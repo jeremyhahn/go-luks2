@@ -1,0 +1,27 @@
+# Build artifacts
+build/
+*.test
+*.out
+
+# Coverage reports
+coverage.out
+coverage.html
+
+# Temporary files
+*.tmp
+*.img
+/tmp/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
