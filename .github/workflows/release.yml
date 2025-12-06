@@ -29,7 +29,7 @@ jobs:
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
       - name: Run tests
-        run: go test -v ./pkg/luks
+        run: go test -v ./pkg/luks2
 
       - name: Build linux/amd64
         env:
@@ -38,7 +38,7 @@ jobs:
           CGO_ENABLED: 0
         run: |
           go build -ldflags="-s -w -X main.version=${{ steps.version.outputs.VERSION }}" \
-            -o luks-${{ steps.version.outputs.VERSION }}-linux-amd64 ./cmd/luks
+            -o luks-${{ steps.version.outputs.VERSION }}-linux-amd64 ./cmd/luks2
 
       - name: Build linux/arm64
         env:
@@ -47,7 +47,7 @@ jobs:
           CGO_ENABLED: 0
         run: |
           go build -ldflags="-s -w -X main.version=${{ steps.version.outputs.VERSION }}" \
-            -o luks-${{ steps.version.outputs.VERSION }}-linux-arm64 ./cmd/luks
+            -o luks-${{ steps.version.outputs.VERSION }}-linux-arm64 ./cmd/luks2
 
       - name: Generate checksums
         run: |
