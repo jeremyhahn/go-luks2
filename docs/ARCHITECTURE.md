@@ -184,7 +184,7 @@ Keyslot Material → Decrypt → AF-Split Material
 ## File Layout
 
 ```
-pkg/luks/
+pkg/luks2/
 ├── errors.go          # Typed errors
 ├── types.go           # Data structures
 ├── header.go          # Header management
@@ -197,7 +197,7 @@ pkg/luks/
 ├── wipe.go            # Secure wipe
 └── util.go            # Utilities
 
-cmd/luks/              # CLI tool
+cmd/luks2/             # CLI tool
 docs/                  # Documentation
 ```
 

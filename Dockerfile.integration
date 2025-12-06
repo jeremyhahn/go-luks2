@@ -44,7 +44,7 @@ RUN echo '#!/bin/bash' > /entrypoint.sh && \
     echo '# Default: run all integration tests with coverage' >> /entrypoint.sh && \
     echo 'if [ "$#" -eq 0 ]; then' >> /entrypoint.sh && \
     echo '    echo "Running all integration tests with coverage..."' >> /entrypoint.sh && \
-    echo '    go test -v -tags=integration -coverprofile=/tmp/coverage.out -covermode=atomic ./pkg/luks' >> /entrypoint.sh && \
+    echo '    go test -v -tags=integration -coverprofile=/tmp/coverage.out -covermode=atomic ./pkg/luks2' >> /entrypoint.sh && \
     echo '    cp /tmp/coverage.out /app/coverage.out 2>/dev/null || true' >> /entrypoint.sh && \
     echo '    echo ""' >> /entrypoint.sh && \
     echo '    echo "Coverage Summary:"' >> /entrypoint.sh && \

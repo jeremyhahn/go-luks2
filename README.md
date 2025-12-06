@@ -19,29 +19,29 @@ Pure Go implementation of LUKS2 (Linux Unified Key Setup) disk encryption.
 
 ```bash
 # Install
-go install github.com/jeremyhahn/go-luks2/cmd/luks@latest
+go install github.com/jeremyhahn/go-luks2/cmd/luks2@latest
 
 # Create encrypted volume
 dd if=/dev/zero of=secret.img bs=1M count=100
-sudo luks format secret.img
+sudo luks2 format secret.img
 
 # Unlock and mount
-sudo luks open secret.img my-disk
+sudo luks2 open secret.img my-disk
 sudo mkfs.ext4 /dev/mapper/my-disk
-sudo luks mount my-disk /mnt/secret
+sudo luks2 mount my-disk /mnt/secret
 
 # Use it
 echo "confidential" | sudo tee /mnt/secret/data.txt
 
 # Cleanup
-sudo luks unmount /mnt/secret
-sudo luks close my-disk
+sudo luks2 unmount /mnt/secret
+sudo luks2 close my-disk
 ```
 
 ### Go Library
 
 ```bash
-go get github.com/jeremyhahn/go-luks2/pkg/luks
+go get github.com/jeremyhahn/go-luks2/pkg/luks2
 ```
 
 **Format and unlock:**
@@ -51,12 +51,12 @@ package main
 
 import (
     "fmt"
-    "github.com/jeremyhahn/go-luks2/pkg/luks"
+    "github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
 func main() {
     // Format volume
-    err := luks.Format(luks.FormatOptions{
+    err := luks2.Format(luks2.FormatOptions{
         Device:     "/dev/loop0",
         Passphrase: []byte("my-secure-passphrase"),
         Label:      "MyData",
@@ -67,11 +67,11 @@ func main() {
     }
 
     // Unlock volume
-    err = luks.Unlock("/dev/loop0", []byte("my-secure-passphrase"), "my-volume")
+    err = luks2.Unlock("/dev/loop0", []byte("my-secure-passphrase"), "my-volume")
     if err != nil {
         panic(err)
     }
-    defer luks.Lock("my-volume")
+    defer luks2.Lock("my-volume")
 
     fmt.Println("✓ Volume unlocked at /dev/mapper/my-volume")
 }
@@ -83,24 +83,24 @@ func main() {
 import (
     "errors"
     "fmt"
-    "github.com/jeremyhahn/go-luks2/pkg/luks"
+    "github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
-err := luks.Unlock(device, passphrase, "my-volume")
+err := luks2.Unlock(device, passphrase, "my-volume")
 if err != nil {
     // Check for specific errors
-    if errors.Is(err, luks.ErrInvalidPassphrase) {
+    if errors.Is(err, luks2.ErrInvalidPassphrase) {
         fmt.Println("Wrong passphrase")
         return
     }
 
-    if errors.Is(err, luks.ErrVolumeAlreadyUnlocked) {
+    if errors.Is(err, luks2.ErrVolumeAlreadyUnlocked) {
         fmt.Println("Already unlocked")
         return
     }
 
     // Check typed errors
-    var devErr *luks.DeviceError
+    var devErr *luks2.DeviceError
     if errors.As(err, &devErr) {
         fmt.Printf("Device error: %s\n", devErr.Device)
         return
@@ -114,10 +114,10 @@ if err != nil {
 
 ```go
 // Create filesystem (first time only)
-luks.MakeFilesystem("my-volume", "ext4", "DataDisk")
+luks2.MakeFilesystem("my-volume", "ext4", "DataDisk")
 
 // Mount
-err := luks.Mount(luks.MountOptions{
+err := luks2.Mount(luks2.MountOptions{
     Device:     "my-volume",
     MountPoint: "/mnt/encrypted",
     FSType:     "ext4",
@@ -125,14 +125,13 @@ err := luks.Mount(luks.MountOptions{
 if err != nil {
     panic(err)
 }
-defer luks.Unmount("/mnt/encrypted", 0)
+defer luks2.Unmount("/mnt/encrypted", 0)
 ```
 
 ## Documentation
 
 - **[Architecture](docs/ARCHITECTURE.md)** - System design and components
 - **[Usage Guide](docs/USAGE.md)** - Detailed CLI and API documentation
-- **[Security Audit](docs/SECURITY-AUDIT.md)** - Security analysis and recommendations
 
 ## API Overview
 
@@ -218,15 +217,12 @@ ErrInvalidHeader
 - Header checksums and redundancy
 - Compatible with cryptsetup
 
-### Security Audit
+### Security
 
-A comprehensive security audit has been performed. See [docs/SECURITY-AUDIT.md](docs/SECURITY-AUDIT.md) for:
-- Identified issues and severity ratings
-- Security recommendations
-- Cryptographic analysis
-- Memory safety review
-
-**Status**: GOOD with room for improvement. Primary concerns relate to incomplete memory clearing of intermediate buffers and input validation. See audit report for details.
+- All security scans pass (gosec, golangci-lint)
+- Memory clearing of sensitive data
+- Input validation and path traversal protection
+- Constant-time cryptographic comparisons
 
 ## Requirements
 
@@ -253,23 +249,23 @@ A comprehensive security audit has been performed. See [docs/SECURITY-AUDIT.md](
 
 ```bash
 # Format with custom KDF
-sudo luks format --kdf argon2id --label "Backup" /dev/sdb1
+sudo luks2 format --kdf argon2id --label "Backup" /dev/sdb1
 
 # Unlock
-sudo luks open /dev/sdb1 backup-disk
+sudo luks2 open /dev/sdb1 backup-disk
 
 # Mount
-sudo luks mount backup-disk /mnt/backup
+sudo luks2 mount backup-disk /mnt/backup
 
 # Wipe (makes data unrecoverable)
-sudo luks wipe /dev/sdb1
+sudo luks2 wipe /dev/sdb1
 ```
 
 ### Library
 
 ```go
 // Advanced format options
-opts := luks.FormatOptions{
+opts := luks2.FormatOptions{
     Device:         "/dev/sdb1",
     Passphrase:     []byte("strong-passphrase"),
     KDFType:        "argon2id",
@@ -278,45 +274,46 @@ opts := luks.FormatOptions{
     Argon2Parallel: 8,
     KeySize:        512,
 }
-luks.Format(opts)
+luks2.Format(opts)
 
 // Loop device support
-loopDev, _ := luks.SetupLoopDevice("encrypted.img")
-defer luks.DetachLoopDevice(loopDev)
-luks.Unlock(loopDev, passphrase, "my-volume")
+loopDev, _ := luks2.SetupLoopDevice("encrypted.img")
+defer luks2.DetachLoopDevice(loopDev)
+luks2.Unlock(loopDev, passphrase, "my-volume")
 ```
 
 ## Testing
 
 ```bash
 # Unit tests (fast, no root required)
-make test-unit
+make test
 
 # Integration tests (requires root)
-sudo make test
+sudo make integration-test
 
 # All tests in Docker (isolated, recommended)
-make docker-integration-test
+make ci-full
 ```
 
-**Coverage**: 85%+ (unit + integration)
+**Coverage**: 48% (unit + integration)
+
+Note: Coverage is lower than typical applications because many functions in a disk encryption library require actual device access (loop devices, device-mapper, mounting) and can only be tested in integration tests.
 
 ## Project Structure
 
 ```
 go-luks2/
-├── pkg/luks/              # Core library
+├── pkg/luks2/             # Core library
 │   ├── errors.go          # Typed errors
 │   ├── format.go          # Volume creation
 │   ├── unlock.go          # Volume unlocking
 │   ├── kdf.go             # Key derivation
 │   ├── mount.go           # Filesystem mounting
 │   └── ...
-├── cmd/luks/              # CLI tool
+├── cmd/luks2/             # CLI tool
 ├── docs/                  # Documentation
 │   ├── ARCHITECTURE.md    # System design
-│   ├── USAGE.md           # Detailed guide
-│   └── SECURITY-AUDIT.md  # Security analysis
+│   └── USAGE.md           # Detailed guide
 └── README.md              # This file
 ```
 
