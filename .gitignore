@@ -8,6 +8,7 @@
 *.out
 build/
 main
+luks2
 test-unlock
 
 # Go workspace file
@@ -26,6 +27,11 @@ go.work
 *.log
 coverage.html
 coverage.out
+coverage-*.html
+coverage-*.out
+gosec-report.json
+integration-test.log
+ci.log
 
 # OS
 .DS_Store
