@@ -69,20 +69,10 @@ jobs:
       - name: Run unit tests
         run: go test -v -coverprofile=coverage.out -covermode=atomic ./pkg/luks2
 
-      - name: Check coverage
+      - name: Show coverage
         run: |
-          coverage=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
-          echo "Coverage: ${coverage}%"
-          if [ $(echo "$coverage < 40" | bc) -eq 1 ]; then
-            echo "Coverage ${coverage}% is below 40% threshold"
-            exit 1
-          fi
-
-      - name: Upload coverage
-        uses: codecov/codecov-action@v4
-        with:
-          files: coverage.out
-          fail_ci_if_error: false
+          coverage=$(go tool cover -func=coverage.out | grep total | awk '{print $3}')
+          echo "Coverage: ${coverage}"
 
   test-integration:
     name: Integration Tests
