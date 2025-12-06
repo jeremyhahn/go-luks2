@@ -11,7 +11,7 @@ go install github.com/jeremyhahn/go-luks2/cmd/luks@latest
 ### Use as Library
 
 ```bash
-go get github.com/jeremyhahn/go-luks2/pkg/luks
+go get github.com/jeremyhahn/go-luks2/pkg/luks2
 ```
 
 ## CLI Tool
@@ -20,11 +20,11 @@ go get github.com/jeremyhahn/go-luks2/pkg/luks
 
 ```bash
 # On a block device
-sudo luks format /dev/sdb1
+sudo luks2 format /dev/sdb1
 
 # On a file (for testing)
 dd if=/dev/zero of=encrypted.img bs=1M count=100
-sudo luks format encrypted.img
+sudo luks2 format encrypted.img
 ```
 
 **Options**:
@@ -39,7 +39,7 @@ sudo luks format encrypted.img
 
 ```bash
 # Unlock (creates /dev/mapper/my-disk)
-sudo luks open /dev/sdb1 my-disk
+sudo luks2 open /dev/sdb1 my-disk
 
 # Verify it's unlocked
 ls -l /dev/mapper/my-disk
@@ -62,7 +62,7 @@ sudo mkfs.xfs /dev/mapper/my-disk
 sudo mkdir -p /mnt/encrypted
 
 # Mount
-sudo luks mount my-disk /mnt/encrypted
+sudo luks2 mount my-disk /mnt/encrypted
 
 # Use it
 echo "secret data" | sudo tee /mnt/encrypted/file.txt
@@ -75,10 +75,10 @@ cat /mnt/encrypted/file.txt
 
 ```bash
 # Unmount
-sudo luks unmount /mnt/encrypted
+sudo luks2 unmount /mnt/encrypted
 
 # Lock (remove from device-mapper)
-sudo luks close my-disk
+sudo luks2 close my-disk
 ```
 
 ### Complete Workflow Example
@@ -88,17 +88,17 @@ sudo luks close my-disk
 dd if=/dev/zero of=/tmp/secret.img bs=1M count=100
 
 # 2. Format with LUKS
-sudo luks format /tmp/secret.img
+sudo luks2 format /tmp/secret.img
 
 # 3. Open (enter passphrase)
-sudo luks open /tmp/secret.img secret-disk
+sudo luks2 open /tmp/secret.img secret-disk
 
 # 4. Create filesystem
 sudo mkfs.ext4 /dev/mapper/secret-disk
 
 # 5. Mount
 sudo mkdir -p /mnt/secret
-sudo luks mount secret-disk /mnt/secret
+sudo luks2 mount secret-disk /mnt/secret
 
 # 6. Use
 sudo touch /mnt/secret/important.txt
@@ -106,18 +106,18 @@ sudo chown $USER:$USER /mnt/secret/important.txt
 echo "confidential" > /mnt/secret/important.txt
 
 # 7. Cleanup
-sudo luks unmount /mnt/secret
-sudo luks close secret-disk
+sudo luks2 unmount /mnt/secret
+sudo luks2 close secret-disk
 ```
 
 ### Wipe Volume
 
 ```bash
 # Wipe headers only (fast, makes data unrecoverable)
-sudo luks wipe /dev/sdb1
+sudo luks2 wipe /dev/sdb1
 
 # Full wipe with 3 passes (slow, DOD standard)
-sudo luks wipe --passes 3 --full /dev/sdb1
+sudo luks2 wipe --passes 3 --full /dev/sdb1
 ```
 
 ## Library API
@@ -129,12 +129,12 @@ package main
 
 import (
     "fmt"
-    "github.com/jeremyhahn/go-luks2/pkg/luks"
+    "github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
 func main() {
     // Format a volume
-    err := luks.Format(luks.FormatOptions{
+    err := luks2.Format(luks2.FormatOptions{
         Device:     "/dev/loop0",
         Passphrase: []byte("my-secure-passphrase"),
         Label:      "MyData",
@@ -145,11 +145,11 @@ func main() {
     }
 
     // Unlock the volume
-    err = luks.Unlock("/dev/loop0", []byte("my-secure-passphrase"), "my-volume")
+    err = luks2.Unlock("/dev/loop0", []byte("my-secure-passphrase"), "my-volume")
     if err != nil {
         panic(err)
     }
-    defer luks.Lock("my-volume")
+    defer luks2.Lock("my-volume")
 
     fmt.Println("Volume unlocked at /dev/mapper/my-volume")
 }
@@ -158,7 +158,7 @@ func main() {
 ### Advanced Format Options
 
 ```go
-opts := luks.FormatOptions{
+opts := luks2.FormatOptions{
     Device:     "/dev/sdb1",
     Passphrase: []byte("strong-passphrase"),
     Label:      "BackupDisk",
@@ -184,7 +184,7 @@ opts := luks.FormatOptions{
     SectorSize: 512,  // 512 or 4096
 }
 
-err := luks.Format(opts)
+err := luks2.Format(opts)
 ```
 
 ### Error Handling with Typed Errors
@@ -192,29 +192,29 @@ err := luks.Format(opts)
 ```go
 import (
     "errors"
-    "github.com/jeremyhahn/go-luks2/pkg/luks"
+    "github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
-err := luks.Unlock(device, passphrase, volumeName)
+err := luks2.Unlock(device, passphrase, volumeName)
 if err != nil {
     // Check for specific error types
-    if errors.Is(err, luks.ErrInvalidPassphrase) {
+    if errors.Is(err, luks2.ErrInvalidPassphrase) {
         fmt.Println("Wrong passphrase, try again")
         return
     }
 
-    if errors.Is(err, luks.ErrDeviceNotFound) {
+    if errors.Is(err, luks2.ErrDeviceNotFound) {
         fmt.Println("Device doesn't exist")
         return
     }
 
-    if errors.Is(err, luks.ErrVolumeAlreadyUnlocked) {
+    if errors.Is(err, luks2.ErrVolumeAlreadyUnlocked) {
         fmt.Println("Volume is already unlocked")
         return
     }
 
     // Check for typed errors
-    var devErr *luks.DeviceError
+    var devErr *luks2.DeviceError
     if errors.As(err, &devErr) {
         fmt.Printf("Device error on %s: %v\n", devErr.Device, devErr.Err)
         return
@@ -229,31 +229,31 @@ if err != nil {
 
 ```go
 // Sentinel errors (use errors.Is())
-luks.ErrInvalidHeader
-luks.ErrInvalidPassphrase
-luks.ErrDeviceNotFound
-luks.ErrVolumeNotUnlocked
-luks.ErrVolumeAlreadyUnlocked
-luks.ErrNotMounted
-luks.ErrAlreadyMounted
-luks.ErrUnsupportedKDF
-luks.ErrUnsupportedHash
-luks.ErrInvalidKeyslot
-luks.ErrNoKeyslots
-luks.ErrInvalidSize
-luks.ErrPermissionDenied
+luks2.ErrInvalidHeader
+luks2.ErrInvalidPassphrase
+luks2.ErrDeviceNotFound
+luks2.ErrVolumeNotUnlocked
+luks2.ErrVolumeAlreadyUnlocked
+luks2.ErrNotMounted
+luks2.ErrAlreadyMounted
+luks2.ErrUnsupportedKDF
+luks2.ErrUnsupportedHash
+luks2.ErrInvalidKeyslot
+luks2.ErrNoKeyslots
+luks2.ErrInvalidSize
+luks2.ErrPermissionDenied
 
 // Typed errors (use errors.As())
-*luks.DeviceError      // Errors related to devices
-*luks.VolumeError      // Errors related to volumes
-*luks.KeyslotError     // Errors related to keyslots
-*luks.CryptoError      // Cryptographic operation errors
+*luks2.DeviceError      // Errors related to devices
+*luks2.VolumeError      // Errors related to volumes
+*luks2.KeyslotError     // Errors related to keyslots
+*luks2.CryptoError      // Cryptographic operation errors
 ```
 
 ### Volume Information
 
 ```go
-info, err := luks.GetVolumeInfo("/dev/sdb1")
+info, err := luks2.GetVolumeInfo("/dev/sdb1")
 if err != nil {
     panic(err)
 }
@@ -268,13 +268,13 @@ fmt.Printf("Keyslots: %v\n", info.ActiveKeyslots)
 
 ```go
 // Create filesystem (first time only)
-err := luks.MakeFilesystem("my-volume", "ext4", "DataDisk")
+err := luks2.MakeFilesystem("my-volume", "ext4", "DataDisk")
 if err != nil {
     panic(err)
 }
 
 // Mount
-err = luks.Mount(luks.MountOptions{
+err = luks2.Mount(luks2.MountOptions{
     Device:     "my-volume",      // Volume name (not /dev/mapper/...)
     MountPoint: "/mnt/encrypted",
     FSType:     "ext4",
@@ -286,14 +286,14 @@ if err != nil {
 }
 
 // Check if mounted
-mounted, err := luks.IsMounted("/mnt/encrypted")
+mounted, err := luks2.IsMounted("/mnt/encrypted")
 if err != nil {
     panic(err)
 }
 fmt.Printf("Mounted: %v\n", mounted)
 
 // Unmount
-err = luks.Unmount("/mnt/encrypted", 0)  // 0 = normal unmount
+err = luks2.Unmount("/mnt/encrypted", 0)  // 0 = normal unmount
 if err != nil {
     panic(err)
 }
@@ -303,14 +303,14 @@ if err != nil {
 
 ```go
 // Wipe headers only (fast)
-err := luks.Wipe(luks.WipeOptions{
+err := luks2.Wipe(luks2.WipeOptions{
     Device:     "/dev/sdb1",
     Passes:     1,
     HeaderOnly: true,
 })
 
 // Full device wipe (slow)
-err = luks.Wipe(luks.WipeOptions{
+err = luks2.Wipe(luks2.WipeOptions{
     Device:     "/dev/sdb1",
     Passes:     3,      // DOD standard
     Random:     true,   // Use random data
@@ -318,23 +318,23 @@ err = luks.Wipe(luks.WipeOptions{
 })
 
 // Wipe specific keyslot
-err = luks.WipeKeyslot("/dev/sdb1", 0)
+err = luks2.WipeKeyslot("/dev/sdb1", 0)
 ```
 
 ### Loop Device Management
 
 ```go
 // Setup loop device for file-based volumes
-loopDev, err := luks.SetupLoopDevice("/path/to/encrypted.img")
+loopDev, err := luks2.SetupLoopDevice("/path/to/encrypted.img")
 if err != nil {
     panic(err)
 }
-defer luks.DetachLoopDevice(loopDev)
+defer luks2.DetachLoopDevice(loopDev)
 
 fmt.Printf("Loop device: %s\n", loopDev)
 
 // Use with LUKS
-err = luks.Unlock(loopDev, passphrase, "my-volume")
+err = luks2.Unlock(loopDev, passphrase, "my-volume")
 ```
 
 ## Best Practices
@@ -358,22 +358,22 @@ err = luks.Unlock(loopDev, passphrase, "my-volume")
 
 ```go
 // Always check errors
-if err := luks.Format(opts); err != nil {
+if err := luks2.Format(opts); err != nil {
     log.Fatalf("Format failed: %v", err)
 }
 
 // Use typed errors for graceful handling
-if errors.Is(err, luks.ErrInvalidPassphrase) {
+if errors.Is(err, luks2.ErrInvalidPassphrase) {
     // Retry with new passphrase
 }
 
 // Clean up on errors
 volume := "temp-volume"
-if err := luks.Unlock(device, pass, volume); err != nil {
+if err := luks2.Unlock(device, pass, volume); err != nil {
     return err
 }
 defer func() {
-    if err := luks.Lock(volume); err != nil {
+    if err := luks2.Lock(volume); err != nil {
         log.Printf("Warning: failed to lock volume: %v", err)
     }
 }()
@@ -387,11 +387,11 @@ passphrase := []byte("secret")
 defer clearBytes(passphrase)  // Internal function
 
 // Use defer for cleanup
-err := luks.Unlock(device, passphrase, volume)
+err := luks2.Unlock(device, passphrase, volume)
 if err != nil {
     return err
 }
-defer luks.Lock(volume)
+defer luks2.Lock(volume)
 
 // Don't log sensitive data
 // ❌ log.Printf("Passphrase: %s", passphrase)
@@ -423,7 +423,7 @@ sudo losetup -f encrypted.img
 sudo dmsetup ls
 
 # Close existing mapping
-sudo luks close volume-name
+sudo luks2 close volume-name
 ```
 
 **"invalid passphrase"**
@@ -443,7 +443,7 @@ sudo luks close volume-name
 // Enable verbose error messages (in development)
 import "log"
 
-err := luks.Format(opts)
+err := luks2.Format(opts)
 if err != nil {
     log.Printf("Format error: %+v", err)  // Detailed error
 }
