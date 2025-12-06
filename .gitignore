@@ -8,7 +8,7 @@
 *.out
 build/
 main
-luks2
+/luks2
 test-unlock
 
 # Go workspace file
