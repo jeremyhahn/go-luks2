@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1-alpha] - 2025-12-17
+
+### Added
+
+- **FIPS-Compatible KDF Support**
+  - Added KDF type constants (`KDFTypePBKDF2`, `KDFTypePBKDF2SHA256`, etc.)
+  - Added `IsFIPSCompliantKDF()` function to check FIPS compliance
+  - Added support for SHA-1, SHA-384 hash algorithms in PBKDF2
+  - PBKDF2 with SHA-1/SHA-256/SHA-384/SHA-512 are FIPS-approved
+
+- **SSD TRIM/DISCARD Support**
+  - Added `Trim` option to `WipeOptions` for SSD optimization
+  - Implemented `BLKDISCARD` ioctl for secure SSD erasure
+  - TRIM is issued after data wipe for additional security on SSDs
+
+- **Keyslot Hash Algorithm Selection**
+  - Added `Hash` field to `AddKeyOptions` for PBKDF2 hash selection
+  - Allows specifying hash algorithm when adding new keyslots
+
+- **Comprehensive Test Coverage**
+  - Added extensive unit tests for KDF functions
+  - Added unit and integration tests for wipe operations
+  - Improved test coverage for edge cases and error handling
+
+### Changed
+
+- Improved device size detection for block devices in wipe operations
+- Added input validation for size parameters in wipe functions
+- Added defense-in-depth buffer clearing in wipe operations
+- Refactored hash function selection into reusable `getPBKDF2HashFunc()`
+
+### Fixed
+
+- Fixed potential issues with negative size values in wipe operations
+
 ## [0.1.0-alpha] - 2025-12-06
 
 ### Added
