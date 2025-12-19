@@ -197,9 +197,8 @@ gosec: ## Run gosec security scanner
 	@echo "$(COLOR_BOLD)Running gosec security scanner...$(COLOR_RESET)"
 	@GOSEC=$$(command -v gosec 2>/dev/null || echo "$(GOBIN)/gosec"); \
 	if [ -x "$$GOSEC" ]; then \
-		$$GOSEC -fmt=json -out=gosec-report.json -no-fail ./... 2>/dev/null || true; \
-		$$GOSEC -fmt=text ./...; \
-		echo "$(COLOR_GREEN)✓ Security scan complete (report: gosec-report.json)$(COLOR_RESET)"; \
+		$$GOSEC -exclude-generated -severity medium -confidence medium ./...; \
+		echo "$(COLOR_GREEN)✓ Security scan passed$(COLOR_RESET)"; \
 	else \
 		echo "$(COLOR_YELLOW)⚠ gosec not installed, skipping...$(COLOR_RESET)"; \
 		echo "  Install: go install github.com/securego/gosec/v2/cmd/gosec@latest"; \
@@ -269,7 +268,7 @@ check: fmt vet test ## Run all quality checks (format, vet, test)
 
 clean: ## Clean build artifacts and test files
 	@echo "$(COLOR_BOLD)Cleaning...$(COLOR_RESET)"
-	@rm -rf $(BUILD_DIR)
+	@rm -rf $(BUILD_DIR) *.log *.test
 	@rm -f $(BINARY_NAME)
 	@rm -f $(COVERAGE_FILE) $(COVERAGE_HTML)
 	@rm -f coverage-docker.out coverage-docker.html

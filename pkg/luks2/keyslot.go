@@ -25,7 +25,13 @@ type AddKeyOptions struct {
 	Keyslot *int
 
 	// KDFType specifies the KDF type (default: argon2id)
+	// Valid values: "pbkdf2", "argon2i", "argon2id"
 	KDFType string
+
+	// Hash specifies the hash algorithm for PBKDF2 (default: sha256)
+	// Valid values: "sha256", "sha512"
+	// Note: This is only used when KDFType is "pbkdf2"
+	Hash string
 
 	// Argon2 parameters (optional, uses defaults if not specified)
 	Argon2Time     int
@@ -99,9 +105,15 @@ func AddKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKe
 		kdfType = opts.KDFType
 	}
 
+	// Determine hash algorithm - use provided value or default to sha256
+	hashAlgo := DefaultHashAlgo
+	if opts != nil && opts.Hash != "" {
+		hashAlgo = opts.Hash
+	}
+
 	formatOpts := FormatOptions{
 		KDFType:        kdfType,
-		HashAlgo:       DefaultHashAlgo,
+		HashAlgo:       hashAlgo,
 		Argon2Time:     4,
 		Argon2Memory:   1048576,
 		Argon2Parallel: 4,
