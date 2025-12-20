@@ -704,3 +704,528 @@ func TestWipeOptions_Structure(t *testing.T) {
 		t.Fatal("HeaderOnly should be false")
 	}
 }
+
+// TestWipeOptions_TrimField tests the Trim field in WipeOptions
+func TestWipeOptions_TrimField(t *testing.T) {
+	tests := []struct {
+		name     string
+		opts     WipeOptions
+		wantTrim bool
+	}{
+		{
+			name: "trim disabled by default",
+			opts: WipeOptions{
+				Device: "/dev/test",
+				Passes: 1,
+			},
+			wantTrim: false,
+		},
+		{
+			name: "trim explicitly enabled",
+			opts: WipeOptions{
+				Device: "/dev/test",
+				Passes: 1,
+				Trim:   true,
+			},
+			wantTrim: true,
+		},
+		{
+			name: "trim with random wipe",
+			opts: WipeOptions{
+				Device: "/dev/test",
+				Passes: 3,
+				Random: true,
+				Trim:   true,
+			},
+			wantTrim: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.opts.Trim != tt.wantTrim {
+				t.Errorf("Trim = %v, want %v", tt.opts.Trim, tt.wantTrim)
+			}
+		})
+	}
+}
+
+// TestIssueDiscard_InvalidFile tests issueDiscard with invalid file descriptors
+func TestIssueDiscard_InvalidFile(t *testing.T) {
+	// Create a temporary file (not a block device)
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_discard")
+
+	testData := make([]byte, 4096)
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	f, err := os.OpenFile(tmpFile, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatalf("Failed to open test file: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	// issueDiscard should fail on a regular file (not a block device)
+	err = issueDiscard(f, int64(len(testData)))
+	// We expect an error since regular files don't support BLKDISCARD
+	if err == nil {
+		t.Log("issueDiscard succeeded on regular file - this is OS-dependent")
+	} else {
+		t.Logf("issueDiscard correctly failed on regular file: %v", err)
+	}
+}
+
+// TestIssueDiscard_ClosedFile tests issueDiscard with a closed file
+func TestIssueDiscard_ClosedFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_discard_closed")
+
+	testData := make([]byte, 4096)
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	f, err := os.OpenFile(tmpFile, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatalf("Failed to open test file: %v", err)
+	}
+
+	// Close the file before calling issueDiscard
+	_ = f.Close()
+
+	// Should fail on closed file descriptor
+	err = issueDiscard(f, 4096)
+	if err == nil {
+		t.Fatal("Expected error when calling issueDiscard on closed file")
+	}
+}
+
+// TestIssueDiscard_ZeroSize tests issueDiscard with zero size
+func TestIssueDiscard_ZeroSize(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_discard_zero")
+
+	testData := make([]byte, 4096)
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	f, err := os.OpenFile(tmpFile, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatalf("Failed to open test file: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	// Zero size discard should now return an error (security validation)
+	err = issueDiscard(f, 0)
+	if err == nil {
+		t.Fatal("Expected error for zero size discard")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("invalid discard size")) {
+		t.Errorf("Unexpected error message: %v", err)
+	}
+}
+
+// TestIssueDiscard_NegativeSize tests issueDiscard with negative size
+func TestIssueDiscard_NegativeSize(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_discard_negative")
+
+	testData := make([]byte, 4096)
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	f, err := os.OpenFile(tmpFile, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatalf("Failed to open test file: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	// Negative size should be rejected to prevent integer overflow
+	// (negative int64 would wrap to huge uint64 value)
+	err = issueDiscard(f, -1)
+	if err == nil {
+		t.Fatal("Expected error for negative size discard")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("invalid discard size")) {
+		t.Errorf("Unexpected error message: %v", err)
+	}
+}
+
+// TestWipe_WithTrimOption tests that Wipe honors the Trim option
+func TestWipe_WithTrimOption(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_wipe_trim")
+
+	// Create test file
+	testSize := 1024 * 1024 // 1MB
+	testData := make([]byte, testSize)
+	for i := range testData {
+		testData[i] = 0xAA
+	}
+
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Wipe with Trim enabled (will fail TRIM on regular file but should complete wipe)
+	opts := WipeOptions{
+		Device: tmpFile,
+		Passes: 1,
+		Random: false,
+		Trim:   true,
+	}
+
+	err := Wipe(opts)
+	if err != nil {
+		t.Fatalf("Wipe with Trim failed: %v", err)
+	}
+
+	// Verify data was wiped
+	result, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("Failed to read result: %v", err)
+	}
+
+	// Check that data is all zeros
+	for i, b := range result {
+		if b != 0 {
+			t.Fatalf("Byte at position %d is not zero after wipe: 0x%02x", i, b)
+		}
+	}
+}
+
+// TestWipe_TrimAfterMultiplePasses tests TRIM is issued after all passes complete
+func TestWipe_TrimAfterMultiplePasses(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_wipe_trim_multi")
+
+	// Create test file
+	testSize := 512 * 1024 // 512KB
+	testData := make([]byte, testSize)
+	for i := range testData {
+		testData[i] = 0xFF
+	}
+
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Wipe with multiple passes and Trim
+	opts := WipeOptions{
+		Device: tmpFile,
+		Passes: 3,
+		Random: true,
+		Trim:   true,
+	}
+
+	err := Wipe(opts)
+	if err != nil {
+		t.Fatalf("Wipe with multiple passes and Trim failed: %v", err)
+	}
+
+	// Verify file still exists and has correct size
+	fi, err := os.Stat(tmpFile)
+	if err != nil {
+		t.Fatalf("Failed to stat file after wipe: %v", err)
+	}
+
+	if fi.Size() != int64(testSize) {
+		t.Fatalf("File size changed after wipe: got %d, want %d", fi.Size(), testSize)
+	}
+}
+
+// TestWipe_HeaderOnlyIgnoresTrim tests that HeaderOnly mode doesn't use Trim
+func TestWipe_HeaderOnlyIgnoresTrim(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_wipe_header_trim")
+
+	// Create test file (64KB)
+	testSize := 64 * 1024
+	testData := make([]byte, testSize)
+	for i := range testData {
+		testData[i] = 0xCC
+	}
+
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Wipe headers only with Trim option (Trim should be skipped for header-only)
+	opts := WipeOptions{
+		Device:     tmpFile,
+		Passes:     1,
+		HeaderOnly: true,
+		Trim:       true,
+	}
+
+	err := Wipe(opts)
+	if err != nil {
+		t.Fatalf("HeaderOnly wipe failed: %v", err)
+	}
+
+	// Verify only headers (32KB) were wiped
+	result, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("Failed to read result: %v", err)
+	}
+
+	headerSize := 0x8000
+	for i := 0; i < headerSize; i++ {
+		if result[i] != 0 {
+			t.Fatalf("Header byte %d not wiped: 0x%02x", i, result[i])
+		}
+	}
+
+	// Verify data after header is untouched
+	for i := headerSize; i < len(result); i++ {
+		if result[i] != 0xCC {
+			t.Fatalf("Data byte %d was modified: 0x%02x", i, result[i])
+		}
+	}
+}
+
+// TestBLKDISCARD_Constant verifies the BLKDISCARD constant value
+func TestBLKDISCARD_Constant(t *testing.T) {
+	// BLKDISCARD should be 0x1277 (as defined in Linux kernel headers)
+	expected := uintptr(0x1277)
+	if BLKDISCARD != expected {
+		t.Errorf("BLKDISCARD = 0x%x, want 0x%x", BLKDISCARD, expected)
+	}
+}
+
+// TestWipePass_BufferClearing tests that wipePass handles buffer correctly
+func TestWipePass_BufferClearing(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_buffer_clear")
+
+	// Create small file
+	testSize := 2048
+	testData := make([]byte, testSize)
+	for i := range testData {
+		testData[i] = 0xBB
+	}
+
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	f, err := os.OpenFile(tmpFile, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatalf("Failed to open test file: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	// Wipe with zeros
+	if err := wipePass(f, int64(testSize), false); err != nil {
+		t.Fatalf("wipePass failed: %v", err)
+	}
+
+	// Verify all bytes are zero
+	result, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("Failed to read result: %v", err)
+	}
+
+	for i, b := range result {
+		if b != 0 {
+			t.Fatalf("Byte %d not zero: 0x%02x", i, b)
+		}
+	}
+}
+
+// TestWipePass_ConcurrentAccess tests that wipe handles concurrent access attempts
+func TestWipePass_ConcurrentAccess(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_concurrent")
+
+	// Create test file
+	testSize := 1024 * 100 // 100KB
+	testData := make([]byte, testSize)
+
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Open file for concurrent test
+	f, err := os.OpenFile(tmpFile, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatalf("Failed to open test file: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	// Run multiple wipe passes concurrently
+	done := make(chan error, 2)
+
+	go func() {
+		done <- wipePass(f, int64(testSize), true)
+	}()
+
+	go func() {
+		done <- wipePass(f, int64(testSize), false)
+	}()
+
+	// Collect results - at least one should succeed
+	err1 := <-done
+	err2 := <-done
+
+	// We're mainly checking no crashes occur
+	t.Logf("Concurrent wipe results: err1=%v, err2=%v", err1, err2)
+}
+
+// TestWipePass_VeryLargeSize tests handling of very large sizes
+func TestWipePass_VeryLargeSize(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_large_size")
+
+	// Create small file
+	testSize := 4096
+	testData := make([]byte, testSize)
+
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	f, err := os.OpenFile(tmpFile, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatalf("Failed to open test file: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	// Try to wipe with a size larger than the file
+	// This tests boundary handling
+	largeSize := int64(1024 * 1024 * 10) // 10MB
+	err = wipePass(f, largeSize, false)
+	// This may succeed or fail depending on filesystem behavior
+	t.Logf("wipePass with large size result: %v", err)
+}
+
+// TestWipe_ZeroPasses tests that zero passes is rejected
+func TestWipe_ZeroPasses(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_zero_passes")
+
+	testData := make([]byte, 4096)
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	opts := WipeOptions{
+		Device: tmpFile,
+		Passes: 0, // Invalid
+		Random: false,
+	}
+
+	err := Wipe(opts)
+	if err == nil {
+		t.Fatal("Expected error for zero passes")
+	}
+
+	if !bytes.Contains([]byte(err.Error()), []byte("invalid number of passes")) {
+		t.Errorf("Unexpected error message: %v", err)
+	}
+}
+
+// TestWipe_NegativePasses tests that negative passes is rejected
+func TestWipe_NegativePasses(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_negative_passes")
+
+	testData := make([]byte, 4096)
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	opts := WipeOptions{
+		Device: tmpFile,
+		Passes: -1, // Invalid
+		Random: false,
+	}
+
+	err := Wipe(opts)
+	if err == nil {
+		t.Fatal("Expected error for negative passes")
+	}
+}
+
+// TestWipePass_ExactlyBufferSize tests wiping exactly at buffer boundary
+func TestWipePass_ExactlyBufferSize(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_exact_buffer")
+
+	// Create file exactly 1MB (buffer size)
+	bufferSize := 1024 * 1024
+	testData := make([]byte, bufferSize)
+	for i := range testData {
+		testData[i] = 0xDD
+	}
+
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	f, err := os.OpenFile(tmpFile, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatalf("Failed to open test file: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if err := wipePass(f, int64(bufferSize), false); err != nil {
+		t.Fatalf("wipePass failed: %v", err)
+	}
+
+	// Verify complete wipe
+	result, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("Failed to read result: %v", err)
+	}
+
+	for i, b := range result {
+		if b != 0 {
+			t.Fatalf("Byte %d not zero: 0x%02x", i, b)
+		}
+	}
+}
+
+// TestWipePass_MultipleBufferSize tests wiping at multiple of buffer boundary
+func TestWipePass_MultipleBufferSize(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_multi_buffer")
+
+	// Create file exactly 3MB (3x buffer size)
+	bufferSize := 3 * 1024 * 1024
+	testData := make([]byte, bufferSize)
+	for i := range testData {
+		testData[i] = 0xEE
+	}
+
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	f, err := os.OpenFile(tmpFile, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatalf("Failed to open test file: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if err := wipePass(f, int64(bufferSize), false); err != nil {
+		t.Fatalf("wipePass failed: %v", err)
+	}
+
+	// Spot check beginning, middle, and end
+	result, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("Failed to read result: %v", err)
+	}
+
+	checkPoints := []int{0, bufferSize / 2, bufferSize - 1}
+	for _, idx := range checkPoints {
+		if result[idx] != 0 {
+			t.Fatalf("Byte at %d not zero: 0x%02x", idx, result[idx])
+		}
+	}
+}

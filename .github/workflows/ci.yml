@@ -7,7 +7,7 @@ on:
     branches: [main, master, develop]
 
 env:
-  GO_VERSION: "1.24.3"
+  GO_VERSION: "1.25.5"
 
 jobs:
   lint:
@@ -36,7 +36,7 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
-          version: v2.1.6
+          version: v2.7.2
           args: --timeout=10m
 
   security:
