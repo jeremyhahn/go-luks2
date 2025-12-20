@@ -526,7 +526,7 @@ func TestCreateDigestInvalidHashAlgo(t *testing.T) {
 		hashAlgo string
 	}{
 		{"MD5", "md5"},
-		{"SHA1", "sha1"},
+		// Note: SHA-1 is now supported (FIPS-approved for HMAC in PBKDF2)
 		{"Unknown", "unknown"},
 		{"Empty", ""},
 	}

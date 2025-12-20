@@ -10,6 +10,7 @@ Pure Go implementation of LUKS2 (Linux Unified Key Setup) disk encryption.
 - **Pure Go** - No external dependencies on cryptsetup
 - **Compatible** - Interoperable with cryptsetup
 - **Secure** - Argon2id, AES-XTS-256, anti-forensic split
+- **FIPS-Ready** - PBKDF2 with SHA-256/384/512 for compliance requirements
 - **Complete** - Format, unlock, mount, wipe operations
 - **Typed Errors** - Proper error handling with `errors.Is()` / `errors.As()`
 
@@ -176,6 +177,12 @@ IsMounted(mountPoint string) (bool, error)
 // Wipe LUKS headers or full device
 Wipe(opts WipeOptions) error
 
+// WipeOptions supports:
+// - Passes: number of overwrite passes
+// - Random: use random data vs zeros
+// - HeaderOnly: wipe headers only (fast)
+// - Trim: issue TRIM/DISCARD for SSDs
+
 // Wipe specific keyslot
 WipeKeyslot(device string, keyslot int) error
 ```
@@ -204,9 +211,28 @@ ErrInvalidHeader
 
 - **Cipher**: AES-256-XTS
 - **KDF**: Argon2id (recommended) / PBKDF2 / Argon2i
-- **Hash**: SHA-256
+- **Hash**: SHA-256 (also supports SHA-1, SHA-384, SHA-512)
 - **Anti-Forensic**: 4000-stripe split
 - **Key Size**: 512 bits
+
+### FIPS Compliance
+
+For environments requiring FIPS 140-2/3 compliance, use PBKDF2 with FIPS-approved hash algorithms:
+
+```go
+// Check if KDF is FIPS-compliant
+luks2.IsFIPSCompliantKDF("pbkdf2-sha256") // true
+luks2.IsFIPSCompliantKDF("argon2id")      // false
+
+// Format with FIPS-compliant KDF
+luks2.Format(luks2.FormatOptions{
+    Device:     "/dev/loop0",
+    Passphrase: []byte("passphrase"),
+    KDFType:    "pbkdf2-sha256",  // FIPS-approved
+})
+```
+
+FIPS-approved KDFs: `pbkdf2-sha1`, `pbkdf2-sha256`, `pbkdf2-sha384`, `pbkdf2-sha512`
 
 ### Security Features
 
@@ -259,6 +285,9 @@ sudo luks2 mount backup-disk /mnt/backup
 
 # Wipe (makes data unrecoverable)
 sudo luks2 wipe /dev/sdb1
+
+# Wipe with TRIM for SSDs
+sudo luks2 wipe --trim /dev/sdb1
 ```
 
 ### Library
@@ -280,6 +309,14 @@ luks2.Format(opts)
 loopDev, _ := luks2.SetupLoopDevice("encrypted.img")
 defer luks2.DetachLoopDevice(loopDev)
 luks2.Unlock(loopDev, passphrase, "my-volume")
+
+// Secure wipe with TRIM for SSDs
+luks2.Wipe(luks2.WipeOptions{
+    Device: "/dev/sdb1",
+    Passes: 3,
+    Random: true,
+    Trim:   true,  // Issue TRIM after wipe
+})
 ```
 
 ## Testing
