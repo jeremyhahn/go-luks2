@@ -1,0 +1,46 @@
+{
+  "name": "go-luks2 Development Container",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "runArgs": [
+    "--privileged",
+    "--cap-add=SYS_ADMIN",
+    "--cap-add=MKNOD"
+  ],
+  "mounts": [
+    "source=/dev,target=/dev,type=bind"
+  ],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "golang.go",
+        "ms-vscode.makefile-tools",
+        "GitHub.copilot",
+        "eamodio.gitlens",
+        "usernamehw.errorlens"
+      ],
+      "settings": {
+        "go.useLanguageServer": true,
+        "go.lintTool": "golangci-lint",
+        "go.lintFlags": ["--fast"],
+        "go.testFlags": ["-v"],
+        "go.coverOnSave": true,
+        "go.coverageDecorator": {
+          "type": "gutter"
+        },
+        "editor.formatOnSave": true,
+        "[go]": {
+          "editor.defaultFormatter": "golang.go"
+        }
+      }
+    }
+  },
+  "postCreateCommand": "go mod download",
+  "postStartCommand": "sudo /usr/local/bin/integration-test-setup true",
+  "remoteUser": "vscode",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  }
+}

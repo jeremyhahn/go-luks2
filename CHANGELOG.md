@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2-alpha] - 2025-12-22
+
+### Added
+
+- **Token Management API**
+  - New `Token` type with support for FIDO2 and TPM2 tokens
+  - Functions: `GetToken`, `ListTokens`, `ImportToken`, `ImportTokenJSON`, `ExportToken`, `RemoveToken`, `FindFreeTokenSlot`, `TokenExists`, `CountTokens`
+  - Full LUKS2 token slot management (slots 0-31)
+
+- **DevContainer Support**
+  - Added `.devcontainer/` configuration for VS Code development
+  - Privileged container setup for LUKS operations during development
+  - Pre-configured Go tools (gopls, delve, golangci-lint, gosec)
+
+- **CLI Testability Refactoring**
+  - Dependency injection interfaces: `LuksOperations`, `Terminal`, `FileSystem`
+  - Comprehensive CLI unit tests with mock implementations
+  - Separated CLI logic from main.go for better testability
+
+- **Integration Test Reorganization**
+  - New `test/integration/pkg/` for package-level integration tests
+  - New `test/integration/cli/` for CLI integration tests
+  - Common test helpers in `test/integration/pkg/common_test.go`
+
+- **Additional Unit Tests**
+  - `pkg/luks2/format_test.go` - encrypt/decrypt key material tests
+  - `pkg/luks2/mount_test.go` - mount operation tests
+  - `pkg/luks2/unlock_test.go` - unlock helper function tests
+
+### Changed
+
+- Updated Makefile with new targets: `test-cli`, `integration-test-pkg`, `integration-test-cli`, `devcontainer`
+- Improved CI workflow to test both `pkg/luks2` and `cmd/luks2` with merged coverage
+- Updated `Dockerfile.integration` to run CLI and package integration tests separately
+- Coverage threshold set to 90%
+
 ## [0.1.1-alpha] - 2025-12-17
 
 ### Added
