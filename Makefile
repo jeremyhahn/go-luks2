@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec ci ci-full fmt-check all check
+.PHONY: help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec ci ci-full fmt-check all check test-cli integration-test-pkg integration-test-cli
 
 # Default target
 .DEFAULT_GOAL := help
@@ -12,12 +12,14 @@ BUILD_DIR=build
 CMD_DIR=cmd/luks2
 COVERAGE_FILE=coverage.out
 COVERAGE_HTML=coverage.html
-# Coverage threshold - set to 48% as many functions require device access
-# and can only be tested in integration tests (loop devices, device-mapper, etc.)
-COVERAGE_THRESHOLD=48.0
+# Coverage threshold - set to 90% for all packages
+COVERAGE_THRESHOLD=90.0
 GO=$(shell which go 2>/dev/null || echo /usr/local/go/bin/go)
 GOPATH=$(shell $(GO) env GOPATH)
 GOBIN=$(GOPATH)/bin
+# Version from VERSION file
+VERSION=$(shell cat VERSION 2>/dev/null | tr -d 'v' || echo "dev")
+LDFLAGS=-ldflags "-X main.Version=$(VERSION)"
 
 # Colors for output
 COLOR_RESET=\033[0m
@@ -32,41 +34,49 @@ help: ## Show this help message
 	@echo "$(COLOR_BLUE)Pure Go LUKS2 Implementation$(COLOR_RESET)"
 	@echo ""
 	@echo "$(COLOR_BOLD)Available targets:$(COLOR_RESET)"
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(COLOR_GREEN)%-20s$(COLOR_RESET) %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(COLOR_GREEN)%-25s$(COLOR_RESET) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "$(COLOR_BOLD)Examples:$(COLOR_RESET)"
-	@echo "  make build            # Build the CLI tool"
-	@echo "  make test             # Run unit tests only"
-	@echo "  make integration-test # Run integration tests only"
-	@echo "  make coverage         # Run all tests with coverage"
-	@echo "  make ci               # Run CI pipeline locally"
-	@echo "  make check            # Run all quality checks"
+	@echo "  make build              # Build the CLI tool"
+	@echo "  make test               # Run unit tests only"
+	@echo "  make test-cli           # Run CLI unit tests"
+	@echo "  make integration-test   # Run all integration tests in Docker"
+	@echo "  make coverage           # Run all tests with coverage"
+	@echo "  make ci                 # Run CI pipeline locally"
+	@echo "  make check              # Run all quality checks"
 	@echo ""
 
 all: clean fmt vet test build ## Run all checks and build
 
 build: ## Build the CLI binary
-	@echo "$(COLOR_BOLD)Building $(BINARY_NAME)...$(COLOR_RESET)"
+	@echo "$(COLOR_BOLD)Building $(BINARY_NAME) v$(VERSION)...$(COLOR_RESET)"
 	@mkdir -p $(BUILD_DIR)
-	@$(GO) build -o $(BUILD_DIR)/$(BINARY_NAME) ./$(CMD_DIR)
-	@echo "$(COLOR_GREEN)✓ Build complete: $(BUILD_DIR)/$(BINARY_NAME)$(COLOR_RESET)"
+	@$(GO) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./$(CMD_DIR)
+	@echo "$(COLOR_GREEN)✓ Build complete: $(BUILD_DIR)/$(BINARY_NAME) (v$(VERSION))$(COLOR_RESET)"
 
 install: ## Install the CLI binary to $GOPATH/bin
-	@echo "$(COLOR_BOLD)Installing $(BINARY_NAME)...$(COLOR_RESET)"
-	@$(GO) install ./$(CMD_DIR)
-	@echo "$(COLOR_GREEN)✓ Installed to $(GOBIN)/$(BINARY_NAME)$(COLOR_RESET)"
+	@echo "$(COLOR_BOLD)Installing $(BINARY_NAME) v$(VERSION)...$(COLOR_RESET)"
+	@$(GO) install $(LDFLAGS) ./$(CMD_DIR)
+	@echo "$(COLOR_GREEN)✓ Installed to $(GOBIN)/$(BINARY_NAME) (v$(VERSION))$(COLOR_RESET)"
 
 test: ## Run unit tests only (no I/O, no root required)
 	@echo "$(COLOR_BOLD)Running unit tests only...$(COLOR_RESET)"
 	@$(GO) test -v ./... 2>&1 | grep -v "no test files" || true
 	@echo "$(COLOR_GREEN)✓ Unit tests complete$(COLOR_RESET)"
 
-test-unit: ## Run only unit tests (fast, no I/O, no root required)
-	@echo "$(COLOR_BOLD)Running unit tests only (pure functions, no I/O)...$(COLOR_RESET)"
-	@$(GO) test -v -coverprofile=$(COVERAGE_FILE) -covermode=atomic ./pkg/luks2 2>&1 | grep -v "no test files" || true
+test-unit: ## Run only unit tests with coverage (fast, no I/O, no root required)
+	@echo "$(COLOR_BOLD)Running unit tests with coverage...$(COLOR_RESET)"
+	@$(GO) test -v -coverprofile=$(COVERAGE_FILE) -covermode=atomic ./pkg/luks2 ./cmd/luks2 2>&1 | grep -v "no test files" || true
 	@echo ""
-	@echo "$(COLOR_BOLD)Coverage from unit tests only:$(COLOR_RESET)"
+	@echo "$(COLOR_BOLD)Coverage from unit tests:$(COLOR_RESET)"
 	@$(GO) tool cover -func=$(COVERAGE_FILE) | tail -1
+
+test-cli: ## Run CLI unit tests only
+	@echo "$(COLOR_BOLD)Running CLI unit tests...$(COLOR_RESET)"
+	@$(GO) test -v -coverprofile=coverage-cli.out -covermode=atomic ./cmd/luks2 2>&1 | grep -v "no test files" || true
+	@echo ""
+	@echo "$(COLOR_BOLD)CLI Coverage:$(COLOR_RESET)"
+	@$(GO) tool cover -func=coverage-cli.out | tail -1
 
 test-verbose: ## Run tests with verbose output
 	@echo "$(COLOR_BOLD)Running tests (verbose)...$(COLOR_RESET)"
@@ -88,21 +98,28 @@ test-coverage: ## Run tests with coverage report
 	@$(GO) tool cover -func=$(COVERAGE_FILE)
 	@echo "$(COLOR_GREEN)✓ Coverage report: $(COVERAGE_HTML)$(COLOR_RESET)"
 
-integration-test: build ## Run integration tests only (requires root, uses real I/O)
-	@echo "$(COLOR_BOLD)Running integration tests only (file I/O, requires root)...$(COLOR_RESET)"
-	@if [ "$$(id -u)" -eq 0 ]; then \
-		$(GO) test -v -tags=integration ./... 2>&1 | grep -v "no test files" || true; \
-	else \
-		sudo -E PATH="$(PATH)" $(GO) test -v -tags=integration ./... 2>&1 | grep -v "no test files" || true; \
-	fi
-	@echo "$(COLOR_GREEN)✓ Integration tests complete$(COLOR_RESET)"
+integration-test: build ## Run all integration tests in Docker (isolated, recommended)
+	@echo "$(COLOR_BOLD)Running all integration tests in Docker container...$(COLOR_RESET)"
+	@$(MAKE) docker-integration-test
+
+integration-test-pkg: build ## Run package integration tests in Docker
+	@echo "$(COLOR_BOLD)Running package integration tests in Docker...$(COLOR_RESET)"
+	@docker build -f test/integration/Dockerfile -t go-luks2-integration-test .
+	@docker run --rm --privileged go-luks2-integration-test \
+		go test -v -tags=integration ./test/integration/pkg/...
+
+integration-test-cli: build ## Run CLI integration tests in Docker
+	@echo "$(COLOR_BOLD)Running CLI integration tests in Docker...$(COLOR_RESET)"
+	@docker build -f test/integration/Dockerfile -t go-luks2-integration-test .
+	@docker run --rm --privileged go-luks2-integration-test \
+		go test -v -tags=integration ./test/integration/cli/...
 
 coverage: build ## Run all tests (unit + integration) with coverage (requires root)
 	@echo "$(COLOR_BOLD)Running all tests (unit + integration) with coverage...$(COLOR_RESET)"
 	@rm -f coverage-unit.out coverage-integration.out $(COVERAGE_FILE)
 	@echo ""
 	@echo "$(COLOR_BOLD)Step 1: Running unit tests with coverage...$(COLOR_RESET)"
-	@$(GO) test -coverprofile=coverage-unit.out -covermode=atomic ./... 2>&1 | grep -v "no test files" || true
+	@$(GO) test -coverprofile=coverage-unit.out -covermode=atomic ./pkg/luks2 ./cmd/luks2 2>&1 | grep -v "no test files" || true
 	@echo ""
 	@echo "$(COLOR_BOLD)Step 2: Running integration tests with coverage...$(COLOR_RESET)"
 	@if [ "$$(id -u)" -eq 0 ]; then \
@@ -130,7 +147,7 @@ coverage: build ## Run all tests (unit + integration) with coverage (requires ro
 
 docker-integration-test: ## Run integration tests in Docker (isolated, recommended)
 	@echo "$(COLOR_BOLD)Building Docker image for integration tests...$(COLOR_RESET)"
-	@docker build -f Dockerfile.integration -t go-luks2-integration-test .
+	@docker build -f test/integration/Dockerfile -t go-luks2-integration-test .
 	@echo ""
 	@echo "$(COLOR_BOLD)Running integration tests in Docker container (privileged)...$(COLOR_RESET)"
 	@rm -f coverage-docker.out
@@ -148,13 +165,25 @@ docker-integration-test: ## Run integration tests in Docker (isolated, recommend
 
 docker-test-specific: ## Run specific integration test in Docker (use TEST=TestName)
 	@echo "$(COLOR_BOLD)Building Docker image...$(COLOR_RESET)"
-	@docker build -f Dockerfile.integration -t go-luks2-integration-test .
+	@docker build -f test/integration/Dockerfile -t go-luks2-integration-test .
 	@echo ""
 	@echo "$(COLOR_BOLD)Running test: $(TEST)$(COLOR_RESET)"
 	@docker run --rm --privileged go-luks2-integration-test \
-		go test -v -tags=integration -run="$(TEST)" ./pkg/luks2
+		go test -v -tags=integration -run="$(TEST)" ./...
 
-test-integration: integration-test ## Alias for integration-test (deprecated)
+host-integration-test: build ## Run integration tests on host (requires sudo, NOT recommended)
+	@echo "$(COLOR_YELLOW)⚠ WARNING: Running integration tests on HOST system$(COLOR_RESET)"
+	@echo "$(COLOR_YELLOW)  This requires root privileges and modifies the system.$(COLOR_RESET)"
+	@echo "$(COLOR_YELLOW)  Recommended: use 'make integration-test' (runs in Docker)$(COLOR_RESET)"
+	@echo ""
+	@if [ "$$(id -u)" -eq 0 ]; then \
+		$(GO) test -v -tags=integration ./... 2>&1 | grep -v "no test files" || true; \
+	else \
+		sudo -E PATH="$(PATH)" $(GO) test -v -tags=integration ./... 2>&1 | grep -v "no test files" || true; \
+	fi
+	@echo "$(COLOR_GREEN)✓ Host integration tests complete$(COLOR_RESET)"
+
+test-integration: integration-test ## Alias for integration-test
 
 bench: ## Run benchmarks
 	@echo "$(COLOR_BOLD)Running benchmarks...$(COLOR_RESET)"
@@ -186,7 +215,7 @@ lint: ## Run golangci-lint (if installed)
 	@echo "$(COLOR_BOLD)Running golangci-lint...$(COLOR_RESET)"
 	@LINTER=$$(command -v golangci-lint 2>/dev/null || echo "$(GOBIN)/golangci-lint"); \
 	if [ -x "$$LINTER" ]; then \
-		$$LINTER run ./...; \
+		$$LINTER run ./... || exit 1; \
 		echo "$(COLOR_GREEN)✓ Lint passed$(COLOR_RESET)"; \
 	else \
 		echo "$(COLOR_YELLOW)⚠ golangci-lint not installed, skipping...$(COLOR_RESET)"; \
@@ -197,7 +226,7 @@ gosec: ## Run gosec security scanner
 	@echo "$(COLOR_BOLD)Running gosec security scanner...$(COLOR_RESET)"
 	@GOSEC=$$(command -v gosec 2>/dev/null || echo "$(GOBIN)/gosec"); \
 	if [ -x "$$GOSEC" ]; then \
-		$$GOSEC -exclude-generated -severity medium -confidence medium ./...; \
+		$$GOSEC -exclude-generated -severity medium -confidence medium ./... || exit 1; \
 		echo "$(COLOR_GREEN)✓ Security scan passed$(COLOR_RESET)"; \
 	else \
 		echo "$(COLOR_YELLOW)⚠ gosec not installed, skipping...$(COLOR_RESET)"; \
@@ -272,6 +301,7 @@ clean: ## Clean build artifacts and test files
 	@rm -f $(BINARY_NAME)
 	@rm -f $(COVERAGE_FILE) $(COVERAGE_HTML)
 	@rm -f coverage-docker.out coverage-docker.html
+	@rm -f coverage-cli.out coverage-unit.out coverage-integration.out
 	@rm -f gosec-report.json
 	@rm -f *.test
 	@find . -name "*.test" -type f -delete
@@ -315,3 +345,12 @@ info: ## Show project information
 	@echo "Build directory: $(BUILD_DIR)"
 	@echo "Binary name: $(BINARY_NAME)"
 	@echo "Coverage file: $(COVERAGE_FILE)"
+	@echo "Coverage threshold: $(COVERAGE_THRESHOLD)%"
+
+devcontainer: ## Build and run the devcontainer
+	@echo "$(COLOR_BOLD)Building devcontainer...$(COLOR_RESET)"
+	@docker build -f .devcontainer/Dockerfile -t go-luks2-devcontainer .
+	@echo "$(COLOR_GREEN)✓ Devcontainer built$(COLOR_RESET)"
+	@echo ""
+	@echo "$(COLOR_BOLD)To run:$(COLOR_RESET)"
+	@echo "  docker run --privileged -v \$$(pwd):/workspace -it go-luks2-devcontainer bash"

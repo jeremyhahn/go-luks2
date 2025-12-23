@@ -4,18 +4,76 @@
 
 go-luks2 is a pure Go implementation of LUKS2 (Linux Unified Key Setup) disk encryption. It provides both a command-line tool and a library for creating, unlocking, and managing encrypted volumes without external dependencies on cryptsetup.
 
+## Project Structure
+
+```
+go-luks2/
+├── cmd/luks2/              # CLI application
+│   ├── main.go             # Entry point, version, usage text
+│   ├── cli.go              # CLI logic with dependency injection
+│   ├── cli_test.go         # CLI unit tests
+│   └── terminal.go         # Terminal interface for password input
+│
+├── pkg/luks2/              # Core library
+│   ├── types.go            # Data structures and options
+│   ├── errors.go           # Typed errors and sentinels
+│   ├── header.go           # Header read/write operations
+│   ├── format.go           # Volume creation
+│   ├── unlock.go           # Volume unlock/lock operations
+│   ├── kdf.go              # Key derivation functions
+│   ├── antiforensic.go     # AF split/merge operations
+│   ├── filesystem.go       # Filesystem creation
+│   ├── mount.go            # Mount/unmount operations
+│   ├── wipe.go             # Secure wipe operations
+│   ├── loopdev.go          # Loop device management
+│   ├── token.go            # Token management API
+│   └── *_test.go           # Unit tests
+│
+├── test/integration/       # Integration tests
+│   ├── Dockerfile          # Docker environment for tests
+│   ├── pkg/                # Package integration tests
+│   └── cli/                # CLI integration tests
+│
+├── docs/                   # Documentation
+│   ├── ARCHITECTURE.md     # This file
+│   ├── cli/                # CLI command documentation
+│   └── luks/               # LUKS2 technical documentation
+│
+└── .devcontainer/          # VS Code dev container
+    ├── Dockerfile
+    └── devcontainer.json
+```
+
 ## Core Components
 
-### 1. Header Management (`header.go`)
+### 1. CLI Layer (`cmd/luks2/`)
 
-**Purpose**: Read/write LUKS2 headers
+The CLI is designed for testability using dependency injection:
 
-**Structure**:
+```go
+type CLI struct {
+    Args      []string
+    Stdin     io.Reader
+    Stdout    io.Writer
+    Stderr    io.Writer
+    Luks      LuksOperations    // Interface for LUKS operations
+    Terminal  Terminal          // Interface for password input
+    FS        FileSystem        // Interface for file operations
+    ExitFunc  func(code int)
+}
+```
+
+This allows complete testing without actual disk operations.
+
+### 2. Header Management (`header.go`)
+
+Handles LUKS2 binary header and JSON metadata:
+
 ```
 ┌─────────────────────────────┐
 │  Binary Header (4096 bytes) │  ← Magic, UUID, checksums
 ├─────────────────────────────┤
-│  JSON Metadata (16KB)       │  ← Keyslots, segments, config
+│  JSON Metadata (12-16 KB)   │  ← Keyslots, segments, config
 ├─────────────────────────────┤
 │  Backup Binary Header       │  ← Redundancy at offset 0x4000
 ├─────────────────────────────┤
@@ -23,34 +81,22 @@ go-luks2 is a pure Go implementation of LUKS2 (Linux Unified Key Setup) disk enc
 └─────────────────────────────┘
 ```
 
-**Key Functions**:
-- `ReadHeader()` - Parse binary + JSON metadata
-- `WriteHeader()` - Write primary + backup headers
-- Checksum validation (SHA-256)
+### 3. Format Operations (`format.go`)
 
-### 2. Format Operations (`format.go`)
+Creates new LUKS2 volumes:
 
-**Purpose**: Create new LUKS2 volumes
-
-**Process**:
 1. Generate master key (random)
 2. Create keyslot with KDF (PBKDF2/Argon2)
 3. Encrypt master key with passphrase-derived key
 4. Apply anti-forensic split (4000 stripes)
-5. Write encrypted key material to keyslot area
-6. Create segment metadata (encryption params)
+5. Write encrypted key material
+6. Create segment metadata
 7. Write headers (primary + backup)
 
-**Security**:
-- Master key cleared from memory after use
-- Passphrase-derived keys cleared after encryption
-- Supports AES-XTS-256, Argon2id, PBKDF2
+### 4. Unlock Operations (`unlock.go`)
 
-### 3. Unlock Operations (`unlock.go`)
+Unlocks LUKS volumes using device-mapper:
 
-**Purpose**: Unlock LUKS volumes using device-mapper
-
-**Process**:
 1. Read header and keyslot metadata
 2. Derive key from passphrase using stored KDF
 3. Decrypt keyslot material
@@ -59,79 +105,40 @@ go-luks2 is a pure Go implementation of LUKS2 (Linux Unified Key Setup) disk enc
 6. Create device-mapper target
 7. Load encryption table
 
-**Device Mapper Integration**:
-- Creates `/dev/mapper/<name>` device
-- Uses dm-crypt target
-- Handles sector-by-sector encryption
+### 5. Key Derivation (`kdf.go`)
 
-### 4. Key Derivation (`kdf.go`)
+Supports multiple KDFs:
 
-**Purpose**: Derive cryptographic keys from passphrases
+| KDF | Type | Use Case |
+|-----|------|----------|
+| Argon2id | Memory-hard | Default, recommended |
+| Argon2i | Memory-hard | Side-channel resistant |
+| PBKDF2 | Iterative | FIPS compliance |
 
-**Supported KDFs**:
-- **PBKDF2** (SHA-256/SHA-512)
-  - Iterations calibrated for time target
-  - Used for digest (100k iterations)
+### 6. Anti-Forensic Split (`antiforensic.go`)
 
-- **Argon2i** (memory-hard, side-channel resistant)
-  - Time cost, memory cost, parallelism
+Protects master key from forensic recovery:
 
-- **Argon2id** (hybrid, recommended)
-  - Default: 4 iterations, 1GB memory, 4 threads
-
-**Functions**:
-- `CreateKDF()` - Generate KDF with calibrated parameters
-- `DeriveKey()` - Derive key from passphrase + salt
-- `BenchmarkPBKDF2()` - Calibrate iterations for target time
-
-### 5. Anti-Forensic Split (`antiforensic.go`)
-
-**Purpose**: Protect against forensic key recovery
-
-**Algorithm** (LUKS standard):
-- Split key into 4000 stripes
-- Each stripe encrypted with diffusion function
-- All stripes required to recover key
-- Partial data cannot reveal key material
-
-**Process**:
 ```
-Key (32 bytes) → AFSplit → 128,000 bytes (4000 * 32)
-                          ↓
-                    Encrypted Material
-                          ↓
-                     AFMerge → Key (32 bytes)
+Key (64 bytes) → AFSplit → 256,000 bytes (4000 × 64)
+                           ↓
+                     Encrypted Material
+                           ↓
+                      AFMerge → Key (64 bytes)
 ```
 
-**Security**: Ensures wiping single stripe makes key unrecoverable
+### 7. Token Management (`token.go`)
 
-### 6. Filesystem Operations (`filesystem.go`, `mount.go`)
+Manages LUKS2 tokens for external key sources:
 
-**Purpose**: Manage filesystems on unlocked volumes
-
-**Operations**:
-- `MakeFilesystem()` - Create ext4/xfs/etc on device
-- `Mount()` - Mount encrypted filesystem
-- `Unmount()` - Unmount filesystem
-- `IsMounted()` - Check mount status
-
-### 7. Wipe Operations (`wipe.go`)
-
-**Purpose**: Securely destroy LUKS volumes
-
-**Modes**:
-- **Header Only**: Wipe LUKS headers (fast)
-- **Full Wipe**: Overwrite entire device (slow)
-- **Keyslot Wipe**: Destroy single keyslot
-
-**Options**:
-- Multiple passes (1-7 recommended)
-- Random or zero patterns
-- DOD 5220.22-M compliance available
+- FIDO2 hardware keys
+- TPM2 modules
+- Custom token types
 
 ## Data Flow
 
 ### Volume Creation
+
 ```
 Passphrase → KDF → Passphrase Key
                          ↓
@@ -143,6 +150,7 @@ Write to Device
 ```
 
 ### Volume Unlock
+
 ```
 Passphrase → KDF → Passphrase Key
                          ↓
@@ -181,56 +189,66 @@ Keyslot Material → Decrypt → AF-Split Material
 - ✗ Hardware keyloggers
 - ✗ Physical coercion
 
-## File Layout
+## Testing Architecture
 
+### Unit Tests
+
+Located alongside source files (`*_test.go`):
+- No I/O operations
+- No root privileges required
+- Mock-based testing for CLI
+
+### Integration Tests
+
+Located in `test/integration/`:
+- Require Docker with privileged mode
+- Test actual device operations
+- Use loop devices for isolation
+
+```bash
+# Run unit tests
+make test-unit
+
+# Run integration tests in Docker
+make integration-test
 ```
-pkg/luks2/
-├── errors.go          # Typed errors
-├── types.go           # Data structures
-├── header.go          # Header management
-├── format.go          # Volume creation
-├── unlock.go          # Volume unlocking
-├── kdf.go             # Key derivation
-├── antiforensic.go    # AF split/merge
-├── filesystem.go      # Filesystem creation
-├── mount.go           # Mount operations
-├── wipe.go            # Secure wipe
-└── util.go            # Utilities
 
-cmd/luks2/             # CLI tool
-docs/                  # Documentation
+## Build System
+
+### Version Injection
+
+Version is read from `VERSION` file and injected at build time:
+
+```makefile
+VERSION=$(shell cat VERSION | tr -d 'v')
+LDFLAGS=-ldflags "-X main.Version=$(VERSION)"
 ```
 
-## Performance Characteristics
+### Key Targets
 
-| Operation | Time (typical) | I/O Pattern |
-|-----------|---------------|-------------|
-| Format (50GB) | 2-5s | Sequential write (headers only) |
-| Unlock | 1-3s | Random read (keyslot) |
-| Lock | <100ms | None |
-| Wipe (headers) | <1s | Sequential write (32KB) |
-| Wipe (full, 50GB) | ~5min | Sequential write (entire device) |
-
-**KDF Times** (defaults):
-- PBKDF2: 2000ms target
-- Argon2id: 1-4s (depending on memory)
+| Target | Description |
+|--------|-------------|
+| `build` | Build CLI with version |
+| `test-unit` | Run unit tests |
+| `integration-test` | Run integration tests in Docker |
+| `ci` | Full CI pipeline |
 
 ## Compatibility
 
-**LUKS2 Specification**: Fully compliant
-**Interoperability**:
-- ✓ Volumes created with go-luks2 can be unlocked with cryptsetup
-- ✓ Volumes created with cryptsetup can be unlocked with go-luks2
+### LUKS2 Specification
 
-**Tested With**:
-- cryptsetup 2.3+
-- Linux kernel 5.x+
-- device-mapper 1.02+
+- Fully compliant with LUKS2 on-disk format
+- Interoperable with cryptsetup
+
+### System Requirements
+
+- Linux with device-mapper support
+- Kernel 5.x+ recommended
+- Root privileges for device operations
 
 ## Limitations
 
 1. **Linux Only**: Requires device-mapper kernel module
-2. **No LUKS1**: Only LUKS2 supported
-3. **Single Keyslot**: Format creates only keyslot 0
-4. **AES-XTS Only**: Other ciphers planned but not implemented
-5. **Root Required**: Device-mapper operations need privileges
+2. **LUKS2 Only**: LUKS1 not supported
+3. **AES-XTS Only**: Other ciphers planned
+4. **Root Required**: Device-mapper needs privileges
