@@ -694,6 +694,200 @@ func TestCLI_Wipe_Failure(t *testing.T) {
 	}
 }
 
+func TestCLI_Wipe_FullDevice(t *testing.T) {
+	var capturedOpts luks2.WipeOptions
+	cli, stdout, _ := newTestCLI([]string{"luks2", "wipe", "--full", "/dev/sda1"})
+	cli.Stdin = strings.NewReader("YES\n")
+	cli.Luks = &MockLuksOperations{
+		WipeFunc: func(opts luks2.WipeOptions) error {
+			capturedOpts = opts
+			return nil
+		},
+	}
+
+	code := cli.Run()
+
+	if code != 0 {
+		t.Errorf("Expected exit code 0, got %d", code)
+	}
+
+	if capturedOpts.HeaderOnly {
+		t.Error("Expected HeaderOnly to be false for --full")
+	}
+
+	if !strings.Contains(stdout.String(), "Full device wipe") {
+		t.Error("Expected 'Full device wipe' in output")
+	}
+}
+
+func TestCLI_Wipe_WithPasses(t *testing.T) {
+	var capturedOpts luks2.WipeOptions
+	cli, stdout, _ := newTestCLI([]string{"luks2", "wipe", "--full", "--passes", "3", "/dev/sda1"})
+	cli.Stdin = strings.NewReader("YES\n")
+	cli.Luks = &MockLuksOperations{
+		WipeFunc: func(opts luks2.WipeOptions) error {
+			capturedOpts = opts
+			return nil
+		},
+	}
+
+	code := cli.Run()
+
+	if code != 0 {
+		t.Errorf("Expected exit code 0, got %d", code)
+	}
+
+	if capturedOpts.Passes != 3 {
+		t.Errorf("Expected 3 passes, got %d", capturedOpts.Passes)
+	}
+
+	if !strings.Contains(stdout.String(), "3 passes") {
+		t.Error("Expected '3 passes' in output")
+	}
+}
+
+func TestCLI_Wipe_WithRandom(t *testing.T) {
+	var capturedOpts luks2.WipeOptions
+	cli, stdout, _ := newTestCLI([]string{"luks2", "wipe", "--full", "--random", "/dev/sda1"})
+	cli.Stdin = strings.NewReader("YES\n")
+	cli.Luks = &MockLuksOperations{
+		WipeFunc: func(opts luks2.WipeOptions) error {
+			capturedOpts = opts
+			return nil
+		},
+	}
+
+	code := cli.Run()
+
+	if code != 0 {
+		t.Errorf("Expected exit code 0, got %d", code)
+	}
+
+	if !capturedOpts.Random {
+		t.Error("Expected Random to be true")
+	}
+
+	if !strings.Contains(stdout.String(), "Data: Random") {
+		t.Error("Expected 'Data: Random' in output")
+	}
+}
+
+func TestCLI_Wipe_WithTrim(t *testing.T) {
+	var capturedOpts luks2.WipeOptions
+	cli, stdout, _ := newTestCLI([]string{"luks2", "wipe", "--full", "--trim", "/dev/sda1"})
+	cli.Stdin = strings.NewReader("YES\n")
+	cli.Luks = &MockLuksOperations{
+		WipeFunc: func(opts luks2.WipeOptions) error {
+			capturedOpts = opts
+			return nil
+		},
+	}
+
+	code := cli.Run()
+
+	if code != 0 {
+		t.Errorf("Expected exit code 0, got %d", code)
+	}
+
+	if !capturedOpts.Trim {
+		t.Error("Expected Trim to be true")
+	}
+
+	if !strings.Contains(stdout.String(), "TRIM: Enabled") {
+		t.Error("Expected 'TRIM: Enabled' in output")
+	}
+}
+
+func TestCLI_Wipe_AllOptions(t *testing.T) {
+	var capturedOpts luks2.WipeOptions
+	cli, _, _ := newTestCLI([]string{"luks2", "wipe", "--full", "--passes", "5", "--random", "--trim", "/dev/sda1"})
+	cli.Stdin = strings.NewReader("YES\n")
+	cli.Luks = &MockLuksOperations{
+		WipeFunc: func(opts luks2.WipeOptions) error {
+			capturedOpts = opts
+			return nil
+		},
+	}
+
+	code := cli.Run()
+
+	if code != 0 {
+		t.Errorf("Expected exit code 0, got %d", code)
+	}
+
+	if capturedOpts.HeaderOnly {
+		t.Error("Expected HeaderOnly to be false")
+	}
+	if capturedOpts.Passes != 5 {
+		t.Errorf("Expected 5 passes, got %d", capturedOpts.Passes)
+	}
+	if !capturedOpts.Random {
+		t.Error("Expected Random to be true")
+	}
+	if !capturedOpts.Trim {
+		t.Error("Expected Trim to be true")
+	}
+	if capturedOpts.Device != "/dev/sda1" {
+		t.Errorf("Expected device /dev/sda1, got %s", capturedOpts.Device)
+	}
+}
+
+func TestCLI_Wipe_InvalidPasses(t *testing.T) {
+	cli, _, stderr := newTestCLI([]string{"luks2", "wipe", "--passes", "invalid", "/dev/sda1"})
+
+	code := cli.Run()
+
+	if code != 1 {
+		t.Errorf("Expected exit code 1, got %d", code)
+	}
+
+	if !strings.Contains(stderr.String(), "Invalid passes value") {
+		t.Error("Expected 'Invalid passes value' error")
+	}
+}
+
+func TestCLI_Wipe_MissingPassesValue(t *testing.T) {
+	cli, _, stderr := newTestCLI([]string{"luks2", "wipe", "--passes"})
+
+	code := cli.Run()
+
+	if code != 1 {
+		t.Errorf("Expected exit code 1, got %d", code)
+	}
+
+	if !strings.Contains(stderr.String(), "--passes requires a value") {
+		t.Error("Expected '--passes requires a value' error")
+	}
+}
+
+func TestCLI_Wipe_UnknownOption(t *testing.T) {
+	cli, _, stderr := newTestCLI([]string{"luks2", "wipe", "--unknown", "/dev/sda1"})
+
+	code := cli.Run()
+
+	if code != 1 {
+		t.Errorf("Expected exit code 1, got %d", code)
+	}
+
+	if !strings.Contains(stderr.String(), "Unknown option") {
+		t.Error("Expected 'Unknown option' error")
+	}
+}
+
+func TestCLI_Wipe_MissingDevice(t *testing.T) {
+	cli, _, stderr := newTestCLI([]string{"luks2", "wipe", "--full"})
+
+	code := cli.Run()
+
+	if code != 1 {
+		t.Errorf("Expected exit code 1, got %d", code)
+	}
+
+	if !strings.Contains(stderr.String(), "device path required") {
+		t.Error("Expected 'device path required' error")
+	}
+}
+
 func TestParseSize(t *testing.T) {
 	tests := []struct {
 		input    string

@@ -39,7 +39,7 @@ luks2 <command> [arguments]
 | [mount](mount.md) | Mount an unlocked volume |
 | [unmount](unmount.md) | Unmount a volume |
 | [info](info.md) | Display volume information |
-| [wipe](wipe.md) | Securely destroy a volume |
+| [wipe](wipe.md) | Securely wipe a volume (headers or full device) |
 | help | Show usage information |
 | version | Show version information |
 

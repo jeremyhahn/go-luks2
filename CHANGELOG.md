@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4-alpha] - 2025-12-31
+
+### Added
+
+- **CLI Wipe Command Options**
+  - `--full` - Wipe entire device instead of headers only
+  - `--passes N` - Multi-pass overwrite support
+  - `--random` - Use random data instead of zeros
+  - `--trim` - Issue TRIM/DISCARD after wipe for SSDs
+
+- **Unit Tests**
+  - Added 9 new CLI unit tests for wipe command options
+
+### Changed
+
+- **Documentation Overhaul**
+  - Complete README rewrite with concise, accurate API documentation
+  - Added Recovery Key API documentation (GenerateRecoveryKey, AddRecoveryKey, etc.)
+  - Added Filesystem utilities (CheckFilesystem, GetFilesystemInfo, SupportedFilesystems)
+  - Added Header validation functions (IsLUKS, IsLUKS2, WriteHeader)
+  - Updated CLI wipe documentation with new options
+
 ## [0.1.3-alpha] - 2025-12-31
 
 ### Added
