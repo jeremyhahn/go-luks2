@@ -25,7 +25,8 @@ COMMANDS:
     mount <name> <mountpoint>    Mount an unlocked volume
     unmount <mountpoint>         Unmount a volume
     info <device>                Show volume information
-    wipe <device>                Securely wipe a volume
+    wipe [options] <device>      Securely wipe a volume
+                                 Options: --full, --passes N, --random, --trim
     help                         Show this help message
     version                      Show version information
 

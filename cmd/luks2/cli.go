@@ -591,17 +591,94 @@ func (c *CLI) cmdInfo() int {
 // cmdWipe securely wipes a LUKS2 volume
 func (c *CLI) cmdWipe() int {
 	if len(c.Args) < 3 {
-		_, _ = fmt.Fprintln(c.Stdout, "Usage: luks2 wipe <device>")
-		_, _ = fmt.Fprintln(c.Stdout, "Example: luks2 wipe /dev/sdb1")
+		_, _ = fmt.Fprintln(c.Stdout, "Usage: luks2 wipe [options] <device>")
+		_, _ = fmt.Fprintln(c.Stdout, "")
+		_, _ = fmt.Fprintln(c.Stdout, "Options:")
+		_, _ = fmt.Fprintln(c.Stdout, "  --full           Wipe entire device (default: headers only)")
+		_, _ = fmt.Fprintln(c.Stdout, "  --passes N       Number of overwrite passes (default: 1)")
+		_, _ = fmt.Fprintln(c.Stdout, "  --random         Use random data instead of zeros")
+		_, _ = fmt.Fprintln(c.Stdout, "  --trim           Issue TRIM/DISCARD after wipe (for SSDs)")
+		_, _ = fmt.Fprintln(c.Stdout, "")
+		_, _ = fmt.Fprintln(c.Stdout, "Examples:")
+		_, _ = fmt.Fprintln(c.Stdout, "  luks2 wipe /dev/sdb1                    # Wipe headers only (fast)")
+		_, _ = fmt.Fprintln(c.Stdout, "  luks2 wipe --full /dev/sdb1             # Wipe entire device")
+		_, _ = fmt.Fprintln(c.Stdout, "  luks2 wipe --full --passes 3 /dev/sdb1  # DoD-style 3-pass wipe")
+		_, _ = fmt.Fprintln(c.Stdout, "  luks2 wipe --full --random /dev/sdb1    # Random data wipe")
+		_, _ = fmt.Fprintln(c.Stdout, "  luks2 wipe --full --trim /dev/ssd1      # Full wipe + TRIM for SSD")
 		return 1
 	}
 
-	device := c.Args[2]
+	// Parse options
+	opts := luks2.WipeOptions{
+		Passes:     1,
+		Random:     false,
+		HeaderOnly: true,
+		Trim:       false,
+	}
+
+	var device string
+	for i := 2; i < len(c.Args); i++ {
+		switch c.Args[i] {
+		case "--full":
+			opts.HeaderOnly = false
+		case "--random":
+			opts.Random = true
+		case "--trim":
+			opts.Trim = true
+		case "--passes":
+			if i+1 < len(c.Args) {
+				i++
+				var passes int
+				_, err := fmt.Sscanf(c.Args[i], "%d", &passes)
+				if err != nil || passes < 1 {
+					_, _ = fmt.Fprintf(c.Stderr, "Invalid passes value: %s (must be >= 1)\n", c.Args[i])
+					return 1
+				}
+				opts.Passes = passes
+			} else {
+				_, _ = fmt.Fprintln(c.Stderr, "--passes requires a value")
+				return 1
+			}
+		default:
+			if c.Args[i][0] == '-' {
+				_, _ = fmt.Fprintf(c.Stderr, "Unknown option: %s\n", c.Args[i])
+				return 1
+			}
+			device = c.Args[i]
+		}
+	}
+
+	if device == "" {
+		_, _ = fmt.Fprintln(c.Stderr, "Error: device path required")
+		return 1
+	}
+
+	opts.Device = device
 
 	c.showBanner()
 	_, _ = fmt.Fprintln(c.Stdout, "*** WARNING: DESTRUCTIVE OPERATION ***")
 	_, _ = fmt.Fprintf(c.Stdout, "\nThis will PERMANENTLY DESTROY all data on: %s\n", device)
 	_, _ = fmt.Fprintln(c.Stdout, "This action CANNOT be undone!")
+
+	// Show wipe configuration
+	_, _ = fmt.Fprintln(c.Stdout, "")
+	if opts.HeaderOnly {
+		_, _ = fmt.Fprintln(c.Stdout, "Mode: Header wipe only (fast)")
+	} else {
+		_, _ = fmt.Fprintf(c.Stdout, "Mode: Full device wipe (%d pass", opts.Passes)
+		if opts.Passes > 1 {
+			_, _ = fmt.Fprint(c.Stdout, "es")
+		}
+		_, _ = fmt.Fprintln(c.Stdout, ")")
+		if opts.Random {
+			_, _ = fmt.Fprintln(c.Stdout, "Data: Random")
+		} else {
+			_, _ = fmt.Fprintln(c.Stdout, "Data: Zeros")
+		}
+		if opts.Trim {
+			_, _ = fmt.Fprintln(c.Stdout, "TRIM: Enabled (SSD)")
+		}
+	}
 
 	// Confirmation
 	_, _ = fmt.Fprint(c.Stdout, "\nType 'YES' to confirm wipe: ")
@@ -613,13 +690,10 @@ func (c *CLI) cmdWipe() int {
 		return 0
 	}
 
-	_, _ = fmt.Fprintln(c.Stdout, "\nWiping LUKS headers...")
-
-	opts := luks2.WipeOptions{
-		Device:     device,
-		Passes:     1,
-		Random:     false,
-		HeaderOnly: true,
+	if opts.HeaderOnly {
+		_, _ = fmt.Fprintln(c.Stdout, "\nWiping LUKS headers...")
+	} else {
+		_, _ = fmt.Fprintln(c.Stdout, "\nWiping entire device (this may take a while)...")
 	}
 
 	if err := c.Luks.Wipe(opts); err != nil {

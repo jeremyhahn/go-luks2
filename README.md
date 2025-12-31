@@ -1,387 +1,273 @@
 # go-luks2
 
-Pure Go implementation of LUKS2 (Linux Unified Key Setup) disk encryption.
+Pure Go implementation of LUKS2 disk encryption. No external dependencies on cryptsetup.
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-## Features
-
-- **LUKS2** - Full specification compliance
-- **Pure Go** - No external dependencies on cryptsetup
-- **Compatible** - Interoperable with cryptsetup
-- **Secure** - Argon2id, AES-XTS-256, anti-forensic split
-- **FIPS-Ready** - PBKDF2 with SHA-256/384/512 for compliance requirements
-- **Complete** - Format, unlock, mount, wipe operations
-- **Typed Errors** - Proper error handling with `errors.Is()` / `errors.As()`
-
-## Quick Start
-
-### CLI Tool
+## Installation
 
 ```bash
-# Install
+# CLI tool
 go install github.com/jeremyhahn/go-luks2/cmd/luks2@latest
 
-# Create encrypted volume
-dd if=/dev/zero of=secret.img bs=1M count=100
-sudo luks2 format secret.img
-
-# Unlock and mount
-sudo luks2 open secret.img my-disk
-sudo mkfs.ext4 /dev/mapper/my-disk
-sudo luks2 mount my-disk /mnt/secret
-
-# Use it
-echo "confidential" | sudo tee /mnt/secret/data.txt
-
-# Cleanup
-sudo luks2 unmount /mnt/secret
-sudo luks2 close my-disk
-```
-
-### Go Library
-
-```bash
+# Library
 go get github.com/jeremyhahn/go-luks2/pkg/luks2
 ```
 
-**Format and unlock:**
+## CLI Usage
 
-```go
-package main
+All commands require root privileges.
 
-import (
-    "fmt"
-    "github.com/jeremyhahn/go-luks2/pkg/luks2"
-)
+### Commands
 
-func main() {
-    // Format volume
-    err := luks2.Format(luks2.FormatOptions{
-        Device:     "/dev/loop0",
-        Passphrase: []byte("my-secure-passphrase"),
-        Label:      "MyData",
-        KDFType:    "argon2id",  // Most secure
-    })
-    if err != nil {
-        panic(err)
-    }
+| Command | Description |
+|---------|-------------|
+| `create <path> [size] [fs]` | Create LUKS2 volume (block device or file) |
+| `open <device> <name>` | Unlock volume to /dev/mapper/\<name\> |
+| `close <name>` | Lock volume |
+| `mount <name> <mountpoint>` | Mount unlocked volume |
+| `unmount <mountpoint>` | Unmount volume |
+| `info <device>` | Show volume information |
+| `wipe [opts] <device>` | Securely wipe volume (`--full`, `--passes N`, `--random`, `--trim`) |
+| `help` | Show help |
+| `version` | Show version |
 
-    // Unlock volume
-    err = luks2.Unlock("/dev/loop0", []byte("my-secure-passphrase"), "my-volume")
-    if err != nil {
-        panic(err)
-    }
-    defer luks2.Lock("my-volume")
+### Examples
 
-    fmt.Println("✓ Volume unlocked at /dev/mapper/my-volume")
-}
+**Block device:**
+```bash
+sudo luks2 create /dev/sdb1
+sudo luks2 open /dev/sdb1 mydisk
+sudo mkfs.ext4 /dev/mapper/mydisk
+sudo luks2 mount mydisk /mnt/encrypted
+# ... use /mnt/encrypted ...
+sudo luks2 unmount /mnt/encrypted
+sudo luks2 close mydisk
 ```
 
-**With typed error handling:**
-
-```go
-import (
-    "errors"
-    "fmt"
-    "github.com/jeremyhahn/go-luks2/pkg/luks2"
-)
-
-err := luks2.Unlock(device, passphrase, "my-volume")
-if err != nil {
-    // Check for specific errors
-    if errors.Is(err, luks2.ErrInvalidPassphrase) {
-        fmt.Println("Wrong passphrase")
-        return
-    }
-
-    if errors.Is(err, luks2.ErrVolumeAlreadyUnlocked) {
-        fmt.Println("Already unlocked")
-        return
-    }
-
-    // Check typed errors
-    var devErr *luks2.DeviceError
-    if errors.As(err, &devErr) {
-        fmt.Printf("Device error: %s\n", devErr.Device)
-        return
-    }
-
-    panic(err)
-}
+**File-based volume (auto-configures loop device and filesystem):**
+```bash
+sudo luks2 create secret.luks 500M ext4
+sudo luks2 mount luks-auto /mnt/encrypted
+# ... use /mnt/encrypted ...
+sudo luks2 unmount /mnt/encrypted
+sudo luks2 close luks-auto
 ```
 
-**Mount filesystem:**
+## Library API
+
+### Core Operations
 
 ```go
-// Create filesystem (first time only)
-luks2.MakeFilesystem("my-volume", "ext4", "DataDisk")
+import "github.com/jeremyhahn/go-luks2/pkg/luks2"
 
-// Mount
-err := luks2.Mount(luks2.MountOptions{
-    Device:     "my-volume",
+// Format new volume
+luks2.Format(luks2.FormatOptions{
+    Device:     "/dev/sdb1",
+    Passphrase: []byte("secret"),
+    Label:      "MyVolume",
+    KDFType:    "argon2id",  // or "pbkdf2", "argon2i"
+})
+
+// Unlock/Lock
+luks2.Unlock("/dev/sdb1", []byte("secret"), "myvolume")
+luks2.Lock("myvolume")
+
+// Status
+luks2.IsUnlocked("myvolume")                    // bool
+luks2.GetVolumeInfo("/dev/sdb1")                // *VolumeInfo, error
+luks2.GetMappedDevicePath("myvolume")           // string, error
+```
+
+### Keyslot Management
+
+```go
+// Add passphrase to new keyslot
+luks2.AddKey(device, existingPass, newPass, &luks2.AddKeyOptions{
+    KDFType: "argon2id",
+    Hash:    "sha256",  // for pbkdf2
+})
+
+// Change passphrase in specific keyslot
+luks2.ChangeKey(device, oldPass, newPass, keyslotNumber)
+
+// Remove passphrase (requires matching passphrase)
+luks2.RemoveKey(device, passphrase, keyslotNumber)
+
+// Kill keyslot (authenticate with any valid passphrase)
+luks2.KillSlot(device, authPassphrase, targetSlot)
+
+// Kill keyslot without authentication (dangerous)
+luks2.KillKeyslot(device, keyslotNumber)
+
+// Verify passphrase without unlocking
+luks2.TestKey(device, passphrase)
+
+// List active keyslots
+luks2.ListKeyslots(device)  // []KeyslotInfo, error
+```
+
+### Token Management
+
+Tokens store metadata for external key sources (FIDO2, TPM2, etc.):
+
+```go
+luks2.ListTokens(device)                        // map[int]*Token, error
+luks2.GetToken(device, tokenID)                 // *Token, error
+luks2.ImportToken(device, tokenID, token)       // error
+luks2.ImportTokenJSON(device, tokenID, json)    // error
+luks2.ExportToken(device, tokenID)              // []byte, error
+luks2.RemoveToken(device, tokenID)              // error
+luks2.FindFreeTokenSlot(device)                 // int, error
+luks2.TokenExists(device, tokenID)              // bool, error
+luks2.CountTokens(device)                       // int, error
+```
+
+### Recovery Keys
+
+Generate and manage recovery keys for emergency access:
+
+```go
+// Generate and add recovery key
+key, _ := luks2.AddRecoveryKey(device, existingPass, &luks2.RecoveryKeyOptions{
+    Format:     luks2.RecoveryKeyFormatDashed,  // "XXXX-XXXX-XXXX-..."
+    OutputPath: "/secure/recovery.key",
+})
+fmt.Println(key.Formatted)  // Human-readable key
+
+// Generate key only (without adding to volume)
+key, _ := luks2.GenerateRecoveryKey(32, luks2.RecoveryKeyFormatHex)
+
+// Save/Load recovery keys
+luks2.SaveRecoveryKey(key, "/path/to/key")
+keyBytes, _ := luks2.LoadRecoveryKey("/path/to/key")
+
+// Verify and parse
+luks2.VerifyRecoveryKey(device, keyBytes)      // bool, error
+luks2.ParseRecoveryKey("XXXX-XXXX-...")        // []byte, error
+```
+
+### Filesystem & Mount
+
+```go
+luks2.MakeFilesystem("myvolume", "ext4", "label")
+
+// Advanced filesystem options
+luks2.MakeFilesystemWithOptions(device, luks2.FilesystemExt4, &luks2.FilesystemOptions{
+    Label:     "MyVolume",
+    BlockSize: 4096,
+})
+
+luks2.Mount(luks2.MountOptions{
+    Device:     "myvolume",
     MountPoint: "/mnt/encrypted",
     FSType:     "ext4",
 })
-if err != nil {
-    panic(err)
-}
-defer luks2.Unmount("/mnt/encrypted", 0)
+
+luks2.Unmount("/mnt/encrypted", 0)
+luks2.IsMounted("/mnt/encrypted")              // bool, error
+luks2.CheckFilesystem(device, fstype, repair)  // error
+luks2.GetFilesystemInfo(device)                // *FilesystemInfo, error
+luks2.SupportedFilesystems()                   // []FilesystemType
 ```
 
-## Documentation
+Supported filesystems: ext2, ext3, ext4, xfs, zfs, vfat
 
-- **[Architecture](docs/ARCHITECTURE.md)** - System design and components
-- **[Usage Guide](docs/USAGE.md)** - Detailed CLI and API documentation
-
-## API Overview
-
-### Core Functions
+### Loop Devices
 
 ```go
-// Format a new LUKS2 volume
-Format(opts FormatOptions) error
+loopDev, _ := luks2.SetupLoopDevice("encrypted.img")
+defer luks2.DetachLoopDevice(loopDev)
+luks2.Unlock(loopDev, passphrase, "myvolume")
 
-// Unlock volume (creates /dev/mapper/<name>)
-Unlock(device string, passphrase []byte, name string) error
-
-// Lock volume (removes from device-mapper)
-Lock(name string) error
-
-// Check if volume is unlocked
-IsUnlocked(name string) bool
-
-// Get volume information
-GetVolumeInfo(device string) (*VolumeInfo, error)
-```
-
-### Filesystem Operations
-
-```go
-// Create filesystem on unlocked volume
-MakeFilesystem(device, fstype, label string) error
-
-// Mount encrypted volume
-Mount(opts MountOptions) error
-
-// Unmount
-Unmount(mountPoint string, flags int) error
-
-// Check mount status
-IsMounted(mountPoint string) (bool, error)
+luks2.FindLoopDevice("encrypted.img")  // Find existing loop device
 ```
 
 ### Secure Wipe
 
 ```go
-// Wipe LUKS headers or full device
-Wipe(opts WipeOptions) error
-
-// WipeOptions supports:
-// - Passes: number of overwrite passes
-// - Random: use random data vs zeros
-// - HeaderOnly: wipe headers only (fast)
-// - Trim: issue TRIM/DISCARD for SSDs
+// Wipe entire device
+luks2.Wipe(luks2.WipeOptions{
+    Device:     "/dev/sdb1",
+    Passes:     3,      // overwrite passes
+    Random:     true,   // random data vs zeros
+    HeaderOnly: false,  // true = headers only (fast)
+    Trim:       true,   // TRIM/DISCARD for SSDs
+})
 
 // Wipe specific keyslot
-WipeKeyslot(device string, keyslot int) error
+luks2.WipeKeyslot(device, keyslotNumber)
 ```
 
-### Typed Errors
+### Header Access
 
 ```go
-// Sentinel errors (use with errors.Is())
-ErrInvalidPassphrase
-ErrDeviceNotFound
-ErrVolumeNotUnlocked
-ErrVolumeAlreadyUnlocked
-ErrInvalidHeader
-// ... and more
+hdr, metadata, err := luks2.ReadHeader(device)
+luks2.WriteHeader(device, hdr, metadata)         // error
+luks2.CreateBinaryHeader(opts)                   // *LUKS2BinaryHeader, error
 
-// Typed errors (use with errors.As())
-*DeviceError
-*VolumeError
-*KeyslotError
-*CryptoError
+// Validation
+luks2.IsLUKS(device)                             // bool, error
+luks2.IsLUKS2(device)                            // bool, error
 ```
-
-## Security
-
-### Cryptographic Defaults
-
-- **Cipher**: AES-256-XTS
-- **KDF**: Argon2id (recommended) / PBKDF2 / Argon2i
-- **Hash**: SHA-256 (also supports SHA-1, SHA-384, SHA-512)
-- **Anti-Forensic**: 4000-stripe split
-- **Key Size**: 512 bits
 
 ### FIPS Compliance
 
-For environments requiring FIPS 140-2/3 compliance, use PBKDF2 with FIPS-approved hash algorithms:
+For FIPS 140-2/3 environments, use PBKDF2:
 
 ```go
-// Check if KDF is FIPS-compliant
-luks2.IsFIPSCompliantKDF("pbkdf2-sha256") // true
-luks2.IsFIPSCompliantKDF("argon2id")      // false
+luks2.IsFIPSCompliantKDF("pbkdf2-sha256")  // true
+luks2.IsFIPSCompliantKDF("argon2id")       // false
 
-// Format with FIPS-compliant KDF
 luks2.Format(luks2.FormatOptions{
-    Device:     "/dev/loop0",
-    Passphrase: []byte("passphrase"),
+    Device:     device,
+    Passphrase: pass,
     KDFType:    "pbkdf2-sha256",  // FIPS-approved
 })
 ```
 
 FIPS-approved KDFs: `pbkdf2-sha1`, `pbkdf2-sha256`, `pbkdf2-sha384`, `pbkdf2-sha512`
 
-### Security Features
+## Cryptographic Defaults
 
-- Strong KDFs (Argon2id with 1GB memory default)
-- Anti-forensic information splitting
-- Secure random number generation (`crypto/rand`)
-- Memory clearing of sensitive data
-- Header checksums and redundancy
-- Compatible with cryptsetup
-
-### Security
-
-- All security scans pass (gosec, golangci-lint)
-- Memory clearing of sensitive data
-- Input validation and path traversal protection
-- Constant-time cryptographic comparisons
+| Parameter | Value |
+|-----------|-------|
+| Cipher | AES-256-XTS |
+| KDF | Argon2id (1GB memory, 4 iterations, 4 threads) |
+| Hash | SHA-256 |
+| Key Size | 512 bits |
+| Anti-Forensic | 4000-stripe split |
 
 ## Requirements
 
-- Linux kernel with device-mapper support
-- Root/sudo privileges for device-mapper operations
-- Go 1.24+ (for building)
+- Linux with device-mapper support
+- Root privileges for device-mapper operations
+- Go 1.25.5 (for building)
 
 ## Compatibility
 
-**LUKS2 Specification**: Fully compliant
+- Fully compliant with LUKS2 specification
+- Interoperable with cryptsetup 2.3+
+- Volumes created with go-luks2 work with cryptsetup and vice versa
 
-**Interoperability**:
-- Volumes created with go-luks2 can be unlocked with `cryptsetup`
-- Volumes created with `cryptsetup` can be unlocked with go-luks2
+## Limitations
 
-**Tested With**:
-- cryptsetup 2.3+
-- Linux kernel 5.x+
-- device-mapper 1.02+
-
-## Examples
-
-### CLI
-
-```bash
-# Format with custom KDF
-sudo luks2 format --kdf argon2id --label "Backup" /dev/sdb1
-
-# Unlock
-sudo luks2 open /dev/sdb1 backup-disk
-
-# Mount
-sudo luks2 mount backup-disk /mnt/backup
-
-# Wipe (makes data unrecoverable)
-sudo luks2 wipe /dev/sdb1
-
-# Wipe with TRIM for SSDs
-sudo luks2 wipe --trim /dev/sdb1
-```
-
-### Library
-
-```go
-// Advanced format options
-opts := luks2.FormatOptions{
-    Device:         "/dev/sdb1",
-    Passphrase:     []byte("strong-passphrase"),
-    KDFType:        "argon2id",
-    Argon2Memory:   2097152,  // 2GB
-    Argon2Time:     4,
-    Argon2Parallel: 8,
-    KeySize:        512,
-}
-luks2.Format(opts)
-
-// Loop device support
-loopDev, _ := luks2.SetupLoopDevice("encrypted.img")
-defer luks2.DetachLoopDevice(loopDev)
-luks2.Unlock(loopDev, passphrase, "my-volume")
-
-// Secure wipe with TRIM for SSDs
-luks2.Wipe(luks2.WipeOptions{
-    Device: "/dev/sdb1",
-    Passes: 3,
-    Random: true,
-    Trim:   true,  // Issue TRIM after wipe
-})
-```
+- Linux only (requires device-mapper)
+- LUKS2 only (LUKS1 not supported)
+- AES-XTS only (other ciphers not implemented)
 
 ## Testing
 
 ```bash
-# Unit tests (fast, no root required)
-make test
-
-# Integration tests (requires root)
-sudo make integration-test
-
-# All tests in Docker (isolated, recommended)
-make ci-full
+make test              # Unit tests
+sudo make integration  # Integration tests (requires root)
+make ci-full           # Full test suite in Docker
 ```
-
-**Coverage**: 48% (unit + integration)
-
-Note: Coverage is lower than typical applications because many functions in a disk encryption library require actual device access (loop devices, device-mapper, mounting) and can only be tested in integration tests.
-
-## Project Structure
-
-```
-go-luks2/
-├── pkg/luks2/             # Core library
-│   ├── errors.go          # Typed errors
-│   ├── format.go          # Volume creation
-│   ├── unlock.go          # Volume unlocking
-│   ├── kdf.go             # Key derivation
-│   ├── mount.go           # Filesystem mounting
-│   └── ...
-├── cmd/luks2/             # CLI tool
-├── docs/                  # Documentation
-│   ├── ARCHITECTURE.md    # System design
-│   └── USAGE.md           # Detailed guide
-└── README.md              # This file
-```
-
-## Performance
-
-| Operation | Time (typical) |
-|-----------|----------------|
-| Format (50GB) | 2-5s |
-| Unlock | 1-3s |
-| Lock | <100ms |
-| Wipe (headers) | <1s |
-| Wipe (full, 50GB) | ~5min |
-
-## Contributing
-
-Contributions welcome! Please:
-1. Read the [Architecture](docs/ARCHITECTURE.md) docs
-2. Follow existing code style
-3. Add tests for new features
-4. Update documentation
 
 ## License
 
-Apache License 2.0 - see [LICENSE](LICENSE) for details
+Apache License 2.0
 
 ## Author
 
 Jeremy Hahn
-
-## Acknowledgments
-
-- LUKS2 specification by Milan Broz
-- cryptsetup project for reference implementation
-- Go crypto libraries for solid foundations
