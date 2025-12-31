@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3-alpha] - 2025-12-31
+
+### Added
+
+- **Cryptsetup Compatibility**
+  - `IsLUKS()` - Check if device contains any LUKS header (v1 or v2)
+  - `IsLUKS2()` - Check if device contains a LUKS2 header specifically
+  - `TestKey()` - Verify passphrase without unlocking (like `cryptsetup luksOpen --test-passphrase`)
+  - `KillSlot()` - Remove keyslot using any valid passphrase (like `cryptsetup luksKillSlot`)
+
+- **LUKS2 Header Constants** (matching cryptsetup defaults)
+  - `LUKS2HeaderMinSize`, `LUKS2HeaderDefaultSize`, `LUKS2MaxKeyslotsSize`, `LUKS2MaxKeyslots`
+  - `LUKS2DefaultKeyslotsSize` - 16 MiB default keyslots area
+
+- **Device Handling Improvements**
+  - Symlink resolution for device paths (dm-crypt requires actual block device)
+  - `waitForDeviceReady()` for udev compatibility in containerized environments
+  - Keyslot overlap protection when adding keys
+
+### Changed
+
+- Format now uses cryptsetup-compatible 16 MiB default metadata area
+- Removed all debug `fmt.Fprintf` statements from library code
+- Library returns errors instead of logging; added `SaveError` field to `RecoveryKey`
+
+### Fixed
+
+- Fixed gosec G115 integer overflow warnings in device-mapper code
+- Fixed gosec G301 directory permissions (0755 → 0750)
+- Fixed `TestSmallVolumeMinimumSize` minimum volume size (16MB → 32MB)
+
 ## [0.1.2-alpha] - 2025-12-22
 
 ### Added

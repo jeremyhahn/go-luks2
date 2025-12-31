@@ -42,6 +42,33 @@ type AddKeyOptions struct {
 	PBKDFIterTime int
 }
 
+// TestKey verifies that a passphrase can unlock the LUKS volume
+// Returns nil if the passphrase is valid, error otherwise
+func TestKey(device string, passphrase []byte) error {
+	// Validate inputs
+	if err := ValidateDevicePath(device); err != nil {
+		return err
+	}
+	if err := ValidatePassphrase(passphrase); err != nil {
+		return err
+	}
+
+	// Read header and metadata
+	_, metadata, err := ReadHeader(device)
+	if err != nil {
+		return fmt.Errorf("failed to read header: %w", err)
+	}
+
+	// Try to get master key with the passphrase
+	masterKey, err := getMasterKey(device, passphrase, metadata)
+	if err != nil {
+		return fmt.Errorf("passphrase does not unlock any keyslot: %w", err)
+	}
+	defer clearBytes(masterKey)
+
+	return nil
+}
+
 // AddKey adds a new passphrase to an available keyslot
 // existingPassphrase is used to unlock the volume and retrieve the master key
 // newPassphrase is the new passphrase to add
@@ -162,6 +189,19 @@ func AddKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKe
 	// Calculate aligned size
 	alignedSize := alignTo(int64(len(encryptedKeyMaterial)), KeyslotAreaAlignment)
 
+	// CRITICAL: Check that new keyslot area doesn't overlap with data segment
+	// This prevents data corruption when keyslot area would extend into encrypted data
+	newKeyslotsEnd := newOffset + alignedSize
+	for _, segment := range metadata.Segments {
+		segmentOffset, err := parseSize(segment.Offset)
+		if err != nil {
+			continue
+		}
+		if newKeyslotsEnd > segmentOffset {
+			return fmt.Errorf("not enough space for new keyslot: keyslot area would end at offset %d but data segment starts at %d (need to reformat with larger header)", newKeyslotsEnd, segmentOffset)
+		}
+	}
+
 	// Create new keyslot metadata
 	priority := 2 // Lower priority than original keyslot
 	newKeyslot := &Keyslot{
@@ -201,8 +241,7 @@ func AddKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKe
 		}
 	}
 
-	// Update keyslots size in config
-	newKeyslotsEnd := newOffset + alignedSize
+	// Update keyslots size in config (reusing newKeyslotsEnd calculated above)
 	metadata.Config.KeyslotsSize = formatSize(newKeyslotsEnd)
 
 	// Increment sequence ID
@@ -279,6 +318,98 @@ func RemoveKey(device string, passphrase []byte, keyslot int) error {
 	_, err = unlockKeyslot(device, passphrase, targetKeyslot, metadata.Digests)
 	if err != nil {
 		return fmt.Errorf("passphrase does not match keyslot %d: %w", keyslot, err)
+	}
+
+	// Ensure at least one keyslot remains
+	if len(metadata.Keyslots) <= 1 {
+		return fmt.Errorf("cannot remove last keyslot")
+	}
+
+	// Wipe the keyslot area
+	if err := wipeKeyslotArea(device, targetKeyslot); err != nil {
+		return fmt.Errorf("failed to wipe keyslot area: %w", err)
+	}
+
+	// Remove keyslot from metadata
+	delete(metadata.Keyslots, slotIDStr)
+
+	// Remove from digests
+	for _, digest := range metadata.Digests {
+		newKeyslots := make([]string, 0, len(digest.Keyslots))
+		for _, ks := range digest.Keyslots {
+			if ks != slotIDStr {
+				newKeyslots = append(newKeyslots, ks)
+			}
+		}
+		digest.Keyslots = newKeyslots
+	}
+
+	// Increment sequence ID
+	hdr.SequenceID++
+
+	// Write updated headers
+	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
+		return fmt.Errorf("failed to write header: %w", err)
+	}
+
+	return nil
+}
+
+// KillSlot removes a keyslot from a LUKS device after authenticating with any valid passphrase.
+// This is equivalent to "cryptsetup luksKillSlot --key-file keyfile device slot".
+// Unlike RemoveKey, the authentication passphrase does NOT need to be from the slot being removed.
+//
+// Parameters:
+//   - device: Path to the LUKS device
+//   - authPassphrase: A valid passphrase from ANY keyslot (for authentication)
+//   - targetSlot: The keyslot number to remove (0-31)
+func KillSlot(device string, authPassphrase []byte, targetSlot int) error {
+	// Validate inputs
+	if err := ValidateDevicePath(device); err != nil {
+		return err
+	}
+	if err := ValidatePassphrase(authPassphrase); err != nil {
+		return err
+	}
+	if targetSlot < 0 || targetSlot >= MaxKeyslots {
+		return fmt.Errorf("invalid keyslot: %d (must be 0-%d)", targetSlot, MaxKeyslots-1)
+	}
+
+	// Acquire exclusive lock
+	lock, err := AcquireFileLock(device)
+	if err != nil {
+		return fmt.Errorf("failed to acquire lock: %w", err)
+	}
+	defer func() { _ = lock.Release() }()
+
+	// Read existing header and metadata
+	hdr, metadata, err := ReadHeader(device)
+	if err != nil {
+		return fmt.Errorf("failed to read header: %w", err)
+	}
+
+	// Verify the auth passphrase works with any keyslot (authentication check)
+	authValid := false
+	for slotID, keyslot := range metadata.Keyslots {
+		_, err := unlockKeyslot(device, authPassphrase, keyslot, metadata.Digests)
+		if err == nil {
+			authValid = true
+			// Make sure we're not removing the only keyslot we can authenticate with
+			if slotID == strconv.Itoa(targetSlot) && len(metadata.Keyslots) == 1 {
+				return fmt.Errorf("cannot remove last keyslot")
+			}
+			break
+		}
+	}
+	if !authValid {
+		return fmt.Errorf("authentication failed: passphrase does not match any keyslot")
+	}
+
+	// Check that target keyslot exists
+	slotIDStr := strconv.Itoa(targetSlot)
+	targetKeyslot, exists := metadata.Keyslots[slotIDStr]
+	if !exists {
+		return fmt.Errorf("keyslot %d does not exist", targetSlot)
 	}
 
 	// Ensure at least one keyslot remains

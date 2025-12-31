@@ -573,10 +573,11 @@ func TestCreateMetadata(t *testing.T) {
 	masterKeySize := 64
 	keyslotOffset := 0x8000
 	keyslotSize := 4096
-	dataOffset := keyslotOffset + keyslotSize
+	keyslotsAreaSize := keyslotSize // For test, use same size
+	dataOffset := keyslotOffset + keyslotsAreaSize
 
 	metadata := createMetadata(kdf, digestKDF, digestValue, opts, masterKeySize,
-		keyslotOffset, keyslotSize, dataOffset)
+		keyslotOffset, keyslotSize, keyslotsAreaSize, dataOffset)
 
 	// Verify keyslots
 	if metadata.Keyslots == nil {
@@ -756,10 +757,11 @@ func TestCreateMetadataWithArgon2(t *testing.T) {
 	masterKeySize := 32
 	keyslotOffset := 0x8000
 	keyslotSize := 8192
-	dataOffset := keyslotOffset + keyslotSize
+	keyslotsAreaSize := keyslotSize // For test, use same size
+	dataOffset := keyslotOffset + keyslotsAreaSize
 
 	metadata := createMetadata(kdf, digestKDF, digestValue, opts, masterKeySize,
-		keyslotOffset, keyslotSize, dataOffset)
+		keyslotOffset, keyslotSize, keyslotsAreaSize, dataOffset)
 
 	if metadata == nil {
 		t.Fatal("Metadata is nil")
@@ -828,10 +830,11 @@ func TestCreateMetadataVariousOffsets(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dataOffset := tt.keyslotOffset + tt.keyslotSize
+			keyslotsAreaSize := tt.keyslotSize // For test, use same size
+			dataOffset := tt.keyslotOffset + keyslotsAreaSize
 
 			metadata := createMetadata(kdf, digestKDF, digestValue, opts, tt.masterKeySize,
-				tt.keyslotOffset, tt.keyslotSize, dataOffset)
+				tt.keyslotOffset, tt.keyslotSize, keyslotsAreaSize, dataOffset)
 
 			if metadata == nil {
 				t.Fatal("Metadata is nil")

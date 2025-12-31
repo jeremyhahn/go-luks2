@@ -102,11 +102,30 @@ func Format(opts FormatOptions) error {
 	keyMaterialSize := len(encryptedKeyMaterial)
 	alignedKeyMaterialSize := alignTo(int64(keyMaterialSize), 4096)
 
-	dataOffset := keyslotAreaStart + alignedKeyMaterialSize
+	// Match cryptsetup's LUKS2 defaults for maximum compatibility:
+	// - LUKS2_DEFAULT_HDR_SIZE = 16 MiB (total metadata area)
+	// - data_offset = 2 * metadata_size + keyslots_size
+	// - Each keyslot needs: volume_key_size * 4000 bytes (AF stripes), 4KB aligned
+	// - For 512-bit key: 64 * 4000 = 256KB per keyslot
+	// - Maximum 32 keyslots (LUKS2MaxKeyslots) supported
+	//
+	// cryptsetup formula: keyslots_size = LUKS2_DEFAULT_HDR_SIZE - 2 * metadata_size
+	// With default 16 KiB metadata: keyslots_size ≈ 16 MiB (LUKS2DefaultKeyslotsSize)
+	//
+	// We use keyslotAreaStart (0x8000 = 32KB) which accounts for 2 header copies,
+	// so keyslots area starts at 32KB and data_offset = 32KB + keyslotsAreaSize
+	keyslotsAreaSize := alignedKeyMaterialSize
+	if keyslotsAreaSize < LUKS2DefaultKeyslotsSize {
+		keyslotsAreaSize = LUKS2DefaultKeyslotsSize
+	}
+
+	dataOffset := keyslotAreaStart + keyslotsAreaSize
 
 	// Create metadata structure
+	// keyslot0Size is the actual size of keyslot 0's area
+	// keyslotsAreaSize is the total reserved space for keyslots (allows adding more keys)
 	metadata := createMetadata(kdf, digestKDF, digestValue, opts, masterKeySize,
-		keyslotAreaStart, int(alignedKeyMaterialSize), int(dataOffset))
+		keyslotAreaStart, int(alignedKeyMaterialSize), int(keyslotsAreaSize), int(dataOffset))
 
 	// Write headers
 	if err := writeHeaderInternal(opts.Device, hdr, metadata); err != nil {
@@ -131,8 +150,10 @@ func Format(opts FormatOptions) error {
 }
 
 // createMetadata creates the JSON metadata structure
+// keyslot0Size is the actual size of keyslot 0's area
+// keyslotsAreaSize is the total reserved space for all keyslots (for Config.KeyslotsSize)
 func createMetadata(kdf, digestKDF *KDF, digestValue string, opts FormatOptions,
-	masterKeySize, keyslotOffset, keyslotSize, dataOffset int) *LUKS2Metadata {
+	masterKeySize, keyslotOffset, keyslot0Size, keyslotsAreaSize, dataOffset int) *LUKS2Metadata {
 
 	// Create keyslot
 	keyslots := make(map[string]*Keyslot)
@@ -145,7 +166,7 @@ func createMetadata(kdf, digestKDF *KDF, digestValue string, opts FormatOptions,
 			Type:       "raw",
 			KeySize:    masterKeySize,
 			Offset:     formatSize(int64(keyslotOffset)),
-			Size:       formatSize(int64(keyslotSize)),
+			Size:       formatSize(int64(keyslot0Size)),
 			Encryption: opts.Cipher + "-" + opts.CipherMode,
 		},
 		KDF: kdf,
@@ -179,11 +200,11 @@ func createMetadata(kdf, digestKDF *KDF, digestValue string, opts FormatOptions,
 		Digest:     digestValue,
 	}
 
-	// Create config
+	// Create config - KeyslotsSize reflects the total reserved area for all keyslots
 	jsonSize := LUKS2DefaultSize
 	config := &Config{
 		JSONSize:     formatSize(int64(jsonSize)),
-		KeyslotsSize: formatSize(int64(keyslotOffset + keyslotSize)),
+		KeyslotsSize: formatSize(int64(keyslotOffset + keyslotsAreaSize)),
 	}
 
 	return &LUKS2Metadata{

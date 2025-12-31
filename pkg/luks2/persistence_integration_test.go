@@ -529,8 +529,8 @@ func TestSmallVolumeMinimumSize(t *testing.T) {
 	volumePath := tmpfile.Name()
 	defer os.Remove(volumePath)
 
-	// 16MB minimum size
-	if err := tmpfile.Truncate(16 * 1024 * 1024); err != nil {
+	// 32MB minimum size (LUKS2 headers require ~16MB, plus space for data)
+	if err := tmpfile.Truncate(32 * 1024 * 1024); err != nil {
 		t.Fatalf("Failed to truncate: %v", err)
 	}
 	tmpfile.Close()
@@ -538,7 +538,7 @@ func TestSmallVolumeMinimumSize(t *testing.T) {
 	passphrase := []byte("small-vol-pass")
 	volumeName := "luks-small"
 
-	t.Logf("Testing minimum viable volume size (16MB)")
+	t.Logf("Testing minimum viable volume size (32MB)")
 
 	formatOpts := FormatOptions{
 		Device:        volumePath,
