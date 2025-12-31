@@ -60,6 +60,71 @@ func ReadHeader(device string) (*LUKS2BinaryHeader, *LUKS2Metadata, error) {
 	return &hdr, metadata, nil
 }
 
+// IsLUKS checks if a device or file contains a LUKS header (either LUKS1 or LUKS2).
+// This is a pure Go implementation that doesn't require the cryptsetup CLI.
+// It checks for LUKS magic bytes at offset 0.
+func IsLUKS(device string) (bool, error) {
+	// Validate device path
+	if err := ValidateDevicePath(device); err != nil {
+		return false, err
+	}
+
+	f, err := os.Open(device) // #nosec G304 -- device path validated above
+	if err != nil {
+		return false, fmt.Errorf("failed to open device: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	// Read first 6 bytes (LUKS magic)
+	magic := make([]byte, LUKS2MagicLen)
+	n, err := f.Read(magic)
+	if err != nil {
+		return false, fmt.Errorf("failed to read device: %w", err)
+	}
+	if n < LUKS2MagicLen {
+		return false, nil // Too small to be LUKS
+	}
+
+	// Check for LUKS magic bytes
+	// Both LUKS1 and LUKS2 use the same magic: "LUKS\xba\xbe"
+	return bytes.Equal(magic, []byte(LUKS2Magic)), nil
+}
+
+// IsLUKS2 checks if a device contains a LUKS2 header specifically.
+// Returns true only for LUKS2 (not LUKS1).
+func IsLUKS2(device string) (bool, error) {
+	// Validate device path
+	if err := ValidateDevicePath(device); err != nil {
+		return false, err
+	}
+
+	f, err := os.Open(device) // #nosec G304 -- device path validated above
+	if err != nil {
+		return false, fmt.Errorf("failed to open device: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	// Read first 8 bytes (magic + version)
+	header := make([]byte, 8)
+	n, err := f.Read(header)
+	if err != nil {
+		return false, fmt.Errorf("failed to read device: %w", err)
+	}
+	if n < 8 {
+		return false, nil // Too small to be LUKS
+	}
+
+	// Check for LUKS magic bytes
+	if !bytes.Equal(header[:LUKS2MagicLen], []byte(LUKS2Magic)) {
+		return false, nil // Not LUKS at all
+	}
+
+	// Check version (bytes 6-7, big-endian)
+	// LUKS2 version is 0x0002
+	version := binary.BigEndian.Uint16(header[6:8])
+	return version == LUKS2Version, nil
+}
+
 // WriteHeader writes a LUKS2 header to a device (acquires lock)
 func WriteHeader(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) error {
 	// Validate device path
@@ -205,9 +270,6 @@ func validateHeaderChecksum(hdr *LUKS2BinaryHeader, r io.ReaderAt) error {
 
 	// Zero out checksum field
 	checksumOffset := 0x1C0 // Offset of Checksum field
-
-	// DEBUG: Print what's at the checksum offset before zeroing
-	// fmt.Printf("DEBUG: Checksum in file at offset 0x%x: %x\n", checksumOffset, headerData[checksumOffset:checksumOffset+32])
 
 	for i := 0; i < 64; i++ {
 		headerData[checksumOffset+i] = 0

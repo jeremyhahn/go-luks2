@@ -9,6 +9,7 @@ import (
 )
 
 // LUKS2 on-disk format constants
+// These match cryptsetup's lib/luks2/luks2.h for maximum compatibility
 const (
 	LUKS2Magic       = "LUKS\xba\xbe"
 	LUKS2MagicLen    = 6
@@ -26,6 +27,19 @@ const (
 	DefaultHashAlgo   = "sha256"
 	DefaultKeySize    = 512 // bits (64 bytes)
 	DefaultSectorSize = 512
+
+	// LUKS2 header size limits (matching cryptsetup)
+	// Reference: cryptsetup/lib/luks2/luks2.h
+	LUKS2HeaderMinSize     = 0x4000    // 16 KiB - minimum header size per copy
+	LUKS2HeaderDefaultSize = 0x1000000 // 16 MiB - default total metadata area size
+	LUKS2HeaderMaxOffset   = 0x400000  // 4 MiB - maximum offset for secondary header
+	LUKS2MaxKeyslotsSize   = 0x8000000 // 128 MiB - maximum keyslots area size
+	LUKS2MaxKeyslots       = 32        // Maximum number of keyslots
+
+	// Default keyslots area size (matching cryptsetup)
+	// Formula: LUKS2_DEFAULT_HDR_SIZE - 2 * metadata_size
+	// With 16 KiB metadata: 16 MiB - 32 KiB ≈ 16 MiB
+	LUKS2DefaultKeyslotsSize = LUKS2HeaderDefaultSize - 2*LUKS2HeaderMinSize
 )
 
 // LUKS2BinaryHeader represents the binary header structure (4096 bytes)

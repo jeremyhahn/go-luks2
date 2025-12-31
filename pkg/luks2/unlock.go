@@ -8,6 +8,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +25,14 @@ func Unlock(device string, passphrase []byte, name string) error {
 		return err
 	}
 
+	// Resolve symlink to get real device path for devmapper
+	// The kernel's dm-crypt requires the actual block device path
+	realDevice, err := filepath.EvalSymlinks(device)
+	if err != nil {
+		// If symlink resolution fails, use the original path
+		realDevice = device
+	}
+
 	// Validate passphrase
 	if err := ValidatePassphrase(passphrase); err != nil {
 		return err
@@ -34,7 +43,7 @@ func Unlock(device string, passphrase []byte, name string) error {
 		return fmt.Errorf("device mapper '%s' already exists - close it first with: luks close %s", name, name)
 	}
 
-	// Read header and metadata
+	// Read header and metadata (use original device for reading, symlink is fine for open())
 	hdr, metadata, err := ReadHeader(device)
 	if err != nil {
 		return err
@@ -44,7 +53,7 @@ func Unlock(device string, passphrase []byte, name string) error {
 	var masterKey []byte
 	var unlocked bool
 
-	for keyslotID, keyslot := range metadata.Keyslots {
+	for _, keyslot := range metadata.Keyslots {
 		if keyslot.Type != "luks2" {
 			continue
 		}
@@ -57,7 +66,6 @@ func Unlock(device string, passphrase []byte, name string) error {
 
 		masterKey = mk
 		unlocked = true
-		_ = keyslotID
 		break
 	}
 
@@ -114,10 +122,11 @@ func Unlock(device string, passphrase []byte, name string) error {
 	// Create device-mapper table
 	// Note: The devmapper library expects Length and BackendOffset in BYTES
 	// (it converts them to sectors internally)
+	// IMPORTANT: Use realDevice (resolved symlink) for devmapper, not the original device path
 	table := devmapper.CryptTable{
 		Start:         0,
 		Length:        length,
-		BackendDevice: device,
+		BackendDevice: realDevice,
 		BackendOffset: backendOffset,
 		Encryption:    segment.Encryption,
 		Key:           masterKey,
@@ -138,6 +147,11 @@ func Unlock(device string, passphrase []byte, name string) error {
 	// Ensure device node exists (may need to create it in containerized environments)
 	// Non-fatal - device may still be accessible via /dev/mapper/
 	_ = ensureDeviceNode(name)
+
+	// Wait for device to be ready - udev needs time to create /dev/mapper/name symlink
+	if err := waitForDeviceReady(name); err != nil {
+		return fmt.Errorf("device not ready after unlock: %w", err)
+	}
 
 	return nil
 }
@@ -211,6 +225,106 @@ func ensureDeviceNode(name string) error {
 	}
 
 	return nil
+}
+
+// waitForDeviceReady waits for the device-mapper device to be ready at /dev/mapper/{name}.
+// If udev doesn't create the device nodes in time, it creates them manually.
+func waitForDeviceReady(name string) error {
+	mapperPath := fmt.Sprintf("/dev/mapper/%s", name)
+
+	// Wait up to 3 seconds for udev to create /dev/mapper/{name}
+	for i := 0; i < 30; i++ {
+		// Check if /dev/mapper/name exists and is a block device
+		if fi, err := os.Stat(mapperPath); err == nil {
+			if fi.Mode()&os.ModeDevice != 0 {
+				return nil
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// udev hasn't created the device yet - create it manually
+	// Get device info to find the dm-X path
+	info, err := devmapper.InfoByName(name)
+	if err != nil {
+		return fmt.Errorf("device %s not found in device-mapper: %w", name, err)
+	}
+
+	// Extract major/minor from DevNo
+	// Masks ensure values fit in uint32 (0xFFF = 4095, 0xFFF00 = 1048320)
+	var major, minor uint32
+	if info.DevNo > 0xFFFF {
+		// For larger device numbers - masks guarantee values fit in uint32
+		major = uint32((info.DevNo >> 8) & 0xFFF)                            // #nosec G115 - max 4095
+		minor = uint32((info.DevNo & 0xFF) | ((info.DevNo >> 12) & 0xFFF00)) // #nosec G115 - max 1048575
+	} else {
+		// Masks guarantee values fit in uint32
+		major = uint32((info.DevNo >> 8) & 0xFFF) // #nosec G115 - max 4095
+		minor = uint32(info.DevNo & 0xFF)         // #nosec G115 - max 255
+	}
+	dmPath := fmt.Sprintf("/dev/dm-%d", minor)
+
+	// Wait briefly for dm-X device node to exist
+	dmExists := false
+	for i := 0; i < 20; i++ {
+		if fi, err := os.Stat(dmPath); err == nil {
+			if fi.Mode()&os.ModeDevice != 0 {
+				dmExists = true
+				break
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// If dm-X doesn't exist, create it with mknod
+	if !dmExists {
+		dev := unix.Mkdev(major, minor)
+		devInt, err := SafeUint64ToInt(dev)
+		if err != nil {
+			return fmt.Errorf("invalid device number: %w", err)
+		}
+		if err := unix.Mknod(dmPath, unix.S_IFBLK|0660, devInt); err != nil && !os.IsExist(err) {
+			return fmt.Errorf("failed to create device node %s: %w", dmPath, err)
+		}
+	}
+
+	// Verify dm-X exists now
+	if _, err := os.Stat(dmPath); err != nil {
+		return fmt.Errorf("device node %s still doesn't exist: %w", dmPath, err)
+	}
+
+	// Create /dev/mapper directory if it doesn't exist
+	if err := os.MkdirAll("/dev/mapper", 0750); err != nil {
+		return fmt.Errorf("failed to create /dev/mapper: %w", err)
+	}
+
+	// Create symlink from /dev/mapper/{name} -> /dev/dm-{minor}
+	if err := os.Symlink(dmPath, mapperPath); err != nil {
+		// Check if symlink was created by udev in the meantime
+		if fi, err := os.Stat(mapperPath); err == nil {
+			if fi.Mode()&os.ModeDevice != 0 {
+				return nil
+			}
+		}
+		// If the symlink exists but points elsewhere, that's also OK
+		if os.IsExist(err) {
+			if fi, err := os.Stat(mapperPath); err == nil {
+				if fi.Mode()&os.ModeDevice != 0 {
+					return nil
+				}
+			}
+		}
+		return fmt.Errorf("failed to create symlink %s -> %s: %w", mapperPath, dmPath, err)
+	}
+
+	// Verify the symlink works
+	if fi, err := os.Stat(mapperPath); err == nil {
+		if fi.Mode()&os.ModeDevice != 0 {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("device %s not ready after creating symlink", mapperPath)
 }
 
 // Lock closes a device-mapper mapping

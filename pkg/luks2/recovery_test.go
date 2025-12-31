@@ -456,3 +456,30 @@ func TestLoadRecoveryKeyEmptyFile(t *testing.T) {
 		t.Error("expected error for empty/comment-only file")
 	}
 }
+
+func TestRecoveryKeySaveError(t *testing.T) {
+	// Test that SaveError field can be set and checked
+	key := &RecoveryKey{
+		Key:        []byte{0x01, 0x02, 0x03},
+		Formatted:  "010203",
+		Format:     RecoveryKeyFormatHex,
+		VolumeUUID: "test-uuid",
+		Keyslot:    0,
+	}
+
+	// Initially SaveError should be nil
+	if key.SaveError != nil {
+		t.Error("expected SaveError to be nil initially")
+	}
+
+	// Set SaveError
+	key.SaveError = os.ErrPermission
+
+	// Verify SaveError is set
+	if key.SaveError == nil {
+		t.Error("expected SaveError to be set")
+	}
+	if key.SaveError != os.ErrPermission {
+		t.Errorf("expected SaveError to be ErrPermission, got %v", key.SaveError)
+	}
+}

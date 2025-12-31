@@ -55,6 +55,10 @@ type RecoveryKey struct {
 
 	// Keyslot is the keyslot number this key was added to
 	Keyslot int
+
+	// SaveError contains any error that occurred while saving the key to file.
+	// The key was still successfully added to the volume even if this is set.
+	SaveError error
 }
 
 // RecoveryKeyOptions contains options for recovery key generation
@@ -182,8 +186,8 @@ func AddRecoveryKey(device string, existingPassphrase []byte, opts *RecoveryKeyO
 	// Save to file if path specified
 	if opts.OutputPath != "" {
 		if err := SaveRecoveryKey(recoveryKey, opts.OutputPath); err != nil {
-			// Non-fatal - key was still added
-			fmt.Printf("Warning: failed to save recovery key to file: %v\n", err)
+			// Non-fatal - key was still added, but caller should be aware
+			recoveryKey.SaveError = fmt.Errorf("failed to save recovery key to %s: %w", opts.OutputPath, err)
 		}
 	}
 
