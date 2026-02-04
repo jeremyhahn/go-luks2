@@ -1103,51 +1103,79 @@ func TestWipePass_VeryLargeSize(t *testing.T) {
 	t.Logf("wipePass with large size result: %v", err)
 }
 
-// TestWipe_ZeroPasses tests that zero passes is rejected
+// TestWipe_ZeroPasses tests that zero passes defaults to 1 pass
 func TestWipe_ZeroPasses(t *testing.T) {
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test_zero_passes")
 
 	testData := make([]byte, 4096)
+	for i := range testData {
+		testData[i] = 0xAA
+	}
 	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
 	opts := WipeOptions{
 		Device: tmpFile,
-		Passes: 0, // Invalid
+		Passes: 0, // Now defaults to 1 pass
 		Random: false,
 	}
 
+	// With the new logic, zero passes defaults to 1
 	err := Wipe(opts)
-	if err == nil {
-		t.Fatal("Expected error for zero passes")
+	if err != nil {
+		t.Fatalf("Wipe failed: %v", err)
 	}
 
-	if !bytes.Contains([]byte(err.Error()), []byte("invalid number of passes")) {
-		t.Errorf("Unexpected error message: %v", err)
+	// Verify file was wiped to zeros
+	result, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("Failed to read result: %v", err)
+	}
+
+	for i, b := range result {
+		if b != 0x00 {
+			t.Fatalf("Byte at %d is 0x%02x, want 0x00", i, b)
+		}
 	}
 }
 
-// TestWipe_NegativePasses tests that negative passes is rejected
+// TestWipe_NegativePasses tests that negative passes defaults to 1 pass
 func TestWipe_NegativePasses(t *testing.T) {
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test_negative_passes")
 
 	testData := make([]byte, 4096)
+	for i := range testData {
+		testData[i] = 0xBB
+	}
 	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
 	opts := WipeOptions{
 		Device: tmpFile,
-		Passes: -1, // Invalid
+		Passes: -1, // Now defaults to 1 pass
 		Random: false,
 	}
 
+	// With the new logic, negative passes defaults to 1
 	err := Wipe(opts)
-	if err == nil {
-		t.Fatal("Expected error for negative passes")
+	if err != nil {
+		t.Fatalf("Wipe failed: %v", err)
+	}
+
+	// Verify file was wiped to zeros
+	result, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("Failed to read result: %v", err)
+	}
+
+	for i, b := range result {
+		if b != 0x00 {
+			t.Fatalf("Byte at %d is 0x%02x, want 0x00", i, b)
+		}
 	}
 }
 
@@ -1227,5 +1255,837 @@ func TestWipePass_MultipleBufferSize(t *testing.T) {
 		if result[idx] != 0 {
 			t.Fatalf("Byte at %d not zero: 0x%02x", idx, result[idx])
 		}
+	}
+}
+
+// ============================================================================
+// New tests for WipePattern, WipeStandard, and multi-pattern support
+// ============================================================================
+
+// TestWipePattern_String tests the String() method of WipePattern
+func TestWipePattern_String(t *testing.T) {
+	tests := []struct {
+		pattern  WipePattern
+		expected string
+	}{
+		{PatternZeros, "zeros"},
+		{PatternOnes, "ones"},
+		{PatternRandom, "random"},
+		{WipePattern(99), "unknown"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.expected, func(t *testing.T) {
+			if got := tt.pattern.String(); got != tt.expected {
+				t.Errorf("WipePattern.String() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestWipeStandard_String tests the String() method of WipeStandard
+func TestWipeStandard_String(t *testing.T) {
+	tests := []struct {
+		standard WipeStandard
+		expected string
+	}{
+		{StandardCustom, "custom"},
+		{StandardNIST, "nist"},
+		{StandardDoD3Pass, "dod3"},
+		{StandardDoD7Pass, "dod7"},
+		{WipeStandard(99), "unknown"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.expected, func(t *testing.T) {
+			if got := tt.standard.String(); got != tt.expected {
+				t.Errorf("WipeStandard.String() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestWipeStandard_GetPatternSequence tests pattern sequences for each standard
+func TestWipeStandard_GetPatternSequence(t *testing.T) {
+	tests := []struct {
+		name     string
+		standard WipeStandard
+		expected []WipePattern
+	}{
+		{
+			name:     "NIST SP 800-88",
+			standard: StandardNIST,
+			expected: []WipePattern{PatternRandom},
+		},
+		{
+			name:     "DoD 5220.22-M 3-pass",
+			standard: StandardDoD3Pass,
+			expected: []WipePattern{PatternZeros, PatternOnes, PatternRandom},
+		},
+		{
+			name:     "DoD 5220.22-M ECE 7-pass",
+			standard: StandardDoD7Pass,
+			expected: []WipePattern{
+				PatternZeros, PatternOnes, PatternRandom,
+				PatternRandom,
+				PatternZeros, PatternOnes, PatternRandom,
+			},
+		},
+		{
+			name:     "Custom (returns nil)",
+			standard: StandardCustom,
+			expected: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.standard.GetPatternSequence()
+			if len(got) != len(tt.expected) {
+				t.Fatalf("GetPatternSequence() len = %d, want %d", len(got), len(tt.expected))
+			}
+			for i := range got {
+				if got[i] != tt.expected[i] {
+					t.Errorf("GetPatternSequence()[%d] = %v, want %v", i, got[i], tt.expected[i])
+				}
+			}
+		})
+	}
+}
+
+// TestWipeStandard_RequiresVerification tests verification requirements
+func TestWipeStandard_RequiresVerification(t *testing.T) {
+	tests := []struct {
+		standard WipeStandard
+		expected bool
+	}{
+		{StandardCustom, false},
+		{StandardNIST, false},
+		{StandardDoD3Pass, true},
+		{StandardDoD7Pass, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.standard.String(), func(t *testing.T) {
+			if got := tt.standard.RequiresVerification(); got != tt.expected {
+				t.Errorf("RequiresVerification() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestFillBufferWithPattern_Zeros tests filling buffer with zeros
+func TestFillBufferWithPattern_Zeros(t *testing.T) {
+	buf := make([]byte, 1024)
+	// Pre-fill with non-zero data
+	for i := range buf {
+		buf[i] = 0xAA
+	}
+
+	if err := fillBufferWithPattern(buf, PatternZeros); err != nil {
+		t.Fatalf("fillBufferWithPattern failed: %v", err)
+	}
+
+	for i, b := range buf {
+		if b != 0x00 {
+			t.Fatalf("Byte at %d is 0x%02x, want 0x00", i, b)
+		}
+	}
+}
+
+// TestFillBufferWithPattern_Ones tests filling buffer with ones (0xFF)
+func TestFillBufferWithPattern_Ones(t *testing.T) {
+	buf := make([]byte, 1024)
+	// Pre-fill with zeros
+	for i := range buf {
+		buf[i] = 0x00
+	}
+
+	if err := fillBufferWithPattern(buf, PatternOnes); err != nil {
+		t.Fatalf("fillBufferWithPattern failed: %v", err)
+	}
+
+	for i, b := range buf {
+		if b != 0xFF {
+			t.Fatalf("Byte at %d is 0x%02x, want 0xFF", i, b)
+		}
+	}
+}
+
+// TestFillBufferWithPattern_Random tests filling buffer with random data
+func TestFillBufferWithPattern_Random(t *testing.T) {
+	buf := make([]byte, 4096)
+	// Pre-fill with zeros
+	for i := range buf {
+		buf[i] = 0x00
+	}
+
+	if err := fillBufferWithPattern(buf, PatternRandom); err != nil {
+		t.Fatalf("fillBufferWithPattern failed: %v", err)
+	}
+
+	// Check that at least some bytes are non-zero (random should produce variety)
+	nonZeroCount := 0
+	for _, b := range buf {
+		if b != 0 {
+			nonZeroCount++
+		}
+	}
+
+	// With 4096 random bytes, we should have many non-zero bytes
+	if nonZeroCount < 100 {
+		t.Fatalf("Too few non-zero bytes in random buffer: %d", nonZeroCount)
+	}
+}
+
+// TestFillBufferWithPattern_Unknown tests error handling for unknown pattern
+func TestFillBufferWithPattern_Unknown(t *testing.T) {
+	buf := make([]byte, 1024)
+	err := fillBufferWithPattern(buf, WipePattern(99))
+	if err == nil {
+		t.Fatal("Expected error for unknown pattern")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("unknown pattern")) {
+		t.Errorf("Unexpected error message: %v", err)
+	}
+}
+
+// TestWipePassWithPattern_Zeros tests wipePassWithPattern with zeros
+func TestWipePassWithPattern_Zeros(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_pattern_zeros")
+
+	testData := make([]byte, 4096)
+	for i := range testData {
+		testData[i] = 0xFF
+	}
+
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	f, err := os.OpenFile(tmpFile, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatalf("Failed to open test file: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if err := wipePassWithPattern(f, int64(len(testData)), PatternZeros, nil, 1, 1); err != nil {
+		t.Fatalf("wipePassWithPattern failed: %v", err)
+	}
+
+	result, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("Failed to read result: %v", err)
+	}
+
+	for i, b := range result {
+		if b != 0x00 {
+			t.Fatalf("Byte at %d is 0x%02x, want 0x00", i, b)
+		}
+	}
+}
+
+// TestWipePassWithPattern_Ones tests wipePassWithPattern with ones
+func TestWipePassWithPattern_Ones(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_pattern_ones")
+
+	testData := make([]byte, 4096)
+	// Start with zeros
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	f, err := os.OpenFile(tmpFile, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatalf("Failed to open test file: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if err := wipePassWithPattern(f, int64(len(testData)), PatternOnes, nil, 1, 1); err != nil {
+		t.Fatalf("wipePassWithPattern failed: %v", err)
+	}
+
+	result, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("Failed to read result: %v", err)
+	}
+
+	for i, b := range result {
+		if b != 0xFF {
+			t.Fatalf("Byte at %d is 0x%02x, want 0xFF", i, b)
+		}
+	}
+}
+
+// TestWipePassWithPattern_Progress tests progress callback
+func TestWipePassWithPattern_Progress(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_pattern_progress")
+
+	testSize := 2 * 1024 * 1024 // 2MB (will trigger multiple progress updates)
+	testData := make([]byte, testSize)
+
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	f, err := os.OpenFile(tmpFile, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatalf("Failed to open test file: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	var progressCalls []WipeProgress
+	progressFunc := func(p WipeProgress) {
+		progressCalls = append(progressCalls, p)
+	}
+
+	if err := wipePassWithPattern(f, int64(testSize), PatternZeros, progressFunc, 1, 3); err != nil {
+		t.Fatalf("wipePassWithPattern failed: %v", err)
+	}
+
+	if len(progressCalls) == 0 {
+		t.Fatal("No progress callbacks received")
+	}
+
+	// Check first and last progress
+	first := progressCalls[0]
+	if first.CurrentPass != 1 || first.TotalPasses != 3 {
+		t.Errorf("First progress: CurrentPass=%d, TotalPasses=%d, want 1, 3", first.CurrentPass, first.TotalPasses)
+	}
+	if first.Pattern != PatternZeros {
+		t.Errorf("First progress pattern = %v, want PatternZeros", first.Pattern)
+	}
+	if first.IsVerification {
+		t.Error("First progress should not be verification")
+	}
+
+	last := progressCalls[len(progressCalls)-1]
+	if last.BytesWritten != int64(testSize) {
+		t.Errorf("Last progress BytesWritten = %d, want %d", last.BytesWritten, testSize)
+	}
+	if last.PercentComplete < 99.9 {
+		t.Errorf("Last progress PercentComplete = %f, want ~100", last.PercentComplete)
+	}
+}
+
+// TestWipeVerify_Success tests successful verification
+func TestWipeVerify_Success(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_verify_success")
+
+	testSize := 4096
+	testData := make([]byte, testSize)
+	// Fill with zeros (pattern we'll verify)
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	f, err := os.OpenFile(tmpFile, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatalf("Failed to open test file: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if err := wipeVerify(f, int64(testSize), PatternZeros, nil, 1); err != nil {
+		t.Fatalf("wipeVerify unexpectedly failed: %v", err)
+	}
+}
+
+// TestWipeVerify_Failure tests verification failure detection
+func TestWipeVerify_Failure(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_verify_failure")
+
+	testSize := 4096
+	testData := make([]byte, testSize)
+	// Fill with zeros
+	for i := range testData {
+		testData[i] = 0x00
+	}
+	// Add a single wrong byte
+	testData[100] = 0xFF
+
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	f, err := os.OpenFile(tmpFile, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatalf("Failed to open test file: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	err = wipeVerify(f, int64(testSize), PatternZeros, nil, 1)
+	if err == nil {
+		t.Fatal("Expected verification failure")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("verification failed")) {
+		t.Errorf("Unexpected error message: %v", err)
+	}
+}
+
+// TestWipeVerify_RandomPattern tests that random pattern verification is skipped
+func TestWipeVerify_RandomPattern(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_verify_random")
+
+	testSize := 4096
+	testData := make([]byte, testSize)
+	// Fill with arbitrary data
+	for i := range testData {
+		testData[i] = byte(i % 256)
+	}
+
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	f, err := os.OpenFile(tmpFile, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatalf("Failed to open test file: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	// Random pattern verification should always succeed (skip verification)
+	if err := wipeVerify(f, int64(testSize), PatternRandom, nil, 1); err != nil {
+		t.Fatalf("wipeVerify with random pattern should not fail: %v", err)
+	}
+}
+
+// TestWipeVerify_OnesPattern tests verification with ones pattern
+func TestWipeVerify_OnesPattern(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_verify_ones")
+
+	testSize := 4096
+	testData := make([]byte, testSize)
+	// Fill with ones (0xFF)
+	for i := range testData {
+		testData[i] = 0xFF
+	}
+
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	f, err := os.OpenFile(tmpFile, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatalf("Failed to open test file: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if err := wipeVerify(f, int64(testSize), PatternOnes, nil, 1); err != nil {
+		t.Fatalf("wipeVerify unexpectedly failed: %v", err)
+	}
+}
+
+// TestResolvePatternSequence_StandardNIST tests NIST standard resolution
+func TestResolvePatternSequence_StandardNIST(t *testing.T) {
+	opts := WipeOptions{
+		Standard: StandardNIST,
+	}
+
+	patterns, verify := resolvePatternSequence(opts)
+
+	if len(patterns) != 1 {
+		t.Fatalf("Expected 1 pattern, got %d", len(patterns))
+	}
+	if patterns[0] != PatternRandom {
+		t.Errorf("Expected PatternRandom, got %v", patterns[0])
+	}
+	if verify {
+		t.Error("NIST should not require verification")
+	}
+}
+
+// TestResolvePatternSequence_StandardDoD3Pass tests DoD 3-pass resolution
+func TestResolvePatternSequence_StandardDoD3Pass(t *testing.T) {
+	opts := WipeOptions{
+		Standard: StandardDoD3Pass,
+	}
+
+	patterns, verify := resolvePatternSequence(opts)
+
+	if len(patterns) != 3 {
+		t.Fatalf("Expected 3 patterns, got %d", len(patterns))
+	}
+	expected := []WipePattern{PatternZeros, PatternOnes, PatternRandom}
+	for i := range patterns {
+		if patterns[i] != expected[i] {
+			t.Errorf("Pattern[%d] = %v, want %v", i, patterns[i], expected[i])
+		}
+	}
+	if !verify {
+		t.Error("DoD 3-pass should require verification")
+	}
+}
+
+// TestResolvePatternSequence_StandardDoD7Pass tests DoD 7-pass resolution
+func TestResolvePatternSequence_StandardDoD7Pass(t *testing.T) {
+	opts := WipeOptions{
+		Standard: StandardDoD7Pass,
+	}
+
+	patterns, verify := resolvePatternSequence(opts)
+
+	if len(patterns) != 7 {
+		t.Fatalf("Expected 7 patterns, got %d", len(patterns))
+	}
+	if !verify {
+		t.Error("DoD 7-pass should require verification")
+	}
+}
+
+// TestResolvePatternSequence_CustomPatterns tests custom pattern sequence
+func TestResolvePatternSequence_CustomPatterns(t *testing.T) {
+	opts := WipeOptions{
+		Patterns: []WipePattern{PatternOnes, PatternZeros},
+		Verify:   true,
+	}
+
+	patterns, verify := resolvePatternSequence(opts)
+
+	if len(patterns) != 2 {
+		t.Fatalf("Expected 2 patterns, got %d", len(patterns))
+	}
+	if patterns[0] != PatternOnes || patterns[1] != PatternZeros {
+		t.Errorf("Unexpected pattern sequence: %v", patterns)
+	}
+	if !verify {
+		t.Error("Verify should be true when explicitly set")
+	}
+}
+
+// TestResolvePatternSequence_LegacyZeros tests legacy mode with zeros
+func TestResolvePatternSequence_LegacyZeros(t *testing.T) {
+	opts := WipeOptions{
+		Passes: 3,
+		Random: false,
+	}
+
+	patterns, verify := resolvePatternSequence(opts)
+
+	if len(patterns) != 3 {
+		t.Fatalf("Expected 3 patterns, got %d", len(patterns))
+	}
+	for i, p := range patterns {
+		if p != PatternZeros {
+			t.Errorf("Pattern[%d] = %v, want PatternZeros", i, p)
+		}
+	}
+	if verify {
+		t.Error("Legacy mode should not verify by default")
+	}
+}
+
+// TestResolvePatternSequence_LegacyRandom tests legacy mode with random
+func TestResolvePatternSequence_LegacyRandom(t *testing.T) {
+	opts := WipeOptions{
+		Passes: 2,
+		Random: true,
+	}
+
+	patterns, verify := resolvePatternSequence(opts)
+
+	if len(patterns) != 2 {
+		t.Fatalf("Expected 2 patterns, got %d", len(patterns))
+	}
+	for i, p := range patterns {
+		if p != PatternRandom {
+			t.Errorf("Pattern[%d] = %v, want PatternRandom", i, p)
+		}
+	}
+	if verify {
+		t.Error("Legacy mode should not verify by default")
+	}
+}
+
+// TestResolvePatternSequence_LegacyDefaultPasses tests legacy mode with zero passes
+func TestResolvePatternSequence_LegacyDefaultPasses(t *testing.T) {
+	opts := WipeOptions{
+		Passes: 0,
+		Random: false,
+	}
+
+	patterns, _ := resolvePatternSequence(opts)
+
+	if len(patterns) != 1 {
+		t.Fatalf("Expected 1 pattern (default), got %d", len(patterns))
+	}
+	if patterns[0] != PatternZeros {
+		t.Errorf("Expected PatternZeros, got %v", patterns[0])
+	}
+}
+
+// TestResolvePatternSequence_StandardOverridesLegacy tests standard takes priority
+func TestResolvePatternSequence_StandardOverridesLegacy(t *testing.T) {
+	opts := WipeOptions{
+		Standard: StandardNIST,
+		Passes:   5,     // Should be ignored
+		Random:   false, // Should be ignored
+	}
+
+	patterns, _ := resolvePatternSequence(opts)
+
+	// Should use NIST (1 random pass), not legacy (5 zero passes)
+	if len(patterns) != 1 {
+		t.Fatalf("Expected 1 pattern, got %d", len(patterns))
+	}
+	if patterns[0] != PatternRandom {
+		t.Errorf("Expected PatternRandom, got %v", patterns[0])
+	}
+}
+
+// TestResolvePatternSequence_VerifyOverride tests explicit verify override
+func TestResolvePatternSequence_VerifyOverride(t *testing.T) {
+	// NIST normally doesn't require verification, but we can force it
+	opts := WipeOptions{
+		Standard: StandardNIST,
+		Verify:   true,
+	}
+
+	_, verify := resolvePatternSequence(opts)
+
+	if !verify {
+		t.Error("Explicit Verify=true should enable verification")
+	}
+}
+
+// TestWipe_LegacyCompatibility tests backward compatibility with legacy options
+func TestWipe_LegacyCompatibility(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_legacy_compat")
+
+	testSize := 1024 * 1024 // 1MB
+	testData := make([]byte, testSize)
+	for i := range testData {
+		testData[i] = 0xAA
+	}
+
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Use legacy options (as before the refactor)
+	opts := WipeOptions{
+		Device: tmpFile,
+		Passes: 2,
+		Random: false,
+	}
+
+	if err := Wipe(opts); err != nil {
+		t.Fatalf("Wipe with legacy options failed: %v", err)
+	}
+
+	// Verify file is wiped to zeros
+	result, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("Failed to read result: %v", err)
+	}
+
+	for i, b := range result {
+		if b != 0x00 {
+			t.Fatalf("Byte at %d is 0x%02x, want 0x00", i, b)
+		}
+	}
+}
+
+// TestWipe_StandardNIST tests wipe with NIST standard
+func TestWipe_StandardNIST(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_nist")
+
+	testSize := 512 * 1024 // 512KB
+	testData := make([]byte, testSize)
+
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	opts := WipeOptions{
+		Device:   tmpFile,
+		Standard: StandardNIST,
+	}
+
+	if err := Wipe(opts); err != nil {
+		t.Fatalf("Wipe with NIST standard failed: %v", err)
+	}
+
+	// Verify file was wiped (with random data - can't check exact value)
+	result, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("Failed to read result: %v", err)
+	}
+
+	if len(result) != testSize {
+		t.Fatalf("File size changed: got %d, want %d", len(result), testSize)
+	}
+}
+
+// TestWipe_StandardDoD3Pass tests wipe with DoD 3-pass standard
+func TestWipe_StandardDoD3Pass(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_dod3")
+
+	testSize := 512 * 1024 // 512KB
+	testData := make([]byte, testSize)
+	for i := range testData {
+		testData[i] = 0xAA
+	}
+
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	var progressCalls []WipeProgress
+	opts := WipeOptions{
+		Device:   tmpFile,
+		Standard: StandardDoD3Pass,
+		ProgressFunc: func(p WipeProgress) {
+			progressCalls = append(progressCalls, p)
+		},
+	}
+
+	if err := Wipe(opts); err != nil {
+		t.Fatalf("Wipe with DoD 3-pass standard failed: %v", err)
+	}
+
+	// Verify we got progress callbacks
+	if len(progressCalls) == 0 {
+		t.Error("Expected progress callbacks")
+	}
+
+	// Verify 3 passes were performed (multiple callbacks per pass)
+	seenPasses := make(map[int]bool)
+	for _, p := range progressCalls {
+		if !p.IsVerification {
+			seenPasses[p.CurrentPass] = true
+		}
+	}
+	if len(seenPasses) != 3 {
+		t.Errorf("Expected 3 different passes, got %d", len(seenPasses))
+	}
+}
+
+// TestWipe_WithVerification tests wipe with explicit verification
+func TestWipe_WithVerification(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_verify")
+
+	testSize := 256 * 1024 // 256KB
+	testData := make([]byte, testSize)
+	for i := range testData {
+		testData[i] = 0xAA
+	}
+
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	var verificationCalled bool
+	opts := WipeOptions{
+		Device: tmpFile,
+		Passes: 1,
+		Random: false,
+		Verify: true,
+		ProgressFunc: func(p WipeProgress) {
+			if p.IsVerification {
+				verificationCalled = true
+			}
+		},
+	}
+
+	if err := Wipe(opts); err != nil {
+		t.Fatalf("Wipe with verification failed: %v", err)
+	}
+
+	if !verificationCalled {
+		t.Error("Verification was not performed")
+	}
+}
+
+// TestWipe_CustomPatternSequence tests wipe with custom pattern sequence
+func TestWipe_CustomPatternSequence(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test_custom_patterns")
+
+	testSize := 256 * 1024 // 256KB
+	testData := make([]byte, testSize)
+
+	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	patternsSeen := make(map[WipePattern]int)
+	opts := WipeOptions{
+		Device:   tmpFile,
+		Patterns: []WipePattern{PatternOnes, PatternZeros, PatternOnes},
+		ProgressFunc: func(p WipeProgress) {
+			if !p.IsVerification && p.PercentComplete >= 99.9 {
+				patternsSeen[p.Pattern]++
+			}
+		},
+	}
+
+	if err := Wipe(opts); err != nil {
+		t.Fatalf("Wipe with custom patterns failed: %v", err)
+	}
+
+	// Should have seen ones twice and zeros once
+	if patternsSeen[PatternOnes] != 2 {
+		t.Errorf("PatternOnes seen %d times, want 2", patternsSeen[PatternOnes])
+	}
+	if patternsSeen[PatternZeros] != 1 {
+		t.Errorf("PatternZeros seen %d times, want 1", patternsSeen[PatternZeros])
+	}
+
+	// Final pattern is ones, so file should end with 0xFF
+	result, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("Failed to read result: %v", err)
+	}
+
+	for i, b := range result {
+		if b != 0xFF {
+			t.Fatalf("Byte at %d is 0x%02x, want 0xFF", i, b)
+		}
+	}
+}
+
+// TestWipeProgress_Fields tests WipeProgress struct fields
+func TestWipeProgress_Fields(t *testing.T) {
+	progress := WipeProgress{
+		CurrentPass:     2,
+		TotalPasses:     3,
+		BytesWritten:    512,
+		TotalBytes:      1024,
+		Pattern:         PatternOnes,
+		IsVerification:  false,
+		PercentComplete: 50.0,
+	}
+
+	if progress.CurrentPass != 2 {
+		t.Errorf("CurrentPass = %d, want 2", progress.CurrentPass)
+	}
+	if progress.TotalPasses != 3 {
+		t.Errorf("TotalPasses = %d, want 3", progress.TotalPasses)
+	}
+	if progress.BytesWritten != 512 {
+		t.Errorf("BytesWritten = %d, want 512", progress.BytesWritten)
+	}
+	if progress.TotalBytes != 1024 {
+		t.Errorf("TotalBytes = %d, want 1024", progress.TotalBytes)
+	}
+	if progress.Pattern != PatternOnes {
+		t.Errorf("Pattern = %v, want PatternOnes", progress.Pattern)
+	}
+	if progress.IsVerification {
+		t.Error("IsVerification = true, want false")
+	}
+	if progress.PercentComplete != 50.0 {
+		t.Errorf("PercentComplete = %f, want 50.0", progress.PercentComplete)
 	}
 }

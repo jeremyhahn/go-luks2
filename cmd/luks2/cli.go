@@ -594,17 +594,27 @@ func (c *CLI) cmdWipe() int {
 		_, _ = fmt.Fprintln(c.Stdout, "Usage: luks2 wipe [options] <device>")
 		_, _ = fmt.Fprintln(c.Stdout, "")
 		_, _ = fmt.Fprintln(c.Stdout, "Options:")
-		_, _ = fmt.Fprintln(c.Stdout, "  --full           Wipe entire device (default: headers only)")
-		_, _ = fmt.Fprintln(c.Stdout, "  --passes N       Number of overwrite passes (default: 1)")
-		_, _ = fmt.Fprintln(c.Stdout, "  --random         Use random data instead of zeros")
-		_, _ = fmt.Fprintln(c.Stdout, "  --trim           Issue TRIM/DISCARD after wipe (for SSDs)")
+		_, _ = fmt.Fprintln(c.Stdout, "  --full             Wipe entire device (default: headers only)")
+		_, _ = fmt.Fprintln(c.Stdout, "  --passes N         Number of overwrite passes (default: 1)")
+		_, _ = fmt.Fprintln(c.Stdout, "  --random           Use random data instead of zeros")
+		_, _ = fmt.Fprintln(c.Stdout, "  --trim             Issue TRIM/DISCARD after wipe (for SSDs)")
+		_, _ = fmt.Fprintln(c.Stdout, "  --standard <name>  Use named wipe standard: nist, dod3, dod7")
+		_, _ = fmt.Fprintln(c.Stdout, "  --verify           Enable verification pass")
+		_, _ = fmt.Fprintln(c.Stdout, "  --no-verify        Disable verification (override standard)")
+		_, _ = fmt.Fprintln(c.Stdout, "")
+		_, _ = fmt.Fprintln(c.Stdout, "Standards:")
+		_, _ = fmt.Fprintln(c.Stdout, "  nist   NIST SP 800-88: 1 random pass (no verification)")
+		_, _ = fmt.Fprintln(c.Stdout, "  dod3   DoD 5220.22-M: 3 passes (zeros->ones->random) + verify")
+		_, _ = fmt.Fprintln(c.Stdout, "  dod7   DoD 5220.22-M ECE: 7 passes + verify")
 		_, _ = fmt.Fprintln(c.Stdout, "")
 		_, _ = fmt.Fprintln(c.Stdout, "Examples:")
-		_, _ = fmt.Fprintln(c.Stdout, "  luks2 wipe /dev/sdb1                    # Wipe headers only (fast)")
-		_, _ = fmt.Fprintln(c.Stdout, "  luks2 wipe --full /dev/sdb1             # Wipe entire device")
-		_, _ = fmt.Fprintln(c.Stdout, "  luks2 wipe --full --passes 3 /dev/sdb1  # DoD-style 3-pass wipe")
-		_, _ = fmt.Fprintln(c.Stdout, "  luks2 wipe --full --random /dev/sdb1    # Random data wipe")
-		_, _ = fmt.Fprintln(c.Stdout, "  luks2 wipe --full --trim /dev/ssd1      # Full wipe + TRIM for SSD")
+		_, _ = fmt.Fprintln(c.Stdout, "  luks2 wipe /dev/sdb1                      # Wipe headers only (fast)")
+		_, _ = fmt.Fprintln(c.Stdout, "  luks2 wipe --full /dev/sdb1               # Wipe entire device")
+		_, _ = fmt.Fprintln(c.Stdout, "  luks2 wipe --full --standard nist /dev/sdb1   # NIST standard")
+		_, _ = fmt.Fprintln(c.Stdout, "  luks2 wipe --full --standard dod3 /dev/sdb1   # DoD 3-pass")
+		_, _ = fmt.Fprintln(c.Stdout, "  luks2 wipe --full --standard dod7 /dev/sdb1   # DoD 7-pass")
+		_, _ = fmt.Fprintln(c.Stdout, "  luks2 wipe --full --passes 3 --random /dev/sdb1  # Custom 3-pass")
+		_, _ = fmt.Fprintln(c.Stdout, "  luks2 wipe --full --trim /dev/ssd1        # Full wipe + TRIM for SSD")
 		return 1
 	}
 
@@ -614,9 +624,12 @@ func (c *CLI) cmdWipe() int {
 		Random:     false,
 		HeaderOnly: true,
 		Trim:       false,
+		Standard:   luks2.StandardCustom,
+		Verify:     false,
 	}
 
 	var device string
+	var explicitNoVerify bool
 	for i := 2; i < len(c.Args); i++ {
 		switch c.Args[i] {
 		case "--full":
@@ -625,6 +638,10 @@ func (c *CLI) cmdWipe() int {
 			opts.Random = true
 		case "--trim":
 			opts.Trim = true
+		case "--verify":
+			opts.Verify = true
+		case "--no-verify":
+			explicitNoVerify = true
 		case "--passes":
 			if i+1 < len(c.Args) {
 				i++
@@ -639,13 +656,36 @@ func (c *CLI) cmdWipe() int {
 				_, _ = fmt.Fprintln(c.Stderr, "--passes requires a value")
 				return 1
 			}
+		case "--standard":
+			if i+1 < len(c.Args) {
+				i++
+				switch c.Args[i] {
+				case "nist":
+					opts.Standard = luks2.StandardNIST
+				case "dod3":
+					opts.Standard = luks2.StandardDoD3Pass
+				case "dod7":
+					opts.Standard = luks2.StandardDoD7Pass
+				default:
+					_, _ = fmt.Fprintf(c.Stderr, "Unknown standard: %s (valid: nist, dod3, dod7)\n", c.Args[i])
+					return 1
+				}
+			} else {
+				_, _ = fmt.Fprintln(c.Stderr, "--standard requires a value (nist, dod3, dod7)")
+				return 1
+			}
 		default:
-			if c.Args[i][0] == '-' {
+			if len(c.Args[i]) > 0 && c.Args[i][0] == '-' {
 				_, _ = fmt.Fprintf(c.Stderr, "Unknown option: %s\n", c.Args[i])
 				return 1
 			}
 			device = c.Args[i]
 		}
+	}
+
+	// Handle --no-verify override
+	if explicitNoVerify {
+		opts.Verify = false
 	}
 
 	if device == "" {
@@ -665,15 +705,44 @@ func (c *CLI) cmdWipe() int {
 	if opts.HeaderOnly {
 		_, _ = fmt.Fprintln(c.Stdout, "Mode: Header wipe only (fast)")
 	} else {
-		_, _ = fmt.Fprintf(c.Stdout, "Mode: Full device wipe (%d pass", opts.Passes)
-		if opts.Passes > 1 {
-			_, _ = fmt.Fprint(c.Stdout, "es")
-		}
-		_, _ = fmt.Fprintln(c.Stdout, ")")
-		if opts.Random {
-			_, _ = fmt.Fprintln(c.Stdout, "Data: Random")
+		// Determine what to show based on standard vs legacy
+		if opts.Standard != luks2.StandardCustom {
+			patterns := opts.Standard.GetPatternSequence()
+			_, _ = fmt.Fprintf(c.Stdout, "Mode: %s standard (%d pass", opts.Standard.String(), len(patterns))
+			if len(patterns) > 1 {
+				_, _ = fmt.Fprint(c.Stdout, "es")
+			}
+			_, _ = fmt.Fprintln(c.Stdout, ")")
+			_, _ = fmt.Fprint(c.Stdout, "Sequence: ")
+			for i, p := range patterns {
+				if i > 0 {
+					_, _ = fmt.Fprint(c.Stdout, " -> ")
+				}
+				_, _ = fmt.Fprint(c.Stdout, p.String())
+			}
+			_, _ = fmt.Fprintln(c.Stdout, "")
+			// Show verification status
+			verifyEnabled := opts.Standard.RequiresVerification() || opts.Verify
+			if explicitNoVerify {
+				verifyEnabled = false
+			}
+			if verifyEnabled {
+				_, _ = fmt.Fprintln(c.Stdout, "Verify: Enabled (100%)")
+			}
 		} else {
-			_, _ = fmt.Fprintln(c.Stdout, "Data: Zeros")
+			_, _ = fmt.Fprintf(c.Stdout, "Mode: Full device wipe (%d pass", opts.Passes)
+			if opts.Passes > 1 {
+				_, _ = fmt.Fprint(c.Stdout, "es")
+			}
+			_, _ = fmt.Fprintln(c.Stdout, ")")
+			if opts.Random {
+				_, _ = fmt.Fprintln(c.Stdout, "Data: Random")
+			} else {
+				_, _ = fmt.Fprintln(c.Stdout, "Data: Zeros")
+			}
+			if opts.Verify {
+				_, _ = fmt.Fprintln(c.Stdout, "Verify: Enabled")
+			}
 		}
 		if opts.Trim {
 			_, _ = fmt.Fprintln(c.Stdout, "TRIM: Enabled (SSD)")
