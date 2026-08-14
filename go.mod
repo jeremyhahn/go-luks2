@@ -5,9 +5,9 @@ go 1.26.6
 require (
 	github.com/anatol/devmapper.go v0.0.0-20250316020617-2671eefd35d7
 	github.com/google/uuid v1.6.0
-	golang.org/x/crypto v0.51.0
-	golang.org/x/sys v0.45.0
-	golang.org/x/term v0.43.0
+	golang.org/x/crypto v0.55.0
+	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.45.0
 )
 
 require (

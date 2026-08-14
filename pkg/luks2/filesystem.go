@@ -549,7 +549,7 @@ type FilesystemInfo struct {
 // GetFilesystemInfo retrieves filesystem information from a device
 func GetFilesystemInfo(devicePath string) (*FilesystemInfo, error) {
 	// Use blkid to get filesystem information
-	cmd := exec.Command("blkid", "-o", "export", devicePath)
+	cmd := exec.Command("blkid", "-o", "export", devicePath) // #nosec G204 -- fixed argv, no shell; devicePath is a block-device path chosen by the caller
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("blkid failed: %w", err)

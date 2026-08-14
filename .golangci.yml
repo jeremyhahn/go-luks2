@@ -1,0 +1,75 @@
+# golangci-lint configuration for go-luks2.
+#
+# devops.md §8 makes this file part of the security gate, not a style
+# preference: staticcheck, errcheck, gosimple, unused, ineffassign, misspell
+# and gocritic must all be enabled. Installing the umbrella with the security
+# linters switched off does not satisfy the section. In golangci-lint v2
+# gosimple was merged into staticcheck (the S1xxx checks), so enabling
+# staticcheck covers it.
+version: "2"
+
+run:
+  timeout: 5m
+  # Tests are analysed too. Skipping them makes `unused` fire on helpers that
+  # only the test suite calls, which is a false positive that invites deleting
+  # live code. The noisier linters are relaxed on _test.go below instead.
+  tests: true
+  # No build-tags here on purpose. The unit tests carry //go:build !integration
+  # and the integration suite carries //go:build integration, so adding
+  # `integration` swaps one set for the other and makes `unused` fire on every
+  # helper the unit tests call. The default (untagged) build is the one CI
+  # lints and the one the library ships.
+
+linters:
+  enable:
+    - govet
+    - errcheck
+    - staticcheck # includes the former gosimple (S1xxx) checks
+    - unused
+    - ineffassign
+    - misspell
+    - gocritic
+
+  settings:
+    misspell:
+      locale: US
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+      disabled-checks:
+        # Would require changing exported signatures across the LUKS2 header
+        # and keyslot types, which are large by the on-disk format's design.
+        - hugeParam
+        - rangeValCopy
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      # Test bodies deliberately discard errors from setup helpers, pass nil
+      # contexts to prove the nil path is handled, and keep instrumentation
+      # fields a given case does not read. That is the tests doing their job.
+      # The library itself is still linted in full.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gocritic
+          - staticcheck
+          - unused
+    paths:
+      - third_party$
+      - builtin$
+
+formatters:
+  enable:
+    - gofmt
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$

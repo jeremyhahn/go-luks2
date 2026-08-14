@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec ci ci-full fmt-check all check test-cli integration-test-pkg integration-test-cli
+.PHONY: help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs security ci ci-full fmt-check all check test-cli integration-test-pkg integration-test-cli
 
 # Default target
 .DEFAULT_GOAL := help
@@ -64,9 +64,9 @@ test: ## Run unit tests only (no I/O, no root required)
 	@$(GO) test -v ./... 2>&1 | grep -v "no test files" || true
 	@echo "$(COLOR_GREEN)✓ Unit tests complete$(COLOR_RESET)"
 
-test-unit: ## Run only unit tests with coverage (fast, no I/O, no root required)
+test-unit: ## Run only unit tests with coverage and the race detector (fast, no I/O, no root required)
 	@echo "$(COLOR_BOLD)Running unit tests with coverage...$(COLOR_RESET)"
-	@$(GO) test -v -coverprofile=$(COVERAGE_FILE) -covermode=atomic ./pkg/luks2 ./cmd/luks2 2>&1 | grep -v "no test files" || true
+	@$(GO) test -v -race -coverprofile=$(COVERAGE_FILE) -covermode=atomic ./pkg/luks2 ./cmd/luks2 2>&1 | grep -v "no test files" || true
 	@echo ""
 	@echo "$(COLOR_BOLD)Coverage from unit tests:$(COLOR_RESET)"
 	@$(GO) tool cover -func=$(COVERAGE_FILE) | tail -1
@@ -222,18 +222,66 @@ lint: ## Run golangci-lint (if installed)
 		echo "  Install: curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b \$$(go env GOPATH)/bin"; \
 	fi
 
+# ---- devops.md §8: the mandatory security-analysis suite ----
+#
+# `make security` is the contract (devops.md §4): CI runs this same target, so
+# a finding here is the finding that blocks a merge. The suite is gosec,
+# govulncheck, `go mod verify` and `trivy fs`, all blocking.
+#
+# gosec deliberately runs with NO -exclude rules. The findings this repository
+# carries are suppressed at the exact line that produces them, each with a
+# written reason (`#nosec G115 - max 4095` on the dev_t masks in unlock.go,
+# `#nosec G204` on the fixed-argv blkid call in filesystem.go). A blanket
+# -exclude would hide the next occurrence of the same rule somewhere it is not
+# justified; a line annotation cannot.
+#
+# The tools are not installed by these targets — devops.md §4 forbids a make
+# target mutating the developer's machine. A missing tool prints how to get it
+# and the target skips; CI installs all four explicitly, so the gate is real
+# where it matters.
+
+# CI passes GOSEC_EXTRA="-fmt=sarif -out=gosec.sarif" so the SARIF it uploads
+# to code scanning comes from the same flags a developer runs, not a second
+# set that can drift (devops.md §4).
+GOSEC_EXTRA ?=
+
 gosec: ## Run gosec security scanner
 	@echo "$(COLOR_BOLD)Running gosec security scanner...$(COLOR_RESET)"
 	@GOSEC=$$(command -v gosec 2>/dev/null || echo "$(GOBIN)/gosec"); \
 	if [ -x "$$GOSEC" ]; then \
-		$$GOSEC -exclude-generated -severity medium -confidence medium ./... || exit 1; \
+		$$GOSEC -exclude-generated -severity medium -confidence medium $(GOSEC_EXTRA) ./... || exit 1; \
 		echo "$(COLOR_GREEN)✓ Security scan passed$(COLOR_RESET)"; \
 	else \
 		echo "$(COLOR_YELLOW)⚠ gosec not installed, skipping...$(COLOR_RESET)"; \
 		echo "  Install: go install github.com/securego/gosec/v2/cmd/gosec@latest"; \
 	fi
 
-ci: fmt-check vet lint gosec test-unit build ## Run CI pipeline locally (format, lint, security, unit tests, build)
+govulncheck: ## Run govulncheck (known vulns in stdlib and the dependency call graph)
+	@echo "$(COLOR_BOLD)Running govulncheck...$(COLOR_RESET)"
+	@GOVULN=$$(command -v govulncheck 2>/dev/null || echo "$(GOBIN)/govulncheck"); \
+	if [ -x "$$GOVULN" ]; then \
+		$$GOVULN ./... || exit 1; \
+		echo "$(COLOR_GREEN)✓ govulncheck passed$(COLOR_RESET)"; \
+	else \
+		echo "$(COLOR_YELLOW)⚠ govulncheck not installed, skipping...$(COLOR_RESET)"; \
+		echo "  Install: go install golang.org/x/vuln/cmd/govulncheck@latest"; \
+	fi
+
+trivy-fs: ## Scan the working tree with trivy (dependency CVEs and leaked secrets)
+	@echo "$(COLOR_BOLD)Running trivy filesystem scan...$(COLOR_RESET)"
+	@if command -v trivy >/dev/null 2>&1; then \
+		trivy fs --scanners vuln,secret --severity CRITICAL,HIGH --exit-code 1 . || exit 1; \
+		echo "$(COLOR_GREEN)✓ Trivy scan passed$(COLOR_RESET)"; \
+	else \
+		echo "$(COLOR_YELLOW)⚠ trivy not installed, skipping filesystem scan$(COLOR_RESET)"; \
+		echo "  Install: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin"; \
+		echo "  CI installs trivy unconditionally, so this scan still gates every push."; \
+	fi
+
+security: gosec govulncheck verify trivy-fs ## Run the full §8 security suite (gosec, govulncheck, go mod verify, trivy fs)
+	@echo "$(COLOR_GREEN)✓ Security suite complete$(COLOR_RESET)"
+
+ci: fmt-check vet lint security test-unit build ## Run CI pipeline locally (format, lint, security suite, unit tests, build)
 	@echo ""
 	@echo "$(COLOR_BOLD)======================================$(COLOR_RESET)"
 	@echo "$(COLOR_BOLD)CI Pipeline Complete$(COLOR_RESET)"
@@ -259,7 +307,7 @@ ci-full: ## Run full CI pipeline with Docker integration tests (enforces 90% cov
 	@$(MAKE) fmt-check
 	@$(MAKE) vet
 	@$(MAKE) lint
-	@$(MAKE) gosec
+	@$(MAKE) security
 	@$(MAKE) docker-integration-test
 	@$(MAKE) build
 	@echo ""
@@ -270,7 +318,7 @@ ci-full: ## Run full CI pipeline with Docker integration tests (enforces 90% cov
 	@echo "$(COLOR_GREEN)✓ Format check passed$(COLOR_RESET)"
 	@echo "$(COLOR_GREEN)✓ Vet passed$(COLOR_RESET)"
 	@echo "$(COLOR_GREEN)✓ Lint passed$(COLOR_RESET)"
-	@echo "$(COLOR_GREEN)✓ Security scan passed$(COLOR_RESET)"
+	@echo "$(COLOR_GREEN)✓ Security suite passed$(COLOR_RESET)"
 	@echo "$(COLOR_GREEN)✓ Integration tests passed$(COLOR_RESET)"
 	@echo "$(COLOR_GREEN)✓ Build successful$(COLOR_RESET)"
 	@echo ""

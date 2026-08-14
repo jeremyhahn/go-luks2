@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -755,7 +756,7 @@ func (c *CLI) cmdWipe() int {
 	_, _ = fmt.Fscanln(c.Stdin, &confirm)
 
 	if confirm != "YES" {
-		_, _ = fmt.Fprintln(c.Stdout, "\nWipe cancelled")
+		_, _ = fmt.Fprintln(c.Stdout, "\nWipe canceled")
 		return 0
 	}
 
@@ -799,7 +800,9 @@ func (c *CLI) promptPassphrase(prompt string, confirm bool) ([]byte, error) {
 			return nil, fmt.Errorf("failed to read confirmation: %w", err)
 		}
 
-		if string(passphrase) != string(confirmation) {
+		// Compare as bytes: converting a passphrase to a string copies the
+		// secret into immutable memory that can never be zeroed.
+		if !bytes.Equal(passphrase, confirmation) {
 			return nil, fmt.Errorf("passphrases do not match")
 		}
 	}

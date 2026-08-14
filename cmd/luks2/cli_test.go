@@ -644,7 +644,7 @@ func TestCLI_Wipe_NoArgs(t *testing.T) {
 	}
 }
 
-func TestCLI_Wipe_Cancelled(t *testing.T) {
+func TestCLI_Wipe_Canceled(t *testing.T) {
 	cli, stdout, _ := newTestCLI([]string{"luks2", "wipe", "/dev/sda1"})
 	cli.Stdin = strings.NewReader("NO\n")
 
@@ -654,8 +654,8 @@ func TestCLI_Wipe_Cancelled(t *testing.T) {
 		t.Errorf("Expected exit code 0, got %d", code)
 	}
 
-	if !strings.Contains(stdout.String(), "Wipe cancelled") {
-		t.Error("Expected cancelled message")
+	if !strings.Contains(stdout.String(), "Wipe canceled") {
+		t.Error("Expected canceled message")
 	}
 }
 

@@ -1,25 +1,36 @@
 name: CI
 
+# One workflow file, run by both hosts (devops.md §1). Steps that only work on
+# github.com are guarded on github.server_url; everything that gates a merge
+# runs on Gitea too.
 on:
   push:
     branches: [main, master, develop]
   pull_request:
     branches: [main, master, develop]
+  # Lets a run be repeated without inventing a commit, which matters when a
+  # failure is the runner's rather than the code's.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
 
 env:
-  GO_VERSION: "1.25.5"
+  GO_VERSION: "1.26.6"
 
 jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache: true
 
       - name: Check formatting
         run: |
@@ -33,44 +44,128 @@ jobs:
       - name: Run go vet
         run: go vet ./...
 
+      # devops.md §9: tooling tracks the latest release, never a pin.
+      # .golangci.yml enables the §8 security linters (staticcheck, errcheck,
+      # unused, ineffassign, misspell, gocritic); the umbrella without them
+      # would not satisfy the section.
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.7.2
+          version: latest
           args: --timeout=10m
 
   security:
     name: Security Scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache: true
 
+      - name: Install gosec
+        run: go install github.com/securego/gosec/v2/cmd/gosec@latest
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      # The Makefile carries the flags and the justification for every
+      # suppression (devops.md §4/§8). gosec runs with no -exclude rules: the
+      # findings this repository carries are annotated at the line that
+      # produces them, so a new occurrence elsewhere still fails.
+      # GOSEC_EXTRA only adds the SARIF written for the upload below; gosec
+      # still exits non-zero on a finding and gates here.
       - name: Run gosec
-        uses: securego/gosec@master
+        run: make gosec GOSEC_EXTRA="-fmt=sarif -out=gosec.sarif"
+
+      # The code scanning API is github.com-only; anywhere else this 404s. The
+      # scan itself has already run and already failed the job on a finding.
+      - name: Upload gosec SARIF
+        if: always() && github.server_url == 'https://github.com'
+        uses: github/codeql-action/upload-sarif@v3
         with:
-          args: ./...
+          sarif_file: gosec.sarif
+          category: gosec
+
+      # govulncheck is also the §9 forcing function for toolchain currency: it
+      # fails on a known-vulnerable stdlib, so a stale GO_VERSION breaks here.
+      - name: Run govulncheck
+        run: make govulncheck
+
+      - name: Verify module integrity
+        run: make verify
+
+  trivy:
+    name: Trivy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # aquasecurity/trivy-action fetches its install script through a nested
+      # checkout that a self-hosted runner resolves against its own server
+      # instead of github.com, failing with git exit 128. It is therefore
+      # github.com-only, and so is its consumer, the code scanning upload.
+      - name: Trivy scan (SARIF for code scanning)
+        if: github.server_url == 'https://github.com'
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: 0
+
+      - name: Upload Trivy SARIF
+        if: always() && github.server_url == 'https://github.com'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-fs
+
+      - name: Trivy gate (fail on CRITICAL/HIGH)
+        if: github.server_url == 'https://github.com'
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          exit-code: 1
+          format: table
+
+      # Gitea and any other non-github.com server run the same gate from the
+      # trivy CLI, installed from the upstream release script. Same scanners,
+      # same severities, same exit code — the dashboard upload is the only
+      # thing GitHub gets and the other host does not.
+      - name: Install trivy CLI
+        if: github.server_url != 'https://github.com'
+        run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Trivy gate (fail on CRITICAL/HIGH)
+        if: github.server_url != 'https://github.com'
+        run: make trivy-fs
 
   test-unit:
     name: Unit Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache: true
 
       - name: Run unit tests (pkg/luks2)
-        run: go test -v -coverprofile=coverage-pkg.out -covermode=atomic ./pkg/luks2
+        run: go test -v -race -coverprofile=coverage-pkg.out -covermode=atomic ./pkg/luks2
 
       - name: Run unit tests (cmd/luks2)
-        run: go test -v -coverprofile=coverage-cli.out -covermode=atomic ./cmd/luks2
+        run: go test -v -race -coverprofile=coverage-cli.out -covermode=atomic ./cmd/luks2
 
       - name: Merge coverage
         run: |
@@ -83,8 +178,13 @@ jobs:
           coverage=$(go tool cover -func=coverage.out | grep total | awk '{print $3}')
           echo "Coverage: ${coverage}"
 
+      # upload-artifact v4+ refuses to run against any server that is not
+      # github.com — it detects one and reports "not currently supported on
+      # GHES", and Gitea presents as such (devops.md §1). The tests above have
+      # already run and already gated; only the artifact is skipped.
       - name: Upload coverage
-        uses: actions/upload-artifact@v4
+        if: github.server_url == 'https://github.com'
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-unit
           path: coverage.out
@@ -94,12 +194,13 @@ jobs:
     runs-on: ubuntu-latest
     needs: [lint, security, test-unit]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache: true
 
       - name: Build Docker image
         run: docker build -f test/integration/Dockerfile -t go-luks2-integration-test .
@@ -119,8 +220,8 @@ jobs:
           fi
 
       - name: Upload integration coverage
-        uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && github.server_url == 'https://github.com'
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-integration
           path: coverage-integration.out
@@ -131,12 +232,13 @@ jobs:
     runs-on: ubuntu-latest
     needs: [test-unit]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache: true
 
       - name: Build linux/amd64
         env:
@@ -151,7 +253,44 @@ jobs:
         run: go build -o luks-linux-arm64 ./cmd/luks2
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        if: github.server_url == 'https://github.com'
+        uses: actions/upload-artifact@v7
         with:
           name: binaries
           path: luks-linux-*
+
+  # The single required check (devops.md §1). Branch protection requires this
+  # job and nothing else; adding a job above means adding it to `needs` and to
+  # the results list below.
+  gate:
+    name: CI Gate
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [lint, security, trivy, test-unit, test-integration, build]
+    steps:
+      # join(needs.*.result) is a GitHub extension that evaluates to an empty
+      # string on Gitea, so a gate built on it reports success while jobs are
+      # failing. Every job is listed by name, and a result that cannot be read
+      # at all is treated as a failure rather than a pass.
+      - name: Check job results
+        env:
+          LINT: ${{ needs.lint.result }}
+          SECURITY: ${{ needs.security.result }}
+          TRIVY: ${{ needs.trivy.result }}
+          TEST_UNIT: ${{ needs.test-unit.result }}
+          TEST_INTEGRATION: ${{ needs.test-integration.result }}
+          BUILD: ${{ needs.build.result }}
+        run: |
+          failed=0
+          for job in LINT SECURITY TRIVY TEST_UNIT TEST_INTEGRATION BUILD; do
+            eval "result=\$$job"
+            echo "${job}=${result:-<unreadable>}"
+            if [ "$result" != "success" ]; then
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "CI gate failed: not every job reported success."
+            exit 1
+          fi
+          echo "CI gate passed."

@@ -156,20 +156,14 @@ func Unlock(device string, passphrase []byte, name string) error {
 	return nil
 }
 
-// TrimRight is a helper function to replace bytes.TrimRight
+// TrimRight is a helper function to replace bytes.TrimRight. The cutset is
+// matched byte-wise, not rune-wise: every caller trims NUL or ASCII padding
+// out of a fixed-width on-disk header field, which is a byte sequence rather
+// than UTF-8 text. Ranging over the cutset as runes and narrowing each to a
+// byte would silently mis-match any multi-byte cutset character.
 func TrimRight(b []byte, cutset string) []byte {
 	i := len(b)
-	for i > 0 {
-		found := false
-		for _, c := range cutset {
-			if b[i-1] == byte(c) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			break
-		}
+	for i > 0 && strings.IndexByte(cutset, b[i-1]) >= 0 {
 		i--
 	}
 	return b[:i]
@@ -489,19 +483,22 @@ func verifyMasterKey(masterKey []byte, digests map[string]*Digest) error {
 		if err != nil {
 			return err
 		}
-		defer clearBytes(derived)
 
 		// Decode expected digest
 		expected, err := decodeBase64(digest.Digest)
 		if err != nil {
+			clearBytes(derived)
 			return err
 		}
-		defer clearBytes(expected)
 
-		// Compare using constant-time comparison to prevent timing attacks
-		if subtle.ConstantTimeCompare(derived, expected) == 1 {
-			clearBytes(derived)
-			clearBytes(expected)
+		// Compare using constant-time comparison to prevent timing attacks.
+		// Both buffers are zeroed on every path before the next iteration:
+		// deferring the clears would pile them up for the whole loop and only
+		// run them once the function returns.
+		matched := subtle.ConstantTimeCompare(derived, expected) == 1
+		clearBytes(derived)
+		clearBytes(expected)
+		if matched {
 			return nil // Verification successful
 		}
 	}
