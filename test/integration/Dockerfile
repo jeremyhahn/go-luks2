@@ -1,7 +1,7 @@
 # Dockerfile for running go-luks2 integration tests in isolation
 # This ensures tests run in a clean environment without affecting the host
 
-FROM golang:1.26.5
+FROM golang:1.26.6
 
 # Install required system dependencies for LUKS operations
 RUN apt-get update && apt-get install -y --no-install-recommends \
