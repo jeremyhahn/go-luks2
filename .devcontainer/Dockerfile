@@ -1,4 +1,4 @@
-FROM golang:1.25.5
+FROM golang:1.26.5
 
 # Install required system dependencies for LUKS operations
 RUN apt-get update && apt-get install -y --no-install-recommends \

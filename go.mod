@@ -1,6 +1,6 @@
 module github.com/jeremyhahn/go-luks2
 
-go 1.25.5
+go 1.26.5
 
 require (
 	github.com/anatol/devmapper.go v0.0.0-20250316020617-2671eefd35d7
