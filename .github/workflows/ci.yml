@@ -259,6 +259,28 @@ jobs:
           name: binaries
           path: luks-linux-*
 
+  fips:
+    name: FIPS
+    runs-on: ubuntu-latest
+    needs: [build]
+    timeout-minutes: 30
+    env:
+      GOFIPS140: latest
+      GODEBUG: fips140=on
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Build all packages (FIPS mode)
+        run: go build ./...
+
+      - name: Unit tests (FIPS mode)
+        run: go test -count=1 -timeout=900s ./...
+
   # The single required check (devops.md §1). Branch protection requires this
   # job and nothing else; adding a job above means adding it to `needs` and to
   # the results list below.
@@ -266,7 +288,7 @@ jobs:
     name: CI Gate
     runs-on: ubuntu-latest
     if: always()
-    needs: [lint, security, trivy, test-unit, test-integration, build]
+    needs: [lint, security, trivy, test-unit, test-integration, build, fips]
     steps:
       # join(needs.*.result) is a GitHub extension that evaluates to an empty
       # string on Gitea, so a gate built on it reports success while jobs are
@@ -280,9 +302,10 @@ jobs:
           TEST_UNIT: ${{ needs.test-unit.result }}
           TEST_INTEGRATION: ${{ needs.test-integration.result }}
           BUILD: ${{ needs.build.result }}
+          FIPS: ${{ needs.fips.result }}
         run: |
           failed=0
-          for job in LINT SECURITY TRIVY TEST_UNIT TEST_INTEGRATION BUILD; do
+          for job in LINT SECURITY TRIVY TEST_UNIT TEST_INTEGRATION BUILD FIPS; do
             eval "result=\$$job"
             echo "${job}=${result:-<unreadable>}"
             if [ "$result" != "success" ]; then
