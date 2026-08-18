@@ -526,7 +526,8 @@ func TestCreateDigestInvalidHashAlgo(t *testing.T) {
 		hashAlgo string
 	}{
 		{"MD5", "md5"},
-		// Note: SHA-1 is now supported (FIPS-approved for HMAC in PBKDF2)
+		// Note: SHA-1 is accepted outside FIPS mode for legacy LUKS headers, so
+		// it is not listed here as an unsupported algorithm (docs/FIPS.md).
 		{"Unknown", "unknown"},
 		{"Empty", ""},
 	}

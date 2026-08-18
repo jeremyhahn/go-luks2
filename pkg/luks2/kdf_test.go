@@ -8,6 +8,8 @@ package luks2
 
 import (
 	"bytes"
+	"crypto/fips140"
+	"errors"
 	"testing"
 )
 
@@ -102,6 +104,13 @@ func TestDeriveKeyArgon2i(t *testing.T) {
 	passphrase := []byte("testpassphrase")
 	keySize := 32
 
+	if fips140.Enabled() {
+		if _, err := DeriveKey(passphrase, kdf, keySize); !errors.Is(err, ErrFIPSNotApproved) {
+			t.Fatalf("DeriveKey with Argon2i in FIPS mode: got error %v, want ErrFIPSNotApproved", err)
+		}
+		return
+	}
+
 	key1, err := DeriveKey(passphrase, kdf, keySize)
 	if err != nil {
 		t.Fatalf("DeriveKey failed: %v", err)
@@ -150,6 +159,13 @@ func TestDeriveKeyArgon2id(t *testing.T) {
 
 	passphrase := []byte("testpassphrase")
 	keySize := 32
+
+	if fips140.Enabled() {
+		if _, err := DeriveKey(passphrase, kdf, keySize); !errors.Is(err, ErrFIPSNotApproved) {
+			t.Fatalf("DeriveKey with Argon2id in FIPS mode: got error %v, want ErrFIPSNotApproved", err)
+		}
+		return
+	}
 
 	key1, err := DeriveKey(passphrase, kdf, keySize)
 	if err != nil {
@@ -284,6 +300,15 @@ func TestDeriveArgon2iMissingTime(t *testing.T) {
 	if err == nil {
 		t.Fatal("Expected error for missing time parameter")
 	}
+	// In FIPS mode the Argon2 refusal precedes parameter validation, so assert
+	// which error came back rather than merely that one did.
+	if fips140.Enabled() {
+		if !errors.Is(err, ErrFIPSNotApproved) {
+			t.Fatalf("In FIPS mode: got error %v, want ErrFIPSNotApproved", err)
+		}
+		return
+	}
+
 }
 
 // TestDeriveArgon2iMissingMemory tests error handling when memory is nil
@@ -308,6 +333,15 @@ func TestDeriveArgon2iMissingMemory(t *testing.T) {
 	if err == nil {
 		t.Fatal("Expected error for missing memory parameter")
 	}
+	// In FIPS mode the Argon2 refusal precedes parameter validation, so assert
+	// which error came back rather than merely that one did.
+	if fips140.Enabled() {
+		if !errors.Is(err, ErrFIPSNotApproved) {
+			t.Fatalf("In FIPS mode: got error %v, want ErrFIPSNotApproved", err)
+		}
+		return
+	}
+
 }
 
 // TestDeriveArgon2iMissingCPUs tests error handling when cpus is nil
@@ -332,6 +366,15 @@ func TestDeriveArgon2iMissingCPUs(t *testing.T) {
 	if err == nil {
 		t.Fatal("Expected error for missing cpus parameter")
 	}
+	// In FIPS mode the Argon2 refusal precedes parameter validation, so assert
+	// which error came back rather than merely that one did.
+	if fips140.Enabled() {
+		if !errors.Is(err, ErrFIPSNotApproved) {
+			t.Fatalf("In FIPS mode: got error %v, want ErrFIPSNotApproved", err)
+		}
+		return
+	}
+
 }
 
 // TestDeriveArgon2idMissingParams tests error handling for Argon2id missing params
@@ -381,6 +424,11 @@ func TestDeriveArgon2idMissingParams(t *testing.T) {
 			_, err := DeriveKey(passphrase, kdf, keySize)
 			if err == nil {
 				t.Fatal("Expected error for missing parameter")
+			}
+			// In FIPS mode the Argon2 refusal precedes parameter validation, so
+			// assert which error came back rather than merely that one did.
+			if fips140.Enabled() && !errors.Is(err, ErrFIPSNotApproved) {
+				t.Fatalf("In FIPS mode: got error %v, want ErrFIPSNotApproved", err)
 			}
 		})
 	}
@@ -514,6 +562,13 @@ func TestCreateKDFArgon2i(t *testing.T) {
 		KDFType: "argon2i",
 	}
 
+	if fips140.Enabled() {
+		if _, err := CreateKDF(opts, 32); !errors.Is(err, ErrFIPSNotApproved) {
+			t.Fatalf("CreateKDF with argon2i in FIPS mode: got error %v, want ErrFIPSNotApproved", err)
+		}
+		return
+	}
+
 	kdf, err := CreateKDF(opts, 32)
 	if err != nil {
 		t.Fatalf("CreateKDF failed: %v", err)
@@ -544,6 +599,13 @@ func TestCreateKDFArgon2i(t *testing.T) {
 func TestCreateKDFArgon2id(t *testing.T) {
 	opts := FormatOptions{
 		KDFType: "argon2id",
+	}
+
+	if fips140.Enabled() {
+		if _, err := CreateKDF(opts, 32); !errors.Is(err, ErrFIPSNotApproved) {
+			t.Fatalf("CreateKDF with argon2id in FIPS mode: got error %v, want ErrFIPSNotApproved", err)
+		}
+		return
 	}
 
 	kdf, err := CreateKDF(opts, 32)
@@ -581,6 +643,13 @@ func TestCreateKDFArgon2idCustomParams(t *testing.T) {
 		Argon2Parallel: 2,
 	}
 
+	if fips140.Enabled() {
+		if _, err := CreateKDF(opts, 32); !errors.Is(err, ErrFIPSNotApproved) {
+			t.Fatalf("CreateKDF with argon2id in FIPS mode: got error %v, want ErrFIPSNotApproved", err)
+		}
+		return
+	}
+
 	kdf, err := CreateKDF(opts, 32)
 	if err != nil {
 		t.Fatalf("CreateKDF failed: %v", err)
@@ -602,6 +671,15 @@ func TestCreateKDFArgon2idCustomParams(t *testing.T) {
 // TestCreateKDFDefaultArgon2id tests that default KDF type is argon2id
 func TestCreateKDFDefaultArgon2id(t *testing.T) {
 	opts := FormatOptions{} // No KDFType specified
+
+	if fips140.Enabled() {
+		// The default must not silently produce a non-approved keyslot in a
+		// FIPS-mode process; the caller has to choose an approved KDF.
+		if _, err := CreateKDF(opts, 32); !errors.Is(err, ErrFIPSNotApproved) {
+			t.Fatalf("CreateKDF with default KDF in FIPS mode: got error %v, want ErrFIPSNotApproved", err)
+		}
+		return
+	}
 
 	kdf, err := CreateKDF(opts, 32)
 	if err != nil {
@@ -694,6 +772,15 @@ func TestArgon2iVsArgon2id(t *testing.T) {
 		CPUs:   &cpus,
 	}
 
+	if fips140.Enabled() {
+		for _, kdf := range []*KDF{kdfI, kdfID} {
+			if _, err := DeriveKey(passphrase, kdf, keySize); !errors.Is(err, ErrFIPSNotApproved) {
+				t.Fatalf("DeriveKey with %s in FIPS mode: got error %v, want ErrFIPSNotApproved", kdf.Type, err)
+			}
+		}
+		return
+	}
+
 	keyI, err := DeriveKey(passphrase, kdfI, keySize)
 	if err != nil {
 		t.Fatalf("DeriveKey for Argon2i failed: %v", err)
@@ -747,7 +834,6 @@ func TestIsFIPSCompliantKDF(t *testing.T) {
 	}{
 		// FIPS-compliant types
 		{KDFTypePBKDF2, true, "pbkdf2 should be FIPS compliant"},
-		{KDFTypePBKDF2SHA1, true, "pbkdf2-sha1 should be FIPS compliant"},
 		{KDFTypePBKDF2SHA256, true, "pbkdf2-sha256 should be FIPS compliant"},
 		{KDFTypePBKDF2SHA384, true, "pbkdf2-sha384 should be FIPS compliant"},
 		{KDFTypePBKDF2SHA512, true, "pbkdf2-sha512 should be FIPS compliant"},
@@ -756,6 +842,10 @@ func TestIsFIPSCompliantKDF(t *testing.T) {
 		{"PBKDF2-SHA256", true, "uppercase PBKDF2-SHA256 should be FIPS compliant"},
 		{"Pbkdf2-Sha512", true, "mixed case should be FIPS compliant"},
 		// Non-FIPS compliant types
+		// PBKDF2-HMAC-SHA1 is rejected by the Go Cryptographic Module, which
+		// permits PBKDF2 only with SHA-2/SHA-3 (docs/FIPS.md).
+		{KDFTypePBKDF2SHA1, false, "pbkdf2-sha1 should NOT be FIPS compliant"},
+		{"PBKDF2-SHA1", false, "uppercase PBKDF2-SHA1 should NOT be FIPS compliant"},
 		{KDFTypeArgon2i, false, "argon2i should NOT be FIPS compliant"},
 		{KDFTypeArgon2id, false, "argon2id should NOT be FIPS compliant"},
 		{"ARGON2ID", false, "uppercase argon2id should NOT be FIPS compliant"},
@@ -864,7 +954,11 @@ func TestGetHashAlgoForKDFType(t *testing.T) {
 	}
 }
 
-// TestDeriveKeyPBKDF2SHA1 tests PBKDF2 with SHA-1 (FIPS-approved for HMAC)
+// TestDeriveKeyPBKDF2SHA1 tests PBKDF2 with SHA-1, which opens LUKS headers
+// written by cryptsetup releases that defaulted to SHA-1. In FIPS 140-3 mode
+// the derivation must be refused with ErrFIPSNotApproved instead of reaching
+// the Go Cryptographic Module, which panics on PBKDF2-HMAC-SHA1 under
+// GODEBUG=fips140=only. See docs/FIPS.md.
 func TestDeriveKeyPBKDF2SHA1(t *testing.T) {
 	iterations := 1000
 	salt := []byte("testsalt12345678")
@@ -879,6 +973,13 @@ func TestDeriveKeyPBKDF2SHA1(t *testing.T) {
 
 	passphrase := []byte("testpassphrase")
 	keySize := 20 // SHA-1 produces 20 bytes
+
+	if fips140.Enabled() {
+		if _, err := DeriveKey(passphrase, kdf, keySize); !errors.Is(err, ErrFIPSNotApproved) {
+			t.Fatalf("DeriveKey with SHA-1 in FIPS mode: got error %v, want ErrFIPSNotApproved", err)
+		}
+		return
+	}
 
 	key, err := DeriveKey(passphrase, kdf, keySize)
 	if err != nil {
@@ -936,8 +1037,16 @@ func TestDeriveKeyPBKDF2SHA384(t *testing.T) {
 	}
 }
 
-// TestBenchmarkPBKDF2SHA1 tests PBKDF2 benchmarking with SHA-1
+// TestBenchmarkPBKDF2SHA1 tests PBKDF2 benchmarking with SHA-1, and that it is
+// refused in FIPS 140-3 mode (docs/FIPS.md).
 func TestBenchmarkPBKDF2SHA1(t *testing.T) {
+	if fips140.Enabled() {
+		if _, err := BenchmarkPBKDF2("sha1", 20, 100); !errors.Is(err, ErrFIPSNotApproved) {
+			t.Fatalf("BenchmarkPBKDF2 with SHA-1 in FIPS mode: got error %v, want ErrFIPSNotApproved", err)
+		}
+		return
+	}
+
 	iterations, err := BenchmarkPBKDF2("sha1", 20, 100)
 	if err != nil {
 		t.Fatalf("BenchmarkPBKDF2 with SHA-1 failed: %v", err)
@@ -960,11 +1069,19 @@ func TestBenchmarkPBKDF2SHA384(t *testing.T) {
 	}
 }
 
-// TestCreateKDFPBKDF2SHA1Alias tests creating PBKDF2 with SHA-1 using type alias
+// TestCreateKDFPBKDF2SHA1Alias tests creating PBKDF2 with SHA-1 using type
+// alias, and that FIPS 140-3 mode refuses to create one (docs/FIPS.md).
 func TestCreateKDFPBKDF2SHA1Alias(t *testing.T) {
 	opts := FormatOptions{
 		KDFType:       KDFTypePBKDF2SHA1,
 		PBKDFIterTime: 100, // Short time for fast test
+	}
+
+	if fips140.Enabled() {
+		if _, err := CreateKDF(opts, 20); !errors.Is(err, ErrFIPSNotApproved) {
+			t.Fatalf("CreateKDF with pbkdf2-sha1 in FIPS mode: got error %v, want ErrFIPSNotApproved", err)
+		}
+		return
 	}
 
 	kdf, err := CreateKDF(opts, 20)
@@ -1103,7 +1220,11 @@ func TestPBKDF2HashFunctionsDifferent(t *testing.T) {
 	passphrase := []byte("testpassphrase")
 	keySize := 32
 
-	hashAlgos := []string{"sha1", "sha256", "sha384", "sha512"}
+	hashAlgos := []string{"sha256", "sha384", "sha512"}
+	if !fips140.Enabled() {
+		// SHA-1 only participates outside FIPS mode (docs/FIPS.md).
+		hashAlgos = append([]string{"sha1"}, hashAlgos...)
+	}
 	keys := make(map[string][]byte)
 
 	for _, hashAlgo := range hashAlgos {
@@ -1134,12 +1255,16 @@ func TestPBKDF2HashFunctionsDifferent(t *testing.T) {
 
 // TestGetPBKDF2HashFunc tests the hash function getter directly
 func TestGetPBKDF2HashFunc(t *testing.T) {
+	// SHA-1 is refused while the Go Cryptographic Module is enabled; outside
+	// FIPS mode it stays available for legacy LUKS headers (docs/FIPS.md).
+	sha1Rejected := fips140.Enabled()
+
 	tests := []struct {
 		hashAlgo    string
 		expectError bool
 	}{
-		{"sha1", false},
-		{"SHA1", false},
+		{"sha1", sha1Rejected},
+		{"SHA1", sha1Rejected},
 		{"sha256", false},
 		{"SHA256", false},
 		{"sha384", false},
@@ -1204,6 +1329,14 @@ func TestArgon2CPUsBoundsValidation(t *testing.T) {
 			}
 
 			_, err := DeriveKey(passphrase, kdf, 32)
+			if fips140.Enabled() {
+				// Argon2 is refused before the parallelism bounds are reached,
+				// so every case errors out with the FIPS refusal instead.
+				if !errors.Is(err, ErrFIPSNotApproved) {
+					t.Errorf("In FIPS mode: got error %v, want ErrFIPSNotApproved", err)
+				}
+				return
+			}
 			if tt.expectError && err == nil {
 				t.Error("Expected error, got nil")
 			}
@@ -1262,4 +1395,113 @@ func TestFIPSCompliantKDFWorkflow(t *testing.T) {
 	if !bytes.Equal(key, key2) {
 		t.Fatal("Key derivation should be deterministic")
 	}
+}
+
+// TestCreateKDFPBKDF2SHA1HashAlgoOverride covers the other route to
+// PBKDF2-HMAC-SHA1: the base "pbkdf2" type with HashAlgo set to "sha1". It must
+// be refused in FIPS 140-3 mode just like the "pbkdf2-sha1" alias, so that no
+// SHA-1 derivation reaches the Go Cryptographic Module. See docs/FIPS.md.
+func TestCreateKDFPBKDF2SHA1HashAlgoOverride(t *testing.T) {
+	opts := FormatOptions{
+		KDFType:       KDFTypePBKDF2,
+		HashAlgo:      "sha1",
+		PBKDFIterTime: 100,
+	}
+
+	kdf, err := CreateKDF(opts, 20)
+	if fips140.Enabled() {
+		if !errors.Is(err, ErrFIPSNotApproved) {
+			t.Fatalf("CreateKDF with HashAlgo sha1 in FIPS mode: got error %v, want ErrFIPSNotApproved", err)
+		}
+		return
+	}
+
+	if err != nil {
+		t.Fatalf("CreateKDF with HashAlgo sha1 failed: %v", err)
+	}
+	if kdf.Hash != "sha1" {
+		t.Fatalf("Expected hash sha1, got %s", kdf.Hash)
+	}
+}
+
+// TestArgon2RefusedInFIPSMode pins the FIPS 140-3 boundary for Argon2 in one
+// place: golang.org/x/crypto/argon2 is pure Go and never enters the Go
+// Cryptographic Module, so GODEBUG=fips140=only cannot reject it and this
+// library has to. Every entry point is covered — an externally supplied header
+// reaching DeriveKey, an explicit CreateKDF request, and CreateKDF's empty
+// default — so a FIPS-mode process can neither unlock nor write a non-approved
+// keyslot. Outside FIPS mode all three must keep working. See docs/FIPS.md.
+func TestArgon2RefusedInFIPSMode(t *testing.T) {
+	argonTime := 1
+	argonMemory := 64 * 1024
+	argonCPUs := 1
+	saltB64 := encodeBase64([]byte("testsalt12345678"))
+	passphrase := []byte("testpassphrase")
+
+	for _, kdfType := range []string{KDFTypeArgon2i, KDFTypeArgon2id} {
+		t.Run("derive/"+kdfType, func(t *testing.T) {
+			kdf := &KDF{
+				Type:   kdfType,
+				Salt:   saltB64,
+				Time:   &argonTime,
+				Memory: &argonMemory,
+				CPUs:   &argonCPUs,
+			}
+
+			key, err := DeriveKey(passphrase, kdf, 32)
+			if fips140.Enabled() {
+				if !errors.Is(err, ErrFIPSNotApproved) {
+					t.Fatalf("got error %v, want ErrFIPSNotApproved", err)
+				}
+				if key != nil {
+					t.Fatal("no key material should be returned when the KDF is refused")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("outside FIPS mode DeriveKey should succeed: %v", err)
+			}
+		})
+
+		t.Run("create/"+kdfType, func(t *testing.T) {
+			_, err := CreateKDF(FormatOptions{KDFType: kdfType}, 32)
+			if fips140.Enabled() {
+				if !errors.Is(err, ErrFIPSNotApproved) {
+					t.Fatalf("got error %v, want ErrFIPSNotApproved", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("outside FIPS mode CreateKDF should succeed: %v", err)
+			}
+		})
+	}
+
+	t.Run("create/default", func(t *testing.T) {
+		kdf, err := CreateKDF(FormatOptions{}, 32)
+		if fips140.Enabled() {
+			if !errors.Is(err, ErrFIPSNotApproved) {
+				t.Fatalf("got error %v, want ErrFIPSNotApproved", err)
+			}
+			return
+		}
+		if err != nil {
+			t.Fatalf("outside FIPS mode CreateKDF should succeed: %v", err)
+		}
+		if kdf.Type != KDFTypeArgon2id {
+			t.Fatalf("expected default type %s, got %s", KDFTypeArgon2id, kdf.Type)
+		}
+	})
+
+	// The approved alternative must remain usable in both modes, so that the
+	// refusals above are a KDF boundary and not a broken package.
+	t.Run("approved-alternative", func(t *testing.T) {
+		kdf, err := CreateKDF(FormatOptions{KDFType: KDFTypePBKDF2SHA256, PBKDFIterTime: 100}, 32)
+		if err != nil {
+			t.Fatalf("CreateKDF with pbkdf2-sha256 failed: %v", err)
+		}
+		if _, err := DeriveKey(passphrase, kdf, 32); err != nil {
+			t.Fatalf("DeriveKey with pbkdf2-sha256 failed: %v", err)
+		}
+	})
 }

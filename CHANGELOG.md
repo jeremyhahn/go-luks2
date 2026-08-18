@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- FIPS CI gate now runs with `GODEBUG=fips140=only` instead of `fips140=on`, so
+  non-approved cryptography fails the gate instead of being merely permitted
+- `IsFIPSCompliantKDF("pbkdf2-sha1")` now returns `false`. The Go Cryptographic
+  Module permits PBKDF2 only with SHA-2/SHA-3, so the previous `true` was wrong
+- PBKDF2-HMAC-SHA1 is refused with the new `ErrFIPSNotApproved` while the
+  process runs in FIPS 140-3 mode, instead of panicking inside
+  `golang.org/x/crypto/pbkdf2` under `fips140=only`. It remains available
+  outside FIPS mode for LUKS headers written by older cryptsetup releases
+- **Breaking in FIPS mode:** `DeriveKey` and `CreateKDF` now refuse `argon2i`
+  and `argon2id` with `ErrFIPSNotApproved` while the process runs in FIPS 140-3
+  mode, including `CreateKDF`'s empty-`KDFType` default. Argon2 is pure Go, so
+  `GODEBUG=fips140=only` cannot reject it; a FIPS-mode process would otherwise
+  derive volume keys with a non-approved KDF. A FIPS caller must now select an
+  approved KDF explicitly. Outside FIPS mode Argon2id remains the default and
+  behavior is unchanged
+
+### Added
+
+- `ErrFIPSNotApproved` typed error for algorithms the Go Cryptographic Module
+  does not approve
+- `docs/FIPS.md` recording the FIPS policy, the approved KDF table, and the
+  cited PBKDF2-HMAC-SHA1 legacy-header exemption
+
 ## [0.1.5-alpha] - 2026-02-03
 
 ### Added

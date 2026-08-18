@@ -8,6 +8,8 @@ package luks2
 
 import (
 	"bytes"
+	"crypto/fips140"
+	"errors"
 	"testing"
 )
 
@@ -54,14 +56,18 @@ func TestRandomBase64(t *testing.T) {
 
 // TestCreateKDF tests KDF object creation
 func TestCreateKDF(t *testing.T) {
+	// Argon2 is not FIPS-approved and CreateKDF refuses it while the process
+	// runs in FIPS 140-3 mode (docs/FIPS.md).
+	argon2Rejected := fips140.Enabled()
+
 	tests := []struct {
 		name    string
 		kdfType string
 		wantErr bool
 	}{
-		{"argon2id-default", "argon2id", false},
+		{"argon2id-default", "argon2id", argon2Rejected},
 		{"pbkdf2", "pbkdf2", false},
-		{"argon2i", "argon2i", false},
+		{"argon2i", "argon2i", argon2Rejected},
 		{"unsupported", "scrypt", true},
 	}
 
@@ -80,6 +86,9 @@ func TestCreateKDF(t *testing.T) {
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("Expected error, got nil")
+				}
+				if argon2Rejected && tt.kdfType != "scrypt" && !errors.Is(err, ErrFIPSNotApproved) {
+					t.Fatalf("In FIPS mode: got error %v, want ErrFIPSNotApproved", err)
 				}
 			} else {
 				if err != nil {

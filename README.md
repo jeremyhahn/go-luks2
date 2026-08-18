@@ -226,7 +226,21 @@ luks2.Format(luks2.FormatOptions{
 })
 ```
 
-FIPS-approved KDFs: `pbkdf2-sha1`, `pbkdf2-sha256`, `pbkdf2-sha384`, `pbkdf2-sha512`
+FIPS-approved KDFs: `pbkdf2-sha256`, `pbkdf2-sha384`, `pbkdf2-sha512`
+
+`pbkdf2-sha1` is **not** FIPS-approved — the Go Cryptographic Module permits
+PBKDF2 only with SHA-2/SHA-3. It remains available outside FIPS mode to open
+LUKS headers written by older cryptsetup releases; in FIPS mode it returns
+`ErrFIPSNotApproved`.
+
+Argon2 is not FIPS-approved either, and `GODEBUG=fips140=only` cannot catch it
+because `x/crypto/argon2` is pure Go. While the process runs in FIPS 140-3 mode
+(`crypto/fips140.Enabled()`), `DeriveKey` and `CreateKDF` refuse `argon2i` and
+`argon2id` with `ErrFIPSNotApproved` — including `CreateKDF`'s empty-`KDFType`
+default, so a FIPS caller must select an approved KDF explicitly. Outside FIPS
+mode Argon2id remains the default and nothing changes.
+
+See [docs/FIPS.md](docs/FIPS.md).
 
 ## Cryptographic Defaults
 

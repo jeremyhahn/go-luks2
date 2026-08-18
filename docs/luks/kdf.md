@@ -97,7 +97,7 @@ Password-Based Key Derivation Function 2, using HMAC.
 
 | Hash | Output Size | FIPS Compliant |
 |------|-------------|----------------|
-| sha1 | 160 bits | Yes |
+| sha1 | 160 bits | No (legacy headers only, see [FIPS.md](../FIPS.md)) |
 | sha256 | 256 bits | Yes |
 | sha384 | 384 bits | Yes |
 | sha512 | 512 bits | Yes |
@@ -114,7 +114,7 @@ opts := luks2.FormatOptions{
 
 ### FIPS Compliance
 
-PBKDF2 is the only FIPS 140-2 approved KDF:
+PBKDF2 is the only FIPS-approved KDF, and only with SHA-2/SHA-3:
 
 ```go
 // Check if KDF is FIPS compliant
@@ -122,6 +122,12 @@ if luks2.IsFIPSCompliantKDF("pbkdf2") {
     // Use for FIPS environments
 }
 ```
+
+`IsFIPSCompliantKDF("pbkdf2-sha1")` returns `false`, and deriving with SHA-1
+returns `ErrFIPSNotApproved` while the process runs in FIPS 140-3 mode. Argon2i
+and Argon2id are refused in FIPS mode for the same reason, including when
+`CreateKDF` reaches Argon2id as its default. See [FIPS.md](../FIPS.md) for the
+full policy and the legacy-header exemption.
 
 ## Iteration Calibration
 

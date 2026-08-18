@@ -49,6 +49,11 @@ var (
 
 	// ErrPermissionDenied indicates insufficient permissions
 	ErrPermissionDenied = errors.New("permission denied")
+
+	// ErrFIPSNotApproved indicates the requested algorithm is not approved by
+	// the Go Cryptographic Module and is refused while the process runs in
+	// FIPS 140-3 mode. See docs/FIPS.md.
+	ErrFIPSNotApproved = errors.New("algorithm not approved in FIPS 140-3 mode")
 )
 
 // DeviceError represents an error related to a specific device

@@ -5,7 +5,8 @@
 package luks2
 
 import (
-	"crypto/sha1" // #nosec G505 - SHA-1 is FIPS-approved for HMAC (used in PBKDF2)
+	"crypto/fips140"
+	"crypto/sha1" // #nosec G505 - legacy LUKS interop only; refused in FIPS mode (docs/FIPS.md)
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/base64"
@@ -24,7 +25,10 @@ const (
 	// KDFTypePBKDF2 is the base PBKDF2 KDF type (uses HashAlgo option for hash selection)
 	KDFTypePBKDF2 = "pbkdf2"
 
-	// KDFTypePBKDF2SHA1 is PBKDF2 with SHA-1 (FIPS-approved for HMAC, legacy compatibility)
+	// KDFTypePBKDF2SHA1 is PBKDF2 with SHA-1. It is NOT FIPS-approved and is
+	// refused while the process runs in FIPS 140-3 mode; it exists only to open
+	// LUKS headers written by cryptsetup releases that defaulted to SHA-1.
+	// See docs/FIPS.md.
 	KDFTypePBKDF2SHA1 = "pbkdf2-sha1"
 
 	// KDFTypePBKDF2SHA256 is PBKDF2 with SHA-256 (FIPS-approved, recommended)
@@ -36,17 +40,28 @@ const (
 	// KDFTypePBKDF2SHA512 is PBKDF2 with SHA-512 (FIPS-approved)
 	KDFTypePBKDF2SHA512 = "pbkdf2-sha512"
 
-	// KDFTypeArgon2i is the Argon2i KDF type (NOT FIPS-approved)
+	// KDFTypeArgon2i is the Argon2i KDF type. It is NOT FIPS-approved and is
+	// refused while the process runs in FIPS 140-3 mode. See docs/FIPS.md.
 	KDFTypeArgon2i = "argon2i"
 
-	// KDFTypeArgon2id is the Argon2id KDF type (NOT FIPS-approved, but recommended for non-FIPS)
+	// KDFTypeArgon2id is the Argon2id KDF type and the library default. It is
+	// NOT FIPS-approved and is refused while the process runs in FIPS 140-3
+	// mode, including when it is reached as the default. See docs/FIPS.md.
 	KDFTypeArgon2id = "argon2id"
 )
 
-// IsFIPSCompliantKDF returns true if the KDF type is FIPS-approved
+// IsFIPSCompliantKDF returns true if the KDF type is FIPS-approved.
+//
+// "pbkdf2-sha1" returns false: the Go Cryptographic Module permits PBKDF2 only
+// with SHA-2 and SHA-3, and rejects SHA-1 outright under GODEBUG=fips140=only.
+// See docs/FIPS.md.
+//
+// "pbkdf2" returns true because it derives with SHA-256 by default. Overriding
+// that with FormatOptions.HashAlgo = "sha1" yields a KDF that is not
+// FIPS-approved and that CreateKDF refuses in FIPS mode.
 func IsFIPSCompliantKDF(kdfType string) bool {
 	switch normalizeKDFType(kdfType) {
-	case KDFTypePBKDF2, KDFTypePBKDF2SHA1, KDFTypePBKDF2SHA256, KDFTypePBKDF2SHA384, KDFTypePBKDF2SHA512:
+	case KDFTypePBKDF2, KDFTypePBKDF2SHA256, KDFTypePBKDF2SHA384, KDFTypePBKDF2SHA512:
 		return true
 	default:
 		return false
@@ -58,8 +73,39 @@ func normalizeKDFType(kdfType string) string {
 	return strings.ToLower(strings.TrimSpace(kdfType))
 }
 
+// requireFIPSApprovedKDF returns an error when kdfType is not FIPS-approved and
+// the process is running in FIPS 140-3 mode.
+//
+// Argon2 is implemented in pure Go by golang.org/x/crypto (BLAKE2b) and never
+// enters the Go Cryptographic Module, so GODEBUG=fips140=only cannot reject it.
+// Without this check a FIPS-mode process would derive volume keys with a
+// non-approved KDF while the FIPS gate reported green. See docs/FIPS.md.
+//
+// PBKDF2 hash selection is enforced separately, in getPBKDF2HashFunc.
+func requireFIPSApprovedKDF(kdfType string) error {
+	if !fips140.Enabled() {
+		return nil
+	}
+
+	normalized := normalizeKDFType(kdfType)
+	switch normalized {
+	case KDFTypeArgon2i, KDFTypeArgon2id:
+		return &CryptoError{Op: normalized, Err: ErrFIPSNotApproved}
+	default:
+		return nil
+	}
+}
+
 // DeriveKey derives a key from a passphrase using the specified KDF
+//
+// In FIPS 140-3 mode an Argon2 KDF is refused with ErrFIPSNotApproved before
+// any derivation is attempted, so an externally supplied header cannot make a
+// FIPS-mode process run a non-approved KDF.
 func DeriveKey(passphrase []byte, kdf *KDF, keySize int) ([]byte, error) {
+	if err := requireFIPSApprovedKDF(kdf.Type); err != nil {
+		return nil, err
+	}
+
 	salt, err := decodeBase64(kdf.Salt)
 	if err != nil {
 		return nil, fmt.Errorf("invalid salt: %w", err)
@@ -93,12 +139,20 @@ func derivePBKDF2(passphrase, salt []byte, kdf *KDF, keySize int) ([]byte, error
 }
 
 // getPBKDF2HashFunc returns the hash function for PBKDF2 key derivation
-// Supported: sha1, sha256, sha384, sha512 (all FIPS-approved)
+// Supported: sha256, sha384, sha512 (FIPS-approved) and sha1 (legacy LUKS
+// headers only, refused in FIPS 140-3 mode)
 func getPBKDF2HashFunc(hashAlgo string) (func() hash.Hash, error) {
 	switch strings.ToLower(hashAlgo) {
 	case "sha1":
-		// SHA-1 is FIPS-approved for HMAC (used in PBKDF2)
-		// Note: SHA-1 is deprecated for signatures but still valid for HMAC
+		// PBKDF2-HMAC-SHA1 is needed to open LUKS headers written by cryptsetup
+		// releases that defaulted to SHA-1, but the Go Cryptographic Module
+		// permits PBKDF2 only with SHA-2/SHA-3 and panics on SHA-1 under
+		// GODEBUG=fips140=only. Refuse it here so a FIPS build reports a typed
+		// error instead of crashing, and so the call never reaches the module.
+		// See docs/FIPS.md.
+		if fips140.Enabled() {
+			return nil, &CryptoError{Op: "pbkdf2-hmac-sha1", Err: ErrFIPSNotApproved}
+		}
 		return sha1.New, nil
 	case "sha256":
 		return sha256.New, nil
@@ -146,7 +200,8 @@ func deriveArgon2id(passphrase, salt []byte, kdf *KDF, keySize int) ([]byte, err
 }
 
 // BenchmarkPBKDF2 determines the number of iterations for target time
-// Supported hash algorithms: sha1, sha256, sha384, sha512
+// Supported hash algorithms: sha256, sha384, sha512 and, outside FIPS 140-3
+// mode, sha1
 func BenchmarkPBKDF2(hashAlgo string, keySize, targetMs int) (int, error) {
 	testPass := []byte("test")
 	testSalt := make([]byte, 32)
@@ -178,16 +233,23 @@ func BenchmarkPBKDF2(hashAlgo string, keySize, targetMs int) (int, error) {
 // CreateKDF creates a KDF structure based on options
 // Supported KDF types:
 //   - "pbkdf2" - PBKDF2 with hash from HashAlgo option (default: sha256) [FIPS-approved]
-//   - "pbkdf2-sha1" - PBKDF2 with SHA-1 [FIPS-approved, legacy]
+//   - "pbkdf2-sha1" - PBKDF2 with SHA-1 [NOT FIPS-approved, legacy headers only]
 //   - "pbkdf2-sha256" - PBKDF2 with SHA-256 [FIPS-approved, recommended]
 //   - "pbkdf2-sha384" - PBKDF2 with SHA-384 [FIPS-approved]
 //   - "pbkdf2-sha512" - PBKDF2 with SHA-512 [FIPS-approved]
-//   - "argon2i" - Argon2i [NOT FIPS-approved]
-//   - "argon2id" - Argon2id [NOT FIPS-approved, default]
+//   - "argon2i" - Argon2i [NOT FIPS-approved, refused in FIPS mode]
+//   - "argon2id" - Argon2id [NOT FIPS-approved, refused in FIPS mode, default]
 func CreateKDF(opts FormatOptions, keySize int) (*KDF, error) {
 	kdfType := normalizeKDFType(opts.KDFType)
 	if kdfType == "" {
 		kdfType = KDFTypeArgon2id // Default
+	}
+
+	// Checked after the default is resolved, so that FormatOptions{} does not
+	// silently create an Argon2id keyslot in a FIPS-mode process. A FIPS caller
+	// must select an approved KDF explicitly; see docs/FIPS.md.
+	if err := requireFIPSApprovedKDF(kdfType); err != nil {
+		return nil, err
 	}
 
 	salt, err := randomBytes(32)
