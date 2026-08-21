@@ -6,7 +6,10 @@ on:
       - "v*"
 
 env:
-  GO_VERSION: "1.25.5"
+  # Kept in lockstep with ci.yml (issue #14). This was pinned at 1.25.5 while
+  # the rest of the repo had moved to 1.26 — a release built on a stale
+  # toolchain is a supply-chain problem, not a cosmetic one.
+  GO_VERSION: "1.26.7"
 
 jobs:
   release:
@@ -15,18 +18,36 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
 
       - name: Get version
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      # PERMANENT GUARD (issue #13). Tag v0.1.7-alpha shipped a tree whose
+      # VERSION file still read 0.1.6-alpha: the release commit bumped the
+      # CHANGELOG but not VERSION, and tags are additive and never rewritten,
+      # so the only fix is to stop the next one. Second confirmed instance of
+      # this defect class portfolio-wide (company task #123), so the assertion
+      # is the deliverable, not the one-off correction.
+      - name: Verify VERSION matches the tag
+        run: |
+          tag="${{ steps.version.outputs.VERSION }}"
+          file="v$(cat VERSION)"
+          if [ "$tag" != "$file" ]; then
+            echo "FAIL: tag ${tag} does not match VERSION file ${file}"
+            echo "Bump VERSION in the same commit as the CHANGELOG"
+            echo "(release-versioning.md), then re-cut the tag."
+            exit 1
+          fi
+          echo "OK: tag ${tag} matches VERSION"
 
       - name: Run tests
         run: go test -v ./pkg/luks2
