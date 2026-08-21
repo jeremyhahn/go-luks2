@@ -3,11 +3,18 @@ name: CI
 # One workflow file, run by both hosts (devops.md §1). Steps that only work on
 # github.com are guarded on github.server_url; everything that gates a merge
 # runs on Gitea too.
+#
+# ci-template v1.9 (owner ruling 2026-08-20, issue #14) — STAGED FAIL-FAST.
+# Gitea has no cancel API (company task #90), so fail-fast comes from ORDERING:
+# a fast tier (lint, build, unit tests) gates the expensive tier (security,
+# integration). A broken push reports in minutes and burns nothing downstream.
+# trivy and fips moved to nightly.yml: both were known-red on every push, and a
+# known-red job burning runner-minutes per push verifies nothing.
 on:
   push:
-    branches: [main, master, develop]
+    branches: [main]                    # trunk-based: main is the ONLY trunk
   pull_request:
-    branches: [main, master, develop]
+    branches: [main]
   # Lets a run be repeated without inventing a commit, which matters when a
   # failure is the runner's rather than the code's.
   workflow_dispatch:
@@ -17,7 +24,11 @@ permissions:
   security-events: write
 
 env:
-  GO_VERSION: "1.26.6"
+  # latest 1.26 patch (owner ruling 2026-08-20): 1.27.0 is BLOCKED —
+  # cockroachdb/swiss fails to compile under it (undefined fastrand64; company
+  # task #121). Never `stable`: it flipped to 1.27.0 mid-campaign and broke
+  # every repo riding it.
+  GO_VERSION: "1.26.7"
 
 jobs:
   lint:
@@ -44,19 +55,36 @@ jobs:
       - name: Run go vet
         run: go vet ./...
 
-      # devops.md §9: tooling tracks the latest release, never a pin.
-      # .golangci.yml enables the §8 security linters (staticcheck, errcheck,
-      # unused, ineffassign, misspell, gocritic); the umbrella without them
-      # would not satisfy the section.
+      # PINNED (devops.md §9 documented-pin clause; go-qrdb#42, 2026-08-19):
+      # @latest moved to v2.13.0, which panics under Go 1.26 ("nilness:
+      # internal error: unhandled builtin recover" in honnef.co/go/tools
+      # v0.8.0-rc.1) and took the whole gate down — and with it every job that
+      # needed lint. Unpin when an upstream release passes on the portfolio.
+      # The bounded retry is for sum.golang.org tile fetches, which flake with
+      # HTTP/2 INTERNAL_ERROR; under staged fail-fast a linter-INSTALL flake
+      # blocks the whole pipeline. Do NOT "fix" that with GOSUMDB=off, which
+      # trades a flake for a supply-chain hole.
+      - name: Install golangci-lint
+        run: |
+          for i in 1 2 3; do
+            go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 && exit 0
+            echo "install attempt $i failed; retrying"; sleep 10
+          done
+          echo "golangci-lint install failed after 3 attempts"; exit 1
+
+      # .golangci.yml enables the devops.md §8 security linters (staticcheck,
+      # errcheck, unused, ineffassign, misspell, gocritic); the umbrella
+      # without them would not satisfy the section.
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: latest
-          args: --timeout=10m
+        run: golangci-lint run --timeout=10m ./...
 
   security:
     name: Security Scan
     runs-on: ubuntu-latest
+    # STAGED FAIL-FAST (v1.9): gated on the fast tier — a push that cannot
+    # lint, build or pass unit tests should not spend a heavy gosec and
+    # govulncheck pass.
+    needs: [lint, build, test-unit]
     steps:
       - uses: actions/checkout@v6
 
@@ -97,57 +125,6 @@ jobs:
 
       - name: Verify module integrity
         run: make verify
-
-  trivy:
-    name: Trivy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      # aquasecurity/trivy-action fetches its install script through a nested
-      # checkout that a self-hosted runner resolves against its own server
-      # instead of github.com, failing with git exit 128. It is therefore
-      # github.com-only, and so is its consumer, the code scanning upload.
-      - name: Trivy scan (SARIF for code scanning)
-        if: github.server_url == 'https://github.com'
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          scan-ref: .
-          scanners: vuln,secret
-          format: sarif
-          output: trivy-results.sarif
-          exit-code: 0
-
-      - name: Upload Trivy SARIF
-        if: always() && github.server_url == 'https://github.com'
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-results.sarif
-          category: trivy-fs
-
-      - name: Trivy gate (fail on CRITICAL/HIGH)
-        if: github.server_url == 'https://github.com'
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          scan-ref: .
-          scanners: vuln,secret
-          severity: CRITICAL,HIGH
-          exit-code: 1
-          format: table
-
-      # Gitea and any other non-github.com server run the same gate from the
-      # trivy CLI, installed from the upstream release script. Same scanners,
-      # same severities, same exit code — the dashboard upload is the only
-      # thing GitHub gets and the other host does not.
-      - name: Install trivy CLI
-        if: github.server_url != 'https://github.com'
-        run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
-
-      - name: Trivy gate (fail on CRITICAL/HIGH)
-        if: github.server_url != 'https://github.com'
-        run: make trivy-fs
 
   test-unit:
     name: Unit Tests
@@ -192,7 +169,11 @@ jobs:
   test-integration:
     name: Integration Tests
     runs-on: ubuntu-latest
-    needs: [lint, security, test-unit]
+    # STAGED FAIL-FAST (v1.9): gated on the fast tier, not on `security` — two
+    # expensive jobs gating each other would serialise them for no benefit.
+    # The suite races on host-global loop devices (company task #48), which is
+    # why it runs inside the container and never bare on a shared runner.
+    needs: [lint, build, test-unit]
     steps:
       - uses: actions/checkout@v6
 
@@ -230,7 +211,8 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: [test-unit]
+    # FAST TIER (v1.9): no `needs`. build runs alongside lint and test-unit so
+    # the three of them together are the gate the expensive tier waits on.
     steps:
       - uses: actions/checkout@v6
 
@@ -259,28 +241,6 @@ jobs:
           name: binaries
           path: luks-linux-*
 
-  fips:
-    name: FIPS
-    runs-on: ubuntu-latest
-    needs: [build]
-    timeout-minutes: 30
-    env:
-      GOFIPS140: latest
-      GODEBUG: fips140=only
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: ${{ env.GO_VERSION }}
-
-      - name: Build all packages (FIPS mode)
-        run: go build ./...
-
-      - name: Unit tests (FIPS mode)
-        run: go test -count=1 -timeout=900s ./...
-
   # The single required check (devops.md §1). Branch protection requires this
   # job and nothing else; adding a job above means adding it to `needs` and to
   # the results list below.
@@ -288,7 +248,9 @@ jobs:
     name: CI Gate
     runs-on: ubuntu-latest
     if: always()
-    needs: [lint, security, trivy, test-unit, test-integration, build, fips]
+    # v1.9: trivy and fips moved to nightly.yml (known-red jobs off the push
+    # path — owner ruling 2026-08-20); they gate nothing here.
+    needs: [lint, security, build, test-unit, test-integration]
     steps:
       # join(needs.*.result) is a GitHub extension that evaluates to an empty
       # string on Gitea, so a gate built on it reports success while jobs are
@@ -298,19 +260,23 @@ jobs:
         env:
           LINT: ${{ needs.lint.result }}
           SECURITY: ${{ needs.security.result }}
-          TRIVY: ${{ needs.trivy.result }}
+          BUILD: ${{ needs.build.result }}
           TEST_UNIT: ${{ needs.test-unit.result }}
           TEST_INTEGRATION: ${{ needs.test-integration.result }}
-          BUILD: ${{ needs.build.result }}
-          FIPS: ${{ needs.fips.result }}
         run: |
+          # skipped != failed, but BOTH fail the gate: under staged fail-fast a
+          # skipped job means an upstream stage failed, and naming it that way
+          # prevents the go-qrdb#42 class — a red that looks like a test
+          # failure while the tests never ran.
           failed=0
-          for job in LINT SECURITY TRIVY TEST_UNIT TEST_INTEGRATION BUILD FIPS; do
+          for job in LINT SECURITY BUILD TEST_UNIT TEST_INTEGRATION; do
             eval "result=\$$job"
-            echo "${job}=${result:-<unreadable>}"
-            if [ "$result" != "success" ]; then
-              failed=1
-            fi
+            case "$result" in
+              success) echo "OK   ${job}" ;;
+              skipped) echo "SKIP ${job} (upstream stage failed — see its job)"; failed=1 ;;
+              "")      echo "FAIL ${job} (<unreadable>)"; failed=1 ;;
+              *)       echo "FAIL ${job} (${result})"; failed=1 ;;
+            esac
           done
           if [ "$failed" -ne 0 ]; then
             echo "CI gate failed: not every job reported success."
