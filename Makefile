@@ -249,7 +249,7 @@ gosec: ## Run gosec security scanner
 	@echo "$(COLOR_BOLD)Running gosec security scanner...$(COLOR_RESET)"
 	@GOSEC=$$(command -v gosec 2>/dev/null || echo "$(GOBIN)/gosec"); \
 	if [ -x "$$GOSEC" ]; then \
-		$$GOSEC -exclude-generated -severity medium -confidence medium $(GOSEC_EXTRA) ./... || exit 1; \
+		$$GOSEC -concurrency 4 -exclude-generated -severity medium -confidence medium $(GOSEC_EXTRA) ./... || exit 1; \
 		echo "$(COLOR_GREEN)✓ Security scan passed$(COLOR_RESET)"; \
 	else \
 		echo "$(COLOR_YELLOW)⚠ gosec not installed, skipping...$(COLOR_RESET)"; \
