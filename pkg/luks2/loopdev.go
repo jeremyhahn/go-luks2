@@ -62,6 +62,16 @@ func SetupLoopDevice(file string) (string, error) {
 // finish releasing a device. Release happens in microseconds on an idle host;
 // the bound is generous because CI runners are not idle. Reaching it therefore
 // means the device is still held by something, not that the host is slow.
+//
+// So this is NOT a guess at how long the kernel needs — do not tune it as one.
+// Measured on a loaded CI runner (#24), the kernel completes the release ~0.5ms
+// after the last holder closes. The only thing that can exhaust this bound is a
+// HOLDER'S LIFETIME, and no value here shortens that: raising it just makes a
+// caller wait longer for someone else before getting the same deferred answer.
+// Read it as a ceiling on how long we are willing to wait on a third party.
+//
+// If a test or caller is timing out against this, the question to ask is what
+// still holds the device, not what this number should be.
 const detachSettleTimeout = 2 * time.Second
 
 // detachPollInterval is how often the release is re-checked while waiting.
