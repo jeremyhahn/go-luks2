@@ -47,6 +47,14 @@ var (
 	// ErrInvalidSize indicates a size parameter is invalid
 	ErrInvalidSize = errors.New("invalid size")
 
+	// ErrDetachIncomplete indicates a loop device was told to detach and the
+	// kernel had not released it before the wait expired. It is deliberately
+	// distinct from a failed detach: the request succeeded, and something else
+	// still holds the device open. An operator who reads "detach failed" goes
+	// looking at the detach; this one has to go looking at what else has the
+	// device.
+	ErrDetachIncomplete = errors.New("loop device detach did not become observable")
+
 	// ErrPermissionDenied indicates insufficient permissions
 	ErrPermissionDenied = errors.New("permission denied")
 

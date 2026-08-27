@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestSetupLoopDevice tests setting up a loop device from a file
@@ -521,4 +522,129 @@ func TestLoopDeviceCleanup(t *testing.T) {
 
 		t.Logf("Defer cleanup verified successfully")
 	})
+}
+
+// TestDetachLoopDeviceStateReportsADeferredRelease is the kernel-facing test
+// for the deferred-release contract, and it exists because the unit test alone
+// could not establish it.
+//
+// The unit test supplies the autoclear state through a fake reader, so it
+// verifies the WAIT's behavior given that state — and nothing about whether
+// the kernel produces it. Three assumptions were load-bearing for the API
+// decision and were checked only against a double built to match them:
+//
+//   - LOOP_CLR_FD returns SUCCESS on a device another descriptor still holds
+//     open, rather than EBUSY;
+//   - sysfs exposes autoclear=1 at that point, not later;
+//   - the release completes once the last holder goes away.
+//
+// A fake that supplies its own answer cannot fail an assertion about the thing
+// it is standing in for. This drives the real kernel.
+//
+// The holder is a second open descriptor on the device, which is the minimal
+// form of the condition — a mounted filesystem or a dm-crypt mapping is the
+// same situation with more moving parts.
+func TestDetachLoopDeviceStateReportsADeferredRelease(t *testing.T) {
+	tmpfile := filepath.Join(t.TempDir(), "test-deferred.img")
+
+	f, err := os.Create(tmpfile)
+	if err != nil {
+		t.Fatalf("Failed to create file: %v", err)
+	}
+	if err := f.Truncate(10 * 1024 * 1024); err != nil {
+		f.Close()
+		t.Fatalf("Failed to truncate file: %v", err)
+	}
+	f.Close()
+
+	loopDev, err := SetupLoopDevice(tmpfile)
+	if err != nil {
+		t.Fatalf("SetupLoopDevice failed: %v", err)
+	}
+	t.Logf("Loop device created: %s", loopDev)
+
+	// A second opener. While this is held, the kernel cannot complete a
+	// release, so it should accept the request and defer it.
+	holder, err := os.OpenFile(loopDev, os.O_RDONLY, 0)
+	if err != nil {
+		_ = DetachLoopDevice(loopDev)
+		t.Fatalf("Failed to hold the loop device open: %v", err)
+	}
+	holderClosed := false
+	defer func() {
+		if !holderClosed {
+			_ = holder.Close()
+		}
+	}()
+
+	state, err := DetachLoopDeviceState(loopDev)
+	if err != nil {
+		_ = holder.Close()
+		holderClosed = true
+		_ = DetachLoopDevice(loopDev)
+		t.Fatalf("DetachLoopDeviceState reported a failure for a device the kernel should have deferred: %v", err)
+	}
+	if state != DetachDeferred {
+		_ = holder.Close()
+		holderClosed = true
+		_ = DetachLoopDevice(loopDev)
+		t.Fatalf("state = %v, want DetachDeferred while another descriptor holds the device", state)
+	}
+	t.Logf("Detach accepted and deferred while the device was held")
+
+	// Releasing the last holder is what lets the kernel finish.
+	if err := holder.Close(); err != nil {
+		t.Fatalf("Failed to release the holder: %v", err)
+	}
+	holderClosed = true
+
+	// The release is asynchronous by definition here, so this waits rather
+	// than asserting immediately — the same reason DetachLoopDevice waits.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := FindLoopDevice(tmpfile); err != nil {
+			t.Logf("Association released after the holder went away")
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("The association survived after the last holder was released")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestDetachLoopDeviceStateReportsAnImmediateRelease is the control. Without
+// it the test above would also pass against an implementation that reported
+// DetachDeferred for everything.
+func TestDetachLoopDeviceStateReportsAnImmediateRelease(t *testing.T) {
+	tmpfile := filepath.Join(t.TempDir(), "test-immediate.img")
+
+	f, err := os.Create(tmpfile)
+	if err != nil {
+		t.Fatalf("Failed to create file: %v", err)
+	}
+	if err := f.Truncate(10 * 1024 * 1024); err != nil {
+		f.Close()
+		t.Fatalf("Failed to truncate file: %v", err)
+	}
+	f.Close()
+
+	loopDev, err := SetupLoopDevice(tmpfile)
+	if err != nil {
+		t.Fatalf("SetupLoopDevice failed: %v", err)
+	}
+
+	state, err := DetachLoopDeviceState(loopDev)
+	if err != nil {
+		t.Fatalf("DetachLoopDeviceState returned error: %v", err)
+	}
+	if state != DetachReleased {
+		t.Errorf("state = %v, want DetachReleased for a device nothing else holds", state)
+	}
+
+	// And the release really is observable on return, which is the guarantee
+	// this whole change exists to provide.
+	if dev, err := FindLoopDevice(tmpfile); err == nil {
+		t.Errorf("device %s is still attached after DetachLoopDeviceState returned released", dev)
+	}
 }

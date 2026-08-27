@@ -7,9 +7,13 @@
 package luks2
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -54,21 +58,323 @@ func SetupLoopDevice(file string) (string, error) {
 	return loopDevice, nil
 }
 
-// DetachLoopDevice detaches a loop device
+// detachSettleTimeout bounds how long DetachLoopDevice waits for the kernel to
+// finish releasing a device. Release happens in microseconds on an idle host;
+// the bound is generous because CI runners are not idle. Reaching it therefore
+// means the device is still held by something, not that the host is slow.
+const detachSettleTimeout = 2 * time.Second
+
+// detachPollInterval is how often the release is re-checked while waiting.
+//
+// This is a BACKOFF, not synchronization: correctness does not depend on the
+// duration. sysfs exposes no readiness signal to select on, so there is nothing
+// to wait on; a shorter interval only spends more CPU reaching the same answer,
+// and a longer one only reaches it later. The bound above is what makes the
+// failure case terminate.
+const detachPollInterval = 500 * time.Microsecond
+
+// DetachState says what became of a detach request. Both values mean the
+// kernel accepted it; they differ in whether the release has happened yet.
+type DetachState int
+
+const (
+	// DetachReleased means the release was OBSERVED: the device is no longer
+	// backed by the file it held.
+	DetachReleased DetachState = iota
+
+	// DetachDeferred means the kernel accepted the request and postponed it
+	// because something else still has the device open — a mounted
+	// filesystem, or a dm-crypt mapping built on it. The device carries the
+	// autoclear flag and will be released when the last user goes away.
+	//
+	// This is a SUCCESS. It is what `losetup -d` does on a busy device, and
+	// reporting it as a failure would tell a caller their detach did not work
+	// when in fact it did and is simply pending.
+	DetachDeferred
+)
+
+// DetachLoopDevice detaches a loop device and waits until the release is
+// OBSERVED before returning.
+//
+// That is the promise callers have always read into it, and it holds in every
+// case but one. If something else still holds the device when the wait's bound
+// expires — a mounted filesystem, a dm-crypt mapping — the kernel has accepted
+// the request and will complete it when the last user goes away, and this
+// returns nil with the device still attached. That case is a success: it is
+// what `losetup -d` reports for a busy device, and failing it would break
+// callers detaching something legitimately still in use.
+//
+// [DetachLoopDeviceState] distinguishes the two. A caller that must know the
+// device is free right now should use it and check for [DetachReleased].
+//
+// A deferred release is not an early exit. The wait keeps looking, because a
+// holder is usually momentary — a neighboring process, a udev settle, a dm
+// teardown in progress — and waiting turns most deferred cases into observed
+// releases. The cost is that a genuinely long-held device pays the full bound
+// before returning; that is bounded, and it buys a nil that means what callers
+// take it to mean.
+//
+// The wait is the point. LOOP_CLR_FD does not necessarily tear the association
+// down before it returns: while any descriptor for the device is still open the
+// kernel marks it autoclear and defers the release until the last reference is
+// dropped. So the ioctl reports success, this function used to return, and a
+// caller that immediately asked [FindLoopDevice] whether the file was still
+// attached could be told that it was — intermittently, depending on whether the
+// kernel had got there yet.
+//
+// That is not a test artifact. Any caller that detaches and then acts on the
+// device's state is exposed to it, and the failure is a race, so it appears and
+// disappears without the code changing.
+//
+// A deferred release is NOT an error; see [DetachState]. Use
+// [DetachLoopDeviceState] to tell the two successes apart.
 func DetachLoopDevice(device string) error {
+	_, err := DetachLoopDeviceState(device)
+	return err
+}
+
+// DetachLoopDeviceState is [DetachLoopDevice] with the outcome reported rather
+// than discarded, for callers that need to know whether the device is free NOW
+// or merely promised.
+func DetachLoopDeviceState(device string) (DetachState, error) {
+	return detachLoopDevice(device, detachSettleTimeout, detachPollInterval, readLoopState)
+}
+
+// detachLoopDevice carries the bound, the poll interval and the reader as
+// parameters so the waiting logic can be exercised without a loop device and
+// without waiting out a real timeout. The kernel-facing path is covered
+// separately, by the integration tests that drive a real device.
+func detachLoopDevice(device string, timeout, poll time.Duration, read loopStateReader) (DetachState, error) {
+	// Recorded BEFORE the detach so the wait can tell "our association is gone"
+	// apart from "this device has since been attached to something else". The
+	// loop-device namespace is host-global, so a freed device can be claimed by
+	// another process between the ioctl and the first poll; waiting for the
+	// backing file to merely become unreadable would then time out on a detach
+	// that had in fact succeeded.
+	before, beforeErr := read(device)
+
 	loopFile, err := os.OpenFile(device, os.O_RDWR, 0) // #nosec G304 -- loop device path from SetupLoopDevice
 	if err != nil {
-		return fmt.Errorf("failed to open %s: %w", device, err)
+		return DetachReleased, fmt.Errorf("failed to open %s: %w", device, err)
 	}
-	defer func() { _ = loopFile.Close() }()
 
-	// Detach loop device
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL, loopFile.Fd(), unix.LOOP_CLR_FD, 0)
+
+	// Closed explicitly rather than deferred, because the close has to happen
+	// BEFORE the wait below rather than after the function returns: this
+	// descriptor is a reference, and the release cannot complete while it is
+	// held. A deferred close would make the wait wait for itself.
+	closeErr := loopFile.Close()
+
 	if errno != 0 {
-		return fmt.Errorf("LOOP_CLR_FD failed: %v", errno)
+		return DetachReleased, fmt.Errorf("LOOP_CLR_FD failed: %v", errno)
 	}
 
-	return nil
+	// A failed close does NOT skip the wait. The detach itself succeeded, the
+	// descriptor is out of our hands either way, and returning here would both
+	// abandon the observation this function exists to make and hand back an
+	// error a caller cannot classify. It is reported alongside whatever the
+	// wait concludes.
+	state, waitErr := waitForDetach(device, before, beforeErr == nil, timeout, poll, read)
+	if closeErr != nil {
+		return state, errors.Join(&DeviceError{Device: device, Op: "close loop device after detach", Err: closeErr}, waitErr)
+	}
+	return state, waitErr
+}
+
+// waitForDetach blocks until the device is released, until the kernel says the
+// release is deferred, or until timeout expires.
+//
+// before is the state observed before the detach; knownBefore says whether that
+// observation succeeded. Without it there is no baseline to compare against, so
+// the wait requires the authoritative not-attached state instead — a stronger
+// condition, which is the right trade when already operating blind.
+//
+// The contract, and it is one sentence: NO PATH RETURNS SUCCESS WITHOUT AN
+// AUTHORITATIVE OBSERVATION. An unreadable state is retried, never concluded
+// from; if it never clears, the bound reports that the state could not be read.
+func waitForDetach(device string, before loopState, knownBefore bool, timeout, poll time.Duration, read loopStateReader) (DetachState, error) {
+	// Nothing was attached, and we KNOW that — the only case that needs no
+	// wait. An unreadable pre-detach observation is not this case, however
+	// similar an empty backing file looks.
+	if knownBefore && before.backing == "" {
+		return DetachReleased, nil
+	}
+
+	deadline := time.Now().Add(timeout)
+
+	// Counted rather than remembered. Classifying on the LAST reading inverts
+	// the report in both directions: a wait that was blind almost throughout
+	// but read cleanly on its final poll would blame a holder that does not
+	// exist, and a genuinely held device whose last poll happened to error
+	// would send an operator to fix a healthy host. The two causes exist
+	// precisely to route an operator differently, so the classification uses
+	// what dominated the wait rather than what happened to come last.
+	var unreadable, held int
+	var lastErr error
+	sawAutoclear := false
+
+	for {
+		current, err := read(device)
+		switch {
+		case err != nil:
+			unreadable++
+			lastErr = err
+
+		case released(current, before, knownBefore):
+			return DetachReleased, nil
+
+		case current.autoclear:
+			// The kernel took the request and postponed it. That is an
+			// authoritative observation, and it is remembered — but it is NOT
+			// an exit.
+			//
+			// Exiting here is what an earlier version did, and it made `nil`
+			// mean "released, or maybe still attached", which is not what a
+			// caller detaching a device takes it to mean. A holder is very
+			// often momentary — a neighboring process, a udev settle, a dm
+			// teardown that has not finished — so waiting usually turns the
+			// deferred case into an observed release, at no cost beyond a few
+			// more polls.
+			sawAutoclear = true
+			held++
+
+		default:
+			held++
+		}
+
+		if time.Now().After(deadline) {
+			if sawAutoclear {
+				// Still held at the bound, but the kernel has accepted the
+				// request and will complete it when the last user goes away.
+				// That is a success: a persistently-held device is exactly
+				// what `losetup -d` reports success for, and failing here
+				// would break callers that detach a device something else is
+				// legitimately still using.
+				return DetachDeferred, nil
+			}
+
+			return DetachReleased, &DeviceError{
+				Device: device,
+				Op:     "detach loop device",
+				Err:    detachTimeoutCause(before, knownBefore, timeout, unreadable, held, lastErr),
+			}
+		}
+
+		time.Sleep(poll)
+	}
+}
+
+// released reports whether an observation shows our association gone.
+func released(current, before loopState, knownBefore bool) bool {
+	if knownBefore {
+		// Gone, or claimed by someone else: either way it is no longer ours.
+		return current.backing != before.backing
+	}
+	// No baseline, so only the authoritative not-attached state will do.
+	return current.backing == ""
+}
+
+// detachTimeoutCause explains WHY the wait gave up, because the two reasons
+// send an operator to different places: a device still held by something else
+// is a process to find, and a sysfs we cannot read is a host to fix.
+func detachTimeoutCause(before loopState, knownBefore bool, timeout time.Duration, unreadable, held int, lastErr error) error {
+	if unreadable > held {
+		return fmt.Errorf("%w: the device's state was unreadable for %d of %d checks over %s: %w",
+			ErrDetachIncomplete, unreadable, unreadable+held, timeout, lastErr)
+	}
+	if knownBefore {
+		return fmt.Errorf("%w: still backed by %s after %s; something else still holds the device open",
+			ErrDetachIncomplete, before.backing, timeout)
+	}
+	return fmt.Errorf("%w: still attached after %s, and its state before the detach could not be read",
+		ErrDetachIncomplete, timeout)
+}
+
+// loopState is one observation of a loop device's attributes.
+type loopState struct {
+	// backing is the file the device is attached to, or "" when it is
+	// attached to nothing. It is only meaningful alongside a nil error: the
+	// zero value is what an unreadable device gives too.
+	backing string
+
+	// autoclear reports the kernel's deferred-release flag.
+	autoclear bool
+}
+
+// loopStateReader observes a loop device. An error means the state could not be
+// determined — which is NOT the same as the device being free, and the
+// difference is the whole contract of the wait above.
+type loopStateReader func(device string) (loopState, error)
+
+// sysBlockRoot is where the kernel exposes block-device attributes. It is a
+// parameter of readLoopStateIn rather than a constant inside it so the reader's
+// own failure branches can be exercised: every path under the real /sys/block
+// either exists or does not, so an error that is NOT "absent" — the one this
+// reader must never mistake for "detached" — is unreachable from a real device
+// name and would otherwise go untested.
+const sysBlockRoot = "/sys/block"
+
+// readLoopState observes a loop device through the real sysfs.
+func readLoopState(device string) (loopState, error) {
+	return readLoopStateIn(sysBlockRoot, device)
+}
+
+// readLoopStateIn is [readLoopState] against a given sysfs root.
+//
+// The distinction it exists to make is between two ways of finding nothing:
+//
+//   - the BLOCK DEVICE is there and its loop attributes are gone — the device
+//     exists and is attached to nothing, which is a positive answer;
+//   - the block device is not there at all — which says nothing about any loop
+//     association, because we are not looking at a loop device we can observe.
+//
+// Collapsing the second into the first is a fail-open, and a subtle one: a
+// device whose basename is not a top-level /sys/block entry — a udev symlink,
+// /dev/block/7:0, or a PARTITION such as /dev/loop0p1, which lives at
+// /sys/block/loop0/loop0p1 — would otherwise report "not attached" and let a
+// caller conclude a release it never observed.
+func readLoopStateIn(root, device string) (loopState, error) {
+	name := filepath.Base(device)
+	blockDir := filepath.Join(root, name)
+
+	if _, err := os.Stat(blockDir); err != nil {
+		return loopState{}, fmt.Errorf("cannot observe block device %s: %w", name, err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(blockDir, "loop", "backing_file")) // #nosec G304 -- sysfs path built from the device's base name
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		// The block device is there and its loop attributes are not, so it is
+		// attached to nothing. This is the authoritative negative.
+		return loopState{}, nil
+	case err != nil:
+		return loopState{}, err
+	}
+
+	backing := strings.TrimRight(string(data), "\n")
+	if backing == "" {
+		return loopState{}, nil
+	}
+
+	abs, err := filepath.Abs(backing)
+	if err != nil {
+		return loopState{}, fmt.Errorf("unreadable backing file %q for %s: %w", backing, device, err)
+	}
+
+	return loopState{backing: abs, autoclear: readLoopFlag(blockDir, "autoclear")}, nil
+}
+
+// readLoopFlag reads a boolean loop attribute. It is best-effort by design: the
+// flags are diagnostic, and a missing or unreadable one must not turn into a
+// claim about the association itself — that is what [readLoopStateIn]'s error
+// is for.
+func readLoopFlag(blockDir, name string) bool {
+	data, err := os.ReadFile(filepath.Join(blockDir, "loop", name)) // #nosec G304 -- sysfs path built from the device's base name
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(data)) == "1"
 }
 
 // FindLoopDevice finds the loop device for a given file by reading /sys
@@ -90,25 +396,16 @@ func FindLoopDevice(file string) (string, error) {
 			continue
 		}
 
-		// Read backing_file
-		backingFilePath := fmt.Sprintf("/sys/block/%s/loop/backing_file", name)
-		data, err := os.ReadFile(backingFilePath) // #nosec G304 -- sysfs path constructed from known prefix
+		// One reader for sysfs, shared with the detach wait: two copies of this
+		// parsing would be two places for "what counts as attached" to drift,
+		// and the wait's correctness depends on answering it the same way
+		// FindLoopDevice does.
+		st, err := readLoopState(name)
 		if err != nil {
+			// Cannot tell for this device; it is not evidence about any other.
 			continue
 		}
-
-		// Trim newline
-		backingFile := string(data)
-		if len(backingFile) > 0 && backingFile[len(backingFile)-1] == '\n' {
-			backingFile = backingFile[:len(backingFile)-1]
-		}
-
-		absBackingFile, err := filepath.Abs(backingFile)
-		if err != nil {
-			continue
-		}
-
-		if absFile == absBackingFile {
+		if st.backing != "" && absFile == st.backing {
 			return "/dev/" + name, nil
 		}
 	}
