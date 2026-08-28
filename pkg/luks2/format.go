@@ -217,8 +217,16 @@ func createMetadata(kdf, digestKDF *KDF, digestValue string, opts FormatOptions,
 
 // createDigest creates a digest for master key verification
 func createDigest(masterKey []byte, hashAlgo string) (*KDF, string, error) {
-	// Use PBKDF2 for digest with 600000 iterations (NIST recommendation)
-	digestIterations := 600000
+	// The cost is DigestIterations itself, not a second copy of its value, so
+	// what Format writes sits behind the assertion on that constant rather than
+	// reaching it through a separate test that happened to keep two spellings
+	// equal.
+	//
+	// That assertion is weaker than it sounds and the difference matters: it is
+	// a >= 100000 floor checked when the tests run, not a lock on 600000 and not
+	// anything enforced at runtime. Setting this constant to 100000 passes the
+	// whole suite today.
+	digestIterations := DigestIterations
 
 	salt, err := randomBytes(32)
 	if err != nil {

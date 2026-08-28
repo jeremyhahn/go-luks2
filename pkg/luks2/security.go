@@ -23,7 +23,18 @@ const (
 	MaxKeySize          = 512
 	MinSectorSize       = 512
 	MaxSectorSize       = 4096
-	DigestIterations    = 600000 // Increased from 100k for better security
+	// DigestIterations is the PBKDF2 iteration count for the master-key digest.
+	// createDigest reads it, so changing it changes what Format writes for newly
+	// formatted volumes; a volume already on disk carries its own count in its
+	// header and is unaffected.
+	//
+	// TestSecurityConstants asserts only that this is >= 100000. The specific
+	// value 600000 is not pinned by anything.
+	//
+	// The comment this replaced attributed 600000 to NIST SP 800-132. That
+	// standard sets a minimum iteration count far below this and does not
+	// specify 600000, so the attribution is dropped rather than restated.
+	DigestIterations = 600000
 )
 
 // Validation errors
