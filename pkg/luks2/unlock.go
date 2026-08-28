@@ -49,11 +49,14 @@ func Unlock(device string, passphrase []byte, name string) error {
 		return err
 	}
 
-	// Try each keyslot by priority
+	// Try each keyslot in scan order. Priority is NOT consulted -- see
+	// keyslotIDsInScanOrder -- so this comment must not be read as a claim that
+	// LUKS2 keyslot priority is honored. It is not.
 	var masterKey []byte
 	var unlocked bool
 
-	for _, keyslot := range metadata.Keyslots {
+	for _, id := range keyslotIDsInScanOrder(metadata.Keyslots) {
+		keyslot := metadata.Keyslots[id]
 		if keyslot.Type != "luks2" {
 			continue
 		}

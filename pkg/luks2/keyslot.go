@@ -5,8 +5,10 @@
 package luks2
 
 import (
+	"cmp"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 )
 
@@ -390,7 +392,8 @@ func KillSlot(device string, authPassphrase []byte, targetSlot int) error {
 
 	// Verify the auth passphrase works with any keyslot (authentication check)
 	authValid := false
-	for slotID, keyslot := range metadata.Keyslots {
+	for _, slotID := range keyslotIDsInScanOrder(metadata.Keyslots) {
+		keyslot := metadata.Keyslots[slotID]
 		_, err := unlockKeyslot(device, authPassphrase, keyslot, metadata.Digests)
 		if err == nil {
 			authValid = true
@@ -714,9 +717,69 @@ type KeyslotInfo struct {
 	Encryption string
 }
 
-// getMasterKey unlocks the volume and returns the master key
+// keyslotIDsInScanOrder returns every keyslot ID in the order unlock attempts
+// are made: ascending numeric ID, with any ID that does not parse with
+// strconv.Atoi after those, in lexical order. That tail is not only
+// non-numeric spellings -- a decimal string too large for an int lands there
+// too, because Atoi reports it as an error.
+//
+// Ranging over the keyslot map directly leaves the order to Go's randomized map
+// iteration, which costs twice. Every attempt is a full derivation -- a failed
+// one costs exactly as much as a successful one, because the digest comparison
+// is the only rejection point -- and the credential in use is almost always in
+// the lowest-numbered slot, so a random start pays O(n/2) derivations where
+// ascending order pays one. It also makes the time to open a volume differ on
+// every call for reasons the caller cannot see or control.
+//
+// The ordering is TOTAL: every key in the map is returned exactly once. An ID
+// that does not parse as a number is still returned rather than skipped,
+// because dropping it would make its keyslot unreachable, and an unreachable
+// keyslot is a credential that can no longer open the volume.
+//
+// Keyslot priority is deliberately not consulted here. No unlock path reads
+// that field -- ListKeyslots reads it, but only to report it -- and honoring it
+// would change WHICH keyslots are tried rather than merely the order, which is
+// a different decision from this one. See #56: the values written for it are
+// inverted with respect to LUKS2, so it must not be wired up as it stands.
+func keyslotIDsInScanOrder(keyslots map[string]*Keyslot) []string {
+	ids := make([]string, 0, len(keyslots))
+	for id := range keyslots {
+		ids = append(ids, id)
+	}
+
+	slices.SortFunc(ids, func(a, b string) int {
+		na, errA := strconv.Atoi(a)
+		nb, errB := strconv.Atoi(b)
+		switch {
+		case errA == nil && errB == nil:
+			// Two spellings of one number ("7" and "007") parse equal. Ties
+			// must break on the raw string: slices.SortFunc is not stable and
+			// the input order comes from the map, so leaving them equal would
+			// hand exactly this header back to the randomness the ordering
+			// exists to remove.
+			if c := cmp.Compare(na, nb); c != 0 {
+				return c
+			}
+			return cmp.Compare(a, b)
+		case errA == nil:
+			return -1
+		case errB == nil:
+			return 1
+		default:
+			return cmp.Compare(a, b)
+		}
+	})
+
+	return ids
+}
+
+// getMasterKey unlocks the volume and returns the master key.
+//
+// Keyslots are tried in the order given by keyslotIDsInScanOrder; every slot is
+// tried before the passphrase is reported wrong.
 func getMasterKey(device string, passphrase []byte, metadata *LUKS2Metadata) ([]byte, error) {
-	for _, keyslot := range metadata.Keyslots {
+	for _, id := range keyslotIDsInScanOrder(metadata.Keyslots) {
+		keyslot := metadata.Keyslots[id]
 		if keyslot.Type != "luks2" {
 			continue
 		}
