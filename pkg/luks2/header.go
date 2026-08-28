@@ -164,7 +164,7 @@ func writeHeaderInternal(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2M
 	}
 
 	// Update header size
-	hdr.HeaderSize = uint64(LUKS2HeaderSize + jsonSize) // #nosec G115 - header size is bounded by LUKS2 spec
+	hdr.HeaderSize = uint64(LUKS2HeaderSize + jsonSize) // #nosec G115 -- bounded on read by the headerAreaSize check against LUKS2HeaderMaxSize
 
 	// Calculate and set checksum
 	if err := calculateHeaderChecksum(hdr, jsonData, jsonSize); err != nil {
@@ -254,6 +254,47 @@ func CreateBinaryHeader(opts FormatOptions) (*LUKS2BinaryHeader, error) {
 	return hdr, nil
 }
 
+// LUKS2HeaderMaxSize bounds the header size accepted from disk. The LUKS2
+// on-disk format allows a metadata area up to 4 MiB per copy; anything beyond
+// that is a malformed or hostile header rather than a volume this library
+// wrote.
+const LUKS2HeaderMaxSize = 0x400000 // 4 MiB
+
+// headerAreaSize returns the on-disk header size, bounded.
+//
+// hdr.HeaderSize is a uint64 read straight off the device before anything has
+// been authenticated -- magic and version are the only checks in front of it,
+// and both are trivially satisfiable by anyone who controls the device. It then
+// sizes two allocations and two reads.
+//
+// Unbounded, a crafted value PANICS rather than returning an error, which no
+// caller can defend against because ReadHeader returns an error they never get.
+// Measured on 9132403, patching only the eight bytes at offset 8:
+//
+//	HeaderSize 0, 100     panic: index out of range [448]     (validateHeaderChecksum)
+//	HeaderSize 510, 511   panic: index out of range [510], [511]
+//	HeaderSize 2^62, 2^64-1   panic: makeslice: len out of range
+//
+// The checksum-field write needs 512 bytes, since the field sits at 0x1C0 and is
+// 64 wide. Below that the first invalid index is 448 while the buffer is shorter
+// than 448, and the buffer's own length once it is longer -- which is why the
+// reported index moves. The bound enforced HERE is LUKS2HeaderSize (4096), not
+// 512: a header area with no room for any JSON is malformed whether or not the
+// checksum write would have fit.
+func headerAreaSize(hdr *LUKS2BinaryHeader) (int, error) {
+	size, err := SafeUint64ToInt(hdr.HeaderSize)
+	if err != nil {
+		return 0, fmt.Errorf("%w: header size %d: %v", ErrInvalidHeader, hdr.HeaderSize, err)
+	}
+
+	if size <= LUKS2HeaderSize || size > LUKS2HeaderMaxSize {
+		return 0, fmt.Errorf("%w: header size %d is outside the %d..%d byte range",
+			ErrInvalidHeader, size, LUKS2HeaderSize+1, LUKS2HeaderMaxSize)
+	}
+
+	return size, nil
+}
+
 // validateHeaderChecksum validates the header checksum
 func validateHeaderChecksum(hdr *LUKS2BinaryHeader, r io.ReaderAt) error {
 	// Safe conversion of header offset
@@ -263,12 +304,25 @@ func validateHeaderChecksum(hdr *LUKS2BinaryHeader, r io.ReaderAt) error {
 	}
 
 	// Read entire header area
-	headerData := make([]byte, hdr.HeaderSize)
+	headerSize, err := headerAreaSize(hdr)
+	if err != nil {
+		return err
+	}
+	headerData := make([]byte, headerSize)
 	if _, err := r.ReadAt(headerData, headerOffset); err != nil {
 		return fmt.Errorf("failed to read header for checksum: %w", err)
 	}
 
-	// Zero out checksum field
+	// Zero out checksum field.
+	//
+	// This writes fixed indices 0x1C0..0x1FF into headerData without checking
+	// its length. What makes that safe is the headerAreaSize call above, which
+	// rejects any HeaderSize at or below LUKS2HeaderSize, so headerData is
+	// always at least 4097 bytes. The enforcer is named here rather than left
+	// implicit because it is not visible at this line, and a reader who does not
+	// know where the bound lives has no way to tell a safe fixed index from a
+	// lucky one. Anything that reaches this loop by another route must bound
+	// len(headerData) first -- see #62.
 	checksumOffset := 0x1C0 // Offset of Checksum field
 
 	for i := 0; i < 64; i++ {
@@ -321,10 +375,10 @@ func calculateHeaderChecksum(hdr *LUKS2BinaryHeader, jsonData []byte, jsonSize i
 
 // readJSONMetadata reads the JSON metadata from the header
 func readJSONMetadata(r io.ReaderAt, hdr *LUKS2BinaryHeader) (*LUKS2Metadata, error) {
-	// Safe conversion of header size
-	headerSizeInt, err := SafeUint64ToInt(hdr.HeaderSize)
+	// Bounded conversion of header size
+	headerSizeInt, err := headerAreaSize(hdr)
 	if err != nil {
-		return nil, fmt.Errorf("invalid header size: %w", err)
+		return nil, err
 	}
 	jsonSize := headerSizeInt - LUKS2HeaderSize
 	jsonData := make([]byte, jsonSize)
