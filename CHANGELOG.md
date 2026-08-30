@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8-alpha] - 2026-08-30
+
 ### Fixed
 
 - **LUKS2 conformance, write side (#28).** A container this library wrote was
