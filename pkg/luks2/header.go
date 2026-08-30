@@ -17,8 +17,151 @@ import (
 	"github.com/google/uuid"
 )
 
-// ReadHeader reads and validates a LUKS2 header from a device
+// LUKS2 header copy locations. LUKS2 stores the header twice so a torn or
+// damaged primary can be recovered from the secondary; the two copies differ in
+// their magic (see LUKS2SecondaryMagic) and in the hdr_offset they record.
+const (
+	// LUKS2PrimaryHeaderOffset is where the first header copy starts.
+	LUKS2PrimaryHeaderOffset int64 = 0
+
+	// LUKS2SecondaryHeaderOffset is where the second header copy starts for the
+	// 16 KiB metadata size this library writes. It is the primary copy's total
+	// area size, not a free-standing constant: a container written with a larger
+	// metadata area puts its second copy correspondingly further out.
+	LUKS2SecondaryHeaderOffset int64 = 0x4000
+)
+
+// ReadHeader reads and validates the PRIMARY LUKS2 header from a device.
+// For the second copy -- which carries a different magic -- see
+// ReadSecondaryHeader.
 func ReadHeader(device string) (*LUKS2BinaryHeader, *LUKS2Metadata, error) {
+	return readHeaderCopy(device, LUKS2PrimaryHeaderOffset)
+}
+
+// ReadSecondaryHeader reads and validates the SECOND LUKS2 header copy, the one
+// carrying the SKUL magic.
+//
+// It exists because writing a spec-correct backup header is only half of a
+// recovery path: without a reader that knows the secondary magic, this library
+// would produce a copy it could not itself open, which is the state #64
+// describes.
+//
+// The header it returns is a SECONDARY header: its magic is LUKS2SecondaryMagic
+// and its hdr_offset is the copy's own offset, because that is what is on disk.
+// Callers repairing a damaged primary should use RestorePrimaryHeader rather
+// than assembling the sequence themselves; writing this header back is safe --
+// writeHeaderInternal stamps each copy's identity -- but the named operation
+// takes the lock for the whole read-and-write.
+//
+// # WHERE THE COPY IS
+//
+// The second copy begins where the first one ends, so its offset is the
+// container's header area size. When the primary header is readable it simply
+// says so, and that is the first thing tried.
+//
+// When it is NOT readable -- which is the only situation this function exists
+// for -- the size cannot be assumed. Defaulting to LUKS2SecondaryHeaderOffset
+// would be right for every container this library formats and wrong for a legal
+// container formatted with a larger metadata area, and wrong in the worst
+// possible place: recovery would be impossible for exactly the containers whose
+// geometry this branch newly taught the reader to accept.
+//
+// So the finite set of legal area sizes is probed instead. There are nine of
+// them (16 KiB through 4 MiB, powers of two), and a candidate is accepted only
+// when the copy found there passes EVERY check readHeaderCopy makes -- secondary
+// magic, version, hdr_offset equal to the probed offset, header size equal to
+// it as well, checksum over the whole area, and a parseable JSON body. Guessing
+// an offset is therefore not a way to be handed someone else's bytes; a wrong
+// guess is rejected, not tolerated.
+func ReadSecondaryHeader(device string) (*LUKS2BinaryHeader, *LUKS2Metadata, error) {
+	return readSecondaryHeader(device)
+}
+
+// RestorePrimaryHeader rebuilds a damaged primary header from the secondary
+// copy, and is the operation ReadSecondaryHeader's documentation describes.
+//
+// It exists because "read the secondary and write it back" is a sequence a
+// caller should not have to get right. The header returned by
+// ReadSecondaryHeader is a SECONDARY header -- that is what it was asked for --
+// and what makes writing it back safe is that writeHeaderInternal stamps each
+// copy's identity itself. Naming the operation puts that guarantee behind an
+// API instead of behind a comment, and makes it one locked step rather than a
+// read and a write with a window between them.
+//
+// The secondary copy is validated in full before anything is written: magic,
+// version, recorded offset, header size, checksum and JSON body. A container
+// whose second copy is also damaged is left exactly as it was.
+func RestorePrimaryHeader(device string) error {
+	if err := ValidateDevicePath(device); err != nil {
+		return err
+	}
+
+	lock, err := AcquireFileLock(device)
+	if err != nil {
+		return fmt.Errorf("failed to acquire lock: %w", err)
+	}
+	defer func() { _ = lock.Release() }()
+
+	hdr, metadata, err := readSecondaryHeader(device)
+	if err != nil {
+		return fmt.Errorf("cannot restore the primary header: %w", err)
+	}
+
+	return writeHeaderInternal(device, hdr, metadata)
+}
+
+// readSecondaryHeader is ReadSecondaryHeader without the device-path check, so
+// RestorePrimaryHeader can call it while holding the lock.
+func readSecondaryHeader(device string) (*LUKS2BinaryHeader, *LUKS2Metadata, error) {
+	// The primary, when it is readable, states the area size outright.
+	if hdr, _, err := ReadHeader(device); err == nil {
+		if area, err := headerAreaSize(hdr); err == nil {
+			return readHeaderCopy(device, int64(area))
+		}
+	}
+
+	// The primary is damaged. Probe every legal offset; smallest first, which is
+	// the overwhelmingly common geometry.
+	var firstErr error
+	for _, offset := range legalHeaderAreaSizes() {
+		hdr, metadata, err := readHeaderCopy(device, offset)
+		if err == nil {
+			return hdr, metadata, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+
+	return nil, nil, fmt.Errorf("%w: no valid secondary header at any legal offset (%d..%d): %v",
+		ErrInvalidHeader, LUKS2HeaderMinSize, LUKS2HeaderMaxSize, firstErr)
+}
+
+// legalHeaderAreaSizes returns the header area sizes LUKS2 admits, ascending:
+// the powers of two from LUKS2HeaderMinSize to LUKS2HeaderMaxSize.
+//
+// The list doubles as the list of legal secondary header offsets, because the
+// second copy starts where the first one ends. It is generated rather than
+// written out so that the two constants remain the only place the range is
+// stated.
+func legalHeaderAreaSizes() []int64 {
+	var sizes []int64
+	for size := int64(LUKS2HeaderMinSize); size <= LUKS2HeaderMaxSize; size *= 2 {
+		sizes = append(sizes, size)
+	}
+	return sizes
+}
+
+// expectedMagic returns the magic a header copy at the given offset must carry.
+func expectedMagic(offset int64) string {
+	if offset == LUKS2PrimaryHeaderOffset {
+		return LUKS2Magic
+	}
+	return LUKS2SecondaryMagic
+}
+
+// readHeaderCopy reads and validates one header copy at a known offset.
+func readHeaderCopy(device string, offset int64) (*LUKS2BinaryHeader, *LUKS2Metadata, error) {
 	// Validate device path
 	if err := ValidateDevicePath(device); err != nil {
 		return nil, nil, err
@@ -31,14 +174,19 @@ func ReadHeader(device string) (*LUKS2BinaryHeader, *LUKS2Metadata, error) {
 	defer func() { _ = f.Close() }()
 
 	// Read binary header (LUKS2 uses big-endian for integer fields)
+	raw := make([]byte, LUKS2HeaderSize)
+	if _, err := f.ReadAt(raw, offset); err != nil {
+		return nil, nil, fmt.Errorf("failed to read header: %w", err)
+	}
 	var hdr LUKS2BinaryHeader
-	if err := binary.Read(f, binary.BigEndian, &hdr); err != nil {
+	if err := binary.Read(bytes.NewReader(raw), binary.BigEndian, &hdr); err != nil {
 		return nil, nil, fmt.Errorf("failed to read header: %w", err)
 	}
 
-	// Validate magic
-	if !bytes.Equal(hdr.Magic[:], []byte(LUKS2Magic)) {
-		return nil, nil, fmt.Errorf("invalid LUKS magic: not a LUKS2 device")
+	// Validate magic -- which copy this is decides which magic is correct
+	if !bytes.Equal(hdr.Magic[:], []byte(expectedMagic(offset))) {
+		return nil, nil, fmt.Errorf("%w: invalid LUKS magic at offset %d: not a LUKS2 device",
+			ErrInvalidHeader, offset)
 	}
 
 	// Validate version
@@ -46,13 +194,42 @@ func ReadHeader(device string) (*LUKS2BinaryHeader, *LUKS2Metadata, error) {
 		return nil, nil, fmt.Errorf("unsupported LUKS version: %d", hdr.Version)
 	}
 
+	// The hdr_offset field must agree with where this copy was actually found.
+	//
+	// The caller already knows the offset; the field is attacker-controlled.
+	// Letting the downstream reads re-derive the offset from the field instead
+	// of using the one they were given is what allowed a header read at 0x4000
+	// to be paired with the JSON at 0, and it makes headerAreaOffset the source
+	// of truth for a question the caller had already answered -- the exact
+	// confusion #63 and #64 exist to end. headerAreaOffset is kept as the
+	// validator that bounds the field and names a bad value; from here on, the
+	// `offset` parameter is what addresses the device.
+	recorded, err := headerAreaOffset(&hdr)
+	if err != nil {
+		return nil, nil, err
+	}
+	if recorded != offset {
+		return nil, nil, fmt.Errorf("%w: header copy at offset %d records hdr_offset %d",
+			ErrInvalidHeader, offset, recorded)
+	}
+
+	// A secondary copy begins where the primary ends, so its offset and the
+	// header area size are the same number. Checking it here is what lets
+	// ReadSecondaryHeader probe candidate offsets safely: a copy that merely
+	// happens to carry the SKUL magic at some offset is still rejected unless
+	// the container's own geometry agrees that the copy belongs there.
+	if offset != LUKS2PrimaryHeaderOffset && hdr.HeaderSize != uint64(offset) { // #nosec G115 -- offset is a positive legal area size
+		return nil, nil, fmt.Errorf("%w: secondary header at offset %d records header size %d, want %d",
+			ErrInvalidHeader, offset, hdr.HeaderSize, offset)
+	}
+
 	// Validate checksum
-	if err := validateHeaderChecksum(&hdr, f); err != nil {
+	if err := validateHeaderChecksum(&hdr, f, offset); err != nil {
 		return nil, nil, err
 	}
 
 	// Read JSON metadata
-	metadata, err := readJSONMetadata(f, &hdr)
+	metadata, err := readJSONMetadata(f, &hdr, offset)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -151,20 +328,81 @@ func writeHeaderInternal(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2M
 	}
 	defer func() { _ = f.Close() }()
 
+	// The header area size is FIXED by the container; it is never recomputed
+	// from how much metadata happens to need writing. See headerAreaSizeForWrite.
+	area, err := headerAreaSizeForWrite(hdr)
+	if err != nil {
+		return err
+	}
+	jsonSize := area - LUKS2HeaderSize
+	secondaryOffset := int64(area)
+
+	// Guarantee the mandatory LUKS2 JSON objects exist before they are encoded.
+	// A nil map here becomes `null` on disk and cryptsetup rejects the whole
+	// header; see LUKS2Metadata.ensureRequiredObjects.
+	metadata.ensureRequiredObjects()
+
+	// config.json_size must equal the JSON area actually written -- cryptsetup
+	// checks it against hdr_size - 4096. It is set from `area` here, before the
+	// marshal, rather than trusted from the caller: createMetadata hardcoded
+	// LUKS2DefaultSize, which was right only for the default geometry and only
+	// by coincidence.
+	if metadata.Config != nil {
+		metadata.Config.JSONSize = formatSize(int64(jsonSize))
+	}
+
 	// Marshal JSON metadata
 	jsonData, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal metadata: %w", err)
 	}
 
-	// Calculate JSON size (must be power of 2, at least 16KB)
-	jsonSize := nextPowerOf2(len(jsonData) + 1) // +1 for null terminator
-	if jsonSize < LUKS2DefaultSize {
-		jsonSize = LUKS2DefaultSize
+	// Refuse metadata that does not fit rather than enlarging the area to hold
+	// it. Growing is not an option: the keyslots offset (2 x area) and the data
+	// offset are already fixed on this device, so a larger area would move the
+	// second header copy on top of whatever now follows it -- for the geometry
+	// this library writes, that is the keyslot key material at 0x8000, which
+	// would destroy every key on the device.
+	//
+	// The previous code did grow, via nextPowerOf2(len(jsonData)+1) floored at
+	// LUKS2DefaultSize. MEASURED: at 15 keyslots the JSON reaches 8390 bytes,
+	// nextPowerOf2 jumps to 16384, HeaderSize becomes 20480, and the backup
+	// header written at 16384 lands INSIDE the primary area and overwrites its
+	// own JSON tail. 4096+16384 = 20480 is also not a power of two, so the size
+	// was not a legal LUKS2 metadata size either.
+	if len(jsonData)+1 > jsonSize {
+		return fmt.Errorf("%w: %d bytes of JSON metadata plus its terminator do not fit the %d-byte JSON area of this container's %d-byte header (remove keyslots or tokens, or reformat with a larger metadata area)",
+			ErrMetadataTooLarge, len(jsonData), jsonSize, area)
 	}
 
 	// Update header size
-	hdr.HeaderSize = uint64(LUKS2HeaderSize + jsonSize) // #nosec G115 -- bounded on read by the headerAreaSize check against LUKS2HeaderMaxSize
+	hdr.HeaderSize = uint64(area) // #nosec G115 -- headerAreaSizeForWrite bounds this to LUKS2HeaderMaxSize
+
+	// THE WRITER OWNS EACH COPY'S IDENTITY. What distinguishes the two copies --
+	// the magic and the recorded hdr_offset -- is a function of WHERE each one
+	// is written, so it is stamped here rather than taken from the caller.
+	//
+	// The backup copy was already handled this way. The primary was not: it was
+	// written with whatever identity the caller's header happened to carry,
+	// because the only place that ever set LUKS2Magic was CreateBinaryHeader on
+	// the format path. That asymmetry is what broke recovery. A header obtained
+	// from ReadSecondaryHeader carries SKUL and hdr_offset 0x4000, and handing
+	// it back to WriteHeader -- the documented way to repair a damaged primary --
+	// wrote those secondary-only fields at offset zero:
+	//
+	//	bytes now at offset 0:      "SKUL\xba\xbe"
+	//	bytes now at offset 0x4000: "SKUL\xba\xbe"
+	//	primary still unreadable after recovery: invalid LUKS magic at offset 0
+	//
+	// so the repair left the container with no valid primary at all and the
+	// volume no longer opened. Normalizing here fixes every caller at once
+	// instead of the one that reported it, and makes the two copies symmetric:
+	// the writer decides what each copy IS, the caller supplies only content.
+	//
+	// The caller's header is normalized in place, as HeaderSize already is, so
+	// what it holds afterwards describes the primary copy that was written.
+	hdr.HeaderOffset = uint64(LUKS2PrimaryHeaderOffset) // #nosec G115 -- zero
+	copy(hdr.Magic[:], LUKS2Magic)
 
 	// Calculate and set checksum
 	if err := calculateHeaderChecksum(hdr, jsonData, jsonSize); err != nil {
@@ -187,14 +425,23 @@ func writeHeaderInternal(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2M
 		return fmt.Errorf("failed to write padding: %w", err)
 	}
 
-	// Write backup header at offset 0x4000
-	if _, err := f.Seek(0x4000, io.SeekStart); err != nil {
+	// Write backup header at the secondary offset, which is the header AREA
+	// SIZE -- the second copy begins where the first one ends. Seeking to a
+	// constant 0x4000 was correct only while the area was always 0x4000, and
+	// silently wrong the moment it was not.
+	if _, err := f.Seek(secondaryOffset, io.SeekStart); err != nil {
 		return fmt.Errorf("failed to seek to backup header: %w", err)
 	}
 
-	// Update header offset for backup
+	// Update header offset and MAGIC for the backup copy. The magic is not a
+	// copy of the primary's: LUKS2 requires "SKUL\xba\xbe" on the second copy,
+	// and cryptsetup that finds the primary magic there does not recognize the
+	// header at all ("LUKS2 header read failed (-22)"), so the copy kept for
+	// repairing a damaged primary cannot perform the repair. Measured with
+	// cryptsetup 2.7.0; see #64.
 	backupHdr := *hdr
-	backupHdr.HeaderOffset = 0x4000
+	backupHdr.HeaderOffset = uint64(secondaryOffset) // #nosec G115 -- bounded by headerAreaSizeForWrite
+	copy(backupHdr.Magic[:], LUKS2SecondaryMagic)
 
 	// Recalculate checksum for backup header
 	if err := calculateHeaderChecksum(&backupHdr, jsonData, jsonSize); err != nil {
@@ -260,6 +507,44 @@ func CreateBinaryHeader(opts FormatOptions) (*LUKS2BinaryHeader, error) {
 // wrote.
 const LUKS2HeaderMaxSize = 0x400000 // 4 MiB
 
+// headerAreaSizeForWrite returns the header area size a write must use.
+//
+// The area is a property of the CONTAINER, fixed when it was formatted, not a
+// function of how much metadata a particular write happens to produce. Two
+// things on disk are already sized against it: the keyslots begin at 2 x area,
+// and the data segment begins after the keyslots. Neither can move, so the area
+// can neither grow nor shrink for the life of the container.
+//
+// hdr.HeaderSize carries it. For a header that has never been written --
+// CreateBinaryHeader leaves it zero -- the area is LUKS2HeaderMinSize, which is
+// the geometry Format lays out (keyslot material at 0x8000, immediately after
+// two 0x4000 copies).
+//
+// The value is required to be a POWER OF TWO in LUKS2HeaderMinSize..
+// LUKS2HeaderMaxSize. LUKS2 admits only 16 KiB, 32 KiB, ... 4 MiB, and a
+// container recording anything else is malformed; propagating such a size would
+// place the second header copy at an offset no LUKS2 reader looks at. The
+// power-of-two requirement is also what makes every legal secondary offset
+// 16 KiB-aligned, so what this writer produces and what headerAreaOffset
+// accepts on read describe the same set.
+func headerAreaSizeForWrite(hdr *LUKS2BinaryHeader) (int, error) {
+	area := LUKS2HeaderMinSize
+	if hdr.HeaderSize != 0 {
+		size, err := SafeUint64ToInt(hdr.HeaderSize)
+		if err != nil {
+			return 0, fmt.Errorf("%w: header size %d: %v", ErrInvalidHeader, hdr.HeaderSize, err)
+		}
+		area = size
+	}
+
+	if area < LUKS2HeaderMinSize || area > LUKS2HeaderMaxSize || !isPowerOf2(area) {
+		return 0, fmt.Errorf("%w: header area size %d is not a power of two in %d..%d",
+			ErrInvalidHeader, area, LUKS2HeaderMinSize, LUKS2HeaderMaxSize)
+	}
+
+	return area, nil
+}
+
 // headerAreaSize returns the on-disk header size, bounded.
 //
 // hdr.HeaderSize is a uint64 read straight off the device before anything has
@@ -295,14 +580,44 @@ func headerAreaSize(hdr *LUKS2BinaryHeader) (int, error) {
 	return size, nil
 }
 
-// validateHeaderChecksum validates the header checksum
-func validateHeaderChecksum(hdr *LUKS2BinaryHeader, r io.ReaderAt) error {
-	// Safe conversion of header offset
-	headerOffset, err := SafeUint64ToInt64(hdr.HeaderOffset)
+// headerAreaOffset returns the on-disk offset of this header copy, bounded.
+//
+// hdr.HeaderOffset is the sibling of the HeaderSize field bounded by
+// headerAreaSize, and it arrives the same way: eight bytes read straight off an
+// attacker-controlled device with only magic and version in front of them. It
+// then feeds every ReadAt this package performs on the header area. Overflow
+// was already checked; RANGE was not, and the type's own documentation ("0 or
+// 0x4000") was the only thing recording the expectation (#63).
+//
+// What is accepted: 0 for the primary copy, or a 16 KiB-aligned offset from
+// LUKS2HeaderMinSize to LUKS2HeaderMaxOffset for the secondary. The range is
+// the whole legal span rather than the single value 0x4000 because a container
+// formatted with a larger metadata area (cryptsetup --luks2-metadata-size)
+// legitimately places its second copy further out, and this library must still
+// be able to read it.
+func headerAreaOffset(hdr *LUKS2BinaryHeader) (int64, error) {
+	offset, err := SafeUint64ToInt64(hdr.HeaderOffset)
 	if err != nil {
-		return fmt.Errorf("invalid header offset: %w", err)
+		return 0, fmt.Errorf("%w: header offset %d: %v", ErrInvalidHeader, hdr.HeaderOffset, err)
 	}
 
+	if offset == LUKS2PrimaryHeaderOffset {
+		return offset, nil
+	}
+
+	if offset < LUKS2HeaderMinSize || offset > LUKS2HeaderMaxOffset || offset%LUKS2HeaderMinSize != 0 {
+		return 0, fmt.Errorf("%w: header offset %d is not 0 and not a %d-aligned offset in %d..%d",
+			ErrInvalidHeader, offset, LUKS2HeaderMinSize, LUKS2HeaderMinSize, LUKS2HeaderMaxOffset)
+	}
+
+	return offset, nil
+}
+
+// validateHeaderChecksum validates the checksum of the header copy at
+// headerOffset. The offset is a parameter rather than something re-derived from
+// hdr.HeaderOffset: the caller knows where it read the copy from, and the field
+// is attacker-controlled. readHeaderCopy has already required the two to agree.
+func validateHeaderChecksum(hdr *LUKS2BinaryHeader, r io.ReaderAt, headerOffset int64) error {
 	// Read entire header area
 	headerSize, err := headerAreaSize(hdr)
 	if err != nil {
@@ -373,8 +688,10 @@ func calculateHeaderChecksum(hdr *LUKS2BinaryHeader, jsonData []byte, jsonSize i
 	return nil
 }
 
-// readJSONMetadata reads the JSON metadata from the header
-func readJSONMetadata(r io.ReaderAt, hdr *LUKS2BinaryHeader) (*LUKS2Metadata, error) {
+// readJSONMetadata reads the JSON metadata that follows the header copy at
+// headerOffset. As with validateHeaderChecksum, the offset is passed in rather
+// than re-derived from the attacker-controlled hdr.HeaderOffset field.
+func readJSONMetadata(r io.ReaderAt, hdr *LUKS2BinaryHeader, headerOffset int64) (*LUKS2Metadata, error) {
 	// Bounded conversion of header size
 	headerSizeInt, err := headerAreaSize(hdr)
 	if err != nil {
@@ -383,11 +700,6 @@ func readJSONMetadata(r io.ReaderAt, hdr *LUKS2BinaryHeader) (*LUKS2Metadata, er
 	jsonSize := headerSizeInt - LUKS2HeaderSize
 	jsonData := make([]byte, jsonSize)
 
-	// Safe conversion of header offset
-	headerOffset, err := SafeUint64ToInt64(hdr.HeaderOffset)
-	if err != nil {
-		return nil, fmt.Errorf("invalid header offset: %w", err)
-	}
 	offset := headerOffset + LUKS2HeaderSize
 	if _, err := r.ReadAt(jsonData, offset); err != nil {
 		return nil, fmt.Errorf("failed to read JSON metadata: %w", err)

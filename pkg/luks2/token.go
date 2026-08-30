@@ -179,10 +179,15 @@ func RemoveToken(device string, tokenID int) error {
 	// Remove token
 	delete(metadata.Tokens, tokenKey)
 
-	// Clean up empty map
-	if len(metadata.Tokens) == 0 {
-		metadata.Tokens = nil
-	}
+	// The map is deliberately left in place when it empties. Nilling it out
+	// existed to make the `tokens,omitempty` tag drop the key entirely, which
+	// is the opposite of what LUKS2 wants: tokens is mandatory and a container
+	// with no tokens carries `{}`.
+	//
+	// ensureRequiredObjects would restore the empty map before this metadata
+	// reached the disk either way, so removing the nilling is not what makes
+	// the container valid -- it removes a second place that has to be reasoned
+	// about to see that it stays valid.
 
 	// Increment sequence ID
 	hdr.SequenceID++

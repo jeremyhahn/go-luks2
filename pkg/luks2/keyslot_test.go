@@ -106,16 +106,29 @@ func TestFindAvailableKeyslot(t *testing.T) {
 func TestCalculateNextKeyslotOffset(t *testing.T) {
 	tests := []struct {
 		name           string
+		keyslotsStart  int64
 		keyslots       map[string]*Keyslot
 		expectedOffset int64
 	}{
 		{
 			name:           "no existing keyslots",
+			keyslotsStart:  0x8000,
 			keyslots:       map[string]*Keyslot{},
-			expectedOffset: 0x8000, // 32KB (after headers)
+			expectedOffset: 0x8000, // 32KB: twice a 16 KiB header area
 		},
 		{
-			name: "one keyslot",
+			// The start is the container's, not this library's. A 32 KiB
+			// metadata area puts the keyslots at 0x10000, and an empty
+			// container of that shape must place its first keyslot there
+			// rather than at the 0x8000 this function used to hardcode.
+			name:           "no existing keyslots, 32 KiB metadata area",
+			keyslotsStart:  0x10000,
+			keyslots:       map[string]*Keyslot{},
+			expectedOffset: 0x10000,
+		},
+		{
+			name:          "one keyslot",
+			keyslotsStart: 0x8000,
 			keyslots: map[string]*Keyslot{
 				"0": {
 					Area: &KeyslotArea{
@@ -127,7 +140,8 @@ func TestCalculateNextKeyslotOffset(t *testing.T) {
 			expectedOffset: 294912, // 32768 + 262144 = 294912
 		},
 		{
-			name: "multiple keyslots",
+			name:          "multiple keyslots",
+			keyslotsStart: 0x8000,
 			keyslots: map[string]*Keyslot{
 				"0": {
 					Area: &KeyslotArea{
@@ -152,7 +166,7 @@ func TestCalculateNextKeyslotOffset(t *testing.T) {
 				Keyslots: tt.keyslots,
 			}
 
-			offset, err := calculateNextKeyslotOffset(metadata)
+			offset, err := calculateNextKeyslotOffset(metadata, tt.keyslotsStart)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}

@@ -7,6 +7,136 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **LUKS2 conformance, write side (#28).** A container this library wrote was
+  refused outright by cryptsetup — `cryptsetup isLuks` exited 1 and `luksDump`
+  reported "is not a valid LUKS device", so `luksDump`, `luksHeaderBackup`,
+  `luksChangeKey` and `luksOpen` were all unavailable and a volume had **no
+  recovery path**. Three defects, each measured against cryptsetup 2.7.0:
+  - `tokens` was omitted from the JSON metadata when empty. LUKS2 requires the
+    object to be PRESENT (`{}` when there are none); cryptsetup reported
+    `JSON area "" is missing "tokens" (object) specification` and failed
+    validation. `tokens` no longer carries `omitempty`, and every mandatory
+    LUKS2 object is guaranteed non-nil before the metadata is encoded, so none
+    of them can reach the disk as `null` either
+  - `config.keyslots_size` stored the keyslots area's END OFFSET instead of its
+    SIZE. cryptsetup reads it as a size and rejected the header with
+    `keyslots_size is too large 16777216 (bytes). Data offset: 16777216,
+    keyslots offset: 32768`. The correct value for this library's geometry is
+    16744448. `AddKey` carried the same defect and additionally SHRANK the
+    reserved area to the end of the slot it had just added; it now leaves the
+    field alone
+  - the secondary header at offset 0x4000 carried the PRIMARY magic
+    (`LUKS\xba\xbe`) where LUKS2 requires `SKUL\xba\xbe` (#64). Measured: this
+    alone does not stop cryptsetup from opening a container whose primary
+    header is intact, but it destroys the backup — with the primary header
+    destroyed, a correct secondary still opens the volume and a
+    primary-magic secondary is "not a valid LUKS device"
+- **LUKS2 conformance, read side (#73).** `verifyMasterKey` derived the digest
+  to a hardcoded 32 bytes, so a cryptsetup-written `--hash sha512` volume —
+  which stores a 64-byte digest — returned "incorrect passphrase" FOR THE
+  CORRECT PASSPHRASE. The verifier now derives to the length ACTUALLY STORED in
+  the header, which is what cryptsetup does. Containers written by earlier
+  versions of this library (32-byte digest labeled `sha512`) therefore keep
+  opening. Which lengths are derived to is a **whitelist**, not a range: the
+  length the digest's declared hash implies, plus a single 32-byte carve-out for
+  those older containers. A crafted header therefore cannot drive a degenerate
+  or unbounded derivation, and a 16-byte digest labeled `sha512` — which nothing
+  legitimate writes — is refused rather than tolerated
+- **Digest scanning no longer depends on map iteration order (#58).**
+  `verifyMasterKey` returned on the first digest whose derivation or decode
+  errored instead of trying the next. Under `GODEBUG=fips140=only`, where
+  `DeriveKey` refuses an argon2 KDF, whether a volume opened depended on which
+  digest Go's randomized map iteration happened to visit first. Every digest is
+  now tried, and one indistinguishable failure is returned once the set is
+  exhausted
+- **The second header copy could be written on top of the first.**
+  `writeHeaderInternal` sized the header area from the metadata
+  (`nextPowerOf2(len(jsonData)+1)`, floored at 12288) while writing the backup
+  copy at a hardcoded 0x4000. MEASURED: a keyslot costs 514 bytes of indented
+  JSON, so at **15 keyslots** — well inside the 32 LUKS2 permits, and reachable
+  with a single moderately sized token — the JSON passes 8192, the area grows to
+  20480, and the backup lands *inside* the primary and overwrites its own JSON
+  tail. The result could not be read back by this library either
+  (`header checksum mismatch`), and 4096+16384 = 20480 is not a power of two, so
+  it was not a legal LUKS2 metadata size to begin with.
+  The area is now taken as **fixed by the container** and metadata that does not
+  fit is refused with the new `ErrMetadataTooLarge`. It is deliberately not
+  grown: the keyslots begin at 2 × area and the data segment after them, both
+  already fixed on disk, so enlarging the area would move the second copy onto
+  the keyslot key material at 0x8000 and destroy every key on the device. The
+  secondary offset is now derived from the area for both the write and
+  `ReadSecondaryHeader`, and `config.json_size` is written from the same area
+  instead of a hardcoded constant
+- **The documented recovery flow corrupted the container it was repairing.**
+  `ReadSecondaryHeader` returns a *secondary* header — `SKUL` magic, nonzero
+  `hdr_offset` — and writing it back, which is how its own documentation said to
+  repair a damaged primary, wrote those secondary-only fields at offset zero.
+  MEASURED: `SKUL` ended up at both 0 and 0x4000, leaving no valid primary, and
+  the volume no longer opened. The corruption was **asymmetric** — cryptsetup
+  shrugs it off (`isLuks` still exits 0; it silently falls back to the intact
+  secondary) while this library, whose reader looks only at offset 0, could not
+  open the container at all.
+  Root cause was an asymmetry in the writer: it stamped the *backup* copy's
+  magic and offset itself but took the *primary*'s from whatever the caller
+  passed, because the only place setting `LUKS2Magic` was `CreateBinaryHeader`
+  on the format path. `writeHeaderInternal` now owns both copies' identities —
+  the writer decides what each copy *is*, the caller supplies only content
+- **`ReadSecondaryHeader` could not recover a container with a non-default
+  metadata area.** It fell back to a hardcoded 0x4000 when the primary header
+  was unreadable — which is the only situation the second copy exists for — so
+  recovery was impossible for exactly the larger-metadata-area containers this
+  release taught the reader to accept. It now probes the nine legal area sizes
+  (16 KiB…4 MiB, powers of two), accepting a candidate only when its secondary
+  magic, recorded `hdr_offset`, header size and checksum all validate. A
+  secondary copy is additionally required to record a header size equal to its
+  own offset, since the second copy begins where the first one ends
+- **`AddKey` did not respect the container's declared keyslots area.**
+  `calculateNextKeyslotOffset` started from a hardcoded 0x8000 — right only for
+  a 16 KiB metadata area — and no path bounded a new keyslot against
+  `config.keyslots_size` at all. On a conformant container whose data offset
+  sits past its keyslots area, keyslots were placed in the gap between the two:
+  MEASURED on a cryptsetup container with a 1 MiB keyslots area ending at
+  1114112 and data at 4194304, **12 keyslots were written outside the declared
+  area**, out to the data segment. The keyslots area is now read from the
+  header (start = 2 × metadata area, length = `config.keyslots_size`) and a new
+  keyslot must fit inside it as well as before every data segment; the new
+  `ErrKeyslotsAreaFull` reports which boundary was hit
+- **`readHeaderCopy` no longer trusts `hdr.HeaderOffset` over the offset it was
+  told to read.** The field is attacker-controlled and the caller already knows
+  where it read the copy from; the downstream checksum and JSON reads now take
+  the offset as a parameter, and the field is required to agree with it. Without
+  this, a header read at 0x4000 could be paired with the JSON at 0
+- **`hdr.HeaderOffset` is bounded (#63).** The sibling of the `HeaderSize`
+  field bounded in #65 was converted for overflow but never range-checked,
+  despite feeding every header-area read. It is now accepted only as 0 or a
+  16 KiB-aligned offset up to `LUKS2HeaderMaxOffset`
+
+### Added
+
+- `ReadSecondaryHeader` reads and validates the second header copy, so the
+  spec-correct backup this library now writes is one it can also read (#64)
+- `RestorePrimaryHeader` rebuilds a damaged primary header from the secondary
+  copy under a single lock, making the documented recovery flow a real
+  operation instead of a sequence the caller has to assemble correctly
+- `LUKS2SecondaryMagic`, `LUKS2PrimaryHeaderOffset` and
+  `LUKS2SecondaryHeaderOffset` constants
+- `ErrMasterKeyVerification` typed error, returned once no digest in a header
+  verifies a candidate master key
+- `ErrMetadataTooLarge` typed error, returned when JSON metadata does not fit
+  the container's fixed header area
+- `ErrKeyslotsAreaFull` typed error, returned when a new keyslot would fall
+  outside the container's declared keyslots area or past its data segment
+- **Bidirectional cryptsetup conformance suite** (`pkg/luks2/conformance_test.go`).
+  It asserts against cryptsetup rather than against this library's own output —
+  a round trip through `Format` and `Unlock` agrees with itself whether or not
+  either agrees with LUKS2, which is how #28 and #73 survived a green suite. It
+  covers both directions, header mutation via `AddKey`/`RemoveToken`, recovery
+  from the secondary header, a 16-keyslot header past the size at which the old
+  writer corrupted itself, and the pre-fix 32-byte-digest container. It runs
+  unprivileged on file images and skips LOUDLY when cryptsetup is absent
+
 ### Changed
 
 - FIPS CI gate now runs with `GODEBUG=fips140=only` instead of `fips140=on`, so

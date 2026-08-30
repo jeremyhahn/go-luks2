@@ -165,6 +165,40 @@ func getPBKDF2HashFunc(hashAlgo string) (func() hash.Hash, error) {
 	}
 }
 
+// legacyDigestLen is the ONE digest length this package accepts that the LUKS2
+// format does not imply.
+//
+// A LUKS2 digest is the master key run through the digest KDF to the output
+// length of the hash the digest declares: 20 bytes for sha1, 32 for sha256, 48
+// for sha384, 64 for sha512. verifyMasterKey derives to the length actually
+// stored in the header, and that length comes off an untrusted device, so the
+// set of lengths it will derive to is a whitelist rather than a range --
+// PBKDF2 will produce a gigabyte if asked, and a zero-length digest would make
+// an all-zero constant-time comparison succeed against every key.
+//
+// The whitelist is {hashOutputLen(declared hash), legacyDigestLen}. The second
+// entry exists for exactly one artifact: containers written by earlier versions
+// of this package, which stored 32 bytes under a "sha512" label. Nothing else
+// legitimately writes a digest whose length disagrees with its hash, so a
+// 16-byte digest labeled sha512 is refused rather than merely tolerated.
+const legacyDigestLen = 32
+
+// hashOutputLen returns the output length in bytes of a LUKS2 hash algorithm
+// name -- 32 for sha256, 64 for sha512, and so on.
+//
+// It resolves the name through getPBKDF2HashFunc rather than a second table, so
+// the set of algorithms whose length is known here cannot drift from the set
+// that can actually be derived with, and so an algorithm refused in FIPS mode
+// is refused here too instead of reporting a length for a hash that will not
+// run.
+func hashOutputLen(hashAlgo string) (int, error) {
+	hashFunc, err := getPBKDF2HashFunc(hashAlgo)
+	if err != nil {
+		return 0, err
+	}
+	return hashFunc().Size(), nil
+}
+
 // deriveArgon2i derives a key using Argon2i
 func deriveArgon2i(passphrase, salt []byte, kdf *KDF, keySize int) ([]byte, error) {
 	if kdf.Time == nil || kdf.Memory == nil || kdf.CPUs == nil {

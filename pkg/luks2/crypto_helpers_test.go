@@ -453,9 +453,18 @@ func TestCreateDigest(t *testing.T) {
 				t.Fatalf("Digest is not valid base64: %v", err)
 			}
 
-			// Verify digest is 32 bytes (as specified in createDigest)
-			if len(digestBytes) != 32 {
-				t.Fatalf("Expected digest size 32 bytes, got %d", len(digestBytes))
+			// The digest must be as long as the OUTPUT OF THE HASH IT DECLARES
+			// -- 64 bytes for sha512, 32 for sha256 -- because that is what a
+			// LUKS2 digest is. This assertion used to demand a flat 32 bytes,
+			// which is the write half of #73: it locked in a digest that no
+			// other LUKS2 implementation derives the same way, so cryptsetup
+			// returned "incorrect passphrase" for the correct passphrase.
+			wantLen, err := hashOutputLen(tt.hashAlgo)
+			if err != nil {
+				t.Fatalf("hashOutputLen(%q) failed: %v", tt.hashAlgo, err)
+			}
+			if len(digestBytes) != wantLen {
+				t.Fatalf("Expected digest size %d bytes for %s, got %d", wantLen, tt.hashAlgo, len(digestBytes))
 			}
 		})
 	}
@@ -501,8 +510,15 @@ func TestCreateDigestVerification(t *testing.T) {
 		t.Fatalf("createDigest failed: %v", err)
 	}
 
-	// Re-derive the digest using the same KDF
-	actualDigest, err := DeriveKey(masterKey, kdf, 32)
+	// Re-derive the digest using the same KDF, to the length the digest is
+	// actually stored at rather than to a constant -- deriving to a hardcoded
+	// 32 here would keep passing for sha256 and quietly stop testing anything
+	// for any other hash.
+	expectedBytes, err := decodeBase64(expectedDigest)
+	if err != nil {
+		t.Fatalf("Digest is not valid base64: %v", err)
+	}
+	actualDigest, err := DeriveKey(masterKey, kdf, len(expectedBytes))
 	if err != nil {
 		t.Fatalf("DeriveKey failed: %v", err)
 	}
@@ -675,6 +691,15 @@ func TestCreateMetadata(t *testing.T) {
 		t.Fatalf("Expected sector size %d, got %d", opts.SectorSize, segment.SectorSize)
 	}
 
+	// Verify tokens: mandatory LUKS2 object, empty but NOT nil, so it marshals
+	// as {} rather than being omitted or written as null (#28).
+	if metadata.Tokens == nil {
+		t.Fatal("Tokens is nil: LUKS2 requires the object to be present, empty when there are none")
+	}
+	if len(metadata.Tokens) != 0 {
+		t.Fatalf("Expected 0 tokens, got %d", len(metadata.Tokens))
+	}
+
 	// Verify digests
 	if metadata.Digests == nil {
 		t.Fatal("Digests is nil")
@@ -717,7 +742,12 @@ func TestCreateMetadata(t *testing.T) {
 	if metadata.Config.JSONSize != expectedJSONSize {
 		t.Fatalf("Expected JSON size %s, got %s", expectedJSONSize, metadata.Config.JSONSize)
 	}
-	expectedKeyslotsSize := formatSize(int64(keyslotOffset + keyslotSize))
+	// config.keyslots_size is the SIZE of the keyslots area, not the offset at
+	// which it ends. This assertion used to demand keyslotOffset +
+	// keyslotsAreaSize, which is the defect from #28 written down as a test:
+	// cryptsetup reads the field as a size and rejected the container with
+	// "keyslots_size is too large 16777216 (bytes)".
+	expectedKeyslotsSize := formatSize(int64(keyslotsAreaSize))
 	if metadata.Config.KeyslotsSize != expectedKeyslotsSize {
 		t.Fatalf("Expected keyslots size %s, got %s", expectedKeyslotsSize, metadata.Config.KeyslotsSize)
 	}

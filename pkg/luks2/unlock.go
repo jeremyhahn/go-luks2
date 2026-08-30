@@ -470,9 +470,21 @@ func unlockKeyslot(device string, passphrase []byte, keyslot *Keyslot, digests m
 	return masterKey, nil
 }
 
-// verifyMasterKey verifies the master key against stored digests
+// verifyMasterKey verifies the master key against the stored digests.
+//
+// Every digest in the set is tried, and a digest that ERRORS is skipped exactly
+// like a digest that mismatches. That symmetry is the fix for #58: the mismatch
+// path already continued, but the derive and decode paths returned, so one
+// unusable digest hid every usable one behind it. Under GODEBUG=fips140=only,
+// DeriveKey refuses an argon2 digest KDF, which made whether a volume opened
+// depend on Go's randomized map iteration order -- the same header opening or
+// not opening from run to run.
+//
+// The failure returned once the set is exhausted is deliberately identical
+// whether the cause was a mismatch, an unsupported KDF, a corrupt salt or a
+// digest of implausible length: the caller learns that this key did not verify
+// and nothing about which digest rejected it or why.
 func verifyMasterKey(masterKey []byte, digests map[string]*Digest) error {
-	// Use the first digest for verification
 	for _, digest := range digests {
 		kdf := &KDF{
 			Type:       digest.Type,
@@ -481,17 +493,42 @@ func verifyMasterKey(masterKey []byte, digests map[string]*Digest) error {
 			Iterations: &digest.Iterations,
 		}
 
-		// Derive digest from master key
-		derived, err := DeriveKey(masterKey, kdf, 32) // 32 bytes digest
-		if err != nil {
-			return err
-		}
-
-		// Decode expected digest
+		// Decode the expected digest FIRST, because its length is what the
+		// derivation has to match.
 		expected, err := decodeBase64(digest.Digest)
 		if err != nil {
-			clearBytes(derived)
-			return err
+			continue // unusable digest -- try the next one (#58)
+		}
+
+		// Derive to the length ACTUALLY STORED, not to a hardcoded 32 and not
+		// to the natural length of digest.Hash.
+		//
+		// Deriving to the stored length is what cryptsetup does, and it is the
+		// only choice that is correct in both directions. A cryptsetup-written
+		// sha512 volume stores 64 bytes and needs 64 derived, which the
+		// hardcoded 32 could never produce (#73). A volume written by an
+		// earlier version of THIS library stores 32 bytes under a "sha512"
+		// label; deriving to the hash's natural 64 would fail to verify it and
+		// would render every such volume unopenable.
+		//
+		// Which lengths are derived to is a whitelist, not a range: the length
+		// the declared hash implies, plus legacyDigestLen for those older
+		// containers. See legacyDigestLen for why the carve-out is exactly one
+		// value.
+		wantLen, err := hashOutputLen(digest.Hash)
+		if err != nil {
+			clearBytes(expected)
+			continue // unknown or FIPS-refused hash -- try the next (#58)
+		}
+		if len(expected) != wantLen && len(expected) != legacyDigestLen {
+			clearBytes(expected)
+			continue // length agrees with neither the hash nor the carve-out (#58)
+		}
+
+		derived, err := DeriveKey(masterKey, kdf, len(expected))
+		if err != nil {
+			clearBytes(expected)
+			continue // e.g. non-approved KDF in FIPS mode -- try the next (#58)
 		}
 
 		// Compare using constant-time comparison to prevent timing attacks.
@@ -506,7 +543,7 @@ func verifyMasterKey(masterKey []byte, digests map[string]*Digest) error {
 		}
 	}
 
-	return fmt.Errorf("master key verification failed")
+	return ErrMasterKeyVerification
 }
 
 // getBlockDeviceSize gets the size of a block device or file

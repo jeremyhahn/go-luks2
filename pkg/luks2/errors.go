@@ -58,6 +58,25 @@ var (
 	// ErrPermissionDenied indicates insufficient permissions
 	ErrPermissionDenied = errors.New("permission denied")
 
+	// ErrMasterKeyVerification indicates that a candidate master key did not
+	// match any digest in the header. It is deliberately one value for every
+	// cause -- mismatch, an unsupported or FIPS-refused digest KDF, a corrupt
+	// salt, a digest of implausible length -- so that neither the message nor
+	// the number of digests tried tells a caller which digest rejected the key.
+	ErrMasterKeyVerification = errors.New("master key verification failed")
+
+	// ErrMetadataTooLarge indicates the JSON metadata does not fit the header
+	// area the container was formatted with. The area cannot be enlarged after
+	// the fact -- the keyslots and data offsets on disk are already sized
+	// against it -- so this is a refusal, not a retryable condition.
+	ErrMetadataTooLarge = errors.New("metadata does not fit the header area")
+
+	// ErrKeyslotsAreaFull indicates the container has no room for another
+	// keyslot: the new one would fall outside the keyslots area the header
+	// declares, or past the start of the encrypted data. Both are refusals
+	// rather than retryable conditions -- the area is fixed at format time.
+	ErrKeyslotsAreaFull = errors.New("no room in the keyslots area for another keyslot")
+
 	// ErrFIPSNotApproved indicates the requested algorithm is not approved by
 	// the Go Cryptographic Module and is refused while the process runs in
 	// FIPS 140-3 mode. See docs/FIPS.md.

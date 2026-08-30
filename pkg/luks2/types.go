@@ -11,7 +11,17 @@ import (
 // LUKS2 on-disk format constants
 // These match cryptsetup's lib/luks2/luks2.h for maximum compatibility
 const (
-	LUKS2Magic       = "LUKS\xba\xbe"
+	LUKS2Magic = "LUKS\xba\xbe"
+
+	// LUKS2SecondaryMagic is the magic of the SECOND header copy, and it is not
+	// the primary magic. LUKS2 spells the second copy "SKUL\xba\xbe" -- the
+	// first four bytes reversed -- precisely so that a tool scanning a device
+	// cannot mistake a backup header for the start of a container. cryptsetup
+	// enforces this: a second copy carrying the primary magic is not read as a
+	// header at all, so the backup written for the case of a damaged primary is
+	// unusable for exactly the repair it exists to perform (#64).
+	LUKS2SecondaryMagic = "SKUL\xba\xbe"
+
 	LUKS2MagicLen    = 6
 	LUKS2Version     = 2
 	LUKS2SectorSize  = 512
@@ -61,24 +71,69 @@ type LUKS2BinaryHeader struct {
 	_ [3584]byte
 }
 
-// LUKS2Metadata represents the JSON metadata structure
+// LUKS2Metadata represents the JSON metadata structure.
+//
+// keyslots, tokens, segments, digests and config are all MANDATORY LUKS2 JSON
+// objects. cryptsetup's hdr_validate_json checks for the presence of each by
+// name and fails the whole header when one is absent -- "JSON area \"\" is
+// missing \"tokens\" (object) specification" -> "LUKS2 validation failed" ->
+// the device is not a valid LUKS device. Absent is not the same as empty: a
+// container with no tokens carries `"tokens": {}`.
+//
+// So none of these fields may carry `omitempty`, and none may be marshaled
+// while nil -- a nil Go map encodes as `null`, which is a JSON value of the
+// wrong type rather than an empty object and is rejected the same way.
+// ensureRequiredObjects enforces the non-nil half immediately before every
+// write; the struct tags enforce the emitted-at-all half here.
 type LUKS2Metadata struct {
 	Keyslots map[string]*Keyslot `json:"keyslots"`
-	Tokens   map[string]*Token   `json:"tokens,omitempty"`
+	Tokens   map[string]*Token   `json:"tokens"`
 	Segments map[string]*Segment `json:"segments"`
 	Digests  map[string]*Digest  `json:"digests"`
 	Config   *Config             `json:"config"`
 }
 
+// ensureRequiredObjects initializes the mandatory LUKS2 JSON objects that are
+// nil, so they marshal as `{}` rather than `null`.
+//
+// It is called on the single path that serializes metadata to disk rather than
+// at each construction site: metadata reaches that path both from Format (which
+// builds it) and from ReadHeader (which parses it, and yields nil maps for any
+// object a foreign writer omitted), and only one of those is under this
+// package's control.
+//
+// Config is deliberately NOT invented here. An empty config object would pass
+// the presence check and then fail on its mandatory json_size/keyslots_size
+// members, turning a missing-config bug into a harder-to-read one.
+func (m *LUKS2Metadata) ensureRequiredObjects() {
+	if m.Keyslots == nil {
+		m.Keyslots = make(map[string]*Keyslot)
+	}
+	if m.Tokens == nil {
+		m.Tokens = make(map[string]*Token)
+	}
+	if m.Segments == nil {
+		m.Segments = make(map[string]*Segment)
+	}
+	if m.Digests == nil {
+		m.Digests = make(map[string]*Digest)
+	}
+}
+
 // Keyslot represents a key slot in LUKS2
 type Keyslot struct {
-	Type     string                 `json:"type"`     // "luks2"
-	KeySize  int                    `json:"key_size"` // Key size in bytes
-	Priority *int                   `json:"priority,omitempty"`
-	Area     *KeyslotArea           `json:"area"`
-	KDF      *KDF                   `json:"kdf"`
-	AF       *AntiForensic          `json:"af,omitempty"`
-	Custom   map[string]interface{} `json:"-"` // For unknown fields
+	Type     string       `json:"type"`     // "luks2"
+	KeySize  int          `json:"key_size"` // Key size in bytes
+	Priority *int         `json:"priority,omitempty"`
+	Area     *KeyslotArea `json:"area"`
+	KDF      *KDF         `json:"kdf"`
+	// AF is mandatory for a keyslot of type "luks2" -- cryptsetup's luks2
+	// keyslot validator requires the object -- so it carries no omitempty.
+	// A nil AF here is a bug in the caller either way; emitting `"af": null`
+	// makes it visible instead of producing a keyslot that merely looks
+	// well-formed.
+	AF     *AntiForensic          `json:"af"`
+	Custom map[string]interface{} `json:"-"` // For unknown fields
 }
 
 // KeyslotArea defines the encrypted key material storage area

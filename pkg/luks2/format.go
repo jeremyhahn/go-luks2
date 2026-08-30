@@ -200,15 +200,30 @@ func createMetadata(kdf, digestKDF *KDF, digestValue string, opts FormatOptions,
 		Digest:     digestValue,
 	}
 
-	// Create config - KeyslotsSize reflects the total reserved area for all keyslots
+	// Create config.
+	//
+	// config.keyslots_size is the SIZE OF THE KEYSLOTS AREA ALONE, not the
+	// offset at which that area ends. Writing keyslotOffset + keyslotsAreaSize
+	// made the two indistinguishable for the default geometry only by accident
+	// of arithmetic, and cryptsetup reads it as a size:
+	//
+	//	keyslots_size is too large 16777216 (bytes).
+	//	Data offset: 16777216, keyslots offset: 32768
+	//
+	// The bound cryptsetup enforces is keyslots_size <= data_offset -
+	// keyslots_offset, i.e. 16777216 - 32768 = 16744448 for the geometry this
+	// library writes. Measured against cryptsetup 2.7.0; see #28.
 	jsonSize := LUKS2DefaultSize
 	config := &Config{
 		JSONSize:     formatSize(int64(jsonSize)),
-		KeyslotsSize: formatSize(int64(keyslotOffset + keyslotsAreaSize)),
+		KeyslotsSize: formatSize(int64(keyslotsAreaSize)),
 	}
 
 	return &LUKS2Metadata{
 		Keyslots: keyslots,
+		// tokens is mandatory in LUKS2 and a container with no tokens carries
+		// an empty object, so it is constructed empty rather than left nil.
+		Tokens:   make(map[string]*Token),
 		Segments: segments,
 		Digests:  digests,
 		Config:   config,
@@ -240,7 +255,20 @@ func createDigest(masterKey []byte, hashAlgo string) (*KDF, string, error) {
 		Iterations: &digestIterations,
 	}
 
-	digest, err := DeriveKey(masterKey, kdf, 32) // 32 bytes digest
+	// The digest is the master key derived to the OUTPUT LENGTH OF THE HASH the
+	// digest declares -- 64 bytes for sha512, 32 for sha256 -- not to a fixed
+	// 32. Writing 32 bytes under a "sha512" label produced a digest no other
+	// LUKS2 implementation derives the same way, which is the write half of #73.
+	//
+	// The read half is deliberately NOT symmetric: verifyMasterKey derives to
+	// the length STORED in the header, not to this one, so containers written
+	// before this change still open.
+	digestLen, err := hashOutputLen(hashAlgo)
+	if err != nil {
+		return nil, "", err
+	}
+
+	digest, err := DeriveKey(masterKey, kdf, digestLen)
 	if err != nil {
 		return nil, "", err
 	}

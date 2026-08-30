@@ -8,6 +8,8 @@ package luks2
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -362,36 +364,105 @@ func TestVerifyMasterKey(t *testing.T) {
 		}
 	})
 
-	t.Run("mismatched digest length", func(t *testing.T) {
-		iterations := 1000
-		kdf := &KDF{
-			Type:       "pbkdf2",
-			Hash:       "sha256",
-			Salt:       encodeBase64([]byte("test-salt-16byte")),
-			Iterations: &iterations,
-		}
-
-		// Derive with different length than expected (64 bytes instead of 32)
-		wrongLengthDigest, err := DeriveKey(testMasterKey, kdf, 64)
-		if err != nil {
-			t.Fatalf("Failed to derive test digest: %v", err)
-		}
-
-		digests := map[string]*Digest{
-			"0": {
+	// The verifier derives to the length of the digest STORED IN THE HEADER,
+	// so a header is verified at whatever length its author chose -- 32 bytes
+	// from an old go-luks2, 64 from cryptsetup with sha512 -- rather than at
+	// one length this package happens to prefer.
+	//
+	// This subtest previously asserted the opposite: that a 64-byte digest must
+	// FAIL because the verifier derived a hardcoded 32. That assertion is the
+	// read half of #73 written down as a test, and it is what made
+	// cryptsetup-written sha512 volumes report "incorrect passphrase" for the
+	// correct passphrase.
+	// The accepted lengths are a whitelist: what the declared hash implies, plus
+	// the 32-byte legacy carve-out for containers earlier versions of this
+	// package wrote.
+	for _, tc := range []struct {
+		hash      string
+		digestLen int
+	}{
+		{"sha256", 32}, // the hash's own length
+		{"sha384", 48},
+		{"sha512", 64},
+		{"sha512", legacyDigestLen}, // old go-luks2: 32 bytes labeled sha512
+		{"sha384", legacyDigestLen},
+	} {
+		t.Run(fmt.Sprintf("%s digest stored at %d bytes verifies", tc.hash, tc.digestLen), func(t *testing.T) {
+			iterations := 1000
+			kdf := &KDF{
 				Type:       "pbkdf2",
-				Hash:       "sha256",
-				Salt:       kdf.Salt,
-				Iterations: iterations,
-				Digest:     encodeBase64(wrongLengthDigest),
-			},
-		}
+				Hash:       tc.hash,
+				Salt:       encodeBase64([]byte("test-salt-16byte")),
+				Iterations: &iterations,
+			}
 
-		err = verifyMasterKey(testMasterKey, digests)
-		if err == nil {
-			t.Error("verifyMasterKey should fail with mismatched digest length")
-		}
-	})
+			stored, err := DeriveKey(testMasterKey, kdf, tc.digestLen)
+			if err != nil {
+				t.Fatalf("Failed to derive test digest: %v", err)
+			}
+
+			digests := map[string]*Digest{
+				"0": {
+					Type:       "pbkdf2",
+					Hash:       tc.hash,
+					Salt:       kdf.Salt,
+					Iterations: iterations,
+					Digest:     encodeBase64(stored),
+				},
+			}
+
+			if err := verifyMasterKey(testMasterKey, digests); err != nil {
+				t.Errorf("verifyMasterKey failed for a %d-byte %s digest: %v", tc.digestLen, tc.hash, err)
+			}
+		})
+	}
+
+	// Every other length is refused BEFORE any derivation is attempted. PBKDF2
+	// will produce whatever length it is asked for, and a zero-length digest
+	// would make the constant-time comparison succeed against every key.
+	//
+	// 16 and 20 are the interesting entries: both were accepted by the earlier
+	// 16..64 range, and neither is a length anything legitimate writes under a
+	// sha512 label.
+	for _, tc := range []struct {
+		hash      string
+		digestLen int
+	}{
+		{"sha512", 0},
+		{"sha512", 1},
+		{"sha512", 16},
+		{"sha512", 20},
+		{"sha512", 48},
+		{"sha512", 65},
+		{"sha256", 64},
+		{"sha256", 4096},
+		{"md5", legacyDigestLen}, // unknown hash: no length is derivable
+	} {
+		t.Run(fmt.Sprintf("%s digest stored at %d bytes is refused", tc.hash, tc.digestLen), func(t *testing.T) {
+			iterations := 1000
+			// The stored bytes are arbitrary: what is under test is that the
+			// LENGTH is refused before any derivation is attempted, so the
+			// value must not come from DeriveKey (which panics on a zero
+			// length -- see the out-of-scope note in the report).
+			stored := bytes.Repeat([]byte{0xA5}, tc.digestLen)
+
+			digests := map[string]*Digest{
+				"0": {
+					Type:       "pbkdf2",
+					Hash:       tc.hash,
+					Salt:       encodeBase64([]byte("test-salt-16byte")),
+					Iterations: iterations,
+					Digest:     encodeBase64(stored),
+				},
+			}
+
+			err := verifyMasterKey(testMasterKey, digests)
+			if !errors.Is(err, ErrMasterKeyVerification) {
+				t.Errorf("verifyMasterKey(%d-byte %s digest) = %v, want ErrMasterKeyVerification",
+					tc.digestLen, tc.hash, err)
+			}
+		})
+	}
 }
 
 // TestVerifyMasterKeyDoesNotModifyInput tests that verifyMasterKey doesn't modify the input

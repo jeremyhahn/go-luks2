@@ -122,8 +122,15 @@ func AddKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKe
 		return fmt.Errorf("no existing keyslot found for reference")
 	}
 
+	// Read the container's reserved keyslots area out of its own header rather
+	// than assuming this library's default geometry.
+	keyslotsStart, keyslotsEnd, err := keyslotsAreaBounds(hdr, metadata)
+	if err != nil {
+		return err
+	}
+
 	// Calculate new keyslot area offset
-	newOffset, err := calculateNextKeyslotOffset(metadata)
+	newOffset, err := calculateNextKeyslotOffset(metadata, keyslotsStart)
 	if err != nil {
 		return err
 	}
@@ -191,16 +198,34 @@ func AddKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKe
 	// Calculate aligned size
 	alignedSize := alignTo(int64(len(encryptedKeyMaterial)), KeyslotAreaAlignment)
 
-	// CRITICAL: Check that new keyslot area doesn't overlap with data segment
-	// This prevents data corruption when keyslot area would extend into encrypted data
 	newKeyslotsEnd := newOffset + alignedSize
+
+	// CRITICAL, and two separate boundaries.
+	//
+	// The first is the container's DECLARED geometry: config.keyslots_size. A
+	// keyslot beyond it is outside the area the container says it reserved for
+	// keyslots, even when nothing is physically overwritten, and another LUKS2
+	// implementation is entitled to refuse the result. Only the data-segment
+	// check existed before, which on a conformant container whose data offset
+	// sits past the keyslots area let a new keyslot be placed in the gap
+	// between the two.
+	if newKeyslotsEnd > keyslotsEnd {
+		return fmt.Errorf("%w: a new keyslot would end at offset %d but the container's keyslots area is %d..%d (config.keyslots_size %s); reformat with a larger keyslots area",
+			ErrKeyslotsAreaFull, newKeyslotsEnd, keyslotsStart, keyslotsEnd, metadata.Config.KeyslotsSize)
+	}
+
+	// The second is PHYSICAL: the encrypted data itself. It is kept even though
+	// the declared bound is normally tighter, because a container whose
+	// config.keyslots_size overstates the space available would otherwise let a
+	// keyslot be written over user data.
 	for _, segment := range metadata.Segments {
 		segmentOffset, err := parseSize(segment.Offset)
 		if err != nil {
 			continue
 		}
 		if newKeyslotsEnd > segmentOffset {
-			return fmt.Errorf("not enough space for new keyslot: keyslot area would end at offset %d but data segment starts at %d (need to reformat with larger header)", newKeyslotsEnd, segmentOffset)
+			return fmt.Errorf("%w: a new keyslot would end at offset %d but the data segment starts at %d; reformat with a larger header",
+				ErrKeyslotsAreaFull, newKeyslotsEnd, segmentOffset)
 		}
 	}
 
@@ -243,8 +268,19 @@ func AddKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKe
 		}
 	}
 
-	// Update keyslots size in config (reusing newKeyslotsEnd calculated above)
-	metadata.Config.KeyslotsSize = formatSize(newKeyslotsEnd)
+	// config.keyslots_size is deliberately NOT touched here.
+	//
+	// It is the size of the RESERVED keyslots area, fixed when the container was
+	// formatted, and not a high-water mark of the slots in use. Writing
+	// newKeyslotsEnd -- an absolute end offset -- into it was the same defect as
+	// the one Format carried (#28): it stored an offset where the spec wants a
+	// size, and on top of that it SHRANK the reserved area down to the end of the
+	// newly added slot, so a conformant container stopped being one as soon as a
+	// second passphrase was added.
+	//
+	// Nothing needs to grow either: the overlap check above already refuses a slot
+	// that would run past the data segment, which is the boundary the reserved
+	// area was sized against.
 
 	// Increment sequence ID
 	hdr.SequenceID++
@@ -821,9 +857,52 @@ func findAvailableKeyslot(metadata *LUKS2Metadata, opts *AddKeyOptions) (int, er
 	return 0, fmt.Errorf("no available keyslots")
 }
 
-// calculateNextKeyslotOffset calculates the offset for the next keyslot area
-func calculateNextKeyslotOffset(metadata *LUKS2Metadata) (int64, error) {
-	var maxEnd int64 = 0x8000 // Start after headers (32KB)
+// keyslotsAreaBounds returns the half-open [start, end) byte range of the
+// container's reserved keyslots area.
+//
+// Both ends are READ FROM THE CONTAINER; neither is assumed. The area starts at
+// twice the header area size, because the two header copies tile the front of
+// the device, and it runs for config.keyslots_size bytes. Hardcoding the start
+// at 0x8000 is correct only for the 16 KiB metadata area this library formats
+// with -- a container with a 32 KiB area starts its keyslots at 0x10000 -- and
+// it is the same "geometry as a constant" mistake that put the secondary header
+// at a fixed offset.
+//
+// The data segment is NOT the end of this area. On a conformant container the
+// data offset may sit well past it, and the gap between the two is space that
+// belongs to neither: a keyslot placed there passes a segment-overlap check
+// while falling outside the geometry the container declares about itself.
+func keyslotsAreaBounds(hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) (int64, int64, error) {
+	area, err := headerAreaSize(hdr)
+	if err != nil {
+		return 0, 0, err
+	}
+	start := 2 * int64(area)
+
+	if metadata.Config == nil {
+		return 0, 0, fmt.Errorf("%w: header has no config object, so the keyslots area is undefined",
+			ErrInvalidHeader)
+	}
+	size, err := parseSize(metadata.Config.KeyslotsSize)
+	if err != nil {
+		return 0, 0, fmt.Errorf("%w: config.keyslots_size %q is not a size: %v",
+			ErrInvalidHeader, metadata.Config.KeyslotsSize, err)
+	}
+	if size <= 0 {
+		return 0, 0, fmt.Errorf("%w: config.keyslots_size %d leaves no room for any keyslot",
+			ErrInvalidHeader, size)
+	}
+
+	return start, start + size, nil
+}
+
+// calculateNextKeyslotOffset calculates the offset for the next keyslot area.
+//
+// keyslotsStart is where the container's keyslots area begins -- see
+// keyslotsAreaBounds. It is a parameter rather than a constant because it is a
+// property of the container, not of this library.
+func calculateNextKeyslotOffset(metadata *LUKS2Metadata, keyslotsStart int64) (int64, error) {
+	maxEnd := keyslotsStart
 
 	for _, ks := range metadata.Keyslots {
 		offset, err := parseSize(ks.Area.Offset)

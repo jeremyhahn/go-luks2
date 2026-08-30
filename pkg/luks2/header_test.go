@@ -363,7 +363,7 @@ func TestValidateHeaderChecksum(t *testing.T) {
 			hdr, data := tt.setupHeader()
 			reader := &mockReaderAt{data: data}
 
-			err := validateHeaderChecksum(hdr, reader)
+			err := validateHeaderChecksum(hdr, reader, int64(hdr.HeaderOffset)) // #nosec G115 -- test fixture offsets are 0 or 0x4000
 			if err != nil {
 				t.Errorf("validateHeaderChecksum() error = %v, want nil", err)
 			}
@@ -476,7 +476,7 @@ func TestValidateHeaderChecksumInvalid(t *testing.T) {
 			hdr, data := tt.setupHeader()
 			reader := &mockReaderAt{data: data}
 
-			err := validateHeaderChecksum(hdr, reader)
+			err := validateHeaderChecksum(hdr, reader, int64(hdr.HeaderOffset)) // #nosec G115 -- test fixture offsets are 0 or 0x4000
 			if (err != nil) != tt.wantErr {
 				t.Errorf("validateHeaderChecksum() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -564,7 +564,7 @@ func TestReadJSONMetadata(t *testing.T) {
 			}
 
 			reader := &mockReaderAt{data: buf.Bytes()}
-			metadata, err := readJSONMetadata(reader, tt.hdr)
+			metadata, err := readJSONMetadata(reader, tt.hdr, int64(tt.hdr.HeaderOffset)) // #nosec G115 -- test fixture offsets are 0 or 0x4000
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("readJSONMetadata() error = %v, wantErr %v", err, tt.wantErr)
@@ -669,7 +669,7 @@ func TestReadJSONMetadataRoundTrip(t *testing.T) {
 
 	// Read back
 	reader := &mockReaderAt{data: buf.Bytes()}
-	recovered, err := readJSONMetadata(reader, hdr)
+	recovered, err := readJSONMetadata(reader, hdr, int64(hdr.HeaderOffset)) // #nosec G115 -- test fixture offset is 0
 	if err != nil {
 		t.Fatalf("readJSONMetadata() error = %v", err)
 	}
