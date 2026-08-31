@@ -58,6 +58,17 @@ type fakeDeviceMapper struct {
 	created  []string
 	removed  []string
 	inspects int
+
+	// loaded records the tables handed to createAndLoad, so a test can assert
+	// on WHAT device-mapper was given and not merely that it was called. The
+	// dm-crypt table is where the volume key used to travel; see
+	// unlockkeyring_test.go.
+	loaded []devmapper.Table
+
+	// onCreate, when set, runs inside createAndLoad -- at the moment the kernel
+	// would be resolving the table -- so a test can observe state that exists
+	// only for the duration of the activation call.
+	onCreate func(name, uuid string, tables []devmapper.Table)
 }
 
 func newFakeDeviceMapper() *fakeDeviceMapper {
@@ -71,7 +82,13 @@ func (f *fakeDeviceMapper) install(t *testing.T) {
 	t.Cleanup(func() { dm = previous })
 
 	dm = deviceMapper{
-		createAndLoad: func(name, uuid string, _ uint32, _ ...devmapper.Table) error {
+		createAndLoad: func(name, uuid string, _ uint32, tables ...devmapper.Table) error {
+			for _, table := range tables {
+				f.loaded = append(f.loaded, snapshotTable(table))
+			}
+			if f.onCreate != nil {
+				f.onCreate(name, uuid, tables)
+			}
 			if f.createErr != nil {
 				return f.createErr
 			}
@@ -105,6 +122,39 @@ func (f *fakeDeviceMapper) install(t *testing.T) {
 		ensureNode: func(string) error { return f.nodeErr },
 		waitReady:  func(string) error { return f.readyErr },
 	}
+}
+
+// snapshotTable copies a table for later inspection, taking its own copy of any
+// key bytes.
+//
+// The copy is not tidiness. On the in-table fallback path CryptTable.Key is the
+// slice BORROWED from the enclave, and go-enclave unmaps those pages when the
+// borrow window closes -- so a test that kept the table verbatim and read Key
+// after Unlock returned would fault on unmapped memory. That the recorded table
+// has to be copied at all is itself evidence the borrow is real: the real
+// device-mapper consumes the table inside the window and keeps nothing.
+func snapshotTable(table devmapper.Table) devmapper.Table {
+	crypt, ok := table.(devmapper.CryptTable)
+	if !ok {
+		return table
+	}
+	crypt.Key = append([]byte(nil), crypt.Key...)
+	return crypt
+}
+
+// cryptTable returns the single dm-crypt table that was loaded, failing the
+// test if the count is anything other than one.
+func (f *fakeDeviceMapper) cryptTable(t *testing.T) devmapper.CryptTable {
+	t.Helper()
+
+	if len(f.loaded) != 1 {
+		t.Fatalf("expected exactly one table to be loaded, got %d", len(f.loaded))
+	}
+	table, ok := f.loaded[0].(devmapper.CryptTable)
+	if !ok {
+		t.Fatalf("the loaded table is a %T, not a devmapper.CryptTable", f.loaded[0])
+	}
+	return table
 }
 
 // live reports whether any dm target is still present.

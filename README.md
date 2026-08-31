@@ -295,7 +295,11 @@ explicitly.
 
 **Operational requirement.** The library **fails closed**: if locked memory
 cannot be obtained the operation is refused with `ErrProtectedMemory` rather
-than completed with the key on the ordinary heap.
+than completed with the key on the ordinary heap. `Unlock` fails closed the
+same way when the **kernel keyring** is unavailable (`ErrKeyringUnavailable`),
+with **no fallback and no opt-out** — the only alternative is putting the volume
+key in the device-mapper table, and that is the exposure this library exists to
+close. See [Kernel keyring requirement](#kernel-keyring-requirement).
 
 A container this library writes needs roughly **512 KiB of `RLIMIT_MEMLOCK` per
 concurrent operation** (the anti-forensic stripes are `key_size × 4000` bytes —
@@ -351,15 +355,102 @@ canonical list, with the reasoning, is the file comment in
 4. **Expanded cipher keys** — `xts.NewCipher` holds the AES key schedule for
    both key halves on the heap for the cipher's lifetime. A schedule is a
    deterministic expansion of the key.
-5. **The device-mapper table** — `dm-crypt` takes the volume key inside the
-   table it is handed, so `Unlock` must borrow it as raw bytes for
-   `CreateAndLoad`. `devmapper.go` then hex-encodes it into immutable Go strings
-   and an unwiped ioctl buffer. Closing this requires passing the key by
-   kernel-keyring reference (`CryptTable.KeyID`) instead.
+5. **The kernel keyring** (was: *the device-mapper table*). The volume key is
+   handed to `dm-crypt` as a **kernel-keyring reference** — `add_key`, `logon`
+   type, in the **session** keyring, revoked/unlinked/verified-gone as soon as
+   the activation ioctl returns — which is what `cryptsetup` does. It goes from
+   its enclave into the kernel and **no userspace string ever holds it**.
+   Nothing in the package assigns `CryptTable.Key`, and there is **no
+   fallback**, so `devmapper.go`'s hex encoding is structurally unreachable
+   rather than conditionally avoided.
+
+   What remains is smaller but real: **kernel keyrings are not namespaced by
+   container** — keys live in the host's key subsystem scoped by uid and
+   session. Three things bound it: the `logon` payload is **write-only**
+   (`KEYCTL_READ` returns `EOPNOTSUPP`, so nothing reads the bytes back, not
+   even root — a same-uid neighbor could *use* the entry by reference, not
+   *learn* the key); the ring is the session keyring, never the uid-wide user
+   keyring, and container runtimes give each container its own; and the entry
+   lives for one ioctl.
 
 Exposures 2 and 4 were missing from an earlier version of this list, which named
 three. They are recorded here because an understated list is the one failure
 mode that stops anyone looking again.
+
+## Kernel keyring requirement
+
+`Unlock` gives the volume key to `dm-crypt` **by kernel-keyring reference**, so
+the process must be able to call `add_key`, `keyctl` and `request_key`. If it
+cannot, the unlock is **refused** — there is no fallback to putting the key in
+the device-mapper table, because that is the exposure this design exists to
+close (owner ruling 2026-08-31).
+
+**Call `luks2.CheckKeyringAvailable()` at startup.** It performs one add and one
+release of a throwaway probe and returns the same typed error `Unlock` would.
+The condition it detects is fixed at boot, so checking early turns a mid-service
+outage into a configuration error at launch.
+
+### Containers: the constraint is seccomp, not capabilities
+
+Measured 2026-08-31 with the exact syscall sequence the library uses:
+
+| Environment | `add_key` |
+|---|---|
+| host, unprivileged (uid 1000) | **OK** |
+| container, default seccomp, no caps | **FAILS** — `operation not permitted` |
+| container, `--cap-add SYS_ADMIN`, default seccomp | **FAILS** — `operation not permitted` |
+| container, `--security-opt seccomp=unconfined` | **OK** |
+| container, `--privileged` | **OK** |
+
+**`CAP_SYS_ADMIN` does not help.** Docker's default seccomp profile denies
+`add_key`, `keyctl` and `request_key` regardless of capabilities; only relaxing
+seccomp lifts it. That is the opposite of the usual intuition, and it means the
+least-privilege choice for dm-crypt (`--cap-add SYS_ADMIN` instead of
+`--privileged`) needs a seccomp change as well.
+
+The fix is a **narrow custom profile** — take the default profile, add those
+three syscalls, and pass `--security-opt seccomp=<profile>.json`. Prefer that
+over `seccomp=unconfined`, which also drops every other syscall restriction. On
+Kubernetes the equivalent is a localhost profile in
+`securityContext.seccompProfile`.
+
+`ErrKeyring` is the root and matches **every** keyring condition — it is the
+only safe catch-all. `ErrKeyringUnavailable` covers *unavailability* only, and
+each unavailability also matches exactly one cause, because they need different
+fixes:
+
+| Sentinel | Cause | Fix |
+|---|---|---|
+| `ErrKeyringBlocked` | seccomp policy (`EPERM`) | allow the three syscalls |
+| `ErrKeyringUnsupported` | kernel built without `CONFIG_KEYS` (`ENOSYS`) | none — use a kernel with keyring support |
+| `ErrKeyringQuotaExhausted` | per-user key quota (`EDQUOT`) | raise `/proc/sys/kernel/keys/maxkeys`, `maxbytes` |
+| `ErrKeyringFailed` | the kernel refused for another reason | read the errno |
+
+Two further refusals are anomalies rather than configuration, and they do
+**not** match `ErrKeyringUnavailable` — use `ErrKeyring` if you want everything:
+`ErrKeyringEntryExists` (a key was already present under this volume's
+description — refused rather than silently overwritten or adopted) and
+`ErrKeyringKeyNotReleased` (the entry could not be confirmed gone after the
+activation, so the volume key may still be in the kernel keyring). The second in
+particular should never be folded into a generic handler: it is the one that
+says a master key may still be resident.
+
+### The reference is a digest, and mapping names are validated
+
+The keyring description is `luks2:<SHA-256 of the dm UUID>`. A dm target
+specification is **space-delimited and positional**
+(`<cipher> <key> <iv_offset> <device> <start>`), and the reference is one token
+in it — while the dm UUID is built from 40 bytes read straight off the device
+(the LUKS2 header's `uuid`, whose charset nothing constrains and whose checksum
+a hostile header author also controls) plus the caller's mapping name. Hashing
+gives that token a closed alphabet **by construction**, so there is no charset
+to get wrong and no escaping to forget.
+
+`Unlock` also validates the mapping name (`ValidateMappingName`,
+`ErrInvalidMappingName`): `[A-Za-z0-9]` first, then
+`[A-Za-z0-9_.+-]`, at most 127 bytes. The name is not covered by the hash on its
+other routes — it becomes `/dev/mapper/<name>`, the dm ioctl name field, and
+part of the dm UUID the rollback uses to prove a target is its own.
 
 ## Untrusted Headers
 
@@ -388,7 +479,10 @@ middle of a reencryption stays readable and inspectable.
 
 ## Requirements
 
-- Linux with device-mapper support
+- Linux with device-mapper support **and kernel keyring support**
+  (`CONFIG_KEYS`); in containers the `add_key`/`keyctl`/`request_key` syscalls
+  must not be blocked by seccomp — see
+  [Kernel keyring requirement](#kernel-keyring-requirement)
 - Root privileges for device-mapper operations
 - `RLIMIT_MEMLOCK` headroom of ~512 KiB per concurrent operation (see
   [Protected Memory](#protected-memory))

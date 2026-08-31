@@ -144,7 +144,41 @@ import (
 //     of the key, so recovering it recovers the key. This is on every keyslot
 //     encrypt and decrypt.
 //
-//  5. THE DEVICE-MAPPER TABLE. See Unlock.
+//  5. THE KERNEL KEYRING. This entry used to be THE DEVICE-MAPPER TABLE, and
+//     it was the largest hole in this list: dm-crypt was handed the volume key
+//     INSIDE its table, and devmapper.go hex-encodes a table key into two
+//     immutable Go strings plus an uncleared ioctl buffer, all three inside a
+//     third-party package this library cannot reach into and all three
+//     outliving the call by however long the collector takes.
+//
+//     That is gone (#78). The key is handed to dm-crypt as a kernel-keyring
+//     reference, which is what cryptsetup does, so it goes from its enclave
+//     into the kernel through add_key and no userspace string ever holds it.
+//     Nothing in this package assigns CryptTable.Key and there is no fallback
+//     that would -- owner ruling 2026-08-31, fail closed -- so the hex encoding
+//     is structurally unreachable rather than conditionally avoided.
+//
+//     What replaces it is smaller but real, and it is recorded here rather
+//     than presented as a clean win. The key spends the duration of one
+//     activation ioctl in the KERNEL's keyring, and KERNEL KEYRINGS ARE NOT
+//     NAMESPACED BY CONTAINER: keys live in the host's key subsystem scoped by
+//     uid and by session. Three things bound it:
+//
+//       - the type is "logon", whose payload is write-only. KEYCTL_READ
+//         returns EOPNOTSUPP, so no process -- not another container's, not
+//         root's -- can read the bytes back out. What a same-uid neighbor
+//         could do is SEE that an entry exists and USE it by reference, not
+//         learn the key.
+//       - the ring is the SESSION keyring, never the uid-wide user keyring,
+//         and container runtimes give each container its own (measured: runc
+//         creates `_ses.<hash>` per container).
+//       - the entry exists for one ioctl and is then revoked, unlinked and
+//         VERIFIED gone. It never outlives its mapping.
+//
+//     This is much better than an unwipeable userspace string, and it is not
+//     nothing. On a host where several containers share a uid AND a session
+//     keyring, the window is one ioctl wide and confers use-by-reference, not
+//     disclosure.
 //
 // That list is FIVE, and it is meant to be exhaustive. It was three, and the
 // missing two were the input side of the KDF -- documented only as an output
@@ -152,6 +186,13 @@ import (
 // never brought here. If a sixth is found, it belongs in this list on the same
 // commit that finds it: the preamble above says an overclaim is worse than the
 // current state, and a list that is quietly short IS the overclaim.
+//
+// Entry 5 was REWRITTEN rather than struck out, and that distinction is the
+// preamble's rule in action. The exposure it named is genuinely closed, but
+// closing it moved the key somewhere else, and a list that had simply deleted
+// the entry would have claimed the volume key now touches nothing outside an
+// enclave -- which is not true for the duration of the ioctl. Where an exposure
+// is traded rather than removed, this list records the trade.
 //
 // # Fail closed
 //

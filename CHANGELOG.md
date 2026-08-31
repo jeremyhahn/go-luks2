@@ -7,6 +7,138 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **The volume key is given to `dm-crypt` by kernel-keyring reference instead of
+  inside the device-mapper table (#78).** This closes the largest remaining hole
+  in the library's key-custody story — residual exposure 5 in
+  `pkg/luks2/enclave.go` — and it was unbounded rather than merely transient.
+  `devmapper.CryptTable` with a `Key` set is hex-encoded with
+  `hex.EncodeToString` and joined into the target spec, producing **two
+  immutable Go strings holding the master key in hex** (a Go string cannot be
+  wiped by anybody) plus an ordinary heap buffer for the ioctl that is never
+  cleared — all three inside a third-party package this library cannot reach
+  into, all three outliving the mapping's creation by however long the collector
+  takes to reclaim them. In a long-lived storage daemon that is one process
+  accumulating every volume key it has ever opened.
+
+  The key now goes from its `go-enclave` locked memory straight into the kernel
+  via `add_key` — the borrowed slice is handed to the syscall with no
+  intermediate copy — and the table carries only a `:<size>:logon:<description>`
+  reference. This is what `cryptsetup` itself does. The `logon` key type is used
+  deliberately: its payload is write-only, so `KEYCTL_READ` cannot fetch it
+  back, not even by root.
+
+  **There is no fallback.** Nothing in the package assigns `CryptTable.Key`, on
+  any path, under any option, which makes the hex encoding structurally
+  unreachable rather than conditionally avoided — and a test parses the
+  package's own source to keep it that way.
+
+  The entry lives in the **session keyring**, is named by a **SHA-256 digest of
+  the volume's dm UUID**, and is **revoked, unlinked and verified gone** as soon
+  as the activation ioctl returns — on the success path and on every failure path.
+  That lifetime is narrower than the mapping's on purpose: dm-crypt copies the
+  key during construction and never consults the keyring again, so nothing can
+  outlive its mapping and neither `Lock` nor the unlock rollback has anything
+  keyring-shaped it could forget.
+
+- **Residual exposure 5 was rewritten, not deleted.** Closing the device-mapper
+  exposure moved the key somewhere else, and the honest statement of where is:
+  for the duration of one activation ioctl the volume key is in the kernel's
+  keyring, and **kernel keyrings are not namespaced by container** — they are
+  scoped by uid and by session on the host. Three things bound it: the `logon`
+  payload is write-only, so a same-uid neighbor could *use* the entry by
+  reference but never *learn* the key; the ring is the session keyring, never
+  the uid-wide user keyring, and container runtimes give each container its own;
+  and the entry exists for one ioctl.
+
+- **Untrusted input cannot reach the device-mapper target specification.** A dm
+  target spec is space-delimited and positional
+  (`<cipher> <key> <iv_offset> <device> <start>`) and `devmapper.go` builds it
+  with `strings.Join(args, " ")`, so the keyring reference is one token in a
+  parsed grammar. The dm UUID it is derived from is built from the LUKS2
+  header's 40-byte `uuid` field — read straight off the device, charset
+  unconstrained, and with the checksum equally under a hostile header author's
+  control — plus a caller-supplied mapping name that nothing validated.
+
+  Before this change those bytes only reached the fixed-width `DmIoctl`
+  name/uuid fields, which are not grammar-parsed, so making them reach a parsed
+  grammar would have been a new parser-confusion primitive. The description is
+  therefore a **SHA-256 digest**: 64 characters of `[0-9a-f]` whatever went in,
+  which closes the charset **by construction** rather than by validation — the
+  same move as leaving `CryptTable.Key` unassigned instead of defaulting it off.
+  Determinism is preserved, so the collision guard still works. Demonstrated
+  against the unhashed revision, where a mapping name of
+  `victim 0 crypt injected` produced a reference containing three spaces.
+
+### Added
+
+- **`ValidateMappingName` / `ErrInvalidMappingName`.** `Unlock` validated the
+  device path and the passphrase and never the name, though the name becomes
+  `/dev/mapper/<name>`, the dm ioctl name field, and part of the dm UUID the
+  rollback uses to prove a target is its own. Those routes are not covered by
+  the digest above. The charset is a whitelist (`[A-Za-z0-9]` first, then
+  `[A-Za-z0-9_.+-]`) bounded at 127 bytes, which is `DM_NAME_LEN` minus the NUL
+  — a truncated name would let two mappings share an identity.
+- `CheckKeyringAvailable()` — a **startup preflight**. `Unlock` fails closed
+  when the keyring is unavailable, which is correct but arrives at the first
+  unlock of a real volume, turning a boot-time configuration error into a
+  mid-service outage. The preflight performs one add and one release of a
+  throwaway probe and returns the same typed error `Unlock` would, so a
+  long-lived consumer fails at launch instead. It also exercises the release
+  path, so a kernel that can add but not revoke is caught at startup rather than
+  at teardown.
+- Seven typed keyring errors, because four causes with four different fixes must
+  not collapse into one useless message. **`ErrKeyring` is the root** and the
+  only safe catch-all — every keyring condition matches it.
+  `ErrKeyringUnavailable` covers *unavailability* only, and each unavailability
+  also matches exactly one of `ErrKeyringBlocked` (seccomp, `EPERM`),
+  `ErrKeyringUnsupported` (no `CONFIG_KEYS`, `ENOSYS`),
+  `ErrKeyringQuotaExhausted` (`EDQUOT`) or `ErrKeyringFailed`.
+  `ErrKeyringEntryExists` and `ErrKeyringKeyNotReleased` are the two anomalies
+  and deliberately do **not** match `ErrKeyringUnavailable`, which is why the
+  root exists: a caller using the unavailability umbrella as a catch-all would
+  silently miss the one that reports a possibly-resident master key.
+  `KeyringUnavailableError` carries the **remedy in the message** — it names
+  `add_key`, `keyctl` and `request_key` so a seccomp profile can be written from
+  a log line — and the errno stays reachable through `Unwrap`. The release path
+  classifies its errno the same way, because that is the path that reports a
+  master key may still be resident and is the last place to hand back a bare
+  errno.
+
+### Changed
+
+- **`Unlock` now FAILS CLOSED when the kernel keyring is unavailable**, with no
+  fallback and no opt-out (owner ruling 2026-08-31: *"we should fail closed, we
+  dont support legacy kernels that are insecure"*). The alternative is the
+  volume master key in memory this library cannot wipe, for an unbounded time,
+  while the caller believes a guarantee that did not hold.
+
+  **This is a behavior change for containers.** Measured 2026-08-31 with the
+  exact syscall sequence the library uses: `add_key` works on the host
+  unprivileged and under `--privileged` or `seccomp=unconfined`, and **fails
+  under Docker's default seccomp profile even with `--cap-add SYS_ADMIN`**. The
+  constraint is seccomp, not capabilities — which is the opposite of the usual
+  intuition, and means the least-privilege choice for dm-crypt
+  (`--cap-add SYS_ADMIN` rather than `--privileged`) needs a seccomp change too.
+  The fix is a narrow custom profile allowing those three syscalls, not
+  `seccomp=unconfined`. See the README's *Kernel keyring requirement*.
+
+- **A pre-existing keyring entry now fails the unlock** (`ErrKeyringEntryExists`)
+  instead of being silently overwritten. `add_key` updates a key of the same
+  type and description in place rather than failing, so a leftover from a
+  crashed process — or an entry planted by another process of the same uid —
+  would otherwise be adopted or clobbered without a word. The description is
+  deterministic and derived from the volume's identity precisely so that a
+  collision is a real signal rather than routine.
+
+- **Releasing a keyring entry is verified, not trusted.** `revoke` and `unlink`
+  returning `nil` is a claim; the ring is searched again and the answer has to
+  be "not there". An entry that is still resolvable — or whose absence cannot be
+  confirmed — is reported as `ErrKeyringKeyNotReleased` rather than swallowed as
+  cleanup noise, the same conservative direction `ErrMappingStillLive` takes for
+  a plaintext mapping that cannot be inspected.
+
 ## [0.1.9-alpha] - 2026-08-31
 
 ## [0.1.8-alpha] - 2026-08-30

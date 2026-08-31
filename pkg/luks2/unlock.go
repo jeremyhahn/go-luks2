@@ -19,7 +19,18 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Unlock opens a LUKS2 volume and creates a device-mapper mapping
+// Unlock opens a LUKS2 volume and creates a device-mapper mapping.
+//
+// The volume key is given to dm-crypt through the KERNEL KEYRING, never inside
+// the device-mapper table, and there is no option that changes that. If the
+// keyring cannot hold the key the unlock is REFUSED with an error matching
+// ErrKeyringUnavailable, whose message names the cause and the fix; see
+// keyring.go and KeyringUnavailableError.
+//
+// The condition that refusal detects -- a container started without the keyring
+// syscalls -- is fixed at boot, so a long-lived consumer should call
+// CheckKeyringAvailable during initialization rather than discovering it here,
+// at the first unlock of a real volume.
 func Unlock(device string, passphrase []byte, name string) error {
 	// Validate device path
 	if err := ValidateDevicePath(device); err != nil {
@@ -36,6 +47,19 @@ func Unlock(device string, passphrase []byte, name string) error {
 
 	// Validate passphrase
 	if err := ValidatePassphrase(passphrase); err != nil {
+		return err
+	}
+
+	// Validate the mapping name.
+	//
+	// This used to be unchecked, which was survivable while the name only
+	// reached fixed-width ioctl fields and a /dev path. Since #78 it also
+	// contributes to the identity behind the dm-crypt keyring reference, and a
+	// target specification is a space-delimited positional grammar. The
+	// description is hashed before it reaches that grammar so the charset is
+	// closed by construction, but the name still reaches /dev/mapper/<name>
+	// and the dm UUID, and neither wants a caller's arbitrary bytes.
+	if err := ValidateMappingName(name); err != nil {
 		return err
 	}
 
@@ -116,34 +140,36 @@ func Unlock(device string, passphrase []byte, name string) error {
 		strings.ReplaceAll(string(TrimRight(hdr.UUID[:], "\x00")), "-", ""),
 		name)
 
-	// THE HARD BOUNDARY.
+	// THE KEY DOES NOT GO IN THE TABLE.
 	//
-	// dm-crypt takes the volume key IN the table it is handed, so the key must
-	// be raw bytes at this call and there is no version of this that keeps it
-	// enclaved. What can be controlled is HOW LONG it is raw, and the borrow is
-	// therefore the narrowest window the API permits: everything derivable from
-	// the header -- the segment, the device size ioctl, the UUID -- has already
-	// been computed, and the device-node and udev-settle work that follows runs
-	// after the key has been destroyed. Before this change the key sat in an
-	// ordinary []byte across all of it, including a wait for udev that can run
-	// for three seconds.
+	// dm-crypt accepts its volume key two ways: inline in the table it is
+	// handed, or as a REFERENCE into the calling task's kernel keyrings. This
+	// library only ever uses the reference, and the difference is the whole of
+	// residual exposure 5.
 	//
-	// RESIDUAL EXPOSURE, and it is not small. Inside CreateAndLoad the
-	// devmapper library hex-encodes the key with hex.EncodeToString and joins it
-	// into the target spec, producing TWO immutable Go strings holding the key
-	// in hex -- strings cannot be wiped, so they persist until the collector
-	// happens to reclaim them -- and then copies that spec into an ordinary heap
-	// buffer for the ioctl, which it does not clear afterwards. All three are
-	// inside a third-party package this library cannot reach into. The key is
-	// therefore in unprotected, unwipeable memory for the duration of the ioctl
-	// and for an unbounded time after it.
+	// Inline, the key is hex-encoded by devmapper.go into two immutable Go
+	// strings and copied into an ioctl buffer it never clears -- three pieces
+	// of unprotected, unwipeable memory inside a third-party package, holding
+	// the volume key for an unbounded time after the mapping is created. By
+	// reference, the bytes go from this library's enclave into the kernel
+	// through add_key and are gone from userspace entirely; no string ever
+	// holds them. That is what cryptsetup does, and keyring.go has the detail:
+	// why the "logon" type, why the session keyring, why the goroutine is
+	// pinned, why a pre-existing entry is refused rather than overwritten, and
+	// why the entry is released the instant activation returns.
 	//
-	// Closing that requires not passing the key in the table at all:
-	// devmapper.CryptTable has a KeyID field for a kernel-keyring reference
-	// (":64:logon:..."), which is what cryptsetup itself uses, and it would put
-	// the key in the kernel keyring instead of in a userspace string. That is a
-	// separate change with its own test requirements -- it needs real dm
-	// activation to verify -- and it is tracked rather than smuggled in here.
+	// There is NO FALLBACK, by owner ruling (2026-08-31): a keyring that cannot
+	// hold the key fails the unlock with an error matching
+	// ErrKeyringUnavailable, naming the cause and the remedy. Nothing in this
+	// package assigns CryptTable.Key, so the hex encoding above is structurally
+	// unreachable rather than merely unused -- which is why exposure 5 is now
+	// about the kernel keyring instead.
+	//
+	// What is left of the borrow is the narrowest window the API permits:
+	// everything derivable from the header -- the segment, the device size
+	// ioctl, the UUID -- has already been computed, the key is raw for one
+	// add_key syscall, and the device-node and udev-settle work that follows
+	// runs after it is destroyed.
 	// FROM HERE THE MAPPING IS A TRANSACTION.
 	//
 	// Once the target may exist, every failure below has to take it down again,
@@ -159,6 +185,11 @@ func Unlock(device string, passphrase []byte, name string) error {
 	// one. devmapper's CreateAndLoad is create-then-load-then-resume and unwinds
 	// only the middle step: a failed table load is cleaned up, a failed resume
 	// is not, so a CreateAndLoad error can also leave a target behind.
+	//
+	// Nothing keyring-shaped needs unwinding here, and that is by construction
+	// rather than by omission: unlockLoadTable releases its keyring entry
+	// before it returns, on every path, so no entry can outlive the call that
+	// made it and neither this rollback nor Lock can forget one.
 	if err := unlockLoadTable(name, uuid, realDevice, segment, masterKey, length, backendOffset); err != nil {
 		return errors.Join(err, removeCreatedMapping(name, uuid))
 	}
@@ -338,7 +369,12 @@ func waitForDeviceReady(name string) error {
 	return fmt.Errorf("device %s not ready after creating symlink", mapperPath)
 }
 
-// Lock closes a device-mapper mapping
+// Lock closes a device-mapper mapping.
+//
+// There is deliberately nothing keyring-related here. The entry holding the
+// volume key is released as soon as the activation ioctl returns, not kept for
+// the mapping's lifetime, so by the time anything can be closed there is
+// nothing left to release. See keyring.go.
 func Lock(name string) error {
 	// Get device info before removing (to find the device node path)
 	info, _ := dm.infoByName(name)
@@ -414,13 +450,30 @@ func GetMappedDevicePath(name string) (string, error) {
 // borrowed from its enclave for exactly that call.
 //
 // It is a separate function so the borrow closure has nothing else in it: the
-// window in which the key is raw bytes is this function body and no more. See
-// the call site for what remains exposed once the key crosses into devmapper.
+// window in which the key is raw bytes is this function body and no more. The
+// key does not reach the table -- it reaches the KERNEL KEYRING, and the table
+// carries only a reference to it. See keyring.go.
 func unlockLoadTable(name, uuid, realDevice string, segment *Segment, masterKey *enclave.MemoryEnclave, length, backendOffset uint64) error {
+	// The goroutine is pinned to its OS thread for the whole add-activate-
+	// release sequence.
+	//
+	// This is not defensive tidiness. Linux keyrings are resolved from the
+	// credentials of the TASK issuing the syscall, and joining or installing a
+	// keyring diverges the calling thread's credentials from its siblings' --
+	// so a key added on one OS thread is not necessarily visible to the
+	// DM_TABLE_LOAD ioctl if the Go scheduler has moved the goroutine to
+	// another thread in between. Without the pin this works almost always and
+	// fails occasionally with ENOKEY, which is the worst possible shape for a
+	// bug in an unlock path. keyring.go has the detail.
+	unpin := pinToOSThread()
+	defer unpin()
+
 	// loadErr is kept separate from the borrow's own error so that a failure to
 	// reach protected memory is not reported as a device-mapper failure. The two
-	// send an operator to completely different places.
-	var loadErr error
+	// send an operator to completely different places. releaseErr is separate
+	// for the same reason again: a keyring entry that could not be removed is
+	// neither of those things and must not be reported as either.
+	var loadErr, releaseErr error
 
 	err := borrowSecret("master key", masterKey, func(key []byte) error {
 		// Note: The devmapper library expects Length and BackendOffset in BYTES
@@ -432,21 +485,51 @@ func unlockLoadTable(name, uuid, realDevice string, segment *Segment, masterKey 
 			BackendDevice: realDevice,
 			BackendOffset: backendOffset,
 			Encryption:    segment.Encryption,
-			Key:           key,
 			IVTweak:       parseIVTweak(segment.IVTweak),
 			SectorSize:    uint64(segment.SectorSize), // #nosec G115 - sector size is validated (512 or 4096)
 		}
 
+		// Key is deliberately NOT set, here or anywhere else in this package.
+		// devmapper's buildSpec takes KeyID when it is non-empty and only falls
+		// back to hex.EncodeToString(Key) when it is empty, so an unassigned
+		// Key is what makes the hex encoding structurally unreachable rather
+		// than merely unused. If the keyring cannot hold the key, this function
+		// returns and no table is loaded at all.
+		keyEntry, keyringErr := addVolumeKeyToKeyring(uuid, key)
+		if keyringErr != nil {
+			return keyringErr
+		}
+
+		// Released before this closure returns, on the success path and on
+		// every failure path including a panic -- so the entry cannot outlive
+		// the activation and there is nothing for the caller's rollback to
+		// clean up. release verifies the key is gone rather than trusting the
+		// syscalls; see keyring.go.
+		defer func() { releaseErr = keyEntry.release() }()
+		table.KeyID = keyEntry.tableKeyID()
+
 		loadErr = dm.createAndLoad(name, uuid, 0, table)
 		return loadErr
 	})
+
+	// The release is checked whatever the activation did. A keyring entry left
+	// holding the volume key is a custody failure in its own right, and one
+	// that a successful unlock would otherwise hide completely.
+	//
+	// Returning it makes the caller roll the mapping back, which is the only
+	// answer consistent with both contracts this function is under: reporting
+	// success would leave the caller believing a custody guarantee that did not
+	// hold, and reporting failure while leaving the target live would leave an
+	// unowned plaintext device. Losing a working mapping is the lesser cost,
+	// and release only fails if the kernel refuses -- or cannot confirm -- an
+	// operation on a key this process just created.
 	if err == nil {
-		return nil
+		return releaseErr
 	}
 	if loadErr != nil {
-		return fmt.Errorf("failed to create device-mapper: %w", loadErr)
+		return errors.Join(fmt.Errorf("failed to create device-mapper: %w", loadErr), releaseErr)
 	}
-	return err
+	return errors.Join(err, releaseErr)
 }
 
 // unlockKeyslot attempts to unlock a keyslot with the given passphrase and

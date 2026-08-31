@@ -47,7 +47,83 @@ var (
 	ErrInvalidArgon2Memory = errors.New("invalid Argon2 memory (must be >= 65536 KB)")
 	ErrInvalidArgon2Time   = errors.New("invalid Argon2 time cost (must be >= 1)")
 	ErrIntegerOverflow     = errors.New("integer overflow detected")
+
+	// ErrInvalidMappingName indicates a device-mapper mapping name that this
+	// library will not create. See ValidateMappingName for what the name
+	// reaches and why the charset is a whitelist.
+	ErrInvalidMappingName = errors.New("invalid device-mapper mapping name")
 )
+
+// MaxMappingNameLength bounds a device-mapper name. The kernel's DM_NAME_LEN is
+// 128 bytes INCLUDING the terminating NUL, and devmapper.go copies the name into
+// that fixed-width ioctl field, so 127 is the largest value that cannot be
+// truncated on the way in. A truncated name is not a cosmetic problem: the
+// rollback identifies its own target by name, so two names that differ only past
+// the cut would become the same target.
+const MaxMappingNameLength = 127
+
+// ValidateMappingName validates a device-mapper mapping name.
+//
+// # What the name reaches
+//
+// It is not just a label. The name becomes, in order: the dm ioctl's name
+// field; the /dev/mapper/<name> path this package creates, stats and unlinks;
+// part of the dm UUID used to prove a target belongs to this unlock; and --
+// since #78 -- part of the identity the kernel-keyring description is derived
+// from. A dm target's parameter string is SPACE-DELIMITED and positional
+// (<cipher> <key> <iv_offset> <device> <start>), so a token carrying a space,
+// a newline or a NUL shifts the fields after it.
+//
+// The keyring description is hashed before it reaches that grammar, which
+// closes the parser-confusion route by construction rather than by charset --
+// see keyringDescription. This validator is the other half: it stops a hostile
+// or careless name from reaching the /dev/mapper path, the ioctl field, or the
+// dm UUID in the first place, and it is a WHITELIST because enumerating what a
+// path and a positional grammar both consider harmless is the kind of list
+// that is always one character short.
+//
+// # Why it is checked here and not only at the callers
+//
+// Unlock validated the device path and the passphrase and never the name. That
+// was survivable while the name only reached fixed-width ioctl fields, which
+// are not grammar-parsed. It stopped being survivable when the name started
+// contributing to a target-spec token.
+func ValidateMappingName(name string) error {
+	if name == "" {
+		return fmt.Errorf("%w: the name is empty", ErrInvalidMappingName)
+	}
+	if len(name) > MaxMappingNameLength {
+		return fmt.Errorf("%w: %d bytes exceeds the %d the device-mapper ioctl can carry without truncation",
+			ErrInvalidMappingName, len(name), MaxMappingNameLength)
+	}
+
+	// A leading dash would be read as an option by the command lines this
+	// library's own error messages tell an operator to run, and "." and ".."
+	// are directory entries rather than names.
+	if name == "." || name == ".." {
+		return fmt.Errorf("%w: %q is a directory entry, not a name", ErrInvalidMappingName, name)
+	}
+	if first := name[0]; !isMappingNameStart(first) {
+		return fmt.Errorf("%w: %q must start with a letter or a digit", ErrInvalidMappingName, name)
+	}
+
+	for i := 0; i < len(name); i++ {
+		if !isMappingNameByte(name[i]) {
+			return fmt.Errorf("%w: byte %d of %q is not one of A-Z a-z 0-9 _ . + -; a device-mapper name reaches a /dev path and a space-delimited target specification, so the permitted set is a whitelist",
+				ErrInvalidMappingName, i, name)
+		}
+	}
+
+	return nil
+}
+
+func isMappingNameStart(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+func isMappingNameByte(c byte) bool {
+	return isMappingNameStart(c) || c == '_' || c == '.' || c == '+' || c == '-'
+}
 
 // ValidateDevicePath validates a device path for security
 func ValidateDevicePath(device string) error {
