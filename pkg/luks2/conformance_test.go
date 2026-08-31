@@ -504,7 +504,7 @@ func TestConformance_LegacyDigestLengthStillOpens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to recover the master key: %v", err)
 	}
-	defer clearBytes(masterKey)
+	defer masterKey.Destroy()
 
 	digest, ok := metadata.Digests["0"]
 	if !ok {
@@ -516,7 +516,7 @@ func TestConformance_LegacyDigestLengthStillOpens(t *testing.T) {
 
 	// Re-derive at the OLD hardcoded length of 32 bytes, leaving the "sha512"
 	// label in place -- the exact inconsistency the old code wrote to disk.
-	legacy, err := DeriveKey(masterKey, &KDF{
+	legacy, err := deriveKeySecret(masterKey, &KDF{
 		Type:       digest.Type,
 		Hash:       digest.Hash,
 		Salt:       digest.Salt,
@@ -525,9 +525,14 @@ func TestConformance_LegacyDigestLengthStillOpens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to derive the legacy digest: %v", err)
 	}
-	defer clearBytes(legacy)
+	defer legacy.Destroy()
 
-	digest.Digest = encodeBase64(legacy)
+	if err := legacy.WithBytes(func(b []byte) error {
+		digest.Digest = encodeBase64(b)
+		return nil
+	}); err != nil {
+		t.Fatalf("failed to read the legacy digest back: %v", err)
+	}
 	if err := writeHeaderInternal(path, hdr, metadata); err != nil {
 		t.Fatalf("failed to write the legacy fixture header: %v", err)
 	}

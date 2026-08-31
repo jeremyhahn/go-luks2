@@ -5,7 +5,7 @@
 package main
 
 import (
-	"bytes"
+	"crypto/subtle"
 	"fmt"
 	"io"
 	"os"
@@ -795,14 +795,22 @@ func (c *CLI) promptPassphrase(prompt string, confirm bool) ([]byte, error) {
 	if confirm {
 		_, _ = fmt.Fprint(c.Stdout, "Confirm passphrase: ")
 		confirmation, err := c.Terminal.ReadPassword(fd)
+		// Cleared unconditionally, including on the read-error path: the
+		// confirmation is a second full copy of the passphrase and it was
+		// previously left on the heap for the collector to release unzeroed
+		// while the passphrase it duplicated was carefully wiped.
+		defer ClearBytes(confirmation)
 		_, _ = fmt.Fprintln(c.Stdout)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read confirmation: %w", err)
 		}
 
-		// Compare as bytes: converting a passphrase to a string copies the
-		// secret into immutable memory that can never be zeroed.
-		if !bytes.Equal(passphrase, confirmation) {
+		// Compare in CONSTANT TIME, and as bytes. Bytes because converting a
+		// passphrase to a string copies the secret into immutable memory that
+		// can never be zeroed; constant time because bytes.Equal returns as
+		// soon as it finds a differing byte, and the caller controls both
+		// inputs only in the case where they are supposed to match.
+		if subtle.ConstantTimeCompare(passphrase, confirmation) != 1 {
 			return nil, fmt.Errorf("passphrases do not match")
 		}
 	}

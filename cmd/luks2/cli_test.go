@@ -134,13 +134,30 @@ func (m *MockLuksOperations) IsUnlocked(name string) bool {
 type MockTerminal struct {
 	Password []byte
 	Err      error
+
+	// Reads counts ReadPassword calls, so a test can tell a confirmation
+	// prompt from a single one.
+	Reads int
+
+	// Handed retains every slice ReadPassword returned, so a test can assert
+	// on what the caller did with buffers it no longer has a name for.
+	Handed [][]byte
 }
 
+// ReadPassword returns a fresh COPY of the configured password on every call.
+//
+// Returning m.Password itself made two reads alias one slice, which no real
+// terminal does -- golang.org/x/term allocates per call -- and which hides
+// exactly the class of bug this mock is used to look for: a caller that wipes
+// one buffer would appear to wipe the other too.
 func (m *MockTerminal) ReadPassword(fd int) ([]byte, error) {
 	if m.Err != nil {
 		return nil, m.Err
 	}
-	return m.Password, nil
+	m.Reads++
+	out := append([]byte(nil), m.Password...)
+	m.Handed = append(m.Handed, out)
+	return out, nil
 }
 
 // MockFileSystem implements FileSystem for testing
@@ -1042,4 +1059,90 @@ func TestCLI_Unmount_Failure(t *testing.T) {
 	if !strings.Contains(stderr.String(), "Failed to unmount") {
 		t.Error("Expected failure message")
 	}
+}
+
+// TestPromptPassphraseClearsTheConfirmationBuffer is a custody test on the CLI's
+// only secret-reading path.
+//
+// A confirmation prompt reads the passphrase TWICE, so it produces a second
+// full copy of the credential. That copy used to be left on the heap for the
+// collector while the first was carefully wiped, which made the wiping of the
+// first close to pointless: both buffers hold the same secret.
+func TestPromptPassphraseClearsTheConfirmationBuffer(t *testing.T) {
+	term := &MockTerminal{Password: []byte("a-passphrase-worth-protecting")}
+	cli := &CLI{
+		Stdout:   &bytes.Buffer{},
+		Stderr:   &bytes.Buffer{},
+		Terminal: term,
+	}
+
+	passphrase, err := cli.promptPassphrase("Enter passphrase: ", true)
+	if err != nil {
+		t.Fatalf("promptPassphrase failed: %v", err)
+	}
+	defer ClearBytes(passphrase)
+
+	if term.Reads != 2 {
+		t.Fatalf("a confirming prompt read the terminal %d times, want 2", term.Reads)
+	}
+	if len(term.Handed) != 2 {
+		t.Fatalf("the terminal handed out %d buffers, want 2", len(term.Handed))
+	}
+
+	// The first buffer is the returned passphrase and is the caller's to clear.
+	if !bytes.Equal(passphrase, []byte("a-passphrase-worth-protecting")) {
+		t.Fatal("promptPassphrase did not return the passphrase that was typed")
+	}
+
+	// The second is the confirmation, which the caller never sees and therefore
+	// cannot clear itself.
+	confirmation := term.Handed[1]
+	if !bytes.Equal(confirmation, make([]byte, len(confirmation))) {
+		t.Fatalf("the confirmation buffer was left readable: %q", confirmation)
+	}
+}
+
+// TestPromptPassphraseClearsTheConfirmationWhenItDoesNotMatch covers the error
+// path, where it is just as easy to leave the copy behind and where nothing
+// downstream will ever clear it.
+func TestPromptPassphraseClearsTheConfirmationWhenItDoesNotMatch(t *testing.T) {
+	term := &mismatchingTerminal{first: []byte("one passphrase"), second: []byte("a different one")}
+	cli := &CLI{
+		Stdout:   &bytes.Buffer{},
+		Stderr:   &bytes.Buffer{},
+		Terminal: term,
+	}
+
+	if _, err := cli.promptPassphrase("Enter passphrase: ", true); err == nil {
+		t.Fatal("promptPassphrase accepted two different passphrases")
+	}
+
+	if len(term.handed) != 2 {
+		t.Fatalf("the terminal handed out %d buffers, want 2", len(term.handed))
+	}
+	confirmation := term.handed[1]
+	if !bytes.Equal(confirmation, make([]byte, len(confirmation))) {
+		t.Fatalf("the confirmation buffer was left readable after a mismatch: %q", confirmation)
+	}
+}
+
+// mismatchingTerminal hands back a different value on the second read, which is
+// what a user who mistypes the confirmation produces.
+type mismatchingTerminal struct {
+	first  []byte
+	second []byte
+	calls  int
+	handed [][]byte
+}
+
+func (m *mismatchingTerminal) ReadPassword(fd int) ([]byte, error) {
+	src := m.first
+	if m.calls > 0 {
+		src = m.second
+	}
+	m.calls++
+
+	out := append([]byte(nil), src...)
+	m.handed = append(m.handed, out)
+	return out, nil
 }

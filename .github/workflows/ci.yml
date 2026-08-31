@@ -138,11 +138,37 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
+      # -timeout 30m, deliberately, against Go's 10-minute DEFAULT.
+      #
+      # This suite is KDF-bound by design. Opening a volume costs a
+      # 600000-iteration digest derivation plus the keyslot's own, and an
+      # expensive KDF is the security feature, not an inefficiency to optimise
+      # away. On top of that CI runs it under -race, measured at ~4.6x the plain
+      # cost on a workstation, and this runner is a further ~2.6x slower than
+      # one. 10 minutes was never a considered budget for that; it is simply
+      # what go test defaults to, and the package crossed it at 600.08s.
+      #
+      # The headroom is NOT the fix for a slow suite -- that was removing the
+      # 45% of CI runtime the enclave-custody tests were spending on redundant
+      # container formats, which is done. This keeps a legitimately slow suite
+      # from being reported as a hang.
       - name: Run unit tests (pkg/luks2)
-        run: go test -v -race -coverprofile=coverage-pkg.out -covermode=atomic ./pkg/luks2
+        run: go test -v -race -timeout 30m -coverprofile=coverage-pkg.out -covermode=atomic ./pkg/luks2
 
       - name: Run unit tests (cmd/luks2)
-        run: go test -v -race -coverprofile=coverage-cli.out -covermode=atomic ./cmd/luks2
+        run: go test -v -race -timeout 30m -coverprofile=coverage-cli.out -covermode=atomic ./cmd/luks2
+
+      # Recorded so the next slow or failing run has evidence rather than a
+      # guess. RLIMIT_MEMLOCK is the one that turns this package's fail-closed
+      # design into a red suite: measured on a workstation, the suite passes
+      # down to 512 KiB and fails comprehensively at 64 KiB with
+      # "could not allocate locked memory ... limit reached?".
+      - name: Record the resource limits these tests ran under
+        if: always()
+        run: |
+          echo "RLIMIT_MEMLOCK (KiB): $(ulimit -l)"
+          echo "nproc: $(nproc)"
+          df -h /tmp | tail -1
 
       - name: Merge coverage
         run: |
@@ -183,8 +209,55 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
+      # go.mod pins github.com/jeremyhahn/go-enclave, published to the internal
+      # Gitea and not to github.com. The runner injects GOPRIVATE and the
+      # tokenised insteadOf rewrite into this job's environment
+      # (dependency-resolution.md §6), but a job environment does NOT cross into
+      # a docker build -- hence handing it over explicitly.
+      #
+      # Written under RUNNER_TEMP, deliberately OUTSIDE the build context: the
+      # Dockerfile ends with `COPY . .`, so a credentials file inside the
+      # workspace would be baked into a layer. .dockerignore lists gomodauth* as
+      # a second line of defence. It is a BuildKit secret, never a build arg --
+      # an arg is recoverable with `docker history`.
+      #
+      # On GitHub none of these variables exist, the file is written empty, and
+      # the Dockerfile's mount is optional, so the same build works there
+      # against the public proxy.
+      #
+      # The variables are read straight from the shell environment, NOT through
+      # ${{ env.X }} -- that expression reads this workflow's own `env:` block,
+      # which does not define them, and would quietly write blanks. The failure
+      # then looks like an unrelated "unknown revision".
+      - name: Stage module-fetch credentials
+        run: |
+          set -eu
+          umask 077
+          : > "${RUNNER_TEMP}/gomodauth.env"
+          if [ -n "${GIT_CONFIG_KEY_0:-}" ]; then
+            {
+              printf 'export GOPRIVATE=%s\n' "${GOPRIVATE:-}"
+              printf 'export GIT_CONFIG_COUNT=%s\n' "${GIT_CONFIG_COUNT:-}"
+              printf 'export GIT_CONFIG_KEY_0=%s\n' "${GIT_CONFIG_KEY_0}"
+              printf 'export GIT_CONFIG_VALUE_0=%s\n' "${GIT_CONFIG_VALUE_0:-}"
+            } > "${RUNNER_TEMP}/gomodauth.env"
+            echo "staged Gitea module credentials"
+          else
+            echo "no Gitea credentials in this environment; resolving from the public proxy"
+          fi
+
       - name: Build Docker image
-        run: docker build -f test/integration/Dockerfile -t go-luks2-integration-test .
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: |
+          docker build \
+            --secret id=gomodauth,src="${RUNNER_TEMP}/gomodauth.env" \
+            -f test/integration/Dockerfile \
+            -t go-luks2-integration-test .
+
+      - name: Remove staged credentials
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/gomodauth.env"
 
       - name: Run integration tests
         run: |

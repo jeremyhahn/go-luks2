@@ -190,18 +190,19 @@ func TestAKeyslotAfterTheFirstStillOpensTheVolume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a credential in a later keyslot no longer opens the volume: %v", err)
 	}
-	clearBytes(key)
+	key.Destroy()
 
 	// And the first credential still works, so the scan did not merely move.
 	key, err = getMasterKey(device, first, metadata)
 	if err != nil {
 		t.Fatalf("the original credential no longer opens the volume: %v", err)
 	}
-	clearBytes(key)
+	key.Destroy()
 
 	// A genuinely wrong passphrase must still be rejected, or the two
 	// assertions above would pass against a function that accepts anything.
-	if _, err := getMasterKey(device, []byte("not either of them"), metadata); err == nil {
+	if mk, err := getMasterKey(device, []byte("not either of them"), metadata); err == nil {
+		mk.Destroy()
 		t.Fatal("getMasterKey accepted a passphrase matching no keyslot")
 	}
 }

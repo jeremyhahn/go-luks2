@@ -716,7 +716,182 @@ func readJSONMetadata(r io.ReaderAt, hdr *LUKS2BinaryHeader, headerOffset int64)
 		return nil, fmt.Errorf("failed to parse JSON metadata: %w", err)
 	}
 
+	// A JSON null is normalized away HERE, at the one point metadata is parsed.
+	// See normalizeMetadataNulls.
+	if err := normalizeMetadataNulls(&metadata); err != nil {
+		return nil, err
+	}
+
+	// Keyslot CONTENTS are deliberately not validated here, and that is a
+	// different question from the nulls dealt with above.
+	//
+	// One gate is tempting: no consumer can forget it. But a keyslot is a part
+	// of a container, not the container, and refusing the whole header on the
+	// first bad keyslot makes a volume with one damaged slot unreadable through
+	// its intact ones -- permanent data loss manufactured by a safety check. An
+	// operator also has to be able to LOOK at a damaged container, which is
+	// precisely when they need to.
+	//
+	// The geometry is bounded at each point that acts on it instead, by the one
+	// shared validateKeyslot; see keyslotvalidation.go for the entry points and
+	// for why the failure is per-keyslot.
+	//
+	// That reasoning is about a keyslot whose CONTENTS are wrong -- there is
+	// something there, it may be repairable, and an operator must be able to see
+	// it. It says nothing about a null, and an earlier version of this comment
+	// was read as though it did. A null is not a damaged keyslot; it is no
+	// keyslot at all, carrying no area, no type and no KDF. Nothing is preserved
+	// by keeping it and nothing can be done with it, so it is removed rather
+	// than tolerated in place. Tolerating obliges every site that counts,
+	// indexes or dereferences it to remember; normalizing obliges nobody.
+
 	return &metadata, nil
+}
+
+// normalizeMetadataNulls makes a JSON null unrepresentable downstream.
+//
+// A null in a map[string]*T does not vanish. It unmarshals to a PRESENT key
+// holding a nil pointer, so len() counts it, range yields it, and -- the fact
+// that has caught this package repeatedly -- the comma-ok idiom reports it as
+// found:
+//
+//	targetKeyslot, exists := metadata.Keyslots[slotIDStr]
+//	if !exists { ... }
+//
+// exists is true. That check reads like a nil guard and is not one, and five
+// sites leaned on it as if it were (#67).
+//
+// # Why this is at the boundary and not at the sites
+//
+// Guarding the dereferencing sites individually was tried on the
+// issue/3-secure-buffer branch and does not hold: a review sweeping for exactly
+// this enumerated seven sites and missed an eighth. An enumeration rots as soon
+// as anyone adds the next consumer. Worse, most of the sites in THIS package
+// survive only because they hand the keyslot to unlockKeyslot, which validates
+// -- a guarantee living in a callee, one refactor from being gone. Dealt with
+// here, there is nothing left to enumerate.
+//
+// # Reject or drop, and why they are different
+//
+// The rule is not "reject every null". It is that a bad state should be
+// unrepresentable where it is bad and tolerated where the tolerance is a
+// feature, and the test is whether a caller can do anything USEFUL with the
+// absence:
+//
+//   - segments, digests: REJECTED. A segment whose location is unknown cannot be
+//     proved clear of, and a digest that cannot be evaluated must not be
+//     silently skipped -- skipping it weakens verification rather than degrading
+//     it.
+//   - config: REJECTED, on a different ground worth keeping straight. LUKS2
+//     REQUIRES a config object, so a header without one is malformed rather than
+//     degraded, and it has no redundancy to fall back on the way a missing
+//     keyslot has other keyslots.
+//   - keyslots, tokens: DROPPED. Rejecting would be a data-availability
+//     regression: getMasterKey deliberately keeps trying other keyslots so a
+//     volume survives one damaged slot, and refusing the header would make a
+//     volume with one corrupt UNUSED slot permanently unopenable. Tokens are
+//     auxiliary unlock paths (TPM, FIDO2), so a malformed one must not stop a
+//     volume opening by passphrase.
+//
+// # It is silent, deliberately
+//
+// A caller cannot learn that entries were dropped, and that is a decided
+// question rather than an oversight: issue #27 records the analysis. Narrating a
+// repair needs a logger, and a Layer-0 primitive taking a logging dependency --
+// or writing to log/slog's process-global default -- imposes a logging decision
+// on every embedding application. Widening ReadHeader's signature is an API
+// break for every caller. #27 exists so that the next person does not re-derive
+// this and reach for the global logger; this comment is that person being
+// stopped.
+//
+// # What it does NOT fix
+//
+// The null dimension only. getMasterKey also skips a keyslot whose Type is not
+// "luks2" -- a "reencrypt" slot is valid metadata recording an in-progress
+// reencryption, so it must be preserved, not dropped, and it still cannot open
+// the volume. len() is correct about nulls after this and still wrong about
+// types.
+//
+// The prior art also rejects a non-canonical keyslot id ("01" alongside "1",
+// which collapses two slots into one listing entry while both stay live for
+// unlock). That is a separate defect with its own measurement and its own
+// behavior change, and it is deliberately not folded in here.
+func normalizeMetadataNulls(metadata *LUKS2Metadata) error {
+	for id, segment := range metadata.Segments {
+		if segment == nil {
+			return fmt.Errorf("%w: segment %q is null", ErrInvalidHeader, id)
+		}
+	}
+
+	for id, digest := range metadata.Digests {
+		if digest == nil {
+			return fmt.Errorf("%w: digest %q is null", ErrInvalidHeader, id)
+		}
+	}
+
+	if metadata.Config == nil {
+		return fmt.Errorf("%w: config is null", ErrInvalidHeader)
+	}
+
+	// TWO PHASES, and the separation is structural rather than a convenient
+	// ordering.
+	//
+	// Phase one removes every null. Phase two repairs the references that
+	// pointed at what was removed. Doing both in one pass means a nil is still
+	// LIVE in one map while another map's references are being rewritten -- and
+	// rewriting a token's keyslot list dereferences the token, so a header
+	// carrying a null keyslot AND a null token panics inside the reader itself.
+	// Each null is handled correctly alone; the combination is not, because the
+	// single-pass shape allows a partially-normalized state to exist at all.
+	dropped := make([]string, 0, len(metadata.Keyslots))
+	for id, keyslot := range metadata.Keyslots {
+		if keyslot == nil {
+			delete(metadata.Keyslots, id)
+			dropped = append(dropped, id)
+		}
+	}
+	for id, token := range metadata.Tokens {
+		if token == nil {
+			delete(metadata.Tokens, id)
+		}
+	}
+
+	// Phase two. A dropped keyslot must stop being referenced by digests and
+	// tokens, or the header this read produces is internally inconsistent: a
+	// digest naming a keyslot that is not there.
+	for _, id := range dropped {
+		forgetKeyslotID(metadata, id)
+	}
+
+	return nil
+}
+
+// forgetKeyslotID removes every reference to a keyslot id from the digests and
+// tokens that name it.
+//
+// Both maps are free of nulls by the time this runs -- that is what phase one
+// guarantees -- so neither loop needs a nil guard, and adding one would suggest
+// the ordering is optional.
+func forgetKeyslotID(metadata *LUKS2Metadata, id string) {
+	for _, digest := range metadata.Digests {
+		digest.Keyslots = withoutID(digest.Keyslots, id)
+	}
+	for _, token := range metadata.Tokens {
+		token.Keyslots = withoutID(token.Keyslots, id)
+	}
+}
+
+// withoutID returns ids with every occurrence of id removed. It allocates a new
+// slice rather than filtering in place, because the input may be shared with a
+// caller that parsed it.
+func withoutID(ids []string, id string) []string {
+	out := make([]string, 0, len(ids))
+	for _, candidate := range ids {
+		if candidate != id {
+			out = append(out, candidate)
+		}
+	}
+	return out
 }
 
 // GetVolumeInfo extracts volume information from a LUKS device

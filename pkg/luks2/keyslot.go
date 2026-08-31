@@ -6,10 +6,13 @@ package luks2
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
 	"strconv"
+
+	"github.com/jeremyhahn/go-enclave"
 )
 
 // LUKS2 keyslot constants
@@ -66,7 +69,10 @@ func TestKey(device string, passphrase []byte) error {
 	if err != nil {
 		return fmt.Errorf("passphrase does not unlock any keyslot: %w", err)
 	}
-	defer clearBytes(masterKey)
+	// The key is recovered only to prove the passphrase opens a slot; it is
+	// released immediately rather than at the end of a scope that does nothing
+	// else with it.
+	masterKey.Destroy()
 
 	return nil
 }
@@ -104,7 +110,7 @@ func AddKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKe
 	if err != nil {
 		return fmt.Errorf("failed to unlock with existing passphrase: %w", err)
 	}
-	defer clearBytes(masterKey)
+	defer masterKey.Destroy()
 
 	// Find available keyslot
 	targetSlot, err := findAvailableKeyslot(metadata, opts)
@@ -112,14 +118,25 @@ func AddKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKe
 		return err
 	}
 
-	// Get existing keyslot for reference (cipher, key size, etc.)
+	// Get existing keyslot for reference (cipher, key size, etc.).
+	//
+	// Its KeySize sizes the derivation and the AF split for the NEW keyslot, so
+	// a damaged slot picked as the template would push its damage into a slot
+	// that is about to be written. Slots are considered in scan order and the
+	// first usable one wins, rather than whichever the map yielded first: with
+	// a random pick, whether AddKey succeeded depended on which keyslot Go
+	// happened to iterate to.
 	var referenceKeyslot *Keyslot
-	for _, ks := range metadata.Keyslots {
+	for _, id := range keyslotIDsInScanOrder(metadata.Keyslots) {
+		ks := metadata.Keyslots[id]
+		if ks.Type != "luks2" || validateKeyslot(id, ks) != nil {
+			continue
+		}
 		referenceKeyslot = ks
 		break
 	}
 	if referenceKeyslot == nil {
-		return fmt.Errorf("no existing keyslot found for reference")
+		return fmt.Errorf("%w: no existing keyslot is usable as a template for a new one", ErrInvalidKeyslot)
 	}
 
 	// Read the container's reserved keyslots area out of its own header rather
@@ -175,21 +192,21 @@ func AddKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKe
 	}
 
 	// Derive key from new passphrase
-	passphraseKey, err := DeriveKey(newPassphrase, kdf, referenceKeyslot.KeySize)
+	passphraseKey, err := DeriveKeyEnclave(newPassphrase, kdf, referenceKeyslot.KeySize)
 	if err != nil {
 		return fmt.Errorf("failed to derive key: %w", err)
 	}
-	defer clearBytes(passphraseKey)
+	defer passphraseKey.Destroy()
 
 	// Apply anti-forensic split to master key
-	afData, err := AFSplit(masterKey, AFStripes, DefaultHashAlgo)
+	afData, err := afSplitEnclave(masterKey, AFStripes, DefaultHashAlgo)
 	if err != nil {
 		return fmt.Errorf("failed to apply AF split: %w", err)
 	}
-	defer clearBytes(afData)
+	defer afData.Destroy()
 
 	// Encrypt AF-split key material with new passphrase-derived key
-	encryptedKeyMaterial, err := encryptKeyMaterial(afData, passphraseKey, DefaultCipher)
+	encryptedKeyMaterial, err := encryptKeyMaterialEnclave(afData, passphraseKey, DefaultCipher)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt key material: %w", err)
 	}
@@ -352,11 +369,14 @@ func RemoveKey(device string, passphrase []byte, keyslot int) error {
 		return fmt.Errorf("keyslot %d does not exist", keyslot)
 	}
 
-	// Verify passphrase unlocks this specific keyslot
-	_, err = unlockKeyslot(device, passphrase, targetKeyslot, metadata.Digests)
+	// Verify passphrase unlocks this specific keyslot. The recovered key is
+	// wanted only as proof, so it is released at once instead of being held for
+	// the rest of the removal.
+	verified, err := unlockKeyslot(device, passphrase, targetKeyslot, metadata.Digests)
 	if err != nil {
 		return fmt.Errorf("passphrase does not match keyslot %d: %w", keyslot, err)
 	}
+	verified.Destroy()
 
 	// Ensure at least one keyslot remains
 	if len(metadata.Keyslots) <= 1 {
@@ -430,8 +450,10 @@ func KillSlot(device string, authPassphrase []byte, targetSlot int) error {
 	authValid := false
 	for _, slotID := range keyslotIDsInScanOrder(metadata.Keyslots) {
 		keyslot := metadata.Keyslots[slotID]
-		_, err := unlockKeyslot(device, authPassphrase, keyslot, metadata.Digests)
+		candidate, err := unlockKeyslot(device, authPassphrase, keyslot, metadata.Digests)
 		if err == nil {
+			// Authentication only: the key is not needed past this point.
+			candidate.Destroy()
 			authValid = true
 			// Make sure we're not removing the only keyslot we can authenticate with
 			if slotID == strconv.Itoa(targetSlot) && len(metadata.Keyslots) == 1 {
@@ -527,7 +549,7 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 	if err != nil {
 		return fmt.Errorf("old passphrase does not match keyslot %d: %w", keyslot, err)
 	}
-	defer clearBytes(masterKey)
+	defer masterKey.Destroy()
 
 	// Create new KDF (keep same type as existing)
 	kdfType := targetKeyslot.KDF.Type
@@ -558,21 +580,21 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 	}
 
 	// Derive key from new passphrase
-	passphraseKey, err := DeriveKey(newPassphrase, kdf, targetKeyslot.KeySize)
+	passphraseKey, err := DeriveKeyEnclave(newPassphrase, kdf, targetKeyslot.KeySize)
 	if err != nil {
 		return fmt.Errorf("failed to derive key: %w", err)
 	}
-	defer clearBytes(passphraseKey)
+	defer passphraseKey.Destroy()
 
 	// Apply anti-forensic split to master key
-	afData, err := AFSplit(masterKey, AFStripes, targetKeyslot.AF.Hash)
+	afData, err := afSplitEnclave(masterKey, AFStripes, targetKeyslot.AF.Hash)
 	if err != nil {
 		return fmt.Errorf("failed to apply AF split: %w", err)
 	}
-	defer clearBytes(afData)
+	defer afData.Destroy()
 
 	// Encrypt AF-split key material with new passphrase-derived key
-	encryptedKeyMaterial, err := encryptKeyMaterial(afData, passphraseKey, DefaultCipher)
+	encryptedKeyMaterial, err := encryptKeyMaterialEnclave(afData, passphraseKey, DefaultCipher)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt key material: %w", err)
 	}
@@ -718,6 +740,10 @@ func ListKeyslots(device string) ([]KeyslotInfo, error) {
 		return nil, fmt.Errorf("failed to read header: %w", err)
 	}
 
+	return listKeyslotsFrom(metadata)
+}
+
+func listKeyslotsFrom(metadata *LUKS2Metadata) ([]KeyslotInfo, error) {
 	var slots []KeyslotInfo
 	for idStr, ks := range metadata.Keyslots {
 		id, err := strconv.Atoi(idStr)
@@ -730,14 +756,26 @@ func ListKeyslots(device string) ([]KeyslotInfo, error) {
 			priority = *ks.Priority
 		}
 
-		slots = append(slots, KeyslotInfo{
-			ID:         id,
-			Type:       ks.Type,
-			KeySize:    ks.KeySize,
-			Priority:   priority,
-			KDFType:    ks.KDF.Type,
-			Encryption: ks.Area.Encryption,
-		})
+		// kdf and area are OPTIONAL as far as this function is concerned. A
+		// luks2 keyslot always has both and the header reader enforces that,
+		// but a "reencrypt" keyslot has no kdf at all, and listing keyslots is
+		// an inspection operation -- the one thing an operator does when a
+		// container is in a state nothing else can handle. It must report what
+		// is there rather than crash on what is not.
+		info := KeyslotInfo{
+			ID:       id,
+			Type:     ks.Type,
+			KeySize:  ks.KeySize,
+			Priority: priority,
+		}
+		if ks.KDF != nil {
+			info.KDFType = ks.KDF.Type
+		}
+		if ks.Area != nil {
+			info.Encryption = ks.Area.Encryption
+		}
+
+		slots = append(slots, info)
 	}
 
 	return slots, nil
@@ -809,11 +847,45 @@ func keyslotIDsInScanOrder(keyslots map[string]*Keyslot) []string {
 	return ids
 }
 
-// getMasterKey unlocks the volume and returns the master key.
+// getMasterKey unlocks the volume and returns the master key HELD IN PROTECTED
+// MEMORY. The caller owns the returned enclave and must Destroy it.
 //
 // Keyslots are tried in the order given by keyslotIDsInScanOrder; every slot is
-// tried before the passphrase is reported wrong.
-func getMasterKey(device string, passphrase []byte, metadata *LUKS2Metadata) ([]byte, error) {
+// tried before the attempt is reported as having failed.
+//
+// # Failing to VERIFY and failing to TRY are different facts
+//
+// This used to collapse every failure into a bare "incorrect passphrase", which
+// made a damaged volume indistinguishable from a wrong credential all the way
+// up to VerifyRecoveryKey -- where an operator is told to discard a recovery key
+// that in fact works (#72).
+//
+// So a keyslot that was tried and whose digest did not match is separated from
+// one that could not be tried at all. If NO keyslot verified and at least one
+// could not be tried, the reason it could not be tried is what comes back: the
+// volume's state is the thing the caller can act on, and claiming a credential
+// verdict that was never actually reached is the failure being fixed.
+//
+// # What this deliberately does NOT claim
+//
+// It does not report ErrInvalidPassphrase for a digest mismatch. Three causes
+// arrive at that comparison indistinguishably -- a wrong credential, the RIGHT
+// credential over damaged key material, and a semantically wrong digest -- so
+// naming it after one of them would be a false statement of exactly the kind
+// this change exists to remove. What a non-verifying keyslot set should be
+// called is an open design question (#68), left untyped here rather than
+// guessed at; ErrMasterKeyVerification says what happened without saying why.
+//
+// It also does not raise ErrNoKeyslots when nothing was tried at all. That is a
+// separate defect with its own issue (#30) and its own semantics, and inventing
+// a second answer to it here is how two answers come to disagree.
+func getMasterKey(device string, passphrase []byte, metadata *LUKS2Metadata) (*enclave.MemoryEnclave, error) {
+	// The first reason a keyslot could not be TRIED, kept in case nothing
+	// verifies. The first rather than the last, because scan order is
+	// deterministic and the lowest-numbered damaged slot is the one an operator
+	// will look at first.
+	var untried error
+
 	for _, id := range keyslotIDsInScanOrder(metadata.Keyslots) {
 		keyslot := metadata.Keyslots[id]
 		if keyslot.Type != "luks2" {
@@ -821,14 +893,33 @@ func getMasterKey(device string, passphrase []byte, metadata *LUKS2Metadata) ([]
 		}
 
 		masterKey, err := unlockKeyslot(device, passphrase, keyslot, metadata.Digests)
-		if err != nil {
+		if err == nil {
+			return masterKey, nil
+		}
+
+		// Protected memory is FAIL-CLOSED, so this aborts rather than moving on:
+		// every remaining keyslot needs the same locked pages and would fail the
+		// same way, and continuing would bury an operator-fixable RLIMIT_MEMLOCK
+		// condition under a credential verdict.
+		if errors.Is(err, ErrProtectedMemory) {
+			return nil, err
+		}
+
+		if errors.Is(err, ErrMasterKeyVerification) {
+			// Tried, and did not verify. Try the next keyslot.
 			continue
 		}
 
-		return masterKey, nil
+		if untried == nil {
+			untried = fmt.Errorf("keyslot %s could not be tried: %w", id, err)
+		}
 	}
 
-	return nil, fmt.Errorf("incorrect passphrase")
+	if untried != nil {
+		return nil, untried
+	}
+
+	return nil, ErrMasterKeyVerification
 }
 
 // findAvailableKeyslot finds the next available keyslot number
@@ -905,6 +996,14 @@ func calculateNextKeyslotOffset(metadata *LUKS2Metadata, keyslotsStart int64) (i
 	maxEnd := keyslotsStart
 
 	for _, ks := range metadata.Keyslots {
+		// A keyslot with no area object is skipped rather than dereferenced.
+		// Its extent is unknown, which is exactly why the new slot must not be
+		// placed as though the damaged one were not there -- but the overlap
+		// checks in AddKey are what refuse that, and they work off the
+		// container's declared bounds rather than off this maximum.
+		if ks == nil || ks.Area == nil {
+			continue
+		}
 		offset, err := parseSize(ks.Area.Offset)
 		if err != nil {
 			continue
@@ -923,8 +1022,18 @@ func calculateNextKeyslotOffset(metadata *LUKS2Metadata, keyslotsStart int64) (i
 	return alignTo(maxEnd, KeyslotAreaAlignment), nil
 }
 
-// wipeKeyslotArea securely wipes a keyslot area
+// wipeKeyslotArea securely wipes a keyslot area.
+//
+// It screens the keyslot itself because KillKeyslot reaches it with NO
+// passphrase and therefore never passes through unlockKeyslot's check. That
+// makes this the one path where a crafted keyslot's declared offset and size
+// decide where zeros get written, and where a missing area object dereferences
+// nil.
 func wipeKeyslotArea(device string, keyslot *Keyslot) error {
+	if err := validateKeyslot("", keyslot); err != nil {
+		return err
+	}
+
 	offset, err := parseSize(keyslot.Area.Offset)
 	if err != nil {
 		return err

@@ -296,8 +296,13 @@ func TestCLI_WipeCancelled(t *testing.T) {
 		t.Fatalf("wipe cancelled should not error: %v", err)
 	}
 
-	if !strings.Contains(stdout, "Wipe cancelled") {
-		t.Error("Expected 'Wipe cancelled' message")
+	// "canceled", one L. The CLI has always printed that spelling and this
+	// assertion has always looked for the other one, so the test has been
+	// failing since it was written -- invisibly, because the entrypoint ran
+	// this suite with `|| true`. The repository's misspell linter enforces
+	// American spelling, so the CLI is right and the assertion was wrong.
+	if !strings.Contains(stdout, "Wipe canceled") {
+		t.Errorf("Expected 'Wipe canceled' message, got: %q", stdout)
 	}
 }
 

@@ -502,7 +502,30 @@ func TestReadJSONMetadata(t *testing.T) {
 			wantErr:  false,
 		},
 		{
+			// A COMPLETE luks2 keyslot. The fixture used to carry only type
+			// and key_size, which is not a keyslot any LUKS2 implementation
+			// writes: it has nowhere to live on the device and no KDF to
+			// unwrap it. Completing it makes the case test what it is named
+			// for against a realistic keyslot; the incomplete form is kept
+			// below, because parsing it is the documented behavior.
 			name: "with keyslots",
+			hdr: &LUKS2BinaryHeader{
+				HeaderSize:   uint64(LUKS2HeaderSize + LUKS2DefaultSize),
+				HeaderOffset: 0,
+			},
+			jsonData: []byte(`{"keyslots":{"0":{"type":"luks2","key_size":64,` +
+				`"kdf":{"type":"pbkdf2","hash":"sha256","salt":"dGVzdHNhbHQ=","iterations":1000},` +
+				`"af":{"type":"luks1","stripes":4000,"hash":"sha256"},` +
+				`"area":{"type":"raw","offset":"32768","size":"258048","encryption":"aes-xts-plain64","key_size":64}}},` +
+				`"segments":{},"digests":{},"config":{"json_size":"12288"}}`),
+			wantErr: false,
+		},
+		{
+			// An incomplete keyslot still PARSES. It is refused where it is
+			// used, not here: refusing the header would make a container with
+			// one damaged keyslot unreadable through its intact ones. See
+			// keyslotvalidation.go.
+			name: "keyslot missing its kdf, af and area still parses",
 			hdr: &LUKS2BinaryHeader{
 				HeaderSize:   uint64(LUKS2HeaderSize + LUKS2DefaultSize),
 				HeaderOffset: 0,
@@ -613,6 +636,14 @@ func TestReadJSONMetadataRoundTrip(t *testing.T) {
 					Type: "pbkdf2",
 					Hash: "sha256",
 					Salt: "dGVzdHNhbHQ=",
+				},
+				// The af object is mandatory on a luks2 keyslot: it is what
+				// says how the volume key is spread across the area above. The
+				// fixture omitted it and only parsed because nothing checked.
+				AF: &AntiForensic{
+					Type:    "luks1",
+					Stripes: AFStripes,
+					Hash:    "sha256",
 				},
 			},
 		},

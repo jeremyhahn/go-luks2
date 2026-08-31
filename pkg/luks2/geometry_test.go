@@ -148,7 +148,7 @@ func TestForeignGeometry_RecoverSecondaryHeaderWithoutThePrimary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the recovered metadata does not open the volume: %v", err)
 	}
-	clearBytes(key)
+	key.Destroy()
 }
 
 // TestForeignGeometry_ProbeRejectsEveryWrongOffset is the control on the probe.

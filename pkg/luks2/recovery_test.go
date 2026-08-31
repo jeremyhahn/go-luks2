@@ -8,10 +8,13 @@ package luks2
 
 import (
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-enclave"
 )
 
 func TestGenerateRecoveryKey(t *testing.T) {
@@ -74,11 +77,19 @@ func TestGenerateRecoveryKey(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
-			if len(key.Key) != tt.expectLen {
-				t.Errorf("expected key length %d, got %d", tt.expectLen, len(key.Key))
+			defer key.Clear()
+
+			if key.Key.Size() != tt.expectLen {
+				t.Errorf("expected key length %d, got %d", tt.expectLen, key.Key.Size())
 			}
 
-			if key.Formatted == "" {
+			// The key is held in an ENCLAVE, not a slice: it can be destroyed,
+			// and reading it afterwards fails rather than returning stale bytes.
+			if !key.Key.IsAlive() {
+				t.Error("the generated key is not held in live protected memory")
+			}
+
+			if key.Formatted.Size() == 0 {
 				t.Error("expected formatted key to be non-empty")
 			}
 
@@ -102,6 +113,13 @@ func TestGenerateRecoveryKey(t *testing.T) {
 	}
 }
 
+// TestFormatDashedKey pins the dashed rendering byte for byte.
+//
+// It matters more than it looks: the rendering is now built IN PLACE inside
+// locked memory, by encoding the hex right-aligned in the destination and
+// expanding it leftward around the separators, rather than by joining strings.
+// These fixtures are what stands between that rewrite and a recovery key that
+// prints differently from the one that was stored.
 func TestFormatDashedKey(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -127,8 +145,10 @@ func TestFormatDashedKey(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := formatDashedKey(tt.key)
-			if result != tt.expected {
+			dst := make([]byte, formattedLen(len(tt.key), RecoveryKeyFormatDashed))
+			formatRecoveryKeyInto(dst, tt.key, RecoveryKeyFormatDashed)
+
+			if result := string(dst); result != tt.expected {
 				t.Errorf("expected %s, got %s", tt.expected, result)
 			}
 		})
@@ -189,8 +209,12 @@ func TestParseRecoveryKey(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
-			if len(key) != tt.expectLen {
-				t.Errorf("expected length %d, got %d", tt.expectLen, len(key))
+			defer key.Destroy()
+
+			// ParseRecoveryKey hands back an ENCLAVE, so the decoded key is
+			// never a slice the caller has to remember to wipe.
+			if key.Size() != tt.expectLen {
+				t.Errorf("expected length %d, got %d", tt.expectLen, key.Size())
 			}
 		})
 	}
@@ -203,14 +227,22 @@ func TestRecoveryKeyRoundTrip(t *testing.T) {
 		t.Fatalf("failed to generate key: %v", err)
 	}
 
+	defer original.Clear()
+
+	formatted, err := original.FormattedString()
+	if err != nil {
+		t.Fatalf("failed to materialize the formatted key: %v", err)
+	}
+
 	// Parse it back
-	parsed, err := ParseRecoveryKey(original.Formatted)
+	parsed, err := ParseRecoveryKey(formatted)
 	if err != nil {
 		t.Fatalf("failed to parse key: %v", err)
 	}
+	defer parsed.Destroy()
 
 	// Compare
-	if hex.EncodeToString(original.Key) != hex.EncodeToString(parsed) {
+	if hex.EncodeToString(openSecret(t, original.Key)) != hex.EncodeToString(openSecret(t, parsed)) {
 		t.Error("round-trip failed: keys don't match")
 	}
 }
@@ -252,7 +284,9 @@ func TestSaveAndLoadRecoveryKey(t *testing.T) {
 		t.Fatalf("failed to load key: %v", err)
 	}
 
-	if hex.EncodeToString(key.Key) != hex.EncodeToString(loaded) {
+	defer loaded.Destroy()
+
+	if hex.EncodeToString(openSecret(t, key.Key)) != hex.EncodeToString(openSecret(t, loaded)) {
 		t.Error("loaded key doesn't match original")
 	}
 }
@@ -267,8 +301,8 @@ func TestSaveRecoveryKeyContent(t *testing.T) {
 
 	// Generate key with specific values
 	key := &RecoveryKey{
-		Key:        []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
-		Formatted:  "010203-040506",
+		Key:        enclaveFrom(t, []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}),
+		Formatted:  enclaveFrom(t, []byte("010203-040506")),
 		Format:     RecoveryKeyFormatDashed,
 		KeyHash:    "testhash",
 		VolumeUUID: "test-uuid",
@@ -310,23 +344,39 @@ func TestRecoveryKeyClear(t *testing.T) {
 	}
 
 	// Verify key is set
-	if len(key.Key) == 0 {
+	if key.Key.Size() == 0 {
 		t.Fatal("key should not be empty")
 	}
-	if key.Formatted == "" {
+	if key.Formatted.Size() == 0 {
 		t.Fatal("formatted key should not be empty")
 	}
+
+	held, rendered := key.Key, key.Formatted
 
 	// Clear the key
 	key.Clear()
 
-	// Verify key is cleared
+	// Verify key is cleared. Both halves matter: the handle is dropped AND the
+	// locked region behind it is destroyed, so a copy of the handle taken
+	// before Clear cannot still read the key.
 	if key.Key != nil {
 		t.Error("key should be nil after clear")
 	}
-	if key.Formatted != "" {
-		t.Error("formatted should be empty after clear")
+	if key.Formatted != nil {
+		t.Error("formatted should be nil after clear")
 	}
+	if held.IsAlive() {
+		t.Error("the key's locked region survived Clear")
+	}
+	if rendered.IsAlive() {
+		t.Error("the rendering's locked region survived Clear")
+	}
+	if err := held.WithBytes(func([]byte) error { return nil }); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
+		t.Errorf("a cleared key is still readable: %v", err)
+	}
+
+	// Clear is idempotent, because error paths call it after a partial setup.
+	key.Clear()
 }
 
 func TestRecoveryKeyFormats(t *testing.T) {
@@ -410,10 +460,20 @@ func TestDecodeHex(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := decodeHex(tt.input)
+			// decodeHexSecret takes bytes and expects them already trimmed and
+			// lower-cased -- the caller normalises in place inside locked
+			// memory rather than through strings.TrimSpace/ToLower, which each
+			// yield an unwipeable copy of the credential. The test does the
+			// same normalisation the parser does.
+			normalized := []byte(tt.input)
+			normalized = trimASCIISpace(normalized)
+			lowerASCII(normalized)
+
+			result, err := decodeHexSecret(normalized)
 
 			if tt.expectErr {
 				if err == nil {
+					result.Destroy()
 					t.Error("expected error but got none")
 				}
 				return
@@ -422,9 +482,12 @@ func TestDecodeHex(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
+			defer result.Destroy()
 
-			if hex.EncodeToString(result) != hex.EncodeToString(tt.expected) {
-				t.Errorf("expected %x, got %x", tt.expected, result)
+			// The decode writes straight into locked memory, so what is
+			// asserted on here is a test-only copy taken back out of it.
+			if got := openSecret(t, result); hex.EncodeToString(got) != hex.EncodeToString(tt.expected) {
+				t.Errorf("expected %x, got %x", tt.expected, got)
 			}
 		})
 	}
@@ -460,8 +523,8 @@ func TestLoadRecoveryKeyEmptyFile(t *testing.T) {
 func TestRecoveryKeySaveError(t *testing.T) {
 	// Test that SaveError field can be set and checked
 	key := &RecoveryKey{
-		Key:        []byte{0x01, 0x02, 0x03},
-		Formatted:  "010203",
+		Key:        enclaveFrom(t, []byte{0x01, 0x02, 0x03}),
+		Formatted:  enclaveFrom(t, []byte("010203")),
 		Format:     RecoveryKeyFormatHex,
 		VolumeUUID: "test-uuid",
 		Keyslot:    0,

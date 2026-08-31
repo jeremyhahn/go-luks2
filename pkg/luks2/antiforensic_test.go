@@ -288,7 +288,7 @@ func TestAFRoundTripKnownData(t *testing.T) {
 	}
 }
 
-// TestHashBlock tests the hashBlock function
+// TestHashBlock tests the hashBlockInto function
 func TestHashBlock(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -307,7 +307,7 @@ func TestHashBlock(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := sha256.New()
-			result := hashBlock(tt.block, h, tt.iv)
+			result := hashBlockInto(nil, tt.block, h, tt.iv)
 
 			if len(result) != sha256.Size {
 				t.Fatalf("Expected hash size %d, got %d", sha256.Size, len(result))
@@ -315,7 +315,7 @@ func TestHashBlock(t *testing.T) {
 
 			// Verify different IVs produce different hashes for same block
 			if tt.iv == 0 {
-				result2 := hashBlock(tt.block, sha256.New(), 1)
+				result2 := hashBlockInto(nil, tt.block, sha256.New(), 1)
 				if bytes.Equal(result, result2) && len(tt.block) > 0 {
 					t.Fatal("Same hash for different IVs")
 				}
@@ -324,19 +324,19 @@ func TestHashBlock(t *testing.T) {
 	}
 }
 
-// TestHashBlockDeterministic tests that hashBlock is deterministic
+// TestHashBlockDeterministic tests that hashBlockInto is deterministic
 func TestHashBlockDeterministic(t *testing.T) {
 	block := []byte{1, 2, 3, 4, 5, 6, 7, 8}
 	iv := 42
 
 	h1 := sha256.New()
-	result1 := hashBlock(block, h1, iv)
+	result1 := hashBlockInto(nil, block, h1, iv)
 
 	h2 := sha256.New()
-	result2 := hashBlock(block, h2, iv)
+	result2 := hashBlockInto(nil, block, h2, iv)
 
 	if !bytes.Equal(result1, result2) {
-		t.Fatal("hashBlock is not deterministic")
+		t.Fatal("hashBlockInto is not deterministic")
 	}
 }
 
@@ -617,21 +617,21 @@ func TestAFSplitSingleStripe(t *testing.T) {
 	}
 }
 
-// TestHashBlockWithSHA512 tests hashBlock with SHA512
+// TestHashBlockWithSHA512 tests hashBlockInto with SHA512
 func TestHashBlockWithSHA512(t *testing.T) {
 	block := []byte("test data for sha512")
 	iv := 100
 
 	h := sha512.New()
-	result := hashBlock(block, h, iv)
+	result := hashBlockInto(nil, block, h, iv)
 
 	if len(result) != sha512.Size {
 		t.Fatalf("Expected hash size %d, got %d", sha512.Size, len(result))
 	}
 
 	// Verify deterministic
-	result2 := hashBlock(block, sha512.New(), iv)
+	result2 := hashBlockInto(nil, block, sha512.New(), iv)
 	if !bytes.Equal(result, result2) {
-		t.Fatal("hashBlock with SHA512 is not deterministic")
+		t.Fatal("hashBlockInto with SHA512 is not deterministic")
 	}
 }

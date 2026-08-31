@@ -216,8 +216,12 @@ type Config struct {
 
 // FormatOptions contains options for formatting a LUKS2 volume
 type FormatOptions struct {
-	Device         string // Path to device/file
-	Passphrase     []byte // Initial passphrase
+	Device string // Path to device/file
+	// Passphrase is the initial passphrase. It is the CALLER'S memory and
+	// stays that way: this package borrows it for the key derivation and
+	// neither locks nor wipes a buffer it does not own. Everything derived
+	// from it is held in protected memory -- see pkg/luks2/enclave.go.
+	Passphrase     []byte
 	Label          string // Volume label (optional)
 	Subsystem      string // Subsystem label (optional)
 	Cipher         string // Cipher algorithm (default: "aes")

@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+#
 # Dockerfile for running go-luks2 integration tests in isolation
 # This ensures tests run in a clean environment without affecting the host
 
@@ -19,13 +21,51 @@ WORKDIR /app
 
 # Copy go module files first (for layer caching)
 COPY go.mod go.sum ./
-RUN go mod download
+
+# go.mod pins a first-party module -- github.com/jeremyhahn/go-enclave, the
+# portfolio locked-memory primitive -- that is published to the internal Gitea
+# instance and not to github.com. Resolving it needs GOPRIVATE plus git's
+# insteadOf rewrite carrying a read-only token: conventions/dependency-resolution.md
+# §6. Without it this build dies on
+#
+#	fatal: could not read Username for 'https://github.com'
+#
+# because the module path says github.com and nothing here says otherwise.
+#
+# This repository had NO private dependency until the go-enclave adoption, so a
+# bare `go mod download` was sufficient and this image never needed credentials.
+# It is the first go-luks2 build to need them, which is why the gap appeared in
+# CI rather than in review.
+#
+# The token arrives as a BuildKit SECRET, not a build arg and not an ENV: an arg
+# is recorded in image metadata and readable with `docker history`, while a
+# secret is mounted on tmpfs for this RUN alone and never becomes a layer. It is
+# `source`d rather than exported, so the value never reaches a command line
+# either -- `ps` on the build host would show that.
+#
+# The mount is OPTIONAL by design. Where no secret is supplied -- GitHub Actions,
+# or a developer building against the public proxy -- the file is simply absent
+# and the same Dockerfile still builds; see §7 for how those tags resolve.
+#
+# GOPROXY and GOSUMDB are deliberately NOT set here, as ENV or otherwise: an
+# image that bakes GOPROXY=direct/GOSUMDB=off turns checksum verification off
+# for every container it spawns, which §6 records as drift that hides in
+# Dockerfile ENV lines rather than in workflows.
+RUN --mount=type=secret,id=gomodauth \
+    set -eu; \
+    if [ -f /run/secrets/gomodauth ]; then . /run/secrets/gomodauth; fi; \
+    go mod download
 
 # Copy source code
 COPY . .
 
-# Ensure go.mod is tidy (handles version differences)
-RUN go mod tidy
+# `go mod tidy` used to run here, after the copy, "to handle version
+# differences". It is gone for two reasons. It needs the network -- so it would
+# have to carry the credentials too, defeating the point of pre-fetching every
+# module in the step above so the finished image needs none at run time. And it
+# REWRITES go.mod inside the image, which means the artifact under test is built
+# against a dependency set the repository never committed. What go.mod and
+# go.sum say is what gets built.
 
 # Build the CLI for integration tests
 RUN go build -o /app/build/luks2 ./cmd/luks2
@@ -50,9 +90,12 @@ RUN echo '#!/bin/bash' > /entrypoint.sh && \
     echo '    # Run package integration tests (in pkg/luks2)' >> /entrypoint.sh && \
     echo '    go test -v -tags=integration -coverprofile=/tmp/coverage-pkg.out -covermode=atomic ./pkg/luks2' >> /entrypoint.sh && \
     echo '    # Run new integration tests (in test/integration/pkg)' >> /entrypoint.sh && \
-    echo '    go test -v -tags=integration -coverprofile=/tmp/coverage-int-pkg.out -covermode=atomic ./test/integration/pkg/... || true' >> /entrypoint.sh && \
+    echo '    # No `|| true` on any of these three: a suite that cannot fail the' >> /entrypoint.sh && \
+    echo '    # job is not a gate (#25). Both trailing suites carried one, and the' >> /entrypoint.sh && \
+    echo '    # CLI suite had in fact been failing the whole time.' >> /entrypoint.sh && \
+    echo '    go test -v -tags=integration -coverprofile=/tmp/coverage-int-pkg.out -covermode=atomic ./test/integration/pkg/...' >> /entrypoint.sh && \
     echo '    # Run CLI integration tests (in test/integration/cli)' >> /entrypoint.sh && \
-    echo '    go test -v -tags=integration -coverprofile=/tmp/coverage-int-cli.out -covermode=atomic ./test/integration/cli/... || true' >> /entrypoint.sh && \
+    echo '    go test -v -tags=integration -coverprofile=/tmp/coverage-int-cli.out -covermode=atomic ./test/integration/cli/...' >> /entrypoint.sh && \
     echo '    # Merge coverage files' >> /entrypoint.sh && \
     echo '    echo "mode: atomic" > /tmp/coverage.out' >> /entrypoint.sh && \
     echo '    grep -v "^mode:" /tmp/coverage-pkg.out >> /tmp/coverage.out 2>/dev/null || true' >> /entrypoint.sh && \

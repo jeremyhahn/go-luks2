@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs security ci ci-full fmt-check all check test-cli integration-test-pkg integration-test-cli
+.PHONY: help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs security ci ci-full fmt-check all check test-cli integration-test-pkg integration-test-cli docker-build-integration
 
 # Default target
 .DEFAULT_GOAL := help
@@ -98,19 +98,56 @@ test-coverage: ## Run tests with coverage report
 	@$(GO) tool cover -func=$(COVERAGE_FILE)
 	@echo "$(COLOR_GREEN)✓ Coverage report: $(COVERAGE_HTML)$(COLOR_RESET)"
 
+# Builds the integration image, handing the Gitea module credentials over as a
+# BuildKit secret (conventions/dependency-resolution.md §6).
+#
+# go.mod pins github.com/jeremyhahn/go-enclave, which lives on the internal
+# Gitea rather than github.com, so a bare `docker build` cannot resolve it: the
+# container inherits none of this shell's git configuration.
+#
+# The staging file is written to a mktemp path OUTSIDE the build context, mode
+# 0600, and removed on every exit path -- the Dockerfile ends with `COPY . .`,
+# so a credentials file inside the tree would be baked into a layer.
+#
+# With no credentials in the environment the file is left empty and the build
+# still runs: the Dockerfile's mount is optional, and modules then resolve from
+# whatever proxy this machine can reach. That is the same shape CI uses on
+# GitHub. The four variables are the ones §6 defines; export them to build
+# against the internal Gitea.
+docker-build-integration:
+	@set -eu; \
+	umask 077; \
+	stage="$$(mktemp -t gomodauth.XXXXXX)"; \
+	trap 'rm -f "$$stage"' EXIT INT TERM; \
+	if [ -n "$${GIT_CONFIG_KEY_0:-}" ]; then \
+		{ \
+			printf 'export GOPRIVATE=%s\n' "$${GOPRIVATE:-}"; \
+			printf 'export GIT_CONFIG_COUNT=%s\n' "$${GIT_CONFIG_COUNT:-}"; \
+			printf 'export GIT_CONFIG_KEY_0=%s\n' "$${GIT_CONFIG_KEY_0}"; \
+			printf 'export GIT_CONFIG_VALUE_0=%s\n' "$${GIT_CONFIG_VALUE_0:-}"; \
+		} > "$$stage"; \
+		echo "$(COLOR_BOLD)Staged Gitea module credentials for the image build$(COLOR_RESET)"; \
+	else \
+		echo "$(COLOR_BOLD)No Gitea module credentials in the environment; resolving from the configured proxy$(COLOR_RESET)"; \
+	fi; \
+	DOCKER_BUILDKIT=1 docker build \
+		--secret id=gomodauth,src="$$stage" \
+		-f test/integration/Dockerfile \
+		-t go-luks2-integration-test .
+
 integration-test: build ## Run all integration tests in Docker (isolated, recommended)
 	@echo "$(COLOR_BOLD)Running all integration tests in Docker container...$(COLOR_RESET)"
 	@$(MAKE) docker-integration-test
 
 integration-test-pkg: build ## Run package integration tests in Docker
 	@echo "$(COLOR_BOLD)Running package integration tests in Docker...$(COLOR_RESET)"
-	@docker build -f test/integration/Dockerfile -t go-luks2-integration-test .
+	@$(MAKE) docker-build-integration
 	@docker run --rm --privileged go-luks2-integration-test \
 		go test -v -tags=integration ./test/integration/pkg/...
 
 integration-test-cli: build ## Run CLI integration tests in Docker
 	@echo "$(COLOR_BOLD)Running CLI integration tests in Docker...$(COLOR_RESET)"
-	@docker build -f test/integration/Dockerfile -t go-luks2-integration-test .
+	@$(MAKE) docker-build-integration
 	@docker run --rm --privileged go-luks2-integration-test \
 		go test -v -tags=integration ./test/integration/cli/...
 
@@ -147,7 +184,7 @@ coverage: build ## Run all tests (unit + integration) with coverage (requires ro
 
 docker-integration-test: ## Run integration tests in Docker (isolated, recommended)
 	@echo "$(COLOR_BOLD)Building Docker image for integration tests...$(COLOR_RESET)"
-	@docker build -f test/integration/Dockerfile -t go-luks2-integration-test .
+	@$(MAKE) docker-build-integration
 	@echo ""
 	@echo "$(COLOR_BOLD)Running integration tests in Docker container (privileged)...$(COLOR_RESET)"
 	@rm -f coverage-docker.out
@@ -165,7 +202,7 @@ docker-integration-test: ## Run integration tests in Docker (isolated, recommend
 
 docker-test-specific: ## Run specific integration test in Docker (use TEST=TestName)
 	@echo "$(COLOR_BOLD)Building Docker image...$(COLOR_RESET)"
-	@docker build -f test/integration/Dockerfile -t go-luks2-integration-test .
+	@$(MAKE) docker-build-integration
 	@echo ""
 	@echo "$(COLOR_BOLD)Running test: $(TEST)$(COLOR_RESET)"
 	@docker run --rm --privileged go-luks2-integration-test \

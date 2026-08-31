@@ -405,7 +405,7 @@ func TestCreateDigest(t *testing.T) {
 				t.Fatalf("Failed to generate master key: %v", err)
 			}
 
-			kdf, digestValue, err := createDigest(tt.masterKey, tt.hashAlgo)
+			kdf, digestValue, err := createDigest(enclaveFrom(t, tt.masterKey), tt.hashAlgo)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("Expected error, got nil")
@@ -477,12 +477,12 @@ func TestCreateDigestDeterministic(t *testing.T) {
 		t.Fatalf("Failed to generate master key: %v", err)
 	}
 
-	kdf1, digest1, err := createDigest(masterKey, "sha256")
+	kdf1, digest1, err := createDigest(enclaveFrom(t, masterKey), "sha256")
 	if err != nil {
 		t.Fatalf("First createDigest failed: %v", err)
 	}
 
-	kdf2, digest2, err := createDigest(masterKey, "sha256")
+	kdf2, digest2, err := createDigest(enclaveFrom(t, masterKey), "sha256")
 	if err != nil {
 		t.Fatalf("Second createDigest failed: %v", err)
 	}
@@ -505,7 +505,7 @@ func TestCreateDigestVerification(t *testing.T) {
 		t.Fatalf("Failed to generate master key: %v", err)
 	}
 
-	kdf, expectedDigest, err := createDigest(masterKey, "sha256")
+	kdf, expectedDigest, err := createDigest(enclaveFrom(t, masterKey), "sha256")
 	if err != nil {
 		t.Fatalf("createDigest failed: %v", err)
 	}
@@ -550,7 +550,7 @@ func TestCreateDigestInvalidHashAlgo(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, err := createDigest(masterKey, tt.hashAlgo)
+			_, _, err := createDigest(enclaveFrom(t, masterKey), tt.hashAlgo)
 			if err == nil {
 				t.Fatal("Expected error for unsupported hash algorithm, got nil")
 			}

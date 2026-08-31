@@ -79,6 +79,26 @@ luks2.GetVolumeInfo("/dev/sdb1")                // *VolumeInfo, error
 luks2.GetMappedDevicePath("myvolume")           // string, error
 ```
 
+`Unlock` is **transactional**: if any step after the dm-crypt target is created
+fails, the target this call created is removed before the error is returned, so
+a reported failure never leaves a decrypted device behind. Only a target
+carrying the dm UUID this call generated is removed — a mapping that merely
+shares the name is left untouched.
+
+The one case a caller must branch on is when the rollback itself could not
+complete, or could not be confirmed:
+
+```go
+if err := luks2.Unlock(device, passphrase, name); err != nil {
+    if errors.Is(err, luks2.ErrMappingStillLive) {
+        // The unlock failed AND a plaintext mapping may still be live.
+        // Releasing the backing device or reusing the name will fail until
+        // it is closed: luks2.Lock(name) / `luks close <name>`.
+    }
+    return err
+}
+```
+
 ### Keyslot Management
 
 ```go
@@ -133,18 +153,24 @@ key, _ := luks2.AddRecoveryKey(device, existingPass, &luks2.RecoveryKeyOptions{
     Format:     luks2.RecoveryKeyFormatDashed,  // "XXXX-XXXX-XXXX-..."
     OutputPath: "/secure/recovery.key",
 })
-fmt.Println(key.Formatted)  // Human-readable key
+defer key.Clear()  // releases both the key and its rendering
+
+// key.Key and key.Formatted are *enclave.MemoryEnclave, not []byte/string.
+// Materialize the printable form only at the point of display.
+rendered, _ := key.FormattedString()
+fmt.Println(rendered)
 
 // Generate key only (without adding to volume)
 key, _ := luks2.GenerateRecoveryKey(32, luks2.RecoveryKeyFormatHex)
 
 // Save/Load recovery keys
-luks2.SaveRecoveryKey(key, "/path/to/key")
-keyBytes, _ := luks2.LoadRecoveryKey("/path/to/key")
+luks2.SaveRecoveryKey(key, "/path/to/key")       // streams from locked memory
+loaded, _ := luks2.LoadRecoveryKey("/path/to/key")  // *enclave.MemoryEnclave
+defer loaded.Destroy()
 
 // Verify and parse
-luks2.VerifyRecoveryKey(device, keyBytes)      // bool, error
-luks2.ParseRecoveryKey("XXXX-XXXX-...")        // []byte, error
+luks2.VerifyRecoveryKey(device, loaded)        // bool, error
+luks2.ParseRecoveryKey("XXXX-XXXX-...")        // *enclave.MemoryEnclave, error
 ```
 
 ### Filesystem & Mount
@@ -252,10 +278,120 @@ See [docs/FIPS.md](docs/FIPS.md).
 | Key Size | 512 bits |
 | Anti-Forensic | 4000-stripe split |
 
+## Protected Memory
+
+Every piece of key material this library derives or recovers is held in
+[go-enclave](https://github.com/jeremyhahn/go-enclave) locked memory — mlock'd,
+guard-paged, zeroized on release — for its whole lifetime, and is only ever
+borrowed through the narrowest window the consuming call allows. That covers the
+master key, passphrase-derived keys, the anti-forensic stripes (which *are* the
+master key, spread wide), the master-key digest derivation and recovery keys
+including their printable rendering.
+
+This matters because the library performs LUKS2 operations **in process**.
+Shelling out to `cryptsetup` kept key material in a separate address space for
+free; doing the work here does not, so the guarantee has to be provided
+explicitly.
+
+**Operational requirement.** The library **fails closed**: if locked memory
+cannot be obtained the operation is refused with `ErrProtectedMemory` rather
+than completed with the key on the ordinary heap.
+
+A container this library writes needs roughly **512 KiB of `RLIMIT_MEMLOCK` per
+concurrent operation** (the anti-forensic stripes are `key_size × 4000` bytes —
+256 KiB for a 512-bit key, held alongside its decrypted counterpart). A
+container written by someone else can legitimately need more: the bounds in
+[Untrusted Headers](#untrusted-headers) cap one operation at about **8 MiB**
+(`key_size` ≤ 1024 × 4000 stripes, for both the stripe buffer and the decrypted
+keyslot material). **Budget 8 MiB per concurrent operation if the headers are
+not yours.**
+
+That is under a typical host default of 8 MiB only barely, and **well above the
+64 KiB some container runtimes impose**; a container running
+Format/Unlock/AddKey/ChangeKey must raise its `memlock` ulimit.
+
+There is no aggregate work or memory budget across an unlock — the per-item
+bounds cannot express one. Tracked as issue #26.
+
+What is deliberately *not* locked, and why:
+
+| Bytes | Why not |
+|-------|---------|
+| Encrypted keyslot material | Stored on the device in exactly that form; locking a copy of public data would double the memlock cost for no confidentiality |
+| KDF salts, the stored digest | Cleartext LUKS2 header fields |
+| Caller-supplied passphrases | The caller's own memory, already on the heap before this library is entered |
+
+Five exposures remain that this library cannot close and does not claim to. The
+canonical list, with the reasoning, is the file comment in
+[`pkg/luks2/enclave.go`](pkg/luks2/enclave.go):
+
+1. **Caller-supplied credentials** — passphrases as `[]byte`, and a recovery
+   key as a `string` at `ParseRecoveryKey`. The caller's own memory, already on
+   the heap before this library is entered; a Go string additionally cannot be
+   borrowed without copying, nor wiped at all. Copies this library makes for its
+   own convenience are not covered by this and are not made.
+2. **Validated-module KDF input, and on two paths the input is the master key.**
+   `crypto/pbkdf2.Key` takes its password as a `string`, so the call site must
+   write `string(passphrase)` — an immutable Go string that can never be wiped —
+   and the Go Cryptographic Module then takes a second copy via `hmac.New`.
+   `deriveKeySecret` borrows an enclave and hands the slice straight down that
+   path, so **every unlock (once per digest tried) and every format materializes
+   the volume master key in unwipeable memory.**
+
+   This is a **ruled position, not an oversight.** Avoiding it means
+   implementing PBKDF2 over `crypto/hmac`, which the company's
+   `conventions/security-review.md` prohibits outright ("NEVER hand-roll
+   cryptography", owner ruling 2026-08-25), with this exact case resolved by
+   name (#155): *use `crypto/pbkdf2`; accept the bounded transient copy;
+   document it; the protected-memory mandate yields at that boundary.* This
+   documentation is the compliance artifact that ruling requires.
+3. **KDF output** — `crypto/pbkdf2.Key`/`argon2.IDKey` allocate and return their
+   result on the heap; it is moved into an enclave immediately, but the return
+   itself is unavoidable.
+4. **Expanded cipher keys** — `xts.NewCipher` holds the AES key schedule for
+   both key halves on the heap for the cipher's lifetime. A schedule is a
+   deterministic expansion of the key.
+5. **The device-mapper table** — `dm-crypt` takes the volume key inside the
+   table it is handed, so `Unlock` must borrow it as raw bytes for
+   `CreateAndLoad`. `devmapper.go` then hex-encodes it into immutable Go strings
+   and an unwiped ioctl buffer. Closing this requires passing the key by
+   kernel-keyring reference (`CryptTable.KeyID`) instead.
+
+Exposures 2 and 4 were missing from an earlier version of this list, which named
+three. They are recorded here because an understated list is the one failure
+mode that stops anyone looking again.
+
+## Untrusted Headers
+
+A LUKS2 header is attacker-controlled input. Its keyslot fields are not
+descriptive — they *size work*: `key_size` is handed to the KDF as the requested
+output length (PBKDF2's cost scales with it) and then sizes the locked region
+the derived key is moved into, and `stripes`/`area.size` decide how much is
+read, decrypted and merged. None of it requires knowing a passphrase, because
+the derivation is what authentication is built on and therefore runs first.
+
+Keyslot geometry is therefore bounded **once, where the metadata is parsed**, so
+that every consumer — unlock, `AddKey`, `ChangeKey`, and the inspection APIs —
+inherits the same bound. A header that fails those bounds is refused with
+`ErrInvalidHeader` before any derivation or allocation.
+
+| Field | Bound | Justification (measured against cryptsetup 2.7.0) |
+|-------|-------|---------------------------------------------------|
+| `key_size` | 1..1024 bytes | cryptsetup refuses to format anything but a 256- or 512-bit key in XTS mode, so 64 bytes is the largest it writes; 16× headroom |
+| `af.stripes` | 1..4000 | the LUKS1/LUKS2 formats fix this at 4000 |
+| `area.size` | 1..128 MiB | matches cryptsetup's `LUKS2_MAX_KEYSLOTS_SIZE` |
+| `key_size × stripes` | ≤ `area.size` | cryptsetup refuses to open a keyslot violating this (`Keyslot open failed`) |
+
+Keyslots of a type this library does not implement (LUKS2's `reencrypt`) are
+checked only against the bounds that apply to any keyslot, so a container in the
+middle of a reencryption stays readable and inspectable.
+
 ## Requirements
 
 - Linux with device-mapper support
 - Root privileges for device-mapper operations
+- `RLIMIT_MEMLOCK` headroom of ~512 KiB per concurrent operation (see
+  [Protected Memory](#protected-memory))
 - Go 1.25.5 (for building)
 
 ## Compatibility

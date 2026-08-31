@@ -5,7 +5,7 @@
 package luks2
 
 import (
-	"crypto/subtle"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +15,7 @@ import (
 	"unsafe"
 
 	"github.com/anatol/devmapper.go"
+	"github.com/jeremyhahn/go-enclave"
 	"golang.org/x/sys/unix"
 )
 
@@ -49,33 +50,21 @@ func Unlock(device string, passphrase []byte, name string) error {
 		return err
 	}
 
-	// Try each keyslot in scan order. Priority is NOT consulted -- see
-	// keyslotIDsInScanOrder -- so this comment must not be read as a claim that
-	// LUKS2 keyslot priority is honored. It is not.
-	var masterKey []byte
-	var unlocked bool
-
-	for _, id := range keyslotIDsInScanOrder(metadata.Keyslots) {
-		keyslot := metadata.Keyslots[id]
-		if keyslot.Type != "luks2" {
-			continue
-		}
-
-		// Try to unlock with this keyslot
-		mk, err := unlockKeyslot(device, passphrase, keyslot, metadata.Digests)
-		if err != nil {
-			continue // Try next keyslot
-		}
-
-		masterKey = mk
-		unlocked = true
-		break
+	// Keyslots are tried by getMasterKey, which is the ONE implementation of
+	// that scan. This function used to carry a second copy of it -- same order,
+	// same type filter, same first-success-wins -- which is how the two came to
+	// report failures differently: getMasterKey now distinguishes a keyslot that
+	// did not verify from one that could not be tried, and the copy here still
+	// said "incorrect passphrase" for both.
+	//
+	// Priority is NOT consulted, by either -- see keyslotIDsInScanOrder -- so
+	// nothing here should be read as a claim that LUKS2 keyslot priority is
+	// honored. It is not.
+	masterKey, err := getMasterKey(device, passphrase, metadata)
+	if err != nil {
+		return fmt.Errorf("failed to unlock any keyslot: %w", err)
 	}
-
-	if !unlocked {
-		return fmt.Errorf("failed to unlock any keyslot: incorrect passphrase")
-	}
-	defer clearBytes(masterKey)
+	defer masterKey.Destroy()
 
 	// Get segment information
 	var segment *Segment
@@ -122,38 +111,85 @@ func Unlock(device string, passphrase []byte, name string) error {
 		return fmt.Errorf("invalid segment offset: %w", err)
 	}
 
-	// Create device-mapper table
-	// Note: The devmapper library expects Length and BackendOffset in BYTES
-	// (it converts them to sectors internally)
-	// IMPORTANT: Use realDevice (resolved symlink) for devmapper, not the original device path
-	table := devmapper.CryptTable{
-		Start:         0,
-		Length:        length,
-		BackendDevice: realDevice,
-		BackendOffset: backendOffset,
-		Encryption:    segment.Encryption,
-		Key:           masterKey,
-		IVTweak:       parseIVTweak(segment.IVTweak),
-		SectorSize:    uint64(segment.SectorSize), // #nosec G115 - sector size is validated (512 or 4096)
-	}
-
 	// Generate UUID for device-mapper
 	uuid := fmt.Sprintf("CRYPT-LUKS2-%s-%s",
 		strings.ReplaceAll(string(TrimRight(hdr.UUID[:], "\x00")), "-", ""),
 		name)
 
-	// Create and load the device-mapper target
-	if err := devmapper.CreateAndLoad(name, uuid, 0, table); err != nil {
-		return fmt.Errorf("failed to create device-mapper: %w", err)
+	// THE HARD BOUNDARY.
+	//
+	// dm-crypt takes the volume key IN the table it is handed, so the key must
+	// be raw bytes at this call and there is no version of this that keeps it
+	// enclaved. What can be controlled is HOW LONG it is raw, and the borrow is
+	// therefore the narrowest window the API permits: everything derivable from
+	// the header -- the segment, the device size ioctl, the UUID -- has already
+	// been computed, and the device-node and udev-settle work that follows runs
+	// after the key has been destroyed. Before this change the key sat in an
+	// ordinary []byte across all of it, including a wait for udev that can run
+	// for three seconds.
+	//
+	// RESIDUAL EXPOSURE, and it is not small. Inside CreateAndLoad the
+	// devmapper library hex-encodes the key with hex.EncodeToString and joins it
+	// into the target spec, producing TWO immutable Go strings holding the key
+	// in hex -- strings cannot be wiped, so they persist until the collector
+	// happens to reclaim them -- and then copies that spec into an ordinary heap
+	// buffer for the ioctl, which it does not clear afterwards. All three are
+	// inside a third-party package this library cannot reach into. The key is
+	// therefore in unprotected, unwipeable memory for the duration of the ioctl
+	// and for an unbounded time after it.
+	//
+	// Closing that requires not passing the key in the table at all:
+	// devmapper.CryptTable has a KeyID field for a kernel-keyring reference
+	// (":64:logon:..."), which is what cryptsetup itself uses, and it would put
+	// the key in the kernel keyring instead of in a userspace string. That is a
+	// separate change with its own test requirements -- it needs real dm
+	// activation to verify -- and it is tracked rather than smuggled in here.
+	// FROM HERE THE MAPPING IS A TRANSACTION.
+	//
+	// Once the target may exist, every failure below has to take it down again,
+	// because the target is DECRYPTED DATA. A caller told "unlock failed" is
+	// entitled to assume no plaintext device exists and will do nothing to
+	// remove one; leaving it live turns a reported failure into an unowned
+	// decrypted device, and in a volume manager it also wedges the rollback --
+	// the backing device cannot be released while the mapping holds it open, so
+	// the operator ends up with a failed attach, a live plaintext mapping and an
+	// activated backing device, which is the opposite of what the error said.
+	//
+	// The rollback runs on the load failure too, not only after a successful
+	// one. devmapper's CreateAndLoad is create-then-load-then-resume and unwinds
+	// only the middle step: a failed table load is cleaned up, a failed resume
+	// is not, so a CreateAndLoad error can also leave a target behind.
+	if err := unlockLoadTable(name, uuid, realDevice, segment, masterKey, length, backendOffset); err != nil {
+		return errors.Join(err, removeCreatedMapping(name, uuid))
 	}
 
-	// Ensure device node exists (may need to create it in containerized environments)
-	// Non-fatal - device may still be accessible via /dev/mapper/
-	_ = ensureDeviceNode(name)
+	// The kernel has the key now, so give up ours immediately rather than at
+	// function exit: nothing below needs it. Destroy is idempotent, so the
+	// deferred Destroy above stays correct.
+	masterKey.Destroy()
+
+	// Ensure device node exists (may need to create it in containerized
+	// environments).
+	//
+	// Still NON-FATAL, and deliberately so: the device may be perfectly
+	// reachable through /dev/mapper/<name> without this having done anything,
+	// and failing an otherwise good unlock because a redundant node could not be
+	// made would be worse than the problem. What it is no longer is SILENT. It
+	// used to be discarded outright, which left waitForDeviceReady as the only
+	// thing between a half-created mapping and the caller, and made the two
+	// halves of one story unreadable: when mknod fails because the process lacks
+	// CAP_MKNOD and udev is also absent, the operator saw "device not ready" and
+	// no reason to suspect node creation at all. It is now carried and reported
+	// alongside the readiness failure it usually explains.
+	nodeErr := dm.ensureNode(name)
 
 	// Wait for device to be ready - udev needs time to create /dev/mapper/name symlink
-	if err := waitForDeviceReady(name); err != nil {
-		return fmt.Errorf("device not ready after unlock: %w", err)
+	if err := dm.waitReady(name); err != nil {
+		readiness := fmt.Errorf("device not ready after unlock: %w", err)
+		if nodeErr != nil {
+			readiness = fmt.Errorf("%w (creating the device node also failed: %v)", readiness, nodeErr)
+		}
+		return errors.Join(readiness, removeCreatedMapping(name, uuid))
 	}
 
 	return nil
@@ -181,23 +217,12 @@ func ensureDeviceNode(name string) error {
 		return err
 	}
 
-	// Extract major/minor from DevNo
-	// DevNo format: (major << 8) | minor for traditional 16-bit dev_t
-	// or (major << 20) | minor for 32-bit dev_t
-	// Masks ensure values fit in uint32 (0xFFF = 4095, 0xFFF00 = 1048320)
-	var major, minor uint32
-	if info.DevNo > 0xFFFF {
-		// For larger device numbers - masks guarantee values fit in uint32
-		major = uint32((info.DevNo >> 8) & 0xFFF)                            // #nosec G115 - max 4095
-		minor = uint32((info.DevNo & 0xFF) | ((info.DevNo >> 12) & 0xFFF00)) // #nosec G115 - max 1048575
-	} else {
-		// Masks guarantee values fit in uint32
-		major = uint32((info.DevNo >> 8) & 0xFFF) // #nosec G115 - max 4095
-		minor = uint32(info.DevNo & 0xFF)         // #nosec G115 - max 255
-	}
+	// One decoder, shared with the removal path. See decodeDevNo for what the
+	// three hand-rolled variants that used to live here disagreed about.
+	major, minor := decodeDevNo(info.DevNo)
 
-	dmPath := fmt.Sprintf("/dev/dm-%d", minor)
-	mapperPath := fmt.Sprintf("/dev/mapper/%s", name)
+	dmPath := dmNodePath(minor)
+	mapperPath := mapperNodePath(name)
 
 	// Check if device already exists
 	if _, err := os.Stat(dmPath); err == nil {
@@ -227,7 +252,7 @@ func ensureDeviceNode(name string) error {
 // waitForDeviceReady waits for the device-mapper device to be ready at /dev/mapper/{name}.
 // If udev doesn't create the device nodes in time, it creates them manually.
 func waitForDeviceReady(name string) error {
-	mapperPath := fmt.Sprintf("/dev/mapper/%s", name)
+	mapperPath := mapperNodePath(name)
 
 	// Wait up to 3 seconds for udev to create /dev/mapper/{name}
 	for i := 0; i < 30; i++ {
@@ -247,19 +272,8 @@ func waitForDeviceReady(name string) error {
 		return fmt.Errorf("device %s not found in device-mapper: %w", name, err)
 	}
 
-	// Extract major/minor from DevNo
-	// Masks ensure values fit in uint32 (0xFFF = 4095, 0xFFF00 = 1048320)
-	var major, minor uint32
-	if info.DevNo > 0xFFFF {
-		// For larger device numbers - masks guarantee values fit in uint32
-		major = uint32((info.DevNo >> 8) & 0xFFF)                            // #nosec G115 - max 4095
-		minor = uint32((info.DevNo & 0xFF) | ((info.DevNo >> 12) & 0xFFF00)) // #nosec G115 - max 1048575
-	} else {
-		// Masks guarantee values fit in uint32
-		major = uint32((info.DevNo >> 8) & 0xFFF) // #nosec G115 - max 4095
-		minor = uint32(info.DevNo & 0xFF)         // #nosec G115 - max 255
-	}
-	dmPath := fmt.Sprintf("/dev/dm-%d", minor)
+	major, minor := decodeDevNo(info.DevNo)
+	dmPath := dmNodePath(minor)
 
 	// Wait briefly for dm-X device node to exist
 	dmExists := false
@@ -291,7 +305,7 @@ func waitForDeviceReady(name string) error {
 	}
 
 	// Create /dev/mapper directory if it doesn't exist
-	if err := os.MkdirAll("/dev/mapper", 0750); err != nil {
+	if err := os.MkdirAll(mapperDir(), 0750); err != nil {
 		return fmt.Errorf("failed to create /dev/mapper: %w", err)
 	}
 
@@ -327,20 +341,15 @@ func waitForDeviceReady(name string) error {
 // Lock closes a device-mapper mapping
 func Lock(name string) error {
 	// Get device info before removing (to find the device node path)
-	info, _ := devmapper.InfoByName(name)
+	info, _ := dm.infoByName(name)
 
-	if err := devmapper.Remove(name); err != nil {
+	if err := dm.remove(name); err != nil {
 		return fmt.Errorf("failed to remove device-mapper: %w", err)
 	}
 
-	// Clean up device nodes that we may have created
-	if info != nil {
-		minor := info.DevNo & 0xFF
-		dmPath := fmt.Sprintf("/dev/dm-%d", minor)
-		_ = os.Remove(dmPath) // Ignore error - may already be gone
-	}
-	mapperPath := fmt.Sprintf("/dev/mapper/%s", name)
-	_ = os.Remove(mapperPath) // Ignore error - may already be gone
+	// Clean up device nodes that we may have created. This is the same cleanup
+	// a rolled-back unlock performs, so the two leave the same state behind.
+	removeMappingNodes(name, info)
 
 	return nil
 }
@@ -349,14 +358,14 @@ func Lock(name string) error {
 func IsUnlocked(name string) bool {
 	// Check dmsetup directly first - this is authoritative
 	// InfoByName returns error if device doesn't exist
-	_, err := devmapper.InfoByName(name)
+	_, err := dm.infoByName(name)
 	if err == nil {
 		return true
 	}
 
 	// Also check the symlink and verify it points to a valid device
 	// (symlink might be stale if udev didn't clean up properly)
-	path := fmt.Sprintf("/dev/mapper/%s", name)
+	path := mapperNodePath(name)
 	if fi, err := os.Stat(path); err == nil {
 		// Stat follows the symlink - if the target doesn't exist, this would fail
 		// But also check if it's a valid device
@@ -373,7 +382,7 @@ func IsUnlocked(name string) bool {
 // for environments without udev (e.g., Docker containers).
 func GetMappedDevicePath(name string) (string, error) {
 	// First check the symlink (preferred, created by udev)
-	symlinkPath := fmt.Sprintf("/dev/mapper/%s", name)
+	symlinkPath := mapperNodePath(name)
 	if _, err := os.Stat(symlinkPath); err == nil {
 		return symlinkPath, nil
 	}
@@ -384,16 +393,11 @@ func GetMappedDevicePath(name string) (string, error) {
 		return "", fmt.Errorf("device %s not found: %w", name, err)
 	}
 
-	// Extract minor number from DevNo (DevNo = major << 8 | minor for older API,
-	// or use unix.Minor for proper extraction)
-	minor := info.DevNo & 0xFF
-	if info.DevNo > 0xFFFF {
-		// Handle 64-bit devno: major is in upper 32 bits, minor in lower 32
-		minor = info.DevNo & 0xFFFFFFFF
-	}
-
-	// Build the /dev/dm-{minor} path
-	dmPath := fmt.Sprintf("/dev/dm-%d", minor)
+	// The same decoder as everything else. This site carried a THIRD spelling
+	// -- masking the low 32 bits, which is not a minor at all -- so a large
+	// device number produced a path no node has ever had.
+	_, minor := decodeDevNo(info.DevNo)
+	dmPath := dmNodePath(minor)
 
 	// Wait for the device file to appear (kernel creates it asynchronously)
 	for i := 0; i < 50; i++ {
@@ -406,14 +410,100 @@ func GetMappedDevicePath(name string) (string, error) {
 	return dmPath, nil
 }
 
-// unlockKeyslot attempts to unlock a keyslot with the given passphrase
-func unlockKeyslot(device string, passphrase []byte, keyslot *Keyslot, digests map[string]*Digest) ([]byte, error) {
+// unlockLoadTable builds the dm-crypt table and loads it, with the master key
+// borrowed from its enclave for exactly that call.
+//
+// It is a separate function so the borrow closure has nothing else in it: the
+// window in which the key is raw bytes is this function body and no more. See
+// the call site for what remains exposed once the key crosses into devmapper.
+func unlockLoadTable(name, uuid, realDevice string, segment *Segment, masterKey *enclave.MemoryEnclave, length, backendOffset uint64) error {
+	// loadErr is kept separate from the borrow's own error so that a failure to
+	// reach protected memory is not reported as a device-mapper failure. The two
+	// send an operator to completely different places.
+	var loadErr error
+
+	err := borrowSecret("master key", masterKey, func(key []byte) error {
+		// Note: The devmapper library expects Length and BackendOffset in BYTES
+		// (it converts them to sectors internally)
+		// IMPORTANT: Use realDevice (resolved symlink) for devmapper, not the original device path
+		table := devmapper.CryptTable{
+			Start:         0,
+			Length:        length,
+			BackendDevice: realDevice,
+			BackendOffset: backendOffset,
+			Encryption:    segment.Encryption,
+			Key:           key,
+			IVTweak:       parseIVTweak(segment.IVTweak),
+			SectorSize:    uint64(segment.SectorSize), // #nosec G115 - sector size is validated (512 or 4096)
+		}
+
+		loadErr = dm.createAndLoad(name, uuid, 0, table)
+		return loadErr
+	})
+	if err == nil {
+		return nil
+	}
+	if loadErr != nil {
+		return fmt.Errorf("failed to create device-mapper: %w", loadErr)
+	}
+	return err
+}
+
+// unlockKeyslot attempts to unlock a keyslot with the given passphrase and
+// returns the master key HELD IN PROTECTED MEMORY.
+//
+// Everything derived along the way that is or reveals the master key -- the
+// passphrase-derived key, the decrypted AF stripes, the merged key itself --
+// lives in an enclave and is destroyed on every path out, success or failure.
+// What is deliberately not enclaved is the ciphertext read off the device,
+// which is already on the device; see decryptKeyMaterialEnclave.
+func unlockKeyslot(device string, passphrase []byte, keyslot *Keyslot, digests map[string]*Digest) (*enclave.MemoryEnclave, error) {
+	// The type is checked HERE and not only in the scan.
+	//
+	// getMasterKey skips anything that is not "luks2", but RemoveKey, ChangeKey
+	// and KillSlot reach this function with a keyslot the caller NAMED, without
+	// consulting its type. A LUKS2 "reencrypt" keyslot has no kdf object, so
+	// arriving at the derivation with one dereferences nil -- a crash reachable
+	// from a container that is merely mid-reencryption, not even a hostile one.
+	if keyslot.Type != "luks2" {
+		return nil, fmt.Errorf("%w: keyslot type %q cannot be opened; only luks2 keyslots hold a passphrase-wrapped volume key",
+			ErrInvalidKeyslot, keyslot.Type)
+	}
+
+	// THE GATE. Everything below this line trusts the keyslot's declared
+	// geometry: that the objects it needs exist, that its offsets and sizes
+	// parse, and that its key size, stripe count and area describe an amount of
+	// work worth doing.
+	//
+	// The header reader already applied this to every keyslot it parsed (see
+	// keyslotvalidation.go); it is repeated here because this function is also
+	// reachable with a keyslot a caller CONSTRUCTED rather than read. What it
+	// replaced was three overlapping bounds scattered down this function --
+	// an area-size check here, an overflow check in afSplitBytes there -- which
+	// is the shape that let an unbounded key_size reach the KDF in the first
+	// place: a bound at one call site says nothing about the call site above it.
+	if err := validateKeyslot("", keyslot); err != nil {
+		return nil, err
+	}
+
+	// What the KDF would COST is checked immediately before it is paid, and
+	// here rather than in validateKeyslot: a keyslot with a deliberately
+	// expensive KDF is still a fine template for a new one, and AddKey's
+	// reference pick screens shape without needing to run anything. See
+	// validateKDFCost.
+	//
+	// Wrapped as an unusable KEYSLOT, which is what makes the scan skip past a
+	// crafted slot rather than let it deny the volume.
+	if err := validateKDFCost(keyslot.KDF); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidKeyslot, err)
+	}
+
 	// Derive key from passphrase
-	passphraseKey, err := DeriveKey(passphrase, keyslot.KDF, keyslot.KeySize)
+	passphraseKey, err := DeriveKeyEnclave(passphrase, keyslot.KDF, keyslot.KeySize)
 	if err != nil {
 		return nil, err
 	}
-	defer clearBytes(passphraseKey)
+	defer passphraseKey.Destroy()
 
 	// Read encrypted key material from keyslot area
 	offset, err := parseSize(keyslot.Area.Offset)
@@ -441,29 +531,55 @@ func unlockKeyslot(device string, passphrase []byte, keyslot *Keyslot, digests m
 	// Extract cipher from area encryption (e.g., "aes-xts-plain64" -> "aes")
 	cipherAlgo := strings.Split(keyslot.Area.Encryption, "-")[0]
 
-	// Decrypt key material
+	// Merge anti-forensic split.
+	//
+	// The keyslot area is 4 KiB-aligned and so is usually LARGER than the
+	// keySize*stripes the merge consumes. Only that much is decrypted, rounded
+	// UP to a whole sector: XTS tweaks on the sector index, so decrypting a
+	// whole-sector prefix yields byte-identical plaintext to decrypting the
+	// area and truncating, while the locked region needed shrinks to the
+	// stripes themselves. Rounding up rather than down matters -- a short final
+	// sector would be zero-padded by the transform and decrypt to something
+	// else entirely.
+	// The gate above has established that this product does not overflow and
+	// fits the area, so it is computed rather than re-checked.
+	afSplitSize := keyslot.KeySize * keyslot.AF.Stripes
+
 	sectorSize := 512 // Default for key material
-	decryptedKeyMaterial, err := decryptKeyMaterial(encryptedKeyMaterial, passphraseKey, cipherAlgo, sectorSize)
+	decryptLen := alignTo(int64(afSplitSize), int64(sectorSize))
+	if decryptLen > size {
+		// Only reachable for an area size that is not a whole number of
+		// sectors, which LUKS2's 4096-byte keyslot alignment rules out for any
+		// container cryptsetup or this library writes.
+		//
+		// It is refused rather than clamped. Clamping would send the final
+		// sector through the zero-padding partial-sector path, which decrypts
+		// to something other than what was written -- so the merge would fail
+		// with a message about the AF material rather than about the geometry
+		// that caused it, and an operator would go looking in the wrong place.
+		return nil, fmt.Errorf("%w: area of %d bytes is not a whole number of %d-byte sectors and cannot hold the %d bytes of AF material this keyslot declares",
+			ErrInvalidKeyslot, size, sectorSize, afSplitSize)
+	}
+
+	decryptedKeyMaterial, err := decryptKeyMaterialEnclave(
+		encryptedKeyMaterial[:decryptLen], passphraseKey, cipherAlgo, sectorSize)
 	if err != nil {
 		return nil, err
 	}
-	defer clearBytes(decryptedKeyMaterial)
+	defer decryptedKeyMaterial.Destroy()
 
-	// Merge anti-forensic split
-	// Note: The keyslot area may be larger than the actual AF-split data due to alignment
-	// We only need keySize * stripes bytes for AF-merge
-	afSplitSize := keyslot.KeySize * keyslot.AF.Stripes
-	if len(decryptedKeyMaterial) < afSplitSize {
-		return nil, fmt.Errorf("decrypted data too small: got %d, need %d", len(decryptedKeyMaterial), afSplitSize)
+	if decryptedKeyMaterial.Size() < afSplitSize {
+		return nil, fmt.Errorf("decrypted data too small: got %d, need %d", decryptedKeyMaterial.Size(), afSplitSize)
 	}
-	masterKey, err := AFMerge(decryptedKeyMaterial[:afSplitSize], keyslot.AF.Stripes, keyslot.KeySize, keyslot.AF.Hash)
+
+	masterKey, err := afMergeEnclave(decryptedKeyMaterial, afSplitSize, keyslot.AF.Stripes, keyslot.KeySize, keyslot.AF.Hash)
 	if err != nil {
 		return nil, err
 	}
 
 	// Verify master key using digest
 	if err := verifyMasterKey(masterKey, digests); err != nil {
-		clearBytes(masterKey)
+		masterKey.Destroy()
 		return nil, err
 	}
 
@@ -484,7 +600,7 @@ func unlockKeyslot(device string, passphrase []byte, keyslot *Keyslot, digests m
 // whether the cause was a mismatch, an unsupported KDF, a corrupt salt or a
 // digest of implausible length: the caller learns that this key did not verify
 // and nothing about which digest rejected it or why.
-func verifyMasterKey(masterKey []byte, digests map[string]*Digest) error {
+func verifyMasterKey(masterKey *enclave.MemoryEnclave, digests map[string]*Digest) error {
 	for _, digest := range digests {
 		kdf := &KDF{
 			Type:       digest.Type,
@@ -525,18 +641,38 @@ func verifyMasterKey(masterKey []byte, digests map[string]*Digest) error {
 			continue // length agrees with neither the hash nor the carve-out (#58)
 		}
 
-		derived, err := DeriveKey(masterKey, kdf, len(expected))
+		// The digest's KDF is header-supplied too, and it is the one that is
+		// easy to miss: it is not the keyslot's. An absurd cost here is skipped
+		// exactly as an unusable digest is -- the symmetry #58 established --
+		// rather than run, and rather than aborting a volume whose other
+		// digests are fine.
+		if err := validateKDFCost(kdf); err != nil {
+			clearBytes(expected)
+			continue
+		}
+
+		// The derivation borrows the master key in place; this package makes
+		// no copy of it.
+		//
+		// It does leave protected memory once inside the KDF, though: pbkdf2
+		// stringifies its password argument, so every digest tried here puts
+		// the master key into an unwipeable Go string. See exposure 2 in
+		// enclave.go. Trying N digests materializes it N times.
+		derived, err := deriveKeySecret(masterKey, kdf, len(expected))
 		if err != nil {
 			clearBytes(expected)
 			continue // e.g. non-approved KDF in FIPS mode -- try the next (#58)
 		}
 
 		// Compare using constant-time comparison to prevent timing attacks.
-		// Both buffers are zeroed on every path before the next iteration:
-		// deferring the clears would pile them up for the whole loop and only
-		// run them once the function returns.
-		matched := subtle.ConstantTimeCompare(derived, expected) == 1
-		clearBytes(derived)
+		// MemoryEnclave.EqualTo does exactly that, under the enclave's own read
+		// lock, so the derived digest is never copied out to be compared. The
+		// stored digest is a cleartext header field and is cleared anyway; the
+		// derived one is destroyed on every path before the next iteration,
+		// because deferring would pile up one locked region per digest and free
+		// none of them until the function returned.
+		matched := derived.EqualTo(expected)
+		derived.Destroy()
 		clearBytes(expected)
 		if matched {
 			return nil // Verification successful

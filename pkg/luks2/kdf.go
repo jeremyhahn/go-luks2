@@ -6,6 +6,7 @@ package luks2
 
 import (
 	"crypto/fips140"
+	"crypto/pbkdf2"
 	"crypto/sha1" // #nosec G505 - legacy LUKS interop only; refused in FIPS mode (docs/FIPS.md)
 	"crypto/sha256"
 	"crypto/sha512"
@@ -15,8 +16,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jeremyhahn/go-enclave"
 	"golang.org/x/crypto/argon2"
-	"golang.org/x/crypto/pbkdf2"
 )
 
 // FIPS-compatible KDF type constants
@@ -96,12 +97,120 @@ func requireFIPSApprovedKDF(kdfType string) error {
 	}
 }
 
-// DeriveKey derives a key from a passphrase using the specified KDF
+// DeriveKeyEnclave derives a key from a passphrase and returns it held in
+// protected memory. This is the derivation every path inside this package uses.
+//
+// In FIPS 140-3 mode an Argon2 KDF is refused with ErrFIPSNotApproved before
+// any derivation is attempted, so an externally supplied header cannot make a
+// FIPS-mode process run a non-approved KDF.
+//
+// # The exposure this cannot close
+//
+// passphrase is the CALLER'S memory, ordinary and unlocked. This function
+// borrows it for the derivation and never wipes it: wiping a buffer this
+// package does not own would corrupt the caller. Bringing it into protected
+// memory at this depth would not help either -- the bytes were already on the
+// heap before the call.
+//
+// The derived key spends the width of one return statement on the heap, and
+// that is not closable in Go: crypto/pbkdf2.Key and argon2.IDKey allocate their result
+// internally and return it, with no variant that writes into a provided buffer.
+// enclave.NewMemoryEnclave takes ownership of that slice and wipes it -- on the
+// failure path too -- so what survives is whatever copy the compiler or the
+// collector made in between, plus the KDF's own scratch, which is unreachable
+// from here. See ProtectedMemoryError for why a failure here is fatal.
+func DeriveKeyEnclave(passphrase []byte, kdf *KDF, keySize int) (*enclave.MemoryEnclave, error) {
+	key, err := deriveKeyPlain(passphrase, kdf, keySize)
+	if err != nil {
+		return nil, err
+	}
+
+	// adoptSecret wipes key on every path, so there is no clearBytes here and
+	// no path on which the derived key outlives this statement in the clear.
+	return adoptSecret("derived key", key)
+}
+
+// deriveKeySecret derives a key from material ALREADY held in protected memory,
+// borrowing the input in place rather than copying it out.
+//
+// It exists for the master-key digest, which derives from the master key rather
+// than from a passphrase, and it keeps THIS package from making a copy.
+//
+// It does NOT keep the input inside the enclave for the derivation, which is
+// what this comment used to claim. The borrow is handed to DeriveKeyEnclave and
+// from there to pbkdf2.Key, whose first act is string(password) -- an immutable
+// Go string nobody can wipe -- followed by hmac.New taking another copy. So on
+// this path the VOLUME MASTER KEY is materialized in unprotected, unwipeable
+// memory once per derivation, on every unlock (verifyMasterKey, once per digest
+// tried) and every format (createDigest).
+//
+// It is a validated-module boundary with no way around it that is permitted:
+// crypto/pbkdf2 takes a string, and implementing PBKDF2 over crypto/hmac to
+// avoid that is prohibited outright by the owner ruling of 2026-08-25 (resolved
+// case #155), which rules that the protected-memory mandate yields here.
+// Recorded as exposure 2 in enclave.go.
+func deriveKeySecret(secret *enclave.MemoryEnclave, kdf *KDF, keySize int) (*enclave.MemoryEnclave, error) {
+	var derived *enclave.MemoryEnclave
+	err := borrowSecret("derive from secret", secret, func(b []byte) error {
+		var err error
+		derived, err = DeriveKeyEnclave(b, kdf, keySize)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return derived, nil
+}
+
+// DeriveKey derives a key from a passphrase using the specified KDF and returns
+// it as plain, unprotected bytes.
+//
+// Deprecated: the returned key is ordinary heap memory -- swappable,
+// core-dumpable, and not zeroized until a caller remembers to do it. Nothing
+// inside this package calls it any more; every internal derivation goes through
+// DeriveKeyEnclave, which returns the key held in locked memory. It remains
+// exported only so that existing consumers and the conformance fixtures keep
+// building, and it will be removed once none depend on it.
 //
 // In FIPS 140-3 mode an Argon2 KDF is refused with ErrFIPSNotApproved before
 // any derivation is attempted, so an externally supplied header cannot make a
 // FIPS-mode process run a non-approved KDF.
 func DeriveKey(passphrase []byte, kdf *KDF, keySize int) ([]byte, error) {
+	return deriveKeyPlain(passphrase, kdf, keySize)
+}
+
+// deriveKeyPlain is the derivation itself. It is the ONE place in this package
+// that produces key material outside an enclave, and it exists because the
+// stdlib KDFs give no other shape: every caller either adopts the result into
+// an enclave immediately (DeriveKeyEnclave) or is the deprecated exported
+// wrapper above.
+func deriveKeyPlain(passphrase []byte, kdf *KDF, keySize int) ([]byte, error) {
+	if kdf == nil {
+		return nil, &CryptoError{Op: "derive", Err: fmt.Errorf("no KDF was given")}
+	}
+
+	// The requested length is checked ONCE, here, ahead of every KDF rather
+	// than inside each of them. It is a PANIC GUARD and nothing more:
+	// crypto/pbkdf2 refuses a non-positive keyLength with an error that
+	// x/crypto used to turn into a panic, and argon2 dereferences nil on one.
+	// No caller of any kind has a use for a zero-length key.
+	//
+	// It deliberately carries no UPPER bound any more. An earlier version
+	// capped it at MaxKeyslotKeySize, which looked like defense in depth and was
+	// misplaced for the same reason validateKDFCost is not enforced here: this
+	// function serves two TRUST DOMAINS. Format, AddKey, ChangeKey and the
+	// exported DeriveKey derive from parameters the CALLER chose, and an
+	// untrusted-input ceiling applied to all of them rejects a caller's own
+	// deliberate choice with an error shaped like a malformed header. What a
+	// HEADER may declare is bounded where headers are read -- validateKeyslot
+	// for the key size, validateKDFCost for the work factors.
+	if keySize <= 0 {
+		return nil, &CryptoError{
+			Op:  "derive",
+			Err: fmt.Errorf("requested key length must be positive"),
+		}
+	}
+
 	if err := requireFIPSApprovedKDF(kdf.Type); err != nil {
 		return nil, err
 	}
@@ -124,9 +233,23 @@ func DeriveKey(passphrase []byte, kdf *KDF, keySize int) ([]byte, error) {
 }
 
 // derivePBKDF2 derives a key using PBKDF2
+// It calls the STANDARD LIBRARY's crypto/pbkdf2, not
+// golang.org/x/crypto/pbkdf2.
+//
+// The x/crypto wrapper is a two-line shim that calls the same validated
+// implementation and then does panic(err) on any error it returns -- so a
+// keyLength the module refuses became a process crash reached through a
+// function whose signature promises an error. That wrapper was the entire
+// mechanism behind the key_size panics; the guard in validateKeyslot keeps a
+// header from reaching it, and calling the erroring API keeps the next caller
+// from having to.
+//
+// It is also the API the owner ruling names: "use crypto/pbkdf2; accept the
+// bounded transient copy; document it" (conventions/security-review.md, NEVER
+// hand-roll cryptography, owner ruling 2026-08-25, resolved case #155).
 func derivePBKDF2(passphrase, salt []byte, kdf *KDF, keySize int) ([]byte, error) {
 	if kdf.Iterations == nil {
-		return nil, fmt.Errorf("PBKDF2 requires iterations")
+		return nil, &CryptoError{Op: "pbkdf2", Err: fmt.Errorf("PBKDF2 requires iterations")}
 	}
 
 	hashFunc, err := getPBKDF2HashFunc(kdf.Hash)
@@ -134,7 +257,15 @@ func derivePBKDF2(passphrase, salt []byte, kdf *KDF, keySize int) ([]byte, error
 		return nil, err
 	}
 
-	key := pbkdf2.Key(passphrase, salt, *kdf.Iterations, keySize, hashFunc)
+	// string(passphrase) is the unwipeable copy exposure 2 in enclave.go
+	// records. It is made HERE now rather than inside the x/crypto wrapper,
+	// which changes who makes it and not whether it is made: crypto/pbkdf2
+	// takes a string, and the module copies it again into the HMAC state
+	// regardless. The ruling above is what settles that.
+	key, err := pbkdf2.Key(hashFunc, string(passphrase), salt, *kdf.Iterations, keySize)
+	if err != nil {
+		return nil, &CryptoError{Op: "pbkdf2", Err: err}
+	}
 	return key, nil
 }
 
@@ -208,7 +339,16 @@ func deriveArgon2i(passphrase, salt []byte, kdf *KDF, keySize int) ([]byte, erro
 	// Validate CPUs fits in uint8 (Argon2 parallelism is 1-255)
 	cpus := *kdf.CPUs
 	if cpus < 1 || cpus > 255 {
-		return nil, fmt.Errorf("Argon2i cpus must be between 1 and 255")
+		return nil, &CryptoError{Op: "argon2i", Err: fmt.Errorf("cpus must be between 1 and 255")}
+	}
+
+	// And the round count, which x/crypto/argon2 PANICS on rather than
+	// refusing: "argon2: number of rounds too small" for time < 1. The cpus
+	// bound directly above was checked and this one was not, which is what made
+	// the omission easy to miss -- both are panics in the same function, from
+	// the same header fields, three lines apart.
+	if *kdf.Time < 1 {
+		return nil, &CryptoError{Op: "argon2i", Err: fmt.Errorf("time cost must be at least 1")}
 	}
 
 	// #nosec G115 - bounds checked above (cpus is 1-255)
@@ -225,7 +365,16 @@ func deriveArgon2id(passphrase, salt []byte, kdf *KDF, keySize int) ([]byte, err
 	// Validate CPUs fits in uint8 (Argon2 parallelism is 1-255)
 	cpus := *kdf.CPUs
 	if cpus < 1 || cpus > 255 {
-		return nil, fmt.Errorf("Argon2id cpus must be between 1 and 255")
+		return nil, &CryptoError{Op: "argon2id", Err: fmt.Errorf("cpus must be between 1 and 255")}
+	}
+
+	// And the round count, which x/crypto/argon2 PANICS on rather than
+	// refusing: "argon2: number of rounds too small" for time < 1. The cpus
+	// bound directly above was checked and this one was not, which is what made
+	// the omission easy to miss -- both are panics in the same function, from
+	// the same header fields, three lines apart.
+	if *kdf.Time < 1 {
+		return nil, &CryptoError{Op: "argon2id", Err: fmt.Errorf("time cost must be at least 1")}
 	}
 
 	// #nosec G115 - bounds checked above (cpus is 1-255)
@@ -248,7 +397,9 @@ func BenchmarkPBKDF2(hashAlgo string, keySize, targetMs int) (int, error) {
 	// Start with 1000 iterations and measure
 	iterations := 1000
 	start := time.Now()
-	_ = pbkdf2.Key(testPass, testSalt, iterations, keySize, hashFunc)
+	if _, err := pbkdf2.Key(hashFunc, string(testPass), testSalt, iterations, keySize); err != nil {
+		return 0, &CryptoError{Op: "pbkdf2 benchmark", Err: err}
+	}
 	elapsed := time.Since(start)
 
 	// Extrapolate to target time
