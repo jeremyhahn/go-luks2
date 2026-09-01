@@ -7,9 +7,13 @@
 package luks2
 
 import (
+	"errors"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -542,6 +546,152 @@ func TestSecurityConstants(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.value < tt.min {
 				t.Errorf("%s = %d, want >= %d", tt.name, tt.value, tt.min)
+			}
+		})
+	}
+}
+
+// A permission failure has to be TYPED, not merely accurate (#31).
+//
+// # Why these tests inject at a seam instead of using permission bits
+//
+// They cannot use permission bits. CI job containers run as ROOT and root
+// bypasses discretionary access checks, so an os.Chmod-based negative test
+// passes on a workstation and fails on the runner -- the exact trap
+// conventions/testing-guidelines.md forbids under Fault Injection.
+//
+// Nor is there a real open that fails with EACCES for every uid. Four
+// candidates were measured on a dev host, as uid 1000 and again as uid 0:
+// /proc/version and /proc/self/cmdline opened O_RDWR, /sys/kernel/vmcoreinfo,
+// and /proc/1/mem. All four refused uid 1000 with "permission denied" and ALL
+// FOUR opened successfully for root. So the fault is injected at
+// openFileFunc, which holds identically for both.
+
+// failOpensWith makes every openDevice call fail with err wrapped in the
+// *fs.PathError shape the kernel produces, and restores the seam afterwards.
+func failOpensWith(t *testing.T, err error) {
+	t.Helper()
+
+	previous := openFileFunc
+	t.Cleanup(func() { openFileFunc = previous })
+	openFileFunc = func(name string, _ int, _ os.FileMode) (*os.File, error) {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: err}
+	}
+}
+
+// TestClassifyDeviceOpen_TypesAPermissionFailure is the contract itself: both
+// errnos the kernel uses for "you may not", classified, with the cause still
+// reachable.
+func TestClassifyDeviceOpen_TypesAPermissionFailure(t *testing.T) {
+	for _, errno := range []syscall.Errno{syscall.EACCES, syscall.EPERM} {
+		t.Run(errno.Error(), func(t *testing.T) {
+			cause := &fs.PathError{Op: "open", Path: "/dev/sdb1", Err: errno}
+
+			err := classifyDeviceOpen("read the LUKS2 header", cause)
+			if !errors.Is(err, ErrPermissionDenied) {
+				t.Fatalf("classifyDeviceOpen = %v, want an error wrapping ErrPermissionDenied", err)
+			}
+			// A caller that already branched on the standard library's sentinel
+			// must not have to change.
+			if !errors.Is(err, os.ErrPermission) {
+				t.Fatalf("the classified error no longer matches os.ErrPermission: %v", err)
+			}
+			if !errors.Is(err, errno) {
+				t.Fatalf("the classified error no longer reaches the errno: %v", err)
+			}
+			// Naming the operation is the difference between a verdict and a
+			// remedy: the message has to say what was being attempted.
+			if !strings.Contains(err.Error(), "read the LUKS2 header") {
+				t.Fatalf("the classified error does not name the operation: %v", err)
+			}
+			if !strings.Contains(err.Error(), "RAW BLOCK DEVICE") {
+				t.Fatalf("the classified error carries no remedy: %v", err)
+			}
+		})
+	}
+}
+
+// TestClassifyDeviceOpen_LeavesEverythingElseAlone is the other half. Wrapping
+// every open failure would rewrite the message of every failure in the package
+// to buy a distinction only one of them needs.
+func TestClassifyDeviceOpen_LeavesEverythingElseAlone(t *testing.T) {
+	for _, errno := range []syscall.Errno{syscall.ENOENT, syscall.ENOTDIR, syscall.EIO, syscall.EBUSY} {
+		t.Run(errno.Error(), func(t *testing.T) {
+			cause := &fs.PathError{Op: "open", Path: "/dev/sdb1", Err: errno}
+
+			err := classifyDeviceOpen("read the LUKS2 header", cause)
+			if err != error(cause) {
+				t.Fatalf("classifyDeviceOpen rewrote a %v failure as %v", errno, err)
+			}
+			if errors.Is(err, ErrPermissionDenied) {
+				t.Fatalf("a %v failure was classified as a permission failure: %v", errno, err)
+			}
+		})
+	}
+
+	if err := classifyDeviceOpen("read the LUKS2 header", nil); err != nil {
+		t.Fatalf("classifyDeviceOpen(nil) = %v, want nil", err)
+	}
+}
+
+// TestOpenDeviceClassifiesAPermissionFailure covers the wrapper rather than the
+// classifier, so a future openDevice that forgot to call it would be caught.
+func TestOpenDeviceClassifiesAPermissionFailure(t *testing.T) {
+	failOpensWith(t, syscall.EACCES)
+
+	f, err := openDevice("read the LUKS2 header", "/dev/sdb1", os.O_RDONLY)
+	if err == nil {
+		_ = f.Close()
+		t.Fatal("openDevice reported success against a seam that always refuses")
+	}
+	if !errors.Is(err, ErrPermissionDenied) {
+		t.Fatalf("openDevice = %v, want an error wrapping ErrPermissionDenied", err)
+	}
+}
+
+// TestTheExportedPathsReportAPermissionFailureAsOne is the assertion that makes
+// the sentinel true rather than merely declared.
+//
+// Every one of these is an entry point a consumer calls, and each reaches a
+// classified open: the header readers open the device themselves, and Format
+// opens it before it writes anything. Testing the classifier alone would prove
+// only that a function nobody calls works.
+func TestTheExportedPathsReportAPermissionFailureAsOne(t *testing.T) {
+	// A real, readable file, so ValidateDevicePath passes and the failure under
+	// test is the OPEN and not the path check.
+	device := newImage(t, "permission.img")
+
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{"ReadHeader", func() error { _, _, err := ReadHeader(device); return err }},
+		{"IsLUKS", func() error { _, err := IsLUKS(device); return err }},
+		{"IsLUKS2", func() error { _, err := IsLUKS2(device); return err }},
+		{"AcquireFileLock", func() error { _, err := AcquireFileLock(device); return err }},
+		{"Format", func() error {
+			return Format(FormatOptions{
+				Device:        device,
+				Passphrase:    []byte(conformancePassphrase),
+				KDFType:       KDFTypePBKDF2,
+				PBKDFIterTime: 1,
+			})
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			failOpensWith(t, syscall.EACCES)
+
+			err := tt.call()
+			if err == nil {
+				t.Fatal("the call reported success against a seam that always refuses to open the device")
+			}
+			if !errors.Is(err, ErrPermissionDenied) {
+				t.Fatalf("%s = %v, want an error wrapping ErrPermissionDenied", tt.name, err)
+			}
+			if !errors.Is(err, os.ErrPermission) {
+				t.Fatalf("%s lost the underlying cause: %v", tt.name, err)
 			}
 		})
 	}

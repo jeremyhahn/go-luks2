@@ -886,7 +886,8 @@ func keyslotIDsInScanOrder(keyslots map[string]*Keyslot) []string {
 //
 // # What this deliberately does NOT claim
 //
-// It does not report ErrInvalidPassphrase for a digest mismatch. Three causes
+// It does not report a wrong-passphrase verdict for a digest mismatch, and
+// since #70 there is no sentinel left that could state one. Three causes
 // arrive at that comparison indistinguishably -- a wrong credential, the RIGHT
 // credential over damaged key material, and a semantically wrong digest -- so
 // naming it after one of them would be a false statement of exactly the kind
@@ -897,10 +898,10 @@ func keyslotIDsInScanOrder(keyslots map[string]*Keyslot) []string {
 // # A volume with NO usable keyslot is not a wrong passphrase either
 //
 // If the scan tries nothing at all, ErrNoKeyslots comes back rather than a
-// verification verdict (#30). ErrInvalidPassphrase is the one error in this
-// package an operator will assume is their own fault, and reporting it here
-// sends someone whose header carries no openable keyslot to retype a
-// credential that was never the problem and that no passphrase would replace.
+// verification verdict (#30). A wrong-passphrase verdict is the one answer an
+// operator will assume is their own fault, and reporting it here sends someone
+// whose header carries no openable keyslot to retype a credential that was
+// never the problem and that no passphrase would replace.
 // The state is reachable without anything exotic -- a keyslots object that is
 // empty or absent, or one whose every entry has a type the unlock path will not
 // try, such as a container left mid-reencryption. A `reencrypt`-only volume

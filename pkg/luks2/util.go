@@ -11,21 +11,6 @@ import (
 	"strconv"
 )
 
-// nextPowerOf2 returns the next power of 2 >= n
-func nextPowerOf2(n int) int {
-	if n <= 0 {
-		return 1
-	}
-	n--
-	n |= n >> 1
-	n |= n >> 2
-	n |= n >> 4
-	n |= n >> 8
-	n |= n >> 16
-	n++
-	return n
-}
-
 // clearBytes securely zeros a byte slice
 func clearBytes(b []byte) {
 	for i := range b {

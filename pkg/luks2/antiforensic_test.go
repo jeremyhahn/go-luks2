@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/sha512"
+	"errors"
 	"testing"
 )
 
@@ -633,5 +634,18 @@ func TestHashBlockWithSHA512(t *testing.T) {
 	result2 := hashBlockInto(nil, block, sha512.New(), iv)
 	if !bytes.Equal(result, result2) {
 		t.Fatal("hashBlockInto with SHA512 is not deterministic")
+	}
+}
+
+// TestAFSplitAndMergeReportAnUnsupportedHash pins ErrUnsupportedHash on the
+// anti-forensic path, which has its own hash dispatch (#70). Both directions
+// are checked: a split and a merge reach getHashFunc separately, and a fix
+// applied to one of them would otherwise look complete.
+func TestAFSplitAndMergeReportAnUnsupportedHash(t *testing.T) {
+	if _, err := AFSplit(make([]byte, 32), 4, "md5"); !errors.Is(err, ErrUnsupportedHash) {
+		t.Fatalf("AFSplit = %v, want an error wrapping ErrUnsupportedHash", err)
+	}
+	if _, err := AFMerge(make([]byte, 128), 4, 32, "md5"); !errors.Is(err, ErrUnsupportedHash) {
+		t.Fatalf("AFMerge = %v, want an error wrapping ErrUnsupportedHash", err)
 	}
 }

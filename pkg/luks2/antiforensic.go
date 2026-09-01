@@ -311,6 +311,6 @@ func getHashFunc(name string) (func() hash.Hash, error) {
 	case "sha512":
 		return sha512.New, nil
 	default:
-		return nil, fmt.Errorf("unsupported hash algorithm: %s", name)
+		return nil, fmt.Errorf("%w: %s", ErrUnsupportedHash, name)
 	}
 }

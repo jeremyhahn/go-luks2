@@ -444,13 +444,18 @@ func devmapperImportName(file *ast.File) string {
 // The digest is what closes it, and this drives the real load path with a UUID
 // no header reader would have rejected to prove the closure end to end.
 func TestAHostileHeaderUUIDCannotSplitTheTargetSpecification(t *testing.T) {
-	segment := &Segment{
+	// Built through the validator rather than as a literal, so this test drives
+	// the same construction path Unlock does (#40).
+	params, err := cryptTableParams("0", &Segment{
 		Type:       "crypt",
 		Offset:     "0",
 		Size:       "dynamic",
 		IVTweak:    "0",
 		Encryption: "aes-xts-plain64",
 		SectorSize: 512,
+	})
+	if err != nil {
+		t.Fatalf("the fixture segment does not validate: %v", err)
 	}
 
 	for _, hostile := range []string{
@@ -469,7 +474,7 @@ func TestAHostileHeaderUUIDCannotSplitTheTargetSpecification(t *testing.T) {
 			}
 			defer key.Destroy()
 
-			if err := unlockLoadTable("victim", hostile, "/dev/null", segment, key, 4096, 0); err != nil {
+			if err := unlockLoadTable("victim", hostile, "/dev/null", params, key, 4096, 0); err != nil {
 				t.Fatalf("unlockLoadTable failed: %v", err)
 			}
 

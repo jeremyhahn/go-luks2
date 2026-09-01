@@ -13,84 +13,14 @@ import (
 	"testing"
 )
 
-// TestParseIVTweak tests parsing IV tweak values from strings
-func TestParseIVTweak(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected uint64
-	}{
-		{
-			name:     "zero value",
-			input:    "0",
-			expected: 0,
-		},
-		{
-			name:     "small positive value",
-			input:    "42",
-			expected: 42,
-		},
-		{
-			name:     "typical sector offset",
-			input:    "4096",
-			expected: 4096,
-		},
-		{
-			name:     "large value",
-			input:    "1048576",
-			expected: 1048576,
-		},
-		{
-			name:     "max uint64",
-			input:    "18446744073709551615",
-			expected: 18446744073709551615,
-		},
-		{
-			name:     "empty string",
-			input:    "",
-			expected: 0, // strconv.ParseUint returns 0 on error
-		},
-		{
-			name:     "invalid characters",
-			input:    "invalid",
-			expected: 0, // strconv.ParseUint returns 0 on error
-		},
-		{
-			name:     "negative value",
-			input:    "-1",
-			expected: 0, // strconv.ParseUint returns 0 on error
-		},
-		{
-			name:     "overflow uint64",
-			input:    "18446744073709551616", // max uint64 + 1
-			expected: 18446744073709551615,   // strconv.ParseUint returns max uint64 on overflow
-		},
-		{
-			name:     "hexadecimal notation",
-			input:    "0x100",
-			expected: 0, // parseIVTweak uses base 10, not hex
-		},
-		{
-			name:     "whitespace",
-			input:    "  123  ",
-			expected: 0, // strconv.ParseUint fails with whitespace
-		},
-		{
-			name:     "leading zeros",
-			input:    "000123",
-			expected: 123,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := parseIVTweak(tt.input)
-			if result != tt.expected {
-				t.Errorf("parseIVTweak(%q) = %d, want %d", tt.input, result, tt.expected)
-			}
-		})
-	}
-}
+// TestParseIVTweak is GONE, with parseIVTweak itself (#40).
+//
+// It was a bug-defender: it asserted that "invalid", "-1" and "0x100" all
+// produced 0 and that a value past 64 bits produced 18446744073709551615 --
+// which is exactly the silent mapping of a malformed header field onto a
+// valid-looking IV offset that the fix removes. A header's iv_tweak is now
+// parsed by cryptTableParams, which refuses what does not parse; the refusals
+// are pinned in segmentvalidation_test.go.
 
 // TestVerifyMasterKey tests master key verification against digests
 func TestVerifyMasterKey(t *testing.T) {
@@ -468,7 +398,7 @@ func TestVerifyMasterKey(t *testing.T) {
 		{"sha256", 4096},
 		{"md5", legacyDigestLen}, // unknown hash: no length is derivable
 	} {
-		t.Run(fmt.Sprintf("%s digest stored at %d bytes is refused", tc.hash, tc.digestLen), func(t *testing.T) {
+		t.Run(fmt.Sprintf("%s digest stored at %d bytes is refused as a header fault", tc.hash, tc.digestLen), func(t *testing.T) {
 			iterations := 1000
 			// The stored bytes are arbitrary: what is under test is that the
 			// LENGTH is refused before any derivation is attempted, so the
@@ -486,9 +416,20 @@ func TestVerifyMasterKey(t *testing.T) {
 				},
 			}
 
+			// ErrInvalidHeader, NOT ErrMasterKeyVerification (#41). This
+			// assertion demanded the verification verdict until the boundary
+			// was drawn, and it was DEFENDING the defect: the only digest that
+			// attests this keyslot is unusable, so nothing was ever compared,
+			// and a verification verdict claims a judgement that never
+			// happened. The operator it misdirects is the one whose header is
+			// damaged and whose passphrase is perfectly good.
 			err := verifyMasterKey(enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
-			if !errors.Is(err, ErrMasterKeyVerification) {
-				t.Errorf("verifyMasterKey(%d-byte %s digest) = %v, want ErrMasterKeyVerification",
+			if !errors.Is(err, ErrInvalidHeader) {
+				t.Errorf("verifyMasterKey(%d-byte %s digest) = %v, want ErrInvalidHeader",
+					tc.digestLen, tc.hash, err)
+			}
+			if errors.Is(err, ErrMasterKeyVerification) {
+				t.Errorf("verifyMasterKey(%d-byte %s digest) claimed a verification that never ran: %v",
 					tc.digestLen, tc.hash, err)
 			}
 		})

@@ -7,10 +7,10 @@ package luks2
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 	"unsafe"
@@ -64,9 +64,16 @@ func Unlock(device string, passphrase []byte, name string) error {
 		return err
 	}
 
-	// Check if already unlocked
+	// Check if already unlocked.
+	//
+	// Typed since #70: the refusal was correct and untyped, so a caller could
+	// not tell "that name is taken" from any other unlock failure without
+	// matching on message text. It is a refusal rather than a no-op because the
+	// existing target may map a DIFFERENT volume, and returning success would
+	// hand the caller a plaintext device this call did not open.
 	if IsUnlocked(name) {
-		return fmt.Errorf("device mapper '%s' already exists - close it first with: luks close %s", name, name)
+		return fmt.Errorf("%w: the device-mapper name %q is already in use - close it first with: luks close %s",
+			ErrVolumeAlreadyUnlocked, name, name)
 	}
 
 	// Read header and metadata (use original device for reading, symlink is fine for open())
@@ -91,17 +98,35 @@ func Unlock(device string, passphrase []byte, name string) error {
 	}
 	defer masterKey.Destroy()
 
-	// Get segment information
+	// Get segment information.
+	//
+	// Visited in sorted id order rather than in map order. A container being
+	// reencrypted carries more than one segment, and picking whichever one Go's
+	// randomized iteration yielded first made WHICH segment a volume opened
+	// through a coin flip -- the same defect class as #54 and #57, on a value
+	// that decides where the plaintext device is backed.
 	var segment *Segment
-	for _, seg := range metadata.Segments {
-		if seg.Type == "crypt" {
-			segment = seg
+	var segmentID string
+	for _, id := range slices.Sorted(maps.Keys(metadata.Segments)) {
+		if metadata.Segments[id].Type == "crypt" {
+			segment = metadata.Segments[id]
+			segmentID = id
 			break
 		}
 	}
 
 	if segment == nil {
-		return fmt.Errorf("no crypt segment found")
+		return fmt.Errorf("%w: the header declares no crypt segment, so there is nothing to map", ErrInvalidHeader)
+	}
+
+	// The three fields that reach the device-mapper ioctl are obtained HERE,
+	// through the validator, and not read off the segment at the table. The
+	// header this came from has already been through the same check at the read
+	// boundary; this is how the values are converted, not a second bound. See
+	// segmentvalidation.go (#40).
+	params, err := cryptTableParams(segmentID, segment)
+	if err != nil {
+		return err
 	}
 
 	// Parse segment offset
@@ -191,7 +216,7 @@ func Unlock(device string, passphrase []byte, name string) error {
 	// rather than by omission: unlockLoadTable releases its keyring entry
 	// before it returns, on every path, so no entry can outlive the call that
 	// made it and neither this rollback nor Lock can forget one.
-	if err := unlockLoadTable(name, uuid, realDevice, segment, masterKey, length, backendOffset); err != nil {
+	if err := unlockLoadTable(name, uuid, realDevice, params, masterKey, length, backendOffset); err != nil {
 		return errors.Join(err, removeCreatedMapping(name, uuid))
 	}
 
@@ -377,6 +402,15 @@ func waitForDeviceReady(name string) error {
 // the mapping's lifetime, so by the time anything can be closed there is
 // nothing left to release. See keyring.go.
 func Lock(name string) error {
+	// Typed since #70. Closing a name nothing has opened used to surface as
+	// "failed to remove device-mapper: ..." -- a device-mapper failure, which
+	// sends an operator to look at device-mapper, when the actual state is that
+	// there was nothing to close. Callers that close idempotently can now say so
+	// with errors.Is instead of matching on text.
+	if !IsUnlocked(name) {
+		return fmt.Errorf("%w: no device-mapper mapping named %q exists", ErrVolumeNotUnlocked, name)
+	}
+
 	// Get device info before removing (to find the device node path)
 	info, _ := dm.infoByName(name)
 
@@ -454,7 +488,7 @@ func GetMappedDevicePath(name string) (string, error) {
 // window in which the key is raw bytes is this function body and no more. The
 // key does not reach the table -- it reaches the KERNEL KEYRING, and the table
 // carries only a reference to it. See keyring.go.
-func unlockLoadTable(name, uuid, realDevice string, segment *Segment, masterKey *enclave.MemoryEnclave, length, backendOffset uint64) error {
+func unlockLoadTable(name, uuid, realDevice string, params cryptSegmentParams, masterKey *enclave.MemoryEnclave, length, backendOffset uint64) error {
 	// The goroutine is pinned to its OS thread for the whole add-activate-
 	// release sequence.
 	//
@@ -485,9 +519,14 @@ func unlockLoadTable(name, uuid, realDevice string, segment *Segment, masterKey 
 			Length:        length,
 			BackendDevice: realDevice,
 			BackendOffset: backendOffset,
-			Encryption:    segment.Encryption,
-			IVTweak:       parseIVTweak(segment.IVTweak),
-			SectorSize:    uint64(segment.SectorSize), // #nosec G115 - sector size is validated (512 or 4096)
+			// Validated at the header read boundary and converted by
+			// cryptTableParams, which is why there is no conversion and no
+			// gosec suppression on this line any more. The one it replaced said
+			// "sector size is validated (512 or 4096)" and named a check that
+			// only ever applied to the FORMAT path (#40).
+			Encryption: params.encryption,
+			IVTweak:    params.ivTweak,
+			SectorSize: params.sectorSize,
 		}
 
 		// Key is deliberately NOT set, here or anywhere else in this package.
@@ -604,7 +643,7 @@ func unlockKeyslot(device string, keyslotID string, passphrase []byte, keyslot *
 		return nil, err
 	}
 
-	f, err := os.Open(device) // #nosec G304 -- device path validated by caller
+	f, err := openDevice("read the keyslot area", device, os.O_RDONLY)
 	if err != nil {
 		return nil, err
 	}
@@ -708,7 +747,12 @@ func unlockKeyslot(device string, keyslotID string, passphrase []byte, keyslot *
 // digest of implausible length: the caller learns that this key did not verify
 // and nothing about which digest rejected it or why.
 func verifyMasterKey(masterKey *enclave.MemoryEnclave, keyslotID string, digests map[string]*Digest) error {
+	// applicable counts the digests that ATTEST this keyslot; evaluated counts
+	// the ones that got as far as a comparison. They differ by exactly the
+	// digests that were unusable, and the difference is what separates a header
+	// fault from a credential verdict at the bottom of this function.
 	applicable := 0
+	evaluated := 0
 
 	for _, digest := range digests {
 		// The association is checked BEFORE any derivation, so a digest that
@@ -787,6 +831,10 @@ func verifyMasterKey(masterKey *enclave.MemoryEnclave, keyslotID string, digests
 		// derived one is destroyed on every path before the next iteration,
 		// because deferring would pile up one locked region per digest and free
 		// none of them until the function returned.
+		// A comparison is about to run, which is what makes this digest
+		// EVALUATED rather than merely applicable. Counted whether it matches
+		// or not.
+		evaluated++
 		matched := derived.EqualTo(expected)
 		derived.Destroy()
 		clearBytes(expected)
@@ -804,12 +852,48 @@ func verifyMasterKey(masterKey *enclave.MemoryEnclave, keyslotID string, digests
 			ErrInvalidHeader, keyslotID)
 	}
 
+	// Digests attest this keyslot and NOT ONE OF THEM COULD BE EVALUATED, so no
+	// comparison ever ran. That is a header fault, and reporting it as a
+	// verification verdict says a key was judged when nothing judged it (#41).
+	//
+	// # Why this case may be distinguished when the ones above it may not
+	//
+	// Every other exit from this function folds into ErrMasterKeyVerification
+	// on purpose, and that must not be "tidied up" into per-cause errors. The
+	// reason is a real attacker: someone holding the device can craft a header,
+	// and an error distinguishing "digest 2 uses a KDF I refuse" from "digest 2
+	// did not match" tells them WHICH keyslot to work on and how this
+	// implementation reads the header. Any error derived from the OUTCOME OF A
+	// COMPARISON carries that information, so all of them say one thing.
+	//
+	// This branch is the one place where no comparison happened. evaluated == 0
+	// means every applicable digest fell out before EqualTo was reached, so
+	// there is no comparison outcome in existence to leak, and the statement
+	// being made is about the SHAPE OF THE HEADER -- which the attacker wrote,
+	// and which anyone holding the device can read in cleartext. It leaks
+	// nothing they do not already have.
+	//
+	// That is also why it stops here. The message names the keyslot and the
+	// count and NOT the cause, even though the causes are header facts too:
+	// naming them here would make naming them in the mixed case look like the
+	// obvious next step, and in the mixed case a comparison DID run. The
+	// boundary is easier to hold at "did a comparison happen" than at a
+	// per-field judgement of what each cause reveals.
+	//
+	// The applicable == 0 branch above is the same distinction already being
+	// drawn for the case where the header names no digest at all; this extends
+	// it to the case where it names digests that cannot be used.
+	if evaluated == 0 {
+		return fmt.Errorf("%w: all %d digests that authenticate keyslot %s are unusable, so a key recovered from it could not be compared against any of them",
+			ErrInvalidHeader, applicable, keyslotID)
+	}
+
 	return ErrMasterKeyVerification
 }
 
 // getBlockDeviceSize gets the size of a block device or file
 func getBlockDeviceSize(device string) (int64, error) {
-	f, err := os.Open(device) // #nosec G304 -- device path validated by caller
+	f, err := openDevice("read the device size", device, os.O_RDONLY)
 	if err != nil {
 		return 0, err
 	}
@@ -830,10 +914,4 @@ func getBlockDeviceSize(device string) (int64, error) {
 	}
 
 	return stat.Size(), nil
-}
-
-// parseIVTweak parses IV tweak value
-func parseIVTweak(s string) uint64 {
-	val, _ := strconv.ParseUint(s, 10, 64)
-	return val
 }

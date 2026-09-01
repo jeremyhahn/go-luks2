@@ -88,29 +88,19 @@ func TestAlignTo(t *testing.T) {
 	}
 }
 
-// TestNextPowerOf2 tests power of 2 calculations
-func TestNextPowerOf2(t *testing.T) {
-	tests := []struct {
-		input    int
-		expected int
-	}{
-		{1, 1},
-		{2, 2},
-		{3, 4},
-		{5, 8},
-		{100, 128},
-		{512, 512},
-		{513, 1024},
-	}
-
-	for _, tt := range tests {
-		result := nextPowerOf2(tt.input)
-		if result != tt.expected {
-			t.Fatalf("nextPowerOf2(%d) = %d, want %d",
-				tt.input, result, tt.expected)
-		}
-	}
-}
+// nextPowerOf2 and TestNextPowerOf2 are GONE (#48).
+//
+// The function had no production caller after #36 removed the header-area
+// rounding, and `unused` could not say so: .golangci.yml sets tests: true, so a
+// function referenced only by its own test looks exactly like a helper the
+// suite legitimately uses. Nothing would ever have reported it.
+//
+// It was removed rather than left because it is not inert. It is the MECHANISM
+// of #36 -- it rounded the JSON region 8192 -> 16384, past the fixed
+// backup-header offset, and destroyed 4080 bytes of keyslot 0's key material.
+// The function was correct; using it there was the bug, and a tested helper
+// reads as endorsed. isPowerOf2 next to it was checked the same way and is
+// LIVE: header.go's headerAreaSize calls it.
 
 // TestIsPowerOf2 tests power of 2 detection
 func TestIsPowerOf2(t *testing.T) {

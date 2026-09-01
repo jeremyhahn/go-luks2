@@ -14,28 +14,54 @@ var (
 	// ErrInvalidHeader indicates a LUKS header is invalid or corrupted
 	ErrInvalidHeader = errors.New("invalid LUKS header")
 
-	// ErrInvalidPassphrase indicates the passphrase is incorrect
-	ErrInvalidPassphrase = errors.New("invalid passphrase")
-
 	// ErrDeviceNotFound indicates the device path doesn't exist
 	ErrDeviceNotFound = errors.New("device not found")
 
-	// ErrVolumeNotUnlocked indicates the volume is not unlocked
+	// ErrVolumeNotUnlocked indicates that an operation needs a live
+	// device-mapper mapping and there is none: Lock was asked to close a name
+	// nothing has opened, or Mount was pointed at a volume that is not unlocked.
 	ErrVolumeNotUnlocked = errors.New("volume not unlocked")
 
-	// ErrVolumeAlreadyUnlocked indicates the volume is already unlocked
+	// ErrVolumeAlreadyUnlocked indicates that the mapping name Unlock was given
+	// is already in use.
+	//
+	// It is a REFUSAL and not a no-op: the existing target may be a mapping of a
+	// different volume entirely, and adopting it would hand the caller a
+	// plaintext device it did not open. The message names the command that
+	// closes it.
 	ErrVolumeAlreadyUnlocked = errors.New("volume already unlocked")
 
-	// ErrNotMounted indicates the path is not mounted
+	// ErrNotMounted indicates that Unmount was given a path the KERNEL says is
+	// not a mount point: it is raised on an EINVAL from umount2(2), never ahead
+	// of the syscall.
+	//
+	// Reading that EINVAL this way is only sound because Unmount validates the
+	// caller's flags first. umount2(2) documents three causes for EINVAL -- not
+	// a mount point, MNT_EXPIRE combined with MNT_FORCE or MNT_DETACH, and an
+	// undefined flag value -- and the last two are properties of the caller's
+	// own argument, so refusing them up front leaves the first as the only
+	// remaining reading. Bad flags are therefore refused BEFORE the syscall and
+	// are NOT this error.
+	//
+	// An earlier draft answered the question itself, from /proc/mounts, ahead of
+	// the syscall. It was wrong twice over: a check that duplicates a decision
+	// the kernel already makes is a second source of truth, and /proc/mounts
+	// escapes its fields, so it refused every mount point whose path contains a
+	// space, tab, newline or backslash. See Unmount.
 	ErrNotMounted = errors.New("not mounted")
 
-	// ErrAlreadyMounted indicates the path is already mounted
-	ErrAlreadyMounted = errors.New("already mounted")
-
-	// ErrUnsupportedKDF indicates the KDF type is not supported
+	// ErrUnsupportedKDF indicates the KDF type named by a header, or by a
+	// caller's options, is not one this package implements. It is raised where a
+	// KDF is DISPATCHED (kdf.go); validateKDFCost deliberately returns an
+	// unclassified error for the same condition, because only its caller knows
+	// whether an unusable KDF condemns a keyslot or a digest.
 	ErrUnsupportedKDF = errors.New("unsupported KDF type")
 
-	// ErrUnsupportedHash indicates the hash algorithm is not supported
+	// ErrUnsupportedHash indicates the hash algorithm named by a header, or by a
+	// caller's options, is not one this package implements. A FIPS-refused
+	// algorithm is NOT this error -- that is ErrFIPSNotApproved, because the
+	// algorithm is implemented and the mode refuses it, which is a different
+	// thing for an operator to be told.
 	ErrUnsupportedHash = errors.New("unsupported hash algorithm")
 
 	// ErrInvalidKeyslot indicates the keyslot is invalid or unavailable
@@ -55,14 +81,50 @@ var (
 	// device.
 	ErrDetachIncomplete = errors.New("loop device detach did not become observable")
 
-	// ErrPermissionDenied indicates insufficient permissions
+	// ErrPermissionDenied indicates that an operation could not open the device
+	// because the process lacks access to it.
+	//
+	// It is raised by classifyDeviceOpen, which every open in this package's
+	// header, format and unlock paths goes through, and it wraps the original
+	// *fs.PathError -- so errors.Is(err, os.ErrPermission) stays true of the
+	// same value and a caller that already branched on the standard library's
+	// sentinel does not have to change.
+	//
+	// The message an operator sees was never the problem: "failed to open
+	// device: open /dev/sdb1: permission denied" says what happened. What was
+	// missing, until #31, was the TYPE. Consumers of this library build daemons
+	// and provisioning flows, and errors.Is(err, ErrPermissionDenied) is the
+	// difference between prompting for elevation and failing a deployment.
+	//
+	// Not every open in the package classifies yet: the keyslot rewrite paths
+	// (keyslot.go), the wipe paths (wipe.go), loop-device setup (loopdev.go)
+	// and the recovery-key file paths (recovery.go) still surface a bare
+	// *fs.PathError. Every EXPORTED entry point that touches a device reaches
+	// one of the classified opens first -- each of them reads the header, and
+	// Format opens the device itself -- so the contract holds at the API
+	// surface; the residue is stated here rather than left for the next reader
+	// to discover.
 	ErrPermissionDenied = errors.New("permission denied")
 
-	// ErrMasterKeyVerification indicates that a candidate master key did not
-	// match any digest in the header. It is deliberately one value for every
-	// cause -- mismatch, an unsupported or FIPS-refused digest KDF, a corrupt
-	// salt, a digest of implausible length -- so that neither the message nor
-	// the number of digests tried tells a caller which digest rejected the key.
+	// ErrMasterKeyVerification indicates that a candidate master key was
+	// COMPARED against at least one digest in the header and matched none of
+	// them.
+	//
+	// It is deliberately one value for every cause -- mismatch, an unsupported
+	// or FIPS-refused digest KDF, a corrupt salt, a digest of implausible
+	// length -- so that neither the message nor the number of digests tried
+	// tells a caller which digest rejected the key. An attacker holding the
+	// device can craft a header, and an error separating "digest 2 uses a KDF I
+	// refuse" from "digest 2 did not match" would tell them which keyslot to
+	// work on and how this implementation reads the header.
+	//
+	// The word COMPARED is load-bearing, and is the #41 fix. A keyslot whose
+	// every attesting digest is unusable never reaches a comparison at all, and
+	// that is reported as ErrInvalidHeader instead: there is no comparison
+	// outcome to leak, and telling an operator their key failed verification
+	// when nothing verified it sends them to the credential rather than to the
+	// header. verifyMasterKey states the boundary and why it sits exactly
+	// there.
 	ErrMasterKeyVerification = errors.New("master key verification failed")
 
 	// ErrMetadataTooLarge indicates the JSON metadata does not fit the header

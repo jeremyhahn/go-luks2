@@ -167,10 +167,9 @@ func TestGetMasterKeyDistinguishesFailureToTryFromFailureToVerify(t *testing.T) 
 		}
 		// It must NOT claim the passphrase is wrong. Per #68 a digest mismatch
 		// cannot honestly say that: the same comparison fails for the correct
-		// credential over damaged key material.
-		if errors.Is(err, ErrInvalidPassphrase) {
-			t.Fatal("a digest mismatch was reported as an invalid passphrase, which it cannot honestly claim (#68)")
-		}
+		// credential over damaged key material. The explicit assertion is gone
+		// with ErrInvalidPassphrase itself (#70) -- the claim is no longer
+		// expressible, which is a stronger guarantee than a test for it.
 	})
 
 	t.Run("could not be tried", func(t *testing.T) {

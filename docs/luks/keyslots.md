@@ -137,8 +137,10 @@ if err != nil {
     }
 }
 
-// Do not branch on ErrInvalidPassphrase. No path in this package returns it,
-// for the reason above.
+// There is no ErrInvalidPassphrase to branch on. It was removed in #70: no path
+// in this package could honestly return it, for the reason above, and a
+// sentinel whose name is what everyone reaches for at that spot is a trap
+// rather than a vocabulary.
 ```
 
 ### Checking Active Keyslots

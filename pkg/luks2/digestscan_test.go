@@ -8,6 +8,7 @@ package luks2
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -193,7 +194,17 @@ func TestVerifyMasterKeySkipsEveryUnusableDigestAtOnce(t *testing.T) {
 func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
 	masterKey := []byte("digest-scan-master-key-32-bytes!")
 
-	t.Run("every digest unusable", func(t *testing.T) {
+	t.Run("every digest unusable is a HEADER fault, because nothing was compared", func(t *testing.T) {
+		// This subtest asserted ErrMasterKeyVerification until #41, and it was
+		// DEFENDING the defect rather than guarding against one: not one of
+		// these digests reaches EqualTo, so no key was ever judged, and a
+		// verification verdict claims a judgement that did not happen.
+		//
+		// It now pins one side of the boundary drawn in verifyMasterKey. The
+		// other side -- a set where at least one digest WAS compared -- is the
+		// subtest below, and the two must not be collapsed: the whole reason
+		// this case may be distinguished at all is that no comparison outcome
+		// exists to leak.
 		digests := map[string]*Digest{}
 		id := 0
 		for _, bad := range unusableDigests(t) {
@@ -202,8 +213,36 @@ func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
 		}
 
 		err := verifyMasterKey(enclaveFrom(t, masterKey), "0", boundTo("0", digests))
-		if !errors.Is(err, ErrMasterKeyVerification) {
-			t.Fatalf("verifyMasterKey = %v, want ErrMasterKeyVerification", err)
+		if !errors.Is(err, ErrInvalidHeader) {
+			t.Fatalf("verifyMasterKey = %v, want ErrInvalidHeader", err)
+		}
+		if errors.Is(err, ErrMasterKeyVerification) {
+			t.Fatalf("a set nothing could compare was reported as a failed verification: %v", err)
+		}
+	})
+
+	t.Run("one usable digest among unusable ones is still a CREDENTIAL verdict", func(t *testing.T) {
+		// The other side of the boundary, and the constraint #41 named
+		// explicitly: a header carrying one wrong-length digest and one good
+		// digest must still tell an operator with a genuinely wrong passphrase
+		// that the credential failed. A comparison ran here, so the verdict is
+		// a verdict -- and every unusable digest beside it must not upgrade it
+		// into a header fault.
+		for name, bad := range unusableDigests(t) {
+			t.Run(name, func(t *testing.T) {
+				digests := map[string]*Digest{
+					"0": bad,
+					"1": usableDigest(t, []byte("some-other-master-key-32-bytes!!"), 32),
+				}
+
+				err := verifyMasterKey(enclaveFrom(t, masterKey), "0", boundTo("0", digests))
+				if !errors.Is(err, ErrMasterKeyVerification) {
+					t.Fatalf("verifyMasterKey = %v, want ErrMasterKeyVerification", err)
+				}
+				if errors.Is(err, ErrInvalidHeader) {
+					t.Fatalf("a set with one comparable digest was reported as a header fault: %v", err)
+				}
+			})
 		}
 	})
 
@@ -222,17 +261,28 @@ func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
 		// Deliberately asserting on the message: an error that distinguished
 		// "digest 2 uses a KDF I refuse" from "digest 2 did not match" would
 		// tell an attacker holding the device which keyslot to work on and how
-		// the header is being interpreted.
+		// the header is being interpreted. That property is UNCHANGED by #41
+		// and must stay unchanged.
+		//
+		// Both sets here reach a comparison, which is what makes them
+		// comparable at all. Before #41 the second set was a lone unusable
+		// digest; that set now lands on ErrInvalidHeader, and pairing it
+		// against a mismatch would have turned this test into an assertion
+		// about the new boundary instead of about the indistinguishability it
+		// exists to pin. It carries a usable digest beside the unusable one so
+		// that the ONLY difference between the two sets is the presence of a
+		// digest that could not be evaluated.
 		mismatch := verifyMasterKey(enclaveFrom(t, masterKey), "0", boundTo("0", map[string]*Digest{
 			"0": usableDigest(t, []byte("some-other-master-key-32-bytes!!"), 32),
 		}))
-		unusable := verifyMasterKey(enclaveFrom(t, masterKey), "0", boundTo("0", map[string]*Digest{
+		mixed := verifyMasterKey(enclaveFrom(t, masterKey), "0", boundTo("0", map[string]*Digest{
 			"0": unusableDigests(t)["unsupported kdf type"],
+			"1": usableDigest(t, []byte("some-other-master-key-32-bytes!!"), 32),
 		}))
 
-		if mismatch.Error() != unusable.Error() {
-			t.Fatalf("a mismatch reports %q but an unusable digest reports %q; the two must be indistinguishable",
-				mismatch, unusable)
+		if mismatch.Error() != mixed.Error() {
+			t.Fatalf("a mismatch reports %q but a mismatch beside an unusable digest reports %q; the two must be indistinguishable",
+				mismatch, mixed)
 		}
 	})
 }
@@ -251,5 +301,55 @@ func TestVerifyMasterKeyAcceptsTheUsableDigestAlone(t *testing.T) {
 
 	if err := verifyMasterKey(enclaveFrom(t, []byte("some-other-master-key-32-bytes!!")), "0", boundTo("0", digests)); err == nil {
 		t.Fatal("the fixture's usable digest verified a DIFFERENT master key")
+	}
+}
+
+// TestAWrongLengthDigestIsAHeaderFaultEndToEnd is #41's own acceptance case,
+// driven through the exported API on a real container rather than through
+// verifyMasterKey directly.
+//
+// The passphrase is CORRECT. That is the whole point: the operator this defect
+// misdirects is the one holding a good credential over a damaged header, and
+// before the boundary was drawn they were told their master key failed
+// verification -- a judgement that never happened, because the only digest
+// attesting the keyslot decodes to a length nothing can compare against.
+func TestAWrongLengthDigestIsAHeaderFaultEndToEnd(t *testing.T) {
+	path := newImage(t, "wrong-length-digest.img")
+	formatWithLibrary(t, path)
+
+	hdr, metadata, err := ReadHeader(path)
+	if err != nil {
+		t.Fatalf("ReadHeader on the freshly formatted container failed: %v", err)
+	}
+	if len(metadata.Digests) == 0 {
+		t.Fatal("the formatted container carries no digest, so this fixture proves nothing")
+	}
+	for _, digest := range metadata.Digests {
+		// 64 bytes under a sha256 label: it decodes cleanly, so this is not a
+		// decode failure, and it agrees with neither the declared hash's output
+		// length nor the 32-byte legacy carve-out.
+		digest.Hash = "sha256"
+		digest.Digest = encodeBase64(make([]byte, 64))
+	}
+	if err := writeHeaderInternal(path, hdr, metadata); err != nil {
+		t.Fatalf("failed to write the wrong-length-digest fixture: %v", err)
+	}
+
+	err = TestKey(path, []byte(conformancePassphrase))
+	if err == nil {
+		t.Fatal("TestKey accepted a container whose only digest cannot be compared against anything")
+	}
+	if !errors.Is(err, ErrInvalidHeader) {
+		t.Fatalf("TestKey = %v, want an error wrapping ErrInvalidHeader", err)
+	}
+	if errors.Is(err, ErrMasterKeyVerification) {
+		t.Fatalf("a correct passphrase over an uncomparable digest was reported as a failed verification: %v", err)
+	}
+
+	// The message must send the operator to the header. It names the keyslot
+	// and the count deliberately and NOT which digest failed how -- see the
+	// threat model at the branch in verifyMasterKey.
+	if !strings.Contains(err.Error(), "unusable") {
+		t.Fatalf("the failure does not tell an operator the header's digests are the problem: %v", err)
 	}
 }

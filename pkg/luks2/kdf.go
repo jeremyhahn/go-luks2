@@ -228,7 +228,7 @@ func deriveKeyPlain(passphrase []byte, kdf *KDF, keySize int) ([]byte, error) {
 	case "argon2id":
 		return deriveArgon2id(passphrase, salt, kdf, keySize)
 	default:
-		return nil, fmt.Errorf("unsupported KDF type: %s", kdf.Type)
+		return nil, fmt.Errorf("%w: %s", ErrUnsupportedKDF, kdf.Type)
 	}
 }
 
@@ -292,7 +292,7 @@ func getPBKDF2HashFunc(hashAlgo string) (func() hash.Hash, error) {
 	case "sha512":
 		return sha512.New, nil
 	default:
-		return nil, fmt.Errorf("unsupported hash algorithm: %s (supported: sha1, sha256, sha384, sha512)", hashAlgo)
+		return nil, fmt.Errorf("%w: %s (supported: sha1, sha256, sha384, sha512)", ErrUnsupportedHash, hashAlgo)
 	}
 }
 
@@ -454,7 +454,7 @@ func CreateKDF(opts FormatOptions, keySize int) (*KDF, error) {
 	case KDFTypeArgon2i, KDFTypeArgon2id:
 		return createArgon2KDF(kdfType, opts, saltB64)
 	default:
-		return nil, fmt.Errorf("unsupported KDF type: %s (supported: pbkdf2, pbkdf2-sha1, pbkdf2-sha256, pbkdf2-sha384, pbkdf2-sha512, argon2i, argon2id)", kdfType)
+		return nil, fmt.Errorf("%w: %s (supported: pbkdf2, pbkdf2-sha1, pbkdf2-sha256, pbkdf2-sha384, pbkdf2-sha512, argon2i, argon2id)", ErrUnsupportedKDF, kdfType)
 	}
 }
 

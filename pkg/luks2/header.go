@@ -167,9 +167,9 @@ func readHeaderCopy(device string, offset int64) (*LUKS2BinaryHeader, *LUKS2Meta
 		return nil, nil, err
 	}
 
-	f, err := os.Open(device) // #nosec G304 -- device path validated above
+	f, err := openDevice("read the LUKS2 header", device, os.O_RDONLY)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to open device: %w", err)
+		return nil, nil, err
 	}
 	defer func() { _ = f.Close() }()
 
@@ -246,9 +246,9 @@ func IsLUKS(device string) (bool, error) {
 		return false, err
 	}
 
-	f, err := os.Open(device) // #nosec G304 -- device path validated above
+	f, err := openDevice("read the LUKS magic", device, os.O_RDONLY)
 	if err != nil {
-		return false, fmt.Errorf("failed to open device: %w", err)
+		return false, err
 	}
 	defer func() { _ = f.Close() }()
 
@@ -275,9 +275,9 @@ func IsLUKS2(device string) (bool, error) {
 		return false, err
 	}
 
-	f, err := os.Open(device) // #nosec G304 -- device path validated above
+	f, err := openDevice("read the LUKS magic and version", device, os.O_RDONLY)
 	if err != nil {
-		return false, fmt.Errorf("failed to open device: %w", err)
+		return false, err
 	}
 	defer func() { _ = f.Close() }()
 
@@ -322,9 +322,9 @@ func WriteHeader(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata)
 // writeHeaderInternal writes a LUKS2 header without acquiring a lock
 // Caller must hold the lock
 func writeHeaderInternal(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) error {
-	f, err := os.OpenFile(device, os.O_RDWR, 0600) // #nosec G304 -- device path from trusted internal call
+	f, err := openDevice("write the LUKS2 header", device, os.O_RDWR)
 	if err != nil {
-		return fmt.Errorf("failed to open device: %w", err)
+		return err
 	}
 	defer func() { _ = f.Close() }()
 
@@ -719,6 +719,14 @@ func readJSONMetadata(r io.ReaderAt, hdr *LUKS2BinaryHeader, headerOffset int64)
 	// A JSON null is normalized away HERE, at the one point metadata is parsed.
 	// See normalizeMetadataNulls.
 	if err := normalizeMetadataNulls(&metadata); err != nil {
+		return nil, err
+	}
+
+	// Segment geometry IS validated here, and the contrast with the keyslots
+	// below is the point rather than an inconsistency: a segment has no
+	// redundancy to preserve, and three of its declared fields reach a
+	// device-mapper ioctl unchanged. See segmentvalidation.go (#40).
+	if err := validateMetadataSegments(&metadata); err != nil {
 		return nil, err
 	}
 

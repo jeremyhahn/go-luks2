@@ -114,9 +114,10 @@ func TestAVolumeWithNoUsableKeyslotIsNotReportedAsAWrongPassphrase(t *testing.T)
 			if errors.Is(err, ErrMasterKeyVerification) {
 				t.Fatalf("no keyslot was tried, yet the failure claims verification was attempted: %v", err)
 			}
-			if errors.Is(err, ErrInvalidPassphrase) {
-				t.Fatalf("a container with no usable keyslot blames the operator's passphrase: %v", err)
-			}
+			// The assertion that used to sit here -- that the failure is not
+			// ErrInvalidPassphrase -- is GONE with the sentinel (#70). The
+			// property it guarded is now structural: the package cannot report a
+			// passphrase verdict because no such value exists to report.
 
 			// The exported paths that reach the same scan must carry the
 			// sentinel through rather than flatten it.

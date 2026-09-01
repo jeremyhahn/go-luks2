@@ -16,12 +16,10 @@ import (
 func TestSentinelErrors(t *testing.T) {
 	sentinelErrors := []error{
 		ErrInvalidHeader,
-		ErrInvalidPassphrase,
 		ErrDeviceNotFound,
 		ErrVolumeNotUnlocked,
 		ErrVolumeAlreadyUnlocked,
 		ErrNotMounted,
-		ErrAlreadyMounted,
 		ErrUnsupportedKDF,
 		ErrUnsupportedHash,
 		ErrInvalidKeyslot,
@@ -55,15 +53,15 @@ func TestSentinelErrorsIs(t *testing.T) {
 			want:   true,
 		},
 		{
-			name:   "ErrInvalidPassphrase matches",
-			err:    ErrInvalidPassphrase,
-			target: ErrInvalidPassphrase,
+			name:   "ErrMasterKeyVerification matches",
+			err:    ErrMasterKeyVerification,
+			target: ErrMasterKeyVerification,
 			want:   true,
 		},
 		{
 			name:   "different sentinel errors don't match",
 			err:    ErrInvalidHeader,
-			target: ErrInvalidPassphrase,
+			target: ErrMasterKeyVerification,
 			want:   false,
 		},
 		{
@@ -207,9 +205,9 @@ func TestVolumeError(t *testing.T) {
 			name:         "unlock volume error",
 			volume:       "encrypted-vol",
 			op:           "unlock",
-			err:          ErrInvalidPassphrase,
-			expectedMsg:  "unlock volume encrypted-vol: invalid passphrase",
-			expectUnwrap: ErrInvalidPassphrase,
+			err:          ErrMasterKeyVerification,
+			expectedMsg:  "unlock volume encrypted-vol: master key verification failed",
+			expectUnwrap: ErrMasterKeyVerification,
 		},
 		{
 			name:         "volume already unlocked",
@@ -220,12 +218,12 @@ func TestVolumeError(t *testing.T) {
 			expectUnwrap: ErrVolumeAlreadyUnlocked,
 		},
 		{
-			name:         "mount error",
+			name:         "unmount error",
 			volume:       "backup-vol",
-			op:           "mount",
-			err:          ErrAlreadyMounted,
-			expectedMsg:  "mount volume backup-vol: already mounted",
-			expectUnwrap: ErrAlreadyMounted,
+			op:           "unmount",
+			err:          ErrNotMounted,
+			expectedMsg:  "unmount volume backup-vol: not mounted",
+			expectUnwrap: ErrNotMounted,
 		},
 	}
 
@@ -325,9 +323,9 @@ func TestKeyslotError(t *testing.T) {
 			name:         "keyslot 7 error",
 			keyslot:      7,
 			op:           "activate",
-			err:          ErrInvalidPassphrase,
-			expectedMsg:  "activate keyslot 7: invalid passphrase",
-			expectUnwrap: ErrInvalidPassphrase,
+			err:          ErrMasterKeyVerification,
+			expectedMsg:  "activate keyslot 7: master key verification failed",
+			expectUnwrap: ErrMasterKeyVerification,
 		},
 		{
 			name:         "no keyslots available",
@@ -522,13 +520,13 @@ func TestCryptoErrorNilHandling(t *testing.T) {
 // TestErrorChaining tests error wrapping and chaining
 func TestErrorChaining(t *testing.T) {
 	// Create a chain of errors
-	baseErr := ErrInvalidPassphrase
+	baseErr := ErrMasterKeyVerification
 	cryptoErr := &CryptoError{Op: "derive", Err: baseErr}
 	keyslotErr := &KeyslotError{Keyslot: 0, Op: "unlock", Err: cryptoErr}
 	deviceErr := &DeviceError{Device: "/dev/sda1", Op: "open", Err: keyslotErr}
 
 	// Test that we can unwrap through the chain
-	if !errors.Is(deviceErr, ErrInvalidPassphrase) {
+	if !errors.Is(deviceErr, ErrMasterKeyVerification) {
 		t.Fatal("errors.Is() failed to find base error in chain")
 	}
 
@@ -550,7 +548,7 @@ func TestErrorChaining(t *testing.T) {
 
 	// Verify the error message contains all context
 	msg := deviceErr.Error()
-	if msg != "open /dev/sda1: unlock keyslot 0: crypto derive: invalid passphrase" {
+	if msg != "open /dev/sda1: unlock keyslot 0: crypto derive: master key verification failed" {
 		t.Fatalf("Error chain message = %q, want full context", msg)
 	}
 }

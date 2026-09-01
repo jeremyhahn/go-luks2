@@ -45,9 +45,9 @@ func Format(opts FormatOptions) error {
 	}
 
 	// Open device
-	f, err := os.OpenFile(opts.Device, os.O_RDWR, 0600)
+	f, err := openDevice("format the device", opts.Device, os.O_RDWR)
 	if err != nil {
-		return fmt.Errorf("failed to open device: %w", err)
+		return err
 	}
 	defer func() { _ = f.Close() }()
 

@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"crypto/fips140"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -1504,4 +1505,70 @@ func TestArgon2RefusedInFIPSMode(t *testing.T) {
 			t.Fatalf("DeriveKey with pbkdf2-sha256 failed: %v", err)
 		}
 	})
+}
+
+// ErrUnsupportedKDF and ErrUnsupportedHash were declared and returned by
+// nothing (#70): both conditions were reported with fmt.Errorf, so a caller
+// could not tell "this header names an algorithm we do not implement" from any
+// other derivation failure.
+
+// TestDeriveKeyReportsAnUnsupportedKDFType covers the dispatch a header reaches.
+func TestDeriveKeyReportsAnUnsupportedKDFType(t *testing.T) {
+	iterations := 1000
+	kdf := &KDF{
+		Type:       "scrypt",
+		Hash:       "sha256",
+		Salt:       encodeBase64([]byte("unsupported-kdf-salt")),
+		Iterations: &iterations,
+	}
+
+	_, err := DeriveKey([]byte("passphrase-long-enough"), kdf, 32)
+	if err == nil {
+		t.Fatal("DeriveKey accepted a KDF type this package does not implement")
+	}
+	if !errors.Is(err, ErrUnsupportedKDF) {
+		t.Fatalf("DeriveKey = %v, want an error wrapping ErrUnsupportedKDF", err)
+	}
+	if !strings.Contains(err.Error(), "scrypt") {
+		t.Fatalf("the refusal does not name the type it refused: %v", err)
+	}
+}
+
+// TestDeriveKeyReportsAnUnsupportedHash covers the hash dispatch underneath it.
+//
+// A FIPS-refused algorithm must NOT land here: sha1 is implemented and the mode
+// refuses it, which is ErrFIPSNotApproved and a different thing to tell an
+// operator. That distinction is asserted in the FIPS tests; this one asserts an
+// algorithm the package genuinely does not have.
+func TestDeriveKeyReportsAnUnsupportedHash(t *testing.T) {
+	iterations := 1000
+	kdf := &KDF{
+		Type:       "pbkdf2",
+		Hash:       "md5",
+		Salt:       encodeBase64([]byte("unsupported-hash-salt")),
+		Iterations: &iterations,
+	}
+
+	_, err := DeriveKey([]byte("passphrase-long-enough"), kdf, 32)
+	if err == nil {
+		t.Fatal("DeriveKey accepted a hash this package does not implement")
+	}
+	if !errors.Is(err, ErrUnsupportedHash) {
+		t.Fatalf("DeriveKey = %v, want an error wrapping ErrUnsupportedHash", err)
+	}
+	if errors.Is(err, ErrFIPSNotApproved) {
+		t.Fatalf("an unimplemented hash was reported as a FIPS refusal: %v", err)
+	}
+}
+
+// TestCreateKDFReportsAnUnsupportedKDFType covers the WRITE side, where the
+// unsupported type comes from a caller's options rather than from a header.
+func TestCreateKDFReportsAnUnsupportedKDFType(t *testing.T) {
+	_, err := CreateKDF(FormatOptions{KDFType: "bcrypt"}, 32)
+	if err == nil {
+		t.Fatal("CreateKDF accepted a KDF type this package does not implement")
+	}
+	if !errors.Is(err, ErrUnsupportedKDF) {
+		t.Fatalf("CreateKDF = %v, want an error wrapping ErrUnsupportedKDF", err)
+	}
 }

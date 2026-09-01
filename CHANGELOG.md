@@ -9,6 +9,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A keyslot whose every attesting digest is unusable is a header fault, not a
+  credential verdict (#41).** With the CORRECT passphrase over a container whose
+  only digest decodes to 64 bytes under a `sha256` label, `TestKey` reported
+  `master key verification failed` — a judgement that never happened, because no
+  digest ever reached a comparison. `verifyMasterKey` now counts *evaluated*
+  digests separately from *applicable* ones and reports `ErrInvalidHeader` when
+  digests attest the keyslot and not one of them could be compared.
+
+  The distinction is deliberately narrow. `ErrMasterKeyVerification` remains one
+  value for every cause: an attacker holding the device can craft a header, and
+  an error separating "digest 2 uses a KDF I refuse" from "digest 2 did not
+  match" would tell them which keyslot to work on. That reasoning covers
+  outcomes of comparisons that ran; this branch is the one place where none did,
+  so there is no outcome to leak and the statement is about the header the
+  attacker wrote. The message names the keyslot and the count, never the cause.
+
+- **A permission failure has a type, not just a message (#31).**
+  `ErrPermissionDenied` was declared and returned by nothing, and nothing
+  inspected `os.ErrPermission`. The message was already accurate; what was
+  missing was the contract a consumer branches on to tell "you need privileges"
+  from "this device is broken". Classified in one place — `openDevice` is now
+  the only way `header.go`, `format.go` and `unlock.go` open a device — with the
+  original `*fs.PathError` kept in the chain, so `errors.Is(err,
+  os.ErrPermission)` remains true of the same value. The keyslot, wipe,
+  loop-device and recovery-file paths do not classify yet; the sentinel's doc
+  comment names them.
+
+- **`IsMounted` no longer misses a mount point whose path contains a space, tab,
+  newline or backslash.** `/proc/mounts` escapes those four bytes, because its
+  fields are space-delimited — a real mount at `/mnt/my disk` is written there
+  as `/mnt/my\040disk` — and the comparison was made against the raw field. So
+  `IsMounted("/mnt/my disk")` answered **false** for a mount that exists. The
+  CLI branches on it in three places. The escapes are now decoded before
+  comparing.
+
+- **Every inert error sentinel is now a decision (#70).** Six were missing
+  returns and are wired: `ErrVolumeAlreadyUnlocked` (`Unlock` refusing a name
+  already in use), `ErrVolumeNotUnlocked` (`Lock` and `Mount`), `ErrNotMounted`
+  (`Unmount`), `ErrUnsupportedKDF` (`DeriveKey`, `CreateKDF`) and
+  `ErrUnsupportedHash` (the KDF and anti-forensic hash dispatches). `Lock`'s was
+  the sharpest: closing a name nothing has opened reported a *device-mapper*
+  failure, sending an operator to look at device-mapper when the actual state
+  was that there was nothing to close.
+
+  `Unmount` classifies the KERNEL'S answer rather than pre-empting it: the
+  flags are validated first, which leaves "the target is not a mount point" as
+  the only remaining reading of an `EINVAL` from `umount2(2)`. A first draft
+  consulted `IsMounted` before the syscall and inherited the escaping defect
+  above, refusing mount points it should have unmounted; that never shipped.
+
+- **`nextPowerOf2` is deleted (#48).** It had no production caller after #36
+  removed the header-area rounding, and `unused` could never have said so —
+  `.golangci.yml` sets `tests: true`, so a function referenced only by its own
+  test is indistinguishable from a helper the suite uses. It is removed rather
+  than left because it is the mechanism of #36, which rounded the JSON region
+  past the fixed backup-header offset and destroyed keyslot key material.
+  `isPowerOf2` beside it was checked the same way and is live.
+
+
+
 - **A container with no usable keyslot is no longer reported as a wrong
   passphrase (#30).** The keyslot scan fell through its loop without executing
   the body and ended at a bare credential verdict, so an operator whose header
@@ -31,6 +91,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A crypt segment's `sector_size`, `iv_tweak` and `encryption` are validated
+  where the header is read (#40).** All three were handed straight to a
+  device-mapper ioctl with nothing between them and the kernel. Measured by
+  crafting a segment through this library's own writer and driving the real
+  unlock path: `sector_size: -1` was accepted and reached the dm-crypt table as
+  `18446744073709551615` (which devmapper renders into the target flag
+  `sector_size:-1`); `iv_tweak: "not-a-number"` was accepted and reached the
+  table as `0`, a valid-looking tweak, so the mapping was created at the wrong
+  IV offset rather than refused; and an `encryption` string containing a SPACE
+  reached the table verbatim **and the unlock succeeded**. devmapper joins the
+  crypt target specification as `<cipher> <key> <iv_offset> <device> <start>`
+  with spaces and the cipher is field zero, so a space inside a header-supplied
+  cipher string shifts every field after it and lets the header nominate the key
+  reference the kernel resolves and the device the target is backed by.
+
+  The conversion carried `#nosec G115 - sector size is validated (512 or 4096)`.
+  That validation is `ValidateFormatOptions`, which checks what a caller passes
+  to `Format`, and never applied to a segment read off a device. The suppression
+  is deleted rather than reworded: the conversion is gone, replaced by a lookup
+  in a whitelist whose values are already `uint64`. Bounds are measured against
+  cryptsetup 2.7.0 — `--sector-size` accepts 512, 1024, 2048 and 4096, so the
+  read path accepts all four even though this package's writer still emits only
+  512 or 4096, because narrowing the read path to the writer's range would
+  refuse containers cryptsetup can create.
+
+
+
 - **A digest can no longer authenticate a keyslot it does not name.**
   `verifyMasterKey` tried EVERY digest in the header against a key recovered
   from ONE keyslot, ignoring the digest's `keyslots` array. A LUKS2 container
@@ -48,6 +135,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   `unlockKeyslot` takes the keyslot's ID for this reason; it is an unexported
   function and no exported signature changed.
+
+### Removed
+
+- **BREAKING: `ErrInvalidPassphrase` is removed (#70).** No path in the package
+  returned it and none honestly could: the passphrase derives only the key that
+  *decrypts* the anti-forensic material, the merge is unauthenticated, and a
+  wrong credential, the **correct** credential over damaged key material, and a
+  semantically wrong digest all reach the digest comparison indistinguishably
+  (#68). `ErrMasterKeyVerification` says what happened without claiming why.
+  Callers branching on the removed symbol get a compile error, which is the
+  point — the branch never ran and never could.
+
+- **BREAKING: `ErrAlreadyMounted` is removed (#70).** Linux permits stacking a
+  mount over an existing mount point, so "already mounted" is a legal state
+  rather than a condition this package can honestly refuse; refusing it would
+  reject something the kernel allows. Callers that want to know call
+  `IsMounted`.
+
+  No repository in the portfolio references either symbol, or any other luks2
+  error sentinel, so neither removal breaks a build outside this one.
 
 ### Changed
 

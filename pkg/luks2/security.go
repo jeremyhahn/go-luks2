@@ -230,6 +230,75 @@ func CheckOverflow(a, b int) error {
 	return nil
 }
 
+// openDevice is the ONE way this package opens a device, and it exists so that
+// the CLASSIFICATION of a failure lives in one place rather than at every call
+// site.
+//
+// Every LUKS2 operation opens the device -- the header reader, the writer, the
+// keyslot paths, the size probe -- and none of them used to look at WHY an open
+// failed. The message an operator saw was accurate ("failed to open device:
+// open /dev/sdb1: permission denied"); what was missing was the typed contract.
+// A caller building a daemon or a provisioning flow cannot write
+//
+//	errors.Is(err, luks2.ErrPermissionDenied)
+//
+// to tell "you need privileges" from "this device is broken" unless something
+// says so, and ErrPermissionDenied was declared and returned by nothing (#31).
+//
+// The mode argument is deliberately absent: nothing here passes O_CREATE, so
+// the permission bits would never be consulted. 0600 is passed for the write
+// paths purely to match what the sites this replaced spelled out.
+func openDevice(op, device string, flag int) (*os.File, error) {
+	f, err := openFileFunc(device, flag, 0600) // #nosec G304 -- the device path is the caller's subject and is validated by ValidateDevicePath before every LUKS2 operation; this function exists precisely so that check and this open are not in different places
+	if err != nil {
+		return nil, classifyDeviceOpen(op, err)
+	}
+	return f, nil
+}
+
+// openFileFunc is the filesystem seam openDevice goes through, in the same
+// idiom as the dm value in devicemapper.go.
+//
+// It is here for a measured reason. A permission failure cannot be produced by
+// permission bits in a test: CI job containers run as ROOT, and root bypasses
+// discretionary access checks, so an os.Chmod-based negative test passes
+// locally and fails on the runner (conventions/testing-guidelines.md, Fault
+// Injection). Four candidate uid-independent EACCES sources were measured on a
+// dev host -- /proc/version and /proc/self/cmdline opened O_RDWR,
+// /sys/kernel/vmcoreinfo, /proc/1/mem -- and root opened ALL FOUR. There is no
+// real open that fails this way for every uid, so the fault is injected at the
+// seam instead, which holds for root and for uid 1000 alike.
+var openFileFunc = os.OpenFile
+
+// classifyDeviceOpen adds the package's typed vocabulary to an open failure,
+// and returns anything it cannot classify UNCHANGED.
+//
+// Returning the original error for the unclassified case is deliberate. The
+// alternative -- wrapping everything in a house error type -- would rewrite the
+// message of every failure in the package to buy a distinction only one of them
+// needs, and *fs.PathError already says which path and which syscall.
+//
+// The permission case keeps the cause reachable through the chain, so
+// errors.Is(err, os.ErrPermission) and errors.Is(err, ErrPermissionDenied) are
+// both true of the same value: a caller that already branched on the standard
+// library's sentinel does not have to change.
+func classifyDeviceOpen(op string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, os.ErrPermission) {
+		return fmt.Errorf("%w: could not %s: %w. %s", ErrPermissionDenied, op, err, permissionRemedy)
+	}
+	return err
+}
+
+// permissionRemedy is the operator guidance carried by every permission
+// failure, in the same spirit as keyringRemedy: an operator should be able to
+// act on the error without reading the source.
+const permissionRemedy = "A LUKS2 container's header, keyslots and data segment are read and written on the RAW BLOCK DEVICE rather than through a filesystem, " +
+	"so every operation in this library needs direct access to the device node -- there is no unprivileged path that does less. " +
+	"Run as root, or give this process access to the node itself (on most distributions the node is owned by root and the `disk` group)."
+
 // FileLock represents a file lock for concurrent access protection
 type FileLock struct {
 	file *os.File
@@ -237,7 +306,7 @@ type FileLock struct {
 
 // AcquireFileLock acquires an exclusive lock on a file
 func AcquireFileLock(path string) (*FileLock, error) {
-	f, err := os.OpenFile(path, os.O_RDWR, 0) // #nosec G304 -- device path for file locking
+	f, err := openDevice("lock the device", path, os.O_RDWR)
 	if err != nil {
 		return nil, err
 	}
