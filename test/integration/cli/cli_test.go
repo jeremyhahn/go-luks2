@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 var binaryPath string
@@ -496,9 +495,37 @@ func TestCLI_OpenAndClose(t *testing.T) {
 
 	defer func() {
 		runCLI("close", volumeName)
-		// Clean up loop devices
-		exec.Command("bash", "-c", "losetup -D 2>/dev/null || true").Run()
-		time.Sleep(500 * time.Millisecond)
+
+		// Detach ONLY the loop device this test attached, found by its backing
+		// file. This used to be `losetup -D`, which detaches EVERY loop device
+		// on the machine -- and loop devices are not namespaced, so under
+		// `docker run --privileged` that reached the host and destroyed loop
+		// devices belonging to other work, other suites, and the developer.
+		// Errors were discarded, so it did so silently.
+		//
+		// A test removes what it created. Nothing else.
+		//
+		// Every failure below is a test FAILURE, not a log line. An earlier
+		// draft ignored the lookup error and reported detach failures with
+		// t.Logf, so the test passed while leaving a host loop device attached
+		// -- state the next run inherits, reported as success. Cleanup that
+		// cannot fail is the same defect as the `losetup -D` it replaced,
+		// wearing better manners.
+		out, err := exec.Command("losetup", "-j", tmpfile).Output()
+		if err != nil {
+			t.Errorf("could not look up the loop devices backing %s, so this "+
+				"test cannot confirm it left none attached: %v", tmpfile, err)
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			dev, _, found := strings.Cut(line, ":")
+			if !found || dev == "" {
+				continue
+			}
+			if err := exec.Command("losetup", "-d", dev).Run(); err != nil {
+				t.Errorf("could not detach %s (attached for %s): %v -- a loop "+
+					"device this test attached is still on the host", dev, tmpfile, err)
+			}
+		}
 		os.Remove(tmpfile)
 	}()
 

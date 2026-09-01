@@ -80,9 +80,47 @@ RUN echo '#!/bin/bash' > /entrypoint.sh && \
     echo 'udevadm trigger 2>/dev/null || true' >> /entrypoint.sh && \
     echo 'udevadm settle 2>/dev/null || true' >> /entrypoint.sh && \
     echo '' >> /entrypoint.sh && \
-    echo '# Clean up any leftover state' >> /entrypoint.sh && \
-    echo 'dmsetup remove_all 2>/dev/null || true' >> /entrypoint.sh && \
-    echo 'losetup -D 2>/dev/null || true' >> /entrypoint.sh && \
+    echo '# NO GLOBAL DEVICE CLEANUP HERE. This block used to run' >> /entrypoint.sh && \
+    echo '# "dmsetup remove_all" and "losetup -D", both with errors discarded.' >> /entrypoint.sh && \
+    echo '# device-mapper and loop devices are NOT namespaced, and this' >> /entrypoint.sh && \
+    echo '# container runs --privileged, so both commands operated on the HOST:' >> /entrypoint.sh && \
+    echo '# every dm mapping and every loop device on the machine running the' >> /entrypoint.sh && \
+    echo '# suite, including a developer root filesystem (nvme0n1p3_crypt ->' >> /entrypoint.sh && \
+    echo '# vgmint-root, measured 2026-08-31). It survived only because those' >> /entrypoint.sh && \
+    echo '# devices were busy: DM_DEV_REMOVE returned EBUSY and "|| true" ate it.' >> /entrypoint.sh && \
+    echo '# A host where they are not busy loses them, silently.' >> /entrypoint.sh && \
+    echo '#' >> /entrypoint.sh && \
+    echo '# Tests own their own teardown and remove only what they created.' >> /entrypoint.sh && \
+    echo '# A suite must never destroy state it did not make.' >> /entrypoint.sh && \
+    echo '' >> /entrypoint.sh && \
+    echo '# Refuse to run if the host device-mapper is visible with mappings we' >> /entrypoint.sh && \
+    echo '# did not create. This guard FAILS CLOSED: an inventory it cannot take' >> /entrypoint.sh && \
+    echo '# is not evidence of an empty host. An earlier draft ended the pipeline' >> /entrypoint.sh && \
+    echo '# in "|| true" and defaulted the count to 0, so a failing dmsetup meant' >> /entrypoint.sh && \
+    echo '# "no mappings" and the suite proceeded exactly when the guard could not' >> /entrypoint.sh && \
+    echo '# verify it was safe -- the same swallow-the-error defect this change' >> /entrypoint.sh && \
+    echo '# exists to remove, reintroduced in the fix for it.' >> /entrypoint.sh && \
+    echo 'if ! command -v dmsetup >/dev/null 2>&1; then' >> /entrypoint.sh && \
+    echo '  echo "REFUSING TO RUN: dmsetup is absent, so the host device-mapper" >&2' >> /entrypoint.sh && \
+    echo '  echo "cannot be inspected and this suite cannot confirm it is safe." >&2' >> /entrypoint.sh && \
+    echo '  exit 1' >> /entrypoint.sh && \
+    echo 'fi' >> /entrypoint.sh && \
+    echo 'if ! dm_inventory=$(dmsetup ls 2>&1); then' >> /entrypoint.sh && \
+    echo '  echo "REFUSING TO RUN: could not inventory the device-mapper state:" >&2' >> /entrypoint.sh && \
+    echo '  echo "${dm_inventory}" >&2' >> /entrypoint.sh && \
+    echo '  exit 1' >> /entrypoint.sh && \
+    echo 'fi' >> /entrypoint.sh && \
+    echo 'case "${dm_inventory}" in' >> /entrypoint.sh && \
+    echo '  "No devices found"*|"") ;;' >> /entrypoint.sh && \
+    echo '  *)' >> /entrypoint.sh && \
+    echo '    echo "REFUSING TO RUN: the host device-mapper is visible from this" >&2' >> /entrypoint.sh && \
+    echo '    echo "container and already has mappings this suite did not create:" >&2' >> /entrypoint.sh && \
+    echo '    echo "${dm_inventory}" >&2' >> /entrypoint.sh && \
+    echo '    echo "Running here risks the host. Scope the container device" >&2' >> /entrypoint.sh && \
+    echo '    echo "access (see issue #80) or run where there is no dm state." >&2' >> /entrypoint.sh && \
+    echo '    exit 1' >> /entrypoint.sh && \
+    echo '    ;;' >> /entrypoint.sh && \
+    echo 'esac' >> /entrypoint.sh && \
     echo '' >> /entrypoint.sh && \
     echo '# Default: run all integration tests with coverage' >> /entrypoint.sh && \
     echo 'if [ "$#" -eq 0 ]; then' >> /entrypoint.sh && \
