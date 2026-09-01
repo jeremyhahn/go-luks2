@@ -343,12 +343,13 @@ canonical list, with the reasoning, is the file comment in
    the volume master key in unwipeable memory.**
 
    This is a **ruled position, not an oversight.** Avoiding it means
-   implementing PBKDF2 over `crypto/hmac`, which the company's
-   `conventions/security-review.md` prohibits outright ("NEVER hand-roll
-   cryptography", owner ruling 2026-08-25), with this exact case resolved by
-   name (#155): *use `crypto/pbkdf2`; accept the bounded transient copy;
-   document it; the protected-memory mandate yields at that boundary.* This
-   documentation is the compliance artifact that ruling requires.
+   hand-rolling PBKDF2 over `crypto/hmac` — writing new cryptographic
+   primitive code to dodge a memory-hygiene boundary — and this project's
+   security policy prohibits hand-rolled cryptography outright (owner ruling
+   2026-08-25), with this exact case resolved by name: *use `crypto/pbkdf2`;
+   accept the bounded transient copy; document it; the protected-memory mandate
+   yields at that boundary.* This section is the documentation that ruling
+   requires, and it is why the boundary is enumerated rather than hidden.
 3. **KDF output** — `crypto/pbkdf2.Key`/`argon2.IDKey` allocate and return their
    result on the heap; it is moved into an enclave immediately, but the return
    itself is unavoidable.
@@ -504,9 +505,37 @@ middle of a reencryption stays readable and inspectable.
 
 ```bash
 make test              # Unit tests
+make vet               # Compile every supported build-tag configuration
 sudo make integration  # Integration tests (requires root)
 make ci-full           # Full test suite in Docker
 ```
+
+### What the race detector covers, exactly
+
+Stated plainly because "we run the race detector" is easy to read as more than
+it is:
+
+| | raced |
+|---|---|
+| `pkg/luks2`, `cmd/luks2`, default build tags | **yes** — `-race -covermode=atomic`, in CI and in `make test-unit` |
+| `pkg/luks2`'s `//go:build integration` test files | no — the package is raced under the default tag set, which excludes them |
+| `test/integration/pkg`, `test/integration/cli` | no — these packages do not exist without the `integration` tag |
+
+So the honest statement of race coverage is **the default-tag build of two
+packages**, not "the module". The integration suites run privileged, in a
+container, against loop devices, device-mapper and mounts — host-global
+resources with real interleaving concerns — and they run without `-race`. That
+is a deliberate, reversible decision rather than an accident of how the CI legs
+were written; the reasoning, and the measurement that would change it, are
+recorded at the race legs in `.github/workflows/ci.yml`.
+
+The package list the race legs name is asserted against `go list ./...` on
+every run (`scripts/race-packages.sh`), so a package added later cannot be
+quietly left out of both the legs and this table.
+
+Build-tag coverage is a separate property with its own gate:
+`scripts/build-tags.sh` compiles every configuration the tree declares, with
+the tag list derived from the `//go:build` lines rather than written down.
 
 ## License
 

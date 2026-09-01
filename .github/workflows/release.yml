@@ -34,17 +34,18 @@ jobs:
       # PERMANENT GUARD (issue #13). Tag v0.1.7-alpha shipped a tree whose
       # VERSION file still read 0.1.6-alpha: the release commit bumped the
       # CHANGELOG but not VERSION, and tags are additive and never rewritten,
-      # so the only fix is to stop the next one. Second confirmed instance of
-      # this defect class portfolio-wide (company task #123), so the assertion
-      # is the deliverable, not the one-off correction.
+      # so the only fix available is to stop the NEXT one. This is the second
+      # confirmed instance of the defect across sibling repositories, which is
+      # why the assertion is the deliverable rather than the one-off
+      # correction.
       - name: Verify VERSION matches the tag
         run: |
           tag="${{ steps.version.outputs.VERSION }}"
           file="v$(cat VERSION)"
           if [ "$tag" != "$file" ]; then
             echo "FAIL: tag ${tag} does not match VERSION file ${file}"
-            echo "Bump VERSION in the same commit as the CHANGELOG"
-            echo "(release-versioning.md), then re-cut the tag."
+            echo "Bump VERSION in the same commit as the CHANGELOG, then"
+            echo "re-cut the tag. VERSION is unprefixed; the tag carries the v."
             exit 1
           fi
           echo "OK: tag ${tag} matches VERSION"

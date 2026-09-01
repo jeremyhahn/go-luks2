@@ -20,7 +20,7 @@ permissions:
 
 env:
   # Kept in lockstep with ci.yml. The template omits this block, which leaves
-  # `env.GO_VERSION` empty in the fips job below — reported to agent-company.
+  # `env.GO_VERSION` empty in the fips job below — reported upstream.
   GO_VERSION: "1.26.7"
 
 jobs:
@@ -99,7 +99,7 @@ jobs:
           exit-code: 1
           format: table
 
-      # Gitea and any other non-github.com server run the same gate from the
+      # Any non-github.com Actions host runs the same gate from the
       # trivy CLI, installed from the upstream release script. Same scanners,
       # same severities, same exit code — the dashboard upload is the only
       # thing GitHub gets and the other host does not.
@@ -111,10 +111,12 @@ jobs:
         if: github.server_url != 'https://github.com'
         run: make trivy-fs
 
-      # Misconfiguration scanning (owner ruling 2026-08-20, company task #27):
-      # devops.md §8 promises it portfolio-wide. It runs HERE — advisory exit
-      # code — so findings surface daily without a new finding class blocking
-      # merges. Promote to the PR gate once its baseline is clean.
+      # Misconfiguration scanning (owner ruling 2026-08-20). It runs HERE, with
+      # an advisory exit code, so findings surface daily without a brand-new
+      # finding class blocking every merge on the day it is switched on.
+      # Promote it to the PR gate once its baseline is clean — and promote it,
+      # rather than leaving it advisory forever, which is how an advisory scan
+      # becomes decoration.
       - name: Trivy misconfiguration scan (advisory)
         if: github.server_url != 'https://github.com'
         run: trivy fs --scanners misconfig --exit-code 0 --format table .

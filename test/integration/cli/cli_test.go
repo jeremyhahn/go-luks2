@@ -17,6 +17,52 @@ import (
 
 var binaryPath string
 
+// detachLoopDevicesBackedBy detaches only the loop devices attached to path,
+// and fails the test if it cannot establish that it left none behind.
+//
+// It replaces `losetup -D` (#17), which detaches EVERY loop device on the
+// machine regardless of who created it. Loop devices are not namespaced and
+// this suite runs under `docker run --privileged`, so "the machine" is the
+// host: two concurrent containers share one global pool, and one container's
+// teardown destroyed the other's in-flight devices. That is not a defect in
+// the allocation path — SetupLoopDevice already asks the kernel for a free
+// device via LOOP_CTL_GET_FREE and touches only what it was given. No amount
+// of careful allocation defends against an ownership-blind, forcible detach.
+//
+// A test removes what it created. Nothing else.
+//
+// EVERY FAILURE HERE IS A TEST FAILURE, not a log line. Cleanup that cannot
+// fail is the same defect as the `losetup -D` it replaces, wearing better
+// manners: an earlier draft reported detach failures with t.Logf, so a test
+// could pass while leaving a host loop device attached — state the next run
+// inherits, reported as success. A lookup that fails is likewise a failure and
+// not an empty result: not knowing what is attached is not evidence that
+// nothing is.
+//
+// It lives here as one function rather than as a copied block because three
+// copies of a teardown is precisely how this repository ended up with three
+// `losetup -D` call sites, and how a fix for two of them left the third.
+func detachLoopDevicesBackedBy(t *testing.T, path string) {
+	t.Helper()
+
+	out, err := exec.Command("losetup", "-j", path).Output()
+	if err != nil {
+		t.Errorf("could not look up the loop devices backing %s, so this test "+
+			"cannot confirm it left none attached: %v", path, err)
+		return
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		dev, _, found := strings.Cut(line, ":")
+		if !found || dev == "" {
+			continue
+		}
+		if err := exec.Command("losetup", "-d", dev).Run(); err != nil {
+			t.Errorf("could not detach %s (attached for %s): %v -- a loop device "+
+				"this test attached is still on the host", dev, path, err)
+		}
+	}
+}
+
 func TestMain(m *testing.M) {
 	// Build the CLI binary
 	tmpDir, err := os.MkdirTemp("", "luks2-cli-test")
@@ -336,7 +382,17 @@ func TestCLI_FullWorkflow(t *testing.T) {
 		// Cleanup
 		runCLIWithInput("", "unmount", mountpoint)
 		runCLI("close", volumeName)
-		exec.Command("losetup", "-D").Run()
+		// Scoped to this test's own backing file. This was the THIRD
+		// `losetup -D` call site (#17) and the one the fix for the other two
+		// missed: it detached every loop device on the machine, and since loop
+		// devices are not namespaced and this suite runs --privileged, "the
+		// machine" is the host. Errors were discarded, so it did so silently.
+		//
+		// This test attaches no loop device at all, so the correct scoped
+		// cleanup finds nothing — which is the point. The old call was not
+		// cleaning up after this test; it was clearing the machine on this
+		// test's behalf.
+		detachLoopDevicesBackedBy(t, tmpfile)
 		os.Remove(tmpfile)
 		os.RemoveAll(mountpoint)
 	}()
@@ -496,36 +552,7 @@ func TestCLI_OpenAndClose(t *testing.T) {
 	defer func() {
 		runCLI("close", volumeName)
 
-		// Detach ONLY the loop device this test attached, found by its backing
-		// file. This used to be `losetup -D`, which detaches EVERY loop device
-		// on the machine -- and loop devices are not namespaced, so under
-		// `docker run --privileged` that reached the host and destroyed loop
-		// devices belonging to other work, other suites, and the developer.
-		// Errors were discarded, so it did so silently.
-		//
-		// A test removes what it created. Nothing else.
-		//
-		// Every failure below is a test FAILURE, not a log line. An earlier
-		// draft ignored the lookup error and reported detach failures with
-		// t.Logf, so the test passed while leaving a host loop device attached
-		// -- state the next run inherits, reported as success. Cleanup that
-		// cannot fail is the same defect as the `losetup -D` it replaced,
-		// wearing better manners.
-		out, err := exec.Command("losetup", "-j", tmpfile).Output()
-		if err != nil {
-			t.Errorf("could not look up the loop devices backing %s, so this "+
-				"test cannot confirm it left none attached: %v", tmpfile, err)
-		}
-		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-			dev, _, found := strings.Cut(line, ":")
-			if !found || dev == "" {
-				continue
-			}
-			if err := exec.Command("losetup", "-d", dev).Run(); err != nil {
-				t.Errorf("could not detach %s (attached for %s): %v -- a loop "+
-					"device this test attached is still on the host", dev, tmpfile, err)
-			}
-		}
+		detachLoopDevicesBackedBy(t, tmpfile)
 		os.Remove(tmpfile)
 	}()
 

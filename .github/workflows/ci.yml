@@ -1,13 +1,14 @@
 name: CI
 
-# One workflow file, run by both hosts (devops.md §1). Steps that only work on
-# github.com are guarded on github.server_url; everything that gates a merge
-# runs on Gitea too.
+# ONE workflow file, run by two different Actions hosts: github.com and a
+# self-hosted forge. Steps that only work on github.com are guarded on
+# github.server_url; everything that gates a merge runs on both.
 #
 # ci-template v1.9 (owner ruling 2026-08-20, issue #14) — STAGED FAIL-FAST.
-# Gitea has no cancel API (company task #90), so fail-fast comes from ORDERING:
-# a fast tier (lint, build, unit tests) gates the expensive tier (security,
-# integration). A broken push reports in minutes and burns nothing downstream.
+# The self-hosted host has no API to cancel in-flight jobs, so fail-fast cannot
+# come from cancellation and comes from ORDERING instead: a fast tier (lint,
+# build, unit tests) gates the expensive tier (security, integration). A broken
+# push reports in minutes and burns nothing downstream.
 # trivy and fips moved to nightly.yml: both were known-red on every push, and a
 # known-red job burning runner-minutes per push verifies nothing.
 on:
@@ -24,11 +25,30 @@ permissions:
   security-events: write
 
 env:
-  # latest 1.26 patch (owner ruling 2026-08-20): 1.27.0 is BLOCKED —
-  # cockroachdb/swiss fails to compile under it (undefined fastrand64; company
-  # task #121). Never `stable`: it flipped to 1.27.0 mid-campaign and broke
-  # every repo riding it.
+  # latest 1.26 patch (owner ruling 2026-08-20): 1.27.0 is BLOCKED — a
+  # transitive dependency fails to compile under it (undefined fastrand64).
+  # Never `stable`: it flipped to 1.27.0 mid-campaign and broke every repo
+  # riding it.
   GO_VERSION: "1.26.7"
+
+  # ANALYSIS TOOL PINS (#21, #44). These are the versions BAKED into the
+  # self-hosted runner image; the steps below assert the binary they got
+  # matches, and refuse to run otherwise.
+  #
+  # Pinned because an unpinned scanner self-updates underneath you. When it
+  # does, a new rule fires on code untouched for months and reddens whichever
+  # pull request happens to run next: the error accuses innocent work, `main`
+  # is latently red, and nobody can reproduce the previous green. gosec was
+  # exactly this — `make security` reported `Gosec : dev`, meaning a binary
+  # built from source at an unknown revision, so two runs of the same commit
+  # could disagree and neither was reproducible.
+  #
+  # Bumping one of these is a DELIBERATE change, one issue per bump, and the
+  # runner image is bumped in the same breath — a version skew between the two
+  # fails this job rather than silently scanning with something else.
+  GOLANGCI_LINT_VERSION: "v2.13.2"
+  GOSEC_VERSION: "v2.29.0"
+  GOVULNCHECK_VERSION: "v1.7.0"
 
 jobs:
   lint:
@@ -52,29 +72,91 @@ jobs:
             exit 1
           fi
 
-      - name: Run go vet
-        run: go vet ./...
+      # COMPILE EVERY SUPPORTED BUILD-TAG CONFIGURATION (#43), in the FAST
+      # tier, so it gates before anything expensive runs. This replaces a bare
+      # `go vet ./...`, which covered the default configuration only.
+      #
+      # Nothing previously enforced that a file's build tag matches the symbols
+      # it uses, and the gap had already cost a regression: a test file landed
+      # untagged while a helper it called 15 times lives under
+      # `//go:build !integration`. go build, go vet, go test -race on both
+      # packages, golangci-lint, gosec, govulncheck and go mod verify all
+      # returned 0; only `-tags=integration` was red, and the only job that ran
+      # it was the privileged Docker suite at the far end of the pipeline.
+      #
+      # The tag list is DERIVED from the //go:build lines in the tree, not
+      # written down — a written list is accurate until someone adds a tag and
+      # then it is silently short. It is also compile-only: no volumes, no
+      # privileges, no root, under a second.
+      #
+      # .golangci.yml stays default-tag-only, deliberately and correctly:
+      # adding `integration` there SWAPS one set for the other and makes
+      # `unused` fire on every helper the unit tests call. This step is what
+      # covers the tag dimension; the linter is not.
+      - name: Compile every supported build-tag configuration
+        run: ./scripts/build-tags.sh
 
-      # PINNED (devops.md §9 documented-pin clause; go-qrdb#42, 2026-08-19):
-      # @latest moved to v2.13.0, which panics under Go 1.26 ("nilness:
-      # internal error: unhandled builtin recover" in honnef.co/go/tools
-      # v0.8.0-rc.1) and took the whole gate down — and with it every job that
-      # needed lint. Unpin when an upstream release passes on the portfolio.
-      # The bounded retry is for sum.golang.org tile fetches, which flake with
-      # HTTP/2 INTERNAL_ERROR; under staged fail-fast a linter-INSTALL flake
-      # blocks the whole pipeline. Do NOT "fix" that with GOSUMDB=off, which
-      # trades a flake for a supply-chain hole.
-      - name: Install golangci-lint
+      # REGRESSION GUARD (#17). `losetup -D` detaches every loop device on the
+      # machine; `dmsetup remove_all` removes every dm mapping. Neither is
+      # namespaced, and the integration suite runs --privileged, so both reach
+      # the HOST — measured on the machine where this was found, every run
+      # asked the kernel to remove the mapping under the root filesystem, and
+      # survived only because those devices were held open.
+      #
+      # This is a check rather than a rule because the rule already existed: a
+      # standing written instruction not to add a second `losetup -D` call
+      # site, at a point when there were four, one of which then survived the
+      # fix for the other three because it lived in a file nothing CI-facing
+      # opens.
+      - name: Refuse ownership-blind device teardown
+        run: ./scripts/no-global-device-cleanup.sh
+
+      # The version gate has its own tests, and they run HERE rather than only
+      # on a developer's machine — a suite nothing executes is a suite that can
+      # rot into agreement with whatever the code does. They use fakes printing
+      # the real output formats, take no network, and finish in under a second.
+      # They exist because the comparison they cover shipped FAILING OPEN: a
+      # substring test accepted v11.7.0 for a v1.7.0 pin.
+      - name: Test the pinned-version gate
+        run: ./scripts/require-tool-test.sh
+
+      # NO NETWORK INSTALL (#44). golangci-lint is baked into the self-hosted
+      # runner image at GOLANGCI_LINT_VERSION. The install this replaces had
+      # grown a hand-rolled 3-attempt retry loop, which is the tell: every host
+      # in this fleet resolves an AAAA record for sum.golang.org and none has a
+      # default IPv6 route, so a module fetch intermittently dies with
+      # ENETUNREACH when Go's v6->v4 fallback does not complete. Retrying was
+      # treating the symptom in one repo; baking the tool removes the fetch.
+      #
+      # THE PIN MOVED v2.12.2 -> v2.13.2, DELIBERATELY AND ON EVIDENCE.
+      # v2.12.2 was pinned because @latest had moved to v2.13.0, which panicked
+      # under Go 1.26 ("nilness: internal error: unhandled builtin recover" in
+      # honnef.co/go/tools) and took the whole gate down. The runner image has
+      # since been rebuilt with v2.13.2, and this gate is what surfaced the
+      # skew — the job went red naming both versions instead of quietly linting
+      # with something other than the pin, which is the entire point of it.
+      #
+      # Measured before moving the pin rather than assumed from a version
+      # number: v2.13.2 was installed and run against this repository under Go
+      # 1.26.7. It exits 0 with "0 issues.", does not panic, and reports the
+      # SAME seven enabled linters as v2.12.2 (errcheck, gocritic, govet,
+      # ineffassign, misspell, staticcheck, unused) — so the bump does not
+      # silently drop a security linter, which would be the quiet way for this
+      # to go wrong. The binary tested self-reports mod sum
+      # h1:bCyq3E4vo9qwzifjpzJqYndEt7Ncva80qkk8G2B4TXU=, identical to the one
+      # the runner reported, so this is the same artifact and not merely the
+      # same version string.
+      - name: Require golangci-lint at the pinned version
         run: |
-          for i in 1 2 3; do
-            go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 && exit 0
-            echo "install attempt $i failed; retrying"; sleep 10
-          done
-          echo "golangci-lint install failed after 3 attempts"; exit 1
+          set -eu
+          "${GITHUB_WORKSPACE}/.github/require-tool.sh" \
+            golangci-lint "$GOLANGCI_LINT_VERSION" \
+            "github.com/golangci/golangci-lint/v2/cmd/golangci-lint"
 
-      # .golangci.yml enables the devops.md §8 security linters (staticcheck,
-      # errcheck, unused, ineffassign, misspell, gocritic); the umbrella
-      # without them would not satisfy the section.
+      # .golangci.yml enables the security linters (staticcheck, errcheck,
+      # unused, ineffassign, misspell, gocritic). The umbrella linter with
+      # those switched off looks like a lint gate and catches none of what one
+      # is for.
       - name: Run golangci-lint
         run: golangci-lint run --timeout=10m ./...
 
@@ -94,18 +176,51 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      - name: Install gosec
-        run: go install github.com/securego/gosec/v2/cmd/gosec@latest
-
-      - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      # NO NETWORK INSTALL (#44), same reason as the lint job: both tools are
+      # baked into the self-hosted runner image at the pinned versions above,
+      # and the `go install` steps this replaces were a live source of
+      # intermittent ENETUNREACH failures on every Security Scan leg.
+      #
+      # This step is also the fix for `Gosec : dev` (#21). gosec takes its
+      # version string from ldflags, NOT from the module path, so
+      # `go install ...@v2.29.0` alone still self-reports `dev` — installing at
+      # a pin was never sufficient and that is why the assertion, rather than
+      # the pin, is the deliverable. The image builds it with the -X flag; the
+      # fallback below does the same.
+      - name: Require gosec and govulncheck at the pinned versions
+        run: |
+          set -eu
+          "${GITHUB_WORKSPACE}/.github/require-tool.sh" \
+            gosec "$GOSEC_VERSION" \
+            "github.com/securego/gosec/v2/cmd/gosec" \
+            -ldflags "-X main.Version=${GOSEC_VERSION}"
+          "${GITHUB_WORKSPACE}/.github/require-tool.sh" \
+            govulncheck "$GOVULNCHECK_VERSION" \
+            "golang.org/x/vuln/cmd/govulncheck"
 
       # The Makefile carries the flags and the justification for every
-      # suppression (devops.md §4/§8). gosec runs with no -exclude rules: the
+      # suppression, and CI calls that same target — so a finding a developer
+      # sees locally is the finding that blocks the merge, with no second set
+      # of flags that can drift. gosec runs with no -exclude rules: the
       # findings this repository carries are annotated at the line that
       # produces them, so a new occurrence elsewhere still fails.
       # GOSEC_EXTRA only adds the SARIF written for the upload below; gosec
       # still exits non-zero on a finding and gates here.
+      #
+      # THIS IS THE INVOCATION THE -concurrency BOUND PROTECTS (#22), and it is
+      # this job — a container-capped runner — that needs it. gosec sizes its
+      # worker pool from runtime.NumCPU(), ignoring GOMAXPROCS and ignoring
+      # cgroup CPU limits, so unbounded it spawns one worker per HOST core here
+      # and is OOM-killed. An OOM exits 137, and a non-zero exit from gosec
+      # reads as a SECURITY FINDING — so the failure would present as this gate
+      # catching something, and send the next person auditing code that was
+      # never the problem.
+      #
+      # The flag is NOT restated here on purpose. It lives at GOSEC_CONCURRENCY
+      # in the Makefile, with the same reasoning at the definition, and this job
+      # calls that target — one bound, one place, nothing to drift. Overriding
+      # it from this workflow would recreate exactly the second-set-of-flags
+      # problem the paragraph above says this arrangement avoids.
       - name: Run gosec
         run: make gosec GOSEC_EXTRA="-fmt=sarif -out=gosec.sarif"
 
@@ -138,6 +253,49 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
+      # THE RACE LEGS BELOW NAME THEIR PACKAGES; THIS ASSERTS THE LIST IS
+      # COMPLETE (#34). Today `go list ./...` returns exactly the two packages
+      # raced below, so the enumeration is accurate — which is exactly when to
+      # install the check, because its failure mode is silent. Add a third
+      # package and CI would race two of three: no job fails, no warning
+      # appears, and the legs quietly stop covering the module.
+      #
+      # The enumeration is kept rather than replaced with `./...` because each
+      # leg writes its own coverage profile and the two are reported
+      # separately. Asserting the list is the other branch of the issue's
+      # acceptance and fails LOUDLY at the moment of divergence.
+      - name: Assert the race legs cover every package
+        run: ./scripts/race-packages.sh ./pkg/luks2 ./cmd/luks2
+
+      # WHAT THE RACE DETECTOR HERE DOES AND DOES NOT COVER (#34 item 3),
+      # stated so "we run the race detector" is never read as more than it is:
+      #
+      #   COVERED: the DEFAULT-tag build of ./pkg/luks2 and ./cmd/luks2.
+      #   NOT COVERED: anything behind `//go:build integration`. That includes
+      #     pkg/luks2's own integration-tagged test files — this package is
+      #     raced under the default tag set, which excludes them — and the
+      #     packages test/integration/pkg and test/integration/cli, which do
+      #     not exist at all without the tag.
+      #
+      # DECISION, recorded rather than left as an accident of how these legs
+      # were written: the integration suites are NOT race-checked, for now.
+      # They run privileged, in a container, against loop devices,
+      # device-mapper and mounts, and they are already the pipeline's long
+      # pole; -race measured ~4.6x on this codebase, and the unit suite needs
+      # 30 minutes without it. That is a cost to weigh, and it cannot be
+      # weighed from a workstation: the container refuses to run where the host
+      # device-mapper is visible with foreign mappings, so the number has to
+      # come from a runner.
+      #
+      # WHAT WOULD CHANGE IT: time `go test -race -tags=integration ./pkg/luks2`
+      # inside the integration container on a runner. That one suite is the
+      # part worth racing — it is the library's own concurrency-sensitive code,
+      # as opposed to the two black-box CLI-driving suites. If it fits the
+      # budget, add -race to that entrypoint line and narrow this note; if it
+      # does not, record the measured cost here so the next person does not
+      # re-derive it. This is a deliberate NO, not an oversight, and it is
+      # reversible on evidence.
+      #
       # -timeout 30m, deliberately, against Go's 10-minute DEFAULT.
       #
       # This suite is KDF-bound by design. Opening a volume costs a
@@ -183,7 +341,7 @@ jobs:
 
       # upload-artifact v4+ refuses to run against any server that is not
       # github.com — it detects one and reports "not currently supported on
-      # GHES", and Gitea presents as such (devops.md §1). The tests above have
+      # GHES", and the self-hosted forge presents as such. The tests above have
       # already run and already gated; only the artifact is skipped.
       - name: Upload coverage
         if: github.server_url == 'https://github.com'
@@ -197,8 +355,9 @@ jobs:
     runs-on: ubuntu-latest
     # STAGED FAIL-FAST (v1.9): gated on the fast tier, not on `security` — two
     # expensive jobs gating each other would serialise them for no benefit.
-    # The suite races on host-global loop devices (company task #48), which is
-    # why it runs inside the container and never bare on a shared runner.
+    # The suite races on host-global loop devices — /dev/loop* is NOT
+    # namespaced, so two concurrent runs on one machine share one pool — which
+    # is why it runs inside the container and never bare on a shared runner.
     needs: [lint, build, test-unit]
     steps:
       - uses: actions/checkout@v6
@@ -209,11 +368,11 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      # go.mod pins github.com/jeremyhahn/go-enclave, published to the internal
-      # Gitea and not to github.com. The runner injects GOPRIVATE and the
-      # tokenised insteadOf rewrite into this job's environment
-      # (dependency-resolution.md §6), but a job environment does NOT cross into
-      # a docker build -- hence handing it over explicitly.
+      # go.mod pins github.com/jeremyhahn/go-enclave, whose module PATH says
+      # github.com while it is served from a private module host. The runner
+      # injects GOPRIVATE and the tokenised insteadOf rewrite into this job's
+      # environment, but a job environment does NOT cross into a docker build --
+      # hence handing it over explicitly.
       #
       # Written under RUNNER_TEMP, deliberately OUTSIDE the build context: the
       # Dockerfile ends with `COPY . .`, so a credentials file inside the
@@ -241,9 +400,9 @@ jobs:
               printf 'export GIT_CONFIG_KEY_0=%s\n' "${GIT_CONFIG_KEY_0}"
               printf 'export GIT_CONFIG_VALUE_0=%s\n' "${GIT_CONFIG_VALUE_0:-}"
             } > "${RUNNER_TEMP}/gomodauth.env"
-            echo "staged Gitea module credentials"
+            echo "staged private-module credentials"
           else
-            echo "no Gitea credentials in this environment; resolving from the public proxy"
+            echo "no private-module credentials here; resolving from the public proxy"
           fi
 
       - name: Build Docker image
@@ -314,9 +473,9 @@ jobs:
           name: binaries
           path: luks-linux-*
 
-  # The single required check (devops.md §1). Branch protection requires this
-  # job and nothing else; adding a job above means adding it to `needs` and to
-  # the results list below.
+  # The single required check. Branch protection requires THIS job and nothing
+  # else, so adding a job above means adding it to `needs` AND to the results
+  # list below; a job left out of both runs and gates nothing.
   gate:
     name: CI Gate
     runs-on: ubuntu-latest
@@ -326,7 +485,8 @@ jobs:
     needs: [lint, security, build, test-unit, test-integration]
     steps:
       # join(needs.*.result) is a GitHub extension that evaluates to an empty
-      # string on Gitea, so a gate built on it reports success while jobs are
+      # string on the self-hosted host, so a gate built on it reports success
+      # while jobs are
       # failing. Every job is listed by name, and a result that cannot be read
       # at all is treated as a failure rather than a pass.
       - name: Check job results
@@ -339,8 +499,8 @@ jobs:
         run: |
           # skipped != failed, but BOTH fail the gate: under staged fail-fast a
           # skipped job means an upstream stage failed, and naming it that way
-          # prevents the go-qrdb#42 class — a red that looks like a test
-          # failure while the tests never ran.
+          # prevents the failure mode this was written for — a red that reads
+          # as a test failure while the tests in fact never ran.
           failed=0
           for job in LINT SECURITY BUILD TEST_UNIT TEST_INTEGRATION; do
             eval "result=\$$job"

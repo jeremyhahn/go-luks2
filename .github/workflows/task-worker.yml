@@ -1,26 +1,29 @@
-# task-worker: v1.1 — ephemeral task agent per `task:ready` issue
-# (conventions/sdlc.md §8; the interim, Gitea-native stand-in for QuicBaaS
-# agent orchestration — software/docs/20-sdlc-automation-reference.md).
+# task-worker: v1.1 — ephemeral task agent per `task:ready` issue. The interim,
+# forge-native stand-in for the orchestration this portfolio intends to move
+# into its own services; it is a copy of a shared template, not a per-repo
+# invention, so a change here belongs upstream in the template too.
 #
 # Trigger: an issue receives the `task:ready` label. The worker claims the
 # issue (label swap → task:in-progress = the lock + visible claim), runs a
 # pre-flight assessment, then drives the full SDLC autonomously as THIS
 # repo's own agent identity: branch → implement → verify → PR → review →
-# merge. Engine selection is label-driven (Part 3 taxonomy):
+# merge. Engine selection is label-driven:
 #   default            → Claude worker (repo default account, model opus)
 #   engine:codex       → Codex worker (the OpenAI utility account)
 #   model:<name>       → model override (sonnet/opus/fable or a GPT model)
 #   effort:<level>     → reasoning-effort override (low|medium|high|xhigh)
 #   task:failover-ok   → authorizes ONE account failover for this task
 #
-# Label restrictions (each mounts a live AI-session credential):
+# Runner labels are restricted, because each one mounts a live AI-session
+# credential and the label IS the capability:
 #   claude      — only task-worker.yml and claude-review.yml
 #   codex       — only codex-review.yml (PR REVIEWS, short jobs)
 #   codex-task  — only task-worker.yml (WORKERS, long jobs)
 # Reviews and workers are deliberately on SEPARATE labels so a long worker
 # can never starve the review it is itself waiting for.
-# Gitea-only; guarded off github.com. Source of truth:
-# software/templates/github-actions/task-worker.yml in the company repo.
+#
+# Self-hosted only; guarded off github.com, where none of these runner labels
+# or credentials exist.
 name: Task Worker
 
 on:
@@ -30,8 +33,8 @@ on:
 jobs:
   work-claude:
     name: Task Worker (claude)
-    # Gitea's labeled payload has no top-level `label` field (action:
-    # label_updated) — guard on the issue's labels array instead.
+    # This forge's `labeled` payload has no top-level `label` field (the action
+    # arrives as label_updated) — guard on the issue's labels array instead.
     if: >-
       contains(toJSON(github.event.issue.labels), 'task:ready') &&
       !contains(toJSON(github.event.issue.labels), 'task:in-progress') &&
@@ -41,7 +44,12 @@ jobs:
     runs-on: claude
     timeout-minutes: 120
     env:
-      GITEA_URL: http://198.51.100.91:3001
+      # Taken from the event, never hardcoded: the worker talks to whichever
+      # forge dispatched it, so there is no address to write down — and writing
+      # one down publishes an internal endpoint from a publicly mirrored repo.
+      # The variable NAME is the contract with the runner-side worker script and
+      # is left alone; only the value changed.
+      GITEA_URL: ${{ github.server_url }}
       REPO: ${{ github.event.repository.name }}
       ISSUE: ${{ github.event.issue.number }}
       AGENT_TOKEN: ${{ secrets.AGENT_TOKEN }}
@@ -72,12 +80,12 @@ jobs:
     # Dedicated label: task workers must NOT share runners with PR reviews.
     # A worker holds its slot for up to 2h while polling for the Codex review
     # its own PR needs — if reviews ran on the same label, workers would block
-    # the reviews they wait on (observed 2026-08-17: go-luks2#4 timed out with
-    # a green PR because every codex slot was held by workers).
+    # the reviews they wait on (observed 2026-08-17: a PR in this repo timed out
+    # while green, because every review slot was held by workers).
     runs-on: codex-task
     timeout-minutes: 120
     env:
-      GITEA_URL: http://198.51.100.91:3001
+      GITEA_URL: ${{ github.server_url }}
       REPO: ${{ github.event.repository.name }}
       ISSUE: ${{ github.event.issue.number }}
       AGENT_TOKEN: ${{ secrets.AGENT_TOKEN }}

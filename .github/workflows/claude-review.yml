@@ -1,13 +1,12 @@
-# claude-review: v1.0 — Claude peer review on demand (conventions/sdlc.md §8).
+# claude-review: v1.0 — Claude peer review on demand.
 # Runs when a PR carries `review:claude` (Claude instead of Codex) or
 # `review:dual` (both reviewers must APPROVE the current head before merge —
 # the merging agent enforces the dual requirement). Default PRs keep the
 # Codex-only pipeline (codex-review.yml), which is unchanged.
 #
 # `runs-on: claude` is restricted: only this workflow and task-worker.yml
-# may use it — the label mounts the live Claude session credential.
-# Gitea-only. Source of truth: software/templates/github-actions/ in the
-# company repo.
+# may use it — the label mounts a live Claude session credential, so the label
+# IS the capability. Self-hosted only. Copied from a shared template.
 name: Claude Review
 
 on:

@@ -1,14 +1,15 @@
 # codex-review-template: v1 — automated Codex peer review for pull requests.
-# Source of truth: software/templates/github-actions/codex-review.yml in the
-# automatethethings repo. Copied into each repo. Gitea-ONLY by design: GitHub
-# remains the owner-gated manual channel (version-control.md §3), so the job
-# guards itself off github.com.
+# Copied from a shared template into each repository, so a change here belongs
+# upstream in the template too. Self-hosted-ONLY by design: the public host
+# remains an owner-gated manual channel, so the job guards itself off
+# github.com.
 #
-# The `codex` runs-on label routes this job to the dedicated review runners
-# (gpu-host-codex / omega-codex), whose job image bakes the codex CLI and the
-# review assets, and whose config mounts the host's logged-in ~/.codex OAuth
-# session. ONLY this workflow may declare `runs-on: codex` — that label
-# carries the credential mount (conventions/sdlc.md).
+# The `codex` runs-on label routes this job to the dedicated review runners,
+# whose job image bakes the codex CLI and the review assets, and whose config
+# mounts the host's logged-in codex OAuth session. ONLY this workflow may
+# declare `runs-on: codex` — that label carries the credential mount, so the
+# label IS the capability and handing it to a second workflow hands that
+# workflow a live session.
 
 name: Codex Review
 

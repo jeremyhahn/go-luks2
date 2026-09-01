@@ -1,9 +1,10 @@
 # golangci-lint configuration for go-luks2.
 #
-# devops.md §8 makes this file part of the security gate, not a style
-# preference: staticcheck, errcheck, gosimple, unused, ineffassign, misspell
-# and gocritic must all be enabled. Installing the umbrella with the security
-# linters switched off does not satisfy the section. In golangci-lint v2
+# This file is part of the SECURITY gate, not a style preference: staticcheck,
+# errcheck, gosimple, unused, ineffassign, misspell and gocritic must all be
+# enabled. Installing the umbrella linter with the security linters switched
+# off looks like a lint gate and catches none of what one is for. In
+# golangci-lint v2
 # gosimple was merged into staticcheck (the S1xxx checks), so enabling
 # staticcheck covers it.
 version: "2"

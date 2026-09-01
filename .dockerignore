@@ -22,13 +22,19 @@ coverage.html
 *.swp
 *.swo
 
+# Code-analysis tooling scratch state (#66). Untracked and gitignored, but it
+# still exists in a developer's working directory, and test/integration/Dockerfile
+# ends in `COPY . .` — so without this line a local `make integration-test` bakes
+# the tool's notes into an image layer.
+.serena/
+
 # OS files
 .DS_Store
 Thumbs.db
 
-# BuildKit credential staging file (dependency-resolution.md §6). The canonical
-# Gitea module-credential pattern mounts these variables via
-# --mount=type=secret and the file is meant to live OUTSIDE the build context;
-# this line is the second line of defence, so that a copy landing in the tree
-# by accident can never be baked into a layer by a broad COPY.
+# BuildKit credential staging file. The private-module credential pattern
+# mounts those variables via --mount=type=secret and the file is meant to live
+# OUTSIDE the build context; this line is the second line of defence, so that a
+# copy landing in the tree by accident can never be baked into a layer by a
+# broad COPY.
 gomodauth*

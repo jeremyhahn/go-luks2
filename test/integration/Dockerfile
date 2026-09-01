@@ -23,10 +23,10 @@ WORKDIR /app
 COPY go.mod go.sum ./
 
 # go.mod pins a first-party module -- github.com/jeremyhahn/go-enclave, the
-# portfolio locked-memory primitive -- that is published to the internal Gitea
-# instance and not to github.com. Resolving it needs GOPRIVATE plus git's
-# insteadOf rewrite carrying a read-only token: conventions/dependency-resolution.md
-# §6. Without it this build dies on
+# portfolio locked-memory primitive -- whose module PATH says github.com while
+# it is in fact served from a private module host. Resolving it needs GOPRIVATE
+# plus git's insteadOf rewrite carrying a read-only token. Without that, this
+# build dies on
 #
 #	fatal: could not read Username for 'https://github.com'
 #
@@ -45,12 +45,13 @@ COPY go.mod go.sum ./
 #
 # The mount is OPTIONAL by design. Where no secret is supplied -- GitHub Actions,
 # or a developer building against the public proxy -- the file is simply absent
-# and the same Dockerfile still builds; see §7 for how those tags resolve.
+# and the same Dockerfile still builds.
 #
 # GOPROXY and GOSUMDB are deliberately NOT set here, as ENV or otherwise: an
 # image that bakes GOPROXY=direct/GOSUMDB=off turns checksum verification off
-# for every container it spawns, which §6 records as drift that hides in
-# Dockerfile ENV lines rather than in workflows.
+# for every container it spawns. That is the worst place for such a change to
+# live: it hides in a Dockerfile ENV line rather than in a workflow, where
+# someone reviewing the supply chain would look.
 RUN --mount=type=secret,id=gomodauth \
     set -eu; \
     if [ -f /run/secrets/gomodauth ]; then . /run/secrets/gomodauth; fi; \
