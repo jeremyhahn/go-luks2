@@ -567,6 +567,8 @@ func (c *CLI) cmdInfo() int {
 		return 1
 	}
 
+	c.warnAboutDroppedEntries(device, info.Metadata)
+
 	_, _ = fmt.Fprintf(c.Stdout, "\nUUID:           %s\n", info.UUID)
 	_, _ = fmt.Fprintf(c.Stdout, "Label:          %s\n", info.Label)
 	_, _ = fmt.Fprintf(c.Stdout, "Version:        LUKS%d\n", info.Version)
@@ -587,6 +589,43 @@ func (c *CLI) cmdInfo() int {
 	_, _ = fmt.Fprintln(c.Stdout, "\nVolume is valid and accessible")
 
 	return 0
+}
+
+// warnAboutDroppedEntries tells the operator when the header on disk carried
+// keyslot or token entries written as JSON null, which the library removed
+// while reading it.
+//
+// The library cannot do this itself: it is a Layer-0 primitive, and taking a
+// logging dependency -- or writing to log/slog's process-global default --
+// would impose a logging decision on every application that embeds it (#27).
+// It reports the ids instead, and deciding that an operator running `luks2
+// info` should see them on stderr is exactly the kind of decision an
+// application is allowed to make.
+//
+// It goes to STDERR rather than stdout because the volume report on stdout is
+// something people pipe, and a warning that a container is damaged does not
+// belong in the middle of it.
+func (c *CLI) warnAboutDroppedEntries(device string, metadata *luks2.LUKS2Metadata) {
+	if metadata == nil || len(metadata.DroppedNullEntries) == 0 {
+		return
+	}
+
+	_, _ = fmt.Fprintf(c.Stderr, "\nWARNING: the header on %s carries %d entr%s written as JSON null:\n",
+		device, len(metadata.DroppedNullEntries), plural(len(metadata.DroppedNullEntries), "y", "ies"))
+	for _, entry := range metadata.DroppedNullEntries {
+		_, _ = fmt.Fprintf(c.Stderr, "  %s\n", entry)
+	}
+	_, _ = fmt.Fprintln(c.Stderr, "They are not usable and are ignored. Any command that writes this header")
+	_, _ = fmt.Fprintln(c.Stderr, "will remove them from the device permanently. Back the header up first:")
+	_, _ = fmt.Fprintf(c.Stderr, "  cryptsetup luksHeaderBackup %s --header-backup-file <file>\n", device)
+}
+
+// plural picks between two suffixes for n.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 // cmdWipe securely wipes a LUKS2 volume

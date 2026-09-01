@@ -7,7 +7,10 @@
 package luks2
 
 import (
+	"errors"
 	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -271,6 +274,133 @@ func TestTokenOperations_Integration(t *testing.T) {
 		// Should have tokens 0 and 10 (5 was removed)
 		if count != 2 {
 			t.Errorf("expected 2 tokens, got %d", count)
+		}
+	})
+}
+
+// TestCryptsetupCannotReachAnUnaddressableTokenID is the measurement #35 was
+// blocked on, kept as a test so the ruling cannot be silently reversed.
+//
+// # Why this is in the INTEGRATION tier
+//
+// It shells out to cryptsetup, and it does so with t.Fatalf rather than a skip
+// guard: a conformance measurement that reports success on a host with no third
+// party to check against converts "unverified" into "verified", which is #90.
+//
+// Those two facts together decide the tier. A hard failure on a missing binary
+// is correct only where the binary is a DECLARED dependency, and here it is --
+// test/integration/Dockerfile installs cryptsetup-bin, and the entrypoint runs
+// `go test -tags=integration ./pkg/luks2`. In the unit tier the same test made
+// `go test ./...` depend on an undocumented system binary, which is the defect
+// this move fixes.
+//
+// This is testing-guidelines.md's SECOND remedy for a test that cannot run
+// everywhere -- a build tag, "a declared, greppable compile-time decision" --
+// rather than the skip guard, which is a runtime excuse that reports success.
+// Both properties are kept: the unit tier needs no system binary, and absence
+// still cannot reverse the ruling, because in the tier that runs this the
+// binary is not optional.
+//
+// # What it establishes
+//
+// #35 offered two answers -- reject the header at the parse if cryptsetup
+// refuses it, or make the listing faithful if cryptsetup accepts it -- and the
+// real answer is neither. cryptsetup 2.7.0 ACCEPTS these headers (so refusing
+// them would be the bricking direction) and cannot REACH the entries (so there
+// is no working token to strand). It addresses tokens by the canonical spelling
+// of each slot number, from 0 to LUKS2_TOKENS_MAX-1.
+func TestCryptsetupCannotReachAnUnaddressableTokenID(t *testing.T) {
+	if _, err := exec.LookPath("cryptsetup"); err != nil {
+		t.Fatalf("cryptsetup is not installed (%v). This tier declares it -- "+
+			"test/integration/Dockerfile installs cryptsetup-bin -- so its absence is a broken "+
+			"environment, not a reason to report success. The measurement #35's fix rests on "+
+			"cannot be assumed.", err)
+	}
+
+	dump := func(t *testing.T, path string) (int, string) {
+		t.Helper()
+		out, err := exec.Command("cryptsetup", "luksDump", path).CombinedOutput() // #nosec G204 -- arguments are test constants
+		var exitErr *exec.ExitError
+		if err != nil && !errors.As(err, &exitErr) {
+			t.Fatalf("failed to run cryptsetup: %v", err)
+		}
+		if err != nil {
+			return exitErr.ExitCode(), string(out)
+		}
+		return 0, string(out)
+	}
+
+	// Every key cryptsetup accepts-but-cannot-reach, and the control that shows
+	// the boundary is real rather than assumed. Without "31" passing, a fix that
+	// simply rejected every two-digit id would look correct here.
+	//
+	// The boundary cases are spelled from MaxTokenSlots rather than hardcoded,
+	// so this measures OUR constant against cryptsetup's LUKS2_TOKENS_MAX
+	// instead of restating a number both sides happen to agree on today. If
+	// MaxTokenSlots ever diverges, the pair below goes red.
+	for _, tc := range []struct {
+		name      string
+		key       string
+		reachable bool
+	}{
+		{"a non-canonical spelling", "01", false},
+		{"one past MaxTokenSlots-1", strconv.Itoa(MaxTokenSlots), false},
+		{"far past the highest slot", "999", false},
+		{"MaxTokenSlots-1, the highest slot this library admits", strconv.Itoa(MaxTokenSlots - 1), true},
+		{"the lowest legal slot", "0", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, out := dump(t, tokenIDVolume(t, "cs-range.img", tc.key))
+			if code != 0 {
+				t.Fatalf("cryptsetup luksDump exited %d on a header carrying token id %q; it must ACCEPT the header, not refuse it\n%s",
+					code, tc.key, out)
+			}
+
+			marker := "written-as-" + tc.key
+			reached := strings.Contains(out, marker)
+			switch {
+			case tc.reachable && !reached:
+				t.Fatalf("cryptsetup did not reach the token at %q, so this library must not list it either\n%s", tc.key, out)
+			case !tc.reachable && reached:
+				t.Fatalf("cryptsetup reached the token at %q, so this library must list it rather than skip it\n%s", tc.key, out)
+			}
+		})
+	}
+
+	// The collision, which is the defect #35 was filed about: the canonical
+	// spelling is reached and the other is not, so folding them onto one int
+	// key could hide a working token.
+	t.Run("a collision resolves to the canonical spelling", func(t *testing.T) {
+		code, out := dump(t, tokenIDVolume(t, "cs-both.img", "1", "01"))
+		if code != 0 {
+			t.Fatalf("cryptsetup luksDump exited %d\n%s", code, out)
+		}
+		if !strings.Contains(out, "written-as-1\n") && !strings.Contains(out, "written-as-1 ") {
+			t.Fatalf("cryptsetup did not reach the canonically-spelled token\n%s", out)
+		}
+		if strings.Contains(out, "written-as-01") {
+			t.Fatalf("cryptsetup reached the token written under %q\n%s", "01", out)
+		}
+	})
+
+	// A negative id is the one case where cryptsetup refuses the whole
+	// container. It does not change what this library does -- the header is
+	// still readable here, which is the point of tolerating a damaged token --
+	// but it is the strongest possible evidence that such a key is not a token,
+	// so it is pinned rather than left as a remark.
+	t.Run("a negative id makes the container invalid to cryptsetup", func(t *testing.T) {
+		code, out := dump(t, tokenIDVolume(t, "cs-negative.img", "-1"))
+		if code == 0 {
+			t.Fatalf("cryptsetup accepted a header carrying token id %q\n%s", "-1", out)
+		}
+		if !strings.Contains(out, "not a valid LUKS device") {
+			t.Fatalf("cryptsetup exited %d but not with the expected refusal\n%s", code, out)
+		}
+
+		// And this library still reads it, so an operator can inspect a
+		// container cryptsetup will not open.
+		if _, _, err := ReadHeader(tokenIDVolume(t, "cs-negative-read.img", "-1")); err != nil {
+			t.Fatalf("the header no longer reads: %v", err)
 		}
 	})
 }

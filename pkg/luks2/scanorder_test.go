@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"testing"
 )
 
@@ -204,5 +205,143 @@ func TestAKeyslotAfterTheFirstStillOpensTheVolume(t *testing.T) {
 	if mk, err := getMasterKey(device, []byte("not either of them"), metadata); err == nil {
 		mk.Destroy()
 		t.Fatal("getMasterKey accepted a passphrase matching no keyslot")
+	}
+}
+
+// multiKeyslotVolume writes a container whose keyslot map carries the given
+// ids, cloned from the real slot Format created so each one is a valid keyslot.
+//
+// The ids include two-digit ones because that is the discriminating case: a
+// lexical ordering puts "10" before "2" and passes every single-digit fixture.
+func multiKeyslotVolume(t *testing.T, ids ...string) string {
+	t.Helper()
+
+	device := filepath.Join(t.TempDir(), "volume.img")
+	if err := os.WriteFile(device, make([]byte, 32<<20), 0600); err != nil {
+		t.Fatalf("failed to create the backing file: %v", err)
+	}
+	if err := Format(FormatOptions{
+		Device:        device,
+		Passphrase:    []byte("correct horse battery staple"),
+		KDFType:       KDFTypePBKDF2,
+		HashAlgo:      "sha256",
+		PBKDFIterTime: 1,
+	}); err != nil {
+		t.Fatalf("Format returned error: %v", err)
+	}
+
+	hdr, metadata, err := ReadHeader(device)
+	if err != nil {
+		t.Fatalf("ReadHeader returned error: %v", err)
+	}
+	template := metadata.Keyslots["0"]
+	if template == nil {
+		t.Fatal("the formatted container has no keyslot 0 to clone")
+	}
+	metadata.Keyslots = make(map[string]*Keyslot, len(ids))
+	for _, id := range ids {
+		clone := *template
+		metadata.Keyslots[id] = &clone
+	}
+	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
+		t.Fatalf("failed to write the multi-keyslot fixture: %v", err)
+	}
+	return device
+}
+
+// TestKeyslotInspectionOrderIsDeterministic is the fix for #57.
+//
+// GetVolumeInfo and ListKeyslots both built their result by ranging
+// metadata.Keyslots, so `luks2 info` printed "Active Keyslots: [2 0 1]" on one
+// invocation and "[1 2 0]" on the next with nothing changed. Measured before
+// the fix on an eight-slot container: 7 distinct orders across 25 reads, from
+// each of the two functions.
+//
+// Both are asserted in one test because they are one defect at two sites and a
+// fix applied to only one of them is the outcome worth catching.
+//
+// The repetition is not decoration: a single read passes against the unfixed
+// code whenever map iteration happens to start at slot 0, which is roughly one
+// read in n.
+func TestKeyslotInspectionOrderIsDeterministic(t *testing.T) {
+	// Deliberately handed to the writer in an order that is neither ascending
+	// nor lexical, with two-digit ids present.
+	device := multiKeyslotVolume(t, "3", "10", "0", "7", "2", "1", "11", "4")
+	want := []int{0, 1, 2, 3, 4, 7, 10, 11}
+
+	for i := 0; i < 25; i++ {
+		info, err := GetVolumeInfo(device)
+		if err != nil {
+			t.Fatalf("GetVolumeInfo failed on read %d: %v", i, err)
+		}
+		if !slices.Equal(info.ActiveKeyslots, want) {
+			t.Fatalf("read %d: GetVolumeInfo.ActiveKeyslots = %v, want %v",
+				i, info.ActiveKeyslots, want)
+		}
+
+		slots, err := ListKeyslots(device)
+		if err != nil {
+			t.Fatalf("ListKeyslots failed on read %d: %v", i, err)
+		}
+		got := make([]int, 0, len(slots))
+		for _, slot := range slots {
+			got = append(got, slot.ID)
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("read %d: ListKeyslots returned slots %v, want %v", i, got, want)
+		}
+	}
+}
+
+// TestKeyslotInspectionOrderMatchesUnlockOrder pins the ordering to the ONE
+// the package already has, rather than to ascending order as such.
+//
+// #57 could have been closed with a sort at each site. Reusing
+// keyslotIDsInScanOrder is what keeps the order an operator reads identical to
+// the order unlock tries the slots in; two independent orderings that happen to
+// agree today are two things that can drift.
+//
+// A keyslot id that is not a number is the case that tells them apart: scan
+// order puts it at the tail rather than dropping it, and both listings drop it
+// because their result types are keyed by int. So the assertion is that the
+// listings are the numeric PREFIX of the scan order -- not merely sorted.
+func TestKeyslotInspectionOrderMatchesUnlockOrder(t *testing.T) {
+	device := multiKeyslotVolume(t, "5", "reencrypt-in-progress", "0", "12", "2")
+
+	_, metadata, err := ReadHeader(device)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+
+	var want []int
+	for _, id := range keyslotIDsInScanOrder(metadata.Keyslots) {
+		n, err := strconv.Atoi(id)
+		if err != nil {
+			continue
+		}
+		want = append(want, n)
+	}
+	if len(want) != 4 {
+		t.Fatalf("the fixture yielded %d numeric keyslot ids, want 4: %v", len(want), want)
+	}
+
+	info, err := GetVolumeInfo(device)
+	if err != nil {
+		t.Fatalf("GetVolumeInfo failed: %v", err)
+	}
+	if !slices.Equal(info.ActiveKeyslots, want) {
+		t.Fatalf("GetVolumeInfo.ActiveKeyslots = %v, want the scan order %v", info.ActiveKeyslots, want)
+	}
+
+	slots, err := ListKeyslots(device)
+	if err != nil {
+		t.Fatalf("ListKeyslots failed: %v", err)
+	}
+	got := make([]int, 0, len(slots))
+	for _, slot := range slots {
+		got = append(got, slot.ID)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("ListKeyslots returned slots %v, want the scan order %v", got, want)
 	}
 }

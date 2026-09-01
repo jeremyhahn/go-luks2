@@ -6,6 +6,7 @@ package luks2
 
 import (
 	"encoding/json"
+	"fmt"
 )
 
 // LUKS2 on-disk format constants
@@ -91,7 +92,56 @@ type LUKS2Metadata struct {
 	Segments map[string]*Segment `json:"segments"`
 	Digests  map[string]*Digest  `json:"digests"`
 	Config   *Config             `json:"config"`
+
+	// DroppedNullEntries names the keyslot and token entries this read
+	// REMOVED because the header spelled them as JSON null. It is nil for
+	// every intact header.
+	//
+	// It is diagnostic state on a type that otherwise models on-disk
+	// structure, and that is a deliberate trade rather than an oversight
+	// (#27). The alternatives were worse: a logger in a Layer-0 primitive
+	// imposes a logging decision on every embedding application, a variadic
+	// option on ReadHeader permanently widens the package's simplest entry
+	// point to serve a rare diagnostic, and a second sibling read invites
+	// the two readers to drift -- which is the failure mode this package has
+	// hit repeatedly. A json:"-" field costs nothing at any call site and
+	// adds no second way to read a header.
+	//
+	// It describes THIS read and nothing else. It is never marshaled, so it
+	// cannot reach the disk; it is not maintained as a caller mutates the
+	// metadata; and it says nothing about what a subsequent write will
+	// contain. What it is for is the one thing a caller could not previously
+	// learn: that a ReadHeader -> mutate -> WriteHeader cycle is about to
+	// drop these entries from the on-disk header, which is a repair an
+	// operator should be able to find out about afterwards.
+	DroppedNullEntries []DroppedEntry `json:"-"`
 }
+
+// DroppedEntry identifies one metadata entry removed by ReadHeader because the
+// header spelled it as JSON null.
+//
+// Kind is what the id names -- "keyslot" or "token" -- and it is carried
+// rather than left to the caller to infer, because the two id spaces are
+// independent: keyslot 0 and token 0 are different things, and a bare list of
+// ids cannot say which was lost.
+type DroppedEntry struct {
+	Kind string
+	ID   string
+}
+
+// String renders an entry as `keyslot "3"`, so a caller that only wants to put
+// it in front of an operator does not have to decide on a spelling.
+func (d DroppedEntry) String() string {
+	return fmt.Sprintf("%s %q", d.Kind, d.ID)
+}
+
+// The kinds DroppedEntry carries. They are constants rather than literals at
+// the two sites that produce them so a consumer switching on Kind cannot be
+// broken by a typo on either side.
+const (
+	DroppedKindKeyslot = "keyslot"
+	DroppedKindToken   = "token"
+)
 
 // ensureRequiredObjects initializes the mandatory LUKS2 JSON objects that are
 // nil, so they marshal as `{}` rather than `null`.
@@ -197,8 +247,37 @@ type Segment struct {
 
 // Digest represents a key digest for verification
 type Digest struct {
-	Type       string   `json:"type"`     // "pbkdf2"
-	Keyslots   []string `json:"keyslots"` // Which keyslots this digest applies to
+	Type string `json:"type"` // "pbkdf2"
+
+	// Keyslots names the keyslots this digest authenticates. It is
+	// LOAD-BEARING, in this library and in cryptsetup, and it has two readers
+	// rather than one.
+	//
+	// The internal reader is verifyMasterKey, which consults it BEFORE any
+	// derivation and skips every digest that does not name the keyslot being
+	// opened. Trying every digest against a key recovered from ONE keyslot
+	// accepts that key on the strength of an attestation made about a
+	// different keyslot -- and a container legitimately holds more than one
+	// volume key, which is the ordinary state mid-reencryption. A keyslot no
+	// digest names cannot be authenticated at all and is reported as
+	// ErrInvalidHeader: a header defect, not a credential verdict. See
+	// verifyMasterKey in unlock.go for the full reasoning and
+	// TestADigestCannotAuthenticateAKeyslotItDoesNotName for the pin.
+	//
+	// The external reader is cryptsetup, which uses the same coverage to
+	// decide which digest validates which keyslot. That reader is why the
+	// field could never have been deleted as unused even while nothing here
+	// read it -- #32 exists because "never read internally" is not "unused",
+	// and it recorded the external reader by name so nobody reached for the
+	// delete key. The internal reader has since landed, so the two now agree:
+	// a header's coverage means the same thing to this library and to
+	// cryptsetup, rather than being enforced by one and ignored by the other.
+	//
+	// AddKey appends to it, KillKeyslot and the null-normalization sweep strip
+	// from it. Those are maintenance, not consumption; the two readers above
+	// are what the maintenance is for.
+	Keyslots []string `json:"keyslots"`
+
 	Segments   []string `json:"segments"` // Which segments use this key
 	Hash       string   `json:"hash"`     // Hash algorithm
 	Iterations int      `json:"iterations"`

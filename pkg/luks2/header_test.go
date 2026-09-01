@@ -11,7 +11,12 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"reflect"
+	"slices"
+	"strings"
 	"testing"
 	"unsafe"
 
@@ -363,7 +368,7 @@ func TestValidateHeaderChecksum(t *testing.T) {
 			hdr, data := tt.setupHeader()
 			reader := &mockReaderAt{data: data}
 
-			err := validateHeaderChecksum(hdr, reader, int64(hdr.HeaderOffset)) // #nosec G115 -- test fixture offsets are 0 or 0x4000
+			err := validateHeaderChecksum(hdr, reader, int64(hdr.HeaderOffset), int(hdr.HeaderSize)) // #nosec G115 -- test fixture offsets are 0 or 0x4000 and sizes are 16384
 			if err != nil {
 				t.Errorf("validateHeaderChecksum() error = %v, want nil", err)
 			}
@@ -476,7 +481,7 @@ func TestValidateHeaderChecksumInvalid(t *testing.T) {
 			hdr, data := tt.setupHeader()
 			reader := &mockReaderAt{data: data}
 
-			err := validateHeaderChecksum(hdr, reader, int64(hdr.HeaderOffset)) // #nosec G115 -- test fixture offsets are 0 or 0x4000
+			err := validateHeaderChecksum(hdr, reader, int64(hdr.HeaderOffset), int(hdr.HeaderSize)) // #nosec G115 -- test fixture offsets are 0 or 0x4000 and sizes are 16384
 			if (err != nil) != tt.wantErr {
 				t.Errorf("validateHeaderChecksum() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -587,7 +592,7 @@ func TestReadJSONMetadata(t *testing.T) {
 			}
 
 			reader := &mockReaderAt{data: buf.Bytes()}
-			metadata, err := readJSONMetadata(reader, tt.hdr, int64(tt.hdr.HeaderOffset)) // #nosec G115 -- test fixture offsets are 0 or 0x4000
+			metadata, err := readJSONMetadata(reader, tt.hdr, int64(tt.hdr.HeaderOffset), int(tt.hdr.HeaderSize)) // #nosec G115 -- test fixture offsets are 0 or 0x4000 and sizes are 16384
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("readJSONMetadata() error = %v, wantErr %v", err, tt.wantErr)
@@ -700,7 +705,7 @@ func TestReadJSONMetadataRoundTrip(t *testing.T) {
 
 	// Read back
 	reader := &mockReaderAt{data: buf.Bytes()}
-	recovered, err := readJSONMetadata(reader, hdr, int64(hdr.HeaderOffset)) // #nosec G115 -- test fixture offset is 0
+	recovered, err := readJSONMetadata(reader, hdr, int64(hdr.HeaderOffset), int(hdr.HeaderSize)) // #nosec G115 -- test fixture offset is 0 and size is 16384
 	if err != nil {
 		t.Fatalf("readJSONMetadata() error = %v", err)
 	}
@@ -780,5 +785,340 @@ func TestCalculateHeaderChecksumEdgeCases(t *testing.T) {
 				t.Errorf("calculateHeaderChecksum() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// TestValidateHeaderChecksumRefusesABufferTooShortForTheChecksumField is the
+// regression test for #62's actual deliverable: this function's own length
+// check is now REACHABLE and load-bearing.
+//
+// Before the size bound was hoisted into readHeaderCopy, this function derived
+// the size itself five lines above the checksum-field write, so a guard on the
+// buffer length could not fire -- instrumented with panic("GUARD REACHED") it
+// was reached zero times across the whole suite, and a test that believed it was
+// exercising the guard was in fact being satisfied by headerAreaSize's rejection
+// wrapping the same sentinel.
+//
+// With the size arriving as a parameter, a short one reaches this function, and
+// the assertion is that it comes back as an ERROR rather than as a panic: the
+// checksum-field indices are fixed by the on-disk layout, so without the guard
+// the slice expression runs off the end of the buffer and the process dies.
+//
+// The error is attributed to errChecksumBufferTooShort SPECIFICALLY, not to
+// ErrInvalidHeader, because that is the whole lesson of #62 -- errors.Is on a
+// shared sentinel answers "was it this class", never "was it this check".
+func TestValidateHeaderChecksumRefusesABufferTooShortForTheChecksumField(t *testing.T) {
+	// A reader long enough to satisfy any ReadAt this test makes, so nothing
+	// but the length guard can decide the outcome.
+	reader := &mockReaderAt{data: make([]byte, LUKS2HeaderSize*2)}
+	hdr := &LUKS2BinaryHeader{Version: LUKS2Version}
+	need := checksumFieldOffset + len(hdr.Checksum)
+
+	for _, tc := range []struct {
+		name string
+		size int
+	}{
+		{"negative, which make() would panic on", -1},
+		{"zero", 0},
+		{"one", 1},
+		{"far below the checksum field", 100},
+		{"one below the checksum field's end", need - 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("validateHeaderChecksum panicked on headerSize=%d instead of returning an error: %v", tc.size, r)
+				}
+			}()
+
+			err := validateHeaderChecksum(hdr, reader, 0, tc.size)
+			if err == nil {
+				t.Fatalf("validateHeaderChecksum accepted headerSize=%d", tc.size)
+			}
+			if !errors.Is(err, errChecksumBufferTooShort) {
+				t.Errorf("error = %v, want it to be errChecksumBufferTooShort; a different guard decided this", err)
+			}
+			if !errors.Is(err, ErrInvalidHeader) {
+				t.Errorf("error = %v, want it to still classify as ErrInvalidHeader for callers", err)
+			}
+			if !strings.Contains(err.Error(), fmt.Sprint(tc.size)) {
+				t.Errorf("error = %q, want it to name the rejected size %d", err.Error(), tc.size)
+			}
+		})
+	}
+
+	// The boundary in the other direction, so the comparison cannot be
+	// off by one: a buffer exactly large enough for the checksum field gets
+	// PAST this guard. It then fails on the checksum itself, which is a
+	// different error, and that difference is the assertion.
+	t.Run("exactly large enough is not refused by this guard", func(t *testing.T) {
+		err := validateHeaderChecksum(hdr, reader, 0, need)
+		if errors.Is(err, errChecksumBufferTooShort) {
+			t.Fatalf("headerSize=%d was refused as too short, but it is exactly the %d bytes the checksum field needs", need, need)
+		}
+	})
+}
+
+// TestReadJSONMetadataRefusesAHeaderSizeWithNoRoomForJSON is the same property
+// for the other function the bound was hoisted out of.
+//
+// jsonSize is headerSize - LUKS2HeaderSize. A size at or below LUKS2HeaderSize
+// makes that zero or negative, and make() panics on a negative length, so this
+// check is what turns a caller's mistake into an error the caller can see.
+func TestReadJSONMetadataRefusesAHeaderSizeWithNoRoomForJSON(t *testing.T) {
+	reader := &mockReaderAt{data: make([]byte, LUKS2HeaderSize*2)}
+	hdr := &LUKS2BinaryHeader{Version: LUKS2Version}
+
+	for _, size := range []int{-1, 0, 1, LUKS2HeaderSize - 1, LUKS2HeaderSize} {
+		t.Run(fmt.Sprintf("size %d", size), func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("readJSONMetadata panicked on headerSize=%d instead of returning an error: %v", size, r)
+				}
+			}()
+
+			_, err := readJSONMetadata(reader, hdr, 0, size)
+			if err == nil {
+				t.Fatalf("readJSONMetadata accepted headerSize=%d", size)
+			}
+			if !errors.Is(err, ErrInvalidHeader) {
+				t.Errorf("error = %v, want it to wrap ErrInvalidHeader", err)
+			}
+		})
+	}
+
+	// One byte more than the binary header leaves one byte of JSON area, which
+	// is not enough to parse but IS enough to get past this guard. The failure
+	// must move to the JSON parse.
+	t.Run("one byte of JSON area is not refused by this guard", func(t *testing.T) {
+		_, err := readJSONMetadata(reader, hdr, 0, LUKS2HeaderSize+1)
+		if err == nil {
+			t.Fatal("readJSONMetadata accepted a one-byte JSON area")
+		}
+		if !strings.Contains(err.Error(), "parse JSON") {
+			t.Fatalf("error = %v, want the failure to have moved to the JSON parse", err)
+		}
+	})
+}
+
+// TestReadHeaderBoundsTheDeclaredSizeBeforeAnythingElseUsesIt pins WHERE the
+// bound now lives, which is the part of #62 a size-rejection test cannot see.
+//
+// A header carrying BOTH an out-of-range HeaderSize and an illegal HeaderOffset
+// has two things wrong with it, and which one is reported says which check ran
+// first. Before the hoist the offset check ran first and the size was not
+// examined until validateHeaderChecksum re-derived it; after the hoist the size
+// is bounded immediately after the magic and version, before anything else
+// consults the header at all.
+//
+// The assertion is on the size, so moving the bound back down turns this test
+// red rather than leaving it satisfied by the other guard.
+func TestReadHeaderBoundsTheDeclaredSizeBeforeAnythingElseUsesIt(t *testing.T) {
+	const craftedSize = uint64(1) << 62
+	const craftedOffset = uint64(0x1234) // not 0, not 16 KiB-aligned
+
+	device, _ := headerSizeVolume(t)
+	setHeaderSize(t, device, craftedSize)
+	setHeaderOffset(t, device, craftedOffset)
+
+	_, _, err := ReadHeader(device)
+	if err == nil {
+		t.Fatal("ReadHeader accepted a header with both an out-of-range size and an illegal offset")
+	}
+	if !strings.Contains(err.Error(), fmt.Sprint(craftedSize)) {
+		t.Fatalf("error = %q, want the SIZE (%d) to be what was reported: the bound must run before the offset check",
+			err.Error(), craftedSize)
+	}
+	if strings.Contains(err.Error(), fmt.Sprint(craftedOffset)) {
+		t.Fatalf("error = %q, want the size bound to have refused this header before the offset was consulted", err.Error())
+	}
+}
+
+// nullEntryVolume writes a container carrying null keyslot AND null token
+// entries alongside healthy ones, through the exported write path.
+//
+// Both kinds in one fixture on purpose: the report has to say WHICH id space
+// each lost entry came from, and a fixture with only one kind cannot tell a
+// correct report from one that labels everything "keyslot".
+func nullEntryVolume(t *testing.T, name string) string {
+	t.Helper()
+
+	path := newImage(t, name)
+	formatWithLibrary(t, path)
+
+	hdr, metadata, err := ReadHeader(path)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+
+	healthy := cloneKeyslot(metadata.Keyslots["0"])
+	metadata.Keyslots = map[string]*Keyslot{
+		"0":  nil,
+		"1":  healthy,
+		"10": nil,
+		"2":  nil,
+	}
+	metadata.Tokens = map[string]*Token{
+		"0": {Type: "healthy-token", Keyslots: []string{"1"}},
+		"3": nil,
+	}
+	for _, digest := range metadata.Digests {
+		digest.Keyslots = []string{"0", "1", "2", "10"}
+	}
+
+	if err := writeHeaderInternal(path, hdr, metadata); err != nil {
+		t.Fatalf("failed to write the null-entry fixture: %v", err)
+	}
+	return path
+}
+
+// TestReadHeaderReportsTheNullEntriesItDropped is the fix for #27.
+//
+// ReadHeader removes null keyslot and token entries, which is what makes the
+// nil unrepresentable downstream and is deliberate. What was wrong is that no
+// caller could learn it happened, so a ReadHeader -> mutate -> WriteHeader
+// cycle silently deleted them from the device.
+//
+// The assertion is on the exact report, ids and kinds and ORDER, not merely
+// that something non-empty came back: a report that names the wrong id space,
+// or that changes between runs, is the same problem in a new place.
+func TestReadHeaderReportsTheNullEntriesItDropped(t *testing.T) {
+	path := nullEntryVolume(t, "null-entries.img")
+
+	_, metadata, err := ReadHeader(path)
+	if err != nil {
+		t.Fatalf("a container with null entries no longer reads: %v", err)
+	}
+
+	want := []DroppedEntry{
+		{Kind: DroppedKindKeyslot, ID: "0"},
+		{Kind: DroppedKindKeyslot, ID: "2"},
+		{Kind: DroppedKindKeyslot, ID: "10"},
+		{Kind: DroppedKindToken, ID: "3"},
+	}
+	if !slices.Equal(metadata.DroppedNullEntries, want) {
+		t.Fatalf("DroppedNullEntries = %v, want %v", metadata.DroppedNullEntries, want)
+	}
+
+	// The report describes entries that are actually gone, and only those.
+	if len(metadata.Keyslots) != 1 || metadata.Keyslots["1"] == nil {
+		t.Fatalf("keyslots = %v, want only the healthy slot 1", metadata.Keyslots)
+	}
+	if len(metadata.Tokens) != 1 || metadata.Tokens["0"] == nil {
+		t.Fatalf("tokens = %v, want only the healthy token 0", metadata.Tokens)
+	}
+
+	// Ordering is a property, not an accident of this run. Go randomizes map
+	// iteration, so a report built by ranging two maps without sorting differs
+	// between reads of an unchanged device -- and a diagnostic an operator
+	// compares against last time's is exactly where that is unacceptable.
+	for i := 0; i < 20; i++ {
+		_, again, err := ReadHeader(path)
+		if err != nil {
+			t.Fatalf("ReadHeader failed on repeat %d: %v", i, err)
+		}
+		if !slices.Equal(again.DroppedNullEntries, want) {
+			t.Fatalf("read %d reported %v, want the same %v every time",
+				i, again.DroppedNullEntries, want)
+		}
+	}
+}
+
+// TestReadHeaderReportsNothingDroppedForAnIntactHeader is the control that
+// keeps the report from being noise. A diagnostic that fires on healthy
+// containers is one an operator learns to ignore, and then it protects nothing.
+func TestReadHeaderReportsNothingDroppedForAnIntactHeader(t *testing.T) {
+	path := newImage(t, "intact.img")
+	formatWithLibrary(t, path)
+
+	_, metadata, err := ReadHeader(path)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+	if metadata.DroppedNullEntries != nil {
+		t.Fatalf("DroppedNullEntries = %v for an intact header, want nil", metadata.DroppedNullEntries)
+	}
+}
+
+// TestDroppedNullEntriesNeverReachesTheDisk pins that the diagnostic field
+// cannot become a wire field.
+//
+// It asserts on the TYPE's reflected json tag set rather than on the bytes of
+// one marshaled instance. Absence asserted through the serializer is blind to
+// a field the serializer declines to emit -- an empty slice with omitempty, or
+// a nil map -- so a keySet check on emitted JSON would pass with the tag
+// removed and the field merely unset. The field set also fails on an ADDED
+// field, so no new member of this struct can reach a LUKS2 header without this
+// test acknowledging it, which matters because cryptsetup validates the JSON
+// object and rejects members it does not expect.
+func TestDroppedNullEntriesNeverReachesTheDisk(t *testing.T) {
+	var got []string
+	typ := reflect.TypeOf(LUKS2Metadata{})
+	for i := 0; i < typ.NumField(); i++ {
+		tag := typ.Field(i).Tag.Get("json")
+		name, _, _ := strings.Cut(tag, ",")
+		if name == "-" {
+			continue
+		}
+		if name == "" {
+			t.Fatalf("field %s carries no json tag, so it would be marshaled under its Go name",
+				typ.Field(i).Name)
+		}
+		got = append(got, name)
+	}
+
+	want := []string{"keyslots", "tokens", "segments", "digests", "config"}
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("LUKS2Metadata marshals %v, want exactly %v -- a LUKS2 JSON object carries these five members and nothing else",
+			got, want)
+	}
+}
+
+// TestDroppedNullEntriesDoesNotSurviveAWriteBack is the behavioral half of the
+// above: the report describes ONE read, and a caller must not be able to
+// mistake a stale report for a fresh one after the repair has been written.
+func TestDroppedNullEntriesDoesNotSurviveAWriteBack(t *testing.T) {
+	path := nullEntryVolume(t, "null-entries-writeback.img")
+
+	hdr, metadata, err := ReadHeader(path)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+	if len(metadata.DroppedNullEntries) == 0 {
+		t.Fatal("the fixture reported no dropped entries, so this test proves nothing")
+	}
+
+	// Writing the metadata back is the repair the report warns about.
+	if err := writeHeaderInternal(path, hdr, metadata); err != nil {
+		t.Fatalf("failed to write the repaired header: %v", err)
+	}
+
+	_, reread, err := ReadHeader(path)
+	if err != nil {
+		t.Fatalf("ReadHeader failed after the write-back: %v", err)
+	}
+	if reread.DroppedNullEntries != nil {
+		t.Fatalf("DroppedNullEntries = %v after the nulls were written out, want nil",
+			reread.DroppedNullEntries)
+	}
+}
+
+// TestDroppedEntryStringNamesBothTheKindAndTheID keeps the rendering an
+// application prints from losing the id space. "3" alone does not say whether
+// keyslot 3 or token 3 was lost, and they are different things.
+func TestDroppedEntryStringNamesBothTheKindAndTheID(t *testing.T) {
+	for _, tc := range []struct {
+		entry DroppedEntry
+		want  string
+	}{
+		{DroppedEntry{Kind: DroppedKindKeyslot, ID: "3"}, `keyslot "3"`},
+		{DroppedEntry{Kind: DroppedKindToken, ID: "3"}, `token "3"`},
+		{DroppedEntry{Kind: DroppedKindKeyslot, ID: "01"}, `keyslot "01"`},
+	} {
+		if got := tc.entry.String(); got != tc.want {
+			t.Errorf("DroppedEntry%v.String() = %q, want %q", tc.entry, got, tc.want)
+		}
 	}
 }

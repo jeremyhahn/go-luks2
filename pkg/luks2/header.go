@@ -6,6 +6,7 @@ package luks2
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -13,6 +14,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
+	"strconv"
 
 	"github.com/google/uuid"
 )
@@ -34,6 +37,14 @@ const (
 // ReadHeader reads and validates the PRIMARY LUKS2 header from a device.
 // For the second copy -- which carries a different magic -- see
 // ReadSecondaryHeader.
+//
+// A keyslot or token the header spells as JSON null is REMOVED from the
+// returned metadata rather than handed back as a nil map entry -- see
+// normalizeMetadataNulls for why, and for why segments, digests and config are
+// refused instead. The removed entries are reported on
+// LUKS2Metadata.DroppedNullEntries, so a caller can tell that a
+// ReadHeader -> mutate -> WriteHeader cycle is about to drop them from the
+// header on disk.
 func ReadHeader(device string) (*LUKS2BinaryHeader, *LUKS2Metadata, error) {
 	return readHeaderCopy(device, LUKS2PrimaryHeaderOffset)
 }
@@ -194,6 +205,28 @@ func readHeaderCopy(device string, offset int64) (*LUKS2BinaryHeader, *LUKS2Meta
 		return nil, nil, fmt.Errorf("unsupported LUKS version: %d", hdr.Version)
 	}
 
+	// BOUND THE DECLARED HEADER AREA SIZE HERE, ONCE, before anything allocates
+	// against it.
+	//
+	// hdr.HeaderSize is eight bytes read straight off an attacker-controlled
+	// device with only the magic and the version in front of them, and it then
+	// sizes two allocations and two reads. It used to be bounded independently
+	// inside validateHeaderChecksum and inside readJSONMetadata, which is twice
+	// in two functions that must not disagree, and it left each of those
+	// functions unable to have a local check of its own: any guard they added
+	// was shadowed by the bound five lines above it and could not fire (#62 --
+	// a guard instrumented with panic("GUARD REACHED") was reached zero times
+	// across the whole suite).
+	//
+	// Enforced at the earliest point it can be, and threaded down as a
+	// parameter, the size arrives at those functions already validated, so the
+	// checks they DO make are about their own arguments and are reachable when
+	// they are called with something short.
+	area, err := headerAreaSize(&hdr)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	// The hdr_offset field must agree with where this copy was actually found.
 	//
 	// The caller already knows the offset; the field is attacker-controlled.
@@ -218,18 +251,18 @@ func readHeaderCopy(device string, offset int64) (*LUKS2BinaryHeader, *LUKS2Meta
 	// ReadSecondaryHeader probe candidate offsets safely: a copy that merely
 	// happens to carry the SKUL magic at some offset is still rejected unless
 	// the container's own geometry agrees that the copy belongs there.
-	if offset != LUKS2PrimaryHeaderOffset && hdr.HeaderSize != uint64(offset) { // #nosec G115 -- offset is a positive legal area size
+	if offset != LUKS2PrimaryHeaderOffset && int64(area) != offset {
 		return nil, nil, fmt.Errorf("%w: secondary header at offset %d records header size %d, want %d",
-			ErrInvalidHeader, offset, hdr.HeaderSize, offset)
+			ErrInvalidHeader, offset, area, offset)
 	}
 
 	// Validate checksum
-	if err := validateHeaderChecksum(&hdr, f, offset); err != nil {
+	if err := validateHeaderChecksum(&hdr, f, offset, area); err != nil {
 		return nil, nil, err
 	}
 
 	// Read JSON metadata
-	metadata, err := readJSONMetadata(f, &hdr, offset)
+	metadata, err := readJSONMetadata(f, &hdr, offset, area)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -613,36 +646,61 @@ func headerAreaOffset(hdr *LUKS2BinaryHeader) (int64, error) {
 	return offset, nil
 }
 
+// checksumFieldOffset is where the 64-byte checksum field sits inside the
+// 4096-byte binary header. It is a property of the on-disk layout, so it is
+// stated once here rather than spelled as a literal at each site that has to
+// blank the field before hashing over it.
+const checksumFieldOffset = 0x1C0
+
+// errChecksumBufferTooShort reports a header buffer too short to contain the
+// checksum field.
+//
+// It is a DISTINCT value rather than another bare ErrInvalidHeader because a
+// declared area size outside the legal range and a buffer too short to hold the
+// checksum field are different faults, and #62 recorded what happens when two
+// guards on one path share a sentinel: errors.Is answers "was it this class",
+// never "was it this check", so a test asserting on the shared sentinel is
+// satisfied by any guard upstream of the one under test. That is exactly how
+// the previous attempt at this guard shipped a test that passed on the wrong
+// error, from the wrong guard, and survived a mutation deleting the guard
+// entirely.
+//
+// It is unexported: no caller can reach this condition through ReadHeader,
+// which bounds the size before calling, so exporting it would add public API
+// for a state only an internal caller can produce. It wraps ErrInvalidHeader,
+// so callers classify it exactly as before while a test can attribute it.
+var errChecksumBufferTooShort = fmt.Errorf("%w: header buffer is too short to hold the checksum field", ErrInvalidHeader)
+
 // validateHeaderChecksum validates the checksum of the header copy at
 // headerOffset. The offset is a parameter rather than something re-derived from
 // hdr.HeaderOffset: the caller knows where it read the copy from, and the field
 // is attacker-controlled. readHeaderCopy has already required the two to agree.
-func validateHeaderChecksum(hdr *LUKS2BinaryHeader, r io.ReaderAt, headerOffset int64) error {
-	// Read entire header area
-	headerSize, err := headerAreaSize(hdr)
-	if err != nil {
-		return err
+//
+// headerSize is likewise a parameter rather than re-derived from
+// hdr.HeaderSize: readHeaderCopy bounds it once, at the earliest point it can,
+// and threads it down (#62). The consequence for this function is that its own
+// length check below is LOAD-BEARING -- there is no longer a bound five lines
+// above it that makes the check unreachable -- so a caller handing it a size
+// too small for the checksum field gets an error rather than a panic.
+func validateHeaderChecksum(hdr *LUKS2BinaryHeader, r io.ReaderAt, headerOffset int64, headerSize int) error {
+	// The buffer must be able to hold the checksum field this function is about
+	// to blank, because the indices it writes are fixed by the on-disk layout
+	// rather than derived from the buffer. Checked BEFORE the allocation, which
+	// also refuses a negative size that make() would panic on.
+	if headerSize < checksumFieldOffset+len(hdr.Checksum) {
+		return fmt.Errorf("%w: %d bytes, need at least %d",
+			errChecksumBufferTooShort, headerSize, checksumFieldOffset+len(hdr.Checksum))
 	}
+
 	headerData := make([]byte, headerSize)
 	if _, err := r.ReadAt(headerData, headerOffset); err != nil {
 		return fmt.Errorf("failed to read header for checksum: %w", err)
 	}
 
-	// Zero out checksum field.
-	//
-	// This writes fixed indices 0x1C0..0x1FF into headerData without checking
-	// its length. What makes that safe is the headerAreaSize call above, which
-	// rejects any HeaderSize at or below LUKS2HeaderSize, so headerData is
-	// always at least 4097 bytes. The enforcer is named here rather than left
-	// implicit because it is not visible at this line, and a reader who does not
-	// know where the bound lives has no way to tell a safe fixed index from a
-	// lucky one. Anything that reaches this loop by another route must bound
-	// len(headerData) first -- see #62.
-	checksumOffset := 0x1C0 // Offset of Checksum field
-
-	for i := 0; i < 64; i++ {
-		headerData[checksumOffset+i] = 0
-	}
+	// Zero out the checksum field, which is not part of what it covers. The
+	// slice expression is bounded by the check above rather than by anything a
+	// caller happens to have done first.
+	clear(headerData[checksumFieldOffset : checksumFieldOffset+len(hdr.Checksum)])
 
 	// Calculate checksum
 	h := sha256.New()
@@ -689,15 +747,17 @@ func calculateHeaderChecksum(hdr *LUKS2BinaryHeader, jsonData []byte, jsonSize i
 }
 
 // readJSONMetadata reads the JSON metadata that follows the header copy at
-// headerOffset. As with validateHeaderChecksum, the offset is passed in rather
-// than re-derived from the attacker-controlled hdr.HeaderOffset field.
-func readJSONMetadata(r io.ReaderAt, hdr *LUKS2BinaryHeader, headerOffset int64) (*LUKS2Metadata, error) {
-	// Bounded conversion of header size
-	headerSizeInt, err := headerAreaSize(hdr)
-	if err != nil {
-		return nil, err
+// headerOffset. As with validateHeaderChecksum, the offset and the header area
+// size are passed in rather than re-derived from the attacker-controlled
+// hdr.HeaderOffset and hdr.HeaderSize fields.
+func readJSONMetadata(r io.ReaderAt, hdr *LUKS2BinaryHeader, headerOffset int64, headerSize int) (*LUKS2Metadata, error) {
+	// headerSize arrives bounded by readHeaderCopy (#62). This function makes
+	// no bound of its own, so there is exactly one place the range is decided.
+	if headerSize <= LUKS2HeaderSize {
+		return nil, fmt.Errorf("%w: header size %d leaves no room for JSON metadata",
+			ErrInvalidHeader, headerSize)
 	}
-	jsonSize := headerSizeInt - LUKS2HeaderSize
+	jsonSize := headerSize - LUKS2HeaderSize
 	jsonData := make([]byte, jsonSize)
 
 	offset := headerOffset + LUKS2HeaderSize
@@ -801,16 +861,24 @@ func readJSONMetadata(r io.ReaderAt, hdr *LUKS2BinaryHeader, headerOffset int64)
 //     auxiliary unlock paths (TPM, FIDO2), so a malformed one must not stop a
 //     volume opening by passphrase.
 //
-// # It is silent, deliberately
+// # It is reported, and it does not choose a logging destination
 //
-// A caller cannot learn that entries were dropped, and that is a decided
-// question rather than an oversight: issue #27 records the analysis. Narrating a
-// repair needs a logger, and a Layer-0 primitive taking a logging dependency --
-// or writing to log/slog's process-global default -- imposes a logging decision
-// on every embedding application. Widening ReadHeader's signature is an API
-// break for every caller. #27 exists so that the next person does not re-derive
-// this and reach for the global logger; this comment is that person being
-// stopped.
+// Every removed entry is recorded on LUKS2Metadata.DroppedNullEntries, so a
+// caller can learn a header was repaired under it. It used to be silent, and
+// #27 records why the obvious fixes were refused: a logger in a Layer-0
+// primitive -- or a write to log/slog's process-global default -- imposes a
+// logging decision on every embedding application, and widening ReadHeader's
+// signature is an API break for every caller. A field costs nothing at any
+// call site, adds no second way to read a header, and leaves the application
+// to decide whether an operator sees it. cmd/luks2 is that application here:
+// `luks2 info` prints a warning to stderr, which is what makes this a
+// capability rather than an offer nobody takes up.
+//
+// STILL SILENT ON PURPOSE is the write side: nothing here refuses the
+// subsequent WriteHeader that makes the removal permanent. The removal is the
+// repair -- a volume carrying a null keyslot cannot be modified at all, since
+// the slot is undeletable and blocks every future AddKey -- so the caller is
+// told, not stopped.
 //
 // # What it does NOT fix
 //
@@ -856,13 +924,24 @@ func normalizeMetadataNulls(metadata *LUKS2Metadata) error {
 		if keyslot == nil {
 			delete(metadata.Keyslots, id)
 			dropped = append(dropped, id)
+			metadata.DroppedNullEntries = append(metadata.DroppedNullEntries,
+				DroppedEntry{Kind: DroppedKindKeyslot, ID: id})
 		}
 	}
 	for id, token := range metadata.Tokens {
 		if token == nil {
 			delete(metadata.Tokens, id)
+			metadata.DroppedNullEntries = append(metadata.DroppedNullEntries,
+				DroppedEntry{Kind: DroppedKindToken, ID: id})
 		}
 	}
+
+	// The report is ORDERED. It is built by ranging two maps, so leaving it
+	// as-is would hand a caller a list that changes between runs for an
+	// unchanged device -- the same defect the keyslot listing has (#57), newly
+	// manufactured in a diagnostic whose whole purpose is to be compared
+	// against what an operator saw last time.
+	sortDroppedEntries(metadata.DroppedNullEntries)
 
 	// Phase two. A dropped keyslot must stop being referenced by digests and
 	// tokens, or the header this read produces is internally inconsistent: a
@@ -872,6 +951,36 @@ func normalizeMetadataNulls(metadata *LUKS2Metadata) error {
 	}
 
 	return nil
+}
+
+// sortDroppedEntries puts the report in a stable, human order: keyslots before
+// tokens, and within a kind ascending by numeric id, with ids that do not parse
+// as a number after those in lexical order.
+//
+// Ids are compared numerically rather than lexically because these are slot
+// numbers, and "10" sorting before "2" in a list an operator is reading against
+// a luksDump is a small, avoidable confusion. Ties on the numeric value break
+// on the raw spelling, so two spellings of one number ("1" and "01") are still
+// ordered rather than left to the sort's instability.
+func sortDroppedEntries(entries []DroppedEntry) {
+	slices.SortFunc(entries, func(a, b DroppedEntry) int {
+		if c := cmp.Compare(a.Kind, b.Kind); c != 0 {
+			return c
+		}
+		na, errA := strconv.Atoi(a.ID)
+		nb, errB := strconv.Atoi(b.ID)
+		switch {
+		case errA == nil && errB == nil:
+			if c := cmp.Compare(na, nb); c != 0 {
+				return c
+			}
+		case errA == nil:
+			return -1
+		case errB == nil:
+			return 1
+		}
+		return cmp.Compare(a.ID, b.ID)
+	})
 }
 
 // forgetKeyslotID removes every reference to a keyslot id from the digests and
@@ -925,8 +1034,19 @@ func GetVolumeInfo(device string) (*VolumeInfo, error) {
 		}
 	}
 
-	// Find active keyslots
-	for id := range metadata.Keyslots {
+	// Find active keyslots, in the order unlock attempts them rather than in Go
+	// map order.
+	//
+	// Ranging the map put this list in a different order on every call, so
+	// `luks2 info` printed "Active Keyslots: [2 0 1]" and then "[1 2 0]" for a
+	// device nothing had touched. That defeats diff between two runs, makes the
+	// output useless as a fixture, and invites an operator to believe something
+	// changed when nothing did (#57).
+	//
+	// keyslotIDsInScanOrder is reused rather than sorted here, so the list an
+	// operator reads is in the same order unlock tries the slots in -- one
+	// ordering for the package, not two that can drift.
+	for _, id := range keyslotIDsInScanOrder(metadata.Keyslots) {
 		// Parse keyslot ID
 		var slotNum int
 		if _, err := fmt.Sscanf(id, "%d", &slotNum); err == nil {

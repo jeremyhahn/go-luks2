@@ -1146,3 +1146,71 @@ func (m *mismatchingTerminal) ReadPassword(fd int) ([]byte, error) {
 	m.handed = append(m.handed, out)
 	return out, nil
 }
+
+// TestCLI_Info_WarnsAboutDroppedNullEntries is the application half of #27.
+//
+// The library reports the entries it removed rather than logging them, because
+// a Layer-0 primitive taking a logging dependency imposes a logging decision on
+// every embedding application. That is only a capability if something exercises
+// it; an offer nobody takes up is indistinguishable from the silence it
+// replaced. `luks2 info` is that something.
+func TestCLI_Info_WarnsAboutDroppedNullEntries(t *testing.T) {
+	cli, stdout, stderr := newTestCLI([]string{"luks2", "info", "/dev/sda1"})
+	cli.Luks = &MockLuksOperations{
+		GetVolumeInfoFunc: func(device string) (*luks2.VolumeInfo, error) {
+			return &luks2.VolumeInfo{
+				UUID:           "test-uuid",
+				Version:        2,
+				ActiveKeyslots: []int{1},
+				Metadata: &luks2.LUKS2Metadata{
+					Keyslots: map[string]*luks2.Keyslot{},
+					DroppedNullEntries: []luks2.DroppedEntry{
+						{Kind: luks2.DroppedKindKeyslot, ID: "0"},
+						{Kind: luks2.DroppedKindToken, ID: "3"},
+					},
+				},
+			}, nil
+		},
+	}
+
+	if code := cli.Run(); code != 0 {
+		t.Fatalf("Expected exit code 0, got %d", code)
+	}
+
+	warning := stderr.String()
+	// Both ids AND both kinds: a warning that names "0" and "3" without saying
+	// which id space each came from tells an operator nothing actionable.
+	for _, want := range []string{`keyslot "0"`, `token "3"`, "2 entries", "luksHeaderBackup"} {
+		if !strings.Contains(warning, want) {
+			t.Errorf("stderr = %q, want it to contain %q", warning, want)
+		}
+	}
+
+	// The volume report is what people pipe; a damage warning does not belong
+	// in the middle of it.
+	if strings.Contains(stdout.String(), "WARNING") {
+		t.Errorf("the warning went to stdout, which is the report stream: %q", stdout.String())
+	}
+}
+
+// TestCLI_Info_DoesNotWarnForAnIntactHeader is the control. A warning that
+// fires on healthy containers is one an operator learns to ignore.
+func TestCLI_Info_DoesNotWarnForAnIntactHeader(t *testing.T) {
+	cli, _, stderr := newTestCLI([]string{"luks2", "info", "/dev/sda1"})
+	cli.Luks = &MockLuksOperations{
+		GetVolumeInfoFunc: func(device string) (*luks2.VolumeInfo, error) {
+			return &luks2.VolumeInfo{
+				UUID:     "test-uuid",
+				Version:  2,
+				Metadata: &luks2.LUKS2Metadata{Keyslots: map[string]*luks2.Keyslot{}},
+			}, nil
+		},
+	}
+
+	if code := cli.Run(); code != 0 {
+		t.Fatalf("Expected exit code 0, got %d", code)
+	}
+	if stderr.String() != "" {
+		t.Errorf("stderr = %q for an intact header, want nothing", stderr.String())
+	}
+}

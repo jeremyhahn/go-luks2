@@ -763,7 +763,12 @@ func ListKeyslots(device string) ([]KeyslotInfo, error) {
 
 func listKeyslotsFrom(metadata *LUKS2Metadata) ([]KeyslotInfo, error) {
 	var slots []KeyslotInfo
-	for idStr, ks := range metadata.Keyslots {
+	// Scan order, not map order: ranging the map returned the listing in a
+	// different order on every call for an unchanged device (#57). This is the
+	// same order unlock attempts the slots in, so an operator reading the
+	// listing is reading the order the volume is actually tried in.
+	for _, idStr := range keyslotIDsInScanOrder(metadata.Keyslots) {
+		ks := metadata.Keyslots[idStr]
 		id, err := strconv.Atoi(idStr)
 		if err != nil {
 			continue
