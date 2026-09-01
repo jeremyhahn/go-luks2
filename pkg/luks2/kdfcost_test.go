@@ -105,7 +105,7 @@ func TestExcessiveKDFCostIsRefusedBeforeDeriving(t *testing.T) {
 			runtime.ReadMemStats(&before)
 
 			start := time.Now()
-			key, err := unlockKeyslot(path, []byte(conformancePassphrase), keyslot, metadata.Digests)
+			key, err := unlockKeyslot(path, "0", []byte(conformancePassphrase), keyslot, metadata.Digests)
 			elapsed := time.Since(start)
 
 			runtime.ReadMemStats(&after)

@@ -104,11 +104,31 @@ ls -l /dev/sdb1
 sudo losetup -f --show myvolume.luks
 ```
 
-### "invalid passphrase"
+### "master key verification failed"
 
 - Verify caps lock is off
 - Try typing passphrase in a text editor first
-- Ensure correct keyslot if multiple exist
+- `luks2 open` takes only a device and a name; it scans every keyslot itself,
+  so there is no keyslot to choose
+
+This message does **not** prove the passphrase is wrong, and the command does
+not claim it does. A LUKS2 keyslot is unwrapped with an unauthenticated cipher,
+so the same failure arises from key material the *correct* passphrase can no
+longer decrypt. If the volume was working recently, suspect corruption before
+concluding the credential was mistyped.
+
+### "no valid keyslots"
+
+The header carries no keyslot this implementation can try — either none at all,
+or only ones of a type it does not open, such as a container left partway
+through a reencryption. **No passphrase will open it.** This is a header
+problem, not a credential problem, and retyping the passphrase cannot help.
+
+### "invalid keyslot" / "invalid LUKS header"
+
+A keyslot, or the header itself, is malformed: a keyslot with no KDF object, an
+area that does not parse, a keyslot no digest authenticates. The passphrase may
+well be correct; the container cannot evaluate it.
 
 ### "volume already unlocked"
 

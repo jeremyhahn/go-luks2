@@ -175,7 +175,7 @@ func TestAKeyslotAfterTheFirstStillOpensTheVolume(t *testing.T) {
 	if len(order) < 2 {
 		t.Fatalf("expected at least 2 keyslots, got %d: %v", len(order), order)
 	}
-	if _, err := unlockKeyslot(device, second, metadata.Keyslots[order[0]], metadata.Digests); err == nil {
+	if _, err := unlockKeyslot(device, order[0], second, metadata.Keyslots[order[0]], metadata.Digests); err == nil {
 		t.Fatalf("the added credential opens keyslot %s, the first slot scanned; "+
 			"this fixture cannot show that the scan continues past it", order[0])
 	}

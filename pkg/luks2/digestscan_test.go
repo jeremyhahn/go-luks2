@@ -33,6 +33,26 @@ import (
 // surviving order-dependence a 2^-64 event rather than a coin flip.
 const digestScanRepeats = 64
 
+// boundTo declares every digest in the map as authenticating keyslot id.
+//
+// A spec-legal LUKS2 header always states that association -- "keyslots" is a
+// mandatory member of a digest object -- and these fixtures used to omit it,
+// which was harmless only while verifyMasterKey ignored it. It does not any
+// more: a digest that names no keyslot authenticates no keyslot. Setting it
+// here keeps the fixtures about what they were always about (the digest SCAN)
+// instead of turning every one of them into a test of the association.
+//
+// The association rule itself is tested where it belongs, on its own fixtures,
+// in digestbinding_test.go.
+func boundTo(id string, digests map[string]*Digest) map[string]*Digest {
+	for _, d := range digests {
+		if d != nil {
+			d.Keyslots = []string{id}
+		}
+	}
+	return digests
+}
+
 // usableDigest builds a digest that the given master key verifies against.
 func usableDigest(t *testing.T, masterKey []byte, length int) *Digest {
 	t.Helper()
@@ -137,7 +157,7 @@ func TestVerifyMasterKeySkipsUnusableDigests(t *testing.T) {
 					"1": usableDigest(t, masterKey, 32),
 				}
 
-				if err := verifyMasterKey(enclaveFrom(t, masterKey), digests); err != nil {
+				if err := verifyMasterKey(enclaveFrom(t, masterKey), "0", boundTo("0", digests)); err != nil {
 					t.Fatalf("run %d: a %s hid the usable digest behind it: %v", i, name, err)
 				}
 			}
@@ -160,7 +180,7 @@ func TestVerifyMasterKeySkipsEveryUnusableDigestAtOnce(t *testing.T) {
 		}
 		digests["z"] = usableDigest(t, masterKey, 32)
 
-		if err := verifyMasterKey(enclaveFrom(t, masterKey), digests); err != nil {
+		if err := verifyMasterKey(enclaveFrom(t, masterKey), "0", boundTo("0", digests)); err != nil {
 			t.Fatalf("run %d: the usable digest was not reached past %d unusable ones: %v", i, id, err)
 		}
 	}
@@ -181,7 +201,7 @@ func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
 			id++
 		}
 
-		err := verifyMasterKey(enclaveFrom(t, masterKey), digests)
+		err := verifyMasterKey(enclaveFrom(t, masterKey), "0", boundTo("0", digests))
 		if !errors.Is(err, ErrMasterKeyVerification) {
 			t.Fatalf("verifyMasterKey = %v, want ErrMasterKeyVerification", err)
 		}
@@ -192,7 +212,7 @@ func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
 			"0": usableDigest(t, []byte("some-other-master-key-32-bytes!!"), 32),
 		}
 
-		err := verifyMasterKey(enclaveFrom(t, masterKey), digests)
+		err := verifyMasterKey(enclaveFrom(t, masterKey), "0", boundTo("0", digests))
 		if !errors.Is(err, ErrMasterKeyVerification) {
 			t.Fatalf("verifyMasterKey = %v, want ErrMasterKeyVerification", err)
 		}
@@ -203,12 +223,12 @@ func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
 		// "digest 2 uses a KDF I refuse" from "digest 2 did not match" would
 		// tell an attacker holding the device which keyslot to work on and how
 		// the header is being interpreted.
-		mismatch := verifyMasterKey(enclaveFrom(t, masterKey), map[string]*Digest{
+		mismatch := verifyMasterKey(enclaveFrom(t, masterKey), "0", boundTo("0", map[string]*Digest{
 			"0": usableDigest(t, []byte("some-other-master-key-32-bytes!!"), 32),
-		})
-		unusable := verifyMasterKey(enclaveFrom(t, masterKey), map[string]*Digest{
+		}))
+		unusable := verifyMasterKey(enclaveFrom(t, masterKey), "0", boundTo("0", map[string]*Digest{
 			"0": unusableDigests(t)["unsupported kdf type"],
-		})
+		}))
 
 		if mismatch.Error() != unusable.Error() {
 			t.Fatalf("a mismatch reports %q but an unusable digest reports %q; the two must be indistinguishable",
@@ -225,11 +245,11 @@ func TestVerifyMasterKeyAcceptsTheUsableDigestAlone(t *testing.T) {
 	masterKey := []byte("digest-scan-master-key-32-bytes!")
 
 	digests := map[string]*Digest{"0": usableDigest(t, masterKey, 32)}
-	if err := verifyMasterKey(enclaveFrom(t, masterKey), digests); err != nil {
+	if err := verifyMasterKey(enclaveFrom(t, masterKey), "0", boundTo("0", digests)); err != nil {
 		t.Fatalf("the fixture's own usable digest does not verify: %v", err)
 	}
 
-	if err := verifyMasterKey(enclaveFrom(t, []byte("some-other-master-key-32-bytes!!")), digests); err == nil {
+	if err := verifyMasterKey(enclaveFrom(t, []byte("some-other-master-key-32-bytes!!")), "0", boundTo("0", digests)); err == nil {
 		t.Fatal("the fixture's usable digest verified a DIFFERENT master key")
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -535,12 +536,16 @@ func unlockLoadTable(name, uuid, realDevice string, segment *Segment, masterKey 
 // unlockKeyslot attempts to unlock a keyslot with the given passphrase and
 // returns the master key HELD IN PROTECTED MEMORY.
 //
+// keyslotID is the key this keyslot has in the header's keyslots object, and it
+// is not decoration: it selects which digests are allowed to authenticate the
+// recovered key. See verifyMasterKey.
+//
 // Everything derived along the way that is or reveals the master key -- the
 // passphrase-derived key, the decrypted AF stripes, the merged key itself --
 // lives in an enclave and is destroyed on every path out, success or failure.
 // What is deliberately not enclaved is the ciphertext read off the device,
 // which is already on the device; see decryptKeyMaterialEnclave.
-func unlockKeyslot(device string, passphrase []byte, keyslot *Keyslot, digests map[string]*Digest) (*enclave.MemoryEnclave, error) {
+func unlockKeyslot(device string, keyslotID string, passphrase []byte, keyslot *Keyslot, digests map[string]*Digest) (*enclave.MemoryEnclave, error) {
 	// The type is checked HERE and not only in the scan.
 	//
 	// getMasterKey skips anything that is not "luks2", but RemoveKey, ChangeKey
@@ -660,8 +665,8 @@ func unlockKeyslot(device string, passphrase []byte, keyslot *Keyslot, digests m
 		return nil, err
 	}
 
-	// Verify master key using digest
-	if err := verifyMasterKey(masterKey, digests); err != nil {
+	// Verify master key using the digests that authenticate THIS keyslot
+	if err := verifyMasterKey(masterKey, keyslotID, digests); err != nil {
 		masterKey.Destroy()
 		return nil, err
 	}
@@ -669,22 +674,50 @@ func unlockKeyslot(device string, passphrase []byte, keyslot *Keyslot, digests m
 	return masterKey, nil
 }
 
-// verifyMasterKey verifies the master key against the stored digests.
+// verifyMasterKey verifies a key recovered from keyslot keyslotID against the
+// digests the header says authenticate THAT keyslot.
 //
-// Every digest in the set is tried, and a digest that ERRORS is skipped exactly
-// like a digest that mismatches. That symmetry is the fix for #58: the mismatch
-// path already continued, but the derive and decode paths returned, so one
-// unusable digest hid every usable one behind it. Under GODEBUG=fips140=only,
-// DeriveKey refuses an argon2 digest KDF, which made whether a volume opened
-// depend on Go's randomized map iteration order -- the same header opening or
-// not opening from run to run.
+// # Only the digests that name this keyslot are consulted
+//
+// A LUKS2 digest carries a "keyslots" array naming the keyslots it
+// authenticates, and it is not advisory: a container can hold more than one
+// volume key -- that is the ordinary state of a container mid-reencryption --
+// and each digest attests one of them. Trying EVERY digest against a key
+// recovered from ONE keyslot accepts that key on the strength of an attestation
+// made about a different keyslot. The unlock then treats it as authenticated
+// for this keyslot's segments, and KillSlot authorizes a destructive operation
+// through an association the header never made.
+//
+// So the digest set is filtered to those whose Keyslots contains keyslotID, and
+// a keyslot no digest names cannot be authenticated at all -- reported as
+// ErrInvalidHeader, because a keyslot with no digest is a broken header rather
+// than a failed credential. A header with no digests at all lands in the same
+// place for the same reason.
+//
+// # Among the digests that DO name it, every one is tried
+//
+// A digest that ERRORS is skipped exactly like a digest that mismatches. That
+// symmetry is the fix for #58: the mismatch path already continued, but the
+// derive and decode paths returned, so one unusable digest hid every usable one
+// behind it. Under GODEBUG=fips140=only a PBKDF2-HMAC-SHA1 digest is refused,
+// which made whether a volume opened depend on Go's randomized map iteration
+// order -- the same header opening or not opening from run to run.
 //
 // The failure returned once the set is exhausted is deliberately identical
 // whether the cause was a mismatch, an unsupported KDF, a corrupt salt or a
 // digest of implausible length: the caller learns that this key did not verify
 // and nothing about which digest rejected it or why.
-func verifyMasterKey(masterKey *enclave.MemoryEnclave, digests map[string]*Digest) error {
+func verifyMasterKey(masterKey *enclave.MemoryEnclave, keyslotID string, digests map[string]*Digest) error {
+	applicable := 0
+
 	for _, digest := range digests {
+		// The association is checked BEFORE any derivation, so a digest that
+		// does not attest this keyslot costs nothing and cannot influence the
+		// outcome by any route.
+		if !slices.Contains(digest.Keyslots, keyslotID) {
+			continue
+		}
+		applicable++
 		kdf := &KDF{
 			Type:       digest.Type,
 			Hash:       digest.Hash,
@@ -760,6 +793,15 @@ func verifyMasterKey(masterKey *enclave.MemoryEnclave, digests map[string]*Diges
 		if matched {
 			return nil // Verification successful
 		}
+	}
+
+	// No digest in the header attests this keyslot. That is a header defect, not
+	// a credential verdict, and it must not be reported as one: an operator told
+	// their passphrase failed would go looking at the passphrase, while the
+	// actual state is that the container declares a keyslot nothing can verify.
+	if applicable == 0 {
+		return fmt.Errorf("%w: no digest in the header authenticates keyslot %s, so a key recovered from it cannot be verified",
+			ErrInvalidHeader, keyslotID)
 	}
 
 	return ErrMasterKeyVerification

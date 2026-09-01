@@ -184,7 +184,7 @@ func TestCraftedKeyslotFieldsAreRefused(t *testing.T) {
 			keyslot := cloneKeyslot(good)
 			tc.mutate(keyslot)
 
-			key, err := unlockKeyslot(path, []byte(conformancePassphrase), keyslot, metadata.Digests)
+			key, err := unlockKeyslot(path, "0", []byte(conformancePassphrase), keyslot, metadata.Digests)
 			if err == nil {
 				key.Destroy()
 				t.Fatal("unlockKeyslot accepted the crafted keyslot")
@@ -294,7 +294,7 @@ func TestUnlockKeyslotRefusesAKeyslotTypeItCannotOpen(t *testing.T) {
 		Area:    &KeyslotArea{Type: "checksum", Offset: "32768", Size: "4096"},
 	}
 
-	key, err := unlockKeyslot(path, []byte(conformancePassphrase), reencrypt, metadata.Digests)
+	key, err := unlockKeyslot(path, "0", []byte(conformancePassphrase), reencrypt, metadata.Digests)
 	if err == nil {
 		key.Destroy()
 		t.Fatal("unlockKeyslot opened a keyslot type it does not implement")

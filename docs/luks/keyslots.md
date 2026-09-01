@@ -118,10 +118,27 @@ Each keyslot's encrypted area contains:
 // Attempt unlock with passphrase
 err := luks2.Unlock(device, passphrase, volumeName)
 if err != nil {
-    if errors.Is(err, luks2.ErrInvalidPassphrase) {
-        // Wrong passphrase for all keyslots
+    switch {
+    case errors.Is(err, luks2.ErrNoKeyslots):
+        // The header carries no keyslot this implementation can try. No
+        // passphrase opens this container; do not ask the operator to retype.
+    case errors.Is(err, luks2.ErrInvalidKeyslot):
+        // A keyslot is damaged and could not evaluate the credential. The
+        // passphrase may well be correct.
+    case errors.Is(err, luks2.ErrInvalidHeader):
+        // The header itself is malformed -- an unusable digest, or a keyslot
+        // that no digest authenticates.
+    case errors.Is(err, luks2.ErrMasterKeyVerification):
+        // A keyslot judged the credential and the recovered key did not match
+        // its digest. That is NOT the same as "the passphrase is wrong": a
+        // wrong passphrase, the CORRECT passphrase over damaged key material,
+        // and a semantically wrong digest are indistinguishable at that
+        // comparison, so the library does not name a cause. See issue #68.
     }
 }
+
+// Do not branch on ErrInvalidPassphrase. No path in this package returns it,
+// for the reason above.
 ```
 
 ### Checking Active Keyslots
@@ -149,8 +166,9 @@ fmt.Printf("Active keyslots: %v\n", info.ActiveKeyslots)
 
 ```go
 // Add a new keyslot (requires existing passphrase)
-err := luks2.AddKey(device, existingPass, newPass, luks2.AddKeyOptions{
-    Slot: 1,  // Use slot 1, or -1 for auto
+slot := 1
+err := luks2.AddKey(device, existingPass, newPass, &luks2.AddKeyOptions{
+    Keyslot: &slot, // *int; nil auto-selects the first free slot
 })
 ```
 

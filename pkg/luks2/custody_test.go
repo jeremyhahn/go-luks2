@@ -696,7 +696,7 @@ func TestUnlockKeyslotRefusesAnAbsurdKeyslotArea(t *testing.T) {
 			keyslot.Area.Size = size
 			defer func() { keyslot.Area.Size = original }()
 
-			key, err := unlockKeyslot(path, []byte(conformancePassphrase), keyslot, metadata.Digests)
+			key, err := unlockKeyslot(path, "0", []byte(conformancePassphrase), keyslot, metadata.Digests)
 			if err == nil {
 				key.Destroy()
 				t.Fatalf("unlockKeyslot accepted a keyslot area of %s bytes", size)

@@ -47,8 +47,16 @@ type AddKeyOptions struct {
 	PBKDFIterTime int
 }
 
-// TestKey verifies that a passphrase can unlock the LUKS volume
-// Returns nil if the passphrase is valid, error otherwise
+// TestKey verifies that a passphrase can unlock the LUKS volume.
+// Returns nil if the passphrase opens a keyslot, error otherwise.
+//
+// A failure is NOT a statement that the passphrase is wrong. getMasterKey
+// distinguishes a keyslot that judged the credential and rejected it from one
+// that could not be tried and from a container with no usable keyslot at all
+// (#30), and this wrapper carries that distinction through instead of
+// flattening every outcome into a credential verdict. Match on the wrapped
+// error -- ErrMasterKeyVerification, ErrInvalidKeyslot, ErrNoKeyslots -- rather
+// than on the message.
 func TestKey(device string, passphrase []byte) error {
 	// Validate inputs
 	if err := ValidateDevicePath(device); err != nil {
@@ -67,7 +75,11 @@ func TestKey(device string, passphrase []byte) error {
 	// Try to get master key with the passphrase
 	masterKey, err := getMasterKey(device, passphrase, metadata)
 	if err != nil {
-		return fmt.Errorf("passphrase does not unlock any keyslot: %w", err)
+		// Deliberately NOT "passphrase does not unlock any keyslot". That names
+		// a verdict on the credential, and for a container with no usable
+		// keyslot -- or one whose keyslot is too damaged to evaluate anything
+		// -- no such verdict was ever reached. See #30.
+		return fmt.Errorf("could not open %s with this passphrase: %w", device, err)
 	}
 	// The key is recovered only to prove the passphrase opens a slot; it is
 	// released immediately rather than at the end of a scope that does nothing
@@ -372,7 +384,7 @@ func RemoveKey(device string, passphrase []byte, keyslot int) error {
 	// Verify passphrase unlocks this specific keyslot. The recovered key is
 	// wanted only as proof, so it is released at once instead of being held for
 	// the rest of the removal.
-	verified, err := unlockKeyslot(device, passphrase, targetKeyslot, metadata.Digests)
+	verified, err := unlockKeyslot(device, slotIDStr, passphrase, targetKeyslot, metadata.Digests)
 	if err != nil {
 		return fmt.Errorf("passphrase does not match keyslot %d: %w", keyslot, err)
 	}
@@ -446,25 +458,31 @@ func KillSlot(device string, authPassphrase []byte, targetSlot int) error {
 		return fmt.Errorf("failed to read header: %w", err)
 	}
 
-	// Verify the auth passphrase works with any keyslot (authentication check)
-	authValid := false
-	for _, slotID := range keyslotIDsInScanOrder(metadata.Keyslots) {
-		keyslot := metadata.Keyslots[slotID]
-		candidate, err := unlockKeyslot(device, authPassphrase, keyslot, metadata.Digests)
-		if err == nil {
-			// Authentication only: the key is not needed past this point.
-			candidate.Destroy()
-			authValid = true
-			// Make sure we're not removing the only keyslot we can authenticate with
-			if slotID == strconv.Itoa(targetSlot) && len(metadata.Keyslots) == 1 {
-				return fmt.Errorf("cannot remove last keyslot")
-			}
-			break
-		}
+	// Authenticate through getMasterKey, which is the ONE implementation of the
+	// keyslot scan.
+	//
+	// This used to carry its own copy -- no keyslot-type filter, no distinction
+	// between a slot that rejected the credential and one that could not be
+	// tried, and a single "passphrase does not match any keyslot" for every
+	// outcome including a container with no usable keyslots at all. That is the
+	// misattribution #30 is about, reproduced in a second place, and the answer
+	// is one scan rather than two agreeing scans.
+	//
+	// The in-loop "removing the only keyslot we can authenticate with" guard
+	// went with it, and nothing is lost: it fired only when the container had
+	// exactly one keyslot and it was the target, which the len(...) <= 1 refusal
+	// below rejects anyway, with the same message.
+	//
+	// Authentication only -- the key is not wanted past this point.
+	candidate, err := getMasterKey(device, authPassphrase, metadata)
+	if err != nil {
+		// "authentication failed" was the old wording and it asserted a verdict
+		// this call may never have reached -- a container with no usable
+		// keyslot judged nothing. The operation is named; the outcome comes
+		// from the wrapped error.
+		return fmt.Errorf("could not authenticate against %s: %w", device, err)
 	}
-	if !authValid {
-		return fmt.Errorf("authentication failed: passphrase does not match any keyslot")
-	}
+	candidate.Destroy()
 
 	// Check that target keyslot exists
 	slotIDStr := strconv.Itoa(targetSlot)
@@ -545,7 +563,7 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 	}
 
 	// Unlock with old passphrase to get master key
-	masterKey, err := unlockKeyslot(device, oldPassphrase, targetKeyslot, metadata.Digests)
+	masterKey, err := unlockKeyslot(device, slotIDStr, oldPassphrase, targetKeyslot, metadata.Digests)
 	if err != nil {
 		return fmt.Errorf("old passphrase does not match keyslot %d: %w", keyslot, err)
 	}
@@ -876,9 +894,22 @@ func keyslotIDsInScanOrder(keyslots map[string]*Keyslot) []string {
 // called is an open design question (#68), left untyped here rather than
 // guessed at; ErrMasterKeyVerification says what happened without saying why.
 //
-// It also does not raise ErrNoKeyslots when nothing was tried at all. That is a
-// separate defect with its own issue (#30) and its own semantics, and inventing
-// a second answer to it here is how two answers come to disagree.
+// # A volume with NO usable keyslot is not a wrong passphrase either
+//
+// If the scan tries nothing at all, ErrNoKeyslots comes back rather than a
+// verification verdict (#30). ErrInvalidPassphrase is the one error in this
+// package an operator will assume is their own fault, and reporting it here
+// sends someone whose header carries no openable keyslot to retype a
+// credential that was never the problem and that no passphrase would replace.
+// The state is reachable without anything exotic -- a keyslots object that is
+// empty or absent, or one whose every entry has a type the unlock path will not
+// try, such as a container left mid-reencryption. A `reencrypt`-only volume
+// even looks populated in ListKeyslots, which deliberately keeps a broader
+// view, while being unopenable here.
+//
+// The message names which of the two it was, because the remedies differ: an
+// empty keyslots object is a lost or truncated header, while keyslots present
+// but untryable is a container in a state this path does not handle.
 func getMasterKey(device string, passphrase []byte, metadata *LUKS2Metadata) (*enclave.MemoryEnclave, error) {
 	// The first reason a keyslot could not be TRIED, kept in case nothing
 	// verifies. The first rather than the last, because scan order is
@@ -886,13 +917,19 @@ func getMasterKey(device string, passphrase []byte, metadata *LUKS2Metadata) (*e
 	// will look at first.
 	var untried error
 
+	// How many keyslots the scan actually reached the unlock with. Counted
+	// rather than derived from len(metadata.Keyslots), which counts entries the
+	// unlock path skips.
+	tried := 0
+
 	for _, id := range keyslotIDsInScanOrder(metadata.Keyslots) {
 		keyslot := metadata.Keyslots[id]
 		if keyslot.Type != "luks2" {
 			continue
 		}
+		tried++
 
-		masterKey, err := unlockKeyslot(device, passphrase, keyslot, metadata.Digests)
+		masterKey, err := unlockKeyslot(device, id, passphrase, keyslot, metadata.Digests)
 		if err == nil {
 			return masterKey, nil
 		}
@@ -917,6 +954,16 @@ func getMasterKey(device string, passphrase []byte, metadata *LUKS2Metadata) (*e
 
 	if untried != nil {
 		return nil, untried
+	}
+
+	// Nothing was tried, so nothing was judged: there is no credential verdict
+	// to report, only a header that offers no way in.
+	if tried == 0 {
+		if len(metadata.Keyslots) == 0 {
+			return nil, fmt.Errorf("%w: the header declares no keyslots", ErrNoKeyslots)
+		}
+		return nil, fmt.Errorf("%w: the header declares %d keyslot(s), none of them of a type the unlock path can try",
+			ErrNoKeyslots, len(metadata.Keyslots))
 	}
 
 	return nil, ErrMasterKeyVerification

@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A container with no usable keyslot is no longer reported as a wrong
+  passphrase (#30).** The keyslot scan fell through its loop without executing
+  the body and ended at a bare credential verdict, so an operator whose header
+  carried no openable keyslot was told their passphrase was wrong — sending
+  them to retype a credential that was never the problem and that no passphrase
+  would replace. `getMasterKey` now returns `ErrNoKeyslots`, naming which of the
+  two reachable states it is: a keyslots object that is empty or absent, or one
+  whose every entry has a type the unlock path will not try (a container left
+  partway through a reencryption, which still looks populated in
+  `ListKeyslots`). `ErrNoKeyslots` was declared and returned by nothing; the
+  path that should have raised it raised something misleading instead.
+
+  `TestKey` and `KillSlot` carry the distinction through instead of flattening
+  it: their wrappers name the OPERATION ("could not open ...", "could not
+  authenticate against ...") rather than asserting a verdict on the credential
+  that, in this state, was never reached. `KillSlot` also drops its private copy
+  of the keyslot scan in favour of `getMasterKey` — the copy had no keyslot-type
+  filter and one message for every outcome, which is the same defect in a second
+  place.
+
+### Security
+
+- **A digest can no longer authenticate a keyslot it does not name.**
+  `verifyMasterKey` tried EVERY digest in the header against a key recovered
+  from ONE keyslot, ignoring the digest's `keyslots` array. A LUKS2 container
+  can hold more than one volume key — that is the ordinary state of one being
+  reencrypted — and each digest attests exactly one of them, so accepting a key
+  on the strength of an attestation made about a different keyslot is a
+  verification that does not verify what it claims to. The unlock would treat
+  the key as authenticated for this keyslot's segments, and `KillSlot` would
+  authorize a destructive operation through an association the header never
+  made. The digest set is now filtered to those naming the keyslot being opened,
+  before any derivation; a keyslot no digest names is reported as
+  `ErrInvalidHeader` — a broken container, not a failed credential — and so is a
+  header with no digests at all, which previously reported a verification
+  failure for a key nothing had judged.
+
+  `unlockKeyslot` takes the keyslot's ID for this reason; it is an unexported
+  function and no exported signature changed.
+
+### Changed
+
+- **The FIPS activation boundary is keyslot CREATION, not key ACCESS (#15).**
+  `v0.1.8-alpha` put the Argon2 refusal on the derivation path, so a
+  FIPS-activated build could not open **any** Argon2 volume — and argon2id is
+  cryptsetup's own on-disk default, which makes that every volume cryptsetup
+  formatted with default settings. That is a data-availability failure that
+  buys no compliance: the keyslot was enrolled long before the process started,
+  refusing to read it removes no Argon2 material from the disk, and it made the
+  migration path unreachable, since re-keying to an approved KDF requires first
+  authenticating with the keyslot you already have.
+
+  `DeriveKey`, `DeriveKeyEnclave` and every internal derivation now open an
+  existing `argon2i`/`argon2id` keyslot in FIPS 140-3 mode. `CreateKDF` still
+  refuses to **create** one with `ErrFIPSNotApproved`, including its
+  empty-`KDFType` default, and `Format`, `AddKey` and `ChangeKey` all route
+  through it — so no FIPS-mode process can enroll a non-approved keyslot.
+  `requireFIPSApprovedKDF` is renamed `requireFIPSApprovedKDFForNewKeyslot` so
+  that re-introducing it on a derivation path reads as wrong at the call site.
+  Owner ruling 2026-08-20 (`docs/04-security-model.md` product rulings 5-8).
+
+  PBKDF2-HMAC-SHA1 remains refused **while deriving**, and that is a different
+  kind of rule: the Go Cryptographic Module panics on SHA-1 under
+  `GODEBUG=fips140=only`, so the derivation cannot run at all. No exported
+  signature changed; `ErrFIPSNotApproved` and `CryptoError` are unchanged, and
+  only the set of situations that produce them narrowed.
+
 ## [0.1.10-alpha] - 2026-08-31
 
 ### Security

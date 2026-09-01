@@ -194,12 +194,23 @@ func TestGetMasterKeyDistinguishesFailureToTryFromFailureToVerify(t *testing.T) 
 	})
 
 	t.Run("a usable keyslot still opens the volume alongside an unusable one", func(t *testing.T) {
+		// The invented keyslot 7 is REGISTERED with the digest, exactly as
+		// AddKey does when it writes a real one. verifyMasterKey consults only
+		// the digests that name the keyslot being opened, so a slot the header
+		// never associated with a digest authenticates nothing -- and this
+		// fixture would then be measuring that omission rather than the
+		// scan-past-a-damaged-slot property it exists for.
+		digests := cloneDigests(metadata.Digests)
+		for _, d := range digests {
+			d.Keyslots = append(d.Keyslots, "7")
+		}
+
 		mixed := &LUKS2Metadata{
 			Keyslots: map[string]*Keyslot{
 				"0": cloneKeyslot(metadata.Keyslots["0"]),
 				"7": cloneKeyslot(metadata.Keyslots["0"]),
 			},
-			Digests: metadata.Digests,
+			Digests: digests,
 		}
 		mixed.Keyslots["0"].KDF = nil
 

@@ -77,7 +77,7 @@ func TestMalformedKeyslotIsRefusedNotPanicked(t *testing.T) {
 			keyslot := cloneKeyslot(good)
 			tc.mutate(keyslot)
 
-			key, err := unlockKeyslot(path, []byte(conformancePassphrase), keyslot, metadata.Digests)
+			key, err := unlockKeyslot(path, "0", []byte(conformancePassphrase), keyslot, metadata.Digests)
 			if err == nil {
 				key.Destroy()
 				t.Fatal("unlockKeyslot accepted a malformed keyslot")
@@ -190,6 +190,29 @@ func TestKillKeyslotRefusesAMalformedKeyslotArea(t *testing.T) {
 	}
 }
 
+// cloneDigests returns a copy of a digest map whose Keyslots lists a test can
+// rewrite without disturbing the metadata it was copied from.
+//
+// It exists because a keyslot's digest ASSOCIATION is now load-bearing: a
+// fixture that invents a second keyslot has to register it with a digest, the
+// way AddKey does in production, or the new slot authenticates nothing. Sharing
+// the digest pointers with the original metadata makes that registration leak
+// into every other subtest.
+func cloneDigests(src map[string]*Digest) map[string]*Digest {
+	out := make(map[string]*Digest, len(src))
+	for id, d := range src {
+		if d == nil {
+			out[id] = nil
+			continue
+		}
+		c := *d
+		c.Keyslots = append([]string(nil), d.Keyslots...)
+		c.Segments = append([]string(nil), d.Segments...)
+		out[id] = &c
+	}
+	return out
+}
+
 // cloneKeyslot returns a deep enough copy that a test can damage one field
 // without disturbing the keyslot it was copied from.
 func cloneKeyslot(src *Keyslot) *Keyslot {
@@ -244,7 +267,7 @@ func TestUnlockKeyslotRefusesANonSectorArea(t *testing.T) {
 		t.Fatalf("fixture precondition: %d bytes of AF material is a whole number of sectors", afBytes)
 	}
 
-	key, err := unlockKeyslot(path, []byte(conformancePassphrase), keyslot, metadata.Digests)
+	key, err := unlockKeyslot(path, "0", []byte(conformancePassphrase), keyslot, metadata.Digests)
 	if err == nil {
 		key.Destroy()
 		t.Fatal("unlockKeyslot accepted an area that is not a whole number of sectors")

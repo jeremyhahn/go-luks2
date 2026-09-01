@@ -336,6 +336,83 @@ func TestConformance_CryptsetupWrites_WeRead(t *testing.T) {
 	})
 }
 
+// TestConformance_CryptsetupMultiKeyslotDigestAssociation is the compatibility
+// guard on the digest-to-keyslot rule.
+//
+// verifyMasterKey consults only the digests whose "keyslots" array names the
+// keyslot being opened. That is what the LUKS2 format says the array is for,
+// but reading a header field STRICTLY is exactly the change that can lock an
+// operator out of a container some other implementation wrote -- and the
+// implementation that matters is cryptsetup, which is what is in the field.
+//
+// So the association is checked against a container cryptsetup itself built and
+// then added a second keyslot to, rather than against one this library wrote:
+// a library that maintained the association wrongly and read it back the same
+// wrong way would agree with itself and pass every self-round-trip.
+//
+// Measured against cryptsetup 2.7.0: it registers BOTH keyslots on the single
+// digest ("keyslots": ["0", "1"]), and both passphrases open the container.
+func TestConformance_CryptsetupMultiKeyslotDigestAssociation(t *testing.T) {
+	requireCryptsetup(t)
+
+	const second = "the-second-conformance-passphrase"
+
+	path := newImage(t, "two-keyslots.img")
+
+	code, out := runCryptsetup(t, conformancePassphrase,
+		"luksFormat", "--type", "luks2",
+		"--pbkdf", "pbkdf2",
+		"--pbkdf-force-iterations", "1000",
+		"--batch-mode", path)
+	if code != 0 {
+		t.Fatalf("cryptsetup luksFormat exited %d, want 0\n%s", code, out)
+	}
+
+	// luksAddKey reads the EXISTING passphrase then the new one, both on stdin.
+	code, out = runCryptsetup(t, conformancePassphrase+"\n"+second+"\n",
+		"luksAddKey", "--pbkdf", "pbkdf2",
+		"--pbkdf-force-iterations", "1000",
+		"--batch-mode", path)
+	if code != 0 {
+		t.Fatalf("cryptsetup luksAddKey exited %d, want 0\n%s", code, out)
+	}
+
+	_, metadata, err := ReadHeader(path)
+	if err != nil {
+		t.Fatalf("ReadHeader failed on a cryptsetup-written container: %v", err)
+	}
+
+	// The fixture is only meaningful if cryptsetup really wrote two keyslots
+	// and really associated both with a digest. Without this the test would go
+	// vacuous the moment luksAddKey silently failed.
+	if len(metadata.Keyslots) != 2 {
+		t.Fatalf("cryptsetup wrote %d keyslots, want 2", len(metadata.Keyslots))
+	}
+	associated := make(map[string]bool)
+	for id, digest := range metadata.Digests {
+		t.Logf("digest %s authenticates keyslots %v", id, digest.Keyslots)
+		for _, ks := range digest.Keyslots {
+			associated[ks] = true
+		}
+	}
+	for id := range metadata.Keyslots {
+		if !associated[id] {
+			t.Fatalf("cryptsetup left keyslot %s associated with no digest; "+
+				"the strict association would lock it out and this fixture cannot show otherwise", id)
+		}
+	}
+
+	for _, passphrase := range []string{conformancePassphrase, second} {
+		if err := TestKey(path, []byte(passphrase)); err != nil {
+			t.Fatalf("a cryptsetup-written keyslot no longer opens under the digest association rule: %v", err)
+		}
+	}
+
+	if err := TestKey(path, []byte(conformanceWrongPassphrase)); err == nil {
+		t.Fatal("TestKey accepted a WRONG passphrase on a two-keyslot cryptsetup container")
+	}
+}
+
 // TestConformance_StaysValidAfterMutation checks that the operations which
 // REWRITE a header leave a container cryptsetup still accepts.
 //

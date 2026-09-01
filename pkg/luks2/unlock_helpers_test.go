@@ -122,7 +122,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			},
 		}
 
-		err = verifyMasterKey(enclaveFrom(t, testMasterKey), digests)
+		err = verifyMasterKey(enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
 		if err != nil {
 			t.Errorf("verifyMasterKey failed with valid key: %v", err)
 		}
@@ -154,7 +154,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			},
 		}
 
-		err = verifyMasterKey(enclaveFrom(t, invalidKey), digests)
+		err = verifyMasterKey(enclaveFrom(t, invalidKey), "0", boundTo("0", digests))
 		if err == nil {
 			t.Error("verifyMasterKey should fail with invalid key")
 		}
@@ -200,7 +200,7 @@ func TestVerifyMasterKey(t *testing.T) {
 		}
 		destroyed.Destroy()
 
-		if err := verifyMasterKey(destroyed, digests); err == nil {
+		if err := verifyMasterKey(destroyed, "0", boundTo("0", digests)); err == nil {
 			t.Error("verifyMasterKey accepted a destroyed master key")
 		}
 	})
@@ -218,7 +218,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			},
 		}
 
-		err := verifyMasterKey(nil, digests)
+		err := verifyMasterKey(nil, "0", boundTo("0", digests))
 		if err == nil {
 			t.Error("verifyMasterKey should fail with nil key")
 		}
@@ -227,17 +227,25 @@ func TestVerifyMasterKey(t *testing.T) {
 	t.Run("empty digests map", func(t *testing.T) {
 		digests := map[string]*Digest{}
 
-		err := verifyMasterKey(enclaveFrom(t, testMasterKey), digests)
+		err := verifyMasterKey(enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
 		if err == nil {
-			t.Error("verifyMasterKey should fail with empty digests map")
+			t.Fatal("verifyMasterKey should fail with empty digests map")
 		}
-		if err.Error() != "master key verification failed" {
-			t.Errorf("Expected 'master key verification failed', got: %v", err)
+		// ErrInvalidHeader, NOT ErrMasterKeyVerification. This assertion used to
+		// demand the verification message, which said a credential had been
+		// judged and rejected when nothing had been judged at all: a header with
+		// no digest cannot evaluate any key. The operator it misdirects is the
+		// one whose header is truncated, and it sends them to their passphrase.
+		if !errors.Is(err, ErrInvalidHeader) {
+			t.Errorf("a header with no digests is not reported as a header fault: %v", err)
+		}
+		if errors.Is(err, ErrMasterKeyVerification) {
+			t.Errorf("a header with no digests was reported as a failed verification: %v", err)
 		}
 	})
 
 	t.Run("nil digests map", func(t *testing.T) {
-		err := verifyMasterKey(enclaveFrom(t, testMasterKey), nil)
+		err := verifyMasterKey(enclaveFrom(t, testMasterKey), "0", boundTo("0", nil))
 		if err == nil {
 			t.Error("verifyMasterKey should fail with nil digests map")
 		}
@@ -274,7 +282,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			},
 		}
 
-		err = verifyMasterKey(enclaveFrom(t, testMasterKey), digests)
+		err = verifyMasterKey(enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
 		if err != nil {
 			t.Errorf("verifyMasterKey failed with at least one valid digest: %v", err)
 		}
@@ -293,7 +301,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			},
 		}
 
-		err := verifyMasterKey(enclaveFrom(t, testMasterKey), digests)
+		err := verifyMasterKey(enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
 		if err == nil {
 			t.Error("verifyMasterKey should fail with invalid base64 digest")
 		}
@@ -312,7 +320,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			},
 		}
 
-		err := verifyMasterKey(enclaveFrom(t, testMasterKey), digests)
+		err := verifyMasterKey(enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
 		if err == nil {
 			t.Error("verifyMasterKey should fail with invalid hash algorithm")
 		}
@@ -342,7 +350,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			},
 		}
 
-		err = verifyMasterKey(enclaveFrom(t, testMasterKey), digests)
+		err = verifyMasterKey(enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
 		if err != nil {
 			t.Errorf("verifyMasterKey failed with sha512: %v", err)
 		}
@@ -361,7 +369,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			},
 		}
 
-		err := verifyMasterKey(enclaveFrom(t, testMasterKey), digests)
+		err := verifyMasterKey(enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
 		if err == nil {
 			t.Error("verifyMasterKey should handle zero iterations")
 		}
@@ -380,7 +388,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			},
 		}
 
-		err := verifyMasterKey(enclaveFrom(t, testMasterKey), digests)
+		err := verifyMasterKey(enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
 		if err == nil {
 			t.Error("verifyMasterKey should fail with invalid base64 salt")
 		}
@@ -433,7 +441,7 @@ func TestVerifyMasterKey(t *testing.T) {
 				},
 			}
 
-			if err := verifyMasterKey(enclaveFrom(t, testMasterKey), digests); err != nil {
+			if err := verifyMasterKey(enclaveFrom(t, testMasterKey), "0", boundTo("0", digests)); err != nil {
 				t.Errorf("verifyMasterKey failed for a %d-byte %s digest: %v", tc.digestLen, tc.hash, err)
 			}
 		})
@@ -478,7 +486,7 @@ func TestVerifyMasterKey(t *testing.T) {
 				},
 			}
 
-			err := verifyMasterKey(enclaveFrom(t, testMasterKey), digests)
+			err := verifyMasterKey(enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
 			if !errors.Is(err, ErrMasterKeyVerification) {
 				t.Errorf("verifyMasterKey(%d-byte %s digest) = %v, want ErrMasterKeyVerification",
 					tc.digestLen, tc.hash, err)
@@ -516,7 +524,7 @@ func TestVerifyMasterKeyDoesNotModifyInput(t *testing.T) {
 		},
 	}
 
-	_ = verifyMasterKey(enclaveFrom(t, testMasterKey), digests)
+	_ = verifyMasterKey(enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
 
 	if !bytes.Equal(testMasterKey, originalKey) {
 		t.Error("verifyMasterKey modified the input master key")
