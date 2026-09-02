@@ -214,13 +214,14 @@ func TestWipeKeyslot(t *testing.T) {
 		// (#100). It supersedes the explicit Lock this test used to do: it
 		// unmounts anything mounted from THIS volume, retries to a deadline,
 		// and reports a mapping it cannot release rather than leaving it.
-		defer releaseVolume(t, "test-wipe-keyslot")
+		vol := runVolume(t, "test-wipe-keyslot")
+		defer releaseVolume(t, vol)
 
 		// The assertion is INVERTED from what #113 hardened, and the inversion
 		// is the point: on a volume whose only keyslot survives a refused wipe,
 		// the unlock must SUCCEED. #113 was hardening the teardown around the
 		// old expectation that it fail.
-		if err := Unlock(loopDev, []byte("test-password"), "test-wipe-keyslot"); err != nil {
+		if err := Unlock(loopDev, []byte("test-password"), vol); err != nil {
 			t.Fatalf("the volume no longer unlocks after a REFUSED WipeKeyslot: %v", err)
 		}
 	}()

@@ -7,7 +7,6 @@
 package luks2
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,10 +46,7 @@ func TestMakeFilesystemExt4(t *testing.T) {
 	tmpfile.Close()
 
 	passphrase := []byte("test-fs-ext4-pass")
-	volumeName := "test-fs-ext4"
-
-	// Cleanup any leftover device mapper from previous runs
-	_ = Lock(volumeName)
+	volumeName := runVolume(t, "test-fs-ext4")
 
 	// Format LUKS volume
 	opts := FormatOptions{
@@ -140,10 +136,7 @@ func TestMakeFilesystemExt3(t *testing.T) {
 	tmpfile.Close()
 
 	passphrase := []byte("test-fs-ext3-pass")
-	volumeName := "test-fs-ext3"
-
-	// Cleanup any leftover device mapper from previous runs
-	_ = Lock(volumeName)
+	volumeName := runVolume(t, "test-fs-ext3")
 
 	// Format LUKS volume
 	opts := FormatOptions{
@@ -209,10 +202,7 @@ func TestMakeFilesystemExt2(t *testing.T) {
 	tmpfile.Close()
 
 	passphrase := []byte("test-fs-ext2-pass")
-	volumeName := "test-fs-ext2"
-
-	// Cleanup any leftover device mapper from previous runs
-	_ = Lock(volumeName)
+	volumeName := runVolume(t, "test-fs-ext2")
 
 	// Format LUKS volume
 	opts := FormatOptions{
@@ -281,11 +271,8 @@ func TestMakeFilesystemWithLabel(t *testing.T) {
 	tmpfile.Close()
 
 	passphrase := []byte("test-fs-label-pass")
-	volumeName := "test-fs-label"
+	volumeName := runVolume(t, "test-fs-label")
 	fsLabel := "my-custom-label"
-
-	// Cleanup any leftover device mapper from previous runs
-	_ = Lock(volumeName)
 
 	// Format LUKS volume
 	opts := FormatOptions{
@@ -408,10 +395,7 @@ func TestFilesystemWriteRead(t *testing.T) {
 
 	passphrase := []byte("test-fs-rw-pass")
 	// Use a unique volume name per run to avoid conflicts with zombie device mappers
-	volumeName := fmt.Sprintf("test-fs-rw-%d", time.Now().UnixNano())
-
-	// Cleanup any leftover device mapper from previous runs (just in case)
-	_ = Lock(volumeName)
+	volumeName := runVolume(t, "test-fs-rw")
 
 	// Format LUKS volume
 	opts := FormatOptions{
@@ -534,7 +518,7 @@ func TestFilesystemPersistence(t *testing.T) {
 
 	passphrase := []byte("test-fs-persist-pass")
 	// Use a unique volume name per run to avoid conflicts with zombie device mappers
-	volumeName := fmt.Sprintf("test-fs-persist-%d", time.Now().UnixNano())
+	volumeName := runVolume(t, "test-fs-persist")
 	testData := []byte("Persistent data test")
 
 	// Format LUKS volume

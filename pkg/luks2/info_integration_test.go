@@ -446,9 +446,7 @@ func TestIsUnlockedTrue(t *testing.T) {
 	defer DetachLoopDevice(loopDev)
 
 	// Unlock volume
-	volumeName := "test-is-unlocked"
-	// Cleanup any leftover device mapper from previous runs
-	_ = Lock(volumeName)
+	volumeName := runVolume(t, "test-is-unlocked")
 
 	// Registered BEFORE the mapping can exist, so a partial or rolled-back
 	// unlock cannot leave one behind either (#100). Idempotent.
@@ -500,7 +498,7 @@ func TestIsUnlockedFalse(t *testing.T) {
 	defer DetachLoopDevice(loopDev)
 
 	// DO NOT unlock - verify IsUnlocked returns false
-	volumeName := "test-is-locked"
+	volumeName := runVolume(t, "test-is-locked")
 	if IsUnlocked(volumeName) {
 		t.Error("IsUnlocked should return false for locked volume")
 	}
@@ -508,7 +506,7 @@ func TestIsUnlockedFalse(t *testing.T) {
 
 // TestIsUnlockedNonexistent tests that IsUnlocked returns false for nonexistent volumes
 func TestIsUnlockedNonexistent(t *testing.T) {
-	volumeName := "nonexistent-volume-12345"
+	volumeName := runVolume(t, "nonexistent-volume-12345")
 
 	if IsUnlocked(volumeName) {
 		t.Error("IsUnlocked should return false for nonexistent volume")
@@ -550,9 +548,7 @@ func TestVolumeStateTransitions(t *testing.T) {
 	}
 	defer DetachLoopDevice(loopDev)
 
-	volumeName := "test-state-transitions"
-	// Cleanup any leftover device mapper from previous runs
-	_ = Lock(volumeName)
+	volumeName := runVolume(t, "test-state-transitions")
 
 	// Initial state: locked
 	if IsUnlocked(volumeName) {

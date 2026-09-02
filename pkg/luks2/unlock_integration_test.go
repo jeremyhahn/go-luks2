@@ -48,9 +48,7 @@ func TestUnlockBasic(t *testing.T) {
 	defer DetachLoopDevice(loopDev)
 
 	// Unlock
-	volumeName := "test-unlock"
-	// Cleanup any leftover device mapper from previous runs
-	_ = Lock(volumeName)
+	volumeName := runVolume(t, "test-unlock")
 
 	// Registered BEFORE the mapping can exist, so a partial or rolled-back
 	// unlock cannot leave one behind either (#100). Idempotent.
@@ -127,8 +125,9 @@ func TestUnlockWithWrongPassphrase(t *testing.T) {
 	// Try with wrong passphrase
 	// Registered BEFORE the mapping can exist, so a partial or rolled-back
 	// unlock cannot leave one behind either (#100). Idempotent.
-	defer releaseVolume(t, "test-wrong-pass")
-	err = Unlock(loopDev, []byte("wrong-password"), "test-wrong-pass")
+	vol := runVolume(t, "test-wrong-pass")
+	defer releaseVolume(t, vol)
+	err = Unlock(loopDev, []byte("wrong-password"), vol)
 	if err == nil {
 		t.Fatal("Unlock should have failed with wrong passphrase")
 	}
@@ -158,12 +157,34 @@ func TestUnlockErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// SCOPED even though every case here is expected to FAIL.
+			//
+			// I first excluded this table on the grounds that the unlocks must
+			// error, so no mapping is created. That reasoned about the CREATION
+			// path and ignored the teardown: `releaseVolume` below runs either
+			// way, and against the bare table value "test" it closes whatever
+			// currently holds that name -- a plausible name for somebody's real
+			// volume, and the exact destructive teardown #109 is about. The
+			// same producer/consumer split that leaked a mapping earlier in
+			// this branch.
+			//
+			// The empty name is left empty: it IS the test case.
+			// `var` then a single assignment, so the only assignment to vol
+			// is the runVolume one. Writing `vol := tt.volumeName` first and
+			// overwriting it would make vol untrusted under the all-or-nothing
+			// rule -- correctly, since that shape is exactly how a scoped name
+			// gets replaced by a global one.
+			var vol string
+			if tt.volumeName != "" {
+				vol = runVolume(t, tt.volumeName)
+			}
+
 			// Registered BEFORE the mapping can exist, so a partial or rolled-back
 			// unlock cannot leave one behind either (#100). Idempotent.
-			defer releaseVolume(t, tt.volumeName)
-			err := Unlock(tt.device, tt.passphrase, tt.volumeName)
+			defer releaseVolume(t, vol)
+			err := Unlock(tt.device, tt.passphrase, vol)
 			if err == nil {
-				Lock(tt.volumeName)
+				Lock(vol)
 				t.Fatal("Expected error, got nil")
 			}
 		})
@@ -172,7 +193,7 @@ func TestUnlockErrors(t *testing.T) {
 
 // TestLockErrors tests lock error conditions
 func TestLockErrors(t *testing.T) {
-	err := Lock("nonexistent-volume")
+	err := Lock(runVolume(t, "nonexistent-volume"))
 	if err == nil {
 		t.Fatal("Expected error when locking nonexistent volume")
 	}

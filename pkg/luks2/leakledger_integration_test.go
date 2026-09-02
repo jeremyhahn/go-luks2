@@ -83,6 +83,13 @@ func runWithLedger(m *testing.M) int {
 		return 1
 	}
 
+	// Every device-mapper name this suite creates is scoped to this run (#109).
+	// dm names are a flat host-wide namespace, so a constant name collides with
+	// any concurrent run of the same suite -- and the collision is destructive,
+	// not merely a failure. Set BEFORE m.Run so no test can allocate a name
+	// without it; runVolume fails closed if it is still empty.
+	runVolumeSuffix = sanitizeRunID(suite.RunID)
+
 	// What this package adds on top, and what the external suites cannot have:
 	// WRITE-AHEAD records for dm mappings, taken at the one seam every mapping
 	// in this package passes through. The record is durable before the kernel

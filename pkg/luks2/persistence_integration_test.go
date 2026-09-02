@@ -66,7 +66,7 @@ func TestDataPersistenceAcrossUnlockCycles(t *testing.T) {
 	tmpfile.Close()
 
 	passphrase := []byte("persistence-test-passphrase")
-	volumeName := "luks-persist-test"
+	volumeName := runVolume(t, "luks-persist-test")
 	testData := []byte("This data must persist across lock/unlock cycles!")
 
 	t.Logf("Step 1: Formatting LUKS volume at %s", volumePath)
@@ -258,7 +258,7 @@ func TestDataPersistenceMultipleFiles(t *testing.T) {
 	tmpfile.Close()
 
 	passphrase := []byte("multifile-test-pass")
-	volumeName := "luks-multifile"
+	volumeName := runVolume(t, "luks-multifile")
 
 	t.Logf("Creating and formatting LUKS volume")
 
@@ -412,7 +412,7 @@ func TestDataPersistenceLargeFile(t *testing.T) {
 	tmpfile.Close()
 
 	passphrase := []byte("largefile-test-pass")
-	volumeName := "luks-largefile"
+	volumeName := runVolume(t, "luks-largefile")
 
 	t.Logf("Setting up LUKS volume")
 
@@ -557,7 +557,7 @@ func TestSmallVolumeMinimumSize(t *testing.T) {
 	tmpfile.Close()
 
 	passphrase := []byte("small-vol-pass")
-	volumeName := "luks-small"
+	volumeName := runVolume(t, "luks-small")
 
 	t.Logf("Testing minimum viable volume size (32MB)")
 
@@ -711,7 +711,7 @@ func TestUnicodePassphrase(t *testing.T) {
 
 	// Unicode passphrase with various scripts
 	passphrase := []byte("pāsswörd-日本語-Ελληνικά-🔐")
-	volumeName := "luks-unicode"
+	volumeName := runVolume(t, "luks-unicode")
 
 	t.Logf("Testing Unicode passphrase: %s", string(passphrase))
 
@@ -870,7 +870,7 @@ func TestEmptyPassphrase(t *testing.T) {
 		}
 		defer DetachLoopDevice(loopDevice)
 
-		volumeName := "luks-empty"
+		volumeName := runVolume(t, "luks-empty")
 		// Registered BEFORE the mapping can exist, so a partial or rolled-back
 		// unlock cannot leave one behind either (#100). Idempotent.
 		defer releaseVolume(t, volumeName)
@@ -906,10 +906,16 @@ func TestRapidLockUnlock(t *testing.T) {
 	tmpfile.Close()
 
 	passphrase := []byte("rapid-test-pass")
-	volumeName := "luks-rapid"
+	volumeName := runVolume(t, "luks-rapid")
 
-	// Clean up any leftover state from previous test runs
-	Lock(volumeName) // Ignore error if not exists
+	// The pre-emptive `Lock(volumeName)` that used to be here is GONE with the
+	// constant that made it necessary (#109). Against a host-global name it was
+	// not a cleanup: it tore down whatever currently held that name, which
+	// under two concurrent runs is the sibling's LIVE volume. So the collision
+	// did not merely fail the second run, it broke the first.
+	//
+	// A run-scoped name cannot have leftovers from another run, and leftovers
+	// from THIS run are the ledger's job (#96).
 
 	t.Logf("Setting up test volume")
 
@@ -997,7 +1003,7 @@ func TestConcurrentRead(t *testing.T) {
 	tmpfile.Close()
 
 	passphrase := []byte("concurrent-test-pass")
-	volumeName := "luks-concurrent"
+	volumeName := runVolume(t, "luks-concurrent")
 
 	t.Logf("Setting up test volume")
 
@@ -1132,7 +1138,7 @@ func TestIsMountedAccuracy(t *testing.T) {
 	tmpfile.Close()
 
 	passphrase := []byte("ismounted-test-pass")
-	volumeName := "luks-ismounted"
+	volumeName := runVolume(t, "luks-ismounted")
 
 	t.Logf("Setting up test volume")
 

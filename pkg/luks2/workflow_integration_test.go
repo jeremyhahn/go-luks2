@@ -37,7 +37,7 @@ func TestFullEndToEndWorkflow(t *testing.T) {
 	tmpfile.Close()
 
 	passphrase := []byte("test-integration-passphrase-123")
-	volumeName := "luks-integration-test"
+	volumeName := runVolume(t, "luks-integration-test")
 
 	t.Logf("Step 1: Created volume file at %s", volumePath)
 

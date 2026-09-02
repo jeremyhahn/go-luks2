@@ -90,8 +90,14 @@ func TestFormatWithKDFTypes(t *testing.T) {
 			}
 			defer DetachLoopDevice(loopDev)
 
-			defer releaseVolume(t, "test-kdf-"+tt.name)
-			if err := Unlock(loopDev, []byte("test-password"), "test-kdf-"+tt.name); err != nil {
+			// ONE name, computed once and shared by the teardown and the
+			// creation. Spelling it twice is how the two drift apart -- the
+			// first draft of #109 scoped the Unlock and left this defer on the
+			// bare name, so every subtest would have leaked the mapping it
+			// created while reporting that it had released one.
+			vol := runVolume(t, "test-kdf-"+tt.name)
+			defer releaseVolume(t, vol)
+			if err := Unlock(loopDev, []byte("test-password"), vol); err != nil {
 				t.Fatalf("Failed to unlock %s volume: %v", tt.kdfType, err)
 			}
 		})

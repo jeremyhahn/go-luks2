@@ -31,10 +31,7 @@ func TestMountUnmount(t *testing.T) {
 	tmpfile.Close()
 
 	passphrase := []byte("test-mount-pass")
-	volumeName := "test-mount"
-
-	// Cleanup any leftover device mapper from previous runs
-	_ = Lock(volumeName)
+	volumeName := runVolume(t, "test-mount")
 
 	// Format
 	opts := FormatOptions{
