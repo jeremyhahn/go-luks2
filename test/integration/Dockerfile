@@ -16,6 +16,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     kmod \
     && rm -rf /var/lib/apt/lists/*
 
+# Where the run ledgers live.
+#
+# This path must be BIND-MOUNTED from the host for the mechanism to work at
+# all: a record that lives inside the container dies with the run it describes,
+# which is the one thing it may not do. The CI invocation and the Makefile
+# mount it; without a mount the image still builds and runs, and simply offers
+# no protection -- which is the pre-existing behaviour, not a regression.
+ENV LUKS2_TEST_STATE_DIR=/var/lib/go-luks2-test-state
+
+# The marker declares that THIS directory -- the image's own -- does not
+# outlive the container. A bind mount shadows it, so the file is visible
+# exactly when the mount is absent, and the harness refuses to run.
+#
+# Running without persistence is worse than not running: every mapping and loop
+# device the suite creates would be recorded into a file that vanishes with the
+# container, while the host devices it records do not, so the host accumulates
+# debris nothing can attribute and the #85 guard blocks the next run with no
+# record to reap. That is the defect this image exists to prevent, reached by
+# omitting a flag -- which is exactly how it was reached: two `make` targets
+# ran privileged without the mount.
+RUN mkdir -p /var/lib/go-luks2-test-state \
+    && touch /var/lib/go-luks2-test-state/.ephemeral-not-a-persistent-mount
+
 # Set working directory
 WORKDIR /app
 
@@ -71,6 +94,15 @@ COPY . .
 # Build the CLI for integration tests
 RUN go build -o /app/build/luks2 ./cmd/luks2
 
+# Build the reaper the entrypoint runs BEFORE the device-mapper guard.
+#
+# It removes the host state a PREVIOUS run recorded and did not clean up (#96).
+# The order matters and is not negotiable: the guard below refuses on any
+# mapping it cannot attribute, so a reap placed after it would never execute on
+# exactly the hosts that need one -- which is the deadlock #96 describes, where
+# one failed run poisons a runner until a human clears it by hand.
+RUN go build -o /usr/local/bin/luks2-testreap ./test/harness/cmd/luks2-testreap
+
 # Create entrypoint script for flexible test execution
 RUN echo '#!/bin/bash' > /entrypoint.sh && \
     echo 'set -e' >> /entrypoint.sh && \
@@ -94,6 +126,23 @@ RUN echo '#!/bin/bash' > /entrypoint.sh && \
     echo '#' >> /entrypoint.sh && \
     echo '# Tests own their own teardown and remove only what they created.' >> /entrypoint.sh && \
     echo '# A suite must never destroy state it did not make.' >> /entrypoint.sh && \
+    echo '' >> /entrypoint.sh && \
+    echo '# REAP FIRST, GUARD SECOND. The reaper removes only what a previous' >> /entrypoint.sh && \
+    echo '# run RECORDED, and only where the live resource still carries the' >> /entrypoint.sh && \
+    echo '# recorded identity -- see test/harness. It has no sweep and no name' >> /entrypoint.sh && \
+    echo '# pattern, so a host carrying state this suite never recorded is left' >> /entrypoint.sh && \
+    echo '# exactly as found and the guard below still decides whether running' >> /entrypoint.sh && \
+    echo '# is safe. Running it AFTER the guard would be useless: the guard' >> /entrypoint.sh && \
+    echo '# refuses on precisely the debris the reaper exists to remove.' >> /entrypoint.sh && \
+    echo '#' >> /entrypoint.sh && \
+    echo '# No "|| true". A reaper that cannot finish leaves the host in an' >> /entrypoint.sh && \
+    echo '# unknown state, and a suite that runs anyway reports whatever it' >> /entrypoint.sh && \
+    echo '# finds there as a test result.' >> /entrypoint.sh && \
+    echo 'if ! luks2-testreap; then' >> /entrypoint.sh && \
+    echo '  echo "REFUSING TO RUN: recorded host state from a previous run could" >&2' >> /entrypoint.sh && \
+    echo '  echo "not be removed, so this host is not known to be clean." >&2' >> /entrypoint.sh && \
+    echo '  exit 1' >> /entrypoint.sh && \
+    echo 'fi' >> /entrypoint.sh && \
     echo '' >> /entrypoint.sh && \
     echo '# Refuse to run if the host device-mapper is visible with mappings we' >> /entrypoint.sh && \
     echo '# did not create. This guard FAILS CLOSED: an inventory it cannot take' >> /entrypoint.sh && \

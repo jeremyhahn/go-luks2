@@ -1,0 +1,69 @@
+// Copyright (c) 2025 Jeremy Hahn
+//
+// SPDX-License-Identifier: Apache-2.0
+
+// Command luks2-testreap removes the host state a previous integration run
+// recorded and did not clean up.
+//
+// It runs in the container entrypoint BEFORE the #85 device-mapper guard, and
+// that order is the whole point: the guard refuses on any mapping it cannot
+// attribute, so a reap that ran after it would never execute on the hosts that
+// need it. Reap, then guard, then the suite.
+//
+// It removes only what a ledger recorded, only where the live resource still
+// carries the recorded identity. It has no sweep, no name pattern and no
+// "looks like ours" branch. A host carrying state this suite never recorded is
+// left exactly as it was found, and the guard behind it is what decides whether
+// running is safe.
+//
+// Exit codes:
+//
+//	0  nothing recorded, or everything recorded has been dealt with
+//	1  recorded state could not be removed, or a ledger could not be read
+//
+// A non-zero exit means the host is NOT known to be clean. It is deliberately
+// fatal to the job: the alternative is a run that proceeds onto a host in an
+// unknown state and reports whatever it finds as a test result.
+package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+
+	"github.com/jeremyhahn/go-luks2/test/harness"
+)
+
+func main() {
+	// harness.StateDir(), not the raw environment: it is what BeginSuite uses
+	// to decide where to WRITE, so defaulting to anything else would let the
+	// reaper look somewhere the suites never write. A host integration run with
+	// LUKS2_TEST_STATE_DIR unset puts its ledgers under DefaultStateDir, and a
+	// plain `luks2-testreap` has to find them there without the caller knowing
+	// to pass -state-dir.
+	dir := flag.String("state-dir", harness.StateDir(),
+		"directory holding the run ledgers; must outlive the container")
+	self := flag.String("self", "",
+		"run id to leave alone, for a reap performed from inside a live run; empty means every ledger is stale")
+	flag.Parse()
+
+	if *dir == "" {
+		// Only reachable if -state-dir was passed empty explicitly, since the
+		// default is never empty. Kept so that spelling does something
+		// predictable rather than reaping the process's working directory.
+		fmt.Fprintf(os.Stderr, "reap: -state-dir was given as empty; nothing to look at\n")
+		return
+	}
+
+	report, err := harness.Reap(*dir, *self, harness.SystemRemover{}, os.Stdout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "reap: FAILED, the host is not known to be clean: %v\n", err)
+		os.Exit(1)
+	}
+
+	for _, entry := range report.NotOurs {
+		fmt.Fprintf(os.Stderr,
+			"reap: WARNING: %s %q was recorded by a previous run but is not the resource that was recorded; left alone\n",
+			entry.Kind, entry.Value)
+	}
+}

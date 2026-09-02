@@ -88,9 +88,9 @@ test: ## Run unit tests only (no I/O, no root required)
 # race legs in .github/workflows/ci.yml, and the coverage statement is in
 # README.md under Testing.
 test-unit: ## Run only unit tests with coverage and the race detector (fast, no I/O, no root required)
-	@./scripts/race-packages.sh ./pkg/luks2 ./cmd/luks2
+	@./scripts/race-packages.sh ./pkg/luks2 ./cmd/luks2 ./test/harness ./test/harness/cmd/luks2-testreap
 	@echo "$(COLOR_BOLD)Running unit tests with coverage...$(COLOR_RESET)"
-	@$(GO) test -v -race -timeout 30m -coverprofile=$(COVERAGE_FILE) -covermode=atomic ./pkg/luks2 ./cmd/luks2
+	@$(GO) test -v -race -timeout 30m -coverprofile=$(COVERAGE_FILE) -covermode=atomic ./pkg/luks2 ./cmd/luks2 ./test/harness ./test/harness/cmd/luks2-testreap
 	@echo ""
 	@echo "$(COLOR_BOLD)Coverage from unit tests:$(COLOR_RESET)"
 	@$(GO) tool cover -func=$(COVERAGE_FILE) | tail -1
@@ -193,13 +193,13 @@ integration-test: build ## Run all integration tests in Docker (isolated, recomm
 integration-test-pkg: build ## Run package integration tests in Docker
 	@echo "$(COLOR_BOLD)Running package integration tests in Docker...$(COLOR_RESET)"
 	@$(MAKE) docker-build-integration
-	@docker run --rm --privileged go-luks2-integration-test \
+	@docker run --rm --privileged -v "$(TEST_STATE_DIR):/var/lib/go-luks2-test-state" go-luks2-integration-test \
 		go test -v -tags=integration ./test/integration/pkg/...
 
 integration-test-cli: build ## Run CLI integration tests in Docker
 	@echo "$(COLOR_BOLD)Running CLI integration tests in Docker...$(COLOR_RESET)"
 	@$(MAKE) docker-build-integration
-	@docker run --rm --privileged go-luks2-integration-test \
+	@docker run --rm --privileged -v "$(TEST_STATE_DIR):/var/lib/go-luks2-test-state" go-luks2-integration-test \
 		go test -v -tags=integration ./test/integration/cli/...
 
 coverage: build ## Run all tests (unit + integration) with coverage (requires root)
@@ -207,7 +207,7 @@ coverage: build ## Run all tests (unit + integration) with coverage (requires ro
 	@rm -f coverage-unit.out coverage-integration.out $(COVERAGE_FILE)
 	@echo ""
 	@echo "$(COLOR_BOLD)Step 1: Running unit tests with coverage...$(COLOR_RESET)"
-	@$(GO) test -coverprofile=coverage-unit.out -covermode=atomic ./pkg/luks2 ./cmd/luks2 2>&1 | grep -v "no test files" || true
+	@$(GO) test -coverprofile=coverage-unit.out -covermode=atomic ./pkg/luks2 ./cmd/luks2 ./test/harness ./test/harness/cmd/luks2-testreap 2>&1 | grep -v "no test files" || true
 	@echo ""
 	@echo "$(COLOR_BOLD)Step 2: Running integration tests with coverage...$(COLOR_RESET)"
 	@if [ "$$(id -u)" -eq 0 ]; then \
@@ -240,7 +240,7 @@ docker-integration-test: ## Run integration tests in Docker (isolated, recommend
 	@echo "$(COLOR_BOLD)Running integration tests in Docker container (privileged)...$(COLOR_RESET)"
 	@rm -f coverage-docker.out
 	@docker rm -f go-luks2-test-runner 2>/dev/null || true
-	@docker run --privileged --name go-luks2-test-runner go-luks2-integration-test
+	@docker run --privileged -v "$(TEST_STATE_DIR):/var/lib/go-luks2-test-state" --name go-luks2-test-runner go-luks2-integration-test
 	@docker cp go-luks2-test-runner:/app/coverage.out coverage-docker.out 2>/dev/null || true
 	@docker rm -f go-luks2-test-runner 2>/dev/null || true
 	@if [ -f coverage-docker.out ]; then \
@@ -251,12 +251,30 @@ docker-integration-test: ## Run integration tests in Docker (isolated, recommend
 	fi
 	@echo "$(COLOR_GREEN)✓ Docker integration tests complete$(COLOR_RESET)"
 
+# TEST_STATE_DIR holds the run ledgers and is bind-mounted into the integration
+# container. It lives on the HOST on purpose: the suite writes host dm mappings
+# and loop devices, records each before creating it, and the next run removes
+# what was recorded (#96). A record kept inside the container dies with the run
+# whose state needs removing.
+#
+# Never clean this directory as a matter of routine. A ledger left behind means
+# a run died, and deleting it discards the only record of what that run put on
+# this machine.
+#
+# It is deliberately NOT created here. The reaper runs privileged and acts on
+# whatever the ledgers name, so the directory is part of the trust boundary and
+# the harness refuses one owned by another user or writable by group or other.
+# Docker creates a missing bind-mount source as root:root, which is what the
+# harness accepts; `make host-integration-test` runs under sudo, so the harness
+# creates it as root itself.
+TEST_STATE_DIR ?= /var/tmp/go-luks2-test-state
+
 docker-test-specific: ## Run specific integration test in Docker (use TEST=TestName)
 	@echo "$(COLOR_BOLD)Building Docker image...$(COLOR_RESET)"
 	@$(MAKE) docker-build-integration
 	@echo ""
 	@echo "$(COLOR_BOLD)Running test: $(TEST)$(COLOR_RESET)"
-	@docker run --rm --privileged go-luks2-integration-test \
+	@docker run --rm --privileged -v "$(TEST_STATE_DIR):/var/lib/go-luks2-test-state" go-luks2-integration-test \
 		go test -v -tags=integration -run="$(TEST)" ./...
 
 host-integration-test: build ## Run integration tests on host (requires sudo, NOT recommended)
@@ -325,6 +343,15 @@ no-internal-disclosure: ## Refuse internal infrastructure detail in a publicly m
 # for an earlier finding. Each is a case in here now.
 test-guards: ## Test the disclosure and device-teardown guards against fixtures
 	@./scripts/guards-test.sh
+
+# Six defects in one branch (#96) were one idea: "I could not find out" rendered
+# as "it is fine". Review found each of them, at one per round, and only because
+# the reviewer happened to look there. This is the same check, mechanically, on
+# every run -- and it is self-testing, because a guard that cannot say both yes
+# and no is the defect it exists to catch, one level up.
+no-error-collapse: ## Refuse an error collapsed into a benign answer (self-tests itself first)
+	@./scripts/error-collapse-guard.sh --self-test
+	@./scripts/error-collapse-guard.sh
 
 # The CI version gate's own tests. Run locally as well as in CI, because the
 # comparison they cover shipped failing open once already: a substring test
@@ -451,7 +478,7 @@ trivy-fs: ## Scan the working tree with trivy (dependency CVEs and leaked secret
 security: gosec govulncheck verify trivy-fs ## Run the full §8 security suite (gosec, govulncheck, go mod verify, trivy fs)
 	@echo "$(COLOR_GREEN)✓ Security suite complete$(COLOR_RESET)"
 
-ci: fmt-check vet no-global-device-cleanup no-internal-disclosure test-require-tool test-guards lint security test-unit test-calibration build ## Run CI pipeline locally (format, lint, security suite, unit tests, build)
+ci: fmt-check vet no-global-device-cleanup no-internal-disclosure no-error-collapse test-require-tool test-guards lint security test-unit test-calibration build ## Run CI pipeline locally (format, lint, security suite, unit tests, build)
 	@echo ""
 	@echo "$(COLOR_BOLD)======================================$(COLOR_RESET)"
 	@echo "$(COLOR_BOLD)CI Pipeline Complete$(COLOR_RESET)"

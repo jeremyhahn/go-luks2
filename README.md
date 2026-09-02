@@ -518,10 +518,11 @@ it is:
 | | raced |
 |---|---|
 | `pkg/luks2`, `cmd/luks2`, default build tags | **yes** — `-race -covermode=atomic`, in CI and in `make test-unit` |
+| `test/harness`, `test/harness/cmd/luks2-testreap` | **yes** — same legs; the ledger and reaper are in-memory and file-based and touch no host device, which is what lets them be raced |
 | `pkg/luks2`'s `//go:build integration` test files | no — the package is raced under the default tag set, which excludes them |
 | `test/integration/pkg`, `test/integration/cli` | no — these packages do not exist without the `integration` tag |
 
-So the honest statement of race coverage is **the default-tag build of two
+So the honest statement of race coverage is **the default-tag build of four
 packages**, not "the module". The integration suites run privileged, in a
 container, against loop devices, device-mapper and mounts — host-global
 resources with real interleaving concerns — and they run without `-race`. That

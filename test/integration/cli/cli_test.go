@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/test/harness"
 )
 
 var binaryPath string
@@ -63,10 +65,44 @@ func detachLoopDevicesBackedBy(t *testing.T, path string) {
 	}
 }
 
+// TestMain records the host state this suite is about to create (#96), then
+// builds the CLI under test.
+//
+// # What it covers, and what it does not
+//
+// COVERED: loop devices, through the recorded temp root that TMPDIR points at.
+//
+// NOT COVERED: dm mappings, on the kill path. This suite creates them by
+// running the luks2 BINARY, so they are made in a subprocess -- no in-process
+// hook can see them, and the binary under test is built without the integration
+// tag precisely so that what is tested is what ships. The two mappings involved
+// (test-cli-open, test-cli-workflow) are removed by the tests themselves on
+// pass and fail; the SIGKILL window has no record.
+//
+// Closing it would mean building the CLI with a recording hook compiled in,
+// which tests a different binary from the one released -- a worse trade than
+// the gap.
+//
+// Accepted rather than closed here (ruled 2026-09-01): #105, where concurrent
+// jobs docker-rm-f each other's containers through a fixed name, is the
+// dominant PRODUCER of the kills this window depends on and is dispatched;
+// #80's privilege scoping then removes the class entirely by denying the
+// container host device-mapper access in the first place. If #80 stalls, an
+// integration-build-tagged exported observer on the library goes back to the
+// OWNER as a proposal -- it is new exported surface on a Layer-0 library and
+// not a lane's call.
 func TestMain(m *testing.M) {
-	// Build the CLI binary
+	suite, err := harness.BeginSuite(os.Stderr)
+	if err != nil {
+		os.Stderr.WriteString("cli integration suite: " + err.Error() + "\n")
+		os.Exit(1)
+	}
+
+	// Built AFTER BeginSuite so the binary lands under the recorded temp root
+	// like everything else this run creates.
 	tmpDir, err := os.MkdirTemp("", "luks2-cli-test")
 	if err != nil {
+		_ = suite.Finish(1, os.Stderr)
 		panic("Failed to create temp dir: " + err.Error())
 	}
 	defer os.RemoveAll(tmpDir)
@@ -74,10 +110,13 @@ func TestMain(m *testing.M) {
 	binaryPath = filepath.Join(tmpDir, "luks2")
 	cmd := exec.Command("go", "build", "-o", binaryPath, "github.com/jeremyhahn/go-luks2/cmd/luks2")
 	if out, err := cmd.CombinedOutput(); err != nil {
+		_ = suite.Finish(1, os.Stderr)
 		panic("Failed to build CLI: " + err.Error() + "\nOutput: " + string(out))
 	}
 
-	os.Exit(m.Run())
+	// Exit with what the CLEANUP concluded: a green run that could not remove
+	// its own host state must not report success.
+	os.Exit(suite.Finish(m.Run(), os.Stderr))
 }
 
 func runCLI(args ...string) (string, string, error) {

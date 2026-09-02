@@ -126,6 +126,20 @@ jobs:
       - name: Refuse internal infrastructure detail
         run: ./scripts/no-internal-disclosure.sh
 
+      # Six defects in one branch (#96) were one idea: "I could not find out"
+      # rendered as "it is fine". Review found each of them, at one per round,
+      # and only because the reviewer happened to look there. This is the same
+      # check mechanically, on every run.
+      #
+      # It self-tests FIRST, and that ordering is the point: a guard that cannot
+      # say both yes and no is the defect it exists to catch, one level up. It
+      # would have caught five of the six instances before any review round --
+      # verified against the historical commits.
+      - name: Refuse an error collapsed into a benign answer
+        run: |
+          ./scripts/error-collapse-guard.sh --self-test
+          ./scripts/error-collapse-guard.sh
+
       # The version gate has its own tests, and they run HERE rather than only
       # on a developer's machine — a suite nothing executes is a suite that can
       # rot into agreement with whatever the code does. They use fakes printing
@@ -291,7 +305,7 @@ jobs:
       # separately. Asserting the list is the other branch of the issue's
       # acceptance and fails LOUDLY at the moment of divergence.
       - name: Assert the race legs cover every package
-        run: ./scripts/race-packages.sh ./pkg/luks2 ./cmd/luks2
+        run: ./scripts/race-packages.sh ./pkg/luks2 ./cmd/luks2 ./test/harness ./test/harness/cmd/luks2-testreap
 
       # WHAT THE RACE DETECTOR HERE DOES AND DOES NOT COVER (#34 item 3),
       # stated so "we run the race detector" is never read as more than it is:
@@ -359,6 +373,18 @@ jobs:
       - name: Run PBKDF2 calibration tests (no -race)
         run: make test-calibration
 
+      # test/harness is the ledger that keeps the integration suite from
+      # leaking host state (#96). It is raced HERE, in the unit tier, because
+      # everything in it is in-memory and file-based -- it never touches
+      # device-mapper or a loop device, which is exactly why it can be.
+      #
+      # It also has to be somewhere: a package CI builds but never tests is a
+      # blind spot, and this one decides what gets REMOVED from a host. The
+      # reaper command is listed alongside it so race-packages.sh's enumeration
+      # stays complete.
+      - name: Run unit tests (test/harness)
+        run: go test -v -race -timeout 30m -coverprofile=coverage-harness.out -covermode=atomic ./test/harness ./test/harness/cmd/luks2-testreap
+
       # Recorded so the next slow or failing run has evidence rather than a
       # guess. RLIMIT_MEMLOCK is the one that turns this package's fail-closed
       # design into a red suite: measured on a workstation, the suite passes
@@ -371,11 +397,18 @@ jobs:
           echo "nproc: $(nproc)"
           df -h /tmp | tail -1
 
+      # Every profile the legs above produce is merged here. A profile that is
+      # written and then left out does not fail anything -- the leg still gates
+      # -- it just makes the reported number describe less of the module than a
+      # reader assumes, which is the same silent narrowing scripts/race-packages.sh
+      # exists to prevent one level up. Adding a race leg means adding its
+      # profile to this list.
       - name: Merge coverage
         run: |
           echo "mode: atomic" > coverage.out
           grep -v "^mode:" coverage-pkg.out >> coverage.out 2>/dev/null || true
           grep -v "^mode:" coverage-cli.out >> coverage.out 2>/dev/null || true
+          grep -v "^mode:" coverage-harness.out >> coverage.out 2>/dev/null || true
 
       - name: Show coverage
         run: |
@@ -462,9 +495,44 @@ jobs:
         run: rm -f "${RUNNER_TEMP}/gomodauth.env"
 
       - name: Run integration tests
+        # LUKS2_TEST_STATE_DIR is bind-mounted from the RUNNER, not left inside
+        # the container, and that is the whole mechanism (#96).
+        #
+        # The suite creates host dm mappings and loop devices -- neither is
+        # namespaced, so --privileged writes them to the machine. It records
+        # each one before creating it, and the next run removes exactly what
+        # was recorded. A record kept inside the container dies with the run it
+        # describes, which is precisely the run whose state needs removing, so
+        # the ledger has to live on the host to be worth anything.
+        #
+        # The directory deliberately persists between jobs. It is NOT cleaned
+        # here: a ledger left behind is a run that died, and erasing it would
+        # discard the only record of what that run put on this machine.
         run: |
+          set -eu
+          STATE_DIR=/var/tmp/go-luks2-test-state
+
+          # NOT created here, deliberately. The reaper inside the container runs
+          # as root, before the #85 guard, and removes whatever the ledgers in
+          # this directory name -- so the directory is part of the trust
+          # boundary. Created by the RUNNER user it would be owned by a
+          # non-root uid, and the harness refuses that: a privileged process
+          # must not act on control files another user maintains.
+          #
+          # Docker creates a missing bind-mount source itself, as root:root
+          # 0755, which is what the harness accepts. If the path already exists
+          # and is not trustworthy -- someone else's, or group/other-writable,
+          # /var/tmp being world-writable and sticky -- the run FAILS with a
+          # diagnosis instead of proceeding, which is the intended outcome.
+          if [ -e "${STATE_DIR}" ]; then
+            echo "state dir already present:"
+            ls -ldn "${STATE_DIR}"
+          fi
+
           docker rm -f go-luks2-test-runner 2>/dev/null || true
-          docker run --privileged --name go-luks2-test-runner go-luks2-integration-test
+          docker run --privileged \
+            -v "${STATE_DIR}:/var/lib/go-luks2-test-state" \
+            --name go-luks2-test-runner go-luks2-integration-test
           docker cp go-luks2-test-runner:/app/coverage.out coverage-integration.out 2>/dev/null || true
           docker rm -f go-luks2-test-runner 2>/dev/null || true
 
