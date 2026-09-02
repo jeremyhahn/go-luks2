@@ -7,10 +7,13 @@
 package luks2
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -544,5 +547,301 @@ func TestRecoveryKeySaveError(t *testing.T) {
 	}
 	if key.SaveError != os.ErrPermission {
 		t.Errorf("expected SaveError to be ErrPermission, got %v", key.SaveError)
+	}
+}
+
+// AddRecoveryKey used to REPORT a keyslot it had not used (#42).
+//
+// AddKey chooses a slot and does not report which, so AddRecoveryKey inferred
+// it afterwards as the HIGHEST-numbered slot in the header. AddKey fills the
+// FIRST FREE slot, so the inference is wrong on any volume with a gap -- which
+// is the ordinary state of one where a credential has ever been revoked.
+//
+// The number is written into the saved recovery-key file. An operator revoking
+// "the recovery key" months later therefore destroys a different, live
+// credential AND leaves the recovery key working: data loss and a failed
+// revocation from one wrong integer.
+
+// fipsSafeAddKeyOptions selects PBKDF2 explicitly.
+//
+// AddKey with nil options defaults to argon2id, which the Go Cryptographic
+// Module refuses under GODEBUG=fips140=on -- so a fixture that passed nil built
+// its volume fine in the default build and failed the FIPS leg with
+// "algorithm not approved in FIPS 140-3 mode". Measured: the race leg and
+// govulncheck were both green while all four of these tests were broken under
+// FIPS. formatWithLibrary makes the same choice for the same reason.
+//
+// The iteration time is the minimum, because these fixtures add several
+// credentials each and the KDF cost is not what any of them is about.
+func fipsSafeAddKeyOptions() *AddKeyOptions {
+	return &AddKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterTime: 1}
+}
+
+// volumeWithAKeyslotGap returns a container holding keyslots {0, 2} -- the
+// shape any volume takes once a credential has been revoked -- together with
+// the passphrases that open them.
+func volumeWithAKeyslotGap(t *testing.T) (device string, primary, third []byte) {
+	t.Helper()
+
+	device = newImage(t, "keyslot-gap.img")
+	formatWithLibrary(t, device)
+
+	primary = []byte(conformancePassphrase)
+	second := []byte("second-credential-passphrase")
+	third = []byte("third-credential-passphrase")
+
+	if err := AddKey(device, primary, second, fipsSafeAddKeyOptions()); err != nil {
+		t.Fatalf("AddKey for slot 1: %v", err)
+	}
+	if err := AddKey(device, primary, third, fipsSafeAddKeyOptions()); err != nil {
+		t.Fatalf("AddKey for slot 2: %v", err)
+	}
+	if err := RemoveKey(device, second, 1); err != nil {
+		t.Fatalf("RemoveKey(1): %v", err)
+	}
+
+	assertKeyslotIDs(t, device, []string{"0", "2"})
+	return device, primary, third
+}
+
+// assertKeyslotIDs fails unless the container holds exactly these keyslots.
+// The fixture above is only meaningful if the gap is really there, and a
+// silently-different keyslot layout would make every assertion below vacuous.
+func assertKeyslotIDs(t *testing.T, device string, want []string) {
+	t.Helper()
+
+	_, metadata, err := ReadHeader(device)
+	if err != nil {
+		t.Fatalf("ReadHeader: %v", err)
+	}
+	got := keyslotIDsInScanOrder(metadata.Keyslots)
+	if len(got) != len(want) {
+		t.Fatalf("keyslots are %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("keyslots are %v, want %v", got, want)
+		}
+	}
+}
+
+// keyslotOpenedBy returns the id of the single keyslot this credential opens,
+// or "" if it opens none. It tries every slot rather than stopping at the
+// first, so a credential that opens more than one is a failure rather than a
+// silently-taken first answer.
+func keyslotOpenedBy(t *testing.T, device string, passphrase []byte) string {
+	t.Helper()
+
+	_, metadata, err := ReadHeader(device)
+	if err != nil {
+		t.Fatalf("ReadHeader: %v", err)
+	}
+
+	opened := ""
+	for _, id := range keyslotIDsInScanOrder(metadata.Keyslots) {
+		key, err := unlockKeyslot(device, id, passphrase, metadata.Keyslots[id], metadata.Digests)
+		if err != nil {
+			continue
+		}
+		key.Destroy()
+		if opened != "" {
+			t.Fatalf("one credential opened both keyslot %s and keyslot %s", opened, id)
+		}
+		opened = id
+	}
+	return opened
+}
+
+// TestAddRecoveryKeyReportsTheKeyslotItActuallyUsed is the #42 regression test.
+//
+// Before the fix, on this fixture: the recovery key landed in slot 1 and was
+// reported as slot 2.
+func TestAddRecoveryKeyReportsTheKeyslotItActuallyUsed(t *testing.T) {
+	device, primary, third := volumeWithAKeyslotGap(t)
+
+	saved := filepath.Join(t.TempDir(), "recovery.key")
+	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{OutputPath: saved, KDFType: KDFTypePBKDF2})
+	if err != nil {
+		t.Fatalf("AddRecoveryKey: %v", err)
+	}
+	defer recoveryKey.Clear()
+	if recoveryKey.SaveError != nil {
+		t.Fatalf("saving the recovery key failed: %v", recoveryKey.SaveError)
+	}
+
+	// The report has to name the slot the recovery key actually opens.
+	var actual string
+	if err := borrowSecret("recovery key", recoveryKey.Key, func(raw []byte) error {
+		actual = keyslotOpenedBy(t, device, raw)
+		return nil
+	}); err != nil {
+		t.Fatalf("could not borrow the recovery key: %v", err)
+	}
+	if actual == "" {
+		t.Fatal("the recovery key opens no keyslot at all")
+	}
+	if got := strconv.Itoa(recoveryKey.Keyslot); got != actual {
+		t.Fatalf("AddRecoveryKey reports keyslot %s; the recovery key opens keyslot %s. Revoking as reported destroys a different credential and leaves the recovery key live",
+			got, actual)
+	}
+
+	// The damage plane, stated as the operator's action: revoking the reported
+	// slot must not take a credential a human still uses with it.
+	for name, credential := range map[string][]byte{"primary": primary, "third": third} {
+		if opened := keyslotOpenedBy(t, device, credential); opened == strconv.Itoa(recoveryKey.Keyslot) {
+			t.Fatalf("the %s passphrase opens keyslot %s, which is the slot reported for the recovery key; revoking it would destroy a live credential",
+				name, opened)
+		}
+	}
+
+	// The number is PERSISTED, and the file is what an operator reads months
+	// later. A correct in-memory struct and a wrong file would be the same
+	// defect with an extra step.
+	if !savedFileRecordsKeyslot(t, saved, actual) {
+		t.Fatalf("the saved recovery key file does not record keyslot %s", actual)
+	}
+}
+
+// savedFileRecordsKeyslot reports whether the saved recovery-key file carries
+// the "# Keyslot: <id>" preamble line.
+//
+// It reads the file into LOCKED memory and searches it in place, which is not
+// ceremony: that file contains a USABLE CREDENTIAL. An earlier version of this
+// test used os.ReadFile plus string(contents) -- two unwipeable heap copies of
+// the recovery key -- and printed the whole file in its failure message, which
+// would have put the credential in CI logs. Codex blocked it on PR #103 and was
+// right; it violates the protected-memory mandate and the prohibition on
+// secrets reaching logs.
+//
+// The idiom is LoadRecoveryKey's own: allocate an enclave sized from the file,
+// fill it inside a borrow, and locate what is wanted by INDEX rather than
+// copying anything out. Nothing here returns or logs file contents -- only a
+// bool -- so no caller can leak them either.
+func savedFileRecordsKeyslot(t *testing.T, path, keyslotID string) bool {
+	t.Helper()
+
+	f, err := os.Open(path) // #nosec G304 -- path is under t.TempDir()
+	if err != nil {
+		t.Fatalf("opening the saved recovery key: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	info, err := f.Stat()
+	if err != nil {
+		t.Fatalf("stat on the saved recovery key: %v", err)
+	}
+
+	contents, err := newSecretEnclave("recovery key file", int(info.Size()))
+	if err != nil {
+		t.Fatalf("could not obtain protected memory for the saved file: %v", err)
+	}
+	defer contents.Destroy()
+
+	found := false
+	if err := borrowSecret("recovery key file", contents, func(b []byte) error {
+		if _, err := io.ReadFull(f, b); err != nil {
+			return err
+		}
+		found = bytes.Contains(b, []byte("# Keyslot: "+keyslotID+"\n"))
+		return nil
+	}); err != nil {
+		t.Fatalf("reading the saved recovery key: %v", err)
+	}
+	return found
+}
+
+// TestAddRecoveryKeyHonoursAnExplicitKeyslot covers the other branch, which was
+// always correct and must stay so: a caller naming a slot gets that slot, and
+// the report agrees.
+func TestAddRecoveryKeyHonoursAnExplicitKeyslot(t *testing.T) {
+	device, primary, _ := volumeWithAKeyslotGap(t)
+
+	requested := 7
+	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{Keyslot: &requested, KDFType: KDFTypePBKDF2})
+	if err != nil {
+		t.Fatalf("AddRecoveryKey: %v", err)
+	}
+	defer recoveryKey.Clear()
+
+	if recoveryKey.Keyslot != requested {
+		t.Fatalf("AddRecoveryKey reports keyslot %d, want the requested %d", recoveryKey.Keyslot, requested)
+	}
+
+	var actual string
+	if err := borrowSecret("recovery key", recoveryKey.Key, func(raw []byte) error {
+		actual = keyslotOpenedBy(t, device, raw)
+		return nil
+	}); err != nil {
+		t.Fatalf("could not borrow the recovery key: %v", err)
+	}
+	if actual != strconv.Itoa(requested) {
+		t.Fatalf("the recovery key opens keyslot %s, but slot %d was requested", actual, requested)
+	}
+}
+
+// TestAddRecoveryKeyPicksTheFreeSlotEvenWhenTheGapIsFilledFirst pins that the
+// answer comes from the CHOICE and not from the shape of the header.
+//
+// The gap at slot 1 is occupied before the call, so the recovery key must land
+// somewhere else -- and the report must follow it there. A rule that
+// reconstructed the slot from the header would have to get this right by a
+// second piece of reasoning; reading the choice gets it right by construction.
+func TestAddRecoveryKeyPicksTheFreeSlotEvenWhenTheGapIsFilledFirst(t *testing.T) {
+	device, primary, _ := volumeWithAKeyslotGap(t)
+
+	occupied := 1
+	occupyOpts := fipsSafeAddKeyOptions()
+	occupyOpts.Keyslot = &occupied
+	if err := AddKey(device, primary, []byte("occupies-the-gap-slot"), occupyOpts); err != nil {
+		t.Fatalf("AddKey into the gap: %v", err)
+	}
+	assertKeyslotIDs(t, device, []string{"0", "1", "2"})
+
+	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{KDFType: KDFTypePBKDF2})
+	if err != nil {
+		t.Fatalf("AddRecoveryKey: %v", err)
+	}
+	defer recoveryKey.Clear()
+
+	var actual string
+	if err := borrowSecret("recovery key", recoveryKey.Key, func(raw []byte) error {
+		actual = keyslotOpenedBy(t, device, raw)
+		return nil
+	}); err != nil {
+		t.Fatalf("could not borrow the recovery key: %v", err)
+	}
+	if actual == "" {
+		t.Fatal("the recovery key opens no keyslot at all")
+	}
+	if got := strconv.Itoa(recoveryKey.Keyslot); got != actual {
+		t.Fatalf("AddRecoveryKey reports keyslot %s; the recovery key opens keyslot %s", got, actual)
+	}
+	// And it must not have taken a slot that was already someone else's.
+	if actual == "1" {
+		t.Fatal("the recovery key took the occupied slot 1")
+	}
+}
+
+// TestAddKeyReportsTheSlotItChose covers the seam directly: AddKey's exported
+// signature is unchanged, and the unexported variant reports.
+func TestAddKeyReportsTheSlotItChose(t *testing.T) {
+	device, primary, _ := volumeWithAKeyslotGap(t)
+
+	assigned := -1
+	if err := addKey(device, primary, []byte("a-new-credential-here"), fipsSafeAddKeyOptions(), &assigned); err != nil {
+		t.Fatalf("addKey: %v", err)
+	}
+	// The FIRST FREE slot, which is the gap -- not the highest, which is what
+	// the deleted inference would have said.
+	if assigned != 1 {
+		t.Fatalf("addKey reported slot %d, want the first free slot 1", assigned)
+	}
+	if opened := keyslotOpenedBy(t, device, []byte("a-new-credential-here")); opened != "1" {
+		t.Fatalf("the new credential opens keyslot %s, but slot %d was reported", opened, assigned)
+	}
+
+	// AddKey itself must still work, and still return only an error.
+	if err := AddKey(device, primary, []byte("another-new-credential"), fipsSafeAddKeyOptions()); err != nil {
+		t.Fatalf("AddKey: %v", err)
 	}
 }

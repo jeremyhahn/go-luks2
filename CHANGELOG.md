@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`AddRecoveryKey` reported a keyslot it had not used — a failed revocation
+  that destroys a live credential (#42).** It inferred the slot after the fact
+  as the **highest-numbered** one in the header, while `AddKey` fills the
+  **first free** one. The two agree only while the active slots are contiguous
+  from zero, which stops being true the moment any credential is revoked.
+  Measured on a container holding slots `{0, 2}`: the recovery key landed in
+  slot 1 and was reported as slot **2**.
+
+  The number is written into the saved recovery-key file, so it outlives the
+  process. An operator retiring the recovery key months later reads slot 2,
+  revokes slot 2, and **destroys a different credential while the recovery key
+  stays live** — both halves wrong in the dangerous direction.
+
+  The inference is deleted rather than corrected: `AddKey` now reports the slot
+  it chose, at the point it chooses it and under the device lock, and
+  `AddRecoveryKey` records that. Any rule that reconstructs the choice instead
+  of reading it drifts from `AddKey` again the next time either moves. The
+  exported `AddKey` signature is unchanged — it has a consumer outside this
+  repository — so the reporting variant is unexported.
+
+  The old code also swallowed its own failure: on a `ListKeyslots` error it left
+  `Keyslot` at its zero value, reporting **slot 0**, which on almost every
+  volume is the operator's primary passphrase.
+
 - **PBKDF2 keyslots were formatted with roughly 1/50th of the requested work
   (#52).** `BenchmarkPBKDF2` calibrated the iteration count by timing 1000
   iterations once and gating the extrapolation on `elapsed.Milliseconds() > 0`.

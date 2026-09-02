@@ -144,7 +144,31 @@ func TestKey(device string, passphrase []byte) error {
 // AddKey adds a new passphrase to an available keyslot
 // existingPassphrase is used to unlock the volume and retrieve the master key
 // newPassphrase is the new passphrase to add
+//
+// It does NOT report which keyslot received the key. A caller that needs to
+// know -- to record it, or to revoke it later -- must use addKey; inferring it
+// afterwards from the header is how #42 destroyed the wrong credential. The
+// exported signature is unchanged because it is consumed outside this
+// repository (go-trusted-platform pkg/storage/luks), so widening it is a
+// coordinated breaking change rather than this fix.
 func AddKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKeyOptions) error {
+	return addKey(device, existingPassphrase, newPassphrase, opts, nil)
+}
+
+// addKey is AddKey, and additionally REPORTS the keyslot it used through
+// assignedSlot when that is non-nil.
+//
+// The slot is written where it is CHOSEN -- under the device lock this function
+// already holds -- so a caller learns the actual answer rather than
+// reconstructing it. AddRecoveryKey used to reconstruct it, with a different
+// rule ("the highest-numbered slot") than the one AddKey uses ("the first free
+// slot"), and the two agree only while the active slots are contiguous from
+// zero. That stops being true the moment any credential is revoked (#42).
+//
+// assignedSlot is an out-parameter rather than a second return value because
+// AddKey's exported signature has a consumer outside this repository. It is
+// unexported, so the wart does not reach the API.
+func addKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKeyOptions, assignedSlot *int) error {
 	// Validate inputs
 	if err := ValidateDevicePath(device); err != nil {
 		return err
@@ -180,6 +204,15 @@ func AddKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKe
 	targetSlot, err := findAvailableKeyslot(metadata, opts)
 	if err != nil {
 		return err
+	}
+
+	// Reported to the caller HERE, at the point of decision and under the lock,
+	// rather than left to be inferred from the header afterwards (#42). It is
+	// set before the write rather than after it deliberately: every remaining
+	// failure path returns an error, so a caller that sees success has this
+	// value, and a caller that sees an error must not act on it either way.
+	if assignedSlot != nil {
+		*assignedSlot = targetSlot
 	}
 
 	// Get existing keyslot for reference (cipher, key size, etc.).

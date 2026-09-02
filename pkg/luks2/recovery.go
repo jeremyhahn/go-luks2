@@ -186,8 +186,12 @@ func AddRecoveryKey(device string, existingPassphrase []byte, opts *RecoveryKeyO
 
 	// AddKey takes the new credential as raw bytes, so the key is borrowed for
 	// the length of that call and no longer.
+	//
+	// addKey rather than AddKey, for assignedSlot: it reports the keyslot it
+	// chose, at the point it chooses it and under the device lock. See below.
+	assignedSlot := -1
 	if err := borrowSecret("recovery key", recoveryKey.Key, func(raw []byte) error {
-		return AddKey(device, existingPassphrase, raw, addOpts)
+		return addKey(device, existingPassphrase, raw, addOpts, &assignedSlot)
 	}); err != nil {
 		recoveryKey.Clear()
 		return nil, fmt.Errorf("failed to add recovery key: %w", err)
@@ -199,22 +203,36 @@ func AddRecoveryKey(device string, existingPassphrase []byte, opts *RecoveryKeyO
 		recoveryKey.VolumeUUID = info.UUID
 	}
 
-	// Determine which keyslot was used
-	if opts.Keyslot != nil {
-		recoveryKey.Keyslot = *opts.Keyslot
-	} else {
-		// Find the newly added keyslot
-		slots, err := ListKeyslots(device)
-		if err == nil {
-			maxSlot := 0
-			for _, s := range slots {
-				if s.ID > maxSlot {
-					maxSlot = s.ID
-				}
-			}
-			recoveryKey.Keyslot = maxSlot
-		}
+	// The keyslot addKey ACTUALLY USED, read from where it was chosen, not
+	// reconstructed from the header afterwards (#42).
+	//
+	// What this replaced inferred it as the HIGHEST-numbered slot present, while
+	// AddKey takes the FIRST FREE one. The two agree only while the active slots
+	// are contiguous from zero, which stops being true the moment a credential
+	// is revoked. Measured on a container holding slots {0, 2}: the recovery key
+	// landed in slot 1 and was reported as slot 2.
+	//
+	// The number is not cosmetic. It is written into the saved recovery-key file
+	// and outlives the process, so an operator retiring the recovery key months
+	// later destroys a different, live credential AND leaves the recovery key
+	// working. Both halves fail in the dangerous direction.
+	//
+	// The old code also swallowed its own failure: on a ListKeyslots error it
+	// left Keyslot at its zero value, reporting SLOT 0 -- which on almost every
+	// volume is the operator's primary passphrase, and the worst possible
+	// default for a number whose only use is deciding what to destroy.
+	//
+	// An inference is not corrected here, it is DELETED. Any rule that
+	// reconstructs the choice instead of reading it will drift from AddKey
+	// again the next time either rule moves.
+	if assignedSlot < 0 {
+		// Unreachable: addKey assigns before every path that can still succeed.
+		// Refused rather than reported as a slot number, because this value's
+		// only use is telling an operator what to destroy.
+		recoveryKey.Clear()
+		return nil, fmt.Errorf("%w: the recovery key was written but the keyslot it went to was not reported", ErrInvalidKeyslot)
 	}
+	recoveryKey.Keyslot = assignedSlot
 
 	// Save to file if path specified
 	if opts.OutputPath != "" {
