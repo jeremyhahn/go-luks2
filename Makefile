@@ -69,6 +69,24 @@ install: ## Install the CLI binary to $GOPATH/bin
 	@$(GO) install $(LDFLAGS) ./$(CMD_DIR)
 	@echo "$(COLOR_GREEN)✓ Installed to $(GOBIN)/$(BINARY_NAME) (v$(BUILD_VERSION))$(COLOR_RESET)"
 
+# WHICH `|| true` IS A DEFECT, AND WHICH IS NOT (#97).
+#
+# `|| true` is not the defect by itself. The defect is `|| true` on a command
+# WHOSE FAILURE IS THE SIGNAL YOU CAME FOR. Apply it per site rather than
+# sweeping, because a sweep produces a rule nobody can apply to the next case:
+#
+#   go test          the failure IS the result           -> never suppress
+#   a repo guard     the failure IS the result           -> never suppress
+#   grep on an       exit 1 means "no lines matched",
+#   optional file    which is not an error               -> suppressing is fine
+#   docker rm -f     removing something already absent
+#   of a container   is the goal state, not a failure    -> suppressing is fine
+#
+# So `|| true` survives deliberately below on the coverage-profile merges and
+# on the docker container teardown, and it is gone from every `go test`. If you
+# are adding one, the question is not "is this noisy" but "would I want to know
+# if this failed".
+#
 # The `2>&1 | grep -v "no test files" || true` this used to end in made the
 # target INCAPABLE OF FAILING, twice over: in a pipeline the exit status is
 # grep's, so go test's failure was already lost, and `|| true` then discarded
@@ -123,7 +141,7 @@ test-calibration: ## Run the PBKDF2 calibration tests without -race (the mode th
 
 test-cli: ## Run CLI unit tests only
 	@echo "$(COLOR_BOLD)Running CLI unit tests...$(COLOR_RESET)"
-	@$(GO) test -v -coverprofile=coverage-cli.out -covermode=atomic ./cmd/luks2 2>&1 | grep -v "no test files" || true
+	@$(GO) test -v -coverprofile=coverage-cli.out -covermode=atomic ./cmd/luks2
 	@echo ""
 	@echo "$(COLOR_BOLD)CLI Coverage:$(COLOR_RESET)"
 	@$(GO) tool cover -func=coverage-cli.out | tail -1
@@ -207,13 +225,13 @@ coverage: build ## Run all tests (unit + integration) with coverage (requires ro
 	@rm -f coverage-unit.out coverage-integration.out $(COVERAGE_FILE)
 	@echo ""
 	@echo "$(COLOR_BOLD)Step 1: Running unit tests with coverage...$(COLOR_RESET)"
-	@$(GO) test -coverprofile=coverage-unit.out -covermode=atomic ./pkg/luks2 ./cmd/luks2 ./test/harness ./test/harness/cmd/luks2-testreap 2>&1 | grep -v "no test files" || true
+	@$(GO) test -coverprofile=coverage-unit.out -covermode=atomic ./pkg/luks2 ./cmd/luks2 ./test/harness ./test/harness/cmd/luks2-testreap
 	@echo ""
 	@echo "$(COLOR_BOLD)Step 2: Running integration tests with coverage...$(COLOR_RESET)"
 	@if [ "$$(id -u)" -eq 0 ]; then \
-		$(GO) test -tags=integration -coverprofile=coverage-integration.out -covermode=atomic ./... 2>&1 | grep -v "no test files" || true; \
+		$(GO) test -tags=integration -coverprofile=coverage-integration.out -covermode=atomic ./...; \
 	else \
-		sudo -E PATH="$(PATH)" $(GO) test -tags=integration -coverprofile=coverage-integration.out -covermode=atomic ./... 2>&1 | grep -v "no test files" || true; \
+		sudo -E PATH="$(PATH)" $(GO) test -tags=integration -coverprofile=coverage-integration.out -covermode=atomic ./...; \
 	fi
 	@echo ""
 	@echo "$(COLOR_BOLD)Step 3: Merging coverage profiles...$(COLOR_RESET)"
@@ -283,9 +301,9 @@ host-integration-test: build ## Run integration tests on host (requires sudo, NO
 	@echo "$(COLOR_YELLOW)  Recommended: use 'make integration-test' (runs in Docker)$(COLOR_RESET)"
 	@echo ""
 	@if [ "$$(id -u)" -eq 0 ]; then \
-		$(GO) test -v -tags=integration ./... 2>&1 | grep -v "no test files" || true; \
+		$(GO) test -v -tags=integration ./...; \
 	else \
-		sudo -E PATH="$(PATH)" $(GO) test -v -tags=integration ./... 2>&1 | grep -v "no test files" || true; \
+		sudo -E PATH="$(PATH)" $(GO) test -v -tags=integration ./...; \
 	fi
 	@echo "$(COLOR_GREEN)✓ Host integration tests complete$(COLOR_RESET)"
 
