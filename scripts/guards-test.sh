@@ -318,6 +318,105 @@ fixture gone.sh 'ordinary'
 rm "$d/gone.sh"
 check reject no-global-device-cleanup.sh "a tracked file missing from the worktree"
 
+echo "== both guards: a tracked symlink is scanned THROUGH, not just read (#120) =="
+# MEASURED against main at 5c7b578 with a control: a tracked link to an
+# untracked file holding a violation was reported CLEAN by both guards, while
+# the identical bytes as a regular tracked file were rejected. A path string
+# never matches any pattern, so the target was never examined at all.
+#
+# The root cases exist because the first version of this fix accepted only
+# "$root"/* and rejected a link to `.` as external -- an in-tree directory
+# reported as outside the worktree. Review caught it. The reviewed
+# implementation this was copied from has the same bug, so "it was already
+# reviewed elsewhere" is not coverage.
+#
+# The two ACCEPT cases are not padding. They are what proves the rejections
+# below come from the target's CONTENT rather than from the mere presence of a
+# link -- a guard that refuses every symlink would pass all four reject cases
+# and be useless. Mutation check: restoring the readlink-only branch turns
+# exactly the four reject cases red and leaves both accept cases green.
+for guard in no-internal-disclosure.sh no-global-device-cleanup.sh; do
+	d="$(newrepo "sym-ok-$guard")"
+	printf 'echo hello\n' > "$d/plain.txt"
+	ln -s plain.txt "$d/link.sh"
+	git -C "$d" add link.sh
+	check accept "$guard" "a link to a harmless untracked file [$guard]"
+
+	d="$(newrepo "sym-dir-$guard")"
+	mkdir -p "$d/sub"
+	ln -s sub "$d/link.sh"
+	git -C "$d" add link.sh
+	check accept "$guard" "a link to a DIRECTORY, which has no bytes of its own [$guard]"
+
+	d="$(newrepo "sym-root-$guard")"
+	ln -s . "$d/link.sh"
+	git -C "$d" add link.sh
+	check accept "$guard" "a link to the REPOSITORY ROOT itself [$guard]"
+
+	d="$(newrepo "sym-updot-$guard")"
+	mkdir -p "$d/sub"
+	ln -s sub/.. "$d/link.sh"
+	git -C "$d" add link.sh
+	check accept "$guard" "a link reaching the root the long way, sub/.. [$guard]"
+
+	d="$(newrepo "sym-dangling-$guard")"
+	ln -s nowhere.txt "$d/link.sh"
+	git -C "$d" add link.sh
+	check reject "$guard" "a DANGLING link, which cannot be examined [$guard]"
+
+	d="$(newrepo "sym-outside-$guard")"
+	ln -s /etc/hostname "$d/link.sh"
+	git -C "$d" add link.sh
+	check reject "$guard" "a link resolving OUTSIDE the worktree [$guard]"
+
+	d="$(newrepo "sym-fifo-$guard")"
+	mkfifo "$d/f.pipe"
+	ln -s f.pipe "$d/link.sh"
+	git -C "$d" add link.sh
+	check reject "$guard" "a link to something neither file nor directory [$guard]"
+done
+
+# The payload cases, one per guard, each carrying that guard's own violation in
+# an UNTRACKED target.
+d="$(newrepo sym-payload-disclosure)"
+printf 'built under %s\n' "${PATH_HOME}" > "$d/secret.txt"
+ln -s secret.txt "$d/link.sh"
+git -C "$d" add link.sh
+check reject no-internal-disclosure.sh "an internal path reachable only THROUGH a link"
+
+# THE PAYLOAD MUST BE ONE ONLY THE FIXED CONSUMER CAN CATCH.
+#
+# The disclosure guard has TWO passes over a file's bytes: the structural grep
+# (home paths, private IPs, internal domains) and the python hashed-name and
+# citation pass. Both had to be taught to see through a symlink, and they were
+# fixed one at a time.
+#
+# The case above uses a home path, which the STRUCTURAL pass catches -- so it
+# stayed green while the python pass was still calling os.readlink and seeing
+# nothing. A test answered by the detector you did not touch proves nothing
+# about the one you did. Review caught that; these two cases are the fix.
+#
+# A bare hostname matches no structural pattern, and a dangling .md citation
+# has no structural shape at all, so each of these can only be found by the
+# python pass reading the target's bytes.
+d="$(newrepo sym-payload-hashname)"
+printf 'built on %s\n' "${HOST_A}" > "$d/secret.txt"
+ln -s secret.txt "$d/link.sh"
+git -C "$d" add link.sh
+check reject no-internal-disclosure.sh "a hashed NAME reachable only through a link (python pass)"
+
+d="$(newrepo sym-payload-citation)"
+printf 'see %s for the rules\n' "${DOC_BARE}" > "$d/secret.txt"
+ln -s secret.txt "$d/link.sh"
+git -C "$d" add link.sh
+check reject no-internal-disclosure.sh "a dangling CITATION reachable only through a link (python pass)"
+
+d="$(newrepo sym-payload-device)"
+printf '%s -D\n' "${LOSETUP}" > "$d/secret.sh"
+ln -s secret.sh "$d/link.sh"
+git -C "$d" add link.sh
+check reject no-global-device-cleanup.sh "a global teardown reachable only THROUGH a link"
+
 echo "== both guards: refuse outside a repository, rather than reporting clean =="
 d="$work/norepo"
 rm -rf "$d"

@@ -112,6 +112,11 @@ set -eu
 
 cd "$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 
+# Fully resolved: a symlink target is compared against this, and realpath
+# returns a resolved path. An unresolved root makes every in-tree target look
+# external (#120).
+root="$(pwd -P)"
+
 # SHA-256 of lowercased tokens that must not appear anywhere in the tree.
 # Add one with: scripts/no-internal-disclosure.sh --add <name>
 FORBIDDEN_DIGESTS='
@@ -185,6 +190,7 @@ printf '%s' "$FORBIDDEN_DIGESTS" | sed '/^$/d' | sort -u > "$work/digests"
 
 : > "$work/hits"
 : > "$work/text"
+mkdir -p "$work/scan"
 scanned=0
 
 while IFS= read -r f; do
@@ -197,8 +203,68 @@ while IFS= read -r f; do
 	# the link target string -- examined, though that string is exactly what
 	# the repository publishes and could name an internal path.
 	if [ -L "$f" ]; then
-		if ! readlink "$f" > "$work/content"; then
-			echo "FAIL: ${f} is a tracked symlink whose target could not be read." >&2
+		# A TRACKED SYMLINK HAS TWO CONTENTS AND THE GUARD NEEDS BOTH (#120).
+		#
+		# Its own published content is the target PATH STRING -- that is
+		# literally the blob git stores -- and `readlink` gives that. But what
+		# the link RESOLVES to is also part of this tree at scan time, and a
+		# release publishes a tree byte-identical to the internal tag, so the
+		# link resolves for whoever unpacks it too.
+		#
+		# Reading only the link text is a fail-open, MEASURED against main at
+		# 5c7b578 with a control: a tracked link to an untracked file holding
+		# the violation was reported CLEAN, while the identical bytes as a
+		# regular tracked file were rejected. A path string never matches any
+		# pattern here, so the target was never examined at all.
+		#
+		# Every case where the target cannot be examined is a FAILURE. A link
+		# this scanner cannot follow is not evidence that what it points at is
+		# clean -- the same rule the non-symlink branches below already apply.
+		if ! readlink -- "$f" > "$work/content" 2>"$work/err"; then
+			echo "FAIL: could not read tracked symlink ${f}:" >&2
+			sed 's/^/  /' "$work/err" >&2
+			exit 1
+		fi
+		if ! real="$(realpath -- "$f" 2>"$work/err")"; then
+			echo "FAIL: tracked symlink ${f} does not resolve (dangling, or a" >&2
+			echo "loop), so what it points at could not be examined." >&2
+			sed 's/^/  /' "$work/err" >&2
+			exit 1
+		fi
+		# $root is fully resolved (pwd -P). Comparing against an unresolved
+		# root reads every in-tree target as "outside" whenever any component
+		# of the worktree path is itself a link -- which is true of every
+		# worktree in this repository.
+		# "$root" ITSELF, not only descendants of it. A link to `.` or to
+		# `subdir/..` resolves to exactly the root, which "$root"/* does not
+		# match -- so the containment check rejected an in-tree directory as
+		# external. Codex caught it on #120; the reviewed implementation this
+		# branch copied from (#108) has the same bug, which is the fourth
+		# instance of the repeated-pattern failure #120 is about: adopting a
+		# reviewed shape carries its findings only if you re-check them.
+		case "$real" in
+		"$root" | "$root"/*) ;;
+		*)
+			echo "FAIL: tracked symlink ${f} resolves OUTSIDE the worktree:" >&2
+			echo "  ${real}" >&2
+			echo "Its target is not part of this tree and is not scanned, so" >&2
+			echo "nothing here can vouch for what it contains." >&2
+			exit 1
+			;;
+		esac
+		if [ -d "$real" ]; then
+			: # A directory has no bytes of its own. Whatever is tracked under
+			  # it is listed and scanned under its own path.
+		elif [ -f "$real" ]; then
+			if ! cat -- "$real" >> "$work/content" 2>"$work/err"; then
+				echo "FAIL: could not read the target of tracked symlink ${f}:" >&2
+				sed 's/^/  /' "$work/err" >&2
+				exit 1
+			fi
+		else
+			echo "FAIL: tracked symlink ${f} resolves to something that is" >&2
+			echo "neither a regular file nor a directory, so it could not be" >&2
+			echo "examined." >&2
 			exit 1
 		fi
 	elif [ -f "$f" ]; then
@@ -218,7 +284,20 @@ while IFS= read -r f; do
 		exit 1
 	fi
 	scanned=$((scanned + 1))
-	printf '%s\n' "$f" >> "$work/text"
+
+	# HAND THE ASSEMBLED CONTENT TO EVERY CONSUMER, not just the nearest one.
+	#
+	# This buffer has TWO consumers: the structural grep loop below, and the
+	# hashed-name/citation pass after it. The first reads "$work/content"; the
+	# second used to re-open the path itself and call os.readlink for a
+	# symlink, so it never saw the target bytes appended above -- a tracked
+	# link to an untracked file holding a forbidden hostname, or a dangling
+	# internal citation with no structural shape, was still reported clean.
+	#
+	# One buffer, both consumers. Two readers of one thing agree until they
+	# do not, and fixing the nearer one is what hides the other.
+	cp -- "$work/content" "$work/scan/$scanned"
+	printf '%s\t%s\n' "$scanned" "$f" >> "$work/text"
 
 	# grep exit codes: 0 matched, 1 no match, >=2 ERROR. Only 1 is clean.
 	while IFS= read -r pat; do
@@ -263,10 +342,18 @@ done < "$work/structural"
 # PATH as well as the content, and the citation check resolves a cited path
 # against the citing file's own directory -- so they live together here rather
 # than as two more grep loops.
-python3 - "$work/text" "$work/digests" "$work/files" >> "$work/hits" <<'PY' || exit 1
+python3 - "$work/text" "$work/digests" "$work/files" "$work/scan" >> "$work/hits" <<'PY' || exit 1
 import hashlib, os, posixpath, re, sys
 
-files = [f for f in open(sys.argv[1], encoding="utf-8", errors="replace").read().split("\n") if f]
+# Each line is "<scan-id>\t<display path>"; the bytes live in <scan dir>/<id>,
+# assembled by the shell loop -- for a symlink, its target string FOLLOWED BY
+# the target's bytes.
+entries = []
+for line in open(sys.argv[1], encoding="utf-8", errors="replace").read().split("\n"):
+    if not line:
+        continue
+    scan_id, _, display = line.partition("\t")
+    entries.append((os.path.join(sys.argv[4], scan_id), display))
 digests = {d.strip() for d in open(sys.argv[2]) if d.strip()}
 tracked = {f for f in open(sys.argv[3], encoding="utf-8", errors="replace").read().split("\n") if f}
 tracked_lower = {f.lower() for f in tracked}
@@ -308,18 +395,11 @@ def forbidden(text):
     return False
 
 
-for path in files:
+for scan_path, path in entries:
     try:
-        # A symlink's own content is its target string, and that string is what
-        # the repository publishes -- it could name an internal path. Reading
-        # through the link would examine the wrong bytes, and would fail
-        # outright on a link whose target is absent.
-        if os.path.islink(path):
-            text = os.readlink(path)
-        else:
-            text = open(path, encoding="utf-8", errors="replace").read()
+        text = open(scan_path, encoding="utf-8", errors="replace").read()
     except OSError as exc:
-        print(f"FAIL: could not read {path}: {exc}", file=sys.stderr)
+        print(f"FAIL: could not read the scanned content of {path}: {exc}", file=sys.stderr)
         sys.exit(1)
 
     # The PATH is hashed alongside the content: a file or directory named after

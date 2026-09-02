@@ -50,6 +50,11 @@ set -eu
 
 cd "$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 
+# Fully resolved: a symlink target is compared against this, and realpath
+# returns a resolved path. An unresolved root makes every in-tree target look
+# external (#120).
+root="$(pwd -P)"
+
 # The commands that operate on everything on the machine, whoever made it.
 # `-D` and `--detach-all` are the SAME flag; a guard that knows only the short
 # spelling reports success while the teardown sits in the tree under its long
@@ -106,6 +111,7 @@ if [ "$records" != "$lines" ]; then
 fi
 
 : > "$work/hits"
+mkdir -p "$work/scan"
 scanned=0
 
 while IFS= read -r f; do
@@ -118,11 +124,70 @@ while IFS= read -r f; do
 	# the link target string -- examined, though that string is what the
 	# repository publishes.
 	if [ -L "$f" ]; then
-		if ! target="$(readlink "$f")"; then
-			echo "FAIL: ${f} is a tracked symlink whose target could not be read." >&2
+		# A TRACKED SYMLINK HAS TWO CONTENTS AND THE GUARD NEEDS BOTH (#120).
+		#
+		# Its own published content is the target PATH STRING -- that is
+		# literally the blob git stores -- and `readlink` gives that. But what
+		# the link RESOLVES to is also part of this tree at scan time, and a
+		# release publishes a tree byte-identical to the internal tag, so the
+		# link resolves for whoever unpacks it too.
+		#
+		# Reading only the link text is a fail-open, MEASURED against main at
+		# 5c7b578 with a control: a tracked link to an untracked file holding
+		# the violation was reported CLEAN, while the identical bytes as a
+		# regular tracked file were rejected. A path string never matches any
+		# pattern here, so the target was never examined at all.
+		#
+		# Every case where the target cannot be examined is a FAILURE. A link
+		# this scanner cannot follow is not evidence that what it points at is
+		# clean -- the same rule the non-symlink branches below already apply.
+		if ! readlink -- "$f" > "$work/content" 2>"$work/err"; then
+			echo "FAIL: could not read tracked symlink ${f}:" >&2
+			sed 's/^/  /' "$work/err" >&2
 			exit 1
 		fi
-		printf '%s\n' "$target" > "$work/content"
+		if ! real="$(realpath -- "$f" 2>"$work/err")"; then
+			echo "FAIL: tracked symlink ${f} does not resolve (dangling, or a" >&2
+			echo "loop), so what it points at could not be examined." >&2
+			sed 's/^/  /' "$work/err" >&2
+			exit 1
+		fi
+		# $root is fully resolved (pwd -P). Comparing against an unresolved
+		# root reads every in-tree target as "outside" whenever any component
+		# of the worktree path is itself a link -- which is true of every
+		# worktree in this repository.
+		# "$root" ITSELF, not only descendants of it. A link to `.` or to
+		# `subdir/..` resolves to exactly the root, which "$root"/* does not
+		# match -- so the containment check rejected an in-tree directory as
+		# external. Codex caught it on #120; the reviewed implementation this
+		# branch copied from (#108) has the same bug, which is the fourth
+		# instance of the repeated-pattern failure #120 is about: adopting a
+		# reviewed shape carries its findings only if you re-check them.
+		case "$real" in
+		"$root" | "$root"/*) ;;
+		*)
+			echo "FAIL: tracked symlink ${f} resolves OUTSIDE the worktree:" >&2
+			echo "  ${real}" >&2
+			echo "Its target is not part of this tree and is not scanned, so" >&2
+			echo "nothing here can vouch for what it contains." >&2
+			exit 1
+			;;
+		esac
+		if [ -d "$real" ]; then
+			: # A directory has no bytes of its own. Whatever is tracked under
+			  # it is listed and scanned under its own path.
+		elif [ -f "$real" ]; then
+			if ! cat -- "$real" >> "$work/content" 2>"$work/err"; then
+				echo "FAIL: could not read the target of tracked symlink ${f}:" >&2
+				sed 's/^/  /' "$work/err" >&2
+				exit 1
+			fi
+		else
+			echo "FAIL: tracked symlink ${f} resolves to something that is" >&2
+			echo "neither a regular file nor a directory, so it could not be" >&2
+			echo "examined." >&2
+			exit 1
+		fi
 	elif [ -f "$f" ]; then
 		# Binary files are scanned too, as text. They were skipped, and the
 		# summary still counted the tree as fully examined -- a tracked blob
@@ -143,8 +208,18 @@ while IFS= read -r f; do
 	fi
 	scanned=$((scanned + 1))
 
-	# The matching is done in one interpreter pass below, on the RAW lines.
-	printf '%s\n' "$f" >> "$work/text"
+	# The matching is done in one interpreter pass below, on the RAW lines --
+	# over THE CONTENT JUST ASSEMBLED, not over the path re-opened downstream.
+	#
+	# The matcher used to re-read each path itself and decide independently
+	# what a symlink's content was. Two implementations of one predicate agree
+	# until they do not: this loop said "the link text", the matcher said "the
+	# link text", and #120 needed both to say "the link text AND the target's
+	# bytes". Fixing one would have left the other deciding, silently.
+	#
+	# So the content is written once, here, and handed over.
+	cp -- "$work/content" "$work/scan/$scanned"
+	printf '%s\t%s\n' "$scanned" "$f" >> "$work/text"
 done < "$work/files"
 
 # Match on the raw line, suppressing only what is genuinely a comment.
@@ -164,10 +239,19 @@ done < "$work/files"
 # So: find the first comment marker that is OUTSIDE quotes, and suppress a
 # match only if it starts after that. A marker inside a string is not a
 # comment, and a line with no unquoted marker is entirely code.
-python3 - "$work/text" "$PATTERN" >> "$work/hits" <<'PY' || exit 1
+python3 - "$work/text" "$PATTERN" "$work/scan" >> "$work/hits" <<'PY' || exit 1
 import os, re, sys
 
-paths = [p for p in open(sys.argv[1], encoding="utf-8", errors="replace").read().split("\n") if p]
+# Each line is "<scan-id>\t<display path>". The bytes to search live in
+# <scan dir>/<scan-id>, assembled by the shell loop above -- for a regular file
+# its contents, and for a tracked symlink its target string FOLLOWED BY the
+# target's bytes (#120).
+entries = []
+for line in open(sys.argv[1], encoding="utf-8", errors="replace").read().split("\n"):
+    if not line:
+        continue
+    scan_id, _, display = line.partition("\t")
+    entries.append((os.path.join(sys.argv[3], scan_id), display))
 pattern = re.compile(sys.argv[2])
 
 
@@ -194,27 +278,12 @@ def comment_starts_at(line):
     return len(line)
 
 
-def lines_of(path):
-    """The file's own published content.
-
-    A symlink's content is its TARGET STRING, not the bytes it points at.
-    Reading through the link scans someone else's file and misses what this
-    repository actually publishes -- and the earlier version did exactly that,
-    because the shell preflight read the link text into a buffer the scan then
-    ignored. A tracked symlink whose target string is the teardown was
-    accepted whenever a harmless file of that name existed.
-    """
-    if os.path.islink(path):
-        return [os.readlink(path)]
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        return [ln.rstrip("\n") for ln in fh]
-
-
-for path in paths:
+for scan_path, path in entries:
     try:
-        content = lines_of(path)
+        with open(scan_path, encoding="utf-8", errors="replace") as fh:
+            content = [ln.rstrip("\n") for ln in fh]
     except OSError as exc:
-        print(f"FAIL: could not read {path}: {exc}", file=sys.stderr)
+        print(f"FAIL: could not read the scanned content of {path}: {exc}", file=sys.stderr)
         sys.exit(1)
     for n, line in enumerate(content, 1):
         cut = comment_starts_at(line)
