@@ -420,18 +420,80 @@ func TestLoopDeviceCleanup(t *testing.T) {
 
 		t.Logf("Loop device created: %s", loopDev)
 
-		// Try to setup again (should fail)
-		_, err = SetupLoopDevice(tmpfile)
-		if err == nil {
-			t.Log("Second setup unexpectedly succeeded (file can be attached multiple times)")
-		}
+		// Release the first device even if this subtest dies before reaching
+		// the explicit detach below.
+		//
+		// Registered HERE, immediately after the acquisition, rather than at
+		// the detach: every t.Fatalf between the two is a path out of this
+		// function, and the one directly below fires precisely when the runner
+		// has no spare loop minors -- so without this the fix would leak a
+		// device exactly on the busy hosts it exists to protect.
+		//
+		// The flag keeps the explicit detach a real assertion rather than a
+		// formality: it is what this subtest is about, its failure must still
+		// fail the test, and this cleanup must not quietly do the job for it.
+		firstReleased := false
+		t.Cleanup(func() {
+			if firstReleased {
+				return
+			}
+			if err := DetachLoopDevice(loopDev); err != nil {
+				t.Errorf("Failed to release %s on the way out: %v", loopDev, err)
+			}
+		})
 
-		// Original device should still be detachable
+		// Attach the SAME FILE a second time.
+		//
+		// This used to say "should fail", and treat success as a surprise worth
+		// logging. The kernel has no such rule: one file can back several loop
+		// devices, and `losetup` does it without complaint. So the "unexpected"
+		// branch was the ONLY branch -- it printed on every run since the test
+		// was written, read as a curiosity, and hid the fact that the device it
+		// had just created was being dropped on the floor. The result was one
+		// permanently leaked loop device per run, per host (#116).
+		//
+		// Loop minors are a global host resource and a container can only ever
+		// use the ones that existed when it started, so a leak here is not
+		// untidiness: six leaked devices on one runner made TestLoopDeviceMultiple
+		// below fail outright, and the suite exhausted the host and then failed
+		// itself.
+		second, err := SetupLoopDevice(tmpfile)
+		if err != nil {
+			t.Fatalf("attaching %s to a second loop device should succeed -- the kernel permits "+
+				"several loop devices to share one backing file: %v", tmpfile, err)
+		}
+		t.Logf("Second loop device created: %s", second)
+		t.Cleanup(func() {
+			if err := DetachLoopDevice(second); err != nil {
+				t.Errorf("Failed to detach the second loop device %s: %v", second, err)
+			}
+		})
+
+		// The first device must still be independently detachable -- which is
+		// what this subtest is actually about, and what the second attachment is
+		// there to complicate.
 		if err := DetachLoopDevice(loopDev); err != nil {
 			t.Fatalf("Failed to detach after failed operation: %v", err)
 		}
+		firstReleased = true
 
 		t.Logf("Successfully detached after failed operation")
+	})
+
+	// Test case 1b: the subtest above must leave NOTHING attached to its file.
+	//
+	// This is the assertion the leak survived the absence of. Nothing checked
+	// the end state, so a device created and never released looked exactly like
+	// a device that was never created.
+	t.Run("detach-after-failed-operation-leaves-no-device", func(t *testing.T) {
+		tmpfile := filepath.Join(tmpDir, "test-cleanup1.img")
+		if _, err := os.Stat(tmpfile); err != nil {
+			t.Fatalf("the previous subtest did not run, so this asserts nothing: %v", err)
+		}
+		if dev, err := FindLoopDevice(tmpfile); err == nil {
+			t.Fatalf("%s is still attached to %s after its subtest finished -- a leaked loop minor is "+
+				"permanent, and the host's supply is fixed and shared", dev, tmpfile)
+		}
 	})
 
 	// Test case 2: Ensure resources are freed after detach
