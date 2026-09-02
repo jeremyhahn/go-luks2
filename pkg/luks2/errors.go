@@ -7,6 +7,7 @@ package luks2
 import (
 	"errors"
 	"fmt"
+	"time"
 )
 
 // Common errors that can be checked using errors.Is()
@@ -143,6 +144,19 @@ var (
 	// the Go Cryptographic Module and is refused while the process runs in
 	// FIPS 140-3 mode. See docs/FIPS.md.
 	ErrFIPSNotApproved = errors.New("algorithm not approved in FIPS 140-3 mode")
+
+	// ErrKDFCalibration indicates that the PBKDF2 iteration count for a NEW
+	// keyslot could not be calibrated, and that no keyslot was created.
+	//
+	// It is a refusal and never a default. The iteration count is written into
+	// the LUKS2 header at format time and is the entire cost an offline attacker
+	// pays per passphrase guess, so a calibration that cannot be performed has
+	// exactly one safe answer: fail. Returning a plausible-looking constant
+	// instead -- which is what this package did until issue #52 -- produces a
+	// header that is permanently weaker than the caller asked for, with a nil
+	// error to say so. Nothing later can strengthen a header that is already on
+	// disk. See KDFCalibrationError for what the failure carries.
+	ErrKDFCalibration = errors.New("PBKDF2 iteration count could not be calibrated")
 
 	// ErrMappingStillLive indicates that Unlock failed AFTER the dm-crypt target
 	// was already live, and that the target this call created may still be
@@ -495,4 +509,50 @@ func (e *CryptoError) Error() string {
 
 func (e *CryptoError) Unwrap() error {
 	return e.Err
+}
+
+// KDFCalibrationError reports that BenchmarkPBKDF2 could not determine an
+// iteration count for the requested time budget, and carries what the probe
+// saw so the condition can be diagnosed without re-running it.
+//
+// Two causes reach here, and both are refusals:
+//
+//   - The requested budget is not a usable number of milliseconds -- zero,
+//     negative, or so large that it is not an iteration time anyone meant.
+//   - No probe up to the ceiling ran long enough to be timed. On real hardware
+//     this cannot happen: a probe doubles until it clears a floor measured in
+//     tens of milliseconds, and even the fastest machine reaches that within a
+//     few million iterations. It means the clock is not advancing.
+type KDFCalibrationError struct {
+	// Hash is the hash algorithm the calibration was for, as the caller spelled
+	// it.
+	Hash string
+
+	// TargetMs is the iteration-time budget that was requested.
+	TargetMs int
+
+	// Probe is the largest iteration count that was actually run, or 0 when the
+	// request was rejected before any probe ran.
+	Probe int
+
+	// Elapsed is how long that probe took. It is the value that was too small to
+	// extrapolate from.
+	Elapsed time.Duration
+
+	// Err is the underlying cause, kept reachable through Unwrap.
+	Err error
+}
+
+func (e *KDFCalibrationError) Error() string {
+	return fmt.Sprintf("%s: hash %s, target %dms, probe %d iterations in %v: %v",
+		ErrKDFCalibration.Error(), e.Hash, e.TargetMs, e.Probe, e.Elapsed, e.Err)
+}
+
+func (e *KDFCalibrationError) Unwrap() error { return e.Err }
+
+// Is reports every KDFCalibrationError as ErrKDFCalibration, so a caller can
+// match the sentinel without knowing this type, while errors.Is also still
+// reaches the specific cause through Unwrap.
+func (e *KDFCalibrationError) Is(target error) bool {
+	return target == ErrKDFCalibration
 }

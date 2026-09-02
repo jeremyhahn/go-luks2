@@ -34,9 +34,10 @@ func TestHeaderWriteRead(t *testing.T) {
 
 	// Create a test header
 	opts := FormatOptions{
-		Label:      "TestVolume",
-		Passphrase: []byte("test-passphrase"),
-		KDFType:    "pbkdf2",
+		Label:         "TestVolume",
+		Passphrase:    []byte("test-passphrase"),
+		KDFType:       "pbkdf2",
+		PBKDFIterTime: 1, // keyslot cost is not what this test exercises (#52)
 	}
 
 	hdr, err := CreateBinaryHeader(opts)

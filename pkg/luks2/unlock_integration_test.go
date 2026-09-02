@@ -30,9 +30,10 @@ func TestUnlockBasic(t *testing.T) {
 
 	passphrase := []byte("test-password")
 	opts := FormatOptions{
-		Device:     tmpfile,
-		Passphrase: passphrase,
-		KDFType:    "pbkdf2",
+		Device:        tmpfile,
+		Passphrase:    passphrase,
+		KDFType:       "pbkdf2",
+		PBKDFIterTime: 1, // keyslot cost is not what this test exercises (#52)
 	}
 
 	if err := Format(opts); err != nil {
@@ -104,9 +105,10 @@ func TestUnlockWithWrongPassphrase(t *testing.T) {
 	f.Close()
 
 	opts := FormatOptions{
-		Device:     tmpfile,
-		Passphrase: []byte("correct-password"),
-		KDFType:    "pbkdf2",
+		Device:        tmpfile,
+		Passphrase:    []byte("correct-password"),
+		KDFType:       "pbkdf2",
+		PBKDFIterTime: 1, // keyslot cost is not what this test exercises (#52)
 	}
 
 	if err := Format(opts); err != nil {

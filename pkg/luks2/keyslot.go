@@ -57,6 +57,58 @@ type AddKeyOptions struct {
 // flattening every outcome into a credential verdict. Match on the wrapped
 // error -- ErrMasterKeyVerification, ErrInvalidKeyslot, ErrNoKeyslots -- rather
 // than on the message.
+// addKeyFormatOptions maps AddKeyOptions onto the FormatOptions that create the
+// new keyslot's KDF, applying this package's defaults for anything the caller
+// left unset.
+//
+// Zero means UNSET and anything else is the caller's choice -- including a value
+// that is out of range. PBKDFIterTime used to be copied only when it was > 0,
+// which silently discarded a negative and produced a keyslot at the 2000ms
+// default instead. That was harmless before #52, when nothing validated the
+// budget; it stopped being harmless the moment BenchmarkPBKDF2 began refusing an
+// unusable one, because the same nonsense value then errored through
+// FormatOptions and was quietly ignored through AddKeyOptions -- two contracts
+// for one parameter, on adjacent APIs. Propagating it is what makes the refusal
+// reach every caller.
+//
+// The Argon2 costs below still use > 0. That asymmetry is deliberate and
+// narrow: those have no calibration and no equivalent refusal to reach, so
+// changing them would alter behavior no defect has been reported against.
+func addKeyFormatOptions(opts *AddKeyOptions) FormatOptions {
+	formatOpts := FormatOptions{
+		KDFType:        "argon2id",
+		HashAlgo:       DefaultHashAlgo,
+		Argon2Time:     4,
+		Argon2Memory:   1048576,
+		Argon2Parallel: 4,
+	}
+
+	if opts == nil {
+		return formatOpts
+	}
+
+	if opts.KDFType != "" {
+		formatOpts.KDFType = opts.KDFType
+	}
+	if opts.Hash != "" {
+		formatOpts.HashAlgo = opts.Hash
+	}
+	if opts.Argon2Time > 0 {
+		formatOpts.Argon2Time = opts.Argon2Time
+	}
+	if opts.Argon2Memory > 0 {
+		formatOpts.Argon2Memory = opts.Argon2Memory
+	}
+	if opts.Argon2Parallel > 0 {
+		formatOpts.Argon2Parallel = opts.Argon2Parallel
+	}
+	if opts.PBKDFIterTime != 0 {
+		formatOpts.PBKDFIterTime = opts.PBKDFIterTime
+	}
+
+	return formatOpts
+}
+
 func TestKey(device string, passphrase []byte) error {
 	// Validate inputs
 	if err := ValidateDevicePath(device); err != nil {
@@ -164,41 +216,7 @@ func AddKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKe
 		return err
 	}
 
-	// Create KDF for new keyslot
-	kdfType := "argon2id"
-	if opts != nil && opts.KDFType != "" {
-		kdfType = opts.KDFType
-	}
-
-	// Determine hash algorithm - use provided value or default to sha256
-	hashAlgo := DefaultHashAlgo
-	if opts != nil && opts.Hash != "" {
-		hashAlgo = opts.Hash
-	}
-
-	formatOpts := FormatOptions{
-		KDFType:        kdfType,
-		HashAlgo:       hashAlgo,
-		Argon2Time:     4,
-		Argon2Memory:   1048576,
-		Argon2Parallel: 4,
-	}
-	if opts != nil {
-		if opts.Argon2Time > 0 {
-			formatOpts.Argon2Time = opts.Argon2Time
-		}
-		if opts.Argon2Memory > 0 {
-			formatOpts.Argon2Memory = opts.Argon2Memory
-		}
-		if opts.Argon2Parallel > 0 {
-			formatOpts.Argon2Parallel = opts.Argon2Parallel
-		}
-		if opts.PBKDFIterTime > 0 {
-			formatOpts.PBKDFIterTime = opts.PBKDFIterTime
-		}
-	}
-
-	kdf, err := CreateKDF(formatOpts, referenceKeyslot.KeySize)
+	kdf, err := CreateKDF(addKeyFormatOptions(opts), referenceKeyslot.KeySize)
 	if err != nil {
 		return fmt.Errorf("failed to create KDF: %w", err)
 	}

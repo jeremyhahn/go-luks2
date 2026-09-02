@@ -28,9 +28,10 @@ func TestWipeHeader(t *testing.T) {
 	f.Close()
 
 	opts := FormatOptions{
-		Device:     tmpfile,
-		Passphrase: []byte("test-password"),
-		KDFType:    "pbkdf2",
+		Device:        tmpfile,
+		Passphrase:    []byte("test-password"),
+		KDFType:       "pbkdf2",
+		PBKDFIterTime: 1, // keyslot cost is not what this test exercises (#52)
 	}
 
 	if err := Format(opts); err != nil {
@@ -77,9 +78,10 @@ func TestWipeFull(t *testing.T) {
 	f.Close()
 
 	opts := FormatOptions{
-		Device:     tmpfile,
-		Passphrase: []byte("test-password"),
-		KDFType:    "pbkdf2",
+		Device:        tmpfile,
+		Passphrase:    []byte("test-password"),
+		KDFType:       "pbkdf2",
+		PBKDFIterTime: 1, // keyslot cost is not what this test exercises (#52)
 	}
 
 	if err := Format(opts); err != nil {
@@ -125,9 +127,10 @@ func TestWipeMultiplePasses(t *testing.T) {
 	f.Close()
 
 	opts := FormatOptions{
-		Device:     tmpfile,
-		Passphrase: []byte("test-password"),
-		KDFType:    "pbkdf2",
+		Device:        tmpfile,
+		Passphrase:    []byte("test-password"),
+		KDFType:       "pbkdf2",
+		PBKDFIterTime: 1, // keyslot cost is not what this test exercises (#52)
 	}
 
 	if err := Format(opts); err != nil {
@@ -164,9 +167,10 @@ func TestWipeKeyslot(t *testing.T) {
 	f.Close()
 
 	opts := FormatOptions{
-		Device:     tmpfile,
-		Passphrase: []byte("test-password"),
-		KDFType:    "pbkdf2",
+		Device:        tmpfile,
+		Passphrase:    []byte("test-password"),
+		KDFType:       "pbkdf2",
+		PBKDFIterTime: 1, // keyslot cost is not what this test exercises (#52)
 	}
 
 	if err := Format(opts); err != nil {
@@ -241,9 +245,10 @@ func TestWipeWithTrimOnLoopDevice(t *testing.T) {
 	f.Close()
 
 	opts := FormatOptions{
-		Device:     tmpfile,
-		Passphrase: []byte("test-password"),
-		KDFType:    "pbkdf2",
+		Device:        tmpfile,
+		Passphrase:    []byte("test-password"),
+		KDFType:       "pbkdf2",
+		PBKDFIterTime: 1, // keyslot cost is not what this test exercises (#52)
 	}
 
 	if err := Format(opts); err != nil {
@@ -299,9 +304,10 @@ func TestWipeWithTrimOnBlockDevice(t *testing.T) {
 
 	// Format on loop device
 	opts := FormatOptions{
-		Device:     loopDev,
-		Passphrase: []byte("test-password"),
-		KDFType:    "pbkdf2",
+		Device:        loopDev,
+		Passphrase:    []byte("test-password"),
+		KDFType:       "pbkdf2",
+		PBKDFIterTime: 1, // keyslot cost is not what this test exercises (#52)
 	}
 
 	if err := Format(opts); err != nil {
@@ -346,9 +352,10 @@ func TestWipeMultiplePassesWithTrim(t *testing.T) {
 	f.Close()
 
 	opts := FormatOptions{
-		Device:     tmpfile,
-		Passphrase: []byte("test-password"),
-		KDFType:    "pbkdf2",
+		Device:        tmpfile,
+		Passphrase:    []byte("test-password"),
+		KDFType:       "pbkdf2",
+		PBKDFIterTime: 1, // keyslot cost is not what this test exercises (#52)
 	}
 
 	if err := Format(opts); err != nil {
@@ -386,9 +393,10 @@ func TestWipeHeaderOnlyNoTrim(t *testing.T) {
 	f.Close()
 
 	opts := FormatOptions{
-		Device:     tmpfile,
-		Passphrase: []byte("test-password"),
-		KDFType:    "pbkdf2",
+		Device:        tmpfile,
+		Passphrase:    []byte("test-password"),
+		KDFType:       "pbkdf2",
+		PBKDFIterTime: 1, // keyslot cost is not what this test exercises (#52)
 	}
 
 	if err := Format(opts); err != nil {
@@ -552,9 +560,10 @@ func TestWipeKeyslotWithTrim(t *testing.T) {
 	f.Close()
 
 	opts := FormatOptions{
-		Device:     tmpfile,
-		Passphrase: []byte("test-password"),
-		KDFType:    "pbkdf2",
+		Device:        tmpfile,
+		Passphrase:    []byte("test-password"),
+		KDFType:       "pbkdf2",
+		PBKDFIterTime: 1, // keyslot cost is not what this test exercises (#52)
 	}
 
 	if err := Format(opts); err != nil {
@@ -605,9 +614,10 @@ func TestWipeWithDataVerification(t *testing.T) {
 
 	// Format
 	opts := FormatOptions{
-		Device:     tmpfile,
-		Passphrase: []byte("test-password"),
-		KDFType:    "pbkdf2",
+		Device:        tmpfile,
+		Passphrase:    []byte("test-password"),
+		KDFType:       "pbkdf2",
+		PBKDFIterTime: 1, // keyslot cost is not what this test exercises (#52)
 	}
 
 	if err := Format(opts); err != nil {
@@ -674,9 +684,10 @@ func TestWipeConcurrentAccess(t *testing.T) {
 
 	// Format
 	opts := FormatOptions{
-		Device:     tmpfile,
-		Passphrase: []byte("test-password"),
-		KDFType:    "pbkdf2",
+		Device:        tmpfile,
+		Passphrase:    []byte("test-password"),
+		KDFType:       "pbkdf2",
+		PBKDFIterTime: 1, // keyslot cost is not what this test exercises (#52)
 	}
 
 	if err := Format(opts); err != nil {

@@ -309,7 +309,7 @@ type FormatOptions struct {
 	HashAlgo       string // Hash algorithm (default: "sha256")
 	SectorSize     int    // Sector size (default: 512)
 	KDFType        string // KDF type: "pbkdf2", "argon2i", "argon2id" (default: "argon2id")
-	PBKDFIterTime  int    // Target ms for PBKDF2 (default: 2000)
+	PBKDFIterTime  int    // Target ms for PBKDF2, 1..600000 (default: 2000); calibrated, never assumed
 	Argon2Time     int    // Argon2 time cost (default: 4)
 	Argon2Memory   int    // Argon2 memory cost in KB (default: 1048576 = 1GB)
 	Argon2Parallel int    // Argon2 parallelism (default: 4)

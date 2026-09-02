@@ -467,16 +467,28 @@ func TestBenchmarkPBKDF2InvalidHash(t *testing.T) {
 	}
 }
 
-// TestBenchmarkPBKDF2MinimumIterations tests minimum iteration enforcement
+// TestBenchmarkPBKDF2MinimumIterations tests minimum iteration enforcement.
+//
+// The bound asserted is the one that actually applies at this budget rather
+// than a flat 1000. An earlier version of this test asked for 1ms, said in a
+// comment that it was triggering the minimum, and asserted `>= 1000` -- which
+// on any modern machine is not the minimum path at all: 1ms buys a few thousand
+// iterations, so the assertion passed without the floor ever being reached. An
+// assertion that is satisfied by a value the code did not choose is how issue
+// #52 stayed green through five merges.
 func TestBenchmarkPBKDF2MinimumIterations(t *testing.T) {
-	// Use very short target time to trigger minimum iterations logic
-	iterations, err := BenchmarkPBKDF2("sha256", 32, 1)
+	const targetMs = 1
+
+	iterations, err := BenchmarkPBKDF2("sha256", 32, targetMs)
 	if err != nil {
 		t.Fatalf("BenchmarkPBKDF2 failed: %v", err)
 	}
 
-	if iterations < 1000 {
-		t.Fatalf("Expected minimum 1000 iterations, got %d", iterations)
+	if floor := pbkdf2IterationFloor("sha256", targetMs); float64(iterations) < floor {
+		t.Fatalf("Expected at least the floor of %v iterations at a %dms target, got %d", floor, targetMs, iterations)
+	}
+	if iterations < minPBKDF2Iterations {
+		t.Fatalf("Expected minimum %d iterations, got %d", minPBKDF2Iterations, iterations)
 	}
 }
 

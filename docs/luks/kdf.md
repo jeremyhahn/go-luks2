@@ -84,14 +84,14 @@ Password-Based Key Derivation Function 2, using HMAC.
   "type": "pbkdf2",
   "salt": "base64-encoded-salt",
   "hash": "sha256",
-  "iterations": 100000
+  "iterations": 4194304
 }
 ```
 
 | Parameter | Description | Typical Value |
 |-----------|-------------|---------------|
 | hash | Hash algorithm | sha256, sha512 |
-| iterations | Number of iterations | 100000-2000000 |
+| iterations | Number of iterations | Calibrated; several million on current hardware at the 2 s default |
 
 ### Supported Hashes
 
@@ -131,7 +131,11 @@ full policy and the legacy-header exemption.
 
 ## Iteration Calibration
 
-LUKS2 calibrates iterations to achieve a target time.
+The iteration count is **measured on the machine doing the formatting**, to fill
+the requested time budget. It is written into the header at format time and is
+the entire cost an offline attacker pays per passphrase guess, so a count that
+is too low is permanent for that volume — no later change reaches a header that
+is already on disk.
 
 ### Automatic Calibration
 
@@ -139,7 +143,7 @@ LUKS2 calibrates iterations to achieve a target time.
 // Target 2 second unlock time
 opts := luks2.FormatOptions{
     KDFType:       "pbkdf2",
-    PBKDFIterTime: 2000,  // milliseconds
+    PBKDFIterTime: 2000,  // milliseconds, 1..600000
 }
 ```
 
@@ -147,9 +151,42 @@ opts := luks2.FormatOptions{
 
 ```go
 // Benchmark for 2 seconds
-iterations := luks2.BenchmarkPBKDF2("sha256", 2000)
-fmt.Printf("Recommended iterations: %d\n", iterations)
+iterations, err := luks2.BenchmarkPBKDF2("sha256", 32, 2000)
+if err != nil {
+    // Calibration is fail-closed: it returns ErrKDFCalibration rather than a
+    // weakened default. Do not substitute a constant here.
+    return err
+}
+fmt.Printf("Calibrated iterations: %d\n", iterations)
 ```
+
+### How the calibration works
+
+A probe derivation starts at 1000 iterations and **doubles** until it runs long
+enough to be timed reliably (tens of milliseconds — long enough that one
+scheduler preemption is noise rather than the measurement). The count for the
+requested budget is extrapolated from that probe using the full measured
+duration, never a truncated millisecond count. Calibration therefore costs about
+100 ms once per format, whatever the budget is.
+
+Two clamps bound the result:
+
+- **A security floor.** A calibrated count answers "how much work fits in the
+  budget on *this* machine", which is a fact about the defender's hardware; the
+  attacker's hardware is unrelated and is not slow. The count is therefore never
+  below the OWASP recommendation for the hash, scaled to the requested budget —
+  600,000 for SHA-256, 210,000 for SHA-384/512 and 1,300,000 for SHA-1 at the
+  2000 ms default. On current hardware the measured count is several million and
+  the floor never binds; it binds on hardware roughly ten times slower.
+- **A header ceiling**, the same one the keyslot validator applies when the
+  header is read back, so a calibrated count can never produce a keyslot this
+  library would then refuse to open.
+
+A calibration that cannot be performed **fails**: `BenchmarkPBKDF2` returns a
+`*KDFCalibrationError` (matching `ErrKDFCalibration`) and no count. It never
+returns a plausible-looking constant with a `nil` error — doing that is how a
+volume ends up permanently weaker than the caller asked for, with nothing to
+say so.
 
 ## Salt Generation
 
@@ -205,7 +242,9 @@ Use Argon2id with:
 
 Use PBKDF2 with:
 - Hash: SHA-256 or SHA-512
-- Iterations: 100,000+ (calibrate for 2+ seconds)
+- Iterations: calibrated for 2+ seconds (`PBKDFIterTime: 2000`), never a
+  hand-picked constant. The floor is 600,000 for SHA-256 and 210,000 for
+  SHA-384/512; current hardware earns several million.
 
 ### For Low-Memory Systems
 

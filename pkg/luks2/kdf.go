@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"hash"
 	"strings"
@@ -382,37 +383,226 @@ func deriveArgon2id(passphrase, salt []byte, kdf *KDF, keySize int) ([]byte, err
 	return key, nil
 }
 
-// BenchmarkPBKDF2 determines the number of iterations for target time
-// Supported hash algorithms: sha256, sha384, sha512 and, outside FIPS 140-3
-// mode, sha1
-func BenchmarkPBKDF2(hashAlgo string, keySize, targetMs int) (int, error) {
-	testPass := []byte("test")
-	testSalt := make([]byte, 32)
+// PBKDF2 iteration calibration.
+//
+// The iteration count is MEASURED, never assumed. It is the entire cost an
+// offline attacker pays per passphrase guess, and it is written into the LUKS2
+// header at format time -- so a count that is too low is permanent for that
+// volume and no later fix reaches it.
+//
+// What this package shipped until issue #52 timed 1000 iterations once and
+// gated the extrapolation on elapsed.Milliseconds() > 0. A thousand iterations
+// of PBKDF2 is a few hundred MICROseconds on any modern CPU, so that comparison
+// was false, the extrapolation never ran, and every pbkdf2 keyslot got a
+// hardcoded 100000 -- about 20-50ms of work against a documented 2000ms target.
+//
+// Two separate things were wrong, and fixing only the first would leave a
+// calibration still wrong by a large factor:
+//
+//  1. RESOLUTION. elapsed.Milliseconds() truncates. Even on the path where the
+//     comparison did pass, a measurement reported as 1ms is anywhere in
+//     [0.5ms, 1.5ms), so the extrapolated count was off by up to 3x,
+//     unpredictably, per machine. The measurement now uses the full
+//     time.Duration.
+//  2. PROBE SIZE. One fixed 1000-iteration probe cannot be right for both a
+//     fast server and a slow embedded board. The probe now DOUBLES until it
+//     clears a floor that dwarfs timer noise and scheduler jitter, and the
+//     extrapolation runs from that measurement.
+const (
+	// pbkdf2ProbeStart is where the doubling begins -- the count the old
+	// implementation used as its entire measurement.
+	pbkdf2ProbeStart = 1000
 
+	// pbkdf2ProbeFloor is how long a probe must run before its measurement is
+	// trusted.
+	//
+	// The floor is not about clock resolution: time.Now is a vDSO read with
+	// nanosecond granularity. It is about SCHEDULING. One preemption costs a
+	// probe on the order of a millisecond, so a 50ms probe absorbs one at a few
+	// percent error while a 1ms probe would be wrong by half. Calibration
+	// therefore costs at most two floors' worth of work -- roughly 100ms, once
+	// per format -- against a default budget of 2000ms of derivation.
+	pbkdf2ProbeFloor = 50 * time.Millisecond
+
+	// pbkdf2ProbeCeiling bounds the doubling so that a clock which never
+	// advances FAILS instead of looping forever. Reaching it means over sixteen
+	// million iterations completed inside 50ms, roughly a hundred times faster
+	// than current hardware: the clock is broken, not the CPU fast.
+	pbkdf2ProbeCeiling = 1 << 24
+
+	// maxPBKDF2IterTimeMs bounds the requested budget. Ten minutes is already
+	// far past any iteration time anyone means, and the bound is what keeps
+	// time.Duration arithmetic on the request from overflowing into a negative
+	// duration -- which would silently return the floor instead of the very
+	// large count that was asked for.
+	maxPBKDF2IterTimeMs = 600_000
+
+	// minPBKDF2Iterations is the absolute floor for a keyslot this package
+	// WRITES: cryptsetup's own minimum, and the smallest count any LUKS
+	// implementation should be handed.
+	//
+	// It is deliberately not minKDFIterations (keyslotvalidation.go), which is 1
+	// and governs what this package will READ out of a header someone else
+	// wrote. Being liberal about a header we did not create and strict about one
+	// we are creating are different decisions.
+	minPBKDF2Iterations = 1000
+
+	// pbkdf2ReferenceTargetMs is the budget the recommended minima below are
+	// stated against, and is this library's own default (see createPBKDF2KDF).
+	pbkdf2ReferenceTargetMs = 2000
+)
+
+// pbkdf2RecommendedIterations is OWASP's recommended PBKDF2 iteration count per
+// hash for password-derived keys, at pbkdf2ReferenceTargetMs.
+//
+// It is a SECOND floor, and it exists because calibration alone has a blind
+// spot. A calibrated count answers "how much work fits in 2 seconds of THIS
+// machine's time" -- a statement about the DEFENDER's hardware. The attacker's
+// hardware is unrelated and is not slow. Formatting on a low-end board
+// therefore yields a header that is weak everywhere, and the header long
+// outlives the board.
+//
+// The floor is scaled by the requested budget rather than applied flat, so a
+// caller that deliberately asks for a cheap keyslot still gets one (bounded
+// below by minPBKDF2Iterations), while the DEFAULT path cannot fall below the
+// recommendation whatever it is formatted on. On current hardware the
+// calibrated count at 2000ms is several million and this floor never binds; it
+// binds on hardware about ten times slower, which is exactly where it should.
+var pbkdf2RecommendedIterations = map[string]int{
+	"sha1":   1_300_000,
+	"sha256": 600_000,
+	"sha384": 210_000,
+	"sha512": 210_000,
+}
+
+var (
+	// errCalibrationTargetInvalid is the cause reported when the requested
+	// iteration time is not a usable number of milliseconds. The rejected value
+	// itself is carried on the KDFCalibrationError.
+	errCalibrationTargetInvalid = errors.New("the iteration-time target must be positive and within the supported range")
+
+	// errCalibrationImmeasurable is the cause reported when no probe up to the
+	// ceiling ran long enough to be timed.
+	errCalibrationImmeasurable = errors.New("no probe ran long enough to be timed; the clock is not advancing")
+)
+
+// BenchmarkPBKDF2 returns the number of PBKDF2 iterations that costs
+// approximately targetMs milliseconds on this machine, for the given hash and
+// derived-key size.
+//
+// It NEVER returns a default. A calibration that cannot be performed returns a
+// *KDFCalibrationError (matching ErrKDFCalibration) and no count; the block
+// comment above says why a plausible-looking constant is the wrong answer here.
+//
+// The result is clamped into [floor, maxKDFIterations]. The floor is the larger
+// of minPBKDF2Iterations and the budget-scaled recommendation for the hash; the
+// ceiling is the same one validateKDFCost enforces when the header is read back,
+// so a count this function returns can never produce a header this package
+// would go on to reject.
+//
+// Supported hash algorithms: sha256, sha384, sha512 and, outside FIPS 140-3
+// mode, sha1.
+func BenchmarkPBKDF2(hashAlgo string, keySize, targetMs int) (int, error) {
 	hashFunc, err := getPBKDF2HashFunc(hashAlgo)
 	if err != nil {
 		return 0, err
 	}
 
-	// Start with 1000 iterations and measure
-	iterations := 1000
-	start := time.Now()
-	if _, err := pbkdf2.Key(hashFunc, string(testPass), testSalt, iterations, keySize); err != nil {
-		return 0, &CryptoError{Op: "pbkdf2 benchmark", Err: err}
-	}
-	elapsed := time.Since(start)
+	return calibratePBKDF2(hashFunc, hashAlgo, keySize, targetMs, pbkdf2ProbeFloor, pbkdf2ProbeCeiling)
+}
 
-	// Extrapolate to target time
-	if elapsed.Milliseconds() > 0 {
-		targetIterations := int(float64(iterations) * (float64(targetMs) / float64(elapsed.Milliseconds())))
-		if targetIterations < 1000 {
-			targetIterations = 1000 // Minimum iterations
+// calibratePBKDF2 is the calibration itself. The probe bounds are parameters so
+// that the fail-closed path can be exercised by a test without needing a broken
+// clock; BenchmarkPBKDF2 supplies the real ones.
+func calibratePBKDF2(hashFunc func() hash.Hash, hashAlgo string, keySize, targetMs int, probeFloor time.Duration, probeCeiling int) (int, error) {
+	if targetMs <= 0 || targetMs > maxPBKDF2IterTimeMs {
+		return 0, &KDFCalibrationError{
+			Hash:     hashAlgo,
+			TargetMs: targetMs,
+			Err:      errCalibrationTargetInvalid,
 		}
-		return targetIterations, nil
 	}
 
-	// If too fast to measure, default to higher value
-	return 100000, nil
+	// Neither of these is key material and neither becomes any. PBKDF2's cost
+	// depends on the iteration count, the hash and the output length, not on the
+	// contents of the passphrase or the salt, and nothing derived here is
+	// returned, stored, or compared against anything.
+	const calibrationPassphrase = "calibration"
+	calibrationSalt := make([]byte, 32)
+
+	for probe := pbkdf2ProbeStart; ; probe *= 2 {
+		start := time.Now()
+		if _, err := pbkdf2.Key(hashFunc, calibrationPassphrase, calibrationSalt, probe, keySize); err != nil {
+			return 0, &CryptoError{Op: "pbkdf2 benchmark", Err: err}
+		}
+		elapsed := time.Since(start)
+
+		// Compared as a Duration, never as elapsed.Milliseconds(). Truncating a
+		// sub-millisecond measurement to an integer is what made the original
+		// extrapolation unreachable; truncating a 1ms one is what made it wrong
+		// by up to 3x on the occasions it was reached.
+		if elapsed >= probeFloor {
+			return scalePBKDF2Iterations(hashAlgo, probe, elapsed, targetMs), nil
+		}
+
+		// Checked after the probe rather than before, so the ceiling bounds the
+		// largest probe actually RUN. Doubling past it would double the work
+		// again for a measurement that has already failed to be timeable.
+		if probe > probeCeiling/2 {
+			return 0, &KDFCalibrationError{
+				Hash:     hashAlgo,
+				TargetMs: targetMs,
+				Probe:    probe,
+				Elapsed:  elapsed,
+				Err:      errCalibrationImmeasurable,
+			}
+		}
+	}
+}
+
+// scalePBKDF2Iterations extrapolates a timed probe to the requested budget and
+// clamps the result into the range this package is willing to write.
+func scalePBKDF2Iterations(hashAlgo string, probe int, elapsed time.Duration, targetMs int) int {
+	perIteration := elapsed.Seconds() / float64(probe)
+	scaled := (time.Duration(targetMs) * time.Millisecond).Seconds() / perIteration
+
+	// Floor first, ceiling second: a budget large enough to push the floor past
+	// the ceiling must land on the ceiling, not above it.
+	if floor := pbkdf2IterationFloor(hashAlgo, targetMs); scaled < floor {
+		scaled = floor
+	}
+
+	// maxKDFIterations is the ceiling validateKDFCost applies when the header is
+	// read back, so exceeding it here would write a keyslot this package would
+	// then refuse to open. Clamping is also what keeps the conversion below
+	// defined -- Go leaves an out-of-range float-to-int conversion
+	// implementation-specific.
+	if scaled > maxKDFIterations {
+		scaled = maxKDFIterations
+	}
+
+	return int(scaled)
+}
+
+// pbkdf2IterationFloor returns the smallest iteration count this package will
+// write for a hash and a budget: minPBKDF2Iterations, or the budget-scaled
+// OWASP recommendation when that is larger.
+//
+// It returns a float64 because its only caller compares it against an
+// unrounded extrapolation, and rounding twice would be the sort of small
+// discrepancy that makes a floor look off by one for no reason.
+func pbkdf2IterationFloor(hashAlgo string, targetMs int) float64 {
+	floor := float64(minPBKDF2Iterations)
+
+	recommended, ok := pbkdf2RecommendedIterations[strings.ToLower(hashAlgo)]
+	if !ok {
+		return floor
+	}
+
+	if scaled := float64(recommended) * float64(targetMs) / pbkdf2ReferenceTargetMs; scaled > floor {
+		return scaled
+	}
+	return floor
 }
 
 // CreateKDF creates a KDF structure based on options

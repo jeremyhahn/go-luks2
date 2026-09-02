@@ -36,10 +36,11 @@ func TestTokenOperations_Integration(t *testing.T) {
 
 	// Format as LUKS2
 	opts := FormatOptions{
-		Device:     device,
-		Passphrase: []byte("test-passphrase"),
-		Label:      "token-test",
-		KDFType:    "pbkdf2", // Faster for tests
+		Device:        device,
+		Passphrase:    []byte("test-passphrase"),
+		Label:         "token-test",
+		KDFType:       "pbkdf2",
+		PBKDFIterTime: 1, // keyslot cost is not what this test exercises (#52)
 	}
 	if err := Format(opts); err != nil {
 		t.Fatalf("failed to format LUKS device: %v", err)

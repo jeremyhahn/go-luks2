@@ -316,6 +316,23 @@ jobs:
       - name: Run unit tests (cmd/luks2)
         run: go test -v -race -timeout 30m -coverprofile=coverage-cli.out -covermode=atomic ./cmd/luks2
 
+      # WITHOUT -race, deliberately, and not a duplicate of the step above.
+      #
+      # The PBKDF2 calibration defect (#52) is invisible under -race. Measured:
+      # the old implementation gated its extrapolation on
+      # `elapsed.Milliseconds() > 0`, race instrumentation slows the probe past
+      # 1ms, the gate passes, and the broken code returns a plausible,
+      # correctly-scaling count. Uninstrumented, the same code returns a
+      # hardcoded 100000 on every pbkdf2 volume it formats -- 25-100x under the
+      # requested work factor. Every calibration test passes against the
+      # restored defect under -race and fails against it without.
+      #
+      # This job otherwise runs ./pkg/luks2 under -race only, which is how that
+      # weakening survived five merges and three releases of green CI. The
+      # uninstrumented build is the one that ships.
+      - name: Run PBKDF2 calibration tests (no -race)
+        run: make test-calibration
+
       # Recorded so the next slow or failing run has evidence rather than a
       # guess. RLIMIT_MEMLOCK is the one that turns this package's fail-closed
       # design into a red suite: measured on a workstation, the suite passes

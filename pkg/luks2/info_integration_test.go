@@ -43,14 +43,15 @@ func TestGetVolumeInfo(t *testing.T) {
 
 	passphrase := []byte("test-password")
 	opts := FormatOptions{
-		Device:     tmpfile,
-		Passphrase: passphrase,
-		KDFType:    "pbkdf2",
-		Cipher:     "aes",
-		CipherMode: "xts-plain64",
-		KeySize:    512,
-		SectorSize: 512,
-		HashAlgo:   "sha256",
+		Device:        tmpfile,
+		Passphrase:    passphrase,
+		KDFType:       "pbkdf2",
+		PBKDFIterTime: 1, // keyslot cost is not what this test exercises (#52)
+		Cipher:        "aes",
+		CipherMode:    "xts-plain64",
+		KeySize:       512,
+		SectorSize:    512,
+		HashAlgo:      "sha256",
 	}
 
 	if err := Format(opts); err != nil {
@@ -138,10 +139,11 @@ func TestGetVolumeInfoWithLabel(t *testing.T) {
 	expectedLabel := "test-volume"
 	passphrase := []byte("test-password")
 	opts := FormatOptions{
-		Device:     tmpfile,
-		Passphrase: passphrase,
-		Label:      expectedLabel,
-		KDFType:    "pbkdf2",
+		Device:        tmpfile,
+		Passphrase:    passphrase,
+		Label:         expectedLabel,
+		KDFType:       "pbkdf2",
+		PBKDFIterTime: 1, // keyslot cost is not what this test exercises (#52)
 	}
 
 	if err := Format(opts); err != nil {
@@ -179,10 +181,11 @@ func TestGetVolumeInfoWithSubsystem(t *testing.T) {
 	expectedSubsystem := "test-subsystem"
 	passphrase := []byte("test-password")
 	opts := FormatOptions{
-		Device:     tmpfile,
-		Passphrase: passphrase,
-		Subsystem:  expectedSubsystem,
-		KDFType:    "pbkdf2",
+		Device:        tmpfile,
+		Passphrase:    passphrase,
+		Subsystem:     expectedSubsystem,
+		KDFType:       "pbkdf2",
+		PBKDFIterTime: 1, // keyslot cost is not what this test exercises (#52)
 	}
 
 	if err := Format(opts); err != nil {
@@ -359,9 +362,10 @@ func TestGetVolumeInfoErrors(t *testing.T) {
 				f.Close()
 
 				opts := FormatOptions{
-					Device:     tmpfile,
-					Passphrase: []byte("test-passphrase"),
-					KDFType:    "pbkdf2",
+					Device:        tmpfile,
+					Passphrase:    []byte("test-passphrase"),
+					KDFType:       "pbkdf2",
+					PBKDFIterTime: 1, // keyslot cost is not what this test exercises (#52)
 				}
 				if err := Format(opts); err != nil {
 					return "", err
@@ -424,9 +428,10 @@ func TestIsUnlockedTrue(t *testing.T) {
 
 	passphrase := []byte("test-password")
 	opts := FormatOptions{
-		Device:     tmpfile,
-		Passphrase: passphrase,
-		KDFType:    "pbkdf2",
+		Device:        tmpfile,
+		Passphrase:    passphrase,
+		KDFType:       "pbkdf2",
+		PBKDFIterTime: 1, // keyslot cost is not what this test exercises (#52)
 	}
 
 	if err := Format(opts); err != nil {
@@ -474,9 +479,10 @@ func TestIsUnlockedFalse(t *testing.T) {
 
 	passphrase := []byte("test-password")
 	opts := FormatOptions{
-		Device:     tmpfile,
-		Passphrase: passphrase,
-		KDFType:    "pbkdf2",
+		Device:        tmpfile,
+		Passphrase:    passphrase,
+		KDFType:       "pbkdf2",
+		PBKDFIterTime: 1, // keyslot cost is not what this test exercises (#52)
 	}
 
 	if err := Format(opts); err != nil {
@@ -524,9 +530,10 @@ func TestVolumeStateTransitions(t *testing.T) {
 
 	passphrase := []byte("test-password")
 	opts := FormatOptions{
-		Device:     tmpfile,
-		Passphrase: passphrase,
-		KDFType:    "pbkdf2",
+		Device:        tmpfile,
+		Passphrase:    passphrase,
+		KDFType:       "pbkdf2",
+		PBKDFIterTime: 1, // keyslot cost is not what this test exercises (#52)
 	}
 
 	if err := Format(opts); err != nil {

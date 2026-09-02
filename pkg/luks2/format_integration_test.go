@@ -114,11 +114,12 @@ func TestFormatWithMetadata(t *testing.T) {
 	f.Close()
 
 	opts := FormatOptions{
-		Device:     tmpfile,
-		Passphrase: []byte("test-password"),
-		Label:      "MyEncryptedDisk",
-		Subsystem:  "my-subsystem",
-		KDFType:    "pbkdf2",
+		Device:        tmpfile,
+		Passphrase:    []byte("test-password"),
+		Label:         "MyEncryptedDisk",
+		Subsystem:     "my-subsystem",
+		KDFType:       "pbkdf2",
+		PBKDFIterTime: 1, // keyslot cost is not what this test exercises (#52)
 	}
 
 	if err := Format(opts); err != nil {

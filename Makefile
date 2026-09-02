@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs security ci ci-full fmt-check all check test-cli integration-test-pkg integration-test-cli docker-build-integration no-global-device-cleanup test-require-tool
+.PHONY: help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs security ci ci-full fmt-check all check test-cli integration-test-pkg integration-test-cli docker-build-integration no-global-device-cleanup test-require-tool test-calibration
 
 # Default target
 .DEFAULT_GOAL := help
@@ -94,6 +94,32 @@ test-unit: ## Run only unit tests with coverage and the race detector (fast, no 
 	@echo ""
 	@echo "$(COLOR_BOLD)Coverage from unit tests:$(COLOR_RESET)"
 	@$(GO) tool cover -func=$(COVERAGE_FILE) | tail -1
+
+# The PBKDF2 calibration tests, deliberately WITHOUT -race.
+#
+# This is not a duplicate of test-unit and must not be folded into it. The
+# defect these tests exist for (#52) is INVISIBLE under -race, and that is
+# measured, not assumed: the old implementation gated its extrapolation on
+# `elapsed.Milliseconds() > 0`, and race instrumentation slows the probe past
+# 1ms, so the gate passes, the extrapolation runs, and the broken code returns a
+# plausible, correctly-scaling iteration count. In an ordinary build the same
+# code returns a hardcoded 100000 -- 25-100x under the requested work factor --
+# on every pbkdf2 volume it formats.
+#
+# CI runs ./pkg/luks2 under -race only, which is how a critical weakening of
+# every pbkdf2 keyslot survived five merges and three releases of green suites.
+# The uninstrumented build is the one that ships; something has to run these
+# assertions in it.
+#
+# No `|| true`: a calibration failure must fail the build. That used to be a
+# distinction from test-unit; #86 removed the swallow there, so it is now simply
+# the house rule rather than an exception to one.
+CALIBRATION_TESTS := TestBenchmarkPBKDF2|TestCalibratePBKDF2|TestPBKDF2IterationFloor|TestScalePBKDF2Iterations|TestCreateKDFPBKDF2
+
+test-calibration: ## Run the PBKDF2 calibration tests without -race (the mode the defect lives in)
+	@echo "$(COLOR_BOLD)Running PBKDF2 calibration tests (no -race)...$(COLOR_RESET)"
+	@$(GO) test -count=1 -timeout 10m -run '$(CALIBRATION_TESTS)' ./pkg/luks2
+	@echo "$(COLOR_GREEN)✓ Calibration tests passed$(COLOR_RESET)"
 
 test-cli: ## Run CLI unit tests only
 	@echo "$(COLOR_BOLD)Running CLI unit tests...$(COLOR_RESET)"
@@ -408,7 +434,7 @@ trivy-fs: ## Scan the working tree with trivy (dependency CVEs and leaked secret
 security: gosec govulncheck verify trivy-fs ## Run the full §8 security suite (gosec, govulncheck, go mod verify, trivy fs)
 	@echo "$(COLOR_GREEN)✓ Security suite complete$(COLOR_RESET)"
 
-ci: fmt-check vet no-global-device-cleanup test-require-tool lint security test-unit build ## Run CI pipeline locally (format, lint, security suite, unit tests, build)
+ci: fmt-check vet no-global-device-cleanup test-require-tool lint security test-unit test-calibration build ## Run CI pipeline locally (format, lint, security suite, unit tests, build)
 	@echo ""
 	@echo "$(COLOR_BOLD)======================================$(COLOR_RESET)"
 	@echo "$(COLOR_BOLD)CI Pipeline Complete$(COLOR_RESET)"

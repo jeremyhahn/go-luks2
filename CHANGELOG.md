@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **PBKDF2 keyslots were formatted with roughly 1/50th of the requested work
+  (#52).** `BenchmarkPBKDF2` calibrated the iteration count by timing 1000
+  iterations once and gating the extrapolation on `elapsed.Milliseconds() > 0`.
+  A thousand iterations of PBKDF2 is a few hundred *micro*seconds on any modern
+  CPU, so that comparison was always false, the extrapolation never ran, and
+  every pbkdf2 keyslot this library formatted received a hardcoded **100000** —
+  about 20–50 ms of work against a documented 2000 ms target, one to two orders
+  of magnitude off. On the reference workstation the correctly calibrated counts
+  at the 2000 ms default are ~4.7M (SHA-256) and ~2.5M (SHA-512).
+
+  Three defects, not one, and fixing any of them alone leaves a broken
+  calibration:
+
+  - **Resolution.** The measurement now uses the full `time.Duration`. Even on
+    the path where the old comparison did pass, truncating a sub-millisecond
+    measurement to an integer left the extrapolated count wrong by up to ~3x,
+    unpredictably, per machine.
+  - **Probe size.** The probe starts at 1000 iterations and **doubles** until it
+    clears a floor of tens of milliseconds, so the measurement is meaningful on
+    a fast server and on a slow board alike. One fixed probe size cannot be.
+  - **The silent fallback.** `return 100000, nil` was a fail-open: a
+    weak-but-plausible count with a `nil` error, so no caller could tell
+    calibration had failed. Calibration now fails closed with a typed
+    `*KDFCalibrationError` (matching the new `ErrKDFCalibration`), and a
+    `PBKDFIterTime` outside 1..600000 is refused rather than silently floored.
+
+  A second, hardware-independent floor was added with it: the count is never
+  below the OWASP recommendation for the hash, scaled to the requested budget
+  (600,000 SHA-256, 210,000 SHA-384/512, 1,300,000 SHA-1 at the 2000 ms
+  default). A calibrated count measures the *defender's* hardware; the
+  attacker's is unrelated and is not slow, so formatting on a low-end board
+  would otherwise produce a header that is weak everywhere and that outlives
+  the board. The result is also clamped to the same iteration ceiling
+  `validateKDFCost` enforces on read-back, so a calibrated count can never
+  produce a keyslot this library would then refuse to open.
+
+  **This does not reach volumes that are already formatted.** The iteration
+  count lives in the LUKS2 header, so every pbkdf2 keyslot written by an
+  affected release stays at 100000 until it is re-keyed. Argon2 keyslots — the
+  library default — are unaffected; only pbkdf2, which is what FIPS deployments
+  are required to use.
+
+  The three tests that existed asserted only `iterations >= 1000`, which 100000
+  satisfies, which is why this survived five merges and three releases of green
+  suites. They are replaced by tests that run the returned count and measure it,
+  that check the count scales with the requested budget, and that pin the
+  recommended minimum without depending on machine speed.
+
 - **A keyslot whose every attesting digest is unusable is a header fault, not a
   credential verdict (#41).** With the CORRECT passphrase over a container whose
   only digest decodes to 64 bytes under a `sha256` label, `TestKey` reported

@@ -750,9 +750,10 @@ func TestLongPassphrase(t *testing.T) {
 
 		t.Logf("Testing maximum valid passphrase (512 bytes)")
 		opts := FormatOptions{
-			Device:     volumePath,
-			Passphrase: maxPass,
-			KDFType:    "pbkdf2",
+			Device:        volumePath,
+			Passphrase:    maxPass,
+			KDFType:       "pbkdf2",
+			PBKDFIterTime: 1, // keyslot cost is not what this test exercises (#52)
 		}
 
 		if err := Format(opts); err != nil {
@@ -783,9 +784,10 @@ func TestLongPassphrase(t *testing.T) {
 
 		t.Logf("Testing too-long passphrase (1024 bytes)")
 		opts := FormatOptions{
-			Device:     volumePath,
-			Passphrase: tooLong,
-			KDFType:    "pbkdf2",
+			Device:        volumePath,
+			Passphrase:    tooLong,
+			KDFType:       "pbkdf2",
+			PBKDFIterTime: 1, // keyslot cost is not what this test exercises (#52)
 		}
 
 		err = Format(opts)
