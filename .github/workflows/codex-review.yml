@@ -44,7 +44,9 @@ jobs:
       #
       # ROLLBACK: delete these two lines. No image rebuild needed.
       # PROMOTE:  move the overlay's content into the base prompt and delete the
-      #           fragment (infra/gitea/README.md, "Staging a review-prompt change").
+      #           fragment, then rebuild the review image so every consumer gets
+      #           it. Promotion is deliberate and separate: a canary that becomes
+      #           the default by accident is not a canary.
       CODEX_REVIEW_PROMPT_VARIANT: exec-basis
     steps:
       - uses: actions/checkout@v6
