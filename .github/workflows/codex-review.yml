@@ -24,6 +24,28 @@ jobs:
     # The review image is the job container; nothing to install.
     if: github.server_url != 'https://github.com'
     timeout-minutes: 45
+    env:
+      # CANARY (2026-09-02): this repository is the single opt-in for the
+      # `exec-basis` prompt overlay, which requires every verdict to state what
+      # it actually ran and whether it completed. The other 16 consumers stay on
+      # the base prompt.
+      #
+      # Why here: this repo has the most review traffic and a twelve-round
+      # baseline measured on PR #91 — 3 rounds completed a full package run and
+      # said so, 2 disclosed an interrupted or compile-only run (one of them an
+      # APPROVE resting on `go test -run '^$' -count=0`), and 5 said nothing at
+      # all, including the round a merge was cleared on. Reviewer job durations
+      # ranged 75s-380s on identical work, so the review window is a distribution
+      # rather than a budget.
+      #
+      # The overlay does NOT change what satisfies the gate, only what the
+      # verdict reports. The footer carries `prompt exec-basis@<hash>` so canary
+      # output is distinguishable from control output.
+      #
+      # ROLLBACK: delete these two lines. No image rebuild needed.
+      # PROMOTE:  move the overlay's content into the base prompt and delete the
+      #           fragment (infra/gitea/README.md, "Staging a review-prompt change").
+      CODEX_REVIEW_PROMPT_VARIANT: exec-basis
     steps:
       - uses: actions/checkout@v6
         with:
