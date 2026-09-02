@@ -96,6 +96,9 @@ func TestDataPersistenceAcrossUnlockCycles(t *testing.T) {
 	t.Logf("Step 3: First unlock and filesystem creation")
 
 	// First unlock
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := Unlock(loopDevice, passphrase, volumeName); err != nil {
 		t.Fatalf("First Unlock failed: %v", err)
 	}
@@ -157,10 +160,13 @@ func TestDataPersistenceAcrossUnlockCycles(t *testing.T) {
 	t.Logf("Step 6: Second unlock cycle - verifying data persistence")
 
 	// Second unlock
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := Unlock(loopDevice, passphrase, volumeName); err != nil {
 		t.Fatalf("Second Unlock failed: %v", err)
 	}
-	defer Lock(volumeName)
+	defer releaseVolume(t, volumeName)
 
 	// Wait for device to appear
 	if !waitForUnlock(volumeName, 5*time.Second) {
@@ -197,6 +203,9 @@ func TestDataPersistenceAcrossUnlockCycles(t *testing.T) {
 	Lock(volumeName)
 
 	// Third unlock
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := Unlock(loopDevice, passphrase, volumeName); err != nil {
 		t.Fatalf("Third Unlock failed: %v", err)
 	}
@@ -270,10 +279,13 @@ func TestDataPersistenceMultipleFiles(t *testing.T) {
 	}
 	defer DetachLoopDevice(loopDevice)
 
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := Unlock(loopDevice, passphrase, volumeName); err != nil {
 		t.Fatalf("Unlock failed: %v", err)
 	}
-	defer Lock(volumeName)
+	defer releaseVolume(t, volumeName)
 
 	if err := MakeFilesystem(volumeName, "ext4", "multifile"); err != nil {
 		t.Fatalf("MakeFilesystem failed: %v", err)
@@ -337,6 +349,9 @@ func TestDataPersistenceMultipleFiles(t *testing.T) {
 	exec.Command("umount", mountPoint).Run()
 	Lock(volumeName)
 
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := Unlock(loopDevice, passphrase, volumeName); err != nil {
 		t.Fatalf("Re-unlock failed: %v", err)
 	}
@@ -418,10 +433,13 @@ func TestDataPersistenceLargeFile(t *testing.T) {
 	}
 	defer DetachLoopDevice(loopDevice)
 
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := Unlock(loopDevice, passphrase, volumeName); err != nil {
 		t.Fatalf("Unlock failed: %v", err)
 	}
-	defer Lock(volumeName)
+	defer releaseVolume(t, volumeName)
 
 	if err := MakeFilesystem(volumeName, "ext4", "largefile"); err != nil {
 		t.Fatalf("MakeFilesystem failed: %v", err)
@@ -473,6 +491,9 @@ func TestDataPersistenceLargeFile(t *testing.T) {
 	exec.Command("umount", mountPoint).Run()
 	Lock(volumeName)
 
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := Unlock(loopDevice, passphrase, volumeName); err != nil {
 		t.Fatalf("Re-unlock failed: %v", err)
 	}
@@ -557,10 +578,13 @@ func TestSmallVolumeMinimumSize(t *testing.T) {
 	}
 	defer DetachLoopDevice(loopDevice)
 
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := Unlock(loopDevice, passphrase, volumeName); err != nil {
 		t.Fatalf("Unlock failed: %v", err)
 	}
-	defer Lock(volumeName)
+	defer releaseVolume(t, volumeName)
 
 	if err := MakeFilesystem(volumeName, "ext4", "small"); err != nil {
 		t.Fatalf("MakeFilesystem failed: %v", err)
@@ -709,10 +733,13 @@ func TestUnicodePassphrase(t *testing.T) {
 	defer DetachLoopDevice(loopDevice)
 
 	// Unlock with unicode passphrase
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := Unlock(loopDevice, passphrase, volumeName); err != nil {
 		t.Fatalf("Unlock with unicode passphrase failed: %v", err)
 	}
-	defer Lock(volumeName)
+	defer releaseVolume(t, volumeName)
 
 	// Verify unlocked (wait for device-mapper to create device)
 	if !waitForUnlock(volumeName, 5*time.Second) {
@@ -844,10 +871,13 @@ func TestEmptyPassphrase(t *testing.T) {
 		defer DetachLoopDevice(loopDevice)
 
 		volumeName := "luks-empty"
+		// Registered BEFORE the mapping can exist, so a partial or rolled-back
+		// unlock cannot leave one behind either (#100). Idempotent.
+		defer releaseVolume(t, volumeName)
 		if err := Unlock(loopDevice, emptyPass, volumeName); err != nil {
 			t.Fatalf("Unlock with empty passphrase failed: %v", err)
 		}
-		defer Lock(volumeName)
+		defer releaseVolume(t, volumeName)
 
 		if !waitForUnlock(volumeName, 5*time.Second) {
 			t.Fatal("Volume should be unlocked")
@@ -901,6 +931,12 @@ func TestRapidLockUnlock(t *testing.T) {
 	defer DetachLoopDevice(loopDevice)
 
 	t.Logf("Performing 10 rapid lock/unlock cycles")
+
+	// ONE registration, hoisted out of the loop (#100). The cycles close
+	// explicitly below; this catches an early exit from any of them. Inside the
+	// loop it would register ten times -- harmless, since releaseVolume is
+	// idempotent, but ten deferred calls to say one thing.
+	defer releaseVolume(t, volumeName)
 
 	// Perform 10 rapid lock/unlock cycles (reduced from 20 for container stability)
 	for i := 0; i < 10; i++ {
@@ -982,10 +1018,13 @@ func TestConcurrentRead(t *testing.T) {
 	}
 	defer DetachLoopDevice(loopDevice)
 
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := Unlock(loopDevice, passphrase, volumeName); err != nil {
 		t.Fatalf("Unlock failed: %v", err)
 	}
-	defer Lock(volumeName)
+	defer releaseVolume(t, volumeName)
 
 	if err := MakeFilesystem(volumeName, "ext4", "concurrent"); err != nil {
 		t.Fatalf("MakeFilesystem failed: %v", err)
@@ -1114,10 +1153,13 @@ func TestIsMountedAccuracy(t *testing.T) {
 	}
 	defer DetachLoopDevice(loopDevice)
 
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := Unlock(loopDevice, passphrase, volumeName); err != nil {
 		t.Fatalf("Unlock failed: %v", err)
 	}
-	defer Lock(volumeName)
+	defer releaseVolume(t, volumeName)
 
 	if err := MakeFilesystem(volumeName, "ext4", "ismounted"); err != nil {
 		t.Fatalf("MakeFilesystem failed: %v", err)
@@ -1145,13 +1187,17 @@ func TestIsMountedAccuracy(t *testing.T) {
 	// Mount
 	dmDevicePath, err := GetMappedDevicePath(volumeName)
 	if err != nil {
-		Lock(volumeName)
 		t.Fatalf("GetMappedDevicePath failed: %v", err)
 	}
 	mountCmd := exec.Command("mount", dmDevicePath, mountPoint)
 	if output, err := mountCmd.CombinedOutput(); err != nil {
 		t.Fatalf("Mount failed: %v\nOutput: %s", err, string(output))
 	}
+	// No bespoke deferred unmount here. releaseVolume unmounts whatever is
+	// mounted from THIS volume's own device before it closes the mapping, so
+	// every mount site in the suite is covered by one mechanism rather than by
+	// nineteen that each have to be remembered -- and the defect being fixed is
+	// precisely a teardown someone forgot.
 
 	// Should be mounted now
 	mounted, err = IsMounted(mountPoint)

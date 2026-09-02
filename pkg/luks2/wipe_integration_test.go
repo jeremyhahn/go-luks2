@@ -189,9 +189,11 @@ func TestWipeKeyslot(t *testing.T) {
 	}
 	defer DetachLoopDevice(loopDev)
 
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, "test-wipe-keyslot")
 	err = Unlock(loopDev, []byte("test-password"), "test-wipe-keyslot")
 	if err == nil {
-		Lock("test-wipe-keyslot")
 		t.Fatal("Unlock should fail after keyslot wipe")
 	}
 }

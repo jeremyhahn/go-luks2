@@ -56,10 +56,13 @@ func TestMountUnmount(t *testing.T) {
 	defer DetachLoopDevice(loopDev)
 
 	// Unlock
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := Unlock(loopDev, passphrase, volumeName); err != nil {
 		t.Fatalf("Unlock failed: %v", err)
 	}
-	defer Lock(volumeName)
+	defer releaseVolume(t, volumeName)
 
 	// Create filesystem
 	if err := MakeFilesystem(volumeName, "ext4", "test-label"); err != nil {

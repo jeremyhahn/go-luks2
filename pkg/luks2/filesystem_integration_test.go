@@ -72,10 +72,13 @@ func TestMakeFilesystemExt4(t *testing.T) {
 	defer DetachLoopDevice(loopDev)
 
 	// Unlock volume
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := Unlock(loopDev, passphrase, volumeName); err != nil {
 		t.Fatalf("Unlock failed: %v", err)
 	}
-	defer Lock(volumeName)
+	defer releaseVolume(t, volumeName)
 
 	// Create ext4 filesystem
 	if err := MakeFilesystem(volumeName, "ext4", "test-ext4"); err != nil {
@@ -162,10 +165,13 @@ func TestMakeFilesystemExt3(t *testing.T) {
 	defer DetachLoopDevice(loopDev)
 
 	// Unlock volume
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := Unlock(loopDev, passphrase, volumeName); err != nil {
 		t.Fatalf("Unlock failed: %v", err)
 	}
-	defer Lock(volumeName)
+	defer releaseVolume(t, volumeName)
 
 	// Create ext3 filesystem
 	if err := MakeFilesystem(volumeName, "ext3", "test-ext3"); err != nil {
@@ -228,10 +234,13 @@ func TestMakeFilesystemExt2(t *testing.T) {
 	defer DetachLoopDevice(loopDev)
 
 	// Unlock volume
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := Unlock(loopDev, passphrase, volumeName); err != nil {
 		t.Fatalf("Unlock failed: %v", err)
 	}
-	defer Lock(volumeName)
+	defer releaseVolume(t, volumeName)
 
 	// Create ext2 filesystem
 	if err := MakeFilesystem(volumeName, "ext2", "test-ext2"); err != nil {
@@ -298,10 +307,13 @@ func TestMakeFilesystemWithLabel(t *testing.T) {
 	defer DetachLoopDevice(loopDev)
 
 	// Unlock volume
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := Unlock(loopDev, passphrase, volumeName); err != nil {
 		t.Fatalf("Unlock failed: %v", err)
 	}
-	defer Lock(volumeName)
+	defer releaseVolume(t, volumeName)
 
 	// Create filesystem with custom label
 	if err := MakeFilesystem(volumeName, "ext4", fsLabel); err != nil {
@@ -421,10 +433,13 @@ func TestFilesystemWriteRead(t *testing.T) {
 	defer DetachLoopDevice(loopDev)
 
 	// Unlock volume
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := Unlock(loopDev, passphrase, volumeName); err != nil {
 		t.Fatalf("Unlock failed: %v", err)
 	}
-	defer Lock(volumeName)
+	defer releaseVolume(t, volumeName)
 
 	// Create filesystem
 	if err := MakeFilesystem(volumeName, "ext4", "test-rw"); err != nil {
@@ -542,6 +557,9 @@ func TestFilesystemPersistence(t *testing.T) {
 	defer DetachLoopDevice(loopDev)
 
 	// Unlock volume
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := Unlock(loopDev, passphrase, volumeName); err != nil {
 		t.Fatalf("Unlock failed: %v", err)
 	}
@@ -591,10 +609,13 @@ func TestFilesystemPersistence(t *testing.T) {
 	}
 
 	// Unlock again
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := Unlock(loopDev, passphrase, volumeName); err != nil {
 		t.Fatalf("Second unlock failed: %v", err)
 	}
-	defer Lock(volumeName)
+	defer releaseVolume(t, volumeName)
 
 	// Wait for device to appear
 	if !waitForDevice(volumeName, 5*time.Second) {

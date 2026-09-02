@@ -450,10 +450,13 @@ func TestIsUnlockedTrue(t *testing.T) {
 	// Cleanup any leftover device mapper from previous runs
 	_ = Lock(volumeName)
 
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := Unlock(loopDev, passphrase, volumeName); err != nil {
 		t.Fatalf("Unlock failed: %v", err)
 	}
-	defer Lock(volumeName)
+	defer releaseVolume(t, volumeName)
 
 	// Verify IsUnlocked returns true (wait for device-mapper)
 	if !waitForDeviceState(volumeName, true, 5*time.Second) {
@@ -557,6 +560,9 @@ func TestVolumeStateTransitions(t *testing.T) {
 	}
 
 	// Transition 1: locked -> unlocked
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := Unlock(loopDev, passphrase, volumeName); err != nil {
 		t.Fatalf("Unlock failed: %v", err)
 	}
@@ -595,6 +601,9 @@ func TestVolumeStateTransitions(t *testing.T) {
 	}
 
 	// Transition 3: locked -> unlocked (again)
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := Unlock(loopDev, passphrase, volumeName); err != nil {
 		t.Fatalf("Second unlock failed: %v", err)
 	}

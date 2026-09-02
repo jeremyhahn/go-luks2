@@ -149,6 +149,9 @@ func TestUnlockPassesTheVolumeKeyThroughTheKernelKeyring(t *testing.T) {
 	// If the reference were malformed, or resolved to nothing, or declared the
 	// wrong key size, the kernel would refuse the table load right here -- so
 	// a successful Unlock is already most of the proof.
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := luks2.Unlock(loopDev, passphrase, volumeName); err != nil {
 		t.Fatalf("Unlock through the kernel keyring failed: %v", err)
 	}

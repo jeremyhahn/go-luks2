@@ -52,6 +52,9 @@ func TestUnlockBasic(t *testing.T) {
 	// Cleanup any leftover device mapper from previous runs
 	_ = Lock(volumeName)
 
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := Unlock(loopDev, passphrase, volumeName); err != nil {
 		t.Fatalf("Unlock failed: %v", err)
 	}
@@ -122,9 +125,11 @@ func TestUnlockWithWrongPassphrase(t *testing.T) {
 	defer DetachLoopDevice(loopDev)
 
 	// Try with wrong passphrase
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, "test-wrong-pass")
 	err = Unlock(loopDev, []byte("wrong-password"), "test-wrong-pass")
 	if err == nil {
-		Lock("test-wrong-pass")
 		t.Fatal("Unlock should have failed with wrong passphrase")
 	}
 }
@@ -153,6 +158,9 @@ func TestUnlockErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Registered BEFORE the mapping can exist, so a partial or rolled-back
+			// unlock cannot leave one behind either (#100). Idempotent.
+			defer releaseVolume(t, tt.volumeName)
 			err := Unlock(tt.device, tt.passphrase, tt.volumeName)
 			if err == nil {
 				Lock(tt.volumeName)

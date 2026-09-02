@@ -93,6 +93,7 @@ func TestFormatWithKDFTypes(t *testing.T) {
 			// Clean up any previous device mapper
 			_ = luks2.Lock(volumeName)
 
+			defer releaseVolume(t, volumeName)
 			if err := luks2.Unlock(loopDev, []byte("test-password"), volumeName); err != nil {
 				t.Fatalf("Failed to unlock %s volume: %v", tt.kdfType, err)
 			}

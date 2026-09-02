@@ -74,10 +74,13 @@ func TestFullEndToEndWorkflow(t *testing.T) {
 	t.Logf("Step 4: Setup loop device %s", loopDevice)
 
 	// Step 5: Unlock the LUKS volume
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := Unlock(loopDevice, passphrase, volumeName); err != nil {
 		t.Fatalf("Step 5 FAILED - Unlock: %v", err)
 	}
-	defer Lock(volumeName)
+	defer releaseVolume(t, volumeName)
 	t.Logf("Step 5: Unlocked LUKS volume as %s", volumeName)
 
 	// Verify the device-mapper device exists (wait for it to appear)

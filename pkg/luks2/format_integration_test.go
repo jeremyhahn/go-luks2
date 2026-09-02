@@ -90,10 +90,10 @@ func TestFormatWithKDFTypes(t *testing.T) {
 			}
 			defer DetachLoopDevice(loopDev)
 
+			defer releaseVolume(t, "test-kdf-"+tt.name)
 			if err := Unlock(loopDev, []byte("test-password"), "test-kdf-"+tt.name); err != nil {
 				t.Fatalf("Failed to unlock %s volume: %v", tt.kdfType, err)
 			}
-			Lock("test-kdf-" + tt.name)
 		})
 	}
 }

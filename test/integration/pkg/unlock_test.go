@@ -42,6 +42,9 @@ func TestUnlockBasic(t *testing.T) {
 	// Cleanup any leftover device mapper from previous runs
 	_ = luks2.Lock(volumeName)
 
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := luks2.Unlock(loopDev, passphrase, volumeName); err != nil {
 		t.Fatalf("Unlock failed: %v", err)
 	}
@@ -94,6 +97,9 @@ func TestUnlockWithWrongPassphrase(t *testing.T) {
 	}
 
 	// Try with wrong passphrase
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	err = luks2.Unlock(loopDev, []byte("wrong-password"), volumeName)
 	if err == nil {
 		luks2.Lock(volumeName)
@@ -124,6 +130,9 @@ func TestUnlockErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Registered BEFORE the mapping can exist, so a partial or rolled-back
+			// unlock cannot leave one behind either (#100). Idempotent.
+			defer releaseVolume(t, tt.volumeName)
 			err := luks2.Unlock(tt.device, tt.passphrase, tt.volumeName)
 			if err == nil {
 				luks2.Lock(tt.volumeName)

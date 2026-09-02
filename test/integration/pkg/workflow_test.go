@@ -56,6 +56,9 @@ func TestFullWorkflow(t *testing.T) {
 
 	// Step 4: Unlock the volume
 	_ = luks2.Lock(volumeName) // Cleanup from previous runs
+	// Registered BEFORE the mapping can exist, so a partial or rolled-back
+	// unlock cannot leave one behind either (#100). Idempotent.
+	defer releaseVolume(t, volumeName)
 	if err := luks2.Unlock(loopDev, passphrase, volumeName); err != nil {
 		t.Fatalf("Unlock failed: %v", err)
 	}
