@@ -134,6 +134,30 @@ var (
 	// against it -- so this is a refusal, not a retryable condition.
 	ErrMetadataTooLarge = errors.New("metadata does not fit the header area")
 
+	// ErrLastKeyslot indicates a removal was REFUSED because it would leave the
+	// container with no keyslot that can open it.
+	//
+	// The count behind it is of keyslots that could actually yield the master
+	// key, not of map entries: a `reencrypt` slot, a slot with no anti-forensic
+	// object, a slot whose cipher nothing implements all read as keyslots and
+	// open nothing. Counting entries is what let the only working credential be
+	// destroyed while the guard reported a survivor (#37, #71).
+	//
+	// It is a refusal rather than a warning by owner ruling. A removal that
+	// leaves a volume unopenable otherwise succeeds, reports success, and is
+	// discovered at the next unlock.
+	ErrLastKeyslot = errors.New("removal would leave no keyslot that can open the volume")
+
+	// ErrKeyslotAreaOverlap indicates a removal was REFUSED because zeroing the
+	// target keyslot's area would also zero key material belonging to a keyslot
+	// that can still open the volume.
+	//
+	// The guard and the wipe used to disagree about what a removal destroys --
+	// the guard reasoned over keyslot entries, the wipe acted on bytes -- so two
+	// entirely well-formed keyslots sharing an area were enough to reproduce
+	// permanent data loss (#38).
+	ErrKeyslotAreaOverlap = errors.New("keyslot area overlaps a keyslot that can still open the volume")
+
 	// ErrKeyslotsAreaFull indicates the container has no room for another
 	// keyslot: the new one would fall outside the keyslots area the header
 	// declares, or past the start of the encrypted data. Both are refusals

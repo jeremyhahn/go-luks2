@@ -178,11 +178,24 @@ func createMetadata(kdf, digestKDF *KDF, digestValue string, opts FormatOptions,
 		KeySize:  masterKeySize,
 		Priority: &priority,
 		Area: &KeyslotArea{
-			Type:       "raw",
-			KeySize:    masterKeySize,
-			Offset:     formatSize(int64(keyslotOffset)),
-			Size:       formatSize(int64(keyslot0Size)),
-			Encryption: opts.Cipher + "-" + opts.CipherMode,
+			Type:    "raw",
+			KeySize: masterKeySize,
+			Offset:  formatSize(int64(keyslotOffset)),
+			Size:    formatSize(int64(keyslot0Size)),
+			// The KEYSLOT AREA cipher, which is not the container's data
+			// cipher and was written as though it were.
+			//
+			// A caller may format with any cipher dm-crypt supports, and that
+			// choice describes the SEGMENT below. Keyslot key material is
+			// wrapped by encryptKeyMaterialEnclave with AES-XTS regardless --
+			// so copying opts.Cipher+opts.CipherMode here declared, for any
+			// non-XTS choice, an encryption the material does not have. The
+			// container then opened for this package, whose read path consults
+			// only the algorithm, and for nothing else.
+			//
+			// Unchanged for the default aes/xts-plain64, where the two strings
+			// were the same by coincidence -- which is why it survived.
+			Encryption: KeyslotAreaEncryption,
 		},
 		KDF: kdf,
 		AF: &AntiForensic{
@@ -404,6 +417,65 @@ func decryptKeyMaterial(data, key []byte, cipherAlgo string, sectorSize int) ([]
 	return decrypted, nil
 }
 
+// validateAreaCipher reports whether this package can run the named cipher over
+// a keyslot area.
+//
+// AES-XTS is the only mode implemented, so "aes" is the only accepted algorithm.
+// It is a function rather than a comparison written where it is needed because
+// [screenKeyslot] must reach the same verdict from the header alone: a keyslot
+// declaring `"encryption": "serpent-xts-plain64"` cannot open the volume, and a
+// removal guard that does not know that will count it as a survivor.
+func validateAreaCipher(cipherAlgo string) error {
+	if cipherAlgo != "aes" {
+		return fmt.Errorf("unsupported cipher: %s", cipherAlgo)
+	}
+	return nil
+}
+
+// validateXTSKeySize reports whether a volume key of this length can be used as
+// an AES-XTS key.
+//
+// XTS splits its key in half and gives each half to AES, so the length must be
+// twice a legal AES key size: 32, 48 or 64 bytes. xts.NewCipher refuses anything
+// else -- which means a keyslot declaring `"key_size": 40` is well-formed by
+// every other measure and can never yield a master key. That is exactly the
+// shape the removal guard must not count, and it could not see it while the
+// rejection lived only inside the cipher constructor.
+//
+// The bound is deliberately NOT MaxKeyslotKeySize's 1024, which asks a different
+// question: what a header may DECLARE without sizing an allocation out of
+// proportion. This asks what the cipher will actually accept.
+func validateXTSKeySize(keySize int) error {
+	switch keySize {
+	case 32, 48, 64:
+		return nil
+	default:
+		return fmt.Errorf("volume key of %d bytes cannot key AES-XTS; the accepted sizes are 32, 48 and 64 bytes", keySize)
+	}
+}
+
+// KeyslotAreaEncryption is the ONLY area encryption this package writes to a
+// keyslot, and it is exact rather than a family.
+//
+// Keyslot key material goes through encryptKeyMaterialEnclave with
+// DefaultCipher, which is AES, and xtsSectors, which is XTS tweaked on a uint64
+// sector index -- that is plain64 and nothing else. It is deliberately NOT the
+// container's DATA cipher: a caller may format a volume with any cipher
+// dm-crypt supports, and that choice describes the data segment. It says
+// nothing about how the keyslots are wrapped, which this package does one way.
+const KeyslotAreaEncryption = DefaultCipher + "-" + DefaultCipherMode
+
+// There is deliberately no validateKeyslotAreaEncryption. It existed to screen a
+// TEMPLATE keyslot whose area cipher AddKey was about to copy, and AddKey no
+// longer copies one: both writers state KeyslotAreaEncryption directly, so there
+// is nothing left to validate -- the value is a constant, and a validator over a
+// constant is a guard against a state the code cannot reach.
+//
+// Its removal is also what repairs legacy containers: screening the template
+// rejected every keyslot of any volume whose keyslot area carried the old
+// data-cipher label, and AddKey then refused to add a credential to a volume it
+// could unlock. See addKey.
+
 // xtsSectors runs AES-XTS over src into dst, one sector at a time, with the
 // sector index as the tweak. It is the single implementation behind both
 // directions and both the enclave and the plain wrappers, so the two can never
@@ -420,8 +492,17 @@ func decryptKeyMaterial(data, key []byte, cipherAlgo string, sectorSize int) ([]
 // The output is unchanged: for a whole sector, copying into a 512-byte buffer
 // and transforming that is identical to transforming the sector directly.
 func xtsSectors(dst, src, key []byte, cipherAlgo string, sectorSize int, decrypt bool) error {
-	if cipherAlgo != "aes" {
-		return fmt.Errorf("unsupported cipher: %s", cipherAlgo)
+	// Both of these are CALLABLE VALIDATORS rather than the inline literals
+	// they used to be, and that is the point of them: the keyslot screen has to
+	// be able to ask the same two questions off metadata alone, before a
+	// derivation is paid for and before a removal guard counts the keyslot as a
+	// survivor. An inline literal here is a condition nothing else can consult,
+	// which is how the guard came to miss both (#45). See keyslotscreen.go.
+	if err := validateAreaCipher(cipherAlgo); err != nil {
+		return err
+	}
+	if err := validateXTSKeySize(len(key)); err != nil {
+		return err
 	}
 	if len(dst) != len(src) {
 		return fmt.Errorf("key material buffer size mismatch")

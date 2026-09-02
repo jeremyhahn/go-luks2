@@ -13,7 +13,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unsafe"
 
 	"github.com/anatol/devmapper.go"
 	"github.com/jeremyhahn/go-enclave"
@@ -585,44 +584,27 @@ func unlockLoadTable(name, uuid, realDevice string, params cryptSegmentParams, m
 // What is deliberately not enclaved is the ciphertext read off the device,
 // which is already on the device; see decryptKeyMaterialEnclave.
 func unlockKeyslot(device string, keyslotID string, passphrase []byte, keyslot *Keyslot, digests map[string]*Digest) (*enclave.MemoryEnclave, error) {
-	// The type is checked HERE and not only in the scan.
+	// THE GATE, and it is one call rather than a prefix of checks written here.
 	//
-	// getMasterKey skips anything that is not "luks2", but RemoveKey, ChangeKey
-	// and KillSlot reach this function with a keyslot the caller NAMED, without
-	// consulting its type. A LUKS2 "reencrypt" keyslot has no kdf object, so
-	// arriving at the derivation with one dereferences nil -- a crash reachable
-	// from a container that is merely mid-reencryption, not even a hostile one.
-	if keyslot.Type != "luks2" {
-		return nil, fmt.Errorf("%w: keyslot type %q cannot be opened; only luks2 keyslots hold a passphrase-wrapped volume key",
-			ErrInvalidKeyslot, keyslot.Type)
-	}
-
-	// THE GATE. Everything below this line trusts the keyslot's declared
-	// geometry: that the objects it needs exist, that its offsets and sizes
-	// parse, and that its key size, stripe count and area describe an amount of
-	// work worth doing.
+	// screenKeyslot performs every rejection this function can make WITHOUT the
+	// passphrase -- the type, the geometry, the KDF's cost and its parameters,
+	// the area cipher, the volume key size, the anti-forensic hash, whether the
+	// area can hold its own split, and whether any digest attests the slot at
+	// all -- and hands back the values the rest of this function needs.
 	//
-	// The header reader already applied this to every keyslot it parsed (see
-	// keyslotvalidation.go); it is repeated here because this function is also
-	// reachable with a keyslot a caller CONSTRUCTED rather than read. What it
-	// replaced was three overlapping bounds scattered down this function --
-	// an area-size check here, an overflow check in afSplitBytes there -- which
-	// is the shape that let an unbounded key_size reach the KDF in the first
-	// place: a bound at one call site says nothing about the call site above it.
-	if err := validateKeyslot("", keyslot); err != nil {
+	// That is the whole of #45. The removal guard has to answer the same
+	// question off metadata alone, and while these checks lived here it answered
+	// it with a hand-maintained copy that was wrong three times and cost the
+	// volume each time. The guard now calls screenKeyslot too. Consuming what it
+	// returns is what makes the coupling mechanical: this function cannot skip
+	// the screen and still work, so a rejection added there is inherited by the
+	// guard and cannot be forgotten. See keyslotscreen.go.
+	//
+	// It is applied here as well as at the header read because this function is
+	// also reachable with a keyslot a caller CONSTRUCTED rather than read.
+	plan, err := screenKeyslot(keyslotID, keyslot, digests)
+	if err != nil {
 		return nil, err
-	}
-
-	// What the KDF would COST is checked immediately before it is paid, and
-	// here rather than in validateKeyslot: a keyslot with a deliberately
-	// expensive KDF is still a fine template for a new one, and AddKey's
-	// reference pick screens shape without needing to run anything. See
-	// validateKDFCost.
-	//
-	// Wrapped as an unusable KEYSLOT, which is what makes the scan skip past a
-	// crafted slot rather than let it deny the volume.
-	if err := validateKDFCost(keyslot.KDF); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidKeyslot, err)
 	}
 
 	// Derive key from passphrase
@@ -632,74 +614,46 @@ func unlockKeyslot(device string, keyslotID string, passphrase []byte, keyslot *
 	}
 	defer passphraseKey.Destroy()
 
-	// Read encrypted key material from keyslot area
-	offset, err := parseSize(keyslot.Area.Offset)
-	if err != nil {
-		return nil, err
-	}
-
-	size, err := parseSize(keyslot.Area.Size)
-	if err != nil {
-		return nil, err
-	}
-
+	// The area bounds come from the screen, which parsed and bounded them --
+	// see screenKeyslot. openDevice is main's typed opener, adopted here so this
+	// path reports a device failure the same way every other one does.
 	f, err := openDevice("read the keyslot area", device, os.O_RDONLY)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
 
-	encryptedKeyMaterial := make([]byte, size)
+	encryptedKeyMaterial := make([]byte, plan.areaSize)
 	defer clearBytes(encryptedKeyMaterial)
-	if _, err := f.ReadAt(encryptedKeyMaterial, offset); err != nil {
+	if _, err := f.ReadAt(encryptedKeyMaterial, plan.areaOffset); err != nil {
 		return nil, err
 	}
-
-	// Extract cipher from area encryption (e.g., "aes-xts-plain64" -> "aes")
-	cipherAlgo := strings.Split(keyslot.Area.Encryption, "-")[0]
 
 	// Merge anti-forensic split.
 	//
 	// The keyslot area is 4 KiB-aligned and so is usually LARGER than the
-	// keySize*stripes the merge consumes. Only that much is decrypted, rounded
-	// UP to a whole sector: XTS tweaks on the sector index, so decrypting a
-	// whole-sector prefix yields byte-identical plaintext to decrypting the
-	// area and truncating, while the locked region needed shrinks to the
-	// stripes themselves. Rounding up rather than down matters -- a short final
-	// sector would be zero-padded by the transform and decrypt to something
-	// else entirely.
-	// The gate above has established that this product does not overflow and
-	// fits the area, so it is computed rather than re-checked.
-	afSplitSize := keyslot.KeySize * keyslot.AF.Stripes
-
-	sectorSize := 512 // Default for key material
-	decryptLen := alignTo(int64(afSplitSize), int64(sectorSize))
-	if decryptLen > size {
-		// Only reachable for an area size that is not a whole number of
-		// sectors, which LUKS2's 4096-byte keyslot alignment rules out for any
-		// container cryptsetup or this library writes.
-		//
-		// It is refused rather than clamped. Clamping would send the final
-		// sector through the zero-padding partial-sector path, which decrypts
-		// to something other than what was written -- so the merge would fail
-		// with a message about the AF material rather than about the geometry
-		// that caused it, and an operator would go looking in the wrong place.
-		return nil, fmt.Errorf("%w: area of %d bytes is not a whole number of %d-byte sectors and cannot hold the %d bytes of AF material this keyslot declares",
-			ErrInvalidKeyslot, size, sectorSize, afSplitSize)
-	}
-
+	// keySize*stripes the merge consumes. Only plan.decryptLen is decrypted:
+	// the stripes rounded UP to a whole sector. XTS tweaks on the sector index,
+	// so decrypting a whole-sector prefix yields byte-identical plaintext to
+	// decrypting the area and truncating, while the locked region needed shrinks
+	// to the stripes themselves. Rounding up rather than down matters -- a short
+	// final sector would be zero-padded by the transform and decrypt to
+	// something else entirely.
+	//
+	// The screen computed all of it, including that the rounded length fits the
+	// area; nothing here recomputes or re-checks any of it.
 	decryptedKeyMaterial, err := decryptKeyMaterialEnclave(
-		encryptedKeyMaterial[:decryptLen], passphraseKey, cipherAlgo, sectorSize)
+		encryptedKeyMaterial[:plan.decryptLen], passphraseKey, plan.cipherAlgo, keyslotSectorSize)
 	if err != nil {
 		return nil, err
 	}
 	defer decryptedKeyMaterial.Destroy()
 
-	if decryptedKeyMaterial.Size() < afSplitSize {
-		return nil, fmt.Errorf("decrypted data too small: got %d, need %d", decryptedKeyMaterial.Size(), afSplitSize)
+	if decryptedKeyMaterial.Size() < plan.afSplitSize {
+		return nil, fmt.Errorf("decrypted data too small: got %d, need %d", decryptedKeyMaterial.Size(), plan.afSplitSize)
 	}
 
-	masterKey, err := afMergeEnclave(decryptedKeyMaterial, afSplitSize, keyslot.AF.Stripes, keyslot.KeySize, keyslot.AF.Hash)
+	masterKey, err := afMergeEnclave(decryptedKeyMaterial, plan.afSplitSize, keyslot.AF.Stripes, keyslot.KeySize, keyslot.AF.Hash)
 	if err != nil {
 		return nil, err
 	}
@@ -758,57 +712,37 @@ func verifyMasterKey(masterKey *enclave.MemoryEnclave, keyslotID string, digests
 		// The association is checked BEFORE any derivation, so a digest that
 		// does not attest this keyslot costs nothing and cannot influence the
 		// outcome by any route.
-		if !slices.Contains(digest.Keyslots, keyslotID) {
+		if !digestCovers(digest, keyslotID) {
 			continue
 		}
 		applicable++
-		kdf := &KDF{
-			Type:       digest.Type,
-			Hash:       digest.Hash,
-			Salt:       digest.Salt,
-			Iterations: &digest.Iterations,
-		}
 
-		// Decode the expected digest FIRST, because its length is what the
-		// derivation has to match.
-		expected, err := decodeBase64(digest.Digest)
+		// EVERY pre-derivation check lives in screenDigest, which the removal
+		// guard also consumes -- see keyslotHasUsableDigest. This function used
+		// to carry them inline, and the guard therefore had no way to ask the
+		// question they answer: it settled for "is a digest ASSOCIATED with this
+		// keyslot", counted a keyslot whose only digest could never be
+		// evaluated, and authorized destroying the one that worked.
+		//
+		// It is consumed rather than repeated: `expected` and `kdf` are values
+		// this loop cannot obtain any other way, so the screen cannot be skipped
+		// and a check added to it cannot fail to reach the guard.
+		//
+		// Deriving to the length ACTUALLY STORED, which screenDigest establishes,
+		// is what cryptsetup does and is the only choice correct in both
+		// directions. A cryptsetup-written sha512 volume stores 64 bytes and
+		// needs 64 derived, which a hardcoded 32 could never produce (#73). A
+		// volume written by an earlier version of THIS library stores 32 bytes
+		// under a "sha512" label; deriving to the hash's natural 64 would render
+		// every such volume unopenable.
+		//
+		// A digest that fails any of it is SKIPPED, not fatal -- the symmetry
+		// #58 established -- so one unusable digest cannot hide a usable one
+		// behind it.
+		expected, kdf, err := screenDigest(digest)
 		if err != nil {
+			clearBytes(expected)
 			continue // unusable digest -- try the next one (#58)
-		}
-
-		// Derive to the length ACTUALLY STORED, not to a hardcoded 32 and not
-		// to the natural length of digest.Hash.
-		//
-		// Deriving to the stored length is what cryptsetup does, and it is the
-		// only choice that is correct in both directions. A cryptsetup-written
-		// sha512 volume stores 64 bytes and needs 64 derived, which the
-		// hardcoded 32 could never produce (#73). A volume written by an
-		// earlier version of THIS library stores 32 bytes under a "sha512"
-		// label; deriving to the hash's natural 64 would fail to verify it and
-		// would render every such volume unopenable.
-		//
-		// Which lengths are derived to is a whitelist, not a range: the length
-		// the declared hash implies, plus legacyDigestLen for those older
-		// containers. See legacyDigestLen for why the carve-out is exactly one
-		// value.
-		wantLen, err := hashOutputLen(digest.Hash)
-		if err != nil {
-			clearBytes(expected)
-			continue // unknown or FIPS-refused hash -- try the next (#58)
-		}
-		if len(expected) != wantLen && len(expected) != legacyDigestLen {
-			clearBytes(expected)
-			continue // length agrees with neither the hash nor the carve-out (#58)
-		}
-
-		// The digest's KDF is header-supplied too, and it is the one that is
-		// easy to miss: it is not the keyslot's. An absurd cost here is skipped
-		// exactly as an unusable digest is -- the symmetry #58 established --
-		// rather than run, and rather than aborting a volume whose other
-		// digests are fine.
-		if err := validateKDFCost(kdf); err != nil {
-			clearBytes(expected)
-			continue
 		}
 
 		// The derivation borrows the master key in place; this package makes
@@ -848,8 +782,7 @@ func verifyMasterKey(masterKey *enclave.MemoryEnclave, keyslotID string, digests
 	// their passphrase failed would go looking at the passphrase, while the
 	// actual state is that the container declares a keyslot nothing can verify.
 	if applicable == 0 {
-		return fmt.Errorf("%w: no digest in the header authenticates keyslot %s, so a key recovered from it cannot be verified",
-			ErrInvalidHeader, keyslotID)
+		return unverifiableKeyslotError(keyslotID, applicable)
 	}
 
 	// Digests attest this keyslot and NOT ONE OF THEM COULD BE EVALUATED, so no
@@ -884,14 +817,20 @@ func verifyMasterKey(masterKey *enclave.MemoryEnclave, keyslotID string, digests
 	// drawn for the case where the header names no digest at all; this extends
 	// it to the case where it names digests that cannot be used.
 	if evaluated == 0 {
-		return fmt.Errorf("%w: all %d digests that authenticate keyslot %s are unusable, so a key recovered from it could not be compared against any of them",
-			ErrInvalidHeader, applicable, keyslotID)
+		return unverifiableKeyslotError(keyslotID, applicable)
 	}
 
 	return ErrMasterKeyVerification
 }
 
-// getBlockDeviceSize gets the size of a block device or file
+// getBlockDeviceSize gets the size of a block device or file.
+//
+// The measurement itself is deviceSizeFromFile, shared with the keyslot-area
+// bound in keyslotscreen.go. It used to be written out twice-over -- once here
+// for the data segment and, in effect, once there as a bare Stat -- and the two
+// did not agree: this one asked the kernel and that one did not, so the guard
+// deciding whether a keyslot lies inside the device was blind on exactly the
+// devices this package exists for.
 func getBlockDeviceSize(device string) (int64, error) {
 	f, err := openDevice("read the device size", device, os.O_RDONLY)
 	if err != nil {
@@ -899,19 +838,5 @@ func getBlockDeviceSize(device string) (int64, error) {
 	}
 	defer func() { _ = f.Close() }()
 
-	// Try BLKGETSIZE64 ioctl first (works for block devices)
-	var size int64
-	// #nosec G103 -- unsafe.Pointer required for ioctl syscall
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL, f.Fd(), unix.BLKGETSIZE64, uintptr(unsafe.Pointer(&size)))
-	if errno == 0 {
-		return size, nil
-	}
-
-	// If ioctl fails, try stat (works for regular files)
-	stat, err := f.Stat()
-	if err != nil {
-		return 0, fmt.Errorf("failed to get device/file size: %w", err)
-	}
-
-	return stat.Size(), nil
+	return deviceSizeFromFile(f)
 }

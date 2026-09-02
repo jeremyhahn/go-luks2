@@ -480,6 +480,88 @@ func TestConformance_StaysValidAfterMutation(t *testing.T) {
 		}
 	})
 
+	// ChangeKey RELOCATES the keyslot: it writes the new material into a free
+	// area of the keyslots region, re-points area.offset, and only then wipes the
+	// area it left (#39). Nothing in LUKS2 requires keyslot areas to be
+	// contiguous or to sit where a first format put them -- but "nothing
+	// requires it" is a reading of the spec, and this is the check that the
+	// reading is right. A relocated keyslot cryptsetup refuses to open would be
+	// a volume this library can open and no other implementation can.
+	t.Run("after ChangeKey relocates a keyslot", func(t *testing.T) {
+		path := newImage(t, "after-changekey.img")
+		formatWithLibrary(t, path)
+		assertStillValid(t, path, "Format", conformancePassphrase)
+
+		_, before, err := ReadHeader(path)
+		if err != nil {
+			t.Fatalf("ReadHeader failed: %v", err)
+		}
+		originalOffset := before.Keyslots["0"].Area.Offset
+
+		if err := ChangeKey(path, []byte(conformancePassphrase), []byte(secondPassphrase), 0); err != nil {
+			t.Fatalf("ChangeKey failed: %v", err)
+		}
+
+		_, after, err := ReadHeader(path)
+		if err != nil {
+			t.Fatalf("ReadHeader after ChangeKey failed: %v", err)
+		}
+		if after.Keyslots["0"].Area.Offset == originalOffset {
+			t.Fatalf("the keyslot did not move, so this case is not exercising the relocation it exists for")
+		}
+
+		// The new credential only: the old one is retired, and cryptsetup
+		// refusing it is the point.
+		assertStillValid(t, path, "ChangeKey", secondPassphrase)
+		if code, out := runCryptsetup(t, conformancePassphrase, "luksOpen", "--test-passphrase", path); code == 0 {
+			t.Fatalf("after ChangeKey, cryptsetup still accepts the retired passphrase\n%s", out)
+		}
+		if err := TestKey(path, []byte(secondPassphrase)); err != nil {
+			t.Errorf("after ChangeKey, TestKey rejected the new passphrase: %v", err)
+		}
+	})
+
+	// A removal now clears the removed keyslot's id out of the tokens as well as
+	// the digests -- previously a token could outlive the keyslot it named, on
+	// every route. That rewrite touches the tokens object of a container
+	// cryptsetup has to keep reading, and a token's "keyslots" array is where
+	// LUKS2 and this library's own digest handling differ (cryptsetup rejects an
+	// empty keyslots list on a DIGEST and accepts one on a TOKEN), so it is
+	// checked against cryptsetup rather than reasoned about.
+	t.Run("after removing a keyslot a token names", func(t *testing.T) {
+		path := newImage(t, "after-keyslot-with-token.img")
+		formatWithLibrary(t, path)
+
+		if err := AddKey(path, []byte(conformancePassphrase), []byte(secondPassphrase), &AddKeyOptions{
+			KDFType:       KDFTypePBKDF2,
+			Hash:          "sha256",
+			PBKDFIterTime: 1,
+		}); err != nil {
+			t.Fatalf("AddKey failed: %v", err)
+		}
+		if err := ImportToken(path, 0, &Token{Type: "systemd-tpm2", Keyslots: []string{"1"}}); err != nil {
+			t.Fatalf("ImportToken failed: %v", err)
+		}
+		assertStillValid(t, path, "ImportToken", conformancePassphrase, secondPassphrase)
+
+		if err := KillKeyslot(path, 1); err != nil {
+			t.Fatalf("KillKeyslot failed: %v", err)
+		}
+		assertStillValid(t, path, "KillKeyslot", conformancePassphrase)
+
+		_, metadata, err := ReadHeader(path)
+		if err != nil {
+			t.Fatalf("ReadHeader failed: %v", err)
+		}
+		for id, token := range metadata.Tokens {
+			for _, named := range token.Keyslots {
+				if named == "1" {
+					t.Fatalf("token %s still names keyslot 1 after it was destroyed", id)
+				}
+			}
+		}
+	})
+
 	t.Run("after importing and removing the last token", func(t *testing.T) {
 		path := newImage(t, "after-token.img")
 		formatWithLibrary(t, path)

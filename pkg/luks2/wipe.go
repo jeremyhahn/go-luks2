@@ -478,7 +478,30 @@ func WipeKeyslot(device string, keyslot int) error {
 		return fmt.Errorf("keyslot %d not found", keyslot)
 	}
 
-	// Parse keyslot area offset and size
+	// THE GATE, and it was missing HERE while every sibling path had it.
+	//
+	// This function is identically destructive to KillKeyslot -- it overwrites
+	// the key material and removes the entry -- and it needs no passphrase.
+	// Without this it destroyed a single-keyslot volume that KillKeyslot refused
+	// to touch, for the same operation.
+	//
+	// The gap was not an oversight in a list; it was two lists. The last-keyslot
+	// guard was applied to the sites enumerated from a review finding, while the
+	// metadata cleanup was written per site from the code, and nobody diffed
+	// them. A rule and the set it must cover have to come from the same place --
+	// see TestEveryKeyslotRemovalPathIsGuarded, which asserts over the paths as a
+	// group so a sixth cannot be added without one.
+	if err := checkKeyslotRemovable(device, metadata, keyslotID); err != nil {
+		return err
+	}
+
+	// The keyslot comes straight from the header and nothing has unlocked it, so
+	// its geometry is untrusted: validated before it reaches a Seek or sizes an
+	// allocation. Same call the unlock path and wipeKeyslotArea make.
+	if err := validateKeyslot(keyslotID, ks); err != nil {
+		return err
+	}
+
 	offset, err := parseSize(ks.Area.Offset)
 	if err != nil {
 		return fmt.Errorf("invalid keyslot offset: %w", err)
@@ -489,6 +512,43 @@ func WipeKeyslot(device string, keyslot int) error {
 		return fmt.Errorf("invalid keyslot size: %w", err)
 	}
 
+	// Re-read the header for writing BEFORE anything is destroyed, so that the
+	// resulting metadata can be proved writable while the key material is still
+	// intact (#50). It used to be read after the wipe, which put the one check
+	// that can still refuse on the far side of the destruction.
+	hdr, _, err := ReadHeader(device)
+	if err != nil {
+		return err
+	}
+	removeKeyslotFromMetadata(metadata, keyslotID)
+
+	// THE SEQUENCE ID ADVANCES, and this path was the one that did not.
+	//
+	// LUKS2 keeps two header copies and uses the sequence id to decide which is
+	// current. writeHeaderInternal writes both, so a failure between them leaves
+	// two copies with DIFFERENT metadata at the SAME sequence id -- and a reader
+	// then has no way to tell which one is newer. That defeats the format's own
+	// recovery mechanism, on a path whose whole purpose is destroying key
+	// material.
+	//
+	// Every other mutating path already did this; WipeKeyslot was the eighth of
+	// eight and the only omission. Audited rather than assumed after review of
+	// e975ed5 named this site: Format, WriteHeader and RestorePrimaryHeader also
+	// do not advance it, and all three are correct not to -- Format creates a
+	// container with no older copy to disambiguate, WriteHeader is the primitive
+	// whose caller owns the header, and RestorePrimaryHeader clones the
+	// secondary onto the primary, where advancing would make the repaired copy
+	// falsely claim to be newer than the copy it was made from.
+	//
+	// It is incremented before the pre-flight, matching the other paths exactly.
+	// The field lives in the binary header rather than the JSON, so it does not
+	// change what checkHeaderWritable measures.
+	hdr.SequenceID++
+
+	if err := checkHeaderWritable(hdr, metadata); err != nil {
+		return err
+	}
+
 	// Open device
 	f, err := os.OpenFile(device, os.O_RDWR, 0600) // #nosec G304 -- device path validated by caller
 	if err != nil {
@@ -496,28 +556,52 @@ func WipeKeyslot(device string, keyslot int) error {
 	}
 	defer func() { _ = f.Close() }()
 
+	if err := checkAreaWithinDevice(f, offset, size); err != nil {
+		return fmt.Errorf("keyslot %d: %w", keyslot, err)
+	}
+
 	// Seek to keyslot area
-	if _, err := f.Seek(offset, 0); err != nil {
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
 		return fmt.Errorf("failed to seek: %w", err)
 	}
 
-	// Wipe keyslot area
-	zeros := make([]byte, size)
-	if _, err := f.Write(zeros); err != nil {
+	// Wipe the keyslot area in fixed-size chunks, so a header-supplied size
+	// cannot choose an allocation.
+	if err := writeZeros(f, size); err != nil {
 		return fmt.Errorf("failed to wipe keyslot: %w", err)
 	}
-
-	// Update metadata to remove keyslot
-	delete(metadata.Keyslots, keyslotID)
-
-	// Re-read header for writing
-	hdr, _, err := ReadHeader(device)
-	if err != nil {
-		return err
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("failed to sync: %w", err)
 	}
 
 	// Write updated metadata (use internal version since we hold the lock)
 	return writeHeaderInternal(device, hdr, metadata)
+}
+
+// keyslotWipeChunk is how much of a keyslot area is zeroed per write.
+const keyslotWipeChunk = 64 * 1024
+
+// writeZeros zeroes size bytes at the file's current position, in fixed-size
+// chunks.
+//
+// The chunking is not an optimisation. size comes out of a header this process
+// did not write, and even after it is bounded there is no reason to let it pick
+// an allocation: one make([]byte, size) per wipe hands an attacker-controlled
+// number straight to the allocator, on a path that is by definition already
+// committed to destroying something.
+func writeZeros(f *os.File, size int64) error {
+	zeros := make([]byte, keyslotWipeChunk)
+	for remaining := size; remaining > 0; {
+		n := int64(len(zeros))
+		if remaining < n {
+			n = remaining
+		}
+		if _, err := f.Write(zeros[:n]); err != nil {
+			return err
+		}
+		remaining -= n
+	}
+	return nil
 }
 
 // issueDiscard issues a BLKDISCARD ioctl to inform the SSD to release blocks.

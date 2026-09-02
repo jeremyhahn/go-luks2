@@ -7,6 +7,7 @@
 package luks2
 
 import (
+	"errors"
 	"os"
 	"testing"
 )
@@ -177,24 +178,70 @@ func TestWipeKeyslot(t *testing.T) {
 		t.Fatalf("Format failed: %v", err)
 	}
 
-	// Wipe keyslot 0
-	if err := WipeKeyslot(tmpfile, 0); err != nil {
-		t.Fatalf("WipeKeyslot failed: %v", err)
+	// THIS TEST USED TO ASSERT THE DEFECT.
+	//
+	// It wiped keyslot 0 on a ONE-KEYSLOT volume, required that to succeed, and
+	// then confirmed the volume no longer unlocked -- which is exactly the data
+	// loss #37 and #71 describe, written down as the expected outcome. The tell
+	// is in the assertion: "Unlock should fail after keyslot wipe", on a volume
+	// with nothing else to unlock it with. Inverting it is part of the fix.
+	//
+	// WipeKeyslot is identically destructive to KillKeyslot and needs no
+	// passphrase, and it was the one removal path with no last-keyslot guard at
+	// all -- so it destroyed a single-keyslot volume that KillKeyslot refused to
+	// touch, for the same operation.
+	if err := WipeKeyslot(tmpfile, 0); err == nil {
+		t.Fatal("WipeKeyslot destroyed the only keyslot that can open this volume, and reported success")
+	} else if !errors.Is(err, ErrLastKeyslot) {
+		t.Fatalf("WipeKeyslot was refused for some other reason than the guard: %v", err)
 	}
 
-	// Try to unlock with the passphrase (should fail)
-	loopDev, err := SetupLoopDevice(tmpfile)
-	if err != nil {
-		t.Fatalf("Failed to setup loop device: %v", err)
-	}
-	defer DetachLoopDevice(loopDev)
+	// The refusal is worth nothing if the volume did not survive it, and this is
+	// the real-device half of that claim: the dm-crypt mapping still comes up.
+	//
+	// Scoped, and the loop device is detached before anything writes to the
+	// backing file again, so no later step reads the volume through two paths at
+	// once. The deferred detach stays as a backstop for a failure inside.
+	func() {
+		loopDev, err := SetupLoopDevice(tmpfile)
+		if err != nil {
+			t.Fatalf("Failed to setup loop device: %v", err)
+		}
+		defer func() { _ = DetachLoopDevice(loopDev) }()
 
-	// Registered BEFORE the mapping can exist, so a partial or rolled-back
-	// unlock cannot leave one behind either (#100). Idempotent.
-	defer releaseVolume(t, "test-wipe-keyslot")
-	err = Unlock(loopDev, []byte("test-password"), "test-wipe-keyslot")
-	if err == nil {
-		t.Fatal("Unlock should fail after keyslot wipe")
+		// #113's idempotent teardown, registered BEFORE the mapping can
+		// exist so a partial or rolled-back unlock cannot leave one behind
+		// (#100). It supersedes the explicit Lock this test used to do: it
+		// unmounts anything mounted from THIS volume, retries to a deadline,
+		// and reports a mapping it cannot release rather than leaving it.
+		defer releaseVolume(t, "test-wipe-keyslot")
+
+		// The assertion is INVERTED from what #113 hardened, and the inversion
+		// is the point: on a volume whose only keyslot survives a refused wipe,
+		// the unlock must SUCCEED. #113 was hardening the teardown around the
+		// old expectation that it fail.
+		if err := Unlock(loopDev, []byte("test-password"), "test-wipe-keyslot"); err != nil {
+			t.Fatalf("the volume no longer unlocks after a REFUSED WipeKeyslot: %v", err)
+		}
+	}()
+
+	// What the original test meant to establish -- that WipeKeyslot really does
+	// destroy the credential it targets -- still holds, on a volume where doing
+	// so leaves a way in.
+	if err := AddKey(tmpfile, []byte("test-password"), []byte("second-password"), &AddKeyOptions{
+		KDFType:       KDFTypePBKDF2,
+		PBKDFIterTime: 1,
+	}); err != nil {
+		t.Fatalf("AddKey failed: %v", err)
+	}
+	if err := WipeKeyslot(tmpfile, 1); err != nil {
+		t.Fatalf("WipeKeyslot refused a removal that leaves a working keyslot: %v", err)
+	}
+	if err := TestKey(tmpfile, []byte("second-password")); err == nil {
+		t.Fatal("the wiped credential still opens the volume")
+	}
+	if err := TestKey(tmpfile, []byte("test-password")); err != nil {
+		t.Fatalf("the surviving credential no longer opens the volume: %v", err)
 	}
 }
 
@@ -582,19 +629,42 @@ func TestWipeKeyslotWithTrim(t *testing.T) {
 		t.Fatal("Keyslot 0 should exist")
 	}
 
-	// Wipe keyslot 0
-	if err := WipeKeyslot(tmpfile, 0); err != nil {
-		t.Fatalf("WipeKeyslot failed: %v", err)
+	// The same bug-defender as TestWipeKeyslot, one assertion shorter: it
+	// required wiping the only keyslot on the volume to succeed, and then
+	// checked the entry was gone. See the note there.
+	if err := WipeKeyslot(tmpfile, 0); err == nil {
+		t.Fatal("WipeKeyslot destroyed the only keyslot that can open this volume, and reported success")
+	} else if !errors.Is(err, ErrLastKeyslot) {
+		t.Fatalf("WipeKeyslot was refused for some other reason than the guard: %v", err)
 	}
 
-	// Verify keyslot is gone
+	// The entry survives the refusal. Asserting on the metadata rather than on
+	// the error is what distinguishes "refused" from "wiped, then reported an
+	// error" -- the error is the diagnosis, the header is the damage.
+	_, metadata, err = ReadHeader(tmpfile)
+	if err != nil {
+		t.Fatalf("Failed to read header after the refusal: %v", err)
+	}
+	if _, ok := metadata.Keyslots["0"]; !ok {
+		t.Fatal("WipeKeyslot was refused AND the keyslot was removed anyway")
+	}
+
+	// And the entry really does go when the removal is legitimate.
+	if err := AddKey(tmpfile, []byte("test-password"), []byte("second-password"), &AddKeyOptions{
+		KDFType:       KDFTypePBKDF2,
+		PBKDFIterTime: 1,
+	}); err != nil {
+		t.Fatalf("AddKey failed: %v", err)
+	}
+	if err := WipeKeyslot(tmpfile, 1); err != nil {
+		t.Fatalf("WipeKeyslot refused a removal that leaves a working keyslot: %v", err)
+	}
 	_, metadata, err = ReadHeader(tmpfile)
 	if err != nil {
 		t.Fatalf("Failed to read header after wipe: %v", err)
 	}
-
-	if _, ok := metadata.Keyslots["0"]; ok {
-		t.Fatal("Keyslot 0 should be wiped")
+	if _, ok := metadata.Keyslots["1"]; ok {
+		t.Fatal("Keyslot 1 should be wiped")
 	}
 }
 

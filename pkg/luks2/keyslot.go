@@ -8,6 +8,7 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"slices"
 	"strconv"
@@ -45,6 +46,22 @@ type AddKeyOptions struct {
 
 	// PBKDF2 parameters (for pbkdf2 KDF type)
 	PBKDFIterTime int
+
+	// There is deliberately NO key-size or cipher option here, and #55 asked for
+	// one. A keyslot's key size is not a preference: it is the length of the
+	// VOLUME KEY the slot wraps, which was fixed when the container was
+	// formatted. A caller-chosen 32 on a 64-byte volume derives a 32-byte
+	// wrapping key, AF-splits the full 64-byte master key underneath it, and
+	// declares a 32-byte keyslot -- so the unlock merges half the stripes,
+	// recovers a 32-byte candidate, and no digest can ever verify it. AddKey
+	// returns nil and the credential opens nothing. Measured, not reasoned
+	// about, and it is the exact silent-catastrophic-failure shape the removal
+	// guards in this package exist to prevent, so the option is not offered.
+	//
+	// What #55 actually reported -- that a heterogeneous container made AddKey
+	// create a slot weaker than the one the caller authenticated with -- is
+	// fixed at its source instead: the size comes from the recovered master key
+	// rather than from a template keyslot. See addKey.
 }
 
 // TestKey verifies that a passphrase can unlock the LUKS volume.
@@ -223,17 +240,60 @@ func addKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKe
 	// first usable one wins, rather than whichever the map yielded first: with
 	// a random pick, whether AddKey succeeded depended on which keyslot Go
 	// happened to iterate to.
-	var referenceKeyslot *Keyslot
-	for _, id := range keyslotIDsInScanOrder(metadata.Keyslots) {
-		ks := metadata.Keyslots[id]
-		if ks.Type != "luks2" || validateKeyslot(id, ks) != nil {
-			continue
-		}
-		referenceKeyslot = ks
-		break
-	}
-	if referenceKeyslot == nil {
-		return fmt.Errorf("%w: no existing keyslot is usable as a template for a new one", ErrInvalidKeyslot)
+	// THERE IS NO TEMPLATE KEYSLOT ANY MORE, and that is the fix for a
+	// regression this branch introduced.
+	//
+	// AddKey used to copy two things from an existing slot: the key size and the
+	// area cipher. The key size now comes from the recovered master key, which
+	// is the only value that can work (#55). The area cipher is a constant.
+	// Nothing was left to template, and the scan that picked one was being
+	// consulted for a value it should never have supplied.
+	//
+	// Removing it also repairs LEGACY CONTAINERS, which is what forced the
+	// issue. Before this branch, Format wrote the container's DATA cipher into
+	// the keyslot area -- so a volume created with, say,
+	// `CipherMode: "cbc-essiv:sha256"` carries AES-XTS key material under an
+	// "aes-cbc-essiv:sha256" label. Those volumes still OPEN here, because the
+	// read path consults only the algorithm. Screening the template against what
+	// this writer produces therefore rejected every keyslot of every such
+	// container, and AddKey refused to add a credential to a volume it could
+	// perfectly well unlock: a correctness fix producing a data-availability
+	// regression, on exactly the containers least able to afford one.
+	//
+	// Writing the constant beats both inheriting and refusing. The new keyslot
+	// declares what its material actually is, no wrong label is propagated, and
+	// no container is turned away. The legacy slot's own label is left alone
+	// rather than silently rewritten -- this call is authoring one keyslot, not
+	// repairing someone else's.
+	//
+	// Raised by the local Codex review of e975ed5.
+
+	// THE NEW KEYSLOT'S KEY SIZE COMES FROM THE MASTER KEY, NOT FROM A TEMPLATE.
+	//
+	// This is #55's fix, and it is a derivation rather than a choice. The slot
+	// about to be written wraps the master key recovered above; its declared
+	// key_size is what the unlock will merge the AF stripes back down to, so the
+	// only value that can ever work is the length of that key. Any other value
+	// produces a keyslot that is written successfully, reported successfully,
+	// and opens nothing -- the unlock merges the wrong number of stripes and no
+	// digest verifies the result.
+	//
+	// It used to come from a template keyslot, which is right only while every
+	// slot agrees. A header whose keyslots DISAGREE is accepted by this package
+	// and by cryptsetup without complaint, so any container this library did not
+	// create may carry one slot at 64 bytes and another at 32 -- and AddKey then
+	// inherited whichever the template rule picked and wrote a dead slot, or a
+	// weaker live one, silently either way. Making the pick deterministic
+	// narrowed that and did not close it: if the first slot in scan order is the
+	// odd one, every added key inherits it, every time.
+	//
+	// Deriving removes the question. There is nothing for the new slot to be
+	// weaker than and nothing for it to disagree with, because the master key is
+	// the thing it has to match. Its length is already known to be a legal
+	// AES-XTS key: it came out of a keyslot that passed screenKeyslot.
+	newKeySize := masterKey.Size()
+	if err := validateXTSKeySize(newKeySize); err != nil {
+		return fmt.Errorf("%w: the recovered volume key is unusable as a keyslot key: %w", ErrInvalidKeyslot, err)
 	}
 
 	// Read the container's reserved keyslots area out of its own header rather
@@ -249,13 +309,17 @@ func addKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKe
 		return err
 	}
 
-	kdf, err := CreateKDF(addKeyFormatOptions(opts), referenceKeyslot.KeySize)
+	// main's extraction (#102), with THIS branch's key size. The size is the
+	// recovered volume key's, not the template keyslot's -- see the derivation
+	// above and #55; addKeyFormatOptions carries only the KDF choices, which are
+	// genuinely the caller's.
+	kdf, err := CreateKDF(addKeyFormatOptions(opts), newKeySize)
 	if err != nil {
 		return fmt.Errorf("failed to create KDF: %w", err)
 	}
 
 	// Derive key from new passphrase
-	passphraseKey, err := DeriveKeyEnclave(newPassphrase, kdf, referenceKeyslot.KeySize)
+	passphraseKey, err := DeriveKeyEnclave(newPassphrase, kdf, newKeySize)
 	if err != nil {
 		return fmt.Errorf("failed to derive key: %w", err)
 	}
@@ -313,14 +377,20 @@ func addKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKe
 	priority := 2 // Lower priority than original keyslot
 	newKeyslot := &Keyslot{
 		Type:     "luks2",
-		KeySize:  referenceKeyslot.KeySize,
+		KeySize:  newKeySize,
 		Priority: &priority,
 		Area: &KeyslotArea{
-			Type:       "raw",
-			KeySize:    referenceKeyslot.KeySize,
-			Offset:     formatSize(newOffset),
-			Size:       formatSize(alignedSize),
-			Encryption: referenceKeyslot.Area.Encryption,
+			Type:    "raw",
+			KeySize: newKeySize,
+			Offset:  formatSize(newOffset),
+			Size:    formatSize(alignedSize),
+			// What this call actually encrypts the material with, stated
+			// rather than copied from a neighbor. encryptKeyMaterialEnclave
+			// uses DefaultCipher and xtsSectors runs XTS; there is no other
+			// truthful value here, and a wrong one is a keyslot only this
+			// package can open -- with our own suite staying green, because
+			// the read path discards the mode.
+			Encryption: KeyslotAreaEncryption,
 		},
 		KDF: kdf,
 		AF: &AntiForensic{
@@ -441,32 +511,38 @@ func RemoveKey(device string, passphrase []byte, keyslot int) error {
 	}
 	verified.Destroy()
 
-	// Ensure at least one keyslot remains
-	if len(metadata.Keyslots) <= 1 {
-		return fmt.Errorf("cannot remove last keyslot")
+	// THE GATE. Every removal path passes through checkKeyslotRemovable, which
+	// asks the one question all of them need answered: after this removal, can
+	// anything still open the volume?
+	//
+	// It replaces `len(metadata.Keyslots) <= 1`, which counted MAP ENTRIES. A
+	// `reencrypt` slot, a slot with no anti-forensic object, a slot whose cipher
+	// nothing implements -- each reads as a keyslot to len() and opens nothing,
+	// so the guard reported a survivor and the only working credential was
+	// destroyed (#37, #71). It also checks the BYTES: the wipe below zeroes a
+	// range, and that range can belong to a keyslot that must survive (#38).
+	if err := checkKeyslotRemovable(device, metadata, slotIDStr); err != nil {
+		return err
 	}
 
-	// Wipe the keyslot area
+	// NOTHING IS DESTROYED UNTIL THE RESULTING HEADER IS PROVED WRITABLE.
+	//
+	// The metadata is brought to its post-removal state and run through the
+	// write path's own encoder first. This used to wipe and then discover the
+	// header would not fit, so a failure that could have been a clean refusal
+	// instead cost a keyslot (#50). Removal only shrinks metadata, so this is
+	// unreachable for a container this library wrote -- and reachable for one it
+	// did not, whose JSON area already exceeds what the writer will accept.
+	removeKeyslotFromMetadata(metadata, slotIDStr)
+	hdr.SequenceID++
+	if err := checkHeaderWritable(hdr, metadata); err != nil {
+		return err
+	}
+
+	// From here the operation is destructive.
 	if err := wipeKeyslotArea(device, targetKeyslot); err != nil {
 		return fmt.Errorf("failed to wipe keyslot area: %w", err)
 	}
-
-	// Remove keyslot from metadata
-	delete(metadata.Keyslots, slotIDStr)
-
-	// Remove from digests
-	for _, digest := range metadata.Digests {
-		newKeyslots := make([]string, 0, len(digest.Keyslots))
-		for _, ks := range digest.Keyslots {
-			if ks != slotIDStr {
-				newKeyslots = append(newKeyslots, ks)
-			}
-		}
-		digest.Keyslots = newKeyslots
-	}
-
-	// Increment sequence ID
-	hdr.SequenceID++
 
 	// Write updated headers
 	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
@@ -542,32 +618,38 @@ func KillSlot(device string, authPassphrase []byte, targetSlot int) error {
 		return fmt.Errorf("keyslot %d does not exist", targetSlot)
 	}
 
-	// Ensure at least one keyslot remains
-	if len(metadata.Keyslots) <= 1 {
-		return fmt.Errorf("cannot remove last keyslot")
+	// THE GATE. Every removal path passes through checkKeyslotRemovable, which
+	// asks the one question all of them need answered: after this removal, can
+	// anything still open the volume?
+	//
+	// It replaces `len(metadata.Keyslots) <= 1`, which counted MAP ENTRIES. A
+	// `reencrypt` slot, a slot with no anti-forensic object, a slot whose cipher
+	// nothing implements -- each reads as a keyslot to len() and opens nothing,
+	// so the guard reported a survivor and the only working credential was
+	// destroyed (#37, #71). It also checks the BYTES: the wipe below zeroes a
+	// range, and that range can belong to a keyslot that must survive (#38).
+	if err := checkKeyslotRemovable(device, metadata, slotIDStr); err != nil {
+		return err
 	}
 
-	// Wipe the keyslot area
+	// NOTHING IS DESTROYED UNTIL THE RESULTING HEADER IS PROVED WRITABLE.
+	//
+	// The metadata is brought to its post-removal state and run through the
+	// write path's own encoder first. This used to wipe and then discover the
+	// header would not fit, so a failure that could have been a clean refusal
+	// instead cost a keyslot (#50). Removal only shrinks metadata, so this is
+	// unreachable for a container this library wrote -- and reachable for one it
+	// did not, whose JSON area already exceeds what the writer will accept.
+	removeKeyslotFromMetadata(metadata, slotIDStr)
+	hdr.SequenceID++
+	if err := checkHeaderWritable(hdr, metadata); err != nil {
+		return err
+	}
+
+	// From here the operation is destructive.
 	if err := wipeKeyslotArea(device, targetKeyslot); err != nil {
 		return fmt.Errorf("failed to wipe keyslot area: %w", err)
 	}
-
-	// Remove keyslot from metadata
-	delete(metadata.Keyslots, slotIDStr)
-
-	// Remove from digests
-	for _, digest := range metadata.Digests {
-		newKeyslots := make([]string, 0, len(digest.Keyslots))
-		for _, ks := range digest.Keyslots {
-			if ks != slotIDStr {
-				newKeyslots = append(newKeyslots, ks)
-			}
-		}
-		digest.Keyslots = newKeyslots
-	}
-
-	// Increment sequence ID
-	hdr.SequenceID++
 
 	// Write updated headers
 	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
@@ -669,12 +751,9 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 	}
 	defer clearBytes(encryptedKeyMaterial)
 
-	// Get existing keyslot offset
-	existingOffset, err := parseSize(targetKeyslot.Area.Offset)
-	if err != nil {
-		return fmt.Errorf("failed to parse keyslot offset: %w", err)
-	}
-
+	// Get existing keyslot size. Its OFFSET is not needed here any more: the
+	// new material is written elsewhere and the old area is described by
+	// oldArea below, which is what the final wipe acts on.
 	existingSize, err := parseSize(targetKeyslot.Area.Size)
 	if err != nil {
 		return fmt.Errorf("failed to parse keyslot size: %w", err)
@@ -685,19 +764,73 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 		return fmt.Errorf("new key material too large for existing keyslot area")
 	}
 
-	// Wipe existing keyslot area first
-	if err := wipeKeyslotArea(device, targetKeyslot); err != nil {
-		return fmt.Errorf("failed to wipe existing keyslot: %w", err)
+	// THE NEW MATERIAL GOES SOMEWHERE ELSE, AND THE OLD AREA IS WIPED LAST.
+	//
+	// This used to wipe the existing area, write the new material into it, and
+	// only then make the new KDF durable. Between the material write and the
+	// header write the on-disk state was: material derived from the NEW
+	// passphrase, under the OLD salt and iteration count. Neither passphrase
+	// derives the key that decrypts that material, so on a single-keyslot volume
+	// an ordinary power failure in that window was permanent data loss -- no
+	// attacker required. The wipe also destroyed the old material before
+	// anything replacing it existed, so a failure in the WRITE alone was already
+	// unrecoverable (#39).
+	//
+	// Writing into a free area and re-pointing the header removes the window
+	// rather than narrowing it. Every intermediate state is openable:
+	//
+	//	crash before the header write   old area intact, header still names it
+	//	                                -> the OLD passphrase opens the volume
+	//	crash after the header write    header names the new area, material there
+	//	                                -> the NEW passphrase opens the volume
+	//
+	// The keyslot keeps its id and its area SIZE; only the offset moves, which
+	// is ordinary LUKS2 -- keyslot areas are not required to be contiguous, and
+	// the area freed here is reclaimed by the next relocation.
+	newOffset, err := findFreeKeyslotArea(hdr, metadata, existingSize)
+	if err != nil {
+		return fmt.Errorf("cannot rewrite keyslot %d safely: %w; add a new key and remove this slot instead", keyslot, err)
 	}
 
-	// Write new encrypted key material
+	// The area this call will eventually ZERO is checked here, up front, against
+	// the keyslots that must survive (#38). A keyslot's area can overlap
+	// another's, and ChangeKey destroys an area exactly as a removal does -- so
+	// on such a container it would take a healthy keyslot's key material with it.
+	//
+	// It is checked BEFORE anything is written rather than beside the wipe at the
+	// end, and the difference is the whole value of the check: by the time the
+	// wipe runs the new passphrase is already live, so a refusal there would be a
+	// half-completed operation reported as a failure. Refusing now costs nothing
+	// -- the volume is untouched and both the old passphrase and the overlapping
+	// keyslot still work.
+	//
+	// ChangeKey deliberately does NOT take the entry-level half of the removal
+	// gate: changing the passphrase on a single-keyslot volume is exactly what
+	// this function is for.
+	oldArea := *targetKeyslot.Area
+	if err := checkKeyslotAreaDisjointFromOthers(device, metadata, slotIDStr, &oldArea); err != nil {
+		return err
+	}
+
+	// The header is proved writable and the metadata brought to its final state
+	// BEFORE any device write, so a refusal costs nothing.
+	targetKeyslot.KDF = kdf
+	targetKeyslot.Area.Offset = formatSize(newOffset)
+	hdr.SequenceID++
+	if err := checkHeaderWritable(hdr, metadata); err != nil {
+		return err
+	}
+
+	// Write new encrypted key material into the free area. Nothing depends on
+	// these bytes until the header points at them, so a failure here leaves the
+	// volume exactly as it was.
 	f, err := os.OpenFile(device, os.O_RDWR, 0600) // #nosec G304 -- device path validated by caller
 	if err != nil {
 		return fmt.Errorf("failed to open device: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
-	if _, err := f.Seek(existingOffset, 0); err != nil {
+	if _, err := f.Seek(newOffset, io.SeekStart); err != nil {
 		return fmt.Errorf("failed to seek to keyslot area: %w", err)
 	}
 
@@ -714,19 +847,26 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 		}
 	}
 
+	// THE MATERIAL IS DURABLE BEFORE THE HEADER NAMES IT. Reversing these two
+	// would recreate the window in a new place: a header pointing at an area
+	// whose contents had not reached the device.
 	if err := f.Sync(); err != nil {
 		return fmt.Errorf("failed to sync: %w", err)
 	}
 
-	// Update keyslot KDF in metadata
-	targetKeyslot.KDF = kdf
-
-	// Increment sequence ID
-	hdr.SequenceID++
-
-	// Write updated headers
+	// The commit point. After this the new passphrase opens the volume.
 	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
 		return fmt.Errorf("failed to write header: %w", err)
+	}
+
+	// Only now is the old material destroyed. That the wipe is SAFE was
+	// established before any of this began -- see the overlap check above -- so
+	// what can fail here is I/O, not a refusal, and a failure leaves the volume
+	// openable by the new passphrase with the old material still on the device.
+	old := *targetKeyslot
+	old.Area = &oldArea
+	if err := wipeKeyslotArea(device, &old); err != nil {
+		return fmt.Errorf("the new passphrase is live in keyslot %d, but the old key material could not be destroyed: %w", keyslot, err)
 	}
 
 	return nil
@@ -763,32 +903,38 @@ func KillKeyslot(device string, keyslot int) error {
 		return fmt.Errorf("keyslot %d does not exist", keyslot)
 	}
 
-	// Ensure at least one keyslot remains
-	if len(metadata.Keyslots) <= 1 {
-		return fmt.Errorf("cannot remove last keyslot")
+	// THE GATE. Every removal path passes through checkKeyslotRemovable, which
+	// asks the one question all of them need answered: after this removal, can
+	// anything still open the volume?
+	//
+	// It replaces `len(metadata.Keyslots) <= 1`, which counted MAP ENTRIES. A
+	// `reencrypt` slot, a slot with no anti-forensic object, a slot whose cipher
+	// nothing implements -- each reads as a keyslot to len() and opens nothing,
+	// so the guard reported a survivor and the only working credential was
+	// destroyed (#37, #71). It also checks the BYTES: the wipe below zeroes a
+	// range, and that range can belong to a keyslot that must survive (#38).
+	if err := checkKeyslotRemovable(device, metadata, slotIDStr); err != nil {
+		return err
 	}
 
-	// Wipe the keyslot area
+	// NOTHING IS DESTROYED UNTIL THE RESULTING HEADER IS PROVED WRITABLE.
+	//
+	// The metadata is brought to its post-removal state and run through the
+	// write path's own encoder first. This used to wipe and then discover the
+	// header would not fit, so a failure that could have been a clean refusal
+	// instead cost a keyslot (#50). Removal only shrinks metadata, so this is
+	// unreachable for a container this library wrote -- and reachable for one it
+	// did not, whose JSON area already exceeds what the writer will accept.
+	removeKeyslotFromMetadata(metadata, slotIDStr)
+	hdr.SequenceID++
+	if err := checkHeaderWritable(hdr, metadata); err != nil {
+		return err
+	}
+
+	// From here the operation is destructive.
 	if err := wipeKeyslotArea(device, targetKeyslot); err != nil {
 		return fmt.Errorf("failed to wipe keyslot area: %w", err)
 	}
-
-	// Remove keyslot from metadata
-	delete(metadata.Keyslots, slotIDStr)
-
-	// Remove from digests
-	for _, digest := range metadata.Digests {
-		newKeyslots := make([]string, 0, len(digest.Keyslots))
-		for _, ks := range digest.Keyslots {
-			if ks != slotIDStr {
-				newKeyslots = append(newKeyslots, ks)
-			}
-		}
-		digest.Keyslots = newKeyslots
-	}
-
-	// Increment sequence ID
-	hdr.SequenceID++
 
 	// Write updated headers
 	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
@@ -1154,15 +1300,286 @@ func wipeKeyslotArea(device string, keyslot *Keyslot) error {
 	}
 	defer func() { _ = f.Close() }()
 
-	// Wipe with zeros
-	if _, err := f.Seek(offset, 0); err != nil {
+	if err := checkAreaWithinDevice(f, offset, size); err != nil {
 		return err
 	}
 
-	zeros := make([]byte, size)
-	if _, err := f.Write(zeros); err != nil {
+	// Wipe with zeros
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return err
+	}
+
+	// In fixed-size chunks: size came out of a header this process did not
+	// write, and even bounded there is no reason to let it choose an
+	// allocation. Shared with WipeKeyslot, which zeroes an area without going
+	// through this function.
+	if err := writeZeros(f, size); err != nil {
 		return err
 	}
 
 	return f.Sync()
+}
+
+// removeKeyslotFromMetadata removes a keyslot and every stored reference to its
+// id, in one call.
+//
+// The three removal paths used to open-code this, and each open-coding deleted
+// the map entry and filtered the digests -- and none of them touched the tokens,
+// so a token could outlive the keyslot it named on every route. That is the
+// hand-written-cleanup failure recorded on forgetKeyslotID (header.go), reached
+// from the other direction: the header READ already had to forget a dropped
+// keyslot's references, so the code existed and the removal paths simply did not
+// call it.
+//
+// One function owning the whole removal is what stops the next author having to
+// know that "holds a keyslot id" is a different relation from "is a keyslot".
+func removeKeyslotFromMetadata(metadata *LUKS2Metadata, id string) {
+	delete(metadata.Keyslots, id)
+	forgetKeyslotID(metadata, id)
+}
+
+// usableKeyslotsAfterRemoving reports how many keyslots would still be able to
+// open the volume if id were removed.
+//
+// This is the question every last-keyslot guard actually needs to ask, and both
+// simpler spellings of it are wrong in opposite directions:
+//
+//   - len(metadata.Keyslots) counts entries that cannot open anything -- a
+//     `reencrypt` slot, a slot whose af object is missing, a slot whose cipher
+//     nothing implements. That is what the guards counted, and it authorized
+//     removing the last real keyslot and left the volume permanently unopenable
+//     (#37, #71).
+//   - counting the slots the unlock loop would TRY is right only when the target
+//     is itself usable. When it is not, the count does not change on removal, so
+//     a volume with one usable slot and one stale reencrypt slot would refuse to
+//     delete the STALE one -- one damaged slot costing the volume its mutability,
+//     which is the same class of failure from the other side.
+//
+// Phrasing it as "what remains afterwards" collapses both cases, so RemoveKey
+// (whose target is provably usable, having just been unlocked) and the kill
+// paths (whose target may not be) share one predicate and neither needs to know
+// which situation it is in.
+func usableKeyslotsAfterRemoving(f *os.File, metadata *LUKS2Metadata, id string) int {
+	remaining := 0
+	for _, other := range keyslotIDsInScanOrder(metadata.Keyslots) {
+		if other == id {
+			continue
+		}
+		if keyslotCanOpenVolume(f, other, metadata.Keyslots[other], metadata.Digests) {
+			remaining++
+		}
+	}
+	return remaining
+}
+
+// keyslotAreaDisjointFrom refuses a wipe that would land on key material another
+// keyslot still needs.
+//
+// wipeKeyslotArea validates the target's own geometry and then zeroes it.
+// Nothing checked it against the areas of the slots that must SURVIVE, so the
+// guard and the wipe disagreed about what the removal destroys: the guard
+// reasoned over keyslot ENTRIES, the wipe acted on BYTES. Two shape-valid slots
+// sharing an area were enough (#38) -- removing either destroyed the other's key
+// material while the guard counted a survivor, and the volume then reported
+// "invalid passphrase" for a passphrase that was correct.
+//
+// The area is passed in rather than read from metadata.Keyslots[id], because
+// the range about to be zeroed is not always the one the metadata now describes:
+// ChangeKey relocates the keyslot first and then destroys the area it used to
+// occupy. Asking about the wrong range is how a check like this passes while the
+// wipe lands somewhere else entirely.
+//
+// Only slots that can still open the volume are protected. An area belonging to
+// a slot that could never yield a key is not worth refusing a removal over, and
+// protecting those would turn every damaged slot into a reason the volume cannot
+// be repaired -- the failure this package spends most of its guards avoiding.
+func keyslotAreaDisjointFrom(f *os.File, metadata *LUKS2Metadata, id string, area *KeyslotArea) error {
+	if area == nil {
+		// No target geometry, so no overlap can be computed -- and none needs
+		// to be. Every wipe path reaches validateKeyslot before writing a byte
+		// and refuses there, with a message about the geometry rather than the
+		// less informative one this function could offer. Failing closed is
+		// already the downstream behavior; returning nil here does not open it.
+		return nil
+	}
+	targetOffset, offErr := parseSize(area.Offset)
+	targetSize, sizeErr := parseSize(area.Size)
+	if offErr != nil || sizeErr != nil || targetOffset < 0 || targetSize <= 0 {
+		return nil // same reasoning as above
+	}
+	targetEnd := targetOffset + targetSize
+
+	for _, other := range keyslotIDsInScanOrder(metadata.Keyslots) {
+		if other == id {
+			continue
+		}
+		survivor := metadata.Keyslots[other]
+		if !keyslotCanOpenVolume(f, other, survivor, metadata.Digests) {
+			continue
+		}
+
+		// keyslotCanOpenVolume has already required these to parse and to be
+		// non-negative and non-overflowing (validateKeyslot); the error is
+		// consumed rather than ignored so that a future loosening of the
+		// predicate cannot silently skip a survivor.
+		otherOffset, err := parseSize(survivor.Area.Offset)
+		if err != nil {
+			return fmt.Errorf("%w: keyslot %s has an unreadable area offset", ErrInvalidKeyslot, other)
+		}
+		otherSize, err := parseSize(survivor.Area.Size)
+		if err != nil {
+			return fmt.Errorf("%w: keyslot %s has an unreadable area size", ErrInvalidKeyslot, other)
+		}
+
+		if targetOffset < otherOffset+otherSize && otherOffset < targetEnd {
+			return fmt.Errorf("%w: zeroing [%d,%d) for keyslot %s would also zero keyslot %s at [%d,%d), which can still open this volume",
+				ErrKeyslotAreaOverlap, targetOffset, targetEnd, id, other, otherOffset, otherOffset+otherSize)
+		}
+	}
+
+	return nil
+}
+
+// checkKeyslotAreaDisjointFromOthers is the BYTE-level half on its own, for the
+// caller that zeroes a keyslot area without removing the keyslot.
+//
+// ChangeKey must NOT take the entry-level half -- changing the passphrase on a
+// single-keyslot volume is exactly what that function is for, and the
+// last-keyslot guard would refuse it. It must take this half, because the bytes
+// it overwrites can belong to another keyslot just as easily as a removal's can.
+//
+// The enumeration that produced the seam was "removal paths", and it misses this
+// site, because ChangeKey is not a removal. The set the OVERLAP invariant ranges
+// over is the paths that ZERO A KEYSLOT'S AREA, and there are five:
+//
+//	RemoveKey, KillSlot, ChangeKey, KillKeyslot   via wipeKeyslotArea
+//	WipeKeyslot                                   with its own write loop
+//
+// Two counts live near each other here and they are NOT the same number, which
+// is its own small lesson about writing one down: wipeKeyslotArea has four
+// callers, while five paths zero a keyslot area, because WipeKeyslot does not go
+// through it. wipeHeaders is deliberately outside both -- it destroys the header
+// on purpose.
+func checkKeyslotAreaDisjointFromOthers(device string, metadata *LUKS2Metadata, id string, area *KeyslotArea) error {
+	f, err := os.Open(device) // #nosec G304 -- device path validated by caller
+	if err != nil {
+		return &DeviceError{Device: device, Op: "open", Err: err}
+	}
+	defer func() { _ = f.Close() }()
+
+	return keyslotAreaDisjointFrom(f, metadata, id, area)
+}
+
+// findFreeKeyslotArea returns an offset inside the container's keyslots area at
+// which `size` bytes can be written without touching any existing keyslot's
+// area or the encrypted data.
+//
+// It is a first-fit search over the GAPS between the areas in use, not a bump
+// allocator. calculateNextKeyslotOffset -- which AddKey uses to place a brand
+// new slot -- takes the maximum end and rounds up, and that is right there,
+// because every existing slot is in use. It is wrong here: ChangeKey frees the
+// area it relocated out of, and a bump allocator would march up the keyslots
+// area until it ran out, making the number of times a passphrase can be changed
+// a function of how much room the container was formatted with.
+//
+// Both bounds are read from the container. The declared keyslots area is the
+// primary one; the data segment is kept as a second, physical ceiling for a
+// container whose config.keyslots_size overstates the space it actually has --
+// the same pair of boundaries AddKey enforces, for the same reason.
+func findFreeKeyslotArea(hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata, size int64) (int64, error) {
+	if size <= 0 {
+		return 0, fmt.Errorf("%w: a keyslot area of %d bytes", ErrInvalidSize, size)
+	}
+
+	start, end, err := keyslotsAreaBounds(hdr, metadata)
+	if err != nil {
+		return 0, err
+	}
+	for _, segment := range metadata.Segments {
+		segmentOffset, err := parseSize(segment.Offset)
+		if err != nil {
+			continue
+		}
+		if segmentOffset < end {
+			end = segmentOffset
+		}
+	}
+
+	type extent struct{ from, to int64 }
+	used := make([]extent, 0, len(metadata.Keyslots))
+	for _, ks := range metadata.Keyslots {
+		if ks == nil || ks.Area == nil {
+			continue
+		}
+		offset, err := parseSize(ks.Area.Offset)
+		if err != nil {
+			continue
+		}
+		areaSize, err := parseSize(ks.Area.Size)
+		if err != nil || areaSize <= 0 {
+			continue
+		}
+		used = append(used, extent{offset, offset + areaSize})
+	}
+	slices.SortFunc(used, func(a, b extent) int { return cmp.Compare(a.from, b.from) })
+
+	cursor := alignTo(start, KeyslotAreaAlignment)
+	for _, in := range used {
+		if in.to <= cursor {
+			continue
+		}
+		if in.from-cursor >= size {
+			break
+		}
+		cursor = alignTo(in.to, KeyslotAreaAlignment)
+	}
+
+	if cursor+size > end {
+		return 0, fmt.Errorf("%w: %d bytes are needed and the keyslots area %d..%d has no gap that large",
+			ErrKeyslotsAreaFull, size, start, end)
+	}
+	return cursor, nil
+}
+
+// checkKeyslotRemovable is the SINGLE gate every keyslot removal passes through.
+//
+// It exists as one function rather than as a check each caller performs because
+// this package has already paid for the other arrangement twice: the
+// last-keyslot guard was applied to the paths enumerated from a review finding
+// and missed WipeKeyslot entirely, and the digest cleanup was open-coded at
+// three sites and cleaned tokens at none. Five call sites that each remember to
+// run two checks is the same defect waiting for its sixth path.
+//
+// The two conditions are ONE question asked about entries and about bytes:
+// after this removal, can anything still open the volume? A guard that only
+// counts surviving ENTRIES answers it for the metadata and not for the key
+// material those entries point at.
+//
+// Both refusals are REFUSALS, not warnings. A removal that leaves a volume
+// unopenable succeeds, reports success, and is discovered at the next unlock --
+// the definition of a silent catastrophic failure, and the reason this is a
+// guard rather than a documented caveat.
+func checkKeyslotRemovable(device string, metadata *LUKS2Metadata, id string) error {
+	f, err := os.Open(device) // #nosec G304 -- device path validated by caller
+	if err != nil {
+		return &DeviceError{Device: device, Op: "open", Err: err}
+	}
+	defer func() { _ = f.Close() }()
+
+	if usableKeyslotsAfterRemoving(f, metadata, id) == 0 {
+		return fmt.Errorf("%w: removing keyslot %s would leave no keyslot that can open this volume",
+			ErrLastKeyslot, id)
+	}
+	return keyslotAreaDisjointFrom(f, metadata, id, areaOfKeyslot(metadata.Keyslots[id]))
+}
+
+// areaOfKeyslot returns a keyslot's area, or nil if it has none. It exists so
+// the removal gate can ask about "the area this keyslot occupies" without a nil
+// dereference on a keyslot that declares no area at all -- which is a shape the
+// wipe paths refuse downstream, in a message about the geometry.
+func areaOfKeyslot(keyslot *Keyslot) *KeyslotArea {
+	if keyslot == nil {
+		return nil
+	}
+	return keyslot.Area
 }

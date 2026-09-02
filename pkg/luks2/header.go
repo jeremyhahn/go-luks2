@@ -352,23 +352,37 @@ func WriteHeader(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata)
 	return writeHeaderInternal(device, hdr, metadata)
 }
 
-// writeHeaderInternal writes a LUKS2 header without acquiring a lock
-// Caller must hold the lock
-func writeHeaderInternal(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) error {
-	f, err := openDevice("write the LUKS2 header", device, os.O_RDWR)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-
+// encodeMetadataForHeader produces exactly the JSON writeHeaderInternal would
+// write, and refuses metadata that does not fit the container's header area --
+// without touching the device.
+//
+// It is a separate function so a caller can ask "would this header write?"
+// BEFORE doing something irreversible. Every keyslot removal destroys key
+// material and only then writes the header, so a header that does not fit is
+// discovered after the material it was meant to protect is already gone: a
+// failure that could have been a clean refusal instead costs a keyslot (#50).
+// The removal paths call checkHeaderWritable on the prospective metadata first.
+//
+// The pre-flight has to be this function rather than a copy of its rules. A
+// second implementation of "does it fit" is the parallel-predicate failure this
+// package has now paid for repeatedly (#45): it would agree today and drift the
+// first time the encoding changes -- and the direction it would drift in is a
+// pre-flight that passes while the real write refuses, which is precisely the
+// case the pre-flight exists to prevent.
+//
+// It MUTATES metadata.Config.JSONSize, as the write path always has: json_size
+// must equal the JSON area actually written and is a property of the container,
+// not of the caller. Calling this and then not writing leaves that field
+// correct for the container it was computed against, so a pre-flight followed by
+// a real write is indistinguishable from the write alone.
+func encodeMetadataForHeader(hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) ([]byte, int, error) {
 	// The header area size is FIXED by the container; it is never recomputed
 	// from how much metadata happens to need writing. See headerAreaSizeForWrite.
 	area, err := headerAreaSizeForWrite(hdr)
 	if err != nil {
-		return err
+		return nil, 0, err
 	}
 	jsonSize := area - LUKS2HeaderSize
-	secondaryOffset := int64(area)
 
 	// Guarantee the mandatory LUKS2 JSON objects exist before they are encoded.
 	// A nil map here becomes `null` on disk and cryptsetup rejects the whole
@@ -387,7 +401,7 @@ func writeHeaderInternal(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2M
 	// Marshal JSON metadata
 	jsonData, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal metadata: %w", err)
+		return nil, 0, fmt.Errorf("failed to marshal metadata: %w", err)
 	}
 
 	// Refuse metadata that does not fit rather than enlarging the area to hold
@@ -404,9 +418,40 @@ func writeHeaderInternal(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2M
 	// own JSON tail. 4096+16384 = 20480 is also not a power of two, so the size
 	// was not a legal LUKS2 metadata size either.
 	if len(jsonData)+1 > jsonSize {
-		return fmt.Errorf("%w: %d bytes of JSON metadata plus its terminator do not fit the %d-byte JSON area of this container's %d-byte header (remove keyslots or tokens, or reformat with a larger metadata area)",
+		return nil, 0, fmt.Errorf("%w: %d bytes of JSON metadata plus its terminator do not fit the %d-byte JSON area of this container's %d-byte header (remove keyslots or tokens, or reformat with a larger metadata area)",
 			ErrMetadataTooLarge, len(jsonData), jsonSize, area)
 	}
+
+	return jsonData, area, nil
+}
+
+// checkHeaderWritable reports whether writeHeaderInternal would accept this
+// header and metadata, without writing anything or touching the device.
+//
+// A guard on a write path is validation that runs AFTER everything destructive
+// has already happened. The value of a refusal is that nothing was lost; a
+// refusal issued after the wipe keeps the error and discards the benefit. See
+// encodeMetadataForHeader and #50.
+func checkHeaderWritable(hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) error {
+	_, _, err := encodeMetadataForHeader(hdr, metadata)
+	return err
+}
+
+// writeHeaderInternal writes a LUKS2 header without acquiring a lock
+// Caller must hold the lock
+func writeHeaderInternal(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) error {
+	f, err := openDevice("write the LUKS2 header", device, os.O_RDWR)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+
+	jsonData, area, err := encodeMetadataForHeader(hdr, metadata)
+	if err != nil {
+		return err
+	}
+	jsonSize := area - LUKS2HeaderSize
+	secondaryOffset := int64(area)
 
 	// Update header size
 	hdr.HeaderSize = uint64(area) // #nosec G115 -- headerAreaSizeForWrite bounds this to LUKS2HeaderMaxSize

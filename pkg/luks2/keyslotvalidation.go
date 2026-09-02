@@ -4,7 +4,10 @@
 
 package luks2
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // Validation of the keyslot geometry a device declares about itself.
 //
@@ -151,9 +154,31 @@ func validateKeyslot(id string, keyslot *Keyslot) error {
 	if keyslot.Area == nil {
 		return fmt.Errorf("%w: %s has no area object", ErrInvalidKeyslot, label)
 	}
-	if _, err := parseSize(keyslot.Area.Offset); err != nil {
+	areaOffset, err := parseSize(keyslot.Area.Offset)
+	if err != nil {
 		return fmt.Errorf("%w: %s declares an area offset %q that is not a number",
 			ErrInvalidKeyslot, label, keyslot.Area.Offset)
+	}
+	// A NEGATIVE offset was accepted here until the removal guard needed to
+	// reason about where a keyslot lives.
+	//
+	// parseSize is ParseInt, so "-4096" parses. On the unlock path that is
+	// harmless -- ReadAt refuses it -- which is why it survived: every consumer
+	// happened to hand it to a syscall that said no. It stops being harmless the
+	// moment anything does ARITHMETIC with it. checkAreaWithinDevice compares
+	// offset+size against the device size, and a negative offset passes that
+	// trivially; the overlap check computes [offset, offset+size) and a negative
+	// start intersects nothing, so a wipe aimed below zero would be declared
+	// disjoint from every surviving keyslot.
+	//
+	// Harvested from keyslotAreaBounds on the issue/3-secure-buffer branch. The
+	// rest of that function -- parsing both fields and bounding the size -- was
+	// already here, so only this and the overflow check below came across; a
+	// second bounds function beside this one would be the parallel-copy failure
+	// #45 is about.
+	if areaOffset < 0 {
+		return fmt.Errorf("%w: %s declares a negative area offset %d",
+			ErrInvalidKeyslot, label, areaOffset)
 	}
 	areaSize, err := parseSize(keyslot.Area.Size)
 	if err != nil {
@@ -163,6 +188,17 @@ func validateKeyslot(id string, keyslot *Keyslot) error {
 	if areaSize <= 0 || areaSize > maxKeyslotAreaSize {
 		return fmt.Errorf("%w: %s declares an area of %d bytes, outside the range a LUKS2 keyslot may occupy",
 			ErrInvalidKeyslot, label, areaSize)
+	}
+	// Checked BEFORE the addition, so that no consumer computes a sum that
+	// wraps. An offset near MaxInt64 plus a positive size goes negative, which
+	// reads as "before everything" -- so an overlap check would call it disjoint
+	// from a keyslot it in fact covers. Both factors are bounded above, so this
+	// is unreachable for any area size a container can declare; it is kept
+	// because the bound above is the only reason it is unreachable, and a
+	// consumer must not have to know that.
+	if areaOffset > math.MaxInt64-areaSize {
+		return fmt.Errorf("%w: %s declares an area at offset %d of %d bytes, which runs past the end of the address space",
+			ErrInvalidKeyslot, label, areaOffset, areaSize)
 	}
 
 	if keyslot.Type != "luks2" {

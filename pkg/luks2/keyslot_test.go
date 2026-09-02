@@ -7,6 +7,11 @@
 package luks2
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
+	"errors"
+	"os"
 	"strconv"
 	"testing"
 )
@@ -239,5 +244,916 @@ func TestMaxKeyslotsConstant(t *testing.T) {
 func TestKeyslotAreaAlignment(t *testing.T) {
 	if KeyslotAreaAlignment != 4096 {
 		t.Errorf("expected KeyslotAreaAlignment to be 4096, got %d", KeyslotAreaAlignment)
+	}
+}
+
+// keyslotRemovalPath is one way to destroy a keyslot. There are four, and they
+// are enumerated HERE, once, so that a guard cannot be applied to three of them.
+//
+// That is not a hypothetical arrangement to avoid: the last-keyslot guard was
+// applied to the paths a review finding named and missed WipeKeyslot entirely,
+// which then destroyed a single-keyslot volume that KillKeyslot refused to
+// touch. A rule and the set it must cover have to come from the same place.
+type keyslotRemovalPath struct {
+	name   string
+	remove func(device string, passphrase []byte, slot int) error
+}
+
+var keyslotRemovalPaths = []keyslotRemovalPath{
+	{"RemoveKey", func(device string, passphrase []byte, slot int) error {
+		return RemoveKey(device, passphrase, slot)
+	}},
+	{"KillSlot", func(device string, passphrase []byte, slot int) error {
+		return KillSlot(device, passphrase, slot)
+	}},
+	{"KillKeyslot", func(device string, _ []byte, slot int) error {
+		return KillKeyslot(device, slot)
+	}},
+	{"WipeKeyslot", func(device string, _ []byte, slot int) error {
+		return WipeKeyslot(device, slot)
+	}},
+}
+
+// TestEveryKeyslotRemovalPathRefusesToDestroyTheLastUsableKeyslot is the
+// regression test for #37, #45 and #71, over every path and every shape.
+//
+// The defect in all three is one sentence: the guard counted MAP ENTRIES while
+// the unlock counted keyslots it could open. A `reencrypt` slot, a slot with no
+// af object, a slot whose cipher nothing implements -- each satisfies
+// len(metadata.Keyslots) > 1 and opens nothing, so destroying the only working
+// credential was permitted, returned nil, and was discovered at the next
+// unlock. Silent, catastrophic, and blamed on the operator's memory: the volume
+// then reports "incorrect passphrase" for a passphrase that is correct.
+//
+// The shapes come from unopenableKeyslotShapes, which is shared with
+// TestTheUnlockPathRefusesEveryShapeTheRemovalGuardMustNotCount -- so every
+// shape asserted here has been shown, in that test, to be one the unlock path
+// really does refuse. Neither test is allowed to be the only definition.
+func TestEveryKeyslotRemovalPathRefusesToDestroyTheLastUsableKeyslot(t *testing.T) {
+	passphrase := []byte(conformancePassphrase)
+
+	for _, shape := range unopenableKeyslotShapes {
+		// Formatted ONCE per shape and stamped onto a fresh file per path: the
+		// fixture is a property of the shape, and the four paths differ only in
+		// which function is asked to destroy it. See goldenSiblingVolume.
+		golden := goldenSiblingVolume(t, shape.apply)
+		offset, size := keyslotAreaExtent(t, restoreVolume(t, "extent.img", golden), "0")
+
+		for _, path := range keyslotRemovalPaths {
+			t.Run(shape.name+"/"+path.name, func(t *testing.T) {
+				device := restoreVolume(t, "guarded.img", golden)
+				before := readAreaBytes(t, device, offset, size)
+
+				err := path.remove(device, passphrase, 0)
+				if err == nil {
+					t.Fatal("the only keyslot that can open this volume was destroyed, and the call reported success")
+				}
+				if !errors.Is(err, ErrLastKeyslot) {
+					t.Fatalf("the removal was refused for some other reason than the guard: %v", err)
+				}
+
+				// THE DAMAGE PLANE, not the return value. "The error is the
+				// diagnosis; the record is the damage." A path that zeroed the
+				// area and then returned the guard's error would satisfy every
+				// error-shaped assertion above and still have destroyed the
+				// volume, so what is asserted per path is that the key material
+				// is byte-identical.
+				if !bytes.Equal(before, readAreaBytes(t, device, offset, size)) {
+					t.Fatal("the removal was refused AND the last usable keyslot's key material was destroyed")
+				}
+			})
+		}
+
+		// And once per shape, end to end: the volume genuinely still opens.
+		// Once rather than per path because it costs a full derivation and the
+		// per-path claim -- that this path destroyed nothing -- is already made
+		// on the bytes above, which is the stronger of the two statements.
+		t.Run(shape.name+"/the volume still opens", func(t *testing.T) {
+			device := restoreVolume(t, "survives.img", golden)
+			for _, path := range keyslotRemovalPaths {
+				if err := path.remove(device, passphrase, 0); err == nil {
+					t.Fatalf("%s destroyed the only keyslot that can open this volume", path.name)
+				}
+			}
+			if err := TestKey(device, passphrase); err != nil {
+				t.Fatalf("the volume no longer opens after four REFUSED removals: %v", err)
+			}
+		})
+	}
+}
+
+// keyslotAreaExtent reads a keyslot's area range out of a fixture, so a test can
+// snapshot the bytes a removal would have destroyed.
+func keyslotAreaExtent(t *testing.T, device, id string) (offset, size int64) {
+	t.Helper()
+
+	_, metadata, err := ReadHeader(device)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+	keyslot := metadata.Keyslots[id]
+	if keyslot == nil || keyslot.Area == nil {
+		t.Fatalf("keyslot %s has no area in the fixture", id)
+	}
+	if offset, err = parseSize(keyslot.Area.Offset); err != nil {
+		t.Fatalf("unreadable area offset: %v", err)
+	}
+	if size, err = parseSize(keyslot.Area.Size); err != nil {
+		t.Fatalf("unreadable area size: %v", err)
+	}
+	return offset, size
+}
+
+// TestEveryKeyslotRemovalPathPermitsARemovalThatLeavesASurvivor is the control
+// for the test above, and without it a guard that refused everything would pass
+// every case there.
+//
+// The sibling is undamaged metadata over an area of zeros, so the guard counts
+// it -- see keyslotCanOpenVolume's documented residual, which cannot be removed
+// without a passphrase to try.
+func TestEveryKeyslotRemovalPathPermitsARemovalThatLeavesASurvivor(t *testing.T) {
+	passphrase := []byte(conformancePassphrase)
+
+	golden := goldenSiblingVolume(t, nil)
+
+	for _, path := range keyslotRemovalPaths {
+		t.Run(path.name, func(t *testing.T) {
+			device := restoreVolume(t, "permitted.img", golden)
+
+			if err := path.remove(device, passphrase, 0); err != nil {
+				t.Fatalf("a removal leaving a counted survivor was refused: %v", err)
+			}
+
+			_, metadata, err := ReadHeader(device)
+			if err != nil {
+				t.Fatalf("ReadHeader failed: %v", err)
+			}
+			if _, present := metadata.Keyslots["0"]; present {
+				t.Fatal("the removal reported success and the keyslot is still in the header")
+			}
+		})
+	}
+}
+
+// overlappingSiblingVolume gives a container two keyslots whose areas share
+// bytes, both of them well-formed.
+//
+// This is #38's reproduction and it needs NO malformed metadata at all. The
+// sibling is a byte-for-byte metadata copy of keyslot 0 pointed at keyslot 0's
+// own area, so both slots are openable by the same passphrase and either one's
+// removal would zero the other's key material.
+//
+// shift moves the sibling's area to produce a PARTIAL overlap; 0 makes the two
+// areas identical.
+func goldenOverlappingVolume(t *testing.T, shift int64) (golden []byte, sharedOffset, sharedSize int64) {
+	t.Helper()
+
+	device, sharedOffset, sharedSize := overlappingSiblingVolume(t, "golden-overlap.img", shift)
+	return goldenBytes(t, device), sharedOffset, sharedSize
+}
+
+func overlappingSiblingVolume(t *testing.T, name string, shift int64) (device string, sharedOffset, sharedSize int64) {
+	t.Helper()
+
+	device = newImage(t, name)
+	formatWithLibrary(t, device)
+	cheapenDigests(t, device)
+
+	hdr, metadata, err := ReadHeader(device)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+
+	original := metadata.Keyslots["0"]
+	sharedOffset, err = parseSize(original.Area.Offset)
+	if err != nil {
+		t.Fatalf("unreadable area offset: %v", err)
+	}
+	sharedSize, err = parseSize(original.Area.Size)
+	if err != nil {
+		t.Fatalf("unreadable area size: %v", err)
+	}
+
+	sibling := cloneKeyslot(original)
+	sibling.Area.Offset = formatSize(sharedOffset + shift)
+	metadata.Keyslots[siblingSlotID] = sibling
+	for _, digest := range metadata.Digests {
+		digest.Keyslots = append(digest.Keyslots, siblingSlotID)
+	}
+
+	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
+		t.Fatalf("failed to write the overlapping fixture: %v", err)
+	}
+	return device, sharedOffset, sharedSize
+}
+
+// readAreaBytes returns the raw contents of a byte range of the device, so a
+// test can assert that a REFUSED removal left key material byte-identical
+// rather than merely that an error came back. The error is the diagnosis; the
+// bytes are the damage.
+func readAreaBytes(t *testing.T, device string, offset, size int64) []byte {
+	t.Helper()
+
+	f, err := os.Open(device)
+	if err != nil {
+		t.Fatalf("failed to open %s: %v", device, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	buf := make([]byte, size)
+	if _, err := f.ReadAt(buf, offset); err != nil {
+		t.Fatalf("failed to read %d bytes at %d: %v", size, offset, err)
+	}
+	return buf
+}
+
+// TestRemovingAKeyslotRefusesWhenItsAreaOverlapsAKeyslotThatStillWorks is #38.
+//
+// Reproduced permanent data loss with entirely well-formed metadata: the guard
+// reasoned over keyslot ENTRIES and the wipe acted on BYTES, so removing one of
+// two slots that share an area destroyed the other's key material while the
+// guard happily counted it as a survivor. The volume then reported the
+// operator's correct passphrase as invalid.
+func TestRemovingAKeyslotRefusesWhenItsAreaOverlapsAKeyslotThatStillWorks(t *testing.T) {
+	passphrase := []byte(conformancePassphrase)
+
+	for _, overlap := range []struct {
+		name  string
+		shift int64
+	}{
+		{"identical areas", 0},
+		// A partial overlap is the case a "same offset" check would miss.
+		{"partially overlapping areas", KeyslotAreaAlignment},
+	} {
+		golden, offset, size := goldenOverlappingVolume(t, overlap.shift)
+
+		for _, path := range keyslotRemovalPaths {
+			t.Run(overlap.name+"/"+path.name, func(t *testing.T) {
+				device := restoreVolume(t, "overlap.img", golden)
+				before := readAreaBytes(t, device, offset, size)
+
+				// Keyslot 0 is the one removed, and keyslot 1 is a survivor by
+				// the guard's count, so the ENTRY-level half of the gate
+				// permits this and only the BYTE-level half can refuse it.
+				//
+				// Removing slot 0 rather than slot 1 is what makes the partial
+				// overlap testable at all: a slot whose area starts part-way
+				// into another's decrypts to nothing, so RemoveKey could not
+				// authenticate against it -- and the entry-level guard would
+				// still count it, which is precisely the residual that makes
+				// the byte-level half necessary.
+				err := path.remove(device, passphrase, 0)
+				if err == nil {
+					t.Fatal("a keyslot was wiped over another keyslot's key material, and the call reported success")
+				}
+				if !errors.Is(err, ErrKeyslotAreaOverlap) {
+					t.Fatalf("the removal was refused for some other reason than the overlap: %v", err)
+				}
+
+				if !bytes.Equal(before, readAreaBytes(t, device, offset, size)) {
+					t.Fatal("the removal was refused AND the surviving keyslot's key material was modified")
+				}
+				if err := TestKey(device, passphrase); err != nil {
+					t.Fatalf("the volume no longer opens after a REFUSED removal: %v", err)
+				}
+			})
+		}
+	}
+}
+
+// TestChangeKeyRefusesToZeroAKeyslotThatStillWorks covers the fifth path that
+// zeroes a keyslot area.
+//
+// ChangeKey is not a removal, so an enumeration of "removal paths" misses it --
+// and it destroys an area exactly as a removal does. It must NOT take the
+// entry-level half of the gate, because changing the passphrase on a
+// single-keyslot volume is precisely what it is for; it must take the byte-level
+// half.
+func TestChangeKeyRefusesToZeroAKeyslotThatStillWorks(t *testing.T) {
+	passphrase := []byte(conformancePassphrase)
+	device, offset, size := overlappingSiblingVolume(t, "changekey-overlap.img", 0)
+	before := readAreaBytes(t, device, offset, size)
+
+	err := ChangeKey(device, passphrase, []byte("a-replacement-credential"), 1)
+	if err == nil {
+		t.Fatal("ChangeKey zeroed an area another keyslot still needs, and reported success")
+	}
+	if !errors.Is(err, ErrKeyslotAreaOverlap) {
+		t.Fatalf("ChangeKey was refused for some other reason than the overlap: %v", err)
+	}
+	if !bytes.Equal(before, readAreaBytes(t, device, offset, size)) {
+		t.Fatal("ChangeKey was refused AND the overlapping keyslot's key material was modified")
+	}
+	if err := TestKey(device, passphrase); err != nil {
+		t.Fatalf("the volume no longer opens after a REFUSED ChangeKey: %v", err)
+	}
+}
+
+// TestChangeKeyOnASingleKeyslotVolumeIsStillAllowed pins the asymmetry above.
+// A guard that took the entry-level half here would refuse the operation
+// ChangeKey exists to perform.
+func TestChangeKeyOnASingleKeyslotVolumeIsStillAllowed(t *testing.T) {
+	device := newImage(t, "changekey-single.img")
+	formatWithLibrary(t, device)
+
+	old := []byte(conformancePassphrase)
+	updated := []byte("the-replacement-credential")
+
+	if err := ChangeKey(device, old, updated, 0); err != nil {
+		t.Fatalf("ChangeKey was refused on the one-keyslot volume it exists for: %v", err)
+	}
+	if err := TestKey(device, updated); err != nil {
+		t.Fatalf("the new passphrase does not open the volume: %v", err)
+	}
+	if err := TestKey(device, old); err == nil {
+		t.Fatal("the old passphrase still opens the volume after ChangeKey")
+	}
+}
+
+// TestChangeKeyWritesTheNewMaterialBeforeDestroyingTheOld is #39.
+//
+// The old ordering was: wipe the area, write material derived from the NEW
+// passphrase into it, and only then make the new KDF durable. Between the
+// material write and the header write the on-disk state was material under the
+// new passphrase and a salt from the old one, which NEITHER passphrase derives
+// -- so on a single-keyslot volume an ordinary power failure in that window was
+// permanent data loss. The wipe also destroyed the old material before anything
+// replacing it existed.
+//
+// The property that removes the window is that the two ranges are DISJOINT: the
+// new material is written somewhere the old material is not, so no intermediate
+// state exists in which the header names an area holding material no passphrase
+// can derive. That is what this asserts, because it is what a crash-free run can
+// actually observe -- the ordering itself is pinned by the guard on the wipe
+// coming last in the source, and by the old area being zero afterwards.
+func TestChangeKeyWritesTheNewMaterialBeforeDestroyingTheOld(t *testing.T) {
+	device := newImage(t, "changekey-relocates.img")
+	formatWithLibrary(t, device)
+
+	old := []byte(conformancePassphrase)
+	updated := []byte("the-replacement-credential")
+
+	_, before, err := ReadHeader(device)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+	oldOffset, err := parseSize(before.Keyslots["0"].Area.Offset)
+	if err != nil {
+		t.Fatalf("unreadable area offset: %v", err)
+	}
+	oldSize, err := parseSize(before.Keyslots["0"].Area.Size)
+	if err != nil {
+		t.Fatalf("unreadable area size: %v", err)
+	}
+
+	if err := ChangeKey(device, old, updated, 0); err != nil {
+		t.Fatalf("ChangeKey failed: %v", err)
+	}
+
+	_, after, err := ReadHeader(device)
+	if err != nil {
+		t.Fatalf("ReadHeader after ChangeKey failed: %v", err)
+	}
+	newOffset, err := parseSize(after.Keyslots["0"].Area.Offset)
+	if err != nil {
+		t.Fatalf("unreadable area offset after ChangeKey: %v", err)
+	}
+	newSize, err := parseSize(after.Keyslots["0"].Area.Size)
+	if err != nil {
+		t.Fatalf("unreadable area size after ChangeKey: %v", err)
+	}
+
+	if newOffset == oldOffset {
+		t.Fatal("ChangeKey rewrote the keyslot in place; there is a window in which the header names material neither passphrase can derive")
+	}
+	if newOffset < oldOffset+oldSize && oldOffset < newOffset+newSize {
+		t.Fatalf("the new area [%d,%d) overlaps the old one [%d,%d), so the write still lands on the material it replaces",
+			newOffset, newOffset+newSize, oldOffset, oldOffset+oldSize)
+	}
+	if newSize != oldSize {
+		t.Fatalf("the keyslot area changed size from %d to %d; only its offset should move", oldSize, newSize)
+	}
+
+	// The old material is gone: relocating must not leave a second copy of the
+	// keyslot's key material behind, encrypted under a passphrase that has just
+	// been retired.
+	if leftovers := readAreaBytes(t, device, oldOffset, oldSize); !bytes.Equal(leftovers, make([]byte, oldSize)) {
+		t.Fatal("the old keyslot area still holds key material after ChangeKey")
+	}
+
+	if err := TestKey(device, updated); err != nil {
+		t.Fatalf("the new passphrase does not open the volume: %v", err)
+	}
+	if err := TestKey(device, old); err == nil {
+		t.Fatal("the old passphrase still opens the volume after ChangeKey")
+	}
+}
+
+// TestChangeKeyRefusesRatherThanRewriteInPlaceWhenThereIsNoFreeArea is the
+// fail-closed half of #39.
+//
+// Relocating needs somewhere to relocate TO. On a container whose keyslots area
+// has no gap, the only in-place alternative is the ordering that loses data on a
+// power failure, so the operation is REFUSED and the volume is left exactly as
+// it was. An operator has a crash-safe route to the same result: add a new key
+// and remove the old slot.
+func TestChangeKeyRefusesRatherThanRewriteInPlaceWhenThereIsNoFreeArea(t *testing.T) {
+	device := newImage(t, "changekey-full.img")
+	formatWithLibrary(t, device)
+
+	hdr, metadata, err := ReadHeader(device)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+	offset, err := parseSize(metadata.Keyslots["0"].Area.Offset)
+	if err != nil {
+		t.Fatalf("unreadable area offset: %v", err)
+	}
+	size, err := parseSize(metadata.Keyslots["0"].Area.Size)
+	if err != nil {
+		t.Fatalf("unreadable area size: %v", err)
+	}
+	start, _, err := keyslotsAreaBounds(hdr, metadata)
+	if err != nil {
+		t.Fatalf("keyslotsAreaBounds failed: %v", err)
+	}
+	// Shrink the declared keyslots area to exactly the one slot in use.
+	metadata.Config.KeyslotsSize = formatSize(offset + size - start)
+	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
+		t.Fatalf("failed to write the full-keyslots-area fixture: %v", err)
+	}
+
+	old := []byte(conformancePassphrase)
+	before := readAreaBytes(t, device, offset, size)
+
+	err = ChangeKey(device, old, []byte("a-replacement-credential"), 0)
+	if err == nil {
+		t.Fatal("ChangeKey rewrote a keyslot in place when it had nowhere safe to relocate")
+	}
+	if !errors.Is(err, ErrKeyslotsAreaFull) {
+		t.Fatalf("ChangeKey was refused for some other reason: %v", err)
+	}
+	if !bytes.Equal(before, readAreaBytes(t, device, offset, size)) {
+		t.Fatal("ChangeKey was refused AND the keyslot's key material was modified")
+	}
+	if err := TestKey(device, old); err != nil {
+		t.Fatalf("the volume no longer opens with the original passphrase after a REFUSED ChangeKey: %v", err)
+	}
+}
+
+// TestFindFreeKeyslotAreaReusesGaps pins the allocator ChangeKey depends on.
+//
+// A bump allocator -- max end, rounded up, which is what AddKey uses to place a
+// brand new slot -- would be wrong here: ChangeKey frees the area it relocates
+// out of, so a bump allocator would march up the keyslots area and make the
+// number of times a passphrase can be changed a function of how much room the
+// container was formatted with.
+func TestFindFreeKeyslotAreaReusesGaps(t *testing.T) {
+	hdr := &LUKS2BinaryHeader{HeaderSize: LUKS2HeaderMinSize}
+	area := func(offset, size int64) *Keyslot {
+		return &Keyslot{
+			Type: "luks2",
+			Area: &KeyslotArea{Offset: formatSize(offset), Size: formatSize(size)},
+		}
+	}
+	const start int64 = 2 * LUKS2HeaderMinSize // where keyslots begin for this geometry
+
+	metadata := func(keyslots map[string]*Keyslot, keyslotsSize int64) *LUKS2Metadata {
+		return &LUKS2Metadata{
+			Keyslots: keyslots,
+			Config:   &Config{KeyslotsSize: formatSize(keyslotsSize)},
+		}
+	}
+
+	t.Run("the first fit is the gap, not the end", func(t *testing.T) {
+		// Slot 0 relocated forward and left a hole at the start of the area.
+		md := metadata(map[string]*Keyslot{
+			"0": area(start+0x40000, 0x40000),
+		}, 0x200000)
+		got, err := findFreeKeyslotArea(hdr, md, 0x40000)
+		if err != nil {
+			t.Fatalf("findFreeKeyslotArea failed: %v", err)
+		}
+		if got != start {
+			t.Fatalf("placed the area at %d, want the hole at %d", got, start)
+		}
+	})
+
+	t.Run("a gap too small is skipped", func(t *testing.T) {
+		md := metadata(map[string]*Keyslot{
+			"0": area(start+0x1000, 0x40000),
+		}, 0x200000)
+		got, err := findFreeKeyslotArea(hdr, md, 0x40000)
+		if err != nil {
+			t.Fatalf("findFreeKeyslotArea failed: %v", err)
+		}
+		if want := start + 0x41000; got != want {
+			t.Fatalf("placed the area at %d, want %d (after the slot in use)", got, want)
+		}
+	})
+
+	t.Run("no room at all is refused", func(t *testing.T) {
+		md := metadata(map[string]*Keyslot{
+			"0": area(start, 0x40000),
+		}, 0x40000)
+		if _, err := findFreeKeyslotArea(hdr, md, 0x40000); !errors.Is(err, ErrKeyslotsAreaFull) {
+			t.Fatalf("a full keyslots area was not refused: %v", err)
+		}
+	})
+
+	t.Run("the data segment is a second ceiling", func(t *testing.T) {
+		// config.keyslots_size overstates the space available; the encrypted
+		// data starts before the area it declares ends.
+		md := metadata(map[string]*Keyslot{
+			"0": area(start, 0x40000),
+		}, 0x1000000)
+		md.Segments = map[string]*Segment{
+			"0": {Type: "crypt", Offset: formatSize(start + 0x40000)},
+		}
+		if _, err := findFreeKeyslotArea(hdr, md, 0x40000); !errors.Is(err, ErrKeyslotsAreaFull) {
+			t.Fatalf("a keyslot was placed on top of the encrypted data: %v", err)
+		}
+	})
+}
+
+// heterogeneousVolume gives a container two real keyslots that DISAGREE about
+// key size, with the weaker one first in scan order.
+//
+// Neither WriteHeader nor ReadHeader requires keyslots to agree, and cryptsetup
+// does not either -- so any container this library did not create may be one.
+// Slot 0's declared key size is reduced after the fact, which is exactly what an
+// external tool or a partially completed operation can leave behind; slot 1 is
+// real and openable and is what the caller authenticates with.
+func heterogeneousVolume(t *testing.T, name string) (device string, strongPassphrase []byte) {
+	t.Helper()
+
+	device = newImage(t, name)
+	formatWithLibrary(t, device)
+
+	strongPassphrase = []byte("the-second-credential")
+	if err := AddKey(device, []byte(conformancePassphrase), strongPassphrase, &AddKeyOptions{
+		KDFType:       KDFTypePBKDF2,
+		PBKDFIterTime: 1,
+	}); err != nil {
+		t.Fatalf("AddKey failed while building the fixture: %v", err)
+	}
+
+	hdr, metadata, err := ReadHeader(device)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+	metadata.Keyslots["0"].KeySize = 32
+	metadata.Keyslots["0"].Area.KeySize = 32
+	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
+		t.Fatalf("failed to write the heterogeneous fixture: %v", err)
+	}
+	return device, strongPassphrase
+}
+
+// TestAddKeyDerivesTheNewKeyslotsKeySizeFromTheVolumeKey is #55.
+//
+// AddKey took the new keyslot's key size from a TEMPLATE slot, which is right
+// only while every keyslot agrees. On a container whose keyslots disagree -- and
+// nothing in this package or in cryptsetup refuses one -- the new slot inherited
+// whichever slot the template rule picked. If that slot's declared key size is
+// not the length of the actual volume key, the result is not merely a weaker
+// credential: it is a DEAD one. The stripes written are the full master key's,
+// the declaration says half that, so the unlock merges half of them, recovers a
+// candidate no digest can verify, and AddKey has already returned nil.
+//
+// The fix is a derivation, not an option: the size comes from the master key the
+// call just recovered, which is the only value that can ever work.
+//
+// This asserts the credential OPENS THE VOLUME, not that some keyslot appeared.
+// The defect's whole signature is a keyslot that appears, looks well-formed, and
+// opens nothing -- an assertion on the header alone passes straight over it.
+func TestAddKeyDerivesTheNewKeyslotsKeySizeFromTheVolumeKey(t *testing.T) {
+	device, strong := heterogeneousVolume(t, "heterogeneous.img")
+	added := []byte("a-third-credential")
+
+	if err := AddKey(device, strong, added, &AddKeyOptions{
+		KDFType:       KDFTypePBKDF2,
+		PBKDFIterTime: 1,
+	}); err != nil {
+		t.Fatalf("AddKey failed on a container whose keyslots disagree: %v", err)
+	}
+
+	if err := TestKey(device, added); err != nil {
+		t.Fatalf("AddKey reported success and the credential it added does not open the volume: %v", err)
+	}
+
+	_, metadata, err := ReadHeader(device)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+	added2 := metadata.Keyslots["2"]
+	if added2 == nil {
+		t.Fatal("AddKey reported success and wrote no keyslot 2")
+	}
+	// 64 is this fixture's real volume key length; the template slot declares 32.
+	if added2.KeySize != 64 || added2.Area.KeySize != 64 {
+		t.Fatalf("the new keyslot declares key size %d/%d; it took the template's rather than the volume key's",
+			added2.KeySize, added2.Area.KeySize)
+	}
+}
+
+// TestAddKeyRefusesATemplateWhoseAreaCipherItWouldNotHonor is DELETED, and the
+// deletion is part of the fix rather than a concession to it.
+//
+// It asserted that AddKey REFUSES a keyslot whose area cipher this writer cannot
+// reproduce, and that behavior is now known to be wrong: it rejected every
+// keyslot of every container this library itself created with a non-XTS data
+// cipher, so AddKey turned away volumes it could unlock. The test was green and
+// it was defending a data-availability regression -- the same classification
+// exercise as the two integration tests this branch inverted, applied to a test
+// this branch had written days earlier.
+//
+// What it was protecting -- that no wrong area cipher is ever written into a new
+// keyslot -- is now guaranteed by construction rather than by a screen, because
+// AddKey states KeyslotAreaEncryption instead of copying a neighbour's label.
+// TestAddKeyStatesItsOwnAreaCipherAndDoesNotRefuseALegacyContainer asserts both
+// halves of that, and its two assertions fail against the two ways of getting
+// this wrong: copying the stale label, and refusing the container.
+
+// shrinkHeaderArea patches the container's declared header size and restores the
+// checksum, producing a header this library can READ and will not WRITE.
+//
+// That combination is what makes #50 reachable. ReadHeader accepts any header
+// area above 4096 bytes, while the writer additionally requires at least 16 KiB
+// and a power of two -- so a container declaring 8 KiB is perfectly readable and
+// every write against it is refused. A container this library wrote cannot get
+// here, which is why the fixture is patched directly rather than produced by
+// Format.
+func shrinkHeaderArea(t *testing.T, device string, area int64) {
+	t.Helper()
+
+	f, err := os.OpenFile(device, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatalf("failed to open %s: %v", device, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	var size [8]byte
+	binary.BigEndian.PutUint64(size[:], uint64(area))
+	if _, err := f.WriteAt(size[:], 8); err != nil {
+		t.Fatalf("failed to patch the header size: %v", err)
+	}
+
+	// The checksum covers the whole header area with its own field zeroed --
+	// see validateHeaderChecksum, whose layout this mirrors.
+	headerData := make([]byte, area)
+	if _, err := f.ReadAt(headerData, 0); err != nil {
+		t.Fatalf("failed to read the header area back: %v", err)
+	}
+	for i := 0; i < 64; i++ {
+		headerData[0x1C0+i] = 0
+	}
+	sum := sha256.Sum256(headerData)
+	if _, err := f.WriteAt(sum[:], 0x1C0); err != nil {
+		t.Fatalf("failed to restore the header checksum: %v", err)
+	}
+	if err := f.Sync(); err != nil {
+		t.Fatalf("failed to sync the patched header: %v", err)
+	}
+}
+
+// TestNoRemovalPathDestroysMaterialBeforeProvingTheHeaderWritable is #50.
+//
+// Every removal wiped the keyslot area first and wrote the header second, so a
+// header write that was going to be refused was refused AFTER the key material
+// was already gone: a failure that could have been a clean refusal instead cost
+// a keyslot. Comparable harm to a corruption, better diagnosis, and no less
+// permanent.
+//
+// The assertion is on the DAMAGE PLANE, not the return value. Both orderings
+// return an error; only one of them leaves the key material byte-identical.
+func TestNoRemovalPathDestroysMaterialBeforeProvingTheHeaderWritable(t *testing.T) {
+	passphrase := []byte(conformancePassphrase)
+
+	// Two keyslots, so the last-keyslot guard permits the removal and the header
+	// pre-flight is what has to refuse it.
+	golden := goldenSiblingVolume(t, nil)
+
+	for _, path := range keyslotRemovalPaths {
+		t.Run(path.name, func(t *testing.T) {
+			device := restoreVolume(t, "unwritable-header.img", golden)
+
+			_, metadata, err := ReadHeader(device)
+			if err != nil {
+				t.Fatalf("ReadHeader failed: %v", err)
+			}
+			offset, err := parseSize(metadata.Keyslots["0"].Area.Offset)
+			if err != nil {
+				t.Fatalf("unreadable area offset: %v", err)
+			}
+			size, err := parseSize(metadata.Keyslots["0"].Area.Size)
+			if err != nil {
+				t.Fatalf("unreadable area size: %v", err)
+			}
+
+			shrinkHeaderArea(t, device, LUKS2HeaderSize*2)
+			before := readAreaBytes(t, device, offset, size)
+
+			err = path.remove(device, passphrase, 0)
+			if err == nil {
+				t.Fatal("a removal succeeded on a container whose header cannot be written")
+			}
+			if !errors.Is(err, ErrInvalidHeader) {
+				t.Fatalf("the removal failed for some other reason than the unwritable header: %v", err)
+			}
+
+			if !bytes.Equal(before, readAreaBytes(t, device, offset, size)) {
+				t.Fatal("the removal was refused AND the key material was already destroyed")
+			}
+		})
+	}
+}
+
+// TestAddKeyStatesItsOwnAreaCipherAndDoesNotRefuseALegacyContainer is the
+// regression test for a fix that broke existing volumes.
+//
+// Before this branch, Format wrote the container's DATA cipher into the keyslot
+// area. A volume created with a non-XTS data cipher therefore carries AES-XTS
+// key material under, say, an "aes-cbc-essiv:sha256" label -- and it still
+// OPENS here, because the read path consults only the algorithm.
+//
+// The first version of the area-cipher fix screened the template keyslot
+// against what this writer produces. That rejected every keyslot of every such
+// container, so AddKey refused to add a credential to a volume it could
+// perfectly well unlock: a correctness fix producing a data-availability
+// regression, on exactly the containers least able to afford one. Raised by the
+// local Codex review of e975ed5.
+//
+// Two properties, and BOTH are needed -- either alone is satisfied by a wrong
+// implementation. Only asserting success permits copying the legacy label into
+// the new slot; only asserting the label permits refusing the container.
+func TestAddKeyStatesItsOwnAreaCipherAndDoesNotRefuseALegacyContainer(t *testing.T) {
+	device := newImage(t, "legacy-area-cipher.img")
+	formatWithLibrary(t, device)
+
+	// The legacy shape, written directly because current Format no longer
+	// produces it -- which is the point: these volumes exist and this library
+	// made them.
+	hdr, metadata, err := ReadHeader(device)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+	metadata.Keyslots["0"].Area.Encryption = "aes-cbc-essiv:sha256"
+	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
+		t.Fatalf("failed to write the legacy fixture: %v", err)
+	}
+
+	// Precondition: the container really does still open. Without this the test
+	// could pass against a volume that was broken to begin with.
+	if err := TestKey(device, []byte(conformancePassphrase)); err != nil {
+		t.Fatalf("the legacy fixture does not open, so it is not the case under test: %v", err)
+	}
+
+	added := []byte("a-second-credential")
+	if err := AddKey(device, []byte(conformancePassphrase), added, &AddKeyOptions{
+		KDFType:       KDFTypePBKDF2,
+		PBKDFIterTime: 1,
+	}); err != nil {
+		t.Fatalf("AddKey refused a container this library created and can still unlock: %v", err)
+	}
+	if err := TestKey(device, added); err != nil {
+		t.Fatalf("the added credential does not open the volume: %v", err)
+	}
+
+	_, after, err := ReadHeader(device)
+	if err != nil {
+		t.Fatalf("ReadHeader after AddKey failed: %v", err)
+	}
+	if got := after.Keyslots["1"].Area.Encryption; got != KeyslotAreaEncryption {
+		t.Fatalf("the new keyslot declares %q; it must state what this call actually encrypted with, not copy the neighbour's stale label", got)
+	}
+
+	// The legacy slot is LEFT ALONE. This call authors one keyslot; silently
+	// rewriting another slot's metadata is a different operation and not one
+	// the caller asked for.
+	if got := after.Keyslots["0"].Area.Encryption; got != "aes-cbc-essiv:sha256" {
+		t.Fatalf("the pre-existing keyslot's declaration was rewritten to %q; AddKey repaired metadata it was not asked to touch", got)
+	}
+}
+
+// TestFormatDeclaresTheKeyslotAreaCipherItActuallyUses covers where the wrong
+// declaration ORIGINATES, which is not AddKey.
+//
+// Format wrote the container's DATA cipher into the keyslot area, and those are
+// different things: a caller may format with any cipher dm-crypt supports, and
+// keyslot key material is wrapped with AES-XTS regardless. For the default
+// aes/xts-plain64 the two strings coincide, which is why it survived -- and for
+// any other choice Format produced a keyslot whose declaration its own material
+// did not match.
+//
+// Without this, the exact-match validation above would REFUSE a template that
+// this very library had written, so AddKey would stop working on containers
+// Format can create. The two changes are one fix.
+func TestFormatDeclaresTheKeyslotAreaCipherItActuallyUses(t *testing.T) {
+	device := newImage(t, "format-cbc-data.img")
+
+	// A non-XTS DATA cipher. Only the segment is affected by this choice; the
+	// keyslot area must still describe what wraps the key material.
+	if err := Format(FormatOptions{
+		Device:        device,
+		Passphrase:    []byte(conformancePassphrase),
+		Cipher:        "aes",
+		CipherMode:    "cbc-essiv:sha256",
+		KeySize:       512,
+		HashAlgo:      "sha512",
+		SectorSize:    512,
+		KDFType:       KDFTypePBKDF2,
+		PBKDFIterTime: 1,
+	}); err != nil {
+		t.Fatalf("Format failed: %v", err)
+	}
+
+	_, metadata, err := ReadHeader(device)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+
+	if got := metadata.Keyslots["0"].Area.Encryption; got != KeyslotAreaEncryption {
+		t.Fatalf("the keyslot area declares %q; the material is %s and nothing else", got, KeyslotAreaEncryption)
+	}
+
+	// The caller's choice still reaches the DATA segment, which is what it was
+	// about -- so this is a correction, not a silent override of the caller.
+	if got := metadata.Segments["0"].Encryption; got != "aes-cbc-essiv:sha256" {
+		t.Fatalf("the data segment declares %q, want the caller's aes-cbc-essiv:sha256", got)
+	}
+
+	// And the container is still fully usable: it opens, and AddKey can
+	// template off it rather than refusing a slot this library just wrote.
+	if err := TestKey(device, []byte(conformancePassphrase)); err != nil {
+		t.Fatalf("the volume does not open: %v", err)
+	}
+	if err := AddKey(device, []byte(conformancePassphrase), []byte("a-second-credential"), &AddKeyOptions{
+		KDFType:       KDFTypePBKDF2,
+		PBKDFIterTime: 1,
+	}); err != nil {
+		t.Fatalf("AddKey refused a template this library itself wrote: %v", err)
+	}
+	if err := TestKey(device, []byte("a-second-credential")); err != nil {
+		t.Fatalf("the added credential does not open the volume: %v", err)
+	}
+}
+
+// TestEveryKeyslotRemovalPathAdvancesTheSequenceID asserts over the SET, which
+// is the only form of this test worth having.
+//
+// LUKS2 keeps two header copies and uses the sequence id to decide which is
+// current. writeHeaderInternal writes both, so a mutating path that leaves the
+// id alone can produce two copies carrying DIFFERENT metadata at the SAME
+// sequence number -- and a reader then cannot tell which is newer. That defeats
+// the format's recovery mechanism on paths whose purpose is destroying key
+// material.
+//
+// Seven of the eight mutating paths advanced it. WipeKeyslot did not, and had
+// not since before this branch -- it became conspicuous only once WipeKeyslot
+// was made a full peer of the other removal paths. That is this change's
+// recurring shape one more time: a rule applied to the sites someone
+// enumerated, and one site nobody enumerated.
+//
+// So this asserts over keyslotRemovalPaths as a group rather than naming
+// WipeKeyslot, for the same reason TestEveryKeyslotRemovalPathIsGuarded does: a
+// sixth path cannot be added without one.
+//
+// Format, WriteHeader and RestorePrimaryHeader deliberately do NOT advance it
+// and are excluded: Format creates a container with no older copy to
+// disambiguate, WriteHeader is the primitive whose caller owns the header, and
+// RestorePrimaryHeader clones the secondary onto the primary, where advancing
+// would make the repaired copy falsely claim to be newer than its source.
+func TestEveryKeyslotRemovalPathAdvancesTheSequenceID(t *testing.T) {
+	passphrase := []byte(conformancePassphrase)
+	golden := goldenSiblingVolume(t, nil)
+
+	for _, path := range keyslotRemovalPaths {
+		t.Run(path.name, func(t *testing.T) {
+			device := restoreVolume(t, "sequence.img", golden)
+
+			before, _, err := ReadHeader(device)
+			if err != nil {
+				t.Fatalf("ReadHeader failed: %v", err)
+			}
+
+			if err := path.remove(device, passphrase, 0); err != nil {
+				t.Fatalf("the removal was refused: %v", err)
+			}
+
+			// Read back from the DEVICE. Asserting on the in-memory header
+			// would pass for a path that incremented the field and never
+			// persisted it, which is the same shape as asserting an error
+			// instead of the damage.
+			after, _, err := ReadHeader(device)
+			if err != nil {
+				t.Fatalf("ReadHeader after the removal failed: %v", err)
+			}
+
+			if after.SequenceID <= before.SequenceID {
+				t.Fatalf("the persisted sequence id went %d -> %d; two header copies could now carry different metadata at the same version, and a reader could not tell which is current",
+					before.SequenceID, after.SequenceID)
+			}
+		})
 	}
 }
