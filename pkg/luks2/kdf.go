@@ -147,8 +147,8 @@ func DeriveKeyEnclave(passphrase []byte, kdf *KDF, keySize int) (*enclave.Memory
 //
 // It is a validated-module boundary with no way around it that is permitted:
 // crypto/pbkdf2 takes a string, and implementing PBKDF2 over crypto/hmac to
-// avoid that is prohibited outright by the owner ruling of 2026-08-25 (resolved
-// case #155), which rules that the protected-memory mandate yields here.
+// avoid that is prohibited outright by the owner ruling of 2026-08-25, which
+// rules that the protected-memory mandate yields here.
 // Recorded as exposure 2 in enclave.go.
 func deriveKeySecret(secret *enclave.MemoryEnclave, kdf *KDF, keySize int) (*enclave.MemoryEnclave, error) {
 	var derived *enclave.MemoryEnclave
@@ -246,8 +246,10 @@ func deriveKeyPlain(passphrase []byte, kdf *KDF, keySize int) ([]byte, error) {
 // from having to.
 //
 // It is also the API the owner ruling names: "use crypto/pbkdf2; accept the
-// bounded transient copy; document it" (conventions/security-review.md, NEVER
-// hand-roll cryptography, owner ruling 2026-08-25, resolved case #155).
+// bounded transient copy; document it" -- the resolution of this exact case
+// under the rule against hand-rolled cryptography (owner ruling 2026-08-25).
+// The reasoning is spelled out in enclave.go and in the README's Protected
+// Memory section, which are in this repository and travel with it.
 func derivePBKDF2(passphrase, salt []byte, kdf *KDF, keySize int) ([]byte, error) {
 	if kdf.Iterations == nil {
 		return nil, &CryptoError{Op: "pbkdf2", Err: fmt.Errorf("PBKDF2 requires iterations")}

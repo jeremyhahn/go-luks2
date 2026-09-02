@@ -82,7 +82,8 @@ RUN echo '#!/bin/bash' > /entrypoint.sh && \
     echo 'udevadm settle 2>/dev/null || true' >> /entrypoint.sh && \
     echo '' >> /entrypoint.sh && \
     echo '# NO GLOBAL DEVICE CLEANUP HERE. This block used to run' >> /entrypoint.sh && \
-    echo '# "dmsetup remove_all" and "losetup -D", both with errors discarded.' >> /entrypoint.sh && \
+    echo '# a global device-mapper wipe and a global loop detach, both with' >> /entrypoint.sh && \
+    echo '# their errors discarded.' >> /entrypoint.sh && \
     echo '# device-mapper and loop devices are NOT namespaced, and this' >> /entrypoint.sh && \
     echo '# container runs --privileged, so both commands operated on the HOST:' >> /entrypoint.sh && \
     echo '# every dm mapping and every loop device on the machine running the' >> /entrypoint.sh && \

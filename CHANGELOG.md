@@ -247,7 +247,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through it — so no FIPS-mode process can enroll a non-approved keyslot.
   `requireFIPSApprovedKDF` is renamed `requireFIPSApprovedKDFForNewKeyslot` so
   that re-introducing it on a derivation path reads as wrong at the call site.
-  Owner ruling 2026-08-20 (`docs/04-security-model.md` product rulings 5-8).
+  Owner ruling 2026-08-20: in FIPS mode a non-approved KDF may not be
+  ENROLLED, and enrollment is the operation that gets refused.
 
   PBKDF2-HMAC-SHA1 remains refused **while deriving**, and that is a different
   kind of rule: the Go Cryptographic Module panics on SHA-1 under

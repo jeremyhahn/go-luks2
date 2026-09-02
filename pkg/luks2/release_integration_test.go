@@ -24,7 +24,7 @@ import "testing"
 // contradicts the obvious explanation:
 //
 //	23:13:49Z  pool clean, dm=none on all four runners
-//	23:30:53Z  job 34559 starts on vm-host-4; its entrypoint guard does NOT
+//	23:30:53Z  job 34559 starts on that runner; its entrypoint guard does NOT
 //	           refuse, so the host was still clean
 //	23:31:28Z  --- PASS: TestMakeFilesystemExt3 (3.40s)
 //	23:34:44Z  job 34559 completes, conclusion: SUCCESS

@@ -27,7 +27,7 @@ import (
 //   - None of them is flaky on a slow or loaded machine. Load can only make a
 //     derivation take LONGER, so the tolerances are asymmetric: tight below,
 //     generous above. There is no t.Skip and no testing.Short() anywhere --
-//     barred by conventions/testing-guidelines.md, and a timing test that
+//     this project's testing rules bar both outright, and a timing test that
 //     excuses itself on a busy CI box is a test that gets deleted in a month.
 
 // timePBKDF2 returns how long one PBKDF2 derivation of the given cost actually
@@ -65,8 +65,8 @@ func timePBKDF2(t *testing.T, hashAlgo string, keySize, iterations int) time.Dur
 //
 // The band is a TENTH to TEN TIMES the budget, and it is that wide on purpose.
 // A timing assertion on a shared CI runner is the classic candidate for someone
-// reaching for t.Skip or testing.Short() in six months -- both barred by
-// conventions/testing-guidelines.md -- so the tolerance has to be wide enough
+// reaching for t.Skip or testing.Short() in six months -- both barred outright
+// by this project's testing rules -- so the tolerance has to be wide enough
 // that it is never tempting. It can afford to be: the defect this pins is a
 // 25-100x error, not a 20% one. Across repeated runs on a machine deliberately
 // loaded with other work the worst observed ratio was 0.46 and the worst 1.8,

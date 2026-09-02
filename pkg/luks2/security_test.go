@@ -557,8 +557,9 @@ func TestSecurityConstants(t *testing.T) {
 //
 // They cannot use permission bits. CI job containers run as ROOT and root
 // bypasses discretionary access checks, so an os.Chmod-based negative test
-// passes on a workstation and fails on the runner -- the exact trap
-// conventions/testing-guidelines.md forbids under Fault Injection.
+// passes on a workstation and fails on the runner -- the exact trap this
+// project's testing rules forbid: a fault must be injected through a means
+// that holds for every uid, never through permission bits.
 //
 // Nor is there a real open that fails with EACCES for every uid. Four
 // candidates were measured on a dev host, as uid 1000 and again as uid 0:

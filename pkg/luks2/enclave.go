@@ -23,11 +23,12 @@ import (
 // and which exited. Doing the work in process removes that boundary, so this
 // library has to provide the guarantee itself.
 //
-// The company mandate (software/CLAUDE.md, owner 2026-08-17) is that every key,
+// The rule this library is held to (owner ruling 2026-08-17) is that every key,
 // password, secret or token read into memory lives in protected storage for its
-// whole lifetime and is zeroized on release -- never a plain []byte or string --
-// and that Layer 0-3 library code touching raw key bytes uses the portfolio
-// locked-memory primitive, github.com/jeremyhahn/go-enclave. go-luks2 is Layer 0.
+// whole lifetime and is zeroized on release -- never a plain []byte or string.
+// go-luks2 sits at the bottom of that stack: the low-level libraries that
+// handle raw key bytes all share one locked-memory package,
+// github.com/jeremyhahn/go-enclave, rather than each rolling its own.
 //
 // # The ownership model
 //
@@ -99,15 +100,15 @@ import (
 //
 //     The obvious remedy -- a PBKDF2 whose password and HMAC state stay in
 //     wipeable storage -- means implementing PBKDF2 over crypto/hmac, and that
-//     is prohibited. From the company conventions, security-review.md, "NEVER
-//     hand-roll cryptography" (owner ruling 2026-08-25):
+//     is prohibited. This project's security policy forbids hand-rolled
+//     cryptography outright (owner ruling 2026-08-25):
 //
 //     "No agent implements a cryptographic primitive or construction by hand --
 //     ever. ... Hand-rolling a KDF, cipher mode, MAC, or any construction --
 //     even 'over validated sub-primitives,' even to satisfy another mandate --
 //     is prohibited."
 //
-//     And the case is resolved by name (#155): "crypto/pbkdf2 copies the
+//     And this exact case was resolved by name: "crypto/pbkdf2 copies the
 //     password inside the validated module, so a secret cannot be kept wipeable
 //     through a validated PBKDF2 call. Ruling: use crypto/pbkdf2; accept the
 //     bounded transient copy; document it; do NOT hand-roll PBKDF2 over
@@ -115,7 +116,7 @@ import (
 //     that boundary. This is the general rule, not a one-off."
 //
 //     So this entry is the compliance artifact the ruling requires, not an
-//     excuse for a gap. Reopening it needs the owner to revisit ruling #155,
+//     excuse for a gap. Reopening it needs the owner to revisit that ruling,
 //     not a code change here.
 //
 //     Note what switching from golang.org/x/crypto/pbkdf2 to the stdlib did and

@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs security ci ci-full fmt-check all check test-cli integration-test-pkg integration-test-cli docker-build-integration no-global-device-cleanup test-require-tool test-calibration
+.PHONY: help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs security ci ci-full fmt-check all check test-cli integration-test-pkg integration-test-cli docker-build-integration no-global-device-cleanup test-require-tool test-calibration no-internal-disclosure test-guards
 
 # Default target
 .DEFAULT_GOAL := help
@@ -309,6 +309,23 @@ fmt-check: ## Check if code is formatted (CI-friendly, doesn't modify files)
 no-global-device-cleanup: ## Refuse ownership-blind device teardown (losetup -D, dmsetup remove_all)
 	@./scripts/no-global-device-cleanup.sh
 
+# PUBLIC-MIRROR GUARD (#20). This repository is mirrored publicly and releases
+# publish a tree byte-identical to the internal tag, so every tracked file is a
+# published file. #20 asserts a WHOLE-TREE property, and a whole-tree property
+# stops holding the moment anything merges beneath it — it cannot be maintained
+# by remembering to re-run a grep, so it fails a build instead.
+no-internal-disclosure: ## Refuse internal infrastructure detail in a publicly mirrored repo
+	@./scripts/no-internal-disclosure.sh
+
+# Behavioural tests for both guards above. Running a guard against the current
+# clean tree proves only that it can say yes; it proves nothing about the thing
+# the guard is for, and a guard that has stopped detecting looks exactly like a
+# clean repository. Every review round on these two found a fail-open path that
+# a green clean-tree run reported as fine -- including one introduced BY a fix
+# for an earlier finding. Each is a case in here now.
+test-guards: ## Test the disclosure and device-teardown guards against fixtures
+	@./scripts/guards-test.sh
+
 # The CI version gate's own tests. Run locally as well as in CI, because the
 # comparison they cover shipped failing open once already: a substring test
 # accepted v11.7.0 for a v1.7.0 pin. `--mutate` loosens the comparison back to
@@ -434,7 +451,7 @@ trivy-fs: ## Scan the working tree with trivy (dependency CVEs and leaked secret
 security: gosec govulncheck verify trivy-fs ## Run the full §8 security suite (gosec, govulncheck, go mod verify, trivy fs)
 	@echo "$(COLOR_GREEN)✓ Security suite complete$(COLOR_RESET)"
 
-ci: fmt-check vet no-global-device-cleanup test-require-tool lint security test-unit test-calibration build ## Run CI pipeline locally (format, lint, security suite, unit tests, build)
+ci: fmt-check vet no-global-device-cleanup no-internal-disclosure test-require-tool test-guards lint security test-unit test-calibration build ## Run CI pipeline locally (format, lint, security suite, unit tests, build)
 	@echo ""
 	@echo "$(COLOR_BOLD)======================================$(COLOR_RESET)"
 	@echo "$(COLOR_BOLD)CI Pipeline Complete$(COLOR_RESET)"
@@ -460,7 +477,9 @@ ci-full: ## Run full CI pipeline with Docker integration tests (enforces 90% cov
 	@$(MAKE) fmt-check
 	@$(MAKE) vet
 	@$(MAKE) no-global-device-cleanup
+	@$(MAKE) no-internal-disclosure
 	@$(MAKE) test-require-tool
+	@$(MAKE) test-guards
 	@$(MAKE) lint
 	@$(MAKE) security
 	@$(MAKE) docker-integration-test
@@ -495,7 +514,7 @@ ci-full: ## Run full CI pipeline with Docker integration tests (enforces 90% cov
 	@echo "$(COLOR_GREEN)All CI checks passed! Ready to push.$(COLOR_RESET)"
 	@echo ""
 
-check: fmt vet no-global-device-cleanup test-require-tool test ## Run all quality checks (format, vet, guards, test)
+check: fmt vet no-global-device-cleanup no-internal-disclosure test-require-tool test-guards test ## Run all quality checks (format, vet, guards, test)
 	@echo "$(COLOR_GREEN)✓ All checks passed$(COLOR_RESET)"
 
 clean: ## Clean build artifacts and test files
@@ -590,9 +609,9 @@ AGENT_GIT ?= $(shell command -v agent-git.sh 2>/dev/null)
 # The LITERAL repo name — never $(notdir $(CURDIR)). Deriving it from the
 # directory derives the signing IDENTITY from the checkout, so a worktree or a
 # CI workspace named anything else signs the release as the wrong agent
-# (measured elsewhere in the fleet 2026-08-26: a directory named `mk` signed as
-# `agent-mk`). This tree is a worktree named `luks2-ci`, so that failure is not
-# hypothetical here.
+# (measured 2026-08-26: a directory named `mk` signed as `agent-mk`). Releases
+# here are cut from git worktrees, whose directory names are chosen for the task
+# rather than to match the repo, so that failure is not hypothetical.
 REPO_NAME ?= go-luks2
 
 # MEASURED for this repository on 2026-08-31: `git remote -v` shows exactly one

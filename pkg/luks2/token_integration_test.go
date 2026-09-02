@@ -295,9 +295,10 @@ func TestTokenOperations_Integration(t *testing.T) {
 // `go test ./...` depend on an undocumented system binary, which is the defect
 // this move fixes.
 //
-// This is testing-guidelines.md's SECOND remedy for a test that cannot run
-// everywhere -- a build tag, "a declared, greppable compile-time decision" --
-// rather than the skip guard, which is a runtime excuse that reports success.
+// This is the SECOND of the two remedies this project allows for a test that
+// cannot run everywhere -- a build tag, which is a declared, greppable
+// compile-time decision -- rather than the skip guard, which is a runtime
+// excuse that reports success.
 // Both properties are kept: the unit tier needs no system binary, and absence
 // still cannot reverse the ruling, because in the tier that runs this the
 // binary is not optional.

@@ -262,8 +262,10 @@ func openDevice(op, device string, flag int) (*os.File, error) {
 // It is here for a measured reason. A permission failure cannot be produced by
 // permission bits in a test: CI job containers run as ROOT, and root bypasses
 // discretionary access checks, so an os.Chmod-based negative test passes
-// locally and fails on the runner (conventions/testing-guidelines.md, Fault
-// Injection). Four candidate uid-independent EACCES sources were measured on a
+// locally and fails on the runner. That is why this project's testing rules
+// forbid building a failure case out of permission bits: inject faults only
+// through means that hold for EVERY uid. Four candidate uid-independent EACCES
+// sources were measured on a
 // dev host -- /proc/version and /proc/self/cmdline opened O_RDWR,
 // /sys/kernel/vmcoreinfo, /proc/1/mem -- and root opened ALL FOUR. There is no
 // real open that fails this way for every uid, so the fault is injected at the

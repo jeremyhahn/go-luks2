@@ -111,6 +111,21 @@ jobs:
       - name: Refuse ownership-blind device teardown
         run: ./scripts/no-global-device-cleanup.sh
 
+      # PUBLIC-MIRROR GUARD (#20). This repository is mirrored publicly and a
+      # release publishes a tree byte-identical to the internal tag, so every
+      # tracked file is a published file. #20 asserts a WHOLE-TREE property —
+      # no workstation paths, no private repo name, no internal forge address,
+      # no named runner hosts, no internal ticket numbers, no citations of
+      # company documents that resolve to nothing outside.
+      #
+      # It runs on every push because such a property stops holding the moment
+      # anything merges beneath it. Establishing it once on a branch and
+      # trusting people to re-check is how it decays; the issue's own
+      # verification section says to re-run the sweep after any rebase, which
+      # is a job for a gate rather than for a habit.
+      - name: Refuse internal infrastructure detail
+        run: ./scripts/no-internal-disclosure.sh
+
       # The version gate has its own tests, and they run HERE rather than only
       # on a developer's machine — a suite nothing executes is a suite that can
       # rot into agreement with whatever the code does. They use fakes printing
@@ -119,6 +134,17 @@ jobs:
       # substring test accepted v11.7.0 for a v1.7.0 pin.
       - name: Test the pinned-version gate
         run: ./scripts/require-tool-test.sh
+
+      # The two repository guards get their own behavioural tests, for the same
+      # reason the version gate does: running a guard against the current clean
+      # tree proves it can say yes and nothing else, and a guard that has
+      # stopped detecting is indistinguishable from a clean repository. Every
+      # review round on these found a fail-open path a clean-tree run called
+      # fine -- one of them introduced BY the fix for an earlier finding. Each
+      # is a case in the suite. Fixtures in throwaway git repos; no network, no
+      # devices.
+      - name: Test the repository guards
+        run: ./scripts/guards-test.sh
 
       # NO NETWORK INSTALL (#44). golangci-lint is baked into the self-hosted
       # runner image at GOLANGCI_LINT_VERSION. The install this replaces had

@@ -52,7 +52,10 @@ mkdir -p "$work/bin"
 PATH="$work/bin:/usr/bin:/bin"
 export PATH
 # Never the github.com branch: these tests must never reach the network.
-GITHUB_SERVER_URL="http://forge.internal"
+# A documentation-reserved domain, deliberately: an internal-looking hostname
+# in a tracked file is the thing the disclosure guard next door exists to
+# reject, and a test fixture is not exempt from it.
+GITHUB_SERVER_URL="https://forge.example"
 export GITHUB_SERVER_URL
 
 if [ -n "$mutate" ]; then
