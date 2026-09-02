@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`Lock` no longer fails on a transient device-mapper `EBUSY` (#122).**
+  Closing a mapping intermittently failed with
+  `dm ioctl: device or resource busy` because something holds the target open
+  for a moment after the activity preceding the close — in practice a process
+  started by a udev rule. There was **no `EBUSY` retry anywhere** in the
+  package; the only mentions of retrying were comments explaining why other
+  conditions are *not* retryable. Traced from go-blockstore #45, where it cost
+  roughly one failure per full integration run.
+
+  The remedy is device-mapper's own rather than ours: `dmsetup(8)` documents the
+  same condition and ships `remove --retry`, which retries *"for a few seconds"*
+  when *"a process run from a udev rule is temporarily using the device"* — so
+  the 3-second budget is anchored to that rather than chosen.
+
+  **Only `EBUSY` is retried.** A device that is gone will still be gone and a
+  permission refusal will be refused again; retrying those would spend the whole
+  budget turning a fast, correct failure into a slow one.
+
+  **What it says when it gives up is the substance, not the loop.** On
+  exhaustion `Lock` returns the new `ErrMappingBusy`, naming the mapping, the
+  attempt count, the budget spent, and how to find the holder (`lsof`,
+  `mount`, `dmsetup info -c`, and `dmsetup remove --deferred` for a device that
+  will free later); the underlying `EBUSY` stays reachable via `errors.Is`. A
+  retry that ended in the same bare errno would only be a slower way to say the
+  same unhelpful thing.
+
+  The rollback path, `removeCreatedMapping`, shares the retry and **keeps its
+  verdict unchanged**: a target it still cannot remove is `ErrMappingStillLive`,
+  because a plaintext device the caller does not know exists is a different and
+  louder problem than a close that failed. It gains only the absence of false
+  alarms on a hold that clears.
+
+  The rollback confirms the target is **ours by UUID before every attempt**, not
+  once before the first. Retrying a removal by name alone would have widened a
+  one-ioctl race into a three-second one: during a backoff another actor can
+  remove our target and create a different mapping under the same name, and the
+  next attempt would remove theirs. Whatever a caller must be sure of before
+  removing belongs inside the unit being retried.
+
 - **`AddRecoveryKey` reported a keyslot it had not used — a failed revocation
   that destroys a live credential (#42).** It inferred the slot after the fact
   as the **highest-numbered** one in the header, while `AddKey` fills the

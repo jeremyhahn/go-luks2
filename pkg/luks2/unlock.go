@@ -410,10 +410,108 @@ func Lock(name string) error {
 		return fmt.Errorf("%w: no device-mapper mapping named %q exists", ErrVolumeNotUnlocked, name)
 	}
 
-	// Get device info before removing (to find the device node path)
-	info, _ := dm.infoByName(name)
+	// The identity MUST be established before anything is removed. Discarding
+	// this error left `info` nil, and the retry below then removed BY NAME with
+	// no identity check at all -- across the full three-second budget. That is
+	// the exact race the identity check exists to prevent, widened rather than
+	// closed: IsUnlocked can succeed through its device-node fallback, so a nil
+	// `info` is reachable in ordinary operation and not only under a transient
+	// fault.
+	//
+	// No-such-device here is the same state IsUnlocked reports on: the mapping
+	// went away between the two calls, which is the typed not-unlocked case, not
+	// a device-mapper failure. Any other inspection error means the identity
+	// cannot be established, and the only safe answer is to say so rather than
+	// to remove something whose identity is unknown.
+	// The capture is RETRIED on EBUSY like everything else on this path. Failing
+	// fast here would reintroduce the very flakiness this function absorbs: the
+	// identity lookup goes through the same device-mapper control path as the
+	// close, so it is subject to the same transient hold, and refusing on it
+	// would leave the mapping live without ever attempting the close.
+	//
+	// What must NOT be retried away is a lookup that keeps failing. Identity is
+	// required before anything is removed -- discarding this error once left the
+	// retry removing BY NAME with no identity check across the whole budget,
+	// which is the race the check exists to prevent.
+	var info *devmapper.DeviceInfo
+	if _, err := retryWhileBusy(func() error {
+		var err error
+		info, err = dm.infoByName(name)
+		return err
+	}); err != nil {
+		if isNoSuchDevice(err) {
+			// The mapping went away between IsUnlocked and here: the typed
+			// not-unlocked case, not a device-mapper failure.
+			return fmt.Errorf("%w: no device-mapper mapping named %q exists", ErrVolumeNotUnlocked, name)
+		}
+		return fmt.Errorf("cannot establish the identity of mapping %q, so it will not be removed: %w", name, err)
+	}
 
-	if err := dm.remove(name); err != nil {
+	// A close rides out a transient hold rather than failing on it. Something
+	// holds a target open for a moment after the activity that preceded the
+	// close -- a udev-triggered scan, in practice -- and the device frees
+	// itself; dmsetup(8) ships --retry for exactly this. See
+	// removeMappingWithRetry (#122).
+	//
+	// When the budget is spent, the answer is SPECIFIC rather than the bare
+	// errno: an operator has to be able to tell "busy for an instant" from
+	// "something is genuinely holding this", and after a retry exists that
+	// distinction is the whole diagnostic value. Silence, or an unchanged
+	// message, would make the retry a slower way to say the same thing.
+	// The identity is re-confirmed before EVERY attempt, for the same reason the
+	// rollback does it (#122): during a backoff another actor can remove this
+	// target and create a DIFFERENT mapping under the same name, and removing
+	// that one would destroy a plaintext device this caller never opened.
+	// Retrying by name alone would widen a one-ioctl window into a three-second
+	// one.
+	//
+	// If the identity changes, or the target disappears, the mapping this call
+	// was asked to close is already gone: that is the goal, so it reports
+	// success and does NOT remove whatever now holds the name. Node cleanup is
+	// skipped in that case too -- the info captured above describes a device
+	// that is no longer there, and unlinking by a stale minor is how the wrong
+	// node gets removed.
+	//
+	// info is now guaranteed non-nil: the inspection above returns rather than
+	// proceeding without an identity, so there is no name-only path left.
+	replaced := false
+	attempts, err := retryWhileBusy(func() error {
+		current, err := dm.infoByName(name)
+		if err != nil {
+			if isNoSuchDevice(err) {
+				replaced = true
+				return nil
+			}
+			return err
+		}
+		// The dm UUID is CRYPT-LUKS2-<header uuid>-<name>: a function of
+		// the VOLUME and the NAME, not of this activation. So a mapping of
+		// the same volume, recreated under the same name during the
+		// backoff, carries an identical UUID and the UUID alone cannot
+		// tell it from ours. DevNo is the closest thing to an instance
+		// handle the dm API offers here, and a recreated target is
+		// normally allocated a different minor.
+		//
+		// This NARROWS the window rather than closing it -- minors are
+		// reused eventually -- and the residue is the pre-existing race
+		// that inspect-then-remove always had. Stated rather than implied,
+		// because a reader who sees two fields compared will otherwise
+		// assume the identity is exact.
+		if current.UUID != info.UUID || current.DevNo != info.DevNo {
+			replaced = true
+			return nil
+		}
+
+		return dm.remove(name)
+	})
+	if replaced {
+		return nil
+	}
+	if err != nil {
+		if errors.Is(err, unix.EBUSY) {
+			return fmt.Errorf("%w: %q was still held after %d attempts over %v (%w); find the holder with `lsof /dev/mapper/%s`, `mount | grep %s` or `dmsetup info -c %s`, or schedule the removal for when it frees with `dmsetup remove --deferred %s`",
+				ErrMappingBusy, name, attempts, dmRemoveRetryBudget, err, name, name, name, name)
+		}
 		return fmt.Errorf("failed to remove device-mapper: %w", err)
 	}
 

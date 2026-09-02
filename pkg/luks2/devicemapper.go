@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/anatol/devmapper.go"
 	"golang.org/x/sys/unix"
@@ -93,29 +94,192 @@ func liveDeviceMapper() deviceMapper {
 //     an unverifiable plaintext mapping is the failure mode this whole function
 //     exists to prevent.
 func removeCreatedMapping(name, uuid string) error {
-	info, err := dm.infoByName(name)
-	if err != nil {
-		if isNoSuchDevice(err) {
-			// Already gone. The common case when devmapper's own CreateAndLoad
-			// cleaned up after a failed table load.
+	var (
+		// info is the inspection belonging to the attempt that actually
+		// removed, so the node cleanup below uses the identity it removed.
+		info *devmapper.DeviceInfo
+		// inspectErr distinguishes "could not look" from "could not remove".
+		// They send an operator to different places, so they keep different
+		// messages.
+		inspectErr error
+		// nothingToDo covers the states where the right action is to stop and
+		// report success: the target is already gone, it is no longer ours, or
+		// it was recreated as a different activation. None is an error.
+		nothingToDo bool
+		// firstDevNo pins the activation seen on the first attempt, so a
+		// recreated mapping is not mistaken for the original.
+		firstDevNo uint64
+		seenDevNo  bool
+	)
+
+	// The identity is re-confirmed before EVERY attempt, inside the retried
+	// unit. During a backoff another actor can remove our target and create a
+	// different mapping under the same name; removing THAT would be removing
+	// someone else's plaintext device, which is the exact harm the UUID check
+	// exists to prevent. Checking once outside the loop would leave the check
+	// guarding only the first of up to eight attempts.
+	//
+	// Retried, but the verdict on exhaustion is UNCHANGED. A transient udev
+	// hold no longer raises a false "may still be live" alarm -- an alarm an
+	// operator learns to ignore is worse than no alarm -- while a target that
+	// genuinely cannot be removed still fails closed, which is the contract
+	// this function exists for (#122).
+	attempts, err := retryWhileBusy(func() error {
+		current, err := dm.infoByName(name)
+		// Cleared on EVERY entry, so it only ever describes THIS attempt. It was
+		// assigned and never reset, so a transient EBUSY on one inspection
+		// survived a later attempt that inspected AND removed successfully: the
+		// switch below then reported ErrMappingStillLive for a target confirmed
+		// gone, skipped node cleanup, and told the caller a plaintext mapping
+		// might still exist. Keeping the invariant local to the loop is what
+		// makes it hold for every future attempt too.
+		inspectErr = nil
+		if err != nil {
+			if isNoSuchDevice(err) {
+				// Already gone. The common case when devmapper's own
+				// CreateAndLoad cleaned up after a failed table load, and also
+				// what a competing remover leaves behind mid-backoff.
+				nothingToDo = true
+				return nil
+			}
+			inspectErr = err
+			return err
+		}
+		if current.UUID != uuid {
+			// Not ours. Leaving it alone is the only safe action; see above.
+			nothingToDo = true
 			return nil
 		}
-		return fmt.Errorf("%w: device-mapper target %q could not be inspected after a failed unlock (%v), so it cannot be confirmed removed; check for it with: dmsetup info %s",
-			ErrMappingStillLive, name, err, name)
-	}
+		// Same volume, same name, DIFFERENT activation. The dm UUID is
+		// CRYPT-LUKS2-<header uuid>-<name> and so is identical for a mapping
+		// of the same volume recreated under the same name mid-backoff; DevNo
+		// is the only instance-ish discriminator the API offers. It narrows
+		// the window without closing it -- minors are eventually reused -- and
+		// what remains is the pre-existing inspect-then-remove race rather
+		// than anything the retry added.
+		if seenDevNo && current.DevNo != firstDevNo {
+			nothingToDo = true
+			return nil
+		}
+		firstDevNo, seenDevNo = current.DevNo, true
+		info = current
+		return dm.remove(name)
+	})
 
-	if info.UUID != uuid {
-		// Not ours. Leaving it alone is the only safe action; see above.
+	switch {
+	case nothingToDo:
 		return nil
-	}
-
-	if err := dm.remove(name); err != nil {
-		return fmt.Errorf("%w: the plaintext device-mapper target %q created by this unlock could not be removed (%v) and is STILL LIVE; close it with: luks close %s",
-			ErrMappingStillLive, name, err, name)
+	case inspectErr != nil:
+		return fmt.Errorf("%w: device-mapper target %q could not be inspected after a failed unlock (%v), so it cannot be confirmed removed; check for it with: dmsetup info %s",
+			ErrMappingStillLive, name, inspectErr, name)
+	case err != nil:
+		return fmt.Errorf("%w: the plaintext device-mapper target %q created by this unlock could not be removed after %d attempt(s) over %v (%v) and is STILL LIVE; close it with: luks close %s",
+			ErrMappingStillLive, name, attempts, dmRemoveRetryBudget, err, name)
 	}
 
 	removeMappingNodes(name, info)
 	return nil
+}
+
+// Removing a device-mapper target intermittently fails with EBUSY because
+// something holds it open for a moment after the activity that preceded the
+// close. In practice that is a process started by a udev rule scanning the
+// device it has just been told about (#122, traced from go-blockstore #45,
+// where it cost roughly one failure per full integration run).
+//
+// # The remedy is device-mapper's own, not ours
+//
+// dmsetup(8) documents this exact condition and ships a flag for it:
+//
+//	remove [--retry] ... "If an attempt to remove a device fails, perhaps
+//	because a process run from a udev rule is temporarily using the device,
+//	the --retry option will cause the operation to be retried for a few
+//	seconds before failing."
+//
+// So the diagnosis is not a guess and the budget below is anchored to "a few
+// seconds" rather than to a number that felt right.
+//
+// # Only EBUSY
+//
+// Nothing else here is transient. A device that is gone (ENXIO/ENODEV) will
+// still be gone; a refusal on permissions or a bad argument will be refused
+// again. Retrying those would spend the whole budget turning a fast, correct
+// failure into a slow one -- so they return immediately and the budget is
+// reserved for the one condition that clears itself.
+const (
+	// dmRemoveRetryBudget is the total time spent waiting for a hold to clear.
+	//
+	// It is the bound that keeps a genuine holder -- a mounted filesystem, an
+	// open fd, a stacked target -- from becoming a hang. A caller that waits
+	// three seconds and is then told precisely what is wrong is better served
+	// than one that waits indefinitely, and far better than one that fails
+	// instantly on a hold that would have cleared in 20 milliseconds.
+	dmRemoveRetryBudget = 3 * time.Second
+
+	// dmRemoveRetryInitialDelay is the first backoff, doubling thereafter.
+	//
+	// Small, because the hold this exists for is short: the common case is one
+	// sleep and one successful retry. Doubling keeps the attempt count low if
+	// it turns out not to be short, so a genuinely held device costs a handful
+	// of ioctls rather than hundreds.
+	dmRemoveRetryInitialDelay = 20 * time.Millisecond
+)
+
+// retryWait is the backoff sleep, as a seam so tests assert the retry's BUDGET
+// instead of spending it. Same idiom as dm, devDir and nodeRdev.
+//
+// A test that really slept would take a hundred times as long to assert the
+// same property, and would be flaky on a loaded runner besides.
+var retryWait = time.Sleep
+
+// retryWhileBusy runs attempt until it stops reporting EBUSY or the budget is
+// spent, and reports how many times it ran.
+//
+// # The ATTEMPT is the caller's whole unit of work, not just the removal
+//
+// That is the point of the signature, and it was a review finding rather than
+// foresight. An earlier version retried dm.remove(name) directly, with the
+// rollback's identity check left outside the loop -- so during a backoff another
+// actor could remove our target and create a DIFFERENT mapping under the same
+// name, and the next attempt would remove theirs. The single-shot code had only
+// a one-ioctl window for that; retrying by name alone widened it to the whole
+// budget. Whatever a caller must be sure of before removing has to be inside
+// the thing being retried.
+//
+// It reports the LAST error and leaves the meaning to the caller, because the
+// two callers face the same errno and owe the operator different answers: Lock
+// is an ordinary close and says the device is held (ErrMappingBusy), while
+// removeCreatedMapping is the rollback after a failed unlock and must still say
+// the plaintext target MAY STILL BE LIVE (ErrMappingStillLive).
+func retryWhileBusy(attempt func() error) (attempts int, err error) {
+	remaining := dmRemoveRetryBudget
+	delay := dmRemoveRetryInitialDelay
+
+	for {
+		attempts++
+		err = attempt()
+		if err == nil || !errors.Is(err, unix.EBUSY) {
+			return attempts, err
+		}
+		if remaining <= 0 {
+			return attempts, err
+		}
+		// The LAST wait is clipped to whatever is left, rather than the loop
+		// giving up as soon as the next doubling would overshoot.
+		//
+		// Giving up early spends 20+40+...+1280 = 2.54s of a 3s budget and then
+		// reports "over 3s" -- so a hold that would have cleared in the final
+		// 460ms still fails, and the error states a duration that was never
+		// spent. An error that overstates what was tried is the same defect as
+		// a suppression whose justification was never true: it stops the next
+		// reader checking. Caught in review of #122.
+		if delay > remaining {
+			delay = remaining
+		}
+		retryWait(delay)
+		remaining -= delay
+		delay *= 2
+	}
 }
 
 // devDir is the directory holding device nodes. It is a variable so the node

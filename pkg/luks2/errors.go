@@ -199,6 +199,25 @@ var (
 	// reported rather than assumed away.
 	ErrMappingStillLive = errors.New("plaintext device-mapper target may still be live after a failed unlock")
 
+	// ErrMappingBusy indicates that a device-mapper target could not be removed
+	// because something still holds it open, after the removal was retried to
+	// its budget.
+	//
+	// It is the ORDINARY-CLOSE answer, raised by Lock. It is deliberately not
+	// ErrMappingStillLive: that one means a plaintext target created by a
+	// FAILED unlock may exist while the caller believes nothing does, and its
+	// danger is silence. Here the caller asked for the close and is being told
+	// it did not happen, so the fact is not silent -- only the cause is, which
+	// is what this names.
+	//
+	// A transient hold is not this error. dmsetup(8) documents the same
+	// condition and retries "for a few seconds" for the same reason; by the
+	// time this is returned that window has been spent, so it means something
+	// genuinely holds the device -- a mounted filesystem, an open descriptor, a
+	// stacked target. The message carries how to find it, and the underlying
+	// EBUSY stays reachable through the chain.
+	ErrMappingBusy = errors.New("device-mapper target is held open and could not be removed")
+
 	// ErrProtectedMemory indicates that key material could not be placed in, or
 	// read back from, protected memory, and that the operation was therefore
 	// REFUSED rather than completed with the material on the ordinary heap.
