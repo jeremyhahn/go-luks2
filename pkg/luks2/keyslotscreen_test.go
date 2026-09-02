@@ -327,91 +327,16 @@ func restoreVolume(t *testing.T, name string, golden []byte) string {
 	return device
 }
 
-// cheapenDigests rewrites a fixture's digests to a low iteration count,
-// re-derived from the volume's own master key so they still verify.
-//
-// This is the FIXTURE COST, and it is not the keyslot KDF that
-// formatWithLibrary already cheapens. createDigest hardcodes
-// DigestIterations -- 600,000 rounds of PBKDF2-SHA512 -- and verifyMasterKey
-// pays it on EVERY unlock. Measured on this workstation: Format 438ms, a single
-// unlock 295ms, essentially all of it the digest. Under -race on a loaded CI
-// runner that is seconds per unlock, and the guard tables here run dozens of
-// them: TestEveryKeyslotRemovalPathRefusesToDestroyTheLastUsableKeyslot alone
-// measured 548s on the runner and took the package past Go's 30-minute timeout.
-//
-// Cheapening it is legitimate HERE and would not be everywhere. What these
-// tables assert is refusal logic on the removal paths, and the guard's verdict
-// does not depend on how many rounds a digest took -- the tests do not read the
-// iteration count, and the one shape that cares sets its own value after this
-// runs. A fixture whose cost IS the property under test keeps its real
-// parameters; see kdfcost_test.go, which is left alone.
-//
-// It costs ONE real unlock, at golden-build time, and every unlock afterwards is
-// cheap -- and the goldens are built once per shape and stamped onto each case,
-// so that one unlock is amortized over four removal paths.
-//
-// The digest VALUE is a public header field, not a secret, so deriving it and
-// encoding it is not a secret leaving protected memory. The master key it is
-// derived FROM is borrowed in place and never copied out.
-func cheapenDigests(t *testing.T, device string) {
-	t.Helper()
-
-	hdr, metadata, err := ReadHeader(device)
-	if err != nil {
-		t.Fatalf("ReadHeader failed: %v", err)
-	}
-
-	masterKey, err := getMasterKey(device, []byte(conformancePassphrase), metadata)
-	if err != nil {
-		t.Fatalf("the fixture does not open, so its digests cannot be re-derived: %v", err)
-	}
-	defer masterKey.Destroy()
-
-	const cheapIterations = 1000
-	for id, digest := range metadata.Digests {
-		iterations := cheapIterations
-		kdf := &KDF{Type: digest.Type, Hash: digest.Hash, Salt: digest.Salt, Iterations: &iterations}
-
-		// Derived exactly as verifyMasterKey will re-derive it, to the length
-		// already stored, so the rewritten digest verifies by the same route
-		// rather than by one this helper invented.
-		expected, err := decodeBase64(digest.Digest)
-		if err != nil {
-			t.Fatalf("digest %s is not base64: %v", id, err)
-		}
-		derived, err := deriveKeySecret(masterKey, kdf, len(expected))
-		if err != nil {
-			t.Fatalf("failed to re-derive digest %s: %v", id, err)
-		}
-		if err := borrowSecret("cheapened digest", derived, func(b []byte) error {
-			digest.Digest = encodeBase64(b)
-			return nil
-		}); err != nil {
-			derived.Destroy()
-			t.Fatalf("failed to read back digest %s: %v", id, err)
-		}
-		derived.Destroy()
-		digest.Iterations = cheapIterations
-	}
-
-	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
-		t.Fatalf("failed to write the cheapened digests: %v", err)
-	}
-
-	// The fixture must still OPEN. Without this, a mistake here would silently
-	// produce volumes that fail for a reason unrelated to what the tables test,
-	// and every table would go red for the wrong cause.
-	if err := TestKey(device, []byte(conformancePassphrase)); err != nil {
-		t.Fatalf("the fixture stopped opening after its digests were cheapened: %v", err)
-	}
-}
+// The per-fixture digest cheapening that used to live here is GONE: it is baked
+// into the shared golden now (cheapenGoldenDigests, conformance_test.go), so
+// every fixture in the package inherits it and the expensive unlock it costs
+// is paid once per process rather than once per shape.
 
 func buildVolumeWithSibling(t *testing.T, name string, damage func(*LUKS2Metadata, *Keyslot)) string {
 	t.Helper()
 
 	path := newImage(t, name)
 	formatWithLibrary(t, path)
-	cheapenDigests(t, path)
 
 	hdr, metadata, err := ReadHeader(path)
 	if err != nil {

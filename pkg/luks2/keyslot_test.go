@@ -417,7 +417,6 @@ func overlappingSiblingVolume(t *testing.T, name string, shift int64) (device st
 
 	device = newImage(t, name)
 	formatWithLibrary(t, device)
-	cheapenDigests(t, device)
 
 	hdr, metadata, err := ReadHeader(device)
 	if err != nil {

@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -111,12 +112,10 @@ func newImage(t *testing.T, name string) string {
 	return path
 }
 
-// formatWithLibrary formats an image with this package, using the parameters
-// the consuming project pins.
-func formatWithLibrary(t *testing.T, path string) {
-	t.Helper()
-
-	err := Format(FormatOptions{
+// standardFormatOptions is the one configuration 51 call sites format with. It
+// is a function rather than a var so no test can mutate the shared value.
+func standardFormatOptions(path string) FormatOptions {
+	return FormatOptions{
 		Device:        path,
 		Passphrase:    []byte(conformancePassphrase),
 		Cipher:        "aes",
@@ -125,10 +124,114 @@ func formatWithLibrary(t *testing.T, path string) {
 		HashAlgo:      "sha512",
 		SectorSize:    512,
 		KDFType:       KDFTypePBKDF2,
-		PBKDFIterTime: 1, // keep the keyslot KDF cheap; the digest cost is fixed
+		PBKDFIterTime: 1, // keep the keyslot KDF cheap
+	}
+}
+
+// formatWithLibrary gives a test a container formatted with the parameters the
+// consuming project pins.
+//
+// It FORMATS ONCE PER PROCESS and stamps the resulting bytes thereafter. Every
+// one of the 51 call sites asks for the identical configuration, and Format
+// costs ~440ms, so the package was paying that repeatedly -- several call sites
+// are inside table loops, which is how two tests reached 25-29s each.
+//
+// The bytes are produced by a REAL Format, so what is stamped is a genuine
+// container and not a hand-built approximation. What each caller loses is that
+// Format does not RUN for them: they no longer get a fresh random UUID and
+// salts. Nothing in the package depends on two fixtures differing -- checked
+// before making this change, not assumed -- and a test that needs Format's own
+// behavior calls Format directly rather than coming through here.
+//
+// The failure is carried out of the sync.Once rather than reported inside it: a
+// t.Fatalf in there would abort whichever test happened to be first, which is
+// not necessarily the test that would have failed.
+func formatWithLibrary(t *testing.T, path string) {
+	t.Helper()
+
+	goldenStandardOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "luks2-golden-*")
+		if err != nil {
+			goldenStandardErr = err
+			return
+		}
+		defer func() { _ = os.RemoveAll(dir) }()
+
+		seed := filepath.Join(dir, "golden.img")
+		f, err := os.Create(seed) // #nosec G304 -- path is under a temp dir this function made
+		if err != nil {
+			goldenStandardErr = err
+			return
+		}
+		if err := f.Truncate(conformanceImageSize); err != nil {
+			_ = f.Close()
+			goldenStandardErr = err
+			return
+		}
+		if err := f.Close(); err != nil {
+			goldenStandardErr = err
+			return
+		}
+		if err := Format(standardFormatOptions(seed)); err != nil {
+			goldenStandardErr = err
+			return
+		}
+		if err := cheapenGoldenDigests(seed); err != nil {
+			goldenStandardErr = err
+			return
+		}
+		goldenStandardBytes, goldenStandardErr = readImagePrefix(seed)
 	})
+
+	if goldenStandardErr != nil {
+		t.Fatalf("Format failed while building the shared golden container: %v", goldenStandardErr)
+	}
+	stampImagePrefix(t, path, goldenStandardBytes)
+}
+
+var (
+	goldenStandardOnce  sync.Once
+	goldenStandardBytes []byte
+	goldenStandardErr   error
+)
+
+// goldenPrefixBytes is how much of a formatted image is captured and stamped.
+//
+// Format writes the two header copies and keyslot 0's area, all inside the
+// first ~550 KiB; everything past that is the zeroed data segment it never
+// touches. 2 MiB covers it with room for the multi-keyslot fixtures built on
+// top, and copying the full 64 MiB image instead would reintroduce as cost what
+// the memoization just removed.
+const goldenPrefixBytes = 2 << 20
+
+func readImagePrefix(path string) ([]byte, error) {
+	f, err := os.Open(path) // #nosec G304 -- test fixture path
 	if err != nil {
-		t.Fatalf("Format failed: %v", err)
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	buf := make([]byte, goldenPrefixBytes)
+	if _, err := f.ReadAt(buf, 0); err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
+
+func stampImagePrefix(t *testing.T, path string, golden []byte) {
+	t.Helper()
+
+	f, err := os.OpenFile(path, os.O_RDWR, 0600) // #nosec G304 -- test fixture path
+	if err != nil {
+		t.Fatalf("failed to open %s: %v", path, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if _, err := f.WriteAt(golden, 0); err != nil {
+		t.Fatalf("failed to stamp the golden container onto %s: %v", path, err)
+	}
+	if err := f.Sync(); err != nil {
+		t.Fatalf("failed to sync %s: %v", path, err)
 	}
 }
 
@@ -795,4 +898,78 @@ func TestEnsureRequiredObjects(t *testing.T) {
 			t.Fatalf("ensureRequiredObjects modified populated maps: %+v", m)
 		}
 	})
+}
+
+// cheapenGoldenDigests rewrites the shared golden's digests to a low iteration
+// count, re-derived from its own master key so they still verify.
+//
+// This is the OTHER half of the fixture cost and it is larger than Format.
+// createDigest hardcodes DigestIterations -- 600,000 rounds of PBKDF2-SHA512 --
+// and verifyMasterKey pays it on EVERY unlock, so every test that opens a
+// fixture paid ~295ms that has nothing to do with what it asserts. Format is
+// paid once per fixture; the digest is paid once per unlock, and unlocks
+// outnumber fixtures across this package.
+//
+// It runs ONCE, inside the same sync.Once that builds the golden, so the single
+// expensive unlock it needs is amortized over every test in the package.
+//
+// Cheapening is safe here and would not be everywhere. Nothing in the package
+// asserts a FIXTURE's digest iteration count -- checked, not assumed:
+// TestSecurityConstants asserts the CONSTANT DigestIterations, which this does
+// not touch, and crypto_helpers_test compares a digest to its own KDF within one
+// createDigest call. A test whose subject IS the digest cost builds its own
+// digest (kdfcost_test.go) and is unaffected.
+//
+// The digest value is a public header field, not a secret. The master key it is
+// derived from is borrowed in place and never copied out.
+func cheapenGoldenDigests(device string) error {
+	hdr, metadata, err := ReadHeader(device)
+	if err != nil {
+		return err
+	}
+
+	masterKey, err := getMasterKey(device, []byte(conformancePassphrase), metadata)
+	if err != nil {
+		return fmt.Errorf("the golden container does not open: %w", err)
+	}
+	defer masterKey.Destroy()
+
+	const cheapIterations = 1000
+	for _, digest := range metadata.Digests {
+		iterations := cheapIterations
+		kdf := &KDF{Type: digest.Type, Hash: digest.Hash, Salt: digest.Salt, Iterations: &iterations}
+
+		// Derived exactly as verifyMasterKey will re-derive it, to the length
+		// already stored, so the rewritten digest verifies by the route
+		// production takes rather than one this helper invented.
+		expected, err := decodeBase64(digest.Digest)
+		if err != nil {
+			return err
+		}
+		derived, err := deriveKeySecret(masterKey, kdf, len(expected))
+		if err != nil {
+			return err
+		}
+		err = borrowSecret("golden digest", derived, func(b []byte) error {
+			digest.Digest = encodeBase64(b)
+			return nil
+		})
+		derived.Destroy()
+		if err != nil {
+			return err
+		}
+		digest.Iterations = cheapIterations
+	}
+
+	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
+		return err
+	}
+
+	// The golden must still OPEN. Without this, a mistake here would hand every
+	// test in the package a container that fails for a reason unrelated to what
+	// it asserts, and the whole suite would go red for the wrong cause.
+	if err := TestKey(device, []byte(conformancePassphrase)); err != nil {
+		return fmt.Errorf("the golden container stopped opening after its digests were cheapened: %w", err)
+	}
+	return nil
 }
