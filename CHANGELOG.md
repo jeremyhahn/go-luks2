@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0-alpha] - 2026-09-03
+
+MINOR rather than PATCH: this release both **removes** two exported error
+sentinels and **adds** exported API. Pre-1.0, MINOR is where breakage lives,
+and announcing a breaking change in a changelog without bumping the minor is
+not announcing it. The removals are detailed under *Removed* below; no
+repository in the portfolio references either symbol, so nothing outside this
+one has to change to adopt the release.
+
 ### Fixed
 
 - **`Lock` no longer fails on a transient device-mapper `EBUSY` (#122).**
