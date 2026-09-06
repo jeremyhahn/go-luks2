@@ -43,19 +43,10 @@
 name: Claude Review
 
 on:
-  # Manual dispatch only — the pull_request trigger is intentionally absent so
-  # this review does not run automatically, and so it registers no status
-  # context. Restore it here to re-enable.
-  #
-  # pr_number is REQUIRED: a dispatched run carries no pull_request event
-  # payload, so without it PR_NUM resolves to the empty string and the review
-  # script has no target.
+  # Disabled 2026-09-06 (owner ruling): gpu-host is the only review host and
+  # the `claude` lane is stopped, so a pull_request trigger would queue a job
+  # with no runner. Manual dispatch only.
   workflow_dispatch:
-    inputs:
-      pr_number:
-        description: "Pull request number to review"
-        required: true
-        type: string
 
 jobs:
   review:
