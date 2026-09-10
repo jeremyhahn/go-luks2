@@ -272,7 +272,28 @@ def comment_starts_at(line):
             quote = c
         elif c == "#":
             return i
-        elif c == "/" and i + 1 < len(line) and line[i + 1] == "/":
+        elif (c == "/" and i + 1 < len(line) and line[i + 1] == "/"
+              and not (i > 0 and line[i - 1] in ":/")):
+            # A URL's slashes are NOT a comment. Without this exclusion
+            # everything after a scheme separator on the line was discarded
+            # before the patterns ran, so a forbidden command hid behind any
+            # URL that preceded it:
+            #
+            #     curl http://example.com/x ; <forbidden command>   -> passed
+            #     echo hi                   ; <forbidden command>   -> flagged
+            #
+            # Same command, invisible behind a URL. The `//` rule is correct
+            # for Go source and stays; it was made quote-aware after a command
+            # was found hiding inside a string, and that fix addressed the
+            # QUOTED case while leaving this one, which needs no string at all.
+            #
+            # BOTH characters are required, and the `/` is the one that is easy
+            # to miss. Excluding only `:` fixes the two-slash form and still
+            # truncates a three-slash one -- `unix:///var/run/...` puts a `/`
+            # rather than a `:` before the pair that matches, so the cut moves
+            # one character instead of going away. Measured: the first version
+            # of this exclusion passed the two-slash case and still failed the
+            # three-slash one.
             return i
         i += 1
     return len(line)

@@ -331,6 +331,33 @@ d="$(newrepo devq6)"
 fixture ok2.sh "${LOSETUP} -d \"\$dev\"   # scoped, with a trailing comment"
 check accept no-global-device-cleanup.sh "a scoped call with a trailing comment"
 
+echo "== device guard: an UNQUOTED URL does not hide the command after it =="
+# The quote-aware fix above addressed the QUOTED case and left this one, which
+# needs no string at all: `//` was treated as a comment start wherever it
+# appeared, so everything after a scheme separator was discarded before the
+# patterns ran. Measured on main before the fix -- the first case here returned
+# rc 0 while the identical command with `echo hi` in place of the URL returned
+# rc 1. Same command, invisible behind a URL.
+d="$(newrepo devurl1)"
+fixture teardown.sh "curl http://example.com/x ; ${LOSETUP} -D"
+check reject no-global-device-cleanup.sh "a forbidden command after an http:// URL"
+# The THREE-slash form is a separate case and is why the exclusion tests two
+# characters rather than one. Excluding only `:` fixes `http://` and still
+# truncates here, because `unix:///` puts a `/` before the matching pair -- the
+# cut moves one character instead of going away.
+d="$(newrepo devurl2)"
+fixture teardown.sh "docker --host unix:///var/run/docker.sock ps ; ${LOSETUP} -D"
+check reject no-global-device-cleanup.sh "a forbidden command after a unix:/// path"
+# Both accept cases are the ones that matter: they prove the exclusion did not
+# simply switch comment stripping off, which would fail the tree on every file
+# that explains why these commands are banned -- this file included.
+d="$(newrepo devurl3)"
+fixture teardown.go "x := 1 // see http://example.com -- never run ${LOSETUP} -D"
+check accept no-global-device-cleanup.sh "a genuine // comment containing a URL still hides prose"
+d="$(newrepo devurl4)"
+fixture teardown.sh "# see http://example.com -- the old code ran ${DMSETUP} remove_all"
+check accept no-global-device-cleanup.sh "a genuine # comment containing a URL still hides prose"
+
 echo "== device guard: fail-closed =="
 d="$(newrepo devfc1)"
 fixture 'a file with spaces.sh' "${LOSETUP} -D"
