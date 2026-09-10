@@ -1,13 +1,13 @@
-# code-review-template: v19 — automated peer review on EVERY pull request.
+# code-review-template: v20 — automated peer review on EVERY pull request.
 # v2 gated the job on a `code-review` label and could skip itself green;
 # see the note on the job below. v4 added a guard step and a concurrency
 # change; v5 keeps the guard and reverts the concurrency — measured, below.
 #
-# v6 makes three changes, all about a verdict being
+# v6 (automatethethings#127) makes three changes, all about a verdict being
 # real rather than about how the review is produced:
 #   - the guard checks `.merged`/`.state` from the read it already makes, so a
-#     closed PR costs no GPU. That check used to live in the REVIEWER PROMPT,
-#     where it could only run after the 27B model had loaded.
+#     closed PR costs no GPU. That check used to live in review-agent.md, where
+#     it could only run after the 27B model had loaded.
 #   - the guard IGNORES PENDING reviews when it looks for a standing verdict. A
 #     draft is not an approval and not a rejection; treating it as one made two
 #     heads permanently unreviewable.
@@ -21,14 +21,14 @@
 # (which did not). They differed in the one line deciding whether an
 # unreviewed PR can merge, and a drift check comparing STAMPS reports two
 # such files as in agreement. This file is now built FROM the deployed
-# copies rather than from its own previous contents.
+# copies rather than from its own previous contents. See automatethethings#88.
 # Source of truth: software/templates/github-actions/opencode-review.yml in
 # the company repo -- INTENT, not a measurement. On 2026-09-07 this file was
 # the stalest copy of itself in the fleet while saying exactly this line.
-# Before editing it, diff it against a deployed copy.
+# Before editing it, diff it against a deployed copy (automatethethings#89).
 # Gitea-only by design.
 #
-# ONE REVIEWER: opencode, running a LOCAL model on the review host's own GPU. Owner ruling
+# ONE REVIEWER: opencode, running a LOCAL model on gpu-host's GPU. Owner ruling
 # 2026-09-06, in his words: "i dont want any CODEX tokens minted or any api
 # usage for frontier models. when the codex subscription is expired then we
 # dont use it! we use opencode with whatever model is specified in the gitea
@@ -46,7 +46,7 @@
 # outlived all three facts and still said the default was qwen3.6 — a comment
 # nobody had reason to distrust, describing a step that no longer existed, in a
 # file whose executable line was already correct. That is the qwen3.6 incident
-# repeating as documentation.
+# repeating as documentation; see automatethethings#127.
 #
 # WHY THE LABEL MAP WENT, since that part is worth keeping: `model:qwen3.6`
 # selected a STOCK tag carrying temperature 0.1 and num_ctx 65536 — Qwen
@@ -104,7 +104,7 @@ on:
 # v5 therefore reverts to the v3 concurrency and keeps the guard. The transient
 # red is accepted: it is self-healing (80s on the canary) and is not fixable at
 # the workflow level. What IS fixable -- a wasted duplicate review, and a
-# duplicate overwriting a verdict -- the guard fixes.
+# duplicate overwriting a verdict -- the guard fixes. automatethethings#94.
 concurrency:
   group: code-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
@@ -144,8 +144,8 @@ jobs:
     #
     # A single job with an expression here avoids that, and Gitea 1.27.1 DOES
     # evaluate it -- verified rather than assumed, because this file already
-    # records Gitea ignoring `cancel-in-progress` as specified. Measured on a
-    # throwaway probe branch cut for this question: the jobs API reported
+    # records Gitea ignoring `cancel-in-progress` as specified. Probe on
+    # automatethethings branch probe/runs-on-expression: the jobs API reported
     # `"labels": ["ubuntu-latest"]` for `runs-on: ${{ ... || 'ubuntu-latest' }}`
     # and the job ran. `contains()` over `labels.*.name` compares ARRAY ELEMENTS,
     # so this is an exact whole-label test, not a substring one (#113).
@@ -161,10 +161,32 @@ jobs:
     # element-equality cannot see. join() is implemented here -- verified by
     # probe, run 15378, not assumed.
     #
-    # `agent:claude` deliberately routes to code-review and FAILS THERE with a
-    # named error, rather than to a `claude` label no runner will ever claim.
-    # A job that fails loudly beats one that queues invisibly.
-    runs-on: ${{ (contains(github.event.pull_request.labels.*.name, 'agent:codex') || contains(github.event.pull_request.labels.*.name, 'model:codex') || contains(join(github.event.pull_request.labels.*.name, ','), 'model:codex:')) && 'codex' || 'code-review' }}
+    # `agent:claude` now ROUTES TO A REAL RUNNER. Until 2026-09-10 it deliberately
+    # landed on code-review and failed there with a named error, because the
+    # `omega-claude` registration pointed at 198.51.100.91:3001 -- the dead
+    # pre-move Gitea -- so a `claude` label was one nothing would ever claim.
+    # Owner, 2026-09-10: "agent:claude should have somewhere to go, it should be
+    # going to a claude agent just like codex is going to the codex agent!"
+    #
+    # A MODEL LABEL ALONE ALSO ROUTES, BY FAMILY PREFIX -- never by an enumerated
+    # list of model names. Owner requirement, same day: opencode "shouldnt be
+    # running when a model is tagged with codex or claude agents or models". A bare
+    # `model:gpt-6` therefore goes to codex and `model:fable-5.1` to claude,
+    # and `model:gpt-7` will route the day it ships without editing 25 workflows.
+    # Adding a FAMILY is the only edit this line should ever need; families change
+    # far more rarely than models, which is the whole point of matching prefixes.
+    #
+    # An explicit `agent:*` is tested FIRST, so it always beats an inferred family:
+    # `agent:opencode` + `model:gpt-6` runs opencode and fails in opencode's own
+    # validation with a message about providers, rather than being silently
+    # rerouted to an engine the labels did not ask for.
+    #
+    # THE TWO EXPRESSIONS -- here and ROUTED_AGENT below -- are generated from one
+    # template and differ in exactly one token ('code-review' is the runner LABEL,
+    # 'opencode' the agent NAME). They must agree; the job asserts it at runtime
+    # rather than trusting that, because a router and a parser that disagree would
+    # otherwise run the wrong CLI on the wrong machine.
+    runs-on: ${{ contains(github.event.pull_request.labels.*.name, 'agent:codex') && 'codex' || contains(github.event.pull_request.labels.*.name, 'agent:claude') && 'claude' || contains(github.event.pull_request.labels.*.name, 'agent:opencode') && 'code-review' || contains(github.event.pull_request.labels.*.name, 'model:codex') && 'codex' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:codex:') && 'codex' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:gpt-') && 'codex' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:o3') && 'codex' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:o4') && 'codex' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:opus') && 'claude' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:sonnet') && 'claude' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:haiku') && 'claude' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:fable') && 'claude' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:claude-') && 'claude' || 'code-review' }}
     timeout-minutes: 45
     steps:
       # Runs BEFORE checkout so a stale or duplicate run costs a few API calls
@@ -209,7 +231,7 @@ jobs:
 
           # A PR that is merged or closed cannot receive a review: Gitea answers
           # the POST with HTTP 422, so everything spent getting there is thrown
-          # away. This was checked by the MODEL, in step 2 of the reviewer prompt,
+          # away. This was checked by the MODEL, in step 2 of review-agent.md,
           # which means it was checked after the container started, the 27B model
           # loaded and the prompt ran -- 31 GPU-minutes in three days by the
           # prompt's own count. It is a field of the read above. Check it here.
@@ -235,9 +257,9 @@ jobs:
           # Two steps read `.draft` and I added the output to the wrong one. The
           # confirmation step keeps its OWN read deliberately -- a gate should
           # re-derive the fact it enforces rather than trust an earlier step's
-          # output. Found by codex on a live review, and now also caught
-          # mechanically: the shared workflow-lint step checks that every
-          # steps.X.outputs.Y read has a matching write in step X.
+          # output. Found by codex on a live review; see automatethethings#127 and
+          # software/scripts/check-workflow-outputs.py, which now checks
+          # mechanically that every steps.X.outputs.Y read has a write in step X.
           echo "is_draft=$(printf '%s' "$pr" | jq -r '.draft // false')" >> "$GITHUB_OUTPUT"
 
           if [ "$merged" = "true" ] || [ "$pr_state" != "open" ]; then
@@ -373,7 +395,7 @@ jobs:
         if: github.server_url != 'https://github.com' && steps.guard.outputs.skip == ''
         env:
           LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
-          ROUTED_AGENT: ${{ (contains(github.event.pull_request.labels.*.name, 'agent:codex') || contains(github.event.pull_request.labels.*.name, 'model:codex') || contains(join(github.event.pull_request.labels.*.name, ','), 'model:codex:')) && 'codex' || 'opencode' }}
+          ROUTED_AGENT: ${{ contains(github.event.pull_request.labels.*.name, 'agent:codex') && 'codex' || contains(github.event.pull_request.labels.*.name, 'agent:claude') && 'claude' || contains(github.event.pull_request.labels.*.name, 'agent:opencode') && 'opencode' || contains(github.event.pull_request.labels.*.name, 'model:codex') && 'codex' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:codex:') && 'codex' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:gpt-') && 'codex' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:o3') && 'codex' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:o4') && 'codex' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:opus') && 'claude' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:sonnet') && 'claude' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:haiku') && 'claude' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:fable') && 'claude' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:claude-') && 'claude' || 'opencode' }}
         run: |
           set -euo pipefail
 
@@ -397,20 +419,7 @@ jobs:
 
           OPENCODE_DEFAULT_MODEL="review-q8"
           CODEX_DEFAULT_MODEL="gpt-5.5"
-          # THE ENDPOINT IS THE RUNNER IMAGE'S CONTRACT, not this file's.
-          # `OLLAMA_URL` is exported by the review image itself, so the literal
-          # that used to sit here as a fallback could never be reached -- and a
-          # publicly mirrored workflow has no business naming an address on a
-          # private network that no outside reader can route to anyway.
-          #
-          # FAIL CLOSED rather than substituting a plausible default. If a
-          # future image stops exporting it, the wrong answer is to guess
-          # loopback and validate models against an endpoint that is not the
-          # one the reviewer will use: that fails 20 minutes later, inside the
-          # model, which is the exact failure the validation below exists to
-          # prevent.
-          OLLAMA="${OLLAMA_URL:-}"
-          [ -n "$OLLAMA" ] || { echo "::error::OLLAMA_URL is not set in this runner's environment."; echo "::error::The review image is expected to export it; without it no model can be validated."; exit 1; }
+          OLLAMA="${OLLAMA_URL:-http://198.51.100.91:11434}"
 
           ollama_models() { curl -sS --max-time 10 "$OLLAMA/api/tags" | jq -r '.models[].name' | sort -u; }
           label_exists() { printf '%s' "$LABELS" | jq -e --arg n "$1" 'index($n) != null' >/dev/null 2>&1; }
@@ -445,6 +454,41 @@ jobs:
             esac
           fi
 
+          # --- infer the agent from the model FAMILY when no agent label is given -------
+          #
+          # Owner requirement 2026-09-10: opencode "shouldnt be running when a model is
+          # tagged with codex or claude agents or models. it should only run if we dont
+          # have any agent or model labels or unless the labels call out opencode with
+          # models specifically."
+          #
+          # Resolved by FAMILY PREFIX, never by an enumerated model list, so a model
+          # released tomorrow routes without a workflow edit. This table and the runs-on
+          # expression must agree -- the ROUTED_AGENT check above is what catches it if
+          # they ever stop agreeing.
+          #
+          # An explicit agent: label always wins; inference only fills a blank.
+          if [ -z "$agent" ] && [ -n "$model" ]; then
+            # ONLY the two hosted families are enumerated; everything else falls to
+            # opencode, which then validates the name against the GPU host's LIVE tag
+            # list and errors with the actual choices if it is wrong.
+            #
+            # A first version of this listed opencode's families too (qwen*, llama*,
+            # deepseek*, ...) and refused anything unmatched. Testing it rejected
+            # `model:GLM-4.5-Air` -- a model the GPU host is serving right now -- which
+            # is the same trap the codex branch refuses: an enumeration that has to be
+            # edited in 25 files whenever the fleet gains a model. Inverting it also
+            # makes agreement with the runs-on expression STRUCTURAL rather than two
+            # tables kept in sync by hand, since that expression falls through to
+            # opencode for exactly the names this falls through on.
+            case "$model" in
+              gpt-*|o3*|o4*)                        agent=codex ;;
+              opus*|sonnet*|haiku*|fable*|claude-*)  agent=claude ;;
+              *)                                     agent=opencode ;;
+            esac
+            echo "No agent: label; inferred agent '$agent' from the family of model '$model'."
+          fi
+
+          # No agent AND no model label at all -- the fleet default.
           agent=${agent:-opencode}
 
           # --- the router and the parser must agree -------------------------------------
@@ -465,6 +509,44 @@ jobs:
               model=${model:-$OPENCODE_DEFAULT_MODEL}
               avail=$(ollama_models || true)
               [ -n "$avail" ] || { echo "::error::could not read the model list from $OLLAMA."; echo "::error::Refusing to run: an unvalidated model fails 20 minutes later inside the reviewer."; exit 1; }
+
+              # FRIENDLY NAME -> CONCRETE TAG. The owner asks for `model:qwen3.8`, and
+              # 2026-09-10 that label resolved to NOTHING: ollama carries the family as
+              # `qwen3.8:27b-q8_0`/`-bf16`/`-q4_K_M`, so an exact-match check rejected the
+              # one name a person would actually write, and the message blamed the label.
+              #
+              # A bare family name maps to the REVIEW-TUNED build, not the raw weights.
+              # The review-* tags are the same 27B weights wrapped by
+              # infra/gpu/models/review.Modelfile, which fixes the thinking-mode
+              # parameters the reviewer was measured with; the raw tag would silently
+              # review at different settings. Ask for a raw tag by its full name and it
+              # still passes through untouched.
+              case "$model" in
+                qwen3.8|qwen3.8:q8|qwen-3.8|qwen3.8:27b-q8)   alias_to=review-q8 ;;
+                qwen3.8:bf16|qwen3.8:27b-bf16-review)          alias_to=review-bf16 ;;
+                qwen3.8:q4|qwen3.8:q4_K_M)                     alias_to=review-q4_K_M ;;
+                *)                                             alias_to="" ;;
+              esac
+              if [ -n "$alias_to" ] && printf '%s\n' "$avail" | grep -qx "${alias_to}\(:latest\)\?"; then
+                echo "Model '$model' resolves to the review-tuned build '$alias_to'."
+                model="$alias_to"
+              elif ! printf '%s\n' "$avail" | grep -qx "${model}\(:latest\)\?"; then
+                # UNIQUE PREFIX, or nothing. `model:llama3.3` matches both `llama3.3:70b`
+                # and `llama3.3:70b-32k`, and picking either would be a coin toss that
+                # reads like a decision -- so ambiguity is an error that names the
+                # candidates, and only a single match is accepted.
+                matches=$(printf '%s\n' "$avail" | grep "^${model}:" || true)
+                n_match=$(printf '%s' "$matches" | grep -c . || true)
+                if [ "$n_match" -eq 1 ]; then
+                  echo "Model '$model' resolves to the only tag in its family: '$matches'."
+                  model="$matches"
+                elif [ "$n_match" -gt 1 ]; then
+                  echo "::error::model '$model' is ambiguous -- $n_match tags share that prefix:"
+                  printf '%s\n' "$matches" | sed 's/^/::error::  /'
+                  echo "::error::Name one exactly, so the verdict can be attributed to a model."
+                  exit 1
+                fi
+              fi
               if ! printf '%s\n' "$avail" | grep -qx "${model}\(:latest\)\?"; then
                 echo "::error::agent opencode has no provider configured for model '$model'."
                 echo "::error::Its only configured provider is ollama, which offers:"
@@ -544,14 +626,38 @@ jobs:
               echo "Reviewer: agent codex driving $resolved at $effort reasoning effort."
               ;;
             claude)
-              echo "::error::agent claude is not available: no claude runner is registered."
-              echo "::error::The registered review runner labels are code-review (opencode) and"
-              echo "::error::codex (codex). Failing here rather than queueing forever on a"
-              echo "::error::runner label that nothing will ever claim."
-              exit 1 ;;
+              # Aliases resolve to current release ids; anything already spelled
+              # `claude-*` passes straight through, so a model released tomorrow works
+              # without an edit here -- same reasoning as the codex branch below.
+              #
+              # THE FLOOR IS NOT THIS FILE'S RULE. conventions/model-usage.md, which the
+              # owner set, says substantive work never runs below Opus 5 and that Haiku
+              # and stale versions are prohibited. A code review is substantive, so a
+              # below-floor label is refused HERE, loudly, instead of quietly producing a
+              # cheaper verdict that reads exactly like a real one.
+              case "${model:-}" in
+                ""|opus|opus-5|claude-opus-5)                 resolved=claude-opus-5 ;;
+                fable|fable-5.1|fable-5-1|claude-fable-5-1)   resolved=claude-fable-5-1 ;;
+                sonnet|sonnet-5|claude-sonnet-5)
+                  echo "::error::model '$model' is below the Opus 5 floor for review work."
+                  echo "::error::conventions/model-usage.md reserves Sonnet for quick, trivial,"
+                  echo "::error::mechanical tasks; judging a pull request is not one. Use"
+                  echo "::error::model:opus or model:fable-5.1, or change the convention first."
+                  exit 1 ;;
+                haiku*|claude-haiku*)
+                  echo "::error::model '$model' is prohibited by conventions/model-usage.md."
+                  exit 1 ;;
+                claude-*)                                     resolved="$model" ;;
+                *)
+                  echo "::error::agent claude does not recognise model '$model'."
+                  echo "::error::Known: opus (default), fable-5.1, or any full claude-* id."
+                  exit 1 ;;
+              esac
+              echo "Reviewer: agent claude driving $resolved, effort $effort."
+              ;;
             *)
               echo "::error::unknown agent '$agent' (from label 'agent:$agent')."
-              echo "::error::Known agents: opencode, codex. (claude is defined but has no runner.)"
+              echo "::error::Known agents: opencode, codex, claude."
               exit 1 ;;
           esac
 
@@ -632,8 +738,8 @@ jobs:
           # what `/pulls/{n}/files` reports. Verified on go-xkms#452 and on two
           # PRs whose base is not `main`.
           #
-          # FAIL CLOSED. The reviewer prompt no longer tells the model how to derive
-          # a diff, so a missing one would mean reviewing blind or silently going
+          # FAIL CLOSED. review-agent.md no longer tells the model how to derive a
+          # diff, so a missing one would mean reviewing blind or silently going
           # back to git merge-base -- exactly the cost this removes. An
           # unreadable diff is not a degraded review, it is no review.
           # INSIDE THE WORKSPACE, not /tmp. Two engines now read this file and
@@ -700,23 +806,72 @@ jobs:
           - $draft_fact
           "
 
-          # THE PROMPT IS AN ASSET OF THE RUNNER IMAGE, exported as
-          # `REVIEW_PROMPT` by the image that also installs it. It is not
-          # carried in this repository, so this file names no path on a private
-          # machine -- and, being a deployment detail, it would be wrong here
-          # even if disclosure were not a concern.
+          # THE CLAUDE AGENT'S CREDENTIAL, resolved through the broker baked into the
+          # image (/opt/review/agent-account.sh). Five Claude subscriptions back this
+          # agent; which one is healthy, and which are parked on a limit, is the
+          # broker's job and not this workflow's -- otherwise limit handling would
+          # exist in 25 diverging copies.
           #
-          # CHECKED BEFORE THE MODEL LOADS, not after. An unset or unreadable
-          # prompt inside the command substitution below expands to the empty
-          # string and the reviewer runs with the FACTS block alone -- a review
-          # with no instructions, which produces a plausible-looking verdict
-          # from a model that was never told what to check. That is worse than
-          # no review, because it is indistinguishable from one.
-          [ -n "${REVIEW_PROMPT:-}" ] || { echo "::error::REVIEW_PROMPT is not set in this runner's environment."; echo "::error::The review image is expected to export it, naming the reviewer prompt it installs."; exit 1; }
-          [ -r "$REVIEW_PROMPT" ] || { echo "::error::the reviewer prompt named by REVIEW_PROMPT is not readable on this runner."; exit 1; }
-          [ -s "$REVIEW_PROMPT" ] || { echo "::error::the reviewer prompt named by REVIEW_PROMPT is empty."; exit 1; }
+          # SUBSCRIPTION AUTH, NEVER AN API KEY (owner's standing rule). These are
+          # long-lived `claude setup-token` values with no rotating refresh lineage,
+          # which is why -- unlike a codex session -- they are safe to use from any
+          # host. ANTHROPIC_API_KEY is explicitly unset: if one were ever present in
+          # the environment the CLI would prefer it and bill per token, silently, while
+          # every log line still said "subscription".
+          #
+          # ONLY THE SELECTED ACCOUNT'S TOKEN IS EXPORTED. tokens.env holds all five,
+          # and this step is about to hand a model bash access over an untrusted pull
+          # request diff, so the file is never sourced -- that would put four
+          # credentials the job has no use for into the reviewer's environment.
+          if [ "$AGENT" = claude ]; then
+            TOKENS=/accounts-tokens/tokens.env
+            [ -r "$TOKENS" ] || {
+              echo "::error::agent claude needs $TOKENS, which the claude runner mounts read-only."
+              echo "::error::It is absent or unreadable, so this job is on a runner that was not"
+              echo "::error::configured for claude. Not falling back to an API key."
+              exit 1; }
 
-          # ONE code path for both engines and for the retry below. The prompt is
+            acct=$(/opt/review/agent-account.sh resolve "$REPO" | cut -f1) || {
+              echo "::error::no healthy Claude account: every account is limited or absent."
+              echo "::error::/opt/review/agent-account.sh health says which and until when."
+              exit 1; }
+            # An EMPTY string read as a legitimate value is the failure mode that has
+            # cost the most time in this pipeline, so assert the shape, not the exit code.
+            case "$acct" in
+              ""|*[!a-z0-9._-]*)
+                echo "::error::the account broker returned '$acct', which is not an account name."
+                exit 1 ;;
+            esac
+
+            tok=$(sed -n "s/^CLAUDE_OAUTH_TOKEN_$(printf '%s' "$acct" | tr 'a-z.-' 'A-Z__')=//p" "$TOKENS" \
+                  | tr -d "\"'" | head -1)
+            [ -n "$tok" ] || {
+              echo "::error::account '$acct' is healthy per the broker but has no token in $TOKENS."
+              exit 1; }
+            case "$tok" in
+              sk-ant-oat*) : ;;
+              sk-ant-api*)
+                echo "::error::the value for '$acct' is an API KEY, not a subscription token."
+                echo "::error::Refusing to use it: that would bill per token against the standing"
+                echo "::error::rule that claude and codex auth is subscription/device only."
+                exit 1 ;;
+              *) echo "::error::the value for '$acct' does not look like a setup-token."; exit 1 ;;
+            esac
+            export CLAUDE_CODE_OAUTH_TOKEN="$tok"
+            unset ANTHROPIC_API_KEY
+            echo "Reviewer account: $acct (subscription token, ${#tok} chars, no API key)."
+
+            # claude has no --reasoning-effort. A thinking budget is the nearest real
+            # control, so effort: maps onto it -- which keeps effort meaningful on all
+            # three agents rather than being silently ignored on one of them.
+            case "$EFFORT" in
+              low)    export MAX_THINKING_TOKENS=4000 ;;
+              medium) export MAX_THINKING_TOKENS=16000 ;;
+              high)   export MAX_THINKING_TOKENS=32000 ;;
+            esac
+          fi
+
+          # ONE code path for all three engines and for the retry below. The prompt is
           # identical: whichever model runs, it reads the same instructions and
           # posts its own review.
           run_reviewer() {
@@ -757,9 +912,28 @@ jobs:
                   -s danger-full-access \
                   "$facts
 
-          $(cat "$REVIEW_PROMPT")${1:+
+          $(cat /opt/review/review-agent.md)${1:+
 
           $1}"
+                ;;
+              claude)
+                # Same shape as the opencode branch: `--continue` resumes the session on
+                # the retry, so `$1` is the resume prompt and replaces the full prompt
+                # rather than being appended to it.
+                #
+                # --permission-mode bypassPermissions for the same reason codex gets
+                # -s danger-full-access (owner ruling 2026-09-09: "the agent is already
+                # sandboxed in our container!"). The job container IS the boundary:
+                # throwaway, one pull request, destroyed after. Without it the CLI
+                # prompts for approval on its first tool call, no one answers, and the
+                # review burns its 45 minutes waiting on a terminal that does not exist.
+                # shellcheck disable=SC2086
+                claude -p ${1:+--continue} \
+                  --model "$MODEL" \
+                  --permission-mode bypassPermissions \
+                  "${1:-$facts
+
+          $(cat /opt/review/review-agent.md)}"
                 ;;
               *)
                 # shellcheck disable=SC2086
@@ -768,7 +942,7 @@ jobs:
                   --print-logs --log-level ERROR \
                   "${1:-$facts
 
-          $(cat "$REVIEW_PROMPT")}"
+          $(cat /opt/review/review-agent.md)}"
                 ;;
             esac
           }
@@ -791,7 +965,7 @@ jobs:
           # It stopped talking. No review existed, and the job would have been
           # green without the confirm step below.
           #
-          # The reviewer prompt now forbids ending a turn on narration, but a prompt
+          # review-agent.md now forbids ending a turn on narration, but a prompt
           # cannot guarantee a turn-ending behaviour, so this does not rely on it.
           # `--continue` RESUMES THE SAME SESSION with its context intact
           # (verified: a token stored in one invocation was recalled in the next),
@@ -818,7 +992,7 @@ jobs:
       # MEASURED, go-luks2 #137 (2026-09-09, task 53362): the model wrote a real
       # 1620-character review, POSTed it correctly, checked that the POST was
       # accepted -- exactly as instructed -- and the job went GREEN with the
-      # review filed as a PENDING draft. The reviewer prompt told it `event` must be
+      # review filed as a PENDING draft. review-agent.md told it `event` must be
       # `APPROVE`; Gitea's enum is `APPROVED` (swagger CreatePullReviewOptions),
       # and Gitea does not reject an unrecognised event, it accepts the POST with
       # HTTP 200 and degrades the review to PENDING. A draft is visible to its
@@ -900,7 +1074,7 @@ jobs:
               # AN APPROVAL CONTRADICTS THE AUTHOR ON A DRAFT. The old
               # pr-review.sh refused to post one ("refusing to APPROVE a pull
               # request its author has marked unfinished"); deleting the script
-              # left that as prose in the reviewer prompt and nothing enforcing it.
+              # left that as prose in review-agent.md and nothing enforcing it.
               # This restores it as a check. REQUEST_CHANGES and COMMENT on a
               # draft are fine and wanted -- only the approval is refused.
               case "$state" in
