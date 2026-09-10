@@ -373,12 +373,51 @@ citation = re.compile(r"[A-Za-z0-9_./-]+\.md", re.IGNORECASE)
 url = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S+")
 
 
+# THE ONE SANCTIONED SIBLING. Owner ruling, recorded against #138.
+#
+# The context repository holding the engineering standards is checked out
+# BESIDE this one, never inside it, so every pointer to it takes the parent
+# form below and reads identically on a developer's host and in a build
+# container. That is the whole point of the layout, and it makes such a
+# citation -- by construction -- a citation of a document this repository does
+# not contain, which is exactly rule 2's predicate. Two rules that are both
+# working as designed, disagreeing.
+#
+# This is a HOLE IN A SECURITY GUARD and is written to be the narrowest one
+# that resolves the conflict:
+#
+#   - ONE literal prefix, compared after normalisation. A candidate is
+#     normalised FIRST, so a citation that merely passes through the sibling
+#     on its way somewhere else -- climbing back out with further parent
+#     traversals -- normalises to a path that no longer carries the prefix and
+#     is rejected exactly as before. The prefix cannot be used as a doorway.
+#   - The trailing slash is load-bearing. Without it the prefix also admits a
+#     sibling whose name merely STARTS with these characters, which would turn
+#     one sanctioned repository into an open-ended family of them.
+#   - It lifts the [dangling] rule ONLY. The [name] and [shape] rules still
+#     scan these lines in full, so a citation that also carries an internal
+#     host, an RFC1918 literal or a private ticket reference still fails.
+#
+# What it costs a public reader is bounded: the prefix publishes a directory
+# name and nothing else -- no host, no address, no private repository name, no
+# ticket. What it buys is that this control can be adopted by the other
+# repositories in the portfolio, every one of which already carries these
+# citations and would otherwise inherit a red build on the day it turned the
+# guard on.
+SANCTIONED_SIBLING = "../handbook/"
+
+
 def inside(candidate):
     """True if candidate normalizes to a tracked path that stays beneath the
-    repository root. An absolute path, or one that climbs out with '..', is
-    NOT resolved back inside -- it is a reference to something this repository
-    does not contain, which is the whole point of the check."""
+    repository root, or to the one sanctioned sibling context repository.
+    An absolute path, or one that climbs out with '..', is NOT resolved back
+    inside -- it is a reference to something this repository does not contain,
+    which is the whole point of the check."""
     norm = posixpath.normpath(candidate)
+    # Normalised before comparison, so this admits the sibling itself and not
+    # a path that only travels through it.
+    if norm.startswith(SANCTIONED_SIBLING):
+        return True
     if posixpath.isabs(norm) or norm == ".." or norm.startswith("../"):
         return False
     return norm.lower() in tracked_lower

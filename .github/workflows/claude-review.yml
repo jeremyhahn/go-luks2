@@ -43,9 +43,10 @@
 name: Claude Review
 
 on:
-  # Disabled 2026-09-06 (owner ruling): gpu-host is the only review host and
-  # the `claude` lane is stopped, so a pull_request trigger would queue a job
-  # with no runner. Manual dispatch only.
+  # Disabled 2026-09-06 (owner ruling): a single self-hosted machine backs
+  # every review lane, and the `claude` lane on it is stopped -- so a
+  # pull_request trigger would queue a job against a label no runner offers
+  # and it would wait forever. Manual dispatch only.
   workflow_dispatch:
 
 jobs:

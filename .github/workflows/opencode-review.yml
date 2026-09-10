@@ -3,11 +3,11 @@
 # see the note on the job below. v4 added a guard step and a concurrency
 # change; v5 keeps the guard and reverts the concurrency — measured, below.
 #
-# v6 (automatethethings#127) makes three changes, all about a verdict being
+# v6 makes three changes, all about a verdict being
 # real rather than about how the review is produced:
 #   - the guard checks `.merged`/`.state` from the read it already makes, so a
-#     closed PR costs no GPU. That check used to live in review-agent.md, where
-#     it could only run after the 27B model had loaded.
+#     closed PR costs no GPU. That check used to live in the REVIEWER PROMPT,
+#     where it could only run after the 27B model had loaded.
 #   - the guard IGNORES PENDING reviews when it looks for a standing verdict. A
 #     draft is not an approval and not a rejection; treating it as one made two
 #     heads permanently unreviewable.
@@ -21,14 +21,14 @@
 # (which did not). They differed in the one line deciding whether an
 # unreviewed PR can merge, and a drift check comparing STAMPS reports two
 # such files as in agreement. This file is now built FROM the deployed
-# copies rather than from its own previous contents. See automatethethings#88.
+# copies rather than from its own previous contents.
 # Source of truth: software/templates/github-actions/opencode-review.yml in
 # the company repo -- INTENT, not a measurement. On 2026-09-07 this file was
 # the stalest copy of itself in the fleet while saying exactly this line.
-# Before editing it, diff it against a deployed copy (automatethethings#89).
+# Before editing it, diff it against a deployed copy.
 # Gitea-only by design.
 #
-# ONE REVIEWER: opencode, running a LOCAL model on gpu-host's GPU. Owner ruling
+# ONE REVIEWER: opencode, running a LOCAL model on the review host's own GPU. Owner ruling
 # 2026-09-06, in his words: "i dont want any CODEX tokens minted or any api
 # usage for frontier models. when the codex subscription is expired then we
 # dont use it! we use opencode with whatever model is specified in the gitea
@@ -46,7 +46,7 @@
 # outlived all three facts and still said the default was qwen3.6 — a comment
 # nobody had reason to distrust, describing a step that no longer existed, in a
 # file whose executable line was already correct. That is the qwen3.6 incident
-# repeating as documentation; see automatethethings#127.
+# repeating as documentation.
 #
 # WHY THE LABEL MAP WENT, since that part is worth keeping: `model:qwen3.6`
 # selected a STOCK tag carrying temperature 0.1 and num_ctx 65536 — Qwen
@@ -104,7 +104,7 @@ on:
 # v5 therefore reverts to the v3 concurrency and keeps the guard. The transient
 # red is accepted: it is self-healing (80s on the canary) and is not fixable at
 # the workflow level. What IS fixable -- a wasted duplicate review, and a
-# duplicate overwriting a verdict -- the guard fixes. automatethethings#94.
+# duplicate overwriting a verdict -- the guard fixes.
 concurrency:
   group: code-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
@@ -144,8 +144,8 @@ jobs:
     #
     # A single job with an expression here avoids that, and Gitea 1.27.1 DOES
     # evaluate it -- verified rather than assumed, because this file already
-    # records Gitea ignoring `cancel-in-progress` as specified. Probe on
-    # automatethethings branch probe/runs-on-expression: the jobs API reported
+    # records Gitea ignoring `cancel-in-progress` as specified. Measured on a
+    # throwaway probe branch cut for this question: the jobs API reported
     # `"labels": ["ubuntu-latest"]` for `runs-on: ${{ ... || 'ubuntu-latest' }}`
     # and the job ran. `contains()` over `labels.*.name` compares ARRAY ELEMENTS,
     # so this is an exact whole-label test, not a substring one (#113).
@@ -209,7 +209,7 @@ jobs:
 
           # A PR that is merged or closed cannot receive a review: Gitea answers
           # the POST with HTTP 422, so everything spent getting there is thrown
-          # away. This was checked by the MODEL, in step 2 of review-agent.md,
+          # away. This was checked by the MODEL, in step 2 of the reviewer prompt,
           # which means it was checked after the container started, the 27B model
           # loaded and the prompt ran -- 31 GPU-minutes in three days by the
           # prompt's own count. It is a field of the read above. Check it here.
@@ -235,9 +235,9 @@ jobs:
           # Two steps read `.draft` and I added the output to the wrong one. The
           # confirmation step keeps its OWN read deliberately -- a gate should
           # re-derive the fact it enforces rather than trust an earlier step's
-          # output. Found by codex on a live review; see automatethethings#127 and
-          # software/scripts/check-workflow-outputs.py, which now checks
-          # mechanically that every steps.X.outputs.Y read has a write in step X.
+          # output. Found by codex on a live review, and now also caught
+          # mechanically: the shared workflow-lint step checks that every
+          # steps.X.outputs.Y read has a matching write in step X.
           echo "is_draft=$(printf '%s' "$pr" | jq -r '.draft // false')" >> "$GITHUB_OUTPUT"
 
           if [ "$merged" = "true" ] || [ "$pr_state" != "open" ]; then
@@ -397,7 +397,20 @@ jobs:
 
           OPENCODE_DEFAULT_MODEL="review-q8"
           CODEX_DEFAULT_MODEL="gpt-5.5"
-          OLLAMA="${OLLAMA_URL:-http://198.51.100.91:11434}"
+          # THE ENDPOINT IS THE RUNNER IMAGE'S CONTRACT, not this file's.
+          # `OLLAMA_URL` is exported by the review image itself, so the literal
+          # that used to sit here as a fallback could never be reached -- and a
+          # publicly mirrored workflow has no business naming an address on a
+          # private network that no outside reader can route to anyway.
+          #
+          # FAIL CLOSED rather than substituting a plausible default. If a
+          # future image stops exporting it, the wrong answer is to guess
+          # loopback and validate models against an endpoint that is not the
+          # one the reviewer will use: that fails 20 minutes later, inside the
+          # model, which is the exact failure the validation below exists to
+          # prevent.
+          OLLAMA="${OLLAMA_URL:-}"
+          [ -n "$OLLAMA" ] || { echo "::error::OLLAMA_URL is not set in this runner's environment."; echo "::error::The review image is expected to export it; without it no model can be validated."; exit 1; }
 
           ollama_models() { curl -sS --max-time 10 "$OLLAMA/api/tags" | jq -r '.models[].name' | sort -u; }
           label_exists() { printf '%s' "$LABELS" | jq -e --arg n "$1" 'index($n) != null' >/dev/null 2>&1; }
@@ -532,8 +545,8 @@ jobs:
               ;;
             claude)
               echo "::error::agent claude is not available: no claude runner is registered."
-              echo "::error::Registered review runners are gpu-host-code-review (opencode) and"
-              echo "::error::omega-codex (codex). Failing here rather than queueing forever on a"
+              echo "::error::The registered review runner labels are code-review (opencode) and"
+              echo "::error::codex (codex). Failing here rather than queueing forever on a"
               echo "::error::runner label that nothing will ever claim."
               exit 1 ;;
             *)
@@ -619,8 +632,8 @@ jobs:
           # what `/pulls/{n}/files` reports. Verified on go-xkms#452 and on two
           # PRs whose base is not `main`.
           #
-          # FAIL CLOSED. review-agent.md no longer tells the model how to derive a
-          # diff, so a missing one would mean reviewing blind or silently going
+          # FAIL CLOSED. The reviewer prompt no longer tells the model how to derive
+          # a diff, so a missing one would mean reviewing blind or silently going
           # back to git merge-base -- exactly the cost this removes. An
           # unreadable diff is not a degraded review, it is no review.
           # INSIDE THE WORKSPACE, not /tmp. Two engines now read this file and
@@ -687,6 +700,22 @@ jobs:
           - $draft_fact
           "
 
+          # THE PROMPT IS AN ASSET OF THE RUNNER IMAGE, exported as
+          # `REVIEW_PROMPT` by the image that also installs it. It is not
+          # carried in this repository, so this file names no path on a private
+          # machine -- and, being a deployment detail, it would be wrong here
+          # even if disclosure were not a concern.
+          #
+          # CHECKED BEFORE THE MODEL LOADS, not after. An unset or unreadable
+          # prompt inside the command substitution below expands to the empty
+          # string and the reviewer runs with the FACTS block alone -- a review
+          # with no instructions, which produces a plausible-looking verdict
+          # from a model that was never told what to check. That is worse than
+          # no review, because it is indistinguishable from one.
+          [ -n "${REVIEW_PROMPT:-}" ] || { echo "::error::REVIEW_PROMPT is not set in this runner's environment."; echo "::error::The review image is expected to export it, naming the reviewer prompt it installs."; exit 1; }
+          [ -r "$REVIEW_PROMPT" ] || { echo "::error::the reviewer prompt named by REVIEW_PROMPT is not readable on this runner."; exit 1; }
+          [ -s "$REVIEW_PROMPT" ] || { echo "::error::the reviewer prompt named by REVIEW_PROMPT is empty."; exit 1; }
+
           # ONE code path for both engines and for the retry below. The prompt is
           # identical: whichever model runs, it reads the same instructions and
           # posts its own review.
@@ -728,7 +757,7 @@ jobs:
                   -s danger-full-access \
                   "$facts
 
-          $(cat /opt/review/review-agent.md)${1:+
+          $(cat "$REVIEW_PROMPT")${1:+
 
           $1}"
                 ;;
@@ -739,7 +768,7 @@ jobs:
                   --print-logs --log-level ERROR \
                   "${1:-$facts
 
-          $(cat /opt/review/review-agent.md)}"
+          $(cat "$REVIEW_PROMPT")}"
                 ;;
             esac
           }
@@ -762,7 +791,7 @@ jobs:
           # It stopped talking. No review existed, and the job would have been
           # green without the confirm step below.
           #
-          # review-agent.md now forbids ending a turn on narration, but a prompt
+          # The reviewer prompt now forbids ending a turn on narration, but a prompt
           # cannot guarantee a turn-ending behaviour, so this does not rely on it.
           # `--continue` RESUMES THE SAME SESSION with its context intact
           # (verified: a token stored in one invocation was recalled in the next),
@@ -789,7 +818,7 @@ jobs:
       # MEASURED, go-luks2 #137 (2026-09-09, task 53362): the model wrote a real
       # 1620-character review, POSTed it correctly, checked that the POST was
       # accepted -- exactly as instructed -- and the job went GREEN with the
-      # review filed as a PENDING draft. review-agent.md told it `event` must be
+      # review filed as a PENDING draft. The reviewer prompt told it `event` must be
       # `APPROVE`; Gitea's enum is `APPROVED` (swagger CreatePullReviewOptions),
       # and Gitea does not reject an unrecognised event, it accepts the POST with
       # HTTP 200 and degrades the review to PENDING. A draft is visible to its
@@ -871,7 +900,7 @@ jobs:
               # AN APPROVAL CONTRADICTS THE AUTHOR ON A DRAFT. The old
               # pr-review.sh refused to post one ("refusing to APPROVE a pull
               # request its author has marked unfinished"); deleting the script
-              # left that as prose in review-agent.md and nothing enforcing it.
+              # left that as prose in the reviewer prompt and nothing enforcing it.
               # This restores it as a check. REQUEST_CHANGES and COMMENT on a
               # draft are fine and wanted -- only the approval is refused.
               case "$state" in

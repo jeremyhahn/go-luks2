@@ -85,6 +85,21 @@ DOC_OTHER="software/CLAUDE"".md"
 DOC_BARE="devops"".md"
 DOC_ESCAPE="../../../README"".md"
 DOC_SIBLING="../../private-repo/README"".md"
+# THE ONE SANCTIONED SIBLING (#138). The standards context repository is
+# checked out BESIDE the project, so a citation of it is by construction a
+# citation of a document this repository does not contain -- the exact
+# predicate of the dangling rule. The guard admits this ONE prefix and the
+# cases below pin how narrow that is. Assembled like every other payload here:
+# a literal would make this file's own probes indistinguishable from the real
+# thing to the guard that scans it.
+DOC_OK_SIB="../hand""book/software/conventions/sdlc"".md"
+# THREE parent steps, not two. From `docs/luks/` two steps reach the
+# REPOSITORY ROOT, so `../../handbook/...` would name an in-tree directory
+# that does not exist -- correctly rejected, and briefly written that way
+# here. The sibling is one step ABOVE the root from anywhere.
+DOC_OK_SIB_DEEP="../../../hand""book/software/docs/00-ownership"".md"
+DOC_NEAR_SIB="../hand""book-private/software/secrets"".md"
+DOC_THRU_SIB="../hand""book/../../elsewhere/README"".md"
 LOSETUP="lose""tup"                      # the command, split so no probe line
 DMSETUP="dmse""tup"                      # carries a matchable command+flag pair
 
@@ -191,6 +206,16 @@ check reject no-internal-disclosure.sh "a citation into a sibling repository"
 d="$(newrepo cite5)"
 fixture notes.txt "see ${DOC_BARE} for the pipeline"
 check reject no-internal-disclosure.sh "a bare company doc filename"
+# The sanctioned prefix is compared AFTER normalisation and WITH its trailing
+# slash, so neither of these reaches the exception. Without the normalisation
+# the second one would: it names the sanctioned sibling and then climbs out of
+# it, which is how a narrow allowance turns into an arbitrary one.
+d="$(newrepo cite6)"
+fixture notes.txt "see ${DOC_NEAR_SIB}"
+check reject no-internal-disclosure.sh "a sibling whose name merely STARTS with the sanctioned one"
+d="$(newrepo cite7)"
+fixture notes.txt "see ${DOC_THRU_SIB}"
+check reject no-internal-disclosure.sh "a path TRAVELLING THROUGH the sanctioned sibling and out again"
 
 echo "== disclosure guard: legitimate content is NOT rejected =="
 d="$(newrepo ok1)"
@@ -213,6 +238,16 @@ check accept no-internal-disclosure.sh "a public https link to a .md document"
 d="$(newrepo ok5)"
 fixture notes.txt "upstream notes: http://example.org/docs/a/b/README.md"
 check accept no-internal-disclosure.sh "a public http link with a deeper path"
+# Both spellings occur legitimately: a root-level file names the sibling with
+# one parent step, a file nested a directory deep needs two. The guard tries
+# the citation relative to the citing file AND relative to the root, so both
+# must pass -- and a regression in either resolution shows up as one of these.
+d="$(newrepo ok6)"
+fixture notes.txt "start with ${DOC_OK_SIB}"
+check accept no-internal-disclosure.sh "the sanctioned sibling cited from the repository root"
+d="$(newrepo ok7)"
+fixture docs/luks/notes.txt "see ${DOC_OK_SIB_DEEP}"
+check accept no-internal-disclosure.sh "the sanctioned sibling cited from a nested directory"
 d="$(newrepo ok6)"
 fixture notes.txt "mirror at ftp://example.net/spec/format.md"
 check accept no-internal-disclosure.sh "a non-http scheme"
