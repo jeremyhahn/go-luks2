@@ -28,6 +28,9 @@ func randomBytes(n int) ([]byte, error) {
 }
 
 // randomBase64 generates a base64-encoded random string
+// -tags=integration, so `unused` fires on a function the default build exercises.
+//
+//nolint:unused // Test-only helper: the tests that call it are excluded under
 func randomBase64(byteCount int) (string, error) {
 	b, err := randomBytes(byteCount)
 	if err != nil {

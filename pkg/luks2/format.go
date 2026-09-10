@@ -409,6 +409,9 @@ func encryptKeyMaterial(data, key []byte, cipherAlgo string) ([]byte, error) {
 // through decryptKeyMaterialEnclave, because the plaintext is the master key in
 // AF-split form. It survives as a plain-memory helper for the unit tests that
 // exercise the transform itself over synthetic data.
+// -tags=integration, so `unused` fires on a function the default build exercises.
+//
+//nolint:unused // Test-only helper: the tests that call it are excluded under
 func decryptKeyMaterial(data, key []byte, cipherAlgo string, sectorSize int) ([]byte, error) {
 	decrypted := make([]byte, len(data))
 	if err := xtsSectors(decrypted, data, key, cipherAlgo, sectorSize, true); err != nil {

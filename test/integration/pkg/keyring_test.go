@@ -163,7 +163,7 @@ func TestUnlockPassesTheVolumeKeyThroughTheKernelKeyring(t *testing.T) {
 
 	// THE NEGATIVE. This is the whole point of the change: the kernel must not
 	// be holding an inline hex key, because an inline hex key is one that
-	// travelled through unwipeable Go strings to get here.
+	// traveled through unwipeable Go strings to get here.
 	if hexKey.MatchString(key) {
 		t.Fatalf("the dm-crypt table holds the volume key inline as hex; the keyring path was not taken")
 	}

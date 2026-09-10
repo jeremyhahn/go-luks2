@@ -377,7 +377,7 @@ func TestCLI_WipeCancelled(t *testing.T) {
 	// Run wipe with "NO" input
 	stdout, _, err := runCLIWithInput("NO\n", "wipe", tmpfile)
 	if err != nil {
-		t.Fatalf("wipe cancelled should not error: %v", err)
+		t.Fatalf("wipe canceled should not error: %v", err)
 	}
 
 	// "canceled", one L. The CLI has always printed that spelling and this

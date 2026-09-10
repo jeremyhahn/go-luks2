@@ -404,6 +404,9 @@ func wipeHeaders(f *os.File) error {
 }
 
 // wipePass performs one wipe pass over the device
+// -tags=integration, so `unused` fires on a function the default build exercises.
+//
+//nolint:unused // Test-only helper: the tests that call it are excluded under
 func wipePass(f *os.File, size int64, random bool) error {
 	const bufferSize = 1024 * 1024 // 1MB buffer
 

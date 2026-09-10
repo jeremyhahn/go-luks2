@@ -67,7 +67,7 @@ import "testing"
 // stops the healthy-path leak; the report stops the next one being invisible.
 // Shipping only the retry would fix today's instance and restore the silence.
 // It is a poll-until-condition on external state — the sanctioned form — not a
-// fixed sleep standing in for synchronisation.
+// fixed sleep standing in for synchronization.
 //
 // It never gives up quietly: exhausting the deadline is a test FAILURE naming
 // the mapping and the last error. A retry that eventually gives up silently is

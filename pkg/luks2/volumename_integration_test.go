@@ -159,7 +159,7 @@ var mappingCalls = map[string]int{
 
 // auditMappingNames reports every mapping call in src whose name argument is
 // not run-scoped. Taking source TEXT rather than a path is what lets the gate's
-// own test drive it with synthesised cases.
+// own test drive it with synthesized cases.
 func auditMappingNames(t *testing.T, filename, src string) []string {
 	t.Helper()
 
@@ -186,7 +186,7 @@ func auditMappingNames(t *testing.T, filename, src string) []string {
 	// lo_file_name: use the identity the system maintains, not the string that
 	// describes it.
 	//
-	// ast.Object is deprecated in favour of go/types. It is used here because
+	// ast.Object is deprecated in favor of go/types. It is used here because
 	// this audit is single-file and needs binding identity only -- not types,
 	// not cross-package resolution -- so loading the package through
 	// go/packages would buy nothing for a real cost (a new dependency, and a
@@ -263,11 +263,11 @@ func auditMappingNames(t *testing.T, filename, src string) []string {
 					"runVolume(t, %q), computed ONCE into a local shared by the creation and "+
 					"the teardown.", at, name, lit, lit))
 		default:
-			// FAIL CLOSED. "I do not recognise this" is not "this is fine".
+			// FAIL CLOSED. "I do not recognize this" is not "this is fine".
 			findings = append(findings, fmt.Sprintf(
 				"%s: %s() takes its volume name from %T, a form this audit cannot trace to "+
 					"runVolume. Assign it to a local scoped with runVolume(t, base) first -- an "+
-					"unrecognised expression is not evidence the name is run-scoped (#109).",
+					"unrecognized expression is not evidence the name is run-scoped (#109).",
 				at, name, arg))
 		}
 		return true
@@ -385,7 +385,7 @@ func TestTheGateCatchesEveryCallItCovers(t *testing.T) {
 				src = "package luks2\n\nfunc TestX(t *testing.T) {\n\t" +
 					name + "(" + strings.Join(args, ", ") + ")\n}\n"
 				if got := auditMappingNames(t, "x_integration_test.go", src); len(got) == 0 {
-					t.Errorf("%s() with the untraceable name %s was NOT flagged; an unrecognised "+
+					t.Errorf("%s() with the untraceable name %s was NOT flagged; an unrecognized "+
 						"expression is not evidence the name is run-scoped", name, form)
 				}
 			}
