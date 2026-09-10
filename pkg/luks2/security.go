@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // Security constants
@@ -306,20 +307,111 @@ type FileLock struct {
 	file *os.File
 }
 
-// AcquireFileLock acquires an exclusive lock on a file
+// Lock wait budget and backoff schedule.
+//
+// DefaultLockWait is what AcquireFileLock spends before giving up. It is a
+// BOUND, not a target: an uncontended lock is taken on the first attempt and
+// costs nothing, and the budget is consumed only when another holder has the
+// device.
+//
+// 30s is chosen against the thing actually being waited for. The longest lock
+// hold in this library is a format, whose cost is dominated by the KDF -- and
+// the KDF is calibrated to a caller-supplied time, defaulting to 2000ms per
+// derivation. A budget of 30s therefore absorbs a normal format several times
+// over while still terminating a genuine deadlock in a time an operator will
+// sit through. Below about 5s it would start refusing ordinary contention,
+// which is the failure this replaces.
+const (
+	DefaultLockWait = 30 * time.Second
+
+	// The backoff runs from 1ms to 100ms. The floor keeps a lock released
+	// microseconds after the first attempt from costing a full sleep; the
+	// ceiling keeps a long wait from turning into a handful of samples that
+	// overshoot the budget. Doubling between them reaches the ceiling in seven
+	// steps, so a 30s wait is roughly 300 attempts rather than 30000 -- the
+	// point of a backoff being that a lock nobody drops must not cost a core.
+	lockBackoffMin = time.Millisecond
+	lockBackoffMax = 100 * time.Millisecond
+)
+
+// AcquireFileLock acquires an exclusive lock on a device, waiting up to
+// DefaultLockWait for a competing holder to release it.
+//
+// IT WAITS, AND THAT IS THE POINT. This call used to be LOCK_NB with no retry:
+// the first caller won and every other caller failed IMMEDIATELY with a bare
+// "resource temporarily unavailable". On a host-global device -- which is what
+// the integration suite locks -- that turns ordinary concurrency into a
+// failure, and one that presents inconsistently enough to be filed as
+// flakiness rather than as contention (#107). Shortening the hold time hides
+// it; bounding the wait fixes it.
 func AcquireFileLock(path string) (*FileLock, error) {
+	return AcquireFileLockTimeout(path, DefaultLockWait)
+}
+
+// AcquireFileLockTimeout is AcquireFileLock with an explicit wait budget, for
+// callers that know their own latency requirement -- and for tests, which need
+// contention to resolve in milliseconds rather than in DefaultLockWait.
+//
+// A budget of zero or less makes exactly ONE attempt and returns immediately,
+// which is the old non-blocking behavior, available deliberately rather than
+// by accident.
+//
+// The wait is a POLL WITH BACKOFF rather than a blocking LOCK_EX. A blocking
+// flock cannot be given a deadline without arranging for a signal to interrupt
+// it, and a lock wait that cannot time out is the deadlock this is meant to
+// terminate. Polling costs a syscall per attempt and can be bounded exactly.
+func AcquireFileLockTimeout(path string, wait time.Duration) (*FileLock, error) {
 	f, err := openDevice("lock the device", path, os.O_RDWR)
 	if err != nil {
 		return nil, err
 	}
 
-	// Try to acquire exclusive lock
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		_ = f.Close() // Ignore close error since we're returning lock error
-		return nil, fmt.Errorf("failed to acquire lock: %w", err)
-	}
+	started := time.Now()
+	deadline := started.Add(wait)
+	backoff := lockBackoffMin
 
-	return &FileLock{file: f}, nil
+	for attempt := 1; ; attempt++ {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return &FileLock{file: f}, nil
+		}
+
+		// CLASSIFY, do not assume contention. EWOULDBLOCK means someone else
+		// holds it and waiting is the right answer. Anything else -- EBADF, a
+		// descriptor closed underneath us -- will not improve by being retried,
+		// and retrying it for the whole budget would report a real fault as a
+		// timeout.
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			_ = f.Close()
+			return nil, &DeviceError{Device: path, Op: "lock", Err: err}
+		}
+
+		// Checked AFTER an attempt, so a zero budget still tries once and a
+		// lock that is free is never reported as contended.
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			_ = f.Close()
+			return nil, &LockTimeoutError{
+				Path:     path,
+				Waited:   time.Since(started),
+				Attempts: attempt,
+				Err:      err,
+			}
+		}
+
+		// Never sleep past the deadline: doing so would report a longer wait
+		// than the caller allowed, and Waited above is meant to be true.
+		if backoff > remaining {
+			backoff = remaining
+		}
+		time.Sleep(backoff)
+		if backoff < lockBackoffMax {
+			backoff *= 2
+			if backoff > lockBackoffMax {
+				backoff = lockBackoffMax
+			}
+		}
+	}
 }
 
 // Release releases the file lock

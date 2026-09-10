@@ -15,6 +15,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestValidateDevicePath(t *testing.T) {
@@ -385,8 +386,11 @@ func TestFileLock(t *testing.T) {
 		t.Fatalf("AcquireFileLock() error = %v", err)
 	}
 
-	// Try to acquire again (should fail)
-	_, err = AcquireFileLock(tmpFile.Name())
+	// Try to acquire again while the first is held. This uses the explicit
+	// budget: AcquireFileLock now waits DefaultLockWait (30s) before giving
+	// up, so calling it here would make this test sit for half a minute to
+	// assert a failure that is decided in the first millisecond.
+	_, err = AcquireFileLockTimeout(tmpFile.Name(), 20*time.Millisecond)
 	if err == nil {
 		t.Error("Expected error acquiring second lock, got nil")
 	}
@@ -695,5 +699,158 @@ func TestTheExportedPathsReportAPermissionFailureAsOne(t *testing.T) {
 				t.Fatalf("%s lost the underlying cause: %v", tt.name, err)
 			}
 		})
+	}
+}
+
+// TestAcquireFileLockWaitsForARelease is the test the old implementation could
+// not pass, and it is the whole point of #107.
+//
+// The lock is held, then released while a second acquire is already waiting.
+// With LOCK_NB and no retry the second call returned "resource temporarily
+// unavailable" instantly and the caller failed; with a bounded wait it queues
+// and succeeds. Asserting only that the second call eventually succeeds would
+// be satisfied by a version that slept for the whole budget, so this also
+// asserts it returned close to the release rather than close to the deadline.
+func TestAcquireFileLockWaitsForARelease(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "luks-lock-wait-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
+	_ = tmpFile.Close()
+
+	held, err := AcquireFileLock(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("first AcquireFileLock() error = %v", err)
+	}
+
+	const holdFor = 150 * time.Millisecond
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(holdFor)
+		if err := held.Release(); err != nil {
+			t.Errorf("Release() error = %v", err)
+		}
+		close(released)
+	}()
+
+	started := time.Now()
+	second, err := AcquireFileLockTimeout(tmpFile.Name(), 10*time.Second)
+	waited := time.Since(started)
+	if err != nil {
+		t.Fatalf("second AcquireFileLockTimeout() error = %v, want it to queue and succeed", err)
+	}
+	defer func() { _ = second.Release() }()
+
+	<-released
+	if waited < holdFor {
+		t.Errorf("second lock returned after %s, before the holder released at %s -- it cannot have been exclusive", waited, holdFor)
+	}
+	// Generous, because this asserts "did not sit out the budget", not a
+	// scheduling deadline: the backoff ceiling is 100ms, so a release is
+	// noticed within roughly that of the release itself.
+	if waited > holdFor+2*time.Second {
+		t.Errorf("second lock returned after %s, far past the %s release -- it waited rather than retried", waited, holdFor)
+	}
+}
+
+// TestAcquireFileLockTimesOutWithATypedError covers the other side: a holder
+// that never releases must produce a bounded, typed, actionable failure rather
+// than an unbounded wait.
+func TestAcquireFileLockTimesOutWithATypedError(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "luks-lock-timeout-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
+	_ = tmpFile.Close()
+
+	held, err := AcquireFileLock(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("AcquireFileLock() error = %v", err)
+	}
+	defer func() { _ = held.Release() }()
+
+	const budget = 120 * time.Millisecond
+	started := time.Now()
+	_, err = AcquireFileLockTimeout(tmpFile.Name(), budget)
+	waited := time.Since(started)
+	if err == nil {
+		t.Fatal("AcquireFileLockTimeout() on a held lock = nil, want a timeout")
+	}
+
+	if !errors.Is(err, ErrLockContended) {
+		t.Errorf("errors.Is(err, ErrLockContended) = false for %#v; a caller cannot tell contention from a broken device", err)
+	}
+
+	var lockErr *LockTimeoutError
+	if !errors.As(err, &lockErr) {
+		t.Fatalf("errors.As(err, *LockTimeoutError) = false for %v", err)
+	}
+	if lockErr.Path != tmpFile.Name() {
+		t.Errorf("LockTimeoutError.Path = %q, want %q", lockErr.Path, tmpFile.Name())
+	}
+	if lockErr.Attempts < 1 {
+		t.Errorf("LockTimeoutError.Attempts = %d, want at least 1", lockErr.Attempts)
+	}
+	if lockErr.Waited <= 0 {
+		t.Errorf("LockTimeoutError.Waited = %s, want a positive measured wait", lockErr.Waited)
+	}
+	// The budget is a bound. Overshooting it by more than a scheduling margin
+	// would mean the deadline is advisory, which is what an unbounded wait
+	// looks like just before it becomes one.
+	if waited > budget+2*time.Second {
+		t.Errorf("waited %s against a %s budget -- the deadline is not being honored", waited, budget)
+	}
+	// The message must name the device; an operator reading a CI log has
+	// nothing else to go on.
+	if !strings.Contains(err.Error(), tmpFile.Name()) {
+		t.Errorf("error %q does not name the locked path", err.Error())
+	}
+}
+
+// TestAcquireFileLockZeroBudgetTriesOnce pins the documented degenerate case:
+// a non-positive budget is the old non-blocking behavior, on purpose.
+func TestAcquireFileLockZeroBudgetTriesOnce(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "luks-lock-zero-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
+	_ = tmpFile.Close()
+
+	// Free: one attempt is enough, so a zero budget must still SUCCEED. A
+	// version that checked the deadline before attempting would fail here.
+	free, err := AcquireFileLockTimeout(tmpFile.Name(), 0)
+	if err != nil {
+		t.Fatalf("AcquireFileLockTimeout(free, 0) error = %v, want success on the first attempt", err)
+	}
+
+	// Held: one attempt is not enough, and there is no budget to spend.
+	started := time.Now()
+	_, err = AcquireFileLockTimeout(tmpFile.Name(), 0)
+	if err == nil {
+		t.Fatal("AcquireFileLockTimeout(held, 0) = nil, want a timeout")
+	}
+	if !errors.Is(err, ErrLockContended) {
+		t.Errorf("errors.Is(err, ErrLockContended) = false for %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Errorf("a zero budget took %s -- it is not returning immediately", elapsed)
+	}
+	_ = free.Release()
+}
+
+// TestAcquireFileLockOnAnUnopenableDeviceIsNotAContentionError separates the
+// two failure classes. An open that fails is a device fault and must keep its
+// device-open classification; reporting it as contention would send an
+// operator looking for a lock holder that does not exist.
+func TestAcquireFileLockOnAnUnopenableDeviceIsNotAContentionError(t *testing.T) {
+	_, err := AcquireFileLockTimeout("/nonexistent/file/path", 50*time.Millisecond)
+	if err == nil {
+		t.Fatal("AcquireFileLockTimeout(nonexistent) = nil, want error")
+	}
+	if errors.Is(err, ErrLockContended) {
+		t.Errorf("a missing device is reported as lock contention: %v", err)
 	}
 }

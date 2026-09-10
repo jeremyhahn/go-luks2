@@ -227,6 +227,23 @@ var (
 	// this library needs and for why the refusal is not negotiable.
 	ErrProtectedMemory = errors.New("key material could not be held in protected memory")
 
+	// ErrLockContended indicates that the exclusive lock on a device could not
+	// be taken within the caller's wait budget, because another holder kept it
+	// for the whole of that budget.
+	//
+	// IT IS NOT "THE DEVICE IS BUSY" AND IT IS NOT A DEFECT. The lock exists so
+	// that two writers cannot interleave in a LUKS2 header, and contention for
+	// it is the ORDINARY case whenever two operations address the same device
+	// at once. What it means is that the wait was bounded and the bound was
+	// reached -- so the caller is being told the operation did not start, and
+	// that retrying later is reasonable, rather than being told something is
+	// wrong with the volume.
+	//
+	// The distinction matters because the alternative to a bound is not
+	// "success": it is a process that waits for a lock nothing will ever drop.
+	// See LockTimeoutError for what was waited and for how to find the holder.
+	ErrLockContended = errors.New("device lock is held by another process and did not become available")
+
 	// ErrKeyring is the ROOT of every keyring condition in this package, and
 	// the only sentinel that is safe to use as a catch-all.
 	//
@@ -493,6 +510,40 @@ func (e *ProtectedMemoryError) Unwrap() error {
 // reaches the underlying go-enclave cause through Unwrap.
 func (e *ProtectedMemoryError) Is(target error) bool {
 	return target == ErrProtectedMemory
+}
+
+// LockTimeoutError reports that the exclusive device lock could not be taken
+// within the wait budget, and carries what an operator needs to act.
+//
+// The three fields are the diagnostic. WITHOUT THEM this condition is
+// indistinguishable from a bug in the caller: "resource temporarily
+// unavailable" names neither the device, nor how long anything waited, nor
+// whether waiting was even attempted -- which is exactly why the non-blocking
+// form this replaced produced CI failures that were filed as flakiness. Waited
+// and Attempts say the budget was really spent rather than skipped.
+type LockTimeoutError struct {
+	Path     string
+	Waited   time.Duration
+	Attempts int
+	Err      error
+}
+
+func (e *LockTimeoutError) Error() string {
+	return fmt.Sprintf("could not lock %s after waiting %s over %d attempts: %v (find the holder with `fuser -v %s` or `lsof %s`)",
+		e.Path, e.Waited, e.Attempts, e.Err, e.Path, e.Path)
+}
+
+// Unwrap keeps the underlying errno reachable, so a caller that genuinely
+// wants to know it was EWOULDBLOCK still can.
+func (e *LockTimeoutError) Unwrap() error {
+	return e.Err
+}
+
+// Is reports every LockTimeoutError as ErrLockContended, so a caller can match
+// the sentinel without depending on this type, in the same idiom as
+// ProtectedMemoryError.
+func (e *LockTimeoutError) Is(target error) bool {
+	return target == ErrLockContended
 }
 
 // DeviceError represents an error related to a specific device
