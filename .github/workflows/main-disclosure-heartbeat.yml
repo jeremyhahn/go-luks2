@@ -1,0 +1,77 @@
+# main-disclosure-heartbeat.yml — the disclosure guard, on a clock instead of
+# a push, so a marked-skip direct push to main cannot make it silent.
+#
+# THE GAP THIS CLOSES
+#
+# ci.yml already runs scripts/no-internal-disclosure.sh on every push to main
+# and every pull request. That is the right gate for everything that goes
+# through review — but this repository's own history shows a path around it:
+# `.github/workflows/opencode-review.yml` is rebuilt from a template kept
+# outside this repository and landed here by a direct push carrying
+# `[skip ci]` in the commit message. Three times, that rebuild has reverted
+# rewrites `no-internal-disclosure.sh` required (an internal service default,
+# a named host, cross-repository ticket citations — put back verbatim by the
+# next sync after each fix), and each time it did so invisibly: `[skip ci]`
+# is honored by the platform before any workflow file is even read, on the
+# commit message alone, so a `push:`-triggered workflow — this one included,
+# if it listened on `push` — is never scheduled for that commit. There is no
+# run for an `if:` inside it to rescue; the gate simply does not fire. Main
+# went red and nobody knew until the next unrelated PR rebased onto it and
+# inherited the failure.
+#
+# WHY A SCHEDULE DEFEATS THAT, AND WHY THAT IS THE WHOLE FIX AVAILABLE HERE
+#
+# `schedule` and `workflow_dispatch` are evaluated on a timer and by hand, not
+# against a commit's message, so `[skip ci]` has nothing to suppress — this is
+# the one trigger type a marked-skip push cannot make invisible. Running the
+# EXACT SAME script ci.yml already gates on, unconditionally, against
+# whatever main currently is, turns a silent revert back into a red run within
+# one interval instead of at the mercy of the next PR that happens to touch
+# main.
+#
+# This does NOT catch the revert at the instant of the push. Nothing running
+# inside this repository can: once a `[skip ci]` push is accepted, no workflow
+# run is ever created for it, so there is no earlier moment for a check in
+# this repository to attach to. Fifteen minutes is the closest available
+# substitute for "at the moment", chosen because it is cheap enough to hold
+# permanently (checkout plus one shell script, no build) rather than because
+# the revert history moves on any particular cadence.
+#
+# What this cannot do, because it is out of scope for this repository's
+# agent: stop the sync from reverting the file in the first place. That
+# requires either changing the upstream template process, or dropping
+# `[skip ci]` from it — the latter runs full CI on every repository the
+# template reaches for a workflow-only change, which is the thundering-herd
+# outcome that convention deliberately avoids. Both are decisions for whoever
+# owns the sync, not something a local workflow file can reach into.
+#
+# WHY THIS IS ITS OWN FILE, NOT A SECOND TRIGGER ON ci.yml
+#
+# Adding `schedule` to ci.yml would re-run its whole staged pipeline —
+# including the security and integration tiers nightly.yml deliberately keeps
+# off the per-push path for cost — every fifteen minutes for no added
+# coverage; the sync only ever touches the review workflow, and the property
+# that broke is the disclosure guard, not the build. One job, the one script
+# already responsible for this property, on the tightest cadence worth
+# keeping standing.
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  disclosure-guard:
+    name: Disclosure guard (main, scheduled)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # Same script, same failure mode as ci.yml's "Refuse internal
+      # infrastructure detail" step (#20). A red run here means main itself —
+      # not a branch, not a pull request — currently publishes what that
+      # guard exists to stop publishing, independent of how it got there.
+      - name: Refuse internal infrastructure detail
+        run: ./scripts/no-internal-disclosure.sh
