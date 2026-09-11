@@ -1268,7 +1268,9 @@ func TestAboveUint32AgreesWithCanExceedUint32(t *testing.T) {
 // dangerous direction for a work factor.
 //
 // Neither is reported by the conversion itself, which is what the blanket
-// `#nosec G115` on those lines was suppressing.
+// G115 suppression on those lines used to hide (see u32 in kdf.go). Not
+// quoting the directive itself here for the same reason u32's comment gives:
+// gosec finds it by literal text, in any comment.
 func TestEveryArgon2DerivationRefusesACostItCannotRepresent(t *testing.T) {
 	if len(argon2Derivations) < 2 {
 		t.Fatalf("argon2Derivations has %d entries; both derivations must be covered",

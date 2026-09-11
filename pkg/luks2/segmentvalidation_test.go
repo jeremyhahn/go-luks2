@@ -24,11 +24,13 @@ import (
 //	SectorSize handed to the dm-crypt table: 18446744073709551615
 //	IVTweak    handed to the dm-crypt table: 0 (from "not-a-number")
 //
-// The sector size carried a `#nosec G115 - sector size is validated (512 or
-// 4096)` annotation. That validation exists in exactly one place --
-// ValidateFormatOptions, on the FORMAT path -- and has never applied to a
-// segment read off a device, so a gosec finding was silenced by a justification
-// that was not true of the code it annotated.
+// The sector size carried a G115 suppression annotation justified as "sector
+// size is validated (512 or 4096)". That validation exists in exactly one
+// place -- ValidateFormatOptions, on the FORMAT path -- and has never applied
+// to a segment read off a device, so a gosec finding was silenced by a
+// justification that was not true of the code it annotated. (Paraphrased
+// rather than quoted for the same reason as kdf.go's u32 comment: gosec finds
+// its directive by literal text, in any comment.)
 //
 // The fix is the segment counterpart of validateKeyslot: ONE validator at the
 // read boundary that every consumer inherits, rather than a check per call

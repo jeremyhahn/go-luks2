@@ -46,14 +46,20 @@ import (
 //
 // # Why the sector-size suppression was worse than no comment
 //
-// The conversion carried `#nosec G115 - sector size is validated (512 or
-// 4096)`. The only sector-size validation in the package is in
-// ValidateFormatOptions, which checks the value a CALLER passes to Format. It
-// has never applied to a segment read off a device. So a gosec finding was
+// The conversion carried a G115 suppression justified as "sector size is
+// validated (512 or 4096)". The only sector-size validation in the package is
+// in ValidateFormatOptions, which checks the value a CALLER passes to Format.
+// It has never applied to a segment read off a device. So a gosec finding was
 // silenced by a justification that was not true of the code it annotated --
 // and an annotation is precisely what stops the next reader checking. There is
 // no suppression here now, and none is needed: the conversion is gone, replaced
 // by a lookup in a whitelist whose values are already uint64.
+//
+// (This paragraph paraphrases that justification rather than quoting it,
+// because gosec's nosec directive is recognized by its literal text wherever
+// it appears in a comment -- quoting it here would risk suppressing a real
+// finding on whatever line the quote landed on. Same reasoning as kdf.go's u32
+// comment.)
 //
 // # Why this is a header refusal and keyslot validation is not
 //
