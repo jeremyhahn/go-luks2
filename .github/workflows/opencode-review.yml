@@ -1,12 +1,12 @@
-# code-review-template: v21 — automated peer review on EVERY pull request.
+# code-review-template: v22 — automated peer review on EVERY pull request.
 # v2 gated the job on a `code-review` label and could skip itself green;
 # see the note on the job below. v4 added a guard step and a concurrency
 # change; v5 keeps the guard and reverts the concurrency — measured, below.
 #
-# v6 (internal issue #127) makes three changes, all about a verdict being
+# v6 (automatethethings#127) makes three changes, all about a verdict being
 # real rather than about how the review is produced:
 #   - the guard checks `.merged`/`.state` from the read it already makes, so a
-#     closed PR costs no GPU. That check used to live in the reviewer instruction file, where
+#     closed PR costs no GPU. That check used to live in review-agent.md, where
 #     it could only run after the 27B model had loaded.
 #   - the guard IGNORES PENDING reviews when it looks for a standing verdict. A
 #     draft is not an approval and not a rejection; treating it as one made two
@@ -21,14 +21,14 @@
 # (which did not). They differed in the one line deciding whether an
 # unreviewed PR can merge, and a drift check comparing STAMPS reports two
 # such files as in agreement. This file is now built FROM the deployed
-# copies rather than from its own previous contents. See internal issue #88.
+# copies rather than from its own previous contents. See automatethethings#88.
 # Source of truth: software/templates/github-actions/opencode-review.yml in
 # the company repo -- INTENT, not a measurement. On 2026-09-07 this file was
 # the stalest copy of itself in the fleet while saying exactly this line.
-# Before editing it, diff it against a deployed copy (internal issue #89).
+# Before editing it, diff it against a deployed copy (automatethethings#89).
 # Gitea-only by design.
 #
-# ONE REVIEWER: opencode, running a LOCAL model on an internal GPU host. Owner ruling
+# ONE REVIEWER: opencode, running a LOCAL model on gpu-host's GPU. Owner ruling
 # 2026-09-06, in his words: "i dont want any CODEX tokens minted or any api
 # usage for frontier models. when the codex subscription is expired then we
 # dont use it! we use opencode with whatever model is specified in the gitea
@@ -46,7 +46,7 @@
 # outlived all three facts and still said the default was qwen3.6 — a comment
 # nobody had reason to distrust, describing a step that no longer existed, in a
 # file whose executable line was already correct. That is the qwen3.6 incident
-# repeating as documentation; see internal issue #127.
+# repeating as documentation; see automatethethings#127.
 #
 # WHY THE LABEL MAP WENT, since that part is worth keeping: `model:qwen3.6`
 # selected a STOCK tag carrying temperature 0.1 and num_ctx 65536 — Qwen
@@ -104,7 +104,7 @@ on:
 # v5 therefore reverts to the v3 concurrency and keeps the guard. The transient
 # red is accepted: it is self-healing (80s on the canary) and is not fixable at
 # the workflow level. What IS fixable -- a wasted duplicate review, and a
-# duplicate overwriting a verdict -- the guard fixes. internal issue #94.
+# duplicate overwriting a verdict -- the guard fixes. automatethethings#94.
 concurrency:
   group: code-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
@@ -145,7 +145,7 @@ jobs:
     # A single job with an expression here avoids that, and Gitea 1.27.1 DOES
     # evaluate it -- verified rather than assumed, because this file already
     # records Gitea ignoring `cancel-in-progress` as specified. Probe on
-    # an internal branch probe/runs-on-expression: the jobs API reported
+    # automatethethings branch probe/runs-on-expression: the jobs API reported
     # `"labels": ["ubuntu-latest"]` for `runs-on: ${{ ... || 'ubuntu-latest' }}`
     # and the job ran. `contains()` over `labels.*.name` compares ARRAY ELEMENTS,
     # so this is an exact whole-label test, not a substring one (#113).
@@ -163,7 +163,7 @@ jobs:
     #
     # `agent:claude` now ROUTES TO A REAL RUNNER. Until 2026-09-10 it deliberately
     # landed on code-review and failed there with a named error, because the
-    # A stale runner registration pointed at a decommissioned endpoint -- the dead
+    # `omega-claude` registration pointed at 198.51.100.91:3001 -- the dead
     # pre-move Gitea -- so a `claude` label was one nothing would ever claim.
     # Owner, 2026-09-10: "agent:claude should have somewhere to go, it should be
     # going to a claude agent just like codex is going to the codex agent!"
@@ -246,7 +246,7 @@ jobs:
 
           # A PR that is merged or closed cannot receive a review: Gitea answers
           # the POST with HTTP 422, so everything spent getting there is thrown
-          # away. This was checked by the MODEL, in step 2 of the reviewer instruction file,
+          # away. This was checked by the MODEL, in step 2 of review-agent.md,
           # which means it was checked after the container started, the 27B model
           # loaded and the prompt ran -- 31 GPU-minutes in three days by the
           # prompt's own count. It is a field of the read above. Check it here.
@@ -272,7 +272,7 @@ jobs:
           # Two steps read `.draft` and I added the output to the wrong one. The
           # confirmation step keeps its OWN read deliberately -- a gate should
           # re-derive the fact it enforces rather than trust an earlier step's
-          # output. Found by codex on a live review; see internal issue #127 and
+          # output. Found by codex on a live review; see automatethethings#127 and
           # software/scripts/check-workflow-outputs.py, which now checks
           # mechanically that every steps.X.outputs.Y read has a write in step X.
           echo "is_draft=$(printf '%s' "$pr" | jq -r '.draft // false')" >> "$GITHUB_OUTPUT"
@@ -447,7 +447,7 @@ jobs:
 
           OPENCODE_DEFAULT_MODEL="review-q8"
           CODEX_DEFAULT_MODEL="gpt-5.5"
-          OLLAMA="${OLLAMA_URL:-http://localhost:11434}"
+          OLLAMA="${OLLAMA_URL:-http://198.51.100.91:11434}"
 
           ollama_models() { curl -sS --max-time 10 "$OLLAMA/api/tags" | jq -r '.models[].name' | sort -u; }
           label_exists() { printf '%s' "$LABELS" | jq -e --arg n "$1" 'index($n) != null' >/dev/null 2>&1; }
@@ -658,7 +658,7 @@ jobs:
               # `claude-*` passes straight through, so a model released tomorrow works
               # without an edit here -- same reasoning as the codex branch below.
               #
-              # THE FLOOR IS NOT THIS FILE'S RULE. the company model-usage policy, which the
+              # THE FLOOR IS NOT THIS FILE'S RULE. conventions/model-usage.md, which the
               # owner set, says substantive work never runs below Opus 5 and that Haiku
               # and stale versions are prohibited. A code review is substantive, so a
               # below-floor label is refused HERE, loudly, instead of quietly producing a
@@ -668,12 +668,12 @@ jobs:
                 fable|fable-5.1|fable-5-1|claude-fable-5-1)   resolved=claude-fable-5-1 ;;
                 sonnet|sonnet-5|claude-sonnet-5)
                   echo "::error::model '$model' is below the Opus 5 floor for review work."
-                  echo "::error::the company model-usage policy reserves Sonnet for quick, trivial,"
+                  echo "::error::conventions/model-usage.md reserves Sonnet for quick, trivial,"
                   echo "::error::mechanical tasks; judging a pull request is not one. Use"
                   echo "::error::model:opus or model:fable-5.1, or change the convention first."
                   exit 1 ;;
                 haiku*|claude-haiku*)
-                  echo "::error::model '$model' is prohibited by the company model-usage policy."
+                  echo "::error::model '$model' is prohibited by conventions/model-usage.md."
                   exit 1 ;;
                 claude-*)                                     resolved="$model" ;;
                 *)
@@ -776,7 +776,7 @@ jobs:
           # what `/pulls/{n}/files` reports. Verified on go-xkms#452 and on two
           # PRs whose base is not `main`.
           #
-          # FAIL CLOSED. the reviewer instruction file no longer tells the model how to derive a
+          # FAIL CLOSED. review-agent.md no longer tells the model how to derive a
           # diff, so a missing one would mean reviewing blind or silently going
           # back to git merge-base -- exactly the cost this removes. An
           # unreadable diff is not a degraded review, it is no review.
@@ -791,25 +791,38 @@ jobs:
           #
           # `.review/` is untracked and outside the diff, so it cannot be
           # mistaken for part of the change under review.
-          REVIEW_DIR="${GITHUB_WORKSPACE:-$PWD}/.review"
-          mkdir -p "$REVIEW_DIR"
-          diff_code=$(curl -sS -o "$REVIEW_DIR/pr.diff" -w '%{http_code}' \
-                      -H "Authorization: token $GITEA_TOKEN" \
-                      "$GITEA_API/repos/jeremyhahn/$REPO/pulls/$PR_NUM.diff")
-          if [ "$diff_code" != "200" ]; then
-            echo "::error::could not fetch the diff for PR $PR_NUM (HTTP $diff_code)."
-            echo "::error::The reviewer is told where the diff is and is told"
-            echo "::error::not to derive one, so there is nothing to review against."
-            exit 1
-          fi
-          grep '^diff --git' "$REVIEW_DIR/pr.diff" | sed 's|^diff --git a/||; s| b/.*$||' | sort -u > "$REVIEW_DIR/pr.files"
-          n_files=$(grep -c . "$REVIEW_DIR/pr.files" || true)
-          if [ "$n_files" -eq 0 ]; then
-            echo "::error::the diff for PR $PR_NUM names no files ($(wc -c < "$REVIEW_DIR/pr.diff") bytes)."
+          # THE REVIEWER GOES TO GITEA ITSELF. Owner instruction 2026-09-11:
+          # "remove the pr.diff bullshit and allow the agent to work directly
+          # against gitea, view the entire codebase, etc."
+          #
+          # This step used to download the whole `.diff` into `.review/pr.diff`
+          # and the prompt pointed the model at it. Two problems, and the owner
+          # named the important one:
+          #
+          #   1. It framed the DIFF as the unit of review, so the reviewer
+          #      stayed inside the changed lines and could not see into the
+          #      layers below -- the library a service drives, the caller that
+          #      assumed the old behaviour -- which is where the defects are.
+          #   2. It does not scale. MEASURED on go-quicbaas#821: `.diff` is
+          #      8.4 MB and `.patch` 15.7 MB, while `/pulls/N/files` is 2.9 KB.
+          #      Handing a model an 8 MB blob crowds out the reading that finds
+          #      bugs.
+          #
+          # So nothing is prefetched into the checkout now. We only ASSERT that
+          # the PR names files -- refusing to spend a reviewer on nothing -- and
+          # the prompt tells the model the exact API calls. The anti-derivation
+          # rule survives in the prompt, because reconstructing the file list
+          # with git merge-base cost ~7 minutes of a 19-minute review and landed
+          # on the same list Gitea already reports.
+          files_json=$(curl -sS -H "Authorization: token $GITEA_TOKEN" \
+                       "$GITEA_API/repos/jeremyhahn/$REPO/pulls/$PR_NUM/files?limit=100" 2>/dev/null || true)
+          n_files=$(printf '%s' "$files_json" | jq -r 'if type=="array" then length else 0 end' 2>/dev/null || echo 0)
+          if [ "${n_files:-0}" -eq 0 ]; then
+            echo "::error::PR $PR_NUM reports no changed files from $GITEA_API/repos/jeremyhahn/$REPO/pulls/$PR_NUM/files."
             echo "::error::Refusing to run a review with nothing to review."
             exit 1
           fi
-          echo "Fetched the PR diff from Gitea: $n_files file(s), $(wc -c < "$REVIEW_DIR/pr.diff") bytes into $REVIEW_DIR."
+          echo "PR $PR_NUM changes $n_files file(s) (Gitea's own list; the reviewer queries it directly)."
 
           # Does a SUBMITTED verdict exist on this exact head? PENDING is a
           # draft and does not count -- see the guard above.
@@ -839,8 +852,12 @@ jobs:
             draft_fact="This pull request is NOT a draft. Any verdict is available to you."
           fi
           facts="FACTS ABOUT THIS PULL REQUEST -- already established, do not re-derive:
-          - The authoritative diff is at $REVIEW_DIR/pr.diff and its file list at
-            $REVIEW_DIR/pr.files. Both are inside the checkout and readable.
+          - This pull request changes $n_files file(s). Gitea's own list is at
+            \$GITEA_API/repos/jeremyhahn/\$REPO/pulls/\$PR_NUM/files -- authoritative,
+            so do not reconstruct it with git diff or merge-base.
+          - The repository is checked out at the head commit with full history, and
+            you may read ANY file in it, and any file in any other repository in the
+            portfolio, to judge whether this change is correct.
           - $draft_fact
           "
 
@@ -950,7 +967,7 @@ jobs:
                   -s danger-full-access \
                   "$facts
 
-          $(cat the reviewer instruction file on the runner)${1:+
+          $(cat /opt/review/review-agent.md)${1:+
 
           $1}"
                 ;;
@@ -971,7 +988,7 @@ jobs:
                   --permission-mode bypassPermissions \
                   "${1:-$facts
 
-          $(cat the reviewer instruction file on the runner)}"
+          $(cat /opt/review/review-agent.md)}"
                 ;;
               *)
                 # shellcheck disable=SC2086
@@ -980,7 +997,7 @@ jobs:
                   --print-logs --log-level ERROR \
                   "${1:-$facts
 
-          $(cat the reviewer instruction file on the runner)}"
+          $(cat /opt/review/review-agent.md)}"
                 ;;
             esac
           }
@@ -1003,7 +1020,7 @@ jobs:
           # It stopped talking. No review existed, and the job would have been
           # green without the confirm step below.
           #
-          # the reviewer instruction file now forbids ending a turn on narration, but a prompt
+          # review-agent.md now forbids ending a turn on narration, but a prompt
           # cannot guarantee a turn-ending behaviour, so this does not rely on it.
           # `--continue` RESUMES THE SAME SESSION with its context intact
           # (verified: a token stored in one invocation was recalled in the next),
@@ -1030,7 +1047,7 @@ jobs:
       # MEASURED, go-luks2 #137 (2026-09-09, task 53362): the model wrote a real
       # 1620-character review, POSTed it correctly, checked that the POST was
       # accepted -- exactly as instructed -- and the job went GREEN with the
-      # review filed as a PENDING draft. the reviewer instruction file told it `event` must be
+      # review filed as a PENDING draft. review-agent.md told it `event` must be
       # `APPROVE`; Gitea's enum is `APPROVED` (swagger CreatePullReviewOptions),
       # and Gitea does not reject an unrecognised event, it accepts the POST with
       # HTTP 200 and degrades the review to PENDING. A draft is visible to its
@@ -1112,7 +1129,7 @@ jobs:
               # AN APPROVAL CONTRADICTS THE AUTHOR ON A DRAFT. The old
               # pr-review.sh refused to post one ("refusing to APPROVE a pull
               # request its author has marked unfinished"); deleting the script
-              # left that as prose in the reviewer instruction file and nothing enforcing it.
+              # left that as prose in review-agent.md and nothing enforcing it.
               # This restores it as a check. REQUEST_CHANGES and COMMENT on a
               # draft are fine and wanted -- only the approval is refused.
               case "$state" in
