@@ -88,9 +88,15 @@ type AddKeyOptions struct {
 // for one parameter, on adjacent APIs. Propagating it is what makes the refusal
 // reach every caller.
 //
-// The Argon2 costs below still use > 0. That asymmetry is deliberate and
-// narrow: those have no calibration and no equivalent refusal to reach, so
-// changing them would alter behavior no defect has been reported against.
+// The Argon2 costs use != 0 for the same reason (#112). A caller that passes a
+// negative gets a typed error instead of a silently-defaulted keyslot, which is
+// the same contract PBKDFIterTime has on the adjacent API.
+//
+// PROPAGATING REQUIRED THE REFUSAL TO EXIST FIRST. deriveArgon2id/i bounded
+// Time and CPUs but NOT Memory, so forwarding a negative memory cost would have
+// turned a silent default into a ~4 TiB allocation -- strictly worse than the
+// defect. The floor was added there in the same change; a producer must not be
+// widened into a consumer that cannot refuse what it will now receive.
 func addKeyFormatOptions(opts *AddKeyOptions) FormatOptions {
 	formatOpts := FormatOptions{
 		KDFType:        "argon2id",
@@ -110,13 +116,13 @@ func addKeyFormatOptions(opts *AddKeyOptions) FormatOptions {
 	if opts.Hash != "" {
 		formatOpts.HashAlgo = opts.Hash
 	}
-	if opts.Argon2Time > 0 {
+	if opts.Argon2Time != 0 {
 		formatOpts.Argon2Time = opts.Argon2Time
 	}
-	if opts.Argon2Memory > 0 {
+	if opts.Argon2Memory != 0 {
 		formatOpts.Argon2Memory = opts.Argon2Memory
 	}
-	if opts.Argon2Parallel > 0 {
+	if opts.Argon2Parallel != 0 {
 		formatOpts.Argon2Parallel = opts.Argon2Parallel
 	}
 	if opts.PBKDFIterTime != 0 {

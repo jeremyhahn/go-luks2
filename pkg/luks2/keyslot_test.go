@@ -11,8 +11,10 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"math"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -1152,6 +1154,276 @@ func TestEveryKeyslotRemovalPathAdvancesTheSequenceID(t *testing.T) {
 			if after.SequenceID <= before.SequenceID {
 				t.Fatalf("the persisted sequence id went %d -> %d; two header copies could now carry different metadata at the same version, and a reader could not tell which is current",
 					before.SequenceID, after.SequenceID)
+			}
+		})
+	}
+}
+
+// TestAddKeyOptionsDoesNotSilentlyDiscardANegativeArgon2Cost is #112.
+//
+// addKeyFormatOptions copied each Argon2 cost only when it was `> 0`, so a
+// caller passing -1 got the package DEFAULT and no indication that the value
+// had been ignored. The sibling parameter PBKDFIterTime had used `!= 0` since
+// #102, so one struct carried two contracts for the same kind of field.
+func TestAddKeyOptionsDoesNotSilentlyDiscardANegativeArgon2Cost(t *testing.T) {
+	for _, tc := range []struct {
+		field string
+		opts  AddKeyOptions
+		got   func(FormatOptions) int
+		deflt int
+	}{
+		{"Argon2Time", AddKeyOptions{Argon2Time: -1}, func(f FormatOptions) int { return f.Argon2Time }, 4},
+		{"Argon2Memory", AddKeyOptions{Argon2Memory: -1}, func(f FormatOptions) int { return f.Argon2Memory }, 1048576},
+		{"Argon2Parallel", AddKeyOptions{Argon2Parallel: -1}, func(f FormatOptions) int { return f.Argon2Parallel }, 4},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			opts := tc.opts
+			got := tc.got(addKeyFormatOptions(&opts))
+			if got == tc.deflt {
+				t.Fatalf("%s: -1 was discarded and the default %d used instead. The caller passed a "+
+					"value and the library ignored it without saying so (#112).", tc.field, tc.deflt)
+			}
+			if got != -1 {
+				t.Fatalf("%s = %d, want the caller's -1 carried through to where it can be refused", tc.field, got)
+			}
+		})
+	}
+}
+
+// TestZeroStillMeansUseTheDefault is the control. `!= 0` must not turn an
+// unset field into a propagated zero, or every caller using AddKeyOptions{}
+// would get a KDF with zero cost.
+func TestZeroStillMeansUseTheDefault(t *testing.T) {
+	f := addKeyFormatOptions(&AddKeyOptions{})
+	if f.Argon2Time != 4 || f.Argon2Memory != 1048576 || f.Argon2Parallel != 4 {
+		t.Fatalf("an unset AddKeyOptions no longer yields the defaults: time=%d memory=%d parallel=%d",
+			f.Argon2Time, f.Argon2Memory, f.Argon2Parallel)
+	}
+}
+
+// argon2Derivations is every function that converts a signed KDF cost with
+// uint32 and calls into x/crypto/argon2. The tests below are TABLES OVER IT,
+// not one function tested and its twin assumed.
+//
+// The first version of this PR guarded BOTH derivations and tested ONE.
+// deriveArgon2i was never invoked by any test in the package -- so the fix was
+// two-of-two and the evidence was one-of-two, which is the exact shape this
+// branch diagnosed four hours earlier: a partial demonstration reads as the
+// most convincing possible argument that the rest was considered.
+//
+// A table forces the enumeration to be written down where a reviewer can count
+// it. Adding a third derivation here without a guard fails immediately.
+var argon2Derivations = map[string]func([]byte, []byte, *KDF, int) ([]byte, error){
+	"deriveArgon2i":  deriveArgon2i,
+	"deriveArgon2id": deriveArgon2id,
+}
+
+// aboveUint32 returns a value larger than MaxUint32 where an int can hold one,
+// and reports whether it could.
+//
+// On a 64-bit platform that is MaxUint32+4. On a 32-bit platform no int can
+// exceed MaxUint32, so the over-range condition cannot be constructed and the
+// caller must not assert it -- which is different from skipping a test that
+// could have run, and is why this returns the fact rather than calling t.Skip.
+func aboveUint32() int {
+	if strconv.IntSize > 32 {
+		// Via a variable: int(uint64(...) + 4) is a CONSTANT expression, so
+		// the conversion is range-checked at compile time and still does not
+		// build on a 32-bit target. Assigning first makes it an ordinary
+		// runtime conversion, which this branch never reaches there.
+		v := uint64(math.MaxUint32) + 4
+		return int(v)
+	}
+	return math.MaxInt
+}
+
+func canExceedUint32() bool { return strconv.IntSize > 32 }
+
+// TestAboveUint32AgreesWithCanExceedUint32 pins the invariant the tables rely
+// on, and it holds on every architecture rather than only where it matters.
+//
+// canExceedUint32 existed and was NEVER CALLED while a comment claimed it was
+// what kept the over-range cases off 32-bit. An unused helper reads exactly
+// like an enforced one.
+func TestAboveUint32AgreesWithCanExceedUint32(t *testing.T) {
+	over := uint64(aboveUint32()) > math.MaxUint32
+	if over != canExceedUint32() {
+		t.Fatalf("canExceedUint32() = %v but aboveUint32() = %d %s MaxUint32 -- the tables gate on "+
+			"the first and pass the second, so they must agree",
+			canExceedUint32(), aboveUint32(), map[bool]string{true: ">", false: "<="}[over])
+	}
+	if !canExceedUint32() && uint64(aboveUint32()) > math.MaxUint32 {
+		t.Fatal("a 32-bit platform produced a value above MaxUint32, which no int there can hold")
+	}
+}
+
+// TestEveryArgon2DerivationRefusesACostItCannotRepresent covers both directions
+// of the uint32 conversion, for every derivation.
+//
+// A NEGATIVE wraps to something enormous: -1 KiB becomes 4294967295 KiB, and
+// argon2 is asked for a ~4 TiB matrix. That is an allocation, not an error.
+//
+// A huge POSITIVE truncates to something small: 2^32+4 becomes 3. The caller
+// asks for an expensive KDF and silently gets a trivial one, which is the
+// dangerous direction for a work factor.
+//
+// Neither is reported by the conversion itself, which is what the blanket
+// `#nosec G115` on those lines was suppressing.
+func TestEveryArgon2DerivationRefusesACostItCannotRepresent(t *testing.T) {
+	if len(argon2Derivations) < 2 {
+		t.Fatalf("argon2Derivations has %d entries; both derivations must be covered",
+			len(argon2Derivations))
+	}
+
+	neg := -1
+	big := aboveUint32()
+	ok := 4
+	mem := 1048576
+
+	type costCase struct {
+		name string
+		kdf  KDF
+	}
+
+	// The negative cases run everywhere. The over-range cases are APPENDED
+	// only where an int can actually exceed MaxUint32.
+	//
+	// This is not decoration and the comment used to be a lie: an earlier
+	// version said the over-range cases "are not run" on 32-bit and nothing
+	// enforced it, while canExceedUint32 sat unused three functions away. On a
+	// 32-bit target aboveUint32() clamps to MaxInt, which IS representable as
+	// a uint32 -- so the guard accepts it and argon2 is asked for 2.1 billion
+	// iterations, or two terabytes. The suite would hang or be killed on an
+	// architecture this PR added a CI leg for.
+	//
+	// A case that cannot exist on a platform is INEXPRESSIBLE there, not
+	// skipped -- but the difference only holds if something actually omits it.
+	// Prose asserting a property the code does not have is the shape this
+	// branch has now produced three times.
+	cases := []costCase{
+		{"negative time", KDF{Time: &neg, Memory: &mem, CPUs: &ok}},
+		{"negative memory", KDF{Time: &ok, Memory: &neg, CPUs: &ok}},
+		{"negative cpus", KDF{Time: &ok, Memory: &mem, CPUs: &neg}},
+	}
+	if canExceedUint32() {
+		cases = append(cases,
+			costCase{"time above MaxUint32", KDF{Time: &big, Memory: &mem, CPUs: &ok}},
+			costCase{"memory above MaxUint32", KDF{Time: &ok, Memory: &big, CPUs: &ok}},
+		)
+	}
+
+	for fname, derive := range argon2Derivations {
+		for _, tc := range cases {
+			t.Run(fname+"/"+tc.name, func(t *testing.T) {
+				kdf := tc.kdf
+				if _, err := derive([]byte("pass"), []byte("saltsaltsaltsalt"), &kdf, 32); err == nil {
+					t.Fatalf("%s accepted a %s -- uint32 changes the value rather than refusing it",
+						fname, tc.name)
+				}
+			})
+		}
+	}
+}
+
+// TestANegativeCostIsRefusedAsTooSmallNotTooLarge pins the ORDER of the two
+// guards, which is not visible from either one alone.
+//
+// The representable-range check uses uint64 on the operand, and uint64(-1) is
+// enormous. If it ran first, a negative would be refused by the MAXIMUM branch
+// and told it is too large: the right refusal with the wrong diagnosis, sending
+// the next reader to the opposite end of the range.
+//
+// Both orderings produce an error, so a test asserting only "it failed" cannot
+// tell them apart -- which is why this asserts the REASON. A later tidy-up that
+// hoists the range check fails here rather than silently degrading the message.
+func TestANegativeCostIsRefusedAsTooSmallNotTooLarge(t *testing.T) {
+	neg := -1
+	ok := 4
+	mem := 1048576
+
+	for fname, derive := range argon2Derivations {
+		for _, tc := range []struct {
+			name string
+			kdf  KDF
+		}{
+			{"time", KDF{Time: &neg, Memory: &mem, CPUs: &ok}},
+			{"memory", KDF{Time: &ok, Memory: &neg, CPUs: &ok}},
+		} {
+			t.Run(fname+"/"+tc.name, func(t *testing.T) {
+				kdf := tc.kdf
+				_, err := derive([]byte("pass"), []byte("saltsaltsaltsalt"), &kdf, 32)
+				if err == nil {
+					t.Fatalf("%s accepted a negative %s cost", fname, tc.name)
+				}
+				if strings.Contains(err.Error(), "can represent") {
+					t.Fatalf("%s refused a NEGATIVE %s cost as though it were too large: %v\n"+
+						"The representable-range check ran before the floor -- uint64(-1) is "+
+						"enormous, so the diagnosis points at the wrong end of the range.",
+						fname, tc.name, err)
+				}
+			})
+		}
+	}
+}
+
+// TestEveryArgon2DerivationRefusesAKeySizeItCannotRepresent is the THIRD field
+// on that conversion line, and the one whose justification was false.
+//
+// The old comment said a key longer than 4 GiB "would exhaust memory first".
+// MEASURED: it does not. The truncation happens BEFORE argon2 allocates, so a
+// request for 4294967300 bytes returned a FOUR BYTE KEY and no error -- the
+// caller asked for a long key and got a short one, silently. That is the
+// truncation direction, which succeeds and has no symptom, applied to the one
+// field whose value is the key material itself.
+func TestEveryArgon2DerivationRefusesAKeySizeItCannotRepresent(t *testing.T) {
+	time, mem, cpus := 1, 8, 1
+
+	for fname, derive := range argon2Derivations {
+		type sizeCase struct {
+			name       string
+			keySize    int
+			wantReason string
+		}
+		sizes := []sizeCase{{"negative", -1, "must not be negative"}}
+		if canExceedUint32() {
+			// Same reason as the cost table: on 32-bit this value clamps to
+			// MaxInt, which the guard accepts, and argon2 would be asked to
+			// allocate a ~2 GiB key.
+			sizes = append(sizes, sizeCase{"above MaxUint32", aboveUint32(), "can represent"})
+		}
+
+		for _, tc := range sizes {
+			t.Run(fname+"/"+tc.name, func(t *testing.T) {
+				kdf := KDF{Time: &time, Memory: &mem, CPUs: &cpus}
+				key, err := derive([]byte("pass"), []byte("saltsaltsaltsalt"), &kdf, tc.keySize)
+				if err == nil {
+					t.Fatalf("%s accepted a %s key size and returned %d bytes -- the caller asked "+
+						"for %d and received a key it did not request, with no error",
+						fname, tc.name, len(key), tc.keySize)
+				}
+				// ASSERT THE REASON. uint64(-1) is enormous, so a negative is
+				// refused by the MAXIMUM branch too -- the negative branch of
+				// u32 exists only to say which end of the range was wrong, and
+				// without this assertion deleting it changes nothing that any
+				// test can see. Measured: removing it left the suite green.
+				if !strings.Contains(err.Error(), tc.wantReason) {
+					t.Errorf("%s refused a %s key size for the wrong stated reason: %v\n"+
+						"want a message containing %q", fname, tc.name, err, tc.wantReason)
+				}
+			})
+		}
+	}
+}
+
+// TestEveryArgon2DerivationAcceptsOrdinaryCosts is the control. Without it a
+// derivation that refused everything would pass every case above.
+func TestEveryArgon2DerivationAcceptsOrdinaryCosts(t *testing.T) {
+	time, mem, cpus := 4, 65536, 4
+	for fname, derive := range argon2Derivations {
+		t.Run(fname, func(t *testing.T) {
+			kdf := KDF{Time: &time, Memory: &mem, CPUs: &cpus}
+			if _, err := derive([]byte("pass"), []byte("saltsaltsaltsalt"), &kdf, 32); err != nil {
+				t.Fatalf("%s refused an ordinary cost set: %v", fname, err)
 			}
 		})
 	}

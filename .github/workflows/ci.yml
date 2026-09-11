@@ -584,6 +584,48 @@ jobs:
           GOARCH: arm64
         run: go build -o luks-linux-arm64 ./cmd/luks2
 
+      # 32-BIT TARGETS, COMPILE ONLY. Both existing legs are 64-bit, so nothing
+      # in this repository had ever compiled for a platform where `int` is 32
+      # bits -- and a guard added in #112 to bound a uint32 conversion did not
+      # build on 386 or arm, while building fine on amd64. An integer-width
+      # defect in the fix for integer-width defects, invisible to CI.
+      #
+      # The PACKAGE is what matters here, not just ./cmd/luks2: the defect was
+      # in pkg/luks2 and a binary-only build would have missed it.
+      #
+      # `go vet`, NOT `go build`, and that distinction is the leg. go build does
+      # not compile TEST files, so the first version of this step -- added
+      # specifically to catch integer-width defects on 32-bit -- was
+      # structurally unable to see them in tests, which is exactly where the
+      # next FOUR landed. It passed while `go vet` failed on the same target and
+      # the same commit.
+      #
+      # vet type-checks tests without running them, which is the whole check
+      # here: every defect in this class is a compile-time one, and the suite
+      # cannot be executed on a foreign architecture anyway. Running it under
+      # emulation would be slow and would test qemu as much as the code.
+      #
+      # vet reports ONE error per package, so fixing a site reveals the next.
+      # Four were found that way and the count was not knowable in advance --
+      # if this leg fires, re-run it after each fix rather than assuming the
+      # first message is the whole list.
+      #
+      # This is not hypothetical for the portfolio: go-trusted-platform targets
+      # edge gateways, and 32-bit ARM is a real consumer architecture for a
+      # disk-encryption library. A Layer 0 library that cannot build there is a
+      # problem discovered at the consumer, which is the most expensive place.
+      - name: Vet linux/386 (32-bit int, compiles tests)
+        env:
+          GOOS: linux
+          GOARCH: "386"
+        run: go vet ./...
+
+      - name: Vet linux/arm (32-bit int, compiles tests)
+        env:
+          GOOS: linux
+          GOARCH: arm
+        run: go vet ./...
+
       - name: Upload artifacts
         if: github.server_url == 'https://github.com'
         uses: actions/upload-artifact@v7

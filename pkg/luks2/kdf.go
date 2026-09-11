@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"math"
 	"strings"
 	"time"
 
@@ -333,42 +334,80 @@ func hashOutputLen(hashAlgo string) (int, error) {
 	return hashFunc().Size(), nil
 }
 
-// deriveArgon2i derives a key using Argon2i
-func deriveArgon2i(passphrase, salt []byte, kdf *KDF, keySize int) ([]byte, error) {
-	if kdf.Time == nil || kdf.Memory == nil || kdf.CPUs == nil {
-		return nil, fmt.Errorf("Argon2i requires time, memory, and cpus parameters")
+// u32 converts a cost or size to the uint32 the argon2 interface takes,
+// refusing what that type cannot represent.
+//
+// REPRESENTATION ONLY. A policy ceiling on a caller's deliberate choice is
+// DeriveKey's business, and it declines them for a reason that is sound: an
+// untrusted-input bound applied to a caller's own decision rejects it with an
+// error shaped like a malformed header. That argument is about what is WISE.
+// This is about what the call can HOLD -- above MaxUint32 the conversion does
+// not reject a value, it changes one.
+//
+// # Why a helper rather than a checked conversion at each site
+//
+// Four conversions shared ONE BLANKET G115 SUPPRESSION. Round one justified
+// one of them;
+// round two justified all four; round three found that the fourth
+// justification was FALSE -- keySize was said to exhaust memory before it could
+// truncate, and it does not. MEASURED: a request for 4294967300 bytes returns
+// a FOUR BYTE KEY and no error, because the truncation happens before argon2
+// allocates anything.
+//
+// Each round produced a better justification for a suppression that should not
+// exist. The helper makes the unchecked conversion unwritable instead: the
+// compiler forces every call site to handle the error, so the enumeration is
+// ENFORCED rather than described, and there is no suppression left to get right.
+//
+// The directive is not written out anywhere in this comment on purpose: gosec
+// acts on that text wherever it appears in one, so quoting it here would
+// suppress the very findings this helper exists to surface. Same defect as a
+// guard that flags a pattern quoted in its own documentation.
+func u32(op, field string, v int) (uint32, error) {
+	if v < 0 {
+		return 0, &CryptoError{Op: op, Err: fmt.Errorf(
+			"%s must not be negative (got %d); the conversion below would turn it into a very large one",
+			field, v)}
 	}
-
-	// Validate CPUs fits in uint8 (Argon2 parallelism is 1-255)
-	cpus := *kdf.CPUs
-	if cpus < 1 || cpus > 255 {
-		return nil, &CryptoError{Op: "argon2i", Err: fmt.Errorf("cpus must be between 1 and 255")}
+	if uint64(v) > math.MaxUint32 {
+		return 0, &CryptoError{Op: op, Err: fmt.Errorf(
+			"%s %d exceeds what the argon2 interface can represent (uint32); the conversion would "+
+				"silently truncate it rather than fail", field, v)}
 	}
-
-	// And the round count, which x/crypto/argon2 PANICS on rather than
-	// refusing: "argon2: number of rounds too small" for time < 1. The cpus
-	// bound directly above was checked and this one was not, which is what made
-	// the omission easy to miss -- both are panics in the same function, from
-	// the same header fields, three lines apart.
-	if *kdf.Time < 1 {
-		return nil, &CryptoError{Op: "argon2i", Err: fmt.Errorf("time cost must be at least 1")}
-	}
-
-	// #nosec G115 - bounds checked above (cpus is 1-255)
-	key := argon2.Key(passphrase, salt, uint32(*kdf.Time), uint32(*kdf.Memory), uint8(cpus), uint32(keySize))
-	return key, nil
+	return uint32(v), nil
 }
 
-// deriveArgon2id derives a key using Argon2id
-func deriveArgon2id(passphrase, salt []byte, kdf *KDF, keySize int) ([]byte, error) {
+// deriveArgon2 is the ONE implementation behind both Argon2 variants.
+//
+// It exists because the two derivations were 63 lines that differed on exactly
+// TWO: the name in their error messages, and `argon2.Key` versus
+// `argon2.IDKey`. Everything else -- the three nil checks, the parallelism
+// bound, the round-count bound, the memory floor and its reasoning, the three
+// checked uint32 conversions -- was duplicated verbatim, including an
+// eighteen-line comment. Duplication of a VALIDATION sequence is the dangerous
+// kind: a bound added to one copy and not the other is invisible, and the
+// memory floor below is itself a bound that was missing from a copy for
+// exactly that reason.
+//
+// `keyFn` is the variant. `argon2.Key` and `argon2.IDKey` share a signature
+// exactly, so no adapter is needed and no behavior is reinterpreted here.
+//
+// `op` is lower case because it is the CryptoError.Op vocabulary the rest of
+// this file uses; `name` is the human spelling that appears in the
+// missing-parameter message, kept distinct so neither message changes.
+func deriveArgon2(
+	op, name string,
+	keyFn func(password, salt []byte, time, memory uint32, threads uint8, keyLen uint32) []byte,
+	passphrase, salt []byte, kdf *KDF, keySize int,
+) ([]byte, error) {
 	if kdf.Time == nil || kdf.Memory == nil || kdf.CPUs == nil {
-		return nil, fmt.Errorf("Argon2id requires time, memory, and cpus parameters")
+		return nil, fmt.Errorf("%s requires time, memory, and cpus parameters", name)
 	}
 
 	// Validate CPUs fits in uint8 (Argon2 parallelism is 1-255)
 	cpus := *kdf.CPUs
 	if cpus < 1 || cpus > 255 {
-		return nil, &CryptoError{Op: "argon2id", Err: fmt.Errorf("cpus must be between 1 and 255")}
+		return nil, &CryptoError{Op: op, Err: fmt.Errorf("cpus must be between 1 and 255")}
 	}
 
 	// And the round count, which x/crypto/argon2 PANICS on rather than
@@ -377,12 +416,61 @@ func deriveArgon2id(passphrase, salt []byte, kdf *KDF, keySize int) ([]byte, err
 	// the omission easy to miss -- both are panics in the same function, from
 	// the same header fields, three lines apart.
 	if *kdf.Time < 1 {
-		return nil, &CryptoError{Op: "argon2id", Err: fmt.Errorf("time cost must be at least 1")}
+		return nil, &CryptoError{Op: op, Err: fmt.Errorf("time cost must be at least 1")}
 	}
 
-	// #nosec G115 - bounds checked above (cpus is 1-255)
-	key := argon2.IDKey(passphrase, salt, uint32(*kdf.Time), uint32(*kdf.Memory), uint8(cpus), uint32(keySize))
-	return key, nil
+	// AND THE MEMORY COST, which was the third field and the one still
+	// unchecked. Time and CPUs were bounded here; Memory was not, and it is the
+	// one whose failure is silent rather than a panic: these are signed ints
+	// out of JSON and the call below converts with uint32, so -1 becomes
+	// 4294967295 KiB and argon2 is asked for a FOUR TERABYTE matrix. Not an
+	// error -- an allocation.
+	//
+	// minArgon2Memory is validateKDFCost's own constant rather than a second
+	// copy, because two spellings of one bound drift. Only the floor is
+	// enforced here, matching the Time check directly above: the ceiling is the
+	// read path's job, and applying it here could refuse a foreign volume that
+	// currently unlocks.
+	if *kdf.Memory < minArgon2Memory {
+		return nil, &CryptoError{Op: op, Err: fmt.Errorf(
+			"memory cost %d is below the %d KiB floor; a negative value becomes ~4 TiB after the uint32 conversion",
+			*kdf.Memory, minArgon2Memory)}
+	}
+
+	// A representation limit, NOT the policy ceiling this file deliberately
+	// declines (see DeriveKey: an untrusted-input ceiling applied to a caller's
+	// own deliberate choice rejects it with an error shaped like a malformed
+	// header). Above MaxUint32 the conversion below does not reject the value,
+	// it SILENTLY CHANGES it -- 2^32+4 becomes 4 -- so the guard is about what
+	// the call can represent rather than about what is a sensible cost.
+
+	t32, err := u32(op, "time cost", *kdf.Time)
+	if err != nil {
+		return nil, err
+	}
+	m32, err := u32(op, "memory cost", *kdf.Memory)
+	if err != nil {
+		return nil, err
+	}
+	k32, err := u32(op, "key length", keySize)
+	if err != nil {
+		return nil, err
+	}
+
+	// cpus is the one conversion still written inline: it is bounded 1..255
+	// directly above, which is narrower than uint8 itself, so there is nothing
+	// for a checked conversion to add.
+	return keyFn(passphrase, salt, t32, m32, uint8(cpus), k32), nil
+}
+
+// deriveArgon2i derives a key using Argon2i.
+func deriveArgon2i(passphrase, salt []byte, kdf *KDF, keySize int) ([]byte, error) {
+	return deriveArgon2("argon2i", "Argon2i", argon2.Key, passphrase, salt, kdf, keySize)
+}
+
+// deriveArgon2id derives a key using Argon2id.
+func deriveArgon2id(passphrase, salt []byte, kdf *KDF, keySize int) ([]byte, error) {
+	return deriveArgon2("argon2id", "Argon2id", argon2.IDKey, passphrase, salt, kdf, keySize)
 }
 
 // PBKDF2 iteration calibration.

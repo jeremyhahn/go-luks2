@@ -47,7 +47,12 @@ func TestExcessiveKDFCostIsRefusedBeforeDeriving(t *testing.T) {
 	}
 	good := metadata.Keyslots["0"]
 
-	huge := 1 << 31
+	// 1<<30, not 1<<31. The point is "past the ceiling", and 1<<31 does not
+	// fit in an int on a 32-bit platform -- the file failed to compile for
+	// GOARCH=386 and arm, which nothing noticed because no CI leg compiled
+	// tests for a 32-bit target. A billion iterations is as far past the
+	// ceiling as two billion for this assertion's purposes.
+	huge := 1 << 30
 	negative := -1
 	zero := 0
 	four := 4
@@ -58,7 +63,7 @@ func TestExcessiveKDFCostIsRefusedBeforeDeriving(t *testing.T) {
 		kdf  *KDF
 	}{
 		{
-			// ~2 billion iterations. Measured: cryptsetup does not refuse this
+			// ~1 billion iterations. Measured: cryptsetup does not refuse this
 			// at format time -- it simply runs, and my probe was still running
 			// when a ten-minute timeout fired.
 			name: "pbkdf2 iterations past the ceiling",
@@ -265,4 +270,53 @@ func pbkdf2KDF(iterations int) *KDF {
 
 func argon2KDF(t, memory, cpus int) *KDF {
 	return &KDF{Type: "argon2id", Salt: "c2FsdA==", Time: &t, Memory: &memory, CPUs: &cpus}
+}
+
+// TestCreateArgon2KDFCarriesANegativeCostToTheDerivation covers the SEAM the
+// #112 fix depends on and which nothing else asserted.
+//
+// The propagation chain is AddKeyOptions -> addKeyFormatOptions -> CreateKDF ->
+// createArgon2KDF -> deriveArgon2*. Both ends of it were tested and the middle
+// was not: `addKeyFormatOptions` was shown to stop discarding a negative, and
+// the derivation was shown to refuse one, but nothing checked that
+// `createArgon2KDF` passes it through UNCHANGED -- and it is the one link that
+// could quietly swallow it, because it defaults on `== 0` rather than on
+// `<= 0`. Widen that comparison and the refusal this PR adds becomes
+// unreachable while every other test stays green.
+func TestCreateArgon2KDFCarriesANegativeCostToTheDerivation(t *testing.T) {
+	kdf, err := CreateKDF(FormatOptions{KDFType: "argon2id", Argon2Memory: -1}, 32)
+	if err != nil {
+		t.Fatalf("CreateKDF() error = %v, want the cost carried to the derivation, not rejected here", err)
+	}
+	if kdf.Memory == nil {
+		t.Fatal("CreateKDF() produced a KDF with no memory cost")
+	}
+	if *kdf.Memory != -1 {
+		t.Fatalf("createArgon2KDF turned a memory cost of -1 into %d; the refusal downstream is then unreachable", *kdf.Memory)
+	}
+
+	// And the end of the chain refuses it, so the seam is not merely carrying a
+	// value into a place that ignores it.
+	if _, err := deriveArgon2id([]byte("passphrase"), []byte("saltsaltsaltsalt"), kdf, 32); err == nil {
+		t.Fatal("deriveArgon2id() accepted a memory cost of -1")
+	}
+}
+
+// The success control for the case above: zero MUST still take the default, or
+// the test above would also pass against a createArgon2KDF that had stopped
+// defaulting at all.
+func TestCreateArgon2KDFStillDefaultsAZeroCost(t *testing.T) {
+	kdf, err := CreateKDF(FormatOptions{KDFType: "argon2id"}, 32)
+	if err != nil {
+		t.Fatalf("CreateKDF() error = %v", err)
+	}
+	if kdf.Memory == nil || *kdf.Memory <= 0 {
+		t.Fatalf("CreateKDF() with no explicit cost produced memory = %v, want a positive default", kdf.Memory)
+	}
+	if kdf.Time == nil || *kdf.Time <= 0 {
+		t.Fatalf("CreateKDF() with no explicit cost produced time = %v, want a positive default", kdf.Time)
+	}
+	if kdf.CPUs == nil || *kdf.CPUs <= 0 {
+		t.Fatalf("CreateKDF() with no explicit cost produced cpus = %v, want a positive default", kdf.CPUs)
+	}
 }

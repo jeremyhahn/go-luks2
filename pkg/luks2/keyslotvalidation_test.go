@@ -9,6 +9,7 @@ package luks2
 import (
 	"errors"
 	"fmt"
+	"math"
 	"runtime"
 	"testing"
 )
@@ -167,7 +168,13 @@ func TestCraftedKeyslotFieldsAreRefused(t *testing.T) {
 			ks.Area.Size = formatSize(maxKeyslotAreaSize + 1)
 		}},
 		{"overflowing key size and stripe count", func(ks *Keyslot) {
-			ks.KeySize = 1 << 62
+			// math.MaxInt/4, not 1<<62. The property under test is that
+			// KeySize * Stripes OVERFLOWS, and no single constant expresses
+			// that on every width: 1<<62 overflows an int on a 32-bit target
+			// at COMPILE time, so this file did not build for GOARCH=386 or
+			// arm. Derived from the platform's own int width, the case means
+			// the same thing everywhere it runs.
+			ks.KeySize = math.MaxInt / 4
 			ks.AF.Stripes = 8
 		}},
 		// Measured against cryptsetup 2.7.0: a keyslot whose AF material does
