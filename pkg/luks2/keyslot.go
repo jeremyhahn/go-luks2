@@ -368,10 +368,22 @@ func addKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKe
 	// the declared bound is normally tighter, because a container whose
 	// config.keyslots_size overstates the space available would otherwise let a
 	// keyslot be written over user data.
-	for _, segment := range metadata.Segments {
+	for id, segment := range metadata.Segments {
+		// A SEGMENT WHOSE OFFSET WILL NOT PARSE DISABLES THIS CHECK, and this
+		// check is the last thing standing between a new keyslot and the
+		// encrypted data. Skipping the segment was silent: the declared bound
+		// above had already passed (that is the case this exists for -- a
+		// config.keyslots_size that overstates the space), so the write went
+		// ahead against a segment whose real position nobody knew.
+		//
+		// Nothing upstream validates segment.Offset: validateSegment checks
+		// SectorSize, IVTweak and Encryption and never touches it, so such a
+		// header reaches here through a clean ReadHeader.
 		segmentOffset, err := parseSize(segment.Offset)
 		if err != nil {
-			continue
+			return fmt.Errorf("%w: data segment %s declares an offset of %q, which is not a valid size, so the "+
+				"bound protecting the encrypted data from a new keyslot cannot be computed",
+				ErrInvalidHeader, id, segment.Offset)
 		}
 		if newKeyslotsEnd > segmentOffset {
 			return fmt.Errorf("%w: a new keyslot would end at offset %d but the data segment starts at %d; reformat with a larger header",
@@ -972,8 +984,37 @@ func listKeyslotsFrom(metadata *LUKS2Metadata) ([]KeyslotInfo, error) {
 	// listing is reading the order the volume is actually tried in.
 	for _, idStr := range keyslotIDsInScanOrder(metadata.Keyslots) {
 		ks := metadata.Keyslots[idStr]
-		id, err := strconv.Atoi(idStr)
-		if err != nil {
+		// AN UNADDRESSABLE KEY IS IGNORED, for the reasons #35 established for
+		// tokens and MEASURED again here against cryptsetup 2.7.0, on headers
+		// crafted for this question with a numeric control through the same
+		// rewrite path:
+		//
+		//	keyslots {"7": k}    luksDump exit 0, shows "7: luks2"   <- control
+		//	keyslots {"31": k}   luksDump exit 0, shows "31: luks2"  <- bound
+		//	keyslots {"32": k}   luksDump exit 0, "Keyslots:" EMPTY
+		//	keyslots {"1000": k} luksDump exit 0, "Keyslots:" EMPTY
+		//	keyslots {"007": k}  luksDump exit 1, "is not a valid LUKS device"
+		//	keyslots {"+3": k}   luksDump exit 1, "is not a valid LUKS device"
+		//	keyslots {"-1": k}   luksDump exit 1, "is not a valid LUKS device"
+		//	keyslots {"reencrypt-in-progress": k}
+		//	                     luksDump exit 1, "is not a valid LUKS device"
+		//
+		// So a key cryptsetup cannot address is not a working keyslot that
+		// omitting would strand -- no LUKS2 implementation reaches it -- and
+		// the header is still readable HERE on purpose, because an operator has
+		// to be able to inspect a container cryptsetup will not open. Refusing
+		// the listing is the BRICKING DIRECTION the tokens-are-tolerated ruling
+		// exists to avoid, and it was briefly implemented here before these
+		// measurements were taken.
+		//
+		// cryptsetup is STRICTER about keyslot keys than token keys: "01" is a
+		// tolerated-but-unreachable token and an invalid DEVICE as a keyslot.
+		// This function does not reproduce that asymmetry, because tolerating
+		// more than cryptsetup only ever costs an entry in a listing, while
+		// tolerating less would hide a keyslot from an operator inspecting a
+		// container that still opens.
+		id, ok := canonicalKeyslotID(idStr)
+		if !ok {
 			continue
 		}
 
@@ -1015,6 +1056,29 @@ type KeyslotInfo struct {
 	Priority   int
 	KDFType    string
 	Encryption string
+}
+
+// canonicalKeyslotID reports the slot number a keyslot key addresses, and
+// whether any LUKS2 implementation can reach it.
+//
+// It mirrors canonicalTokenID exactly, and deliberately: the two questions are
+// the same question about two maps in the same header, and answering them
+// differently is how a listing comes to disagree with what can be retrieved.
+//
+// SPELLING, then RANGE. strconv.Atoi accepts "007", "+1" and " 1" and returns
+// the same number for each, so parsing alone does not answer whether a key
+// addresses a slot; the round trip through strconv.Itoa does. Range then bounds
+// it to the 0..LUKS2MaxKeyslots-1 that cryptsetup addresses -- the 31/32 pair in
+// the measurements above pins that boundary rather than assuming it.
+func canonicalKeyslotID(key string) (int, bool) {
+	id, err := strconv.Atoi(key)
+	if err != nil || strconv.Itoa(id) != key {
+		return 0, false
+	}
+	if id < 0 || id >= LUKS2MaxKeyslots {
+		return 0, false
+	}
+	return id, true
 }
 
 // keyslotIDsInScanOrder returns every keyslot ID in the order unlock attempts
@@ -1251,22 +1315,40 @@ func keyslotsAreaBounds(hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) (int64,
 func calculateNextKeyslotOffset(metadata *LUKS2Metadata, keyslotsStart int64) (int64, error) {
 	maxEnd := keyslotsStart
 
-	for _, ks := range metadata.Keyslots {
-		// A keyslot with no area object is skipped rather than dereferenced.
-		// Its extent is unknown, which is exactly why the new slot must not be
-		// placed as though the damaged one were not there -- but the overlap
-		// checks in AddKey are what refuse that, and they work off the
-		// container's declared bounds rather than off this maximum.
+	// THE COMMENT THAT USED TO BE HERE PROMISED A GUARD THAT DOES NOT EXIST.
+	//
+	// It said a damaged keyslot could be skipped because "the overlap checks in
+	// AddKey are what refuse that". There are no such checks on the ADD path:
+	// keyslotAreaDisjointFrom has exactly two call sites, ChangeKey on the OLD
+	// area it is about to wipe, and the removal path. Nothing validates the new
+	// offset this function returns.
+	//
+	// So a sibling dropped from maxEnd was not merely unaccounted for -- it was
+	// unprotected. This function is the ONLY thing choosing where AddKey writes,
+	// and a keyslot whose area.offset or area.size did not parse silently
+	// lowered the maximum, letting the new slot land inside that keyslot's real
+	// bytes and destroy another credential's key material, with AddKey
+	// reporting success.
+	//
+	// A keyslot whose extent cannot be read is therefore a refusal, not a skip.
+	for id, ks := range metadata.Keyslots {
+		// No area object at all is a different thing from an unreadable one:
+		// there is no extent to exclude because the keyslot declares none, and
+		// the declared-bounds check in AddKey does cover that case.
 		if ks == nil || ks.Area == nil {
 			continue
 		}
 		offset, err := parseSize(ks.Area.Offset)
 		if err != nil {
-			continue
+			return 0, fmt.Errorf("%w: keyslot %s declares an area offset of %q, which is not a valid size; a new "+
+				"keyslot cannot be placed without knowing where this one ends",
+				ErrInvalidHeader, id, ks.Area.Offset)
 		}
 		size, err := parseSize(ks.Area.Size)
 		if err != nil {
-			continue
+			return 0, fmt.Errorf("%w: keyslot %s declares an area size of %q, which is not a valid size; a new "+
+				"keyslot cannot be placed without knowing where this one ends",
+				ErrInvalidHeader, id, ks.Area.Size)
 		}
 		end := offset + size
 		if end > maxEnd {
@@ -1501,28 +1583,48 @@ func findFreeKeyslotArea(hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata, size i
 	if err != nil {
 		return 0, err
 	}
-	for _, segment := range metadata.Segments {
+	// This loop narrows the search so it cannot run into the encrypted data. A
+	// segment whose offset would not parse was skipped, which WIDENS the
+	// search -- the opposite of what an unreadable bound should do.
+	for id, segment := range metadata.Segments {
 		segmentOffset, err := parseSize(segment.Offset)
 		if err != nil {
-			continue
+			return 0, fmt.Errorf("%w: data segment %s declares an offset of %q, which is not a valid size, so the "+
+				"search for free keyslot space cannot be stopped before the encrypted data",
+				ErrInvalidHeader, id, segment.Offset)
 		}
 		if segmentOffset < end {
 			end = segmentOffset
 		}
 	}
 
+	// And this one is what keeps the chosen gap off every OTHER keyslot's
+	// bytes. ChangeKey disjointness-checks only the OLD area it is about to
+	// wipe (keyslot.go, checkKeyslotAreaDisjointFromOthers) and never re-checks
+	// the new offset chosen here, so a sibling dropped from `used` because its
+	// extent would not parse could be written straight over -- destroying that
+	// credential during what looks like a routine passphrase change.
 	type extent struct{ from, to int64 }
 	used := make([]extent, 0, len(metadata.Keyslots))
-	for _, ks := range metadata.Keyslots {
+	for id, ks := range metadata.Keyslots {
 		if ks == nil || ks.Area == nil {
 			continue
 		}
 		offset, err := parseSize(ks.Area.Offset)
 		if err != nil {
-			continue
+			return 0, fmt.Errorf("%w: keyslot %s declares an area offset of %q, which is not a valid size; free "+
+				"space cannot be chosen without knowing which bytes this keyslot occupies",
+				ErrInvalidHeader, id, ks.Area.Offset)
 		}
 		areaSize, err := parseSize(ks.Area.Size)
-		if err != nil || areaSize <= 0 {
+		if err != nil {
+			return 0, fmt.Errorf("%w: keyslot %s declares an area size of %q, which is not a valid size; free "+
+				"space cannot be chosen without knowing which bytes this keyslot occupies",
+				ErrInvalidHeader, id, ks.Area.Size)
+		}
+		// A non-positive size is a DECLARED empty extent rather than an
+		// unreadable one: it parsed, and it occupies nothing to avoid.
+		if areaSize <= 0 {
 			continue
 		}
 		used = append(used, extent{offset, offset + areaSize})

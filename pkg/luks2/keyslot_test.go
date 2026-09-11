@@ -1428,3 +1428,129 @@ func TestEveryArgon2DerivationAcceptsOrdinaryCosts(t *testing.T) {
 		})
 	}
 }
+
+// TestKeyslotPlacementRefusesAnUnreadableSiblingExtent is the regression test
+// for the silent-overwrite class (#142).
+//
+// calculateNextKeyslotOffset is the ONLY thing AddKey uses to choose where new
+// key material goes, and findFreeKeyslotArea is the only thing ChangeKey uses.
+// Both used to SKIP a keyslot whose area offset or size would not parse, which
+// silently lowered the maximum -- or removed an extent from the used set -- and
+// let the new slot land inside that keyslot's real bytes.
+//
+// Nothing downstream catches it: keyslotAreaDisjointFrom has two call sites,
+// ChangeKey on the OLD area it is about to wipe and the removal path. The new
+// offset is checked by nobody, so the write went ahead and reported success
+// while destroying another credential's key material.
+//
+// A comment at the skip asserted that "the overlap checks in AddKey are what
+// refuse that". There are no such checks. That comment is why this survived
+// review, and it is deleted by the same change these cases cover.
+func TestKeyslotPlacementRefusesAnUnreadableSiblingExtent(t *testing.T) {
+	hdr := &LUKS2BinaryHeader{HeaderSize: LUKS2HeaderMinSize}
+	const start int64 = 2 * LUKS2HeaderMinSize
+
+	good := &Keyslot{Type: "luks2", Area: &KeyslotArea{Offset: formatSize(start), Size: formatSize(0x40000)}}
+	md := func(ks map[string]*Keyslot) *LUKS2Metadata {
+		return &LUKS2Metadata{Keyslots: ks, Config: &Config{KeyslotsSize: formatSize(0x200000)}}
+	}
+
+	// THE POSITIVE CONTROL FIRST. Without it, every case below is also
+	// satisfied by a function that refuses everything -- which would make the
+	// library unable to add or change a key at all.
+	t.Run("an ordinary container still places a keyslot", func(t *testing.T) {
+		m := md(map[string]*Keyslot{"0": good})
+		if _, err := calculateNextKeyslotOffset(m, start); err != nil {
+			t.Fatalf("calculateNextKeyslotOffset on a healthy container = %v, want success", err)
+		}
+		if _, err := findFreeKeyslotArea(hdr, m, 0x40000); err != nil {
+			t.Fatalf("findFreeKeyslotArea on a healthy container = %v, want success", err)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		bad  *Keyslot
+	}{
+		{"an unparseable area offset", &Keyslot{Type: "luks2", Area: &KeyslotArea{Offset: "not-a-size", Size: formatSize(0x40000)}}},
+		{"an unparseable area size", &Keyslot{Type: "luks2", Area: &KeyslotArea{Offset: formatSize(start), Size: "enormous"}}},
+	} {
+		t.Run(tc.name+" is refused by AddKey's placement", func(t *testing.T) {
+			m := md(map[string]*Keyslot{"0": good, "3": tc.bad})
+			_, err := calculateNextKeyslotOffset(m, start)
+			if err == nil {
+				t.Fatal("calculateNextKeyslotOffset accepted a sibling whose extent it could not read -- " +
+					"AddKey would place new key material without knowing where that keyslot ends")
+			}
+			if !errors.Is(err, ErrInvalidHeader) {
+				t.Errorf("errors.Is(err, ErrInvalidHeader) = false for %v", err)
+			}
+			// The offending keyslot must be named: an operator has to know
+			// which one to look at.
+			if !strings.Contains(err.Error(), "keyslot 3") {
+				t.Errorf("error %q does not name the offending keyslot", err)
+			}
+		})
+
+		t.Run(tc.name+" is refused by ChangeKey's allocator", func(t *testing.T) {
+			m := md(map[string]*Keyslot{"0": good, "3": tc.bad})
+			_, err := findFreeKeyslotArea(hdr, m, 0x40000)
+			if err == nil {
+				t.Fatal("findFreeKeyslotArea accepted a sibling whose extent it could not read -- " +
+					"ChangeKey would relocate over that keyslot's real bytes")
+			}
+			if !errors.Is(err, ErrInvalidHeader) {
+				t.Errorf("errors.Is(err, ErrInvalidHeader) = false for %v", err)
+			}
+		})
+	}
+
+	// A DECLARED empty extent is not an unreadable one. It parsed; it occupies
+	// nothing to avoid. Refusing it would reject containers that are fine.
+	t.Run("a zero-size area is not an unreadable one", func(t *testing.T) {
+		m := md(map[string]*Keyslot{
+			"0": good,
+			"3": {Type: "luks2", Area: &KeyslotArea{Offset: formatSize(start + 0x100000), Size: formatSize(0)}},
+		})
+		if _, err := findFreeKeyslotArea(hdr, m, 0x40000); err != nil {
+			t.Fatalf("findFreeKeyslotArea refused a zero-size extent: %v", err)
+		}
+	})
+}
+
+// TestCanonicalKeyslotID pins the addressability rule against what cryptsetup
+// 2.7.0 actually does, measured on crafted headers rather than assumed.
+//
+// The 31/32 pair is the boundary and is not decoration: cryptsetup lists a
+// keyslot at "31" and silently omits one at "32", so LUKS2MaxKeyslots is where
+// addressability stops. "007" and "+3" parse with Atoi to numbers in range and
+// are still unreachable, which is why the round trip is checked and not just
+// the parse.
+func TestCanonicalKeyslotID(t *testing.T) {
+	for _, tc := range []struct {
+		key    string
+		id     int
+		wantOK bool
+	}{
+		{"0", 0, true},
+		{"7", 7, true},
+		{"31", 31, true},   // cryptsetup: listed
+		{"32", 0, false},   // cryptsetup: header valid, keyslot omitted
+		{"1000", 0, false}, // cryptsetup: header valid, keyslot omitted
+		{"007", 0, false},  // cryptsetup: "not a valid LUKS device"
+		{"+3", 0, false},   // cryptsetup: "not a valid LUKS device"
+		{"-1", 0, false},   // cryptsetup: "not a valid LUKS device"
+		{" 1", 0, false},
+		{"", 0, false},
+		{"reencrypt-in-progress", 0, false}, // cryptsetup: "not a valid LUKS device"
+	} {
+		id, ok := canonicalKeyslotID(tc.key)
+		if ok != tc.wantOK {
+			t.Errorf("canonicalKeyslotID(%q) ok = %v, want %v", tc.key, ok, tc.wantOK)
+			continue
+		}
+		if ok && id != tc.id {
+			t.Errorf("canonicalKeyslotID(%q) = %d, want %d", tc.key, id, tc.id)
+		}
+	}
+}

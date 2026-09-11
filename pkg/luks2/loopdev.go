@@ -400,6 +400,10 @@ func FindLoopDevice(file string) (string, error) {
 		return "", err
 	}
 
+	// Counted rather than remembered, in the same idiom as waitForDetach.
+	var unreadable int
+	var lastErr error
+
 	for _, entry := range entries {
 		name := entry.Name()
 		if len(name) < 4 || name[:4] != "loop" {
@@ -412,11 +416,35 @@ func FindLoopDevice(file string) (string, error) {
 		// FindLoopDevice does.
 		st, err := readLoopState(name)
 		if err != nil {
-			// Cannot tell for this device; it is not evidence about any other.
+			// Cannot tell for THIS device; it is not evidence about any other,
+			// so the scan continues -- but it is counted, because it is
+			// evidence about the ANSWER. See below.
+			unreadable++
+			lastErr = err
 			continue
 		}
 		if st.backing != "" && absFile == st.backing {
 			return "/dev/" + name, nil
+		}
+	}
+
+	// "NOT ATTACHED" AND "COULD NOT TELL" ARE DIFFERENT ANSWERS, and only the
+	// first may be acted on. Per-candidate the skip above is right; in the
+	// AGGREGATE it used to erase the distinction, because every unreadable
+	// candidate still ended here as a flat "no loop device found".
+	//
+	// waitForDetach in this same file is scrupulous about exactly this -- it
+	// counts unreadable separately from held and never reports success from an
+	// unreadable observation. This function did not, and the caller it misleads
+	// is the one asking whether a file is ALREADY attached before attaching it:
+	// told "no" when the truth was "the one device backing it could not be
+	// inspected", it creates a SECOND loop device for the same backing file,
+	// giving the kernel two independent writers of one LUKS container.
+	if unreadable > 0 {
+		return "", &DeviceError{
+			Device: file,
+			Op:     fmt.Sprintf("find the loop device backing this file (%d of %d candidates could not be inspected, so absence cannot be concluded)", unreadable, len(entries)),
+			Err:    lastErr,
 		}
 	}
 

@@ -37,12 +37,26 @@ func Unlock(device string, passphrase []byte, name string) error {
 		return err
 	}
 
-	// Resolve symlink to get real device path for devmapper
-	// The kernel's dm-crypt requires the actual block device path
+	// Resolve the symlink, because the kernel's dm-crypt target is built from
+	// the ACTUAL block device path -- see unlockLoadTable below, whose comment
+	// says in as many words to use realDevice and not the original.
+	//
+	// A FAILED RESOLUTION IS A REFUSAL, NOT A FALLBACK. Owner ruling against
+	// #142. This used to assign `realDevice = device` and carry on, which put
+	// the exact value the downstream comment forbids into the crypt table --
+	// so "I could not find the real device" became "use the symlink and hope",
+	// on the unlock path, silently.
+	//
+	// It is silent in the SUCCESS case too, which is what made it survive:
+	// the kernel resolves a symlink at table-load time anyway, so the fallback
+	// usually works and tells nobody it happened. What it costs is the case it
+	// was written for -- a udev re-enumeration racing the open, an EIO on an
+	// intermediate component -- where the two lookups are not atomic with each
+	// other and the table can be built against a path that no longer names the
+	// device just validated.
 	realDevice, err := filepath.EvalSymlinks(device)
 	if err != nil {
-		// If symlink resolution fails, use the original path
-		realDevice = device
+		return &DeviceError{Device: device, Op: "resolve the real device path for the dm-crypt backend", Err: err}
 	}
 
 	// Validate passphrase
