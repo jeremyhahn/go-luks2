@@ -107,17 +107,49 @@ RUN go build -o /usr/local/bin/luks2-testreap ./test/harness/cmd/luks2-testreap
 RUN echo '#!/bin/bash' > /entrypoint.sh && \
     echo 'set -e' >> /entrypoint.sh && \
     echo '' >> /entrypoint.sh && \
-    echo '# Start udevd for device-mapper symlink creation' >> /entrypoint.sh && \
-    echo '/usr/lib/systemd/systemd-udevd --daemon 2>/dev/null || true' >> /entrypoint.sh && \
-    echo 'sleep 1' >> /entrypoint.sh && \
-    echo 'udevadm trigger 2>/dev/null || true' >> /entrypoint.sh && \
-    echo 'udevadm settle 2>/dev/null || true' >> /entrypoint.sh && \
+    echo '# Create the loop device nodes this container may be handed.' >> /entrypoint.sh && \
+    echo '#' >> /entrypoint.sh && \
+    echo '# /dev in here is a bare tmpfs. The container is no longer --privileged,' >> /entrypoint.sh && \
+    echo '# so the host /dev is not bind-mounted in and nothing creates /dev/loopN' >> /entrypoint.sh && \
+    echo '# for us. udev cannot do it either: without --privileged Docker mounts' >> /entrypoint.sh && \
+    echo '# /sys read-only, udevadm trigger fails to write the uevent and no node is' >> /entrypoint.sh && \
+    echo '# ever made -- measured, which is why the udevd start that used to be here' >> /entrypoint.sh && \
+    echo '# is gone rather than moved. Nothing is lost with it: pkg/luks2 mknods its' >> /entrypoint.sh && \
+    echo '# own dm nodes (unlock.go), the fallback it has always carried for' >> /entrypoint.sh && \
+    echo '# environments without udev, and cryptsetup skips the udev cookie wait' >> /entrypoint.sh && \
+    echo '# when no udevd is running.' >> /entrypoint.sh && \
+    echo '#' >> /entrypoint.sh && \
+    echo '# A POOL, not an exact answer, because the number is not knowable in' >> /entrypoint.sh && \
+    echo '# advance: pkg/luks2 opens /dev/loopN for the N that LOOP_CTL_GET_FREE' >> /entrypoint.sh && \
+    echo '# hands back, so the node has to exist before the number is known.' >> /entrypoint.sh && \
+    echo '#' >> /entrypoint.sh && \
+    echo '# 256 is a ceiling on the MINOR a runner may hand out, not a count of what' >> /entrypoint.sh && \
+    echo '# this suite uses -- it uses a handful. LOOP_CTL_GET_FREE returns the' >> /entrypoint.sh && \
+    echo '# first FREE device and only allocates past the highest existing one when' >> /entrypoint.sh && \
+    echo '# every one of them is busy, so the pool has to clear whatever a shared' >> /entrypoint.sh && \
+    echo '# runner already has attached, which on Ubuntu is one loop per snap. A' >> /entrypoint.sh && \
+    echo '# node above what the kernel has created costs nothing and is not a lie:' >> /entrypoint.sh && \
+    echo '# the loop module creates the device on first open (measured on 6.17 with' >> /entrypoint.sh && \
+    echo '# /dev/loop200).' >> /entrypoint.sh && \
+    echo 'for minor in $(seq 0 255); do' >> /entrypoint.sh && \
+    echo '  if [ ! -e /dev/loop$minor ] && ! mknod /dev/loop$minor b 7 $minor; then' >> /entrypoint.sh && \
+    echo '    echo "REFUSING TO RUN: cannot create /dev/loop$minor, so this suite" >&2' >> /entrypoint.sh && \
+    echo '    echo "cannot attach a backing file to anything. The container needs" >&2' >> /entrypoint.sh && \
+    echo '    echo "CAP_MKNOD and a device-cgroup rule for major 7; both are set by" >&2' >> /entrypoint.sh && \
+    echo '    echo "test/integration/docker-run.sh, which is the supported way to" >&2' >> /entrypoint.sh && \
+    echo '    echo "start this image." >&2' >> /entrypoint.sh && \
+    echo '    exit 1' >> /entrypoint.sh && \
+    echo '  fi' >> /entrypoint.sh && \
+    echo 'done' >> /entrypoint.sh && \
     echo '' >> /entrypoint.sh && \
     echo '# NO GLOBAL DEVICE CLEANUP HERE. This block used to run' >> /entrypoint.sh && \
     echo '# a global device-mapper wipe and a global loop detach, both with' >> /entrypoint.sh && \
     echo '# their errors discarded.' >> /entrypoint.sh && \
-    echo '# device-mapper and loop devices are NOT namespaced, and this' >> /entrypoint.sh && \
-    echo '# container runs --privileged, so both commands operated on the HOST:' >> /entrypoint.sh && \
+    echo '# device-mapper and loop devices are NOT namespaced, so both' >> /entrypoint.sh && \
+    echo '# commands operated on the HOST -- and still would today. Dropping' >> /entrypoint.sh && \
+    echo '# --privileged (#80) did not change this: scoping the device access' >> /entrypoint.sh && \
+    echo '# decides which nodes are reachable, not which kernel the dm and' >> /entrypoint.sh && \
+    echo '# loop subsystems belong to, and there is only the one:' >> /entrypoint.sh && \
     echo '# every dm mapping and every loop device on the machine running the' >> /entrypoint.sh && \
     echo '# suite, including a developer root filesystem (nvme0n1p3_crypt ->' >> /entrypoint.sh && \
     echo '# vgmint-root, measured 2026-08-31). It survived only because those' >> /entrypoint.sh && \
@@ -167,8 +199,14 @@ RUN echo '#!/bin/bash' > /entrypoint.sh && \
     echo '    echo "REFUSING TO RUN: the host device-mapper is visible from this" >&2' >> /entrypoint.sh && \
     echo '    echo "container and already has mappings this suite did not create:" >&2' >> /entrypoint.sh && \
     echo '    echo "${dm_inventory}" >&2' >> /entrypoint.sh && \
-    echo '    echo "Running here risks the host. Scope the container device" >&2' >> /entrypoint.sh && \
-    echo '    echo "access (see issue #80) or run where there is no dm state." >&2' >> /entrypoint.sh && \
+    echo '    echo "Running here risks the host." >&2' >> /entrypoint.sh && \
+    echo '    echo "This is NOT fixed by scoping the container device access." >&2' >> /entrypoint.sh && \
+    echo '    echo "That advice used to be printed here and it was wrong:" >&2' >> /entrypoint.sh && \
+    echo '    echo "device-mapper is not namespaced, so dmsetup ls reports the" >&2' >> /entrypoint.sh && \
+    echo '    echo "whole machine whatever /dev the container was given -- the" >&2' >> /entrypoint.sh && \
+    echo '    echo "unprivileged container measured for #80 sees the host" >&2' >> /entrypoint.sh && \
+    echo '    echo "mappings exactly as the privileged one did. Run where there" >&2' >> /entrypoint.sh && \
+    echo '    echo "is no dm state." >&2' >> /entrypoint.sh && \
     echo '    exit 1' >> /entrypoint.sh && \
     echo '    ;;' >> /entrypoint.sh && \
     echo 'esac' >> /entrypoint.sh && \

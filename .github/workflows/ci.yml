@@ -82,7 +82,7 @@ jobs:
       # `//go:build !integration`. go build, go vet, go test -race on both
       # packages, golangci-lint, gosec, govulncheck and go mod verify all
       # returned 0; only `-tags=integration` was red, and the only job that ran
-      # it was the privileged Docker suite at the far end of the pipeline.
+      # it was the Docker integration suite at the far end of the pipeline.
       #
       # The tag list is DERIVED from the //go:build lines in the tree, not
       # written down — a written list is accurate until someone adds a tag and
@@ -98,10 +98,10 @@ jobs:
 
       # REGRESSION GUARD (#17). `losetup -D` detaches every loop device on the
       # machine; `dmsetup remove_all` removes every dm mapping. Neither is
-      # namespaced, and the integration suite runs --privileged, so both reach
-      # the HOST — measured on the machine where this was found, every run
-      # asked the kernel to remove the mapping under the root filesystem, and
-      # survived only because those devices were held open.
+      # namespaced, so both reach the HOST whatever the container is confined
+      # to — measured on the machine where this was found, every run asked the
+      # kernel to remove the mapping under the root filesystem, and survived
+      # only because those devices were held open.
       #
       # This is a check rather than a rule because the rule already existed: a
       # standing written instruction not to add a second `losetup -D` call
@@ -319,9 +319,9 @@ jobs:
       #
       # DECISION, recorded rather than left as an accident of how these legs
       # were written: the integration suites are NOT race-checked, for now.
-      # They run privileged, in a container, against loop devices,
-      # device-mapper and mounts, and they are already the pipeline's long
-      # pole; -race measured ~4.6x on this codebase, and the unit suite needs
+      # They run in a container, against loop devices, device-mapper and
+      # mounts, and they are already the pipeline's long pole; -race measured
+      # ~4.6x on this codebase, and the unit suite needs
       # 30 minutes without it. That is a cost to weigh, and it cannot be
       # weighed from a workstation: the container refuses to run where the host
       # device-mapper is visible with foreign mappings, so the number has to
@@ -499,7 +499,10 @@ jobs:
         # the container, and that is the whole mechanism (#96).
         #
         # The suite creates host dm mappings and loop devices -- neither is
-        # namespaced, so --privileged writes them to the machine. It records
+        # namespaced, so they land on the machine however the container is
+        # confined. Dropping --privileged (#80) did not change that and was
+        # never going to: scoping device access decides which nodes are
+        # reachable, not which kernel dm and loop belong to. The suite records
         # each one before creating it, and the next run removes exactly what
         # was recorded. A record kept inside the container dies with the run it
         # describes, which is precisely the run whose state needs removing, so
@@ -516,8 +519,8 @@ jobs:
           # as root, before the #85 guard, and removes whatever the ledgers in
           # this directory name -- so the directory is part of the trust
           # boundary. Created by the RUNNER user it would be owned by a
-          # non-root uid, and the harness refuses that: a privileged process
-          # must not act on control files another user maintains.
+          # non-root uid, and the harness refuses that: a root process must not
+          # act on control files another user maintains.
           #
           # Docker creates a missing bind-mount source itself, as root:root
           # 0755, which is what the harness accepts. If the path already exists
@@ -530,9 +533,13 @@ jobs:
           fi
 
           docker rm -f go-luks2-test-runner 2>/dev/null || true
-          docker run --privileged \
-            -v "${STATE_DIR}:/var/lib/go-luks2-test-state" \
-            --name go-luks2-test-runner go-luks2-integration-test
+
+          # No privilege flags here, on purpose. They all live in
+          # test/integration/docker-run.sh, which the Makefile targets call
+          # too, so this workflow and a developer's `make integration-test`
+          # cannot drift into running under different privilege (#80).
+          TEST_STATE_DIR="${STATE_DIR}" test/integration/docker-run.sh \
+            --name go-luks2-test-runner --
           docker cp go-luks2-test-runner:/app/coverage.out coverage-integration.out 2>/dev/null || true
           docker rm -f go-luks2-test-runner 2>/dev/null || true
 

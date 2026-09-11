@@ -28,9 +28,9 @@ import (
 // claims about the kernel rather than about this package -- so they have to be
 // asked of a kernel.
 //
-// Real dm activation needs privileges, which is why this file is in the
-// containerized suite (`make integration-test`, docker run --privileged) and
-// not next to the unit tests.
+// Real dm activation needs CAP_SYS_ADMIN, which is why this file is in the
+// containerized suite (`make integration-test`, which runs through
+// test/integration/docker-run.sh) and not next to the unit tests.
 
 // hexKey matches a dm-crypt table key given INLINE -- the state this change
 // exists to eliminate. A 512-bit XTS volume key is 128 hex characters.
@@ -214,8 +214,9 @@ func TestUnlockPassesTheVolumeKeyThroughTheKernelKeyring(t *testing.T) {
 // lockWithRetry closes the mapping, retrying while device-mapper reports it
 // busy.
 //
-// The retry is not covering for Lock. This suite runs --privileged, which means
-// it shares the HOST's device-mapper and the host's udev is watching: closing a
+// The retry is not covering for Lock. This suite shares the HOST's
+// device-mapper -- dm is not namespaced, whatever the container is confined to
+// -- and the host's udev is watching: closing a
 // block device that was just written to fires a change event, and udev's blkid
 // probe holds the device open for a moment afterwards. DM_DEV_REMOVE loses that
 // race and returns EBUSY -- correctly, which is why Lock reports it. `dmsetup

@@ -40,8 +40,10 @@ import (
 // wrong and the unit suite would be asserting against fiction. These tests are
 // what stop that from being silent.
 //
-// This file runs in the privileged container alongside the real device-mapper
-// activation it pairs with (`make integration-test`).
+// This file runs in the container alongside the real device-mapper activation
+// it pairs with (`make integration-test`). What it needs from that container is
+// seccomp, not capability: the three keyring syscalls are denied by Docker's
+// default profile and allowed by test/integration/seccomp.json.
 
 // integrationTestKey is a stand-in volume key of the length this library
 // formats with.

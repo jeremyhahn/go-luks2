@@ -201,7 +201,8 @@ Located alongside source files (`*_test.go`):
 ### Integration Tests
 
 Located in `test/integration/`:
-- Require Docker with privileged mode
+- Run in Docker under a scoped privilege set — **never `--privileged`**; see
+  [TESTING.md](TESTING.md) and `test/integration/docker-run.sh`
 - Test actual device operations
 - Use loop devices for isolation
 

@@ -400,6 +400,7 @@ Measured 2026-08-31 with the exact syscall sequence the library uses:
 | host, unprivileged (uid 1000) | **OK** |
 | container, default seccomp, no caps | **FAILS** — `operation not permitted` |
 | container, `--cap-add SYS_ADMIN`, default seccomp | **FAILS** — `operation not permitted` |
+| container, narrow custom profile, **no caps added** | **OK** |
 | container, `--security-opt seccomp=unconfined` | **OK** |
 | container, `--privileged` | **OK** |
 
@@ -407,13 +408,23 @@ Measured 2026-08-31 with the exact syscall sequence the library uses:
 `add_key`, `keyctl` and `request_key` regardless of capabilities; only relaxing
 seccomp lifts it. That is the opposite of the usual intuition, and it means the
 least-privilege choice for dm-crypt (`--cap-add SYS_ADMIN` instead of
-`--privileged`) needs a seccomp change as well.
+`--privileged`) needs a seccomp change as well — and that the seccomp change
+needs no capability at all.
 
 The fix is a **narrow custom profile** — take the default profile, add those
 three syscalls, and pass `--security-opt seccomp=<profile>.json`. Prefer that
 over `seccomp=unconfined`, which also drops every other syscall restriction. On
 Kubernetes the equivalent is a localhost profile in
 `securityContext.seccompProfile`.
+
+**This repository ships one you can copy:
+[`test/integration/seccomp.json`](test/integration/seccomp.json).** It is
+Docker's default profile byte for byte with one appended allow block, and its
+header records the upstream module version, the sha256 and how to re-verify it.
+The invocation that goes with it — capabilities, device scoping, and what each
+was measured to buy — is [`test/integration/docker-run.sh`](test/integration/docker-run.sh)
+and [`docs/TESTING.md`](docs/TESTING.md). The suite has not used `--privileged`
+since #80.
 
 `ErrKeyring` is the root and matches **every** keyring condition — it is the
 only safe catch-all. `ErrKeyringUnavailable` covers *unavailability* only, and
@@ -523,9 +534,9 @@ it is:
 | `test/integration/pkg`, `test/integration/cli` | no — these packages do not exist without the `integration` tag |
 
 So the honest statement of race coverage is **the default-tag build of four
-packages**, not "the module". The integration suites run privileged, in a
-container, against loop devices, device-mapper and mounts — host-global
-resources with real interleaving concerns — and they run without `-race`. That
+packages**, not "the module". The integration suites run in a container,
+against loop devices, device-mapper and mounts — host-global resources with
+real interleaving concerns — and they run without `-race`. That
 is a deliberate, reversible decision rather than an accident of how the CI legs
 were written; the reasoning, and the measurement that would change it, are
 recorded at the race legs in `.github/workflows/ci.yml`.

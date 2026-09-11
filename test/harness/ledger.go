@@ -7,9 +7,11 @@
 //
 // # The problem this exists for
 //
-// The integration suite runs in a --privileged container, and neither
-// device-mapper nor loop devices are namespaced. Every dm mapping and every
-// loop device it creates is HOST state. When a run dies without cleaning up --
+// Neither device-mapper nor loop devices are namespaced, so every dm mapping
+// and every loop device the integration suite creates is HOST state. That is a
+// property of the kernel, not of how the container is confined: dropping
+// --privileged for a scoped capability and device set (#80) changed what the
+// container can reach and changed nothing here. When a run dies without cleaning up --
 // a failing test, a timeout, a container torn down mid-run -- that state
 // outlives it, and the #85 guard then correctly refuses every later run on that
 // host because it cannot attribute what it finds. One failed run poisons a

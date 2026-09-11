@@ -6,9 +6,11 @@
 #
 # `losetup -D` detaches EVERY loop device on the machine. `dmsetup remove_all`
 # removes EVERY device-mapper mapping. Neither loop devices nor device-mapper
-# are namespaced, and this repository's integration suite runs under
-# `docker run --privileged`, so "the machine" is the HOST: the developer's
-# workstation, or a runner shared with every other container on it.
+# are namespaced, so "the machine" is the HOST whatever the container is
+# confined to: the developer's workstation, or a runner shared with every other
+# container on it. The suite no longer runs under `docker run --privileged`
+# (#80) and that did not weaken this rule by one line -- scoping device access
+# decides which nodes are reachable, not which kernel dm and loop belong to.
 #
 # The measured damage was not hypothetical. The visible dm stack on the machine
 # where this was found was nvme0n1p3_crypt -> vgmint-root, mounted at /. Every

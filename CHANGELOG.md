@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **The integration container no longer runs `--privileged` (#80).** It runs
+  under a set that was measured flag by flag, and that set now lives in one
+  file, `test/integration/docker-run.sh`, which the four Makefile targets and
+  the CI workflow all call. There were five copies of `docker run
+  --privileged`; five copies of a security-critical invocation is how one of
+  them quietly grows a flag the others do not have.
+
+  `--privileged` is not a privilege setting. It is the absence of every
+  restriction Docker has — all capabilities, seccomp off, AppArmor off, and the
+  host's whole `/dev` bind-mounted in, which on the machine this was measured on
+  meant the test container could open the root NVMe, an unrelated RAID array and
+  every dm mapping on the box. This library holds volume keys for a trusted computing
+  platform, and a test rig is not where that gets handed away for convenience
+  (owner direction, 2026-08-31).
+
+  What replaces it: `--cap-drop ALL` plus `CAP_SYS_ADMIN` and `CAP_MKNOD`;
+  a seccomp profile; `apparmor=unconfined`; `--device /dev/mapper/control` and
+  `--device /dev/loop-control`; and a device-cgroup rule for the loop and
+  device-mapper majors, the latter read from `/proc/devices` rather than
+  hard-coded. Each was established by removing it and recording what broke
+  first — the table is in `docs/TESTING.md`.
+
+  **Capabilities were the wrong suspect.** Docker's default seccomp profile
+  denies `add_key`, `keyctl` and `request_key` outright, because kernel
+  keyrings are not namespaced, and no capability lifts a seccomp denial:
+  `add_key` fails under the default profile *with* `CAP_SYS_ADMIN` and succeeds
+  under the new profile with *no* capabilities added at all.
+
+- **A reviewable seccomp profile, `test/integration/seccomp.json`.** Docker's
+  own default profile byte for byte, plus one appended block allowing exactly
+  `add_key`, `keyctl` and `request_key`. Upstream is `default.json` from
+  `github.com/moby/profiles/seccomp v0.1.0` — the version the local daemon
+  links, read out of the binary rather than guessed — and the file header
+  carries its sha256. `make seccomp-diff` re-fetches it through the Go module
+  proxy, so the checksum database vouches for the comparison, and prints the
+  difference.
+
+  `seccomp=unconfined` would also have made the suite pass and is deliberately
+  not used: it re-admits every syscall the default profile denies, including
+  the `mount`, `kexec`, `bpf` and namespace calls the profile exists for, to
+  solve a three-syscall problem.
+
+### Changed
+
+- **The container entrypoint creates its own loop device nodes and no longer
+  starts udevd.** Without `--privileged` the host `/dev` is not bind-mounted
+  in, so `/dev` is a bare tmpfs and nothing creates `/dev/loopN`. udev cannot
+  fill the gap — without `--privileged` Docker mounts `/sys` read-only, so
+  `udevadm trigger` cannot write the uevent and no node is ever made (measured)
+  — and nothing is lost with it: `pkg/luks2` mknods its own dm nodes, the
+  fallback `unlock.go` has always carried for environments without udev, and
+  `cryptsetup` skips the udev cookie wait when no udevd is running.
+
+- **The host-state guard's advice was wrong and has been corrected.** It used
+  to say "Scope the container device access (see issue #80)". Scoping device
+  access does not help and cannot: device-mapper is not namespaced, so
+  `dmsetup ls` reports every mapping on the machine whatever `/dev` the
+  container was given — measured, the unprivileged container sees exactly what
+  the privileged one did. The guard's logic is unchanged; only the sentence
+  that sent readers down a dead end is gone.
+
+
 ## [0.2.0-alpha] - 2026-09-03
 
 MINOR rather than PATCH: this release both **removes** two exported error

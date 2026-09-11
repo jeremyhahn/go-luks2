@@ -16,8 +16,8 @@ import (
 )
 
 func TestTokenOperations_Integration(t *testing.T) {
-	// Integration tests run in Docker container with --privileged flag
-	// No root check needed - Docker handles permissions
+	// Integration tests run in the container, as root, under the scoped
+	// privilege set in test/integration/docker-run.sh. No root check needed.
 
 	// Create a temporary file for testing
 	device := "/tmp/luks2-token-test.img"

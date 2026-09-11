@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs security ci ci-full fmt-check all check test-cli integration-test-pkg integration-test-cli docker-build-integration no-global-device-cleanup test-require-tool test-calibration no-internal-disclosure test-guards
+.PHONY: help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs security ci ci-full fmt-check all check test-cli integration-test-pkg integration-test-cli docker-build-integration no-global-device-cleanup test-require-tool test-calibration no-internal-disclosure test-guards seccomp-diff
 
 # Default target
 .DEFAULT_GOAL := help
@@ -211,13 +211,13 @@ integration-test: build ## Run all integration tests in Docker (isolated, recomm
 integration-test-pkg: build ## Run package integration tests in Docker
 	@echo "$(COLOR_BOLD)Running package integration tests in Docker...$(COLOR_RESET)"
 	@$(MAKE) docker-build-integration
-	@docker run --rm --privileged -v "$(TEST_STATE_DIR):/var/lib/go-luks2-test-state" go-luks2-integration-test \
+	@TEST_STATE_DIR="$(TEST_STATE_DIR)" $(INTEGRATION_DOCKER_RUN) --rm -- \
 		go test -v -tags=integration ./test/integration/pkg/...
 
 integration-test-cli: build ## Run CLI integration tests in Docker
 	@echo "$(COLOR_BOLD)Running CLI integration tests in Docker...$(COLOR_RESET)"
 	@$(MAKE) docker-build-integration
-	@docker run --rm --privileged -v "$(TEST_STATE_DIR):/var/lib/go-luks2-test-state" go-luks2-integration-test \
+	@TEST_STATE_DIR="$(TEST_STATE_DIR)" $(INTEGRATION_DOCKER_RUN) --rm -- \
 		go test -v -tags=integration ./test/integration/cli/...
 
 coverage: build ## Run all tests (unit + integration) with coverage (requires root)
@@ -255,10 +255,10 @@ docker-integration-test: ## Run integration tests in Docker (isolated, recommend
 	@echo "$(COLOR_BOLD)Building Docker image for integration tests...$(COLOR_RESET)"
 	@$(MAKE) docker-build-integration
 	@echo ""
-	@echo "$(COLOR_BOLD)Running integration tests in Docker container (privileged)...$(COLOR_RESET)"
+	@echo "$(COLOR_BOLD)Running integration tests in Docker container...$(COLOR_RESET)"
 	@rm -f coverage-docker.out
 	@docker rm -f go-luks2-test-runner 2>/dev/null || true
-	@docker run --privileged -v "$(TEST_STATE_DIR):/var/lib/go-luks2-test-state" --name go-luks2-test-runner go-luks2-integration-test
+	@TEST_STATE_DIR="$(TEST_STATE_DIR)" $(INTEGRATION_DOCKER_RUN) --name go-luks2-test-runner --
 	@docker cp go-luks2-test-runner:/app/coverage.out coverage-docker.out 2>/dev/null || true
 	@docker rm -f go-luks2-test-runner 2>/dev/null || true
 	@if [ -f coverage-docker.out ]; then \
@@ -279,7 +279,7 @@ docker-integration-test: ## Run integration tests in Docker (isolated, recommend
 # a run died, and deleting it discards the only record of what that run put on
 # this machine.
 #
-# It is deliberately NOT created here. The reaper runs privileged and acts on
+# It is deliberately NOT created here. The reaper runs as root and acts on
 # whatever the ledgers name, so the directory is part of the trust boundary and
 # the harness refuses one owned by another user or writable by group or other.
 # Docker creates a missing bind-mount source as root:root, which is what the
@@ -287,12 +287,59 @@ docker-integration-test: ## Run integration tests in Docker (isolated, recommend
 # creates it as root itself.
 TEST_STATE_DIR ?= /var/tmp/go-luks2-test-state
 
+# Every target that starts the integration container goes through this script,
+# and none of them spells out a privilege flag. There used to be four `docker
+# run --privileged` lines here and a fifth in the CI workflow; five copies of a
+# security-critical invocation is how one of them quietly grows a flag the
+# others do not have. The script carries the capabilities, the seccomp profile
+# and the device scoping, with the measurement behind each one written beside
+# it (#80).
+INTEGRATION_DOCKER_RUN := test/integration/docker-run.sh
+
+# test/integration/seccomp.json is Docker's own default profile with one block
+# appended, and the value of that arrangement is entirely in being able to
+# prove it. This target fetches the upstream profile through the Go module
+# proxy -- so the checksum database vouches for it -- and prints the
+# difference, which should be the two _comment blocks and the three syscall
+# names and nothing else.
+#
+# The version is the one the LOCAL dockerd links, which the recipe reads out of
+# the binary rather than trusting this variable; a mismatch is reported, not
+# silently diffed against the wrong upstream.
+SECCOMP_PROFILE := test/integration/seccomp.json
+SECCOMP_UPSTREAM := github.com/moby/profiles/seccomp
+SECCOMP_UPSTREAM_VERSION := v0.1.0
+
+seccomp-diff: ## Diff the integration seccomp profile against Docker's default
+	@linked=$$($(GO) version -m "$$(command -v dockerd)" 2>/dev/null \
+		| awk '$$1 == "dep" && $$2 == "$(SECCOMP_UPSTREAM)" { print $$3 }'); \
+	if [ -z "$$linked" ]; then \
+		echo "$(COLOR_YELLOW)No dockerd on this host, or it carries no build info;$(COLOR_RESET)"; \
+		echo "$(COLOR_YELLOW)diffing against the recorded $(SECCOMP_UPSTREAM_VERSION) instead.$(COLOR_RESET)"; \
+	elif [ "$$linked" != "$(SECCOMP_UPSTREAM_VERSION)" ]; then \
+		echo "$(COLOR_YELLOW)The local dockerd links $(SECCOMP_UPSTREAM) $$linked,$(COLOR_RESET)"; \
+		echo "$(COLOR_YELLOW)not the $(SECCOMP_UPSTREAM_VERSION) this profile was taken from. The$(COLOR_RESET)"; \
+		echo "$(COLOR_YELLOW)diff below is against $(SECCOMP_UPSTREAM_VERSION); rebase the profile if$(COLOR_RESET)"; \
+		echo "$(COLOR_YELLOW)upstream has moved.$(COLOR_RESET)"; \
+	fi; \
+	dir=$$($(GO) mod download -json $(SECCOMP_UPSTREAM)@$(SECCOMP_UPSTREAM_VERSION) \
+		| sed -n 's/.*"Dir": "\(.*\)".*/\1/p'); \
+	if [ -z "$$dir" ]; then \
+		echo "$(COLOR_RED)Could not fetch $(SECCOMP_UPSTREAM)@$(SECCOMP_UPSTREAM_VERSION)$(COLOR_RESET)"; \
+		exit 1; \
+	fi; \
+	echo "$(COLOR_BOLD)Upstream: $$dir/default.json$(COLOR_RESET)"; \
+	sha256sum "$$dir/default.json"; \
+	echo ""; \
+	diff -u "$$dir/default.json" $(SECCOMP_PROFILE) || true
+
+
 docker-test-specific: ## Run specific integration test in Docker (use TEST=TestName)
 	@echo "$(COLOR_BOLD)Building Docker image...$(COLOR_RESET)"
 	@$(MAKE) docker-build-integration
 	@echo ""
 	@echo "$(COLOR_BOLD)Running test: $(TEST)$(COLOR_RESET)"
-	@docker run --rm --privileged -v "$(TEST_STATE_DIR):/var/lib/go-luks2-test-state" go-luks2-integration-test \
+	@TEST_STATE_DIR="$(TEST_STATE_DIR)" $(INTEGRATION_DOCKER_RUN) --rm -- \
 		go test -v -tags=integration -run="$(TEST)" ./...
 
 host-integration-test: build ## Run integration tests on host (requires sudo, NOT recommended)
@@ -620,7 +667,19 @@ devcontainer: ## Build and run the devcontainer
 	@echo "$(COLOR_GREEN)✓ Devcontainer built$(COLOR_RESET)"
 	@echo ""
 	@echo "$(COLOR_BOLD)To run:$(COLOR_RESET)"
-	@echo "  docker run --privileged -v \$$(pwd):/workspace -it go-luks2-devcontainer bash"
+	@echo "  IMAGE=go-luks2-devcontainer $(INTEGRATION_DOCKER_RUN) \\"
+	@echo "      --rm -it -v \$$(pwd):/workspace -- bash"
+	@echo ""
+	@echo "$(COLOR_YELLOW)  It used to say --privileged here. Going through the script gets the$(COLOR_RESET)"
+	@echo "$(COLOR_YELLOW)  same scoped capabilities, seccomp profile and device access the$(COLOR_RESET)"
+	@echo "$(COLOR_YELLOW)  integration suite runs under, so a shell you debug in behaves like$(COLOR_RESET)"
+	@echo "$(COLOR_YELLOW)  the suite instead of like a machine with no restrictions (#80).$(COLOR_RESET)"
+	@echo ""
+	@echo "$(COLOR_YELLOW)  Note: .devcontainer/devcontainer.json still carries --privileged and$(COLOR_RESET)"
+	@echo "$(COLOR_YELLOW)  a bind mount of the host /dev, so opening this repo through the VS$(COLOR_RESET)"
+	@echo "$(COLOR_YELLOW)  Code devcontainer is NOT the same thing. Tracked separately: a$(COLOR_RESET)"
+	@echo "$(COLOR_YELLOW)  devcontainer.json cannot read the dm major out of /proc/devices, and$(COLOR_RESET)"
+	@echo "$(COLOR_YELLOW)  a hard-coded one is wrong on the next machine.$(COLOR_RESET)"
 
 # Builds never resolve through a workspace: cross-repository modules come from
 # published TAGS, never from wherever a sibling repo happens to be checked out.
