@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/jeremyhahn/go-enclave"
@@ -317,25 +316,19 @@ func TestSaveRecoveryKeyContent(t *testing.T) {
 		t.Fatalf("failed to save key: %v", err)
 	}
 
-	// Read file content
-	content, err := os.ReadFile(keyPath)
-	if err != nil {
-		t.Fatalf("failed to read key file: %v", err)
-	}
-
-	contentStr := string(content)
-
-	// Verify content contains expected elements
-	if !strings.Contains(contentStr, "LUKS Recovery Key") {
+	// Verify the file carries the expected elements. This searches the file
+	// in locked memory rather than copying it into a plain heap string --
+	// see savedFileContains -- because the file holds a USABLE CREDENTIAL.
+	if !savedFileContains(t, keyPath, "LUKS Recovery Key") {
 		t.Error("expected header in file")
 	}
-	if !strings.Contains(contentStr, "test-uuid") {
+	if !savedFileContains(t, keyPath, "test-uuid") {
 		t.Error("expected UUID in file")
 	}
-	if !strings.Contains(contentStr, "Keyslot: 1") {
+	if !savedFileContains(t, keyPath, "Keyslot: 1") {
 		t.Error("expected keyslot in file")
 	}
-	if !strings.Contains(contentStr, "010203-040506") {
+	if !savedFileContains(t, keyPath, "010203-040506") {
 		t.Error("expected recovery key in file")
 	}
 }
@@ -702,22 +695,21 @@ func TestAddRecoveryKeyReportsTheKeyslotItActuallyUsed(t *testing.T) {
 	}
 }
 
-// savedFileRecordsKeyslot reports whether the saved recovery-key file carries
-// the "# Keyslot: <id>" preamble line.
+// savedFileContains reports whether the saved recovery-key file contains substr.
 //
 // It reads the file into LOCKED memory and searches it in place, which is not
-// ceremony: that file contains a USABLE CREDENTIAL. An earlier version of this
-// test used os.ReadFile plus string(contents) -- two unwipeable heap copies of
-// the recovery key -- and printed the whole file in its failure message, which
-// would have put the credential in CI logs. Codex blocked it on PR #103 and was
-// right; it violates the protected-memory mandate and the prohibition on
-// secrets reaching logs.
+// ceremony: that file contains a USABLE CREDENTIAL. An earlier version of a
+// test in this package used os.ReadFile plus string(contents) -- two
+// unwipeable heap copies of the recovery key -- and printed the whole file in
+// its failure message, which would have put the credential in CI logs. Codex
+// blocked it on PR #103 and was right; it violates the protected-memory
+// mandate and the prohibition on secrets reaching logs.
 //
 // The idiom is LoadRecoveryKey's own: allocate an enclave sized from the file,
-// fill it inside a borrow, and locate what is wanted by INDEX rather than
+// fill it inside a borrow, and locate what is wanted by SEARCH rather than
 // copying anything out. Nothing here returns or logs file contents -- only a
 // bool -- so no caller can leak them either.
-func savedFileRecordsKeyslot(t *testing.T, path, keyslotID string) bool {
+func savedFileContains(t *testing.T, path, substr string) bool {
 	t.Helper()
 
 	f, err := os.Open(path) // #nosec G304 -- path is under t.TempDir()
@@ -742,12 +734,19 @@ func savedFileRecordsKeyslot(t *testing.T, path, keyslotID string) bool {
 		if _, err := io.ReadFull(f, b); err != nil {
 			return err
 		}
-		found = bytes.Contains(b, []byte("# Keyslot: "+keyslotID+"\n"))
+		found = bytes.Contains(b, []byte(substr))
 		return nil
 	}); err != nil {
 		t.Fatalf("reading the saved recovery key: %v", err)
 	}
 	return found
+}
+
+// savedFileRecordsKeyslot reports whether the saved recovery-key file carries
+// the "# Keyslot: <id>" preamble line.
+func savedFileRecordsKeyslot(t *testing.T, path, keyslotID string) bool {
+	t.Helper()
+	return savedFileContains(t, path, "# Keyslot: "+keyslotID+"\n")
 }
 
 // TestAddRecoveryKeyHonoursAnExplicitKeyslot covers the other branch, which was
