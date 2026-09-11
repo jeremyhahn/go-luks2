@@ -3,11 +3,11 @@
 # see the note on the job below. v4 added a guard step and a concurrency
 # change; v5 keeps the guard and reverts the concurrency — measured, below.
 #
-# v6 (automatethethings#127) makes three changes, all about a verdict being
-# real rather than about how the review is produced:
+# v6 makes three changes, all about a verdict being real rather than about
+# how the review is produced:
 #   - the guard checks `.merged`/`.state` from the read it already makes, so a
-#     closed PR costs no GPU. That check used to live in review-agent.md, where
-#     it could only run after the 27B model had loaded.
+#     closed PR costs no GPU. That check used to live in the reviewer's system
+#     prompt, where it could only run after the 27B model had loaded.
 #   - the guard IGNORES PENDING reviews when it looks for a standing verdict. A
 #     draft is not an approval and not a rejection; treating it as one made two
 #     heads permanently unreviewable.
@@ -21,14 +21,17 @@
 # (which did not). They differed in the one line deciding whether an
 # unreviewed PR can merge, and a drift check comparing STAMPS reports two
 # such files as in agreement. This file is now built FROM the deployed
-# copies rather than from its own previous contents. See automatethethings#88.
+# copies rather than from its own previous contents, precisely so the two
+# cannot drift apart again without a build noticing.
 # Source of truth: software/templates/github-actions/opencode-review.yml in
 # the company repo -- INTENT, not a measurement. On 2026-09-07 this file was
 # the stalest copy of itself in the fleet while saying exactly this line.
-# Before editing it, diff it against a deployed copy (automatethethings#89).
+# Before editing it, diff it against a deployed copy -- that is the lesson
+# this whole note exists to enforce.
 # Gitea-only by design.
 #
-# ONE REVIEWER: opencode, running a LOCAL model on gpu-host's GPU. Owner ruling
+# ONE REVIEWER: opencode, running a LOCAL model on the team's dedicated review
+# GPU host. Owner ruling
 # 2026-09-06, in his words: "i dont want any CODEX tokens minted or any api
 # usage for frontier models. when the codex subscription is expired then we
 # dont use it! we use opencode with whatever model is specified in the gitea
@@ -46,7 +49,7 @@
 # outlived all three facts and still said the default was qwen3.6 — a comment
 # nobody had reason to distrust, describing a step that no longer existed, in a
 # file whose executable line was already correct. That is the qwen3.6 incident
-# repeating as documentation; see automatethethings#127.
+# repeating as documentation, which is why this note exists.
 #
 # WHY THE LABEL MAP WENT, since that part is worth keeping: `model:qwen3.6`
 # selected a STOCK tag carrying temperature 0.1 and num_ctx 65536 — Qwen
@@ -104,7 +107,7 @@ on:
 # v5 therefore reverts to the v3 concurrency and keeps the guard. The transient
 # red is accepted: it is self-healing (80s on the canary) and is not fixable at
 # the workflow level. What IS fixable -- a wasted duplicate review, and a
-# duplicate overwriting a verdict -- the guard fixes. automatethethings#94.
+# duplicate overwriting a verdict -- the guard fixes.
 concurrency:
   group: code-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
@@ -144,8 +147,9 @@ jobs:
     #
     # A single job with an expression here avoids that, and Gitea 1.27.1 DOES
     # evaluate it -- verified rather than assumed, because this file already
-    # records Gitea ignoring `cancel-in-progress` as specified. Probe on
-    # automatethethings branch probe/runs-on-expression: the jobs API reported
+    # records Gitea ignoring `cancel-in-progress` as specified. Probed on a
+    # verification branch in the company's shared workflow-template
+    # repository: the jobs API reported
     # `"labels": ["ubuntu-latest"]` for `runs-on: ${{ ... || 'ubuntu-latest' }}`
     # and the job ran. `contains()` over `labels.*.name` compares ARRAY ELEMENTS,
     # so this is an exact whole-label test, not a substring one (#113).
@@ -163,8 +167,9 @@ jobs:
     #
     # `agent:claude` now ROUTES TO A REAL RUNNER. Until 2026-09-10 it deliberately
     # landed on code-review and failed there with a named error, because the
-    # `omega-claude` registration pointed at 198.51.100.91:3001 -- the dead
-    # pre-move Gitea -- so a `claude` label was one nothing would ever claim.
+    # runner registration for the claude route pointed at the address of the
+    # pre-move Gitea instance, retired when Gitea moved -- so a `claude` label
+    # was one nothing would ever claim.
     # Owner, 2026-09-10: "agent:claude should have somewhere to go, it should be
     # going to a claude agent just like codex is going to the codex agent!"
     #
@@ -246,7 +251,7 @@ jobs:
 
           # A PR that is merged or closed cannot receive a review: Gitea answers
           # the POST with HTTP 422, so everything spent getting there is thrown
-          # away. This was checked by the MODEL, in step 2 of review-agent.md,
+          # away. This was checked by the MODEL, in step 2 of its system prompt,
           # which means it was checked after the container started, the 27B model
           # loaded and the prompt ran -- 31 GPU-minutes in three days by the
           # prompt's own count. It is a field of the read above. Check it here.
@@ -272,7 +277,7 @@ jobs:
           # Two steps read `.draft` and I added the output to the wrong one. The
           # confirmation step keeps its OWN read deliberately -- a gate should
           # re-derive the fact it enforces rather than trust an earlier step's
-          # output. Found by codex on a live review; see automatethethings#127 and
+          # output. Found by codex on a live review; see
           # software/scripts/check-workflow-outputs.py, which now checks
           # mechanically that every steps.X.outputs.Y read has a write in step X.
           echo "is_draft=$(printf '%s' "$pr" | jq -r '.draft // false')" >> "$GITHUB_OUTPUT"
@@ -422,6 +427,19 @@ jobs:
         id: reviewer
         if: github.server_url != 'https://github.com' && steps.guard.outputs.skip == ''
         env:
+          # The endpoint lives in a repository Actions VARIABLE, not in this
+          # file. That is what lets the address stay out of a publicly mirrored
+          # tree while the step still has a value to use: the disclosure guard
+          # refuses an RFC1918 literal in any tracked file, and a per-runner
+          # fact is not something a shared template can carry anyway.
+          #
+          # Wiring it here is required. An Actions variable is NOT exported into
+          # the step's shell on its own -- it has to be referenced as
+          # `vars.<NAME>`. The variable already existed and nothing read it, so
+          # the hardcoded fallback removed above was doing all the work
+          # unnoticed; the `:?` below now fails loudly if the variable is unset
+          # rather than silently pointing the fleet at one host's address.
+          OLLAMA_URL: ${{ vars.OLLAMA_URL }}
           LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           ROUTED_AGENT: ${{ contains(github.event.pull_request.labels.*.name, 'agent:codex') && 'codex' || contains(github.event.pull_request.labels.*.name, 'agent:claude') && 'claude' || contains(github.event.pull_request.labels.*.name, 'agent:opencode') && 'opencode' || contains(github.event.pull_request.labels.*.name, 'model:codex') && 'codex' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:codex:') && 'codex' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:gpt-') && 'codex' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:o3') && 'codex' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:o4') && 'codex' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:opus') && 'claude' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:sonnet') && 'claude' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:haiku') && 'claude' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:fable') && 'claude' || contains(join(github.event.pull_request.labels.*.name, ','), 'model:claude-') && 'claude' || 'opencode' }}
         run: |
@@ -447,7 +465,17 @@ jobs:
 
           OPENCODE_DEFAULT_MODEL="review-q8"
           CODEX_DEFAULT_MODEL="gpt-5.5"
-          OLLAMA="${OLLAMA_URL:-http://198.51.100.91:11434}"
+
+          # This step only ever runs on the internal Gitea server (the `if:` on
+          # the job above), so the Ollama endpoint is whatever the self-hosted
+          # runner's own environment supplies for the GPU host it drives -- a
+          # per-runner fact, not a value this template can know or default. A
+          # baked-in fallback here would silently point every runner in the
+          # fleet at ONE host's address the moment its own is unset, and the
+          # failure would surface as a confusing curl error far below rather
+          # than as a clear "this runner is missing its own required config".
+          : "${OLLAMA_URL:?OLLAMA_URL is required on this runner and has no default -- set it to the Ollama endpoint for this runner.}"
+          OLLAMA="$OLLAMA_URL"
 
           ollama_models() { curl -sS --max-time 10 "$OLLAMA/api/tags" | jq -r '.models[].name' | sort -u; }
           label_exists() { printf '%s' "$LABELS" | jq -e --arg n "$1" 'index($n) != null' >/dev/null 2>&1; }
@@ -658,7 +686,7 @@ jobs:
               # `claude-*` passes straight through, so a model released tomorrow works
               # without an edit here -- same reasoning as the codex branch below.
               #
-              # THE FLOOR IS NOT THIS FILE'S RULE. conventions/model-usage.md, which the
+              # THE FLOOR IS NOT THIS FILE'S RULE. ../handbook/software/conventions/model-usage.md, which the
               # owner set, says substantive work never runs below Opus 5 and that Haiku
               # and stale versions are prohibited. A code review is substantive, so a
               # below-floor label is refused HERE, loudly, instead of quietly producing a
@@ -668,12 +696,12 @@ jobs:
                 fable|fable-5.1|fable-5-1|claude-fable-5-1)   resolved=claude-fable-5-1 ;;
                 sonnet|sonnet-5|claude-sonnet-5)
                   echo "::error::model '$model' is below the Opus 5 floor for review work."
-                  echo "::error::conventions/model-usage.md reserves Sonnet for quick, trivial,"
+                  echo "::error::../handbook/software/conventions/model-usage.md reserves Sonnet for quick, trivial,"
                   echo "::error::mechanical tasks; judging a pull request is not one. Use"
                   echo "::error::model:opus or model:fable-5.1, or change the convention first."
                   exit 1 ;;
                 haiku*|claude-haiku*)
-                  echo "::error::model '$model' is prohibited by conventions/model-usage.md."
+                  echo "::error::model '$model' is prohibited by ../handbook/software/conventions/model-usage.md."
                   exit 1 ;;
                 claude-*)                                     resolved="$model" ;;
                 *)
@@ -776,7 +804,7 @@ jobs:
           # what `/pulls/{n}/files` reports. Verified on go-xkms#452 and on two
           # PRs whose base is not `main`.
           #
-          # FAIL CLOSED. review-agent.md no longer tells the model how to derive a
+          # FAIL CLOSED. The reviewer's system prompt no longer tells the model how to derive a
           # diff, so a missing one would mean reviewing blind or silently going
           # back to git merge-base -- exactly the cost this removes. An
           # unreadable diff is not a degraded review, it is no review.
@@ -926,6 +954,12 @@ jobs:
             esac
           fi
 
+          # THE REVIEWER'S SYSTEM PROMPT is baked into the review container image at
+          # build time (the company's shared template repository, not this one) and
+          # read from this fixed location at run time -- named once here rather than
+          # spelled out at each of the three call sites below.
+          REVIEWER_PROMPT_DIR="/opt/review"
+
           # ONE code path for all three engines and for the retry below. The prompt is
           # identical: whichever model runs, it reads the same instructions and
           # posts its own review.
@@ -967,7 +1001,7 @@ jobs:
                   -s danger-full-access \
                   "$facts
 
-          $(cat /opt/review/review-agent.md)${1:+
+          $(cat $REVIEWER_PROMPT_DIR/review-agent.md)${1:+
 
           $1}"
                 ;;
@@ -988,7 +1022,7 @@ jobs:
                   --permission-mode bypassPermissions \
                   "${1:-$facts
 
-          $(cat /opt/review/review-agent.md)}"
+          $(cat $REVIEWER_PROMPT_DIR/review-agent.md)}"
                 ;;
               *)
                 # shellcheck disable=SC2086
@@ -997,7 +1031,7 @@ jobs:
                   --print-logs --log-level ERROR \
                   "${1:-$facts
 
-          $(cat /opt/review/review-agent.md)}"
+          $(cat $REVIEWER_PROMPT_DIR/review-agent.md)}"
                 ;;
             esac
           }
@@ -1020,8 +1054,9 @@ jobs:
           # It stopped talking. No review existed, and the job would have been
           # green without the confirm step below.
           #
-          # review-agent.md now forbids ending a turn on narration, but a prompt
-          # cannot guarantee a turn-ending behaviour, so this does not rely on it.
+          # The reviewer's system prompt now forbids ending a turn on narration,
+          # but a prompt cannot guarantee a turn-ending behaviour, so this does
+          # not rely on it.
           # `--continue` RESUMES THE SAME SESSION with its context intact
           # (verified: a token stored in one invocation was recalled in the next),
           # so the retry costs the remaining work rather than a second review --
@@ -1047,7 +1082,7 @@ jobs:
       # MEASURED, go-luks2 #137 (2026-09-09, task 53362): the model wrote a real
       # 1620-character review, POSTed it correctly, checked that the POST was
       # accepted -- exactly as instructed -- and the job went GREEN with the
-      # review filed as a PENDING draft. review-agent.md told it `event` must be
+      # review filed as a PENDING draft. Its system prompt told it `event` must be
       # `APPROVE`; Gitea's enum is `APPROVED` (swagger CreatePullReviewOptions),
       # and Gitea does not reject an unrecognised event, it accepts the POST with
       # HTTP 200 and degrades the review to PENDING. A draft is visible to its
@@ -1129,7 +1164,8 @@ jobs:
               # AN APPROVAL CONTRADICTS THE AUTHOR ON A DRAFT. The old
               # pr-review.sh refused to post one ("refusing to APPROVE a pull
               # request its author has marked unfinished"); deleting the script
-              # left that as prose in review-agent.md and nothing enforcing it.
+              # left that as prose in the reviewer's system prompt and nothing
+              # enforcing it.
               # This restores it as a check. REQUEST_CHANGES and COMMENT on a
               # draft are fine and wanted -- only the approval is refused.
               case "$state" in
