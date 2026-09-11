@@ -4,11 +4,21 @@ name: CI
 # self-hosted forge. Steps that only work on github.com are guarded on
 # github.server_url; everything that gates a merge runs on both.
 #
-# ci-template v1.9 (owner ruling 2026-08-20, issue #14) — STAGED FAIL-FAST.
-# The self-hosted host has no API to cancel in-flight jobs, so fail-fast cannot
-# come from cancellation and comes from ORDERING instead: a fast tier (lint,
-# build, unit tests) gates the expensive tier (security, integration). A broken
-# push reports in minutes and burns nothing downstream.
+# ci-template v1.9 (owner ruling 2026-08-20, issue #14) — STAGED FAIL-FAST,
+# and, since #136, supersession as well. The self-hosted host exposes no REST
+# route to cancel a run, so nothing can reach in and stop one from outside. Two
+# mechanisms cover that, and they answer different questions:
+#
+#   WITHIN one run, fail-fast comes from ORDERING: a fast tier (lint, build,
+#   unit tests) gates the expensive tier (security, integration). A broken push
+#   reports in minutes and burns nothing downstream.
+#
+#   ACROSS runs, the `concurrency` block below cancels a run the moment a newer
+#   head lands on the same ref. It is a property of the workflow the scheduler
+#   reads, not an API call — which is exactly why it works on a host where no
+#   cancel route exists. "No cancel API" was long read here as "cancellation is
+#   impossible"; the narrow claim is true and the conclusion was not.
+#
 # trivy and fips moved to nightly.yml: both were known-red on every push, and a
 # known-red job burning runner-minutes per push verifies nothing.
 on:
@@ -19,6 +29,45 @@ on:
   # Lets a run be repeated without inventing a commit, which matters when a
   # failure is the runner's rather than the code's.
   workflow_dispatch:
+
+# Supersede an in-flight run when a newer head lands on the same ref: the older
+# run is cancelled and the newest survives. Measured across this portfolio, 73%
+# of runs were already superseded yet ran to completion, on a runner pool every
+# repository shares — so the wasted slots were other projects' queue latency,
+# not only this one's.
+#
+# `${{ github.workflow }}` LEADS the key deliberately. It scopes the group to
+# this workflow alone, so a cancellation here can never reach the separate
+# review workflow that also gates a merge; that one carries its own group.
+#
+# `cancel-in-progress` is the literal `true` and must stay literal. This host
+# does not evaluate expressions in that field — any non-empty value is truthy —
+# so a `${{ ... }}` guard meant to narrow it would read as always-on instead.
+#
+# MAIN PUSHES ARE IN SCOPE, and that is the cost of the line above rather than
+# an oversight. `push` fires only on `main`, so every trunk commit shares the
+# one group `CI-refs/heads/main`: merge two pull requests a few minutes apart
+# and the FIRST merge commit's run is cancelled by the second. `main` then
+# carries a commit whose CI never completed, reported `cancelled`.
+#
+# The usual narrowing — `cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}`
+# — is exactly what the paragraph above says this host cannot do: the
+# expression is not evaluated, the value is non-empty, and it reads as `true`.
+# So the choice here is between per-push supersession everywhere and none at
+# all, and it is taken deliberately: a superseded trunk run is re-runnable from
+# the forge, the tags a release is verified against are cut from a commit that
+# has been through a completed run, and 73% waste on a shared pool is a cost
+# every other project in it pays. Recorded rather than fixed, because the fix
+# is a host capability this host does not have.
+#
+# `github.ref` rather than `github.head_ref || github.ref` is safe ONLY while
+# `push` is restricted to `main`: for a pull_request the ref is already
+# `refs/pull/<n>/merge`, so supersession works. Add a push trigger for
+# `issue/*` and the same commit lands in two groups, and the figure above
+# regresses without anything failing.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
