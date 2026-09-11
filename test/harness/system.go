@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/anatol/devmapper.go"
 	"golang.org/x/sys/unix"
@@ -342,10 +343,10 @@ func (SystemRemover) DetachLoop(dev LoopDevice) error {
 	if err != nil {
 		return fmt.Errorf("opening %s: %w", dev.Path, err)
 	}
-	defer func() { _ = f.Close() }()
 
 	info, err := unix.IoctlLoopGetStatus64(int(f.Fd()))
 	if err != nil {
+		_ = f.Close()
 		// ENXIO is the kernel saying the device is not bound to anything. That
 		// is the goal state, not a failure: something released it between the
 		// scan and here -- the test's own cleanup, or an autoclear on the last
@@ -357,15 +358,93 @@ func (SystemRemover) DetachLoop(dev LoopDevice) error {
 	}
 
 	if now := identityFromStatus(info); now != dev.Identity {
+		_ = f.Close()
 		return fmt.Errorf("refusing to detach %s: it is now bound to %s, not the %s it carried when it was "+
 			"enumerated as backing %q -- the loop number was reused",
 			dev.Path, now, dev.Identity, dev.Backing)
 	}
 
 	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, f.Fd(), unix.LOOP_CLR_FD, 0); errno != 0 {
+		_ = f.Close()
 		return fmt.Errorf("LOOP_CLR_FD on %s: %w", dev.Path, errno)
 	}
-	return nil
+
+	// THE DESCRIPTOR IS A REFERENCE, AND IT IS CLOSED HERE RATHER THAN DEFERRED.
+	//
+	// LOOP_CLR_FD does not necessarily release the device. When any descriptor
+	// is still open on it -- including THIS one -- the kernel sets autoclear and
+	// defers the release until the last close. Returning at this point reported
+	// success while the caller's own open fd was the thing preventing it, and
+	// `defer f.Close()` ran only after the return, so the release could not even
+	// begin until the caller was already acting on the "success".
+	//
+	// pkg/luks2/loopdev.go states this exactly, for its own detach path: "this
+	// descriptor is a reference, and the release cannot complete while it is
+	// held. A deferred close would make the wait wait for itself." The harness
+	// did the thing that comment forbids.
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("closing %s after LOOP_CLR_FD, which must happen before the release can complete: %w", dev.Path, err)
+	}
+
+	// NO PATH RETURNS SUCCESS WITHOUT AN AUTHORITATIVE OBSERVATION -- the same
+	// contract pkg/luks2 holds itself to. Without this the function reported a
+	// PROMISE as a fact, and whether the promise had been kept by the caller's
+	// next syscall was a race the caller could not see.
+	return waitForLoopRelease("/sys/block", dev, loopReleaseTimeout, loopReleasePoll, captureLoopIdentity)
+}
+
+// Release wait bounds. The release being waited on is the kernel completing a
+// deferred autoclear once the last reference goes away; it is normally already
+// done by the first poll, and the bound exists so a device something else holds
+// open fails with a diagnosis instead of hanging a suite.
+const (
+	loopReleaseTimeout = 2 * time.Second
+	loopReleasePoll    = 500 * time.Microsecond
+)
+
+// waitForLoopRelease blocks until the enumerated device no longer backs the
+// file, and says so authoritatively rather than assuming it.
+//
+// "Released" is not the same as "absent from the listing for some other
+// reason", so the two cases the scan can legitimately produce are both
+// accepted and neither is guessed at:
+//
+//   - the device is gone from the listing for this backing file -- released;
+//   - it is present but now carries a DIFFERENT identity -- the loop number was
+//     freed and reused by another job, which also means ours is released.
+//
+// Anything else is still held, and the bound turns that into an error naming
+// the device rather than a suite that hangs or, worse, one that proceeds.
+// The sysfs root and the identity capturer are PARAMETERS, in the same idiom
+// and for the same reason as loopDevicesForIn: the waiting logic can then be
+// exercised against a fake /sys tree, with no loop device, no root, and without
+// waiting out a real timeout. A wait that could only be tested by attaching a
+// real device would not be tested.
+func waitForLoopRelease(sysBlock string, dev LoopDevice, timeout, poll time.Duration, capture identityCapturer) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		devices, err := loopDevicesForIn(sysBlock, dev.Backing, capture)
+		if err != nil {
+			return fmt.Errorf("confirming %s was released from %q: %w", dev.Path, dev.Backing, err)
+		}
+
+		stillOurs := false
+		for _, d := range devices {
+			if d.Path == dev.Path && d.IdentityKnown && d.Identity == dev.Identity {
+				stillOurs = true
+				break
+			}
+		}
+		if !stillOurs {
+			return nil
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s still backs %q %s after LOOP_CLR_FD reported success: the release is deferred "+
+				"and something still holds the device open", dev.Path, dev.Backing, timeout)
+		}
+		time.Sleep(poll)
+	}
 }
 
 // loopIdentity is the kernel's own identity for a loop device's CURRENT
