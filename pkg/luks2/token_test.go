@@ -178,12 +178,12 @@ func TestCountTokens_InvalidDevice(t *testing.T) {
 
 func TestTokenJSONMarshal(t *testing.T) {
 	token := &Token{
-		Type:            "fido2-manual",
+		Type:            TokenTypeSystemdFIDO2,
 		Keyslots:        []string{"1"},
 		FIDO2Credential: "dGVzdC1jcmVkZW50aWFs",
 		FIDO2Salt:       "dGVzdC1zYWx0",
 		FIDO2RP:         "test.example.com",
-		FIDO2UPRequired: true,
+		FIDO2UPRequired: boolPtr(true),
 	}
 
 	data, err := json.Marshal(token)
@@ -211,8 +211,8 @@ func TestTokenJSONMarshal(t *testing.T) {
 	if parsed.FIDO2RP != token.FIDO2RP {
 		t.Errorf("FIDO2RP mismatch: got %s, want %s", parsed.FIDO2RP, token.FIDO2RP)
 	}
-	if parsed.FIDO2UPRequired != token.FIDO2UPRequired {
-		t.Errorf("FIDO2UPRequired mismatch: got %v, want %v", parsed.FIDO2UPRequired, token.FIDO2UPRequired)
+	if parsed.FIDO2UPRequired == nil || *parsed.FIDO2UPRequired != *token.FIDO2UPRequired {
+		t.Errorf("FIDO2UPRequired mismatch: got %v, want %v", parsed.FIDO2UPRequired, *token.FIDO2UPRequired)
 	}
 }
 
@@ -223,7 +223,7 @@ func TestTPM2TokenJSONMarshal(t *testing.T) {
 		TPM2Hash:       "sha256",
 		TPM2PolicyHash: "dGVzdC1wb2xpY3ktaGFzaA==",
 		TPM2PCRBank:    "sha256",
-		TPM2PCRs:       []int{0, 1, 2, 3, 7},
+		TPM2PCRs:       intsPtr([]int{0, 1, 2, 3, 7}),
 		TPM2Blob:       "dGVzdC1ibG9i",
 		TPM2PublicKey:  "dGVzdC1wdWJrZXk=",
 	}
@@ -244,8 +244,11 @@ func TestTPM2TokenJSONMarshal(t *testing.T) {
 	if parsed.TPM2Hash != token.TPM2Hash {
 		t.Errorf("TPM2Hash mismatch: got %s, want %s", parsed.TPM2Hash, token.TPM2Hash)
 	}
-	if len(parsed.TPM2PCRs) != len(token.TPM2PCRs) {
-		t.Errorf("TPM2PCRs length mismatch: got %d, want %d", len(parsed.TPM2PCRs), len(token.TPM2PCRs))
+	if parsed.TPM2PCRs == nil || token.TPM2PCRs == nil {
+		t.Fatalf("TPM2PCRs should be set on both sides: got %v, want %v", parsed.TPM2PCRs, token.TPM2PCRs)
+	}
+	if len(*parsed.TPM2PCRs) != len(*token.TPM2PCRs) {
+		t.Errorf("TPM2PCRs length mismatch: got %d, want %d", len(*parsed.TPM2PCRs), len(*token.TPM2PCRs))
 	}
 }
 

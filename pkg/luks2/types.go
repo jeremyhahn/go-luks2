@@ -5,7 +5,6 @@
 package luks2
 
 import (
-	"encoding/json"
 	"fmt"
 )
 
@@ -170,40 +169,111 @@ func (m *LUKS2Metadata) ensureRequiredObjects() {
 	}
 }
 
-// Keyslot represents a key slot in LUKS2
+// Keyslot represents a key slot in LUKS2.
+//
+// FIELD ORDER IS THE ON-DISK MEMBER ORDER. encoding/json marshals a struct's
+// fields in declaration order, and this order is cryptsetup 2.7.0's, measured
+// with `cryptsetup luksDump --dump-json-metadata`: type, key_size, af, area,
+// kdf, and priority last on the keyslots that carry one. Nothing in LUKS2
+// requires a member order, so this
+// buys no compatibility -- what it buys is that a header this package wrote
+// and one cryptsetup wrote can be diffed, which is how the members that were
+// being dropped entirely were found.
+//
+// Members this package does not model are carried across a read-modify-write
+// cycle rather than deleted; see unknownfields.go.
 type Keyslot struct {
-	Type     string       `json:"type"`     // "luks2"
-	KeySize  int          `json:"key_size"` // Key size in bytes
-	Priority *int         `json:"priority,omitempty"`
-	Area     *KeyslotArea `json:"area"`
-	KDF      *KDF         `json:"kdf"`
-	// AF is mandatory for a keyslot of type "luks2" -- cryptsetup's luks2
-	// keyslot validator requires the object -- so it carries no omitempty.
-	// A nil AF here is a bug in the caller either way; emitting `"af": null`
-	// makes it visible instead of producing a keyslot that merely looks
-	// well-formed.
-	AF     *AntiForensic          `json:"af"`
-	Custom map[string]interface{} `json:"-"` // For unknown fields
+	Type    string `json:"type"`     // "luks2"
+	KeySize int    `json:"key_size"` // Key size in bytes
+
+	// AF and KDF are mandatory for a keyslot of type "luks2" and absent from
+	// one of type "reencrypt", so they carry omitempty: a keyslot legitimately
+	// has neither, and LUKS2 has more than one keyslot type.
+	//
+	// They carried none from before this package's first release until #143 --
+	// so every version shipped so far writes the nulls described below, and
+	// this is a fix to existing behavior rather than to anything #143
+	// introduced. The reasoning was that a nil AF is a caller bug and
+	// `"af": null` makes it visible. The goal was right and the place was
+	// wrong. Serialization describes what IS there; asserting what OUGHT
+	// to be there is validateKeyslot's job, and it already does exactly this
+	// -- it refuses a luks2 keyslot with no kdf or no af as ErrInvalidKeyslot,
+	// while deliberately exempting other types (keyslotvalidation.go). That
+	// check is louder than a null member and reaches every path that acts on a
+	// keyslot.
+	//
+	// What the missing omitempty cost was the other direction. cryptsetup
+	// leaves a reencrypt keyslot in the header during an online reencryption;
+	// this package would read it, and the next unrelated header write would
+	// hand it back to disk carrying `"af": null` and `"kdf": null` that it
+	// never had. That is the read-modify-write corruption of a foreign object
+	// that unknownfields.go exists to prevent, one layer down in the typed
+	// half.
+	//
+	// Whether cryptsetup 2.7.0 REFUSES that shape is untested, and the
+	// omitempty is not justified by a claim that it does. Measured: a
+	// container carrying a reencrypt keyslot is refused earlier, for
+	// "Missing reencryption requirement flag", with and without the null
+	// members alike -- so the af/kdf check is never reached. This package
+	// cannot currently produce -- or even read -- a container that gets past
+	// that point: LUKS2 spells config.requirements as an object with a
+	// mandatory array and Config models it as []string, which is #152. The
+	// justification is fidelity: an object this package did not create goes
+	// back the way it came.
+	AF   *AntiForensic `json:"af,omitempty"`
+	Area *KeyslotArea  `json:"area"`
+	KDF  *KDF          `json:"kdf,omitempty"`
+
+	// Priority is 0 (ignore), 1 (normal) or 2 (prefer). It is a pointer
+	// because absent is meaningful: LUKS2 reads an absent priority as normal,
+	// and cryptsetup writes no member at all for a normal keyslot.
+	//
+	// It is declared LAST because that is where cryptsetup emits it when it
+	// emits it at all -- after kdf, not among the mandatory members.
+	Priority *int `json:"priority,omitempty"`
+
+	unknown unknownFields
 }
 
-// KeyslotArea defines the encrypted key material storage area
+// KeyslotArea defines the encrypted key material storage area.
+//
+// Member order is cryptsetup's: type, offset, size, encryption, key_size.
+//
+// Every keyslot type has an area, but they do not have the same one. A "raw"
+// area holds key material and declares the encryption and key size it holds
+// it under; a reencrypt keyslot's area is a checksum, journal or datashift
+// region with neither, and with members -- hash, sector_size, shift_size --
+// this package does not model and carries through instead. So encryption and
+// key_size carry omitempty, for the same reason af and kdf do on the keyslot
+// above: emitting `"encryption": ""` and `"key_size": 0` into an area that
+// legitimately has neither is inventing members on an object this package did
+// not create.
 type KeyslotArea struct {
-	Type       string `json:"type"`       // "raw"
-	KeySize    int    `json:"key_size"`   // Size of encrypted key
-	Offset     string `json:"offset"`     // Offset in bytes (as string)
-	Size       string `json:"size"`       // Size in bytes (as string)
-	Encryption string `json:"encryption"` // e.g., "aes-xts-plain64"
+	Type       string `json:"type"`                 // "raw"
+	Offset     string `json:"offset"`               // Offset in bytes (as string)
+	Size       string `json:"size"`                 // Size in bytes (as string)
+	Encryption string `json:"encryption,omitempty"` // e.g., "aes-xts-plain64"
+	KeySize    int    `json:"key_size,omitempty"`   // Size of encrypted key
+
+	unknown unknownFields
 }
 
-// KDF represents key derivation function parameters
+// KDF represents key derivation function parameters.
+//
+// Member order serves BOTH shapes cryptsetup emits, because salt is last in
+// each: pbkdf2 is type, hash, iterations, salt, and argon2 is type, time,
+// memory, cpus, salt. The members the other shape does not use carry
+// omitempty and drop out.
 type KDF struct {
 	Type       string `json:"type"`                 // "pbkdf2" or "argon2i" or "argon2id"
 	Hash       string `json:"hash,omitempty"`       // For pbkdf2: "sha256", "sha512"
-	Salt       string `json:"salt"`                 // Base64-encoded salt
 	Iterations *int   `json:"iterations,omitempty"` // For pbkdf2
 	Time       *int   `json:"time,omitempty"`       // For argon2
 	Memory     *int   `json:"memory,omitempty"`     // For argon2 (KB)
 	CPUs       *int   `json:"cpus,omitempty"`       // For argon2
+	Salt       string `json:"salt"`                 // Base64-encoded salt
+
+	unknown unknownFields
 }
 
 // AntiForensic represents anti-forensic information splitting parameters
@@ -211,28 +281,88 @@ type AntiForensic struct {
 	Type    string `json:"type"`    // "luks1"
 	Stripes int    `json:"stripes"` // Always 4000 for compatibility
 	Hash    string `json:"hash"`    // Hash algorithm
+
+	unknown unknownFields
 }
 
-// Token represents optional token metadata (TPM, FIDO2, etc.)
+// The token types systemd defines and dispatches on.
+//
+// The type string is not documentation: systemd-cryptsetup switches on it to
+// decide which unlock plugin gets the token, so a token spelled anything else
+// is one systemd will not look at. These are the literals in the systemd 255
+// binary.
+const (
+	// TokenTypeSystemdFIDO2 is the token systemd-cryptenroll --fido2-device
+	// writes. It replaces "fido2-manual", which this package invented and
+	// which nothing reads.
+	TokenTypeSystemdFIDO2 = "systemd-fido2"
+
+	// TokenTypeSystemdTPM2 is the token systemd-cryptenroll --tpm2-device
+	// writes.
+	TokenTypeSystemdTPM2 = "systemd-tpm2"
+
+	// TokenTypeSystemdRecovery is the token systemd-cryptenroll
+	// --recovery-key writes. It carries nothing but its type and keyslots:
+	// the recovery key IS the passphrase, so there is no material to record.
+	TokenTypeSystemdRecovery = "systemd-recovery"
+)
+
+// Token represents optional token metadata (TPM, FIDO2, etc.).
+//
+// A token this package does not fully model still round-trips: members with no
+// field here are carried verbatim rather than dropped. See unknownfields.go
+// for why that matters -- a token is written once by whatever enrolled it, and
+// every later header write by this package used to rewrite it from these
+// fields alone.
 type Token struct {
 	Type     string   `json:"type"`
 	Keyslots []string `json:"keyslots"`
 
-	// FIDO2-specific fields (for type "fido2-manual")
+	// FIDO2 fields, for TokenTypeSystemdFIDO2. Name, spelling and order are
+	// systemd's -- including the camelCase in fido2-clientPin-required, which
+	// is not a typo here and would be a token systemd cannot read if it were
+	// normalized.
 	FIDO2Credential string `json:"fido2-credential,omitempty"`
 	FIDO2Salt       string `json:"fido2-salt,omitempty"`
 	FIDO2RP         string `json:"fido2-rp,omitempty"`
-	FIDO2UPRequired bool   `json:"fido2-up-required,omitempty"`
 
-	// TPM-specific fields (for type "systemd-tpm2")
+	// The three FIDO2 requirement flags are POINTERS because false is a
+	// value systemd writes on purpose -- it is what
+	// --fido2-with-user-presence=no records -- and `omitempty` on a plain
+	// bool cannot express it: the zero value and "not set" are the same
+	// value, so the member would vanish from a token that had it.
+	FIDO2ClientPinRequired *bool `json:"fido2-clientPin-required,omitempty"`
+	FIDO2UPRequired        *bool `json:"fido2-up-required,omitempty"`
+	FIDO2UVRequired        *bool `json:"fido2-uv-required,omitempty"`
+
+	// TPM2 fields, for TokenTypeSystemdTPM2.
+	//
+	// These have NOT been reconciled against systemd the way the FIDO2 fields
+	// above have, and several of them do not match it: systemd writes
+	// tpm2-public-key where this says tpm2-pubkey, and has no tpm2-hash,
+	// tpm2-srk-nv or tpm2-key-handle at all. They are left alone here because
+	// correcting them is a separate breaking change to a public type -- and
+	// the passthrough means a real systemd-tpm2 token now survives a header
+	// rewrite regardless of what these fields are called.
 	TPM2Hash       string `json:"tpm2-hash,omitempty"`
 	TPM2PolicyHash string `json:"tpm2-policy-hash,omitempty"`
 	TPM2PCRBank    string `json:"tpm2-pcr-bank,omitempty"`
-	TPM2PCRs       []int  `json:"tpm2-pcrs,omitempty"`
-	TPM2Blob       string `json:"tpm2-blob,omitempty"`
-	TPM2PublicKey  string `json:"tpm2-pubkey,omitempty"`
-	TPM2SRKNV      string `json:"tpm2-srk-nv,omitempty"`
-	TPM2KeyHandle  uint64 `json:"tpm2-key-handle,omitempty"`
+
+	// TPM2PCRs is a POINTER for the same reason the three FIDO2 flags above
+	// are: `systemd-cryptenroll --tpm2-pcrs=""` writes "tpm2-pcrs": [] on
+	// purpose -- it is how a token enrolls with no PCR binding, leaving the
+	// policy to the signed public key alone -- and `omitempty` on a plain
+	// []int cannot express that. A nil slice and an explicitly empty one both
+	// have length zero, so the member would vanish either way. A nil pointer
+	// means "not set" and stays absent; a pointer to an empty slice means
+	// "set to no PCRs" and marshals as [].
+	TPM2PCRs      *[]int `json:"tpm2-pcrs,omitempty"`
+	TPM2Blob      string `json:"tpm2-blob,omitempty"`
+	TPM2PublicKey string `json:"tpm2-pubkey,omitempty"`
+	TPM2SRKNV     string `json:"tpm2-srk-nv,omitempty"`
+	TPM2KeyHandle uint64 `json:"tpm2-key-handle,omitempty"`
+
+	unknown unknownFields
 }
 
 // Segment represents a data segment on the device
@@ -325,27 +455,4 @@ type VolumeInfo struct {
 	SectorSize     int
 	ActiveKeyslots []int
 	Metadata       *LUKS2Metadata
-}
-
-// UnmarshalJSON custom unmarshaler to handle unknown fields in keyslots
-func (k *Keyslot) UnmarshalJSON(data []byte) error {
-	type Alias Keyslot
-	aux := &struct {
-		*Alias
-	}{
-		Alias: (*Alias)(k),
-	}
-
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-
-	// Store in map for later if needed
-	var raw map[string]interface{}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	k.Custom = raw
-
-	return nil
 }

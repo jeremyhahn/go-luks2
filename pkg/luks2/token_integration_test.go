@@ -15,6 +15,15 @@ import (
 	"testing"
 )
 
+// boolPtr is the integration build's copy of the helper the unit build keeps
+// in unknownfields_test.go. The two builds never compile together, so one
+// definition cannot serve both.
+func boolPtr(b bool) *bool { return &b }
+
+// intsPtr is the integration build's copy of the []int analog of boolPtr,
+// kept in unknownfields_test.go for the unit build.
+func intsPtr(v []int) *[]int { return &v }
+
 func TestTokenOperations_Integration(t *testing.T) {
 	// Integration tests run in the container, as root, under the scoped
 	// privilege set in test/integration/docker-run.sh. No root check needed.
@@ -76,12 +85,12 @@ func TestTokenOperations_Integration(t *testing.T) {
 
 	t.Run("import FIDO2 token", func(t *testing.T) {
 		token := &Token{
-			Type:            "fido2-manual",
+			Type:            TokenTypeSystemdFIDO2,
 			Keyslots:        []string{"0"},
 			FIDO2Credential: "dGVzdC1jcmVkZW50aWFs",
 			FIDO2Salt:       "dGVzdC1zYWx0",
 			FIDO2RP:         "test.example.com",
-			FIDO2UPRequired: true,
+			FIDO2UPRequired: boolPtr(true),
 		}
 
 		if err := ImportToken(device, 0, token); err != nil {
@@ -104,7 +113,7 @@ func TestTokenOperations_Integration(t *testing.T) {
 			t.Fatalf("failed to get token: %v", err)
 		}
 
-		if token.Type != "fido2-manual" {
+		if token.Type != TokenTypeSystemdFIDO2 {
 			t.Errorf("unexpected token type: %s", token.Type)
 		}
 		if token.FIDO2RP != "test.example.com" {
@@ -113,7 +122,7 @@ func TestTokenOperations_Integration(t *testing.T) {
 		if token.FIDO2Credential != "dGVzdC1jcmVkZW50aWFs" {
 			t.Errorf("unexpected FIDO2Credential: %s", token.FIDO2Credential)
 		}
-		if !token.FIDO2UPRequired {
+		if token.FIDO2UPRequired == nil || !*token.FIDO2UPRequired {
 			t.Error("FIDO2UPRequired should be true")
 		}
 	})
@@ -130,7 +139,7 @@ func TestTokenOperations_Integration(t *testing.T) {
 
 		// Verify it contains expected fields
 		jsonStr := string(jsonData)
-		if !strings.Contains(jsonStr, "fido2-manual") {
+		if !strings.Contains(jsonStr, TokenTypeSystemdFIDO2) {
 			t.Error("JSON should contain token type")
 		}
 		if !strings.Contains(jsonStr, "test.example.com") {
@@ -155,7 +164,7 @@ func TestTokenOperations_Integration(t *testing.T) {
 			TPM2Hash:       "sha256",
 			TPM2PolicyHash: "dGVzdC1wb2xpY3ktaGFzaA==",
 			TPM2PCRBank:    "sha256",
-			TPM2PCRs:       []int{0, 1, 2, 3, 7},
+			TPM2PCRs:       intsPtr([]int{0, 1, 2, 3, 7}),
 			TPM2Blob:       "dGVzdC1ibG9i",
 		}
 
@@ -242,12 +251,12 @@ func TestTokenOperations_Integration(t *testing.T) {
 	t.Run("update existing token", func(t *testing.T) {
 		// Update token 0 with new values
 		token := &Token{
-			Type:            "fido2-manual",
+			Type:            TokenTypeSystemdFIDO2,
 			Keyslots:        []string{"0"},
 			FIDO2Credential: "dXBkYXRlZC1jcmVk",
 			FIDO2Salt:       "dXBkYXRlZC1zYWx0",
 			FIDO2RP:         "updated.example.com",
-			FIDO2UPRequired: false,
+			FIDO2UPRequired: boolPtr(false),
 		}
 
 		if err := ImportToken(device, 0, token); err != nil {
@@ -262,7 +271,9 @@ func TestTokenOperations_Integration(t *testing.T) {
 		if updated.FIDO2RP != "updated.example.com" {
 			t.Errorf("token was not updated: %s", updated.FIDO2RP)
 		}
-		if updated.FIDO2UPRequired {
+		if updated.FIDO2UPRequired == nil {
+			t.Error("FIDO2UPRequired was dropped by the header rewrite; false must be written, not omitted")
+		} else if *updated.FIDO2UPRequired {
 			t.Error("FIDO2UPRequired should be false after update")
 		}
 	})

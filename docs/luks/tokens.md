@@ -101,18 +101,25 @@ For Trusted Platform Module:
 ### Import Token
 
 ```go
+clientPin, userPresence, userVerification := true, true, false
+
 token := &luks2.Token{
-    Type:     "systemd-fido2",
-    Keyslots: []string{"0"},
-    Data: map[string]interface{}{
-        "fido2-credential": "base64...",
-        "fido2-salt":       "base64...",
-        "fido2-rp":         "io.systemd.cryptsetup",
-    },
+    Type:                   luks2.TokenTypeSystemdFIDO2,
+    Keyslots:               []string{"0"},
+    FIDO2Credential:        "base64...",
+    FIDO2Salt:              "base64...",
+    FIDO2RP:                "io.systemd.cryptsetup",
+    FIDO2ClientPinRequired: &clientPin,
+    FIDO2UPRequired:        &userPresence,
+    FIDO2UVRequired:        &userVerification,
 }
 
 err := luks2.ImportToken(device, 0, token)
 ```
+
+The three requirement flags are `*bool` because `false` is a value systemd
+writes deliberately, and a plain `bool` with `omitempty` cannot express it --
+the member would simply vanish from the token.
 
 ### List Tokens
 
@@ -163,20 +170,37 @@ fmt.Printf("Active tokens: %d\n", count)
 
 ## Custom Token Types
 
-You can define custom token types:
+You can define custom token types. A token whose members `Token` does not model
+is imported as JSON:
 
 ```go
-token := &luks2.Token{
-    Type:     "my-custom-type",
-    Keyslots: []string{"0"},
-    Data: map[string]interface{}{
-        "server": "https://keyserver.example.com",
-        "key-id": "abc123",
-    },
-}
+tokenJSON := []byte(`{
+    "type": "my-custom-type",
+    "keyslots": ["0"],
+    "server": "https://keyserver.example.com",
+    "key-id": "abc123"
+}`)
 
-err := luks2.ImportToken(device, 0, token)
+err := luks2.ImportTokenJSON(device, 0, tokenJSON)
 ```
+
+## Unmodeled Members Are Preserved
+
+Every header write re-serializes the whole metadata blob, so a token is
+rewritten whenever a keyslot changes -- even though the operation has nothing
+to do with it. Members that `Token` does not model are therefore carried
+verbatim across a read-modify-write cycle rather than dropped.
+
+This matters because token types are defined outside this library: systemd
+adds members between releases, and a vendor may define a type of its own. A
+`systemd-fido2` token enrolled by `systemd-cryptenroll` survives an
+unrelated `AddKey` with all of its members intact, including any this library
+has never heard of. Values are preserved byte for byte, so a 64-bit handle is
+not rounded and a number written as `1e3` does not come back as `1000`.
+
+The same applies to keyslots and to their nested `area`, `kdf` and `af`
+objects. It does NOT yet apply to the `segments`, `digests` and `config`
+objects, which are still closed.
 
 ## Token Workflow
 

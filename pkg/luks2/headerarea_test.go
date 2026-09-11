@@ -278,7 +278,7 @@ func TestWriteHeaderRefusesOversizedTokenMetadata(t *testing.T) {
 		Type:      "systemd-tpm2",
 		Keyslots:  []string{"0"},
 		TPM2Blob:  encodeBase64(bytes.Repeat([]byte{0x5A}, LUKS2DefaultSize)),
-		TPM2PCRs:  []int{0, 7},
+		TPM2PCRs:  intsPtr([]int{0, 7}),
 		TPM2Hash:  "sha256",
 		TPM2SRKNV: "1",
 	}
