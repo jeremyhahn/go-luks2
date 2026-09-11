@@ -244,6 +244,22 @@ var (
 	// See LockTimeoutError for what was waited and for how to find the holder.
 	ErrLockContended = errors.New("device lock is held by another process and did not become available")
 
+	// ErrLoopNodeAbsent indicates that the kernel allocated a loop device but
+	// no device node for it appeared under /dev within the wait budget.
+	//
+	// THE ALLOCATION SUCCEEDED. LOOP_CTL_GET_FREE reserves a minor number and
+	// returns it; creating the node is a separate job belonging to devtmpfs or
+	// to udev, and neither is guaranteed to have finished -- or to be running
+	// at all. So this is not "no loop devices available", which is the reading
+	// the bare ENOENT invited: it means the number is ours and the path to it
+	// does not exist yet.
+	//
+	// It is invisible until allocation passes the PRE-CREATED range, typically
+	// loop0-loop7, because those nodes exist from boot. That is why it presents
+	// as "works for the first N, fails past them", with N depending on how many
+	// loop devices the host already has in use.
+	ErrLoopNodeAbsent = errors.New("kernel allocated a loop device but its /dev node did not appear")
+
 	// ErrKeyring is the ROOT of every keyring condition in this package, and
 	// the only sentinel that is safe to use as a catch-all.
 	//

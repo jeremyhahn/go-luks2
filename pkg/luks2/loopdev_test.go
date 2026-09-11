@@ -445,3 +445,116 @@ func sysfsFixture(t *testing.T, name, backing, autoclear string) string {
 	}
 	return root
 }
+
+// TestWaitForLoopNodeReturnsAsSoonAsTheNodeAppears is the success path, and it
+// covers the case the defect actually was: the node arrives LATE, not never.
+//
+// LOOP_CTL_GET_FREE allocates a minor and returns; creating /dev/loop<N> is
+// udev's or devtmpfs's job and races this code. Asserting only that the call
+// eventually returns nil would be satisfied by a version that slept out the
+// whole budget, so this also asserts it returned near the creation rather than
+// near the deadline.
+func TestWaitForLoopNodeReturnsAsSoonAsTheNodeAppears(t *testing.T) {
+	dir := t.TempDir()
+	node := filepath.Join(dir, "loop8")
+
+	const appearsAfter = 100 * time.Millisecond
+	go func() {
+		time.Sleep(appearsAfter)
+		if err := os.WriteFile(node, nil, 0600); err != nil {
+			t.Errorf("could not create the stand-in node: %v", err)
+		}
+	}()
+
+	started := time.Now()
+	if err := waitForLoopNode(node, 10*time.Second, time.Millisecond); err != nil {
+		t.Fatalf("waitForLoopNode() error = %v, want it to wait for the node and succeed", err)
+	}
+	waited := time.Since(started)
+
+	if waited < appearsAfter {
+		t.Errorf("returned after %s, before the node was created at %s -- it cannot have observed it", waited, appearsAfter)
+	}
+	if waited > appearsAfter+2*time.Second {
+		t.Errorf("returned after %s, far past the %s creation -- it is not polling", waited, appearsAfter)
+	}
+}
+
+// TestWaitForLoopNodeTimesOutWithATypedError is the other side: a node nothing
+// will ever create must produce a bounded, typed refusal.
+//
+// The distinction this error carries is the point. The bare ENOENT it replaces
+// read as "there is no such loop device", when the truth is that the minor IS
+// ours and only the path is missing -- which sends an operator to look at loop
+// device exhaustion instead of at udev.
+func TestWaitForLoopNodeTimesOutWithATypedError(t *testing.T) {
+	node := filepath.Join(t.TempDir(), "loop9999")
+
+	const budget = 80 * time.Millisecond
+	started := time.Now()
+	err := waitForLoopNode(node, budget, time.Millisecond)
+	waited := time.Since(started)
+
+	if err == nil {
+		t.Fatal("waitForLoopNode() on a node that never appears = nil, want a timeout")
+	}
+	if !errors.Is(err, ErrLoopNodeAbsent) {
+		t.Errorf("errors.Is(err, ErrLoopNodeAbsent) = false for %v", err)
+	}
+	var devErr *DeviceError
+	if !errors.As(err, &devErr) {
+		t.Fatalf("errors.As(err, *DeviceError) = false for %v", err)
+	}
+	if devErr.Device != node {
+		t.Errorf("DeviceError.Device = %q, want %q", devErr.Device, node)
+	}
+	if waited > budget+2*time.Second {
+		t.Errorf("waited %s against a %s budget -- the deadline is not being honored", waited, budget)
+	}
+}
+
+// TestWaitForLoopNodeDoesNotRetryANonExistenceFailure separates the two
+// classes. Retrying a permission or I/O failure for the whole budget would
+// report it as a missing node and send an operator to the wrong subsystem.
+func TestWaitForLoopNodeDoesNotRetryANonExistenceFailure(t *testing.T) {
+	// A path whose PARENT is a regular file: stat fails with ENOTDIR, which is
+	// not os.IsNotExist and is uid-independent, so this holds for root too --
+	// the project's rule against building failure cases out of permission bits.
+	dir := t.TempDir()
+	notADir := filepath.Join(dir, "file")
+	if err := os.WriteFile(notADir, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	node := filepath.Join(notADir, "loop0")
+
+	started := time.Now()
+	err := waitForLoopNode(node, 10*time.Second, time.Millisecond)
+	if err == nil {
+		t.Fatal("waitForLoopNode() on an unstatable path = nil, want an error")
+	}
+	if errors.Is(err, ErrLoopNodeAbsent) {
+		t.Errorf("an unstatable path is reported as an absent node: %v", err)
+	}
+	// It must not have spent the budget on a condition that cannot improve.
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Errorf("took %s to refuse a non-existence failure -- it is being retried", elapsed)
+	}
+}
+
+// TestWaitForLoopNodeAcceptsAnExistingNodeImmediately is the ordinary case: a
+// node in the pre-created range is already there, and the wait must cost
+// nothing. Without this, a version that always slept one poll interval would
+// pass every other case here.
+func TestWaitForLoopNodeAcceptsAnExistingNodeImmediately(t *testing.T) {
+	node := filepath.Join(t.TempDir(), "loop0")
+	if err := os.WriteFile(node, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if err := waitForLoopNode(node, 10*time.Second, time.Second); err != nil {
+		t.Fatalf("waitForLoopNode() on an existing node = %v, want nil", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Errorf("an existing node took %s -- the first check is not happening before the first sleep", elapsed)
+	}
+}

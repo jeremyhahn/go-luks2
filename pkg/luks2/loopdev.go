@@ -42,10 +42,28 @@ func SetupLoopDevice(file string) (string, error) {
 
 	loopDevice := fmt.Sprintf("/dev/loop%d", devNum)
 
+	// THE NUMBER IS NOT THE NODE. LOOP_CTL_GET_FREE allocated the minor above
+	// and returned it; it does NOT create /dev/loop<N>. Creating the node
+	// belongs to devtmpfs or to udev, and this code has no ordering guarantee
+	// against either -- in a container the node appears only if devtmpfs
+	// propagates it, or if udev is running and wins the race.
+	//
+	// The assumption held for the PRE-CREATED range, typically loop0-loop7,
+	// which exists from boot. Past it the open failed outright, which is why
+	// this presented as "works for the first N, fails past them" with N set by
+	// how many loop devices the host was already using -- and why nothing
+	// exercised it until something else consumed the low minors.
+	//
+	// Measured, PR #89 job 34083: four devices created fine and the fifth died
+	// on `open /dev/loop8: no such file or directory`.
+	if err := waitForLoopNode(loopDevice, loopNodeTimeout, loopNodePollInterval); err != nil {
+		return "", err
+	}
+
 	// Open loop device
 	loopFile, err := os.OpenFile(loopDevice, os.O_RDWR, 0) // #nosec G304 -- loop device path constructed from kernel
 	if err != nil {
-		return "", fmt.Errorf("failed to open %s: %w", loopDevice, err)
+		return "", &DeviceError{Device: loopDevice, Op: "open the allocated loop device", Err: err}
 	}
 	defer func() { _ = loopFile.Close() }()
 
@@ -82,6 +100,52 @@ const detachSettleTimeout = 2 * time.Second
 // and a longer one only reaches it later. The bound above is what makes the
 // failure case terminate.
 const detachPollInterval = 500 * time.Microsecond
+
+// loopNodeTimeout bounds the wait for a newly allocated loop device's node to
+// appear under /dev.
+//
+// Read it, like detachSettleTimeout above, as a ceiling on how long we are
+// willing to wait on a THIRD PARTY -- here udev or devtmpfs rather than
+// whatever holds a device. Two seconds is the same order for the same reason:
+// long enough to absorb a loaded machine's udev queue, short enough that a
+// host where nothing will ever create the node fails with a diagnosis instead
+// of hanging.
+const loopNodeTimeout = 2 * time.Second
+
+// loopNodePollInterval is how often the node is re-checked while waiting.
+//
+// A BACKOFF, not synchronization, exactly as detachPollInterval is: there is no
+// readiness signal to select on, so a shorter interval only spends more CPU
+// reaching the same answer and a longer one only reaches it later. The bound
+// above is what makes the failure case terminate.
+const loopNodePollInterval = 500 * time.Microsecond
+
+// waitForLoopNode waits for the device node of a freshly allocated loop device
+// to appear, and reports a TYPED refusal if it does not.
+//
+// The node is stat'ed rather than opened. An open can fail for reasons that
+// have nothing to do with the node existing -- EACCES, EBUSY -- and retrying
+// those for the whole budget would report a permission problem as a missing
+// node. Existence is the one question this answers; the open that follows
+// keeps its own error.
+func waitForLoopNode(device string, timeout, poll time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		_, err := os.Stat(device)
+		if err == nil {
+			return nil
+		}
+		// Anything other than "not there yet" is not a race, and waiting will
+		// not improve it.
+		if !os.IsNotExist(err) {
+			return &DeviceError{Device: device, Op: "wait for the loop device node", Err: err}
+		}
+		if time.Now().After(deadline) {
+			return &DeviceError{Device: device, Op: "wait for the loop device node", Err: ErrLoopNodeAbsent}
+		}
+		time.Sleep(poll)
+	}
+}
 
 // DetachState says what became of a detach request. Both values mean the
 // kernel accepted it; they differ in whether the release has happened yet.
