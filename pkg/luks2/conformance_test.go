@@ -63,9 +63,29 @@ func requireCryptsetup(t *testing.T) string {
 
 	path, err := exec.LookPath("cryptsetup")
 	if err != nil {
-		t.Skipf("SKIPPING LUKS2 CONFORMANCE CHECK -- cryptsetup is NOT INSTALLED on this host (%v). "+
-			"Nothing in this test was verified against a third-party LUKS2 implementation. "+
-			"Install cryptsetup to actually run it.", err)
+		// FAILS, DOES NOT SKIP. A skip converts a missing dependency into a
+		// green result, and this is the suite that must not do that: it holds
+		// the bidirectional interoperability property -- cryptsetup opens what
+		// this library writes, and the reverse -- which took seven review
+		// rounds to earn, after a period when cryptsetup refused every
+		// container this library produced and an encrypted volume had NO
+		// recovery path.
+		//
+		// While this was a t.Skipf, a runner without cryptsetup ran every
+		// TestConformance_* to a PASS having executed nothing. Measured on the
+		// CI unit leg: nine such messages across this file and geometry_test.go,
+		// job green (#90).
+		//
+		// The remedy ranking is in
+		// ../handbook/software/conventions/testing-guidelines.md; fixing the
+		// environment is the first of them. The devcontainer and the integration
+		// image install cryptsetup-bin, and ci.yml now installs it for the unit
+		// job too. So this branch means the environment is wrong, and it should
+		// say so loudly rather than quietly exempting itself.
+		t.Fatalf("LUKS2 CONFORMANCE CHECK CANNOT RUN -- cryptsetup is NOT INSTALLED on this host (%v). "+
+			"This test verifies interoperability with a third-party LUKS2 implementation and there is "+
+			"nothing it can verify without one. Install cryptsetup (Debian/Ubuntu: cryptsetup-bin); the "+
+			"devcontainer and the integration image already carry it.", err)
 	}
 	return path
 }

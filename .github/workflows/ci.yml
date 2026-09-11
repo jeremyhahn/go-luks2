@@ -350,6 +350,43 @@ jobs:
       # 45% of CI runtime the enclave-custody tests were spending on redundant
       # container formats, which is done. This keeps a legitimately slow suite
       # from being reported as a hang.
+      # CRYPTSETUP IS A TEST DEPENDENCY OF ./pkg/luks2, NOT AN OPTIONAL EXTRA.
+      #
+      # conformance_test.go is in the DEFAULT tag set, so it runs in this job --
+      # and its `requireCryptsetup` used to t.Skipf when the binary was absent.
+      # This runner image has no cryptsetup, so every TestConformance_* passed
+      # here having executed nothing, and the job reported success. Measured on
+      # PR #159's unit leg: NINE skip messages across conformance_test.go and
+      # geometry_test.go, all green.
+      #
+      # That suite is the whole bidirectional interoperability property -- that
+      # cryptsetup can open what this library writes, and the reverse. It took
+      # seven review rounds to earn, after a period when cryptsetup refused
+      # every container this library produced and an encrypted volume had NO
+      # recovery path. Guarding it with a mechanism that turns absence into
+      # success is how that regresses unnoticed.
+      #
+      # ../handbook/software/conventions/testing-guidelines.md ranks the remedies
+      # and this is the first one. The devcontainer and the integration image
+      # already install cryptsetup-bin; this job was the only place it was
+      # missing.
+      #
+      # The version is asserted, not assumed. An install that silently produced
+      # no usable binary would put the suite straight back to skipping, which is
+      # the failure this step exists to remove.
+      - name: Install cryptsetup (a test dependency of ./pkg/luks2)
+        run: |
+          set -eu
+          if ! command -v cryptsetup >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq cryptsetup-bin
+          fi
+          cryptsetup --version
+          command -v cryptsetup >/dev/null 2>&1 || {
+            echo "::error::cryptsetup is still absent after install; the conformance suite would skip and report green."
+            exit 1
+          }
+
       - name: Run unit tests (pkg/luks2)
         run: go test -v -race -timeout 30m -coverprofile=coverage-pkg.out -covermode=atomic ./pkg/luks2
 
