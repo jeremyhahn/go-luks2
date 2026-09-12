@@ -14,9 +14,7 @@ import (
 
 // TestMountUnmount tests mounting and unmounting LUKS volumes
 func TestMountUnmount(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("This test requires root privileges")
-	}
+	requireRoot(t)
 
 	tmpfile, err := os.CreateTemp("", "luks-mount-*.img")
 	if err != nil {
@@ -109,9 +107,7 @@ func TestMountUnmount(t *testing.T) {
 
 // TestMountErrors tests mount error conditions
 func TestMountErrors(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("This test requires root privileges")
-	}
+	requireRoot(t)
 
 	tests := []struct {
 		name string

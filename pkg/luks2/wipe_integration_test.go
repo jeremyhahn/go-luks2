@@ -329,7 +329,7 @@ func TestWipeWithTrimOnLoopDevice(t *testing.T) {
 	}
 }
 
-// TestWipeWithTrimOnBlockDevice tests TRIM on actual block device if available
+// TestWipeWithTrimOnBlockDevice tests TRIM on an actual block device
 func TestWipeWithTrimOnBlockDevice(t *testing.T) {
 	tmpfile := "/tmp/test-luks-wipe-trim-blk.img"
 	defer os.Remove(tmpfile)
@@ -345,10 +345,16 @@ func TestWipeWithTrimOnBlockDevice(t *testing.T) {
 	}
 	f.Close()
 
-	// Set up loop device
+	// Set up loop device. Fails, does not skip: test/integration/Dockerfile's
+	// entrypoint pre-creates /dev/loop0-255 and docker-run.sh grants CAP_MKNOD,
+	// CAP_SYS_ADMIN and the loop major's device-cgroup rule specifically so
+	// this always succeeds in the tier this test belongs to (every other
+	// SetupLoopDevice call site in this package already t.Fatalf's here, e.g.
+	// line 206 above); a failure means the environment is wrong, not that a
+	// block device is optional for a test whose entire point is testing one.
 	loopDev, err := SetupLoopDevice(tmpfile)
 	if err != nil {
-		t.Skipf("Cannot set up loop device: %v", err)
+		t.Fatalf("Failed to setup loop device: %v", err)
 	}
 	defer DetachLoopDevice(loopDev)
 

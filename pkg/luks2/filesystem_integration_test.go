@@ -27,11 +27,30 @@ func waitForDevice(name string, timeout time.Duration) bool {
 	return false
 }
 
+// requireMkfs fails the calling test when mkfs.<fstype> is not on PATH, and
+// does so LOUDLY rather than skipping: test/integration/Dockerfile installs
+// e2fsprogs, which carries mkfs.ext2, mkfs.ext3 and mkfs.ext4 together, so
+// this tier's image never lacks one without lacking all three. Reaching this
+// branch therefore means the image was built wrong or bypassed, not that the
+// filesystem is optional -- the same reasoning requireCryptsetup applies in
+// conformance_test.go (#90), and the same remedy: fix the environment first,
+// then fail loudly if it is ever wrong, instead of quietly reporting a
+// filesystem was never exercised.
+func requireMkfs(t *testing.T, fstype string) {
+	t.Helper()
+
+	tool := "mkfs." + fstype
+	if _, err := exec.LookPath(tool); err != nil {
+		t.Fatalf("%s IS NOT INSTALLED on this host (%v). test/integration/Dockerfile "+
+			"installs e2fsprogs specifically so mkfs.ext2, mkfs.ext3 and mkfs.ext4 are "+
+			"all present; install e2fsprogs (Debian/Ubuntu: e2fsprogs) to run this test.",
+			tool, err)
+	}
+}
+
 // TestMakeFilesystemExt4 tests creating an ext4 filesystem on a LUKS volume
 func TestMakeFilesystemExt4(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("This test requires root privileges")
-	}
+	requireRoot(t)
 
 	tmpfile, err := os.CreateTemp("", "luks-fs-ext4-*.img")
 	if err != nil {
@@ -112,16 +131,10 @@ func TestMakeFilesystemExt4(t *testing.T) {
 	}
 }
 
-// TestMakeFilesystemExt3 tests creating an ext3 filesystem if supported
+// TestMakeFilesystemExt3 tests creating an ext3 filesystem
 func TestMakeFilesystemExt3(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("This test requires root privileges")
-	}
-
-	// Check if mkfs.ext3 exists
-	if _, err := exec.LookPath("mkfs.ext3"); err != nil {
-		t.Skip("mkfs.ext3 not available on this system")
-	}
+	requireRoot(t)
+	requireMkfs(t, "ext3")
 
 	tmpfile, err := os.CreateTemp("", "luks-fs-ext3-*.img")
 	if err != nil {
@@ -178,16 +191,10 @@ func TestMakeFilesystemExt3(t *testing.T) {
 	}
 }
 
-// TestMakeFilesystemExt2 tests creating an ext2 filesystem if supported
+// TestMakeFilesystemExt2 tests creating an ext2 filesystem
 func TestMakeFilesystemExt2(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("This test requires root privileges")
-	}
-
-	// Check if mkfs.ext2 exists
-	if _, err := exec.LookPath("mkfs.ext2"); err != nil {
-		t.Skip("mkfs.ext2 not available on this system")
-	}
+	requireRoot(t)
+	requireMkfs(t, "ext2")
 
 	tmpfile, err := os.CreateTemp("", "luks-fs-ext2-*.img")
 	if err != nil {
@@ -254,9 +261,7 @@ func TestMakeFilesystemExt2(t *testing.T) {
 
 // TestMakeFilesystemWithLabel tests creating filesystem with custom label
 func TestMakeFilesystemWithLabel(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("This test requires root privileges")
-	}
+	requireRoot(t)
 
 	tmpfile, err := os.CreateTemp("", "luks-fs-label-*.img")
 	if err != nil {
@@ -338,9 +343,7 @@ func TestMakeFilesystemWithLabel(t *testing.T) {
 
 // TestMakeFilesystemErrors tests error conditions in MakeFilesystem
 func TestMakeFilesystemErrors(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("This test requires root privileges")
-	}
+	requireRoot(t)
 
 	tests := []struct {
 		name       string
@@ -377,9 +380,7 @@ func TestMakeFilesystemErrors(t *testing.T) {
 
 // TestFilesystemWriteRead tests writing and reading data to verify filesystem works
 func TestFilesystemWriteRead(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("This test requires root privileges")
-	}
+	requireRoot(t)
 
 	tmpfile, err := os.CreateTemp("", "luks-fs-rw-*.img")
 	if err != nil {
@@ -500,9 +501,7 @@ func TestFilesystemWriteRead(t *testing.T) {
 
 // TestFilesystemPersistence tests that data persists after unmount/remount
 func TestFilesystemPersistence(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("This test requires root privileges")
-	}
+	requireRoot(t)
 
 	tmpfile, err := os.CreateTemp("", "luks-fs-persist-*.img")
 	if err != nil {

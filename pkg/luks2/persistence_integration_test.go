@@ -47,9 +47,7 @@ func waitForLock(name string, timeout time.Duration) bool {
 // TestDataPersistenceAcrossUnlockCycles verifies that data written to a LUKS
 // volume persists across multiple lock/unlock cycles
 func TestDataPersistenceAcrossUnlockCycles(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("This test requires root privileges")
-	}
+	requireRoot(t)
 
 	// Create temporary file for LUKS volume
 	tmpfile, err := os.CreateTemp("", "luks-persist-*.img")
@@ -241,9 +239,7 @@ func TestDataPersistenceAcrossUnlockCycles(t *testing.T) {
 
 // TestDataPersistenceMultipleFiles verifies multiple files persist correctly
 func TestDataPersistenceMultipleFiles(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("This test requires root privileges")
-	}
+	requireRoot(t)
 
 	tmpfile, err := os.CreateTemp("", "luks-multifile-*.img")
 	if err != nil {
@@ -394,9 +390,7 @@ func TestDataPersistenceMultipleFiles(t *testing.T) {
 
 // TestDataPersistenceLargeFile verifies large file integrity with checksum
 func TestDataPersistenceLargeFile(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("This test requires root privileges")
-	}
+	requireRoot(t)
 
 	tmpfile, err := os.CreateTemp("", "luks-largefile-*.img")
 	if err != nil {
@@ -539,9 +533,7 @@ func TestDataPersistenceLargeFile(t *testing.T) {
 
 // TestSmallVolumeMinimumSize tests with minimum viable volume size
 func TestSmallVolumeMinimumSize(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("This test requires root privileges")
-	}
+	requireRoot(t)
 
 	tmpfile, err := os.CreateTemp("", "luks-small-*.img")
 	if err != nil {
@@ -631,9 +623,7 @@ func TestSmallVolumeMinimumSize(t *testing.T) {
 
 // TestLabelSpecialCharacters tests labels with special characters
 func TestLabelSpecialCharacters(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("This test requires root privileges")
-	}
+	requireRoot(t)
 
 	testCases := []struct {
 		name  string
@@ -693,9 +683,7 @@ func TestLabelSpecialCharacters(t *testing.T) {
 
 // TestUnicodePassphrase tests with unicode passphrase
 func TestUnicodePassphrase(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("This test requires root privileges")
-	}
+	requireRoot(t)
 
 	tmpfile, err := os.CreateTemp("", "luks-unicode-*.img")
 	if err != nil {
@@ -753,9 +741,7 @@ func TestUnicodePassphrase(t *testing.T) {
 func TestLongPassphrase(t *testing.T) {
 	// Test maximum valid length (512 bytes)
 	t.Run("max-valid-length", func(t *testing.T) {
-		if os.Getuid() != 0 {
-			t.Skip("This test requires root privileges")
-		}
+		requireRoot(t)
 
 		tmpfile, err := os.CreateTemp("", "luks-longpass-*.img")
 		if err != nil {
@@ -830,9 +816,7 @@ func TestLongPassphrase(t *testing.T) {
 
 // TestEmptyPassphrase verifies empty passphrase handling
 func TestEmptyPassphrase(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("This test requires root privileges")
-	}
+	requireRoot(t)
 
 	tmpfile, err := os.CreateTemp("", "luks-empty-*.img")
 	if err != nil {
@@ -889,9 +873,7 @@ func TestEmptyPassphrase(t *testing.T) {
 
 // TestRapidLockUnlock tests rapid lock/unlock cycles for stability
 func TestRapidLockUnlock(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("This test requires root privileges")
-	}
+	requireRoot(t)
 
 	tmpfile, err := os.CreateTemp("", "luks-rapid-*.img")
 	if err != nil {
@@ -986,9 +968,7 @@ func TestRapidLockUnlock(t *testing.T) {
 
 // TestConcurrentRead tests multiple goroutines reading from mounted volume
 func TestConcurrentRead(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("This test requires root privileges")
-	}
+	requireRoot(t)
 
 	tmpfile, err := os.CreateTemp("", "luks-concurrent-*.img")
 	if err != nil {
@@ -1121,9 +1101,7 @@ func TestConcurrentRead(t *testing.T) {
 
 // TestIsMountedAccuracy verifies IsMounted correctly reports mount state
 func TestIsMountedAccuracy(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("This test requires root privileges")
-	}
+	requireRoot(t)
 
 	tmpfile, err := os.CreateTemp("", "luks-ismounted-*.img")
 	if err != nil {

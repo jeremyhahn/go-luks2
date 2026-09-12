@@ -18,9 +18,7 @@ import (
 // This test creates a file-based LUKS volume, unlocks it, mounts it, writes data,
 // reads data, and then cleans up. This verifies all operations work end-to-end.
 func TestFullEndToEndWorkflow(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("This test requires root privileges")
-	}
+	requireRoot(t)
 
 	// Step 1: Create a temporary file for the LUKS volume
 	tmpfile, err := os.CreateTemp("", "luks-workflow-*.img")
@@ -187,9 +185,7 @@ func TestFullEndToEndWorkflow(t *testing.T) {
 
 // TestFileVolumeOnly verifies we're testing file-based volumes, not block devices
 func TestFileVolumeOnly(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("This test requires root privileges")
-	}
+	requireRoot(t)
 
 	// Create a temporary file
 	tmpfile, err := os.CreateTemp("", "luks-file-test-*.img")
