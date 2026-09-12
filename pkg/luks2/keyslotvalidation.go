@@ -255,9 +255,9 @@ func validateKeyslot(id string, keyslot *Keyslot) error {
 //
 // They are deliberately NOT enforced inside deriveKeyPlain, which looks like the
 // right home because it is the one place a KDF is executed. It is not. That
-// function serves two TRUST DOMAINS: Format, AddKey, ChangeKey and the exported
-// DeriveKey all derive from parameters the CALLER chose, and an untrusted-input
-// ceiling there rejects a caller's own deliberate hardening -- after the master
+// function serves two TRUST DOMAINS: Format, AddKey and ChangeKey all derive
+// from parameters the CALLER chose, and an untrusted-input ceiling there
+// rejects a caller's own deliberate hardening -- after the master
 // key has been generated, with an error shaped like a malformed header. The
 // narrowest common point is where the two domains merge, which is exactly why it
 // is the wrong place to tell them apart. This is prior art from the

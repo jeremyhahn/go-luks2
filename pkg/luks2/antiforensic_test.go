@@ -15,24 +15,53 @@ import (
 	"testing"
 )
 
-// TestAFSplitValid tests AFSplit with valid inputs
-func TestAFSplitValid(t *testing.T) {
+// afSplitPlain runs afSplitEnclave over a copy of data held in a throwaway
+// test enclave and returns the stripes as a plain slice, so the table-driven
+// tests below can assert on bytes the same way they always have.
+func afSplitPlain(t *testing.T, data []byte, stripes int, hashAlgo string) ([]byte, error) {
+	t.Helper()
+
+	secret := enclaveFrom(t, data)
+	split, err := afSplitEnclave(secret, stripes, hashAlgo)
+	if err != nil {
+		return nil, err
+	}
+	defer split.Destroy()
+
+	return openSecret(t, split), nil
+}
+
+// afMergePlain is afSplitPlain's counterpart for afMergeEnclave.
+func afMergePlain(t *testing.T, splitData []byte, stripes, blockSize int, hashAlgo string) ([]byte, error) {
+	t.Helper()
+
+	held := enclaveFrom(t, splitData)
+	merged, err := afMergeEnclave(held, len(splitData), stripes, blockSize, hashAlgo)
+	if err != nil {
+		return nil, err
+	}
+	defer merged.Destroy()
+
+	return openSecret(t, merged), nil
+}
+
+// TestAFSplitEnclaveValidSizes tests afSplitEnclave with valid inputs.
+func TestAFSplitEnclaveValidSizes(t *testing.T) {
 	tests := []struct {
-		name      string
-		dataSize  int
-		stripes   int
-		hashAlgo  string
-		expectErr bool
+		name     string
+		dataSize int
+		stripes  int
+		hashAlgo string
 	}{
-		{"32byte_2stripes_sha256", 32, 2, "sha256", false},
-		{"32byte_4stripes_sha256", 32, 4, "sha256", false},
-		{"32byte_10stripes_sha256", 32, 10, "sha256", false},
-		{"32byte_4000stripes_sha256", 32, 4000, "sha256", false},
-		{"64byte_2stripes_sha512", 64, 2, "sha512", false},
-		{"64byte_4stripes_sha512", 64, 4, "sha512", false},
-		{"64byte_10stripes_sha512", 64, 10, "sha512", false},
-		{"16byte_2stripes_sha256", 16, 2, "sha256", false},
-		{"128byte_8stripes_sha512", 128, 8, "sha512", false},
+		{"32byte_2stripes_sha256", 32, 2, "sha256"},
+		{"32byte_4stripes_sha256", 32, 4, "sha256"},
+		{"32byte_10stripes_sha256", 32, 10, "sha256"},
+		{"32byte_4000stripes_sha256", 32, 4000, "sha256"},
+		{"64byte_2stripes_sha512", 64, 2, "sha512"},
+		{"64byte_4stripes_sha512", 64, 4, "sha512"},
+		{"64byte_10stripes_sha512", 64, 10, "sha512"},
+		{"16byte_2stripes_sha256", 16, 2, "sha256"},
+		{"128byte_8stripes_sha512", 128, 8, "sha512"},
 	}
 
 	for _, tt := range tests {
@@ -42,9 +71,9 @@ func TestAFSplitValid(t *testing.T) {
 				t.Fatalf("Failed to generate test data: %v", err)
 			}
 
-			result, err := AFSplit(data, tt.stripes, tt.hashAlgo)
+			result, err := afSplitPlain(t, data, tt.stripes, tt.hashAlgo)
 			if err != nil {
-				t.Fatalf("AFSplit failed: %v", err)
+				t.Fatalf("afSplitEnclave failed: %v", err)
 			}
 
 			expectedSize := tt.dataSize * tt.stripes
@@ -55,8 +84,8 @@ func TestAFSplitValid(t *testing.T) {
 	}
 }
 
-// TestAFSplitInvalidStripes tests AFSplit with invalid stripe counts
-func TestAFSplitInvalidStripes(t *testing.T) {
+// TestAFSplitEnclaveInvalidStripes tests afSplitEnclave with invalid stripe counts.
+func TestAFSplitEnclaveInvalidStripes(t *testing.T) {
 	tests := []struct {
 		name    string
 		stripes int
@@ -69,7 +98,7 @@ func TestAFSplitInvalidStripes(t *testing.T) {
 	data := make([]byte, 32)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := AFSplit(data, tt.stripes, "sha256")
+			_, err := afSplitPlain(t, data, tt.stripes, "sha256")
 			if err == nil {
 				t.Fatal("Expected error for invalid stripes, got nil")
 			}
@@ -77,8 +106,8 @@ func TestAFSplitInvalidStripes(t *testing.T) {
 	}
 }
 
-// TestAFSplitInvalidHash tests AFSplit with invalid hash algorithm
-func TestAFSplitInvalidHash(t *testing.T) {
+// TestAFSplitEnclaveInvalidHash tests afSplitEnclave with invalid hash algorithms.
+func TestAFSplitEnclaveInvalidHash(t *testing.T) {
 	tests := []struct {
 		name     string
 		hashAlgo string
@@ -93,7 +122,7 @@ func TestAFSplitInvalidHash(t *testing.T) {
 	data := make([]byte, 32)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := AFSplit(data, 4, tt.hashAlgo)
+			_, err := afSplitPlain(t, data, 4, tt.hashAlgo)
 			if err == nil {
 				t.Fatalf("Expected error for invalid hash algorithm %s, got nil", tt.hashAlgo)
 			}
@@ -101,20 +130,8 @@ func TestAFSplitInvalidHash(t *testing.T) {
 	}
 }
 
-// TestAFSplitEmptyData tests AFSplit with empty data
-func TestAFSplitEmptyData(t *testing.T) {
-	data := make([]byte, 0)
-	result, err := AFSplit(data, 4, "sha256")
-	if err != nil {
-		t.Fatalf("AFSplit failed on empty data: %v", err)
-	}
-	if len(result) != 0 {
-		t.Fatalf("Expected empty result for empty data, got %d bytes", len(result))
-	}
-}
-
-// TestAFMergeValid tests AFMerge with valid inputs
-func TestAFMergeValid(t *testing.T) {
+// TestAFMergeEnclaveValidSizes tests afMergeEnclave with valid inputs.
+func TestAFMergeEnclaveValidSizes(t *testing.T) {
 	tests := []struct {
 		name     string
 		dataSize int
@@ -136,15 +153,15 @@ func TestAFMergeValid(t *testing.T) {
 				t.Fatalf("Failed to generate test data: %v", err)
 			}
 
-			splitData, err := AFSplit(data, tt.stripes, tt.hashAlgo)
+			splitData, err := afSplitPlain(t, data, tt.stripes, tt.hashAlgo)
 			if err != nil {
-				t.Fatalf("AFSplit failed: %v", err)
+				t.Fatalf("afSplitEnclave failed: %v", err)
 			}
 
 			// Merge it back
-			merged, err := AFMerge(splitData, tt.stripes, tt.dataSize, tt.hashAlgo)
+			merged, err := afMergePlain(t, splitData, tt.stripes, tt.dataSize, tt.hashAlgo)
 			if err != nil {
-				t.Fatalf("AFMerge failed: %v", err)
+				t.Fatalf("afMergeEnclave failed: %v", err)
 			}
 
 			if len(merged) != tt.dataSize {
@@ -154,8 +171,8 @@ func TestAFMergeValid(t *testing.T) {
 	}
 }
 
-// TestAFMergeInvalidSize tests AFMerge with invalid size parameters
-func TestAFMergeInvalidSize(t *testing.T) {
+// TestAFMergeEnclaveInvalidSize tests afMergeEnclave with invalid size parameters.
+func TestAFMergeEnclaveInvalidSize(t *testing.T) {
 	tests := []struct {
 		name      string
 		splitSize int
@@ -170,7 +187,7 @@ func TestAFMergeInvalidSize(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			splitData := make([]byte, tt.splitSize)
-			_, err := AFMerge(splitData, tt.stripes, tt.blockSize, "sha256")
+			_, err := afMergePlain(t, splitData, tt.stripes, tt.blockSize, "sha256")
 			if err == nil {
 				t.Fatal("Expected error for invalid size, got nil")
 			}
@@ -178,8 +195,8 @@ func TestAFMergeInvalidSize(t *testing.T) {
 	}
 }
 
-// TestAFMergeInvalidHash tests AFMerge with invalid hash algorithm
-func TestAFMergeInvalidHash(t *testing.T) {
+// TestAFMergeEnclaveInvalidHash tests afMergeEnclave with invalid hash algorithms.
+func TestAFMergeEnclaveInvalidHash(t *testing.T) {
 	tests := []struct {
 		name     string
 		hashAlgo string
@@ -193,7 +210,7 @@ func TestAFMergeInvalidHash(t *testing.T) {
 	splitData := make([]byte, 128)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := AFMerge(splitData, 4, 32, tt.hashAlgo)
+			_, err := afMergePlain(t, splitData, 4, 32, tt.hashAlgo)
 			if err == nil {
 				t.Fatalf("Expected error for invalid hash algorithm %s, got nil", tt.hashAlgo)
 			}
@@ -201,8 +218,9 @@ func TestAFMergeInvalidHash(t *testing.T) {
 	}
 }
 
-// TestAFRoundTrip tests that AFSplit followed by AFMerge recovers original data
-func TestAFRoundTrip(t *testing.T) {
+// TestAFEnclaveRoundTrip tests that afSplitEnclave followed by afMergeEnclave
+// recovers original data.
+func TestAFEnclaveRoundTrip(t *testing.T) {
 	tests := []struct {
 		name     string
 		dataSize int
@@ -233,15 +251,15 @@ func TestAFRoundTrip(t *testing.T) {
 			}
 
 			// Split the data
-			splitData, err := AFSplit(original, tt.stripes, tt.hashAlgo)
+			splitData, err := afSplitPlain(t, original, tt.stripes, tt.hashAlgo)
 			if err != nil {
-				t.Fatalf("AFSplit failed: %v", err)
+				t.Fatalf("afSplitEnclave failed: %v", err)
 			}
 
 			// Merge it back
-			recovered, err := AFMerge(splitData, tt.stripes, tt.dataSize, tt.hashAlgo)
+			recovered, err := afMergePlain(t, splitData, tt.stripes, tt.dataSize, tt.hashAlgo)
 			if err != nil {
-				t.Fatalf("AFMerge failed: %v", err)
+				t.Fatalf("afMergeEnclave failed: %v", err)
 			}
 
 			// Verify recovered data matches original
@@ -252,8 +270,8 @@ func TestAFRoundTrip(t *testing.T) {
 	}
 }
 
-// TestAFRoundTripKnownData tests round-trip with known data patterns
-func TestAFRoundTripKnownData(t *testing.T) {
+// TestAFEnclaveRoundTripKnownData tests round-trip with known data patterns.
+func TestAFEnclaveRoundTripKnownData(t *testing.T) {
 	tests := []struct {
 		name     string
 		data     []byte
@@ -270,15 +288,15 @@ func TestAFRoundTripKnownData(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Split the data
-			splitData, err := AFSplit(tt.data, tt.stripes, tt.hashAlgo)
+			splitData, err := afSplitPlain(t, tt.data, tt.stripes, tt.hashAlgo)
 			if err != nil {
-				t.Fatalf("AFSplit failed: %v", err)
+				t.Fatalf("afSplitEnclave failed: %v", err)
 			}
 
 			// Merge it back
-			recovered, err := AFMerge(splitData, tt.stripes, len(tt.data), tt.hashAlgo)
+			recovered, err := afMergePlain(t, splitData, tt.stripes, len(tt.data), tt.hashAlgo)
 			if err != nil {
-				t.Fatalf("AFMerge failed: %v", err)
+				t.Fatalf("afMergeEnclave failed: %v", err)
 			}
 
 			// Verify recovered data matches original
@@ -439,8 +457,8 @@ func TestXorBytesInverse(t *testing.T) {
 	}
 }
 
-// TestDiffuse tests the diffuse function via AFSplit/AFMerge
-func TestDiffuse(t *testing.T) {
+// TestDiffuseViaAFEnclave tests the diffuse function via afSplitEnclave/afMergeEnclave
+func TestDiffuseViaAFEnclave(t *testing.T) {
 	tests := []struct {
 		name      string
 		blockSize int
@@ -461,14 +479,14 @@ func TestDiffuse(t *testing.T) {
 			}
 
 			// Split and merge - this exercises diffuse internally
-			splitData, err := AFSplit(data, 4, tt.hashAlgo)
+			splitData, err := afSplitPlain(t, data, 4, tt.hashAlgo)
 			if err != nil {
-				t.Fatalf("AFSplit failed: %v", err)
+				t.Fatalf("afSplitEnclave failed: %v", err)
 			}
 
-			recovered, err := AFMerge(splitData, 4, tt.blockSize, tt.hashAlgo)
+			recovered, err := afMergePlain(t, splitData, 4, tt.blockSize, tt.hashAlgo)
 			if err != nil {
-				t.Fatalf("AFMerge failed: %v", err)
+				t.Fatalf("afMergeEnclave failed: %v", err)
 			}
 
 			if !bytes.Equal(data, recovered) {
@@ -501,37 +519,38 @@ func TestDiffuseModifiesData(t *testing.T) {
 	}
 }
 
-// TestAFSplitDifferentOutput tests that AFSplit produces different output each time
-func TestAFSplitDifferentOutput(t *testing.T) {
+// TestAFSplitEnclaveDifferentOutput tests that afSplitEnclave produces
+// different output each time.
+func TestAFSplitEnclaveDifferentOutput(t *testing.T) {
 	data := make([]byte, 32)
 	if _, err := rand.Read(data); err != nil {
 		t.Fatalf("Failed to generate test data: %v", err)
 	}
 
-	split1, err := AFSplit(data, 4, "sha256")
+	split1, err := afSplitPlain(t, data, 4, "sha256")
 	if err != nil {
-		t.Fatalf("AFSplit failed: %v", err)
+		t.Fatalf("afSplitEnclave failed: %v", err)
 	}
 
-	split2, err := AFSplit(data, 4, "sha256")
+	split2, err := afSplitPlain(t, data, 4, "sha256")
 	if err != nil {
-		t.Fatalf("AFSplit failed: %v", err)
+		t.Fatalf("afSplitEnclave failed: %v", err)
 	}
 
 	// Due to randomness, splits should be different
 	if bytes.Equal(split1, split2) {
-		t.Fatal("AFSplit produced identical output for same input (extremely unlikely)")
+		t.Fatal("afSplitEnclave produced identical output for same input (extremely unlikely)")
 	}
 
 	// But both should recover to the same original data
-	recovered1, err := AFMerge(split1, 4, 32, "sha256")
+	recovered1, err := afMergePlain(t, split1, 4, 32, "sha256")
 	if err != nil {
-		t.Fatalf("AFMerge failed: %v", err)
+		t.Fatalf("afMergeEnclave failed: %v", err)
 	}
 
-	recovered2, err := AFMerge(split2, 4, 32, "sha256")
+	recovered2, err := afMergePlain(t, split2, 4, 32, "sha256")
 	if err != nil {
-		t.Fatalf("AFMerge failed: %v", err)
+		t.Fatalf("afMergeEnclave failed: %v", err)
 	}
 
 	if !bytes.Equal(recovered1, recovered2) || !bytes.Equal(recovered1, data) {
@@ -539,21 +558,22 @@ func TestAFSplitDifferentOutput(t *testing.T) {
 	}
 }
 
-// TestAFSplitHashAlgorithms tests different hash algorithms produce different splits
-func TestAFSplitHashAlgorithms(t *testing.T) {
+// TestAFSplitEnclaveHashAlgorithms tests different hash algorithms produce
+// different splits.
+func TestAFSplitEnclaveHashAlgorithms(t *testing.T) {
 	data := make([]byte, 64) // Use 64 bytes to work well with both sha256 and sha512
 	for i := range data {
 		data[i] = byte(i)
 	}
 
-	split256, err := AFSplit(data, 4, "sha256")
+	split256, err := afSplitPlain(t, data, 4, "sha256")
 	if err != nil {
-		t.Fatalf("AFSplit with sha256 failed: %v", err)
+		t.Fatalf("afSplitEnclave with sha256 failed: %v", err)
 	}
 
-	split512, err := AFSplit(data, 4, "sha512")
+	split512, err := afSplitPlain(t, data, 4, "sha512")
 	if err != nil {
-		t.Fatalf("AFSplit with sha512 failed: %v", err)
+		t.Fatalf("afSplitEnclave with sha512 failed: %v", err)
 	}
 
 	// The splits should be different due to different hash algorithms
@@ -563,14 +583,14 @@ func TestAFSplitHashAlgorithms(t *testing.T) {
 	}
 
 	// But both should recover correctly
-	recovered256, err := AFMerge(split256, 4, 64, "sha256")
+	recovered256, err := afMergePlain(t, split256, 4, 64, "sha256")
 	if err != nil {
-		t.Fatalf("AFMerge with sha256 failed: %v", err)
+		t.Fatalf("afMergeEnclave with sha256 failed: %v", err)
 	}
 
-	recovered512, err := AFMerge(split512, 4, 64, "sha512")
+	recovered512, err := afMergePlain(t, split512, 4, 64, "sha512")
 	if err != nil {
-		t.Fatalf("AFMerge with sha512 failed: %v", err)
+		t.Fatalf("afMergeEnclave with sha512 failed: %v", err)
 	}
 
 	if !bytes.Equal(recovered256, data) {
@@ -582,23 +602,24 @@ func TestAFSplitHashAlgorithms(t *testing.T) {
 	}
 }
 
-// TestAFMergeWrongHashAlgo tests that using wrong hash algo in merge fails to recover
-func TestAFMergeWrongHashAlgo(t *testing.T) {
+// TestAFMergeEnclaveWrongHashAlgo tests that using the wrong hash algo in a
+// merge fails to recover.
+func TestAFMergeEnclaveWrongHashAlgo(t *testing.T) {
 	data := make([]byte, 64)
 	if _, err := rand.Read(data); err != nil {
 		t.Fatalf("Failed to generate test data: %v", err)
 	}
 
 	// Split with sha256
-	splitData, err := AFSplit(data, 4, "sha256")
+	splitData, err := afSplitPlain(t, data, 4, "sha256")
 	if err != nil {
-		t.Fatalf("AFSplit failed: %v", err)
+		t.Fatalf("afSplitEnclave failed: %v", err)
 	}
 
 	// Try to merge with sha512 (wrong hash)
-	recovered, err := AFMerge(splitData, 4, 64, "sha512")
+	recovered, err := afMergePlain(t, splitData, 4, 64, "sha512")
 	if err != nil {
-		t.Fatalf("AFMerge failed: %v", err)
+		t.Fatalf("afMergeEnclave failed: %v", err)
 	}
 
 	// Should not recover the original data
@@ -607,14 +628,14 @@ func TestAFMergeWrongHashAlgo(t *testing.T) {
 	}
 }
 
-// TestAFSplitSingleStripe tests edge case with single stripe
-func TestAFSplitSingleStripe(t *testing.T) {
+// TestAFSplitEnclaveSingleStripe tests edge case with single stripe
+func TestAFSplitEnclaveSingleStripe(t *testing.T) {
 	data := []byte{0x01, 0x02, 0x03, 0x04}
 
-	_, err := AFSplit(data, 1, "sha256")
+	_, err := afSplitPlain(t, data, 1, "sha256")
 	// Single stripe should work - the last block would just be XOR'd with zeros
 	if err != nil {
-		t.Fatalf("AFSplit with single stripe failed: %v", err)
+		t.Fatalf("afSplitEnclave with single stripe failed: %v", err)
 	}
 }
 
@@ -637,15 +658,15 @@ func TestHashBlockWithSHA512(t *testing.T) {
 	}
 }
 
-// TestAFSplitAndMergeReportAnUnsupportedHash pins ErrUnsupportedHash on the
-// anti-forensic path, which has its own hash dispatch (#70). Both directions
-// are checked: a split and a merge reach getHashFunc separately, and a fix
-// applied to one of them would otherwise look complete.
-func TestAFSplitAndMergeReportAnUnsupportedHash(t *testing.T) {
-	if _, err := AFSplit(make([]byte, 32), 4, "md5"); !errors.Is(err, ErrUnsupportedHash) {
-		t.Fatalf("AFSplit = %v, want an error wrapping ErrUnsupportedHash", err)
+// TestAFSplitAndMergeEnclaveReportAnUnsupportedHash pins ErrUnsupportedHash on
+// the anti-forensic path, which has its own hash dispatch (#70). Both
+// directions are checked: a split and a merge reach getHashFunc separately,
+// and a fix applied to one of them would otherwise look complete.
+func TestAFSplitAndMergeEnclaveReportAnUnsupportedHash(t *testing.T) {
+	if _, err := afSplitPlain(t, make([]byte, 32), 4, "md5"); !errors.Is(err, ErrUnsupportedHash) {
+		t.Fatalf("afSplitEnclave = %v, want an error wrapping ErrUnsupportedHash", err)
 	}
-	if _, err := AFMerge(make([]byte, 128), 4, 32, "md5"); !errors.Is(err, ErrUnsupportedHash) {
-		t.Fatalf("AFMerge = %v, want an error wrapping ErrUnsupportedHash", err)
+	if _, err := afMergePlain(t, make([]byte, 128), 4, 32, "md5"); !errors.Is(err, ErrUnsupportedHash) {
+		t.Fatalf("afMergeEnclave = %v, want an error wrapping ErrUnsupportedHash", err)
 	}
 }

@@ -30,9 +30,9 @@ func TestDeriveKeyPBKDF2(t *testing.T) {
 	passphrase := []byte("testpassphrase")
 	keySize := 32
 
-	key1, err := DeriveKey(passphrase, kdf, keySize)
+	key1, err := deriveKeyPlain(passphrase, kdf, keySize)
 	if err != nil {
-		t.Fatalf("DeriveKey failed: %v", err)
+		t.Fatalf("deriveKeyPlain failed: %v", err)
 	}
 
 	if len(key1) != keySize {
@@ -40,9 +40,9 @@ func TestDeriveKeyPBKDF2(t *testing.T) {
 	}
 
 	// Derive again with same parameters - should produce identical key
-	key2, err := DeriveKey(passphrase, kdf, keySize)
+	key2, err := deriveKeyPlain(passphrase, kdf, keySize)
 	if err != nil {
-		t.Fatalf("Second DeriveKey failed: %v", err)
+		t.Fatalf("Second deriveKeyPlain failed: %v", err)
 	}
 
 	if !bytes.Equal(key1, key2) {
@@ -50,9 +50,9 @@ func TestDeriveKeyPBKDF2(t *testing.T) {
 	}
 
 	// Different passphrase should produce different key
-	key3, err := DeriveKey([]byte("different"), kdf, keySize)
+	key3, err := deriveKeyPlain([]byte("different"), kdf, keySize)
 	if err != nil {
-		t.Fatalf("DeriveKey with different passphrase failed: %v", err)
+		t.Fatalf("deriveKeyPlain with different passphrase failed: %v", err)
 	}
 
 	if bytes.Equal(key1, key3) {
@@ -76,9 +76,9 @@ func TestDeriveKeyPBKDF2SHA512(t *testing.T) {
 	passphrase := []byte("testpassphrase")
 	keySize := 64
 
-	key, err := DeriveKey(passphrase, kdf, keySize)
+	key, err := deriveKeyPlain(passphrase, kdf, keySize)
 	if err != nil {
-		t.Fatalf("DeriveKey with SHA512 failed: %v", err)
+		t.Fatalf("deriveKeyPlain with SHA512 failed: %v", err)
 	}
 
 	if len(key) != keySize {
@@ -106,15 +106,15 @@ func TestDeriveKeyArgon2i(t *testing.T) {
 	keySize := 32
 
 	if fips140.Enabled() {
-		if _, err := DeriveKey(passphrase, kdf, keySize); !errors.Is(err, ErrFIPSNotApproved) {
-			t.Fatalf("DeriveKey with Argon2i in FIPS mode: got error %v, want ErrFIPSNotApproved", err)
+		if _, err := deriveKeyPlain(passphrase, kdf, keySize); !errors.Is(err, ErrFIPSNotApproved) {
+			t.Fatalf("deriveKeyPlain with Argon2i in FIPS mode: got error %v, want ErrFIPSNotApproved", err)
 		}
 		return
 	}
 
-	key1, err := DeriveKey(passphrase, kdf, keySize)
+	key1, err := deriveKeyPlain(passphrase, kdf, keySize)
 	if err != nil {
-		t.Fatalf("DeriveKey failed: %v", err)
+		t.Fatalf("deriveKeyPlain failed: %v", err)
 	}
 
 	if len(key1) != keySize {
@@ -122,9 +122,9 @@ func TestDeriveKeyArgon2i(t *testing.T) {
 	}
 
 	// Derive again with same parameters - should produce identical key
-	key2, err := DeriveKey(passphrase, kdf, keySize)
+	key2, err := deriveKeyPlain(passphrase, kdf, keySize)
 	if err != nil {
-		t.Fatalf("Second DeriveKey failed: %v", err)
+		t.Fatalf("Second deriveKeyPlain failed: %v", err)
 	}
 
 	if !bytes.Equal(key1, key2) {
@@ -132,9 +132,9 @@ func TestDeriveKeyArgon2i(t *testing.T) {
 	}
 
 	// Different passphrase should produce different key
-	key3, err := DeriveKey([]byte("different"), kdf, keySize)
+	key3, err := deriveKeyPlain([]byte("different"), kdf, keySize)
 	if err != nil {
-		t.Fatalf("DeriveKey with different passphrase failed: %v", err)
+		t.Fatalf("deriveKeyPlain with different passphrase failed: %v", err)
 	}
 
 	if bytes.Equal(key1, key3) {
@@ -162,15 +162,15 @@ func TestDeriveKeyArgon2id(t *testing.T) {
 	keySize := 32
 
 	if fips140.Enabled() {
-		if _, err := DeriveKey(passphrase, kdf, keySize); !errors.Is(err, ErrFIPSNotApproved) {
-			t.Fatalf("DeriveKey with Argon2id in FIPS mode: got error %v, want ErrFIPSNotApproved", err)
+		if _, err := deriveKeyPlain(passphrase, kdf, keySize); !errors.Is(err, ErrFIPSNotApproved) {
+			t.Fatalf("deriveKeyPlain with Argon2id in FIPS mode: got error %v, want ErrFIPSNotApproved", err)
 		}
 		return
 	}
 
-	key1, err := DeriveKey(passphrase, kdf, keySize)
+	key1, err := deriveKeyPlain(passphrase, kdf, keySize)
 	if err != nil {
-		t.Fatalf("DeriveKey failed: %v", err)
+		t.Fatalf("deriveKeyPlain failed: %v", err)
 	}
 
 	if len(key1) != keySize {
@@ -178,9 +178,9 @@ func TestDeriveKeyArgon2id(t *testing.T) {
 	}
 
 	// Derive again with same parameters - should produce identical key
-	key2, err := DeriveKey(passphrase, kdf, keySize)
+	key2, err := deriveKeyPlain(passphrase, kdf, keySize)
 	if err != nil {
-		t.Fatalf("Second DeriveKey failed: %v", err)
+		t.Fatalf("Second deriveKeyPlain failed: %v", err)
 	}
 
 	if !bytes.Equal(key1, key2) {
@@ -188,9 +188,9 @@ func TestDeriveKeyArgon2id(t *testing.T) {
 	}
 
 	// Different passphrase should produce different key
-	key3, err := DeriveKey([]byte("different"), kdf, keySize)
+	key3, err := deriveKeyPlain([]byte("different"), kdf, keySize)
 	if err != nil {
-		t.Fatalf("DeriveKey with different passphrase failed: %v", err)
+		t.Fatalf("deriveKeyPlain with different passphrase failed: %v", err)
 	}
 
 	if bytes.Equal(key1, key3) {
@@ -211,7 +211,7 @@ func TestDeriveKeyInvalidType(t *testing.T) {
 	passphrase := []byte("testpassphrase")
 	keySize := 32
 
-	_, err := DeriveKey(passphrase, kdf, keySize)
+	_, err := deriveKeyPlain(passphrase, kdf, keySize)
 	if err == nil {
 		t.Fatal("Expected error for unsupported KDF type")
 	}
@@ -230,7 +230,7 @@ func TestDeriveKeyInvalidSalt(t *testing.T) {
 	passphrase := []byte("testpassphrase")
 	keySize := 32
 
-	_, err := DeriveKey(passphrase, kdf, keySize)
+	_, err := deriveKeyPlain(passphrase, kdf, keySize)
 	if err == nil {
 		t.Fatal("Expected error for invalid base64 salt")
 	}
@@ -251,7 +251,7 @@ func TestDerivePBKDF2MissingIterations(t *testing.T) {
 	passphrase := []byte("testpassphrase")
 	keySize := 32
 
-	_, err := DeriveKey(passphrase, kdf, keySize)
+	_, err := deriveKeyPlain(passphrase, kdf, keySize)
 	if err == nil {
 		t.Fatal("Expected error for missing iterations")
 	}
@@ -273,7 +273,7 @@ func TestDerivePBKDF2UnsupportedHash(t *testing.T) {
 	passphrase := []byte("testpassphrase")
 	keySize := 32
 
-	_, err := DeriveKey(passphrase, kdf, keySize)
+	_, err := deriveKeyPlain(passphrase, kdf, keySize)
 	if err == nil {
 		t.Fatal("Expected error for unsupported hash algorithm")
 	}
@@ -297,7 +297,7 @@ func TestDeriveArgon2iMissingTime(t *testing.T) {
 	passphrase := []byte("testpassphrase")
 	keySize := 32
 
-	_, err := DeriveKey(passphrase, kdf, keySize)
+	_, err := deriveKeyPlain(passphrase, kdf, keySize)
 	if err == nil {
 		t.Fatal("Expected error for missing time parameter")
 	}
@@ -330,7 +330,7 @@ func TestDeriveArgon2iMissingMemory(t *testing.T) {
 	passphrase := []byte("testpassphrase")
 	keySize := 32
 
-	_, err := DeriveKey(passphrase, kdf, keySize)
+	_, err := deriveKeyPlain(passphrase, kdf, keySize)
 	if err == nil {
 		t.Fatal("Expected error for missing memory parameter")
 	}
@@ -363,7 +363,7 @@ func TestDeriveArgon2iMissingCPUs(t *testing.T) {
 	passphrase := []byte("testpassphrase")
 	keySize := 32
 
-	_, err := DeriveKey(passphrase, kdf, keySize)
+	_, err := deriveKeyPlain(passphrase, kdf, keySize)
 	if err == nil {
 		t.Fatal("Expected error for missing cpus parameter")
 	}
@@ -422,7 +422,7 @@ func TestDeriveArgon2idMissingParams(t *testing.T) {
 			passphrase := []byte("testpassphrase")
 			keySize := 32
 
-			_, err := DeriveKey(passphrase, kdf, keySize)
+			_, err := deriveKeyPlain(passphrase, kdf, keySize)
 			if err == nil {
 				t.Fatal("Expected error for missing parameter")
 			}
@@ -747,9 +747,9 @@ func TestDeriveKeyDifferentKeySizes(t *testing.T) {
 	keySizes := []int{16, 32, 64, 128}
 	for _, size := range keySizes {
 		t.Run(formatSize(int64(size)), func(t *testing.T) {
-			key, err := DeriveKey(passphrase, kdf, size)
+			key, err := deriveKeyPlain(passphrase, kdf, size)
 			if err != nil {
-				t.Fatalf("DeriveKey failed for size %d: %v", size, err)
+				t.Fatalf("deriveKeyPlain failed for size %d: %v", size, err)
 			}
 
 			if len(key) != size {
@@ -787,21 +787,21 @@ func TestArgon2iVsArgon2id(t *testing.T) {
 
 	if fips140.Enabled() {
 		for _, kdf := range []*KDF{kdfI, kdfID} {
-			if _, err := DeriveKey(passphrase, kdf, keySize); !errors.Is(err, ErrFIPSNotApproved) {
-				t.Fatalf("DeriveKey with %s in FIPS mode: got error %v, want ErrFIPSNotApproved", kdf.Type, err)
+			if _, err := deriveKeyPlain(passphrase, kdf, keySize); !errors.Is(err, ErrFIPSNotApproved) {
+				t.Fatalf("deriveKeyPlain with %s in FIPS mode: got error %v, want ErrFIPSNotApproved", kdf.Type, err)
 			}
 		}
 		return
 	}
 
-	keyI, err := DeriveKey(passphrase, kdfI, keySize)
+	keyI, err := deriveKeyPlain(passphrase, kdfI, keySize)
 	if err != nil {
-		t.Fatalf("DeriveKey for Argon2i failed: %v", err)
+		t.Fatalf("deriveKeyPlain for Argon2i failed: %v", err)
 	}
 
-	keyID, err := DeriveKey(passphrase, kdfID, keySize)
+	keyID, err := deriveKeyPlain(passphrase, kdfID, keySize)
 	if err != nil {
-		t.Fatalf("DeriveKey for Argon2id failed: %v", err)
+		t.Fatalf("deriveKeyPlain for Argon2id failed: %v", err)
 	}
 
 	if bytes.Equal(keyI, keyID) {
@@ -988,15 +988,15 @@ func TestDeriveKeyPBKDF2SHA1(t *testing.T) {
 	keySize := 20 // SHA-1 produces 20 bytes
 
 	if fips140.Enabled() {
-		if _, err := DeriveKey(passphrase, kdf, keySize); !errors.Is(err, ErrFIPSNotApproved) {
-			t.Fatalf("DeriveKey with SHA-1 in FIPS mode: got error %v, want ErrFIPSNotApproved", err)
+		if _, err := deriveKeyPlain(passphrase, kdf, keySize); !errors.Is(err, ErrFIPSNotApproved) {
+			t.Fatalf("deriveKeyPlain with SHA-1 in FIPS mode: got error %v, want ErrFIPSNotApproved", err)
 		}
 		return
 	}
 
-	key, err := DeriveKey(passphrase, kdf, keySize)
+	key, err := deriveKeyPlain(passphrase, kdf, keySize)
 	if err != nil {
-		t.Fatalf("DeriveKey with SHA-1 failed: %v", err)
+		t.Fatalf("deriveKeyPlain with SHA-1 failed: %v", err)
 	}
 
 	if len(key) != keySize {
@@ -1004,9 +1004,9 @@ func TestDeriveKeyPBKDF2SHA1(t *testing.T) {
 	}
 
 	// Derive again with same parameters - should produce identical key
-	key2, err := DeriveKey(passphrase, kdf, keySize)
+	key2, err := deriveKeyPlain(passphrase, kdf, keySize)
 	if err != nil {
-		t.Fatalf("Second DeriveKey failed: %v", err)
+		t.Fatalf("Second deriveKeyPlain failed: %v", err)
 	}
 
 	if !bytes.Equal(key, key2) {
@@ -1030,9 +1030,9 @@ func TestDeriveKeyPBKDF2SHA384(t *testing.T) {
 	passphrase := []byte("testpassphrase")
 	keySize := 48 // SHA-384 produces 48 bytes
 
-	key, err := DeriveKey(passphrase, kdf, keySize)
+	key, err := deriveKeyPlain(passphrase, kdf, keySize)
 	if err != nil {
-		t.Fatalf("DeriveKey with SHA-384 failed: %v", err)
+		t.Fatalf("deriveKeyPlain with SHA-384 failed: %v", err)
 	}
 
 	if len(key) != keySize {
@@ -1040,9 +1040,9 @@ func TestDeriveKeyPBKDF2SHA384(t *testing.T) {
 	}
 
 	// Derive again with same parameters - should produce identical key
-	key2, err := DeriveKey(passphrase, kdf, keySize)
+	key2, err := deriveKeyPlain(passphrase, kdf, keySize)
 	if err != nil {
-		t.Fatalf("Second DeriveKey failed: %v", err)
+		t.Fatalf("Second deriveKeyPlain failed: %v", err)
 	}
 
 	if !bytes.Equal(key, key2) {
@@ -1248,9 +1248,9 @@ func TestPBKDF2HashFunctionsDifferent(t *testing.T) {
 			Iterations: &iterations,
 		}
 
-		key, err := DeriveKey(passphrase, kdf, keySize)
+		key, err := deriveKeyPlain(passphrase, kdf, keySize)
 		if err != nil {
-			t.Fatalf("DeriveKey with %s failed: %v", hashAlgo, err)
+			t.Fatalf("deriveKeyPlain with %s failed: %v", hashAlgo, err)
 		}
 
 		keys[hashAlgo] = key
@@ -1341,7 +1341,7 @@ func TestArgon2CPUsBoundsValidation(t *testing.T) {
 				CPUs:   &cpus,
 			}
 
-			_, err := DeriveKey(passphrase, kdf, 32)
+			_, err := deriveKeyPlain(passphrase, kdf, 32)
 			if fips140.Enabled() {
 				// Argon2 is refused before the parallelism bounds are reached,
 				// so every case errors out with the FIPS refusal instead.
@@ -1390,9 +1390,9 @@ func TestFIPSCompliantKDFWorkflow(t *testing.T) {
 
 	// Step 4: Use the KDF to derive a key
 	passphrase := []byte("FIPS-compliant-passphrase")
-	key, err := DeriveKey(passphrase, kdf, 32)
+	key, err := deriveKeyPlain(passphrase, kdf, 32)
 	if err != nil {
-		t.Fatalf("DeriveKey failed: %v", err)
+		t.Fatalf("deriveKeyPlain failed: %v", err)
 	}
 
 	if len(key) != 32 {
@@ -1400,9 +1400,9 @@ func TestFIPSCompliantKDFWorkflow(t *testing.T) {
 	}
 
 	// Step 5: Verify deterministic derivation
-	key2, err := DeriveKey(passphrase, kdf, 32)
+	key2, err := deriveKeyPlain(passphrase, kdf, 32)
 	if err != nil {
-		t.Fatalf("Second DeriveKey failed: %v", err)
+		t.Fatalf("Second deriveKeyPlain failed: %v", err)
 	}
 
 	if !bytes.Equal(key, key2) {
@@ -1441,7 +1441,7 @@ func TestCreateKDFPBKDF2SHA1HashAlgoOverride(t *testing.T) {
 // place: golang.org/x/crypto/argon2 is pure Go and never enters the Go
 // Cryptographic Module, so GODEBUG=fips140=only cannot reject it and this
 // library has to. Every entry point is covered — an externally supplied header
-// reaching DeriveKey, an explicit CreateKDF request, and CreateKDF's empty
+// reaching deriveKeyPlain, an explicit CreateKDF request, and CreateKDF's empty
 // default — so a FIPS-mode process can neither unlock nor write a non-approved
 // keyslot. Outside FIPS mode all three must keep working. See docs/FIPS.md.
 func TestArgon2RefusedInFIPSMode(t *testing.T) {
@@ -1461,7 +1461,7 @@ func TestArgon2RefusedInFIPSMode(t *testing.T) {
 				CPUs:   &argonCPUs,
 			}
 
-			key, err := DeriveKey(passphrase, kdf, 32)
+			key, err := deriveKeyPlain(passphrase, kdf, 32)
 			if fips140.Enabled() {
 				if !errors.Is(err, ErrFIPSNotApproved) {
 					t.Fatalf("got error %v, want ErrFIPSNotApproved", err)
@@ -1472,7 +1472,7 @@ func TestArgon2RefusedInFIPSMode(t *testing.T) {
 				return
 			}
 			if err != nil {
-				t.Fatalf("outside FIPS mode DeriveKey should succeed: %v", err)
+				t.Fatalf("outside FIPS mode deriveKeyPlain should succeed: %v", err)
 			}
 		})
 
@@ -1513,8 +1513,8 @@ func TestArgon2RefusedInFIPSMode(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CreateKDF with pbkdf2-sha256 failed: %v", err)
 		}
-		if _, err := DeriveKey(passphrase, kdf, 32); err != nil {
-			t.Fatalf("DeriveKey with pbkdf2-sha256 failed: %v", err)
+		if _, err := deriveKeyPlain(passphrase, kdf, 32); err != nil {
+			t.Fatalf("deriveKeyPlain with pbkdf2-sha256 failed: %v", err)
 		}
 	})
 }
@@ -1534,12 +1534,12 @@ func TestDeriveKeyReportsAnUnsupportedKDFType(t *testing.T) {
 		Iterations: &iterations,
 	}
 
-	_, err := DeriveKey([]byte("passphrase-long-enough"), kdf, 32)
+	_, err := deriveKeyPlain([]byte("passphrase-long-enough"), kdf, 32)
 	if err == nil {
-		t.Fatal("DeriveKey accepted a KDF type this package does not implement")
+		t.Fatal("deriveKeyPlain accepted a KDF type this package does not implement")
 	}
 	if !errors.Is(err, ErrUnsupportedKDF) {
-		t.Fatalf("DeriveKey = %v, want an error wrapping ErrUnsupportedKDF", err)
+		t.Fatalf("deriveKeyPlain = %v, want an error wrapping ErrUnsupportedKDF", err)
 	}
 	if !strings.Contains(err.Error(), "scrypt") {
 		t.Fatalf("the refusal does not name the type it refused: %v", err)
@@ -1561,12 +1561,12 @@ func TestDeriveKeyReportsAnUnsupportedHash(t *testing.T) {
 		Iterations: &iterations,
 	}
 
-	_, err := DeriveKey([]byte("passphrase-long-enough"), kdf, 32)
+	_, err := deriveKeyPlain([]byte("passphrase-long-enough"), kdf, 32)
 	if err == nil {
-		t.Fatal("DeriveKey accepted a hash this package does not implement")
+		t.Fatal("deriveKeyPlain accepted a hash this package does not implement")
 	}
 	if !errors.Is(err, ErrUnsupportedHash) {
-		t.Fatalf("DeriveKey = %v, want an error wrapping ErrUnsupportedHash", err)
+		t.Fatalf("deriveKeyPlain = %v, want an error wrapping ErrUnsupportedHash", err)
 	}
 	if errors.Is(err, ErrFIPSNotApproved) {
 		t.Fatalf("an unimplemented hash was reported as a FIPS refusal: %v", err)

@@ -17,7 +17,7 @@ import (
 //
 // The mismatch path already continued, so the bug was invisible whenever every
 // digest in a header was well-formed. It surfaced under GODEBUG=fips140=only,
-// where DeriveKey refuses an argon2 KDF: a header carrying one argon2 digest
+// where deriveKeyPlain refuses an argon2 KDF: a header carrying one argon2 digest
 // and one usable digest opened or did not open depending on which one Go's
 // randomized map iteration happened to visit first. The same header, the same
 // passphrase, a different answer from run to run.
@@ -66,7 +66,7 @@ func usableDigest(t *testing.T, masterKey []byte, length int) *Digest {
 		Iterations: &iterations,
 	}
 
-	derived, err := DeriveKey(masterKey, kdf, length)
+	derived, err := deriveKeyPlain(masterKey, kdf, length)
 	if err != nil {
 		t.Fatalf("failed to derive the usable digest: %v", err)
 	}
@@ -120,7 +120,7 @@ func unusableDigests(t *testing.T) map[string]*Digest {
 		},
 		"argon2 digest with no parameters": {
 			// The stand-in for GODEBUG=fips140=only refusing argon2: same
-			// return path out of DeriveKey, reachable without FIPS mode.
+			// return path out of deriveKeyPlain, reachable without FIPS mode.
 			Type:       "argon2id",
 			Salt:       encodeBase64([]byte("digest-scan-salt")),
 			Iterations: iterations,

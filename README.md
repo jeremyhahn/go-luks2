@@ -261,7 +261,7 @@ LUKS headers written by older cryptsetup releases; in FIPS mode it returns
 
 Argon2 is not FIPS-approved either, and `GODEBUG=fips140=only` cannot catch it
 because `x/crypto/argon2` is pure Go. While the process runs in FIPS 140-3 mode
-(`crypto/fips140.Enabled()`), `DeriveKey` and `CreateKDF` refuse `argon2i` and
+(`crypto/fips140.Enabled()`), `DeriveKeyEnclave` and `CreateKDF` refuse `argon2i` and
 `argon2id` with `ErrFIPSNotApproved` — including `CreateKDF`'s empty-`KDFType`
 default, so a FIPS caller must select an approved KDF explicitly. Outside FIPS
 mode Argon2id remains the default and nothing changes.

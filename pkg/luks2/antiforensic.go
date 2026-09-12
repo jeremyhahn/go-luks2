@@ -18,14 +18,14 @@ import (
 
 // Anti-forensic splitting and the custody of what it produces.
 //
-// AF STRIPES ARE MASTER KEY MATERIAL. It is easy to read AFSplit as an
+// AF STRIPES ARE MASTER KEY MATERIAL. It is easy to read afSplitEnclave as an
 // obfuscation step and treat its output as less sensitive than its input, and
 // that is backwards: the split is reversible with nothing but the stripes
-// themselves -- AFMerge takes no key -- so holding the stripes is holding the
-// master key, spread over keySize*stripes bytes instead of keySize. For the
-// default 512-bit key and 4000 stripes that is 256 KiB of key material, four
-// thousand times the surface of the key it encodes, which is precisely why it
-// must not sit on the ordinary heap.
+// themselves -- afMergeEnclave takes no key -- so holding the stripes is
+// holding the master key, spread over keySize*stripes bytes instead of
+// keySize. For the default 512-bit key and 4000 stripes that is 256 KiB of
+// key material, four thousand times the surface of the key it encodes, which
+// is precisely why it must not sit on the ordinary heap.
 //
 // The diffusion buffer carries the same weight. It is the running XOR of the
 // stripes, and combined with the final stripe it yields the key directly.
@@ -129,66 +129,9 @@ func afMergeEnclave(split *enclave.MemoryEnclave, splitLen, stripes, blockSize i
 	return result, nil
 }
 
-// AFSplit performs anti-forensic information splitting, returning the stripes
-// as plain, unprotected bytes.
-//
-// Deprecated: the returned stripes ARE the master key -- AFMerge reverses them
-// with no key at all -- and this returns them on the ordinary heap, where they
-// are swappable, core-dumpable and zeroized only if a caller remembers.
-// Nothing inside this package calls it any more; the internal split path is
-// afSplitEnclave, which keeps the stripes in locked memory. It remains exported
-// only so existing consumers keep building.
-func AFSplit(data []byte, stripes int, hashAlgo string) ([]byte, error) {
-	if stripes <= 0 {
-		return nil, fmt.Errorf("stripes must be positive")
-	}
-
-	hashFunc, err := getHashFunc(hashAlgo)
-	if err != nil {
-		return nil, err
-	}
-
-	blockSize := len(data)
-	result := make([]byte, blockSize*stripes)
-	buffer := make([]byte, blockSize)
-	defer clearBytes(buffer)
-
-	if err := afSplitInto(result, data, buffer, stripes, hashFunc); err != nil {
-		clearBytes(result)
-		return nil, err
-	}
-
-	return result, nil
-}
-
-// AFMerge performs anti-forensic information merging, returning the recovered
-// data as plain, unprotected bytes.
-//
-// Deprecated: the recovered value is the master key on the ordinary heap. The
-// internal merge path is afMergeEnclave. See AFSplit.
-func AFMerge(splitData []byte, stripes int, blockSize int, hashAlgo string) ([]byte, error) {
-	if len(splitData) != blockSize*stripes {
-		return nil, fmt.Errorf("invalid split data size")
-	}
-
-	hashFunc, err := getHashFunc(hashAlgo)
-	if err != nil {
-		return nil, err
-	}
-
-	buffer := make([]byte, blockSize)
-	defer clearBytes(buffer)
-
-	result := make([]byte, blockSize)
-	afMergeInto(result, splitData, buffer, stripes, blockSize, hashFunc)
-
-	return result, nil
-}
-
-// afSplitInto is the split itself, writing into caller-provided storage so that
-// the enclave-backed and the deprecated plain paths run the SAME code over
-// different memory. Behavior must not be able to drift between them: a
-// difference here would be a container this library could write but not read.
+// afSplitInto is the split itself, writing into caller-provided storage so
+// that afSplitEnclave's callers all run the SAME code regardless of where dst
+// and buffer live.
 //
 // dst must be len(data)*stripes bytes and buffer must be len(data) bytes; both
 // are the caller's to protect and to clear.
@@ -215,8 +158,7 @@ func afSplitInto(dst, data, buffer []byte, stripes int, hashFunc func() hash.Has
 	return nil
 }
 
-// afMergeInto is the merge itself, writing the recovered value into dst. See
-// afSplitInto for why both paths share one implementation.
+// afMergeInto is the merge itself, writing the recovered value into dst.
 func afMergeInto(dst, splitData, buffer []byte, stripes, blockSize int, hashFunc func() hash.Hash) {
 	for i := 0; i < stripes-1; i++ {
 		block := splitData[i*blockSize : (i+1)*blockSize]

@@ -785,7 +785,7 @@ func TestScreenDigestNeverAcceptsWhatTheDerivationRefuses(t *testing.T) {
 				Salt:       digest.Salt,
 				Iterations: &digest.Iterations,
 			}
-			derived, deriveErr := DeriveKey([]byte("yardstick-key"), kdf, deriveLen)
+			derived, deriveErr := deriveKeyPlain([]byte("yardstick-key"), kdf, deriveLen)
 			clearBytes(derived)
 
 			if deriveErr != nil {

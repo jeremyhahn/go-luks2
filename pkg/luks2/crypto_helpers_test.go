@@ -518,9 +518,9 @@ func TestCreateDigestVerification(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Digest is not valid base64: %v", err)
 	}
-	actualDigest, err := DeriveKey(masterKey, kdf, len(expectedBytes))
+	actualDigest, err := deriveKeyPlain(masterKey, kdf, len(expectedBytes))
 	if err != nil {
-		t.Fatalf("DeriveKey failed: %v", err)
+		t.Fatalf("deriveKeyPlain failed: %v", err)
 	}
 
 	// Encode and compare

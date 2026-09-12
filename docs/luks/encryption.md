@@ -82,7 +82,7 @@ Master Key (64 bytes)
       │
       ▼
 ┌─────────────────────┐
-│   AFSplit           │
+│   afSplitEnclave    │
 │   4000 stripes      │
 │   SHA-256 diffuse   │
 └─────────────────────┘
@@ -116,7 +116,7 @@ Split Material (256,000 bytes)
       │
       ▼
 ┌─────────────────────┐
-│   AFMerge           │
+│   afMergeEnclave    │
 │   Combine stripes   │
 └─────────────────────┘
       │

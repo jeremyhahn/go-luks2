@@ -74,7 +74,7 @@ Passphrase
          │
          ▼
 ┌──────────────────┐
-│ Anti-Forensic    │  AFMerge (4000 stripes)
+│ Anti-Forensic    │  afMergeEnclave (4000 stripes)
 │ Merge            │
 └────────┬─────────┘
          │

@@ -120,11 +120,11 @@ Supports multiple KDFs:
 Protects master key from forensic recovery:
 
 ```
-Key (64 bytes) → AFSplit → 256,000 bytes (4000 × 64)
-                           ↓
-                     Encrypted Material
-                           ↓
-                      AFMerge → Key (64 bytes)
+Key (64 bytes) → afSplitEnclave → 256,000 bytes (4000 × 64)
+                                  ↓
+                            Encrypted Material
+                                  ↓
+                             afMergeEnclave → Key (64 bytes)
 ```
 
 ### 7. Token Management (`token.go`)

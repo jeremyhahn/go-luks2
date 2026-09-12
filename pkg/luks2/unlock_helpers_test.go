@@ -37,7 +37,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			Iterations: &iterations,
 		}
 
-		expectedDigest, err := DeriveKey(testMasterKey, kdf, 32)
+		expectedDigest, err := deriveKeyPlain(testMasterKey, kdf, 32)
 		if err != nil {
 			t.Fatalf("Failed to derive test digest: %v", err)
 		}
@@ -69,7 +69,7 @@ func TestVerifyMasterKey(t *testing.T) {
 		}
 
 		// Derive digest from correct key
-		correctDigest, err := DeriveKey(testMasterKey, kdf, 32)
+		correctDigest, err := deriveKeyPlain(testMasterKey, kdf, 32)
 		if err != nil {
 			t.Fatalf("Failed to derive test digest: %v", err)
 		}
@@ -190,7 +190,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			Iterations: &iterations,
 		}
 
-		validDigest, err := DeriveKey(testMasterKey, kdf, 32)
+		validDigest, err := deriveKeyPlain(testMasterKey, kdf, 32)
 		if err != nil {
 			t.Fatalf("Failed to derive test digest: %v", err)
 		}
@@ -265,7 +265,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			Iterations: &iterations,
 		}
 
-		expectedDigest, err := DeriveKey(testMasterKey, kdf, 32)
+		expectedDigest, err := deriveKeyPlain(testMasterKey, kdf, 32)
 		if err != nil {
 			t.Fatalf("Failed to derive test digest: %v", err)
 		}
@@ -356,7 +356,7 @@ func TestVerifyMasterKey(t *testing.T) {
 				Iterations: &iterations,
 			}
 
-			stored, err := DeriveKey(testMasterKey, kdf, tc.digestLen)
+			stored, err := deriveKeyPlain(testMasterKey, kdf, tc.digestLen)
 			if err != nil {
 				t.Fatalf("Failed to derive test digest: %v", err)
 			}
@@ -402,7 +402,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			iterations := 1000
 			// The stored bytes are arbitrary: what is under test is that the
 			// LENGTH is refused before any derivation is attempted, so the
-			// value must not come from DeriveKey (which panics on a zero
+			// value must not come from deriveKeyPlain (which panics on a zero
 			// length -- see the out-of-scope note in the report).
 			stored := bytes.Repeat([]byte{0xA5}, tc.digestLen)
 
@@ -450,7 +450,7 @@ func TestVerifyMasterKeyDoesNotModifyInput(t *testing.T) {
 		Iterations: &iterations,
 	}
 
-	expectedDigest, err := DeriveKey(testMasterKey, kdf, 32)
+	expectedDigest, err := deriveKeyPlain(testMasterKey, kdf, 32)
 	if err != nil {
 		t.Fatalf("Failed to derive test digest: %v", err)
 	}

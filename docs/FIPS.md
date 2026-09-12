@@ -46,8 +46,9 @@ sufficient boundary for a KDF the module never sees, so the library enforces it:
 `&CryptoError{Err: ErrFIPSNotApproved}` for `argon2i` and `argon2id` whenever
 `crypto/fips140.Enabled()` is true. It is called from:
 
-- `DeriveKey`, before the salt is decoded — so an externally supplied header
-  cannot make a FIPS-mode process run a non-approved KDF;
+- `deriveKeyPlain`, before the salt is decoded — reached by every derivation
+  through `DeriveKeyEnclave` — so an externally supplied header cannot make a
+  FIPS-mode process run a non-approved KDF;
 - `CreateKDF`, after the empty-`KDFType` default is resolved — so
   `FormatOptions{}` cannot silently write an Argon2id keyslot in a FIPS-mode
   process. A FIPS caller must select an approved KDF explicitly rather than have
@@ -65,7 +66,7 @@ and nothing changes.
 ## Exemption: PBKDF2-HMAC-SHA1 for legacy LUKS headers
 
 **Scope.** `getPBKDF2HashFunc("sha1")` in `pkg/luks2/kdf.go`, reachable through
-`DeriveKey`, `BenchmarkPBKDF2` and `CreateKDF` (the `pbkdf2-sha1` alias, or the
+`DeriveKeyEnclave`, `BenchmarkPBKDF2` and `CreateKDF` (the `pbkdf2-sha1` alias, or the
 `pbkdf2` type with `HashAlgo: "sha1"`). Nothing else in this repository uses
 SHA-1 or any other non-approved primitive; the anti-forensic splitter
 (`pkg/luks2/antiforensic.go`) already accepts only SHA-256 and SHA-512.

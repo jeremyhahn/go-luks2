@@ -284,9 +284,9 @@ func TestDeriveKeyEnclaveAgreesWithTheUnprotectedDerivation(t *testing.T) {
 	}
 	defer held.Destroy()
 
-	plain, err := DeriveKey(passphrase, kdf, 64)
+	plain, err := deriveKeyPlain(passphrase, kdf, 64)
 	if err != nil {
-		t.Fatalf("DeriveKey failed: %v", err)
+		t.Fatalf("deriveKeyPlain failed: %v", err)
 	}
 	defer clearBytes(plain)
 
@@ -355,9 +355,9 @@ func TestDeriveKeySecretKeepsTheInputInsideItsEnclave(t *testing.T) {
 
 	// Same answer as deriving from the raw bytes, so routing through the
 	// enclave changed custody and nothing else.
-	want, err := DeriveKey(secret, kdf, 32)
+	want, err := deriveKeyPlain(secret, kdf, 32)
 	if err != nil {
-		t.Fatalf("DeriveKey failed: %v", err)
+		t.Fatalf("deriveKeyPlain failed: %v", err)
 	}
 	defer clearBytes(want)
 
@@ -442,9 +442,12 @@ func TestAFSplitEnclaveRoundTripsWithoutLeavingProtectedMemory(t *testing.T) {
 	}
 }
 
-// TestAFMergeEnclaveAgreesWithTheUnprotectedMerge pins the two AF paths to one
-// another over the SAME stripes, which is the only way to compare them: a split
-// draws fresh randomness every time, so two splits of one key never match.
+// TestAFMergeEnclaveAgreesWithTheUnprotectedMerge pins afMergeEnclave against
+// afMergeInto -- the same merge core, run directly over plain slices -- over
+// the SAME stripes, which is the only way to compare them: a split draws
+// fresh randomness every time, so two splits of one key never match. This
+// proves the enclave plumbing (borrowSecret, the locked diffusion buffer)
+// does not change the answer relative to computing over ordinary memory.
 func TestAFMergeEnclaveAgreesWithTheUnprotectedMerge(t *testing.T) {
 	const (
 		stripes   = 32
@@ -456,10 +459,15 @@ func TestAFMergeEnclaveAgreesWithTheUnprotectedMerge(t *testing.T) {
 		t.Fatalf("failed to generate stripes: %v", err)
 	}
 
-	want, err := AFMerge(stripeBytes, stripes, blockSize, "sha256")
+	hashFunc, err := getHashFunc("sha256")
 	if err != nil {
-		t.Fatalf("AFMerge failed: %v", err)
+		t.Fatalf("getHashFunc failed: %v", err)
 	}
+
+	want := make([]byte, blockSize)
+	buffer := make([]byte, blockSize)
+	defer clearBytes(buffer)
+	afMergeInto(want, stripeBytes, buffer, stripes, blockSize, hashFunc)
 	defer clearBytes(want)
 
 	held := enclaveFrom(t, stripeBytes)

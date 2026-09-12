@@ -51,6 +51,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `mount`, `kexec`, `bpf` and namespace calls the profile exists for, to
   solve a three-syscall problem.
 
+### Removed
+
+- **BREAKING: `AFSplit`, `AFMerge` and `DeriveKey` are removed (#11).** All
+  three were `Deprecated:`-marked exported wrappers around plain, unprotected
+  heap memory, kept only for consumers that turned out not to exist — a
+  repository-wide search, including `cmd/`, `test/` and both build-tag sets,
+  found none. `AFSplit`/`AFMerge` are superseded by the unexported
+  `afSplitEnclave`/`afMergeEnclave`, which perform the same anti-forensic
+  split and merge entirely inside `go-enclave` locked memory. `DeriveKey` is
+  superseded by `DeriveKeyEnclave`, which returns the derived key held in an
+  enclave rather than as a plain `[]byte`. Callers that still reference any of
+  the three get a compile error, which is the point: this is pre-1.0 alpha
+  software, and there is no compatibility shim to remove them into (owner
+  ruling, 2026-09-11).
+
 ### Changed
 
 - **The container entrypoint creates its own loop device nodes and no longer

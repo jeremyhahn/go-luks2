@@ -164,28 +164,10 @@ func deriveKeySecret(secret *enclave.MemoryEnclave, kdf *KDF, keySize int) (*enc
 	return derived, nil
 }
 
-// DeriveKey derives a key from a passphrase using the specified KDF and returns
-// it as plain, unprotected bytes.
-//
-// Deprecated: the returned key is ordinary heap memory -- swappable,
-// core-dumpable, and not zeroized until a caller remembers to do it. Nothing
-// inside this package calls it any more; every internal derivation goes through
-// DeriveKeyEnclave, which returns the key held in locked memory. It remains
-// exported only so that existing consumers and the conformance fixtures keep
-// building, and it will be removed once none depend on it.
-//
-// In FIPS 140-3 mode an Argon2 KDF is refused with ErrFIPSNotApproved before
-// any derivation is attempted, so an externally supplied header cannot make a
-// FIPS-mode process run a non-approved KDF.
-func DeriveKey(passphrase []byte, kdf *KDF, keySize int) ([]byte, error) {
-	return deriveKeyPlain(passphrase, kdf, keySize)
-}
-
 // deriveKeyPlain is the derivation itself. It is the ONE place in this package
 // that produces key material outside an enclave, and it exists because the
-// stdlib KDFs give no other shape: every caller either adopts the result into
-// an enclave immediately (DeriveKeyEnclave) or is the deprecated exported
-// wrapper above.
+// stdlib KDFs give no other shape: every caller adopts the result into an
+// enclave immediately, via DeriveKeyEnclave.
 func deriveKeyPlain(passphrase []byte, kdf *KDF, keySize int) ([]byte, error) {
 	if kdf == nil {
 		return nil, &CryptoError{Op: "derive", Err: fmt.Errorf("no KDF was given")}
@@ -200,12 +182,12 @@ func deriveKeyPlain(passphrase []byte, kdf *KDF, keySize int) ([]byte, error) {
 	// It deliberately carries no UPPER bound any more. An earlier version
 	// capped it at MaxKeyslotKeySize, which looked like defense in depth and was
 	// misplaced for the same reason validateKDFCost is not enforced here: this
-	// function serves two TRUST DOMAINS. Format, AddKey, ChangeKey and the
-	// exported DeriveKey derive from parameters the CALLER chose, and an
-	// untrusted-input ceiling applied to all of them rejects a caller's own
-	// deliberate choice with an error shaped like a malformed header. What a
-	// HEADER may declare is bounded where headers are read -- validateKeyslot
-	// for the key size, validateKDFCost for the work factors.
+	// function serves two TRUST DOMAINS. Format, AddKey and ChangeKey derive
+	// from parameters the CALLER chose, and an untrusted-input ceiling applied
+	// to all of them rejects a caller's own deliberate choice with an error
+	// shaped like a malformed header. What a HEADER may declare is bounded
+	// where headers are read -- validateKeyslot for the key size,
+	// validateKDFCost for the work factors.
 	if keySize <= 0 {
 		return nil, &CryptoError{
 			Op:  "derive",
@@ -338,7 +320,7 @@ func hashOutputLen(hashAlgo string) (int, error) {
 // refusing what that type cannot represent.
 //
 // REPRESENTATION ONLY. A policy ceiling on a caller's deliberate choice is
-// DeriveKey's business, and it declines them for a reason that is sound: an
+// deriveKeyPlain's business, and it declines them for a reason that is sound: an
 // untrusted-input bound applied to a caller's own decision rejects it with an
 // error shaped like a malformed header. That argument is about what is WISE.
 // This is about what the call can HOLD -- above MaxUint32 the conversion does
@@ -438,11 +420,12 @@ func deriveArgon2(
 	}
 
 	// A representation limit, NOT the policy ceiling this file deliberately
-	// declines (see DeriveKey: an untrusted-input ceiling applied to a caller's
-	// own deliberate choice rejects it with an error shaped like a malformed
-	// header). Above MaxUint32 the conversion below does not reject the value,
-	// it SILENTLY CHANGES it -- 2^32+4 becomes 4 -- so the guard is about what
-	// the call can represent rather than about what is a sensible cost.
+	// declines (see deriveKeyPlain: an untrusted-input ceiling applied to a
+	// caller's own deliberate choice rejects it with an error shaped like a
+	// malformed header). Above MaxUint32 the conversion below does not reject
+	// the value, it SILENTLY CHANGES it -- 2^32+4 becomes 4 -- so the guard is
+	// about what the call can represent rather than about what is a sensible
+	// cost.
 
 	t32, err := u32(op, "time cost", *kdf.Time)
 	if err != nil {
