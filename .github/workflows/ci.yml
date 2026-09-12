@@ -145,6 +145,20 @@ jobs:
       - name: Compile every supported build-tag configuration
         run: ./scripts/build-tags.sh
 
+      # LOCK-COVERAGE GUARD. Unique per-attempt names stopped two jobs killing
+      # each other and thereby allowed two suites to run at once against a
+      # host-global loop-device pool. The lock keeps that safe, and a lock is
+      # only as good as its coverage -- one unlocked entry point restores the
+      # contention entirely. The invariant was broken twice while being
+      # introduced, both times by enumerating the MECHANISM (`docker run`)
+      # instead of the RESOURCE (the pool), so it is checked rather than
+      # remembered. --self-test first: a guard that cannot say "no" reports what
+      # a clean check reports.
+      - name: Refuse an unlocked privileged integration entry point
+        run: |
+          ./scripts/integration-lock-guard.sh --self-test
+          ./scripts/integration-lock-guard.sh
+
       # REGRESSION GUARD (#17). `losetup -D` detaches every loop device on the
       # machine; `dmsetup remove_all` removes every dm mapping. Neither is
       # namespaced, so both reach the HOST whatever the container is confined
@@ -515,6 +529,93 @@ jobs:
   test-integration:
     name: Integration Tests
     runs-on: ubuntu-latest
+    # EVERY DOCKER NAME THIS JOB CREATES IS UNIQUE TO THIS JOB ATTEMPT (#105).
+    #
+    # Docker names and image tags are unique PER HOST, not per job. Six open
+    # pull requests share four runners, so two integration jobs routinely land
+    # on one machine — and both used to use the constant name
+    # `go-luks2-test-runner` and the constant tag `go-luks2-integration-test`.
+    # Two separate defects followed, and both were measured rather than
+    # theorised:
+    #
+    #   THE KILL. `docker rm -f` sends SIGKILL. Job B's pre-run cleanup killed
+    #   job A's RUNNING container mid-suite, and A's step exited 137.
+    #   Reproduced deterministically by running the old four-line sequence
+    #   twice on one host: job A exit=137, job B exit=0. It looked like an OOM
+    #   and was not one — Infrastructure found no OOM kill in eighteen hours —
+    #   and SIGKILL cannot be caught, which is why no `defer` or `t.Cleanup` in
+    #   the suite ever ran and why the container leaked every loop device and
+    #   device-mapper mapping it held.
+    #
+    #   THE WRONG RESULT, quieter and worse. A shared image TAG is resolved at
+    #   `docker run` time. Job B's build moved the tag between job A's build
+    #   and A's run, so A tested B's tree and reported the result against A's
+    #   commit. Measured: two images built from different sources under one
+    #   tag, and the first job's run printed the SECOND job's content. That
+    #   failure is GREEN, so nothing would ever have reported it.
+    #
+    # run_attempt is part of the name because a re-run of this job must not
+    # collide with its own previous attempt.
+    #
+    # WHAT THIS FIX UNCOVERS, stated rather than left to be discovered (#104)
+    #
+    # The collision was, accidentally, the only thing SERIALISING integration
+    # jobs on a runner: two landed, the second force-removed the first, and the
+    # survivor had the host to itself. Unique names remove the kill, so two
+    # suites now genuinely run at once — privileged, on one kernel, against one
+    # loop-device pool. That can convert #104 from intermittent to routine, and
+    # it is not hypothetical arithmetic:
+    #
+    #   /sys/module/loop/parameters/max_loop = 8, so nodes loop0..loop7 exist
+    #   and nothing creates loop8. TestLoopDeviceMultiple alone holds 5 at its
+    #   peak, and no integration test calls t.Parallel(), so one suite peaks at
+    #   5 of 8. TWO CONCURRENT SUITES NEED 10 AND THE HOST HAS 8. The CI
+    #   failure log confirms the same ceiling on the runner: loop0..loop7 all
+    #   allocated, and then
+    #   `failed to open /dev/loop8: no such file or directory`.
+    #
+    # It does not follow that this change makes things worse on net. The
+    # SIGKILL it removes was ITSELF a leak source — a killed container runs no
+    # cleanup and abandons every loop device it held, which is what consumed
+    # the low minors in the first place. Fewer kills means fewer orphans means
+    # a deeper pool. Which effect dominates is not something this comment can
+    # claim, so it does not.
+    #
+    # A `concurrency:` group was considered as a companion and REJECTED, for
+    # two reasons:
+    #
+    #   It cannot be scoped to a runner. Concurrency keys are evaluated when
+    #   the job is created, before it is assigned, so `runner.*` is not in
+    #   scope for one. The only key available is a constant, which serialises
+    #   integration across ALL FOUR runners — trading a random kill for a
+    #   queue one job deep across the whole pool, on the slowest leg there is.
+    #
+    #   And it would not close the hole. The loop pool is host-global and
+    #   shared with everything else on the box; serialising this repository's
+    #   own jobs narrows the window and leaves the failure reachable.
+    #
+    # The companion is #104 itself — already filed, task:ready, effort:low —
+    # because its fix removes the ceiling rather than rationing it: create the
+    # node for the minor LOOP_CTL_GET_FREE returned (major 7) instead of
+    # assuming udev already did. Measured while answering this: in a
+    # `--privileged` container /dev is a FRESH TMPFS, not the host's — docker
+    # populates it once at creation and there is no udev inside — so a device
+    # the kernel adds later gets no node in the container, ever. The "wait
+    # briefly for udev" alternative in #104 cannot work here; mknod is the only
+    # option that does. That measurement is posted on #104.
+    env:
+      # The job term is the literal job id, NOT ${{ github.job }}. Uniqueness
+      # already comes from run_id + run_attempt; the job term only has to be a
+      # legal token, and github.job is not reliably one. This forge resolves it
+      # to the job KEY -- measured: container go-luks2-test-runner-17144-test-
+      # integration-1 on run 17144 -- but GitHub Actions documents it as unset
+      # outside step execution, and act-derived runners have resolved it to the
+      # display NAME, which here is "Integration Tests". A space makes both a
+      # container name and an image tag invalid ([a-zA-Z0-9][a-zA-Z0-9_.-]*),
+      # so the merge-gating job would die on a malformed name rather than on
+      # anything it tests. A literal cannot diverge between hosts.
+      ITEST_IMAGE: go-luks2-integration-test:${{ github.run_id }}-test-integration-${{ github.run_attempt }}
+      ITEST_CONTAINER: go-luks2-test-runner-${{ github.run_id }}-test-integration-${{ github.run_attempt }}
     # STAGED FAIL-FAST (v1.9): gated on the fast tier, not on `security` — two
     # expensive jobs gating each other would serialise them for no benefit.
     # The suite races on host-global loop devices — /dev/loop* is NOT
@@ -574,12 +675,20 @@ jobs:
           docker build \
             --secret id=gomodauth,src="${RUNNER_TEMP}/gomodauth.env" \
             -f test/integration/Dockerfile \
-            -t go-luks2-integration-test .
+            -t "$ITEST_IMAGE" .
 
       - name: Remove staged credentials
         if: always()
         run: rm -f "${RUNNER_TEMP}/gomodauth.env"
 
+      # NO PRE-RUN `docker rm -f`. The deleted line existed to clear a leftover
+      # from this job's previous attempt; with a name unique to the attempt
+      # there is nothing of ours to clear, and a delete by any broader name is
+      # the race itself. Cleanup of THIS job's container moved to the always()
+      # step below, which is where it belongs: the old trailing `rm -f` never
+      # ran when the suite failed, because the step aborts on the failing
+      # command, so a red run left its container behind for the next job's
+      # pre-run delete to collect — the very line that did the killing.
       - name: Run integration tests
         # LUKS2_TEST_STATE_DIR is bind-mounted from the RUNNER, not left inside
         # the container, and that is the whole mechanism (#96).
@@ -618,16 +727,56 @@ jobs:
             ls -ldn "${STATE_DIR}"
           fi
 
-          docker rm -f go-luks2-test-runner 2>/dev/null || true
-
+          # No pre-run remove. With a name no other job attempt can hold there
+          # is nothing of ours to clear, and a remove by any broader name is
+          # the race itself (#105).
+          # HOST-SCOPED SERIALIZATION. Per-attempt names stop two jobs killing
+          # each other; they do NOT isolate the loop-device pool, which is
+          # host-global -- a suite holds about five devices and the host provides
+          # eight, so two overlapping suites can need ten and one fails for a
+          # reason unrelated to the code under test. Unique names removed a
+          # collision and exposed a contention.
+          #
+          # The lock is deliberately NOT inside STATE_DIR: the harness validates
+          # that directory's owner because its ledgers authorize host device
+          # removal, so a lock written there either breaks the suite or weakens
+          # the check. Same path as the Makefile's ITEST_LOCK, because a second
+          # lock path would serialize nothing.
+          #
+          # A workflow `concurrency:` key would be repo-scoped and would not
+          # cover two repositories sharing a runner.
           # No privilege flags here, on purpose. They all live in
           # test/integration/docker-run.sh, which the Makefile targets call
           # too, so this workflow and a developer's `make integration-test`
           # cannot drift into running under different privilege (#80).
-          TEST_STATE_DIR="${STATE_DIR}" test/integration/docker-run.sh \
-            --name go-luks2-test-runner --
-          docker cp go-luks2-test-runner:/app/coverage.out coverage-integration.out 2>/dev/null || true
-          docker rm -f go-luks2-test-runner 2>/dev/null || true
+          flock /var/tmp/go-luks2-itest-loopdev.lock \
+            env IMAGE="${ITEST_IMAGE}" TEST_STATE_DIR="${STATE_DIR}" \
+              test/integration/docker-run.sh --name "${ITEST_CONTAINER}" --
+
+      # Separate and always(): coverage is worth extracting from a suite that
+      # failed, and this must not be skipped by the run step aborting.
+      - name: Extract integration coverage
+        if: always()
+        run: |
+          set -u
+          if ! docker container inspect "$ITEST_CONTAINER" >/dev/null 2>&1; then
+            echo "no container named ${ITEST_CONTAINER}; nothing to extract"
+            exit 0
+          fi
+          if ! docker cp "${ITEST_CONTAINER}:/app/coverage.out" coverage-integration.out; then
+            echo "::warning::the container exists but /app/coverage.out could not be copied"
+          fi
+
+      # Removes ONLY what this job attempt created, by its unique names, so it
+      # cannot reach another job's container or image. Without this the unique
+      # names would accumulate on the runner forever, since nothing else ever
+      # deletes them now that the broad pre-run delete is gone.
+      - name: Remove this job's container and image
+        if: always()
+        run: |
+          set -u
+          docker rm -f "$ITEST_CONTAINER" >/dev/null 2>&1 || true
+          docker image rm -f "$ITEST_IMAGE" >/dev/null 2>&1 || true
 
       - name: Show integration coverage
         run: |

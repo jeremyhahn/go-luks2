@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs security ci ci-full fmt-check all check test-cli integration-test-pkg integration-test-cli docker-build-integration no-global-device-cleanup test-require-tool test-calibration no-internal-disclosure test-guards seccomp-diff
+.PHONY: help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs security ci ci-full fmt-check all check test-cli integration-test-pkg integration-test-cli docker-build-integration no-global-device-cleanup test-require-tool test-calibration no-internal-disclosure test-guards seccomp-diff integration-lock
 
 # Default target
 .DEFAULT_GOAL := help
@@ -166,6 +166,32 @@ test-coverage: ## Run tests with coverage report
 	@$(GO) tool cover -func=$(COVERAGE_FILE)
 	@echo "$(COLOR_GREEN)✓ Coverage report: $(COVERAGE_HTML)$(COLOR_RESET)"
 
+# ---- per-invocation docker names (#105) ----
+#
+# Docker names and image tags are unique PER HOST, not per invocation. Two
+# concurrent `make integration-test` runs -- or one alongside a CI job, which
+# shares the same daemon -- used the constant name `go-luks2-test-runner` and
+# the constant tag `go-luks2-integration-test`, and collided two ways:
+#
+#   `docker rm -f` sends SIGKILL, so the second invocation's pre-run cleanup
+#   killed the first one's RUNNING container mid-suite, exit 137. Reproduced
+#   deterministically on one host with the old sequence: job A exit=137, job B
+#   exit=0. The killed container took every loop device and device-mapper
+#   mapping it held with it, because SIGKILL cannot be caught.
+#
+#   A shared image TAG is resolved at `docker run` time, so the second
+#   invocation's build moved the tag between the first's build and its run --
+#   and the first tested the second's tree. Measured. That failure is GREEN.
+#
+# ITEST_ID is computed ONCE (`?=` then flattened with `:=`) and exported, so
+# every target in one invocation, including recursive `$(MAKE)` calls, agrees
+# on the name while two invocations never do.
+ITEST_ID ?= $(shell date +%s)-$(shell od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+ITEST_ID := $(ITEST_ID)
+export ITEST_ID
+ITEST_IMAGE := go-luks2-integration-test:$(ITEST_ID)
+ITEST_CONTAINER := go-luks2-test-runner-$(ITEST_ID)
+
 # Builds the integration image, handing the private-module credentials over as
 # a BuildKit secret.
 #
@@ -202,7 +228,7 @@ docker-build-integration:
 	DOCKER_BUILDKIT=1 docker build \
 		--secret id=gomodauth,src="$$stage" \
 		-f test/integration/Dockerfile \
-		-t go-luks2-integration-test .
+		-t $(ITEST_IMAGE) .
 
 integration-test: build ## Run all integration tests in Docker (isolated, recommended)
 	@echo "$(COLOR_BOLD)Running all integration tests in Docker container...$(COLOR_RESET)"
@@ -211,13 +237,27 @@ integration-test: build ## Run all integration tests in Docker (isolated, recomm
 integration-test-pkg: build ## Run package integration tests in Docker
 	@echo "$(COLOR_BOLD)Running package integration tests in Docker...$(COLOR_RESET)"
 	@$(MAKE) docker-build-integration
-	@TEST_STATE_DIR="$(TEST_STATE_DIR)" $(INTEGRATION_DOCKER_RUN) --rm -- \
+	@# One shell with a trap: the per-invocation image tag is never reused, so
+	@# if this target simply exits -- and it aborts on a failing suite -- the
+	@# image is orphaned on the host forever.
+	@set -eu; \
+	trap 'docker image rm -f $(ITEST_IMAGE) >/dev/null 2>&1 || true' EXIT INT TERM; \
+	flock "$(ITEST_LOCK)" \
+	  env IMAGE="$(ITEST_IMAGE)" TEST_STATE_DIR="$(TEST_STATE_DIR)" \
+	    $(INTEGRATION_DOCKER_RUN) --rm -- \
 		go test -v -tags=integration ./test/integration/pkg/...
 
 integration-test-cli: build ## Run CLI integration tests in Docker
 	@echo "$(COLOR_BOLD)Running CLI integration tests in Docker...$(COLOR_RESET)"
 	@$(MAKE) docker-build-integration
-	@TEST_STATE_DIR="$(TEST_STATE_DIR)" $(INTEGRATION_DOCKER_RUN) --rm -- \
+	@# One shell with a trap: the per-invocation image tag is never reused, so
+	@# if this target simply exits -- and it aborts on a failing suite -- the
+	@# image is orphaned on the host forever.
+	@set -eu; \
+	trap 'docker image rm -f $(ITEST_IMAGE) >/dev/null 2>&1 || true' EXIT INT TERM; \
+	flock "$(ITEST_LOCK)" \
+	  env IMAGE="$(ITEST_IMAGE)" TEST_STATE_DIR="$(TEST_STATE_DIR)" \
+	    $(INTEGRATION_DOCKER_RUN) --rm -- \
 		go test -v -tags=integration ./test/integration/cli/...
 
 coverage: build ## Run all tests (unit + integration) with coverage (requires root)
@@ -229,9 +269,9 @@ coverage: build ## Run all tests (unit + integration) with coverage (requires ro
 	@echo ""
 	@echo "$(COLOR_BOLD)Step 2: Running integration tests with coverage...$(COLOR_RESET)"
 	@if [ "$$(id -u)" -eq 0 ]; then \
-		$(GO) test -tags=integration -coverprofile=coverage-integration.out -covermode=atomic ./...; \
+		flock "$(ITEST_LOCK)" $(GO) test -tags=integration -coverprofile=coverage-integration.out -covermode=atomic ./...; \
 	else \
-		sudo -E PATH="$(PATH)" $(GO) test -tags=integration -coverprofile=coverage-integration.out -covermode=atomic ./...; \
+		flock "$(ITEST_LOCK)" sudo -E PATH="$(PATH)" $(GO) test -tags=integration -coverprofile=coverage-integration.out -covermode=atomic ./...; \
 	fi
 	@echo ""
 	@echo "$(COLOR_BOLD)Step 3: Merging coverage profiles...$(COLOR_RESET)"
@@ -257,10 +297,24 @@ docker-integration-test: ## Run integration tests in Docker (isolated, recommend
 	@echo ""
 	@echo "$(COLOR_BOLD)Running integration tests in Docker container...$(COLOR_RESET)"
 	@rm -f coverage-docker.out
-	@docker rm -f go-luks2-test-runner 2>/dev/null || true
-	@TEST_STATE_DIR="$(TEST_STATE_DIR)" $(INTEGRATION_DOCKER_RUN) --name go-luks2-test-runner --
-	@docker cp go-luks2-test-runner:/app/coverage.out coverage-docker.out 2>/dev/null || true
-	@docker rm -f go-luks2-test-runner 2>/dev/null || true
+	@# ONE shell with a trap, deliberately. Each recipe line is its own shell,
+	@# so when the suite failed the following lines never ran: the container was
+	@# left behind and the NEXT invocation's `docker rm -f` collected it -- the
+	@# line that did the killing. The trap removes this invocation's container
+	@# on every exit path, including failure, and by a name no other invocation
+	@# can hold. There is no pre-run delete: with a unique name there is nothing
+	@# of ours to clear, and a delete by any broader name is the race itself.
+	@set -eu; \
+	trap 'docker rm -f $(ITEST_CONTAINER) >/dev/null 2>&1 || true; \
+	      docker image rm -f $(ITEST_IMAGE) >/dev/null 2>&1 || true' EXIT INT TERM; \
+	rc=0; flock "$(ITEST_LOCK)" \
+	  env IMAGE="$(ITEST_IMAGE)" TEST_STATE_DIR="$(TEST_STATE_DIR)" \
+	    $(INTEGRATION_DOCKER_RUN) --name $(ITEST_CONTAINER) -- || rc=$$?; \
+	if docker container inspect $(ITEST_CONTAINER) >/dev/null 2>&1; then \
+		docker cp $(ITEST_CONTAINER):/app/coverage.out coverage-docker.out || \
+			echo "$(COLOR_YELLOW)container exists but /app/coverage.out could not be copied$(COLOR_RESET)"; \
+	fi; \
+	exit $$rc
 	@if [ -f coverage-docker.out ]; then \
 		echo ""; \
 		echo "$(COLOR_BOLD)Generating coverage report...$(COLOR_RESET)"; \
@@ -333,13 +387,36 @@ seccomp-diff: ## Diff the integration seccomp profile against Docker's default
 	echo ""; \
 	diff -u "$$dir/default.json" $(SECCOMP_PROFILE) || true
 
+# ITEST_LOCK serializes the PRIVILEGED suite across every job on this host.
+#
+# Per-invocation container and image names stop two jobs killing each other, but
+# they do NOT isolate the loop-device pool, which is HOST-GLOBAL: a suite holds
+# about five devices and the host provides eight, so two overlapping suites can
+# need ten and one fails for a reason unrelated to the code under test. Unique
+# names removed a collision and exposed a contention.
+#
+# NOT inside TEST_STATE_DIR. That directory is validated by the harness
+# (test/harness/statedir.go checks its owner) because its ledgers authorize host
+# device removal; a user-created directory is deliberately REFUSED, and a
+# root-created 0755 one cannot be written by the invoking user. Either way a lock
+# placed there breaks the suite or weakens the trust check. The lock lives beside
+# it instead, on a path the runner user can create.
+ITEST_LOCK ?= /var/tmp/go-luks2-itest-loopdev.lock
+
 
 docker-test-specific: ## Run specific integration test in Docker (use TEST=TestName)
 	@echo "$(COLOR_BOLD)Building Docker image...$(COLOR_RESET)"
 	@$(MAKE) docker-build-integration
 	@echo ""
 	@echo "$(COLOR_BOLD)Running test: $(TEST)$(COLOR_RESET)"
-	@TEST_STATE_DIR="$(TEST_STATE_DIR)" $(INTEGRATION_DOCKER_RUN) --rm -- \
+	@# One shell with a trap: the per-invocation image tag is never reused, so
+	@# if this target simply exits -- and it aborts on a failing suite -- the
+	@# image is orphaned on the host forever.
+	@set -eu; \
+	trap 'docker image rm -f $(ITEST_IMAGE) >/dev/null 2>&1 || true' EXIT INT TERM; \
+	flock "$(ITEST_LOCK)" \
+	  env IMAGE="$(ITEST_IMAGE)" TEST_STATE_DIR="$(TEST_STATE_DIR)" \
+	    $(INTEGRATION_DOCKER_RUN) --rm -- \
 		go test -v -tags=integration -run="$(TEST)" ./...
 
 host-integration-test: build ## Run integration tests on host (requires sudo, NOT recommended)
@@ -348,9 +425,9 @@ host-integration-test: build ## Run integration tests on host (requires sudo, NO
 	@echo "$(COLOR_YELLOW)  Recommended: use 'make integration-test' (runs in Docker)$(COLOR_RESET)"
 	@echo ""
 	@if [ "$$(id -u)" -eq 0 ]; then \
-		$(GO) test -v -tags=integration ./...; \
+		flock "$(ITEST_LOCK)" $(GO) test -v -tags=integration ./...; \
 	else \
-		sudo -E PATH="$(PATH)" $(GO) test -v -tags=integration ./...; \
+		flock "$(ITEST_LOCK)" sudo -E PATH="$(PATH)" $(GO) test -v -tags=integration ./...; \
 	fi
 	@echo "$(COLOR_GREEN)✓ Host integration tests complete$(COLOR_RESET)"
 
@@ -391,6 +468,15 @@ fmt-check: ## Check if code is formatted (CI-friendly, doesn't modify files)
 # was demonstrably not enough, so this is a check that runs.
 no-global-device-cleanup: ## Refuse ownership-blind device teardown (losetup -D, dmsetup remove_all)
 	@./scripts/no-global-device-cleanup.sh
+
+# REGRESSION GUARD (#105). A fixed container name is the SIGKILL vector: two
+# jobs on one runner share it, `docker rm -f` sends SIGKILL, and one job's
+# teardown kills the other's running container mid-suite. `--self-test` feeds
+# the guard input it must reject AND input it must not, because running it
+# against a clean tree proves only that it can say yes.
+integration-lock: ## Refuse a privileged integration entry point that skips the host lock
+	@./scripts/integration-lock-guard.sh
+	@./scripts/integration-lock-guard.sh --self-test
 
 # PUBLIC-MIRROR GUARD (#20). This repository is mirrored publicly and releases
 # publish a tree byte-identical to the internal tag, so every tracked file is a
@@ -543,7 +629,7 @@ trivy-fs: ## Scan the working tree with trivy (dependency CVEs and leaked secret
 security: gosec govulncheck verify trivy-fs ## Run the full §8 security suite (gosec, govulncheck, go mod verify, trivy fs)
 	@echo "$(COLOR_GREEN)✓ Security suite complete$(COLOR_RESET)"
 
-ci: fmt-check vet no-global-device-cleanup no-internal-disclosure no-error-collapse test-require-tool test-guards lint security test-unit test-calibration build ## Run CI pipeline locally (format, lint, security suite, unit tests, build)
+ci: fmt-check vet integration-lock no-global-device-cleanup no-internal-disclosure no-error-collapse test-require-tool test-guards lint security test-unit test-calibration build ## Run CI pipeline locally (format, lint, security suite, unit tests, build)
 	@echo ""
 	@echo "$(COLOR_BOLD)======================================$(COLOR_RESET)"
 	@echo "$(COLOR_BOLD)CI Pipeline Complete$(COLOR_RESET)"
@@ -568,6 +654,7 @@ ci-full: ## Run full CI pipeline with Docker integration tests (enforces 90% cov
 	@echo ""
 	@$(MAKE) fmt-check
 	@$(MAKE) vet
+	@$(MAKE) integration-lock
 	@$(MAKE) no-global-device-cleanup
 	@$(MAKE) no-internal-disclosure
 	@$(MAKE) test-require-tool
@@ -606,7 +693,7 @@ ci-full: ## Run full CI pipeline with Docker integration tests (enforces 90% cov
 	@echo "$(COLOR_GREEN)All CI checks passed! Ready to push.$(COLOR_RESET)"
 	@echo ""
 
-check: fmt vet no-global-device-cleanup no-internal-disclosure test-require-tool test-guards test ## Run all quality checks (format, vet, guards, test)
+check: fmt vet integration-lock no-global-device-cleanup no-internal-disclosure test-require-tool test-guards test ## Run all quality checks (format, vet, guards, test)
 	@echo "$(COLOR_GREEN)✓ All checks passed$(COLOR_RESET)"
 
 clean: ## Clean build artifacts and test files
