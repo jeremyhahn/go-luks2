@@ -83,6 +83,10 @@ const (
 	metadataObjectKDF          = "kdf"
 	metadataObjectAntiForensic = "af"
 	metadataObjectToken        = "token"
+	metadataObjectSegment      = "segment"
+	metadataObjectDigest       = "digest"
+	metadataObjectConfig       = "config"
+	metadataObjectRequirements = "config.requirements"
 )
 
 // The two directions a metadata object crosses the JSON boundary.
@@ -281,6 +285,10 @@ var (
 	kdfKnownMembers          = jsonMemberNames(reflect.TypeOf(KDF{}))
 	antiForensicKnownMembers = jsonMemberNames(reflect.TypeOf(AntiForensic{}))
 	tokenKnownMembers        = jsonMemberNames(reflect.TypeOf(Token{}))
+	segmentKnownMembers      = jsonMemberNames(reflect.TypeOf(Segment{}))
+	digestKnownMembers       = jsonMemberNames(reflect.TypeOf(Digest{}))
+	configKnownMembers       = jsonMemberNames(reflect.TypeOf(Config{}))
+	requirementsKnownMembers = jsonMemberNames(reflect.TypeOf(Requirements{}))
 )
 
 // UnmarshalJSON decodes a keyslot and carries any member this package does not
@@ -443,4 +451,131 @@ func (t Token) MarshalJSON() ([]byte, error) {
 		return nil, &MetadataJSONError{Object: metadataObjectToken, Op: metadataJSONEncode, Err: err}
 	}
 	return t.unknown.mergeInto(typed, metadataObjectToken)
+}
+
+// UnmarshalJSON decodes a segment and carries any member this package does not
+// model.
+func (x *Segment) UnmarshalJSON(data []byte) error {
+	type alias Segment
+	if err := json.Unmarshal(data, (*alias)(x)); err != nil {
+		return &MetadataJSONError{Object: metadataObjectSegment, Op: metadataJSONDecode, Err: err}
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return &MetadataJSONError{Object: metadataObjectSegment, Op: metadataJSONDecode, Err: err}
+	}
+	x.unknown = splitKnown(raw, segmentKnownMembers)
+
+	return nil
+}
+
+// MarshalJSON encodes a segment together with the members it carried in.
+//
+// VALUE receiver, like every other marshaler here. A pointer-receiver
+// MarshalJSON is simply not in the method set reached by json.Marshal of a bare
+// value, so it stops firing wherever the object is encountered as one -- while
+// every test that happens to hold a pointer keeps passing. That is the hazard
+// #143 measured and #151 was told to pin per type.
+func (x Segment) MarshalJSON() ([]byte, error) {
+	type alias Segment
+	typed, err := json.Marshal(alias(x))
+	if err != nil {
+		return nil, &MetadataJSONError{Object: metadataObjectSegment, Op: metadataJSONEncode, Err: err}
+	}
+	return x.unknown.mergeInto(typed, metadataObjectSegment)
+}
+
+// UnmarshalJSON decodes a digest and carries any member this package does not
+// model.
+func (x *Digest) UnmarshalJSON(data []byte) error {
+	type alias Digest
+	if err := json.Unmarshal(data, (*alias)(x)); err != nil {
+		return &MetadataJSONError{Object: metadataObjectDigest, Op: metadataJSONDecode, Err: err}
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return &MetadataJSONError{Object: metadataObjectDigest, Op: metadataJSONDecode, Err: err}
+	}
+	x.unknown = splitKnown(raw, digestKnownMembers)
+
+	return nil
+}
+
+// MarshalJSON encodes a digest together with the members it carried in.
+//
+// VALUE receiver, like every other marshaler here. A pointer-receiver
+// MarshalJSON is simply not in the method set reached by json.Marshal of a bare
+// value, so it stops firing wherever the object is encountered as one -- while
+// every test that happens to hold a pointer keeps passing. That is the hazard
+// #143 measured and #151 was told to pin per type.
+func (x Digest) MarshalJSON() ([]byte, error) {
+	type alias Digest
+	typed, err := json.Marshal(alias(x))
+	if err != nil {
+		return nil, &MetadataJSONError{Object: metadataObjectDigest, Op: metadataJSONEncode, Err: err}
+	}
+	return x.unknown.mergeInto(typed, metadataObjectDigest)
+}
+
+// UnmarshalJSON decodes a config and carries any member this package does not
+// model.
+func (x *Config) UnmarshalJSON(data []byte) error {
+	type alias Config
+	if err := json.Unmarshal(data, (*alias)(x)); err != nil {
+		return &MetadataJSONError{Object: metadataObjectConfig, Op: metadataJSONDecode, Err: err}
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return &MetadataJSONError{Object: metadataObjectConfig, Op: metadataJSONDecode, Err: err}
+	}
+	x.unknown = splitKnown(raw, configKnownMembers)
+
+	return nil
+}
+
+// MarshalJSON encodes a config together with the members it carried in.
+//
+// VALUE receiver, like every other marshaler here. A pointer-receiver
+// MarshalJSON is simply not in the method set reached by json.Marshal of a bare
+// value, so it stops firing wherever the object is encountered as one -- while
+// every test that happens to hold a pointer keeps passing. That is the hazard
+// #143 measured and #151 was told to pin per type.
+func (x Config) MarshalJSON() ([]byte, error) {
+	type alias Config
+	typed, err := json.Marshal(alias(x))
+	if err != nil {
+		return nil, &MetadataJSONError{Object: metadataObjectConfig, Op: metadataJSONEncode, Err: err}
+	}
+	return x.unknown.mergeInto(typed, metadataObjectConfig)
+}
+
+// UnmarshalJSON decodes the requirements object and carries any member this
+// package does not model.
+func (x *Requirements) UnmarshalJSON(data []byte) error {
+	type alias Requirements
+	if err := json.Unmarshal(data, (*alias)(x)); err != nil {
+		return &MetadataJSONError{Object: metadataObjectRequirements, Op: metadataJSONDecode, Err: err}
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return &MetadataJSONError{Object: metadataObjectRequirements, Op: metadataJSONDecode, Err: err}
+	}
+	x.unknown = splitKnown(raw, requirementsKnownMembers)
+
+	return nil
+}
+
+// MarshalJSON encodes the requirements object together with the members it
+// carried in. Value receiver, for the reason given on Segment.MarshalJSON.
+func (x Requirements) MarshalJSON() ([]byte, error) {
+	type alias Requirements
+	typed, err := json.Marshal(alias(x))
+	if err != nil {
+		return nil, &MetadataJSONError{Object: metadataObjectRequirements, Op: metadataJSONEncode, Err: err}
+	}
+	return x.unknown.mergeInto(typed, metadataObjectRequirements)
 }

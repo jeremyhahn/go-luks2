@@ -373,6 +373,8 @@ type Segment struct {
 	IVTweak    string `json:"iv_tweak"`   // IV tweak value
 	Encryption string `json:"encryption"` // e.g., "aes-xts-plain64"
 	SectorSize int    `json:"sector_size"`
+
+	unknown unknownFields
 }
 
 // Digest represents a key digest for verification
@@ -413,6 +415,8 @@ type Digest struct {
 	Iterations int      `json:"iterations"`
 	Salt       string   `json:"salt"`   // Base64-encoded
 	Digest     string   `json:"digest"` // Base64-encoded digest value
+
+	unknown unknownFields
 }
 
 // Config represents global configuration
@@ -420,7 +424,46 @@ type Config struct {
 	JSONSize     string   `json:"json_size"`     // JSON area size (as string)
 	KeyslotsSize string   `json:"keyslots_size"` // Keyslot area size (as string)
 	Flags        []string `json:"flags,omitempty"`
-	Requirements []string `json:"requirements,omitempty"`
+
+	// Requirements is the LUKS2 requirements object, nil when the container
+	// declares none.
+	//
+	// It is a POINTER TO A STRUCT and not a []string, which is what it was
+	// until #152. LUKS2 spells this member as an OBJECT carrying a mandatory
+	// array -- both `mandatory` and `online-reencrypt-v3` are literals in
+	// libcryptsetup -- so the flat slice did not merely lose detail: the decode
+	// failed outright with "cannot unmarshal object into Go struct field
+	// Config.config.requirements of type []string", and THIS PACKAGE COULD NOT
+	// READ ANY CONTAINER MID-REENCRYPTION AT ALL.
+	//
+	// That inverted the mechanism. requirements exists so an implementation
+	// that does not understand a feature refuses the container instead of
+	// damaging it; failing to parse the member that carries the warning meant
+	// not being able to read the flag that says "do not touch this".
+	Requirements *Requirements `json:"requirements,omitempty"`
+
+	unknown unknownFields
+}
+
+// Requirements is config.requirements: how a container tells an implementation
+// that does not understand a feature to leave it alone.
+//
+// WHAT THIS PACKAGE DOES WITH IT. A mandatory requirement it does not implement
+// does NOT stop a read -- ReadHeader parses the container and exposes the
+// requirement, because a flag whose purpose is to warn is useless if reading it
+// is what fails, and an operator diagnosing an interrupted reencryption needs to
+// see it. It stops every WRITE: encodeMetadataForHeader refuses with an
+// UnsupportedRequirementError before anything touches the device, and that is
+// the one chokepoint every mutation in this package passes through. Corruption
+// happens on write, so that is where the refusal belongs (owner ruling,
+// 2026-09-13).
+type Requirements struct {
+	// Mandatory names requirements an implementation MUST understand to modify
+	// the container. LUKS2 defines no optional counterpart today; an
+	// implementation that meets an unknown entry here is required to refuse.
+	Mandatory []string `json:"mandatory,omitempty"`
+
+	unknown unknownFields
 }
 
 // FormatOptions contains options for formatting a LUKS2 volume
@@ -455,4 +498,34 @@ type VolumeInfo struct {
 	SectorSize     int
 	ActiveKeyslots []int
 	Metadata       *LUKS2Metadata
+}
+
+// implementedRequirements is every LUKS2 mandatory requirement this package can
+// honor on a WRITE.
+//
+// It is EMPTY, and that is the honest state rather than an oversight: this
+// package implements none of the features LUKS2 currently gates this way --
+// online reencryption above all -- so every mandatory requirement it meets is
+// one it must refuse to write over. The set exists as a named, searchable place
+// to add a requirement the moment support for it lands, so the guard and the
+// feature cannot drift apart.
+var implementedRequirements = map[string]bool{}
+
+// checkRequirementsImplemented refuses a container whose mandatory requirements
+// this package does not implement.
+//
+// It reports the FIRST unimplemented entry in declaration order, deterministic
+// so the same container always produces the same diagnosis, and carries the
+// whole list so an operator sees everything being asked.
+func (m *LUKS2Metadata) checkRequirementsImplemented() error {
+	if m == nil || m.Config == nil || m.Config.Requirements == nil {
+		return nil
+	}
+	mandatory := m.Config.Requirements.Mandatory
+	for _, requirement := range mandatory {
+		if !implementedRequirements[requirement] {
+			return &UnsupportedRequirementError{Requirement: requirement, Mandatory: mandatory}
+		}
+	}
+	return nil
 }

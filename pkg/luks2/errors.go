@@ -7,6 +7,7 @@ package luks2
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -67,6 +68,11 @@ var (
 
 	// ErrInvalidKeyslot indicates the keyslot is invalid or unavailable
 	ErrInvalidKeyslot = errors.New("invalid keyslot")
+
+	// ErrUnsupportedRequirement indicates the container declares a mandatory
+	// requirement this package does not implement, so it must not be modified.
+	// The container is still READABLE -- see Requirements (types.go).
+	ErrUnsupportedRequirement = errors.New("container declares a mandatory requirement this package does not implement")
 
 	// ErrNoKeyslots indicates no valid keyslots are available
 	ErrNoKeyslots = errors.New("no valid keyslots")
@@ -666,3 +672,25 @@ func (e *KDFCalibrationError) Unwrap() error { return e.Err }
 func (e *KDFCalibrationError) Is(target error) bool {
 	return target == ErrKDFCalibration
 }
+
+// UnsupportedRequirementError names the requirement that makes a container
+// unwritable by this package.
+//
+// It carries the whole mandatory list and not just the offending entry, because
+// an operator deciding what tool to reach for next needs to see everything the
+// container is asking of an implementation, not the first thing this one
+// happened to trip over.
+type UnsupportedRequirementError struct {
+	// Requirement is the first mandatory entry this package does not implement.
+	Requirement string
+
+	// Mandatory is every mandatory requirement the container declares.
+	Mandatory []string
+}
+
+func (e *UnsupportedRequirementError) Error() string {
+	return fmt.Sprintf("refusing to modify the container: it requires %q, which this package does not implement (mandatory: %s)",
+		e.Requirement, strings.Join(e.Mandatory, ", "))
+}
+
+func (e *UnsupportedRequirementError) Unwrap() error { return ErrUnsupportedRequirement }

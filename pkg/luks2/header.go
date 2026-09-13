@@ -376,6 +376,22 @@ func WriteHeader(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata)
 // correct for the container it was computed against, so a pre-flight followed by
 // a real write is indistinguishable from the write alone.
 func encodeMetadataForHeader(hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) ([]byte, int, error) {
+	// REFUSE BEFORE ANYTHING ELSE. A container that declares a mandatory
+	// requirement this package does not implement must not be modified by it --
+	// that is what the requirements mechanism is FOR, and the refusal is worth
+	// nothing if it arrives after the header has been rewritten.
+	//
+	// This is the chokepoint every mutation passes through: Format, AddKey,
+	// ChangeKey, KillKeyslot, the token writes and WriteHeader all reach the
+	// device through writeHeaderInternal, which encodes here first, and
+	// checkHeaderWritable reaches it without touching the device at all. One
+	// guard here covers all of them, and a caller can ask in advance.
+	//
+	// Reads are deliberately NOT gated; see Requirements (types.go).
+	if err := metadata.checkRequirementsImplemented(); err != nil {
+		return nil, 0, err
+	}
+
 	// The header area size is FIXED by the container; it is never recomputed
 	// from how much metadata happens to need writing. See headerAreaSizeForWrite.
 	area, err := headerAreaSizeForWrite(hdr)

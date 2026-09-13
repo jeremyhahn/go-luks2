@@ -68,6 +68,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: `Config.Requirements` is `*Requirements`, not `[]string` (#152).**
+  LUKS2 spells `config.requirements` as an OBJECT carrying a `mandatory` array;
+  both `mandatory` and `online-reencrypt-v3` are literals in libcryptsetup. The
+  flat slice did not merely lose detail — the decode failed outright with
+  `cannot unmarshal object into Go struct field Config.config.requirements of
+  type []string`, so **this package could not read any container
+  mid-reencryption at all.** cryptsetup sets a requirement flag for the
+  duration of an online reencryption, which made every interrupted volume
+  opaque to go-luks2 until the reencryption finished.
+
+  That inverted the mechanism. `requirements` exists so an implementation that
+  does not understand a feature refuses the container instead of damaging it;
+  failing to parse the member carrying the warning meant not being able to read
+  the flag that says "do not touch this".
+
+  Migration: `cfg.Requirements` becomes `cfg.Requirements.Mandatory`, and is
+  `nil` when the container declares none. Nothing in this repository read the
+  field, and no container carrying one could be decoded, so no working caller
+  can have depended on the old shape.
+
+- **A mandatory requirement this package does not implement refuses WRITES and
+  permits READS (#152, owner ruling 2026-09-13).** `ReadHeader` parses the
+  container and exposes the requirement, because a flag whose purpose is to warn
+  is useless if reading it is what fails, and an operator diagnosing an
+  interrupted reencryption needs to see it. Every mutation refuses with an
+  `UnsupportedRequirementError` (`errors.Is(err, ErrUnsupportedRequirement)`),
+  naming the offending entry and carrying the whole declared list.
+
+  The guard sits in `encodeMetadataForHeader`, the one chokepoint every write in
+  this package passes through — `Format`, `AddKey`, `ChangeKey`, `KillKeyslot`,
+  the token writes and `WriteHeader` all reach the device through
+  `writeHeaderInternal`, which encodes first — so it runs before anything
+  touches the device, and `checkHeaderWritable` lets a caller ask in advance.
+  `implementedRequirements` is the named set to add to when support for one of
+  these features lands; it is currently empty, which is the honest state.
+
 - **The container entrypoint creates its own loop device nodes and no longer
   starts udevd.** Without `--privileged` the host `/dev` is not bind-mounted
   in, so `/dev` is a bare tmpfs and nothing creates `/dev/loopN`. udev cannot

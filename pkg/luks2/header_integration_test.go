@@ -99,7 +99,10 @@ func TestHeaderWriteRead(t *testing.T) {
 			JSONSize:     "16384",
 			KeyslotsSize: "3145728",
 			Flags:        []string{},
-			Requirements: []string{},
+			// Requirements is left nil: this container declares none, and the
+			// member is now an object (#152) rather than a flat array, so an
+			// empty value here would write `"requirements":{}` into a header
+			// that never had it.
 		},
 	}
 
