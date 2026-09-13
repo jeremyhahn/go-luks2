@@ -25,6 +25,11 @@ type Suite struct {
 	TempDir string
 	RunID   string
 
+	// Scope identifies the CONTAINER rather than this process, so the three
+	// test binaries that run inside one container agree on it and two
+	// containers never do. See volumename.go for why a name needs both terms.
+	Scope string
+
 	// Remover is the kernel side of Finish. It is a field rather than a
 	// hardcoded SystemRemover because Finish is where the measured defect
 	// LIVED -- it trusted the exit code -- and a path that has already been
@@ -43,6 +48,14 @@ type Suite struct {
 func BeginSuite(w io.Writer) (*Suite, error) {
 	stateDir := StateDir()
 	runID := NewRunID(os.Getpid(), time.Now().UnixNano())
+
+	// Before the ledger: a suite that cannot name its volumes uniquely must not
+	// start, and failing here costs nothing. Proceeding would hand every test a
+	// host-global name under a guard that no longer refuses them.
+	scope, err := NewScope()
+	if err != nil {
+		return nil, err
+	}
 
 	ledger, err := OpenLedger(stateDir, runID)
 	if err != nil {
@@ -95,7 +108,7 @@ func BeginSuite(w io.Writer) (*Suite, error) {
 		return nil, err
 	}
 
-	return &Suite{Ledger: ledger, TempDir: tmpRoot, RunID: runID, Remover: SystemRemover{}}, nil
+	return &Suite{Ledger: ledger, TempDir: tmpRoot, RunID: runID, Scope: scope, Remover: SystemRemover{}}, nil
 }
 
 // verifyAllocationsLandUnder confirms that a temp allocation made the way the

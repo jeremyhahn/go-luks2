@@ -64,6 +64,10 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
+	// Registered before any test runs: runVolume refuses without it, so every
+	// name this tier creates carries the container and process terms.
+	runSuite = suite
+
 	// Exit with what the CLEANUP concluded: a green run that could not remove
 	// its own host state must not report success.
 	os.Exit(suite.Finish(m.Run(), os.Stderr))

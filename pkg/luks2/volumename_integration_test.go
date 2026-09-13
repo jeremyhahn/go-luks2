@@ -15,10 +15,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/test/harness"
 )
 
-// runVolumeSuffix makes every device-mapper name this suite creates unique to
-// the run that created it. TestMain sets it once, from the harness run id.
+// Every device-mapper name this suite creates is unique to the container and
+// the process that created it. TestMain registers the suite that supplies both.
 //
 // # Why a constant name is the defect
 //
@@ -50,52 +52,41 @@ import (
 // The ledger governs CLEANUP -- it records what a run created so a later run
 // can remove exactly that. It says nothing about ALLOCATION, and nothing in it
 // stops two runs choosing the same name in the first place.
-var runVolumeSuffix string
+// runSuite is the harness suite this process registered, and the single source
+// of the two identity terms every name carries. TestMain sets it.
+var runSuite *harness.Suite
 
-// runVolume returns a device-mapper name unique to this run.
+// runVolume returns a device-mapper name unique to this container and process.
 //
-// It FAILS THE TEST when the suffix was never set, rather than falling back to
-// the bare name. A fallback would be silent and would restore the collision the
-// moment someone refactored TestMain -- and it would restore it invisibly,
-// because the suite passes either way until two runs happen to overlap. The
-// whole defect class here is a global constant that works until it does not.
+// The rule itself lives in test/harness (VolumeName): pkg/luks2,
+// test/integration/pkg and test/integration/cli all create mappings in the same
+// host-wide namespace, so a rule implemented here would be a rule the other two
+// tiers could drift from -- and a tier that drifts back to a constant name is
+// invisible until two runs overlap.
+//
+// It FAILS THE TEST rather than falling back to the bare name. A fallback would
+// be silent and would restore the collision the moment someone refactored
+// TestMain. The whole defect class here is a global constant that works until it
+// does not.
 func runVolume(t *testing.T, base string) string {
 	t.Helper()
 
-	if base == "" {
-		t.Fatal("runVolume was given an empty base name; a device-mapper name must identify the test that made it")
+	if runSuite == nil {
+		t.Fatalf("runVolume(%q): TestMain did not register the suite, so this name would be "+
+			"host-global and could collide with a concurrent run.", base)
 	}
-	if runVolumeSuffix == "" {
-		t.Fatalf("runVolume(%q): the run suffix is unset, so this name would be host-global and could "+
-			"collide with a concurrent run. TestMain must set runVolumeSuffix before any test runs.", base)
+	name, err := runSuite.VolumeName(base)
+	if err != nil {
+		t.Fatalf("runVolume(%q): %v", base, err)
 	}
-	return base + "-" + runVolumeSuffix
-}
-
-// sanitizeRunID keeps the suffix inside what device-mapper accepts.
-//
-// The harness run id is "<pid>-<base36 nanos>", which is already safe, but this
-// does not depend on that: it is the caller of a naming rule's job to enforce
-// it, not to inherit it from a producer that may change. Anything outside
-// [A-Za-z0-9-] becomes '-'.
-func sanitizeRunID(id string) string {
-	var b strings.Builder
-	for _, r := range id {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('-')
-		}
-	}
-	return b.String()
+	return name
 }
 
 // TestRunVolumeIsScopedToTheRun proves the three properties the fix rests on,
 // without creating any host state.
 func TestRunVolumeIsScopedToTheRun(t *testing.T) {
-	if runVolumeSuffix == "" {
-		t.Fatal("TestMain did not set the run suffix; every name this suite creates would be host-global")
+	if runSuite == nil {
+		t.Fatal("TestMain did not register the suite; every name this suite creates would be host-global")
 	}
 
 	got := runVolume(t, "luks-rapid")
@@ -105,8 +96,11 @@ func TestRunVolumeIsScopedToTheRun(t *testing.T) {
 	if !strings.HasPrefix(got, "luks-rapid-") {
 		t.Errorf("runVolume = %q, want it to keep the base so a leaked mapping still names its test", got)
 	}
-	if !strings.HasSuffix(got, runVolumeSuffix) {
-		t.Errorf("runVolume = %q, want it to end in this run's suffix %q", got, runVolumeSuffix)
+	if !strings.HasSuffix(got, runSuite.RunID) {
+		t.Errorf("runVolume = %q, want it to end in this run's id %q", got, runSuite.RunID)
+	}
+	if !strings.Contains(got, runSuite.Scope) {
+		t.Errorf("runVolume = %q, want it to carry this container's scope %q", got, runSuite.Scope)
 	}
 
 	// Two different tests must not collide with each other either.
@@ -120,9 +114,9 @@ func TestRunVolumeIsScopedToTheRun(t *testing.T) {
 	}
 }
 
-// TestSanitizeRunIDKeepsNamesLegal pins the character rule at this end rather
+// TestSanitizeNameTermKeepsNamesLegal pins the character rule at this end rather
 // than trusting the harness's id format not to change.
-func TestSanitizeRunIDKeepsNamesLegal(t *testing.T) {
+func TestSanitizeNameTermKeepsNamesLegal(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{"1774-dl4fv4rhvelp", "1774-dl4fv4rhvelp"},
 		{"has/slash", "has-slash"},
@@ -130,8 +124,8 @@ func TestSanitizeRunIDKeepsNamesLegal(t *testing.T) {
 		{"tab\there", "tab-here"},
 		{"unicode-é", "unicode--"},
 	} {
-		if got := sanitizeRunID(tc.in); got != tc.want {
-			t.Errorf("sanitizeRunID(%q) = %q, want %q", tc.in, got, tc.want)
+		if got := harness.SanitizeNameTerm(tc.in); got != tc.want {
+			t.Errorf("harness.SanitizeNameTerm(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }

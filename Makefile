@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs security ci ci-full fmt-check all check test-cli integration-test-pkg integration-test-cli docker-build-integration no-global-device-cleanup test-require-tool test-calibration no-internal-disclosure test-guards seccomp-diff integration-lock
+.PHONY: dm-scope-guard help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs security ci ci-full fmt-check all check test-cli integration-test-pkg integration-test-cli docker-build-integration no-global-device-cleanup test-require-tool test-calibration no-internal-disclosure test-guards seccomp-diff
 
 # Default target
 .DEFAULT_GOAL := help
@@ -242,7 +242,6 @@ integration-test-pkg: build ## Run package integration tests in Docker
 	@# image is orphaned on the host forever.
 	@set -eu; \
 	trap 'docker image rm -f $(ITEST_IMAGE) >/dev/null 2>&1 || true' EXIT INT TERM; \
-	flock "$(ITEST_LOCK)" \
 	  env IMAGE="$(ITEST_IMAGE)" TEST_STATE_DIR="$(TEST_STATE_DIR)" \
 	    $(INTEGRATION_DOCKER_RUN) --rm -- \
 		go test -v -tags=integration ./test/integration/pkg/...
@@ -255,7 +254,6 @@ integration-test-cli: build ## Run CLI integration tests in Docker
 	@# image is orphaned on the host forever.
 	@set -eu; \
 	trap 'docker image rm -f $(ITEST_IMAGE) >/dev/null 2>&1 || true' EXIT INT TERM; \
-	flock "$(ITEST_LOCK)" \
 	  env IMAGE="$(ITEST_IMAGE)" TEST_STATE_DIR="$(TEST_STATE_DIR)" \
 	    $(INTEGRATION_DOCKER_RUN) --rm -- \
 		go test -v -tags=integration ./test/integration/cli/...
@@ -269,9 +267,9 @@ coverage: build ## Run all tests (unit + integration) with coverage (requires ro
 	@echo ""
 	@echo "$(COLOR_BOLD)Step 2: Running integration tests with coverage...$(COLOR_RESET)"
 	@if [ "$$(id -u)" -eq 0 ]; then \
-		flock "$(ITEST_LOCK)" $(GO) test -tags=integration -coverprofile=coverage-integration.out -covermode=atomic ./...; \
+		$(GO) test -tags=integration -coverprofile=coverage-integration.out -covermode=atomic ./...; \
 	else \
-		flock "$(ITEST_LOCK)" sudo -E PATH="$(PATH)" $(GO) test -tags=integration -coverprofile=coverage-integration.out -covermode=atomic ./...; \
+		sudo -E PATH="$(PATH)" $(GO) test -tags=integration -coverprofile=coverage-integration.out -covermode=atomic ./...; \
 	fi
 	@echo ""
 	@echo "$(COLOR_BOLD)Step 3: Merging coverage profiles...$(COLOR_RESET)"
@@ -307,8 +305,7 @@ docker-integration-test: ## Run integration tests in Docker (isolated, recommend
 	@set -eu; \
 	trap 'docker rm -f $(ITEST_CONTAINER) >/dev/null 2>&1 || true; \
 	      docker image rm -f $(ITEST_IMAGE) >/dev/null 2>&1 || true' EXIT INT TERM; \
-	rc=0; flock "$(ITEST_LOCK)" \
-	  env IMAGE="$(ITEST_IMAGE)" TEST_STATE_DIR="$(TEST_STATE_DIR)" \
+	rc=0; 	  env IMAGE="$(ITEST_IMAGE)" TEST_STATE_DIR="$(TEST_STATE_DIR)" \
 	    $(INTEGRATION_DOCKER_RUN) --name $(ITEST_CONTAINER) -- || rc=$$?; \
 	if docker container inspect $(ITEST_CONTAINER) >/dev/null 2>&1; then \
 		docker cp $(ITEST_CONTAINER):/app/coverage.out coverage-docker.out || \
@@ -387,21 +384,13 @@ seccomp-diff: ## Diff the integration seccomp profile against Docker's default
 	echo ""; \
 	diff -u "$$dir/default.json" $(SECCOMP_PROFILE) || true
 
-# ITEST_LOCK serializes the PRIVILEGED suite across every job on this host.
+# No host lock. Every device-mapper name the suite creates carries the
+# container's scope and the process's run id (test/harness VolumeName), so
+# concurrent runs cannot collide and nothing needs serializing (#178).
 #
-# Per-invocation container and image names stop two jobs killing each other, but
-# they do NOT isolate the loop-device pool, which is HOST-GLOBAL: a suite holds
-# about five devices and the host provides eight, so two overlapping suites can
-# need ten and one fails for a reason unrelated to the code under test. Unique
-# names removed a collision and exposed a contention.
-#
-# NOT inside TEST_STATE_DIR. That directory is validated by the harness
-# (test/harness/statedir.go checks its owner) because its ledgers authorize host
-# device removal; a user-created directory is deliberately REFUSED, and a
-# root-created 0755 one cannot be written by the invoking user. Either way a lock
-# placed there breaks the suite or weakens the trust check. The lock lives beside
-# it instead, on a path the runner user can create.
-ITEST_LOCK ?= /var/tmp/go-luks2-itest-loopdev.lock
+# The lock that used to live here was also inert in CI: the runner executes job
+# steps inside a container, so a flock on a job-local path is private per job,
+# while the loop pool and device-mapper namespace it protected are host-global.
 
 
 docker-test-specific: ## Run specific integration test in Docker (use TEST=TestName)
@@ -414,7 +403,6 @@ docker-test-specific: ## Run specific integration test in Docker (use TEST=TestN
 	@# image is orphaned on the host forever.
 	@set -eu; \
 	trap 'docker image rm -f $(ITEST_IMAGE) >/dev/null 2>&1 || true' EXIT INT TERM; \
-	flock "$(ITEST_LOCK)" \
 	  env IMAGE="$(ITEST_IMAGE)" TEST_STATE_DIR="$(TEST_STATE_DIR)" \
 	    $(INTEGRATION_DOCKER_RUN) --rm -- \
 		go test -v -tags=integration -run="$(TEST)" ./...
@@ -425,9 +413,9 @@ host-integration-test: build ## Run integration tests on host (requires sudo, NO
 	@echo "$(COLOR_YELLOW)  Recommended: use 'make integration-test' (runs in Docker)$(COLOR_RESET)"
 	@echo ""
 	@if [ "$$(id -u)" -eq 0 ]; then \
-		flock "$(ITEST_LOCK)" $(GO) test -v -tags=integration ./...; \
+		$(GO) test -v -tags=integration ./...; \
 	else \
-		flock "$(ITEST_LOCK)" sudo -E PATH="$(PATH)" $(GO) test -v -tags=integration ./...; \
+		sudo -E PATH="$(PATH)" $(GO) test -v -tags=integration ./...; \
 	fi
 	@echo "$(COLOR_GREEN)✓ Host integration tests complete$(COLOR_RESET)"
 
@@ -466,6 +454,9 @@ fmt-check: ## Check if code is formatted (CI-friendly, doesn't modify files)
 # REGRESSION GUARD (#17). A standing written rule against adding a second
 # `losetup -D` call site already existed; there were then four. A doc-only rule
 # was demonstrably not enough, so this is a check that runs.
+dm-scope-guard: ## Refuse a dm guard that blocks concurrent runs or stops refusing its own scope
+	@./scripts/dm-scope-guard-test.sh
+
 no-global-device-cleanup: ## Refuse ownership-blind device teardown (losetup -D, dmsetup remove_all)
 	@./scripts/no-global-device-cleanup.sh
 
@@ -474,10 +465,6 @@ no-global-device-cleanup: ## Refuse ownership-blind device teardown (losetup -D,
 # teardown kills the other's running container mid-suite. `--self-test` feeds
 # the guard input it must reject AND input it must not, because running it
 # against a clean tree proves only that it can say yes.
-integration-lock: ## Refuse a privileged integration entry point that skips the host lock
-	@./scripts/integration-lock-guard.sh
-	@./scripts/integration-lock-guard.sh --self-test
-
 # PUBLIC-MIRROR GUARD (#20). This repository is mirrored publicly and releases
 # publish a tree byte-identical to the internal tag, so every tracked file is a
 # published file. #20 asserts a WHOLE-TREE property, and a whole-tree property
@@ -629,7 +616,7 @@ trivy-fs: ## Scan the working tree with trivy (dependency CVEs and leaked secret
 security: gosec govulncheck verify trivy-fs ## Run the full §8 security suite (gosec, govulncheck, go mod verify, trivy fs)
 	@echo "$(COLOR_GREEN)✓ Security suite complete$(COLOR_RESET)"
 
-ci: fmt-check vet integration-lock no-global-device-cleanup no-internal-disclosure no-error-collapse test-require-tool test-guards lint security test-unit test-calibration build ## Run CI pipeline locally (format, lint, security suite, unit tests, build)
+ci: fmt-check vet dm-scope-guard no-global-device-cleanup no-internal-disclosure no-error-collapse test-require-tool test-guards lint security test-unit test-calibration build ## Run CI pipeline locally (format, lint, security suite, unit tests, build)
 	@echo ""
 	@echo "$(COLOR_BOLD)======================================$(COLOR_RESET)"
 	@echo "$(COLOR_BOLD)CI Pipeline Complete$(COLOR_RESET)"
@@ -654,7 +641,6 @@ ci-full: ## Run full CI pipeline with Docker integration tests (enforces 90% cov
 	@echo ""
 	@$(MAKE) fmt-check
 	@$(MAKE) vet
-	@$(MAKE) integration-lock
 	@$(MAKE) no-global-device-cleanup
 	@$(MAKE) no-internal-disclosure
 	@$(MAKE) test-require-tool
@@ -693,7 +679,7 @@ ci-full: ## Run full CI pipeline with Docker integration tests (enforces 90% cov
 	@echo "$(COLOR_GREEN)All CI checks passed! Ready to push.$(COLOR_RESET)"
 	@echo ""
 
-check: fmt vet integration-lock no-global-device-cleanup no-internal-disclosure test-require-tool test-guards test ## Run all quality checks (format, vet, guards, test)
+check: fmt vet dm-scope-guard no-global-device-cleanup no-internal-disclosure test-require-tool test-guards test ## Run all quality checks (format, vet, guards, test)
 	@echo "$(COLOR_GREEN)✓ All checks passed$(COLOR_RESET)"
 
 clean: ## Clean build artifacts and test files

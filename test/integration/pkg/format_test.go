@@ -62,7 +62,7 @@ func TestFormatWithKDFTypes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tmpfile := "/tmp/test-luks-kdf-" + tt.name + ".img"
-			volumeName := "test-kdf-" + tt.name
+			volumeName := runVolume(t, "test-kdf-"+tt.name)
 			defer testCleanup(volumeName, "", tmpfile)
 
 			if err := createTestFile(tmpfile, 50); err != nil {

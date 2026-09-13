@@ -121,7 +121,7 @@ func TestCheckKeyringAvailablePassesWhereActivationWorks(t *testing.T) {
 // reports a reference rather than a key when asked what the target holds.
 func TestUnlockPassesTheVolumeKeyThroughTheKernelKeyring(t *testing.T) {
 	tmpfile := "/tmp/test-luks-keyring.img"
-	volumeName := "test-keyring"
+	volumeName := runVolume(t, "test-keyring")
 	var loopDev string
 	defer func() { testCleanup(volumeName, loopDev, tmpfile) }()
 

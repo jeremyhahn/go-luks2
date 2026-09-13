@@ -98,6 +98,10 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
+	// Registered before any test runs: runVolume refuses without it, so every
+	// name this tier creates carries the container and process terms.
+	runSuite = suite
+
 	// Built AFTER BeginSuite so the binary lands under the recorded temp root
 	// like everything else this run creates.
 	tmpDir, err := os.MkdirTemp("", "luks2-cli-test")
@@ -414,7 +418,7 @@ func TestCLI_InfoNonLuksDevice(t *testing.T) {
 
 func TestCLI_FullWorkflow(t *testing.T) {
 	tmpfile := "/tmp/test-cli-workflow.img"
-	volumeName := "test-cli-workflow"
+	volumeName := runVolume(t, "test-cli-workflow")
 	mountpoint := "/tmp/test-cli-mount"
 
 	defer func() {
@@ -586,7 +590,7 @@ func TestCLI_UnmountNotMounted(t *testing.T) {
 
 func TestCLI_OpenAndClose(t *testing.T) {
 	tmpfile := "/tmp/test-cli-open-close.img"
-	volumeName := "test-cli-open"
+	volumeName := runVolume(t, "test-cli-open")
 
 	defer func() {
 		runCLI("close", volumeName)

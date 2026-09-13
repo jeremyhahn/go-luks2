@@ -154,23 +154,15 @@ jobs:
       # instead of the RESOURCE (the pool), so it is checked rather than
       # remembered. --self-test first: a guard that cannot say "no" reports what
       # a clean check reports.
-      - name: Refuse an unlocked privileged integration entry point
+      - name: Refuse a dm guard that blocks concurrent runs
         run: |
-          ./scripts/integration-lock-guard.sh --self-test
-          ./scripts/integration-lock-guard.sh
+          # The entrypoint guard decides whether the suite runs at all, and has
+          # been wrong twice: refusing every LVM-root runner (#162), then
+          # refusing any host where a CONCURRENT run held a mapping (#178).
+          # This drives the shipped guard over both, and asserts it can still
+          # say no.
+          ./scripts/dm-scope-guard-test.sh
 
-      # REGRESSION GUARD (#17). `losetup -D` detaches every loop device on the
-      # machine; `dmsetup remove_all` removes every dm mapping. Neither is
-      # namespaced, so both reach the HOST whatever the container is confined
-      # to — measured on the machine where this was found, every run asked the
-      # kernel to remove the mapping under the root filesystem, and survived
-      # only because those devices were held open.
-      #
-      # This is a check rather than a rule because the rule already existed: a
-      # standing written instruction not to add a second `losetup -D` call
-      # site, at a point when there were four, one of which then survived the
-      # fix for the other three because it lived in a file nothing CI-facing
-      # opens.
       - name: Refuse ownership-blind device teardown
         run: ./scripts/no-global-device-cleanup.sh
 
@@ -730,28 +722,22 @@ jobs:
           # No pre-run remove. With a name no other job attempt can hold there
           # is nothing of ours to clear, and a remove by any broader name is
           # the race itself (#105).
-          # HOST-SCOPED SERIALIZATION. Per-attempt names stop two jobs killing
-          # each other; they do NOT isolate the loop-device pool, which is
-          # host-global -- a suite holds about five devices and the host provides
-          # eight, so two overlapping suites can need ten and one fails for a
-          # reason unrelated to the code under test. Unique names removed a
-          # collision and exposed a contention.
+          # No serialization here, and none needed. Every device-mapper name the
+          # suite creates carries this container's scope, so two runs cannot
+          # collide and the entrypoint guard refuses only on a mapping already
+          # carrying this container's own scope (#178).
           #
-          # The lock is deliberately NOT inside STATE_DIR: the harness validates
-          # that directory's owner because its ledgers authorize host device
-          # removal, so a lock written there either breaks the suite or weakens
-          # the check. Same path as the Makefile's ITEST_LOCK, because a second
-          # lock path would serialize nothing.
+          # A lock here was worse than unnecessary: the runner executes job
+          # steps INSIDE a container, so a flock on a job-local path is private
+          # per job and serializes nothing, while the loop pool and the
+          # device-mapper namespace it meant to protect are host-global.
           #
-          # A workflow `concurrency:` key would be repo-scoped and would not
-          # cover two repositories sharing a runner.
           # No privilege flags here, on purpose. They all live in
           # test/integration/docker-run.sh, which the Makefile targets call
           # too, so this workflow and a developer's `make integration-test`
           # cannot drift into running under different privilege (#80).
-          flock /var/tmp/go-luks2-itest-loopdev.lock \
-            env IMAGE="${ITEST_IMAGE}" TEST_STATE_DIR="${STATE_DIR}" \
-              test/integration/docker-run.sh --name "${ITEST_CONTAINER}" --
+          env IMAGE="${ITEST_IMAGE}" TEST_STATE_DIR="${STATE_DIR}" \
+            test/integration/docker-run.sh --name "${ITEST_CONTAINER}" --
 
       # Separate and always(): coverage is worth extracting from a suite that
       # failed, and this must not be skipped by the run step aborting.

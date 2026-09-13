@@ -14,7 +14,7 @@ import (
 
 func TestUnlockBasic(t *testing.T) {
 	tmpfile := "/tmp/test-luks-unlock.img"
-	volumeName := "test-unlock"
+	volumeName := runVolume(t, "test-unlock")
 	var loopDev string
 	defer func() { testCleanup(volumeName, loopDev, tmpfile) }()
 
@@ -72,7 +72,7 @@ func TestUnlockBasic(t *testing.T) {
 
 func TestUnlockWithWrongPassphrase(t *testing.T) {
 	tmpfile := "/tmp/test-luks-wrong-pass.img"
-	volumeName := "test-wrong-pass"
+	volumeName := runVolume(t, "test-wrong-pass")
 	var loopDev string
 	defer func() { testCleanup(volumeName, loopDev, tmpfile) }()
 

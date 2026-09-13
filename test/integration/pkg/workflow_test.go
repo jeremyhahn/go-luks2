@@ -16,7 +16,7 @@ import (
 
 func TestFullWorkflow(t *testing.T) {
 	tmpfile := "/tmp/test-luks-workflow.img"
-	volumeName := "test-workflow"
+	volumeName := runVolume(t, "test-workflow")
 	mountpoint := "/tmp/test-luks-mount"
 	var loopDev string
 

@@ -176,62 +176,45 @@ RUN echo '#!/bin/bash' > /entrypoint.sh && \
     echo '  exit 1' >> /entrypoint.sh && \
     echo 'fi' >> /entrypoint.sh && \
     echo '' >> /entrypoint.sh && \
-    echo '# Refuse to run only if the host device-mapper already has a mapping' >> /entrypoint.sh && \
-    echo '# this suite could actually collide with by name. This guard FAILS' >> /entrypoint.sh && \
-    echo '# CLOSED: an inventory it cannot take is not evidence of an empty host.' >> /entrypoint.sh && \
-    echo '# An earlier draft ended the pipeline in "|| true" and defaulted the' >> /entrypoint.sh && \
-    echo '# count to 0, so a failing dmsetup meant "no mappings" and the suite' >> /entrypoint.sh && \
-    echo '# proceeded exactly when the guard could not verify it was safe -- the' >> /entrypoint.sh && \
-    echo '# same swallow-the-error defect this change exists to remove,' >> /entrypoint.sh && \
-    echo '# reintroduced in the fix for it.' >> /entrypoint.sh && \
+    echo '# Refuse to run only if the host device-mapper already holds a mapping THIS' >> /entrypoint.sh && \
+    echo '# INVOCATION could collide with -- that is, one already carrying' >> /entrypoint.sh && \
+    echo '# this containers own scope. This guard FAILS CLOSED: an inventory it cannot take' >> /entrypoint.sh && \
+    echo '# is not evidence of an empty host.' >> /entrypoint.sh && \
     echo '#' >> /entrypoint.sh && \
-    echo '# It used to refuse on ANY pre-existing mapping (#162), because this' >> /entrypoint.sh && \
-    echo '# entrypoint also ran the global device-mapper wipe described above --' >> /entrypoint.sh && \
-    echo '# with the whole host in scope for removal, every mapping was a risk.' >> /entrypoint.sh && \
-    echo '# That global wipe is gone: tests own their own teardown and remove only' >> /entrypoint.sh && \
-    echo '# the name they created, and the reaper above removes only what a' >> /entrypoint.sh && \
-    echo '# previous run recorded. With the global wipe gone, the only way this' >> /entrypoint.sh && \
-    echo '# suite can still touch a mapping it did not make is a NAME COLLISION:' >> /entrypoint.sh && \
-    echo '# Lock() and the CLI "close" command remove /dev/mapper/<name> by name,' >> /entrypoint.sh && \
-    echo '# and MakeFilesystem/Mount operate on it directly, so a pre-existing' >> /entrypoint.sh && \
-    echo '# mapping that happens to share a name this suite uses would be touched' >> /entrypoint.sh && \
-    echo '# by a teardown or a filesystem op that believes it owns that name. A' >> /entrypoint.sh && \
-    echo '# pre-existing mapping with an unrelated name -- e.g. a runners own' >> /entrypoint.sh && \
-    echo '# root, ubuntu--vg-ubuntu--lv -- carries none of that risk, and refusing' >> /entrypoint.sh && \
-    echo '# on it anyway is exactly the over-broad check #162 reports: it fails' >> /entrypoint.sh && \
-    echo '# every LVM-root runner for a reason never in the diff.' >> /entrypoint.sh && \
+    echo '# WHY THE SCOPE AND NOT A LIST OF NAMES.' >> /entrypoint.sh && \
     echo '#' >> /entrypoint.sh && \
-    echo '# The families below were derived by grepping every literal' >> /entrypoint.sh && \
-    echo '# device-mapper/volume name the suite uses -- pkg/luks2/*_integration_' >> /entrypoint.sh && \
-    echo '# test.go and test/integration/{pkg,cli} -- as of the #162 fix. Nearly' >> /entrypoint.sh && \
-    echo '# all of them share one of four prefixes; the one that does not is' >> /entrypoint.sh && \
-    echo '# listed by itself:' >> /entrypoint.sh && \
+    echo '# It used to refuse on a mapping whose name matched one of the families the' >> /entrypoint.sh && \
+    echo '# suite uses (test*, luks-*, nonexistent*, definitely-not-a*, myvolume). Every' >> /entrypoint.sh && \
+    echo '# name the suite creates is now <base>-<container scope>-<run id>, so a' >> /entrypoint.sh && \
+    echo '# family match is satisfied by ANOTHER LIVE RUNs mapping -- which cannot be' >> /entrypoint.sh && \
+    echo '# collided with, because the scope and run id differ. The old check therefore' >> /entrypoint.sh && \
+    echo '# refused on evidence of CONCURRENCY rather than evidence of COLLISION, and' >> /entrypoint.sh && \
+    echo '# two overlapping runs failed each other for a reason never in the diff.' >> /entrypoint.sh && \
+    echo '# Measured 2026-09-12: run 17641 refused over' >> /entrypoint.sh && \
+    echo '# luks-multifile-7071-dldmvo78hv64, a sibling runs own mapping, while the' >> /entrypoint.sh && \
+    echo '# reaper said in the line above it that the owning run was still alive.' >> /entrypoint.sh && \
     echo '#' >> /entrypoint.sh && \
-    echo '#   test*             every runVolume(t, "test-...") base (test-fs-ext4,' >> /entrypoint.sh && \
-    echo '#                     test-mount, test-unlock, test-wrong-pass, ...), the' >> /entrypoint.sh && \
-    echo '#                     bare "test" literal, and the test/integration names' >> /entrypoint.sh && \
-    echo '#                     issue #162s follow-up will make run-unique' >> /entrypoint.sh && \
-    echo '#                     (test-keyring, test-workflow, test-cli-workflow,' >> /entrypoint.sh && \
-    echo '#                     test-cli-open, test-kdf-<case>, test-volume)' >> /entrypoint.sh && \
-    echo '#   luks-*            every runVolume(t, "luks-...") base (luks-rapid,' >> /entrypoint.sh && \
-    echo '#                     luks-concurrent, luks-large, luks-ismounted, ...)' >> /entrypoint.sh && \
-    echo '#   nonexistent*      negative-path fixtures ("nonexistent-volume",' >> /entrypoint.sh && \
-    echo '#                     "nonexistent-volume-12345", "nonexistent")' >> /entrypoint.sh && \
-    echo '#   definitely-not-a* CLI negative-path fixtures' >> /entrypoint.sh && \
-    echo '#                     ("definitely-not-a-volume-12345",' >> /entrypoint.sh && \
-    echo '#                     "definitely-not-a-real-volume")' >> /entrypoint.sh && \
-    echo '#   myvolume          the one CLI usage-error fixture that fits no other' >> /entrypoint.sh && \
-    echo '#                     family (test/integration/cli/cli_test.go)' >> /entrypoint.sh && \
+    echo '# Scoping to this container keeps exactly what the guard was for. The suite' >> /entrypoint.sh && \
+    echo '# only ever removes or writes a name it built, and every such name carries' >> /entrypoint.sh && \
+    echo '# this scope, so a mapping that does NOT carry it cannot be reached by a' >> /entrypoint.sh && \
+    echo '# teardown or a filesystem op here -- including a runners own LVM root' >> /entrypoint.sh && \
+    echo '# (ubuntu--vg-ubuntu--lv), which is #162. A mapping that DOES carry it is' >> /entrypoint.sh && \
+    echo '# either debris from a crashed run of this very container or a genuine' >> /entrypoint.sh && \
+    echo '# collision, and both are worth refusing over.' >> /entrypoint.sh && \
     echo '#' >> /entrypoint.sh && \
-    echo '# A mapping matches when its name equals one of these, or starts with' >> /entrypoint.sh && \
-    echo '# one of the "*" prefixes -- the shape runVolume(t, base) produces at' >> /entrypoint.sh && \
-    echo '# test run time is "<base>-<run-suffix>". This is an ALLOWLIST OF NAMES,' >> /entrypoint.sh && \
-    echo '# not of mappings: it says which names to refuse over, never which' >> /entrypoint.sh && \
-    echo '# mappings to touch -- a match still only refuses, it is never removed' >> /entrypoint.sh && \
-    echo '# or modified here.' >> /entrypoint.sh && \
+    echo '# The scope is the hostname, which Docker sets to the container id. The suite' >> /entrypoint.sh && \
+    echo '# derives it the same way (test/harness NewScope), so the guard and the tests' >> /entrypoint.sh && \
+    echo '# cannot disagree about what this invocation is called, and there is no' >> /entrypoint.sh && \
+    echo '# environment variable to plumb or forget.' >> /entrypoint.sh && \
     echo 'if ! command -v dmsetup >/dev/null 2>&1; then' >> /entrypoint.sh && \
     echo '  echo "REFUSING TO RUN: dmsetup is absent, so the host device-mapper" >&2' >> /entrypoint.sh && \
     echo '  echo "cannot be inspected and this suite cannot confirm it is safe." >&2' >> /entrypoint.sh && \
+    echo '  exit 1' >> /entrypoint.sh && \
+    echo 'fi' >> /entrypoint.sh && \
+    echo 'itest_scope=$(hostname 2>/dev/null | tr -c "A-Za-z0-9-" "-")' >> /entrypoint.sh && \
+    echo 'if [ -z "${itest_scope}" ]; then' >> /entrypoint.sh && \
+    echo '  echo "REFUSING TO RUN: this container has no usable hostname, so the" >&2' >> /entrypoint.sh && \
+    echo '  echo "scope every volume name is built from cannot be determined." >&2' >> /entrypoint.sh && \
     echo '  exit 1' >> /entrypoint.sh && \
     echo 'fi' >> /entrypoint.sh && \
     echo 'if ! dm_inventory=$(dmsetup ls 2>&1); then' >> /entrypoint.sh && \
@@ -247,24 +230,24 @@ RUN echo '#!/bin/bash' > /entrypoint.sh && \
     echo '      # Parameter expansion, NOT `set --`. `set --` would overwrite' >> /entrypoint.sh && \
     echo '      # THIS SCRIPTs positional parameters, and the dispatch at the' >> /entrypoint.sh && \
     echo '      # bottom branches on "$#" and then runs `exec "$@"`. Clobbering' >> /entrypoint.sh && \
-    echo '      # them here made a host carrying ANY non-colliding mapping -- an' >> /entrypoint.sh && \
-    echo '      # LVM root, the exact case this allowlist exists to let through --' >> /entrypoint.sh && \
+    echo '      # them here made a host carrying ANY non-matching mapping -- an' >> /entrypoint.sh && \
+    echo '      # LVM root, the exact case this guard exists to let through --' >> /entrypoint.sh && \
     echo '      # take the exec branch and try to run the mapping name as a' >> /entrypoint.sh && \
     echo '      # command, so the suite silently ran NOTHING instead of running.' >> /entrypoint.sh && \
     echo '      # Measured before the fix: "$#" became 2 and "$@" became the' >> /entrypoint.sh && \
     echo '      # mapping name and its major:minor.' >> /entrypoint.sh && \
     echo '      dm_name="${dm_line%%[[:space:]]*}"' >> /entrypoint.sh && \
     echo '      case "${dm_name}" in' >> /entrypoint.sh && \
-    echo '        test*|luks-*|nonexistent*|definitely-not-a*|myvolume)' >> /entrypoint.sh && \
+    echo '        *-"${itest_scope}"-*)' >> /entrypoint.sh && \
     echo '          echo "REFUSING TO RUN: the host device-mapper already has a" >&2' >> /entrypoint.sh && \
-    echo '          echo "mapping this suite could collide with by name:" >&2' >> /entrypoint.sh && \
+    echo '          echo "mapping carrying THIS containers scope:" >&2' >> /entrypoint.sh && \
     echo '          echo "  ${dm_line}" >&2' >> /entrypoint.sh && \
-    echo '          echo "\"${dm_name}\" matches a name this suite creates or" >&2' >> /entrypoint.sh && \
-    echo '          echo "touches (see the comment above this guard for the" >&2' >> /entrypoint.sh && \
-    echo '          echo "derivation), so a teardown or filesystem op that" >&2' >> /entrypoint.sh && \
-    echo '          echo "believes it owns that name would touch this" >&2' >> /entrypoint.sh && \
-    echo '          echo "pre-existing mapping instead. Run where no mapping" >&2' >> /entrypoint.sh && \
-    echo '          echo "shares a name this suite uses." >&2' >> /entrypoint.sh && \
+    echo '          echo "Every name this suite creates is" >&2' >> /entrypoint.sh && \
+    echo '          echo "<base>-${itest_scope}-<run id>, so this mapping is either" >&2' >> /entrypoint.sh && \
+    echo '          echo "debris from a crashed run of this container or a name this" >&2' >> /entrypoint.sh && \
+    echo '          echo "run would collide with. A mapping belonging to a different" >&2' >> /entrypoint.sh && \
+    echo '          echo "container, or to the host, is not reported here and does" >&2' >> /entrypoint.sh && \
+    echo '          echo "not block this run." >&2' >> /entrypoint.sh && \
     echo '          exit 1' >> /entrypoint.sh && \
     echo '          ;;' >> /entrypoint.sh && \
     echo '      esac' >> /entrypoint.sh && \

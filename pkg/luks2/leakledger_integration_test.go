@@ -88,7 +88,7 @@ func runWithLedger(m *testing.M) int {
 	// any concurrent run of the same suite -- and the collision is destructive,
 	// not merely a failure. Set BEFORE m.Run so no test can allocate a name
 	// without it; runVolume fails closed if it is still empty.
-	runVolumeSuffix = sanitizeRunID(suite.RunID)
+	runSuite = suite
 
 	// What this package adds on top, and what the external suites cannot have:
 	// WRITE-AHEAD records for dm mappings, taken at the one seam every mapping
