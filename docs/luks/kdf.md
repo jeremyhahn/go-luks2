@@ -147,6 +147,72 @@ opts := luks2.FormatOptions{
 }
 ```
 
+### Explicit iteration count
+
+Calibration answers "how much work fits in N milliseconds of *this* machine's
+time", so it yields a different number on every host. Where a container must be
+reproducible — provisioning two machines from one specification, or comparing
+bytes against another implementation — the count can be pinned instead:
+
+```go
+opts := luks2.FormatOptions{
+    KDFType:         "pbkdf2",
+    HashAlgo:        "sha512",
+    PBKDFIterations: 500_000, // bypasses calibration; PBKDFIterTime is ignored
+}
+```
+
+`AddKeyOptions.PBKDFIterations` does the same for a new keyslot.
+
+**It does not bypass the iteration floor.** cryptsetup's
+`--pbkdf-force-iterations` bypasses its own minimum; this deliberately does not,
+because a floor any caller can argue around is not a floor and nothing can
+strengthen a keyslot that is already on disk. A count below the floor for the
+chosen hash is refused with `ErrPBKDFIterationsTooLow`, and one above
+`maxKDFIterations` — the ceiling applied when a header is read back — with
+`ErrPBKDFIterationsTooHigh`. Both are carried on a `*PBKDFIterationsError` that
+reports the permitted range:
+
+| Hash | Minimum |
+|---|---|
+| sha1 | 1300000 |
+| sha256 | 600000 |
+| sha384 | 210000 |
+| sha512 | 210000 |
+| any other | 1000 |
+
+### The floor and library-generated credentials
+
+The iteration floor above applies to credentials a **caller** supplies. It does
+not apply to credentials **this library generated** — recovery keys and enrolled
+provider keys, which are 256 CSPRNG bits.
+
+An iteration count buys exactly one thing: it multiplies the cost of each guess
+in an offline *search*. That is decisive for a human-chosen passphrase, drawn
+from a space an attacker can enumerate. For 256 random bits there is no
+candidate list, so there is no search, so there is nothing to multiply.
+
+Concretely, the floor made systemd's own parameters unwritable: systemd enrolls
+`pbkdf2 / sha512 / 1000`, and the sha512 floor is 210000, so this library could
+not reproduce a systemd-enrolled header even when told exactly what to write.
+
+The exemption is **structural, not a flag**:
+
+- It travels as an unexported type (`keyslotCostPolicy`) on an unexported
+  function. There is no `Force` or `SkipFloor` field, and none may be added — a
+  floor a caller can argue around is not a floor.
+- Its zero value is the strict policy, so anything that forgets to choose gets
+  the floor.
+- The exempt path **keeps a floor**: `minPBKDF2Iterations` (1000), LUKS2's own
+  minimum and exactly what systemd writes. Zero and negative are still refused,
+  and the ceiling is unchanged.
+
+> The same shape — "the input is a full-entropy CSPRNG secret, so the iteration
+> count defends nothing" — was argued about the master-key *digest* and
+> reverted. The logic was sound; the *evidence* was not, because the measurement
+> was taken with a flag that wrote its own answer. Check what is actually being
+> enumerated before reusing the argument.
+
 ### Manual Benchmark
 
 ```go
@@ -220,6 +286,41 @@ The master key digest always uses PBKDF2:
 ```
 
 This is separate from the keyslot KDF and verifies the decrypted master key.
+
+### The digest cost is calibrated, not fixed
+
+`DigestIterations` used to be a constant. It is now calibrated to
+`DigestIterationTargetMs` (100 ms), matching cryptsetup, which calibrates the
+digest rather than pinning it.
+
+**This parameter buys essentially no security.** The digest verifies a candidate
+*master key* — 512 bits from a CSPRNG — so there is no guessable input for an
+iteration count to slow down and no offline search for it to multiply. The count
+that defends a guessable secret is the **keyslot** KDF's, and its floor is
+non-negotiable. What this controls is unlock latency and parity with cryptsetup.
+
+The 100 ms target was measured, not chosen. Across 14 default containers on one
+host, converting each recorded count by that machine's PBKDF2 rate:
+
+| Hash | Digest iterations | Implied time |
+|---|---|---|
+| sha512 | 317750–328090 | 96.7–101.0 ms |
+| sha256 | 493679–518071 | 47.1–49.5 ms |
+
+The two hashes look like different targets and are not: cryptsetup benchmarks a
+fixed **64-byte** derivation whatever the hash, and under sha256 that is two
+PBKDF2 blocks per iteration rather than one. Re-measured at 64 bytes both land on
+100 ms (sha512 100.0, sha256 101.0). Hence `DigestCalibrationKeyLen = 64`.
+
+The digest cost is also independent of the keyslot budget — at `--iter-time`
+500/2000/8000 ms the keyslot count scales 16x while the digest holds between
+452753 and 468951 — which is why it needs its own target.
+
+> **Measurement trap.** A container formatted with `--pbkdf-force-iterations`
+> reports a digest of exactly the forced value: that flag pins the *digest* as
+> well as the keyslot. Measuring that way shows a digest of 1000 and invites the
+> conclusion that cryptsetup hardcodes it. Take this measurement on **default**
+> containers or not at all.
 
 ## Performance Comparison
 

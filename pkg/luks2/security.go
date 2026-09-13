@@ -24,18 +24,65 @@ const (
 	MaxKeySize          = 512
 	MinSectorSize       = 512
 	MaxSectorSize       = 4096
-	// DigestIterations is the PBKDF2 iteration count for the master-key digest.
-	// createDigest reads it, so changing it changes what Format writes for newly
-	// formatted volumes; a volume already on disk carries its own count in its
-	// header and is unaffected.
+	// DigestIterationTargetMs is how long the master-key digest's PBKDF2 is
+	// calibrated to take, and it replaces the DigestIterations constant that
+	// used to fix the count at 600000.
 	//
-	// TestSecurityConstants asserts only that this is >= 100000. The specific
-	// value 600000 is not pinned by anything.
+	// # WHAT THIS PARAMETER IS AND IS NOT
 	//
-	// The comment this replaced attributed 600000 to NIST SP 800-132. That
-	// standard sets a minimum iteration count far below this and does not
-	// specify 600000, so the attribution is dropped rather than restated.
-	DigestIterations = 600000
+	// It buys essentially NO SECURITY, and pretending otherwise is how it gets
+	// mis-tuned. The digest verifies a candidate MASTER KEY -- 512 bits from a
+	// CSPRNG -- so there is no guessable input for an iteration count to slow
+	// down and no offline search for it to multiply. The count that does defend
+	// a guessable secret is the KEYSLOT KDF's, whose floor
+	// (pbkdf2RecommendedIterations, kdf.go) is non-negotiable and unrelated to
+	// this. What this controls is unlock latency and behavioral parity with
+	// cryptsetup. Nothing else.
+	//
+	// # WHY 100ms, MEASURED
+	//
+	// cryptsetup CALIBRATES the digest; it does not pin it. Across 14 default
+	// containers on one host, converting each recorded count by this machine's
+	// measured PBKDF2 rate:
+	//
+	//	--hash sha512   317750..328090 iterations   96.7..101.0 ms
+	//	--hash sha256   493679..518071 iterations   47.1.. 49.5 ms
+	//
+	// The two hashes look like different targets and are not. cryptsetup
+	// benchmarks a FIXED 64-BYTE derivation whatever the hash, and for sha256
+	// that is two PBKDF2 blocks per iteration rather than one. Re-measuring at
+	// 64 bytes collapses them: sha512 100.0ms, sha256 101.0ms. Hence
+	// DigestCalibrationKeyLen below, and hence 100.
+	//
+	// The digest cost is also independent of the KEYSLOT budget -- measured at
+	// --iter-time 500/2000/8000, the keyslot count scaled 16x while the digest
+	// held between 452753 and 468951 -- which is why it needs its own target
+	// rather than a share of the keyslot's.
+	//
+	// # THE MEASUREMENT TRAP
+	//
+	// A container formatted with --pbkdf-force-iterations reports a digest of
+	// exactly the forced value, because that flag pins the DIGEST as well as
+	// the keyslot. Measuring that way shows a digest of 1000 and invites the
+	// conclusion that cryptsetup hardcodes it. That conclusion was drawn here,
+	// acted on, and reverted: the flag was writing the number the measurement
+	// then attributed to cryptsetup. Take this measurement on DEFAULT
+	// containers or not at all.
+	DigestIterationTargetMs = 100
+
+	// DigestCalibrationKeyLen is the derived-key length the digest calibration
+	// benchmarks, fixed at 64 bytes REGARDLESS of the hash because that is what
+	// cryptsetup does.
+	//
+	// It is deliberately not the digest's own output length. Deriving 64 bytes
+	// costs one PBKDF2 block under sha512 and two under sha256, so calibrating
+	// at the hash's own length would target 100ms of real work for every hash
+	// and produce roughly twice cryptsetup's count for sha256. That is arguably
+	// the more principled number and it is not the one the reference
+	// implementation writes; parity is worth more here than tidiness, given the
+	// parameter defends nothing. The practical effect is that a sha256 digest
+	// costs ~50ms at unlock and a sha512 one ~100ms, exactly as cryptsetup's do.
+	DigestCalibrationKeyLen = 64
 )
 
 // Validation errors
@@ -174,6 +221,66 @@ func ValidatePassphrase(passphrase []byte) error {
 	return nil
 }
 
+// MinArgon2MemoryKB is the smallest Argon2 memory cost this package will WRITE
+// when a caller chooses it.
+//
+// # A CREATE FLOOR, NOT AN ACCEPT FLOOR
+//
+// These are two different decisions and they were one code path. Refusing to
+// CREATE a weak keyslot is this package's judgement to make. Refusing to TOUCH
+// a container someone else created is not: cryptsetup has no such floor, a
+// low-memory or embedded device has good reason to format below 64 MiB, and a
+// library that will not open, rotate or remove a credential on a container the
+// reference implementation considers valid has turned a hardening preference
+// into an interop failure.
+//
+// So the accept side is deliberately far more liberal -- minArgon2Memory in
+// keyslotvalidation.go is 8 KiB, below even cryptsetup's own 32 -- and every
+// read path, RemoveKey and KillSlot go through that one instead. This bound
+// applies only where a caller SUPPLIES a cost: Format and AddKey.
+//
+// ChangeKey is deliberately NOT bound by it. It inherits the cost of the slot
+// it is rotating, which is a cost this package did not choose, on hardware that
+// has already demonstrated it can afford that and nothing more. See ChangeKey.
+const MinArgon2MemoryKB = 65536
+
+// MinArgon2Time is the smallest Argon2 time cost this package will write. It is
+// the format's own minimum; a zero or negative time cost is not a weak keyslot
+// but a malformed one.
+const MinArgon2Time = 1
+
+// validateArgon2CreateCost bounds the Argon2 costs a CALLER supplies.
+//
+// Split out of ValidateFormatOptions so AddKey can apply the identical bound
+// without inheriting the rest of it -- device paths, passphrase lengths, sector
+// sizes -- none of which AddKey is in a position to check. Before this, the
+// bound existed on Format alone, so AddKey with an explicit Argon2Memory of 32
+// wrote a keyslot Format would have refused: a floor reachable from one entry
+// point and not the other, which is the shape of every bypass in this package's
+// history.
+func validateArgon2CreateCost(opts FormatOptions) error {
+	if opts.KDFType != "argon2id" && opts.KDFType != "argon2i" {
+		return nil
+	}
+	if opts.Argon2Memory != 0 && opts.Argon2Memory < MinArgon2MemoryKB {
+		return &Argon2CostError{
+			Parameter: "memory",
+			Value:     opts.Argon2Memory,
+			Minimum:   MinArgon2MemoryKB,
+			Err:       ErrInvalidArgon2Memory,
+		}
+	}
+	if opts.Argon2Time != 0 && opts.Argon2Time < MinArgon2Time {
+		return &Argon2CostError{
+			Parameter: "time",
+			Value:     opts.Argon2Time,
+			Minimum:   MinArgon2Time,
+			Err:       ErrInvalidArgon2Time,
+		}
+	}
+	return nil
+}
+
 // ValidateFormatOptions validates all format options
 func ValidateFormatOptions(opts FormatOptions) error {
 	// Validate device path
@@ -197,13 +304,8 @@ func ValidateFormatOptions(opts FormatOptions) error {
 	}
 
 	// Validate Argon2 parameters if specified
-	if opts.KDFType == "argon2id" || opts.KDFType == "argon2i" {
-		if opts.Argon2Memory != 0 && opts.Argon2Memory < 65536 {
-			return ErrInvalidArgon2Memory
-		}
-		if opts.Argon2Time != 0 && opts.Argon2Time < 1 {
-			return ErrInvalidArgon2Time
-		}
+	if err := validateArgon2CreateCost(opts); err != nil {
+		return err
 	}
 
 	// Check for integer overflow in size calculations

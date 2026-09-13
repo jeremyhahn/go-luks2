@@ -473,19 +473,20 @@ type FormatOptions struct {
 	// stays that way: this package borrows it for the key derivation and
 	// neither locks nor wipes a buffer it does not own. Everything derived
 	// from it is held in protected memory -- see pkg/luks2/enclave.go.
-	Passphrase     []byte
-	Label          string // Volume label (optional)
-	Subsystem      string // Subsystem label (optional)
-	Cipher         string // Cipher algorithm (default: "aes")
-	CipherMode     string // Cipher mode (default: "xts-plain64")
-	KeySize        int    // Key size in bits (default: 512)
-	HashAlgo       string // Hash algorithm (default: "sha256")
-	SectorSize     int    // Sector size (default: 512)
-	KDFType        string // KDF type: "pbkdf2", "argon2i", "argon2id" (default: "argon2id")
-	PBKDFIterTime  int    // Target ms for PBKDF2, 1..600000 (default: 2000); calibrated, never assumed
-	Argon2Time     int    // Argon2 time cost (default: 4)
-	Argon2Memory   int    // Argon2 memory cost in KB (default: 1048576 = 1GB)
-	Argon2Parallel int    // Argon2 parallelism (default: 4)
+	Passphrase      []byte
+	Label           string // Volume label (optional)
+	Subsystem       string // Subsystem label (optional)
+	Cipher          string // Cipher algorithm (default: "aes")
+	CipherMode      string // Cipher mode (default: "xts-plain64")
+	KeySize         int    // Key size in bits (default: 512)
+	HashAlgo        string // Hash algorithm (default: "sha256")
+	SectorSize      int    // Sector size (default: 512)
+	KDFType         string // KDF type: "pbkdf2", "argon2i", "argon2id" (default: "argon2id")
+	PBKDFIterTime   int    // Target ms for PBKDF2, 1..600000 (default: 2000); calibrated, never assumed
+	PBKDFIterations int    // Exact PBKDF2 iterations; skips calibration when non-zero. Bounded -- see forcedPBKDF2Iterations
+	Argon2Time      int    // Argon2 time cost (default: 4)
+	Argon2Memory    int    // Argon2 memory cost in KB (default: 1048576 = 1GB)
+	Argon2Parallel  int    // Argon2 parallelism (default: 4)
 }
 
 // VolumeInfo contains information about a LUKS volume

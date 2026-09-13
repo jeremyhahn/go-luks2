@@ -155,10 +155,29 @@ func Format(opts FormatOptions) error {
 		return fmt.Errorf("failed to write key material: %w", err)
 	}
 
-	// Pad to aligned size
-	padding := make([]byte, alignedKeyMaterialSize-int64(keyMaterialSize))
-	if _, err := f.Write(padding); err != nil {
-		return fmt.Errorf("failed to write padding: %w", err)
+	// FILL THE REST OF THE KEYSLOTS AREA WITH CSPRNG DATA, from the end of
+	// keyslot 0's material to the start of the data segment. That is two
+	// distinct ranges and both used to be zeroes:
+	//
+	//	the tail of keyslot 0's own declared area   2 KiB
+	//	the region no keyslot occupies yet          ~15.7 MiB
+	//
+	// Zeroes there are an INFORMATION DISCLOSURE. Encrypted key material is
+	// indistinguishable from random, so a region of random says nothing; a
+	// region of zeroes says "no keyslot has ever been written here". On a
+	// stolen or discarded drive that hands the holder the container's key
+	// management history for free -- how many keys exist, where they sit, and
+	// which slots were used and later destroyed -- without breaking anything.
+	// cryptsetup fills the whole area at format for exactly this reason, and
+	// the same reasoning is why wipeKeyslotArea now fills with random rather
+	// than zeroing (keyslot.go).
+	//
+	// It is not a conformance requirement: cryptsetup opens a container whose
+	// unallocated area is zeroed. MEASURED over 20 formats of a 64 MiB image,
+	// it costs 20ms on top of 375ms -- the CSPRNG is not the cost, writing 16
+	// MiB and syncing it is -- and the image is no longer sparse.
+	if err := writeRandom(f, dataOffset-(keyslotAreaStart+int64(keyMaterialSize))); err != nil {
+		return fmt.Errorf("failed to fill the keyslots area: %w", err)
 	}
 
 	return f.Sync()
@@ -170,13 +189,23 @@ func Format(opts FormatOptions) error {
 func createMetadata(kdf, digestKDF *KDF, digestValue string, opts FormatOptions,
 	masterKeySize, keyslotOffset, keyslot0Size, keyslotsAreaSize, dataOffset int) *LUKS2Metadata {
 
-	// Create keyslot
+	// Create keyslot.
+	//
+	// PRIORITY IS DELIBERATELY NOT SET. LUKS2 makes the member optional and an
+	// ABSENT priority means "normal" -- so writing `"priority":1` states the
+	// default the reader already assumes. MEASURED against cryptsetup 2.7.0:
+	// luksFormat and luksAddKey emit no priority member at all, and
+	// `cryptsetup config --priority normal` DELETES it rather than writing 1.
+	// Omitting it is what every LUKS2 writer does, and it is what lets a
+	// formatted container's JSON be byte-identical to cryptsetup's.
+	//
+	// The field stays declared and omitempty on Keyslot: a caller that sets a
+	// non-default priority still writes it, and a foreign container's priority
+	// still round-trips untouched.
 	keyslots := make(map[string]*Keyslot)
-	priority := 1
 	keyslots["0"] = &Keyslot{
-		Type:     "luks2",
-		KeySize:  masterKeySize,
-		Priority: &priority,
+		Type:    "luks2",
+		KeySize: masterKeySize,
 		Area: &KeyslotArea{
 			Type:    "raw",
 			KeySize: masterKeySize,
@@ -258,6 +287,38 @@ func createMetadata(kdf, digestKDF *KDF, digestValue string, opts FormatOptions,
 	}
 }
 
+// digestIterationsFor is the digest calibration, behind a seam.
+//
+// The seam exists for the same reason cryptoRand and newUUID do and no other:
+// a calibrated value differs on every machine, so with no way to fix it no test
+// can compare two headers -- and the conformance suite's guarded exclusion for
+// this field needs to be able to assert a pinned value rather than skip it.
+//
+// FormatOptions.PBKDFIterations deliberately does NOT pin this. Pinning the
+// keyslot count and the digest count with one knob is exactly what
+// cryptsetup's --pbkdf-force-iterations does, and that conflation is what
+// produced a confounded measurement, a wrong ruling and a revert here. They are
+// independent parameters defending different things -- one a human-chosen
+// passphrase, the other nothing at all -- and the API says so by keeping them
+// apart. It is unexported and has no setter, so no caller can weaken the digest
+// through it.
+var digestIterationsFor = calibrateDigestIterations
+
+// calibrateDigestIterations returns the digest iteration count for a hash on
+// this machine.
+//
+// It reuses BenchmarkPBKDF2 rather than adding a second calibration mechanism.
+// One consequence is worth naming: BenchmarkPBKDF2 applies the keyslot
+// iteration floor scaled to the requested budget, which at a 100ms target is
+// ~10500 for sha512 rather than the 1000 LUKS2 requires. That floor is meant
+// for a parameter this one is not, so it is over-strict here -- but it binds
+// only on a machine roughly thirty times slower than current hardware, where it
+// costs a few milliseconds, and one calibration path is worth more than a
+// second one tuned for a value that defends nothing.
+func calibrateDigestIterations(hashAlgo string) (int, error) {
+	return BenchmarkPBKDF2(hashAlgo, DigestCalibrationKeyLen, DigestIterationTargetMs)
+}
+
 // createDigest creates a digest for master key verification.
 //
 // The master key is passed as an ENCLAVE and this package never copies it out:
@@ -276,16 +337,14 @@ func createMetadata(kdf, digestKDF *KDF, digestValue string, opts FormatOptions,
 // key, and the whole point of writing it to the header is that anyone can check
 // a candidate key against it.
 func createDigest(masterKey *enclave.MemoryEnclave, hashAlgo string) (*KDF, string, error) {
-	// The cost is DigestIterations itself, not a second copy of its value, so
-	// what Format writes sits behind the assertion on that constant rather than
-	// reaching it through a separate test that happened to keep two spellings
-	// equal.
-	//
-	// That assertion is weaker than it sounds and the difference matters: it is
-	// a >= 100000 floor checked when the tests run, not a lock on 600000 and not
-	// anything enforced at runtime. Setting this constant to 100000 passes the
-	// whole suite today.
-	digestIterations := DigestIterations
+	// CALIBRATED, not a constant. See DigestIterationTargetMs (security.go) for
+	// what this parameter is, what it is not, and why 100ms -- and for the
+	// --pbkdf-force-iterations measurement trap that makes cryptsetup look as
+	// though it hardcodes this.
+	digestIterations, err := digestIterationsFor(hashAlgo)
+	if err != nil {
+		return nil, "", err
+	}
 
 	salt, err := randomBytes(32)
 	if err != nil {

@@ -432,8 +432,17 @@ func TestCreateDigest(t *testing.T) {
 			if kdf.Iterations == nil {
 				t.Fatal("Iterations is nil")
 			}
-			if *kdf.Iterations != DigestIterations {
-				t.Fatalf("Expected %d iterations, got %d", DigestIterations, *kdf.Iterations)
+			// CALIBRATED, so there is no constant to compare against. What is
+			// pinned instead is the property that survives a change of
+			// machine: the count is the one this machine's calibration
+			// produces for the digest's target.
+			want, err := calibrateDigestIterations(tt.hashAlgo)
+			if err != nil {
+				t.Fatalf("calibrateDigestIterations failed: %v", err)
+			}
+			if ratio := float64(*kdf.Iterations) / float64(want); ratio < 0.5 || ratio > 2 {
+				t.Fatalf("digest has %d iterations; a fresh calibration for %s gives %d, which is not within 2x",
+					*kdf.Iterations, tt.hashAlgo, want)
 			}
 
 			// Verify digest value
@@ -614,8 +623,12 @@ func TestCreateMetadata(t *testing.T) {
 	if keyslot.KeySize != masterKeySize {
 		t.Fatalf("Expected keyslot key size %d, got %d", masterKeySize, keyslot.KeySize)
 	}
-	if keyslot.Priority == nil || *keyslot.Priority != 1 {
-		t.Fatal("Expected priority 1")
+	// NO priority member, which is how "normal" is spelled in LUKS2: the field
+	// is optional and its default IS normal, so writing 1 states what every
+	// reader already assumes and diverges from what cryptsetup writes. See
+	// createMetadata.
+	if keyslot.Priority != nil {
+		t.Fatalf("createMetadata set priority %d; a normal keyslot carries no priority member", *keyslot.Priority)
 	}
 
 	// Verify keyslot area

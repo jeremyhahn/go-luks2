@@ -188,6 +188,29 @@ var (
 	// disk. See KDFCalibrationError for what the failure carries.
 	ErrKDFCalibration = errors.New("PBKDF2 iteration count could not be calibrated")
 
+	// ErrPBKDFIterationsTooLow indicates a caller supplied an explicit PBKDF2
+	// iteration count below the floor this package writes.
+	//
+	// It exists because FormatOptions.PBKDFIterations and
+	// AddKeyOptions.PBKDFIterations bypass calibration, and calibration was
+	// where the floor was applied. cryptsetup's own
+	// --pbkdf-force-iterations bypasses ITS minimum; this package deliberately
+	// does not copy that. A floor that any caller can argue its way around is
+	// not a floor, and the keyslot outlives every reason anyone had for
+	// lowering it.
+	ErrPBKDFIterationsTooLow = errors.New("PBKDF2 iteration count is below the minimum this package will write")
+
+	// ErrPBKDFIterationsTooHigh indicates an explicit PBKDF2 iteration count
+	// above maxKDFIterations, which is the ceiling validateKDFCost enforces
+	// when a header is READ.
+	//
+	// It is a refusal rather than a clamp for the same reason the floor is a
+	// refusal: writing the ceiling instead would produce a keyslot with less
+	// work than the caller asked for and return nil to say it succeeded. It is
+	// also the only outcome that keeps write and read consistent -- a count
+	// above the ceiling makes a keyslot this package would refuse to open.
+	ErrPBKDFIterationsTooHigh = errors.New("PBKDF2 iteration count is above the maximum this package will write")
+
 	// ErrMappingStillLive indicates that Unlock failed AFTER the dm-crypt target
 	// was already live, and that the target this call created may still be
 	// present.
@@ -694,3 +717,68 @@ func (e *UnsupportedRequirementError) Error() string {
 }
 
 func (e *UnsupportedRequirementError) Unwrap() error { return ErrUnsupportedRequirement }
+
+// PBKDFIterationsError reports that an explicit PBKDF2 iteration count was
+// refused, and carries both numbers so the caller can act without guessing what
+// the floor is.
+//
+// The floor is a function of the HASH, not a single constant: it is the larger
+// of this package's absolute minimum and OWASP's recommendation for that hash
+// at the reference budget, so the same count is acceptable under sha512 and
+// refused under sha256. Reporting only "too low" would leave a caller unable to
+// tell which.
+type PBKDFIterationsError struct {
+	// Hash is the hash algorithm the keyslot would use, as it will be written.
+	Hash string
+
+	// Iterations is the count the caller asked for.
+	Iterations int
+
+	// Minimum is the smallest count that would have been accepted for Hash.
+	Minimum int
+
+	// Maximum is the largest count that would have been accepted. It is the
+	// ceiling validateKDFCost applies when the header is read back, and is not
+	// hash-dependent.
+	Maximum int
+
+	// Err is the underlying cause, kept reachable through Unwrap.
+	Err error
+}
+
+func (e *PBKDFIterationsError) Error() string {
+	return fmt.Sprintf("%s: hash %s, requested %d iterations, permitted range %d..%d",
+		e.Err.Error(), e.Hash, e.Iterations, e.Minimum, e.Maximum)
+}
+
+func (e *PBKDFIterationsError) Unwrap() error { return e.Err }
+
+// Argon2CostError reports that an Argon2 cost a caller supplied was refused,
+// and carries the permitted range so the caller can act without guessing.
+//
+// It is the Argon2 counterpart of PBKDFIterationsError and deliberately reads
+// the same way: both are refusals of a CALLER-CHOSEN keyslot cost, and an
+// operator should not have to learn two vocabularies for one decision.
+//
+// It wraps the existing sentinels rather than replacing them, so
+// errors.Is(err, ErrInvalidArgon2Memory) stays true of the same value and
+// callers that already branch on those do not change.
+type Argon2CostError struct {
+	// Parameter is the cost that was refused: "memory" or "time".
+	Parameter string
+
+	// Value is what the caller asked for. Memory is in KiB.
+	Value int
+
+	// Minimum is the smallest value that would have been accepted.
+	Minimum int
+
+	// Err is the underlying sentinel, kept reachable through Unwrap.
+	Err error
+}
+
+func (e *Argon2CostError) Error() string {
+	return fmt.Sprintf("%s: requested %s %d, minimum %d", e.Err.Error(), e.Parameter, e.Value, e.Minimum)
+}
+
+func (e *Argon2CostError) Unwrap() error { return e.Err }

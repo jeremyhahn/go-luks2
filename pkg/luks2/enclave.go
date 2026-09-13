@@ -5,7 +5,6 @@
 package luks2
 
 import (
-	"crypto/rand"
 	"errors"
 	"io"
 
@@ -261,7 +260,7 @@ func randomSecret(op string, n int) (*enclave.MemoryEnclave, error) {
 	}
 
 	if err := e.WithBytes(func(b []byte) error {
-		_, err := io.ReadFull(rand.Reader, b)
+		_, err := io.ReadFull(cryptoRand, b)
 		return err
 	}); err != nil {
 		e.Destroy()

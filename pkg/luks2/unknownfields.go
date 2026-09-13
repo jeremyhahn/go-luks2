@@ -231,7 +231,7 @@ func (u unknownFields) mergeInto(typed []byte, object string) ([]byte, error) {
 		}
 		first = false
 
-		quoted, err := json.Marshal(name)
+		quoted, err := marshalCanonicalJSON(name)
 		if err != nil {
 			return nil, &MetadataJSONError{Object: object, Op: metadataJSONEncode, Member: name, Err: err}
 		}
@@ -321,9 +321,24 @@ func (k *Keyslot) UnmarshalJSON(data []byte) error {
 // decided where the keyslot is BUILT, in createMetadata; a serializer that
 // silently dropped a value the caller set would be deciding it twice, in the
 // one place a caller cannot see.
+// EVERY MarshalJSON BELOW ENCODES THROUGH marshalCanonicalJSON, NOT json.Marshal.
+//
+// encoding/json HTML-escapes <, > and & by default; json-c, which is what
+// cryptsetup writes the header with, emits them literally. The header's encoder
+// turns that off (marshalCanonicalJSON, header.go), but a type implementing
+// Marshaler is encoded by the bytes it RETURNS: the outer encoder compacts them
+// into the output and, with escaping off, neither adds escapes nor removes ones
+// already there. So a json.Marshal inside one of these methods reintroduces the
+// exact escapes the canonical encoder exists to avoid, and does it on the
+// members most likely to carry those characters -- a foreign token's strings and
+// the names of members this package does not model.
+//
+// Measured before the fix: a fido2-rp of `a<b>c&d` round-tripped as
+// `a\u003cb\u003ec\u0026d`, which is a different byte sequence for the same
+// string and breaks byte-for-byte conformance and the header digest with it.
 func (k Keyslot) MarshalJSON() ([]byte, error) {
 	type alias Keyslot
-	typed, err := json.Marshal(alias(k))
+	typed, err := marshalCanonicalJSON(alias(k))
 	if err != nil {
 		return nil, &MetadataJSONError{Object: metadataObjectKeyslot, Op: metadataJSONEncode, Err: err}
 	}
@@ -355,7 +370,7 @@ func (a *KeyslotArea) UnmarshalJSON(data []byte) error {
 // MarshalJSON encodes a keyslot area together with the members it carried in.
 func (a KeyslotArea) MarshalJSON() ([]byte, error) {
 	type alias KeyslotArea
-	typed, err := json.Marshal(alias(a))
+	typed, err := marshalCanonicalJSON(alias(a))
 	if err != nil {
 		return nil, &MetadataJSONError{Object: metadataObjectKeyslotArea, Op: metadataJSONEncode, Err: err}
 	}
@@ -382,7 +397,7 @@ func (k *KDF) UnmarshalJSON(data []byte) error {
 // MarshalJSON encodes a KDF together with the members it carried in.
 func (k KDF) MarshalJSON() ([]byte, error) {
 	type alias KDF
-	typed, err := json.Marshal(alias(k))
+	typed, err := marshalCanonicalJSON(alias(k))
 	if err != nil {
 		return nil, &MetadataJSONError{Object: metadataObjectKDF, Op: metadataJSONEncode, Err: err}
 	}
@@ -410,7 +425,7 @@ func (a *AntiForensic) UnmarshalJSON(data []byte) error {
 // it carried in.
 func (a AntiForensic) MarshalJSON() ([]byte, error) {
 	type alias AntiForensic
-	typed, err := json.Marshal(alias(a))
+	typed, err := marshalCanonicalJSON(alias(a))
 	if err != nil {
 		return nil, &MetadataJSONError{Object: metadataObjectAntiForensic, Op: metadataJSONEncode, Err: err}
 	}
@@ -446,7 +461,7 @@ func (t *Token) UnmarshalJSON(data []byte) error {
 // preserve, and every direct test of it still passes.
 func (t Token) MarshalJSON() ([]byte, error) {
 	type alias Token
-	typed, err := json.Marshal(alias(t))
+	typed, err := marshalCanonicalJSON(alias(t))
 	if err != nil {
 		return nil, &MetadataJSONError{Object: metadataObjectToken, Op: metadataJSONEncode, Err: err}
 	}
@@ -479,7 +494,7 @@ func (x *Segment) UnmarshalJSON(data []byte) error {
 // #143 measured and #151 was told to pin per type.
 func (x Segment) MarshalJSON() ([]byte, error) {
 	type alias Segment
-	typed, err := json.Marshal(alias(x))
+	typed, err := marshalCanonicalJSON(alias(x))
 	if err != nil {
 		return nil, &MetadataJSONError{Object: metadataObjectSegment, Op: metadataJSONEncode, Err: err}
 	}
@@ -512,7 +527,7 @@ func (x *Digest) UnmarshalJSON(data []byte) error {
 // #143 measured and #151 was told to pin per type.
 func (x Digest) MarshalJSON() ([]byte, error) {
 	type alias Digest
-	typed, err := json.Marshal(alias(x))
+	typed, err := marshalCanonicalJSON(alias(x))
 	if err != nil {
 		return nil, &MetadataJSONError{Object: metadataObjectDigest, Op: metadataJSONEncode, Err: err}
 	}
@@ -545,7 +560,7 @@ func (x *Config) UnmarshalJSON(data []byte) error {
 // #143 measured and #151 was told to pin per type.
 func (x Config) MarshalJSON() ([]byte, error) {
 	type alias Config
-	typed, err := json.Marshal(alias(x))
+	typed, err := marshalCanonicalJSON(alias(x))
 	if err != nil {
 		return nil, &MetadataJSONError{Object: metadataObjectConfig, Op: metadataJSONEncode, Err: err}
 	}
@@ -573,7 +588,7 @@ func (x *Requirements) UnmarshalJSON(data []byte) error {
 // carried in. Value receiver, for the reason given on Segment.MarshalJSON.
 func (x Requirements) MarshalJSON() ([]byte, error) {
 	type alias Requirements
-	typed, err := json.Marshal(alias(x))
+	typed, err := marshalCanonicalJSON(alias(x))
 	if err != nil {
 		return nil, &MetadataJSONError{Object: metadataObjectRequirements, Op: metadataJSONEncode, Err: err}
 	}

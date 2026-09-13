@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"slices"
 	"strconv"
@@ -23,6 +24,26 @@ const (
 
 	// KeyslotAreaAlignment is the alignment for keyslot areas
 	KeyslotAreaAlignment = 4096
+)
+
+// LUKS2 keyslot priorities. The member is OPTIONAL and its default is NORMAL,
+// so a keyslot with no priority is a normal one -- not an ignored one, which is
+// what reading the absent member as the zero value would say.
+//
+// The names exist because the numbers read backwards: the value that sorts
+// higher means "try this first". A bare 2 under a comment saying "lower
+// priority" is how addKey came to mark every added key as the preferred one.
+const (
+	// KeyslotPriorityIgnore marks a keyslot that should not be tried.
+	KeyslotPriorityIgnore = 0
+
+	// KeyslotPriorityNormal is the default, and the meaning of an ABSENT
+	// priority member.
+	KeyslotPriorityNormal = 1
+
+	// KeyslotPriorityPrefer marks a keyslot that should be tried FIRST. It is
+	// numerically the largest and semantically the highest.
+	KeyslotPriorityPrefer = 2
 )
 
 // AddKeyOptions contains options for adding a new key
@@ -46,6 +67,35 @@ type AddKeyOptions struct {
 
 	// PBKDF2 parameters (for pbkdf2 KDF type)
 	PBKDFIterTime int
+
+	// InheritedArgon2Cost is WRITTEN BY AddKey and never read by it. It carries
+	// the Argon2 cost the new keyslot was given when that cost came FROM THE
+	// CONTAINER rather than from this package's defaults, and is nil otherwise.
+	//
+	// It exists because the inherited value must not be silent. A volume
+	// deliberately formatted at 512 MiB -- chosen so it stays openable from a
+	// rescue USB or a small recovery box -- used to gain keyslots at this
+	// package's hardcoded 1 GiB default, inconsistent with every neighbor and
+	// precisely on the credential added for a recovery scenario. Inheriting
+	// fixes that by construction; reporting it is what lets an operator SEE
+	// which cost was used and that it was taken from the volume.
+	//
+	// A field rather than a log line, for the reason recorded on
+	// forgetKeyslotID (header.go): a logger in a layer-0 primitive, or a write
+	// to log/slog's process-global default, imposes a logging decision on every
+	// embedding application. cmd/luks2 is the application that turns this into
+	// something an operator reads.
+	InheritedArgon2Cost *KDF
+
+	// PBKDFIterations is an exact PBKDF2 iteration count. When it is non-zero
+	// it is written as given and PBKDFIterTime is not consulted, so a keyslot
+	// added to two machines from one specification carries identical cost
+	// instead of whatever each machine's benchmark happened to measure.
+	//
+	// It does NOT bypass the iteration floor -- see forcedPBKDF2Iterations. A
+	// count below the minimum for the chosen hash is refused with
+	// ErrPBKDFIterationsTooLow rather than written.
+	PBKDFIterations int
 
 	// There is deliberately NO key-size or cipher option here, and #55 asked for
 	// one. A keyslot's key size is not a preference: it is the length of the
@@ -97,7 +147,112 @@ type AddKeyOptions struct {
 // turned a silent default into a ~4 TiB allocation -- strictly worse than the
 // defect. The floor was added there in the same change; a producer must not be
 // widened into a consumer that cannot refuse what it will now receive.
-func addKeyFormatOptions(opts *AddKeyOptions) FormatOptions {
+func addKeyFormatOptions(opts *AddKeyOptions, metadata *LUKS2Metadata) (FormatOptions, *KDF) {
+	formatOpts := baseAddKeyFormatOptions(opts)
+
+	// INHERIT THE CONTAINER'S ARGON2 COST EXACTLY when the caller did not
+	// choose one.
+	//
+	// THE INVARIANT: every keyslot in a volume should be derivable by the
+	// hardware that owns the volume. The container's existing cost is the only
+	// evidence this package has about that hardware, and inheriting it exactly
+	// is how the invariant is kept.
+	//
+	// The defaults above are this package's, not the volume's, and using them
+	// unconditionally is what made AddKey write a 1 GiB keyslot onto a volume
+	// deliberately formatted at 512 MiB. cryptsetup's luksAddKey re-benchmarks
+	// instead of inheriting, which is the same mistake in a different
+	// direction: the new slot's cost is then decided by whichever machine
+	// happens to be running.
+	//
+	// NOT CLAMPED UP TO MinArgon2MemoryKB, and this is the case that makes the
+	// distinction concrete. THE MACHINE ADDING THE KEY NEED NOT BE THE MACHINE
+	// USING THE VOLUME. An operator adding a credential from a workstation with
+	// plenty of RAM, for a volume that lives on a 32 MiB device, would clamp
+	// successfully on the workstation and write a keyslot the target hardware
+	// cannot derive at all -- discovered later, by whoever needed that
+	// credential. On the small device itself the clamp at least fails loudly;
+	// remotely it fails silently, which is worse.
+	//
+	// And the clamp buys nothing to pay for that. A volume's resistance is
+	// bounded by its WEAKEST keyslot, and on a 32 MiB container the weak slots
+	// already exist -- adding a 64 MiB slot beside them does not make the
+	// volume harder to attack, because the attacker goes at a 32 MiB slot
+	// exactly as before. A rule that costs derivability on the target hardware
+	// and returns no security is not hardening.
+	//
+	// The floor still binds where there is no evidence to defer to: a cost the
+	// CALLER supplies (checked in addKeyWithPolicy, before anything is written)
+	// and a container with no complete Argon2 cost to inherit, which falls
+	// through to the defaults above -- all of which are above the floor.
+	// ChangeKey inherits on the same terms and for the same reason.
+	if !isArgon2Type(formatOpts.KDFType) || callerChoseArgon2Cost(opts) {
+		return formatOpts, nil
+	}
+	inherited := containerArgon2Cost(metadata)
+	if inherited == nil {
+		return formatOpts, nil
+	}
+
+	formatOpts.Argon2Time = *inherited.Time
+	formatOpts.Argon2Parallel = *inherited.CPUs
+	formatOpts.Argon2Memory = *inherited.Memory
+	return formatOpts, inherited
+}
+
+// callerArgon2Options returns ONLY the Argon2 costs the caller supplied, so the
+// create floor judges the caller's request and nothing else. Defaults and
+// inherited values are resolved later and are not the caller's to answer for.
+func callerArgon2Options(opts *AddKeyOptions) FormatOptions {
+	if opts == nil {
+		return FormatOptions{}
+	}
+	return FormatOptions{
+		KDFType:      baseAddKeyFormatOptions(opts).KDFType,
+		Argon2Time:   opts.Argon2Time,
+		Argon2Memory: opts.Argon2Memory,
+	}
+}
+
+// callerChoseArgon2Cost reports whether the caller supplied ANY Argon2 cost,
+// including a negative one. != 0 for the same reason addKeyFormatOptions uses
+// it (#112): a negative is still a deliberate choice, and treating it as "no
+// choice" would silently INHERIT the container's cost instead of reaching the
+// refusal in addKeyWithPolicy, which checks the caller's request -- via
+// callerArgon2Options -- before anything is written.
+func callerChoseArgon2Cost(opts *AddKeyOptions) bool {
+	return opts != nil && (opts.Argon2Time != 0 || opts.Argon2Memory != 0 || opts.Argon2Parallel != 0)
+}
+
+func isArgon2Type(kdfType string) bool {
+	return kdfType == KDFTypeArgon2id || kdfType == KDFTypeArgon2i
+}
+
+// containerArgon2Cost returns the Argon2 cost of the first keyslot in scan
+// order that carries a complete one, or nil.
+//
+// Scan order rather than map order, for the reason keyslotIDsInScanOrder
+// exists: ranging the map would make the inherited cost depend on which entry
+// Go happened to yield first, so two AddKey calls on one container could
+// disagree.
+func containerArgon2Cost(metadata *LUKS2Metadata) *KDF {
+	if metadata == nil {
+		return nil
+	}
+	for _, id := range keyslotIDsInScanOrder(metadata.Keyslots) {
+		kdf := metadata.Keyslots[id].KDF
+		if kdf == nil || !isArgon2Type(kdf.Type) {
+			continue
+		}
+		if kdf.Time == nil || kdf.Memory == nil || kdf.CPUs == nil {
+			continue
+		}
+		return kdf
+	}
+	return nil
+}
+
+func baseAddKeyFormatOptions(opts *AddKeyOptions) FormatOptions {
 	formatOpts := FormatOptions{
 		KDFType:        "argon2id",
 		HashAlgo:       DefaultHashAlgo,
@@ -127,6 +282,13 @@ func addKeyFormatOptions(opts *AddKeyOptions) FormatOptions {
 	}
 	if opts.PBKDFIterTime != 0 {
 		formatOpts.PBKDFIterTime = opts.PBKDFIterTime
+	}
+	// Copied on the same "zero means unset" rule as PBKDFIterTime above, and
+	// for the same reason: an out-of-range count must reach the refusal in
+	// forcedPBKDF2Iterations rather than be dropped here, or AddKey and Format
+	// would enforce different contracts for one parameter.
+	if opts.PBKDFIterations != 0 {
+		formatOpts.PBKDFIterations = opts.PBKDFIterations
 	}
 
 	return formatOpts
@@ -192,6 +354,28 @@ func AddKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKe
 // AddKey's exported signature has a consumer outside this repository. It is
 // unexported, so the wart does not reach the API.
 func addKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKeyOptions, assignedSlot *int) error {
+	// The default and the only policy any EXPORTED path can select. A
+	// credential arriving through AddKey came from the caller, so nothing is
+	// known about its entropy and the full floor applies.
+	return addKeyWithPolicy(device, existingPassphrase, newPassphrase, opts, assignedSlot, callerSuppliedCredential)
+}
+
+// addKeyWithPolicy is addKey with the keyslot cost policy made explicit.
+//
+// It is unexported and takes an unexported type, which is the whole mechanism:
+// the relaxed floor is reachable only from inside this package, and only from a
+// caller that GENERATED the credential it is enrolling. AddRecoveryKey
+// (recovery.go) is that caller, and today it is the only one: it passes
+// libraryGeneratedCredential where every other path takes addKey and the strict
+// default.
+//
+// A second such caller is expected -- enrolling an external key provider's
+// secret has the same shape, a 256-bit value this package drew or received
+// rather than one a human chose -- but it does not exist in this package yet,
+// and naming it here as though it did would describe a wiring that is not
+// there. See keyslotCostPolicy (kdf.go) for what the exemption is, what it is
+// not, and why it is not a field on AddKeyOptions.
+func addKeyWithPolicy(device string, existingPassphrase, newPassphrase []byte, opts *AddKeyOptions, assignedSlot *int, policy keyslotCostPolicy) error {
 	// Validate inputs
 	if err := ValidateDevicePath(device); err != nil {
 		return err
@@ -201,6 +385,21 @@ func addKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKe
 	}
 	if err := ValidatePassphrase(newPassphrase); err != nil {
 		return fmt.Errorf("invalid new passphrase: %w", err)
+	}
+
+	// A NEW KEYSLOT IS A KEYSLOT THIS PACKAGE CREATES, so a caller-supplied
+	// Argon2 cost is bound by the same floor Format applies. It was not, and
+	// the gap was reachable: AddKey with an explicit Argon2Memory of 32 wrote a
+	// keyslot Format refuses outright, so the floor held on one entry point and
+	// not the other.
+	//
+	// Checked HERE, before the lock and before the unlock, because a refusal
+	// that arrives after seconds of key derivation has already spent what the
+	// refusal was meant to save. Only the CALLER'S values are judged at this
+	// point; an inherited cost is resolved later, once the container has been
+	// read, and is clamped rather than refused.
+	if err := validateArgon2CreateCost(callerArgon2Options(opts)); err != nil {
+		return err
 	}
 
 	// Acquire exclusive lock
@@ -319,7 +518,14 @@ func addKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKe
 	// recovered volume key's, not the template keyslot's -- see the derivation
 	// above and #55; addKeyFormatOptions carries only the KDF choices, which are
 	// genuinely the caller's.
-	kdf, err := CreateKDF(addKeyFormatOptions(opts), newKeySize)
+	formatOpts, inherited := addKeyFormatOptions(opts, metadata)
+	if inherited != nil && opts != nil {
+		// Reported at the point of decision, the same way targetSlot is above,
+		// rather than left to be inferred from the header afterwards.
+		opts.InheritedArgon2Cost = inherited
+	}
+
+	kdf, err := createKDF(formatOpts, newKeySize, policy)
 	if err != nil {
 		return fmt.Errorf("failed to create KDF: %w", err)
 	}
@@ -391,12 +597,23 @@ func addKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKe
 		}
 	}
 
-	// Create new keyslot metadata
-	priority := 2 // Lower priority than original keyslot
+	// Create new keyslot metadata.
+	//
+	// NO PRIORITY IS WRITTEN, and what was here before was wrong in both halves
+	// at once: `priority := 2` under the comment "Lower priority than original
+	// keyslot". In LUKS2, 2 is PREFER -- HIGHER, tried first -- so every key
+	// this package added was marked as the one to try before the original,
+	// which is the opposite of the stated intent. MEASURED against cryptsetup
+	// 2.7.0: `config --priority prefer` writes 2, `--priority normal` deletes
+	// the member, and luksAddKey writes none.
+	//
+	// The intent -- a newly added key gets no special treatment -- IS the
+	// absent member, because absent means normal. Expressing it by omission
+	// makes the value and the meaning impossible to disagree again. See
+	// createMetadata (format.go) for the same decision on the format path.
 	newKeyslot := &Keyslot{
-		Type:     "luks2",
-		KeySize:  newKeySize,
-		Priority: &priority,
+		Type:    "luks2",
+		KeySize: newKeySize,
 		Area: &KeyslotArea{
 			Type:    "raw",
 			KeySize: newKeySize,
@@ -720,14 +937,52 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 	}
 	defer masterKey.Destroy()
 
-	// Create new KDF (keep same type as existing)
+	// Create the new KDF WITH THE COST THE KEYSLOT ALREADY HAD.
+	//
+	// A passphrase change is not a request to re-cost the keyslot. The argon2
+	// branch below always understood that; the pbkdf2 side did not, and left
+	// both its cost and its hash to be re-decided:
+	//
+	//	iterations  recalibrated against the 2000ms default budget
+	//	hash        replaced with DefaultHashAlgo -- sha256, whatever it was
+	//
+	// So an operator who deliberately configured a cost had it discarded by an
+	// unrelated passphrase change, silently and in both directions. MEASURED: a
+	// single ChangeKey on a container formatted with --pbkdf-force-iterations
+	// 1000 took ~6.3 seconds and left the keyslot at several million
+	// iterations. The volume still opened, which is why nothing caught it.
 	kdfType := targetKeyslot.KDF.Type
 	formatOpts := FormatOptions{
 		KDFType:  kdfType,
 		HashAlgo: DefaultHashAlgo,
 	}
+	if targetKeyslot.KDF.Hash != "" {
+		formatOpts.HashAlgo = targetKeyslot.KDF.Hash
+	}
 
-	// Copy existing Argon2 parameters or set defaults
+	// Copy existing Argon2 parameters or set defaults.
+	//
+	// AN INHERITED ARGON2 MEMORY COST IS PRESERVED, NOT RAISED TO
+	// MinArgon2MemoryKB, and this is the one place the create floor deliberately
+	// does not reach.
+	//
+	// THE INVARIANT, the same one AddKey keeps: every keyslot in a volume should
+	// be derivable by the hardware that owns the volume. A cost read out of the
+	// container is the only evidence this package has about that hardware --
+	// a volume formatted at 32 MiB was formatted by something that had 32 MiB --
+	// so raising it produces a keyslot that cannot be derived at all on the only
+	// hardware that uses the volume. Preserving makes nothing weaker than it
+	// already was: the operator is changing the credential, not the cost, and
+	// the volume's resistance is bounded by its weakest slot either way.
+	//
+	// It is the opposite of the PBKDF2 rule below, which DOES raise an inherited
+	// count to the floor, and the asymmetry is PHYSICAL rather than a
+	// preference: PBKDF2 iterations cost time, which any machine can spend;
+	// Argon2 memory costs RAM, which it may simply not have.
+	//
+	// The floor still binds where the cost is the CALLER's -- Format and AddKey
+	// -- because there is no container to take evidence from. See
+	// MinArgon2MemoryKB.
 	if kdfType == "argon2id" || kdfType == "argon2i" {
 		formatOpts.Argon2Time = 4
 		formatOpts.Argon2Memory = 1048576
@@ -741,6 +996,30 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 		if targetKeyslot.KDF.CPUs != nil {
 			formatOpts.Argon2Parallel = *targetKeyslot.KDF.CPUs
 		}
+	}
+
+	// The pbkdf2 equivalent, with one asymmetry that is not an oversight: the
+	// preserved count is RAISED TO THIS PACKAGE'S FLOOR if it sits below it.
+	//
+	// Argon2 has no such floor, so preserving there is unconditional. PBKDF2
+	// does (pbkdf2IterationFloor), and a container written elsewhere may
+	// legitimately carry a count under it -- cryptsetup's
+	// --pbkdf-force-iterations will write 1000. Preserving that exactly would
+	// mean forcedPBKDF2Iterations refusing the write, so an imported container
+	// could never have its passphrase changed at all; that is a worse outcome
+	// than a keyslot stronger than the one asked for, and it would be this
+	// package refusing to let an operator rotate a credential.
+	//
+	// Raising is also CLOSER to the old behavior than refusing: recalibration
+	// already replaced a low count with a much larger one. What changes is that
+	// the increase now stops at the floor instead of at whatever this machine
+	// benchmarks.
+	if isPBKDF2Type(normalizeKDFType(kdfType)) && targetKeyslot.KDF.Iterations != nil {
+		preserved := *targetKeyslot.KDF.Iterations
+		if floor := int(math.Ceil(pbkdf2IterationFloor(formatOpts.HashAlgo, pbkdf2ReferenceTargetMs))); preserved < floor {
+			preserved = floor
+		}
+		formatOpts.PBKDFIterations = preserved
 	}
 
 	kdf, err := CreateKDF(formatOpts, targetKeyslot.KeySize)
@@ -1018,7 +1297,21 @@ func listKeyslotsFrom(metadata *LUKS2Metadata) ([]KeyslotInfo, error) {
 			continue
 		}
 
-		priority := 0
+		// AN ABSENT PRIORITY IS NORMAL (1), NOT IGNORE (0).
+		//
+		// This defaulted to 0 and that is the wrong end of the scale: LUKS2
+		// gives priority the values 0 ignore, 1 normal, 2 prefer, and defines
+		// the member as OPTIONAL WITH A DEFAULT OF NORMAL. cryptsetup omits it
+		// for a normal keyslot -- MEASURED: `cryptsetup config --priority
+		// normal` deletes the member rather than writing 1 -- so essentially
+		// every keyslot in every cryptsetup-created container arrives here with
+		// no priority at all, and every one of them was being listed as
+		// "ignore": a slot an operator is told to skip, and that a
+		// priority-aware unlock would skip.
+		//
+		// It was already wrong for foreign containers before this package
+		// stopped emitting the default; now it would be wrong for our own too.
+		priority := KeyslotPriorityNormal
 		if ks.Priority != nil {
 			priority = *ks.Priority
 		}
@@ -1037,6 +1330,21 @@ func listKeyslotsFrom(metadata *LUKS2Metadata) ([]KeyslotInfo, error) {
 		}
 		if ks.KDF != nil {
 			info.KDFType = ks.KDF.Type
+			// Read through the pointers rather than copying the KDF, so a
+			// caller cannot reach the header's own structure through a
+			// listing and mutate it.
+			if ks.KDF.Iterations != nil {
+				info.PBKDF2Iterations = *ks.KDF.Iterations
+			}
+			if ks.KDF.Time != nil {
+				info.Argon2Time = *ks.KDF.Time
+			}
+			if ks.KDF.Memory != nil {
+				info.Argon2MemoryKB = *ks.KDF.Memory
+			}
+			if ks.KDF.CPUs != nil {
+				info.Argon2Parallel = *ks.KDF.CPUs
+			}
 		}
 		if ks.Area != nil {
 			info.Encryption = ks.Area.Encryption
@@ -1056,6 +1364,24 @@ type KeyslotInfo struct {
 	Priority   int
 	KDFType    string
 	Encryption string
+
+	// The keyslot's KDF COST, which is what an operator needs to see and could
+	// not get from this package without parsing the header themselves.
+	//
+	// It matters most where the costs on one volume DIFFER. ChangeKey preserves
+	// a slot's existing Argon2 memory cost even when it sits below
+	// MinArgon2MemoryKB -- deliberately, because raising it would ask the
+	// formatting hardware for RAM it may not have (see ChangeKey) -- so a
+	// rotated slot can legitimately read below what Format would ever write.
+	// That is the one thing about the decision an operator has to be able to
+	// observe, and a listing is where they would look.
+	//
+	// Zero where the KDF does not carry the parameter: a pbkdf2 slot has no
+	// Argon2 costs and an argon2 slot has no iteration count.
+	PBKDF2Iterations int
+	Argon2Time       int
+	Argon2MemoryKB   int
+	Argon2Parallel   int
 }
 
 // canonicalKeyslotID reports the slot number a keyslot key addresses, and
@@ -1392,16 +1718,33 @@ func wipeKeyslotArea(device string, keyslot *Keyslot) error {
 		return err
 	}
 
-	// Wipe with zeros
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
 		return err
 	}
 
+	// OVERWRITTEN WITH RANDOM, NOT ZEROED.
+	//
+	// Both destroy the key material equally well -- that is not what is at
+	// stake. What differs is what the destroyed area then LOOKS LIKE. A live
+	// keyslot's area holds AF-split material under a passphrase-derived key,
+	// which is indistinguishable from random; a zeroed area is
+	// distinguishable from every one of them at a glance. So zeroing published
+	// the one fact the removal was meant to end: that a key USED to be here and
+	// was revoked. Anyone holding the drive afterwards learns the container's
+	// key-management history -- how many credentials existed, which were
+	// destroyed and when relative to each other -- from the pattern alone.
+	//
+	// cryptsetup leaves a freed area random for this reason, and Format now
+	// fills the whole unallocated keyslots region the same way (format.go), so
+	// a slot that was never used and a slot that was destroyed are
+	// indistinguishable from each other as well as from a live one.
+	//
 	// In fixed-size chunks: size came out of a header this process did not
 	// write, and even bounded there is no reason to let it choose an
-	// allocation. Shared with WipeKeyslot, which zeroes an area without going
-	// through this function.
-	if err := writeZeros(f, size); err != nil {
+	// allocation. WipeKeyslot (wipe.go) still zeroes, with its own write loop
+	// and its own contract -- it is a destructive operator command, not part of
+	// a removal.
+	if err := writeRandom(f, size); err != nil {
 		return err
 	}
 

@@ -510,8 +510,8 @@ func TestAddKeyFormatOptionsPropagatesTheIterTime(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := addKeyFormatOptions(tt.opts).PBKDFIterTime; got != tt.want {
-				t.Fatalf("addKeyFormatOptions(%+v).PBKDFIterTime = %d, want %d", tt.opts, got, tt.want)
+			if got := baseAddKeyFormatOptions(tt.opts).PBKDFIterTime; got != tt.want {
+				t.Fatalf("baseAddKeyFormatOptions(%+v).PBKDFIterTime = %d, want %d", tt.opts, got, tt.want)
 			}
 		})
 	}
@@ -521,7 +521,7 @@ func TestAddKeyFormatOptionsPropagatesTheIterTime(t *testing.T) {
 // options are handed to CreateKDF, and that is where the refusal has to land.
 // Asserting the field alone would pin the plumbing without pinning the outcome.
 func TestAddKeyFormatOptionsRefusesAnUnusableIterTime(t *testing.T) {
-	opts := addKeyFormatOptions(&AddKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterTime: -1})
+	opts := baseAddKeyFormatOptions(&AddKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterTime: -1})
 
 	kdf, err := CreateKDF(opts, 32)
 	if err == nil {
@@ -536,7 +536,7 @@ func TestAddKeyFormatOptionsRefusesAnUnusableIterTime(t *testing.T) {
 // moved out of AddKey in the same change. A refactor that silently dropped the
 // Argon2 defaults would leave CreateKDF deriving with zero cost.
 func TestAddKeyFormatOptionsKeepsItsDefaults(t *testing.T) {
-	got := addKeyFormatOptions(nil)
+	got := baseAddKeyFormatOptions(nil)
 
 	if got.KDFType != KDFTypeArgon2id {
 		t.Fatalf("default KDFType = %q, want %q", got.KDFType, KDFTypeArgon2id)
@@ -550,7 +550,7 @@ func TestAddKeyFormatOptionsKeepsItsDefaults(t *testing.T) {
 	}
 
 	// An explicit choice overrides each default.
-	custom := addKeyFormatOptions(&AddKeyOptions{
+	custom := baseAddKeyFormatOptions(&AddKeyOptions{
 		KDFType: KDFTypePBKDF2SHA512, Hash: "sha512",
 		Argon2Time: 8, Argon2Memory: 2048, Argon2Parallel: 2,
 	})

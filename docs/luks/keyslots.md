@@ -52,6 +52,87 @@ Master key size in bytes:
 - 32 bytes (256 bits) for AES-128-XTS
 - 64 bytes (512 bits) for AES-256-XTS (default)
 
+### Argon2 cost floors: creating vs accepting
+
+These are two different decisions and this library keeps them apart.
+
+| | Bound | Applies to |
+|---|---|---|
+| **Create** | `MinArgon2MemoryKB` = 65536 | costs a *caller* supplies, on `Format` and `AddKey` |
+| **Accept** | `minArgon2Memory` = 8 KiB | every read path, `RemoveKey`, `KillSlot` |
+
+Refusing to *create* a weak keyslot is this library's judgement to make.
+Refusing to *touch* a container someone else created is not: cryptsetup has no
+such floor, a low-memory or embedded device has good reason to format below
+64 MiB, and a library that will not rotate a credential on a container the
+reference implementation considers valid has turned a hardening preference into
+an interop failure.
+
+**The invariant:** *every keyslot in a volume should be derivable by the hardware
+that owns the volume.* The container's existing cost is the only evidence this
+library has about that hardware, so `AddKey` and `ChangeKey` inherit it
+**exactly**, without clamping — including below the create floor.
+
+Clamping would break the invariant for exactly one slot, and buys nothing:
+
+- **It can lock out the owning hardware, silently.** The machine adding a key
+  need not be the machine using the volume. A clamp succeeds on a roomy
+  workstation and writes a keyslot the 32 MiB target cannot derive at all —
+  found later, by whoever needed that credential.
+- **It adds no resistance.** A volume is only as strong as its *weakest*
+  keyslot. Adding a 64 MiB slot beside four 32 MiB ones does not make the volume
+  harder to attack; the attacker goes at a 32 MiB slot exactly as before.
+
+The floor still binds wherever there is no evidence to defer to: costs the
+caller supplies explicitly, and a container with no Argon2 cost to inherit
+(which falls through to the package defaults, all above the floor).
+
+### AddKey and ChangeKey inherit the volume's Argon2 cost
+
+`AddKey` and `ChangeKey` take the Argon2 cost from the **container**, not from a
+package default, when the caller does not choose one.
+
+`AddKey`'s default used to be a hardcoded 1 GiB. On a volume deliberately
+formatted at 512 MiB — chosen so it stays openable from a rescue USB or a small
+recovery box — the first `AddKey` silently wrote a 1 GiB keyslot: inconsistent
+with every neighbor, and precisely on the credential added for a recovery
+scenario.
+
+The inherited value is **reported**, not silent: `AddKeyOptions.InheritedArgon2Cost`
+is written by `AddKey` and carries the container's cost when one was inherited,
+nil otherwise. It is a field rather than a log line for the reason recorded on
+`forgetKeyslotID` — a logger in a layer-0 primitive imposes a logging decision
+on every embedding application.
+
+Note that cryptsetup's `luksAddKey` does *not* inherit; it re-benchmarks, so the
+new slot's cost is decided by whichever machine happens to be running. On a
+machine with less memory than the last one that is the same mistake in the other
+direction.
+
+`ListKeyslots` reports each slot's KDF cost (`PBKDF2Iterations`, `Argon2Time`,
+`Argon2MemoryKB`, `Argon2Parallel`). That is how a preserved below-floor cost is
+observable: `ChangeKey` takes no options, so unlike `AddKey` it has no call-site
+field to report through.
+
+### priority
+
+Optional; `0` ignore, `1` normal, `2` prefer. **The default is normal**, and the
+larger value is the one tried *first*.
+
+A normal keyslot carries **no priority member at all**. cryptsetup omits it on
+`luksFormat` and `luksAddKey`, and `cryptsetup config --priority normal` deletes
+it rather than writing `1`; this library does the same. Writing the default
+states what every reader already assumes and breaks byte-identity for no
+benefit.
+
+The corollary matters when reading someone else's container: an **absent**
+priority is *normal*, not *ignore*. Since essentially every cryptsetup-created
+container has keyslots with no priority member, reading absence as the zero
+value would report every one of them as a slot to skip.
+
+A non-default priority is still written and still round-trips, including
+`0` (ignore) — which is why the field is a pointer rather than a plain `int`.
+
 ### af (Anti-Forensic)
 
 Protects against forensic key recovery:
@@ -192,10 +273,30 @@ err := luks2.WipeKeyslot(device, 1)
 ### Keyslot Wiping
 
 Wiping a keyslot:
-1. Overwrites the encrypted key area
+1. Overwrites the encrypted key area **with CSPRNG data**
 2. Removes JSON metadata
 3. Makes that passphrase unusable
 4. Does not affect other keyslots
+
+### Unused keyslot space is random, not zero
+
+`Format` fills the entire keyslots area with CSPRNG data — the tail of keyslot
+0's declared area and the ~15.7 MiB no keyslot occupies yet — and a destroyed
+keyslot's area is overwritten with random rather than zeroed.
+
+This is an **indistinguishability** property, not a secrecy one. Encrypted
+AF-split key material is indistinguishable from random; a zeroed range is
+distinguishable from all of it at a glance. Zeroes therefore publish the
+container's key-management history — how many credentials exist, where they sit,
+and which slots were used and later destroyed — to anyone holding the drive,
+without breaking any encryption. cryptsetup fills both ranges for the same
+reason.
+
+It costs about 20 ms on a ~375 ms format (measured over 20 runs, 64 MiB image),
+and the container is no longer sparse: 16 MiB is actually allocated.
+
+`WipeKeyslot` still zeroes. It is an explicit operator command with its own
+contract, not part of a key removal.
 
 ### Attack Resistance
 

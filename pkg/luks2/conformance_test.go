@@ -218,10 +218,20 @@ var (
 // goldenPrefixBytes is how much of a formatted image is captured and stamped.
 //
 // Format writes the two header copies and keyslot 0's area, all inside the
-// first ~550 KiB; everything past that is the zeroed data segment it never
-// touches. 2 MiB covers it with room for the multi-keyslot fixtures built on
-// top, and copying the full 64 MiB image instead would reintroduce as cost what
-// the memoization just removed.
+// first ~550 KiB. 2 MiB covers that with room for the multi-keyslot fixtures
+// built on top, and copying the full 64 MiB image instead would reintroduce as
+// cost what the memoization just removed.
+//
+// A STAMPED FIXTURE IS NOT BYTE-FOR-BYTE A FORMATTED CONTAINER PAST THIS
+// POINT, and since the keyslots-area fill it no longer can be cheaply. Format
+// now writes CSPRNG data over the whole keyslots area out to the data segment
+// at 16 MiB (format.go), so a stamped image carries that fill for its first 2
+// MiB and zeroes for the remaining ~14 MiB of keyslots area. Nothing here
+// depends on the difference -- cryptsetup does not read unallocated keyslot
+// space, and AddKey places new slots immediately after keyslot 0, well inside
+// the prefix -- and a test that needs the real fill calls Format directly, as
+// TestFormatFillsTheWholeKeyslotsAreaWithRandom does. Raising this to 16 MiB
+// would put a 16 MiB copy on all 51 call sites to fix nothing.
 const goldenPrefixBytes = 2 << 20
 
 func readImagePrefix(path string) ([]byte, error) {

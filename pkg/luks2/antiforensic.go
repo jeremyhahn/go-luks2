@@ -5,7 +5,6 @@
 package luks2
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/binary"
@@ -142,7 +141,7 @@ func afSplitInto(dst, data, buffer []byte, stripes int, hashFunc func() hash.Has
 	// which for the enclave path is locked memory, so the stripes are never
 	// anywhere else.
 	randomSize := blockSize * (stripes - 1)
-	if _, err := io.ReadFull(rand.Reader, dst[:randomSize]); err != nil {
+	if _, err := io.ReadFull(cryptoRand, dst[:randomSize]); err != nil {
 		return fmt.Errorf("failed to generate random data: %w", err)
 	}
 

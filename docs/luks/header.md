@@ -92,6 +92,48 @@ The JSON area follows the binary header and contains structured metadata:
 }
 ```
 
+### On-disk encoding
+
+The example above is pretty-printed for reading. **What is written to disk is
+compact**: no newlines, no indentation, one NUL terminator after the closing
+brace, and zero padding to the end of the JSON area.
+
+Three properties of the encoding are conformance requirements, not style:
+
+| Property | Why |
+|---|---|
+| Compact | The JSON area is a fixed 12288 bytes and cannot grow (the keyslots and the data segment are already placed), so indentation is charged against the keyslot budget. Indented, only 22 of the 32 keyslots LUKS2 defines fit; compact, all 32 fit in 10676 bytes. |
+| No HTML escaping | Go's `encoding/json` escapes `<`, `>` and `&` as `\u003c`, `\u003e` and `\u0026` by default. json-c, which cryptsetup uses, does not. |
+| No trailing newline | `json.Encoder.Encode` appends one; it would land between the closing brace and the NUL terminator. |
+
+Byte values that exceed 2^53 are written as JSON **strings** (`"offset"`,
+`"size"`, `"iv_tweak"`, `"json_size"`, `"keyslots_size"`) because JSON numbers
+are doubles; counts and sizes that do not (`"key_size"`, `"iterations"`,
+`"stripes"`, `"sector_size"`) are written bare. This matches the LUKS2
+specification and cryptsetup exactly.
+
+Conformance is asserted rather than assumed. `TestCanonicalJSONReencodes-
+CryptsetupsHeaderByteForByte` parses a container cryptsetup wrote and re-encodes
+it, requiring identical bytes; `TestFormattedBinaryHeaderMatchesCryptsetup`
+compares two independently formatted containers and requires the whole 4096-byte
+binary header to match outside the header salt, the derived checksum, and
+`sequence_id`.
+
+Byte-identity with cryptsetup's json-c encoder holds **up to ten entries** in
+any of `keyslots`, `tokens`, `segments` or `digests`. Go's `encoding/json` sorts
+object keys as strings while json-c preserves insertion order, so at eleven
+keyslots cryptsetup writes `0,1,...,9,10` and this library writes
+`0,1,10,2,...,9`. Both are conformant — JSON objects are unordered — and both
+parse identically; only a byte comparison sees it.
+
+### sequence_id
+
+`sequence_id` is a monotonic counter, not a format constant: the LUKS2
+specification defines it as increased on update, and a reader takes the header
+copy with the higher value. cryptsetup writes 3 after `luksFormat` because its
+format performs three header writes; this library writes 1. Both are valid, and
+the value records a container's write history rather than describing its layout.
+
 ## JSON Sections
 
 ### keyslots

@@ -374,7 +374,16 @@ func EnrollKeyProvider(ctx context.Context, device string, existing []byte, p Ke
 	// remove.
 	err = borrowSecret("provider credential", credential, func(raw []byte) error {
 		var inner error
-		keyslot, tokenID, inner = enrollWithToken(device, existing, raw, opts, p.Token())
+		// callerSuppliedCredential, deliberately: this secret arrives from an
+		// external helper rather than from randomSecret here, so it keeps the
+		// full hash-dependent floor -- which is exactly what this path did
+		// before the policy became a parameter. The kdf.go rationale names an
+		// enrolled provider key as a candidate for the exemption on the grounds
+		// that it is also a full-entropy value, and it may well be; granting it
+		// is a separate decision about a credential this package did not draw,
+		// and is not made here as a side effect of threading the parameter
+		// through.
+		keyslot, tokenID, inner = enrollWithToken(device, existing, raw, opts, p.Token(), callerSuppliedCredential)
 		return inner
 	})
 	if err != nil {
@@ -408,7 +417,11 @@ func EnrollKeyProvider(ctx context.Context, device string, existing []byte, p Ke
 // credential they are still using. When the rollback itself fails the caller
 // gets an OrphanedKeyslotError naming the slot, because at that point the only
 // remedy is a human with the device.
-func enrollWithToken(device string, existing, credential []byte, opts *AddKeyOptions, token *Token) (keyslot, tokenID int, err error) {
+// policy is the keyslot cost policy the new keyslot is written under. It is a
+// parameter rather than a constant because the two callers differ: a recovery
+// key is bytes THIS PACKAGE drew, while a key provider's secret arrives from
+// outside it. See keyslotCostPolicy (kdf.go).
+func enrollWithToken(device string, existing, credential []byte, opts *AddKeyOptions, token *Token, policy keyslotCostPolicy) (keyslot, tokenID int, err error) {
 	if err := ValidateDevicePath(device); err != nil {
 		return -1, -1, err
 	}
@@ -430,7 +443,7 @@ func enrollWithToken(device string, existing, credential []byte, opts *AddKeyOpt
 	// frozen -- it has a consumer outside this repository -- which is why the
 	// out-parameter exists.
 	assignedSlot := -1
-	if err := addKey(device, existing, credential, opts, &assignedSlot); err != nil {
+	if err := addKeyWithPolicy(device, existing, credential, opts, &assignedSlot, policy); err != nil {
 		return -1, -1, &KeyProviderError{Op: "enroll", Err: err}
 	}
 	if assignedSlot < 0 {

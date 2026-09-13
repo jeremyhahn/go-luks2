@@ -586,7 +586,8 @@ func TestChangeKeyOnASingleKeyslotVolumeIsStillAllowed(t *testing.T) {
 // state exists in which the header names an area holding material no passphrase
 // can derive. That is what this asserts, because it is what a crash-free run can
 // actually observe -- the ordering itself is pinned by the guard on the wipe
-// coming last in the source, and by the old area being zero afterwards.
+// coming last in the source, and by the old area no longer holding the material
+// it held before the change.
 func TestChangeKeyWritesTheNewMaterialBeforeDestroyingTheOld(t *testing.T) {
 	device := newImage(t, "changekey-relocates.img")
 	formatWithLibrary(t, device)
@@ -606,6 +607,8 @@ func TestChangeKeyWritesTheNewMaterialBeforeDestroyingTheOld(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unreadable area size: %v", err)
 	}
+
+	materialBefore := readAreaBytes(t, device, oldOffset, oldSize)
 
 	if err := ChangeKey(device, old, updated, 0); err != nil {
 		t.Fatalf("ChangeKey failed: %v", err)
@@ -638,8 +641,19 @@ func TestChangeKeyWritesTheNewMaterialBeforeDestroyingTheOld(t *testing.T) {
 	// The old material is gone: relocating must not leave a second copy of the
 	// keyslot's key material behind, encrypted under a passphrase that has just
 	// been retired.
-	if leftovers := readAreaBytes(t, device, oldOffset, oldSize); !bytes.Equal(leftovers, make([]byte, oldSize)) {
+	//
+	// The freed area is checked against WHAT IT HELD, not against zeroes. It is
+	// overwritten with CSPRNG data rather than zeroed (wipeKeyslotArea), because
+	// a zeroed range is distinguishable from live key material at a glance and
+	// so announces that a credential was revoked here -- see
+	// TestWipeKeyslotAreaLeavesRandomNotZeroes. Comparing against zeroes would
+	// therefore assert the disclosure rather than the destruction.
+	leftovers := readAreaBytes(t, device, oldOffset, oldSize)
+	if bytes.Equal(leftovers, materialBefore) {
 		t.Fatal("the old keyslot area still holds key material after ChangeKey")
+	}
+	if bytes.Equal(leftovers, make([]byte, oldSize)) {
+		t.Fatal("the old keyslot area was zeroed; that discloses which slots have been retired")
 	}
 
 	if err := TestKey(device, updated); err != nil {
@@ -1178,7 +1192,8 @@ func TestAddKeyOptionsDoesNotSilentlyDiscardANegativeArgon2Cost(t *testing.T) {
 	} {
 		t.Run(tc.field, func(t *testing.T) {
 			opts := tc.opts
-			got := tc.got(addKeyFormatOptions(&opts))
+			formatOpts, _ := addKeyFormatOptions(&opts, nil)
+			got := tc.got(formatOpts)
 			if got == tc.deflt {
 				t.Fatalf("%s: -1 was discarded and the default %d used instead. The caller passed a "+
 					"value and the library ignored it without saying so (#112).", tc.field, tc.deflt)
@@ -1194,7 +1209,7 @@ func TestAddKeyOptionsDoesNotSilentlyDiscardANegativeArgon2Cost(t *testing.T) {
 // unset field into a propagated zero, or every caller using AddKeyOptions{}
 // would get a KDF with zero cost.
 func TestZeroStillMeansUseTheDefault(t *testing.T) {
-	f := addKeyFormatOptions(&AddKeyOptions{})
+	f, _ := addKeyFormatOptions(&AddKeyOptions{}, nil)
 	if f.Argon2Time != 4 || f.Argon2Memory != 1048576 || f.Argon2Parallel != 4 {
 		t.Fatalf("an unset AddKeyOptions no longer yields the defaults: time=%d memory=%d parallel=%d",
 			f.Argon2Time, f.Argon2Memory, f.Argon2Parallel)

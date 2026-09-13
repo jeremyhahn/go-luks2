@@ -543,7 +543,13 @@ func TestSecurityConstants(t *testing.T) {
 		{"MaxKeySize", MaxKeySize, 512},
 		{"MinSectorSize", MinSectorSize, 512},
 		{"MaxSectorSize", MaxSectorSize, 4096},
-		{"DigestIterations", DigestIterations, 100000},
+		// The digest cost is CALIBRATED now, so there is no constant here to
+		// bound. What is bounded is its target: see
+		// TestDigestCalibrationTargetsItsBudget, and DigestIterationTargetMs
+		// for why this parameter defends nothing and 100ms is cryptsetup's own
+		// measured target.
+		{"DigestIterationTargetMs", DigestIterationTargetMs, 1},
+		{"DigestCalibrationKeyLen", DigestCalibrationKeyLen, 32},
 	}
 
 	for _, tt := range tests {

@@ -678,6 +678,134 @@ func pbkdf2IterationFloor(hashAlgo string, targetMs int) float64 {
 	return floor
 }
 
+// keyslotCostPolicy says which PBKDF2 floor applies to a keyslot being created,
+// and it exists because ONE FLOOR WAS SERVING TWO POPULATIONS.
+//
+// # THE DISTINCTION
+//
+// A PBKDF2 iteration count buys exactly one thing: it multiplies the cost of
+// each guess in an offline SEARCH. That makes it decisive for a credential
+// whose entropy is unknown -- a human-chosen passphrase is drawn from a space
+// an attacker can enumerate, and pbkdf2RecommendedIterations is the floor that
+// keeps enumeration expensive. It stays, unchanged, for everything a caller
+// hands in.
+//
+// It makes no difference at all for a credential THIS LIBRARY GENERATED. A
+// recovery key or an enrolled provider key is 256 bits straight from
+// randomSecret; there is no candidate list, so there is no search, so there is
+// nothing for the multiplier to multiply. Stretching it defends against no
+// attack that exists, while the floor makes systemd's own parameters
+// unwritable: systemd enrolls pbkdf2/sha512/1000, and the sha512 floor is
+// 210000, so this package could not reproduce a systemd-enrolled header even
+// when told exactly what to write.
+//
+// # WHY THIS SHAPE RECURS, AND WHERE IT IS INVALID
+//
+// The same argument -- "the input is a full-entropy CSPRNG secret, so the
+// iteration count defends nothing" -- was made about the master-key DIGEST
+// earlier in this package's history. It was ACTED ON AND REVERTED, because the
+// premise about cryptsetup's behavior was measured with a flag that wrote the
+// answer into the measurement (see DigestIterationTargetMs, security.go).
+//
+// The reasoning is sound HERE and was sound there; what failed there was the
+// evidence, not the logic. The lesson is not to distrust the argument but to
+// check what is actually being enumerated: here it is nothing, because the
+// credential is 256 CSPRNG bits this package drew itself. The same number under
+// a human passphrase would be catastrophic, and that is precisely why the
+// exemption is not reachable from outside this package.
+//
+// # WHY IT IS A TYPE AND NOT A BOOL ON AN OPTIONS STRUCT
+//
+// The exemption must be reachable only BECAUSE the library produced the
+// credential, never because a caller asked for it. A public Force or SkipFloor
+// field is a floor that can be argued around, which is not a floor. So this
+// type is unexported, its zero value is the STRICT policy, and no exported API
+// carries it: a caller holding a weak passphrase has no route to the exempt
+// path even by mistake.
+type keyslotCostPolicy int
+
+const (
+	// callerSuppliedCredential is the strict policy and the ZERO VALUE, so
+	// anything that forgets to choose gets the floor rather than the exemption.
+	callerSuppliedCredential keyslotCostPolicy = iota
+
+	// libraryGeneratedCredential relaxes the hash-dependent floor to
+	// minPBKDF2Iterations for a credential this package drew from randomSecret.
+	// Only a caller that generated the bytes it is enrolling may select it.
+	// AddRecoveryKey is that caller and currently the only one; enrolling an
+	// external provider's secret has the same shape and is expected to join it,
+	// but no such path exists in this package yet.
+	libraryGeneratedCredential
+)
+
+// pbkdf2FloorFor returns the smallest iteration count a policy permits.
+//
+// The exempt path KEEPS A FLOOR; it does not lose one. minPBKDF2Iterations is
+// LUKS2's own minimum and is exactly what systemd writes, so honoring it costs
+// nothing and still refuses zero, negative and absurd values.
+func pbkdf2FloorFor(hashAlgo string, policy keyslotCostPolicy) int {
+	if policy == libraryGeneratedCredential {
+		return minPBKDF2Iterations
+	}
+	// Rounded UP. pbkdf2IterationFloor returns a float because its other caller
+	// compares it against an unrounded extrapolation; truncating here would
+	// admit a count one iteration below the floor.
+	return int(math.Ceil(pbkdf2IterationFloor(hashAlgo, pbkdf2ReferenceTargetMs)))
+}
+
+// forcedPBKDF2Iterations validates an explicit PBKDF2 iteration count -- the
+// one a caller supplies through FormatOptions.PBKDFIterations or
+// AddKeyOptions.PBKDFIterations -- and returns it unchanged if it is one this
+// package is willing to write.
+//
+// WHY AN EXPLICIT COUNT EXISTS AT ALL. Calibration answers "how much work fits
+// in N milliseconds of THIS machine's time", so it produces a different number
+// on every host and on the same host under different load. That is the right
+// default and the wrong thing for reproducible provisioning, where two
+// containers built from one specification must be identical, and for a
+// conformance test that has to compare bytes with cryptsetup. It is the
+// analog of cryptsetup's --pbkdf-force-iterations.
+//
+// WHY IT STILL RESPECTS THE FLOOR. cryptsetup's --pbkdf-force-iterations
+// bypasses its own minimum. This package deliberately does not copy that: a
+// floor any caller can argue around is not a floor, and unlike a slow benchmark
+// the mistake is permanent -- nothing can strengthen a keyslot that is already
+// on disk. The bound applied is exactly the one calibration would have applied
+// at the reference budget, so an explicit count and a calibrated one are held
+// to the same standard and the option cannot be used to obtain a keyslot
+// BenchmarkPBKDF2 would have refused to return.
+//
+// The floor is hash-dependent (pbkdf2IterationFloor): 600000 for sha256,
+// 210000 for sha384 and sha512, and minPBKDF2Iterations for a hash with no
+// published recommendation -- unless the policy says this package generated the
+// credential itself, in which case see keyslotCostPolicy for what changes and
+// why.
+func forcedPBKDF2Iterations(hashAlgo string, iterations int, policy keyslotCostPolicy) (int, error) {
+	minimum := pbkdf2FloorFor(hashAlgo, policy)
+
+	if iterations < minimum {
+		return 0, &PBKDFIterationsError{
+			Hash:       hashAlgo,
+			Iterations: iterations,
+			Minimum:    minimum,
+			Maximum:    maxKDFIterations,
+			Err:        ErrPBKDFIterationsTooLow,
+		}
+	}
+
+	if iterations > maxKDFIterations {
+		return 0, &PBKDFIterationsError{
+			Hash:       hashAlgo,
+			Iterations: iterations,
+			Minimum:    minimum,
+			Maximum:    maxKDFIterations,
+			Err:        ErrPBKDFIterationsTooHigh,
+		}
+	}
+
+	return iterations, nil
+}
+
 // CreateKDF creates a KDF structure based on options
 // Supported KDF types:
 //   - "pbkdf2" - PBKDF2 with hash from HashAlgo option (default: sha256) [FIPS-approved]
@@ -688,6 +816,12 @@ func pbkdf2IterationFloor(hashAlgo string, targetMs int) float64 {
 //   - "argon2i" - Argon2i [NOT FIPS-approved, refused in FIPS mode]
 //   - "argon2id" - Argon2id [NOT FIPS-approved, refused in FIPS mode, default]
 func CreateKDF(opts FormatOptions, keySize int) (*KDF, error) {
+	// The EXPORTED entry point is always strict. The exemption has no route
+	// through the public API by construction -- see keyslotCostPolicy.
+	return createKDF(opts, keySize, callerSuppliedCredential)
+}
+
+func createKDF(opts FormatOptions, keySize int, policy keyslotCostPolicy) (*KDF, error) {
 	kdfType := normalizeKDFType(opts.KDFType)
 	if kdfType == "" {
 		kdfType = KDFTypeArgon2id // Default
@@ -709,7 +843,7 @@ func CreateKDF(opts FormatOptions, keySize int) (*KDF, error) {
 
 	// Handle PBKDF2 variants (including convenience aliases)
 	if isPBKDF2Type(kdfType) {
-		return createPBKDF2KDF(kdfType, opts, saltB64, keySize)
+		return createPBKDF2KDF(kdfType, opts, saltB64, keySize, policy)
 	}
 
 	// Handle Argon2 variants
@@ -732,16 +866,33 @@ func isPBKDF2Type(kdfType string) bool {
 }
 
 // createPBKDF2KDF creates a PBKDF2 KDF structure
-func createPBKDF2KDF(kdfType string, opts FormatOptions, saltB64 string, keySize int) (*KDF, error) {
-	iterTime := opts.PBKDFIterTime
-	if iterTime == 0 {
-		iterTime = 2000 // 2 seconds default
-	}
-
+func createPBKDF2KDF(kdfType string, opts FormatOptions, saltB64 string, keySize int, policy keyslotCostPolicy) (*KDF, error) {
 	// Determine hash algorithm from KDF type or HashAlgo option
 	hashAlgo := getHashAlgoForKDFType(kdfType, opts.HashAlgo)
 
-	iterations, err := BenchmarkPBKDF2(hashAlgo, keySize, iterTime)
+	// AN EXPLICIT COUNT TAKES PRECEDENCE OVER THE TIME BUDGET, and the two are
+	// not combined: PBKDFIterations names the number to write, PBKDFIterTime
+	// names a budget to calibrate against, and there is nothing for calibration
+	// to contribute once the number is given. A caller that sets both gets the
+	// explicit one, which is what "skips calibration when non-zero" means.
+	//
+	// Ignoring a caller's parameter is normally how a silent defect starts --
+	// see addKeyFormatOptions on PBKDFIterTime -- and it is safe here for one
+	// reason: the explicit count is BOUNDED by forcedPBKDF2Iterations, so the
+	// path that skips calibration cannot skip the floor calibration applies.
+	var (
+		iterations int
+		err        error
+	)
+	if opts.PBKDFIterations != 0 {
+		iterations, err = forcedPBKDF2Iterations(hashAlgo, opts.PBKDFIterations, policy)
+	} else {
+		iterTime := opts.PBKDFIterTime
+		if iterTime == 0 {
+			iterTime = pbkdf2ReferenceTargetMs
+		}
+		iterations, err = BenchmarkPBKDF2(hashAlgo, keySize, iterTime)
+	}
 	if err != nil {
 		return nil, err
 	}

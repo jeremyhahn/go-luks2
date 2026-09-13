@@ -133,21 +133,33 @@ func TestWriteHeaderKeepsTheBackupOutOfThePrimaryArea(t *testing.T) {
 
 	// Confirm the fixture actually straddles the old threshold. Without this,
 	// the test could pass by never reaching the condition it exists to check.
-	encoded, err := json.MarshalIndent(metadata, "", "  ")
+	//
+	// TWO ORACLES, TWO QUESTIONS, and they are not interchangeable. The
+	// threshold this regression is about is a property of the INDENTED encoding
+	// the writer used at the time -- nextPowerOf2(len(indented)+1) crossing 8192
+	// is what moved the backup header -- so that measurement stays on
+	// MarshalIndent. Whether the fixture FITS is a question about the bytes the
+	// writer produces TODAY, which is marshalCanonicalJSON.
+	indented, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
 		t.Fatalf("failed to marshal the fixture: %v", err)
 	}
-	if len(encoded) <= 8192 {
-		t.Fatalf("fixture JSON is %d bytes, which does not exceed the 8192 at which the old sizing overflowed"+
-			" (a keyslot costs about %d bytes; raise the keyslot count)", len(encoded), keyslotJSONCost)
+	if len(indented) <= 8192 {
+		t.Fatalf("fixture JSON is %d indented bytes, which does not exceed the 8192 at which the old sizing overflowed"+
+			" (a keyslot costs about %d bytes; raise the keyslot count)", len(indented), keyslotJSONCost)
+	}
+
+	encoded, err := marshalCanonicalJSON(metadata)
+	if err != nil {
+		t.Fatalf("failed to marshal the fixture: %v", err)
 	}
 	if len(encoded) >= LUKS2DefaultSize {
 		t.Fatalf("fixture JSON is %d bytes, which does not fit the %d-byte area at all;"+
 			" this test needs the window where the old code corrupted and the new code succeeds",
 			len(encoded), LUKS2DefaultSize)
 	}
-	t.Logf("fixture: %d keyslots, %d bytes of JSON (area %d, JSON area %d)",
-		keyslots, len(encoded), LUKS2HeaderMinSize, LUKS2DefaultSize)
+	t.Logf("fixture: %d keyslots, %d bytes of JSON (%d indented; area %d, JSON area %d)",
+		keyslots, len(encoded), len(indented), LUKS2HeaderMinSize, LUKS2DefaultSize)
 
 	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
 		t.Fatalf("writeHeaderInternal refused metadata that fits: %v", err)
@@ -206,6 +218,14 @@ func TestWriteHeaderKeepsTheBackupOutOfThePrimaryArea(t *testing.T) {
 // metadata genuinely exceeds the container's fixed JSON area, the write is
 // refused and the device is left exactly as it was. Enlarging the area to make
 // it fit would move the second header copy onto the keyslot key material.
+//
+// HOW THE FIXTURE REACHES THE LIMIT CHANGED, and the change is the point of the
+// compact encoding. Under MarshalIndent, 32 keyslots -- the LUKS2 maximum --
+// produced 17558 bytes and were refused; the container could not hold the
+// keyslot complement the format defines. Compact, the same 32 keyslots fit with
+// room to spare (see TestWriteHeaderAcceptsTheMaximumKeyslotCount), so the
+// overflow is now reached the way a real header reaches it: a token on top of a
+// full set of keyslots.
 func TestWriteHeaderRefusesMetadataThatDoesNotFit(t *testing.T) {
 	const keyslots = LUKS2MaxKeyslots // 32, the LUKS2 maximum
 
@@ -216,8 +236,13 @@ func TestWriteHeaderRefusesMetadataThatDoesNotFit(t *testing.T) {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 	padKeyslots(t, metadata, keyslots)
+	metadata.Tokens["0"] = &Token{
+		Type:     "systemd-tpm2",
+		Keyslots: []string{"0"},
+		TPM2Blob: encodeBase64(bytes.Repeat([]byte{0x5A}, LUKS2DefaultSize)),
+	}
 
-	encoded, err := json.MarshalIndent(metadata, "", "  ")
+	encoded, err := marshalCanonicalJSON(metadata)
 	if err != nil {
 		t.Fatalf("failed to marshal the fixture: %v", err)
 	}
@@ -260,6 +285,55 @@ func TestWriteHeaderRefusesMetadataThatDoesNotFit(t *testing.T) {
 	key, err := getMasterKey(device, passphrase, reread)
 	if err != nil {
 		t.Fatalf("the volume no longer opens after a refused write: %v", err)
+	}
+	key.Destroy()
+}
+
+// TestWriteHeaderAcceptsTheMaximumKeyslotCount is the behavioral consequence
+// of the compact encoding, asserted on a real container rather than on byte
+// counts.
+//
+// LUKS2 defines 32 keyslots. Under MarshalIndent this package could write 22 of
+// them into the 12288-byte area and refused the rest -- a container that could
+// not hold the complement the format allows, for no reason but whitespace.
+// cryptsetup, writing the same metadata through json-c, has never had that
+// limit.
+func TestWriteHeaderAcceptsTheMaximumKeyslotCount(t *testing.T) {
+	const keyslots = LUKS2MaxKeyslots
+
+	device, passphrase := headerSizeVolume(t)
+
+	hdr, metadata, err := ReadHeader(device)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+	padKeyslots(t, metadata, keyslots)
+
+	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
+		t.Fatalf("writeHeaderInternal refused the %d keyslots LUKS2 permits: %v", keyslots, err)
+	}
+	if hdr.HeaderSize != LUKS2HeaderMinSize {
+		t.Fatalf("HeaderSize = %d, want %d -- the area was resized to hold the keyslots", hdr.HeaderSize, LUKS2HeaderMinSize)
+	}
+
+	_, primary, err := ReadHeader(device)
+	if err != nil {
+		t.Fatalf("the primary header no longer parses: %v", err)
+	}
+	if len(primary.Keyslots) != keyslots {
+		t.Fatalf("primary header has %d keyslots after writing %d", len(primary.Keyslots), keyslots)
+	}
+	_, secondary, err := ReadSecondaryHeader(device)
+	if err != nil {
+		t.Fatalf("the secondary header no longer parses: %v", err)
+	}
+	if len(secondary.Keyslots) != keyslots {
+		t.Fatalf("secondary header has %d keyslots after writing %d", len(secondary.Keyslots), keyslots)
+	}
+
+	key, err := getMasterKey(device, passphrase, primary)
+	if err != nil {
+		t.Fatalf("the volume no longer opens with a full keyslot complement: %v", err)
 	}
 	key.Destroy()
 }

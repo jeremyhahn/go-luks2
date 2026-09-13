@@ -250,6 +250,30 @@ type RecoveryKeyOptions struct {
 	Argon2Time     int
 	Argon2Memory   int
 	Argon2Parallel int
+
+	// Hash selects the PBKDF2 hash when KDFType is pbkdf2 (default: sha256).
+	Hash string
+
+	// PBKDFIterations is an exact PBKDF2 iteration count. Zero calibrates, as
+	// before.
+	//
+	// This is the ONLY place the library-generated exemption becomes visible.
+	// The relaxed floor is consulted only for an explicit count -- a calibrated
+	// one is bounded by the benchmark instead -- so without this field the
+	// exemption is selected and never binds. The point of it is to be able to
+	// reproduce a systemd-enrolled header: systemd writes pbkdf2/sha512/1000,
+	// and the sha512 floor of 210000 makes that unwritable for a credential a
+	// CALLER supplied.
+	//
+	// It is safe HERE and nowhere else: the credential this enrolls is drawn by
+	// GenerateRecoveryKey from randomSecret, 256 bits with no candidate list, so
+	// the iteration count has no search to multiply. The same field on
+	// AddKeyOptions is held to the full hash-dependent floor, because the bytes
+	// arriving there came from outside. The exemption still keeps
+	// minPBKDF2Iterations, so zero, negative and absurd counts are refused.
+	//
+	// See keyslotCostPolicy (kdf.go) for the full argument.
+	PBKDFIterations int
 }
 
 // GenerateRecoveryKey generates a cryptographically secure recovery key.
@@ -359,11 +383,13 @@ func AddRecoveryKey(device string, existingPassphrase []byte, opts *RecoveryKeyO
 	}
 
 	addOpts := &AddKeyOptions{
-		Keyslot:        opts.Keyslot,
-		KDFType:        opts.KDFType,
-		Argon2Time:     opts.Argon2Time,
-		Argon2Memory:   opts.Argon2Memory,
-		Argon2Parallel: opts.Argon2Parallel,
+		Keyslot:         opts.Keyslot,
+		KDFType:         opts.KDFType,
+		Argon2Time:      opts.Argon2Time,
+		Argon2Memory:    opts.Argon2Memory,
+		Argon2Parallel:  opts.Argon2Parallel,
+		Hash:            opts.Hash,
+		PBKDFIterations: opts.PBKDFIterations,
 	}
 
 	// The credential is borrowed for the length of the enrollment and no
@@ -371,10 +397,22 @@ func AddRecoveryKey(device string, existingPassphrase []byte, opts *RecoveryKeyO
 	// where addKey CHOSE it rather than inferring it afterwards (#42), writes
 	// the token naming that slot, and rolls the keyslot back if the token write
 	// fails.
+	//
+	// libraryGeneratedCredential, because THIS function drew the bytes it is
+	// enrolling: the credential is randomSecret output, 256 bits with no
+	// candidate list behind it. A PBKDF2 iteration count multiplies the cost of
+	// each guess in an offline search, and there is no search to multiply here,
+	// so the hash-dependent floor buys nothing while making systemd's own
+	// parameters unwritable. The exemption KEEPS minPBKDF2Iterations -- LUKS2's
+	// minimum, and exactly what systemd enrolls -- so zero, negative and absurd
+	// counts are still refused. See keyslotCostPolicy (kdf.go) for the full
+	// argument, including why the same reasoning is invalid for a credential a
+	// caller hands in and why no exported API can select this.
 	var keyslot, tokenID int
 	if err := borrowSecret("recovery key", recoveryKey.Credential, func(credential []byte) error {
 		var err error
-		keyslot, tokenID, err = enrollWithToken(device, existingPassphrase, credential, addOpts, recoveryToken())
+		keyslot, tokenID, err = enrollWithToken(device, existingPassphrase, credential, addOpts,
+			recoveryToken(), libraryGeneratedCredential)
 		return err
 	}); err != nil {
 		recoveryKey.Clear()
