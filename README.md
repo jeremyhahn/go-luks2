@@ -29,8 +29,25 @@ All commands require root privileges.
 | `unmount <mountpoint>` | Unmount volume |
 | `info <device>` | Show volume information |
 | `wipe [opts] <device>` | Securely wipe volume (`--full`, `--passes N`, `--random`, `--trim`) |
+| `keyslots <device>` | List keyslots, in the order an unlock tries them |
+| `testkey <device>` | Check that a passphrase opens a volume |
+| `addkey <device>` | Add another passphrase (`--slot N`, `--kdf NAME`) |
+| `changekey <device> <slot>` | Replace the passphrase in a keyslot |
+| `removekey <device> <slot>` | Remove a keyslot, using its own passphrase |
+| `killslot <device> <slot>` | Remove a keyslot, using any valid passphrase |
+| `recovery generate\|add\|verify` | Recovery keys (`--format`, `--length`, `--output`) |
+| `token list\|show\|export\|import\|remove\|free\|exists\|count` | Token management |
+| `header show\|secondary\|restore` | Inspect or repair the two header copies |
+| `isluks [--luks2] <device>` | Exit 0 if the device holds a LUKS container |
 | `help` | Show help |
 | `version` | Show version |
+
+Every command that needs a passphrase accepts `--key-file <path>` (and `-` for
+standard input), and reads a piped passphrase as one line when standard input is
+not a terminal — so the tool works from a script, a systemd unit or a timer.
+**A key file's trailing newline is part of the passphrase**, exactly as in
+cryptsetup, so write one with `printf %s`, not `echo`. See
+[docs/cli/key-input.md](docs/cli/key-input.md).
 
 ### Examples
 
@@ -147,30 +164,42 @@ luks2.CountTokens(device)                       // int, error
 
 Generate and manage recovery keys for emergency access:
 
+**The printed string is the passphrase.** The keyslot holds the formatted text
+byte for byte, so a page in a safe opens the volume from any rescue system with
+stock cryptsetup and nothing else — `cryptsetup open /dev/sdb1 vault`, paste.
+It is the same 32 CSPRNG bytes either way; only the alphabet differs.
+
 ```go
-// Generate and add recovery key
+// Generate and add a recovery key. A systemd-recovery token is written
+// alongside the keyslot, and the keyslot is rolled back if it cannot be.
 key, _ := luks2.AddRecoveryKey(device, existingPass, &luks2.RecoveryKeyOptions{
-    Format:     luks2.RecoveryKeyFormatDashed,  // "XXXX-XXXX-XXXX-..."
+    Format:     luks2.RecoveryKeyFormatDashed,  // "XXXXXX-XXXXXX-..."
     OutputPath: "/secure/recovery.key",
 })
-defer key.Clear()  // releases both the key and its rendering
+defer key.Clear()
 
-// key.Key and key.Formatted are *enclave.MemoryEnclave, not []byte/string.
-// Materialize the printable form only at the point of display.
+// key.Credential is the passphrase, in an *enclave.MemoryEnclave rather than a
+// []byte or string. Materialize it only at the point of display.
 rendered, _ := key.FormattedString()
 fmt.Println(rendered)
+fmt.Println(key.Keyslot, key.TokenID)
 
 // Generate key only (without adding to volume)
 key, _ := luks2.GenerateRecoveryKey(32, luks2.RecoveryKeyFormatHex)
 
-// Save/Load recovery keys
-luks2.SaveRecoveryKey(key, "/path/to/key")       // streams from locked memory
-loaded, _ := luks2.LoadRecoveryKey("/path/to/key")  // *enclave.MemoryEnclave
+// Save and load. LoadRecoveryCredential returns the credential itself.
+luks2.SaveRecoveryKey(key, "/path/to/key")               // streams from locked memory
+loaded, _ := luks2.LoadRecoveryCredential("/path/to/key")
 defer loaded.Destroy()
 
-// Verify and parse
-luks2.VerifyRecoveryKey(device, loaded)        // bool, error
-luks2.ParseRecoveryKey("XXXX-XXXX-...")        // *enclave.MemoryEnclave, error
+// Verify, and take a typed or pasted key verbatim
+luks2.VerifyRecoveryKey(device, loaded)         // bool, error
+luks2.RecoveryCredential("XXXXXX-XXXXXX-...")   // *enclave.MemoryEnclave, error
+
+// For a volume enrolled BEFORE the credential became the printed text, the
+// keyslot holds the decoded bytes; these two produce those instead.
+luks2.ParseRecoveryKey("XXXXXX-XXXXXX-...")
+luks2.LoadRecoveryKey("/path/to/key")
 ```
 
 ### Filesystem & Mount

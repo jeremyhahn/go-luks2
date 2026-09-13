@@ -37,42 +37,75 @@ const (
 	RecoveryKeyFormatDashed RecoveryKeyFormat = "dashed"
 )
 
-// RecoveryKey represents a generated recovery key.
+// RecoveryKey is a generated credential for a volume.
 //
-// A recovery key is a full-strength credential for the volume -- it opens a
-// keyslot exactly as the primary passphrase does -- so both the raw bytes and
-// their human-readable rendering are held in protected memory and are the
-// caller's to release with Clear.
+// # THE PRINTED TEXT IS THE PASSPHRASE
 //
-// The RENDERING is key material too, and it is easy to miss. "010203-040506" is
-// the key; it is only an encoding. Holding the raw bytes in locked memory while
-// the printable form sits in an ordinary Go string would protect nothing, which
-// is why Formatted is an enclave and not a string, and why materializing it
-// costs a deliberate call.
+// The keyslot holds the FORMATTED TEXT -- "9F3A2C-4B81DE-..." -- byte for byte.
+// It is not an encoding of the credential, it IS the credential, so a printed
+// page opens the volume from any rescue system with stock cryptsetup and
+// nothing else:
+//
+//	cryptsetup open /dev/sdb1 vault      # paste the printed string
+//
+// That is the whole point of a recovery key, and it is why this changed. What
+// this package used to enroll was the raw 32 bytes BEHIND the rendering, so the
+// printed page only opened the volume after being decoded by the very library
+// that might be the thing that is unavailable. A recovery path with a software
+// dependency is not a recovery path.
+//
+// # NO ENTROPY IS LOST BY THIS, AND NONE IS GAINED BY REVERTING IT
+//
+// The credential is the same 32 bytes from the same CSPRNG, written down in a
+// different alphabet. Rendering 256 bits as 64 hex characters spreads the same
+// 256 bits over more characters; it does not create or destroy any of them. The
+// per-character density falls, the total does not move.
+//
+// Anyone reading "the keyslot holds text rather than key bytes" as a weakening
+// and reverting it would silently reintroduce the failure above, so: it is not
+// a weakening, it is the same secret in a form a human can carry.
+//
+// # Custody
+//
+// The credential is held in protected memory and is the caller's to release
+// with Clear. Materializing it as a Go string costs a deliberate call
+// (FormattedString) because a string holding a credential can never be wiped.
 type RecoveryKey struct {
-	// Key holds the raw key bytes in protected memory. Borrow it with
+	// Credential is THE PASSPHRASE the keyslot was enrolled with: the
+	// formatted text, byte for byte, in protected memory.
+	//
+	// This member replaces the previous pair -- a raw Key that WAS the
+	// credential and a Formatted rendering that was not -- and the rename is
+	// deliberate. Under the new model the raw bytes open nothing, so leaving a
+	// field called Key would have left the old code compiling and quietly
+	// verifying against bytes no keyslot holds. Borrow it with
 	// MemoryEnclave.WithBytes; never copy it out.
-	Key *enclave.MemoryEnclave
+	Credential *enclave.MemoryEnclave
 
-	// Formatted holds the human-readable representation in protected memory.
-	// Use FormattedString to materialize it at the point of display.
-	Formatted *enclave.MemoryEnclave
-
-	// Format is the format used
+	// Format is the rendering the credential is written in.
 	Format RecoveryKeyFormat
 
-	// KeyHash is a SHA-256 hash of the key for verification. It is a one-way
-	// function of the key and is not itself secret.
-	KeyHash string
+	// CredentialHash is a SHA-256 of the credential text, hex-encoded. It is a
+	// one-way function of the credential and is not itself secret: it is
+	// written into the saved file in the clear so a transcription can be
+	// checked without going near the volume.
+	CredentialHash string
 
-	// CreatedAt is when the key was generated
+	// CreatedAt is when the key was generated.
 	CreatedAt time.Time
 
-	// VolumeUUID is the UUID of the volume this key is for
+	// VolumeUUID is the UUID of the volume this key is for.
 	VolumeUUID string
 
-	// Keyslot is the keyslot number this key was added to
+	// Keyslot is the keyslot the credential was added to, as reported by the
+	// code that CHOSE it. It is -1 for a key that has not been added to a
+	// volume.
 	Keyslot int
+
+	// TokenID is the token slot naming that keyslot, or -1 when no token was
+	// written. The token is what tells cryptsetup and systemd that the slot is
+	// a recovery key rather than someone's passphrase.
+	TokenID int
 
 	// SaveError contains any error that occurred while saving the key to file.
 	// The key was still successfully added to the volume even if this is set.
@@ -93,7 +126,124 @@ type RecoveryKeyOptions struct {
 	// OutputPath is where to save the recovery key (optional)
 	OutputPath string
 
-	// KDFType specifies the KDF type (default: argon2id)
+	// KDFType specifies the KDF type (default: argon2id).
+	//
+	// # What systemd writes, MEASURED
+	//
+	// From `cryptsetup luksDump` on a volume enrolled with systemd-cryptenroll
+	// (systemd 255, cryptsetup 2.7.0) holding a passphrase, a recovery key and
+	// three FIDO2 credentials:
+	//
+	//	slot 0  human passphrase   argon2id  t=24  m=512000  p=4
+	//	slot 1  recovery key       pbkdf2    sha512  iterations=1000
+	//	slot 2  FIDO2 credential   pbkdf2    sha512  iterations=1000
+	//	slot 3  FIDO2 credential   pbkdf2    sha512  iterations=1000
+	//	slot 4  FIDO2 credential   pbkdf2    sha512  iterations=1000
+	//
+	// A flat minimum, identically, for every credential that is not a human
+	// passphrase, and no calibration at all. That is the correct shape and this
+	// package should match it.
+	//
+	// # 1000 IS NOT A GENERALLY SAFE ITERATION COUNT
+	//
+	// It is correct for these keyslots for exactly one reason: the credential is
+	// 256 bits from a CSPRNG, so there is nothing to enumerate and stretching it
+	// defends against nothing. The same number under a HUMAN-CHOSEN passphrase
+	// would be catastrophic -- which is precisely why systemd puts argon2id at
+	// t=24 on slot 0 and 1000 pbkdf2 iterations on the rest. Anyone copying the
+	// number somewhere else, or "fixing" it upward here, has misread which of
+	// those two cases they are in.
+	//
+	// (Unrelatedly, 1000 is also what `cryptsetup --pbkdf-force-iterations 1000`
+	// produces, which is how the test fixtures in this repository stay fast. Same
+	// number, two unconnected reasons. They have been confounded once already.)
+	//
+	// # Why the default is still argon2id: it CANNOT BE EXPRESSED YET
+	//
+	// This package's pbkdf2 path takes a TIME BUDGET and calibrates against it;
+	// there is no way through the public API to write a fixed iteration count.
+	// The floor at minPBKDF2Iterations does not rescue it, because on real
+	// hardware even a 1 ms budget extrapolates well past 1000 before the floor
+	// is consulted. Measured on one developer machine, BenchmarkPBKDF2:
+	//
+	//	sha512, 1 ms budget    -> 3253 iterations
+	//	sha512, 10 ms budget   -> 31824 iterations
+	//	sha256, 2000 ms (the default) -> ~9.9M iterations
+	//
+	// So the smallest thing this API can currently write is a few thousand
+	// iterations that DIFFER PER MACHINE -- neither systemd's number nor a
+	// reproducible one, and still paying for a calibration probe to get there.
+	// Switching the default to that would produce headers that match nothing and
+	// vary between two nodes enrolled from the same script, which is worse than
+	// either endpoint.
+	//
+	// # THE COMPARISON ABOVE HAS AN EXPIRY DATE
+	//
+	// Read the 0.88 s / 2.08 s figures as an argument against pbkdf2 and you
+	// will reach the wrong conclusion the moment the gap above closes. Nearly
+	// all of that 2.08 s IS THE BENCHMARK -- the calibration probe, not the key
+	// derivation -- and an explicit iteration count does not run one. At 1000
+	// iterations there is nothing to calibrate and nothing to stretch, so the
+	// choice stops being "a gigabyte or two seconds" and becomes neither: the
+	// memory comes back AND the wall time with it.
+	//
+	// What survives the change is the reasoning, which is why it is written out
+	// rather than summarized as a verdict: a heavy KDF defends a guessable
+	// secret, this credential is not guessable, and the cost was never buying
+	// anything. The 2.4x figure is an artifact of an API that could only
+	// calibrate.
+	//
+	// # Closing it takes TWO things, and the second one is easy to miss
+	//
+	// The first is an explicit iteration count -- PBKDFIterations on
+	// FormatOptions and AddKeyOptions, resolved in createPBKDF2KDF instead of
+	// the benchmark. That exists on the issue/144-canonical-json-conformance
+	// branch and is not on main yet.
+	//
+	// IT IS NOT SUFFICIENT ON ITS OWN. An explicit count is still bounded by
+	// this package's OWASP-derived floor, which refuses systemd's number
+	// outright -- measured against forcedPBKDF2Iterations:
+	//
+	//	sha1    1000 REFUSED: permitted range 1300000..100000000
+	//	sha256  1000 REFUSED: permitted range  600000..100000000
+	//	sha512  1000 REFUSED: permitted range  210000..100000000
+	//
+	// So the floor rejects 1000 by a factor of 210 on sha512, and anyone who
+	// adds the field and expects this default to follow will hit that and be
+	// puzzled. The floor is not wrong: it exists because a calibrated count
+	// measures the DEFENDER's hardware and says nothing about the attacker's,
+	// which is the right instinct for a passphrase.
+	//
+	// It is wrong only for a credential with no brute-force surface, and the
+	// second thing needed is therefore an exemption scoped to exactly that: to
+	// credentials THIS LIBRARY GENERATED, on the unexported addKey path, with
+	// AddRecoveryKey and EnrollKeyProvider as the only callers permitted to
+	// claim it -- because they are the only two that know the bytes came from a
+	// CSPRNG rather than from a person. Exempt means the OWASP floor does not
+	// apply; minPBKDF2Iterations still does, and it is 1000, which is systemd's
+	// value exactly. That work is queued behind the field.
+	//
+	// If a future change makes that exemption reachable from an exported option,
+	// something has gone wrong: a caller-supplied credential may be a human
+	// passphrase, and the floor is the only thing standing between one and a
+	// keyslot stretched a thousand times too little.
+	//
+	// When both land, this default becomes pbkdf2 / SHA512 / 1000 with no
+	// calibration, and the luksDump table above is the artifact to check it
+	// against. The hash is part of the target and is the easiest part to lose:
+	// systemd writes sha512, while this package's own default is sha256.
+	//
+	// # None of this is an interoperability question
+	//
+	// A keyslot records its own KDF parameters and every implementation reads
+	// them from the header, so cryptsetup and systemd-cryptsetup open an
+	// argon2id keyslot and a pbkdf2 one alike. The type, hash and count are a
+	// COST decision, not a compatibility constraint, and treating the iteration
+	// count as something that has to match for interop would be a
+	// misunderstanding. It is also forward-only: volumes keep whatever their
+	// keyslots already hold.
+	//
+	// Callers who want pbkdf2 today set KDFType to KDFTypePBKDF2 explicitly.
 	KDFType string
 
 	// Argon2 parameters
@@ -104,9 +254,16 @@ type RecoveryKeyOptions struct {
 
 // GenerateRecoveryKey generates a cryptographically secure recovery key.
 //
-// The key is drawn directly into locked memory and its printable rendering is
+// length is the number of RANDOM BYTES drawn, not the length of the credential:
+// the credential is those bytes rendered in format, which is longer. 32 bytes
+// is 71 characters dashed, 64 hex, 44 base64.
+//
+// The random bytes are drawn directly into locked memory and the rendering is
 // built directly into locked memory, so neither ever exists on the ordinary
-// heap. The caller owns the result and must Clear it.
+// heap. The raw bytes are DESTROYED before this returns -- once the rendering
+// exists they are not the credential and there is nothing left to do with
+// them, so holding them would be holding a second copy of the secret for no
+// reason. The caller owns the result and must Clear it.
 func GenerateRecoveryKey(length int, format RecoveryKeyFormat) (*RecoveryKey, error) {
 	if length <= 0 {
 		length = RecoveryKeyLength
@@ -120,42 +277,68 @@ func GenerateRecoveryKey(length int, format RecoveryKeyFormat) (*RecoveryKey, er
 	if err != nil {
 		return nil, err
 	}
+	defer key.Destroy()
 
-	formatted, err := newSecretEnclave("recovery key rendering", formattedLen(length, format))
+	credential, err := newSecretEnclave("recovery key", formattedLen(length, format))
 	if err != nil {
-		key.Destroy()
 		return nil, err
 	}
 
-	// The hash is a one-way function of the key and is written to the recovery
-	// file in the clear for verification, so it is not protected; it is computed
-	// inside the borrow only because that is where the key is readable.
-	var keyHash string
-	err = borrowSecret("recovery key", key, func(raw []byte) error {
-		sum := sha256.Sum256(raw)
-		keyHash = hex.EncodeToString(sum[:])
-
-		return borrowSecret("recovery key rendering", formatted, func(dst []byte) error {
+	if err := borrowSecret("recovery key", key, func(raw []byte) error {
+		return borrowSecret("recovery key", credential, func(dst []byte) error {
 			formatRecoveryKeyInto(dst, raw, format)
 			return nil
 		})
-	})
-	if err != nil {
-		destroySecrets(key, formatted)
+	}); err != nil {
+		credential.Destroy()
+		return nil, err
+	}
+
+	// The hash is of the CREDENTIAL, not of the bytes behind it -- the
+	// credential is the thing an operator transcribes and the thing a keyslot
+	// holds, so it is the thing worth being able to check. It is a one-way
+	// function of it and is written to the recovery file in the clear, so it is
+	// not protected; it is computed inside the borrow only because that is
+	// where the credential is readable.
+	var credentialHash string
+	if err := borrowSecret("recovery key", credential, func(b []byte) error {
+		sum := sha256.Sum256(b)
+		credentialHash = hex.EncodeToString(sum[:])
+		return nil
+	}); err != nil {
+		credential.Destroy()
 		return nil, err
 	}
 
 	return &RecoveryKey{
-		Key:       key,
-		Formatted: formatted,
-		Format:    format,
-		KeyHash:   keyHash,
-		CreatedAt: time.Now(),
+		Credential:     credential,
+		Format:         format,
+		CredentialHash: credentialHash,
+		CreatedAt:      time.Now(),
+		Keyslot:        -1,
+		TokenID:        -1,
 	}, nil
 }
 
-// AddRecoveryKey generates a recovery key and adds it to a LUKS volume
-// existingPassphrase is used to unlock the volume
+// AddRecoveryKey generates a recovery key, adds it to a LUKS volume and records
+// a token saying what the keyslot is.
+//
+// existingPassphrase is a credential that already opens the volume; it is needed
+// because adding a keyslot means unwrapping the volume key.
+//
+// # What lands on the device
+//
+// A keyslot holding the FORMATTED TEXT as its passphrase -- see RecoveryKey for
+// why -- and a `systemd-recovery` token naming that keyslot. The token carries
+// nothing else: there is no material to record, because the credential is the
+// text an operator is holding. Its purpose is to tell cryptsetup, systemd and
+// the next person that the slot is a recovery key rather than somebody's
+// passphrase, which is a distinction that otherwise exists only in a filing
+// cabinet.
+//
+// If the token cannot be written the KEYSLOT IS ROLLED BACK, for the same
+// reason EnrollKeyProvider does it: a keyslot nothing describes is a live
+// credential that cannot be told apart from one still in use.
 func AddRecoveryKey(device string, existingPassphrase []byte, opts *RecoveryKeyOptions) (*RecoveryKey, error) {
 	if opts == nil {
 		opts = &RecoveryKeyOptions{}
@@ -175,7 +358,6 @@ func AddRecoveryKey(device string, existingPassphrase []byte, opts *RecoveryKeyO
 		return nil, err
 	}
 
-	// Add the recovery key to the volume
 	addOpts := &AddKeyOptions{
 		Keyslot:        opts.Keyslot,
 		KDFType:        opts.KDFType,
@@ -184,55 +366,29 @@ func AddRecoveryKey(device string, existingPassphrase []byte, opts *RecoveryKeyO
 		Argon2Parallel: opts.Argon2Parallel,
 	}
 
-	// AddKey takes the new credential as raw bytes, so the key is borrowed for
-	// the length of that call and no longer.
-	//
-	// addKey rather than AddKey, for assignedSlot: it reports the keyslot it
-	// chose, at the point it chooses it and under the device lock. See below.
-	assignedSlot := -1
-	if err := borrowSecret("recovery key", recoveryKey.Key, func(raw []byte) error {
-		return addKey(device, existingPassphrase, raw, addOpts, &assignedSlot)
+	// The credential is borrowed for the length of the enrollment and no
+	// longer. enrollWithToken writes the keyslot, reads the slot number from
+	// where addKey CHOSE it rather than inferring it afterwards (#42), writes
+	// the token naming that slot, and rolls the keyslot back if the token write
+	// fails.
+	var keyslot, tokenID int
+	if err := borrowSecret("recovery key", recoveryKey.Credential, func(credential []byte) error {
+		var err error
+		keyslot, tokenID, err = enrollWithToken(device, existingPassphrase, credential, addOpts, recoveryToken())
+		return err
 	}); err != nil {
 		recoveryKey.Clear()
 		return nil, fmt.Errorf("failed to add recovery key: %w", err)
 	}
+
+	recoveryKey.Keyslot = keyslot
+	recoveryKey.TokenID = tokenID
 
 	// Get volume info for UUID
 	info, err := GetVolumeInfo(device)
 	if err == nil {
 		recoveryKey.VolumeUUID = info.UUID
 	}
-
-	// The keyslot addKey ACTUALLY USED, read from where it was chosen, not
-	// reconstructed from the header afterwards (#42).
-	//
-	// What this replaced inferred it as the HIGHEST-numbered slot present, while
-	// AddKey takes the FIRST FREE one. The two agree only while the active slots
-	// are contiguous from zero, which stops being true the moment a credential
-	// is revoked. Measured on a container holding slots {0, 2}: the recovery key
-	// landed in slot 1 and was reported as slot 2.
-	//
-	// The number is not cosmetic. It is written into the saved recovery-key file
-	// and outlives the process, so an operator retiring the recovery key months
-	// later destroys a different, live credential AND leaves the recovery key
-	// working. Both halves fail in the dangerous direction.
-	//
-	// The old code also swallowed its own failure: on a ListKeyslots error it
-	// left Keyslot at its zero value, reporting SLOT 0 -- which on almost every
-	// volume is the operator's primary passphrase, and the worst possible
-	// default for a number whose only use is deciding what to destroy.
-	//
-	// An inference is not corrected here, it is DELETED. Any rule that
-	// reconstructs the choice instead of reading it will drift from AddKey
-	// again the next time either rule moves.
-	if assignedSlot < 0 {
-		// Unreachable: addKey assigns before every path that can still succeed.
-		// Refused rather than reported as a slot number, because this value's
-		// only use is telling an operator what to destroy.
-		recoveryKey.Clear()
-		return nil, fmt.Errorf("%w: the recovery key was written but the keyslot it went to was not reported", ErrInvalidKeyslot)
-	}
-	recoveryKey.Keyslot = assignedSlot
 
 	// Save to file if path specified
 	if opts.OutputPath != "" {
@@ -243,6 +399,20 @@ func AddRecoveryKey(device string, existingPassphrase []byte, opts *RecoveryKeyO
 	}
 
 	return recoveryKey, nil
+}
+
+// recoveryToken builds the token that identifies a recovery keyslot.
+//
+// It is systemd's, and it is the WHOLE token: type and keyslots, nothing else.
+// systemd-cryptenroll --recovery-key writes no format member and no algorithm
+// member, because there is no material to describe -- the credential is the
+// printed text. Adding fields of our own here would produce a token systemd
+// reads differently from the way we wrote it.
+//
+// Keyslots is filled in by enrollWithToken, which is the only place that knows
+// the answer.
+func recoveryToken() *Token {
+	return &Token{Type: recoveryTokenType}
 }
 
 // removeFile is os.Remove, reached through a variable so the staging-cleanup
@@ -385,8 +555,14 @@ func writeRecoveryKeyContent(w io.Writer, key *RecoveryKey) error {
 	preamble.WriteString("#\n")
 	fmt.Fprintf(&preamble, "# Volume UUID: %s\n", key.VolumeUUID)
 	fmt.Fprintf(&preamble, "# Keyslot: %d\n", key.Keyslot)
+	fmt.Fprintf(&preamble, "# Token: %d\n", key.TokenID)
 	fmt.Fprintf(&preamble, "# Created: %s\n", key.CreatedAt.Format(time.RFC3339))
-	fmt.Fprintf(&preamble, "# Key Hash (SHA-256): %s\n", key.KeyHash)
+	fmt.Fprintf(&preamble, "# Key Hash (SHA-256): %s\n", key.CredentialHash)
+	preamble.WriteString("#\n")
+	preamble.WriteString("# The line below IS the passphrase. Type or paste it exactly as it\n")
+	preamble.WriteString("# appears, including the dashes and the letter case:\n")
+	preamble.WriteString("#\n")
+	preamble.WriteString("#   cryptsetup open <device> <name>\n")
 	preamble.WriteString("#\n")
 	preamble.WriteString("# Recovery Key:\n")
 
@@ -394,7 +570,7 @@ func writeRecoveryKeyContent(w io.Writer, key *RecoveryKey) error {
 		return fmt.Errorf("failed to write recovery key: %w", err)
 	}
 
-	if err := borrowSecret("recovery key rendering", key.Formatted, func(b []byte) error {
+	if err := borrowSecret("recovery key", key.Credential, func(b []byte) error {
 		_, err := w.Write(b)
 		return err
 	}); err != nil {
@@ -425,8 +601,21 @@ func syncDir(dir string) error {
 	return nil
 }
 
-// LoadRecoveryKey loads a recovery key from a file and returns it in protected
-// memory.
+// LoadRecoveryKey loads a recovery key file and returns the KEY MATERIAL BEHIND
+// the rendering -- the bytes the text decodes to, in protected memory.
+//
+// # This is probably not the function you want
+//
+// It is unchanged, and that is deliberate rather than an oversight: it is how a
+// volume enrolled BEFORE the recovery key became the printed text is opened,
+// because those keyslots hold the decoded bytes. For a volume enrolled by the
+// current code, the credential is the line itself and
+// LoadRecoveryCredential returns it.
+//
+// The two are kept apart rather than merged behind a guess. Deciding which one
+// a container wants by trying both would be a fallback, and a fallback here
+// means that on the day a recovery key is needed the tool reports success after
+// silently testing something other than what was asked.
 //
 // The file is read DIRECTLY into locked memory and parsed in place. It used to
 // go through os.ReadFile into a plain []byte, then string(data), then
@@ -439,6 +628,45 @@ func syncDir(dir string) error {
 // protected-memory mandate does not yield to them the way it does inside
 // PBKDF2 -- see exposure 2 in enclave.go for the case where it does.
 func LoadRecoveryKey(path string) (*enclave.MemoryEnclave, error) {
+	line, err := readRecoveryKeyLine(path)
+	if err != nil {
+		return nil, err
+	}
+	defer line.Destroy()
+
+	return parseRecoveryKeySecret(line)
+}
+
+// LoadRecoveryCredential reads a saved recovery key file and returns THE
+// CREDENTIAL -- the line verbatim, which is what the keyslot holds.
+//
+// This is the one to use for a volume this package enrolled. LoadRecoveryKey
+// decodes the same line into the bytes behind it, which is the credential only
+// for a volume enrolled before the recovery key became the printed text; see
+// RecoveryKey.
+//
+// The line is taken EXACTLY as written apart from surrounding whitespace, which
+// a text editor may have added and which no keyslot holds. Nothing else is
+// normalized: case and dashes are part of the credential, and a "helpful"
+// canonicalization here would produce bytes the volume has never seen.
+func LoadRecoveryCredential(path string) (*enclave.MemoryEnclave, error) {
+	return readRecoveryKeyLine(path)
+}
+
+// readRecoveryKeyLine reads the first non-comment line of a recovery key file
+// into locked memory.
+//
+// The file is read DIRECTLY into locked memory and parsed in place. It used to
+// go through os.ReadFile into a plain []byte, then string(data), then
+// strings.Split -- so the credential existed in at least three places, two of
+// them immutable and therefore unwipeable no matter what the byte slice was
+// cleared to. Measured on a 512 KiB file, that cost 1.18 MB of ordinary heap.
+//
+// Nothing about those copies was forced. They were this package's own choice of
+// how to read a file, not a validated primitive's internals, so the
+// protected-memory mandate does not yield to them the way it does inside
+// PBKDF2 -- see exposure 2 in enclave.go for the case where it does.
+func readRecoveryKeyLine(path string) (*enclave.MemoryEnclave, error) {
 	f, err := os.Open(path) // #nosec G304 -- user-provided path for recovery key file
 	if err != nil {
 		return nil, fmt.Errorf("failed to read recovery key file: %w", err)
@@ -483,9 +711,69 @@ func LoadRecoveryKey(path string) (*enclave.MemoryEnclave, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer keyLine.Destroy()
 
-	return parseRecoveryKeySecret(keyLine)
+	return keyLine, nil
+}
+
+// RecoveryCredential returns the credential a typed or pasted recovery key
+// names: the text itself, in protected memory.
+//
+// It is the counterpart to ParseRecoveryKey under the current model. There is
+// no decoding to do -- the keyslot holds these characters -- so all this does is
+// move them into locked memory and refuse what cannot be a recovery key.
+//
+// # What is NOT normalized, and why
+//
+// Surrounding whitespace is trimmed, because a paste carries it and no keyslot
+// holds it. NOTHING ELSE IS TOUCHED. Case is significant, the dashes are
+// significant, and a credential that has been "canonicalized" on the way in is
+// a credential the volume has never seen. This is the same contract cryptsetup
+// offers when the same string is pasted at its own prompt, which is the point:
+// the two must agree, because the whole reason the credential is text is so
+// that stock cryptsetup can open the volume without this package.
+//
+// # What is exposed, precisely
+//
+// formatted is a Go string and Go strings are immutable, so the CALLER'S copy
+// cannot be wiped by anyone. That is unavoidable at this boundary: a recovery
+// key reaches a program by being typed, pasted or read out of a file, all of
+// which are string-shaped. What this function avoids is making more of them --
+// the string is copied ONCE, into locked memory. Callers that already hold the
+// key in an enclave, as LoadRecoveryCredential does, should not come through
+// here at all.
+func RecoveryCredential(formatted string) (*enclave.MemoryEnclave, error) {
+	// One copy, into locked memory. []byte(formatted) is the last ordinary
+	// allocation the credential sees, and adoptSecret's enclave takes ownership
+	// of it and wipes it -- including on the failure path.
+	held, err := adoptSecret("recovery key", []byte(formatted))
+	if err != nil {
+		return nil, err
+	}
+
+	var credential *enclave.MemoryEnclave
+	if err := borrowSecret("recovery key", held, func(b []byte) error {
+		body := trimASCIISpace(b)
+		if len(body) == 0 {
+			return fmt.Errorf("recovery key is empty")
+		}
+		// A newline inside the body means more than one line was handed in --
+		// the whole file, most likely. Refused rather than silently taking the
+		// first line, because guessing which line somebody meant is how the
+		// wrong string gets enrolled or tested.
+		if bytes.IndexByte(body, '\n') >= 0 {
+			return fmt.Errorf("a recovery key is a single line; use LoadRecoveryCredential to read a saved file")
+		}
+
+		var err error
+		credential, err = copySecret("recovery key", body)
+		return err
+	}); err != nil {
+		held.Destroy()
+		return nil, err
+	}
+	held.Destroy()
+
+	return credential, nil
 }
 
 // firstRecoveryKeyLine returns the first line of the file that is neither blank
@@ -530,8 +818,21 @@ func isASCIISpace(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r'
 }
 
-// ParseRecoveryKey parses a recovery key from its formatted string
-// representation and returns it in protected memory.
+// ParseRecoveryKey decodes a formatted recovery key into the KEY MATERIAL
+// BEHIND it and returns that in protected memory.
+//
+// # This is probably not the function you want
+//
+// Its behavior is unchanged, and so is its meaning: it turns "9F3A2C-4B81DE-..."
+// into the bytes that rendering encodes. What changed around it is which of the
+// two is the credential. A keyslot enrolled by the current code holds the TEXT,
+// so RecoveryCredential is what produces something that opens such a volume;
+// this function is for a volume enrolled before that change, whose keyslot holds
+// the decoded bytes.
+//
+// It is tolerant in a way RecoveryCredential is deliberately not -- it accepts
+// either case, with or without dashes, hex or base64 -- because it is decoding a
+// rendering rather than reproducing a credential.
 //
 // # What is exposed, precisely
 //
@@ -661,6 +962,15 @@ func isAllHex(b []byte) bool {
 // VerifyRecoveryKey reports whether a recovery key unlocks the volume.
 //
 // The key stays in its enclave and is borrowed for the unlock attempt only.
+//
+// # What to pass
+//
+// Whatever the keyslot actually holds. For a volume enrolled by the current
+// code that is the CREDENTIAL -- RecoveryKey.Credential, or the result of
+// RecoveryCredential or LoadRecoveryCredential. For one enrolled before the
+// recovery key became the printed text it is the decoded material, from
+// ParseRecoveryKey or LoadRecoveryKey. This function tests the bytes it is
+// given and does not guess between the two.
 //
 // # (false, nil) means "no keyslot verified this key", NOT "the key is wrong"
 //
@@ -866,17 +1176,22 @@ func decodeSecret(op string, maxLen int, decode func(dst []byte) (int, error)) (
 	return exact, nil
 }
 
-// FormattedString materializes the human-readable key as a Go string.
+// FormattedString materializes the credential as a Go string, for display.
 //
 // It deliberately produces an UNPROTECTED, unwipeable copy, because displaying
 // a recovery key is the entire purpose of one and every display path in Go goes
 // through a string. Call it as late as possible, at the point of output, and do
 // not store the result. Callers that write the key somewhere should prefer
-// SaveRecoveryKey or a borrow of Formatted, both of which never materialize it.
+// SaveRecoveryKey or a borrow of Credential, both of which never materialize it.
+//
+// The name is kept from when this returned a rendering that was not the
+// credential. What it returns has not changed -- the same characters, in the
+// same order -- so display code needs no revision; what changed is that those
+// characters now open the volume by themselves.
 func (r *RecoveryKey) FormattedString() (string, error) {
-	s, err := r.Formatted.OpenString()
+	s, err := r.Credential.OpenString()
 	if err != nil {
-		return "", &ProtectedMemoryError{Op: "recovery key rendering", Err: err}
+		return "", &ProtectedMemoryError{Op: "recovery key", Err: err}
 	}
 	return s, nil
 }
@@ -884,7 +1199,6 @@ func (r *RecoveryKey) FormattedString() (string, error) {
 // Clear releases the key material from protected memory. It is idempotent and
 // safe on a zero-valued RecoveryKey, so it can always be deferred.
 func (r *RecoveryKey) Clear() {
-	destroySecrets(r.Key, r.Formatted)
-	r.Key = nil
-	r.Formatted = nil
+	destroySecrets(r.Credential)
+	r.Credential = nil
 }

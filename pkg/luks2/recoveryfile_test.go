@@ -46,12 +46,12 @@ func TestSaveRecoveryKeyDoesNotDamageAnExistingFile(t *testing.T) {
 	}
 
 	// A save that fails PART WAY THROUGH: the preamble is writable, and the
-	// rendering is not. This is the "destroyed key.Formatted" case, and it is
+	// credential is not. This is the "destroyed key.Credential" case, and it is
 	// the one that used to leave a truncated file behind.
 	key := failingRecoveryKey(t)
 
 	if err := SaveRecoveryKey(key, path); err == nil {
-		t.Fatal("SaveRecoveryKey reported success with an unreadable rendering")
+		t.Fatal("SaveRecoveryKey reported success with an unreadable credential")
 	}
 
 	after, err := os.ReadFile(path)
@@ -73,7 +73,7 @@ func TestSaveRecoveryKeyLeavesNoPartialFile(t *testing.T) {
 	key := failingRecoveryKey(t)
 
 	if err := SaveRecoveryKey(key, path); err == nil {
-		t.Fatal("SaveRecoveryKey reported success with an unreadable rendering")
+		t.Fatal("SaveRecoveryKey reported success with an unreadable credential")
 	}
 
 	if _, err := os.Stat(path); err == nil {
@@ -163,7 +163,7 @@ func TestSaveRecoveryKeyWritesADurableReadableFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read back: %v", err)
 	}
-	for _, want := range []string{"LUKS Recovery Key", "a-volume-uuid", "Keyslot: 3", key.KeyHash} {
+	for _, want := range []string{"LUKS Recovery Key", "a-volume-uuid", "Keyslot: 3", key.CredentialHash} {
 		if !strings.Contains(string(content), want) {
 			t.Errorf("the file does not carry %q", want)
 		}
@@ -171,14 +171,14 @@ func TestSaveRecoveryKeyWritesADurableReadableFile(t *testing.T) {
 
 	// And the key itself round-trips, which is the only assertion that matters
 	// to whoever needs it.
-	loaded, err := LoadRecoveryKey(path)
+	loaded, err := LoadRecoveryCredential(path)
 	if err != nil {
-		t.Fatalf("LoadRecoveryKey failed: %v", err)
+		t.Fatalf("LoadRecoveryCredential failed: %v", err)
 	}
 	defer loaded.Destroy()
 
-	if !key.Key.EqualTo(openSecret(t, loaded)) {
-		t.Fatal("the key read back is not the key written")
+	if !key.Credential.EqualTo(openSecret(t, loaded)) {
+		t.Fatal("the credential read back is not the credential written")
 	}
 
 	// The directory holds exactly the one file: no temp left over on success.
@@ -399,7 +399,7 @@ func TestLoadRecoveryKeyRefusesAFileWithNoKey(t *testing.T) {
 	})
 }
 
-// failingRecoveryKey returns a RecoveryKey whose rendering cannot be read, so a
+// failingRecoveryKey returns a RecoveryKey whose credential cannot be read, so a
 // save fails after the preamble has been written.
 func failingRecoveryKey(t *testing.T) *RecoveryKey {
 	t.Helper()
@@ -410,7 +410,7 @@ func failingRecoveryKey(t *testing.T) *RecoveryKey {
 	}
 	t.Cleanup(key.Clear)
 
-	key.Formatted.Destroy()
+	key.Credential.Destroy()
 	return key
 }
 
@@ -476,12 +476,12 @@ func TestSaveRecoveryKeyAlwaysUnlinksTheStagingName(t *testing.T) {
 	}
 
 	// The published file is intact and still the credential.
-	loaded, err := LoadRecoveryKey(path)
+	loaded, err := LoadRecoveryCredential(path)
 	if err != nil {
 		t.Fatalf("the published recovery key is unreadable: %v", err)
 	}
 	defer loaded.Destroy()
-	if !key.Key.EqualTo(openSecret(t, loaded)) {
+	if !key.Credential.EqualTo(openSecret(t, loaded)) {
 		t.Fatal("the published file is not the key that was generated")
 	}
 }

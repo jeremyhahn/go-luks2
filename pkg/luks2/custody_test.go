@@ -718,35 +718,38 @@ func TestUnlockKeyslotRefusesAnAbsurdKeyslotArea(t *testing.T) {
 	}
 }
 
-// TestRecoveryKeyRenderingIsHeldInProtectedMemory guards the half of a recovery
-// key that is easiest to leave behind: the printable form is the key, and it
-// used to be a plain Go string that could never be wiped.
-func TestRecoveryKeyRenderingIsHeldInProtectedMemory(t *testing.T) {
+// TestRecoveryKeyIsHeldInProtectedMemory guards the part of a recovery key that
+// is easiest to leave behind: the printable form, which used to be a plain Go
+// string that could never be wiped -- and which is now the credential itself.
+func TestRecoveryKeyIsHeldInProtectedMemory(t *testing.T) {
 	key, err := GenerateRecoveryKey(32, RecoveryKeyFormatDashed)
 	if err != nil {
 		t.Fatalf("GenerateRecoveryKey failed: %v", err)
 	}
 	defer key.Clear()
 
-	if !key.Formatted.IsAlive() {
-		t.Fatal("the rendering is not in live protected memory")
+	if !key.Credential.IsAlive() {
+		t.Fatal("the credential is not in live protected memory")
 	}
 
-	// The rendering really does encode the key it accompanies, so protecting it
-	// is not decoration.
+	// What is displayed is the credential, byte for byte. Anything else means
+	// the string an operator writes down is not the string the keyslot holds.
 	rendered, err := key.FormattedString()
 	if err != nil {
 		t.Fatalf("FormattedString failed: %v", err)
 	}
-
-	parsed, err := ParseRecoveryKey(rendered)
-	if err != nil {
-		t.Fatalf("ParseRecoveryKey failed: %v", err)
+	if !key.Credential.EqualTo([]byte(rendered)) {
+		t.Fatal("the displayed string is not the credential")
 	}
-	defer parsed.Destroy()
 
-	if !key.Key.EqualTo(openSecret(t, parsed)) {
-		t.Fatal("the rendering does not decode back to the key")
+	typed, err := RecoveryCredential(rendered)
+	if err != nil {
+		t.Fatalf("RecoveryCredential failed: %v", err)
+	}
+	defer typed.Destroy()
+
+	if !key.Credential.EqualTo(openSecret(t, typed)) {
+		t.Fatal("typing the displayed string back does not reproduce the credential")
 	}
 }
 
@@ -759,8 +762,8 @@ func TestRecoveryKeyRenderingRoundTripsInEveryFormat(t *testing.T) {
 			}
 			defer key.Clear()
 
-			if key.Formatted.Size() != formattedLen(32, format) {
-				t.Fatalf("rendering holds %d bytes, want %d", key.Formatted.Size(), formattedLen(32, format))
+			if key.Credential.Size() != formattedLen(32, format) {
+				t.Fatalf("credential holds %d bytes, want %d", key.Credential.Size(), formattedLen(32, format))
 			}
 
 			rendered, err := key.FormattedString()
@@ -768,14 +771,28 @@ func TestRecoveryKeyRenderingRoundTripsInEveryFormat(t *testing.T) {
 				t.Fatalf("FormattedString failed: %v", err)
 			}
 
-			parsed, err := ParseRecoveryKey(rendered)
+			typed, err := RecoveryCredential(rendered)
+			if err != nil {
+				t.Fatalf("RecoveryCredential(%q) failed: %v", rendered, err)
+			}
+			defer typed.Destroy()
+
+			if !key.Credential.EqualTo(openSecret(t, typed)) {
+				t.Fatalf("the %s credential does not survive being typed back", format)
+			}
+
+			// The credential is still a faithful rendering of 32 random bytes,
+			// which is where its strength comes from. Nothing depends on the
+			// decode any more, but if it ever stopped decoding to 32 bytes the
+			// generator would be producing something other than what it claims.
+			decoded, err := ParseRecoveryKey(rendered)
 			if err != nil {
 				t.Fatalf("ParseRecoveryKey(%q) failed: %v", rendered, err)
 			}
-			defer parsed.Destroy()
+			defer decoded.Destroy()
 
-			if !key.Key.EqualTo(openSecret(t, parsed)) {
-				t.Fatalf("the %s rendering does not decode back to the key", format)
+			if decoded.Size() != 32 {
+				t.Fatalf("the %s rendering decodes to %d bytes, want 32", format, decoded.Size())
 			}
 		})
 	}

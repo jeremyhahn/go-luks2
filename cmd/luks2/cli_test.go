@@ -14,126 +14,21 @@ import (
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
-// MockLuksOperations implements LuksOperations for testing
-type MockLuksOperations struct {
-	FormatFunc           func(opts luks2.FormatOptions) error
-	UnlockFunc           func(device string, passphrase []byte, name string) error
-	LockFunc             func(name string) error
-	MountFunc            func(opts luks2.MountOptions) error
-	UnmountFunc          func(mountPoint string, flags int) error
-	GetVolumeInfoFunc    func(device string) (*luks2.VolumeInfo, error)
-	WipeFunc             func(opts luks2.WipeOptions) error
-	SetupLoopDeviceFunc  func(filename string) (string, error)
-	DetachLoopDeviceFunc func(loopDev string) error
-	MakeFilesystemFunc   func(volumeName, fstype, label string) error
-	IsMountedFunc        func(mountPoint string) (bool, error)
-	IsUnlockedFunc       func(name string) bool
-}
-
-func (m *MockLuksOperations) Format(opts luks2.FormatOptions) error {
-	if m.FormatFunc != nil {
-		return m.FormatFunc(opts)
-	}
-	return nil
-}
-
-func (m *MockLuksOperations) Unlock(device string, passphrase []byte, name string) error {
-	if m.UnlockFunc != nil {
-		return m.UnlockFunc(device, passphrase, name)
-	}
-	return nil
-}
-
-func (m *MockLuksOperations) Lock(name string) error {
-	if m.LockFunc != nil {
-		return m.LockFunc(name)
-	}
-	return nil
-}
-
-func (m *MockLuksOperations) Mount(opts luks2.MountOptions) error {
-	if m.MountFunc != nil {
-		return m.MountFunc(opts)
-	}
-	return nil
-}
-
-func (m *MockLuksOperations) Unmount(mountPoint string, flags int) error {
-	if m.UnmountFunc != nil {
-		return m.UnmountFunc(mountPoint, flags)
-	}
-	return nil
-}
-
-func (m *MockLuksOperations) GetVolumeInfo(device string) (*luks2.VolumeInfo, error) {
-	if m.GetVolumeInfoFunc != nil {
-		return m.GetVolumeInfoFunc(device)
-	}
-	return &luks2.VolumeInfo{
-		UUID:           "test-uuid",
-		Label:          "TestVolume",
-		Version:        2,
-		Cipher:         "aes-xts-plain64",
-		SectorSize:     512,
-		ActiveKeyslots: []int{0},
-		Metadata: &luks2.LUKS2Metadata{
-			Keyslots: map[string]*luks2.Keyslot{
-				"0": {
-					Type:    "luks2",
-					KeySize: 64,
-					KDF:     &luks2.KDF{Type: "argon2id"},
-				},
-			},
-		},
-	}, nil
-}
-
-func (m *MockLuksOperations) Wipe(opts luks2.WipeOptions) error {
-	if m.WipeFunc != nil {
-		return m.WipeFunc(opts)
-	}
-	return nil
-}
-
-func (m *MockLuksOperations) SetupLoopDevice(filename string) (string, error) {
-	if m.SetupLoopDeviceFunc != nil {
-		return m.SetupLoopDeviceFunc(filename)
-	}
-	return "/dev/loop0", nil
-}
-
-func (m *MockLuksOperations) DetachLoopDevice(loopDev string) error {
-	if m.DetachLoopDeviceFunc != nil {
-		return m.DetachLoopDeviceFunc(loopDev)
-	}
-	return nil
-}
-
-func (m *MockLuksOperations) MakeFilesystem(volumeName, fstype, label string) error {
-	if m.MakeFilesystemFunc != nil {
-		return m.MakeFilesystemFunc(volumeName, fstype, label)
-	}
-	return nil
-}
-
-func (m *MockLuksOperations) IsMounted(mountPoint string) (bool, error) {
-	if m.IsMountedFunc != nil {
-		return m.IsMountedFunc(mountPoint)
-	}
-	return false, nil
-}
-
-func (m *MockLuksOperations) IsUnlocked(name string) bool {
-	if m.IsUnlockedFunc != nil {
-		return m.IsUnlockedFunc(name)
-	}
-	return false
-}
-
 // MockTerminal implements Terminal for testing
 type MockTerminal struct {
 	Password []byte
 	Err      error
+
+	// NotATerminal makes IsTerminal report false, which is how a test says
+	// "this is a script, not a person".
+	//
+	// The default is the other way round -- a MockTerminal IS a terminal -- so
+	// that every test written before non-interactive input existed keeps
+	// exercising the prompt path it was written for. Defaulting to "not a
+	// terminal" would have silently rerouted all of them through the pipe
+	// reader, which reads from a Stdin those tests leave empty, and they would
+	// have gone on passing while testing nothing they name.
+	NotATerminal bool
 
 	// Reads counts ReadPassword calls, so a test can tell a confirmation
 	// prompt from a single one.
@@ -160,6 +55,11 @@ func (m *MockTerminal) ReadPassword(fd int) ([]byte, error) {
 	return out, nil
 }
 
+// IsTerminal reports whether the configured stdin is a terminal.
+func (m *MockTerminal) IsTerminal(fd int) bool {
+	return !m.NotATerminal
+}
+
 // MockFileSystem implements FileSystem for testing
 type MockFileSystem struct {
 	Files       map[string]bool
@@ -168,6 +68,7 @@ type MockFileSystem struct {
 	RemoveErr   error
 	MkdirAllErr error
 	CreatedFile *MockFile
+	OpenErr     error
 }
 
 type MockFile struct {
@@ -196,6 +97,16 @@ func (m *MockFileSystem) Create(name string) (*os.File, error) {
 	}
 	m.Files[name] = true
 	return f, nil
+}
+
+// Open opens a REAL file, so the key-file tests read the bytes an operator
+// would have written rather than a fixture this mock invented. Their paths are
+// under t.TempDir(); nothing here reaches the host.
+func (m *MockFileSystem) Open(name string) (*os.File, error) {
+	if m.OpenErr != nil {
+		return nil, m.OpenErr
+	}
+	return os.Open(name) // #nosec G304 -- test paths are under t.TempDir()
 }
 
 func (m *MockFileSystem) Stat(name string) (os.FileInfo, error) {
@@ -1146,6 +1057,8 @@ func (m *mismatchingTerminal) ReadPassword(fd int) ([]byte, error) {
 	m.handed = append(m.handed, out)
 	return out, nil
 }
+
+func (m *mismatchingTerminal) IsTerminal(fd int) bool { return true }
 
 // TestCLI_Info_WarnsAboutDroppedNullEntries is the application half of #27.
 //

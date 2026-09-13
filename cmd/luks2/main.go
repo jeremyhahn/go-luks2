@@ -27,8 +27,53 @@ COMMANDS:
     info <device>                Show volume information
     wipe [options] <device>      Securely wipe a volume
                                  Options: --full, --passes N, --random, --trim
+
+KEYSLOTS:
+    keyslots <device>            List the keyslots on a volume
+    testkey <device>             Check that a passphrase opens a volume
+    addkey <device>              Add another passphrase
+    changekey <device> <slot>    Replace the passphrase in a keyslot
+    removekey <device> <slot>    Remove a keyslot, using its own passphrase
+    killslot <device> <slot>     Remove a keyslot, using any valid passphrase
+
+RECOVERY KEYS:
+    recovery generate            Generate a recovery key
+    recovery add <device>        Generate one and add it to a keyslot
+    recovery verify <device>     Check that a recovery key still opens a volume
+
+TOKENS:
+    token list <device>          Show the tokens on a volume
+    token show <device> <id>     Show one token
+    token export <device> <id>   Write a token as JSON
+    token import <device> <id>   Store a token from JSON
+    token remove <device> <id>   Delete a token (the keyslot is NOT touched)
+    token free <device>          Report the first free token slot
+    token exists <device> <id>   Exit 0 if the token is there, 1 if not
+    token count <device>         Report how many tokens there are
+
+HEADER:
+    header show <device>         Show the primary header
+    header secondary <device>    Show the secondary header copy
+    header restore <device>      Overwrite the primary header from the secondary
+    isluks [--luks2] <device>    Exit 0 if the device holds a LUKS container
+
     help                         Show this help message
     version                      Show version information
+
+NON-INTERACTIVE USE:
+    Every command that needs a passphrase accepts --key-file, and every command
+    that sets a new one also accepts --new-key-file:
+
+    # From a key file. THE WHOLE FILE IS THE PASSPHRASE, trailing newline
+    # included -- this is cryptsetup's rule, so use printf, not echo:
+    printf %s 'my passphrase' > /etc/luks/backup.key
+    luks2 open --key-file /etc/luks/backup.key /dev/sdb1 backup
+
+    # From standard input, whole:
+    printf %s 'my passphrase' | luks2 open --key-file - /dev/sdb1 backup
+
+    # From standard input, one line (the newline is NOT part of it):
+    echo 'my passphrase' | luks2 open /dev/sdb1 backup
 
 EXAMPLES:
     # Create a new LUKS2 encrypted volume on a block device

@@ -10,6 +10,8 @@ import (
 	"io"
 	"os"
 
+	"github.com/jeremyhahn/go-enclave"
+
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
@@ -27,16 +29,57 @@ type LuksOperations interface {
 	MakeFilesystem(volumeName, fstype, label string) error
 	IsMounted(mountPoint string) (bool, error)
 	IsUnlocked(name string) bool
+
+	// Keyslots
+	TestKey(device string, passphrase []byte) error
+	AddKey(device string, existing, newPassphrase []byte, opts *luks2.AddKeyOptions) error
+	RemoveKey(device string, passphrase []byte, keyslot int) error
+	KillSlot(device string, authPassphrase []byte, targetSlot int) error
+	ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) error
+	ListKeyslots(device string) ([]luks2.KeyslotInfo, error)
+
+	// Recovery keys
+	GenerateRecoveryKey(length int, format luks2.RecoveryKeyFormat) (*luks2.RecoveryKey, error)
+	AddRecoveryKey(device string, existing []byte, opts *luks2.RecoveryKeyOptions) (*luks2.RecoveryKey, error)
+	SaveRecoveryKey(key *luks2.RecoveryKey, path string) error
+	LoadRecoveryCredential(path string) (*enclave.MemoryEnclave, error)
+	RecoveryCredential(formatted string) (*enclave.MemoryEnclave, error)
+	VerifyRecoveryKey(device string, key *enclave.MemoryEnclave) (bool, error)
+
+	// Tokens
+	GetToken(device string, tokenID int) (*luks2.Token, error)
+	ListTokens(device string) (map[int]*luks2.Token, error)
+	ExportToken(device string, tokenID int) ([]byte, error)
+	ImportToken(device string, tokenID int, token *luks2.Token) error
+	ImportTokenJSON(device string, tokenID int, tokenJSON []byte) error
+	RemoveToken(device string, tokenID int) error
+	FindFreeTokenSlot(device string) (int, error)
+	TokenExists(device string, tokenID int) (bool, error)
+	CountTokens(device string) (int, error)
+
+	// Header
+	ReadHeader(device string) (*luks2.LUKS2BinaryHeader, *luks2.LUKS2Metadata, error)
+	ReadSecondaryHeader(device string) (*luks2.LUKS2BinaryHeader, *luks2.LUKS2Metadata, error)
+	RestorePrimaryHeader(device string) error
+	IsLUKS(device string) (bool, error)
+	IsLUKS2(device string) (bool, error)
 }
 
 // Terminal defines the interface for terminal operations
 type Terminal interface {
 	ReadPassword(fd int) ([]byte, error)
+
+	// IsTerminal reports whether fd is a terminal. It is what decides between
+	// prompting for a passphrase and reading one from a pipe, so it belongs on
+	// the same seam as the reading itself -- a test that says "there is no
+	// terminal here" must be able to say it in one place.
+	IsTerminal(fd int) bool
 }
 
 // FileSystem defines the interface for file system operations
 type FileSystem interface {
 	Create(name string) (*os.File, error)
+	Open(name string) (*os.File, error)
 	Stat(name string) (os.FileInfo, error)
 	Remove(name string) error
 	MkdirAll(path string, perm os.FileMode) error
@@ -114,6 +157,10 @@ func (d *DefaultFileSystem) Create(name string) (*os.File, error) {
 	return os.Create(name) // #nosec G304 -- CLI tool intentionally creates files at user-specified paths
 }
 
+func (d *DefaultFileSystem) Open(name string) (*os.File, error) {
+	return os.Open(name) // #nosec G304 -- CLI tool intentionally reads files at user-specified paths
+}
+
 func (d *DefaultFileSystem) Stat(name string) (os.FileInfo, error) {
 	return os.Stat(name)
 }
@@ -145,7 +192,7 @@ func NewCLI() *CLI {
 func (c *CLI) Run() int {
 	if len(c.Args) < 2 {
 		c.showBanner()
-		_, _ = fmt.Fprint(c.Stdout, usage)
+		_, _ = fmt.Fprintf(c.Stdout, "%s", usage)
 		return 1
 	}
 
@@ -166,16 +213,36 @@ func (c *CLI) Run() int {
 		return c.cmdInfo()
 	case "wipe":
 		return c.cmdWipe()
+	case "testkey":
+		return c.cmdTestKey()
+	case "addkey":
+		return c.cmdAddKey()
+	case "removekey":
+		return c.cmdRemoveKey()
+	case "killslot":
+		return c.cmdKillSlot()
+	case "changekey":
+		return c.cmdChangeKey()
+	case "keyslots":
+		return c.cmdKeyslots()
+	case "recovery":
+		return c.cmdRecovery()
+	case "token":
+		return c.cmdToken()
+	case "header":
+		return c.cmdHeader()
+	case "isluks":
+		return c.cmdIsLUKS()
 	case "help", "--help", "-h":
 		c.showBanner()
-		_, _ = fmt.Fprint(c.Stdout, usage)
+		_, _ = fmt.Fprintf(c.Stdout, "%s", usage)
 		return 0
 	case "version", "--version", "-v":
 		_, _ = fmt.Fprintf(c.Stdout, "luks2 version %s\n", Version)
 		return 0
 	default:
 		_, _ = fmt.Fprintf(c.Stderr, "Unknown command: %s\n\n", command)
-		_, _ = fmt.Fprint(c.Stdout, usage)
+		_, _ = fmt.Fprintf(c.Stdout, "%s", usage)
 		return 1
 	}
 }
@@ -186,7 +253,15 @@ func (c *CLI) showBanner() {
 
 // cmdCreate handles the create command
 func (c *CLI) cmdCreate() int {
-	if len(c.Args) < 3 {
+	o := newOptions("create")
+	key := keyFileFlag(o, "key-file")
+	args, err := o.parse(c.Args[2:])
+	if err != nil {
+		_, _ = fmt.Fprintf(c.Stderr, "%v\n", err)
+		return 1
+	}
+
+	if len(args) < 1 {
 		_, _ = fmt.Fprintln(c.Stdout, "Usage: luks2 create <path> [size] [filesystem]")
 		_, _ = fmt.Fprintln(c.Stdout, "\nFor block devices:")
 		_, _ = fmt.Fprintln(c.Stdout, "  luks2 create /dev/sdb1")
@@ -195,21 +270,26 @@ func (c *CLI) cmdCreate() int {
 		_, _ = fmt.Fprintln(c.Stdout, "  luks2 create encrypted.luks 1G ext4")
 		_, _ = fmt.Fprintln(c.Stdout, "\nSize suffixes: K, M, G, T")
 		_, _ = fmt.Fprintln(c.Stdout, "Filesystem types: ext4, ext3, ext2 (default: ext4)")
+		_, _ = fmt.Fprintln(c.Stdout, "\nOptions:")
+		_, _ = fmt.Fprintf(c.Stdout, "%s", keyFileHelp)
 		return 1
 	}
 
-	path := c.Args[2]
+	path := args[0]
 	isBlockDevice := len(path) >= 5 && path[:5] == "/dev/"
 
 	if isBlockDevice {
-		return c.cmdCreateBlockDevice(path)
+		return c.cmdCreateBlockDevice(path, *key)
 	}
-	return c.cmdCreateFile(path)
+	return c.cmdCreateFile(path, args[1:], *key)
 }
 
-// cmdCreateFile creates a LUKS2 volume in a file with full automation
-func (c *CLI) cmdCreateFile(filename string) int {
-	if len(c.Args) < 4 {
+// cmdCreateFile creates a LUKS2 volume in a file with full automation.
+//
+// args are the positional arguments after the filename: the size, then
+// optionally the filesystem type.
+func (c *CLI) cmdCreateFile(filename string, args []string, key KeySource) int {
+	if len(args) < 1 {
 		_, _ = fmt.Fprintln(c.Stdout, "Error: Size required for file volumes")
 		_, _ = fmt.Fprintln(c.Stdout, "Usage: luks2 create <file> <size> [filesystem]")
 		_, _ = fmt.Fprintln(c.Stdout, "Example: luks2 create encrypted.luks 100M ext4")
@@ -218,11 +298,11 @@ func (c *CLI) cmdCreateFile(filename string) int {
 		return 1
 	}
 
-	sizeStr := c.Args[3]
+	sizeStr := args[0]
 
 	fstype := "ext4"
-	if len(c.Args) > 4 {
-		fstype = c.Args[4]
+	if len(args) > 1 {
+		fstype = args[1]
 	}
 
 	c.showBanner()
@@ -264,8 +344,9 @@ func (c *CLI) cmdCreateFile(filename string) int {
 	// Now format it as LUKS
 	_, _ = fmt.Fprintln(c.Stdout, "\nFormatting as LUKS2 volume...")
 
-	// Prompt for passphrase
-	passphrase, err := c.promptPassphrase("Enter passphrase for new volume: ", true)
+	// Obtain the passphrase, from a key file when one was given and from the
+	// terminal otherwise.
+	passphrase, err := c.readPassphrase("Enter passphrase for new volume: ", true, key)
 	if err != nil {
 		_ = c.FS.Remove(filename)
 		_, _ = fmt.Fprintf(c.Stderr, "Error: %v\n", err)
@@ -273,10 +354,10 @@ func (c *CLI) cmdCreateFile(filename string) int {
 	}
 	defer ClearBytes(passphrase)
 
-	// Prompt for label
-	_, _ = fmt.Fprint(c.Stdout, "Enter volume label (optional, press Enter to skip): ")
-	var label string
-	_, _ = fmt.Fscanln(c.Stdin, &label)
+	// The label prompt is skipped when the credential did not come from a
+	// terminal: there is nobody there to answer it, and Fscanln would consume
+	// whatever the script piped next.
+	label := c.promptLabel(key)
 
 	// Create format options
 	opts := luks2.FormatOptions{
@@ -345,22 +426,20 @@ func (c *CLI) cmdCreateFile(filename string) int {
 }
 
 // cmdCreateBlockDevice creates a LUKS2 volume on a block device
-func (c *CLI) cmdCreateBlockDevice(device string) int {
+func (c *CLI) cmdCreateBlockDevice(device string, key KeySource) int {
 	c.showBanner()
 	_, _ = fmt.Fprintf(c.Stdout, "Creating LUKS2 volume on block device: %s\n\n", device)
 
-	// Prompt for passphrase
-	passphrase, err := c.promptPassphrase("Enter passphrase for new volume: ", true)
+	// Obtain the passphrase, from a key file when one was given and from the
+	// terminal otherwise.
+	passphrase, err := c.readPassphrase("Enter passphrase for new volume: ", true, key)
 	if err != nil {
 		_, _ = fmt.Fprintf(c.Stderr, "Error: %v\n", err)
 		return 1
 	}
 	defer ClearBytes(passphrase)
 
-	// Prompt for label
-	_, _ = fmt.Fprint(c.Stdout, "Enter volume label (optional, press Enter to skip): ")
-	var label string
-	_, _ = fmt.Fscanln(c.Stdin, &label)
+	label := c.promptLabel(key)
 
 	// Create format options
 	opts := luks2.FormatOptions{
@@ -391,20 +470,30 @@ func (c *CLI) cmdCreateBlockDevice(device string) int {
 
 // cmdOpen unlocks a LUKS2 volume
 func (c *CLI) cmdOpen() int {
-	if len(c.Args) < 4 {
-		_, _ = fmt.Fprintln(c.Stdout, "Usage: luks2 open <device> <name>")
-		_, _ = fmt.Fprintln(c.Stdout, "Example: luks2 open /dev/sdb1 my-encrypted-disk")
+	o := newOptions("open")
+	key := keyFileFlag(o, "key-file")
+	args, err := o.parse(c.Args[2:])
+	if err != nil {
+		_, _ = fmt.Fprintf(c.Stderr, "%v\n", err)
 		return 1
 	}
 
-	device := c.Args[2]
-	name := c.Args[3]
+	if len(args) < 2 {
+		_, _ = fmt.Fprintln(c.Stdout, "Usage: luks2 open [options] <device> <name>")
+		_, _ = fmt.Fprintln(c.Stdout, "Example: luks2 open /dev/sdb1 my-encrypted-disk")
+		_, _ = fmt.Fprintln(c.Stdout, "\nOptions:")
+		_, _ = fmt.Fprintf(c.Stdout, "%s", keyFileHelp)
+		return 1
+	}
+
+	device := args[0]
+	name := args[1]
 
 	c.showBanner()
 	_, _ = fmt.Fprintf(c.Stdout, "Opening LUKS2 volume: %s -> %s\n\n", device, name)
 
-	// Prompt for passphrase
-	passphrase, err := c.promptPassphrase("Enter passphrase: ", false)
+	// The credential: a key file, a pipe, or the terminal.
+	passphrase, err := c.readPassphrase("Enter passphrase: ", false, *key)
 	if err != nil {
 		_, _ = fmt.Fprintf(c.Stderr, "Error: %v\n", err)
 		return 1
@@ -828,7 +917,7 @@ func (c *CLI) promptPassphrase(prompt string, confirm bool) ([]byte, error) {
 	passphrase, err := c.Terminal.ReadPassword(fd)
 	_, _ = fmt.Fprintln(c.Stdout)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read passphrase: %w", err)
+		return nil, &KeyInputError{Op: "failed to read passphrase", Source: "terminal", Err: err}
 	}
 
 	if confirm {
@@ -841,7 +930,7 @@ func (c *CLI) promptPassphrase(prompt string, confirm bool) ([]byte, error) {
 		defer ClearBytes(confirmation)
 		_, _ = fmt.Fprintln(c.Stdout)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read confirmation: %w", err)
+			return nil, &KeyInputError{Op: "failed to read confirmation", Source: "terminal", Err: err}
 		}
 
 		// Compare in CONSTANT TIME, and as bytes. Bytes because converting a
@@ -850,7 +939,8 @@ func (c *CLI) promptPassphrase(prompt string, confirm bool) ([]byte, error) {
 		// soon as it finds a differing byte, and the caller controls both
 		// inputs only in the case where they are supposed to match.
 		if subtle.ConstantTimeCompare(passphrase, confirmation) != 1 {
-			return nil, fmt.Errorf("passphrases do not match")
+			ClearBytes(passphrase)
+			return nil, &KeyInputError{Op: "confirm passphrase", Source: "terminal", Err: ErrPassphraseMismatch}
 		}
 	}
 

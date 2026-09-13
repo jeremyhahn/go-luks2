@@ -8,6 +8,17 @@ Create a new LUKS2 encrypted volume.
 luks2 create <path> [size] [filesystem]
 ```
 
+## Non-interactive use
+
+`--key-file <path>` supplies the new volume's passphrase without a terminal, and
+the volume label prompt is skipped when there is nobody to answer it. See
+[key-input](key-input.md).
+
+```bash
+printf %s 'my passphrase' > /root/new.key
+sudo luks2 create --key-file /root/new.key encrypted.luks 100M ext4
+```
+
 ## Description
 
 The `create` command initializes a new LUKS2 encrypted volume. It supports two modes:

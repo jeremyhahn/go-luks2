@@ -11,6 +11,7 @@ This directory contains technical documentation about the LUKS2 (Linux Unified K
 | [Key Derivation](kdf.md) | PBKDF2 and Argon2 key derivation functions |
 | [Encryption](encryption.md) | AES-XTS encryption and anti-forensic splitting |
 | [Tokens](tokens.md) | Token management for FIDO2/TPM2 |
+| [External key providers](keyprovider.md) | Credentials from a hardware authenticator, agent or script |
 
 ## LUKS2 Overview
 

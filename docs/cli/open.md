@@ -5,7 +5,7 @@ Unlock a LUKS2 encrypted volume.
 ## Synopsis
 
 ```
-luks2 open <device> <name>
+luks2 open [--key-file <path>] <device> <name>
 ```
 
 ## Description
@@ -68,9 +68,27 @@ Encrypted Device ──> Unlock ──> /dev/mapper/<name>
 
 ## Passphrase
 
-- Prompts for passphrase with hidden input
+- Prompts for passphrase with hidden input when standard input is a terminal
 - Passphrase is cleared from memory after use
 - Failed attempts return an error
+
+### Without a terminal
+
+`--key-file <path>` reads the passphrase from a file, `--key-file -` from
+standard input, and a passphrase piped in with no flag at all is read as one
+line. This is what makes `open` usable from a script or a systemd unit.
+
+```bash
+# THE WHOLE FILE IS THE PASSPHRASE, trailing newline included -- so printf,
+# not echo. This is cryptsetup's rule and this tool matches it.
+printf %s 'my passphrase' > /etc/luks/backup.key
+sudo luks2 open --key-file /etc/luks/backup.key /dev/sdb1 backup
+
+# One line from a pipe, newline discarded
+echo 'my passphrase' | sudo luks2 open /dev/sdb1 backup
+```
+
+Full rules, and the trailing-newline trap in detail: [key-input](key-input.md).
 
 ## Device Mapper
 
@@ -145,3 +163,4 @@ sudo luks2 close <name>
 - [close](close.md) - Lock the volume
 - [mount](mount.md) - Mount after opening
 - [create](create.md) - Create new volumes
+- [key-input](key-input.md) - Passphrases from a file, a pipe or a terminal

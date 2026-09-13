@@ -242,6 +242,32 @@ objects, which are still closed.
 - Have backup passphrase keyslot
 - Test recovery procedures
 
+## Recovery tokens
+
+A recovery keyslot carries the token `systemd-cryptenroll --recovery-key`
+writes, and it is the whole token:
+
+```json
+{
+  "type": "systemd-recovery",
+  "keyslots": ["1"]
+}
+```
+
+There is no format member and no algorithm member, because there is nothing to
+record: the credential is the printed text an operator is holding. The token's
+job is to say that the slot is a recovery key rather than somebody's second
+passphrase — a distinction that otherwise exists only in a filing cabinet, and
+that decides whether the slot gets revoked.
+
+`luks2 recovery add` writes it, and rolls the keyslot back if it cannot.
+
+## See Also
+
+- [External key providers](keyprovider.md) — enrolling and unlocking with the
+  credential a token describes, and the FIDO2 helper protocol
+- [luks2 token](../cli/token.md) — the command-line interface to these
+
 ## Compatibility
 
 go-luks2 tokens are compatible with:

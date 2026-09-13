@@ -40,8 +40,22 @@ luks2 <command> [arguments]
 | [unmount](unmount.md) | Unmount a volume |
 | [info](info.md) | Display volume information |
 | [wipe](wipe.md) | Securely wipe a volume (headers or full device) |
+| [keyslots](keyslots.md) | List the keyslots on a volume |
+| [testkey](keyslots.md#testkey) | Check that a passphrase opens a volume |
+| [addkey](keyslots.md#addkey) | Add another passphrase |
+| [changekey](keyslots.md#changekey) | Replace the passphrase in a keyslot |
+| [removekey](keyslots.md#removekey) | Remove a keyslot, using its own passphrase |
+| [killslot](keyslots.md#killslot) | Remove a keyslot, using any valid passphrase |
+| [recovery](recovery.md) | Generate, enroll and verify recovery keys |
+| [token](token.md) | Inspect and edit the tokens in the header |
+| [header](header.md) | Show or restore the LUKS2 header copies |
+| [isluks](header.md#isluks) | Ask whether a device holds a LUKS container |
 | help | Show usage information |
 | version | Show version information |
+
+Every command that needs a passphrase can take one without a terminal — see
+[Non-interactive key input](key-input.md), which is what makes this tool usable
+from a script, a systemd unit or a timer.
 
 ## Quick Start
 
