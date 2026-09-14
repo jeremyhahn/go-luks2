@@ -156,3 +156,47 @@ restrictions:
 ```bash
 test/integration/docker-run.sh --rm -it -- bash
 ```
+
+## Image names, and what removes them
+
+Every integration run builds its image under a tag unique to that invocation —
+`go-luks2-integration-test:$(ITEST_ID)` — and runs its container under a
+matching name. That is what keeps two runs on one host from killing each
+other's containers or swapping each other's images mid-suite (#105). It also
+means nothing is ever *replaced*, so something has to delete:
+
+- Each target that runs the suite removes its own image and container from a
+  trap, on success and on failure alike.
+- A build that is the whole job — `make docker-build-integration` with nothing
+  after it — removes what it built. No later run can name that tag, so keeping
+  it is only disk. The BuildKit layer cache, which is the reason to pre-build
+  at all, is stored separately and survives.
+- Everything else is caught by the label. Every image built here carries
+  `go-luks2-itest=1`, and `make docker-prune-itest` — which also runs at the
+  start of every integration build, and in CI — removes labelled images that no
+  container references and that are older than `ITEST_PRUNE_AGE` (default
+  `2h`). This is the only mechanism that survives a `kill -9`, where no trap
+  runs at all.
+
+The age floor is not a guess: `prune` already skips an image any container
+references, so a suite that is executing is safe, but the seconds between
+another run's `docker build` and its `docker run` are not covered by that, and
+deleting an image inside that window fails the other run with `Unable to find
+image locally`. An hours-wide floor cannot land in a seconds-wide window.
+
+To keep an image — to poke at it by hand, or to build once and run later — name
+it yourself:
+
+```bash
+export ITEST_ID=debug          # or ITEST_IMAGE=my-image:debug
+make docker-build-integration  # builds go-luks2-integration-test:debug, keeps it
+```
+
+A kept image still carries the label — everything built here does, or the reaper
+would have holes exactly where the orphans are — so one left unused is collected
+once it is older than `ITEST_PRUNE_AGE`. Raise that value if you need it for
+longer than a couple of hours.
+
+`ITEST_ID`, `ITEST_IMAGE` and `ITEST_CONTAINER` all defer to the environment, so
+a caller that has already decided the names — CI does, per job attempt — gets
+the names it chose, and its own cleanup matches what was actually created.

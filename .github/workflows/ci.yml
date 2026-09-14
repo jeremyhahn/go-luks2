@@ -452,12 +452,40 @@ jobs:
             echo "no private-module credentials here; resolving from the public proxy"
           fi
 
+      # Reaps integration images this runner was left holding by EARLIER jobs
+      # (#146). Every tag here is unique to a job attempt, so a build never
+      # replaces its predecessor the way the old constant tag did, and only a
+      # delete bounds the disk. The cleanup step below covers this attempt;
+      # nothing covers an attempt whose runner died with it, and on a shared
+      # self-hosted runner the result presents as unrelated jobs failing to
+      # pull, which is a long way from this cause.
+      #
+      # The scoping -- label, unused-by-any-container, and an age floor no live
+      # run can be under -- lives in the Makefile's ITEST_PRUNE, so this
+      # workflow and a developer's `make integration-test` cannot drift into
+      # reaping by different rules. Same reason the privilege flags live in
+      # docker-run.sh (#80).
+      #
+      # Never fails the job: an unreapable image is a disk problem, not a test
+      # result, and this job's own names are removed by name regardless.
+      - name: Reap orphaned integration images
+        run: make docker-prune-itest || true
+
+      # --label is what makes the reap above possible AT ALL for an image built
+      # here: a trap cannot survive the SIGKILL that cancelling a job sends, and
+      # an unlabelled orphan is indistinguishable from any other image on the
+      # host. The value is read from the Makefile rather than repeated, because
+      # a label that disagrees with the prune filter reaps nothing and says so
+      # nowhere.
       - name: Build Docker image
         env:
           DOCKER_BUILDKIT: "1"
         run: |
+          set -eu
+          label="$(make -s print-itest-label)"
           docker build \
             --secret id=gomodauth,src="${RUNNER_TEMP}/gomodauth.env" \
+            --label "$label" \
             -f test/integration/Dockerfile \
             -t "$ITEST_IMAGE" .
 

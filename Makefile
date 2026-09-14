@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: changelog-assemble help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs security ci ci-full fmt-check all check test-cli integration-test-pkg integration-test-cli docker-build-integration test-calibration seccomp-diff
+.PHONY: changelog-assemble help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs security ci ci-full fmt-check all check test-cli integration-test-pkg integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration seccomp-diff
 
 # Default target
 .DEFAULT_GOAL := help
@@ -185,11 +185,82 @@ test-coverage: ## Run tests with coverage report
 # ITEST_ID is computed ONCE (`?=` then flattened with `:=`) and exported, so
 # every target in one invocation, including recursive `$(MAKE)` calls, agrees
 # on the name while two invocations never do.
+#
+# The two derived names use the SAME shape, and that is the point (#146). They
+# were `:=`, which OVERRIDES the environment instead of deferring to it. CI
+# sets ITEST_IMAGE and ITEST_CONTAINER as job-level env and its `if: always()`
+# cleanup removes exactly those two names; the moment a CI step calls a `make`
+# integration target -- a change that looks safe -- make would ignore the job's
+# values, build and run under names of its own, and the cleanup would delete
+# names that were never created. Both halves succeed, nothing fails, and the
+# real container keeps running on the host. That is #105's defect in a new
+# place: cleanup keyed on a name that does not match the thing that exists.
+#
+# The *_ORIGIN captures must come BEFORE the assignments. The flattening `:=`
+# rewrites a variable's origin to "file", which destroys the only answer to
+# "did anyone outside this make name this image?" -- see ITEST_BUILD_IS_GOAL.
+ITEST_ID_ORIGIN := $(origin ITEST_ID)
+ITEST_IMAGE_ORIGIN := $(origin ITEST_IMAGE)
 ITEST_ID ?= $(shell date +%s)-$(shell od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
 ITEST_ID := $(ITEST_ID)
 export ITEST_ID
-ITEST_IMAGE := go-luks2-integration-test:$(ITEST_ID)
-ITEST_CONTAINER := go-luks2-test-runner-$(ITEST_ID)
+ITEST_IMAGE ?= go-luks2-integration-test:$(ITEST_ID)
+ITEST_IMAGE := $(ITEST_IMAGE)
+export ITEST_IMAGE
+ITEST_CONTAINER ?= go-luks2-test-runner-$(ITEST_ID)
+ITEST_CONTAINER := $(ITEST_CONTAINER)
+export ITEST_CONTAINER
+
+# ---- bounding what the per-invocation tags leave behind (#146) ----
+#
+# Every image this repository builds for the integration suite carries this
+# label. The label is the only handle that survives a kill -9: a trap runs on
+# INT and TERM, SIGKILL cannot be caught, and an image orphaned that way is
+# otherwise indistinguishable from any other image on the host.
+ITEST_LABEL := go-luks2-itest=1
+
+# The reap is scoped three ways and every one of them is load-bearing:
+#
+#   --filter label=   only images this repository built.
+#   --all             our tags are unique per invocation, so an orphan is never
+#                     dangling; without --all, prune skips every one of them.
+#   --filter until=   an age floor. prune already skips an image that any
+#                     container references, which covers a run whose suite is
+#                     executing, but NOT the seconds between another run's
+#                     `docker build` and its `docker run`. Deleting an image in
+#                     that window fails that run with "Unable to find image
+#                     locally", which is #105's race wearing a new hat. An
+#                     hours-wide floor cannot land inside a seconds-wide
+#                     window, and a labelled image built two hours ago that no
+#                     container references is not a live run.
+ITEST_PRUNE_AGE ?= 2h
+ITEST_PRUNE := docker image prune --force --all \
+  --filter label=$(ITEST_LABEL) --filter until=$(ITEST_PRUNE_AGE)
+
+# `make docker-build-integration` with nothing after it builds an image NOTHING
+# can consume: the next invocation computes a different ITEST_ID, so the tag it
+# looks for is not this one. Before #105 the tag was constant and a rebuild
+# replaced its predecessor, bounding the cost at one image; unique tags turned
+# every standalone build into hundreds of MB kept forever. So a standalone
+# build removes what it built. The BuildKit layer cache -- the only reason to
+# pre-build at all -- is stored separately and survives that removal.
+#
+# "Standalone" is two conditions, and the second is the escape hatch: you name
+# it, you own it.
+#
+#   MAKELEVEL 0     no consuming target delegated here. Their
+#                   `$(MAKE) docker-build-integration` runs at level 1 and must
+#                   leave the image for the run on the following line.
+#   both undefined  make invented both names, so nothing outside this
+#                   invocation can even spell them. Set ITEST_ID or ITEST_IMAGE
+#                   in the environment and the image is yours: it is kept, and
+#                   the same value makes it findable again. It still carries the
+#                   label -- everything built here does, or the reaper would
+#                   have holes exactly where the orphans are -- so an image kept
+#                   this way and then left unused is collected once it passes
+#                   ITEST_PRUNE_AGE. Raise that if you need it for longer.
+ITEST_NAMES_ARE_OURS := $(if $(filter-out undefined,$(ITEST_ID_ORIGIN) $(ITEST_IMAGE_ORIGIN)),,yes)
+ITEST_BUILD_IS_GOAL := $(if $(filter 0,$(MAKELEVEL)),$(ITEST_NAMES_ARE_OURS))
 
 # Builds the integration image, handing the private-module credentials over as
 # a BuildKit secret.
@@ -209,7 +280,14 @@ ITEST_CONTAINER := go-luks2-test-runner-$(ITEST_ID)
 # github.com. The four variables are git's standard GIT_CONFIG_* override set
 # plus GOPRIVATE; export them to build against a private module host.
 docker-build-integration:
+	@# Reap first, so a build that later fails has still bounded the host. The
+	@# reap's output is shown only when something was actually removed: an
+	@# orphan means a run died here and that is worth reading, while "0B
+	@# reclaimed" on every build is noise. If docker ever reworded that output
+	@# the reap still happens and only the report goes quiet.
 	@set -eu; \
+	out="$$($(ITEST_PRUNE) 2>/dev/null || true)"; \
+	case "$$out" in *Deleted*) printf '%s\n' "$$out";; esac; \
 	umask 077; \
 	stage="$$(mktemp -t gomodauth.XXXXXX)"; \
 	trap 'rm -f "$$stage"' EXIT INT TERM; \
@@ -226,8 +304,41 @@ docker-build-integration:
 	fi; \
 	DOCKER_BUILDKIT=1 docker build \
 		--secret id=gomodauth,src="$$stage" \
+		--label $(ITEST_LABEL) \
 		-f test/integration/Dockerfile \
-		-t $(ITEST_IMAGE) .
+		-t $(ITEST_IMAGE) .; \
+	if [ -n "$(ITEST_BUILD_IS_GOAL)" ]; then \
+		docker image rm -f $(ITEST_IMAGE) >/dev/null 2>&1 || true; \
+		echo "$(COLOR_BOLD)Removed $(ITEST_IMAGE): a tag this invocation invented, which no later run can name.$(COLOR_RESET)"; \
+		echo "$(COLOR_BOLD)The build cache is kept. Export ITEST_ID or ITEST_IMAGE to keep the image itself.$(COLOR_RESET)"; \
+	fi
+
+# The reaper on its own, for an operator who wants to run it directly. It is
+# also the first thing every integration build does, so on any host that builds
+# this suite at all, orphans are bounded whether or not anyone remembers this
+# target exists.
+#
+# Reaping by label is what covers the cases no trap can: a run killed with
+# SIGKILL, a runner that died with the job, and the window between a consuming
+# target's build line and the next line that arms its trap. That window cannot
+# be closed by moving the build into the trapped shell -- each recipe line is
+# its own shell, and folding `$(MAKE) docker-build-integration` in was measured
+# to break `make -n`, because make EXECUTES a recipe line containing $(MAKE)
+# under -n and the dry run then started containers (#146). The label needs no
+# window closed: it outlives the process that created the image.
+docker-prune-itest: ## Remove orphaned integration images (label-scoped, age-bounded)
+	@$(ITEST_PRUNE)
+
+# The label, for the one other place that builds this image: ci.yml. Both the
+# build that applies it and the prune that reaps by it have to spell it the
+# same way or the reaper silently matches nothing -- cleanup keyed on a name
+# that does not match the thing that exists, which is the defect this whole
+# section descends from. So the workflow reads it from here rather than
+# repeating the literal, the same reason the privilege flags live in
+# docker-run.sh and not in five call sites. Deliberately undocumented in help:
+# it is a seam for the workflow, not a target anyone runs.
+print-itest-label:
+	@echo $(ITEST_LABEL)
 
 integration-test: build ## Run all integration tests in Docker (isolated, recommended)
 	@echo "$(COLOR_BOLD)Running all integration tests in Docker container...$(COLOR_RESET)"
