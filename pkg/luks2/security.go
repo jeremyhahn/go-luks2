@@ -94,7 +94,9 @@ var (
 	ErrInvalidSectorSize   = errors.New("invalid sector size (must be 512 or 4096)")
 	ErrInvalidArgon2Memory = errors.New("invalid Argon2 memory (must be >= 65536 KB)")
 	ErrInvalidArgon2Time   = errors.New("invalid Argon2 time cost (must be >= 1)")
-	ErrIntegerOverflow     = errors.New("integer overflow detected")
+	//nolint:lll // the message states the bound, like its two siblings above
+	ErrInvalidArgon2Parallel = errors.New("invalid Argon2 parallelism (must be >= 1)")
+	ErrIntegerOverflow       = errors.New("integer overflow detected")
 
 	// ErrInvalidMappingName indicates a device-mapper mapping name that this
 	// library will not create. See ValidateMappingName for what the name
@@ -249,6 +251,17 @@ const MinArgon2MemoryKB = 65536
 // but a malformed one.
 const MinArgon2Time = 1
 
+// MinArgon2Parallel is the smallest Argon2 parallelism this package will write.
+// Like MinArgon2Time it is the format's own minimum rather than a security
+// judgement: Argon2 parallelism is a uint8 in 1..255, so zero or negative is
+// malformed, not weak.
+//
+// The CEILING is not checked here, deliberately. Time and Memory have no upper
+// bound at this layer either, and 255 is already enforced twice -- by
+// deriveArgon2 before it derives, and by validateKeyslot when a header is read.
+// Adding a third spelling of it here would be a fourth place to keep in step.
+const MinArgon2Parallel = 1
+
 // validateArgon2CreateCost bounds the Argon2 costs a CALLER supplies.
 //
 // Split out of ValidateFormatOptions so AddKey can apply the identical bound
@@ -276,6 +289,20 @@ func validateArgon2CreateCost(opts FormatOptions) error {
 			Value:     opts.Argon2Time,
 			Minimum:   MinArgon2Time,
 			Err:       ErrInvalidArgon2Time,
+		}
+	}
+	// Parallelism is checked HERE, with its siblings, rather than being left to
+	// deriveArgon2 (#176). It was refused -- `cpus must be between 1 and 255`
+	// -- but one layer later, after the pre-check had passed, and as a
+	// CryptoError rather than the Argon2CostError the other two produce. Same
+	// mistake by the caller, two different error shapes and two different
+	// moments.
+	if opts.Argon2Parallel != 0 && opts.Argon2Parallel < MinArgon2Parallel {
+		return &Argon2CostError{
+			Parameter: "parallelism",
+			Value:     opts.Argon2Parallel,
+			Minimum:   MinArgon2Parallel,
+			Err:       ErrInvalidArgon2Parallel,
 		}
 	}
 	return nil

@@ -207,10 +207,15 @@ func callerArgon2Options(opts *AddKeyOptions) FormatOptions {
 	if opts == nil {
 		return FormatOptions{}
 	}
+	// All THREE costs, not two. Argon2Parallel was missing, so a negative
+	// parallelism never reached validateArgon2CreateCost and was refused one
+	// layer later by deriveArgon2 instead -- see #176 and the parallelism
+	// branch in validateArgon2CreateCost.
 	return FormatOptions{
-		KDFType:      baseAddKeyFormatOptions(opts).KDFType,
-		Argon2Time:   opts.Argon2Time,
-		Argon2Memory: opts.Argon2Memory,
+		KDFType:        baseAddKeyFormatOptions(opts).KDFType,
+		Argon2Time:     opts.Argon2Time,
+		Argon2Memory:   opts.Argon2Memory,
+		Argon2Parallel: opts.Argon2Parallel,
 	}
 }
 
