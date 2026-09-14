@@ -570,13 +570,15 @@ is a deliberate, reversible decision rather than an accident of how the CI legs
 were written; the reasoning, and the measurement that would change it, are
 recorded at the race legs in `.github/workflows/ci.yml`.
 
-The package list the race legs name is asserted against `go list ./...` on
-every run (`scripts/race-packages.sh`), so a package added later cannot be
-quietly left out of both the legs and this table.
+The package list the race legs name is maintained by hand: a package added
+later must be added to the legs in `.github/workflows/ci.yml` and to this table.
+That used to be asserted by a repository guard; the guards were removed and
+these properties are carried at review time instead, pending a code-based
+scanning solution.
 
-Build-tag coverage is a separate property with its own gate:
-`scripts/build-tags.sh` compiles every configuration the tree declares, with
-the tag list derived from the `//go:build` lines rather than written down.
+Build-tag coverage is a separate property: `make vet` runs `go vet` under the
+default configuration and under `integration`, which are the configurations this
+tree declares. A new build tag needs a vet leg added alongside it.
 
 ## License
 

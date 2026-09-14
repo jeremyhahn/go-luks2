@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: dm-scope-guard help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs security ci ci-full fmt-check all check test-cli integration-test-pkg integration-test-cli docker-build-integration no-global-device-cleanup test-require-tool test-calibration no-internal-disclosure test-guards seccomp-diff
+.PHONY: help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs security ci ci-full fmt-check all check test-cli integration-test-pkg integration-test-cli docker-build-integration test-calibration seccomp-diff
 
 # Default target
 .DEFAULT_GOAL := help
@@ -106,7 +106,6 @@ test: ## Run unit tests only (no I/O, no root required)
 # race legs in .github/workflows/ci.yml, and the coverage statement is in
 # README.md under Testing.
 test-unit: ## Run only unit tests with coverage and the race detector (fast, no I/O, no root required)
-	@./scripts/race-packages.sh ./pkg/luks2 ./cmd/luks2 ./test/harness ./test/harness/cmd/luks2-testreap
 	@echo "$(COLOR_BOLD)Running unit tests with coverage...$(COLOR_RESET)"
 	@$(GO) test -v -race -timeout 30m -coverprofile=$(COVERAGE_FILE) -covermode=atomic ./pkg/luks2 ./cmd/luks2 ./test/harness ./test/harness/cmd/luks2-testreap
 	@echo ""
@@ -442,66 +441,10 @@ fmt-check: ## Check if code is formatted (CI-friendly, doesn't modify files)
 	fi
 	@echo "$(COLOR_GREEN)✓ All files are properly formatted$(COLOR_RESET)"
 
-# vet compiles EVERY supported build-tag configuration, not just the default
-# one (#43). The tag list is derived from the //go:build lines in the tree by
-# scripts/build-tags.sh — see that file for why it is derived rather than
-# written down, and for why non-linux is deliberately not a configuration.
-#
-# This is the same command CI runs, so the local check and the gate cannot
-# diverge; `make ci` and `make check` both depend on this target, which is what
-# catches a tag/symbol mismatch before a push rather than at the far end of the
-# pipeline.
-# REGRESSION GUARD (#17). A standing written rule against adding a second
-# `losetup -D` call site already existed; there were then four. A doc-only rule
-# was demonstrably not enough, so this is a check that runs.
-dm-scope-guard: ## Refuse a dm guard that blocks concurrent runs or stops refusing its own scope
-	@./scripts/dm-scope-guard-test.sh
-
-no-global-device-cleanup: ## Refuse ownership-blind device teardown (losetup -D, dmsetup remove_all)
-	@./scripts/no-global-device-cleanup.sh
-
-# REGRESSION GUARD (#105). A fixed container name is the SIGKILL vector: two
-# jobs on one runner share it, `docker rm -f` sends SIGKILL, and one job's
-# teardown kills the other's running container mid-suite. `--self-test` feeds
-# the guard input it must reject AND input it must not, because running it
-# against a clean tree proves only that it can say yes.
-# PUBLIC-MIRROR GUARD (#20). This repository is mirrored publicly and releases
-# publish a tree byte-identical to the internal tag, so every tracked file is a
-# published file. #20 asserts a WHOLE-TREE property, and a whole-tree property
-# stops holding the moment anything merges beneath it — it cannot be maintained
-# by remembering to re-run a grep, so it fails a build instead.
-no-internal-disclosure: ## Refuse internal infrastructure detail in a publicly mirrored repo
-	@./scripts/no-internal-disclosure.sh
-
-# Behavioural tests for both guards above. Running a guard against the current
-# clean tree proves only that it can say yes; it proves nothing about the thing
-# the guard is for, and a guard that has stopped detecting looks exactly like a
-# clean repository. Every review round on these two found a fail-open path that
-# a green clean-tree run reported as fine -- including one introduced BY a fix
-# for an earlier finding. Each is a case in here now.
-test-guards: ## Test the disclosure and device-teardown guards against fixtures
-	@./scripts/guards-test.sh
-
-# Six defects in one branch (#96) were one idea: "I could not find out" rendered
-# as "it is fine". Review found each of them, at one per round, and only because
-# the reviewer happened to look there. This is the same check, mechanically, on
-# every run -- and it is self-testing, because a guard that cannot say both yes
-# and no is the defect it exists to catch, one level up.
-no-error-collapse: ## Refuse an error collapsed into a benign answer (self-tests itself first)
-	@./scripts/error-collapse-guard.sh --self-test
-	@./scripts/error-collapse-guard.sh
-
-# The CI version gate's own tests. Run locally as well as in CI, because the
-# comparison they cover shipped failing open once already: a substring test
-# accepted v11.7.0 for a v1.7.0 pin. `--mutate` loosens the comparison back to
-# that substring in a copy and asserts the near-miss cases go red, so the suite
-# cannot quietly stop testing the property it names.
-test-require-tool: ## Test the pinned-version gate (add MUTATE=1 to verify the tests themselves)
-	@./scripts/require-tool-test.sh $(if $(MUTATE),--mutate,)
-
-vet: ## Run go vet under every supported build-tag configuration
-	@echo "$(COLOR_BOLD)Running go vet (every build-tag configuration)...$(COLOR_RESET)"
-	@./scripts/build-tags.sh
+vet: ## Run go vet, including the integration build tag
+	@echo "$(COLOR_BOLD)Running go vet...$(COLOR_RESET)"
+	@$(GO) vet ./...
+	@$(GO) vet -tags=integration ./...
 	@echo "$(COLOR_GREEN)✓ Vet passed$(COLOR_RESET)"
 
 lint: ## Run golangci-lint (if installed)
@@ -616,7 +559,7 @@ trivy-fs: ## Scan the working tree with trivy (dependency CVEs and leaked secret
 security: gosec govulncheck verify trivy-fs ## Run the full §8 security suite (gosec, govulncheck, go mod verify, trivy fs)
 	@echo "$(COLOR_GREEN)✓ Security suite complete$(COLOR_RESET)"
 
-ci: fmt-check vet dm-scope-guard no-global-device-cleanup no-internal-disclosure no-error-collapse test-require-tool test-guards lint security test-unit test-calibration build ## Run CI pipeline locally (format, lint, security suite, unit tests, build)
+ci: fmt-check vet lint security test-unit test-calibration build ## Run CI pipeline locally (format, lint, security suite, unit tests, build)
 	@echo ""
 	@echo "$(COLOR_BOLD)======================================$(COLOR_RESET)"
 	@echo "$(COLOR_BOLD)CI Pipeline Complete$(COLOR_RESET)"
@@ -643,7 +586,6 @@ ci-full: ## Run full CI pipeline with Docker integration tests (enforces 90% cov
 	@$(MAKE) vet
 	@$(MAKE) no-global-device-cleanup
 	@$(MAKE) no-internal-disclosure
-	@$(MAKE) test-require-tool
 	@$(MAKE) test-guards
 	@$(MAKE) lint
 	@$(MAKE) security
@@ -679,7 +621,7 @@ ci-full: ## Run full CI pipeline with Docker integration tests (enforces 90% cov
 	@echo "$(COLOR_GREEN)All CI checks passed! Ready to push.$(COLOR_RESET)"
 	@echo ""
 
-check: fmt vet dm-scope-guard no-global-device-cleanup no-internal-disclosure test-require-tool test-guards test ## Run all quality checks (format, vet, guards, test)
+check: fmt vet test ## Run all quality checks (format, vet, test)
 	@echo "$(COLOR_GREEN)✓ All checks passed$(COLOR_RESET)"
 
 clean: ## Clean build artifacts and test files

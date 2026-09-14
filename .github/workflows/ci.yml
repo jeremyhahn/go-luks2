@@ -120,127 +120,6 @@ jobs:
             echo "$unformatted"
             exit 1
           fi
-
-      # COMPILE EVERY SUPPORTED BUILD-TAG CONFIGURATION (#43), in the FAST
-      # tier, so it gates before anything expensive runs. This replaces a bare
-      # `go vet ./...`, which covered the default configuration only.
-      #
-      # Nothing previously enforced that a file's build tag matches the symbols
-      # it uses, and the gap had already cost a regression: a test file landed
-      # untagged while a helper it called 15 times lives under
-      # `//go:build !integration`. go build, go vet, go test -race on both
-      # packages, golangci-lint, gosec, govulncheck and go mod verify all
-      # returned 0; only `-tags=integration` was red, and the only job that ran
-      # it was the Docker integration suite at the far end of the pipeline.
-      #
-      # The tag list is DERIVED from the //go:build lines in the tree, not
-      # written down — a written list is accurate until someone adds a tag and
-      # then it is silently short. It is also compile-only: no volumes, no
-      # privileges, no root, under a second.
-      #
-      # .golangci.yml stays default-tag-only, deliberately and correctly:
-      # adding `integration` there SWAPS one set for the other and makes
-      # `unused` fire on every helper the unit tests call. This step is what
-      # covers the tag dimension; the linter is not.
-      - name: Compile every supported build-tag configuration
-        run: ./scripts/build-tags.sh
-
-      # LOCK-COVERAGE GUARD. Unique per-attempt names stopped two jobs killing
-      # each other and thereby allowed two suites to run at once against a
-      # host-global loop-device pool. The lock keeps that safe, and a lock is
-      # only as good as its coverage -- one unlocked entry point restores the
-      # contention entirely. The invariant was broken twice while being
-      # introduced, both times by enumerating the MECHANISM (`docker run`)
-      # instead of the RESOURCE (the pool), so it is checked rather than
-      # remembered. --self-test first: a guard that cannot say "no" reports what
-      # a clean check reports.
-      - name: Refuse a dm guard that blocks concurrent runs
-        run: |
-          # The entrypoint guard decides whether the suite runs at all, and has
-          # been wrong twice: refusing every LVM-root runner (#162), then
-          # refusing any host where a CONCURRENT run held a mapping (#178).
-          # This drives the shipped guard over both, and asserts it can still
-          # say no.
-          ./scripts/dm-scope-guard-test.sh
-
-      - name: Refuse ownership-blind device teardown
-        run: ./scripts/no-global-device-cleanup.sh
-
-      # PUBLIC-MIRROR GUARD (#20). This repository is mirrored publicly and a
-      # release publishes a tree byte-identical to the internal tag, so every
-      # tracked file is a published file. #20 asserts a WHOLE-TREE property —
-      # no workstation paths, no private repo name, no internal forge address,
-      # no named runner hosts, no internal ticket numbers, no citations of
-      # company documents that resolve to nothing outside.
-      #
-      # It runs on every push because such a property stops holding the moment
-      # anything merges beneath it. Establishing it once on a branch and
-      # trusting people to re-check is how it decays; the issue's own
-      # verification section says to re-run the sweep after any rebase, which
-      # is a job for a gate rather than for a habit.
-      - name: Refuse internal infrastructure detail
-        run: ./scripts/no-internal-disclosure.sh
-
-      # Six defects in one branch (#96) were one idea: "I could not find out"
-      # rendered as "it is fine". Review found each of them, at one per round,
-      # and only because the reviewer happened to look there. This is the same
-      # check mechanically, on every run.
-      #
-      # It self-tests FIRST, and that ordering is the point: a guard that cannot
-      # say both yes and no is the defect it exists to catch, one level up. It
-      # would have caught five of the six instances before any review round --
-      # verified against the historical commits.
-      - name: Refuse an error collapsed into a benign answer
-        run: |
-          ./scripts/error-collapse-guard.sh --self-test
-          ./scripts/error-collapse-guard.sh
-
-      # The version gate has its own tests, and they run HERE rather than only
-      # on a developer's machine — a suite nothing executes is a suite that can
-      # rot into agreement with whatever the code does. They use fakes printing
-      # the real output formats, take no network, and finish in under a second.
-      # They exist because the comparison they cover shipped FAILING OPEN: a
-      # substring test accepted v11.7.0 for a v1.7.0 pin.
-      - name: Test the pinned-version gate
-        run: ./scripts/require-tool-test.sh
-
-      # The two repository guards get their own behavioural tests, for the same
-      # reason the version gate does: running a guard against the current clean
-      # tree proves it can say yes and nothing else, and a guard that has
-      # stopped detecting is indistinguishable from a clean repository. Every
-      # review round on these found a fail-open path a clean-tree run called
-      # fine -- one of them introduced BY the fix for an earlier finding. Each
-      # is a case in the suite. Fixtures in throwaway git repos; no network, no
-      # devices.
-      - name: Test the repository guards
-        run: ./scripts/guards-test.sh
-
-      # NO NETWORK INSTALL (#44). golangci-lint is baked into the self-hosted
-      # runner image at GOLANGCI_LINT_VERSION. The install this replaces had
-      # grown a hand-rolled 3-attempt retry loop, which is the tell: every host
-      # in this fleet resolves an AAAA record for sum.golang.org and none has a
-      # default IPv6 route, so a module fetch intermittently dies with
-      # ENETUNREACH when Go's v6->v4 fallback does not complete. Retrying was
-      # treating the symptom in one repo; baking the tool removes the fetch.
-      #
-      # THE PIN MOVED v2.12.2 -> v2.13.2, DELIBERATELY AND ON EVIDENCE.
-      # v2.12.2 was pinned because @latest had moved to v2.13.0, which panicked
-      # under Go 1.26 ("nilness: internal error: unhandled builtin recover" in
-      # honnef.co/go/tools) and took the whole gate down. The runner image has
-      # since been rebuilt with v2.13.2, and this gate is what surfaced the
-      # skew — the job went red naming both versions instead of quietly linting
-      # with something other than the pin, which is the entire point of it.
-      #
-      # Measured before moving the pin rather than assumed from a version
-      # number: v2.13.2 was installed and run against this repository under Go
-      # 1.26.7. It exits 0 with "0 issues.", does not panic, and reports the
-      # SAME seven enabled linters as v2.12.2 (errcheck, gocritic, govet,
-      # ineffassign, misspell, staticcheck, unused) — so the bump does not
-      # silently drop a security linter, which would be the quiet way for this
-      # to go wrong. The binary tested self-reports mod sum
-      # h1:bCyq3E4vo9qwzifjpzJqYndEt7Ncva80qkk8G2B4TXU=, identical to the one
-      # the runner reported, so this is the same artifact and not merely the
-      # same version string.
       - name: Require golangci-lint at the pinned version
         run: |
           set -eu
@@ -347,88 +226,6 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
-
-      # THE RACE LEGS BELOW NAME THEIR PACKAGES; THIS ASSERTS THE LIST IS
-      # COMPLETE (#34). Today `go list ./...` returns exactly the two packages
-      # raced below, so the enumeration is accurate — which is exactly when to
-      # install the check, because its failure mode is silent. Add a third
-      # package and CI would race two of three: no job fails, no warning
-      # appears, and the legs quietly stop covering the module.
-      #
-      # The enumeration is kept rather than replaced with `./...` because each
-      # leg writes its own coverage profile and the two are reported
-      # separately. Asserting the list is the other branch of the issue's
-      # acceptance and fails LOUDLY at the moment of divergence.
-      - name: Assert the race legs cover every package
-        run: ./scripts/race-packages.sh ./pkg/luks2 ./cmd/luks2 ./test/harness ./test/harness/cmd/luks2-testreap
-
-      # WHAT THE RACE DETECTOR HERE DOES AND DOES NOT COVER (#34 item 3),
-      # stated so "we run the race detector" is never read as more than it is:
-      #
-      #   COVERED: the DEFAULT-tag build of ./pkg/luks2 and ./cmd/luks2.
-      #   NOT COVERED: anything behind `//go:build integration`. That includes
-      #     pkg/luks2's own integration-tagged test files — this package is
-      #     raced under the default tag set, which excludes them — and the
-      #     packages test/integration/pkg and test/integration/cli, which do
-      #     not exist at all without the tag.
-      #
-      # DECISION, recorded rather than left as an accident of how these legs
-      # were written: the integration suites are NOT race-checked, for now.
-      # They run in a container, against loop devices, device-mapper and
-      # mounts, and they are already the pipeline's long pole; -race measured
-      # ~4.6x on this codebase, and the unit suite needs
-      # 30 minutes without it. That is a cost to weigh, and it cannot be
-      # weighed from a workstation: the container refuses to run where the host
-      # device-mapper is visible with foreign mappings, so the number has to
-      # come from a runner.
-      #
-      # WHAT WOULD CHANGE IT: time `go test -race -tags=integration ./pkg/luks2`
-      # inside the integration container on a runner. That one suite is the
-      # part worth racing — it is the library's own concurrency-sensitive code,
-      # as opposed to the two black-box CLI-driving suites. If it fits the
-      # budget, add -race to that entrypoint line and narrow this note; if it
-      # does not, record the measured cost here so the next person does not
-      # re-derive it. This is a deliberate NO, not an oversight, and it is
-      # reversible on evidence.
-      #
-      # -timeout 30m, deliberately, against Go's 10-minute DEFAULT.
-      #
-      # This suite is KDF-bound by design. Opening a volume costs a
-      # 600000-iteration digest derivation plus the keyslot's own, and an
-      # expensive KDF is the security feature, not an inefficiency to optimise
-      # away. On top of that CI runs it under -race, measured at ~4.6x the plain
-      # cost on a workstation, and this runner is a further ~2.6x slower than
-      # one. 10 minutes was never a considered budget for that; it is simply
-      # what go test defaults to, and the package crossed it at 600.08s.
-      #
-      # The headroom is NOT the fix for a slow suite -- that was removing the
-      # 45% of CI runtime the enclave-custody tests were spending on redundant
-      # container formats, which is done. This keeps a legitimately slow suite
-      # from being reported as a hang.
-      # CRYPTSETUP IS A TEST DEPENDENCY OF ./pkg/luks2, NOT AN OPTIONAL EXTRA.
-      #
-      # conformance_test.go is in the DEFAULT tag set, so it runs in this job --
-      # and its `requireCryptsetup` used to t.Skipf when the binary was absent.
-      # This runner image has no cryptsetup, so every TestConformance_* passed
-      # here having executed nothing, and the job reported success. Measured on
-      # PR #159's unit leg: NINE skip messages across conformance_test.go and
-      # geometry_test.go, all green.
-      #
-      # That suite is the whole bidirectional interoperability property -- that
-      # cryptsetup can open what this library writes, and the reverse. It took
-      # seven review rounds to earn, after a period when cryptsetup refused
-      # every container this library produced and an encrypted volume had NO
-      # recovery path. Guarding it with a mechanism that turns absence into
-      # success is how that regresses unnoticed.
-      #
-      # ../handbook/software/conventions/testing-guidelines.md ranks the remedies
-      # and this is the first one. The devcontainer and the integration image
-      # already install cryptsetup-bin; this job was the only place it was
-      # missing.
-      #
-      # The version is asserted, not assumed. An install that silently produced
-      # no usable binary would put the suite straight back to skipping, which is
-      # the failure this step exists to remove.
       - name: Install cryptsetup (a test dependency of ./pkg/luks2)
         run: |
           set -eu
@@ -472,16 +269,13 @@ jobs:
       #
       # It also has to be somewhere: a package CI builds but never tests is a
       # blind spot, and this one decides what gets REMOVED from a host. The
-      # reaper command is listed alongside it so race-packages.sh's enumeration
-      # stays complete.
+      # reaper command is listed alongside it so the enumeration stays complete.
       - name: Run unit tests (test/harness)
         run: go test -v -race -timeout 30m -coverprofile=coverage-harness.out -covermode=atomic ./test/harness ./test/harness/cmd/luks2-testreap
-
-      # Recorded so the next slow or failing run has evidence rather than a
-      # guess. RLIMIT_MEMLOCK is the one that turns this package's fail-closed
-      # design into a red suite: measured on a workstation, the suite passes
-      # down to 512 KiB and fails comprehensively at 64 KiB with
-      # "could not allocate locked memory ... limit reached?".
+      # RLIMIT_MEMLOCK is the one that turns a correct design into a red suite:
+      # measured on a workstation, the suite passes down to 512 KiB and fails
+      # comprehensively at 64 KiB with "could not allocate locked memory ...
+      # limit reached?".
       - name: Record the resource limits these tests ran under
         if: always()
         run: |
@@ -492,9 +286,7 @@ jobs:
       # Every profile the legs above produce is merged here. A profile that is
       # written and then left out does not fail anything -- the leg still gates
       # -- it just makes the reported number describe less of the module than a
-      # reader assumes, which is the same silent narrowing scripts/race-packages.sh
-      # exists to prevent one level up. Adding a race leg means adding its
-      # profile to this list.
+      # reader assumes. Adding a race leg means adding its profile to this list.
       - name: Merge coverage
         run: |
           echo "mode: atomic" > coverage.out

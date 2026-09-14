@@ -53,6 +53,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **The repository guards and the `scripts/` directory (#183).** 2,418 lines of
+  shell and Python across nine files, plus every Makefile target and CI step
+  that invoked them: the disclosure scanner, the ownership-blind device-teardown
+  scanner, the error-collapse scanner, the dm-scope guard test, the build-tag
+  and race-package enumerators, and the two suites that tested the other
+  scripts.
+
+  These concerns move to **development and review time**, as part of the SDLC
+  process and conventions. A code-based scanning solution is planned separately;
+  until it lands this repository implements none (owner ruling 2026-09-13). The
+  guards were deliberately NOT ported to Go tests, which was the obvious move and
+  is not what is wanted.
+
+  What review now carries, stated plainly rather than lost quietly: this
+  repository is publicly mirrored and keeps the forge address out of the tree, so
+  internal-detail disclosure is now a review property; and an ownership-blind
+  device teardown — a global `dmsetup` wipe once reached
+  `nvme0n1p3_crypt -> vgmint-root` on a real machine and survived only because
+  those devices were busy — is now a review property too.
+
+  `.github/require-tool.sh` and `test/integration/docker-run.sh` are NOT removed.
+  Neither scans the tree: the first installs the pinned analysis tools three CI
+  steps depend on, and the second holds the integration container's eight
+  privilege flags in one place, which is the arrangement #80 put there so five
+  copies of a security-critical invocation cannot drift apart.
+
+  `make vet` now runs `go vet` directly for the default and `integration`
+  configurations rather than deriving the tag list, and the race-leg package list
+  in `.github/workflows/ci.yml` is maintained by hand.
+
 - **BREAKING: `AFSplit`, `AFMerge` and `DeriveKey` are removed (#11).** All
   three were `Deprecated:`-marked exported wrappers around plain, unprotected
   heap memory, kept only for consumers that turned out not to exist — a
