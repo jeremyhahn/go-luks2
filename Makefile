@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs security ci ci-full fmt-check all check test-cli integration-test-pkg integration-test-cli docker-build-integration test-calibration seccomp-diff
+.PHONY: changelog-assemble help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs security ci ci-full fmt-check all check test-cli integration-test-pkg integration-test-cli docker-build-integration test-calibration seccomp-diff
 
 # Default target
 .DEFAULT_GOAL := help
@@ -797,6 +797,37 @@ RELEASE_REMOTE ?= dev
 
 .PHONY: release-alpha deps-latest
 
+# changelog-assemble folds changelog.d fragments into a new CHANGELOG.md section.
+#
+# A COMMITTED STEP PERFORMED BEFORE TAGGING, not something release.yml does --
+# the workflow only overwrites the runner-workspace copy, so a fragment folded in
+# there would never reach the repository (release-versioning.md 5).
+#
+# Run it, read the diff, commit it, then `make release-alpha VERSION=...`. It
+# does not commit for you: the changelog is the one artefact of a release a human
+# should look at before it is published.
+changelog-assemble: export ASM_VERSION := $(value VERSION)
+changelog-assemble: ## Fold changelog.d fragments into a CHANGELOG.md section (VERSION=vX.Y.Z-alpha)
+	@test -n "$$ASM_VERSION" || { echo 'ERROR: state the version explicitly: make changelog-assemble VERSION=vX.Y.Z-alpha'; exit 1; }
+	@ls changelog.d/*.md >/dev/null 2>&1 || { echo 'ERROR: changelog.d holds no fragments; nothing to assemble'; exit 1; }
+	@set -eu; \
+	ver="$${ASM_VERSION#v}"; \
+	frags=$$(ls changelog.d/*.md | grep -v '/README\.md$$' || true); \
+	test -n "$$frags" || { echo 'ERROR: changelog.d holds only README.md; nothing to assemble'; exit 1; }; \
+	{ \
+	  printf '## [%s] - %s\n\n' "$$ver" "$$(date -u +%Y-%m-%d)"; \
+	  for f in $$frags; do cat "$$f"; printf '\n'; done; \
+	} > .changelog-section; \
+	awk 'NR==FNR { sec = sec $$0 "\n"; next } \
+	     !done && /^## \[/ && $$0 !~ /^## \[Unreleased\]/ { printf "%s", sec; done = 1 } \
+	     { print } \
+	     END { if (!done) printf "%s", sec }' .changelog-section CHANGELOG.md > .changelog-new; \
+	mv .changelog-new CHANGELOG.md; \
+	rm -f .changelog-section; \
+	rm -f $$frags; \
+	echo "Assembled $$(echo "$$frags" | wc -w) fragment(s) into CHANGELOG.md as [$$ver]."; \
+	echo "Review the diff, then commit CHANGELOG.md and the fragment deletions together."
+
 release-alpha: export REL_VERSION   := $(value VERSION)
 release-alpha: export REL_REMOTE    := $(RELEASE_REMOTE)
 release-alpha: export REL_REPO      := $(REPO_NAME)
@@ -817,6 +848,11 @@ release-alpha:
 	  *) echo "ERROR: could not reach $$REL_REMOTE to check whether tag $$REL_VERSION exists. Refusing to continue: an unreachable remote is not an absent tag"; exit 1 ;; \
 	esac
 	@test -z "$$(git status --porcelain)" || { echo 'ERROR: working tree not clean'; exit 1; }
+	@# Captured, not piped into a test. `grep -q` closes the pipe on its first
+	@# match, so under pipefail the pipeline reports ls's SIGPIPE rather than
+	@# grep's verdict and the check silently never fires -- measured.
+	@frags=$$(ls changelog.d/*.md 2>/dev/null | grep -v '/README\.md$$' || true); \
+	test -z "$$frags" || { echo "ERROR: changelog.d still holds unassembled fragments:"; echo "$$frags" | sed 's/^/  /'; echo "Tagging now would publish a release whose CHANGELOG omits them. Run: make changelog-assemble VERSION=$$REL_VERSION, review, commit, then release."; exit 1; }
 	@ver="## [$${REL_VERSION#v}]"; awk -v ver="$$ver" 'index($$0, ver) == 1 { f = 1 } END { exit f ? 0 : 1 }' CHANGELOG.md || { echo "ERROR: CHANGELOG.md has no \"$$ver\" section heading. Matched LITERALLY and anchored at the line start — an unanchored prose mention does not count, and neither does a near-miss heading"; exit 1; }
 	@printf '%s\n' "$${REL_VERSION#v}" > VERSION
 	"$$REL_AGENT_GIT" "$$REL_REPO" add VERSION
