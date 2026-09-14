@@ -14,6 +14,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -216,39 +217,70 @@ func TestTokenJSONMarshal(t *testing.T) {
 	}
 }
 
-func TestTPM2TokenJSONMarshal(t *testing.T) {
-	token := &Token{
-		Type:           "systemd-tpm2",
-		Keyslots:       []string{"2"},
-		TPM2Hash:       "sha256",
-		TPM2PolicyHash: "dGVzdC1wb2xpY3ktaGFzaA==",
-		TPM2PCRBank:    "sha256",
-		TPM2PCRs:       intsPtr([]int{0, 1, 2, 3, 7}),
-		TPM2Blob:       "dGVzdC1ibG9i",
-		TPM2PublicKey:  "dGVzdC1wdWJrZXk=",
+// TestSystemdTPM2TokenSurvivesUnmodeled is what replaced the typed TPM2
+// fields (#189).
+//
+// go-xkms owns TPM2, so this package models none of that token's members. The
+// property that matters is therefore not "we parse it" but "we do not damage
+// it": a systemd-tpm2 token read from a foreign header and written back must
+// come out byte-identical, because this package reads a whole header, changes
+// one keyslot, and writes the lot back.
+//
+// The member shapes below are the ones libsystemd-shared-255.so actually
+// contains -- tpm2-blob, tpm2-pcrs, tpm2-pcr-bank, tpm2-primary-alg,
+// tpm2-policy-hash, tpm2-pin -- read out of the library that holds
+// tpm2_make_luks2_json rather than taken from the spec or from memory. Their
+// meaning is go-xkms's business; their survival is this package's.
+func TestSystemdTPM2TokenSurvivesUnmodeled(t *testing.T) {
+	const real = `{"type":"systemd-tpm2","keyslots":["2"],` +
+		`"tpm2-blob":"dGVzdC1ibG9i","tpm2-pcrs":[0,1,2,3,7],` +
+		`"tpm2-pcr-bank":"sha256","tpm2-primary-alg":"ecc",` +
+		`"tpm2-policy-hash":"dGVzdC1wb2xpY3ktaGFzaA==","tpm2-pin":false}`
+
+	var token Token
+	if err := json.Unmarshal([]byte(real), &token); err != nil {
+		t.Fatalf("decoding a systemd-tpm2 token: %v", err)
 	}
 
-	data, err := json.Marshal(token)
+	// The two members LUKS2 itself defines are modeled and must decode.
+	if token.Type != "systemd-tpm2" {
+		t.Errorf("Type = %q, want %q", token.Type, "systemd-tpm2")
+	}
+	if len(token.Keyslots) != 1 || token.Keyslots[0] != "2" {
+		t.Errorf("Keyslots = %v, want [2]", token.Keyslots)
+	}
+
+	// Value receiver on purpose: json.Marshal of a bare Token does not take
+	// its address, and a pointer-receiver marshaler would silently not fire.
+	out, err := json.Marshal(token)
 	if err != nil {
-		t.Fatalf("failed to marshal token: %v", err)
+		t.Fatalf("re-encoding: %v", err)
 	}
 
-	var parsed Token
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		t.Fatalf("failed to unmarshal token: %v", err)
+	for _, member := range []string{
+		`"tpm2-blob":"dGVzdC1ibG9i"`,
+		`"tpm2-pcrs":[0,1,2,3,7]`,
+		`"tpm2-pcr-bank":"sha256"`,
+		`"tpm2-primary-alg":"ecc"`,
+		`"tpm2-policy-hash":"dGVzdC1wb2xpY3ktaGFzaA=="`,
+		`"tpm2-pin":false`,
+	} {
+		if !strings.Contains(string(out), member) {
+			t.Errorf("%s did not survive the round trip\n got: %s", member, out)
+		}
 	}
+}
 
-	if parsed.Type != token.Type {
-		t.Errorf("type mismatch: got %s, want %s", parsed.Type, token.Type)
-	}
-	if parsed.TPM2Hash != token.TPM2Hash {
-		t.Errorf("TPM2Hash mismatch: got %s, want %s", parsed.TPM2Hash, token.TPM2Hash)
-	}
-	if parsed.TPM2PCRs == nil || token.TPM2PCRs == nil {
-		t.Fatalf("TPM2PCRs should be set on both sides: got %v, want %v", parsed.TPM2PCRs, token.TPM2PCRs)
-	}
-	if len(*parsed.TPM2PCRs) != len(*token.TPM2PCRs) {
-		t.Errorf("TPM2PCRs length mismatch: got %d, want %d", len(*parsed.TPM2PCRs), len(*token.TPM2PCRs))
+// TestTPM2MembersAreNotModelled pins the boundary itself: if someone adds a
+// typed TPM2 field back, this fails and points at the ruling rather than at a
+// style preference.
+func TestTPM2MembersAreNotModelled(t *testing.T) {
+	for _, name := range jsonMemberNames(reflect.TypeOf(Token{})) {
+		if strings.HasPrefix(name, "tpm2-") {
+			t.Errorf("Token models the TPM2 member %q. go-xkms owns TPM2 (#189); "+
+				"a consumer that needs to interpret such a token supplies it through "+
+				"KeyProvider, and the passthrough carries it meanwhile.", name)
+		}
 	}
 }
 

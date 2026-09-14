@@ -7,6 +7,7 @@
 package luks2
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -157,19 +158,45 @@ func TestTokenOperations_Integration(t *testing.T) {
 		}
 	})
 
+	// Decoded from JSON, not built from typed fields: this package models no
+	// TPM2 member (#189) and carries them through the passthrough, so a
+	// realistic token arrives the way a real one does. The members are the ones
+	// libsystemd-shared-255.so actually contains.
 	t.Run("import TPM2 token", func(t *testing.T) {
-		token := &Token{
-			Type:           "systemd-tpm2",
-			Keyslots:       []string{"1"},
-			TPM2Hash:       "sha256",
-			TPM2PolicyHash: "dGVzdC1wb2xpY3ktaGFzaA==",
-			TPM2PCRBank:    "sha256",
-			TPM2PCRs:       intsPtr([]int{0, 1, 2, 3, 7}),
-			TPM2Blob:       "dGVzdC1ibG9i",
+		const real = `{"type":"systemd-tpm2","keyslots":["1"],` +
+			`"tpm2-blob":"dGVzdC1ibG9i","tpm2-pcrs":[0,1,2,3,7],` +
+			`"tpm2-pcr-bank":"sha256","tpm2-primary-alg":"ecc",` +
+			`"tpm2-policy-hash":"dGVzdC1wb2xpY3ktaGFzaA=="}`
+
+		var token Token
+		if err := json.Unmarshal([]byte(real), &token); err != nil {
+			t.Fatalf("decoding the token: %v", err)
 		}
 
-		if err := ImportToken(device, 5, token); err != nil {
+		if err := ImportToken(device, 5, &token); err != nil {
 			t.Fatalf("failed to import TPM2 token: %v", err)
+		}
+
+		// It must come back off the device with every unmodeled member intact:
+		// that is the whole basis for not modeling them.
+		back, err := GetToken(device, 5)
+		if err != nil {
+			t.Fatalf("reading the token back: %v", err)
+		}
+		encoded, err := json.Marshal(*back)
+		if err != nil {
+			t.Fatalf("re-encoding the token: %v", err)
+		}
+		for _, member := range []string{
+			`"tpm2-blob":"dGVzdC1ibG9i"`,
+			`"tpm2-pcrs":[0,1,2,3,7]`,
+			`"tpm2-pcr-bank":"sha256"`,
+			`"tpm2-primary-alg":"ecc"`,
+			`"tpm2-policy-hash":"dGVzdC1wb2xpY3ktaGFzaA=="`,
+		} {
+			if !strings.Contains(string(encoded), member) {
+				t.Errorf("%s did not survive a real header round trip\n got: %s", member, encoded)
+			}
 		}
 	})
 

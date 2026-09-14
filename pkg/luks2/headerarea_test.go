@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"slices"
 	"strconv"
@@ -236,11 +237,17 @@ func TestWriteHeaderRefusesMetadataThatDoesNotFit(t *testing.T) {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 	padKeyslots(t, metadata, keyslots)
-	metadata.Tokens["0"] = &Token{
-		Type:     "systemd-tpm2",
-		Keyslots: []string{"0"},
-		TPM2Blob: encodeBase64(bytes.Repeat([]byte{0x5A}, LUKS2DefaultSize)),
+	// Built by DECODING, because the bulk is an unmodeled member: this
+	// package stopped modeling TPM2 in #189 and carries such members through
+	// the passthrough, so a token big enough to overflow the area has to be
+	// constructed the way a real one arrives -- from JSON.
+	oversized := fmt.Sprintf(`{"type":"systemd-tpm2","keyslots":["0"],"tpm2-blob":%q}`,
+		encodeBase64(bytes.Repeat([]byte{0x5A}, LUKS2DefaultSize)))
+	var token Token
+	if err := json.Unmarshal([]byte(oversized), &token); err != nil {
+		t.Fatalf("building the oversized token: %v", err)
 	}
+	metadata.Tokens["0"] = &token
 
 	encoded, err := marshalCanonicalJSON(metadata)
 	if err != nil {
@@ -348,14 +355,17 @@ func TestWriteHeaderRefusesOversizedTokenMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
-	metadata.Tokens["0"] = &Token{
-		Type:      "systemd-tpm2",
-		Keyslots:  []string{"0"},
-		TPM2Blob:  encodeBase64(bytes.Repeat([]byte{0x5A}, LUKS2DefaultSize)),
-		TPM2PCRs:  intsPtr([]int{0, 7}),
-		TPM2Hash:  "sha256",
-		TPM2SRKNV: "1",
+	// Decoded rather than constructed, for the reason given at the other
+	// oversized-token fixture: TPM2 members are unmodeled (#189) and reach a
+	// Token only through the passthrough.
+	oversized := fmt.Sprintf(`{"type":"systemd-tpm2","keyslots":["0"],`+
+		`"tpm2-blob":%q,"tpm2-pcrs":[0,7],"tpm2-pcr-bank":"sha256"}`,
+		encodeBase64(bytes.Repeat([]byte{0x5A}, LUKS2DefaultSize)))
+	var token Token
+	if err := json.Unmarshal([]byte(oversized), &token); err != nil {
+		t.Fatalf("building the oversized token: %v", err)
 	}
+	metadata.Tokens["0"] = &token
 
 	before := deviceHead(t, device, 2*LUKS2HeaderMinSize+4096)
 
@@ -376,11 +386,13 @@ func TestWriteHeaderAcceptsATokenThatFits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
-	metadata.Tokens["0"] = &Token{
-		Type:     "systemd-tpm2",
-		Keyslots: []string{"0"},
-		TPM2Blob: encodeBase64(bytes.Repeat([]byte{0x5A}, 1024)),
+	fits := fmt.Sprintf(`{"type":"systemd-tpm2","keyslots":["0"],"tpm2-blob":%q}`,
+		encodeBase64(bytes.Repeat([]byte{0x5A}, 1024)))
+	var token Token
+	if err := json.Unmarshal([]byte(fits), &token); err != nil {
+		t.Fatalf("building the token: %v", err)
 	}
+	metadata.Tokens["0"] = &token
 
 	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
 		t.Fatalf("writeHeaderInternal refused a token that fits: %v", err)

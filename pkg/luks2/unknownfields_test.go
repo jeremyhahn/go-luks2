@@ -498,8 +498,9 @@ func TestKnownMembersAreDerivedFromTheStructTags(t *testing.T) {
 				"type", "keyslots",
 				"fido2-credential", "fido2-salt", "fido2-rp",
 				"fido2-clientPin-required", "fido2-up-required", "fido2-uv-required",
-				"tpm2-hash", "tpm2-policy-hash", "tpm2-pcr-bank", "tpm2-pcrs",
-				"tpm2-blob", "tpm2-pubkey", "tpm2-srk-nv", "tpm2-key-handle",
+				// No tpm2-* members: go-xkms owns TPM2 and this package models
+				// none of them (#189). A systemd-tpm2 token reaches the
+				// passthrough intact instead.
 			},
 		},
 		{
@@ -647,67 +648,68 @@ func TestFIDO2BooleansCanSayFalse(t *testing.T) {
 	})
 }
 
-// TestTPM2PCRsCanSayEmpty is the same defect the FIDO2 flags were fixed for,
-// one field over. `systemd-cryptenroll --tpm2-pcrs=""` writes
-// "tpm2-pcrs": [] on purpose -- it is how a TPM2 token enrolls with no PCR
-// binding, relying on the signed public key alone for its policy -- and
-// `omitempty` on a plain []int cannot express that: nil and an empty slice
-// both have length zero, so the member vanishes either way. Because every
-// mutation this package performs re-marshals the whole header
-// (writeHeaderInternal), an unrelated AddKey silently converts that volume's
-// enrollment away from what systemd-cryptenroll actually wrote.
-func TestTPM2PCRsCanSayEmpty(t *testing.T) {
+// TestEmptyTPM2PCRsSurvivesUnmodeled is the property the old typed TPM2PCRs
+// field existed to protect, carried over to the passthrough that replaced it
+// (#189).
+//
+// `systemd-cryptenroll --tpm2-pcrs=""` writes "tpm2-pcrs": [] ON PURPOSE -- it
+// is how a token enrolls with no PCR binding, leaving the policy to the signed
+// public key alone. Absent and empty are different enrollments, and because
+// every mutation re-marshals the whole header, anything that flattens one into
+// the other silently converts a volume away from what systemd wrote.
+//
+// A pointer field used to express that. Now nothing models the member at all,
+// so the question is whether the passthrough preserves the distinction. It
+// must, and for a stronger reason than before: the passthrough carries the
+// member's ORIGINAL BYTES, so there is no re-encoding step in which an empty
+// array could become an absent one.
+func TestEmptyTPM2PCRsSurvivesUnmodeled(t *testing.T) {
 	tests := []struct {
-		name string
-		set  *[]int
-		want string
+		name       string
+		in         string
+		want       string
+		wantAbsent bool
 	}{
-		{name: "empty is emitted", set: intsPtr([]int{}), want: `"tpm2-pcrs":[]`},
-		{name: "populated is emitted", set: intsPtr([]int{0, 7}), want: `"tpm2-pcrs":[0,7]`},
+		{
+			name: "explicitly empty stays empty",
+			in:   `{"type":"systemd-tpm2","keyslots":["0"],"tpm2-pcrs":[]}`,
+			want: `"tpm2-pcrs":[]`,
+		},
+		{
+			name: "populated stays populated",
+			in:   `{"type":"systemd-tpm2","keyslots":["0"],"tpm2-pcrs":[0,7]}`,
+			want: `"tpm2-pcrs":[0,7]`,
+		},
+		{
+			name:       "absent stays absent",
+			in:         `{"type":"systemd-tpm2","keyslots":["0"]}`,
+			wantAbsent: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			token := Token{Type: TokenTypeSystemdTPM2, Keyslots: []string{"0"}, TPM2PCRs: tt.set}
-			encoded, err := json.Marshal(&token)
+			var token Token
+			if err := json.Unmarshal([]byte(tt.in), &token); err != nil {
+				t.Fatalf("decoding: %v", err)
+			}
+
+			encoded, err := json.Marshal(token)
 			if err != nil {
-				t.Fatalf("failed to marshal the token: %v", err)
+				t.Fatalf("re-encoding: %v", err)
+			}
+
+			if tt.wantAbsent {
+				if strings.Contains(string(encoded), "tpm2-pcrs") {
+					t.Errorf("tpm2-pcrs was invented for a token that never had it: %s", encoded)
+				}
+				return
 			}
 			if !strings.Contains(string(encoded), tt.want) {
 				t.Errorf("expected %s in %s", tt.want, encoded)
 			}
-
-			var parsed Token
-			if err := json.Unmarshal(encoded, &parsed); err != nil {
-				t.Fatalf("failed to unmarshal the token: %v", err)
-			}
-			if parsed.TPM2PCRs == nil {
-				t.Fatal("tpm2-pcrs round-tripped to unset")
-			}
-			if len(*parsed.TPM2PCRs) != len(*tt.set) {
-				t.Errorf("tpm2-pcrs length mismatch: got %d, want %d", len(*parsed.TPM2PCRs), len(*tt.set))
-			}
 		})
 	}
-
-	t.Run("unset is absent", func(t *testing.T) {
-		token := Token{Type: TokenTypeSystemdTPM2, Keyslots: []string{"0"}}
-		encoded, err := json.Marshal(&token)
-		if err != nil {
-			t.Fatalf("failed to marshal the token: %v", err)
-		}
-		if strings.Contains(string(encoded), "tpm2-pcrs") {
-			t.Errorf("tpm2-pcrs should be absent when never set; got %s", encoded)
-		}
-
-		var parsed Token
-		if err := json.Unmarshal(encoded, &parsed); err != nil {
-			t.Fatalf("failed to unmarshal the token: %v", err)
-		}
-		if parsed.TPM2PCRs != nil {
-			t.Errorf("tpm2-pcrs should stay unset, got %v", *parsed.TPM2PCRs)
-		}
-	})
 }
 
 // TestKeyslotMemberOrderMatchesCryptsetup pins the declaration order against

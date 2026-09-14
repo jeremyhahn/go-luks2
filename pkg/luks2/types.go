@@ -297,10 +297,6 @@ const (
 	// which nothing reads.
 	TokenTypeSystemdFIDO2 = "systemd-fido2"
 
-	// TokenTypeSystemdTPM2 is the token systemd-cryptenroll --tpm2-device
-	// writes.
-	TokenTypeSystemdTPM2 = "systemd-tpm2"
-
 	// TokenTypeSystemdRecovery is the token systemd-cryptenroll
 	// --recovery-key writes. It carries nothing but its type and keyslots:
 	// the recovery key IS the passphrase, so there is no material to record.
@@ -335,32 +331,24 @@ type Token struct {
 	FIDO2UPRequired        *bool `json:"fido2-up-required,omitempty"`
 	FIDO2UVRequired        *bool `json:"fido2-uv-required,omitempty"`
 
-	// TPM2 fields, for TokenTypeSystemdTPM2.
+	// NO TPM2 FIELDS, deliberately (#189).
 	//
-	// These have NOT been reconciled against systemd the way the FIDO2 fields
-	// above have, and several of them do not match it: systemd writes
-	// tpm2-public-key where this says tpm2-pubkey, and has no tpm2-hash,
-	// tpm2-srk-nv or tpm2-key-handle at all. They are left alone here because
-	// correcting them is a separate breaking change to a public type -- and
-	// the passthrough means a real systemd-tpm2 token now survives a header
-	// rewrite regardless of what these fields are called.
-	TPM2Hash       string `json:"tpm2-hash,omitempty"`
-	TPM2PolicyHash string `json:"tpm2-policy-hash,omitempty"`
-	TPM2PCRBank    string `json:"tpm2-pcr-bank,omitempty"`
-
-	// TPM2PCRs is a POINTER for the same reason the three FIDO2 flags above
-	// are: `systemd-cryptenroll --tpm2-pcrs=""` writes "tpm2-pcrs": [] on
-	// purpose -- it is how a token enrolls with no PCR binding, leaving the
-	// policy to the signed public key alone -- and `omitempty` on a plain
-	// []int cannot express that. A nil slice and an explicitly empty one both
-	// have length zero, so the member would vanish either way. A nil pointer
-	// means "not set" and stays absent; a pointer to an empty slice means
-	// "set to no PCRs" and marshals as [].
-	TPM2PCRs      *[]int `json:"tpm2-pcrs,omitempty"`
-	TPM2Blob      string `json:"tpm2-blob,omitempty"`
-	TPM2PublicKey string `json:"tpm2-pubkey,omitempty"`
-	TPM2SRKNV     string `json:"tpm2-srk-nv,omitempty"`
-	TPM2KeyHandle uint64 `json:"tpm2-key-handle,omitempty"`
+	// go-xkms owns all hardware and cloud crypto -- TPM2, PKCS#11, the KMS
+	// backends -- and this is a Layer 0 library that carries none of it. A
+	// systemd-tpm2 token is not lost by that: every member this package does
+	// not model is carried through a read-modify-write by the passthrough
+	// below, byte for byte, so the token survives a header rewrite exactly as
+	// systemd wrote it.
+	//
+	// A consumer that needs to UNDERSTAND such a token supplies it through
+	// KeyProvider (keyprovider.go), which returns both the credential and the
+	// token that identifies it. This package enrolls the one and writes the
+	// other without interpreting either.
+	//
+	// The fields that used to be here were also half wrong, which is how this
+	// was noticed: they claimed a tpm2-pubkey member systemd does not write,
+	// and tpm2-hash, tpm2-srk-nv and tpm2-key-handle that do not exist in a
+	// real systemd-tpm2 token under any spelling (#150).
 
 	unknown unknownFields
 }

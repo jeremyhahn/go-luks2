@@ -74,27 +74,47 @@ For hardware security keys:
 
 ### TPM2 Tokens
 
-For Trusted Platform Module:
+**go-luks2 models no TPM2 member, deliberately.** go-xkms owns all hardware and
+cloud crypto — TPM2, PKCS#11, and the KMS backends — and this is a Layer 0
+library that carries none of it.
+
+A `systemd-tpm2` token is still handled correctly, because handling it does not
+require understanding it. Every member this package does not model is carried
+through a read-modify-write byte for byte, so a token written by
+`systemd-cryptenroll` survives a header rewrite exactly as systemd wrote it:
 
 ```json
 {
   "type": "systemd-tpm2",
   "keyslots": ["0"],
-  "tpm2-pcrs": "7",
-  "tpm2-bank": "sha256",
-  "tpm2-primary-alg": "ecc",
   "tpm2-blob": "base64-encoded-sealed-key",
+  "tpm2-pcrs": [7],
+  "tpm2-pcr-bank": "sha256",
+  "tpm2-primary-alg": "ecc",
   "tpm2-policy-hash": "base64..."
 }
 ```
 
-| Field | Description |
-|-------|-------------|
-| tpm2-pcrs | PCR indices to bind to |
-| tpm2-bank | PCR bank algorithm |
-| tpm2-primary-alg | Primary key algorithm |
-| tpm2-blob | Sealed key blob |
-| tpm2-policy-hash | Policy session hash |
+Read it back with `GetToken` and the members are all there. Only `type` and
+`keyslots` — which LUKS2 itself defines — are typed fields.
+
+#### Supplying a TPM2-backed credential
+
+A consumer that needs to *interpret* such a token implements `KeyProvider`:
+
+```go
+type KeyProvider interface {
+	Passphrase(ctx context.Context) (*enclave.MemoryEnclave, error)
+	Token() *Token
+}
+```
+
+go-xkms supplies the unsealed credential and the token identifying it; go-luks2
+enrolls the one and writes the other without interpreting either. That is the
+injection seam, and it is the only place hardware-backed credentials enter this
+library.
+
+See [keyprovider.md](keyprovider.md).
 
 ## go-luks2 Token API
 
