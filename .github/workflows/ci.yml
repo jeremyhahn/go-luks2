@@ -649,13 +649,93 @@ jobs:
   # The single required check. Branch protection requires THIS job and nothing
   # else, so adding a job above means adding it to `needs` AND to the results
   # list below; a job left out of both runs and gates nothing.
+  # THE MERGE RESULT, which nothing else in this pipeline looks at.
+  #
+  # Every other check reads the BRANCH HEAD. actions/checkout takes the PR head,
+  # Gitea publishes only refs/pull/N/head -- there is no /merge ref to check out
+  # -- and `git merge-tree` answers "do these conflict?", never "is the result
+  # correct?". So this state is invisible to the whole board:
+  #
+  #     branch green | main green | the merge of the two red
+  #
+  # Measured twice in one day (2026-09-13): #173 removed the exported DeriveKey
+  # while #158 still called it from a test, and #180 added four marshalers while
+  # #158 changed the encoder they use. Both branches were green, main was green,
+  # and each merge produced a tree that did not compile. Both were found by hand.
+  #
+  # WHAT IT RUNS, and why not the suite: `go vet ./...` compiles the test files,
+  # which is where both real breakages were -- a `go build` alone would have
+  # missed the DeriveKey one. The unit suite would catch them too and costs 90s
+  # plus the race legs, and a gate that slow is a gate someone turns off. This
+  # one takes about as long as a compile.
+  merge-check:
+    name: Merged Tree
+    runs-on: ubuntu-latest
+    steps:
+      # Full history: merge-tree needs the base branch, and the default shallow
+      # fetch does not have it.
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # Runs on push too, reporting success, rather than carrying an `if:` that
+      # skips it. The gate below counts a SKIPPED job as a failure on purpose --
+      # under staged fail-fast a skip means an upstream stage failed -- so a job
+      # that skips itself on main would turn main red, and the fix for that must
+      # not be to weaken the rule.
+      - name: Construct the merge and compile it
+        run: |
+          set -eu
+
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "not a pull request: the merge result IS this commit, already checked by the other jobs"
+            exit 0
+          fi
+
+          base="${{ github.event.pull_request.base.ref }}"
+          git fetch --no-tags --quiet origin "$base"
+
+          # A conflict is an earlier and different answer from a broken merge,
+          # and is reported as such rather than being allowed to masquerade as a
+          # compile failure.
+          if ! tree=$(git merge-tree --write-tree "origin/$base" HEAD 2>/dev/null); then
+            echo "::error::This branch conflicts with $base. Rebase it; the merge result cannot be evaluated until it applies."
+            exit 1
+          fi
+
+          work=$(mktemp -d)
+          git archive "$tree" | tar -x -C "$work"
+
+          # Proof the extraction produced a module, not an empty directory. An
+          # instrument is loudest when it sees least: `go vet` over no packages
+          # exits 0, so a silently empty tree would report the merge as clean.
+          if [ ! -f "$work/go.mod" ]; then
+            echo "::error::The extracted merge tree has no go.mod, so nothing was checked."
+            exit 1
+          fi
+
+          cd "$work"
+          echo "==> go build ./...            (merged tree)"
+          go build ./...
+          echo "==> go vet ./...              (merged tree, compiles tests)"
+          go vet ./...
+          echo "==> go vet -tags=integration  (merged tree)"
+          go vet -tags=integration ./...
+          echo "the merge of this branch with $base compiles"
+
   gate:
     name: CI Gate
     runs-on: ubuntu-latest
     if: always()
     # v1.9: trivy and fips moved to nightly.yml (known-red jobs off the push
     # path — owner ruling 2026-08-20); they gate nothing here.
-    needs: [lint, security, build, test-unit, test-integration]
+    needs: [lint, security, build, test-unit, test-integration, merge-check]
     steps:
       # join(needs.*.result) is a GitHub extension that evaluates to an empty
       # string on the self-hosted host, so a gate built on it reports success
@@ -669,13 +749,14 @@ jobs:
           BUILD: ${{ needs.build.result }}
           TEST_UNIT: ${{ needs.test-unit.result }}
           TEST_INTEGRATION: ${{ needs.test-integration.result }}
+          MERGE_CHECK: ${{ needs.merge-check.result }}
         run: |
           # skipped != failed, but BOTH fail the gate: under staged fail-fast a
           # skipped job means an upstream stage failed, and naming it that way
           # prevents the failure mode this was written for — a red that reads
           # as a test failure while the tests in fact never ran.
           failed=0
-          for job in LINT SECURITY BUILD TEST_UNIT TEST_INTEGRATION; do
+          for job in LINT SECURITY BUILD TEST_UNIT TEST_INTEGRATION MERGE_CHECK; do
             eval "result=\$$job"
             case "$result" in
               success) echo "OK   ${job}" ;;
