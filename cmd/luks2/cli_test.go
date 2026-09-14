@@ -1127,3 +1127,127 @@ func TestCLI_Info_DoesNotWarnForAnIntactHeader(t *testing.T) {
 		t.Errorf("stderr = %q for an intact header, want nothing", stderr.String())
 	}
 }
+
+// The mount-state check must not treat "I could not find out" as "it is fine"
+// (#185). IsMounted fails only when /proc/mounts cannot be read -- an absent
+// mapper node is simply not listed and returns false with no error -- so an
+// error means the state is UNKNOWN. Acting on the permissive guess is how a
+// filesystem gets torn out from under its writers, or mounted over.
+//
+// Each asserts the ACTION WAS NOT TAKEN, not merely the exit code: a command
+// that returns 1 after already locking the volume has still done the damage.
+
+func TestCLI_Close_RefusesWhenMountStateIsUnknown(t *testing.T) {
+	cli, _, stderr := newTestCLI([]string{"luks2", "close", "myvolume"})
+	locked := false
+	cli.Luks = &MockLuksOperations{
+		IsMountedFunc: func(mountPoint string) (bool, error) {
+			return false, errors.New("open /proc/mounts: permission denied")
+		},
+		LockFunc: func(name string) error {
+			locked = true
+			return nil
+		},
+	}
+
+	code := cli.Run()
+
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1: an unknown mount state must not be closed through", code)
+	}
+	if locked {
+		t.Error("the volume was LOCKED while its mount state was unknown; this is the defect (#185)")
+	}
+	if !strings.Contains(stderr.String(), "Cannot determine whether") {
+		t.Errorf("stderr = %q, want it to say the mount state could not be determined", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "permission denied") {
+		t.Errorf("stderr = %q, want it to carry the underlying cause", stderr.String())
+	}
+}
+
+func TestCLI_Mount_RefusesWhenMountStateIsUnknown(t *testing.T) {
+	cli, _, stderr := newTestCLI([]string{"luks2", "mount", "myvolume", "/mnt/x"})
+	mounted := false
+	cli.Luks = &MockLuksOperations{
+		IsMountedFunc: func(mountPoint string) (bool, error) {
+			return false, errors.New("open /proc/mounts: permission denied")
+		},
+		MountFunc: func(opts luks2.MountOptions) error {
+			mounted = true
+			return nil
+		},
+	}
+
+	code := cli.Run()
+
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if mounted {
+		t.Error("MOUNTED over a mountpoint whose state was unknown; that hides whatever was already there")
+	}
+	if !strings.Contains(stderr.String(), "Cannot determine whether") {
+		t.Errorf("stderr = %q, want the unknown-state diagnosis", stderr.String())
+	}
+}
+
+// Unmount refuses either way, so this is about the DIAGNOSIS: "Not mounted"
+// sent an operator looking in the wrong place for a /proc/mounts failure.
+func TestCLI_Unmount_ReportsTheRealCauseNotNotMounted(t *testing.T) {
+	cli, _, stderr := newTestCLI([]string{"luks2", "unmount", "/mnt/x"})
+	cli.Luks = &MockLuksOperations{
+		IsMountedFunc: func(mountPoint string) (bool, error) {
+			return false, errors.New("open /proc/mounts: permission denied")
+		},
+	}
+
+	code := cli.Run()
+
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if strings.Contains(stderr.String(), "Not mounted") {
+		t.Errorf("stderr = %q, want the real cause rather than a false \"Not mounted\"", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "permission denied") {
+		t.Errorf("stderr = %q, want it to carry the underlying cause", stderr.String())
+	}
+}
+
+// The controls: a mount state that IS known must still behave as before.
+func TestCLI_MountStateKnownStillBehaves(t *testing.T) {
+	t.Run("close refuses a mounted volume", func(t *testing.T) {
+		cli, _, stderr := newTestCLI([]string{"luks2", "close", "myvolume"})
+		locked := false
+		cli.Luks = &MockLuksOperations{
+			IsMountedFunc: func(string) (bool, error) { return true, nil },
+			LockFunc:      func(string) error { locked = true; return nil },
+		}
+		if code := cli.Run(); code != 1 {
+			t.Errorf("exit code = %d, want 1", code)
+		}
+		if locked {
+			t.Error("locked a volume reported as mounted")
+		}
+		if !strings.Contains(stderr.String(), "still mounted") {
+			t.Errorf("stderr = %q, want the still-mounted refusal", stderr.String())
+		}
+	})
+
+	t.Run("close proceeds when not mounted", func(t *testing.T) {
+		cli, stdout, _ := newTestCLI([]string{"luks2", "close", "myvolume"})
+		locked := false
+		cli.Luks = &MockLuksOperations{
+			IsMountedFunc: func(string) (bool, error) { return false, nil },
+			LockFunc:      func(string) error { locked = true; return nil },
+		}
+		if code := cli.Run(); code != 0 {
+			t.Errorf("exit code = %d, want 0", code)
+		}
+		if !locked {
+			t.Error("did not lock a volume that was not mounted; the refusal is too broad")
+		}
+		_ = stdout
+	})
+}

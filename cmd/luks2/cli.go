@@ -529,9 +529,25 @@ func (c *CLI) cmdClose() int {
 	c.showBanner()
 	_, _ = fmt.Fprintf(c.Stdout, "Closing LUKS2 volume: %s\n\n", name)
 
-	// Check if mounted
+	// Check if mounted.
+	//
+	// An ERROR here is not "not mounted". IsMounted fails only when
+	// /proc/mounts cannot be read -- an absent mapper node is simply not listed
+	// and returns false with no error -- so a failure means the mount state is
+	// UNKNOWN, and closing a volume whose filesystem is still mounted tears it
+	// out from under its writers.
+	//
+	// This read `if err == nil && mounted`, which SKIPPED the whole branch when
+	// the check could not run and fell through to locking the volume: "I could
+	// not find out" acting as "it is fine". Those are different answers and only
+	// the second may act.
 	mounted, err := c.Luks.IsMounted("/dev/mapper/" + name)
-	if err == nil && mounted {
+	if err != nil {
+		_, _ = fmt.Fprintf(c.Stderr, "Cannot determine whether %s is mounted: %v\n", name, err)
+		_, _ = fmt.Fprintln(c.Stderr, "Refusing to close a volume that may still be mounted.")
+		return 1
+	}
+	if mounted {
 		_, _ = fmt.Fprintln(c.Stderr, "Volume is still mounted!")
 		_, _ = fmt.Fprintln(c.Stderr, "Please unmount first: sudo luks2 unmount <mountpoint>")
 		return 1
@@ -564,8 +580,17 @@ func (c *CLI) cmdMount() int {
 	c.showBanner()
 	_, _ = fmt.Fprintf(c.Stdout, "Mounting volume: %s -> %s\n\n", name, mountpoint)
 
-	// Check if already mounted
-	mounted, _ := c.Luks.IsMounted(mountpoint)
+	// Check if already mounted.
+	//
+	// The error is not discarded into "not mounted". IsMounted fails only when
+	// /proc/mounts cannot be read, so a failure means the answer is UNKNOWN --
+	// and mounting over a mountpoint already in use hides whatever was there.
+	mounted, err := c.Luks.IsMounted(mountpoint)
+	if err != nil {
+		_, _ = fmt.Fprintf(c.Stderr, "Cannot determine whether %s is already mounted: %v\n", mountpoint, err)
+		_, _ = fmt.Fprintln(c.Stderr, "Refusing to mount over a mountpoint that may be in use.")
+		return 1
+	}
 	if mounted {
 		_, _ = fmt.Fprintf(c.Stderr, "Mountpoint already in use: %s\n", mountpoint)
 		return 1
@@ -616,8 +641,17 @@ func (c *CLI) cmdUnmount() int {
 	c.showBanner()
 	_, _ = fmt.Fprintf(c.Stdout, "Unmounting: %s\n\n", mountpoint)
 
-	// Check if mounted
-	mounted, _ := c.Luks.IsMounted(mountpoint)
+	// Check if mounted.
+	//
+	// A failure to read /proc/mounts is not "not mounted". Reporting it as one
+	// is SAFE -- this path refuses either way -- but it tells the operator
+	// something false about their system, and "not mounted" sends them looking
+	// in the wrong place.
+	mounted, err := c.Luks.IsMounted(mountpoint)
+	if err != nil {
+		_, _ = fmt.Fprintf(c.Stderr, "Cannot determine whether %s is mounted: %v\n", mountpoint, err)
+		return 1
+	}
 	if !mounted {
 		_, _ = fmt.Fprintf(c.Stderr, "Not mounted: %s\n", mountpoint)
 		return 1
