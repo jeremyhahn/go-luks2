@@ -68,12 +68,13 @@ sudo luks2 addkey --slot 5 --kdf pbkdf2 /dev/sdb1
 | `--kdf <name>` | `argon2id` (default), `argon2i` or `pbkdf2` |
 | `--new-key-file <path>` | Read the **new** passphrase from a file |
 
-**`addkey` does not report which keyslot it used**, and that omission is
-deliberate. The library's `AddKey` does not return the slot, and reconstructing
-it from the header afterwards gives the wrong answer on any container whose
-active slots are not contiguous from zero — which is every container that has
-ever had a credential revoked. A wrong number here is acted on months later by
-an operator deciding what to destroy. Run `luks2 keyslots <device>` to see.
+**`addkey` does not report which keyslot it used.** Run
+`luks2 keyslots <device>` to see. The library's `AddKey` returns the slot it
+chose, so a correct number is available to the command; what it must never do
+is reconstruct one from the header afterwards, which gives the wrong answer on
+any container whose active slots are not contiguous from zero — every container
+that has ever had a credential revoked — and a wrong number here is acted on
+months later by an operator deciding what to destroy.
 
 ## changekey
 

@@ -298,7 +298,7 @@ func TestAddKeyWritesAnExplicitIterationCount(t *testing.T) {
 	path := newImage(t, "addkey-iterations.img")
 	formatWithLibrary(t, path)
 
-	if err := AddKey(path, []byte(conformancePassphrase), []byte("a-second-credential"), &AddKeyOptions{
+	if _, err := AddKey(path, []byte(conformancePassphrase), []byte("a-second-credential"), &AddKeyOptions{
 		KDFType:         KDFTypePBKDF2,
 		Hash:            "sha512",
 		PBKDFIterations: iterations,
@@ -341,7 +341,7 @@ func TestAddKeyRefusesAnExplicitCountBelowTheFloor(t *testing.T) {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 
-	err = AddKey(path, []byte(conformancePassphrase), []byte("a-second-credential"), &AddKeyOptions{
+	_, err = AddKey(path, []byte(conformancePassphrase), []byte("a-second-credential"), &AddKeyOptions{
 		KDFType:         KDFTypePBKDF2,
 		Hash:            "sha512",
 		PBKDFIterations: 1,

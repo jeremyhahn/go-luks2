@@ -50,7 +50,7 @@ func TestEveryCredentialCommandRefusesAnUnreadableKeyFile(t *testing.T) {
 				UnlockFunc:    func(string, []byte, string) error { touched = true; return nil },
 				FormatFunc:    func(luks2.FormatOptions) error { touched = true; return nil },
 				TestKeyFunc:   func(string, []byte) error { touched = true; return nil },
-				AddKeyFunc:    func(string, []byte, []byte, *luks2.AddKeyOptions) error { touched = true; return nil },
+				AddKeyFunc:    func(string, []byte, []byte, *luks2.AddKeyOptions) (int, error) { touched = true; return 0, nil },
 				RemoveKeyFunc: func(string, []byte, int) error { touched = true; return nil },
 				KillSlotFunc:  func(string, []byte, int) error { touched = true; return nil },
 				ChangeKeyFunc: func(string, []byte, []byte, int) error { touched = true; return nil },
@@ -91,7 +91,7 @@ func TestASecondCredentialThatCannotBeReadIsAlsoRefused(t *testing.T) {
 			cli, _, stderr := runCLI(t, "", args...)
 			cli.FS = &DefaultFileSystem{}
 			cli.Luks = &MockLuksOperations{
-				AddKeyFunc:    func(string, []byte, []byte, *luks2.AddKeyOptions) error { touched = true; return nil },
+				AddKeyFunc:    func(string, []byte, []byte, *luks2.AddKeyOptions) (int, error) { touched = true; return 0, nil },
 				ChangeKeyFunc: func(string, []byte, []byte, int) error { touched = true; return nil },
 			}
 
@@ -127,7 +127,7 @@ func TestEveryCredentialCommandReportsALibraryRefusal(t *testing.T) {
 			cli, _, stderr := runCLI(t, "a passphrase\n", args...)
 			cli.Luks = &MockLuksOperations{
 				TestKeyFunc:      func(string, []byte) error { return refusal },
-				AddKeyFunc:       func(string, []byte, []byte, *luks2.AddKeyOptions) error { return refusal },
+				AddKeyFunc:       func(string, []byte, []byte, *luks2.AddKeyOptions) (int, error) { return -1, refusal },
 				RemoveKeyFunc:    func(string, []byte, int) error { return refusal },
 				KillSlotFunc:     func(string, []byte, int) error { return refusal },
 				ChangeKeyFunc:    func(string, []byte, []byte, int) error { return refusal },

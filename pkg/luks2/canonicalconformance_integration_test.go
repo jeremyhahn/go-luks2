@@ -762,7 +762,7 @@ func TestSequenceIDRecordsTheContainersWriteHistory(t *testing.T) {
 	// rule depends on: without it, a torn write leaves two copies a reader
 	// cannot order.
 	before := primary.SequenceID
-	if err := AddKey(path, []byte(canonicalPassphrase), []byte("a-second-credential"), &AddKeyOptions{
+	if _, err := AddKey(path, []byte(canonicalPassphrase), []byte("a-second-credential"), &AddKeyOptions{
 		KDFType:       KDFTypePBKDF2,
 		Hash:          "sha512",
 		PBKDFIterTime: 1,

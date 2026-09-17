@@ -117,7 +117,7 @@ func TestLowMemoryArgon2ContainerRemainsFullyManageable(t *testing.T) {
 		// the situation that makes a clamp dangerous: it would succeed here and
 		// write a slot the 32 MiB target could never derive.
 		opts := &AddKeyOptions{KDFType: KDFTypeArgon2id}
-		if err := AddKey(path, original, second, opts); err != nil {
+		if _, err := AddKey(path, original, second, opts); err != nil {
 			t.Fatalf("AddKey: %v", err)
 		}
 
@@ -214,7 +214,7 @@ func TestLowMemoryArgon2ContainerRemainsFullyManageable(t *testing.T) {
 		existing := slotIDs(t, path)
 
 		third := []byte("a-third-credential")
-		if err := AddKey(path, second, third, &AddKeyOptions{
+		if _, err := AddKey(path, second, third, &AddKeyOptions{
 			KDFType:         KDFTypePBKDF2,
 			Hash:            "sha512",
 			PBKDFIterations: canonicalCheapIterations,
@@ -298,7 +298,7 @@ func TestAddKeyInheritsAHealthyContainersArgon2Cost(t *testing.T) {
 	}
 
 	opts := &AddKeyOptions{KDFType: KDFTypeArgon2id}
-	if err := AddKey(path, []byte(canonicalPassphrase), []byte("a-recovery-credential"), opts); err != nil {
+	if _, err := AddKey(path, []byte(canonicalPassphrase), []byte("a-recovery-credential"), opts); err != nil {
 		t.Fatalf("AddKey: %v", err)
 	}
 
@@ -347,7 +347,7 @@ func TestCreateFloorStillRefusesACallerChosenWeakArgon2Cost(t *testing.T) {
 			t.Fatalf("ReadHeader: %v", err)
 		}
 
-		err = AddKey(path, []byte(canonicalPassphrase), []byte("a-second-credential"), &AddKeyOptions{
+		_, err = AddKey(path, []byte(canonicalPassphrase), []byte("a-second-credential"), &AddKeyOptions{
 			KDFType:      KDFTypeArgon2id,
 			Argon2Memory: lowMemoryArgon2KB,
 			Argon2Time:   4,

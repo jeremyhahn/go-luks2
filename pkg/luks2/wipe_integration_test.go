@@ -229,7 +229,7 @@ func TestWipeKeyslot(t *testing.T) {
 	// What the original test meant to establish -- that WipeKeyslot really does
 	// destroy the credential it targets -- still holds, on a volume where doing
 	// so leaves a way in.
-	if err := AddKey(tmpfile, []byte("test-password"), []byte("second-password"), &AddKeyOptions{
+	if _, err := AddKey(tmpfile, []byte("test-password"), []byte("second-password"), &AddKeyOptions{
 		KDFType:       KDFTypePBKDF2,
 		PBKDFIterTime: 1,
 	}); err != nil {
@@ -657,7 +657,7 @@ func TestWipeKeyslotWithTrim(t *testing.T) {
 	}
 
 	// And the entry really does go when the removal is legitimate.
-	if err := AddKey(tmpfile, []byte("test-password"), []byte("second-password"), &AddKeyOptions{
+	if _, err := AddKey(tmpfile, []byte("test-password"), []byte("second-password"), &AddKeyOptions{
 		KDFType:       KDFTypePBKDF2,
 		PBKDFIterTime: 1,
 	}); err != nil {

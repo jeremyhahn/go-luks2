@@ -806,7 +806,7 @@ func heterogeneousVolume(t *testing.T, name string) (device string, strongPassph
 	formatWithLibrary(t, device)
 
 	strongPassphrase = []byte("the-second-credential")
-	if err := AddKey(device, []byte(conformancePassphrase), strongPassphrase, &AddKeyOptions{
+	if _, err := AddKey(device, []byte(conformancePassphrase), strongPassphrase, &AddKeyOptions{
 		KDFType:       KDFTypePBKDF2,
 		PBKDFIterTime: 1,
 	}); err != nil {
@@ -846,7 +846,7 @@ func TestAddKeyDerivesTheNewKeyslotsKeySizeFromTheVolumeKey(t *testing.T) {
 	device, strong := heterogeneousVolume(t, "heterogeneous.img")
 	added := []byte("a-third-credential")
 
-	if err := AddKey(device, strong, added, &AddKeyOptions{
+	if _, err := AddKey(device, strong, added, &AddKeyOptions{
 		KDFType:       KDFTypePBKDF2,
 		PBKDFIterTime: 1,
 	}); err != nil {
@@ -1025,7 +1025,7 @@ func TestAddKeyStatesItsOwnAreaCipherAndDoesNotRefuseALegacyContainer(t *testing
 	}
 
 	added := []byte("a-second-credential")
-	if err := AddKey(device, []byte(conformancePassphrase), added, &AddKeyOptions{
+	if _, err := AddKey(device, []byte(conformancePassphrase), added, &AddKeyOptions{
 		KDFType:       KDFTypePBKDF2,
 		PBKDFIterTime: 1,
 	}); err != nil {
@@ -1103,7 +1103,7 @@ func TestFormatDeclaresTheKeyslotAreaCipherItActuallyUses(t *testing.T) {
 	if err := TestKey(device, []byte(conformancePassphrase)); err != nil {
 		t.Fatalf("the volume does not open: %v", err)
 	}
-	if err := AddKey(device, []byte(conformancePassphrase), []byte("a-second-credential"), &AddKeyOptions{
+	if _, err := AddKey(device, []byte(conformancePassphrase), []byte("a-second-credential"), &AddKeyOptions{
 		KDFType:       KDFTypePBKDF2,
 		PBKDFIterTime: 1,
 	}); err != nil {

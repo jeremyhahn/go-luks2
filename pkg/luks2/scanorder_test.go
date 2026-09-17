@@ -154,7 +154,7 @@ func TestAKeyslotAfterTheFirstStillOpensTheVolume(t *testing.T) {
 	}
 
 	second := []byte("a second credential entirely")
-	if err := AddKey(device, first, second, &AddKeyOptions{
+	if _, err := AddKey(device, first, second, &AddKeyOptions{
 		KDFType:       KDFTypePBKDF2,
 		Hash:          "sha256",
 		PBKDFIterTime: 1,

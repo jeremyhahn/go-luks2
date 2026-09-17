@@ -405,7 +405,7 @@ func EnrollKeyProvider(ctx context.Context, device string, existing []byte, p Ke
 // # Order, and why the keyslot is rolled back
 //
 // The keyslot is written FIRST because writing it is what produces the slot
-// number the token has to name, and the slot number is read from where addKey
+// number the token has to name, and the slot number is read from where AddKey
 // CHOOSES it rather than inferred from the header afterwards. Inferring it is
 // #42: the two rules -- "first free slot" and "the highest-numbered slot
 // present" -- agree only while the active slots are contiguous from zero, and a
@@ -438,18 +438,17 @@ func enrollWithToken(device string, existing, credential []byte, opts *AddKeyOpt
 		}
 	}
 
-	// addKey rather than AddKey, for assignedSlot: it reports the slot at the
-	// point it chooses it and under the device lock. AddKey's signature is
-	// frozen -- it has a consumer outside this repository -- which is why the
-	// out-parameter exists.
-	assignedSlot := -1
-	if err := addKeyWithPolicy(device, existing, credential, opts, &assignedSlot, policy); err != nil {
+	// The slot is the one addKeyWithPolicy CHOSE, reported from the point of
+	// decision under the device lock, so the token below names the keyslot the
+	// credential actually went to rather than one inferred afterwards (#42).
+	assignedSlot, err := addKeyWithPolicy(device, existing, credential, opts, policy)
+	if err != nil {
 		return -1, -1, &KeyProviderError{Op: "enroll", Err: err}
 	}
 	if assignedSlot < 0 {
-		// Unreachable: addKey assigns before every path that can still succeed.
-		// Refused rather than reported, because this number's only use is
-		// telling an operator which credential is which.
+		// Unreachable: addKeyWithPolicy returns a slot on every path that
+		// succeeds. Refused rather than reported, because this number's only
+		// use is telling an operator which credential is which.
 		return -1, -1, &KeyProviderError{
 			Op:  "enroll",
 			Err: fmt.Errorf("%w: the credential was written but the keyslot it went to was not reported", ErrInvalidKeyslot),

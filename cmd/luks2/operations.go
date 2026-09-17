@@ -25,7 +25,7 @@ func (d *DefaultLuksOperations) TestKey(device string, passphrase []byte) error 
 	return luks2.TestKey(device, passphrase)
 }
 
-func (d *DefaultLuksOperations) AddKey(device string, existing, newPassphrase []byte, opts *luks2.AddKeyOptions) error {
+func (d *DefaultLuksOperations) AddKey(device string, existing, newPassphrase []byte, opts *luks2.AddKeyOptions) (int, error) {
 	return luks2.AddKey(device, existing, newPassphrase, opts)
 }
 

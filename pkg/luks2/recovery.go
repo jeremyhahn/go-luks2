@@ -216,10 +216,10 @@ type RecoveryKeyOptions struct {
 	//
 	// It is wrong only for a credential with no brute-force surface, and the
 	// second thing needed is therefore an exemption scoped to exactly that: to
-	// credentials THIS LIBRARY GENERATED, on the unexported addKey path, with
-	// AddRecoveryKey and EnrollKeyProvider as the only callers permitted to
-	// claim it -- because they are the only two that know the bytes came from a
-	// CSPRNG rather than from a person. Exempt means the OWASP floor does not
+	// credentials THIS LIBRARY GENERATED, on the unexported addKeyWithPolicy
+	// path, with AddRecoveryKey and EnrollKeyProvider as the only callers
+	// permitted to claim it -- because they are the only two that know the
+	// bytes came from a CSPRNG rather than from a person. Exempt means the OWASP floor does not
 	// apply; minPBKDF2Iterations still does, and it is 1000, which is systemd's
 	// value exactly. That work is queued behind the field.
 	//
@@ -394,7 +394,7 @@ func AddRecoveryKey(device string, existingPassphrase []byte, opts *RecoveryKeyO
 
 	// The credential is borrowed for the length of the enrollment and no
 	// longer. enrollWithToken writes the keyslot, reads the slot number from
-	// where addKey CHOSE it rather than inferring it afterwards (#42), writes
+	// where AddKey CHOSE it rather than inferring it afterwards (#42), writes
 	// the token naming that slot, and rolls the keyslot back if the token write
 	// fails.
 	//

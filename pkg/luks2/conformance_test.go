@@ -594,7 +594,7 @@ func TestConformance_StaysValidAfterMutation(t *testing.T) {
 		formatWithLibrary(t, path)
 		assertStillValid(t, path, "Format", conformancePassphrase)
 
-		if err := AddKey(path, []byte(conformancePassphrase), []byte(secondPassphrase), &AddKeyOptions{
+		if _, err := AddKey(path, []byte(conformancePassphrase), []byte(secondPassphrase), &AddKeyOptions{
 			KDFType:       KDFTypePBKDF2,
 			Hash:          "sha256",
 			PBKDFIterTime: 1,
@@ -665,7 +665,7 @@ func TestConformance_StaysValidAfterMutation(t *testing.T) {
 		path := newImage(t, "after-keyslot-with-token.img")
 		formatWithLibrary(t, path)
 
-		if err := AddKey(path, []byte(conformancePassphrase), []byte(secondPassphrase), &AddKeyOptions{
+		if _, err := AddKey(path, []byte(conformancePassphrase), []byte(secondPassphrase), &AddKeyOptions{
 			KDFType:       KDFTypePBKDF2,
 			Hash:          "sha256",
 			PBKDFIterTime: 1,

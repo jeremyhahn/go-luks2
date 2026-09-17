@@ -146,7 +146,7 @@ func TestPublicEntryPointsCannotReachTheExemption(t *testing.T) {
 		path := newImage(t, "exempt-addkey.img")
 		formatWithLibrary(t, path)
 
-		err := AddKey(path, []byte(conformancePassphrase), []byte("a-second-credential"), &AddKeyOptions{
+		_, err := AddKey(path, []byte(conformancePassphrase), []byte("a-second-credential"), &AddKeyOptions{
 			KDFType:         KDFTypePBKDF2,
 			Hash:            "sha512",
 			PBKDFIterations: minPBKDF2Iterations,
@@ -183,12 +183,12 @@ func TestTheInternalSeamWritesSystemdsCountToTheHeader(t *testing.T) {
 		t.Fatalf("randomBase64 failed: %v", err)
 	}
 
-	var assigned int
-	if err := addKeyWithPolicy(path, []byte(conformancePassphrase), []byte(generated), &AddKeyOptions{
+	assigned, err := addKeyWithPolicy(path, []byte(conformancePassphrase), []byte(generated), &AddKeyOptions{
 		KDFType:         KDFTypePBKDF2,
 		Hash:            "sha512",
 		PBKDFIterations: minPBKDF2Iterations,
-	}, &assigned, libraryGeneratedCredential); err != nil {
+	}, libraryGeneratedCredential)
+	if err != nil {
 		t.Fatalf("addKeyWithPolicy with a generated credential: %v", err)
 	}
 
@@ -220,7 +220,7 @@ func TestTheInternalSeamWritesSystemdsCountToTheHeader(t *testing.T) {
 // The seam test calls addKeyWithPolicy directly, so it proves the mechanism
 // works when something selects it. It says nothing about whether anything in
 // the shipped API ever does -- and for a while nothing did: AddRecoveryKey
-// called addKey, which hardcodes callerSuppliedCredential, so the relaxed branch
+// called AddKey, which hardcodes callerSuppliedCredential, so the relaxed branch
 // was reachable only from that test. A policy no exported path can select is
 // indistinguishable from one that does not exist.
 //
@@ -276,7 +276,7 @@ func TestAddKeyKeepsTheFullFloorForTheSameCount(t *testing.T) {
 	path := newImage(t, "recovery-exemption-negative.img")
 	formatWithLibrary(t, path)
 
-	err := AddKey(path, []byte(conformancePassphrase), []byte("a-caller-supplied-credential"), &AddKeyOptions{
+	_, err := AddKey(path, []byte(conformancePassphrase), []byte("a-caller-supplied-credential"), &AddKeyOptions{
 		KDFType:         KDFTypePBKDF2,
 		Hash:            "sha512",
 		PBKDFIterations: minPBKDF2Iterations,
@@ -416,7 +416,7 @@ func TestAddKeyReportsTheInheritedCostToTheCaller(t *testing.T) {
 	}
 
 	opts := &AddKeyOptions{}
-	if err := AddKey(path, []byte(conformancePassphrase), []byte("a-second-credential"), opts); err != nil {
+	if _, err := AddKey(path, []byte(conformancePassphrase), []byte("a-second-credential"), opts); err != nil {
 		t.Fatalf("AddKey failed: %v", err)
 	}
 

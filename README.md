@@ -119,8 +119,8 @@ if err := luks2.Unlock(device, passphrase, name); err != nil {
 ### Keyslot Management
 
 ```go
-// Add passphrase to new keyslot
-luks2.AddKey(device, existingPass, newPass, &luks2.AddKeyOptions{
+// Add passphrase to new keyslot; the keyslot it went to is returned
+slot, err := luks2.AddKey(device, existingPass, newPass, &luks2.AddKeyOptions{
     KDFType: "argon2id",
     Hash:    "sha256",  // for pbkdf2
 })

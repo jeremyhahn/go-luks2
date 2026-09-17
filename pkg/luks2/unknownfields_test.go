@@ -1036,7 +1036,7 @@ func TestConformance_TokenSurvivesAnUnrelatedKeyslotChange(t *testing.T) {
 
 	mutations := map[string]func(t *testing.T, path string){
 		"AddKey": func(t *testing.T, path string) {
-			if err := AddKey(path, []byte(conformancePassphrase), []byte(secondPassphrase), &AddKeyOptions{
+			if _, err := AddKey(path, []byte(conformancePassphrase), []byte(secondPassphrase), &AddKeyOptions{
 				KDFType:       KDFTypePBKDF2,
 				Hash:          "sha256",
 				PBKDFIterTime: 1,
@@ -1120,7 +1120,7 @@ func TestConformance_UnmodeledTokenMembersSurviveOurRewrite(t *testing.T) {
 		t.Fatalf("cryptsetup token import failed (exit %d)\n%s", code, out)
 	}
 
-	if err := AddKey(path, []byte(conformancePassphrase), []byte("another-passphrase"), &AddKeyOptions{
+	if _, err := AddKey(path, []byte(conformancePassphrase), []byte("another-passphrase"), &AddKeyOptions{
 		KDFType:       KDFTypePBKDF2,
 		Hash:          "sha256",
 		PBKDFIterTime: 1,

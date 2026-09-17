@@ -177,7 +177,7 @@ func TestDefaultOperationsAreWiredToTheRightLibraryCalls(t *testing.T) {
 	})
 
 	t.Run("AddKey, ChangeKey and RemoveKey", func(t *testing.T) {
-		if err := ops.AddKey(image, []byte(passphrase), []byte("the-second-passphrase"), cheapKeyslot()); err != nil {
+		if _, err := ops.AddKey(image, []byte(passphrase), []byte("the-second-passphrase"), cheapKeyslot()); err != nil {
 			t.Fatalf("AddKey() error = %v", err)
 		}
 
@@ -206,7 +206,7 @@ func TestDefaultOperationsAreWiredToTheRightLibraryCalls(t *testing.T) {
 	})
 
 	t.Run("KillSlot", func(t *testing.T) {
-		if err := ops.AddKey(image, []byte(passphrase), []byte("a-doomed-passphrase"), cheapKeyslot()); err != nil {
+		if _, err := ops.AddKey(image, []byte(passphrase), []byte("a-doomed-passphrase"), cheapKeyslot()); err != nil {
 			t.Fatalf("AddKey() error = %v", err)
 		}
 

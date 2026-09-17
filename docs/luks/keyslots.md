@@ -248,10 +248,12 @@ fmt.Printf("Active keyslots: %v\n", info.ActiveKeyslots)
 ### Adding a Keyslot
 
 ```go
-// Add a new keyslot (requires existing passphrase)
-slot := 1
-err := luks2.AddKey(device, existingPass, newPass, &luks2.AddKeyOptions{
-    Keyslot: &slot, // *int; nil auto-selects the first free slot
+// Add a new keyslot (requires existing passphrase). The keyslot that
+// received the key is returned -- read from where AddKey chose it, never
+// inferred from the header afterwards.
+requested := 1
+slot, err := luks2.AddKey(device, existingPass, newPass, &luks2.AddKeyOptions{
+    Keyslot: &requested, // *int; nil auto-selects the first free slot
 })
 ```
 

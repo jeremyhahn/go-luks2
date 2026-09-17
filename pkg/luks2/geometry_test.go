@@ -275,7 +275,7 @@ func TestForeignGeometry_AddKeyStaysInsideTheDeclaredKeyslotsArea(t *testing.T) 
 	added := 0
 	for i := 0; ; i++ {
 		next := []byte("foreign-added-passphrase-" + strconv.Itoa(i))
-		err := AddKey(path, []byte(conformancePassphrase), next, opts)
+		_, err := AddKey(path, []byte(conformancePassphrase), next, opts)
 		if err != nil {
 			if !errors.Is(err, ErrKeyslotsAreaFull) {
 				t.Fatalf("AddKey #%d failed with an unexpected error: %v", i, err)

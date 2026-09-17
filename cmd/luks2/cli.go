@@ -32,7 +32,7 @@ type LuksOperations interface {
 
 	// Keyslots
 	TestKey(device string, passphrase []byte) error
-	AddKey(device string, existing, newPassphrase []byte, opts *luks2.AddKeyOptions) error
+	AddKey(device string, existing, newPassphrase []byte, opts *luks2.AddKeyOptions) (int, error)
 	RemoveKey(device string, passphrase []byte, keyslot int) error
 	KillSlot(device string, authPassphrase []byte, targetSlot int) error
 	ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) error

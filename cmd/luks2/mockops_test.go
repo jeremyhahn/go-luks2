@@ -38,7 +38,7 @@ type MockLuksOperations struct {
 
 	// Keyslots
 	TestKeyFunc      func(device string, passphrase []byte) error
-	AddKeyFunc       func(device string, existing, newPassphrase []byte, opts *luks2.AddKeyOptions) error
+	AddKeyFunc       func(device string, existing, newPassphrase []byte, opts *luks2.AddKeyOptions) (int, error)
 	RemoveKeyFunc    func(device string, passphrase []byte, keyslot int) error
 	KillSlotFunc     func(device string, authPassphrase []byte, targetSlot int) error
 	ChangeKeyFunc    func(device string, oldPassphrase, newPassphrase []byte, keyslot int) error
@@ -180,11 +180,11 @@ func (m *MockLuksOperations) TestKey(device string, passphrase []byte) error {
 	return nil
 }
 
-func (m *MockLuksOperations) AddKey(device string, existing, newPassphrase []byte, opts *luks2.AddKeyOptions) error {
+func (m *MockLuksOperations) AddKey(device string, existing, newPassphrase []byte, opts *luks2.AddKeyOptions) (int, error) {
 	if m.AddKeyFunc != nil {
 		return m.AddKeyFunc(device, existing, newPassphrase, opts)
 	}
-	return nil
+	return 0, nil
 }
 
 func (m *MockLuksOperations) RemoveKey(device string, passphrase []byte, keyslot int) error {

@@ -101,17 +101,17 @@ func (c *CLI) cmdAddKey() int {
 		opts.Keyslot = &requested
 	}
 
-	if err := c.Luks.AddKey(device, existing, added, opts); err != nil {
+	if _, err := c.Luks.AddKey(device, existing, added, opts); err != nil {
 		_, _ = fmt.Fprintf(c.Stderr, "Failed to add the passphrase: %v\n", err)
 		return 1
 	}
 
-	// The slot number is deliberately NOT reported here. AddKey does not say
-	// which slot it used, and inferring it from the header afterwards gives the
-	// wrong answer on any container whose active slots are not contiguous from
-	// zero -- which is every container that has ever had a credential revoked
-	// (#42). A number that is wrong in the direction of "destroy the other
-	// credential" is worse than no number, so the listing is what says.
+	// The slot number is not reported here. AddKey now returns the slot it
+	// chose (#101), so a correct number is available; printing it is a change
+	// to this command's output and is not part of #101. Until then the
+	// listing is what says -- never an inference from the header, which gives
+	// the wrong answer on any container whose active slots are not contiguous
+	// from zero (#42).
 	_, _ = fmt.Fprintln(c.Stdout, "Passphrase added.")
 	_, _ = fmt.Fprintf(c.Stdout, "Run 'luks2 keyslots %s' to see which keyslot it went to.\n", device)
 	return 0

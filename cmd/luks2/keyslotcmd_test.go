@@ -101,11 +101,11 @@ func TestAddKeyKeepsTheTwoCredentialsApart(t *testing.T) {
 	cli, _, stderr := runCLI(t, "", "addkey",
 		"--key-file", existingFile, "--new-key-file", newFile, "--slot", "3", "--kdf", "pbkdf2", "/dev/sdb1")
 	cli.Luks = &MockLuksOperations{
-		AddKeyFunc: func(device string, existing, added []byte, opts *luks2.AddKeyOptions) error {
+		AddKeyFunc: func(device string, existing, added []byte, opts *luks2.AddKeyOptions) (int, error) {
 			gotExisting = append([]byte(nil), existing...)
 			gotNew = append([]byte(nil), added...)
 			gotOpts = opts
-			return nil
+			return 3, nil
 		},
 	}
 

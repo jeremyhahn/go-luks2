@@ -196,7 +196,7 @@ func TestEveryExportedPathToleratesANullKeyslot(t *testing.T) {
 
 	t.Run("AddKey", func(t *testing.T) {
 		path := nullKeyslotVolume(t, "n5.img")
-		if err := AddKey(path, passphrase, []byte("a-second-credential"), &AddKeyOptions{
+		if _, err := AddKey(path, passphrase, []byte("a-second-credential"), &AddKeyOptions{
 			KDFType:       KDFTypePBKDF2,
 			PBKDFIterTime: 1,
 		}); err != nil {

@@ -139,7 +139,7 @@ func TestAddKeyWritesNoPriorityMember(t *testing.T) {
 	path := canonicalImage(t, "addkey-priority.img")
 	formatWithLibraryCheap(t, path)
 
-	if err := AddKey(path, []byte(canonicalPassphrase), []byte("a-second-credential"), &AddKeyOptions{
+	if _, err := AddKey(path, []byte(canonicalPassphrase), []byte("a-second-credential"), &AddKeyOptions{
 		KDFType:         KDFTypePBKDF2,
 		Hash:            "sha512",
 		PBKDFIterations: canonicalCheapIterations,

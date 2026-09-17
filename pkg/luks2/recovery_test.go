@@ -619,10 +619,10 @@ func volumeWithAKeyslotGap(t *testing.T) (device string, primary, third []byte) 
 	second := []byte("second-credential-passphrase")
 	third = []byte("third-credential-passphrase")
 
-	if err := AddKey(device, primary, second, fipsSafeAddKeyOptions()); err != nil {
+	if _, err := AddKey(device, primary, second, fipsSafeAddKeyOptions()); err != nil {
 		t.Fatalf("AddKey for slot 1: %v", err)
 	}
-	if err := AddKey(device, primary, third, fipsSafeAddKeyOptions()); err != nil {
+	if _, err := AddKey(device, primary, third, fipsSafeAddKeyOptions()); err != nil {
 		t.Fatalf("AddKey for slot 2: %v", err)
 	}
 	if err := RemoveKey(device, second, 1); err != nil {
@@ -827,7 +827,7 @@ func TestAddRecoveryKeyPicksTheFreeSlotEvenWhenTheGapIsFilledFirst(t *testing.T)
 	occupied := 1
 	occupyOpts := fipsSafeAddKeyOptions()
 	occupyOpts.Keyslot = &occupied
-	if err := AddKey(device, primary, []byte("occupies-the-gap-slot"), occupyOpts); err != nil {
+	if _, err := AddKey(device, primary, []byte("occupies-the-gap-slot"), occupyOpts); err != nil {
 		t.Fatalf("AddKey into the gap: %v", err)
 	}
 	assertKeyslotIDs(t, device, []string{"0", "1", "2"})
@@ -857,27 +857,47 @@ func TestAddRecoveryKeyPicksTheFreeSlotEvenWhenTheGapIsFilledFirst(t *testing.T)
 	}
 }
 
-// TestAddKeyReportsTheSlotItChose covers the seam directly: AddKey's exported
-// signature is unchanged, and the unexported variant reports.
+// TestAddKeyReportsTheSlotItChose covers the seam directly: AddKey returns the
+// slot it used (#101), read from where it was chosen rather than inferred.
 func TestAddKeyReportsTheSlotItChose(t *testing.T) {
 	device, primary, _ := volumeWithAKeyslotGap(t)
 
-	assigned := -1
-	if err := addKey(device, primary, []byte("a-new-credential-here"), fipsSafeAddKeyOptions(), &assigned); err != nil {
-		t.Fatalf("addKey: %v", err)
+	assigned, err := AddKey(device, primary, []byte("a-new-credential-here"), fipsSafeAddKeyOptions())
+	if err != nil {
+		t.Fatalf("AddKey: %v", err)
 	}
 	// The FIRST FREE slot, which is the gap -- not the highest, which is what
 	// the deleted inference would have said.
 	if assigned != 1 {
-		t.Fatalf("addKey reported slot %d, want the first free slot 1", assigned)
+		t.Fatalf("AddKey reported slot %d, want the first free slot 1", assigned)
 	}
 	if opened := keyslotOpenedBy(t, device, []byte("a-new-credential-here")); opened != "1" {
 		t.Fatalf("the new credential opens keyslot %s, but slot %d was reported", opened, assigned)
 	}
 
-	// AddKey itself must still work, and still return only an error.
-	if err := AddKey(device, primary, []byte("another-new-credential"), fipsSafeAddKeyOptions()); err != nil {
+	// With the gap filled the next free slot is past the occupied ones, and
+	// the report must follow the choice rather than repeat the last answer.
+	next, err := AddKey(device, primary, []byte("another-new-credential"), fipsSafeAddKeyOptions())
+	if err != nil {
 		t.Fatalf("AddKey: %v", err)
+	}
+	if opened := keyslotOpenedBy(t, device, []byte("another-new-credential")); opened != strconv.Itoa(next) {
+		t.Fatalf("the second credential opens keyslot %s, but slot %d was reported", opened, next)
+	}
+}
+
+// TestAddKeyReportsNoSlotOnFailure pins the contract a caller relies on when it
+// records the number: an error comes with -1, never a slot that was chosen but
+// not written.
+func TestAddKeyReportsNoSlotOnFailure(t *testing.T) {
+	device, _, _ := volumeWithAKeyslotGap(t)
+
+	slot, err := AddKey(device, []byte("not-the-primary-passphrase"), []byte("a-new-credential-here"), fipsSafeAddKeyOptions())
+	if err == nil {
+		t.Fatal("AddKey with a wrong existing passphrase succeeded")
+	}
+	if slot != -1 {
+		t.Fatalf("AddKey reported slot %d alongside an error, want -1", slot)
 	}
 }
 

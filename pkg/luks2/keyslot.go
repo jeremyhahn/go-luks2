@@ -331,47 +331,36 @@ func TestKey(device string, passphrase []byte) error {
 	return nil
 }
 
-// AddKey adds a new passphrase to an available keyslot
-// existingPassphrase is used to unlock the volume and retrieve the master key
-// newPassphrase is the new passphrase to add
+// AddKey adds a new passphrase to an available keyslot and returns the number
+// of the keyslot it used.
 //
-// It does NOT report which keyslot received the key. A caller that needs to
-// know -- to record it, or to revoke it later -- must use addKey; inferring it
-// afterwards from the header is how #42 destroyed the wrong credential. The
-// exported signature is unchanged because it is consumed outside this
-// repository (go-trusted-platform pkg/storage/luks), so widening it is a
-// coordinated breaking change rather than this fix.
-func AddKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKeyOptions) error {
-	return addKey(device, existingPassphrase, newPassphrase, opts, nil)
-}
-
-// addKey is AddKey, and additionally REPORTS the keyslot it used through
-// assignedSlot when that is non-nil.
+// existingPassphrase is used to unlock the volume and retrieve the master key;
+// newPassphrase is the new passphrase to add.
 //
-// The slot is written where it is CHOSEN -- under the device lock this function
-// already holds -- so a caller learns the actual answer rather than
-// reconstructing it. AddRecoveryKey used to reconstruct it, with a different
-// rule ("the highest-numbered slot") than the one AddKey uses ("the first free
-// slot"), and the two agree only while the active slots are contiguous from
-// zero. That stops being true the moment any credential is revoked (#42).
+// The keyslot is reported from where it is CHOSEN -- under the device lock, at
+// the point of decision -- rather than left for the caller to infer from the
+// header afterwards. Inferring it is how #42 destroyed the wrong credential:
+// AddRecoveryKey assumed "the highest-numbered slot" while AddKey fills "the
+// first free slot", and the two agree only while the active slots are
+// contiguous from zero, which stops being true the moment any credential is
+// revoked. A caller that does not need the number writes `_, err :=`; a caller
+// that does can no longer get it wrong (#101).
 //
-// assignedSlot is an out-parameter rather than a second return value because
-// AddKey's exported signature has a consumer outside this repository. It is
-// unexported, so the wart does not reach the API.
-func addKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKeyOptions, assignedSlot *int) error {
+// On error the returned slot is -1 and must not be acted on.
+func AddKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKeyOptions) (int, error) {
 	// The default and the only policy any EXPORTED path can select. A
 	// credential arriving through AddKey came from the caller, so nothing is
 	// known about its entropy and the full floor applies.
-	return addKeyWithPolicy(device, existingPassphrase, newPassphrase, opts, assignedSlot, callerSuppliedCredential)
+	return addKeyWithPolicy(device, existingPassphrase, newPassphrase, opts, callerSuppliedCredential)
 }
 
-// addKeyWithPolicy is addKey with the keyslot cost policy made explicit.
+// addKeyWithPolicy is AddKey with the keyslot cost policy made explicit.
 //
 // It is unexported and takes an unexported type, which is the whole mechanism:
 // the relaxed floor is reachable only from inside this package, and only from a
 // caller that GENERATED the credential it is enrolling. AddRecoveryKey
 // (recovery.go) is that caller, and today it is the only one: it passes
-// libraryGeneratedCredential where every other path takes addKey and the strict
+// libraryGeneratedCredential where every other path takes AddKey and the strict
 // default.
 //
 // A second such caller is expected -- enrolling an external key provider's
@@ -380,16 +369,16 @@ func addKey(device string, existingPassphrase, newPassphrase []byte, opts *AddKe
 // and naming it here as though it did would describe a wiring that is not
 // there. See keyslotCostPolicy (kdf.go) for what the exemption is, what it is
 // not, and why it is not a field on AddKeyOptions.
-func addKeyWithPolicy(device string, existingPassphrase, newPassphrase []byte, opts *AddKeyOptions, assignedSlot *int, policy keyslotCostPolicy) error {
+func addKeyWithPolicy(device string, existingPassphrase, newPassphrase []byte, opts *AddKeyOptions, policy keyslotCostPolicy) (int, error) {
 	// Validate inputs
 	if err := ValidateDevicePath(device); err != nil {
-		return err
+		return -1, err
 	}
 	if err := ValidatePassphrase(existingPassphrase); err != nil {
-		return fmt.Errorf("invalid existing passphrase: %w", err)
+		return -1, fmt.Errorf("invalid existing passphrase: %w", err)
 	}
 	if err := ValidatePassphrase(newPassphrase); err != nil {
-		return fmt.Errorf("invalid new passphrase: %w", err)
+		return -1, fmt.Errorf("invalid new passphrase: %w", err)
 	}
 
 	// A NEW KEYSLOT IS A KEYSLOT THIS PACKAGE CREATES, so a caller-supplied
@@ -404,43 +393,40 @@ func addKeyWithPolicy(device string, existingPassphrase, newPassphrase []byte, o
 	// point; an inherited cost is resolved later, once the container has been
 	// read, and is clamped rather than refused.
 	if err := validateArgon2CreateCost(callerArgon2Options(opts)); err != nil {
-		return err
+		return -1, err
 	}
 
 	// Acquire exclusive lock
 	lock, err := AcquireFileLock(device)
 	if err != nil {
-		return fmt.Errorf("failed to acquire lock: %w", err)
+		return -1, fmt.Errorf("failed to acquire lock: %w", err)
 	}
 	defer func() { _ = lock.Release() }()
 
 	// Read existing header and metadata
 	hdr, metadata, err := ReadHeader(device)
 	if err != nil {
-		return fmt.Errorf("failed to read header: %w", err)
+		return -1, fmt.Errorf("failed to read header: %w", err)
 	}
 
 	// Unlock with existing passphrase to get master key
 	masterKey, err := getMasterKey(device, existingPassphrase, metadata)
 	if err != nil {
-		return fmt.Errorf("failed to unlock with existing passphrase: %w", err)
+		return -1, fmt.Errorf("failed to unlock with existing passphrase: %w", err)
 	}
 	defer masterKey.Destroy()
 
 	// Find available keyslot
 	targetSlot, err := findAvailableKeyslot(metadata, opts)
 	if err != nil {
-		return err
+		return -1, err
 	}
 
-	// Reported to the caller HERE, at the point of decision and under the lock,
-	// rather than left to be inferred from the header afterwards (#42). It is
-	// set before the write rather than after it deliberately: every remaining
-	// failure path returns an error, so a caller that sees success has this
-	// value, and a caller that sees an error must not act on it either way.
-	if assignedSlot != nil {
-		*assignedSlot = targetSlot
-	}
+	// targetSlot is what the caller receives on success: decided HERE, under
+	// the lock, rather than left to be inferred from the header afterwards
+	// (#42). Every remaining failure path returns -1 with its error, so a
+	// caller that sees success has the slot and a caller that sees an error
+	// has nothing to act on.
 
 	// Get existing keyslot for reference (cipher, key size, etc.).
 	//
@@ -503,20 +489,20 @@ func addKeyWithPolicy(device string, existingPassphrase, newPassphrase []byte, o
 	// AES-XTS key: it came out of a keyslot that passed screenKeyslot.
 	newKeySize := masterKey.Size()
 	if err := validateXTSKeySize(newKeySize); err != nil {
-		return fmt.Errorf("%w: the recovered volume key is unusable as a keyslot key: %w", ErrInvalidKeyslot, err)
+		return -1, fmt.Errorf("%w: the recovered volume key is unusable as a keyslot key: %w", ErrInvalidKeyslot, err)
 	}
 
 	// Read the container's reserved keyslots area out of its own header rather
 	// than assuming this library's default geometry.
 	keyslotsStart, keyslotsEnd, err := keyslotsAreaBounds(hdr, metadata)
 	if err != nil {
-		return err
+		return -1, err
 	}
 
 	// Calculate new keyslot area offset
 	newOffset, err := calculateNextKeyslotOffset(metadata, keyslotsStart)
 	if err != nil {
-		return err
+		return -1, err
 	}
 
 	// main's extraction (#102), with THIS branch's key size. The size is the
@@ -532,27 +518,27 @@ func addKeyWithPolicy(device string, existingPassphrase, newPassphrase []byte, o
 
 	kdf, err := createKDF(formatOpts, newKeySize, policy)
 	if err != nil {
-		return fmt.Errorf("failed to create KDF: %w", err)
+		return -1, fmt.Errorf("failed to create KDF: %w", err)
 	}
 
 	// Derive key from new passphrase
 	passphraseKey, err := DeriveKeyEnclave(newPassphrase, kdf, newKeySize)
 	if err != nil {
-		return fmt.Errorf("failed to derive key: %w", err)
+		return -1, fmt.Errorf("failed to derive key: %w", err)
 	}
 	defer passphraseKey.Destroy()
 
 	// Apply anti-forensic split to master key
 	afData, err := afSplitEnclave(masterKey, AFStripes, DefaultHashAlgo)
 	if err != nil {
-		return fmt.Errorf("failed to apply AF split: %w", err)
+		return -1, fmt.Errorf("failed to apply AF split: %w", err)
 	}
 	defer afData.Destroy()
 
 	// Encrypt AF-split key material with new passphrase-derived key
 	encryptedKeyMaterial, err := encryptKeyMaterialEnclave(afData, passphraseKey, DefaultCipher)
 	if err != nil {
-		return fmt.Errorf("failed to encrypt key material: %w", err)
+		return -1, fmt.Errorf("failed to encrypt key material: %w", err)
 	}
 	defer clearBytes(encryptedKeyMaterial)
 
@@ -571,7 +557,7 @@ func addKeyWithPolicy(device string, existingPassphrase, newPassphrase []byte, o
 	// sits past the keyslots area let a new keyslot be placed in the gap
 	// between the two.
 	if newKeyslotsEnd > keyslotsEnd {
-		return fmt.Errorf("%w: a new keyslot would end at offset %d but the container's keyslots area is %d..%d (config.keyslots_size %s); reformat with a larger keyslots area",
+		return -1, fmt.Errorf("%w: a new keyslot would end at offset %d but the container's keyslots area is %d..%d (config.keyslots_size %s); reformat with a larger keyslots area",
 			ErrKeyslotsAreaFull, newKeyslotsEnd, keyslotsStart, keyslotsEnd, metadata.Config.KeyslotsSize)
 	}
 
@@ -592,12 +578,12 @@ func addKeyWithPolicy(device string, existingPassphrase, newPassphrase []byte, o
 		// header reaches here through a clean ReadHeader.
 		segmentOffset, err := parseSize(segment.Offset)
 		if err != nil {
-			return fmt.Errorf("%w: data segment %s declares an offset of %q, which is not a valid size, so the "+
+			return -1, fmt.Errorf("%w: data segment %s declares an offset of %q, which is not a valid size, so the "+
 				"bound protecting the encrypted data from a new keyslot cannot be computed",
 				ErrInvalidHeader, id, segment.Offset)
 		}
 		if newKeyslotsEnd > segmentOffset {
-			return fmt.Errorf("%w: a new keyslot would end at offset %d but the data segment starts at %d; reformat with a larger header",
+			return -1, fmt.Errorf("%w: a new keyslot would end at offset %d but the data segment starts at %d; reformat with a larger header",
 				ErrKeyslotsAreaFull, newKeyslotsEnd, segmentOffset)
 		}
 	}
@@ -678,34 +664,34 @@ func addKeyWithPolicy(device string, existingPassphrase, newPassphrase []byte, o
 	// Write encrypted key material to device
 	f, err := os.OpenFile(device, os.O_RDWR, 0600) // #nosec G304 -- device path validated by caller
 	if err != nil {
-		return fmt.Errorf("failed to open device: %w", err)
+		return -1, fmt.Errorf("failed to open device: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
 	if _, err := f.Seek(newOffset, 0); err != nil {
-		return fmt.Errorf("failed to seek to keyslot area: %w", err)
+		return -1, fmt.Errorf("failed to seek to keyslot area: %w", err)
 	}
 
 	if _, err := f.Write(encryptedKeyMaterial); err != nil {
-		return fmt.Errorf("failed to write key material: %w", err)
+		return -1, fmt.Errorf("failed to write key material: %w", err)
 	}
 
 	// Pad to aligned size
 	padding := make([]byte, alignedSize-int64(len(encryptedKeyMaterial)))
 	if _, err := f.Write(padding); err != nil {
-		return fmt.Errorf("failed to write padding: %w", err)
+		return -1, fmt.Errorf("failed to write padding: %w", err)
 	}
 
 	if err := f.Sync(); err != nil {
-		return fmt.Errorf("failed to sync: %w", err)
+		return -1, fmt.Errorf("failed to sync: %w", err)
 	}
 
 	// Write updated headers
 	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
-		return fmt.Errorf("failed to write header: %w", err)
+		return -1, fmt.Errorf("failed to write header: %w", err)
 	}
 
-	return nil
+	return targetSlot, nil
 }
 
 // RemoveKey removes a passphrase from a keyslot
