@@ -207,7 +207,7 @@ import (
 // adoptSecret only for material that already exists outside an enclave and
 // cannot be produced inside one.
 //
-// The two go-enclave constructors are reached through the variables below
+// The three go-enclave constructors are reached through the variables below
 // rather than called directly. That is the same seam as dm and nodeRdev
 // elsewhere in this package, and it exists for one reason: the fail-closed
 // paths cannot otherwise be tested. RLIMIT_MEMLOCK is process-wide, so
@@ -217,6 +217,7 @@ import (
 var (
 	newLockedRegion      = enclave.NewMemoryEnclaveSized
 	moveIntoLockedRegion = enclave.NewMemoryEnclave
+	copyIntoLockedRegion = enclave.NewMemoryEnclaveCopy
 )
 
 func newSecretEnclave(op string, n int) (*enclave.MemoryEnclave, error) {
@@ -290,14 +291,38 @@ func borrowSecret(op string, e *enclave.MemoryEnclave, fn func([]byte) error) er
 	return err
 }
 
-// copySecret returns an enclave holding a copy of b.
+// copySecret returns a FROZEN enclave holding a copy of b.
 //
 // It is for material that is ALREADY in protected memory and must be narrowed
-// or normalised -- a line located inside a locked file buffer, a body to be
-// lower-cased -- where adoptSecret cannot be used because the source is not the
-// caller's to wipe. b must itself be protected; copying unprotected bytes with
-// this only moves them, it does not un-expose them.
+// -- a line located inside a locked file buffer, a body trimmed of its
+// surrounding whitespace -- where adoptSecret cannot be used because the source
+// is not the caller's to wipe. b must itself be protected; copying unprotected
+// bytes with this only moves them, it does not un-expose them.
+//
+// The result is read-only, exactly as adoptSecret's is: the material is
+// complete when this returns, so a write through a slice retained past its
+// borrow faults the process instead of silently corrupting a credential. Since
+// go-enclave v0.5.0-alpha that is one constructor call rather than a sized
+// region, a borrow to fill it and a Destroy on the error path -- the
+// composition copySecretWritable below still carries, for the one case that
+// needs the pages to stay writable.
 func copySecret(op string, b []byte) (*enclave.MemoryEnclave, error) {
+	e, err := copyIntoLockedRegion(b)
+	if err != nil {
+		return nil, &ProtectedMemoryError{Op: op, Err: err}
+	}
+	return e, nil
+}
+
+// copySecretWritable is copySecret whose result a borrow may WRITE to.
+//
+// It exists for a copy that is normalised in place after it is taken -- a
+// candidate body lower-cased before the hex test -- which the frozen result of
+// copySecret cannot be. The pages are writable for the enclave's whole life,
+// so the copy should be short-lived scratch, destroyed as soon as the
+// normalised bytes have been consumed; material that is returned to a caller
+// belongs in copySecret.
+func copySecretWritable(op string, b []byte) (*enclave.MemoryEnclave, error) {
 	if len(b) == 0 {
 		return nil, &ProtectedMemoryError{Op: op, Err: enclave.ErrEmptyEnclave}
 	}
@@ -318,12 +343,14 @@ func copySecret(op string, b []byte) (*enclave.MemoryEnclave, error) {
 	return e, nil
 }
 
-// copySecretFiltered is copySecret keeping only the bytes keep reports true
-// for, sized exactly to what survives.
+// copySecretFiltered is copySecretWritable keeping only the bytes keep reports
+// true for, sized exactly to what survives.
 //
 // It exists so that stripping separators out of a formatted secret happens
 // inside locked memory rather than through strings.ReplaceAll, which would
-// yield an unwipeable copy of the whole thing.
+// yield an unwipeable copy of the whole thing. The result is writable for the
+// same reason copySecretWritable's is: the stripped body is lower-cased in
+// place before it is decoded.
 func copySecretFiltered(op string, b []byte, keep func(byte) bool) (*enclave.MemoryEnclave, error) {
 	n := 0
 	for _, c := range b {

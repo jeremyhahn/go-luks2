@@ -527,7 +527,7 @@ middle of a reencryption stays readable and inspectable.
 - Root privileges for device-mapper operations
 - `RLIMIT_MEMLOCK` headroom of ~512 KiB per concurrent operation (see
   [Protected Memory](#protected-memory))
-- Go 1.25.5 (for building)
+- Go 1.27.0 (for building)
 
 ## Compatibility
 

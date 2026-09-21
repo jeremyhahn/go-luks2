@@ -936,10 +936,11 @@ func parseRecoveryKeySecret(formatted *enclave.MemoryEnclave) (*enclave.MemoryEn
 			})
 		}
 
-		// Not dashed. The hex test is on the lower-cased body, so a copy is
-		// taken to lower-case in -- the borrowed pages of an enclave built from
-		// existing material are frozen read-only.
-		normalized, err := copySecret("recovery key", body)
+		// Not dashed. The hex test is on the lower-cased body, so a WRITABLE
+		// copy is taken to lower-case in -- the borrowed pages of an enclave
+		// built from existing material, copySecret's included, are frozen
+		// read-only and a write through them faults.
+		normalized, err := copySecretWritable("recovery key", body)
 		if err != nil {
 			return err
 		}

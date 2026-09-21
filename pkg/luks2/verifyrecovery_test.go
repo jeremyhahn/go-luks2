@@ -228,9 +228,9 @@ func TestGetMasterKeyDistinguishesFailureToTryFromFailureToVerify(t *testing.T) 
 func withFailingProtectedMemory(t *testing.T) {
 	t.Helper()
 
-	previousNew, previousMove := newLockedRegion, moveIntoLockedRegion
+	previousNew, previousMove, previousCopy := newLockedRegion, moveIntoLockedRegion, copyIntoLockedRegion
 	t.Cleanup(func() {
-		newLockedRegion, moveIntoLockedRegion = previousNew, previousMove
+		newLockedRegion, moveIntoLockedRegion, copyIntoLockedRegion = previousNew, previousMove, previousCopy
 	})
 
 	refuse := func() (*enclave.MemoryEnclave, error) {
@@ -245,4 +245,7 @@ func withFailingProtectedMemory(t *testing.T) {
 		enclave.Wipe(b)
 		return refuse()
 	}
+	// The copy constructor never touches its source, so the fake must not
+	// either: copySecret's callers keep reading the bytes they copied from.
+	copyIntoLockedRegion = func([]byte) (*enclave.MemoryEnclave, error) { return refuse() }
 }

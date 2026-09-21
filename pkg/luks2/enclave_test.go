@@ -21,22 +21,20 @@ import (
 //
 // It copies rather than adopting because enclave.NewMemoryEnclave takes
 // ownership and wipes its argument, and a test that hands over a fixture and
-// then asserts against it would be asserting against zeros.
+// then asserts against it would be asserting against zeros. That is exactly the
+// case enclave.NewMemoryEnclaveCopy was added for (go-enclave v0.5.0-alpha),
+// replacing the Sized + WithBytes + Destroy-on-error composition this helper
+// used to carry. The result is FROZEN read-only, like every enclave built from
+// existing material: a test that needs to write into its fixture must build a
+// sized enclave itself.
 func enclaveFrom(t *testing.T, b []byte) *enclave.MemoryEnclave {
 	t.Helper()
 
-	e, err := enclave.NewMemoryEnclaveSized(len(b))
+	e, err := enclave.NewMemoryEnclaveCopy(b)
 	if err != nil {
 		t.Fatalf("could not allocate a test enclave: %v", err)
 	}
 	t.Cleanup(e.Destroy)
-
-	if err := e.WithBytes(func(dst []byte) error {
-		copy(dst, b)
-		return nil
-	}); err != nil {
-		t.Fatalf("could not fill a test enclave: %v", err)
-	}
 
 	return e
 }
@@ -227,6 +225,120 @@ func TestAdoptSecretRefusesEmptyMaterial(t *testing.T) {
 	}
 	if !errors.Is(err, enclave.ErrEmptyEnclave) {
 		t.Fatalf("go-enclave's cause is not reachable: %v", err)
+	}
+}
+
+func TestCopySecretLeavesTheSourceIntact(t *testing.T) {
+	original := []byte("MATERIAL that is not the caller's to wipe")
+	source := append([]byte(nil), original...)
+
+	e, err := copySecret("test", source)
+	if err != nil {
+		t.Fatalf("copySecret failed: %v", err)
+	}
+	defer e.Destroy()
+
+	// The whole point of copying rather than adopting: the source belongs to
+	// someone else -- a line inside another enclave's locked pages -- and must
+	// still read as it did.
+	if !bytes.Equal(source, original) {
+		t.Fatal("copySecret disturbed the source slice")
+	}
+	if got := openSecret(t, e); !bytes.Equal(got, original) {
+		t.Fatal("copySecret did not copy the material into the enclave intact")
+	}
+}
+
+func TestCopySecretRefusesEmptyMaterial(t *testing.T) {
+	for _, name := range []string{"copySecret", "copySecretWritable"} {
+		t.Run(name, func(t *testing.T) {
+			var (
+				e   *enclave.MemoryEnclave
+				err error
+			)
+			if name == "copySecret" {
+				e, err = copySecret("test", nil)
+			} else {
+				e, err = copySecretWritable("test", nil)
+			}
+			if err == nil {
+				e.Destroy()
+				t.Fatalf("%s(nil) succeeded", name)
+			}
+			if !errors.Is(err, ErrProtectedMemory) {
+				t.Fatalf("error does not match ErrProtectedMemory: %v", err)
+			}
+			if !errors.Is(err, enclave.ErrEmptyEnclave) {
+				t.Fatalf("go-enclave's cause is not reachable: %v", err)
+			}
+		})
+	}
+}
+
+// copySecret is built through go-enclave's copy constructor, which is reached
+// through its own seam variable. If that seam were left out of
+// withFailingProtectedMemory, a copy would succeed while every other
+// allocation in the same test was being refused -- a fail-closed path with a
+// hole in it that only the copying callers would fall through.
+func TestCopySecretFailsClosedWhenLockedMemoryIsUnavailable(t *testing.T) {
+	withFailingProtectedMemory(t)
+
+	for _, name := range []string{"copySecret", "copySecretWritable"} {
+		t.Run(name, func(t *testing.T) {
+			source := []byte("material that never reaches locked memory")
+			var (
+				e   *enclave.MemoryEnclave
+				err error
+			)
+			if name == "copySecret" {
+				e, err = copySecret("test", source)
+			} else {
+				e, err = copySecretWritable("test", source)
+			}
+			if err == nil {
+				e.Destroy()
+				t.Fatalf("%s succeeded while locked memory was being refused", name)
+			}
+			if e != nil {
+				t.Fatalf("%s returned both an enclave and an error", name)
+			}
+			if !errors.Is(err, ErrProtectedMemory) {
+				t.Fatalf("error does not match ErrProtectedMemory: %v", err)
+			}
+			if !errors.Is(err, enclave.ErrLockedMemoryUnavailable) {
+				t.Fatalf("go-enclave's refusal is not reachable: %v", err)
+			}
+		})
+	}
+}
+
+// copySecretWritable exists for one reason: the copy is normalised IN PLACE.
+// The enclaves go-enclave builds from existing material are frozen read-only
+// and a write through them faults the process, so the writable variant has to
+// keep handing back pages a borrow may write to. This is the property
+// parseRecoveryKeySecret depends on when it lower-cases a candidate body.
+func TestCopySecretWritableHandsBackPagesABorrowMayWrite(t *testing.T) {
+	source := []byte("ABCDEF0123")
+
+	e, err := copySecretWritable("test", source)
+	if err != nil {
+		t.Fatalf("copySecretWritable failed: %v", err)
+	}
+	defer e.Destroy()
+
+	if err := borrowSecret("test", e, func(b []byte) error {
+		lowerASCII(b)
+		return nil
+	}); err != nil {
+		t.Fatalf("writing into a writable copy failed: %v", err)
+	}
+
+	if got, want := openSecret(t, e), []byte("abcdef0123"); !bytes.Equal(got, want) {
+		t.Fatalf("copy reads %q after an in-place lower-case, want %q", got, want)
+	}
+	// The source is untouched by both the copy and the write into the copy.
+	if !bytes.Equal(source, []byte("ABCDEF0123")) {
+		t.Fatalf("source reads %q after a write into the copy", source)
 	}
 }
 

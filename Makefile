@@ -812,6 +812,64 @@ devcontainer: ## Build and run the devcontainer
 # Immunizes against a stray go.work file changing what gets built.
 export GOWORK=off
 
+# ---- toolchain binding (#201) ----
+#
+# Every target runs on EXACTLY the toolchain go.mod's `go` directive names,
+# derived from the file so the two cannot drift. Go's own resolution is
+# GOTOOLCHAIN=auto: a host whose installed go is older than the directive
+# fetches the named version through GOPROXY, cached once under GOMODCACHE.
+# Hosts that set GOTOOLCHAIN=local opt out of that, and on such a host a
+# module whose floor has moved past the installed go does not build at all:
+#
+#   go: go.mod requires go >= 1.27.0 (running go 1.26.7; GOTOOLCHAIN=local)
+#
+# Measured on #201, adopting go-enclave v0.5.0-alpha (floor `go 1.27.0`):
+# the review harness carried 1.26.7 with GOTOOLCHAIN=local and could neither
+# build nor test the change it was asked to verify -- the same failure the
+# handbook recorded on 2026-08-27, when thirteen repos moved to 1.26.7 ahead
+# of the shared image. A gate that READS instead of BUILDS and still votes is
+# the thing to close, and pinning the exact directive is the remedy the
+# handbook names (OWNER-QUEUE-2026-08-28 item 26) and the mechanism the dev
+# hosts already use by hand (`GOTOOLCHAIN=go1.27.0`).
+#
+# Why the exact version and not `auto`: `auto` may pick a NEWER toolchain
+# than the directive when one is installed, so two hosts build one commit on
+# two compilers. The pin is the Makefile counterpart of the workflows'
+# GO_VERSION (devops.md: bind the toolchain to the pinned version wherever
+# the file supports it) and of the Dockerfiles' `golang:<pinned>` tags. It is
+# derived, never typed here, so there is one place the floor is written.
+#
+# HOW it is derived, and why it is `override`, are both about not depending
+# on the host the binding exists to rescue. The directive is read with make's
+# own `$(file <)` and text functions -- no sed, no awk, no `go` (which is the
+# very command that refuses to run) -- so a stripped PATH cannot silently
+# leave GO_FLOOR empty and the export unset. `override` makes the pin win
+# over `make -e` and over a GOTOOLCHAIN=... on make's command line, either of
+# which a harness may set for hermeticity: an environment that pins the
+# toolchain to "whatever is installed" is precisely the environment that
+# cannot build this module, and a binding that yields to it is no binding.
+#
+# The opt-out is explicit and named: `make TOOLCHAIN_PIN=0 <target>` leaves
+# GOTOOLCHAIN exactly as the environment has it, so a host that must not
+# fetch gets go's clear refusal above rather than a download it did not
+# want. A silent knob (an empty GO_FLOOR, a missing tool) is not an opt-out,
+# it is the failure mode this block was written against.
+#
+# The pairing trick below reads as: list every word of go.mod suffixed with
+# `@`, zip it against the word list shifted by one, and keep the pair whose
+# left half is the bare token `go` and whose right half starts with a digit
+# -- i.e. `go@1.27.0` from the directive, never `toolchain go1.27.0` (its
+# token is `go1.27.0`, not `go`) and never a module path containing `go`.
+TOOLCHAIN_PIN ?= 1
+GO_MOD_WORDS := $(file < go.mod)
+GO_FLOOR := $(firstword $(patsubst go@%,%,$(filter go@0% go@1% go@2% go@3% go@4% go@5% go@6% go@7% go@8% go@9%,$(join $(addsuffix @,$(GO_MOD_WORDS)),$(wordlist 2,$(words $(GO_MOD_WORDS)),$(GO_MOD_WORDS)) end-of-go-mod))))
+ifeq ($(TOOLCHAIN_PIN),1)
+ifeq ($(GO_FLOOR),)
+$(error go.mod has no `go` directive to bind the toolchain to; see the toolchain binding block in this Makefile)
+endif
+override export GOTOOLCHAIN := go$(GO_FLOOR)
+endif
+
 # ---- dependency-resolution targets (2026-08-13 cutover) ----
 # deps-latest runs before compiling in a consumer repo; release-alpha publishes
 # this repo's next -alpha tag.

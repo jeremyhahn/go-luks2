@@ -9,7 +9,7 @@ env:
   # Kept in lockstep with ci.yml (issue #14). This was pinned at 1.25.5 while
   # the rest of the repo had moved to 1.26 — a release built on a stale
   # toolchain is a supply-chain problem, not a cosmetic one.
-  GO_VERSION: "1.26.7"
+  GO_VERSION: "1.27.0"
 
 jobs:
   release:
