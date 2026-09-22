@@ -400,6 +400,12 @@ func TestCreateDigest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// The digest cost is CALIBRATED, and a calibration is a wall-clock
+			// measurement, so it is pinned here rather than measured a second
+			// time. See the iteration assertion below for why (#204).
+			const pinnedIterations = 123_457
+			askedFor := recordDigestCalibration(t, pinnedIterations)
+
 			// Generate random master key
 			if _, err := rand.Read(tt.masterKey); err != nil {
 				t.Fatalf("Failed to generate master key: %v", err)
@@ -432,17 +438,29 @@ func TestCreateDigest(t *testing.T) {
 			if kdf.Iterations == nil {
 				t.Fatal("Iterations is nil")
 			}
-			// CALIBRATED, so there is no constant to compare against. What is
-			// pinned instead is the property that survives a change of
-			// machine: the count is the one this machine's calibration
-			// produces for the digest's target.
-			want, err := calibrateDigestIterations(tt.hashAlgo)
-			if err != nil {
-				t.Fatalf("calibrateDigestIterations failed: %v", err)
+			// CALIBRATED, so there is no constant to compare against. This
+			// used to compare the recorded count against a SECOND, fresh
+			// calibration and accept anything within 2x -- which compares two
+			// wall-clock measurements taken moments apart. That is a property
+			// of how busy the host is, not of this code: under load the two
+			// measurements land five-fold apart and the test fails on a tree
+			// that is correct (#204).
+			//
+			// The property that actually belongs to createDigest is pinned
+			// instead: it records EXACTLY the count the calibration returned,
+			// for the hash the digest declares -- no rounding, no substituted
+			// default, no second call whose answer could differ from the one
+			// the digest was derived with. That the REAL calibration tracks
+			// its time target and clears the LUKS2 iteration floor is a
+			// property of the calibration, and is checked where it lives, in
+			// TestDigestCalibrationTargetsItsBudget.
+			if *kdf.Iterations != pinnedIterations {
+				t.Fatalf("digest records %d iterations; the calibration returned %d",
+					*kdf.Iterations, pinnedIterations)
 			}
-			if ratio := float64(*kdf.Iterations) / float64(want); ratio < 0.5 || ratio > 2 {
-				t.Fatalf("digest has %d iterations; a fresh calibration for %s gives %d, which is not within 2x",
-					*kdf.Iterations, tt.hashAlgo, want)
+			if len(*askedFor) != 1 || (*askedFor)[0] != tt.hashAlgo {
+				t.Fatalf("calibration was asked for %v; want exactly one call, for %q",
+					*askedFor, tt.hashAlgo)
 			}
 
 			// Verify digest value

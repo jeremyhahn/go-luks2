@@ -31,6 +31,23 @@ func pinDigestIterations(t *testing.T, iterations int) {
 	t.Cleanup(func() { digestIterationsFor = previous })
 }
 
+// recordDigestCalibration fixes the digest cost exactly as pinDigestIterations
+// does and additionally records the hash each call asked for, so a test can
+// assert that a digest was calibrated for the hash it declares.
+func recordDigestCalibration(t *testing.T, iterations int) *[]string {
+	t.Helper()
+
+	asked := new([]string)
+	previous := digestIterationsFor
+	digestIterationsFor = func(hashAlgo string) (int, error) {
+		*asked = append(*asked, hashAlgo)
+		return iterations, nil
+	}
+	t.Cleanup(func() { digestIterationsFor = previous })
+
+	return asked
+}
+
 // TestDigestCalibrationTargetsItsBudget is the property that replaced the
 // constant: the count is whatever costs DigestIterationTargetMs on this
 // machine, so it is right on hardware nobody has measured on.
