@@ -14,8 +14,17 @@ COVERAGE_FILE=coverage.out
 COVERAGE_HTML=coverage.html
 # Coverage threshold - set to 90% for all packages
 COVERAGE_THRESHOLD=90.0
-GO=$(shell which go 2>/dev/null || echo /usr/local/go/bin/go)
-GOPATH=$(shell $(GO) env GOPATH)
+# Simple expansion (:=), not recursive (=), and that is load-bearing (#205).
+# GNU make 4.4 exports environment-origin variables into $(shell ...). GOPATH is
+# in the environment on the build workers, so a recursive GO had to expand the
+# redefined GOPATH first, whose own $(GO) was still empty there: the command
+# became `env GOPATH`, and env printed "can't execute 'GOPATH'" to stderr on
+# every make invocation. Harmless to the build, but it landed as the first line
+# of every failing verification's output and got diagnosed as the failure twice.
+# Evaluating both once, in order, keeps the `which` fallback that `sudo make`
+# relies on while leaving nothing for a later GOPATH expansion to re-enter.
+GO := $(shell which go 2>/dev/null || echo /usr/local/go/bin/go)
+GOPATH := $(shell $(GO) env GOPATH)
 GOBIN=$(GOPATH)/bin
 # Version stamped into the binary, read from the VERSION file.
 #
@@ -107,7 +116,7 @@ test: ## Run unit tests only (no I/O, no root required)
 # README.md under Testing.
 test-unit: ## Run only unit tests with coverage and the race detector (fast, no I/O, no root required)
 	@echo "$(COLOR_BOLD)Running unit tests with coverage...$(COLOR_RESET)"
-	@$(GO) test -v -race -timeout 30m -coverprofile=$(COVERAGE_FILE) -covermode=atomic ./pkg/luks2 ./cmd/luks2 ./test/harness ./test/harness/cmd/luks2-testreap
+	@$(GO) test -v -race -timeout 30m -coverprofile=$(COVERAGE_FILE) -covermode=atomic ./pkg/luks2 ./cmd/luks2 ./test/harness ./test/harness/cmd/luks2-testreap ./test/makefile
 	@echo ""
 	@echo "$(COLOR_BOLD)Coverage from unit tests:$(COLOR_RESET)"
 	@$(GO) tool cover -func=$(COVERAGE_FILE) | tail -1

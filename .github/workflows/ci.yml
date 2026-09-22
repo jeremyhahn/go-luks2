@@ -276,6 +276,13 @@ jobs:
       # reaper command is listed alongside it so the enumeration stays complete.
       - name: Run unit tests (test/harness)
         run: go test -v -race -timeout 30m -coverprofile=coverage-harness.out -covermode=atomic ./test/harness ./test/harness/cmd/luks2-testreap
+
+      # The Makefile's own regression tests (#205). Its defects can exit zero --
+      # #205 printed a spurious `env: can't execute 'GOPATH'` on every make
+      # invocation and failed nothing -- so no other step can catch their
+      # return. The package has no non-test code, hence no coverage profile.
+      - name: Run Makefile regression tests (test/makefile)
+        run: go test -v -count=1 ./test/makefile
       # RLIMIT_MEMLOCK is the one that turns a correct design into a red suite:
       # measured on a workstation, the suite passes down to 512 KiB and fails
       # comprehensively at 64 KiB with "could not allocate locked memory ...
