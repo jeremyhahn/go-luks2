@@ -26,6 +26,12 @@ import (
 // destroy a developer's machine -- a host was measured carrying test litter and
 // a live encrypted root in the same listing -- and nothing here may reintroduce
 // them under a different spelling.
+//
+// That absence is ruled policy, not an omission: a device no ledger recorded is
+// cleared by an operator, per device, on positive attribution with stock
+// losetup, and never by code here (owner ruling 2026-09-22, issue #114). The
+// reasoning is in docs/TESTING.md, "A device no ledger recorded is an
+// operator's job, not this repository's".
 type SystemRemover struct{}
 
 // MappingIdentity returns the dm UUID of the live mapping called name.

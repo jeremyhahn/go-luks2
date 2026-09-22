@@ -140,6 +140,55 @@ mappings whatsoever** — a machine with an LVM root will always trip it, with o
 without `--privileged`. Scoping the container's device access does not and
 cannot change that.
 
+## A device no ledger recorded is an operator's job, not this repository's
+
+The reaper removes what a ledger recorded, where the live resource still
+carries the recorded identity. A loop device or mapping that **no ledger
+names** — left by a run from before the ledger existed, by a branch that does
+not ship the harness, or by some other process entirely — is outside its reach,
+permanently and by design.
+
+**Owner ruling, 2026-09-22 (issue #114): an operator clears such a device by
+hand, per device, on positive attribution, using the stock tools.** There is no
+command in this repository for it and none is wanted:
+
+```bash
+losetup -a              # read the backing file, attribute the device to a run
+losetup -d /dev/loopN   # detach the one you attributed
+```
+
+The reasoning, so nobody re-opens it from first principles:
+
+- **Ownership is never inferred from a device's appearance.** Not "it matches
+  `/tmp/go-luks2-run-*`" — a developer's directory can too. Not "its backing
+  file is `(deleted)`" — so is any unlinked image on the box. Not "nothing
+  holds it" — measured on a LIVE job's device 2026-09-01, `holders` and `fuser`
+  were both empty and the only distinguishing fact was that a job owned it.
+- **A sweep is worst at exactly the cases that cost.** It matches the
+  well-behaved leftovers, which already carry this suite's metadata and which
+  the record-based reaper reclaims unaided; it misses the ones left by code
+  that never knew the ledger existed. Measured on the six orphans that
+  exhausted a runner's eight-minor loop pool on 2026-09-02, five were backed
+  directly under `/tmp/` and not under any run root — a bounded-by-prefix sweep
+  would have matched none of them. Risk bought in exchange for covering the
+  cases you did not need covered.
+- **The inflow is already closed producer-side.** The suite records every loop
+  device and mapping before creating it and fails the run if it cannot, so the
+  unrecorded set is finite and historical rather than growing. Clearing it is
+  an operational action on the named hosts, tracked by Infrastructure.
+- **Shipping an operator command here would not help and would decay.** `losetup`
+  is already on every runner; a tool in this tree adds nothing but proximity to
+  the suite, and that is what later grows an `--all` flag and re-lands PR #85's
+  `losetup -D` / `dmsetup remove_all` under a new spelling.
+
+So the "no sweep, no prefix match, no looks-like-ours" refusals in
+`test/harness/system.go` and `test/harness/cmd/luks2-testreap` are **policy,
+not an omission**. Removing one is an owner decision, not a cleanup.
+
+Container scoping does not substitute for any of this: loop and dm are not
+namespaced, so #80 reduced this suite's reach without removing its ability to
+create host loop state — see "What scoping the container does *not* do" above.
+
 ## Running a single test
 
 ```bash

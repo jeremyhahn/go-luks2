@@ -16,6 +16,12 @@
 // left exactly as it was found, and the guard behind it is what decides whether
 // running is safe.
 //
+// No flag adds a sweep. An unrecorded device is cleared by an operator, per device,
+// on positive attribution with stock losetup -- ruled 2026-09-22 on issue #114,
+// with the reasoning in docs/TESTING.md, "A device no ledger recorded is an
+// operator's job, not this repository's". Growing an --all here is how PR #85's
+// losetup -D returns under a new spelling.
+//
 // Exit codes:
 //
 //	0  nothing recorded, or everything recorded has been dealt with
