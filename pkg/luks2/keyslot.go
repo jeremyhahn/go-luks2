@@ -445,22 +445,23 @@ func addKeyWithPolicy(device string, existingPassphrase, newPassphrase []byte, o
 	// Nothing was left to template, and the scan that picked one was being
 	// consulted for a value it should never have supplied.
 	//
-	// Removing it also repairs LEGACY CONTAINERS, which is what forced the
-	// issue. Before this branch, Format wrote the container's DATA cipher into
+	// LEGACY CONTAINERS are what forced the issue. Before this branch, Format wrote the container's DATA cipher into
 	// the keyslot area -- so a volume created with, say,
 	// `CipherMode: "cbc-essiv:sha256"` carries AES-XTS key material under an
-	// "aes-cbc-essiv:sha256" label. Those volumes still OPEN here, because the
-	// read path consults only the algorithm. Screening the template against what
-	// this writer produces therefore rejected every keyslot of every such
-	// container, and AddKey refused to add a credential to a volume it could
-	// perfectly well unlock: a correctness fix producing a data-availability
-	// regression, on exactly the containers least able to afford one.
+	// "aes-cbc-essiv:sha256" label. Those volumes used to OPEN here, because the
+	// read path consulted only the algorithm, and screening the template against
+	// what this writer produces rejected every keyslot of every such container.
 	//
-	// Writing the constant beats both inheriting and refusing. The new keyslot
-	// declares what its material actually is, no wrong label is propagated, and
-	// no container is turned away. The legacy slot's own label is left alone
-	// rather than silently rewritten -- this call is authoring one keyslot, not
-	// repairing someone else's.
+	// #106 has since made the READ path honor the declared mode (owner ruling
+	// 2026-09-25), so a mislabeled keyslot is now refused by getMasterKey above,
+	// with ErrUnsupportedKeyslotCipher, before this point is reached: it opens
+	// nowhere, including here. What remains true is that a template's label has
+	// nothing to contribute to a new keyslot.
+	//
+	// Writing the constant beats inheriting. The new keyslot declares what its
+	// material actually is and no wrong label is propagated. Any other slot's
+	// label is left alone rather than silently rewritten -- this call is
+	// authoring one keyslot, not repairing someone else's.
 	//
 	// Raised by the local Codex review of e975ed5.
 

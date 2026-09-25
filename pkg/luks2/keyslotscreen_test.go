@@ -801,3 +801,86 @@ func TestScreenDigestNeverAcceptsWhatTheDerivationRefuses(t *testing.T) {
 		t.Fatal("the screen accepted no digest at all, so the implication it asserts is vacuous")
 	}
 }
+
+// TestScreenKeyslotRefusalsAreTypedAndAttributed pins that every refusal
+// screenKeyslot makes on the keyslot's own account is an InvalidKeyslotError
+// naming the keyslot, still matching ErrInvalidKeyslot -- which keeps the unlock
+// scan moving -- and still reaching whatever cause it wraps.
+func TestScreenKeyslotRefusalsAreTypedAndAttributed(t *testing.T) {
+	path := newImage(t, "screen-typed.img")
+	formatWithLibrary(t, path)
+
+	cases := []struct {
+		name      string
+		nilSlot   bool
+		apply     func(*Keyslot)
+		wantCause error
+	}{
+		{name: "a null keyslot", nilSlot: true},
+		{name: "a reencrypt keyslot", apply: func(ks *Keyslot) { ks.Type = "reencrypt" }},
+		{name: "a PBKDF2 iteration count past the accepted ceiling", apply: func(ks *Keyslot) {
+			absurd := maxKDFIterations + 1
+			ks.KDF.Iterations = &absurd
+		}},
+		{name: "a KDF type nothing implements", apply: func(ks *Keyslot) { ks.KDF.Type = "scrypt" }},
+		{name: "a volume key size AES-XTS cannot use", apply: func(ks *Keyslot) { ks.KeySize = 40 }},
+		{name: "an anti-forensic hash nothing implements", apply: func(ks *Keyslot) { ks.AF.Hash = "nosuchhash" }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, metadata, err := ReadHeader(path)
+			if err != nil {
+				t.Fatalf("ReadHeader failed: %v", err)
+			}
+			keyslot := metadata.Keyslots["0"]
+			if tc.nilSlot {
+				keyslot = nil
+			} else {
+				tc.apply(keyslot)
+			}
+
+			_, err = screenKeyslot("0", keyslot, metadata.Digests)
+			if err == nil {
+				t.Fatal("the screen accepted the keyslot")
+			}
+			if !errors.Is(err, ErrInvalidKeyslot) {
+				t.Fatalf("refusal does not match ErrInvalidKeyslot: %v", err)
+			}
+			var typed *InvalidKeyslotError
+			if !errors.As(err, &typed) {
+				t.Fatalf("refusal is %T, want *InvalidKeyslotError: %v", err, err)
+			}
+			if typed.Keyslot != "0" {
+				t.Fatalf("refusal names keyslot %q, want \"0\"", typed.Keyslot)
+			}
+			if typed.Reason == "" {
+				t.Fatal("refusal carries no reason")
+			}
+		})
+	}
+}
+
+// TestInvalidKeyslotErrorKeepsItsCause pins that the typed wrapper neither
+// reclassifies nor hides what it wraps.
+func TestInvalidKeyslotErrorKeepsItsCause(t *testing.T) {
+	err := error(&InvalidKeyslotError{Keyslot: "3", Reason: "declares an anti-forensic", Err: ErrUnsupportedHash})
+	if !errors.Is(err, ErrInvalidKeyslot) || !errors.Is(err, ErrUnsupportedHash) {
+		t.Fatalf("wrapper lost a classification: %v", err)
+	}
+	if errors.Is(err, ErrMasterKeyVerification) {
+		t.Fatalf("wrapper matches a sentinel it does not stand for: %v", err)
+	}
+	want := `invalid keyslot: luks2 keyslot "3": declares an anti-forensic: ` + ErrUnsupportedHash.Error()
+	if err.Error() != want {
+		t.Fatalf("message is %q, want %q", err.Error(), want)
+	}
+
+	bare := &InvalidKeyslotError{Keyslot: "3", Reason: "is null"}
+	if got, want := bare.Error(), `invalid keyslot: luks2 keyslot "3": is null`; got != want {
+		t.Fatalf("message is %q, want %q", got, want)
+	}
+	if bare.Unwrap() != nil {
+		t.Fatal("a wrapper with no cause unwraps to one")
+	}
+}

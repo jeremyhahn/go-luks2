@@ -984,31 +984,39 @@ func TestNoRemovalPathDestroysMaterialBeforeProvingTheHeaderWritable(t *testing.
 	}
 }
 
-// TestAddKeyStatesItsOwnAreaCipherAndDoesNotRefuseALegacyContainer is the
-// regression test for a fix that broke existing volumes.
+// TestLegacyMislabeledKeyslotIsRefusedAndLeftAlone covers the containers
+// v0.1.x Format wrote, and is where #106 deliberately changes behavior.
 //
-// Before this branch, Format wrote the container's DATA cipher into the keyslot
-// area. A volume created with a non-XTS data cipher therefore carries AES-XTS
-// key material under, say, an "aes-cbc-essiv:sha256" label -- and it still
-// OPENS here, because the read path consults only the algorithm.
+// Before #91, Format wrote the container's DATA cipher into the keyslot area,
+// so a volume created with a non-XTS data cipher carries AES-XTS key material
+// under, say, an "aes-cbc-essiv:sha256" label. While the read path consulted
+// only the algorithm, those keyslots OPENED here -- and in nothing else:
+// cryptsetup decrypts the declared CBC and fails. This test used to assert that
+// they open and that AddKey works on them.
 //
-// The first version of the area-cipher fix screened the template keyslot
-// against what this writer produces. That rejected every keyslot of every such
-// container, so AddKey refused to add a credential to a volume it could
-// perfectly well unlock: a correctness fix producing a data-availability
-// regression, on exactly the containers least able to afford one. Raised by the
-// local Codex review of e975ed5.
+// #106 (owner ruling 2026-09-25) makes the reader honor the declared mode and
+// refuse any spec it cannot actually decrypt, which is exactly this shape. A
+// container only this library can open is not a container, and a reader that
+// ignores the mode is what let the mislabel go unnoticed. So the property now
+// held is the opposite, and it has three parts:
 //
-// Two properties, and BOTH are needed -- either alone is satisfied by a wrong
-// implementation. Only asserting success permits copying the legacy label into
-// the new slot; only asserting the label permits refusing the container.
-func TestAddKeyStatesItsOwnAreaCipherAndDoesNotRefuseALegacyContainer(t *testing.T) {
+//   - the keyslot is REFUSED with the typed error, not decrypted as XTS;
+//   - AddKey, which must unlock first, refuses the same way; and
+//   - the refusal WRITES NOTHING: the header comes back byte-identical, so no
+//     label is silently rewritten and no new keyslot is authored off a key
+//     this package would not recover.
+func TestLegacyMislabeledKeyslotIsRefusedAndLeftAlone(t *testing.T) {
 	device := newImage(t, "legacy-area-cipher.img")
 	formatWithLibrary(t, device)
 
+	// Precondition: the unmodified container opens, so the refusal below is
+	// about the label and not a broken fixture.
+	if err := TestKey(device, []byte(conformancePassphrase)); err != nil {
+		t.Fatalf("control: the unmodified fixture does not open: %v", err)
+	}
+
 	// The legacy shape, written directly because current Format no longer
-	// produces it -- which is the point: these volumes exist and this library
-	// made them.
+	// produces it.
 	hdr, metadata, err := ReadHeader(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
@@ -1017,37 +1025,21 @@ func TestAddKeyStatesItsOwnAreaCipherAndDoesNotRefuseALegacyContainer(t *testing
 	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
 		t.Fatalf("failed to write the legacy fixture: %v", err)
 	}
+	before := readAreaBytes(t, device, 0, goldenPrefixBytes)
 
-	// Precondition: the container really does still open. Without this the test
-	// could pass against a volume that was broken to begin with.
-	if err := TestKey(device, []byte(conformancePassphrase)); err != nil {
-		t.Fatalf("the legacy fixture does not open, so it is not the case under test: %v", err)
+	if err := TestKey(device, []byte(conformancePassphrase)); !errors.Is(err, ErrUnsupportedKeyslotCipher) {
+		t.Fatalf("TestKey on XTS material declared as CBC: got %v, want ErrUnsupportedKeyslotCipher", err)
 	}
 
-	added := []byte("a-second-credential")
-	if _, err := AddKey(device, []byte(conformancePassphrase), added, &AddKeyOptions{
+	if slot, err := AddKey(device, []byte(conformancePassphrase), []byte("a-second-credential"), &AddKeyOptions{
 		KDFType:       KDFTypePBKDF2,
 		PBKDFIterTime: 1,
-	}); err != nil {
-		t.Fatalf("AddKey refused a container this library created and can still unlock: %v", err)
-	}
-	if err := TestKey(device, added); err != nil {
-		t.Fatalf("the added credential does not open the volume: %v", err)
+	}); !errors.Is(err, ErrUnsupportedKeyslotCipher) {
+		t.Fatalf("AddKey on a mislabeled container: got slot %d, err %v; want ErrUnsupportedKeyslotCipher", slot, err)
 	}
 
-	_, after, err := ReadHeader(device)
-	if err != nil {
-		t.Fatalf("ReadHeader after AddKey failed: %v", err)
-	}
-	if got := after.Keyslots["1"].Area.Encryption; got != KeyslotAreaEncryption {
-		t.Fatalf("the new keyslot declares %q; it must state what this call actually encrypted with, not copy the neighbour's stale label", got)
-	}
-
-	// The legacy slot is LEFT ALONE. This call authors one keyslot; silently
-	// rewriting another slot's metadata is a different operation and not one
-	// the caller asked for.
-	if got := after.Keyslots["0"].Area.Encryption; got != "aes-cbc-essiv:sha256" {
-		t.Fatalf("the pre-existing keyslot's declaration was rewritten to %q; AddKey repaired metadata it was not asked to touch", got)
+	if !bytes.Equal(before, readAreaBytes(t, device, 0, goldenPrefixBytes)) {
+		t.Fatal("a refused AddKey changed the container; a refusal must write nothing")
 	}
 }
 
@@ -1061,9 +1053,9 @@ func TestAddKeyStatesItsOwnAreaCipherAndDoesNotRefuseALegacyContainer(t *testing
 // any other choice Format produced a keyslot whose declaration its own material
 // did not match.
 //
-// Without this, the exact-match validation above would REFUSE a template that
-// this very library had written, so AddKey would stop working on containers
-// Format can create. The two changes are one fix.
+// Without this, the read path -- which since #106 honors the declared mode --
+// would refuse every keyslot Format wrote for a non-XTS data cipher, so such a
+// container would not open at all. The two changes are one fix.
 func TestFormatDeclaresTheKeyslotAreaCipherItActuallyUses(t *testing.T) {
 	device := newImage(t, "format-cbc-data.img")
 

@@ -229,8 +229,9 @@ func createMetadata(kdf, digestKDF *KDF, digestValue string, opts FormatOptions,
 			// wrapped by encryptKeyMaterialEnclave with AES-XTS regardless --
 			// so copying opts.Cipher+opts.CipherMode here declared, for any
 			// non-XTS choice, an encryption the material does not have. The
-			// container then opened for this package, whose read path consults
-			// only the algorithm, and for nothing else.
+			// container then opened for this package, whose read path consulted
+			// only the algorithm, and for nothing else. Since #106 the read path
+			// honors the mode, so such a keyslot is refused everywhere.
 			//
 			// Unchanged for the default aes/xts-plain64, where the two strings
 			// were the same by coincidence -- which is why it survived.
@@ -543,10 +544,10 @@ const KeyslotAreaEncryption = DefaultCipher + "-" + DefaultCipherMode
 // is nothing left to validate -- the value is a constant, and a validator over a
 // constant is a guard against a state the code cannot reach.
 //
-// Its removal is also what repairs legacy containers: screening the template
-// rejected every keyslot of any volume whose keyslot area carried the old
-// data-cipher label, and AddKey then refused to add a credential to a volume it
-// could unlock. See addKey.
+// Its removal also stopped AddKey refusing legacy containers whose keyslot area
+// carried the old data-cipher label. Those keyslots are now refused one step
+// earlier instead, by the read path, which honors the declared mode (#106):
+// see parseKeyslotAreaEncryption.
 
 // xtsSectors runs AES-XTS over src into dst, one sector at a time, with the
 // sector index as the tweak. It is the single implementation behind both

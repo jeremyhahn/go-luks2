@@ -69,6 +69,14 @@ var (
 	// ErrInvalidKeyslot indicates the keyslot is invalid or unavailable
 	ErrInvalidKeyslot = errors.New("invalid keyslot")
 
+	// ErrUnsupportedKeyslotCipher indicates a keyslot's area.encryption names a
+	// cipher spec -- algorithm, mode AND IV generator -- this package cannot
+	// decrypt. The read path honors the whole spec rather than only its
+	// algorithm (#106): a keyslot declaring "aes-cbc-essiv:sha256" is refused
+	// here, never decrypted as AES-XTS. A keyslot refused with it is also
+	// ErrInvalidKeyslot, so the keyslot scan moves on to the next one.
+	ErrUnsupportedKeyslotCipher = errors.New("unsupported keyslot area cipher")
+
 	// ErrUnsupportedRequirement indicates the container declares a mandatory
 	// requirement this package does not implement, so it must not be modified.
 	// The container is still READABLE -- see Requirements (types.go).
@@ -555,6 +563,72 @@ func (e *ProtectedMemoryError) Unwrap() error {
 // reaches the underlying go-enclave cause through Unwrap.
 func (e *ProtectedMemoryError) Is(target error) bool {
 	return target == ErrProtectedMemory
+}
+
+// UnsupportedKeyslotCipherError reports a keyslot whose area.encryption names a
+// cipher spec this package cannot decrypt (#106), and carries which keyslot and
+// which spec so an operator is told what the header actually declares.
+//
+// It is BOTH ErrUnsupportedKeyslotCipher and ErrInvalidKeyslot. The first says
+// why; the second is what keeps getMasterKey's scan moving on to the keyslots
+// that still open, rather than aborting the unlock on one it cannot read.
+type UnsupportedKeyslotCipherError struct {
+	// Keyslot is the keyslot's JSON id; empty when the spec was refused before
+	// it was attributed to one.
+	Keyslot string
+	// Spec is the area.encryption value exactly as the header declares it.
+	Spec string
+}
+
+func (e *UnsupportedKeyslotCipherError) Error() string {
+	slot := ""
+	if e.Keyslot != "" {
+		slot = fmt.Sprintf("luks2 keyslot %q: ", e.Keyslot)
+	}
+	return fmt.Sprintf("%s: %s: %sarea encryption %q; the keyslot area transforms this package implements are %s and %s",
+		ErrInvalidKeyslot.Error(), ErrUnsupportedKeyslotCipher.Error(), slot, e.Spec,
+		keyslotAreaSpecPlain64, keyslotAreaSpecPlain)
+}
+
+// Is reports the error as both sentinels it stands for, in the idiom of
+// ProtectedMemoryError.
+func (e *UnsupportedKeyslotCipherError) Is(target error) bool {
+	return target == ErrUnsupportedKeyslotCipher || target == ErrInvalidKeyslot
+}
+
+// InvalidKeyslotError reports a keyslot the unlock path refuses on its own
+// account -- its type, its geometry, its KDF or its anti-forensic parameters --
+// and names which keyslot, so an operator is told where to look.
+//
+// It is always ErrInvalidKeyslot, which is what keeps getMasterKey's scan
+// moving on to the keyslots that still open. Err, when set, is the underlying
+// cause and stays reachable through errors.Is and errors.As.
+type InvalidKeyslotError struct {
+	// Keyslot is the keyslot's JSON id.
+	Keyslot string
+	// Reason says what about the keyslot is refused.
+	Reason string
+	// Err is the cause, or nil when Reason says everything.
+	Err error
+}
+
+func (e *InvalidKeyslotError) Error() string {
+	msg := fmt.Sprintf("%s: luks2 keyslot %q: %s", ErrInvalidKeyslot.Error(), e.Keyslot, e.Reason)
+	if e.Err != nil {
+		msg += ": " + e.Err.Error()
+	}
+	return msg
+}
+
+// Unwrap exposes the cause, so its own classification survives the wrap.
+func (e *InvalidKeyslotError) Unwrap() error {
+	return e.Err
+}
+
+// Is reports every InvalidKeyslotError as ErrInvalidKeyslot, in the idiom of
+// ProtectedMemoryError.
+func (e *InvalidKeyslotError) Is(target error) bool {
+	return target == ErrInvalidKeyslot
 }
 
 // LockTimeoutError reports that the exclusive device lock could not be taken

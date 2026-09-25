@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"slices"
-	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -116,7 +115,9 @@ type keyslotPlan struct {
 	decryptLen int64
 
 	// cipherAlgo is the area cipher's algorithm name, taken from
-	// area.encryption ("aes-xts-plain64" -> "aes").
+	// area.encryption only after the WHOLE spec -- mode and IV generator
+	// included -- was matched against what the transform actually runs
+	// ("aes-xts-plain64" -> "aes"; "aes-cbc-essiv:sha256" -> refused).
 	cipherAlgo string
 }
 
@@ -131,7 +132,8 @@ type keyslotPlan struct {
 //	geometry and shape          validateKeyslot          (keyslotvalidation.go)
 //	KDF cost                    validateKDFCost          (keyslotvalidation.go)
 //	KDF approval, salt, hash    screenKDFParameters      (below, over deriveKeyPlain's rejections)
-//	area cipher                 validateAreaCipher       (format.go, shared with xtsSectors)
+//	area cipher, whole spec     parseKeyslotAreaEncryption (below; #106)
+//	area cipher algorithm       validateAreaCipher       (format.go, shared with xtsSectors)
 //	volume key size for XTS     validateXTSKeySize       (format.go, shared with xtsSectors)
 //	anti-forensic hash          getHashFunc              (antiforensic.go)
 //	area holds its own AF split computed here, from bounds validateKeyslot established
@@ -141,7 +143,11 @@ type keyslotPlan struct {
 // Every one of those is a condition on which the unlock ALREADY fails. This
 // function only moves the failure earlier -- before a KDF is paid for, and
 // before a removal guard can mistake the keyslot for a survivor. No container
-// that opened before this existed is refused by it.
+// that opened before this existed is refused by it -- with ONE deliberate
+// exception, the whole-spec area cipher check (#106): a keyslot whose declared
+// mode is not the one its material was encrypted with used to open here, and
+// nowhere else, because only the algorithm was read. That is the defect the
+// check exists to close, so it is a new refusal rather than a moved one.
 //
 // Each failure keeps the sentinel the rejection it moves already carried --
 // ErrInvalidKeyslot for everything the keyslot itself gets wrong, and
@@ -157,11 +163,11 @@ func screenKeyslot(id string, keyslot *Keyslot, digests map[string]*Digest) (key
 	// region rather than key material, so it holds no passphrase-wrapped volume
 	// key. It is valid metadata that cannot open anything.
 	if keyslot == nil {
-		return plan, fmt.Errorf("%w: keyslot %q is null", ErrInvalidKeyslot, id)
+		return plan, &InvalidKeyslotError{Keyslot: id, Reason: "is null"}
 	}
 	if keyslot.Type != "luks2" {
-		return plan, fmt.Errorf("%w: keyslot type %q cannot be opened; only luks2 keyslots hold a passphrase-wrapped volume key",
-			ErrInvalidKeyslot, keyslot.Type)
+		return plan, &InvalidKeyslotError{Keyslot: id,
+			Reason: fmt.Sprintf("type %q cannot be opened; only luks2 keyslots hold a passphrase-wrapped volume key", keyslot.Type)}
 	}
 
 	// THE GATE. Everything below trusts the keyslot's declared geometry: that
@@ -176,12 +182,12 @@ func screenKeyslot(id string, keyslot *Keyslot, digests map[string]*Digest) (key
 	// validateKeyslot because a deliberately expensive KDF is still a fine
 	// template for a new keyslot; see validateKDFCost.
 	if err := validateKDFCost(keyslot.KDF); err != nil {
-		return plan, fmt.Errorf("%w: %w", ErrInvalidKeyslot, err)
+		return plan, &InvalidKeyslotError{Keyslot: id, Reason: "declares a KDF cost this package refuses", Err: err}
 	}
 
 	// What the KDF would REFUSE, as opposed to what it would cost.
 	if err := screenKDFParameters(keyslot.KDF); err != nil {
-		return plan, fmt.Errorf("%w: %w", ErrInvalidKeyslot, err)
+		return plan, &InvalidKeyslotError{Keyslot: id, Reason: "declares KDF parameters the derivation refuses", Err: err}
 	}
 
 	// From here the order MIRRORS unlockKeyslot's, and that is deliberate rather
@@ -196,13 +202,13 @@ func screenKeyslot(id string, keyslot *Keyslot, digests map[string]*Digest) (key
 	var err error
 	plan.areaOffset, err = parseSize(keyslot.Area.Offset)
 	if err != nil {
-		return plan, fmt.Errorf("%w: keyslot %q declares an area offset %q that is not a number",
-			ErrInvalidKeyslot, id, keyslot.Area.Offset)
+		return plan, &InvalidKeyslotError{Keyslot: id,
+			Reason: fmt.Sprintf("declares an area offset %q that is not a number", keyslot.Area.Offset), Err: err}
 	}
 	plan.areaSize, err = parseSize(keyslot.Area.Size)
 	if err != nil {
-		return plan, fmt.Errorf("%w: keyslot %q declares an area size %q that is not a number",
-			ErrInvalidKeyslot, id, keyslot.Area.Size)
+		return plan, &InvalidKeyslotError{Keyslot: id,
+			Reason: fmt.Sprintf("declares an area size %q that is not a number", keyslot.Area.Size), Err: err}
 	}
 
 	// validateKeyslot has already established that this product does not
@@ -220,25 +226,31 @@ func screenKeyslot(id string, keyslot *Keyslot, digests map[string]*Digest) (key
 		// to something other than what was written -- so the merge would fail
 		// with a message about the AF material rather than about the geometry
 		// that caused it, and an operator would go looking in the wrong place.
-		return plan, fmt.Errorf("%w: area of %d bytes is not a whole number of %d-byte sectors and cannot hold the %d bytes of AF material this keyslot declares",
-			ErrInvalidKeyslot, plan.areaSize, keyslotSectorSize, plan.afSplitSize)
+		return plan, &InvalidKeyslotError{Keyslot: id,
+			Reason: fmt.Sprintf("area of %d bytes is not a whole number of %d-byte sectors and cannot hold the %d bytes of AF material this keyslot declares",
+				plan.areaSize, keyslotSectorSize, plan.afSplitSize)}
 	}
 
-	// The area cipher and the volume key size both reach xts.NewCipher, which
-	// refuses either independently of the passphrase. Both are checked through
-	// the validators xtsSectors itself calls, so neither can drift.
-	plan.cipherAlgo = keyslotAreaCipherAlgo(keyslot.Area.Encryption)
+	// The area cipher is read WHOLE -- algorithm, mode and IV generator -- and
+	// refused unless it is a spec this package actually decrypts (#106). It used
+	// to be cut down to its algorithm, so a keyslot declaring CBC over XTS
+	// material opened here and nowhere else. The algorithm it yields is then
+	// held to the same validator xtsSectors calls, as is the volume key size,
+	// so neither can drift from what the transform will accept.
+	plan.cipherAlgo, err = parseKeyslotAreaEncryption(keyslot.Area.Encryption)
+	if err != nil {
+		return plan, &UnsupportedKeyslotCipherError{Keyslot: id, Spec: keyslot.Area.Encryption}
+	}
 	if err := validateAreaCipher(plan.cipherAlgo); err != nil {
-		return plan, fmt.Errorf("%w: %w", ErrInvalidKeyslot, err)
+		return plan, &InvalidKeyslotError{Keyslot: id, Reason: "declares an area cipher the transform refuses", Err: err}
 	}
 	if err := validateXTSKeySize(keyslot.KeySize); err != nil {
-		return plan, fmt.Errorf("%w: luks2 keyslot %q: %w", ErrInvalidKeyslot, id, err)
+		return plan, &InvalidKeyslotError{Keyslot: id, Reason: "declares a volume key size AES-XTS cannot use", Err: err}
 	}
 
 	// The anti-forensic merge resolves this name and fails if it cannot.
 	if _, err := getHashFunc(keyslot.AF.Hash); err != nil {
-		return plan, fmt.Errorf("%w: luks2 keyslot %q declares an anti-forensic %w",
-			ErrInvalidKeyslot, id, err)
+		return plan, &InvalidKeyslotError{Keyslot: id, Reason: "declares an anti-forensic hash nothing implements", Err: err}
 	}
 
 	// A keyslot no digest attests cannot be authenticated at all -- see
@@ -314,15 +326,62 @@ func screenKDFParameters(kdf *KDF) error {
 	return nil
 }
 
-// keyslotAreaCipherAlgo extracts the cipher algorithm from an area encryption
-// name -- "aes-xts-plain64" yields "aes".
+// parseKeyslotAreaEncryption reads a keyslot's area.encryption as the full
+// cipher spec it is -- "<algorithm>-<mode>-<iv>" -- and returns the algorithm
+// the transform must run, or ErrUnsupportedKeyslotCipher if the spec names
+// anything this package cannot decrypt.
 //
-// It is a function rather than an inline Split so the unlock path and the
-// removal guard cannot come to spell it differently, which is the whole failure
-// mode this file exists to remove.
-func keyslotAreaCipherAlgo(encryption string) string {
-	return strings.Split(encryption, "-")[0]
+// # The mode is consumed, not discarded (#106)
+//
+// This used to be a Split that kept the algorithm and threw the rest away, and
+// xtsSectors then ran AES-XTS whatever the header said. A keyslot declaring
+// "aes-cbc-essiv:sha256" over XTS material therefore opened perfectly HERE and
+// in no conforming implementation, and nothing in this package's own suite
+// could notice, because the reader that would have had to was not looking.
+// Honoring the mode on read is what makes a wrong declaration a test failure
+// instead of a container only this library can open.
+//
+// # The accepted set is exact and closed
+//
+// It is an enumeration of the transforms keyslot material actually goes
+// through, not a grammar. xtsSectors runs AES-XTS with a little-endian tweak on
+// the area-relative sector index, and exactly two cryptsetup spellings describe
+// that:
+//
+//	aes-xts-plain64  the 64-bit sector index; what this package and
+//	                 cryptsetup write by default
+//	aes-xts-plain    the index truncated to 32 bits; cryptsetup accepts it as
+//	                 --keyslot-cipher and carries it over from LUKS1
+//
+// The two differ only for a sector index of 2^32 or more. A keyslot area never
+// reaches one: its decrypted length is KeySize*Stripes rounded to a sector,
+// bounded by MaxKeyslotKeySize*maxKeyslotStripes (validateKeyslot) -- about 4
+// MiB, or 8,000 sectors. For every keyslot the screen admits, the two specs
+// name the same bytes, which is why "plain" is decrypted rather than refused.
+//
+// Everything else is refused: another mode (cbc, ecb, lrw), another IV
+// generator (essiv, benbi, plain64be, null), a spec with the mode missing, any
+// other algorithm, and any other casing or decoration. Matching is exact
+// because the kernel's crypto API names are case-sensitive and cryptsetup
+// passes them through unchanged.
+//
+// It is a function rather than an inline comparison so the unlock path and the
+// removal guard cannot come to read the spec differently -- both reach it only
+// through screenKeyslot.
+func parseKeyslotAreaEncryption(spec string) (string, error) {
+	switch spec {
+	case keyslotAreaSpecPlain64, keyslotAreaSpecPlain:
+		return DefaultCipher, nil
+	default:
+		return "", &UnsupportedKeyslotCipherError{Spec: spec}
+	}
 }
+
+// The two area.encryption spellings parseKeyslotAreaEncryption accepts.
+const (
+	keyslotAreaSpecPlain64 = DefaultCipher + "-xts-plain64"
+	keyslotAreaSpecPlain   = DefaultCipher + "-xts-plain"
+)
 
 // digestCovers reports whether a digest attests the named keyslot.
 //
