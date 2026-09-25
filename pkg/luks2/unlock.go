@@ -32,6 +32,117 @@ import (
 // CheckKeyringAvailable during initialization rather than discovering it here,
 // at the first unlock of a real volume.
 func Unlock(device string, passphrase []byte, name string) error {
+	return unlockVolume(device, name,
+		func() error { return ValidatePassphrase(passphrase) },
+		func(metadata *LUKS2Metadata) (*enclave.MemoryEnclave, func(), error) {
+			// Keyslots are tried by getMasterKey, which is the ONE implementation
+			// of that scan. This function used to carry a second copy of it --
+			// same order, same type filter, same first-success-wins -- which is
+			// how the two came to report failures differently: getMasterKey now
+			// distinguishes a keyslot that did not verify from one that could not
+			// be tried, and the copy here still said "incorrect passphrase" for
+			// both.
+			//
+			// Priority is NOT consulted, by either -- see keyslotIDsInScanOrder --
+			// so nothing here should be read as a claim that LUKS2 keyslot
+			// priority is honored. It is not.
+			masterKey, err := getMasterKey(device, passphrase, metadata)
+			if err != nil {
+				return nil, nil, &UnlockError{Op: "unlock any keyslot", Err: err}
+			}
+			// The derived key is THIS package's, so releasing it destroys it.
+			return masterKey, masterKey.Destroy, nil
+		})
+}
+
+// UnlockWithVolumeKey opens a LUKS2 volume with a volume key the caller already
+// holds, and creates a device-mapper mapping exactly as Unlock does.
+//
+// It is the seam for a key that never was a passphrase -- one unsealed by
+// hardware, or returned by a key service, in a layer above this one (#79). Where
+// the key came from is not this package's business and nothing here asks: it
+// receives a key in protected memory and uses it. There is no hardware code in
+// this package, and there is no policy about key sources.
+//
+// # What it skips, and what it does not
+//
+// It skips the KEYSLOTS: no keyslot is scanned, no passphrase is derived, and
+// the keyslot KDF never runs. That is the whole point -- the derivation exists
+// only because a credential started as a human secret, and this one did not.
+//
+// It does NOT skip the header or the key check. The header is read and
+// validated by the same ReadHeader every path uses; the mapping name, the
+// in-use check, the segment validation, the keyring transport and the rollback
+// are the same code as Unlock's. And the key must be ATTESTED by a digest the
+// header assigns to the crypt segment being mapped -- which is what cryptsetup
+// checks when it activates by volume key. Without that, a wrong key would map
+// garbage as the plaintext device and the first mkfs on it would destroy the
+// volume. A key the header does not attest is refused as
+// ErrMasterKeyVerification, the same verdict a passphrase recovering the wrong
+// key gets.
+//
+// That check derives from the volume key through the DIGEST's PBKDF2, so
+// residual exposure 2 in enclave.go still applies to this path on its digest
+// leg, once per digest tried. What this path removes is the keyslot leg: the
+// passphrase derivation and everything downstream of it.
+//
+// # Custody
+//
+// volumeKey is the CALLER's. It is borrowed for the digest check and for the
+// one add_key syscall that hands it to the kernel keyring, and it is never
+// copied out, retained or destroyed here; the caller destroys it when it is
+// done with it. A nil or destroyed enclave, or one no keyslot of this package
+// could hold, is refused with ErrInvalidVolumeKey before the device is read.
+//
+// Keyslot policy is untouched. This call reads a container; it does not create
+// or remove keyslots, so ErrLastKeyslot and the guards behind it mean exactly
+// what they meant before.
+func UnlockWithVolumeKey(device string, volumeKey *enclave.MemoryEnclave, name string) error {
+	return unlockVolume(device, name,
+		func() error { return validateVolumeKey(volumeKey) },
+		func(metadata *LUKS2Metadata) (*enclave.MemoryEnclave, func(), error) {
+			segmentID, _, err := cryptSegmentOf(metadata)
+			if err != nil {
+				return nil, nil, err
+			}
+			if err := verifyVolumeKeyForSegment(volumeKey, segmentID, metadata); err != nil {
+				return nil, nil, &UnlockError{Op: "open the volume with the supplied volume key", Err: err}
+			}
+			// The caller's enclave: released by the caller, never here.
+			return volumeKey, func() {}, nil
+		})
+}
+
+// validateVolumeKey rejects a volume key that cannot be one, before the device
+// is read. It checks the SHAPE only; whether the key opens this volume is the
+// digest's question, answered by verifyVolumeKeyForSegment.
+func validateVolumeKey(volumeKey *enclave.MemoryEnclave) error {
+	if volumeKey == nil {
+		return &UnlockError{Op: "check the volume key", Err: ErrInvalidVolumeKey, Detail: "no enclave was given"}
+	}
+	if !volumeKey.IsAlive() {
+		return &UnlockError{Op: "check the volume key", Err: ErrInvalidVolumeKey, Detail: "the enclave has been destroyed"}
+	}
+	if size := volumeKey.Size(); size <= 0 || size > MaxKeyslotKeySize {
+		return &UnlockError{Op: "check the volume key", Err: ErrInvalidVolumeKey,
+			Detail: fmt.Sprintf("a %d-byte key is outside the 1..%d bytes this package supports", size, MaxKeyslotKeySize)}
+	}
+	return nil
+}
+
+// unlockVolume is the one unlock path. Unlock and UnlockWithVolumeKey differ in
+// exactly two places -- how the credential is validated and where the volume
+// key comes from -- and those are the two functions they pass. Everything else,
+// every validation and the whole mapping transaction, is this body, so the two
+// entry points cannot drift in what they check.
+//
+// validateCredential runs where the passphrase check always ran: after the
+// device path is resolved and before the mapping name is checked. volumeKey is
+// called once the header has been read and validated; it returns the key and a
+// release function, which destroys a key this package derived and does nothing
+// to a key the caller owns.
+func unlockVolume(device, name string, validateCredential func() error,
+	volumeKey func(metadata *LUKS2Metadata) (*enclave.MemoryEnclave, func(), error)) error {
 	// Validate device path
 	if err := ValidateDevicePath(device); err != nil {
 		return err
@@ -59,8 +170,8 @@ func Unlock(device string, passphrase []byte, name string) error {
 		return &DeviceError{Device: device, Op: "resolve the real device path for the dm-crypt backend", Err: err}
 	}
 
-	// Validate passphrase
-	if err := ValidatePassphrase(passphrase); err != nil {
+	// Validate the credential: the passphrase, or the shape of a supplied key.
+	if err := validateCredential(); err != nil {
 		return err
 	}
 
@@ -85,8 +196,8 @@ func Unlock(device string, passphrase []byte, name string) error {
 	// existing target may map a DIFFERENT volume, and returning success would
 	// hand the caller a plaintext device this call did not open.
 	if IsUnlocked(name) {
-		return fmt.Errorf("%w: the device-mapper name %q is already in use - close it first with: luks close %s",
-			ErrVolumeAlreadyUnlocked, name, name)
+		return &UnlockError{Op: "unlock", Err: ErrVolumeAlreadyUnlocked,
+			Detail: fmt.Sprintf("the device-mapper name %q is already in use - close it first with: luks close %s", name, name)}
 	}
 
 	// Read header and metadata (use original device for reading, symlink is fine for open())
@@ -95,41 +206,15 @@ func Unlock(device string, passphrase []byte, name string) error {
 		return err
 	}
 
-	// Keyslots are tried by getMasterKey, which is the ONE implementation of
-	// that scan. This function used to carry a second copy of it -- same order,
-	// same type filter, same first-success-wins -- which is how the two came to
-	// report failures differently: getMasterKey now distinguishes a keyslot that
-	// did not verify from one that could not be tried, and the copy here still
-	// said "incorrect passphrase" for both.
-	//
-	// Priority is NOT consulted, by either -- see keyslotIDsInScanOrder -- so
-	// nothing here should be read as a claim that LUKS2 keyslot priority is
-	// honored. It is not.
-	masterKey, err := getMasterKey(device, passphrase, metadata)
+	masterKey, release, err := volumeKey(metadata)
 	if err != nil {
-		return fmt.Errorf("failed to unlock any keyslot: %w", err)
+		return err
 	}
-	defer masterKey.Destroy()
+	defer release()
 
-	// Get segment information.
-	//
-	// Visited in sorted id order rather than in map order. A container being
-	// reencrypted carries more than one segment, and picking whichever one Go's
-	// randomized iteration yielded first made WHICH segment a volume opened
-	// through a coin flip -- the same defect class as #54 and #57, on a value
-	// that decides where the plaintext device is backed.
-	var segment *Segment
-	var segmentID string
-	for _, id := range slices.Sorted(maps.Keys(metadata.Segments)) {
-		if metadata.Segments[id].Type == "crypt" {
-			segment = metadata.Segments[id]
-			segmentID = id
-			break
-		}
-	}
-
-	if segment == nil {
-		return fmt.Errorf("%w: the header declares no crypt segment, so there is nothing to map", ErrInvalidHeader)
+	segmentID, segment, err := cryptSegmentOf(metadata)
+	if err != nil {
+		return err
 	}
 
 	// The three fields that reach the device-mapper ioctl are obtained HERE,
@@ -145,7 +230,7 @@ func Unlock(device string, passphrase []byte, name string) error {
 	// Parse segment offset
 	offsetBytes, err := parseSize(segment.Offset)
 	if err != nil {
-		return fmt.Errorf("invalid segment offset: %w", err)
+		return &UnlockError{Op: "invalid segment offset", Err: err}
 	}
 
 	// Get device size for dynamic segments
@@ -154,24 +239,24 @@ func Unlock(device string, passphrase []byte, name string) error {
 		// For block devices, we need to use ioctl to get the size
 		devSize, err := getBlockDeviceSize(device)
 		if err != nil {
-			return fmt.Errorf("failed to get device size: %w", err)
+			return &UnlockError{Op: "failed to get device size", Err: err}
 		}
 		sizeBytes = devSize - offsetBytes
 	} else {
 		sizeBytes, err = parseSize(segment.Size)
 		if err != nil {
-			return fmt.Errorf("invalid segment size: %w", err)
+			return &UnlockError{Op: "invalid segment size", Err: err}
 		}
 	}
 
 	// Safe conversion of sizes to uint64
 	length, err := SafeInt64ToUint64(sizeBytes)
 	if err != nil {
-		return fmt.Errorf("invalid segment size: %w", err)
+		return &UnlockError{Op: "invalid segment size", Err: err}
 	}
 	backendOffset, err := SafeInt64ToUint64(offsetBytes)
 	if err != nil {
-		return fmt.Errorf("invalid segment offset: %w", err)
+		return &UnlockError{Op: "invalid segment offset", Err: err}
 	}
 
 	// Generate UUID for device-mapper
@@ -235,8 +320,9 @@ func Unlock(device string, passphrase []byte, name string) error {
 
 	// The kernel has the key now, so give up ours immediately rather than at
 	// function exit: nothing below needs it. Destroy is idempotent, so the
-	// deferred Destroy above stays correct.
-	masterKey.Destroy()
+	// deferred release above stays correct. A caller-owned key is not ours to
+	// give up, and its release does nothing.
+	release()
 
 	// Ensure device node exists (may need to create it in containerized
 	// environments).
@@ -255,14 +341,36 @@ func Unlock(device string, passphrase []byte, name string) error {
 
 	// Wait for device to be ready - udev needs time to create /dev/mapper/name symlink
 	if err := dm.waitReady(name); err != nil {
-		readiness := fmt.Errorf("device not ready after unlock: %w", err)
+		readiness := &UnlockError{Op: "device not ready after unlock", Err: err}
 		if nodeErr != nil {
-			readiness = fmt.Errorf("%w (creating the device node also failed: %v)", readiness, nodeErr)
+			readiness.Detail = fmt.Sprintf("creating the device node also failed: %v", nodeErr)
 		}
 		return errors.Join(readiness, removeCreatedMapping(name, uuid))
 	}
 
 	return nil
+}
+
+// cryptSegmentOf returns the crypt segment a mapping is built from.
+//
+// Visited in sorted id order rather than in map order. A container being
+// reencrypted carries more than one segment, and picking whichever one Go's
+// randomized iteration yielded first made WHICH segment a volume opened through
+// a coin flip -- the same defect class as #54 and #57, on a value that decides
+// where the plaintext device is backed.
+//
+// It is one function because two things must agree on the answer: the mapping,
+// and -- on the injected-key path -- the digest the key is verified against. A
+// key attested for one segment and mapped over another would be exactly the
+// wrong-key failure that verification exists to prevent.
+func cryptSegmentOf(metadata *LUKS2Metadata) (string, *Segment, error) {
+	for _, id := range slices.Sorted(maps.Keys(metadata.Segments)) {
+		if segment := metadata.Segments[id]; segment != nil && segment.Type == "crypt" {
+			return id, segment, nil
+		}
+	}
+	return "", nil, &UnlockError{Op: "select the crypt segment", Err: ErrInvalidHeader,
+		Detail: "the header declares no crypt segment, so there is nothing to map"}
 }
 
 // TrimRight is a helper function to replace bytes.TrimRight. The cutset is
@@ -719,8 +827,9 @@ func unlockKeyslot(device string, keyslotID string, passphrase []byte, keyslot *
 		return nil, err
 	}
 
-	// Derive key from passphrase
-	passphraseKey, err := DeriveKeyEnclave(passphrase, keyslot.KDF, keyslot.KeySize)
+	// Derive key from passphrase. Through passphraseKDF so the injected-key
+	// path's tests can prove it never gets here; see UnlockWithVolumeKey.
+	passphraseKey, err := passphraseKDF(passphrase, keyslot.KDF, keyslot.KeySize)
 	if err != nil {
 		return nil, err
 	}
@@ -762,7 +871,8 @@ func unlockKeyslot(device string, keyslotID string, passphrase []byte, keyslot *
 	defer decryptedKeyMaterial.Destroy()
 
 	if decryptedKeyMaterial.Size() < plan.afSplitSize {
-		return nil, fmt.Errorf("decrypted data too small: got %d, need %d", decryptedKeyMaterial.Size(), plan.afSplitSize)
+		return nil, &UnlockError{Op: "decrypt keyslot " + keyslotID,
+			Detail: fmt.Sprintf("decrypted data too small: got %d, need %d", decryptedKeyMaterial.Size(), plan.afSplitSize)}
 	}
 
 	masterKey, err := afMergeEnclave(decryptedKeyMaterial, plan.afSplitSize, keyslot.AF.Stripes, keyslot.KeySize, keyslot.AF.Hash)
@@ -813,6 +923,90 @@ func unlockKeyslot(device string, keyslotID string, passphrase []byte, keyslot *
 // digest of implausible length: the caller learns that this key did not verify
 // and nothing about which digest rejected it or why.
 func verifyMasterKey(masterKey *enclave.MemoryEnclave, keyslotID string, digests map[string]*Digest) error {
+	return verifyKeyAgainstDigests(masterKey, digests,
+		func(digest *Digest) bool { return digestCovers(digest, keyslotID) },
+		func(applicable int) error { return unverifiableKeyslotError(keyslotID, applicable) })
+}
+
+// verifyVolumeKeyForSegment verifies a volume key the CALLER supplied against
+// the digests the header says authenticate the crypt segment being mapped.
+//
+// There is no keyslot on this path, so the keyslot association verifyMasterKey
+// filters on does not exist. The association that does is the digest's
+// "segments" array, and it is the one cryptsetup consults when it activates a
+// volume by volume key: the key must be attested FOR THE SEGMENT IT WILL
+// DECRYPT. Everything else -- which digests are usable, that an error folds
+// into the same verdict as a mismatch, when a header fault may be named -- is
+// verifyMasterKey's reasoning unchanged, because it is the same loop.
+//
+// # The key's LENGTH is checked separately, because the digest cannot check it
+//
+// The digest is PBKDF2-HMAC over the key, and HMAC zero-pads a key shorter than
+// the hash's block size before using it. So a key and the same key with zero
+// bytes appended -- up to the block size, 128 bytes for sha512 -- produce the
+// SAME digest. On the passphrase path that cannot matter: the key comes out of
+// a keyslot at exactly that keyslot's key_size. Here the caller chooses the
+// length, and a 32-byte volume key padded with 32 zeros would verify and then
+// be handed to dm-crypt as a 64-byte aes-xts key, mapping garbage as plaintext.
+//
+// The length is therefore required to equal the key_size recorded by a keyslot
+// the attesting digest names, and a digest is only consulted if it names one of
+// that size -- which is cryptsetup's rule too: it takes the volume key size
+// from the keyslots and refuses a volume key of any other. A volume whose
+// digest names no keyslot records no key size and cannot be checked, so it is
+// refused as a header fault. The format seam never produces one: a volume
+// formatted around an injected key always carries its recovery keyslot.
+func verifyVolumeKeyForSegment(volumeKey *enclave.MemoryEnclave, segmentID string, metadata *LUKS2Metadata) error {
+	size := volumeKey.Size()
+
+	coversSegment := func(digest *Digest) bool {
+		return digest != nil && slices.Contains(digest.Segments, segmentID)
+	}
+	namesKeyslotOfSize := func(digest *Digest) bool {
+		return slices.ContainsFunc(digest.Keyslots, func(id string) bool {
+			keyslot := metadata.Keyslots[id]
+			return keyslot != nil && keyslot.KeySize == size
+		})
+	}
+
+	// Whether the header records ANY key size for this segment, and whether
+	// this key's is one of them. Both come off cleartext header fields, so
+	// saying so tells a reader nothing the device does not.
+	recorded, matches := false, false
+	for _, digest := range metadata.Digests {
+		if !coversSegment(digest) {
+			continue
+		}
+		for _, id := range digest.Keyslots {
+			if keyslot := metadata.Keyslots[id]; keyslot != nil && keyslot.KeySize > 0 {
+				recorded = true
+				matches = matches || keyslot.KeySize == size
+			}
+		}
+	}
+	if !recorded {
+		return &UnlockError{Op: "verify the volume key", Err: ErrInvalidHeader,
+			Detail: fmt.Sprintf("no keyslot named by a digest of segment %s records the volume key size, so a supplied volume key cannot be checked", segmentID)}
+	}
+	if !matches {
+		return &UnlockError{Op: "verify the volume key", Err: ErrMasterKeyVerification,
+			Detail: fmt.Sprintf("the supplied key is %d bytes, which no keyslot of segment %s records as the volume key size", size, segmentID)}
+	}
+
+	return verifyKeyAgainstDigests(volumeKey, metadata.Digests,
+		func(digest *Digest) bool { return coversSegment(digest) && namesKeyslotOfSize(digest) },
+		func(applicable int) error {
+			return &UnlockError{Op: "verify the volume key", Err: ErrInvalidHeader,
+				Detail: fmt.Sprintf("all %d digests that authenticate segment %s are unusable, so a supplied volume key could not be compared against any of them", applicable, segmentID)}
+		})
+}
+
+// verifyKeyAgainstDigests is the comparison loop both verifications share. It
+// tries every digest `covers` selects, and reports through `unverifiable` the
+// two header faults in which no comparison ran; see verifyMasterKey for why
+// those, and only those, are distinguished.
+func verifyKeyAgainstDigests(masterKey *enclave.MemoryEnclave, digests map[string]*Digest,
+	covers func(*Digest) bool, unverifiable func(applicable int) error) error {
 	// applicable counts the digests that ATTEST this keyslot; evaluated counts
 	// the ones that got as far as a comparison. They differ by exactly the
 	// digests that were unusable, and the difference is what separates a header
@@ -824,7 +1018,7 @@ func verifyMasterKey(masterKey *enclave.MemoryEnclave, keyslotID string, digests
 		// The association is checked BEFORE any derivation, so a digest that
 		// does not attest this keyslot costs nothing and cannot influence the
 		// outcome by any route.
-		if !digestCovers(digest, keyslotID) {
+		if !covers(digest) {
 			continue
 		}
 		applicable++
@@ -894,7 +1088,7 @@ func verifyMasterKey(masterKey *enclave.MemoryEnclave, keyslotID string, digests
 	// their passphrase failed would go looking at the passphrase, while the
 	// actual state is that the container declares a keyslot nothing can verify.
 	if applicable == 0 {
-		return unverifiableKeyslotError(keyslotID, applicable)
+		return unverifiable(applicable)
 	}
 
 	// Digests attest this keyslot and NOT ONE OF THEM COULD BE EVALUATED, so no
@@ -929,7 +1123,7 @@ func verifyMasterKey(masterKey *enclave.MemoryEnclave, keyslotID string, digests
 	// drawn for the case where the header names no digest at all; this extends
 	// it to the case where it names digests that cannot be used.
 	if evaluated == 0 {
-		return unverifiableKeyslotError(keyslotID, applicable)
+		return unverifiable(applicable)
 	}
 
 	return ErrMasterKeyVerification

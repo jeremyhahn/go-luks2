@@ -95,6 +95,13 @@ import (
 //     Its two callers are verifyMasterKey, on every unlock, once per digest
 //     tried, and createDigest, on every format.
 //
+//     "Every unlock" includes UnlockWithVolumeKey (#79). That path takes the
+//     key from the caller and skips the keyslot derivation entirely, so the
+//     passphrase side of this entry does not apply to it. It still verifies
+//     the key against the segment's digests through the same loop, so the
+//     master-key side does, once per digest tried. Skipping that check would
+//     let a wrong key map garbage as the plaintext device.
+//
 //     # Why this is accepted rather than fixed
 //
 //     The obvious remedy -- a PBKDF2 whose password and HMAC state stay in

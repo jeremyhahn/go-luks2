@@ -142,6 +142,16 @@ var (
 	// there.
 	ErrMasterKeyVerification = errors.New("master key verification failed")
 
+	// ErrInvalidVolumeKey indicates a volume key handed to UnlockWithVolumeKey
+	// that cannot be a volume key at all: a nil or destroyed enclave, or one
+	// whose size no keyslot of this package could hold. It is the caller's
+	// argument that is wrong, and it is reported before the device is read.
+	//
+	// A key of plausible shape that the header does not attest is NOT this
+	// error; that is ErrMasterKeyVerification, exactly as for a passphrase
+	// that recovers the wrong key, and for the same reason.
+	ErrInvalidVolumeKey = errors.New("invalid volume key")
+
 	// ErrMetadataTooLarge indicates the JSON metadata does not fit the header
 	// area the container was formatted with. The area cannot be enlarged after
 	// the fact -- the keyslots and data offsets on disk are already sized
@@ -721,6 +731,34 @@ func (e *CryptoError) Error() string {
 }
 
 func (e *CryptoError) Unwrap() error {
+	return e.Err
+}
+
+// UnlockError reports why an unlock refused, carrying the classifying cause
+// in Err so errors.Is sees through it -- ErrInvalidVolumeKey,
+// ErrMasterKeyVerification, ErrInvalidHeader, or whatever the keyslot scan
+// returned. Err is nil when the refusal has no underlying cause to carry.
+//
+// Op names the step that refused and Detail says what was wrong with it. Both
+// are built from the caller's argument shape and cleartext header fields only;
+// neither ever carries key or passphrase content.
+type UnlockError struct {
+	Op     string
+	Detail string
+	Err    error
+}
+
+func (e *UnlockError) Error() string {
+	if e.Err == nil {
+		return fmt.Sprintf("%s: %s", e.Op, e.Detail)
+	}
+	if e.Detail == "" {
+		return fmt.Sprintf("%s: %v", e.Op, e.Err)
+	}
+	return fmt.Sprintf("%s: %v: %s", e.Op, e.Err, e.Detail)
+}
+
+func (e *UnlockError) Unwrap() error {
 	return e.Err
 }
 

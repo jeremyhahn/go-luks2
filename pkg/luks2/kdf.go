@@ -132,6 +132,17 @@ func DeriveKeyEnclave(passphrase []byte, kdf *KDF, keySize int) (*enclave.Memory
 	return adoptSecret("derived key", key)
 }
 
+// passphraseKDF is the keyslot derivation: the passphrase-to-keyslot-key step
+// unlockKeyslot runs for every keyslot it tries. It is DeriveKeyEnclave, and it
+// is reached through this variable for one reason -- so a test can prove that
+// UnlockWithVolumeKey never reaches it (#79). A path that must not run a KDF is
+// a claim nothing checks unless the KDF can be observed.
+//
+// Only the keyslot derivation goes through it. The digest derivation in
+// deriveKeySecret calls DeriveKeyEnclave directly, because the injected-key path
+// DOES run that one and a test forbidding this seam must not forbid it too.
+var passphraseKDF = DeriveKeyEnclave
+
 // deriveKeySecret derives a key from material ALREADY held in protected memory,
 // borrowing the input in place rather than copying it out.
 //

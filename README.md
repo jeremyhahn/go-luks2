@@ -96,7 +96,32 @@ luks2.GetVolumeInfo("/dev/sdb1")                // *VolumeInfo, error
 luks2.GetMappedDevicePath("myvolume")           // string, error
 ```
 
-`Unlock` is **transactional**: if any step after the dm-crypt target is created
+### Unlocking with a volume key you already hold
+
+```go
+// volumeKey is a *enclave.MemoryEnclave holding the volume key -- unsealed by
+// whatever the caller uses; this library does not know and does not ask.
+luks2.UnlockWithVolumeKey("/dev/sdb1", volumeKey, "myvolume")
+```
+
+`UnlockWithVolumeKey` opens a volume with a key the caller already has in
+[go-enclave](https://github.com/jeremyhahn/go-enclave) protected memory, instead
+of a passphrase. No keyslot is scanned and the keyslot KDF never runs. It is a
+seam only: there is no TPM, HSM or KMS code in this library, and no policy
+about where a key comes from.
+
+It does not skip the checks. The header is read and validated as for `Unlock`,
+and the key must be attested by a digest the header assigns to the crypt
+segment, and must be the key size the header's keyslots record. A key that
+fails either is refused with `ErrMasterKeyVerification`. The key size check is
+needed because HMAC zero-pads a short key: the volume key with zero bytes
+appended produces the same digest. A nil, destroyed or oversized enclave is
+refused with `ErrInvalidVolumeKey`. The enclave belongs to the caller and is
+never destroyed here. The digest check still runs PBKDF2 over the key, so
+exposure 2 below applies to this path once per digest tried. What this path
+removes is the passphrase derivation.
+
+`Unlock` and `UnlockWithVolumeKey` are **transactional**: if any step after the dm-crypt target is created
 fails, the target this call created is removed before the error is returned, so
 a reported failure never leaves a decrypted device behind. Only a target
 carrying the dm UUID this call generated is removed — a mapping that merely
@@ -369,7 +394,9 @@ canonical list, with the reasoning, is the file comment in
    and the Go Cryptographic Module then takes a second copy via `hmac.New`.
    `deriveKeySecret` borrows an enclave and hands the slice straight down that
    path, so **every unlock (once per digest tried) and every format materializes
-   the volume master key in unwipeable memory.**
+   the volume master key in unwipeable memory.** That includes
+   `UnlockWithVolumeKey`: it skips the passphrase derivation, but not the digest
+   check.
 
    This is a **ruled position, not an oversight.** Avoiding it means
    hand-rolling PBKDF2 over `crypto/hmac` — writing new cryptographic
