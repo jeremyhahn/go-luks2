@@ -372,7 +372,13 @@ func TestAddKeyRefusesAnExplicitCountBelowTheFloor(t *testing.T) {
 // an unrelated operation -- and the volume still opened, which is why it went
 // unnoticed. The hash went the same way, replaced with DefaultHashAlgo.
 func TestChangeKeyPreservesTheKeyslotsPBKDF2Cost(t *testing.T) {
-	const iterations = 640_000
+	// An explicit count neither a recalibration nor its floor would produce:
+	// one above sha512's recommended minimum (pbkdf2RecommendedIterations),
+	// where calibration lands in the millions on current hardware. It was
+	// 640_000, which bought no extra discrimination and was paid in full by
+	// every one of the five derivations below -- the slowest test in the
+	// package under -race (#92).
+	const iterations = 210_001
 
 	path := newImage(t, "changekey-cost.img")
 	if err := Format(FormatOptions{

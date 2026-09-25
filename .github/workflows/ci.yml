@@ -243,8 +243,28 @@ jobs:
             exit 1
           }
 
+      # -timeout 300s IS THE RUNTIME BUDGET for this package under -race
+      # (owner ruling on #92), not a safety net. An overrun panics the test
+      # binary and fails this step, naming the tests still running -- so the
+      # suite drifting slow is a red check here instead of a consumer that
+      # silently stops finishing it.
+      #
+      # It fired on the runner the first time it was set (PR for #92, head
+      # a7be4e2: killed at 300.1s inside a recovery-key test), against 251s
+      # for the same suite on an idle 24-core workstation -- so the runner is
+      # at least 1.2x slower. Per the ruling's step 2 the KDF-bound setup was
+      # then moved onto shared fixtures (formattedImage; an explicit PBKDF2
+      # count for the AddRecoveryKey tests): workstation -race 251s -> 168s,
+      # plain 108s -> 60s, 1829 passing tests + subtests in both builds before
+      # and after, none skipped, per-function coverage identical.
+      #
+      # If this fires, the ruling's step 2 applies: profile with
+      # `go test -json -race`, then move the slowest KDF-bound setup onto a
+      # shared fixture (formatWithLibrary), validated in both the -race and
+      # the plain build. Never a skip guard, and never a larger number here
+      # without a new ruling.
       - name: Run unit tests (pkg/luks2)
-        run: go test -v -race -timeout 30m -coverprofile=coverage-pkg.out -covermode=atomic ./pkg/luks2
+        run: go test -v -race -timeout 300s -coverprofile=coverage-pkg.out -covermode=atomic ./pkg/luks2
 
       - name: Run unit tests (cmd/luks2)
         run: go test -v -race -timeout 30m -coverprofile=coverage-cli.out -covermode=atomic ./cmd/luks2

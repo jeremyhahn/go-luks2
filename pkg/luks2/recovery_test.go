@@ -606,6 +606,20 @@ func fipsSafeAddKeyOptions() *AddKeyOptions {
 	return &AddKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterTime: 1}
 }
 
+// recoveryTestIterations is the explicit PBKDF2 count the AddRecoveryKey tests
+// enroll with, where the subject is which keyslot and token get written, not
+// what the keyslot costs.
+//
+// Left to calibrate, every one of those keyslots was stretched to the default
+// iteration time, and each test then pays that derivation again for every
+// probe that opens it -- keyslotOpenedBy tries every slot. That was the single
+// largest cost in the package (#92). The floor is minPBKDF2Iterations because
+// a recovery key is library-generated and RecoveryKeyOptions.PBKDFIterations
+// admits exactly that. Calibration itself is exercised by the Format and AddKey
+// tests and the exemption by keyslotcostpolicy_test.go; per-function coverage
+// of the package was identical before and after this switch.
+const recoveryTestIterations = minPBKDF2Iterations
+
 // volumeWithAKeyslotGap returns a container holding keyslots {0, 2} -- the
 // shape any volume takes once a credential has been revoked -- together with
 // the passphrases that open them.
@@ -689,7 +703,7 @@ func TestAddRecoveryKeyReportsTheKeyslotItActuallyUsed(t *testing.T) {
 	device, primary, third := volumeWithAKeyslotGap(t)
 
 	saved := filepath.Join(t.TempDir(), "recovery.key")
-	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{OutputPath: saved, KDFType: KDFTypePBKDF2})
+	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{OutputPath: saved, KDFType: KDFTypePBKDF2, PBKDFIterations: recoveryTestIterations})
 	if err != nil {
 		t.Fatalf("AddRecoveryKey: %v", err)
 	}
@@ -792,7 +806,7 @@ func TestAddRecoveryKeyHonoursAnExplicitKeyslot(t *testing.T) {
 	device, primary, _ := volumeWithAKeyslotGap(t)
 
 	requested := 7
-	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{Keyslot: &requested, KDFType: KDFTypePBKDF2})
+	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{Keyslot: &requested, KDFType: KDFTypePBKDF2, PBKDFIterations: recoveryTestIterations})
 	if err != nil {
 		t.Fatalf("AddRecoveryKey: %v", err)
 	}
@@ -832,7 +846,7 @@ func TestAddRecoveryKeyPicksTheFreeSlotEvenWhenTheGapIsFilledFirst(t *testing.T)
 	}
 	assertKeyslotIDs(t, device, []string{"0", "1", "2"})
 
-	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{KDFType: KDFTypePBKDF2})
+	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterations: recoveryTestIterations})
 	if err != nil {
 		t.Fatalf("AddRecoveryKey: %v", err)
 	}
@@ -909,7 +923,7 @@ func TestAddKeyReportsNoSlotOnFailure(t *testing.T) {
 func TestAddRecoveryKeyWritesTheSystemdRecoveryToken(t *testing.T) {
 	device, primary, _ := volumeWithAKeyslotGap(t)
 
-	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{KDFType: KDFTypePBKDF2})
+	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterations: recoveryTestIterations})
 	if err != nil {
 		t.Fatalf("AddRecoveryKey: %v", err)
 	}
@@ -960,7 +974,7 @@ func TestAddRecoveryKeyRollsBackAKeyslotItCannotIdentify(t *testing.T) {
 	importToken = func(string, int, *Token) error { return errors.New("the header could not be written") }
 	t.Cleanup(func() { importToken = previous })
 
-	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{KDFType: KDFTypePBKDF2})
+	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterations: recoveryTestIterations})
 	if err == nil {
 		recoveryKey.Clear()
 		t.Fatal("AddRecoveryKey reported success with an unwritable token")
@@ -989,7 +1003,7 @@ func TestAddRecoveryKeyReportsAnOrphanItCannotRemove(t *testing.T) {
 	killKeyslot = func(string, int) error { return errors.New("the device is read-only") }
 	t.Cleanup(func() { killKeyslot = previousKill })
 
-	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{KDFType: KDFTypePBKDF2})
+	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterations: recoveryTestIterations})
 	if err == nil {
 		recoveryKey.Clear()
 		t.Fatal("AddRecoveryKey reported success")
@@ -1023,7 +1037,7 @@ func TestAddRecoveryKeyRefusesWhenNoTokenSlotIsFree(t *testing.T) {
 		}
 	}
 
-	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{KDFType: KDFTypePBKDF2})
+	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterations: recoveryTestIterations})
 	if err == nil {
 		recoveryKey.Clear()
 		t.Fatal("AddRecoveryKey succeeded with every token slot occupied")
@@ -1149,8 +1163,9 @@ func TestAddRecoveryKeyKeepsTheKeyLiveWhenTheSaveFails(t *testing.T) {
 	}
 
 	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{
-		OutputPath: filepath.Join(blocked, "recovery.key"),
-		KDFType:    KDFTypePBKDF2,
+		OutputPath:      filepath.Join(blocked, "recovery.key"),
+		KDFType:         KDFTypePBKDF2,
+		PBKDFIterations: recoveryTestIterations,
 	})
 	if err != nil {
 		t.Fatalf("AddRecoveryKey reported failure for a save it could not do: %v", err)

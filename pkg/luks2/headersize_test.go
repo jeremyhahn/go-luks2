@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -19,25 +18,25 @@ import (
 // headerSizeVolume formats a genuine volume, so magic, version, checksum
 // algorithm and salt are all authentic. Only HeaderSize is altered afterwards,
 // which is what anyone holding the device can do with eight bytes.
+//
+// The Format runs once per process and each call gets a byte-for-byte copy
+// (formattedImage), because a dozen tests and a table loop were each paying
+// for a real Format -- digest calibration included -- to alter one field (#92).
 func headerSizeVolume(t *testing.T) (device string, passphrase []byte) {
 	t.Helper()
 
-	device = filepath.Join(t.TempDir(), "volume.img")
-	if err := os.WriteFile(device, make([]byte, 16<<20), 0600); err != nil {
-		t.Fatalf("failed to create the backing file: %v", err)
-	}
-	passphrase = []byte("correct horse battery staple")
-	if err := Format(FormatOptions{
-		Device:        device,
-		Passphrase:    passphrase,
-		KDFType:       KDFTypePBKDF2,
-		HashAlgo:      "sha256",
-		PBKDFIterTime: 1,
-	}); err != nil {
-		t.Fatalf("Format returned error: %v", err)
-	}
-	return device, passphrase
+	device = formattedImage(t, "headerSizeVolume", "volume.img", 16<<20, func() FormatOptions {
+		return FormatOptions{
+			Passphrase:    []byte(headerSizeVolumePassphrase),
+			KDFType:       KDFTypePBKDF2,
+			HashAlgo:      "sha256",
+			PBKDFIterTime: 1,
+		}
+	})
+	return device, []byte(headerSizeVolumePassphrase)
 }
+
+const headerSizeVolumePassphrase = "correct horse battery staple"
 
 // setHeaderSize patches the big-endian uint64 HeaderSize field at offset 8.
 func setHeaderSize(t *testing.T, device string, size uint64) {

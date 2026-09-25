@@ -12,8 +12,6 @@ package luks2
 import (
 	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -316,35 +314,25 @@ func TestErrNoFreeTokenSlot(t *testing.T) {
 // Each token's Type names the key it was written under, so a listing that
 // returns the wrong one of two colliding entries is caught by identity rather
 // than by count.
+//
+// The Format underneath runs once per process and each call gets a copy
+// (formattedImage): the tokens are the subject, the container is setup, and
+// the table-driven callers were paying a full Format per row (#92).
 func tokenIDVolume(t *testing.T, name string, keys ...string) string {
 	t.Helper()
 
-	path := filepath.Join(t.TempDir(), name)
-	f, err := os.Create(path) // #nosec G304 -- path is under t.TempDir()
-	if err != nil {
-		t.Fatalf("failed to create image: %v", err)
-	}
-	if err := f.Truncate(64 << 20); err != nil {
-		_ = f.Close()
-		t.Fatalf("failed to size image: %v", err)
-	}
-	if err := f.Close(); err != nil {
-		t.Fatalf("failed to close image: %v", err)
-	}
-
-	if err := Format(FormatOptions{
-		Device:        path,
-		Passphrase:    []byte("token-id-fixture-passphrase"),
-		Cipher:        "aes",
-		CipherMode:    "xts-plain64",
-		KeySize:       512,
-		HashAlgo:      "sha512",
-		SectorSize:    512,
-		KDFType:       KDFTypePBKDF2,
-		PBKDFIterTime: 1,
-	}); err != nil {
-		t.Fatalf("Format failed: %v", err)
-	}
+	path := formattedImage(t, "tokenIDVolume", name, 64<<20, func() FormatOptions {
+		return FormatOptions{
+			Passphrase:    []byte("token-id-fixture-passphrase"),
+			Cipher:        "aes",
+			CipherMode:    "xts-plain64",
+			KeySize:       512,
+			HashAlgo:      "sha512",
+			SectorSize:    512,
+			KDFType:       KDFTypePBKDF2,
+			PBKDFIterTime: 1,
+		}
+	})
 
 	tokens := make(map[string]*Token, len(keys))
 	for _, key := range keys {
