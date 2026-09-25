@@ -7,6 +7,7 @@ package luks2
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -386,21 +387,125 @@ func Wipe(opts WipeOptions) error {
 	return nil
 }
 
-// wipeHeaders wipes only the LUKS headers (primary and backup)
+// wipeHeaders wipes only the LUKS headers (primary and backup).
+//
+// Both copies tile the front of the device, each one header AREA long, so the
+// region to zero is twice the area the container records -- READ FROM THE
+// CONTAINER, not assumed. A fixed 32 KiB covers both copies only of the
+// default 16 KiB area. On a container with a 32 KiB area, which cryptsetup's
+// --luks2-metadata-size and FormatOptions.MetadataSize both produce, the
+// second copy starts at 32 KiB and survived a header-only wipe intact, leaving
+// a "wiped" volume that still opened (#47).
+//
+// The geometry comes from wipeHeaderGeometry, which trusts only
+// checksum-validated copies; see there for why. Beyond the front region, the
+// binary header of every other copy that is recognizably a LUKS2 header for its
+// own offset is zeroed too, so no copy the geometry did not account for is
+// left recognizable.
 func wipeHeaders(f *os.File) error {
-	headerSize := int64(0x8000) // 32KB (covers both headers)
+	geometry := wipeHeaderGeometry(f)
+	front := 2 * geometry.area
 
-	zeros := make([]byte, headerSize)
-
-	if _, err := f.Seek(0, 0); err != nil {
-		return fmt.Errorf("failed to seek: %w", err)
+	if err := zeroAt(f, 0, front); err != nil {
+		return &DeviceError{Device: f.Name(), Op: "wipe headers", Err: err}
 	}
-
-	if _, err := f.Write(zeros); err != nil {
-		return fmt.Errorf("failed to wipe headers: %w", err)
+	for _, offset := range geometry.strays {
+		if offset < front {
+			continue
+		}
+		if err := zeroAt(f, offset, LUKS2HeaderSize); err != nil {
+			return &DeviceError{Device: f.Name(), Op: "wipe stray header copy", Err: err}
+		}
 	}
 
 	return f.Sync()
+}
+
+// zeroAt writes size zero bytes at offset.
+func zeroAt(f *os.File, offset, size int64) error {
+	_, err := f.WriteAt(make([]byte, size), offset)
+	return err
+}
+
+// wipeGeometry is what wipeHeaders zeroes: the front 2 x area bytes, and the
+// binary header of each stray copy.
+type wipeGeometry struct {
+	area   int64
+	strays []int64
+}
+
+// wipeHeaderGeometry decides how much of the front of f a header-only wipe
+// zeroes, from CHECKSUM-VALIDATED header copies only.
+//
+// Neither direction of error is safe, which is why an unvalidated size decides
+// nothing (#47 review):
+//
+//   - Believing a damaged primary that UNDERSTATES the area zeroes only the
+//     front of the device while a valid secondary further out survives, and
+//     the "wiped" volume is recoverable from it.
+//   - Believing a damaged primary that OVERSTATES the area zeroes up to 8 MiB,
+//     which on a container whose data segment starts early -- cryptsetup's
+//     --offset puts it as low as the end of the keyslots area -- is payload.
+//
+// So the area is the validated primary's, else the smallest validated
+// secondary's (smallest, because it is the one that cannot reach past the
+// others into payload), else the 16 KiB default this function always used.
+// Every OTHER copy that is recognizably a LUKS2 header for its own offset --
+// valid or not -- is returned as a stray, and only its 4 KiB binary header is
+// zeroed: that removes its magic, which is all any reader locates it by, and
+// touches no byte that is not itself part of a header.
+func wipeHeaderGeometry(f *os.File) wipeGeometry {
+	var (
+		area    int64
+		strays  []int64
+		offsets = append([]int64{LUKS2PrimaryHeaderOffset}, legalHeaderAreaSizes()...)
+	)
+	for _, offset := range offsets {
+		size, valid, ok := wipeProbeHeaderCopy(f, offset)
+		if !ok {
+			continue
+		}
+		if valid && area == 0 {
+			area = size
+			continue
+		}
+		strays = append(strays, offset)
+	}
+	if area == 0 {
+		area = LUKS2HeaderMinSize
+	}
+	return wipeGeometry{area: area, strays: strays}
+}
+
+// wipeProbeHeaderCopy reports whether what is at offset is recognizably a
+// LUKS2 header copy belonging there (ok) -- magic, version, a legal area size,
+// hdr_offset equal to offset and, for a secondary copy, an area equal to its
+// offset -- and whether its checksum also validates (valid). size is the area
+// it declares.
+func wipeProbeHeaderCopy(f *os.File, offset int64) (size int64, valid, ok bool) {
+	raw := make([]byte, LUKS2HeaderSize)
+	if _, err := f.ReadAt(raw, offset); err != nil {
+		return 0, false, false
+	}
+	var hdr LUKS2BinaryHeader
+	if err := binary.Read(bytes.NewReader(raw), binary.BigEndian, &hdr); err != nil {
+		return 0, false, false
+	}
+	if !bytes.Equal(hdr.Magic[:], []byte(expectedMagic(offset))) || hdr.Version != LUKS2Version {
+		return 0, false, false
+	}
+	area, err := headerAreaSize(&hdr)
+	if err != nil {
+		return 0, false, false
+	}
+	if recorded, err := headerAreaOffset(&hdr); err != nil || recorded != offset {
+		return 0, false, false
+	}
+	if offset != LUKS2PrimaryHeaderOffset && int64(area) != offset {
+		return 0, false, false
+	}
+	valid = validateHeaderChecksum(&hdr, f, offset, area) == nil
+	return int64(area), valid, true
 }
 
 // wipePass performs one wipe pass over the device

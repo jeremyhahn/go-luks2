@@ -22,6 +22,26 @@ The binary header is 4096 bytes (4 KB) and contains:
 | 0x01C0 | 64 | Checksum | SHA-256 of header + JSON |
 | 0x0200 | 3584 | Padding | Reserved to 4 KB |
 
+## Metadata Area Size
+
+Each header copy (binary header plus JSON area) occupies one metadata area,
+and the two copies tile the front of the device:
+
+| Region | Offset | Size |
+|--------|--------|------|
+| Primary header + JSON | `0` | `area` |
+| Secondary header + JSON | `area` | `area` |
+| Keyslots area | `2 × area` | `16 MiB − 2 × area` |
+| Data segment | `16 MiB` | rest of device |
+
+`area` is 16 KiB by default, leaving `json_size` = 12288. Set
+`FormatOptions.MetadataSize` to a power of two from 16 KiB to 4 MiB for more
+JSON space. This is the equivalent of cryptsetup's `--luks2-metadata-size`,
+with the same accepted set and the same layout; other values are refused with
+`ErrInvalidMetadataSize`. The size is recorded in the header and cannot change
+after format. Containers cryptsetup wrote with any legal size are read
+from their headers.
+
 ## Header Checksum
 
 The checksum is computed over:
@@ -102,7 +122,7 @@ Three properties of the encoding are conformance requirements, not style:
 
 | Property | Why |
 |---|---|
-| Compact | The JSON area is a fixed 12288 bytes and cannot grow (the keyslots and the data segment are already placed), so indentation is charged against the keyslot budget. Indented, only 22 of the 32 keyslots LUKS2 defines fit; compact, all 32 fit in 10676 bytes. |
+| Compact | The JSON area is fixed when the container is formatted (12288 bytes by default) and cannot grow (the keyslots and the data segment are already placed), so indentation is charged against the keyslot budget. Indented, only 22 of the 32 keyslots LUKS2 defines fit; compact, all 32 fit in 10676 bytes. |
 | No HTML escaping | Go's `encoding/json` escapes `<`, `>` and `&` as `\u003c`, `\u003e` and `\u0026` by default. json-c, which cryptsetup uses, does not. |
 | No trailing newline | `json.Encoder.Encode` appends one; it would land between the closing brace and the NUL terminator. |
 

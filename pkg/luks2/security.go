@@ -87,11 +87,13 @@ const (
 
 // Validation errors
 var (
-	ErrInvalidPath         = errors.New("invalid device path")
-	ErrPassphraseTooShort  = errors.New("passphrase too short (minimum 8 bytes)")
-	ErrPassphraseTooLong   = errors.New("passphrase too long (maximum 512 bytes)")
-	ErrInvalidKeySize      = errors.New("invalid key size (must be 256 or 512 bits)")
-	ErrInvalidSectorSize   = errors.New("invalid sector size (must be 512 or 4096)")
+	ErrInvalidPath        = errors.New("invalid device path")
+	ErrPassphraseTooShort = errors.New("passphrase too short (minimum 8 bytes)")
+	ErrPassphraseTooLong  = errors.New("passphrase too long (maximum 512 bytes)")
+	ErrInvalidKeySize     = errors.New("invalid key size (must be 256 or 512 bits)")
+	ErrInvalidSectorSize  = errors.New("invalid sector size (must be 512 or 4096)")
+	//nolint:lll // the message states the accepted set, like its siblings above
+	ErrInvalidMetadataSize = errors.New("invalid metadata size (must be 0 for the default, or a power of two from 16 KiB to 4 MiB)")
 	ErrInvalidArgon2Memory = errors.New("invalid Argon2 memory (must be >= 65536 KB)")
 	ErrInvalidArgon2Time   = errors.New("invalid Argon2 time cost (must be >= 1)")
 	//nolint:lll // the message states the bound, like its two siblings above
@@ -330,6 +332,10 @@ func ValidateFormatOptions(opts FormatOptions) error {
 		return ErrInvalidSectorSize
 	}
 
+	if err := validateMetadataSize(opts.MetadataSize); err != nil {
+		return err
+	}
+
 	// Validate Argon2 parameters if specified
 	if err := validateArgon2CreateCost(opts); err != nil {
 		return err
@@ -344,6 +350,21 @@ func ValidateFormatOptions(opts FormatOptions) error {
 		}
 	}
 
+	return nil
+}
+
+// validateMetadataSize checks FormatOptions.MetadataSize against exactly the
+// set cryptsetup's --luks2-metadata-size accepts: zero for the default, or a
+// power of two from LUKS2HeaderMinSize to LUKS2HeaderMaxSize. Measured against
+// cryptsetup 2.7.0 on #47 -- 8k, 12288, 20k and 8m are all refused there with
+// "Unsupported LUKS2 metadata size options".
+func validateMetadataSize(size int) error {
+	if size == 0 {
+		return nil
+	}
+	if size < LUKS2HeaderMinSize || size > LUKS2HeaderMaxSize || !isPowerOf2(size) {
+		return ErrInvalidMetadataSize
+	}
 	return nil
 }
 

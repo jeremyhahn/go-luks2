@@ -23,7 +23,7 @@ func Format(opts FormatOptions) error {
 	// Acquire file lock for exclusive access
 	lock, err := AcquireFileLock(opts.Device)
 	if err != nil {
-		return fmt.Errorf("failed to acquire lock: %w", err)
+		return &DeviceError{Device: opts.Device, Op: "lock", Err: err}
 	}
 	defer func() { _ = lock.Release() }()
 
@@ -112,26 +112,36 @@ func Format(opts FormatOptions) error {
 	}
 	defer clearBytes(encryptedKeyMaterial)
 
-	// Calculate offsets and sizes
-	const keyslotAreaStart = 0x8000 // 32KB (after both headers)
+	// Calculate offsets and sizes.
+	//
+	// The keyslots area starts where the two header copies end, at twice the
+	// header area size. It is derived from the header rather than written as
+	// 0x8000, which was right only for the default 16 KiB area: with
+	// FormatOptions.MetadataSize at 32 KiB the second header copy occupies
+	// 0x8000..0xFFFF, and keyslot material written at 0x8000 would land inside
+	// it (#47).
+	area, err := headerAreaSizeForWrite(hdr)
+	if err != nil {
+		return err
+	}
+	keyslotAreaStart := 2 * int64(area)
 	keyMaterialSize := len(encryptedKeyMaterial)
 	alignedKeyMaterialSize := alignTo(int64(keyMaterialSize), 4096)
 
-	// Match cryptsetup's LUKS2 defaults for maximum compatibility:
+	// Match cryptsetup's LUKS2 layout for maximum compatibility:
 	// - LUKS2_DEFAULT_HDR_SIZE = 16 MiB (total metadata area)
-	// - data_offset = 2 * metadata_size + keyslots_size
+	// - keyslots_size = LUKS2_DEFAULT_HDR_SIZE - 2 * metadata_size
+	// - data_offset = 2 * metadata_size + keyslots_size = 16 MiB
 	// - Each keyslot needs: volume_key_size * 4000 bytes (AF stripes), 4KB aligned
 	// - For 512-bit key: 64 * 4000 = 256KB per keyslot
-	// - Maximum 32 keyslots (LUKS2MaxKeyslots) supported
 	//
-	// cryptsetup formula: keyslots_size = LUKS2_DEFAULT_HDR_SIZE - 2 * metadata_size
-	// With default 16 KiB metadata: keyslots_size ≈ 16 MiB (LUKS2DefaultKeyslotsSize)
-	//
-	// We use keyslotAreaStart (0x8000 = 32KB) which accounts for 2 header copies,
-	// so keyslots area starts at 32KB and data_offset = 32KB + keyslotsAreaSize
-	keyslotsAreaSize := alignedKeyMaterialSize
-	if keyslotsAreaSize < LUKS2DefaultKeyslotsSize {
-		keyslotsAreaSize = LUKS2DefaultKeyslotsSize
+	// MEASURED against cryptsetup 2.7.0 (#47): --luks2-metadata-size 16k gives
+	// keyslots_size 16744448, 32k gives 16711680 and 4m gives 8388608, with the
+	// data segment at 16 MiB in every case. Even the 4 MiB area leaves 8 MiB of
+	// keyslots, room for all 32 keyslots of a 512-bit key.
+	keyslotsAreaSize := int64(LUKS2HeaderDefaultSize) - keyslotAreaStart
+	if keyslotsAreaSize < alignedKeyMaterialSize {
+		keyslotsAreaSize = alignedKeyMaterialSize
 	}
 
 	dataOffset := keyslotAreaStart + keyslotsAreaSize
@@ -140,7 +150,7 @@ func Format(opts FormatOptions) error {
 	// keyslot0Size is the actual size of keyslot 0's area
 	// keyslotsAreaSize is the total reserved space for keyslots (allows adding more keys)
 	metadata := createMetadata(kdf, digestKDF, digestValue, opts, masterKeySize,
-		keyslotAreaStart, int(alignedKeyMaterialSize), int(keyslotsAreaSize), int(dataOffset))
+		int(keyslotAreaStart), int(alignedKeyMaterialSize), int(keyslotsAreaSize), int(dataOffset))
 
 	// Write headers
 	if err := writeHeaderInternal(opts.Device, hdr, metadata); err != nil {
@@ -148,11 +158,11 @@ func Format(opts FormatOptions) error {
 	}
 
 	// Write encrypted key material
-	if _, err := f.Seek(int64(keyslotAreaStart), 0); err != nil {
-		return fmt.Errorf("failed to seek to keyslot area: %w", err)
+	if _, err := f.Seek(keyslotAreaStart, 0); err != nil {
+		return &DeviceError{Device: opts.Device, Op: "seek to keyslot area", Err: err}
 	}
 	if _, err := f.Write(encryptedKeyMaterial); err != nil {
-		return fmt.Errorf("failed to write key material: %w", err)
+		return &DeviceError{Device: opts.Device, Op: "write key material", Err: err}
 	}
 
 	// FILL THE REST OF THE KEYSLOTS AREA WITH CSPRNG DATA, from the end of
@@ -177,7 +187,7 @@ func Format(opts FormatOptions) error {
 	// it costs 20ms on top of 375ms -- the CSPRNG is not the cost, writing 16
 	// MiB and syncing it is -- and the image is no longer sparse.
 	if err := writeRandom(f, dataOffset-(keyslotAreaStart+int64(keyMaterialSize))); err != nil {
-		return fmt.Errorf("failed to fill the keyslots area: %w", err)
+		return &DeviceError{Device: opts.Device, Op: "fill the keyslots area", Err: err}
 	}
 
 	return f.Sync()

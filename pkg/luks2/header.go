@@ -27,7 +27,7 @@ const (
 	LUKS2PrimaryHeaderOffset int64 = 0
 
 	// LUKS2SecondaryHeaderOffset is where the second header copy starts for the
-	// 16 KiB metadata size this library writes. It is the primary copy's total
+	// DEFAULT 16 KiB metadata size. It is the primary copy's total
 	// area size, not a free-standing constant: a container written with a larger
 	// metadata area puts its second copy correspondingly further out.
 	LUKS2SecondaryHeaderOffset int64 = 0x4000
@@ -655,11 +655,20 @@ func CreateBinaryHeader(opts FormatOptions) (*LUKS2BinaryHeader, error) {
 
 	// Generate salt for checksum
 	if _, err := io.ReadFull(cryptoRand, hdr.Salt[:]); err != nil {
-		return nil, fmt.Errorf("failed to generate salt: %w", err)
+		return nil, &CryptoError{Op: "generate header salt", Err: err}
 	}
 
 	// Sequence ID starts at 1
 	hdr.SequenceID = 1
+
+	// The header area size. Zero leaves it to headerAreaSizeForWrite, which
+	// picks the 16 KiB default; anything else is the caller's choice and is
+	// validated here as well as in ValidateFormatOptions, because this
+	// function is exported and reachable without it.
+	if err := validateMetadataSize(opts.MetadataSize); err != nil {
+		return nil, err
+	}
+	hdr.HeaderSize = uint64(opts.MetadataSize) // #nosec G115 -- validateMetadataSize bounds this to 0..LUKS2HeaderMaxSize
 
 	return hdr, nil
 }
@@ -678,10 +687,10 @@ const LUKS2HeaderMaxSize = 0x400000 // 4 MiB
 // and the data segment begins after the keyslots. Neither can move, so the area
 // can neither grow nor shrink for the life of the container.
 //
-// hdr.HeaderSize carries it. For a header that has never been written --
-// CreateBinaryHeader leaves it zero -- the area is LUKS2HeaderMinSize, which is
-// the geometry Format lays out (keyslot material at 0x8000, immediately after
-// two 0x4000 copies).
+// hdr.HeaderSize carries it. CreateBinaryHeader sets it from
+// FormatOptions.MetadataSize; a header that carries zero -- the default -- gets
+// LUKS2HeaderMinSize, the geometry Format lays out when no size is chosen
+// (keyslot material at 0x8000, immediately after two 0x4000 copies).
 //
 // The value is required to be a POWER OF TWO in LUKS2HeaderMinSize..
 // LUKS2HeaderMaxSize. LUKS2 admits only 16 KiB, 32 KiB, ... 4 MiB, and a

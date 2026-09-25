@@ -475,6 +475,20 @@ type FormatOptions struct {
 	Argon2Time      int    // Argon2 time cost (default: 4)
 	Argon2Memory    int    // Argon2 memory cost in KB (default: 1048576 = 1GB)
 	Argon2Parallel  int    // Argon2 parallelism (default: 4)
+
+	// MetadataSize is the size of ONE header copy -- the 4096-byte binary
+	// header plus its JSON area -- in bytes, the equivalent of cryptsetup's
+	// --luks2-metadata-size. Zero selects the default, 16 KiB, which leaves
+	// 12288 bytes for JSON. Otherwise it must be a power of two from 16 KiB to
+	// 4 MiB; anything else is refused with ErrInvalidMetadataSize.
+	//
+	// The size is fixed for the life of the container: the second header copy
+	// starts at MetadataSize, the keyslots area at 2 x MetadataSize, and the
+	// keyslots area is sized so the data segment still starts at 16 MiB, as
+	// cryptsetup lays it out. Choose a larger size up front when the container
+	// will carry large tokens; metadata that does not fit is refused with
+	// ErrMetadataTooLarge rather than grown into.
+	MetadataSize int
 }
 
 // VolumeInfo contains information about a LUKS volume
