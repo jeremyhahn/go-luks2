@@ -311,6 +311,10 @@ func buildCanonicalPair(t *testing.T, kdf canonicalKDF) *canonicalPair {
 	if theirKeyslot == nil || theirKeyslot.KDF == nil {
 		t.Fatal("cryptsetup's container has no keyslot 0 with a KDF")
 	}
+	theirDigest := theirMetadata.Digests["0"]
+	if theirDigest == nil {
+		t.Fatal("cryptsetup's container has no digest 0")
+	}
 
 	opts := FormatOptions{
 		Device:     canonicalImage(t, "library.img"),
@@ -323,6 +327,15 @@ func buildCanonicalPair(t *testing.T, kdf canonicalKDF) *canonicalPair {
 	}
 	kdf.mirror(t, &opts, theirKeyslot.KDF)
 
+	// The DIGEST cost is mirrored too, through the digestIterationsFor seam --
+	// FormatOptions deliberately has no knob for it. cryptsetup still
+	// calibrates freely; this package is told the count it chose, exactly as
+	// it is told the keyslot costs. Letting this package run a second
+	// calibration of its own would put two wall-clock measurements, taken
+	// moments apart on a host that is also running a test suite, into a
+	// comparison about ENCODING -- and under load they land 2x apart and fail
+	// a correct tree (#209).
+	pinDigestIterations(t, theirDigest.Iterations)
 	pinCryptoRand(t, 0x9c)
 	pinUUID(t, conformanceUUID)
 	if err := Format(opts); err != nil {
@@ -342,6 +355,14 @@ func buildCanonicalPair(t *testing.T, kdf canonicalKDF) *canonicalPair {
 	// be excusing a difference this helper was supposed to remove. Asserted
 	// from the HEADERS, because what is on disk is the question.
 	assertKDFCostsMatch(t, ourKeyslot.KDF, theirKeyslot.KDF)
+	ourDigest := ourMetadata.Digests["0"]
+	if ourDigest == nil {
+		t.Fatal("the formatted container has no digest 0")
+	}
+	if ourDigest.Iterations != theirDigest.Iterations {
+		t.Fatalf("digest iterations differ: ours %d, cryptsetup %d -- the digest pin did not take",
+			ourDigest.Iterations, theirDigest.Iterations)
+	}
 
 	pair := &canonicalPair{
 		oursJSON:      readJSONArea(t, opts.Device),
@@ -352,8 +373,8 @@ func buildCanonicalPair(t *testing.T, kdf canonicalKDF) *canonicalPair {
 		theirsKDF:     theirKeyslot.KDF,
 		oursKeyslot:   ourKeyslot,
 		theirsKeyslot: theirKeyslot,
-		oursDigest:    ourMetadata.Digests["0"],
-		theirsDigest:  theirMetadata.Digests["0"],
+		oursDigest:    ourDigest,
+		theirsDigest:  theirDigest,
 	}
 	canonicalPairs[kdf.name] = pair
 	return pair
@@ -512,24 +533,28 @@ func TestCanonicalJSONReencodesCryptsetupsHeaderByteForByte(t *testing.T) {
 // TestFormattedJSONMatchesCryptsetupByteForByte compares two containers
 // FORMATTED INDEPENDENTLY, which is the claim an operator cares about.
 //
-// TWO classes of value are substituted, and neither is a divergence this
-// package chose:
+// ONE class of value is substituted, and it is not a divergence this package
+// chose: the salts and the digest value. Two separate processes' CSPRNG draws,
+// and the digest is a one-way function of a master key that is itself an
+// independent draw. Making them agree would mean the two containers shared key
+// material.
 //
-//  1. The salts and the digest value. Two separate processes' CSPRNG draws, and
-//     the digest is a one-way function of a master key that is itself an
-//     independent draw. Making them agree would mean the two containers shared
-//     key material.
+// The DIGEST iteration count is NOT substituted, and no longer compared as two
+// calibrations either. It used to be: both sides calibrated it independently
+// and a 0.5x-2x band guarded the substitution. That band compared two
+// wall-clock measurements taken moments apart on a loaded CI host, so it
+// measured the scheduler rather than this code, and failed a correct tree at
+// 0.48x (#209). buildCanonicalPair now reads cryptsetup's calibrated count out
+// of its header and pins this package's digest to it -- cryptsetup itself
+// still calibrates freely; see canonicalKDF for why --pbkdf-force-iterations
+// is not the way to make the counts agree -- so the count is compared byte for
+// byte like everything else.
 //
-//  2. The DIGEST iteration count. BOTH sides calibrate it now, independently,
-//     so the two values are measurements of the same machine taken moments
-//     apart and will differ by a percent or two. That is the whole reason this
-//     is excluded, and it is why the exclusion is GUARDED rather than blind:
-//     the two counts must agree to within a factor before either is dropped,
-//     which is the assertion that would catch a target that had drifted away
-//     from cryptsetup's. See DigestIterationTargetMs (security.go) for the
-//     measurements behind the 100ms target, and canonicalKDF for what happens
-//     to this measurement if you reach for --pbkdf-force-iterations to make
-//     the two agree exactly.
+// What the band was really guarding -- that this package's calibration TARGET
+// has not drifted from cryptsetup's -- is a property of two constants, and is
+// asserted on those constants, deterministically, by
+// assertDigestCalibrationTargetIsCryptsetups. That the real calibration meets
+// its target on this machine is TestDigestCalibrationTargetsItsBudget's job.
 //
 // A keyslot's `priority` used to be substituted here as well and is not any
 // more: neither side writes the member now, which is asserted rather than
@@ -582,26 +607,15 @@ func formattedJSONMatchesCryptsetup(t *testing.T, kdf canonicalKDF) {
 	ourDigest.Salt = theirDigest.Salt
 	ourDigest.Digest = theirDigest.Digest
 
-	// (2) the two independent calibrations, checked against each other before
-	// either is substituted. Substituting silently would hide a digest target
-	// that had drifted somewhere cryptsetup would never calibrate to, which is
-	// the one thing this exclusion must not conceal.
-	//
-	// The tolerance is deliberately loose. Both numbers are benchmarks taken on
-	// a machine that is also running a test suite, and the failure this guards
-	// against is an order-of-magnitude drift -- a hardcoded 1000, or a target
-	// changed by a factor of ten -- not a few percent of scheduler noise.
+	// (2) the digest iteration count is NOT substituted: buildCanonicalPair
+	// pinned it to cryptsetup's, so it is compared in the bytes below. The
+	// guard against a drifted calibration target is a check of the constants
+	// that define the target, not a comparison of two timings (#209).
+	assertDigestCalibrationTargetIsCryptsetups(t)
 	if theirDigest.Iterations < minPBKDF2Iterations {
-		t.Fatalf("cryptsetup calibrated its digest to %d iterations, below the LUKS2 minimum of %d; "+
-			"the machine is too slow for this comparison to establish anything",
+		t.Fatalf("cryptsetup wrote its digest with %d iterations, below the LUKS2 minimum of %d",
 			theirDigest.Iterations, minPBKDF2Iterations)
 	}
-	if ratio := float64(ourDigest.Iterations) / float64(theirDigest.Iterations); ratio < 0.5 || ratio > 2 {
-		t.Fatalf("this package calibrated its digest to %d iterations and cryptsetup to %d on the same machine "+
-			"(%.2fx). Both target ~%dms; a gap this size means the target has drifted, not that the benchmark was noisy.",
-			ourDigest.Iterations, theirDigest.Iterations, ratio, DigestIterationTargetMs)
-	}
-	ourDigest.Iterations = theirDigest.Iterations
 
 	// Neither side may write a priority member. Asserted, not substituted: it
 	// is now a property of what this package writes.
@@ -629,6 +643,42 @@ func formattedJSONMatchesCryptsetup(t *testing.T, kdf canonicalKDF) {
 		t.Fatalf("the formatted metadata is not byte-identical to cryptsetup's outside the substituted classes\n"+
 			"cryptsetup (%d bytes):\n%s\n\nthis package (%d bytes):\n%s",
 			len(pair.theirsJSON), pair.theirsJSON, len(got), got)
+	}
+}
+
+// cryptsetupDigestTargetMs and cryptsetupDigestKeyLen are cryptsetup 2.7.0's
+// digest calibration: it benchmarks a 64-byte PBKDF2 derivation to 100ms.
+// Measured, not taken from its documentation -- see DigestIterationTargetMs and
+// DigestCalibrationKeyLen (security.go) for the 14-container measurement.
+const (
+	cryptsetupDigestTargetMs = 100
+	cryptsetupDigestKeyLen   = 64
+)
+
+// assertDigestCalibrationTargetIsCryptsetups is the drift guard for the digest
+// cost, stated on the CONSTANTS that define the calibration rather than on two
+// calibrations' results.
+//
+// The failure it exists to catch is the one the old 0.5x-2x band caught when
+// the host was quiet: a target changed by a factor of ten, a derivation length
+// that doubles the sha256 cost, a floor that silently binds. Each of those is a
+// change to a constant, so comparing the constants catches it every time and
+// cannot be failed by a busy scheduler (#209).
+func assertDigestCalibrationTargetIsCryptsetups(t *testing.T) {
+	t.Helper()
+
+	if DigestIterationTargetMs != cryptsetupDigestTargetMs {
+		t.Errorf("DigestIterationTargetMs is %d; cryptsetup calibrates its digest to %dms, "+
+			"so this package's digest cost has drifted from cryptsetup's",
+			DigestIterationTargetMs, cryptsetupDigestTargetMs)
+	}
+	if DigestCalibrationKeyLen != cryptsetupDigestKeyLen {
+		t.Errorf("DigestCalibrationKeyLen is %d; cryptsetup benchmarks a %d-byte derivation whatever the hash, "+
+			"so the sha256 digest cost has drifted from cryptsetup's",
+			DigestCalibrationKeyLen, cryptsetupDigestKeyLen)
+	}
+	if minPBKDF2Iterations != 1000 {
+		t.Errorf("minPBKDF2Iterations is %d; the LUKS2 floor cryptsetup enforces is 1000", minPBKDF2Iterations)
 	}
 }
 

@@ -22,15 +22,6 @@ import (
 // drifting to whatever a constant happened to say, and that it stays pinnable
 // so a header can be reproduced.
 
-// pinDigestIterations fixes the digest cost for the duration of a test.
-func pinDigestIterations(t *testing.T, iterations int) {
-	t.Helper()
-
-	previous := digestIterationsFor
-	digestIterationsFor = func(string) (int, error) { return iterations, nil }
-	t.Cleanup(func() { digestIterationsFor = previous })
-}
-
 // recordDigestCalibration fixes the digest cost exactly as pinDigestIterations
 // does and additionally records the hash each call asked for, so a test can
 // assert that a digest was calibrated for the hash it declares.

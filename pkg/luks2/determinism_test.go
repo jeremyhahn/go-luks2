@@ -78,6 +78,20 @@ func pinUUID(t *testing.T, value string) {
 	t.Cleanup(func() { newUUID = previous })
 }
 
+// pinDigestIterations fixes the digest cost for the duration of a test.
+//
+// It lives here, untagged, beside the other seam pins because both tiers need
+// it: the unit tier to make a header reproducible, and the integration tier's
+// byte-for-byte conformance to write cryptsetup's own calibrated digest count
+// instead of comparing two wall-clock calibrations (#209).
+func pinDigestIterations(t *testing.T, iterations int) {
+	t.Helper()
+
+	previous := digestIterationsFor
+	digestIterationsFor = func(string) (int, error) { return iterations, nil }
+	t.Cleanup(func() { digestIterationsFor = previous })
+}
+
 // TestPinCryptoRandIsDeterministicAndStillRandomLooking establishes both halves
 // of the contract the helper claims: the same seed reproduces the same stream,
 // and the stream is not a degenerate one that would hollow out the tests built
