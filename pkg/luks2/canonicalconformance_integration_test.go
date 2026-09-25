@@ -8,6 +8,7 @@ package luks2
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -149,12 +150,18 @@ func canonicalKDFs() []canonicalKDF {
 
 // Binary header field offsets, from the LUKS2 On-Disk Format specification and
 // matching LUKS2BinaryHeader. Named here because the comparison below excludes
-// three of them and an unnamed 104:168 tells a reader nothing.
+// three of them and an unnamed 104:168 tells a reader nothing; hdr_size and
+// hdr_offset are named because the secondary header is located and identified
+// by them.
 const (
+	hdrSizeStart       = 8
+	hdrSizeEnd         = 16
 	hdrSequenceIDStart = 16
 	hdrSequenceIDEnd   = 24
 	hdrSaltStart       = 104
 	hdrSaltEnd         = 168
+	hdrOffsetStart     = 256
+	hdrOffsetEnd       = 264
 	hdrChecksumStart   = 448
 	hdrChecksumEnd     = 512
 )
@@ -270,10 +277,13 @@ func formatWithCryptsetupForced(t *testing.T, path string, iterations int) {
 type canonicalPair struct {
 	oursJSON, theirsJSON     []byte
 	oursHeader, theirsHeader []byte
-	oursKDF, theirsKDF       *KDF
-	oursKeyslot              *Keyslot
-	theirsKeyslot            *Keyslot
-	oursDigest, theirsDigest *Digest
+	// oursSecondary and theirsSecondary are the 4096-byte binary header of
+	// the SECOND copy, read from the offset each primary records.
+	oursSecondary, theirsSecondary []byte
+	oursKDF, theirsKDF             *KDF
+	oursKeyslot                    *Keyslot
+	theirsKeyslot                  *Keyslot
+	oursDigest, theirsDigest       *Digest
 }
 
 // buildCanonicalPair formats both containers and returns their bytes.
@@ -365,16 +375,18 @@ func buildCanonicalPair(t *testing.T, kdf canonicalKDF) *canonicalPair {
 	}
 
 	pair := &canonicalPair{
-		oursJSON:      readJSONArea(t, opts.Device),
-		theirsJSON:    readJSONArea(t, theirs),
-		oursHeader:    readBinaryHeader(t, opts.Device),
-		theirsHeader:  readBinaryHeader(t, theirs),
-		oursKDF:       ourKeyslot.KDF,
-		theirsKDF:     theirKeyslot.KDF,
-		oursKeyslot:   ourKeyslot,
-		theirsKeyslot: theirKeyslot,
-		oursDigest:    ourDigest,
-		theirsDigest:  theirDigest,
+		oursJSON:        readJSONArea(t, opts.Device),
+		theirsJSON:      readJSONArea(t, theirs),
+		oursHeader:      readBinaryHeader(t, opts.Device),
+		theirsHeader:    readBinaryHeader(t, theirs),
+		oursSecondary:   readSecondaryBinaryHeader(t, opts.Device),
+		theirsSecondary: readSecondaryBinaryHeader(t, theirs),
+		oursKDF:         ourKeyslot.KDF,
+		theirsKDF:       theirKeyslot.KDF,
+		oursKeyslot:     ourKeyslot,
+		theirsKeyslot:   theirKeyslot,
+		oursDigest:      ourDigest,
+		theirsDigest:    theirDigest,
 	}
 	canonicalPairs[kdf.name] = pair
 	return pair
@@ -474,6 +486,42 @@ func readBinaryHeader(t *testing.T, path string) []byte {
 	buf := make([]byte, LUKS2HeaderSize)
 	if _, err := f.ReadAt(buf, 0); err != nil {
 		t.Fatalf("failed to read the binary header of %s: %v", path, err)
+	}
+	return buf
+}
+
+// readSecondaryBinaryHeader returns the 4096-byte binary header of the second
+// header copy.
+//
+// It is located from the hdr_size the PRIMARY records rather than from a
+// constant, because that is how every reader finds it, and it is then checked
+// to BE a secondary header: the secondary magic, and a hdr_offset naming the
+// offset it was read from. Without that check a wrong offset would read two
+// runs of zeroes -- or two copies of keyslot area -- and compare them equal.
+func readSecondaryBinaryHeader(t *testing.T, path string) []byte {
+	t.Helper()
+
+	primary := readBinaryHeader(t, path)
+	offset := binary.BigEndian.Uint64(primary[hdrSizeStart:hdrSizeEnd])
+	if offset < LUKS2HeaderSize || offset > canonicalImageSize-LUKS2HeaderSize {
+		t.Fatalf("the primary header of %s records hdr_size %d, which cannot locate a secondary header", path, offset)
+	}
+
+	f, err := os.Open(path) // #nosec G304 -- path is under t.TempDir()
+	if err != nil {
+		t.Fatalf("failed to open %s: %v", path, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	buf := make([]byte, LUKS2HeaderSize)
+	if _, err := f.ReadAt(buf, int64(offset)); err != nil {
+		t.Fatalf("failed to read the secondary binary header of %s at %d: %v", path, offset, err)
+	}
+	if got := string(buf[:LUKS2MagicLen]); got != LUKS2SecondaryMagic {
+		t.Fatalf("the header at %d in %s has magic %q, not the secondary magic %q", offset, path, got, LUKS2SecondaryMagic)
+	}
+	if got := binary.BigEndian.Uint64(buf[hdrOffsetStart:hdrOffsetEnd]); got != offset {
+		t.Fatalf("the secondary header of %s was read at %d but records hdr_offset %d", path, offset, got)
 	}
 	return buf
 }
@@ -726,52 +774,161 @@ func formattedBinaryHeaderMatchesCryptsetup(t *testing.T, kdf canonicalKDF) {
 	t.Helper()
 
 	pair := buildCanonicalPair(t, kdf)
-	got, want := pair.oursHeader, pair.theirsHeader
+	assertBinaryHeaderMatches(t, "primary", pair.oursHeader, pair.theirsHeader)
+}
 
-	excluded := func(i int) bool {
-		switch {
-		case i >= hdrSequenceIDStart && i < hdrSequenceIDEnd:
-			return true
-		case i >= hdrSaltStart && i < hdrSaltEnd:
-			return true
-		case i >= hdrChecksumStart && i < hdrChecksumEnd:
-			return true
-		default:
-			return false
-		}
+// comparedBinaryHeaderBytes is how many of the 4096 binary-header bytes the
+// comparison covers: everything but sequence_id, the header salt and the
+// checksum.
+const comparedBinaryHeaderBytes = LUKS2HeaderSize -
+	(hdrSequenceIDEnd - hdrSequenceIDStart) -
+	(hdrSaltEnd - hdrSaltStart) -
+	(hdrChecksumEnd - hdrChecksumStart)
+
+// excludedFromBinaryHeaderComparison reports whether offset i is one of the
+// three ranges TestFormattedBinaryHeaderMatchesCryptsetup documents as
+// legitimately different between two independently formatted containers.
+func excludedFromBinaryHeaderComparison(i int) bool {
+	switch {
+	case i >= hdrSequenceIDStart && i < hdrSequenceIDEnd:
+		return true
+	case i >= hdrSaltStart && i < hdrSaltEnd:
+		return true
+	case i >= hdrChecksumStart && i < hdrChecksumEnd:
+		return true
+	default:
+		return false
 	}
+}
 
+// differingBinaryHeaderBytes returns every compared offset at which got and
+// want disagree.
+func differingBinaryHeaderBytes(got, want []byte) []int {
 	var differing []int
 	for i := range want {
-		if !excluded(i) && got[i] != want[i] {
+		if !excludedFromBinaryHeaderComparison(i) && got[i] != want[i] {
 			differing = append(differing, i)
 		}
 	}
-	if len(differing) > 0 {
+	return differing
+}
+
+// assertBinaryHeaderMatches is the comparison both header copies are held to:
+// byte-equality outside the three excluded ranges, and excluded ranges that
+// are excluded because they hold values that cannot agree -- never because
+// they are empty.
+func assertBinaryHeaderMatches(t *testing.T, copyName string, got, want []byte) {
+	t.Helper()
+
+	if len(got) != LUKS2HeaderSize || len(want) != LUKS2HeaderSize {
+		t.Fatalf("the %s binary headers are %d and %d bytes; both must be %d",
+			copyName, len(got), len(want), LUKS2HeaderSize)
+	}
+
+	if differing := differingBinaryHeaderBytes(got, want); len(differing) > 0 {
 		limit := len(differing)
 		if limit > 32 {
 			limit = 32
 		}
-		t.Fatalf("%d of the %d compared binary-header bytes differ from cryptsetup's; first offsets %v\n"+
+		t.Fatalf("%d of the %d compared %s binary-header bytes differ from cryptsetup's; first offsets %v\n"+
 			"ours[%d]=%#x theirs[%d]=%#x",
-			len(differing), LUKS2HeaderSize-(hdrSequenceIDEnd-hdrSequenceIDStart)-(hdrSaltEnd-hdrSaltStart)-(hdrChecksumEnd-hdrChecksumStart),
+			len(differing), comparedBinaryHeaderBytes, copyName,
 			differing[:limit], differing[0], got[differing[0]], differing[0], want[differing[0]])
 	}
 
-	// The excluded ranges must not be excluded because they are EMPTY. A salt
-	// or checksum of zeroes would pass the comparison above by vacuity and
-	// would mean something is badly wrong.
+	// The excluded ranges must not be excluded because they are EMPTY.
+	for _, name := range allZeroExcludedRanges(got) {
+		t.Errorf("this package wrote an all-zero %s %s", copyName, name)
+	}
+}
+
+// allZeroExcludedRanges names every range excluded from the binary-header
+// comparison that holds only zeroes. A sequence_id, salt or checksum of zeroes
+// would pass the comparison by vacuity and would mean something is badly
+// wrong: sequence_id starts at 1 on format, the salt is random and the
+// checksum is a hash.
+func allZeroExcludedRanges(hdr []byte) []string {
+	var zero []string
 	for _, r := range []struct {
 		name       string
 		start, end int
 	}{
+		{"sequence_id", hdrSequenceIDStart, hdrSequenceIDEnd},
 		{"header salt", hdrSaltStart, hdrSaltEnd},
 		{"header checksum", hdrChecksumStart, hdrChecksumEnd},
 	} {
-		if bytes.Equal(got[r.start:r.end], make([]byte, r.end-r.start)) {
-			t.Errorf("this package wrote an all-zero %s", r.name)
+		if bytes.Equal(hdr[r.start:r.end], make([]byte, r.end-r.start)) {
+			zero = append(zero, r.name)
 		}
 	}
+	return zero
+}
+
+// TestSecondaryHeaderMatchesCryptsetup holds the SECOND header copy to the
+// same byte comparison as the primary (#167).
+//
+// The secondary is not a restatement of the primary. Its magic is different
+// ("SKUL\xba\xbe"), its hdr_offset names its own position, and its salt and
+// checksum are its own -- so a primary that matches cryptsetup says nothing
+// about whether the copy a reader falls back to does. The exclusions are the
+// primary's, for the primary's reasons: sequence_id records write history,
+// and the salt and checksum are random and derived respectively.
+func TestSecondaryHeaderMatchesCryptsetup(t *testing.T) {
+	requireCryptsetupDeclared(t)
+
+	for _, kdf := range canonicalKDFs() {
+		t.Run(kdf.name, func(t *testing.T) {
+			pair := buildCanonicalPair(t, kdf)
+			assertBinaryHeaderMatches(t, "secondary", pair.oursSecondary, pair.theirsSecondary)
+		})
+	}
+
+	// The comparison must be able to FAIL. A test that reads the wrong
+	// region, or excludes more than it says, passes against any container;
+	// corrupting one byte of cryptsetup's own secondary header and requiring
+	// the diff to name that byte and only that byte rules both out.
+	t.Run("detects-one-corrupted-byte", func(t *testing.T) {
+		pair := buildCanonicalPair(t, canonicalKDFs()[0])
+		for _, offset := range []int{
+			0,                    // the secondary magic
+			hdrSizeStart + 7,     // hdr_size
+			hdrOffsetStart + 6,   // hdr_offset, the field only the secondary sets non-zero
+			hdrSaltEnd,           // first UUID byte, just past an excluded range
+			hdrChecksumStart - 1, // last reserved byte before the checksum
+			LUKS2HeaderSize - 1,  // the final padding byte
+		} {
+			corrupted := bytes.Clone(pair.theirsSecondary)
+			corrupted[offset] ^= 0xff
+			differing := differingBinaryHeaderBytes(corrupted, pair.theirsSecondary)
+			if len(differing) != 1 || differing[0] != offset {
+				t.Errorf("corrupting secondary-header byte %d was reported as differing offsets %v", offset, differing)
+			}
+		}
+	})
+
+	// The non-zero guard on the excluded ranges must be able to fail too:
+	// zeroing any one of them in an otherwise valid secondary header must be
+	// reported, and by that range's name alone.
+	t.Run("rejects-zeroed-excluded-range", func(t *testing.T) {
+		pair := buildCanonicalPair(t, canonicalKDFs()[0])
+		if zero := allZeroExcludedRanges(pair.oursSecondary); len(zero) != 0 {
+			t.Fatalf("the unmodified secondary header already has all-zero excluded ranges %v", zero)
+		}
+		for _, r := range []struct {
+			name       string
+			start, end int
+		}{
+			{"sequence_id", hdrSequenceIDStart, hdrSequenceIDEnd},
+			{"header salt", hdrSaltStart, hdrSaltEnd},
+			{"header checksum", hdrChecksumStart, hdrChecksumEnd},
+		} {
+			zeroed := bytes.Clone(pair.oursSecondary)
+			clear(zeroed[r.start:r.end])
+			if got := allZeroExcludedRanges(zeroed); len(got) != 1 || got[0] != r.name {
+				t.Errorf("zeroing the secondary %s was reported as all-zero ranges %v", r.name, got)
+			}
+		}
+	})
 }
 
 // TestSequenceIDRecordsTheContainersWriteHistory is the semantic assertion the
