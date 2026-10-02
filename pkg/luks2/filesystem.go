@@ -7,6 +7,7 @@
 package luks2
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -17,10 +18,18 @@ import (
 type FilesystemType string
 
 const (
-	// FilesystemExt2 is the ext2 filesystem
+	// FilesystemExt2 names the ext2 filesystem. It is deliberately NOT
+	// supported: ext2 has no journal, and the owner ruled ext2 and ext3 out
+	// of this library's supported set (#195). The constant remains so the
+	// name can be refused explicitly; MakeFilesystemWithOptions and
+	// CheckFilesystem return ErrUnsupportedFilesystem for it.
 	FilesystemExt2 FilesystemType = "ext2"
 
-	// FilesystemExt3 is the ext3 filesystem
+	// FilesystemExt3 names the ext3 filesystem. It is NOT supported: this
+	// library does not offer ext3 on an encrypted volume (owner ruling, #195)
+	// -- ext4 is the ext-family filesystem it supports. The constant remains
+	// so the name can be refused explicitly; MakeFilesystemWithOptions and
+	// CheckFilesystem return ErrUnsupportedFilesystem for it.
 	FilesystemExt3 FilesystemType = "ext3"
 
 	// FilesystemExt4 is the ext4 filesystem
@@ -147,24 +156,98 @@ type ZFSOptions struct {
 	Properties map[string]string
 }
 
-// SupportedFilesystems returns the list of supported filesystem types
-func SupportedFilesystems() []FilesystemType {
-	return []FilesystemType{
-		FilesystemExt4,
-		FilesystemXFS,
-		FilesystemZFS,
-		FilesystemFAT32,
-	}
+// supportedFilesystems is the single source of truth for the supported set
+// (#195). SupportedFilesystems and IsFilesystemSupported read it, and
+// MakeFilesystemWithOptions and CheckFilesystem refuse anything not in it.
+// Every entry must have a filesystemDispatch entry with both a make and a
+// check implementation; TestSupportedFilesystemsCanBeCreatedAndChecked
+// enforces that in both directions.
+var supportedFilesystems = []FilesystemType{
+	FilesystemExt4,
+	FilesystemXFS,
+	FilesystemZFS,
+	FilesystemFAT32,
 }
 
-// IsFilesystemSupported checks if a filesystem type is supported
+// filesystemOps is how one supported filesystem is created and checked.
+type filesystemOps struct {
+	// make creates the filesystem on devicePath.
+	make func(devicePath string, opts *FilesystemOptions) error
+
+	// check checks the filesystem on devicePath, running its tools through
+	// run, and interprets their exit status. See CheckFilesystem for what
+	// repair means for each type.
+	check func(run commandRunner, devicePath string, repair bool) error
+}
+
+// commandRunner runs an external program and returns its combined stdout and
+// stderr. A program that ran and exited nonzero is reported as an error with
+// an ExitCode() int method, as *exec.ExitError is.
+type commandRunner func(name string, args ...string) ([]byte, error)
+
+// execCommand is the commandRunner CheckFilesystem uses.
+func execCommand(name string, args ...string) ([]byte, error) {
+	return exec.Command(name, args...).CombinedOutput() // #nosec G204 -- name is a fixed checker from filesystemDispatch; args are fixed flags plus the caller's device path
+}
+
+// runCheck runs one checker command and reports any failure as a
+// *FilesystemCommandError. The device is the last argument.
+func runCheck(run commandRunner, name string, args ...string) error {
+	output, err := run(name, args...)
+	if err != nil {
+		return &FilesystemCommandError{Command: name, Device: args[len(args)-1], Output: string(output), Err: err}
+	}
+	return nil
+}
+
+// exitStatus returns the exit status carried by err, or -1 when err is nil or
+// is not a program's nonzero exit (for example, the program was not found).
+func exitStatus(err error) int {
+	var ec interface{ ExitCode() int }
+	if err == nil || !errors.As(err, &ec) {
+		return -1
+	}
+	return ec.ExitCode()
+}
+
+// filesystemDispatch holds the create and check implementation for every
+// entry in supportedFilesystems, and for nothing else.
+var filesystemDispatch = map[FilesystemType]filesystemOps{
+	FilesystemExt4:  {make: makeExt4, check: checkExt4},
+	FilesystemXFS:   {make: makeXFS, check: checkXFS},
+	FilesystemZFS:   {make: makeZFS, check: checkZFS},
+	FilesystemFAT32: {make: makeFAT32, check: checkFAT32},
+}
+
+// SupportedFilesystems returns the filesystem types this package can create
+// and check. The returned slice is a copy; changing it does not change the
+// supported set.
+func SupportedFilesystems() []FilesystemType {
+	out := make([]FilesystemType, len(supportedFilesystems))
+	copy(out, supportedFilesystems)
+	return out
+}
+
+// IsFilesystemSupported reports whether fstype is in SupportedFilesystems().
+// It agrees with MakeFilesystemWithOptions and CheckFilesystem: both refuse
+// exactly the types this returns false for.
 func IsFilesystemSupported(fstype FilesystemType) bool {
-	for _, fs := range SupportedFilesystems() {
+	for _, fs := range supportedFilesystems {
 		if fs == fstype {
 			return true
 		}
 	}
 	return false
+}
+
+// dispatchFor returns the implementation for fstype, or an error wrapping
+// ErrUnsupportedFilesystem when fstype is not in SupportedFilesystems().
+func dispatchFor(fstype FilesystemType) (filesystemOps, error) {
+	ops, ok := filesystemDispatch[fstype]
+	if !IsFilesystemSupported(fstype) || !ok {
+		return filesystemOps{}, &UnsupportedFilesystemError{Filesystem: fstype}
+	}
+	return ops, nil
 }
 
 // MakeFilesystem creates a filesystem on an unlocked LUKS volume
@@ -174,6 +257,11 @@ func MakeFilesystem(device, fstype, label string) error {
 
 // MakeFilesystemWithOptions creates a filesystem with detailed options
 func MakeFilesystemWithOptions(device string, fstype FilesystemType, opts *FilesystemOptions) error {
+	ops, err := dispatchFor(fstype)
+	if err != nil {
+		return err
+	}
+
 	if opts == nil {
 		opts = &FilesystemOptions{}
 	}
@@ -189,31 +277,16 @@ func MakeFilesystemWithOptions(device string, fstype FilesystemType, opts *Files
 	}
 
 	if !deviceExists {
-		return fmt.Errorf("device not found: %s (is volume unlocked?)", device)
+		return &DeviceError{Device: device, Op: "make filesystem", Err: ErrVolumeNotUnlocked}
 	}
 
 	// Get the actual device path
 	devicePath, err := GetMappedDevicePath(device)
 	if err != nil {
-		return fmt.Errorf("failed to get device path: %w", err)
+		return &DeviceError{Device: device, Op: "get mapped device path", Err: err}
 	}
 
-	switch fstype {
-	case FilesystemExt2:
-		return makeExtFS(devicePath, "mkfs.ext2", opts)
-	case FilesystemExt3:
-		return makeExtFS(devicePath, "mkfs.ext3", opts)
-	case FilesystemExt4:
-		return makeExt4(devicePath, opts)
-	case FilesystemXFS:
-		return makeXFS(devicePath, opts)
-	case FilesystemZFS:
-		return makeZFS(devicePath, opts)
-	case FilesystemFAT32:
-		return makeFAT32(devicePath, opts)
-	default:
-		return fmt.Errorf("unsupported filesystem type: %s", fstype)
-	}
+	return ops.make(devicePath, opts)
 }
 
 // makeExt4 creates an ext4 filesystem
@@ -288,36 +361,6 @@ func makeExt4(devicePath string, opts *FilesystemOptions) error {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("mkfs.ext4 failed: %w\nOutput: %s", err, string(output))
-	}
-
-	return nil
-}
-
-// makeExtFS creates an ext2 or ext3 filesystem using the specified mkfs command
-func makeExtFS(devicePath string, mkfsCmd string, opts *FilesystemOptions) error {
-	args := []string{}
-
-	// Label
-	if opts.Label != "" {
-		args = append(args, "-L", opts.Label)
-	}
-
-	// Block size
-	if opts.BlockSize > 0 {
-		args = append(args, "-b", fmt.Sprintf("%d", opts.BlockSize))
-	}
-
-	// Force
-	if opts.Force {
-		args = append(args, "-F")
-	}
-
-	args = append(args, devicePath)
-
-	cmd := exec.Command(mkfsCmd, args...) // #nosec G204 -- mkfsCmd is from trusted internal constant
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%s failed: %w\nOutput: %s", mkfsCmd, err, string(output))
 	}
 
 	return nil
@@ -496,41 +539,78 @@ func makeFAT32(devicePath string, opts *FilesystemOptions) error {
 	return nil
 }
 
-// CheckFilesystem checks the filesystem on a device
+// CheckFilesystem checks the filesystem on a device. Every type in
+// SupportedFilesystems() can be checked; any other type is refused with
+// ErrUnsupportedFilesystem before a command is run.
+//
+// For ext4, xfs and vfat the check is read-only unless repair is set, and it
+// returns nil only when the filesystem is clean or, with repair, has been
+// repaired. With repair, vfat repairs that fsck.fat reports by exiting 1 are
+// confirmed by a read-only recheck and then count as success.
+//
+// ZFS is the exception, and repair does not change it:
+//   - devicePath is the name of a ZFS pool, not a device path.
+//   - It starts `zpool scrub` and returns once the scrub has started. It does
+//     not wait for the scrub or report what it finds; read `zpool status`
+//     for that.
+//   - A scrub is not read-only. On a pool with redundancy (mirror, raidz) it
+//     repairs damaged data as it goes, even when repair is false.
 func CheckFilesystem(devicePath string, fstype FilesystemType, repair bool) error {
-	var cmd *exec.Cmd
-
-	switch fstype {
-	case FilesystemExt4:
-		args := []string{"-n"} // Read-only check by default
-		if repair {
-			args = []string{"-p"} // Auto-repair
-		}
-		args = append(args, devicePath)
-		cmd = exec.Command("e2fsck", args...)
-
-	case FilesystemXFS:
-		args := []string{"-n"} // Read-only check by default
-		if repair {
-			args = []string{} // XFS repairs automatically
-		}
-		args = append(args, devicePath)
-		cmd = exec.Command("xfs_repair", args...)
-
-	case FilesystemZFS:
-		// ZFS scrub is the equivalent
-		args := []string{"scrub", devicePath}
-		cmd = exec.Command("zpool", args...) // #nosec G204 -- args constructed from validated options
-
-	default:
-		return fmt.Errorf("filesystem check not supported for: %s", fstype)
-	}
-
-	output, err := cmd.CombinedOutput()
+	ops, err := dispatchFor(fstype)
 	if err != nil {
-		return fmt.Errorf("filesystem check failed: %w\nOutput: %s", err, string(output))
+		return err
+	}
+	return ops.check(execCommand, devicePath, repair)
+}
+
+// checkExt4 checks an ext4 filesystem with e2fsck.
+func checkExt4(run commandRunner, devicePath string, repair bool) error {
+	if repair {
+		return runCheck(run, "e2fsck", "-p", devicePath) // Auto-repair
+	}
+	return runCheck(run, "e2fsck", "-n", devicePath) // Read-only
+}
+
+// checkXFS checks an XFS filesystem with xfs_repair.
+func checkXFS(run commandRunner, devicePath string, repair bool) error {
+	if repair {
+		return runCheck(run, "xfs_repair", devicePath) // XFS repairs automatically
+	}
+	return runCheck(run, "xfs_repair", "-n", devicePath) // Read-only
+}
+
+// checkZFS starts a scrub of the ZFS pool named devicePath, the ZFS
+// equivalent of fsck. It ignores repair: see CheckFilesystem.
+func checkZFS(run commandRunner, devicePath string, _ bool) error {
+	return runCheck(run, "zpool", "scrub", devicePath)
+}
+
+// fatRepairedOrInconsistent is the fsck.fat exit status that means either
+// "changes were written" or "stopped on an internal inconsistency". dosfstools
+// exits 1 in both cases, so with -a it does not by itself say whether the
+// repair worked.
+const fatRepairedOrInconsistent = 1
+
+// checkFAT32 checks a FAT filesystem with fsck.fat, from the same dosfstools
+// package as the mkfs.fat that makeFAT32 runs.
+//
+// Read-only (-n), any nonzero exit is a failure: exit 1 means problems were
+// found. Repairing (-a), exit 1 is ambiguous (see fatRepairedOrInconsistent),
+// so it is followed by a read-only recheck: a clean recheck means the repair
+// worked, and anything else returns the repair run's error, whose output says
+// what fsck.fat found.
+func checkFAT32(run commandRunner, devicePath string, repair bool) error {
+	if !repair {
+		return runCheck(run, "fsck.fat", "-n", devicePath) // Read-only
 	}
 
+	err := runCheck(run, "fsck.fat", "-a", devicePath) // Auto-repair
+	if exitStatus(err) != fatRepairedOrInconsistent {
+		return err
+	}
+	if runCheck(run, "fsck.fat", "-n", devicePath) != nil {
+		return err
+	}
 	return nil
 }
 

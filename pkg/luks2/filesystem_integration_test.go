@@ -7,6 +7,7 @@
 package luks2
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,27 +26,6 @@ func waitForDevice(name string, timeout time.Duration) bool {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return false
-}
-
-// requireMkfs fails the calling test when mkfs.<fstype> is not on PATH, and
-// does so LOUDLY rather than skipping: test/integration/Dockerfile installs
-// e2fsprogs, which carries mkfs.ext2, mkfs.ext3 and mkfs.ext4 together, so
-// this tier's image never lacks one without lacking all three. Reaching this
-// branch therefore means the image was built wrong or bypassed, not that the
-// filesystem is optional -- the same reasoning requireCryptsetup applies in
-// conformance_test.go (#90), and the same remedy: fix the environment first,
-// then fail loudly if it is ever wrong, instead of quietly reporting a
-// filesystem was never exercised.
-func requireMkfs(t *testing.T, fstype string) {
-	t.Helper()
-
-	tool := "mkfs." + fstype
-	if _, err := exec.LookPath(tool); err != nil {
-		t.Fatalf("%s IS NOT INSTALLED on this host (%v). test/integration/Dockerfile "+
-			"installs e2fsprogs specifically so mkfs.ext2, mkfs.ext3 and mkfs.ext4 are "+
-			"all present; install e2fsprogs (Debian/Ubuntu: e2fsprogs) to run this test.",
-			tool, err)
-	}
 }
 
 // TestMakeFilesystemExt4 tests creating an ext4 filesystem on a LUKS volume
@@ -128,134 +108,6 @@ func TestMakeFilesystemExt4(t *testing.T) {
 	fstype := strings.TrimSpace(string(output))
 	if fstype != "ext2/ext3" && fstype != "ext4" {
 		t.Errorf("Expected ext4 filesystem, got: %s", fstype)
-	}
-}
-
-// TestMakeFilesystemExt3 tests creating an ext3 filesystem
-func TestMakeFilesystemExt3(t *testing.T) {
-	requireRoot(t)
-	requireMkfs(t, "ext3")
-
-	tmpfile, err := os.CreateTemp("", "luks-fs-ext3-*.img")
-	if err != nil {
-		t.Fatalf("Failed to create temp file: %v", err)
-	}
-	volumePath := tmpfile.Name()
-	defer os.Remove(volumePath)
-
-	if err := tmpfile.Truncate(100 * 1024 * 1024); err != nil {
-		t.Fatalf("Failed to truncate: %v", err)
-	}
-	tmpfile.Close()
-
-	passphrase := []byte("test-fs-ext3-pass")
-	volumeName := runVolume(t, "test-fs-ext3")
-
-	// Format LUKS volume
-	opts := FormatOptions{
-		Device:        volumePath,
-		Passphrase:    passphrase,
-		KDFType:       "pbkdf2",
-		PBKDFIterTime: 100,
-	}
-
-	if err := Format(opts); err != nil {
-		t.Fatalf("Format failed: %v", err)
-	}
-
-	// Setup loop device
-	loopDev, err := SetupLoopDevice(volumePath)
-	if err != nil {
-		t.Fatalf("Failed to setup loop device: %v", err)
-	}
-	defer DetachLoopDevice(loopDev)
-
-	// Unlock volume
-	// Registered BEFORE the mapping can exist, so a partial or rolled-back
-	// unlock cannot leave one behind either (#100). Idempotent.
-	defer releaseVolume(t, volumeName)
-	if err := Unlock(loopDev, passphrase, volumeName); err != nil {
-		t.Fatalf("Unlock failed: %v", err)
-	}
-	defer releaseVolume(t, volumeName)
-
-	// Create ext3 filesystem
-	if err := MakeFilesystem(volumeName, "ext3", "test-ext3"); err != nil {
-		t.Fatalf("MakeFilesystem failed: %v", err)
-	}
-
-	// Verify filesystem exists by checking device mapper path
-	devicePath := "/dev/mapper/" + volumeName
-	if _, err := os.Stat(devicePath); err != nil {
-		t.Errorf("Device mapper path not found: %v", err)
-	}
-}
-
-// TestMakeFilesystemExt2 tests creating an ext2 filesystem
-func TestMakeFilesystemExt2(t *testing.T) {
-	requireRoot(t)
-	requireMkfs(t, "ext2")
-
-	tmpfile, err := os.CreateTemp("", "luks-fs-ext2-*.img")
-	if err != nil {
-		t.Fatalf("Failed to create temp file: %v", err)
-	}
-	volumePath := tmpfile.Name()
-	defer os.Remove(volumePath)
-
-	if err := tmpfile.Truncate(100 * 1024 * 1024); err != nil {
-		t.Fatalf("Failed to truncate: %v", err)
-	}
-	tmpfile.Close()
-
-	passphrase := []byte("test-fs-ext2-pass")
-	volumeName := runVolume(t, "test-fs-ext2")
-
-	// Format LUKS volume
-	opts := FormatOptions{
-		Device:        volumePath,
-		Passphrase:    passphrase,
-		KDFType:       "pbkdf2",
-		PBKDFIterTime: 100,
-	}
-
-	if err := Format(opts); err != nil {
-		t.Fatalf("Format failed: %v", err)
-	}
-
-	// Setup loop device
-	loopDev, err := SetupLoopDevice(volumePath)
-	if err != nil {
-		t.Fatalf("Failed to setup loop device: %v", err)
-	}
-	defer DetachLoopDevice(loopDev)
-
-	// Unlock volume
-	// Registered BEFORE the mapping can exist, so a partial or rolled-back
-	// unlock cannot leave one behind either (#100). Idempotent.
-	defer releaseVolume(t, volumeName)
-	if err := Unlock(loopDev, passphrase, volumeName); err != nil {
-		t.Fatalf("Unlock failed: %v", err)
-	}
-	defer releaseVolume(t, volumeName)
-
-	// Create ext2 filesystem
-	if err := MakeFilesystem(volumeName, "ext2", "test-ext2"); err != nil {
-		t.Fatalf("MakeFilesystem failed: %v", err)
-	}
-
-	// Wait for device-mapper to stabilize after filesystem creation
-	devicePath := "/dev/mapper/" + volumeName
-	var deviceExists bool
-	for i := 0; i < 20; i++ {
-		if _, err := os.Stat(devicePath); err == nil {
-			deviceExists = true
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if !deviceExists {
-		t.Errorf("Device mapper path not found after waiting: %s", devicePath)
 	}
 }
 
@@ -375,6 +227,29 @@ func TestMakeFilesystemErrors(t *testing.T) {
 				t.Errorf("MakeFilesystem() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// TestCheckFilesystemFailureIsTypedOnHost runs the real e2fsck against a
+// device that does not exist and checks the failure comes back as a
+// *FilesystemCommandError naming the command and device, not as a refusal.
+// The in-process unit test covers the same path through an injected runner.
+func TestCheckFilesystemFailureIsTypedOnHost(t *testing.T) {
+	const dev = "/dev/luks2-test-no-such-device"
+	err := CheckFilesystem(dev, FilesystemExt4, false)
+
+	var fce *FilesystemCommandError
+	if !errors.As(err, &fce) {
+		t.Fatalf("CheckFilesystem = %v (%T), want *FilesystemCommandError", err, err)
+	}
+	if fce.Command != "e2fsck" || fce.Device != dev {
+		t.Errorf("FilesystemCommandError{Command: %q, Device: %q}, want e2fsck on %q", fce.Command, fce.Device, dev)
+	}
+	if fce.Err == nil || errors.Unwrap(err) != fce.Err {
+		t.Errorf("Unwrap() = %v, want the exec error %v", errors.Unwrap(err), fce.Err)
+	}
+	if errors.Is(err, ErrUnsupportedFilesystem) {
+		t.Errorf("a failed check of a supported type matched ErrUnsupportedFilesystem: %v", err)
 	}
 }
 

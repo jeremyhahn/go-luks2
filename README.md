@@ -251,7 +251,16 @@ luks2.GetFilesystemInfo(device)                // *FilesystemInfo, error
 luks2.SupportedFilesystems()                   // []FilesystemType
 ```
 
-Supported filesystems: ext2, ext3, ext4, xfs, zfs, vfat
+Supported filesystems: ext4, xfs, zfs, vfat — exactly what
+`SupportedFilesystems()` returns, and every one can be created and checked.
+ext2 and ext3 are refused with `ErrUnsupportedFilesystem`: ext2 has no
+journal, and this library does not offer either filesystem on an encrypted
+volume.
+
+`CheckFilesystem` is read-only unless `repair` is set, except for zfs. For zfs
+the device argument is a pool name, and the call only starts `zpool scrub`
+and returns; read `zpool status` for the result. A scrub repairs damaged data
+on a pool with redundancy even when `repair` is false.
 
 ### Loop Devices
 

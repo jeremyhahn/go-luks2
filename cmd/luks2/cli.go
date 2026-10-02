@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/jeremyhahn/go-enclave"
 
@@ -269,7 +270,7 @@ func (c *CLI) cmdCreate() int {
 		_, _ = fmt.Fprintln(c.Stdout, "  luks2 create encrypted.luks 100M")
 		_, _ = fmt.Fprintln(c.Stdout, "  luks2 create encrypted.luks 1G ext4")
 		_, _ = fmt.Fprintln(c.Stdout, "\nSize suffixes: K, M, G, T")
-		_, _ = fmt.Fprintln(c.Stdout, "Filesystem types: ext4, ext3, ext2 (default: ext4)")
+		_, _ = fmt.Fprintln(c.Stdout, filesystemTypesHelp())
 		_, _ = fmt.Fprintln(c.Stdout, "\nOptions:")
 		_, _ = fmt.Fprintf(c.Stdout, "%s", keyFileHelp)
 		return 1
@@ -284,6 +285,47 @@ func (c *CLI) cmdCreate() int {
 	return c.cmdCreateFile(path, args[1:], *key)
 }
 
+// cliExcludedFilesystems are library-supported filesystems that create cannot
+// build. create calls MakeFilesystem, which passes only a label; ZFS needs
+// ZFSOptions with a pool name, so offering it would advertise a volume the
+// command cannot finish formatting.
+var cliExcludedFilesystems = map[luks2.FilesystemType]bool{
+	luks2.FilesystemZFS: true,
+}
+
+// cliFilesystems returns the filesystems create can build: the library's
+// SupportedFilesystems() less cliExcludedFilesystems, so the help can never
+// offer a type the library refuses (#195).
+func cliFilesystems() []luks2.FilesystemType {
+	var out []luks2.FilesystemType
+	for _, fs := range luks2.SupportedFilesystems() {
+		if !cliExcludedFilesystems[fs] {
+			out = append(out, fs)
+		}
+	}
+	return out
+}
+
+// isCLIFilesystem reports whether create can build fstype.
+func isCLIFilesystem(fstype string) bool {
+	for _, fs := range cliFilesystems() {
+		if string(fs) == fstype {
+			return true
+		}
+	}
+	return false
+}
+
+// filesystemTypesHelp lists the filesystems create accepts.
+func filesystemTypesHelp() string {
+	fss := cliFilesystems()
+	names := make([]string, 0, len(fss))
+	for _, fs := range fss {
+		names = append(names, string(fs))
+	}
+	return "Filesystem types: " + strings.Join(names, ", ") + " (default: ext4)"
+}
+
 // cmdCreateFile creates a LUKS2 volume in a file with full automation.
 //
 // args are the positional arguments after the filename: the size, then
@@ -294,7 +336,7 @@ func (c *CLI) cmdCreateFile(filename string, args []string, key KeySource) int {
 		_, _ = fmt.Fprintln(c.Stdout, "Usage: luks2 create <file> <size> [filesystem]")
 		_, _ = fmt.Fprintln(c.Stdout, "Example: luks2 create encrypted.luks 100M ext4")
 		_, _ = fmt.Fprintln(c.Stdout, "\nSize suffixes: K, M, G, T")
-		_, _ = fmt.Fprintln(c.Stdout, "Filesystem types: ext4, ext3, ext2 (default: ext4)")
+		_, _ = fmt.Fprintln(c.Stdout, filesystemTypesHelp())
 		return 1
 	}
 
@@ -303,6 +345,15 @@ func (c *CLI) cmdCreateFile(filename string, args []string, key KeySource) int {
 	fstype := "ext4"
 	if len(args) > 1 {
 		fstype = args[1]
+	}
+
+	// Refuse a filesystem create cannot build before anything is created,
+	// formatted or unlocked: failing at the MakeFilesystem step would leave
+	// an unlocked, unformatted volume behind (#195).
+	if !isCLIFilesystem(fstype) {
+		_, _ = fmt.Fprintf(c.Stderr, "Error: Unsupported filesystem: %s\n", fstype)
+		_, _ = fmt.Fprintln(c.Stderr, filesystemTypesHelp())
+		return 1
 	}
 
 	c.showBanner()

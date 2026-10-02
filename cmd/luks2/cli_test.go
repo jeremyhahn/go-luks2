@@ -242,6 +242,85 @@ func TestCLI_Create_NoArgs(t *testing.T) {
 	}
 }
 
+// TestCLI_Create_FilesystemTypesHelp checks that both create usage messages
+// list exactly the filesystems create can build: not ext2 or ext3, which the
+// library refuses (#195), and not zfs, which needs a pool name create does not
+// take.
+func TestCLI_Create_FilesystemTypesHelp(t *testing.T) {
+	want := "Filesystem types: ext4, xfs, vfat (default: ext4)"
+
+	for _, args := range [][]string{
+		{"luks2", "create"},
+		{"luks2", "create", "test.luks"},
+	} {
+		cli, stdout, _ := newTestCLI(args)
+		if code := cli.Run(); code != 1 {
+			t.Errorf("%v: expected exit code 1, got %d", args, code)
+		}
+		out := stdout.String()
+		if !strings.Contains(out, want) {
+			t.Errorf("%v: usage does not contain %q:\n%s", args, want, out)
+		}
+		if strings.Contains(out, "ext2") || strings.Contains(out, "ext3") {
+			t.Errorf("%v: usage offers an unsupported ext2/ext3:\n%s", args, out)
+		}
+		if strings.Contains(out, "zfs") {
+			t.Errorf("%v: usage offers zfs, which create cannot build:\n%s", args, out)
+		}
+	}
+}
+
+// TestCLI_Create_RejectsUnsupportedFilesystem checks that create refuses a
+// filesystem it cannot build -- ext2/ext3, which the library refuses (#195),
+// zfs, which needs a pool name, and an unknown type -- with a nonzero exit and
+// before the file is created, formatted, attached or unlocked. Refusing only
+// at the MakeFilesystem step would leave an unlocked, unformatted volume.
+func TestCLI_Create_RejectsUnsupportedFilesystem(t *testing.T) {
+	for _, fstype := range []string{"ext2", "ext3", "zfs", "btrfs"} {
+		t.Run(fstype, func(t *testing.T) {
+			cli, _, stderr := newTestCLI([]string{"luks2", "create", "test.luks", "10M", fstype})
+			fs := &MockFileSystem{Files: make(map[string]bool)}
+			cli.FS = fs
+			touched := false
+			cli.Luks = &MockLuksOperations{
+				FormatFunc:          func(luks2.FormatOptions) error { touched = true; return nil },
+				SetupLoopDeviceFunc: func(string) (string, error) { touched = true; return "/dev/loop0", nil },
+				UnlockFunc:          func(string, []byte, string) error { touched = true; return nil },
+				MakeFilesystemFunc:  func(string, string, string) error { touched = true; return nil },
+			}
+
+			if code := cli.Run(); code != 1 {
+				t.Fatalf("create ... %s exited %d, want 1", fstype, code)
+			}
+			if fs.Files["test.luks"] {
+				t.Errorf("create ... %s created the file before refusing", fstype)
+			}
+			if touched {
+				t.Errorf("create ... %s formatted, attached, unlocked or formatted a filesystem before refusing", fstype)
+			}
+			if !strings.Contains(stderr.String(), "Unsupported filesystem: "+fstype) {
+				t.Errorf("stderr = %q, want it to name the unsupported filesystem", stderr.String())
+			}
+		})
+	}
+}
+
+// TestCLI_CliFilesystems_SubsetOfLibrary checks that every type create offers
+// is one the library supports, and that every exclusion names a supported
+// type (a stale exclusion would hide nothing and mislead the reader).
+func TestCLI_CliFilesystems_SubsetOfLibrary(t *testing.T) {
+	for _, fs := range cliFilesystems() {
+		if !luks2.IsFilesystemSupported(fs) {
+			t.Errorf("create offers %q, which the library does not support", fs)
+		}
+	}
+	for fs := range cliExcludedFilesystems {
+		if !luks2.IsFilesystemSupported(fs) {
+			t.Errorf("exclusion %q is not a library-supported filesystem", fs)
+		}
+	}
+}
+
 func TestCLI_Create_FileNoSize(t *testing.T) {
 	cli, stdout, _ := newTestCLI([]string{"luks2", "create", "test.luks"})
 

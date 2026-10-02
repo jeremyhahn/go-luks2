@@ -39,7 +39,7 @@ For file volumes, the command automatically:
 |----------|-------------|
 | `path` | Block device (e.g., `/dev/sdb1`) or file path |
 | `size` | Size for file volumes (required for files, ignored for devices) |
-| `filesystem` | Filesystem type: `ext4`, `ext3`, `ext2` (default: `ext4`) |
+| `filesystem` | Filesystem type: `ext4`, `xfs`, `vfat` (default: `ext4`). `ext2` and `ext3` are not supported. `zfs` is supported by the library but not by this command, because it needs a pool name (`ZFSOptions`) that `create` does not take. |
 
 ### Size Suffixes
 
@@ -72,8 +72,8 @@ sudo luks2 create myvolume.luks 100M
 # Create a 1GB encrypted file with ext4
 sudo luks2 create backup.luks 1G ext4
 
-# Create with ext3 filesystem
-sudo luks2 create legacy.luks 500M ext3
+# Create with XFS filesystem
+sudo luks2 create data.luks 500M xfs
 ```
 
 ### Automated workflow

@@ -66,6 +66,12 @@ var (
 	// thing for an operator to be told.
 	ErrUnsupportedHash = errors.New("unsupported hash algorithm")
 
+	// ErrUnsupportedFilesystem indicates a filesystem type that is not in
+	// SupportedFilesystems(). MakeFilesystemWithOptions and CheckFilesystem
+	// raise it before touching a device. ext2 and ext3 are deliberately in
+	// this category (#195); see FilesystemExt2 and FilesystemExt3.
+	ErrUnsupportedFilesystem = errors.New("unsupported filesystem type")
+
 	// ErrInvalidKeyslot indicates the keyslot is invalid or unavailable
 	ErrInvalidKeyslot = errors.New("invalid keyslot")
 
@@ -807,6 +813,44 @@ func (e *KDFCalibrationError) Unwrap() error { return e.Err }
 func (e *KDFCalibrationError) Is(target error) bool {
 	return target == ErrKDFCalibration
 }
+
+// UnsupportedFilesystemError names the filesystem type that
+// MakeFilesystemWithOptions or CheckFilesystem refused because it is not in
+// SupportedFilesystems(). It unwraps to ErrUnsupportedFilesystem.
+type UnsupportedFilesystemError struct {
+	// Filesystem is the type the caller asked for.
+	Filesystem FilesystemType
+}
+
+func (e *UnsupportedFilesystemError) Error() string {
+	return fmt.Sprintf("%s: %q", ErrUnsupportedFilesystem.Error(), string(e.Filesystem))
+}
+
+func (e *UnsupportedFilesystemError) Unwrap() error { return ErrUnsupportedFilesystem }
+
+// FilesystemCommandError reports that an external filesystem tool (a checker
+// such as e2fsck or fsck.fat) exited unsuccessfully. It carries the tool's
+// combined output so the cause can be read without re-running it, and keeps the
+// exec error reachable through Unwrap.
+type FilesystemCommandError struct {
+	// Command is the program that was run.
+	Command string
+
+	// Device is the device path it was run against.
+	Device string
+
+	// Output is the program's combined stdout and stderr.
+	Output string
+
+	// Err is the error from running the program, typically an *exec.ExitError.
+	Err error
+}
+
+func (e *FilesystemCommandError) Error() string {
+	return fmt.Sprintf("%s %s failed: %v\nOutput: %s", e.Command, e.Device, e.Err, e.Output)
+}
+
+func (e *FilesystemCommandError) Unwrap() error { return e.Err }
 
 // UnsupportedRequirementError names the requirement that makes a container
 // unwritable by this package.

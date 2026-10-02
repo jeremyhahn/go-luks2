@@ -22,6 +22,7 @@ func TestSentinelErrors(t *testing.T) {
 		ErrNotMounted,
 		ErrUnsupportedKDF,
 		ErrUnsupportedHash,
+		ErrUnsupportedFilesystem,
 		ErrInvalidKeyslot,
 		ErrNoKeyslots,
 		ErrInvalidSize,

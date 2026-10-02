@@ -65,8 +65,8 @@ The `mount` command defaults to `ext4`. If your volume uses a different filesyst
 # For XFS
 sudo mount -t xfs /dev/mapper/myvolume /mnt/encrypted
 
-# For ext3
-sudo mount -t ext3 /dev/mapper/myvolume /mnt/encrypted
+# For vfat
+sudo mount -t vfat /dev/mapper/myvolume /mnt/encrypted
 ```
 
 ## Auto-created Mountpoints
