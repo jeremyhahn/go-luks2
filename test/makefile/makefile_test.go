@@ -6,6 +6,8 @@ package makefile
 
 import (
 	"bytes"
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -165,13 +167,72 @@ func goEnvGOPATH(t *testing.T, env []string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// ownedGOPATH returns an empty GOPATH that belongs to this test and is removed
+// with it, whatever the go command leaves inside.
+//
+// The Makefile runs `$(GO) env GOPATH` at parse time. When that go is older
+// than go.mod's go line -- as the goFallback install can be on a host whose
+// PATH carries a newer one -- GOTOOLCHAIN=auto downloads the required
+// toolchain into the module cache under this GOPATH, and the go command
+// writes the module cache read-only. t.TempDir's own RemoveAll then fails
+// with "permission denied" and fails the test for something it did not test
+// (#230). So the tree is made writable first: t.Cleanup runs cleanups last
+// registered first, and this one is registered after t.TempDir's.
+func ownedGOPATH(t *testing.T) string {
+	t.Helper()
+	gopath := t.TempDir()
+	t.Cleanup(func() {
+		if err := makeTreeWritable(gopath); err != nil {
+			t.Errorf("making the test's GOPATH %s removable: %v", gopath, err)
+		}
+	})
+	return gopath
+}
+
+// goPathEnv returns set (a new map when nil) with GOPATH set to gopath and
+// GOMODCACHE pinned to gopath/pkg/mod. Pinning GOMODCACHE keeps a host's own
+// GOMODCACHE, from the environment or `go env -w`, from sending a toolchain
+// download outside the directory ownedGOPATH cleans.
+func goPathEnv(gopath string, set map[string]string) map[string]string {
+	if set == nil {
+		set = map[string]string{}
+	}
+	set["GOPATH"] = gopath
+	set["GOMODCACHE"] = filepath.Join(gopath, "pkg", "mod")
+	return set
+}
+
+// makeTreeWritable adds owner write (and, for directories, owner execute)
+// permission to root and everything under it, so os.RemoveAll can delete a
+// module cache the go command wrote read-only. Symbolic links are not
+// followed: only what is inside the tree is changed.
+func makeTreeWritable(root string) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		add := fs.FileMode(0o200)
+		if d.IsDir() {
+			add = 0o700
+		}
+		return os.Chmod(path, info.Mode().Perm()|add)
+	})
+}
+
 // TestGoVariablesAreSimplyExpanded pins the mechanism of the #205 fix and does
 // so on every GNU make version. The symptom only appears under make 4.4+,
 // which exports environment-origin variables into $(shell ...); a make older
 // than that would pass the stderr assertions below against the defect. A
 // recursive (=) GO or GOPATH fails here wherever this runs.
 func TestGoVariablesAreSimplyExpanded(t *testing.T) {
-	vars, stderr := probe(t, environ(nil, map[string]string{"GOPATH": t.TempDir()}))
+	vars, stderr := probe(t, environ(nil, goPathEnv(ownedGOPATH(t), nil)))
 	assertNoEnvDiagnostic(t, stderr)
 	if got, want := vars["FLAVOR"], "simple simple"; got != want {
 		t.Errorf("flavor of GO and GOPATH = %q, want %q: a recursive assignment re-enters GOPATH's $(shell) "+
@@ -182,8 +243,8 @@ func TestGoVariablesAreSimplyExpanded(t *testing.T) {
 // TestNoEnvDiagnosticWithGOPATHSet is the issue's own verification: GOPATH in
 // the environment, as the build workers have it.
 func TestNoEnvDiagnosticWithGOPATHSet(t *testing.T) {
-	gopath := t.TempDir()
-	env := environ(nil, map[string]string{"GOPATH": gopath})
+	gopath := ownedGOPATH(t)
+	env := environ(nil, goPathEnv(gopath, nil))
 
 	vars, stderr := probe(t, env)
 	assertNoEnvDiagnostic(t, stderr)
@@ -222,7 +283,7 @@ func TestGOPATHDefaultsWhenUnset(t *testing.T) {
 // TestGoFallbackWhenNotOnPATH keeps the `which` fallback the fix had to
 // preserve: with no go on PATH, GO is the fixed install path.
 func TestGoFallbackWhenNotOnPATH(t *testing.T) {
-	env := environ(nil, map[string]string{"PATH": pathWithoutGo(t), "GOPATH": t.TempDir()})
+	env := environ(nil, goPathEnv(ownedGOPATH(t), map[string]string{"PATH": pathWithoutGo(t)}))
 
 	vars, stderr := probe(t, env)
 	assertNoEnvDiagnostic(t, stderr)
@@ -274,8 +335,8 @@ func TestProbesIgnoreParentMakeOverrides(t *testing.T) {
 		t.Fatalf("the parent make exported no MAKEFLAGS; the test is not exercising what it claims:\n%v", parentEnv)
 	}
 
-	gopath := t.TempDir()
-	vars, stderr := probe(t, environFrom(parentEnv, nil, map[string]string{"GOPATH": gopath}))
+	gopath := ownedGOPATH(t)
+	vars, stderr := probe(t, environFrom(parentEnv, nil, goPathEnv(gopath, nil)))
 	assertNoEnvDiagnostic(t, stderr)
 	if got, want := vars["FLAVOR"], "simple simple"; got != want {
 		t.Errorf("flavor of GO and GOPATH = %q, want %q under a parent make's overrides", got, want)
@@ -305,4 +366,95 @@ func parentMakeEnviron(t *testing.T, overrides ...string) []string {
 		}
 	}
 	return env
+}
+
+// TestMakeTreeWritable checks the helper ownedGOPATH relies on by the modes it
+// leaves, not by whether a removal then succeeds: root bypasses permission
+// bits, so a removal-based check would pass on a CI runner even if the helper
+// did nothing.
+func TestMakeTreeWritable(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("x"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	// A module-cache-shaped tree: read-only directories holding read-only
+	// files, and a link out of the tree that must not be followed.
+	sub := filepath.Join(root, "pkg", "mod", "golang.org", "toolchain@v0")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(sub, "SECURITY.md")
+	if err := os.WriteFile(file, []byte("x"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(sub, "link")); err != nil {
+		t.Fatal(err)
+	}
+	dirs := []string{sub, filepath.Dir(sub), filepath.Join(root, "pkg", "mod"), filepath.Join(root, "pkg")}
+	for _, d := range dirs {
+		if err := os.Chmod(d, 0o555); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := makeTreeWritable(root); err != nil {
+		t.Fatalf("makeTreeWritable: %v", err)
+	}
+
+	if got := mode(t, file); got != 0o644 {
+		t.Errorf("file mode = %o, want 0644 (read-only plus owner write)", got)
+	}
+	for _, d := range dirs {
+		if got := mode(t, d); got != 0o755 {
+			t.Errorf("directory %s mode = %o, want 0755", d, got)
+		}
+	}
+	if got := mode(t, outside); got != 0o444 {
+		t.Errorf("the symlink's target outside the tree changed to %o; links must not be followed", got)
+	}
+	// The target is in another TempDir; leave it removable for its own cleanup.
+	if err := os.Chmod(outside, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestMakeTreeWritableReportsAMissingRoot is the failure path: a root that
+// does not exist is an error, not a silent no-op.
+func TestMakeTreeWritableReportsAMissingRoot(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "no-such-gopath")
+	if err := makeTreeWritable(missing); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("makeTreeWritable(%s) = %v, want fs.ErrNotExist", missing, err)
+	}
+}
+
+// TestGoPathEnvPinsTheModuleCache checks that the module cache a test's go
+// command uses is inside the GOPATH ownedGOPATH cleans, and that the caller's
+// other settings are kept.
+func TestGoPathEnvPinsTheModuleCache(t *testing.T) {
+	got := goPathEnv("/gp", map[string]string{"PATH": "/bin"})
+	want := map[string]string{"PATH": "/bin", "GOPATH": "/gp", "GOMODCACHE": filepath.Join("/gp", "pkg", "mod")}
+	if len(got) != len(want) {
+		t.Fatalf("goPathEnv = %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("goPathEnv[%s] = %q, want %q", k, got[k], v)
+		}
+	}
+	if m := goPathEnv("/gp", nil); m["GOPATH"] != "/gp" {
+		t.Errorf("goPathEnv with a nil map = %v", m)
+	}
+}
+
+// mode returns the permission bits of path, following symlinks; path must
+// exist.
+func mode(t *testing.T, path string) fs.FileMode {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Mode().Perm()
 }

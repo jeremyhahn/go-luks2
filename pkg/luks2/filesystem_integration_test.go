@@ -521,3 +521,66 @@ func TestFilesystemPersistence(t *testing.T) {
 		t.Errorf("Expected 2 files, found %d", fileCount)
 	}
 }
+
+// runTool runs one e2fsprogs tool the repair test needs to build its fixture
+// and fails the test, loudly, if it is missing or fails: test/integration's
+// Dockerfile installs e2fsprogs, which carries mkfs.ext4 and debugfs, so a
+// missing tool is a broken image, not an optional filesystem.
+func runTool(t *testing.T, name string, args ...string) {
+	t.Helper()
+	out, err := exec.Command(name, args...).CombinedOutput() // #nosec G204 -- fixed e2fsprogs tool; arguments are test constants and a TempDir path
+	if err != nil {
+		t.Fatalf("%s %s: %v\n%s", name, strings.Join(args, " "), err, out)
+	}
+}
+
+// TestCheckFilesystemRepairsCorruptExt4 is #228 against the real e2fsck: an
+// ext4 filesystem with a wrong inode link count is reported broken by a
+// read-only check (e2fsck -n exits 4), repaired by CheckFilesystemDetailed
+// with repair -- e2fsck -p corrects it and exits 1, which must be success
+// with Repaired set, not a failure -- and is clean afterwards. It runs on an
+// image file, which e2fsck checks as it does a block device, so it needs
+// neither root nor a loop device.
+func TestCheckFilesystemRepairsCorruptExt4(t *testing.T) {
+	dir := t.TempDir()
+	img := filepath.Join(dir, "ext4.img")
+	if err := os.WriteFile(img, nil, 0o600); err != nil {
+		t.Fatalf("creating the image: %v", err)
+	}
+	if err := os.Truncate(img, 16*1024*1024); err != nil {
+		t.Fatalf("sizing the image: %v", err)
+	}
+	payload := filepath.Join(dir, "payload.txt")
+	if err := os.WriteFile(payload, []byte("payload\n"), 0o600); err != nil {
+		t.Fatalf("writing the payload: %v", err)
+	}
+
+	runTool(t, "mkfs.ext4", "-q", "-F", img)
+	runTool(t, "debugfs", "-w", "-R", "write "+payload+" payload.txt", img)
+	// Corrupt it: the file has one directory entry but claims five links.
+	runTool(t, "debugfs", "-w", "-R", "sif /payload.txt links_count 5", img)
+	// Mark it not cleanly unmounted, as a crash would, so e2fsck -p checks it
+	// instead of trusting the clean flag.
+	runTool(t, "debugfs", "-w", "-R", "ssv state 0", img)
+
+	// The corruption is real: a read-only check fails with e2fsck's
+	// "errors left uncorrected" status.
+	err := CheckFilesystem(img, FilesystemExt4, false)
+	var fce *FilesystemCommandError
+	if !errors.As(err, &fce) || exitStatus(err) != e2fsckUncorrected {
+		t.Fatalf("read-only check of the corrupted image = %v (exit %d), want a *FilesystemCommandError with exit %d",
+			err, exitStatus(err), e2fsckUncorrected)
+	}
+
+	res, err := CheckFilesystemDetailed(img, FilesystemExt4, true)
+	if err != nil {
+		t.Fatalf("repairing check = %v, want success: e2fsck -p corrected the errors", err)
+	}
+	if !res.Repaired || res.RebootRequired {
+		t.Errorf("repairing check result = %+v, want Repaired and no reboot request", res)
+	}
+
+	if err := CheckFilesystem(img, FilesystemExt4, false); err != nil {
+		t.Errorf("read-only check after the repair = %v, want a clean filesystem", err)
+	}
+}

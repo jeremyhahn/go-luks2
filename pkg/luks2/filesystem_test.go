@@ -129,7 +129,7 @@ func TestCheckFilesystemFailureIsTyped(t *testing.T) {
 	for _, cause := range []error{exitCode(8), exec.ErrNotFound} {
 		t.Run(cause.Error(), func(t *testing.T) {
 			r := &scriptedRunner{results: []error{cause}}
-			err := filesystemDispatch[FilesystemExt4].check(r.run, dev, false)
+			_, err := filesystemDispatch[FilesystemExt4].check(r.run, dev, false)
 
 			var fce *FilesystemCommandError
 			if !errors.As(err, &fce) {
@@ -200,8 +200,12 @@ func TestFilesystemCheckCommands(t *testing.T) {
 			continue
 		}
 		r := &scriptedRunner{}
-		if err := ops.check(r.run, dev, tt.repair); err != nil {
+		res, err := ops.check(r.run, dev, tt.repair)
+		if err != nil {
 			t.Errorf("check(%q, repair=%v) on a clean filesystem = %v, want nil", tt.fs, tt.repair, err)
+		}
+		if res != (FilesystemCheckResult{}) {
+			t.Errorf("check(%q, repair=%v) on a clean filesystem reported %+v, want a zero result", tt.fs, tt.repair, res)
 		}
 		if want := [][]string{tt.want}; !reflect.DeepEqual(r.calls, want) {
 			t.Errorf("check(%q, repair=%v) ran %v, want %v", tt.fs, tt.repair, r.calls, want)
@@ -225,23 +229,27 @@ func TestCheckFAT32Outcomes(t *testing.T) {
 		results   []error
 		wantCalls [][]string
 		wantErr   error // nil means success; otherwise the error the command failed with
+		wantRes   FilesystemCheckResult
 	}{
-		{"read-only clean", false, nil, [][]string{readOnlyArgv}, nil},
-		{"read-only finds problems", false, []error{exitCode(1)}, [][]string{readOnlyArgv}, exitCode(1)},
-		{"repair clean", true, nil, [][]string{repairArgv}, nil},
-		{"repair wrote fixes, recheck clean", true, []error{exitCode(1), nil}, [][]string{repairArgv, readOnlyArgv}, nil},
-		{"repair exit 1, recheck still finds problems", true, []error{exitCode(1), exitCode(1)}, [][]string{repairArgv, readOnlyArgv}, exitCode(1)},
-		{"repair usage or fatal error", true, []error{exitCode(2)}, [][]string{repairArgv}, exitCode(2)},
-		{"checker not found", true, []error{notFound}, [][]string{repairArgv}, notFound},
+		{"read-only clean", false, nil, [][]string{readOnlyArgv}, nil, FilesystemCheckResult{}},
+		{"read-only finds problems", false, []error{exitCode(1)}, [][]string{readOnlyArgv}, exitCode(1), FilesystemCheckResult{}},
+		{"repair clean", true, nil, [][]string{repairArgv}, nil, FilesystemCheckResult{}},
+		{"repair wrote fixes, recheck clean", true, []error{exitCode(1), nil}, [][]string{repairArgv, readOnlyArgv}, nil, FilesystemCheckResult{Repaired: true}},
+		{"repair exit 1, recheck still finds problems", true, []error{exitCode(1), exitCode(1)}, [][]string{repairArgv, readOnlyArgv}, exitCode(1), FilesystemCheckResult{}},
+		{"repair usage or fatal error", true, []error{exitCode(2)}, [][]string{repairArgv}, exitCode(2), FilesystemCheckResult{}},
+		{"checker not found", true, []error{notFound}, [][]string{repairArgv}, notFound, FilesystemCheckResult{}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &scriptedRunner{results: tt.results}
-			err := checkFAT32(r.run, dev, tt.repair)
+			res, err := checkFAT32(r.run, dev, tt.repair)
 
 			if !reflect.DeepEqual(r.calls, tt.wantCalls) {
 				t.Errorf("ran %v, want %v", r.calls, tt.wantCalls)
+			}
+			if res != tt.wantRes {
+				t.Errorf("checkFAT32 result = %+v, want %+v", res, tt.wantRes)
 			}
 			if tt.wantErr == nil {
 				if err != nil {
@@ -261,5 +269,95 @@ func TestCheckFAT32Outcomes(t *testing.T) {
 				t.Errorf("checkFAT32 = %v, want it to wrap %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// TestCheckExt4Outcomes pins how e2fsck's exit status is read (#228). The
+// status is a bitmask (e2fsck(8)): 1 = errors corrected, 2 = corrected and a
+// reboot is requested, 4 = errors left uncorrected, 8 = operational error,
+// 16 = usage error, 32 = canceled, 128 = shared-library error. Repairing,
+// 0-3 is success with the repair and reboot request reported, and any status
+// with a bit of 4 or above is a failure. Read-only, every nonzero status is a
+// failure: -n writes nothing, so nothing was corrected.
+func TestCheckExt4Outcomes(t *testing.T) {
+	const dev = "/dev/mapper/vol"
+	repairArgv := [][]string{{"e2fsck", "-p", dev}}
+	readOnlyArgv := [][]string{{"e2fsck", "-n", dev}}
+	signaled := exitCode(-1) // *exec.ExitError reports -1 for a signal
+	notFound := exec.ErrNotFound
+
+	tests := []struct {
+		name      string
+		repair    bool
+		result    error
+		wantCalls [][]string
+		wantErr   error // nil means success; otherwise the error the command failed with
+		wantRes   FilesystemCheckResult
+	}{
+		{"repair clean", true, nil, repairArgv, nil, FilesystemCheckResult{}},
+		{"repair corrected", true, exitCode(1), repairArgv, nil, FilesystemCheckResult{Repaired: true}},
+		{"repair corrected, reboot", true, exitCode(2), repairArgv, nil, FilesystemCheckResult{Repaired: true, RebootRequired: true}},
+		{"repair corrected both bits", true, exitCode(3), repairArgv, nil, FilesystemCheckResult{Repaired: true, RebootRequired: true}},
+		{"repair uncorrected", true, exitCode(4), repairArgv, exitCode(4), FilesystemCheckResult{}},
+		{"repair corrected some, others uncorrected", true, exitCode(5), repairArgv, exitCode(5), FilesystemCheckResult{}},
+		{"repair operational error", true, exitCode(8), repairArgv, exitCode(8), FilesystemCheckResult{}},
+		{"repair usage error", true, exitCode(16), repairArgv, exitCode(16), FilesystemCheckResult{}},
+		{"repair canceled after corrections", true, exitCode(33), repairArgv, exitCode(33), FilesystemCheckResult{}},
+		{"repair shared-library error", true, exitCode(128), repairArgv, exitCode(128), FilesystemCheckResult{}},
+		{"repair killed by a signal", true, signaled, repairArgv, signaled, FilesystemCheckResult{}},
+		{"repair checker not found", true, notFound, repairArgv, notFound, FilesystemCheckResult{}},
+		{"read-only clean", false, nil, readOnlyArgv, nil, FilesystemCheckResult{}},
+		{"read-only status 1", false, exitCode(1), readOnlyArgv, exitCode(1), FilesystemCheckResult{}},
+		{"read-only status 2", false, exitCode(2), readOnlyArgv, exitCode(2), FilesystemCheckResult{}},
+		{"read-only errors present", false, exitCode(4), readOnlyArgv, exitCode(4), FilesystemCheckResult{}},
+		{"read-only operational error", false, exitCode(8), readOnlyArgv, exitCode(8), FilesystemCheckResult{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &scriptedRunner{results: []error{tt.result}}
+			res, err := checkExt4(r.run, dev, tt.repair)
+
+			if !reflect.DeepEqual(r.calls, tt.wantCalls) {
+				t.Errorf("ran %v, want %v", r.calls, tt.wantCalls)
+			}
+			if res != tt.wantRes {
+				t.Errorf("checkExt4 result = %+v, want %+v", res, tt.wantRes)
+			}
+			if tt.wantErr == nil {
+				if err != nil {
+					t.Fatalf("checkExt4 = %v, want nil", err)
+				}
+				return
+			}
+
+			var fce *FilesystemCommandError
+			if !errors.As(err, &fce) {
+				t.Fatalf("checkExt4 = %v (%T), want *FilesystemCommandError", err, err)
+			}
+			if fce.Command != "e2fsck" || fce.Device != dev || fce.Output != "output" {
+				t.Errorf("FilesystemCommandError{Command: %q, Device: %q, Output: %q}, want e2fsck on %q with the checker's output",
+					fce.Command, fce.Device, fce.Output, dev)
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Errorf("checkExt4 = %v, want it to wrap %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestCheckFilesystemDetailedRefusesUnsupported checks that the detailed
+// entry point refuses exactly what CheckFilesystem refuses, with a zero
+// result, before running anything.
+func TestCheckFilesystemDetailedRefusesUnsupported(t *testing.T) {
+	for _, fs := range []FilesystemType{FilesystemExt2, FilesystemExt3, "btrfs", ""} {
+		res, err := CheckFilesystemDetailed("/dev/luks2-test-no-such-device", fs, true)
+		var ufe *UnsupportedFilesystemError
+		if !errors.As(err, &ufe) || ufe.Filesystem != fs || !errors.Is(err, ErrUnsupportedFilesystem) {
+			t.Errorf("CheckFilesystemDetailed(%q) = %v, want *UnsupportedFilesystemError naming it", fs, err)
+		}
+		if res != (FilesystemCheckResult{}) {
+			t.Errorf("CheckFilesystemDetailed(%q) result = %+v, want zero on refusal", fs, res)
+		}
 	}
 }

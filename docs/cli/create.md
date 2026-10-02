@@ -94,6 +94,14 @@ After completion, the volume is ready to mount:
 sudo luks2 mount luks-auto /mnt/encrypted
 ```
 
+If step 5 fails, `create` exits 1 and prints the cause. It closes the
+`luks-auto` mapping and detaches the loop device it attached, so nothing is
+left unlocked. The LUKS2 container file is valid and is kept, but filesystem
+creation did not complete, so anything the formatter wrote before failing
+may be partial: delete it, or attach and open it yourself and run `mkfs`
+on the mapping. If the mapping cannot be closed, `create` says so and prints
+the `luks2 close` and `losetup -d` commands to finish the cleanup.
+
 ## Encryption Settings
 
 The `create` command uses these default settings:

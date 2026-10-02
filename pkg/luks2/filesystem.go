@@ -175,9 +175,28 @@ type filesystemOps struct {
 	make func(devicePath string, opts *FilesystemOptions) error
 
 	// check checks the filesystem on devicePath, running its tools through
-	// run, and interprets their exit status. See CheckFilesystem for what
-	// repair means for each type.
-	check func(run commandRunner, devicePath string, repair bool) error
+	// run, and interprets their exit status. See CheckFilesystemDetailed for
+	// what repair means for each type and what the result reports.
+	check func(run commandRunner, devicePath string, repair bool) (FilesystemCheckResult, error)
+}
+
+// FilesystemCheckResult describes a check that CheckFilesystemDetailed
+// reports as successful. A failed check returns an error instead. A zero
+// result means the checker reported no repair and no reboot request: for
+// ext4 and vfat that is a clean filesystem with nothing written, but
+// xfs_repair and zpool scrub never report either, so for xfs and zfs a zero
+// result says nothing about whether data was repaired (see CheckFilesystem).
+type FilesystemCheckResult struct {
+	// Repaired is true when the checker wrote corrections to the filesystem
+	// and the filesystem is now consistent. It is only ever set when repair
+	// was requested.
+	Repaired bool
+
+	// RebootRequired is true when the checker corrected errors and asks for
+	// the system to be rebooted before the filesystem is used (e2fsck exit
+	// status bit 2). It matters when the filesystem was mounted, for example
+	// as the root filesystem, while it was repaired.
+	RebootRequired bool
 }
 
 // commandRunner runs an external program and returns its combined stdout and
@@ -545,8 +564,9 @@ func makeFAT32(devicePath string, opts *FilesystemOptions) error {
 //
 // For ext4, xfs and vfat the check is read-only unless repair is set, and it
 // returns nil only when the filesystem is clean or, with repair, has been
-// repaired. With repair, vfat repairs that fsck.fat reports by exiting 1 are
-// confirmed by a read-only recheck and then count as success.
+// repaired. With repair, e2fsck exiting 1 (errors corrected) or 2 (corrected,
+// reboot requested) is success, and vfat repairs that fsck.fat reports by
+// exiting 1 are confirmed by a read-only recheck and then count as success.
 //
 // ZFS is the exception, and repair does not change it:
 //   - devicePath is the name of a ZFS pool, not a device path.
@@ -555,34 +575,92 @@ func makeFAT32(devicePath string, opts *FilesystemOptions) error {
 //     for that.
 //   - A scrub is not read-only. On a pool with redundancy (mirror, raidz) it
 //     repairs damaged data as it goes, even when repair is false.
+//
+// CheckFilesystem reports only success or failure. CheckFilesystemDetailed
+// runs the same check and also reports whether a repair was written and
+// whether the checker asked for a reboot.
 func CheckFilesystem(devicePath string, fstype FilesystemType, repair bool) error {
+	_, err := CheckFilesystemDetailed(devicePath, fstype, repair)
+	return err
+}
+
+// CheckFilesystemDetailed is CheckFilesystem, and on success it also reports
+// what the check did. Everything CheckFilesystem documents applies here.
+//
+// Result.Repaired is set when, with repair, the checker wrote corrections and
+// the filesystem is now consistent: e2fsck exiting 1 or 2, or fsck.fat
+// exiting 1 followed by a clean read-only recheck. Result.RebootRequired is
+// set when e2fsck exits with bit 2 set ("errors corrected, system should be
+// rebooted"). xfs_repair and zpool scrub report neither, so their results are
+// always zero.
+//
+// A failed check is returned as an error: a *FilesystemCommandError carrying
+// the checker's output for a checker that ran or could not be started, and
+// ErrUnsupportedFilesystem for a type outside SupportedFilesystems().
+func CheckFilesystemDetailed(devicePath string, fstype FilesystemType, repair bool) (FilesystemCheckResult, error) {
 	ops, err := dispatchFor(fstype)
 	if err != nil {
-		return err
+		return FilesystemCheckResult{}, err
 	}
 	return ops.check(execCommand, devicePath, repair)
 }
 
+// e2fsck exit status bits, from e2fsck(8). The status is a bitmask: several
+// bits can be set at once, and any bit from e2fsckUncorrected upward is a
+// failure (uncorrected errors, an operational error, a usage error, a
+// canceled check or a shared-library error).
+const (
+	// e2fsckCorrected: filesystem errors were corrected.
+	e2fsckCorrected = 1
+
+	// e2fsckRebootRequired: errors were corrected and the system should be
+	// rebooted.
+	e2fsckRebootRequired = 2
+
+	// e2fsckUncorrected: errors were left uncorrected. Every higher bit is a
+	// failure as well.
+	e2fsckUncorrected = 4
+)
+
 // checkExt4 checks an ext4 filesystem with e2fsck.
-func checkExt4(run commandRunner, devicePath string, repair bool) error {
-	if repair {
-		return runCheck(run, "e2fsck", "-p", devicePath) // Auto-repair
+//
+// Read-only (-n), any nonzero exit is a failure: e2fsck could not certify the
+// filesystem clean, and -n wrote nothing. Repairing (-p), the exit status is
+// read as e2fsck's bitmask: 0 is clean, 1 and 2 (and 3) are success with the
+// repair -- and for bit 2 the reboot request -- reported in the result, and
+// any status with bit 4 or higher set is a failure.
+func checkExt4(run commandRunner, devicePath string, repair bool) (FilesystemCheckResult, error) {
+	if !repair {
+		return FilesystemCheckResult{}, runCheck(run, "e2fsck", "-n", devicePath) // Read-only
 	}
-	return runCheck(run, "e2fsck", "-n", devicePath) // Read-only
+
+	err := runCheck(run, "e2fsck", "-p", devicePath) // Auto-repair
+	if err == nil {
+		return FilesystemCheckResult{}, nil
+	}
+	status := exitStatus(err)
+	if status <= 0 || status >= e2fsckUncorrected {
+		// Not started, killed by a signal, or a failure bit is set.
+		return FilesystemCheckResult{}, err
+	}
+	return FilesystemCheckResult{
+		Repaired:       status&(e2fsckCorrected|e2fsckRebootRequired) != 0,
+		RebootRequired: status&e2fsckRebootRequired != 0,
+	}, nil
 }
 
 // checkXFS checks an XFS filesystem with xfs_repair.
-func checkXFS(run commandRunner, devicePath string, repair bool) error {
+func checkXFS(run commandRunner, devicePath string, repair bool) (FilesystemCheckResult, error) {
 	if repair {
-		return runCheck(run, "xfs_repair", devicePath) // XFS repairs automatically
+		return FilesystemCheckResult{}, runCheck(run, "xfs_repair", devicePath) // XFS repairs automatically
 	}
-	return runCheck(run, "xfs_repair", "-n", devicePath) // Read-only
+	return FilesystemCheckResult{}, runCheck(run, "xfs_repair", "-n", devicePath) // Read-only
 }
 
 // checkZFS starts a scrub of the ZFS pool named devicePath, the ZFS
 // equivalent of fsck. It ignores repair: see CheckFilesystem.
-func checkZFS(run commandRunner, devicePath string, _ bool) error {
-	return runCheck(run, "zpool", "scrub", devicePath)
+func checkZFS(run commandRunner, devicePath string, _ bool) (FilesystemCheckResult, error) {
+	return FilesystemCheckResult{}, runCheck(run, "zpool", "scrub", devicePath)
 }
 
 // fatRepairedOrInconsistent is the fsck.fat exit status that means either
@@ -599,19 +677,19 @@ const fatRepairedOrInconsistent = 1
 // so it is followed by a read-only recheck: a clean recheck means the repair
 // worked, and anything else returns the repair run's error, whose output says
 // what fsck.fat found.
-func checkFAT32(run commandRunner, devicePath string, repair bool) error {
+func checkFAT32(run commandRunner, devicePath string, repair bool) (FilesystemCheckResult, error) {
 	if !repair {
-		return runCheck(run, "fsck.fat", "-n", devicePath) // Read-only
+		return FilesystemCheckResult{}, runCheck(run, "fsck.fat", "-n", devicePath) // Read-only
 	}
 
 	err := runCheck(run, "fsck.fat", "-a", devicePath) // Auto-repair
 	if exitStatus(err) != fatRepairedOrInconsistent {
-		return err
+		return FilesystemCheckResult{}, err
 	}
 	if runCheck(run, "fsck.fat", "-n", devicePath) != nil {
-		return err
+		return FilesystemCheckResult{}, err
 	}
-	return nil
+	return FilesystemCheckResult{Repaired: true}, nil
 }
 
 // GetFilesystemInfo returns information about a filesystem

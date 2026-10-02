@@ -247,6 +247,7 @@ luks2.Mount(luks2.MountOptions{
 luks2.Unmount("/mnt/encrypted", 0)
 luks2.IsMounted("/mnt/encrypted")              // bool, error
 luks2.CheckFilesystem(device, fstype, repair)  // error
+luks2.CheckFilesystemDetailed(device, fstype, repair) // FilesystemCheckResult, error
 luks2.GetFilesystemInfo(device)                // *FilesystemInfo, error
 luks2.SupportedFilesystems()                   // []FilesystemType
 ```
@@ -261,6 +262,13 @@ volume.
 the device argument is a pool name, and the call only starts `zpool scrub`
 and returns; read `zpool status` for the result. A scrub repairs damaged data
 on a pool with redundancy even when `repair` is false.
+
+With `repair`, a checker that corrected errors is a success, not a failure:
+for ext4, `e2fsck -p` exiting 1 (errors corrected) or 2 (corrected, reboot
+requested) returns nil, and only a status with bit 4 or higher set (errors
+left uncorrected, operational, usage or library error, canceled) is an
+error. `CheckFilesystemDetailed` runs the same check and reports
+`Repaired` and `RebootRequired` in its result.
 
 ### Loop Devices
 

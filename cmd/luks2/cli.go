@@ -461,11 +461,7 @@ func (c *CLI) cmdCreateFile(filename string, args []string, key KeySource) int {
 	// Auto-format filesystem
 	_, _ = fmt.Fprintf(c.Stdout, "\nCreating %s filesystem...\n", fstype)
 	if err := c.Luks.MakeFilesystem(volumeName, fstype, label); err != nil {
-		_, _ = fmt.Fprintf(c.Stderr, "Warning: Filesystem creation failed: %v\n", err)
-		_, _ = fmt.Fprintf(c.Stdout, "Manual format: sudo mkfs.%s /dev/mapper/%s\n", fstype, volumeName)
-		_, _ = fmt.Fprintf(c.Stdout, "\nVolume is ready at: /dev/mapper/%s\n", volumeName)
-		_, _ = fmt.Fprintf(c.Stdout, "Mount with: sudo luks2 mount %s /mnt/encrypted\n", volumeName)
-		return 0
+		return c.abandonUnformattedVolume(filename, loopDev, volumeName, fstype, err)
 	}
 	_, _ = fmt.Fprintln(c.Stdout, "Filesystem created")
 
@@ -479,6 +475,41 @@ func (c *CLI) cmdCreateFile(filename string, args []string, key KeySource) int {
 	_, _ = fmt.Fprintf(c.Stdout, "  sudo luks2 close %s\n", volumeName)
 
 	return 0
+}
+
+// abandonUnformattedVolume handles a MakeFilesystem failure in create (#229).
+// The volume is not usable, so the command fails: it prints the cause, closes
+// the mapping it opened so nothing is left unlocked, detaches the loop device
+// it attached, and says that the LUKS2 container itself -- which is valid --
+// was kept. It always returns exit status 1. Before #229 this path printed
+// "Volume is ready" and exited 0, leaving an unlocked mapping with no
+// filesystem on it that a script checking the exit status took as usable.
+//
+// The loop device is detached only once the mapping is closed: while the
+// mapping is open it holds the loop device, and the detach would fail.
+func (c *CLI) abandonUnformattedVolume(filename, loopDev, volumeName, fstype string, cause error) int {
+	_, _ = fmt.Fprintf(c.Stderr, "\nError: Filesystem creation failed: %v\n", cause)
+
+	if err := c.Luks.Lock(volumeName); err != nil {
+		_, _ = fmt.Fprintf(c.Stderr, "Error: Failed to close /dev/mapper/%s: %v\n", volumeName, err)
+		_, _ = fmt.Fprintf(c.Stderr, "The volume is still UNLOCKED. Close it with: sudo luks2 close %s\n", volumeName)
+		_, _ = fmt.Fprintf(c.Stderr, "Then detach the loop device with: sudo losetup -d %s\n", loopDev)
+		return 1
+	}
+	_, _ = fmt.Fprintf(c.Stderr, "Closed /dev/mapper/%s: the volume is locked.\n", volumeName)
+
+	if err := c.Luks.DetachLoopDevice(loopDev); err != nil {
+		_, _ = fmt.Fprintf(c.Stderr, "Warning: Failed to detach loop device %s: %v\n", loopDev, err)
+		_, _ = fmt.Fprintf(c.Stderr, "Detach it with: sudo losetup -d %s\n", loopDev)
+	} else {
+		_, _ = fmt.Fprintf(c.Stderr, "Detached loop device %s.\n", loopDev)
+	}
+
+	_, _ = fmt.Fprintf(c.Stderr, "\nThe LUKS2 container %s is valid and was kept, but filesystem creation did not complete:\n", filename)
+	_, _ = fmt.Fprintln(c.Stderr, "whatever the formatter wrote before it failed may be partial.")
+	_, _ = fmt.Fprintf(c.Stderr, "Delete it, or attach it (sudo losetup -f --show %s), open it (sudo luks2 open <loop-device> <name>)\n", filename)
+	_, _ = fmt.Fprintf(c.Stderr, "and create the filesystem yourself (sudo mkfs.%s /dev/mapper/<name>).\n", fstype)
+	return 1
 }
 
 // cmdCreateBlockDevice creates a LUKS2 volume on a block device
