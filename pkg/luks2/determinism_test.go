@@ -20,10 +20,12 @@ import (
 // same bytes, the integration tier to compare those bytes against cryptsetup --
 // and an untagged _test.go is compiled into both.
 //
-// NOTHING HERE MAY BE RUN IN PARALLEL. Both helpers assign to a package var and
-// restore it from t.Cleanup, so a t.Parallel() test using either would see
-// another test's reader. The package runs its tests sequentially and no test in
-// it calls t.Parallel(); this is the reason to keep it that way.
+// NOTHING THAT USES THESE MAY BE RUN IN PARALLEL. Both helpers assign to a
+// package var and restore it from t.Cleanup, so a t.Parallel() test using
+// either would see another test's reader. The package's parallelism rule is in
+// keyringfake_test.go, beside TestMain: a test that writes any package-level
+// variable stays sequential, and Go runs every sequential top-level test
+// before it releases any parallel one, so the two never overlap.
 
 // pinCryptoRand replaces the package RNG with a deterministic ChaCha8 stream
 // for the duration of the test.

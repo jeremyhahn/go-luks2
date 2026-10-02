@@ -69,6 +69,8 @@ func setHeaderSize(t *testing.T, device string, size uint64) {
 // caller that dutifully checks it never gets one and the process dies instead.
 // Every case below therefore runs under a recover that fails the test.
 func TestReadHeaderRefusesAHeaderSizeTheLayoutCannotHold(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name string
 		size uint64
@@ -124,6 +126,8 @@ func TestReadHeaderRefusesAHeaderSizeTheLayoutCannotHold(t *testing.T) {
 // itself writes are still readable, and that the passphrase still recovers the
 // master key afterwards.
 func TestReadHeaderStillOpensAnUntamperedVolume(t *testing.T) {
+	t.Parallel()
+
 	device, passphrase := headerSizeVolume(t)
 
 	hdr, metadata, err := ReadHeader(device)

@@ -109,6 +109,8 @@ func TestNullKeyslotDoesNotSurviveTheHeaderRead(t *testing.T) {
 // There is no validateKeyslot call and no nil check anywhere in wipe.go, so a
 // crafted header panics a public API.
 func TestWipeKeyslotDoesNotPanicOnANullKeyslot(t *testing.T) {
+	t.Parallel()
+
 	path := nullKeyslotVolume(t, "null-wipe.img")
 
 	// After the boundary fix the slot is gone, so this is the ordinary
@@ -135,6 +137,8 @@ func TestWipeKeyslotDoesNotPanicOnANullKeyslot(t *testing.T) {
 // The null is at "0", so the scan reaches it before the healthy slot rather
 // than stopping at a success first.
 func TestGetMasterKeyDoesNotPanicOnANullKeyslot(t *testing.T) {
+	t.Parallel()
+
 	path := nullKeyslotVolume(t, "null-scan.img")
 
 	_, metadata, err := ReadHeader(path)
@@ -157,6 +161,8 @@ func TestGetMasterKeyDoesNotPanicOnANullKeyslot(t *testing.T) {
 // gone. Asserting the whole surface is what makes the boundary fix the thing
 // being tested, rather than the two patches it would otherwise be.
 func TestEveryExportedPathToleratesANullKeyslot(t *testing.T) {
+	t.Parallel()
+
 	passphrase := []byte(conformancePassphrase)
 
 	// A fresh volume per operation: several of these mutate the header.
@@ -244,6 +250,8 @@ func TestEveryExportedPathToleratesANullKeyslot(t *testing.T) {
 // that cannot be evaluated must not be silently skipped, because skipping it
 // weakens verification rather than degrading it.
 func TestNullsAreRefusedWhereTheyCannotBeDropped(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		name   string
 		mutate func(*LUKS2Metadata)
@@ -282,6 +290,8 @@ func TestNullsAreRefusedWhereTheyCannotBeDropped(t *testing.T) {
 // or FIDO2 token must not stop a volume opening by passphrase, so it is dropped
 // on the same reasoning as a null keyslot.
 func TestNullTokenIsDroppedToo(t *testing.T) {
+	t.Parallel()
+
 	path := newImage(t, "null-token.img")
 	formatWithLibrary(t, path)
 

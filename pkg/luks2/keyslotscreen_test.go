@@ -316,13 +316,14 @@ func restoreVolume(t *testing.T, name string, golden []byte) string {
 	if err != nil {
 		t.Fatalf("failed to open the restored volume: %v", err)
 	}
-	defer func() { _ = f.Close() }()
+	defer func() { _ = f.Close() }() // failure paths only: success closes, checked, below
 
 	if _, err := f.WriteAt(golden, 0); err != nil {
 		t.Fatalf("failed to restore the golden volume: %v", err)
 	}
-	if err := f.Sync(); err != nil {
-		t.Fatalf("failed to sync the restored volume: %v", err)
+	// Closed, not fsynced: see stampImagePrefix.
+	if err := f.Close(); err != nil {
+		t.Fatalf("failed to close the restored volume: %v", err)
 	}
 	return device
 }
@@ -385,6 +386,8 @@ func buildVolumeWithSibling(t *testing.T, name string, damage func(*LUKS2Metadat
 // the unlock refuses it, no removal guard may count it, and the next assertion
 // is entitled to demand that.
 func TestTheUnlockPathRefusesEveryShapeTheRemovalGuardMustNotCount(t *testing.T) {
+	t.Parallel()
+
 	for _, shape := range unopenableKeyslotShapes {
 		t.Run(shape.name, func(t *testing.T) {
 			path := volumeWithSibling(t, "yardstick.img", shape.apply)
@@ -429,6 +432,8 @@ func TestTheUnlockPathRefusesEveryShapeTheRemovalGuardMustNotCount(t *testing.T)
 // keyslotCanOpenVolume and it falls on the counting-MORE side; this test states
 // it rather than leaving a reader to assume the predicate is exact.
 func TestTheRemovalGuardCountsTheSlotsTheUnlockPathWouldOpen(t *testing.T) {
+	t.Parallel()
+
 	path := volumeWithSibling(t, "control.img", nil)
 
 	_, metadata, err := ReadHeader(path)
@@ -459,6 +464,8 @@ func TestTheRemovalGuardCountsTheSlotsTheUnlockPathWouldOpen(t *testing.T) {
 // control: the screen must not refuse the ordinary case, and it must hand back
 // values the unlock path can use.
 func TestScreenKeyslotAcceptsAKeyslotThisLibraryWrote(t *testing.T) {
+	t.Parallel()
+
 	path := newImage(t, "screen-accepts.img")
 	formatWithLibrary(t, path)
 
@@ -511,6 +518,8 @@ func TestScreenKeyslotAcceptsAKeyslotThisLibraryWrote(t *testing.T) {
 // would have changed what an operator is told, which is the one thing this
 // refactor may not do.
 func TestScreenKeyslotKeepsTheDigestBindingClassification(t *testing.T) {
+	t.Parallel()
+
 	path := newImage(t, "screen-digest-binding.img")
 	formatWithLibrary(t, path)
 
@@ -602,6 +611,8 @@ func TestValidateKeyslotRefusesAreaArithmeticThatCannotBeReasonedAbout(t *testin
 // skips the bad and verifies against the good. So the guard must count it, and
 // a removal that leaves it must be permitted.
 func TestAKeyslotWithOneUsableDigestIsStillCounted(t *testing.T) {
+	t.Parallel()
+
 	device := volumeWithSibling(t, "one-good-digest.img", func(metadata *LUKS2Metadata, _ *Keyslot) {
 		metadata.Digests["9"] = &Digest{
 			Type:       "pbkdf2",
@@ -740,6 +751,8 @@ func TestDeviceSizeIsMeasuredNotAssumed(t *testing.T) {
 // getPBKDF2HashFunc, which is where the FIPS refusal lives. That is a property
 // of the current code, not a law, and this test is what keeps it true.
 func TestScreenDigestNeverAcceptsWhatTheDerivationRefuses(t *testing.T) {
+	t.Parallel()
+
 	shapes := unusableDigests(t)
 	shapes["a usable digest"] = usableDigest(t, []byte("digest-scan-master-key-32-bytes!"), 32)
 	// The hash that is legal outside FIPS 140-3 and refused inside it. Its

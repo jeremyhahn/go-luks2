@@ -13,6 +13,7 @@ import (
 	"errors"
 	"math"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -292,6 +293,8 @@ var keyslotRemovalPaths = []keyslotRemovalPath{
 // shape asserted here has been shown, in that test, to be one the unlock path
 // really does refuse. Neither test is allowed to be the only definition.
 func TestEveryKeyslotRemovalPathRefusesToDestroyTheLastUsableKeyslot(t *testing.T) {
+	t.Parallel()
+
 	passphrase := []byte(conformancePassphrase)
 
 	for _, shape := range unopenableKeyslotShapes {
@@ -303,6 +306,8 @@ func TestEveryKeyslotRemovalPathRefusesToDestroyTheLastUsableKeyslot(t *testing.
 
 		for _, path := range keyslotRemovalPaths {
 			t.Run(shape.name+"/"+path.name, func(t *testing.T) {
+				t.Parallel()
+
 				device := restoreVolume(t, "guarded.img", golden)
 				before := readAreaBytes(t, device, offset, size)
 
@@ -331,6 +336,8 @@ func TestEveryKeyslotRemovalPathRefusesToDestroyTheLastUsableKeyslot(t *testing.
 		// per-path claim -- that this path destroyed nothing -- is already made
 		// on the bytes above, which is the stronger of the two statements.
 		t.Run(shape.name+"/the volume still opens", func(t *testing.T) {
+			t.Parallel()
+
 			device := restoreVolume(t, "survives.img", golden)
 			for _, path := range keyslotRemovalPaths {
 				if err := path.remove(device, passphrase, 0); err == nil {
@@ -374,6 +381,8 @@ func keyslotAreaExtent(t *testing.T, device, id string) (offset, size int64) {
 // it -- see keyslotCanOpenVolume's documented residual, which cannot be removed
 // without a passphrase to try.
 func TestEveryKeyslotRemovalPathPermitsARemovalThatLeavesASurvivor(t *testing.T) {
+	t.Parallel()
+
 	passphrase := []byte(conformancePassphrase)
 
 	golden := goldenSiblingVolume(t, nil)
@@ -476,6 +485,8 @@ func readAreaBytes(t *testing.T, device string, offset, size int64) []byte {
 // guard happily counted it as a survivor. The volume then reported the
 // operator's correct passphrase as invalid.
 func TestRemovingAKeyslotRefusesWhenItsAreaOverlapsAKeyslotThatStillWorks(t *testing.T) {
+	t.Parallel()
+
 	passphrase := []byte(conformancePassphrase)
 
 	for _, overlap := range []struct {
@@ -531,6 +542,8 @@ func TestRemovingAKeyslotRefusesWhenItsAreaOverlapsAKeyslotThatStillWorks(t *tes
 // single-keyslot volume is precisely what it is for; it must take the byte-level
 // half.
 func TestChangeKeyRefusesToZeroAKeyslotThatStillWorks(t *testing.T) {
+	t.Parallel()
+
 	passphrase := []byte(conformancePassphrase)
 	device, offset, size := overlappingSiblingVolume(t, "changekey-overlap.img", 0)
 	before := readAreaBytes(t, device, offset, size)
@@ -554,6 +567,8 @@ func TestChangeKeyRefusesToZeroAKeyslotThatStillWorks(t *testing.T) {
 // A guard that took the entry-level half here would refuse the operation
 // ChangeKey exists to perform.
 func TestChangeKeyOnASingleKeyslotVolumeIsStillAllowed(t *testing.T) {
+	t.Parallel()
+
 	device := newImage(t, "changekey-single.img")
 	formatWithLibrary(t, device)
 
@@ -589,6 +604,8 @@ func TestChangeKeyOnASingleKeyslotVolumeIsStillAllowed(t *testing.T) {
 // coming last in the source, and by the old area no longer holding the material
 // it held before the change.
 func TestChangeKeyWritesTheNewMaterialBeforeDestroyingTheOld(t *testing.T) {
+	t.Parallel()
+
 	device := newImage(t, "changekey-relocates.img")
 	formatWithLibrary(t, device)
 
@@ -673,6 +690,8 @@ func TestChangeKeyWritesTheNewMaterialBeforeDestroyingTheOld(t *testing.T) {
 // it was. An operator has a crash-safe route to the same result: add a new key
 // and remove the old slot.
 func TestChangeKeyRefusesRatherThanRewriteInPlaceWhenThereIsNoFreeArea(t *testing.T) {
+	t.Parallel()
+
 	device := newImage(t, "changekey-full.img")
 	formatWithLibrary(t, device)
 
@@ -843,6 +862,8 @@ func heterogeneousVolume(t *testing.T, name string) (device string, strongPassph
 // The defect's whole signature is a keyslot that appears, looks well-formed, and
 // opens nothing -- an assertion on the header alone passes straight over it.
 func TestAddKeyDerivesTheNewKeyslotsKeySizeFromTheVolumeKey(t *testing.T) {
+	t.Parallel()
+
 	device, strong := heterogeneousVolume(t, "heterogeneous.img")
 	added := []byte("a-third-credential")
 
@@ -906,7 +927,7 @@ func shrinkHeaderArea(t *testing.T, device string, area int64) {
 	if err != nil {
 		t.Fatalf("failed to open %s: %v", device, err)
 	}
-	defer func() { _ = f.Close() }()
+	defer func() { _ = f.Close() }() // failure paths only: success closes, checked, below
 
 	var size [8]byte
 	binary.BigEndian.PutUint64(size[:], uint64(area))
@@ -927,8 +948,9 @@ func shrinkHeaderArea(t *testing.T, device string, area int64) {
 	if _, err := f.WriteAt(sum[:], 0x1C0); err != nil {
 		t.Fatalf("failed to restore the header checksum: %v", err)
 	}
-	if err := f.Sync(); err != nil {
-		t.Fatalf("failed to sync the patched header: %v", err)
+	// Closed, not fsynced: see stampImagePrefix.
+	if err := f.Close(); err != nil {
+		t.Fatalf("failed to close the patched header: %v", err)
 	}
 }
 
@@ -943,6 +965,8 @@ func shrinkHeaderArea(t *testing.T, device string, area int64) {
 // The assertion is on the DAMAGE PLANE, not the return value. Both orderings
 // return an error; only one of them leaves the key material byte-identical.
 func TestNoRemovalPathDestroysMaterialBeforeProvingTheHeaderWritable(t *testing.T) {
+	t.Parallel()
+
 	passphrase := []byte(conformancePassphrase)
 
 	// Two keyslots, so the last-keyslot guard permits the removal and the header
@@ -1006,6 +1030,8 @@ func TestNoRemovalPathDestroysMaterialBeforeProvingTheHeaderWritable(t *testing.
 //     label is silently rewritten and no new keyslot is authored off a key
 //     this package would not recover.
 func TestLegacyMislabeledKeyslotIsRefusedAndLeftAlone(t *testing.T) {
+	t.Parallel()
+
 	device := newImage(t, "legacy-area-cipher.img")
 	formatWithLibrary(t, device)
 
@@ -1057,6 +1083,8 @@ func TestLegacyMislabeledKeyslotIsRefusedAndLeftAlone(t *testing.T) {
 // would refuse every keyslot Format wrote for a non-XTS data cipher, so such a
 // container would not open at all. The two changes are one fix.
 func TestFormatDeclaresTheKeyslotAreaCipherItActuallyUses(t *testing.T) {
+	t.Parallel()
+
 	device := newImage(t, "format-cbc-data.img")
 
 	// A non-XTS DATA cipher. Only the segment is affected by this choice; the
@@ -1132,6 +1160,8 @@ func TestFormatDeclaresTheKeyslotAreaCipherItActuallyUses(t *testing.T) {
 // RestorePrimaryHeader clones the secondary onto the primary, where advancing
 // would make the repaired copy falsely claim to be newer than its source.
 func TestEveryKeyslotRemovalPathAdvancesTheSequenceID(t *testing.T) {
+	t.Parallel()
+
 	passphrase := []byte(conformancePassphrase)
 	golden := goldenSiblingVolume(t, nil)
 
@@ -1427,6 +1457,8 @@ func TestEveryArgon2DerivationRefusesAKeySizeItCannotRepresent(t *testing.T) {
 // TestEveryArgon2DerivationAcceptsOrdinaryCosts is the control. Without it a
 // derivation that refused everything would pass every case above.
 func TestEveryArgon2DerivationAcceptsOrdinaryCosts(t *testing.T) {
+	t.Parallel()
+
 	time, mem, cpus := 4, 65536, 4
 	for fname, derive := range argon2Derivations {
 		t.Run(fname, func(t *testing.T) {
@@ -1561,5 +1593,98 @@ func TestCanonicalKeyslotID(t *testing.T) {
 		if ok && id != tc.id {
 			t.Errorf("canonicalKeyslotID(%q) = %d, want %d", tc.key, id, tc.id)
 		}
+	}
+}
+
+// TestKeyslotEntryPointsRefuseInvalidInputBeforeWriting covers the front door
+// of every keyslot operation: an unusable path, a passphrase too short to be
+// one, a keyslot number outside the header's range, and a device that holds no
+// LUKS2 header. Each is refused with its own error, and -- the property that
+// matters on the destructive ones -- the device is byte-identical afterwards.
+func TestKeyslotEntryPointsRefuseInvalidInputBeforeWriting(t *testing.T) {
+	t.Parallel()
+
+	good := []byte(conformancePassphrase)
+	short := []byte("short")
+	other := []byte("a-different-credential")
+
+	type call func(device string) error
+	entryPoints := map[string]struct {
+		valid        call
+		passphrases  []call // each with exactly one passphrase argument too short
+		keyslotRange []call // each with exactly one keyslot number out of range
+	}{
+		"TestKey": {
+			valid:       func(d string) error { return TestKey(d, good) },
+			passphrases: []call{func(d string) error { return TestKey(d, short) }},
+		},
+		"AddKey": {
+			valid: func(d string) error { _, err := AddKey(d, good, other, fipsSafeAddKeyOptions()); return err },
+			passphrases: []call{
+				func(d string) error { _, err := AddKey(d, short, other, fipsSafeAddKeyOptions()); return err },
+				func(d string) error { _, err := AddKey(d, good, short, fipsSafeAddKeyOptions()); return err },
+			},
+		},
+		"RemoveKey": {
+			valid:        func(d string) error { return RemoveKey(d, good, 0) },
+			passphrases:  []call{func(d string) error { return RemoveKey(d, short, 0) }},
+			keyslotRange: []call{func(d string) error { return RemoveKey(d, good, -1) }, func(d string) error { return RemoveKey(d, good, MaxKeyslots) }},
+		},
+		"KillSlot": {
+			valid:        func(d string) error { return KillSlot(d, good, 0) },
+			passphrases:  []call{func(d string) error { return KillSlot(d, short, 0) }},
+			keyslotRange: []call{func(d string) error { return KillSlot(d, good, -1) }, func(d string) error { return KillSlot(d, good, MaxKeyslots) }},
+		},
+		"ChangeKey": {
+			valid: func(d string) error { return ChangeKey(d, good, other, 0) },
+			passphrases: []call{
+				func(d string) error { return ChangeKey(d, short, other, 0) },
+				func(d string) error { return ChangeKey(d, good, short, 0) },
+			},
+			keyslotRange: []call{func(d string) error { return ChangeKey(d, good, other, -1) }, func(d string) error { return ChangeKey(d, good, other, MaxKeyslots) }},
+		},
+		"KillKeyslot": {
+			valid:        func(d string) error { return KillKeyslot(d, 0) },
+			keyslotRange: []call{func(d string) error { return KillKeyslot(d, -1) }, func(d string) error { return KillKeyslot(d, MaxKeyslots) }},
+		},
+		"ListKeyslots": {
+			valid: func(d string) error { _, err := ListKeyslots(d); return err },
+		},
+	}
+
+	for name, ep := range entryPoints {
+		t.Run(name, func(t *testing.T) {
+			if err := ep.valid(""); !errors.Is(err, ErrInvalidPath) {
+				t.Errorf("an empty path: %v, want ErrInvalidPath", err)
+			}
+			if err := ep.valid(filepath.Join(t.TempDir(), "absent.img")); !errors.Is(err, ErrDeviceNotFound) {
+				t.Errorf("a missing device: %v, want ErrDeviceNotFound", err)
+			}
+
+			blank := newImage(t, "not-luks.img")
+			if err := ep.valid(blank); !errors.Is(err, ErrInvalidHeader) {
+				t.Errorf("a device with no LUKS2 header: %v, want ErrInvalidHeader", err)
+			}
+			if b := readAreaBytes(t, blank, 0, goldenPrefixBytes); !bytes.Equal(b, make([]byte, goldenPrefixBytes)) {
+				t.Error("the refusal wrote to a device that holds no LUKS2 header")
+			}
+
+			device := newImage(t, "volume.img")
+			formatWithLibrary(t, device)
+			before := readAreaBytes(t, device, 0, goldenPrefixBytes)
+			for i, c := range ep.passphrases {
+				if err := c(device); !errors.Is(err, ErrPassphraseTooShort) {
+					t.Errorf("short passphrase, argument %d: %v, want ErrPassphraseTooShort", i, err)
+				}
+			}
+			for i, c := range ep.keyslotRange {
+				if err := c(device); err == nil || !strings.Contains(err.Error(), "invalid keyslot") {
+					t.Errorf("out-of-range keyslot, case %d: %v, want an invalid-keyslot refusal", i, err)
+				}
+			}
+			if !bytes.Equal(before, readAreaBytes(t, device, 0, goldenPrefixBytes)) {
+				t.Error("a refused call changed the container")
+			}
+		})
 	}
 }

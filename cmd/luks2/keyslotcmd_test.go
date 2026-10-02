@@ -22,7 +22,10 @@ import (
 // credential.
 
 // runCLI builds a CLI over the given arguments with no terminal attached, which
-// is the shape every non-interactive test wants.
+// is the shape every non-interactive test wants. Everything a CLI touches is
+// injected through it -- streams, terminal, operations -- so the package's
+// tests share no mutable state, and the ones that cost real time (cryptsetup
+// round-trips, multi-megabyte key files under -race) run in parallel (#92).
 func runCLI(t *testing.T, stdin string, args ...string) (*CLI, *strings.Builder, *strings.Builder) {
 	t.Helper()
 

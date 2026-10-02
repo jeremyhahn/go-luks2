@@ -55,15 +55,16 @@ func formattedImage(t *testing.T, key, name string, size int64, opts func() Form
 	if err != nil {
 		t.Fatalf("failed to create image %s: %v", path, err)
 	}
-	defer func() { _ = f.Close() }()
+	defer func() { _ = f.Close() }() // failure paths only: success closes, checked, below
 	if err := f.Truncate(size); err != nil {
 		t.Fatalf("failed to size image %s: %v", path, err)
 	}
 	if _, err := f.WriteAt(entry.image, 0); err != nil {
 		t.Fatalf("failed to copy the shared %q container onto %s: %v", key, path, err)
 	}
-	if err := f.Sync(); err != nil {
-		t.Fatalf("failed to sync %s: %v", path, err)
+	// Closed, not fsynced: see stampImagePrefix.
+	if err := f.Close(); err != nil {
+		t.Fatalf("failed to close %s: %v", path, err)
 	}
 	return path
 }

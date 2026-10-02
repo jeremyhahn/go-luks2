@@ -14,6 +14,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -914,6 +916,8 @@ func TestReadJSONMetadataRefusesAHeaderSizeWithNoRoomForJSON(t *testing.T) {
 // The assertion is on the size, so moving the bound back down turns this test
 // red rather than leaving it satisfied by the other guard.
 func TestReadHeaderBoundsTheDeclaredSizeBeforeAnythingElseUsesIt(t *testing.T) {
+	t.Parallel()
+
 	const craftedSize = uint64(1) << 62
 	const craftedOffset = uint64(0x1234) // not 0, not 16 KiB-aligned
 
@@ -983,6 +987,8 @@ func nullEntryVolume(t *testing.T, name string) string {
 // that something non-empty came back: a report that names the wrong id space,
 // or that changes between runs, is the same problem in a new place.
 func TestReadHeaderReportsTheNullEntriesItDropped(t *testing.T) {
+	t.Parallel()
+
 	path := nullEntryVolume(t, "null-entries.img")
 
 	_, metadata, err := ReadHeader(path)
@@ -1028,6 +1034,8 @@ func TestReadHeaderReportsTheNullEntriesItDropped(t *testing.T) {
 // keeps the report from being noise. A diagnostic that fires on healthy
 // containers is one an operator learns to ignore, and then it protects nothing.
 func TestReadHeaderReportsNothingDroppedForAnIntactHeader(t *testing.T) {
+	t.Parallel()
+
 	path := newImage(t, "intact.img")
 	formatWithLibrary(t, path)
 
@@ -1120,5 +1128,96 @@ func TestDroppedEntryStringNamesBothTheKindAndTheID(t *testing.T) {
 		if got := tc.entry.String(); got != tc.want {
 			t.Errorf("DroppedEntry%v.String() = %q, want %q", tc.entry, got, tc.want)
 		}
+	}
+}
+
+// luksPrefixImage writes prefix at the start of a fresh image, for the probes
+// that read nothing past the first eight bytes.
+func luksPrefixImage(t *testing.T, name string, prefix []byte) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, prefix, 0o600); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
+	}
+	return path
+}
+
+// luksVersionPrefix is the magic followed by a big-endian version -- all that
+// IsLUKS and IsLUKS2 read -- padded to a whole binary header, which is what
+// ReadHeader reads before it looks at the version.
+func luksVersionPrefix(version uint16) []byte {
+	prefix := append([]byte(LUKS2Magic), 0, 0)
+	binary.BigEndian.PutUint16(prefix[LUKS2MagicLen:], version)
+	return append(prefix, make([]byte, LUKS2HeaderSize-len(prefix))...)
+}
+
+// TestIsLUKSAndIsLUKS2TellTheVersionsApart pins the two probes against each
+// other: IsLUKS answers "is there a LUKS header at all", IsLUKS2 "is it the
+// version this package reads", and a LUKS1 container is where they must
+// disagree -- it is the one case that tells a probe that checks the version
+// from one that does not.
+func TestIsLUKSAndIsLUKS2TellTheVersionsApart(t *testing.T) {
+	golden := newImage(t, "luks2.img")
+	formatWithLibrary(t, golden)
+
+	for _, tc := range []struct {
+		name         string
+		device       string
+		luks, luksV2 bool
+	}{
+		{"a container this package formatted", golden, true, true},
+		{"a LUKS1 header", luksPrefixImage(t, "luks1.img", luksVersionPrefix(1)), true, false},
+		{"the LUKS magic with an unknown version", luksPrefixImage(t, "luks3.img", luksVersionPrefix(3)), true, false},
+		{"no LUKS magic", luksPrefixImage(t, "plain.img", make([]byte, 4096)), false, false},
+		{"the secondary header's magic at offset 0", luksPrefixImage(t, "skul.img",
+			append([]byte(LUKS2SecondaryMagic), 0, 2)), false, false},
+		{"fewer bytes than the magic", luksPrefixImage(t, "tiny.img", []byte("LUK")), false, false},
+		{"the magic and half a version", luksPrefixImage(t, "seven.img", append([]byte(LUKS2Magic), 0)), true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := IsLUKS(tc.device)
+			if err != nil || got != tc.luks {
+				t.Errorf("IsLUKS = %v, %v; want %v, nil", got, err, tc.luks)
+			}
+			got, err = IsLUKS2(tc.device)
+			if err != nil || got != tc.luksV2 {
+				t.Errorf("IsLUKS2 = %v, %v; want %v, nil", got, err, tc.luksV2)
+			}
+		})
+	}
+}
+
+// TestIsLUKSRefusesAPathItCannotProbe is the failure half: a path that cannot
+// be probed is an error, never a confident "not LUKS" -- a caller deciding
+// whether to format would read false as permission.
+func TestIsLUKSRefusesAPathItCannotProbe(t *testing.T) {
+	for _, tc := range []struct {
+		name, device string
+		want         error
+	}{
+		{"an empty path", "", ErrInvalidPath},
+		{"a relative path", "relative/volume.img", ErrInvalidPath},
+		{"a path that does not exist", filepath.Join(t.TempDir(), "absent.img"), ErrDeviceNotFound},
+		{"a directory", t.TempDir(), ErrInvalidPath},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, err := IsLUKS(tc.device); !errors.Is(err, tc.want) {
+				t.Errorf("IsLUKS = %v, %v; want an error wrapping %v", got, err, tc.want)
+			}
+			if got, err := IsLUKS2(tc.device); !errors.Is(err, tc.want) {
+				t.Errorf("IsLUKS2 = %v, %v; want an error wrapping %v", got, err, tc.want)
+			}
+		})
+	}
+}
+
+// TestReadHeaderRefusesALUKS1Container: IsLUKS says yes and this package must
+// still not parse it -- a LUKS1 header has a different layout after the
+// version field, and reading it as LUKS2 would interpret its key material
+// offsets as JSON sizes.
+func TestReadHeaderRefusesALUKS1Container(t *testing.T) {
+	device := luksPrefixImage(t, "luks1.img", luksVersionPrefix(1))
+	if _, _, err := ReadHeader(device); err == nil || !strings.Contains(err.Error(), "unsupported LUKS version: 1") {
+		t.Fatalf("ReadHeader = %v, want it to refuse LUKS version 1 by name", err)
 	}
 }

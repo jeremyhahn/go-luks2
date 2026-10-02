@@ -197,3 +197,90 @@ func TestNewRunIDDistinguishesRunsWithTheSamePID(t *testing.T) {
 		t.Fatalf("NewRunID returned %q for two different runs with the same pid", a)
 	}
 }
+
+// TestLedgerRecordAfterCloseIsARecordError: a record that cannot be written is
+// the one failure the whole ledger exists to surface, so it must reach the
+// caller as ErrLedgerUnavailable -- the sentinel suites stop on -- naming what
+// was not recorded, with the write's own error still reachable underneath.
+func TestLedgerRecordAfterCloseIsARecordError(t *testing.T) {
+	ledger, err := OpenLedger(stateDir(t), "run-closed")
+	if err != nil {
+		t.Fatalf("OpenLedger: %v", err)
+	}
+	if err := ledger.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	err = ledger.Record(KindMapping, "luks-after-close", "uuid")
+	var re *RecordError
+	if !errors.As(err, &re) || re.Kind != KindMapping || re.Value != "luks-after-close" {
+		t.Fatalf("Record after Close = %v, want a *RecordError for dm %q", err, "luks-after-close")
+	}
+	if !errors.Is(err, ErrLedgerUnavailable) {
+		t.Errorf("error = %v, want it to match ErrLedgerUnavailable", err)
+	}
+	if !errors.Is(err, os.ErrClosed) {
+		t.Errorf("error = %v, want the closed-file cause reachable through Unwrap", err)
+	}
+	if !strings.Contains(err.Error(), `could not record dm "luks-after-close" before creating it`) {
+		t.Errorf("error = %q, want it to say what was not recorded", err)
+	}
+}
+
+// TestLedgerDiscardReportsAFailedClose: Discard must not delete the record of a
+// run whose ledger it could not even close -- and a second Discard is exactly
+// that case.
+func TestLedgerDiscardReportsAFailedClose(t *testing.T) {
+	ledger, err := OpenLedger(stateDir(t), "run-discarded")
+	if err != nil {
+		t.Fatalf("OpenLedger: %v", err)
+	}
+	if err := ledger.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := ledger.Discard(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("Discard of a closed ledger = %v, want the close failure", err)
+	}
+	if _, err := os.Stat(ledger.Path()); err != nil {
+		t.Fatalf("Discard removed the ledger after failing to close it: %v", err)
+	}
+}
+
+// TestOpenLedgerRefusesALedgerPathItCannotOpen: the state directory is trusted
+// but the ledger's own name is taken by something that is not a file.
+func TestOpenLedgerRefusesALedgerPathItCannotOpen(t *testing.T) {
+	dir := stateDir(t)
+	if err := os.Mkdir(filepath.Join(dir, "run-squatted"+ledgerSuffix), 0o700); err != nil {
+		t.Fatalf("creating the squatting directory: %v", err)
+	}
+	if _, err := OpenLedger(dir, "run-squatted"); !errors.Is(err, ErrLedgerUnavailable) {
+		t.Fatalf("OpenLedger = %v, want ErrLedgerUnavailable", err)
+	}
+}
+
+// TestTryLockAndReadLedgerReportAMissingLedger: both are handed paths from a
+// directory listing, and a ledger removed between the listing and the call is
+// an error, not an empty or unlocked ledger.
+func TestTryLockAndReadLedgerReportAMissingLedger(t *testing.T) {
+	missing := filepath.Join(stateDir(t), "gone"+ledgerSuffix)
+	if locked, _, err := TryLock(missing); locked || !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("TryLock = %v, %v; want not locked and ErrNotExist", locked, err)
+	}
+	if entries, err := ReadLedger(missing); entries != nil || !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("ReadLedger = %v, %v; want ErrNotExist", entries, err)
+	}
+}
+
+// TestStateDirDefaultsToAPathThatOutlivesTheRun: with LUKS2_TEST_STATE_DIR
+// unset the ledgers go to DefaultStateDir, a fixed path, never a temp
+// directory that dies with the run it describes.
+func TestStateDirDefaultsToAPathThatOutlivesTheRun(t *testing.T) {
+	t.Setenv(StateDirEnv, "")
+	if got := StateDir(); got != DefaultStateDir {
+		t.Fatalf("StateDir() = %q with %s unset, want %q", got, StateDirEnv, DefaultStateDir)
+	}
+	t.Setenv(StateDirEnv, "/srv/ledgers")
+	if got := StateDir(); got != "/srv/ledgers" {
+		t.Fatalf("StateDir() = %q, want the environment's /srv/ledgers", got)
+	}
+}

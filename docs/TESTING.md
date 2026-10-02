@@ -9,6 +9,13 @@ make test-unit            # no devices, no root, no container
 make integration-test     # the container, through test/integration/docker-run.sh
 ```
 
+The container's default command is `make coverage-combined`: the integration
+suite, instrumenting `pkg/luks2` and `test/harness`, then the unit suite for
+those two packages, then the coverage gate over the union of both profiles. A
+package below its combined floor fails the container and with it the run --
+the README's "Coverage, and how it is measured" says which packages are gated
+in which tier, and why.
+
 ## The container is not privileged
 
 `docker run --privileged` is not a privilege setting. It is the absence of

@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // The waiting logic is exercised here without a loop device; the kernel-facing
@@ -246,6 +248,8 @@ func TestWaitForDetachRecoversWhenTheReadStartsWorking(t *testing.T) {
 // detach and continuing to fail afterwards, so there is neither a baseline nor
 // an authoritative reading at any point.
 func TestWaitForDetachNeverSucceedsWithoutAnAuthoritativeObservation(t *testing.T) {
+	t.Parallel()
+
 	unreadable := failingReader(errors.New("sysfs unavailable"))
 	stillHeld := reader(attachedTo("/tmp/volume.img"))
 	heldByAnother := reader(attachedTo("/tmp/other.img"))
@@ -556,5 +560,29 @@ func TestWaitForLoopNodeAcceptsAnExistingNodeImmediately(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
 		t.Errorf("an existing node took %s -- the first check is not happening before the first sleep", elapsed)
+	}
+}
+
+// TestLoopAttributeSaysUnboundOnEveryKernelsAnswer: the answers that mean a
+// loop device is attached to nothing -- the attribute gone (ENOENT), or the
+// read refused with ENODEV as the CI runner's kernel does for a released device
+// (#141) -- against the ones that mean the state could not be read, which
+// readLoopStateIn must keep as errors.
+func TestLoopAttributeSaysUnboundOnEveryKernelsAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		errno   error
+		unbound bool
+	}{
+		{unix.ENOENT, true},
+		{unix.ENODEV, true},
+		{unix.ENXIO, true},
+		{unix.EIO, false},
+		{unix.EACCES, false},
+		{unix.EISDIR, false},
+	} {
+		err := &os.PathError{Op: "read", Path: "/sys/block/loop0/loop/backing_file", Err: tc.errno}
+		if got := loopAttributeSaysUnbound(err); got != tc.unbound {
+			t.Errorf("loopAttributeSaysUnbound(%v) = %v, want %v", tc.errno, got, tc.unbound)
+		}
 	}
 }

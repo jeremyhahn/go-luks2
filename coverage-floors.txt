@@ -1,0 +1,38 @@
+# Coverage floors: <import path> <tier> <floor%>
+#
+# Read by test/covergate (`make coverage-gate`, `make coverage-combined`). The
+# bar is 90% for EVERY package (testing-guidelines.md; project-scaffold.md 6),
+# compared per package and exactly -- 89.99% is below 90.
+#
+# TIERS
+#
+#   unit      the default-tag unit suite under -race, as `make test-unit`
+#             measures it. Gated in CI's unit job and by `make ci`.
+#   combined  the union of the unit suite and the devcontainer integration
+#             suite, measured in one container by `make coverage-combined`.
+#             Gated by the container's exit status, in CI's integration job
+#             and by `make ci-full`.
+#
+# A package's floor of record is its 90. A package whose remaining statements
+# only a real kernel can execute -- loop devices, device-mapper, mount(2),
+# dmsetup and losetup -- is held to 90 in the combined tier, and ALSO carries a
+# unit floor at its measured unit level, rounded DOWN to the half point -- a
+# few branches (lock backoff, retry loops) run or not by timing, and a floor at
+# the exact measurement would fail on that alone -- and down to the whole point
+# where the half point would leave less than two statements of slack
+# (test/harness: 466 of 551 is 84.57%, and 84.50% needs 466 -- no slack at
+# all). So neither suite can lose coverage unnoticed. RAISE a unit floor
+# when unit coverage rises; never lower one.
+#
+# The gate refuses this file if a package `go list ./...` reports has no unit
+# line, if a line names a package that no longer exists, or if no tier holds a
+# package to the 90% target. `none` declares a package with no statements, and
+# the gate checks that claim against the profile.
+github.com/jeremyhahn/go-luks2/pkg/luks2                         unit      87.50
+github.com/jeremyhahn/go-luks2/pkg/luks2                         combined  90
+github.com/jeremyhahn/go-luks2/cmd/luks2                         unit      90
+github.com/jeremyhahn/go-luks2/test/harness                      unit      84.00
+github.com/jeremyhahn/go-luks2/test/harness                      combined  90
+github.com/jeremyhahn/go-luks2/test/harness/cmd/luks2-testreap   unit      90
+github.com/jeremyhahn/go-luks2/test/covergate                    unit      90
+github.com/jeremyhahn/go-luks2/test/makefile                     unit      none

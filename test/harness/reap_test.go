@@ -2094,3 +2094,81 @@ func TestUnknownStateStillFailsClosed(t *testing.T) {
 		}
 	})
 }
+
+// TestReapEntryRefusesAKindItDoesNotKnow: ReadLedger already rejects unknown
+// kinds, and this is the second line -- an entry nobody knows how to remove is
+// a failure, not something to skip as removed.
+func TestReapEntryRefusesAKindItDoesNotKnow(t *testing.T) {
+	out, err := reapEntry(Entry{Kind: "zram", Value: "/dev/zram0"}, newFakeRemover(), io.Discard)
+	if err == nil || out != outcomeNotOurs || !strings.Contains(err.Error(), `unknown record kind "zram"`) {
+		t.Fatalf("reapEntry = %v, %v; want a refusal naming the kind", out, err)
+	}
+}
+
+// TestReapErrorUnwrapsToEveryFailure: a caller asking errors.Is about one
+// specific cause must find it whichever failure in the list carries it.
+func TestReapErrorUnwrapsToEveryFailure(t *testing.T) {
+	first := errors.New("device or resource busy")
+	second := errors.New("input/output error")
+	err := error(&ReapError{Failures: []ReapFailure{
+		{Entry: Entry{Kind: KindMapping, Value: "a"}, Err: first},
+		{Entry: Entry{Kind: KindLoopBacking, Value: "/b.img"}, Err: second},
+	}})
+	if !errors.Is(err, first) || !errors.Is(err, second) || !errors.Is(err, ErrReapIncomplete) {
+		t.Fatalf("errors.Is did not reach every cause and the sentinel through %v", err)
+	}
+}
+
+// TestFinishReportsAndLeavesANameSomethingElseNowHolds: a mapping this run
+// recorded whose name now carries another identity is not ours to remove.
+// Finish leaves it, says so, and still passes the run and discards the ledger
+// -- nothing of ours is left under the name.
+func TestFinishReportsAndLeavesANameSomethingElseNowHolds(t *testing.T) {
+	ledger, err := OpenLedger(stateDir(t), "run")
+	if err != nil {
+		t.Fatalf("OpenLedger: %v", err)
+	}
+	if err := ledger.Record(KindMapping, "reused", "uuid-ours"); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	rm := newFakeRemover()
+	rm.mappings["reused"] = "uuid-a-strangers"
+
+	var out strings.Builder
+	suite := &Suite{Ledger: ledger, TempDir: t.TempDir(), RunID: "run", Remover: rm}
+	if got := suite.Finish(0, &out); got != 0 {
+		t.Fatalf("Finish = %d, want 0: a name held by something else is not a failed cleanup", got)
+	}
+	if rm.mappings["reused"] != "uuid-a-strangers" {
+		t.Fatal("Finish removed a mapping carrying someone else's identity")
+	}
+	if !strings.Contains(out.String(), "1 recorded name(s) are now held by something else") {
+		t.Errorf("Finish output %q does not report the name it left alone", out.String())
+	}
+	if _, err := os.Stat(ledger.Path()); !os.IsNotExist(err) {
+		t.Errorf("the ledger survived a Finish with nothing of ours outstanding: %v", err)
+	}
+}
+
+// TestFinishFailsTheRunWhenTheLedgerCannotBeDiscarded: every resource is gone
+// and the record of them cannot be deleted. That is safe -- the next run reaps
+// it as a dead run's -- but it is not a clean finish, and a silent pass would
+// hide a state directory nobody can write to.
+func TestFinishFailsTheRunWhenTheLedgerCannotBeDiscarded(t *testing.T) {
+	ledger, err := OpenLedger(stateDir(t), "run")
+	if err != nil {
+		t.Fatalf("OpenLedger: %v", err)
+	}
+	if err := ledger.Close(); err != nil { // so Discard's own Close fails
+		t.Fatalf("Close: %v", err)
+	}
+
+	var out strings.Builder
+	suite := &Suite{Ledger: ledger, TempDir: t.TempDir(), RunID: "run", Remover: newFakeRemover()}
+	if got := suite.Finish(0, &out); got != 1 {
+		t.Fatalf("Finish = %d, want 1 when the ledger could not be discarded", got)
+	}
+	if !strings.Contains(out.String(), "could not discard the run ledger") {
+		t.Errorf("Finish output %q does not say what failed", out.String())
+	}
+}

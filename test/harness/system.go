@@ -7,6 +7,7 @@ package harness
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -189,8 +190,9 @@ func identifyLoopDevice(sysDir, backing string, capture identityCapturer) (LoopD
 // it has one at all.
 //
 // ABSENT AND UNREADABLE ARE DIFFERENT ANSWERS, and collapsing them is the
-// defect this function exists to prevent. ENOENT means the device is unused --
-// or was detached while this loop was running -- and skipping it is correct.
+// defect this function exists to prevent. ENOENT, ENODEV and ENXIO mean the
+// device is unused -- or was detached while this loop was running -- and
+// skipping it is correct (see loopReleased for which kernel says which).
 // Anything else (EACCES, EIO, EISDIR, a sysfs quirk) means the backing file
 // COULD NOT BE VERIFIED, and treating that as "no backing file" makes the
 // caller report an empty device list, which makes the reaper report AlreadyGone
@@ -200,14 +202,31 @@ func identifyLoopDevice(sysDir, backing string, capture identityCapturer) (LoopD
 // reintroduced here by a bare `continue` on every error.
 func readBackingFile(loopDir string) (backing string, present bool, err error) {
 	path := filepath.Join(loopDir, "loop", "backing_file")
-	raw, err := os.ReadFile(path) // #nosec G304 -- path is a sysfs entry under the given root
+	raw, err := readSysfsAttr(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if loopReleased(err) {
 			return "", false, nil
 		}
 		return "", false, fmt.Errorf("reading %s: %w", path, err)
 	}
 	return normalizeBackingFile(string(raw)), true, nil
+}
+
+// readSysfsAttr reads one sysfs attribute. It is a variable so the answers
+// only some kernels give can be driven in a test; nothing else replaces it.
+var readSysfsAttr = os.ReadFile
+
+// loopReleased reports whether a failed read of a loop device's backing_file
+// means the device is bound to nothing -- which is the answer, not an error.
+//
+// Kernels disagree on how they say it. Some remove the attribute (ENOENT);
+// others keep it, and the read fails with ENODEV once the device is released
+// -- measured on the CI runner, where it made a successful detach fail its own
+// release confirmation (#141). ENXIO is the loop driver's own "not bound"
+// answer, and is treated the same way. Any other failure is a real one: the
+// reaper does not know what the device backs, so it must not guess "nothing".
+func loopReleased(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ENODEV) || errors.Is(err, unix.ENXIO)
 }
 
 // LoopDevicesUnder returns the loop devices whose backing file lives under dir.

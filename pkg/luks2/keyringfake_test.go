@@ -286,6 +286,25 @@ func validLogonDescription(description string) bool {
 // the keyring too -- which is how a CI runner that denies add_key managed to
 // fail tests that have nothing to do with #78. Installing the fake once, here,
 // means no test can accidentally depend on the host's keyring policy.
+//
+// # WHICH TESTS RUN IN PARALLEL (#92)
+//
+// The suite was entirely sequential: the sum of its tests' times WAS its wall
+// time -- 213s under -race on a loaded 8-core workstation, and the CI runner has
+// 112 cores. The cost is real work in the code under test (a keyslot unlock is
+// a 4000-stripe AF merge and an XTS pass, ~5x slower instrumented), so it
+// cannot be trimmed away; it can be overlapped.
+//
+// A top-level test calls t.Parallel() when it costs at least ~100ms and it, and
+// everything it calls, writes NO package-level variable -- none of the seams
+// (dm, keyring, cryptoRand, newUUID, digestIterationsFor, importToken, ...), no
+// process-wide setting (Setenv, Chdir, umask), and it does not measure
+// something process-wide (VmLck, MemStats) or time itself against a wall
+// clock. Everything else stays sequential, and that is safe by construction:
+// the testing package runs every sequential top-level test to completion
+// before it releases the first parallel one, so a seam is never swapped while
+// a parallel test is running. The race detector is the check on the rule, and
+// every CI run is a -race run.
 func TestMain(m *testing.M) {
 	keyring = (&fakeKeyring{}).seam()
 	os.Exit(m.Run())

@@ -105,6 +105,8 @@ func assertHeaderCopiesAreDistinct(t *testing.T, device string, areaSize int64) 
 // TestRecoveryFlow_RestorePrimaryHeader drives the documented repair through
 // the public API and checks the container that comes out the other side.
 func TestRecoveryFlow_RestorePrimaryHeader(t *testing.T) {
+	t.Parallel()
+
 	device, passphrase := headerSizeVolume(t)
 
 	destroyPrimaryHeader(t, device, LUKS2SecondaryHeaderOffset)
@@ -126,6 +128,8 @@ func TestRecoveryFlow_RestorePrimaryHeader(t *testing.T) {
 // what a caller reading the documentation would assemble, and it is the exact
 // sequence that used to destroy the container.
 func TestRecoveryFlow_WriteBackTheSecondaryHeader(t *testing.T) {
+	t.Parallel()
+
 	device, passphrase := headerSizeVolume(t)
 
 	destroyPrimaryHeader(t, device, LUKS2SecondaryHeaderOffset)
@@ -170,6 +174,8 @@ func TestRecoveryFlow_WriteBackTheSecondaryHeader(t *testing.T) {
 // TestRecoveryFlow_RefusesWhenBothCopiesAreGone checks the failure direction:
 // a container with no usable secondary is left alone rather than half-written.
 func TestRecoveryFlow_RefusesWhenBothCopiesAreGone(t *testing.T) {
+	t.Parallel()
+
 	device, _ := headerSizeVolume(t)
 
 	f, err := os.OpenFile(device, os.O_RDWR, 0600) // #nosec G304 -- device is under t.TempDir()
@@ -214,6 +220,8 @@ func TestRecoveryFlow_RefusesWhenBothCopiesAreGone(t *testing.T) {
 // read path, which is why they are made here too rather than trusting the
 // third party to notice.
 func TestConformance_RecoveredContainerIsAcceptedByCryptsetup(t *testing.T) {
+	t.Parallel()
+
 	requireCryptsetup(t)
 
 	path := newImage(t, "recovered.img")
@@ -260,6 +268,8 @@ func TestConformance_RecoveredContainerIsAcceptedByCryptsetup(t *testing.T) {
 // secondary copy is at 0x8000 rather than 0x4000. It ties the recovery flow to
 // the offset-probing fix: nothing in the repair may assume the default layout.
 func TestConformance_RecoverForeignGeometryContainer(t *testing.T) {
+	t.Parallel()
+
 	requireCryptsetup(t)
 
 	const areaSize = 0x8000

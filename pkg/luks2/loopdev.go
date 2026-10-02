@@ -418,7 +418,7 @@ func readLoopStateIn(root, device string) (loopState, error) {
 
 	data, err := os.ReadFile(filepath.Join(blockDir, "loop", "backing_file")) // #nosec G304 -- sysfs path built from the device's base name
 	switch {
-	case errors.Is(err, fs.ErrNotExist):
+	case loopAttributeSaysUnbound(err):
 		// The block device is there and its loop attributes are not, so it is
 		// attached to nothing. This is the authoritative negative.
 		return loopState{}, nil
@@ -443,6 +443,19 @@ func readLoopStateIn(root, device string) (loopState, error) {
 // flags are diagnostic, and a missing or unreadable one must not turn into a
 // claim about the association itself — that is what [readLoopStateIn]'s error
 // is for.
+// loopAttributeSaysUnbound reports whether a failed read of a loop device's
+// sysfs backing_file means the device is attached to nothing.
+//
+// Kernels say it differently: some remove the loop attributes (ENOENT), others
+// keep them and fail the read with ENODEV once the device is released --
+// measured on a CI runner, where the test harness's own release confirmation
+// failed on exactly that (go-luks2 #141). ENXIO is the loop driver's "not
+// bound" answer. Every other failure means the state could not be read, and
+// stays an error.
+func loopAttributeSaysUnbound(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ENODEV) || errors.Is(err, unix.ENXIO)
+}
+
 func readLoopFlag(blockDir, name string) bool {
 	data, err := os.ReadFile(filepath.Join(blockDir, "loop", name)) // #nosec G304 -- sysfs path built from the device's base name
 	if err != nil {

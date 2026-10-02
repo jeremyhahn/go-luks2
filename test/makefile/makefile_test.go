@@ -7,6 +7,7 @@ package makefile
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -366,6 +367,223 @@ func parentMakeEnviron(t *testing.T, overrides ...string) []string {
 		}
 	}
 	return env
+}
+
+// runMakeErr is runMake for a target that is EXPECTED to be able to fail: it
+// returns the error instead of failing the test on it.
+func runMakeErr(t *testing.T, env []string, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	cmd := exec.Command(lookPath(t, "make"), args...) // #nosec G204 -- make is resolved from PATH; arguments are test-built
+	cmd.Dir = repoRoot(t)
+	cmd.Env = env
+	var out, errOut bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+	err = cmd.Run()
+	return out.String(), errOut.String(), err
+}
+
+// listPackages is `go list ./...` at the repository root: the package list the
+// coverage gate holds the floors file to.
+func listPackages(t *testing.T) []string {
+	t.Helper()
+	cmd := exec.Command(resolveGo(t), "list", "./...") // #nosec G204 -- go is resolved as the Makefile resolves it; arguments are constants
+	cmd.Dir = repoRoot(t)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go list ./...: %v", err)
+	}
+	return strings.Fields(string(out))
+}
+
+// coverageFixture writes a profile in which every package has exactly 9 of 10
+// statements covered -- 90.00% -- and a floors file holding every package to
+// floor, except that override (when set) replaces one package's floor.
+func coverageFixture(t *testing.T, floor, overridePkg, override string) (profile, floors string) {
+	t.Helper()
+	dir := t.TempDir()
+	var prof, fl strings.Builder
+	prof.WriteString("mode: atomic\n")
+	for _, pkg := range listPackages(t) {
+		fmt.Fprintf(&prof, "%s/f.go:1.1,2.2 9 1\n%s/f.go:3.1,4.2 1 0\n", pkg, pkg)
+		f := floor
+		if pkg == overridePkg {
+			f = override
+		}
+		fmt.Fprintf(&fl, "%s unit %s\n", pkg, f)
+	}
+	profile = filepath.Join(dir, "unit.out")
+	floors = filepath.Join(dir, "floors.txt")
+	if err := os.WriteFile(profile, []byte(prof.String()), 0o600); err != nil {
+		t.Fatalf("writing the profile fixture: %v", err)
+	}
+	if err := os.WriteFile(floors, []byte(fl.String()), 0o600); err != nil {
+		t.Fatalf("writing the floors fixture: %v", err)
+	}
+	return profile, floors
+}
+
+// TestCoverageGateIsAGateThatCanFail is #141's verification, through the
+// Makefile target CI runs: the negative control passes, the positive control
+// -- one package one hundredth of a point under its floor -- fails the make.
+// A gate not observed failing is not known to be a gate.
+func TestCoverageGateIsAGateThatCanFail(t *testing.T) {
+	env := environ(nil, nil)
+
+	profile, floors := coverageFixture(t, "90", "", "")
+	stdout, stderr, err := runMakeErr(t, env, "-s", "coverage-gate",
+		"COVERAGE_FLOORS="+floors, "COVERAGE_UNIT_LEGS="+profile)
+	if err != nil {
+		t.Fatalf("negative control: every package at its floor, and make coverage-gate failed: %v\n%s%s", err, stdout, stderr)
+	}
+
+	target := listPackages(t)[0]
+	profile, floors = coverageFixture(t, "90", target, "90.01")
+	stdout, _, err = runMakeErr(t, env, "-s", "coverage-gate",
+		"COVERAGE_FLOORS="+floors, "COVERAGE_UNIT_LEGS="+profile)
+	if err == nil {
+		t.Fatalf("positive control: %s is under its floor and make coverage-gate passed:\n%s", target, stdout)
+	}
+	if !strings.Contains(stdout, "FAIL "+target+" [unit]: 90.00%") {
+		t.Errorf("the failure does not name %s and its exact coverage:\n%s", target, stdout)
+	}
+}
+
+// TestCoverageGateFailsWhenALegLeftNoProfile is the deleted-profile check: a
+// leg that wrote nothing must fail the gate, not drop out of the total.
+func TestCoverageGateFailsWhenALegLeftNoProfile(t *testing.T) {
+	profile, floors := coverageFixture(t, "90", "", "")
+	missing := filepath.Join(t.TempDir(), "coverage-rest.out")
+
+	stdout, stderr, err := runMakeErr(t, environ(nil, nil), "-s", "coverage-gate",
+		"COVERAGE_FLOORS="+floors, "COVERAGE_UNIT_LEGS="+profile+" "+missing)
+	if err == nil {
+		t.Fatalf("make coverage-gate passed with a leg's profile missing:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, missing) {
+		t.Errorf("the failure does not name the missing profile %s:\n%s", missing, stderr)
+	}
+}
+
+// fakeGoForCI stands in for the go command so `make ci` can run its real
+// recipes in milliseconds. A `go test` that writes a coverage profile takes a
+// second to do it, as the real unit legs take minutes; `go run ./test/covergate`
+// succeeds only if every profile it was handed already exists, which is what
+// the real gate needs.
+const fakeGoForCI = `#!/bin/sh
+case "$1" in
+env) echo /nonexistent-gopath ;;
+list) echo example.com/fake/other ;;
+test)
+	for a in "$@"; do
+		case "$a" in -coverprofile=*)
+			sleep 1
+			printf 'mode: atomic\nexample.com/fake/other/f.go:1.1,2.2 1 1\n' > "${a#-coverprofile=}" ;;
+		esac
+	done ;;
+run)
+	shift
+	while [ $# -gt 0 ]; do
+		if [ "$1" = -profile ]; then
+			[ -s "$2" ] || { echo "gate ran before its input $2 existed" >&2; exit 1; }
+			shift
+		fi
+		shift
+	done ;;
+tool) echo "total: (statements) 100.0%" ;;
+esac
+exit 0
+`
+
+// stubTargets replaces the recipes of ci's tool prerequisites -- formatting,
+// vet, lint and the security suite, none of which this test is about -- with
+// nothing, so only the ordering under test runs.
+const stubTargets = `
+fmt-check vet lint gosec govulncheck verify trivy-fs security:
+	@:
+`
+
+// TestCIRunsTheGateOnlyAfterTheTestsUnderParallelMake is the #141 review's
+// finding: with test-unit and coverage-gate as sibling prerequisites, `make -j
+// ci` ran the gate while the tests were still writing its inputs. ci now runs
+// them in order from its recipe. Under the sibling arrangement this fails --
+// the fake gate runs before the profiles exist.
+func TestCIRunsTheGateOnlyAfterTheTestsUnderParallelMake(t *testing.T) {
+	dir := t.TempDir()
+	fakeGo := filepath.Join(dir, "go")
+	if err := os.WriteFile(fakeGo, []byte(fakeGoForCI), 0o700); err != nil { // #nosec G306 -- an executable test fixture under t.TempDir()
+		t.Fatalf("writing the fake go: %v", err)
+	}
+	stubs := filepath.Join(dir, "stubs.mk")
+	if err := os.WriteFile(stubs, []byte(stubTargets), 0o600); err != nil {
+		t.Fatalf("writing the stub targets: %v", err)
+	}
+
+	stdout, stderr, err := runMakeErr(t, environ(nil, nil), "-j8", "-f", "Makefile", "-f", stubs, "ci",
+		"GO="+fakeGo,
+		"COVERAGE_LEG_PKG="+filepath.Join(dir, "pkg.out"),
+		"COVERAGE_LEG_REST="+filepath.Join(dir, "rest.out"),
+		"COVERAGE_FILE="+filepath.Join(dir, "coverage.out"),
+		"BUILD_DIR="+filepath.Join(dir, "build"))
+	if err != nil {
+		t.Fatalf("make -j8 ci failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if strings.Contains(stderr, "gate ran before its input") {
+		t.Fatalf("the gate ran before the tests wrote its inputs:\n%s", stderr)
+	}
+}
+
+// dockerStandIn writes a docker that succeeds at everything except, when
+// reachable is false, `docker container inspect` and `docker cp` -- which then
+// fail as they do once the daemon is unreachable or the container is gone.
+// When reachable is true, cp writes a profile to its destination. It returns a
+// PATH with the stand-in first.
+func dockerStandIn(t *testing.T, reachable bool) string {
+	t.Helper()
+	bin := t.TempDir()
+	gone := `echo "Error response from daemon: No such container" >&2; exit 1`
+	cp, inspect := gone, gone
+	if reachable {
+		cp = `printf 'mode: atomic\nexample.com/fake/f.go:1.1,2.2 1 1\n' > "$3"`
+		inspect = ":"
+	}
+	script := "#!/bin/sh\ncase \"$1\" in\ncp) " + cp + " ;;\ncontainer) " + inspect + " ;;\nesac\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(script), 0o700); err != nil { // #nosec G306 -- an executable test fixture under t.TempDir()
+		t.Fatalf("writing the docker stand-in: %v", err)
+	}
+	return bin + string(os.PathListSeparator) + os.Getenv("PATH")
+}
+
+// TestDockerIntegrationTestFailsWhenAPassingContainerLeftNoProfile is the
+// #141 review's extraction finding, for the Makefile path: a container whose
+// suite (and so whose combined gate) passed, but whose profile cannot be
+// copied out, must fail the target -- it used to inspect first and, when the
+// inspect failed, skip the copy and pass.
+func TestDockerIntegrationTestFailsWhenAPassingContainerLeftNoProfile(t *testing.T) {
+	dir := t.TempDir()
+	run := filepath.Join(dir, "run.sh")
+	if err := os.WriteFile(run, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil { // #nosec G306 -- an executable test fixture under t.TempDir()
+		t.Fatalf("writing the run stand-in: %v", err)
+	}
+	fakeGo := filepath.Join(dir, "go")
+	if err := os.WriteFile(fakeGo, []byte(fakeGoForCI), 0o700); err != nil { // #nosec G306 -- an executable test fixture under t.TempDir()
+		t.Fatalf("writing the fake go: %v", err)
+	}
+	args := []string{"-s", "docker-integration-test", "GO=" + fakeGo, "INTEGRATION_DOCKER_RUN=" + run,
+		"COVERAGE_INTEGRATION=" + filepath.Join(dir, "integration.out"), "TEST_STATE_DIR=" + dir}
+
+	stdout, stderr, err := runMakeErr(t, environ(nil, map[string]string{"PATH": dockerStandIn(t, false)}), args...)
+	if err == nil {
+		t.Fatalf("the container passed, its profile could not be copied, and the target passed:\n%s%s", stdout, stderr)
+	}
+	if !strings.Contains(stdout, "the container passed and left no") {
+		t.Errorf("the failure does not say what was missing:\n%s%s", stdout, stderr)
+	}
+
+	stdout, stderr, err = runMakeErr(t, environ(nil, map[string]string{"PATH": dockerStandIn(t, true)}), args...)
+	if err != nil {
+		t.Fatalf("control: the profile was copied and the target failed: %v\n%s%s", err, stdout, stderr)
+	}
 }
 
 // TestMakeTreeWritable checks the helper ownedGOPATH relies on by the modes it

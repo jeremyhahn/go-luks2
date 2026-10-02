@@ -219,6 +219,8 @@ func TestCreateKDFRefusesAnExplicitCountBelowTheFloor(t *testing.T) {
 // which is the only place the count actually matters: it is what an offline
 // attacker pays per guess and nothing can change it afterwards.
 func TestFormatWritesAnExplicitIterationCount(t *testing.T) {
+	t.Parallel()
+
 	const iterations = 250_000
 
 	path := newImage(t, "explicit-iterations.img")
@@ -259,6 +261,8 @@ func TestFormatWritesAnExplicitIterationCount(t *testing.T) {
 // option safe to expose at all: the refusal must happen BEFORE anything is
 // written, because a weak keyslot cannot be strengthened afterwards.
 func TestFormatRefusesAnExplicitCountBelowTheFloor(t *testing.T) {
+	t.Parallel()
+
 	path := newImage(t, "weak-iterations.img")
 	before, err := os.ReadFile(path) // #nosec G304 -- path is under t.TempDir()
 	if err != nil {
@@ -293,6 +297,8 @@ func TestFormatRefusesAnExplicitCountBelowTheFloor(t *testing.T) {
 // two must agree: a parameter accepted by Format and dropped by AddKey is the
 // defect addKeyFormatOptions already documents for PBKDFIterTime.
 func TestAddKeyWritesAnExplicitIterationCount(t *testing.T) {
+	t.Parallel()
+
 	const iterations = 300_000
 
 	path := newImage(t, "addkey-iterations.img")
@@ -333,6 +339,8 @@ func TestAddKeyWritesAnExplicitIterationCount(t *testing.T) {
 // TestAddKeyRefusesAnExplicitCountBelowTheFloor closes the same gap on the
 // add-key side, and checks the container is left alone.
 func TestAddKeyRefusesAnExplicitCountBelowTheFloor(t *testing.T) {
+	t.Parallel()
+
 	path := newImage(t, "addkey-weak.img")
 	formatWithLibrary(t, path)
 
@@ -372,6 +380,8 @@ func TestAddKeyRefusesAnExplicitCountBelowTheFloor(t *testing.T) {
 // an unrelated operation -- and the volume still opened, which is why it went
 // unnoticed. The hash went the same way, replaced with DefaultHashAlgo.
 func TestChangeKeyPreservesTheKeyslotsPBKDF2Cost(t *testing.T) {
+	t.Parallel()
+
 	// An explicit count neither a recalibration nor its floor would produce:
 	// one above sha512's recommended minimum (pbkdf2RecommendedIterations),
 	// where calibration lands in the millions on current hardware. It was

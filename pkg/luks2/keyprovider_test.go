@@ -653,6 +653,8 @@ func TestProviderFromTokenRefusesWhatItCannotDrive(t *testing.T) {
 // PARTY, not merely for this package: a keyslot only this library can use is
 // exactly the failure the conformance suite exists to catch.
 func TestEnrollKeyProviderWritesTheKeyslotAndTheTokenThatNamesIt(t *testing.T) {
+	t.Parallel()
+
 	requireCryptsetup(t)
 
 	image := newImage(t, "enroll.img")
@@ -701,6 +703,8 @@ func TestEnrollKeyProviderWritesTheKeyslotAndTheTokenThatNamesIt(t *testing.T) {
 // TestEnrollKeyProviderWithoutATokenAddsOnlyTheKeyslot covers the anonymous
 // provider: no token means no token slot is consumed.
 func TestEnrollKeyProviderWithoutATokenAddsOnlyTheKeyslot(t *testing.T) {
+	t.Parallel()
+
 	requireCryptsetup(t)
 
 	image := newImage(t, "anonymous.img")
@@ -734,6 +738,8 @@ func TestEnrollKeyProviderWithoutATokenAddsOnlyTheKeyslot(t *testing.T) {
 // TestEnrollKeyProviderRollsBackAKeyslotItCannotIdentify is the orphan
 // guarantee: a keyslot whose token could not be written must not survive.
 func TestEnrollKeyProviderRollsBackAKeyslotItCannotIdentify(t *testing.T) {
+	t.Parallel()
+
 	requireCryptsetup(t)
 
 	image := newImage(t, "rollback.img")

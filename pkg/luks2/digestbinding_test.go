@@ -187,6 +187,8 @@ func writeKeyslot(t *testing.T, path string, hdr *LUKS2BinaryHeader, metadata *L
 // still finds a match and reports keyslot 0 as authenticated -- on the strength
 // of a digest the header says belongs to another slot.
 func TestADigestCannotAuthenticateAKeyslotItDoesNotName(t *testing.T) {
+	t.Parallel()
+
 	passA := []byte("the-first-credential")
 	passB := []byte("the-second-credential")
 

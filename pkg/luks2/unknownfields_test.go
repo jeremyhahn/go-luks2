@@ -1030,6 +1030,8 @@ func binaryRead(r io.Reader, hdr *LUKS2BinaryHeader) error {
 // fido2-clientPin-required and fido2-uv-required were gone, deleted by a
 // header rewrite performed for a keyslot the token has nothing to do with.
 func TestConformance_TokenSurvivesAnUnrelatedKeyslotChange(t *testing.T) {
+	t.Parallel()
+
 	requireCryptsetup(t)
 
 	const secondPassphrase = "second-conformance-passphrase"
@@ -1104,6 +1106,8 @@ func TestConformance_TokenSurvivesAnUnrelatedKeyslotChange(t *testing.T) {
 // entirely. A passthrough that only preserved members this package already
 // knows about would preserve nothing that was actually at risk.
 func TestConformance_UnmodeledTokenMembersSurviveOurRewrite(t *testing.T) {
+	t.Parallel()
+
 	requireCryptsetup(t)
 
 	const vendorToken = `{"type":"com.example.vendor","keyslots":["0"],` +
@@ -1159,6 +1163,8 @@ func TestConformance_UnmodeledTokenMembersSurviveOurRewrite(t *testing.T) {
 // the order is what makes that a usable technique instead of a wall of
 // reordering noise.
 func TestConformance_HeaderMemberOrderMatchesCryptsetup(t *testing.T) {
+	t.Parallel()
+
 	requireCryptsetup(t)
 
 	ours := newImage(t, "ours.img")
@@ -1359,6 +1365,8 @@ func TestConformance_ReencryptKeyslotSurvivesOnDisk(t *testing.T) {
 // in, or something in this package is inventing or dropping a member on a
 // container it did not create.
 func TestConformance_CryptsetupKeyslotRoundTripsUnchanged(t *testing.T) {
+	t.Parallel()
+
 	requireCryptsetup(t)
 
 	path := newImage(t, "theirs-roundtrip.img")

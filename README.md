@@ -610,11 +610,43 @@ middle of a reencryption stays readable and inspectable.
 ## Testing
 
 ```bash
-make test              # Unit tests
-make vet               # Compile every supported build-tag configuration
-sudo make integration  # Integration tests (requires root)
-make ci-full           # Full test suite in Docker
+make test-unit         # Unit tests, raced, with per-package coverage profiles
+make coverage-gate     # Refuse unit coverage below any package's floor
+make ci                # Everything CI's fast tier runs, including both of the above
+make integration-test  # Integration tests in the devcontainer (requires Docker)
+make ci-full           # ci, then the devcontainer suite and its combined coverage gate
 ```
+
+### Coverage, and how it is measured
+
+Every package is held to **90%**, compared per package and exactly -- 89.99% is
+below 90, and an aggregate above the bar does not excuse a package below it.
+The floors live in `coverage-floors.txt` and the gate is `test/covergate`.
+
+| tier | measured by | gated in |
+|---|---|---|
+| `unit` | `make test-unit`: every package `go list ./...` reports, default tags, `-race` | CI's unit job and `make ci` (`make coverage-gate`) |
+| `combined` | `make coverage-combined`, inside the devcontainer: the unit suite and the integration suite together, the integration suite instrumenting `pkg/luks2` and `test/harness` through `-coverpkg` | CI's integration job and `make ci-full`, by the container's exit status |
+
+`pkg/luks2` and `test/harness` are held to 90% in the **combined** tier,
+because part of each only runs against a real kernel -- loop devices,
+device-mapper, `mount(2)`, the reaper's removals -- and the unit tier has no
+privileges by design. Each also carries a **unit** floor at its measured unit
+level, so neither suite can lose coverage unnoticed. Every other package is held
+to 90% in the unit tier.
+
+The gate fails on a package below its floor, on a profile that is missing,
+empty or unreadable, on a package with no floor, on a floor for a package that
+no longer exists, and on a floors file that holds a package to 90% in no tier.
+
+### The unit suite's runtime budget
+
+`go test -race ./pkg/luks2` has a budget of **240s** on the CI runner
+(`UNIT_TEST_TARGET`) and a ceiling of **10m** (`UNIT_TEST_TIMEOUT`), both in the
+Makefile and read by CI through `make test-unit`. The ceiling fails the run; the
+budget is printed against the measured time on every run and flagged when it is
+exceeded. Tests that cost real time and share no package state run in parallel;
+the rule is written beside `TestMain` in `pkg/luks2/keyringfake_test.go`.
 
 ### What the race detector covers, exactly
 
@@ -623,24 +655,15 @@ it is:
 
 | | raced |
 |---|---|
-| `pkg/luks2`, `cmd/luks2`, default build tags | **yes** — `-race -covermode=atomic`, in CI and in `make test-unit` |
-| `test/harness`, `test/harness/cmd/luks2-testreap` | **yes** — same legs; the ledger and reaper are in-memory and file-based and touch no host device, which is what lets them be raced |
-| `pkg/luks2`'s `//go:build integration` test files | no — the package is raced under the default tag set, which excludes them |
-| `test/integration/pkg`, `test/integration/cli` | no — these packages do not exist without the `integration` tag |
+| every package `go list ./...` reports, default build tags | **yes** -- `-race -covermode=atomic`, in CI and in `make test-unit`, which enumerates them, so a package added later is raced without being listed |
+| `pkg/luks2`'s and `test/harness`'s `//go:build integration` test files | no -- they run in the devcontainer, without `-race` |
+| `test/integration/pkg`, `test/integration/cli` | no -- these packages do not exist without the `integration` tag |
 
-So the honest statement of race coverage is **the default-tag build of four
-packages**, not "the module". The integration suites run in a container,
-against loop devices, device-mapper and mounts — host-global resources with
-real interleaving concerns — and they run without `-race`. That
-is a deliberate, reversible decision rather than an accident of how the CI legs
-were written; the reasoning, and the measurement that would change it, are
-recorded at the race legs in `.github/workflows/ci.yml`.
-
-The package list the race legs name is maintained by hand: a package added
-later must be added to the legs in `.github/workflows/ci.yml` and to this table.
-That used to be asserted by a repository guard; the guards were removed and
-these properties are carried at review time instead, pending a code-based
-scanning solution.
+So the honest statement of race coverage is **the default-tag build of the
+module**. The integration suites run in a container, against loop devices,
+device-mapper and mounts -- host-global resources with real interleaving
+concerns -- and they run without `-race`. That is a deliberate, reversible
+decision rather than an accident of how the CI legs were written.
 
 Build-tag coverage is a separate property: `make vet` runs `go vet` under the
 default configuration and under `integration`, which are the configurations this

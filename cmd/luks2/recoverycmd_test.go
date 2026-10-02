@@ -82,6 +82,8 @@ func printedRecoveryKey(t *testing.T, out string) string {
 //	stdin         cryptsetup reads one line and discards its terminator, which
 //	              is what pasting at the prompt does
 func TestRecoveryKeyRoundTripsThroughCryptsetup(t *testing.T) {
+	t.Parallel()
+
 	requireCryptsetupCLI(t)
 
 	formats := []string{
@@ -142,6 +144,8 @@ func TestRecoveryKeyRoundTripsThroughCryptsetup(t *testing.T) {
 //	the same text, dashes removed	what a "tidy it up" step produces
 //	the same text, lower-cased	what a shell pipeline through tr produces
 func TestOnlyTheExactPrintedStringOpensTheVolume(t *testing.T) {
+	t.Parallel()
+
 	requireCryptsetupCLI(t)
 
 	dir := t.TempDir()
@@ -191,6 +195,8 @@ func TestOnlyTheExactPrintedStringOpensTheVolume(t *testing.T) {
 // keyslot exists and nothing says what it is, which is indistinguishable from
 // somebody's forgotten second passphrase.
 func TestRecoveryAddWritesTheSystemdRecoveryToken(t *testing.T) {
+	t.Parallel()
+
 	requireCryptsetupCLI(t)
 
 	dir := t.TempDir()
@@ -240,6 +246,8 @@ func TestRecoveryAddWritesTheSystemdRecoveryToken(t *testing.T) {
 // TestRecoveryVerifyAcceptsWhatWasPrinted closes the loop through the tool
 // itself: the string on the screen, typed back, is accepted.
 func TestRecoveryVerifyAcceptsWhatWasPrinted(t *testing.T) {
+	t.Parallel()
+
 	requireCryptsetupCLI(t)
 
 	dir := t.TempDir()
@@ -283,6 +291,8 @@ func TestRecoveryVerifyAcceptsWhatWasPrinted(t *testing.T) {
 // TestRecoveryVerifyReadsASavedFile covers the other input path: the file this
 // tool wrote, read back by LoadRecoveryKey rather than parsed as a bare string.
 func TestRecoveryVerifyReadsASavedFile(t *testing.T) {
+	t.Parallel()
+
 	requireCryptsetupCLI(t)
 
 	dir := t.TempDir()

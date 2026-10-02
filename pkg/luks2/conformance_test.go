@@ -255,13 +255,20 @@ func stampImagePrefix(t *testing.T, path string, golden []byte) {
 	if err != nil {
 		t.Fatalf("failed to open %s: %v", path, err)
 	}
-	defer func() { _ = f.Close() }()
+	defer func() { _ = f.Close() }() // failure paths only: success closes, checked, below
 
 	if _, err := f.WriteAt(golden, 0); err != nil {
 		t.Fatalf("failed to stamp the golden container onto %s: %v", path, err)
 	}
-	if err := f.Sync(); err != nil {
-		t.Fatalf("failed to sync %s: %v", path, err)
+	// CLOSED, NOT FSYNCED (#92). fsync buys durability across a power loss,
+	// which a fixture under t.TempDir() does not need: the page cache is
+	// coherent for every reader of the file -- this process, a cryptsetup
+	// child, and O_DIRECT, which writes dirty pages back before it reads. It
+	// was not free: on a loaded runner each fsync of a fixture this size took
+	// ~330ms (measured: 45 fixture fsyncs, 14.8s, across three tests), paid by
+	// every caller of every stamping helper for nothing it asserts.
+	if err := f.Close(); err != nil {
+		t.Fatalf("failed to close %s: %v", path, err)
 	}
 }
 
@@ -272,6 +279,8 @@ func stampImagePrefix(t *testing.T, path string, golden []byte) {
 // which took luksDump, luksHeaderBackup, luksChangeKey and luksOpen with it and
 // left a volume written by this library with no recovery path.
 func TestConformance_WeWrite_CryptsetupReads(t *testing.T) {
+	t.Parallel()
+
 	requireCryptsetup(t)
 
 	path := newImage(t, "we-write.img")
@@ -416,6 +425,8 @@ func TestConformance_SecondaryHeaderMagic(t *testing.T) {
 // digest, and the hardcoded 32-byte derivation in verifyMasterKey could never
 // reproduce it, so the CORRECT passphrase returned "incorrect passphrase".
 func TestConformance_CryptsetupWrites_WeRead(t *testing.T) {
+	t.Parallel()
+
 	requireCryptsetup(t)
 
 	path := newImage(t, "they-write.img")
@@ -486,6 +497,8 @@ func TestConformance_CryptsetupWrites_WeRead(t *testing.T) {
 // Measured against cryptsetup 2.7.0: it registers BOTH keyslots on the single
 // digest ("keyslots": ["0", "1"]), and both passphrases open the container.
 func TestConformance_CryptsetupMultiKeyslotDigestAssociation(t *testing.T) {
+	t.Parallel()
+
 	requireCryptsetup(t)
 
 	const second = "the-second-conformance-passphrase"
@@ -556,6 +569,8 @@ func TestConformance_CryptsetupMultiKeyslotDigestAssociation(t *testing.T) {
 // object. Both would have turned a conformant container into a rejected one on
 // the second operation, not the first.
 func TestConformance_StaysValidAfterMutation(t *testing.T) {
+	t.Parallel()
+
 	requireCryptsetup(t)
 
 	const secondPassphrase = "conformance-second-passphrase"
@@ -726,6 +741,8 @@ func TestConformance_StaysValidAfterMutation(t *testing.T) {
 // changes the header layout under test. They are tiled at distinct,
 // non-overlapping areas, which is what cryptsetup validates about them.
 func TestConformance_LargeHeaderStaysValid(t *testing.T) {
+	t.Parallel()
+
 	requireCryptsetup(t)
 
 	const keyslots = 16
@@ -784,6 +801,8 @@ func TestConformance_LargeHeaderStaysValid(t *testing.T) {
 // AF material, salts, iteration count -- is byte-for-byte what the old code
 // wrote, because it IS what the current code wrote.
 func TestConformance_LegacyDigestLengthStillOpens(t *testing.T) {
+	t.Parallel()
+
 	path := newImage(t, "legacy-digest.img")
 	formatWithLibrary(t, path)
 

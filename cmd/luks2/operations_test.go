@@ -46,6 +46,8 @@ func cheapKeyslot() *luks2.AddKeyOptions {
 }
 
 func TestDefaultOperationsAreWiredToTheRightLibraryCalls(t *testing.T) {
+	t.Parallel()
+
 	requireCryptsetupCLI(t)
 
 	dir := t.TempDir()

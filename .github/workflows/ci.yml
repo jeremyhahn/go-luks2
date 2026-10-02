@@ -243,31 +243,24 @@ jobs:
             exit 1
           }
 
-      # -timeout 300s IS THE RUNTIME BUDGET for this package under -race
-      # (owner ruling on #92), not a safety net. An overrun panics the test
-      # binary and fails this step, naming the tests still running -- so the
-      # suite drifting slow is a red check here instead of a consumer that
-      # silently stops finishing it.
+      # THE RACE LEGS, through the Makefile so that this job and a developer's
+      # `make test-unit` run the same commands under the same two numbers
+      # (#92): UNIT_TEST_TIMEOUT, the ceiling that fails the run, and
+      # UNIT_TEST_TARGET, the budget for ./pkg/luks2 under -race, printed with
+      # the measured time on every run and flagged with a ::warning:: past it.
+      # Neither is restated here; change them in the Makefile.
       #
-      # It fired on the runner the first time it was set (PR for #92, head
-      # a7be4e2: killed at 300.1s inside a recovery-key test), against 251s
-      # for the same suite on an idle 24-core workstation -- so the runner is
-      # at least 1.2x slower. Per the ruling's step 2 the KDF-bound setup was
-      # then moved onto shared fixtures (formattedImage; an explicit PBKDF2
-      # count for the AddRecoveryKey tests): workstation -race 251s -> 168s,
-      # plain 108s -> 60s, 1829 passing tests + subtests in both builds before
-      # and after, none skipped, per-function coverage identical.
+      # The second leg is every package `go list ./...` reports besides
+      # ./pkg/luks2 -- cmd/luks2, test/harness and its reaper, the coverage gate,
+      # the Makefile's own regression tests -- so a package added later is raced
+      # and gated without being listed here.
       #
-      # If this fires, the ruling's step 2 applies: profile with
-      # `go test -json -race`, then move the slowest KDF-bound setup onto a
-      # shared fixture (formatWithLibrary), validated in both the -race and
-      # the plain build. Never a skip guard, and never a larger number here
-      # without a new ruling.
-      - name: Run unit tests (pkg/luks2)
-        run: go test -v -race -timeout 300s -coverprofile=coverage-pkg.out -covermode=atomic ./pkg/luks2
-
-      - name: Run unit tests (cmd/luks2)
-        run: go test -v -race -timeout 30m -coverprofile=coverage-cli.out -covermode=atomic ./cmd/luks2
+      # What is raced is the DEFAULT tag set. The integration-tagged suites run
+      # in the devcontainer without -race: they drive loop devices,
+      # device-mapper and mounts, which are host-global, and are measured there
+      # for coverage instead (make coverage-combined).
+      - name: Run unit tests (-race, per-package coverage)
+        run: make test-unit UNIT_TEST_FLAGS=-v
 
       # WITHOUT -race, deliberately, and not a duplicate of the step above.
       #
@@ -286,23 +279,6 @@ jobs:
       - name: Run PBKDF2 calibration tests (no -race)
         run: make test-calibration
 
-      # test/harness is the ledger that keeps the integration suite from
-      # leaking host state (#96). It is raced HERE, in the unit tier, because
-      # everything in it is in-memory and file-based -- it never touches
-      # device-mapper or a loop device, which is exactly why it can be.
-      #
-      # It also has to be somewhere: a package CI builds but never tests is a
-      # blind spot, and this one decides what gets REMOVED from a host. The
-      # reaper command is listed alongside it so the enumeration stays complete.
-      - name: Run unit tests (test/harness)
-        run: go test -v -race -timeout 30m -coverprofile=coverage-harness.out -covermode=atomic ./test/harness ./test/harness/cmd/luks2-testreap
-
-      # The Makefile's own regression tests (#205). Its defects can exit zero --
-      # #205 printed a spurious `env: can't execute 'GOPATH'` on every make
-      # invocation and failed nothing -- so no other step can catch their
-      # return. The package has no non-test code, hence no coverage profile.
-      - name: Run Makefile regression tests (test/makefile)
-        run: go test -v -count=1 ./test/makefile
       # RLIMIT_MEMLOCK is the one that turns a correct design into a red suite:
       # measured on a workstation, the suite passes down to 512 KiB and fails
       # comprehensively at 64 KiB with "could not allocate locked memory ...
@@ -314,21 +290,15 @@ jobs:
           echo "nproc: $(nproc)"
           df -h /tmp | tail -1
 
-      # Every profile the legs above produce is merged here. A profile that is
-      # written and then left out does not fail anything -- the leg still gates
-      # -- it just makes the reported number describe less of the module than a
-      # reader assumes. Adding a race leg means adding its profile to this list.
-      - name: Merge coverage
-        run: |
-          echo "mode: atomic" > coverage.out
-          grep -v "^mode:" coverage-pkg.out >> coverage.out 2>/dev/null || true
-          grep -v "^mode:" coverage-cli.out >> coverage.out 2>/dev/null || true
-          grep -v "^mode:" coverage-harness.out >> coverage.out 2>/dev/null || true
-
-      - name: Show coverage
-        run: |
-          coverage=$(go tool cover -func=coverage.out | grep total | awk '{print $3}')
-          echo "Coverage: ${coverage}"
+      # THE GATE, not a print (#141). This step used to echo a total and exit
+      # zero, the merge before it ended in `|| true` so a leg with no profile
+      # made the total go UP, and COVERAGE_THRESHOLD was compared only in
+      # ci-full, which no workflow runs. `make coverage-gate` compares every
+      # package against its own floor in coverage-floors.txt, exactly, and
+      # fails on a missing profile, an unmeasured package or a floor that
+      # holds a package to 90% in no tier.
+      - name: Coverage gate
+        run: make coverage-gate
 
       # upload-artifact v4+ refuses to run against any server that is not
       # github.com — it detects one and reports "not currently supported on
@@ -533,6 +503,7 @@ jobs:
       # command, so a red run left its container behind for the next job's
       # pre-run delete to collect — the very line that did the killing.
       - name: Run integration tests
+        id: itest
         # LUKS2_TEST_STATE_DIR is bind-mounted from the RUNNER, not left inside
         # the container, and that is the whole mechanism (#96).
         #
@@ -594,15 +565,26 @@ jobs:
       # failed, and this must not be skipped by the run step aborting.
       - name: Extract integration coverage
         if: always()
+        env:
+          ITEST_OUTCOME: ${{ steps.itest.outcome }}
         run: |
-          set -u
-          if ! docker container inspect "$ITEST_CONTAINER" >/dev/null 2>&1; then
-            echo "no container named ${ITEST_CONTAINER}; nothing to extract"
+          set -eu
+          # The container's default command is `make coverage-combined`, so
+          # the combined coverage GATE has already run inside it and its result
+          # is the run step's outcome. When that step SUCCEEDED the container
+          # exists and holds the profile its gate read, so failing to copy it --
+          # an unreachable daemon, a container removed early -- fails this step:
+          # it used to warn and pass (#141), and a docker inspect that could
+          # not answer was read as "no container, nothing to extract".
+          #
+          # Only a run step that did NOT succeed and left no container skips
+          # the copy; the job is already red from that step.
+          if [ "${ITEST_OUTCOME}" != success ] && ! docker container inspect "${ITEST_CONTAINER}" >/dev/null 2>&1; then
+            echo "the run step ended ${ITEST_OUTCOME} without creating ${ITEST_CONTAINER}; nothing to extract"
             exit 0
           fi
-          if ! docker cp "${ITEST_CONTAINER}:/app/coverage.out" coverage-integration.out; then
-            echo "::warning::the container exists but /app/coverage.out could not be copied"
-          fi
+          docker cp "${ITEST_CONTAINER}:/app/coverage-integration.out" coverage-integration.out
+          test -s coverage-integration.out
 
       # Removes ONLY what this job attempt created, by its unique names, so it
       # cannot reach another job's container or image. Without this the unique
@@ -615,20 +597,13 @@ jobs:
           docker rm -f "$ITEST_CONTAINER" >/dev/null 2>&1 || true
           docker image rm -f "$ITEST_IMAGE" >/dev/null 2>&1 || true
 
-      - name: Show integration coverage
-        run: |
-          if [ -f coverage-integration.out ]; then
-            coverage=$(go tool cover -func=coverage-integration.out | grep total | awk '{print $3}')
-            echo "Integration Coverage: ${coverage}"
-          fi
-
       - name: Upload integration coverage
         if: always() && github.server_url == 'https://github.com'
         uses: actions/upload-artifact@v7
         with:
           name: coverage-integration
           path: coverage-integration.out
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   build:
     name: Build

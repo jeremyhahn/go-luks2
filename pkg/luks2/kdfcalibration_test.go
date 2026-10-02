@@ -159,6 +159,8 @@ func TestBenchmarkPBKDF2CalibratesToRequestedTime(t *testing.T) {
 // same spread sits comfortably inside 4..100 while the constant-returning
 // implementation still scores 1.
 func TestBenchmarkPBKDF2ScalesWithRequestedTime(t *testing.T) {
+	t.Parallel()
+
 	const (
 		shortMs = 100
 		longMs  = 2000
@@ -209,6 +211,8 @@ func TestBenchmarkPBKDF2ScalesWithRequestedTime(t *testing.T) {
 // reason and is wired into `make ci`; do not consolidate it into the -race
 // unit-test target on the grounds that it duplicates coverage. It does not.
 func TestBenchmarkPBKDF2MeetsRecommendedMinimum(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		hashAlgo string
@@ -447,6 +451,8 @@ func TestScalePBKDF2IterationsClamps(t *testing.T) {
 // have been fixed while createPBKDF2KDF kept ignoring it; the header is what an
 // attacker gets, so the header is what this asserts.
 func TestCreateKDFPBKDF2CalibratesTheKeyslot(t *testing.T) {
+	t.Parallel()
+
 	kdf, err := CreateKDF(FormatOptions{KDFType: KDFTypePBKDF2SHA256}, 32)
 	if err != nil {
 		t.Fatalf("CreateKDF: %v", err)

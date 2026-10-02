@@ -55,10 +55,16 @@ func boundTo(id string, digests map[string]*Digest) map[string]*Digest {
 }
 
 // usableDigest builds a digest that the given master key verifies against.
+//
+// One iteration, the least a header may declare (minKDFIterations): the subject
+// here is the ORDER of the scan, which every case repeats digestScanRepeats
+// times, and at the 1000 iterations this used to carry each repeat paid two
+// full derivations for nothing it asserts -- these were among the slowest
+// tests in the package under -race (#92).
 func usableDigest(t *testing.T, masterKey []byte, length int) *Digest {
 	t.Helper()
 
-	iterations := 1000
+	iterations := minKDFIterations
 	kdf := &KDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
@@ -148,10 +154,14 @@ func unusableDigests(t *testing.T) map[string]*Digest {
 // TestVerifyMasterKeySkipsUnusableDigests is the core regression test: one
 // unusable digest must not hide a usable one, whichever order the map yields.
 func TestVerifyMasterKeySkipsUnusableDigests(t *testing.T) {
+	t.Parallel()
+
 	masterKey := []byte("digest-scan-master-key-32-bytes!")
 
 	for name, bad := range unusableDigests(t) {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
 			for i := 0; i < digestScanRepeats; i++ {
 				digests := map[string]*Digest{
 					"0": bad,
@@ -170,16 +180,26 @@ func TestVerifyMasterKeySkipsUnusableDigests(t *testing.T) {
 // of the usable one, so the scan has to survive every failure mode in a single
 // pass rather than one at a time.
 func TestVerifyMasterKeySkipsEveryUnusableDigestAtOnce(t *testing.T) {
+	t.Parallel()
+
 	masterKey := []byte("digest-scan-master-key-32-bytes!")
+
+	// Built once and re-keyed into a fresh map per repeat. What the repeats
+	// vary is the map's iteration order, which Go randomizes per range; the
+	// digests themselves are the same every time, and rebuilding them per
+	// repeat base64-encoded the 1 MiB "absurd length" digest 64 times over for
+	// nothing (#92).
+	unusable := unusableDigests(t)
+	usable := usableDigest(t, masterKey, 32)
 
 	for i := 0; i < digestScanRepeats; i++ {
 		digests := map[string]*Digest{}
 		id := 0
-		for _, bad := range unusableDigests(t) {
+		for _, bad := range unusable {
 			digests[string(rune('a'+id))] = bad
 			id++
 		}
-		digests["z"] = usableDigest(t, masterKey, 32)
+		digests["z"] = usable
 
 		if err := verifyMasterKey(enclaveFrom(t, masterKey), "0", boundTo("0", digests)); err != nil {
 			t.Fatalf("run %d: the usable digest was not reached past %d unusable ones: %v", i, id, err)
@@ -192,6 +212,8 @@ func TestVerifyMasterKeySkipsEveryUnusableDigestAtOnce(t *testing.T) {
 // A set with no usable digest fails, and it fails with one indistinguishable
 // error whatever the cause was.
 func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
+	t.Parallel()
+
 	masterKey := []byte("digest-scan-master-key-32-bytes!")
 
 	t.Run("every digest unusable is a HEADER fault, because nothing was compared", func(t *testing.T) {
@@ -314,6 +336,8 @@ func TestVerifyMasterKeyAcceptsTheUsableDigestAlone(t *testing.T) {
 // verification -- a judgement that never happened, because the only digest
 // attesting the keyslot decodes to a length nothing can compare against.
 func TestAWrongLengthDigestIsAHeaderFaultEndToEnd(t *testing.T) {
+	t.Parallel()
+
 	path := newImage(t, "wrong-length-digest.img")
 	formatWithLibrary(t, path)
 

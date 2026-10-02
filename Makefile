@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: changelog-assemble help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs security ci ci-full fmt-check all check test-cli integration-test-pkg integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration seccomp-diff
+.PHONY: coverage-gate coverage-combined changelog-assemble help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs security ci ci-full fmt-check all check test-cli integration-test-pkg integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration seccomp-diff
 
 # Default target
 .DEFAULT_GOAL := help
@@ -12,8 +12,57 @@ BUILD_DIR=build
 CMD_DIR=cmd/luks2
 COVERAGE_FILE=coverage.out
 COVERAGE_HTML=coverage.html
-# Coverage threshold - set to 90% for all packages
-COVERAGE_THRESHOLD=90.0
+
+# ---- the coverage gate (#141) ----
+#
+# COVERAGE_THRESHOLD is the bar testing-guidelines.md sets for EVERY package
+# (project-scaffold.md 6). COVERAGE_FLOORS holds one floor per package per
+# tier, and test/covergate compares each package against its own floor in
+# integer arithmetic -- never the aggregate, and never a rounded percentage.
+# The gate also refuses a floors file that leaves a package unmeasured, names
+# one that no longer exists, or holds a package to the target in no tier, so a
+# floor cannot be lowered past the target without the gate saying so.
+COVERAGE_THRESHOLD=90
+COVERAGE_FLOORS=coverage-floors.txt
+COVERAGE_GATE=$(GO) run ./test/covergate -floors $(COVERAGE_FLOORS) -target $(COVERAGE_THRESHOLD)
+
+# The unit tier's profiles, one per leg of test-unit. They are handed to the
+# gate SEPARATELY rather than concatenated first: a leg that wrote no profile
+# is an unreadable input and fails the gate, where the old `grep ... || true`
+# merge dropped it and the total went UP. coverage.out is the merged copy kept
+# for the HTML report and the CI artifact; nothing gates on it.
+COVERAGE_LEG_PKG=coverage-pkg.out
+COVERAGE_LEG_REST=coverage-rest.out
+COVERAGE_UNIT_LEGS=$(COVERAGE_LEG_PKG) $(COVERAGE_LEG_REST)
+
+# The combined tier, measured INSIDE the devcontainer (coverage-combined). The
+# packages listed here have statements that only a real kernel executes --
+# loop devices, device-mapper, mount(2), mkfs on a mapped device, dmsetup and
+# losetup -- so their floor of record is the union of their unit profile and
+# the integration suite's, which instruments them through -coverpkg.
+COVERAGE_COMBINED_PKGS=./pkg/luks2 ./test/harness
+COVERAGE_COMBINED_COVERPKG=./pkg/luks2,./test/harness
+COVERAGE_COMBINED_UNIT=coverage-combined-unit.out
+COVERAGE_INTEGRATION=coverage-integration.out
+
+# ---- the unit-suite runtime budget (#92) ----
+#
+# Two numbers, and ci.yml reads both through `make test-unit` rather than
+# restating them, so the workflow and a developer's run cannot drift apart:
+#
+#   UNIT_TEST_TIMEOUT  the CEILING: `go test -timeout`. A hang guard with
+#                      headroom, and the only one of the two that fails a run.
+#                      It used to be 300s, and a loaded runner killed healthy
+#                      runs at exactly 5m0s (owner ruling on #92, 2026-09-28).
+#   UNIT_TEST_TARGET   the BUDGET, in seconds, for `go test -race ./pkg/luks2`
+#                      on the CI runner (p95 <= 240s). test-unit prints the
+#                      measured time against it on every run, so drift is
+#                      visible long before the ceiling is.
+UNIT_TEST_TIMEOUT ?= 10m
+UNIT_TEST_TARGET ?= 240
+# Extra `go test` flags for the unit legs; CI passes -v.
+UNIT_TEST_FLAGS ?=
+
 # Simple expansion (:=), not recursive (=), and that is load-bearing (#205).
 # GNU make 4.4 exports environment-origin variables into $(shell ...). GOPATH is
 # in the environment on the build workers, so a recursive GO had to expand the
@@ -91,8 +140,11 @@ install: ## Install the CLI binary to $GOPATH/bin
 #   docker rm -f     removing something already absent
 #   of a container   is the goal state, not a failure    -> suppressing is fine
 #
-# So `|| true` survives deliberately below on the coverage-profile merges and
-# on the docker container teardown, and it is gone from every `go test`. If you
+# So `|| true` survives deliberately below on the docker container teardown, and
+# it is gone from every `go test`. It is gone from the coverage-profile merges
+# too, which this table once listed as safe: a missing profile there is not "no
+# lines matched", it is a package whose coverage nobody measured, and dropping
+# it made the reported total go UP (#141). If you
 # are adding one, the question is not "is this noisy" but "would I want to know
 # if this failed".
 #
@@ -107,18 +159,42 @@ test: ## Run unit tests only (no I/O, no root required)
 	@$(GO) test -v ./...
 	@echo "$(COLOR_GREEN)✓ Unit tests complete$(COLOR_RESET)"
 
-# The package list here is the same enumeration CI races, and it is ASSERTED
-# against `go list ./...` before the tests run (#34): a third package added
-# later would otherwise be raced by neither, silently. What this covers is the
-# DEFAULT tag set only — integration-tagged code is not race-checked anywhere;
-# the reasoning and the measurement that would change that are recorded at the
-# race legs in .github/workflows/ci.yml, and the coverage statement is in
-# README.md under Testing.
+# THE UNIT TIER, raced, in two legs: ./pkg/luks2 on its own, because its
+# runtime is the one #92 budgets and it is timed here, then every other package
+# `go list ./...` reports -- so a package added later is raced and measured
+# without anyone remembering to list it (#34). What this covers is the DEFAULT
+# tag set only; integration-tagged code runs in the devcontainer, without -race,
+# and the reasoning is recorded at the race legs in .github/workflows/ci.yml.
+#
+# -count=1, because a cached result would report a runtime of zero against the
+# budget and a profile from some earlier tree.
 test-unit: ## Run only unit tests with coverage and the race detector (fast, no I/O, no root required)
-	@echo "$(COLOR_BOLD)Running unit tests with coverage...$(COLOR_RESET)"
-	@$(GO) test -v -race -timeout 30m -coverprofile=$(COVERAGE_FILE) -covermode=atomic ./pkg/luks2 ./cmd/luks2 ./test/harness ./test/harness/cmd/luks2-testreap ./test/makefile
+	@echo "$(COLOR_BOLD)Running unit tests with coverage and -race...$(COLOR_RESET)"
+	@rm -f $(COVERAGE_UNIT_LEGS) $(COVERAGE_FILE)
+	@set -u; \
+	start=$$(date +%s); rc=0; \
+	$(GO) test $(UNIT_TEST_FLAGS) -count=1 -race -timeout $(UNIT_TEST_TIMEOUT) -covermode=atomic \
+		-coverprofile=$(COVERAGE_LEG_PKG) ./pkg/luks2 || rc=$$?; \
+	elapsed=$$(( $$(date +%s) - start )); \
+	echo "pkg/luks2 under -race took $${elapsed}s: target $(UNIT_TEST_TARGET)s (UNIT_TEST_TARGET), ceiling $(UNIT_TEST_TIMEOUT) (UNIT_TEST_TIMEOUT)"; \
+	if [ "$$elapsed" -gt "$(UNIT_TEST_TARGET)" ]; then \
+		echo "::warning::pkg/luks2 under -race took $${elapsed}s, over its $(UNIT_TEST_TARGET)s budget (#92). Profile it with go test -json -race and move the slowest setup onto shared fixtures; do not raise the budget."; \
+	fi; \
+	exit $$rc
+	@pkgs=$$($(GO) list ./... | grep -vx 'github.com/jeremyhahn/go-luks2/pkg/luks2') && test -n "$$pkgs" || \
+		{ echo "$(COLOR_RED)go list named no package besides pkg/luks2$(COLOR_RESET)"; exit 1; }; \
+	$(GO) test $(UNIT_TEST_FLAGS) -count=1 -race -timeout $(UNIT_TEST_TIMEOUT) -covermode=atomic \
+		-coverprofile=$(COVERAGE_LEG_REST) $$pkgs
+	@# The merged copy, for the report only. A missing leg is still an error
+	@# here: a report computed over the legs that happened to write a profile
+	@# is the number that used to go UP when a package went missing.
+	@echo "mode: atomic" > $(COVERAGE_FILE)
+	@for leg in $(COVERAGE_UNIT_LEGS); do \
+		test -s "$$leg" || { echo "$(COLOR_RED)$$leg is missing or empty$(COLOR_RESET)"; exit 1; }; \
+		sed '/^mode:/d' "$$leg" >> $(COVERAGE_FILE) || exit 1; \
+	done
 	@echo ""
-	@echo "$(COLOR_BOLD)Coverage from unit tests:$(COLOR_RESET)"
+	@echo "$(COLOR_BOLD)Coverage from unit tests (gated per package by coverage-gate):$(COLOR_RESET)"
 	@$(GO) tool cover -func=$(COVERAGE_FILE) | tail -1
 
 # The PBKDF2 calibration tests, deliberately WITHOUT -race.
@@ -377,43 +453,61 @@ integration-test-cli: build ## Run CLI integration tests in Docker
 	    $(INTEGRATION_DOCKER_RUN) --rm -- \
 		go test -v -tags=integration ./test/integration/cli/...
 
-coverage: build ## Run all tests (unit + integration) with coverage (requires root)
-	@echo "$(COLOR_BOLD)Running all tests (unit + integration) with coverage...$(COLOR_RESET)"
-	@rm -f coverage-unit.out coverage-integration.out $(COVERAGE_FILE)
-	@echo ""
-	@echo "$(COLOR_BOLD)Step 1: Running unit tests with coverage...$(COLOR_RESET)"
-	@$(GO) test -coverprofile=coverage-unit.out -covermode=atomic ./pkg/luks2 ./cmd/luks2 ./test/harness ./test/harness/cmd/luks2-testreap
-	@echo ""
-	@echo "$(COLOR_BOLD)Step 2: Running integration tests with coverage...$(COLOR_RESET)"
-	@if [ "$$(id -u)" -eq 0 ]; then \
-		$(GO) test -tags=integration -coverprofile=coverage-integration.out -covermode=atomic ./...; \
-	else \
-		sudo -E PATH="$(PATH)" $(GO) test -tags=integration -coverprofile=coverage-integration.out -covermode=atomic ./...; \
-	fi
-	@echo ""
-	@echo "$(COLOR_BOLD)Step 3: Merging coverage profiles...$(COLOR_RESET)"
-	@if [ -f coverage-unit.out ] && [ -f coverage-integration.out ]; then \
-		echo "mode: atomic" > $(COVERAGE_FILE); \
-		grep -v "^mode:" coverage-unit.out >> $(COVERAGE_FILE) 2>/dev/null || true; \
-		grep -v "^mode:" coverage-integration.out >> $(COVERAGE_FILE) 2>/dev/null || true; \
-	elif [ -f coverage-unit.out ]; then \
-		cp coverage-unit.out $(COVERAGE_FILE); \
-	elif [ -f coverage-integration.out ]; then \
-		cp coverage-integration.out $(COVERAGE_FILE); \
-	fi
-	@rm -f coverage-unit.out coverage-integration.out
-	@echo ""
-	@echo "$(COLOR_BOLD)Generating coverage report...$(COLOR_RESET)"
+# THE COVERAGE GATE (#141). project-scaffold.md 6: "The `coverage` target
+# enforces a hard threshold that fails the build, never a warning."
+#
+# It did not. COVERAGE_THRESHOLD was compared in exactly one target -- ci-full
+# -- that ci.yml never invokes, while the workflow step that looked like the
+# gate printed a number and exited 0; the merges ended in `|| true`, so a leg
+# with no profile made the total go UP; and the one comparison there was
+# truncated the percentage to an integer, so 89.9% passed a 90% bar.
+#
+# test/covergate is the gate, and every caller reaches it through these
+# targets: ci.yml's unit job runs `make coverage-gate`, the devcontainer's
+# entrypoint runs `make coverage-combined`, so a developer's number is the
+# number that blocks the merge. It is a Go program with its own tests rather
+# than an awk pipeline, because a gate is only known to be a gate once it has
+# been seen to fail, and its tests are where that is seen.
+
+coverage-gate: ## Refuse unit coverage below any package's floor (reads test-unit's profiles)
+	@$(COVERAGE_GATE) -tier unit $(foreach leg,$(COVERAGE_UNIT_LEGS),-profile $(leg)) $$($(GO) list ./...)
+
+coverage: test-unit ## Measure unit coverage, gate it per package, and write the HTML report
+	@$(MAKE) --no-print-directory coverage-gate
 	@$(GO) tool cover -html=$(COVERAGE_FILE) -o $(COVERAGE_HTML)
-	@$(GO) tool cover -func=$(COVERAGE_FILE) | tail -1
 	@echo "$(COLOR_GREEN)✓ Coverage report: $(COVERAGE_HTML)$(COLOR_RESET)"
+
+# The COMBINED tier: unit plus integration, for the packages whose remaining
+# statements need a real kernel. It runs INSIDE the devcontainer -- it is the
+# entrypoint's default command -- and never on a host (testing-guidelines.md).
+# `make integration-test` / `make ci-full` / ci.yml's integration job all reach
+# it through that entrypoint.
+#
+# Both suites are measured in the same container so the union is of two
+# profiles of the same tree. The integration leg instruments the combined
+# packages through -coverpkg, so test/integration/pkg's calls into the library
+# count toward pkg/luks2, and its ledger and reaper use counts toward
+# test/harness -- whose own integration tests drive the reaper's removals
+# against the real kernel. -p 1 keeps the integration packages from contending
+# for loop devices at once. The unit leg is not raced: -race is the unit job's
+# business, and this leg is here for its profile.
+coverage-combined: ## (devcontainer only) Run the integration suite and gate unit+integration coverage
+	@rm -f $(COVERAGE_INTEGRATION) $(COVERAGE_COMBINED_UNIT)
+	@echo "$(COLOR_BOLD)Integration suite, instrumenting $(COVERAGE_COMBINED_COVERPKG)...$(COLOR_RESET)"
+	@$(GO) test -v -count=1 -p 1 -tags=integration -timeout 30m -covermode=atomic \
+		-coverpkg=$(COVERAGE_COMBINED_COVERPKG) -coverprofile=$(COVERAGE_INTEGRATION) \
+		./pkg/luks2 ./test/harness ./test/integration/pkg/... ./test/integration/cli/...
+	@echo "$(COLOR_BOLD)Unit suite for the combined packages...$(COLOR_RESET)"
+	@$(GO) test -count=1 -timeout $(UNIT_TEST_TIMEOUT) -covermode=atomic \
+		-coverprofile=$(COVERAGE_COMBINED_UNIT) $(COVERAGE_COMBINED_PKGS)
+	@$(COVERAGE_GATE) -tier combined -profile $(COVERAGE_COMBINED_UNIT) -profile $(COVERAGE_INTEGRATION) $$($(GO) list ./...)
 
 docker-integration-test: ## Run integration tests in Docker (isolated, recommended)
 	@echo "$(COLOR_BOLD)Building Docker image for integration tests...$(COLOR_RESET)"
 	@$(MAKE) docker-build-integration
 	@echo ""
 	@echo "$(COLOR_BOLD)Running integration tests in Docker container...$(COLOR_RESET)"
-	@rm -f coverage-docker.out
+	@rm -f $(COVERAGE_INTEGRATION) coverage-docker.out
 	@# ONE shell with a trap, deliberately. Each recipe line is its own shell,
 	@# so when the suite failed the following lines never ran: the container was
 	@# left behind and the NEXT invocation's `docker rm -f` collected it -- the
@@ -421,22 +515,30 @@ docker-integration-test: ## Run integration tests in Docker (isolated, recommend
 	@# on every exit path, including failure, and by a name no other invocation
 	@# can hold. There is no pre-run delete: with a unique name there is nothing
 	@# of ours to clear, and a delete by any broader name is the race itself.
+	@#
+	@# The container's default command is `make coverage-combined`, so its exit
+	@# status already carries the combined coverage gate. The profile is copied
+	@# out for the report, and a container that PASSED without leaving one --
+	@# or that can no longer be reached to copy it from -- is a failure (#141):
+	@# it used to be a yellow line and a green run. A container that FAILED has
+	@# already failed this target; its profile is copied only for diagnosis.
 	@set -eu; \
 	trap 'docker rm -f $(ITEST_CONTAINER) >/dev/null 2>&1 || true; \
 	      docker image rm -f $(ITEST_IMAGE) >/dev/null 2>&1 || true' EXIT INT TERM; \
 	rc=0; 	  env IMAGE="$(ITEST_IMAGE)" TEST_STATE_DIR="$(TEST_STATE_DIR)" \
 	    $(INTEGRATION_DOCKER_RUN) --name $(ITEST_CONTAINER) -- || rc=$$?; \
-	if docker container inspect $(ITEST_CONTAINER) >/dev/null 2>&1; then \
-		docker cp $(ITEST_CONTAINER):/app/coverage.out coverage-docker.out || \
-			echo "$(COLOR_YELLOW)container exists but /app/coverage.out could not be copied$(COLOR_RESET)"; \
+	if [ "$$rc" -eq 0 ]; then \
+		if ! docker cp $(ITEST_CONTAINER):/app/$(COVERAGE_INTEGRATION) $(COVERAGE_INTEGRATION) || \
+		   ! test -s $(COVERAGE_INTEGRATION); then \
+			echo "$(COLOR_RED)the container passed and left no /app/$(COVERAGE_INTEGRATION)$(COLOR_RESET)"; \
+			exit 1; \
+		fi; \
+	elif docker container inspect $(ITEST_CONTAINER) >/dev/null 2>&1; then \
+		docker cp $(ITEST_CONTAINER):/app/$(COVERAGE_INTEGRATION) $(COVERAGE_INTEGRATION); \
 	fi; \
 	exit $$rc
-	@if [ -f coverage-docker.out ]; then \
-		echo ""; \
-		echo "$(COLOR_BOLD)Generating coverage report...$(COLOR_RESET)"; \
-		$(GO) tool cover -html=coverage-docker.out -o coverage-docker.html 2>/dev/null || true; \
-		echo "$(COLOR_GREEN)✓ Coverage report: coverage-docker.html$(COLOR_RESET)"; \
-	fi
+	@$(GO) tool cover -html=$(COVERAGE_INTEGRATION) -o coverage-integration.html
+	@echo "$(COLOR_GREEN)✓ Integration coverage report: coverage-integration.html$(COLOR_RESET)"
 	@echo "$(COLOR_GREEN)✓ Docker integration tests complete$(COLOR_RESET)"
 
 # TEST_STATE_DIR holds the run ledgers and is bind-mounted into the integration
@@ -679,7 +781,16 @@ trivy-fs: ## Scan the working tree with trivy (dependency CVEs and leaked secret
 security: gosec govulncheck verify trivy-fs ## Run the full §8 security suite (gosec, govulncheck, go mod verify, trivy fs)
 	@echo "$(COLOR_GREEN)✓ Security suite complete$(COLOR_RESET)"
 
-ci: fmt-check vet lint security test-unit test-calibration build ## Run CI pipeline locally (format, lint, security suite, unit tests, build)
+# The tests, the gate and the rest run IN ORDER, from the recipe, not as
+# sibling prerequisites. Under `make -j` -- or a MAKEFLAGS a parent passes down
+# -- siblings run concurrently, so the gate could read the profiles while
+# test-unit was still deleting and rewriting them: a missing-input failure on a
+# clean tree, or a pass on the previous run's profiles (#141 review).
+ci: fmt-check vet lint security ## Run CI pipeline locally (format, lint, security suite, unit tests + coverage gate, build)
+	@$(MAKE) --no-print-directory test-unit
+	@$(MAKE) --no-print-directory coverage-gate
+	@$(MAKE) --no-print-directory test-calibration
+	@$(MAKE) --no-print-directory build
 	@echo ""
 	@echo "$(COLOR_BOLD)======================================$(COLOR_RESET)"
 	@echo "$(COLOR_BOLD)CI Pipeline Complete$(COLOR_RESET)"
@@ -690,55 +801,25 @@ ci: fmt-check vet lint security test-unit test-calibration build ## Run CI pipel
 	@echo "$(COLOR_GREEN)✓ Lint passed$(COLOR_RESET)"
 	@echo "$(COLOR_GREEN)✓ Security scan passed$(COLOR_RESET)"
 	@echo "$(COLOR_GREEN)✓ Unit tests passed$(COLOR_RESET)"
+	@echo "$(COLOR_GREEN)✓ Unit coverage at or above every package floor$(COLOR_RESET)"
 	@echo "$(COLOR_GREEN)✓ Build successful$(COLOR_RESET)"
 	@echo ""
-	@echo "$(COLOR_BOLD)Coverage Summary (unit tests only):$(COLOR_RESET)"
-	@$(GO) tool cover -func=$(COVERAGE_FILE) | tail -1
-	@echo ""
-	@echo "$(COLOR_YELLOW)Note: Full coverage requires integration tests (make ci-full)$(COLOR_RESET)"
+	@echo "$(COLOR_YELLOW)The combined (unit + integration) floors are gated in the devcontainer: make ci-full$(COLOR_RESET)"
 	@echo "$(COLOR_GREEN)All CI checks passed! Ready to push.$(COLOR_RESET)"
 	@echo ""
 
-ci-full: ## Run full CI pipeline with Docker integration tests (enforces 90% coverage)
+# The full pipeline: everything `ci` runs, then the devcontainer, whose default
+# command is coverage-combined -- so the combined floors are enforced by the
+# container's own exit status. There is no coverage summary after it any more.
+# The one that was here compared a truncated integer and, when the profile was
+# missing, printed a warning and reported success (#141).
+ci-full: ## Run the full CI pipeline, including the devcontainer integration suite and the combined coverage gate
 	@echo "$(COLOR_BOLD)Running full CI pipeline with integration tests...$(COLOR_RESET)"
 	@echo ""
-	@$(MAKE) fmt-check
-	@$(MAKE) vet
-	@$(MAKE) no-global-device-cleanup
-	@$(MAKE) no-internal-disclosure
-	@$(MAKE) test-guards
-	@$(MAKE) lint
-	@$(MAKE) security
-	@$(MAKE) docker-integration-test
-	@$(MAKE) build
+	@$(MAKE) --no-print-directory ci
+	@$(MAKE) --no-print-directory docker-integration-test
 	@echo ""
-	@echo "$(COLOR_BOLD)======================================$(COLOR_RESET)"
-	@echo "$(COLOR_BOLD)Full CI Pipeline Complete$(COLOR_RESET)"
-	@echo "$(COLOR_BOLD)======================================$(COLOR_RESET)"
-	@echo ""
-	@echo "$(COLOR_GREEN)✓ Format check passed$(COLOR_RESET)"
-	@echo "$(COLOR_GREEN)✓ Vet passed$(COLOR_RESET)"
-	@echo "$(COLOR_GREEN)✓ Lint passed$(COLOR_RESET)"
-	@echo "$(COLOR_GREEN)✓ Security suite passed$(COLOR_RESET)"
-	@echo "$(COLOR_GREEN)✓ Integration tests passed$(COLOR_RESET)"
-	@echo "$(COLOR_GREEN)✓ Build successful$(COLOR_RESET)"
-	@echo ""
-	@echo "$(COLOR_BOLD)Coverage Summary:$(COLOR_RESET)"
-	@if [ -f coverage-docker.out ]; then \
-		$(GO) tool cover -func=coverage-docker.out | tail -1; \
-		COVERAGE=$$($(GO) tool cover -func=coverage-docker.out | grep total | awk '{print $$3}' | sed 's/%//'); \
-		COVERAGE_INT=$$(echo "$$COVERAGE" | awk '{print int($$1)}'); \
-		if [ "$$COVERAGE_INT" -lt $(shell echo $(COVERAGE_THRESHOLD) | awk '{print int($$1)}') ]; then \
-			echo "$(COLOR_RED)✗ Coverage $$COVERAGE% is below threshold of $(COVERAGE_THRESHOLD)%$(COLOR_RESET)"; \
-			exit 1; \
-		else \
-			echo "$(COLOR_GREEN)✓ Coverage threshold met ($$COVERAGE% >= $(COVERAGE_THRESHOLD)%)$(COLOR_RESET)"; \
-		fi; \
-	else \
-		echo "$(COLOR_YELLOW)⚠ Coverage file not found$(COLOR_RESET)"; \
-	fi
-	@echo ""
-	@echo "$(COLOR_GREEN)All CI checks passed! Ready to push.$(COLOR_RESET)"
+	@echo "$(COLOR_GREEN)✓ Unit tier, integration suite and combined coverage gate passed$(COLOR_RESET)"
 	@echo ""
 
 check: fmt vet test ## Run all quality checks (format, vet, test)
@@ -749,7 +830,7 @@ clean: ## Clean build artifacts and test files
 	@rm -rf $(BUILD_DIR) *.log *.test
 	@rm -f $(BINARY_NAME)
 	@rm -f $(COVERAGE_FILE) $(COVERAGE_HTML)
-	@rm -f coverage-docker.out coverage-docker.html
+	@rm -f coverage-docker.out coverage-docker.html $(COVERAGE_INTEGRATION) $(COVERAGE_COMBINED_UNIT) coverage-integration.html $(COVERAGE_UNIT_LEGS)
 	@rm -f coverage-cli.out coverage-unit.out coverage-integration.out
 	@rm -f gosec-report.json
 	@rm -f *.test

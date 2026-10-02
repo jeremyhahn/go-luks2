@@ -137,6 +137,8 @@ func TestKeyslotScanOrderIsStableAcrossCalls(t *testing.T) {
 // So this asserts the property the cost fix must not buy: a credential held in
 // a slot that is NOT visited first still opens the volume.
 func TestAKeyslotAfterTheFirstStillOpensTheVolume(t *testing.T) {
+	t.Parallel()
+
 	device := filepath.Join(t.TempDir(), "volume.img")
 	if err := os.WriteFile(device, make([]byte, 32<<20), 0600); err != nil {
 		t.Fatalf("failed to create the backing file: %v", err)
@@ -264,6 +266,8 @@ func multiKeyslotVolume(t *testing.T, ids ...string) string {
 // code whenever map iteration happens to start at slot 0, which is roughly one
 // read in n.
 func TestKeyslotInspectionOrderIsDeterministic(t *testing.T) {
+	t.Parallel()
+
 	// Deliberately handed to the writer in an order that is neither ascending
 	// nor lexical, with two-digit ids present.
 	device := multiKeyslotVolume(t, "3", "10", "0", "7", "2", "1", "11", "4")
@@ -306,6 +310,8 @@ func TestKeyslotInspectionOrderIsDeterministic(t *testing.T) {
 // because their result types are keyed by int. So the assertion is that the
 // listings are the numeric PREFIX of the scan order -- not merely sorted.
 func TestKeyslotInspectionOrderMatchesUnlockOrder(t *testing.T) {
+	t.Parallel()
+
 	device := multiKeyslotVolume(t, "5", "reencrypt-in-progress", "0", "12", "2")
 
 	_, metadata, err := ReadHeader(device)

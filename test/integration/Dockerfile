@@ -255,27 +255,14 @@ RUN echo '#!/bin/bash' > /entrypoint.sh && \
     echo '    ;;' >> /entrypoint.sh && \
     echo 'esac' >> /entrypoint.sh && \
     echo '' >> /entrypoint.sh && \
-    echo '# Default: run all integration tests with coverage' >> /entrypoint.sh && \
+    echo '# Default: the integration suite, measured, then the COMBINED coverage' >> /entrypoint.sh && \
+    echo '# gate (#141) -- one Makefile target, so this container and a developer' >> /entrypoint.sh && \
+    echo '# run the same commands. It used to run three go test commands and merge' >> /entrypoint.sh && \
+    echo '# their profiles with `|| true`, so a suite that wrote no profile dropped' >> /entrypoint.sh && \
+    echo '# out of the total silently and nothing compared the total to anything.' >> /entrypoint.sh && \
+    echo '# The gate fails this container, and with it the job, below a floor.' >> /entrypoint.sh && \
     echo 'if [ "$#" -eq 0 ]; then' >> /entrypoint.sh && \
-    echo '    echo "Running all integration tests with coverage..."' >> /entrypoint.sh && \
-    echo '    # Run package integration tests (in pkg/luks2)' >> /entrypoint.sh && \
-    echo '    go test -v -tags=integration -coverprofile=/tmp/coverage-pkg.out -covermode=atomic ./pkg/luks2' >> /entrypoint.sh && \
-    echo '    # Run new integration tests (in test/integration/pkg)' >> /entrypoint.sh && \
-    echo '    # No `|| true` on any of these three: a suite that cannot fail the' >> /entrypoint.sh && \
-    echo '    # job is not a gate (#25). Both trailing suites carried one, and the' >> /entrypoint.sh && \
-    echo '    # CLI suite had in fact been failing the whole time.' >> /entrypoint.sh && \
-    echo '    go test -v -tags=integration -coverprofile=/tmp/coverage-int-pkg.out -covermode=atomic ./test/integration/pkg/...' >> /entrypoint.sh && \
-    echo '    # Run CLI integration tests (in test/integration/cli)' >> /entrypoint.sh && \
-    echo '    go test -v -tags=integration -coverprofile=/tmp/coverage-int-cli.out -covermode=atomic ./test/integration/cli/...' >> /entrypoint.sh && \
-    echo '    # Merge coverage files' >> /entrypoint.sh && \
-    echo '    echo "mode: atomic" > /tmp/coverage.out' >> /entrypoint.sh && \
-    echo '    grep -v "^mode:" /tmp/coverage-pkg.out >> /tmp/coverage.out 2>/dev/null || true' >> /entrypoint.sh && \
-    echo '    grep -v "^mode:" /tmp/coverage-int-pkg.out >> /tmp/coverage.out 2>/dev/null || true' >> /entrypoint.sh && \
-    echo '    grep -v "^mode:" /tmp/coverage-int-cli.out >> /tmp/coverage.out 2>/dev/null || true' >> /entrypoint.sh && \
-    echo '    cp /tmp/coverage.out /app/coverage.out 2>/dev/null || true' >> /entrypoint.sh && \
-    echo '    echo ""' >> /entrypoint.sh && \
-    echo '    echo "Coverage Summary:"' >> /entrypoint.sh && \
-    echo '    go tool cover -func=/tmp/coverage.out | tail -1' >> /entrypoint.sh && \
+    echo '    exec make --no-print-directory coverage-combined' >> /entrypoint.sh && \
     echo 'else' >> /entrypoint.sh && \
     echo '    exec "$@"' >> /entrypoint.sh && \
     echo 'fi' >> /entrypoint.sh && \

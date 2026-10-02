@@ -134,6 +134,8 @@ func TestTheExemptPathAcceptsSystemdsParameters(t *testing.T) {
 // AddKey and Format are the two ways a caller reaches keyslot creation, and
 // both must refuse systemd's count for a credential they did not generate.
 func TestPublicEntryPointsCannotReachTheExemption(t *testing.T) {
+	t.Parallel()
+
 	t.Run("Format", func(t *testing.T) {
 		opts := standardFormatOptions(newImage(t, "exempt-format.img"))
 		opts.PBKDFIterations = minPBKDF2Iterations
@@ -172,6 +174,8 @@ func TestPublicEntryPointsCannotReachTheExemption(t *testing.T) {
 // the exemption, through the same unexported entry point AddRecoveryKey and
 // EnrollKeyProvider will call.
 func TestTheInternalSeamWritesSystemdsCountToTheHeader(t *testing.T) {
+	t.Parallel()
+
 	path := newImage(t, "generated-credential.img")
 	formatWithLibrary(t, path)
 
@@ -229,6 +233,8 @@ func TestTheInternalSeamWritesSystemdsCountToTheHeader(t *testing.T) {
 // removed, if RecoveryKeyOptions stops forwarding the count, or if the policy
 // reverts to strict -- each of which returns ErrPBKDFIterationsTooLow here.
 func TestAddRecoveryKeyReachesTheExemption(t *testing.T) {
+	t.Parallel()
+
 	path := newImage(t, "recovery-exemption.img")
 	formatWithLibrary(t, path)
 
@@ -273,6 +279,8 @@ func TestAddRecoveryKeyReachesTheExemption(t *testing.T) {
 // exemption belongs to the credential's ORIGIN, not to the number. The exact
 // count AddRecoveryKey just wrote is refused when a caller supplies the bytes.
 func TestAddKeyKeepsTheFullFloorForTheSameCount(t *testing.T) {
+	t.Parallel()
+
 	path := newImage(t, "recovery-exemption-negative.img")
 	formatWithLibrary(t, path)
 
@@ -398,6 +406,8 @@ func TestAddKeyFallsBackToDefaultsForANonArgon2Container(t *testing.T) {
 // The value must reach the caller at the point of decision rather than be left
 // to be inferred from the header afterwards.
 func TestAddKeyReportsTheInheritedCostToTheCaller(t *testing.T) {
+	t.Parallel()
+
 	path := newImage(t, "inherited-report.img")
 	if err := Format(FormatOptions{
 		Device:         path,

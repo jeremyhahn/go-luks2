@@ -28,6 +28,8 @@ import (
 // because the branch is per-command and a new command that forgets it looks
 // exactly like the ones that do not.
 func TestEveryCredentialCommandRefusesAnUnreadableKeyFile(t *testing.T) {
+	t.Parallel()
+
 	absent := filepath.Join(t.TempDir(), "absent.key")
 
 	commands := [][]string{
@@ -342,6 +344,8 @@ func TestTokenListSaysSoWhenThereAreNone(t *testing.T) {
 
 // TestRecoveryGenerateSavesWhenAsked, and says so when it could not.
 func TestRecoveryGenerateSavesWhenAsked(t *testing.T) {
+	t.Parallel()
+
 	t.Run("saved", func(t *testing.T) {
 		saved := filepath.Join(t.TempDir(), "recovery.txt")
 
@@ -444,6 +448,8 @@ func TestRecoveryVerifyReportsALibraryFailure(t *testing.T) {
 // TestReadKeyLineRefusesALineWithoutEnd: a stream with no newline at all must
 // not grow this process without bound.
 func TestReadKeyLineRefusesALineWithoutEnd(t *testing.T) {
+	t.Parallel()
+
 	endless := strings.NewReader(strings.Repeat("x", maxKeyFileSize+2))
 
 	if _, err := readKeyLine(endless); !errors.Is(err, ErrKeyFileTooLarge) {

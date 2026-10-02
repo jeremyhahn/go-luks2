@@ -265,3 +265,22 @@ func TestEphemeralStateDirectoryIsRefused(t *testing.T) {
 		}
 	})
 }
+
+// TestEnsureTrustedStateDirRefusesWhatItCannotCreate: no directory configured
+// at all, and a directory that cannot be created because a FILE holds a
+// component of its path. Both refuse with ErrLedgerUnavailable, the sentinel
+// that stops a suite before it creates anything it could not record.
+func TestEnsureTrustedStateDirRefusesWhatItCannotCreate(t *testing.T) {
+	if err := ensureTrustedStateDir(""); !errors.Is(err, ErrLedgerUnavailable) {
+		t.Errorf("an unconfigured state dir: %v, want ErrLedgerUnavailable", err)
+	}
+
+	file := filepath.Join(t.TempDir(), "a-file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatalf("creating the blocking file: %v", err)
+	}
+	err := ensureTrustedStateDir(filepath.Join(file, "state"))
+	if !errors.Is(err, ErrLedgerUnavailable) || !strings.Contains(err.Error(), "creating") {
+		t.Errorf("a state dir under a regular file: %v, want ErrLedgerUnavailable naming the create", err)
+	}
+}

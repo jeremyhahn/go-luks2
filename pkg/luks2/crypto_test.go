@@ -56,6 +56,8 @@ func TestRandomBase64(t *testing.T) {
 
 // TestCreateKDF tests KDF object creation
 func TestCreateKDF(t *testing.T) {
+	t.Parallel()
+
 	// Argon2 is not FIPS-approved and CreateKDF refuses it while the process
 	// runs in FIPS 140-3 mode (docs/FIPS.md).
 	argon2Rejected := fips140.Enabled()

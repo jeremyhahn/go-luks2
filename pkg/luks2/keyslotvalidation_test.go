@@ -287,6 +287,8 @@ func TestKeyslotValidationLeavesOtherKeyslotTypesAlone(t *testing.T) {
 // keyslot has no kdf object, so reaching the derivation with one dereferences
 // nil.
 func TestUnlockKeyslotRefusesAKeyslotTypeItCannotOpen(t *testing.T) {
+	t.Parallel()
+
 	path := newImage(t, "wrong-type.img")
 	formatWithLibrary(t, path)
 
@@ -315,6 +317,8 @@ func TestUnlockKeyslotRefusesAKeyslotTypeItCannotOpen(t *testing.T) {
 // validation now prevents at read, at the one exported function that walks
 // keyslots without opening them.
 func TestListKeyslotsSurvivesAKeyslotWithNoKDF(t *testing.T) {
+	t.Parallel()
+
 	path := newImage(t, "listable.img")
 	formatWithLibrary(t, path)
 

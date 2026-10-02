@@ -139,3 +139,18 @@ func TestSuiteVolumeNameRefusesAnIncompleteSuite(t *testing.T) {
 		t.Fatalf("Suite.VolumeName = %q on a suite with no run id, want a refusal", got)
 	}
 }
+
+// TestVolumeNameErrorNamesTheEmptyTerm: the refusal is read in a CI log by
+// someone who did not write the call, so it says which term was empty and
+// what the other two were.
+func TestVolumeNameErrorNamesTheEmptyTerm(t *testing.T) {
+	_, err := VolumeName("luks", "", "123-abc")
+	if !errors.Is(err, ErrVolumeName) {
+		t.Fatalf("VolumeName with no scope = %v, want ErrVolumeName", err)
+	}
+	for _, want := range []string{"scope is empty", `base="luks"`, `run id="123-abc"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not carry %q", err, want)
+		}
+	}
+}

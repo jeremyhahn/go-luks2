@@ -423,6 +423,8 @@ func TestFileLock_ReleaseNilFile(t *testing.T) {
 }
 
 func TestFileLock_MultipleRelease(t *testing.T) {
+	t.Parallel()
+
 	tmpFile, err := os.CreateTemp("", "luks-lock-test-*")
 	if err != nil {
 		t.Fatal(err)
