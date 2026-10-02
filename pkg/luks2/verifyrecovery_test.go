@@ -159,7 +159,7 @@ func TestGetMasterKeyDistinguishesFailureToTryFromFailureToVerify(t *testing.T) 
 	t.Run("tried and did not verify", func(t *testing.T) {
 		key, err := getMasterKey(path, []byte(conformanceWrongPassphrase), metadata)
 		if err == nil {
-			key.Destroy()
+			mustDestroy(t, key)
 			t.Fatal("a wrong credential opened the volume")
 		}
 		if !errors.Is(err, ErrMasterKeyVerification) {
@@ -181,7 +181,7 @@ func TestGetMasterKeyDistinguishesFailureToTryFromFailureToVerify(t *testing.T) 
 
 		key, err := getMasterKey(path, []byte(conformancePassphrase), damaged)
 		if err == nil {
-			key.Destroy()
+			mustDestroy(t, key)
 			t.Fatal("a keyslot with no kdf object opened the volume")
 		}
 		if !errors.Is(err, ErrInvalidKeyslot) {
@@ -217,7 +217,7 @@ func TestGetMasterKeyDistinguishesFailureToTryFromFailureToVerify(t *testing.T) 
 		if err != nil {
 			t.Fatalf("an unusable keyslot ahead of a usable one denied the volume: %v", err)
 		}
-		key.Destroy()
+		mustDestroy(t, key)
 	})
 }
 

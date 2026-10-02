@@ -72,7 +72,7 @@ func TestDeriveKeyDoesNotPanicOnHeaderControlledParameters(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			key, err := DeriveKeyEnclave([]byte("a passphrase"), tc.kdf, tc.keySize)
 			if err == nil {
-				key.Destroy()
+				mustDestroy(t, key)
 				t.Fatal("the derivation accepted a parameter no derivation can run with")
 			}
 			// A typed refusal, not a panic and not a bare string: callers

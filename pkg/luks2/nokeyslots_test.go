@@ -103,7 +103,7 @@ func TestAVolumeWithNoUsableKeyslotIsNotReportedAsAWrongPassphrase(t *testing.T)
 
 			key, err := getMasterKey(path, passphrase, metadata)
 			if err == nil {
-				key.Destroy()
+				mustDestroy(t, key)
 				t.Fatal("a container with no usable keyslot opened")
 			}
 			if !errors.Is(err, ErrNoKeyslots) {
@@ -145,7 +145,7 @@ func TestAVolumeWithNoUsableKeyslotIsNotReportedAsAWrongPassphrase(t *testing.T)
 
 		key, err := getMasterKey(path, []byte(conformanceWrongPassphrase), metadata)
 		if err == nil {
-			key.Destroy()
+			mustDestroy(t, key)
 			t.Fatal("a wrong passphrase opened a healthy volume")
 		}
 		if errors.Is(err, ErrNoKeyslots) {
@@ -161,6 +161,6 @@ func TestAVolumeWithNoUsableKeyslotIsNotReportedAsAWrongPassphrase(t *testing.T)
 		if err != nil {
 			t.Fatalf("the correct passphrase no longer opens a healthy volume: %v", err)
 		}
-		key.Destroy()
+		mustDestroy(t, key)
 	})
 }

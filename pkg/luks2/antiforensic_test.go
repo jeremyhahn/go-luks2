@@ -26,7 +26,7 @@ func afSplitPlain(t *testing.T, data []byte, stripes int, hashAlgo string) ([]by
 	if err != nil {
 		return nil, err
 	}
-	defer split.Destroy()
+	defer mustDestroy(t, split)
 
 	return openSecret(t, split), nil
 }
@@ -40,7 +40,7 @@ func afMergePlain(t *testing.T, splitData []byte, stripes, blockSize int, hashAl
 	if err != nil {
 		return nil, err
 	}
-	defer merged.Destroy()
+	defer mustDestroy(t, merged)
 
 	return openSecret(t, merged), nil
 }

@@ -79,7 +79,7 @@ func TestMalformedKeyslotIsRefusedNotPanicked(t *testing.T) {
 
 			key, err := unlockKeyslot(path, "0", []byte(conformancePassphrase), keyslot, metadata.Digests)
 			if err == nil {
-				key.Destroy()
+				mustDestroy(t, key)
 				t.Fatal("unlockKeyslot accepted a malformed keyslot")
 			}
 			// ErrInvalidKeyslot specifically, not merely "an error": it is what
@@ -269,7 +269,7 @@ func TestUnlockKeyslotRefusesANonSectorArea(t *testing.T) {
 
 	key, err := unlockKeyslot(path, "0", []byte(conformancePassphrase), keyslot, metadata.Digests)
 	if err == nil {
-		key.Destroy()
+		mustDestroy(t, key)
 		t.Fatal("unlockKeyslot accepted an area that is not a whole number of sectors")
 	}
 	if !errors.Is(err, ErrInvalidKeyslot) {

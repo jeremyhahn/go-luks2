@@ -34,9 +34,32 @@ func enclaveFrom(t *testing.T, b []byte) *enclave.MemoryEnclave {
 	if err != nil {
 		t.Fatalf("could not allocate a test enclave: %v", err)
 	}
-	t.Cleanup(e.Destroy)
+	destroyOnCleanup(t, e)
 
 	return e
+}
+
+// mustDestroy destroys e now and fails the test if go-enclave reports the
+// release as anything but clean. Every test-side Destroy goes through it, for
+// the reason destroyOnCleanup gives: on a healthy host every release is clean,
+// so a report means the suite ran somewhere that refuses part of the teardown
+// contract, and that is worth a red test rather than a silent drop. It uses
+// Errorf, not Fatalf, so it is safe from a deferred call and from a goroutine.
+func mustDestroy(tb testing.TB, e *enclave.MemoryEnclave) {
+	tb.Helper()
+	if err := e.Destroy(); err != nil {
+		tb.Errorf("releasing a test enclave was reported: %v", err)
+	}
+}
+
+// destroyOnCleanup destroys e when the test ends and fails the test if the
+// release is reported as anything but clean. A fixture's release report is
+// the one a test CAN act on: on a healthy host every release succeeds, so a
+// report here means the suite ran somewhere that refuses part of the teardown
+// contract, which is worth a red test rather than a silent drop.
+func destroyOnCleanup(t *testing.T, e *enclave.MemoryEnclave) {
+	t.Helper()
+	t.Cleanup(func() { mustDestroy(t, e) })
 }
 
 // openSecret copies the material out of an enclave so a test can assert on it.
@@ -100,7 +123,7 @@ func TestNewSecretEnclaveReturnsLockedZeroedMemory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newSecretEnclave failed: %v", err)
 	}
-	defer e.Destroy()
+	defer mustDestroy(t, e)
 
 	if !e.IsAlive() {
 		t.Fatal("a freshly allocated enclave reports itself destroyed")
@@ -121,7 +144,7 @@ func TestNewSecretEnclaveRefusesAnImpossibleSize(t *testing.T) {
 		t.Run(strconv.Itoa(size), func(t *testing.T) {
 			e, err := newSecretEnclave("test", size)
 			if err == nil {
-				e.Destroy()
+				mustDestroy(t, e)
 				t.Fatalf("newSecretEnclave(%d) succeeded", size)
 			}
 			if e != nil {
@@ -165,13 +188,13 @@ func TestRandomSecretGeneratesInsideTheEnclave(t *testing.T) {
 	if err != nil {
 		t.Fatalf("randomSecret failed: %v", err)
 	}
-	defer a.Destroy()
+	defer mustDestroy(t, a)
 
 	b, err := randomSecret("test", 32)
 	if err != nil {
 		t.Fatalf("randomSecret failed: %v", err)
 	}
-	defer b.Destroy()
+	defer mustDestroy(t, b)
 
 	first, second := openSecret(t, a), openSecret(t, b)
 
@@ -186,7 +209,7 @@ func TestRandomSecretGeneratesInsideTheEnclave(t *testing.T) {
 func TestRandomSecretRefusesAZeroLengthDraw(t *testing.T) {
 	e, err := randomSecret("test", 0)
 	if err == nil {
-		e.Destroy()
+		mustDestroy(t, e)
 		t.Fatal("randomSecret(0) succeeded; an enclave over nothing protects nothing")
 	}
 	if !errors.Is(err, ErrProtectedMemory) {
@@ -202,7 +225,7 @@ func TestAdoptSecretWipesTheSourceSlice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("adoptSecret failed: %v", err)
 	}
-	defer e.Destroy()
+	defer mustDestroy(t, e)
 
 	// The whole point of adopting rather than copying: the caller's slice is
 	// zeroed, so the material does not survive in unprotected memory.
@@ -217,7 +240,7 @@ func TestAdoptSecretWipesTheSourceSlice(t *testing.T) {
 func TestAdoptSecretRefusesEmptyMaterial(t *testing.T) {
 	e, err := adoptSecret("test", nil)
 	if err == nil {
-		e.Destroy()
+		mustDestroy(t, e)
 		t.Fatal("adoptSecret(nil) succeeded")
 	}
 	if !errors.Is(err, ErrProtectedMemory) {
@@ -236,7 +259,7 @@ func TestCopySecretLeavesTheSourceIntact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("copySecret failed: %v", err)
 	}
-	defer e.Destroy()
+	defer mustDestroy(t, e)
 
 	// The whole point of copying rather than adopting: the source belongs to
 	// someone else -- a line inside another enclave's locked pages -- and must
@@ -262,7 +285,7 @@ func TestCopySecretRefusesEmptyMaterial(t *testing.T) {
 				e, err = copySecretWritable("test", nil)
 			}
 			if err == nil {
-				e.Destroy()
+				mustDestroy(t, e)
 				t.Fatalf("%s(nil) succeeded", name)
 			}
 			if !errors.Is(err, ErrProtectedMemory) {
@@ -296,7 +319,7 @@ func TestCopySecretFailsClosedWhenLockedMemoryIsUnavailable(t *testing.T) {
 				e, err = copySecretWritable("test", source)
 			}
 			if err == nil {
-				e.Destroy()
+				mustDestroy(t, e)
 				t.Fatalf("%s succeeded while locked memory was being refused", name)
 			}
 			if e != nil {
@@ -324,7 +347,7 @@ func TestCopySecretWritableHandsBackPagesABorrowMayWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("copySecretWritable failed: %v", err)
 	}
-	defer e.Destroy()
+	defer mustDestroy(t, e)
 
 	if err := borrowSecret("test", e, func(b []byte) error {
 		lowerASCII(b)
@@ -347,7 +370,7 @@ func TestBorrowSecretReportsADestroyedEnclaveAsAProtectedMemoryError(t *testing.
 	if err != nil {
 		t.Fatalf("randomSecret failed: %v", err)
 	}
-	e.Destroy()
+	mustDestroy(t, e)
 
 	called := false
 	err = borrowSecret("test", e, func([]byte) error {
@@ -367,7 +390,7 @@ func TestBorrowSecretPassesTheCallersErrorThrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("randomSecret failed: %v", err)
 	}
-	defer e.Destroy()
+	defer mustDestroy(t, e)
 
 	sentinel := errors.New("the caller's own failure")
 	if err := borrowSecret("test", e, func([]byte) error { return sentinel }); !errors.Is(err, sentinel) {
@@ -399,7 +422,7 @@ func TestBorrowWindowClosesWhenTheBorrowReturns(t *testing.T) {
 		t.Fatalf("borrowSecret failed: %v", err)
 	}
 
-	e.Destroy()
+	mustDestroy(t, e)
 
 	if e.IsAlive() {
 		t.Fatal("the enclave survived Destroy")
@@ -446,4 +469,132 @@ func TestLockedMemoryIsReleasedByDestroySecrets(t *testing.T) {
 	if after := lockedKiB(t); after > before+lockedSlackKiB {
 		t.Fatalf("locked memory grew from %d KiB to %d KiB across %d allocate/destroy rounds", before, after, rounds)
 	}
+}
+
+// reportingDestroy installs a destroyEnclave that really releases each enclave
+// and then reports report for it, the way go-enclave does when the kernel or a
+// sandbox refuses part of the teardown. It records every enclave it was given,
+// in order, so a test can prove the release reached each one.
+func reportingDestroy(t *testing.T, report error) *[]*enclave.MemoryEnclave {
+	t.Helper()
+	var seen []*enclave.MemoryEnclave
+	saved := destroyEnclave
+	t.Cleanup(func() { destroyEnclave = saved })
+	destroyEnclave = func(e *enclave.MemoryEnclave) error {
+		seen = append(seen, e)
+		if err := e.Destroy(); err != nil {
+			t.Errorf("the real release under the fake report failed: %v", err)
+		}
+		return report
+	}
+	return &seen
+}
+
+// requireReleased fails unless e's material is gone.
+func requireReleased(t *testing.T, name string, e *enclave.MemoryEnclave) {
+	t.Helper()
+	if err := e.WithBytes(func([]byte) error { return nil }); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
+		t.Errorf("%s: borrow after release = %v, want enclave.ErrEnclaveDestroyed", name, err)
+	}
+}
+
+func TestReleaseSecretDestroysTheEnclave(t *testing.T) {
+	e, err := enclave.NewMemoryEnclaveCopy([]byte("volume key material"))
+	if err != nil {
+		t.Fatalf("could not allocate a test enclave: %v", err)
+	}
+
+	releaseSecret(e)
+
+	requireReleased(t, "releaseSecret", e)
+}
+
+// TestReleaseSecretDropsEveryReleaseReport pins the decision documented on
+// releaseSecret: neither report go-enclave can return is turned into a panic or
+// leaks out of the helper, and the enclave is released either way.
+func TestReleaseSecretDropsEveryReleaseReport(t *testing.T) {
+	tests := []struct {
+		name   string
+		report error
+		is     error
+	}{
+		{
+			name:   "released without the in-process wipe",
+			report: &enclave.UnwipedReleaseError{Cause: errors.New("synthetic mprotect EPERM")},
+			is:     enclave.ErrReleasedWithoutWipe,
+		},
+		{
+			name:   "release refused, pages still held",
+			report: &enclave.LockedMemoryError{Cause: errors.New("synthetic munmap ENOMEM")},
+			is:     enclave.ErrLockedMemoryUnavailable,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !errors.Is(tt.report, tt.is) {
+				t.Fatalf("fixture %v does not match %v; the case tests nothing", tt.report, tt.is)
+			}
+			seen := reportingDestroy(t, tt.report)
+			e, err := enclave.NewMemoryEnclaveCopy([]byte("volume key material"))
+			if err != nil {
+				t.Fatalf("could not allocate a test enclave: %v", err)
+			}
+
+			releaseSecret(e)
+
+			if len(*seen) != 1 || (*seen)[0] != e {
+				t.Fatalf("release saw %d enclaves, want exactly the one given", len(*seen))
+			}
+			requireReleased(t, tt.name, e)
+		})
+	}
+}
+
+// TestDestroySecretsReleasesPastAReport proves one enclave's report does not
+// stop the others being released: the material after it would otherwise
+// outlive the function that deferred the call.
+func TestDestroySecretsReleasesPastAReport(t *testing.T) {
+	seen := reportingDestroy(t, &enclave.LockedMemoryError{Cause: errors.New("synthetic munmap ENOMEM")})
+	first, err := enclave.NewMemoryEnclaveCopy([]byte("passphrase key"))
+	if err != nil {
+		t.Fatalf("could not allocate a test enclave: %v", err)
+	}
+	second, err := enclave.NewMemoryEnclaveCopy([]byte("af stripes"))
+	if err != nil {
+		t.Fatalf("could not allocate a test enclave: %v", err)
+	}
+
+	destroySecrets(first, nil, second)
+
+	if len(*seen) != 3 || (*seen)[0] != first || (*seen)[2] != second {
+		t.Fatalf("release saw %v, want first, nil, second in order", *seen)
+	}
+	requireReleased(t, "first", first)
+	requireReleased(t, "second", second)
+}
+
+// TestReleaseSecretDoesNotSwallowCorruption pins the other half of the
+// decision: detected corruption is go-enclave's one panic, and releaseSecret
+// must let it reach the caller rather than recover it into a dropped report.
+func TestReleaseSecretDoesNotSwallowCorruption(t *testing.T) {
+	saved := destroyEnclave
+	t.Cleanup(func() { destroyEnclave = saved })
+	e, err := enclave.NewMemoryEnclaveCopy([]byte("volume key material"))
+	if err != nil {
+		t.Fatalf("could not allocate a test enclave: %v", err)
+	}
+	destroyOnCleanup(t, e)
+	destroyEnclave = func(*enclave.MemoryEnclave) error {
+		panic(enclave.ErrEnclaveCorrupted)
+	}
+
+	defer func() {
+		r := recover()
+		perr, ok := r.(error)
+		if !ok || !errors.Is(perr, enclave.ErrEnclaveCorrupted) {
+			t.Fatalf("recovered %v, want a panic matching enclave.ErrEnclaveCorrupted", r)
+		}
+	}()
+	releaseSecret(e)
+	t.Fatal("releaseSecret returned normally from a corrupted release")
 }

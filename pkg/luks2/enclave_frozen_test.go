@@ -71,7 +71,7 @@ func TestCopySecretPagesAreReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("copySecretWritable: %v", err)
 	}
-	defer writable.Destroy()
+	defer mustDestroy(t, writable)
 	if err := borrowSecret("test", writable, func(b []byte) error {
 		b[0] = 'm'
 		return nil
@@ -135,5 +135,5 @@ func frozenCopyChild(t *testing.T) {
 		t.Fatalf("the borrow itself failed before the write: %v", err)
 	}
 	fmt.Println(frozenCopySurvived)
-	e.Destroy()
+	mustDestroy(t, e)
 }

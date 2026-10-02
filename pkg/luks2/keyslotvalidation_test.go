@@ -193,7 +193,7 @@ func TestCraftedKeyslotFieldsAreRefused(t *testing.T) {
 
 			key, err := unlockKeyslot(path, "0", []byte(conformancePassphrase), keyslot, metadata.Digests)
 			if err == nil {
-				key.Destroy()
+				mustDestroy(t, key)
 				t.Fatal("unlockKeyslot accepted the crafted keyslot")
 			}
 			if !errors.Is(err, ErrInvalidKeyslot) {
@@ -303,7 +303,7 @@ func TestUnlockKeyslotRefusesAKeyslotTypeItCannotOpen(t *testing.T) {
 
 	key, err := unlockKeyslot(path, "0", []byte(conformancePassphrase), reencrypt, metadata.Digests)
 	if err == nil {
-		key.Destroy()
+		mustDestroy(t, key)
 		t.Fatal("unlockKeyslot opened a keyslot type it does not implement")
 	}
 	if !errors.Is(err, ErrInvalidKeyslot) {

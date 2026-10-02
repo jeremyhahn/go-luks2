@@ -221,7 +221,7 @@ func TestParseRecoveryKey(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
-			defer key.Destroy()
+			defer mustDestroy(t, key)
 
 			// ParseRecoveryKey hands back an ENCLAVE, so the decoded key is
 			// never a slice the caller has to remember to wipe.
@@ -251,7 +251,7 @@ func TestRecoveryKeyRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to parse key: %v", err)
 	}
-	defer parsed.Destroy()
+	defer mustDestroy(t, parsed)
 
 	// The decode still yields the 32 bytes behind the rendering, which is what
 	// ParseRecoveryKey is for. It is no longer the credential: see
@@ -332,7 +332,7 @@ func TestSaveAndLoadRecoveryKey(t *testing.T) {
 		t.Fatalf("failed to load key: %v", err)
 	}
 
-	defer loaded.Destroy()
+	defer mustDestroy(t, loaded)
 
 	if !key.Credential.EqualTo(openSecret(t, loaded)) {
 		t.Error("loaded credential doesn't match original")
@@ -506,7 +506,7 @@ func TestDecodeHex(t *testing.T) {
 
 			if tt.expectErr {
 				if err == nil {
-					result.Destroy()
+					mustDestroy(t, result)
 					t.Error("expected error but got none")
 				}
 				return
@@ -515,7 +515,7 @@ func TestDecodeHex(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			defer result.Destroy()
+			defer mustDestroy(t, result)
 
 			// The decode writes straight into locked memory, so what is
 			// asserted on here is a test-only copy taken back out of it.
@@ -686,7 +686,7 @@ func keyslotOpenedBy(t *testing.T, device string, passphrase []byte) string {
 		if err != nil {
 			continue
 		}
-		key.Destroy()
+		mustDestroy(t, key)
 		if opened != "" {
 			t.Fatalf("one credential opened both keyslot %s and keyslot %s", opened, id)
 		}
@@ -777,7 +777,7 @@ func savedFileContains(t *testing.T, path, substr string) bool {
 	if err != nil {
 		t.Fatalf("could not obtain protected memory for the saved file: %v", err)
 	}
-	defer contents.Destroy()
+	defer mustDestroy(t, contents)
 
 	found := false
 	if err := borrowSecret("recovery key file", contents, func(b []byte) error {
@@ -1075,7 +1075,7 @@ func TestRecoveryCredentialDoesNotNormalize(t *testing.T) {
 			if err != nil {
 				t.Fatalf("RecoveryCredential(%q): %v", tt.typed, err)
 			}
-			defer credential.Destroy()
+			defer mustDestroy(t, credential)
 
 			if got := string(openSecret(t, credential)); got != tt.want {
 				t.Errorf("RecoveryCredential(%q) = %q, want %q", tt.typed, got, tt.want)
@@ -1099,7 +1099,7 @@ func TestRecoveryCredentialRefusesWhatCannotBeOne(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			credential, err := RecoveryCredential(tt.typed)
 			if err == nil {
-				credential.Destroy()
+				mustDestroy(t, credential)
 				t.Fatalf("RecoveryCredential(%q) accepted something that cannot be a recovery key", tt.typed)
 			}
 		})
@@ -1124,7 +1124,7 @@ func TestLoadRecoveryCredentialReturnsTheLineNotItsDecoding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadRecoveryCredential: %v", err)
 	}
-	defer credential.Destroy()
+	defer mustDestroy(t, credential)
 
 	if !key.Credential.EqualTo(openSecret(t, credential)) {
 		t.Error("LoadRecoveryCredential did not return the credential that was saved")
@@ -1136,7 +1136,7 @@ func TestLoadRecoveryCredentialReturnsTheLineNotItsDecoding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadRecoveryKey: %v", err)
 	}
-	defer decoded.Destroy()
+	defer mustDestroy(t, decoded)
 
 	if decoded.Size() != 32 {
 		t.Errorf("LoadRecoveryKey returned %d bytes, want the 32 behind the rendering", decoded.Size())

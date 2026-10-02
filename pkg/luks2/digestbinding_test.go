@@ -75,7 +75,7 @@ func twoVolumeKeyContainer(t *testing.T, name string, passA, passB []byte) strin
 	if err != nil {
 		t.Fatalf("failed to hold the second volume key: %v", err)
 	}
-	defer keyB.Destroy()
+	defer mustDestroy(t, keyB)
 
 	writeKeyslot(t, path, hdr, metadata, "1", reference, keyB, passB)
 
@@ -118,13 +118,13 @@ func writeKeyslot(t *testing.T, path string, hdr *LUKS2BinaryHeader, metadata *L
 	if err != nil {
 		t.Fatalf("DeriveKeyEnclave failed: %v", err)
 	}
-	defer passphraseKey.Destroy()
+	defer mustDestroy(t, passphraseKey)
 
 	afData, err := afSplitEnclave(masterKey, AFStripes, DefaultHashAlgo)
 	if err != nil {
 		t.Fatalf("afSplitEnclave failed: %v", err)
 	}
-	defer afData.Destroy()
+	defer mustDestroy(t, afData)
 
 	encrypted, err := encryptKeyMaterialEnclave(afData, passphraseKey, DefaultCipher)
 	if err != nil {
@@ -205,7 +205,7 @@ func TestADigestCannotAuthenticateAKeyslotItDoesNotName(t *testing.T) {
 			if err != nil {
 				t.Fatalf("keyslot %s did not open under its own credential and digest: %v", tc.id, err)
 			}
-			key.Destroy()
+			mustDestroy(t, key)
 		}
 	})
 
@@ -230,7 +230,7 @@ func TestADigestCannotAuthenticateAKeyslotItDoesNotName(t *testing.T) {
 
 		key, err := unlockKeyslot(path, "0", passA, mutated.Keyslots["0"], mutated.Digests)
 		if err == nil {
-			key.Destroy()
+			mustDestroy(t, key)
 			t.Fatal("keyslot 0 authenticated against a digest the header associates only with keyslot 1")
 		}
 		// A header fault, not a credential verdict: the passphrase was right and
@@ -249,6 +249,6 @@ func TestADigestCannotAuthenticateAKeyslotItDoesNotName(t *testing.T) {
 		if err != nil {
 			t.Fatalf("keyslot 1 stopped opening after keyslot 0 lost its digest: %v", err)
 		}
-		key.Destroy()
+		mustDestroy(t, key)
 	})
 }

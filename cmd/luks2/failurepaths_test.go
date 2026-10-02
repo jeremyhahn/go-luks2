@@ -362,13 +362,13 @@ func TestRecoveryGenerateSavesWhenAsked(t *testing.T) {
 		if err != nil {
 			t.Fatalf("LoadRecoveryKey() error = %v", err)
 		}
-		defer loaded.Destroy()
+		defer mustDestroy(t, loaded)
 
 		parsed, err := luks2.ParseRecoveryKey(printed)
 		if err != nil {
 			t.Fatalf("ParseRecoveryKey() error = %v", err)
 		}
-		defer parsed.Destroy()
+		defer mustDestroy(t, parsed)
 
 		if !parsed.EqualTo(mustOpen(t, loaded)) {
 			t.Error("the saved file holds a different key from the one that was displayed")

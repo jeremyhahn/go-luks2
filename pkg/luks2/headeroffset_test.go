@@ -180,7 +180,7 @@ func TestHeaderOffsetBoundStillAdmitsTheSecondaryHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the metadata from the secondary header does not open the volume: %v", err)
 	}
-	key.Destroy()
+	mustDestroy(t, key)
 }
 
 // TestReadSecondaryHeaderRejectsThePrimaryMagic pins which magic each copy must

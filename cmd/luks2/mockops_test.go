@@ -5,6 +5,8 @@
 package main
 
 import (
+	"testing"
+
 	"github.com/jeremyhahn/go-enclave"
 
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
@@ -384,5 +386,16 @@ func mockMetadata() *luks2.LUKS2Metadata {
 		Tokens:   map[string]*luks2.Token{},
 		Segments: map[string]*luks2.Segment{"0": {Type: "crypt"}},
 		Digests:  map[string]*luks2.Digest{"0": {Type: "pbkdf2"}},
+	}
+}
+
+// mustDestroy destroys e now and fails the test if go-enclave reports the
+// release as anything but clean: on a healthy host every release is clean, so
+// a report means the suite ran somewhere that refuses part of the teardown
+// contract. Errorf, not Fatalf, so it is safe from a deferred call.
+func mustDestroy(tb testing.TB, e *enclave.MemoryEnclave) {
+	tb.Helper()
+	if err := e.Destroy(); err != nil {
+		tb.Errorf("releasing a test enclave was reported: %v", err)
 	}
 }

@@ -50,8 +50,9 @@ func Unlock(device string, passphrase []byte, name string) error {
 			if err != nil {
 				return nil, nil, &UnlockError{Op: "unlock any keyslot", Err: err}
 			}
-			// The derived key is THIS package's, so releasing it destroys it.
-			return masterKey, masterKey.Destroy, nil
+			// The derived key is THIS package's, so releasing it destroys it,
+			// through the one place this package handles a release report.
+			return masterKey, func() { releaseSecret(masterKey) }, nil
 		})
 }
 
@@ -833,7 +834,7 @@ func unlockKeyslot(device string, keyslotID string, passphrase []byte, keyslot *
 	if err != nil {
 		return nil, err
 	}
-	defer passphraseKey.Destroy()
+	defer releaseSecret(passphraseKey)
 
 	// The area bounds come from the screen, which parsed and bounded them --
 	// see screenKeyslot. openDevice is main's typed opener, adopted here so this
@@ -868,7 +869,7 @@ func unlockKeyslot(device string, keyslotID string, passphrase []byte, keyslot *
 	if err != nil {
 		return nil, err
 	}
-	defer decryptedKeyMaterial.Destroy()
+	defer releaseSecret(decryptedKeyMaterial)
 
 	if decryptedKeyMaterial.Size() < plan.afSplitSize {
 		return nil, &UnlockError{Op: "decrypt keyslot " + keyslotID,
@@ -882,7 +883,7 @@ func unlockKeyslot(device string, keyslotID string, passphrase []byte, keyslot *
 
 	// Verify master key using the digests that authenticate THIS keyslot
 	if err := verifyMasterKey(masterKey, keyslotID, digests); err != nil {
-		masterKey.Destroy()
+		releaseSecret(masterKey)
 		return nil, err
 	}
 
@@ -1076,7 +1077,7 @@ func verifyKeyAgainstDigests(masterKey *enclave.MemoryEnclave, digests map[strin
 		// or not.
 		evaluated++
 		matched := derived.EqualTo(expected)
-		derived.Destroy()
+		releaseSecret(derived)
 		clearBytes(expected)
 		if matched {
 			return nil // Verification successful

@@ -138,7 +138,7 @@ func (p *CommandKeyProvider) Passphrase(ctx context.Context) (*enclave.MemoryEnc
 	if err != nil {
 		return nil, err
 	}
-	defer out.Destroy()
+	defer releaseSecret(out)
 
 	return p.selectLine(out, n)
 }
@@ -166,7 +166,7 @@ func (p *CommandKeyProvider) run(ctx context.Context) (*enclave.MemoryEnclave, i
 	}
 
 	if err := cmd.Start(); err != nil {
-		buf.Destroy()
+		releaseSecret(buf)
 		return nil, 0, &HelperError{Path: p.Path, ExitCode: -1, Err: err}
 	}
 
@@ -205,10 +205,10 @@ func (p *CommandKeyProvider) run(ctx context.Context) (*enclave.MemoryEnclave, i
 
 	switch {
 	case readErr != nil:
-		buf.Destroy()
+		releaseSecret(buf)
 		return nil, 0, &KeyProviderError{Op: op, Err: readErr}
 	case waitErr != nil:
-		buf.Destroy()
+		releaseSecret(buf)
 		return nil, 0, &HelperError{
 			Path:     p.Path,
 			ExitCode: exitCodeOf(waitErr),
@@ -360,7 +360,7 @@ func EnrollKeyProvider(ctx context.Context, device string, existing []byte, p Ke
 	if err != nil {
 		return -1, -1, err
 	}
-	defer credential.Destroy()
+	defer releaseSecret(credential)
 
 	// Seeded to -1 so a borrow that never runs the closure reports "no slot"
 	// rather than slot 0, which on almost every volume is somebody's primary
@@ -505,7 +505,7 @@ func UnlockWithProvider(ctx context.Context, device, name string, p KeyProvider)
 	if err != nil {
 		return err
 	}
-	defer credential.Destroy()
+	defer releaseSecret(credential)
 
 	return borrowSecret("provider credential", credential, func(raw []byte) error {
 		return Unlock(device, raw, name)
@@ -742,7 +742,7 @@ func normalizeFIDO2Secret(line []byte) (*enclave.MemoryEnclave, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer raw.Destroy()
+	defer releaseSecret(raw)
 
 	var rawLen int
 	if err := borrowSecret(op, raw, func(dst []byte) error {
@@ -775,7 +775,7 @@ func normalizeFIDO2Secret(line []byte) (*enclave.MemoryEnclave, error) {
 			return nil
 		})
 	}); err != nil {
-		encoded.Destroy()
+		releaseSecret(encoded)
 		return nil, err
 	}
 
@@ -882,7 +882,7 @@ func (p *fido2Provider) Passphrase(ctx context.Context) (*enclave.MemoryEnclave,
 	if err != nil {
 		return nil, err
 	}
-	defer line.Destroy()
+	defer releaseSecret(line)
 
 	var credential *enclave.MemoryEnclave
 	if err := borrowSecret("fido2 secret", line, func(b []byte) error {
@@ -898,7 +898,7 @@ func (p *fido2Provider) Passphrase(ctx context.Context) (*enclave.MemoryEnclave,
 	// from the helper was not the hmac-secret -- see fido2AssertSecretLine --
 	// and enrolling it would produce a keyslot that opens nothing.
 	if want := fido2SecretEncoding.EncodedLen(FIDO2SecretLength); credential.Size() != want {
-		credential.Destroy()
+		releaseSecret(credential)
 		return nil, &KeyProviderError{
 			Op: "fido2 secret",
 			Err: fmt.Errorf("%w: line %d of the assertion is not a %d-byte hmac-secret; the helper's output format is not the one this package expects",
@@ -1039,7 +1039,7 @@ func NewFIDO2Credential(ctx context.Context, cfg ExecConfig, opts FIDO2Credentia
 	if err != nil {
 		return nil, err
 	}
-	defer encoded.Destroy()
+	defer releaseSecret(encoded)
 
 	var id []byte
 	if err := borrowSecret("fido2 credential id", encoded, func(b []byte) error {

@@ -57,7 +57,7 @@ func masterKeyOf(t *testing.T, device string, passphrase []byte) []byte {
 	if err != nil {
 		t.Fatalf("recovering the master key failed: %v", err)
 	}
-	defer secret.Destroy()
+	defer mustDestroy(t, secret)
 
 	var key []byte
 	if err := secret.WithBytes(func(b []byte) error {
@@ -472,7 +472,7 @@ func TestAHostileHeaderUUIDCannotSplitTheTargetSpecification(t *testing.T) {
 			if err != nil {
 				t.Fatalf("could not obtain protected memory: %v", err)
 			}
-			defer key.Destroy()
+			defer mustDestroy(t, key)
 
 			if err := unlockLoadTable("victim", hostile, "/dev/null", params, key, 4096, 0); err != nil {
 				t.Fatalf("unlockLoadTable failed: %v", err)

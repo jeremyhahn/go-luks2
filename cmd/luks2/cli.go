@@ -98,6 +98,11 @@ type CLI struct {
 	ExitFunc   func(code int)
 	stdinFd    int
 	getStdinFd func() int
+
+	// destroyEnclave releases a credential the library handed this command.
+	// nil means go-enclave's own Destroy; a test sets it to produce the
+	// release reports a healthy host never does. See releaseCredential.
+	destroyEnclave func(*enclave.MemoryEnclave) error
 }
 
 // DefaultLuksOperations implements LuksOperations using the actual luks2 package

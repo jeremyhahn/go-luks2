@@ -116,7 +116,7 @@ func TestExcessiveKDFCostIsRefusedBeforeDeriving(t *testing.T) {
 			runtime.ReadMemStats(&after)
 
 			if err == nil {
-				key.Destroy()
+				mustDestroy(t, key)
 				t.Fatal("unlockKeyslot ran a KDF whose declared cost is outside every accepted range")
 			}
 			// Entry-level, so a crafted keyslot costs its own keyslot and not
@@ -257,7 +257,7 @@ func TestExcessiveDigestKDFCostSkipsThatDigest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a volume with one expensive digest no longer opens through its usable one: %v", err)
 	}
-	key.Destroy()
+	mustDestroy(t, key)
 
 	if elapsed > 10*time.Second {
 		t.Fatalf("opening took %s: the expensive digest was derived rather than skipped", elapsed)

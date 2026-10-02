@@ -36,7 +36,7 @@ func volumeKeyEnclave(t *testing.T, key []byte) *enclave.MemoryEnclave {
 	if err != nil {
 		t.Fatalf("placing the volume key in an enclave failed: %v", err)
 	}
-	t.Cleanup(e.Destroy)
+	destroyOnCleanup(t, e)
 	return e
 }
 
@@ -158,7 +158,7 @@ func TestUnlockWithVolumeKeyRefusesAnUnusableEnclave(t *testing.T) {
 	if err != nil {
 		t.Fatalf("creating an enclave failed: %v", err)
 	}
-	destroyed.Destroy()
+	mustDestroy(t, destroyed)
 
 	oversized := volumeKeyEnclave(t, make([]byte, MaxKeyslotKeySize+1))
 

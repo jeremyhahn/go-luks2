@@ -796,7 +796,7 @@ func TestConformance_LegacyDigestLengthStillOpens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to recover the master key: %v", err)
 	}
-	defer masterKey.Destroy()
+	defer mustDestroy(t, masterKey)
 
 	digest, ok := metadata.Digests["0"]
 	if !ok {
@@ -817,7 +817,7 @@ func TestConformance_LegacyDigestLengthStillOpens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to derive the legacy digest: %v", err)
 	}
-	defer legacy.Destroy()
+	defer mustDestroy(t, legacy)
 
 	if err := legacy.WithBytes(func(b []byte) error {
 		digest.Digest = encodeBase64(b)
@@ -952,7 +952,7 @@ func TestEnsureRequiredObjects(t *testing.T) {
 //
 // The digest value is a public header field, not a secret. The master key it is
 // derived from is borrowed in place and never copied out.
-func cheapenGoldenDigests(device string) error {
+func cheapenGoldenDigests(device string) (err error) {
 	hdr, metadata, err := ReadHeader(device)
 	if err != nil {
 		return err
@@ -962,7 +962,13 @@ func cheapenGoldenDigests(device string) error {
 	if err != nil {
 		return fmt.Errorf("the golden container does not open: %w", err)
 	}
-	defer masterKey.Destroy()
+	// No *testing.T here, so the release report joins this helper's error:
+	// a refused teardown fails the caller's setup rather than vanishing.
+	defer func() {
+		if derr := masterKey.Destroy(); derr != nil {
+			err = errors.Join(err, fmt.Errorf("releasing the golden master key: %w", derr))
+		}
+	}()
 
 	const cheapIterations = 1000
 	for _, digest := range metadata.Digests {
@@ -984,7 +990,9 @@ func cheapenGoldenDigests(device string) error {
 			digest.Digest = encodeBase64(b)
 			return nil
 		})
-		derived.Destroy()
+		if derr := derived.Destroy(); derr != nil {
+			err = errors.Join(err, fmt.Errorf("releasing a golden digest key: %w", derr))
+		}
 		if err != nil {
 			return err
 		}

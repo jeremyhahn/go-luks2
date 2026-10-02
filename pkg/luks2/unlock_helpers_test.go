@@ -101,7 +101,7 @@ func TestVerifyMasterKey(t *testing.T) {
 	t.Run("empty master key cannot be held at all", func(t *testing.T) {
 		e, err := newSecretEnclave("master key", 0)
 		if err == nil {
-			e.Destroy()
+			mustDestroy(t, e)
 			t.Fatal("an enclave over an empty master key was created")
 		}
 		if !errors.Is(err, ErrProtectedMemory) {
@@ -128,7 +128,7 @@ func TestVerifyMasterKey(t *testing.T) {
 		if err != nil {
 			t.Fatalf("randomSecret failed: %v", err)
 		}
-		destroyed.Destroy()
+		mustDestroy(t, destroyed)
 
 		if err := verifyMasterKey(destroyed, "0", boundTo("0", digests)); err == nil {
 			t.Error("verifyMasterKey accepted a destroyed master key")

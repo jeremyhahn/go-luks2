@@ -60,10 +60,10 @@ func afSplitEnclave(secret *enclave.MemoryEnclave, stripes int, hashAlgo string)
 	// this call.
 	buffer, err := newSecretEnclave("af diffusion state", blockSize)
 	if err != nil {
-		result.Destroy()
+		releaseSecret(result)
 		return nil, err
 	}
-	defer buffer.Destroy()
+	defer releaseSecret(buffer)
 
 	err = borrowSecret("af stripes", result, func(dst []byte) error {
 		return borrowSecret("af diffusion state", buffer, func(buf []byte) error {
@@ -73,7 +73,7 @@ func afSplitEnclave(secret *enclave.MemoryEnclave, stripes int, hashAlgo string)
 		})
 	})
 	if err != nil {
-		result.Destroy()
+		releaseSecret(result)
 		return nil, err
 	}
 
@@ -104,10 +104,10 @@ func afMergeEnclave(split *enclave.MemoryEnclave, splitLen, stripes, blockSize i
 
 	buffer, err := newSecretEnclave("af diffusion state", blockSize)
 	if err != nil {
-		result.Destroy()
+		releaseSecret(result)
 		return nil, err
 	}
-	defer buffer.Destroy()
+	defer releaseSecret(buffer)
 
 	err = borrowSecret("merged master key", result, func(dst []byte) error {
 		return borrowSecret("af diffusion state", buffer, func(buf []byte) error {
@@ -121,7 +121,7 @@ func afMergeEnclave(split *enclave.MemoryEnclave, splitLen, stripes, blockSize i
 		})
 	})
 	if err != nil {
-		result.Destroy()
+		releaseSecret(result)
 		return nil, err
 	}
 

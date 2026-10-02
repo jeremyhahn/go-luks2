@@ -380,6 +380,26 @@ Format/Unlock/AddKey/ChangeKey must raise its `memlock` ulimit.
 There is no aggregate work or memory budget across an unlock — the per-item
 bounds cannot express one. Tracked as issue #26.
 
+**Release.** Every enclave the library creates is destroyed through one helper
+(`releaseSecret` in `pkg/luks2/enclave.go`), which receives go-enclave's
+release report and deliberately does not return it: by the time a key is
+released the operation's outcome is decided, so a refused unmap must not make a
+completed `Format` or `Unlock` look failed, and a Layer-0 library does not log.
+Neither report means key material reached ordinary memory. A sandbox that
+denies `mprotect` makes go-enclave unmap a read-only enclave **without** the
+in-process wipe (`enclave.ErrReleasedWithoutWipe`); the pages were mlock'd
+throughout and the kernel zeroes them before reuse. A refused release
+(`enclave.ErrLockedMemoryUnavailable`) leaves the pages mapped and on
+go-enclave's `WipeAll` ledger until the process sweeps or exits; go-enclave
+wipes before it unlocks, so they hold either zeroes or material that is still
+mlock'd, never unwiped material in unlocked pages. (Under go-enclave v0.5 that
+refusal panicked out of `Destroy`; since v0.6.2 it is a report, so the
+operation now completes instead of crashing at the release.) Detected canary
+corruption still panics. An application sees these conditions on the enclaves
+the library hands it (recovery credentials, key-provider output) and through
+its own shutdown `WipeAll`; the `luks2` CLI prints a warning when releasing a
+recovery credential is reported.
+
 What is deliberately *not* locked, and why:
 
 | Bytes | Why not |
@@ -420,7 +440,9 @@ canonical list, with the reasoning, is the file comment in
    itself is unavoidable.
 4. **Expanded cipher keys** — `xts.NewCipher` holds the AES key schedule for
    both key halves on the heap for the cipher's lifetime. A schedule is a
-   deterministic expansion of the key.
+   deterministic expansion of the key. go-enclave's `runtime/secret` key-schedule
+   erasure (v0.7.0-alpha) covers only go-enclave's own sealing, which this
+   library does not use, so it does not narrow this entry.
 5. **The kernel keyring** (was: *the device-mapper table*). The volume key is
    handed to `dm-crypt` as a **kernel-keyring reference** — `add_key`, `logon`
    type, in the **session** keyring, revoked/unlinked/verified-gone as soon as

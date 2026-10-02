@@ -427,7 +427,7 @@ func CheckKeyringAvailable() error {
 	if err != nil {
 		return err
 	}
-	defer material.Destroy()
+	defer releaseSecret(material)
 
 	// Pinned for the same reason unlockLoadTable pins: the ring belongs to the
 	// task, so the add and the release have to happen on the same one.

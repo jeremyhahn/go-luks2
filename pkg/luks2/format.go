@@ -61,7 +61,7 @@ func Format(opts FormatOptions) error {
 	if err != nil {
 		return err
 	}
-	defer masterKey.Destroy()
+	defer releaseSecret(masterKey)
 
 	// Create binary header
 	hdr, err := CreateBinaryHeader(opts)
@@ -82,7 +82,7 @@ func Format(opts FormatOptions) error {
 	if err != nil {
 		return err
 	}
-	defer passphraseKey.Destroy()
+	defer releaseSecret(passphraseKey)
 
 	// Create digest KDF and digest
 	digestKDF, digestValue, err := createDigest(masterKey, opts.HashAlgo)
@@ -97,7 +97,7 @@ func Format(opts FormatOptions) error {
 	if err != nil {
 		return err
 	}
-	defer afData.Destroy()
+	defer releaseSecret(afData)
 
 	// Encrypt AF-split key material with passphrase-derived key.
 	//
@@ -386,7 +386,7 @@ func createDigest(masterKey *enclave.MemoryEnclave, hashAlgo string) (*KDF, stri
 	if err != nil {
 		return nil, "", err
 	}
-	defer digest.Destroy()
+	defer releaseSecret(digest)
 
 	var encoded string
 	if err := borrowSecret("master key digest", digest, func(b []byte) error {
@@ -451,7 +451,7 @@ func decryptKeyMaterialEnclave(data []byte, key *enclave.MemoryEnclave, cipherAl
 		})
 	})
 	if err != nil {
-		plaintext.Destroy()
+		releaseSecret(plaintext)
 		return nil, err
 	}
 
@@ -639,7 +639,7 @@ func xtsPartialSector(dst, src []byte, xtsCipher *xts.Cipher, sectorSize, index 
 	if err != nil {
 		return err
 	}
-	defer scratch.Destroy()
+	defer releaseSecret(scratch)
 
 	return borrowSecret("key material sector", scratch, func(buf []byte) error {
 		in, out := buf[:sectorSize], buf[sectorSize:]

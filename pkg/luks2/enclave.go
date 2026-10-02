@@ -151,6 +151,13 @@ import (
 //     of the key, so recovering it recovers the key. This is on every keyslot
 //     encrypt and decrypt.
 //
+//     go-enclave v0.7.0-alpha erases AES key schedules under runtime/secret
+//     (enclave.KeyScheduleErasure), and that does NOT reach this entry. It
+//     covers the AES operations inside go-enclave's own sealing, which this
+//     package does not use; the XTS ciphers here are built by this package
+//     through x/crypto/xts, outside any runtime/secret.Do, so their schedules
+//     persist on the heap exactly as described whichever build is running.
+//
 //  5. THE KERNEL KEYRING. This entry used to be THE DEVICE-MAPPER TABLE, and
 //     it was the largest hole in this list: dm-crypt was handed the volume key
 //     INSIDE its table, and devmapper.go hex-encodes a table key into two
@@ -205,6 +212,19 @@ import (
 //
 // Every helper here fails the operation when protected memory cannot be
 // obtained. There is no degradation to heap. See ProtectedMemoryError.
+//
+// # Release
+//
+// Every enclave this package creates is released through releaseSecret, the
+// single site that receives go-enclave's release report. "Zeroized on release"
+// has one qualification there, and it is not a sixth entry above because no
+// key byte reaches ordinary memory through it: where a sandbox denies the
+// mprotect a frozen region needs before it can be overwritten, go-enclave
+// unmaps the pages WITHOUT the in-process wipe (enclave.ErrReleasedWithoutWipe)
+// and the kernel's zeroing of an anonymous page before reuse is what clears
+// them. The pages were mlock'd throughout, so nothing reached swap. Why that
+// report, and a refused unmap, are dropped there rather than returned is
+// recorded on releaseSecret.
 
 // newSecretEnclave returns an enclave over n bytes of locked, zeroed memory for
 // the caller to fill IN PLACE, through a borrow.
@@ -271,7 +291,7 @@ func randomSecret(op string, n int) (*enclave.MemoryEnclave, error) {
 		_, err := io.ReadFull(cryptoRand, b)
 		return err
 	}); err != nil {
-		e.Destroy()
+		releaseSecret(e)
 		return nil, &CryptoError{Op: op, Err: err}
 	}
 
@@ -343,7 +363,7 @@ func copySecretWritable(op string, b []byte) (*enclave.MemoryEnclave, error) {
 		copy(dst, b)
 		return nil
 	}); err != nil {
-		e.Destroy()
+		releaseSecret(e)
 		return nil, err
 	}
 
@@ -384,19 +404,99 @@ func copySecretFiltered(op string, b []byte, keep func(byte) bool) (*enclave.Mem
 		}
 		return nil
 	}); err != nil {
-		e.Destroy()
+		releaseSecret(e)
 		return nil, err
 	}
 
 	return e, nil
 }
 
-// destroySecrets destroys every enclave given, skipping nils. It exists so a
-// function holding several pieces of key material can release all of them in a
-// single deferred call rather than accumulating defers that are easy to forget
-// on an error path.
+// destroyEnclave is go-enclave's release, reached through a variable for the
+// same reason the constructors above are: the refusals it reports cannot be
+// produced on demand. A refused munlock or munmap needs the kernel to be out of
+// map slots, and a denied mprotect needs a seccomp filter, neither of which a
+// test binary can impose on itself without taking the rest of the suite with
+// it.
+var destroyEnclave = (*enclave.MemoryEnclave).Destroy
+
+// releaseSecret destroys e -- zeroizing the material and returning its pages --
+// and is the ONE place this package receives go-enclave's release report. Every
+// enclave this package creates is released through it (or through
+// destroySecrets, which calls it), so the decision below is made once rather
+// than re-made, or silently not made, at each of the call sites.
+//
+// # What the report can say, and why it is not an operation failure
+//
+// Since go-enclave v0.7.0-alpha Destroy returns the release report directly.
+// Apart from nil it is one of two things, and neither means key material
+// escaped locked memory:
+//
+//   - enclave.ErrReleasedWithoutWipe: the mprotect that makes a frozen region
+//     writable was denied (a seccomp filter or sandbox), so the pages were
+//     unmapped without the in-process overwrite. They were mlock'd for their
+//     whole life, so nothing reached swap, and the kernel zeroes an anonymous
+//     page before any reuse. What it reports is the ENVIRONMENT: the same
+//     denial reaches every frozen enclave in the process.
+//   - enclave.ErrLockedMemoryUnavailable: the release itself was refused
+//     (ENOMEM at vm.max_map_count is the realistic cause), so the pages are
+//     still MAPPED and stay on go-enclave's WipeAll ledger. Whether they are
+//     still LOCKED depends on how far the release got, and what matters is
+//     that it never leaves material both unwiped and unlocked: go-enclave
+//     wipes before it unlocks. If the wipe ran -- a refused munlock, or a
+//     refused munmap after a successful munlock -- the pages hold zeroes,
+//     locked or not. If it could not run -- the wipe-enabling mprotect AND the
+//     bare-unmap fallback were both refused -- the material is still there and
+//     the pages are still mlock'd, as they have been all along. Only the
+//     process's WipeAll, or the process's exit, takes them back.
+//
+// Under go-enclave v0.5.0-alpha, which this package used before, the second
+// case did not reach a caller as a report at all: a refused munlock or munmap
+// PANICKED out of Destroy, contrary to go-enclave's own contract, and go-enclave
+// v0.6.2-alpha fixed that (its #83). So adopting v0.7 changes this package's
+// behavior there, from a crash at the release to the operation completing with
+// the pages left on the ledger. That is the intended direction: the crash
+// protected no key byte, and it could abort an operation midway -- between
+// writing a keyslot and releasing the stripes that wrote it -- for a condition
+// that only costs address space. The first case was already dropped then,
+// implicitly, by the void Destroy every call site used.
+//
+// This package can do nothing with either. It cannot remedy the environment,
+// retrying at once with nothing changed is refused again (go-enclave's own
+// guidance), and WipeAll belongs to the binary that owns the process, never to
+// a library. Nor may it turn either into the operation's error: every release
+// here happens after the operation's outcome is already decided -- a volume
+// formatted, a keyslot written, a mapping created -- or while an earlier error
+// is already being returned. Reporting a completed Format or Unlock as failed
+// because an unmap was refused afterwards would invite the caller to repeat it,
+// and a repeated Format destroys a volume. And it may not log: a logger, or a
+// write to log/slog's process-global default, in a layer-0 primitive imposes a
+// logging decision on every embedding application (see forgetKeyslotID in
+// header.go).
+//
+// So the report is dropped HERE, deliberately and for those reasons. An
+// application that wants to see these conditions has them where it can act: its
+// own Destroy calls on the enclaves this package hands it (recovery
+// credentials, KeyProvider output) report the same environment, and its
+// shutdown WipeAll counts any pages still held -- these included -- and
+// reports, as a *enclave.SweepError, the unwiped releases and corruption the
+// sweep itself meets.
+//
+// Detected CORRUPTION is not a report and is not dropped: go-enclave panics
+// with enclave.ErrEnclaveCorrupted, after wiping, and releaseSecret does not
+// recover it. A process whose locked memory was written by something that did
+// not own it must not carry on.
+func releaseSecret(e *enclave.MemoryEnclave) {
+	// Dropped on purpose; see the doc comment above for every outcome and why
+	// none of them is this package's to act on or to return.
+	_ = destroyEnclave(e)
+}
+
+// destroySecrets releases every enclave given through releaseSecret, skipping
+// nils. It exists so a function holding several pieces of key material can
+// release all of them in a single deferred call rather than accumulating defers
+// that are easy to forget on an error path.
 func destroySecrets(secrets ...*enclave.MemoryEnclave) {
 	for _, s := range secrets {
-		s.Destroy() // nil-safe by go-enclave contract
+		releaseSecret(s)
 	}
 }

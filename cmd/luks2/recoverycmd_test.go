@@ -160,7 +160,7 @@ func TestOnlyTheExactPrintedStringOpensTheVolume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseRecoveryKey() error = %v", err)
 	}
-	defer decoded.Destroy()
+	defer mustDestroy(t, decoded)
 
 	rawFile := filepath.Join(dir, "decoded.raw")
 	if err := decoded.WithBytes(func(b []byte) error {
@@ -454,5 +454,89 @@ func TestRecoveryVerifyReportsARefusal(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "does NOT open") {
 		t.Errorf("stderr = %q", stderr.String())
+	}
+}
+
+// verifyCapturing returns a VerifyRecoveryKeyFunc answering valid that records
+// the credential it was handed, so a test can check what became of it.
+func verifyCapturing(valid bool, got **enclave.MemoryEnclave) func(string, *enclave.MemoryEnclave) (bool, error) {
+	return func(_ string, key *enclave.MemoryEnclave) (bool, error) {
+		*got = key
+		return valid, nil
+	}
+}
+
+func TestRecoveryVerifyReleasesTheCredentialCleanly(t *testing.T) {
+	var key *enclave.MemoryEnclave
+	cli, _, stderr := runCLI(t, "the-recovery-key\n", "recovery", "verify", "/dev/sdb1")
+	cli.Luks = &MockLuksOperations{VerifyRecoveryKeyFunc: verifyCapturing(true, &key)}
+
+	if code := cli.Run(); code != 0 {
+		t.Fatalf("recovery verify exited %d, want 0: %s", code, stderr.String())
+	}
+	if key == nil {
+		t.Fatal("the credential never reached VerifyRecoveryKey")
+	}
+	if err := key.WithBytes(func([]byte) error { return nil }); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
+		t.Errorf("credential after the command = %v, want enclave.ErrEnclaveDestroyed", err)
+	}
+	if strings.Contains(stderr.String(), "Warning") {
+		t.Errorf("a clean release produced a warning: %q", stderr.String())
+	}
+}
+
+// TestRecoveryVerifyReportsAReleaseReport pins releaseCredential: a release
+// go-enclave reports as unclean reaches the operator, and does not change the
+// answer the command gives about the key.
+func TestRecoveryVerifyReportsAReleaseReport(t *testing.T) {
+	tests := []struct {
+		name     string
+		report   error
+		is       error
+		valid    bool
+		wantCode int
+	}{
+		{
+			name:     "released without the in-process wipe",
+			report:   &enclave.UnwipedReleaseError{Cause: errors.New("synthetic mprotect EPERM")},
+			is:       enclave.ErrReleasedWithoutWipe,
+			valid:    true,
+			wantCode: 0,
+		},
+		{
+			name:     "release refused on a key that does not open the volume",
+			report:   &enclave.LockedMemoryError{Cause: errors.New("synthetic munmap ENOMEM")},
+			is:       enclave.ErrLockedMemoryUnavailable,
+			valid:    false,
+			wantCode: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !errors.Is(tt.report, tt.is) {
+				t.Fatalf("fixture %v does not match %v; the case tests nothing", tt.report, tt.is)
+			}
+			var key, released *enclave.MemoryEnclave
+			cli, _, stderr := runCLI(t, "the-recovery-key\n", "recovery", "verify", "/dev/sdb1")
+			cli.Luks = &MockLuksOperations{VerifyRecoveryKeyFunc: verifyCapturing(tt.valid, &key)}
+			cli.destroyEnclave = func(e *enclave.MemoryEnclave) error {
+				released = e
+				if err := e.Destroy(); err != nil {
+					t.Errorf("the real release under the fake report failed: %v", err)
+				}
+				return tt.report
+			}
+
+			if code := cli.Run(); code != tt.wantCode {
+				t.Fatalf("recovery verify exited %d, want %d: %s", code, tt.wantCode, stderr.String())
+			}
+			if key == nil || released != key {
+				t.Fatal("the credential handed to VerifyRecoveryKey was not the one released")
+			}
+			want := "Warning: the recovery key's protected memory was not released cleanly: " + tt.report.Error()
+			if !strings.Contains(stderr.String(), want) {
+				t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+			}
+		})
 	}
 }

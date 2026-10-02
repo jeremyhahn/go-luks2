@@ -147,7 +147,7 @@ func TestCommandKeyProviderTakesTheSelectedLine(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Passphrase() error = %v", err)
 			}
-			defer got.Destroy()
+			defer mustDestroy(t, got)
 
 			if s := string(openSecret(t, got)); s != tt.want {
 				t.Errorf("credential = %q, want %q", s, tt.want)
@@ -230,7 +230,7 @@ func TestCommandKeyProviderRefusesUnusableOutput(t *testing.T) {
 
 			got, err := p.Passphrase(context.Background())
 			if err == nil {
-				got.Destroy()
+				mustDestroy(t, got)
 				t.Fatalf("Passphrase() succeeded, want %v", tt.want)
 			}
 			if !errors.Is(err, tt.want) {
@@ -324,7 +324,7 @@ func TestCommandKeyProviderRefusesOverlongOutputWithoutDeadlocking(t *testing.T)
 		p := &CommandKeyProvider{Path: path, Line: 0}
 		credential, err := p.Passphrase(context.Background())
 		if credential != nil {
-			credential.Destroy()
+			mustDestroy(t, credential)
 		}
 		done <- err
 	}()
@@ -361,7 +361,7 @@ func TestNormalizeFIDO2SecretIsCanonicalBase64(t *testing.T) {
 	if err != nil {
 		t.Fatalf("normalizeFIDO2Secret() error = %v", err)
 	}
-	defer got.Destroy()
+	defer mustDestroy(t, got)
 
 	if s := string(openSecret(t, got)); s != encoded {
 		t.Errorf("enrolled credential = %q, want %q", s, encoded)
@@ -392,7 +392,7 @@ func TestNormalizeFIDO2SecretRefusesWhatItCannotDecode(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := normalizeFIDO2Secret([]byte(tt.line))
 			if err == nil {
-				got.Destroy()
+				mustDestroy(t, got)
 				t.Fatal("normalizeFIDO2Secret() accepted output it cannot decode")
 			}
 			if !errors.Is(err, ErrHelperOutput) {
@@ -453,7 +453,7 @@ func TestFIDO2ProviderEnrollsTheBase64OfTheSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Passphrase() error = %v", err)
 	}
-	defer credential.Destroy()
+	defer mustDestroy(t, credential)
 
 	if s := string(openSecret(t, credential)); s != encoded {
 		t.Errorf("credential = %q, want the base64 text %q", s, encoded)
@@ -505,7 +505,7 @@ func TestFIDO2ProviderRefusesAFieldThatIsNotTheSecret(t *testing.T) {
 
 	got, err := p.Passphrase(context.Background())
 	if err == nil {
-		got.Destroy()
+		mustDestroy(t, got)
 		t.Fatal("Passphrase() accepted a field that is not a 32-byte hmac-secret")
 	}
 	if !errors.Is(err, ErrHelperOutput) {
@@ -1024,7 +1024,7 @@ func TestChangingTheEncodingChangesWhatIsEnrolled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("normalizeFIDO2Secret() error = %v", err)
 	}
-	defer got.Destroy()
+	defer mustDestroy(t, got)
 
 	if s := string(openSecret(t, got)); s != base64.RawStdEncoding.EncodeToString(secret) {
 		t.Errorf("enrolled = %q, want the unpadded encoding", s)

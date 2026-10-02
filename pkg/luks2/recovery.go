@@ -301,7 +301,7 @@ func GenerateRecoveryKey(length int, format RecoveryKeyFormat) (*RecoveryKey, er
 	if err != nil {
 		return nil, err
 	}
-	defer key.Destroy()
+	defer releaseSecret(key)
 
 	credential, err := newSecretEnclave("recovery key", formattedLen(length, format))
 	if err != nil {
@@ -314,7 +314,7 @@ func GenerateRecoveryKey(length int, format RecoveryKeyFormat) (*RecoveryKey, er
 			return nil
 		})
 	}); err != nil {
-		credential.Destroy()
+		releaseSecret(credential)
 		return nil, err
 	}
 
@@ -330,7 +330,7 @@ func GenerateRecoveryKey(length int, format RecoveryKeyFormat) (*RecoveryKey, er
 		credentialHash = hex.EncodeToString(sum[:])
 		return nil
 	}); err != nil {
-		credential.Destroy()
+		releaseSecret(credential)
 		return nil, err
 	}
 
@@ -670,7 +670,7 @@ func LoadRecoveryKey(path string) (*enclave.MemoryEnclave, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer line.Destroy()
+	defer releaseSecret(line)
 
 	return parseRecoveryKeySecret(line)
 }
@@ -728,7 +728,7 @@ func readRecoveryKeyLine(path string) (*enclave.MemoryEnclave, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer contents.Destroy()
+	defer releaseSecret(contents)
 
 	var keyLine *enclave.MemoryEnclave
 	err = borrowSecret("recovery key file", contents, func(b []byte) error {
@@ -806,10 +806,10 @@ func RecoveryCredential(formatted string) (*enclave.MemoryEnclave, error) {
 		credential, err = copySecret("recovery key", body)
 		return err
 	}); err != nil {
-		held.Destroy()
+		releaseSecret(held)
 		return nil, err
 	}
-	held.Destroy()
+	releaseSecret(held)
 
 	return credential, nil
 }
@@ -900,7 +900,7 @@ func ParseRecoveryKey(formatted string) (*enclave.MemoryEnclave, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer held.Destroy()
+	defer releaseSecret(held)
 
 	return parseRecoveryKeySecret(held)
 }
@@ -927,7 +927,7 @@ func parseRecoveryKeySecret(formatted *enclave.MemoryEnclave) (*enclave.MemoryEn
 			if err != nil {
 				return err
 			}
-			defer stripped.Destroy()
+			defer releaseSecret(stripped)
 
 			return borrowSecret("recovery key", stripped, func(hexBody []byte) error {
 				lowerASCII(hexBody)
@@ -944,7 +944,7 @@ func parseRecoveryKeySecret(formatted *enclave.MemoryEnclave) (*enclave.MemoryEn
 		if err != nil {
 			return err
 		}
-		defer normalized.Destroy()
+		defer releaseSecret(normalized)
 
 		return borrowSecret("recovery key", normalized, func(b []byte) error {
 			lowerASCII(b)
@@ -1057,7 +1057,7 @@ func VerifyRecoveryKey(device string, key *enclave.MemoryEnclave) (bool, error) 
 			// never actually made.
 			return err
 		}
-		masterKey.Destroy()
+		releaseSecret(masterKey)
 		unlocked = true
 		return nil
 	}); err != nil {
@@ -1185,7 +1185,7 @@ func decodeSecret(op string, maxLen int, decode func(dst []byte) (int, error)) (
 	if err != nil {
 		return nil, err
 	}
-	defer scratch.Destroy()
+	defer releaseSecret(scratch)
 
 	var exact *enclave.MemoryEnclave
 	err = borrowSecret(op, scratch, func(dst []byte) error {
@@ -1208,7 +1208,7 @@ func decodeSecret(op string, maxLen int, decode func(dst []byte) (int, error)) (
 		})
 	})
 	if err != nil {
-		exact.Destroy()
+		releaseSecret(exact)
 		return nil, err
 	}
 

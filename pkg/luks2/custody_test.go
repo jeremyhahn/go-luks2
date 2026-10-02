@@ -282,7 +282,7 @@ func TestDeriveKeyEnclaveAgreesWithTheUnprotectedDerivation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeriveKeyEnclave failed: %v", err)
 	}
-	defer held.Destroy()
+	defer mustDestroy(t, held)
 
 	plain, err := deriveKeyPlain(passphrase, kdf, 64)
 	if err != nil {
@@ -322,7 +322,7 @@ func TestDeriveKeyEnclaveHandsBackAnEnclaveNotASlice(t *testing.T) {
 		t.Fatal("the derived key is not in live protected memory")
 	}
 
-	held.Destroy()
+	mustDestroy(t, held)
 
 	if held.IsAlive() {
 		t.Fatal("the derived key survived Destroy")
@@ -351,7 +351,7 @@ func TestDeriveKeySecretKeepsTheInputInsideItsEnclave(t *testing.T) {
 	if err != nil {
 		t.Fatalf("deriveKeySecret failed: %v", err)
 	}
-	defer derived.Destroy()
+	defer mustDestroy(t, derived)
 
 	// Same answer as deriving from the raw bytes, so routing through the
 	// enclave changed custody and nothing else.
@@ -385,11 +385,11 @@ func TestDeriveKeySecretRefusesADestroyedInput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("randomSecret failed: %v", err)
 	}
-	source.Destroy()
+	mustDestroy(t, source)
 
 	derived, err := deriveKeySecret(source, kdf, 32)
 	if err == nil {
-		derived.Destroy()
+		mustDestroy(t, derived)
 		t.Fatal("deriveKeySecret derived from a destroyed enclave")
 	}
 	if !errors.Is(err, ErrProtectedMemory) {
@@ -413,7 +413,7 @@ func TestAFSplitEnclaveRoundTripsWithoutLeavingProtectedMemory(t *testing.T) {
 			if err != nil {
 				t.Fatalf("afSplitEnclave failed: %v", err)
 			}
-			defer split.Destroy()
+			defer mustDestroy(t, split)
 
 			if split.Size() != len(secret)*stripes {
 				t.Fatalf("split holds %d bytes, want %d", split.Size(), len(secret)*stripes)
@@ -433,7 +433,7 @@ func TestAFSplitEnclaveRoundTripsWithoutLeavingProtectedMemory(t *testing.T) {
 			if err != nil {
 				t.Fatalf("afMergeEnclave failed: %v", err)
 			}
-			defer merged.Destroy()
+			defer mustDestroy(t, merged)
 
 			if !merged.EqualTo(secret) {
 				t.Fatal("the enclave AF round trip did not recover the secret")
@@ -475,7 +475,7 @@ func TestAFMergeEnclaveAgreesWithTheUnprotectedMerge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("afMergeEnclave failed: %v", err)
 	}
-	defer got.Destroy()
+	defer mustDestroy(t, got)
 
 	if !got.EqualTo(want) {
 		t.Fatal("the enclave merge and the plain merge disagree")
@@ -488,11 +488,11 @@ func TestAFMergeEnclaveRefusesASizeThatIsNotTheSplit(t *testing.T) {
 	// splitLen must be exactly blockSize*stripes; anything else would merge
 	// alignment padding into the key.
 	if merged, err := afMergeEnclave(held, 64*32, 32, 63, "sha256"); err == nil {
-		merged.Destroy()
+		mustDestroy(t, merged)
 		t.Fatal("afMergeEnclave accepted a length that is not blockSize*stripes")
 	}
 	if merged, err := afMergeEnclave(held, 64*31, 32, 64, "sha256"); err == nil {
-		merged.Destroy()
+		mustDestroy(t, merged)
 		t.Fatal("afMergeEnclave accepted a short split length")
 	}
 }
@@ -502,11 +502,11 @@ func TestAFSplitEnclaveRefusesADestroyedSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("randomSecret failed: %v", err)
 	}
-	secret.Destroy()
+	mustDestroy(t, secret)
 
 	split, err := afSplitEnclave(secret, 16, "sha256")
 	if err == nil {
-		split.Destroy()
+		mustDestroy(t, split)
 		t.Fatal("afSplitEnclave split a destroyed secret")
 	}
 	if !errors.Is(err, ErrProtectedMemory) {
@@ -534,7 +534,7 @@ func TestEncryptAndDecryptKeyMaterialEnclaveRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decryptKeyMaterialEnclave failed: %v", err)
 	}
-	defer recovered.Destroy()
+	defer mustDestroy(t, recovered)
 
 	// The plaintext comes back INSIDE an enclave -- it is the AF-split master
 	// key on a real volume, so it must never be produced as a slice.
@@ -594,7 +594,7 @@ func TestUnlockKeyslotHoldsTheMasterKeyInProtectedMemory(t *testing.T) {
 		t.Fatalf("the master key handle renders as %q", s)
 	}
 
-	masterKey.Destroy()
+	mustDestroy(t, masterKey)
 
 	if err := masterKey.WithBytes(func([]byte) error { return nil }); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
 		t.Fatalf("the master key is still readable after Destroy: %v", err)
@@ -635,7 +635,7 @@ func TestFailedUnlocksReleaseEveryLockedRegion(t *testing.T) {
 	for i := 0; i < attempts; i++ {
 		key, err := getMasterKey(path, []byte(conformanceWrongPassphrase), metadata)
 		if err == nil {
-			key.Destroy()
+			mustDestroy(t, key)
 			t.Fatal("a wrong passphrase opened the volume")
 		}
 	}
@@ -661,7 +661,7 @@ func TestSuccessfulUnlocksReleaseEveryLockedRegion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getMasterKey failed: %v", err)
 	}
-	key.Destroy()
+	mustDestroy(t, key)
 
 	before := lockedKiB(t)
 
@@ -672,7 +672,7 @@ func TestSuccessfulUnlocksReleaseEveryLockedRegion(t *testing.T) {
 		if err != nil {
 			t.Fatalf("getMasterKey failed: %v", err)
 		}
-		key.Destroy()
+		mustDestroy(t, key)
 	}
 
 	if after := lockedKiB(t); after > before+lockedSlackKiB {
@@ -706,7 +706,7 @@ func TestUnlockKeyslotRefusesAnAbsurdKeyslotArea(t *testing.T) {
 
 			key, err := unlockKeyslot(path, "0", []byte(conformancePassphrase), keyslot, metadata.Digests)
 			if err == nil {
-				key.Destroy()
+				mustDestroy(t, key)
 				t.Fatalf("unlockKeyslot accepted a keyslot area of %s bytes", size)
 			}
 			// ErrInvalidKeyslot, not ErrInvalidHeader: damage to one keyslot
@@ -746,7 +746,7 @@ func TestRecoveryKeyIsHeldInProtectedMemory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RecoveryCredential failed: %v", err)
 	}
-	defer typed.Destroy()
+	defer mustDestroy(t, typed)
 
 	if !key.Credential.EqualTo(openSecret(t, typed)) {
 		t.Fatal("typing the displayed string back does not reproduce the credential")
@@ -775,7 +775,7 @@ func TestRecoveryKeyRenderingRoundTripsInEveryFormat(t *testing.T) {
 			if err != nil {
 				t.Fatalf("RecoveryCredential(%q) failed: %v", rendered, err)
 			}
-			defer typed.Destroy()
+			defer mustDestroy(t, typed)
 
 			if !key.Credential.EqualTo(openSecret(t, typed)) {
 				t.Fatalf("the %s credential does not survive being typed back", format)
@@ -789,7 +789,7 @@ func TestRecoveryKeyRenderingRoundTripsInEveryFormat(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseRecoveryKey(%q) failed: %v", rendered, err)
 			}
-			defer decoded.Destroy()
+			defer mustDestroy(t, decoded)
 
 			if decoded.Size() != 32 {
 				t.Fatalf("the %s rendering decodes to %d bytes, want 32", format, decoded.Size())

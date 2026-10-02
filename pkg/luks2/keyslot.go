@@ -326,7 +326,7 @@ func TestKey(device string, passphrase []byte) error {
 	// The key is recovered only to prove the passphrase opens a slot; it is
 	// released immediately rather than at the end of a scope that does nothing
 	// else with it.
-	masterKey.Destroy()
+	releaseSecret(masterKey)
 
 	return nil
 }
@@ -414,7 +414,7 @@ func addKeyWithPolicy(device string, existingPassphrase, newPassphrase []byte, o
 	if err != nil {
 		return -1, fmt.Errorf("failed to unlock with existing passphrase: %w", err)
 	}
-	defer masterKey.Destroy()
+	defer releaseSecret(masterKey)
 
 	// Find available keyslot
 	targetSlot, err := findAvailableKeyslot(metadata, opts)
@@ -527,14 +527,14 @@ func addKeyWithPolicy(device string, existingPassphrase, newPassphrase []byte, o
 	if err != nil {
 		return -1, fmt.Errorf("failed to derive key: %w", err)
 	}
-	defer passphraseKey.Destroy()
+	defer releaseSecret(passphraseKey)
 
 	// Apply anti-forensic split to master key
 	afData, err := afSplitEnclave(masterKey, AFStripes, DefaultHashAlgo)
 	if err != nil {
 		return -1, fmt.Errorf("failed to apply AF split: %w", err)
 	}
-	defer afData.Destroy()
+	defer releaseSecret(afData)
 
 	// Encrypt AF-split key material with new passphrase-derived key
 	encryptedKeyMaterial, err := encryptKeyMaterialEnclave(afData, passphraseKey, DefaultCipher)
@@ -736,7 +736,7 @@ func RemoveKey(device string, passphrase []byte, keyslot int) error {
 	if err != nil {
 		return fmt.Errorf("passphrase does not match keyslot %d: %w", keyslot, err)
 	}
-	verified.Destroy()
+	releaseSecret(verified)
 
 	// THE GATE. Every removal path passes through checkKeyslotRemovable, which
 	// asks the one question all of them need answered: after this removal, can
@@ -836,7 +836,7 @@ func KillSlot(device string, authPassphrase []byte, targetSlot int) error {
 		// from the wrapped error.
 		return fmt.Errorf("could not authenticate against %s: %w", device, err)
 	}
-	candidate.Destroy()
+	releaseSecret(candidate)
 
 	// Check that target keyslot exists
 	slotIDStr := strconv.Itoa(targetSlot)
@@ -927,7 +927,7 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 	if err != nil {
 		return fmt.Errorf("old passphrase does not match keyslot %d: %w", keyslot, err)
 	}
-	defer masterKey.Destroy()
+	defer releaseSecret(masterKey)
 
 	// Create the new KDF WITH THE COST THE KEYSLOT ALREADY HAD.
 	//
@@ -1024,14 +1024,14 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 	if err != nil {
 		return fmt.Errorf("failed to derive key: %w", err)
 	}
-	defer passphraseKey.Destroy()
+	defer releaseSecret(passphraseKey)
 
 	// Apply anti-forensic split to master key
 	afData, err := afSplitEnclave(masterKey, AFStripes, targetKeyslot.AF.Hash)
 	if err != nil {
 		return fmt.Errorf("failed to apply AF split: %w", err)
 	}
-	defer afData.Destroy()
+	defer releaseSecret(afData)
 
 	// Encrypt AF-split key material with new passphrase-derived key
 	encryptedKeyMaterial, err := encryptKeyMaterialEnclave(afData, passphraseKey, DefaultCipher)

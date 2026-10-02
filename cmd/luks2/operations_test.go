@@ -245,7 +245,7 @@ func TestDefaultOperationsAreWiredToTheRightLibraryCalls(t *testing.T) {
 		if err != nil {
 			t.Fatalf("LoadRecoveryCredential() error = %v", err)
 		}
-		defer loaded.Destroy()
+		defer mustDestroy(t, loaded)
 
 		formatted, err := key.FormattedString()
 		if err != nil {
@@ -255,7 +255,7 @@ func TestDefaultOperationsAreWiredToTheRightLibraryCalls(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RecoveryCredential() error = %v", err)
 		}
-		defer typed.Destroy()
+		defer mustDestroy(t, typed)
 
 		// The saved file and the displayed string are two routes to the same
 		// credential. If they ever disagree, one of the two commands that use

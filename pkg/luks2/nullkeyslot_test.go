@@ -146,7 +146,7 @@ func TestGetMasterKeyDoesNotPanicOnANullKeyslot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a null keyslot ahead of a healthy one denied the volume: %v", err)
 	}
-	key.Destroy()
+	mustDestroy(t, key)
 }
 
 // TestEveryExportedPathToleratesANullKeyslot sweeps the exported surface rather

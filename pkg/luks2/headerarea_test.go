@@ -212,7 +212,7 @@ func TestWriteHeaderKeepsTheBackupOutOfThePrimaryArea(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the volume no longer opens after a large header write: %v", err)
 	}
-	key.Destroy()
+	mustDestroy(t, key)
 }
 
 // TestWriteHeaderRefusesMetadataThatDoesNotFit is the other half: once the
@@ -293,7 +293,7 @@ func TestWriteHeaderRefusesMetadataThatDoesNotFit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the volume no longer opens after a refused write: %v", err)
 	}
-	key.Destroy()
+	mustDestroy(t, key)
 }
 
 // TestWriteHeaderAcceptsTheMaximumKeyslotCount is the behavioral consequence
@@ -342,7 +342,7 @@ func TestWriteHeaderAcceptsTheMaximumKeyslotCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the volume no longer opens with a full keyslot complement: %v", err)
 	}
-	key.Destroy()
+	mustDestroy(t, key)
 }
 
 // TestWriteHeaderRefusesOversizedTokenMetadata covers the other way the JSON
@@ -412,7 +412,7 @@ func TestWriteHeaderAcceptsATokenThatFits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the volume no longer opens after writing a token: %v", err)
 	}
-	key.Destroy()
+	mustDestroy(t, key)
 }
 
 // deviceHead reads the first n bytes of a device.

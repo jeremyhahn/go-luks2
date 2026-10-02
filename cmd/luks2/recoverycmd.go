@@ -204,7 +204,7 @@ func (c *CLI) cmdRecoveryVerify() int {
 	if err != nil {
 		return c.fail(err)
 	}
-	defer key.Destroy()
+	defer c.releaseCredential(key)
 
 	valid, err := c.Luks.VerifyRecoveryKey(device, key)
 	if err != nil {
@@ -217,6 +217,29 @@ func (c *CLI) cmdRecoveryVerify() int {
 
 	_, _ = fmt.Fprintf(c.Stdout, "The recovery key opens %s\n", device)
 	return 0
+}
+
+// releaseCredential destroys a credential the library handed this command and
+// tells the operator when go-enclave reports the release as anything but clean.
+//
+// The library drops its own release reports (pkg/luks2 releaseSecret: it can
+// neither act on them nor log), and says an application sees the same
+// conditions on the enclaves it is handed. This is that application. Both
+// reports describe the HOST, not this command: enclave.ErrReleasedWithoutWipe
+// means a sandbox denied the mprotect a wipe needs, and
+// enclave.ErrLockedMemoryUnavailable means the kernel refused to take the pages
+// back. Neither leaks the key -- the pages were mlock'd throughout, the kernel
+// zeroes them before reuse, and pages still held go when this process exits --
+// so the warning goes to stderr and the exit status stays the command's own: a
+// verification that answered is not made to look as though it did not.
+func (c *CLI) releaseCredential(key *enclave.MemoryEnclave) {
+	destroy := c.destroyEnclave
+	if destroy == nil {
+		destroy = (*enclave.MemoryEnclave).Destroy
+	}
+	if err := destroy(key); err != nil {
+		_, _ = fmt.Fprintf(c.Stderr, "Warning: the recovery key's protected memory was not released cleanly: %v\n", err)
+	}
 }
 
 // recoveryKeyInput obtains a recovery credential from a file, or from wherever a

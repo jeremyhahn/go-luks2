@@ -175,7 +175,7 @@ func TestSaveRecoveryKeyWritesADurableReadableFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadRecoveryCredential failed: %v", err)
 	}
-	defer loaded.Destroy()
+	defer mustDestroy(t, loaded)
 
 	if !key.Credential.EqualTo(openSecret(t, loaded)) {
 		t.Fatal("the credential read back is not the credential written")
@@ -238,7 +238,7 @@ func TestLoadRecoveryKeyDoesNotMaterializeTheFileOnTheHeap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadRecoveryKey failed: %v", err)
 	}
-	defer key.Destroy()
+	defer mustDestroy(t, key)
 
 	if got := openSecret(t, key); len(got) != 12 {
 		t.Fatalf("decoded %d bytes, want 12", len(got))
@@ -294,7 +294,7 @@ func TestParseRecoveryKeyNormalisesInsideProtectedMemory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseRecoveryKey failed: %v", err)
 	}
-	defer key.Destroy()
+	defer mustDestroy(t, key)
 
 	budget := uint64(2 * len(input))
 	allocated := after.TotalAlloc - before.TotalAlloc
@@ -328,7 +328,7 @@ func TestParseRecoveryKeyStillAcceptsEveryFormat(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseRecoveryKey(%q) failed: %v", tc.input, err)
 			}
-			defer key.Destroy()
+			defer mustDestroy(t, key)
 
 			if key.Size() != tc.expectLen {
 				t.Fatalf("decoded %d bytes, want %d", key.Size(), tc.expectLen)
@@ -340,7 +340,7 @@ func TestParseRecoveryKeyStillAcceptsEveryFormat(t *testing.T) {
 		t.Run("refuses "+bad, func(t *testing.T) {
 			key, err := ParseRecoveryKey(bad)
 			if err == nil {
-				key.Destroy()
+				mustDestroy(t, key)
 				t.Fatalf("ParseRecoveryKey(%q) succeeded", bad)
 			}
 		})
@@ -358,7 +358,7 @@ func TestLoadRecoveryKeyRefusesAFileWithNoKey(t *testing.T) {
 			t.Fatalf("failed to write the fixture: %v", err)
 		}
 		if key, err := LoadRecoveryKey(path); err == nil {
-			key.Destroy()
+			mustDestroy(t, key)
 			t.Fatal("a file with no key was accepted")
 		}
 	})
@@ -369,7 +369,7 @@ func TestLoadRecoveryKeyRefusesAFileWithNoKey(t *testing.T) {
 			t.Fatalf("failed to write the fixture: %v", err)
 		}
 		if key, err := LoadRecoveryKey(path); err == nil {
-			key.Destroy()
+			mustDestroy(t, key)
 			t.Fatal("an empty file was accepted")
 		}
 	})
@@ -390,7 +390,7 @@ func TestLoadRecoveryKeyRefusesAFileWithNoKey(t *testing.T) {
 
 		key, err := LoadRecoveryKey(path)
 		if err == nil {
-			key.Destroy()
+			mustDestroy(t, key)
 			t.Fatal("a file too large to be a recovery key file was read into locked memory")
 		}
 		if !errors.Is(err, ErrInvalidSize) {
@@ -410,7 +410,7 @@ func failingRecoveryKey(t *testing.T) *RecoveryKey {
 	}
 	t.Cleanup(key.Clear)
 
-	key.Credential.Destroy()
+	mustDestroy(t, key.Credential)
 	return key
 }
 
@@ -480,7 +480,7 @@ func TestSaveRecoveryKeyAlwaysUnlinksTheStagingName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the published recovery key is unreadable: %v", err)
 	}
-	defer loaded.Destroy()
+	defer mustDestroy(t, loaded)
 	if !key.Credential.EqualTo(openSecret(t, loaded)) {
 		t.Fatal("the published file is not the key that was generated")
 	}

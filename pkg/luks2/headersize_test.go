@@ -143,7 +143,7 @@ func TestReadHeaderStillOpensAnUntamperedVolume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the volume no longer opens after the bound was added: %v", err)
 	}
-	key.Destroy()
+	mustDestroy(t, key)
 }
 
 // TestHeaderAreaSizeAcceptsTheWholeAcceptedBand pins the boundaries directly, so

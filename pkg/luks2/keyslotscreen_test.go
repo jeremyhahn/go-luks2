@@ -400,7 +400,7 @@ func TestTheUnlockPathRefusesEveryShapeTheRemovalGuardMustNotCount(t *testing.T)
 
 			key, err := unlockKeyslot(path, siblingSlotID, []byte(conformancePassphrase), sibling, metadata.Digests)
 			if err == nil {
-				key.Destroy()
+				mustDestroy(t, key)
 				t.Fatal("the unlock path accepted a keyslot this test asserts it cannot open; the shape is not damaged the way it claims")
 			}
 
