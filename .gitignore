@@ -49,3 +49,8 @@ Thumbs.db
 
 
 go.work.sum
+
+# Agent instructions are internal working context and stay out of the
+# published tree (owner ruling on #211). test/labstrings fails if one is tracked.
+CLAUDE.md
+AGENTS.md

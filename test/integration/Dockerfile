@@ -136,7 +136,7 @@ RUN echo '#!/bin/bash' > /entrypoint.sh && \
     echo '    echo "REFUSING TO RUN: cannot create /dev/loop$minor, so this suite" >&2' >> /entrypoint.sh && \
     echo '    echo "cannot attach a backing file to anything. The container needs" >&2' >> /entrypoint.sh && \
     echo '    echo "CAP_MKNOD and a device-cgroup rule for major 7; both are set by" >&2' >> /entrypoint.sh && \
-    echo '    echo "test/integration/docker-run.sh, which is the supported way to" >&2' >> /entrypoint.sh && \
+    echo '    echo "test/integration/cmd/docker-run, which is the supported way to" >&2' >> /entrypoint.sh && \
     echo '    echo "start this image." >&2' >> /entrypoint.sh && \
     echo '    exit 1' >> /entrypoint.sh && \
     echo '  fi' >> /entrypoint.sh && \

@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: coverage-gate coverage-combined changelog-assemble help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs security ci ci-full fmt-check all check test-cli integration-test-pkg integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration seccomp-diff
+.PHONY: coverage-gate coverage-combined changelog-assemble help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-pkg integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration seccomp-diff
 
 # Default target
 .DEFAULT_GOAL := help
@@ -196,6 +196,15 @@ test-unit: ## Run only unit tests with coverage and the race detector (fast, no 
 	@echo ""
 	@echo "$(COLOR_BOLD)Coverage from unit tests (gated per package by coverage-gate):$(COLOR_RESET)"
 	@$(GO) tool cover -func=$(COVERAGE_FILE) | tail -1
+
+# The public-releasability gate (#211) over THIS checkout's git index: no fleet
+# address, hostname or owner path in a tracked file, and no tracked file the
+# public release must not carry. It is a command rather than a test because it
+# needs the git index, and the package tests also run where there is none --
+# the integration image excludes .git/ and runs `go test ./...`. Without a
+# checkout it fails; it never reports a tree it could not list as clean.
+releasability: ## Run the public-releasability gate over the tracked tree (needs a git checkout)
+	@$(GO) run ./test/labstrings/cmd/releasability-gate .
 
 # The PBKDF2 calibration tests, deliberately WITHOUT -race.
 #
@@ -428,8 +437,8 @@ docker-prune-itest: ## Remove orphaned integration images (label-scoped, age-bou
 # that does not match the thing that exists, which is the defect this whole
 # section descends from. So the workflow reads it from here rather than
 # repeating the literal, the same reason the privilege flags live in
-# docker-run.sh and not in five call sites. Deliberately undocumented in help:
-# it is a seam for the workflow, not a target anyone runs.
+# test/integration/cmd/docker-run and not in five call sites. Deliberately
+# undocumented in help: it is a seam for the workflow, not a target anyone runs.
 print-itest-label:
 	@echo $(ITEST_LABEL)
 
@@ -437,7 +446,7 @@ integration-test: build ## Run all integration tests in Docker (isolated, recomm
 	@echo "$(COLOR_BOLD)Running all integration tests in Docker container...$(COLOR_RESET)"
 	@$(MAKE) docker-integration-test
 
-integration-test-pkg: build ## Run package integration tests in Docker
+integration-test-pkg: build docker-run-bin ## Run package integration tests in Docker
 	@echo "$(COLOR_BOLD)Running package integration tests in Docker...$(COLOR_RESET)"
 	@$(MAKE) docker-build-integration
 	@# One shell with a trap: the per-invocation image tag is never reused, so
@@ -449,7 +458,7 @@ integration-test-pkg: build ## Run package integration tests in Docker
 	    $(INTEGRATION_DOCKER_RUN) --rm -- \
 		go test -v -tags=integration ./test/integration/pkg/...
 
-integration-test-cli: build ## Run CLI integration tests in Docker
+integration-test-cli: build docker-run-bin ## Run CLI integration tests in Docker
 	@echo "$(COLOR_BOLD)Running CLI integration tests in Docker...$(COLOR_RESET)"
 	@$(MAKE) docker-build-integration
 	@# One shell with a trap: the per-invocation image tag is never reused, so
@@ -510,7 +519,7 @@ coverage-combined: ## (devcontainer only) Run the integration suite and gate uni
 		-coverprofile=$(COVERAGE_COMBINED_UNIT) $(COVERAGE_COMBINED_PKGS)
 	@$(COVERAGE_GATE) -tier combined -profile $(COVERAGE_COMBINED_UNIT) -profile $(COVERAGE_INTEGRATION) $$($(GO) list ./...)
 
-docker-integration-test: ## Run integration tests in Docker (isolated, recommended)
+docker-integration-test: docker-run-bin ## Run integration tests in Docker (isolated, recommended)
 	@echo "$(COLOR_BOLD)Building Docker image for integration tests...$(COLOR_RESET)"
 	@$(MAKE) docker-build-integration
 	@echo ""
@@ -567,14 +576,29 @@ docker-integration-test: ## Run integration tests in Docker (isolated, recommend
 # creates it as root itself.
 TEST_STATE_DIR ?= /var/tmp/go-luks2-test-state
 
-# Every target that starts the integration container goes through this script,
+# Every target that starts the integration container goes through this command,
 # and none of them spells out a privilege flag. There used to be four `docker
 # run --privileged` lines here and a fifth in the CI workflow; five copies of a
 # security-critical invocation is how one of them quietly grows a flag the
-# others do not have. The script carries the capabilities, the seccomp profile
+# others do not have. The command carries the capabilities, the seccomp profile
 # and the device scoping, with the measurement behind each one written beside
-# it (#80).
-INTEGRATION_DOCKER_RUN := test/integration/docker-run.sh
+# it (#80), and a unit test pins the set flag by flag.
+#
+# It is Go rather than the shell script it replaces because the public release
+# ships no shell scripts (#211). It execs docker in place, so docker's exit
+# status and an interactive -it terminal reach the caller unchanged -- which
+# holds only because the targets run the BUILT binary. Under `go run` the go
+# tool stays as the parent process and reports any nonzero child status as 1,
+# so docker's 125/126/127 would be lost. test/integration/cmd/docker-run's
+# TestBinary_PropagatesDockersExitStatus pins this.
+DOCKER_RUN_BIN := $(BUILD_DIR)/docker-run
+INTEGRATION_DOCKER_RUN := $(DOCKER_RUN_BIN)
+
+# Phony so an edit to the command is always picked up; `go build` is cached,
+# so a rebuild with nothing changed costs next to nothing.
+docker-run-bin: ## Build the integration container launcher (build/docker-run)
+	@mkdir -p $(BUILD_DIR)
+	@$(GO) build -o $(DOCKER_RUN_BIN) ./test/integration/cmd/docker-run
 
 # test/integration/seccomp.json is Docker's own default profile with one block
 # appended, and the value of that arrangement is entirely in being able to
@@ -622,7 +646,7 @@ seccomp-diff: ## Diff the integration seccomp profile against Docker's default
 # while the loop pool and device-mapper namespace it protected are host-global.
 
 
-docker-test-specific: ## Run specific integration test in Docker (use TEST=TestName)
+docker-test-specific: docker-run-bin ## Run specific integration test in Docker (use TEST=TestName)
 	@echo "$(COLOR_BOLD)Building Docker image...$(COLOR_RESET)"
 	@$(MAKE) docker-build-integration
 	@echo ""
@@ -794,7 +818,8 @@ security: gosec govulncheck verify trivy-fs ## Run the full §8 security suite (
 # -- siblings run concurrently, so the gate could read the profiles while
 # test-unit was still deleting and rewriting them: a missing-input failure on a
 # clean tree, or a pass on the previous run's profiles (#141 review).
-ci: fmt-check vet lint security ## Run CI pipeline locally (format, lint, security suite, unit tests + coverage gate, build)
+ci: fmt-check vet lint security ## Run CI pipeline locally (format, lint, security suite, releasability gate, unit tests + coverage gate, build)
+	@$(MAKE) --no-print-directory releasability
 	@$(MAKE) --no-print-directory test-unit
 	@$(MAKE) --no-print-directory coverage-gate
 	@$(MAKE) --no-print-directory test-calibration
@@ -891,10 +916,10 @@ devcontainer: ## Build and run the devcontainer
 	@echo "$(COLOR_GREEN)✓ Devcontainer built$(COLOR_RESET)"
 	@echo ""
 	@echo "$(COLOR_BOLD)To run:$(COLOR_RESET)"
-	@echo "  IMAGE=go-luks2-devcontainer $(INTEGRATION_DOCKER_RUN) \\"
+	@echo "  make docker-run-bin && IMAGE=go-luks2-devcontainer $(INTEGRATION_DOCKER_RUN) \\"
 	@echo "      --rm -it -v \$$(pwd):/workspace -- bash"
 	@echo ""
-	@echo "$(COLOR_YELLOW)  It used to say --privileged here. Going through the script gets the$(COLOR_RESET)"
+	@echo "$(COLOR_YELLOW)  It used to say --privileged here. Going through the command gets the$(COLOR_RESET)"
 	@echo "$(COLOR_YELLOW)  same scoped capabilities, seccomp profile and device access the$(COLOR_RESET)"
 	@echo "$(COLOR_YELLOW)  integration suite runs under, so a shell you debug in behaves like$(COLOR_RESET)"
 	@echo "$(COLOR_YELLOW)  the suite instead of like a machine with no restrictions (#80).$(COLOR_RESET)"

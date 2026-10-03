@@ -352,9 +352,9 @@ keyslots, accepts only SHA-256 and SHA-512.
 digest was derived with, in the LUKS1 `hash-spec` header field and in the LUKS2
 JSON keyslot `kdf.hash` field. cryptsetup used SHA-1 as the LUKS1 default until
 1.7.0, so volumes formatted by older releases carry `sha1` and can only be
-unlocked by recomputing PBKDF2-HMAC-SHA1 over the passphrase. This project's
-`CLAUDE.md` requires interfacing correctly with the cryptsetup userspace tools,
-so the primitive cannot simply be deleted without losing the ability to open
+unlocked by recomputing PBKDF2-HMAC-SHA1 over the passphrase. This project is
+required to interoperate correctly with the cryptsetup userspace tools, so the
+primitive cannot simply be deleted without losing the ability to open
 those volumes.
 
 **Why it is not a compliance violation.** The exemption covers reading an

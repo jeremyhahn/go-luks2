@@ -1,6 +1,6 @@
-### Changed
+### Changed — BREAKING: no keyslot or digest is created with a PBKDF2-SHA1 KDF
 
-- **BREAKING: no keyslot or digest is created with a PBKDF2-SHA1 KDF (#239).**
+- **No keyslot or digest is created with a PBKDF2-SHA1 KDF (#239).**
   `Format`, `AddKey`, `CreateKDF` and the digest writer refuse
   `KDFTypePBKDF2SHA1` and a `sha1` hash (`FormatOptions.HashAlgo`,
   `AddKeyOptions.Hash`, in any case) with the new `ErrSHA1NotWritten`,

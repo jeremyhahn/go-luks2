@@ -36,3 +36,7 @@ github.com/jeremyhahn/go-luks2/test/harness                      combined  90
 github.com/jeremyhahn/go-luks2/test/harness/cmd/luks2-testreap   unit      90
 github.com/jeremyhahn/go-luks2/test/covergate                    unit      90
 github.com/jeremyhahn/go-luks2/test/makefile                     unit      none
+github.com/jeremyhahn/go-luks2/test/labstrings                   unit      90
+github.com/jeremyhahn/go-luks2/test/labstrings/cmd/releasability-gate unit 90
+github.com/jeremyhahn/go-luks2/test/ci/cmd/require-tool          unit      90
+github.com/jeremyhahn/go-luks2/test/integration/cmd/docker-run   unit      90

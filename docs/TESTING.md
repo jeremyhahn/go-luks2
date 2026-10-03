@@ -6,7 +6,7 @@ container, and this document is about the privilege that container gets.
 
 ```bash
 make test-unit            # no devices, no root, no container
-make integration-test     # the container, through test/integration/docker-run.sh
+make integration-test     # the container, through test/integration/cmd/docker-run
 ```
 
 The container's default command is `make coverage-combined`: the integration
@@ -27,9 +27,12 @@ RAID array and every device-mapper mapping on the box.
 This library holds volume keys for a trusted computing platform, and a test rig
 is not where that gets handed away for convenience (owner direction,
 2026-08-31; issue #80). The suite runs under the narrowest set that was
-measured to work, and that set lives in exactly one file:
+measured to work, and that set lives in exactly one place: the `privileges`
+function in
 
-**`test/integration/docker-run.sh`.**
+**`test/integration/cmd/docker-run`.**
+
+A unit test pins it flag by flag, so adding or dropping one fails `make test-unit`.
 
 Every Makefile target and the CI workflow call it. Nothing else spells out a
 privilege flag, because five copies of a security-critical invocation is how
@@ -204,14 +207,19 @@ make integration-test-pkg
 make integration-test-cli
 ```
 
-All three go through `test/integration/docker-run.sh`. To get an interactive
+All three go through `test/integration/cmd/docker-run`. To get an interactive
 shell under the same privilege the suite runs with — which is the point, a
 shell that behaves like the suite rather than like a machine with no
 restrictions:
 
 ```bash
-test/integration/docker-run.sh --rm -it -- bash
+make docker-run-bin
+build/docker-run --rm -it -- bash
 ```
+
+Run the built binary, not `go run`: the launcher execs docker in place so
+docker's exit status comes back unchanged, but under `go run` the go tool stays
+the parent and reports every nonzero status as 1.
 
 ## Image names, and what removes them
 

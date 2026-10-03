@@ -30,7 +30,7 @@ import (
 //
 // Real dm activation needs CAP_SYS_ADMIN, which is why this file is in the
 // containerized suite (`make integration-test`, which runs through
-// test/integration/docker-run.sh) and not next to the unit tests.
+// test/integration/cmd/docker-run) and not next to the unit tests.
 
 // hexKey matches a dm-crypt table key given INLINE -- the state this change
 // exists to eliminate. A 512-bit XTS volume key is 128 hex characters.

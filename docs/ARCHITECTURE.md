@@ -202,7 +202,7 @@ Located alongside source files (`*_test.go`):
 
 Located in `test/integration/`:
 - Run in Docker under a scoped privilege set — **never `--privileged`**; see
-  [TESTING.md](TESTING.md) and `test/integration/docker-run.sh`
+  [TESTING.md](TESTING.md) and `test/integration/cmd/docker-run`
 - Test actual device operations
 - Use loop devices for isolation
 

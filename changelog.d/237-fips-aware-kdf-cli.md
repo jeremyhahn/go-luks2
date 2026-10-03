@@ -29,7 +29,7 @@
   mode -- refused in FIPS mode -- rather than a PBKDF2 keyslot with the cost
   silently dropped.
 
-### Fixed
+### Changed — BREAKING: an explicit KDF alias's hash is honored, and an Argon2 cost with no KDF type meets the floor
 
 - **A KDF alias's hash is honored by `Format` and `AddKey` (#237).** Both
   defaulted the hash to SHA-256 before creating the keyslot's KDF, and that

@@ -27,7 +27,7 @@ func intsPtr(v []int) *[]int { return &v }
 
 func TestTokenOperations_Integration(t *testing.T) {
 	// Integration tests run in the container, as root, under the scoped
-	// privilege set in test/integration/docker-run.sh. No root check needed.
+	// privilege set in test/integration/cmd/docker-run. No root check needed.
 
 	// Create a temporary file for testing
 	device := "/tmp/luks2-token-test.img"

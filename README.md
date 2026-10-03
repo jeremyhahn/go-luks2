@@ -541,7 +541,7 @@ Kubernetes the equivalent is a localhost profile in
 Docker's default profile byte for byte with one appended allow block, and its
 header records the upstream module version, the sha256 and how to re-verify it.
 The invocation that goes with it — capabilities, device scoping, and what each
-was measured to buy — is [`test/integration/docker-run.sh`](test/integration/docker-run.sh)
+was measured to buy — is [`test/integration/cmd/docker-run`](test/integration/cmd/docker-run/main.go)
 and [`docs/TESTING.md`](docs/TESTING.md). The suite has not used `--privileged`
 since #80.
 
@@ -692,6 +692,21 @@ decision rather than an accident of how the CI legs were written.
 Build-tag coverage is a separate property: `make vet` runs `go vet` under the
 default configuration and under `integration`, which are the configurations this
 tree declares. A new build tag needs a vet leg added alongside it.
+
+### Public releasability
+
+The internal-detail disclosure that review used to carry alone is now also
+gated in code. `make releasability`, part of `make ci`, fails on a fleet
+address, fleet hostname or owner path in any tracked file. It also fails on any
+tracked file the public release must not carry: a shell script, agent
+instructions, or an internal-only workflow. The rule, the waiver syntax and the
+scrub done for the first public release are in
+[docs/RELEASABILITY.md](docs/RELEASABILITY.md).
+
+## Versioning and compatibility
+
+What a version number promises, how a breaking change is announced, and what
+changes at the first public release: [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
 
 ## License
 

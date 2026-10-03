@@ -1,0 +1,11 @@
+# Binary and oversize files the public release may carry.
+#
+# The public-releasability gate (make releasability) fails on any tracked
+# binary file (one holding a NUL byte) and on any tracked file over its 32 MiB
+# scan limit, unless it is listed here. One file per line: its exact
+# repository-relative path, whitespace, then the reason a person accepted it.
+# A listed binary is still scanned for lab values; a listed oversize file is
+# not read at all, and the gate says so on every run. A path that is not
+# tracked, a line with no reason and a path listed twice all stop the gate.
+#
+# There are none today.

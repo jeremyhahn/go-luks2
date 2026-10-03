@@ -18,7 +18,7 @@ import (
 // whole reason this tier is privileged is so that is never true.
 //
 // Both sanctioned ways to run this tier already hand out uid 0:
-// test/integration/docker-run.sh starts the image with no --user, so the
+// test/integration/cmd/docker-run starts the image with no --user, so the
 // container is root by default, and `make host-integration-test` /
 // `make coverage` re-exec themselves under sudo when the calling shell is
 // not root already (see Makefile). So reaching this branch means one of
