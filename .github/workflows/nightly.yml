@@ -66,6 +66,34 @@ jobs:
       - name: Build all packages (FIPS mode)
         run: go build ./...
 
+      # ./pkg/luks2's unit tests call the real cryptsetup (the conformance
+      # suite, and the FIPS import proof below), and fail rather than skip
+      # when it is absent. Same step as the unit job in ci.yml.
+      - name: Install cryptsetup (a test dependency of ./pkg/luks2)
+        run: |
+          set -eu
+          if ! command -v cryptsetup >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq cryptsetup-bin
+          fi
+          cryptsetup --version
+
+      # THE FIPS IMPORT PROOF (#84, owner ruling 2026-09-25), named on its own
+      # so its result is visible rather than one line inside the suite below.
+      #
+      # A `cryptsetup luksFormat` Argon2id volume (cryptsetup's minimum Argon2
+      # cost; the default-cost volume is proved on the real kernel by the
+      # integration suite) is migrated with
+      # MigrateToFIPS in a NON-FIPS step, then opened by a FIPS step. FIPS mode
+      # is fixed at process start, so each step is its own re-execution of the
+      # test binary: the migration runs with GODEBUG=fips140=off, the opens with
+      # GODEBUG=fips140=only, and the test fails if either child did not run in
+      # the mode it was given. This job's GODEBUG applies to the parent, which
+      # only formats, inspects headers and judges the children -- so it proves
+      # the same thing here as in the ordinary unit run.
+      - name: FIPS import (non-FIPS migrate, then FIPS open)
+        run: go test -count=1 -timeout=900s -v -run '^TestFIPSImportOf(ACryptsetupArgon2idVolume|ACryptsetupVolumeWithShortSalts|ACryptsetupVolumeWithAnUnboundKey)$' ./pkg/luks2
+
       # Mirrors the repo's own unit-test scope with ONLY the FIPS env changed.
       # `./...` is the right scope here because the integration suites sit
       # behind `//go:build integration` and so are already excluded; the race

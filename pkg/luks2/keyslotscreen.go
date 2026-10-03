@@ -300,27 +300,57 @@ func screenKeyslot(id string, keyslot *Keyslot, digests map[string]*Digest) (key
 // do, and screenKeyslot runs it first.
 func screenKDFParameters(kdf *KDF) error {
 	if kdf == nil {
-		return fmt.Errorf("no KDF object")
+		return &detailError{Detail: "no KDF object"}
 	}
 
 	if err := requireFIPSApprovedKDF(kdf.Type); err != nil {
 		return err
 	}
 
-	if _, err := decodeBase64(kdf.Salt); err != nil {
-		return fmt.Errorf("invalid salt: %w", err)
+	if err := screenKDFStructure(kdf); err != nil {
+		return err
 	}
 
-	switch kdf.Type {
-	case "pbkdf2":
+	// The second FIPS gate, and the last check: PBKDF2 over SHA-1. Its name
+	// has already resolved in screenKDFStructure, so the only thing this can
+	// still refuse is the policy.
+	if kdf.Type == KDFTypePBKDF2 {
 		if _, err := getPBKDF2HashFunc(kdf.Hash); err != nil {
 			return err
 		}
-	case "argon2i", "argon2id":
+	}
+
+	return nil
+}
+
+// screenKDFStructure is screenKDFParameters without its two FIPS 140-3 gates:
+// whether the KDF is well formed, as opposed to whether this process may run it.
+//
+// It is split out for one reader besides screenKDFParameters, which is the
+// question "was this keyslot refused ONLY because the process is in FIPS
+// mode?" (keyslotRefusedByFIPS). Answering that with a separate list of
+// structural checks would be a second copy of the screen, which is the drift
+// this file exists to remove; answering it with the screen minus its gates is
+// the same checks by construction.
+func screenKDFStructure(kdf *KDF) error {
+	if kdf == nil {
+		return &detailError{Detail: "no KDF object"}
+	}
+
+	if _, err := decodeBase64(kdf.Salt); err != nil {
+		return &detailError{Detail: "invalid salt", Err: err}
+	}
+
+	switch kdf.Type {
+	case KDFTypePBKDF2:
+		if _, err := pbkdf2Hash(kdf.Hash); err != nil {
+			return err
+		}
+	case KDFTypeArgon2i, KDFTypeArgon2id:
 		// Nothing further is decidable without the passphrase: cost is
 		// validateKDFCost's, and argon2 has no algorithm name to resolve.
 	default:
-		return fmt.Errorf("unsupported KDF type: %s", kdf.Type)
+		return &detailError{Detail: "unsupported KDF type: " + kdf.Type}
 	}
 
 	return nil
@@ -417,25 +447,66 @@ func digestCovers(digest *Digest, keyslotID string) bool {
 // The order mirrors verifyMasterKey's, and the decode comes first because its
 // LENGTH is what the derivation has to match.
 func screenDigest(digest *Digest) ([]byte, *KDF, error) {
+	expected, kdf, err := screenDigestStructure(digest)
+	if err != nil {
+		return expected, nil, err
+	}
+
+	// The FIPS 140-3 gates run LAST, after every structural check has passed,
+	// so a digest refused here is a well-formed digest this process may not
+	// evaluate -- never a damaged one. keyslotRefusedByFIPS depends on that.
+	if err := screenKDFParameters(kdf); err != nil {
+		return expected, nil, err
+	}
+
+	return expected, kdf, nil
+}
+
+// argon2DigestLen is the length an Argon2 digest that declares no hash is
+// derived to.
+//
+// LUKS2 defines digests over PBKDF2 only, and the length of one follows from
+// its hash. A digest declaring Argon2 is a foreign header's invention -- #84
+// requires this package to evaluate and migrate one rather than assume it
+// never meets one -- and such a digest may declare no hash at all. Its length
+// is then pinned to one value rather than taken from the header, for the
+// reason legacyDigestLen gives: a length off an untrusted device is a
+// whitelist, never a range. 32 bytes is the digest length of every
+// cryptsetup-written sha256 volume.
+const argon2DigestLen = 32
+
+// screenDigestStructure is screenDigest without the FIPS 140-3 gates: every
+// check that the digest is well formed, and the KDF the derivation will run.
+// The caller owns `expected` exactly as screenDigest's does.
+//
+// An Argon2 digest carries its cost the way an Argon2 keyslot KDF does, in
+// time, memory and cpus members, and is bounded by the same validateKDFCost.
+func screenDigestStructure(digest *Digest) ([]byte, *KDF, error) {
 	if digest == nil {
-		return nil, nil, fmt.Errorf("digest is null")
+		return nil, nil, &detailError{Detail: "digest is null"}
 	}
 
 	expected, err := decodeBase64(digest.Digest)
 	if err != nil {
-		return nil, nil, fmt.Errorf("digest value is not base64: %w", err)
+		return nil, nil, &detailError{Detail: "digest value is not base64", Err: err}
 	}
 
 	// Which lengths are derived to is a whitelist, not a range: the length the
 	// declared hash implies, plus legacyDigestLen for containers an earlier
-	// version of this package wrote. See legacyDigestLen.
-	wantLen, err := hashOutputLen(digest.Hash)
-	if err != nil {
-		return expected, nil, err
+	// version of this package wrote. See legacyDigestLen. Resolved WITHOUT the
+	// FIPS gate, which screenKDFParameters applies afterwards.
+	argon2 := digest.Type == KDFTypeArgon2i || digest.Type == KDFTypeArgon2id
+	wantLen := argon2DigestLen
+	if !argon2 || digest.Hash != "" {
+		h, err := pbkdf2Hash(digest.Hash)
+		if err != nil {
+			return expected, nil, err
+		}
+		wantLen = h.Size()
 	}
 	if len(expected) != wantLen && len(expected) != legacyDigestLen {
-		return expected, nil, fmt.Errorf("digest is %d bytes, which agrees with neither %s nor the legacy carve-out",
-			len(expected), digest.Hash)
+		return expected, nil, &detailError{Detail: fmt.Sprintf(
+			"digest is %d bytes, which agrees with neither %s nor the legacy carve-out", len(expected), digest.Hash)}
 	}
 
 	kdf := &KDF{
@@ -443,6 +514,9 @@ func screenDigest(digest *Digest) ([]byte, *KDF, error) {
 		Hash:       digest.Hash,
 		Salt:       digest.Salt,
 		Iterations: &digest.Iterations,
+		Time:       digest.Time,
+		Memory:     digest.Memory,
+		CPUs:       digest.CPUs,
 	}
 
 	// The digest's KDF is header-supplied too, and it is the one that is easy to
@@ -450,7 +524,7 @@ func screenDigest(digest *Digest) ([]byte, *KDF, error) {
 	if err := validateKDFCost(kdf); err != nil {
 		return expected, nil, err
 	}
-	if err := screenKDFParameters(kdf); err != nil {
+	if err := screenKDFStructure(kdf); err != nil {
 		return expected, nil, err
 	}
 

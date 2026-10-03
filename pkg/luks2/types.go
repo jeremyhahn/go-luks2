@@ -401,8 +401,20 @@ type Digest struct {
 	Segments   []string `json:"segments"` // Which segments use this key
 	Hash       string   `json:"hash"`     // Hash algorithm
 	Iterations int      `json:"iterations"`
-	Salt       string   `json:"salt"`   // Base64-encoded
-	Digest     string   `json:"digest"` // Base64-encoded digest value
+
+	// Time, Memory and CPUs are the cost of a digest whose KDF is Argon2,
+	// named as an Argon2 keyslot KDF names them. LUKS2 defines digests over
+	// PBKDF2 only, so no conformant writer -- this package included -- emits
+	// them, and they are omitted when nil. They are modeled rather than left
+	// in the unknown-member passthrough because a foreign header that DOES
+	// carry one has to be evaluated, and then migrated to PBKDF2, before a
+	// FIPS 140-3 process can open it (#84; see MigrateToFIPS).
+	Time   *int `json:"time,omitempty"`
+	Memory *int `json:"memory,omitempty"`
+	CPUs   *int `json:"cpus,omitempty"`
+
+	Salt   string `json:"salt"`   // Base64-encoded
+	Digest string `json:"digest"` // Base64-encoded digest value
 
 	unknown unknownFields
 }

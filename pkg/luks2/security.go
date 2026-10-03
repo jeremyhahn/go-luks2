@@ -14,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // Security constants
@@ -422,6 +424,20 @@ func openDevice(op, device string, flag int) (*os.File, error) {
 // real open that fails this way for every uid, so the fault is injected at the
 // seam instead, which holds for root and for uid 1000 alike.
 var openFileFunc = os.OpenFile
+
+// dropDeviceCache evicts f's clean pages from the page cache, so the next read
+// of them comes from the medium. It is called only after the device has been
+// synced, when no page of it should be dirty; one that is (written since by
+// another process) is not evicted, which is the kernel's contract and leaves
+// what is read current rather than stale.
+//
+// A seam for the same reason syncDevice is one: what is in the cache and what
+// is on the medium cannot be made to differ from a test without a failing
+// device, so this package's tests substitute it to model exactly that.
+// Unexported, substituted only by this package's tests.
+var dropDeviceCache = func(f *os.File) error {
+	return unix.Fadvise(int(f.Fd()), 0, 0, unix.FADV_DONTNEED)
+}
 
 // classifyDeviceOpen adds the package's typed vocabulary to an open failure,
 // and returns anything it cannot classify UNCHANGED.

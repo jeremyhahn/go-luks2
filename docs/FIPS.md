@@ -59,9 +59,196 @@ Argon2-backed volume, and Argon2id has been the stock cryptsetup LUKS2 default
 since 2.0, so that covers most volumes in the field. This is the compliance
 position, not an oversight: a process that asked the Go runtime to reject
 non-approved cryptography should not then derive regulated keys with a
-non-approved KDF. Such a volume must be re-keyed to `pbkdf2-sha256` or better,
+non-approved KDF. Such a volume must be imported with `MigrateToFIPS` (below),
 or opened by a non-FIPS process. Outside FIPS mode Argon2id remains the default
 and nothing changes.
+
+## Importing an Argon2 volume: `MigrateToFIPS` (#84)
+
+**What a FIPS process reports.** When every keyslot a FIPS process could not try
+was refused only because its KDF — or the KDF of every digest attesting it — is
+not approved, the unlock returns `*FIPSImportRequiredError` instead of the bare
+refusal. Its message says the volume is intact, names each keyslot and digest
+and its KDF, and names `MigrateToFIPS` as the remedy. It matches
+`ErrFIPSImportRequired` and `ErrFIPSNotApproved`, and deliberately not
+`ErrInvalidKeyslot` or `ErrInvalidHeader`, which say "damaged". If any keyslot
+also failed for another reason, that failure is reported as before: a migration
+would not fix it.
+
+**What the import does.** The KDF is a property of the keyslot, not of the
+volume, and the data cipher (`aes-xts-plain64`) is already approved, so nothing
+in the data area changes. `MigrateToFIPS(device, passphrase, opts)`:
+
+1. unlocks with the passphrase — FIPS-approved keyslots are tried first, and
+   only keyslots whose digests bind every data segment are tried at all; the
+   key recovered must match a digest binding each segment, or the import
+   refuses with `ErrFIPSMigrationUnboundKey` before any write. A LUKS2 header
+   may carry unbound keys beside the volume key, and carrying one across while
+   removing the keyslot holding the real one would leave a volume whose
+   migrated keyslot opens and whose data does not;
+2. requires every digest whose KDF is not approved to attest the recovered
+   volume key, refusing before any write otherwise;
+3. adds a PBKDF2 keyslot (SHA-256 by default) wrapping the same volume key,
+   through `AddKey`'s own code;
+4. rewrites each non-approved digest as a PBKDF2 digest over the same key —
+   `verifyMasterKey` derives through the digest's KDF on every unlock, so a
+   volume with PBKDF2 keyslots and a PBKDF2-SHA1 digest (what `cryptsetup
+   convert` leaves on an old LUKS1 volume) is still unopenable under FIPS;
+5. verifies with a real open through the new keyslot and approved digests
+   only, that an approved digest binds the key it recovers to every data
+   segment, and that the ordinary unlock scan — the one `Unlock` hands to
+   dm-crypt — run over only the approved keyslots and digests recovers that
+   same volume key. The last check is what catches a retained approved keyslot
+   holding an unbound key under the same passphrase: opening the new keyslot
+   directly cannot see it;
+6. removes the non-approved keyslots, each through the removal gate every
+   removal in the package takes — unless `KeepNonApprovedKeyslots` is set, in
+   which case `FIPSMigrationResult.Complete` is false and
+   `RetainedNonApprovedKeyslots` names them;
+7. re-reads the header and checks it statically (no keyslot or digest that is
+   not approved remains, other than those kept on request) and with a real open.
+
+Nothing is removed until step 5 passes, so no state along the way is
+unopenable; a `*FIPSMigrationError` names the failed stage and the state the
+volume was left in. Only the supplied passphrase is carried across: other
+credentials held only in Argon2 keyslots are removed with them unless kept.
+
+**If the process dies or the power goes mid-import.** Every write step ends
+with a sync, the new keyslot's material is durable before a header names it,
+and each header write makes the primary copy durable before it touches the
+secondary, so an interruption can tear at most one header copy. Every state
+the device can be left in opens to the original volume key: cryptsetup picks
+the newest intact copy and repairs the other itself; this library reads the
+primary, and if the interruption tore it, `RestorePrimaryHeader` rebuilds it
+from the secondary. Running `MigrateToFIPS` again on any such state finishes
+the import. That holds for a run started from what an interrupted one left,
+too: such a run can find the copies apart (a primary naming the new PBKDF2
+keyslot beside a secondary that does not, or a torn secondary), so before its
+first write it rewrites the secondary from the primary — first making the
+primary it read durable, since an interrupted process can leave one that reads
+back whole from the page cache but is not yet on the medium, then writing the
+secondary alone — and before the first removal it requires the two copies to
+agree. Copies that agree may still agree only in the page cache — a run stopped
+after writing the secondary and before syncing it, or a writeback error after
+which the kernel keeps the unwritten bytes as clean cached pages that a later
+`fsync` does not rewrite — so every run, under its lock and before its first
+read, syncs the device and evicts its cached pages
+(`posix_fadvise(POSIX_FADV_DONTNEED)`). Eviction is advisory — a page another
+process holds mapped survives it — so the run then reads the two header copies
+(bounded by the primary's own `hdr_size`, so no keyslot or data byte is read)
+both through the cache and past it (`O_DIRECT`) and requires them to be
+identical; if they are not it stops with `ErrDeviceCacheStale`, having written
+nothing. "Past it" means past every cache on the way to the medium: a loop
+device without direct I/O reads its backing file through that file's page
+cache, so a loop device's backing is compared too, at the loop offset, all the
+way down (a direct-I/O loop device can sit on a buffered one); a
+device-mapper, md or partition device with such a loop device anywhere below
+it cannot be mapped to a backing-file offset in general and is refused with
+`ErrDirectIOUnsupported` (`losetup --direct-io=on`, or importing the backing
+file itself, is the remedy). Where `O_DIRECT` is refused the run also stops
+with `ErrDirectIOUnsupported`, except on a memory filesystem (tmpfs, ramfs),
+where the cache is the only copy there is. A
+torn primary is not repaired by the import; it refuses before writing, and
+`RestorePrimaryHeader` (or cryptsetup) rebuilds it. When a header write fails
+having damaged the primary, the `*FIPSMigrationError` state says so and names
+`RestorePrimaryHeader`, rather than claiming the volume opens as before. The
+report judges the header copies on the MEDIUM — read past the page cache, which
+after a failed writeback may still hold a primary the medium does not — and
+says plainly when the medium cannot be read; it reads the secondary only where
+the volume's own geometry puts it, never probing further offsets that, on a
+small-metadata layout, are encrypted data.
+`TestMigrateToFIPSEveryCrashStateStillOpens` enumerates those
+states for a cryptsetup volume with two Argon2id keyslots and a PBKDF2-SHA1
+digest — every partial write of every step — and checks all three claims
+against cryptsetup and this library; `TestMigrateToFIPSFailingAtEachWriteLeavesAnOpenableVolume`
+fails each write in turn and checks the reported stage and state as well, and
+`TestMigrateToFIPSResumedAfterACrashKeepsAWayIn` re-runs the import from the
+torn states of the header write that adds the keyslot and checks every state a
+second crash could leave.
+
+Volumes whose keyslots use a SHA-1 anti-forensic hash (`cryptsetup luksFormat
+--hash sha1`, or a converted LUKS1 volume) cannot be imported: this library
+does not unlock them in any mode, because its anti-forensic merge implements
+SHA-256 and SHA-512 only.
+
+**Why it runs outside FIPS mode.** Step 1 executes the volume's Argon2 keyslot.
+The import is therefore a non-FIPS step that produces a FIPS-ready volume, and
+the FIPS process that later opens it never executes the unapproved primitive.
+Called in a FIPS process, `MigrateToFIPS` returns `ErrFIPSMigrationUnderFIPS`
+without touching the device.
+
+**How the outcome is verified.** FIPS mode is fixed at process start, so the
+migrating process cannot open the result "under FIPS" itself (owner ruling
+2026-09-25). Steps 5 and 7 are the in-process layers; the third is
+`TestFIPSImportOfACryptsetupArgon2idVolume`, which formats a volume with
+cryptsetup (its defaults, at its minimum Argon2 cost), migrates it in a child
+process started with
+`GODEBUG=fips140=off`, and opens it in one started with `GODEBUG=fips140=only`,
+checking cryptsetup still opens it and the data area is unchanged.
+`TestFIPSImportOfACryptsetupVolumeWithShortSalts` does the same for approved
+names over salts strict FIPS refuses, and
+`TestFIPSImportOfACryptsetupVolumeWithAnUnboundKey` for a cryptsetup
+`luksAddKey --unbound` keyslot sharing the passphrase: the key a
+`fips140=only` process's unlock scan recovers must be the volume key cryptsetup
+itself dumps. They run in the unit suite and as their own step in the nightly
+FIPS job. On the real kernel, the integration suite's
+`TestFIPSImportOfADefaultCryptsetupVolumeMapsTheSameData` writes plaintext
+through cryptsetup's mapping of a default volume, imports it, and requires a
+`GODEBUG=fips140=only` process's `Unlock` — the key it hands dm-crypt — and
+cryptsetup's own mapping both to read the same plaintext back, with the
+ciphertext unchanged.
+
+**Which key the unlock scan returns.** Keyslots whose digests bind every data
+segment are tried before any that do not, so a passphrase shared by the volume
+key's keyslot and an unbound one opens the volume with the volume key whatever
+the keyslot numbers — matching cryptsetup, which activates only through
+keyslots bound to the segment. Nothing is filtered out: a keyslot outside that
+group is still tried after it. A keyslot added by `AddKey` (and so by the
+import) joins only the digest its key matches; it used to be appended to every
+digest, which cryptsetup refuses ("Keyslot N is not assigned to exactly 1
+digest").
+
+**"Approved" means what strict FIPS mode will run, not what the header
+names.** Under `GODEBUG=fips140=only`, `crypto/pbkdf2` also refuses a salt
+shorter than 128 bits and an output shorter than 112 bits. A PBKDF2-SHA256
+keyslot or digest below either floor has an approved name and still cannot be
+opened, so the import treats it exactly as it treats Argon2: such a keyslot is
+never reused as the migrated one and is removed, such a digest is rewritten, and
+the static check in step 7 applies the same floors. `NonApprovedKDF.Reason`
+names the parameter when the algorithm itself is approved.
+`TestFIPSImportOfACryptsetupVolumeWithShortSalts` proves it across processes
+in the nightly FIPS job.
+
+**Argon2 digests.** LUKS2 digests are PBKDF2 in cryptsetup and in this package,
+but a foreign writer's need not be. A digest declaring `argon2i`/`argon2id`
+carries its cost in `time`, `memory` and `cpus` members, named as an Argon2
+keyslot KDF names them and bounded by the same limits; with no `hash` its value
+must be 32 bytes. Outside FIPS mode it is evaluated like any other digest, so
+such a volume opens and can be imported; step 4 rewrites it as PBKDF2 and drops
+the Argon2 cost members. In FIPS mode it is refused with
+`*FIPSImportRequiredError` naming the digest.
+
+**Damage is never reported as a FIPS refusal.** The error above is returned only
+when the refusal is computed to be the FIPS policy's alone: the keyslot is
+screened again with every refused KDF replaced by an approved stand-in, after
+each replaced KDF has passed the structural half of the screen. A SHA-1 digest
+whose value is not base64, for example, is reported as `ErrInvalidHeader`.
+
+**What may be read or wiped.** An unlock reads a keyslot's whole declared area
+and a removal randomizes it, and that area comes off the device. Before the
+first keyslot is read, every keyslot's area must lie inside the container's
+reserved keyslots area (`config.keyslots_size`, from twice the header size) and
+clear of every data segment, and each area is checked again at its wipe;
+otherwise the import refuses with `ErrKeyslotAreaOverlap`, having read no
+keyslot and changed nothing. The import reads and writes header and keyslot
+space only — never a byte of the data segment.
+
+**Testing the FIPS policy without a FIPS process.** Every FIPS policy decision
+in the package asks one unexported function, `fipsMode` (`crypto/fips140.Enabled`).
+The unit tests substitute it so the refusal classification above runs in every
+ordinary test run, not only in the nightly FIPS job; what the Go Cryptographic
+Module itself enforces under `GODEBUG=fips140=only` is still proved by the
+child-process tests.
 
 ## Exemption: PBKDF2-HMAC-SHA1 for legacy LUKS headers
 

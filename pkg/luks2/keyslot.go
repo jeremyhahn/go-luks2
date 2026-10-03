@@ -375,10 +375,10 @@ func addKeyWithPolicy(device string, existingPassphrase, newPassphrase []byte, o
 		return -1, err
 	}
 	if err := ValidatePassphrase(existingPassphrase); err != nil {
-		return -1, fmt.Errorf("invalid existing passphrase: %w", err)
+		return -1, &detailError{Detail: "invalid existing passphrase", Err: err}
 	}
 	if err := ValidatePassphrase(newPassphrase); err != nil {
-		return -1, fmt.Errorf("invalid new passphrase: %w", err)
+		return -1, &detailError{Detail: "invalid new passphrase", Err: err}
 	}
 
 	// A NEW KEYSLOT IS A KEYSLOT THIS PACKAGE CREATES, so a caller-supplied
@@ -399,25 +399,48 @@ func addKeyWithPolicy(device string, existingPassphrase, newPassphrase []byte, o
 	// Acquire exclusive lock
 	lock, err := AcquireFileLock(device)
 	if err != nil {
-		return -1, fmt.Errorf("failed to acquire lock: %w", err)
+		return -1, &detailError{Detail: "failed to acquire lock", Err: err}
 	}
 	defer func() { _ = lock.Release() }()
 
 	// Read existing header and metadata
 	hdr, metadata, err := ReadHeader(device)
 	if err != nil {
-		return -1, fmt.Errorf("failed to read header: %w", err)
+		return -1, &detailError{Detail: "failed to read header", Err: err}
 	}
 
 	// Unlock with existing passphrase to get master key
 	masterKey, err := getMasterKey(device, existingPassphrase, metadata)
 	if err != nil {
-		return -1, fmt.Errorf("failed to unlock with existing passphrase: %w", err)
+		return -1, &detailError{Detail: "failed to unlock with existing passphrase", Err: err}
 	}
 	defer releaseSecret(masterKey)
 
+	return addKeyslotWithMasterKey(device, hdr, metadata, masterKey, newPassphrase, opts, policy)
+}
+
+// addKeyslotWithMasterKey is the half of AddKey that runs once the volume key is
+// in hand: it wraps masterKey under newPassphrase in a new keyslot, writes the
+// key material, and commits the header. hdr and metadata are the container's
+// current header, read under the device lock the CALLER holds, and are mutated
+// into the state that is written.
+//
+// It is split out so an operation that already holds the lock and has already
+// recovered the volume key -- MigrateToFIPS (fipsmigrate.go) -- adds its keyslot
+// through the same code AddKey does rather than through a copy of it. The lock
+// is not reentrant (flock on a second descriptor waits on the first), so that
+// caller cannot go through AddKey itself without releasing the lock between its
+// steps.
+func addKeyslotWithMasterKey(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata, masterKey *enclave.MemoryEnclave,
+	newPassphrase []byte, opts *AddKeyOptions, policy keyslotCostPolicy) (int, error) {
 	// Find available keyslot
 	targetSlot, err := findAvailableKeyslot(metadata, opts)
+	if err != nil {
+		return -1, err
+	}
+
+	// The ONE digest the new keyslot joins, chosen before anything is written.
+	attestingDigest, err := digestAttestingKey(metadata, masterKey)
 	if err != nil {
 		return -1, err
 	}
@@ -490,7 +513,7 @@ func addKeyWithPolicy(device string, existingPassphrase, newPassphrase []byte, o
 	// AES-XTS key: it came out of a keyslot that passed screenKeyslot.
 	newKeySize := masterKey.Size()
 	if err := validateXTSKeySize(newKeySize); err != nil {
-		return -1, fmt.Errorf("%w: the recovered volume key is unusable as a keyslot key: %w", ErrInvalidKeyslot, err)
+		return -1, &detailError{Kind: ErrInvalidKeyslot, Detail: "the recovered volume key is unusable as a keyslot key", Err: err}
 	}
 
 	// Read the container's reserved keyslots area out of its own header rather
@@ -519,27 +542,27 @@ func addKeyWithPolicy(device string, existingPassphrase, newPassphrase []byte, o
 
 	kdf, err := createKDF(formatOpts, newKeySize, policy)
 	if err != nil {
-		return -1, fmt.Errorf("failed to create KDF: %w", err)
+		return -1, &detailError{Detail: "failed to create KDF", Err: err}
 	}
 
 	// Derive key from new passphrase
 	passphraseKey, err := DeriveKeyEnclave(newPassphrase, kdf, newKeySize)
 	if err != nil {
-		return -1, fmt.Errorf("failed to derive key: %w", err)
+		return -1, &detailError{Detail: "failed to derive key", Err: err}
 	}
 	defer releaseSecret(passphraseKey)
 
 	// Apply anti-forensic split to master key
 	afData, err := afSplitEnclave(masterKey, AFStripes, DefaultHashAlgo)
 	if err != nil {
-		return -1, fmt.Errorf("failed to apply AF split: %w", err)
+		return -1, &detailError{Detail: "failed to apply AF split", Err: err}
 	}
 	defer releaseSecret(afData)
 
 	// Encrypt AF-split key material with new passphrase-derived key
 	encryptedKeyMaterial, err := encryptKeyMaterialEnclave(afData, passphraseKey, DefaultCipher)
 	if err != nil {
-		return -1, fmt.Errorf("failed to encrypt key material: %w", err)
+		return -1, &detailError{Detail: "failed to encrypt key material", Err: err}
 	}
 	defer clearBytes(encryptedKeyMaterial)
 
@@ -558,8 +581,8 @@ func addKeyWithPolicy(device string, existingPassphrase, newPassphrase []byte, o
 	// sits past the keyslots area let a new keyslot be placed in the gap
 	// between the two.
 	if newKeyslotsEnd > keyslotsEnd {
-		return -1, fmt.Errorf("%w: a new keyslot would end at offset %d but the container's keyslots area is %d..%d (config.keyslots_size %s); reformat with a larger keyslots area",
-			ErrKeyslotsAreaFull, newKeyslotsEnd, keyslotsStart, keyslotsEnd, metadata.Config.KeyslotsSize)
+		return -1, &detailError{Kind: ErrKeyslotsAreaFull, Detail: fmt.Sprintf("a new keyslot would end at offset %d but the container's keyslots area is %d..%d (config.keyslots_size %s); reformat with a larger keyslots area",
+			newKeyslotsEnd, keyslotsStart, keyslotsEnd, metadata.Config.KeyslotsSize)}
 	}
 
 	// The second is PHYSICAL: the encrypted data itself. It is kept even though
@@ -579,13 +602,13 @@ func addKeyWithPolicy(device string, existingPassphrase, newPassphrase []byte, o
 		// header reaches here through a clean ReadHeader.
 		segmentOffset, err := parseSize(segment.Offset)
 		if err != nil {
-			return -1, fmt.Errorf("%w: data segment %s declares an offset of %q, which is not a valid size, so the "+
+			return -1, &detailError{Kind: ErrInvalidHeader, Detail: fmt.Sprintf("data segment %s declares an offset of %q, which is not a valid size, so the "+
 				"bound protecting the encrypted data from a new keyslot cannot be computed",
-				ErrInvalidHeader, id, segment.Offset)
+				id, segment.Offset)}
 		}
 		if newKeyslotsEnd > segmentOffset {
-			return -1, fmt.Errorf("%w: a new keyslot would end at offset %d but the data segment starts at %d; reformat with a larger header",
-				ErrKeyslotsAreaFull, newKeyslotsEnd, segmentOffset)
+			return -1, &detailError{Kind: ErrKeyslotsAreaFull, Detail: fmt.Sprintf("a new keyslot would end at offset %d but the data segment starts at %d; reformat with a larger header",
+				newKeyslotsEnd, segmentOffset)}
 		}
 	}
 
@@ -631,18 +654,14 @@ func addKeyWithPolicy(device string, existingPassphrase, newPassphrase []byte, o
 	slotIDStr := strconv.Itoa(targetSlot)
 	metadata.Keyslots[slotIDStr] = newKeyslot
 
-	// Update digest to include new keyslot
-	for _, digest := range metadata.Digests {
-		found := false
-		for _, ks := range digest.Keyslots {
-			if ks == slotIDStr {
-				found = true
-				break
-			}
-		}
-		if !found {
-			digest.Keyslots = append(digest.Keyslots, slotIDStr)
-		}
+	// The new keyslot joins exactly the digest that attests the key it wraps.
+	// It used to be appended to EVERY digest, which on a header carrying an
+	// unbound key beside the volume key claimed the new keyslot for both keys:
+	// cryptsetup refuses such a header outright ("Keyslot N is not assigned to
+	// exactly 1 digest"), so adding a passphrase made the volume unreadable to
+	// every other LUKS2 implementation.
+	if digest := metadata.Digests[attestingDigest]; !slices.Contains(digest.Keyslots, slotIDStr) {
+		digest.Keyslots = append(digest.Keyslots, slotIDStr)
 	}
 
 	// config.keyslots_size is deliberately NOT touched here.
@@ -662,34 +681,36 @@ func addKeyWithPolicy(device string, existingPassphrase, newPassphrase []byte, o
 	// Increment sequence ID
 	hdr.SequenceID++
 
-	// Write encrypted key material to device
-	f, err := os.OpenFile(device, os.O_RDWR, 0600) // #nosec G304 -- device path validated by caller
+	// Write encrypted key material to device. Through openDevice, the seam
+	// every other device open in the package takes, so a permission failure is
+	// classified like theirs and a test can stop the operation at this write.
+	f, err := openDevice("write the keyslot area", device, os.O_RDWR)
 	if err != nil {
-		return -1, fmt.Errorf("failed to open device: %w", err)
+		return -1, &detailError{Detail: "failed to open device", Err: err}
 	}
 	defer func() { _ = f.Close() }()
 
 	if _, err := f.Seek(newOffset, 0); err != nil {
-		return -1, fmt.Errorf("failed to seek to keyslot area: %w", err)
+		return -1, &detailError{Detail: "failed to seek to keyslot area", Err: err}
 	}
 
 	if _, err := f.Write(encryptedKeyMaterial); err != nil {
-		return -1, fmt.Errorf("failed to write key material: %w", err)
+		return -1, &detailError{Detail: "failed to write key material", Err: err}
 	}
 
 	// Pad to aligned size
 	padding := make([]byte, alignedSize-int64(len(encryptedKeyMaterial)))
 	if _, err := f.Write(padding); err != nil {
-		return -1, fmt.Errorf("failed to write padding: %w", err)
+		return -1, &detailError{Detail: "failed to write padding", Err: err}
 	}
 
 	if err := f.Sync(); err != nil {
-		return -1, fmt.Errorf("failed to sync: %w", err)
+		return -1, &detailError{Detail: "failed to sync", Err: err}
 	}
 
 	// Write updated headers
 	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
-		return -1, fmt.Errorf("failed to write header: %w", err)
+		return -1, &detailError{Detail: "failed to write header", Err: err}
 	}
 
 	return targetSlot, nil
@@ -1501,7 +1522,58 @@ func keyslotIDsInScanOrder(keyslots map[string]*Keyslot) []string {
 // The message names which of the two it was, because the remedies differ: an
 // empty keyslots object is a lost or truncated header, while keyslots present
 // but untryable is a container in a state this path does not handle.
+//
+// # A FIPS refusal is not damage, and is not reported as damage
+//
+// In a FIPS 140-3 process an Argon2 keyslot -- cryptsetup's default -- cannot be
+// tried at all, and neither can a keyslot whose only digests are refused. That
+// used to surface as the first untried keyslot's error, "invalid keyslot:
+// argon2id: algorithm not approved", which reads as corruption to anyone who
+// does not know LUKS2 internals. When every keyslot that could not be tried was
+// refused for exactly that reason, and none verified, the scan instead returns
+// a FIPSImportRequiredError: it says the refusal is a policy one, names the
+// keyslots and digests involved, and names MigrateToFIPS as the remedy.
 func getMasterKey(device string, passphrase []byte, metadata *LUKS2Metadata) (*enclave.MemoryEnclave, error) {
+	masterKey, _, err := getMasterKeySlot(device, passphrase, metadata, volumeKeyScanOrder(metadata))
+	return masterKey, err
+}
+
+// volumeKeyScanOrder is keyslotIDsInScanOrder with the keyslots whose digests
+// bind every data segment moved to the front, each group keeping its own order.
+//
+// A LUKS2 header may carry unbound keys -- keyslots whose digest names no
+// segment -- beside the volume key, and nothing stops one from sharing a
+// passphrase with a keyslot that holds the volume key. A purely numeric scan
+// finds whichever sorts first, and Unlock would hand an unbound key to
+// dm-crypt: the mapping succeeds and every byte read through it is garbage.
+// cryptsetup opens only keyslots bound to the segment it activates; trying the
+// bound ones first gives the same answer whenever a bound keyslot opens, and
+// changes nothing for a header whose keyslots are all bound, which is every
+// header this library and a default cryptsetup luksFormat write.
+//
+// It reorders and never filters: a keyslot outside the first group is still
+// tried, so no credential that opened a volume before is refused now.
+func volumeKeyScanOrder(metadata *LUKS2Metadata) []string {
+	all := keyslotIDsInScanOrder(metadata.Keyslots)
+	order := make([]string, 0, len(all))
+	var rest []string
+	for _, id := range all {
+		if keyslotDeclaredForAllSegments(metadata, id) {
+			order = append(order, id)
+		} else {
+			rest = append(rest, id)
+		}
+	}
+	return append(order, rest...)
+}
+
+// getMasterKeySlot is getMasterKey with the scan order supplied by the caller
+// and the id of the keyslot that opened reported back. order must name keyslots
+// of metadata; getMasterKey passes volumeKeyScanOrder, and MigrateToFIPS
+// passes the same order with FIPS-approved keyslots moved to the front so a
+// credential that already has an approved keyslot is found there first, without
+// running Argon2.
+func getMasterKeySlot(device string, passphrase []byte, metadata *LUKS2Metadata, order []string) (*enclave.MemoryEnclave, string, error) {
 	// The first reason a keyslot could not be TRIED, kept in case nothing
 	// verifies. The first rather than the last, because scan order is
 	// deterministic and the lowest-numbered damaged slot is the one an operator
@@ -1513,16 +1585,24 @@ func getMasterKey(device string, passphrase []byte, metadata *LUKS2Metadata) (*e
 	// unlock path skips.
 	tried := 0
 
-	for _, id := range keyslotIDsInScanOrder(metadata.Keyslots) {
+	// fipsBlocked names the keyslots that could not be tried ONLY because this
+	// process runs in FIPS 140-3 mode; otherBlocked records whether anything
+	// could not be tried for any other reason. The typed FIPS error is returned
+	// only when the first is non-empty and the second is false, so a volume that
+	// is also damaged is still reported as damaged.
+	var fipsBlocked []string
+	otherBlocked := false
+
+	for _, id := range order {
 		keyslot := metadata.Keyslots[id]
-		if keyslot.Type != "luks2" {
+		if keyslot == nil || keyslot.Type != "luks2" {
 			continue
 		}
 		tried++
 
 		masterKey, err := unlockKeyslot(device, id, passphrase, keyslot, metadata.Digests)
 		if err == nil {
-			return masterKey, nil
+			return masterKey, id, nil
 		}
 
 		// Protected memory is FAIL-CLOSED, so this aborts rather than moving on:
@@ -1530,7 +1610,7 @@ func getMasterKey(device string, passphrase []byte, metadata *LUKS2Metadata) (*e
 		// same way, and continuing would bury an operator-fixable RLIMIT_MEMLOCK
 		// condition under a credential verdict.
 		if errors.Is(err, ErrProtectedMemory) {
-			return nil, err
+			return nil, "", err
 		}
 
 		if errors.Is(err, ErrMasterKeyVerification) {
@@ -1538,26 +1618,70 @@ func getMasterKey(device string, passphrase []byte, metadata *LUKS2Metadata) (*e
 			continue
 		}
 
+		if keyslotRefusedByFIPS(id, keyslot, metadata.Digests) {
+			fipsBlocked = append(fipsBlocked, id)
+		} else {
+			otherBlocked = true
+		}
+
 		if untried == nil {
-			untried = fmt.Errorf("keyslot %s could not be tried: %w", id, err)
+			untried = &detailError{Detail: "keyslot " + id + " could not be tried", Err: err}
 		}
 	}
 
+	if len(fipsBlocked) > 0 && !otherBlocked {
+		return nil, "", newFIPSImportRequiredError(device, metadata, fipsBlocked)
+	}
+
 	if untried != nil {
-		return nil, untried
+		return nil, "", untried
 	}
 
 	// Nothing was tried, so nothing was judged: there is no credential verdict
 	// to report, only a header that offers no way in.
 	if tried == 0 {
 		if len(metadata.Keyslots) == 0 {
-			return nil, fmt.Errorf("%w: the header declares no keyslots", ErrNoKeyslots)
+			return nil, "", &detailError{Kind: ErrNoKeyslots, Detail: "the header declares no keyslots"}
 		}
-		return nil, fmt.Errorf("%w: the header declares %d keyslot(s), none of them of a type the unlock path can try",
-			ErrNoKeyslots, len(metadata.Keyslots))
+		return nil, "", &detailError{Kind: ErrNoKeyslots, Detail: fmt.Sprintf("the header declares %d keyslot(s), none of them of a type the unlock path can try",
+			len(metadata.Keyslots))}
 	}
 
-	return nil, ErrMasterKeyVerification
+	return nil, "", ErrMasterKeyVerification
+}
+
+// digestAttestingKey returns the id of the digest a keyslot wrapping masterKey
+// must be assigned to: the digests masterKey actually matches, evaluated in
+// sorted id order, preferring one that binds data segments over an unbound one.
+// LUKS2 assigns every keyslot to exactly one digest, and the key the keyslot
+// holds is what decides which -- not which digests happen to exist.
+//
+// Matching no digest is refused rather than guessed: the key came from a
+// keyslot a digest just verified, so no match means the header changed under
+// the caller or the key is not the one it claims to be, and a keyslot joined to
+// a digest its key does not satisfy never opens.
+func digestAttestingKey(metadata *LUKS2Metadata, masterKey *enclave.MemoryEnclave) (string, error) {
+	var unbound string
+	for _, id := range sortedDigestIDs(metadata.Digests) {
+		digest := metadata.Digests[id]
+		if digest == nil {
+			continue
+		}
+		if _, matched := evaluateDigest(masterKey, digest); !matched {
+			continue
+		}
+		if len(digest.Segments) > 0 {
+			return id, nil
+		}
+		if unbound == "" {
+			unbound = id
+		}
+	}
+	if unbound != "" {
+		return unbound, nil
+	}
+	return "", &detailError{Kind: ErrMasterKeyVerification,
+		Detail: "no digest in the header attests the key the new keyslot would hold"}
 }
 
 // findAvailableKeyslot finds the next available keyslot number
@@ -1700,7 +1824,7 @@ func wipeKeyslotArea(device string, keyslot *Keyslot) error {
 		return err
 	}
 
-	f, err := os.OpenFile(device, os.O_RDWR, 0600) // #nosec G304 -- device path validated by caller
+	f, err := openDevice("wipe the keyslot area", device, os.O_RDWR)
 	if err != nil {
 		return err
 	}

@@ -337,6 +337,25 @@ because `x/crypto/argon2` is pure Go. While the process runs in FIPS 140-3 mode
 default, so a FIPS caller must select an approved KDF explicitly. Outside FIPS
 mode Argon2id remains the default and nothing changes.
 
+**Importing an Argon2 volume.** A FIPS process that meets a volume it can open
+only through Argon2 — any volume from a default `cryptsetup luksFormat` — gets a
+`*FIPSImportRequiredError` (matching `ErrFIPSImportRequired` and
+`ErrFIPSNotApproved`) that says the volume is intact and names the remedy: run
+`MigrateToFIPS` once, from a process **not** in FIPS mode.
+
+```go
+res, err := luks2.MigrateToFIPS("/dev/sdb1", passphrase, nil) // non-FIPS process
+// res.Complete: no keyslot or digest FIPS mode cannot execute remains
+```
+
+It is a keyslot and digest migration, not a re-encryption: it adds a PBKDF2
+keyslot wrapping the existing volume key, migrates any digest whose KDF is not
+approved, verifies the volume opens through approved KDFs alone, and only then
+removes the Argon2 keyslots (`KeepNonApprovedKeyslots` keeps them, and the result
+reports the import as incomplete). The data area is never read or written, and
+cryptsetup still opens the result. In a FIPS process it refuses with
+`ErrFIPSMigrationUnderFIPS`.
+
 See [docs/FIPS.md](docs/FIPS.md).
 
 ## Cryptographic Defaults

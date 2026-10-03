@@ -183,25 +183,32 @@ func readHeaderCopy(device string, offset int64) (*LUKS2BinaryHeader, *LUKS2Meta
 	}
 	defer func() { _ = f.Close() }()
 
+	return readHeaderCopyFrom(f, offset)
+}
+
+// readHeaderCopyFrom is readHeaderCopy over any reader: every check the header
+// reader makes, applied to bytes that need not have come through the page
+// cache -- MigrateToFIPS classifies a failed write from bytes read past it.
+func readHeaderCopyFrom(f io.ReaderAt, offset int64) (*LUKS2BinaryHeader, *LUKS2Metadata, error) {
 	// Read binary header (LUKS2 uses big-endian for integer fields)
 	raw := make([]byte, LUKS2HeaderSize)
 	if _, err := f.ReadAt(raw, offset); err != nil {
-		return nil, nil, fmt.Errorf("failed to read header: %w", err)
+		return nil, nil, &detailError{Detail: "failed to read header", Err: err}
 	}
 	var hdr LUKS2BinaryHeader
 	if err := binary.Read(bytes.NewReader(raw), binary.BigEndian, &hdr); err != nil {
-		return nil, nil, fmt.Errorf("failed to read header: %w", err)
+		return nil, nil, &detailError{Detail: "failed to read header", Err: err}
 	}
 
 	// Validate magic -- which copy this is decides which magic is correct
 	if !bytes.Equal(hdr.Magic[:], []byte(expectedMagic(offset))) {
-		return nil, nil, fmt.Errorf("%w: invalid LUKS magic at offset %d: not a LUKS2 device",
-			ErrInvalidHeader, offset)
+		return nil, nil, &detailError{Kind: ErrInvalidHeader, Detail: fmt.Sprintf(
+			"invalid LUKS magic at offset %d: not a LUKS2 device", offset)}
 	}
 
 	// Validate version
 	if hdr.Version != LUKS2Version {
-		return nil, nil, fmt.Errorf("unsupported LUKS version: %d", hdr.Version)
+		return nil, nil, &detailError{Kind: ErrUnsupportedLUKSVersion, Detail: strconv.Itoa(int(hdr.Version))}
 	}
 
 	// BOUND THE DECLARED HEADER AREA SIZE HERE, ONCE, before anything allocates
@@ -241,8 +248,8 @@ func readHeaderCopy(device string, offset int64) (*LUKS2BinaryHeader, *LUKS2Meta
 		return nil, nil, err
 	}
 	if recorded != offset {
-		return nil, nil, fmt.Errorf("%w: header copy at offset %d records hdr_offset %d",
-			ErrInvalidHeader, offset, recorded)
+		return nil, nil, &detailError{Kind: ErrInvalidHeader, Detail: fmt.Sprintf(
+			"header copy at offset %d records hdr_offset %d", offset, recorded)}
 	}
 
 	// A secondary copy begins where the primary ends, so its offset and the
@@ -251,8 +258,8 @@ func readHeaderCopy(device string, offset int64) (*LUKS2BinaryHeader, *LUKS2Meta
 	// happens to carry the SKUL magic at some offset is still rejected unless
 	// the container's own geometry agrees that the copy belongs there.
 	if offset != LUKS2PrimaryHeaderOffset && int64(area) != offset {
-		return nil, nil, fmt.Errorf("%w: secondary header at offset %d records header size %d, want %d",
-			ErrInvalidHeader, offset, area, offset)
+		return nil, nil, &detailError{Kind: ErrInvalidHeader, Detail: fmt.Sprintf(
+			"secondary header at offset %d records header size %d, want %d", offset, area, offset)}
 	}
 
 	// Validate checksum
@@ -566,26 +573,58 @@ func writeHeaderInternal(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2M
 
 	// Write binary header (LUKS2 uses big-endian for integer fields)
 	if err := binary.Write(f, binary.BigEndian, hdr); err != nil {
-		return fmt.Errorf("failed to write header: %w", err)
+		return &detailError{Detail: "failed to write header", Err: err}
 	}
 
 	// Write JSON metadata with padding
 	if _, err := f.Write(jsonData); err != nil {
-		return fmt.Errorf("failed to write metadata: %w", err)
+		return &detailError{Detail: "failed to write metadata", Err: err}
 	}
 
 	// Null-terminate and pad to jsonSize
 	padding := make([]byte, jsonSize-len(jsonData))
 	if _, err := f.Write(padding); err != nil {
-		return fmt.Errorf("failed to write padding: %w", err)
+		return &detailError{Detail: "failed to write padding", Err: err}
 	}
 
-	// Write backup header at the secondary offset, which is the header AREA
-	// SIZE -- the second copy begins where the first one ends. Seeking to a
-	// constant 0x4000 was correct only while the area was always 0x4000, and
-	// silently wrong the moment it was not.
+	// THE PRIMARY IS DURABLE BEFORE THE SECONDARY IS TOUCHED.
+	//
+	// The two copies exist so that an interrupted write can damage at most one
+	// of them, and that holds only if the writes reach the medium in order. With
+	// a single sync at the end, the kernel may write back the dirty pages of
+	// both copies in any order, and a power loss during that writeback can tear
+	// both -- leaving a container no reader can open, by this library or by
+	// cryptsetup. Syncing here means a crash at any point of this function leaves
+	// at least one complete, checksummed copy: the old secondary while the
+	// primary is being written, the new primary while the secondary is. Every
+	// header write in the package comes through here, so every multi-step
+	// operation (MigrateToFIPS among them) inherits the guarantee rather than
+	// re-arguing it.
+	//
+	// A failed sync stops the write before the secondary is touched: the
+	// secondary still holds the previous header, complete, and the caller gets
+	// the error rather than a second copy written on top of an unknown first.
+	if err := syncDevice(f); err != nil {
+		return &detailError{Detail: "failed to sync the primary header before writing the secondary", Err: err}
+	}
+
+	if err := writeSecondaryCopy(f, hdr, jsonData, jsonSize, secondaryOffset); err != nil {
+		return err
+	}
+
+	return syncDevice(f)
+}
+
+// writeSecondaryCopy writes the SECOND header copy of hdr, whose fields
+// describe the primary, with jsonData padded to jsonSize, at secondaryOffset.
+//
+// Write the backup header at the secondary offset, which is the header AREA
+// SIZE -- the second copy begins where the first one ends. Seeking to a
+// constant 0x4000 was correct only while the area was always 0x4000, and
+// silently wrong the moment it was not.
+func writeSecondaryCopy(f *os.File, hdr *LUKS2BinaryHeader, jsonData []byte, jsonSize int, secondaryOffset int64) error {
 	if _, err := f.Seek(secondaryOffset, io.SeekStart); err != nil {
-		return fmt.Errorf("failed to seek to backup header: %w", err)
+		return &detailError{Detail: "failed to seek to backup header", Err: err}
 	}
 
 	// Update header offset and MAGIC for the backup copy. The magic is not a
@@ -605,19 +644,116 @@ func writeHeaderInternal(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2M
 
 	// Write backup header (LUKS2 uses big-endian for integer fields)
 	if err := binary.Write(f, binary.BigEndian, &backupHdr); err != nil {
-		return fmt.Errorf("failed to write backup header: %w", err)
+		return &detailError{Detail: "failed to write backup header", Err: err}
 	}
 
 	// Write backup JSON metadata
 	if _, err := f.Write(jsonData); err != nil {
-		return fmt.Errorf("failed to write backup metadata: %w", err)
+		return &detailError{Detail: "failed to write backup metadata", Err: err}
 	}
-	if _, err := f.Write(padding); err != nil {
-		return fmt.Errorf("failed to write backup padding: %w", err)
+	if _, err := f.Write(make([]byte, jsonSize-len(jsonData))); err != nil {
+		return &detailError{Detail: "failed to write backup padding", Err: err}
+	}
+	return nil
+}
+
+// repairSecondaryHeader rewrites ONLY the secondary header copy from the
+// primary's header and metadata, at the primary's sequence id, and syncs it.
+// Caller must hold the lock.
+//
+// It exists for an operation that is about to destroy something and must
+// first know that EITHER copy, alone, opens the volume afterwards: a secondary
+// left stale or torn by an earlier interrupted write would otherwise be the
+// only copy a later interruption leaves, describing a volume that no longer
+// exists (MigrateToFIPS). The primary is not written, and is made durable
+// before the secondary is touched, so an interruption here leaves the copy
+// the volume already opens through exactly as it was -- writeHeaderInternal,
+// which writes the primary first, would put the one good copy at risk to
+// repair the bad one.
+func repairSecondaryHeader(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) error {
+	f, err := openDevice("repair the secondary LUKS2 header", device, os.O_RDWR)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+
+	jsonData, area, err := encodeMetadataForHeader(hdr, metadata)
+	if err != nil {
+		return err
 	}
 
-	return f.Sync()
+	// THE PRIMARY IS MADE DURABLE BEFORE A SINGLE SECONDARY BYTE IS WRITTEN.
+	//
+	// The primary this repair copies was READ, and a read can be served from
+	// the page cache: an earlier process killed between writing the primary
+	// and syncing it -- or whose sync failed -- leaves a primary that reads
+	// back whole while the medium may hold only part of it, and the old
+	// secondary as the one durable copy. Overwriting that secondary first
+	// would put both copies at risk at once. fsync flushes the file's dirty
+	// pages whoever wrote them, so after it the primary that was read is the
+	// primary on the medium; if it fails, the secondary is left exactly as it
+	// was.
+	if err := syncDevice(f); err != nil {
+		return &detailError{Detail: "failed to make the primary header durable before repairing the secondary", Err: err}
+	}
+
+	primary := *hdr
+	primary.HeaderSize = uint64(area) // #nosec G115 -- headerAreaSizeForWrite bounds this to LUKS2HeaderMaxSize
+	if err := writeSecondaryCopy(f, &primary, jsonData, area-LUKS2HeaderSize, int64(area)); err != nil {
+		return err
+	}
+	if err := syncDevice(f); err != nil {
+		return &detailError{Detail: "failed to sync the repaired secondary header", Err: err}
+	}
+	return nil
 }
+
+// headerCopiesAgree reports whether device's two header copies are both
+// readable and carry the same sequence id and the same metadata, as every
+// completed writeHeaderInternal leaves them. A copy that cannot be read, or
+// that differs, is described in the error.
+func headerCopiesAgree(device string) error {
+	hdr, metadata, err := ReadHeader(device)
+	if err != nil {
+		return &detailError{Kind: ErrInvalidHeader, Detail: "the primary header copy is not readable", Err: err}
+	}
+	// The secondary is read where the primary says it is, and nowhere else.
+	area, err := headerAreaSize(hdr)
+	if err != nil {
+		return err
+	}
+	shdr, smetadata, err := readHeaderCopy(device, int64(area))
+	if err != nil {
+		return &detailError{Kind: ErrInvalidHeader, Detail: "the secondary header copy is not readable", Err: err}
+	}
+	if shdr.SequenceID != hdr.SequenceID {
+		return &detailError{Kind: ErrInvalidHeader, Detail: fmt.Sprintf(
+			"the header copies are at sequence ids %d (primary) and %d (secondary)", hdr.SequenceID, shdr.SequenceID)}
+	}
+	primary, _, err := encodeMetadataForHeader(hdr, metadata)
+	if err != nil {
+		return err
+	}
+	secondary, _, err := encodeMetadataForHeader(shdr, smetadata)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(primary, secondary) {
+		return &detailError{Kind: ErrInvalidHeader, Detail: fmt.Sprintf(
+			"the header copies carry different metadata at the same sequence id %d", hdr.SequenceID)}
+	}
+	return nil
+}
+
+// syncDevice flushes a device written by writeHeaderInternal to stable storage.
+//
+// It is a seam for one reason: the ORDER of the two header copies' durability
+// is the crash-safety property, and it is not observable from outside a
+// process -- a test substitutes this to see the device exactly as a power loss
+// at each sync point would leave it, and to fail the sync between the copies.
+// Unexported and substituted only by this package's own tests, like
+// openFileFunc.
+var syncDevice = (*os.File).Sync
 
 // newUUID is the source of a new container's UUID.
 //
@@ -827,13 +963,13 @@ func validateHeaderChecksum(hdr *LUKS2BinaryHeader, r io.ReaderAt, headerOffset 
 	// rather than derived from the buffer. Checked BEFORE the allocation, which
 	// also refuses a negative size that make() would panic on.
 	if headerSize < checksumFieldOffset+len(hdr.Checksum) {
-		return fmt.Errorf("%w: %d bytes, need at least %d",
-			errChecksumBufferTooShort, headerSize, checksumFieldOffset+len(hdr.Checksum))
+		return &detailError{Kind: errChecksumBufferTooShort, Detail: fmt.Sprintf("%d bytes, need at least %d",
+			headerSize, checksumFieldOffset+len(hdr.Checksum))}
 	}
 
 	headerData := make([]byte, headerSize)
 	if _, err := r.ReadAt(headerData, headerOffset); err != nil {
-		return fmt.Errorf("failed to read header for checksum: %w", err)
+		return &detailError{Detail: "failed to read header for checksum", Err: err}
 	}
 
 	// Zero out the checksum field, which is not part of what it covers. The
@@ -847,9 +983,13 @@ func validateHeaderChecksum(hdr *LUKS2BinaryHeader, r io.ReaderAt, headerOffset 
 	calculated := h.Sum(nil)
 
 	// Compare
+	// A mismatch is a header that is not intact -- torn by an interrupted
+	// write, most often -- and is classified as such, so a caller can tell it
+	// from an I/O failure and reach for the other copy (RestorePrimaryHeader).
 	if !bytes.Equal(calculated, hdr.Checksum[:len(calculated)]) {
-		return fmt.Errorf("header checksum mismatch\nExpected: %x\nCalculated: %x\nHeaderSize: %d, HeaderOffset: %d",
-			hdr.Checksum[:32], calculated[:32], hdr.HeaderSize, hdr.HeaderOffset)
+		return &detailError{Kind: ErrInvalidHeader, Detail: fmt.Sprintf(
+			"header checksum mismatch\nExpected: %x\nCalculated: %x\nHeaderSize: %d, HeaderOffset: %d",
+			hdr.Checksum[:32], calculated[:32], hdr.HeaderSize, hdr.HeaderOffset)}
 	}
 
 	return nil

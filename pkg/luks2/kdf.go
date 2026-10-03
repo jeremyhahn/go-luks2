@@ -5,11 +5,14 @@
 package luks2
 
 import (
+	"crypto"
 	"crypto/fips140"
 	"crypto/pbkdf2"
-	"crypto/sha1" // #nosec G505 - legacy LUKS interop only; refused in FIPS mode (docs/FIPS.md)
-	"crypto/sha256"
-	"crypto/sha512"
+	// The hashes pbkdf2Hash resolves to, linked in so crypto.Hash.New can
+	// construct them.
+	_ "crypto/sha1" // #nosec G505 - legacy LUKS interop only; refused in FIPS mode (docs/FIPS.md)
+	_ "crypto/sha256"
+	_ "crypto/sha512"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -76,6 +79,20 @@ func normalizeKDFType(kdfType string) string {
 	return strings.ToLower(strings.TrimSpace(kdfType))
 }
 
+// fipsMode reports whether this process runs in FIPS 140-3 mode. It is
+// crypto/fips140.Enabled, and every FIPS policy decision in this package --
+// the KDF gates, the SHA-1 gate, MigrateToFIPS's refusal, and the
+// classification of a refusal as an import rather than damage -- asks it here.
+//
+// It is a seam because FIPS mode is fixed at process start: without it, the
+// policy branches run only in a process started with GODEBUG=fips140=only, so
+// the ordinary unit run would exercise none of them and a regression there
+// would wait for the nightly FIPS job. This package's tests substitute it to
+// run those branches in-process; what the Go Cryptographic Module itself
+// enforces in strict mode is still proved by the child-process and nightly
+// tests. Unexported, no setter, substituted only by this package's tests.
+var fipsMode = fips140.Enabled
+
 // requireFIPSApprovedKDF returns an error when kdfType is not FIPS-approved and
 // the process is running in FIPS 140-3 mode.
 //
@@ -86,7 +103,7 @@ func normalizeKDFType(kdfType string) string {
 //
 // PBKDF2 hash selection is enforced separately, in getPBKDF2HashFunc.
 func requireFIPSApprovedKDF(kdfType string) error {
-	if !fips140.Enabled() {
+	if !fipsMode() {
 		return nil
 	}
 
@@ -270,26 +287,43 @@ func derivePBKDF2(passphrase, salt []byte, kdf *KDF, keySize int) ([]byte, error
 // Supported: sha256, sha384, sha512 (FIPS-approved) and sha1 (legacy LUKS
 // headers only, refused in FIPS 140-3 mode)
 func getPBKDF2HashFunc(hashAlgo string) (func() hash.Hash, error) {
+	h, err := pbkdf2Hash(hashAlgo)
+	if err != nil {
+		return nil, err
+	}
+	// PBKDF2-HMAC-SHA1 is needed to open LUKS headers written by cryptsetup
+	// releases that defaulted to SHA-1, but the Go Cryptographic Module
+	// permits PBKDF2 only with SHA-2/SHA-3 and panics on SHA-1 under
+	// GODEBUG=fips140=only. Refuse it here so a FIPS build reports a typed
+	// error instead of crashing, and so the call never reaches the module.
+	// See docs/FIPS.md.
+	if h == crypto.SHA1 && fipsMode() {
+		return nil, &CryptoError{Op: "pbkdf2-hmac-sha1", Err: ErrFIPSNotApproved}
+	}
+	return h.New, nil
+}
+
+// pbkdf2Hash resolves a LUKS2 PBKDF2 hash name to the algorithm, with NO FIPS
+// 140-3 gate. It is the one table of names this package derives with:
+// getPBKDF2HashFunc is it plus the gate, and the screen asks it alone when the
+// question is whether a header is well formed rather than whether this process
+// may run it -- see screenDigestStructure.
+//
+// Resolving to a crypto.Hash rather than a constructor means a length can be
+// read (crypto.Hash.Size is a table lookup) without instantiating SHA-1 in a
+// process where the module refuses it.
+func pbkdf2Hash(hashAlgo string) (crypto.Hash, error) {
 	switch strings.ToLower(hashAlgo) {
 	case "sha1":
-		// PBKDF2-HMAC-SHA1 is needed to open LUKS headers written by cryptsetup
-		// releases that defaulted to SHA-1, but the Go Cryptographic Module
-		// permits PBKDF2 only with SHA-2/SHA-3 and panics on SHA-1 under
-		// GODEBUG=fips140=only. Refuse it here so a FIPS build reports a typed
-		// error instead of crashing, and so the call never reaches the module.
-		// See docs/FIPS.md.
-		if fips140.Enabled() {
-			return nil, &CryptoError{Op: "pbkdf2-hmac-sha1", Err: ErrFIPSNotApproved}
-		}
-		return sha1.New, nil
+		return crypto.SHA1, nil
 	case "sha256":
-		return sha256.New, nil
+		return crypto.SHA256, nil
 	case "sha384":
-		return sha512.New384, nil
+		return crypto.SHA384, nil
 	case "sha512":
-		return sha512.New, nil
+		return crypto.SHA512, nil
 	default:
-		return nil, fmt.Errorf("%w: %s (supported: sha1, sha256, sha384, sha512)", ErrUnsupportedHash, hashAlgo)
+		return 0, &detailError{Kind: ErrUnsupportedHash, Detail: hashAlgo + " (supported: sha1, sha256, sha384, sha512)"}
 	}
 }
 

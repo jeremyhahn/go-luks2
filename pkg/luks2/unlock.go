@@ -1024,61 +1024,17 @@ func verifyKeyAgainstDigests(masterKey *enclave.MemoryEnclave, digests map[strin
 		}
 		applicable++
 
-		// EVERY pre-derivation check lives in screenDigest, which the removal
-		// guard also consumes -- see keyslotHasUsableDigest. This function used
-		// to carry them inline, and the guard therefore had no way to ask the
-		// question they answer: it settled for "is a digest ASSOCIATED with this
-		// keyslot", counted a keyslot whose only digest could never be
-		// evaluated, and authorized destroying the one that worked.
-		//
-		// It is consumed rather than repeated: `expected` and `kdf` are values
-		// this loop cannot obtain any other way, so the screen cannot be skipped
-		// and a check added to it cannot fail to reach the guard.
-		//
-		// Deriving to the length ACTUALLY STORED, which screenDigest establishes,
-		// is what cryptsetup does and is the only choice correct in both
-		// directions. A cryptsetup-written sha512 volume stores 64 bytes and
-		// needs 64 derived, which a hardcoded 32 could never produce (#73). A
-		// volume written by an earlier version of THIS library stores 32 bytes
-		// under a "sha512" label; deriving to the hash's natural 64 would render
-		// every such volume unopenable.
+		// The screen, the derivation and the comparison are evaluateDigest's;
+		// see it for why each is done the way it is.
 		//
 		// A digest that fails any of it is SKIPPED, not fatal -- the symmetry
 		// #58 established -- so one unusable digest cannot hide a usable one
 		// behind it.
-		expected, kdf, err := screenDigest(digest)
-		if err != nil {
-			clearBytes(expected)
+		ok, matched := evaluateDigest(masterKey, digest)
+		if !ok {
 			continue // unusable digest -- try the next one (#58)
 		}
-
-		// The derivation borrows the master key in place; this package makes
-		// no copy of it.
-		//
-		// It does leave protected memory once inside the KDF, though: pbkdf2
-		// stringifies its password argument, so every digest tried here puts
-		// the master key into an unwipeable Go string. See exposure 2 in
-		// enclave.go. Trying N digests materializes it N times.
-		derived, err := deriveKeySecret(masterKey, kdf, len(expected))
-		if err != nil {
-			clearBytes(expected)
-			continue // e.g. non-approved KDF in FIPS mode -- try the next (#58)
-		}
-
-		// Compare using constant-time comparison to prevent timing attacks.
-		// MemoryEnclave.EqualTo does exactly that, under the enclave's own read
-		// lock, so the derived digest is never copied out to be compared. The
-		// stored digest is a cleartext header field and is cleared anyway; the
-		// derived one is destroyed on every path before the next iteration,
-		// because deferring would pile up one locked region per digest and free
-		// none of them until the function returned.
-		// A comparison is about to run, which is what makes this digest
-		// EVALUATED rather than merely applicable. Counted whether it matches
-		// or not.
 		evaluated++
-		matched := derived.EqualTo(expected)
-		releaseSecret(derived)
-		clearBytes(expected)
 		if matched {
 			return nil // Verification successful
 		}
@@ -1128,6 +1084,64 @@ func verifyKeyAgainstDigests(masterKey *enclave.MemoryEnclave, digests map[strin
 	}
 
 	return ErrMasterKeyVerification
+}
+
+// evaluateDigest compares masterKey against ONE digest. evaluated is false when
+// the digest could not be used at all -- it failed screenDigest, or its
+// derivation was refused -- and in that case matched is false too and no
+// comparison ran. verifyMasterKey counts the two outcomes separately; see its
+// comments for why that difference is the line between a header fault and a
+// credential verdict.
+//
+// It is the body of verifyMasterKey's loop, split out so MigrateToFIPS can ask
+// "does this particular digest attest this key" before it replaces the digest,
+// through the same screen and the same comparison the unlock uses.
+func evaluateDigest(masterKey *enclave.MemoryEnclave, digest *Digest) (evaluated, matched bool) {
+	// EVERY pre-derivation check lives in screenDigest, which the removal
+	// guard also consumes -- see keyslotHasUsableDigest. This function used
+	// to carry them inline, and the guard therefore had no way to ask the
+	// question they answer: it settled for "is a digest ASSOCIATED with this
+	// keyslot", counted a keyslot whose only digest could never be
+	// evaluated, and authorized destroying the one that worked.
+	//
+	// It is consumed rather than repeated: `expected` and `kdf` are values
+	// this function cannot obtain any other way, so the screen cannot be
+	// skipped and a check added to it cannot fail to reach the guard.
+	//
+	// Deriving to the length ACTUALLY STORED, which screenDigest establishes,
+	// is what cryptsetup does and is the only choice correct in both
+	// directions. A cryptsetup-written sha512 volume stores 64 bytes and
+	// needs 64 derived, which a hardcoded 32 could never produce (#73). A
+	// volume written by an earlier version of THIS library stores 32 bytes
+	// under a "sha512" label; deriving to the hash's natural 64 would render
+	// every such volume unopenable.
+	expected, kdf, err := screenDigest(digest)
+	defer clearBytes(expected)
+	if err != nil {
+		return false, false
+	}
+
+	// The derivation borrows the master key in place; this package makes
+	// no copy of it.
+	//
+	// It does leave protected memory once inside the KDF, though: pbkdf2
+	// stringifies its password argument, so every digest tried here puts
+	// the master key into an unwipeable Go string. See exposure 2 in
+	// enclave.go. Trying N digests materializes it N times.
+	derived, err := deriveKeySecret(masterKey, kdf, len(expected))
+	if err != nil {
+		return false, false // e.g. non-approved KDF in FIPS mode (#58)
+	}
+
+	// Compare using constant-time comparison to prevent timing attacks.
+	// MemoryEnclave.EqualTo does exactly that, under the enclave's own read
+	// lock, so the derived digest is never copied out to be compared. The
+	// stored digest is a cleartext header field and is cleared anyway; the
+	// derived one is destroyed before returning, so a caller trying several
+	// digests never holds more than one locked region for them at a time.
+	matched = derived.EqualTo(expected)
+	releaseSecret(derived)
+	return true, matched
 }
 
 // getBlockDeviceSize gets the size of a block device or file.

@@ -199,6 +199,62 @@ var (
 	// FIPS 140-3 mode. See docs/FIPS.md.
 	ErrFIPSNotApproved = errors.New("algorithm not approved in FIPS 140-3 mode")
 
+	// ErrFIPSImportRequired indicates that a FIPS 140-3 process met a volume
+	// whose keyslots -- or the digests attesting them -- use a KDF FIPS mode
+	// cannot execute, most often Argon2id, cryptsetup's default. The volume is
+	// not damaged. The remedy is a one-time MigrateToFIPS from a process that
+	// is NOT in FIPS mode. It is carried by FIPSImportRequiredError, which also
+	// matches ErrFIPSNotApproved.
+	ErrFIPSImportRequired = errors.New("volume must be imported for FIPS 140-3 mode before a FIPS process can open it")
+
+	// ErrFIPSMigrationUnderFIPS indicates MigrateToFIPS was called in a process
+	// running in FIPS 140-3 mode. The migration has to unlock the volume through
+	// its existing Argon2 keyslots, which FIPS mode cannot execute, so it is
+	// refused before the device is touched rather than failing inside the
+	// derivation.
+	ErrFIPSMigrationUnderFIPS = errors.New("the FIPS import must run in a process that is not in FIPS 140-3 mode")
+
+	// ErrFIPSMigrationDigest indicates a digest whose KDF is not FIPS-approved
+	// could not be migrated, because it could not be evaluated or does not
+	// attest the volume key the passphrase recovered. Rewriting it would
+	// replace an attestation about some other key with one about this key, so
+	// the migration refuses before writing anything.
+	ErrFIPSMigrationDigest = errors.New("a digest that is not FIPS-approved does not attest the recovered volume key and cannot be migrated")
+
+	// ErrFIPSMigrationVerification indicates MigrateToFIPS could not confirm
+	// its own outcome: the migrated keyslot did not open the volume through a
+	// FIPS-approved path to the same volume key, or a keyslot or digest that is
+	// not FIPS-approved remained that the caller did not ask to keep. The
+	// operation reports failure rather than a success nobody checked.
+	ErrFIPSMigrationVerification = errors.New("the FIPS import could not verify that the volume opens through FIPS-approved KDFs only")
+
+	// ErrFIPSMigrationUnboundKey indicates the passphrase handed to
+	// MigrateToFIPS does not open a keyslot holding the volume key the data
+	// segments are encrypted with. Migrating whatever key it does open -- an
+	// unbound key a LUKS2 header may carry beside the volume key -- and then
+	// removing the non-approved keyslots would erase the only way to the data
+	// while the migrated keyslot still opened, so the migration refuses before
+	// writing anything.
+	ErrFIPSMigrationUnboundKey = errors.New("the passphrase does not open a keyslot holding the key the data segments are encrypted with")
+
+	// ErrUnsupportedLUKSVersion indicates a header copy whose magic is LUKS
+	// but whose version is not 2 -- a LUKS1 container, most often. It is not
+	// damage, and is not reported as ErrInvalidHeader.
+	ErrUnsupportedLUKSVersion = errors.New("unsupported LUKS version")
+
+	// ErrDeviceCacheStale indicates that bytes read from the device through the
+	// page cache differ from the same bytes read past it (O_DIRECT): another
+	// process holds the device mapped, or an earlier write failed and left
+	// bytes in the cache that never reached the medium. An operation that
+	// would act on what it read refuses rather than act on what is not there.
+	ErrDeviceCacheStale = errors.New("the device's page cache does not match what is on the medium")
+
+	// ErrDirectIOUnsupported indicates the device cannot be read past the
+	// page cache (O_DIRECT is refused) and is not on a memory filesystem,
+	// where the cache would be the only copy. What is on the medium therefore
+	// cannot be confirmed, and an operation that needs it confirmed refuses.
+	ErrDirectIOUnsupported = errors.New("the device cannot be read past the page cache, so what is on the medium cannot be confirmed")
+
 	// ErrKDFCalibration indicates that the PBKDF2 iteration count for a NEW
 	// keyslot could not be calibrated, and that no keyslot was created.
 	//
@@ -938,3 +994,158 @@ func (e *Argon2CostError) Error() string {
 }
 
 func (e *Argon2CostError) Unwrap() error { return e.Err }
+
+// NonApprovedKDF names one keyslot or digest whose KDF FIPS 140-3 mode cannot
+// execute. ID is the header's own key for the object; Type and Hash are its KDF
+// as declared ("argon2id" and "", or "pbkdf2" and "sha1").
+type NonApprovedKDF struct {
+	ID   string
+	Type string
+	Hash string
+
+	// Reason is set when the algorithm itself is approved but a parameter
+	// is one strict FIPS mode (GODEBUG=fips140=only) refuses -- a salt
+	// shorter than 128 bits, an output shorter than 112 bits. Empty when the
+	// algorithm is what is not approved.
+	Reason string
+}
+
+// String renders the KDF the way an operator would name it: "argon2id",
+// "pbkdf2-sha1", "pbkdf2-sha256 (salt shorter than 128 bits)".
+func (k NonApprovedKDF) String() string {
+	name := k.Type
+	if k.Hash != "" {
+		name += "-" + k.Hash
+	}
+	if k.Reason != "" {
+		name += " (" + k.Reason + ")"
+	}
+	return name
+}
+
+// FIPSImportRequiredError is what a FIPS 140-3 process gets when it tries to
+// open a volume it cannot open ONLY because the volume's keyslots or digests
+// use a KDF FIPS mode cannot execute -- an Argon2 keyslot, as every volume from
+// a default `cryptsetup luksFormat` has.
+//
+// Its message is written for someone who does not know LUKS2 internals, because
+// the bare refusal it replaces ("invalid keyslot: argon2id: algorithm not
+// approved") read as corruption. It says the volume is intact, what it uses,
+// why this process cannot execute that, and that MigrateToFIPS is the remedy.
+//
+// It matches ErrFIPSImportRequired and ErrFIPSNotApproved with errors.Is, so a
+// caller that already branched on the latter keeps working. It deliberately
+// does NOT unwrap to the scan's ErrInvalidKeyslot or ErrInvalidHeader: those
+// say the header is damaged, which is precisely the reading this error exists
+// to correct.
+type FIPSImportRequiredError struct {
+	// Device is the volume that was being opened.
+	Device string
+
+	// Keyslots are the keyslots whose own KDF is not approved.
+	Keyslots []NonApprovedKDF
+
+	// Digests are the digests attesting the refused keyslots whose KDF is not
+	// approved. A volume can need these migrated even when every keyslot is
+	// already PBKDF2, and the failure looks identical from outside.
+	Digests []NonApprovedKDF
+}
+
+func (e *FIPSImportRequiredError) Error() string {
+	var uses []string
+	for _, k := range e.Keyslots {
+		uses = append(uses, fmt.Sprintf("keyslot %s uses %s", k.ID, k))
+	}
+	for _, d := range e.Digests {
+		uses = append(uses, fmt.Sprintf("digest %s uses %s", d.ID, d))
+	}
+	return fmt.Sprintf("%s: %s is intact, but this process runs in FIPS 140-3 mode and %s, which FIPS mode cannot execute; "+
+		"no key was derived through them, so this is not a verdict on the volume or on the passphrase; "+
+		"import it once with MigrateToFIPS from a process that is NOT in FIPS mode -- it rewraps the existing volume key "+
+		"under PBKDF2 without re-encrypting any data -- and this process can then open it",
+		ErrFIPSImportRequired.Error(), e.Device, strings.Join(uses, " and "))
+}
+
+// Is reports a match for ErrFIPSImportRequired and ErrFIPSNotApproved.
+func (e *FIPSImportRequiredError) Is(target error) bool {
+	return target == ErrFIPSImportRequired || target == ErrFIPSNotApproved
+}
+
+// FIPSMigrationError reports a MigrateToFIPS that did not complete: which stage
+// failed, why, and -- because a migration writes to the device in several steps
+// -- what state the volume was left in. State is never left for the caller to
+// infer; the migration is ordered so that every state it can stop in is
+// openable, and State says by what.
+type FIPSMigrationError struct {
+	// Device is the volume being migrated.
+	Device string
+
+	// Stage is the step that failed: "precondition", "unlock", "plan",
+	// "sync", "reconcile header copies", "add keyslot", "migrate digest",
+	// "verify", "remove keyslot" or "final check".
+	Stage string
+
+	// State describes the volume as the failure left it.
+	State string
+
+	// Err is the cause, reachable through Unwrap.
+	Err error
+}
+
+func (e *FIPSMigrationError) Error() string {
+	return fmt.Sprintf("FIPS import of %s failed at %s: %v; %s", e.Device, e.Stage, e.Err, e.State)
+}
+
+func (e *FIPSMigrationError) Unwrap() error { return e.Err }
+
+// detailError is the typed form of what this package used to build with
+// fmt.Errorf("%w: detail: %w", sentinel, cause): a sentinel that classifies the
+// failure, the specifics an operator needs, and the underlying cause.
+//
+// Both Kind and Err stay reachable through errors.Is and errors.As, so a caller
+// matching the sentinel and one matching the cause's own type both keep
+// working. Either may be nil. The message is laid out exactly as the fmt.Errorf
+// it replaces rendered it -- "kind: detail: cause" -- so converting a site
+// changes its type and not what an operator reads.
+type detailError struct {
+	// Kind is the sentinel classifying the failure, or nil.
+	Kind error
+
+	// Detail says which object and why, in words.
+	Detail string
+
+	// Err is the underlying cause, or nil.
+	Err error
+}
+
+func (e *detailError) Error() string {
+	var b strings.Builder
+	if e.Kind != nil {
+		b.WriteString(e.Kind.Error())
+	}
+	if e.Detail != "" {
+		if b.Len() > 0 {
+			b.WriteString(": ")
+		}
+		b.WriteString(e.Detail)
+	}
+	if e.Err != nil {
+		if b.Len() > 0 {
+			b.WriteString(": ")
+		}
+		b.WriteString(e.Err.Error())
+	}
+	return b.String()
+}
+
+// Unwrap exposes both the classifying sentinel and the cause.
+func (e *detailError) Unwrap() []error {
+	errs := make([]error, 0, 2)
+	if e.Kind != nil {
+		errs = append(errs, e.Kind)
+	}
+	if e.Err != nil {
+		errs = append(errs, e.Err)
+	}
+	return errs
+}
