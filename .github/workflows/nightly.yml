@@ -92,7 +92,7 @@ jobs:
       # only formats, inspects headers and judges the children -- so it proves
       # the same thing here as in the ordinary unit run.
       - name: FIPS import (non-FIPS migrate, then FIPS open)
-        run: go test -count=1 -timeout=900s -v -run '^TestFIPSImportOf(ACryptsetupArgon2idVolume|ACryptsetupVolumeWithShortSalts|ACryptsetupVolumeWithAnUnboundKey)$' ./pkg/luks2
+        run: go test -count=1 -timeout=900s -v -run '^TestFIPSImportOf(ACryptsetupArgon2idVolume|ACryptsetupVolumeWithShortSalts|ACryptsetupVolumeWithAnUnboundKey|SHA1AFVolumes)$' ./pkg/luks2
 
       # Mirrors the repo's own unit-test scope with ONLY the FIPS env changed.
       # `./...` is the right scope here because the integration suites sit

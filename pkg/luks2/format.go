@@ -40,6 +40,13 @@ func Format(opts FormatOptions) error {
 	if opts.HashAlgo == "" {
 		opts.HashAlgo = DefaultHashAlgo
 	}
+	// HashAlgo is also the new keyslot's anti-forensic hash, so it must be one
+	// a keyslot may be WRITTEN with -- never SHA-1 (#236) -- and that is
+	// refused here, before the KDF is paid for and before the device is
+	// touched.
+	if _, err := getHashFunc(opts.HashAlgo); err != nil {
+		return err
+	}
 	if opts.SectorSize == 0 {
 		opts.SectorSize = DefaultSectorSize
 	}

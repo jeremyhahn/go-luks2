@@ -914,39 +914,39 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 		return err
 	}
 	if err := ValidatePassphrase(oldPassphrase); err != nil {
-		return fmt.Errorf("invalid old passphrase: %w", err)
+		return &detailError{Detail: "invalid old passphrase", Err: err}
 	}
 	if err := ValidatePassphrase(newPassphrase); err != nil {
-		return fmt.Errorf("invalid new passphrase: %w", err)
+		return &detailError{Detail: "invalid new passphrase", Err: err}
 	}
 	if keyslot < 0 || keyslot >= MaxKeyslots {
-		return fmt.Errorf("invalid keyslot: %d (must be 0-%d)", keyslot, MaxKeyslots-1)
+		return &detailError{Kind: ErrInvalidKeyslot, Detail: fmt.Sprintf("%d (must be 0-%d)", keyslot, MaxKeyslots-1)}
 	}
 
 	// Acquire exclusive lock
 	lock, err := AcquireFileLock(device)
 	if err != nil {
-		return fmt.Errorf("failed to acquire lock: %w", err)
+		return &detailError{Detail: "failed to acquire lock", Err: err}
 	}
 	defer func() { _ = lock.Release() }()
 
 	// Read existing header and metadata
 	hdr, metadata, err := ReadHeader(device)
 	if err != nil {
-		return fmt.Errorf("failed to read header: %w", err)
+		return &detailError{Detail: "failed to read header", Err: err}
 	}
 
 	// Check that keyslot exists
 	slotIDStr := strconv.Itoa(keyslot)
 	targetKeyslot, exists := metadata.Keyslots[slotIDStr]
 	if !exists {
-		return fmt.Errorf("keyslot %d does not exist", keyslot)
+		return &detailError{Kind: ErrInvalidKeyslot, Detail: fmt.Sprintf("keyslot %d does not exist", keyslot)}
 	}
 
 	// Unlock with old passphrase to get master key
 	masterKey, err := unlockKeyslot(device, slotIDStr, oldPassphrase, targetKeyslot, metadata.Digests)
 	if err != nil {
-		return fmt.Errorf("old passphrase does not match keyslot %d: %w", keyslot, err)
+		return &detailError{Detail: fmt.Sprintf("old passphrase does not match keyslot %d", keyslot), Err: err}
 	}
 	defer releaseSecret(masterKey)
 
@@ -1037,27 +1037,35 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 
 	kdf, err := CreateKDF(formatOpts, targetKeyslot.KeySize)
 	if err != nil {
-		return fmt.Errorf("failed to create KDF: %w", err)
+		return &detailError{Detail: "failed to create KDF", Err: err}
 	}
 
 	// Derive key from new passphrase
 	passphraseKey, err := DeriveKeyEnclave(newPassphrase, kdf, targetKeyslot.KeySize)
 	if err != nil {
-		return fmt.Errorf("failed to derive key: %w", err)
+		return &detailError{Detail: "failed to derive key", Err: err}
 	}
 	defer releaseSecret(passphraseKey)
+
+	// A keyslot read with SHA-1 anti-forensic hashing -- a converted LUKS1
+	// keyslot -- is REWRITTEN with the default: this package reads SHA-1
+	// keyslots and never writes one (#236). The area holds the same bytes
+	// either way, keySize x stripes, so nothing else moves.
+	if targetKeyslot.AF.Hash == "sha1" {
+		targetKeyslot.AF.Hash = DefaultHashAlgo
+	}
 
 	// Apply anti-forensic split to master key
 	afData, err := afSplitEnclave(masterKey, AFStripes, targetKeyslot.AF.Hash)
 	if err != nil {
-		return fmt.Errorf("failed to apply AF split: %w", err)
+		return &detailError{Detail: "failed to apply AF split", Err: err}
 	}
 	defer releaseSecret(afData)
 
 	// Encrypt AF-split key material with new passphrase-derived key
 	encryptedKeyMaterial, err := encryptKeyMaterialEnclave(afData, passphraseKey, DefaultCipher)
 	if err != nil {
-		return fmt.Errorf("failed to encrypt key material: %w", err)
+		return &detailError{Detail: "failed to encrypt key material", Err: err}
 	}
 	defer clearBytes(encryptedKeyMaterial)
 
@@ -1066,12 +1074,12 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 	// oldArea below, which is what the final wipe acts on.
 	existingSize, err := parseSize(targetKeyslot.Area.Size)
 	if err != nil {
-		return fmt.Errorf("failed to parse keyslot size: %w", err)
+		return &detailError{Detail: "failed to parse keyslot size", Err: err}
 	}
 
 	// Verify new key material fits in existing area
 	if int64(len(encryptedKeyMaterial)) > existingSize {
-		return fmt.Errorf("new key material too large for existing keyslot area")
+		return &detailError{Kind: ErrInvalidKeyslot, Detail: "new key material too large for existing keyslot area"}
 	}
 
 	// THE NEW MATERIAL GOES SOMEWHERE ELSE, AND THE OLD AREA IS WIPED LAST.
@@ -1099,7 +1107,7 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 	// the area freed here is reclaimed by the next relocation.
 	newOffset, err := findFreeKeyslotArea(hdr, metadata, existingSize)
 	if err != nil {
-		return fmt.Errorf("cannot rewrite keyslot %d safely: %w; add a new key and remove this slot instead", keyslot, err)
+		return &detailError{Detail: fmt.Sprintf("cannot rewrite keyslot %d safely (add a new key and remove this slot instead)", keyslot), Err: err}
 	}
 
 	// The area this call will eventually ZERO is checked here, up front, against
@@ -1136,16 +1144,16 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 	// volume exactly as it was.
 	f, err := os.OpenFile(device, os.O_RDWR, 0600) // #nosec G304 -- device path validated by caller
 	if err != nil {
-		return fmt.Errorf("failed to open device: %w", err)
+		return &detailError{Detail: "failed to open device", Err: err}
 	}
 	defer func() { _ = f.Close() }()
 
 	if _, err := f.Seek(newOffset, io.SeekStart); err != nil {
-		return fmt.Errorf("failed to seek to keyslot area: %w", err)
+		return &detailError{Detail: "failed to seek to keyslot area", Err: err}
 	}
 
 	if _, err := f.Write(encryptedKeyMaterial); err != nil {
-		return fmt.Errorf("failed to write key material: %w", err)
+		return &detailError{Detail: "failed to write key material", Err: err}
 	}
 
 	// Pad remaining area
@@ -1153,7 +1161,7 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 	if remaining > 0 {
 		padding := make([]byte, remaining)
 		if _, err := f.Write(padding); err != nil {
-			return fmt.Errorf("failed to write padding: %w", err)
+			return &detailError{Detail: "failed to write padding", Err: err}
 		}
 	}
 
@@ -1161,12 +1169,12 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 	// would recreate the window in a new place: a header pointing at an area
 	// whose contents had not reached the device.
 	if err := f.Sync(); err != nil {
-		return fmt.Errorf("failed to sync: %w", err)
+		return &detailError{Detail: "failed to sync", Err: err}
 	}
 
 	// The commit point. After this the new passphrase opens the volume.
 	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
-		return fmt.Errorf("failed to write header: %w", err)
+		return &detailError{Detail: "failed to write header", Err: err}
 	}
 
 	// Only now is the old material destroyed. That the wipe is SAFE was
@@ -1176,7 +1184,7 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 	old := *targetKeyslot
 	old.Area = &oldArea
 	if err := wipeKeyslotArea(device, &old); err != nil {
-		return fmt.Errorf("the new passphrase is live in keyslot %d, but the old key material could not be destroyed: %w", keyslot, err)
+		return &detailError{Detail: fmt.Sprintf("the new passphrase is live in keyslot %d, but the old key material could not be destroyed", keyslot), Err: err}
 	}
 
 	return nil

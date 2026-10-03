@@ -248,9 +248,16 @@ func screenKeyslot(id string, keyslot *Keyslot, digests map[string]*Digest) (key
 		return plan, &InvalidKeyslotError{Keyslot: id, Reason: "declares a volume key size AES-XTS cannot use", Err: err}
 	}
 
-	// The anti-forensic merge resolves this name and fails if it cannot.
-	if _, err := getHashFunc(keyslot.AF.Hash); err != nil {
+	// The anti-forensic merge resolves this name and fails if it cannot. SHA-1
+	// resolves (#236): it is what a converted LUKS1 volume carries.
+	if err := afHashReadable(keyslot.AF.Hash); err != nil {
 		return plan, &InvalidKeyslotError{Keyslot: id, Reason: "declares an anti-forensic hash nothing implements", Err: err}
+	}
+	// The FIPS 140-3 gate on it, after the structural check so a refusal here
+	// is a well-formed keyslot this process may not run -- which is what
+	// keyslotRefusedByFIPS depends on to call it an import, not damage.
+	if err := requireFIPSApprovedAFHash(keyslot.AF.Hash); err != nil {
+		return plan, &InvalidKeyslotError{Keyslot: id, Reason: "declares an anti-forensic hash the merge refuses", Err: err}
 	}
 
 	// A keyslot no digest attests cannot be authenticated at all -- see

@@ -166,10 +166,9 @@ fails each write in turn and checks the reported stage and state as well, and
 torn states of the header write that adds the keyslot and checks every state a
 second crash could leave.
 
-Volumes whose keyslots use a SHA-1 anti-forensic hash (`cryptsetup luksFormat
---hash sha1`, or a converted LUKS1 volume) cannot be imported: this library
-does not unlock them in any mode, because its anti-forensic merge implements
-SHA-256 and SHA-512 only.
+Volumes whose keyslots use a SHA-1 anti-forensic hash — `cryptsetup
+luksFormat --hash sha1`, or any LUKS1 volume converted with `cryptsetup
+convert` — are imported the same way: see "SHA-1 anti-forensic keyslots" below.
 
 **Why it runs outside FIPS mode.** Step 1 executes the volume's Argon2 keyslot.
 The import is therefore a non-FIPS step that produces a FIPS-ready volume, and
@@ -250,13 +249,54 @@ ordinary test run, not only in the nightly FIPS job; what the Go Cryptographic
 Module itself enforces under `GODEBUG=fips140=only` is still proved by the
 child-process tests.
 
+## SHA-1 anti-forensic keyslots (#236)
+
+LUKS1 split the volume key across its anti-forensic stripes with SHA-1 by
+default, and `cryptsetup convert --type luks2` keeps that, so every converted
+LUKS1 volume carries keyslots with `af.hash: "sha1"` — as does any volume from
+`cryptsetup luksFormat --hash sha1`, together with a PBKDF2-SHA1 digest.
+
+**Outside FIPS mode** such keyslots are read: the merge resolves SHA-1
+(`getAFMergeHashFunc`) and recovers the same volume key cryptsetup does. Both
+shapes are checked against real cryptsetup, on file images by
+`TestSHA1AFVolumesOpenWithCryptsetupsVolumeKey` and on the kernel by the
+integration suite's `TestSHA1AFVolumesMapTheSameDataOnTheKernel`, which reads
+plaintext written through cryptsetup's mapping back through one `Unlock` made.
+
+**In FIPS 140-3 mode** they are refused before any hashing runs. SHA-1 is not an
+approved diffuser of key material, and under `GODEBUG=fips140=only` the Go
+module makes SHA-1's `Write` return an error that `hash.Hash` callers discard,
+so without the gate the merge would complete with wrong bytes rather than fail.
+The refusal is the typed `*FIPSImportRequiredError` described above, naming the
+keyslot's anti-forensic hash — for example `keyslot 0 uses pbkdf2-sha1
+(anti-forensic hash sha1) and digest 0 uses pbkdf2-sha1` for a converted LUKS1
+volume — and `NonApprovedKDF.Reason` carries `anti-forensic hash sha1`.
+
+**The import** (`MigrateToFIPS`, run outside FIPS mode) treats a SHA-1 AF
+keyslot as non-approved whatever its KDF: it is never reused as the migrated
+keyslot, the new keyslot is PBKDF2-SHA256 with a SHA-256 split, the SHA-1
+digest is rewritten, the original keyslots are removed by default, and the
+static check refuses any SHA-1 AF hash that remains. `TestFIPSImportOfSHA1AFVolumes`
+imports both shapes and opens the result in a `fips140=only` process, and the
+integration test does the same on the kernel.
+
+**SHA-1 is read, never written.** The anti-forensic split — every path that
+writes a keyslot — accepts SHA-256 and SHA-512 only. `Format` refuses
+`HashAlgo: "sha1"` with `ErrUnsupportedHash` before it touches the device;
+`AddKey` writes SHA-256; and `ChangeKey` on a SHA-1 keyslot rewrites it with a
+SHA-256 split (the area size is the same). `ChangeKey` keeps a keyslot's KDF and
+cost, so a converted LUKS1 keyslot's PBKDF2-SHA1 KDF survives a passphrase
+change; `MigrateToFIPS` is what replaces it.
+
 ## Exemption: PBKDF2-HMAC-SHA1 for legacy LUKS headers
 
 **Scope.** `getPBKDF2HashFunc("sha1")` in `pkg/luks2/kdf.go`, reachable through
 `DeriveKeyEnclave`, `BenchmarkPBKDF2` and `CreateKDF` (the `pbkdf2-sha1` alias, or the
-`pbkdf2` type with `HashAlgo: "sha1"`). Nothing else in this repository uses
-SHA-1 or any other non-approved primitive; the anti-forensic splitter
-(`pkg/luks2/antiforensic.go`) already accepts only SHA-256 and SHA-512.
+`pbkdf2` type with `HashAlgo: "sha1"`), and `getAFMergeHashFunc("sha1")` in
+`pkg/luks2/antiforensic.go`, the anti-forensic MERGE of a SHA-1 keyslot (see
+"SHA-1 anti-forensic keyslots" below). Nothing else in this repository uses
+SHA-1 or any other non-approved primitive; the anti-forensic SPLIT, which writes
+keyslots, accepts only SHA-256 and SHA-512.
 
 **Why the primitive is needed.** A LUKS keyslot records the hash its PBKDF2
 digest was derived with, in the LUKS1 `hash-spec` header field and in the LUKS2

@@ -837,7 +837,15 @@ func keyslotFIPSRefusal(id string, keyslot *Keyslot) (refusal NonApprovedKDF, ok
 		return refusal, false
 	}
 	refusal.Type, refusal.Hash = keyslot.KDF.Type, keyslot.KDF.Hash
-	if !fipsApprovedKDF(keyslot.KDF.Type, keyslot.KDF.Hash) {
+	// The anti-forensic hash runs on every unlock too, and SHA-1 -- what a
+	// converted LUKS1 keyslot carries -- is not approved there (#236). Named
+	// even when the KDF is refused as well, so an operator is told every
+	// reason the keyslot cannot be opened in FIPS mode.
+	afRefused := keyslot.AF != nil && keyslot.AF.Hash == "sha1"
+	if afRefused {
+		refusal.Reason = "anti-forensic hash sha1"
+	}
+	if !fipsApprovedKDF(keyslot.KDF.Type, keyslot.KDF.Hash) || afRefused {
 		return refusal, false
 	}
 	refusal.Reason = fipsParameterRefusal(keyslot.KDF.Salt, keyslot.KeySize)
@@ -1054,6 +1062,14 @@ func fipsStandInKeyslot(keyslot *Keyslot) (standIn *Keyslot, substituted, ok boo
 	}
 	replaced := *keyslot
 	replaced.KDF = fipsStandInKDF(keyslot.KDF.Salt)
+	// A SHA-1 anti-forensic hash is refused by policy alone (#236): stand an
+	// approved one in for it. Any other unreadable name is left, so the
+	// screen still reports it as the damage it is.
+	if keyslot.AF != nil && keyslot.AF.Hash == "sha1" {
+		af := *keyslot.AF
+		af.Hash = DefaultHashAlgo
+		replaced.AF = &af
+	}
 	return &replaced, true, true
 }
 

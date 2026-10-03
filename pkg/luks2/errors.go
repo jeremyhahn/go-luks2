@@ -1003,10 +1003,11 @@ type NonApprovedKDF struct {
 	Type string
 	Hash string
 
-	// Reason is set when the algorithm itself is approved but a parameter
-	// is one strict FIPS mode (GODEBUG=fips140=only) refuses -- a salt
-	// shorter than 128 bits, an output shorter than 112 bits. Empty when the
-	// algorithm is what is not approved.
+	// Reason is set when something other than the KDF algorithm is what
+	// strict FIPS mode (GODEBUG=fips140=only) refuses: a parameter -- a salt
+	// shorter than 128 bits, an output shorter than 112 bits -- or, for a
+	// keyslot, its anti-forensic hash ("anti-forensic hash sha1", whatever its
+	// KDF). Empty when the KDF algorithm alone is what is not approved.
 	Reason string
 }
 

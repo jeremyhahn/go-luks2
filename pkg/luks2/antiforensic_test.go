@@ -195,13 +195,15 @@ func TestAFMergeEnclaveInvalidSize(t *testing.T) {
 	}
 }
 
-// TestAFMergeEnclaveInvalidHash tests afMergeEnclave with invalid hash algorithms.
+// TestAFMergeEnclaveInvalidHash tests afMergeEnclave with invalid hash
+// algorithms. SHA-1 is not among them: the merge reads it (#236, see
+// sha1af_test.go); only the split refuses it.
 func TestAFMergeEnclaveInvalidHash(t *testing.T) {
 	tests := []struct {
 		name     string
 		hashAlgo string
 	}{
-		{"sha1", "sha1"},
+		{"sha384", "sha384"}, // read nowhere: LUKS2 AF hashes are sha1, sha256, sha512
 		{"md5", "md5"},
 		{"invalid", "invalid"},
 		{"empty", ""},

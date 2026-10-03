@@ -5,6 +5,7 @@
 package luks2
 
 import (
+	"crypto/sha1" // #nosec G505 -- legacy LUKS interop only: SHA-1 AF keyslots are read, never written, and refused in FIPS mode (docs/FIPS.md)
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/binary"
@@ -89,10 +90,10 @@ func afSplitEnclave(secret *enclave.MemoryEnclave, stripes int, hashAlgo string)
 // trailing alignment padding into the key.
 func afMergeEnclave(split *enclave.MemoryEnclave, splitLen, stripes, blockSize int, hashAlgo string) (*enclave.MemoryEnclave, error) {
 	if splitLen != blockSize*stripes {
-		return nil, fmt.Errorf("invalid split data size")
+		return nil, &detailError{Kind: ErrInvalidKeyslot, Detail: "the anti-forensic material is not the size its stripes and key size declare"}
 	}
 
-	hashFunc, err := getHashFunc(hashAlgo)
+	hashFunc, err := getAFMergeHashFunc(hashAlgo)
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +114,7 @@ func afMergeEnclave(split *enclave.MemoryEnclave, splitLen, stripes, blockSize i
 		return borrowSecret("af diffusion state", buffer, func(buf []byte) error {
 			return borrowSecret("af stripes", split, func(splitData []byte) error {
 				if len(splitData) < splitLen {
-					return fmt.Errorf("invalid split data size")
+					return &detailError{Kind: ErrInvalidKeyslot, Detail: "the anti-forensic material is not the size its stripes and key size declare"}
 				}
 				afMergeInto(dst, splitData[:splitLen], buf, stripes, blockSize, hashFunc)
 				return nil
@@ -244,14 +245,60 @@ func xorBytes(a, b, dest []byte) {
 	}
 }
 
-// getHashFunc returns a hash function by name
+// getHashFunc returns the anti-forensic hash a NEW keyslot may be written
+// with: sha256 or sha512. It is the split's table, and SHA-1 is deliberately
+// absent from it -- this package reads SHA-1 keyslots (getAFMergeHashFunc) and
+// never creates one (#236).
 func getHashFunc(name string) (func() hash.Hash, error) {
 	switch name {
 	case "sha256":
 		return sha256.New, nil
 	case "sha512":
 		return sha512.New, nil
+	case "sha1":
+		return nil, &detailError{Kind: ErrUnsupportedHash, Detail: "sha1: an anti-forensic hash this package reads in legacy keyslots and never writes; use sha256 or sha512"}
 	default:
-		return nil, fmt.Errorf("%w: %s", ErrUnsupportedHash, name)
+		return nil, &detailError{Kind: ErrUnsupportedHash, Detail: name + " (supported: sha256, sha512)"}
 	}
+}
+
+// getAFMergeHashFunc returns the anti-forensic hash an EXISTING keyslot is
+// read with: getHashFunc's, plus SHA-1.
+//
+// SHA-1 is what LUKS1 used for the AF split by default, so every LUKS1 volume
+// converted to LUKS2 carries it, as does any `cryptsetup luksFormat --hash
+// sha1`; cryptsetup opens them and so must this package (#236). In FIPS 140-3
+// mode it is refused with ErrFIPSNotApproved before any hashing runs: SHA-1 is
+// not an approved diffuser for key material, and under GODEBUG=fips140=only
+// the Go module makes sha1's Write return an error that hash.Hash callers
+// discard, so the merge would otherwise complete with wrong bytes rather than
+// fail.
+func getAFMergeHashFunc(name string) (func() hash.Hash, error) {
+	if err := requireFIPSApprovedAFHash(name); err != nil {
+		return nil, err
+	}
+	if name == "sha1" {
+		return sha1.New, nil
+	}
+	return getHashFunc(name)
+}
+
+// afHashReadable reports whether name is an anti-forensic hash an existing
+// keyslot can be read with, whatever the FIPS policy: the structural question,
+// as opposed to requireFIPSApprovedAFHash's policy one.
+func afHashReadable(name string) error {
+	if name == "sha1" {
+		return nil
+	}
+	_, err := getHashFunc(name)
+	return err
+}
+
+// requireFIPSApprovedAFHash refuses a non-approved anti-forensic hash -- SHA-1
+// -- in FIPS 140-3 mode, naming it.
+func requireFIPSApprovedAFHash(name string) error {
+	if name == "sha1" && fipsMode() {
+		return &CryptoError{Op: "anti-forensic merge with sha1", Err: ErrFIPSNotApproved}
+	}
+	return nil
 }
