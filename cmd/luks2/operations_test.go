@@ -5,6 +5,7 @@
 package main
 
 import (
+	"crypto/fips140"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -32,17 +33,42 @@ import (
 // cheapKeyslot is the KDF configuration every keyslot written here uses.
 //
 // argon2id at its floor rather than pbkdf2, and that is not arbitrary: ChangeKey
-// COPIES an argon2 slot's cost parameters when it rewrites it, while for a
-// pbkdf2 slot it recalibrates against the 2000 ms default budget and takes
-// several seconds. A unit test cannot afford that, and cost is not what this
+// COPIES an argon2 slot's cost parameters when it rewrites it, while a pbkdf2
+// slot is rewritten at no less than the hash's floor. Cost is not what this
 // test is about.
+//
+// Except in FIPS 140-3 mode, where Argon2 is not approved and the library
+// refuses to create it (#235): there the keyslot is pbkdf2-sha512 at the
+// floor the library enforces for a caller-supplied credential, 210000, the
+// cheapest approved keyslot it will write. The wiring under test is the same
+// either way.
 func cheapKeyslot() *luks2.AddKeyOptions {
+	if fips140.Enabled() {
+		return &luks2.AddKeyOptions{KDFType: luks2.KDFTypePBKDF2, Hash: "sha512", PBKDFIterations: 210_000}
+	}
 	return &luks2.AddKeyOptions{
 		KDFType:        "argon2id",
 		Argon2Time:     1,
 		Argon2Memory:   65536,
 		Argon2Parallel: 1,
 	}
+}
+
+// cheapRecoveryKDF sets a recovery keyslot's KDF to the cheapest the library
+// writes in this process's mode: argon2id at its floor, or -- in FIPS 140-3
+// mode, where Argon2 is refused (#235) -- pbkdf2-sha512 at 1000 iterations,
+// which a library-generated recovery key is permitted (see
+// RecoveryKeyOptions.PBKDFIterations).
+func cheapRecoveryKDF(opts *luks2.RecoveryKeyOptions) {
+	if fips140.Enabled() {
+		opts.KDFType = luks2.KDFTypePBKDF2
+		opts.Hash = "sha512"
+		opts.PBKDFIterations = 1000
+		return
+	}
+	opts.Argon2Time = 1
+	opts.Argon2Memory = 65536
+	opts.Argon2Parallel = 1
 }
 
 func TestDefaultOperationsAreWiredToTheRightLibraryCalls(t *testing.T) {
@@ -280,12 +306,9 @@ func TestDefaultOperationsAreWiredToTheRightLibraryCalls(t *testing.T) {
 		}
 
 		// And an enrolled one must say yes.
-		enrolled, err := ops.AddRecoveryKey(image, []byte(passphrase), &luks2.RecoveryKeyOptions{
-			Format:         luks2.RecoveryKeyFormatDashed,
-			Argon2Time:     1,
-			Argon2Memory:   65536,
-			Argon2Parallel: 1,
-		})
+		recoveryOpts := &luks2.RecoveryKeyOptions{Format: luks2.RecoveryKeyFormatDashed}
+		cheapRecoveryKDF(recoveryOpts)
+		enrolled, err := ops.AddRecoveryKey(image, []byte(passphrase), recoveryOpts)
 		if err != nil {
 			t.Fatalf("AddRecoveryKey() error = %v", err)
 		}

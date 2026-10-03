@@ -7,6 +7,8 @@
 package luks2
 
 import (
+	"bytes"
+	"crypto/fips140"
 	"errors"
 	"reflect"
 	"strconv"
@@ -405,31 +407,45 @@ func TestAddKeyFallsBackToDefaultsForANonArgon2Container(t *testing.T) {
 // TestAddKeyReportsTheInheritedCostToTheCaller is the visibility requirement.
 // The value must reach the caller at the point of decision rather than be left
 // to be inferred from the header afterwards.
+//
+// The container is written by cryptsetup, so the cost being inherited is one
+// this package did not choose -- the case the visibility requirement exists
+// for -- and so the fixture can exist in a FIPS 140-3 mode process, which
+// refuses to create Argon2 keyslots itself (#235). In FIPS mode the inheriting
+// AddKey must be refused with the typed error and leave the container exactly
+// as it was; without FIPS it must inherit the cost and report it.
 func TestAddKeyReportsTheInheritedCostToTheCaller(t *testing.T) {
 	defer parallel(t)()
 
+	requireCryptsetup(t)
 	path := newImage(t, "inherited-report.img")
-	if err := Format(FormatOptions{
-		Device:         path,
-		Passphrase:     []byte(conformancePassphrase),
-		Cipher:         "aes",
-		CipherMode:     "xts-plain64",
-		KeySize:        512,
-		HashAlgo:       "sha512",
-		SectorSize:     512,
-		KDFType:        KDFTypeArgon2id,
-		Argon2Time:     1,
-		Argon2Memory:   MinArgon2MemoryKB,
-		Argon2Parallel: 1,
-	}); err != nil {
-		t.Fatalf("Format failed: %v", err)
+	code, out := runCryptsetup(t, conformancePassphrase,
+		"luksFormat", "--type", "luks2",
+		"--cipher", "aes-xts-plain64", "--key-size", "512", "--hash", "sha512",
+		"--pbkdf", "argon2id", "--pbkdf-force-iterations", "4",
+		"--pbkdf-memory", strconv.Itoa(MinArgon2MemoryKB), "--pbkdf-parallel", "1",
+		"--batch-mode", path)
+	if code != 0 {
+		t.Fatalf("cryptsetup luksFormat exited %d\n%s", code, out)
 	}
+	before := readAreaBytes(t, path, 0, goldenPrefixBytes)
 
 	opts := &AddKeyOptions{}
-	if _, err := AddKey(path, []byte(conformancePassphrase), []byte("a-second-credential"), opts); err != nil {
-		t.Fatalf("AddKey failed: %v", err)
+	_, err := AddKey(path, []byte(conformancePassphrase), []byte("a-second-credential"), opts)
+
+	if fips140.Enabled() {
+		if !errors.Is(err, ErrFIPSNotApproved) {
+			t.Fatalf("in FIPS mode AddKey on an Argon2 container = %v, want ErrFIPSNotApproved", err)
+		}
+		if !bytes.Equal(before, readAreaBytes(t, path, 0, goldenPrefixBytes)) {
+			t.Fatal("the refused AddKey changed the container")
+		}
+		return
 	}
 
+	if err != nil {
+		t.Fatalf("AddKey failed: %v", err)
+	}
 	if opts.InheritedArgon2Cost == nil {
 		t.Fatal("AddKey did not report the inherited cost; an operator cannot tell it came from the container")
 	}
@@ -440,6 +456,9 @@ func TestAddKeyReportsTheInheritedCostToTheCaller(t *testing.T) {
 	_, metadata, err := ReadHeader(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
+	}
+	if len(metadata.Keyslots) != 2 {
+		t.Fatalf("the container has %d keyslots after AddKey, want 2", len(metadata.Keyslots))
 	}
 	for id, keyslot := range metadata.Keyslots {
 		if keyslot.KDF.Memory == nil || *keyslot.KDF.Memory != MinArgon2MemoryKB {

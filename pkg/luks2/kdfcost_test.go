@@ -7,6 +7,7 @@
 package luks2
 
 import (
+	"crypto/fips140"
 	"errors"
 	"runtime"
 	"testing"
@@ -296,16 +297,19 @@ func argon2KDF(t, memory, cpus int) *KDF {
 // could quietly swallow it, because it defaults on `== 0` rather than on
 // `<= 0`. Widen that comparison and the refusal this PR adds becomes
 // unreachable while every other test stays green.
+//
+// It holds in both modes (#235). The seam itself is checked directly, because
+// it is the same code whether or not the process runs in FIPS 140-3 mode. The
+// public entry point is checked for what it does in the mode this process is
+// in: without FIPS it carries the cost through; under FIPS it refuses Argon2
+// before building anything, with the typed error.
 func TestCreateArgon2KDFCarriesANegativeCostToTheDerivation(t *testing.T) {
-	kdf, err := CreateKDF(FormatOptions{KDFType: "argon2id", Argon2Memory: -1}, 32)
+	kdf, err := createArgon2KDF(KDFTypeArgon2id, FormatOptions{Argon2Memory: -1}, "c2FsdA==")
 	if err != nil {
-		t.Fatalf("CreateKDF() error = %v, want the cost carried to the derivation, not rejected here", err)
+		t.Fatalf("createArgon2KDF() error = %v, want the cost carried to the derivation, not rejected here", err)
 	}
-	if kdf.Memory == nil {
-		t.Fatal("CreateKDF() produced a KDF with no memory cost")
-	}
-	if *kdf.Memory != -1 {
-		t.Fatalf("createArgon2KDF turned a memory cost of -1 into %d; the refusal downstream is then unreachable", *kdf.Memory)
+	if kdf.Memory == nil || *kdf.Memory != -1 {
+		t.Fatalf("createArgon2KDF turned a memory cost of -1 into %v; the refusal downstream is then unreachable", kdf.Memory)
 	}
 
 	// And the end of the chain refuses it, so the seam is not merely carrying a
@@ -313,23 +317,55 @@ func TestCreateArgon2KDFCarriesANegativeCostToTheDerivation(t *testing.T) {
 	if _, err := deriveArgon2id([]byte("passphrase"), []byte("saltsaltsaltsalt"), kdf, 32); err == nil {
 		t.Fatal("deriveArgon2id() accepted a memory cost of -1")
 	}
+
+	assertCreateKDFInThisMode(t, FormatOptions{KDFType: "argon2id", Argon2Memory: -1}, func(t *testing.T, kdf *KDF) {
+		if kdf.Memory == nil || *kdf.Memory != -1 {
+			t.Fatalf("CreateKDF turned a memory cost of -1 into %v", kdf.Memory)
+		}
+	})
 }
 
 // The success control for the case above: zero MUST still take the default, or
 // the test above would also pass against a createArgon2KDF that had stopped
-// defaulting at all.
+// defaulting at all. In both modes, the same way (#235).
 func TestCreateArgon2KDFStillDefaultsAZeroCost(t *testing.T) {
-	kdf, err := CreateKDF(FormatOptions{KDFType: "argon2id"}, 32)
+	defaulted := func(t *testing.T, kdf *KDF) {
+		t.Helper()
+		if kdf.Memory == nil || *kdf.Memory <= 0 {
+			t.Fatalf("no explicit cost produced memory = %v, want a positive default", kdf.Memory)
+		}
+		if kdf.Time == nil || *kdf.Time <= 0 {
+			t.Fatalf("no explicit cost produced time = %v, want a positive default", kdf.Time)
+		}
+		if kdf.CPUs == nil || *kdf.CPUs <= 0 {
+			t.Fatalf("no explicit cost produced cpus = %v, want a positive default", kdf.CPUs)
+		}
+	}
+
+	kdf, err := createArgon2KDF(KDFTypeArgon2id, FormatOptions{}, "c2FsdA==")
 	if err != nil {
-		t.Fatalf("CreateKDF() error = %v", err)
+		t.Fatalf("createArgon2KDF() error = %v", err)
 	}
-	if kdf.Memory == nil || *kdf.Memory <= 0 {
-		t.Fatalf("CreateKDF() with no explicit cost produced memory = %v, want a positive default", kdf.Memory)
+	defaulted(t, kdf)
+
+	assertCreateKDFInThisMode(t, FormatOptions{KDFType: "argon2id"}, defaulted)
+}
+
+// assertCreateKDFInThisMode checks the public CreateKDF for Argon2 options in
+// the mode this process runs in. Without FIPS 140-3 mode it must build the KDF,
+// which check then inspects. Under FIPS mode Argon2 is not approved, and
+// CreateKDF must refuse it with ErrFIPSNotApproved and build nothing (#235).
+func assertCreateKDFInThisMode(t *testing.T, opts FormatOptions, check func(*testing.T, *KDF)) {
+	t.Helper()
+	kdf, err := CreateKDF(opts, 32)
+	if fips140.Enabled() {
+		if !errors.Is(err, ErrFIPSNotApproved) || kdf != nil {
+			t.Fatalf("in FIPS mode CreateKDF(%s) = %v, %v; want no KDF and ErrFIPSNotApproved", opts.KDFType, kdf, err)
+		}
+		return
 	}
-	if kdf.Time == nil || *kdf.Time <= 0 {
-		t.Fatalf("CreateKDF() with no explicit cost produced time = %v, want a positive default", kdf.Time)
+	if err != nil {
+		t.Fatalf("CreateKDF(%s) error = %v", opts.KDFType, err)
 	}
-	if kdf.CPUs == nil || *kdf.CPUs <= 0 {
-		t.Fatalf("CreateKDF() with no explicit cost produced cpus = %v, want a positive default", kdf.CPUs)
-	}
+	check(t, kdf)
 }

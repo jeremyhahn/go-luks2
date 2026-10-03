@@ -33,13 +33,12 @@ import (
 // The library is doing the work -- a real keyslot is written to a real
 // container and a real cryptsetup is asked about it. What the override changes
 // is the COST: AddRecoveryKey's default is argon2id at 1 GiB, and the CLI
-// deliberately does not expose the cost knobs, so this is where a test says it.
+// deliberately does not expose the cost knobs, so this is where a test says it
+// -- and, in FIPS 140-3 mode, the KDF too (see cheapRecoveryKDF).
 func realRecoveryOps() *MockLuksOperations {
 	return &MockLuksOperations{
 		AddRecoveryKeyFunc: func(device string, existing []byte, opts *luks2.RecoveryKeyOptions) (*luks2.RecoveryKey, error) {
-			opts.Argon2Time = 1
-			opts.Argon2Memory = 65536
-			opts.Argon2Parallel = 1
+			cheapRecoveryKDF(opts)
 			return luks2.AddRecoveryKey(device, existing, opts)
 		},
 		VerifyRecoveryKeyFunc: func(device string, key *enclave.MemoryEnclave) (bool, error) {
