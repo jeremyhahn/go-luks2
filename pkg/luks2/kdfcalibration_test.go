@@ -9,8 +9,15 @@ package luks2
 import (
 	"crypto/pbkdf2"
 	"errors"
+	"fmt"
+	"hash"
+	"math"
+	"runtime"
+	"slices"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // The tests in this file exist because the three that were already here did
@@ -21,169 +28,177 @@ import (
 //
 // They are built to two rules the fix is worthless without:
 //
-//   - Every assertion here fails against the old implementation. The strongest
-//     of them do so WITHOUT depending on how fast this machine is, because a
-//     regression test that only fails on fast hardware is not a regression test.
-//   - None of them is flaky on a slow or loaded machine. Load can only make a
-//     derivation take LONGER, so the tolerances are asymmetric: tight below,
-//     generous above. There is no t.Skip and no testing.Short() anywhere --
-//     this project's testing rules bar both outright, and a timing test that
-//     excuses itself on a busy CI box is a test that gets deleted in a month.
+//   - Every assertion here fails against the old implementation, and the
+//     arithmetic ones do so WITHOUT depending on how fast or how busy this
+//     machine is. The calibration takes its timer as a parameter, so the unit
+//     tests hand it a machine that hashes at a KNOWN rate (knownRate) and
+//     assert the exact count that rate buys -- including a probe faster than a
+//     millisecond, which is the exact shape of #52 and is now caught in the
+//     -race build as well as the ordinary one.
+//   - No unit verdict depends on the wall clock (#233). The real-work checks,
+//     whose answer moves with the hardware, are benchmarks
+//     (BenchmarkPBKDF2CalibrationCostsItsBudget and its digest sibling), run
+//     by `make test-calibration` on their own, timed in thread CPU time. There
+//     is no t.Skip and no testing.Short() anywhere -- this project's testing
+//     rules bar both outright.
 
-// timePBKDF2 returns how long one PBKDF2 derivation of the given cost actually
-// takes on this machine.
-func timePBKDF2(t *testing.T, hashAlgo string, keySize, iterations int) time.Duration {
-	t.Helper()
+// knownRate is a pbkdf2Timer for a machine that derives at exactly
+// perIteration, whatever else it is doing. It records the output size and the
+// hash width of every derivation it was asked to time.
+type knownRate struct {
+	perIteration time.Duration
+	probes       []int
+	keySizes     []int
+	hashWidths   []int
+}
 
+func (r *knownRate) time(hashFunc func() hash.Hash, iterations, keySize int) (time.Duration, error) {
+	r.probes = append(r.probes, iterations)
+	r.keySizes = append(r.keySizes, keySize)
+	r.hashWidths = append(r.hashWidths, hashFunc().Size())
+	return time.Duration(iterations) * r.perIteration, nil
+}
+
+// threadCPUPBKDF2 is a pbkdf2Timer that runs the real derivation and times it
+// in the CPU time of the thread that ran it. Time the scheduler gives to other
+// work is not counted; cache and frequency effects still are.
+func threadCPUPBKDF2(hashFunc func() hash.Hash, iterations, keySize int) (time.Duration, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	var start, end unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_THREAD_CPUTIME_ID, &start); err != nil {
+		return 0, err
+	}
+	if _, err := pbkdf2.Key(hashFunc, "timing-probe-passphrase", make([]byte, 32), iterations, keySize); err != nil {
+		return 0, err
+	}
+	if err := unix.ClockGettime(unix.CLOCK_THREAD_CPUTIME_ID, &end); err != nil {
+		return 0, err
+	}
+	return time.Duration(end.Nano() - start.Nano()), nil
+}
+
+// checkCalibrationCost is the real-work check behind the calibration
+// benchmarks: calibrate with the real hash timed in thread CPU time, derive at
+// the count it chose, and require the count to be within 4x of what that
+// derivation's own CPU rate says the target buys -- clamped, as the
+// calibration clamps, to the floor and the header ceiling. A floor or ceiling
+// that binds is the clamp working, not an overrun.
+func checkCalibrationCost(b *testing.B, hashAlgo string, keySize, targetMs int, calibrate func(pbkdf2Timer) (int, error)) {
+	b.Helper()
+	iterations, err := calibrate(threadCPUPBKDF2)
+	if err != nil {
+		b.Fatalf("calibrating %s: %v", hashAlgo, err)
+	}
 	hashFunc, err := getPBKDF2HashFunc(hashAlgo)
 	if err != nil {
-		t.Fatalf("getPBKDF2HashFunc(%q): %v", hashAlgo, err)
+		b.Fatalf("getPBKDF2HashFunc(%q): %v", hashAlgo, err)
 	}
-
-	salt := make([]byte, 32)
-	start := time.Now()
-	if _, err := pbkdf2.Key(hashFunc, "verification", salt, iterations, keySize); err != nil {
-		t.Fatalf("pbkdf2.Key(%q, %d iterations): %v", hashAlgo, iterations, err)
+	cost, err := threadCPUPBKDF2(hashFunc, iterations, keySize)
+	if err != nil {
+		b.Fatalf("timing the calibrated derivation: %v", err)
 	}
-	return time.Since(start)
+	target := time.Duration(targetMs) * time.Millisecond
+	perIteration := float64(cost) / float64(iterations)
+	want := math.Max(pbkdf2IterationFloor(hashAlgo, targetMs), float64(target)/perIteration)
+	want = math.Min(want, maxKDFIterations)
+	if got := float64(iterations); got < want/4 || got > want*4 {
+		b.Errorf("calibrated to %d %s iterations; the derivation's own CPU rate (%v per iteration) puts the %v target at %.0f",
+			iterations, hashAlgo, time.Duration(perIteration), target, want)
+	}
 }
 
 // TestBenchmarkPBKDF2CalibratesToRequestedTime is the test that would have
-// caught issue #52: it RUNS the iteration count that was returned and checks
-// that it costs something like the time that was asked for.
+// caught issue #52: the count the calibration returns is the one that costs the
+// requested time at the rate the machine was measured to hash at.
 //
-// The old implementation returned 100000 for every request, which is 20-50ms of
-// work; against a 1000ms budget that is 20-40x under the lower bound below, so
-// this fails against it by a wide margin on any hardware where the fallback was
-// reachable -- which was all of it.
+// The rate is injected (#233). This used to run the returned count on the wall
+// clock and accept anything from a tenth to ten times the budget -- a band
+// that wide because a busy runner moved it, and still a verdict that depended
+// on the runner. On a known rate the expected count is exact.
 //
-// The budget is above the library's own default, which is what makes a very
-// generous band affordable: the old fallback was a FIXED 100000 iterations
-// whatever was asked for, so the larger the budget the further under it that
-// constant falls. Measured, that constant costs 28ms (sha256) and 118ms
-// (sha512) here, against a 3000ms budget.
-//
-// The band is a TENTH to TEN TIMES the budget, and it is that wide on purpose.
-// A timing assertion on a shared CI runner is the classic candidate for someone
-// reaching for t.Skip or testing.Short() in six months -- both barred outright
-// by this project's testing rules -- so the tolerance has to be wide enough
-// that it is never tempting. It can afford to be: the defect this pins is a
-// 25-100x error, not a 20% one. Across repeated runs on a machine deliberately
-// loaded with other work the worst observed ratio was 0.46 and the worst 1.8,
-// so a tenth and ten times leave roughly a 4x margin on both sides while the
-// old implementation still lands 2.5x (sha512) to 10x (sha256) below the floor.
-//
-// The FLOOR check below is unconditional and carries no timing at all. It is
-// the assertion that holds when this one cannot -- see the -race note at the
-// top of TestBenchmarkPBKDF2MeetsRecommendedMinimum.
+// The 360ns case is #52 itself. Its first probe of 1000 iterations takes
+// 0.36ms; the old implementation gated on elapsed.Milliseconds() > 0, read
+// that as zero and returned a hardcoded 100000 -- against the 5,555,555 the
+// 2000ms budget buys at that rate. Under -race the real probe used to slow
+// past 1ms and hide the defect; an injected rate cannot be slowed.
 func TestBenchmarkPBKDF2CalibratesToRequestedTime(t *testing.T) {
-	const targetMs = 3000
-	target := targetMs * time.Millisecond
-
-	tests := []struct {
-		name     string
-		hashAlgo string
-		keySize  int
+	for _, tc := range []struct {
+		hashAlgo     string
+		keySize      int
+		targetMs     int
+		perIteration time.Duration
 	}{
-		{"sha256", "sha256", 32},
-		{"sha512", "sha512", 64},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			iterations, err := BenchmarkPBKDF2(tt.hashAlgo, tt.keySize, targetMs)
+		{"sha256", 32, 3000, time.Microsecond},
+		{"sha512", 64, 3000, 2 * time.Microsecond},
+		{"sha256", 32, 2000, 360 * time.Nanosecond},
+		{"sha512", 64, 500, 900 * time.Nanosecond},
+	} {
+		t.Run(fmt.Sprintf("%s %dms at %v", tc.hashAlgo, tc.targetMs, tc.perIteration), func(t *testing.T) {
+			hashFunc, err := getPBKDF2HashFunc(tc.hashAlgo)
 			if err != nil {
-				t.Fatalf("BenchmarkPBKDF2(%q, %d, %d): %v", tt.hashAlgo, tt.keySize, targetMs, err)
+				t.Fatalf("getPBKDF2HashFunc: %v", err)
+			}
+			rate := &knownRate{perIteration: tc.perIteration}
+			iterations, err := calibratePBKDF2(hashFunc, tc.hashAlgo, tc.keySize, tc.targetMs,
+				pbkdf2ProbeFloor, pbkdf2ProbeCeiling, rate.time)
+			if err != nil {
+				t.Fatalf("calibratePBKDF2: %v", err)
 			}
 
-			elapsed := timePBKDF2(t, tt.hashAlgo, tt.keySize, iterations)
-			t.Logf("%s: calibrated %d iterations for %v, measured %v", tt.hashAlgo, iterations, target, elapsed)
-
-			// Checked FIRST and unconditionally. An earlier version of this test
-			// only consulted the floor to decide whether to apply the upper
-			// bound, which let a count BELOW the floor through the "the floor
-			// set this" branch and skip the remaining checks -- measured: a
-			// mutant returning 500000 against a 600000 floor was reported as
-			// floored and passed. A bound used to classify must also be
-			// asserted.
-			floor := pbkdf2IterationFloor(tt.hashAlgo, targetMs)
-			if float64(iterations) < floor {
-				t.Fatalf("%s: got %d iterations, below the floor of %v for a %dms budget",
-					tt.hashAlgo, iterations, floor, targetMs)
+			want := int(time.Duration(tc.targetMs) * time.Millisecond / tc.perIteration)
+			if float64(want) < pbkdf2IterationFloor(tc.hashAlgo, tc.targetMs) {
+				t.Fatalf("fixture error: the %v case lands under the floor and would not test the extrapolation", tc.perIteration)
 			}
-
-			if lower := target / 10; elapsed < lower {
-				t.Fatalf("%s: %d iterations cost %v, which is below %v -- the count is calibrated far under the %v that was requested",
-					tt.hashAlgo, iterations, elapsed, lower, target)
+			if iterations < want-1 || iterations > want+1 {
+				t.Fatalf("calibrated to %d iterations; at %v per iteration the %dms target is %d",
+					iterations, tc.perIteration, tc.targetMs, want)
 			}
-
-			// The upper bound is skipped -- and only ever skipped -- when the
-			// count did not come from the measurement at all. Both clamps
-			// legitimately produce a count that costs more than the budget: the
-			// security floor on hardware too slow to earn it, the header ceiling
-			// on a budget too large to fit. Asserting the budget against a
-			// clamped count would be asserting the wrong thing, not tolerating a
-			// failure.
-			if float64(iterations) <= floor {
-				t.Logf("%s: count came from the security floor, not the measurement", tt.hashAlgo)
-				return
-			}
-			if iterations == maxKDFIterations {
-				t.Logf("%s: count came from the header ceiling, not the measurement", tt.hashAlgo)
-				return
-			}
-
-			if upper := 10 * target; elapsed > upper {
-				t.Fatalf("%s: %d iterations cost %v, which is above %v -- the extrapolation overshot the %v that was requested",
-					tt.hashAlgo, iterations, elapsed, upper, target)
+			for i, size := range rate.keySizes {
+				if size != tc.keySize {
+					t.Fatalf("probe %d derived %d bytes, want the %d being calibrated for", i, size, tc.keySize)
+				}
 			}
 		})
 	}
 }
 
-// TestBenchmarkPBKDF2ScalesWithRequestedTime pins the same property without
-// depending on this machine's speed at all: four times the budget must buy
-// about four times the iterations.
+// TestBenchmarkPBKDF2ScalesWithRequestedTime pins the same property from the
+// other side: on one machine, twenty times the budget buys twenty times the
+// iterations. The old implementation returned the same 100000 for both, a
+// ratio of 1.
 //
-// It is the more robust half of the pair. Both calibrations run back to back
-// under identical conditions, so the ratio survives a machine that is slow, a
-// machine that is loaded, and a machine whose count is being set by the
-// security floor -- the floor scales with the budget too. The old
-// implementation returned the same 100000 for both budgets, a ratio of 1.
-//
-// The two budgets are twenty times apart rather than four, which is what makes
-// the band affordable. Each calibration carries its own measurement noise, and
-// the ratio compounds both: measured over ten runs on a loaded machine, two
-// budgets 4x apart produced ratios from 2.57 to 7.13 -- a spread that leaves no
-// room around a band tight enough to mean anything. Twenty times apart, the
-// same spread sits comfortably inside 4..100 while the constant-returning
-// implementation still scores 1.
+// On a known rate (#233) the ratio is exact. It used to be two real
+// calibrations back to back, whose ratio on a loaded machine ranged from 2.57
+// to 7.13 for budgets 4x apart, which is why the band had to be 4..100.
 func TestBenchmarkPBKDF2ScalesWithRequestedTime(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	const (
 		shortMs = 100
 		longMs  = 2000
 	)
-
-	short, err := BenchmarkPBKDF2("sha256", 32, shortMs)
+	hashFunc, err := getPBKDF2HashFunc("sha256")
 	if err != nil {
-		t.Fatalf("BenchmarkPBKDF2 at %dms: %v", shortMs, err)
+		t.Fatalf("getPBKDF2HashFunc: %v", err)
 	}
-	long, err := BenchmarkPBKDF2("sha256", 32, longMs)
-	if err != nil {
-		t.Fatalf("BenchmarkPBKDF2 at %dms: %v", longMs, err)
+	calibrate := func(targetMs int) int {
+		t.Helper()
+		rate := &knownRate{perIteration: 500 * time.Nanosecond}
+		n, err := calibratePBKDF2(hashFunc, "sha256", 32, targetMs, pbkdf2ProbeFloor, pbkdf2ProbeCeiling, rate.time)
+		if err != nil {
+			t.Fatalf("calibratePBKDF2 at %dms: %v", targetMs, err)
+		}
+		return n
 	}
 
-	ratio := float64(long) / float64(short)
-	t.Logf("%dms -> %d iterations, %dms -> %d iterations, ratio %.2f (expected %.1f)",
-		shortMs, short, longMs, long, ratio, float64(longMs)/float64(shortMs))
-
-	// Expected ratio is 20, and the band is a fifth to five times that. A count
-	// that ignores the budget scores 1, four times below the lower bound.
-	if ratio < 4 || ratio > 100 {
-		t.Fatalf("iteration count does not scale with the requested time: %dms gave %d and %dms gave %d (ratio %.2f, want 4..100)",
-			shortMs, short, longMs, long, ratio)
+	short, long := calibrate(shortMs), calibrate(longMs)
+	// 200,000 and 4,000,000 at 500ns per iteration, each within one iteration
+	// of float rounding.
+	if short < 199_999 || short > 200_001 || long < 3_999_999 || long > 4_000_001 {
+		t.Fatalf("%dms gave %d and %dms gave %d; at 500ns per iteration want 200000 and 4000000",
+			shortMs, short, longMs, long)
 	}
 }
 
@@ -211,7 +226,7 @@ func TestBenchmarkPBKDF2ScalesWithRequestedTime(t *testing.T) {
 // reason and is wired into `make ci`; do not consolidate it into the -race
 // unit-test target on the grounds that it duplicates coverage. It does not.
 func TestBenchmarkPBKDF2MeetsRecommendedMinimum(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	tests := []struct {
 		name     string
@@ -301,7 +316,8 @@ func TestCalibratePBKDF2FailsClosedWhenUnmeasurable(t *testing.T) {
 		t.Fatalf("getPBKDF2HashFunc: %v", err)
 	}
 
-	iterations, err := calibratePBKDF2(hashFunc, "sha256", 32, 2000, time.Hour, pbkdf2ProbeStart)
+	rate := &knownRate{perIteration: time.Microsecond}
+	iterations, err := calibratePBKDF2(hashFunc, "sha256", 32, 2000, time.Hour, pbkdf2ProbeStart, rate.time)
 	if err == nil {
 		t.Fatalf("an immeasurable calibration returned %d iterations and no error", iterations)
 	}
@@ -322,8 +338,10 @@ func TestCalibratePBKDF2FailsClosedWhenUnmeasurable(t *testing.T) {
 	if calErr.Probe != pbkdf2ProbeStart {
 		t.Fatalf("error reports probe %d, want the %d that was run", calErr.Probe, pbkdf2ProbeStart)
 	}
-	if calErr.Elapsed <= 0 {
-		t.Fatalf("error reports elapsed %v; the probe did run and its measurement is what could not be used", calErr.Elapsed)
+	// The probe did run, and its measurement is what could not be used: the
+	// error carries exactly what was measured.
+	if want := pbkdf2ProbeStart * time.Microsecond; calErr.Elapsed != want {
+		t.Fatalf("error reports elapsed %v, want the probe's measured %v", calErr.Elapsed, want)
 	}
 }
 
@@ -341,7 +359,8 @@ func TestCalibratePBKDF2StopsDoublingAtTheCeiling(t *testing.T) {
 	// a doubling past it.
 	const ceiling = 4 * pbkdf2ProbeStart
 
-	_, err = calibratePBKDF2(hashFunc, "sha256", 32, 2000, time.Hour, ceiling)
+	rate := &knownRate{perIteration: time.Microsecond}
+	_, err = calibratePBKDF2(hashFunc, "sha256", 32, 2000, time.Hour, ceiling, rate.time)
 	var calErr *KDFCalibrationError
 	if !errors.As(err, &calErr) {
 		t.Fatalf("got error %v, want a *KDFCalibrationError", err)
@@ -357,6 +376,34 @@ func TestCalibratePBKDF2StopsDoublingAtTheCeiling(t *testing.T) {
 	}
 	if calErr.Probe != ceiling {
 		t.Fatalf("largest probe run was %d, want the ceiling %d", calErr.Probe, ceiling)
+	}
+	if want := []int{pbkdf2ProbeStart, 2 * pbkdf2ProbeStart, 4 * pbkdf2ProbeStart}; !slices.Equal(rate.probes, want) {
+		t.Fatalf("probes run: %v, want %v -- doubling, and stopping at the ceiling", rate.probes, want)
+	}
+}
+
+// BenchmarkPBKDF2CalibrationCostsItsBudget is the real-work check for the
+// keyslot calibration: the real hash, calibrated and derived, in thread CPU
+// time. A benchmark, so the unit suite never runs it (#233); `make
+// test-calibration` runs it once, uninstrumented, and fails the build on it.
+// See checkCalibrationCost for the band.
+func BenchmarkPBKDF2CalibrationCostsItsBudget(b *testing.B) {
+	const targetMs = 500
+	for _, tc := range []struct {
+		hashAlgo string
+		keySize  int
+	}{{"sha256", 32}, {"sha512", 64}} {
+		b.Run(tc.hashAlgo, func(b *testing.B) {
+			hashFunc, err := getPBKDF2HashFunc(tc.hashAlgo)
+			if err != nil {
+				b.Fatalf("getPBKDF2HashFunc: %v", err)
+			}
+			for b.Loop() {
+				checkCalibrationCost(b, tc.hashAlgo, tc.keySize, targetMs, func(timer pbkdf2Timer) (int, error) {
+					return calibratePBKDF2(hashFunc, tc.hashAlgo, tc.keySize, targetMs, pbkdf2ProbeFloor, pbkdf2ProbeCeiling, timer)
+				})
+			}
+		})
 	}
 }
 
@@ -451,7 +498,7 @@ func TestScalePBKDF2IterationsClamps(t *testing.T) {
 // have been fixed while createPBKDF2KDF kept ignoring it; the header is what an
 // attacker gets, so the header is what this asserts.
 func TestCreateKDFPBKDF2CalibratesTheKeyslot(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	kdf, err := CreateKDF(FormatOptions{KDFType: KDFTypePBKDF2SHA256}, 32)
 	if err != nil {

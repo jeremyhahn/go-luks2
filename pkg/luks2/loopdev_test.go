@@ -56,7 +56,7 @@ func TestWaitForDetachReturnsOnceTheAssociationIsGone(t *testing.T) {
 		return loopState{}, nil // released
 	}
 
-	state, err := waitForDetach("/dev/loop0", attachedTo("/tmp/volume.img"), true, testDetachTimeout, testDetachPoll, backing)
+	state, err := waitForDetach("/dev/loop0", attachedTo("/tmp/volume.img"), true, testDetachTimeout, testDetachPoll, backing, newFakeClock(t))
 	if err != nil {
 		t.Fatalf("waitForDetach returned error: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestWaitForDetachReturnsOnceTheAssociationIsGone(t *testing.T) {
 func TestWaitForDetachAcceptsADeviceReattachedElsewhere(t *testing.T) {
 	backing := reader(attachedTo("/tmp/somebody-elses.img"))
 
-	if _, err := waitForDetach("/dev/loop0", attachedTo("/tmp/volume.img"), true, testDetachTimeout, testDetachPoll, backing); err != nil {
+	if _, err := waitForDetach("/dev/loop0", attachedTo("/tmp/volume.img"), true, testDetachTimeout, testDetachPoll, backing, newFakeClock(t)); err != nil {
 		t.Fatalf("waitForDetach reported a failure for a device that was released and reclaimed: %v", err)
 	}
 }
@@ -113,9 +113,8 @@ func TestWaitForDetachAcceptsADeviceReattachedElsewhere(t *testing.T) {
 func TestWaitForDetachReportsADeferredReleaseAsSuccess(t *testing.T) {
 	deferred := loopState{backing: "/tmp/volume.img", autoclear: true}
 
-	start := time.Now()
-	state, err := waitForDetach("/dev/loop0", attachedTo("/tmp/volume.img"), true, testDetachTimeout, testDetachPoll, reader(deferred))
-	elapsed := time.Since(start)
+	clk := newFakeClock(t)
+	state, err := waitForDetach("/dev/loop0", attachedTo("/tmp/volume.img"), true, testDetachTimeout, testDetachPoll, reader(deferred), clk)
 
 	if err != nil {
 		t.Fatalf("a deferred release was reported as a failure: %v", err)
@@ -129,9 +128,10 @@ func TestWaitForDetachReportsADeferredReleaseAsSuccess(t *testing.T) {
 	// reported as deferred, and a caller that immediately asked whether the
 	// association was gone was told it was not. Waiting turns most of those
 	// into observed releases; only a device still held at the bound comes back
-	// deferred. Asserting a LOWER bound is the direction that cannot flake.
-	if elapsed < testDetachTimeout {
-		t.Errorf("returned after %s, before the %s bound; a momentary holder would "+
+	// deferred. On a controlled clock (#233) the wait is exact: past the bound,
+	// by no more than one poll.
+	if elapsed := clk.elapsed(); elapsed <= testDetachTimeout || elapsed > testDetachTimeout+testDetachPoll {
+		t.Errorf("returned after %s; want just past the %s bound -- a momentary holder would "+
 			"be reported as deferred rather than waited out", elapsed, testDetachTimeout)
 	}
 }
@@ -154,7 +154,7 @@ func TestWaitForDetachOutlastsAMomentaryHolder(t *testing.T) {
 		return loopState{}, nil // the holder let go
 	}
 
-	state, err := waitForDetach("/dev/loop0", attachedTo("/tmp/volume.img"), true, testDetachTimeout, testDetachPoll, backing)
+	state, err := waitForDetach("/dev/loop0", attachedTo("/tmp/volume.img"), true, testDetachTimeout, testDetachPoll, backing, newFakeClock(t))
 	if err != nil {
 		t.Fatalf("waitForDetach returned error: %v", err)
 	}
@@ -170,9 +170,8 @@ func TestWaitForDetachOutlastsAMomentaryHolder(t *testing.T) {
 func TestWaitForDetachTimesOutWithATypedError(t *testing.T) {
 	backing := reader(attachedTo("/tmp/volume.img")) // never released, never deferred
 
-	start := time.Now()
-	_, err := waitForDetach("/dev/loop0", attachedTo("/tmp/volume.img"), true, testDetachTimeout, testDetachPoll, backing)
-	elapsed := time.Since(start)
+	clk := newFakeClock(t)
+	_, err := waitForDetach("/dev/loop0", attachedTo("/tmp/volume.img"), true, testDetachTimeout, testDetachPoll, backing, clk)
 
 	if err == nil {
 		t.Fatal("waitForDetach returned no error for a device that was never released")
@@ -189,10 +188,10 @@ func TestWaitForDetachTimesOutWithATypedError(t *testing.T) {
 		t.Errorf("DeviceError.Device = %q, want %q", devErr.Device, "/dev/loop0")
 	}
 
-	// The wait actually waited. Asserting a LOWER bound is deliberate: a loaded
-	// machine can only push elapsed further into the asserted regime.
-	if elapsed < testDetachTimeout {
-		t.Errorf("gave up after %s, before the %s bound", elapsed, testDetachTimeout)
+	// The wait waited out its bound and no further: just past it, by at most
+	// one poll, on a clock only the wait moves (#233).
+	if elapsed := clk.elapsed(); elapsed <= testDetachTimeout || elapsed > testDetachTimeout+testDetachPoll {
+		t.Errorf("gave up after %s, want just past the %s bound", elapsed, testDetachTimeout)
 	}
 }
 
@@ -206,7 +205,7 @@ func TestWaitForDetachDoesNothingWhenNothingWasAttached(t *testing.T) {
 		return loopState{}, nil
 	}
 
-	if _, err := waitForDetach("/dev/loop0", loopState{}, true, testDetachTimeout, testDetachPoll, backing); err != nil {
+	if _, err := waitForDetach("/dev/loop0", loopState{}, true, testDetachTimeout, testDetachPoll, backing, newFakeClock(t)); err != nil {
 		t.Fatalf("waitForDetach returned error: %v", err)
 	}
 	if consulted {
@@ -228,7 +227,7 @@ func TestWaitForDetachRecoversWhenTheReadStartsWorking(t *testing.T) {
 		return loopState{}, nil // readable again, and authoritatively detached
 	}
 
-	if _, err := waitForDetach("/dev/loop0", attachedTo("/tmp/volume.img"), true, testDetachTimeout, testDetachPoll, backing); err != nil {
+	if _, err := waitForDetach("/dev/loop0", attachedTo("/tmp/volume.img"), true, testDetachTimeout, testDetachPoll, backing, newFakeClock(t)); err != nil {
 		t.Fatalf("waitForDetach gave up on a transient read failure: %v", err)
 	}
 }
@@ -248,7 +247,7 @@ func TestWaitForDetachRecoversWhenTheReadStartsWorking(t *testing.T) {
 // detach and continuing to fail afterwards, so there is neither a baseline nor
 // an authoritative reading at any point.
 func TestWaitForDetachNeverSucceedsWithoutAnAuthoritativeObservation(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	unreadable := failingReader(errors.New("sysfs unavailable"))
 	stillHeld := reader(attachedTo("/tmp/volume.img"))
@@ -269,7 +268,7 @@ func TestWaitForDetachNeverSucceedsWithoutAnAuthoritativeObservation(t *testing.
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := waitForDetach("/dev/loop0", tt.before, tt.knownBefore, testDetachTimeout, testDetachPoll, tt.read)
+			_, err := waitForDetach("/dev/loop0", tt.before, tt.knownBefore, testDetachTimeout, testDetachPoll, tt.read, newFakeClock(t))
 			if err == nil {
 				t.Fatal("waitForDetach reported a release it never observed")
 			}
@@ -300,7 +299,7 @@ func TestWaitForDetachSucceedsOnlyOnAnAuthoritativeObservation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			state, err := waitForDetach("/dev/loop0", tt.before, tt.knownBefore, testDetachTimeout, testDetachPoll, tt.read)
+			state, err := waitForDetach("/dev/loop0", tt.before, tt.knownBefore, testDetachTimeout, testDetachPoll, tt.read, newFakeClock(t))
 			if err != nil {
 				t.Fatalf("waitForDetach returned error: %v", err)
 			}
@@ -462,25 +461,25 @@ func TestWaitForLoopNodeReturnsAsSoonAsTheNodeAppears(t *testing.T) {
 	dir := t.TempDir()
 	node := filepath.Join(dir, "loop8")
 
+	// udev creates the node 100ms into the wait, on a clock only the wait
+	// moves (#233), so "as soon as" is a property of the code, not of the
+	// scheduler.
 	const appearsAfter = 100 * time.Millisecond
-	go func() {
-		time.Sleep(appearsAfter)
-		if err := os.WriteFile(node, nil, 0600); err != nil {
-			t.Errorf("could not create the stand-in node: %v", err)
+	const poll = time.Millisecond
+	clk := newFakeClock(t)
+	clk.onSleep = func(time.Time) {
+		if clk.elapsed() == appearsAfter {
+			if err := os.WriteFile(node, nil, 0600); err != nil {
+				t.Errorf("could not create the stand-in node: %v", err)
+			}
 		}
-	}()
+	}
 
-	started := time.Now()
-	if err := waitForLoopNode(node, 10*time.Second, time.Millisecond); err != nil {
+	if err := waitForLoopNode(node, 10*time.Second, poll, clk); err != nil {
 		t.Fatalf("waitForLoopNode() error = %v, want it to wait for the node and succeed", err)
 	}
-	waited := time.Since(started)
-
-	if waited < appearsAfter {
-		t.Errorf("returned after %s, before the node was created at %s -- it cannot have observed it", waited, appearsAfter)
-	}
-	if waited > appearsAfter+2*time.Second {
-		t.Errorf("returned after %s, far past the %s creation -- it is not polling", waited, appearsAfter)
+	if waited := clk.elapsed(); waited != appearsAfter {
+		t.Errorf("returned after %s; the node appeared at %s and is polled every %s", waited, appearsAfter, poll)
 	}
 }
 
@@ -495,9 +494,9 @@ func TestWaitForLoopNodeTimesOutWithATypedError(t *testing.T) {
 	node := filepath.Join(t.TempDir(), "loop9999")
 
 	const budget = 80 * time.Millisecond
-	started := time.Now()
-	err := waitForLoopNode(node, budget, time.Millisecond)
-	waited := time.Since(started)
+	const poll = time.Millisecond
+	clk := newFakeClock(t)
+	err := waitForLoopNode(node, budget, poll, clk)
 
 	if err == nil {
 		t.Fatal("waitForLoopNode() on a node that never appears = nil, want a timeout")
@@ -512,8 +511,8 @@ func TestWaitForLoopNodeTimesOutWithATypedError(t *testing.T) {
 	if devErr.Device != node {
 		t.Errorf("DeviceError.Device = %q, want %q", devErr.Device, node)
 	}
-	if waited > budget+2*time.Second {
-		t.Errorf("waited %s against a %s budget -- the deadline is not being honored", waited, budget)
+	if waited := clk.elapsed(); waited <= budget || waited > budget+poll {
+		t.Errorf("waited %s against a %s budget polled every %s -- the deadline is not being honored", waited, budget, poll)
 	}
 }
 
@@ -531,17 +530,18 @@ func TestWaitForLoopNodeDoesNotRetryANonExistenceFailure(t *testing.T) {
 	}
 	node := filepath.Join(notADir, "loop0")
 
-	started := time.Now()
-	err := waitForLoopNode(node, 10*time.Second, time.Millisecond)
+	clk := newFakeClock(t)
+	err := waitForLoopNode(node, 10*time.Second, time.Millisecond, clk)
 	if err == nil {
 		t.Fatal("waitForLoopNode() on an unstatable path = nil, want an error")
 	}
 	if errors.Is(err, ErrLoopNodeAbsent) {
 		t.Errorf("an unstatable path is reported as an absent node: %v", err)
 	}
-	// It must not have spent the budget on a condition that cannot improve.
-	if elapsed := time.Since(started); elapsed > 5*time.Second {
-		t.Errorf("took %s to refuse a non-existence failure -- it is being retried", elapsed)
+	// It must not have spent any of the budget on a condition that cannot
+	// improve: not one sleep.
+	if len(clk.slept) != 0 {
+		t.Errorf("slept %v before refusing a non-existence failure -- it is being retried", clk.slept)
 	}
 }
 
@@ -554,12 +554,12 @@ func TestWaitForLoopNodeAcceptsAnExistingNodeImmediately(t *testing.T) {
 	if err := os.WriteFile(node, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	started := time.Now()
-	if err := waitForLoopNode(node, 10*time.Second, time.Second); err != nil {
+	clk := newFakeClock(t)
+	if err := waitForLoopNode(node, 10*time.Second, time.Second, clk); err != nil {
 		t.Fatalf("waitForLoopNode() on an existing node = %v, want nil", err)
 	}
-	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
-		t.Errorf("an existing node took %s -- the first check is not happening before the first sleep", elapsed)
+	if len(clk.slept) != 0 {
+		t.Errorf("an existing node slept %v -- the first check is not happening before the first sleep", clk.slept)
 	}
 }
 

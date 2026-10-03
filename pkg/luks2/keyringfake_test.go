@@ -295,7 +295,9 @@ func validLogonDescription(description string) bool {
 // a 4000-stripe AF merge and an XTS pass, ~5x slower instrumented), so it
 // cannot be trimmed away; it can be overlapped.
 //
-// A top-level test calls t.Parallel() when it costs at least ~100ms and it, and
+// A top-level test runs in parallel -- through `defer parallel(t)()`, which
+// also keeps the concurrent tests inside the process's locked-memory limit
+// (lockedmemorybudget_test.go) -- when it costs at least ~100ms and it, and
 // everything it calls, writes NO package-level variable -- none of the seams
 // (dm, keyring, cryptoRand, newUUID, digestIterationsFor, importToken, ...), no
 // process-wide setting (Setenv, Chdir, umask), and it does not measure

@@ -369,7 +369,7 @@ func stampTokens(t *testing.T, path string, tokens map[string]*Token) {
 // The assertion is on WHICH token came back, not on the count: a fix that
 // returned one entry by keeping the wrong one would satisfy a count check.
 func TestListTokensDoesNotCollapseTwoSpellingsOfOneTokenID(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	path := tokenIDVolume(t, "token-id-collision.img", "1", "01")
 
@@ -399,7 +399,7 @@ func TestListTokensDoesNotCollapseTwoSpellingsOfOneTokenID(t *testing.T) {
 // cryptsetup included, which is the measurement that decided this (see
 // TestCryptsetupCannotReachAnUnaddressableTokenID, integration tier).
 func TestListTokensSkipsANonCanonicalTokenIDOnItsOwn(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	path := tokenIDVolume(t, "token-id-lone.img", "01")
 
@@ -465,7 +465,7 @@ func TestCanonicalTokenIDRejectsEverySpellingThatIsNotItsOwn(t *testing.T) {
 // entry no implementation can reach, so a container carrying "1" and "01"
 // reported two tokens while every listing and every lookup found one.
 func TestCountTokensCountsOnlyTheTokensAnyoneCanAddress(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	for _, tc := range []struct {
 		name string
@@ -509,7 +509,7 @@ func TestCountTokensCountsOnlyTheTokensAnyoneCanAddress(t *testing.T) {
 // skip: a key that never looked like a token id was already skipped, and the
 // canonical rule must not have made that path stricter or looser.
 func TestListTokensIsUnaffectedByKeysThatAreNotNumbersAtAll(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	path := tokenIDVolume(t, "token-id-junk.img", "0", "keyring", "")
 
@@ -547,7 +547,7 @@ func TestListTokensIsUnaffectedByKeysThatAreNotNumbersAtAll(t *testing.T) {
 // safety, they are never exercised, and their tests pass for reasons unrelated
 // to them.
 func TestGetTokenNeverReturnsNilWithoutAnError(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	path := tokenIDVolume(t, "null-token-api.img")
 	stampTokens(t, path, map[string]*Token{
@@ -651,7 +651,7 @@ func TestGetTokenNeverReturnsNilWithoutAnError(t *testing.T) {
 // listing reports and requires the retrieval to succeed, so a listing and a
 // getter that disagree fail here however they came to disagree.
 func TestListTokensSkipsAnIDNoOtherEntryPointAccepts(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	for _, tc := range []struct {
 		name string

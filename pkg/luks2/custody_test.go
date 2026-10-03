@@ -570,7 +570,7 @@ func TestDecryptKeyMaterialEnclaveReleasesOnFailure(t *testing.T) {
 // assertion: a real container, opened through the real path, must hand back a
 // live enclave and nothing else.
 func TestUnlockKeyslotHoldsTheMasterKeyInProtectedMemory(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	path := newImage(t, "custody.img")
 	formatWithLibrary(t, path)
@@ -687,7 +687,7 @@ func TestSuccessfulUnlocksReleaseEveryLockedRegion(t *testing.T) {
 // is process-wide and rlimited, so an unbounded request would not merely fail
 // this unlock -- it would starve every other one in the process.
 func TestUnlockKeyslotRefusesAnAbsurdKeyslotArea(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	path := newImage(t, "custody-absurd-area.img")
 	formatWithLibrary(t, path)

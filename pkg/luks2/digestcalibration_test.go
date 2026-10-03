@@ -8,6 +8,8 @@ package luks2
 
 import (
 	"errors"
+	"fmt"
+	"hash"
 	"os"
 	"testing"
 	"time"
@@ -40,47 +42,125 @@ func recordDigestCalibration(t *testing.T, iterations int) *[]string {
 }
 
 // TestDigestCalibrationTargetsItsBudget is the property that replaced the
-// constant: the count is whatever costs DigestIterationTargetMs on this
-// machine, so it is right on hardware nobody has measured on.
+// constant: the count is whatever costs DigestIterationTargetMs at the rate
+// this machine was measured to hash at, so it is right on hardware nobody has
+// measured on.
 //
-// The assertion is on TIME, not on a count, because a count is exactly the
-// thing that cannot travel between machines.
+// The rate is INJECTED. This test used to time a real derivation on the wall
+// clock and failed whenever the host was busy -- 410ms against a 400ms bound at
+// load 35 on 8 cores -- while the arithmetic it was there to check was fine
+// (#233). With a known rate the expected count is exact, so the assertion can
+// be tight: a calibration that extrapolated wrongly, timed the wrong
+// derivation, or aimed at the wrong target lands on a different number.
+//
+// The 100ms target and the 64-byte benchmark are written out here rather than
+// read from DigestIterationTargetMs and DigestCalibrationKeyLen, because they
+// are measured facts about cryptsetup (see security.go), not this package's to
+// choose: a test that read the constants would follow a change to them.
 func TestDigestCalibrationTargetsItsBudget(t *testing.T) {
-	for _, hashAlgo := range []string{"sha256", "sha512"} {
-		t.Run(hashAlgo, func(t *testing.T) {
-			iterations, err := calibrateDigestIterations(hashAlgo)
+	const cryptsetupDigestTarget = 100 * time.Millisecond
+	const cryptsetupBenchmarkBytes = 64
+	target := cryptsetupDigestTarget
+	for _, tc := range []struct {
+		hashAlgo     string
+		hashWidth    int
+		perIteration time.Duration
+	}{
+		{"sha256", 32, time.Microsecond},
+		{"sha256", 32, 3 * time.Microsecond},
+		{"sha512", 64, 2 * time.Microsecond},
+		{"sha512", 64, 300 * time.Nanosecond},
+	} {
+		t.Run(fmt.Sprintf("%s at %v per iteration", tc.hashAlgo, tc.perIteration), func(t *testing.T) {
+			rate := &knownRate{perIteration: tc.perIteration}
+			iterations, err := digestIterationsTimedBy(tc.hashAlgo, rate.time)
 			if err != nil {
-				t.Fatalf("calibrateDigestIterations failed: %v", err)
-			}
-			if iterations < minPBKDF2Iterations {
-				t.Fatalf("calibrated to %d iterations, below the LUKS2 minimum of %d",
-					iterations, minPBKDF2Iterations)
+				t.Fatalf("digestIterationsTimedBy: %v", err)
 			}
 
-			// Time the derivation the calibration was for: the SAME 64-byte
-			// output cryptsetup benchmarks, which is what makes the target
-			// comparable to its numbers at all.
-			kdf := &KDF{Type: "pbkdf2", Hash: hashAlgo, Salt: encodeBase64(make([]byte, 32)), Iterations: &iterations}
-			start := time.Now()
-			// deriveKeyPlain, not the exported DeriveKey: #173 removed that
-			// wrapper. This is an in-package test and wants the derivation
-			// timed, not a key it keeps, so the unexported function it always
-			// delegated to is the same measurement without the enclave
-			// allocation DeriveKeyEnclave would add to the clock.
-			if _, err := deriveKeyPlain([]byte("timing-probe-passphrase"), kdf, DigestCalibrationKeyLen); err != nil {
-				t.Fatalf("deriveKeyPlain failed: %v", err)
+			// The count that costs exactly the target at this rate. Within
+			// one iteration, for the float division the calibration does.
+			want := int(target / tc.perIteration)
+			if iterations < want-1 || iterations > want+1 {
+				t.Fatalf("calibrated to %d iterations; at %v per iteration the %v target is %d",
+					iterations, tc.perIteration, target, want)
 			}
-			elapsed := time.Since(start)
 
-			// A wide band on purpose. This runs alongside the rest of the
-			// suite, so the clock is contended; the failure worth catching is
-			// a target that has moved by an order of magnitude, which is what
-			// a reinstated constant would look like.
-			low := time.Duration(DigestIterationTargetMs) * time.Millisecond / 4
-			high := time.Duration(DigestIterationTargetMs) * time.Millisecond * 4
-			if elapsed < low || elapsed > high {
-				t.Errorf("a %d-iteration %s digest took %v; the %dms target puts it in %v..%v",
-					iterations, hashAlgo, elapsed, DigestIterationTargetMs, low, high)
+			// It extrapolated from the FIRST probe that ran for at least
+			// pbkdf2ProbeFloor, which is what keeps scheduler noise out of the
+			// measurement on a real clock: every earlier probe was shorter.
+			last := len(rate.probes) - 1
+			if last < 0 || time.Duration(rate.probes[last])*tc.perIteration < pbkdf2ProbeFloor {
+				t.Fatalf("probes %v: the last ran under the %v floor", rate.probes, pbkdf2ProbeFloor)
+			}
+			if last > 0 && time.Duration(rate.probes[last-1])*tc.perIteration >= pbkdf2ProbeFloor {
+				t.Fatalf("probes %v: it kept doubling past a probe that already met the %v floor", rate.probes, pbkdf2ProbeFloor)
+			}
+
+			// It timed the derivation cryptsetup benchmarks -- 64 bytes
+			// whatever the hash -- with the hash the digest declares.
+			if len(rate.keySizes) == 0 {
+				t.Fatal("the calibration timed nothing")
+			}
+			for i := range rate.keySizes {
+				if rate.keySizes[i] != cryptsetupBenchmarkBytes || rate.hashWidths[i] != tc.hashWidth {
+					t.Fatalf("probe %d derived %d bytes with a %d-byte hash; want %d bytes with %s",
+						i, rate.keySizes[i], rate.hashWidths[i], cryptsetupBenchmarkBytes, tc.hashAlgo)
+				}
+			}
+		})
+	}
+}
+
+// TestDigestCalibrationNeverGoesBelowItsFloor: on a machine slow enough that
+// the target buys fewer iterations than the floor, the floor is what is
+// written -- with a known rate, exactly.
+func TestDigestCalibrationNeverGoesBelowItsFloor(t *testing.T) {
+	rate := &knownRate{perIteration: 100 * time.Microsecond} // 1000 iterations in the target
+	iterations, err := digestIterationsTimedBy("sha256", rate.time)
+	if err != nil {
+		t.Fatalf("digestIterationsTimedBy: %v", err)
+	}
+	// sha256's recommended 600000 at the 2000ms reference, scaled to the
+	// 100ms digest target.
+	if want := 600_000 * 100 / 2000; iterations != want {
+		t.Fatalf("calibrated to %d iterations on a slow machine, want the floor %d", iterations, want)
+	}
+}
+
+// TestDigestCalibrationReportsAFailedProbe: a probe that could not run fails
+// the calibration with its own error, never a default count.
+func TestDigestCalibrationReportsAFailedProbe(t *testing.T) {
+	broken := errors.New("the derivation could not run")
+	iterations, err := digestIterationsTimedBy("sha512", func(func() hash.Hash, int, int) (time.Duration, error) {
+		return 0, broken
+	})
+	if !errors.Is(err, broken) || iterations != 0 {
+		t.Fatalf("digestIterationsTimedBy = %d, %v; want 0 and the probe's error", iterations, err)
+	}
+}
+
+// BenchmarkDigestCalibrationCostsItsBudget is the real-work check the injected
+// rate cannot give: the actual hash, calibrated and then derived at the count
+// it chose, costs about the digest target. It is a BENCHMARK, not a test, so
+// the ordinary unit suite never runs it: whatever clock it uses, a real
+// derivation's cost moves with the machine, and a unit verdict must not
+// (#233). `make test-calibration` runs it, uninstrumented and on its own, in
+// CI's unit job and in `make ci`, where a failure fails the build.
+//
+// Both the calibration and the check are timed in thread CPU time, which
+// leaves out time the scheduler gives to other work -- the source of the
+// failures this replaces -- though not cache or frequency effects; hence the
+// 4x band. The band is applied to the ITERATION COUNT against what the
+// check's own measured rate says the count should be, max(floor, target /
+// rate): on hardware slow enough that the floor binds, the right count costs
+// more than the target, and that is the floor working, not a failure.
+func BenchmarkDigestCalibrationCostsItsBudget(b *testing.B) {
+	for _, hashAlgo := range []string{"sha256", "sha512"} {
+		b.Run(hashAlgo, func(b *testing.B) {
+			for b.Loop() {
+				checkCalibrationCost(b, hashAlgo, DigestCalibrationKeyLen, DigestIterationTargetMs,
+					func(timer pbkdf2Timer) (int, error) { return digestIterationsTimedBy(hashAlgo, timer) })
 			}
 		})
 	}

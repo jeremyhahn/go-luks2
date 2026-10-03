@@ -46,13 +46,13 @@ func metadataSizeFormatOptions(path string, size int) FormatOptions {
 // allows and checks the geometry against cryptsetup's, both as this package
 // reads it and as cryptsetup reads it.
 func TestFormatMetadataSizeLaysOutEveryLegalSize(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	requireCryptsetup(t)
 
 	for _, size := range legalHeaderAreaSizes() {
 		t.Run(fmt.Sprintf("%dKiB", size/1024), func(t *testing.T) {
-			t.Parallel()
+			defer parallel(t)()
 
 			path := newImage(t, "metadata-size.img")
 			if err := Format(metadataSizeFormatOptions(path, int(size))); err != nil {
@@ -117,7 +117,7 @@ func TestFormatMetadataSizeLaysOutEveryLegalSize(t *testing.T) {
 // cryptsetup refuses ("Unsupported LUKS2 metadata size options") are refused
 // here too, with a typed error, before the device is touched.
 func TestFormatMetadataSizeRefusesIllegalSizes(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	for _, size := range []int{
 		-1,
@@ -175,7 +175,7 @@ func TestValidateFormatOptionsMetadataSize(t *testing.T) {
 // knob: a token too large for the default 12288-byte JSON area is refused on a
 // default container and accepted on a 64 KiB one, which cryptsetup then reads.
 func TestFormatMetadataSizeHoldsMetadataTheDefaultRefuses(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	requireCryptsetup(t)
 
@@ -242,7 +242,7 @@ func TestFormatMetadataSizeHoldsMetadataTheDefaultRefuses(t *testing.T) {
 // write, and which cryptsetup always could -- the second copy starts at 32 KiB
 // and survived the wipe intact, so the "wiped" volume was still recoverable.
 func TestWipeHeaderOnlyDestroysBothCopiesOfALargerArea(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	requireCryptsetup(t)
 
@@ -301,7 +301,7 @@ func TestWipeHeaderOnlyDestroysBothCopiesOfALargerArea(t *testing.T) {
 // secondary at 64 KiB survived a "successful" header-only wipe -- so the
 // volume was still recoverable from its second copy.
 func TestWipeHeaderOnlyDoesNotTrustADamagedPrimarysSize(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	const size = 64 << 10
 
@@ -394,7 +394,7 @@ func readImageAt(t *testing.T, path string, offset int64, size int) []byte {
 // container with 32 KiB headers and its data segment at 4 MiB, that is 4 MiB
 // of payload destroyed, although the intact secondary stated the real geometry.
 func TestWipeHeaderOnlyDoesNotTrustAnOverstatedPrimarySize(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	requireCryptsetup(t)
 
@@ -451,7 +451,7 @@ func TestWipeHeaderOnlyDoesNotTrustAnOverstatedPrimarySize(t *testing.T) {
 // container -- so no copy is left locatable and no payload-sized span is
 // guessed at.
 func TestWipeHeaderOnlyWithNoValidCopy(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	const size = 64 << 10
 

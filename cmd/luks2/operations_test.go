@@ -46,7 +46,7 @@ func cheapKeyslot() *luks2.AddKeyOptions {
 }
 
 func TestDefaultOperationsAreWiredToTheRightLibraryCalls(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	requireCryptsetupCLI(t)
 

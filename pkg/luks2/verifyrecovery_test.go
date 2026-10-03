@@ -57,7 +57,7 @@ func TestVerifyRecoveryKeyReportsAnUnreadableDevice(t *testing.T) {
 }
 
 func TestVerifyRecoveryKeyReportsAnUnusableKeyslot(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	path := newImage(t, "verify-damaged.img")
 	formatWithLibrary(t, path)
@@ -118,7 +118,7 @@ func TestVerifyRecoveryKeyReportsAProtectedMemoryFailure(t *testing.T) {
 // everything, which would make the boolean useless. A well-formed container and
 // a key that simply is not one of its credentials must still be (false, nil).
 func TestVerifyRecoveryKeyStillReportsAKeyThatDoesNotOpenTheVolume(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	path := newImage(t, "verify-wrong.img")
 	formatWithLibrary(t, path)
@@ -152,7 +152,7 @@ func TestVerifyRecoveryKeyStillReportsAKeyThatDoesNotOpenTheVolume(t *testing.T)
 // verify are different facts about a volume, and collapsing them is what made
 // every caller above wrong.
 func TestGetMasterKeyDistinguishesFailureToTryFromFailureToVerify(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	path := newImage(t, "classify.img")
 	formatWithLibrary(t, path)

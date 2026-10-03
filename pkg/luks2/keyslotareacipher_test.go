@@ -117,7 +117,7 @@ func TestUnsupportedKeyslotCipherErrorMatchesBothSentinels(t *testing.T) {
 // The control matters as much as the mutation: the untouched fixture must
 // open, or a refusal proves nothing about the declaration.
 func TestKeyslotDeclaringAModeItDoesNotUseIsRefused(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	// declare stamps a fresh library-formatted container and rewrites ONLY
 	// keyslot 0's declared area encryption. The material is untouched.
@@ -191,7 +191,7 @@ func TestKeyslotDeclaringAModeItDoesNotUseIsRefused(t *testing.T) {
 // with the typed error: before #106 it was decrypted as XTS and failed as a
 // digest mismatch, which an operator cannot tell apart from a wrong passphrase.
 func TestConformance_CryptsetupKeyslotCiphers(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	requireCryptsetup(t)
 

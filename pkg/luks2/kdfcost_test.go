@@ -10,7 +10,8 @@ import (
 	"errors"
 	"runtime"
 	"testing"
-	"time"
+
+	"github.com/jeremyhahn/go-enclave"
 )
 
 // A header declares how EXPENSIVE its own KDF is to run, and this package used
@@ -100,6 +101,18 @@ func TestExcessiveKDFCostIsRefusedBeforeDeriving(t *testing.T) {
 		},
 	}
 
+	// The derivation is observed directly rather than timed (#233): a refusal
+	// that comes BEFORE it never calls it, whatever the machine is doing.
+	derivations := 0
+	previous := passphraseKDF
+	t.Cleanup(func() { passphraseKDF = previous })
+	// It does not derive: on a mutation that ran it first, deriving a billion
+	// iterations would hang the test instead of failing it.
+	passphraseKDF = func([]byte, *KDF, int) (*enclave.MemoryEnclave, error) {
+		derivations++
+		return nil, errors.New("the keyslot KDF was reached")
+	}
+
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			keyslot := cloneKeyslot(good)
@@ -109,9 +122,8 @@ func TestExcessiveKDFCostIsRefusedBeforeDeriving(t *testing.T) {
 			runtime.GC()
 			runtime.ReadMemStats(&before)
 
-			start := time.Now()
+			derivations = 0
 			key, err := unlockKeyslot(path, "0", []byte(conformancePassphrase), keyslot, metadata.Digests)
-			elapsed := time.Since(start)
 
 			runtime.ReadMemStats(&after)
 
@@ -125,12 +137,12 @@ func TestExcessiveKDFCostIsRefusedBeforeDeriving(t *testing.T) {
 				t.Fatalf("the refusal is not an unusable-keyslot error: %v", err)
 			}
 
-			// The bound must run BEFORE the derivation. The correct answer takes
-			// microseconds and the unbounded one takes minutes or allocates
-			// gigabytes, so the thresholds below are six orders of magnitude
-			// clear of the signal rather than a tight race.
-			if elapsed > 5*time.Second {
-				t.Fatalf("refusing took %s: the derivation ran before the bound was applied", elapsed)
+			// The bound must run BEFORE the derivation: the keyslot KDF was
+			// never entered. The allocation bound below is the Argon2 matrix
+			// that would otherwise have been sized; it is six orders of
+			// magnitude clear of the signal rather than a tight race.
+			if derivations != 0 {
+				t.Fatalf("the keyslot KDF ran %d time(s) before the bound was applied", derivations)
 			}
 			if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 8<<20 {
 				t.Fatalf("refusing allocated %d bytes: the Argon2 matrix was sized before the bound was applied", allocated)
@@ -250,18 +262,19 @@ func TestExcessiveDigestKDFCostSkipsThatDigest(t *testing.T) {
 	expensive.Iterations = maxKDFIterations + 1
 	metadata.Digests["1"] = &expensive
 
-	start := time.Now()
-	key, err := getMasterKey(path, []byte(conformancePassphrase), metadata)
-	elapsed := time.Since(start)
+	// The expensive digest is refused by the screen before any derivation --
+	// asserted on the screen's verdict rather than on how long opening took
+	// (#233). verifyKeyAgainstDigests cannot skip the screen: it is the only
+	// source of the expected value and the KDF it derives with.
+	if _, _, err := screenDigest(&expensive); err == nil {
+		t.Fatalf("the screen accepted a digest declaring %d iterations, past the %d ceiling", expensive.Iterations, maxKDFIterations)
+	}
 
+	key, err := getMasterKey(path, []byte(conformancePassphrase), metadata)
 	if err != nil {
 		t.Fatalf("a volume with one expensive digest no longer opens through its usable one: %v", err)
 	}
 	mustDestroy(t, key)
-
-	if elapsed > 10*time.Second {
-		t.Fatalf("opening took %s: the expensive digest was derived rather than skipped", elapsed)
-	}
 }
 
 func pbkdf2KDF(iterations int) *KDF {

@@ -327,7 +327,19 @@ var digestIterationsFor = calibrateDigestIterations
 // costs a few milliseconds, and one calibration path is worth more than a
 // second one tuned for a value that defends nothing.
 func calibrateDigestIterations(hashAlgo string) (int, error) {
-	return BenchmarkPBKDF2(hashAlgo, DigestCalibrationKeyLen, DigestIterationTargetMs)
+	return digestIterationsTimedBy(hashAlgo, wallClockPBKDF2)
+}
+
+// digestIterationsTimedBy is the digest calibration with its timer supplied:
+// the digest's target and benchmark length, through the one calibration path.
+// calibrateDigestIterations passes the wall clock; a test passes a known rate.
+func digestIterationsTimedBy(hashAlgo string, timer pbkdf2Timer) (int, error) {
+	hashFunc, err := getPBKDF2HashFunc(hashAlgo)
+	if err != nil {
+		return 0, err
+	}
+	return calibratePBKDF2(hashFunc, hashAlgo, DigestCalibrationKeyLen, DigestIterationTargetMs,
+		pbkdf2ProbeFloor, pbkdf2ProbeCeiling, timer)
 }
 
 // createDigest creates a digest for master key verification.

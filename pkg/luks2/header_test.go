@@ -916,7 +916,7 @@ func TestReadJSONMetadataRefusesAHeaderSizeWithNoRoomForJSON(t *testing.T) {
 // The assertion is on the size, so moving the bound back down turns this test
 // red rather than leaving it satisfied by the other guard.
 func TestReadHeaderBoundsTheDeclaredSizeBeforeAnythingElseUsesIt(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	const craftedSize = uint64(1) << 62
 	const craftedOffset = uint64(0x1234) // not 0, not 16 KiB-aligned
@@ -987,7 +987,7 @@ func nullEntryVolume(t *testing.T, name string) string {
 // that something non-empty came back: a report that names the wrong id space,
 // or that changes between runs, is the same problem in a new place.
 func TestReadHeaderReportsTheNullEntriesItDropped(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	path := nullEntryVolume(t, "null-entries.img")
 
@@ -1034,7 +1034,7 @@ func TestReadHeaderReportsTheNullEntriesItDropped(t *testing.T) {
 // keeps the report from being noise. A diagnostic that fires on healthy
 // containers is one an operator learns to ignore, and then it protects nothing.
 func TestReadHeaderReportsNothingDroppedForAnIntactHeader(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	path := newImage(t, "intact.img")
 	formatWithLibrary(t, path)

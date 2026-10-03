@@ -511,12 +511,17 @@ func AcquireFileLock(path string) (*FileLock, error) {
 // it, and a lock wait that cannot time out is the deadlock this is meant to
 // terminate. Polling costs a syscall per attempt and can be bounded exactly.
 func AcquireFileLockTimeout(path string, wait time.Duration) (*FileLock, error) {
+	return acquireFileLock(path, wait, systemClock{})
+}
+
+// acquireFileLock is AcquireFileLockTimeout on the given clock.
+func acquireFileLock(path string, wait time.Duration, clk clock) (*FileLock, error) {
 	f, err := openDevice("lock the device", path, os.O_RDWR)
 	if err != nil {
 		return nil, err
 	}
 
-	started := time.Now()
+	started := clk.Now()
 	deadline := started.Add(wait)
 	backoff := lockBackoffMin
 
@@ -538,12 +543,12 @@ func AcquireFileLockTimeout(path string, wait time.Duration) (*FileLock, error) 
 
 		// Checked AFTER an attempt, so a zero budget still tries once and a
 		// lock that is free is never reported as contended.
-		remaining := time.Until(deadline)
+		remaining := deadline.Sub(clk.Now())
 		if remaining <= 0 {
 			_ = f.Close()
 			return nil, &LockTimeoutError{
 				Path:     path,
-				Waited:   time.Since(started),
+				Waited:   clk.Now().Sub(started),
 				Attempts: attempt,
 				Err:      err,
 			}
@@ -554,7 +559,7 @@ func AcquireFileLockTimeout(path string, wait time.Duration) (*FileLock, error) 
 		if backoff > remaining {
 			backoff = remaining
 		}
-		time.Sleep(backoff)
+		clk.Sleep(backoff)
 		if backoff < lockBackoffMax {
 			backoff *= 2
 			if backoff > lockBackoffMax {

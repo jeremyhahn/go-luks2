@@ -56,7 +56,7 @@ func SetupLoopDevice(file string) (string, error) {
 	//
 	// Measured, PR #89 job 34083: four devices created fine and the fifth died
 	// on `open /dev/loop8: no such file or directory`.
-	if err := waitForLoopNode(loopDevice, loopNodeTimeout, loopNodePollInterval); err != nil {
+	if err := waitForLoopNode(loopDevice, loopNodeTimeout, loopNodePollInterval, systemClock{}); err != nil {
 		return "", err
 	}
 
@@ -128,8 +128,8 @@ const loopNodePollInterval = 500 * time.Microsecond
 // those for the whole budget would report a permission problem as a missing
 // node. Existence is the one question this answers; the open that follows
 // keeps its own error.
-func waitForLoopNode(device string, timeout, poll time.Duration) error {
-	deadline := time.Now().Add(timeout)
+func waitForLoopNode(device string, timeout, poll time.Duration, clk clock) error {
+	deadline := clk.Now().Add(timeout)
 	for {
 		_, err := os.Stat(device)
 		if err == nil {
@@ -140,10 +140,10 @@ func waitForLoopNode(device string, timeout, poll time.Duration) error {
 		if !os.IsNotExist(err) {
 			return &DeviceError{Device: device, Op: "wait for the loop device node", Err: err}
 		}
-		if time.Now().After(deadline) {
+		if clk.Now().After(deadline) {
 			return &DeviceError{Device: device, Op: "wait for the loop device node", Err: ErrLoopNodeAbsent}
 		}
-		time.Sleep(poll)
+		clk.Sleep(poll)
 	}
 }
 
@@ -249,7 +249,7 @@ func detachLoopDevice(device string, timeout, poll time.Duration, read loopState
 	// abandon the observation this function exists to make and hand back an
 	// error a caller cannot classify. It is reported alongside whatever the
 	// wait concludes.
-	state, waitErr := waitForDetach(device, before, beforeErr == nil, timeout, poll, read)
+	state, waitErr := waitForDetach(device, before, beforeErr == nil, timeout, poll, read, systemClock{})
 	if closeErr != nil {
 		return state, errors.Join(&DeviceError{Device: device, Op: "close loop device after detach", Err: closeErr}, waitErr)
 	}
@@ -267,7 +267,7 @@ func detachLoopDevice(device string, timeout, poll time.Duration, read loopState
 // The contract, and it is one sentence: NO PATH RETURNS SUCCESS WITHOUT AN
 // AUTHORITATIVE OBSERVATION. An unreadable state is retried, never concluded
 // from; if it never clears, the bound reports that the state could not be read.
-func waitForDetach(device string, before loopState, knownBefore bool, timeout, poll time.Duration, read loopStateReader) (DetachState, error) {
+func waitForDetach(device string, before loopState, knownBefore bool, timeout, poll time.Duration, read loopStateReader, clk clock) (DetachState, error) {
 	// Nothing was attached, and we KNOW that — the only case that needs no
 	// wait. An unreadable pre-detach observation is not this case, however
 	// similar an empty backing file looks.
@@ -275,7 +275,7 @@ func waitForDetach(device string, before loopState, knownBefore bool, timeout, p
 		return DetachReleased, nil
 	}
 
-	deadline := time.Now().Add(timeout)
+	deadline := clk.Now().Add(timeout)
 
 	// Counted rather than remembered. Classifying on the LAST reading inverts
 	// the report in both directions: a wait that was blind almost throughout
@@ -317,7 +317,7 @@ func waitForDetach(device string, before loopState, knownBefore bool, timeout, p
 			held++
 		}
 
-		if time.Now().After(deadline) {
+		if clk.Now().After(deadline) {
 			if sawAutoclear {
 				// Still held at the bound, but the kernel has accepted the
 				// request and will complete it when the last user goes away.
@@ -335,7 +335,7 @@ func waitForDetach(device string, before loopState, knownBefore bool, timeout, p
 			}
 		}
 
-		time.Sleep(poll)
+		clk.Sleep(poll)
 	}
 }
 

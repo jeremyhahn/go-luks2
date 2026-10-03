@@ -517,16 +517,16 @@ var (
 // waitForNoDevices polls until the query returns nothing or the bound expires,
 // and returns whatever it saw last.
 func waitForNoDevices(query func() ([]LoopDevice, error)) ([]LoopDevice, error) {
-	deadline := time.Now().Add(detachSettleTimeout)
+	deadline := waitClock.Now().Add(detachSettleTimeout)
 	for {
 		devices, err := query()
 		if err != nil || len(devices) == 0 {
 			return devices, err
 		}
-		if time.Now().After(deadline) {
+		if waitClock.Now().After(deadline) {
 			return devices, nil
 		}
-		time.Sleep(detachSettlePoll)
+		waitClock.Sleep(detachSettlePoll)
 	}
 }
 
@@ -694,7 +694,7 @@ func lockReaper(dir string) (func(), error) {
 		return nil, fmt.Errorf("%w: opening %s: %v", ErrLedgerUnavailable, path, err)
 	}
 
-	deadline := time.Now().Add(reaperLockTimeoutForTest)
+	deadline := waitClock.Now().Add(reaperLockTimeoutForTest)
 	for {
 		err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 		if err == nil {
@@ -707,12 +707,12 @@ func lockReaper(dir string) (func(), error) {
 			_ = f.Close()
 			return nil, fmt.Errorf("%w: locking %s: %v", ErrLedgerUnavailable, path, err)
 		}
-		if time.Now().After(deadline) {
+		if waitClock.Now().After(deadline) {
 			_ = f.Close()
 			return nil, fmt.Errorf("%w: another reaper has held %s for over %s; this host is not known to be clean",
 				ErrReapIncomplete, path, reaperLockTimeoutForTest)
 		}
-		time.Sleep(reaperLockPoll)
+		waitClock.Sleep(reaperLockPoll)
 	}
 }
 

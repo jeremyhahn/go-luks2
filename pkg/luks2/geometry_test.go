@@ -101,7 +101,7 @@ func newForeignContainer(t *testing.T, name string, geo foreignGeometry) string 
 // second copy exists for: the offset has to be found, and the old fallback
 // looked in one place and gave up.
 func TestForeignGeometry_RecoverSecondaryHeaderWithoutThePrimary(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	requireCryptsetup(t)
 
@@ -160,7 +160,7 @@ func TestForeignGeometry_RecoverSecondaryHeaderWithoutThePrimary(t *testing.T) {
 // failure rather than accepting whatever happens to sit at one of the nine
 // legal offsets.
 func TestForeignGeometry_ProbeRejectsEveryWrongOffset(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	requireCryptsetup(t)
 
@@ -237,7 +237,7 @@ func TestLegalHeaderAreaSizes(t *testing.T) {
 // at 1355776, past the 1114112 the container declares and far short of the
 // 4194304 where the data begins.
 func TestForeignGeometry_AddKeyStaysInsideTheDeclaredKeyslotsArea(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	requireCryptsetup(t)
 

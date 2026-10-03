@@ -24,7 +24,7 @@ import (
 
 // TestVerifyMasterKey tests master key verification against digests
 func TestVerifyMasterKey(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	// Create a known master key for testing
 	testMasterKey := []byte("test-master-key-32-bytes-long!!!")

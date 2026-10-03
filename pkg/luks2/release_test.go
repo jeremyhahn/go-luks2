@@ -43,6 +43,11 @@ var volumeReleaseTimeout = 10 * time.Second
 // in for synchronization.
 var releaseVolumePoll = 100 * time.Millisecond
 
+// releaseClock is the clock releaseVolumeErr waits on. The integration tier
+// waits on the real one; the unit tests of the helper itself substitute a
+// controlled one, so their verdicts do not depend on host load (#233).
+var releaseClock clock = systemClock{}
+
 // releaseVolumeErr closes name and returns a diagnostic error if a
 // device-mapper mapping is still present afterwards.
 //
@@ -61,7 +66,7 @@ var releaseVolumePoll = 100 * time.Millisecond
 // silently is the same defect wearing a delay.
 func releaseVolumeErr(name string) error {
 	var last error
-	deadline := time.Now().Add(volumeReleaseTimeout)
+	deadline := releaseClock.Now().Add(volumeReleaseTimeout)
 	for {
 		// A filesystem still mounted FROM THIS VOLUME holds the mapping open,
 		// and no amount of retrying will free it. Unmount it first.
@@ -84,10 +89,10 @@ func releaseVolumeErr(name string) error {
 		if mappingGone(name) {
 			return nil
 		}
-		if !time.Now().Before(deadline) {
+		if !releaseClock.Now().Before(deadline) {
 			break
 		}
-		time.Sleep(releaseVolumePoll)
+		releaseClock.Sleep(releaseVolumePoll)
 	}
 	return fmt.Errorf("device-mapper mapping %q is STILL PRESENT after %s, so "+
 		"this run is leaving it on the host for the next job, which will "+
@@ -304,16 +309,17 @@ func TestReleaseVolumeErr_RetriesThroughTransientBusy(t *testing.T) {
 			return nil
 		})
 
-	start := time.Now()
+	clk := withReleaseClock(t)
 	if err := releaseVolumeErr("busy-then-free"); err != nil {
 		t.Fatalf("a transient busy must be retried through, not reported: %v", err)
 	}
-	if attempts < 3 {
-		t.Fatalf("expected the release to be retried; it was attempted %d time(s)", attempts)
+	if attempts != 3 {
+		t.Fatalf("expected exactly three attempts, two busy and one that worked; got %d", attempts)
 	}
-	if elapsed := time.Since(start); elapsed >= volumeReleaseTimeout {
-		t.Fatalf("retry took %s, which means it waited out the deadline rather "+
-			"than succeeding on a later attempt", elapsed)
+	// One poll between each attempt and no more: it succeeded on the third
+	// rather than waiting out the deadline.
+	if want := 2 * releaseVolumePoll; clk.elapsed() != want {
+		t.Fatalf("retry took %s, want %s (two polls)", clk.elapsed(), want)
 	}
 }
 
@@ -321,7 +327,7 @@ func TestReleaseVolumeErr_RetriesThroughTransientBusy(t *testing.T) {
 // LOUD. A retry that eventually returns nil is the original defect with a
 // delay in front of it.
 func TestReleaseVolumeErr_ReportsAMappingItCannotRelease(t *testing.T) {
-	withShortDeadline(t)
+	clk := withReleaseClock(t)
 
 	attempts := 0
 	fakeDM(t,
@@ -340,15 +346,19 @@ func TestReleaseVolumeErr_ReportsAMappingItCannotRelease(t *testing.T) {
 	if !strings.Contains(err.Error(), "busy") {
 		t.Errorf("the failure must carry the last error from Lock, got: %v", err)
 	}
-	if attempts < 2 {
-		t.Errorf("expected repeated attempts before giving up, got %d", attempts)
+	// It gave up at the deadline, having tried once per poll until then.
+	if clk.elapsed() != volumeReleaseTimeout {
+		t.Errorf("gave up after %s, want the %s deadline", clk.elapsed(), volumeReleaseTimeout)
+	}
+	if want := int(volumeReleaseTimeout/releaseVolumePoll) + 1; attempts != want {
+		t.Errorf("made %d attempts before giving up, want %d (one per %s poll)", attempts, want, releaseVolumePoll)
 	}
 }
 
 // A Lock that reports success while the mapping survives must still fail. This
 // is why the helper asserts the end state rather than the call's error.
 func TestReleaseVolumeErr_ReportsWhenRemoveLiesAboutSuccess(t *testing.T) {
-	withShortDeadline(t)
+	withReleaseClock(t)
 	fakeDM(t,
 		func() bool { return true }, // mapping never disappears
 		func() error { return nil }) // ...but remove claims it worked
@@ -359,15 +369,17 @@ func TestReleaseVolumeErr_ReportsWhenRemoveLiesAboutSuccess(t *testing.T) {
 	}
 }
 
-// withShortDeadline makes the give-up cases finish quickly without weakening
-// what they assert. The deadline is the only thing shortened; the reporting
-// path under test is unchanged.
-func withShortDeadline(t *testing.T) {
+// withReleaseClock puts releaseVolumeErr on a controlled clock for the test,
+// at the real deadline and poll: the give-up cases wait out the full ten
+// seconds instantly, and how long they waited is exact rather than whatever
+// the scheduler allowed (#233).
+func withReleaseClock(t *testing.T) *fakeClock {
 	t.Helper()
-	prevTimeout, prevPoll := volumeReleaseTimeout, releaseVolumePoll
-	t.Cleanup(func() { volumeReleaseTimeout, releaseVolumePoll = prevTimeout, prevPoll })
-	volumeReleaseTimeout = 300 * time.Millisecond
-	releaseVolumePoll = 10 * time.Millisecond
+	clk := newFakeClock(t)
+	previous := releaseClock
+	t.Cleanup(func() { releaseClock = previous })
+	releaseClock = clk
+	return clk
 }
 
 // The mountinfo parser is the part of the scoped unmount that can be wrong,
@@ -433,7 +445,7 @@ func TestParseMountinfoFor_MalformedLinesAreSkipped(t *testing.T) {
 // reports clean on the evidence that nothing can be known -- the exact shape
 // this change exists to remove, so it gets its own case.
 func TestReleaseVolumeErr_UnclassifiableDMErrorIsNotAbsence(t *testing.T) {
-	withShortDeadline(t)
+	withReleaseClock(t)
 
 	previous := dm
 	t.Cleanup(func() { dm = previous })

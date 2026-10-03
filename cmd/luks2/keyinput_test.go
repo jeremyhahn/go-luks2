@@ -140,7 +140,7 @@ var keyFileCases = []struct {
 // the same file, writes what it got to a second file, and cryptsetup is asked to
 // open with that. It opens only if the two readings are byte-identical.
 func TestKeyFileReadingMatchesCryptsetup(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	requireCryptsetupCLI(t)
 
@@ -179,7 +179,7 @@ func TestKeyFileReadingMatchesCryptsetup(t *testing.T) {
 // this case the differential test would pass for a tool that trims, because
 // most key files have no trailing newline to trim.
 func TestTrimmingAKeyFileWouldBreakIt(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	requireCryptsetupCLI(t)
 
@@ -200,7 +200,7 @@ func TestTrimmingAKeyFileWouldBreakIt(t *testing.T) {
 // It is the opposite convention to a key file, on the same tool, which is
 // exactly why both are pinned here rather than described in a comment.
 func TestPipedPassphraseMatchesCryptsetup(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	requireCryptsetupCLI(t)
 
@@ -262,7 +262,7 @@ func TestReadKeyLineLeavesTheRestOfTheStream(t *testing.T) {
 }
 
 func TestReadKeyFileRefusesWhatCryptsetupRefuses(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	t.Run("larger than the bound", func(t *testing.T) {
 		oversize := strings.NewReader(strings.Repeat("x", maxKeyFileSize+1))

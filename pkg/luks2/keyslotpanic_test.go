@@ -44,7 +44,7 @@ import (
 // derivation: three of them on a nil dereference, and the key_size ones inside
 // x/crypto's panic-on-error wrapper.
 func TestMalformedKeyslotIsRefusedNotPanicked(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	path := newImage(t, "malformed.img")
 	formatWithLibrary(t, path)
@@ -105,7 +105,7 @@ func TestMalformedKeyslotIsRefusedNotPanicked(t *testing.T) {
 // class of outcome as issue #37's reproduced data loss, reached from the other
 // direction.
 func TestOneMalformedKeyslotDoesNotDenyTheVolume(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	path := newImage(t, "one-bad-slot.img")
 	formatWithLibrary(t, path)
@@ -165,7 +165,7 @@ func TestOneMalformedKeyslotDoesNotDenyTheVolume(t *testing.T) {
 // Area.Size. A keyslot with no area object dereferences nil there, and one with
 // a crafted offset writes zeros wherever it says.
 func TestKillKeyslotRefusesAMalformedKeyslotArea(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	path := newImage(t, "kill-malformed.img")
 	formatWithLibrary(t, path)

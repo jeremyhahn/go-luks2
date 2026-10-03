@@ -72,7 +72,7 @@ func noUsableKeyslotVolume(t *testing.T, name string, reencryptOnly bool) string
 // TestAVolumeWithNoUsableKeyslotIsNotReportedAsAWrongPassphrase is the fix for
 // #30, asserted on the scan and on the exported paths that reach it.
 func TestAVolumeWithNoUsableKeyslotIsNotReportedAsAWrongPassphrase(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	passphrase := []byte(conformancePassphrase)
 

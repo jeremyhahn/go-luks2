@@ -446,7 +446,7 @@ const (
 // waiting out a real timeout. A wait that could only be tested by attaching a
 // real device would not be tested.
 func waitForLoopRelease(sysBlock string, dev LoopDevice, timeout, poll time.Duration, capture identityCapturer) error {
-	deadline := time.Now().Add(timeout)
+	deadline := waitClock.Now().Add(timeout)
 	for {
 		devices, err := loopDevicesForIn(sysBlock, dev.Backing, capture)
 		if err != nil {
@@ -464,11 +464,11 @@ func waitForLoopRelease(sysBlock string, dev LoopDevice, timeout, poll time.Dura
 			return nil
 		}
 
-		if time.Now().After(deadline) {
+		if waitClock.Now().After(deadline) {
 			return fmt.Errorf("%s still backs %q %s after LOOP_CLR_FD reported success: the release is deferred "+
 				"and something still holds the device open", dev.Path, dev.Backing, timeout)
 		}
-		time.Sleep(poll)
+		waitClock.Sleep(poll)
 	}
 }
 

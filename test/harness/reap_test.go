@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -1086,11 +1087,20 @@ func TestReapersSerializeSoALockedLedgerAlwaysMeansALiveSuite(t *testing.T) {
 	rm := newFakeRemover()
 	rm.mappings["left"] = "uuid-left"
 
-	// Reaper B must WAIT rather than sail past. With the mutex held for longer
-	// than B's patience, B must fail rather than report a clean host.
-	restore := reaperLockPoll
-	reaperLockPoll = time.Millisecond
-	t.Cleanup(func() { reaperLockPoll = restore })
+	// Reaper B must WAIT rather than sail past. Its wait is held still at its
+	// first sleep -- on a clock only the wait moves (#233) -- so "B has not
+	// finished while A holds the mutex" is observed, not raced against a
+	// timer: B has tried the lock, been refused, and is waiting to retry.
+	clk := useFakeClock(t)
+	waiting := make(chan struct{})
+	proceed := make(chan struct{})
+	var once sync.Once
+	clk.onSleep = func(time.Time) {
+		once.Do(func() {
+			close(waiting)
+			<-proceed
+		})
+	}
 
 	done := make(chan error, 1)
 	go func() {
@@ -1098,26 +1108,24 @@ func TestReapersSerializeSoALockedLedgerAlwaysMeansALiveSuite(t *testing.T) {
 		done <- err
 	}()
 
-	// B must not have finished while A holds the mutex. This is the assertion:
-	// the old code returned success here, having classified the ledger as a
-	// live suite's.
+	// Either B parks at its first retry, or it returned without waiting --
+	// the regression -- and is reported at once rather than hanging.
 	select {
 	case err := <-done:
+		unlockA()
 		t.Fatalf("a second reaper completed (%v) while another held the host mutex", err)
-	case <-time.After(50 * time.Millisecond):
+	case <-waiting:
 	}
 
 	// A finishes without having removed anything -- the failure case that made
-	// B's early success dangerous.
+	// B's early success dangerous -- and B's wait resumes.
 	unlockA()
+	close(proceed)
 
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Reap: %v", err)
-		}
-	case <-time.After(30 * time.Second):
-		t.Fatal("the second reaper never completed after the mutex was released")
+	// No wall-clock guard: a B that never completes hangs, and the test
+	// binary's -timeout ends the run naming this test.
+	if err := <-done; err != nil {
+		t.Fatalf("Reap: %v", err)
 	}
 
 	// B did A's unfinished work rather than assuming it was handled.
@@ -1139,10 +1147,9 @@ func TestReapTimesOutRatherThanRunningOnAnUnknownHost(t *testing.T) {
 	}
 	t.Cleanup(unlockA)
 
-	restorePoll, restoreTimeout := reaperLockPoll, reaperLockTimeoutForTest
-	reaperLockPoll = time.Millisecond
-	reaperLockTimeoutForTest = 20 * time.Millisecond
-	t.Cleanup(func() { reaperLockPoll, reaperLockTimeoutForTest = restorePoll, restoreTimeout })
+	// The real bound and poll, on a controlled clock (#233): five minutes of
+	// waiting costs nothing, and how long it waited is exact.
+	clk := useFakeClock(t)
 
 	rm := newFakeRemover()
 	rm.mappings["left"] = "uuid-left"
@@ -1150,6 +1157,9 @@ func TestReapTimesOutRatherThanRunningOnAnUnknownHost(t *testing.T) {
 	_, err = Reap(dir, "reaper-b", rm, io.Discard)
 	if err == nil {
 		t.Fatal("Reap reported success without ever taking the host reaper mutex")
+	}
+	if waited := clk.elapsed(); waited <= reaperLockTimeoutForTest || waited > reaperLockTimeoutForTest+reaperLockPoll {
+		t.Fatalf("gave up after %s, want just past the %s bound", waited, reaperLockTimeoutForTest)
 	}
 	if !errors.Is(err, ErrReapIncomplete) {
 		t.Fatalf("error = %v, want it to match ErrReapIncomplete", err)
@@ -1252,12 +1262,14 @@ func TestReapWaitsForADetachToBecomeObservable(t *testing.T) {
 	// queries -- the kernel finishing the release asynchronously.
 	rm.detachVisibleAfterQueries = 2
 
-	restore := detachSettlePoll
-	detachSettlePoll = time.Millisecond
-	t.Cleanup(func() { detachSettlePoll = restore })
+	clk := useFakeClock(t)
 
 	if _, err := Reap(dir, "next-run", rm, io.Discard); err != nil {
 		t.Fatalf("Reap: %v -- a detach that had not yet settled was reported as a failure", err)
+	}
+	// It waited for the two further queries and no longer: two polls.
+	if waited := clk.elapsed(); waited != 2*detachSettlePoll {
+		t.Fatalf("waited %s for a release two queries away, want %s", waited, 2*detachSettlePoll)
 	}
 }
 
@@ -1272,11 +1284,12 @@ func TestReapStillFailsOnADeviceThatNeverGoesAway(t *testing.T) {
 	rm.loops["/tmp/go-luks2-run-abc/x.img"] = []string{"/dev/loop3"}
 	rm.detachVisibleAfterQueries = 1 << 30 // never
 
-	restorePoll, restoreTimeout := detachSettlePoll, detachSettleTimeout
-	detachSettlePoll, detachSettleTimeout = time.Millisecond, 10*time.Millisecond
-	t.Cleanup(func() { detachSettlePoll, detachSettleTimeout = restorePoll, restoreTimeout })
+	clk := useFakeClock(t)
 
 	report, err := Reap(dir, "next-run", rm, io.Discard)
+	if waited := clk.elapsed(); waited <= detachSettleTimeout || waited > detachSettleTimeout+detachSettlePoll {
+		t.Fatalf("gave up after %s, want just past the %s bound", waited, detachSettleTimeout)
+	}
 	if !errors.Is(err, ErrReapIncomplete) {
 		t.Fatalf("error = %v, want ErrReapIncomplete", err)
 	}

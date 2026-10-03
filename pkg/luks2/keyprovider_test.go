@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 // Tests for the external key providers.
@@ -319,27 +318,20 @@ func TestCommandKeyProviderRefusesOverlongOutputWithoutDeadlocking(t *testing.T)
 		t.Fatalf("failed to write helper: %v", err)
 	}
 
-	done := make(chan error, 1)
-	go func() {
-		p := &CommandKeyProvider{Path: path, Line: 0}
-		credential, err := p.Passphrase(context.Background())
-		if credential != nil {
-			mustDestroy(t, credential)
-		}
-		done <- err
-	}()
-
-	select {
-	case err := <-done:
-		if !errors.Is(err, ErrHelperOutput) {
-			t.Errorf("Passphrase() error = %v, want errors.Is(_, ErrHelperOutput)", err)
-		}
-		if !errors.Is(err, ErrKeyProvider) {
-			t.Errorf("Passphrase() error = %v, want it to match ErrKeyProvider too", err)
-		}
-	case <-time.After(30 * time.Second):
-		t.Fatal("Passphrase() never returned: the helper overran the bound and the " +
-			"read stopped, so the helper is blocked writing and Wait is blocked on its exit")
+	// Called directly, with no wall-clock guard (#233). A deadlock here does
+	// not return, and the test binary's -timeout -- UNIT_TEST_TIMEOUT in the
+	// Makefile -- ends the run with every goroutine's stack, naming this test.
+	// A 30-second select was a second, load-sensitive copy of that bound.
+	p := &CommandKeyProvider{Path: path, Line: 0}
+	credential, err := p.Passphrase(context.Background())
+	if credential != nil {
+		mustDestroy(t, credential)
+	}
+	if !errors.Is(err, ErrHelperOutput) {
+		t.Errorf("Passphrase() error = %v, want errors.Is(_, ErrHelperOutput)", err)
+	}
+	if !errors.Is(err, ErrKeyProvider) {
+		t.Errorf("Passphrase() error = %v, want it to match ErrKeyProvider too", err)
 	}
 }
 
@@ -653,7 +645,7 @@ func TestProviderFromTokenRefusesWhatItCannotDrive(t *testing.T) {
 // PARTY, not merely for this package: a keyslot only this library can use is
 // exactly the failure the conformance suite exists to catch.
 func TestEnrollKeyProviderWritesTheKeyslotAndTheTokenThatNamesIt(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	requireCryptsetup(t)
 
@@ -703,7 +695,7 @@ func TestEnrollKeyProviderWritesTheKeyslotAndTheTokenThatNamesIt(t *testing.T) {
 // TestEnrollKeyProviderWithoutATokenAddsOnlyTheKeyslot covers the anonymous
 // provider: no token means no token slot is consumed.
 func TestEnrollKeyProviderWithoutATokenAddsOnlyTheKeyslot(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	requireCryptsetup(t)
 
@@ -738,7 +730,7 @@ func TestEnrollKeyProviderWithoutATokenAddsOnlyTheKeyslot(t *testing.T) {
 // TestEnrollKeyProviderRollsBackAKeyslotItCannotIdentify is the orphan
 // guarantee: a keyslot whose token could not be written must not survive.
 func TestEnrollKeyProviderRollsBackAKeyslotItCannotIdentify(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	requireCryptsetup(t)
 

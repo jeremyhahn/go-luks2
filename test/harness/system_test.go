@@ -137,8 +137,9 @@ func TestWaitForLoopReleaseRefusesADeviceStillBound(t *testing.T) {
 	}
 
 	const budget = 40 * time.Millisecond
-	started := time.Now()
-	err := waitForLoopRelease(root, dev, budget, time.Millisecond, ours)
+	const poll = time.Millisecond
+	clk := useFakeClock(t)
+	err := waitForLoopRelease(root, dev, budget, poll, ours)
 	if err == nil {
 		t.Fatal("waitForLoopRelease() on a device that never releases = nil, want an error")
 	}
@@ -148,9 +149,10 @@ func TestWaitForLoopReleaseRefusesADeviceStillBound(t *testing.T) {
 	if !strings.Contains(err.Error(), "deferred") {
 		t.Errorf("error %q does not say the release was deferred, which is the whole diagnosis", err)
 	}
-	// A bound that is not honored is an unbounded wait wearing a timeout.
-	if waited := time.Since(started); waited > budget+2*time.Second {
-		t.Errorf("waited %s against a %s budget", waited, budget)
+	// A bound that is not honored is an unbounded wait wearing a timeout. On a
+	// controlled clock (#233) it is exact: past the budget by at most a poll.
+	if waited := clk.elapsed(); waited <= budget || waited > budget+poll {
+		t.Errorf("waited %s against a %s budget polled every %s", waited, budget, poll)
 	}
 }
 

@@ -102,7 +102,7 @@ func TestSaveRecoveryKeyLeavesNoPartialFile(t *testing.T) {
 // existing file is never replaced. For a last-resort credential, refusing is
 // the safe direction, and a caller that means to replace one removes it first.
 func TestSaveRecoveryKeyRefusesToReplaceAnExistingFile(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	dir := t.TempDir()
 

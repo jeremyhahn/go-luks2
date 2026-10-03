@@ -293,7 +293,7 @@ var keyslotRemovalPaths = []keyslotRemovalPath{
 // shape asserted here has been shown, in that test, to be one the unlock path
 // really does refuse. Neither test is allowed to be the only definition.
 func TestEveryKeyslotRemovalPathRefusesToDestroyTheLastUsableKeyslot(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	passphrase := []byte(conformancePassphrase)
 
@@ -306,7 +306,7 @@ func TestEveryKeyslotRemovalPathRefusesToDestroyTheLastUsableKeyslot(t *testing.
 
 		for _, path := range keyslotRemovalPaths {
 			t.Run(shape.name+"/"+path.name, func(t *testing.T) {
-				t.Parallel()
+				defer parallel(t)()
 
 				device := restoreVolume(t, "guarded.img", golden)
 				before := readAreaBytes(t, device, offset, size)
@@ -336,7 +336,7 @@ func TestEveryKeyslotRemovalPathRefusesToDestroyTheLastUsableKeyslot(t *testing.
 		// per-path claim -- that this path destroyed nothing -- is already made
 		// on the bytes above, which is the stronger of the two statements.
 		t.Run(shape.name+"/the volume still opens", func(t *testing.T) {
-			t.Parallel()
+			defer parallel(t)()
 
 			device := restoreVolume(t, "survives.img", golden)
 			for _, path := range keyslotRemovalPaths {
@@ -381,7 +381,7 @@ func keyslotAreaExtent(t *testing.T, device, id string) (offset, size int64) {
 // it -- see keyslotCanOpenVolume's documented residual, which cannot be removed
 // without a passphrase to try.
 func TestEveryKeyslotRemovalPathPermitsARemovalThatLeavesASurvivor(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	passphrase := []byte(conformancePassphrase)
 
@@ -485,7 +485,7 @@ func readAreaBytes(t *testing.T, device string, offset, size int64) []byte {
 // guard happily counted it as a survivor. The volume then reported the
 // operator's correct passphrase as invalid.
 func TestRemovingAKeyslotRefusesWhenItsAreaOverlapsAKeyslotThatStillWorks(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	passphrase := []byte(conformancePassphrase)
 
@@ -542,7 +542,7 @@ func TestRemovingAKeyslotRefusesWhenItsAreaOverlapsAKeyslotThatStillWorks(t *tes
 // single-keyslot volume is precisely what it is for; it must take the byte-level
 // half.
 func TestChangeKeyRefusesToZeroAKeyslotThatStillWorks(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	passphrase := []byte(conformancePassphrase)
 	device, offset, size := overlappingSiblingVolume(t, "changekey-overlap.img", 0)
@@ -567,7 +567,7 @@ func TestChangeKeyRefusesToZeroAKeyslotThatStillWorks(t *testing.T) {
 // A guard that took the entry-level half here would refuse the operation
 // ChangeKey exists to perform.
 func TestChangeKeyOnASingleKeyslotVolumeIsStillAllowed(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	device := newImage(t, "changekey-single.img")
 	formatWithLibrary(t, device)
@@ -604,7 +604,7 @@ func TestChangeKeyOnASingleKeyslotVolumeIsStillAllowed(t *testing.T) {
 // coming last in the source, and by the old area no longer holding the material
 // it held before the change.
 func TestChangeKeyWritesTheNewMaterialBeforeDestroyingTheOld(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	device := newImage(t, "changekey-relocates.img")
 	formatWithLibrary(t, device)
@@ -690,7 +690,7 @@ func TestChangeKeyWritesTheNewMaterialBeforeDestroyingTheOld(t *testing.T) {
 // it was. An operator has a crash-safe route to the same result: add a new key
 // and remove the old slot.
 func TestChangeKeyRefusesRatherThanRewriteInPlaceWhenThereIsNoFreeArea(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	device := newImage(t, "changekey-full.img")
 	formatWithLibrary(t, device)
@@ -862,7 +862,7 @@ func heterogeneousVolume(t *testing.T, name string) (device string, strongPassph
 // The defect's whole signature is a keyslot that appears, looks well-formed, and
 // opens nothing -- an assertion on the header alone passes straight over it.
 func TestAddKeyDerivesTheNewKeyslotsKeySizeFromTheVolumeKey(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	device, strong := heterogeneousVolume(t, "heterogeneous.img")
 	added := []byte("a-third-credential")
@@ -965,7 +965,7 @@ func shrinkHeaderArea(t *testing.T, device string, area int64) {
 // The assertion is on the DAMAGE PLANE, not the return value. Both orderings
 // return an error; only one of them leaves the key material byte-identical.
 func TestNoRemovalPathDestroysMaterialBeforeProvingTheHeaderWritable(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	passphrase := []byte(conformancePassphrase)
 
@@ -1030,7 +1030,7 @@ func TestNoRemovalPathDestroysMaterialBeforeProvingTheHeaderWritable(t *testing.
 //     label is silently rewritten and no new keyslot is authored off a key
 //     this package would not recover.
 func TestLegacyMislabeledKeyslotIsRefusedAndLeftAlone(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	device := newImage(t, "legacy-area-cipher.img")
 	formatWithLibrary(t, device)
@@ -1083,7 +1083,7 @@ func TestLegacyMislabeledKeyslotIsRefusedAndLeftAlone(t *testing.T) {
 // would refuse every keyslot Format wrote for a non-XTS data cipher, so such a
 // container would not open at all. The two changes are one fix.
 func TestFormatDeclaresTheKeyslotAreaCipherItActuallyUses(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	device := newImage(t, "format-cbc-data.img")
 
@@ -1160,7 +1160,7 @@ func TestFormatDeclaresTheKeyslotAreaCipherItActuallyUses(t *testing.T) {
 // RestorePrimaryHeader clones the secondary onto the primary, where advancing
 // would make the repaired copy falsely claim to be newer than its source.
 func TestEveryKeyslotRemovalPathAdvancesTheSequenceID(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	passphrase := []byte(conformancePassphrase)
 	golden := goldenSiblingVolume(t, nil)
@@ -1457,7 +1457,7 @@ func TestEveryArgon2DerivationRefusesAKeySizeItCannotRepresent(t *testing.T) {
 // TestEveryArgon2DerivationAcceptsOrdinaryCosts is the control. Without it a
 // derivation that refused everything would pass every case above.
 func TestEveryArgon2DerivationAcceptsOrdinaryCosts(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	time, mem, cpus := 4, 65536, 4
 	for fname, derive := range argon2Derivations {
@@ -1602,7 +1602,7 @@ func TestCanonicalKeyslotID(t *testing.T) {
 // LUKS2 header. Each is refused with its own error, and -- the property that
 // matters on the destructive ones -- the device is byte-identical afterwards.
 func TestKeyslotEntryPointsRefuseInvalidInputBeforeWriting(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	good := []byte(conformancePassphrase)
 	short := []byte("short")

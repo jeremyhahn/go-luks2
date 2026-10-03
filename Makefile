@@ -216,11 +216,19 @@ test-unit: ## Run only unit tests with coverage and the race detector (fast, no 
 # No `|| true`: a calibration failure must fail the build. That used to be a
 # distinction from test-unit; #86 removed the swallow there, so it is now simply
 # the house rule rather than an exception to one.
-CALIBRATION_TESTS := TestBenchmarkPBKDF2|TestCalibratePBKDF2|TestPBKDF2IterationFloor|TestScalePBKDF2Iterations|TestCreateKDFPBKDF2
+#
+# The real-time checks live here too (#233). The calibration arithmetic, the
+# waits and their bounds are unit-tested on injected rates and clocks, which no
+# host load can move; what only the real machine can answer -- that a real
+# calibration costs about its budget, that the system clock is the time
+# package's -- is in BENCHMARKS, which the ordinary unit suite never runs.
+# This target runs each once, and a failure fails the build.
+CALIBRATION_TESTS := TestBenchmarkPBKDF2|TestCalibratePBKDF2|TestPBKDF2IterationFloor|TestScalePBKDF2Iterations|TestCreateKDFPBKDF2|TestDigestCalibration
+CALIBRATION_BENCHMARKS := BenchmarkDigestCalibrationCostsItsBudget|BenchmarkPBKDF2CalibrationCostsItsBudget|BenchmarkSystemClockIsTheRealClock
 
 test-calibration: ## Run the PBKDF2 calibration tests without -race (the mode the defect lives in)
 	@echo "$(COLOR_BOLD)Running PBKDF2 calibration tests (no -race)...$(COLOR_RESET)"
-	@$(GO) test -count=1 -timeout 10m -run '$(CALIBRATION_TESTS)' ./pkg/luks2
+	@$(GO) test -count=1 -timeout 10m -run '$(CALIBRATION_TESTS)' -bench '$(CALIBRATION_BENCHMARKS)' -benchtime=1x ./pkg/luks2
 	@echo "$(COLOR_GREEN)✓ Calibration tests passed$(COLOR_RESET)"
 
 test-cli: ## Run CLI unit tests only

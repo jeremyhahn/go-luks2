@@ -249,7 +249,7 @@ func TestUnlockWithVolumeKeyKeepsTheHeaderAndNameValidation(t *testing.T) {
 // attest some other segment offers no attestation for this one at all, and
 // that is a header fault rather than a credential verdict.
 func TestVerifyVolumeKeyConsultsOnlyTheSegmentsDigests(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	device, passphrase := unlockableVolume(t)
 	volumeKey := volumeKeyEnclave(t, masterKeyOf(t, device, passphrase))
@@ -278,7 +278,7 @@ func TestVerifyVolumeKeyConsultsOnlyTheSegmentsDigests(t *testing.T) {
 // be accepted and handed to dm-crypt as a key of the wrong size. The length is
 // bound to the keyslots' key_size, and a header that records none is refused.
 func TestVerifyVolumeKeyBindsTheKeyLength(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	device, passphrase := unlockableVolume(t)
 	key := masterKeyOf(t, device, passphrase)

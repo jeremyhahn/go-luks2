@@ -154,13 +154,13 @@ func unusableDigests(t *testing.T) map[string]*Digest {
 // TestVerifyMasterKeySkipsUnusableDigests is the core regression test: one
 // unusable digest must not hide a usable one, whichever order the map yields.
 func TestVerifyMasterKeySkipsUnusableDigests(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	masterKey := []byte("digest-scan-master-key-32-bytes!")
 
 	for name, bad := range unusableDigests(t) {
 		t.Run(name, func(t *testing.T) {
-			t.Parallel()
+			defer parallel(t)()
 
 			for i := 0; i < digestScanRepeats; i++ {
 				digests := map[string]*Digest{
@@ -180,7 +180,7 @@ func TestVerifyMasterKeySkipsUnusableDigests(t *testing.T) {
 // of the usable one, so the scan has to survive every failure mode in a single
 // pass rather than one at a time.
 func TestVerifyMasterKeySkipsEveryUnusableDigestAtOnce(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	masterKey := []byte("digest-scan-master-key-32-bytes!")
 
@@ -212,7 +212,7 @@ func TestVerifyMasterKeySkipsEveryUnusableDigestAtOnce(t *testing.T) {
 // A set with no usable digest fails, and it fails with one indistinguishable
 // error whatever the cause was.
 func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	masterKey := []byte("digest-scan-master-key-32-bytes!")
 
@@ -336,7 +336,7 @@ func TestVerifyMasterKeyAcceptsTheUsableDigestAlone(t *testing.T) {
 // verification -- a judgement that never happened, because the only digest
 // attesting the keyslot decodes to a length nothing can compare against.
 func TestAWrongLengthDigestIsAHeaderFaultEndToEnd(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	path := newImage(t, "wrong-length-digest.img")
 	formatWithLibrary(t, path)

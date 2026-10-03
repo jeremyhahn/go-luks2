@@ -499,7 +499,7 @@ func TestCreateDigest(t *testing.T) {
 
 // TestCreateDigestDeterministic tests that same input produces different digests due to random salt
 func TestCreateDigestDeterministic(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	masterKey := make([]byte, 64)
 	if _, err := rand.Read(masterKey); err != nil {
@@ -529,7 +529,7 @@ func TestCreateDigestDeterministic(t *testing.T) {
 
 // TestCreateDigestVerification tests that the digest can be used to verify the master key
 func TestCreateDigestVerification(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	masterKey := make([]byte, 64)
 	if _, err := rand.Read(masterKey); err != nil {

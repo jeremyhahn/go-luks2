@@ -122,7 +122,7 @@ func jsonAreaBytes(t *testing.T, device string, offset int64, jsonSize int) []by
 // stops fitting. In that window the old code silently corrupted the header and
 // the new code must write it cleanly.
 func TestWriteHeaderKeepsTheBackupOutOfThePrimaryArea(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	const keyslots = 16
 
@@ -230,7 +230,7 @@ func TestWriteHeaderKeepsTheBackupOutOfThePrimaryArea(t *testing.T) {
 // overflow is now reached the way a real header reaches it: a token on top of a
 // full set of keyslots.
 func TestWriteHeaderRefusesMetadataThatDoesNotFit(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	const keyslots = LUKS2MaxKeyslots // 32, the LUKS2 maximum
 
@@ -310,7 +310,7 @@ func TestWriteHeaderRefusesMetadataThatDoesNotFit(t *testing.T) {
 // cryptsetup, writing the same metadata through json-c, has never had that
 // limit.
 func TestWriteHeaderAcceptsTheMaximumKeyslotCount(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	const keyslots = LUKS2MaxKeyslots
 
@@ -355,7 +355,7 @@ func TestWriteHeaderAcceptsTheMaximumKeyslotCount(t *testing.T) {
 // grows. A single token can carry an arbitrarily large blob, so the limit is
 // reachable without any keyslots at all.
 func TestWriteHeaderRefusesOversizedTokenMetadata(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	device, _ := headerSizeVolume(t)
 
@@ -388,7 +388,7 @@ func TestWriteHeaderRefusesOversizedTokenMetadata(t *testing.T) {
 // TestWriteHeaderAcceptsATokenThatFits is the control: the refusal above must
 // be about size, not about tokens.
 func TestWriteHeaderAcceptsATokenThatFits(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	device, passphrase := headerSizeVolume(t)
 
@@ -501,7 +501,7 @@ func TestHeaderAreaSizeForWrite(t *testing.T) {
 // downstream reads would then have taken the field's word for it and paired a
 // header with the wrong copy's JSON.
 func TestReadHeaderRefusesAMismatchedHeaderOffset(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	device, _ := headerSizeVolume(t)
 

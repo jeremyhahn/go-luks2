@@ -592,13 +592,41 @@ func BenchmarkPBKDF2(hashAlgo string, keySize, targetMs int) (int, error) {
 		return 0, err
 	}
 
-	return calibratePBKDF2(hashFunc, hashAlgo, keySize, targetMs, pbkdf2ProbeFloor, pbkdf2ProbeCeiling)
+	return calibratePBKDF2(hashFunc, hashAlgo, keySize, targetMs, pbkdf2ProbeFloor, pbkdf2ProbeCeiling, wallClockPBKDF2)
 }
 
-// calibratePBKDF2 is the calibration itself. The probe bounds are parameters so
-// that the fail-closed path can be exercised by a test without needing a broken
-// clock; BenchmarkPBKDF2 supplies the real ones.
-func calibratePBKDF2(hashFunc func() hash.Hash, hashAlgo string, keySize, targetMs int, probeFloor time.Duration, probeCeiling int) (int, error) {
+// pbkdf2Timer runs one PBKDF2 derivation of the given iteration count and
+// output size and reports how long it took.
+//
+// It is a parameter of the calibration so the ARITHMETIC can be tested against
+// a known rate: with a real clock the measured rate depends on whatever else
+// the machine is doing, and a test asserting on it fails under host load for a
+// reason that has nothing to do with the code (#233).
+type pbkdf2Timer func(hashFunc func() hash.Hash, iterations, keySize int) (time.Duration, error)
+
+// wallClockPBKDF2 is the timer the package calibrates with: the real
+// derivation, timed on the wall clock.
+//
+// Neither the passphrase nor the salt is key material or becomes any. PBKDF2's
+// cost depends on the iteration count, the hash and the output length, not on
+// their contents, and nothing derived here is returned, stored, or compared
+// against anything.
+func wallClockPBKDF2(hashFunc func() hash.Hash, iterations, keySize int) (time.Duration, error) {
+	const calibrationPassphrase = "calibration"
+	calibrationSalt := make([]byte, 32)
+
+	start := time.Now()
+	if _, err := pbkdf2.Key(hashFunc, calibrationPassphrase, calibrationSalt, iterations, keySize); err != nil {
+		return 0, &CryptoError{Op: "pbkdf2 benchmark", Err: err}
+	}
+	return time.Since(start), nil
+}
+
+// calibratePBKDF2 is the calibration itself. The probe bounds and the timer
+// are parameters so that the fail-closed path and the extrapolation can be
+// exercised by a test without needing a broken or an idle clock;
+// BenchmarkPBKDF2 supplies the real ones.
+func calibratePBKDF2(hashFunc func() hash.Hash, hashAlgo string, keySize, targetMs int, probeFloor time.Duration, probeCeiling int, timer pbkdf2Timer) (int, error) {
 	if targetMs <= 0 || targetMs > maxPBKDF2IterTimeMs {
 		return 0, &KDFCalibrationError{
 			Hash:     hashAlgo,
@@ -607,19 +635,11 @@ func calibratePBKDF2(hashFunc func() hash.Hash, hashAlgo string, keySize, target
 		}
 	}
 
-	// Neither of these is key material and neither becomes any. PBKDF2's cost
-	// depends on the iteration count, the hash and the output length, not on the
-	// contents of the passphrase or the salt, and nothing derived here is
-	// returned, stored, or compared against anything.
-	const calibrationPassphrase = "calibration"
-	calibrationSalt := make([]byte, 32)
-
 	for probe := pbkdf2ProbeStart; ; probe *= 2 {
-		start := time.Now()
-		if _, err := pbkdf2.Key(hashFunc, calibrationPassphrase, calibrationSalt, probe, keySize); err != nil {
-			return 0, &CryptoError{Op: "pbkdf2 benchmark", Err: err}
+		elapsed, err := timer(hashFunc, probe, keySize)
+		if err != nil {
+			return 0, err
 		}
-		elapsed := time.Since(start)
 
 		// Compared as a Duration, never as elapsed.Milliseconds(). Truncating a
 		// sub-millisecond measurement to an integer is what made the original

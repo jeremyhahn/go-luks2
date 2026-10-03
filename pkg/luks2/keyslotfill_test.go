@@ -263,7 +263,7 @@ func TestCreateBinaryHeaderReportsAnRNGFailure(t *testing.T) {
 // the tail of keyslot 0's own declared area, and the ~15.7 MiB of keyslots area
 // that no keyslot occupies yet.
 func TestFormatFillsTheWholeKeyslotsAreaWithRandom(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	path := newImage(t, "filled.img")
 	if err := Format(standardFormatOptions(path)); err != nil {
@@ -318,7 +318,7 @@ func TestFormatFillsTheWholeKeyslotsAreaWithRandom(t *testing.T) {
 // freed area announces that a credential was revoked; the whole point of the
 // removal is that it leaves no trace.
 func TestWipeKeyslotAreaLeavesRandomNotZeroes(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	const (
 		areaOffset = 0x8000

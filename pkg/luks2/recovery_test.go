@@ -296,7 +296,7 @@ func TestTheCredentialIsThePrintedText(t *testing.T) {
 }
 
 func TestSaveAndLoadRecoveryKey(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	// Create temp directory
 	tmpDir, err := os.MkdirTemp("", "luks-recovery-test-*")
@@ -342,7 +342,7 @@ func TestSaveAndLoadRecoveryKey(t *testing.T) {
 }
 
 func TestSaveRecoveryKeyContent(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	// Create temp directory
 	tmpDir, err := os.MkdirTemp("", "luks-recovery-test-*")
@@ -704,7 +704,7 @@ func keyslotOpenedBy(t *testing.T, device string, passphrase []byte) string {
 // Before the fix, on this fixture: the recovery key landed in slot 1 and was
 // reported as slot 2.
 func TestAddRecoveryKeyReportsTheKeyslotItActuallyUsed(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	device, primary, third := volumeWithAKeyslotGap(t)
 
@@ -809,7 +809,7 @@ func savedFileRecordsKeyslot(t *testing.T, path, keyslotID string) bool {
 // always correct and must stay so: a caller naming a slot gets that slot, and
 // the report agrees.
 func TestAddRecoveryKeyHonoursAnExplicitKeyslot(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	device, primary, _ := volumeWithAKeyslotGap(t)
 
@@ -844,7 +844,7 @@ func TestAddRecoveryKeyHonoursAnExplicitKeyslot(t *testing.T) {
 // reconstructed the slot from the header would have to get this right by a
 // second piece of reasoning; reading the choice gets it right by construction.
 func TestAddRecoveryKeyPicksTheFreeSlotEvenWhenTheGapIsFilledFirst(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	device, primary, _ := volumeWithAKeyslotGap(t)
 
@@ -884,7 +884,7 @@ func TestAddRecoveryKeyPicksTheFreeSlotEvenWhenTheGapIsFilledFirst(t *testing.T)
 // TestAddKeyReportsTheSlotItChose covers the seam directly: AddKey returns the
 // slot it used (#101), read from where it was chosen rather than inferred.
 func TestAddKeyReportsTheSlotItChose(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	device, primary, _ := volumeWithAKeyslotGap(t)
 
@@ -916,7 +916,7 @@ func TestAddKeyReportsTheSlotItChose(t *testing.T) {
 // records the number: an error comes with -1, never a slot that was chosen but
 // not written.
 func TestAddKeyReportsNoSlotOnFailure(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	device, _, _ := volumeWithAKeyslotGap(t)
 
@@ -935,7 +935,7 @@ func TestAddKeyReportsNoSlotOnFailure(t *testing.T) {
 // is, which is indistinguishable from somebody's forgotten second passphrase --
 // and the difference decides whether an operator revokes it.
 func TestAddRecoveryKeyWritesTheSystemdRecoveryToken(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	device, primary, _ := volumeWithAKeyslotGap(t)
 
@@ -1045,7 +1045,7 @@ func TestAddRecoveryKeyReportsAnOrphanItCannotRemove(t *testing.T) {
 // token slot is claimed BEFORE key material is written, so running out costs
 // nothing rather than costing a rollback.
 func TestAddRecoveryKeyRefusesWhenNoTokenSlotIsFree(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	device, primary, _ := volumeWithAKeyslotGap(t)
 
@@ -1172,7 +1172,7 @@ func TestLoadRecoveryCredentialReturnsTheLineNotItsDecoding(t *testing.T) {
 // happened, discard the key, and leave a live credential on the volume that
 // nobody has.
 func TestAddRecoveryKeyKeepsTheKeyLiveWhenTheSaveFails(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	device, primary, _ := volumeWithAKeyslotGap(t)
 

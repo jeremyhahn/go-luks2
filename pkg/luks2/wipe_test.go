@@ -35,7 +35,7 @@ func TestWipeOptions_DefaultPasses(t *testing.T) {
 
 // TestWipePass_Zeros tests wiping with zero pattern
 func TestWipePass_Zeros(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	// Create temporary file for testing
 	tmpDir := t.TempDir()
@@ -82,7 +82,7 @@ func TestWipePass_Zeros(t *testing.T) {
 
 // TestWipePass_Random tests wiping with random pattern
 func TestWipePass_Random(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	// Create temporary file for testing
 	tmpDir := t.TempDir()
@@ -135,7 +135,7 @@ func TestWipePass_Random(t *testing.T) {
 
 // TestWipePass_SmallSize tests wiping smaller than buffer size
 func TestWipePass_SmallSize(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	// Create temporary file for testing
 	tmpDir := t.TempDir()
@@ -179,7 +179,7 @@ func TestWipePass_SmallSize(t *testing.T) {
 
 // TestWipePass_LargeSize tests wiping larger than buffer size
 func TestWipePass_LargeSize(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	// Create temporary file for testing
 	tmpDir := t.TempDir()
@@ -241,7 +241,7 @@ func TestWipePass_LargeSize(t *testing.T) {
 
 // TestWipePass_ZeroSize tests wiping with zero size
 func TestWipePass_ZeroSize(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	// Create temporary file for testing
 	tmpDir := t.TempDir()
@@ -267,7 +267,7 @@ func TestWipePass_ZeroSize(t *testing.T) {
 
 // TestWipeHeaders tests wiping LUKS headers
 func TestWipeHeaders(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	// Create temporary file for testing
 	tmpDir := t.TempDir()
@@ -362,7 +362,7 @@ func TestWipeHeaders_ExactSize(t *testing.T) {
 
 // TestWipePass_SeekError tests error handling when seek fails
 func TestWipePass_SeekError(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	// Create a read-only file to trigger seek/write errors
 	tmpDir := t.TempDir()
@@ -392,7 +392,7 @@ func TestWipePass_SeekError(t *testing.T) {
 
 // TestWipePass_BufferBoundary tests wiping at exact buffer boundaries
 func TestWipePass_BufferBoundary(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	// Create temporary file for testing
 	tmpDir := t.TempDir()
@@ -440,7 +440,7 @@ func TestWipePass_BufferBoundary(t *testing.T) {
 
 // TestWipePass_RandomDataDifferent tests that random wipes produce different data
 func TestWipePass_RandomDataDifferent(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	// Create two temporary files
 	tmpDir := t.TempDir()
@@ -498,7 +498,7 @@ func TestWipePass_RandomDataDifferent(t *testing.T) {
 
 // TestWipePass_PartialBuffer tests wiping size that's not a multiple of buffer
 func TestWipePass_PartialBuffer(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	// Create temporary file for testing
 	tmpDir := t.TempDir()
@@ -568,7 +568,7 @@ func TestWipePass_PartialBuffer(t *testing.T) {
 
 // TestWipePass_RandomReadError tests error handling for random data generation
 func TestWipePass_RandomReadError(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	// This test documents that wipePass relies on crypto/rand.Read
 	// which could theoretically fail in extreme cases (e.g., system entropy exhaustion)
@@ -881,7 +881,7 @@ func TestIssueDiscard_NegativeSize(t *testing.T) {
 
 // TestWipe_WithTrimOption tests that Wipe honors the Trim option
 func TestWipe_WithTrimOption(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test_wipe_trim")
@@ -926,7 +926,7 @@ func TestWipe_WithTrimOption(t *testing.T) {
 
 // TestWipe_TrimAfterMultiplePasses tests TRIM is issued after all passes complete
 func TestWipe_TrimAfterMultiplePasses(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test_wipe_trim_multi")
@@ -1027,7 +1027,7 @@ func TestBLKDISCARD_Constant(t *testing.T) {
 
 // TestWipePass_BufferClearing tests that wipePass handles buffer correctly
 func TestWipePass_BufferClearing(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test_buffer_clear")
@@ -1069,7 +1069,7 @@ func TestWipePass_BufferClearing(t *testing.T) {
 
 // TestWipePass_ConcurrentAccess tests that wipe handles concurrent access attempts
 func TestWipePass_ConcurrentAccess(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test_concurrent")
@@ -1110,7 +1110,7 @@ func TestWipePass_ConcurrentAccess(t *testing.T) {
 
 // TestWipePass_VeryLargeSize tests handling of very large sizes
 func TestWipePass_VeryLargeSize(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test_large_size")
@@ -1139,7 +1139,7 @@ func TestWipePass_VeryLargeSize(t *testing.T) {
 
 // TestWipe_ZeroPasses tests that zero passes defaults to 1 pass
 func TestWipe_ZeroPasses(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test_zero_passes")
@@ -1179,7 +1179,7 @@ func TestWipe_ZeroPasses(t *testing.T) {
 
 // TestWipe_NegativePasses tests that negative passes defaults to 1 pass
 func TestWipe_NegativePasses(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test_negative_passes")
@@ -1219,7 +1219,7 @@ func TestWipe_NegativePasses(t *testing.T) {
 
 // TestWipePass_ExactlyBufferSize tests wiping exactly at buffer boundary
 func TestWipePass_ExactlyBufferSize(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test_exact_buffer")
@@ -1260,7 +1260,7 @@ func TestWipePass_ExactlyBufferSize(t *testing.T) {
 
 // TestWipePass_MultipleBufferSize tests wiping at multiple of buffer boundary
 func TestWipePass_MultipleBufferSize(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test_multi_buffer")
@@ -1494,7 +1494,7 @@ func TestFillBufferWithPattern_Unknown(t *testing.T) {
 
 // TestWipePassWithPattern_Zeros tests wipePassWithPattern with zeros
 func TestWipePassWithPattern_Zeros(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test_pattern_zeros")
@@ -1532,7 +1532,7 @@ func TestWipePassWithPattern_Zeros(t *testing.T) {
 
 // TestWipePassWithPattern_Ones tests wipePassWithPattern with ones
 func TestWipePassWithPattern_Ones(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test_pattern_ones")
@@ -1567,7 +1567,7 @@ func TestWipePassWithPattern_Ones(t *testing.T) {
 
 // TestWipePassWithPattern_Progress tests progress callback
 func TestWipePassWithPattern_Progress(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test_pattern_progress")
@@ -1621,7 +1621,7 @@ func TestWipePassWithPattern_Progress(t *testing.T) {
 
 // TestWipeVerify_Success tests successful verification
 func TestWipeVerify_Success(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test_verify_success")
@@ -1646,7 +1646,7 @@ func TestWipeVerify_Success(t *testing.T) {
 
 // TestWipeVerify_Failure tests verification failure detection
 func TestWipeVerify_Failure(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test_verify_failure")
@@ -1709,7 +1709,7 @@ func TestWipeVerify_RandomPattern(t *testing.T) {
 
 // TestWipeVerify_OnesPattern tests verification with ones pattern
 func TestWipeVerify_OnesPattern(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test_verify_ones")
@@ -1910,7 +1910,7 @@ func TestResolvePatternSequence_VerifyOverride(t *testing.T) {
 
 // TestWipe_LegacyCompatibility tests backward compatibility with legacy options
 func TestWipe_LegacyCompatibility(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test_legacy_compat")
@@ -1951,7 +1951,7 @@ func TestWipe_LegacyCompatibility(t *testing.T) {
 
 // TestWipe_StandardNIST tests wipe with NIST standard
 func TestWipe_StandardNIST(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test_nist")
@@ -1985,7 +1985,7 @@ func TestWipe_StandardNIST(t *testing.T) {
 
 // TestWipe_StandardDoD3Pass tests wipe with DoD 3-pass standard
 func TestWipe_StandardDoD3Pass(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test_dod3")
@@ -2032,7 +2032,7 @@ func TestWipe_StandardDoD3Pass(t *testing.T) {
 
 // TestWipe_WithVerification tests wipe with explicit verification
 func TestWipe_WithVerification(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test_verify")
@@ -2071,7 +2071,7 @@ func TestWipe_WithVerification(t *testing.T) {
 
 // TestWipe_CustomPatternSequence tests wipe with custom pattern sequence
 func TestWipe_CustomPatternSequence(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test_custom_patterns")
@@ -2158,7 +2158,7 @@ func TestWipeProgress_Fields(t *testing.T) {
 // device, and a device with no bytes in it. The second is refused rather than
 // reported as wiped -- "wiped zero bytes" is a success claim about nothing.
 func TestWipeRefusesWhatItCannotWipe(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	if err := Wipe(WipeOptions{Device: ""}); !errors.Is(err, ErrInvalidPath) {
 		t.Errorf("an empty path: %v, want ErrInvalidPath", err)
@@ -2178,7 +2178,7 @@ func TestWipeRefusesWhatItCannotWipe(t *testing.T) {
 // a keyslot the header does not have. On the last the container must be
 // byte-identical afterwards, since WipeKeyslot needs no passphrase to destroy.
 func TestWipeKeyslotRefusesBeforeDestroyingAnything(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	if err := WipeKeyslot("", 0); !errors.Is(err, ErrInvalidPath) {
 		t.Errorf("an empty path: %v, want ErrInvalidPath", err)

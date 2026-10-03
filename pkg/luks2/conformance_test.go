@@ -279,7 +279,7 @@ func stampImagePrefix(t *testing.T, path string, golden []byte) {
 // which took luksDump, luksHeaderBackup, luksChangeKey and luksOpen with it and
 // left a volume written by this library with no recovery path.
 func TestConformance_WeWrite_CryptsetupReads(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	requireCryptsetup(t)
 
@@ -425,7 +425,7 @@ func TestConformance_SecondaryHeaderMagic(t *testing.T) {
 // digest, and the hardcoded 32-byte derivation in verifyMasterKey could never
 // reproduce it, so the CORRECT passphrase returned "incorrect passphrase".
 func TestConformance_CryptsetupWrites_WeRead(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	requireCryptsetup(t)
 
@@ -497,7 +497,7 @@ func TestConformance_CryptsetupWrites_WeRead(t *testing.T) {
 // Measured against cryptsetup 2.7.0: it registers BOTH keyslots on the single
 // digest ("keyslots": ["0", "1"]), and both passphrases open the container.
 func TestConformance_CryptsetupMultiKeyslotDigestAssociation(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	requireCryptsetup(t)
 
@@ -569,7 +569,7 @@ func TestConformance_CryptsetupMultiKeyslotDigestAssociation(t *testing.T) {
 // object. Both would have turned a conformant container into a rejected one on
 // the second operation, not the first.
 func TestConformance_StaysValidAfterMutation(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	requireCryptsetup(t)
 
@@ -741,7 +741,7 @@ func TestConformance_StaysValidAfterMutation(t *testing.T) {
 // changes the header layout under test. They are tiled at distinct,
 // non-overlapping areas, which is what cryptsetup validates about them.
 func TestConformance_LargeHeaderStaysValid(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	requireCryptsetup(t)
 
@@ -801,7 +801,7 @@ func TestConformance_LargeHeaderStaysValid(t *testing.T) {
 // AF material, salts, iteration count -- is byte-for-byte what the old code
 // wrote, because it IS what the current code wrote.
 func TestConformance_LegacyDigestLengthStillOpens(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	path := newImage(t, "legacy-digest.img")
 	formatWithLibrary(t, path)

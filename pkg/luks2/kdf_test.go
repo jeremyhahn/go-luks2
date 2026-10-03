@@ -88,7 +88,7 @@ func TestDeriveKeyPBKDF2SHA512(t *testing.T) {
 
 // TestDeriveKeyArgon2i tests Argon2i key derivation
 func TestDeriveKeyArgon2i(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	time := 1
 	memory := 64 * 1024 // 64 MB
@@ -146,7 +146,7 @@ func TestDeriveKeyArgon2i(t *testing.T) {
 
 // TestDeriveKeyArgon2id tests Argon2id key derivation
 func TestDeriveKeyArgon2id(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	time := 1
 	memory := 64 * 1024 // 64 MB
@@ -441,7 +441,7 @@ func TestDeriveArgon2idMissingParams(t *testing.T) {
 
 // TestBenchmarkPBKDF2SHA256 tests PBKDF2 benchmarking with SHA256
 func TestBenchmarkPBKDF2SHA256(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	iterations, err := BenchmarkPBKDF2("sha256", 32, 100)
 	if err != nil {
@@ -455,7 +455,7 @@ func TestBenchmarkPBKDF2SHA256(t *testing.T) {
 
 // TestBenchmarkPBKDF2SHA512 tests PBKDF2 benchmarking with SHA512
 func TestBenchmarkPBKDF2SHA512(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	iterations, err := BenchmarkPBKDF2("sha512", 64, 100)
 	if err != nil {
@@ -485,7 +485,7 @@ func TestBenchmarkPBKDF2InvalidHash(t *testing.T) {
 // assertion that is satisfied by a value the code did not choose is how issue
 // #52 stayed green through five merges.
 func TestBenchmarkPBKDF2MinimumIterations(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	const targetMs = 1
 
@@ -504,7 +504,7 @@ func TestBenchmarkPBKDF2MinimumIterations(t *testing.T) {
 
 // TestCreateKDFPBKDF2 tests creating a PBKDF2 KDF with defaults
 func TestCreateKDFPBKDF2(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	opts := FormatOptions{
 		KDFType: "pbkdf2",
@@ -544,7 +544,7 @@ func TestCreateKDFPBKDF2(t *testing.T) {
 
 // TestCreateKDFPBKDF2CustomHash tests creating PBKDF2 with custom hash
 func TestCreateKDFPBKDF2CustomHash(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	opts := FormatOptions{
 		KDFType:  "pbkdf2",
@@ -563,7 +563,7 @@ func TestCreateKDFPBKDF2CustomHash(t *testing.T) {
 
 // TestCreateKDFPBKDF2CustomIterTime tests creating PBKDF2 with custom iteration time
 func TestCreateKDFPBKDF2CustomIterTime(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	opts := FormatOptions{
 		KDFType:       "pbkdf2",
@@ -777,7 +777,7 @@ func TestDeriveKeyDifferentKeySizes(t *testing.T) {
 
 // TestArgon2iVsArgon2id tests that Argon2i and Argon2id produce different keys
 func TestArgon2iVsArgon2id(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	time := 1
 	memory := 64 * 1024
@@ -1071,7 +1071,7 @@ func TestDeriveKeyPBKDF2SHA384(t *testing.T) {
 // TestBenchmarkPBKDF2SHA1 tests PBKDF2 benchmarking with SHA-1, and that it is
 // refused in FIPS 140-3 mode (docs/FIPS.md).
 func TestBenchmarkPBKDF2SHA1(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	if fips140.Enabled() {
 		if _, err := BenchmarkPBKDF2("sha1", 20, 100); !errors.Is(err, ErrFIPSNotApproved) {
@@ -1092,7 +1092,7 @@ func TestBenchmarkPBKDF2SHA1(t *testing.T) {
 
 // TestBenchmarkPBKDF2SHA384 tests PBKDF2 benchmarking with SHA-384
 func TestBenchmarkPBKDF2SHA384(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	iterations, err := BenchmarkPBKDF2("sha384", 48, 100)
 	if err != nil {
@@ -1107,7 +1107,7 @@ func TestBenchmarkPBKDF2SHA384(t *testing.T) {
 // TestCreateKDFPBKDF2SHA1Alias tests creating PBKDF2 with SHA-1 using type
 // alias, and that FIPS 140-3 mode refuses to create one (docs/FIPS.md).
 func TestCreateKDFPBKDF2SHA1Alias(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	opts := FormatOptions{
 		KDFType:       KDFTypePBKDF2SHA1,
@@ -1142,7 +1142,7 @@ func TestCreateKDFPBKDF2SHA1Alias(t *testing.T) {
 
 // TestCreateKDFPBKDF2SHA256Alias tests creating PBKDF2 with SHA-256 using type alias
 func TestCreateKDFPBKDF2SHA256Alias(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	opts := FormatOptions{
 		KDFType:       KDFTypePBKDF2SHA256,
@@ -1165,7 +1165,7 @@ func TestCreateKDFPBKDF2SHA256Alias(t *testing.T) {
 
 // TestCreateKDFPBKDF2SHA384Alias tests creating PBKDF2 with SHA-384 using type alias
 func TestCreateKDFPBKDF2SHA384Alias(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	opts := FormatOptions{
 		KDFType:       KDFTypePBKDF2SHA384,
@@ -1188,7 +1188,7 @@ func TestCreateKDFPBKDF2SHA384Alias(t *testing.T) {
 
 // TestCreateKDFPBKDF2SHA512Alias tests creating PBKDF2 with SHA-512 using type alias
 func TestCreateKDFPBKDF2SHA512Alias(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	opts := FormatOptions{
 		KDFType:       KDFTypePBKDF2SHA512,
@@ -1211,7 +1211,7 @@ func TestCreateKDFPBKDF2SHA512Alias(t *testing.T) {
 
 // TestCreateKDFCaseInsensitive tests that KDF type is case-insensitive
 func TestCreateKDFCaseInsensitive(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	tests := []string{
 		"PBKDF2-SHA256",
@@ -1241,7 +1241,7 @@ func TestCreateKDFCaseInsensitive(t *testing.T) {
 
 // TestCreateKDFWithHashOverride tests that explicit HashAlgo overrides type alias
 func TestCreateKDFWithHashOverride(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	opts := FormatOptions{
 		KDFType:       KDFTypePBKDF2SHA256, // Would normally use sha256
@@ -1345,7 +1345,7 @@ func TestGetPBKDF2HashFunc(t *testing.T) {
 
 // TestArgon2CPUsBoundsValidation tests Argon2 CPUs bounds checking
 func TestArgon2CPUsBoundsValidation(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
@@ -1398,7 +1398,7 @@ func TestArgon2CPUsBoundsValidation(t *testing.T) {
 
 // TestFIPSCompliantKDFWorkflow tests a complete FIPS-compliant workflow
 func TestFIPSCompliantKDFWorkflow(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	// Step 1: Verify the KDF type is FIPS-compliant
 	kdfType := KDFTypePBKDF2SHA256
@@ -1453,7 +1453,7 @@ func TestFIPSCompliantKDFWorkflow(t *testing.T) {
 // be refused in FIPS 140-3 mode just like the "pbkdf2-sha1" alias, so that no
 // SHA-1 derivation reaches the Go Cryptographic Module. See docs/FIPS.md.
 func TestCreateKDFPBKDF2SHA1HashAlgoOverride(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	opts := FormatOptions{
 		KDFType:       KDFTypePBKDF2,
@@ -1485,7 +1485,7 @@ func TestCreateKDFPBKDF2SHA1HashAlgoOverride(t *testing.T) {
 // default — so a FIPS-mode process can neither unlock nor write a non-approved
 // keyslot. Outside FIPS mode all three must keep working. See docs/FIPS.md.
 func TestArgon2RefusedInFIPSMode(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	argonTime := 1
 	argonMemory := 64 * 1024

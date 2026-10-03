@@ -287,7 +287,7 @@ func TestUnlockFailsClosedWhenTheKeyringIsUnavailable(t *testing.T) {
 // "Key is deliberately not set, here or anywhere else" -- is exactly the kind
 // of warning that a check can enforce instead.
 func TestUnlockHasNoInTableFallbackAtAll(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	if assignments := cryptTableKeyAssignments(t); len(assignments) != 0 {
 		t.Fatalf("this module writes a device-mapper table Key field, so the in-table volume key is still reachable:\n\t%s",

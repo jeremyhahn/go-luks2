@@ -74,7 +74,7 @@ func craftedSegmentVolume(t *testing.T, name string, mutate func(*Segment)) stri
 // the whole volume's data, and there is no second segment to fall back on the
 // way a damaged keyslot has 31 siblings -- so each is ErrInvalidHeader.
 func TestReadHeaderRefusesASegmentTheKernelMustNotSee(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	tests := []struct {
 		name   string
@@ -198,7 +198,7 @@ func TestReadHeaderRefusesASegmentTheKernelMustNotSee(t *testing.T) {
 // cryptsetup can create -- exactly the failure keyslotvalidation.go's measured
 // limits exist to avoid.
 func TestReadHeaderAcceptsEverySectorSizeCryptsetupWrites(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	for _, sectorSize := range []int{512, 1024, 2048, 4096} {
 		t.Run(strconv.Itoa(sectorSize), func(t *testing.T) {
@@ -229,7 +229,7 @@ func TestReadHeaderAcceptsEverySectorSizeCryptsetupWrites(t *testing.T) {
 // format can express, which is what maxSegmentEncryptionLength is sized
 // against.
 func TestReadHeaderAcceptsTheCipherSpellingsCryptsetupWrites(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	for _, encryption := range []string{
 		"aes-xts-plain64",

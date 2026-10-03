@@ -46,7 +46,7 @@ func setHeaderOffset(t *testing.T, device string, offset uint64) {
 // and still observes "ReadHeader returned an error", which would make every
 // case below pass for the wrong reason.
 func TestSetHeaderOffsetPatchesTheRightField(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	device, _ := headerSizeVolume(t)
 	setHeaderOffset(t, device, uint64(LUKS2SecondaryHeaderOffset))
@@ -87,7 +87,7 @@ func TestSetHeaderOffsetPatchesTheRightField(t *testing.T) {
 // As with HeaderSize, the assertion that matters is that the call RETURNS -- a
 // caller who checks the error ReadHeader promises must actually receive one.
 func TestReadHeaderRefusesAnOutOfRangeHeaderOffset(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	for _, tc := range []struct {
 		name   string
@@ -169,7 +169,7 @@ func TestHeaderAreaOffsetAcceptsEveryLegalCopyLocation(t *testing.T) {
 // HeaderOffset field, so a bound that only admitted 0 would make the backup
 // unreadable -- trading one broken recovery path for another.
 func TestHeaderOffsetBoundStillAdmitsTheSecondaryHeader(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	device, passphrase := headerSizeVolume(t)
 
@@ -197,7 +197,7 @@ func TestHeaderOffsetBoundStillAdmitsTheSecondaryHeader(t *testing.T) {
 // that accepted either would not notice a backup written with the wrong magic
 // -- which is the state #64 describes.
 func TestReadSecondaryHeaderRejectsThePrimaryMagic(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	device, _ := headerSizeVolume(t)
 

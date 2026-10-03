@@ -423,7 +423,7 @@ func TestFileLock_ReleaseNilFile(t *testing.T) {
 }
 
 func TestFileLock_MultipleRelease(t *testing.T) {
-	t.Parallel()
+	defer parallel(t)()
 
 	tmpFile, err := os.CreateTemp("", "luks-lock-test-*")
 	if err != nil {
@@ -732,33 +732,41 @@ func TestAcquireFileLockWaitsForARelease(t *testing.T) {
 		t.Fatalf("first AcquireFileLock() error = %v", err)
 	}
 
+	// The holder lets go 150ms into the wait, on a clock only the wait moves
+	// (#233): the release happens at a controlled moment, not a scheduled one.
 	const holdFor = 150 * time.Millisecond
-	released := make(chan struct{})
-	go func() {
-		time.Sleep(holdFor)
-		if err := held.Release(); err != nil {
-			t.Errorf("Release() error = %v", err)
+	clk := newFakeClock(t)
+	released := false
+	clk.onSleep = func(time.Time) {
+		if !released && clk.elapsed() >= holdFor {
+			if err := held.Release(); err != nil {
+				t.Errorf("Release() error = %v", err)
+			}
+			released = true
 		}
-		close(released)
-	}()
+	}
 
-	started := time.Now()
-	second, err := AcquireFileLockTimeout(tmpFile.Name(), 10*time.Second)
-	waited := time.Since(started)
+	second, err := acquireFileLock(tmpFile.Name(), 10*time.Second, clk)
 	if err != nil {
-		t.Fatalf("second AcquireFileLockTimeout() error = %v, want it to queue and succeed", err)
+		t.Fatalf("second acquireFileLock() error = %v, want it to queue and succeed", err)
 	}
 	defer func() { _ = second.Release() }()
 
-	<-released
-	if waited < holdFor {
-		t.Errorf("second lock returned after %s, before the holder released at %s -- it cannot have been exclusive", waited, holdFor)
+	if !released {
+		t.Fatal("the second lock was granted while the first was still held -- it cannot have been exclusive")
 	}
-	// Generous, because this asserts "did not sit out the budget", not a
-	// scheduling deadline: the backoff ceiling is 100ms, so a release is
-	// noticed within roughly that of the release itself.
-	if waited > holdFor+2*time.Second {
-		t.Errorf("second lock returned after %s, far past the %s release -- it waited rather than retried", waited, holdFor)
+	// Noticed within one backoff of the release, not at the deadline.
+	if waited := clk.elapsed(); waited < holdFor || waited > holdFor+lockBackoffMax {
+		t.Errorf("acquired after %v, want within %v of the %v release", waited, lockBackoffMax, holdFor)
+	}
+	// The pacing: the documented backoff, doubling from the minimum.
+	if len(clk.slept) < 2 || clk.slept[0] != lockBackoffMin || clk.slept[1] != 2*lockBackoffMin {
+		t.Errorf("backoff began %v, want %v then %v", clk.slept, lockBackoffMin, 2*lockBackoffMin)
+	}
+	for i, d := range clk.slept {
+		if d > lockBackoffMax {
+			t.Errorf("sleep %d was %v, above the %v backoff ceiling", i, d, lockBackoffMax)
+		}
 	}
 }
 
@@ -780,11 +788,10 @@ func TestAcquireFileLockTimesOutWithATypedError(t *testing.T) {
 	defer func() { _ = held.Release() }()
 
 	const budget = 120 * time.Millisecond
-	started := time.Now()
-	_, err = AcquireFileLockTimeout(tmpFile.Name(), budget)
-	waited := time.Since(started)
+	clk := newFakeClock(t)
+	_, err = acquireFileLock(tmpFile.Name(), budget, clk)
 	if err == nil {
-		t.Fatal("AcquireFileLockTimeout() on a held lock = nil, want a timeout")
+		t.Fatal("acquireFileLock() on a held lock = nil, want a timeout")
 	}
 
 	if !errors.Is(err, ErrLockContended) {
@@ -798,17 +805,15 @@ func TestAcquireFileLockTimesOutWithATypedError(t *testing.T) {
 	if lockErr.Path != tmpFile.Name() {
 		t.Errorf("LockTimeoutError.Path = %q, want %q", lockErr.Path, tmpFile.Name())
 	}
-	if lockErr.Attempts < 1 {
-		t.Errorf("LockTimeoutError.Attempts = %d, want at least 1", lockErr.Attempts)
+	// The budget is a bound, honored EXACTLY on a controlled clock: the last
+	// sleep is cut to what remains, so the wait ends on the deadline and the
+	// error reports the wait that happened.
+	if clk.elapsed() != budget || lockErr.Waited != budget {
+		t.Errorf("waited %v and reported %v against a %v budget", clk.elapsed(), lockErr.Waited, budget)
 	}
-	if lockErr.Waited <= 0 {
-		t.Errorf("LockTimeoutError.Waited = %s, want a positive measured wait", lockErr.Waited)
-	}
-	// The budget is a bound. Overshooting it by more than a scheduling margin
-	// would mean the deadline is advisory, which is what an unbounded wait
-	// looks like just before it becomes one.
-	if waited > budget+2*time.Second {
-		t.Errorf("waited %s against a %s budget -- the deadline is not being honored", waited, budget)
+	if lockErr.Attempts != len(clk.slept)+1 {
+		t.Errorf("LockTimeoutError.Attempts = %d after %d sleeps, want one attempt more than the sleeps between them",
+			lockErr.Attempts, len(clk.slept))
 	}
 	// The message must name the device; an operator reading a CI log has
 	// nothing else to go on.
@@ -834,17 +839,18 @@ func TestAcquireFileLockZeroBudgetTriesOnce(t *testing.T) {
 		t.Fatalf("AcquireFileLockTimeout(free, 0) error = %v, want success on the first attempt", err)
 	}
 
-	// Held: one attempt is not enough, and there is no budget to spend.
-	started := time.Now()
-	_, err = AcquireFileLockTimeout(tmpFile.Name(), 0)
+	// Held: one attempt is not enough, and there is no budget to spend -- so
+	// there is no sleep at all.
+	clk := newFakeClock(t)
+	_, err = acquireFileLock(tmpFile.Name(), 0, clk)
 	if err == nil {
-		t.Fatal("AcquireFileLockTimeout(held, 0) = nil, want a timeout")
+		t.Fatal("acquireFileLock(held, 0) = nil, want a timeout")
 	}
 	if !errors.Is(err, ErrLockContended) {
 		t.Errorf("errors.Is(err, ErrLockContended) = false for %v", err)
 	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Errorf("a zero budget took %s -- it is not returning immediately", elapsed)
+	if len(clk.slept) != 0 {
+		t.Errorf("a zero budget slept %v -- it is not returning immediately", clk.slept)
 	}
 	_ = free.Release()
 }
