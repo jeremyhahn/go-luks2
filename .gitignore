@@ -9,6 +9,7 @@
 build/
 main
 /luks2
+/cmd/luks2/luks2
 test-unlock
 
 # Go workspace file

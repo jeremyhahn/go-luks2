@@ -697,29 +697,6 @@ func TestCreateKDFArgon2idCustomParams(t *testing.T) {
 	}
 }
 
-// TestCreateKDFDefaultArgon2id tests that default KDF type is argon2id
-func TestCreateKDFDefaultArgon2id(t *testing.T) {
-	opts := FormatOptions{} // No KDFType specified
-
-	if fips140.Enabled() {
-		// The default must not silently produce a non-approved keyslot in a
-		// FIPS-mode process; the caller has to choose an approved KDF.
-		if _, err := CreateKDF(opts, 32); !errors.Is(err, ErrFIPSNotApproved) {
-			t.Fatalf("CreateKDF with default KDF in FIPS mode: got error %v, want ErrFIPSNotApproved", err)
-		}
-		return
-	}
-
-	kdf, err := CreateKDF(opts, 32)
-	if err != nil {
-		t.Fatalf("CreateKDF failed: %v", err)
-	}
-
-	if kdf.Type != "argon2id" {
-		t.Fatalf("Expected default type argon2id, got %s", kdf.Type)
-	}
-}
-
 // TestCreateKDFInvalidType tests error handling for unsupported KDF type
 func TestCreateKDFInvalidType(t *testing.T) {
 	opts := FormatOptions{
@@ -1532,16 +1509,18 @@ func TestArgon2RefusedInFIPSMode(t *testing.T) {
 		})
 	}
 
+	// The default is not refused in FIPS mode: it is PBKDF2-SHA512 there
+	// (#237), so a caller that names no KDF is never given Argon2.
 	t.Run("create/default", func(t *testing.T) {
 		kdf, err := CreateKDF(FormatOptions{}, 32)
+		if err != nil {
+			t.Fatalf("CreateKDF with the default KDF failed: %v", err)
+		}
 		if fips140.Enabled() {
-			if !errors.Is(err, ErrFIPSNotApproved) {
-				t.Fatalf("got error %v, want ErrFIPSNotApproved", err)
+			if kdf.Type != KDFTypePBKDF2 || kdf.Hash != "sha512" {
+				t.Fatalf("in FIPS mode the default is %s/%s, want pbkdf2/sha512", kdf.Type, kdf.Hash)
 			}
 			return
-		}
-		if err != nil {
-			t.Fatalf("outside FIPS mode CreateKDF should succeed: %v", err)
 		}
 		if kdf.Type != KDFTypeArgon2id {
 			t.Fatalf("expected default type %s, got %s", KDFTypeArgon2id, kdf.Type)

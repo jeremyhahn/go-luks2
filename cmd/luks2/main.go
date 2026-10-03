@@ -20,6 +20,8 @@ COMMANDS:
     create <path> [size]         Create a new LUKS2 volume
                                  - Block device: luks2 create /dev/sdb1
                                  - File volume:  luks2 create encrypted.luks 100M
+                                 Options: --pbkdf argon2id|pbkdf2 and its cost
+                                 options (default: pbkdf2 in FIPS 140-3 mode)
     open <device> <name>         Unlock and open a LUKS volume
     close <name>                 Lock and close a LUKS volume
     mount <name> <mountpoint>    Mount an unlocked volume

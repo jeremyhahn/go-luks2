@@ -37,6 +37,13 @@ func Format(opts FormatOptions) error {
 	if opts.KeySize == 0 {
 		opts.KeySize = DefaultKeySize
 	}
+	// The keyslot's KDF is created from the options AS THE CALLER GAVE THEM,
+	// before HashAlgo is defaulted below. HashAlgo names the digest and AF hash
+	// AND overrides the hash a KDF alias names, so defaulting it first turned
+	// every "pbkdf2-sha512" -- the FIPS-mode default (DefaultKDFType) among
+	// them -- into PBKDF2-SHA256 (#237). A caller who sets HashAlgo still gets
+	// it for the KDF as well, as before.
+	kdfOpts := opts
 	if opts.HashAlgo == "" {
 		opts.HashAlgo = DefaultHashAlgo
 	}
@@ -77,7 +84,7 @@ func Format(opts FormatOptions) error {
 	}
 
 	// Create KDF for keyslot 0
-	kdf, err := CreateKDF(opts, masterKeySize)
+	kdf, err := CreateKDF(kdfOpts, masterKeySize)
 	if err != nil {
 		return err
 	}

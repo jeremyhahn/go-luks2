@@ -28,18 +28,55 @@ tags, no skipped packages.
 | `pbkdf2` | yes | derives with SHA-256 unless `FormatOptions.HashAlgo` overrides it |
 | `pbkdf2-sha256` | yes | recommended |
 | `pbkdf2-sha384` | yes | |
-| `pbkdf2-sha512` | yes | |
+| `pbkdf2-sha512` | yes | the library default in FIPS mode |
 | `pbkdf2-sha1` | **no** | legacy header interop only — see the exemption below |
 | `argon2i` | no | refused in FIPS mode |
 | `argon2id` | no | refused in FIPS mode; library default otherwise |
+
+## The default KDF follows the mode
+
+`DefaultKDFType()` is the KDF a keyslot is created with when the caller names
+none — through `Format`, `AddKey`, `AddRecoveryKey` or `CreateKDF` — and it
+follows cryptsetup's model:
+
+| Mode | Default |
+|---|---|
+| FIPS 140-3 (`crypto/fips140.Enabled()`) | `pbkdf2-sha512`: the iteration count is calibrated to the time budget (`PBKDFIterTime`, 2000 ms by default) and never below the SHA-512 floor for that budget (210,000 at 2000 ms), so the keyslot gets whichever is greater |
+| Otherwise | `argon2id`, unchanged |
+
+The KDF hash is the one the type names: `Format` creates the keyslot's KDF from
+the caller's `HashAlgo` (empty unless set) rather than the volume's defaulted
+digest hash, and `AddKey` from `AddKeyOptions.Hash`. A caller that sets the
+hash explicitly still gets it.
+
+A caller that names no KDF but sets an Argon2 cost (`Argon2Time`,
+`Argon2Memory`, `Argon2Parallel`) has chosen Argon2 by its parameters and gets
+`argon2id` in either mode — refused in FIPS mode — rather than a PBKDF2
+keyslot with its cost silently dropped.
+
+Before go-luks2 #237 the default was `argon2id` in both modes, so a FIPS-mode
+caller that named no KDF was refused, and the CLI could not create or enroll a
+keyslot at all.
+
+## The CLI
+
+`luks2 create` and `luks2 recovery add` take `--pbkdf argon2id|pbkdf2` and the
+matching cost options (`--hash`, `--iter-time`, `--pbkdf-force-iterations`,
+`--pbkdf-memory`, `--pbkdf-parallel`); see [create](cli/create.md) and
+[recovery](cli/recovery.md). With no `--pbkdf` they use the default above, so
+under `GODEBUG=fips140=only` both work with no options and write PBKDF2-SHA512
+keyslots that cryptsetup opens. `--pbkdf argon2id` in FIPS mode is refused
+before the passphrase prompt — and, for `create`, before any file is made —
+with the library's `ErrFIPSNotApproved`. `luks2 addkey` with no `--kdf` also
+uses the default.
 
 ## Enforcement: Argon2 is refused in FIPS mode
 
 Argon2 is implemented in pure Go by `golang.org/x/crypto` (BLAKE2b) and never
 enters the Go Cryptographic Module, so `GODEBUG=fips140=only` cannot reject it
 and the CI gate cannot fail on it. Left alone, a FIPS-mode process would derive
-volume keys with a non-approved KDF — by default, since `CreateKDF` falls back
-to `argon2id` — while the gate above reported green. `GODEBUG` is not a
+volume keys with a non-approved KDF — by default, as it was before the default
+became mode-aware — while the gate above reported green. `GODEBUG` is not a
 sufficient boundary for a KDF the module never sees, so the library enforces it:
 
 `requireFIPSApprovedKDF` in `pkg/luks2/kdf.go` returns
@@ -49,10 +86,9 @@ sufficient boundary for a KDF the module never sees, so the library enforces it:
 - `deriveKeyPlain`, before the salt is decoded — reached by every derivation
   through `DeriveKeyEnclave` — so an externally supplied header cannot make a
   FIPS-mode process run a non-approved KDF;
-- `CreateKDF`, after the empty-`KDFType` default is resolved — so
-  `FormatOptions{}` cannot silently write an Argon2id keyslot in a FIPS-mode
-  process. A FIPS caller must select an approved KDF explicitly rather than have
-  one substituted for them.
+- `CreateKDF`, after the empty-`KDFType` default is resolved. The default is
+  approved in FIPS mode, so what this refuses there is an Argon2 KDF the
+  caller asked for, by name or by setting an Argon2 cost.
 
 **Effect on callers.** A FIPS-mode process can neither format nor unlock an
 Argon2-backed volume, and Argon2id has been the stock cryptsetup LUKS2 default

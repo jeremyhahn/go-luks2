@@ -32,9 +32,10 @@ import (
 //
 // The library is doing the work -- a real keyslot is written to a real
 // container and a real cryptsetup is asked about it. What the override changes
-// is the COST: AddRecoveryKey's default is argon2id at 1 GiB, and the CLI
-// deliberately does not expose the cost knobs, so this is where a test says it
-// -- and, in FIPS 140-3 mode, the KDF too (see cheapRecoveryKDF).
+// is the COST: outside FIPS mode the default is argon2id at 1 GiB. These tests
+// are about the printed key, not the KDF options (kdfflags_test.go has those),
+// so the cost is pinned here rather than through the command line -- and, in
+// FIPS 140-3 mode, the KDF too (see cheapRecoveryKDF).
 func realRecoveryOps() *MockLuksOperations {
 	return &MockLuksOperations{
 		AddRecoveryKeyFunc: func(device string, existing []byte, opts *luks2.RecoveryKeyOptions) (*luks2.RecoveryKey, error) {

@@ -50,11 +50,75 @@ const (
 	// refused while the process runs in FIPS 140-3 mode. See docs/FIPS.md.
 	KDFTypeArgon2i = "argon2i"
 
-	// KDFTypeArgon2id is the Argon2id KDF type and the library default. It is
-	// NOT FIPS-approved and is refused while the process runs in FIPS 140-3
-	// mode, including when it is reached as the default. See docs/FIPS.md.
+	// KDFTypeArgon2id is the Argon2id KDF type and the library default outside
+	// FIPS 140-3 mode. It is NOT FIPS-approved and is refused while the process
+	// runs in FIPS 140-3 mode. See DefaultKDFType and docs/FIPS.md.
 	KDFTypeArgon2id = "argon2id"
 )
+
+// DefaultKDFType returns the KDF a keyslot is created with when the caller
+// names none, and it depends on the mode the process runs in, as cryptsetup's
+// default does (#237):
+//
+//   - In FIPS 140-3 mode it is KDFTypePBKDF2SHA512. The iteration count is
+//     calibrated to the time budget (PBKDFIterTime, 2000 ms by default) and
+//     never falls below the policy floor for SHA-512, so the keyslot gets
+//     whichever of the two is greater.
+//   - Otherwise it is KDFTypeArgon2id, as it always has been.
+//
+// Before #237 the default was Argon2id in both modes, so in FIPS mode every
+// caller that named no KDF -- the CLI's recovery add among them -- was refused
+// with ErrFIPSNotApproved and a FIPS deployment could create no keyslot
+// without choosing one explicitly.
+//
+// A caller that names no KDF but supplies an Argon2 cost has chosen Argon2 by
+// its parameters, and gets KDFTypeArgon2id in either mode rather than having
+// the cost silently dropped; see resolveKDFType.
+func DefaultKDFType() string {
+	return defaultKDFTypeFor(fipsMode())
+}
+
+// defaultKDFTypeFor is DefaultKDFType for a given mode. The mode is a parameter
+// so both answers are tested in every run: a process cannot leave FIPS mode, or
+// enter it, once it has started. DefaultKDFType asks fipsMode, the seam every
+// FIPS policy decision in this package goes through.
+func defaultKDFTypeFor(fipsMode bool) string {
+	if fipsMode {
+		return KDFTypePBKDF2SHA512
+	}
+	return KDFTypeArgon2id
+}
+
+// resolveKDFType returns the KDF type a keyslot is created with: kdfType when
+// the caller named one, KDFTypeArgon2id when the caller named none but supplied
+// an Argon2 cost, and DefaultKDFType otherwise.
+//
+// The middle case is what keeps a caller's parameter from being ignored. In
+// FIPS mode the default is PBKDF2, and resolving to it would discard the Argon2
+// cost the caller gave without a word; resolving to Argon2id instead reaches
+// the FIPS refusal, which says what is wrong. Outside FIPS mode the default is
+// Argon2id anyway, so nothing there changes.
+func resolveKDFType(kdfType string, argon2CostGiven bool) string {
+	return resolveKDFTypeFor(kdfType, argon2CostGiven, fipsMode())
+}
+
+// resolveKDFTypeFor is resolveKDFType for a given mode; see defaultKDFTypeFor.
+func resolveKDFTypeFor(kdfType string, argon2CostGiven, fipsMode bool) string {
+	if kdfType != "" {
+		return kdfType
+	}
+	if argon2CostGiven {
+		return KDFTypeArgon2id
+	}
+	return defaultKDFTypeFor(fipsMode)
+}
+
+// formatArgon2CostGiven reports whether a FormatOptions carries any Argon2
+// cost, including a negative one -- != 0 for the reason callerChoseArgon2Cost
+// gives: a negative is still a deliberate choice, and must reach the refusal.
+func formatArgon2CostGiven(opts FormatOptions) bool {
+	return opts.Argon2Time != 0 || opts.Argon2Memory != 0 || opts.Argon2Parallel != 0
+}
 
 // IsFIPSCompliantKDF returns true if the KDF type is FIPS-approved.
 //
@@ -879,7 +943,11 @@ func forcedPBKDF2Iterations(hashAlgo string, iterations int, policy keyslotCostP
 //   - "pbkdf2-sha384" - PBKDF2 with SHA-384 [FIPS-approved]
 //   - "pbkdf2-sha512" - PBKDF2 with SHA-512 [FIPS-approved]
 //   - "argon2i" - Argon2i [NOT FIPS-approved, refused in FIPS mode]
-//   - "argon2id" - Argon2id [NOT FIPS-approved, refused in FIPS mode, default]
+//   - "argon2id" - Argon2id [NOT FIPS-approved, refused in FIPS mode]
+//
+// An empty KDFType resolves through resolveKDFType: to DefaultKDFType --
+// "pbkdf2-sha512" in FIPS 140-3 mode, "argon2id" otherwise -- unless an Argon2
+// cost is set, which selects "argon2id".
 func CreateKDF(opts FormatOptions, keySize int) (*KDF, error) {
 	// The EXPORTED entry point is always strict. The exemption has no route
 	// through the public API by construction -- see keyslotCostPolicy.
@@ -887,14 +955,12 @@ func CreateKDF(opts FormatOptions, keySize int) (*KDF, error) {
 }
 
 func createKDF(opts FormatOptions, keySize int, policy keyslotCostPolicy) (*KDF, error) {
-	kdfType := normalizeKDFType(opts.KDFType)
-	if kdfType == "" {
-		kdfType = KDFTypeArgon2id // Default
-	}
+	kdfType := resolveKDFType(normalizeKDFType(opts.KDFType), formatArgon2CostGiven(opts))
 
-	// Checked after the default is resolved, so that FormatOptions{} does not
-	// silently create an Argon2id keyslot in a FIPS-mode process. A FIPS caller
-	// must select an approved KDF explicitly; see docs/FIPS.md.
+	// Checked after the default is resolved. The default itself is approved in
+	// FIPS mode (DefaultKDFType), so what this refuses there is an Argon2 KDF
+	// the caller asked for -- by name, or by supplying an Argon2 cost; see
+	// docs/FIPS.md.
 	if err := requireFIPSApprovedKDF(kdfType); err != nil {
 		return nil, err
 	}

@@ -333,9 +333,11 @@ LUKS headers written by older cryptsetup releases; in FIPS mode it returns
 Argon2 is not FIPS-approved either, and `GODEBUG=fips140=only` cannot catch it
 because `x/crypto/argon2` is pure Go. While the process runs in FIPS 140-3 mode
 (`crypto/fips140.Enabled()`), `DeriveKeyEnclave` and `CreateKDF` refuse `argon2i` and
-`argon2id` with `ErrFIPSNotApproved` — including `CreateKDF`'s empty-`KDFType`
-default, so a FIPS caller must select an approved KDF explicitly. Outside FIPS
-mode Argon2id remains the default and nothing changes.
+`argon2id` with `ErrFIPSNotApproved`. The default KDF follows the mode, as
+cryptsetup's does: `DefaultKDFType()` is `pbkdf2-sha512` in FIPS 140-3 mode
+(calibrated, never below the SHA-512 iteration floor) and Argon2id otherwise,
+so a FIPS caller — and the `luks2` CLI — can create keyslots without naming a
+KDF. Outside FIPS mode Argon2id remains the default and nothing changes.
 
 **Importing an Argon2 volume.** A FIPS process that meets a volume it can open
 only through Argon2 — any volume from a default `cryptsetup luksFormat` — gets a
@@ -363,7 +365,7 @@ See [docs/FIPS.md](docs/FIPS.md).
 | Parameter | Value |
 |-----------|-------|
 | Cipher | AES-256-XTS |
-| KDF | Argon2id (1GB memory, 4 iterations, 4 threads) |
+| KDF | Argon2id (1GB memory, 4 iterations, 4 threads); PBKDF2-SHA512 in FIPS 140-3 mode |
 | Hash | SHA-256 |
 | Key Size | 512 bits |
 | Anti-Forensic | 4000-stripe split |

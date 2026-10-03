@@ -5,7 +5,7 @@ Create a new LUKS2 encrypted volume.
 ## Synopsis
 
 ```
-luks2 create <path> [size] [filesystem]
+luks2 create [--key-file <path>] [KDF options] <path> [size] [filesystem]
 ```
 
 ## Non-interactive use
@@ -18,6 +18,54 @@ the volume label prompt is skipped when there is nobody to answer it. See
 printf %s 'my passphrase' > /root/new.key
 sudo luks2 create --key-file /root/new.key encrypted.luks 100M ext4
 ```
+
+## Key derivation (KDF options)
+
+The passphrase's keyslot is created with the KDF the process's mode allows, as
+cryptsetup does:
+
+| Mode | Default KDF |
+|------|-------------|
+| FIPS 140-3 (`GODEBUG=fips140=only` or `on`) | PBKDF2-SHA512, calibrated to the time budget and never below the SHA-512 iteration floor (210,000 at the default 2000 ms) |
+| Otherwise | Argon2id (time 4, memory 1 GiB, parallelism 4) |
+
+These options choose otherwise. They are named as cryptsetup names them.
+
+| Option | Applies to | Description |
+|--------|------------|-------------|
+| `--pbkdf <name>` | | `argon2id` or `pbkdf2`. `argon2id` is refused in FIPS 140-3 mode. |
+| `--hash <name>` | pbkdf2 | `sha256`, `sha384` or `sha512` (default `sha512`). The volume digest keeps its own default (`sha256`). |
+| `--iter-time <ms>` | pbkdf2 | Time budget the iteration count is calibrated to (default 2000). The count never falls below the hash's floor for that budget. |
+| `--pbkdf-force-iterations <n>` | both | The PBKDF2 iteration count, which skips calibration and is held to the hash's floor; or the Argon2 time cost. |
+| `--pbkdf-memory <KiB>` | argon2id | Argon2 memory cost, at least 65536. |
+| `--pbkdf-parallel <n>` | argon2id | Argon2 parallelism. |
+
+An option that does not apply to the chosen KDF is refused, not ignored, and
+so is an empty value or one that is not a whole number above zero. These
+checks, and the FIPS check, run **before anything else happens**: a refused
+choice exits 1 before the passphrase prompt and before a file is created. In
+FIPS 140-3 mode, `--pbkdf argon2id` exits 1 with the library's
+`ErrFIPSNotApproved` ("algorithm not approved in FIPS 140-3 mode") and says
+what to use instead.
+
+The cost bounds themselves are the library's and are checked when the volume
+is formatted: an Argon2 memory below 65536 KiB, a PBKDF2 count below the
+hash's floor, or an `--iter-time` above 600000 is refused then, after the
+passphrase prompt. For a file volume, `create` removes the file it made.
+
+```bash
+# The mode's default
+sudo luks2 create /dev/sdb1
+
+# PBKDF2-SHA256 at a 3-second budget
+sudo luks2 create --pbkdf pbkdf2 --hash sha256 --iter-time 3000 /dev/sdb1
+
+# Argon2id at 512 MiB (not in FIPS 140-3 mode)
+sudo luks2 create --pbkdf argon2id --pbkdf-memory 524288 data.luks 1G
+```
+
+The output names the KDF used (`KDF: PBKDF2-SHA512`, `KDF: Argon2id`).
+See [FIPS 140-3](../FIPS.md).
 
 ## Description
 
@@ -82,7 +130,7 @@ When creating a file volume, the command automatically performs:
 
 ```
 1. Create sparse file
-2. Format with LUKS2 (Argon2id KDF)
+2. Format with LUKS2 (the KDF above)
 3. Setup loop device
 4. Unlock volume
 5. Create filesystem
@@ -110,7 +158,7 @@ The `create` command uses these default settings:
 |---------|-------|
 | Cipher | AES-XTS-256 |
 | Key Size | 512 bits |
-| KDF | Argon2id |
+| KDF | Argon2id; PBKDF2-SHA512 in FIPS 140-3 mode (see [KDF options](#key-derivation-kdf-options)) |
 | Sector Size | 512 bytes |
 
 ## Passphrase Requirements
@@ -132,7 +180,7 @@ On success, displays:
 | Code | Description |
 |------|-------------|
 | 0 | Success |
-| 1 | Error (file exists, invalid size, format failed) |
+| 1 | Error (file exists, invalid size, a KDF option refused, format failed) |
 
 ## See Also
 

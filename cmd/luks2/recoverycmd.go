@@ -49,9 +49,13 @@ func (c *CLI) recoveryUsage() int {
 	_, _ = fmt.Fprintln(c.Stdout, "  --output <path>          Write the key to a file as well as showing it")
 	_, _ = fmt.Fprintln(c.Stdout, "  --recovery-file <path>   Read a recovery key from a file (verify)")
 	_, _ = fmt.Fprintln(c.Stdout, "")
+	_, _ = fmt.Fprintln(c.Stdout, "KDF options (add):")
+	_, _ = fmt.Fprintf(c.Stdout, "%s", kdfFlagsHelp)
+	_, _ = fmt.Fprintln(c.Stdout, "")
 	_, _ = fmt.Fprintln(c.Stdout, "Examples:")
 	_, _ = fmt.Fprintln(c.Stdout, "  luks2 recovery add /dev/sdb1")
 	_, _ = fmt.Fprintln(c.Stdout, "  luks2 recovery add --format hex --output /root/recovery.txt /dev/sdb1")
+	_, _ = fmt.Fprintln(c.Stdout, "  luks2 recovery add --pbkdf pbkdf2 --hash sha512 /dev/sdb1")
 	_, _ = fmt.Fprintln(c.Stdout, "  luks2 recovery verify --recovery-file /root/recovery.txt /dev/sdb1")
 	return 1
 }
@@ -121,12 +125,22 @@ func (c *CLI) cmdRecoveryAdd() int {
 	o, format, length, output := recoveryOptions("recovery add")
 	key := keyFileFlag(o, "key-file")
 	slot := o.Int("slot", -1)
+	kdf := declareKDFFlags(o)
 	args, err := o.parse(c.Args[3:])
 	if err != nil {
 		return c.usageError(err)
 	}
 	if len(args) < 1 {
 		return c.recoveryUsage()
+	}
+
+	// Settled before the passphrase prompt, for the reason cmdCreate gives.
+	// With no KDF option this is the library's policy for the mode (#237):
+	// before, the KDF was left unset and the library's mode-blind Argon2id
+	// default was refused in FIPS mode even on an all-PBKDF2 volume.
+	choice, err := kdf.resolve()
+	if err != nil {
+		return c.kdfRefused(err)
 	}
 
 	device := args[0]
@@ -138,9 +152,15 @@ func (c *CLI) cmdRecoveryAdd() int {
 	defer ClearBytes(existing)
 
 	opts := &luks2.RecoveryKeyOptions{
-		Length:     *length,
-		Format:     luks2.RecoveryKeyFormat(*format),
-		OutputPath: *output,
+		Length:          *length,
+		Format:          luks2.RecoveryKeyFormat(*format),
+		OutputPath:      *output,
+		KDFType:         choice.KDFType,
+		PBKDFIterTime:   choice.PBKDFIterTime,
+		PBKDFIterations: choice.PBKDFIterations,
+		Argon2Time:      choice.Argon2Time,
+		Argon2Memory:    choice.Argon2Memory,
+		Argon2Parallel:  choice.Argon2Parallel,
 	}
 	if *slot >= 0 {
 		requested := *slot

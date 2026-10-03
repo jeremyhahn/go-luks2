@@ -275,8 +275,13 @@ const MinArgon2Parallel = 1
 // wrote a keyslot Format would have refused: a floor reachable from one entry
 // point and not the other, which is the shape of every bypass in this package's
 // history.
+//
+// The KDF is judged as it RESOLVES, not as it is spelled: an empty KDFType
+// with an Argon2 cost resolves to Argon2id (resolveKDFType), and the bound
+// applies to it. Checking the spelling let FormatOptions{Argon2Memory: 32}
+// past this floor because the type was left to the default (#237).
 func validateArgon2CreateCost(opts FormatOptions) error {
-	if opts.KDFType != "argon2id" && opts.KDFType != "argon2i" {
+	if !isArgon2Type(resolveKDFType(normalizeKDFType(opts.KDFType), formatArgon2CostGiven(opts))) {
 		return nil
 	}
 	if opts.Argon2Memory != 0 && opts.Argon2Memory < MinArgon2MemoryKB {

@@ -29,6 +29,10 @@ type options struct {
 	bools   map[string]*bool
 	ints    map[string]*int
 	order   []string
+
+	// given records every option that appeared on the command line, so a
+	// caller can tell an option given an empty value from one not given.
+	given map[string]bool
 }
 
 func newOptions(command string) *options {
@@ -37,7 +41,14 @@ func newOptions(command string) *options {
 		strings: make(map[string]*string),
 		bools:   make(map[string]*bool),
 		ints:    make(map[string]*int),
+		given:   make(map[string]bool),
 	}
+}
+
+// Given reports whether the option appeared on the command line, whatever
+// its value -- including an empty one.
+func (o *options) Given(name string) bool {
+	return o.given[name]
 }
 
 // String declares an option taking a value.
@@ -81,6 +92,10 @@ func (o *options) parse(args []string) ([]string, error) {
 
 		name, inline, hasInline := strings.Cut(arg, "=")
 		name = strings.TrimLeft(name, "-")
+
+		if o.bools[name] != nil || o.strings[name] != nil || o.ints[name] != nil {
+			o.given[name] = true
+		}
 
 		switch {
 		case o.bools[name] != nil:

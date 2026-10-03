@@ -311,7 +311,11 @@ func TestAddKeyInheritsTheContainersArgon2Cost(t *testing.T) {
 		}},
 	}}
 
-	opts, inherited := addKeyFormatOptions(&AddKeyOptions{}, container)
+	// Argon2id is named because inheritance is what an Argon2id keyslot does
+	// with no cost chosen, in either mode; with no KDF named at all, FIPS mode
+	// defaults to PBKDF2 and there is no Argon2 cost to inherit
+	// (TestAddKeyWithNoKDFNamedInheritsOnlyInTheArgon2Default).
+	opts, inherited := addKeyFormatOptions(&AddKeyOptions{KDFType: KDFTypeArgon2id}, container)
 	if inherited == nil {
 		t.Fatal("AddKey did not report inheriting the container's cost")
 	}
@@ -343,7 +347,11 @@ func TestAddKeyInheritsABelowFloorArgon2CostExactly(t *testing.T) {
 		}},
 	}}
 
-	opts, inherited := addKeyFormatOptions(&AddKeyOptions{}, container)
+	// Argon2id is named because inheritance is what an Argon2id keyslot does
+	// with no cost chosen, in either mode; with no KDF named at all, FIPS mode
+	// defaults to PBKDF2 and there is no Argon2 cost to inherit
+	// (TestAddKeyWithNoKDFNamedInheritsOnlyInTheArgon2Default).
+	opts, inherited := addKeyFormatOptions(&AddKeyOptions{KDFType: KDFTypeArgon2id}, container)
 	if inherited == nil {
 		t.Fatal("AddKey did not report inheriting the container's cost")
 	}

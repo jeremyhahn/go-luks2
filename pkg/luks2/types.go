@@ -481,7 +481,7 @@ type FormatOptions struct {
 	KeySize         int    // Key size in bits (default: 512)
 	HashAlgo        string // Hash algorithm (default: "sha256")
 	SectorSize      int    // Sector size (default: 512)
-	KDFType         string // KDF type: "pbkdf2", "argon2i", "argon2id" (default: "argon2id")
+	KDFType         string // KDF type: "pbkdf2[-sha*]", "argon2i", "argon2id" (default: DefaultKDFType -- "pbkdf2-sha512" in FIPS mode, else "argon2id")
 	PBKDFIterTime   int    // Target ms for PBKDF2, 1..600000 (default: 2000); calibrated, never assumed
 	PBKDFIterations int    // Exact PBKDF2 iterations; skips calibration when non-zero. Bounded -- see forcedPBKDF2Iterations
 	Argon2Time      int    // Argon2 time cost (default: 4)

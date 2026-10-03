@@ -51,13 +51,15 @@ type AddKeyOptions struct {
 	// Keyslot specifies which keyslot to use (nil = auto-select)
 	Keyslot *int
 
-	// KDFType specifies the KDF type (default: argon2id)
-	// Valid values: "pbkdf2", "argon2i", "argon2id"
+	// KDFType specifies the KDF type: "pbkdf2" (or an alias naming the hash,
+	// such as "pbkdf2-sha512"), "argon2i" or "argon2id". Empty means
+	// DefaultKDFType -- PBKDF2-SHA512 in FIPS 140-3 mode, Argon2id otherwise
+	// (#237) -- or Argon2id when an Argon2 cost is set.
 	KDFType string
 
-	// Hash specifies the hash algorithm for PBKDF2 (default: sha256)
-	// Valid values: "sha256", "sha512"
-	// Note: This is only used when KDFType is "pbkdf2"
+	// Hash specifies the hash algorithm for PBKDF2. Empty means the hash the
+	// KDF type names (sha512 for "pbkdf2-sha512"), or sha256 for a type that
+	// names none. It is only used when the KDF is PBKDF2.
 	Hash string
 
 	// Argon2 parameters (optional, uses defaults if not specified)
@@ -257,25 +259,40 @@ func containerArgon2Cost(metadata *LUKS2Metadata) *KDF {
 	return nil
 }
 
+// baseAddKeyFormatOptions maps the caller's AddKeyOptions onto FormatOptions,
+// with this package's defaults for whatever the caller left unset.
+//
+// The KDF type resolves through resolveKDFType, so a caller that names none
+// gets DefaultKDFType -- PBKDF2-SHA512 in FIPS mode, Argon2id otherwise (#237)
+// -- unless it supplied an Argon2 cost, which selects Argon2id.
+//
+// HashAlgo is the caller's Hash when it gave one and otherwise the hash the
+// resolved type names: "sha512" for "pbkdf2-sha512", and DefaultHashAlgo for a
+// type that names none. It was DefaultHashAlgo unconditionally, and since
+// HashAlgo overrides the hash a KDF alias names, that wrote every
+// "pbkdf2-sha512" keyslot -- the FIPS-mode default among them -- as
+// PBKDF2-SHA256.
 func baseAddKeyFormatOptions(opts *AddKeyOptions) FormatOptions {
 	formatOpts := FormatOptions{
-		KDFType:        "argon2id",
-		HashAlgo:       DefaultHashAlgo,
+		KDFType:        resolveKDFType("", callerChoseArgon2Cost(opts)),
 		Argon2Time:     4,
 		Argon2Memory:   1048576,
 		Argon2Parallel: 4,
 	}
 
+	var callerHash string
+	if opts != nil {
+		if opts.KDFType != "" {
+			formatOpts.KDFType = opts.KDFType
+		}
+		callerHash = opts.Hash
+	}
+	formatOpts.HashAlgo = getHashAlgoForKDFType(normalizeKDFType(formatOpts.KDFType), callerHash)
+
 	if opts == nil {
 		return formatOpts
 	}
 
-	if opts.KDFType != "" {
-		formatOpts.KDFType = opts.KDFType
-	}
-	if opts.Hash != "" {
-		formatOpts.HashAlgo = opts.Hash
-	}
 	if opts.Argon2Time != 0 {
 		formatOpts.Argon2Time = opts.Argon2Time
 	}

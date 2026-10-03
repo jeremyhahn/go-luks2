@@ -261,6 +261,7 @@ func (c *CLI) showBanner() {
 func (c *CLI) cmdCreate() int {
 	o := newOptions("create")
 	key := keyFileFlag(o, "key-file")
+	kdf := declareKDFFlags(o)
 	args, err := o.parse(c.Args[2:])
 	if err != nil {
 		_, _ = fmt.Fprintf(c.Stderr, "%v\n", err)
@@ -278,16 +279,41 @@ func (c *CLI) cmdCreate() int {
 		_, _ = fmt.Fprintln(c.Stdout, filesystemTypesHelp())
 		_, _ = fmt.Fprintln(c.Stdout, "\nOptions:")
 		_, _ = fmt.Fprintf(c.Stdout, "%s", keyFileHelp)
+		_, _ = fmt.Fprintf(c.Stdout, "%s", kdfFlagsHelp)
 		return 1
+	}
+
+	// The KDF is settled before anything else happens: a choice this mode
+	// refuses must stop the command before it prompts for a passphrase or
+	// creates a file (#237).
+	choice, err := kdf.resolve()
+	if err != nil {
+		return c.kdfRefused(err)
 	}
 
 	path := args[0]
 	isBlockDevice := len(path) >= 5 && path[:5] == "/dev/"
 
 	if isBlockDevice {
-		return c.cmdCreateBlockDevice(path, *key)
+		return c.cmdCreateBlockDevice(path, *key, choice)
 	}
-	return c.cmdCreateFile(path, args[1:], *key)
+	return c.cmdCreateFile(path, args[1:], *key, choice)
+}
+
+// formatOptions returns the FormatOptions for a new volume on device, with
+// the KDF the options chose.
+func (k kdfChoice) formatOptions(device string, passphrase []byte, label string) luks2.FormatOptions {
+	return luks2.FormatOptions{
+		Device:          device,
+		Passphrase:      passphrase,
+		Label:           label,
+		KDFType:         k.KDFType,
+		PBKDFIterTime:   k.PBKDFIterTime,
+		PBKDFIterations: k.PBKDFIterations,
+		Argon2Time:      k.Argon2Time,
+		Argon2Memory:    k.Argon2Memory,
+		Argon2Parallel:  k.Argon2Parallel,
+	}
 }
 
 // cliExcludedFilesystems are library-supported filesystems that create cannot
@@ -335,7 +361,7 @@ func filesystemTypesHelp() string {
 //
 // args are the positional arguments after the filename: the size, then
 // optionally the filesystem type.
-func (c *CLI) cmdCreateFile(filename string, args []string, key KeySource) int {
+func (c *CLI) cmdCreateFile(filename string, args []string, key KeySource, kdf kdfChoice) int {
 	if len(args) < 1 {
 		_, _ = fmt.Fprintln(c.Stdout, "Error: Size required for file volumes")
 		_, _ = fmt.Fprintln(c.Stdout, "Usage: luks2 create <file> <size> [filesystem]")
@@ -415,16 +441,10 @@ func (c *CLI) cmdCreateFile(filename string, args []string, key KeySource) int {
 	// whatever the script piped next.
 	label := c.promptLabel(key)
 
-	// Create format options
-	opts := luks2.FormatOptions{
-		Device:     filename,
-		Passphrase: passphrase,
-		Label:      label,
-		KDFType:    "argon2id",
-	}
+	opts := kdf.formatOptions(filename, passphrase, label)
 
 	_, _ = fmt.Fprintln(c.Stdout, "\n  Cipher: AES-XTS-256")
-	_, _ = fmt.Fprintln(c.Stdout, "  KDF: Argon2id")
+	_, _ = fmt.Fprintf(c.Stdout, "  KDF: %s\n", kdf.Label)
 	_, _ = fmt.Fprintln(c.Stdout, "  Key Size: 512 bits")
 	_, _ = fmt.Fprintln(c.Stdout, "\nThis may take a few seconds...")
 
@@ -513,7 +533,7 @@ func (c *CLI) abandonUnformattedVolume(filename, loopDev, volumeName, fstype str
 }
 
 // cmdCreateBlockDevice creates a LUKS2 volume on a block device
-func (c *CLI) cmdCreateBlockDevice(device string, key KeySource) int {
+func (c *CLI) cmdCreateBlockDevice(device string, key KeySource, kdf kdfChoice) int {
 	c.showBanner()
 	_, _ = fmt.Fprintf(c.Stdout, "Creating LUKS2 volume on block device: %s\n\n", device)
 
@@ -528,17 +548,11 @@ func (c *CLI) cmdCreateBlockDevice(device string, key KeySource) int {
 
 	label := c.promptLabel(key)
 
-	// Create format options
-	opts := luks2.FormatOptions{
-		Device:     device,
-		Passphrase: passphrase,
-		Label:      label,
-		KDFType:    "argon2id",
-	}
+	opts := kdf.formatOptions(device, passphrase, label)
 
 	_, _ = fmt.Fprintln(c.Stdout, "\nCreating LUKS2 volume...")
 	_, _ = fmt.Fprintln(c.Stdout, "  Cipher: AES-XTS-256")
-	_, _ = fmt.Fprintln(c.Stdout, "  KDF: Argon2id")
+	_, _ = fmt.Fprintf(c.Stdout, "  KDF: %s\n", kdf.Label)
 	_, _ = fmt.Fprintln(c.Stdout, "  Key Size: 512 bits")
 	_, _ = fmt.Fprintln(c.Stdout, "\nThis may take a few seconds...")
 

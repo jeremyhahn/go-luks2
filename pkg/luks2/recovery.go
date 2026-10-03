@@ -126,7 +126,9 @@ type RecoveryKeyOptions struct {
 	// OutputPath is where to save the recovery key (optional)
 	OutputPath string
 
-	// KDFType specifies the KDF type (default: argon2id).
+	// KDFType specifies the KDF type. Empty means the library's policy, as for
+	// AddKey: DefaultKDFType -- PBKDF2-SHA512 in FIPS 140-3 mode, Argon2id
+	// otherwise (#237) -- or Argon2id when an Argon2 cost is set.
 	//
 	// # What systemd writes, MEASURED
 	//
@@ -243,7 +245,8 @@ type RecoveryKeyOptions struct {
 	// misunderstanding. It is also forward-only: volumes keep whatever their
 	// keyslots already hold.
 	//
-	// Callers who want pbkdf2 today set KDFType to KDFTypePBKDF2 explicitly.
+	// Outside FIPS mode, callers who want pbkdf2 set KDFType to KDFTypePBKDF2
+	// (or an alias that names the hash) explicitly.
 	KDFType string
 
 	// Argon2 parameters
@@ -251,8 +254,15 @@ type RecoveryKeyOptions struct {
 	Argon2Memory   int
 	Argon2Parallel int
 
-	// Hash selects the PBKDF2 hash when KDFType is pbkdf2 (default: sha256).
+	// Hash selects the PBKDF2 hash when the KDF is PBKDF2. When it is empty the
+	// hash is the one the KDF type names -- sha512 for "pbkdf2-sha512", the
+	// FIPS-mode default -- and sha256 for a type that names none.
 	Hash string
+
+	// PBKDFIterTime is the time budget, in milliseconds, a PBKDF2 iteration
+	// count is calibrated to when PBKDFIterations is zero (default: 2000). It
+	// is passed to AddKey unchanged and bounded there as it is for any keyslot.
+	PBKDFIterTime int
 
 	// PBKDFIterations is an exact PBKDF2 iteration count. Zero calibrates, as
 	// before.
@@ -389,6 +399,7 @@ func AddRecoveryKey(device string, existingPassphrase []byte, opts *RecoveryKeyO
 		Argon2Memory:    opts.Argon2Memory,
 		Argon2Parallel:  opts.Argon2Parallel,
 		Hash:            opts.Hash,
+		PBKDFIterTime:   opts.PBKDFIterTime,
 		PBKDFIterations: opts.PBKDFIterations,
 	}
 

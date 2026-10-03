@@ -12,7 +12,7 @@ source rather than remembered, so it is written down instead.
 ```
 luks2 recovery generate [--format <name>] [--length <n>] [--output <path>]
 luks2 recovery add      [--key-file <path>] [--format <name>] [--length <n>]
-                        [--slot <n>] [--output <path>] <device>
+                        [--slot <n>] [--output <path>] [KDF options] <device>
 luks2 recovery verify   [--recovery-file <path>] <device>
 ```
 
@@ -108,6 +108,32 @@ number is the only record of it.
 If `--output` is given and the file cannot be written, the command exits 1 and
 says so loudly on stderr — **but the key is already live in a keyslot**, and it
 is still on the screen. That is the moment to copy it.
+
+### Key derivation
+
+`add` takes the same KDF options as [`create`](create.md#key-derivation-kdf-options):
+`--pbkdf argon2id|pbkdf2`, `--hash`, `--iter-time`, `--pbkdf-force-iterations`,
+`--pbkdf-memory` and `--pbkdf-parallel`, checked the same way and before the
+passphrase prompt; cost bounds are the library's and are checked when the
+keyslot is written, with nothing written if one is refused.
+
+With none of them the keyslot gets the library's policy for the mode:
+PBKDF2-SHA512 in FIPS 140-3 mode, Argon2id otherwise — and an Argon2id
+recovery keyslot inherits the Argon2 cost of the volume's existing keyslots.
+In FIPS 140-3 mode `--pbkdf argon2id` is refused with `ErrFIPSNotApproved`.
+
+```bash
+# FIPS 140-3 mode: no option needed
+sudo GODEBUG=fips140=only luks2 recovery add /dev/sdb1
+
+# PBKDF2 explicitly, as systemd-cryptenroll writes a recovery keyslot
+sudo luks2 recovery add --pbkdf pbkdf2 --hash sha512 --pbkdf-force-iterations 1000 /dev/sdb1
+```
+
+A recovery key is 256 random bits, so its keyslot may take an explicit
+iteration count as low as 1000 — the count multiplies the cost of a search,
+and there is no search over 256 random bits. A passphrase keyslot is held to
+the hash's full floor.
 
 ## verify
 

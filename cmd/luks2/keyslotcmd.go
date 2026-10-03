@@ -77,7 +77,8 @@ func (c *CLI) cmdAddKey() int {
 			"",
 			"Options:",
 			"  --slot <n>              Use this keyslot instead of the first free one",
-			"  --kdf <name>            argon2id (default), argon2i or pbkdf2",
+			"  --kdf <name>            argon2id, argon2i or pbkdf2 (default: pbkdf2-sha512\n"+
+				"                          in FIPS 140-3 mode, argon2id otherwise)",
 			"  --new-key-file <path>   Read the NEW passphrase from a file")
 	}
 

@@ -7,6 +7,7 @@
 package luks2
 
 import (
+	"crypto/fips140"
 	"crypto/pbkdf2"
 	"errors"
 	"fmt"
@@ -591,11 +592,16 @@ func TestAddKeyFormatOptionsRefusesAnUnusableIterTime(t *testing.T) {
 func TestAddKeyFormatOptionsKeepsItsDefaults(t *testing.T) {
 	got := baseAddKeyFormatOptions(nil)
 
-	if got.KDFType != KDFTypeArgon2id {
-		t.Fatalf("default KDFType = %q, want %q", got.KDFType, KDFTypeArgon2id)
+	// The KDF is the mode's default (#237), and the hash is the one it names.
+	wantKDF, wantHash := KDFTypeArgon2id, DefaultHashAlgo
+	if fips140.Enabled() {
+		wantKDF, wantHash = KDFTypePBKDF2SHA512, "sha512"
 	}
-	if got.HashAlgo != DefaultHashAlgo {
-		t.Fatalf("default HashAlgo = %q, want %q", got.HashAlgo, DefaultHashAlgo)
+	if got.KDFType != wantKDF {
+		t.Fatalf("default KDFType = %q, want %q", got.KDFType, wantKDF)
+	}
+	if got.HashAlgo != wantHash {
+		t.Fatalf("default HashAlgo = %q, want %q", got.HashAlgo, wantHash)
 	}
 	if got.Argon2Time != 4 || got.Argon2Memory != 1048576 || got.Argon2Parallel != 4 {
 		t.Fatalf("default Argon2 costs = time %d, memory %d, parallel %d; want 4, 1048576, 4",
