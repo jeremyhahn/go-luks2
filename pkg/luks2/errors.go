@@ -237,6 +237,15 @@ var (
 	// writing anything.
 	ErrFIPSMigrationUnboundKey = errors.New("the passphrase does not open a keyslot holding the key the data segments are encrypted with")
 
+	// ErrSHA1NotWritten indicates a request to WRITE SHA-1 into a keyslot or
+	// digest: a PBKDF2-SHA1 KDF (KDFTypePBKDF2SHA1, or a "sha1" hash for a new
+	// keyslot or a format) or a SHA-1 anti-forensic split. SHA-1 is
+	// deprecated for key derivation and not FIPS-approved for it, so this
+	// package reads it -- to open volumes cryptsetup and LUKS1 wrote -- and
+	// never writes it (#236, #239). It is carried alongside ErrUnsupportedHash
+	// or ErrUnsupportedKDF, whichever the rejected option names.
+	ErrSHA1NotWritten = errors.New("SHA-1 is read from existing keyslots but never written to a new keyslot or digest")
+
 	// ErrUnsupportedLUKSVersion indicates a header copy whose magic is LUKS
 	// but whose version is not 2 -- a LUKS1 container, most often. It is not
 	// damage, and is not reported as ErrInvalidHeader.

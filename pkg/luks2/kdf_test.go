@@ -1081,39 +1081,16 @@ func TestBenchmarkPBKDF2SHA384(t *testing.T) {
 	}
 }
 
-// TestCreateKDFPBKDF2SHA1Alias tests creating PBKDF2 with SHA-1 using type
-// alias, and that FIPS 140-3 mode refuses to create one (docs/FIPS.md).
+// TestCreateKDFPBKDF2SHA1Alias: the pbkdf2-sha1 alias creates nothing (#239,
+// BREAKING). It is refused with ErrSHA1NotWritten, and with ErrUnsupportedKDF
+// for callers that branched on that, in every mode -- before FIPS policy is
+// consulted, because no process may write it.
 func TestCreateKDFPBKDF2SHA1Alias(t *testing.T) {
 	defer parallel(t)()
 
-	opts := FormatOptions{
-		KDFType:       KDFTypePBKDF2SHA1,
-		PBKDFIterTime: 100, // Short time for fast test
-	}
-
-	if fips140.Enabled() {
-		if _, err := CreateKDF(opts, 20); !errors.Is(err, ErrFIPSNotApproved) {
-			t.Fatalf("CreateKDF with pbkdf2-sha1 in FIPS mode: got error %v, want ErrFIPSNotApproved", err)
-		}
-		return
-	}
-
-	kdf, err := CreateKDF(opts, 20)
-	if err != nil {
-		t.Fatalf("CreateKDF with pbkdf2-sha1 failed: %v", err)
-	}
-
-	// Should be stored as "pbkdf2" for LUKS2 compatibility
-	if kdf.Type != KDFTypePBKDF2 {
-		t.Fatalf("Expected type %s, got %s", KDFTypePBKDF2, kdf.Type)
-	}
-
-	if kdf.Hash != "sha1" {
-		t.Fatalf("Expected hash sha1, got %s", kdf.Hash)
-	}
-
-	if kdf.Iterations == nil || *kdf.Iterations < 1000 {
-		t.Fatal("Expected at least 1000 iterations")
+	kdf, err := CreateKDF(FormatOptions{KDFType: KDFTypePBKDF2SHA1, PBKDFIterTime: 100}, 20)
+	if kdf != nil || !errors.Is(err, ErrSHA1NotWritten) || !errors.Is(err, ErrUnsupportedKDF) {
+		t.Fatalf("CreateKDF with pbkdf2-sha1: got %+v, %v; want ErrSHA1NotWritten and ErrUnsupportedKDF", kdf, err)
 	}
 }
 
@@ -1425,32 +1402,19 @@ func TestFIPSCompliantKDFWorkflow(t *testing.T) {
 	}
 }
 
-// TestCreateKDFPBKDF2SHA1HashAlgoOverride covers the other route to
-// PBKDF2-HMAC-SHA1: the base "pbkdf2" type with HashAlgo set to "sha1". It must
-// be refused in FIPS 140-3 mode just like the "pbkdf2-sha1" alias, so that no
-// SHA-1 derivation reaches the Go Cryptographic Module. See docs/FIPS.md.
+// TestCreateKDFPBKDF2SHA1HashAlgoOverride: a "sha1" hash with the plain
+// pbkdf2 type -- or with any type, since the hash also names a format's digest
+// and split -- is refused the same way (#239), in every mode.
 func TestCreateKDFPBKDF2SHA1HashAlgoOverride(t *testing.T) {
 	defer parallel(t)()
 
-	opts := FormatOptions{
-		KDFType:       KDFTypePBKDF2,
-		HashAlgo:      "sha1",
-		PBKDFIterTime: 100,
-	}
-
-	kdf, err := CreateKDF(opts, 20)
-	if fips140.Enabled() {
-		if !errors.Is(err, ErrFIPSNotApproved) {
-			t.Fatalf("CreateKDF with HashAlgo sha1 in FIPS mode: got error %v, want ErrFIPSNotApproved", err)
+	for _, kdfType := range []string{KDFTypePBKDF2, KDFTypeArgon2id} {
+		for _, hash := range []string{"sha1", "SHA1", " sha1 "} {
+			kdf, err := CreateKDF(FormatOptions{KDFType: kdfType, HashAlgo: hash, PBKDFIterTime: 100}, 20)
+			if kdf != nil || !errors.Is(err, ErrSHA1NotWritten) || !errors.Is(err, ErrUnsupportedHash) {
+				t.Fatalf("CreateKDF %s with HashAlgo %q: got %+v, %v; want ErrSHA1NotWritten and ErrUnsupportedHash", kdfType, hash, kdf, err)
+			}
 		}
-		return
-	}
-
-	if err != nil {
-		t.Fatalf("CreateKDF with HashAlgo sha1 failed: %v", err)
-	}
-	if kdf.Hash != "sha1" {
-		t.Fatalf("Expected hash sha1, got %s", kdf.Hash)
 	}
 }
 

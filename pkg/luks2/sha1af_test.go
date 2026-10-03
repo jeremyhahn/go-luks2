@@ -243,8 +243,8 @@ func TestNoKeyslotIsWrittenWithSHA1AF(t *testing.T) {
 		before := fileDigest(t, image)
 		opts := standardFormatOptions(image)
 		opts.HashAlgo = "sha1"
-		if err := Format(opts); !errors.Is(err, ErrUnsupportedHash) || !strings.Contains(err.Error(), "never writes") {
-			t.Fatalf("got %v, want ErrUnsupportedHash saying SHA-1 is never written", err)
+		if err := Format(opts); !errors.Is(err, ErrUnsupportedHash) || !errors.Is(err, ErrSHA1NotWritten) {
+			t.Fatalf("got %v, want ErrUnsupportedHash and ErrSHA1NotWritten", err)
 		}
 		if fileDigest(t, image) != before {
 			t.Fatal("the refused Format changed the device")

@@ -256,7 +256,7 @@ func getHashFunc(name string) (func() hash.Hash, error) {
 	case "sha512":
 		return sha512.New, nil
 	case "sha1":
-		return nil, &detailError{Kind: ErrUnsupportedHash, Detail: "sha1: an anti-forensic hash this package reads in legacy keyslots and never writes; use sha256 or sha512"}
+		return nil, &detailError{Kind: ErrUnsupportedHash, Err: ErrSHA1NotWritten, Detail: "sha1: an anti-forensic hash this package reads in legacy keyslots and never writes; use sha256 or sha512"}
 	default:
 		return nil, &detailError{Kind: ErrUnsupportedHash, Detail: name + " (supported: sha256, sha512)"}
 	}

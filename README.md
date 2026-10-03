@@ -326,9 +326,12 @@ luks2.Format(luks2.FormatOptions{
 FIPS-approved KDFs: `pbkdf2-sha256`, `pbkdf2-sha384`, `pbkdf2-sha512`
 
 `pbkdf2-sha1` is **not** FIPS-approved — the Go Cryptographic Module permits
-PBKDF2 only with SHA-2/SHA-3. It remains available outside FIPS mode to open
-LUKS headers written by older cryptsetup releases; in FIPS mode it returns
-`ErrFIPSNotApproved`.
+PBKDF2 only with SHA-2/SHA-3. Existing SHA-1 keyslots, which older cryptsetup
+releases and converted LUKS1 volumes carry, still open outside FIPS mode (in
+FIPS mode they return a typed `ErrFIPSNotApproved` error), but no keyslot or
+digest is ever created with SHA-1: asking for `pbkdf2-sha1` or a `sha1` hash
+returns `ErrSHA1NotWritten`, and `ChangeKey` rewrites a SHA-1 keyslot as
+PBKDF2-SHA256.
 
 Argon2 is not FIPS-approved either, and `GODEBUG=fips140=only` cannot catch it
 because `x/crypto/argon2` is pure Go. While the process runs in FIPS 140-3 mode

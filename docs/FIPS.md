@@ -29,7 +29,7 @@ tags, no skipped packages.
 | `pbkdf2-sha256` | yes | recommended |
 | `pbkdf2-sha384` | yes | |
 | `pbkdf2-sha512` | yes | the library default in FIPS mode |
-| `pbkdf2-sha1` | **no** | legacy header interop only — see the exemption below |
+| `pbkdf2-sha1` | **no** | read only, to open legacy headers — never written (#239); see the exemption below |
 | `argon2i` | no | refused in FIPS mode |
 | `argon2id` | no | refused in FIPS mode; library default otherwise |
 
@@ -316,19 +316,33 @@ static check refuses any SHA-1 AF hash that remains. `TestFIPSImportOfSHA1AFVolu
 imports both shapes and opens the result in a `fips140=only` process, and the
 integration test does the same on the kernel.
 
-**SHA-1 is read, never written.** The anti-forensic split — every path that
-writes a keyslot — accepts SHA-256 and SHA-512 only. `Format` refuses
-`HashAlgo: "sha1"` with `ErrUnsupportedHash` before it touches the device;
-`AddKey` writes SHA-256; and `ChangeKey` on a SHA-1 keyslot rewrites it with a
-SHA-256 split (the area size is the same). `ChangeKey` keeps a keyslot's KDF and
-cost, so a converted LUKS1 keyslot's PBKDF2-SHA1 KDF survives a passphrase
-change; `MigrateToFIPS` is what replaces it.
+**SHA-1 is read, never written** — in either half of a keyslot, or in a
+digest (#236, #239). The anti-forensic split accepts SHA-256 and SHA-512 only,
+and no path creates a PBKDF2-SHA1 KDF: `Format`, `AddKey`, `CreateKDF` and the
+digest writer refuse the `pbkdf2-sha1` type and a `sha1` hash (any case) with
+`ErrSHA1NotWritten`, alongside `ErrUnsupportedKDF` or `ErrUnsupportedHash`,
+before they derive or write anything — `AddKey` before it even unlocks the
+existing keyslot. `ChangeKey` on a SHA-1 keyslot rewrites both halves: a
+SHA-256 split of the same size, and a PBKDF2-SHA256 KDF whose iteration count
+is CONVERTED from the old keyslot's cost, not copied. PBKDF2 derives its output
+in blocks of the hash's length, each a full chain of iterations, so a 64-byte
+key is four SHA-1 blocks but two SHA-256 blocks and the same count would halve
+the work; and on CPUs with SHA extensions an HMAC-SHA256 can cost less than an
+HMAC-SHA1. The count is the larger of equal work (as many SHA-256 HMACs as the
+SHA-1 keyslot took) and equal time measured on the machine doing the rewrite
+(slowest SHA-1 sample against fastest SHA-256 sample), raised to the SHA-256
+floor; a result past the iteration ceiling is refused with
+`ErrPBKDFIterationsTooHigh` before anything is written. `TestChangeKeyRewritesAPBKDF2SHA1KeyslotAsSHA256`
+does it to a cryptsetup-converted LUKS1 keyslot and opens the result with
+cryptsetup. This is a breaking change: code that created PBKDF2-SHA1 keyslots
+now gets the error.
 
 ## Exemption: PBKDF2-HMAC-SHA1 for legacy LUKS headers
 
 **Scope.** `getPBKDF2HashFunc("sha1")` in `pkg/luks2/kdf.go`, reachable through
-`DeriveKeyEnclave`, `BenchmarkPBKDF2` and `CreateKDF` (the `pbkdf2-sha1` alias, or the
-`pbkdf2` type with `HashAlgo: "sha1"`), and `getAFMergeHashFunc("sha1")` in
+`DeriveKeyEnclave` and `BenchmarkPBKDF2` when they are handed an existing SHA-1
+keyslot's or digest's KDF (`CreateKDF` refuses SHA-1 since #239), and
+`getAFMergeHashFunc("sha1")` in
 `pkg/luks2/antiforensic.go`, the anti-forensic MERGE of a SHA-1 keyslot (see
 "SHA-1 anti-forensic keyslots" below). Nothing else in this repository uses
 SHA-1 or any other non-approved primitive; the anti-forensic SPLIT, which writes
@@ -345,9 +359,10 @@ those volumes.
 
 **Why it is not a compliance violation.** The exemption covers reading an
 externally-defined on-disk format, not the protection of regulated data by this
-library's own choices. New volumes should be formatted with `pbkdf2-sha256` or
-better (or Argon2id outside FIPS); `IsFIPSCompliantKDF("pbkdf2-sha1")` returns
-`false` so callers cannot be told otherwise.
+library's own choices. No keyslot or digest is created with PBKDF2-SHA1 — every
+creation path refuses it with `ErrSHA1NotWritten` (#239) — and
+`IsFIPSCompliantKDF("pbkdf2-sha1")` returns `false` so callers cannot be told
+otherwise.
 
 **How it is isolated from the FIPS-gated path.** `getPBKDF2HashFunc` checks
 `crypto/fips140.Enabled()` and returns `ErrFIPSNotApproved` before the call can

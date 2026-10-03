@@ -6,7 +6,9 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
@@ -57,6 +59,26 @@ func (c *CLI) cmdTestKey() int {
 	return 0
 }
 
+// addKeyKDFs are the --kdf values addkey writes with: the library's KDF names
+// apart from pbkdf2-sha1, which no keyslot is created with (#239), and "" for
+// the library default.
+var addKeyKDFs = []string{"", "argon2id", "argon2i", "pbkdf2", "pbkdf2-sha256", "pbkdf2-sha384", "pbkdf2-sha512"}
+
+// addKeyKDFAllowed refuses an addkey --kdf value no keyslot is created with,
+// naming SHA-1's refusal when that is what was asked for.
+func addKeyKDFAllowed(kdf string) error {
+	name := strings.ToLower(strings.TrimSpace(kdf))
+	if name == luks2.KDFTypePBKDF2SHA1 {
+		return &UsageError{Command: "addkey", Detail: "--kdf pbkdf2-sha1: no keyslot is created with SHA-1; " +
+			"use pbkdf2 (SHA-256), pbkdf2-sha384, pbkdf2-sha512 or argon2id"}
+	}
+	if !slices.Contains(addKeyKDFs, name) {
+		return &UsageError{Command: "addkey", Detail: fmt.Sprintf("--kdf must be one of %s, not %q",
+			strings.Join(addKeyKDFs[1:], ", "), kdf)}
+	}
+	return nil
+}
+
 // cmdAddKey adds a second credential to a volume.
 func (c *CLI) cmdAddKey() int {
 	o := newOptions("addkey")
@@ -77,12 +99,19 @@ func (c *CLI) cmdAddKey() int {
 			"",
 			"Options:",
 			"  --slot <n>              Use this keyslot instead of the first free one",
-			"  --kdf <name>            argon2id, argon2i or pbkdf2 (default: pbkdf2-sha512\n"+
-				"                          in FIPS 140-3 mode, argon2id otherwise)",
+			"  --kdf <name>            argon2id, argon2i, pbkdf2 (SHA-256), pbkdf2-sha384 or\n"+
+				"                          pbkdf2-sha512 (default: pbkdf2-sha512 in FIPS 140-3\n"+
+				"                          mode, argon2id otherwise); never pbkdf2-sha1",
 			"  --new-key-file <path>   Read the NEW passphrase from a file")
 	}
 
 	device := args[0]
+
+	// Judged before either passphrase is asked for: an operator should not
+	// type two credentials to learn the KDF was never going to be written.
+	if err := addKeyKDFAllowed(*kdf); err != nil {
+		return c.usageError(err)
+	}
 
 	existing, err := c.readPassphrase("Enter an existing passphrase: ", false, *key)
 	if err != nil {

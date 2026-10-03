@@ -47,10 +47,13 @@ func Format(opts FormatOptions) error {
 	if opts.HashAlgo == "" {
 		opts.HashAlgo = DefaultHashAlgo
 	}
-	// HashAlgo is also the new keyslot's anti-forensic hash, so it must be one
-	// a keyslot may be WRITTEN with -- never SHA-1 (#236) -- and that is
-	// refused here, before the KDF is paid for and before the device is
-	// touched.
+	// HashAlgo is also the new keyslot's anti-forensic hash and its digest's,
+	// so it must be one a keyslot may be WRITTEN with -- never SHA-1 (#236,
+	// #239), nor a pbkdf2-sha1 KDF -- and that is refused here, before the KDF
+	// is paid for and before the device is touched.
+	if err := refuseSHA1ForCreation(opts.KDFType, opts.HashAlgo); err != nil {
+		return err
+	}
 	if _, err := getHashFunc(opts.HashAlgo); err != nil {
 		return err
 	}
@@ -374,6 +377,10 @@ func digestIterationsTimedBy(hashAlgo string, timer pbkdf2Timer) (int, error) {
 // key, and the whole point of writing it to the header is that anyone can check
 // a candidate key against it.
 func createDigest(masterKey *enclave.MemoryEnclave, hashAlgo string) (*KDF, string, error) {
+	// A digest is written, so it is never PBKDF2-SHA1 (#239).
+	if err := refuseSHA1ForCreation("", hashAlgo); err != nil {
+		return nil, "", err
+	}
 	// CALIBRATED, not a constant. See DigestIterationTargetMs (security.go) for
 	// what this parameter is, what it is not, and why 100ms -- and for the
 	// --pbkdf-force-iterations measurement trap that makes cryptsetup look as

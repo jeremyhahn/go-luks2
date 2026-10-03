@@ -13,6 +13,7 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/jeremyhahn/go-enclave"
 )
@@ -396,6 +397,13 @@ func addKeyWithPolicy(device string, existingPassphrase, newPassphrase []byte, o
 	}
 	if err := ValidatePassphrase(newPassphrase); err != nil {
 		return -1, &detailError{Detail: "invalid new passphrase", Err: err}
+	}
+	// No SHA-1 keyslot, refused before the existing keyslot is unlocked --
+	// which costs a full KDF derivation -- and before anything is written.
+	if opts != nil {
+		if err := refuseSHA1ForCreation(opts.KDFType, opts.Hash); err != nil {
+			return -1, err
+		}
 	}
 
 	// A NEW KEYSLOT IS A KEYSLOT THIS PACKAGE CREATES, so a caller-supplied
@@ -989,6 +997,14 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 	if targetKeyslot.KDF.Hash != "" {
 		formatOpts.HashAlgo = targetKeyslot.KDF.Hash
 	}
+	// EXCEPT SHA-1, which is never written (#239). A PBKDF2-SHA1 keyslot -- a
+	// converted LUKS1 one -- is rewritten as PBKDF2-SHA256, and its iteration
+	// count is CONVERTED from what it cost, not copied: see
+	// sha256IterationsForSHA1 for why a copied count can halve the work.
+	rewritingSHA1 := strings.EqualFold(formatOpts.HashAlgo, "sha1")
+	if rewritingSHA1 {
+		formatOpts.HashAlgo = DefaultHashAlgo
+	}
 
 	// Copy existing Argon2 parameters or set defaults.
 	//
@@ -1046,6 +1062,13 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 	// benchmarks.
 	if isPBKDF2Type(normalizeKDFType(kdfType)) && targetKeyslot.KDF.Iterations != nil {
 		preserved := *targetKeyslot.KDF.Iterations
+		if rewritingSHA1 {
+			converted, err := sha256IterationsForSHA1(preserved, targetKeyslot.KeySize)
+			if err != nil {
+				return &detailError{Detail: "failed to carry the PBKDF2-SHA1 keyslot's cost over to PBKDF2-SHA256", Err: err}
+			}
+			preserved = converted
+		}
 		if floor := int(math.Ceil(pbkdf2IterationFloor(formatOpts.HashAlgo, pbkdf2ReferenceTargetMs))); preserved < floor {
 			preserved = floor
 		}

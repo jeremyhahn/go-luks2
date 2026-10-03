@@ -31,9 +31,11 @@ const (
 	// KDFTypePBKDF2 is the base PBKDF2 KDF type (uses HashAlgo option for hash selection)
 	KDFTypePBKDF2 = "pbkdf2"
 
-	// KDFTypePBKDF2SHA1 is PBKDF2 with SHA-1. It is NOT FIPS-approved and is
-	// refused while the process runs in FIPS 140-3 mode; it exists only to open
-	// LUKS headers written by cryptsetup releases that defaulted to SHA-1.
+	// KDFTypePBKDF2SHA1 names PBKDF2 with SHA-1. It is NOT a type a keyslot
+	// can be created with: every creation path refuses it with
+	// ErrSHA1NotWritten (#239, a breaking change). Existing PBKDF2-SHA1
+	// keyslots -- on disk, type "pbkdf2" with hash "sha1", as cryptsetup and
+	// converted LUKS1 volumes carry -- still open outside FIPS 140-3 mode.
 	// See docs/FIPS.md.
 	KDFTypePBKDF2SHA1 = "pbkdf2-sha1"
 
@@ -938,7 +940,7 @@ func forcedPBKDF2Iterations(hashAlgo string, iterations int, policy keyslotCostP
 // CreateKDF creates a KDF structure based on options
 // Supported KDF types:
 //   - "pbkdf2" - PBKDF2 with hash from HashAlgo option (default: sha256) [FIPS-approved]
-//   - "pbkdf2-sha1" - PBKDF2 with SHA-1 [NOT FIPS-approved, legacy headers only]
+//   - "pbkdf2-sha1" - REFUSED with ErrSHA1NotWritten: SHA-1 is never written (#239)
 //   - "pbkdf2-sha256" - PBKDF2 with SHA-256 [FIPS-approved, recommended]
 //   - "pbkdf2-sha384" - PBKDF2 with SHA-384 [FIPS-approved]
 //   - "pbkdf2-sha512" - PBKDF2 with SHA-512 [FIPS-approved]
@@ -956,6 +958,11 @@ func CreateKDF(opts FormatOptions, keySize int) (*KDF, error) {
 
 func createKDF(opts FormatOptions, keySize int, policy keyslotCostPolicy) (*KDF, error) {
 	kdfType := resolveKDFType(normalizeKDFType(opts.KDFType), formatArgon2CostGiven(opts))
+
+	// No keyslot is created with SHA-1, before any other choice is judged.
+	if err := refuseSHA1ForCreation(kdfType, opts.HashAlgo); err != nil {
+		return nil, err
+	}
 
 	// Checked after the default is resolved. The default itself is approved in
 	// FIPS mode (DefaultKDFType), so what this refuses there is an Argon2 KDF
@@ -982,8 +989,25 @@ func createKDF(opts FormatOptions, keySize int, policy keyslotCostPolicy) (*KDF,
 	case KDFTypeArgon2i, KDFTypeArgon2id:
 		return createArgon2KDF(kdfType, opts, saltB64)
 	default:
-		return nil, fmt.Errorf("%w: %s (supported: pbkdf2, pbkdf2-sha1, pbkdf2-sha256, pbkdf2-sha384, pbkdf2-sha512, argon2i, argon2id)", ErrUnsupportedKDF, kdfType)
+		return nil, &detailError{Kind: ErrUnsupportedKDF, Detail: kdfType + " (supported: pbkdf2, pbkdf2-sha256, pbkdf2-sha384, pbkdf2-sha512, argon2i, argon2id)"}
 	}
+}
+
+// refuseSHA1ForCreation refuses a KDF type or hash that would WRITE SHA-1
+// into a new keyslot or digest: the pbkdf2-sha1 alias, or a "sha1" hash for
+// any KDF -- a format's hash is also its digest's and its anti-forensic
+// split's, and an AddKey hash names the new keyslot's. Reading is unaffected:
+// existing PBKDF2-SHA1 keyslots and digests open outside FIPS mode (#239).
+func refuseSHA1ForCreation(kdfType, hashAlgo string) error {
+	if normalizeKDFType(kdfType) == KDFTypePBKDF2SHA1 {
+		return &detailError{Kind: ErrSHA1NotWritten, Err: ErrUnsupportedKDF,
+			Detail: "pbkdf2-sha1: new keyslots use pbkdf2 with sha256, sha384 or sha512, or argon2"}
+	}
+	if strings.EqualFold(strings.TrimSpace(hashAlgo), "sha1") {
+		return &detailError{Kind: ErrSHA1NotWritten, Err: ErrUnsupportedHash,
+			Detail: "sha1: new keyslots and digests use sha256, sha384 or sha512"}
+	}
+	return nil
 }
 
 // isPBKDF2Type returns true if the KDF type is a PBKDF2 variant

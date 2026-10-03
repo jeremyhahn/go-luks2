@@ -669,3 +669,58 @@ func TestUnknownSubcommandsAreRefused(t *testing.T) {
 		})
 	}
 }
+
+// TestAddKeyRefusesASHA1KDFBeforeAskingForPassphrases: --kdf pbkdf2-sha1 --
+// in any case -- and an unknown KDF are usage errors, reported before either
+// passphrase is read and without reaching the library. Every KDF the library
+// writes with is still passed through (#239).
+func TestAddKeyRefusesASHA1KDFBeforeAskingForPassphrases(t *testing.T) {
+	for _, tc := range []struct {
+		kdf     string
+		refused bool
+		words   string
+	}{
+		{"pbkdf2-sha1", true, "no keyslot is created with SHA-1"},
+		{"PBKDF2-SHA1", true, "no keyslot is created with SHA-1"},
+		{"scrypt", true, "--kdf must be one of"},
+		{"pbkdf2-sha512", false, ""},
+		{"argon2id", false, ""},
+		{"pbkdf2", false, ""},
+	} {
+		t.Run(tc.kdf, func(t *testing.T) {
+			dir := t.TempDir()
+			keyFile := writeFile(t, dir, "key", "a-key-file-passphrase")
+			called := false
+			// No --key-file: a passphrase would be read from the terminal,
+			// which the empty stdin cannot supply -- so a refusal that came
+			// after the prompt would fail differently.
+			args := []string{"addkey", "--kdf", tc.kdf, "/dev/sdb1"}
+			if !tc.refused {
+				args = []string{"addkey", "--key-file", keyFile, "--new-key-file", keyFile, "--kdf", tc.kdf, "/dev/sdb1"}
+			}
+			cli, _, stderr := runCLI(t, "", args...)
+			cli.Luks = &MockLuksOperations{
+				AddKeyFunc: func(string, []byte, []byte, *luks2.AddKeyOptions) (int, error) {
+					called = true
+					return 1, nil
+				},
+			}
+			code := cli.Run()
+			if !tc.refused {
+				if code != 0 || !called {
+					t.Fatalf("addkey --kdf %s exited %d (called %v): %s", tc.kdf, code, called, stderr.String())
+				}
+				return
+			}
+			if code == 0 || called {
+				t.Fatalf("addkey --kdf %s exited %d and reached the library = %v; want a refusal before it", tc.kdf, code, called)
+			}
+			if !strings.Contains(stderr.String(), tc.words) || strings.Contains(stderr.String(), "passphrase") {
+				t.Fatalf("stderr %q: want %q, and no passphrase prompt or passphrase error", stderr.String(), tc.words)
+			}
+		})
+	}
+	if err := addKeyKDFAllowed("pbkdf2-sha1"); !errors.Is(err, ErrUsage) {
+		t.Fatalf("addKeyKDFAllowed: got %v, want ErrUsage", err)
+	}
+}

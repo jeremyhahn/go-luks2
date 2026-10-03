@@ -97,7 +97,7 @@ Password-Based Key Derivation Function 2, using HMAC.
 
 | Hash | Output Size | FIPS Compliant |
 |------|-------------|----------------|
-| sha1 | 160 bits | No (legacy headers only, see [FIPS.md](../FIPS.md)) |
+| sha1 | 160 bits | No — read in existing keyslots only, never written (`ErrSHA1NotWritten`, see [FIPS.md](../FIPS.md)) |
 | sha256 | 256 bits | Yes |
 | sha384 | 384 bits | Yes |
 | sha512 | 512 bits | Yes |
@@ -123,8 +123,10 @@ if luks2.IsFIPSCompliantKDF("pbkdf2") {
 }
 ```
 
-`IsFIPSCompliantKDF("pbkdf2-sha1")` returns `false`, and deriving with SHA-1
-returns `ErrFIPSNotApproved` while the process runs in FIPS 140-3 mode. Argon2i
+`IsFIPSCompliantKDF("pbkdf2-sha1")` returns `false`; no keyslot is created
+with SHA-1 in any mode (`ErrSHA1NotWritten`), and deriving through an existing
+SHA-1 keyslot returns `ErrFIPSNotApproved` while the process runs in FIPS
+140-3 mode. Argon2i
 and Argon2id are refused in FIPS mode for the same reason, including when
 `CreateKDF` reaches Argon2id as its default. See [FIPS.md](../FIPS.md) for the
 full policy and the legacy-header exemption.
@@ -175,7 +177,6 @@ reports the permitted range:
 
 | Hash | Minimum |
 |---|---|
-| sha1 | 1300000 |
 | sha256 | 600000 |
 | sha384 | 210000 |
 | sha512 | 210000 |
@@ -241,8 +242,8 @@ Two clamps bound the result:
   budget on *this* machine", which is a fact about the defender's hardware; the
   attacker's hardware is unrelated and is not slow. The count is therefore never
   below the OWASP recommendation for the hash, scaled to the requested budget —
-  600,000 for SHA-256, 210,000 for SHA-384/512 and 1,300,000 for SHA-1 at the
-  2000 ms default. On current hardware the measured count is several million and
+  600,000 for SHA-256 and 210,000 for SHA-384/512 at the 2000 ms default
+  (SHA-1 is never written, #239). On current hardware the measured count is several million and
   the floor never binds; it binds on hardware roughly ten times slower.
 - **A header ceiling**, the same one the keyslot validator applies when the
   header is read back, so a calibrated count can never produce a keyslot this

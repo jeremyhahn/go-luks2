@@ -65,7 +65,7 @@ sudo luks2 addkey --slot 5 --kdf pbkdf2 /dev/sdb1
 | Option | Meaning |
 |---|---|
 | `--slot <n>` | Use this keyslot instead of the first free one |
-| `--kdf <name>` | `argon2id`, `argon2i` or `pbkdf2`. Default: `pbkdf2-sha512` in FIPS 140-3 mode, `argon2id` otherwise |
+| `--kdf <name>` | `argon2id`, `argon2i`, `pbkdf2` (SHA-256), `pbkdf2-sha384` or `pbkdf2-sha512`. Default: `pbkdf2-sha512` in FIPS 140-3 mode, `argon2id` otherwise. `pbkdf2-sha1` is refused before any passphrase is asked for: no keyslot is created with SHA-1 |
 | `--new-key-file <path>` | Read the **new** passphrase from a file |
 
 **`addkey` does not report which keyslot it used.** Run
