@@ -29,7 +29,7 @@ jobs:
 
       - name: Get version
         id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
 
       # PERMANENT GUARD (issue #13). Tag v0.1.7-alpha shipped a tree whose
       # VERSION file still read 0.1.6-alpha: the release commit bumped the
@@ -50,6 +50,22 @@ jobs:
           fi
           echo "OK: tag ${tag} matches VERSION"
 
+      # The same install CI's unit job does: the cryptsetup conformance and FIPS
+      # import tests are part of ./pkg/luks2 and fail without it, so a release
+      # job without it can never publish.
+      - name: Install cryptsetup (a test dependency of ./pkg/luks2)
+        run: |
+          set -eu
+          if ! command -v cryptsetup >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq cryptsetup-bin
+          fi
+          cryptsetup --version
+          command -v cryptsetup >/dev/null 2>&1 || {
+            echo "::error::cryptsetup is still absent after install; the release tests cannot run."
+            exit 1
+          }
+
       - name: Run tests
         run: go test -v ./pkg/luks2
 
@@ -59,8 +75,23 @@ jobs:
           GOARCH: amd64
           CGO_ENABLED: 0
         run: |
-          go build -ldflags="-s -w -X main.version=${{ steps.version.outputs.VERSION }}" \
+          go build -ldflags="-s -w -X main.Version=${{ steps.version.outputs.VERSION }}" \
             -o luks-${{ steps.version.outputs.VERSION }}-linux-amd64 ./cmd/luks2
+
+      # The linker ignores -X for a symbol that does not exist, so a misspelt
+      # variable ships binaries that call themselves "dev". The amd64 binary
+      # runs on this runner: it must report exactly this tag before anything
+      # is published.
+      - name: Verify the binary reports this version
+        run: |
+          set -eu
+          want='${{ steps.version.outputs.VERSION }}'
+          got=$(./luks-${want}-linux-amd64 version)
+          printf '%s\n' "$got"
+          case "$got" in
+            *"$want"*) ;;
+            *) echo "::error::the built binary reports '$got', not $want: the -X ldflag did not take"; exit 1 ;;
+          esac
 
       - name: Build linux/arm64
         env:
@@ -68,7 +99,7 @@ jobs:
           GOARCH: arm64
           CGO_ENABLED: 0
         run: |
-          go build -ldflags="-s -w -X main.version=${{ steps.version.outputs.VERSION }}" \
+          go build -ldflags="-s -w -X main.Version=${{ steps.version.outputs.VERSION }}" \
             -o luks-${{ steps.version.outputs.VERSION }}-linux-arm64 ./cmd/luks2
 
       - name: Generate checksums
