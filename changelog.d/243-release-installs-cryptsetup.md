@@ -1,4 +1,0 @@
-### Fixed
-
-- **The release workflow can publish again** (#243). Its test step ran `./pkg/luks2` without cryptsetup, and the cryptsetup conformance and FIPS-import tests fail closed on a missing cryptsetup. So `v0.3.0-alpha`'s release job failed and no Gitea release was created. The job now installs `cryptsetup-bin` exactly as CI's unit job does, and fails if it is still absent. `v0.3.0-alpha` remains a tag without a published release; `v0.3.1-alpha` carries the same code.
-- **Released binaries report their version** (#243). Both release builds passed `-X main.version`, but the variable is `main.Version`; the linker silently ignored the mismatch, so every released binary called itself `dev`. The flag is corrected, and the release now runs the built amd64 binary and fails unless it reports the tag.

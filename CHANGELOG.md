@@ -152,6 +152,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that sent readers down a dead end is gone.
 
 
+## [0.3.1-alpha] - 2026-10-04
+
+This is the first published release of the `0.3.0-alpha` code: `v0.3.0-alpha` was tagged, but its release job failed (#243), so it was never published. Every change listed under [0.3.0-alpha] below ships in this release, including the BREAKING ones.
+
+### Fixed
+
+- **The release workflow can publish again** (#243). Its test step ran `./pkg/luks2` without cryptsetup, and the cryptsetup conformance and FIPS-import tests fail closed on a missing cryptsetup. So `v0.3.0-alpha`'s release job failed and no Gitea release was created. The job now installs `cryptsetup-bin` exactly as CI's unit job does, and fails if it is still absent. `v0.3.0-alpha` remains a tag without a published release; `v0.3.1-alpha` carries the same code.
+- **Released binaries report their version** (#243). Both release builds passed `-X main.version`, but the variable is `main.Version`; the linker silently ignored the mismatch, so every released binary called itself `dev`. The flag is corrected, and the release now runs the built amd64 binary and fails unless it reports the tag.
+
 ## [0.3.0-alpha] - 2026-10-03
 
 ### Changed — BREAKING: `AddKey` returns `(int, error)`
