@@ -22,13 +22,17 @@ configuration of it, so a TPM helper or a network agent needs no new code here.
 
 ```go
 type CommandKeyProvider struct {
-	Path  string   // run as given; a bare name is looked up on PATH
+	Path  string   // absolute; anything else is ErrHelperPathNotAbsolute
 	Args  []string
 	Stdin []byte
 	Line  int      // 1-based stdout line to take; 0 for all of stdout
 	Meta  *Token   // token to record, or nil
+	Env   []string // extra NAME=value entries for the helper
 }
 ```
+
+- The helper does not inherit the process environment. It gets
+  `PATH=/usr/sbin:/usr/bin:/sbin:/bin` plus `Env`.
 
 - `Line > 0` takes that line without its newline. `Line == 0` takes all of
   stdout verbatim, newline included, as `cryptsetup --key-file` would.
@@ -49,13 +53,17 @@ err = luks2.UnlockWithProvider(ctx, "/dev/sdb1", "backup", provider)
 provider, err = luks2.ProviderFromToken(token, luks2.ExecConfig{Device: "/dev/hidraw0"})
 ```
 
-`EnrollKeyProvider` writes the keyslot, then a token naming the slot it was
-given. If the token write fails the keyslot is removed, because a keyslot that
+`EnrollKeyProvider` chooses a free token slot, writes the keyslot, then a token
+naming the slot it was given, all under one device lock, so two enrollments at
+once cannot pick the same token slot. If the token write fails the keyslot is removed, because a keyslot that
 nothing describes cannot be told apart from a forgotten credential. If that
 removal also fails, the error is an `OrphanedKeyslotError` naming the slot.
 
 `ctx` bounds the helper. An authenticator waiting for a touch blocks until
-someone touches it; an unattended unlock needs a deadline.
+someone touches it; an unattended unlock needs a deadline. The read of the
+helper's output ends with `ctx` even if a process the helper started still
+holds its stdout. If the helper exits while such a process keeps the pipe open,
+the read is cut off after a short grace period with `ErrHelperOutput`.
 
 ## FIDO2
 
@@ -78,6 +86,11 @@ The token is `systemd-fido2` with relying party `io.systemd.cryptsetup`, so
 standard base64 text of the 32-byte hmac-secret as the passphrase, not the raw
 bytes. `fido2SecretEncoding` is the one place that choice is made.
 
+`ExecConfig.Device` is required (`ErrNoFIDO2Device` otherwise) and is passed
+after `--`. The token records `fido2-up-required`, `fido2-clientPin-required`
+and `fido2-uv-required`, and `ProviderFromToken` reads all three back; an
+absent member reads as false.
+
 Two details that would otherwise enroll a credential that never opens:
 
 - `-h` is passed when the credential is created as well as when it is used;
@@ -93,6 +106,8 @@ Two details that would otherwise enroll a credential that never opens:
 | `ErrKeyProvider` | Matches every failure below |
 | `ErrNoKeyProvider` | No provider, or a token with nothing to build one from |
 | `ErrHelperNotConfigured` | The provider names no command |
+| `ErrHelperPathNotAbsolute` | The helper path is relative or a bare name |
+| `ErrNoFIDO2Device` | A FIDO2 operation was given no device |
 | `ErrHelperFailed` | The helper exited non-zero: refused, timed out, wrong PIN |
 | `ErrHelperOutput` | The helper succeeded but its output is unusable |
 | `ErrUnsupportedTokenType` | `ProviderFromToken` was given a type it cannot drive |

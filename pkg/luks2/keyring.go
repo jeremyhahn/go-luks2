@@ -92,6 +92,10 @@ import (
 // would occasionally be invisible to the ioctl issued from another, and the
 // unlock would fail with ENOKEY at random.
 //
+// The pinned thread is then THROWN AWAY rather than unpinned, because the same
+// commit_creds that makes the pin necessary may have installed a session
+// keyring on it alone; see runOnDiscardedThread.
+//
 // # Lifetime: the activation call, and not one instant longer
 //
 // The entry is removed as soon as CreateAndLoad returns, on the success path
@@ -429,34 +433,81 @@ func CheckKeyringAvailable() error {
 	}
 	defer releaseSecret(material)
 
-	// Pinned for the same reason unlockLoadTable pins: the ring belongs to the
-	// task, so the add and the release have to happen on the same one.
-	unpin := pinToOSThread()
-	defer unpin()
-
-	var entry *keyringVolumeKey
-	if err := borrowSecret("keyring preflight", material, func(b []byte) error {
-		var addErr error
-		entry, addErr = addVolumeKeyToKeyring(probe, b)
-		return addErr
-	}); err != nil {
-		return err
-	}
-
-	return entry.release()
+	// On a discarded thread for the same reason unlockLoadTable is: the ring
+	// belongs to the task, so the add and the release have to happen on the
+	// same one, and resolving the ring may change that thread's credentials.
+	return runOnDiscardedThread(func() error {
+		var entry *keyringVolumeKey
+		if err := borrowSecret("keyring preflight", material, func(b []byte) error {
+			var addErr error
+			entry, addErr = addVolumeKeyToKeyring(probe, b)
+			return addErr
+		}); err != nil {
+			return err
+		}
+		return entry.release()
+	})
 }
 
 // pinToOSThread pins the calling goroutine to the OS thread it is running on
-// and returns the function that releases it.
+// and returns the function that releases it. Lock/Unlock nest by count, so a
+// caller that has already pinned stays pinned.
 //
-// Every keyring sequence in this package runs inside one of these windows. The
-// reason is in the file comment: keyrings belong to the TASK, so an add on one
-// OS thread and a use on another are not guaranteed to see the same ring, and
-// Go is free to move a goroutine between the two syscalls. Lock/Unlock nest by
-// count, so a caller that has already pinned stays pinned.
+// The library's own keyring sequences do NOT use it any more; they run on
+// runOnDiscardedThread, because releasing the pin hands a thread whose
+// credentials the sequence may have changed back to the scheduler. Only the
+// tests use it, to search a ring that already exists.
 func pinToOSThread() func() {
 	runtime.LockOSThread()
 	return runtime.UnlockOSThread
+}
+
+// runOnDiscardedThread runs fn on a new goroutine locked to its OS thread, and
+// lets that thread EXIT with the goroutine instead of returning it to the
+// scheduler.
+//
+// # Why the thread is thrown away
+//
+// Keyrings belong to the TASK, and every Linux thread is a task with its own
+// credentials. Resolving the session keyring with create set -- which
+// addVolumeKeyToKeyring does, deliberately; see the file comment -- INSTALLS a
+// new session keyring when the task has none, through prepare_creds and
+// commit_creds, which change the calling thread and no other. A goroutine that
+// pinned, did that, and called UnlockOSThread returned a thread with diverged
+// credentials to the Go scheduler, and whatever goroutine ran there next
+// inherited a keyring the rest of the process does not have (#250, C9).
+//
+// The Go runtime terminates a thread whose goroutine exits while still locked
+// to it ("If the calling goroutine exits without unlocking the thread, the
+// thread will be terminated" -- runtime.LockOSThread). So the work runs on a
+// goroutine that locks and never unlocks, and the changed credentials die with
+// the thread. The cost is one thread creation per unlock.
+//
+// A panic in fn is carried back and re-raised on the caller's goroutine, so it
+// behaves as it would have inline instead of killing the process from a
+// goroutine nobody can recover.
+func runOnDiscardedThread(fn func() error) error {
+	type outcome struct {
+		err      error
+		panicked bool
+		value    any
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		runtime.LockOSThread()
+		// Deliberately no runtime.UnlockOSThread: see above.
+		defer func() {
+			if r := recover(); r != nil {
+				done <- outcome{panicked: true, value: r}
+			}
+		}()
+		done <- outcome{err: fn()}
+	}()
+	result := <-done
+	if result.panicked {
+		panic(result.value)
+	}
+	return result.err
 }
 
 // keyringFailure classifies an errno from a keyring syscall and attaches the

@@ -445,39 +445,24 @@ func TestSplitKnownIsCaseInsensitive(t *testing.T) {
 	}
 }
 
-// TestKeyslotCaseInsensitiveTypeDoesNotDuplicate is the reviewer's repro for
-// #153 finding 2: a keyslot decoded from a header that spells the member
-// "Type" must not re-emit both "type" (the typed field, which encoding/json
-// bound "Type" to on decode) and "Type" (retained as unmodeled) on the next
-// write.
-func TestKeyslotCaseInsensitiveTypeDoesNotDuplicate(t *testing.T) {
+// TestKeyslotCaseVariantMemberIsRefused is the #153 finding 2 repro, with the
+// answer #248 changed. A keyslot spelling its type member "Type" used to be
+// bound to the typed field by encoding/json's case-insensitive match and
+// re-emitted as "type". cryptsetup's json-c is case-sensitive and sees no type
+// at all, so the two implementations read different keyslots out of the same
+// bytes, and this package's next write silently rewrote the member into the
+// one cryptsetup reads. Such an object is now refused, never interpreted.
+func TestKeyslotCaseVariantMemberIsRefused(t *testing.T) {
 	const in = `{"Type":"luks2","key_size":64,"area":{"type":"raw","offset":"1","size":"2"}}`
 
 	var keyslot Keyslot
-	if err := json.Unmarshal([]byte(in), &keyslot); err != nil {
-		t.Fatalf("failed to unmarshal keyslot: %v", err)
+	err := json.Unmarshal([]byte(in), &keyslot)
+	if !errors.Is(err, ErrAmbiguousJSONMember) {
+		t.Fatalf("decoding a keyslot spelled \"Type\": got %v, want ErrAmbiguousJSONMember", err)
 	}
-	if keyslot.Type != "luks2" {
-		t.Fatalf("expected Type to be bound from the differently-cased member, got %q", keyslot.Type)
-	}
-
-	encoded, err := json.Marshal(&keyslot)
-	if err != nil {
-		t.Fatalf("failed to marshal keyslot: %v", err)
-	}
-
-	// Compare the TOP-LEVEL members only -- the nested area object has its
-	// own, unrelated "type" member, so counting substrings across the whole
-	// encoding would also count that one.
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(encoded, &top); err != nil {
-		t.Fatalf("failed to unmarshal the re-encoded keyslot: %v", err)
-	}
-	if _, ok := top["Type"]; ok {
-		t.Errorf("Type survived as unmodeled alongside type: %s", encoded)
-	}
-	if _, ok := top["type"]; !ok {
-		t.Errorf("expected the typed field on the wire as type: %s", encoded)
+	var merr *MetadataJSONError
+	if !errors.As(err, &merr) || merr.Object != metadataObjectKeyslot || merr.Member != "Type" {
+		t.Fatalf("the refusal does not name the keyslot member \"Type\": %v", err)
 	}
 }
 
@@ -1324,16 +1309,36 @@ func TestConformance_ReencryptKeyslotSurvivesOnDisk(t *testing.T) {
 	}
 	metadata.Keyslots["1"] = &injected
 	hdr.SequenceID++
-	if err := writeHeaderInternal(path, hdr, metadata); err != nil {
+	if err := writeHeaderUnvalidated(path, hdr, metadata); err != nil {
 		t.Fatalf("failed to write the header carrying the reencrypt keyslot: %v", err)
 	}
 
 	want := asObject(t, readHeaderJSONArea(t, path))["keyslots"].(map[string]any)["1"]
 
-	// The unrelated mutation: a token import has nothing to do with keyslot 1
-	// and rewrites the whole blob anyway.
-	if err := ImportToken(path, 2, &Token{Type: TokenTypeSystemdRecovery, Keyslots: []string{"0"}}); err != nil {
-		t.Fatalf("ImportToken failed: %v", err)
+	// An unrelated write is REFUSED now (#248): a reencrypt keyslot with no
+	// reencryption requirement flag is a header cryptsetup refuses ("Missing
+	// reencryption requirement flag"), and with the flag the requirements
+	// guard refuses every write. So no write of this package carries such a
+	// keyslot -- and the refusal must leave it on disk untouched.
+	if err := ImportToken(path, 2, &Token{Type: TokenTypeSystemdRecovery, Keyslots: []string{"0"}}); !errors.Is(err, ErrInvalidHeader) {
+		t.Fatalf("ImportToken beside an orphan reencrypt keyslot: got %v, want ErrInvalidHeader", err)
+	}
+	if got := asObject(t, readHeaderJSONArea(t, path))["keyslots"].(map[string]any)["1"]; !reflect.DeepEqual(want, got) {
+		t.Fatalf("a refused write changed the reencrypt keyslot\n want %v\n  got %v", want, got)
+	}
+
+	// What remains to pin is the ENCODER every write uses: read the header
+	// back and re-encode it with an unrelated change, exactly as a write
+	// would, and the reencrypt keyslot it never touched must come out the
+	// same, member for member.
+	hdr, metadata, err = ReadHeader(path)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+	metadata.Tokens["2"] = &Token{Type: TokenTypeSystemdRecovery, Keyslots: []string{"0"}}
+	hdr.SequenceID++
+	if err := writeHeaderUnvalidated(path, hdr, metadata); err != nil {
+		t.Fatalf("re-encoding the header failed: %v", err)
 	}
 
 	got := asObject(t, readHeaderJSONArea(t, path))["keyslots"].(map[string]any)["1"]

@@ -9,9 +9,9 @@ package luks2
 import (
 	"errors"
 	"fmt"
-	"os/exec"
+	"maps"
+	"slices"
 	"strings"
-	"time"
 )
 
 // FilesystemType represents supported filesystem types
@@ -204,9 +204,10 @@ type FilesystemCheckResult struct {
 // an ExitCode() int method, as *exec.ExitError is.
 type commandRunner func(name string, args ...string) ([]byte, error)
 
-// execCommand is the commandRunner CheckFilesystem uses.
+// execCommand is the commandRunner CheckFilesystem uses. It runs the checker
+// from a fixed system directory with a minimal environment; see runSystemTool.
 func execCommand(name string, args ...string) ([]byte, error) {
-	return exec.Command(name, args...).CombinedOutput() // #nosec G204 -- name is a fixed checker from filesystemDispatch; args are fixed flags plus the caller's device path
+	return runSystemTool(name, args...)
 }
 
 // runCheck runs one checker command and reports any failure as a
@@ -285,23 +286,21 @@ func MakeFilesystemWithOptions(device string, fstype FilesystemType, opts *Files
 		opts = &FilesystemOptions{}
 	}
 
-	// Wait for device to appear (device-mapper creates it asynchronously)
-	var deviceExists bool
-	for i := 0; i < 50; i++ {
-		if IsUnlocked(device) {
-			deviceExists = true
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
+	// device is a MAPPING NAME, and it is resolved to a node only through
+	// device-mapper: the name is validated, the target is looked up, and the
+	// node handed to mkfs must carry the target's device number. This used to
+	// accept any name whose /dev/mapper/<name> stat'd as a block device, and
+	// /dev/mapper/../sdb is /dev/sdb -- so MakeFilesystem("../sdb", ...) ran
+	// mkfs on the raw disk (#250, C3). A stale /dev/mapper entry is refused the
+	// same way (C5). See mappedDevicePath.
+	if err := ValidateMappingName(device); err != nil {
+		return &DeviceError{Device: device, Op: "make filesystem", Err: err}
 	}
-
-	if !deviceExists {
-		return &DeviceError{Device: device, Op: "make filesystem", Err: ErrVolumeNotUnlocked}
-	}
-
-	// Get the actual device path
-	devicePath, err := GetMappedDevicePath(device)
+	devicePath, _, err := mappedDevicePath(device)
 	if err != nil {
+		if errors.Is(err, ErrVolumeNotUnlocked) {
+			return &DeviceError{Device: device, Op: "make filesystem", Err: ErrVolumeNotUnlocked}
+		}
 		return &DeviceError{Device: device, Op: "get mapped device path", Err: err}
 	}
 
@@ -374,10 +373,10 @@ func makeExt4(devicePath string, opts *FilesystemOptions) error {
 		}
 	}
 
-	args = append(args, devicePath)
+	// "--" ends the options, so the device is never read as one.
+	args = append(args, "--", devicePath)
 
-	cmd := exec.Command("mkfs.ext4", args...) // #nosec G204 -- args constructed from validated options
-	output, err := cmd.CombinedOutput()
+	output, err := runSystemTool("mkfs.ext4", args...)
 	if err != nil {
 		return fmt.Errorf("mkfs.ext4 failed: %w\nOutput: %s", err, string(output))
 	}
@@ -446,10 +445,9 @@ func makeXFS(devicePath string, opts *FilesystemOptions) error {
 		}
 	}
 
-	args = append(args, devicePath)
+	args = append(args, "--", devicePath)
 
-	cmd := exec.Command("mkfs.xfs", args...) // #nosec G204 -- args constructed from validated options
-	output, err := cmd.CombinedOutput()
+	output, err := runSystemTool("mkfs.xfs", args...)
 	if err != nil {
 		return fmt.Errorf("mkfs.xfs failed: %w\nOutput: %s", err, string(output))
 	}
@@ -466,6 +464,9 @@ func makeZFS(devicePath string, opts *FilesystemOptions) error {
 	zfs := opts.ZFSOptions
 	if zfs.PoolName == "" {
 		return fmt.Errorf("ZFS pool name is required")
+	}
+	if err := validateZFSOptions(zfs); err != nil {
+		return err
 	}
 
 	// Build zpool create command
@@ -486,9 +487,9 @@ func makeZFS(devicePath string, opts *FilesystemOptions) error {
 		args = append(args, "-o", fmt.Sprintf("ashift=%d", zfs.Ashift))
 	}
 
-	// Pool properties
-	for key, val := range zfs.Properties {
-		args = append(args, "-o", fmt.Sprintf("%s=%s", key, val))
+	// Pool properties, in key order so the command is the same every run.
+	for _, key := range slices.Sorted(maps.Keys(zfs.Properties)) {
+		args = append(args, "-o", key+"="+zfs.Properties[key])
 	}
 
 	// Dataset properties
@@ -511,11 +512,10 @@ func makeZFS(devicePath string, opts *FilesystemOptions) error {
 		args = append(args, "-o", fmt.Sprintf("feature@%s=enabled", feature))
 	}
 
-	// Pool name and device
-	args = append(args, zfs.PoolName, devicePath)
+	// Pool name and device, after "--" so neither is read as an option.
+	args = append(args, "--", zfs.PoolName, devicePath)
 
-	cmd := exec.Command("zpool", args...)
-	output, err := cmd.CombinedOutput()
+	output, err := runSystemTool("zpool", args...)
 	if err != nil {
 		return fmt.Errorf("zpool create failed: %w\nOutput: %s", err, string(output))
 	}
@@ -526,15 +526,151 @@ func makeZFS(devicePath string, opts *FilesystemOptions) error {
 		for _, prop := range datasetProps {
 			dsArgs = append(dsArgs, "-o", prop)
 		}
-		dsArgs = append(dsArgs, fmt.Sprintf("%s/%s", zfs.PoolName, zfs.DatasetName))
+		dsArgs = append(dsArgs, "--", zfs.PoolName+"/"+zfs.DatasetName)
 
-		cmd = exec.Command("zfs", dsArgs...)
-		output, err = cmd.CombinedOutput()
+		output, err = runSystemTool("zfs", dsArgs...)
 		if err != nil {
 			return fmt.Errorf("zfs create failed: %w\nOutput: %s", err, string(output))
 		}
 	}
 
+	return nil
+}
+
+// ZFS names and option values reach zpool and zfs as separate arguments, so
+// there is no shell to inject into -- but an argument that starts with "-" is
+// an OPTION to those programs, and a pool name like "-f" or a dataset like
+// "tank/-o" changes what the command does rather than what it names (#250,
+// C7). Each value is therefore held to the naming rules zpool(8) and zfs(8)
+// document, which no option can satisfy.
+
+// zfsReservedPoolPrefixes are the vdev keywords zpool(8) reserves: a pool may
+// not be named, or begin with, any of them.
+var zfsReservedPoolPrefixes = []string{"mirror", "raidz", "draid", "spare"}
+
+// zfsReservedPoolNames are the further vdev class keywords a pool may not be
+// named.
+var zfsReservedPoolNames = []string{"log", "cache", "special", "dedup"}
+
+// isZFSNameByte reports whether c may appear in a ZFS pool or dataset
+// component: letters, digits, underscore, hyphen, colon and period.
+func isZFSNameByte(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+		c == '_' || c == '-' || c == ':' || c == '.'
+}
+
+// zfsMaxNameLength is ZFS_MAX_DATASET_NAME_LEN less its terminating NUL.
+const zfsMaxNameLength = 255
+
+func invalidZFSOption(what, value, why string) error {
+	return &detailError{Kind: ErrInvalidFilesystemOption, Detail: fmt.Sprintf("ZFS %s %q %s", what, value, why)}
+}
+
+// validateZFSPoolName enforces zpool(8)'s pool naming rules: a letter first,
+// then letters, digits, "_", "-", ":" and ".", and none of the reserved vdev
+// keywords. A space is permitted by zpool and refused here.
+func validateZFSPoolName(name string) error {
+	if name == "" || len(name) > zfsMaxNameLength {
+		return invalidZFSOption("pool name", name, "must be 1 to 255 bytes long")
+	}
+	if c := name[0]; (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+		return invalidZFSOption("pool name", name, "must begin with a letter")
+	}
+	for i := 0; i < len(name); i++ {
+		if !isZFSNameByte(name[i]) {
+			return invalidZFSOption("pool name", name, "may contain only letters, digits, _ - : and .")
+		}
+	}
+	lower := strings.ToLower(name)
+	for _, prefix := range zfsReservedPoolPrefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return invalidZFSOption("pool name", name, "begins with the reserved word "+prefix)
+		}
+	}
+	if slices.Contains(zfsReservedPoolNames, lower) {
+		return invalidZFSOption("pool name", name, "is a reserved word")
+	}
+	if len(lower) > 1 && lower[0] == 'c' && lower[1] >= '0' && lower[1] <= '9' {
+		return invalidZFSOption("pool name", name, "begins with c and a digit, which zpool reserves for device names")
+	}
+	return nil
+}
+
+// validateZFSDatasetName enforces zfs(8)'s component rules on a dataset path
+// below the pool: "/"-separated components of letters, digits, "_", "-", ":"
+// and ".", none empty, none "." or "..", and none starting with "-".
+func validateZFSDatasetName(name string) error {
+	if len(name) > zfsMaxNameLength {
+		return invalidZFSOption("dataset name", name, "is longer than 255 bytes")
+	}
+	for _, component := range strings.Split(name, "/") {
+		if component == "" || component == "." || component == ".." || component[0] == '-' {
+			return invalidZFSOption("dataset name", name, "has an empty, \".\", \"..\" or option-like component")
+		}
+		for i := 0; i < len(component); i++ {
+			if !isZFSNameByte(component[i]) {
+				return invalidZFSOption("dataset name", name, "may contain only letters, digits, _ - : . and /")
+			}
+		}
+	}
+	return nil
+}
+
+// validateZFSToken checks a value that becomes part of a key=value argument --
+// a property name, a feature, a compression or record size: it must be
+// non-empty and drawn from letters, digits, "_", "-", ":", "." and "@", and
+// must not start with "-".
+func validateZFSToken(what, value string) error {
+	if value == "" || value[0] == '-' {
+		return invalidZFSOption(what, value, "must be non-empty and must not start with -")
+	}
+	for i := 0; i < len(value); i++ {
+		if c := value[i]; !isZFSNameByte(c) && c != '@' {
+			return invalidZFSOption(what, value, "may contain only letters, digits, _ - : . and @")
+		}
+	}
+	return nil
+}
+
+// validateZFSOptions checks every ZFSOptions field that reaches a command line.
+func validateZFSOptions(zfs *ZFSOptions) error {
+	if err := validateZFSPoolName(zfs.PoolName); err != nil {
+		return err
+	}
+	if zfs.DatasetName != "" && zfs.DatasetName != "root" {
+		if err := validateZFSDatasetName(zfs.DatasetName); err != nil {
+			return err
+		}
+	}
+	if zfs.Ashift != 0 && (zfs.Ashift < 9 || zfs.Ashift > 16) {
+		return invalidZFSOption("ashift", fmt.Sprint(zfs.Ashift), "must be between 9 and 16")
+	}
+	if mp := zfs.MountPoint; mp != "" && mp != "none" && mp != "legacy" && (!strings.HasPrefix(mp, "/") || strings.ContainsAny(mp, "\x00\n")) {
+		return invalidZFSOption("mount point", mp, "must be an absolute path, \"none\" or \"legacy\"")
+	}
+	for _, check := range []struct{ what, value string }{
+		{"compression", zfs.Compression},
+		{"record size", zfs.RecordSize},
+	} {
+		if check.value != "" {
+			if err := validateZFSToken(check.what, check.value); err != nil {
+				return err
+			}
+		}
+	}
+	for _, feature := range zfs.Features {
+		if err := validateZFSToken("feature", feature); err != nil {
+			return err
+		}
+	}
+	for key, value := range zfs.Properties {
+		if err := validateZFSToken("property name", key); err != nil {
+			return err
+		}
+		if strings.ContainsAny(value, "\x00\n") {
+			return invalidZFSOption("property value for", key, "contains a NUL or newline")
+		}
+	}
 	return nil
 }
 
@@ -547,10 +683,9 @@ func makeFAT32(devicePath string, opts *FilesystemOptions) error {
 		args = append(args, "-n", opts.Label)
 	}
 
-	args = append(args, devicePath)
+	args = append(args, "--", devicePath)
 
-	cmd := exec.Command("mkfs.fat", args...)
-	output, err := cmd.CombinedOutput()
+	output, err := runSystemTool("mkfs.fat", args...)
 	if err != nil {
 		return fmt.Errorf("mkfs.fat failed: %w\nOutput: %s", err, string(output))
 	}
@@ -631,10 +766,10 @@ const (
 // any status with bit 4 or higher set is a failure.
 func checkExt4(run commandRunner, devicePath string, repair bool) (FilesystemCheckResult, error) {
 	if !repair {
-		return FilesystemCheckResult{}, runCheck(run, "e2fsck", "-n", devicePath) // Read-only
+		return FilesystemCheckResult{}, runCheck(run, "e2fsck", "-n", "--", devicePath) // Read-only
 	}
 
-	err := runCheck(run, "e2fsck", "-p", devicePath) // Auto-repair
+	err := runCheck(run, "e2fsck", "-p", "--", devicePath) // Auto-repair
 	if err == nil {
 		return FilesystemCheckResult{}, nil
 	}
@@ -652,15 +787,18 @@ func checkExt4(run commandRunner, devicePath string, repair bool) (FilesystemChe
 // checkXFS checks an XFS filesystem with xfs_repair.
 func checkXFS(run commandRunner, devicePath string, repair bool) (FilesystemCheckResult, error) {
 	if repair {
-		return FilesystemCheckResult{}, runCheck(run, "xfs_repair", devicePath) // XFS repairs automatically
+		return FilesystemCheckResult{}, runCheck(run, "xfs_repair", "--", devicePath) // XFS repairs automatically
 	}
-	return FilesystemCheckResult{}, runCheck(run, "xfs_repair", "-n", devicePath) // Read-only
+	return FilesystemCheckResult{}, runCheck(run, "xfs_repair", "-n", "--", devicePath) // Read-only
 }
 
 // checkZFS starts a scrub of the ZFS pool named devicePath, the ZFS
 // equivalent of fsck. It ignores repair: see CheckFilesystem.
 func checkZFS(run commandRunner, devicePath string, _ bool) (FilesystemCheckResult, error) {
-	return FilesystemCheckResult{}, runCheck(run, "zpool", "scrub", devicePath)
+	if err := validateZFSPoolName(devicePath); err != nil {
+		return FilesystemCheckResult{}, err
+	}
+	return FilesystemCheckResult{}, runCheck(run, "zpool", "scrub", "--", devicePath)
 }
 
 // fatRepairedOrInconsistent is the fsck.fat exit status that means either
@@ -679,14 +817,14 @@ const fatRepairedOrInconsistent = 1
 // what fsck.fat found.
 func checkFAT32(run commandRunner, devicePath string, repair bool) (FilesystemCheckResult, error) {
 	if !repair {
-		return FilesystemCheckResult{}, runCheck(run, "fsck.fat", "-n", devicePath) // Read-only
+		return FilesystemCheckResult{}, runCheck(run, "fsck.fat", "-n", "--", devicePath) // Read-only
 	}
 
-	err := runCheck(run, "fsck.fat", "-a", devicePath) // Auto-repair
+	err := runCheck(run, "fsck.fat", "-a", "--", devicePath) // Auto-repair
 	if exitStatus(err) != fatRepairedOrInconsistent {
 		return FilesystemCheckResult{}, err
 	}
-	if runCheck(run, "fsck.fat", "-n", devicePath) != nil {
+	if runCheck(run, "fsck.fat", "-n", "--", devicePath) != nil {
 		return FilesystemCheckResult{}, err
 	}
 	return FilesystemCheckResult{Repaired: true}, nil
@@ -707,7 +845,10 @@ type FilesystemInfo struct {
 // GetFilesystemInfo retrieves filesystem information from a device
 func GetFilesystemInfo(devicePath string) (*FilesystemInfo, error) {
 	// Use blkid to get filesystem information
-	cmd := exec.Command("blkid", "-o", "export", devicePath) // #nosec G204 -- fixed argv, no shell; devicePath is a block-device path chosen by the caller
+	cmd, err := toolCommand("blkid", "-o", "export", "--", devicePath)
+	if err != nil {
+		return nil, &detailError{Detail: "blkid failed", Err: err}
+	}
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("blkid failed: %w", err)

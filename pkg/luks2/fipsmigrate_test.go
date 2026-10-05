@@ -496,7 +496,7 @@ func TestMigrateToFIPSRefusesADigestThatDoesNotAttestTheKey(t *testing.T) {
 	stray.Digest = encodeBase64(bytes.Repeat([]byte{0x5a}, 20))
 	metadata.Digests["1"] = &stray
 	hdr.SequenceID++
-	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
+	if err := writeHeaderUnvalidated(device, hdr, metadata); err != nil {
 		t.Fatalf("writing the fixture failed: %v", err)
 	}
 	before := fileDigest(t, device)
@@ -583,7 +583,7 @@ func fakeArgon2KeyslotVolume(t *testing.T, name string) string {
 	kdf.Type, kdf.Hash, kdf.Iterations = KDFTypeArgon2id, "", nil
 	kdf.Time, kdf.Memory, kdf.CPUs = &cost, &memory, &cpus
 	hdr.SequenceID++
-	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
+	if err := writeHeaderUnvalidated(device, hdr, metadata); err != nil {
 		t.Fatalf("writing the fixture failed: %v", err)
 	}
 	return device
@@ -658,7 +658,7 @@ func TestFIPSRefusalDoesNotMaskDamage(t *testing.T) {
 	metadata.Keyslots["1"] = &damaged
 	metadata.Digests["0"].Keyslots = append(metadata.Digests["0"].Keyslots, "1")
 	hdr.SequenceID++
-	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
+	if err := writeHeaderUnvalidated(device, hdr, metadata); err != nil {
 		t.Fatalf("writing the fixture failed: %v", err)
 	}
 

@@ -42,6 +42,7 @@ func runCLI(t *testing.T, stdin string, args ...string) (*CLI, *strings.Builder,
 		FS:         &MockFileSystem{Files: make(map[string]bool)},
 		ExitFunc:   func(int) {},
 		getStdinFd: func() int { return 0 },
+		Devices:    &MockDeviceProber{},
 	}
 	return cli, stdout, stderr
 }
@@ -559,6 +560,7 @@ func TestHeaderRestoreNeedsAnExplicitYes(t *testing.T) {
 		{name: "refused", answer: "no\n", restored: false},
 		{name: "empty", answer: "\n", restored: false},
 		{name: "lowercase yes is not YES", answer: "yes\n", restored: false},
+		{name: "end of input is not YES", answer: "", restored: false},
 	}
 
 	for _, tt := range tests {
@@ -566,11 +568,17 @@ func TestHeaderRestoreNeedsAnExplicitYes(t *testing.T) {
 			restored := false
 			cli, _, _ := runCLI(t, tt.answer, "header", "restore", "/dev/sdb1")
 			cli.Luks = &MockLuksOperations{
-				RestorePrimaryHeaderFunc: func(string) error { restored = true; return nil },
+				RestorePrimaryHeaderFunc: func(string, luks2.RestoreHeaderOptions) error { restored = true; return nil },
 			}
 
-			if code := cli.Run(); code != 0 {
-				t.Fatalf("header restore exited %d, want 0", code)
+			// A restore that did not happen exits non-zero (#246 D12): a
+			// script checking the status must not read it as done.
+			want := 1
+			if tt.restored {
+				want = 0
+			}
+			if code := cli.Run(); code != want {
+				t.Fatalf("header restore exited %d, want %d", code, want)
 			}
 			if restored != tt.restored {
 				t.Errorf("restored = %v, want %v", restored, tt.restored)
@@ -582,7 +590,7 @@ func TestHeaderRestoreNeedsAnExplicitYes(t *testing.T) {
 func TestHeaderRestoreReportsAFailure(t *testing.T) {
 	cli, _, stderr := runCLI(t, "YES\n", "header", "restore", "/dev/sdb1")
 	cli.Luks = &MockLuksOperations{
-		RestorePrimaryHeaderFunc: func(string) error { return errors.New("device is read-only") },
+		RestorePrimaryHeaderFunc: func(string, luks2.RestoreHeaderOptions) error { return errors.New("device is read-only") },
 	}
 
 	if code := cli.Run(); code != 1 {
@@ -723,4 +731,54 @@ func TestAddKeyRefusesASHA1KDFBeforeAskingForPassphrases(t *testing.T) {
 	if err := addKeyKDFAllowed("pbkdf2-sha1"); !errors.Is(err, ErrUsage) {
 		t.Fatalf("addKeyKDFAllowed: got %v, want ErrUsage", err)
 	}
+}
+
+// TestHeaderRestoreForcePassesThroughAndStillAsksForYES: --force reaches the
+// library as RestoreHeaderOptions.Force -- the only way the CLI can restore
+// over an intact primary that is not older -- and it does not stand in for
+// the confirmation: without YES (or --batch-mode) nothing is restored. Without
+// --force the library's refusal is explained and points at the flag.
+func TestHeaderRestoreForcePassesThroughAndStillAsksForYES(t *testing.T) {
+	tests := []struct {
+		name      string
+		answer    string
+		args      []string
+		restored  bool
+		wantForce bool
+	}{
+		{name: "forced and confirmed", answer: "YES\n", args: []string{"--force", "/dev/sdb1"}, restored: true, wantForce: true},
+		{name: "forced in batch mode", args: []string{"/dev/sdb1", "--force", "--batch-mode"}, restored: true, wantForce: true},
+		{name: "forced and not confirmed", answer: "no\n", args: []string{"--force", "/dev/sdb1"}},
+		{name: "forced at end of input", args: []string{"--force", "/dev/sdb1"}},
+		{name: "not forced", answer: "YES\n", args: []string{"/dev/sdb1"}, restored: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got *luks2.RestoreHeaderOptions
+			cli, stdout, stderr := runCLI(t, tt.answer, append([]string{"header", "restore"}, tt.args...)...)
+			cli.Luks = &MockLuksOperations{
+				RestorePrimaryHeaderFunc: func(_ string, opts luks2.RestoreHeaderOptions) error { got = &opts; return nil },
+			}
+			code := cli.Run()
+			if (got != nil) != tt.restored || (code == 0) != tt.restored {
+				t.Fatalf("exit %d, restored %v; want restored %v\n%s", code, got != nil, tt.restored, stderr.String())
+			}
+			if got != nil && got.Force != tt.wantForce {
+				t.Fatalf("Force = %v, want %v", got.Force, tt.wantForce)
+			}
+			if tt.wantForce && !strings.Contains(stdout.String(), "ROLLS THE VOLUME BACK") {
+				t.Errorf("--force did not warn that it rolls the volume back:\n%s", stdout.String())
+			}
+		})
+	}
+
+	t.Run("refused without --force", func(t *testing.T) {
+		cli, _, stderr := runCLI(t, "YES\n", "header", "restore", "/dev/sdb1")
+		cli.Luks = &MockLuksOperations{
+			RestorePrimaryHeaderFunc: func(string, luks2.RestoreHeaderOptions) error { return luks2.ErrPrimaryHeaderCurrent },
+		}
+		if code := cli.Run(); code != 1 || !strings.Contains(stderr.String(), "--force") {
+			t.Fatalf("exit %d, stderr %q; want a refusal that names --force", code, stderr.String())
+		}
+	})
 }

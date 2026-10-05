@@ -11,7 +11,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -92,14 +91,20 @@ var (
 	ErrInvalidPath        = errors.New("invalid device path")
 	ErrPassphraseTooShort = errors.New("passphrase too short (minimum 8 bytes)")
 	ErrPassphraseTooLong  = errors.New("passphrase too long (maximum 512 bytes)")
-	ErrInvalidKeySize     = errors.New("invalid key size (must be 256 or 512 bits)")
-	ErrInvalidSectorSize  = errors.New("invalid sector size (must be 512 or 4096)")
+
+	// ErrCredentialEmpty and ErrCredentialTooLong bound an EXISTING
+	// credential -- one presented to open a keyslot, not one being created.
+	// See validateExistingCredential.
+	ErrCredentialEmpty   = errors.New("credential is empty")
+	ErrCredentialTooLong = errors.New("credential too long (maximum 8 MiB, cryptsetup's key file limit)")
+	ErrInvalidKeySize    = errors.New("invalid key size (must be 256 or 512 bits)")
+	ErrInvalidSectorSize = errors.New("invalid sector size (must be 512 or 4096)")
 	//nolint:lll // the message states the accepted set, like its siblings above
 	ErrInvalidMetadataSize = errors.New("invalid metadata size (must be 0 for the default, or a power of two from 16 KiB to 4 MiB)")
-	ErrInvalidArgon2Memory = errors.New("invalid Argon2 memory (must be >= 65536 KB)")
-	ErrInvalidArgon2Time   = errors.New("invalid Argon2 time cost (must be >= 1)")
+	ErrInvalidArgon2Memory = errors.New("invalid Argon2 memory (must be 65536..4194304 KB)")
+	ErrInvalidArgon2Time   = errors.New("invalid Argon2 time cost (must be 1..10000)")
 	//nolint:lll // the message states the bound, like its two siblings above
-	ErrInvalidArgon2Parallel = errors.New("invalid Argon2 parallelism (must be >= 1)")
+	ErrInvalidArgon2Parallel = errors.New("invalid Argon2 parallelism (must be 1..255)")
 	ErrIntegerOverflow       = errors.New("integer overflow detected")
 
 	// ErrInvalidMappingName indicates a device-mapper mapping name that this
@@ -157,6 +162,12 @@ func ValidateMappingName(name string) error {
 	if name == "." || name == ".." {
 		return fmt.Errorf("%w: %q is a directory entry, not a name", ErrInvalidMappingName, name)
 	}
+	// /dev/mapper/control is device-mapper's own control node. A mapping
+	// called "control" would make /dev/mapper/<name> that node, and the node
+	// repair after an unlock would replace it (#250).
+	if name == "control" {
+		return &detailError{Kind: ErrInvalidMappingName, Detail: `"control" names the device-mapper control node`}
+	}
 	if first := name[0]; !isMappingNameStart(first) {
 		return fmt.Errorf("%w: %q must start with a letter or a digit", ErrInvalidMappingName, name)
 	}
@@ -185,13 +196,12 @@ func ValidateDevicePath(device string) error {
 		return ErrInvalidPath
 	}
 
-	// Clean the path
+	// Clean the path. On an ABSOLUTE path Clean resolves every ".." element
+	// lexically, so nothing that survives the IsAbs check below can climb
+	// above the root. The substring check that used to follow refused nothing
+	// that check does not, and refused legitimate names that merely contain
+	// two dots, such as /dev/disk/by-label/a..b (#249, A10).
 	cleaned := filepath.Clean(device)
-
-	// Check for path traversal attempts
-	if strings.Contains(cleaned, "..") {
-		return ErrInvalidPath
-	}
 
 	// Must be absolute path
 	if !filepath.IsAbs(cleaned) {
@@ -216,7 +226,44 @@ func ValidateDevicePath(device string) error {
 	return nil
 }
 
-// ValidatePassphrase validates passphrase length
+// MaxCredentialLength is the longest EXISTING credential this package will
+// present to a keyslot: cryptsetup's key file limit (DEFAULT_KEYFILE_SIZE_MAXKB,
+// 8 MiB). A keyslot cryptsetup enrolled from a key file can only be opened with
+// the whole file.
+const MaxCredentialLength = 8 << 20
+
+// validateExistingCredential bounds a credential presented to OPEN a keyslot --
+// Unlock, TestKey, the existing passphrase of AddKey, ChangeKey's old one,
+// RemoveKey, KillSlot and MigrateToFIPS -- as opposed to one being enrolled.
+//
+// # Why this is not ValidatePassphrase (#249, A7)
+//
+// ValidatePassphrase's 8..512 bytes is a POLICY for credentials this package
+// creates, and it was applied to credentials that already exist. A keyslot does
+// not record how long its passphrase was, and cryptsetup enrolls key files of
+// up to 8 MiB -- `dd bs=4096 count=1` is the common recipe -- and passphrases
+// shorter than 8 characters. Such a volume could never be unlocked, tested,
+// rotated or used to authenticate through this package: the policy refused
+// the one credential that opens it, before any keyslot was tried.
+//
+// Policy has no purchase on an existing credential: refusing it does not make
+// the keyslot stronger, it only locks its owner out. So only what no keyslot
+// can be opened with is refused -- nothing at all -- and what cryptsetup itself
+// will not read past.
+func validateExistingCredential(credential []byte) error {
+	if len(credential) == 0 {
+		return ErrCredentialEmpty
+	}
+	if len(credential) > MaxCredentialLength {
+		return ErrCredentialTooLong
+	}
+	return nil
+}
+
+// ValidatePassphrase validates the length of a NEW passphrase: the policy for a
+// credential this package enrolls (Format, AddKey's new passphrase, ChangeKey's
+// new one). A credential presented to open an existing keyslot is bounded by
+// validateExistingCredential instead.
 func ValidatePassphrase(passphrase []byte) error {
 	if len(passphrase) < MinPassphraseLength {
 		return ErrPassphraseTooShort
@@ -260,10 +307,9 @@ const MinArgon2Time = 1
 // judgement: Argon2 parallelism is a uint8 in 1..255, so zero or negative is
 // malformed, not weak.
 //
-// The CEILING is not checked here, deliberately. Time and Memory have no upper
-// bound at this layer either, and 255 is already enforced twice -- by
-// deriveArgon2 before it derives, and by validateKeyslot when a header is read.
-// Adding a third spelling of it here would be a fourth place to keep in step.
+// Its CEILING, like Time's and Memory's, is the read side's own
+// (maxArgon2Parallel, keyslotvalidation.go), applied by validateArgon2CreateCost
+// so nothing is written that the reader would refuse (#249, A5).
 const MinArgon2Parallel = 1
 
 // validateArgon2CreateCost bounds the Argon2 costs a CALLER supplies.
@@ -284,19 +330,28 @@ func validateArgon2CreateCost(opts FormatOptions) error {
 	if !isArgon2Type(resolveKDFType(normalizeKDFType(opts.KDFType), formatArgon2CostGiven(opts))) {
 		return nil
 	}
-	if opts.Argon2Memory != 0 && opts.Argon2Memory < MinArgon2MemoryKB {
+	// Each cost has a FLOOR -- what this package will write -- and a CEILING,
+	// which is exactly what validateKDFCost refuses when the header is read
+	// back (#249, A5). Without the ceiling, Format with Argon2Memory 8 GiB on a
+	// host that had the RAM derived, wrote and reported success, and every
+	// later unlock refused the keyslot: a volume nothing can open, created on
+	// request. The read-side bounds are the ones used, not restated, so the
+	// two can never disagree about what a keyslot may cost.
+	if opts.Argon2Memory != 0 && (opts.Argon2Memory < MinArgon2MemoryKB || opts.Argon2Memory > maxArgon2Memory) {
 		return &Argon2CostError{
 			Parameter: "memory",
 			Value:     opts.Argon2Memory,
 			Minimum:   MinArgon2MemoryKB,
+			Maximum:   maxArgon2Memory,
 			Err:       ErrInvalidArgon2Memory,
 		}
 	}
-	if opts.Argon2Time != 0 && opts.Argon2Time < MinArgon2Time {
+	if opts.Argon2Time != 0 && (opts.Argon2Time < MinArgon2Time || opts.Argon2Time > maxArgon2Time) {
 		return &Argon2CostError{
 			Parameter: "time",
 			Value:     opts.Argon2Time,
 			Minimum:   MinArgon2Time,
+			Maximum:   maxArgon2Time,
 			Err:       ErrInvalidArgon2Time,
 		}
 	}
@@ -306,11 +361,12 @@ func validateArgon2CreateCost(opts FormatOptions) error {
 	// CryptoError rather than the Argon2CostError the other two produce. Same
 	// mistake by the caller, two different error shapes and two different
 	// moments.
-	if opts.Argon2Parallel != 0 && opts.Argon2Parallel < MinArgon2Parallel {
+	if opts.Argon2Parallel != 0 && (opts.Argon2Parallel < MinArgon2Parallel || opts.Argon2Parallel > maxArgon2Parallel) {
 		return &Argon2CostError{
 			Parameter: "parallelism",
 			Value:     opts.Argon2Parallel,
 			Minimum:   MinArgon2Parallel,
+			Maximum:   maxArgon2Parallel,
 			Err:       ErrInvalidArgon2Parallel,
 		}
 	}
@@ -340,6 +396,11 @@ func ValidateFormatOptions(opts FormatOptions) error {
 	}
 
 	if err := validateMetadataSize(opts.MetadataSize); err != nil {
+		return err
+	}
+
+	// Cipher, mode and key size as a combination, and the two labels (#248).
+	if err := validateFormatChoices(opts); err != nil {
 		return err
 	}
 
@@ -463,6 +524,11 @@ func classifyDeviceOpen(op string, err error) error {
 	if errors.Is(err, os.ErrPermission) {
 		return fmt.Errorf("%w: could not %s: %w. %s", ErrPermissionDenied, op, err, permissionRemedy)
 	}
+	// EBUSY is what an O_EXCL open of a block device returns while the device
+	// is mounted, mapped or claimed by another exclusive opener.
+	if errors.Is(err, syscall.EBUSY) {
+		return &detailError{Kind: ErrDeviceInUse, Detail: "could not " + op + ": it is mounted, mapped or held open exclusively", Err: err}
+	}
 	return err
 }
 
@@ -476,6 +542,11 @@ const permissionRemedy = "A LUKS2 container's header, keyslots and data segment 
 // FileLock represents a file lock for concurrent access protection
 type FileLock struct {
 	file *os.File
+
+	// cryptsetup is cryptsetup's own lock for a block device, held too so
+	// that cryptsetup is excluded as well (cryptsetuplock.go). nil for a
+	// regular file, whose flock above is already cryptsetup's lock.
+	cryptsetup *cryptsetupLock
 }
 
 // Lock wait budget and backoff schedule.
@@ -544,12 +615,27 @@ func acquireFileLock(path string, wait time.Duration, clk clock) (*FileLock, err
 
 	started := clk.Now()
 	deadline := started.Add(wait)
-	backoff := lockBackoffMin
+	if err := pollFlock(f, path, lockExclusive, started, deadline, clk); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	cs, err := acquireCryptsetupLockFor(f, path, started, deadline, clk)
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return &FileLock{file: f, cryptsetup: cs}, nil
+}
 
+// pollFlock flocks f in mode, retrying with backoff while another holder has
+// it, until deadline. It always makes one attempt, so a lock that is free is
+// never reported as contended, whatever the budget.
+func pollFlock(f *os.File, path string, mode lockMode, started, deadline time.Time, clk clock) error {
+	backoff := lockBackoffMin
 	for attempt := 1; ; attempt++ {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		err := unix.Flock(int(f.Fd()), mode.flockOp())
 		if err == nil {
-			return &FileLock{file: f}, nil
+			return nil
 		}
 
 		// CLASSIFY, do not assume contention. EWOULDBLOCK means someone else
@@ -557,17 +643,14 @@ func acquireFileLock(path string, wait time.Duration, clk clock) (*FileLock, err
 		// descriptor closed underneath us -- will not improve by being retried,
 		// and retrying it for the whole budget would report a real fault as a
 		// timeout.
-		if !errors.Is(err, syscall.EWOULDBLOCK) {
-			_ = f.Close()
-			return nil, &DeviceError{Device: path, Op: "lock", Err: err}
+		if !errors.Is(err, unix.EWOULDBLOCK) {
+			return &DeviceError{Device: path, Op: "lock", Err: err}
 		}
 
-		// Checked AFTER an attempt, so a zero budget still tries once and a
-		// lock that is free is never reported as contended.
+		// Checked AFTER an attempt, so a zero budget still tries once.
 		remaining := deadline.Sub(clk.Now())
 		if remaining <= 0 {
-			_ = f.Close()
-			return nil, &LockTimeoutError{
+			return &LockTimeoutError{
 				Path:     path,
 				Waited:   clk.Now().Sub(started),
 				Attempts: attempt,
@@ -577,16 +660,8 @@ func acquireFileLock(path string, wait time.Duration, clk clock) (*FileLock, err
 
 		// Never sleep past the deadline: doing so would report a longer wait
 		// than the caller allowed, and Waited above is meant to be true.
-		if backoff > remaining {
-			backoff = remaining
-		}
-		clk.Sleep(backoff)
-		if backoff < lockBackoffMax {
-			backoff *= 2
-			if backoff > lockBackoffMax {
-				backoff = lockBackoffMax
-			}
-		}
+		clk.Sleep(min(backoff, remaining))
+		backoff = min(backoff*2, lockBackoffMax)
 	}
 }
 
@@ -595,6 +670,8 @@ func (l *FileLock) Release() error {
 	if l.file == nil {
 		return nil
 	}
+	// cryptsetup's lock is released first: it was taken second.
+	_ = l.cryptsetup.release()
 	_ = syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN) // Ignore unlock error
 	return l.file.Close()
 }

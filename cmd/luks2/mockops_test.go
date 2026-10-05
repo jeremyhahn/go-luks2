@@ -36,7 +36,9 @@ type MockLuksOperations struct {
 	DetachLoopDeviceFunc func(loopDev string) error
 	MakeFilesystemFunc   func(volumeName, fstype, label string) error
 	IsMountedFunc        func(mountPoint string) (bool, error)
+	IsMappingMountedFunc func(name string) (bool, error)
 	IsUnlockedFunc       func(name string) bool
+	DetectFilesystemFunc func(name string) (luks2.FilesystemType, error)
 
 	// Keyslots
 	TestKeyFunc      func(device string, passphrase []byte) error
@@ -68,7 +70,7 @@ type MockLuksOperations struct {
 	// Header
 	ReadHeaderFunc           func(device string) (*luks2.LUKS2BinaryHeader, *luks2.LUKS2Metadata, error)
 	ReadSecondaryHeaderFunc  func(device string) (*luks2.LUKS2BinaryHeader, *luks2.LUKS2Metadata, error)
-	RestorePrimaryHeaderFunc func(device string) error
+	RestorePrimaryHeaderFunc func(device string, opts luks2.RestoreHeaderOptions) error
 	IsLUKSFunc               func(device string) (bool, error)
 	IsLUKS2Func              func(device string) (bool, error)
 }
@@ -164,6 +166,22 @@ func (m *MockLuksOperations) IsMounted(mountPoint string) (bool, error) {
 		return m.IsMountedFunc(mountPoint)
 	}
 	return false, nil
+}
+
+func (m *MockLuksOperations) IsMappingMounted(name string) (bool, error) {
+	if m.IsMappingMountedFunc != nil {
+		return m.IsMappingMountedFunc(name)
+	}
+	return false, nil
+}
+
+// DetectFilesystem reports ext4 unless the test says otherwise: the volume
+// most mount tests describe is one create made with its default type.
+func (m *MockLuksOperations) DetectFilesystem(name string) (luks2.FilesystemType, error) {
+	if m.DetectFilesystemFunc != nil {
+		return m.DetectFilesystemFunc(name)
+	}
+	return luks2.FilesystemExt4, nil
 }
 
 func (m *MockLuksOperations) IsUnlocked(name string) bool {
@@ -345,9 +363,9 @@ func (m *MockLuksOperations) ReadSecondaryHeader(device string) (*luks2.LUKS2Bin
 	return mockHeader(2, 7), mockMetadata(), nil
 }
 
-func (m *MockLuksOperations) RestorePrimaryHeader(device string) error {
+func (m *MockLuksOperations) RestorePrimaryHeader(device string, opts luks2.RestoreHeaderOptions) error {
 	if m.RestorePrimaryHeaderFunc != nil {
-		return m.RestorePrimaryHeaderFunc(device)
+		return m.RestorePrimaryHeaderFunc(device, opts)
 	}
 	return nil
 }

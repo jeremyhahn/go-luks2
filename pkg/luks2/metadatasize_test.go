@@ -241,6 +241,10 @@ func TestFormatMetadataSizeHoldsMetadataTheDefaultRefuses(t *testing.T) {
 // only of a 16 KiB area. On a 32 KiB-area container -- which Format can now
 // write, and which cryptsetup always could -- the second copy starts at 32 KiB
 // and survived the wipe intact, so the "wiped" volume was still recoverable.
+//
+// Since #246 (D3) the wipe also zeroes the whole keyslots area, so the region
+// checked runs to the end of it -- and stops there: the data segment is not
+// touched.
 func TestWipeHeaderOnlyDestroysBothCopiesOfALargerArea(t *testing.T) {
 	defer parallel(t)()
 
@@ -252,6 +256,17 @@ func TestWipeHeaderOnlyDestroysBothCopiesOfALargerArea(t *testing.T) {
 			if err := Format(metadataSizeFormatOptions(path, size)); err != nil {
 				t.Fatalf("Format failed: %v", err)
 			}
+			hdr, metadata, err := ReadHeader(path)
+			if err != nil {
+				t.Fatalf("ReadHeader: %v", err)
+			}
+			_, keyslotsEnd, err := keyslotsAreaBounds(hdr, metadata)
+			if err != nil {
+				t.Fatalf("keyslotsAreaBounds: %v", err)
+			}
+			dataOffset := firstDataOffset(metadata)
+			payload := bytes.Repeat([]byte("payload!"), 512)
+			writeImageAt(t, path, dataOffset, payload)
 
 			if err := Wipe(WipeOptions{Device: path, Passes: 1, HeaderOnly: true}); err != nil {
 				t.Fatalf("header-only Wipe failed: %v", err)
@@ -267,30 +282,27 @@ func TestWipeHeaderOnlyDestroysBothCopiesOfALargerArea(t *testing.T) {
 				t.Errorf("cryptsetup still recognizes the container after a header-only wipe\n%s", out)
 			}
 
-			// Both copies, and nothing past them: the data segment is not
-			// touched by a header-only wipe.
-			f, err := os.Open(path) // #nosec G304 -- path is under t.TempDir()
-			if err != nil {
-				t.Fatalf("failed to open the image: %v", err)
+			// Both copies and the whole keyslots area, and nothing past them.
+			if region := readImageAt(t, path, 0, int(keyslotsEnd)); !bytes.Equal(region, make([]byte, len(region))) {
+				t.Errorf("the %d bytes holding both copies and the keyslots area are not all zeroes after a header-only wipe", len(region))
 			}
-			defer func() { _ = f.Close() }()
-			region := make([]byte, 2*size)
-			if _, err := f.ReadAt(region, 0); err != nil {
-				t.Fatalf("failed to read the header region: %v", err)
-			}
-			if !bytes.Equal(region, make([]byte, len(region))) {
-				t.Errorf("the %d-byte header region is not all zeroes after a header-only wipe", len(region))
-			}
-			// The keyslots area begins at 2 x area and was filled with random
-			// by Format; the first block of it must still be random.
-			next := make([]byte, 4096)
-			if _, err := f.ReadAt(next, int64(2*size)); err != nil {
-				t.Fatalf("failed to read past the header region: %v", err)
-			}
-			if bytes.Equal(next, make([]byte, len(next))) {
-				t.Error("the header-only wipe zeroed past the two header copies")
+			if !bytes.Equal(readImageAt(t, path, dataOffset, len(payload)), payload) {
+				t.Error("the header-only wipe reached the data segment")
 			}
 		})
+	}
+}
+
+// writeImageAt writes data into the image at offset.
+func writeImageAt(t *testing.T, path string, offset int64, data []byte) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_RDWR, 0) // #nosec G304 -- path is under t.TempDir()
+	if err != nil {
+		t.Fatalf("failed to open the image: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.WriteAt(data, offset); err != nil {
+		t.Fatalf("failed to write %d bytes at %d: %v", len(data), offset, err)
 	}
 }
 
@@ -446,10 +458,11 @@ func TestWipeHeaderOnlyDoesNotTrustAnOverstatedPrimarySize(t *testing.T) {
 
 // TestWipeHeaderOnlyWithNoValidCopy covers the ambiguous case: every copy is
 // damaged, so no geometry can be trusted. The wipe zeroes the default 32 KiB
-// front and nothing beyond it but the binary header of each copy still
-// recognizable as a LUKS2 header -- here the damaged secondary of a 64 KiB
-// container -- so no copy is left locatable and no payload-sized span is
-// guessed at.
+// front and, of each copy still recognizable as a LUKS2 header -- here the
+// damaged secondary of a 64 KiB container -- its binary header and its JSON
+// up to the terminating NUL (#246 D3: the JSON carries the keyslot salts, and
+// a binary header is cheap to rebuild in front of it). No payload-sized span
+// is guessed at: the keyslots area is left alone.
 func TestWipeHeaderOnlyWithNoValidCopy(t *testing.T) {
 	defer parallel(t)()
 
@@ -481,8 +494,8 @@ func TestWipeHeaderOnlyWithNoValidCopy(t *testing.T) {
 	if front := readImageAt(t, path, 0, 2*LUKS2HeaderMinSize); !bytes.Equal(front, make([]byte, len(front))) {
 		t.Error("the default 32 KiB front is not all zeroes")
 	}
-	if magic := readImageAt(t, path, size, LUKS2HeaderSize); !bytes.Equal(magic, make([]byte, len(magic))) {
-		t.Error("the damaged secondary's binary header is still present")
+	if copy2 := readImageAt(t, path, size, size); !bytes.Equal(copy2, make([]byte, len(copy2))) {
+		t.Error("the damaged secondary's binary header or JSON is still present")
 	}
 	if !bytes.Equal(readImageAt(t, path, 2*size, len(keyslots)), keyslots) {
 		t.Error("the wipe reached past the header copies into the keyslots area")

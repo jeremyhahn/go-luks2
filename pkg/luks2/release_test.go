@@ -272,8 +272,8 @@ func fakeDM(t *testing.T, present func() bool, removeErr func() error) {
 			return nil, unix.ENXIO // the kernel's answer for an unknown dm device
 		},
 		remove:     func(string) error { return removeErr() },
-		ensureNode: func(string) error { return nil },
-		waitReady:  func(string) error { return nil },
+		ensureNode: func(string, *devmapper.DeviceInfo) error { return nil },
+		waitReady:  func(string, *devmapper.DeviceInfo) error { return nil },
 	}
 }
 
@@ -455,8 +455,8 @@ func TestReleaseVolumeErr_UnclassifiableDMErrorIsNotAbsence(t *testing.T) {
 			return nil, errors.New("device-mapper control could not be opened")
 		},
 		remove:     func(string) error { return errors.New("device or resource busy") },
-		ensureNode: func(string) error { return nil },
-		waitReady:  func(string) error { return nil },
+		ensureNode: func(string, *devmapper.DeviceInfo) error { return nil },
+		waitReady:  func(string, *devmapper.DeviceInfo) error { return nil },
 	}
 
 	if err := releaseVolumeErr("unknowable"); err == nil {

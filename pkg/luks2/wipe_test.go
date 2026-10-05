@@ -8,12 +8,16 @@ package luks2
 
 import (
 	"bytes"
+	"crypto/aes"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 // TestWipeOptions_DefaultPasses tests that default passes is set to 1
@@ -1416,323 +1420,439 @@ func TestWipeStandard_RequiresVerification(t *testing.T) {
 	}
 }
 
-// TestFillBufferWithPattern_Zeros tests filling buffer with zeros
-func TestFillBufferWithPattern_Zeros(t *testing.T) {
-	buf := make([]byte, 1024)
-	// Pre-fill with non-zero data
-	for i := range buf {
-		buf[i] = 0xAA
-	}
-
-	if err := fillBufferWithPattern(buf, PatternZeros); err != nil {
-		t.Fatalf("fillBufferWithPattern failed: %v", err)
-	}
-
-	for i, b := range buf {
-		if b != 0x00 {
-			t.Fatalf("Byte at %d is 0x%02x, want 0x00", i, b)
+// TestPassStreamFillsEachPattern: zeros and ones are what they say, and an
+// unknown pattern is refused before anything is written.
+func TestPassStreamFillsEachPattern(t *testing.T) {
+	for _, tc := range []struct {
+		pattern WipePattern
+		want    byte
+	}{{PatternZeros, 0x00}, {PatternOnes, 0xFF}} {
+		s, err := newPassStream(tc.pattern)
+		if err != nil {
+			t.Fatalf("newPassStream(%s): %v", tc.pattern, err)
 		}
-	}
-}
-
-// TestFillBufferWithPattern_Ones tests filling buffer with ones (0xFF)
-func TestFillBufferWithPattern_Ones(t *testing.T) {
-	buf := make([]byte, 1024)
-	// Pre-fill with zeros
-	for i := range buf {
-		buf[i] = 0x00
-	}
-
-	if err := fillBufferWithPattern(buf, PatternOnes); err != nil {
-		t.Fatalf("fillBufferWithPattern failed: %v", err)
-	}
-
-	for i, b := range buf {
-		if b != 0xFF {
-			t.Fatalf("Byte at %d is 0x%02x, want 0xFF", i, b)
-		}
-	}
-}
-
-// TestFillBufferWithPattern_Random tests filling buffer with random data
-func TestFillBufferWithPattern_Random(t *testing.T) {
-	buf := make([]byte, 4096)
-	// Pre-fill with zeros
-	for i := range buf {
-		buf[i] = 0x00
-	}
-
-	if err := fillBufferWithPattern(buf, PatternRandom); err != nil {
-		t.Fatalf("fillBufferWithPattern failed: %v", err)
-	}
-
-	// Check that at least some bytes are non-zero (random should produce variety)
-	nonZeroCount := 0
-	for _, b := range buf {
-		if b != 0 {
-			nonZeroCount++
+		buf := bytes.Repeat([]byte{0xAA}, 1024)
+		s.fill(buf, 4096)
+		for i, b := range buf {
+			if b != tc.want {
+				t.Fatalf("%s: byte %d is 0x%02x, want 0x%02x", tc.pattern, i, b, tc.want)
+			}
 		}
 	}
 
-	// With 4096 random bytes, we should have many non-zero bytes
-	if nonZeroCount < 100 {
-		t.Fatalf("Too few non-zero bytes in random buffer: %d", nonZeroCount)
+	if _, err := newPassStream(WipePattern(99)); !errors.Is(err, ErrInvalidSize) {
+		t.Fatalf("newPassStream(99) = %v, want ErrInvalidSize", err)
 	}
 }
 
-// TestFillBufferWithPattern_Unknown tests error handling for unknown pattern
-func TestFillBufferWithPattern_Unknown(t *testing.T) {
-	buf := make([]byte, 1024)
-	err := fillBufferWithPattern(buf, WipePattern(99))
-	if err == nil {
-		t.Fatal("Expected error for unknown pattern")
+// TestRandomPassStreamIsReproducible is what makes a random pass verifiable
+// (#246 D1): the stream at any chunk can be produced again on its own, a
+// fresh pass gets a fresh key, and the output is not a constant.
+func TestRandomPassStreamIsReproducible(t *testing.T) {
+	s, err := newPassStream(PatternRandom)
+	if err != nil {
+		t.Fatalf("newPassStream: %v", err)
 	}
-	if !bytes.Contains([]byte(err.Error()), []byte("unknown pattern")) {
-		t.Errorf("Unexpected error message: %v", err)
+
+	whole := make([]byte, 3*aes.BlockSize*64)
+	s.fill(whole, 0)
+	part := make([]byte, aes.BlockSize*64)
+	s.fill(part, int64(aes.BlockSize*64))
+	if !bytes.Equal(part, whole[aes.BlockSize*64:2*aes.BlockSize*64]) {
+		t.Fatal("the stream regenerated at an offset differs from the stream written through it")
+	}
+	if bytes.Count(whole, []byte{0}) > len(whole)/16 {
+		t.Fatal("the random stream is mostly zeros")
+	}
+
+	other, err := newPassStream(PatternRandom)
+	if err != nil {
+		t.Fatalf("newPassStream: %v", err)
+	}
+	again := make([]byte, len(whole))
+	other.fill(again, 0)
+	if bytes.Equal(again, whole) {
+		t.Fatal("two random passes wrote the same stream: the key is not drawn per pass")
 	}
 }
 
-// TestWipePassWithPattern_Zeros tests wipePassWithPattern with zeros
-func TestWipePassWithPattern_Zeros(t *testing.T) {
+// TestRandomPassStreamCarriesTheCounter: an IV whose low half is about to wrap
+// carries into the high half, so the stream past the wrap is still the CTR
+// stream and not a repeat of its start.
+func TestRandomPassStreamCarriesTheCounter(t *testing.T) {
+	s, err := newPassStream(PatternRandom)
+	if err != nil {
+		t.Fatalf("newPassStream: %v", err)
+	}
+	for i := 8; i < aes.BlockSize; i++ {
+		s.iv[i] = 0xFF
+	}
+
+	whole := make([]byte, 4*aes.BlockSize)
+	s.fill(whole, 0)
+	tail := make([]byte, 2*aes.BlockSize)
+	s.fill(tail, 2*aes.BlockSize)
+	if !bytes.Equal(tail, whole[2*aes.BlockSize:]) {
+		t.Fatal("the stream regenerated past the counter wrap differs from the stream written through it")
+	}
+}
+
+// writeWipeFixture writes a file of size bytes of fill and returns its path and
+// an open read-write descriptor.
+func writeWipeFixture(t *testing.T, size int, fill byte) (string, *os.File) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "wipe-fixture")
+	if err := os.WriteFile(path, bytes.Repeat([]byte{fill}, size), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0o600) // #nosec G304 -- under t.TempDir()
+	if err != nil {
+		t.Fatalf("open fixture: %v", err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	return path, f
+}
+
+// TestWipePassWithStreamWritesThePattern covers each fixed pattern end to end.
+func TestWipePassWithStreamWritesThePattern(t *testing.T) {
 	defer parallel(t)()
 
-	tmpDir := t.TempDir()
-	tmpFile := filepath.Join(tmpDir, "test_pattern_zeros")
-
-	testData := make([]byte, 4096)
-	for i := range testData {
-		testData[i] = 0xFF
-	}
-
-	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
-	}
-
-	f, err := os.OpenFile(tmpFile, os.O_RDWR, 0600)
-	if err != nil {
-		t.Fatalf("Failed to open test file: %v", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	if err := wipePassWithPattern(f, int64(len(testData)), PatternZeros, nil, 1, 1); err != nil {
-		t.Fatalf("wipePassWithPattern failed: %v", err)
-	}
-
-	result, err := os.ReadFile(tmpFile)
-	if err != nil {
-		t.Fatalf("Failed to read result: %v", err)
-	}
-
-	for i, b := range result {
-		if b != 0x00 {
-			t.Fatalf("Byte at %d is 0x%02x, want 0x00", i, b)
+	for _, tc := range []struct {
+		pattern WipePattern
+		start   byte
+		want    byte
+	}{{PatternZeros, 0xFF, 0x00}, {PatternOnes, 0x00, 0xFF}} {
+		path, f := writeWipeFixture(t, 4096, tc.start)
+		s, err := newPassStream(tc.pattern)
+		if err != nil {
+			t.Fatalf("newPassStream: %v", err)
+		}
+		if err := wipePassWithStream(f, 4096, s, nil, 1, 1); err != nil {
+			t.Fatalf("wipePassWithStream(%s): %v", tc.pattern, err)
+		}
+		got, err := os.ReadFile(path) // #nosec G304 -- under t.TempDir()
+		if err != nil {
+			t.Fatalf("read back: %v", err)
+		}
+		if !bytes.Equal(got, bytes.Repeat([]byte{tc.want}, 4096)) {
+			t.Fatalf("%s pass did not write 0x%02x throughout", tc.pattern, tc.want)
 		}
 	}
 }
 
-// TestWipePassWithPattern_Ones tests wipePassWithPattern with ones
-func TestWipePassWithPattern_Ones(t *testing.T) {
-	defer parallel(t)()
-
-	tmpDir := t.TempDir()
-	tmpFile := filepath.Join(tmpDir, "test_pattern_ones")
-
-	testData := make([]byte, 4096)
-	// Start with zeros
-	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
-	}
-
-	f, err := os.OpenFile(tmpFile, os.O_RDWR, 0600)
-	if err != nil {
-		t.Fatalf("Failed to open test file: %v", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	if err := wipePassWithPattern(f, int64(len(testData)), PatternOnes, nil, 1, 1); err != nil {
-		t.Fatalf("wipePassWithPattern failed: %v", err)
-	}
-
-	result, err := os.ReadFile(tmpFile)
-	if err != nil {
-		t.Fatalf("Failed to read result: %v", err)
-	}
-
-	for i, b := range result {
-		if b != 0xFF {
-			t.Fatalf("Byte at %d is 0x%02x, want 0xFF", i, b)
-		}
+// TestWipePassWithStreamRefusesANegativeSize, and writes nothing.
+func TestWipePassWithStreamRefusesANegativeSize(t *testing.T) {
+	_, f := writeWipeFixture(t, 16, 0xAA)
+	s, _ := newPassStream(PatternZeros)
+	if err := wipePassWithStream(f, -1, s, nil, 1, 1); !errors.Is(err, ErrInvalidSize) {
+		t.Fatalf("wipePassWithStream(-1) = %v, want ErrInvalidSize", err)
 	}
 }
 
-// TestWipePassWithPattern_Progress tests progress callback
-func TestWipePassWithPattern_Progress(t *testing.T) {
+// TestWipePassWithStreamReportsAWriteFailure: a descriptor that cannot be
+// written is a DeviceError, not a silent short wipe.
+func TestWipePassWithStreamReportsAWriteFailure(t *testing.T) {
+	path, _ := writeWipeFixture(t, 16, 0xAA)
+	ro, err := os.Open(path) // #nosec G304 -- under t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ro.Close() }()
+	s, _ := newPassStream(PatternZeros)
+	var de *DeviceError
+	if err := wipePassWithStream(ro, 16, s, nil, 1, 1); !errors.As(err, &de) {
+		t.Fatalf("wipePassWithStream on a read-only descriptor = %v, want a DeviceError", err)
+	}
+}
+
+// TestWipePassWithStreamReportsProgress tests the progress callback.
+func TestWipePassWithStreamReportsProgress(t *testing.T) {
 	defer parallel(t)()
 
-	tmpDir := t.TempDir()
-	tmpFile := filepath.Join(tmpDir, "test_pattern_progress")
-
-	testSize := 2 * 1024 * 1024 // 2MB (will trigger multiple progress updates)
-	testData := make([]byte, testSize)
-
-	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
-	}
-
-	f, err := os.OpenFile(tmpFile, os.O_RDWR, 0600)
-	if err != nil {
-		t.Fatalf("Failed to open test file: %v", err)
-	}
-	defer func() { _ = f.Close() }()
+	testSize := 2 * wipeChunk
+	_, f := writeWipeFixture(t, testSize, 0)
+	s, _ := newPassStream(PatternZeros)
 
 	var progressCalls []WipeProgress
-	progressFunc := func(p WipeProgress) {
-		progressCalls = append(progressCalls, p)
+	if err := wipePassWithStream(f, int64(testSize), s, func(p WipeProgress) { progressCalls = append(progressCalls, p) }, 1, 3); err != nil {
+		t.Fatalf("wipePassWithStream failed: %v", err)
 	}
 
-	if err := wipePassWithPattern(f, int64(testSize), PatternZeros, progressFunc, 1, 3); err != nil {
-		t.Fatalf("wipePassWithPattern failed: %v", err)
+	if len(progressCalls) != 2 {
+		t.Fatalf("got %d progress callbacks, want one per chunk (2)", len(progressCalls))
 	}
-
-	if len(progressCalls) == 0 {
-		t.Fatal("No progress callbacks received")
-	}
-
-	// Check first and last progress
 	first := progressCalls[0]
-	if first.CurrentPass != 1 || first.TotalPasses != 3 {
-		t.Errorf("First progress: CurrentPass=%d, TotalPasses=%d, want 1, 3", first.CurrentPass, first.TotalPasses)
+	if first.CurrentPass != 1 || first.TotalPasses != 3 || first.Pattern != PatternZeros || first.IsVerification {
+		t.Errorf("first progress = %+v", first)
 	}
-	if first.Pattern != PatternZeros {
-		t.Errorf("First progress pattern = %v, want PatternZeros", first.Pattern)
-	}
-	if first.IsVerification {
-		t.Error("First progress should not be verification")
-	}
-
 	last := progressCalls[len(progressCalls)-1]
-	if last.BytesWritten != int64(testSize) {
-		t.Errorf("Last progress BytesWritten = %d, want %d", last.BytesWritten, testSize)
-	}
-	if last.PercentComplete < 99.9 {
-		t.Errorf("Last progress PercentComplete = %f, want ~100", last.PercentComplete)
+	if last.BytesWritten != int64(testSize) || last.PercentComplete < 99.9 {
+		t.Errorf("last progress = %+v", last)
 	}
 }
 
-// TestWipeVerify_Success tests successful verification
-func TestWipeVerify_Success(t *testing.T) {
+// TestVerifyWipeAcceptsWhatThePassWrote, for every pattern, and reports
+// verification progress.
+func TestVerifyWipeAcceptsWhatThePassWrote(t *testing.T) {
 	defer parallel(t)()
 
-	tmpDir := t.TempDir()
-	tmpFile := filepath.Join(tmpDir, "test_verify_success")
-
-	testSize := 4096
-	testData := make([]byte, testSize)
-	// Fill with zeros (pattern we'll verify)
-	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
-	}
-
-	f, err := os.OpenFile(tmpFile, os.O_RDWR, 0600)
-	if err != nil {
-		t.Fatalf("Failed to open test file: %v", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	if err := wipeVerify(f, int64(testSize), PatternZeros, nil, 1); err != nil {
-		t.Fatalf("wipeVerify unexpectedly failed: %v", err)
+	for _, pattern := range []WipePattern{PatternZeros, PatternOnes, PatternRandom} {
+		path, f := writeWipeFixture(t, wipeChunk+4096+100, 0xAA)
+		s, err := newPassStream(pattern)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := wipePassWithStream(f, wipeChunk+4096+100, s, nil, 1, 1); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Sync(); err != nil {
+			t.Fatal(err)
+		}
+		var verified int64
+		progress := func(p WipeProgress) {
+			if p.IsVerification {
+				verified = p.BytesWritten
+			}
+		}
+		if err := verifyWipe(path, path, wipeChunk+4096+100, s, progress, 1); err != nil {
+			t.Fatalf("verifyWipe(%s) refused what the pass wrote: %v", pattern, err)
+		}
+		if verified != wipeChunk+4096+100 {
+			t.Fatalf("verification progress reached %d bytes, want %d", verified, wipeChunk+4096+100)
+		}
 	}
 }
 
-// TestWipeVerify_Failure tests verification failure detection
-func TestWipeVerify_Failure(t *testing.T) {
+// TestVerifyWipeDetectsADifferenceInARandomPass is #246 D1. The DoD sequences
+// end with a random pass, and verification used to return nil for a random
+// pass without reading a byte -- so "verify" verified nothing.
+func TestVerifyWipeDetectsADifferenceInARandomPass(t *testing.T) {
 	defer parallel(t)()
 
-	tmpDir := t.TempDir()
-	tmpFile := filepath.Join(tmpDir, "test_verify_failure")
-
-	testSize := 4096
-	testData := make([]byte, testSize)
-	// Fill with zeros
-	for i := range testData {
-		testData[i] = 0x00
-	}
-	// Add a single wrong byte
-	testData[100] = 0xFF
-
-	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
-	}
-
-	f, err := os.OpenFile(tmpFile, os.O_RDWR, 0600)
+	path, f := writeWipeFixture(t, 64*1024, 0)
+	s, err := newPassStream(PatternRandom)
 	if err != nil {
-		t.Fatalf("Failed to open test file: %v", err)
+		t.Fatal(err)
 	}
-	defer func() { _ = f.Close() }()
+	if err := wipePassWithStream(f, 64*1024, s, nil, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	// One byte of the medium is not what the pass wrote.
+	one := make([]byte, 1)
+	if _, err := f.ReadAt(one, 40000); err != nil {
+		t.Fatal(err)
+	}
+	one[0] ^= 0x01
+	if _, err := f.WriteAt(one, 40000); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Sync(); err != nil {
+		t.Fatal(err)
+	}
 
-	err = wipeVerify(f, int64(testSize), PatternZeros, nil, 1)
-	if err == nil {
-		t.Fatal("Expected verification failure")
+	err = verifyWipe(path, path, 64*1024, s, nil, 1)
+	if !errors.Is(err, ErrWipeVerification) {
+		t.Fatalf("verifyWipe = %v, want ErrWipeVerification", err)
 	}
-	if !bytes.Contains([]byte(err.Error()), []byte("verification failed")) {
-		t.Errorf("Unexpected error message: %v", err)
+	if !strings.Contains(err.Error(), "byte 40000") {
+		t.Fatalf("the error does not name the first differing byte: %v", err)
 	}
 }
 
-// TestWipeVerify_RandomPattern tests that random pattern verification is skipped
-func TestWipeVerify_RandomPattern(t *testing.T) {
-	tmpDir := t.TempDir()
-	tmpFile := filepath.Join(tmpDir, "test_verify_random")
-
-	testSize := 4096
-	testData := make([]byte, testSize)
-	// Fill with arbitrary data
-	for i := range testData {
-		testData[i] = byte(i % 256)
-	}
-
-	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
-	}
-
-	f, err := os.OpenFile(tmpFile, os.O_RDWR, 0600)
-	if err != nil {
-		t.Fatalf("Failed to open test file: %v", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	// Random pattern verification should always succeed (skip verification)
-	if err := wipeVerify(f, int64(testSize), PatternRandom, nil, 1); err != nil {
-		t.Fatalf("wipeVerify with random pattern should not fail: %v", err)
-	}
-}
-
-// TestWipeVerify_OnesPattern tests verification with ones pattern
-func TestWipeVerify_OnesPattern(t *testing.T) {
+// TestVerifyWipeDetectsAShortMedium: a medium that ends early is not verified.
+func TestVerifyWipeDetectsAShortMedium(t *testing.T) {
 	defer parallel(t)()
 
-	tmpDir := t.TempDir()
-	tmpFile := filepath.Join(tmpDir, "test_verify_ones")
+	path, _ := writeWipeFixture(t, 4096, 0)
+	s, _ := newPassStream(PatternZeros)
+	if err := verifyWipe(path, path, 8192, s, nil, 1); !errors.Is(err, ErrWipeVerification) {
+		t.Fatalf("verifyWipe past the end = %v, want ErrWipeVerification", err)
+	}
+	if err := verifyWipe(path, path, 0, s, nil, 1); err != nil {
+		t.Fatalf("verifyWipe of nothing = %v, want nil", err)
+	}
+}
 
-	testSize := 4096
-	testData := make([]byte, testSize)
-	// Fill with ones (0xFF)
-	for i := range testData {
-		testData[i] = 0xFF
+// staleMedium is a mediumReader whose bytes are NOT the file's: what the medium
+// holds when the page cache has the wipe and the device does not.
+type staleMedium struct {
+	data   []byte
+	closed bool
+}
+
+func (m *staleMedium) ReadAt(p []byte, off int64) (int, error) {
+	if off >= int64(len(m.data)) {
+		return 0, io.EOF
+	}
+	n := copy(p, m.data[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+func (m *staleMedium) Close() error { m.closed = true; return nil }
+
+// useStaleMedium substitutes openMediumReader for the rest of the test. Not
+// parallel: the seam is package state.
+func useStaleMedium(t *testing.T, data []byte) *staleMedium {
+	t.Helper()
+	m := &staleMedium{data: data}
+	previous := openMediumReader
+	openMediumReader = func(string) (mediumReader, error) { return m, nil }
+	t.Cleanup(func() { openMediumReader = previous })
+	return m
+}
+
+// TestWipeVerificationReadsPastTheCache is #246 D2. Verification used to
+// read back through the descriptor it had just written, so the page cache
+// answered with the bytes this process put there whatever reached the medium.
+// The medium is modeled here as still holding the old contents; a verification
+// that consults the cache passes, and one that consults the medium does not.
+func TestWipeVerificationReadsPastTheCache(t *testing.T) {
+	path, _ := writeWipeFixture(t, 16*1024, 0xAA)
+	m := useStaleMedium(t, bytes.Repeat([]byte{0xAA}, 16*1024))
+
+	err := Wipe(WipeOptions{Device: path, Standard: StandardDoD3Pass})
+	if !errors.Is(err, ErrWipeVerification) {
+		t.Fatalf("Wipe with a medium that kept the old data = %v, want ErrWipeVerification", err)
+	}
+	if !m.closed {
+		t.Fatal("the medium reader was not closed")
+	}
+}
+
+// TestVerifyWipePropagatesAMediumOpenFailure: a medium that cannot be read
+// past the cache is not reported as verified.
+func TestVerifyWipePropagatesAMediumOpenFailure(t *testing.T) {
+	path, _ := writeWipeFixture(t, 4096, 0)
+	previous := openMediumReader
+	openMediumReader = func(p string) (mediumReader, error) {
+		return nil, &detailError{Kind: ErrDirectIOUnsupported, Detail: p}
+	}
+	t.Cleanup(func() { openMediumReader = previous })
+
+	s, _ := newPassStream(PatternZeros)
+	if err := verifyWipe(path, path, 4096, s, nil, 1); !errors.Is(err, ErrDirectIOUnsupported) {
+		t.Fatalf("verifyWipe = %v, want ErrDirectIOUnsupported", err)
+	}
+}
+
+// failingMedium fails every read, or only its Close.
+type failingMedium struct{ readErr, closeErr error }
+
+func (m failingMedium) ReadAt(p []byte, _ int64) (int, error) {
+	if m.readErr != nil {
+		return 0, m.readErr
+	}
+	clear(p)
+	return len(p), nil
+}
+
+func (m failingMedium) Close() error { return m.closeErr }
+
+// TestVerifyWipeReportsReadAndCloseFailures as device errors.
+func TestVerifyWipeReportsReadAndCloseFailures(t *testing.T) {
+	path, _ := writeWipeFixture(t, 4096, 0)
+	s, _ := newPassStream(PatternZeros)
+	previous := openMediumReader
+	t.Cleanup(func() { openMediumReader = previous })
+
+	for name, m := range map[string]failingMedium{
+		"read":  {readErr: unix.EIO},
+		"close": {closeErr: unix.EIO},
+	} {
+		openMediumReader = func(string) (mediumReader, error) { return m, nil }
+		var de *DeviceError
+		if err := verifyWipe(path, path, 4096, s, nil, 1); !errors.As(err, &de) || !errors.Is(err, unix.EIO) {
+			t.Fatalf("%s failure: verifyWipe = %v, want a DeviceError wrapping EIO", name, err)
+		}
+	}
+}
+
+// TestDirectReaderReadsUnalignedSpans: the O_DIRECT reader aligns every read
+// itself, so a caller's offset and length need not be.
+func TestDirectReaderReadsUnalignedSpans(t *testing.T) {
+	defer parallel(t)()
+
+	content := make([]byte, wipeChunk+3*directIOAlign)
+	for i := range content {
+		content[i] = byte(i * 7)
+	}
+	path := filepath.Join(t.TempDir(), "direct")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
 	}
 
-	if err := os.WriteFile(tmpFile, testData, 0600); err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
-	}
-
-	f, err := os.OpenFile(tmpFile, os.O_RDWR, 0600)
+	r, err := openDirectReader(path)
 	if err != nil {
-		t.Fatalf("Failed to open test file: %v", err)
+		t.Fatalf("openDirectReader: %v", err)
 	}
-	defer func() { _ = f.Close() }()
+	defer func() { _ = r.Close() }()
 
-	if err := wipeVerify(f, int64(testSize), PatternOnes, nil, 1); err != nil {
-		t.Fatalf("wipeVerify unexpectedly failed: %v", err)
+	// Exercise the aligned-buffer path whatever the filesystem under the temp
+	// directory does with O_DIRECT.
+	if _, ok := r.(*directReader); !ok {
+		buf, err := unix.Mmap(-1, 0, wipeChunk+2*directIOAlign, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_ANON|unix.MAP_PRIVATE)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.Open(path) // #nosec G304 -- under t.TempDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+		r = &directReader{f: f, buf: buf}
+	}
+
+	got := make([]byte, wipeChunk+100)
+	n, err := r.ReadAt(got, 1234)
+	if err != nil || n != len(got) || !bytes.Equal(got, content[1234:1234+len(got)]) {
+		t.Fatalf("ReadAt(1234) = %d, %v; content mismatch=%v", n, err, !bytes.Equal(got[:n], content[1234:1234+n]))
+	}
+
+	tail := make([]byte, 5000)
+	n, err = r.ReadAt(tail, int64(len(content)-100))
+	if !errors.Is(err, io.EOF) || n != 100 || !bytes.Equal(tail[:n], content[len(content)-100:]) {
+		t.Fatalf("ReadAt past the end = %d, %v; want 100 bytes and EOF", n, err)
+	}
+}
+
+// TestOpenDirectReaderRefusesWhatItCannotOpen passes the open failure through.
+func TestOpenDirectReaderRefusesWhatItCannotOpen(t *testing.T) {
+	if _, err := openDirectReader(filepath.Join(t.TempDir(), "absent")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("openDirectReader(absent) = %v, want ErrNotExist", err)
+	}
+}
+
+// TestOpenDirectReaderFallsBackOnlyWhereTheCacheIsTheStorage: O_DIRECT refused
+// with EINVAL is a buffered read on a memory filesystem and a refusal
+// everywhere else.
+func TestOpenDirectReaderFallsBackOnlyWhereTheCacheIsTheStorage(t *testing.T) {
+	path, _ := writeWipeFixture(t, 4096, 0)
+	previous := openFileFunc
+	t.Cleanup(func() { openFileFunc = previous })
+	openFileFunc = func(name string, flag int, perm os.FileMode) (*os.File, error) {
+		if flag&unix.O_DIRECT != 0 {
+			return nil, &os.PathError{Op: "open", Path: name, Err: unix.EINVAL}
+		}
+		return previous(name, flag, perm)
+	}
+
+	memory, err := cacheIsTheStorage(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := openDirectReader(path)
+	switch {
+	case memory && err == nil:
+		_ = r.Close()
+	case !memory && errors.Is(err, ErrDirectIOUnsupported):
+	default:
+		t.Fatalf("openDirectReader with O_DIRECT refused (memory filesystem=%v) = %v", memory, err)
+	}
+
+	if _, err := openDirectReader(filepath.Join(t.TempDir(), "absent")); err == nil {
+		t.Fatal("openDirectReader(absent) with O_DIRECT refused succeeded")
 	}
 }
 
@@ -2168,7 +2288,7 @@ func TestWipeRefusesWhatItCannotWipe(t *testing.T) {
 	if err := os.WriteFile(empty, nil, 0o600); err != nil {
 		t.Fatalf("creating the empty device: %v", err)
 	}
-	if err := Wipe(WipeOptions{Device: empty, Passes: 1}); err == nil || !strings.Contains(err.Error(), "invalid device size: 0") {
+	if err := Wipe(WipeOptions{Device: empty, Passes: 1}); !errors.Is(err, ErrInvalidSize) {
 		t.Errorf("an empty device: %v, want it refused for having no size", err)
 	}
 }
@@ -2195,5 +2315,230 @@ func TestWipeKeyslotRefusesBeforeDestroyingAnything(t *testing.T) {
 	}
 	if !bytes.Equal(before, readAreaBytes(t, device, 0, goldenPrefixBytes)) {
 		t.Error("the refused WipeKeyslot changed the container")
+	}
+}
+
+// TestWipeHeaderOnlyIsACryptoErase is #246 D3. A header-only wipe zeroed the
+// two header copies and left the keyslot areas -- the wrapped volume key --
+// intact, so anyone holding a copy of the header from before the wipe (a
+// luksHeaderBackup, a snapshot, the first megabytes of a disk image) put it
+// back and opened the volume with the old passphrase. A crypto-erase must
+// leave that copy opening nothing.
+func TestWipeHeaderOnlyIsACryptoErase(t *testing.T) {
+	defer parallel(t)()
+
+	path := newImage(t, "crypto-erase.img")
+	if err := Format(standardFormatOptions(path)); err != nil {
+		t.Fatalf("Format: %v", err)
+	}
+	hdr, metadata, err := ReadHeader(path)
+	if err != nil {
+		t.Fatalf("ReadHeader: %v", err)
+	}
+	area := int64(hdr.HeaderSize)
+	backup := readImageAt(t, path, 0, int(2*area))
+	_, keyslotsEnd, err := keyslotsAreaBounds(hdr, metadata)
+	if err != nil {
+		t.Fatalf("keyslotsAreaBounds: %v", err)
+	}
+
+	if err := Wipe(WipeOptions{Device: path, HeaderOnly: true}); err != nil {
+		t.Fatalf("header-only Wipe: %v", err)
+	}
+	if region := readImageAt(t, path, 0, int(keyslotsEnd)); !bytes.Equal(region, make([]byte, len(region))) {
+		t.Fatal("the keyslots area is not all zeroes after a header-only wipe")
+	}
+
+	// Put the pre-wipe header copies back, as an attacker holding them would.
+	writeImageAt(t, path, 0, backup)
+	if _, _, err := ReadHeader(path); err != nil {
+		t.Fatalf("precondition: the restored header does not read: %v", err)
+	}
+	if err := TestKey(path, []byte(conformancePassphrase)); err == nil {
+		t.Fatal("the old passphrase opens the volume from a header restored after a header-only wipe: the keyslot material survived")
+	}
+}
+
+// TestWipeHeaderOnlyErasesAStrayCopysJSON is #246 D3's second half. A stray
+// header copy -- left by an earlier format with a different metadata size,
+// beyond this container's keyslots area -- had only its 4 KiB binary header
+// zeroed. Its JSON, keyslot salts and digests included, survived, and a
+// binary header is a checksum computation away from rebuilt. The JSON goes
+// too; the data segment does not.
+func TestWipeHeaderOnlyErasesAStrayCopysJSON(t *testing.T) {
+	defer parallel(t)()
+
+	requireCryptsetup(t)
+
+	const (
+		strayAt    = 2 << 20
+		dataOffset = 8 << 20
+	)
+	path := newForeignContainer(t, "stray.img", foreignGeometry{
+		metadataSize:     "16k",
+		keyslotsSize:     "1m",
+		dataOffsetSec:    strconv.Itoa(dataOffset / 512),
+		wantArea:         LUKS2HeaderMinSize,
+		wantKeyslotsSize: 1 << 20,
+	})
+
+	// The stray: the secondary copy of a container formatted with 2 MiB of
+	// metadata, which sits at 2 MiB -- past this container's keyslots area.
+	donor := newImage(t, "donor.img")
+	if err := Format(metadataSizeFormatOptions(donor, strayAt)); err != nil {
+		t.Fatalf("Format donor: %v", err)
+	}
+	stray := readImageAt(t, donor, strayAt, strayAt)
+	writeImageAt(t, path, strayAt, stray)
+	payload := bytes.Repeat([]byte("payload!"), 512)
+	writeImageAt(t, path, dataOffset, payload)
+
+	if err := Wipe(WipeOptions{Device: path, HeaderOnly: true}); err != nil {
+		t.Fatalf("header-only Wipe: %v", err)
+	}
+
+	if got := readImageAt(t, path, strayAt, strayAt); !bytes.Equal(got, make([]byte, len(got))) {
+		t.Fatal("the stray copy's JSON survived a header-only wipe")
+	}
+	if !bytes.Equal(readImageAt(t, path, dataOffset, len(payload)), payload) {
+		t.Fatal("the header-only wipe reached the data segment")
+	}
+}
+
+// TestWipeHeaderPlanStaysOutOfTheData: a keyslot area or a stray copy that a
+// validated header places at or past the first data segment is not zeroed
+// there, and an unvalidated copy is zeroed only as far as its JSON runs.
+func TestWipeHeaderPlanStaysOutOfTheData(t *testing.T) {
+	metadata := &LUKS2Metadata{
+		Segments: map[string]*Segment{"0": {Offset: "65536"}, "1": {Offset: "bogus"}, "2": nil},
+		Keyslots: map[string]*Keyslot{
+			"0": {Area: &KeyslotArea{Offset: "32768", Size: "65536"}},
+			"1": {Area: &KeyslotArea{Offset: "x", Size: "1"}},
+			"2": {},
+			"3": nil,
+		},
+	}
+	if got := firstDataOffset(metadata); got != 65536 {
+		t.Fatalf("firstDataOffset = %d, want 65536", got)
+	}
+	if got := declaredKeyslotAreas(metadata); len(got) != 1 || got[0] != (wipeRegion{offset: 32768, size: 65536}) {
+		t.Fatalf("declaredKeyslotAreas = %+v, want only the parseable area", got)
+	}
+	if got := firstDataOffset(&LUKS2Metadata{}); got != -1 {
+		t.Fatalf("firstDataOffset with no segment = %d, want -1", got)
+	}
+
+	path := filepath.Join(t.TempDir(), "extent")
+	content := make([]byte, 3*LUKS2HeaderSize)
+	for i := LUKS2HeaderSize; i < 2*LUKS2HeaderSize+10; i++ {
+		content[i] = '{'
+	}
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path) // #nosec G304 -- under t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if got := headerCopyExtent(f, 0, 16384); got != 2*LUKS2HeaderSize+11 {
+		t.Fatalf("headerCopyExtent = %d, want the JSON and its NUL (%d)", got, 2*LUKS2HeaderSize+11)
+	}
+	if got := headerCopyExtent(f, 0, 2*LUKS2HeaderSize); got != 2*LUKS2HeaderSize {
+		t.Fatalf("headerCopyExtent with no NUL inside the area = %d, want the area", got)
+	}
+	if got := headerCopyExtent(f, 2*LUKS2HeaderSize, 16384); got != LUKS2HeaderSize {
+		t.Fatalf("headerCopyExtent running off the end = %d, want what could be read (%d)", got, LUKS2HeaderSize)
+	}
+}
+
+// busyExclusiveOpens substitutes openFileFunc so that an O_EXCL open of path
+// fails with EBUSY -- what the kernel answers for a block device that is
+// mounted, mapped or held -- and records whether one was attempted. Not
+// parallel: the seam is package state.
+func busyExclusiveOpens(t *testing.T, path string) *bool {
+	t.Helper()
+	attempted := false
+	previous := openFileFunc
+	openFileFunc = func(name string, flag int, perm os.FileMode) (*os.File, error) {
+		if name == path && flag&unix.O_EXCL != 0 {
+			attempted = true
+			return nil, &os.PathError{Op: "open", Path: name, Err: unix.EBUSY}
+		}
+		return previous(name, flag, perm)
+	}
+	t.Cleanup(func() { openFileFunc = previous })
+	return &attempted
+}
+
+// TestWipeOpensTheDeviceExclusively is #246 D4. Wipe opened the device
+// O_RDWR alone, so a mounted filesystem, a live dm-crypt mapping or anything
+// else holding the device was overwritten underneath its user. The kernel's
+// O_EXCL claim is the in-use check; EBUSY from it is ErrDeviceInUse and
+// nothing is written.
+func TestWipeOpensTheDeviceExclusively(t *testing.T) {
+	path, _ := writeWipeFixture(t, 64*1024, 0xAA)
+	attempted := busyExclusiveOpens(t, path)
+
+	for _, opts := range []WipeOptions{{Device: path, HeaderOnly: true}, {Device: path, Passes: 1}} {
+		err := Wipe(opts)
+		if !*attempted {
+			t.Fatal("Wipe did not open the device with O_EXCL")
+		}
+		if !errors.Is(err, ErrDeviceInUse) || !errors.Is(err, unix.EBUSY) {
+			t.Fatalf("Wipe of a busy device = %v, want ErrDeviceInUse wrapping EBUSY", err)
+		}
+	}
+	got, err := os.ReadFile(path) // #nosec G304 -- under t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, bytes.Repeat([]byte{0xAA}, 64*1024)) {
+		t.Fatal("Wipe wrote to a device it reported busy")
+	}
+}
+
+// TestWipeKeyslotOpensTheDeviceExclusively is D4 for WipeKeyslot: a keyslot of
+// a volume that is open is not wiped out from under it.
+func TestWipeKeyslotOpensTheDeviceExclusively(t *testing.T) {
+	path := newImage(t, "wipe-keyslot-busy.img")
+	formatWithLibrary(t, path)
+	key, err := AddRecoveryKey(path, []byte(conformancePassphrase), &RecoveryKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterations: minPBKDF2Iterations})
+	if err != nil {
+		t.Fatalf("AddRecoveryKey: %v", err)
+	}
+	key.Clear()
+	before := readImageAt(t, path, 0, 16<<20)
+	attempted := busyExclusiveOpens(t, path)
+
+	err = WipeKeyslot(path, key.Keyslot)
+	if !*attempted {
+		t.Fatal("WipeKeyslot did not open the device with O_EXCL")
+	}
+	if !errors.Is(err, ErrDeviceInUse) {
+		t.Fatalf("WipeKeyslot of a busy device = %v, want ErrDeviceInUse", err)
+	}
+	if !bytes.Equal(readImageAt(t, path, 0, 16<<20), before) {
+		t.Fatal("the container changed although the device was reported busy")
+	}
+}
+
+// TestWipeNoVerifySkipsAStandardsVerification: NoVerify turns verification
+// off even for a standard that requires it -- the medium here would fail it.
+func TestWipeNoVerifySkipsAStandardsVerification(t *testing.T) {
+	path, _ := writeWipeFixture(t, 16*1024, 0xAA)
+	useStaleMedium(t, bytes.Repeat([]byte{0xAA}, 16*1024))
+
+	if err := Wipe(WipeOptions{Device: path, Standard: StandardDoD3Pass, NoVerify: true}); err != nil {
+		t.Fatalf("Wipe dod3 with NoVerify = %v, want no verification", err)
+	}
+	for _, opts := range []WipeOptions{
+		{Standard: StandardDoD7Pass, NoVerify: true},
+		{Patterns: []WipePattern{PatternOnes}, Verify: true, NoVerify: true},
+		{Passes: 2, Verify: true, NoVerify: true},
+	} {
+		if _, verify := resolvePatternSequence(opts); verify {
+			t.Errorf("resolvePatternSequence(%+v) still verifies", opts)
+		}
 	}
 }

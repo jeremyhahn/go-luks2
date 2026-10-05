@@ -163,7 +163,9 @@ func TestTokenOperations_Integration(t *testing.T) {
 	// realistic token arrives the way a real one does. The members are the ones
 	// libsystemd-shared-255.so actually contains.
 	t.Run("import TPM2 token", func(t *testing.T) {
-		const real = `{"type":"systemd-tpm2","keyslots":["1"],` +
+		// It names keyslot 0, the one this volume has: a reference to a keyslot
+		// the header does not have is refused, as cryptsetup refuses it (#248).
+		const real = `{"type":"systemd-tpm2","keyslots":["0"],` +
 			`"tpm2-blob":"dGVzdC1ibG9i","tpm2-pcrs":[0,1,2,3,7],` +
 			`"tpm2-pcr-bank":"sha256","tpm2-primary-alg":"ecc",` +
 			`"tpm2-policy-hash":"dGVzdC1wb2xpY3ktaGFzaA=="}`
@@ -230,7 +232,7 @@ func TestTokenOperations_Integration(t *testing.T) {
 	t.Run("import token from JSON", func(t *testing.T) {
 		tokenJSON := []byte(`{
 			"type": "custom-token",
-			"keyslots": ["2"],
+			"keyslots": ["0"],
 			"fido2-rp": "json-import.example.com"
 		}`)
 

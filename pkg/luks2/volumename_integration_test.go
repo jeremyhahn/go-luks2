@@ -30,7 +30,7 @@ import (
 // library defect rather than a collision:
 //
 //	Unlock failed on cycle 1: volume already unlocked: the device-mapper name
-//	"luks-rapid" is already in use - close it first with: luks close luks-rapid
+//	"luks-rapid" is already in use - close it first with: luks2 close luks-rapid
 //
 // Measured on a shared runner 2026-09-01 WITH A CONTROL: two concurrent
 // containers, distinct container names, one passed and one failed on exactly

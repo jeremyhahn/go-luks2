@@ -32,7 +32,9 @@ make changelog-assemble VERSION=vX.Y.Z-alpha
 This inserts a `## [X.Y.Z-alpha] - <date>` section built from the fragments
 into `CHANGELOG.md`, below `## [Unreleased]`, and deletes the fragments
 (`README.md` stays). Commit both before tagging: `release.yml` takes the release
-notes from that section of the committed `CHANGELOG.md`.
+notes from that section of the committed `CHANGELOG.md`. It publishes only if
+the tagged commit is on main and CI's gate passed for that commit; it waits for
+CI if CI is still running.
 
 The `## [Unreleased]` section that predates fragments is not touched by
 assembly. Move any entries still in it into the new section by hand before

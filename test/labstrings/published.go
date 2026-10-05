@@ -65,6 +65,8 @@ var DefaultStripAtPublish = []Unpublishable{
 	{Path: "**/.claude/**", Reason: agentInstructions},
 	{Path: workflowDir + "automerge.yml", Reason: "Gitea-only automerge workflow (owner ruling 2026-10-02, " +
 		"automatethethings#200): tracked on main, stripped from the public release (#211, #252)"},
+	{Path: "test/ci/workflows/automerge_test.go", Reason: "runs automerge.yml's merge script, so it is " +
+		"stripped with that workflow: the published tree has no automerge.yml to test (#247)"},
 }
 
 // internalWorkflow is the reason given for any file under workflowDir that

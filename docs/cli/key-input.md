@@ -17,7 +17,9 @@ luks2 <command> [--new-key-file <path>] ...   # addkey, changekey: the new one
 | no flag, stdin is a pipe | The first line of stdin, without its newline |
 | no flag, stdin is a terminal | Prompt, input hidden |
 
-`--key-file` wins even when a terminal is attached. `recovery verify` takes no
+`--key-file` wins even when a terminal is attached. An empty path
+(`--key-file ""`, or a variable that expanded to nothing) is refused rather
+than falling back to stdin or the terminal. `recovery verify` takes no
 `--key-file`; see [recovery](recovery.md#verify).
 
 ## The trailing newline
@@ -42,11 +44,11 @@ Every other byte is content, spaces and NUL included.
 
 ## Limits
 
-Passphrases must be 8 to 512 bytes, so an empty or short key file fails with
-`passphrase too short` and one of 513 bytes to 8 MiB fails with
-`passphrase too long`. A key file over 8 MiB is refused while it is read, with
-`key file is too large`. cryptsetup accepts binary key files up to 8 MiB; volumes
-whose key file is longer than 512 bytes cannot be opened with this tool.
+A credential that opens an existing keyslot may be 1 byte to 8 MiB, as with
+cryptsetup, so a 4 KiB key file or a short legacy passphrase works. A new
+passphrase (`create`, and the new credential of `addkey` and `changekey`) must
+be 8 to 512 bytes. A key file over 8 MiB is refused while it is read, with
+`key file is too large`.
 
 ## Confirmation
 

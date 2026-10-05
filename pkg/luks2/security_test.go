@@ -628,7 +628,7 @@ func TestClassifyDeviceOpen_TypesAPermissionFailure(t *testing.T) {
 // every open failure would rewrite the message of every failure in the package
 // to buy a distinction only one of them needs.
 func TestClassifyDeviceOpen_LeavesEverythingElseAlone(t *testing.T) {
-	for _, errno := range []syscall.Errno{syscall.ENOENT, syscall.ENOTDIR, syscall.EIO, syscall.EBUSY} {
+	for _, errno := range []syscall.Errno{syscall.ENOENT, syscall.ENOTDIR, syscall.EIO} {
 		t.Run(errno.Error(), func(t *testing.T) {
 			cause := &fs.PathError{Op: "open", Path: "/dev/sdb1", Err: errno}
 

@@ -96,8 +96,11 @@ func TestHeaderWriteRead(t *testing.T) {
 			},
 		},
 		Config: &Config{
-			JSONSize:     "16384",
-			KeyslotsSize: "3145728",
+			JSONSize: "16384",
+			// The keyslots area ends where the data starts, at 1 MiB: a larger
+			// one runs into the data, which cryptsetup refuses and so does
+			// WriteHeader (#248).
+			KeyslotsSize: "1015808",
 			Flags:        []string{},
 			// Requirements is left nil: this container declares none, and the
 			// member is now an object (#152) rather than a flat array, so an

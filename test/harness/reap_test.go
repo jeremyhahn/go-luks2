@@ -702,13 +702,13 @@ func TestReapProcessesEveryStaleLedger(t *testing.T) {
 // allocates, through t.TempDir() or os.CreateTemp(""), lands underneath it.
 func TestReapDetachesLoopDevicesUnderARecordedRoot(t *testing.T) {
 	dir := stateDir(t)
-	writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/luks2-run-abc"})
+	writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-dead-run-1"})
 
 	rm := newFakeRemover()
-	rm.loops["/tmp/luks2-run-abc/TestLoopDeviceCleanup/001/x.img"] = []string{"/dev/loop3"}
-	rm.loops["/tmp/luks2-run-abc/TestLoopDeviceMultiple/002/y.img"] = []string{"/dev/loop4"}
+	rm.loops["/tmp/go-luks2-run-dead-run-1/TestLoopDeviceCleanup/001/x.img"] = []string{"/dev/loop3"}
+	rm.loops["/tmp/go-luks2-run-dead-run-1/TestLoopDeviceMultiple/002/y.img"] = []string{"/dev/loop4"}
 	// Another run's root, and a developer's own image. Neither is ours.
-	rm.loops["/tmp/luks2-run-zzz/other.img"] = []string{"/dev/loop6"}
+	rm.loops["/tmp/go-luks2-run-other-run-2/other.img"] = []string{"/dev/loop6"}
 	rm.loops["/var/lib/libvirt/images/backup.img"] = []string{"/dev/loop7"}
 
 	if _, err := Reap(dir, "live-run", rm, io.Discard); err != nil {
@@ -721,7 +721,7 @@ func TestReapDetachesLoopDevicesUnderARecordedRoot(t *testing.T) {
 	if _, ok := rm.loops["/var/lib/libvirt/images/backup.img"]; !ok {
 		t.Fatal("a developer's own loop device was detached")
 	}
-	if _, ok := rm.loops["/tmp/luks2-run-zzz/other.img"]; !ok {
+	if _, ok := rm.loops["/tmp/go-luks2-run-other-run-2/other.img"]; !ok {
 		t.Fatal("another run's loop device was detached")
 	}
 }
@@ -737,7 +737,7 @@ func TestLoopDevicesUnderRefusesARootThatIsNotOne(t *testing.T) {
 }
 
 func TestLoopDevicesUnderDoesNotMatchASiblingWithASharedPrefix(t *testing.T) {
-	// "/tmp/run-1" must not match "/tmp/run-10": a plain string prefix would
+	// "/tmp/go-luks2-run-1" must not match "/tmp/go-luks2-run-10": a plain string prefix would
 	// have one run detach the next run's devices.
 	root := t.TempDir()
 	write := func(dev, backing string) {
@@ -750,10 +750,10 @@ func TestLoopDevicesUnderDoesNotMatchASiblingWithASharedPrefix(t *testing.T) {
 			t.Fatalf("WriteFile: %v", err)
 		}
 	}
-	write("loop1", "/tmp/run-1/a.img\n")
-	write("loop2", "/tmp/run-10/b.img\n")
+	write("loop1", "/tmp/go-luks2-run-1/a.img\n")
+	write("loop2", "/tmp/go-luks2-run-10/b.img\n")
 
-	got, err := loopDevicesUnderIn(root, "/tmp/run-1", stubBoundIdentity)
+	got, err := loopDevicesUnderIn(root, "/tmp/go-luks2-run-1", stubBoundIdentity)
 	if err != nil {
 		t.Fatalf("loopDevicesUnderIn: %v", err)
 	}
@@ -941,7 +941,7 @@ func TestReapOwnCleansWhatAPassingRunLeaked(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ledger.Close() })
 
-	if err := ledger.Record(KindLoopRoot, "/tmp/go-luks2-run-abc", ""); err != nil {
+	if err := ledger.Record(KindLoopRoot, "/tmp/go-luks2-run-passing-run-1", ""); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 	if err := ledger.Record(KindMapping, "tidy-volume", "uuid-tidy"); err != nil {
@@ -951,9 +951,9 @@ func TestReapOwnCleansWhatAPassingRunLeaked(t *testing.T) {
 	rm := newFakeRemover()
 	// The test cleaned up its mapping, as a passing test does...
 	// ...and leaked a loop device anyway, which is the measured shape.
-	rm.loops["/tmp/go-luks2-run-abc/TestLoopDeviceCleanup/001/x.img"] = []string{"/dev/loop1"}
+	rm.loops["/tmp/go-luks2-run-passing-run-1/TestLoopDeviceCleanup/001/x.img"] = []string{"/dev/loop1"}
 
-	report, err := ReapOwn(ledger.Path(), rm, io.Discard)
+	report, err := ReapOwn(ledger, rm, io.Discard)
 	if err != nil {
 		t.Fatalf("ReapOwn: %v", err)
 	}
@@ -989,7 +989,7 @@ func TestReapOwnDoesNotNeedTheLedgerUnlocked(t *testing.T) {
 	rm := newFakeRemover()
 	rm.mappings["mine"] = "uuid-mine"
 
-	if _, err := ReapOwn(ledger.Path(), rm, io.Discard); err != nil {
+	if _, err := ReapOwn(ledger, rm, io.Discard); err != nil {
 		t.Fatalf("ReapOwn refused a ledger its own caller holds: %v", err)
 	}
 	if _, ok := rm.mappings["mine"]; ok {
@@ -1010,12 +1010,12 @@ func TestSuiteFinishCleansUpEvenWhenTheTestsPassed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenLedger: %v", err)
 	}
-	if err := ledger.Record(KindLoopRoot, "/tmp/go-luks2-run-xyz", ""); err != nil {
+	if err := ledger.Record(KindLoopRoot, "/tmp/go-luks2-run-green-but-leaky-1", ""); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 
 	rm := newFakeRemover()
-	rm.loops["/tmp/go-luks2-run-xyz/TestLoopDeviceCleanup/001/x.img"] = []string{"/dev/loop1"}
+	rm.loops["/tmp/go-luks2-run-green-but-leaky-1/TestLoopDeviceCleanup/001/x.img"] = []string{"/dev/loop1"}
 
 	suite := &Suite{Ledger: ledger, TempDir: t.TempDir(), RunID: "green-but-leaky", Remover: rm}
 
@@ -1079,7 +1079,7 @@ func TestReapersSerializeSoALockedLedgerAlwaysMeansALiveSuite(t *testing.T) {
 	writeLedger(t, dir, "dead-run", Entry{Kind: KindMapping, Value: "left", Identity: "uuid-left"})
 
 	// Reaper A is mid-sweep: it holds the host mutex.
-	unlockA, err := lockReaper(dir)
+	_, unlockA, err := lockReaper(dir)
 	if err != nil {
 		t.Fatalf("lockReaper: %v", err)
 	}
@@ -1141,7 +1141,7 @@ func TestReapTimesOutRatherThanRunningOnAnUnknownHost(t *testing.T) {
 	dir := stateDir(t)
 	writeLedger(t, dir, "dead-run", Entry{Kind: KindMapping, Value: "left", Identity: "uuid-left"})
 
-	unlockA, err := lockReaper(dir)
+	_, unlockA, err := lockReaper(dir)
 	if err != nil {
 		t.Fatalf("lockReaper: %v", err)
 	}
@@ -1174,13 +1174,13 @@ func TestReapTimesOutRatherThanRunningOnAnUnknownHost(t *testing.T) {
 // parse it and fail the whole reap.
 func TestReaperLockFileIsNotMistakenForALedger(t *testing.T) {
 	dir := stateDir(t)
-	unlock, err := lockReaper(dir)
+	sd, unlock, err := lockReaper(dir)
 	if err != nil {
 		t.Fatalf("lockReaper: %v", err)
 	}
-	unlock()
+	defer unlock()
 
-	paths, err := staleLedgers(dir, "anything")
+	paths, err := staleLedgers(sd, "anything")
 	if err != nil {
 		t.Fatalf("staleLedgers: %v", err)
 	}
@@ -1203,13 +1203,13 @@ func TestReapRemovesTheHolderBeforeTheDeviceItHolds(t *testing.T) {
 	dir := stateDir(t)
 	// Written in the order a real run produces: loop root first.
 	writeLedger(t, dir, "dead-run",
-		Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-abc"},
+		Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-dead-run-1"},
 		Entry{Kind: KindMapping, Value: "stacked-on-loop", Identity: "uuid-stacked"},
 	)
 
 	rm := newFakeRemover()
 	rm.mappings["stacked-on-loop"] = "uuid-stacked"
-	rm.loops["/tmp/go-luks2-run-abc/x.img"] = []string{"/dev/loop3"}
+	rm.loops["/tmp/go-luks2-run-dead-run-1/x.img"] = []string{"/dev/loop3"}
 	// The kernel refuses to release a loop device a dm target still holds.
 	rm.holdLoopUntilMappingGone = map[string]string{"/dev/loop3": "stacked-on-loop"}
 
@@ -1254,10 +1254,10 @@ func TestInRemovalOrderPutsMappingsFirstAndIsStable(t *testing.T) {
 // NEXT run over a device that was already on its way out.
 func TestReapWaitsForADetachToBecomeObservable(t *testing.T) {
 	dir := stateDir(t)
-	writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-abc"})
+	writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-dead-run-1"})
 
 	rm := newFakeRemover()
-	rm.loops["/tmp/go-luks2-run-abc/x.img"] = []string{"/dev/loop3"}
+	rm.loops["/tmp/go-luks2-run-dead-run-1/x.img"] = []string{"/dev/loop3"}
 	// The detach succeeds, but sysfs keeps reporting the device for two more
 	// queries -- the kernel finishing the release asynchronously.
 	rm.detachVisibleAfterQueries = 2
@@ -1278,10 +1278,10 @@ func TestReapWaitsForADetachToBecomeObservable(t *testing.T) {
 // something still HOLDS the device, which is a real failure.
 func TestReapStillFailsOnADeviceThatNeverGoesAway(t *testing.T) {
 	dir := stateDir(t)
-	writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-abc"})
+	writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-dead-run-1"})
 
 	rm := newFakeRemover()
-	rm.loops["/tmp/go-luks2-run-abc/x.img"] = []string{"/dev/loop3"}
+	rm.loops["/tmp/go-luks2-run-dead-run-1/x.img"] = []string{"/dev/loop3"}
 	rm.detachVisibleAfterQueries = 1 << 30 // never
 
 	clk := useFakeClock(t)
@@ -1293,7 +1293,7 @@ func TestReapStillFailsOnADeviceThatNeverGoesAway(t *testing.T) {
 	if !errors.Is(err, ErrReapIncomplete) {
 		t.Fatalf("error = %v, want ErrReapIncomplete", err)
 	}
-	if !unremoved(report, "/tmp/go-luks2-run-abc") {
+	if !unremoved(report, "/tmp/go-luks2-run-dead-run-1") {
 		t.Fatal("Reap passed over a loop device that never detached, without reporting it")
 	}
 }
@@ -1376,7 +1376,7 @@ func TestReapOwnRemovesTheHolderBeforeTheDeviceItHolds(t *testing.T) {
 	t.Cleanup(func() { _ = ledger.Close() })
 
 	// Ledger order, as BeginSuite produces it: loop root first.
-	if err := ledger.Record(KindLoopRoot, "/tmp/go-luks2-run-abc", ""); err != nil {
+	if err := ledger.Record(KindLoopRoot, "/tmp/go-luks2-run-leaky-run-1", ""); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 	if err := ledger.Record(KindMapping, "stacked", "uuid-stacked"); err != nil {
@@ -1385,10 +1385,10 @@ func TestReapOwnRemovesTheHolderBeforeTheDeviceItHolds(t *testing.T) {
 
 	rm := newFakeRemover()
 	rm.mappings["stacked"] = "uuid-stacked"
-	rm.loops["/tmp/go-luks2-run-abc/x.img"] = []string{"/dev/loop3"}
+	rm.loops["/tmp/go-luks2-run-leaky-run-1/x.img"] = []string{"/dev/loop3"}
 	rm.holdLoopUntilMappingGone = map[string]string{"/dev/loop3": "stacked"}
 
-	if _, err := ReapOwn(ledger.Path(), rm, io.Discard); err != nil {
+	if _, err := ReapOwn(ledger, rm, io.Discard); err != nil {
 		t.Fatalf("ReapOwn: %v -- the holder was not removed before the device it holds", err)
 	}
 	if len(rm.loops) != 0 || len(rm.mappings) != 0 {
@@ -1442,17 +1442,17 @@ func TestReapFailsClosedWhenItCannotConfirmRemoval(t *testing.T) {
 
 	t.Run("loop detach that cannot be confirmed", func(t *testing.T) {
 		dir := stateDir(t)
-		path := writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-abc"})
+		path := writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-dead-run-1"})
 
 		rm := newFakeRemover()
-		rm.loops["/tmp/go-luks2-run-abc/x.img"] = []string{"/dev/loop3"}
+		rm.loops["/tmp/go-luks2-run-dead-run-1/x.img"] = []string{"/dev/loop3"}
 		rm.loopQueryErr = errors.New("sysfs read failed")
 
 		report, err := Reap(dir, "next-run", rm, io.Discard)
 		if !errors.Is(err, ErrReapIncomplete) {
 			t.Fatalf("error = %v, want ErrReapIncomplete", err)
 		}
-		if !unremoved(report, "/tmp/go-luks2-run-abc") {
+		if !unremoved(report, "/tmp/go-luks2-run-dead-run-1") {
 			t.Fatal("a detach that could not be confirmed was not reported")
 		}
 		if _, err := os.Stat(path); err != nil {
@@ -1553,7 +1553,7 @@ func TestLoopDiscoveryDistinguishesAbsentFromUnreadable(t *testing.T) {
 	}
 
 	// loop0: a real backing file we are looking for.
-	if err := os.WriteFile(mk("loop0"), []byte("/tmp/run/x.img\n"), 0o600); err != nil {
+	if err := os.WriteFile(mk("loop0"), []byte("/tmp/go-luks2-run-x/x.img\n"), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	// loop1: no backing_file at all -- genuinely unused, must be skipped.
@@ -1562,7 +1562,7 @@ func TestLoopDiscoveryDistinguishesAbsentFromUnreadable(t *testing.T) {
 	}
 
 	t.Run("an unused device is skipped, not an error", func(t *testing.T) {
-		got, err := loopDevicesUnderIn(root, "/tmp/run", stubBoundIdentity)
+		got, err := loopDevicesUnderIn(root, "/tmp/go-luks2-run-x", stubBoundIdentity)
 		if err != nil {
 			t.Fatalf("loopDevicesUnderIn: %v", err)
 		}
@@ -1581,8 +1581,12 @@ func TestLoopDiscoveryDistinguishesAbsentFromUnreadable(t *testing.T) {
 			name string
 			call func() ([]LoopDevice, error)
 		}{
-			{"under a root", func() ([]LoopDevice, error) { return loopDevicesUnderIn(root, "/tmp/run", stubBoundIdentity) }},
-			{"for an exact path", func() ([]LoopDevice, error) { return loopDevicesForIn(root, "/tmp/run/x.img", stubBoundIdentity) }},
+			{"under a root", func() ([]LoopDevice, error) {
+				return loopDevicesUnderIn(root, "/tmp/go-luks2-run-x", stubBoundIdentity)
+			}},
+			{"for an exact path", func() ([]LoopDevice, error) {
+				return loopDevicesForIn(root, "/tmp/go-luks2-run-x/x.img", stubBoundIdentity)
+			}},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				got, err := tc.call()
@@ -1603,7 +1607,7 @@ func TestLoopDiscoveryDistinguishesAbsentFromUnreadable(t *testing.T) {
 // a device nobody could confirm is gone.
 func TestReapKeepsTheLedgerWhenLoopDiscoveryFails(t *testing.T) {
 	dir := stateDir(t)
-	path := writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-abc"})
+	path := writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-dead-run-1"})
 
 	rm := newFakeRemover()
 	rm.loopLookupErr = errors.New("reading /sys/block/loop2/loop/backing_file: is a directory")
@@ -1612,7 +1616,7 @@ func TestReapKeepsTheLedgerWhenLoopDiscoveryFails(t *testing.T) {
 	if !errors.Is(err, ErrReapIncomplete) {
 		t.Fatalf("error = %v, want ErrReapIncomplete", err)
 	}
-	if !unremoved(report, "/tmp/go-luks2-run-abc") {
+	if !unremoved(report, "/tmp/go-luks2-run-dead-run-1") {
 		t.Fatal("an unenumerable device list was not reported")
 	}
 	if _, err := os.Stat(path); err != nil {
@@ -1638,12 +1642,14 @@ func TestStaleLedgersPropagatesAReadErrorRatherThanReportingNoLedgers(t *testing
 	base := stateDir(t)
 
 	t.Run("absent means no records", func(t *testing.T) {
-		paths, err := staleLedgers(filepath.Join(base, "never-created"), "self")
+		// The reaper creates a missing state directory (0700) rather than
+		// failing on it: nothing was ever written, so nothing is recorded.
+		report, err := Reap(filepath.Join(base, "never-created"), "self", newFakeRemover(), io.Discard)
 		if err != nil {
-			t.Fatalf("staleLedgers: %v", err)
+			t.Fatalf("Reap: %v", err)
 		}
-		if len(paths) != 0 {
-			t.Fatalf("= %v, want none", paths)
+		if len(report.LedgersProcessed) != 0 {
+			t.Fatalf("= %v, want none", report.LedgersProcessed)
 		}
 	})
 
@@ -1652,8 +1658,20 @@ func TestStaleLedgersPropagatesAReadErrorRatherThanReportingNoLedgers(t *testing
 		if err := os.WriteFile(notADir, []byte("x"), 0o600); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
-		if paths, err := staleLedgers(filepath.Join(notADir, "sub"), "self"); err == nil {
-			t.Fatalf("= %v, nil -- a directory that could not be read was reported as having no ledgers", paths)
+		if _, err := Reap(filepath.Join(notADir, "sub"), "self", newFakeRemover(), io.Discard); err == nil {
+			t.Fatal("a state directory that could not be opened was reported as having no ledgers")
+		}
+	})
+
+	t.Run("a listing failure propagates", func(t *testing.T) {
+		dir := stateDir(t)
+		sd, unlock, err := lockReaper(dir)
+		if err != nil {
+			t.Fatalf("lockReaper: %v", err)
+		}
+		unlock() // closes the handle: listing through it must now fail, not report nothing
+		if paths, err := staleLedgers(sd, "self"); err == nil {
+			t.Fatalf("= %v, nil -- a directory that could not be listed was reported as having no ledgers", paths)
 		}
 	})
 }
@@ -1666,10 +1684,10 @@ func TestStaleLedgersPropagatesAReadErrorRatherThanReportingNoLedgers(t *testing
 // the device it looked for is gone either way.
 func TestDetachRefusesAReusedLoopNumber(t *testing.T) {
 	dir := stateDir(t)
-	path := writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-abc"})
+	path := writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-dead-run-1"})
 
 	rm := newFakeRemover()
-	rm.loops["/tmp/go-luks2-run-abc/x.img"] = []string{"/dev/loop3"}
+	rm.loops["/tmp/go-luks2-run-dead-run-1/x.img"] = []string{"/dev/loop3"}
 	// Between enumeration and detach, loop3 is reassigned to a stranger.
 	rm.reassignBeforeDetach = map[string]string{"/dev/loop3": "/var/lib/libvirt/images/someone-elses.img"}
 
@@ -1677,7 +1695,7 @@ func TestDetachRefusesAReusedLoopNumber(t *testing.T) {
 	if !errors.Is(err, ErrReapIncomplete) {
 		t.Fatalf("error = %v, want ErrReapIncomplete", err)
 	}
-	if !unremoved(report, "/tmp/go-luks2-run-abc") {
+	if !unremoved(report, "/tmp/go-luks2-run-dead-run-1") {
 		t.Fatal("the refusal to detach a reassigned device was not reported")
 	}
 	// The damage plane, and this assertion is unchanged because it is the one
@@ -1749,17 +1767,17 @@ func TestTheLoopIdentityIsTheBackingInodeNotItsName(t *testing.T) {
 // everyday path is what would latch the runner.
 func TestADeviceWhoseIdentityIsUnknownIsRefusedNotDetached(t *testing.T) {
 	dir := stateDir(t)
-	path := writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-abc"})
+	path := writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-dead-run-1"})
 
 	rm := newFakeRemover()
-	rm.loops["/tmp/go-luks2-run-abc/x.img"] = []string{"/dev/loop3"}
+	rm.loops["/tmp/go-luks2-run-dead-run-1/x.img"] = []string{"/dev/loop3"}
 	rm.identityUnknown = map[string]bool{"/dev/loop3": true}
 
 	report, err := Reap(dir, "next-run", rm, io.Discard)
 	if !errors.Is(err, ErrReapIncomplete) {
 		t.Fatalf("error = %v, want ErrReapIncomplete: a device that could not be identified must refuse the run", err)
 	}
-	if !unremoved(report, "/tmp/go-luks2-run-abc") {
+	if !unremoved(report, "/tmp/go-luks2-run-dead-run-1") {
 		t.Fatal("the refusal was not reported")
 	}
 
@@ -1786,7 +1804,7 @@ func TestAnUnidentifiableDeviceIsStillEnumerated(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "backing_file"), []byte("/tmp/run/x.img\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "backing_file"), []byte("/tmp/go-luks2-run-x/x.img\n"), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
@@ -1794,7 +1812,7 @@ func TestAnUnidentifiableDeviceIsStillEnumerated(t *testing.T) {
 		return loopIdentity{}, false, fmt.Errorf("reading the status of %s: input/output error", device)
 	}
 
-	got, err := loopDevicesUnderIn(root, "/tmp/run", failing)
+	got, err := loopDevicesUnderIn(root, "/tmp/go-luks2-run-x", failing)
 	if err != nil {
 		t.Fatalf("loopDevicesUnderIn: %v", err)
 	}
@@ -1824,13 +1842,13 @@ func TestADeviceReleasedBetweenScanAndCaptureIsDropped(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "backing_file"), []byte("/tmp/run/x.img\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "backing_file"), []byte("/tmp/go-luks2-run-x/x.img\n"), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
 	unbound := func(string) (loopIdentity, bool, error) { return loopIdentity{}, false, nil }
 
-	got, err := loopDevicesUnderIn(root, "/tmp/run", unbound)
+	got, err := loopDevicesUnderIn(root, "/tmp/go-luks2-run-x", unbound)
 	if err != nil {
 		t.Fatalf("loopDevicesUnderIn: %v", err)
 	}
@@ -1850,10 +1868,10 @@ func TestADeviceReleasedBetweenScanAndCaptureIsDropped(t *testing.T) {
 // reach as well as about the bug.
 func TestReapSucceedsWhenTheDeviceWasAlreadyReleased(t *testing.T) {
 	dir := stateDir(t)
-	path := writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-abc"})
+	path := writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-dead-run-1"})
 
 	rm := newFakeRemover()
-	rm.loops["/tmp/go-luks2-run-abc/x.img"] = []string{"/dev/loop1"}
+	rm.loops["/tmp/go-luks2-run-dead-run-1/x.img"] = []string{"/dev/loop1"}
 	// Released between the scan and the detach, as a test's own cleanup does.
 	rm.releaseBeforeDetach = map[string]bool{"/dev/loop1": true}
 
@@ -1920,15 +1938,15 @@ func TestTempRootIsRemovedAndItsFailureIsReported(t *testing.T) {
 // devices and left the images.
 func TestReapRemovesTheTempRootOfAKilledRun(t *testing.T) {
 	dir := stateDir(t)
-	path := writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-abc"})
+	path := writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-dead-run-1"})
 
 	rm := newFakeRemover()
-	rm.loops["/tmp/go-luks2-run-abc/x.img"] = []string{"/dev/loop3"}
+	rm.loops["/tmp/go-luks2-run-dead-run-1/x.img"] = []string{"/dev/loop3"}
 
 	if _, err := Reap(dir, "next-run", rm, io.Discard); err != nil {
 		t.Fatalf("Reap: %v", err)
 	}
-	if !slices.Contains(rm.removedDirs, "/tmp/go-luks2-run-abc") {
+	if !slices.Contains(rm.removedDirs, "/tmp/go-luks2-run-dead-run-1") {
 		t.Fatalf("removedDirs = %v -- the dead run's images were left on the runner", rm.removedDirs)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -1941,10 +1959,10 @@ func TestReapRemovesTheTempRootOfAKilledRun(t *testing.T) {
 // record must survive for the retry.
 func TestReapKeepsTheLedgerWhenTheTempRootCannotBeRemoved(t *testing.T) {
 	dir := stateDir(t)
-	path := writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-abc"})
+	path := writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-dead-run-1"})
 
 	rm := newFakeRemover()
-	rm.removeDirErr["/tmp/go-luks2-run-abc"] = errors.New("device or resource busy")
+	rm.removeDirErr["/tmp/go-luks2-run-dead-run-1"] = errors.New("device or resource busy")
 
 	report, err := Reap(dir, "next-run", rm, io.Discard)
 	if err != nil {
@@ -2011,10 +2029,10 @@ func TestRemoveDirRefusesAPathThatCouldNotBeOurs(t *testing.T) {
 // latch.
 func TestAnUnremovableDirectoryDoesNotLatchTheRunner(t *testing.T) {
 	dir := stateDir(t)
-	path := writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-stuck"})
+	path := writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-dead-run-1"})
 
 	rm := newFakeRemover()
-	rm.removeDirErr["/tmp/go-luks2-run-stuck"] = errors.New("device or resource busy")
+	rm.removeDirErr["/tmp/go-luks2-run-dead-run-1"] = errors.New("device or resource busy")
 
 	for attempt := 1; attempt <= 2; attempt++ {
 		report, err := Reap(dir, "next-run", rm, io.Discard)
@@ -2033,7 +2051,7 @@ func TestAnUnremovableDirectoryDoesNotLatchTheRunner(t *testing.T) {
 	}
 
 	// And the moment the condition clears, the retry finishes the job.
-	delete(rm.removeDirErr, "/tmp/go-luks2-run-stuck")
+	delete(rm.removeDirErr, "/tmp/go-luks2-run-dead-run-1")
 
 	report, err := Reap(dir, "next-run", rm, io.Discard)
 	if err != nil {
@@ -2056,17 +2074,17 @@ func TestAnUnremovableDirectoryDoesNotLatchTheRunner(t *testing.T) {
 // thing from leaving some disk behind.
 func TestARetainedDeviceRefusesTheRun(t *testing.T) {
 	dir := stateDir(t)
-	path := writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-abc"})
+	path := writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-dead-run-1"})
 
 	rm := newFakeRemover()
-	rm.loops["/tmp/go-luks2-run-abc/x.img"] = []string{"/dev/loop3"}
+	rm.loops["/tmp/go-luks2-run-dead-run-1/x.img"] = []string{"/dev/loop3"}
 	rm.detachErr["/dev/loop3"] = errors.New("device or resource busy")
 
 	report, err := Reap(dir, "next-run", rm, io.Discard)
 	if !errors.Is(err, ErrReapIncomplete) {
 		t.Fatalf("error = %v, want ErrReapIncomplete: a live device left on the host refuses the run", err)
 	}
-	if !unremoved(report, "/tmp/go-luks2-run-abc") {
+	if !unremoved(report, "/tmp/go-luks2-run-dead-run-1") {
 		t.Fatal("the retained device was not named in the report")
 	}
 	if _, err := os.Stat(path); err != nil {
@@ -2112,7 +2130,7 @@ func TestUnknownStateStillFailsClosed(t *testing.T) {
 // kinds, and this is the second line -- an entry nobody knows how to remove is
 // a failure, not something to skip as removed.
 func TestReapEntryRefusesAKindItDoesNotKnow(t *testing.T) {
-	out, err := reapEntry(Entry{Kind: "zram", Value: "/dev/zram0"}, newFakeRemover(), io.Discard)
+	out, err := reapEntry(Entry{Kind: "zram", Value: "/dev/zram0"}, "dead-run", newFakeRemover(), io.Discard)
 	if err == nil || out != outcomeNotOurs || !strings.Contains(err.Error(), `unknown record kind "zram"`) {
 		t.Fatalf("reapEntry = %v, %v; want a refusal naming the kind", out, err)
 	}
@@ -2172,9 +2190,12 @@ func TestFinishFailsTheRunWhenTheLedgerCannotBeDiscarded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenLedger: %v", err)
 	}
-	if err := ledger.Close(); err != nil { // so Discard's own Close fails
+	// Close the ledger's FILE only, so Discard's own close of it fails. The
+	// state directory's handle stays open: ReapOwn reads the ledger through it.
+	if err := ledger.f.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
+	t.Cleanup(func() { _ = ledger.dir.Close() })
 
 	var out strings.Builder
 	suite := &Suite{Ledger: ledger, TempDir: t.TempDir(), RunID: "run", Remover: newFakeRemover()}

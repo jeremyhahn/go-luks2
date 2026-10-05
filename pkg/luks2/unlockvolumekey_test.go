@@ -219,7 +219,7 @@ func TestUnlockWithVolumeKeyKeepsTheHeaderAndNameValidation(t *testing.T) {
 		if !errors.As(err, &typed) {
 			t.Fatalf("the in-use refusal is not a typed *UnlockError: %T %v", err, err)
 		}
-		if !strings.Contains(err.Error(), "luks close taken") {
+		if !strings.Contains(err.Error(), "luks2 close taken") {
 			t.Fatalf("the in-use refusal lost its remedy: %v", err)
 		}
 	})

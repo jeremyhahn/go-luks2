@@ -29,7 +29,55 @@ var (
 	// ErrUsage indicates the arguments given cannot be parsed. It is separate
 	// from a failed operation: nothing was attempted.
 	ErrUsage = errors.New("usage")
+
+	// ErrNotConfirmed indicates a destructive operation was not confirmed:
+	// the answer was not YES, input ended, or it could not be read.
+	ErrNotConfirmed = errors.New("not confirmed: type YES, or pass --batch-mode")
+
+	// ErrEmptyKeyFilePath indicates --key-file or --new-key-file was given an
+	// empty path. It is refused rather than read as "no key file", which would
+	// silently fall back to a prompt or to standard input.
+	ErrEmptyKeyFilePath = errors.New("the key file path is empty")
+
+	// ErrDeviceHasData indicates create was pointed at a device that already
+	// carries a LUKS header or a filesystem signature, without --force.
+	ErrDeviceHasData = errors.New("the device already holds data")
 )
+
+// ConfirmationError reports a destructive operation that was not confirmed.
+type ConfirmationError struct {
+	// Err is ErrNotConfirmed for an answer other than YES, or the read
+	// failure -- io.ErrUnexpectedEOF for no answer at all.
+	Err error
+}
+
+func (e *ConfirmationError) Error() string {
+	if errors.Is(e.Err, ErrNotConfirmed) {
+		return e.Err.Error()
+	}
+	return fmt.Sprintf("%s: %v", ErrNotConfirmed.Error(), e.Err)
+}
+
+func (e *ConfirmationError) Unwrap() error { return e.Err }
+
+// Is reports every ConfirmationError as ErrNotConfirmed.
+func (e *ConfirmationError) Is(target error) bool {
+	return target == ErrNotConfirmed
+}
+
+// DevicePathError reports a failure to inspect or prepare the path a command
+// was given, naming it.
+type DevicePathError struct {
+	Path string
+	Op   string
+	Err  error
+}
+
+func (e *DevicePathError) Error() string {
+	return fmt.Sprintf("%s %s: %v", e.Op, e.Path, e.Err)
+}
+
+func (e *DevicePathError) Unwrap() error { return e.Err }
 
 // KeyInputError reports a failure to obtain a credential, naming where the
 // credential was coming from.

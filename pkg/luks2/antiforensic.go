@@ -8,6 +8,7 @@ import (
 	"crypto/sha1" // #nosec G505 -- legacy LUKS interop only: SHA-1 AF keyslots are read, never written, and refused in FIPS mode (docs/FIPS.md)
 	"crypto/sha256"
 	"crypto/sha512"
+	"crypto/subtle"
 	"encoding/binary"
 	"fmt"
 	"hash"
@@ -238,11 +239,14 @@ func hashBlockInto(dst, block []byte, h hash.Hash, iv int) []byte {
 	return h.Sum(dst)
 }
 
-// xorBytes XORs two byte slices into dest
+// xorBytes XORs the first len(dest) bytes of a and b into dest.
+//
+// crypto/subtle's word-at-a-time XOR rather than a byte loop: an AF split or
+// merge calls this 3999 times per keyslot, and a byte loop in this package is
+// also a coverage counter per byte under the instrumented test build (#92).
 func xorBytes(a, b, dest []byte) {
-	for i := range dest {
-		dest[i] = a[i] ^ b[i]
-	}
+	n := len(dest)
+	subtle.XORBytes(dest, a[:n], b[:n])
 }
 
 // getHashFunc returns the anti-forensic hash a NEW keyslot may be written

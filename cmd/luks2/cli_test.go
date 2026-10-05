@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -86,6 +87,20 @@ func (m *MockFile) Close() error {
 	return nil
 }
 
+// CreateExclusive refuses a name the mock already holds, as O_EXCL would, and
+// otherwise hands back a real temp file.
+func (m *MockFileSystem) CreateExclusive(name string) (*os.File, error) {
+	if m.Files[name] {
+		return nil, &os.PathError{Op: "open", Path: name, Err: os.ErrExist}
+	}
+	return m.Create(name)
+}
+
+// RemoveCreated removes name from the mock.
+func (m *MockFileSystem) RemoveCreated(name string, _ *os.File) error {
+	return m.Remove(name)
+}
+
 func (m *MockFileSystem) Create(name string) (*os.File, error) {
 	if m.CreateErr != nil {
 		return nil, m.CreateErr
@@ -135,6 +150,41 @@ func (m *MockFileSystem) MkdirAll(path string, perm os.FileMode) error {
 	return nil
 }
 
+// MockDeviceProber answers create's questions about a path without a device:
+// a /dev path is a block device, anything else is absent unless Kinds says
+// otherwise, and no block device holds a signature unless Found says so.
+type MockDeviceProber struct {
+	Kinds    map[string]pathKind
+	KindErr  error
+	Found    string
+	FoundErr error
+	Probed   []string
+	Held     bool
+	Released int
+}
+
+func (m *MockDeviceProber) Kind(path string) (pathKind, error) {
+	if m.KindErr != nil {
+		return pathOther, m.KindErr
+	}
+	if k, ok := m.Kinds[path]; ok {
+		return k, nil
+	}
+	if strings.HasPrefix(path, "/dev/") {
+		return pathBlockDevice, nil
+	}
+	return pathAbsent, nil
+}
+
+func (m *MockDeviceProber) Claim(path string) (string, func(), error) {
+	m.Probed = append(m.Probed, path)
+	if m.FoundErr != nil {
+		return "", nil, m.FoundErr
+	}
+	m.Held = true
+	return m.Found, func() { m.Held = false; m.Released++ }, nil
+}
+
 // newTestCLI creates a CLI with mock dependencies
 func newTestCLI(args []string) (*CLI, *bytes.Buffer, *bytes.Buffer) {
 	stdout := &bytes.Buffer{}
@@ -151,6 +201,7 @@ func newTestCLI(args []string) (*CLI, *bytes.Buffer, *bytes.Buffer) {
 		FS:         &MockFileSystem{Files: make(map[string]bool)},
 		ExitFunc:   func(code int) {},
 		getStdinFd: func() int { return 0 },
+		Devices:    &MockDeviceProber{},
 	}
 
 	return cli, stdout, stderr
@@ -337,7 +388,11 @@ func TestCLI_Create_FileNoSize(t *testing.T) {
 
 func TestCLI_Create_FileAlreadyExists(t *testing.T) {
 	cli, _, stderr := newTestCLI([]string{"luks2", "create", "test.luks", "100M"})
-	cli.FS = &MockFileSystem{Files: map[string]bool{"test.luks": true}}
+	abs, err := filepath.Abs("test.luks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli.FS = &MockFileSystem{Files: map[string]bool{abs: true}}
 
 	code := cli.Run()
 
@@ -442,7 +497,7 @@ func TestCLI_Close_Success(t *testing.T) {
 func TestCLI_Close_StillMounted(t *testing.T) {
 	cli, _, stderr := newTestCLI([]string{"luks2", "close", "myvolume"})
 	cli.Luks = &MockLuksOperations{
-		IsMountedFunc: func(mountPoint string) (bool, error) {
+		IsMappingMountedFunc: func(name string) (bool, error) {
 			return true, nil
 		},
 	}
@@ -455,6 +510,39 @@ func TestCLI_Close_StillMounted(t *testing.T) {
 
 	if !strings.Contains(stderr.String(), "still mounted") {
 		t.Error("Expected still mounted error")
+	}
+}
+
+// TestCLI_Close_AsksWhetherTheMappingIsMounted is the regression for #250
+// (C10). close used to ask IsMounted whether "/dev/mapper/<name>" was a mount
+// POINT, which it never is, so a mounted volume was closed out from under its
+// filesystem. The mock reports exactly that state: no path named after the
+// mapping is a mount point, and the mapping itself is mounted.
+func TestCLI_Close_AsksWhetherTheMappingIsMounted(t *testing.T) {
+	defer parallel(t)()
+	cli, _, stderr := newTestCLI([]string{"luks2", "close", "myvolume"})
+	locked := false
+	var asked string
+	cli.Luks = &MockLuksOperations{
+		IsMountedFunc: func(string) (bool, error) { return false, nil },
+		IsMappingMountedFunc: func(name string) (bool, error) {
+			asked = name
+			return true, nil
+		},
+		LockFunc: func(string) error { locked = true; return nil },
+	}
+
+	if code := cli.Run(); code != 1 {
+		t.Errorf("exit code = %d, want 1 for a mounted mapping", code)
+	}
+	if locked {
+		t.Fatal("close LOCKED a mapping whose filesystem is mounted")
+	}
+	if asked != "myvolume" {
+		t.Errorf("the mount check was asked about %q, want the mapping name %q", asked, "myvolume")
+	}
+	if !strings.Contains(stderr.String(), "still mounted") {
+		t.Errorf("stderr = %q, want the still-mounted refusal", stderr.String())
 	}
 }
 
@@ -651,17 +739,19 @@ func TestCLI_Wipe_NoArgs(t *testing.T) {
 	}
 }
 
+// TestCLI_Wipe_Canceled: a wipe that was not confirmed exits NON-ZERO (#246
+// D12), so a script checking the status does not read it as done.
 func TestCLI_Wipe_Canceled(t *testing.T) {
-	cli, stdout, _ := newTestCLI([]string{"luks2", "wipe", "/dev/sda1"})
+	cli, _, stderr := newTestCLI([]string{"luks2", "wipe", "/dev/sda1"})
 	cli.Stdin = strings.NewReader("NO\n")
 
 	code := cli.Run()
 
-	if code != 0 {
-		t.Errorf("Expected exit code 0, got %d", code)
+	if code != 1 {
+		t.Errorf("Expected exit code 1, got %d", code)
 	}
 
-	if !strings.Contains(stdout.String(), "Wipe canceled") {
+	if !strings.Contains(stderr.String(), "Wipe canceled") {
 		t.Error("Expected canceled message")
 	}
 }
@@ -876,8 +966,8 @@ func TestCLI_Wipe_UnknownOption(t *testing.T) {
 		t.Errorf("Expected exit code 1, got %d", code)
 	}
 
-	if !strings.Contains(stderr.String(), "Unknown option") {
-		t.Error("Expected 'Unknown option' error")
+	if !strings.Contains(stderr.String(), "unknown option --unknown") {
+		t.Error("Expected 'unknown option' error")
 	}
 }
 
@@ -961,7 +1051,7 @@ func TestCLI_PasswordReadError(t *testing.T) {
 
 func TestCLI_CreateBlockDevice_Success(t *testing.T) {
 	cli, stdout, _ := newTestCLI([]string{"luks2", "create", "/dev/sda1"})
-	cli.Stdin = strings.NewReader("\n") // empty label
+	cli.Stdin = strings.NewReader("YES\n\n") // the confirmation, then an empty label
 
 	code := cli.Run()
 
@@ -976,7 +1066,7 @@ func TestCLI_CreateBlockDevice_Success(t *testing.T) {
 
 func TestCLI_CreateBlockDevice_Failure(t *testing.T) {
 	cli, _, stderr := newTestCLI([]string{"luks2", "create", "/dev/sda1"})
-	cli.Stdin = strings.NewReader("\n")
+	cli.Stdin = strings.NewReader("YES\n\n")
 	cli.Luks = &MockLuksOperations{
 		FormatFunc: func(opts luks2.FormatOptions) error {
 			return errors.New("format failed")
@@ -1220,7 +1310,7 @@ func TestCLI_Close_RefusesWhenMountStateIsUnknown(t *testing.T) {
 	cli, _, stderr := newTestCLI([]string{"luks2", "close", "myvolume"})
 	locked := false
 	cli.Luks = &MockLuksOperations{
-		IsMountedFunc: func(mountPoint string) (bool, error) {
+		IsMappingMountedFunc: func(name string) (bool, error) {
 			return false, errors.New("open /proc/mounts: permission denied")
 		},
 		LockFunc: func(name string) error {
@@ -1300,8 +1390,8 @@ func TestCLI_MountStateKnownStillBehaves(t *testing.T) {
 		cli, _, stderr := newTestCLI([]string{"luks2", "close", "myvolume"})
 		locked := false
 		cli.Luks = &MockLuksOperations{
-			IsMountedFunc: func(string) (bool, error) { return true, nil },
-			LockFunc:      func(string) error { locked = true; return nil },
+			IsMappingMountedFunc: func(string) (bool, error) { return true, nil },
+			LockFunc:             func(string) error { locked = true; return nil },
 		}
 		if code := cli.Run(); code != 1 {
 			t.Errorf("exit code = %d, want 1", code)
@@ -1318,8 +1408,8 @@ func TestCLI_MountStateKnownStillBehaves(t *testing.T) {
 		cli, stdout, _ := newTestCLI([]string{"luks2", "close", "myvolume"})
 		locked := false
 		cli.Luks = &MockLuksOperations{
-			IsMountedFunc: func(string) (bool, error) { return false, nil },
-			LockFunc:      func(string) error { locked = true; return nil },
+			IsMappingMountedFunc: func(string) (bool, error) { return false, nil },
+			LockFunc:             func(string) error { locked = true; return nil },
 		}
 		if code := cli.Run(); code != 0 {
 			t.Errorf("exit code = %d, want 0", code)
@@ -1329,4 +1419,112 @@ func TestCLI_MountStateKnownStillBehaves(t *testing.T) {
 		}
 		_ = stdout
 	})
+}
+
+// TestCLI_Mount_MountsTheDetectedFilesystem: with no --type, the volume is
+// mounted as the filesystem found on it. It used to be mounted as ext4 always,
+// so the xfs volume `create ... xfs` made could not be mounted at all.
+func TestCLI_Mount_MountsTheDetectedFilesystem(t *testing.T) {
+	cli, stdout, stderr := newTestCLI([]string{"luks2", "mount", "myvolume", "/mnt/test"})
+	cli.FS = &MockFileSystem{Files: map[string]bool{"/mnt/test": true}}
+	var mountedAs string
+	cli.Luks = &MockLuksOperations{
+		DetectFilesystemFunc: func(name string) (luks2.FilesystemType, error) {
+			if name != "myvolume" {
+				t.Errorf("detected the filesystem of %q, want myvolume", name)
+			}
+			return luks2.FilesystemXFS, nil
+		},
+		MountFunc: func(opts luks2.MountOptions) error {
+			mountedAs = opts.FSType
+			return nil
+		},
+	}
+
+	if code := cli.Run(); code != 0 {
+		t.Fatalf("exit code = %d, stderr %q", code, stderr.String())
+	}
+	if mountedAs != "xfs" {
+		t.Fatalf("mounted as %q, want the detected xfs", mountedAs)
+	}
+	if !strings.Contains(stdout.String(), "Detected filesystem: xfs") {
+		t.Errorf("stdout = %q, want it to say what was detected", stdout.String())
+	}
+}
+
+// TestCLI_Mount_RefusesToGuess: when nothing can be detected, nothing is
+// mounted and the operator is told to make a filesystem or name the type.
+func TestCLI_Mount_RefusesToGuess(t *testing.T) {
+	cli, _, stderr := newTestCLI([]string{"luks2", "mount", "myvolume", "/mnt/test"})
+	cli.FS = &MockFileSystem{Files: map[string]bool{"/mnt/test": true}}
+	mounted := false
+	cli.Luks = &MockLuksOperations{
+		DetectFilesystemFunc: func(string) (luks2.FilesystemType, error) {
+			return "", luks2.ErrFilesystemNotDetected
+		},
+		MountFunc: func(luks2.MountOptions) error {
+			mounted = true
+			return nil
+		},
+	}
+
+	if code := cli.Run(); code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if mounted {
+		t.Fatal("mounted a volume whose filesystem could not be determined")
+	}
+	if !strings.Contains(stderr.String(), "--type") || !strings.Contains(stderr.String(), luks2.ErrFilesystemNotDetected.Error()) {
+		t.Errorf("stderr = %q, want the cause and a pointer to --type", stderr.String())
+	}
+}
+
+// TestCLI_Mount_TypeOptionIsUsedAsGiven: --type and -t name the type, in any
+// position, and nothing is detected.
+func TestCLI_Mount_TypeOptionIsUsedAsGiven(t *testing.T) {
+	for _, args := range [][]string{
+		{"--type", "vfat", "myvolume", "/mnt/test"},
+		{"myvolume", "/mnt/test", "-t", "vfat"},
+		{"--type=vfat", "-t", "vfat", "myvolume", "/mnt/test"},
+	} {
+		cli, _, stderr := newTestCLI(append([]string{"luks2", "mount"}, args...))
+		cli.FS = &MockFileSystem{Files: map[string]bool{"/mnt/test": true}}
+		var mountedAs string
+		cli.Luks = &MockLuksOperations{
+			DetectFilesystemFunc: func(string) (luks2.FilesystemType, error) {
+				t.Errorf("%q: detected a type the operator named", args)
+				return luks2.FilesystemExt4, nil
+			},
+			MountFunc: func(opts luks2.MountOptions) error {
+				mountedAs = opts.FSType
+				return nil
+			},
+		}
+		if code := cli.Run(); code != 0 || mountedAs != "vfat" {
+			t.Errorf("%q: exit %d, mounted as %q, stderr %q; want vfat", args, code, mountedAs, stderr.String())
+		}
+	}
+}
+
+// TestCLI_Mount_RefusesAContradictoryOrEmptyType: two different types, or an
+// empty one, are usage errors -- an empty --type must not quietly mean
+// "detect".
+func TestCLI_Mount_RefusesAContradictoryOrEmptyType(t *testing.T) {
+	for _, args := range [][]string{
+		{"--type", "xfs", "-t", "ext4", "myvolume", "/mnt/test"},
+		{"--type=", "myvolume", "/mnt/test"},
+		{"-t", "", "myvolume", "/mnt/test"},
+	} {
+		cli, _, stderr := newTestCLI(append([]string{"luks2", "mount"}, args...))
+		cli.FS = &MockFileSystem{Files: map[string]bool{"/mnt/test": true}}
+		cli.Luks = &MockLuksOperations{
+			MountFunc: func(luks2.MountOptions) error {
+				t.Errorf("%q: mounted", args)
+				return nil
+			},
+		}
+		if code := cli.Run(); code != 1 || !strings.Contains(stderr.String(), "mount") {
+			t.Errorf("%q: exit %d, stderr %q; want a usage error", args, code, stderr.String())
+		}
+	}
 }

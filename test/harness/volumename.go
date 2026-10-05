@@ -76,6 +76,11 @@ func SanitizeNameTerm(s string) string {
 	return b.String()
 }
 
+// hostname is os.Hostname, as a variable so a test can give NewScope a
+// hostname of its choosing -- and a failure -- instead of depending on the
+// machine it runs on. Nothing else changes it.
+var hostname = os.Hostname
+
 // NewScope returns the token identifying this CONTAINER.
 //
 // It is the hostname, which Docker sets to the container's own id: unique per
@@ -89,7 +94,7 @@ func SanitizeNameTerm(s string) string {
 // per-process; only the entrypoint guard's notion of "mine" widens, and that
 // guard runs in the container.
 func NewScope() (string, error) {
-	host, err := os.Hostname()
+	host, err := hostname()
 	if err != nil {
 		return "", fmt.Errorf("%w: hostname unavailable: %v", ErrVolumeName, err)
 	}

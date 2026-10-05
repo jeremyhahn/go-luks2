@@ -323,6 +323,8 @@ func TestCompactJSONRaisesTheKeyslotCeiling(t *testing.T) {
 		metadata := sampleMetadata()
 		for i := 1; i < n; i++ {
 			metadata.Keyslots[fmt.Sprint(i)] = sampleKeyslot(i)
+			// Named by the digest, as every luks2 keyslot must be (#248).
+			metadata.Digests["0"].Keyslots = append(metadata.Digests["0"].Keyslots, fmt.Sprint(i))
 		}
 		if _, _, err := encodeMetadataForHeader(hdr, metadata); err != nil {
 			break

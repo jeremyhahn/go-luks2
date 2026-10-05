@@ -33,16 +33,18 @@ import (
 // reserves.
 const keyInputImageSize = 32 << 20
 
-// requireCryptsetupCLI skips the calling test when cryptsetup is missing, and
-// says so loudly: a differential test with nothing to differ from reports
-// success while verifying nothing.
+// requireCryptsetupCLI FAILS the calling test when cryptsetup is missing: a
+// differential test with nothing to differ from must not report success, and
+// a skip is a success. The unit job, the devcontainer and the integration
+// image all install cryptsetup-bin, so its absence is a broken environment --
+// the same rule pkg/luks2's requireCryptsetup follows.
 func requireCryptsetupCLI(t *testing.T) {
 	t.Helper()
 
 	if _, err := exec.LookPath("cryptsetup"); err != nil {
-		t.Skipf("SKIPPING KEY-FILE COMPATIBILITY CHECK -- cryptsetup is NOT INSTALLED (%v). "+
-			"Nothing in this test was verified against cryptsetup's own key-file handling. "+
-			"Install cryptsetup to actually run it.", err)
+		t.Fatalf("KEY-FILE COMPATIBILITY CHECK CANNOT RUN -- cryptsetup is NOT INSTALLED (%v). "+
+			"This test verifies key-file handling against cryptsetup's own and has nothing to "+
+			"verify without it. Install cryptsetup (Debian/Ubuntu: cryptsetup-bin).", err)
 	}
 }
 
@@ -460,7 +462,7 @@ func TestCreateDoesNotPromptForALabelWhenUnattended(t *testing.T) {
 			gotLabel = opts.Label
 			return nil
 		},
-		SetupLoopDeviceFunc: func(string) (string, error) { return "", errors.New("no loop devices in a unit test") },
+		SetupLoopDeviceFunc: func(string) (string, error) { return "/dev/loop7", nil },
 	}
 
 	if code := cli.Run(); code != 0 {

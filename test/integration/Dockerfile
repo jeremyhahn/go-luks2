@@ -5,7 +5,11 @@
 
 FROM golang:1.27.0
 
-# Install required system dependencies for LUKS operations
+# Install required system dependencies for LUKS operations.
+#
+# strace is a test instrument, not a dependency of the library: it delays one
+# of cryptsetup's own syscalls so a test can make real cryptsetup hold its
+# metadata lock on cue (pkg/luks2/unlockreadlock_integration_test.go).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     util-linux \
     e2fsprogs \
@@ -14,6 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cryptsetup-bin \
     udev \
     kmod \
+    strace \
     && rm -rf /var/lib/apt/lists/*
 
 # Where the run ledgers live.

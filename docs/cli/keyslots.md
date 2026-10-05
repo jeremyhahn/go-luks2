@@ -1,6 +1,6 @@
 # luks2 keyslot commands
 
-> **Status: REFERENCE** · Last verified: 2026-10-04 against v0.3.1-alpha
+> **Status: REFERENCE** · Last verified: 2026-10-05 against v0.3.1-alpha
 
 ```
 luks2 keyslots  <device>
@@ -25,9 +25,9 @@ Slot  Type     Key size  KDF        Encryption
 4     luks2    64        pbkdf2     aes-xts-plain64
 ```
 
-Listed by ascending slot number, with gaps where slots were removed. Unlock
-tries slots bound to the data segment first, then the rest, each in that order;
-keyslot priority is not used. A header with no keyslots prints a message on
+Listed by ascending slot number, with gaps where slots were removed. `open`
+tries only slots bound to the data segment, in that order; keyslot priority is
+not used. A header with no keyslots prints a message on
 stderr and exits 1.
 
 ## testkey
@@ -79,6 +79,7 @@ sudo luks2 killslot --key-file current.key /dev/sdb1 3
 ```
 
 The freed area is overwritten with random bytes. The slot's number is removed
-from every token; a token left naming no slot stays until
-[`token remove`](token.md). Removing the last slot that can open the volume is
-refused.
+from every token in the same header write; a token left naming no slot stays
+until [`token remove`](token.md), as with `cryptsetup luksKillSlot`. Removing the last slot that can open the volume is
+refused; a slot created with `cryptsetup luksAddKey --unbound` does not count,
+and its passphrase cannot authorize `addkey` or `killslot`.

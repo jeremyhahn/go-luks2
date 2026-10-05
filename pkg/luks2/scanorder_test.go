@@ -245,7 +245,7 @@ func multiKeyslotVolume(t *testing.T, ids ...string) string {
 		clone := *template
 		metadata.Keyslots[id] = &clone
 	}
-	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
+	if err := writeHeaderUnvalidated(device, hdr, metadata); err != nil {
 		t.Fatalf("failed to write the multi-keyslot fixture: %v", err)
 	}
 	return device

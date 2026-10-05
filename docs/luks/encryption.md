@@ -6,7 +6,14 @@
 
 `Format` writes `aes-xts-plain64` with a 512-bit key (AES-256-XTS) and
 512-byte sectors. `FormatOptions.KeySize` may be 256 (AES-128-XTS) and
-`SectorSize` may be 4096.
+`SectorSize` may be 4096. The only other data cipher it writes is
+`aes-cbc-essiv:sha256` with a 256-bit key; any other combination fails with
+`ErrUnsupportedCipher` before the device is touched.
+
+`Format` also refuses, before writing: a label or subsystem over 47 bytes
+(`ErrInvalidLabel`), and a device with no room for one data sector after the
+keyslots area (`ErrDeviceTooSmall`). It opens the device with `O_EXCL`, so a
+mounted or mapped block device fails with `ErrDeviceInUse`.
 
 | Where | Cipher | Done by |
 |---|---|---|

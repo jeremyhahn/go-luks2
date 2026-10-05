@@ -59,7 +59,7 @@ func nullKeyslotVolume(t *testing.T, name string) string {
 		digest.Keyslots = []string{"0", "1"}
 	}
 
-	if err := writeHeaderInternal(path, hdr, metadata); err != nil {
+	if err := writeHeaderUnvalidated(path, hdr, metadata); err != nil {
 		t.Fatalf("failed to write the null-keyslot fixture: %v", err)
 	}
 
@@ -275,7 +275,7 @@ func TestNullsAreRefusedWhereTheyCannotBeDropped(t *testing.T) {
 			// Not a Skip. All three fixtures write today, and a skip here would
 			// silently stop testing the refusal it exists for -- the failure
 			// mode the entrypoint's `|| true` had.
-			if err := writeHeaderInternal(path, hdr, metadata); err != nil {
+			if err := writeHeaderUnvalidated(path, hdr, metadata); err != nil {
 				t.Fatalf("the fixture could not be written, so the reader was never exercised: %v", err)
 			}
 
@@ -301,7 +301,7 @@ func TestNullTokenIsDroppedToo(t *testing.T) {
 	}
 	metadata.Tokens = map[string]*Token{"0": nil}
 
-	if err := writeHeaderInternal(path, hdr, metadata); err != nil {
+	if err := writeHeaderUnvalidated(path, hdr, metadata); err != nil {
 		t.Fatalf("failed to write the fixture: %v", err)
 	}
 

@@ -7,6 +7,7 @@ package main
 import (
 	"crypto/fips140"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -339,7 +340,27 @@ func TestDefaultOperationsAreWiredToTheRightLibraryCalls(t *testing.T) {
 	})
 
 	t.Run("RestorePrimaryHeader", func(t *testing.T) {
-		if err := ops.RestorePrimaryHeader(image); err != nil {
+		// An intact primary is current, and restoring over it would roll the
+		// volume back, so it is refused (#248). A torn one is what restore is for.
+		if err := ops.RestorePrimaryHeader(image, luks2.RestoreHeaderOptions{}); !errors.Is(err, luks2.ErrPrimaryHeaderCurrent) {
+			t.Fatalf("RestorePrimaryHeader() over an intact primary: got %v, want ErrPrimaryHeaderCurrent", err)
+		}
+		// Force is what `header restore --force` passes, and it is honored.
+		if err := ops.RestorePrimaryHeader(image, luks2.RestoreHeaderOptions{Force: true}); err != nil {
+			t.Fatalf("RestorePrimaryHeader(Force) over an intact primary: %v", err)
+		}
+		if err := ops.TestKey(image, []byte(passphrase)); err != nil {
+			t.Fatalf("the volume no longer opens after a forced restore: %v", err)
+		}
+		f, err := os.OpenFile(image, os.O_RDWR, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = f.WriteAt([]byte("torn"), luks2.LUKS2HeaderSize)
+		if closeErr := f.Close(); err != nil || closeErr != nil {
+			t.Fatalf("tearing the primary header: %v, %v", err, closeErr)
+		}
+		if err := ops.RestorePrimaryHeader(image, luks2.RestoreHeaderOptions{}); err != nil {
 			t.Fatalf("RestorePrimaryHeader() error = %v", err)
 		}
 		// The container still opens afterwards, which is the only thing that

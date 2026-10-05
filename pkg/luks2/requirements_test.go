@@ -173,11 +173,5 @@ func TestTheFirstUnimplementedRequirementIsReported(t *testing.T) {
 }
 
 func minimalMetadataForRequirements() *LUKS2Metadata {
-	return &LUKS2Metadata{
-		Keyslots: map[string]*Keyslot{},
-		Tokens:   map[string]*Token{},
-		Segments: map[string]*Segment{},
-		Digests:  map[string]*Digest{},
-		Config:   &Config{JSONSize: "12288", KeyslotsSize: "16744448"},
-	}
+	return minimalValidMetadata()
 }

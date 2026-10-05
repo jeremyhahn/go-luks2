@@ -464,15 +464,44 @@ func readLoopFlag(blockDir, name string) bool {
 	return strings.TrimSpace(string(data)) == "1"
 }
 
-// FindLoopDevice finds the loop device for a given file by reading /sys
-func FindLoopDevice(file string) (string, error) {
-	absFile, err := filepath.Abs(file)
+// loopBackingIdentity reports the device and inode of the file the loop
+// device at path is backed by, as the loop driver itself records them
+// (LOOP_GET_STATUS64). A seam because it needs a real loop device.
+var loopBackingIdentity = func(path string) (dev, ino uint64, err error) {
+	f, err := os.Open(path) // #nosec G304 -- path is /dev/<name> for a loop device listed in /sys/block
 	if err != nil {
-		return "", err
+		return 0, 0, err
 	}
+	defer func() { _ = f.Close() }()
+	info, err := unix.IoctlLoopGetStatus64(int(f.Fd()))
+	if err != nil {
+		return 0, 0, err
+	}
+	return info.Device, info.Inode, nil
+}
 
-	// Read /sys/block to find loop devices
-	entries, err := os.ReadDir("/sys/block")
+// FindLoopDevice finds the loop device backing file.
+//
+// A device matches when the loop driver's record of its backing file -- the
+// device and inode LOOP_GET_STATUS64 reports -- is the file's own. It used to
+// compare filepath.Abs(file) with the path sysfs prints, and the two are
+// different strings for the same file whenever the path runs through a
+// symlink, a bind mount or another mount namespace, so an attached file was
+// reported unattached and a caller attached it a second time (#250, C8). A
+// path string is not an identity; a device and inode are.
+func FindLoopDevice(file string) (string, error) {
+	return findLoopDeviceIn(sysBlockRoot, file)
+}
+
+// findLoopDeviceIn is FindLoopDevice against a given sysfs root.
+func findLoopDeviceIn(root, file string) (string, error) {
+	var st unix.Stat_t
+	if err := unix.Stat(file, &st); err != nil {
+		return "", &DeviceError{Device: file, Op: "identify the backing file", Err: err}
+	}
+	wantDev, wantIno := uint64(st.Dev), st.Ino //nolint:unconvert // Dev is not uint64 on every GOARCH
+
+	entries, err := os.ReadDir(root)
 	if err != nil {
 		return "", err
 	}
@@ -487,36 +516,43 @@ func FindLoopDevice(file string) (string, error) {
 			continue
 		}
 
-		// One reader for sysfs, shared with the detach wait: two copies of this
-		// parsing would be two places for "what counts as attached" to drift,
-		// and the wait's correctness depends on answering it the same way
-		// FindLoopDevice does.
-		st, err := readLoopState(name)
+		// sysfs says whether the device is bound at all; only a bound device
+		// has a backing file to identify.
+		state, err := readLoopStateIn(root, name)
 		if err != nil {
-			// Cannot tell for THIS device; it is not evidence about any other,
-			// so the scan continues -- but it is counted, because it is
-			// evidence about the ANSWER. See below.
 			unreadable++
 			lastErr = err
 			continue
 		}
-		if st.backing != "" && absFile == st.backing {
+		if state.backing == "" {
+			continue
+		}
+
+		dev, ino, err := loopBackingIdentity(filepath.Join(devDir, name))
+		if errors.Is(err, unix.ENXIO) {
+			// Released between the sysfs read and the ioctl: the loop
+			// driver's own "not bound" answer.
+			continue
+		}
+		if err != nil {
+			// Bound, and its backing file cannot be identified: that is not
+			// evidence it is some other file. Counted, like an unreadable
+			// sysfs entry.
+			unreadable++
+			lastErr = err
+			continue
+		}
+		if dev == wantDev && ino == wantIno {
 			return "/dev/" + name, nil
 		}
 	}
 
 	// "NOT ATTACHED" AND "COULD NOT TELL" ARE DIFFERENT ANSWERS, and only the
-	// first may be acted on. Per-candidate the skip above is right; in the
-	// AGGREGATE it used to erase the distinction, because every unreadable
-	// candidate still ended here as a flat "no loop device found".
-	//
-	// waitForDetach in this same file is scrupulous about exactly this -- it
-	// counts unreadable separately from held and never reports success from an
-	// unreadable observation. This function did not, and the caller it misleads
-	// is the one asking whether a file is ALREADY attached before attaching it:
-	// told "no" when the truth was "the one device backing it could not be
-	// inspected", it creates a SECOND loop device for the same backing file,
-	// giving the kernel two independent writers of one LUKS container.
+	// first may be acted on. The caller this misleads is the one asking
+	// whether a file is ALREADY attached before attaching it: told "no" when
+	// the truth was "the one device backing it could not be inspected", it
+	// creates a SECOND loop device for the same backing file, giving the kernel
+	// two independent writers of one LUKS container.
 	if unreadable > 0 {
 		return "", &DeviceError{
 			Device: file,

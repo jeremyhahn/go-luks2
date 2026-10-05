@@ -38,44 +38,99 @@ import (
 // and an untrusted one fails the run rather than being repaired -- silently
 // widening someone else's directory is not this code's business.
 
-// ensureTrustedStateDir creates the state directory if it is absent and refuses
-// to use it if it is not trustworthy.
+// trustedDir is the state directory, opened ONCE and validated through that
+// handle. Every ledger read, lock, create and delete goes through the handle
+// too, never through the path again (#247).
+//
+// Validating a path and then re-resolving it for each later operation is a
+// check on one directory followed by use of whatever the name points at by
+// then. With LUKS2_TEST_STATE_DIR under a parent another user can write to,
+// that user could swap a forged directory in after the check, and the
+// privileged reaper would act on its ledgers. A handle cannot be swapped: what
+// was validated is what is read.
+type trustedDir struct {
+	path string
+	root *os.Root
+}
+
+// Close releases the handle.
+func (d *trustedDir) Close() error { return d.root.Close() }
+
+// openTrustedStateDir creates the state directory if it is absent, opens it,
+// and refuses it unless the OPENED directory is trustworthy.
 //
 // It is called from BOTH the writer (OpenLedger) and the reaper (lockReaper),
 // deliberately: a check on one path only is a check an attacker routes around
 // by racing the other.
-func ensureTrustedStateDir(dir string) error {
+func openTrustedStateDir(dir string) (*trustedDir, error) {
 	if dir == "" {
-		return fmt.Errorf("%w: no state directory was configured", ErrLedgerUnavailable)
+		return nil, &StateDirError{Problem: "no state directory was configured"}
 	}
 
 	// 0o700, not 0o750: nothing else has any business in here, and a group the
 	// directory happens to inherit is a group that can aim the reaper.
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("%w: creating %s: %v", ErrLedgerUnavailable, dir, err)
+		return nil, &StateDirError{Dir: dir, Problem: "creating it", Err: err}
 	}
 
 	// Lstat, not Stat: a symlink must be REJECTED rather than followed. Stat
 	// would resolve it and validate the target, which is precisely the check an
 	// attacker wants -- point the name at a directory that passes and swap it
 	// afterwards.
-	fi, err := os.Lstat(dir)
+	named, err := os.Lstat(dir)
 	if err != nil {
-		return fmt.Errorf("%w: inspecting %s: %v", ErrLedgerUnavailable, dir, err)
+		return nil, &StateDirError{Dir: dir, Problem: "inspecting it", Err: err}
+	}
+	if named.Mode()&os.ModeSymlink != 0 {
+		return nil, validateStateDir(dir, named.Mode(), 0, os.Geteuid())
 	}
 
-	owner, ok := fileOwner(fi)
+	stateDirHook(stateDirNamed, dir)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, &StateDirError{Dir: dir, Problem: "opening it", Err: err}
+	}
+	d := &trustedDir{path: dir, root: root}
+
+	// The decision is made on the OPENED directory (fstat of the handle), and
+	// it must be the same directory the name showed a moment ago: a swap
+	// between the two is refused rather than raced.
+	opened, err := root.Stat(".")
+	if err != nil {
+		_ = d.Close()
+		return nil, &StateDirError{Dir: dir, Problem: "inspecting the opened directory", Err: err}
+	}
+	if !os.SameFile(named, opened) {
+		_ = d.Close()
+		return nil, &StateDirError{Dir: dir, Problem: "it was replaced while it was being opened"}
+	}
+
+	owner, ok := fileOwner(opened)
 	if !ok {
-		return fmt.Errorf("%w: cannot determine the owner of %s, so it cannot be trusted",
-			ErrLedgerUnavailable, dir)
+		_ = d.Close()
+		return nil, &StateDirError{Dir: dir, Problem: "cannot determine its owner, so it cannot be trusted"}
 	}
-
-	if err := validateStateDir(dir, fi.Mode(), owner, os.Geteuid()); err != nil {
-		return err
+	if err := validateStateDir(dir, opened.Mode(), owner, os.Geteuid()); err != nil {
+		_ = d.Close()
+		return nil, err
 	}
-
-	return refuseEphemeralStateDir(dir)
+	if err := refuseEphemeralStateDir(d); err != nil {
+		_ = d.Close()
+		return nil, err
+	}
+	stateDirHook(stateDirValidated, dir)
+	return d, nil
 }
+
+// The points in openTrustedStateDir where the directory's name could be
+// swapped under it. stateDirHook runs at each; it does nothing outside tests,
+// which use it to perform the swap at exactly that point.
+const (
+	stateDirNamed     = "named"     // after the name was inspected, before it is opened
+	stateDirValidated = "validated" // after the opened directory passed every check
+)
+
+var stateDirHook = func(stage, dir string) {}
 
 // EphemeralMarker names a file whose PRESENCE declares that the state
 // directory does not outlive the process using it.
@@ -102,9 +157,10 @@ const EphemeralMarker = ".ephemeral-not-a-persistent-mount"
 // container, so the host accumulates devices nothing can attribute and the #85
 // guard blocks the next run with no record to reap. That is the exact defect
 // #96 exists to close, reached by omitting a flag.
-func refuseEphemeralStateDir(dir string) error {
+func refuseEphemeralStateDir(d *trustedDir) error {
+	dir := d.path
 	marker := filepath.Join(dir, EphemeralMarker)
-	if _, err := os.Lstat(marker); err == nil {
+	if _, err := d.root.Lstat(EphemeralMarker); err == nil {
 		return fmt.Errorf("%w: %s is the image's own directory, not a persistent mount "+
 			"(%s is present) -- the ledger would die with this container while the host devices it "+
 			"records would not. Mount a host path over it: "+

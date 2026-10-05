@@ -284,3 +284,13 @@ func TestEnsureTrustedStateDirRefusesWhatItCannotCreate(t *testing.T) {
 		t.Errorf("a state dir under a regular file: %v, want ErrLedgerUnavailable naming the create", err)
 	}
 }
+
+// ensureTrustedStateDir opens and validates dir the way OpenLedger and the
+// reaper do, then releases the handle: the decision alone, for these tests.
+func ensureTrustedStateDir(dir string) error {
+	d, err := openTrustedStateDir(dir)
+	if err != nil {
+		return err
+	}
+	return d.Close()
+}

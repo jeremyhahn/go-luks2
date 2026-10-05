@@ -35,6 +35,8 @@ These files are tracked on `main` and stripped at publish (#211):
   `.claude/settings.local.json`, is gitignored.
 - `.github/workflows/automerge.yml`, which the forge requires. Only that exact
   name; a `.yaml` variant or nested copy fails.
+- `test/ci/workflows/automerge_test.go`, which runs `automerge.yml`'s merge
+  script and so goes with it (#247).
 
 The gate passes them, lists each on every run and does not call the tree
 publishable while one is tracked. Their content is still scanned, and a script

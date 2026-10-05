@@ -1,11 +1,11 @@
 # luks2 header, luks2 isluks
 
-> **Status: REFERENCE** · Last verified: 2026-10-04 against v0.3.1-alpha
+> **Status: REFERENCE** · Last verified: 2026-10-05 against v0.3.1-alpha
 
 ```
 luks2 header show      <device>
 luks2 header secondary <device>
-luks2 header restore   <device>
+luks2 header restore   [--batch-mode | --yes] [--force] <device>
 luks2 isluks [--luks2] <device>
 ```
 
@@ -39,9 +39,13 @@ secondary is ahead, the primary is stale.
 
 ## restore
 
-Overwrites the primary copy with the secondary, after you type `YES`. The
-secondary is validated first. If it is older than the primary, changes made
-since are lost, so compare sequence IDs first and keep a backup:
+Rebuilds the primary copy from the secondary, after you type `YES`
+(`--batch-mode` or `--yes` skips the question; any other answer, end of input
+or a read error exits 1). The secondary is validated first. Restore is refused
+when the primary is intact and its sequence ID is not lower than the
+secondary's, since that would roll the volume back: a passphrase removed since
+may open it again. `--force` restores anyway; it still asks for `YES` unless
+`--batch-mode` is given. Keep a backup:
 
 ```bash
 cryptsetup luksHeaderBackup /dev/sdb1 --header-backup-file /root/sdb1.header

@@ -7,6 +7,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -367,10 +368,10 @@ func TestRecoveryGenerateHonorsTheFormat(t *testing.T) {
 }
 
 func TestRecoveryGenerateRefusesAnImpossibleRequest(t *testing.T) {
-	cli, _, stderr := runCLI(t, "", "recovery", "generate", "--format", "morse")
+	cli, _, stderr := runCLI(t, "", "recovery", "generate", "--format", "hex")
 	cli.Luks = &MockLuksOperations{
 		GenerateRecoveryKeyFunc: func(int, luks2.RecoveryKeyFormat) (*luks2.RecoveryKey, error) {
-			return nil, errors.New("unsupported recovery key format")
+			return nil, errors.New("unsupported recovery key length")
 		},
 	}
 
@@ -549,4 +550,56 @@ func TestRecoveryVerifyReportsAReleaseReport(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRecoveryRefusesAnUnknownFormatBeforeAnythingElse: --format names one of
+// three renderings. Anything else -- an empty value included, which is not a
+// request for the default -- is a usage error with a non-zero exit, raised
+// before a passphrase is read or the library is asked for anything. Before, an
+// unknown name reached the library (after the passphrase prompt, for add) and
+// an empty one was rendered dashed.
+func TestRecoveryRefusesAnUnknownFormatBeforeAnythingElse(t *testing.T) {
+	for _, args := range [][]string{
+		{"recovery", "generate", "--format", "morse"},
+		{"recovery", "generate", "--format="},
+		{"recovery", "add", "--format", "DASHED", "/dev/sdb1"},
+		{"recovery", "add", "--format", "", "/dev/sdb1"},
+	} {
+		t.Run(strings.Join(args[1:], " "), func(t *testing.T) {
+			cli, stdout, stderr := runCLI(t, "", args...)
+			stdin := &readCounter{r: strings.NewReader("a-passphrase\n")}
+			cli.Stdin = stdin
+			cli.Luks = &MockLuksOperations{
+				GenerateRecoveryKeyFunc: func(length int, _ luks2.RecoveryKeyFormat) (*luks2.RecoveryKey, error) {
+					t.Error("generated a key for a format that does not exist")
+					return luks2.GenerateRecoveryKey(length, luks2.RecoveryKeyFormatDashed)
+				},
+				AddRecoveryKeyFunc: func(string, []byte, *luks2.RecoveryKeyOptions) (*luks2.RecoveryKey, error) {
+					t.Error("enrolled a key for a format that does not exist")
+					return luks2.GenerateRecoveryKey(32, luks2.RecoveryKeyFormatDashed)
+				},
+			}
+
+			if code := cli.Run(); code == 0 {
+				t.Fatalf("exit 0; stdout %q", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), ErrUsage.Error()) || !strings.Contains(stderr.String(), "recovery key format") {
+				t.Errorf("stderr = %q, want a usage error naming the format", stderr.String())
+			}
+			if stdin.reads != 0 {
+				t.Errorf("read the passphrase before refusing the format")
+			}
+		})
+	}
+}
+
+// readCounter counts the reads made through it.
+type readCounter struct {
+	r     io.Reader
+	reads int
+}
+
+func (c *readCounter) Read(p []byte) (int, error) {
+	c.reads++
+	return c.r.Read(p)
 }

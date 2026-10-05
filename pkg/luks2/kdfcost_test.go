@@ -286,43 +286,44 @@ func argon2KDF(t, memory, cpus int) *KDF {
 	return &KDF{Type: "argon2id", Salt: "c2FsdA==", Time: &t, Memory: &memory, CPUs: &cpus}
 }
 
-// TestCreateArgon2KDFCarriesANegativeCostToTheDerivation covers the SEAM the
-// #112 fix depends on and which nothing else asserted.
+// TestCreateArgon2KDFRefusesANegativeCostRatherThanDefaultingIt covers the SEAM
+// the #112 fix depends on and which nothing else asserted.
 //
 // The propagation chain is AddKeyOptions -> addKeyFormatOptions -> CreateKDF ->
-// createArgon2KDF -> deriveArgon2*. Both ends of it were tested and the middle
-// was not: `addKeyFormatOptions` was shown to stop discarding a negative, and
-// the derivation was shown to refuse one, but nothing checked that
-// `createArgon2KDF` passes it through UNCHANGED -- and it is the one link that
-// could quietly swallow it, because it defaults on `== 0` rather than on
-// `<= 0`. Widen that comparison and the refusal this PR adds becomes
-// unreachable while every other test stays green.
+// createArgon2KDF -> deriveArgon2*. The one link that could quietly swallow a
+// negative is createArgon2KDF, because it defaults on `== 0` rather than on
+// `<= 0`: widen that comparison and a caller's -1 becomes this package's 1 GiB
+// default, silently.
 //
-// It holds in both modes (#235). The seam itself is checked directly, because
-// it is the same code whether or not the process runs in FIPS 140-3 mode. The
-// public entry point is checked for what it does in the mode this process is
-// in: without FIPS it carries the cost through; under FIPS it refuses Argon2
-// before building anything, with the typed error.
-func TestCreateArgon2KDFCarriesANegativeCostToTheDerivation(t *testing.T) {
+// Since #249 (A5) createArgon2KDF holds what it builds to validateKDFCost -- the
+// read path's own bounds -- so a negative cost is REFUSED there, with an error,
+// before anything is derived or written. What this pins is that the refusal is
+// reached at all: a createArgon2KDF that defaulted the negative would build a
+// valid 1 GiB KDF and return no error. The derivation's own refusal is still
+// checked, on a KDF built by hand, so the end of the chain is not merely
+// assumed.
+//
+// It holds in both modes (#235): without FIPS the cost is refused; under FIPS
+// Argon2 is refused before anything is built, with the typed error.
+func TestCreateArgon2KDFRefusesANegativeCostRatherThanDefaultingIt(t *testing.T) {
 	kdf, err := createArgon2KDF(KDFTypeArgon2id, FormatOptions{Argon2Memory: -1}, "c2FsdA==")
-	if err != nil {
-		t.Fatalf("createArgon2KDF() error = %v, want the cost carried to the derivation, not rejected here", err)
-	}
-	if kdf.Memory == nil || *kdf.Memory != -1 {
-		t.Fatalf("createArgon2KDF turned a memory cost of -1 into %v; the refusal downstream is then unreachable", kdf.Memory)
+	if err == nil {
+		t.Fatalf("createArgon2KDF() = %+v for a memory cost of -1; the negative was defaulted instead of refused", kdf)
 	}
 
-	// And the end of the chain refuses it, so the seam is not merely carrying a
-	// value into a place that ignores it.
-	if _, err := deriveArgon2id([]byte("passphrase"), []byte("saltsaltsaltsalt"), kdf, 32); err == nil {
+	// And the end of the chain refuses it too, so a KDF that reached it some
+	// other way would not be derived.
+	if _, err := deriveArgon2id([]byte("passphrase"), []byte("saltsaltsaltsalt"), argon2KDF(1, -1, 1), 32); err == nil {
 		t.Fatal("deriveArgon2id() accepted a memory cost of -1")
 	}
 
-	assertCreateKDFInThisMode(t, FormatOptions{KDFType: "argon2id", Argon2Memory: -1}, func(t *testing.T, kdf *KDF) {
-		if kdf.Memory == nil || *kdf.Memory != -1 {
-			t.Fatalf("CreateKDF turned a memory cost of -1 into %v", kdf.Memory)
-		}
-	})
+	kdf, err = CreateKDF(FormatOptions{KDFType: "argon2id", Argon2Memory: -1}, 32)
+	if kdf != nil || err == nil {
+		t.Fatalf("CreateKDF(argon2id, memory -1) = %+v, %v; want a refusal", kdf, err)
+	}
+	if fips140.Enabled() && !errors.Is(err, ErrFIPSNotApproved) {
+		t.Fatalf("in FIPS mode CreateKDF(argon2id) = %v, want ErrFIPSNotApproved", err)
+	}
 }
 
 // The success control for the case above: zero MUST still take the default, or

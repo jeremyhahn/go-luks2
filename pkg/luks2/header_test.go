@@ -180,7 +180,7 @@ func TestCalculateHeaderChecksum(t *testing.T) {
 				SequenceID: 1,
 				HeaderSize: uint64(LUKS2HeaderSize + LUKS2DefaultSize),
 			},
-			jsonData: []byte(`{"keyslots":{},"segments":{},"digests":{},"config":{"json_size":"12288"}}`),
+			jsonData: []byte(`{"keyslots":{},` + minimalHeaderJSONTail),
 			jsonSize: LUKS2DefaultSize,
 		},
 		{
@@ -253,7 +253,7 @@ func TestCalculateHeaderChecksumDeterministic(t *testing.T) {
 	copy(hdr.Magic[:], LUKS2Magic)
 	copy(hdr.ChecksumAlgorithm[:], "sha256")
 
-	jsonData := []byte(`{"keyslots":{},"segments":{},"digests":{},"config":{"json_size":"12288"}}`)
+	jsonData := []byte(`{"keyslots":{},` + minimalHeaderJSONTail)
 	jsonSize := LUKS2DefaultSize
 
 	// Calculate checksum first time
@@ -310,7 +310,7 @@ func TestValidateHeaderChecksum(t *testing.T) {
 				copy(hdr.Magic[:], LUKS2Magic)
 				copy(hdr.ChecksumAlgorithm[:], "sha256")
 
-				jsonData := []byte(`{"keyslots":{},"segments":{},"digests":{},"config":{"json_size":"12288"}}`)
+				jsonData := []byte(`{"keyslots":{},` + minimalHeaderJSONTail)
 				jsonSize := LUKS2DefaultSize
 
 				// Calculate correct checksum
@@ -342,7 +342,7 @@ func TestValidateHeaderChecksum(t *testing.T) {
 				copy(hdr.Magic[:], LUKS2Magic)
 				copy(hdr.ChecksumAlgorithm[:], "sha256")
 
-				jsonData := []byte(`{"keyslots":{},"segments":{},"digests":{},"config":{"json_size":"12288"}}`)
+				jsonData := []byte(`{"keyslots":{},` + minimalHeaderJSONTail)
 				jsonSize := LUKS2DefaultSize
 
 				// Calculate correct checksum
@@ -397,7 +397,7 @@ func TestValidateHeaderChecksumInvalid(t *testing.T) {
 				copy(hdr.Magic[:], LUKS2Magic)
 				copy(hdr.ChecksumAlgorithm[:], "sha256")
 
-				jsonData := []byte(`{"keyslots":{},"segments":{},"digests":{},"config":{"json_size":"12288"}}`)
+				jsonData := []byte(`{"keyslots":{},` + minimalHeaderJSONTail)
 				jsonSize := LUKS2DefaultSize
 
 				// Calculate correct checksum
@@ -433,7 +433,7 @@ func TestValidateHeaderChecksumInvalid(t *testing.T) {
 				copy(hdr.Magic[:], LUKS2Magic)
 				copy(hdr.ChecksumAlgorithm[:], "sha256")
 
-				jsonData := []byte(`{"keyslots":{},"segments":{},"digests":{},"config":{"json_size":"12288"}}`)
+				jsonData := []byte(`{"keyslots":{},` + minimalHeaderJSONTail)
 				jsonSize := LUKS2DefaultSize
 
 				// Calculate correct checksum
@@ -505,7 +505,7 @@ func TestReadJSONMetadata(t *testing.T) {
 				HeaderSize:   uint64(LUKS2HeaderSize + LUKS2DefaultSize),
 				HeaderOffset: 0,
 			},
-			jsonData: []byte(`{"keyslots":{},"segments":{},"digests":{},"config":{"json_size":"12288"}}`),
+			jsonData: []byte(`{"keyslots":{},` + minimalHeaderJSONTail),
 			wantErr:  false,
 		},
 		{
@@ -524,7 +524,7 @@ func TestReadJSONMetadata(t *testing.T) {
 				`"kdf":{"type":"pbkdf2","hash":"sha256","salt":"dGVzdHNhbHQ=","iterations":1000},` +
 				`"af":{"type":"luks1","stripes":4000,"hash":"sha256"},` +
 				`"area":{"type":"raw","offset":"32768","size":"258048","encryption":"aes-xts-plain64","key_size":64}}},` +
-				`"segments":{},"digests":{},"config":{"json_size":"12288"}}`),
+				`` + minimalHeaderJSONTail),
 			wantErr: false,
 		},
 		{
@@ -537,7 +537,7 @@ func TestReadJSONMetadata(t *testing.T) {
 				HeaderSize:   uint64(LUKS2HeaderSize + LUKS2DefaultSize),
 				HeaderOffset: 0,
 			},
-			jsonData: []byte(`{"keyslots":{"0":{"type":"luks2","key_size":64}},"segments":{},"digests":{},"config":{"json_size":"12288"}}`),
+			jsonData: []byte(`{"keyslots":{"0":{"type":"luks2","key_size":64}},` + minimalHeaderJSONTail),
 			wantErr:  false,
 		},
 		{
@@ -546,7 +546,7 @@ func TestReadJSONMetadata(t *testing.T) {
 				HeaderSize:   uint64(LUKS2HeaderSize + LUKS2DefaultSize),
 				HeaderOffset: 0,
 			},
-			jsonData: append([]byte(`{"keyslots":{},"segments":{},"digests":{},"config":{"json_size":"12288"}}`), 0, 0, 0),
+			jsonData: append([]byte(`{"keyslots":{},`+minimalHeaderJSONTail), 0, 0, 0),
 			wantErr:  false,
 		},
 		{
@@ -654,6 +654,7 @@ func TestReadJSONMetadataRoundTrip(t *testing.T) {
 				},
 			},
 		},
+		Tokens: map[string]*Token{}, // mandatory: cryptsetup refuses a header without it (#248)
 		Segments: map[string]*Segment{
 			"0": {
 				Type:       "crypt",
@@ -970,7 +971,7 @@ func nullEntryVolume(t *testing.T, name string) string {
 		digest.Keyslots = []string{"0", "1", "2", "10"}
 	}
 
-	if err := writeHeaderInternal(path, hdr, metadata); err != nil {
+	if err := writeHeaderUnvalidated(path, hdr, metadata); err != nil {
 		t.Fatalf("failed to write the null-entry fixture: %v", err)
 	}
 	return path

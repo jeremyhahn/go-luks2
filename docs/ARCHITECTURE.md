@@ -1,6 +1,6 @@
 # Architecture
 
-> **Status: REFERENCE** · Last verified: 2026-10-04 against v0.3.1-alpha
+> **Status: REFERENCE** · Last verified: 2026-10-05 against v0.3.1-alpha
 
 How go-luks2 is built, for maintainers. The API by task is in the
 [library guide](luks/README.md); the commands are in the
@@ -28,14 +28,17 @@ Runtime dependencies: `github.com/jeremyhahn/go-enclave` (locked memory),
 The layout and field rules are in [luks/header.md](luks/header.md). The design
 points:
 
-- `ReadHeader` reads the primary copy and checks magic, version, area size,
-  checksum and the JSON. Segment fields that reach the dm-crypt table are
-  checked against a whitelist then (`segmentvalidation.go`).
+- `ReadHeader` reads the primary copy's area once and checks magic, version,
+  area size, checksum and the JSON, then cryptsetup's structural rules
+  (`headervalidation.go`). Segment fields that reach the dm-crypt table are
+  checked against a whitelist then (`segmentvalidation.go`). Every write runs
+  the full structural validator first, except `RestorePrimaryHeader`, which
+  copies an existing secondary and applies only the header-wide rules.
 - Keyslots are screened one at a time before use (`screenKeyslot`,
   `validateKeyslot`): geometry, key size and KDF cost are bounded before any
   derivation or allocation, and one bad keyslot does not block the others. See
   [Untrusted headers](luks/header.md#untrusted-headers).
-- `writeHeaderInternal` encodes canonical JSON, writes and syncs the primary,
+- `writeHeaderTo` encodes canonical JSON, writes and syncs the primary,
   then writes and syncs the secondary, so a crash tears at most one copy.
   Keyslot and token changes advance `sequence_id`.
 - Members the structs do not model survive a read-modify-write in every
@@ -43,6 +46,11 @@ points:
   [header.md](luks/header.md#encoding) for the limits.
 - Every operation that writes the container takes an exclusive `flock` on the
   device, waiting up to 30 s (`DefaultLockWait`) before `LockTimeoutError`.
+  Its reads and writes go through the descriptor it locked, or through an
+  `O_EXCL` descriptor proven to be the same file: the path is opened again
+  only for that in-use claim (Format and Wipe write through it; WipeKeyslot
+  only holds it), and the open is refused with `ErrDeviceChanged` unless its
+  device, inode and rdev match the locked one.
 - Every keyslot removal path goes through one check that refuses to remove the
   last keyslot that can open the volume (`ErrLastKeyslot`).
 
@@ -54,16 +62,23 @@ the passphrase key, create the PBKDF2 digest, AF-split the master key
 write the keyslot material, fill the rest of the keyslots area with random
 bytes, sync.
 
-`Unlock`: validate the path, passphrase and mapping name; read the header; try
-keyslots (bound to every data segment first, then ascending number; priority
-is not read); derive, decrypt, AF-merge, verify against the digest; load a
-dm-crypt table that references the key in the kernel keyring; wait for the
-device node. `UnlockWithVolumeKey` skips the keyslots and verifies the caller's
-key against the segment's digest.
+`Unlock`: validate the path, passphrase and mapping name; open the device
+once (block devices only); take cryptsetup's read lock (`LOCK_SH` on the
+device, then on `/run/cryptsetup/L_<maj>:<min>`), so a writer holding it
+exclusively is waited for; read the header, size and keyslots through that
+descriptor; refuse an unimplemented mandatory requirement or more than one
+segment; try only keyslots bound to the crypt segment (ascending number;
+priority is not read); derive, decrypt, AF-merge, verify against that segment's
+digest; release the read lock; create the dm target, then load a dm-crypt table that names the device
+as `major:minor` and references the key in the kernel keyring; wait until
+`/dev/mapper/<name>` carries the target's device number.
+`UnlockWithVolumeKey` skips the keyslots and verifies the caller's key against
+the segment's digest.
 
-If any step after the target is created fails, the target is removed if it
-still carries the dm UUID this call set. If that rollback cannot complete, the
-error matches `ErrMappingStillLive`.
+If any step after this call's own create fails, the target is removed if it
+still carries the dm UUID and the device number that create returned. A create
+refused because the name is taken rolls nothing back. If the rollback cannot
+complete, the error matches `ErrMappingStillLive`.
 
 ## Key custody
 
@@ -130,11 +145,18 @@ default plus that one allow block; [TESTING.md](TESTING.md) has the measurements
 | Loop devices | Loop ioctls through `/dev/loop-control` |
 | Mount | `mount(2)` and `umount2(2)` |
 
+Mapping names are validated at every entry, device-mapper decides whether a
+mapping exists, and a `/dev/mapper` or `/dev/dm-N` node is used only when its
+device number matches the target's (`ErrDeviceNodeUnverified`).
+
 External programs run only for work that is not LUKS2: `mkfs.ext4`,
 `mkfs.xfs`, `mkfs.fat`, `zpool` and `zfs` to make filesystems; `e2fsck`,
 `xfs_repair`, `fsck.fat` and `zpool scrub` to check them; `blkid` for
 `GetFilesystemInfo`; and whatever helper a `CommandKeyProvider` names, such as
-`fido2-assert`.
+`fido2-assert`. The filesystem programs come from `/usr/sbin`, `/usr/bin`,
+`/sbin`, `/bin`, `/usr/local/sbin` or `/usr/local/bin`, never `PATH`, only if
+nobody but root or the caller can write them or a directory above them; they
+get `PATH` and `LC_ALL=C` as their environment and `--` before every operand.
 
 ## FIPS mode
 
@@ -150,7 +172,7 @@ gets `*FIPSImportRequiredError` naming `MigrateToFIPS`. Details: [FIPS.md](FIPS.
 | LUKS2 header and keyslot areas | Untrusted: anyone with the disk can write them | Segments whitelisted at read; each keyslot bounded before use; removal and `MigrateToFIPS` also check areas against the device, the keyslots area and other keyslots |
 | Passphrase, volume key, key provider output | Secret | Borrowed or moved into enclaves; never logged |
 | Mapping name | Caller-chosen | Validated before use in the dm UUID, the keyring description (hashed) and `/dev/mapper` |
-| Key provider helper | Runs with the caller's privileges | Run as named (a bare name is looked up on `PATH`, so callers should pass an absolute path); output capped at 64 KiB and read into locked memory |
+| Key provider helper | Runs with the caller's privileges | Absolute path required; minimal environment (system `PATH` plus `Env`); output capped at 64 KiB and read into locked memory |
 | Kernel keyring | Shared per uid and session | `logon` type, session keyring, removed after one ioctl |
 | Device-mapper and loop | Global to the host | Identity checked before every removal; the check and the removal are separate ioctls, so a same-name race between them remains |
 

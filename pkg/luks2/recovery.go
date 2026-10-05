@@ -20,8 +20,21 @@ import (
 	"github.com/jeremyhahn/go-enclave"
 )
 
-// RecoveryKeyLength is the default length for recovery keys (32 bytes = 256 bits)
+// RecoveryKeyLength is the default length for recovery keys (32 bytes = 256
+// bits), and also the SHORTEST one GenerateRecoveryKey will draw.
 const RecoveryKeyLength = 32
+
+// Recovery-key generation refusals (#249, A4).
+var (
+	// ErrRecoveryKeyTooShort is returned for a recovery key of fewer than
+	// RecoveryKeyLength random bytes, or one whose rendering is too long to be
+	// enrolled as a passphrase.
+	ErrRecoveryKeyTooShort = errors.New("recovery key length out of range (at least 32 random bytes, and a rendering no longer than 512 bytes)")
+
+	// ErrInvalidRecoveryKeyFormat is returned for a format other than hex,
+	// base64 or dashed.
+	ErrInvalidRecoveryKeyFormat = errors.New("unknown recovery key format (hex, base64 or dashed)")
+)
 
 // RecoveryKeyFormat specifies the output format for recovery keys
 type RecoveryKeyFormat string
@@ -36,6 +49,31 @@ const (
 	// RecoveryKeyFormatDashed outputs as dash-separated hex groups (like Windows BitLocker)
 	RecoveryKeyFormatDashed RecoveryKeyFormat = "dashed"
 )
+
+// ParseRecoveryKeyFormat returns the format name spells: hex, base64 or
+// dashed. Anything else -- the empty string included, since a caller that
+// names a format has not asked for the default -- is refused with an error
+// matching ErrInvalidRecoveryKeyFormat.
+//
+// It is for a caller that takes the name from a person, so a misspelling is
+// refused when it is typed rather than when a key is generated.
+func ParseRecoveryKeyFormat(name string) (RecoveryKeyFormat, error) {
+	format := RecoveryKeyFormat(name)
+	if !format.known() {
+		return "", &detailError{Kind: ErrInvalidRecoveryKeyFormat, Detail: fmt.Sprintf("%q", name)}
+	}
+	return format, nil
+}
+
+// known reports whether f is one of the three renderings.
+func (f RecoveryKeyFormat) known() bool {
+	switch f {
+	case RecoveryKeyFormatHex, RecoveryKeyFormatBase64, RecoveryKeyFormatDashed:
+		return true
+	default:
+		return false
+	}
+}
 
 // RecoveryKey is a generated credential for a volume.
 //
@@ -130,123 +168,25 @@ type RecoveryKeyOptions struct {
 	// AddKey: DefaultKDFType -- PBKDF2-SHA512 in FIPS 140-3 mode, Argon2id
 	// otherwise (#237) -- or Argon2id when an Argon2 cost is set.
 	//
-	// # What systemd writes, MEASURED
+	// systemd-cryptenroll writes a recovery key, and every other credential that
+	// is not a human passphrase, as PBKDF2-SHA512 at a flat 1000 iterations with
+	// no calibration (measured: systemd 255, cryptsetup 2.7.0). 1000 IS NOT A
+	// GENERALLY SAFE COUNT. It is right here only because the credential is 256
+	// bits this package drew from a CSPRNG: there is nothing to enumerate, so
+	// stretching defends against nothing. Under a human-chosen passphrase the
+	// same number would be catastrophic.
 	//
-	// From `cryptsetup luksDump` on a volume enrolled with systemd-cryptenroll
-	// (systemd 255, cryptsetup 2.7.0) holding a passphrase, a recovery key and
-	// three FIDO2 credentials:
+	// To write systemd's keyslot, set KDFType to KDFTypePBKDF2, Hash to
+	// "sha512" and PBKDFIterations to 1000. AddRecoveryKey enrolls under the
+	// library-generated exemption (keyslotCostPolicy, kdf.go), which waives the
+	// hash-dependent floor that would refuse 1000 for a caller's passphrase and
+	// keeps minPBKDF2Iterations; no exported option reaches that exemption for
+	// a credential the caller supplies.
 	//
-	//	slot 0  human passphrase   argon2id  t=24  m=512000  p=4
-	//	slot 1  recovery key       pbkdf2    sha512  iterations=1000
-	//	slot 2  FIDO2 credential   pbkdf2    sha512  iterations=1000
-	//	slot 3  FIDO2 credential   pbkdf2    sha512  iterations=1000
-	//	slot 4  FIDO2 credential   pbkdf2    sha512  iterations=1000
-	//
-	// A flat minimum, identically, for every credential that is not a human
-	// passphrase, and no calibration at all. That is the correct shape and this
-	// package should match it.
-	//
-	// # 1000 IS NOT A GENERALLY SAFE ITERATION COUNT
-	//
-	// It is correct for these keyslots for exactly one reason: the credential is
-	// 256 bits from a CSPRNG, so there is nothing to enumerate and stretching it
-	// defends against nothing. The same number under a HUMAN-CHOSEN passphrase
-	// would be catastrophic -- which is precisely why systemd puts argon2id at
-	// t=24 on slot 0 and 1000 pbkdf2 iterations on the rest. Anyone copying the
-	// number somewhere else, or "fixing" it upward here, has misread which of
-	// those two cases they are in.
-	//
-	// (Unrelatedly, 1000 is also what `cryptsetup --pbkdf-force-iterations 1000`
-	// produces, which is how the test fixtures in this repository stay fast. Same
-	// number, two unconnected reasons. They have been confounded once already.)
-	//
-	// # Why the default is still argon2id: it CANNOT BE EXPRESSED YET
-	//
-	// This package's pbkdf2 path takes a TIME BUDGET and calibrates against it;
-	// there is no way through the public API to write a fixed iteration count.
-	// The floor at minPBKDF2Iterations does not rescue it, because on real
-	// hardware even a 1 ms budget extrapolates well past 1000 before the floor
-	// is consulted. Measured on one developer machine, BenchmarkPBKDF2:
-	//
-	//	sha512, 1 ms budget    -> 3253 iterations
-	//	sha512, 10 ms budget   -> 31824 iterations
-	//	sha256, 2000 ms (the default) -> ~9.9M iterations
-	//
-	// So the smallest thing this API can currently write is a few thousand
-	// iterations that DIFFER PER MACHINE -- neither systemd's number nor a
-	// reproducible one, and still paying for a calibration probe to get there.
-	// Switching the default to that would produce headers that match nothing and
-	// vary between two nodes enrolled from the same script, which is worse than
-	// either endpoint.
-	//
-	// # THE COMPARISON ABOVE HAS AN EXPIRY DATE
-	//
-	// Read the 0.88 s / 2.08 s figures as an argument against pbkdf2 and you
-	// will reach the wrong conclusion the moment the gap above closes. Nearly
-	// all of that 2.08 s IS THE BENCHMARK -- the calibration probe, not the key
-	// derivation -- and an explicit iteration count does not run one. At 1000
-	// iterations there is nothing to calibrate and nothing to stretch, so the
-	// choice stops being "a gigabyte or two seconds" and becomes neither: the
-	// memory comes back AND the wall time with it.
-	//
-	// What survives the change is the reasoning, which is why it is written out
-	// rather than summarized as a verdict: a heavy KDF defends a guessable
-	// secret, this credential is not guessable, and the cost was never buying
-	// anything. The 2.4x figure is an artifact of an API that could only
-	// calibrate.
-	//
-	// # Closing it takes TWO things, and the second one is easy to miss
-	//
-	// The first is an explicit iteration count -- PBKDFIterations on
-	// FormatOptions and AddKeyOptions, resolved in createPBKDF2KDF instead of
-	// the benchmark. That exists on the issue/144-canonical-json-conformance
-	// branch and is not on main yet.
-	//
-	// IT IS NOT SUFFICIENT ON ITS OWN. An explicit count is still bounded by
-	// this package's OWASP-derived floor, which refuses systemd's number
-	// outright -- measured against forcedPBKDF2Iterations:
-	//
-	//	sha1    1000 REFUSED: permitted range 1300000..100000000
-	//	sha256  1000 REFUSED: permitted range  600000..100000000
-	//	sha512  1000 REFUSED: permitted range  210000..100000000
-	//
-	// So the floor rejects 1000 by a factor of 210 on sha512, and anyone who
-	// adds the field and expects this default to follow will hit that and be
-	// puzzled. The floor is not wrong: it exists because a calibrated count
-	// measures the DEFENDER's hardware and says nothing about the attacker's,
-	// which is the right instinct for a passphrase.
-	//
-	// It is wrong only for a credential with no brute-force surface, and the
-	// second thing needed is therefore an exemption scoped to exactly that: to
-	// credentials THIS LIBRARY GENERATED, on the unexported addKeyWithPolicy
-	// path, with AddRecoveryKey and EnrollKeyProvider as the only callers
-	// permitted to claim it -- because they are the only two that know the
-	// bytes came from a CSPRNG rather than from a person. Exempt means the OWASP floor does not
-	// apply; minPBKDF2Iterations still does, and it is 1000, which is systemd's
-	// value exactly. That work is queued behind the field.
-	//
-	// If a future change makes that exemption reachable from an exported option,
-	// something has gone wrong: a caller-supplied credential may be a human
-	// passphrase, and the floor is the only thing standing between one and a
-	// keyslot stretched a thousand times too little.
-	//
-	// When both land, this default becomes pbkdf2 / SHA512 / 1000 with no
-	// calibration, and the luksDump table above is the artifact to check it
-	// against. The hash is part of the target and is the easiest part to lose:
-	// systemd writes sha512, while this package's own default is sha256.
-	//
-	// # None of this is an interoperability question
-	//
-	// A keyslot records its own KDF parameters and every implementation reads
-	// them from the header, so cryptsetup and systemd-cryptsetup open an
-	// argon2id keyslot and a pbkdf2 one alike. The type, hash and count are a
-	// COST decision, not a compatibility constraint, and treating the iteration
-	// count as something that has to match for interop would be a
-	// misunderstanding. It is also forward-only: volumes keep whatever their
-	// keyslots already hold.
-	//
-	// Outside FIPS mode, callers who want pbkdf2 set KDFType to KDFTypePBKDF2
-	// (or an alias that names the hash) explicitly.
+	// None of this is an interoperability question: a keyslot records its own
+	// KDF parameters, and cryptsetup and systemd-cryptsetup open an argon2id
+	// keyslot and a pbkdf2 one alike. It is a cost decision, and forward-only --
+	// volumes keep whatever their keyslots already hold.
 	KDFType string
 
 	// Argon2 parameters
@@ -290,7 +230,7 @@ type RecoveryKeyOptions struct {
 //
 // length is the number of RANDOM BYTES drawn, not the length of the credential:
 // the credential is those bytes rendered in format, which is longer. 32 bytes
-// is 71 characters dashed, 64 hex, 44 base64.
+// is 74 characters dashed (eleven groups of up to six), 64 hex, 44 base64.
 //
 // The random bytes are drawn directly into locked memory and the rendering is
 // built directly into locked memory, so neither ever exists on the ordinary
@@ -299,12 +239,34 @@ type RecoveryKeyOptions struct {
 // them, so holding them would be holding a second copy of the secret for no
 // reason. The caller owns the result and must Clear it.
 func GenerateRecoveryKey(length int, format RecoveryKeyFormat) (*RecoveryKey, error) {
-	if length <= 0 {
+	if length == 0 {
 		length = RecoveryKeyLength
 	}
 
 	if format == "" {
 		format = RecoveryKeyFormatDashed
+	}
+
+	// A FORMAT IS ONE OF THREE, not "dashed, and anything else as dashed".
+	// An unknown value used to be rendered dashed silently, so a caller asking
+	// for a format that does not exist got a key in one they did not ask for
+	// and could not tell (#249, A4).
+	if !format.known() {
+		return nil, &detailError{Kind: ErrInvalidRecoveryKeyFormat, Detail: fmt.Sprintf("%q", format)}
+	}
+
+	// AT LEAST 256 BITS, because that is what the recovery key's whole cost
+	// model assumes (#249, A4). AddRecoveryKey enrolls it under the
+	// library-generated exemption -- PBKDF2 down to 1000 iterations, systemd's
+	// value -- on the argument that 256 CSPRNG bits leave no search for an
+	// iteration count to multiply. A 4-byte key made the same exemption apply
+	// to a 32-bit secret, and its UNSALTED CredentialHash, printed and saved in
+	// the clear as "not secret", then recovers it in 2^32 SHA-256 operations:
+	// seconds, with no volume needed. The floor is what keeps both statements
+	// true. The ceiling is the passphrase policy: a rendering longer than 512
+	// bytes could never be enrolled.
+	if length < RecoveryKeyLength || formattedLen(length, format) > MaxPassphraseLength {
+		return nil, &detailError{Kind: ErrRecoveryKeyTooShort, Detail: fmt.Sprintf("%d random bytes rendered %s", length, format)}
 	}
 
 	key, err := randomSecret("recovery key", length)
@@ -378,8 +340,9 @@ func AddRecoveryKey(device string, existingPassphrase []byte, opts *RecoveryKeyO
 		opts = &RecoveryKeyOptions{}
 	}
 
-	// Set defaults
-	if opts.Length <= 0 {
+	// Set defaults. Only ZERO means "unset": a negative length is refused by
+	// GenerateRecoveryKey rather than silently replaced (#249, A4).
+	if opts.Length == 0 {
 		opts.Length = RecoveryKeyLength
 	}
 	if opts.Format == "" {
@@ -420,30 +383,28 @@ func AddRecoveryKey(device string, existingPassphrase []byte, opts *RecoveryKeyO
 	// argument, including why the same reasoning is invalid for a credential a
 	// caller hands in and why no exported API can select this.
 	var keyslot, tokenID int
+	var volumeUUID string
 	if err := borrowSecret("recovery key", recoveryKey.Credential, func(credential []byte) error {
 		var err error
-		keyslot, tokenID, err = enrollWithToken(device, existingPassphrase, credential, addOpts,
+		keyslot, tokenID, volumeUUID, err = enrollWithToken(device, existingPassphrase, credential, addOpts,
 			recoveryToken(), libraryGeneratedCredential)
 		return err
 	}); err != nil {
 		recoveryKey.Clear()
-		return nil, fmt.Errorf("failed to add recovery key: %w", err)
+		return nil, &detailError{Detail: "failed to add recovery key", Err: err}
 	}
 
 	recoveryKey.Keyslot = keyslot
 	recoveryKey.TokenID = tokenID
-
-	// Get volume info for UUID
-	info, err := GetVolumeInfo(device)
-	if err == nil {
-		recoveryKey.VolumeUUID = info.UUID
-	}
+	// From the header the enrollment read under its lock, not a second read
+	// of the path, which could by now name another volume.
+	recoveryKey.VolumeUUID = volumeUUID
 
 	// Save to file if path specified
 	if opts.OutputPath != "" {
 		if err := SaveRecoveryKey(recoveryKey, opts.OutputPath); err != nil {
 			// Non-fatal - key was still added, but caller should be aware
-			recoveryKey.SaveError = fmt.Errorf("failed to save recovery key to %s: %w", opts.OutputPath, err)
+			recoveryKey.SaveError = &detailError{Detail: "failed to save recovery key to " + opts.OutputPath, Err: err}
 		}
 	}
 
@@ -1048,15 +1009,24 @@ func VerifyRecoveryKey(device string, key *enclave.MemoryEnclave) (bool, error) 
 		return false, err
 	}
 
-	_, metadata, err := ReadHeader(device)
+	// One descriptor for the header and every keyslot read (#249, A10).
+	f, err := openDevice("read the LUKS2 header", device, os.O_RDONLY)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = f.Close() }()
+
+	_, metadata, err := readHeaderCopyFrom(f, LUKS2PrimaryHeaderOffset)
 	if err != nil {
 		return false, err
 	}
 
-	// Try to unlock with the key
+	// Try to unlock with the key. "Opens the volume" means it recovers the
+	// VOLUME key: a recovery key that opened only an unbound keyslot would
+	// recover nothing the data can be read with (#249, A1).
 	var unlocked bool
 	if err := borrowSecret("recovery key", key, func(raw []byte) error {
-		masterKey, err := getMasterKey(device, raw, metadata)
+		masterKey, _, err := getVolumeKey(f, device, raw, metadata)
 		if err != nil {
 			if errors.Is(err, ErrMasterKeyVerification) {
 				// The keyslots were tried and none verified. That is an answer
@@ -1087,7 +1057,7 @@ func formattedLen(n int, format RecoveryKeyFormat) int {
 		return base64.StdEncoding.EncodedLen(n)
 	case RecoveryKeyFormatHex:
 		return hex.EncodedLen(n)
-	default: // dashed, and the default for anything unrecognized
+	default: // dashed: GenerateRecoveryKey has refused every other value
 		hexLen := hex.EncodedLen(n)
 		if hexLen == 0 {
 			return 0

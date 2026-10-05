@@ -479,7 +479,6 @@ func TestVerifyMasterKeyDoesNotModifyInput(t *testing.T) {
  * because they require actual device I/O or system resources:
  *
  * - unlockKeyslot: Requires reading from a real LUKS device
- * - getBlockDeviceSize: Requires a real block device or file descriptor
  * - Unlock: Requires a real LUKS device and device-mapper interaction
  * - Lock: Requires device-mapper interaction
  * - IsUnlocked: Requires checking /dev/mapper

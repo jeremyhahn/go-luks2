@@ -72,6 +72,13 @@ type KeySource struct {
 	// Path is the --key-file argument: a filesystem path, stdinKeyFile for
 	// standard input, or "" when the flag was not given.
 	Path string
+
+	// given reports whether the flag appeared on the command line, so an
+	// EMPTY path -- `--key-file ""`, or a variable that expanded to nothing
+	// -- is refused rather than read as "no key file", which would quietly
+	// fall back to a prompt or to standard input (#246 D18). nil when the
+	// source was not declared through keyFileFlag.
+	given func() bool
 }
 
 // keyFileFlag declares --key-file on a subcommand and returns the KeySource it
@@ -81,7 +88,7 @@ type KeySource struct {
 // describes it the same way. `luks2 help` is where an operator looks for the
 // newline rule.
 func keyFileFlag(o *options, name string) *KeySource {
-	src := &KeySource{}
+	src := &KeySource{given: func() bool { return o.Given(name) }}
 	o.strings[name] = &src.Path
 	o.order = append(o.order, name)
 	return src
@@ -96,6 +103,9 @@ func keyFileFlag(o *options, name string) *KeySource {
 // choice under --batch-mode.
 func (c *CLI) readPassphrase(prompt string, confirm bool, src KeySource) ([]byte, error) {
 	switch {
+	case src.Path == "" && src.given != nil && src.given():
+		return nil, &KeyInputError{Op: "read key file", Source: `""`, Err: ErrEmptyKeyFilePath}
+
 	case src.Path == stdinKeyFile:
 		return readKeyFile(c.Stdin, "standard input")
 
@@ -158,15 +168,25 @@ func readKeyFile(r io.Reader, source string) ([]byte, error) {
 // write and the shell is under no obligation to add a newline.
 func readKeyLine(r io.Reader) ([]byte, error) {
 	var (
-		line = make([]byte, 0, 64)
+		line = newKeyBuffer(64)
 		one  = make([]byte, 1)
 	)
+	defer ClearBytes(one)
 
 	for len(line) <= maxKeyFileSize {
 		n, err := r.Read(one)
 		if n > 0 {
 			if one[0] == '\n' {
 				return line, nil
+			}
+			// Grown by hand rather than by append, so the outgrown buffer
+			// -- a prefix of the passphrase -- is wiped instead of left on
+			// the heap for the collector (#246 D16).
+			if len(line) == cap(line) {
+				grown := newKeyBuffer(2 * cap(line))[:len(line)]
+				copy(grown, line)
+				ClearBytes(line)
+				line = grown
 			}
 			line = append(line, one[0])
 		}
@@ -175,7 +195,6 @@ func readKeyLine(r io.Reader) ([]byte, error) {
 		}
 		if err != nil {
 			ClearBytes(line)
-			ClearBytes(one)
 			return nil, &KeyInputError{Op: "read passphrase", Source: "standard input", Err: err}
 		}
 	}
@@ -183,6 +202,11 @@ func readKeyLine(r io.Reader) ([]byte, error) {
 	ClearBytes(line)
 	return nil, &KeyInputError{Op: "read passphrase", Source: "standard input", Err: ErrKeyFileTooLarge}
 }
+
+// newKeyBuffer allocates an empty buffer of capacity n for passphrase bytes.
+// A seam: a test records every buffer readKeyLine holds, to prove each one it
+// let go of was wiped. Unexported, substituted only by this package's tests.
+var newKeyBuffer = func(n int) []byte { return make([]byte, 0, n) }
 
 // readAllSecret reads r to EOF, or until limit bytes have arrived, ZEROING
 // every intermediate buffer it outgrows.

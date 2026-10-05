@@ -20,8 +20,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-
-	"golang.org/x/sys/unix"
 )
 
 // Crash safety of MigrateToFIPS, proved against cryptsetup (#84).
@@ -34,8 +32,9 @@ import (
 //
 // # How the states are obtained
 //
-// Every write the migration makes opens the device for writing through
-// openDevice, so openFileFunc sees each write STEP start. The recorder
+// The migration opens the device once, to lock it, and makes every write
+// through that descriptor (#255); each write STEP starts at keyslotWriteStep,
+// where the recorder sees it. The recorder
 // snapshots the region the migration may write -- everything before the data
 // segment -- at each such open, and once more at the end. Between two
 // consecutive snapshots exactly one step ran: the keyslot material, a header
@@ -276,45 +275,69 @@ func placeImage(t *testing.T, path string, prefix []byte) {
 	}
 }
 
-// errInjectedOpen is the fault the recorder injects.
-var errInjectedOpen = errors.New("injected: the device could not be opened for writing")
+// errInjectedOpen is the fault the recorder injects: the device lock's open,
+// or a write step, fails before anything is written.
+var errInjectedOpen = errors.New("injected: the device could not be opened, or a write step could not start")
 
-// writeStepRecorder snapshots device's first limit bytes at every open of it
-// for writing, and fails the failAt-th such open (1-based; 0 never).
+// writeStepRecorder snapshots device's first limit bytes at the open the
+// device lock takes and at the start of every write step on the pinned
+// descriptor (keyslotWriteStep), and fails the failAt-th of those (1-based;
+// 0 never).
+//
+// The migration opens the device once (#255): the steps are observed on the
+// descriptor, not counted as path opens, so a step that wrote through some
+// other descriptor would not be a step here -- and is what
+// TestMigrateToFIPSWritesOnlyTheDeviceItLocked rules out.
 type writeStepRecorder struct {
-	device   string
-	limit    int64
-	failAt   int
-	opens    int
-	snaps    [][]byte
-	previous func(string, int, os.FileMode) (*os.File, error)
+	device       string
+	limit        int64
+	failAt       int
+	opens        int
+	snaps        [][]byte
+	previous     func(string, int, os.FileMode) (*os.File, error)
+	previousStep func(*keyslotDevice, string) error
 }
 
-// install substitutes openFileFunc until uninstall, or the end of the test.
+// install substitutes openFileFunc and keyslotWriteStep until uninstall, or
+// the end of the test.
 func (r *writeStepRecorder) install(t *testing.T) {
 	t.Helper()
 
-	previous := openFileFunc
-	r.previous = previous
+	r.previous, r.previousStep = openFileFunc, keyslotWriteStep
 	t.Cleanup(r.uninstall)
+	step := func() error {
+		r.opens++
+		if r.opens == r.failAt {
+			return errInjectedOpen
+		}
+		r.snaps = append(r.snaps, readPrefix(t, r.device, r.limit))
+		return nil
+	}
+	previous, previousStep := r.previous, r.previousStep
 	openFileFunc = func(name string, flag int, perm os.FileMode) (*os.File, error) {
 		if name == r.device && flag&(os.O_WRONLY|os.O_RDWR) != 0 {
-			r.opens++
-			if r.opens == r.failAt {
-				return nil, errInjectedOpen
+			if err := step(); err != nil {
+				return nil, err
 			}
-			r.snaps = append(r.snaps, readPrefix(t, name, r.limit))
 		}
 		return previous(name, flag, perm)
 	}
+	keyslotWriteStep = func(d *keyslotDevice, op string) error {
+		if d.path == r.device {
+			if err := step(); err != nil {
+				return err
+			}
+		}
+		return previousStep(d, op)
+	}
 }
 
-// uninstall restores the openFileFunc install replaced.
-func (r *writeStepRecorder) uninstall() { openFileFunc = r.previous }
+// uninstall restores what install replaced.
+func (r *writeStepRecorder) uninstall() { openFileFunc, keyslotWriteStep = r.previous, r.previousStep }
 
 // crashStep is one write step: the region before and after it.
 type crashStep struct {
-	open          int // which write-open began it, 1-based
+	open          int // which recorded event began it, 1-based
 	before, after []byte
 }
 
@@ -430,7 +453,8 @@ func assertStateOpens(t *testing.T, dir string, state []byte, key []byte) (prima
 
 	ours := filepath.Join(dir, "library.img")
 	placeImage(t, ours, state)
-	if _, _, err := ReadSecondaryHeader(ours); err != nil {
+	shdr, _, err := ReadSecondaryHeader(ours)
+	if err != nil {
 		secondaryTorn = true
 	}
 	if _, _, err := ReadHeader(ours); err != nil {
@@ -448,6 +472,14 @@ func assertStateOpens(t *testing.T, dir string, state []byte, key []byte) (prima
 	}
 	if got := volumeKey(t, ours, migrationPassphrase); !bytes.Equal(got, key) {
 		t.Fatal("this library recovers a different volume key from this state")
+	}
+	if primaryTorn {
+		// The restore writes one past the copy it rebuilt from (#248), so the
+		// state it opened is the secondary's.
+		if hdr.SequenceID != shdr.SequenceID+1 {
+			t.Fatalf("RestorePrimaryHeader wrote sequence %d from a secondary at %d, want one past it", hdr.SequenceID, shdr.SequenceID)
+		}
+		return primaryTorn, secondaryTorn, shdr.SequenceID
 	}
 	return primaryTorn, secondaryTorn, hdr.SequenceID
 }
@@ -912,7 +944,7 @@ func TestHeaderCopiesAgree(t *testing.T) {
 	fresh := func(t *testing.T) string {
 		device := newImage(t, "copies.img")
 		formatWithLibrary(t, device)
-		if err := headerCopiesAgree(device); err != nil {
+		if err := copiesAgree(t, device); err != nil {
 			t.Fatalf("a freshly formatted volume's copies disagree: %v", err)
 		}
 		return device
@@ -924,10 +956,10 @@ func TestHeaderCopiesAgree(t *testing.T) {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
 		primary := readPrefix(t, device, int64(hdr.HeaderSize))
-		if err := repairSecondaryHeader(device, hdr, metadata); err != nil {
+		if err := repairOn(t, device, hdr, metadata); err != nil {
 			t.Fatalf("repairSecondaryHeader failed: %v", err)
 		}
-		if err := headerCopiesAgree(device); err != nil {
+		if err := copiesAgree(t, device); err != nil {
 			t.Fatalf("the copies still disagree after the repair: %v", err)
 		}
 		if !bytes.Equal(readPrefix(t, device, int64(hdr.HeaderSize)), primary) {
@@ -938,7 +970,7 @@ func TestHeaderCopiesAgree(t *testing.T) {
 	t.Run("secondary torn", func(t *testing.T) {
 		device := fresh(t)
 		damageSecondary(t, device)
-		if err := headerCopiesAgree(device); !errors.Is(err, ErrInvalidHeader) || !strings.Contains(err.Error(), "secondary") {
+		if err := copiesAgree(t, device); !errors.Is(err, ErrInvalidHeader) || !strings.Contains(err.Error(), "secondary") {
 			t.Fatalf("got %v, want the secondary named unreadable", err)
 		}
 		repairs(t, device)
@@ -955,7 +987,7 @@ func TestHeaderCopiesAgree(t *testing.T) {
 			t.Fatalf("got %v, want the injected sync failure", err)
 		}
 		syncDevice = (*os.File).Sync
-		if err := headerCopiesAgree(device); !errors.Is(err, ErrInvalidHeader) || !strings.Contains(err.Error(), "sequence ids") {
+		if err := copiesAgree(t, device); !errors.Is(err, ErrInvalidHeader) || !strings.Contains(err.Error(), "sequence ids") {
 			t.Fatalf("got %v, want the differing sequence ids named", err)
 		}
 		repairs(t, device)
@@ -973,10 +1005,10 @@ func TestHeaderCopiesAgree(t *testing.T) {
 			changed.Iterations++
 			other.Digests[id] = &changed
 		}
-		if err := repairSecondaryHeader(device, hdr, &other); err != nil {
+		if err := repairOn(t, device, hdr, &other); err != nil {
 			t.Fatalf("writing a differing secondary failed: %v", err)
 		}
-		if err := headerCopiesAgree(device); !errors.Is(err, ErrInvalidHeader) || !strings.Contains(err.Error(), "different metadata") {
+		if err := copiesAgree(t, device); !errors.Is(err, ErrInvalidHeader) || !strings.Contains(err.Error(), "different metadata") {
 			t.Fatalf("got %v, want differing metadata named", err)
 		}
 		repairs(t, device)
@@ -984,7 +1016,7 @@ func TestHeaderCopiesAgree(t *testing.T) {
 	t.Run("primary torn", func(t *testing.T) {
 		device := fresh(t)
 		damagePrimary(t, device)
-		if err := headerCopiesAgree(device); !errors.Is(err, ErrInvalidHeader) || !strings.Contains(err.Error(), "primary") {
+		if err := copiesAgree(t, device); !errors.Is(err, ErrInvalidHeader) || !strings.Contains(err.Error(), "primary") {
 			t.Fatalf("got %v, want the primary named unreadable", err)
 		}
 	})
@@ -1004,7 +1036,7 @@ func TestHeaderCopiesAgree(t *testing.T) {
 			}
 			return errInjectedSync
 		})
-		if err := repairSecondaryHeader(device, hdr, metadata); !errors.Is(err, errInjectedSync) {
+		if err := repairOn(t, device, hdr, metadata); !errors.Is(err, errInjectedSync) {
 			t.Fatalf("got %v, want the injected sync failure", err)
 		}
 		if now := readPrefix(t, device, 2*int64(hdr.HeaderSize)); !bytes.Equal(now, before) {
@@ -1018,20 +1050,25 @@ func TestHeaderCopiesAgree(t *testing.T) {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
 		onSync(t, 2, func(*os.File) error { return errInjectedSync })
-		if err := repairSecondaryHeader(device, hdr, metadata); !errors.Is(err, errInjectedSync) {
+		if err := repairOn(t, device, hdr, metadata); !errors.Is(err, errInjectedSync) {
 			t.Fatalf("got %v, want the injected sync failure", err)
 		}
 	})
-	t.Run("repair cannot open", func(t *testing.T) {
+	t.Run("the repair's write step fails", func(t *testing.T) {
 		device := fresh(t)
 		hdr, metadata, err := ReadHeader(device)
 		if err != nil {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
+		before := readPrefix(t, device, 2*int64(hdr.HeaderSize))
+		dev := lockedDevice(t, device)
 		r := &writeStepRecorder{device: device, limit: 1, failAt: 1}
 		r.install(t)
-		if err := repairSecondaryHeader(device, hdr, metadata); !errors.Is(err, errInjectedOpen) {
-			t.Fatalf("got %v, want the injected open failure", err)
+		if err := repairSecondaryHeader(dev, hdr, metadata); !errors.Is(err, errInjectedOpen) {
+			t.Fatalf("got %v, want the injected write-step failure", err)
+		}
+		if !bytes.Equal(readPrefix(t, device, 2*int64(hdr.HeaderSize)), before) {
+			t.Fatal("a repair whose write step failed still wrote")
 		}
 	})
 }
@@ -1173,7 +1210,7 @@ func TestMigrateToFIPSMakesAgreeingCopiesDurableBeforeWriting(t *testing.T) {
 		t.Fatalf("got %#v, want the add-keyslot header write to fail at its final sync", err)
 	}
 	syncDevice = (*os.File).Sync
-	if err := headerCopiesAgree(image); err != nil {
+	if err := copiesAgree(t, image); err != nil {
 		t.Fatalf("the fixture's copies must agree, as both were written: %v", err)
 	}
 	left := readPrefix(t, image, int64(len(prefix)))
@@ -1327,14 +1364,27 @@ func newCacheModel(t *testing.T, evicts bool) *cacheModel {
 	placeImage(t, device, medium)
 	placeImage(t, cache, addHeader.after)
 
+	// Every read the run makes goes through its pinned descriptor (#255), so
+	// the cached view is modeled THERE: until the cache is dropped, a read of
+	// the device's descriptor is served from the cache image.
 	dropped := false
-	previousOpen := openFileFunc
-	t.Cleanup(func() { openFileFunc = previousOpen })
-	openFileFunc = func(name string, flag int, perm os.FileMode) (*os.File, error) {
-		if name == device && flag&(os.O_WRONLY|os.O_RDWR|unix.O_DIRECT) == 0 && !dropped {
-			return previousOpen(cache, flag, perm)
+	cached, err := os.Open(cache) // #nosec G304 -- path is under t.TempDir()
+	if err != nil {
+		t.Fatalf("open the cache image: %v", err)
+	}
+	t.Cleanup(func() { _ = cached.Close() })
+	previousReader := pinnedDeviceReader
+	t.Cleanup(func() { pinnedDeviceReader = previousReader })
+	pinnedDeviceReader = func(f *os.File) io.ReaderAt {
+		if !sameFile(t, f.Name(), device) {
+			return previousReader(f)
 		}
-		return previousOpen(name, flag, perm)
+		return readerFunc(func(p []byte, off int64) (int, error) {
+			if !dropped {
+				return cached.ReadAt(p, off)
+			}
+			return f.ReadAt(p, off)
+		})
 	}
 	previousDrop := dropDeviceCache
 	t.Cleanup(func() { dropDeviceCache = previousDrop })
@@ -1345,7 +1395,7 @@ func newCacheModel(t *testing.T, evicts bool) *cacheModel {
 	previousDirect := readDeviceDirect
 	t.Cleanup(func() { readDeviceDirect = previousDirect })
 	readDeviceDirect = func(path string, off int64, n int) ([]byte, error) {
-		if path != device {
+		if !sameFile(t, path, device) {
 			return previousDirect(path, off, n)
 		}
 		medium := readPrefix(t, device, off+int64(n))
@@ -1354,7 +1404,7 @@ func newCacheModel(t *testing.T, evicts bool) *cacheModel {
 
 	// The model is what it claims: through the cache the copies agree, on
 	// the medium the secondary is torn.
-	if err := headerCopiesAgree(device); err != nil {
+	if err := copiesAgree(t, cache); err != nil {
 		t.Fatalf("through the modeled cache the copies must agree: %v", err)
 	}
 	if _, _, err := readHeaderCopy(cache, int64(headerArea)); err != nil {
@@ -1537,4 +1587,60 @@ func TestReadHeaderCopyFromClassifiesEveryRejection(t *testing.T) {
 			}
 		})
 	}
+}
+
+// lockedDevice locks path and pins it, as a keyslot operation does, for a test
+// that drives a pinned helper directly. The lock is released when the test
+// ends.
+func lockedDevice(t *testing.T, path string) *keyslotDevice {
+	t.Helper()
+
+	lock, dev, err := lockKeyslotDevice(path)
+	if err != nil {
+		t.Fatalf("lockKeyslotDevice(%s): %v", path, err)
+	}
+	t.Cleanup(func() { _ = lock.Release() })
+	return dev
+}
+
+// repairOn runs repairSecondaryHeader on path under its own lock, released
+// before it returns.
+func repairOn(t *testing.T, path string, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) error {
+	t.Helper()
+
+	lock, dev, err := lockKeyslotDevice(path)
+	if err != nil {
+		t.Fatalf("lockKeyslotDevice(%s): %v", path, err)
+	}
+	defer func() { _ = lock.Release() }()
+	return repairSecondaryHeader(dev, hdr, metadata)
+}
+
+// copiesAgree is headerCopiesAgree on path, read through a descriptor of its
+// own.
+func copiesAgree(t *testing.T, path string) error {
+	t.Helper()
+
+	f, err := os.Open(path) // #nosec G304 -- path is under t.TempDir()
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	defer func() { _ = f.Close() }()
+	return headerCopiesAgree(f)
+}
+
+// readerFunc adapts a function to io.ReaderAt.
+type readerFunc func(p []byte, off int64) (int, error)
+
+func (f readerFunc) ReadAt(p []byte, off int64) (int, error) { return f(p, off) }
+
+// sameFile reports whether two paths name the same file -- a pinned
+// descriptor's /proc/self/fd entry and the image it was opened from among
+// them.
+func sameFile(t *testing.T, a, b string) bool {
+	t.Helper()
+
+	sa, errA := os.Stat(a)
+	sb, errB := os.Stat(b)
+	return errA == nil && errB == nil && os.SameFile(sa, sb)
 }

@@ -11,8 +11,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/jeremyhahn/go-enclave"
 )
@@ -93,9 +96,9 @@ const maxHelperStderr = 4 << 10
 // passphrase controls its own bytes, and silently trimming them is the classic
 // way a credential works one way and not the other.
 type CommandKeyProvider struct {
-	// Path is the helper binary. It is not searched for on PATH: an unlock
-	// credential must not depend on the environment of whoever happened to
-	// invoke the process.
+	// Path is the helper binary, as an ABSOLUTE path. A relative or bare name
+	// is refused rather than searched for on PATH: an unlock credential must
+	// not depend on the environment of whoever happened to invoke the process.
 	Path string
 
 	// Args are the helper's arguments, not including the program name.
@@ -111,7 +114,30 @@ type CommandKeyProvider struct {
 	// Meta is the token to record for this credential, or nil for none. It is
 	// COPIED before anything is written, so a provider can be reused.
 	Meta *Token
+
+	// Env is extra environment for the helper, as NAME=value entries. The
+	// helper does NOT inherit this process's environment: it gets
+	// helperBaseEnv plus these, and nothing else, so a variable the invoking
+	// user set (LD_PRELOAD, a PATH entry they control, a library's debug hook)
+	// cannot reach the program that produces the credential.
+	Env []string
 }
+
+// helperBaseEnv is the whole environment a helper gets besides
+// CommandKeyProvider.Env: a PATH of system directories only, for a helper
+// script that runs other tools.
+var helperBaseEnv = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
+
+// helperWaitDelay bounds how long a helper's output is waited for once the
+// helper itself has exited, or after ctx ends and it has been killed. A
+// grandchild that inherited the helper's stdout or stderr and kept it open
+// would otherwise hold the read, and Wait, forever. A variable so tests need
+// not wait it out.
+var helperWaitDelay = 2 * time.Second
+
+// expiredDeadline is a read deadline already in the past: setting it makes a
+// blocked read return at once, without consulting a clock.
+var expiredDeadline = time.Unix(1, 0)
 
 // Ensure CommandKeyProvider satisfies the interface at compile time.
 var _ KeyProvider = (*CommandKeyProvider)(nil)
@@ -126,6 +152,9 @@ func (p *CommandKeyProvider) Token() *Token {
 func (p *CommandKeyProvider) Passphrase(ctx context.Context) (*enclave.MemoryEnclave, error) {
 	if p.Path == "" {
 		return nil, &KeyProviderError{Op: "command key provider", Err: ErrHelperNotConfigured}
+	}
+	if !filepath.IsAbs(p.Path) {
+		return nil, &KeyProviderError{Op: "command key provider", Err: &detailError{Kind: ErrHelperPathNotAbsolute, Detail: strconv.Quote(p.Path)}}
 	}
 	if p.Line < 0 {
 		return nil, &KeyProviderError{
@@ -145,30 +174,75 @@ func (p *CommandKeyProvider) Passphrase(ctx context.Context) (*enclave.MemoryEnc
 
 // run executes the helper and returns its stdout in locked memory together with
 // the number of bytes actually written.
+//
+// # Why stdout is an os.Pipe and not StdoutPipe
+//
+// The read must end when ctx does. A read from StdoutPipe does not: killing
+// the helper on cancellation closes nothing if a grandchild inherited its
+// stdout, and the read then waits for that grandchild for ever. An os.Pipe is
+// this process's own, read through the runtime poller, so a deadline can be
+// set on it -- expiredDeadline when ctx ends, and helperWaitDelay after the
+// helper exits, for a grandchild that keeps the pipe open with no deadline in
+// ctx at all. cmd.WaitDelay does the same for the stderr copy.
 func (p *CommandKeyProvider) run(ctx context.Context) (*enclave.MemoryEnclave, int, error) {
 	op := "helper output"
 
-	cmd := exec.CommandContext(ctx, p.Path, p.Args...) // #nosec G204 -- the helper is named by the caller or by a token it authored
+	cmd := exec.CommandContext(ctx, p.Path, p.Args...) // #nosec G204 -- the helper is an absolute path named by the caller or by a token it authored
+	cmd.Env = append(append([]string(nil), helperBaseEnv...), p.Env...)
+	cmd.WaitDelay = helperWaitDelay
 	if len(p.Stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(p.Stdin)
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &limitedWriter{w: &stderr, remaining: maxHelperStderr}
 
-	stdout, err := cmd.StdoutPipe()
+	stdout, writeEnd, err := os.Pipe()
 	if err != nil {
 		return nil, 0, &KeyProviderError{Op: op, Err: err}
 	}
+	defer func() { _ = stdout.Close() }()
+	cmd.Stdout = writeEnd
 
 	buf, err := newSecretEnclave(op, maxHelperOutput)
 	if err != nil {
+		_ = writeEnd.Close()
 		return nil, 0, err
 	}
 
-	if err := cmd.Start(); err != nil {
+	startErr := cmd.Start()
+	// The child has its own copy now; this one must go, or the read below
+	// never sees end-of-file.
+	_ = writeEnd.Close()
+	if startErr != nil {
 		releaseSecret(buf)
-		return nil, 0, &HelperError{Path: p.Path, ExitCode: -1, Err: err}
+		return nil, 0, &HelperError{Path: p.Path, ExitCode: -1, Err: startErr}
 	}
+
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	stop := make(chan struct{})
+	watched := make(chan struct{})
+	var cut, cutAfterExit bool
+	go func() {
+		defer close(watched)
+		select {
+		case <-ctx.Done():
+			cut = true
+		case <-stop:
+			return
+		case waitErr := <-exited:
+			exited <- waitErr // put back for the reader of the result
+			select {
+			case <-stop:
+				return
+			case <-ctx.Done():
+				cut = true
+			case <-time.After(helperWaitDelay):
+				cut, cutAfterExit = true, true
+			}
+		}
+		_ = stdout.SetReadDeadline(expiredDeadline)
+	}()
 
 	// Drained INSIDE the borrow so the bytes land in the locked pages and
 	// nowhere else. A short read is not an error here -- the helpers write far
@@ -180,30 +254,31 @@ func (p *CommandKeyProvider) run(ctx context.Context) (*enclave.MemoryEnclave, i
 		n, err = readFullish(stdout, dst)
 		return err
 	})
+	close(stop)
+	<-watched
 
-	// A helper that overran the bound is STILL WRITING, and nothing will drain
-	// it again: readFullish stops reading for good the moment it refuses. Its
-	// next write blocks once the pipe buffer fills, so it cannot exit -- and
-	// cmd.Wait() below waits for exactly that exit, closing StdoutPipe's read
-	// end only after it. Neither side moves. With a deadline-carrying context
-	// CommandContext eventually kills the helper; with context.Background(),
-	// which an unattended unlock at boot typically passes, nothing does, and
-	// Passphrase never returns while holding the child and the locked buffer.
-	//
-	// So end the helper here rather than waiting for one that cannot finish. The
-	// output is already refused; there is nothing left to read from it. Closing
-	// the pipe alone would unblock a helper that dies on EPIPE but not one that
-	// ignores it, so the kill is what makes this terminate in every case.
+	// A helper that overran the bound, or whose output was cut off, is STILL
+	// RUNNING or still holds the pipe, and nothing will drain it again. With
+	// context.Background(), which an unattended unlock at boot typically
+	// passes, nothing else would end it: kill it here rather than wait for one
+	// that cannot finish. Closing the pipe alone would not stop a helper that
+	// ignores EPIPE.
 	if readErr != nil {
-		_ = stdout.Close()
+		_ = stdout.Close() // a writer still blocked on the pipe gets EPIPE
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
 		}
 	}
-
-	waitErr := cmd.Wait()
+	waitErr := <-exited
 
 	switch {
+	case cut && ctx.Err() != nil:
+		releaseSecret(buf)
+		return nil, 0, &KeyProviderError{Op: op, Err: &detailError{Detail: p.Path + " did not finish", Err: ctx.Err()}}
+	case cutAfterExit:
+		releaseSecret(buf)
+		return nil, 0, &KeyProviderError{Op: op, Err: &detailError{Kind: ErrHelperOutput,
+			Detail: p.Path + " exited, but its output was still held open by a process it started"}}
 	case readErr != nil:
 		releaseSecret(buf)
 		return nil, 0, &KeyProviderError{Op: op, Err: readErr}
@@ -213,7 +288,7 @@ func (p *CommandKeyProvider) run(ctx context.Context) (*enclave.MemoryEnclave, i
 			Path:     p.Path,
 			ExitCode: exitCodeOf(waitErr),
 			Stderr:   stderr.String(),
-			Err:      fmt.Errorf("%w: %v", ErrHelperFailed, waitErr),
+			Err:      &detailError{Kind: ErrHelperFailed, Err: waitErr},
 		}
 	}
 
@@ -383,7 +458,7 @@ func EnrollKeyProvider(ctx context.Context, device string, existing []byte, p Ke
 		// is a separate decision about a credential this package did not draw,
 		// and is not made here as a side effect of threading the parameter
 		// through.
-		keyslot, tokenID, inner = enrollWithToken(device, existing, raw, opts, p.Token(), callerSuppliedCredential)
+		keyslot, tokenID, _, inner = enrollWithToken(device, existing, raw, opts, p.Token(), callerSuppliedCredential)
 		return inner
 	})
 	if err != nil {
@@ -421,42 +496,71 @@ func EnrollKeyProvider(ctx context.Context, device string, existing []byte, p Ke
 // parameter rather than a constant because the two callers differ: a recovery
 // key is bytes THIS PACKAGE drew, while a key provider's secret arrives from
 // outside it. See keyslotCostPolicy (kdf.go).
-func enrollWithToken(device string, existing, credential []byte, opts *AddKeyOptions, token *Token, policy keyslotCostPolicy) (keyslot, tokenID int, err error) {
-	if err := ValidateDevicePath(device); err != nil {
-		return -1, -1, err
+func enrollWithToken(device string, existing, credential []byte, opts *AddKeyOptions, token *Token, policy keyslotCostPolicy) (keyslot, tokenID int, volumeUUID string, err error) {
+	if err := addKeyPreflight(device, existing, credential, opts); err != nil {
+		return -1, -1, "", &KeyProviderError{Op: "enroll", Err: err}
 	}
 
-	// The token slot is chosen BEFORE the keyslot is written. Both orders leave
-	// a window, and this is the cheap one: finding no free token slot here costs
-	// nothing, while finding it after the keyslot exists costs a rollback of
-	// live key material.
+	// ONE LOCK, held from the choice of token slot to the token's write (#246
+	// D8). The token slot used to be chosen before the keyslot was written,
+	// and each step took the device lock on its own, so two enrollments
+	// running at once both found the same slot free and the second token
+	// overwrote the first: one keyslot was left with no token naming it. Under
+	// a single lock the slot chosen is still free when the token is written.
+	// The locked descriptor carries every read and write below (#249, A10).
+	lock, dev, err := lockKeyslotDevice(device)
+	if err != nil {
+		return -1, -1, "", &KeyProviderError{Op: "enroll", Err: err}
+	}
+	defer func() { _ = lock.Release() }()
+
+	// The token slot is chosen BEFORE the keyslot is written: finding no free
+	// token slot here costs nothing, while finding it afterwards costs a
+	// rollback of live key material.
+	hdr, metadata, err := dev.readHeader()
+	if err != nil {
+		return -1, -1, "", &KeyProviderError{Op: "enroll", Err: &detailError{Detail: "failed to read header", Err: err}}
+	}
 	tokenID = -1
 	if token != nil {
-		tokenID, err = FindFreeTokenSlot(device)
-		if err != nil {
-			return -1, -1, &KeyProviderError{Op: "enroll", Err: err}
+		if tokenID, err = freeTokenSlot(metadata); err != nil {
+			return -1, -1, "", &KeyProviderError{Op: "enroll", Err: err}
 		}
 	}
 
-	// The slot is the one addKeyWithPolicy CHOSE, reported from the point of
-	// decision under the device lock, so the token below names the keyslot the
-	// credential actually went to rather than one inferred afterwards (#42).
-	assignedSlot, err := addKeyWithPolicy(device, existing, credential, opts, policy)
+	// The VOLUME key: a credential that opens only an unbound keyslot proves
+	// nothing about the volume (#249, A1).
+	masterKey, _, err := getVolumeKey(dev.file, device, existing, metadata)
 	if err != nil {
-		return -1, -1, &KeyProviderError{Op: "enroll", Err: err}
+		return -1, -1, "", &KeyProviderError{Op: "enroll", Err: &detailError{Detail: "failed to unlock with existing passphrase", Err: err}}
+	}
+	defer releaseSecret(masterKey)
+
+	// The slot is the one addKeyslotWithMasterKey CHOSE, reported from the
+	// point of decision under the device lock, so the token below names the
+	// keyslot the credential actually went to rather than one inferred
+	// afterwards (#42).
+	assignedSlot, err := addKeyslotWithMasterKey(dev, hdr, metadata, masterKey, credential, opts, policy)
+	if err != nil {
+		return -1, -1, "", &KeyProviderError{Op: "enroll", Err: err}
 	}
 	if assignedSlot < 0 {
-		// Unreachable: addKeyWithPolicy returns a slot on every path that
-		// succeeds. Refused rather than reported, because this number's only
-		// use is telling an operator which credential is which.
-		return -1, -1, &KeyProviderError{
+		// Unreachable: addKeyslotWithMasterKey returns a slot on every path
+		// that succeeds. Refused rather than reported, because this number's
+		// only use is telling an operator which credential is which.
+		return -1, -1, "", &KeyProviderError{
 			Op:  "enroll",
-			Err: fmt.Errorf("%w: the credential was written but the keyslot it went to was not reported", ErrInvalidKeyslot),
+			Err: &detailError{Kind: ErrInvalidKeyslot, Detail: "the credential was written but the keyslot it went to was not reported"},
 		}
 	}
 
+	// The UUID of the volume the credential went to, from the header read
+	// through the locked descriptor: a caller that reopened the path to ask
+	// could be told about a different volume (the recovery key file names it).
+	volumeUUID = string(bytes.TrimRight(hdr.UUID[:], "\x00"))
+
 	if token == nil {
-		return assignedSlot, -1, nil
+		return assignedSlot, -1, volumeUUID, nil
 	}
 
 	// A COPY, so enrolling the same provider twice does not accumulate keyslot
@@ -464,32 +568,90 @@ func enrollWithToken(device string, existing, credential []byte, opts *AddKeyOpt
 	record := *token
 	record.Keyslots = []string{strconv.Itoa(assignedSlot)}
 
-	if err := importToken(device, tokenID, &record); err != nil {
-		if killErr := killKeyslot(device, assignedSlot); killErr != nil {
-			return assignedSlot, -1, &OrphanedKeyslotError{Keyslot: assignedSlot, Err: err, Cause: killErr}
+	if err := importToken(dev, tokenID, &record); err != nil {
+		if killErr := killKeyslot(dev, assignedSlot); killErr != nil {
+			return assignedSlot, -1, "", &OrphanedKeyslotError{Keyslot: assignedSlot, Err: err, Cause: killErr}
 		}
-		return -1, -1, &KeyProviderError{Op: "enroll token", Err: err}
+		return -1, -1, "", &KeyProviderError{Op: "enroll token", Err: err}
 	}
 
-	return assignedSlot, tokenID, nil
+	return assignedSlot, tokenID, volumeUUID, nil
 }
 
-// importToken is ImportToken, reached through a variable so the rollback itself
-// can be exercised: the token this package writes for a recovery key is built
+// importTokenLocked writes token into slot tokenID for a caller that holds the
+// device lock -- ImportToken would wait on that same lock for ever, since
+// flock on a second descriptor waits on the first. The slot must still be
+// free: it was chosen under this lock, so anything else there is a defect,
+// and overwriting it would destroy another credential's record.
+//
+// It refuses what ImportToken refuses: an id out of range, and a token with no
+// type.
+func importTokenLocked(dev *keyslotDevice, tokenID int, token *Token) error {
+	if tokenID < 0 || tokenID >= MaxTokenSlots {
+		return &detailError{Kind: ErrInvalidHeader, Detail: "token id " + strconv.Itoa(tokenID) + " is out of range"}
+	}
+	if token == nil || token.Type == "" {
+		return &detailError{Kind: ErrUnsupportedTokenType, Detail: "a token must have a type"}
+	}
+	hdr, metadata, err := dev.readHeader()
+	if err != nil {
+		return err
+	}
+	if metadata.Tokens == nil {
+		metadata.Tokens = make(map[string]*Token)
+	}
+	key := strconv.Itoa(tokenID)
+	if _, taken := metadata.Tokens[key]; taken {
+		return &detailError{Kind: ErrNoFreeTokenSlot, Detail: "token slot " + key + " was taken while this enrollment held the device lock"}
+	}
+	metadata.Tokens[key] = token
+	hdr.SequenceID++
+	return dev.writeHeader(hdr, metadata)
+}
+
+// freeTokenSlot returns the lowest token id metadata does not use.
+func freeTokenSlot(metadata *LUKS2Metadata) (int, error) {
+	for i := 0; i < MaxTokenSlots; i++ {
+		if _, used := metadata.Tokens[strconv.Itoa(i)]; !used {
+			return i, nil
+		}
+	}
+	return -1, ErrNoFreeTokenSlot
+}
+
+// killKeyslotLocked removes a keyslot for a caller that holds the device lock,
+// through the same gate every removal takes (removeKeyslotOn).
+func killKeyslotLocked(dev *keyslotDevice, keyslot int) error {
+	hdr, metadata, err := dev.readHeader()
+	if err != nil {
+		return err
+	}
+	id := strconv.Itoa(keyslot)
+	if _, ok := metadata.Keyslots[id]; !ok {
+		return &detailError{Kind: ErrInvalidKeyslot, Detail: "keyslot " + id + " does not exist"}
+	}
+	// Through the pinned descriptor: the rollback must remove the keyslot
+	// from the device the enrollment wrote, not whatever the path names now.
+	_, err = removeKeyslotOn(dev, hdr, metadata, id)
+	return err
+}
+
+// importToken is importTokenLocked, reached through a variable so the rollback
+// itself can be exercised: the token this package writes for a recovery key is built
 // internally and is always well-formed, so there is no argument a test can pass
 // that makes the write fail at the point where a keyslot is already on the
 // device.
-var importToken = ImportToken
+var importToken = importTokenLocked
 
-// killKeyslot is KillKeyslot, reached through a variable so the rollback's own
-// failure path can be exercised.
+// killKeyslot is killKeyslotLocked, reached through a variable so the
+// rollback's own failure path can be exercised.
 //
 // Same seam as removeFile in recovery.go and dm in devicemapper.go: what is
 // being guarded against is the device refusing a write at exactly one call, and
 // a test cannot arrange that any other way. The branch behind it is the only
 // one in this file that ends with a human holding a volume that needs
 // attention, so it is the last one that should go untested.
-var killKeyslot = KillKeyslot
+var killKeyslot = killKeyslotLocked
 
 // UnlockWithProvider opens a volume with a credential from a provider.
 //
@@ -548,8 +710,8 @@ type ExecConfig struct {
 	FIDO2Assert string
 
 	// Device is the authenticator, as libfido2 names it (a hidraw path on
-	// Linux). Empty means the helper's own default, which is only correct when
-	// exactly one authenticator is attached.
+	// Linux). It is required: the helpers take the device as a mandatory
+	// argument and have no default.
 	Device string
 }
 
@@ -572,6 +734,14 @@ func (c ExecConfig) assertPath() string {
 		return c.FIDO2Assert
 	}
 	return DefaultFIDO2AssertPath
+}
+
+// device returns the authenticator, refusing none.
+func (c ExecConfig) device() (string, error) {
+	if c.Device == "" {
+		return "", &KeyProviderError{Op: "fido2 device", Err: ErrNoFIDO2Device}
+	}
+	return c.Device, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -915,6 +1085,10 @@ func NewFIDO2KeyProvider(params FIDO2Params, cfg ExecConfig) (KeyProvider, error
 	if err := params.validate(); err != nil {
 		return nil, err
 	}
+	device, err := cfg.device()
+	if err != nil {
+		return nil, err
+	}
 
 	clientData, err := newFIDO2ClientDataHash()
 	if err != nil {
@@ -940,7 +1114,8 @@ func NewFIDO2KeyProvider(params FIDO2Params, cfg ExecConfig) (KeyProvider, error
 	if params.UserVerification {
 		args = append(args, "-v")
 	}
-	args = append(args, cfg.Device)
+	// "--" ends the options: a device name is never read as one.
+	args = append(args, "--", device)
 
 	return &fido2Provider{
 		cmd: &CommandKeyProvider{
@@ -989,6 +1164,11 @@ type FIDO2CredentialOptions struct {
 // else the helpers produce, because that path is the provider, and having a
 // second one would mean having a second thing to get right.
 func NewFIDO2Credential(ctx context.Context, cfg ExecConfig, opts FIDO2CredentialOptions) ([]byte, error) {
+	device, err := cfg.device()
+	if err != nil {
+		return nil, err
+	}
+
 	clientData, err := newFIDO2ClientDataHash()
 	if err != nil {
 		return nil, err
@@ -1026,7 +1206,7 @@ func NewFIDO2Credential(ctx context.Context, cfg ExecConfig, opts FIDO2Credentia
 	if opts.UserVerification {
 		args = append(args, "-v")
 	}
-	args = append(args, cfg.Device, "es256")
+	args = append(args, "--", device, "es256")
 
 	cred := &CommandKeyProvider{
 		Path:  cfg.credPath(),
@@ -1103,14 +1283,23 @@ func newFIDO2ClientDataHash() ([]byte, error) {
 // pointer rather than relying on omitempty is what keeps "presence not required"
 // distinguishable from "this token says nothing about presence" on the way back
 // in. See Token (types.go) and #153.
+//
+// The PIN and user-verification requirements are written the same way, for the
+// same reason, and because a token that omitted them was rebuilt by
+// fido2ParamsFromToken into a binding that asked for neither: an unlock driven
+// from the header dropped the PIN the enrollment demanded (#246 D9).
 func fido2Token(params FIDO2Params) *Token {
 	userPresence := params.UserPresence
+	clientPin := params.ClientPin
+	userVerification := params.UserVerification
 	return &Token{
-		Type:            fido2TokenType,
-		FIDO2Credential: base64.StdEncoding.EncodeToString(params.CredentialID),
-		FIDO2Salt:       base64.StdEncoding.EncodeToString(params.Salt),
-		FIDO2RP:         params.relyingParty(),
-		FIDO2UPRequired: &userPresence,
+		Type:                   fido2TokenType,
+		FIDO2Credential:        base64.StdEncoding.EncodeToString(params.CredentialID),
+		FIDO2Salt:              base64.StdEncoding.EncodeToString(params.Salt),
+		FIDO2RP:                params.relyingParty(),
+		FIDO2ClientPinRequired: &clientPin,
+		FIDO2UPRequired:        &userPresence,
+		FIDO2UVRequired:        &userVerification,
 	}
 }
 
@@ -1143,13 +1332,16 @@ func fido2ParamsFromToken(t *Token) (FIDO2Params, error) {
 	// can be WRITTEN, not how a token that omits it is understood, and
 	// inventing a different default here would silently change whether an
 	// existing binding demands a touch.
-	userPresence := t.FIDO2UPRequired != nil && *t.FIDO2UPRequired
-
+	//
+	// The PIN and user-verification requirements are read the same way: absent
+	// is false, present is what it says.
 	params := FIDO2Params{
-		RelyingParty: t.FIDO2RP,
-		CredentialID: credential,
-		Salt:         salt,
-		UserPresence: userPresence,
+		RelyingParty:     t.FIDO2RP,
+		CredentialID:     credential,
+		Salt:             salt,
+		UserPresence:     t.FIDO2UPRequired != nil && *t.FIDO2UPRequired,
+		ClientPin:        t.FIDO2ClientPinRequired != nil && *t.FIDO2ClientPinRequired,
+		UserVerification: t.FIDO2UVRequired != nil && *t.FIDO2UVRequired,
 	}
 	if err := params.validate(); err != nil {
 		return FIDO2Params{}, err
@@ -1188,6 +1380,16 @@ var (
 	// distinct from a helper that is missing on disk: nothing was named, so
 	// nothing was looked for.
 	ErrHelperNotConfigured = errors.New("no helper command configured")
+
+	// ErrHelperPathNotAbsolute indicates a helper was named by a relative path
+	// or a bare command name. It is refused rather than looked up on PATH,
+	// whose contents belong to whoever invoked the process.
+	ErrHelperPathNotAbsolute = errors.New("helper path is not absolute")
+
+	// ErrNoFIDO2Device indicates a FIDO2 operation was given no authenticator
+	// device. The libfido2 helpers require one, and an empty argument in its
+	// place is not a default.
+	ErrNoFIDO2Device = errors.New("no FIDO2 authenticator device named")
 
 	// ErrHelperFailed indicates the helper ran and exited non-zero -- the
 	// authenticator refused, the touch timed out, the PIN was wrong.

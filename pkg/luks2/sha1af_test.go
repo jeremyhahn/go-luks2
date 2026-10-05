@@ -137,8 +137,15 @@ func TestSHA1AFVolumesAreRefusedUnderTheFIPSPolicy(t *testing.T) {
 // volume key; cryptsetup still recovers that key; and a process under
 // GODEBUG=fips140=only opens it.
 func TestFIPSImportOfSHA1AFVolumes(t *testing.T) {
+	// Parallel at both levels, the shape parallel's comment allows: each
+	// subtest pauses in t.Parallel before it asks for a slot, so the parent's
+	// body returns -- and gives its slot back -- before any subtest waits for
+	// one. Measured with a one-slot memlock limit (ulimit -l 2048): the
+	// subtests run one after the other and nothing waits on the parent.
+	defer parallel(t)()
 	for _, kind := range sha1AFKinds {
 		t.Run(kind.name, func(t *testing.T) {
+			defer parallel(t)()
 			image := sha1AFVolume(t, kind)
 			volumeKeyBefore := cryptsetupVolumeKey(t, image)
 
@@ -365,7 +372,9 @@ func TestChangeKeyAndAFMergeFailuresAreTyped(t *testing.T) {
 	if err := ChangeKey(device, []byte(conformanceWrongPassphrase), newPassphrase, 0); !errors.Is(err, ErrMasterKeyVerification) {
 		t.Fatalf("wrong old passphrase: got %v, want ErrMasterKeyVerification reachable", err)
 	}
-	if err := ChangeKey(device, []byte("short"), newPassphrase, 0); err == nil || errors.Is(err, ErrMasterKeyVerification) {
+	// An EXISTING credential is refused only when nothing could open a
+	// keyslot with it (#249, A7): empty. A short one is tried, like any other.
+	if err := ChangeKey(device, nil, newPassphrase, 0); !errors.Is(err, ErrCredentialEmpty) {
 		t.Fatalf("an invalid old passphrase: got %v, want the validation error, not a credential verdict", err)
 	}
 

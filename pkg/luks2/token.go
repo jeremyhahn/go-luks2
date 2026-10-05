@@ -171,17 +171,18 @@ func ImportToken(device string, tokenID int, token *Token) error {
 		return err
 	}
 
-	// Acquire file lock for exclusive access
-	lock, err := AcquireFileLock(device)
+	// One descriptor: locked, read through and written through, so a path
+	// re-pointed after the lock cannot have the header of one device rewritten
+	// onto another (as the keyslot operations, #249 A10).
+	lock, dev, err := lockKeyslotDevice(device)
 	if err != nil {
-		return fmt.Errorf("failed to acquire lock: %w", err)
+		return err
 	}
 	defer func() { _ = lock.Release() }()
 
-	// Read current header and metadata
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := dev.readHeader()
 	if err != nil {
-		return fmt.Errorf("failed to read LUKS header: %w", err)
+		return &detailError{Detail: "failed to read LUKS header", Err: err}
 	}
 
 	// Initialize tokens map if nil
@@ -189,18 +190,31 @@ func ImportToken(device string, tokenID int, token *Token) error {
 		metadata.Tokens = make(map[string]*Token)
 	}
 
+	// LUKS2 requires a token's keyslots member to be an ARRAY. A nil slice
+	// encodes as `"keyslots":null`, which cryptsetup and systemd-cryptsetup
+	// refuse along with the whole header, so a token that names no keyslot is
+	// written with an empty one. The caller's token is copied rather than
+	// changed (#248).
+	//
+	// Whether the keyslots it names exist, under their canonical ids, is not
+	// checked here: the header write below refuses a dangling reference along
+	// with every other header cryptsetup would not read (headervalidation.go),
+	// and that is one rule rather than two that could disagree.
+	imported := *token
+	if imported.Keyslots == nil {
+		imported.Keyslots = []string{}
+	}
+
 	// Add or replace token
 	tokenKey := strconv.Itoa(tokenID)
-	metadata.Tokens[tokenKey] = token
+	metadata.Tokens[tokenKey] = &imported
 
 	// Increment sequence ID
 	hdr.SequenceID++
 
-	// Write updated header
-	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
-		return fmt.Errorf("failed to write header: %w", err)
+	if err := dev.writeHeader(hdr, metadata); err != nil {
+		return &detailError{Detail: "failed to write header", Err: err}
 	}
-
 	return nil
 }
 
@@ -225,17 +239,16 @@ func RemoveToken(device string, tokenID int) error {
 		return err
 	}
 
-	// Acquire file lock for exclusive access
-	lock, err := AcquireFileLock(device)
+	// One descriptor, as ImportToken.
+	lock, dev, err := lockKeyslotDevice(device)
 	if err != nil {
-		return fmt.Errorf("failed to acquire lock: %w", err)
+		return err
 	}
 	defer func() { _ = lock.Release() }()
 
-	// Read current header and metadata
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := dev.readHeader()
 	if err != nil {
-		return fmt.Errorf("failed to read LUKS header: %w", err)
+		return &detailError{Detail: "failed to read LUKS header", Err: err}
 	}
 
 	if metadata.Tokens == nil {
@@ -263,11 +276,9 @@ func RemoveToken(device string, tokenID int) error {
 	// Increment sequence ID
 	hdr.SequenceID++
 
-	// Write updated header
-	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
-		return fmt.Errorf("failed to write header: %w", err)
+	if err := dev.writeHeader(hdr, metadata); err != nil {
+		return &detailError{Detail: "failed to write header", Err: err}
 	}
-
 	return nil
 }
 

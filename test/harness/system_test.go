@@ -252,7 +252,10 @@ func TestCaptureLoopIdentityRefusesWhatIsNotALoopDevice(t *testing.T) {
 // /sys/block: a file this test just created backs no loop device, whatever else
 // the host has attached.
 func TestSystemRemoverFindsNoLoopDeviceForAFileNothingBacks(t *testing.T) {
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), runRootPrefix+"unattached-1")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatalf("creating the run root: %v", err)
+	}
 	file := filepath.Join(dir, "unattached.img")
 	if err := os.WriteFile(file, nil, 0o600); err != nil {
 		t.Fatalf("creating the file: %v", err)

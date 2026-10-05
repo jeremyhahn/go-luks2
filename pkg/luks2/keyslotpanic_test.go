@@ -124,7 +124,7 @@ func TestOneMalformedKeyslotDoesNotDenyTheVolume(t *testing.T) {
 		digest.Keyslots = append(digest.Keyslots, "1")
 	}
 
-	if err := writeHeaderInternal(path, hdr, metadata); err != nil {
+	if err := writeHeaderUnvalidated(path, hdr, metadata); err != nil {
 		t.Fatalf("failed to write the damaged fixture: %v", err)
 	}
 
@@ -179,7 +179,7 @@ func TestKillKeyslotRefusesAMalformedKeyslotArea(t *testing.T) {
 	damaged.Area = nil
 	metadata.Keyslots["1"] = damaged
 
-	if err := writeHeaderInternal(path, hdr, metadata); err != nil {
+	if err := writeHeaderUnvalidated(path, hdr, metadata); err != nil {
 		t.Fatalf("failed to write the damaged fixture: %v", err)
 	}
 
@@ -311,7 +311,7 @@ func TestAddKeyDoesNotTemplateOffADamagedKeyslot(t *testing.T) {
 	good.KeySize = 64
 	metadata.Keyslots["7"] = good
 
-	if err := writeHeaderInternal(path, hdr, metadata); err != nil {
+	if err := writeHeaderUnvalidated(path, hdr, metadata); err != nil {
 		t.Fatalf("failed to write the fixture: %v", err)
 	}
 

@@ -90,6 +90,15 @@ any loop device and any dm mapping. What keeps the suite off other devices is
 before creating it, removes only what it recorded, and never sweeps. Treat the
 state directory as part of that boundary.
 
+Since #247 the state directory is opened once and checked through that
+handle, and every ledger read, lock, write and delete goes through the same
+handle. A run's temp root is named `go-luks2-run-<run id>-<n>`, and the reaper
+detaches loop devices under a recorded root only when its name carries the id
+of the run that recorded it. A ledger from before #247 has a root with no run
+id. If loop devices are still backed under it, the reap fails and keeps the
+ledger, because they may belong to a live run. Once no integration run is live,
+detach them by hand (see below) and delete the ledger.
+
 The entrypoint reaps the previous run's recorded state, then refuses to run if
 `dmsetup` is missing, the inventory fails, or a mapping already carries this
 container's scope (every name the suite creates is

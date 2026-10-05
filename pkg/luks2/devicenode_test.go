@@ -209,8 +209,8 @@ func withDevDir(t *testing.T, dir string) {
 func withNodeRdev(t *testing.T, table map[string]uint64) {
 	t.Helper()
 
-	previous := nodeRdev
-	t.Cleanup(func() { nodeRdev = previous })
+	previous, previousBlock := nodeRdev, blockNodeRdev
+	t.Cleanup(func() { nodeRdev, blockNodeRdev = previous, previousBlock })
 	nodeRdev = func(path string) (uint64, error) {
 		rdev, ok := table[path]
 		if !ok {
@@ -218,6 +218,7 @@ func withNodeRdev(t *testing.T, table map[string]uint64) {
 		}
 		return rdev, nil
 	}
+	blockNodeRdev = nodeRdev
 }
 
 func writeFakeNode(t *testing.T, path string) {

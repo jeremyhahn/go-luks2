@@ -161,3 +161,77 @@ func TestCreateFailsWhenFilesystemCreationFails(t *testing.T) {
 		})
 	}
 }
+
+// TestCreateFailsWhenTheVolumeCannotBeOpened: create exits non-zero, with the
+// cause on stderr, when the loop device cannot be attached or the volume
+// cannot be unlocked. Both used to print a warning and exit 0, so a script
+// went on to mount a volume that was never opened and has no filesystem. A
+// loop device create attached is detached again, and the container is kept.
+func TestCreateFailsWhenTheVolumeCannotBeOpened(t *testing.T) {
+	tests := []struct {
+		name       string
+		attachErr  error
+		unlockErr  error
+		detachErr  error
+		wantCalls  []string
+		wantStderr []string
+	}{
+		{
+			name:       "no loop device",
+			attachErr:  errors.New("no free loop devices"),
+			wantCalls:  []string{"attach"},
+			wantStderr: []string{"Error: Failed to set up a loop device", "no free loop devices", "is valid and was kept", "mkfs.ext4"},
+		},
+		{
+			name:      "unlock fails",
+			unlockErr: errors.New("keyring unavailable"),
+			wantCalls: []string{"attach", "unlock /dev/loop7 luks-auto", "detach /dev/loop7"},
+			wantStderr: []string{"Error: Failed to unlock /dev/loop7", "keyring unavailable",
+				"Detached loop device /dev/loop7", "is valid and was kept"},
+		},
+		{
+			name:      "unlock fails and the loop device cannot be detached",
+			unlockErr: errors.New("keyring unavailable"),
+			detachErr: errors.New("resource busy"),
+			wantCalls: []string{"attach", "unlock /dev/loop7 luks-auto", "detach /dev/loop7"},
+			wantStderr: []string{"Error: Failed to unlock /dev/loop7", "Failed to detach loop device /dev/loop7: resource busy",
+				"sudo losetup -d /dev/loop7", "is valid and was kept"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cli, stdout, stderr, volume := newCreateCLI(t)
+			rec := &createRecorder{}
+			ops := rec.ops(nil, nil, tt.detachErr)
+			attach, unlock := ops.SetupLoopDeviceFunc, ops.UnlockFunc
+			ops.SetupLoopDeviceFunc = func(f string) (string, error) {
+				dev, _ := attach(f)
+				if tt.attachErr != nil {
+					return "", tt.attachErr
+				}
+				return dev, nil
+			}
+			ops.UnlockFunc = func(device string, p []byte, name string) error {
+				_ = unlock(device, p, name)
+				return tt.unlockErr
+			}
+			cli.Luks = ops
+
+			if code := cli.Run(); code != 1 {
+				t.Fatalf("create exited %d, want 1; stderr %q", code, stderr.String())
+			}
+			if !reflect.DeepEqual(rec.calls, tt.wantCalls) {
+				t.Errorf("calls = %v, want %v", rec.calls, tt.wantCalls)
+			}
+			for _, want := range append(tt.wantStderr, volume) {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr lacks %q:\n%s", want, stderr.String())
+				}
+			}
+			if strings.Contains(stdout.String(), "Volume ready to use") {
+				t.Errorf("create claimed the volume is ready:\n%s", stdout.String())
+			}
+		})
+	}
+}

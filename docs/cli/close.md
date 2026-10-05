@@ -14,11 +14,11 @@ sudo luks2 unmount /mnt/backup
 sudo luks2 close backup
 ```
 
-Unmount first. Before closing, the command asks whether `/dev/mapper/<name>`
-is listed as a mount point in `/proc/mounts`. A device path never is, so this
-check does not catch a mounted volume. Closing a mounted volume reaches
-device-mapper, which reports the target busy; `close` retries for 3 seconds and
-then fails with `device-mapper target is held open` and hints for finding the
-holder. If `/proc/mounts` cannot be read, it refuses to close.
+Unmount first. `close` refuses while a filesystem on the mapping is mounted,
+whatever path it was mounted through: it compares the mapping's device number
+with the mounts in `/proc/self/mountinfo`. If that cannot be read, it refuses
+to close. A holder it cannot see, such as a ZFS pool, makes device-mapper
+report the target busy; `close` retries for 3 seconds and then fails with
+`device-mapper target is held open` and hints for finding the holder.
 
 A name with no mapping fails with `volume not unlocked`.

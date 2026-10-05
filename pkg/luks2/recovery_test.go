@@ -987,7 +987,7 @@ func TestAddRecoveryKeyRollsBackAKeyslotItCannotIdentify(t *testing.T) {
 	device, primary, _ := volumeWithAKeyslotGap(t)
 
 	previous := importToken
-	importToken = func(string, int, *Token) error { return errors.New("the header could not be written") }
+	importToken = func(*keyslotDevice, int, *Token) error { return errors.New("the header could not be written") }
 	t.Cleanup(func() { importToken = previous })
 
 	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterations: recoveryTestIterations})
@@ -1012,11 +1012,11 @@ func TestAddRecoveryKeyReportsAnOrphanItCannotRemove(t *testing.T) {
 	device, primary, _ := volumeWithAKeyslotGap(t)
 
 	previousImport := importToken
-	importToken = func(string, int, *Token) error { return errors.New("the header could not be written") }
+	importToken = func(*keyslotDevice, int, *Token) error { return errors.New("the header could not be written") }
 	t.Cleanup(func() { importToken = previousImport })
 
 	previousKill := killKeyslot
-	killKeyslot = func(string, int) error { return errors.New("the device is read-only") }
+	killKeyslot = func(*keyslotDevice, int) error { return errors.New("the device is read-only") }
 	t.Cleanup(func() { killKeyslot = previousKill })
 
 	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterations: recoveryTestIterations})
@@ -1210,5 +1210,21 @@ func TestAddRecoveryKeyKeepsTheKeyLiveWhenTheSaveFails(t *testing.T) {
 	}
 	if opened != strconv.Itoa(recoveryKey.Keyslot) {
 		t.Fatalf("the credential opens keyslot %q, reported as %d", opened, recoveryKey.Keyslot)
+	}
+}
+
+// TestParseRecoveryKeyFormatAcceptsExactlyTheThreeRenderings: a name is one of
+// hex, base64 or dashed, spelled exactly. The empty string is refused here --
+// a caller that names a format has not asked for the default.
+func TestParseRecoveryKeyFormatAcceptsExactlyTheThreeRenderings(t *testing.T) {
+	for _, name := range []string{"hex", "base64", "dashed"} {
+		if got, err := ParseRecoveryKeyFormat(name); err != nil || string(got) != name {
+			t.Errorf("ParseRecoveryKeyFormat(%q) = %q, %v", name, got, err)
+		}
+	}
+	for _, name := range []string{"", "morse", "HEX", " dashed", "base32"} {
+		if got, err := ParseRecoveryKeyFormat(name); !errors.Is(err, ErrInvalidRecoveryKeyFormat) || got != "" {
+			t.Errorf("ParseRecoveryKeyFormat(%q) = %q, %v; want ErrInvalidRecoveryKeyFormat", name, got, err)
+		}
 	}
 }

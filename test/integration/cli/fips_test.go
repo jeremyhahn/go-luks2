@@ -22,7 +22,7 @@ import (
 // bar for #237, on the real kernel.
 //
 // A luks2 binary built with the Go Cryptographic Module and run under
-// GODEBUG=fips140=only creates a volume and enrols a recovery key with NO KDF
+// GODEBUG=fips140=only creates a volume and enrolls a recovery key with NO KDF
 // options -- before #237 both were refused, because create hard-coded
 // Argon2id and recovery add defaulted to it. Both keyslots must be
 // PBKDF2-SHA512, and cryptsetup -- a separate implementation, in no FIPS mode
@@ -98,7 +98,7 @@ func TestCLI_FIPSModeCreateAndRecoveryAddOpenWithCryptsetup(t *testing.T) {
 	}
 
 	// The defaults: create, then recovery add, with no KDF option.
-	stdout, stderr, err := runFIPS("create", "--key-file", keyFile, loopDev)
+	stdout, stderr, err := runFIPS("create", "--batch-mode", "--key-file", keyFile, loopDev)
 	if err != nil {
 		t.Fatalf("create under fips140=only failed: %v\nstdout: %s\nstderr: %s", err, stdout, stderr)
 	}

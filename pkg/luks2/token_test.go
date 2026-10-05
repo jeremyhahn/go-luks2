@@ -353,7 +353,7 @@ func stampTokens(t *testing.T, path string, tokens map[string]*Token) {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 	metadata.Tokens = tokens
-	if err := writeHeaderInternal(path, hdr, metadata); err != nil {
+	if err := writeHeaderUnvalidated(path, hdr, metadata); err != nil {
 		t.Fatalf("failed to write the token fixture: %v", err)
 	}
 }

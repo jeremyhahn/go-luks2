@@ -369,7 +369,7 @@ func buildVolumeWithSibling(t *testing.T, name string, damage func(*LUKS2Metadat
 		damage(metadata, sibling)
 	}
 
-	if err := writeHeaderInternal(path, hdr, metadata); err != nil {
+	if err := writeHeaderUnvalidated(path, hdr, metadata); err != nil {
 		t.Fatalf("failed to write the fixture header: %v", err)
 	}
 	return path
@@ -392,7 +392,7 @@ func TestTheUnlockPathRefusesEveryShapeTheRemovalGuardMustNotCount(t *testing.T)
 		t.Run(shape.name, func(t *testing.T) {
 			path := volumeWithSibling(t, "yardstick.img", shape.apply)
 
-			_, metadata, err := ReadHeader(path)
+			hdr, metadata, err := ReadHeader(path)
 			if err != nil {
 				t.Fatalf("ReadHeader failed: %v", err)
 			}
@@ -414,7 +414,7 @@ func TestTheUnlockPathRefusesEveryShapeTheRemovalGuardMustNotCount(t *testing.T)
 			}
 			defer func() { _ = f.Close() }()
 
-			if keyslotCanOpenVolume(f, siblingSlotID, sibling, metadata.Digests) {
+			if keyslotCanOpenVolume(f, hdr, metadata, siblingSlotID) {
 				t.Fatalf("the removal guard counts a keyslot the unlock path refuses (%v); counting one too many is how a removal destroys the last working credential", err)
 			}
 		})
@@ -436,7 +436,7 @@ func TestTheRemovalGuardCountsTheSlotsTheUnlockPathWouldOpen(t *testing.T) {
 
 	path := volumeWithSibling(t, "control.img", nil)
 
-	_, metadata, err := ReadHeader(path)
+	hdr, metadata, err := ReadHeader(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -447,15 +447,15 @@ func TestTheRemovalGuardCountsTheSlotsTheUnlockPathWouldOpen(t *testing.T) {
 	defer func() { _ = f.Close() }()
 
 	for _, id := range []string{"0", siblingSlotID} {
-		if !keyslotCanOpenVolume(f, id, metadata.Keyslots[id], metadata.Digests) {
+		if !keyslotCanOpenVolume(f, hdr, metadata, id) {
 			t.Fatalf("keyslot %s is not counted, so every refusal this file asserts could come from a predicate that counts nothing", id)
 		}
 	}
 
-	if got := usableKeyslotsAfterRemoving(f, metadata, "0"); got != 1 {
+	if got := usableKeyslotsAfterRemoving(f, hdr, metadata, "0"); got != 1 {
 		t.Fatalf("removing keyslot 0 leaves %d counted keyslots, want 1", got)
 	}
-	if got := usableKeyslotsAfterRemoving(f, metadata, "nosuchslot"); got != 2 {
+	if got := usableKeyslotsAfterRemoving(f, hdr, metadata, "nosuchslot"); got != 2 {
 		t.Fatalf("removing a keyslot that does not exist leaves %d counted keyslots, want 2", got)
 	}
 }
@@ -625,7 +625,7 @@ func TestAKeyslotWithOneUsableDigestIsStillCounted(t *testing.T) {
 		}
 	})
 
-	_, metadata, err := ReadHeader(device)
+	hdr, metadata, err := ReadHeader(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -636,7 +636,7 @@ func TestAKeyslotWithOneUsableDigestIsStillCounted(t *testing.T) {
 	defer func() { _ = f.Close() }()
 
 	for _, id := range []string{"0", siblingSlotID} {
-		if !keyslotCanOpenVolume(f, id, metadata.Keyslots[id], metadata.Digests) {
+		if !keyslotCanOpenVolume(f, hdr, metadata, id) {
 			t.Fatalf("keyslot %s stopped being counted because ONE of its digests is unusable; the screen must require any, not all", id)
 		}
 	}

@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: coverage-gate coverage-combined changelog-assemble help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-pkg integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration seccomp-diff
+.PHONY: coverage-gate coverage-combined changelog-assemble help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-pkg integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration seccomp-diff
 
 # Default target
 .DEFAULT_GOAL := help
@@ -574,6 +574,11 @@ docker-integration-test: docker-run-bin ## Run integration tests in Docker (isol
 # Docker creates a missing bind-mount source as root:root, which is what the
 # harness accepts; `make host-integration-test` runs under sudo, so the harness
 # creates it as root itself.
+#
+# If the directory already exists and an ordinary user owns it -- because
+# something ran as that user first -- the launcher (test/integration/cmd/
+# docker-run) mounts its root-ledger subdirectory instead, which Docker creates
+# as root. The harness still refuses a ledger directory a non-root user owns.
 TEST_STATE_DIR ?= /var/tmp/go-luks2-test-state
 
 # Every target that starts the integration container goes through this command,
@@ -709,7 +714,7 @@ lint: ## Run golangci-lint (if installed)
 		echo "$(COLOR_GREEN)✓ Lint passed$(COLOR_RESET)"; \
 	else \
 		echo "$(COLOR_YELLOW)⚠ golangci-lint not installed, skipping...$(COLOR_RESET)"; \
-		echo "  Install: curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b \$$(go env GOPATH)/bin"; \
+		echo "  Install: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)"; \
 	fi
 
 # ---- the mandatory security-analysis suite ----
@@ -728,7 +733,19 @@ lint: ## Run golangci-lint (if installed)
 #
 # The tools are not installed by these targets: a make target must not mutate
 # the developer's machine. A missing tool prints how to get it and the target
-# skips; CI provides all four, so the gate is real where it matters.
+# skips -- unless TOOLS_REQUIRED=1, which turns every skip into a failure.
+# Where each tool gates (#247):
+#
+#   gosec, govulncheck, go mod verify   CI's Security Scan job, every push and
+#                                       pull request (the runner image bakes
+#                                       both tools; ci.yml asserts the pins)
+#   trivy fs                            the NIGHTLY workflow and every RELEASE,
+#                                       not a merge: it is not in ci.yml
+#
+# The release runs this whole target with TOOLS_REQUIRED=1, so a release never
+# publishes on a scan that skipped.
+TOOLS_REQUIRED ?= 0
+export TOOLS_REQUIRED
 
 # CI passes GOSEC_EXTRA="-fmt=sarif -out=gosec.sarif" so the SARIF it uploads
 # to code scanning comes from the same flags a developer runs, not a second
@@ -764,6 +781,7 @@ gosec: ## Run gosec security scanner
 		$$GOSEC -concurrency $(GOSEC_CONCURRENCY) -exclude-generated -severity medium -confidence medium $(GOSEC_EXTRA) ./... || exit 1; \
 		echo "$(COLOR_GREEN)✓ Security scan passed$(COLOR_RESET)"; \
 	else \
+		if [ "$$TOOLS_REQUIRED" = 1 ]; then echo "$(COLOR_RED)✗ gosec is not installed and TOOLS_REQUIRED=1$(COLOR_RESET)"; exit 1; fi; \
 		echo "$(COLOR_YELLOW)⚠ gosec not installed, skipping...$(COLOR_RESET)"; \
 		echo "  Install: go install -ldflags \"-X main.Version=$(GOSEC_VERSION)\" github.com/securego/gosec/v2/cmd/gosec@$(GOSEC_VERSION)"; \
 		echo "  (pinned, and the -ldflags are REQUIRED: gosec reads its version"; \
@@ -785,6 +803,7 @@ gosec: ## Run gosec security scanner
 #
 # These are also the versions baked into the CI runner image. Bumping one is a
 # deliberate change, one issue per bump, made here and in the image together.
+GOLANGCI_LINT_VERSION ?= v2.13.2
 GOSEC_VERSION ?= v2.29.0
 GOVULNCHECK_VERSION ?= v1.7.0
 
@@ -795,20 +814,94 @@ govulncheck: ## Run govulncheck (known vulns in stdlib and the dependency call g
 		$$GOVULN ./... || exit 1; \
 		echo "$(COLOR_GREEN)✓ govulncheck passed$(COLOR_RESET)"; \
 	else \
+		if [ "$$TOOLS_REQUIRED" = 1 ]; then echo "$(COLOR_RED)✗ govulncheck is not installed and TOOLS_REQUIRED=1$(COLOR_RESET)"; exit 1; fi; \
 		echo "$(COLOR_YELLOW)⚠ govulncheck not installed, skipping...$(COLOR_RESET)"; \
 		echo "  Install: go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)"; \
 	fi
 
+# ---- trivy: a pinned release archive, verified before it is unpacked (#247) ----
+#
+# trivy is not in the runner image, so the nightly workflow and the release
+# install it with `make trivy-install`. That replaced `curl .../contrib/install.sh
+# from main | sh`: an unreviewed script from a moving branch, run as the build
+# user, which then fetched whatever trivy was newest.
+#
+# Four SHA-256s, raised together or not at all: the archive per architecture,
+# checked BEFORE anything is unpacked, and the binary inside it, checked after
+# unpacking and again before an installed copy is reused. The archive hashes
+# match upstream's trivy_0.74.0_checksums.txt; the binary hashes are go-enclave's
+# pins for the same release. Never a checksum file fetched next to the archive:
+# whoever can replace the archive can replace that file too.
+#
+# The binary lands in build/tools, inside the checkout, so the target does not
+# touch anything outside the repository.
+TRIVY_VERSION                := v0.74.0
+TRIVY_SHA256_LINUX_AMD64     := 2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
+TRIVY_SHA256_LINUX_ARM64     := b94ce1976bbf3c15b514b605ee88be7c6d94a29be2302847ff01cb794d47aad5
+TRIVY_BIN_SHA256_LINUX_AMD64 := d89bcc6510a267f11b773398cbf1be5520ce39f9e8b6633178c4487f05b7d791
+TRIVY_BIN_SHA256_LINUX_ARM64 := fed2c9ca7d27191ada34524b5eaf5216a845c6d6f3246143c3b475552ffe5358
+TRIVY_DOWNLOAD_BASE          ?= https://github.com/aquasecurity/trivy/releases/download
+TOOLS_DIR                    ?= $(CURDIR)/$(BUILD_DIR)/tools
+TRIVY_BIN                     = $(TOOLS_DIR)/trivy-$(TRIVY_VERSION)/trivy
+
+# Values reach the recipe through the environment, never spliced into its
+# shell source, so a TOOLS_DIR with a quote in it is a path and not a command.
+trivy-install: export TI_VERSION     := $(TRIVY_VERSION)
+trivy-install: export TI_SUM_AMD64   := $(TRIVY_SHA256_LINUX_AMD64)
+trivy-install: export TI_SUM_ARM64   := $(TRIVY_SHA256_LINUX_ARM64)
+trivy-install: export TI_BIN_AMD64   := $(TRIVY_BIN_SHA256_LINUX_AMD64)
+trivy-install: export TI_BIN_ARM64   := $(TRIVY_BIN_SHA256_LINUX_ARM64)
+trivy-install: export TI_BASE        := $(TRIVY_DOWNLOAD_BASE)
+trivy-install: export TI_DEST        := $(TRIVY_BIN)
+trivy-install: ## Install the pinned trivy into build/tools, verified by SHA-256
+	@set -eu; \
+	case "$$(uname -s)/$$(uname -m)" in \
+	  Linux/x86_64|Linux/amd64)  arch=64bit; sum=$$TI_SUM_AMD64; binsum=$$TI_BIN_AMD64 ;; \
+	  Linux/aarch64|Linux/arm64) arch=ARM64; sum=$$TI_SUM_ARM64; binsum=$$TI_BIN_ARM64 ;; \
+	  *) echo "trivy-install: no pinned trivy for $$(uname -s)/$$(uname -m)"; exit 1 ;; \
+	esac; \
+	if [ -x "$$TI_DEST" ] && printf '%s  %s\n' "$$binsum" "$$TI_DEST" | sha256sum -c --status -; then \
+		echo "$(COLOR_GREEN)✓ trivy $$TI_VERSION already installed: $$TI_DEST$(COLOR_RESET)"; exit 0; \
+	fi; \
+	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
+	file="trivy_$${TI_VERSION#v}_Linux-$$arch.tar.gz"; \
+	curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$$tmp/$$file" "$$TI_BASE/$$TI_VERSION/$$file"; \
+	printf '%s  %s\n' "$$sum" "$$tmp/$$file" | sha256sum -c --quiet - || { \
+		echo "$(COLOR_RED)✗ $$file does not match its pinned SHA-256; refusing to unpack it$(COLOR_RESET)"; exit 1; }; \
+	tar -xzf "$$tmp/$$file" -C "$$tmp" trivy; \
+	printf '%s  %s\n' "$$binsum" "$$tmp/trivy" | sha256sum -c --quiet - || { \
+		echo "$(COLOR_RED)✗ the trivy binary in $$file does not match its pinned SHA-256$(COLOR_RESET)"; exit 1; }; \
+	mkdir -p "$$(dirname "$$TI_DEST")"; \
+	install -m 0755 "$$tmp/trivy" "$$TI_DEST"; \
+	echo "$(COLOR_GREEN)✓ trivy $$TI_VERSION installed: $$TI_DEST$(COLOR_RESET)"
+
+# The pinned binary from trivy-install when it is there, else a trivy on PATH.
+# build/ is skipped: it holds the pinned trivy itself and the built CLI, and
+# trivy reads the dependencies compiled into every Go binary it finds -- so it
+# would report trivy's own dependencies as this module's.
+trivy-fs: export TI_DEST := $(TRIVY_BIN)
 trivy-fs: ## Scan the working tree with trivy (dependency CVEs and leaked secrets)
 	@echo "$(COLOR_BOLD)Running trivy filesystem scan...$(COLOR_RESET)"
-	@if command -v trivy >/dev/null 2>&1; then \
-		trivy fs --scanners vuln,secret --severity CRITICAL,HIGH --exit-code 1 . || exit 1; \
+	@TRIVY=$$TI_DEST; [ -x "$$TRIVY" ] || TRIVY=$$(command -v trivy 2>/dev/null || true); \
+	if [ -n "$$TRIVY" ]; then \
+		"$$TRIVY" fs --scanners vuln,secret --severity CRITICAL,HIGH --exit-code 1 --skip-dirs build . || exit 1; \
 		echo "$(COLOR_GREEN)✓ Trivy scan passed$(COLOR_RESET)"; \
 	else \
+		if [ "$$TOOLS_REQUIRED" = 1 ]; then echo "$(COLOR_RED)✗ trivy is not installed and TOOLS_REQUIRED=1 (make trivy-install)$(COLOR_RESET)"; exit 1; fi; \
 		echo "$(COLOR_YELLOW)⚠ trivy not installed, skipping filesystem scan$(COLOR_RESET)"; \
-		echo "  Install: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin"; \
-		echo "  CI installs trivy unconditionally, so this scan still gates every push."; \
+		echo "  Install: make trivy-install   (pinned $(TRIVY_VERSION), SHA-256 verified)"; \
+		echo "  This scan is NOT part of CI's per-push gate: it gates the nightly workflow and every release."; \
 	fi
+
+# The same scan as SARIF, for github.com's code-scanning upload (nightly only).
+trivy-sarif: export TI_DEST := $(TRIVY_BIN)
+trivy-sarif:
+	@"$$TI_DEST" fs --scanners vuln,secret --exit-code 0 --format sarif --output trivy-results.sarif --skip-dirs build .
+
+# Misconfiguration scanning, ADVISORY: it reports and never fails.
+trivy-misconfig: export TI_DEST := $(TRIVY_BIN)
+trivy-misconfig:
+	@"$$TI_DEST" fs --scanners misconfig --exit-code 0 --format table --skip-dirs build .
 
 security: gosec govulncheck verify trivy-fs ## Run the full §8 security suite (gosec, govulncheck, go mod verify, trivy fs)
 	@echo "$(COLOR_GREEN)✓ Security suite complete$(COLOR_RESET)"

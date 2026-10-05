@@ -60,10 +60,13 @@ func noUsableKeyslotVolume(t *testing.T, name string, reencryptOnly bool) string
 			},
 		}
 	} else {
+		// No keyslots, and so no digest naming one: a header cryptsetup
+		// itself accepts, as it is left by removing the last keyslot.
 		metadata.Keyslots = map[string]*Keyslot{}
+		metadata.Digests["0"].Keyslots = []string{}
 	}
 
-	if err := writeHeaderInternal(path, hdr, metadata); err != nil {
+	if err := writeHeaderUnvalidated(path, hdr, metadata); err != nil {
 		t.Fatalf("failed to write the no-usable-keyslot fixture: %v", err)
 	}
 	return path

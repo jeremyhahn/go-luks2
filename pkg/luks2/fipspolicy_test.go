@@ -44,7 +44,7 @@ func writeFixture(t *testing.T, device string, mutate func(*LUKS2Metadata)) {
 	}
 	mutate(metadata)
 	hdr.SequenceID++
-	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
+	if err := writeHeaderUnvalidated(device, hdr, metadata); err != nil {
 		t.Fatalf("writing the fixture failed: %v", err)
 	}
 }

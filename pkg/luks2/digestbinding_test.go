@@ -221,7 +221,7 @@ func TestADigestCannotAuthenticateAKeyslotItDoesNotName(t *testing.T) {
 		// Digest 0 still holds the digest OF KEYSLOT 0's master key. Only the
 		// association moves.
 		metadata.Digests["0"].Keyslots = []string{"1"}
-		if err := writeHeaderInternal(path, hdr, metadata); err != nil {
+		if err := writeHeaderUnvalidated(path, hdr, metadata); err != nil {
 			t.Fatalf("failed to write the mutated header: %v", err)
 		}
 

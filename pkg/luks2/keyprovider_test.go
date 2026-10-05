@@ -490,7 +490,7 @@ func TestFIDO2ProviderRefusesAFieldThatIsNotTheSecret(t *testing.T) {
 	signature := base64.StdEncoding.EncodeToString(make([]byte, 71))
 
 	helper := helperScript(t, "fido2-assert", assertOutput(signature))
-	p, err := NewFIDO2KeyProvider(fido2TestParams(t), ExecConfig{FIDO2Assert: helper})
+	p, err := NewFIDO2KeyProvider(fido2TestParams(t), ExecConfig{FIDO2Assert: helper, Device: "/dev/hidraw9"})
 	if err != nil {
 		t.Fatalf("NewFIDO2KeyProvider() error = %v", err)
 	}
@@ -568,7 +568,7 @@ func TestNewFIDO2CredentialReadsTheCredentialID(t *testing.T) {
 func TestNewFIDO2CredentialRefusesUnusableOutput(t *testing.T) {
 	helper := helperScript(t, "fido2-cred", "one\ntwo\nthree\nfour\n!!! not base64 !!!\n")
 
-	if _, err := NewFIDO2Credential(context.Background(), ExecConfig{FIDO2Cred: helper}, FIDO2CredentialOptions{}); !errors.Is(err, ErrHelperOutput) {
+	if _, err := NewFIDO2Credential(context.Background(), ExecConfig{FIDO2Cred: helper, Device: "/dev/hidraw9"}, FIDO2CredentialOptions{}); !errors.Is(err, ErrHelperOutput) {
 		t.Errorf("error = %v, want errors.Is(_, ErrHelperOutput)", err)
 	}
 }
@@ -595,7 +595,7 @@ func TestProviderFromTokenBuildsTheBindingTheHeaderRecords(t *testing.T) {
 		t.Errorf("relying party = %q, want %q", round.relyingParty(), DefaultFIDO2RelyingParty)
 	}
 
-	if _, err := ProviderFromToken(token, ExecConfig{}); err != nil {
+	if _, err := ProviderFromToken(token, ExecConfig{Device: "/dev/hidraw9"}); err != nil {
 		t.Errorf("ProviderFromToken() error = %v", err)
 	}
 }
@@ -782,7 +782,7 @@ func TestEnrollKeyProviderReportsAnOrphanItCannotRemove(t *testing.T) {
 	formatWithLibrary(t, image)
 
 	original := killKeyslot
-	killKeyslot = func(string, int) error { return errors.New("device is read-only") }
+	killKeyslot = func(*keyslotDevice, int) error { return errors.New("device is read-only") }
 	t.Cleanup(func() { killKeyslot = original })
 
 	provider := &CommandKeyProvider{
@@ -935,7 +935,7 @@ func TestKeyProviderErrorVocabulary(t *testing.T) {
 func TestFIDO2ProviderCarriesItsToken(t *testing.T) {
 	params := fido2TestParams(t)
 
-	p, err := NewFIDO2KeyProvider(params, ExecConfig{})
+	p, err := NewFIDO2KeyProvider(params, ExecConfig{Device: "/dev/hidraw9"})
 	if err != nil {
 		t.Fatalf("NewFIDO2KeyProvider() error = %v", err)
 	}
@@ -1079,7 +1079,7 @@ func TestFIDO2ArgumentsFollowTheRequirementFlags(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p, err := NewFIDO2KeyProvider(tt.params, ExecConfig{FIDO2Assert: "/usr/bin/fido2-assert"})
+			p, err := NewFIDO2KeyProvider(tt.params, ExecConfig{FIDO2Assert: "/usr/bin/fido2-assert", Device: "/dev/hidraw9"})
 			if err != nil {
 				t.Fatalf("NewFIDO2KeyProvider() error = %v", err)
 			}
@@ -1126,7 +1126,7 @@ func TestNewFIDO2CredentialArgumentsFollowTheOptions(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			helper, argsFile, stdinFile := echoingHelper(t, "fido2-cred", stdout)
 
-			if _, err := NewFIDO2Credential(context.Background(), ExecConfig{FIDO2Cred: helper}, tt.opts); err != nil {
+			if _, err := NewFIDO2Credential(context.Background(), ExecConfig{FIDO2Cred: helper, Device: "/dev/hidraw9"}, tt.opts); err != nil {
 				t.Fatalf("NewFIDO2Credential() error = %v", err)
 			}
 

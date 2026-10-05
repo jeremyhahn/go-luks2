@@ -7,8 +7,10 @@
 package luks2
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -140,4 +142,83 @@ func TestMountErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestMountDetectsTheFilesystemOnTheDevice: with no FSType, Mount mounts what
+// blkid finds on the mapping -- here xfs, which the CLI's old hard-coded ext4
+// could not mount -- and an empty mapping is refused rather than guessed at.
+func TestMountDetectsTheFilesystemOnTheDevice(t *testing.T) {
+	requireRoot(t)
+
+	volumePath := filepath.Join(t.TempDir(), "detect.img")
+	if err := os.WriteFile(volumePath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(volumePath, 400<<20); err != nil { // xfs wants 300 MiB
+		t.Fatal(err)
+	}
+	passphrase := []byte("detect-the-filesystem")
+	if err := Format(FormatOptions{Device: volumePath, Passphrase: passphrase, KDFType: "pbkdf2", PBKDFIterTime: 100}); err != nil {
+		t.Fatalf("Format: %v", err)
+	}
+	loopDev, err := SetupLoopDevice(volumePath)
+	if err != nil {
+		t.Fatalf("SetupLoopDevice: %v", err)
+	}
+	defer DetachLoopDevice(loopDev)
+
+	volumeName := runVolume(t, "mount-detect")
+	defer releaseVolume(t, volumeName)
+	if err := Unlock(loopDev, passphrase, volumeName); err != nil {
+		t.Fatalf("Unlock: %v", err)
+	}
+
+	mountPoint := t.TempDir()
+
+	// Nothing on it yet: refused, and nothing mounted.
+	if _, err := DetectFilesystem(volumeName); !errors.Is(err, ErrFilesystemNotDetected) {
+		t.Fatalf("DetectFilesystem on an empty mapping = %v, want ErrFilesystemNotDetected", err)
+	}
+	if err := Mount(MountOptions{Device: volumeName, MountPoint: mountPoint}); !errors.Is(err, ErrFilesystemNotDetected) {
+		_ = Unmount(mountPoint, 0)
+		t.Fatalf("Mount with no type on an empty mapping = %v, want ErrFilesystemNotDetected", err)
+	}
+
+	if err := MakeFilesystem(volumeName, string(FilesystemXFS), "detected"); err != nil {
+		t.Fatalf("MakeFilesystem xfs: %v", err)
+	}
+	if got, err := DetectFilesystem(volumeName); err != nil || got != FilesystemXFS {
+		t.Fatalf("DetectFilesystem = %q, %v; want xfs", got, err)
+	}
+
+	if err := Mount(MountOptions{Device: volumeName, MountPoint: mountPoint}); err != nil {
+		t.Fatalf("Mount with no type: %v", err)
+	}
+	defer func() {
+		if err := Unmount(mountPoint, 0); err != nil {
+			t.Errorf("Unmount: %v", err)
+		}
+	}()
+
+	if fsType := mountedType(t, mountPoint); fsType != "xfs" {
+		t.Fatalf("%s is mounted as %q, want xfs", mountPoint, fsType)
+	}
+}
+
+// mountedType is the filesystem type /proc/self/mountinfo records for the
+// mount at mountPoint, or "" when nothing is mounted there.
+func mountedType(t *testing.T, mountPoint string) string {
+	t.Helper()
+	data, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		pre, post, ok := strings.Cut(line, " - ")
+		fields, after := strings.Fields(pre), strings.Fields(post)
+		if ok && len(fields) >= 5 && len(after) >= 1 && unescapeMountField(fields[4]) == mountPoint {
+			return after[0]
+		}
+	}
+	return ""
 }

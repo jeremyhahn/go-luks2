@@ -42,7 +42,10 @@ func (c *CLI) cmdTestKey() int {
 			"  luks2 testkey --key-file /etc/luks/backup.key /dev/sdb1")
 	}
 
-	device := args[0]
+	device, err := absPath("testkey", args[0])
+	if err != nil {
+		return c.usageError(err)
+	}
 
 	passphrase, err := c.readPassphrase("Enter passphrase: ", false, *key)
 	if err != nil {
@@ -105,7 +108,10 @@ func (c *CLI) cmdAddKey() int {
 			"  --new-key-file <path>   Read the NEW passphrase from a file")
 	}
 
-	device := args[0]
+	device, err := absPath("addkey", args[0])
+	if err != nil {
+		return c.usageError(err)
+	}
 
 	// Judged before either passphrase is asked for: an operator should not
 	// type two credentials to learn the KDF was never going to be written.
@@ -162,7 +168,10 @@ func (c *CLI) cmdRemoveKey() int {
 			"  luks2 removekey /dev/sdb1 2")
 	}
 
-	device := args[0]
+	device, err := absPath("removekey", args[0])
+	if err != nil {
+		return c.usageError(err)
+	}
 	slot, err := parseKeyslot("removekey", args[1])
 	if err != nil {
 		return c.usageError(err)
@@ -199,7 +208,10 @@ func (c *CLI) cmdKillSlot() int {
 			"  luks2 killslot /dev/sdb1 3")
 	}
 
-	device := args[0]
+	device, err := absPath("killslot", args[0])
+	if err != nil {
+		return c.usageError(err)
+	}
 	slot, err := parseKeyslot("killslot", args[1])
 	if err != nil {
 		return c.usageError(err)
@@ -241,7 +253,10 @@ func (c *CLI) cmdChangeKey() int {
 			"  luks2 changekey --key-file old.key --new-key-file new.key /dev/sdb1 0")
 	}
 
-	device := args[0]
+	device, err := absPath("changekey", args[0])
+	if err != nil {
+		return c.usageError(err)
+	}
 	slot, err := parseKeyslot("changekey", args[1])
 	if err != nil {
 		return c.usageError(err)
@@ -281,7 +296,11 @@ func (c *CLI) cmdKeyslots() int {
 			"  luks2 keyslots /dev/sdb1")
 	}
 
-	slots, err := c.Luks.ListKeyslots(args[0])
+	device, err := absPath("keyslots", args[0])
+	if err != nil {
+		return c.usageError(err)
+	}
+	slots, err := c.Luks.ListKeyslots(device)
 	if err != nil {
 		_, _ = fmt.Fprintf(c.Stderr, "Failed to read keyslots: %v\n", err)
 		return 1

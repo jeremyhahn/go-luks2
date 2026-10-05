@@ -6,7 +6,6 @@ package harness
 
 import (
 	"errors"
-	"os"
 	"strings"
 	"testing"
 )
@@ -94,12 +93,18 @@ func TestTwoScopesNeverShareAName(t *testing.T) {
 }
 
 func TestNewScopeIsUsableAsANameTerm(t *testing.T) {
+	previous := hostname
+	t.Cleanup(func() { hostname = previous })
+
+	// A hostname of this test's choosing, carrying every kind of byte
+	// device-mapper refuses, rather than whatever this machine is called.
+	hostname = func() (string, error) { return "build_07.example.com", nil }
 	scope, err := NewScope()
 	if err != nil {
 		t.Fatalf("NewScope failed: %v", err)
 	}
-	if scope == "" {
-		t.Fatal("NewScope returned an empty scope, which VolumeName must refuse")
+	if want := "build-07-example-com"; scope != want {
+		t.Errorf("NewScope = %q, want the sanitized hostname %q", scope, want)
 	}
 	for _, r := range scope {
 		switch {
@@ -108,12 +113,18 @@ func TestNewScopeIsUsableAsANameTerm(t *testing.T) {
 			t.Errorf("NewScope = %q contains %q, which device-mapper does not accept", scope, r)
 		}
 	}
-	host, err := os.Hostname()
-	if err != nil {
-		t.Skip("hostname unavailable; NewScope already reported usable output above")
+
+	// No hostname is a refusal, never an empty scope VolumeName would have to
+	// catch.
+	hostname = func() (string, error) { return "", errors.New("uname failed") }
+	if scope, err := NewScope(); !errors.Is(err, ErrVolumeName) || scope != "" {
+		t.Errorf("NewScope with no hostname = %q, %v; want ErrVolumeName", scope, err)
 	}
-	if want := SanitizeNameTerm(host); scope != want {
-		t.Errorf("NewScope = %q, want the sanitized hostname %q", scope, want)
+
+	// And the real one, on this machine: whatever it is, it sanitizes.
+	hostname = previous
+	if scope, err := NewScope(); err != nil || scope == "" {
+		t.Errorf("NewScope on this host = %q, %v", scope, err)
 	}
 }
 

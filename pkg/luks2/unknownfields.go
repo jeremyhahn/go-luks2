@@ -19,8 +19,8 @@ import (
 // WHY THIS EXISTS
 //
 // Every mutation this package performs -- AddKey, RemoveKey, ChangeKey,
-// ImportToken, RemoveToken -- goes through writeHeaderInternal, and
-// writeHeaderInternal re-marshals the ENTIRE metadata blob. So the header that
+// ImportToken, RemoveToken -- goes through writeHeaderTo, and
+// writeHeaderTo re-marshals the ENTIRE metadata blob. So the header that
 // lands on disk contains exactly what these Go structs managed to hold, and a
 // JSON member no field models is not left alone: it is deleted, from an object
 // the operation never meant to touch.
@@ -53,19 +53,13 @@ import (
 // integers, and because the package declared no MarshalJSON at all it could
 // not have reached the disk in any case.
 //
-// WHAT THIS DOES NOT COVER
+// WHAT IT COVERS
 //
-// The Segment, Digest and Config objects are still closed, and an unmodeled
-// member of one of those is still dropped. That is #152, and it is not
-// hypothetical: cryptsetup flags the backup segments of an in-progress
-// reencryption `backup-previous` and `backup-final`, Segment has no field for
-// them, and a rewrite drops exactly what `cryptsetup reencrypt --resume-only`
-// needs. Extending this mechanism to Segment is mechanical -- splitKnown and
-// mergeInto are type-agnostic and the known-member lists are derived by
-// reflection. Config is not: its requirements member has the wrong Go TYPE,
-// which is a hard read failure rather than a silent drop, so it needs a shape
-// change and an owner decision about what this package does when it meets a
-// mandatory requirement it does not implement.
+// Every object the metadata models: keyslots and their area, kdf and af,
+// tokens, segments, digests, config and config.requirements (#152). Members
+// at the top level of the metadata are not carried. Before any of them is
+// decoded, decodeMembers refuses an object that names a member twice or names
+// a modeled member in another case (#248).
 
 // unknownFields holds the members of one JSON object that the Go struct for
 // that object does not model, exactly as they were read.
@@ -87,6 +81,7 @@ const (
 	metadataObjectDigest       = "digest"
 	metadataObjectConfig       = "config"
 	metadataObjectRequirements = "config.requirements"
+	metadataObjectHeader       = "metadata"
 )
 
 // The two directions a metadata object crosses the JSON boundary.
@@ -102,6 +97,19 @@ const (
 // object is a valid LUKS2 object: a syntactically perfect keyslot with an
 // impossible key size decodes cleanly and is refused elsewhere.
 var ErrMetadataJSON = errors.New("LUKS2 metadata object could not be converted to or from JSON")
+
+// ErrAmbiguousJSONMember indicates a LUKS2 metadata object that names one
+// member twice, or names a member this package models in a different case
+// ("Keyslots" for "keyslots").
+//
+// Such an object reads differently to different implementations, so it is
+// refused rather than interpreted (#248). encoding/json binds a member to a
+// struct field CASE-INSENSITIVELY and lets the last duplicate win; json-c,
+// which cryptsetup parses the header with, is case-sensitive. A digest
+// carrying {"keyslots":["0"], "Keyslots":["1"]} attests keyslot 0 to
+// cryptsetup and keyslot 1 to this package -- and the next header write by this
+// package would have rewritten it to what this package saw.
+var ErrAmbiguousJSONMember = errors.New("JSON object names a member twice or in a case that differs from the LUKS2 spelling")
 
 // MetadataJSONError reports which metadata object failed to convert, in which
 // direction, and why.
@@ -167,13 +175,10 @@ func splitKnown(raw map[string]json.RawMessage, known []string) unknownFields {
 
 // containsMember reports whether names holds name, matching case-
 // INSENSITIVELY to agree with how encoding/json itself binds a decoded
-// member to a struct field: when a raw object has no exact-case match for a
-// field, json.Unmarshal still binds it case-insensitively rather than
-// leaving the field unset. A case-sensitive comparison here would let that
-// same member survive a second time as "unknown", so the typed half and the
-// carried half would both reach the wire -- and disagree the moment a caller
-// changes the typed field, which is the very state splitKnown exists to rule
-// out.
+// member to a struct field. A case variant of a modeled member never gets
+// this far on a decode -- decodeMembers refuses it first -- so this is the
+// same answer an exact comparison would give, kept in encoding/json's terms
+// so the typed half and the carried half can never both claim one member.
 func containsMember(names []string, name string) bool {
 	for _, candidate := range names {
 		if strings.EqualFold(candidate, name) {
@@ -181,6 +186,45 @@ func containsMember(names []string, name string) bool {
 		}
 	}
 	return false
+}
+
+// decodeMembers splits the JSON object data into its members, refusing an
+// object that names a member twice or names one of known in a different case.
+// See ErrAmbiguousJSONMember.
+//
+// It runs BEFORE the typed decode, because the typed decode is where the
+// ambiguity is resolved silently. A map loses duplicates, so the object is
+// read token by token. A value that is not an object is left to the typed
+// decode, which reports it with encoding/json's own error type.
+func decodeMembers(object string, data []byte, known []string) (map[string]json.RawMessage, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil, nil
+	}
+	members := make(map[string]json.RawMessage)
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, &MetadataJSONError{Object: object, Op: metadataJSONDecode, Err: err}
+		}
+		name, _ := tok.(string) // an object key is always a string token
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return nil, &MetadataJSONError{Object: object, Op: metadataJSONDecode, Member: name, Err: err}
+		}
+		if _, dup := members[name]; dup {
+			return nil, &MetadataJSONError{Object: object, Op: metadataJSONDecode, Member: name,
+				Err: &detailError{Kind: ErrAmbiguousJSONMember, Detail: "the member appears more than once"}}
+		}
+		for _, modeled := range known {
+			if name != modeled && strings.EqualFold(name, modeled) {
+				return nil, &MetadataJSONError{Object: object, Op: metadataJSONDecode, Member: name,
+					Err: &detailError{Kind: ErrAmbiguousJSONMember, Detail: fmt.Sprintf("the LUKS2 member is spelled %q", modeled)}}
+			}
+		}
+		members[name] = value
+	}
+	return members, nil
 }
 
 // mergeInto splices the carried members into typed -- the JSON object the
@@ -289,20 +333,21 @@ var (
 	digestKnownMembers       = jsonMemberNames(reflect.TypeOf(Digest{}))
 	configKnownMembers       = jsonMemberNames(reflect.TypeOf(Config{}))
 	requirementsKnownMembers = jsonMemberNames(reflect.TypeOf(Requirements{}))
+	metadataKnownMembers     = jsonMemberNames(reflect.TypeOf(LUKS2Metadata{}))
 )
 
 // UnmarshalJSON decodes a keyslot and carries any member this package does not
 // model.
 func (k *Keyslot) UnmarshalJSON(data []byte) error {
+	raw, err := decodeMembers(metadataObjectKeyslot, data, keyslotKnownMembers)
+	if err != nil {
+		return err
+	}
+
 	// The alias sheds Keyslot's methods, so encoding/json handles the typed
 	// half by reflection instead of calling this function again.
 	type alias Keyslot
 	if err := json.Unmarshal(data, (*alias)(k)); err != nil {
-		return &MetadataJSONError{Object: metadataObjectKeyslot, Op: metadataJSONDecode, Err: err}
-	}
-
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
 		return &MetadataJSONError{Object: metadataObjectKeyslot, Op: metadataJSONDecode, Err: err}
 	}
 	k.unknown = splitKnown(raw, keyslotKnownMembers)
@@ -353,13 +398,13 @@ func (k Keyslot) MarshalJSON() ([]byte, error) {
 // and `shift_size`, none of which this package models, and all of which it
 // needs to resume an interrupted reencryption.
 func (a *KeyslotArea) UnmarshalJSON(data []byte) error {
-	type alias KeyslotArea
-	if err := json.Unmarshal(data, (*alias)(a)); err != nil {
-		return &MetadataJSONError{Object: metadataObjectKeyslotArea, Op: metadataJSONDecode, Err: err}
+	raw, err := decodeMembers(metadataObjectKeyslotArea, data, keyslotAreaKnownMembers)
+	if err != nil {
+		return err
 	}
 
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
+	type alias KeyslotArea
+	if err := json.Unmarshal(data, (*alias)(a)); err != nil {
 		return &MetadataJSONError{Object: metadataObjectKeyslotArea, Op: metadataJSONDecode, Err: err}
 	}
 	a.unknown = splitKnown(raw, keyslotAreaKnownMembers)
@@ -380,13 +425,13 @@ func (a KeyslotArea) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON decodes a KDF and carries any member this package does not
 // model.
 func (k *KDF) UnmarshalJSON(data []byte) error {
-	type alias KDF
-	if err := json.Unmarshal(data, (*alias)(k)); err != nil {
-		return &MetadataJSONError{Object: metadataObjectKDF, Op: metadataJSONDecode, Err: err}
+	raw, err := decodeMembers(metadataObjectKDF, data, kdfKnownMembers)
+	if err != nil {
+		return err
 	}
 
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
+	type alias KDF
+	if err := json.Unmarshal(data, (*alias)(k)); err != nil {
 		return &MetadataJSONError{Object: metadataObjectKDF, Op: metadataJSONDecode, Err: err}
 	}
 	k.unknown = splitKnown(raw, kdfKnownMembers)
@@ -407,13 +452,13 @@ func (k KDF) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON decodes an anti-forensic specification and carries any member
 // this package does not model.
 func (a *AntiForensic) UnmarshalJSON(data []byte) error {
-	type alias AntiForensic
-	if err := json.Unmarshal(data, (*alias)(a)); err != nil {
-		return &MetadataJSONError{Object: metadataObjectAntiForensic, Op: metadataJSONDecode, Err: err}
+	raw, err := decodeMembers(metadataObjectAntiForensic, data, antiForensicKnownMembers)
+	if err != nil {
+		return err
 	}
 
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
+	type alias AntiForensic
+	if err := json.Unmarshal(data, (*alias)(a)); err != nil {
 		return &MetadataJSONError{Object: metadataObjectAntiForensic, Op: metadataJSONDecode, Err: err}
 	}
 	a.unknown = splitKnown(raw, antiForensicKnownMembers)
@@ -439,13 +484,13 @@ func (a AntiForensic) MarshalJSON() ([]byte, error) {
 // that matter are defined by systemd, not by this package, and a token is
 // written once by whatever enrolled it and then only ever read.
 func (t *Token) UnmarshalJSON(data []byte) error {
-	type alias Token
-	if err := json.Unmarshal(data, (*alias)(t)); err != nil {
-		return &MetadataJSONError{Object: metadataObjectToken, Op: metadataJSONDecode, Err: err}
+	raw, err := decodeMembers(metadataObjectToken, data, tokenKnownMembers)
+	if err != nil {
+		return err
 	}
 
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
+	type alias Token
+	if err := json.Unmarshal(data, (*alias)(t)); err != nil {
 		return &MetadataJSONError{Object: metadataObjectToken, Op: metadataJSONDecode, Err: err}
 	}
 	t.unknown = splitKnown(raw, tokenKnownMembers)
@@ -471,13 +516,13 @@ func (t Token) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON decodes a segment and carries any member this package does not
 // model.
 func (x *Segment) UnmarshalJSON(data []byte) error {
-	type alias Segment
-	if err := json.Unmarshal(data, (*alias)(x)); err != nil {
-		return &MetadataJSONError{Object: metadataObjectSegment, Op: metadataJSONDecode, Err: err}
+	raw, err := decodeMembers(metadataObjectSegment, data, segmentKnownMembers)
+	if err != nil {
+		return err
 	}
 
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
+	type alias Segment
+	if err := json.Unmarshal(data, (*alias)(x)); err != nil {
 		return &MetadataJSONError{Object: metadataObjectSegment, Op: metadataJSONDecode, Err: err}
 	}
 	x.unknown = splitKnown(raw, segmentKnownMembers)
@@ -504,13 +549,13 @@ func (x Segment) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON decodes a digest and carries any member this package does not
 // model.
 func (x *Digest) UnmarshalJSON(data []byte) error {
-	type alias Digest
-	if err := json.Unmarshal(data, (*alias)(x)); err != nil {
-		return &MetadataJSONError{Object: metadataObjectDigest, Op: metadataJSONDecode, Err: err}
+	raw, err := decodeMembers(metadataObjectDigest, data, digestKnownMembers)
+	if err != nil {
+		return err
 	}
 
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
+	type alias Digest
+	if err := json.Unmarshal(data, (*alias)(x)); err != nil {
 		return &MetadataJSONError{Object: metadataObjectDigest, Op: metadataJSONDecode, Err: err}
 	}
 	x.unknown = splitKnown(raw, digestKnownMembers)
@@ -537,13 +582,13 @@ func (x Digest) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON decodes a config and carries any member this package does not
 // model.
 func (x *Config) UnmarshalJSON(data []byte) error {
-	type alias Config
-	if err := json.Unmarshal(data, (*alias)(x)); err != nil {
-		return &MetadataJSONError{Object: metadataObjectConfig, Op: metadataJSONDecode, Err: err}
+	raw, err := decodeMembers(metadataObjectConfig, data, configKnownMembers)
+	if err != nil {
+		return err
 	}
 
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
+	type alias Config
+	if err := json.Unmarshal(data, (*alias)(x)); err != nil {
 		return &MetadataJSONError{Object: metadataObjectConfig, Op: metadataJSONDecode, Err: err}
 	}
 	x.unknown = splitKnown(raw, configKnownMembers)
@@ -570,13 +615,13 @@ func (x Config) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON decodes the requirements object and carries any member this
 // package does not model.
 func (x *Requirements) UnmarshalJSON(data []byte) error {
-	type alias Requirements
-	if err := json.Unmarshal(data, (*alias)(x)); err != nil {
-		return &MetadataJSONError{Object: metadataObjectRequirements, Op: metadataJSONDecode, Err: err}
+	raw, err := decodeMembers(metadataObjectRequirements, data, requirementsKnownMembers)
+	if err != nil {
+		return err
 	}
 
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
+	type alias Requirements
+	if err := json.Unmarshal(data, (*alias)(x)); err != nil {
 		return &MetadataJSONError{Object: metadataObjectRequirements, Op: metadataJSONDecode, Err: err}
 	}
 	x.unknown = splitKnown(raw, requirementsKnownMembers)

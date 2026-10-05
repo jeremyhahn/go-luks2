@@ -72,7 +72,7 @@ func TestWipeFull(t *testing.T) {
 		t.Fatalf("Failed to create file: %v", err)
 	}
 	// Use small file for fast testing
-	if err := f.Truncate(10 * 1024 * 1024); err != nil {
+	if err := f.Truncate(32 * 1024 * 1024); err != nil {
 		f.Close()
 		t.Fatalf("Failed to truncate: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestWipeMultiplePasses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create file: %v", err)
 	}
-	if err := f.Truncate(5 * 1024 * 1024); err != nil {
+	if err := f.Truncate(32 * 1024 * 1024); err != nil {
 		f.Close()
 		t.Fatalf("Failed to truncate: %v", err)
 	}
@@ -402,7 +402,7 @@ func TestWipeMultiplePassesWithTrim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create file: %v", err)
 	}
-	if err := f.Truncate(5 * 1024 * 1024); err != nil {
+	if err := f.Truncate(32 * 1024 * 1024); err != nil {
 		f.Close()
 		t.Fatalf("Failed to truncate: %v", err)
 	}
@@ -756,7 +756,7 @@ func TestWipeConcurrentAccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create file: %v", err)
 	}
-	if err := f.Truncate(10 * 1024 * 1024); err != nil {
+	if err := f.Truncate(32 * 1024 * 1024); err != nil {
 		f.Close()
 		t.Fatalf("Failed to truncate: %v", err)
 	}

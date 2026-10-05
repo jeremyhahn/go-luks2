@@ -408,6 +408,12 @@ func TestMigrateToFIPSRefusesWhenNoKeyslotHoldsTheVolumeKey(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
+		// The data segment stays attested -- by a digest no keyslot is
+		// bound to -- so the header is one cryptsetup accepts and only the
+		// binding this test is about is missing.
+		unbound := *metadata.Digests["0"]
+		unbound.Keyslots = []string{}
+		metadata.Digests["1"] = &unbound
 		metadata.Digests["0"].Segments = []string{}
 		hdr.SequenceID++
 		if err := writeHeaderInternal(device, hdr, metadata); err != nil {

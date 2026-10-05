@@ -20,13 +20,21 @@ boundaries: [ARCHITECTURE.md](../ARCHITECTURE.md).
 
 - Paths must be absolute and name a regular file or a block device, or the call
   fails with `ErrInvalidPath` or `ErrDeviceNotFound`.
-- Passphrases are 8 to 512 bytes (`ErrPassphraseTooShort`,
-  `ErrPassphraseTooLong`). They stay the caller's memory; the library neither
+- New passphrases are 8 to 512 bytes (`ErrPassphraseTooShort`,
+  `ErrPassphraseTooLong`). A credential presented to open an existing keyslot
+  may be 1 byte to 8 MiB (`ErrCredentialEmpty`, `ErrCredentialTooLong`). They stay the caller's memory; the library neither
   locks nor wipes them.
 - Credentials the library returns are `*enclave.MemoryEnclave` values from
   go-enclave. The caller destroys them.
 - Calls that create a mapping need root, the kernel keyring and enough
   `RLIMIT_MEMLOCK`. Call `CheckKeyringAvailable` once at startup.
+- Calls that change a header hold an exclusive device lock (`AcquireFileLock`)
+  that cryptsetup honours too: for a block device, `flock` on
+  `/run/cryptsetup/L_<major>:<minor>`, created if missing and unlinked on
+  release, as cryptsetup does; for an image file, `flock` on the file. Locking a
+  block device therefore needs write access to `/run/cryptsetup` (normally
+  root). It does not exclude a cryptsetup with its own `/run` (another
+  container) or one run with `--disable-locks`.
 
 ## API by task
 
@@ -43,7 +51,7 @@ boundaries: [ARCHITECTURE.md](../ARCHITECTURE.md).
 | FIPS | `DefaultKDFType`, `IsFIPSCompliantKDF`, `MigrateToFIPS` ([FIPS.md](../FIPS.md)) |
 | Loop devices | `SetupLoopDevice`, `DetachLoopDevice`, `FindLoopDevice` |
 | Filesystems | `MakeFilesystem`, `MakeFilesystemWithOptions`, `CheckFilesystem`, `CheckFilesystemDetailed`, `GetFilesystemInfo`, `SupportedFilesystems` |
-| Mount | `Mount`, `Unmount`, `IsMounted` |
+| Mount | `Mount`, `Unmount`, `IsMounted`, `IsMappingMounted` |
 | Wipe | `Wipe(WipeOptions)`, `WipeKeyslot` |
 
 `UnlockWithVolumeKey` opens a volume with a key the caller already holds in an
@@ -106,11 +114,25 @@ writer held the device for 30 s).
 - `SupportedFilesystems` is ext4, xfs, zfs and vfat; ext2 and
   ext3 are refused with `ErrUnsupportedFilesystem`. `MakeFilesystem` takes a
   mapping name, not a path. `CheckFilesystem` is read-only unless `repair` is
-  set; for zfs it takes a pool name and only starts `zpool scrub`. See godoc.
-- A `HeaderOnly` wipe leaves keyslot areas and data intact, so a header
-  backup reopens the volume, and wipe verification is skipped when the final
-  pass is random. Details: [luks2 wipe](../cli/wipe.md). `WipeKeyslot` zeroes
-  one keyslot area with no passphrase.
+  set; for zfs it takes a pool name and only starts `zpool scrub`. ZFS pool,
+  dataset, feature and property names must follow zpool's rules
+  (`ErrInvalidFilesystemOption`). See godoc.
+- `Unlock` needs a block device (`ErrNotBlockDevice`); attach a file with
+  `SetupLoopDevice`. It refuses a container mid-reencryption
+  (`ErrUnsupportedRequirement`) or with more than one segment
+  (`ErrUnsupportedSegmentLayout`), and a passphrase that opens only an unbound
+  keyslot (`ErrMasterKeyVerification`).
+- Functions taking a mapping name refuse an invalid one
+  (`ErrInvalidMappingName`; `IsUnlocked` returns false) and trust a device node
+  only if its device number is the mapping's (`ErrDeviceNodeUnverified`).
+  `IsMappingMounted` matches mounts by device number; `FindLoopDevice` matches
+  the backing file by device and inode.
+- A `HeaderOnly` wipe zeroes the header copies, the keyslots area and any
+  stray header copy, so a header backup no longer reopens the volume; the data
+  is untouched. Verification reads the medium with `O_DIRECT` and checks random
+  passes too. `Wipe` and `WipeKeyslot` refuse a device in use (`ErrDeviceInUse`).
+  Details: [luks2 wipe](../cli/wipe.md). `WipeKeyslot` zeroes one keyslot area
+  with no passphrase.
 - A recovery keyslot holds the printed text, so the printed key
   opens the volume with stock cryptsetup. `RecoveryKey.Credential` is that text
   in an enclave; `FormattedString` returns it as a string. Keys enrolled before

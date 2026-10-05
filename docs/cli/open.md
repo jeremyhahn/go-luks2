@@ -27,8 +27,11 @@ that needs a seccomp profile allowing the keyring syscalls; see
 
 | Message contains | Meaning |
 |---|---|
-| `master key verification failed` | A keyslot was tried and the key did not match. Usually a wrong passphrase, but damaged key material looks the same. |
-| `no valid keyslots` | Nothing in the header can be tried, for example a container mid-reencryption. No passphrase will help. |
+| `master key verification failed` | A keyslot was tried and the key did not match, or the passphrase opens only an unbound keyslot. Usually a wrong passphrase, but damaged key material looks the same. |
+| `no valid keyslots` | Nothing in the header can be tried. No passphrase will help. |
+| `mandatory requirement` | The header declares a feature this tool does not implement, such as `online-reencrypt-v2` from an interrupted `cryptsetup reencrypt`. Finish it with `cryptsetup reencrypt --resume-only <device>`. |
+| `segment layout cannot be activated` | The header has more than one segment. |
+| `not a block device` | `<device>` is a file; attach a loop device first. |
 | `invalid keyslot`, `invalid LUKS header` | The header or a keyslot is malformed. The passphrase may be correct. |
 | `volume already unlocked` | `<name>` is in use; close it or pick another. |
 | `kernel keyring` | The keyring syscalls are blocked or unsupported. |

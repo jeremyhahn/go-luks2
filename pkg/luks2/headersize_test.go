@@ -25,7 +25,9 @@ import (
 func headerSizeVolume(t *testing.T) (device string, passphrase []byte) {
 	t.Helper()
 
-	device = formattedImage(t, "headerSizeVolume", "volume.img", 16<<20, func() FormatOptions {
+	// 17 MiB: the data segment starts at 16 MiB, and Format refuses a device
+	// with no room for data after it (#248).
+	device = formattedImage(t, "headerSizeVolume", "volume.img", 17<<20, func() FormatOptions {
 		return FormatOptions{
 			Passphrase:    []byte(headerSizeVolumePassphrase),
 			KDFType:       KDFTypePBKDF2,

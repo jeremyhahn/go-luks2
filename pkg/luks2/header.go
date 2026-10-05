@@ -10,8 +10,10 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"slices"
 	"strconv"
@@ -60,7 +62,7 @@ func ReadHeader(device string) (*LUKS2BinaryHeader, *LUKS2Metadata, error) {
 // and its hdr_offset is the copy's own offset, because that is what is on disk.
 // Callers repairing a damaged primary should use RestorePrimaryHeader rather
 // than assembling the sequence themselves; writing this header back is safe --
-// writeHeaderInternal stamps each copy's identity -- but the named operation
+// writeHeaderTo stamps each copy's identity -- but the named operation
 // takes the lock for the whole read-and-write.
 //
 // # WHERE THE COPY IS
@@ -84,7 +86,29 @@ func ReadHeader(device string) (*LUKS2BinaryHeader, *LUKS2Metadata, error) {
 // an offset is therefore not a way to be handed someone else's bytes; a wrong
 // guess is rejected, not tolerated.
 func ReadSecondaryHeader(device string) (*LUKS2BinaryHeader, *LUKS2Metadata, error) {
-	return readSecondaryHeader(device)
+	if err := ValidateDevicePath(device); err != nil {
+		return nil, nil, err
+	}
+	f, err := openDevice("read the LUKS2 header", device, os.O_RDONLY)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return readSecondaryHeaderFrom(f)
+}
+
+// ErrPrimaryHeaderCurrent indicates RestorePrimaryHeader was refused because
+// the primary header copy is intact and at least as new as the secondary, so
+// restoring would roll the volume back rather than repair it.
+var ErrPrimaryHeaderCurrent = errors.New("the primary header is intact and not older than the secondary; restoring would roll the volume back")
+
+// RestoreHeaderOptions controls RestorePrimaryHeaderWithOptions.
+type RestoreHeaderOptions struct {
+	// Force restores the secondary copy even over an intact primary that is
+	// as new as it or newer. That ROLLS THE VOLUME BACK to the secondary's
+	// state: a keyslot removed since -- a revoked passphrase -- opens the
+	// volume again if its key material has not yet been overwritten.
+	Force bool
 }
 
 // RestorePrimaryHeader rebuilds a damaged primary header from the secondary
@@ -93,7 +117,7 @@ func ReadSecondaryHeader(device string) (*LUKS2BinaryHeader, *LUKS2Metadata, err
 // It exists because "read the secondary and write it back" is a sequence a
 // caller should not have to get right. The header returned by
 // ReadSecondaryHeader is a SECONDARY header -- that is what it was asked for --
-// and what makes writing it back safe is that writeHeaderInternal stamps each
+// and what makes writing it back safe is that writeHeaderTo stamps each
 // copy's identity itself. Naming the operation puts that guarantee behind an
 // API instead of behind a comment, and makes it one locked step rather than a
 // read and a write with a window between them.
@@ -101,7 +125,27 @@ func ReadSecondaryHeader(device string) (*LUKS2BinaryHeader, *LUKS2Metadata, err
 // The secondary copy is validated in full before anything is written: magic,
 // version, recorded offset, header size, checksum and JSON body. A container
 // whose second copy is also damaged is left exactly as it was.
+//
+// # It repairs; it does not roll back
+//
+// It refuses with ErrPrimaryHeaderCurrent when the primary is intact and its
+// sequence id is not lower than the secondary's (#248). Header writes put the
+// primary on the medium first, so an interrupted ChangeKey or RemoveKey can
+// leave a NEWER primary -- the passphrase already revoked -- over an OLDER
+// secondary that still lists it. Restoring that secondary would bring the
+// revoked passphrase back. cryptsetup resolves the same state the other way,
+// keeping the higher sequence id. Use RestorePrimaryHeaderWithOptions with
+// Force to restore anyway.
+//
+// The restored header is written at a sequence id one above both copies', so
+// no reader can mistake the restored state for either earlier one.
 func RestorePrimaryHeader(device string) error {
+	return RestorePrimaryHeaderWithOptions(device, RestoreHeaderOptions{})
+}
+
+// RestorePrimaryHeaderWithOptions is RestorePrimaryHeader with options; see
+// RestoreHeaderOptions.
+func RestorePrimaryHeaderWithOptions(device string, opts RestoreHeaderOptions) error {
 	if err := ValidateDevicePath(device); err != nil {
 		return err
 	}
@@ -112,21 +156,59 @@ func RestorePrimaryHeader(device string) error {
 	}
 	defer func() { _ = lock.Release() }()
 
-	hdr, metadata, err := readSecondaryHeader(device)
+	// EVERY READ AND THE WRITE GO THROUGH THE LOCKED DESCRIPTOR, so the
+	// copies compared, the copy restored and the device written are the one
+	// the lock is held on: the path is not resolved again (#248, as #249 does
+	// for the keyslot operations).
+	f := lock.file
+	if err := requireLockableDevice(f, device); err != nil {
+		return err
+	}
+
+	hdr, metadata, err := readSecondaryHeaderFrom(f)
 	if err != nil {
 		return fmt.Errorf("cannot restore the primary header: %w", err)
 	}
 
-	return writeHeaderInternal(device, hdr, metadata)
+	sequence := hdr.SequenceID
+	if primary, _, err := readHeaderCopyFrom(f, LUKS2PrimaryHeaderOffset); err == nil {
+		if primary.SequenceID >= hdr.SequenceID && !opts.Force {
+			return &detailError{Kind: ErrPrimaryHeaderCurrent, Detail: fmt.Sprintf(
+				"%s: primary sequence id %d, secondary %d; the secondary copy is repaired by the next header write",
+				device, primary.SequenceID, hdr.SequenceID)}
+		}
+		sequence = max(sequence, primary.SequenceID)
+	}
+	if sequence == math.MaxUint64 {
+		return &detailError{Kind: ErrInvalidHeader, Detail: "the header sequence id is at its maximum and cannot be advanced past both copies"}
+	}
+	hdr.SequenceID = sequence + 1
+
+	// The restore REPRODUCES a copy already on the medium; it authors nothing.
+	// So it is held to the header-wide rules the secondary already passed when
+	// it was read, not to the per-entry ones every other write applies. A
+	// damaged keyslot or token in the secondary is the state the volume was in
+	// before the primary tore, and refusing to restore it would leave the
+	// volume with no readable primary at all -- the loss the per-entry policy
+	// exists to prevent (headervalidation.go). Remove the damaged entry once
+	// the primary is back.
+	jsonData, area, err := encodeMetadata(hdr, metadata)
+	if err != nil {
+		return err
+	}
+	if err := validateHeaderWideStructure(area, metadata); err != nil {
+		return err
+	}
+	return writeEncodedHeader(f, hdr, jsonData, area)
 }
 
-// readSecondaryHeader is ReadSecondaryHeader without the device-path check, so
-// RestorePrimaryHeader can call it while holding the lock.
-func readSecondaryHeader(device string) (*LUKS2BinaryHeader, *LUKS2Metadata, error) {
+// readSecondaryHeaderFrom finds and reads the secondary header copy in device,
+// which RestorePrimaryHeader passes as its locked descriptor.
+func readSecondaryHeaderFrom(device io.ReaderAt) (*LUKS2BinaryHeader, *LUKS2Metadata, error) {
 	// The primary, when it is readable, states the area size outright.
-	if hdr, _, err := ReadHeader(device); err == nil {
+	if hdr, _, err := readHeaderCopyFrom(device, LUKS2PrimaryHeaderOffset); err == nil {
 		if area, err := headerAreaSize(hdr); err == nil {
-			return readHeaderCopy(device, int64(area))
+			return readHeaderCopyFrom(device, int64(area))
 		}
 	}
 
@@ -134,7 +216,7 @@ func readSecondaryHeader(device string) (*LUKS2BinaryHeader, *LUKS2Metadata, err
 	// the overwhelmingly common geometry.
 	var firstErr error
 	for _, offset := range legalHeaderAreaSizes() {
-		hdr, metadata, err := readHeaderCopy(device, offset)
+		hdr, metadata, err := readHeaderCopyFrom(device, offset)
 		if err == nil {
 			return hdr, metadata, nil
 		}
@@ -262,13 +344,35 @@ func readHeaderCopyFrom(f io.ReaderAt, offset int64) (*LUKS2BinaryHeader, *LUKS2
 			"secondary header at offset %d records header size %d, want %d", offset, area, offset)}
 	}
 
-	// Validate checksum
-	if err := validateHeaderChecksum(&hdr, f, offset, area); err != nil {
+	// THE WHOLE AREA IS READ ONCE, and the checksum, the binary header and the
+	// JSON all come from that one buffer (#248).
+	//
+	// They used to be three reads -- the binary header, then the area again for
+	// the checksum, then the JSON area a third time -- and ReadHeader takes no
+	// lock, so a header rewritten between them could be checksummed in one
+	// state and parsed in another: metadata no checksum ever covered. The
+	// first read above only sizes this one; its bytes must be the ones this
+	// read returns, or the header changed underneath us.
+	buf := make([]byte, area)
+	if _, err := f.ReadAt(buf, offset); err != nil {
+		return nil, nil, &detailError{Detail: "failed to read header area", Err: err}
+	}
+	if !bytes.Equal(buf[:LUKS2HeaderSize], raw) {
+		return nil, nil, &detailError{Kind: ErrInvalidHeader, Detail: fmt.Sprintf(
+			"the header copy at offset %d changed while it was being read; retry once the writer is done", offset)}
+	}
+
+	// The checksum is verified with the algorithm the header names, and that
+	// can only be sha256 here; see checkHeaderChecksumAlgorithm.
+	if err := checkHeaderChecksumAlgorithm(&hdr); err != nil {
 		return nil, nil, err
 	}
 
-	// Read JSON metadata
-	metadata, err := readJSONMetadata(f, &hdr, offset, area)
+	if err := validateAreaChecksum(&hdr, buf); err != nil {
+		return nil, nil, err
+	}
+
+	metadata, err := parseJSONMetadata(buf[LUKS2HeaderSize:], area)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -348,17 +452,18 @@ func WriteHeader(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata)
 		return err
 	}
 
-	// Acquire file lock for exclusive access
-	lock, err := AcquireFileLock(device)
+	// Written through the descriptor the lock is held on, not a second open
+	// of the path, which a re-pointed symlink could send elsewhere.
+	lock, dev, err := lockKeyslotDevice(device)
 	if err != nil {
-		return fmt.Errorf("failed to acquire lock: %w", err)
+		return err
 	}
 	defer func() { _ = lock.Release() }()
 
-	return writeHeaderInternal(device, hdr, metadata)
+	return dev.writeHeader(hdr, metadata)
 }
 
-// encodeMetadataForHeader produces exactly the JSON writeHeaderInternal would
+// encodeMetadataForHeader produces exactly the JSON writeHeaderTo would
 // write, and refuses metadata that does not fit the container's header area --
 // without touching the device.
 //
@@ -382,6 +487,30 @@ func WriteHeader(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata)
 // correct for the container it was computed against, so a pre-flight followed by
 // a real write is indistinguishable from the write alone.
 func encodeMetadataForHeader(hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) ([]byte, int, error) {
+	jsonData, area, err := encodeMetadata(hdr, metadata)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// NOTHING IS WRITTEN THAT CRYPTSETUP WOULD REFUSE TO READ (#248). The same
+	// structural validator the read path applies runs here, in full, on the
+	// metadata exactly as it was just encoded, so no write -- an imported token
+	// naming a keyslot that does not exist, a caller's WriteHeader, a bug in
+	// one of this package's own mutations -- can leave a header that
+	// cryptsetup, systemd-cryptsetup and this package's own reader reject.
+	// Like the requirements guard, it reaches every writer through this one
+	// function, and checkHeaderWritable reaches it without the device.
+	if err := validateHeaderStructure(area, metadata); err != nil {
+		return nil, 0, err
+	}
+	return jsonData, area, nil
+}
+
+// encodeMetadata is encodeMetadataForHeader without the structural validation:
+// the requirements guard, the area size, the canonical encoding and the fit.
+// Only encodeMetadataForHeader calls it outside of tests, which use it to
+// stand up headers another writer could have produced.
+func encodeMetadata(hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) ([]byte, int, error) {
 	// REFUSE BEFORE ANYTHING ELSE. A container that declares a mandatory
 	// requirement this package does not implement must not be modified by it --
 	// that is what the requirements mechanism is FOR, and the refusal is worth
@@ -389,7 +518,7 @@ func encodeMetadataForHeader(hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) ([
 	//
 	// This is the chokepoint every mutation passes through: Format, AddKey,
 	// ChangeKey, KillKeyslot, the token writes and WriteHeader all reach the
-	// device through writeHeaderInternal, which encodes here first, and
+	// device through writeHeaderTo, which encodes here first, and
 	// checkHeaderWritable reaches it without touching the device at all. One
 	// guard here covers all of them, and a caller can ask in advance.
 	//
@@ -509,7 +638,7 @@ func marshalCanonicalJSON(v any) ([]byte, error) {
 	return bytes.TrimSuffix(buf.Bytes(), []byte{'\n'}), nil
 }
 
-// checkHeaderWritable reports whether writeHeaderInternal would accept this
+// checkHeaderWritable reports whether writeHeaderTo would accept this
 // header and metadata, without writing anything or touching the device.
 //
 // A guard on a write path is validation that runs AFTER everything destructive
@@ -521,18 +650,24 @@ func checkHeaderWritable(hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) error 
 	return err
 }
 
-// writeHeaderInternal writes a LUKS2 header without acquiring a lock
-// Caller must hold the lock
-func writeHeaderInternal(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) error {
-	f, err := openDevice("write the LUKS2 header", device, os.O_RDWR)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-
+// writeHeaderTo writes both header copies through a descriptor the caller
+// already holds, so the path is not resolved again: the locked one for a keyslot
+// operation that must not reopen the device between reading the header and
+// writing it (#249, A10), and Format's exclusive one (#248). It writes from
+// offset zero whatever the descriptor's position (writeEncodedHeader seeks).
+func writeHeaderTo(f *os.File, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) error {
 	jsonData, area, err := encodeMetadataForHeader(hdr, metadata)
 	if err != nil {
 		return err
+	}
+	return writeEncodedHeader(f, hdr, jsonData, area)
+}
+
+// writeEncodedHeader writes both copies of hdr carrying jsonData, already
+// encoded for a header area of area bytes, primary first.
+func writeEncodedHeader(f *os.File, hdr *LUKS2BinaryHeader, jsonData []byte, area int) error {
+	if _, err := f.Seek(LUKS2PrimaryHeaderOffset, io.SeekStart); err != nil {
+		return &detailError{Detail: "failed to seek to the primary header", Err: err}
 	}
 	jsonSize := area - LUKS2HeaderSize
 	secondaryOffset := int64(area)
@@ -667,15 +802,16 @@ func writeSecondaryCopy(f *os.File, hdr *LUKS2BinaryHeader, jsonData []byte, jso
 // only copy a later interruption leaves, describing a volume that no longer
 // exists (MigrateToFIPS). The primary is not written, and is made durable
 // before the secondary is touched, so an interruption here leaves the copy
-// the volume already opens through exactly as it was -- writeHeaderInternal,
+// the volume already opens through exactly as it was -- writeHeaderTo,
 // which writes the primary first, would put the one good copy at risk to
 // repair the bad one.
-func repairSecondaryHeader(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) error {
-	f, err := openDevice("repair the secondary LUKS2 header", device, os.O_RDWR)
-	if err != nil {
+//
+// It writes through the caller's pinned descriptor (#255), as one write step.
+func repairSecondaryHeader(dev *keyslotDevice, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) error {
+	if err := keyslotWriteStep(dev, "repair the secondary LUKS2 header"); err != nil {
 		return err
 	}
-	defer func() { _ = f.Close() }()
+	f := dev.file
 
 	jsonData, area, err := encodeMetadataForHeader(hdr, metadata)
 	if err != nil {
@@ -710,10 +846,12 @@ func repairSecondaryHeader(device string, hdr *LUKS2BinaryHeader, metadata *LUKS
 
 // headerCopiesAgree reports whether device's two header copies are both
 // readable and carry the same sequence id and the same metadata, as every
-// completed writeHeaderInternal leaves them. A copy that cannot be read, or
+// completed writeHeaderTo leaves them. A copy that cannot be read, or
 // that differs, is described in the error.
-func headerCopiesAgree(device string) error {
-	hdr, metadata, err := ReadHeader(device)
+//
+// It reads through r -- a pinned operation's own descriptor (#255).
+func headerCopiesAgree(r io.ReaderAt) error {
+	hdr, metadata, err := readHeaderCopyFrom(r, LUKS2PrimaryHeaderOffset)
 	if err != nil {
 		return &detailError{Kind: ErrInvalidHeader, Detail: "the primary header copy is not readable", Err: err}
 	}
@@ -722,7 +860,7 @@ func headerCopiesAgree(device string) error {
 	if err != nil {
 		return err
 	}
-	shdr, smetadata, err := readHeaderCopy(device, int64(area))
+	shdr, smetadata, err := readHeaderCopyFrom(r, int64(area))
 	if err != nil {
 		return &detailError{Kind: ErrInvalidHeader, Detail: "the secondary header copy is not readable", Err: err}
 	}
@@ -730,11 +868,13 @@ func headerCopiesAgree(device string) error {
 		return &detailError{Kind: ErrInvalidHeader, Detail: fmt.Sprintf(
 			"the header copies are at sequence ids %d (primary) and %d (secondary)", hdr.SequenceID, shdr.SequenceID)}
 	}
-	primary, _, err := encodeMetadataForHeader(hdr, metadata)
+	// A comparison, not a write: the two copies are encoded the way a write
+	// would encode them, without the write-time structural validation.
+	primary, _, err := encodeMetadata(hdr, metadata)
 	if err != nil {
 		return err
 	}
-	secondary, _, err := encodeMetadataForHeader(shdr, smetadata)
+	secondary, _, err := encodeMetadata(shdr, smetadata)
 	if err != nil {
 		return err
 	}
@@ -745,7 +885,7 @@ func headerCopiesAgree(device string) error {
 	return nil
 }
 
-// syncDevice flushes a device written by writeHeaderInternal to stable storage.
+// syncDevice flushes a device written by writeHeaderTo to stable storage.
 //
 // It is a seam for one reason: the ORDER of the two header copies' durability
 // is the crash-safety property, and it is not observable from outside a
@@ -773,7 +913,7 @@ func CreateBinaryHeader(opts FormatOptions) (*LUKS2BinaryHeader, error) {
 	copy(hdr.Magic[:], LUKS2Magic)
 
 	// Set checksum algorithm
-	copy(hdr.ChecksumAlgorithm[:], "sha256")
+	copy(hdr.ChecksumAlgorithm[:], headerChecksumAlgorithm)
 
 	// Generate UUID
 	u := newUUID()
@@ -971,6 +1111,17 @@ func validateHeaderChecksum(hdr *LUKS2BinaryHeader, r io.ReaderAt, headerOffset 
 	if _, err := r.ReadAt(headerData, headerOffset); err != nil {
 		return &detailError{Detail: "failed to read header for checksum", Err: err}
 	}
+	return validateAreaChecksum(hdr, headerData)
+}
+
+// validateAreaChecksum checks hdr's checksum against headerData, the whole
+// header area it was read from. headerData is modified: its checksum field is
+// zeroed, which is the form the checksum is computed over.
+func validateAreaChecksum(hdr *LUKS2BinaryHeader, headerData []byte) error {
+	if len(headerData) < checksumFieldOffset+len(hdr.Checksum) {
+		return &detailError{Kind: errChecksumBufferTooShort, Detail: fmt.Sprintf("%d bytes, need at least %d",
+			len(headerData), checksumFieldOffset+len(hdr.Checksum))}
+	}
 
 	// Zero out the checksum field, which is not part of what it covers. The
 	// slice expression is bounded by the check above rather than by anything a
@@ -1043,6 +1194,13 @@ func readJSONMetadata(r io.ReaderAt, hdr *LUKS2BinaryHeader, headerOffset int64,
 	if _, err := r.ReadAt(jsonData, offset); err != nil {
 		return nil, fmt.Errorf("failed to read JSON metadata: %w", err)
 	}
+	return parseJSONMetadata(jsonData, headerSize)
+}
+
+// parseJSONMetadata parses and validates jsonArea, the JSON area of a header
+// whose whole area is headerSize bytes.
+func parseJSONMetadata(jsonArea []byte, headerSize int) (*LUKS2Metadata, error) {
+	jsonData := jsonArea
 
 	// Find null terminator
 	nullIdx := bytes.IndexByte(jsonData, 0)
@@ -1050,14 +1208,29 @@ func readJSONMetadata(r io.ReaderAt, hdr *LUKS2BinaryHeader, headerOffset int64,
 		jsonData = jsonData[:nullIdx]
 	}
 
+	// The top-level object and the four id-keyed objects are checked for
+	// duplicate and case-variant members here; every modeled object below them
+	// checks its own in its UnmarshalJSON. See ErrAmbiguousJSONMember.
+	if err := checkTopLevelMembers(jsonData); err != nil {
+		return nil, &detailError{Kind: ErrInvalidHeader, Detail: "failed to parse JSON metadata", Err: err}
+	}
+
 	var metadata LUKS2Metadata
 	if err := json.Unmarshal(jsonData, &metadata); err != nil {
-		return nil, fmt.Errorf("failed to parse JSON metadata: %w", err)
+		return nil, &detailError{Kind: ErrInvalidHeader, Detail: "failed to parse JSON metadata", Err: err}
 	}
 
 	// A JSON null is normalized away HERE, at the one point metadata is parsed.
 	// See normalizeMetadataNulls.
 	if err := normalizeMetadataNulls(&metadata); err != nil {
+		return nil, err
+	}
+
+	// The header as a whole is held to the structural rules cryptsetup applies
+	// on every read, after the nulls are gone so the metadata checked is the
+	// metadata returned. The rules about one keyslot or one token are applied
+	// to every write instead; see headervalidation.go for why (#248).
+	if err := validateHeaderWideStructure(headerSize, &metadata); err != nil {
 		return nil, err
 	}
 
@@ -1093,6 +1266,36 @@ func readJSONMetadata(r io.ReaderAt, hdr *LUKS2BinaryHeader, headerOffset int64,
 	// indexes or dereferences it to remember; normalizing obliges nobody.
 
 	return &metadata, nil
+}
+
+// checkTopLevelMembers refuses a JSON area whose top-level object, or whose
+// keyslots, tokens, segments or digests object, names a member twice or names
+// a top-level member in a case LUKS2 does not spell it -- and one that lacks
+// any of the five mandatory objects, or carries one as something other than an
+// object (`"tokens":null`). cryptsetup refuses such a header outright
+// (json_contains(..., json_type_object) in each hdr_validate_*), and the typed
+// decode cannot tell an absent or null member from an empty one.
+func checkTopLevelMembers(jsonData []byte) error {
+	top, err := decodeMembers(metadataObjectHeader, jsonData, metadataKnownMembers)
+	if err != nil {
+		return err
+	}
+	if top == nil {
+		return nil // not an object: the typed decode reports it
+	}
+	for _, name := range []string{"keyslots", "tokens", "segments", "digests", "config"} {
+		raw, present := top[name]
+		if trimmed := bytes.TrimLeft(raw, " \t\r\n"); !present || len(trimmed) == 0 || trimmed[0] != '{' {
+			return headerStructureError("the JSON area has no %q object; LUKS2 requires one, empty if there is nothing in it", name)
+		}
+		if name == "config" {
+			continue // Config.UnmarshalJSON checks its own members
+		}
+		if _, err := decodeMembers(name, raw, nil); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // normalizeMetadataNulls makes a JSON null unrepresentable downstream.
@@ -1290,6 +1493,27 @@ func withoutID(ids []string, id string) []string {
 	return out
 }
 
+// volumeKeyBits returns the size, in bits, of the key the data in segmentID is
+// encrypted with: the key size of a keyslot that a digest attests for that
+// segment. It is 0 when no keyslot is attested for it. Keyslots and digests
+// are visited in sorted order, so the answer does not depend on map order.
+func volumeKeyBits(metadata *LUKS2Metadata, segmentID string) int {
+	for _, digestID := range sortedIDs(metadata.Digests) {
+		digest := metadata.Digests[digestID]
+		if !slices.Contains(digest.Segments, segmentID) {
+			continue
+		}
+		keyslots := slices.Clone(digest.Keyslots)
+		slices.Sort(keyslots)
+		for _, id := range keyslots {
+			if keyslot := metadata.Keyslots[id]; keyslot != nil && keyslot.Type == "luks2" && keyslot.KeySize > 0 {
+				return keyslot.KeySize * 8
+			}
+		}
+	}
+	return 0
+}
+
 // GetVolumeInfo extracts volume information from a LUKS device
 func GetVolumeInfo(device string) (*VolumeInfo, error) {
 	hdr, metadata, err := ReadHeader(device)
@@ -1304,11 +1528,15 @@ func GetVolumeInfo(device string) (*VolumeInfo, error) {
 		Metadata: metadata,
 	}
 
-	// Extract cipher info from first segment
-	for _, seg := range metadata.Segments {
-		if seg.Type == "crypt" {
-			info.Cipher = seg.Encryption
-			info.SectorSize = seg.SectorSize
+	// The lowest-id crypt segment, in sorted order rather than whichever one
+	// map iteration yielded first. It is the segment Unlock maps whenever
+	// Unlock maps one (activationSegment), and unlike Unlock this reports on a
+	// multi-segment container too, which is when an operator needs to look.
+	for _, segmentID := range sortedIDs(metadata.Segments) {
+		if segment := metadata.Segments[segmentID]; segment != nil && segment.Type == "crypt" {
+			info.Cipher = segment.Encryption
+			info.SectorSize = segment.SectorSize
+			info.KeySize = volumeKeyBits(metadata, segmentID)
 			break
 		}
 	}

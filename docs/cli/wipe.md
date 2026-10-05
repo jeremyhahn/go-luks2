@@ -1,15 +1,22 @@
 # luks2 wipe
 
-> **Status: REFERENCE** · Last verified: 2026-10-04 against v0.3.1-alpha
+> **Status: REFERENCE** · Last verified: 2026-10-05 against v0.3.1-alpha
 
 ```
 luks2 wipe [--full] [--passes <n>] [--random] [--standard nist|dod3|dod7]
-           [--verify | --no-verify] [--trim] <device>
+           [--verify | --no-verify] [--trim] [--batch-mode | --yes] <device>
 ```
 
-Options may come before or after `<device>`; `--name=value` is not accepted
-here. The command shows what it will do and reads `YES` from standard input.
-Anything else prints `Wipe canceled` and exits 0. Close the volume first.
+Options may come before or after `<device>`. A relative path is resolved
+against the working directory. The command shows what it will do and reads
+`YES` from standard input. Any other answer, end of input or a read error
+prints `Wipe canceled` and exits 1. `--batch-mode` (or `--yes`) skips the
+question.
+
+The device is opened with `O_EXCL`, so a device that is mounted, open as a
+mapping, or otherwise held is refused. Close the volume first. If the path
+names a different file when it is opened than when it was locked (a symlink
+re-pointed in between), the wipe is refused before anything is written.
 
 ## Header-only (default)
 
@@ -17,15 +24,16 @@ Anything else prints `Wipe canceled` and exits 0. Close the volume first.
 sudo luks2 wipe /dev/sdb1
 ```
 
-Zeroes both header copies: twice the header area from the start of the device
-(32 KiB by default; the size is read from a valid header copy). It also zeroes
-the 4 KiB binary header of any other header copy it finds at a legal offset.
+Zeroes both header copies and the whole keyslots area, plus every keyslot area
+the header lists, using the geometry of a header copy whose checksum is valid.
+Any other header copy found at a legal offset is zeroed too: its binary header
+and its JSON. Nothing at or past the start of the data segment is touched.
 
-**Keyslot areas and data are not touched.** The volume no longer opens, and
-neither this tool nor cryptsetup recognises it as LUKS. But anyone who kept a
-header backup (`cryptsetup luksHeaderBackup`, or a copy of the first 32 KiB) can
-write it back and open the volume with any passphrase that was valid. To
-destroy the key material, use `--full`.
+This is a crypto-erase. A header backup taken before the wipe
+(`cryptsetup luksHeaderBackup`, or a copy of the first megabytes) no longer
+opens the volume, because the keyslot material it needs is gone. If no header
+copy has a valid checksum, the keyslots area cannot be located: the first
+32 KiB and every recognisable copy are zeroed, and you should use `--full`.
 
 Without `--full` the other options have no effect, but they are still parsed:
 an invalid `--passes` or `--standard` value exits 1.
@@ -36,11 +44,11 @@ Overwrites the whole device, then syncs.
 
 | Option | Effect |
 |---|---|
-| `--passes <n>` | Number of passes (default 1) |
+| `--passes <n>` | Number of passes, 1 to 100 (default 1). The whole value must be a number. |
 | `--random` | Random data instead of zeros |
 | `--standard <name>` | A fixed pattern sequence; overrides `--passes` and `--random` |
 | `--verify` | Read the device back and compare it with the final pass |
-| `--no-verify` | Turn verification off |
+| `--no-verify` | Turn verification off, including a standard's |
 | `--trim` | Issue `BLKDISCARD` over the device afterwards |
 
 | Standard | Passes |
@@ -49,11 +57,11 @@ Overwrites the whole device, then syncs.
 | `dod3` | zeros, ones, random |
 | `dod7` | zeros, ones, random, random, zeros, ones, random |
 
-`dod3` and `dod7` turn verification on, and the command prints
-`Verify: Enabled (100%)`. **Verification only checks the final pass and is
-skipped when that pass is random,** so it does nothing for any of the three
-standards. It has an effect only on a zero-filled custom wipe:
-`--full --verify`.
+`dod3` and `dod7` turn verification on. Verification reads the device back with
+`O_DIRECT`, past the page cache (for a loop device, its backing file too), and
+compares every byte with the final pass. A random pass is AES-256-CTR under a
+fresh key, so it is checked like any other. If the device cannot be read past
+the page cache, verification fails instead of reading the cache.
 
 A `--trim` that the device refuses, or a regular file, is ignored silently.
 

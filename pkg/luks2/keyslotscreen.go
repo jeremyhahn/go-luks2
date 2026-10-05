@@ -6,10 +6,12 @@ package luks2
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"slices"
 	"unsafe"
 
+	"github.com/jeremyhahn/go-enclave"
 	"golang.org/x/sys/unix"
 )
 
@@ -113,6 +115,13 @@ type keyslotPlan struct {
 	// 4 KiB-aligned and so usually larger than the stripes; only this much is
 	// decrypted, which is what keeps the locked region to the material itself.
 	decryptLen int64
+
+	// areaKeySize is the length of the key that WRAPS the area: what the KDF
+	// derives and what the area cipher is keyed with. It is area.key_size, not
+	// the keyslot's key_size -- that one is the VOLUME key the AF merge
+	// recovers, and cryptsetup --keyslot-key-size makes the two differ (#249,
+	// A6).
+	areaKeySize int
 
 	// cipherAlgo is the area cipher's algorithm name, taken from
 	// area.encryption only after the WHOLE spec -- mode and IV generator
@@ -246,6 +255,17 @@ func screenKeyslot(id string, keyslot *Keyslot, digests map[string]*Digest) (key
 	}
 	if err := validateXTSKeySize(keyslot.KeySize); err != nil {
 		return plan, &InvalidKeyslotError{Keyslot: id, Reason: "declares a volume key size AES-XTS cannot use", Err: err}
+	}
+	// The AREA's key size is what the KDF derives and the area cipher is keyed
+	// with (#249, A6). It used to be ignored and keyslot.KeySize used in its
+	// place, which is the same number only until a keyslot is written with
+	// cryptsetup --keyslot-key-size. Missing (0) is refused like any other size
+	// AES-XTS cannot use: cryptsetup requires the member, and so did every
+	// version of this package's writer.
+	plan.areaKeySize = keyslot.Area.KeySize
+	if err := validateXTSKeySize(plan.areaKeySize); err != nil {
+		return plan, &InvalidKeyslotError{Keyslot: id,
+			Reason: fmt.Sprintf("declares an area key size of %d bytes, which its AES-XTS area cipher cannot use", plan.areaKeySize), Err: err}
 	}
 
 	// The anti-forensic merge resolves this name and fails if it cannot. SHA-1
@@ -591,10 +611,116 @@ func unverifiableKeyslotError(keyslotID string, applicable int) error {
 		ErrInvalidHeader, applicable, keyslotID)
 }
 
-// keyslotCanOpenVolume reports whether a keyslot could actually yield the master
-// key. It is the removal guard's predicate, and it is DERIVED from the unlock
-// path rather than maintained alongside it -- see the file comment for why that
-// distinction is the whole point.
+// keyslotBoundToSegment reports whether the header DECLARES that keyslot
+// keyslotID holds the key of data segment segmentID: the static half of "does
+// this keyslot hold the volume key", answered without a passphrase.
+//
+// # Why "attests the keyslot" is not enough
+//
+// A LUKS2 header may carry keys that decrypt nothing: `cryptsetup luksAddKey
+// --unbound` writes a keyslot whose digest names no segment, and a container
+// mid-reencryption has a digest per segment. A digest's "segments" array is what
+// says which data a key decrypts, and cryptsetup consults it -- both when it
+// activates a segment and when it decides that a keyslot is the last one. A
+// predicate that asks only whether some digest attests the keyslot treats an
+// unbound key as a volume key: the removal guard then counts it as a survivor
+// and authorizes destroying the only keyslot that holds the real key (#249,
+// A1), and an unlock maps a key that decrypts garbage (Lane C, C1).
+//
+// # A declaration, strictly read
+//
+// It is true only when
+//
+//   - the segment exists in the header, and
+//   - at least one digest attests the keyslot, and
+//   - EVERY digest that attests the keyslot names the segment.
+//
+// The last condition is what keeps a crafted header from passing: a keyslot
+// attested both by a digest bound to the segment and by an unbound one is a
+// header cryptsetup refuses outright ("Keyslot N is not assigned to exactly 1
+// digest"), and nothing static can say which of the two keys the keyslot really
+// holds. Counting it would be counting a survivor on a guess; refusing it costs
+// only a spurious refusal, and THE INVARIANT on the file comment says which of
+// those two errors this package is allowed to make.
+//
+// Whether the attesting digests can actually be EVALUATED is deliberately not
+// asked here: that is screenKeyslot's question (keyslotDigestCounts), it
+// already refuses a keyslot no usable digest attests, and it reports it as the
+// header fault it is. Asking it twice would turn "this keyslot's digest is
+// damaged" into "no keyslot holds the volume key" -- the same refusal with the
+// wrong diagnosis.
+//
+// It is a pure function of the metadata. Lane C's unlock (C1) and the removal
+// guard below ask the same question through it, so the two cannot come to
+// disagree about which keyslots hold the volume key.
+func keyslotBoundToSegment(metadata *LUKS2Metadata, keyslotID, segmentID string) bool {
+	if metadata == nil || metadata.Segments[segmentID] == nil {
+		return false
+	}
+	attesting := 0
+	for _, digest := range metadata.Digests {
+		if !digestCovers(digest, keyslotID) {
+			continue
+		}
+		if !slices.Contains(digest.Segments, segmentID) {
+			return false
+		}
+		attesting++
+	}
+	return attesting > 0
+}
+
+// keyslotBoundToDataSegments is keyslotBoundToSegment for EVERY data segment
+// the header declares: the keyslot holds the key the whole volume is encrypted
+// with. A header that declares no segment has no volume key to hold, and is
+// answered false rather than vacuously true -- a removal guard must not find a
+// survivor in a header that describes nothing to survive for.
+func keyslotBoundToDataSegments(metadata *LUKS2Metadata, keyslotID string) bool {
+	if metadata == nil {
+		return false
+	}
+	segments := dataSegmentIDs(metadata)
+	if len(segments) == 0 {
+		return false
+	}
+	for _, segment := range segments {
+		if !keyslotBoundToSegment(metadata, keyslotID, segment) {
+			return false
+		}
+	}
+	return true
+}
+
+// recoveredKeyBoundToSegment is the DYNAMIC half: whether key, recovered from
+// keyslot keyslotID, is attested for segment segmentID by a digest that both
+// names that keyslot and that segment and actually matches key.
+//
+// keyslotBoundToSegment says what the header declares; this says what the key in
+// hand satisfies, through evaluateDigest -- the comparison the unlock itself
+// makes. An activation must use this one before it maps a key: a declaration is
+// not proof, and the key decides which digest it matches. It derives once per
+// candidate digest, so it is called once, after the key is recovered.
+func recoveredKeyBoundToSegment(metadata *LUKS2Metadata, keyslotID, segmentID string, key *enclave.MemoryEnclave) bool {
+	if metadata == nil || key == nil || metadata.Segments[segmentID] == nil {
+		return false
+	}
+	for _, id := range sortedDigestIDs(metadata.Digests) {
+		digest := metadata.Digests[id]
+		if !digestCovers(digest, keyslotID) || !slices.Contains(digest.Segments, segmentID) {
+			continue
+		}
+		if _, matched := evaluateDigest(key, digest); matched {
+			return true
+		}
+	}
+	return false
+}
+
+// keyslotCanOpenVolume reports whether a keyslot could actually yield the VOLUME
+// key: the key the data segments are encrypted with. It is the removal guard's
+// predicate, and it is DERIVED from the unlock path rather than maintained
+// alongside it -- see the file comment for why that distinction is the whole
+// point.
 //
 // It is deliberately stricter than getMasterKey's ITERATION set. Being tried is
 // not the same as being able to succeed: a "luks2" slot with damaged metadata is
@@ -605,12 +731,157 @@ func unverifiableKeyslotError(keyslotID string, applicable int) error {
 // no longer SEE the damaged slot. Two different questions need two different
 // predicates; the fix for a guard that counts too much is a stricter guard, not
 // a narrower loop.
-func keyslotCanOpenVolume(f *os.File, id string, keyslot *Keyslot, digests map[string]*Digest) bool {
+//
+// On top of what the unlock screens, a survivor must
+//
+//   - sit at an id cryptsetup can address (canonicalKeyslotID; A9),
+//   - be BOUND to every data segment (keyslotBoundToDataSegments; A1) -- an
+//     unbound key opens its keyslot and decrypts nothing, so counting it let the
+//     only keyslot holding the volume key be destroyed beside a `cryptsetup
+//     luksAddKey --unbound` one, and
+//   - lie inside the container's keyslots area and clear of every data segment
+//     (checkKeyslotAreaConfined; A2) -- an area reaching into the header or the
+//     payload is one the next header write or data write destroys, and one
+//     cryptsetup refuses the whole header over.
+func keyslotCanOpenVolume(f *os.File, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata, id string) bool {
+	if _, ok := canonicalKeyslotID(id); !ok {
+		return false
+	}
+	if !keyslotHoldsKeyMaterial(f, id, metadata.Keyslots[id], metadata.Digests) {
+		return false
+	}
+	if !keyslotBoundToDataSegments(metadata, id) {
+		return false
+	}
+	return checkKeyslotAreaConfined(hdr, metadata, id) == nil
+}
+
+// keyslotHoldsKeyMaterial reports whether a keyslot's area holds key material
+// some passphrase could open -- to ANY key, bound to the data or not. It is the
+// set the overlap check protects (keyslotAreaDisjointFrom), and it is
+// deliberately WIDER than keyslotCanOpenVolume: an unbound keyslot is not a
+// survivor for the purposes of the last-keyslot guard, but its key is still
+// somebody's key, and a wipe aimed at another keyslot must not destroy it. For
+// the overlap check, protecting more is the safe direction.
+func keyslotHoldsKeyMaterial(f *os.File, id string, keyslot *Keyslot, digests map[string]*Digest) bool {
 	plan, err := screenKeyslot(id, keyslot, digests)
 	if err != nil {
 		return false
 	}
 	return checkAreaWithinDevice(f, plan.areaOffset, plan.areaSize) == nil
+}
+
+// checkKeyslotAreaConfined refuses a keyslot whose area is not wholly inside the
+// container's reserved keyslots area (keyslotsAreaBounds), or that reaches into
+// any data segment. See checkAreaConfined.
+func checkKeyslotAreaConfined(hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata, id string) error {
+	keyslot := metadata.Keyslots[id]
+	if keyslot == nil {
+		return &detailError{Kind: ErrInvalidKeyslot, Detail: "keyslot " + id + " declares no area, so what removing it would wipe is unknown"}
+	}
+	return checkAreaConfined(hdr, metadata, id, keyslot.Area)
+}
+
+// checkAreaConfined refuses a keyslot area -- named by id for the message --
+// that is not wholly inside the container's reserved keyslots area, or that
+// reaches into any data segment: an area this package would otherwise READ
+// outside keyslot space when it unlocks or scans the keyslot, or OVERWRITE when
+// it removes it (#249, A2).
+//
+// It takes the area rather than the id because the bytes a wipe destroys are not
+// always the area the metadata now describes: ChangeKey relocates a keyslot and
+// then wipes the area it USED to occupy.
+//
+// # Why every wipe needs it
+//
+// checkKeyslotRemovable refuses a wipe that would reach a SURVIVING keyslot's
+// area, and checkAreaWithinDevice one past the end of the device. Neither asks
+// whether the area is keyslot space at all. A keyslot -- a `reencrypt` one, a
+// damaged one, one written by a hostile header -- declaring its area at the
+// data offset, or at 0, had RemoveKey, KillSlot, KillKeyslot, ChangeKey's
+// cleanup and WipeKeyslot overwrite up to 128 MiB of encrypted payload, or both
+// header copies, with a crash before the rewrite losing the volume. It was
+// enforced only on the FIPS migration's path. cryptsetup refuses such a header
+// outright, so confining every wipe refuses nothing cryptsetup opens.
+//
+// Both boundaries are read from the container, never assumed.
+func checkAreaConfined(hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata, id string, area *KeyslotArea) error {
+	start, limit, err := keyslotsAreaBounds(hdr, metadata)
+	if err != nil {
+		return err
+	}
+	return confineArea(start, limit, metadata, id, area)
+}
+
+// checkKeyslotAreaConfinedByMetadata is checkKeyslotAreaConfined for the one
+// reader that has no binary header in hand: the unlock scan. The keyslots area
+// starts after both header copies, and their size is config.json_size plus the
+// binary header -- the relation cryptsetup itself validates (hdr_size =
+// json_size + 4096), so a header whose two disagree is one cryptsetup refuses.
+func checkKeyslotAreaConfinedByMetadata(metadata *LUKS2Metadata, id string) error {
+	keyslot := metadata.Keyslots[id]
+	if keyslot == nil {
+		return &detailError{Kind: ErrInvalidKeyslot, Detail: "keyslot " + id + " is null"}
+	}
+	if metadata.Config == nil {
+		return &detailError{Kind: ErrInvalidHeader, Detail: "header has no config object, so the keyslots area is undefined"}
+	}
+	jsonSize, err := parseSize(metadata.Config.JSONSize)
+	if err != nil || jsonSize <= 0 || jsonSize > LUKS2HeaderMaxSize-LUKS2HeaderSize {
+		return &detailError{Kind: ErrInvalidHeader, Detail: fmt.Sprintf(
+			"config.json_size %q does not describe a LUKS2 header area, so where the keyslots area starts is unknown", metadata.Config.JSONSize)}
+	}
+	start, limit, err := keyslotsAreaFrom(2*(jsonSize+LUKS2HeaderSize), metadata)
+	if err != nil {
+		return err
+	}
+	return confineArea(start, limit, metadata, id, keyslot.Area)
+}
+
+// confineArea is the check itself, against a keyslots area [start, limit).
+func confineArea(start, limit int64, metadata *LUKS2Metadata, id string, area *KeyslotArea) error {
+	if area == nil {
+		return &detailError{Kind: ErrInvalidKeyslot, Detail: "keyslot " + id + " declares no area, so what removing it would wipe is unknown"}
+	}
+	offset, offErr := parseSize(area.Offset)
+	size, sizeErr := parseSize(area.Size)
+	if offErr != nil || sizeErr != nil || offset < 0 || size <= 0 || offset > math.MaxInt64-size {
+		return &detailError{Kind: ErrInvalidKeyslot, Detail: fmt.Sprintf(
+			"keyslot %s declares an area at offset %q of size %q, which is not a byte range", id, area.Offset, area.Size)}
+	}
+	end := offset + size
+
+	if offset < start || end > limit {
+		return &detailError{Kind: ErrKeyslotAreaOverlap, Detail: fmt.Sprintf(
+			"keyslot %s declares its area at [%d,%d), outside the container's keyslots area [%d,%d); "+
+				"reading or wiping it would touch bytes that are not keyslot material", id, offset, end, start, limit)}
+	}
+
+	for _, segmentID := range dataSegmentIDs(metadata) {
+		segment := metadata.Segments[segmentID]
+		segmentStart, err := parseSize(segment.Offset)
+		if err != nil || segmentStart < 0 {
+			return &detailError{Kind: ErrInvalidHeader, Detail: fmt.Sprintf(
+				"data segment %s declares an offset of %q, so whether keyslot %s's area overlaps it cannot be decided",
+				segmentID, segment.Offset, id)}
+		}
+		segmentEnd := int64(math.MaxInt64)
+		if segment.Size != "dynamic" {
+			segmentSize, err := parseSize(segment.Size)
+			if err != nil || segmentSize < 0 || segmentStart > math.MaxInt64-segmentSize {
+				return &detailError{Kind: ErrInvalidHeader, Detail: fmt.Sprintf(
+					"data segment %s declares a size of %q, so whether keyslot %s's area overlaps it cannot be decided",
+					segmentID, segment.Size, id)}
+			}
+			segmentEnd = segmentStart + segmentSize
+		}
+		if offset < segmentEnd && segmentStart < end {
+			return &detailError{Kind: ErrKeyslotAreaOverlap, Detail: fmt.Sprintf(
+				"keyslot %s declares its area at [%d,%d), which overlaps data segment %s starting at %d; "+
+					"reading or wiping it would touch the encrypted data", id, offset, end, segmentID, segmentStart)}
+		}
+	}
+	return nil
 }
 
 // deviceSizeFromFile measures the device or file behind an open descriptor.
@@ -620,7 +891,7 @@ func keyslotCanOpenVolume(f *os.File, id string, keyslot *Keyslot, digests map[s
 // exactly the case that does not matter and skips the one that does. Stat is
 // the fallback, for the regular files used as containers and in tests.
 //
-// It is the same measurement getBlockDeviceSize performs for the data segment,
+// It is the same measurement Unlock performs for the data segment,
 // and it is this function that performs it there too. One implementation: a
 // second one would be free to disagree about the size of the device a
 // destructive operation is about to write to.

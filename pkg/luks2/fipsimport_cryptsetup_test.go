@@ -77,6 +77,7 @@ const (
 // need, and because a role check here cannot be forgotten by a later TestMain.
 func init() {
 	if role := os.Getenv(fipsImportRoleEnv); role != "" {
+		useCheapCalibratedCounts()
 		os.Exit(runFIPSImportChild(role, os.Getenv(fipsImportImageEnv)))
 	}
 }
@@ -225,6 +226,7 @@ func runChild(t *testing.T, role, image, godebug string, wantFIPS bool) (int, st
 // cryptsetup's defaults, imports, and reads plaintext back through a mapping a
 // GODEBUG=fips140=only process made.
 func TestFIPSImportOfACryptsetupArgon2idVolume(t *testing.T) {
+	defer parallel(t)()
 	requireCryptsetup(t)
 
 	image := newImage(t, "cryptsetup-argon2id.img")
@@ -319,6 +321,7 @@ func TestFIPSImportOfACryptsetupArgon2idVolume(t *testing.T) {
 // and a calibrated Argon2 cost would only spend the package's -race budget
 // (ci.yml) unlocking it in the children.
 func TestFIPSImportOfACryptsetupVolumeWithShortSalts(t *testing.T) {
+	defer parallel(t)()
 	requireCryptsetup(t)
 
 	image := newImage(t, "cryptsetup-short-salts.img")
@@ -390,6 +393,7 @@ func TestFIPSImportOfACryptsetupVolumeWithShortSalts(t *testing.T) {
 // The key a strict FIPS process's normal scan recovers must be the one
 // cryptsetup itself reports as the volume key.
 func TestFIPSImportOfACryptsetupVolumeWithAnUnboundKey(t *testing.T) {
+	defer parallel(t)()
 	requireCryptsetup(t)
 
 	image := newImage(t, "cryptsetup-unbound.img")

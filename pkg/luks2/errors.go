@@ -336,6 +336,49 @@ var (
 	// EBUSY stays reachable through the chain.
 	ErrMappingBusy = errors.New("device-mapper target is held open and could not be removed")
 
+	// ErrDeviceNodeUnverified indicates that no device node carries the device
+	// number device-mapper reports for a mapping. A node is used only when its
+	// rdev matches the mapping's dm DevNo, so a stale or planted
+	// /dev/mapper/<name> is refused rather than handed to mount or mkfs.
+	ErrDeviceNodeUnverified = errors.New("no device node verifiably names the device-mapper target")
+
+	// ErrNotBlockDevice indicates that Unlock was given something that is not
+	// a block device. dm-crypt maps a block device by its major:minor, so a
+	// regular file must be attached to a loop device first.
+	ErrNotBlockDevice = errors.New("not a block device")
+
+	// ErrUnsupportedSegmentLayout indicates a header whose segments are not
+	// exactly one crypt segment. Activation maps one segment with one key, and
+	// any other layout would map part of the device with the wrong key.
+	ErrUnsupportedSegmentLayout = errors.New("the header's segment layout cannot be activated")
+
+	// ErrFilesystemTool indicates a filesystem program could not be found in
+	// the fixed system directories this package runs tools from, or was found
+	// but is writable by someone other than root or the current user.
+	ErrFilesystemTool = errors.New("filesystem tool is not available from a trusted system directory")
+
+	// ErrUnsupportedHeaderChecksum indicates a binary header whose checksum
+	// algorithm field names anything but sha256, the algorithm cryptsetup
+	// writes and the only one this package verifies. Such a header is refused
+	// on read; the error also matches ErrInvalidHeader.
+	ErrUnsupportedHeaderChecksum = errors.New("header checksum algorithm is not sha256")
+
+	// ErrDeviceChanged indicates that a device path resolved to a different
+	// file when it was opened again than when it was locked: a symlink
+	// re-pointed in between. The operation is refused before it writes.
+	ErrDeviceChanged = errors.New("the device path now names a different file than the one locked")
+
+	// ErrFilesystemNotDetected indicates that the filesystem on a device could
+	// not be determined: blkid found no signature, more than one, or one that
+	// is not a mountable filesystem. DetectFilesystem returns it, and so does
+	// Mount when it is asked to detect the type, rather than guessing one.
+	ErrFilesystemNotDetected = errors.New("the filesystem on the device could not be determined")
+
+	// ErrInvalidFilesystemOption indicates a filesystem option (a ZFS pool,
+	// dataset, feature or property name, for example) that could be read as
+	// a command-line option or does not follow the tool's naming rules.
+	ErrInvalidFilesystemOption = errors.New("invalid filesystem option")
+
 	// ErrProtectedMemory indicates that key material could not be placed in, or
 	// read back from, protected memory, and that the operation was therefore
 	// REFUSED rather than completed with the material on the ordinary heap.
@@ -994,11 +1037,19 @@ type Argon2CostError struct {
 	// Minimum is the smallest value that would have been accepted.
 	Minimum int
 
+	// Maximum is the largest value that would have been accepted: the ceiling
+	// the read path applies, so a keyslot is never written that cannot be
+	// opened (#249). Zero when no ceiling was stated.
+	Maximum int
+
 	// Err is the underlying sentinel, kept reachable through Unwrap.
 	Err error
 }
 
 func (e *Argon2CostError) Error() string {
+	if e.Maximum > 0 {
+		return fmt.Sprintf("%s: requested %s %d, permitted range %d..%d", e.Err.Error(), e.Parameter, e.Value, e.Minimum, e.Maximum)
+	}
 	return fmt.Sprintf("%s: requested %s %d, minimum %d", e.Err.Error(), e.Parameter, e.Value, e.Minimum)
 }
 

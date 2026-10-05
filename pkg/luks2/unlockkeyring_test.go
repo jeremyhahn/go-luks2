@@ -176,7 +176,7 @@ func TestTheKeyringEntryIsLiveExactlyDuringActivation(t *testing.T) {
 	fake := newFakeDeviceMapper()
 	var reference string
 	var resolvedDuring error
-	fake.onCreate = func(_, _ string, tables []devmapper.Table) {
+	fake.onLoad = func(_, _ string, tables []devmapper.Table) {
 		table := tables[0].(devmapper.CryptTable)
 		reference = table.KeyID
 		// The goroutine is pinned by unlockLoadTable for exactly this window,
@@ -213,9 +213,9 @@ func TestUnlockReleasesTheKeyringEntryWhenTheActivationFails(t *testing.T) {
 	device, passphrase := unlockableVolume(t)
 
 	fake := newFakeDeviceMapper()
-	fake.createErr = errors.New("device-mapper table load failed")
+	fake.loadErr = errors.New("device-mapper table load failed")
 	var reference string
-	fake.onCreate = func(_, _ string, tables []devmapper.Table) {
+	fake.onLoad = func(_, _ string, tables []devmapper.Table) {
 		reference = tables[0].(devmapper.CryptTable).KeyID
 	}
 	fake.install(t)
@@ -235,11 +235,12 @@ func TestUnlockReleasesTheKeyringEntryWhenTheActivationFails(t *testing.T) {
 // TestUnlockFailsClosedWhenTheKeyringIsUnavailable pins the owner's ruling
 // (2026-08-31): fail closed, no fallback to the in-table key.
 //
-// Refusing means device-mapper is never reached at all -- a caller that got
-// ErrKeyringUnavailable must be able to conclude that no plaintext mapping was
-// created and no key was ever handed over -- and the error has to carry the
-// remedy, because the operator meeting it is reading a log line rather than
-// this source.
+// Refusing means no table is ever loaded and nothing is left behind -- a
+// caller that got ErrKeyringUnavailable must be able to conclude that no
+// plaintext mapping exists and no key was ever handed over. (The empty target
+// the create made first holds neither, and is rolled back; see
+// unlockLoadTable.) The error has to carry the remedy, because the operator
+// meeting it is reading a log line rather than this source.
 func TestUnlockFailsClosedWhenTheKeyringIsUnavailable(t *testing.T) {
 	device, passphrase := unlockableVolume(t)
 
@@ -448,9 +449,9 @@ func devmapperImportName(file *ast.File) string {
 func TestAHostileHeaderUUIDCannotSplitTheTargetSpecification(t *testing.T) {
 	// Built through the validator rather than as a literal, so this test drives
 	// the same construction path Unlock does (#40).
-	params, err := cryptTableParams("0", &Segment{
+	params, err := cryptTableParams(minimalValidMetadata(), "0", &Segment{
 		Type:       "crypt",
-		Offset:     "0",
+		Offset:     "16777216",
 		Size:       "dynamic",
 		IVTweak:    "0",
 		Encryption: "aes-xts-plain64",
@@ -460,13 +461,19 @@ func TestAHostileHeaderUUIDCannotSplitTheTargetSpecification(t *testing.T) {
 		t.Fatalf("the fixture segment does not validate: %v", err)
 	}
 
-	for _, hostile := range []string{
-		"CRYPT-LUKS2-aaaa 0 crypt aes-xts-plain64 0000-victim",
-		"CRYPT-LUKS2-aa\nbb-victim",
-		"CRYPT-LUKS2-aa\tbb-victim",
-		"CRYPT-LUKS2-aa\x00bb-victim",
+	// The hostile bytes go in the header's uuid FIELD, and the dm UUID is built
+	// from it by mappingUUID, exactly as Unlock builds it -- which also cuts it
+	// at a NUL, as the kernel would.
+	for _, field := range []string{
+		"aaaa 0 crypt aes-xts-plain64 0000",
+		"aa\nbb",
+		"aa\tbb",
+		"aa\x00bb",
 	} {
-		t.Run(strconv.Quote(hostile), func(t *testing.T) {
+		var hdr LUKS2BinaryHeader
+		copy(hdr.UUID[:], field)
+		hostile := mappingUUID(&hdr, "victim")
+		t.Run(strconv.Quote(field), func(t *testing.T) {
 			fake := newFakeDeviceMapper()
 			fake.install(t)
 
@@ -476,7 +483,7 @@ func TestAHostileHeaderUUIDCannotSplitTheTargetSpecification(t *testing.T) {
 			}
 			defer mustDestroy(t, key)
 
-			if err := unlockLoadTable("victim", hostile, "/dev/null", params, key, 4096, 0); err != nil {
+			if _, _, err := unlockLoadTable("victim", hostile, "7:3", params, key, 4096, 0); err != nil {
 				t.Fatalf("unlockLoadTable failed: %v", err)
 			}
 

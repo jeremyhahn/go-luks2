@@ -1,6 +1,6 @@
 # LUKS2 header
 
-> **Status: REFERENCE** · Last verified: 2026-10-04 against v0.3.1-alpha
+> **Status: REFERENCE** · Last verified: 2026-10-05 against v0.3.1-alpha
 
 A LUKS2 header is two copies of a 4096-byte binary header plus a JSON area,
 followed by the keyslots area and the data segment.
@@ -47,8 +47,11 @@ Integers are big-endian.
 | 0x200 | 3584 | Padding |
 
 The checksum covers the binary header (checksum field zeroed) followed by the
-whole JSON area. This library writes `sha256` in the algorithm field and always
-computes and verifies the checksum with SHA-256, whatever the field says. The
+whole JSON area. This library writes `sha256` in the algorithm field, as
+cryptsetup does, and refuses a header naming any other algorithm
+(`ErrUnsupportedHeaderChecksum`). cryptsetup verifies with whatever hash the
+field names, so a header re-checksummed with `sha1` or `sha512` opens there and
+not here. The
 two copies differ in magic and header offset.
 
 The specification has `sequence_id` increase on each update and readers prefer
@@ -97,8 +100,9 @@ Pretty-printed here; values are illustrative.
 | `config` | JSON area size, keyslots area size, optional `requirements` |
 
 A container whose `config.requirements.mandatory` lists anything is refused
-for writing (`UnsupportedRequirementError`): this library implements none of
-those features, online reencryption included.
+for writing and for activation (`UnsupportedRequirementError`): this library
+implements none of those features, online reencryption included. It can still
+be read.
 
 ## Encoding
 
@@ -133,9 +137,24 @@ Unknown members at the top level of the metadata are dropped.
 Anyone with the disk can write the header, and keyslot fields decide how much
 work an unlock does before any passphrase is checked.
 
-- Segments are validated when the header is read, because their fields go
-  straight into the dm-crypt table: cipher characters, `sector_size` (512,
-  1024, 2048 or 4096) and `iv_tweak`. Failure is `ErrInvalidHeader`.
+- The header area is read once; the checksum and the JSON come from the same
+  bytes. An object that names a member twice, or a modeled member in another
+  case (`"Keyslots"`), fails with `ErrAmbiguousJSONMember`: cryptsetup's JSON
+  parser is case-sensitive and Go's is not.
+- The header is checked against cryptsetup's structural rules
+  (`LUKS2_hdr_validate`, in `headervalidation.go`): segment offsets and sizes
+  on the 512-byte grid, the keyslots area between the header copies and the
+  data, digests and tokens naming keyslots and segments that exist. On read, a
+  rule about the header as a whole fails with `ErrInvalidHeader`; a damaged
+  keyslot or token does not. Every write applies all the rules, so this library
+  never writes a header cryptsetup would refuse. The one exception is
+  `RestorePrimaryHeader`, which copies an existing secondary back and applies
+  only the header-wide rules, so a damaged keyslot or token cannot block the
+  repair.
+- Segment fields that go straight into the dm-crypt table are also
+  whitelisted: cipher characters, `sector_size` (512, 1024, 2048 or 4096) and
+  `iv_tweak`. Unlock refuses a segment that starts inside the header or
+  keyslots area, including a detached header's offset 0.
 - Keyslots are validated one at a time, before each is used, so one damaged
   keyslot does not hide the others and the header can still be inspected. A
   keyslot outside the bounds below fails with an error matching
@@ -164,6 +183,10 @@ err = luks2.WriteHeader(device, hdr, metadata)     // writes both copies
 ```
 
 `ReadSecondaryHeader` finds the secondary copy by probing the legal area sizes,
-so it works when the primary is unreadable. `RestorePrimaryHeader` validates the
-secondary in full before writing. `WriteHeader` stamps the correct magic and
+so it works when the primary is unreadable. `RestorePrimaryHeader` reads and validates
+the secondary copy (magic, checksum, header-wide structure; a damaged keyslot or
+token does not block it) before writing, refuses with `ErrPrimaryHeaderCurrent` when
+the primary is intact and not older (restoring would roll the volume back;
+`RestorePrimaryHeaderWithOptions` with `Force` overrides), and writes a sequence
+ID one above both copies. `WriteHeader` stamps the correct magic and
 offset on each copy, whatever the caller's header carried.

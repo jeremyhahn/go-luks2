@@ -181,20 +181,24 @@ func (r *scriptedRunner) run(name string, args ...string) ([]byte, error) {
 // TestFilesystemCheckCommands pins the argv each checker runs on a clean
 // filesystem, read-only and repairing, including the vfat arm #195 added.
 func TestFilesystemCheckCommands(t *testing.T) {
+	// "--" ends the options on every command (#250, C7), so the operand can
+	// never be read as one. For ZFS the operand is a pool NAME, not a device.
 	const dev = "/dev/mapper/vol"
+	const pool = "tank"
 	tests := []struct {
-		fs     FilesystemType
-		repair bool
-		want   []string
+		fs      FilesystemType
+		repair  bool
+		operand string
+		want    []string
 	}{
-		{FilesystemExt4, false, []string{"e2fsck", "-n", dev}},
-		{FilesystemExt4, true, []string{"e2fsck", "-p", dev}},
-		{FilesystemXFS, false, []string{"xfs_repair", "-n", dev}},
-		{FilesystemXFS, true, []string{"xfs_repair", dev}},
-		{FilesystemZFS, false, []string{"zpool", "scrub", dev}},
-		{FilesystemZFS, true, []string{"zpool", "scrub", dev}},
-		{FilesystemFAT32, false, []string{"fsck.fat", "-n", dev}},
-		{FilesystemFAT32, true, []string{"fsck.fat", "-a", dev}},
+		{FilesystemExt4, false, dev, []string{"e2fsck", "-n", "--", dev}},
+		{FilesystemExt4, true, dev, []string{"e2fsck", "-p", "--", dev}},
+		{FilesystemXFS, false, dev, []string{"xfs_repair", "-n", "--", dev}},
+		{FilesystemXFS, true, dev, []string{"xfs_repair", "--", dev}},
+		{FilesystemZFS, false, pool, []string{"zpool", "scrub", "--", pool}},
+		{FilesystemZFS, true, pool, []string{"zpool", "scrub", "--", pool}},
+		{FilesystemFAT32, false, dev, []string{"fsck.fat", "-n", "--", dev}},
+		{FilesystemFAT32, true, dev, []string{"fsck.fat", "-a", "--", dev}},
 	}
 
 	for _, tt := range tests {
@@ -204,7 +208,7 @@ func TestFilesystemCheckCommands(t *testing.T) {
 			continue
 		}
 		r := &scriptedRunner{}
-		res, err := ops.check(r.run, dev, tt.repair)
+		res, err := ops.check(r.run, tt.operand, tt.repair)
 		if err != nil {
 			t.Errorf("check(%q, repair=%v) on a clean filesystem = %v, want nil", tt.fs, tt.repair, err)
 		}
@@ -223,8 +227,8 @@ func TestFilesystemCheckCommands(t *testing.T) {
 // a successful repair is not reported as a failure, and an unsuccessful one is.
 func TestCheckFAT32Outcomes(t *testing.T) {
 	const dev = "/dev/mapper/vol"
-	repairArgv := []string{"fsck.fat", "-a", dev}
-	readOnlyArgv := []string{"fsck.fat", "-n", dev}
+	repairArgv := []string{"fsck.fat", "-a", "--", dev}
+	readOnlyArgv := []string{"fsck.fat", "-n", "--", dev}
 	notFound := errors.New("executable file not found")
 
 	tests := []struct {
@@ -285,8 +289,8 @@ func TestCheckFAT32Outcomes(t *testing.T) {
 // failure: -n writes nothing, so nothing was corrected.
 func TestCheckExt4Outcomes(t *testing.T) {
 	const dev = "/dev/mapper/vol"
-	repairArgv := [][]string{{"e2fsck", "-p", dev}}
-	readOnlyArgv := [][]string{{"e2fsck", "-n", dev}}
+	repairArgv := [][]string{{"e2fsck", "-p", "--", dev}}
+	readOnlyArgv := [][]string{{"e2fsck", "-n", "--", dev}}
 	signaled := exitCode(-1) // *exec.ExitError reports -1 for a signal
 	notFound := exec.ErrNotFound
 
@@ -366,16 +370,21 @@ func TestCheckFilesystemDetailedRefusesUnsupported(t *testing.T) {
 	}
 }
 
-// fakeTools puts stand-ins for external programs first -- and alone -- on
-// PATH, so the creators' real exec.Command lookups reach them. Each records the
-// argv it was run with, one argument per line, prints stdout and exits with
-// code; record returns what a tool was run with, or nil if it never ran.
+// fakeTools puts stand-ins for external programs in the ONLY directory the
+// creators resolve programs from (toolDirs), so their real lookups reach them.
+// Each records the argv it was run with, one argument per line, prints stdout
+// and exits with code; record returns what a tool was run with, or nil if it
+// never ran.
 //
-// t.Setenv makes every caller sequential, which is required: PATH is process
-// state.
+// toolDirs is package state, so every caller is sequential.
 func fakeTools(t *testing.T, tools map[string]fakeTool) (record func(name string) []string) {
 	t.Helper()
 	bin := t.TempDir()
+	// t.TempDir makes its directories 0777 less the umask, and a program
+	// directory others can write to is refused.
+	if err := os.Chmod(bin, 0o700); err != nil {
+		t.Fatalf("restricting the fake tool directory: %v", err)
+	}
 	logs := t.TempDir()
 	for name, tool := range tools {
 		script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %s\nprintf '%%s' %s\nexit %d\n",
@@ -384,7 +393,9 @@ func fakeTools(t *testing.T, tools map[string]fakeTool) (record func(name string
 			t.Fatalf("writing the fake %s: %v", name, err)
 		}
 	}
-	t.Setenv("PATH", bin)
+	previous := toolDirs
+	t.Cleanup(func() { toolDirs = previous })
+	toolDirs = []string{bin}
 	return func(name string) []string {
 		data, err := os.ReadFile(filepath.Join(logs, name)) // #nosec G304 -- under t.TempDir()
 		if errors.Is(err, os.ErrNotExist) {
@@ -415,7 +426,7 @@ func TestFilesystemCreatorsTranslateEveryOption(t *testing.T) {
 		opts   FilesystemOptions
 		want   []string
 	}{
-		{"ext4, no options", "mkfs.ext4", makeExt4, FilesystemOptions{}, []string{dev}},
+		{"ext4, no options", "mkfs.ext4", makeExt4, FilesystemOptions{}, []string{"--", dev}},
 		{"ext4, every option", "mkfs.ext4", makeExt4, FilesystemOptions{
 			Label: "data", BlockSize: 4096, Force: true,
 			Ext4Options: &Ext4Options{
@@ -424,11 +435,11 @@ func TestFilesystemCreatorsTranslateEveryOption(t *testing.T) {
 				Enable64bit: true, EnableLargeDir: true, DisableMetadataChecksums: true,
 			},
 		}, []string{"-L", "data", "-b", "4096", "-F", "-J", "size=64", "-I", "256", "-m", "2.5",
-			"-E", "stride=16,stripe_width=64", "-O", "64bit,dir_index,large_dir,^metadata_csum", dev}},
+			"-E", "stride=16,stripe_width=64", "-O", "64bit,dir_index,large_dir,^metadata_csum", "--", dev}},
 		{"ext4, a stripe width alone", "mkfs.ext4", makeExt4, FilesystemOptions{
 			Ext4Options: &Ext4Options{StripeWidth: 64},
-		}, []string{"-E", "stripe_width=64", dev}},
-		{"xfs, no options", "mkfs.xfs", makeXFS, FilesystemOptions{}, []string{dev}},
+		}, []string{"-E", "stripe_width=64", "--", dev}},
+		{"xfs, no options", "mkfs.xfs", makeXFS, FilesystemOptions{}, []string{"--", dev}},
 		{"xfs, every option", "mkfs.xfs", makeXFS, FilesystemOptions{
 			Label: "data", Force: true,
 			XFSOptions: &XFSOptions{
@@ -436,9 +447,9 @@ func TestFilesystemCreatorsTranslateEveryOption(t *testing.T) {
 				RefLink: true, BigTime: true, NoAlign: true,
 			},
 		}, []string{"-L", "data", "-f", "-b", "size=4096", "-s", "size=4096", "-i", "size=512",
-			"-d", "agcount=4", "-l", "size=64m", "-m", "reflink=1,bigtime=1", "-d", "noalign", dev}},
-		{"vfat, no label", "mkfs.fat", makeFAT32, FilesystemOptions{}, []string{"-F", "32", dev}},
-		{"vfat, with a label", "mkfs.fat", makeFAT32, FilesystemOptions{Label: "BOOT"}, []string{"-F", "32", "-n", "BOOT", dev}},
+			"-d", "agcount=4", "-l", "size=64m", "-m", "reflink=1,bigtime=1", "-d", "noalign", "--", dev}},
+		{"vfat, no label", "mkfs.fat", makeFAT32, FilesystemOptions{}, []string{"-F", "32", "--", dev}},
+		{"vfat, with a label", "mkfs.fat", makeFAT32, FilesystemOptions{Label: "BOOT"}, []string{"-F", "32", "-n", "BOOT", "--", dev}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -501,11 +512,11 @@ func TestMakeZFSTranslatesEveryOption(t *testing.T) {
 	}
 	wantPool := []string{"create", "-f", "-m", "/srv/tank", "-o", "ashift=12", "-o", "autotrim=on",
 		"-O", "compression=lz4", "-O", "recordsize=1M", "-O", "dedup=on",
-		"-o", "feature@async_destroy=enabled", "-o", "feature@lz4_compress=enabled", "tank", dev}
+		"-o", "feature@async_destroy=enabled", "-o", "feature@lz4_compress=enabled", "--", "tank", dev}
 	if got := record("zpool"); !reflect.DeepEqual(got, wantPool) {
 		t.Errorf("zpool ran with %q, want %q", got, wantPool)
 	}
-	wantDataset := []string{"create", "-o", "compression=lz4", "-o", "recordsize=1M", "-o", "dedup=on", "tank/data"}
+	wantDataset := []string{"create", "-o", "compression=lz4", "-o", "recordsize=1M", "-o", "dedup=on", "--", "tank/data"}
 	if got := record("zfs"); !reflect.DeepEqual(got, wantDataset) {
 		t.Errorf("zfs ran with %q, want %q", got, wantDataset)
 	}
@@ -519,7 +530,7 @@ func TestMakeZFSCreatesNoDatasetForTheRoot(t *testing.T) {
 		if err := makeZFS("/dev/mapper/vol", &FilesystemOptions{ZFSOptions: &ZFSOptions{PoolName: "tank", DatasetName: dataset}}); err != nil {
 			t.Fatalf("dataset %q: makeZFS = %v, want nil", dataset, err)
 		}
-		if got := record("zpool"); !reflect.DeepEqual(got, []string{"create", "tank", "/dev/mapper/vol"}) {
+		if got := record("zpool"); !reflect.DeepEqual(got, []string{"create", "--", "tank", "/dev/mapper/vol"}) {
 			t.Errorf("dataset %q: zpool ran with %q", dataset, got)
 		}
 		if got := record("zfs"); got != nil {
@@ -570,7 +581,7 @@ func TestGetFilesystemInfoReadsBlkidsExport(t *testing.T) {
 	if *info != want {
 		t.Errorf("GetFilesystemInfo = %+v, want %+v", *info, want)
 	}
-	if got := record("blkid"); !reflect.DeepEqual(got, []string{"-o", "export", "/dev/mapper/vol"}) {
+	if got := record("blkid"); !reflect.DeepEqual(got, []string{"-o", "export", "--", "/dev/mapper/vol"}) {
 		t.Errorf("blkid ran with %q", got)
 	}
 }

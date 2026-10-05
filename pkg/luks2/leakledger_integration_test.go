@@ -13,7 +13,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anatol/devmapper.go"
 	"github.com/jeremyhahn/go-luks2/test/harness"
 )
 
@@ -24,7 +23,7 @@ import (
 // change rests on -- and does it without creating any host state.
 var (
 	runLedger     *harness.Ledger
-	dmCreateInner func(name, uuid string, flags uint32, tables ...devmapper.Table) error
+	dmCreateInner func(name, uuid string) (uint64, error)
 )
 
 // TestMain records every piece of HOST state this suite is about to create, so
@@ -39,7 +38,7 @@ var (
 // twenty-ninth. So the record is taken at the one place every mapping in this
 // package passes through.
 //
-// devicemapper.go already exposes that place: `dm.createAndLoad` is the single
+// devicemapper.go already exposes that place: `dm.create` is the single
 // seam between this package and the kernel's device mapper, and it exists
 // because a failure that only ever runs against a real kernel is a failure
 // nothing checks. Wrapping it here means no test call site changes and no test
@@ -90,23 +89,28 @@ func runWithLedger(m *testing.M) int {
 	// without it; runVolume fails closed if it is still empty.
 	runSuite = suite
 
+	// Keyslots whose cost is not under test stay as cheap as they were before
+	// a calibrated count was held to the OWASP floor (#249, A8); see
+	// calibratedCountFloor and the unit suite's TestMain.
+	calibratedCountFloor = func(string, keyslotCostPolicy) int { return minPBKDF2Iterations }
+
 	// What this package adds on top, and what the external suites cannot have:
 	// WRITE-AHEAD records for dm mappings, taken at the one seam every mapping
 	// in this package passes through. The record is durable before the kernel
 	// is asked, and a failed record REFUSES the creation rather than proceeding
 	// unrecorded.
-	previous := dm.createAndLoad
+	previous := dm.create
 	runLedger = suite.Ledger
 	dmCreateInner = previous
-	dm.createAndLoad = func(name, uuid string, flags uint32, tables ...devmapper.Table) error {
+	dm.create = func(name, uuid string) (uint64, error) {
 		if err := suite.Ledger.Record(harness.KindMapping, name, uuid); err != nil {
-			return fmt.Errorf("refusing to create dm mapping %q: %w", name, err)
+			return 0, fmt.Errorf("refusing to create dm mapping %q: %w", name, err)
 		}
-		return dmCreateInner(name, uuid, flags, tables...)
+		return dmCreateInner(name, uuid)
 	}
 
 	code := m.Run()
-	dm.createAndLoad = previous
+	dm.create = previous
 	return suite.Finish(code, os.Stderr)
 }
 
@@ -135,22 +139,22 @@ func TestLedgerRecordsAMappingBeforeTheKernelIsAsked(t *testing.T) {
 	t.Cleanup(func() { dmCreateInner = saved })
 
 	sentinel := fmt.Errorf("selftest: deliberately not creating a mapping")
-	dmCreateInner = func(gotName, gotUUID string, _ uint32, _ ...devmapper.Table) error {
+	dmCreateInner = func(gotName, gotUUID string) (uint64, error) {
 		entries, err := harness.ReadLedger(runLedger.Path())
 		if err != nil {
 			t.Errorf("reading the ledger from inside the create call: %v", err)
-			return sentinel
+			return 0, sentinel
 		}
 		recordedAtCallTime = entries
 		if gotName != name || gotUUID != uuid {
 			t.Errorf("seam received (%q, %q), want (%q, %q)", gotName, gotUUID, name, uuid)
 		}
-		return sentinel
+		return 0, sentinel
 	}
 
-	err := dm.createAndLoad(name, uuid, 0)
+	_, err := dm.create(name, uuid)
 	if err == nil || !strings.Contains(err.Error(), "deliberately not creating") {
-		t.Fatalf("createAndLoad error = %v, want the substitute's sentinel", err)
+		t.Fatalf("create error = %v, want the substitute's sentinel", err)
 	}
 
 	var found bool

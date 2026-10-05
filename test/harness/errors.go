@@ -7,6 +7,7 @@ package harness
 import (
 	"errors"
 	"fmt"
+	"time"
 )
 
 // Sentinels for the conditions a caller can act on.
@@ -103,3 +104,89 @@ func (e *CorruptLedgerError) Error() string {
 }
 
 func (e *CorruptLedgerError) Is(target error) bool { return target == ErrLedgerCorrupt }
+
+// StateDirError reports a state directory that cannot be used. Every one is an
+// ErrLedgerUnavailable: nothing may be recorded or reaped through it.
+type StateDirError struct {
+	Dir     string
+	Problem string
+	Err     error
+}
+
+func (e *StateDirError) Error() string {
+	msg := ErrLedgerUnavailable.Error() + ": state directory"
+	if e.Dir != "" {
+		msg += " " + e.Dir
+	}
+	msg += ": " + e.Problem
+	if e.Err != nil {
+		msg += ": " + e.Err.Error()
+	}
+	return msg
+}
+
+func (e *StateDirError) Unwrap() error { return e.Err }
+
+func (e *StateDirError) Is(target error) bool { return target == ErrLedgerUnavailable }
+
+// RunRootError reports a recorded run root that is not shaped like a directory
+// this suite creates. A ledger is a file, and a damaged or forged line must not
+// be able to aim a recursive removal or a loop detach at, say, /var/lib/snapd.
+type RunRootError struct {
+	Action  string
+	Path    string
+	Problem string
+}
+
+func (e *RunRootError) Error() string {
+	return fmt.Sprintf("refusing to %s %q: %s", e.Action, e.Path, e.Problem)
+}
+
+// UnboundRunRootError reports a recorded run root whose name does not carry the
+// id of the run whose ledger recorded it, while loop devices are backed under
+// it. Those devices may be a LIVE run's: before #247 a run root was named only
+// by a 32-bit random suffix, so two containers could create the same name. They
+// are left alone, the record is kept, and the host is not declared clean.
+type UnboundRunRootError struct {
+	Root    string
+	RunID   string
+	Devices []LoopDevice
+}
+
+func (e *UnboundRunRootError) Error() string {
+	return fmt.Sprintf("%q was recorded by run %s but is not named for it (%s%s-<n>), and loop devices %v are "+
+		"backed under it -- they may belong to another, live run with the same root name, so they are left "+
+		"alone. If no integration run is live on this host, detach them by hand and delete the ledger",
+		e.Root, e.RunID, runRootPrefix, e.RunID, e.Devices)
+}
+
+// LockFileError reports a ledger or the reaper mutex that could not be opened
+// or locked. Nothing may be recorded or reaped without it, so it is an
+// ErrLedgerUnavailable.
+type LockFileError struct {
+	Action string // "opening" or "locking"
+	Path   string
+	Err    error
+}
+
+func (e *LockFileError) Error() string {
+	return fmt.Sprintf("%s: %s %s: %v", ErrLedgerUnavailable.Error(), e.Action, e.Path, e.Err)
+}
+
+func (e *LockFileError) Unwrap() error { return e.Err }
+
+func (e *LockFileError) Is(target error) bool { return target == ErrLedgerUnavailable }
+
+// ReaperBusyError reports another reaper holding the host-wide mutex past the
+// wait bound. Something is wedged, and the host is not known to be clean.
+type ReaperBusyError struct {
+	Path   string
+	Waited time.Duration
+}
+
+func (e *ReaperBusyError) Error() string {
+	return fmt.Sprintf("%s: another reaper has held %s for over %s; this host is not known to be clean",
+		ErrReapIncomplete.Error(), e.Path, e.Waited)
+}
+
+func (e *ReaperBusyError) Is(target error) bool { return target == ErrReapIncomplete }

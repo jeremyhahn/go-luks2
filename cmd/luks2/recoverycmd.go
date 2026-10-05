@@ -6,6 +6,7 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/jeremyhahn/go-enclave"
 
@@ -79,6 +80,17 @@ func (c *CLI) cmdRecovery() int {
 	}
 }
 
+// recoveryFormat is the rendering --format names. An unknown name -- or an
+// empty one, which is not a request for the default -- is a usage error, and
+// it is reported before anything is prompted for, generated or written.
+func recoveryFormat(command, name string) (luks2.RecoveryKeyFormat, error) {
+	format, err := luks2.ParseRecoveryKeyFormat(name)
+	if err != nil {
+		return "", &UsageError{Command: command, Detail: "unknown recovery key format " + strconv.Quote(name) + " for --format: use dashed, hex or base64"}
+	}
+	return format, nil
+}
+
 // recoveryOptions parses the options the generate and add subcommands share.
 func recoveryOptions(command string) (*options, *string, *int, *string) {
 	o := newOptions(command)
@@ -98,8 +110,12 @@ func (c *CLI) cmdRecoveryGenerate() int {
 	if _, err := o.parse(c.Args[3:]); err != nil {
 		return c.usageError(err)
 	}
+	rendering, err := recoveryFormat("recovery generate", *format)
+	if err != nil {
+		return c.usageError(err)
+	}
 
-	key, err := c.Luks.GenerateRecoveryKey(*length, luks2.RecoveryKeyFormat(*format))
+	key, err := c.Luks.GenerateRecoveryKey(*length, rendering)
 	if err != nil {
 		return c.fail(err)
 	}
@@ -133,6 +149,10 @@ func (c *CLI) cmdRecoveryAdd() int {
 	if len(args) < 1 {
 		return c.recoveryUsage()
 	}
+	rendering, err := recoveryFormat("recovery add", *format)
+	if err != nil {
+		return c.usageError(err)
+	}
 
 	// Settled before the passphrase prompt, for the reason cmdCreate gives.
 	// With no KDF option this is the library's policy for the mode (#237):
@@ -143,7 +163,10 @@ func (c *CLI) cmdRecoveryAdd() int {
 		return c.kdfRefused(err)
 	}
 
-	device := args[0]
+	device, err := absPath("recovery add", args[0])
+	if err != nil {
+		return c.usageError(err)
+	}
 
 	existing, err := c.readPassphrase("Enter an existing passphrase: ", false, *key)
 	if err != nil {
@@ -153,7 +176,7 @@ func (c *CLI) cmdRecoveryAdd() int {
 
 	opts := &luks2.RecoveryKeyOptions{
 		Length:          *length,
-		Format:          luks2.RecoveryKeyFormat(*format),
+		Format:          rendering,
 		OutputPath:      *output,
 		KDFType:         choice.KDFType,
 		PBKDFIterTime:   choice.PBKDFIterTime,
@@ -174,7 +197,7 @@ func (c *CLI) cmdRecoveryAdd() int {
 	defer recovery.Clear()
 
 	if err := c.showRecoveryKey(recovery); err != nil {
-		return c.fail(err)
+		return c.unshownRecoveryKey(device, existing, recovery, *output, err)
 	}
 
 	// The keyslot number comes from AddRecoveryKey, which reads it from where
@@ -203,6 +226,34 @@ func (c *CLI) cmdRecoveryAdd() int {
 	return 0
 }
 
+// unshownRecoveryKey handles a recovery key that was enrolled and could not be
+// shown (#246 D17): a live credential nobody has seen. Unless it reached the
+// --output file, its keyslot and token are removed again; what could not be
+// removed is named, with the command that removes it. The exit status is 1
+// either way: the operator did not get a key.
+func (c *CLI) unshownRecoveryKey(device string, existing []byte, key *luks2.RecoveryKey, output string, cause error) int {
+	_, _ = fmt.Fprintf(c.Stderr, "Error: the recovery key could not be shown: %v\n", cause)
+	if output != "" && key.SaveError == nil {
+		_, _ = fmt.Fprintf(c.Stderr, "It is in keyslot %d on %s and was saved to %s. Read it from there.\n", key.Keyslot, device, output)
+		return 1
+	}
+
+	if err := c.Luks.KillSlot(device, existing, key.Keyslot); err != nil {
+		_, _ = fmt.Fprintf(c.Stderr, "WARNING: the key is LIVE in keyslot %d on %s and nobody has seen it, and removing it failed: %v\n", key.Keyslot, device, err)
+		_, _ = fmt.Fprintf(c.Stderr, "Remove it with: luks2 killslot %s %d\n", device, key.Keyslot)
+		return 1
+	}
+	if key.TokenID >= 0 {
+		if err := c.Luks.RemoveToken(device, key.TokenID); err != nil {
+			_, _ = fmt.Fprintf(c.Stderr, "Keyslot %d was removed, but its token %d was not: %v\n", key.Keyslot, key.TokenID, err)
+			_, _ = fmt.Fprintf(c.Stderr, "Remove it with: luks2 token remove %s %d\n", device, key.TokenID)
+			return 1
+		}
+	}
+	_, _ = fmt.Fprintf(c.Stderr, "Keyslot %d was removed again, so no key nobody has seen is left on %s.\n", key.Keyslot, device)
+	return 1
+}
+
 // cmdRecoveryVerify checks that a recovery key still opens a volume.
 //
 // Reading it back is the only way to find out that a key written down a year
@@ -218,7 +269,10 @@ func (c *CLI) cmdRecoveryVerify() int {
 		return c.recoveryUsage()
 	}
 
-	device := args[0]
+	device, err := absPath("recovery verify", args[0])
+	if err != nil {
+		return c.usageError(err)
+	}
 
 	key, err := c.recoveryKeyInput(*file)
 	if err != nil {
@@ -312,7 +366,11 @@ func (c *CLI) showRecoveryKey(key *luks2.RecoveryKey) error {
 
 	_, _ = fmt.Fprintln(c.Stdout, "")
 	_, _ = fmt.Fprintln(c.Stdout, "=================== RECOVERY KEY ===================")
-	_, _ = fmt.Fprintln(c.Stdout, formatted)
+	// The one write whose failure matters: a key line that did not reach
+	// the operator is a key nobody holds.
+	if _, err := fmt.Fprintln(c.Stdout, formatted); err != nil {
+		return err
+	}
 	_, _ = fmt.Fprintln(c.Stdout, "====================================================")
 	_, _ = fmt.Fprintln(c.Stdout, "Write this down NOW. It is shown once and cannot be")
 	_, _ = fmt.Fprintln(c.Stdout, "recovered from the volume.")

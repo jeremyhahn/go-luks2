@@ -5,14 +5,14 @@
 package luks2
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
-	"maps"
+	"io"
 	"os"
-	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
-	"time"
 
 	"github.com/anatol/devmapper.go"
 	"github.com/jeremyhahn/go-enclave"
@@ -33,20 +33,21 @@ import (
 // at the first unlock of a real volume.
 func Unlock(device string, passphrase []byte, name string) error {
 	return unlockVolume(device, name,
-		func() error { return ValidatePassphrase(passphrase) },
-		func(metadata *LUKS2Metadata) (*enclave.MemoryEnclave, func(), error) {
-			// Keyslots are tried by getMasterKey, which is the ONE implementation
-			// of that scan. This function used to carry a second copy of it --
-			// same order, same type filter, same first-success-wins -- which is
-			// how the two came to report failures differently: getMasterKey now
-			// distinguishes a keyslot that did not verify from one that could not
-			// be tried, and the copy here still said "incorrect passphrase" for
-			// both.
+		func() error { return validateExistingCredential(passphrase) },
+		func(f *os.File, _ string, metadata *LUKS2Metadata) (*enclave.MemoryEnclave, func(), error) {
+			// Only keyslots bound to the data segment are tried, and only
+			// against the digests that bind it: getVolumeKey, the scan every
+			// operation that needs the VOLUME key shares. A LUKS2 header can
+			// carry UNBOUND keys beside the volume key, and a passphrase that
+			// opened only one of those used to have its key handed to dm-crypt:
+			// the mapping succeeded and every byte read through it was garbage
+			// (#250, C1). The keyslot areas are read through f, the descriptor
+			// whose header was read (C6).
 			//
-			// Priority is NOT consulted, by either -- see keyslotIDsInScanOrder --
-			// so nothing here should be read as a claim that LUKS2 keyslot
-			// priority is honored. It is not.
-			masterKey, err := getMasterKey(device, passphrase, metadata)
+			// Priority is NOT consulted -- see keyslotIDsInScanOrder -- so
+			// nothing here should be read as a claim that LUKS2 keyslot priority
+			// is honored. It is not.
+			masterKey, _, err := getVolumeKey(f, device, passphrase, metadata)
 			if err != nil {
 				return nil, nil, &UnlockError{Op: "unlock any keyslot", Err: err}
 			}
@@ -101,11 +102,7 @@ func Unlock(device string, passphrase []byte, name string) error {
 func UnlockWithVolumeKey(device string, volumeKey *enclave.MemoryEnclave, name string) error {
 	return unlockVolume(device, name,
 		func() error { return validateVolumeKey(volumeKey) },
-		func(metadata *LUKS2Metadata) (*enclave.MemoryEnclave, func(), error) {
-			segmentID, _, err := cryptSegmentOf(metadata)
-			if err != nil {
-				return nil, nil, err
-			}
+		func(_ *os.File, segmentID string, metadata *LUKS2Metadata) (*enclave.MemoryEnclave, func(), error) {
 			if err := verifyVolumeKeyForSegment(volumeKey, segmentID, metadata); err != nil {
 				return nil, nil, &UnlockError{Op: "open the volume with the supplied volume key", Err: err}
 			}
@@ -137,38 +134,15 @@ func validateVolumeKey(volumeKey *enclave.MemoryEnclave) error {
 // every validation and the whole mapping transaction, is this body, so the two
 // entry points cannot drift in what they check.
 //
-// validateCredential runs where the passphrase check always ran: after the
-// device path is resolved and before the mapping name is checked. volumeKey is
-// called once the header has been read and validated; it returns the key and a
-// release function, which destroys a key this package derived and does nothing
-// to a key the caller owns.
+// volumeKey is called once the header has been read and validated and the
+// segment to map has been chosen. It receives the pinned descriptor to read
+// keyslots through, the segment id and the metadata, and
+// returns the key and a release function, which destroys a key this package
+// derived and does nothing to a key the caller owns.
 func unlockVolume(device, name string, validateCredential func() error,
-	volumeKey func(metadata *LUKS2Metadata) (*enclave.MemoryEnclave, func(), error)) error {
-	// Validate device path
+	volumeKey func(f *os.File, segmentID string, metadata *LUKS2Metadata) (*enclave.MemoryEnclave, func(), error)) error {
 	if err := ValidateDevicePath(device); err != nil {
 		return err
-	}
-
-	// Resolve the symlink, because the kernel's dm-crypt target is built from
-	// the ACTUAL block device path -- see unlockLoadTable below, whose comment
-	// says in as many words to use realDevice and not the original.
-	//
-	// A FAILED RESOLUTION IS A REFUSAL, NOT A FALLBACK. Owner ruling against
-	// #142. This used to assign `realDevice = device` and carry on, which put
-	// the exact value the downstream comment forbids into the crypt table --
-	// so "I could not find the real device" became "use the symlink and hope",
-	// on the unlock path, silently.
-	//
-	// It is silent in the SUCCESS case too, which is what made it survive:
-	// the kernel resolves a symlink at table-load time anyway, so the fallback
-	// usually works and tells nobody it happened. What it costs is the case it
-	// was written for -- a udev re-enumeration racing the open, an EIO on an
-	// intermediate component -- where the two lookups are not atomic with each
-	// other and the table can be built against a path that no longer names the
-	// device just validated.
-	realDevice, err := filepath.EvalSymlinks(device)
-	if err != nil {
-		return &DeviceError{Device: device, Op: "resolve the real device path for the dm-crypt backend", Err: err}
 	}
 
 	// Validate the credential: the passphrase, or the shape of a supplied key.
@@ -176,69 +150,110 @@ func unlockVolume(device, name string, validateCredential func() error,
 		return err
 	}
 
-	// Validate the mapping name.
-	//
-	// This used to be unchecked, which was survivable while the name only
-	// reached fixed-width ioctl fields and a /dev path. Since #78 it also
-	// contributes to the identity behind the dm-crypt keyring reference, and a
-	// target specification is a space-delimited positional grammar. The
-	// description is hashed before it reaches that grammar so the charset is
-	// closed by construction, but the name still reaches /dev/mapper/<name>
-	// and the dm UUID, and neither wants a caller's arbitrary bytes.
+	// Validate the mapping name. It reaches the dm ioctl, /dev/mapper/<name>,
+	// the dm UUID and the identity behind the keyring reference; see
+	// ValidateMappingName.
 	if err := ValidateMappingName(name); err != nil {
 		return err
 	}
 
-	// Check if already unlocked.
-	//
-	// Typed since #70: the refusal was correct and untyped, so a caller could
-	// not tell "that name is taken" from any other unlock failure without
-	// matching on message text. It is a refusal rather than a no-op because the
-	// existing target may map a DIFFERENT volume, and returning success would
-	// hand the caller a plaintext device this call did not open.
+	// An early, cheap refusal before any key derivation. It is NOT what keeps
+	// two unlocks of one name apart -- the create ioctl is, see unlockLoadTable
+	// -- because this check and the create are not atomic.
 	if IsUnlocked(name) {
 		return &UnlockError{Op: "unlock", Err: ErrVolumeAlreadyUnlocked,
-			Detail: fmt.Sprintf("the device-mapper name %q is already in use - close it first with: luks close %s", name, name)}
+			Detail: fmt.Sprintf("the device-mapper name %q is already in use - close it first with: luks2 close %s", name, name)}
 	}
 
-	// Read header and metadata (use original device for reading, symlink is fine for open())
-	hdr, metadata, err := ReadHeader(device)
+	// THE DEVICE IS OPENED ONCE, and that descriptor is the device from here on
+	// (#250, C6). The header, the size and the keyslot areas are read through
+	// it, and the dm-crypt table names the device by the major:minor fstat
+	// reports for it rather than by a path. This used to resolve the path four
+	// separate times -- validation, EvalSymlinks, the header read and the size
+	// probe -- and to hand the kernel a PATH, so a udev re-enumeration or a
+	// replaced symlink between any two of them could map a device other than
+	// the one whose header was read. The descriptor is held until the table is
+	// loaded, so the device cannot be released and its number reused under it.
+	f, err := openDevice("open the device to unlock", device, os.O_RDONLY)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+
+	backingDevNo, err := blockDeviceOf(f)
+	if err != nil {
+		return &DeviceError{Device: device, Op: "identify the device to unlock", Err: err}
+	}
+
+	// THE METADATA IS READ UNDER CRYPTSETUP'S READ LOCK, from the header to
+	// the last keyslot area the scan reads, and released before anything
+	// touches device-mapper -- the step that needs no metadata, which is where
+	// cryptsetup releases it too. A cryptsetup command rewriting this header
+	// holds that lock exclusively, so the read waits for the write to finish
+	// rather than parsing a header mid-rewrite or pairing it with keyslot
+	// areas from another state. Shared, so other readers are not delayed.
+	//
+	// cryptsetup itself drops the lock between the header read and each
+	// keyslot read and derives the key unlocked; it is held across the scan
+	// here so the keyslot areas read are the ones the header that was read
+	// describes. A writer waits at most one scan.
+	readLock, err := acquireMetadataReadLock(f, device, backingDevNo, metadataReadLockWait, unlockClock)
+	if err != nil {
+		return &UnlockError{Op: "wait for the metadata", Err: err}
+	}
+	defer readLock.release()
+
+	hdr, metadata, err := readUnlockHeader(f, LUKS2PrimaryHeaderOffset)
 	if err != nil {
 		return err
 	}
 
-	masterKey, release, err := volumeKey(metadata)
+	// A container that declares a mandatory requirement this package does not
+	// implement is refused for ACTIVATION too, not only for writes (#250, C2).
+	// The case that matters is an interrupted `cryptsetup reencrypt`, which
+	// sets online-reencrypt-v2: the data is then partly under the new key and
+	// partly under the old one, split across several segments, and mapping any
+	// one segment with any one key returns garbage for the rest. Reads stay
+	// allowed (ReadHeader), so an operator can still see the state.
+	if err := metadata.checkRequirementsImplemented(); err != nil {
+		return &UnlockError{Op: "activate the volume", Err: err,
+			Detail: "the container must be finished or recovered with the tool that set the requirement (for an interrupted reencryption: cryptsetup reencrypt --resume-only) before it can be activated"}
+	}
+
+	segmentID, segment, err := activationSegment(metadata)
+	if err != nil {
+		return err
+	}
+
+	masterKey, release, err := volumeKey(f, segmentID, metadata)
 	if err != nil {
 		return err
 	}
 	defer release()
 
-	segmentID, segment, err := cryptSegmentOf(metadata)
-	if err != nil {
-		return err
-	}
+	// Every metadata read is done: the rest is the passphrase-independent
+	// device-mapper work, and nothing below reads the header or a keyslot.
+	readLock.release()
 
 	// The three fields that reach the device-mapper ioctl are obtained HERE,
 	// through the validator, and not read off the segment at the table. The
 	// header this came from has already been through the same check at the read
 	// boundary; this is how the values are converted, not a second bound. See
 	// segmentvalidation.go (#40).
-	params, err := cryptTableParams(segmentID, segment)
+	params, err := cryptTableParams(metadata, segmentID, segment)
 	if err != nil {
 		return err
 	}
 
-	// Parse segment offset
 	offsetBytes, err := parseSize(segment.Offset)
 	if err != nil {
 		return &UnlockError{Op: "invalid segment offset", Err: err}
 	}
 
-	// Get device size for dynamic segments
+	// The size of a dynamic segment comes from the pinned descriptor too.
 	var sizeBytes int64
 	if segment.Size == "dynamic" {
-		// For block devices, we need to use ioctl to get the size
-		devSize, err := getBlockDeviceSize(device)
+		devSize, err := deviceSizeFromFile(f)
 		if err != nil {
 			return &UnlockError{Op: "failed to get device size", Err: err}
 		}
@@ -250,7 +265,6 @@ func unlockVolume(device, name string, validateCredential func() error,
 		}
 	}
 
-	// Safe conversion of sizes to uint64
 	length, err := SafeInt64ToUint64(sizeBytes)
 	if err != nil {
 		return &UnlockError{Op: "invalid segment size", Err: err}
@@ -260,63 +274,43 @@ func unlockVolume(device, name string, validateCredential func() error,
 		return &UnlockError{Op: "invalid segment offset", Err: err}
 	}
 
-	// Generate UUID for device-mapper
-	uuid := fmt.Sprintf("CRYPT-LUKS2-%s-%s",
-		strings.ReplaceAll(string(TrimRight(hdr.UUID[:], "\x00")), "-", ""),
-		name)
+	uuid := mappingUUID(hdr, name)
+
+	backendMajor, backendMinor := decodeDevNo(backingDevNo)
+	backend := strconv.FormatUint(uint64(backendMajor), 10) + ":" + strconv.FormatUint(uint64(backendMinor), 10)
 
 	// THE KEY DOES NOT GO IN THE TABLE.
 	//
 	// dm-crypt accepts its volume key two ways: inline in the table it is
 	// handed, or as a REFERENCE into the calling task's kernel keyrings. This
 	// library only ever uses the reference, and the difference is the whole of
-	// residual exposure 5.
-	//
-	// Inline, the key is hex-encoded by devmapper.go into two immutable Go
-	// strings and copied into an ioctl buffer it never clears -- three pieces
-	// of unprotected, unwipeable memory inside a third-party package, holding
-	// the volume key for an unbounded time after the mapping is created. By
-	// reference, the bytes go from this library's enclave into the kernel
-	// through add_key and are gone from userspace entirely; no string ever
-	// holds them. That is what cryptsetup does, and keyring.go has the detail:
-	// why the "logon" type, why the session keyring, why the goroutine is
-	// pinned, why a pre-existing entry is refused rather than overwritten, and
-	// why the entry is released the instant activation returns.
+	// residual exposure 5. keyring.go has the detail: why the "logon" type, why
+	// the session keyring, why the work runs on a thread that is then
+	// discarded, why a pre-existing entry is refused rather than overwritten,
+	// and why the entry is released the instant activation returns.
 	//
 	// There is NO FALLBACK, by owner ruling (2026-08-31): a keyring that cannot
 	// hold the key fails the unlock with an error matching
-	// ErrKeyringUnavailable, naming the cause and the remedy. Nothing in this
-	// package assigns CryptTable.Key, so the hex encoding above is structurally
-	// unreachable rather than merely unused -- which is why exposure 5 is now
-	// about the kernel keyring instead.
+	// ErrKeyringUnavailable. Nothing in this package assigns CryptTable.Key.
 	//
-	// What is left of the borrow is the narrowest window the API permits:
-	// everything derivable from the header -- the segment, the device size
-	// ioctl, the UUID -- has already been computed, the key is raw for one
-	// add_key syscall, and the device-node and udev-settle work that follows
-	// runs after it is destroyed.
-	// FROM HERE THE MAPPING IS A TRANSACTION.
+	// FROM THE CREATE ON, THE MAPPING IS A TRANSACTION.
 	//
-	// Once the target may exist, every failure below has to take it down again,
-	// because the target is DECRYPTED DATA. A caller told "unlock failed" is
-	// entitled to assume no plaintext device exists and will do nothing to
-	// remove one; leaving it live turns a reported failure into an unowned
-	// decrypted device, and in a volume manager it also wedges the rollback --
-	// the backing device cannot be released while the mapping holds it open, so
-	// the operator ends up with a failed attach, a live plaintext mapping and an
-	// activated backing device, which is the opposite of what the error said.
+	// Once this call's target exists, every failure below has to take it down
+	// again, because the target is DECRYPTED DATA. A caller told "unlock
+	// failed" is entitled to assume no plaintext device exists.
 	//
-	// The rollback runs on the load failure too, not only after a successful
-	// one. devmapper's CreateAndLoad is create-then-load-then-resume and unwinds
-	// only the middle step: a failed table load is cleaned up, a failed resume
-	// is not, so a CreateAndLoad error can also leave a target behind.
-	//
-	// Nothing keyring-shaped needs unwinding here, and that is by construction
-	// rather than by omission: unlockLoadTable releases its keyring entry
-	// before it returns, on every path, so no entry can outlive the call that
-	// made it and neither this rollback nor Lock can forget one.
-	if err := unlockLoadTable(name, uuid, realDevice, params, masterKey, length, backendOffset); err != nil {
-		return errors.Join(err, removeCreatedMapping(name, uuid))
+	// But ONLY once this call's target exists. A create that failed because
+	// the name is taken created nothing, and the target under that name belongs
+	// to whoever won: rolling back there removed the WINNER's live mapping
+	// whenever two unlocks raced for one name (#250, C4). So the rollback runs
+	// only when unlockLoadTable reports that its own create succeeded, and it
+	// is pinned to the device number that create returned.
+	devNo, created, err := unlockLoadTable(name, uuid, backend, params, masterKey, length, backendOffset)
+	if err != nil {
+		if !created {
+			return err
+		}
+		return errors.Join(err, removeCreatedMapping(name, uuid, devNo))
 	}
 
 	// The kernel has the key now, so give up ours immediately rather than at
@@ -325,52 +319,112 @@ func unlockVolume(device, name string, validateCredential func() error,
 	// give up, and its release does nothing.
 	release()
 
-	// Ensure device node exists (may need to create it in containerized
-	// environments).
-	//
-	// Still NON-FATAL, and deliberately so: the device may be perfectly
-	// reachable through /dev/mapper/<name> without this having done anything,
-	// and failing an otherwise good unlock because a redundant node could not be
-	// made would be worse than the problem. What it is no longer is SILENT. It
-	// used to be discarded outright, which left waitForDeviceReady as the only
-	// thing between a half-created mapping and the caller, and made the two
-	// halves of one story unreadable: when mknod fails because the process lacks
-	// CAP_MKNOD and udev is also absent, the operator saw "device not ready" and
-	// no reason to suspect node creation at all. It is now carried and reported
-	// alongside the readiness failure it usually explains.
-	nodeErr := dm.ensureNode(name)
+	ours := &devmapper.DeviceInfo{Name: name, UUID: uuid, DevNo: devNo}
 
-	// Wait for device to be ready - udev needs time to create /dev/mapper/name symlink
-	if err := dm.waitReady(name); err != nil {
+	// Ensure /dev/dm-N names this device (containers without udev need it).
+	// Still NON-FATAL on its own -- the device may be reachable through
+	// /dev/mapper/<name> without it -- but carried and reported alongside the
+	// readiness failure it usually explains.
+	nodeErr := dm.ensureNode(name, ours)
+
+	// Wait until /dev/mapper/<name> is verifiably THIS device.
+	if err := dm.waitReady(name, ours); err != nil {
 		readiness := &UnlockError{Op: "device not ready after unlock", Err: err}
 		if nodeErr != nil {
 			readiness.Detail = fmt.Sprintf("creating the device node also failed: %v", nodeErr)
 		}
-		return errors.Join(readiness, removeCreatedMapping(name, uuid))
+		return errors.Join(readiness, removeCreatedMapping(name, uuid, devNo))
 	}
 
 	return nil
 }
 
-// cryptSegmentOf returns the crypt segment a mapping is built from.
+// dmUUIDMaxLength is the longest dm UUID the kernel stores: DM_UUID_LEN (129)
+// less its terminating NUL.
+const dmUUIDMaxLength = 128
+
+// mappingUUID is the dm UUID of the mapping name of the volume hdr describes:
+// "CRYPT-LUKS2-<header uuid without dashes>-<name>", cryptsetup's form, cut to
+// what the kernel stores.
 //
-// Visited in sorted id order rather than in map order. A container being
-// reencrypted carries more than one segment, and picking whichever one Go's
-// randomized iteration yielded first made WHICH segment a volume opened through
-// a coin flip -- the same defect class as #54 and #57, on a value that decides
-// where the plaintext device is backed.
+// It is cut HERE, once, because the kernel cuts it anyway and every later
+// identity check compares against what the kernel holds. A 127-byte name is
+// valid, and with the header UUID it made a 172-byte string; the create ioctl
+// stored the first 128 bytes, the confirmation and the rollback compared the
+// whole string, and an unlock under a long name failed and left its target
+// behind as "not ours" (#250). The header UUID is cut at its first NUL for the
+// same reason: the kernel reads the field as a C string. cryptsetup truncates
+// to the same length.
+//
+// Two long names that agree in their first bytes then share a UUID. The kernel
+// refuses the second create, and the rollback is pinned to the device number
+// as well, so a shared UUID cannot make one activation remove the other.
+func mappingUUID(hdr *LUKS2BinaryHeader, name string) string {
+	headerUUID := hdr.UUID[:]
+	if i := bytes.IndexByte(headerUUID, 0); i >= 0 {
+		headerUUID = headerUUID[:i]
+	}
+	uuid := "CRYPT-LUKS2-" + strings.ReplaceAll(string(headerUUID), "-", "") + "-" + name
+	if len(uuid) > dmUUIDMaxLength {
+		uuid = uuid[:dmUUIDMaxLength]
+	}
+	return uuid
+}
+
+// unlockClock is the clock the activation's metadata lock waits on. A
+// variable so the unit tests can make a contended lock time out without
+// spending the wait; nothing else changes it.
+var unlockClock clock = systemClock{}
+
+// readUnlockHeader is how the activation reads the header, under its read
+// lock. A variable so a test can see WHICH header the activation read -- the
+// one a concurrent writer left, or the one it was replacing -- which no
+// result of Unlock reveals. Same idiom as blockDeviceOf.
+var readUnlockHeader = readHeaderCopyFrom
+
+// blockDeviceOf reports the device number of the block device f is open on,
+// and refuses anything else: dm-crypt maps a block device, so a regular file
+// has to be attached to a loop device first. A seam so the unit tests, which
+// cannot create block devices, can map a regular-file image through the fake
+// device mapper.
+var blockDeviceOf = func(f *os.File) (uint64, error) {
+	var st unix.Stat_t
+	if err := unix.Fstat(int(f.Fd()), &st); err != nil {
+		return 0, err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFBLK {
+		return 0, ErrNotBlockDevice
+	}
+	return uint64(st.Rdev), nil //nolint:unconvert // Rdev is not uint64 on every GOARCH
+}
+
+// activationSegment returns the one segment a mapping is built from.
+//
+// A header activates only when it declares EXACTLY ONE segment and that
+// segment is a crypt segment. It used to take the first crypt segment in
+// sorted id order whatever else the header declared, and a container left
+// mid-reencryption declares five: the first is the part already under the NEW
+// key, sized to the progress so far, so mapping it with the old key -- which is
+// what the keyslot scan found first -- produced garbage over a truncated
+// device (#250, C2). Such a container is normally refused earlier by its
+// requirements flag; this refuses any other multi-segment header outright
+// rather than guessing which part to map.
 //
 // It is one function because two things must agree on the answer: the mapping,
-// and -- on the injected-key path -- the digest the key is verified against. A
-// key attested for one segment and mapped over another would be exactly the
-// wrong-key failure that verification exists to prevent.
-func cryptSegmentOf(metadata *LUKS2Metadata) (string, *Segment, error) {
-	for _, id := range slices.Sorted(maps.Keys(metadata.Segments)) {
-		if segment := metadata.Segments[id]; segment != nil && segment.Type == "crypt" {
+// and the digest the key is verified against. A key attested for one segment
+// and mapped over another would be exactly the wrong-key failure that
+// verification exists to prevent.
+func activationSegment(metadata *LUKS2Metadata) (string, *Segment, error) {
+	if len(metadata.Segments) != 1 {
+		return "", nil, &UnlockError{Op: "select the segment to activate", Err: ErrUnsupportedSegmentLayout,
+			Detail: fmt.Sprintf("the header declares %d segments; activation maps exactly one crypt segment", len(metadata.Segments))}
+	}
+	for id, segment := range metadata.Segments {
+		if segment != nil && segment.Type == "crypt" {
 			return id, segment, nil
 		}
 	}
-	return "", nil, &UnlockError{Op: "select the crypt segment", Err: ErrInvalidHeader,
+	return "", nil, &UnlockError{Op: "select the segment to activate", Err: ErrInvalidHeader,
 		Detail: "the header declares no crypt segment, so there is nothing to map"}
 }
 
@@ -387,136 +441,6 @@ func TrimRight(b []byte, cutset string) []byte {
 	return b[:i]
 }
 
-// ensureDeviceNode creates the /dev/dm-X device node if it doesn't exist.
-// This is needed in containerized environments where udev may not be running.
-func ensureDeviceNode(name string) error {
-	// Get device info
-	info, err := devmapper.InfoByName(name)
-	if err != nil {
-		return err
-	}
-
-	// One decoder, shared with the removal path. See decodeDevNo for what the
-	// three hand-rolled variants that used to live here disagreed about.
-	major, minor := decodeDevNo(info.DevNo)
-
-	dmPath := dmNodePath(minor)
-	mapperPath := mapperNodePath(name)
-
-	// Check if device already exists
-	if _, err := os.Stat(dmPath); err == nil {
-		return nil
-	}
-	if _, err := os.Stat(mapperPath); err == nil {
-		return nil
-	}
-
-	// Create the device node using mknod
-	dev := unix.Mkdev(major, minor)
-	// Safe conversion of dev to int (device numbers are always small enough)
-	devInt, err := SafeUint64ToInt(dev)
-	if err != nil {
-		return fmt.Errorf("invalid device number: %w", err)
-	}
-	if err := unix.Mknod(dmPath, unix.S_IFBLK|0660, devInt); err != nil {
-		// Try creating in /dev/mapper instead
-		if err2 := unix.Mknod(mapperPath, unix.S_IFBLK|0660, devInt); err2 != nil {
-			return fmt.Errorf("failed to create device node: %v, %v", err, err2)
-		}
-	}
-
-	return nil
-}
-
-// waitForDeviceReady waits for the device-mapper device to be ready at /dev/mapper/{name}.
-// If udev doesn't create the device nodes in time, it creates them manually.
-func waitForDeviceReady(name string) error {
-	mapperPath := mapperNodePath(name)
-
-	// Wait up to 3 seconds for udev to create /dev/mapper/{name}
-	for i := 0; i < 30; i++ {
-		// Check if /dev/mapper/name exists and is a block device
-		if fi, err := os.Stat(mapperPath); err == nil {
-			if fi.Mode()&os.ModeDevice != 0 {
-				return nil
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	// udev hasn't created the device yet - create it manually
-	// Get device info to find the dm-X path
-	info, err := devmapper.InfoByName(name)
-	if err != nil {
-		return fmt.Errorf("device %s not found in device-mapper: %w", name, err)
-	}
-
-	major, minor := decodeDevNo(info.DevNo)
-	dmPath := dmNodePath(minor)
-
-	// Wait briefly for dm-X device node to exist
-	dmExists := false
-	for i := 0; i < 20; i++ {
-		if fi, err := os.Stat(dmPath); err == nil {
-			if fi.Mode()&os.ModeDevice != 0 {
-				dmExists = true
-				break
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	// If dm-X doesn't exist, create it with mknod
-	if !dmExists {
-		dev := unix.Mkdev(major, minor)
-		devInt, err := SafeUint64ToInt(dev)
-		if err != nil {
-			return fmt.Errorf("invalid device number: %w", err)
-		}
-		if err := unix.Mknod(dmPath, unix.S_IFBLK|0660, devInt); err != nil && !os.IsExist(err) {
-			return fmt.Errorf("failed to create device node %s: %w", dmPath, err)
-		}
-	}
-
-	// Verify dm-X exists now
-	if _, err := os.Stat(dmPath); err != nil {
-		return fmt.Errorf("device node %s still doesn't exist: %w", dmPath, err)
-	}
-
-	// Create /dev/mapper directory if it doesn't exist
-	if err := os.MkdirAll(mapperDir(), 0750); err != nil {
-		return fmt.Errorf("failed to create /dev/mapper: %w", err)
-	}
-
-	// Create symlink from /dev/mapper/{name} -> /dev/dm-{minor}
-	if err := os.Symlink(dmPath, mapperPath); err != nil {
-		// Check if symlink was created by udev in the meantime
-		if fi, err := os.Stat(mapperPath); err == nil {
-			if fi.Mode()&os.ModeDevice != 0 {
-				return nil
-			}
-		}
-		// If the symlink exists but points elsewhere, that's also OK
-		if os.IsExist(err) {
-			if fi, err := os.Stat(mapperPath); err == nil {
-				if fi.Mode()&os.ModeDevice != 0 {
-					return nil
-				}
-			}
-		}
-		return fmt.Errorf("failed to create symlink %s -> %s: %w", mapperPath, dmPath, err)
-	}
-
-	// Verify the symlink works
-	if fi, err := os.Stat(mapperPath); err == nil {
-		if fi.Mode()&os.ModeDevice != 0 {
-			return nil
-		}
-	}
-
-	return fmt.Errorf("device %s not ready after creating symlink", mapperPath)
-}
-
 // Lock closes a device-mapper mapping.
 //
 // There is deliberately nothing keyring-related here. The entry holding the
@@ -524,38 +448,26 @@ func waitForDeviceReady(name string) error {
 // the mapping's lifetime, so by the time anything can be closed there is
 // nothing left to release. See keyring.go.
 func Lock(name string) error {
-	// Typed since #70. Closing a name nothing has opened used to surface as
-	// "failed to remove device-mapper: ..." -- a device-mapper failure, which
-	// sends an operator to look at device-mapper, when the actual state is that
-	// there was nothing to close. Callers that close idempotently can now say so
-	// with errors.Is instead of matching on text.
-	if !IsUnlocked(name) {
-		return fmt.Errorf("%w: no device-mapper mapping named %q exists", ErrVolumeNotUnlocked, name)
+	// The name is validated before it reaches anything. dm's own lookup would
+	// refuse most bad names, but the node cleanup below builds
+	// /dev/mapper/<name>, and "../sdb" there is /dev/sdb (#250, C3).
+	if err := ValidateMappingName(name); err != nil {
+		return err
 	}
 
-	// The identity MUST be established before anything is removed. Discarding
-	// this error left `info` nil, and the retry below then removed BY NAME with
-	// no identity check at all -- across the full three-second budget. That is
-	// the exact race the identity check exists to prevent, widened rather than
-	// closed: IsUnlocked can succeed through its device-node fallback, so a nil
-	// `info` is reachable in ordinary operation and not only under a transient
-	// fault.
+	// The identity MUST be established before anything is removed, and
+	// device-mapper is the only authority on it: there is no separate
+	// "is it unlocked" pre-check any more, because the one that was here could
+	// answer yes from a stale /dev/mapper node alone (#250, C5).
 	//
-	// No-such-device here is the same state IsUnlocked reports on: the mapping
-	// went away between the two calls, which is the typed not-unlocked case, not
-	// a device-mapper failure. Any other inspection error means the identity
-	// cannot be established, and the only safe answer is to say so rather than
-	// to remove something whose identity is unknown.
-	// The capture is RETRIED on EBUSY like everything else on this path. Failing
-	// fast here would reintroduce the very flakiness this function absorbs: the
-	// identity lookup goes through the same device-mapper control path as the
-	// close, so it is subject to the same transient hold, and refusing on it
-	// would leave the mapping live without ever attempting the close.
+	// No-such-device is the typed not-unlocked case, not a device-mapper
+	// failure. Any other inspection error means the identity cannot be
+	// established, and the only safe answer is to say so rather than to remove
+	// something whose identity is unknown.
 	//
-	// What must NOT be retried away is a lookup that keeps failing. Identity is
-	// required before anything is removed -- discarding this error once left the
-	// retry removing BY NAME with no identity check across the whole budget,
-	// which is the race the check exists to prevent.
+	// The capture is RETRIED on EBUSY like everything else on this path: the
+	// lookup goes through the same device-mapper control path as the close, so
+	// it is subject to the same transient hold.
 	var info *devmapper.DeviceInfo
 	if _, err := retryWhileBusy(func() error {
 		var err error
@@ -563,40 +475,22 @@ func Lock(name string) error {
 		return err
 	}); err != nil {
 		if isNoSuchDevice(err) {
-			// The mapping went away between IsUnlocked and here: the typed
-			// not-unlocked case, not a device-mapper failure.
 			return fmt.Errorf("%w: no device-mapper mapping named %q exists", ErrVolumeNotUnlocked, name)
 		}
 		return fmt.Errorf("cannot establish the identity of mapping %q, so it will not be removed: %w", name, err)
 	}
 
-	// A close rides out a transient hold rather than failing on it. Something
-	// holds a target open for a moment after the activity that preceded the
-	// close -- a udev-triggered scan, in practice -- and the device frees
-	// itself; dmsetup(8) ships --retry for exactly this. See
-	// removeMappingWithRetry (#122).
+	// A close rides out a transient hold rather than failing on it (#122).
 	//
-	// When the budget is spent, the answer is SPECIFIC rather than the bare
-	// errno: an operator has to be able to tell "busy for an instant" from
-	// "something is genuinely holding this", and after a retry exists that
-	// distinction is the whole diagnostic value. Silence, or an unchanged
-	// message, would make the retry a slower way to say the same thing.
 	// The identity is re-confirmed before EVERY attempt, for the same reason the
-	// rollback does it (#122): during a backoff another actor can remove this
-	// target and create a DIFFERENT mapping under the same name, and removing
-	// that one would destroy a plaintext device this caller never opened.
-	// Retrying by name alone would widen a one-ioctl window into a three-second
-	// one.
+	// rollback does it: during a backoff another actor can remove this target
+	// and create a DIFFERENT mapping under the same name, and removing that one
+	// would destroy a plaintext device this caller never opened.
 	//
 	// If the identity changes, or the target disappears, the mapping this call
 	// was asked to close is already gone: that is the goal, so it reports
 	// success and does NOT remove whatever now holds the name. Node cleanup is
-	// skipped in that case too -- the info captured above describes a device
-	// that is no longer there, and unlinking by a stale minor is how the wrong
-	// node gets removed.
-	//
-	// info is now guaranteed non-nil: the inspection above returns rather than
-	// proceeding without an identity, so there is no name-only path left.
+	// skipped in that case too.
 	replaced := false
 	attempts, err := retryWhileBusy(func() error {
 		current, err := dm.infoByName(name)
@@ -607,19 +501,10 @@ func Lock(name string) error {
 			}
 			return err
 		}
-		// The dm UUID is CRYPT-LUKS2-<header uuid>-<name>: a function of
-		// the VOLUME and the NAME, not of this activation. So a mapping of
-		// the same volume, recreated under the same name during the
-		// backoff, carries an identical UUID and the UUID alone cannot
-		// tell it from ours. DevNo is the closest thing to an instance
-		// handle the dm API offers here, and a recreated target is
-		// normally allocated a different minor.
-		//
-		// This NARROWS the window rather than closing it -- minors are
-		// reused eventually -- and the residue is the pre-existing race
-		// that inspect-then-remove always had. Stated rather than implied,
-		// because a reader who sees two fields compared will otherwise
-		// assume the identity is exact.
+		// The dm UUID is a function of the VOLUME and the NAME, not of this
+		// activation, so DevNo is compared as well. This NARROWS the window
+		// rather than closing it -- minors are reused eventually -- and the
+		// residue is the race that inspect-then-remove-by-name always has.
 		if current.UUID != info.UUID || current.DevNo != info.DevNo {
 			replaced = true
 			return nil
@@ -645,151 +530,169 @@ func Lock(name string) error {
 	return nil
 }
 
-// IsUnlocked checks if a device-mapper mapping exists
-func IsUnlocked(name string) bool {
-	// Check dmsetup directly first - this is authoritative
-	// InfoByName returns error if device doesn't exist
-	_, err := dm.infoByName(name)
-	if err == nil {
-		return true
-	}
-
-	// Also check the symlink and verify it points to a valid device
-	// (symlink might be stale if udev didn't clean up properly)
-	path := mapperNodePath(name)
-	if fi, err := os.Stat(path); err == nil {
-		// Stat follows the symlink - if the target doesn't exist, this would fail
-		// But also check if it's a valid device
-		if fi.Mode()&os.ModeDevice != 0 {
-			return true
-		}
-	}
-
-	return false
-}
-
-// GetMappedDevicePath returns the device path to use for an unlocked volume.
-// It prefers /dev/mapper/{name} (created by udev) but falls back to /dev/dm-{minor}
-// for environments without udev (e.g., Docker containers).
-func GetMappedDevicePath(name string) (string, error) {
-	// First check the symlink (preferred, created by udev)
-	symlinkPath := mapperNodePath(name)
-	if _, err := os.Stat(symlinkPath); err == nil {
-		return symlinkPath, nil
-	}
-
-	// Fall back to getting dm-X device directly
-	info, err := devmapper.InfoByName(name)
-	if err != nil {
-		return "", fmt.Errorf("device %s not found: %w", name, err)
-	}
-
-	// The same decoder as everything else. This site carried a THIRD spelling
-	// -- masking the low 32 bits, which is not a minor at all -- so a large
-	// device number produced a path no node has ever had.
-	_, minor := decodeDevNo(info.DevNo)
-	dmPath := dmNodePath(minor)
-
-	// Wait for the device file to appear (kernel creates it asynchronously)
-	for i := 0; i < 50; i++ {
-		if _, err := os.Stat(dmPath); err == nil {
-			return dmPath, nil
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	return dmPath, nil
-}
-
-// unlockLoadTable builds the dm-crypt table and loads it, with the master key
-// borrowed from its enclave for exactly that call.
+// IsUnlocked reports whether a device-mapper mapping named name exists.
 //
-// It is a separate function so the borrow closure has nothing else in it: the
-// window in which the key is raw bytes is this function body and no more. The
-// key does not reach the table -- it reaches the KERNEL KEYRING, and the table
-// carries only a reference to it. See keyring.go.
-func unlockLoadTable(name, uuid, realDevice string, params cryptSegmentParams, masterKey *enclave.MemoryEnclave, length, backendOffset uint64) error {
-	// The goroutine is pinned to its OS thread for the whole add-activate-
-	// release sequence.
-	//
-	// This is not defensive tidiness. Linux keyrings are resolved from the
-	// credentials of the TASK issuing the syscall, and joining or installing a
-	// keyring diverges the calling thread's credentials from its siblings' --
-	// so a key added on one OS thread is not necessarily visible to the
-	// DM_TABLE_LOAD ioctl if the Go scheduler has moved the goroutine to
-	// another thread in between. Without the pin this works almost always and
-	// fails occasionally with ENOKEY, which is the worst possible shape for a
-	// bug in an unlock path. keyring.go has the detail.
-	unpin := pinToOSThread()
-	defer unpin()
+// device-mapper is the only authority. This used to fall back to stat'ing
+// /dev/mapper/<name> when the dm lookup failed, so a stale node -- or, before
+// names were validated here, "../sdb", which is /dev/sdb -- answered "unlocked"
+// for a mapping that does not exist (#250, C3 and C5). An invalid name is never
+// unlocked, and a lookup that fails for any reason is not evidence that a
+// mapping exists.
+func IsUnlocked(name string) bool {
+	if ValidateMappingName(name) != nil {
+		return false
+	}
+	_, err := dm.infoByName(name)
+	return err == nil
+}
 
-	// loadErr is kept separate from the borrow's own error so that a failure to
-	// reach protected memory is not reported as a device-mapper failure. The two
-	// send an operator to completely different places. releaseErr is separate
-	// for the same reason again: a keyring entry that could not be removed is
-	// neither of those things and must not be reported as either.
-	var loadErr, releaseErr error
+// GetMappedDevicePath returns the device node of an unlocked volume:
+// /dev/mapper/<name> when it names the mapping, otherwise /dev/dm-<minor>.
+//
+// A node is returned only when its rdev equals the device number
+// device-mapper reports for the mapping; see mappedDevicePath. A name that is
+// not a valid mapping name is refused with ErrInvalidMappingName, a name with
+// no mapping with ErrVolumeNotUnlocked, and a mapping whose nodes do not carry
+// its device number -- a stale or planted /dev/mapper entry -- with
+// ErrDeviceNodeUnverified, after waiting for udev for the same 5 seconds this
+// always waited.
+func GetMappedDevicePath(name string) (string, error) {
+	path, _, err := mappedDevicePath(name)
+	return path, err
+}
 
-	err := borrowSecret("master key", masterKey, func(key []byte) error {
-		// Note: The devmapper library expects Length and BackendOffset in BYTES
-		// (it converts them to sectors internally)
-		// IMPORTANT: Use realDevice (resolved symlink) for devmapper, not the original device path
-		table := devmapper.CryptTable{
-			Start:         0,
-			Length:        length,
-			BackendDevice: realDevice,
-			BackendOffset: backendOffset,
-			// Validated at the header read boundary and converted by
-			// cryptTableParams, which is why there is no conversion and no
-			// gosec suppression on this line any more. The one it replaced said
-			// "sector size is validated (512 or 4096)" and named a check that
-			// only ever applied to the FORMAT path (#40).
-			Encryption: params.encryption,
-			IVTweak:    params.ivTweak,
-			SectorSize: params.sectorSize,
+// unlockLoadTable runs the whole activation -- create, keyring add, load,
+// resume, keyring release -- with the master key borrowed from its enclave for
+// the keyring add and the load, and reports the device number of the target it
+// created and whether it created one at all.
+//
+// created is the line the caller's rollback is drawn on. It is false when the
+// call failed before its own create succeeded, which is the case the rollback
+// must NOT touch: a create refused because the name is taken leaves the name
+// to its owner (#250, C4).
+//
+// THE CREATE COMES FIRST, before the key is borrowed or the keyring touched.
+// DM_DEV_CREATE is atomic kernel-wide: of two unlocks racing for one name,
+// exactly one gets past it, so only that one ever adds the volume key under
+// the description both would use. With the keyring step first, the loser's
+// add_key could UPDATE the winner's entry in place and its release then
+// revoke the key the winner's table load was about to resolve, failing both.
+// The empty target a later failure leaves behind holds no key and no table;
+// the caller's rollback removes it.
+//
+// It runs on a thread of its own that is discarded afterwards. Linux keyrings
+// are resolved from the credentials of the TASK issuing the syscall, so the
+// add and the DM_TABLE_LOAD that resolves the reference must run on one OS
+// thread; and resolving the session keyring can INSTALL one into that thread's
+// credentials, which must not then go back to the Go scheduler for unrelated
+// goroutines to inherit (#250, C9). See runOnDiscardedThread.
+func unlockLoadTable(name, uuid, backend string, params cryptSegmentParams, masterKey *enclave.MemoryEnclave,
+	length, backendOffset uint64) (devNo uint64, created bool, err error) {
+	err = runOnDiscardedThread(func() error {
+		var createErr error
+		devNo, createErr = dm.create(name, uuid)
+		if createErr != nil {
+			if errors.Is(createErr, unix.EBUSY) {
+				// The kernel's answer for a name or UUID already in use:
+				// another activation got there first, and its mapping is its
+				// own.
+				return &UnlockError{Op: "unlock", Err: ErrVolumeAlreadyUnlocked,
+					Detail: fmt.Sprintf("the device-mapper name %q was taken by another activation (%v) - close it first with: luks2 close %s", name, createErr, name)}
+			}
+			return &detailError{Detail: "failed to create device-mapper", Err: createErr}
 		}
+		created = true
 
-		// Key is deliberately NOT set, here or anywhere else in this package.
-		// devmapper's buildSpec takes KeyID when it is non-empty and only falls
-		// back to hex.EncodeToString(Key) when it is empty, so an unassigned
-		// Key is what makes the hex encoding structurally unreachable rather
-		// than merely unused. If the keyring cannot hold the key, this function
-		// returns and no table is loaded at all.
-		keyEntry, keyringErr := addVolumeKeyToKeyring(uuid, key)
-		if keyringErr != nil {
-			return keyringErr
+		// loadErr is kept separate from the borrow's own error so that a failure
+		// to reach protected memory is not reported as a device-mapper failure.
+		// releaseErr is separate for the same reason again: a keyring entry that
+		// could not be removed is neither of those things.
+		var loadErr, releaseErr error
+
+		borrowErr := borrowSecret("master key", masterKey, func(key []byte) error {
+			// Note: The devmapper library expects Length and BackendOffset in
+			// BYTES (it converts them to sectors internally).
+			table := devmapper.CryptTable{
+				Start:  0,
+				Length: length,
+				// major:minor of the descriptor Unlock pinned, never a path.
+				BackendDevice: backend,
+				BackendOffset: backendOffset,
+				// Validated at the header read boundary and converted by
+				// cryptTableParams (#40).
+				Encryption: params.encryption,
+				IVTweak:    params.ivTweak,
+				SectorSize: params.sectorSize,
+			}
+
+			// Key is deliberately NOT set, here or anywhere else in this
+			// package. devmapper's buildSpec takes KeyID when it is non-empty
+			// and only falls back to hex.EncodeToString(Key) when it is empty,
+			// so an unassigned Key is what makes the hex encoding structurally
+			// unreachable rather than merely unused.
+			keyEntry, keyringErr := addVolumeKeyToKeyring(uuid, key)
+			if keyringErr != nil {
+				return keyringErr
+			}
+
+			// Released before this closure returns, on every path including a
+			// panic, so the entry cannot outlive the activation.
+			defer func() { releaseErr = keyEntry.release() }()
+			table.KeyID = keyEntry.tableKeyID()
+
+			loadErr = activateCreated(name, uuid, devNo, table)
+			return loadErr
+		})
+
+		// The release is checked whatever the activation did. A keyring entry
+		// left holding the volume key is a custody failure in its own right,
+		// and one that a successful unlock would otherwise hide completely --
+		// so it fails the unlock, and the caller rolls the mapping back.
+		if borrowErr == nil {
+			return releaseErr
 		}
-
-		// Released before this closure returns, on the success path and on
-		// every failure path including a panic -- so the entry cannot outlive
-		// the activation and there is nothing for the caller's rollback to
-		// clean up. release verifies the key is gone rather than trusting the
-		// syscalls; see keyring.go.
-		defer func() { releaseErr = keyEntry.release() }()
-		table.KeyID = keyEntry.tableKeyID()
-
-		loadErr = dm.createAndLoad(name, uuid, 0, table)
-		return loadErr
+		if loadErr != nil {
+			return errors.Join(&detailError{Detail: "failed to create device-mapper", Err: loadErr}, releaseErr)
+		}
+		return errors.Join(borrowErr, releaseErr)
 	})
+	return devNo, created, err
+}
 
-	// The release is checked whatever the activation did. A keyring entry left
-	// holding the volume key is a custody failure in its own right, and one
-	// that a successful unlock would otherwise hide completely.
-	//
-	// Returning it makes the caller roll the mapping back, which is the only
-	// answer consistent with both contracts this function is under: reporting
-	// success would leave the caller believing a custody guarantee that did not
-	// hold, and reporting failure while leaving the target live would leave an
-	// unowned plaintext device. Losing a working mapping is the lesser cost,
-	// and release only fails if the kernel refuses -- or cannot confirm -- an
-	// operation on a key this process just created.
-	if err == nil {
-		return releaseErr
+// activateCreated loads table into the target this call created and resumes
+// it, confirming before each step that the name still names that target.
+//
+// devmapper addresses load and resume by NAME, so between this call's create
+// and either step another process could remove the target and create its own
+// under the same name; loading our table into it would make it our plaintext
+// mapping under someone else's control. The check is not atomic with the
+// ioctl that follows it, and the residual is the same one the rollback
+// documents, but it is no longer the whole window from create to resume.
+func activateCreated(name, uuid string, devNo uint64, table devmapper.Table) error {
+	if err := confirmCreated(name, uuid, devNo); err != nil {
+		return err
 	}
-	if loadErr != nil {
-		return errors.Join(fmt.Errorf("failed to create device-mapper: %w", loadErr), releaseErr)
+	if err := dm.load(name, table); err != nil {
+		return err
 	}
-	return errors.Join(err, releaseErr)
+	if err := confirmCreated(name, uuid, devNo); err != nil {
+		return err
+	}
+	return dm.resume(name)
+}
+
+// confirmCreated reports an error unless name is still the target this call
+// created: the same UUID and the device number the create returned.
+func confirmCreated(name, uuid string, devNo uint64) error {
+	current, err := dm.infoByName(name)
+	if err != nil {
+		return &VolumeError{Volume: name, Op: "confirm the identity of the target created for", Err: err}
+	}
+	if current.UUID != uuid || current.DevNo != devNo {
+		return &VolumeError{Volume: name, Op: "activate", Err: &detailError{
+			Detail: "the device-mapper target this unlock created was replaced before it was activated"}}
+	}
+	return nil
 }
 
 // unlockKeyslot attempts to unlock a keyslot with the given passphrase and
@@ -805,6 +708,19 @@ func unlockLoadTable(name, uuid, realDevice string, params cryptSegmentParams, m
 // What is deliberately not enclaved is the ciphertext read off the device,
 // which is already on the device; see decryptKeyMaterialEnclave.
 func unlockKeyslot(device string, keyslotID string, passphrase []byte, keyslot *Keyslot, digests map[string]*Digest) (*enclave.MemoryEnclave, error) {
+	f, err := openDevice("read the keyslot area", device, os.O_RDONLY)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	return unlockKeyslotFrom(f, keyslotID, passphrase, keyslot, digests)
+}
+
+// unlockKeyslotFrom is unlockKeyslot reading the keyslot area through dev, a
+// descriptor the caller already holds -- the locked one, for a keyslot operation
+// pinned to the device it locked (#249, A10).
+func unlockKeyslotFrom(dev io.ReaderAt, keyslotID string, passphrase []byte, keyslot *Keyslot, digests map[string]*Digest) (*enclave.MemoryEnclave, error) {
 	// THE GATE, and it is one call rather than a prefix of checks written here.
 	//
 	// screenKeyslot performs every rejection this function can make WITHOUT the
@@ -828,26 +744,35 @@ func unlockKeyslot(device string, keyslotID string, passphrase []byte, keyslot *
 		return nil, err
 	}
 
-	// Derive key from passphrase. Through passphraseKDF so the injected-key
+	// Derive the key that WRAPS the area, to the AREA's key size -- which is
+	// not the volume key's (#249, A6). cryptsetup --keyslot-key-size writes
+	// them differently, and deriving to keyslot.KeySize decrypted such a
+	// keyslot with the wrong key. Through passphraseKDF so the injected-key
 	// path's tests can prove it never gets here; see UnlockWithVolumeKey.
-	passphraseKey, err := passphraseKDF(passphrase, keyslot.KDF, keyslot.KeySize)
+	passphraseKey, err := passphraseKDF(passphrase, keyslot.KDF, plan.areaKeySize)
 	if err != nil {
 		return nil, err
 	}
 	defer releaseSecret(passphraseKey)
 
-	// The area bounds come from the screen, which parsed and bounded them --
-	// see screenKeyslot. openDevice is main's typed opener, adopted here so this
-	// path reports a device failure the same way every other one does.
-	f, err := openDevice("read the keyslot area", device, os.O_RDONLY)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
+	return recoverKeyslotKey(dev, keyslotID, keyslot, plan, passphraseKey, digests)
+}
 
+// recoverKeyslotKey is unlockKeyslotFrom past the derivation: it reads the area
+// the screen bounded, decrypts it under the area key, merges the stripes and
+// verifies the result against the digests that attest the keyslot.
+//
+// It is split out so a keyslot just WRITTEN can be read back through exactly
+// this path with the area key its writer already holds (verifyWrittenKeyslot):
+// the read-back then proves what the next unlock will see without paying the
+// KDF a second time.
+func recoverKeyslotKey(dev io.ReaderAt, keyslotID string, keyslot *Keyslot, plan keyslotPlan,
+	passphraseKey *enclave.MemoryEnclave, digests map[string]*Digest) (*enclave.MemoryEnclave, error) {
+	// The area bounds come from the screen, which parsed and bounded them --
+	// see screenKeyslot.
 	encryptedKeyMaterial := make([]byte, plan.areaSize)
 	defer clearBytes(encryptedKeyMaterial)
-	if _, err := f.ReadAt(encryptedKeyMaterial, plan.areaOffset); err != nil {
+	if _, err := dev.ReadAt(encryptedKeyMaterial, plan.areaOffset); err != nil {
 		return nil, err
 	}
 
@@ -1142,22 +1067,4 @@ func evaluateDigest(masterKey *enclave.MemoryEnclave, digest *Digest) (evaluated
 	matched = derived.EqualTo(expected)
 	releaseSecret(derived)
 	return true, matched
-}
-
-// getBlockDeviceSize gets the size of a block device or file.
-//
-// The measurement itself is deviceSizeFromFile, shared with the keyslot-area
-// bound in keyslotscreen.go. It used to be written out twice-over -- once here
-// for the data segment and, in effect, once there as a bare Stat -- and the two
-// did not agree: this one asked the kernel and that one did not, so the guard
-// deciding whether a keyslot lies inside the device was blind on exactly the
-// devices this package exists for.
-func getBlockDeviceSize(device string) (int64, error) {
-	f, err := openDevice("read the device size", device, os.O_RDONLY)
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = f.Close() }()
-
-	return deviceSizeFromFile(f)
 }

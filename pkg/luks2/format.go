@@ -6,14 +6,168 @@ package luks2
 
 import (
 	"crypto/aes"
+	"errors"
 	"fmt"
+	"golang.org/x/sys/unix"
 	"os"
+	"slices"
+	"strings"
 
 	"github.com/jeremyhahn/go-enclave"
 	"golang.org/x/crypto/xts"
 )
 
-// Format creates a new LUKS2 volume
+// Errors Format and ValidateFormatOptions refuse with before the device is
+// touched (#248).
+var (
+	// ErrUnsupportedCipher indicates a Cipher, CipherMode and KeySize that are
+	// not a combination Format writes: aes-xts-plain64 with a 256- or 512-bit
+	// key, or aes-cbc-essiv:sha256 with a 256-bit key.
+	ErrUnsupportedCipher = errors.New("unsupported cipher, mode and key size combination")
+
+	// ErrInvalidLabel indicates a Label or Subsystem that does not fit the
+	// 48-byte header field with its NUL terminator, or that contains a NUL.
+	ErrInvalidLabel = errors.New("label must be at most 47 bytes and contain no NUL byte")
+
+	// ErrDeviceTooSmall indicates a device with no room for the header copies,
+	// the keyslots area and at least one encryption sector of data.
+	ErrDeviceTooSmall = errors.New("device is too small for a LUKS2 container")
+)
+
+// maxLabelLength is the longest label or subsystem the 48-byte header field
+// holds with the NUL terminator LUKS2 requires. cryptsetup refuses a longer one
+// (LUKS2_hdr_labels) and reads only the first 47 bytes of the field.
+const maxLabelLength = 47
+
+// formatCiphers lists every data-segment cipher Format writes, and the key
+// sizes in bits each is written with.
+//
+// It is an allow-list because the segment cipher is a device-mapper
+// specification and anything else was written blind (#248): a CipherMode of
+// "xts-plain64 x" formatted a container no reader would open, and aes-cbc with
+// a 512-bit key formatted one dm-crypt cannot set up. CBC-ESSIV takes one AES
+// key, so it has no 512-bit form; XTS splits its key in two, which is why
+// 512 bits is AES-256-XTS. Both are what cryptsetup writes for the same
+// options.
+var formatCiphers = map[string][]int{
+	"aes-xts-plain64":      {256, 512},
+	"aes-cbc-essiv:sha256": {256},
+}
+
+// validateFormatChoices refuses a cipher combination outside formatCiphers and
+// a label or subsystem that does not fit its header field. Empty values are
+// judged as the defaults Format substitutes for them.
+func validateFormatChoices(opts FormatOptions) error {
+	cipher, mode, keySize := opts.Cipher, opts.CipherMode, opts.KeySize
+	if cipher == "" {
+		cipher = DefaultCipher
+	}
+	if mode == "" {
+		mode = DefaultCipherMode
+	}
+	if keySize == 0 {
+		keySize = DefaultKeySize
+	}
+	spec := cipher + "-" + mode
+	if sizes, ok := formatCiphers[spec]; !ok || !slices.Contains(sizes, keySize) {
+		return &detailError{Kind: ErrUnsupportedCipher, Detail: fmt.Sprintf(
+			"%s with a %d-bit key; Format writes aes-xts-plain64 (256 or 512 bits) and aes-cbc-essiv:sha256 (256 bits)", spec, keySize)}
+	}
+	for _, field := range []struct{ name, value string }{{"label", opts.Label}, {"subsystem", opts.Subsystem}} {
+		if len(field.value) > maxLabelLength || strings.IndexByte(field.value, 0) >= 0 {
+			return &detailError{Kind: ErrInvalidLabel, Detail: fmt.Sprintf("the %s is %d bytes", field.name, len(field.value))}
+		}
+	}
+	return nil
+}
+
+// requireSameDevice refuses unless locked and opened are descriptors of one
+// file -- the same st_dev, st_ino AND st_rdev -- so the lock held is the lock on
+// what is about to be written. op says what the second open was for.
+//
+// It exists for the opens the kernel grants only BY PATH: an O_EXCL in-use
+// claim on a block device cannot be taken on a descriptor already open. The
+// path is resolved again for it, and a symlink re-pointed since the lock was
+// taken -- a /dev/disk/by-* link, a /dev/mapper entry -- would otherwise put
+// the lock on one device and the writes on another. Every caller checks before
+// its first write and refuses with ErrDeviceChanged.
+func requireSameDevice(locked, opened *os.File, device, op string) error {
+	var a, b unix.Stat_t
+	if err := unix.Fstat(int(locked.Fd()), &a); err != nil {
+		return &DeviceError{Device: device, Op: "stat the locked descriptor", Err: err}
+	}
+	if err := unix.Fstat(int(opened.Fd()), &b); err != nil {
+		return &DeviceError{Device: device, Op: "stat the descriptor opened to " + op, Err: err}
+	}
+	if a.Dev != b.Dev || a.Ino != b.Ino || a.Rdev != b.Rdev {
+		return &DeviceError{Device: device, Op: op, Err: &detailError{Kind: ErrDeviceChanged,
+			Detail: "the path resolved to a different file between taking its lock and opening it to " + op}}
+	}
+	return nil
+}
+
+// formatLayout is where Format puts each part of a new container.
+type formatLayout struct {
+	keyslotsOffset int64 // the keyslots area starts after both header copies
+	keyslotsSize   int64 // the keyslots area, up to the data
+	dataOffset     int64 // the data segment
+}
+
+// newFormatLayout lays a container out the way cryptsetup does: two header
+// copies of metadataSize bytes (0 for the 16 KiB default), the keyslots area,
+// and the data segment at 16 MiB -- or later, if one keyslot of keyBytes of
+// key material would not fit before it.
+//
+// MEASURED against cryptsetup 2.7.0 (#47): --luks2-metadata-size 16k gives
+// keyslots_size 16744448, 32k gives 16711680 and 4m gives 8388608, with the
+// data segment at 16 MiB in every case.
+func newFormatLayout(metadataSize, keyBytes int) formatLayout {
+	area := int64(metadataSize)
+	if area == 0 {
+		area = LUKS2HeaderMinSize
+	}
+	keyslotsOffset := 2 * area
+	keyslotsSize := max(int64(LUKS2HeaderDefaultSize)-keyslotsOffset, alignTo(int64(keyBytes)*AFStripes, 4096))
+	return formatLayout{
+		keyslotsOffset: keyslotsOffset,
+		keyslotsSize:   keyslotsSize,
+		dataOffset:     keyslotsOffset + keyslotsSize,
+	}
+}
+
+// checkFormatDeviceSize refuses a device that cannot hold the layout plus at
+// least one sector of data, or whose data area is not a whole number of
+// sectors -- BEFORE anything is written. Format used to write the header first
+// and fail later, or, on a regular file, silently grow it into a container with
+// an empty data segment.
+//
+// The data size is rounded down to 512 bytes first, as a loop device presents a
+// file, so only a sector size above 512 adds an alignment requirement.
+func checkFormatDeviceSize(f *os.File, device string, layout formatLayout, sectorSize int) error {
+	size, err := measureDeviceSize(f)
+	if err != nil {
+		return &DeviceError{Device: device, Op: "measure the device", Err: err}
+	}
+	data := size - layout.dataOffset
+	if data < int64(sectorSize) {
+		return &detailError{Kind: ErrDeviceTooSmall, Detail: fmt.Sprintf(
+			"%s is %d bytes; the header copies and keyslots area end at %d, and the data needs at least one %d-byte sector after that",
+			device, size, layout.dataOffset, sectorSize)}
+	}
+	if usable := data - data%LUKS2SectorSize; usable%int64(sectorSize) != 0 {
+		return &detailError{Kind: ErrInvalidSize, Detail: fmt.Sprintf(
+			"%s leaves %d bytes of data after the keyslots area, which is not a whole number of %d-byte sectors", device, usable, sectorSize)}
+	}
+	return nil
+}
+
+// Format creates a new LUKS2 volume.
+//
+// The device is opened O_EXCL. For a block device the kernel then refuses the
+// open with EBUSY while the device is mounted, mapped by device-mapper or held
+// by another exclusive opener, and Format returns ErrDeviceInUse rather than
+// overwriting something in use. On a regular file O_EXCL without O_CREAT has
+// no effect.
 func Format(opts FormatOptions) error {
 	// Validate options
 	if err := ValidateFormatOptions(opts); err != nil {
@@ -61,19 +215,34 @@ func Format(opts FormatOptions) error {
 		opts.SectorSize = DefaultSectorSize
 	}
 
-	// Open device
-	f, err := openDevice("format the device", opts.Device, os.O_RDWR)
+	// Open device, exclusively: see the function comment. The locks above were
+	// taken first, as the cryptsetup lock order requires, on a descriptor of
+	// their own; this one must be the SAME file, or a path retargeted between
+	// the two opens would have the locks held on one device while the format
+	// writes another. Every write below goes through f.
+	f, err := openDevice("format the device", opts.Device, os.O_RDWR|os.O_EXCL)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = f.Close() }()
+	if err := requireSameDevice(lock.file, f, opts.Device, "format it"); err != nil {
+		return err
+	}
+
+	masterKeySize := opts.KeySize / 8 // Convert bits to bytes
+
+	// The whole layout is known now, before the KDF is paid for and before a
+	// byte is written, so a device that cannot hold it is refused untouched.
+	layout := newFormatLayout(opts.MetadataSize, masterKeySize)
+	if err := checkFormatDeviceSize(f, opts.Device, layout, opts.SectorSize); err != nil {
+		return err
+	}
 
 	// Generate the master key DIRECTLY into locked memory. It is drawn inside
 	// the enclave's borrow window, so the volume's whole secret never exists on
 	// the ordinary heap -- not even for the instant between rand.Read and a
 	// move, which is a window no later wipe can close because the collector may
 	// already have copied the bytes.
-	masterKeySize := opts.KeySize / 8 // Convert bits to bytes
 	masterKey, err := randomSecret("master key", masterKeySize)
 	if err != nil {
 		return err
@@ -129,39 +298,14 @@ func Format(opts FormatOptions) error {
 	}
 	defer clearBytes(encryptedKeyMaterial)
 
-	// Calculate offsets and sizes.
-	//
 	// The keyslots area starts where the two header copies end, at twice the
-	// header area size. It is derived from the header rather than written as
-	// 0x8000, which was right only for the default 16 KiB area: with
-	// FormatOptions.MetadataSize at 32 KiB the second header copy occupies
-	// 0x8000..0xFFFF, and keyslot material written at 0x8000 would land inside
-	// it (#47).
-	area, err := headerAreaSizeForWrite(hdr)
-	if err != nil {
-		return err
-	}
-	keyslotAreaStart := 2 * int64(area)
+	// header area size, never at a fixed 0x8000: with MetadataSize at 32 KiB
+	// the second header copy occupies 0x8000..0xFFFF (#47). See newFormatLayout.
+	keyslotAreaStart := layout.keyslotsOffset
 	keyMaterialSize := len(encryptedKeyMaterial)
 	alignedKeyMaterialSize := alignTo(int64(keyMaterialSize), 4096)
-
-	// Match cryptsetup's LUKS2 layout for maximum compatibility:
-	// - LUKS2_DEFAULT_HDR_SIZE = 16 MiB (total metadata area)
-	// - keyslots_size = LUKS2_DEFAULT_HDR_SIZE - 2 * metadata_size
-	// - data_offset = 2 * metadata_size + keyslots_size = 16 MiB
-	// - Each keyslot needs: volume_key_size * 4000 bytes (AF stripes), 4KB aligned
-	// - For 512-bit key: 64 * 4000 = 256KB per keyslot
-	//
-	// MEASURED against cryptsetup 2.7.0 (#47): --luks2-metadata-size 16k gives
-	// keyslots_size 16744448, 32k gives 16711680 and 4m gives 8388608, with the
-	// data segment at 16 MiB in every case. Even the 4 MiB area leaves 8 MiB of
-	// keyslots, room for all 32 keyslots of a 512-bit key.
-	keyslotsAreaSize := int64(LUKS2HeaderDefaultSize) - keyslotAreaStart
-	if keyslotsAreaSize < alignedKeyMaterialSize {
-		keyslotsAreaSize = alignedKeyMaterialSize
-	}
-
-	dataOffset := keyslotAreaStart + keyslotsAreaSize
+	keyslotsAreaSize := layout.keyslotsSize
+	dataOffset := layout.dataOffset
 
 	// Create metadata structure
 	// keyslot0Size is the actual size of keyslot 0's area
@@ -169,8 +313,8 @@ func Format(opts FormatOptions) error {
 	metadata := createMetadata(kdf, digestKDF, digestValue, opts, masterKeySize,
 		int(keyslotAreaStart), int(alignedKeyMaterialSize), int(keyslotsAreaSize), int(dataOffset))
 
-	// Write headers
-	if err := writeHeaderInternal(opts.Device, hdr, metadata); err != nil {
+	// Write headers, through the exclusively opened descriptor.
+	if err := writeHeaderTo(f, hdr, metadata); err != nil {
 		return err
 	}
 

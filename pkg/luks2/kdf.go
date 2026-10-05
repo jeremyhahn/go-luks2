@@ -325,8 +325,9 @@ func deriveKeyPlain(passphrase []byte, kdf *KDF, keySize int) ([]byte, error) {
 // It is also the API the owner ruling names: "use crypto/pbkdf2; accept the
 // bounded transient copy; document it" -- the resolution of this exact case
 // under the rule against hand-rolled cryptography (owner ruling 2026-08-25).
-// The reasoning is spelled out in enclave.go and in the README's Protected
-// Memory section, which are in this repository and travel with it.
+// The reasoning is spelled out in enclave.go and summarized under "Key
+// custody" in docs/ARCHITECTURE.md, which are in this repository and travel
+// with it.
 func derivePBKDF2(passphrase, salt []byte, kdf *KDF, keySize int) ([]byte, error) {
 	if kdf.Iterations == nil {
 		return nil, &CryptoError{Op: "pbkdf2", Err: fmt.Errorf("PBKDF2 requires iterations")}
@@ -884,6 +885,20 @@ func pbkdf2FloorFor(hashAlgo string, policy keyslotCostPolicy) int {
 	return int(math.Ceil(pbkdf2IterationFloor(hashAlgo, pbkdf2ReferenceTargetMs)))
 }
 
+// calibratedCountFloor is the floor a CALIBRATED iteration count is raised to
+// for a new keyslot (#249, A8): pbkdf2FloorFor, under the keyslot's policy.
+//
+// It is a variable for the reason fipsMode is one. This package's unit suite
+// writes hundreds of keyslots whose cost is not what the test is about, and
+// asks for them with PBKDFIterTime: 1; held to the OWASP floor, each one costs
+// up to 600,000 PBKDF2 rounds per derivation -- seconds under the race
+// detector -- which the suite's runtime budget (#92) cannot carry. TestMain
+// lowers it to LUKS2's own minimum, the cost those keyslots had before this
+// floor existed, exactly as cheapenGoldenDigests cheapens the fixture digests.
+// Production never assigns it, and the test whose subject IS this floor
+// restores it.
+var calibratedCountFloor = pbkdf2FloorFor
+
 // forcedPBKDF2Iterations validates an explicit PBKDF2 iteration count -- the
 // one a caller supplies through FormatOptions.PBKDFIterations or
 // AddKeyOptions.PBKDFIterations -- and returns it unchanged if it is one this
@@ -1047,6 +1062,15 @@ func createPBKDF2KDF(kdfType string, opts FormatOptions, saltB64 string, keySize
 			iterTime = pbkdf2ReferenceTargetMs
 		}
 		iterations, err = BenchmarkPBKDF2(hashAlgo, keySize, iterTime)
+		// A CALIBRATED count is held to the same floor an explicit one is
+		// (#249, A8). BenchmarkPBKDF2 scales the OWASP floor by the budget, so
+		// PBKDFIterTime: 1 calibrated a caller's passphrase down to ~1000
+		// iterations -- the exact outcome forcedPBKDF2Iterations refuses for
+		// PBKDFIterations: 1000 on the same path. The budget is a way to ask
+		// for MORE than the floor on fast hardware, never a way under it.
+		if err == nil {
+			iterations = max(iterations, calibratedCountFloor(hashAlgo, policy))
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -1098,13 +1122,24 @@ func createArgon2KDF(kdfType string, opts FormatOptions, saltB64 string) (*KDF, 
 		cpus = 4 // Default
 	}
 
-	return &KDF{
+	kdf := &KDF{
 		Type:   kdfType,
 		Salt:   saltB64,
 		Time:   &time,
 		Memory: &memory,
 		CPUs:   &cpus,
-	}, nil
+	}
+
+	// WHAT IS WRITTEN MUST BE WHAT THE READER ACCEPTS (#249, A5). The KDF is
+	// held to validateKDFCost -- the very check screenKeyslot applies when the
+	// header is read back -- so no creation path, whether the cost came from a
+	// caller, a default or a container ChangeKey inherited it from, can write a
+	// keyslot this package then refuses to open. Consumed rather than
+	// restated, for the reason the screen gives.
+	if err := validateKDFCost(kdf); err != nil {
+		return nil, &detailError{Detail: "refusing to write an Argon2 keyslot the read path would refuse", Err: err}
+	}
+	return kdf, nil
 }
 
 // encodeBase64 encodes bytes to base64 string

@@ -57,6 +57,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -150,9 +151,14 @@ type Entry struct {
 // A ledger holds an exclusive advisory LOCK on its own file for the whole life
 // of the run, and that lock is what makes a later reap safe. See TryLock.
 type Ledger struct {
-	mu   sync.Mutex
-	f    *os.File
-	path string
+	mu    sync.Mutex
+	f     *os.File
+	path  string
+	name  string
+	runID string
+	// dir is the validated state directory's handle. The ledger is created,
+	// re-read and deleted through it, never by path (#247).
+	dir *trustedDir
 }
 
 // OpenLedger creates the ledger for one run.
@@ -164,14 +170,20 @@ func OpenLedger(dir, runID string) (*Ledger, error) {
 	// The directory is part of the trust boundary; see statedir.go. Checked on
 	// the WRITER path as well as the reaper's, because a check on one path only
 	// is one an attacker routes around by racing the other.
-	if err := ensureTrustedStateDir(dir); err != nil {
+	if runID == "" || strings.ContainsAny(runID, `/\`) || runID == "." || runID == ".." {
+		return nil, &StateDirError{Dir: dir, Problem: "run id " + strconv.Quote(runID) + " cannot name a ledger"}
+	}
+	sd, err := openTrustedStateDir(dir)
+	if err != nil {
 		return nil, err
 	}
 
-	path := filepath.Join(dir, runID+ledgerSuffix)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) // #nosec G304 -- path built from the configured state dir and the run id
+	name := runID + ledgerSuffix
+	path := filepath.Join(dir, name)
+	f, err := sd.root.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		return nil, fmt.Errorf("%w: opening %s: %v", ErrLedgerUnavailable, path, err)
+		_ = sd.Close()
+		return nil, &LockFileError{Action: "opening", Path: path, Err: err}
 	}
 
 	// Hold an exclusive advisory lock for the life of the run. This is what
@@ -183,10 +195,11 @@ func OpenLedger(dir, runID string) (*Ledger, error) {
 	// the state directory is a bind mount -- every container sees the same one.
 	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		_ = f.Close()
-		return nil, fmt.Errorf("%w: locking %s: %v", ErrLedgerUnavailable, path, err)
+		_ = sd.Close()
+		return nil, &LockFileError{Action: "locking", Path: path, Err: err}
 	}
 
-	return &Ledger{f: f, path: path}, nil
+	return &Ledger{f: f, path: path, name: name, runID: runID, dir: sd}, nil
 }
 
 // TryLock reports whether the run that owns the ledger at path is GONE.
@@ -212,7 +225,22 @@ func TryLock(path string) (locked bool, release func(), err error) {
 	if err != nil {
 		return false, nil, err
 	}
+	return tryLockFile(f)
+}
 
+// tryLockIn is TryLock for a ledger named inside the validated state directory,
+// opened through its handle.
+func tryLockIn(d *trustedDir, name string) (locked bool, release func(), err error) {
+	f, err := d.root.OpenFile(name, os.O_RDONLY, 0)
+	if err != nil {
+		return false, nil, err
+	}
+	return tryLockFile(f)
+}
+
+// tryLockFile takes f's lock without waiting. It owns f: f is closed unless
+// the lock is taken, in which case release closes it.
+func tryLockFile(f *os.File) (locked bool, release func(), err error) {
 	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		_ = f.Close()
 		if errors.Is(err, unix.EWOULDBLOCK) {
@@ -232,6 +260,14 @@ const ledgerSuffix = ".ledger"
 
 // Path returns the ledger's file path.
 func (l *Ledger) Path() string { return l.path }
+
+// RunID returns the id of the run the ledger belongs to.
+func (l *Ledger) RunID() string { return l.runID }
+
+// entries re-reads the ledger through the state directory's handle.
+func (l *Ledger) entries() ([]Entry, error) {
+	return readLedgerIn(l.dir, l.name)
+}
 
 // Record appends an entry and does not return until it is DURABLE.
 //
@@ -269,7 +305,11 @@ func (l *Ledger) Record(kind Kind, value, identity string) error {
 func (l *Ledger) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.f.Close()
+	err := l.f.Close()
+	if derr := l.dir.Close(); err == nil {
+		err = derr
+	}
+	return err
 }
 
 // Discard closes the ledger and deletes it, declaring that this run removed
@@ -279,12 +319,29 @@ func (l *Ledger) Close() error {
 // a ledger without reaping it. A run that ends any other way -- a panic, a
 // timeout, a SIGKILL -- leaves the file behind, which is precisely the signal
 // the next run needs.
+//
+// The ledger is unlinked BEFORE its file is closed. Closing releases the lock,
+// and a ledger that is visible and unlocked is a dead run's ledger to any
+// other run's reaper: closing first let a sibling consume this run's record in
+// the window before the unlink, and this run's own Remove then failed a clean
+// run with ENOENT (Codex review on #247).
 func (l *Ledger) Discard() error {
-	if err := l.Close(); err != nil {
-		return err
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	defer func() { _ = l.dir.Close() }()
+	rmErr := l.dir.root.Remove(l.name)
+	ledgerCloseHook(l)
+	closeErr := l.f.Close()
+	if rmErr != nil {
+		return rmErr
 	}
-	return os.Remove(l.path)
+	return closeErr
 }
+
+// ledgerCloseHook runs in Discard just before the ledger's file -- and with it
+// the lock -- is released. It does nothing outside tests, which use it to look
+// at the state directory at exactly that moment.
+var ledgerCloseHook = func(*Ledger) {}
 
 // ReadLedger parses one ledger file.
 //
@@ -296,9 +353,24 @@ func ReadLedger(path string) ([]Entry, error) {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
+	return parseLedger(f, path)
+}
 
+// readLedgerIn reads a ledger named inside the validated state directory,
+// through its handle.
+func readLedgerIn(d *trustedDir, name string) ([]Entry, error) {
+	f, err := d.root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return parseLedger(f, filepath.Join(d.path, name))
+}
+
+// parseLedger parses one ledger's contents; path names it in errors.
+func parseLedger(r io.Reader, path string) ([]Entry, error) {
 	var entries []Entry
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(r)
 	for line := 1; scanner.Scan(); line++ {
 		text := scanner.Text()
 		if text == "" {

@@ -27,7 +27,7 @@ import (
 //
 // NOT COVERED: dm mappings, on the kill path specifically. This package is
 // pkg_test -- an EXTERNAL test package -- so it cannot reach luks2's
-// dm.createAndLoad seam, which is unexported and is what gives the pkg/luks2
+// dm.create seam, which is unexported and is what gives the pkg/luks2
 // suite write-ahead mapping records with no call-site changes. The tests here
 // still remove their mappings through testCleanup on pass, fail and panic; what
 // is missing is the SIGKILL window, where a mapping created a moment before the
@@ -38,7 +38,7 @@ import (
 // Three things close it between them, which is why leaving it is not a punt:
 //
 //   - All four leak names measured in #96 originate in pkg/luks2, which the
-//     dm.createAndLoad seam covers completely. The external suites are not
+//     dm.create seam covers completely. The external suites are not
 //     where the observed damage came from.
 //   - Both external suites already clean up on pass, fail AND panic. Only the
 //     SIGKILL window is open.

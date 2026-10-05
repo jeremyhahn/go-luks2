@@ -90,7 +90,8 @@ func lockedKiB(t *testing.T) int {
 
 	data, err := os.ReadFile("/proc/self/status")
 	if err != nil {
-		t.Skipf("/proc/self/status is unavailable: %v", err)
+		// Linux always has it; a host without it cannot run this package.
+		t.Fatalf("/proc/self/status is unavailable, so locked memory cannot be measured: %v", err)
 	}
 
 	for _, line := range strings.Split(string(data), "\n") {
@@ -108,7 +109,7 @@ func lockedKiB(t *testing.T) int {
 		return n
 	}
 
-	t.Skip("/proc/self/status does not report VmLck")
+	t.Fatalf("/proc/self/status reports no VmLck line, so locked memory cannot be measured:\n%s", data)
 	return 0
 }
 

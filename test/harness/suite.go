@@ -62,7 +62,10 @@ func BeginSuite(w io.Writer) (*Suite, error) {
 		return nil, err
 	}
 
-	tmpRoot, err := os.MkdirTemp("", "go-luks2-run-")
+	// The run id is IN the name (#247): a run root is told apart from another
+	// container's by name alone, and the reaper detaches under a root only for
+	// the run whose ledger carries that id. See reapLoopRoot.
+	tmpRoot, err := os.MkdirTemp("", runRootPrefix+runID+"-")
 	if err != nil {
 		_ = ledger.Close()
 		return nil, fmt.Errorf("creating the run temp root: %w", err)
@@ -173,7 +176,7 @@ func verifyAllocationsLandUnder(root string) error {
 // A non-zero test result is preserved as-is; a clean run whose cleanup failed
 // becomes 1. The caller must exit with what this returns.
 func (s *Suite) Finish(code int, w io.Writer) int {
-	report, err := ReapOwn(s.Ledger.Path(), s.Remover, w)
+	report, err := ReapOwn(s.Ledger, s.Remover, w)
 	if err != nil {
 		// Keep the ledger. Something this run created is still on the host and
 		// could not be removed, and the record is what lets the next run try

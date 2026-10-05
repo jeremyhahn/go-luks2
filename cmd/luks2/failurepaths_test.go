@@ -34,7 +34,7 @@ func TestEveryCredentialCommandRefusesAnUnreadableKeyFile(t *testing.T) {
 
 	commands := [][]string{
 		{"open", "--key-file", absent, "/dev/sdb1", "backup"},
-		{"create", "--key-file", absent, "/dev/sdb1"},
+		{"create", "--batch-mode", "--key-file", absent, "/dev/sdb1"},
 		{"testkey", "--key-file", absent, "/dev/sdb1"},
 		{"addkey", "--key-file", absent, "/dev/sdb1"},
 		{"removekey", "--key-file", absent, "/dev/sdb1", "1"},

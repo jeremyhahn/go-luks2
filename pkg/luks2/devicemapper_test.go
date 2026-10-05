@@ -65,8 +65,8 @@ func countingRemove(t *testing.T, fake *fakeDeviceMapper, failures int) *int {
 	return &calls
 }
 
-// recordRetryWaits replaces the backoff sleep with one that records what it
-// was asked to wait and returns immediately.
+// recordRetryWaits runs the device-mapper waits on a fake clock, which records
+// every sleep it is asked for and returns at once, and returns that record.
 //
 // The test therefore asserts the retry's BUDGET rather than spending it. A
 // test that actually slept would be asserting the same property at a hundred
@@ -75,11 +75,11 @@ func countingRemove(t *testing.T, fake *fakeDeviceMapper, failures int) *int {
 func recordRetryWaits(t *testing.T) *[]time.Duration {
 	t.Helper()
 
-	var waits []time.Duration
-	previous := retryWait
-	t.Cleanup(func() { retryWait = previous })
-	retryWait = func(d time.Duration) { waits = append(waits, d) }
-	return &waits
+	clk := newFakeClock(t)
+	previous := dmClock
+	t.Cleanup(func() { dmClock = previous })
+	dmClock = clk
+	return &clk.slept
 }
 
 // TestLockRetriesATransientBusyAndSucceeds is the defect itself: the mapping
@@ -201,7 +201,7 @@ func TestRollbackStillFailsClosedWhenTheDeviceIsNeverReleased(t *testing.T) {
 	countingRemove(t, fake, 1<<30)
 	recordRetryWaits(t)
 
-	err := removeCreatedMapping("rollback-held", "CRYPT-LUKS2-rollback")
+	err := removeCreatedMapping("rollback-held", "CRYPT-LUKS2-rollback", fakeDefaultDevNo)
 	if err == nil {
 		t.Fatal("the rollback reported success for a target it could not remove")
 	}
@@ -221,7 +221,7 @@ func TestRollbackRidesOutATransientBusy(t *testing.T) {
 	calls := countingRemove(t, fake, 2)
 	recordRetryWaits(t)
 
-	if err := removeCreatedMapping("rollback-transient", "CRYPT-LUKS2-transient"); err != nil {
+	if err := removeCreatedMapping("rollback-transient", "CRYPT-LUKS2-transient", fakeDefaultDevNo); err != nil {
 		t.Fatalf("the rollback raised %v for a hold that cleared; a false ErrMappingStillLive is an alarm an operator will learn to ignore", err)
 	}
 	if *calls != 3 {
@@ -301,7 +301,7 @@ func TestRollbackWillNotRemoveAMappingThatChangedIdentityMidRetry(t *testing.T) 
 		return previousRemove(n)
 	}
 
-	if err := removeCreatedMapping(name, "CRYPT-LUKS2-ours"); err != nil {
+	if err := removeCreatedMapping(name, "CRYPT-LUKS2-ours", fakeDefaultDevNo); err != nil {
 		t.Fatalf("removeCreatedMapping = %v; a name that is no longer ours is not an error, it is nothing to do", err)
 	}
 
@@ -338,7 +338,7 @@ func TestRollbackStopsWhenTheTargetDisappearsMidRetry(t *testing.T) {
 		return previousRemove(n)
 	}
 
-	if err := removeCreatedMapping(name, "CRYPT-LUKS2-ours"); err != nil {
+	if err := removeCreatedMapping(name, "CRYPT-LUKS2-ours", fakeDefaultDevNo); err != nil {
 		t.Fatalf("removeCreatedMapping = %v; a target that is already gone is the success case", err)
 	}
 	if removeCalls != 1 {
@@ -474,7 +474,7 @@ func TestRollbackWillNotRemoveARecreatedMappingWithTheSameUUID(t *testing.T) {
 		return previousRemove(n)
 	}
 
-	if err := removeCreatedMapping(name, uuid); err != nil {
+	if err := removeCreatedMapping(name, uuid, fakeDefaultDevNo); err != nil {
 		t.Fatalf("removeCreatedMapping = %v; the activation it created is gone", err)
 	}
 	if _, live := fake.targets[name]; !live {
@@ -549,7 +549,7 @@ func TestRollbackDoesNotRetryWhatCannotClear(t *testing.T) {
 			}
 			waits := recordRetryWaits(t)
 
-			err := removeCreatedMapping(name, uuid)
+			err := removeCreatedMapping(name, uuid, fakeDefaultDevNo)
 			if err == nil {
 				t.Fatalf("the rollback reported success on %v", errno)
 			}
@@ -601,7 +601,7 @@ func TestRollbackClearsAStaleInspectionError(t *testing.T) {
 	}
 	recordRetryWaits(t)
 
-	if err := removeCreatedMapping(name, uuid); err != nil {
+	if err := removeCreatedMapping(name, uuid, fakeDefaultDevNo); err != nil {
 		t.Fatalf("removeCreatedMapping = %v, want success: the second attempt "+
 			"inspected and removed the target, so a stale inspection error from "+
 			"the first attempt must not decide the result", err)
@@ -720,4 +720,45 @@ func TestLockRidesOutATransientIdentityLookupFailure(t *testing.T) {
 	if _, live := fake.targets[name]; live {
 		t.Fatalf("Lock returned success but %q is still live", name)
 	}
+}
+
+// TestDeviceMapperWaitsEndAtTheirDeadlineOnALoadedHost: every device-mapper
+// wait is bounded by a DEADLINE on the clock, not by a count of sleeps. On a
+// loaded host a sleep overruns what it was asked for; the waits used to count
+// polls (30 for udev's node, 50 for a verified node) or subtract the sleeps
+// they REQUESTED from a budget, so each overrun stretched the wait further --
+// thirty overrunning polls of a 3-second wait took thirty times the overrun
+// longer. Here each sleep overruns by a full second, and every wait still
+// ends within one overrun of its bound.
+func TestDeviceMapperWaitsEndAtTheirDeadlineOnALoadedHost(t *testing.T) {
+	const overrun = time.Second
+	loaded := func(t *testing.T) *fakeClock {
+		clk := newFakeClock(t)
+		clk.onSleep = func(time.Time) { clk.now = clk.now.Add(overrun) }
+		previous := dmClock
+		t.Cleanup(func() { dmClock = previous })
+		dmClock = clk
+		return clk
+	}
+
+	t.Run("busy retry", func(t *testing.T) {
+		clk := loaded(t)
+		_, err := retryWhileBusy(func() error { return os.NewSyscallError("dm ioctl", unix.EBUSY) })
+		if !errors.Is(err, unix.EBUSY) {
+			t.Fatalf("retryWhileBusy = %v, want the last EBUSY", err)
+		}
+		if clk.elapsed() > dmRemoveRetryBudget+overrun {
+			t.Fatalf("a %v retry budget took %v", dmRemoveRetryBudget, clk.elapsed())
+		}
+	})
+
+	t.Run("node polls", func(t *testing.T) {
+		clk := loaded(t)
+		if pollUntil(deviceReadyTimeout, deviceReadyPollInterval, func() bool { return false }) {
+			t.Fatal("pollUntil reported a condition that never held")
+		}
+		if clk.elapsed() > deviceReadyTimeout+overrun {
+			t.Fatalf("a %v node wait took %v over %d sleeps", deviceReadyTimeout, clk.elapsed(), len(clk.slept))
+		}
+	})
 }

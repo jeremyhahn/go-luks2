@@ -86,7 +86,7 @@ func TestVerifyFIPSOpenRefusesEveryUnprovenOpen(t *testing.T) {
 	key := volumeKey(t, device, migrationPassphrase)
 	want := secretOf(t, key)
 
-	if err := verifyFIPSOpen(device, migrationPassphrase, "0", want); err != nil {
+	if err := verifyOn(t, device, migrationPassphrase, "0", want); err != nil {
 		t.Fatalf("verifyFIPSOpen on an approved volume failed: %v", err)
 	}
 
@@ -98,24 +98,31 @@ func TestVerifyFIPSOpenRefusesEveryUnprovenOpen(t *testing.T) {
 	}
 
 	t.Run("no such keyslot", func(t *testing.T) {
-		refused(t, verifyFIPSOpen(device, migrationPassphrase, "7", want), "missing")
+		refused(t, verifyOn(t, device, migrationPassphrase, "7", want), "missing")
 	})
 	t.Run("wrong passphrase", func(t *testing.T) {
-		refused(t, verifyFIPSOpen(device, []byte("not-the-passphrase"), "0", want), "does not open")
+		refused(t, verifyOn(t, device, []byte("not-the-passphrase"), "0", want), "does not open")
 	})
 	t.Run("a different key expected", func(t *testing.T) {
 		other := secretOf(t, bytes.Repeat([]byte{0x42}, len(key)))
-		refused(t, verifyFIPSOpen(device, migrationPassphrase, "0", other), "other than")
+		refused(t, verifyOn(t, device, migrationPassphrase, "0", other), "other than")
 	})
 	t.Run("a keyslot that is not approved", func(t *testing.T) {
 		argon2 := fakeArgon2KeyslotVolume(t, "verify-argon2.img")
-		refused(t, verifyFIPSOpen(argon2, migrationPassphrase, "0", want), "FIPS-approved KDF")
+		refused(t, verifyOn(t, argon2, migrationPassphrase, "0", want), "FIPS-approved KDF")
 	})
 	t.Run("a key bound to no segment", func(t *testing.T) {
 		unbound := newImage(t, "verify-unbound.img")
 		formatWithLibrary(t, unbound)
-		writeFixture(t, unbound, func(m *LUKS2Metadata) { m.Digests["0"].Segments = []string{} })
-		refused(t, verifyFIPSOpen(unbound, migrationPassphrase, "0", want), "segment")
+		writeFixture(t, unbound, func(m *LUKS2Metadata) {
+			// The segment stays attested by a digest naming no keyslot, so
+			// the header is valid and only keyslot 0's binding is missing.
+			attest := *m.Digests["0"]
+			attest.Keyslots = []string{}
+			m.Digests["1"] = &attest
+			m.Digests["0"].Segments = []string{}
+		})
+		refused(t, verifyOn(t, unbound, migrationPassphrase, "0", want), "segment")
 	})
 }
 
@@ -174,4 +181,17 @@ func TestFIPSRefusalDescribesMalformedObjects(t *testing.T) {
 	if got := (NonApprovedKDF{Type: KDFTypePBKDF2, Hash: "sha256", Reason: "salt shorter than 128 bits"}).String(); got != "pbkdf2-sha256 (salt shorter than 128 bits)" {
 		t.Fatalf("String() = %q", got)
 	}
+}
+
+// verifyOn runs verifyFIPSOpen on path under its own lock, released before it
+// returns.
+func verifyOn(t *testing.T, path string, passphrase []byte, id string, want *enclave.MemoryEnclave) error {
+	t.Helper()
+
+	lock, dev, err := lockKeyslotDevice(path)
+	if err != nil {
+		t.Fatalf("lockKeyslotDevice(%s): %v", path, err)
+	}
+	defer func() { _ = lock.Release() }()
+	return verifyFIPSOpen(dev, passphrase, id, want)
 }

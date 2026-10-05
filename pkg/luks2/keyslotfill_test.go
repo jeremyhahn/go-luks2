@@ -348,7 +348,8 @@ func TestWipeKeyslotAreaLeavesRandomNotZeroes(t *testing.T) {
 		AF:  &AntiForensic{Type: "luks1", Stripes: AFStripes, Hash: "sha512"},
 	}
 
-	if err := wipeKeyslotArea(path, keyslot); err != nil {
+	hdr, metadata := bareKeyslotsGeometry(areaOffset + areaSize)
+	if err := wipeKeyslotArea(lockedDevice(t, path), hdr, metadata, "0", keyslot); err != nil {
 		t.Fatalf("wipeKeyslotArea failed: %v", err)
 	}
 
@@ -403,7 +404,8 @@ func TestWipeKeyslotAreaRefusesAKeyslotItCannotLocate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := wipeKeyslotArea(path, tt.keyslot); err == nil {
+			hdr, metadata := bareKeyslotsGeometry(1 << 30)
+			if err := wipeKeyslotArea(lockedDevice(t, path), hdr, metadata, "0", tt.keyslot); err == nil {
 				t.Fatal("wipeKeyslotArea accepted a keyslot whose area it cannot locate")
 			}
 
@@ -416,4 +418,18 @@ func TestWipeKeyslotAreaRefusesAKeyslotItCannotLocate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// bareKeyslotsGeometry is the header geometry the bare-image wipe tests stand for: a
+// 16 KiB header area, so the keyslots area starts at 0x8000, running up to end,
+// and no data segment. wipeKeyslotArea confines every wipe to that area
+// (#249, A2), so a test that wipes outside a container still has to say where
+// the keyslots area is.
+func bareKeyslotsGeometry(end int64) (*LUKS2BinaryHeader, *LUKS2Metadata) {
+	hdr := &LUKS2BinaryHeader{HeaderSize: LUKS2HeaderMinSize}
+	metadata := &LUKS2Metadata{
+		Config:   &Config{KeyslotsSize: formatSize(end - 2*LUKS2HeaderMinSize)},
+		Segments: map[string]*Segment{},
+	}
+	return hdr, metadata
 }

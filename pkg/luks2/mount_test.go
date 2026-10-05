@@ -297,6 +297,9 @@ func TestIsMountedReadsTheRealMountTable(t *testing.T) {
 // what was missing was the type a caller can branch on.
 func TestMountReportsAVolumeThatIsNotUnlocked(t *testing.T) {
 	withDevDir(t, t.TempDir())
+	// device-mapper is the authority on whether a mapping exists, so the test
+	// asks a fake one: the real control node answers only root.
+	newFakeDeviceMapper().install(t)
 
 	err := Mount(MountOptions{
 		Device:     "no-such-mapping",

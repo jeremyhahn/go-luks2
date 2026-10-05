@@ -6,8 +6,6 @@ package luks2
 
 import (
 	"bytes"
-	"fmt"
-	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -67,7 +65,7 @@ import (
 // # Both header copies, and an interrupted earlier run
 //
 // Every header write syncs the primary copy before it touches the secondary
-// (writeHeaderInternal), so an interruption tears at most one copy, and the
+// (writeHeaderTo), so an interruption tears at most one copy, and the
 // survivor is the header before or after that write -- each of which opens.
 // That argument needs both copies to describe the same volume when a
 // destructive step begins. A run that starts from what an INTERRUPTED earlier
@@ -279,9 +277,13 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 	// The header area size, once the run has read and validated one: what a
 	// failure report reads the secondary at (stateAfterWriteFailure).
 	var area int64
+	// What a failure report reads the medium through: the pinned descriptor's
+	// own file once the device is locked (#255). Only states reached after the
+	// lock consult it.
+	mediumPath := device
 	fail := func(stage, state string, err error) (*FIPSMigrationResult, error) {
 		if state == fipsStateOriginals || state == fipsStateRemoving {
-			state = stateAfterWriteFailure(device, area, state)
+			state = stateAfterWriteFailure(mediumPath, area, state)
 		}
 		return nil, &FIPSMigrationError{Device: device, Stage: stage, State: state, Err: err}
 	}
@@ -292,7 +294,11 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 	if err := ValidateDevicePath(device); err != nil {
 		return fail("precondition", fipsStateUntouched, err)
 	}
-	if err := ValidatePassphrase(passphrase); err != nil {
+	// The passphrase is an EXISTING credential -- the one the import
+	// re-wraps, not a new one chosen here -- so it is judged by what can open a
+	// keyslot (#249, A7): a volume opened by a cryptsetup keyfile is migrated
+	// like any other.
+	if err := validateExistingCredential(passphrase); err != nil {
 		return fail("precondition", fipsStateUntouched, err)
 	}
 
@@ -319,11 +325,18 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 		PBKDFIterations: o.PBKDFIterations,
 	}
 
-	lock, err := AcquireFileLock(device)
+	// ONE DESCRIPTOR FOR THE WHOLE IMPORT (#255). The lock is taken on it and
+	// every read, write, sync, wipe and medium check below goes through it --
+	// the medium checks by reopening the same inode through /proc/self/fd --
+	// so a path re-pointed mid-import cannot send a write, or a read the
+	// import acts on, to a device that was never locked. This used to resolve
+	// the path at every step, like the keyslot operations before #249 (A10).
+	lock, dev, err := lockKeyslotDevice(device)
 	if err != nil {
 		return fail("precondition", fipsStateUntouched, err)
 	}
 	defer func() { _ = lock.Release() }()
+	mediumPath = dev.mediumPath()
 
 	// SYNC, then READ FROM THE MEDIUM: see "Both header copies" above. The
 	// lock's descriptor is the device's own; fsync flushes every dirty page
@@ -342,11 +355,11 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 	// cached and the call still succeeds -- so it is not the proof. This is:
 	// the header region read through the cache must equal the same bytes read
 	// past it.
-	if err := requireCacheMatchesMedium(device); err != nil {
+	if err := requireCacheMatchesMediumOf(dev.reader(), mediumPath); err != nil {
 		return fail("sync", fipsStateUntouched, err)
 	}
 
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := dev.readHeader()
 	if err != nil {
 		return fail("unlock", fipsStateUntouched, err)
 	}
@@ -383,7 +396,11 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 	// removal below wiped the only keyslot holding the key the data needs.
 	var order []string
 	for _, id := range fipsFirstScanOrder(metadata) {
-		if keyslotDeclaredForAllSegments(metadata, id) {
+		// The strict predicate the removal guard and getVolumeKey use (#249):
+		// a keyslot attested by an unbound digest beside a bound one, or by
+		// per-segment digests that only together cover the volume, is not a
+		// migration source.
+		if keyslotBoundToDataSegments(metadata, id) {
 			order = append(order, id)
 		}
 	}
@@ -393,7 +410,7 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 			Detail: "no keyslot is attested by digests binding every data segment (" + strings.Join(dataSegmentIDs(metadata), ", ") + ")",
 		})
 	}
-	masterKey, openedID, err := getMasterKeySlot(device, passphrase, metadata, order)
+	masterKey, openedID, err := getMasterKeySlot(dev.reader(), device, passphrase, volumeKeyDigestsView(metadata), order)
 	if err != nil {
 		return fail("unlock", fipsStateUntouched, err)
 	}
@@ -437,11 +454,11 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 	// secondary: see "Both header copies" above. Nothing else is written if
 	// they already agree, which is every run that does not follow an
 	// interrupted one.
-	if headerCopiesAgree(device) != nil {
-		if err := repairSecondaryHeader(device, hdr, metadata); err != nil {
+	if headerCopiesAgree(dev.reader()) != nil {
+		if err := repairSecondaryHeader(dev, hdr, metadata); err != nil {
 			return fail("reconcile header copies", fipsStateOriginals, err)
 		}
-		if err := headerCopiesAgree(device); err != nil {
+		if err := headerCopiesAgree(dev.reader()); err != nil {
 			return fail("reconcile header copies", fipsStateOriginals, err)
 		}
 	}
@@ -453,7 +470,7 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 	slot, reusable := canonicalKeyslotID(openedID)
 	reusable = reusable && keyslotFIPSApproved(metadata.Keyslots[openedID])
 	if !reusable {
-		added, err := addKeyslotWithMasterKey(device, hdr, metadata, masterKey, passphrase, addOpts, callerSuppliedCredential)
+		added, err := addKeyslotWithMasterKey(dev, hdr, metadata, masterKey, passphrase, addOpts, callerSuppliedCredential)
 		if err != nil {
 			return fail("add keyslot", fipsStateOriginals, err)
 		}
@@ -467,7 +484,7 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 	// volume key, keeping the keyslots and segments it attests. Every header
 	// either copy of the write can leave behind attests the same key.
 	if len(digestsToMigrate) > 0 {
-		hdr, metadata, err = ReadHeader(device)
+		hdr, metadata, err = dev.readHeader()
 		if err != nil {
 			return fail("migrate digest", fipsStateOriginals, err)
 		}
@@ -488,7 +505,7 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 			digest.Digest = value
 		}
 		hdr.SequenceID++
-		if err := writeHeaderInternal(device, hdr, metadata); err != nil {
+		if err := dev.writeHeader(hdr, metadata); err != nil {
 			return fail("migrate digest", fipsStateOriginals, err)
 		}
 		result.MigratedDigests = digestsToMigrate
@@ -497,16 +514,16 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 	// 5. VERIFY, before anything is removed -- including that BOTH header
 	// copies describe the volume just verified, so a removal interrupted later
 	// leaves either one opening it.
-	if err := verifyFIPSOpen(device, passphrase, slotID, masterKey); err != nil {
+	if err := verifyFIPSOpen(dev, passphrase, slotID, masterKey); err != nil {
 		return fail("verify", fipsStateOriginals, err)
 	}
-	if err := headerCopiesAgree(device); err != nil {
+	if err := headerCopiesAgree(dev.reader()); err != nil {
 		return fail("verify", fipsStateOriginals, &detailError{Kind: ErrFIPSMigrationVerification,
 			Detail: "the header copies do not agree after the writes", Err: err})
 	}
 
 	// 6. REMOVE the non-approved keyslots, or record that they were kept.
-	hdr, metadata, err = ReadHeader(device)
+	hdr, metadata, err = dev.readHeader()
 	if err != nil {
 		return fail("remove keyslot", fipsStateOriginals, err)
 	}
@@ -527,7 +544,7 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 			result.RetainedNonApprovedKeyslots = append(result.RetainedNonApprovedKeyslots, id)
 			continue
 		}
-		if destroyed, err := removeKeyslotLocked(device, hdr, metadata, id); err != nil {
+		if destroyed, err := removeKeyslotOn(dev, hdr, metadata, id); err != nil {
 			// A refusal before the wipe, with nothing removed yet, leaves the
 			// originals intact; anything else leaves the verified keyslot.
 			state := fipsStateRemoving
@@ -542,7 +559,7 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 	// 7. FINAL CHECK, against the header as written. Static first -- nothing
 	// non-approved may remain except what the caller asked to keep -- and then
 	// a real open again, because the outcome being reported is THIS header.
-	_, metadata, err = ReadHeader(device)
+	_, metadata, err = dev.readHeader()
 	if err != nil {
 		return fail("final check", fipsStateFinal, err)
 	}
@@ -562,7 +579,7 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 			Detail: "still not approved: " + strings.Join(unexpected, ", "),
 		})
 	}
-	if err := verifyFIPSOpen(device, passphrase, slotID, masterKey); err != nil {
+	if err := verifyFIPSOpen(dev, passphrase, slotID, masterKey); err != nil {
 		return fail("final check", fipsStateFinal, err)
 	}
 
@@ -578,8 +595,8 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 // is refused unless its own KDF is approved, and the digest set handed to the
 // unlock is filtered to approved ones before it gets there. It is therefore the
 // path a FIPS process would take, run in a process that cannot BE one.
-func verifyFIPSOpen(device string, passphrase []byte, id string, want *enclave.MemoryEnclave) error {
-	_, metadata, err := ReadHeader(device)
+func verifyFIPSOpen(dev *keyslotDevice, passphrase []byte, id string, want *enclave.MemoryEnclave) error {
+	_, metadata, err := dev.readHeader()
 	if err != nil {
 		return err
 	}
@@ -596,7 +613,7 @@ func verifyFIPSOpen(device string, passphrase []byte, id string, want *enclave.M
 		}
 	}
 
-	got, err := unlockKeyslot(device, id, passphrase, keyslot, approved)
+	got, err := unlockKeyslotFrom(dev.reader(), id, passphrase, keyslot, approved)
 	if err != nil {
 		return &detailError{Kind: ErrFIPSMigrationVerification,
 			Detail: "keyslot " + id + " does not open through FIPS-approved KDFs", Err: err}
@@ -629,7 +646,8 @@ func verifyFIPSOpen(device string, passphrase []byte, id string, want *enclave.M
 	// passphrase would be found by a scan that ignored segment binding, and
 	// dm-crypt would be handed the wrong key. So the scan itself is run, over
 	// exactly what a FIPS process can execute, and must recover the volume key.
-	scanned, err := getMasterKey(device, passphrase, fipsApprovedView(metadata))
+	view := fipsApprovedView(metadata)
+	scanned, _, err := getMasterKeySlot(dev.reader(), dev.path, passphrase, view, volumeKeyScanOrder(view))
 	if err != nil {
 		return &detailError{Kind: ErrFIPSMigrationVerification,
 			Detail: "the unlock scan over FIPS-approved keyslots and digests does not open the volume", Err: err}
@@ -669,26 +687,23 @@ func fipsApprovedView(metadata *LUKS2Metadata) *LUKS2Metadata {
 	return &view
 }
 
-// removeKeyslotLocked removes one keyslot for a caller that already holds the
+// removeKeyslotOn removes one keyslot for a caller that already holds the
 // device lock, in the order every removal in this package takes: the removal
 // gate, then the header proved writable, then the wipe, then the header.
 // destroyed reports whether the keyslot's material may already have been wiped
 // when an error is returned, so the caller never reports a keyslot intact that
 // is not.
-func removeKeyslotLocked(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata, id string) (destroyed bool, err error) {
+//
+// removeKeyslotOn is the name the rollback paths use (#246); every caller holds
+// the locked descriptor and removes through it.
+func removeKeyslotOn(dev *keyslotDevice, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata, id string) (destroyed bool, err error) {
 	target := metadata.Keyslots[id]
 
-	// The bytes about to be randomized must be keyslot bytes. The gate below
-	// protects the SURVIVING keyslots' areas; this protects the header and
-	// the data from an area that points at them.
-	if err := checkKeyslotAreaConfined(hdr, metadata, id); err != nil {
-		return false, err
-	}
-
 	// THE GATE -- the same one RemoveKey, KillSlot and KillKeyslot take:
-	// after this removal, can anything still open the volume, and do the bytes
-	// about to be wiped belong to anything that can?
-	if err := checkKeyslotRemovable(device, metadata, id); err != nil {
+	// are the bytes about to be randomized keyslot bytes, can anything still
+	// open the volume after this removal, and do the bytes about to be wiped
+	// belong to anything that can?
+	if err := checkKeyslotRemovable(dev, hdr, metadata, id); err != nil {
 		return false, err
 	}
 
@@ -699,84 +714,10 @@ func removeKeyslotLocked(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2M
 	}
 
 	// From here the operation is destructive.
-	if err := wipeKeyslotArea(device, target); err != nil {
+	if err := wipeKeyslotArea(dev, hdr, metadata, id, target); err != nil {
 		return true, err
 	}
-	return true, writeHeaderInternal(device, hdr, metadata)
-}
-
-// checkKeyslotAreaConfined refuses a keyslot whose area is not wholly inside
-// the container's reserved keyslots area (keyslotsAreaBounds), or that reaches
-// into any data segment -- an area the migration would therefore read outside
-// keyslot space when it unlocks or scans the keyslot, or overwrite when it
-// removes it.
-//
-// checkKeyslotRemovable already refuses a wipe that would reach a SURVIVING
-// keyslot's area, and wipeKeyslotArea refuses one past the end of the device.
-// Neither asks whether the area is keyslot space at all, so a keyslot that
-// cannot open anything -- and is therefore exactly what the migration removes
-// -- could point its area into the header or the encrypted data and have it
-// overwritten with random bytes, with the final verification still passing
-// because it reads only the header and the new keyslot; and one that CAN open
-// the volume could declare an area running into the data, of which the
-// unlock reads every byte. Both boundaries are read from the container, never
-// assumed.
-func checkKeyslotAreaConfined(hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata, id string) error {
-	keyslot := metadata.Keyslots[id]
-	if keyslot == nil || keyslot.Area == nil {
-		return &detailError{Kind: ErrInvalidKeyslot, Detail: "keyslot " + id + " declares no area, so what removing it would wipe is unknown"}
-	}
-	offset, offErr := parseSize(keyslot.Area.Offset)
-	size, sizeErr := parseSize(keyslot.Area.Size)
-	if offErr != nil || sizeErr != nil || offset < 0 || size <= 0 || offset > math.MaxInt64-size {
-		return &detailError{Kind: ErrInvalidKeyslot, Detail: fmt.Sprintf(
-			"keyslot %s declares an area at offset %q of size %q, which is not a byte range", id, keyslot.Area.Offset, keyslot.Area.Size)}
-	}
-	end := offset + size
-
-	start, limit, err := keyslotsAreaBounds(hdr, metadata)
-	if err != nil {
-		return err
-	}
-	if offset < start || end > limit {
-		return &detailError{Kind: ErrKeyslotAreaOverlap, Detail: fmt.Sprintf(
-			"keyslot %s declares its area at [%d,%d), outside the container's keyslots area [%d,%d); "+
-				"reading or wiping it would touch bytes that are not keyslot material", id, offset, end, start, limit)}
-	}
-
-	segmentIDs := make([]string, 0, len(metadata.Segments))
-	for segmentID := range metadata.Segments {
-		segmentIDs = append(segmentIDs, segmentID)
-	}
-	slices.Sort(segmentIDs)
-	for _, segmentID := range segmentIDs {
-		segment := metadata.Segments[segmentID]
-		if segment == nil {
-			continue
-		}
-		segmentStart, err := parseSize(segment.Offset)
-		if err != nil || segmentStart < 0 {
-			return &detailError{Kind: ErrInvalidHeader, Detail: fmt.Sprintf(
-				"data segment %s declares an offset of %q, so whether removing keyslot %s would overwrite it cannot be decided",
-				segmentID, segment.Offset, id)}
-		}
-		segmentEnd := int64(math.MaxInt64)
-		if segment.Size != "dynamic" {
-			segmentSize, err := parseSize(segment.Size)
-			if err != nil || segmentSize < 0 || segmentStart > math.MaxInt64-segmentSize {
-				return &detailError{Kind: ErrInvalidHeader, Detail: fmt.Sprintf(
-					"data segment %s declares a size of %q, so whether removing keyslot %s would overwrite it cannot be decided",
-					segmentID, segment.Size, id)}
-			}
-			segmentEnd = segmentStart + segmentSize
-		}
-		if offset < segmentEnd && segmentStart < end {
-			return &detailError{Kind: ErrKeyslotAreaOverlap, Detail: fmt.Sprintf(
-				"keyslot %s declares its area at [%d,%d), which overlaps data segment %s starting at %d; "+
-					"reading or wiping it would touch the encrypted data", id, offset, end, segmentID, segmentStart)}
-		}
-	}
-	return nil
+	return true, dev.writeHeader(hdr, metadata)
 }
 
 // fipsApprovedKDF reports whether a KDF, as a header declares it, is one a FIPS
@@ -848,7 +789,14 @@ func keyslotFIPSRefusal(id string, keyslot *Keyslot) (refusal NonApprovedKDF, ok
 	if !fipsApprovedKDF(keyslot.KDF.Type, keyslot.KDF.Hash) || afRefused {
 		return refusal, false
 	}
-	refusal.Reason = fipsParameterRefusal(keyslot.KDF.Salt, keyslot.KeySize)
+	// The KDF's output is the key that wraps the AREA, whose length is
+	// area.key_size (#249, A6); the volume key's is what it was taken from
+	// only while the two agree.
+	outputLen := keyslot.KeySize
+	if keyslot.Area != nil {
+		outputLen = keyslot.Area.KeySize
+	}
+	refusal.Reason = fipsParameterRefusal(keyslot.KDF.Salt, outputLen)
 	return refusal, refusal.Reason == ""
 }
 

@@ -309,5 +309,19 @@ func validLogonDescription(description string) bool {
 // every CI run is a -race run.
 func TestMain(m *testing.M) {
 	keyring = (&fakeKeyring{}).seam()
+	useCheapCalibratedCounts()
 	os.Exit(m.Run())
+}
+
+// useCheapCalibratedCounts keeps keyslots whose cost is not under test as
+// cheap as they were before a calibrated count was held to the OWASP floor
+// (#249, A8); see calibratedCountFloor.
+// TestACalibratedCountIsHeldToTheCallerFloor restores the real floor for
+// itself. The FIPS-import child processes apply it too: they start before
+// TestMain, and without it every keyslot a child migration writes was
+// stretched to the floor and then derived again by every child that opened it
+// -- the larger part of the package's -race time for tests about FIPS policy,
+// not cost (#92).
+func useCheapCalibratedCounts() {
+	calibratedCountFloor = func(string, keyslotCostPolicy) int { return minPBKDF2Iterations }
 }

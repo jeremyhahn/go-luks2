@@ -451,7 +451,7 @@ func overlappingSiblingVolume(t *testing.T, name string, shift int64) (device st
 		digest.Keyslots = append(digest.Keyslots, siblingSlotID)
 	}
 
-	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
+	if err := writeHeaderUnvalidated(device, hdr, metadata); err != nil {
 		t.Fatalf("failed to write the overlapping fixture: %v", err)
 	}
 	return device, sharedOffset, sharedSize
@@ -1094,7 +1094,7 @@ func TestFormatDeclaresTheKeyslotAreaCipherItActuallyUses(t *testing.T) {
 		Passphrase:    []byte(conformancePassphrase),
 		Cipher:        "aes",
 		CipherMode:    "cbc-essiv:sha256",
-		KeySize:       512,
+		KeySize:       256, // CBC-ESSIV takes one AES key; there is no 512-bit form (#248)
 		HashAlgo:      "sha512",
 		SectorSize:    512,
 		KDFType:       KDFTypePBKDF2,
@@ -1608,38 +1608,47 @@ func TestKeyslotEntryPointsRefuseInvalidInputBeforeWriting(t *testing.T) {
 	short := []byte("short")
 	other := []byte("a-different-credential")
 
+	// A NEW credential too short for the policy, and an EXISTING one nothing
+	// can open a keyslot with -- the two refusals are different since #249
+	// (A7), because an existing credential is not this package's to judge.
 	type call func(device string) error
+	type refusal struct {
+		call call
+		want error
+	}
+	newTooShort := func(c call) refusal { return refusal{c, ErrPassphraseTooShort} }
+	existingEmpty := func(c call) refusal { return refusal{c, ErrCredentialEmpty} }
 	entryPoints := map[string]struct {
 		valid        call
-		passphrases  []call // each with exactly one passphrase argument too short
-		keyslotRange []call // each with exactly one keyslot number out of range
+		passphrases  []refusal // each with exactly one passphrase argument refused
+		keyslotRange []call    // each with exactly one keyslot number out of range
 	}{
 		"TestKey": {
 			valid:       func(d string) error { return TestKey(d, good) },
-			passphrases: []call{func(d string) error { return TestKey(d, short) }},
+			passphrases: []refusal{existingEmpty(func(d string) error { return TestKey(d, nil) })},
 		},
 		"AddKey": {
 			valid: func(d string) error { _, err := AddKey(d, good, other, fipsSafeAddKeyOptions()); return err },
-			passphrases: []call{
-				func(d string) error { _, err := AddKey(d, short, other, fipsSafeAddKeyOptions()); return err },
-				func(d string) error { _, err := AddKey(d, good, short, fipsSafeAddKeyOptions()); return err },
+			passphrases: []refusal{
+				existingEmpty(func(d string) error { _, err := AddKey(d, nil, other, fipsSafeAddKeyOptions()); return err }),
+				newTooShort(func(d string) error { _, err := AddKey(d, good, short, fipsSafeAddKeyOptions()); return err }),
 			},
 		},
 		"RemoveKey": {
 			valid:        func(d string) error { return RemoveKey(d, good, 0) },
-			passphrases:  []call{func(d string) error { return RemoveKey(d, short, 0) }},
+			passphrases:  []refusal{existingEmpty(func(d string) error { return RemoveKey(d, nil, 0) })},
 			keyslotRange: []call{func(d string) error { return RemoveKey(d, good, -1) }, func(d string) error { return RemoveKey(d, good, MaxKeyslots) }},
 		},
 		"KillSlot": {
 			valid:        func(d string) error { return KillSlot(d, good, 0) },
-			passphrases:  []call{func(d string) error { return KillSlot(d, short, 0) }},
+			passphrases:  []refusal{existingEmpty(func(d string) error { return KillSlot(d, nil, 0) })},
 			keyslotRange: []call{func(d string) error { return KillSlot(d, good, -1) }, func(d string) error { return KillSlot(d, good, MaxKeyslots) }},
 		},
 		"ChangeKey": {
 			valid: func(d string) error { return ChangeKey(d, good, other, 0) },
-			passphrases: []call{
-				func(d string) error { return ChangeKey(d, short, other, 0) },
-				func(d string) error { return ChangeKey(d, good, short, 0) },
+			passphrases: []refusal{
+				existingEmpty(func(d string) error { return ChangeKey(d, nil, other, 0) }),
+				newTooShort(func(d string) error { return ChangeKey(d, good, short, 0) }),
 			},
 			keyslotRange: []call{func(d string) error { return ChangeKey(d, good, other, -1) }, func(d string) error { return ChangeKey(d, good, other, MaxKeyslots) }},
 		},
@@ -1672,9 +1681,9 @@ func TestKeyslotEntryPointsRefuseInvalidInputBeforeWriting(t *testing.T) {
 			device := newImage(t, "volume.img")
 			formatWithLibrary(t, device)
 			before := readAreaBytes(t, device, 0, goldenPrefixBytes)
-			for i, c := range ep.passphrases {
-				if err := c(device); !errors.Is(err, ErrPassphraseTooShort) {
-					t.Errorf("short passphrase, argument %d: %v, want ErrPassphraseTooShort", i, err)
+			for i, r := range ep.passphrases {
+				if err := r.call(device); !errors.Is(err, r.want) {
+					t.Errorf("refused passphrase, argument %d: %v, want %v", i, err, r.want)
 				}
 			}
 			for i, c := range ep.keyslotRange {

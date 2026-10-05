@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -126,22 +127,25 @@ func Reap(dir, selfRunID string, rm Remover, w io.Writer) (Report, error) {
 	// thing it is supposed to mean. B waits for A, then does its own pass over
 	// whatever A left -- so if A failed, B fails too, which is the required
 	// direction.
-	unlock, err := lockReaper(dir)
+	sd, unlock, err := lockReaper(dir)
 	if err != nil {
 		return report, err
 	}
 	defer unlock()
 
-	paths, err := staleLedgers(dir, selfRunID)
+	// Every ledger is listed, locked, read and deleted through the handle
+	// lockReaper validated, never by path again (#247).
+	names, err := staleLedgers(sd, selfRunID)
 	if err != nil {
 		return report, err
 	}
-	if len(paths) == 0 {
+	if len(names) == 0 {
 		fmt.Fprintln(w, "reap: no ledgers from previous runs; nothing recorded to remove")
 		return report, nil
 	}
 
-	for _, path := range paths {
+	for _, name := range names {
+		path := filepath.Join(sd.path, name)
 		// LIVENESS FIRST, before the file is even read.
 		//
 		// Several jobs run concurrently on one runner, so a ledger in this
@@ -159,7 +163,7 @@ func Reap(dir, selfRunID string, rm Remover, w io.Writer) (Report, error) {
 		// Cannot establish whether the owner is alive: that is UNKNOWN state,
 		// and unknown still fails closed. See the exit-code policy below for
 		// why a failure to REMOVE does not.
-		dead, release, err := TryLock(path)
+		dead, release, err := tryLockIn(sd, name)
 		if err != nil {
 			return report, fmt.Errorf("%w: could not establish whether the run owning %s is alive: %v",
 				ErrReapIncomplete, path, err)
@@ -174,7 +178,7 @@ func Reap(dir, selfRunID string, rm Remover, w io.Writer) (Report, error) {
 		// otherwise hold one open descriptor and one lock per ledger for the
 		// whole sweep, which is a leak in the code whose entire job is to stop
 		// leaks.
-		outcome := reapLedger(path, rm, w, &report)
+		outcome := reapLedger(sd, name, rm, w, &report)
 		release()
 
 		if outcome.err != nil {
@@ -236,10 +240,12 @@ type ledgerOutcome struct {
 }
 
 // reapLedger deals with one stale ledger. The caller holds its lock.
-func reapLedger(path string, rm Remover, w io.Writer, report *Report) ledgerOutcome {
+func reapLedger(sd *trustedDir, name string, rm Remover, w io.Writer, report *Report) ledgerOutcome {
 	var out ledgerOutcome
+	path := filepath.Join(sd.path, name)
+	runID := strings.TrimSuffix(name, ledgerSuffix)
 
-	entries, err := ReadLedger(path)
+	entries, err := readLedgerIn(sd, name)
 	if err != nil {
 		// A ledger that cannot be read is NOT skipped and NOT deleted. Its
 		// contents are unknown, so the host cannot be declared clean.
@@ -249,7 +255,7 @@ func reapLedger(path string, rm Remover, w io.Writer, report *Report) ledgerOutc
 
 	clean := true
 	for _, entry := range inRemovalOrder(entries) {
-		res, err := reapEntry(entry, rm, w)
+		res, err := reapEntry(entry, runID, rm, w)
 		if err != nil {
 			out.failures = append(out.failures, ReapFailure{Entry: entry, Err: err})
 			clean = false
@@ -273,7 +279,7 @@ func reapLedger(path string, rm Remover, w io.Writer, report *Report) ledgerOutc
 		fmt.Fprintf(w, "reap: keeping %s; some recorded state is still on the host\n", path)
 		return out
 	}
-	if err := os.Remove(path); err != nil {
+	if err := sd.root.Remove(name); err != nil {
 		out.failures = append(out.failures, ReapFailure{
 			Entry: Entry{Kind: "ledger", Value: path},
 			Err:   err,
@@ -302,10 +308,10 @@ func reapLedger(path string, rm Remover, w io.Writer, report *Report) ledgerOutc
 //
 // There is no liveness check here, and there must not be: the caller IS the
 // owner and holds the lock, so TryLock would refuse its own ledger.
-func ReapOwn(ledgerPath string, rm Remover, w io.Writer) (Report, error) {
+func ReapOwn(ledger *Ledger, rm Remover, w io.Writer) (Report, error) {
 	var report Report
 
-	entries, err := ReadLedger(ledgerPath)
+	entries, err := ledger.entries()
 	if err != nil {
 		return report, err
 	}
@@ -317,7 +323,7 @@ func ReapOwn(ledgerPath string, rm Remover, w io.Writer) (Report, error) {
 	// own mapping still holds. Missing it here while fixing it in Reap was the
 	// same defect in the sibling function.
 	for _, entry := range inRemovalOrder(entries) {
-		out, err := reapEntry(entry, rm, w)
+		out, err := reapEntry(entry, ledger.runID, rm, w)
 		if err != nil {
 			failures = append(failures, ReapFailure{Entry: entry, Err: err})
 			continue
@@ -398,14 +404,16 @@ const (
 	outcomeDirLeft
 )
 
-func reapEntry(entry Entry, rm Remover, w io.Writer) (outcome, error) {
+// reapEntry removes one recorded resource. runID is the run whose ledger
+// recorded it.
+func reapEntry(entry Entry, runID string, rm Remover, w io.Writer) (outcome, error) {
 	switch entry.Kind {
 	case KindMapping:
 		return reapMapping(entry, rm, w)
 	case KindLoopBacking:
 		return reapLoop(entry, rm, w)
 	case KindLoopRoot:
-		return reapLoopRoot(entry, rm, w)
+		return reapLoopRoot(entry, runID, rm, w)
 	default:
 		return outcomeNotOurs, fmt.Errorf("unknown record kind %q", entry.Kind)
 	}
@@ -537,10 +545,30 @@ func waitForNoDevices(query func() ([]LoopDevice, error)) ([]LoopDevice, error) 
 // os.MkdirTemp for one run, so a backing file underneath it was put there by
 // that run and by nothing else. What the kernel supplies is which device
 // carries it -- observation again, against a path recorded first.
-func reapLoopRoot(entry Entry, rm Remover, w io.Writer) (outcome, error) {
+//
+// THE NAME MUST CARRY THE RUN'S ID (#247). Each container has its own /tmp,
+// and the kernel reports a backing file by the path its container saw, so two
+// containers' run roots are told apart by NAME alone. MkdirTemp's suffix is 32
+// random bits, so a dead run's root and a live sibling's could share a name,
+// and reaping the dead one would detach the live one's devices. BeginSuite now
+// names the root go-luks2-run-<run id>-<n>, and a root is reaped only for the
+// run whose ledger carries that id. A root that is not (an older ledger, or a
+// damaged one) with devices under it is left alone and fails the reap; with
+// none, the record is consumed and the directory, which may be someone
+// else's, is left where it is.
+func reapLoopRoot(entry Entry, runID string, rm Remover, w io.Writer) (outcome, error) {
 	devices, err := rm.LoopDevicesUnder(entry.Value)
 	if err != nil {
 		return outcomeNotOurs, err
+	}
+
+	if !rootBelongsToRun(entry.Value, runID) {
+		if len(devices) > 0 {
+			return outcomeNotOurs, &UnboundRunRootError{Root: entry.Value, RunID: runID, Devices: devices}
+		}
+		fmt.Fprintf(w, "reap: %q is not named for run %s, so it may be another run's; nothing is backed under "+
+			"it -- consuming the record and leaving the directory alone\n", entry.Value, runID)
+		return outcomeAlreadyGone, nil
 	}
 
 	// NO DEVICES DOES NOT MEAN NOTHING TO DO. An early return here left a dead
@@ -680,37 +708,53 @@ const reaperLockName = ".reap.lock"
 // wedged, which is reported rather than assumed away.
 var reaperLockTimeoutForTest = 5 * time.Minute
 
-// lockReaper takes the host-wide reaper mutex, waiting for any other reaper.
-func lockReaper(dir string) (func(), error) {
+// rootBelongsToRun reports whether root is named the way BeginSuite names
+// runID's run root: go-luks2-run-<run id>-<decimal MkdirTemp suffix>.
+func rootBelongsToRun(root, runID string) bool {
+	if runID == "" {
+		return false
+	}
+	rest, ok := strings.CutPrefix(filepath.Base(filepath.Clean(root)), runRootPrefix+runID+"-")
+	return ok && rest != "" && strings.Trim(rest, "0123456789") == ""
+}
+
+// lockReaper validates and opens the state directory, then takes the host-wide
+// reaper mutex in it, waiting for any other reaper. The returned function
+// releases the mutex and closes the directory.
+func lockReaper(dir string) (*trustedDir, func(), error) {
 	// Validated here too, not only in OpenLedger: this is the privileged side,
 	// it runs before the #85 guard, and it acts on whatever the ledgers say.
-	if err := ensureTrustedStateDir(dir); err != nil {
-		return nil, err
+	sd, err := openTrustedStateDir(dir)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	path := filepath.Join(dir, reaperLockName)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600) // #nosec G304 -- path is the fixed lock name under the configured state dir
+	f, err := sd.root.OpenFile(reaperLockName, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return nil, fmt.Errorf("%w: opening %s: %v", ErrLedgerUnavailable, path, err)
+		_ = sd.Close()
+		return nil, nil, &LockFileError{Action: "opening", Path: path, Err: err}
 	}
 
 	deadline := waitClock.Now().Add(reaperLockTimeoutForTest)
 	for {
 		err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 		if err == nil {
-			return func() {
+			return sd, func() {
 				_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
 				_ = f.Close()
+				_ = sd.Close()
 			}, nil
 		}
 		if !errors.Is(err, unix.EWOULDBLOCK) {
 			_ = f.Close()
-			return nil, fmt.Errorf("%w: locking %s: %v", ErrLedgerUnavailable, path, err)
+			_ = sd.Close()
+			return nil, nil, &LockFileError{Action: "locking", Path: path, Err: err}
 		}
 		if waitClock.Now().After(deadline) {
 			_ = f.Close()
-			return nil, fmt.Errorf("%w: another reaper has held %s for over %s; this host is not known to be clean",
-				ErrReapIncomplete, path, reaperLockTimeoutForTest)
+			_ = sd.Close()
+			return nil, nil, &ReaperBusyError{Path: path, Waited: reaperLockTimeoutForTest}
 		}
 		waitClock.Sleep(reaperLockPoll)
 	}
@@ -721,14 +765,17 @@ func lockReaper(dir string) (func(), error) {
 // wait here would hang a CI job rather than fail it.
 var reaperLockPoll = 200 * time.Millisecond
 
-// staleLedgers lists the ledgers belonging to runs other than selfRunID, oldest
-// first so output reads chronologically.
-func staleLedgers(dir, selfRunID string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
+// staleLedgers lists, by name, the ledgers in the validated state directory
+// belonging to runs other than selfRunID, oldest first so output reads
+// chronologically. It reads the directory through its handle.
+func staleLedgers(sd *trustedDir, selfRunID string) ([]string, error) {
+	f, err := sd.root.Open(".")
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
+		return nil, err
+	}
+	entries, err := f.ReadDir(-1)
+	_ = f.Close()
+	if err != nil {
 		return nil, err
 	}
 
@@ -741,7 +788,7 @@ func staleLedgers(dir, selfRunID string) ([]string, error) {
 		if e.Name() == self {
 			continue
 		}
-		paths = append(paths, filepath.Join(dir, e.Name()))
+		paths = append(paths, e.Name())
 	}
 	sort.Strings(paths)
 	return paths, nil

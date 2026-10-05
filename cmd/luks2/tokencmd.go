@@ -61,7 +61,10 @@ func (c *CLI) cmdToken() int {
 	if len(args) < 1 {
 		return c.tokenUsage()
 	}
-	device := args[0]
+	device, err := absPath("token "+c.Args[2], args[0])
+	if err != nil {
+		return c.usageError(err)
+	}
 
 	// The subcommands that address a single token all take the id the same way,
 	// so it is parsed once rather than five times.

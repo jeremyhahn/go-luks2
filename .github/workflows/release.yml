@@ -1,35 +1,77 @@
 name: Release
 
+# A `v*` tag publishes a release only after four stages, every one on the
+# TAGGED commit (#247):
+#
+#   1. Verify   the tag is a plain version string and agrees with VERSION.
+#   2. CI gate  the tagged commit is on main, and CI's gate job passed for that
+#               exact commit (test/ci/cmd/release-gate). `make release-alpha`
+#               pushes the release commit and its tag together, so CI is
+#               normally still running when this starts: the gate WAITS for
+#               its result, and anything but a pass stops the release.
+#   3. Test     ./pkg/luks2 AND ./cmd/luks2 -- the CLI is what ships.
+#      Security `make security` with TOOLS_REQUIRED=1: gosec, govulncheck,
+#               go mod verify and trivy fs, none of which may skip.
+#   4. Publish  checks every stage by name, then builds with -trimpath, stamps
+#               and checks the version, writes checksums, and publishes.
+#
+# Before this, a tag published on its own: no dependency on CI, only
+# ./pkg/luks2's tests, no security scan, and no -trimpath, so the binaries
+# carried the build host's paths.
+#
+# Every action is pinned to a full commit SHA, with its tag in a comment. A tag
+# can be moved to new code after it is reviewed; a commit cannot. The test in
+# test/ci/workflows refuses an action reference that is not a full SHA.
+
 on:
   push:
     tags:
       - "v*"
+
+permissions:
+  contents: read
 
 env:
   # Kept in lockstep with ci.yml (issue #14). This was pinned at 1.25.5 while
   # the rest of the repo had moved to 1.26 — a release built on a stale
   # toolchain is a supply-chain problem, not a cosmetic one.
   GO_VERSION: "1.27.0"
+  # The same scanner pins as ci.yml, asserted the same way.
+  GOSEC_VERSION: "v2.29.0"
+  GOVULNCHECK_VERSION: "v1.7.0"
 
 jobs:
-  release:
-    name: Build and Release
+  verify:
+    name: Verify tag
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      sha: ${{ steps.tag.outputs.sha }}
     steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: ${{ env.GO_VERSION }}
-
-      - name: Get version
-        id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+      # Git accepts tag names such as v`id` and v$(id), and `v*` matches them.
+      # From here on the tag is DATA: every later step receives it through
+      # `env:`, never through an expression spliced into a script. It is also
+      # refused here unless it is a plain version string.
+      - name: Identify the tag
+        id: tag
+        run: |
+          set -eu
+          case "$GITHUB_REF" in
+            refs/tags/v*) tag=${GITHUB_REF#refs/tags/} ;;
+            *) echo "::error::release.yml ran for a ref that is not a v* tag"; exit 1 ;;
+          esac
+          case $tag in
+            *[!0-9A-Za-z.-]*) echo "::error::the tag name holds characters no release version does; refusing it"; exit 1 ;;
+          esac
+          sha=$(git rev-parse HEAD)
+          printf 'Releasing %s from %s\n' "$tag" "$sha"
+          {
+            echo "tag=$tag"
+            echo "sha=$sha"
+          } >> "$GITHUB_OUTPUT"
 
       # PERMANENT GUARD (issue #13). Tag v0.1.7-alpha shipped a tree whose
       # VERSION file still read 0.1.6-alpha: the release commit bumped the
@@ -39,16 +81,63 @@ jobs:
       # why the assertion is the deliverable rather than the one-off
       # correction.
       - name: Verify VERSION matches the tag
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          tag="${{ steps.version.outputs.VERSION }}"
           file="v$(cat VERSION)"
-          if [ "$tag" != "$file" ]; then
-            echo "FAIL: tag ${tag} does not match VERSION file ${file}"
+          if [ "$TAG" != "$file" ]; then
+            echo "FAIL: tag ${TAG} does not match VERSION file ${file}"
             echo "Bump VERSION in the same commit as the CHANGELOG, then"
             echo "re-cut the tag. VERSION is unprefixed; the tag carries the v."
             exit 1
           fi
-          echo "OK: tag ${tag} matches VERSION"
+          echo "OK: tag ${TAG} matches VERSION"
+
+  ci-gate:
+    name: On main, CI gate passed
+    needs: [verify]
+    runs-on: ubuntu-latest
+    # CI's own run for the commit is what this waits on; the bound is
+    # release-gate's -timeout, with room for setup.
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0      # main's history, for the ancestry check
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      # The gate job of ci.yml on a PUSH to main: the release commit lands on
+      # main directly. On Gitea that is the commit status context below; on
+      # github.com it is ci.yml's push run for this commit and its CI Gate job,
+      # through the Actions API. The token only reads; on Gitea it is the
+      # project agent's, the token automerge.yml reads the same API with.
+      - name: Tagged commit is on main and CI's gate passed for it
+        env:
+          SHA: ${{ needs.verify.outputs.sha }}
+          FORGE_TOKEN: ${{ github.server_url == 'https://github.com' && secrets.GITHUB_TOKEN || secrets.AGENT_TOKEN }}
+        run: |
+          set -eu
+          git fetch --no-tags --quiet origin main
+          go run ./test/ci/cmd/release-gate -sha "$SHA" -main-ref FETCH_HEAD \
+            -status-context 'CI / CI Gate (push)' -workflow ci.yml -job-name 'CI Gate' \
+            -timeout 2h -poll 30s
+
+  test:
+    name: Test
+    needs: [verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
 
       # The same install CI's unit job does: the cryptsetup conformance and FIPS
       # import tests are part of ./pkg/luks2 and fail without it, so a release
@@ -66,45 +155,136 @@ jobs:
             exit 1
           }
 
+      # The library AND the CLI: the binaries this publishes are ./cmd/luks2.
       - name: Run tests
-        run: go test -v ./pkg/luks2
+        run: go test -count=1 -v ./pkg/luks2 ./cmd/luks2
 
-      - name: Build linux/amd64
-        env:
-          GOOS: linux
-          GOARCH: amd64
-          CGO_ENABLED: 0
+  security:
+    name: Security
+    needs: [verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      # The same assertion ci.yml's Security Scan job makes: the scanners are
+      # the pinned versions, or nothing scans.
+      - name: Require gosec and govulncheck at the pinned versions
         run: |
-          go build -ldflags="-s -w -X main.Version=${{ steps.version.outputs.VERSION }}" \
-            -o luks-${{ steps.version.outputs.VERSION }}-linux-amd64 ./cmd/luks2
+          set -eu
+          go run ./test/ci/cmd/require-tool \
+            gosec "$GOSEC_VERSION" \
+            "github.com/securego/gosec/v2/cmd/gosec" \
+            -ldflags "-X main.Version=${GOSEC_VERSION}"
+          go run ./test/ci/cmd/require-tool \
+            govulncheck "$GOVULNCHECK_VERSION" \
+            "golang.org/x/vuln/cmd/govulncheck"
+
+      # trivy is not in the runner image: the pinned release archive, accepted
+      # only if it matches the SHA-256 pinned in the Makefile.
+      - name: Install trivy (pinned, SHA-256 verified)
+        run: make trivy-install
+
+      # TOOLS_REQUIRED=1: a scanner that is missing fails the release instead
+      # of skipping with a warning.
+      - name: Security suite (gosec, govulncheck, go mod verify, trivy fs)
+        run: make security TOOLS_REQUIRED=1
+
+  publish:
+    name: Build and Release
+    needs: [verify, ci-gate, test, security]
+    # always(): a failed or skipped stage produces a red, named job here rather
+    # than a silently skipped one.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      # Gitea combines a skipped job as success and does not implement
+      # join(needs.*.result), so every stage is checked by name and anything
+      # but success refuses to publish.
+      - name: Every stage passed
+        env:
+          VERIFY: ${{ needs.verify.result }}
+          CI_GATE: ${{ needs.ci-gate.result }}
+          TEST: ${{ needs.test.result }}
+          SECURITY: ${{ needs.security.result }}
+        run: |
+          failed=0
+          for stage in VERIFY CI_GATE TEST SECURITY; do
+            eval "result=\$$stage"
+            case "$result" in
+              success) echo "OK   ${stage}" ;;
+              skipped) echo "SKIP ${stage} (upstream stage failed — see its job)"; failed=1 ;;
+              "")      echo "FAIL ${stage} (<unreadable>)"; failed=1 ;;
+              *)       echo "FAIL ${stage} (${result})"; failed=1 ;;
+            esac
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::not publishing: a release stage did not pass"
+            exit 1
+          fi
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: The commit being built is the one every stage checked
+        env:
+          SHA: ${{ needs.verify.outputs.sha }}
+        run: |
+          set -eu
+          head=$(git rev-parse HEAD)
+          if [ "$head" != "$SHA" ]; then
+            echo "::error::this job checked out $head, but the stages ran on $SHA"
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      # -trimpath: without it every binary records the build host's absolute
+      # source and module-cache paths, so two builds of one commit differ by
+      # where they ran and the binary publishes the runner's layout.
+      - name: Build linux/amd64 and linux/arm64
+        env:
+          TAG: ${{ needs.verify.outputs.tag }}
+          CGO_ENABLED: "0"
+        run: |
+          set -eu
+          for arch in amd64 arm64; do
+            GOOS=linux GOARCH=$arch go build -trimpath \
+              -ldflags="-s -w -X main.Version=${TAG}" \
+              -o "luks-${TAG}-linux-${arch}" ./cmd/luks2
+          done
 
       # The linker ignores -X for a symbol that does not exist, so a misspelt
       # variable ships binaries that call themselves "dev". The amd64 binary
       # runs on this runner: it must report exactly this tag before anything
       # is published.
       - name: Verify the binary reports this version
+        env:
+          TAG: ${{ needs.verify.outputs.tag }}
         run: |
           set -eu
-          want='${{ steps.version.outputs.VERSION }}'
-          got=$(./luks-${want}-linux-amd64 version)
+          got=$("./luks-${TAG}-linux-amd64" version)
           printf '%s\n' "$got"
           case "$got" in
-            *"$want"*) ;;
-            *) echo "::error::the built binary reports '$got', not $want: the -X ldflag did not take"; exit 1 ;;
+            *"$TAG"*) ;;
+            *) echo "::error::the built binary reports '$got', not $TAG: the -X ldflag did not take"; exit 1 ;;
           esac
 
-      - name: Build linux/arm64
-        env:
-          GOOS: linux
-          GOARCH: arm64
-          CGO_ENABLED: 0
-        run: |
-          go build -ldflags="-s -w -X main.Version=${{ steps.version.outputs.VERSION }}" \
-            -o luks-${{ steps.version.outputs.VERSION }}-linux-arm64 ./cmd/luks2
-
       - name: Generate checksums
+        env:
+          TAG: ${{ needs.verify.outputs.tag }}
         run: |
-          sha256sum luks-${{ steps.version.outputs.VERSION }}-linux-* > checksums.txt
+          sha256sum "luks-${TAG}-linux-"* > checksums.txt
           cat checksums.txt
 
       # This tag's own CHANGELOG section, from its heading up to the next
@@ -113,15 +293,16 @@ jobs:
       # Gitea path — see the comment on the Gitea step.
       - name: Extract changelog section
         id: notes
+        env:
+          TAG: ${{ needs.verify.outputs.tag }}
         run: |
-          version="${{ steps.version.outputs.VERSION }}"
-          notes="$(awk -v want="## [${version#v}]" '
+          notes="$(awk -v want="## [${TAG#v}]" '
             index($0, want) == 1 { collecting = 1; next }
             collecting && /^## / { exit }
             collecting { print }
           ' CHANGELOG.md)"
           if [ -z "${notes//[[:space:]]/}" ]; then
-            echo "no CHANGELOG section for ${version}" >&2
+            echo "no CHANGELOG section for ${TAG}" >&2
             exit 1
           fi
           {
@@ -132,13 +313,13 @@ jobs:
 
       - name: Create Release (github.com)
         if: github.server_url == 'https://github.com'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           generate_release_notes: false
           body: ${{ steps.notes.outputs.notes }}
           files: |
-            luks-${{ steps.version.outputs.VERSION }}-linux-amd64
-            luks-${{ steps.version.outputs.VERSION }}-linux-arm64
+            luks-${{ needs.verify.outputs.tag }}-linux-amd64
+            luks-${{ needs.verify.outputs.tag }}-linux-arm64
             checksums.txt
 
       # softprops/action-gh-release is a GitHub-API client: it never publishes
@@ -168,7 +349,7 @@ jobs:
         env:
           BOT: ${{ secrets.AGENT_TOKEN }}
           REPO_API: ${{ github.server_url }}/api/v1/repos/${{ github.repository }}
-          TAG: ${{ steps.version.outputs.VERSION }}
+          TAG: ${{ needs.verify.outputs.tag }}
           NOTES: ${{ steps.notes.outputs.notes }}
         run: |
           set -euo pipefail

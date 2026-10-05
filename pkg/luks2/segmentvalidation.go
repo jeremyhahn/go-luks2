@@ -164,18 +164,45 @@ func validateSegment(id string, segment *Segment) error {
 	if segment.Type != "crypt" {
 		return nil
 	}
-	_, err := cryptTableParams(id, segment)
+	_, err := cryptSegmentChecks(id, segment)
 	return err
 }
 
-// cryptTableParams validates a crypt segment and returns the parameters the
-// device-mapper table is built from.
+// cryptTableParams validates a crypt segment of metadata for ACTIVATION and
+// returns the parameters the device-mapper table is built from.
 //
 // It is the only way those three values are obtained. Unlock calls it for the
-// segment it selected, and the header read calls it for every segment through
-// validateSegment, so a value that reaches the ioctl has been through here
-// whether the caller remembered or not.
-func cryptTableParams(id string, segment *Segment) (cryptSegmentParams, error) {
+// segment it selected, and the header read applies the same checks to every
+// segment through validateSegment, so a value that reaches the ioctl has been
+// through here whether the caller remembered or not.
+//
+// On top of what the read path checks, it refuses a segment that starts before
+// the end of the keyslots area (#248). A plaintext mapping over the header
+// copies or the keyslots would hand them to whatever is written to the volume:
+// the first filesystem write destroys every keyslot. cryptsetup reads such a
+// header only as a DETACHED one, at offset 0, whose data lives on another
+// device; this package maps the data on the device that carries the header, so
+// it has no detached form to offer and refuses that too.
+func cryptTableParams(metadata *LUKS2Metadata, id string, segment *Segment) (cryptSegmentParams, error) {
+	geometry, err := configGeometry(metadata.Config)
+	if err != nil {
+		return cryptSegmentParams{}, err
+	}
+	offset, ok := parseNumberedUint64(segment.Offset)
+	if !ok || offset < geometry.end() {
+		detail := fmt.Sprintf("%s starts at offset %q, inside the %d bytes the header copies and keyslots area occupy; mapping it would expose them to the plaintext device",
+			segmentLabel(id), segment.Offset, geometry.end())
+		if ok && offset == 0 {
+			detail = segmentLabel(id) + " is at offset 0, which is a detached header whose data lives on another device; this package does not activate detached headers"
+		}
+		return cryptSegmentParams{}, &detailError{Kind: ErrInvalidHeader, Detail: detail}
+	}
+	return cryptSegmentChecks(id, segment)
+}
+
+// cryptSegmentChecks is what every read checks about a crypt segment's three
+// device-mapper fields, returning them in the types the table wants.
+func cryptSegmentChecks(id string, segment *Segment) (cryptSegmentParams, error) {
 	label := segmentLabel(id)
 
 	sectorSize, accepted := segmentSectorSizes[segment.SectorSize]

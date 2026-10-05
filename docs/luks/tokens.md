@@ -58,6 +58,10 @@ id, err := luks2.FindFreeTokenSlot(device) // ErrNoFreeTokenSlot when full
 err = luks2.RemoveToken(device, 0)
 ```
 
+`Keyslots` must name keyslots the header has, by canonical id (`"1"`, not
+`"01"`), or the import fails with `ErrInvalidHeader` and nothing is written. A
+token with no keyslots is written as `"keyslots":[]`.
+
 `TokenExists` and `CountTokens` return a bool and a count. A token key that no
 LUKS2 implementation can address, such as `"01"` or `"40"`, is not listed or
 counted.

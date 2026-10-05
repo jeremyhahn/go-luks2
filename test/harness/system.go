@@ -233,14 +233,20 @@ func loopReleased(err error) bool {
 //
 // dir must be a directory THIS suite created; see KindLoopRoot for why a prefix
 // is acceptable there and nowhere else. The check is on a cleaned path plus a
-// separator, so "/tmp/run-1" does not match "/tmp/run-10".
+// separator, so "/tmp/go-luks2-run-1" does not match "/tmp/go-luks2-run-10".
+//
+// dir is bounded the way RemoveDir bounds it (#247): absolute, below the root,
+// and named like a run root. Before, only "" and "/" were refused, so a damaged
+// or forged loop-root line such as /var/lib/snapd would have detached every
+// snap's loop device. The bound is not the ownership decision -- the record is
+// -- it limits what a damaged record can reach.
 func (SystemRemover) LoopDevicesUnder(dir string) ([]LoopDevice, error) {
 	return loopDevicesUnderIn("/sys/block", dir, captureLoopIdentity)
 }
 
 func loopDevicesUnderIn(sysBlock, dir string, capture identityCapturer) ([]LoopDevice, error) {
-	if dir == "" || filepath.Clean(dir) == "/" {
-		return nil, fmt.Errorf("refusing to match loop devices under %q: it is not a directory this suite created", dir)
+	if err := checkRunRoot("match loop devices under", dir); err != nil {
+		return nil, err
 	}
 	prefix := filepath.Clean(dir) + string(filepath.Separator)
 
@@ -304,16 +310,19 @@ func (SystemRemover) RemoveDir(path string) error {
 const runRootPrefix = "go-luks2-run-"
 
 func safeToRemove(path string) error {
+	return checkRunRoot("remove", path)
+}
+
+// checkRunRoot bounds a recorded run root before action is taken on it:
+// absolute, below the root, and named the way BeginSuite names run roots.
+func checkRunRoot(action, path string) error {
 	clean := filepath.Clean(path)
-	if clean == "" || clean == "/" || clean == "." || !filepath.IsAbs(clean) {
-		return fmt.Errorf("refusing to remove %q: it is not an absolute path below the root", path)
-	}
-	if filepath.Dir(clean) == clean {
-		return fmt.Errorf("refusing to remove %q: it is a filesystem root", path)
+	if path == "" || clean == "/" || clean == "." || !filepath.IsAbs(clean) {
+		return &RunRootError{Action: action, Path: path, Problem: "it is not an absolute path below the root"}
 	}
 	if !strings.HasPrefix(filepath.Base(clean), runRootPrefix) {
-		return fmt.Errorf("refusing to remove %q: it is not named like a directory this suite creates (%s*)",
-			path, runRootPrefix)
+		return &RunRootError{Action: action, Path: path,
+			Problem: "it is not named like a directory this suite creates (" + runRootPrefix + "*)"}
 	}
 	return nil
 }

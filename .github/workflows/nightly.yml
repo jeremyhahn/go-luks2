@@ -43,10 +43,10 @@ jobs:
       # exemption with the owner's approval.
       GODEBUG: fips140=only
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
 
@@ -104,53 +104,35 @@ jobs:
   trivy:
     name: Trivy
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      # aquasecurity/trivy-action fetches its install script through a nested
-      # checkout that a self-hosted runner resolves against its own server
-      # instead of github.com, failing with git exit 128. It is therefore
-      # github.com-only, and so is its consumer, the code scanning upload.
+      # The pinned trivy release archive on BOTH hosts, accepted only if it
+      # matches the SHA-256 pinned in the Makefile (#247). This replaced the
+      # trivy action at its floating `master` branch on github.com, and a piped
+      # install of trivy's contrib/install.sh from its main branch everywhere
+      # else: an unreviewed script from a moving branch that then installed
+      # whatever trivy was newest.
+      - name: Install trivy (pinned, SHA-256 verified)
+        run: make trivy-install
+
+      # Code scanning is github.com-only: Gitea has no code-scanning API.
       - name: Trivy scan (SARIF for code scanning)
         if: github.server_url == 'https://github.com'
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          scan-ref: .
-          scanners: vuln,secret
-          format: sarif
-          output: trivy-results.sarif
-          exit-code: 0
+        run: make trivy-sarif
 
       - name: Upload Trivy SARIF
         if: always() && github.server_url == 'https://github.com'
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3
         with:
           sarif_file: trivy-results.sarif
           category: trivy-fs
 
+      # The gate: vulnerabilities and secrets, CRITICAL/HIGH fail the job. The
+      # same target the release runs as a blocking stage.
       - name: Trivy gate (fail on CRITICAL/HIGH)
-        if: github.server_url == 'https://github.com'
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          scan-ref: .
-          scanners: vuln,secret
-          severity: CRITICAL,HIGH
-          exit-code: 1
-          format: table
-
-      # Any non-github.com Actions host runs the same gate from the
-      # trivy CLI, installed from the upstream release script. Same scanners,
-      # same severities, same exit code — the dashboard upload is the only
-      # thing GitHub gets and the other host does not.
-      - name: Install trivy CLI
-        if: github.server_url != 'https://github.com'
-        run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
-
-      - name: Trivy gate (fail on CRITICAL/HIGH)
-        if: github.server_url != 'https://github.com'
-        run: make trivy-fs
+        run: make trivy-fs TOOLS_REQUIRED=1
 
       # Misconfiguration scanning (owner ruling 2026-08-20). It runs HERE, with
       # an advisory exit code, so findings surface daily without a brand-new
@@ -159,5 +141,4 @@ jobs:
       # rather than leaving it advisory forever, which is how an advisory scan
       # becomes decoration.
       - name: Trivy misconfiguration scan (advisory)
-        if: github.server_url != 'https://github.com'
-        run: trivy fs --scanners misconfig --exit-code 0 --format table .
+        run: make trivy-misconfig

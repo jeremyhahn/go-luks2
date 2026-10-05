@@ -61,7 +61,7 @@ func craftedSegmentVolume(t *testing.T, name string, mutate func(*Segment)) stri
 	}
 	mutate(segment)
 
-	if err := writeHeaderInternal(path, hdr, metadata); err != nil {
+	if err := writeHeaderUnvalidated(path, hdr, metadata); err != nil {
 		t.Fatalf("failed to write the crafted segment fixture: %v", err)
 	}
 	return path

@@ -366,31 +366,28 @@ func TestCLI_WipeMissingArgs(t *testing.T) {
 	}
 }
 
+// TestCLI_WipeCancelled: an answer other than YES cancels the wipe, the device
+// is untouched, and the exit status is NON-ZERO (#246 D12) -- a script must not
+// read a wipe that did not happen as one that did.
 func TestCLI_WipeCancelled(t *testing.T) {
-	// Create a test file to wipe
-	tmpfile := "/tmp/test-cli-wipe-cancel.img"
-	defer os.Remove(tmpfile)
-
-	f, err := os.Create(tmpfile)
-	if err != nil {
+	tmpfile := filepath.Join(t.TempDir(), "test-cli-wipe-cancel.img")
+	content := bytes.Repeat([]byte{0xAA}, 1024*1024)
+	if err := os.WriteFile(tmpfile, content, 0o600); err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
-	f.Truncate(1024 * 1024) // 1MB
-	f.Close()
 
-	// Run wipe with "NO" input
-	stdout, _, err := runCLIWithInput("NO\n", "wipe", tmpfile)
-	if err != nil {
-		t.Fatalf("wipe canceled should not error: %v", err)
-	}
-
-	// "canceled", one L. The CLI has always printed that spelling and this
-	// assertion has always looked for the other one, so the test has been
-	// failing since it was written -- invisibly, because the entrypoint ran
-	// this suite with `|| true`. The repository's misspell linter enforces
-	// American spelling, so the CLI is right and the assertion was wrong.
-	if !strings.Contains(stdout, "Wipe canceled") {
-		t.Errorf("Expected 'Wipe canceled' message, got: %q", stdout)
+	for _, input := range []string{"NO\n", ""} {
+		_, stderr, err := runCLIWithInput(input, "wipe", tmpfile)
+		if err == nil {
+			t.Fatalf("wipe with %q on stdin exited 0", input)
+		}
+		if !strings.Contains(stderr, "Wipe canceled") {
+			t.Errorf("Expected 'Wipe canceled' message, got: %q", stderr)
+		}
+		got, err := os.ReadFile(tmpfile)
+		if err != nil || !bytes.Equal(got, content) {
+			t.Fatalf("a canceled wipe changed the device (%v)", err)
+		}
 	}
 }
 
@@ -470,13 +467,15 @@ func TestCLI_FullWorkflow(t *testing.T) {
 	t.Log("CLI workflow test completed (partial - non-interactive commands)")
 }
 
+// TestCLI_CreateBlockDeviceUsage: a /dev path that is not a block device is
+// refused, and not created as a file.
 func TestCLI_CreateBlockDeviceUsage(t *testing.T) {
-	// Test that creating on a block device shows correct messages
-	stdout, _, _ := runCLI("create", "/dev/nonexistent")
-
-	// Should show banner and prompt for passphrase
-	if !strings.Contains(stdout, "LUKS2") {
-		t.Error("Expected LUKS2 in output")
+	_, stderr, err := runCLI("create", "/dev/nonexistent")
+	if err == nil || !strings.Contains(stderr, "no such block device") {
+		t.Errorf("create /dev/nonexistent: %v, stderr %q", err, stderr)
+	}
+	if _, err := os.Lstat("/dev/nonexistent"); err == nil {
+		t.Error("create made /dev/nonexistent")
 	}
 }
 

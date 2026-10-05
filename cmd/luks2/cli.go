@@ -6,10 +6,15 @@ package main
 
 import (
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
+	"strconv"
 	"strings"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/jeremyhahn/go-enclave"
 
@@ -22,6 +27,7 @@ type LuksOperations interface {
 	Unlock(device string, passphrase []byte, name string) error
 	Lock(name string) error
 	Mount(opts luks2.MountOptions) error
+	DetectFilesystem(name string) (luks2.FilesystemType, error)
 	Unmount(mountPoint string, flags int) error
 	GetVolumeInfo(device string) (*luks2.VolumeInfo, error)
 	Wipe(opts luks2.WipeOptions) error
@@ -29,6 +35,7 @@ type LuksOperations interface {
 	DetachLoopDevice(loopDev string) error
 	MakeFilesystem(volumeName, fstype, label string) error
 	IsMounted(mountPoint string) (bool, error)
+	IsMappingMounted(name string) (bool, error)
 	IsUnlocked(name string) bool
 
 	// Keyslots
@@ -61,7 +68,7 @@ type LuksOperations interface {
 	// Header
 	ReadHeader(device string) (*luks2.LUKS2BinaryHeader, *luks2.LUKS2Metadata, error)
 	ReadSecondaryHeader(device string) (*luks2.LUKS2BinaryHeader, *luks2.LUKS2Metadata, error)
-	RestorePrimaryHeader(device string) error
+	RestorePrimaryHeader(device string, opts luks2.RestoreHeaderOptions) error
 	IsLUKS(device string) (bool, error)
 	IsLUKS2(device string) (bool, error)
 }
@@ -79,6 +86,14 @@ type Terminal interface {
 
 // FileSystem defines the interface for file system operations
 type FileSystem interface {
+	// CreateExclusive creates a file that must not exist yet: O_EXCL, a
+	// symlink refused rather than followed (O_NOFOLLOW), mode 0600.
+	CreateExclusive(name string) (*os.File, error)
+
+	// RemoveCreated removes name only if it is still the file this run
+	// created and holds open as created.
+	RemoveCreated(name string, created *os.File) error
+
 	Create(name string) (*os.File, error)
 	Open(name string) (*os.File, error)
 	Stat(name string) (os.FileInfo, error)
@@ -98,6 +113,10 @@ type CLI struct {
 	ExitFunc   func(code int)
 	stdinFd    int
 	getStdinFd func() int
+
+	// Devices is how create inspects a path before formatting it. nil means
+	// DefaultDeviceProber.
+	Devices DeviceProber
 
 	// destroyEnclave releases a credential the library handed this command.
 	// nil means go-enclave's own Destroy; a test sets it to produce the
@@ -122,6 +141,10 @@ func (d *DefaultLuksOperations) Lock(name string) error {
 
 func (d *DefaultLuksOperations) Mount(opts luks2.MountOptions) error {
 	return luks2.Mount(opts)
+}
+
+func (d *DefaultLuksOperations) DetectFilesystem(name string) (luks2.FilesystemType, error) {
+	return luks2.DetectFilesystem(name)
 }
 
 func (d *DefaultLuksOperations) Unmount(mountPoint string, flags int) error {
@@ -152,12 +175,24 @@ func (d *DefaultLuksOperations) IsMounted(mountPoint string) (bool, error) {
 	return luks2.IsMounted(mountPoint)
 }
 
+func (d *DefaultLuksOperations) IsMappingMounted(name string) (bool, error) {
+	return luks2.IsMappingMounted(name)
+}
+
 func (d *DefaultLuksOperations) IsUnlocked(name string) bool {
 	return luks2.IsUnlocked(name)
 }
 
 // DefaultFileSystem implements FileSystem using the actual os package
 type DefaultFileSystem struct{}
+
+func (d *DefaultFileSystem) CreateExclusive(name string) (*os.File, error) {
+	return os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600) // #nosec G304 -- the operator's path; O_EXCL|O_NOFOLLOW is the point
+}
+
+func (d *DefaultFileSystem) RemoveCreated(name string, created *os.File) error {
+	return removeCreated(name, created)
+}
 
 func (d *DefaultFileSystem) Create(name string) (*os.File, error) {
 	return os.Create(name) // #nosec G304 -- CLI tool intentionally creates files at user-specified paths
@@ -191,7 +226,24 @@ func NewCLI() *CLI {
 		FS:         &DefaultFileSystem{},
 		ExitFunc:   os.Exit,
 		getStdinFd: func() int { return int(os.Stdin.Fd()) },
+		Devices:    DefaultDeviceProber{},
 	}
+}
+
+// looksLikeADeviceName reports whether an absent path names where a block
+// device would be: under /dev, except /dev/shm, which is an ordinary place to
+// keep a file. A typo for a device is refused rather than created as a file
+// in devtmpfs.
+func looksLikeADeviceName(path string) bool {
+	return strings.HasPrefix(path, "/dev/") && path != "/dev/shm" && !strings.HasPrefix(path, "/dev/shm/")
+}
+
+// devices returns the DeviceProber, defaulting to the real one.
+func (c *CLI) devices() DeviceProber {
+	if c.Devices == nil {
+		return DefaultDeviceProber{}
+	}
+	return c.Devices
 }
 
 // Run executes the CLI with the given arguments
@@ -262,6 +314,8 @@ func (c *CLI) cmdCreate() int {
 	o := newOptions("create")
 	key := keyFileFlag(o, "key-file")
 	kdf := declareKDFFlags(o)
+	batch := batchFlags(o)
+	force := o.Bool("force")
 	args, err := o.parse(c.Args[2:])
 	if err != nil {
 		_, _ = fmt.Fprintf(c.Stderr, "%v\n", err)
@@ -273,13 +327,15 @@ func (c *CLI) cmdCreate() int {
 		_, _ = fmt.Fprintln(c.Stdout, "\nFor block devices:")
 		_, _ = fmt.Fprintln(c.Stdout, "  luks2 create /dev/sdb1")
 		_, _ = fmt.Fprintln(c.Stdout, "\nFor file volumes:")
-		_, _ = fmt.Fprintln(c.Stdout, "  luks2 create encrypted.luks 100M")
-		_, _ = fmt.Fprintln(c.Stdout, "  luks2 create encrypted.luks 1G ext4")
+		_, _ = fmt.Fprintln(c.Stdout, "  luks2 create /srv/encrypted.luks 100M")
+		_, _ = fmt.Fprintln(c.Stdout, "  luks2 create /srv/encrypted.luks 1G ext4")
 		_, _ = fmt.Fprintln(c.Stdout, "\nSize suffixes: K, M, G, T")
 		_, _ = fmt.Fprintln(c.Stdout, filesystemTypesHelp())
 		_, _ = fmt.Fprintln(c.Stdout, "\nOptions:")
 		_, _ = fmt.Fprintf(c.Stdout, "%s", keyFileHelp)
 		_, _ = fmt.Fprintf(c.Stdout, "%s", kdfFlagsHelp)
+		_, _ = fmt.Fprintf(c.Stdout, "%s", batchFlagsHelp)
+		_, _ = fmt.Fprintln(c.Stdout, "  --force              Format a block device that already holds a LUKS header or a filesystem")
 		return 1
 	}
 
@@ -291,13 +347,30 @@ func (c *CLI) cmdCreate() int {
 		return c.kdfRefused(err)
 	}
 
-	path := args[0]
-	isBlockDevice := len(path) >= 5 && path[:5] == "/dev/"
-
-	if isBlockDevice {
-		return c.cmdCreateBlockDevice(path, *key, choice)
+	path, err := absPath("create", args[0])
+	if err != nil {
+		return c.usageError(err)
 	}
-	return c.cmdCreateFile(path, args[1:], *key, choice)
+
+	// What is at the path decides the flow, not its spelling: a /dev name
+	// that is not a block device is refused rather than created as a file.
+	kind, err := c.devices().Kind(path)
+	if err != nil {
+		return c.fail(&DevicePathError{Path: path, Op: "inspect", Err: err})
+	}
+	switch {
+	case kind == pathBlockDevice:
+		return c.cmdCreateBlockDevice(path, *key, choice, batch(), *force)
+	case kind == pathAbsent && !looksLikeADeviceName(path):
+		return c.cmdCreateFile(path, args[1:], *key, choice)
+	case kind == pathAbsent:
+		_, _ = fmt.Fprintf(c.Stderr, "Error: no such block device: %s\n", path)
+		return 1
+	default:
+		_, _ = fmt.Fprintf(c.Stderr, "Error: File already exists: %s\n", path)
+		_, _ = fmt.Fprintln(c.Stderr, "Remove it first if you want to recreate it.")
+		return 1
+	}
 }
 
 // formatOptions returns the FormatOptions for a new volume on device, with
@@ -365,7 +438,7 @@ func (c *CLI) cmdCreateFile(filename string, args []string, key KeySource, kdf k
 	if len(args) < 1 {
 		_, _ = fmt.Fprintln(c.Stdout, "Error: Size required for file volumes")
 		_, _ = fmt.Fprintln(c.Stdout, "Usage: luks2 create <file> <size> [filesystem]")
-		_, _ = fmt.Fprintln(c.Stdout, "Example: luks2 create encrypted.luks 100M ext4")
+		_, _ = fmt.Fprintln(c.Stdout, "Example: luks2 create /srv/encrypted.luks 100M ext4")
 		_, _ = fmt.Fprintln(c.Stdout, "\nSize suffixes: K, M, G, T")
 		_, _ = fmt.Fprintln(c.Stdout, filesystemTypesHelp())
 		return 1
@@ -397,29 +470,33 @@ func (c *CLI) cmdCreateFile(filename string, args []string, key KeySource, kdf k
 		return 1
 	}
 
-	// Check if file exists
-	if _, err := c.FS.Stat(filename); err == nil {
+	// Created EXCLUSIVELY, in one step: there is no window between asking
+	// whether the file exists and creating it, a symlink planted at the path
+	// is refused rather than followed, and only the owner can read it. What
+	// was created is remembered, so a cleanup removes this run's file and
+	// never one that took its place.
+	_, _ = fmt.Fprintf(c.Stdout, "Creating %s file...\n", sizeStr)
+	f, err := c.FS.CreateExclusive(filename)
+	if errors.Is(err, os.ErrExist) {
 		_, _ = fmt.Fprintf(c.Stderr, "Error: File already exists: %s\n", filename)
 		_, _ = fmt.Fprintln(c.Stderr, "Remove it first if you want to recreate it.")
 		return 1
 	}
-
-	// Create file
-	_, _ = fmt.Fprintf(c.Stdout, "Creating %s file...\n", sizeStr)
-	f, err := c.FS.Create(filename)
 	if err != nil {
 		_, _ = fmt.Fprintf(c.Stderr, "Failed to create file: %v\n", err)
 		return 1
 	}
+	// Held open until the command ends: the descriptor is what lets the
+	// cleanup tell this file from one that replaced it.
+	defer func() { _ = f.Close() }()
+	cleanup := func() { _ = c.FS.RemoveCreated(filename, f) }
 
 	// Truncate to desired size
 	if err := f.Truncate(size); err != nil {
-		_ = f.Close()
-		_ = c.FS.Remove(filename)
+		cleanup()
 		_, _ = fmt.Fprintf(c.Stderr, "Failed to set file size: %v\n", err)
 		return 1
 	}
-	_ = f.Close()
 
 	_, _ = fmt.Fprintln(c.Stdout, "File created")
 
@@ -430,7 +507,7 @@ func (c *CLI) cmdCreateFile(filename string, args []string, key KeySource, kdf k
 	// terminal otherwise.
 	passphrase, err := c.readPassphrase("Enter passphrase for new volume: ", true, key)
 	if err != nil {
-		_ = c.FS.Remove(filename)
+		cleanup()
 		_, _ = fmt.Fprintf(c.Stderr, "Error: %v\n", err)
 		return 1
 	}
@@ -449,7 +526,7 @@ func (c *CLI) cmdCreateFile(filename string, args []string, key KeySource, kdf k
 	_, _ = fmt.Fprintln(c.Stdout, "\nThis may take a few seconds...")
 
 	if err := c.Luks.Format(opts); err != nil {
-		_ = c.FS.Remove(filename)
+		cleanup()
 		_, _ = fmt.Fprintf(c.Stderr, "\nFailed to format volume: %v\n", err)
 		return 1
 	}
@@ -462,9 +539,8 @@ func (c *CLI) cmdCreateFile(filename string, args []string, key KeySource, kdf k
 	_, _ = fmt.Fprintln(c.Stdout, "\nSetting up loop device...")
 	loopDev, err := c.Luks.SetupLoopDevice(filename)
 	if err != nil {
-		_, _ = fmt.Fprintf(c.Stderr, "Warning: Failed to setup loop device: %v\n", err)
-		_, _ = fmt.Fprintf(c.Stdout, "\nManual setup: sudo losetup -f %s\n", filename)
-		return 0
+		_, _ = fmt.Fprintf(c.Stderr, "\nError: Failed to set up a loop device for %s: %v\n", filename, err)
+		return c.abandonUnopenedVolume(filename, fstype)
 	}
 	_, _ = fmt.Fprintf(c.Stdout, "Loop device created: %s\n", loopDev)
 
@@ -472,9 +548,14 @@ func (c *CLI) cmdCreateFile(filename string, args []string, key KeySource, kdf k
 	_, _ = fmt.Fprintln(c.Stdout, "\nUnlocking volume...")
 	volumeName := "luks-auto"
 	if err := c.Luks.Unlock(loopDev, passphrase, volumeName); err != nil {
-		_, _ = fmt.Fprintf(c.Stderr, "Warning: Failed to unlock: %v\n", err)
-		_, _ = fmt.Fprintf(c.Stdout, "\nManual unlock: sudo luks2 open %s myvolume\n", loopDev)
-		return 0
+		_, _ = fmt.Fprintf(c.Stderr, "\nError: Failed to unlock %s: %v\n", loopDev, err)
+		if err := c.Luks.DetachLoopDevice(loopDev); err != nil {
+			_, _ = fmt.Fprintf(c.Stderr, "Warning: Failed to detach loop device %s: %v\n", loopDev, err)
+			_, _ = fmt.Fprintf(c.Stderr, "Detach it with: sudo losetup -d %s\n", loopDev)
+		} else {
+			_, _ = fmt.Fprintf(c.Stderr, "Detached loop device %s.\n", loopDev)
+		}
+		return c.abandonUnopenedVolume(filename, fstype)
 	}
 	_, _ = fmt.Fprintf(c.Stdout, "Volume unlocked as: /dev/mapper/%s\n", volumeName)
 
@@ -527,15 +608,69 @@ func (c *CLI) abandonUnformattedVolume(filename, loopDev, volumeName, fstype str
 
 	_, _ = fmt.Fprintf(c.Stderr, "\nThe LUKS2 container %s is valid and was kept, but filesystem creation did not complete:\n", filename)
 	_, _ = fmt.Fprintln(c.Stderr, "whatever the formatter wrote before it failed may be partial.")
+	return c.finishByHand(filename, fstype)
+}
+
+// finishByHand tells the operator how to finish a create that stopped after
+// the container was written, and returns exit status 1.
+func (c *CLI) finishByHand(filename, fstype string) int {
 	_, _ = fmt.Fprintf(c.Stderr, "Delete it, or attach it (sudo losetup -f --show %s), open it (sudo luks2 open <loop-device> <name>)\n", filename)
 	_, _ = fmt.Fprintf(c.Stderr, "and create the filesystem yourself (sudo mkfs.%s /dev/mapper/<name>).\n", fstype)
 	return 1
 }
 
+// abandonUnopenedVolume ends a create whose container was written but could
+// not be attached or opened, so it has no filesystem. The command FAILS: it
+// used to print a warning and exit 0, and a script checking the exit status
+// took a volume nothing could mount as ready. The container itself is valid
+// and is kept, and the operator is told how to finish by hand. It always
+// returns exit status 1.
+func (c *CLI) abandonUnopenedVolume(filename, fstype string) int {
+	_, _ = fmt.Fprintf(c.Stderr, "\nThe LUKS2 container %s is valid and was kept, but it is not open and has no filesystem.\n", filename)
+	return c.finishByHand(filename, fstype)
+}
+
 // cmdCreateBlockDevice creates a LUKS2 volume on a block device
-func (c *CLI) cmdCreateBlockDevice(device string, key KeySource, kdf kdfChoice) int {
+func (c *CLI) cmdCreateBlockDevice(device string, key KeySource, kdf kdfChoice, batch, force bool) int {
 	c.showBanner()
 	_, _ = fmt.Fprintf(c.Stdout, "Creating LUKS2 volume on block device: %s\n\n", device)
+
+	// Probed before anything is asked: a device that is in use is refused
+	// whatever the flags say, and one that holds data is refused without
+	// --force.
+	found, release, err := c.devices().Claim(device)
+	if err != nil {
+		_, _ = fmt.Fprintf(c.Stderr, "Error: cannot use %s: %v\n", device, err)
+		return 1
+	}
+	// The exclusive claim is held through the confirmation and the
+	// passphrase prompt, and given up just before Format, which opens the
+	// device again itself.
+	claimed := true
+	unclaim := func() {
+		if claimed {
+			release()
+			claimed = false
+		}
+	}
+	defer unclaim()
+	if found != "" {
+		if !force {
+			_, _ = fmt.Fprintf(c.Stderr, "Error: %s: %s holds %s.\n", ErrDeviceHasData, device, found)
+			_, _ = fmt.Fprintln(c.Stderr, "Refusing to format over it. Pass --force to destroy it.")
+			return 1
+		}
+		_, _ = fmt.Fprintf(c.Stdout, "WARNING: %s holds %s, which formatting destroys.\n", device, found)
+	}
+
+	// Whole-stdin key input and a confirmation cannot share one stream.
+	if key.Path == stdinKeyFile && !batch {
+		return c.usageError(&UsageError{Command: "create", Detail: "--key-file - reads standard input, so the confirmation cannot; pass --batch-mode"})
+	}
+	_, _ = fmt.Fprintf(c.Stdout, "WARNING: This will overwrite data on %s irrevocably.\n", device)
+	if err := c.confirmDestructive("Type 'YES' to confirm: ", batch); err != nil {
+		return c.refuseUnconfirmed("Create", err)
+	}
 
 	// Obtain the passphrase, from a key file when one was given and from the
 	// terminal otherwise.
@@ -556,6 +691,7 @@ func (c *CLI) cmdCreateBlockDevice(device string, key KeySource, kdf kdfChoice) 
 	_, _ = fmt.Fprintln(c.Stdout, "  Key Size: 512 bits")
 	_, _ = fmt.Fprintln(c.Stdout, "\nThis may take a few seconds...")
 
+	unclaim()
 	if err := c.Luks.Format(opts); err != nil {
 		_, _ = fmt.Fprintf(c.Stderr, "\nFailed to create volume: %v\n", err)
 		return 1
@@ -587,7 +723,10 @@ func (c *CLI) cmdOpen() int {
 		return 1
 	}
 
-	device := args[0]
+	device, err := absPath("open", args[0])
+	if err != nil {
+		return c.usageError(err)
+	}
 	name := args[1]
 
 	c.showBanner()
@@ -632,17 +771,15 @@ func (c *CLI) cmdClose() int {
 
 	// Check if mounted.
 	//
-	// An ERROR here is not "not mounted". IsMounted fails only when
-	// /proc/mounts cannot be read -- an absent mapper node is simply not listed
-	// and returns false with no error -- so a failure means the mount state is
-	// UNKNOWN, and closing a volume whose filesystem is still mounted tears it
-	// out from under its writers.
+	// By the mapping's DEVICE, not a path: this used to ask IsMounted whether
+	// "/dev/mapper/<name>" was a mount point, which it never is, so the refusal
+	// below could not fire (#250, C10). IsMappingMounted matches the mounted
+	// device number against the mapping's.
 	//
-	// This read `if err == nil && mounted`, which SKIPPED the whole branch when
-	// the check could not run and fell through to locking the volume: "I could
-	// not find out" acting as "it is fine". Those are different answers and only
-	// the second may act.
-	mounted, err := c.Luks.IsMounted("/dev/mapper/" + name)
+	// An ERROR here is not "not mounted": the mount state is UNKNOWN, and
+	// closing a volume whose filesystem is still mounted tears it out from
+	// under its writers. Only a known "not mounted" may act.
+	mounted, err := c.Luks.IsMappingMounted(name)
 	if err != nil {
 		_, _ = fmt.Fprintf(c.Stderr, "Cannot determine whether %s is mounted: %v\n", name, err)
 		_, _ = fmt.Fprintln(c.Stderr, "Refusing to close a volume that may still be mounted.")
@@ -667,16 +804,37 @@ func (c *CLI) cmdClose() int {
 	return 0
 }
 
-// cmdMount mounts an unlocked LUKS2 volume
+// cmdMount mounts an unlocked LUKS2 volume.
+//
+// The filesystem type is the one --type names, or else the one on the device
+// as blkid identifies it. It is never assumed: this used to mount everything
+// as ext4, so the xfs and vfat volumes create makes could not be mounted with
+// the command create tells the operator to run. When nothing can be detected
+// the mount is refused, with a pointer to --type.
 func (c *CLI) cmdMount() int {
-	if len(c.Args) < 4 {
-		_, _ = fmt.Fprintln(c.Stdout, "Usage: luks2 mount <name> <mountpoint>")
+	o := newOptions("mount")
+	longType := o.String("type", "")
+	shortType := o.String("t", "")
+	args, err := o.parse(c.Args[2:])
+	if err != nil {
+		return c.usageError(err)
+	}
+
+	if len(args) != 2 {
+		_, _ = fmt.Fprintln(c.Stdout, "Usage: luks2 mount [--type <fstype>] <name> <mountpoint>")
 		_, _ = fmt.Fprintln(c.Stdout, "Example: luks2 mount my-encrypted-disk /mnt/encrypted")
+		_, _ = fmt.Fprintln(c.Stdout, "\nOptions:")
+		_, _ = fmt.Fprintln(c.Stdout, "  --type, -t <fstype>  Filesystem type to mount as (default: detected with blkid)")
 		return 1
 	}
 
-	name := c.Args[2]
-	mountpoint := c.Args[3]
+	fstype, err := mountTypeOption(o, *longType, *shortType)
+	if err != nil {
+		return c.usageError(err)
+	}
+
+	name := args[0]
+	mountpoint := args[1]
 
 	c.showBanner()
 	_, _ = fmt.Fprintf(c.Stdout, "Mounting volume: %s -> %s\n\n", name, mountpoint)
@@ -697,6 +855,17 @@ func (c *CLI) cmdMount() int {
 		return 1
 	}
 
+	if fstype == "" {
+		detected, err := c.Luks.DetectFilesystem(name)
+		if err != nil {
+			_, _ = fmt.Fprintf(c.Stderr, "Cannot determine the filesystem on /dev/mapper/%s: %v\n", name, err)
+			_, _ = fmt.Fprintln(c.Stderr, "Refusing to guess. Make a filesystem on it first, or name the type with --type.")
+			return 1
+		}
+		fstype = string(detected)
+		_, _ = fmt.Fprintf(c.Stdout, "Detected filesystem: %s\n", fstype)
+	}
+
 	// Create mountpoint if it doesn't exist
 	if _, err := c.FS.Stat(mountpoint); os.IsNotExist(err) {
 		_, _ = fmt.Fprintf(c.Stdout, "Creating mountpoint: %s\n", mountpoint)
@@ -709,17 +878,13 @@ func (c *CLI) cmdMount() int {
 	opts := luks2.MountOptions{
 		Device:     name,
 		MountPoint: mountpoint,
-		FSType:     "ext4",
-		Flags:      0,
-		Data:       "",
+		FSType:     fstype,
 	}
 
-	_, _ = fmt.Fprintln(c.Stdout, "Mounting...")
+	_, _ = fmt.Fprintf(c.Stdout, "Mounting as %s...\n", fstype)
 
 	if err := c.Luks.Mount(opts); err != nil {
-		_, _ = fmt.Fprintf(c.Stderr, "\nFailed to mount: %v\n", err)
-		_, _ = fmt.Fprintln(c.Stderr, "\nHave you created a filesystem? Try:")
-		_, _ = fmt.Fprintf(c.Stderr, "  sudo mkfs.ext4 /dev/mapper/%s\n", name)
+		_, _ = fmt.Fprintf(c.Stderr, "\nFailed to mount as %s: %v\n", fstype, err)
 		return 1
 	}
 
@@ -727,6 +892,23 @@ func (c *CLI) cmdMount() int {
 	_, _ = fmt.Fprintf(c.Stdout, "\nYou can now use: %s\n", mountpoint)
 
 	return 0
+}
+
+// mountTypeOption is the filesystem type --type or -t named, or "" when
+// neither was given. Naming two different types, or an empty one, is a usage
+// error: an empty --type would otherwise read as "detect it", which is not
+// what anyone typing the option asked for.
+func mountTypeOption(o *options, long, short string) (string, error) {
+	switch {
+	case o.Given("type") && o.Given("t") && long != short:
+		return "", &UsageError{Command: "mount", Detail: fmt.Sprintf("--type %q and -t %q name different filesystems", long, short)}
+	case o.Given("type") && long == "", o.Given("t") && short == "":
+		return "", &UsageError{Command: "mount", Detail: "--type and -t need a filesystem name"}
+	case o.Given("type"):
+		return long, nil
+	default:
+		return short, nil
+	}
 }
 
 // cmdUnmount unmounts a LUKS2 volume
@@ -779,7 +961,10 @@ func (c *CLI) cmdInfo() int {
 		return 1
 	}
 
-	device := c.Args[2]
+	device, err := absPath("info", c.Args[2])
+	if err != nil {
+		return c.usageError(err)
+	}
 
 	c.showBanner()
 	_, _ = fmt.Fprintf(c.Stdout, "Volume Information: %s\n", device)
@@ -852,19 +1037,24 @@ func plural(n int, one, many string) string {
 	return many
 }
 
+// maxWipePasses bounds --passes. Seven is the most any named standard uses;
+// the bound only stops a typo from becoming weeks of writing.
+const maxWipePasses = 100
+
 // cmdWipe securely wipes a LUKS2 volume
 func (c *CLI) cmdWipe() int {
 	if len(c.Args) < 3 {
 		_, _ = fmt.Fprintln(c.Stdout, "Usage: luks2 wipe [options] <device>")
 		_, _ = fmt.Fprintln(c.Stdout, "")
 		_, _ = fmt.Fprintln(c.Stdout, "Options:")
-		_, _ = fmt.Fprintln(c.Stdout, "  --full             Wipe entire device (default: headers only)")
+		_, _ = fmt.Fprintln(c.Stdout, "  --full             Wipe entire device (default: headers and keyslots only)")
 		_, _ = fmt.Fprintln(c.Stdout, "  --passes N         Number of overwrite passes (default: 1)")
 		_, _ = fmt.Fprintln(c.Stdout, "  --random           Use random data instead of zeros")
 		_, _ = fmt.Fprintln(c.Stdout, "  --trim             Issue TRIM/DISCARD after wipe (for SSDs)")
 		_, _ = fmt.Fprintln(c.Stdout, "  --standard <name>  Use named wipe standard: nist, dod3, dod7")
 		_, _ = fmt.Fprintln(c.Stdout, "  --verify           Enable verification pass")
 		_, _ = fmt.Fprintln(c.Stdout, "  --no-verify        Disable verification (override standard)")
+		_, _ = fmt.Fprintln(c.Stdout, "  --batch-mode, --yes  Do not ask for confirmation (for scripts)")
 		_, _ = fmt.Fprintln(c.Stdout, "")
 		_, _ = fmt.Fprintln(c.Stdout, "Standards:")
 		_, _ = fmt.Fprintln(c.Stdout, "  nist   NIST SP 800-88: 1 random pass (no verification)")
@@ -882,79 +1072,59 @@ func (c *CLI) cmdWipe() int {
 		return 1
 	}
 
-	// Parse options
+	o := newOptions("wipe")
+	full := o.Bool("full")
+	random := o.Bool("random")
+	trim := o.Bool("trim")
+	verify := o.Bool("verify")
+	noVerify := o.Bool("no-verify")
+	passes := o.String("passes", "1")
+	standard := o.String("standard", "")
+	batch := batchFlags(o)
+	args, err := o.parse(c.Args[2:])
+	if err != nil {
+		return c.usageError(err)
+	}
+
 	opts := luks2.WipeOptions{
-		Passes:     1,
-		Random:     false,
-		HeaderOnly: true,
-		Trim:       false,
+		HeaderOnly: !*full,
+		Random:     *random,
+		Trim:       *trim,
+		Verify:     *verify && !*noVerify,
+		NoVerify:   *noVerify,
 		Standard:   luks2.StandardCustom,
-		Verify:     false,
 	}
+	explicitNoVerify := *noVerify
 
-	var device string
-	var explicitNoVerify bool
-	for i := 2; i < len(c.Args); i++ {
-		switch c.Args[i] {
-		case "--full":
-			opts.HeaderOnly = false
-		case "--random":
-			opts.Random = true
-		case "--trim":
-			opts.Trim = true
-		case "--verify":
-			opts.Verify = true
-		case "--no-verify":
-			explicitNoVerify = true
-		case "--passes":
-			if i+1 < len(c.Args) {
-				i++
-				var passes int
-				_, err := fmt.Sscanf(c.Args[i], "%d", &passes)
-				if err != nil || passes < 1 {
-					_, _ = fmt.Fprintf(c.Stderr, "Invalid passes value: %s (must be >= 1)\n", c.Args[i])
-					return 1
-				}
-				opts.Passes = passes
-			} else {
-				_, _ = fmt.Fprintln(c.Stderr, "--passes requires a value")
-				return 1
-			}
-		case "--standard":
-			if i+1 < len(c.Args) {
-				i++
-				switch c.Args[i] {
-				case "nist":
-					opts.Standard = luks2.StandardNIST
-				case "dod3":
-					opts.Standard = luks2.StandardDoD3Pass
-				case "dod7":
-					opts.Standard = luks2.StandardDoD7Pass
-				default:
-					_, _ = fmt.Fprintf(c.Stderr, "Unknown standard: %s (valid: nist, dod3, dod7)\n", c.Args[i])
-					return 1
-				}
-			} else {
-				_, _ = fmt.Fprintln(c.Stderr, "--standard requires a value (nist, dod3, dod7)")
-				return 1
-			}
-		default:
-			if len(c.Args[i]) > 0 && c.Args[i][0] == '-' {
-				_, _ = fmt.Fprintf(c.Stderr, "Unknown option: %s\n", c.Args[i])
-				return 1
-			}
-			device = c.Args[i]
-		}
-	}
-
-	// Handle --no-verify override
-	if explicitNoVerify {
-		opts.Verify = false
-	}
-
-	if device == "" {
-		_, _ = fmt.Fprintln(c.Stderr, "Error: device path required")
+	// The whole argument must be a number, and a sane one: Sscanf stopped at
+	// the first non-digit, so "3x" was three passes.
+	n, err := strconv.Atoi(*passes)
+	if err != nil || n < 1 || n > maxWipePasses {
+		_, _ = fmt.Fprintf(c.Stderr, "Invalid passes value: %s (must be 1-%d)\n", *passes, maxWipePasses)
 		return 1
+	}
+	opts.Passes = n
+
+	switch *standard {
+	case "":
+	case "nist":
+		opts.Standard = luks2.StandardNIST
+	case "dod3":
+		opts.Standard = luks2.StandardDoD3Pass
+	case "dod7":
+		opts.Standard = luks2.StandardDoD7Pass
+	default:
+		_, _ = fmt.Fprintf(c.Stderr, "Unknown standard: %s (valid: nist, dod3, dod7)\n", *standard)
+		return 1
+	}
+
+	if len(args) != 1 {
+		_, _ = fmt.Fprintln(c.Stderr, "Error: exactly one device path required")
+		return 1
+	}
+	device, err := absPath("wipe", args[0])
+	if err != nil {
+		return c.usageError(err)
 	}
 
 	opts.Device = device
@@ -1013,14 +1183,10 @@ func (c *CLI) cmdWipe() int {
 		}
 	}
 
-	// Confirmation
-	_, _ = fmt.Fprint(c.Stdout, "\nType 'YES' to confirm wipe: ")
-	var confirm string
-	_, _ = fmt.Fscanln(c.Stdin, &confirm)
-
-	if confirm != "YES" {
-		_, _ = fmt.Fprintln(c.Stdout, "\nWipe canceled")
-		return 0
+	// Confirmation. Anything but YES -- end of input included -- cancels,
+	// and a canceled wipe exits non-zero: a script must not read it as done.
+	if err := c.confirmDestructive("\nType 'YES' to confirm wipe: ", batch()); err != nil {
+		return c.refuseUnconfirmed("Wipe", err)
 	}
 
 	if opts.HeaderOnly {
@@ -1065,6 +1231,9 @@ func (c *CLI) promptPassphrase(prompt string, confirm bool) ([]byte, error) {
 		defer ClearBytes(confirmation)
 		_, _ = fmt.Fprintln(c.Stdout)
 		if err != nil {
+			// The first passphrase is wiped here too: it is not returned,
+			// so nothing else ever will (#246 D13).
+			ClearBytes(passphrase)
 			return nil, &KeyInputError{Op: "failed to read confirmation", Source: "terminal", Err: err}
 		}
 
@@ -1082,36 +1251,39 @@ func (c *CLI) promptPassphrase(prompt string, confirm bool) ([]byte, error) {
 	return passphrase, nil
 }
 
-// ParseSize parses a size string like "100M" into bytes (exported for testing)
+// ParseSize parses a size string like "100M" into bytes (exported for testing).
+//
+// The WHOLE string must be a positive decimal number with an optional K, M, G
+// or T suffix (powers of 1024), and the result must fit an int64. Sscanf used
+// to stop at the first character it could not use, so "10x" and "1.5G" were
+// accepted as 10 bytes and 1 GiB, and a large value wrapped negative.
 func ParseSize(s string) (int64, error) {
 	if len(s) == 0 {
-		return 0, fmt.Errorf("empty size")
+		return 0, &UsageError{Command: "create", Detail: "empty size"}
 	}
 
-	// Get suffix
-	suffix := s[len(s)-1]
-	var multiplier int64 = 1
-
+	multiplier := int64(1)
 	valueStr := s
-	switch suffix {
+	switch s[len(s)-1] {
 	case 'K', 'k':
-		multiplier = 1024
-		valueStr = s[:len(s)-1]
+		multiplier = 1 << 10
 	case 'M', 'm':
-		multiplier = 1024 * 1024
-		valueStr = s[:len(s)-1]
+		multiplier = 1 << 20
 	case 'G', 'g':
-		multiplier = 1024 * 1024 * 1024
-		valueStr = s[:len(s)-1]
+		multiplier = 1 << 30
 	case 'T', 't':
-		multiplier = 1024 * 1024 * 1024 * 1024
+		multiplier = 1 << 40
+	}
+	if multiplier != 1 {
 		valueStr = s[:len(s)-1]
 	}
 
-	var value int64
-	_, err := fmt.Sscanf(valueStr, "%d", &value)
-	if err != nil {
-		return 0, fmt.Errorf("invalid size value: %s", s)
+	value, err := strconv.ParseInt(valueStr, 10, 64)
+	if err != nil || value <= 0 || strings.HasPrefix(valueStr, "+") {
+		return 0, &UsageError{Command: "create", Detail: fmt.Sprintf("invalid size %q: want a positive whole number with an optional K, M, G or T suffix", s)}
+	}
+	if value > math.MaxInt64/multiplier {
+		return 0, &UsageError{Command: "create", Detail: fmt.Sprintf("size %q is too large", s)}
 	}
 
 	return value * multiplier, nil

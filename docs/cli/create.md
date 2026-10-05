@@ -1,17 +1,31 @@
 # luks2 create
 
-> **Status: REFERENCE** · Last verified: 2026-10-04 against v0.3.1-alpha
+> **Status: REFERENCE** · Last verified: 2026-10-05 against v0.3.1-alpha
 
 ```
-luks2 create [--key-file <path>] [KDF options] <path> [size] [filesystem]
+luks2 create [--key-file <path>] [KDF options] [--batch-mode | --yes] [--force]
+             <path> [size] [filesystem]
 ```
 
-A `<path>` under `/dev/` is a block device; anything else is a file volume.
-Either way the path must be absolute.
+A block device is formatted in place; a path that does not exist yet is a new
+file volume. A relative path is resolved against the working directory. A path
+under `/dev/` (other than `/dev/shm/`) that is not a block device is refused.
 
 ## Block device
 
 Formats the device as LUKS2 and stops. `size` and `filesystem` are ignored.
+Before anything is asked:
+
+- A device the kernel reports in use (mounted, open as a mapping, held) is
+  refused. The device stays claimed with `O_EXCL` through the questions and is
+  released just before formatting.
+- A device holding a LUKS header (either copy) or a filesystem, RAID, LVM or
+  partition-table signature is refused, naming what was found. `--force`
+  formats over it.
+
+Then it asks you to type `YES`. Any other answer, end of input or a read error
+exits 1. `--batch-mode` (or `--yes`) skips the question. `--key-file -` reads
+standard input for the key, so it needs `--batch-mode`.
 
 ```bash
 sudo luks2 create /dev/sdb1
@@ -26,14 +40,16 @@ sudo luks2 create /srv/data.luks 1G          # ext4
 sudo luks2 create /srv/data.luks 500M xfs
 ```
 
-`size` is required: a whole number with an optional `K`, `M`, `G` or `T`
-suffix (powers of 1024, either case); no suffix means bytes. `filesystem` is
+`size` is required: a positive whole number with an optional `K`, `M`, `G` or
+`T` suffix (powers of 1024, either case); no suffix means bytes. Anything else
+(`1.5G`, `10x`, an overflowing value) is refused. `filesystem` is
 `ext4` (default), `xfs` or `vfat`. `zfs` needs a pool name and is not offered.
 
 Steps, in order:
 
-1. Refuse an unsupported filesystem, an unparsable size or an existing file.
-2. Create the file at `size` (sparse).
+1. Refuse an unsupported filesystem or an unparsable size.
+2. Create the file at `size` (sparse), with `O_EXCL` and `O_NOFOLLOW`, mode
+   0600. An existing file, or a symlink at the path, is refused.
 3. Read the passphrase and, from a terminal only, an optional label.
 4. Format. The rest of the 16 MiB header region is filled with random bytes,
    so that much is allocated.
@@ -41,15 +57,15 @@ Steps, in order:
 6. Open it as `/dev/mapper/luks-auto`.
 7. Run `mkfs.<filesystem>` on the mapping with the label.
 
-If reading the passphrase or formatting fails, the file is deleted and the
-command exits 1.
+If reading the passphrase or formatting fails, the file is deleted (only if it
+is still the file this run created) and the command exits 1.
 
-If step 5 or 6 fails, the command prints a warning and the manual command, and
-**exits 0** with the formatted container kept. A failed step 6 normally leaves
-no mapping, but if the error says the mapping may still be live, close
-`luks-auto` yourself. The loop device from step 5 stays attached. The name is
-always `luks-auto`, so creating a second file volume while one is open stops
-here.
+If step 5 or 6 fails, the command prints the error on stderr, detaches the
+loop device from step 5 (after a failed step 6), keeps the formatted container
+with the commands to finish by hand, and exits 1. A failed step 6 normally
+leaves no mapping, but if the error says the mapping may still be live, close
+`luks-auto` yourself. The name is always `luks-auto`, so creating a second file
+volume while one is open stops here.
 
 If step 7 fails, the command tries to close the mapping and detach the loop
 device, keeps the container file and exits 1. If either cleanup step fails it

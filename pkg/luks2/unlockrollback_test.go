@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -45,7 +46,14 @@ type fakeDeviceMapper struct {
 	// targets is the live dm state: name -> uuid.
 	targets map[string]string
 
+	// devNos is each target's device number, set by create. A target a test
+	// put in targets directly has fakeDefaultDevNo.
+	devNos  map[string]uint64
+	nextDev uint64
+
 	createErr error
+	loadErr   error
+	resumeErr error
 	nodeErr   error
 	readyErr  error
 	removeErr error
@@ -59,20 +67,32 @@ type fakeDeviceMapper struct {
 	removed  []string
 	inspects int
 
-	// loaded records the tables handed to createAndLoad, so a test can assert
-	// on WHAT device-mapper was given and not merely that it was called. The
-	// dm-crypt table is where the volume key used to travel; see
-	// unlockkeyring_test.go.
+	// loaded records the tables handed to load, so a test can assert on WHAT
+	// device-mapper was given and not merely that it was called. The dm-crypt
+	// table is where the volume key used to travel; see unlockkeyring_test.go.
 	loaded []devmapper.Table
 
-	// onCreate, when set, runs inside createAndLoad -- at the moment the kernel
-	// would be resolving the table -- so a test can observe state that exists
-	// only for the duration of the activation call.
-	onCreate func(name, uuid string, tables []devmapper.Table)
+	// onLoad, when set, runs inside load -- at the moment the kernel would be
+	// resolving the table -- so a test can observe state that exists only for
+	// the duration of the activation call.
+	onLoad func(name, uuid string, tables []devmapper.Table)
+
+	// readyInfo records the identity waitReady was asked to wait for.
+	readyInfo *devmapper.DeviceInfo
 }
 
+// fakeDefaultDevNo is the device number of a target a test placed directly.
+const fakeDefaultDevNo = 0xfe00
+
 func newFakeDeviceMapper() *fakeDeviceMapper {
-	return &fakeDeviceMapper{targets: map[string]string{}}
+	return &fakeDeviceMapper{targets: map[string]string{}, devNos: map[string]uint64{}, nextDev: 0xfe10}
+}
+
+func (f *fakeDeviceMapper) devNoOf(name string) uint64 {
+	if devNo, ok := f.devNos[name]; ok {
+		return devNo
+	}
+	return fakeDefaultDevNo
 }
 
 func (f *fakeDeviceMapper) install(t *testing.T) {
@@ -81,25 +101,39 @@ func (f *fakeDeviceMapper) install(t *testing.T) {
 	previous := dm
 	t.Cleanup(func() { dm = previous })
 
+	// A fake device mapper maps the regular-file images the unit tests use.
+	withImageAsBlockDevice(t)
+
 	dm = deviceMapper{
-		createAndLoad: func(name, uuid string, _ uint32, tables ...devmapper.Table) error {
-			for _, table := range tables {
-				f.loaded = append(f.loaded, snapshotTable(table))
-			}
-			if f.onCreate != nil {
-				f.onCreate(name, uuid, tables)
-			}
+		create: func(name, uuid string) (uint64, error) {
 			if f.createErr != nil {
-				return f.createErr
+				return 0, f.createErr
 			}
 			if _, exists := f.targets[name]; exists {
 				// What the kernel does: a create against a name in use fails.
-				return os.NewSyscallError("dm ioctl", unix.EBUSY)
+				return 0, os.NewSyscallError("dm ioctl DM_DEV_CREATE", unix.EBUSY)
+			}
+			// What the kernel stores: a C string of at most 128 bytes.
+			if i := strings.IndexByte(uuid, 0); i >= 0 {
+				uuid = uuid[:i]
+			}
+			if len(uuid) > dmUUIDMaxLength {
+				uuid = uuid[:dmUUIDMaxLength]
 			}
 			f.targets[name] = uuid
+			f.devNos[name] = f.nextDev
+			f.nextDev++
 			f.created = append(f.created, name)
-			return nil
+			return f.devNos[name], nil
 		},
+		load: func(name string, table devmapper.Table) error {
+			f.loaded = append(f.loaded, snapshotTable(table))
+			if f.onLoad != nil {
+				f.onLoad(name, f.targets[name], []devmapper.Table{table})
+			}
+			return f.loadErr
+		},
+		resume: func(string) error { return f.resumeErr },
 		infoByName: func(name string) (*devmapper.DeviceInfo, error) {
 			f.inspects++
 			if f.infoErr != nil {
@@ -109,7 +143,7 @@ func (f *fakeDeviceMapper) install(t *testing.T) {
 			if !exists {
 				return nil, os.NewSyscallError("dm ioctl", unix.ENXIO)
 			}
-			return &devmapper.DeviceInfo{Name: name, UUID: uuid, DevNo: 0xfe00}, nil
+			return &devmapper.DeviceInfo{Name: name, UUID: uuid, DevNo: f.devNoOf(name)}, nil
 		},
 		remove: func(name string) error {
 			f.removed = append(f.removed, name)
@@ -117,10 +151,14 @@ func (f *fakeDeviceMapper) install(t *testing.T) {
 				return f.removeErr
 			}
 			delete(f.targets, name)
+			delete(f.devNos, name)
 			return nil
 		},
-		ensureNode: func(string) error { return f.nodeErr },
-		waitReady:  func(string) error { return f.readyErr },
+		ensureNode: func(string, *devmapper.DeviceInfo) error { return f.nodeErr },
+		waitReady: func(_ string, info *devmapper.DeviceInfo) error {
+			f.readyInfo = info
+			return f.readyErr
+		},
 	}
 }
 
@@ -178,6 +216,25 @@ func unlockableVolume(t *testing.T) (string, []byte) {
 	return path, []byte(conformancePassphrase)
 }
 
+// fakeBackingDevNo is the device number a regular-file image is given when a
+// test maps it through the fake device mapper.
+const fakeBackingDevNo = 0x0703 // 7:3, a loop device
+
+// withImageAsBlockDevice lets Unlock map a regular-file image: the unit tests
+// cannot create block devices, and Unlock refuses anything else (C6). The
+// fstat seam reports the image as loop device 7:3, and cryptsetup's lock
+// directory is one of the test's own, so the read lock Unlock takes for 7:3
+// never touches the host's /run/cryptsetup.
+func withImageAsBlockDevice(t *testing.T) {
+	t.Helper()
+
+	previous := blockDeviceOf
+	previousDir := cryptsetupLockDir
+	t.Cleanup(func() { blockDeviceOf, cryptsetupLockDir = previous, previousDir })
+	blockDeviceOf = func(*os.File) (uint64, error) { return fakeBackingDevNo, nil }
+	cryptsetupLockDir = filepath.Join(t.TempDir(), "cryptsetup")
+}
+
 // TestUnlockRemovesTheMappingWhenReadinessFails is the regression test for #76.
 //
 // Before the fix this failed on the final assertion: Unlock reported "device not
@@ -213,23 +270,17 @@ func TestUnlockRemovesTheMappingWhenReadinessFails(t *testing.T) {
 // TestUnlockRemovesTheMappingWhenTheLoadItselfFailsPartway covers the other
 // half of the same transaction.
 //
-// devmapper.CreateAndLoad is create-then-load-then-resume and only unwinds the
-// MIDDLE step: a failed table load is cleaned up, a failed resume is not. So a
-// CreateAndLoad error can also leave a target behind, and the rollback has to
-// run on that path too rather than only after a successful create.
+// The activation is create-then-load-then-resume, and a failure after the
+// create leaves a target behind whichever step it was. The rollback has to run
+// on that path too, not only after the readiness check.
 func TestUnlockRemovesTheMappingWhenTheLoadItselfFailsPartway(t *testing.T) {
 	device, passphrase := unlockableVolume(t)
 
 	fake := newFakeDeviceMapper()
+	// Model a failed resume: the target exists and has its table, and the
+	// activation still reports failure.
+	fake.resumeErr = errors.New("device-mapper resume failed")
 	fake.install(t)
-
-	// Model a failed resume: the target exists, and CreateAndLoad still
-	// reports failure.
-	previous := dm.createAndLoad
-	dm.createAndLoad = func(name, uuid string, flags uint32, tables ...devmapper.Table) error {
-		_ = previous(name, uuid, flags, tables...)
-		return errors.New("device-mapper resume failed")
-	}
 
 	err := Unlock(device, passphrase, "half-created")
 	if err == nil {
@@ -259,9 +310,9 @@ func TestUnlockRefusesToRemoveAMappingItDidNotCreate(t *testing.T) {
 	// Between the create and the readiness check, somebody else's mapping takes
 	// over the name.
 	previous := dm.waitReady
-	dm.waitReady = func(name string) error {
+	dm.waitReady = func(name string, info *devmapper.DeviceInfo) error {
 		fake.targets[name] = "CRYPT-LUKS2-somebodyelse-" + name
-		return previous(name)
+		return previous(name, info)
 	}
 
 	if err := Unlock(device, passphrase, "contended"); err == nil {
@@ -303,7 +354,7 @@ func TestUnlockReportsAMappingItCouldNotRemove(t *testing.T) {
 	if !strings.Contains(err.Error(), "not ready") {
 		t.Fatalf("the readiness failure was lost behind the rollback failure: %v", err)
 	}
-	if !strings.Contains(err.Error(), "luks close stuck") {
+	if !strings.Contains(err.Error(), "luks2 close stuck") {
 		t.Fatalf("the error does not tell an operator how to clean up: %v", err)
 	}
 }
@@ -346,9 +397,9 @@ func TestUnlockTreatsAnAbsentTargetAsNothingToClean(t *testing.T) {
 
 	// Model devmapper's own cleanup having already removed the target.
 	previous := dm.waitReady
-	dm.waitReady = func(name string) error {
+	dm.waitReady = func(name string, info *devmapper.DeviceInfo) error {
 		delete(fake.targets, name)
-		return previous(name)
+		return previous(name, info)
 	}
 
 	err := Unlock(device, passphrase, "already-gone")
@@ -421,7 +472,7 @@ func TestRemoveCreatedMappingMatchesOnTheUUIDNotTheName(t *testing.T) {
 	const name = "shared-name"
 	fake.targets[name] = "CRYPT-LUKS2-theirs-" + name
 
-	if err := removeCreatedMapping(name, "CRYPT-LUKS2-ours-"+name); err != nil {
+	if err := removeCreatedMapping(name, "CRYPT-LUKS2-ours-"+name, fakeDefaultDevNo); err != nil {
 		t.Fatalf("removeCreatedMapping reported a failure for a foreign target: %v", err)
 	}
 	if len(fake.removed) != 0 {
@@ -430,7 +481,7 @@ func TestRemoveCreatedMappingMatchesOnTheUUIDNotTheName(t *testing.T) {
 
 	// The same name, now genuinely ours, must be removed.
 	fake.targets[name] = "CRYPT-LUKS2-ours-" + name
-	if err := removeCreatedMapping(name, "CRYPT-LUKS2-ours-"+name); err != nil {
+	if err := removeCreatedMapping(name, "CRYPT-LUKS2-ours-"+name, fakeDefaultDevNo); err != nil {
 		t.Fatalf("removeCreatedMapping failed on its own target: %v", err)
 	}
 	if _, exists := fake.targets[name]; exists {

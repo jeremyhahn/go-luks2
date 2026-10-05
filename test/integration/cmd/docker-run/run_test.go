@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -172,5 +173,48 @@ func TestHostSystem_IsTheRealOne(t *testing.T) {
 	}
 	if sys.exec == nil {
 		t.Fatal("exec is nil")
+	}
+}
+
+// TestLedgerDirMovesBelowAUserOwnedStateDir: a state directory an ordinary
+// user owns -- the default, once anything ran as that user -- is not mounted
+// as the ledger, which the root reaper must not trust, and is not refused
+// either: the ledger is a subdirectory Docker creates as root. A root-owned or
+// absent directory is used as configured.
+func TestLedgerDirMovesBelowAUserOwnedStateDir(t *testing.T) {
+	dir := t.TempDir()
+	want := dir
+	if os.Getuid() != 0 {
+		want = filepath.Join(dir, rootLedgerSubdir)
+	}
+	if got := ledgerDir(dir, os.Lstat); got != want {
+		t.Fatalf("ledgerDir(%s owned by uid %d) = %s, want %s", dir, os.Getuid(), got, want)
+	}
+
+	absent := filepath.Join(dir, "absent")
+	if got := ledgerDir(absent, os.Lstat); got != absent {
+		t.Fatalf("ledgerDir(absent) = %s, want it unchanged", got)
+	}
+	file := filepath.Join(dir, "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := ledgerDir(file, os.Lstat); got != file {
+		t.Fatalf("ledgerDir(a file) = %s, want it unchanged for the harness to refuse", got)
+	}
+	root := func(string) (os.FileInfo, error) { return os.Lstat("/") }
+	if got := ledgerDir(dir, root); got != dir {
+		t.Fatalf("ledgerDir(root-owned) = %s, want it unchanged", got)
+	}
+
+	_, inside := moduleWithProfile(t)
+	f := &fakeSystem{devices: devicesWithDM, wd: inside, env: map[string]string{"TEST_STATE_DIR": dir}}
+	sys := f.system()
+	sys.lstat = os.Lstat
+	if err := run([]string{"--", "true"}, sys); err != nil {
+		t.Fatal(err)
+	}
+	if mount := dir + ":" + containerStateDir; os.Getuid() != 0 && strings.Contains(strings.Join(f.argv, " "), mount) {
+		t.Fatalf("the user-owned state directory itself was mounted: %v", f.argv)
 	}
 }

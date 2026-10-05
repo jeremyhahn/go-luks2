@@ -311,11 +311,26 @@ func bufferedLoopBehind(backing string) (string, error) {
 // A primary whose size is not a legal header size is left for the header
 // reader to refuse.
 func requireCacheMatchesMedium(device string) error {
+	f, err := openDevice("read the device", device, os.O_RDONLY)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }() // read-only: a close error loses nothing
+	return requireCacheMatchesMediumOf(f, device)
+}
+
+// requireCacheMatchesMediumOf is requireCacheMatchesMedium for an operation
+// that already holds the device: cached is what it reads through -- its pinned
+// descriptor (#255) -- and path names the same file for the reads past the
+// cache (keyslotDevice.mediumPath), so no step resolves the operator's path
+// again.
+func requireCacheMatchesMediumOf(cached io.ReaderAt, path string) error {
+	device := path
 	sources, err := mediumSources(device)
 	if err != nil {
 		return err
 	}
-	head, err := compareRegion(device, sources, LUKS2HeaderSize)
+	head, err := compareRegion(cached, device, sources, LUKS2HeaderSize)
 	if err != nil {
 		return err
 	}
@@ -326,17 +341,19 @@ func requireCacheMatchesMedium(device string) error {
 	if size < LUKS2HeaderMinSize || size > LUKS2HeaderMaxSize || !isPowerOf2(int(size)) {
 		return nil
 	}
-	_, err = compareRegion(device, sources, 2*int(size))
+	_, err = compareRegion(cached, device, sources, 2*int(size))
 	return err
 }
 
-// compareRegion reads the first n bytes of device through the page cache and
+// compareRegion reads the first n bytes through r -- the page cache -- and
 // past it at every source, and returns the cached bytes if all agree.
-func compareRegion(device string, sources []mediumSource, n int) ([]byte, error) {
-	cached, err := readBufferedAt(device, 0, n)
-	if err != nil {
-		return nil, err
+func compareRegion(r io.ReaderAt, device string, sources []mediumSource, n int) ([]byte, error) {
+	cached := make([]byte, n)
+	read, err := r.ReadAt(cached, 0)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, &detailError{Detail: "failed to read the device", Err: err}
 	}
+	cached = cached[:read]
 	for _, src := range sources {
 		medium, err := readDeviceDirect(src.path, src.offset, len(cached))
 		if err != nil {

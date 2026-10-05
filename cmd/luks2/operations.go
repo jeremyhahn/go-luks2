@@ -119,8 +119,8 @@ func (d *DefaultLuksOperations) ReadSecondaryHeader(device string) (*luks2.LUKS2
 	return luks2.ReadSecondaryHeader(device)
 }
 
-func (d *DefaultLuksOperations) RestorePrimaryHeader(device string) error {
-	return luks2.RestorePrimaryHeader(device)
+func (d *DefaultLuksOperations) RestorePrimaryHeader(device string, opts luks2.RestoreHeaderOptions) error {
+	return luks2.RestorePrimaryHeaderWithOptions(device, opts)
 }
 
 func (d *DefaultLuksOperations) IsLUKS(device string) (bool, error) {

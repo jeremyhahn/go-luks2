@@ -6,6 +6,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -27,6 +28,8 @@ func (c *CLI) headerUsage() int {
 	_, _ = fmt.Fprintln(c.Stdout, "  show <device>        Show the primary header")
 	_, _ = fmt.Fprintln(c.Stdout, "  secondary <device>   Show the secondary header copy")
 	_, _ = fmt.Fprintln(c.Stdout, "  restore <device>     Overwrite the primary header with the secondary copy")
+	_, _ = fmt.Fprintln(c.Stdout, "                       (--batch-mode or --yes skips the confirmation;")
+	_, _ = fmt.Fprintln(c.Stdout, "                       --force restores over an intact primary that is not older)")
 	_, _ = fmt.Fprintln(c.Stdout, "")
 	_, _ = fmt.Fprintln(c.Stdout, "Examples:")
 	_, _ = fmt.Fprintln(c.Stdout, "  luks2 header show /dev/sdb1")
@@ -42,6 +45,12 @@ func (c *CLI) cmdHeader() int {
 	}
 
 	o := newOptions("header " + c.Args[2])
+	batch := func() bool { return false }
+	force := new(bool)
+	if c.Args[2] == "restore" {
+		batch = batchFlags(o)
+		force = o.Bool("force")
+	}
 	args, err := o.parse(c.Args[3:])
 	if err != nil {
 		return c.usageError(err)
@@ -49,7 +58,10 @@ func (c *CLI) cmdHeader() int {
 	if len(args) < 1 {
 		return c.headerUsage()
 	}
-	device := args[0]
+	device, err := absPath("header "+c.Args[2], args[0])
+	if err != nil {
+		return c.usageError(err)
+	}
 
 	switch c.Args[2] {
 	case "show":
@@ -57,7 +69,7 @@ func (c *CLI) cmdHeader() int {
 	case "secondary":
 		return c.showHeader(device, "Secondary", c.Luks.ReadSecondaryHeader)
 	case "restore":
-		return c.cmdHeaderRestore(device)
+		return c.cmdHeaderRestore(device, batch(), luks2.RestoreHeaderOptions{Force: *force})
 	default:
 		_, _ = fmt.Fprintf(c.Stderr, "Unknown header subcommand: %s\n\n", c.Args[2])
 		return c.headerUsage()
@@ -101,19 +113,33 @@ func (c *CLI) showHeader(device, which string, read headerReader) int {
 }
 
 // cmdHeaderRestore overwrites the primary header with the secondary copy.
-func (c *CLI) cmdHeaderRestore(device string) int {
+//
+// Without --force the library refuses an intact primary that is not older
+// than the secondary (ErrPrimaryHeaderCurrent): that restore is a ROLLBACK,
+// not a repair. --force asks for it anyway, and still needs the typed YES or
+// --batch-mode -- forcing is what makes the confirmation matter most.
+func (c *CLI) cmdHeaderRestore(device string, batch bool, opts luks2.RestoreHeaderOptions) int {
 	_, _ = fmt.Fprintf(c.Stdout, "This overwrites the PRIMARY header on %s with the secondary copy.\n", device)
 	_, _ = fmt.Fprintln(c.Stdout, "If the secondary copy is older, changes recorded only in the primary")
 	_, _ = fmt.Fprintln(c.Stdout, "header -- a keyslot added since, a token written since -- are lost.")
 	_, _ = fmt.Fprintln(c.Stdout, "Compare them first with 'luks2 header show' and 'luks2 header secondary'.")
-
-	if !c.confirm("Type 'YES' to restore the primary header: ") {
-		_, _ = fmt.Fprintln(c.Stdout, "Restore canceled")
-		return 0
+	if opts.Force {
+		_, _ = fmt.Fprintln(c.Stdout, "")
+		_, _ = fmt.Fprintln(c.Stdout, "--force: the primary is restored over even when it is intact and current.")
+		_, _ = fmt.Fprintln(c.Stdout, "That ROLLS THE VOLUME BACK: a passphrase removed since may open it again.")
 	}
 
-	if err := c.Luks.RestorePrimaryHeader(device); err != nil {
+	// Anything but YES cancels, and a canceled restore exits non-zero.
+	if err := c.confirmDestructive("Type 'YES' to restore the primary header: ", batch); err != nil {
+		return c.refuseUnconfirmed("Restore", err)
+	}
+
+	if err := c.Luks.RestorePrimaryHeader(device, opts); err != nil {
 		_, _ = fmt.Fprintf(c.Stderr, "Failed to restore the primary header: %v\n", err)
+		if errors.Is(err, luks2.ErrPrimaryHeaderCurrent) {
+			_, _ = fmt.Fprintln(c.Stderr, "The primary is intact and not older than the secondary, so restoring would roll it back.")
+			_, _ = fmt.Fprintln(c.Stderr, "If that is what you want, pass --force.")
+		}
 		return 1
 	}
 
@@ -147,7 +173,10 @@ func (c *CLI) cmdIsLUKS() int {
 		return 1
 	}
 
-	device := args[0]
+	device, err := absPath("isluks", args[0])
+	if err != nil {
+		return c.usageError(err)
+	}
 
 	var (
 		is   bool
@@ -170,19 +199,6 @@ func (c *CLI) cmdIsLUKS() int {
 
 	_, _ = fmt.Fprintf(c.Stdout, "%s is a %s device\n", device, kind)
 	return 0
-}
-
-// confirm asks for an explicit YES before a destructive operation.
-//
-// It reads with Fscanln from the same stream everything else does, which is the
-// existing convention here (see cmdWipe): a script that means it writes YES on
-// stdin, and a script that does not gets a refusal rather than a surprise.
-func (c *CLI) confirm(prompt string) bool {
-	_, _ = fmt.Fprint(c.Stdout, prompt)
-
-	var answer string
-	_, _ = fmt.Fscanln(c.Stdin, &answer)
-	return answer == "YES"
 }
 
 // trimNUL renders a fixed-size C string field from the binary header.

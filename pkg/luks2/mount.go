@@ -20,12 +20,15 @@ import (
 type MountOptions struct {
 	Device     string  // Device mapper name (e.g., "my-volume")
 	MountPoint string  // Where to mount (e.g., "/mnt/encrypted")
-	FSType     string  // Filesystem type (e.g., "ext4", "xfs")
+	FSType     string  // Filesystem type (e.g., "ext4", "xfs"); empty detects it (DetectFilesystem)
 	Flags      uintptr // Mount flags (unix.MS_RDONLY, etc.)
 	Data       string  // Mount data/options
 }
 
 // Mount mounts an unlocked LUKS volume using syscall.
+//
+// An empty opts.FSType mounts the filesystem DetectFilesystem finds on the
+// mapping, and refuses with ErrFilesystemNotDetected when it finds none.
 //
 // There is deliberately no already-mounted refusal, and no ErrAlreadyMounted
 // sentinel for one to return (#70). Linux permits STACKING a mount over an
@@ -34,29 +37,101 @@ type MountOptions struct {
 // the kernel offers. A caller that wants to know asks IsMounted, which is
 // exported and answers exactly that question.
 func Mount(opts MountOptions) error {
-	// Get the device path (handles both udev and non-udev environments)
-	devicePath, err := GetMappedDevicePath(opts.Device)
+	// opts.Device is a MAPPING NAME, resolved only through device-mapper: the
+	// name is validated, and the node mounted must carry the target's device
+	// number. A name that merely stat'd as a block device under /dev/mapper
+	// used to be enough, so "../sdb" mounted /dev/sdb and a stale mapper entry
+	// mounted whatever it pointed at (#250, C3 and C5). See mappedDevicePath.
+	devicePath, _, err := mappedDevicePath(opts.Device)
 	if err != nil {
-		return fmt.Errorf("%w: no mapping named %q was found, so there is nothing to mount", ErrVolumeNotUnlocked, opts.Device)
-	}
-
-	// Check if device exists
-	if _, err := os.Stat(devicePath); err != nil {
-		return fmt.Errorf("%w: the mapping named %q resolves to %s, which is not there", ErrVolumeNotUnlocked, opts.Device, devicePath)
+		return err
 	}
 
 	// Check if mount point exists
 	if _, err := os.Stat(opts.MountPoint); os.IsNotExist(err) {
-		return fmt.Errorf("mount point %s does not exist", opts.MountPoint)
+		return &detailError{Detail: "mount point " + opts.MountPoint + " does not exist", Err: err}
 	}
 
-	// Use syscall to mount
-	err = unix.Mount(devicePath, opts.MountPoint, opts.FSType, opts.Flags, opts.Data)
-	if err != nil {
-		return fmt.Errorf("mount syscall failed: %w", err)
+	// No type named means the type ON THE DEVICE, as blkid identifies it --
+	// never an assumed one. Mounting under the wrong type fails at best, and
+	// a caller that hard-codes ext4 cannot mount the xfs volume create made.
+	fsType := opts.FSType
+	if fsType == "" {
+		detected, err := probeFilesystem(probeOutput, devicePath)
+		if err != nil {
+			return err
+		}
+		fsType = string(detected)
+	}
+
+	if err := unix.Mount(devicePath, opts.MountPoint, fsType, opts.Flags, opts.Data); err != nil {
+		return &detailError{Detail: "mount syscall failed (" + fsType + ")", Err: err}
 	}
 
 	return nil
+}
+
+// mountInfoPath is the mount table IsMappingMounted reads. A variable so the
+// unit tests can hand it a table they wrote.
+var mountInfoPath = "/proc/self/mountinfo"
+
+// IsMappingMounted reports whether a filesystem on the device-mapper mapping
+// name is mounted, in this process's mount namespace.
+//
+// It matches the mounted DEVICE, by number, and not a path. /proc/self/mountinfo
+// records each mount's st_dev as major:minor, and that is compared with the
+// mapping's dm DevNo. IsMounted answers a different question -- whether a PATH
+// is a mount point -- and the CLI's close used to ask it about
+// "/dev/mapper/<name>", which is never a mount point, so the still-mounted
+// refusal could not fire (#250, C10). Matching a source path instead would
+// still miss a filesystem mounted through /dev/dm-N or a udev alias.
+//
+// A mapping that does not exist is not mounted: false, nil. A name that is not
+// a valid mapping name is refused with ErrInvalidMappingName, and a mount table
+// that cannot be read is an error rather than "not mounted".
+//
+// A filesystem whose st_dev is not the block device's own -- a ZFS pool on the
+// mapping, for example -- is not seen here; device-mapper still refuses to
+// remove a mapping that is held open, so Lock fails on it with ErrMappingBusy.
+func IsMappingMounted(name string) (bool, error) {
+	if err := ValidateMappingName(name); err != nil {
+		return false, err
+	}
+	info, err := dm.infoByName(name)
+	if err != nil {
+		if isNoSuchDevice(err) {
+			return false, nil
+		}
+		return false, &VolumeError{Volume: name, Op: "inspect the device-mapper target of", Err: err}
+	}
+
+	f, err := os.Open(mountInfoPath)
+	if err != nil {
+		return false, &detailError{Detail: "failed to open " + mountInfoPath, Err: err}
+	}
+	defer func() { _ = f.Close() }()
+
+	major, minor := decodeDevNo(info.DevNo)
+	return deviceListedInMountInfo(f, major, minor)
+}
+
+// deviceListedInMountInfo reports whether any mount in a mountinfo-formatted
+// stream is of the device major:minor. The third field of every mountinfo line
+// is that device number (proc(5)).
+func deviceListedInMountInfo(r io.Reader, major, minor uint32) (bool, error) {
+	want := strconv.FormatUint(uint64(major), 10) + ":" + strconv.FormatUint(uint64(minor), 10)
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) >= 3 && fields[2] == want {
+			return true, nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return false, &detailError{Detail: "error reading " + mountInfoPath, Err: err}
+	}
+	return false, nil
 }
 
 // umountFlags is every flag umount2(2) defines, as one mask.

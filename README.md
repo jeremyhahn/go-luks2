@@ -31,8 +31,8 @@ go get github.com/jeremyhahn/go-luks2/pkg/luks2               # library
 
 ## CLI quick start
 
-Device and container-file paths must be absolute; the library refuses relative
-ones. Key files and output files may be relative.
+The CLI resolves relative paths against the working directory. The library
+itself takes absolute device and container-file paths only.
 
 ```bash
 # A file-backed volume: creates the file, formats it, attaches a loop
@@ -121,7 +121,8 @@ make help              # every target
 - Keyslot areas must be AES-XTS (`aes-xts-plain64`, or `aes-xts-plain` on
   read). The data segment cipher is passed to dm-crypt as the header declares
   it.
-- No online reencryption, and no dm-integrity.
+- No online reencryption (a container mid-reencryption is refused for
+  activation), and no dm-integrity.
 
 ## License
 

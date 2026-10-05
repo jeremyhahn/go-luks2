@@ -260,7 +260,7 @@ func TestMigrateToFIPSRefusesToWipeOutsideTheKeyslotsArea(t *testing.T) {
 			stray.KDF = &KDF{Type: KDFTypeArgon2id, Salt: stray.KDF.Salt, Time: &cost, Memory: &memory, CPUs: &cpus}
 			metadata.Keyslots["1"] = &stray
 			hdr.SequenceID++
-			if err := writeHeaderInternal(device, hdr, metadata); err != nil {
+			if err := writeHeaderUnvalidated(device, hdr, metadata); err != nil {
 				t.Fatalf("writing the fixture failed: %v", err)
 			}
 			before := fileDigest(t, device)
@@ -312,7 +312,7 @@ func TestMigrateToFIPSReadsNoKeyslotOutsideKeyslotSpace(t *testing.T) {
 			area.Size = formatSize(dataOffset + 4096 - offset)
 			keyslot.Area = &area
 			hdr.SequenceID++
-			if err := writeHeaderInternal(device, hdr, metadata); err != nil {
+			if err := writeHeaderUnvalidated(device, hdr, metadata); err != nil {
 				t.Fatalf("writing the fixture failed: %v", err)
 			}
 			before := fileDigest(t, device)

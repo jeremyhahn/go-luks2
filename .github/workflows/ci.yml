@@ -108,10 +108,10 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -146,10 +146,10 @@ jobs:
     # govulncheck pass.
     needs: [lint, build, test-unit]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -206,7 +206,7 @@ jobs:
       # scan itself has already run and already failed the job on a finding.
       - name: Upload gosec SARIF
         if: always() && github.server_url == 'https://github.com'
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3
         with:
           sarif_file: gosec.sarif
           category: gosec
@@ -223,10 +223,10 @@ jobs:
     name: Unit Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -313,7 +313,7 @@ jobs:
       # already run and already gated; only the artifact is skipped.
       - name: Upload coverage
         if: github.server_url == 'https://github.com'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: coverage-unit
           path: coverage.out
@@ -415,10 +415,10 @@ jobs:
     # is why it runs inside the container and never bare on a shared runner.
     needs: [lint, build, test-unit]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -611,7 +611,7 @@ jobs:
 
       - name: Upload integration coverage
         if: always() && github.server_url == 'https://github.com'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: coverage-integration
           path: coverage-integration.out
@@ -623,10 +623,10 @@ jobs:
     # FAST TIER (v1.9): no `needs`. build runs alongside lint and test-unit so
     # the three of them together are the gate the expensive tier waits on.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -635,13 +635,13 @@ jobs:
         env:
           GOOS: linux
           GOARCH: amd64
-        run: go build -o luks-linux-amd64 ./cmd/luks2
+        run: go build -trimpath -o luks-linux-amd64 ./cmd/luks2
 
       - name: Build linux/arm64
         env:
           GOOS: linux
           GOARCH: arm64
-        run: go build -o luks-linux-arm64 ./cmd/luks2
+        run: go build -trimpath -o luks-linux-arm64 ./cmd/luks2
 
       # 32-BIT TARGETS, COMPILE ONLY. Both existing legs are 64-bit, so nothing
       # in this repository had ever compiled for a platform where `int` is 32
@@ -687,7 +687,7 @@ jobs:
 
       - name: Upload artifacts
         if: github.server_url == 'https://github.com'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: binaries
           path: luks-linux-*
@@ -720,12 +720,12 @@ jobs:
     steps:
       # Full history: merge-tree needs the base branch, and the default shallow
       # fetch does not have it.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true

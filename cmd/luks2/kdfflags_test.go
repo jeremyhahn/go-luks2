@@ -215,7 +215,7 @@ func TestCreatePassesTheKDFChoiceToFormat(t *testing.T) {
 
 	for name, target := range map[string][]string{
 		"file":         {filepath.Join(dir, "vol.luks"), "32M", "ext4"},
-		"block device": {"/dev/sdz9"},
+		"block device": {"--batch-mode", "/dev/sdz9"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			args := append([]string{"luks2", "create", "--key-file", keyFile}, kdfArgs...)

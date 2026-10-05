@@ -21,14 +21,17 @@ COMMANDS:
                                  - Block device: luks2 create /dev/sdb1
                                  - File volume:  luks2 create /srv/encrypted.luks 100M
                                  Options: --pbkdf argon2id|pbkdf2 and its cost
-                                 options (default: pbkdf2 in FIPS 140-3 mode)
+                                 options (default: pbkdf2 in FIPS 140-3 mode);
+                                 on a block device: asks for YES unless
+                                 --batch-mode, refuses existing data unless --force
     open <device> <name>         Unlock and open a LUKS volume
     close <name>                 Lock and close a LUKS volume
-    mount <name> <mountpoint>    Mount an unlocked volume
+    mount <name> <mountpoint>    Mount an unlocked volume (type detected, or --type)
     unmount <mountpoint>         Unmount a volume
     info <device>                Show volume information
-    wipe [options] <device>      Securely wipe a volume
-                                 Options: --full, --passes N, --random, --trim
+    wipe [options] <device>      Securely wipe a volume (asks for YES)
+                                 Options: --full, --passes N, --random, --trim,
+                                 --batch-mode
 
 KEYSLOTS:
     keyslots <device>            List the keyslots on a volume
@@ -57,6 +60,7 @@ HEADER:
     header show <device>         Show the primary header
     header secondary <device>    Show the secondary header copy
     header restore <device>      Overwrite the primary header from the secondary
+                                 (asks for YES unless --batch-mode)
     isluks [--luks2] <device>    Exit 0 if the device holds a LUKS container
 
     help                         Show this help message
@@ -90,7 +94,7 @@ EXAMPLES:
     # First use of a block device: make a filesystem
     sudo mkfs.ext4 /dev/mapper/my-encrypted-disk
 
-    # Mount the unlocked volume (as ext4)
+    # Mount the unlocked volume (the filesystem type is detected)
     sudo luks2 mount my-encrypted-disk /mnt/encrypted
 
     # Use your encrypted storage

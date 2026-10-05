@@ -30,11 +30,10 @@ import (
 // feeding it a constant changes the very property under measurement.
 var cryptoRand io.Reader = rand.Reader
 
-// clearBytes securely zeros a byte slice
+// clearBytes securely zeros a byte slice. The clear builtin is a memclr the
+// compiler cannot drop: the slice's memory outlives the call.
 func clearBytes(b []byte) {
-	for i := range b {
-		b[i] = 0
-	}
+	clear(b)
 }
 
 // randomBytes generates cryptographically secure random bytes
@@ -89,7 +88,7 @@ const randomFillChunk = keyslotWipeChunk
 // writeRandom writes size bytes of CSPRNG output at the file's current
 // position, in fixed-size chunks.
 //
-// It is the counterpart of writeZeros and exists for the same reason that one
+// It is the counterpart of zeroRange (wipe.go) and exists for the same reason that one
 // chunks: size is derived from a header, and a single make([]byte, size) hands
 // an attacker-influenced number to the allocator. Here the argument is stronger
 // still -- the largest caller fills the whole unallocated keyslots region, ~16

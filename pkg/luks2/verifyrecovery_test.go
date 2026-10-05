@@ -179,9 +179,14 @@ func TestGetMasterKeyDistinguishesFailureToTryFromFailureToVerify(t *testing.T) 
 	})
 
 	t.Run("could not be tried", func(t *testing.T) {
+		// Config and segments come along: the scan confines every keyslot area
+		// to keyslot space before reading it (#249), and the header it reads
+		// that from is part of the fixture.
 		damaged := &LUKS2Metadata{
 			Keyslots: map[string]*Keyslot{"0": cloneKeyslot(metadata.Keyslots["0"])},
 			Digests:  metadata.Digests,
+			Segments: metadata.Segments,
+			Config:   metadata.Config,
 		}
 		damaged.Keyslots["0"].KDF = nil
 
@@ -215,7 +220,9 @@ func TestGetMasterKeyDistinguishesFailureToTryFromFailureToVerify(t *testing.T) 
 				"0": cloneKeyslot(metadata.Keyslots["0"]),
 				"7": cloneKeyslot(metadata.Keyslots["0"]),
 			},
-			Digests: digests,
+			Digests:  digests,
+			Segments: metadata.Segments,
+			Config:   metadata.Config,
 		}
 		mixed.Keyslots["0"].KDF = nil
 

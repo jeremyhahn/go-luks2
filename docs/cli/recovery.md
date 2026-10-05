@@ -1,6 +1,6 @@
 # luks2 recovery
 
-> **Status: REFERENCE** · Last verified: 2026-10-04 against v0.3.1-alpha
+> **Status: REFERENCE** · Last verified: 2026-10-05 against v0.3.1-alpha
 
 ```
 luks2 recovery generate [--format <name>] [--length <n>] [--output <path>]
@@ -27,17 +27,21 @@ with stock cryptsetup: `cryptsetup open /dev/sdb1 vault` and paste. Type it
 exactly as shown; dashes and case are part of it. The `Checksum (not secret)`
 line is a SHA-256 of the key for checking a transcription; it opens nothing.
 
+If `add` cannot print the key (the write to standard output fails) and it was
+not saved with `--output`, the keyslot and token are removed again and the
+command exits 1. If that removal fails, the error names the slot to kill.
+
 | `--format` | Example | Characters for 32 bytes |
 |---|---|---|
 | `dashed` (default) | `56D3DF-C65CED-…` (uppercase hex, groups of 6) | 74 |
 | `hex` | `6920392130c6…` (lowercase) | 64 |
 | `base64` | `nzosS4HeB8Wm…=` | 44 |
 
-An unrecognised `--format` value is rendered as dashed.
+Any other `--format` value, an empty one included, is a usage error (exit 1)
+raised before the passphrase is read.
 
-`--length` is the number of random bytes, default 32. Zero or less means 32.
-No minimum is enforced: `generate` accepts any positive length, and `add`
-accepts any length whose rendered key is 8 to 512 characters (4 bytes and up).
+`--length` is the number of random bytes, default 32; zero means 32. It must be
+at least 32 (256 bits), and the rendered key at most 512 characters.
 Keep the default.
 
 ## generate
@@ -64,7 +68,8 @@ passphrase prompt. Without them the keyslot gets `DefaultKDFType()`:
 PBKDF2-SHA512 in FIPS 140-3 mode, otherwise Argon2id with the cost of the
 volume's first Argon2 keyslot, if it has one. Because the key is generated,
 `--pbkdf-force-iterations` may go as low as 1000 here, which is what
-`systemd-cryptenroll` writes. That floor applies whatever `--length` is.
+`systemd-cryptenroll` writes; it is safe only because the key is at least 256
+random bits.
 
 ```bash
 sudo luks2 recovery add --pbkdf pbkdf2 --hash sha512 --pbkdf-force-iterations 1000 /dev/sdb1

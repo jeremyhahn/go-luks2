@@ -98,6 +98,8 @@ type system struct {
 	// exec replaces the process; it returns only on failure.
 	exec    func(argv0 string, argv, envv []string) error
 	environ func() []string
+	// lstat inspects the state directory; nil leaves it as configured.
+	lstat func(path string) (os.FileInfo, error)
 }
 
 // hostSystem is the real one.
@@ -109,6 +111,7 @@ func hostSystem() system {
 		lookPath: exec.LookPath,
 		exec:     syscall.Exec,
 		environ:  os.Environ,
+		lstat:    os.Lstat,
 	}
 }
 
@@ -141,6 +144,9 @@ func run(args []string, sys system) error {
 		return err
 	}
 	cfg := configFromEnv(sys.getenv)
+	if sys.lstat != nil {
+		cfg.stateDir = ledgerDir(cfg.stateDir, sys.lstat)
+	}
 
 	docker, err := sys.lookPath("docker")
 	if err != nil {
@@ -167,6 +173,33 @@ func configFromEnv(getenv func(string) string) config {
 		cfg.image = defaultImage
 	}
 	return cfg
+}
+
+// rootLedgerSubdir is where the ledger goes when the configured state directory
+// belongs to an ordinary user.
+const rootLedgerSubdir = "root-ledger"
+
+// ledgerDir returns the directory to bind-mount as the ledger.
+//
+// The reaper runs as root and acts on what the ledger names, so the harness
+// refuses a ledger directory owned by anyone but root (test/harness
+// validateStateDir) -- and a state directory an unprivileged user created, by
+// running a tool as themselves first, made every later run refuse. Accepting
+// that user's ownership would hand the root reaper a list of devices written by
+// a non-root account, so instead the ledger moves one level down: a
+// subdirectory that does not exist is created by Docker, as root, when it is
+// bind-mounted, and the harness checks it exactly as before. A subdirectory
+// the user made themselves is still owned by them and still refused.
+func ledgerDir(dir string, lstat func(string) (os.FileInfo, error)) string {
+	fi, err := lstat(dir)
+	if err != nil || !fi.IsDir() {
+		return dir // absent: Docker creates it as root; anything else is the harness's to refuse
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || st.Uid == 0 {
+		return dir
+	}
+	return filepath.Join(dir, rootLedgerSubdir)
 }
 
 // splitArgs separates docker's flags from the container's command at the first

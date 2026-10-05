@@ -46,7 +46,8 @@ The result is clamped:
   600,000 for SHA-256 and 210,000 for SHA-384 and SHA-512 at 2000 ms, never
   below 1000. Calibration measures the defender's hardware, which says nothing
   about the attacker's. On current hardware the measured count is in the
-  millions and the floor does not bind.
+  millions and the floor does not bind. A keyslot for a caller's passphrase is
+  never below the 2000 ms floor, whatever `PBKDFIterTime` asks for.
 - The ceiling is 100,000,000, the same bound the header reader enforces, so a
   calibrated keyslot always reopens.
 
