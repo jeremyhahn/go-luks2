@@ -34,10 +34,9 @@ type Unpublishable struct {
 const noShellScripts = "the public release ships no shell scripts (owner ruling on #211): " +
 	"write it as a Go command under test/ or cmd/, or as a Makefile recipe"
 
-// agentInstructions is the reason shared by the agent-context rules.
-const agentInstructions = "agent instructions are internal working context and stay out of the " +
-	"published tree (owner ruling on #211); the file is gitignored, so it can exist in a " +
-	"checkout without being tracked"
+// agentInstructions is the reason shared by the agent-file strip rules.
+const agentInstructions = "agent instructions: tracked in every repository and stripped at publish " +
+	"(standards project-scaffold.md §7, #252); the public release removes them (#211)"
 
 // workflowDir is where GitHub and Gitea Actions look for workflows.
 const workflowDir = ".github/workflows/"
@@ -49,26 +48,23 @@ const workflowDir = ".github/workflows/"
 // default. Everything else under workflowDir fails the gate.
 var PublishedWorkflows = []string{"ci.yml", "nightly.yml", "release.yml"}
 
-// PendingWorkflows are workflows under workflowDir that the public release
-// must not carry but that Gitea main carries anyway, each held open by a
-// conflict of rulings this gate cannot settle. The gate does not fail on them
-// -- failing would make main unmergeable, which is the opposite of what either
-// ruling wants -- but it never calls them publishable either: every run lists
-// each one, with its reason, as an open item (Pending), and #211's checklist
-// stays open until the list is empty.
+// DefaultStripAtPublish is the list of tracked files Gitea main carries and
+// the public release does not: the publish removes them (#211). The gate does
+// not fail on them -- they belong on main -- but it never calls a tree that
+// holds one publishable: every run lists each one, with its reason.
 //
-// automerge.yml: the owner ruled on 2026-10-02 (automatethethings#200) that
-// every project carries the label-gated automerge workflow, and on 2026-09-28
-// (#211) that only ci.yml, nightly.yml and release.yml ship. The published
-// tree is the release tag's tree byte for byte (version-control.md 5a), so
-// both cannot hold for one tag. Its job is inert on github.com -- it is
-// guarded by `github.server_url != 'https://github.com'` -- but it names the
-// forge's agent principals and internal paths, so it is not publishable as it
-// stands.
-var PendingWorkflows = map[string]string{
-	"automerge.yml": "Gitea-only automerge workflow (owner ruling 2026-10-02, automatethethings#200) " +
-		"that the public release must not carry (owner ruling 2026-09-28, #211); an owner ruling " +
-		"must say whether it leaves main, or how the release tag excludes it",
+// A strip rule exempts a file from the file-class checks only, never from its
+// content: a script or a binary under .claude/ still fails, and the lab-value
+// scan reads every stripped file like any other.
+//
+// The automerge rule is an exact name: `automerge.yaml` or a nested copy is an
+// unknown workflow and fails.
+var DefaultStripAtPublish = []Unpublishable{
+	{Path: "**/CLAUDE.md", Reason: agentInstructions},
+	{Path: "**/AGENTS.md", Reason: agentInstructions},
+	{Path: "**/.claude/**", Reason: agentInstructions},
+	{Path: workflowDir + "automerge.yml", Reason: "Gitea-only automerge workflow (owner ruling 2026-10-02, " +
+		"automatethethings#200): tracked on main, stripped from the public release (#211, #252)"},
 }
 
 // internalWorkflow is the reason given for any file under workflowDir that
@@ -81,9 +77,6 @@ const internalWorkflow = "only the public workflows ship (#211): ci.yml, nightly
 var DefaultUnpublishable = []Unpublishable{
 	{Path: "**/*.sh", Reason: noShellScripts},
 	{Path: "**/*.bash", Reason: noShellScripts},
-	{Path: "**/CLAUDE.md", Reason: agentInstructions},
-	{Path: "**/AGENTS.md", Reason: agentInstructions},
-	{Path: ".claude/**", Reason: agentInstructions},
 }
 
 // shebang opens every interpreted script, whatever its name. A script renamed
@@ -130,7 +123,8 @@ func ValidateUnpublishable(rules []Unpublishable) error {
 }
 
 // ScanUnpublishable reports every entry that matches a rule, every entry under
-// .github/workflows/ that PublishedWorkflows does not name, every regular
+// .github/workflows/ that neither PublishedWorkflows nor a strip rule names,
+// every regular
 // file whose staged content opens with a shebang, and every binary regular
 // file ExemptFile does not list. The content is the whole
 // staged blob (see IndexEntries), so neither a file's size nor what follows
@@ -138,8 +132,11 @@ func ValidateUnpublishable(rules []Unpublishable) error {
 // ExemptFile lists, whose content is not read (Unread) and which the gate
 // prints as NOT READ: its exemption is a person's statement that it ships. A symlink is not itself a script; a
 // tracked link target is checked under its own name.
-func ScanUnpublishable(entries []Entry, rules []Unpublishable) ([]FileFinding, error) {
+func ScanUnpublishable(entries []Entry, rules, strip []Unpublishable) ([]FileFinding, error) {
 	if err := ValidateUnpublishable(rules); err != nil {
+		return nil, err
+	}
+	if err := ValidateUnpublishable(strip); err != nil {
 		return nil, err
 	}
 	var findings []FileFinding
@@ -148,7 +145,8 @@ func ScanUnpublishable(entries []Entry, rules []Unpublishable) ([]FileFinding, e
 			findings = append(findings, FileFinding{Path: e.Path, Reason: reason})
 			continue
 		}
-		if unpublishedWorkflow(e.Path) {
+		_, stripped := matchUnpublishable(strip, e.Path)
+		if !stripped && unpublishedWorkflow(e.Path) {
 			findings = append(findings, FileFinding{Path: e.Path, Reason: internalWorkflow})
 			continue
 		}
@@ -181,25 +179,20 @@ func unpublishedWorkflow(name string) bool {
 			return false
 		}
 	}
-	_, pending := PendingWorkflows[rest]
-	return !pending
+	return true
 }
 
-// Pending reports every tracked entry PendingWorkflows names, so the gate can
-// list it as an open item on every run. The name comparison is exact, as in
-// unpublishedWorkflow: `automerge.yaml` is not pending, it fails.
-func Pending(entries []Entry) []FileFinding {
-	var open []FileFinding
+// StripAtPublish reports every tracked entry a strip rule names, so the gate
+// can list it on every run. Patterns are validated by ScanUnpublishable, which
+// the gate runs first; an unusable one matches nothing here.
+func StripAtPublish(entries []Entry, strip []Unpublishable) []FileFinding {
+	var out []FileFinding
 	for _, e := range entries {
-		rest, ok := strings.CutPrefix(e.Path, workflowDir)
-		if !ok {
-			continue
-		}
-		if reason, pending := PendingWorkflows[rest]; pending {
-			open = append(open, FileFinding{Path: e.Path, Reason: reason})
+		if reason, ok := matchUnpublishable(strip, e.Path); ok {
+			out = append(out, FileFinding{Path: e.Path, Reason: reason})
 		}
 	}
-	return open
+	return out
 }
 
 // matchUnpublishable returns the reason of the first rule matching name.

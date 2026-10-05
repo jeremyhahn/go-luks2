@@ -69,7 +69,7 @@ func TestScanUnpublishable_ABinaryFileNeedsAnExemption(t *testing.T) {
 		{Path: "fixture.bin", Kind: KindFile, Content: []byte("\x00\x02"), Exemption: "a golden fixture"},
 		{Path: "README.md", Kind: KindFile, Content: []byte("text\n")},
 	}
-	findings, err := ScanUnpublishable(entries, DefaultUnpublishable)
+	findings, err := ScanUnpublishable(entries, DefaultUnpublishable, DefaultStripAtPublish)
 	if err != nil {
 		t.Fatalf("ScanUnpublishable: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestIndexEntries_HonorsOnlyTheStagedExemptionList(t *testing.T) {
 				t.Fatalf("huge.img = %+v, want exempt and unread", e)
 			}
 		}
-		findings, err := ScanUnpublishable(entries, DefaultUnpublishable)
+		findings, err := ScanUnpublishable(entries, DefaultUnpublishable, DefaultStripAtPublish)
 		if err != nil {
 			t.Fatalf("ScanUnpublishable: %v", err)
 		}

@@ -12,14 +12,14 @@ import (
 
 // TestThePlantedUnpublishableFilesAreCaught proves the gate's second half can fail: one
 // of each kind this repository has actually carried, planted, and each one
-// must come back.
+// must come back. Agent instructions are no longer among them -- they are
+// stripped at publish (#252), see TestScanUnpublishable_AgentFilesAreStrippedNotFailed
+// -- but a script or a workflow under an agent directory still fails.
 func TestThePlantedUnpublishableFilesAreCaught(t *testing.T) {
 	planted := map[string]string{
 		".github/require-tool.sh":             "#!/bin/sh\nset -eu\n",
 		"test/integration/docker-run.sh":      "#!/usr/bin/env bash\n",
-		"CLAUDE.md":                           "# go-luks2\n",
-		"test/integration/AGENTS.md":          "# mirror\n",
-		".claude/settings.local.json":         "{}\n",
+		".claude/hooks/pre-commit.sh":         "#!/bin/sh\n",
 		".github/workflows/task-worker.yml":   "on: workflow_dispatch\n",
 		".github/workflows/claude-review.yml": "on: pull_request\n",
 		// No extension, but a script all the same.
@@ -27,7 +27,7 @@ func TestThePlantedUnpublishableFilesAreCaught(t *testing.T) {
 	}
 	files := entriesOf(planted)
 
-	findings, err := ScanUnpublishable(files, DefaultUnpublishable)
+	findings, err := ScanUnpublishable(files, DefaultUnpublishable, DefaultStripAtPublish)
 	if err != nil {
 		t.Fatalf("ScanUnpublishable: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestScanUnpublishable_CatchesAScriptWhateverItCarries(t *testing.T) {
 	})
 	entries = append(entries, Entry{Path: "tools/odd-link", Kind: KindSymlink, Content: []byte("#!weird-name")})
 
-	findings, err := ScanUnpublishable(entries, DefaultUnpublishable)
+	findings, err := ScanUnpublishable(entries, DefaultUnpublishable, DefaultStripAtPublish)
 	if err != nil {
 		t.Fatalf("ScanUnpublishable: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestScanUnpublishable_AcceptsWhatShips(t *testing.T) {
 		"docs/CLAUDE.md.txt":             "not the file\n",
 		"pkg/luks2/claude_test_names.go": "package luks2\n",
 	})
-	findings, err := ScanUnpublishable(files, DefaultUnpublishable)
+	findings, err := ScanUnpublishable(files, DefaultUnpublishable, DefaultStripAtPublish)
 	if err != nil {
 		t.Fatalf("ScanUnpublishable: %v", err)
 	}
@@ -120,8 +120,12 @@ func TestValidateUnpublishable_RefusesEveryUnusableEntry(t *testing.T) {
 	}
 
 	files := entriesOf(map[string]string{"a.txt": "x\n"})
-	if _, err := ScanUnpublishable(files, []Unpublishable{{Path: "**/*.sh"}}); err == nil {
+	if _, err := ScanUnpublishable(files, []Unpublishable{{Path: "**/*.sh"}}, DefaultStripAtPublish); err == nil {
 		t.Fatal("a rule with no reason was accepted by the scan")
+	}
+	var stripErr *AllowRuleError
+	if _, err := ScanUnpublishable(files, DefaultUnpublishable, []Unpublishable{{Path: "CLAUDE.md"}}); !errors.As(err, &stripErr) {
+		t.Fatalf("a strip-at-publish rule with no reason: err = %v, want *AllowRuleError", err)
 	}
 }
 
@@ -168,7 +172,7 @@ func TestScanUnpublishable_OnlyThePublicWorkflowsShip(t *testing.T) {
 		files[".github/workflows/"+name] = "on: push\n"
 	}
 
-	findings, err := ScanUnpublishable(entriesOf(files), DefaultUnpublishable)
+	findings, err := ScanUnpublishable(entriesOf(files), DefaultUnpublishable, DefaultStripAtPublish)
 	if err != nil {
 		t.Fatalf("ScanUnpublishable: %v", err)
 	}
@@ -191,11 +195,11 @@ func TestScanUnpublishable_OnlyThePublicWorkflowsShip(t *testing.T) {
 	}
 }
 
-// A pending workflow is neither a finding nor publishable: ScanUnpublishable
-// passes it and Pending lists it. Its .yaml variant and a nested copy are not
-// pending -- the exemption is the exact name -- and fail like any unknown
-// workflow.
-func TestPending_ListsThePendingWorkflowAndNothingElse(t *testing.T) {
+// A strip-at-publish workflow is neither a finding nor publishable:
+// ScanUnpublishable passes it and StripAtPublish lists it. Its .yaml variant and
+// a nested copy are not stripped -- the rule is the exact name -- and fail
+// like any unknown workflow.
+func TestStripAtPublish_ListsTheAutomergeWorkflowAndNothingElse(t *testing.T) {
 	files := map[string]string{
 		".github/workflows/automerge.yml":     "on: push\n",
 		".github/workflows/automerge.yaml":    "on: push\n",
@@ -205,7 +209,7 @@ func TestPending_ListsThePendingWorkflowAndNothingElse(t *testing.T) {
 	}
 	entries := entriesOf(files)
 
-	findings, err := ScanUnpublishable(entries, DefaultUnpublishable)
+	findings, err := ScanUnpublishable(entries, DefaultUnpublishable, DefaultStripAtPublish)
 	if err != nil {
 		t.Fatalf("ScanUnpublishable: %v", err)
 	}
@@ -214,33 +218,96 @@ func TestPending_ListsThePendingWorkflowAndNothingElse(t *testing.T) {
 		failed[f.Path] = true
 	}
 	if failed[".github/workflows/automerge.yml"] {
-		t.Error("the pending workflow failed the scan; it is listed as open, not failed")
+		t.Error("the automerge workflow failed the scan; it is stripped at publish, not failed")
 	}
 	for _, name := range []string{".github/workflows/automerge.yaml", ".github/workflows/sub/automerge.yml"} {
 		if !failed[name] {
-			t.Errorf("%s passed the scan; only the exact pending name is exempt", name)
+			t.Errorf("%s passed the scan; only the exact name is stripped", name)
 		}
 	}
 
-	open := Pending(entries)
-	if len(open) != 1 || open[0].Path != ".github/workflows/automerge.yml" {
-		t.Fatalf("Pending = %v, want exactly .github/workflows/automerge.yml", open)
+	stripped := StripAtPublish(entries, DefaultStripAtPublish)
+	if len(stripped) != 1 || stripped[0].Path != ".github/workflows/automerge.yml" {
+		t.Fatalf("StripAtPublish = %v, want exactly .github/workflows/automerge.yml", stripped)
 	}
-	if !strings.Contains(open[0].Reason, "owner ruling") {
-		t.Errorf("the pending reason does not say what settles it: %q", open[0].Reason)
+	if !strings.Contains(stripped[0].Reason, "#211") {
+		t.Errorf("the reason does not name the release issue: %q", stripped[0].Reason)
 	}
 }
 
-// Every pending workflow carries a reason, and none is also a public one.
-func TestPendingWorkflows_AreReasonedAndNotPublished(t *testing.T) {
-	for name, reason := range PendingWorkflows {
-		if strings.TrimSpace(reason) == "" {
-			t.Errorf("%s has no reason", name)
+// Agent instructions are tracked on main and stripped at publish (owner
+// ruling 2026-10-04, #252): at the root or nested, they pass the scan and are
+// listed. Content checks still apply -- a script under .claude/ fails as a
+// script -- and lookalike names are ordinary files.
+func TestScanUnpublishable_AgentFilesAreStrippedNotFailed(t *testing.T) {
+	agentFiles := []string{
+		"CLAUDE.md",
+		"AGENTS.md",
+		"test/integration/CLAUDE.md",
+		"test/integration/AGENTS.md",
+		".claude/settings.json",
+		".claude/agents/go-luks2.md",
+		"cmd/.claude/settings.json",
+	}
+	files := map[string]string{
+		".claude/hooks/guard.sh": "#!/bin/sh\n",
+		".claude/hooks/guard":    "#!/bin/sh\n",
+		"docs/CLAUDE.md.txt":     "not the file\n",
+		"docs/claude.md":         "not the file either\n",
+	}
+	for _, name := range agentFiles {
+		files[name] = "# agent notes\n"
+	}
+	entries := entriesOf(files)
+
+	findings, err := ScanUnpublishable(entries, DefaultUnpublishable, DefaultStripAtPublish)
+	if err != nil {
+		t.Fatalf("ScanUnpublishable: %v", err)
+	}
+	failed := map[string]string{}
+	for _, f := range findings {
+		failed[f.Path] = f.Reason
+	}
+	for _, name := range agentFiles {
+		if reason, ok := failed[name]; ok {
+			t.Errorf("%s failed the scan (%s); agent files are stripped at publish", name, reason)
 		}
-		for _, published := range PublishedWorkflows {
-			if name == published {
-				t.Errorf("%s is both pending and published", name)
-			}
+	}
+	for _, name := range []string{".claude/hooks/guard.sh", ".claude/hooks/guard"} {
+		if !strings.Contains(failed[name], "no shell scripts") {
+			t.Errorf("%s: a script under .claude/ must fail as a script, got %q", name, failed[name])
+		}
+	}
+	if len(findings) != 2 {
+		t.Errorf("findings = %v, want exactly the two scripts", findings)
+	}
+
+	listed := map[string]string{}
+	for _, f := range StripAtPublish(entries, DefaultStripAtPublish) {
+		listed[f.Path] = f.Reason
+	}
+	for _, name := range agentFiles {
+		if !strings.Contains(listed[name], "#252") {
+			t.Errorf("%s: not listed as stripped at publish with its ruling: %q", name, listed[name])
+		}
+	}
+	for _, name := range []string{"docs/CLAUDE.md.txt", "docs/claude.md"} {
+		if _, ok := listed[name]; ok {
+			t.Errorf("%s is listed as an agent file; only the exact names are", name)
+		}
+	}
+}
+
+// The strip list is usable, carries a reason per entry, and never strips a
+// public workflow -- a rule that did would publish a release without its CI.
+func TestDefaultStripAtPublish_IsUsableAndStripsNothingPublished(t *testing.T) {
+	if err := ValidateUnpublishable(DefaultStripAtPublish); err != nil {
+		t.Fatalf("the shipped strip list is not usable: %v", err)
+	}
+	for _, name := range PublishedWorkflows {
+		path := ".github/workflows/" + name
+		if listed := StripAtPublish(entriesOf(map[string]string{path: "on: push\n"}), DefaultStripAtPublish); len(listed) != 0 {
+			t.Errorf("%s is both published and stripped: %v", path, listed)
 		}
 	}
 }

@@ -25,16 +25,21 @@ These files are never published, whatever their content:
 - Shell scripts: `*.sh`, `*.bash`, or anything starting with `#!`. Tools are
   Go commands (`test/ci/cmd/require-tool`, `test/integration/cmd/docker-run`)
   or Makefile recipes.
-- Agent instructions: `CLAUDE.md`, `AGENTS.md`, `.claude/`. They are
-  gitignored.
 - Workflows other than `ci.yml`, `nightly.yml` and `release.yml`
   (`PublishedWorkflows`), including `.yaml` variants and subdirectories.
 
-`automerge.yml` is pending (`PendingWorkflows`): the forge requires it and the
-public release must not carry it. Until that is decided, the gate accepts that
-exact name but prints it as an open item on every run and does not call the
-tree publishable. The file list is `DefaultUnpublishable` in
-`test/labstrings/published.go`.
+These files are tracked on `main` and stripped at publish (#211):
+
+- Agent files: `CLAUDE.md`, `AGENTS.md` and `.claude/`, at any depth
+  (standards `project-scaffold.md` §7, #252). Only local tool state,
+  `.claude/settings.local.json`, is gitignored.
+- `.github/workflows/automerge.yml`, which the forge requires. Only that exact
+  name; a `.yaml` variant or nested copy fails.
+
+The gate passes them, lists each on every run and does not call the tree
+publishable while one is tracked. Their content is still scanned, and a script
+or binary among them still fails. The lists are `DefaultUnpublishable` and
+`DefaultStripAtPublish` in `test/labstrings/published.go`.
 
 ## The gate
 
@@ -73,5 +78,6 @@ There is no waiver for an unpublishable file: remove it from the index.
 
 When the gate was added the tree already held no lab address, hostname or owner
 path. The scrub replaced `.github/require-tool.sh` and
-`test/integration/docker-run.sh` with the Go commands above (same behaviour) and
-removed `CLAUDE.md` from the index.
+`test/integration/docker-run.sh` with the Go commands above (same behaviour).
+It also removed `CLAUDE.md` from the index; #252 tracks it again, stripped at
+publish.

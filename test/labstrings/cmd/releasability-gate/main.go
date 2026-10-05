@@ -13,8 +13,9 @@
 // excludes .git/ and runs `go test -tags=integration ./...`. Run it through
 // `make releasability`, which `make ci` and the CI workflow both call.
 //
-// Exit status: 0 the tree has no finding -- publishable, or publishable but
-// for the pending items it lists (labstrings.PendingWorkflows) -- 1 it is not (the report says why),
+// Exit status: 0 the tree has no finding -- publishable, or publishable once
+// the files it lists are stripped at publish (labstrings.DefaultStripAtPublish)
+// -- 1 it is not (the report says why),
 // 2 the gate could not run -- a missing or extra argument, a root that is not
 // a git checkout, an unusable releasability-exempt.txt, or an index entry it
 // could not read in full (a blob over the scan limit that the exemption list
@@ -44,16 +45,21 @@ const (
 // decisions are exercised without a git checkout.
 type indexReader func(root string) ([]labstrings.Entry, error)
 
-// policy is what the gate enforces: the lab-value allow-list and the
-// unpublishable-file rules. main passes this repository's; tests pass broken
-// ones to see the gate refuse to run on them.
+// policy is what the gate enforces: the lab-value allow-list, the
+// unpublishable-file rules and the strip-at-publish rules. main passes this
+// repository's; tests pass broken ones to see the gate refuse to run on them.
 type policy struct {
 	allow         []labstrings.AllowRule
 	unpublishable []labstrings.Unpublishable
+	strip         []labstrings.Unpublishable
 }
 
 // repositoryPolicy is this repository's policy.
-var repositoryPolicy = policy{allow: labstrings.DefaultAllowList, unpublishable: labstrings.DefaultUnpublishable}
+var repositoryPolicy = policy{
+	allow:         labstrings.DefaultAllowList,
+	unpublishable: labstrings.DefaultUnpublishable,
+	strip:         labstrings.DefaultStripAtPublish,
+}
 
 func main() {
 	os.Exit(run(os.Args[1:], labstrings.IndexEntries, repositoryPolicy, os.Stdout, os.Stderr))
@@ -81,7 +87,7 @@ func run(args []string, read indexReader, p policy, stdout, stderr io.Writer) in
 		fmt.Fprintf(stderr, "releasability-gate: %v\n", err)
 		return exitFailed
 	}
-	unpublishable, err := labstrings.ScanUnpublishable(entries, p.unpublishable)
+	unpublishable, err := labstrings.ScanUnpublishable(entries, p.unpublishable, p.strip)
 	if err != nil {
 		fmt.Fprintf(stderr, "releasability-gate: %v\n", err)
 		return exitFailed
@@ -110,13 +116,14 @@ func run(args []string, read indexReader, p policy, stdout, stderr io.Writer) in
 		}
 	}
 
-	// Pending items do not fail the gate, and the tree is not called
-	// publishable while any exists: each is printed on every run, so the open
-	// checklist item is in front of whoever reads the log. A report that
-	// cannot be written is a failure -- the qualification is the point.
-	if open := labstrings.Pending(entries); len(open) > 0 {
-		header := fmt.Sprintf("releasability-gate: %d tracked files; no finding, but NOT YET PUBLISHABLE -- %d item(s) await an owner ruling (#211):\n\n", len(entries), len(open))
-		if err := writeItems(stdout, header, open); err != nil {
+	// Strip-at-publish files do not fail the gate, and the tree is not called
+	// publishable while any is tracked: the tag's tree is not the published
+	// tree until the publish removes them (#211). Each is printed on every
+	// run. A report that cannot be written is a failure -- the qualification
+	// is the point.
+	if stripped := labstrings.StripAtPublish(entries, p.strip); len(stripped) > 0 {
+		header := fmt.Sprintf("releasability-gate: %d tracked files; no finding, but NOT YET PUBLISHABLE -- %d file(s) to be stripped at publish (#211):\n\n", len(entries), len(stripped))
+		if err := writeItems(stdout, header, stripped); err != nil {
 			fmt.Fprintf(stderr, "releasability-gate: %v\n", err)
 			return exitFailed
 		}

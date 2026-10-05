@@ -108,7 +108,7 @@ func TestRun_ALabValueFails(t *testing.T) {
 }
 
 func TestRun_AnUnpublishableFileFails(t *testing.T) {
-	for _, name := range []string{"CLAUDE.md", "test/integration/docker-run.sh", ".github/workflows/task-worker.yml"} {
+	for _, name := range []string{"tools/reap.bash", "test/integration/docker-run.sh", ".github/workflows/task-worker.yml", ".github/workflows/claude-review.yml"} {
 		t.Run(name, func(t *testing.T) {
 			list := entriesOf(map[string]string{name: "x\n"})
 			code, _, stderr := runGate(t.TempDir(), list)
@@ -215,7 +215,7 @@ func TestRun_NeedsExactlyOneRoot(t *testing.T) {
 // repository the test builds for itself, so the git-backed path is covered
 // without depending on the checkout the test runs in (there may be none).
 func TestRun_ReadsARealIndex(t *testing.T) {
-	root := gitRepo(t, map[string]string{"CLAUDE.md": "# agent notes\n", "go.mod": "module example.com/x\n"})
+	root := gitRepo(t, map[string]string{"tools/run.sh": "#!/bin/sh\n", "go.mod": "module example.com/x\n"})
 	code, _, stderr := runGate(root, labstrings.IndexEntries)
 	if code != exitDirty {
 		t.Fatalf("exit = %d, want %d; stderr:\n%s", code, exitDirty, stderr)
@@ -325,8 +325,9 @@ func TestGatePackageTestsPassWithoutACheckout(t *testing.T) {
 func TestRun_RefusesToRunOnABrokenPolicy(t *testing.T) {
 	read := entriesOf(map[string]string{"README.md": "nothing to see\n"})
 	broken := map[string]policy{
-		"allow-list":         {allow: []labstrings.AllowRule{{Path: ""}}, unpublishable: labstrings.DefaultUnpublishable},
-		"unpublishable list": {allow: labstrings.DefaultAllowList, unpublishable: []labstrings.Unpublishable{{Path: "x"}}},
+		"allow-list":         {allow: []labstrings.AllowRule{{Path: ""}}, unpublishable: labstrings.DefaultUnpublishable, strip: labstrings.DefaultStripAtPublish},
+		"unpublishable list": {allow: labstrings.DefaultAllowList, unpublishable: []labstrings.Unpublishable{{Path: "x"}}, strip: labstrings.DefaultStripAtPublish},
+		"strip list":         {allow: labstrings.DefaultAllowList, unpublishable: labstrings.DefaultUnpublishable, strip: []labstrings.Unpublishable{{Path: "x"}}},
 	}
 	for name, p := range broken {
 		t.Run(name, func(t *testing.T) {
@@ -361,22 +362,62 @@ func TestRun_AReportThatCannotBeWrittenIsAFailure(t *testing.T) {
 	}
 }
 
-// TestRun_APendingWorkflowIsListedNotPassedAsPublishable: exit 0, but the
-// output says the tree is NOT yet publishable and names the item.
-func TestRun_APendingWorkflowIsListedNotPassedAsPublishable(t *testing.T) {
+// TestRun_AStripAtPublishFileIsListedNotPassedAsPublishable: exit 0, but the
+// output says the tree is NOT yet publishable and names each file the publish
+// strips.
+func TestRun_AStripAtPublishFileIsListedNotPassedAsPublishable(t *testing.T) {
 	read := entriesOf(map[string]string{
 		".github/workflows/ci.yml":        "on: push\n",
 		".github/workflows/automerge.yml": "on: push\n",
+		"CLAUDE.md":                       "# agent notes\n",
 	})
 	code, stdout, stderr := runGate(".", read)
 	if code != exitClean {
 		t.Fatalf("exit = %d, want %d; stderr %q", code, exitClean, stderr)
 	}
-	if !strings.Contains(stdout, "NOT YET PUBLISHABLE") || !strings.Contains(stdout, ".github/workflows/automerge.yml") {
-		t.Fatalf("stdout = %q, want the pending workflow listed as not yet publishable", stdout)
+	for _, want := range []string{"NOT YET PUBLISHABLE", "stripped at publish", ".github/workflows/automerge.yml", "CLAUDE.md"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout lacks %q:\n%s", want, stdout)
+		}
 	}
 	if strings.Contains(stdout, ", publishable") {
-		t.Fatalf("stdout = %q calls the tree publishable while an item is pending", stdout)
+		t.Fatalf("stdout = %q calls the tree publishable while a file awaits the strip", stdout)
+	}
+}
+
+// TestRun_TrackedAgentFilesPassARealIndex: CLAUDE.md, a nested AGENTS.md and a
+// .claude/ file, tracked in a real index, pass the gate and are each listed
+// as stripped at publish; a script beside them still fails it.
+func TestRun_TrackedAgentFilesPassARealIndex(t *testing.T) {
+	agentFiles := map[string]string{
+		"CLAUDE.md":                  "# agent notes\n",
+		"AGENTS.md":                  "# agent notes\n",
+		"test/integration/AGENTS.md": "# agent notes\n",
+		".claude/settings.json":      "{}\n",
+	}
+	files := map[string]string{"go.mod": "module example.com/x\n"}
+	for name, content := range agentFiles {
+		files[name] = content
+	}
+	code, stdout, stderr := runGate(gitRepo(t, files), labstrings.IndexEntries)
+	if code != exitClean {
+		t.Fatalf("exit = %d, want %d; stderr:\n%s", code, exitClean, stderr)
+	}
+	for name := range agentFiles {
+		if !strings.Contains(stdout, name+": ") {
+			t.Errorf("%s is not listed as stripped at publish:\n%s", name, stdout)
+		}
+	}
+
+	files["tools/run.sh"] = "#!/bin/sh\n"
+	code, _, stderr = runGate(gitRepo(t, files), labstrings.IndexEntries)
+	if code != exitDirty || !strings.Contains(stderr, "tools/run.sh") {
+		t.Fatalf("exit = %d, stderr %q; want %d naming the script", code, stderr, exitDirty)
+	}
+	for name := range agentFiles {
+		if strings.Contains(stderr, name+": ") {
+			t.Errorf("%s is reported as a finding:\n%s", name, stderr)
+		}
 	}
 }
 
@@ -391,11 +432,11 @@ func (w *failAfter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// TestRun_AQualificationThatCannotBeWrittenIsAFailure: the pending notice and
+// TestRun_AQualificationThatCannotBeWrittenIsAFailure: the strip notice and
 // the exemption list are what make a clean exit honest, so losing either --
 // at its header or at an item -- exits 2, as does losing the final verdict.
 func TestRun_AQualificationThatCannotBeWrittenIsAFailure(t *testing.T) {
-	pending := entriesOf(map[string]string{
+	stripped := entriesOf(map[string]string{
 		".github/workflows/ci.yml":        "on: push\n",
 		".github/workflows/automerge.yml": "on: push\n",
 	})
@@ -410,8 +451,8 @@ func TestRun_AQualificationThatCannotBeWrittenIsAFailure(t *testing.T) {
 		read   indexReader
 		writes int
 	}{
-		"pending header":   {pending, 0},
-		"pending item":     {pending, 1},
+		"strip header":     {stripped, 0},
+		"strip item":       {stripped, 1},
 		"exemption header": {exempt, 0},
 		"exemption item":   {exempt, 1},
 		"final verdict":    {clean, 0},

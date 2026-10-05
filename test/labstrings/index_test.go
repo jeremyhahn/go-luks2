@@ -151,7 +151,7 @@ func TestIndexEntries_TheStagedContentIsScannedNotTheWorkingTree(t *testing.T) {
 		}
 	}
 
-	files, err := ScanUnpublishable(entries, DefaultUnpublishable)
+	files, err := ScanUnpublishable(entries, DefaultUnpublishable, DefaultStripAtPublish)
 	if err != nil {
 		t.Fatalf("ScanUnpublishable: %v", err)
 	}

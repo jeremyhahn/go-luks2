@@ -50,7 +50,7 @@ Thumbs.db
 
 go.work.sum
 
-# Agent instructions are internal working context and stay out of the
-# published tree (owner ruling on #211). test/labstrings fails if one is tracked.
-CLAUDE.md
-AGENTS.md
+# Local tool state. Agent files (CLAUDE.md, AGENTS.md, .claude/) are tracked
+# and stripped at publish (standards project-scaffold.md §7, #252); only this
+# stays gitignored.
+**/.claude/settings.local.json
