@@ -152,6 +152,478 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that sent readers down a dead end is gone.
 
 
+## [0.4.0-alpha] - 2026-10-05
+
+### Changed
+
+- **The project documentation was checked against the code and rewritten
+  (#245).** README.md, docs/ARCHITECTURE.md, docs/cli, docs/luks, FIPS.md,
+  TESTING.md, COMPATIBILITY.md, RELEASABILITY.md and changelog.d/README.md now
+  describe v0.3.1-alpha as it behaves, at about 40% of their former length.
+  ARCHITECTURE.md now covers the packages, key custody, header handling, the
+  device layer, FIPS mode and the trust boundaries. Corrected claims include:
+  a header-only `wipe` zeroes the two header copies only, so keyslot material
+  survives; `close` does not detect a mounted volume, which instead fails as
+  busy after 3 s of retries; wipe verification does nothing for the `nist`,
+  `dod3` and `dod7` standards; device and file paths must be absolute; key
+  files over 512 bytes are refused; keyslot priority is not used by unlock;
+  the dashed recovery key is 74 uppercase characters; and the FIPS job runs
+  in `nightly.yml`. The CLI help no longer claims that no external tools are
+  used (`create` runs `mkfs`), and its examples use absolute paths.
+
+### Changed — BREAKING: `luks2 create` on a block device asks for `YES` and refuses existing data
+
+- **Formatting a block device needs confirmation (#246).** `create /dev/X` asks
+  for `YES`. `--batch-mode` (or `--yes`) skips the question for scripts. Before
+  this, it formatted the device without asking. It now refuses a device that
+  already holds a LUKS header (either copy) or a filesystem, RAID, LVM or
+  partition-table signature unless `--force` is given. It always refuses a
+  device the kernel reports in use. Scripts that create volumes on block
+  devices must add `--batch-mode`.
+
+### Changed — BREAKING: an unconfirmed `wipe` or `header restore` exits 1
+
+- **A canceled destructive command now fails (#246).** Any answer other than
+  `YES`, end of input, or a read error used to print "canceled" and exit 0, so
+  a script read a wipe that never happened as done. These now exit 1.
+  `--batch-mode` (or `--yes`) skips the question.
+
+### Changed — BREAKING: a header-only wipe also erases the keyslots area
+
+- **`Wipe` with `HeaderOnly` is now a crypto-erase (#246).** It used to zero
+  only the two header copies, plus the 4 KiB binary header of any stray copy.
+  The keyslot material stayed on the device, and so did a stray copy's JSON,
+  salts included. Anyone holding a pre-wipe copy of the header could put it
+  back and open the volume with the old passphrase. The wipe now zeroes the
+  whole keyslots area, every declared keyslot area, and every other
+  recognizable header copy's JSON. It stops at the start of the data segment.
+
+### Changed — BREAKING: key-provider helpers need absolute paths, a clean environment and a FIDO2 device
+
+- **Helpers are never looked up on PATH (#246).** A `CommandKeyProvider` or
+  `ExecConfig` helper path that is not absolute is refused with
+  `ErrHelperPathNotAbsolute`. The docs already said PATH was not searched, but
+  `exec` searched it for any bare name. Helpers no longer inherit the
+  process environment. They get a system `PATH` plus the new
+  `CommandKeyProvider.Env`.
+- **`ExecConfig.Device` is required (#246).** An empty device used to reach
+  the helper as an empty argument. It is now refused with `ErrNoFIDO2Device`,
+  and the device is passed after `--`.
+
+### Changed — BREAKING: the device lock also takes cryptsetup's lock
+
+- **go-luks2 and cryptsetup now exclude each other (#246).** For a block
+  device, `AcquireFileLock` (used by every header write) now also takes
+  cryptsetup's own lock, `flock` on `/run/cryptsetup/L_<major>:<minor>`, the
+  way cryptsetup does. Before, cryptsetup could change a header this package
+  held locked. A process that cannot create or open that file (normally
+  anything but root) can no longer lock a block device. Image files are
+  unchanged: cryptsetup locks the file itself, which this package already did.
+
+### Fixed
+
+- **`--no-verify` turns off a standard's verification (#246).** It only hid
+  the "Verify" line and the DoD standards still verified. The new
+  `WipeOptions.NoVerify` is what it sets.
+- **Wipe verification reads the medium (#246).** It reads back with
+  `O_DIRECT`, including a loop device's backing file. The random pass is now
+  AES-256-CTR under a per-pass key, so the DoD sequences, which end with a
+  random pass, are actually verified. Before, verification read the page cache
+  and skipped random passes.
+- **`Wipe` and `WipeKeyslot` refuse a device in use (#246).** They open block
+  devices with `O_EXCL` and return `ErrDeviceInUse` for a mounted, mapped or
+  held device.
+- **Concurrent enrollments no longer overwrite each other's token (#246).**
+  `EnrollKeyProvider` and `AddRecoveryKey` hold one device lock from choosing
+  the token slot to writing the token.
+- **FIDO2 tokens keep their PIN and user-verification requirements (#246).**
+  They are written as `fido2-clientPin-required` and `fido2-uv-required` and
+  read back by `ProviderFromToken`.
+- **A helper's output read ends with `ctx` (#246).** It also ends if the
+  helper exits while a process it started still holds the pipe.
+- **`create <file>` creates the file safely (#246).** It uses `O_EXCL` and
+  `O_NOFOLLOW` at mode 0600, instead of a stat-then-create that raced, followed
+  symlinks, and made the file 0644. Cleanup removes only the file this run
+  made.
+- **Relative paths work in every command (#246).** The documentation shows
+  them, and the CLI now resolves them.
+- **Strict size and `--passes` parsing (#246).** `10x`, `1.5G` and overflowing
+  values are refused instead of silently truncated.
+- **An empty `--key-file ""` is refused (#246).** It no longer falls back to
+  the prompt or to standard input.
+- **Passphrase buffers are wiped on every path (#246).** This covers a failed
+  confirmation read and a piped line whose buffer grew.
+- **`recovery add` rolls back a key it could not show (#246).** If the key
+  cannot be displayed, the CLI removes its keyslot and token. If that fails, it
+  names the slot to remove.
+- **The integration suite runs when its state directory belongs to the
+  invoking user (#246).** The launcher mounts a root-owned `root-ledger`
+  subdirectory in that case instead of the directory itself, which the root
+  reaper must not trust. Before, every run refused until the directory was
+  removed by hand.
+
+### Security
+
+- **golang.org/x/crypto is v0.57.0, and every direct dependency is at its
+  latest (#247).** v0.55.0 carried GO-2026-6355 and GO-2026-6354, two
+  x/crypto/ssh denial-of-service advisories fixed in v0.56.0. This module never
+  imports x/crypto/ssh, so neither was reachable, but a consumer's govulncheck
+  reported both. golang.org/x/term is v0.46.0 and
+  github.com/anatol/devmapper.go is at its 2026-03-15 commit, which copies a
+  caller's crypt flags instead of appending to them. govulncheck now reports
+  only GO-2026-5932: x/crypto/openpgp is unmaintained, has no fixed version, and
+  is not imported here.
+- **A release waits for CI and runs the security suite (#247).** A `v*` tag
+  used to publish on its own: it had no dependency on CI, tested only
+  ./pkg/luks2, ran no scanner, and built without `-trimpath`. release.yml now
+  publishes only when every one of these passes:
+  - the tagged commit is on main;
+  - CI's gate passed for that exact commit. `test/ci/cmd/release-gate` waits
+    for the gate's result and refuses on anything but a pass.
+  - the ./pkg/luks2 and ./cmd/luks2 tests;
+  - `make security` with `TOOLS_REQUIRED=1`, so no scanner can skip.
+
+  The publish step then builds with `-trimpath`. The tag name is treated as
+  data and is never spliced into a script.
+- **Every workflow action is pinned to a full commit SHA, and trivy is installed
+  from a checksummed archive (#247).** `aquasecurity/trivy-action@master` and
+  `curl …/install.sh | sh` are gone. `make trivy-install` downloads the pinned
+  v0.74.0 archive and checks its SHA-256 before unpacking. It then checks the
+  binary's SHA-256 before installing it, and again before reusing an installed
+  copy. The Makefile no longer claims trivy gates every push: it gates the
+  nightly workflow and every release.
+- **Automerge requires an approval for a PR that changes CI definitions
+  (#247).** CI_DEFINITIONS covers `.github/`, `.gitea/`, the Makefile,
+  `test/ci/`, `test/covergate/`, `test/labstrings/`, `coverage-floors.txt`,
+  `releasability-exempt.txt`, `.golangci.yml`, and the integration job's
+  `test/integration/Dockerfile`, `test/integration/cmd/`,
+  `test/integration/seccomp.json` and `.dockerignore`. A PR touching any of them,
+  whether by adding, editing, deleting or renaming, now needs the same
+  approval as a `code-review` PR. Before, it could change
+  its own gate and merge on that green. automerge.yml reads the changed files
+  from the forge and refuses to merge if it cannot read the whole list.
+
+### Fixed
+
+- **Test harness hardening (#247).** These changes affect only the
+  integration harness:
+  - The reaper no longer detaches under a recorded root unless the root is
+    named like a run root.
+  - The state directory is used only through the handle it was validated by.
+  - A run's temp root is named `go-luks2-run-<run id>-<n>`. A root is reaped
+    only for the run whose ledger carries that id, so a dead run's root can no
+    longer share a name with a live sibling's and have the sibling's loop
+    devices detached.
+  - A pre-#247 ledger whose root still has loop devices under it fails the reap
+    and must be cleared by hand (docs/TESTING.md).
+
+### Changed — BREAKING: headers are validated the way cryptsetup validates them, on read and before every write
+
+- **One structural validator, matching cryptsetup's `LUKS2_hdr_validate` (#248).**
+  It covers the five mandatory objects (present, and objects), segment offsets
+  and sizes on the 512-byte sector grid, a keyslots
+  area that fits between the header copies and the data, digests and tokens
+  that name only keyslots and segments that exist, every luks2 keyslot named
+  by exactly one digest, the online-reencryption backup segments and
+  reencrypt keyslot, and the config sizes. The integration suite holds it to the
+  cryptsetup binary in both directions: every header cryptsetup writes passes
+  it, and every header cryptsetup refuses is refused.
+
+  On read, a header that breaks a rule about the header as a whole is refused
+  with `ErrInvalidHeader`. A damaged keyslot or token still does not cost the
+  volume its other keyslots. Every **write** applies all the rules, so
+  `WriteHeader`, `ImportToken` and the keyslot operations refuse to write a
+  header cryptsetup would not read. A damaged entry has to be removed before
+  anything else can be written. `RestorePrimaryHeader` is the exception: it
+  copies the existing secondary back under the header-wide rules only, so a
+  damaged entry cannot block the repair.
+
+  A data segment that overlaps the header or keyslots area is never activated.
+  That includes offset 0, which cryptsetup reads as a detached header; this
+  library has no detached-header support. Previously, Unlock mapped the headers
+  into the plaintext device.
+
+- **Ambiguous JSON members are refused (#248).** A metadata object that names a
+  member twice, or names one this library models in another case (`"Keyslots"`),
+  is refused with `ErrAmbiguousJSONMember`. Go's JSON decoder matches member
+  names case-insensitively and cryptsetup's does not, so the two read different
+  values from the same header.
+
+- **`RestorePrimaryHeader` repairs; it does not roll back (#248).** It refuses
+  with `ErrPrimaryHeaderCurrent` when the primary is intact and not older than
+  the secondary. Before, restoring an older secondary over a newer primary
+  could bring back a passphrase that had already been removed. The restored
+  header gets a sequence id one above both copies.
+  `RestorePrimaryHeaderWithOptions` with `Force` restores anyway.
+
+- **`Format` refuses bad input before it writes anything (#248).** It accepts only
+  `aes-xts-plain64` (256 or 512 bits) and `aes-cbc-essiv:sha256` (256 bits),
+  and refuses anything else with `ErrUnsupportedCipher`. It also refuses:
+  - labels and subsystems over 47 bytes, or containing a NUL (`ErrInvalidLabel`);
+  - devices with no room for at least one data sector after the keyslots area
+    (`ErrDeviceTooSmall`). Before, it wrote the header and failed later, or grew
+    a regular file into a container with no data.
+
+  It opens the device with `O_EXCL`, so a mounted or mapped block device is
+  refused with `ErrDeviceInUse` instead of being formatted.
+
+### Fixed
+
+- **`ImportToken` no longer writes `"keyslots":null` (#248).** A token naming no
+  keyslot is written with an empty array. cryptsetup and systemd-cryptsetup
+  refuse a whole header that carries the null.
+- **The header checksum covers the bytes that are parsed (#248).** The header
+  area is read once, and the checksum, the binary header and the JSON all come
+  from that buffer. Before, the area was read three times, so a concurrent
+  rewrite could be checksummed in one state and parsed in another.
+- **`VolumeInfo.KeySize` is set (#248).** It is the volume key size in bits,
+  taken from a keyslot attested for the crypt segment that Unlock maps. Cipher
+  and sector size come from that same segment instead of from whichever one Go
+  map iteration returned first.
+
+### Security
+
+- **The last-keyslot guard no longer counts an unbound keyslot as a survivor
+  (#249).** A keyslot written by `cryptsetup luksAddKey --unbound`, or bound only
+  to another segment, holds a key that decrypts nothing, yet `RemoveKey`,
+  `KillSlot`, `KillKeyslot` and `WipeKeyslot` counted it and destroyed the only
+  keyslot holding the volume key. A survivor must now be declared bound to every
+  data segment, sit at an id cryptsetup can address, and lie in keyslot space.
+- **Every keyslot wipe is confined to the keyslots area (#249).** A header
+  declaring a keyslot area over the header copies or the encrypted payload had
+  it overwritten by `RemoveKey`, `KillSlot`, `KillKeyslot`, `ChangeKey`'s
+  cleanup and `WipeKeyslot`. They now refuse with `ErrKeyslotAreaOverlap`, and
+  the unlock scan no longer reads such a keyslot.
+- **Keyslot operations stay on the device they locked (#249).** `AddKey`,
+  `ChangeKey`, `RemoveKey`, `KillSlot`, `KillKeyslot`, `WipeKeyslot`,
+  `TestKey` and `VerifyRecoveryKey` open the path once and do every read, size
+  check, write, sync and wipe through that descriptor, so a path re-pointed
+  mid-operation cannot redirect the writes.
+
+### Fixed
+
+- **`ChangeKey` on a keyslot with a non-standard stripe count no longer
+  destroys it (#249).** It split into 4000 stripes but kept the old
+  `af.stripes`, then wiped the old area. The rewritten keyslot now declares
+  4000 stripes (growing its area if needed), and both `ChangeKey` and `AddKey`
+  read the new keyslot back from the committed header and require it to open to
+  the volume key before anything old is destroyed; one that does not is rolled
+  back.
+- **cryptsetup `--keyslot-key-size` volumes open (#249).** The passphrase is
+  derived to `area.key_size`, not the volume key's size.
+- **`ValidateDevicePath` accepts names containing `..`** such as
+  `/dev/disk/by-label/a..b` (#249); `..` path elements are still resolved and
+  relative paths still refused.
+
+### Changed — BREAKING: existing credentials, recovery keys, Argon2 and PBKDF2 costs (#249)
+
+- **An existing credential is no longer held to the new-passphrase policy.**
+  `Unlock`, `TestKey`, `RemoveKey`, `KillSlot`, `MigrateToFIPS` and the existing
+  credential of `AddKey` and `ChangeKey` accept 1 byte to 8 MiB (cryptsetup's key
+  file limit), so a 4 KiB key file or a short legacy passphrase opens. Empty and
+  over-long credentials return the new `ErrCredentialEmpty` and
+  `ErrCredentialTooLong`; `ErrPassphraseTooShort`/`TooLong` now apply only to new
+  passphrases.
+- **A passphrase that opens only an unbound keyslot no longer authenticates**
+  `TestKey`, `AddKey`, `KillSlot` or `VerifyRecoveryKey`; it gets
+  `ErrMasterKeyVerification`, as with cryptsetup.
+- **`GenerateRecoveryKey` and `AddRecoveryKey` refuse fewer than 32 random
+  bytes**, a negative length, a rendering longer than 512 bytes
+  (`ErrRecoveryKeyTooShort`) and an unknown format
+  (`ErrInvalidRecoveryKeyFormat`) instead of rendering it dashed.
+- **Argon2 creation refuses costs the reader refuses**: memory over 4 GiB, time
+  over 10000, parallelism over 255. `Argon2CostError` gains `Maximum`.
+- **A calibrated PBKDF2 count for a caller's passphrase is held to the OWASP
+  floor at the 2000 ms reference budget**, so `PBKDFIterTime: 1` no longer
+  yields ~1000 iterations.
+- **The unlock scan skips keyslot ids cryptsetup cannot address** (`01`, `32`,
+  `abc`).
+
+### Security
+
+- **`Unlock` maps only a key bound to the data segment (#250).** A passphrase
+  that opened only an unbound keyslot had its key handed to dm-crypt, and the
+  mapping returned garbage. Only keyslots bound to the segment are tried now,
+  and the key must verify against that segment's digest. Otherwise the result is
+  `ErrMasterKeyVerification`, which is also what cryptsetup does. `AddKey`
+  checks the existing passphrase the same way.
+- **A rolled-back `Unlock` no longer removes another caller's mapping (#250).**
+  When two unlocks raced for one name, the loser's rollback matched the winner's
+  dm UUID and removed the live mapping. The rollback now runs only after this
+  call's own create succeeded, and is pinned to the device number that create
+  returned.
+- **Filesystem programs no longer run from `PATH` (#250).** mkfs, fsck, zpool,
+  zfs and blkid run from fixed system directories with a two-variable
+  environment, and every operand follows `--`. A program, or a symlink to
+  one, is run only if the file and every directory above it are writable by
+  nobody but root or the current user.
+
+### Changed — BREAKING: activation refuses reencrypting and multi-segment containers
+
+- **(#250)** A container with a mandatory requirement this library does not
+  implement, such as `online-reencrypt-v2` from an interrupted
+  `cryptsetup reencrypt`, is refused with `ErrUnsupportedRequirement`. It used to
+  be mapped with one key over one segment. A header with more than one segment
+  is refused with `ErrUnsupportedSegmentLayout`.
+
+### Changed — BREAKING: mapping names are validated and nodes verified everywhere
+
+- **(#250)** `MakeFilesystem`, `MakeFilesystemWithOptions`, `Mount`, `Lock`,
+  `IsUnlocked` and `GetMappedDevicePath` reject an invalid mapping name with
+  `ErrInvalidMappingName` (`IsUnlocked` returns false). `control` is no longer
+  a valid name: `/dev/mapper/control` is device-mapper's control node. Before this,
+  `MakeFilesystem("../sdb", ...)` ran mkfs on `/dev/sdb`. Device-mapper decides
+  whether a mapping exists: `IsUnlocked` no longer answers true from a
+  `/dev/mapper` node alone. `GetMappedDevicePath` returns a node only if its
+  device number matches the mapping's, and returns `ErrDeviceNodeUnverified`
+  otherwise. `Unlock` replaces a stale `/dev/mapper/<name>` instead of
+  trusting it.
+
+### Changed — BREAKING: `Unlock` requires a block device
+
+- **(#250)** `Unlock` opens the device once, reads the header, the size and the
+  keyslots through that descriptor, and gives dm-crypt its `major:minor`. A
+  regular file is refused with `ErrNotBlockDevice`; attach it with
+  `SetupLoopDevice` first. dm-crypt could never map a regular file anyway.
+
+### Changed — BREAKING: ZFS names are validated, tools come from fixed directories
+
+- **(#250)** ZFS pool, dataset, feature and property names that do not follow
+  zpool's naming rules are refused with `ErrInvalidFilesystemOption`. A
+  filesystem program that is only on `PATH`, or that sits in a directory
+  writable by others, is refused with `ErrFilesystemTool`.
+
+### Added
+
+- **`IsMappingMounted(name)` (#250)** reports whether a filesystem on a mapping
+  is mounted, by device number. `luks2 close` uses it. The old check asked
+  whether `/dev/mapper/<name>` was a mount point, which it never is, so `close`
+  never refused a mounted volume.
+
+### Fixed
+
+- **`Unlock` works under a mapping name of any valid length (#250).** The dm
+  UUID is now cut to the 128 bytes the kernel stores before the create, as
+  cryptsetup does. With a name over about 83 bytes the kernel used to cut it
+  and every later identity check compared the uncut string.
+- **`FindLoopDevice` matches by device and inode (#250)**, so a file named
+  through a symlink or a bind mount finds its loop device. It now returns a
+  `DeviceError` for a file that does not exist.
+- **The keyring thread is discarded after an unlock (#250).** Resolving the
+  session keyring can install one on the calling OS thread, and that thread used
+  to return to the scheduler. The keyring work now runs on a locked thread that
+  exits when it finishes.
+- **Unlock errors name the real command (#250).** The remedy for a name in use
+  or a mapping left live said `luks close <name>`; the CLI is `luks2`.
+
+### Changed
+
+- **`CLAUDE.md` and the new `AGENTS.md` are tracked; agent files are stripped
+  at publish (#252).** The releasability gate no longer fails on `CLAUDE.md`,
+  `AGENTS.md` or `.claude/` at any depth. It lists them, with
+  `automerge.yml`, as files the public release strips (#211), and does not call
+  the tree publishable while one is tracked. Their content is still scanned, and
+  shell scripts, binaries and unpublished workflows still fail.
+  `PendingWorkflows` and `Pending` are replaced by `DefaultStripAtPublish` and
+  `StripAtPublish`, and `ScanUnpublishable` takes the strip list.
+  Only local tool state (`.claude/settings.local.json`) stays gitignored, per
+  the standards' project-scaffold §7.
+
+### Security
+
+- **`MigrateToFIPS` stays on the device it locked (#255).** It opened the
+  device path again for every read, write, wipe and medium check, so a path
+  re-pointed mid-import could send the new keyslot, the header rewrites and the
+  wipes of the old keyslots to a device that was never locked or read. It now
+  opens the path once, locks that descriptor, and does everything through it;
+  the reads past the page cache reopen the same inode through `/proc/self/fd`.
+
+### Added
+
+- **`DetectFilesystem` and type detection in `Mount`.** `DetectFilesystem(name)`
+  reports the filesystem on an open mapping from `blkid -p` (never blkid's
+  cache). `Mount` with an empty `FSType` mounts what it finds. Nothing found,
+  more than one signature, or one that is not a filesystem is refused with
+  `ErrFilesystemNotDetected`.
+- **`ParseRecoveryKeyFormat`** turns a format name into a `RecoveryKeyFormat`,
+  refusing anything but `dashed`, `hex` and `base64` (an empty name included)
+  with `ErrInvalidRecoveryKeyFormat`.
+- **`luks2 header restore --force`** passes `RestoreHeaderOptions.Force`
+  through, so the CLI can restore over an intact primary that is not older. It
+  still asks for `YES` unless `--batch-mode` is given, and warns that it rolls
+  the volume back.
+
+### Changed — BREAKING: `luks2 mount` mounts the detected filesystem, not ext4
+
+- `luks2 mount` used to mount every volume as ext4, so the xfs and vfat volumes
+  `create` makes could not be mounted with it. It now takes `--type`/`-t` and
+  otherwise detects the type. A mapping with no recognizable filesystem is
+  refused (exit 1) instead of being handed to `mount(2)` as ext4.
+
+### Changed — BREAKING: `luks2 create` fails when it cannot open the new volume
+
+- If `create` cannot attach a loop device to the new file volume or unlock it,
+  it now prints the error on stderr, detaches a loop device it attached, keeps
+  the container and **exits 1**. It used to print a warning and exit 0, so a
+  script went on to mount a volume that was never opened.
+
+### Changed — BREAKING: a header checksum algorithm other than sha256 is refused
+
+- The binary header's `csum_alg` field was ignored and SHA-256 computed
+  regardless, so a header claiming `sha1` over a SHA-256 checksum was read here
+  and refused by cryptsetup. A header naming anything but `sha256` (the only
+  algorithm cryptsetup writes) is now refused with
+  `ErrUnsupportedHeaderChecksum`, which also matches `ErrInvalidHeader`.
+
+### Security
+
+- **Writers no longer reopen the device path after locking it.** `Wipe` and
+  `WipeKeyslot` took their `O_EXCL` in-use claim on a second open of the path
+  and never checked it was the locked device: a symlink re-pointed in between
+  had `Wipe` overwrite a different disk, and `WipeKeyslot` claim an idle disk
+  and then zero a keyslot on the in-use one. `ImportToken`, `RemoveToken` and
+  `WriteHeader` read and wrote the header by reopening the path. The token
+  and header writers now read and write through the locked descriptor; the
+  wipes' `O_EXCL` claim is refused with the new `ErrDeviceChanged`, before
+  anything is written, unless its device, inode and rdev match the locked
+  descriptor, and `Wipe` then writes through that proven claim.
+  `AddRecoveryKey` took the `VolumeUUID` it reports (and saves) from a second
+  read of the path after enrolling; it now comes from the header read under
+  the enrollment's lock. Format's same-file refusal now also returns
+  `ErrDeviceChanged`.
+
+### Fixed
+
+- **`Unlock` reads the metadata under cryptsetup's read lock.** It takes
+  `LOCK_SH` on the device and on `/run/cryptsetup/L_<maj>:<min>` before reading
+  the header and holds them through the keyslot scan, releasing them before the
+  device-mapper work. A cryptsetup command (or this library) writing the header
+  is waited for, up to `DefaultLockWait`, instead of being read mid-rewrite;
+  other readers are not delayed. Releasing cryptsetup's lock file now unlinks
+  it only when no other holder remains, as cryptsetup does.
+- **`luks2 recovery` refuses an unknown `--format` as a usage error**, before
+  reading the passphrase. An empty `--format=` used to produce a dashed key.
+- **Polling waits use the package clock.** The device-mapper readiness and
+  busy-retry waits run on the injectable clock with a deadline.
+- Stale comments and examples: the dashed recovery key is 74 characters, not
+  71; `RecoveryKeyOptions.KDFType` describes the PBKDF2/1000 path that now
+  exists; `create`'s usage examples use an absolute path.
+
+### Tests
+
+- Keyslot removal is held to `cryptsetup luksKillSlot`'s token update on the
+  same header for every removal path (the keyslot is dropped from every token;
+  a token left naming none is kept).
+- The last `t.Skip` guards are gone: missing cryptsetup or VmLck fails the
+  test, and the harness hostname is injected.
+- The integration image installs `strace`, used to make real cryptsetup hold
+  its write lock while `Unlock` reads.
+- **`pkg/luks2` under `-race` is back inside its budget (#92):** 322 s to
+  108 s on the same host. The FIPS-import child processes use the suite's
+  calibrated-count seam and run in parallel, and the AF XOR, `clearBytes` and
+  the ones-pattern fill no longer loop per byte (the coverage build counted
+  every byte atomically).
+
 ## [0.3.1-alpha] - 2026-10-04
 
 This is the first published release of the `0.3.0-alpha` code: `v0.3.0-alpha` was tagged, but its release job failed (#243), so it was never published. Every change listed under [0.3.0-alpha] below ships in this release, including the BREAKING ones.
