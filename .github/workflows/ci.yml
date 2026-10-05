@@ -1,23 +1,25 @@
+# ci-template: v1.15 (customized)
+
 name: CI
 
 # ONE workflow file, run by two different Actions hosts: github.com and a
 # self-hosted forge. Steps that only work on github.com are guarded on
 # github.server_url; everything that gates a merge runs on both.
 #
-# ci-template v1.9 (owner ruling 2026-08-20, issue #14) — STAGED FAIL-FAST,
-# and, since #136, supersession as well. The self-hosted host exposes no REST
-# route to cancel a run, so nothing can reach in and stop one from outside. Two
-# mechanisms cover that, and they answer different questions:
+# ci-template v1.15 (automatethethings#209): every job starts at once, so a run
+# takes as long as its slowest job, and `push` runs on main only (merge trains
+# are PRs and get CI from `pull_request`). The CI Gate, the one required check,
+# needs every job and fails closed on any result but success. This replaces
+# v1.9's staged ordering, where lint, build and unit tests gated security and
+# integration.
 #
-#   WITHIN one run, fail-fast comes from ORDERING: a fast tier (lint, build,
-#   unit tests) gates the expensive tier (security, integration). A broken push
-#   reports in minutes and burns nothing downstream.
-#
-#   ACROSS runs, the `concurrency` block below cancels a run the moment a newer
-#   head lands on the same ref. It is a property of the workflow the scheduler
-#   reads, not an API call — which is exactly why it works on a host where no
-#   cancel route exists. "No cancel API" was long read here as "cancellation is
-#   impossible"; the narrow claim is true and the conclusion was not.
+# ACROSS runs, supersession (#136): the self-hosted host exposes no REST route
+# to cancel a run, so the `concurrency` block below cancels a run the moment a
+# newer head lands on the same ref. It is a property of the workflow the
+# scheduler reads, not an API call — which is exactly why it works on a host
+# where no cancel route exists. "No cancel API" was long read here as
+# "cancellation is impossible"; the narrow claim is true and the conclusion was
+# not.
 #
 # trivy and fips moved to nightly.yml: both were known-red on every push, and a
 # known-red job burning runner-minutes per push verifies nothing.
@@ -141,10 +143,7 @@ jobs:
   security:
     name: Security Scan
     runs-on: ubuntu-latest
-    # STAGED FAIL-FAST (v1.9): gated on the fast tier — a push that cannot
-    # lint, build or pass unit tests should not spend a heavy gosec and
-    # govulncheck pass.
-    needs: [lint, build, test-unit]
+    # No `needs` (ci-template v1.14): starts with lint and build, not after them.
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -408,12 +407,10 @@ jobs:
       # anything it tests. A literal cannot diverge between hosts.
       ITEST_IMAGE: go-luks2-integration-test:${{ github.run_id }}-test-integration-${{ github.run_attempt }}
       ITEST_CONTAINER: go-luks2-test-runner-${{ github.run_id }}-test-integration-${{ github.run_attempt }}
-    # STAGED FAIL-FAST (v1.9): gated on the fast tier, not on `security` — two
-    # expensive jobs gating each other would serialise them for no benefit.
-    # The suite races on host-global loop devices — /dev/loop* is NOT
+    # No `needs` (ci-template v1.14): starts at once; the CI Gate fails closed
+    # on it. The suite races on host-global loop devices — /dev/loop* is NOT
     # namespaced, so two concurrent runs on one machine share one pool — which
     # is why it runs inside the container and never bare on a shared runner.
-    needs: [lint, build, test-unit]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -620,8 +617,7 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    # FAST TIER (v1.9): no `needs`. build runs alongside lint and test-unit so
-    # the three of them together are the gate the expensive tier waits on.
+    # No `needs`: every job starts at once (ci-template v1.14).
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -732,9 +728,9 @@ jobs:
 
       # Runs on push too, reporting success, rather than carrying an `if:` that
       # skips it. The gate below counts a SKIPPED job as a failure on purpose --
-      # under staged fail-fast a skip means an upstream stage failed -- so a job
-      # that skips itself on main would turn main red, and the fix for that must
-      # not be to weaken the rule.
+      # a job that never ran proved nothing -- so a job that skips itself on
+      # main would turn main red, and the fix for that must not be to weaken
+      # the rule.
       - name: Construct the merge and compile it
         run: |
           set -eu
@@ -797,16 +793,16 @@ jobs:
           TEST_INTEGRATION: ${{ needs.test-integration.result }}
           MERGE_CHECK: ${{ needs.merge-check.result }}
         run: |
-          # skipped != failed, but BOTH fail the gate: under staged fail-fast a
-          # skipped job means an upstream stage failed, and naming it that way
-          # prevents the failure mode this was written for — a red that reads
-          # as a test failure while the tests in fact never ran.
+          # skipped != failed, but BOTH fail the gate: a job that never ran
+          # proved nothing, and naming it that way prevents the failure mode
+          # this was written for — a red that reads as a test failure while the
+          # tests in fact never ran.
           failed=0
           for job in LINT SECURITY BUILD TEST_UNIT TEST_INTEGRATION MERGE_CHECK; do
             eval "result=\$$job"
             case "$result" in
               success) echo "OK   ${job}" ;;
-              skipped) echo "SKIP ${job} (upstream stage failed — see its job)"; failed=1 ;;
+              skipped) echo "SKIP ${job} (did not run — see its job)"; failed=1 ;;
               "")      echo "FAIL ${job} (<unreadable>)"; failed=1 ;;
               *)       echo "FAIL ${job} (${result})"; failed=1 ;;
             esac
