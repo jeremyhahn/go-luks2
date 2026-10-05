@@ -1,46 +1,39 @@
 # changelog.d
 
-One fragment per pull request: `changelog.d/<issue>-<slug>.md`, holding **only
-that change's entry**.
-
-The release step concatenates the fragments into the new version's section in
-`CHANGELOG.md` and empties this directory. Assembly is a **committed step
-performed before tagging** — `release.yml` only overwrites the runner-workspace
-copy, so a fragment folded in by the workflow would never reach the repository.
-
-## Why fragments and not a shared `## [Unreleased]` section
-
-A shared section makes every open sibling PR conflict on one file. Each
-resulting rebase changes the head SHA, which invalidates a reviewer's approval
-bound to the previous head and re-queues CI on shared runners; `main` collects
-duplicate subsection headings belonging to no single PR; and it pressures a
-branch into carrying unrelated issues, contradicting one-issue-one-branch.
-
-Measured here on 2026-09-13: #180 and #158 both edited the shared section and
-#158 could not merge until it was rebased — a docs-only collision that cost a
-full CI cycle.
+One fragment per pull request, `changelog.d/<issue>-<slug>.md`, holding only
+that change's entry. A shared `## [Unreleased]` section makes every open pull
+request conflict on one file; fragments do not.
 
 ## Format
 
-A fragment carries the Keep a Changelog subsection heading it will land under,
-so assembly is a concatenation and not an editing pass:
+A fragment starts with the Keep a Changelog heading it belongs under, so
+assembly is concatenation:
 
 ```markdown
 ### Fixed
 
-- **What changed, in a sentence (#123).** Then why it mattered, and what a
-  reader needs in order to act on it.
+- **What changed, in one sentence (#123).** Why it mattered, and what a reader
+  must do about it.
 ```
 
-Headings in use: `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`,
-`Security`. Mark a breaking change in the heading itself:
+Headings: `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`.
+Mark a breaking change in the heading:
 
 ```markdown
 ### Changed — BREAKING: `Config.Requirements` is now `*Requirements`
 ```
 
-## Adoption
+## Release
 
-Additive, no history rewrite. The `## [Unreleased]` section already in
-`CHANGELOG.md` stays where it is and releases normally at the next tag; only
-NEW entries come here.
+```bash
+make changelog-assemble VERSION=vX.Y.Z-alpha
+```
+
+This inserts a `## [X.Y.Z-alpha] - <date>` section built from the fragments
+into `CHANGELOG.md`, below `## [Unreleased]`, and deletes the fragments
+(`README.md` stays). Commit both before tagging: `release.yml` takes the release
+notes from that section of the committed `CHANGELOG.md`.
+
+The `## [Unreleased]` section that predates fragments is not touched by
+assembly. Move any entries still in it into the new section by hand before
+tagging. New entries go here.

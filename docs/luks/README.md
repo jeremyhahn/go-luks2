@@ -1,133 +1,121 @@
-# LUKS2 Technical Documentation
+# Library guide
 
-This directory contains technical documentation about the LUKS2 (Linux Unified Key Setup version 2) disk encryption format as implemented by go-luks2.
+> **Status: REFERENCE** · Last verified: 2026-10-04 against v0.3.1-alpha
 
-## Contents
+How to use `github.com/jeremyhahn/go-luks2/pkg/luks2`. Signatures and field
+docs are in godoc (`go doc github.com/jeremyhahn/go-luks2/pkg/luks2`); this page
+says which call does what and which errors to branch on. Design and trust
+boundaries: [ARCHITECTURE.md](../ARCHITECTURE.md).
 
-| Document | Description |
-|----------|-------------|
-| [Header Format](header.md) | Binary header structure and JSON metadata |
-| [Keyslots](keyslots.md) | Key slot management and encryption |
-| [Key Derivation](kdf.md) | PBKDF2 and Argon2 key derivation functions |
-| [Encryption](encryption.md) | AES-XTS encryption and anti-forensic splitting |
-| [Tokens](tokens.md) | Token management for FIDO2/TPM2 |
-| [External key providers](keyprovider.md) | Credentials from a hardware authenticator, agent or script |
+| Page | Covers |
+|---|---|
+| [header.md](header.md) | On-disk layout, binary header, JSON metadata, header bounds |
+| [keyslots.md](keyslots.md) | Keyslot structure, cost inheritance, removal |
+| [kdf.md](kdf.md) | PBKDF2 and Argon2, calibration, iteration floors, the digest |
+| [encryption.md](encryption.md) | AES-XTS, anti-forensic split, the dm-crypt table |
+| [tokens.md](tokens.md) | Token JSON, systemd token types, the token API |
+| [keyprovider.md](keyprovider.md) | Credentials from a helper program, FIDO2 |
 
-## LUKS2 Overview
+## Rules that apply to every call
 
-LUKS2 is the second version of the Linux Unified Key Setup specification, providing:
+- Paths must be absolute and name a regular file or a block device, or the call
+  fails with `ErrInvalidPath` or `ErrDeviceNotFound`.
+- Passphrases are 8 to 512 bytes (`ErrPassphraseTooShort`,
+  `ErrPassphraseTooLong`). They stay the caller's memory; the library neither
+  locks nor wipes them.
+- Credentials the library returns are `*enclave.MemoryEnclave` values from
+  go-enclave. The caller destroys them.
+- Calls that create a mapping need root, the kernel keyring and enough
+  `RLIMIT_MEMLOCK`. Call `CheckKeyringAvailable` once at startup.
 
-- **Authenticated encryption metadata** with checksums
-- **JSON-based configuration** for flexibility
-- **Multiple keyslots** (up to 32) for different passphrases
-- **Token support** for hardware security modules
-- **Integrity protection** options (dm-integrity)
+## API by task
 
-## On-Disk Layout
+| Task | Calls |
+|---|---|
+| Create | `Format(FormatOptions)` |
+| Open and close | `Unlock`, `UnlockWithVolumeKey`, `UnlockWithProvider`, `Lock`, `IsUnlocked`, `GetMappedDevicePath` |
+| Inspect | `GetVolumeInfo`, `ListKeyslots`, `IsLUKS`, `IsLUKS2` |
+| Keyslots | `TestKey`, `AddKey`, `ChangeKey`, `RemoveKey` (that slot's passphrase), `KillSlot` (any passphrase), `KillKeyslot` and `WipeKeyslot` (no passphrase) |
+| Recovery keys | `GenerateRecoveryKey`, `AddRecoveryKey`, `SaveRecoveryKey`, `LoadRecoveryCredential`, `RecoveryCredential`, `VerifyRecoveryKey` |
+| Tokens | `ListTokens`, `GetToken`, `ImportToken`, `ImportTokenJSON`, `ExportToken`, `RemoveToken`, `FindFreeTokenSlot`, `TokenExists`, `CountTokens` |
+| Key providers | `EnrollKeyProvider`, `UnlockWithProvider`, `ProviderFromToken`, `NewFIDO2KeyProvider` |
+| Header | `ReadHeader`, `ReadSecondaryHeader`, `RestorePrimaryHeader`, `WriteHeader` |
+| FIPS | `DefaultKDFType`, `IsFIPSCompliantKDF`, `MigrateToFIPS` ([FIPS.md](../FIPS.md)) |
+| Loop devices | `SetupLoopDevice`, `DetachLoopDevice`, `FindLoopDevice` |
+| Filesystems | `MakeFilesystem`, `MakeFilesystemWithOptions`, `CheckFilesystem`, `CheckFilesystemDetailed`, `GetFilesystemInfo`, `SupportedFilesystems` |
+| Mount | `Mount`, `Unmount`, `IsMounted` |
+| Wipe | `Wipe(WipeOptions)`, `WipeKeyslot` |
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    LUKS2 Device Layout                       │
-├─────────────────────────────────────────────────────────────┤
-│  Offset 0x0000: Primary Binary Header (4 KB)                │
-├─────────────────────────────────────────────────────────────┤
-│  Offset 0x1000: Primary JSON Area (typically 12 KB)          │
-├─────────────────────────────────────────────────────────────┤
-│  Offset 0x4000: Secondary Binary Header (4 KB) [backup]      │
-├─────────────────────────────────────────────────────────────┤
-│  Offset 0x5000: Secondary JSON Area [backup]                 │
-├─────────────────────────────────────────────────────────────┤
-│  Keyslot Area (size varies, typically starts at 32 KB)       │
-│  - Contains encrypted key material for each keyslot          │
-├─────────────────────────────────────────────────────────────┤
-│  Data Segment (encrypted user data)                          │
-│  - Encrypted with AES-XTS using the master key               │
-└─────────────────────────────────────────────────────────────┘
-```
+`UnlockWithVolumeKey` opens a volume with a key the caller already holds in an
+enclave, for keys unsealed by a TPM, HSM or KMS in a layer above this one. It
+skips the keyslots but still requires the key to match a digest bound to the
+crypt segment and to have the keyslots' key size (`ErrMasterKeyVerification`).
+A nil, destroyed or oversized enclave fails with `ErrInvalidVolumeKey`. The
+caller keeps ownership of the enclave.
 
-## Cryptographic Components
+## Errors to branch on
 
-### Master Key
+Match with `errors.Is`. Unlock failures:
 
-- Generated randomly during volume creation
-- 256 or 512 bits (typically 512 for AES-XTS)
-- Never stored directly on disk
-- Encrypted in each keyslot with a passphrase-derived key
-
-### Key Hierarchy
-
-```
-Passphrase
-    │
-    ▼
-┌──────────────────┐
-│ Key Derivation   │  PBKDF2 or Argon2
-│ Function (KDF)   │
-└────────┬─────────┘
-         │
-         ▼
-    Derived Key
-         │
-         ▼
-┌──────────────────┐
-│ Decrypt Keyslot  │  AES-XTS
-└────────┬─────────┘
-         │
-         ▼
-┌──────────────────┐
-│ Anti-Forensic    │  afMergeEnclave (4000 stripes)
-│ Merge            │
-└────────┬─────────┘
-         │
-         ▼
-    Master Key
-         │
-         ▼
-┌──────────────────┐
-│ Verify Digest    │  PBKDF2-SHA256
-└────────┬─────────┘
-         │
-         ▼
-    Data Encryption
+```go
+err := luks2.Unlock(device, passphrase, name)
+switch {
+case err == nil:
+case errors.Is(err, luks2.ErrMappingStillLive):
+	// The unlock failed and a plaintext mapping may still exist. Lock(name).
+case errors.Is(err, luks2.ErrNoKeyslots):
+	// No keyslot this library can try. No passphrase will open it.
+case errors.Is(err, luks2.ErrMasterKeyVerification):
+	// A keyslot was tried and the key did not match the digest: a wrong
+	// passphrase, or the right one over damaged key material.
+case errors.Is(err, luks2.ErrInvalidKeyslot), errors.Is(err, luks2.ErrInvalidHeader):
+	// Malformed keyslot or header. The passphrase may be correct.
+case errors.Is(err, luks2.ErrFIPSImportRequired):
+	// FIPS process, volume opens only through Argon2 or SHA-1. See FIPS.md.
+case errors.Is(err, luks2.ErrKeyringUnavailable):
+	// Keyring syscalls blocked or unsupported. See the table below.
+case errors.Is(err, luks2.ErrVolumeAlreadyUnlocked):
+	// The mapping name is taken.
+}
 ```
 
-## Security Properties
+There is no "wrong passphrase" error: with an unauthenticated keyslot cipher a
+wrong passphrase and damaged key material look the same.
 
-### Passphrase Protection
+Keyring errors all match `ErrKeyring`. The unavailability causes also match
+`ErrKeyringUnavailable`:
 
-- Strong KDFs resist brute-force attacks
-- Argon2id provides memory-hard protection
-- PBKDF2 with high iterations for compatibility
+| Error | Cause | Fix |
+|---|---|---|
+| `ErrKeyringBlocked` | seccomp (`EPERM`) | Allow `add_key`, `keyctl`, `request_key` |
+| `ErrKeyringUnsupported` | kernel without `CONFIG_KEYS` (`ENOSYS`) | Use a kernel with keyrings |
+| `ErrKeyringQuotaExhausted` | per-user quota (`EDQUOT`) | Raise `/proc/sys/kernel/keys/maxkeys` and `maxbytes` |
+| `ErrKeyringFailed` | any other refusal | Read the errno |
+| `ErrKeyringEntryExists` | an entry for this volume already exists | Remove the leftover with `keyctl unlink` |
+| `ErrKeyringKeyNotReleased` | the entry could not be confirmed gone | The volume key may still be in the keyring; investigate |
 
-### Anti-Forensic Protection
+The last two do not match `ErrKeyringUnavailable`.
 
-- Master key split into 4000 stripes
-- All stripes required for reconstruction
-- Single stripe wipe makes key unrecoverable
+Other errors worth handling: `ErrMappingBusy` from `Lock` (still held after
+3 s of retries), `ErrLastKeyslot` (removal would leave nothing that opens the
+volume), `ErrProtectedMemory` (no locked memory), `LockTimeoutError` (another
+writer held the device for 30 s).
 
-### Header Redundancy
+## Behaviour to know
 
-- Primary and backup headers
-- Survives partial corruption
-- Both must be wiped to destroy volume
-
-## Implementation Notes
-
-### go-luks2 Specifics
-
-- Pure Go implementation
-- Uses device-mapper for dm-crypt integration
-- Supports file-based volumes via loop devices
-- No dependency on cryptsetup binary
-
-### Compatibility
-
-- Fully interoperable with cryptsetup
-- Volumes can be opened by either tool
-- Follows LUKS2 on-disk specification
-
-## References
-
-- [LUKS2 On-Disk Format Specification](https://gitlab.com/cryptsetup/LUKS2-docs)
-- [cryptsetup Documentation](https://gitlab.com/cryptsetup/cryptsetup)
-- [dm-crypt Kernel Documentation](https://www.kernel.org/doc/html/latest/admin-guide/device-mapper/dm-crypt.html)
+- `SupportedFilesystems` is ext4, xfs, zfs and vfat; ext2 and
+  ext3 are refused with `ErrUnsupportedFilesystem`. `MakeFilesystem` takes a
+  mapping name, not a path. `CheckFilesystem` is read-only unless `repair` is
+  set; for zfs it takes a pool name and only starts `zpool scrub`. See godoc.
+- A `HeaderOnly` wipe leaves keyslot areas and data intact, so a header
+  backup reopens the volume, and wipe verification is skipped when the final
+  pass is random. Details: [luks2 wipe](../cli/wipe.md). `WipeKeyslot` zeroes
+  one keyslot area with no passphrase.
+- A recovery keyslot holds the printed text, so the printed key
+  opens the volume with stock cryptsetup. `RecoveryKey.Credential` is that text
+  in an enclave; `FormattedString` returns it as a string. Keys enrolled before
+  this was the case hold the decoded bytes: use `ParseRecoveryKey` or
+  `LoadRecoveryKey` for those.
+- A keyslot or token written as JSON `null` is dropped
+  on read and listed in `LUKS2Metadata.DroppedNullEntries`. The next header
+  write removes it from the device.

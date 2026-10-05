@@ -1,134 +1,65 @@
-# luks2 CLI Reference
+# luks2 CLI reference
 
-The `luks2` command-line tool provides a complete interface for creating, managing, and securing LUKS2 encrypted volumes.
+> **Status: REFERENCE** · Last verified: 2026-10-04 against v0.3.1-alpha
 
-## Installation
+`luks2` creates, opens and manages LUKS2 volumes. It is a thin layer over
+[`pkg/luks2`](../luks/README.md).
 
 ```bash
 go install github.com/jeremyhahn/go-luks2/cmd/luks2@latest
-```
-
-Or build from source:
-
-```bash
-git clone https://github.com/jeremyhahn/go-luks2.git
-cd go-luks2
-make build
-sudo cp build/luks2 /usr/local/bin/
-```
-
-## Requirements
-
-- Linux operating system
-- Root privileges (sudo) for device-mapper operations
-- Kernel with dm-crypt support
-
-## Usage
-
-```
-luks2 <command> [arguments]
+# or, from a checkout
+make build && sudo cp build/luks2 /usr/local/bin/
 ```
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| [create](create.md) | Create a new LUKS2 encrypted volume |
-| [open](open.md) | Unlock an encrypted volume |
-| [close](close.md) | Lock an encrypted volume |
-| [mount](mount.md) | Mount an unlocked volume |
-| [unmount](unmount.md) | Unmount a volume |
-| [info](info.md) | Display volume information |
-| [wipe](wipe.md) | Securely wipe a volume (headers or full device) |
-| [keyslots](keyslots.md) | List the keyslots on a volume |
-| [testkey](keyslots.md#testkey) | Check that a passphrase opens a volume |
-| [addkey](keyslots.md#addkey) | Add another passphrase |
-| [changekey](keyslots.md#changekey) | Replace the passphrase in a keyslot |
-| [removekey](keyslots.md#removekey) | Remove a keyslot, using its own passphrase |
-| [killslot](keyslots.md#killslot) | Remove a keyslot, using any valid passphrase |
-| [recovery](recovery.md) | Generate, enroll and verify recovery keys |
-| [token](token.md) | Inspect and edit the tokens in the header |
-| [header](header.md) | Show or restore the LUKS2 header copies |
-| [isluks](header.md#isluks) | Ask whether a device holds a LUKS container |
-| help | Show usage information |
-| version | Show version information |
+| Command | Does |
+|---|---|
+| [create](create.md) | Format a block device, or create, format, open and mkfs a file volume |
+| [open](open.md) | Unlock a volume to `/dev/mapper/<name>` |
+| [close](close.md) | Remove the mapping |
+| [mount](mount.md), [unmount](unmount.md) | Mount an open volume as ext4; unmount it |
+| [info](info.md) | Show the volume summary |
+| [wipe](wipe.md) | Destroy the header copies, or overwrite the whole device |
+| [keyslots, testkey, addkey, changekey, removekey, killslot](keyslots.md) | Manage passphrases |
+| [recovery generate, add, verify](recovery.md) | Recovery keys |
+| [token ...](token.md) | Read and edit header tokens |
+| [header show, secondary, restore; isluks](header.md) | Inspect and repair the header copies |
+| `help`, `--help`, `-h` | Print usage (exit 0) |
+| `version`, `--version`, `-v` | Print the version (exit 0) |
 
-Every command that needs a passphrase can take one without a terminal — see
-[Non-interactive key input](key-input.md), which is what makes this tool usable
-from a script, a systemd unit or a timer.
+## Rules for every command
 
-## Quick Start
+- Paths must be absolute. The library refuses a relative device or file
+  path with `invalid device path`. Key files and output files may be relative.
+- Root is needed to create a mapping, a loop device or a mount, and to
+  write a block device. `info`, `keyslots`, `testkey`, the keyslot and token
+  edits, and `header` work on a file you own without root.
+- Passphrases are 8 to 512 bytes. Without a terminal, use `--key-file`;
+  see [key input](key-input.md).
+- Options take `--name value` or `--name=value`, before or after the
+  positional arguments. An unknown option is refused rather than read as a
+  path. `close`, `mount`, `unmount`, `info` and `wipe` parse their own
+  arguments; see each page.
+- The exit status is 0 on success and 1 on any failure, including bad
+  arguments and missing arguments (which also print the command's usage). The
+  exceptions, where 1 is an answer rather than a failure, are `isluks`,
+  `token exists` and `recovery verify`. A canceled `wipe` or `header restore`
+  exits 0.
+- The destructive commands, `wipe` and `header restore`, read `YES` from
+  standard input. Anything else cancels.
 
-### Create an encrypted file volume
-
-```bash
-# Create a 100MB encrypted file with ext4 filesystem
-sudo luks2 create myvolume.luks 100M ext4
-
-# The volume is automatically:
-# - Formatted with LUKS2
-# - Attached to a loop device
-# - Unlocked as /dev/mapper/luks-auto
-# - Formatted with ext4 filesystem
-```
-
-### Create on a block device
+## Typical session
 
 ```bash
-# Format an existing partition
-sudo luks2 create /dev/sdb1
-```
-
-### Complete workflow
-
-```bash
-# 1. Create encrypted volume
-sudo luks2 create secret.luks 1G
-
-# 2. Mount it
+sudo luks2 create /srv/secret.luks 1G          # opens as luks-auto, runs mkfs.ext4
 sudo luks2 mount luks-auto /mnt/secret
-
-# 3. Use it
-echo "confidential data" | sudo tee /mnt/secret/data.txt
-
-# 4. Cleanup when done
 sudo luks2 unmount /mnt/secret
 sudo luks2 close luks-auto
+sudo losetup -d /dev/loop0                      # the loop device create attached
+
+# Later
+sudo losetup -f --show /srv/secret.luks         # prints e.g. /dev/loop0
+sudo luks2 open /dev/loop0 secret
+sudo luks2 mount secret /mnt/secret
 ```
-
-### Re-open an existing volume
-
-```bash
-# Open (unlock) the volume
-sudo luks2 open /dev/loop0 myvolume
-
-# Mount
-sudo luks2 mount myvolume /mnt/encrypted
-
-# ... use the volume ...
-
-# Cleanup
-sudo luks2 unmount /mnt/encrypted
-sudo luks2 close myvolume
-```
-
-## Global Options
-
-| Option | Description |
-|--------|-------------|
-| `--help`, `-h` | Show help message |
-| `--version`, `-v` | Show version information |
-
-## Security Considerations
-
-1. **Passphrase Strength**: Use at least 12 characters with mixed case, numbers, and symbols
-2. **Memory**: Passphrases are cleared from memory after use
-3. **Root Access**: All operations require root privileges
-4. **Secure Wipe**: Use `wipe` command before disposing of devices
-
-## See Also
-
-- [create](create.md) - Detailed create command documentation
-- [open](open.md) - Detailed open command documentation
-- [wipe](wipe.md) - Secure wipe documentation
-- [LUKS2 Header Format](../luks/header.md) - Technical header documentation

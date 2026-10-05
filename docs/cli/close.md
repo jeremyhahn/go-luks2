@@ -1,91 +1,24 @@
 # luks2 close
 
-Lock a LUKS2 encrypted volume.
-
-## Synopsis
+> **Status: REFERENCE** · Last verified: 2026-10-04 against v0.3.1-alpha
 
 ```
 luks2 close <name>
 ```
 
-## Description
-
-The `close` command locks a previously unlocked LUKS2 volume by removing its device-mapper entry. After closing, the encrypted data is no longer accessible until the volume is opened again.
-
-**Important**: The volume must be unmounted before closing.
-
-## Arguments
-
-| Argument | Description |
-|----------|-------------|
-| `name` | Name of the device-mapper entry (from `open` command) |
-
-## Examples
-
-### Close a volume
+Removes `/dev/mapper/<name>`. It does not detach a loop device; use
+`losetup -d` for that.
 
 ```bash
-# Close the volume
-sudo luks2 close my-encrypted-disk
-
-# Verify it's closed
-ls /dev/mapper/my-encrypted-disk
-# Should return: No such file or directory
+sudo luks2 unmount /mnt/backup
+sudo luks2 close backup
 ```
 
-### Complete cleanup workflow
+Unmount first. Before closing, the command asks whether `/dev/mapper/<name>`
+is listed as a mount point in `/proc/mounts`. A device path never is, so this
+check does not catch a mounted volume. Closing a mounted volume reaches
+device-mapper, which reports the target busy; `close` retries for 3 seconds and
+then fails with `device-mapper target is held open` and hints for finding the
+holder. If `/proc/mounts` cannot be read, it refuses to close.
 
-```bash
-# 1. Unmount first
-sudo luks2 unmount /mnt/encrypted
-
-# 2. Close the volume
-sudo luks2 close myvolume
-
-# 3. (Optional) Detach loop device for file volumes
-sudo losetup -d /dev/loop0
-```
-
-## Pre-requisites
-
-Before closing, ensure:
-1. Volume is not mounted
-2. No processes are using the device
-3. All file handles are closed
-
-## Error Handling
-
-### "Volume is still mounted"
-
-```bash
-# Unmount first
-sudo luks2 unmount /mnt/encrypted
-
-# Or check mount points
-mount | grep myvolume
-
-# Force unmount if necessary (use with caution)
-sudo umount -l /mnt/encrypted
-```
-
-### "Device is busy"
-
-```bash
-# Find processes using the device
-sudo lsof /dev/mapper/myvolume
-
-# Or use fuser
-sudo fuser -m /dev/mapper/myvolume
-```
-
-## Exit Codes
-
-| Code | Description |
-|------|-------------|
-| 0 | Success |
-| 1 | Error (still mounted, device busy, not found) |
-
-## See Also
-
-- [open](open.md) - Unlock the volume
-- [unmount](unmount.md) - Unmount before closing
+A name with no mapping fails with `volume not unlocked`.

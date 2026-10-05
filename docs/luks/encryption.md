@@ -1,222 +1,51 @@
-# LUKS2 Encryption
+# Encryption
 
-LUKS2 uses symmetric encryption for both data and key material protection.
+> **Status: REFERENCE** · Last verified: 2026-10-04 against v0.3.1-alpha
 
-## Cipher Specification
+## Ciphers
 
-The default cipher specification is:
+`Format` writes `aes-xts-plain64` with a 512-bit key (AES-256-XTS) and
+512-byte sectors. `FormatOptions.KeySize` may be 256 (AES-128-XTS) and
+`SectorSize` may be 4096.
 
-```
-aes-xts-plain64
-```
+| Where | Cipher | Done by |
+|---|---|---|
+| Keyslot areas | `aes-xts-plain64` written; `aes-xts-plain64` or `aes-xts-plain` read; anything else fails with `ErrUnsupportedKeyslotCipher` | This library, `golang.org/x/crypto/xts` |
+| Data segment | Whatever the header declares, after a character whitelist | The kernel, dm-crypt |
 
-Components:
-- **aes**: AES (Advanced Encryption Standard) block cipher
-- **xts**: XEX-based Tweaked-codebook mode with ciphertext Stealing
-- **plain64**: 64-bit sector number as IV tweak
+XTS encrypts each sector independently with the sector number as tweak. It does
+not authenticate: changed ciphertext decrypts to garbage rather than failing.
+The header checksum detects corruption, not tampering, since anyone who can
+write the disk can recompute it.
 
-## AES-XTS Mode
+## Anti-forensic split
 
-XTS mode is designed specifically for disk encryption:
-
-### Properties
-
-- **Tweakable**: Each sector has a unique tweak (IV)
-- **Length-preserving**: Ciphertext same size as plaintext
-- **No authentication**: Does not detect tampering
-- **Parallel**: Sectors can be encrypted independently
-
-### Key Size
-
-XTS uses two keys (for encryption and tweak):
-
-| Setting | Key Size | Effective Security |
-|---------|----------|-------------------|
-| AES-128-XTS | 256 bits (2×128) | 128-bit |
-| AES-256-XTS | 512 bits (2×256) | 256-bit |
-
-go-luks2 uses AES-256-XTS (512-bit key) by default.
-
-## Sector Encryption
-
-Data is encrypted sector-by-sector:
+The volume key is never stored directly. Each keyslot holds it split into
+stripes with a hash-based diffuser, encrypted with AES-XTS under the key
+derived from the credential. This library writes 4000 stripes
+(`key_size × 4000` bytes, 256,000 for a 64-byte key) and reads 1 to 4000.
 
 ```
-┌─────────────────────────────────────────┐
-│              Sector N                    │
-├─────────────────────────────────────────┤
-│  Plaintext (512 or 4096 bytes)          │
-│            │                             │
-│            ▼                             │
-│  ┌────────────────┐                      │
-│  │   AES-XTS      │ ◄── Key + Tweak(N)  │
-│  └────────────────┘                      │
-│            │                             │
-│            ▼                             │
-│  Ciphertext (same size)                  │
-└─────────────────────────────────────────┘
+volume key ──AF split (4000 stripes)──> stripes ──AES-XTS, derived key──> keyslot area
+keyslot area ──AES-XTS decrypt──> stripes ──AF merge──> candidate key ──digest check
 ```
 
-### Sector Size
+Every stripe feeds the merge, so overwriting any part of the stripe material
+destroys that keyslot. The area is rounded up to 4 KiB; the padding after the
+stripes is not read. New keyslots use SHA-256 or SHA-512 for the diffuser; SHA-1 keyslots
+from older cryptsetup are read outside FIPS mode only. Stripes, derived keys and
+the merged key are held in locked memory; see
+[Key custody](../ARCHITECTURE.md#key-custody).
 
-| Size | Use Case |
-|------|----------|
-| 512 bytes | Traditional, maximum compatibility |
-| 4096 bytes | Modern drives, better performance |
+## The dm-crypt table
 
-## Anti-Forensic Splitting
-
-Master key is protected with anti-forensic information splitting (AFsplit).
-
-### Purpose
-
-Prevents recovery of the master key from:
-- Partial disk reads
-- Disk imaging artifacts
-- Forensic recovery tools
-
-### Algorithm
+`Unlock` creates a `crypt` target whose key field is a kernel keyring
+reference, not the key. The optional-parameter count `<n>` is 0 for 512-byte
+sectors; for 1024, 2048 or 4096 it is 1, followed by `sector_size:<size>`:
 
 ```
-Master Key (64 bytes)
-      │
-      ▼
-┌─────────────────────┐
-│   afSplitEnclave    │
-│   4000 stripes      │
-│   SHA-256 diffuse   │
-└─────────────────────┘
-      │
-      ▼
-Split Material (256,000 bytes)
-      │
-      ▼
-┌─────────────────────┐
-│   AES-XTS Encrypt   │
-│   with derived key  │
-└─────────────────────┘
-      │
-      ▼
-Encrypted Keyslot Material
+0 <sectors> crypt aes-xts-plain64 :64:logon:luks2:<sha256 of dm UUID> <iv_tweak> <device> <offset sectors> <n> [sector_size:<size>]
 ```
 
-### Recovery (Unlock)
-
-```
-Encrypted Material
-      │
-      ▼
-┌─────────────────────┐
-│   AES-XTS Decrypt   │
-│   with derived key  │
-└─────────────────────┘
-      │
-      ▼
-Split Material (256,000 bytes)
-      │
-      ▼
-┌─────────────────────┐
-│   afMergeEnclave    │
-│   Combine stripes   │
-└─────────────────────┘
-      │
-      ▼
-Master Key (64 bytes)
-```
-
-### Security Property
-
-If any single stripe is wiped or corrupted, the master key cannot be recovered. This means:
-
-1. Wiping 64 bytes anywhere in the keyslot destroys it
-2. Forensic tools cannot recover partial key data
-3. Physical damage to keyslot area is fatal
-
-## Device-Mapper Integration
-
-go-luks2 uses Linux device-mapper for encryption:
-
-```
-User Space              Kernel Space
-    │                       │
-    ▼                       │
-/dev/sdb1 ──────────────────┤
-(encrypted)                 │
-    │                       ▼
-    │            ┌─────────────────────┐
-    │            │   device-mapper     │
-    │            │   dm-crypt target   │
-    │            └─────────────────────┘
-    │                       │
-    ▼                       ▼
-           /dev/mapper/myvolume
-               (decrypted)
-```
-
-### dm-crypt Table
-
-```
-0 <size> crypt aes-xts-plain64 <key> 0 /dev/sdb1 <offset>
-```
-
-Components:
-- `0`: Start sector
-- `<size>`: Number of sectors
-- `crypt`: dm-crypt target
-- `aes-xts-plain64`: Cipher specification
-- `<key>`: Master key (hex)
-- `0`: IV offset
-- `/dev/sdb1`: Underlying device
-- `<offset>`: Data start offset
-
-## Implementation Details
-
-### Key Generation
-
-```go
-// Master key is generated using crypto/rand
-masterKey := make([]byte, 64)
-_, err := rand.Read(masterKey)
-```
-
-### Memory Protection
-
-```go
-// Keys are cleared after use
-defer func() {
-    for i := range masterKey {
-        masterKey[i] = 0
-    }
-}()
-```
-
-### Encryption Operations
-
-```go
-// Encrypt key material
-encrypted, err := encryptKeyMaterial(data, derivedKey, "aes")
-
-// Decrypt key material
-decrypted, err := decryptKeyMaterial(encrypted, derivedKey, "aes", 512)
-```
-
-## Security Considerations
-
-### XTS Limitations
-
-1. **No Authentication**: Cannot detect tampering
-2. **Malleability**: Specific bit flips have predictable effects
-3. **Sector Boundaries**: Changes in one sector don't affect others
-
-### Mitigations
-
-1. **Header Checksums**: Detect header tampering
-2. **Key Verification**: Digest verifies correct decryption
-3. **dm-integrity**: Optional integrity protection (not in go-luks2)
-
-### Best Practices
-
-1. Use full disk encryption
-2. Keep headers backed up securely
-3. Use strong passphrases
-4. Wipe headers before device disposal
+The key sits in the session keyring only while the target is created, then is
+revoked. See [Kernel keyring](../ARCHITECTURE.md#kernel-keyring).

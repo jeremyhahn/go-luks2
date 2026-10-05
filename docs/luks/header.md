@@ -1,60 +1,66 @@
-# LUKS2 Header Format
+# LUKS2 header
 
-The LUKS2 header consists of a binary header followed by a JSON metadata area. Both primary and backup copies are stored.
+> **Status: REFERENCE** · Last verified: 2026-10-04 against v0.3.1-alpha
 
-## Binary Header Structure
+A LUKS2 header is two copies of a 4096-byte binary header plus a JSON area,
+followed by the keyslots area and the data segment.
 
-The binary header is 4096 bytes (4 KB) and contains:
+## Layout
 
-| Offset | Size | Field | Description |
-|--------|------|-------|-------------|
-| 0x0000 | 6 | Magic | `LUKS\xba\xbe` (primary) or `SKUL\xba\xbe` (secondary) |
-| 0x0006 | 2 | Version | `0x0002` for LUKS2 |
-| 0x0008 | 8 | Header Size | Total header size including JSON |
-| 0x0010 | 8 | Sequence ID | Monotonic counter for updates |
-| 0x0018 | 48 | Label | Volume label (null-padded) |
-| 0x0048 | 32 | Checksum Algorithm | e.g., "sha256" |
-| 0x0068 | 64 | Salt | Random salt for checksum |
-| 0x00A8 | 40 | UUID | Volume UUID string |
-| 0x00D0 | 48 | Subsystem | Optional subsystem label |
-| 0x0100 | 8 | Header Offset | Offset of this header |
-| 0x0108 | 184 | Padding | Reserved (zeros) |
-| 0x01C0 | 64 | Checksum | SHA-256 of header + JSON |
-| 0x0200 | 3584 | Padding | Reserved to 4 KB |
-
-## Metadata Area Size
-
-Each header copy (binary header plus JSON area) occupies one metadata area,
-and the two copies tile the front of the device:
+`area` is the size of one header copy (binary header plus JSON). It is 16 KiB
+by default, leaving 12288 bytes of JSON.
 
 | Region | Offset | Size |
-|--------|--------|------|
-| Primary header + JSON | `0` | `area` |
-| Secondary header + JSON | `area` | `area` |
+|---|---|---|
+| Primary header and JSON | `0` | `area` |
+| Secondary header and JSON | `area` | `area` |
 | Keyslots area | `2 × area` | `16 MiB − 2 × area` |
-| Data segment | `16 MiB` | rest of device |
+| Data segment | `16 MiB` | rest of the device |
 
-`area` is 16 KiB by default, leaving `json_size` = 12288. Set
-`FormatOptions.MetadataSize` to a power of two from 16 KiB to 4 MiB for more
-JSON space. This is the equivalent of cryptsetup's `--luks2-metadata-size`,
-with the same accepted set and the same layout; other values are refused with
-`ErrInvalidMetadataSize`. The size is recorded in the header and cannot change
-after format. Containers cryptsetup wrote with any legal size are read
-from their headers.
+`FormatOptions.MetadataSize` sets `area` to a power of two from 16 KiB to
+4 MiB, as cryptsetup's `--luks2-metadata-size` does; other values fail with
+`ErrInvalidMetadataSize`. It cannot change after format. Containers
+cryptsetup wrote with any legal size are read from their headers.
 
-## Header Checksum
+`Format` fills the unused keyslots area with random bytes, so the first 16 MiB
+of a new container is allocated and does not show which slots were ever used.
+The data area is left as it was.
 
-The checksum is computed over:
-1. The binary header (with checksum field zeroed)
-2. The entire JSON metadata area
+## Binary header
 
-```
-checksum = SHA256(binary_header || json_area)
-```
+Integers are big-endian.
 
-## JSON Metadata
+| Offset | Size | Field |
+|---|---|---|
+| 0x000 | 6 | Magic: `LUKS\xba\xbe` (primary), `SKUL\xba\xbe` (secondary) |
+| 0x006 | 2 | Version, `2` |
+| 0x008 | 8 | Header size (`area`) |
+| 0x010 | 8 | Sequence ID |
+| 0x018 | 48 | Label |
+| 0x048 | 32 | Checksum algorithm, e.g. `sha256` |
+| 0x068 | 64 | Salt |
+| 0x0A8 | 40 | UUID |
+| 0x0D0 | 48 | Subsystem label |
+| 0x100 | 8 | Header offset (0 or `area`) |
+| 0x108 | 184 | Padding |
+| 0x1C0 | 64 | Checksum |
+| 0x200 | 3584 | Padding |
 
-The JSON area follows the binary header and contains structured metadata:
+The checksum covers the binary header (checksum field zeroed) followed by the
+whole JSON area. This library writes `sha256` in the algorithm field and always
+computes and verifies the checksum with SHA-256, whatever the field says. The
+two copies differ in magic and header offset.
+
+The specification has `sequence_id` increase on each update and readers prefer
+the copy with the higher value. This library writes 1 on format and advances it
+on keyslot and token changes. `WriteHeader` writes the value the caller passes.
+`ReadHeader` reads the primary copy only and does not compare sequence IDs; the
+CLI's `header show` and `header secondary` show both so you can.
+cryptsetup writes 3 on format because it does three header writes.
+
+## JSON metadata
+
+Pretty-printed here; values are illustrative.
 
 ```json
 {
@@ -62,183 +68,102 @@ The JSON area follows the binary header and contains structured metadata:
     "0": {
       "type": "luks2",
       "key_size": 64,
-      "af": {
-        "type": "luks1",
-        "stripes": 4000,
-        "hash": "sha256"
-      },
-      "area": {
-        "type": "raw",
-        "offset": "32768",
-        "size": "258048",
-        "encryption": "aes-xts-plain64",
-        "key_size": 64
-      },
-      "kdf": {
-        "type": "argon2id",
-        "salt": "base64...",
-        "time": 4,
-        "memory": 1048576,
-        "cpus": 4
-      }
+      "af": { "type": "luks1", "stripes": 4000, "hash": "sha256" },
+      "area": { "type": "raw", "offset": "32768", "size": "258048",
+                "encryption": "aes-xts-plain64", "key_size": 64 },
+      "kdf": { "type": "argon2id", "salt": "...", "time": 4,
+               "memory": 1048576, "cpus": 4 }
     }
   },
   "tokens": {},
   "segments": {
-    "0": {
-      "type": "crypt",
-      "offset": "16777216",
-      "size": "dynamic",
-      "iv_tweak": "0",
-      "encryption": "aes-xts-plain64",
-      "sector_size": 512
-    }
+    "0": { "type": "crypt", "offset": "16777216", "size": "dynamic",
+           "iv_tweak": "0", "encryption": "aes-xts-plain64", "sector_size": 512 }
   },
   "digests": {
-    "0": {
-      "type": "pbkdf2",
-      "keyslots": ["0"],
-      "segments": ["0"],
-      "hash": "sha256",
-      "iterations": 100000,
-      "salt": "base64...",
-      "digest": "base64..."
-    }
+    "0": { "type": "pbkdf2", "keyslots": ["0"], "segments": ["0"],
+           "hash": "sha256", "iterations": 500000, "salt": "...", "digest": "..." }
   },
-  "config": {
-    "json_size": "12288",
-    "keyslots_size": "16744448"
-  }
+  "config": { "json_size": "12288", "keyslots_size": "16744448" }
 }
 ```
 
-### On-disk encoding
-
-The example above is pretty-printed for reading. **What is written to disk is
-compact**: no newlines, no indentation, one NUL terminator after the closing
-brace, and zero padding to the end of the JSON area.
-
-Three properties of the encoding are conformance requirements, not style:
-
-| Property | Why |
+| Object | Holds |
 |---|---|
-| Compact | The JSON area is fixed when the container is formatted (12288 bytes by default) and cannot grow (the keyslots and the data segment are already placed), so indentation is charged against the keyslot budget. Indented, only 22 of the 32 keyslots LUKS2 defines fit; compact, all 32 fit in 10676 bytes. |
-| No HTML escaping | Go's `encoding/json` escapes `<`, `>` and `&` as `\u003c`, `\u003e` and `\u0026` by default. json-c, which cryptsetup uses, does not. |
-| No trailing newline | `json.Encoder.Encode` appends one; it would land between the closing brace and the NUL terminator. |
+| `keyslots` | Wrapped copies of the volume key; see [keyslots.md](keyslots.md) |
+| `segments` | The encrypted data area: offset, size (`dynamic` = to the end), cipher, sector size |
+| `digests` | PBKDF2 digests that verify a recovered volume key, and which keyslots and segments each binds |
+| `tokens` | Metadata about external credentials; see [tokens.md](tokens.md) |
+| `config` | JSON area size, keyslots area size, optional `requirements` |
 
-Byte values that exceed 2^53 are written as JSON **strings** (`"offset"`,
-`"size"`, `"iv_tweak"`, `"json_size"`, `"keyslots_size"`) because JSON numbers
-are doubles; counts and sizes that do not (`"key_size"`, `"iterations"`,
-`"stripes"`, `"sector_size"`) are written bare. This matches the LUKS2
-specification and cryptsetup exactly.
+A container whose `config.requirements.mandatory` lists anything is refused
+for writing (`UnsupportedRequirementError`): this library implements none of
+those features, online reencryption included.
 
-Conformance is asserted rather than assumed. `TestCanonicalJSONReencodes-
-CryptsetupsHeaderByteForByte` parses a container cryptsetup wrote and re-encodes
-it, requiring identical bytes; `TestFormattedBinaryHeaderMatchesCryptsetup`
-compares two independently formatted containers and requires the whole 4096-byte
-binary header to match outside the header salt, the derived checksum, and
-`sequence_id`.
+## Encoding
 
-Byte-identity with cryptsetup's json-c encoder holds **up to ten entries** in
-any of `keyslots`, `tokens`, `segments` or `digests`. Go's `encoding/json` sorts
-object keys as strings while json-c preserves insertion order, so at eleven
-keyslots cryptsetup writes `0,1,...,9,10` and this library writes
-`0,1,10,2,...,9`. Both are conformant — JSON objects are unordered — and both
-parse identically; only a byte comparison sees it.
+What goes to disk is compact JSON, one NUL, then zero padding to the end of the
+JSON area. Three properties matter for conformance:
 
-### sequence_id
+- Compact. The JSON area cannot grow after format. Compact, all 32 keyslots
+  fit in the default area; indented, only 22 do.
+- No HTML escaping. Go escapes `<`, `>` and `&` by default; json-c, which
+  cryptsetup uses, does not.
+- No trailing newline between the closing brace and the NUL.
 
-`sequence_id` is a monotonic counter, not a format constant: the LUKS2
-specification defines it as increased on update, and a reader takes the header
-copy with the higher value. cryptsetup writes 3 after `luksFormat` because its
-format performs three header writes; this library writes 1. Both are valid, and
-the value records a container's write history rather than describing its layout.
+Byte offsets and sizes are JSON strings (`offset`, `size`, `iv_tweak`,
+`json_size`, `keyslots_size`) because they can exceed 2^53; small counts
+(`key_size`, `iterations`, `stripes`, `sector_size`) are numbers. This matches
+the specification and cryptsetup.
 
-## JSON Sections
+Output matches cryptsetup byte for byte while each object has at most ten
+entries. Go sorts object keys as strings and json-c keeps insertion order, so
+at eleven keyslots this library writes `0,1,10,2,…`. Both parse the same.
+`TestCanonicalJSONReencodesCryptsetupsHeaderByteForByte` and
+`TestFormattedBinaryHeaderMatchesCryptsetup` check this against cryptsetup.
 
-### keyslots
+Members a struct does not model are kept through a rewrite in every nested
+object: keyslots and their `area`, `kdf` and `af`, tokens, segments, digests,
+`config` and `requirements`. Their values are kept exactly (large integers and
+number spellings such as `1e3` included); whitespace inside them is compacted.
+Unknown members at the top level of the metadata are dropped.
 
-Defines encryption keyslots:
-- `type`: Always "luks2"
-- `key_size`: Master key size (bytes)
-- `af`: Anti-forensic parameters
-- `area`: Encrypted key material location
-- `kdf`: Key derivation function parameters
+## Untrusted headers
 
-### segments
+Anyone with the disk can write the header, and keyslot fields decide how much
+work an unlock does before any passphrase is checked.
 
-Defines encrypted data segments:
-- `type`: "crypt" for encrypted segments
-- `offset`: Start of encrypted data
-- `size`: "dynamic" for full device
-- `encryption`: Cipher specification
-- `sector_size`: Encryption sector size
+- Segments are validated when the header is read, because their fields go
+  straight into the dm-crypt table: cipher characters, `sector_size` (512,
+  1024, 2048 or 4096) and `iv_tweak`. Failure is `ErrInvalidHeader`.
+- Keyslots are validated one at a time, before each is used, so one damaged
+  keyslot does not hide the others and the header can still be inspected. A
+  keyslot outside the bounds below fails with an error matching
+  `ErrInvalidKeyslot` before any derivation or allocation.
 
-### digests
+| Field | Bound |
+|---|---|
+| `key_size` | declared 1–1024 bytes; only 32, 48 or 64 is tried (AES-XTS) |
+| `af.stripes` | 1–4000 |
+| `area.size` | 1 byte – 128 MiB (cryptsetup's `LUKS2_MAX_KEYSLOTS_SIZE`) |
+| `key_size × stripes` | at most `area.size` |
+| PBKDF2 iterations | 1 – 100,000,000 |
+| Argon2 time / memory / cpus | 1–10,000 / 8 KiB – 4 GiB / 1–255 |
 
-Master key verification:
-- `type`: "pbkdf2" (always)
-- `keyslots`: Which keyslots use this digest
-- `segments`: Which segments use this key
-- `digest`: Expected key hash
+Keyslots of a type this library does not implement, such as `reencrypt`, are
+never tried. The bounds are per derivation: nothing caps the total work of an
+unlock that tries many keyslots.
 
-### tokens
-
-Hardware token references:
-- FIDO2 tokens
-- TPM2 tokens
-- Custom token types
-
-### config
-
-Volume configuration:
-- `json_size`: Size of JSON area
-- `keyslots_size`: Total keyslot area size
-
-## Header Locations
-
-| Header | Offset | Purpose |
-|--------|--------|---------|
-| Primary | 0x0000 | Main header |
-| Secondary | 0x4000 | Backup header |
-
-Both headers should be identical (except magic bytes). The secondary header uses `SKUL` magic to distinguish it.
-
-## Implementation in go-luks2
-
-### Reading Headers
+## API
 
 ```go
-// Read and validate header
-header, err := luks2.ReadHeader(device)
-if err != nil {
-    // Handle invalid/corrupted header
-}
-
-// Access metadata
-fmt.Println(header.UUID)
-fmt.Println(header.Label)
+hdr, metadata, err := luks2.ReadHeader(device)     // primary copy
+hdr, metadata, err = luks2.ReadSecondaryHeader(device)
+err = luks2.RestorePrimaryHeader(device)           // rebuild primary from secondary
+err = luks2.WriteHeader(device, hdr, metadata)     // writes both copies
 ```
 
-### Header Validation
-
-1. Check magic bytes
-2. Verify version is 2
-3. Validate checksum
-4. Parse JSON metadata
-5. Verify JSON structure
-
-### Checksum Verification
-
-```go
-// Computed internally during ReadHeader
-// Returns error if checksum doesn't match:
-// "header checksum mismatch"
-```
-
-## Security Considerations
-
-1. **Checksum Protection**: Headers are integrity-protected
-2. **Redundancy**: Backup header survives corruption
-3. **Secure Wipe**: Both headers must be destroyed
-4. **No Encryption**: Headers are not encrypted (by design)
+`ReadSecondaryHeader` finds the secondary copy by probing the legal area sizes,
+so it works when the primary is unreadable. `RestorePrimaryHeader` validates the
+secondary in full before writing. `WriteHeader` stamps the correct magic and
+offset on each copy, whatever the caller's header carried.

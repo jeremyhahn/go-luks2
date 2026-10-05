@@ -1,12 +1,6 @@
 # luks2 header, luks2 isluks
 
-Header inspection and repair.
-
-A LUKS2 container carries **two copies** of its header, and the second is not a
-backup anyone has to remember to take — it is written every time the first one
-is. These commands are how the second copy becomes useful.
-
-## Synopsis
+> **Status: REFERENCE** · Last verified: 2026-10-04 against v0.3.1-alpha
 
 ```
 luks2 header show      <device>
@@ -15,14 +9,17 @@ luks2 header restore   <device>
 luks2 isluks [--luks2] <device>
 ```
 
+A LUKS2 container has two header copies, written together on every change.
+Layout: [header.md](../luks/header.md).
+
 ## show and secondary
 
-```bash
-$ sudo luks2 header show /dev/sdb1
-Primary header: /dev/sdb1
+```
+$ luks2 header show /srv/data.luks
+Primary header: /srv/data.luks
 ===========================================================
 Version:        LUKS2
-UUID:           12345678-1234-1234-1234-123456789abc
+UUID:           856e75eb-57d5-488e-984b-29344ad7a7d7
 Label:          backup
 Subsystem:
 Header size:    16384 bytes
@@ -36,62 +33,27 @@ Segments:       1
 Digests:        1
 ```
 
-`secondary` prints the same report for the copy at offset `0x4000`.
-
-**The sequence id is the reason to look at both.** Whichever copy carries the
-higher one was written last. A secondary that is *ahead* of the primary means
-the primary is stale, which is what a restore is for.
-
-If the header carries entries written as JSON `null`, they are reported on
-stderr along with the warning that the next write removes them permanently.
+`secondary` prints the same for the second copy, whose header offset equals the
+header size. The copy with the higher sequence ID was written last; if the
+secondary is ahead, the primary is stale.
 
 ## restore
 
-Overwrites the primary header with the secondary copy. Requires typing `YES`.
-
-```bash
-sudo luks2 header restore /dev/sdb1
-```
-
-If the secondary copy is **older**, changes recorded only in the primary — a
-keyslot added since, a token written since — are lost. Compare the two sequence
-ids first:
-
-```bash
-sudo luks2 header show /dev/sdb1      | grep Sequence
-sudo luks2 header secondary /dev/sdb1 | grep Sequence
-```
-
-Back the header up before repairing anything:
+Overwrites the primary copy with the secondary, after you type `YES`. The
+secondary is validated first. If it is older than the primary, changes made
+since are lost, so compare sequence IDs first and keep a backup:
 
 ```bash
 cryptsetup luksHeaderBackup /dev/sdb1 --header-backup-file /root/sdb1.header
+sudo luks2 header restore /dev/sdb1
 ```
 
 ## isluks
 
-Answers whether a device holds a LUKS container, **in its exit code** — 0 for
-yes, 1 for no, as `cryptsetup isLuks` does it. `--luks2` narrows the question to
-LUKS2 specifically.
+Exit 0 if the device starts with the LUKS magic, 1 otherwise, like
+`cryptsetup isLuks`. `--luks2` also requires version 2. A device that cannot be
+read is also 1, with the reason on stderr.
 
 ```bash
-if sudo luks2 isluks --luks2 /dev/sdb1; then
-    sudo luks2 open /dev/sdb1 backup
-fi
+if sudo luks2 isluks --luks2 /dev/sdb1; then sudo luks2 open /dev/sdb1 backup; fi
 ```
-
-A device that could not be read is also "no", but the reason is reported on
-stderr so a person can tell "there is no container here" from "this device could
-not be read".
-
-## Exit codes
-
-| Code | Description |
-|---|---|
-| 0 | Success — for `isluks`, the device holds a LUKS container |
-| 1 | Not a LUKS container, or the operation failed |
-
-## See Also
-
-- [info](info.md) — the volume report, from the primary header
-- [LUKS2 header](../luks/header.md) — the on-disk structure
