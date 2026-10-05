@@ -7,151 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Security
-
-- **The integration container no longer runs `--privileged` (#80).** It runs
-  under a set that was measured flag by flag, and that set now lives in one
-  file, `test/integration/docker-run.sh`, which the four Makefile targets and
-  the CI workflow all call. There were five copies of `docker run
-  --privileged`; five copies of a security-critical invocation is how one of
-  them quietly grows a flag the others do not have.
-
-  `--privileged` is not a privilege setting. It is the absence of every
-  restriction Docker has — all capabilities, seccomp off, AppArmor off, and the
-  host's whole `/dev` bind-mounted in, which on the machine this was measured on
-  meant the test container could open the root NVMe, an unrelated RAID array and
-  every dm mapping on the box. This library holds volume keys for a trusted computing
-  platform, and a test rig is not where that gets handed away for convenience
-  (owner direction, 2026-08-31).
-
-  What replaces it: `--cap-drop ALL` plus `CAP_SYS_ADMIN` and `CAP_MKNOD`;
-  a seccomp profile; `apparmor=unconfined`; `--device /dev/mapper/control` and
-  `--device /dev/loop-control`; and a device-cgroup rule for the loop and
-  device-mapper majors, the latter read from `/proc/devices` rather than
-  hard-coded. Each was established by removing it and recording what broke
-  first — the table is in `docs/TESTING.md`.
-
-  **Capabilities were the wrong suspect.** Docker's default seccomp profile
-  denies `add_key`, `keyctl` and `request_key` outright, because kernel
-  keyrings are not namespaced, and no capability lifts a seccomp denial:
-  `add_key` fails under the default profile *with* `CAP_SYS_ADMIN` and succeeds
-  under the new profile with *no* capabilities added at all.
-
-- **A reviewable seccomp profile, `test/integration/seccomp.json`.** Docker's
-  own default profile byte for byte, plus one appended block allowing exactly
-  `add_key`, `keyctl` and `request_key`. Upstream is `default.json` from
-  `github.com/moby/profiles/seccomp v0.1.0` — the version the local daemon
-  links, read out of the binary rather than guessed — and the file header
-  carries its sha256. `make seccomp-diff` re-fetches it through the Go module
-  proxy, so the checksum database vouches for the comparison, and prints the
-  difference.
-
-  `seccomp=unconfined` would also have made the suite pass and is deliberately
-  not used: it re-admits every syscall the default profile denies, including
-  the `mount`, `kexec`, `bpf` and namespace calls the profile exists for, to
-  solve a three-syscall problem.
-
-### Removed
-
-- **The repository guards and the `scripts/` directory (#183).** 2,418 lines of
-  shell and Python across nine files, plus every Makefile target and CI step
-  that invoked them: the disclosure scanner, the ownership-blind device-teardown
-  scanner, the error-collapse scanner, the dm-scope guard test, the build-tag
-  and race-package enumerators, and the two suites that tested the other
-  scripts.
-
-  These concerns move to **development and review time**, as part of the SDLC
-  process and conventions. A code-based scanning solution is planned separately;
-  until it lands this repository implements none (owner ruling 2026-09-13). The
-  guards were deliberately NOT ported to Go tests, which was the obvious move and
-  is not what is wanted.
-
-  What review now carries, stated plainly rather than lost quietly: this
-  repository is publicly mirrored and keeps the forge address out of the tree, so
-  internal-detail disclosure is now a review property; and an ownership-blind
-  device teardown — a global `dmsetup` wipe once reached
-  `nvme0n1p3_crypt -> vgmint-root` on a real machine and survived only because
-  those devices were busy — is now a review property too.
-
-  `.github/require-tool.sh` and `test/integration/docker-run.sh` are NOT removed.
-  Neither scans the tree: the first installs the pinned analysis tools three CI
-  steps depend on, and the second holds the integration container's eight
-  privilege flags in one place, which is the arrangement #80 put there so five
-  copies of a security-critical invocation cannot drift apart.
-
-  `make vet` now runs `go vet` directly for the default and `integration`
-  configurations rather than deriving the tag list, and the race-leg package list
-  in `.github/workflows/ci.yml` is maintained by hand.
-
-- **BREAKING: `AFSplit`, `AFMerge` and `DeriveKey` are removed (#11).** All
-  three were `Deprecated:`-marked exported wrappers around plain, unprotected
-  heap memory, kept only for consumers that turned out not to exist — a
-  repository-wide search, including `cmd/`, `test/` and both build-tag sets,
-  found none. `AFSplit`/`AFMerge` are superseded by the unexported
-  `afSplitEnclave`/`afMergeEnclave`, which perform the same anti-forensic
-  split and merge entirely inside `go-enclave` locked memory. `DeriveKey` is
-  superseded by `DeriveKeyEnclave`, which returns the derived key held in an
-  enclave rather than as a plain `[]byte`. Callers that still reference any of
-  the three get a compile error, which is the point: this is pre-1.0 alpha
-  software, and there is no compatibility shim to remove them into (owner
-  ruling, 2026-09-11).
-
-### Changed
-
-- **BREAKING: `Config.Requirements` is `*Requirements`, not `[]string` (#152).**
-  LUKS2 spells `config.requirements` as an OBJECT carrying a `mandatory` array;
-  both `mandatory` and `online-reencrypt-v3` are literals in libcryptsetup. The
-  flat slice did not merely lose detail — the decode failed outright with
-  `cannot unmarshal object into Go struct field Config.config.requirements of
-  type []string`, so **this package could not read any container
-  mid-reencryption at all.** cryptsetup sets a requirement flag for the
-  duration of an online reencryption, which made every interrupted volume
-  opaque to go-luks2 until the reencryption finished.
-
-  That inverted the mechanism. `requirements` exists so an implementation that
-  does not understand a feature refuses the container instead of damaging it;
-  failing to parse the member carrying the warning meant not being able to read
-  the flag that says "do not touch this".
-
-  Migration: `cfg.Requirements` becomes `cfg.Requirements.Mandatory`, and is
-  `nil` when the container declares none. Nothing in this repository read the
-  field, and no container carrying one could be decoded, so no working caller
-  can have depended on the old shape.
-
-- **A mandatory requirement this package does not implement refuses WRITES and
-  permits READS (#152, owner ruling 2026-09-13).** `ReadHeader` parses the
-  container and exposes the requirement, because a flag whose purpose is to warn
-  is useless if reading it is what fails, and an operator diagnosing an
-  interrupted reencryption needs to see it. Every mutation refuses with an
-  `UnsupportedRequirementError` (`errors.Is(err, ErrUnsupportedRequirement)`),
-  naming the offending entry and carrying the whole declared list.
-
-  The guard sits in `encodeMetadataForHeader`, the one chokepoint every write in
-  this package passes through — `Format`, `AddKey`, `ChangeKey`, `KillKeyslot`,
-  the token writes and `WriteHeader` all reach the device through
-  `writeHeaderInternal`, which encodes first — so it runs before anything
-  touches the device, and `checkHeaderWritable` lets a caller ask in advance.
-  `implementedRequirements` is the named set to add to when support for one of
-  these features lands; it is currently empty, which is the honest state.
-
-- **The container entrypoint creates its own loop device nodes and no longer
-  starts udevd.** Without `--privileged` the host `/dev` is not bind-mounted
-  in, so `/dev` is a bare tmpfs and nothing creates `/dev/loopN`. udev cannot
-  fill the gap — without `--privileged` Docker mounts `/sys` read-only, so
-  `udevadm trigger` cannot write the uevent and no node is ever made (measured)
-  — and nothing is lost with it: `pkg/luks2` mknods its own dm nodes, the
-  fallback `unlock.go` has always carried for environments without udev, and
-  `cryptsetup` skips the udev cookie wait when no udevd is running.
-
-- **The host-state guard's advice was wrong and has been corrected.** It used
-  to say "Scope the container device access (see issue #80)". Scoping device
-  access does not help and cannot: device-mapper is not namespaced, so
-  `dmsetup ls` reports every mapping on the machine whatever `/dev` the
-  container was given — measured, the unprivileged container sees exactly what
-  the privileged one did. The guard's logic is unchanged; only the sentence
-  that sent readers down a dead end is gone.
-
-
 ## [0.4.0-alpha] - 2026-10-05
 
 ### Changed
@@ -634,6 +489,154 @@ This is the first published release of the `0.3.0-alpha` code: `v0.3.0-alpha` wa
 - **Released binaries report their version** (#243). Both release builds passed `-X main.version`, but the variable is `main.Version`; the linker silently ignored the mismatch, so every released binary called itself `dev`. The flag is corrected, and the release now runs the built amd64 binary and fails unless it reports the tag.
 
 ## [0.3.0-alpha] - 2026-10-03
+
+> Recorded late: the entries down to the next note shipped in this release but were left under `[Unreleased]` when it was cut.
+
+### Security
+
+- **The integration container no longer runs `--privileged` (#80).** It runs
+  under a set that was measured flag by flag, and that set now lives in one
+  file, `test/integration/docker-run.sh`, which the four Makefile targets and
+  the CI workflow all call. There were five copies of `docker run
+  --privileged`; five copies of a security-critical invocation is how one of
+  them quietly grows a flag the others do not have.
+
+  `--privileged` is not a privilege setting. It is the absence of every
+  restriction Docker has — all capabilities, seccomp off, AppArmor off, and the
+  host's whole `/dev` bind-mounted in, which on the machine this was measured on
+  meant the test container could open the root NVMe, an unrelated RAID array and
+  every dm mapping on the box. This library holds volume keys for a trusted computing
+  platform, and a test rig is not where that gets handed away for convenience
+  (owner direction, 2026-08-31).
+
+  What replaces it: `--cap-drop ALL` plus `CAP_SYS_ADMIN` and `CAP_MKNOD`;
+  a seccomp profile; `apparmor=unconfined`; `--device /dev/mapper/control` and
+  `--device /dev/loop-control`; and a device-cgroup rule for the loop and
+  device-mapper majors, the latter read from `/proc/devices` rather than
+  hard-coded. Each was established by removing it and recording what broke
+  first — the table is in `docs/TESTING.md`.
+
+  **Capabilities were the wrong suspect.** Docker's default seccomp profile
+  denies `add_key`, `keyctl` and `request_key` outright, because kernel
+  keyrings are not namespaced, and no capability lifts a seccomp denial:
+  `add_key` fails under the default profile *with* `CAP_SYS_ADMIN` and succeeds
+  under the new profile with *no* capabilities added at all.
+
+- **A reviewable seccomp profile, `test/integration/seccomp.json`.** Docker's
+  own default profile byte for byte, plus one appended block allowing exactly
+  `add_key`, `keyctl` and `request_key`. Upstream is `default.json` from
+  `github.com/moby/profiles/seccomp v0.1.0` — the version the local daemon
+  links, read out of the binary rather than guessed — and the file header
+  carries its sha256. `make seccomp-diff` re-fetches it through the Go module
+  proxy, so the checksum database vouches for the comparison, and prints the
+  difference.
+
+  `seccomp=unconfined` would also have made the suite pass and is deliberately
+  not used: it re-admits every syscall the default profile denies, including
+  the `mount`, `kexec`, `bpf` and namespace calls the profile exists for, to
+  solve a three-syscall problem.
+
+### Removed
+
+- **The repository guards and the `scripts/` directory (#183).** 2,418 lines of
+  shell and Python across nine files, plus every Makefile target and CI step
+  that invoked them: the disclosure scanner, the ownership-blind device-teardown
+  scanner, the error-collapse scanner, the dm-scope guard test, the build-tag
+  and race-package enumerators, and the two suites that tested the other
+  scripts.
+
+  These concerns move to **development and review time**, as part of the SDLC
+  process and conventions. A code-based scanning solution is planned separately;
+  until it lands this repository implements none (owner ruling 2026-09-13). The
+  guards were deliberately NOT ported to Go tests, which was the obvious move and
+  is not what is wanted.
+
+  What review now carries, stated plainly rather than lost quietly: this
+  repository is publicly mirrored and keeps the forge address out of the tree, so
+  internal-detail disclosure is now a review property; and an ownership-blind
+  device teardown — a global `dmsetup` wipe once reached
+  `nvme0n1p3_crypt -> vgmint-root` on a real machine and survived only because
+  those devices were busy — is now a review property too.
+
+  `.github/require-tool.sh` and `test/integration/docker-run.sh` are NOT removed.
+  Neither scans the tree: the first installs the pinned analysis tools three CI
+  steps depend on, and the second holds the integration container's eight
+  privilege flags in one place, which is the arrangement #80 put there so five
+  copies of a security-critical invocation cannot drift apart.
+
+  `make vet` now runs `go vet` directly for the default and `integration`
+  configurations rather than deriving the tag list, and the race-leg package list
+  in `.github/workflows/ci.yml` is maintained by hand.
+
+- **BREAKING: `AFSplit`, `AFMerge` and `DeriveKey` are removed (#11).** All
+  three were `Deprecated:`-marked exported wrappers around plain, unprotected
+  heap memory, kept only for consumers that turned out not to exist — a
+  repository-wide search, including `cmd/`, `test/` and both build-tag sets,
+  found none. `AFSplit`/`AFMerge` are superseded by the unexported
+  `afSplitEnclave`/`afMergeEnclave`, which perform the same anti-forensic
+  split and merge entirely inside `go-enclave` locked memory. `DeriveKey` is
+  superseded by `DeriveKeyEnclave`, which returns the derived key held in an
+  enclave rather than as a plain `[]byte`. Callers that still reference any of
+  the three get a compile error, which is the point: this is pre-1.0 alpha
+  software, and there is no compatibility shim to remove them into (owner
+  ruling, 2026-09-11).
+
+### Changed
+
+- **BREAKING: `Config.Requirements` is `*Requirements`, not `[]string` (#152).**
+  LUKS2 spells `config.requirements` as an OBJECT carrying a `mandatory` array;
+  both `mandatory` and `online-reencrypt-v3` are literals in libcryptsetup. The
+  flat slice did not merely lose detail — the decode failed outright with
+  `cannot unmarshal object into Go struct field Config.config.requirements of
+  type []string`, so **this package could not read any container
+  mid-reencryption at all.** cryptsetup sets a requirement flag for the
+  duration of an online reencryption, which made every interrupted volume
+  opaque to go-luks2 until the reencryption finished.
+
+  That inverted the mechanism. `requirements` exists so an implementation that
+  does not understand a feature refuses the container instead of damaging it;
+  failing to parse the member carrying the warning meant not being able to read
+  the flag that says "do not touch this".
+
+  Migration: `cfg.Requirements` becomes `cfg.Requirements.Mandatory`, and is
+  `nil` when the container declares none. Nothing in this repository read the
+  field, and no container carrying one could be decoded, so no working caller
+  can have depended on the old shape.
+
+- **A mandatory requirement this package does not implement refuses WRITES and
+  permits READS (#152, owner ruling 2026-09-13).** `ReadHeader` parses the
+  container and exposes the requirement, because a flag whose purpose is to warn
+  is useless if reading it is what fails, and an operator diagnosing an
+  interrupted reencryption needs to see it. Every mutation refuses with an
+  `UnsupportedRequirementError` (`errors.Is(err, ErrUnsupportedRequirement)`),
+  naming the offending entry and carrying the whole declared list.
+
+  The guard sits in `encodeMetadataForHeader`, the one chokepoint every write in
+  this package passes through — `Format`, `AddKey`, `ChangeKey`, `KillKeyslot`,
+  the token writes and `WriteHeader` all reach the device through
+  `writeHeaderInternal`, which encodes first — so it runs before anything
+  touches the device, and `checkHeaderWritable` lets a caller ask in advance.
+  `implementedRequirements` is the named set to add to when support for one of
+  these features lands; it is currently empty, which is the honest state.
+
+- **The container entrypoint creates its own loop device nodes and no longer
+  starts udevd.** Without `--privileged` the host `/dev` is not bind-mounted
+  in, so `/dev` is a bare tmpfs and nothing creates `/dev/loopN`. udev cannot
+  fill the gap — without `--privileged` Docker mounts `/sys` read-only, so
+  `udevadm trigger` cannot write the uevent and no node is ever made (measured)
+  — and nothing is lost with it: `pkg/luks2` mknods its own dm nodes, the
+  fallback `unlock.go` has always carried for environments without udev, and
+  `cryptsetup` skips the udev cookie wait when no udevd is running.
+
+- **The host-state guard's advice was wrong and has been corrected.** It used
+  to say "Scope the container device access (see issue #80)". Scoping device
+  access does not help and cannot: device-mapper is not namespaced, so
+  `dmsetup ls` reports every mapping on the machine whatever `/dev` the
+  container was given — measured, the unprivileged container sees exactly what
+  the privileged one did. The guard's logic is unchanged; only the sentence
+  that sent readers down a dead end is gone.
+
+> End of the late entries.
 
 ### Changed — BREAKING: `AddKey` returns `(int, error)`
 
