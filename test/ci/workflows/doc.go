@@ -5,9 +5,8 @@
 // Package workflows holds regression tests for .github/workflows (#247).
 //
 // The workflows decide what reaches main and what is published, and most of
-// their defects pass quietly: an action pinned to a moving tag, a release that
-// does not wait for CI, or an automerge that trusts CI definitions the PR
-// itself changed. Each of these merges and publishes with every check green.
-// The tests read the workflow files the forge runs, and for automerge.yml they
-// run its merge script against a fake forge.
+// their defects pass quietly: an action pinned to a moving tag, or a release that
+// does not wait for CI. Each of these merges and publishes with every check
+// green. The tests read the workflow files the forge runs. automerge.yml is the
+// shared company template and is tested where it is maintained, not here.
 package workflows
