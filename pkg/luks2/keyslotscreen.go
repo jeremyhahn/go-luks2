@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"slices"
+	"strings"
 	"unsafe"
 
 	"github.com/jeremyhahn/go-enclave"
@@ -123,11 +124,11 @@ type keyslotPlan struct {
 	// A6).
 	areaKeySize int
 
-	// cipherAlgo is the area cipher's algorithm name, taken from
-	// area.encryption only after the WHOLE spec -- mode and IV generator
-	// included -- was matched against what the transform actually runs
-	// ("aes-xts-plain64" -> "aes"; "aes-cbc-essiv:sha256" -> refused).
-	cipherAlgo string
+	// area is the transform area.encryption names, taken only after the
+	// WHOLE spec -- algorithm, mode and IV generator -- matched one this
+	// package runs ("aes-cbc-essiv:sha256" -> AES-CBC with an ESSIV IV;
+	// "serpent-xts-plain64" -> refused).
+	area areaTransform
 }
 
 // screenKeyslot performs every rejection [unlockKeyslot] can make WITHOUT the
@@ -142,8 +143,8 @@ type keyslotPlan struct {
 //	KDF cost                    validateKDFCost          (keyslotvalidation.go)
 //	KDF approval, salt, hash    screenKDFParameters      (below, over deriveKeyPlain's rejections)
 //	area cipher, whole spec     parseKeyslotAreaEncryption (below; #106)
-//	area cipher algorithm       validateAreaCipher       (format.go, shared with xtsSectors)
-//	volume key size for XTS     validateXTSKeySize       (format.go, shared with xtsSectors)
+//	volume key size             validateVolumeKeySize    (keyslotarea.go)
+//	area key size               areaTransform.validateKeySize (keyslotarea.go, shared with keyslotAreaSectors)
 //	anti-forensic hash          getHashFunc              (antiforensic.go)
 //	area holds its own AF split computed here, from bounds validateKeyslot established
 //	a digest that can attest it keyslotDigestCounts     (over screenDigest, which
@@ -243,29 +244,32 @@ func screenKeyslot(id string, keyslot *Keyslot, digests map[string]*Digest) (key
 	// The area cipher is read WHOLE -- algorithm, mode and IV generator -- and
 	// refused unless it is a spec this package actually decrypts (#106). It used
 	// to be cut down to its algorithm, so a keyslot declaring CBC over XTS
-	// material opened here and nowhere else. The algorithm it yields is then
-	// held to the same validator xtsSectors calls, as is the volume key size,
-	// so neither can drift from what the transform will accept.
-	plan.cipherAlgo, err = parseKeyslotAreaEncryption(keyslot.Area.Encryption)
+	// material opened here and nowhere else; the declared transform is now the
+	// one run.
+	//
+	// The VOLUME key's size (keyslot.KeySize) is not the area cipher's
+	// business: it is what the data segment's cipher takes -- 16 bytes for a
+	// 128-bit aes-cbc-essiv volume, 64 for the default AES-XTS. It is held to
+	// the sizes an AES data cipher can be keyed with, so a keyslot declaring
+	// any other cannot be counted as a survivor by the removal guard: its AF
+	// merge yields a key no segment this package maps can use.
+	plan.area, err = parseKeyslotAreaEncryption(keyslot.Area.Encryption)
 	if err != nil {
 		return plan, &UnsupportedKeyslotCipherError{Keyslot: id, Spec: keyslot.Area.Encryption}
 	}
-	if err := validateAreaCipher(plan.cipherAlgo); err != nil {
-		return plan, &InvalidKeyslotError{Keyslot: id, Reason: "declares an area cipher the transform refuses", Err: err}
-	}
-	if err := validateXTSKeySize(keyslot.KeySize); err != nil {
-		return plan, &InvalidKeyslotError{Keyslot: id, Reason: "declares a volume key size AES-XTS cannot use", Err: err}
+	if err := validateVolumeKeySize(keyslot.KeySize); err != nil {
+		return plan, &InvalidKeyslotError{Keyslot: id, Reason: "declares a volume key size no AES data cipher can use", Err: err}
 	}
 	// The AREA's key size is what the KDF derives and the area cipher is keyed
 	// with (#249, A6). It used to be ignored and keyslot.KeySize used in its
 	// place, which is the same number only until a keyslot is written with
 	// cryptsetup --keyslot-key-size. Missing (0) is refused like any other size
-	// AES-XTS cannot use: cryptsetup requires the member, and so did every
-	// version of this package's writer.
+	// the area cipher cannot use: cryptsetup requires the member, and so did
+	// every version of this package's writer.
 	plan.areaKeySize = keyslot.Area.KeySize
-	if err := validateXTSKeySize(plan.areaKeySize); err != nil {
+	if err := plan.area.validateKeySize(plan.areaKeySize); err != nil {
 		return plan, &InvalidKeyslotError{Keyslot: id,
-			Reason: fmt.Sprintf("declares an area key size of %d bytes, which its AES-XTS area cipher cannot use", plan.areaKeySize), Err: err}
+			Reason: fmt.Sprintf("declares an area key size of %d bytes, which its %s area cipher cannot use", plan.areaKeySize, keyslot.Area.Encryption), Err: err}
 	}
 
 	// The anti-forensic merge resolves this name and fails if it cannot. SHA-1
@@ -384,61 +388,77 @@ func screenKDFStructure(kdf *KDF) error {
 }
 
 // parseKeyslotAreaEncryption reads a keyslot's area.encryption as the full
-// cipher spec it is -- "<algorithm>-<mode>-<iv>" -- and returns the algorithm
-// the transform must run, or ErrUnsupportedKeyslotCipher if the spec names
-// anything this package cannot decrypt.
+// cipher spec it is -- "<algorithm>-<mode>-<iv>" -- and returns the transform
+// it names, or ErrUnsupportedKeyslotCipher if this package cannot run it.
 //
 // # The mode is consumed, not discarded (#106)
 //
 // This used to be a Split that kept the algorithm and threw the rest away, and
-// xtsSectors then ran AES-XTS whatever the header said. A keyslot declaring
+// the transform then ran AES-XTS whatever the header said. A keyslot declaring
 // "aes-cbc-essiv:sha256" over XTS material therefore opened perfectly HERE and
-// in no conforming implementation, and nothing in this package's own suite
-// could notice, because the reader that would have had to was not looking.
-// Honoring the mode on read is what makes a wrong declaration a test failure
-// instead of a container only this library can open.
+// in no conforming implementation. Honoring the mode on read is what makes a
+// wrong declaration a test failure instead of a container only this library
+// can open: such a keyslot is now decrypted as the CBC it claims, fails its
+// digest as it does in cryptsetup, and a genuine CBC keyslot opens.
 //
 // # The accepted set is exact and closed
 //
-// It is an enumeration of the transforms keyslot material actually goes
-// through, not a grammar. xtsSectors runs AES-XTS with a little-endian tweak on
-// the area-relative sector index, and exactly two cryptsetup spellings describe
-// that:
+// It is an enumeration of the area transforms cryptsetup writes for AES, not a
+// grammar:
 //
-//	aes-xts-plain64  the 64-bit sector index; what this package and
-//	                 cryptsetup write by default
-//	aes-xts-plain    the index truncated to 32 bits; cryptsetup accepts it as
-//	                 --keyslot-cipher and carries it over from LUKS1
+//	aes-xts-plain64       the default of this package and of cryptsetup
+//	aes-xts-plain         --keyslot-cipher, and carried over from LUKS1
+//	aes-cbc-essiv:sha256  LUKS1's long-time default, kept by `cryptsetup
+//	                      convert`, and what cryptsetup writes for a volume
+//	                      formatted with that data cipher
+//	aes-cbc-plain64       --keyslot-cipher, or a data cipher of that name
+//	aes-cbc-plain
 //
-// The two differ only for a sector index of 2^32 or more. A keyslot area never
-// reaches one: its decrypted length is KeySize*Stripes rounded to a sector,
-// bounded by MaxKeyslotKeySize*maxKeyslotStripes (validateKeyslot) -- about 4
-// MiB, or 8,000 sectors. For every keyslot the screen admits, the two specs
-// name the same bytes, which is why "plain" is decrypted rather than refused.
+// "plain" truncates the sector index to 32 bits, "plain64" does not; the two
+// differ only for a sector index of 2^32 or more, and a keyslot area's
+// decrypted length is bounded at about 4 MiB (validateKeyslot), so for every
+// keyslot the screen admits they name the same bytes.
 //
-// Everything else is refused: another mode (cbc, ecb, lrw), another IV
-// generator (essiv, benbi, plain64be, null), a spec with the mode missing, any
-// other algorithm, and any other casing or decoration. Matching is exact
-// because the kernel's crypto API names are case-sensitive and cryptsetup
-// passes them through unchanged.
+// Everything else is refused: another algorithm, another mode or IV generator
+// (ecb, lrw, benbi, plain64be, null, essiv over XTS), a spec with the mode
+// missing, and any other casing or decoration. Matching is exact because the
+// kernel's crypto API names are case-sensitive and cryptsetup passes them
+// through unchanged.
 //
 // It is a function rather than an inline comparison so the unlock path and the
 // removal guard cannot come to read the spec differently -- both reach it only
 // through screenKeyslot.
-func parseKeyslotAreaEncryption(spec string) (string, error) {
-	switch spec {
-	case keyslotAreaSpecPlain64, keyslotAreaSpecPlain:
-		return DefaultCipher, nil
-	default:
-		return "", &UnsupportedKeyslotCipherError{Spec: spec}
+func parseKeyslotAreaEncryption(spec string) (areaTransform, error) {
+	t, ok := keyslotAreaTransforms[spec]
+	if !ok {
+		return areaTransform{}, &UnsupportedKeyslotCipherError{Spec: spec}
 	}
+	return t, nil
 }
 
-// The two area.encryption spellings parseKeyslotAreaEncryption accepts.
+// The area.encryption spellings parseKeyslotAreaEncryption accepts.
 const (
-	keyslotAreaSpecPlain64 = DefaultCipher + "-xts-plain64"
-	keyslotAreaSpecPlain   = DefaultCipher + "-xts-plain"
+	keyslotAreaSpecPlain64    = DefaultCipher + "-xts-plain64"
+	keyslotAreaSpecPlain      = DefaultCipher + "-xts-plain"
+	keyslotAreaSpecCBCESSIV   = DefaultCipher + "-cbc-essiv:sha256"
+	keyslotAreaSpecCBCPlain64 = DefaultCipher + "-cbc-plain64"
+	keyslotAreaSpecCBCPlain   = DefaultCipher + "-cbc-plain"
 )
+
+// keyslotAreaTransforms maps each accepted spec to what it runs.
+var keyslotAreaTransforms = map[string]areaTransform{
+	keyslotAreaSpecPlain64:    {mode: areaModeXTS, iv: areaIVPlain64},
+	keyslotAreaSpecPlain:      {mode: areaModeXTS, iv: areaIVPlain},
+	keyslotAreaSpecCBCESSIV:   {mode: areaModeCBC, iv: areaIVESSIVSHA256},
+	keyslotAreaSpecCBCPlain64: {mode: areaModeCBC, iv: areaIVPlain64},
+	keyslotAreaSpecCBCPlain:   {mode: areaModeCBC, iv: areaIVPlain},
+}
+
+// keyslotAreaSpecs lists the accepted specs, for messages.
+func keyslotAreaSpecs() string {
+	return strings.Join([]string{keyslotAreaSpecPlain64, keyslotAreaSpecPlain,
+		keyslotAreaSpecCBCESSIV, keyslotAreaSpecCBCPlain64, keyslotAreaSpecCBCPlain}, ", ")
+}
 
 // digestCovers reports whether a digest attests the named keyslot.
 //
@@ -520,7 +540,8 @@ func screenDigestStructure(digest *Digest) ([]byte, *KDF, error) {
 
 	// Which lengths are derived to is a whitelist, not a range: the length the
 	// declared hash implies, plus legacyDigestLen for containers an earlier
-	// version of this package wrote. See legacyDigestLen. Resolved WITHOUT the
+	// version of this package wrote and luks1DigestLen for converted LUKS1
+	// containers. See legacyDigestLen. Resolved WITHOUT the
 	// FIPS gate, which screenKDFParameters applies afterwards.
 	argon2 := digest.Type == KDFTypeArgon2i || digest.Type == KDFTypeArgon2id
 	wantLen := argon2DigestLen
@@ -531,9 +552,9 @@ func screenDigestStructure(digest *Digest) ([]byte, *KDF, error) {
 		}
 		wantLen = h.Size()
 	}
-	if len(expected) != wantLen && len(expected) != legacyDigestLen {
+	if len(expected) != wantLen && len(expected) != legacyDigestLen && len(expected) != luks1DigestLen {
 		return expected, nil, &detailError{Detail: fmt.Sprintf(
-			"digest is %d bytes, which agrees with neither %s nor the legacy carve-out", len(expected), digest.Hash)}
+			"digest is %d bytes, which agrees with neither %s nor a legacy carve-out", len(expected), digest.Hash)}
 	}
 
 	kdf := &KDF{
@@ -838,6 +859,16 @@ func checkKeyslotAreaConfinedByMetadata(metadata *LUKS2Metadata, id string) erro
 	return confineArea(start, limit, metadata, id, keyslot.Area)
 }
 
+// dataOnAnotherDevice reports whether a data segment at offset is a detached
+// header's: offset 0 means the data lives on another device (cryptsetup
+// --header), so nothing in the header's own keyslots area can overlap it.
+// cryptsetup exempts it from the same checks (json_segments_get_minimal_offset
+// returning 0; see minimalSegmentOffset). Activation refuses such a header on
+// its own terms (cryptTableParams).
+func dataOnAnotherDevice(segmentOffset int64) bool {
+	return segmentOffset == 0
+}
+
 // confineArea is the check itself, against a keyslots area [start, limit).
 func confineArea(start, limit int64, metadata *LUKS2Metadata, id string, area *KeyslotArea) error {
 	if area == nil {
@@ -864,6 +895,9 @@ func confineArea(start, limit int64, metadata *LUKS2Metadata, id string, area *K
 			return &detailError{Kind: ErrInvalidHeader, Detail: fmt.Sprintf(
 				"data segment %s declares an offset of %q, so whether keyslot %s's area overlaps it cannot be decided",
 				segmentID, segment.Offset, id)}
+		}
+		if dataOnAnotherDevice(segmentStart) {
+			continue
 		}
 		segmentEnd := int64(math.MaxInt64)
 		if segment.Size != "dynamic" {

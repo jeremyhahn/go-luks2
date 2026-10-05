@@ -33,8 +33,10 @@ boundaries: [ARCHITECTURE.md](../ARCHITECTURE.md).
   `/run/cryptsetup/L_<major>:<minor>`, created if missing and unlinked on
   release, as cryptsetup does; for an image file, `flock` on the file. Locking a
   block device therefore needs write access to `/run/cryptsetup` (normally
-  root). It does not exclude a cryptsetup with its own `/run` (another
-  container) or one run with `--disable-locks`.
+  root); a lock that cannot be taken fails with `ErrMetadataLockUnavailable`,
+  as cryptsetup fails in the same state. It does not exclude a cryptsetup with
+  its own `/run` (another container) or one run with `--disable-locks`. See
+  [COMPATIBILITY.md](../COMPATIBILITY.md#metadata-lock).
 
 ## API by task
 
@@ -106,8 +108,11 @@ The last two do not match `ErrKeyringUnavailable`.
 
 Other errors worth handling: `ErrMappingBusy` from `Lock` (still held after
 3 s of retries), `ErrLastKeyslot` (removal would leave nothing that opens the
-volume), `ErrProtectedMemory` (no locked memory), `LockTimeoutError` (another
-writer held the device for 30 s).
+volume), `ErrProtectedMemory` (no locked memory, or more than the process
+allocator's budget), `LockTimeoutError` (another writer held the device for
+30 s), `ErrMetadataLockUnavailable` (cryptsetup's lock directory cannot be
+used), `ErrKDFBudgetExceeded` (a header asking one unlock for more key
+derivation than any cryptsetup header can).
 
 ## Behaviour to know
 

@@ -53,11 +53,17 @@ func pinnedKeyslotDevice(lock *FileLock, path string) (*keyslotDevice, error) {
 	return &keyslotDevice{path: path, file: lock.file}, nil
 }
 
+// keyslotLockWait is how long a keyslot operation waits for the device's
+// locks: DefaultLockWait, as AcquireFileLock waits. A variable so a test
+// process can observe the bounded refusal without spending the whole budget;
+// nothing else changes it.
+var keyslotLockWait = DefaultLockWait
+
 // lockKeyslotDevice validates the path, opens and locks it once, and returns the
 // lock together with the device pinned to the locked descriptor. The caller
 // releases the lock.
 func lockKeyslotDevice(device string) (*FileLock, *keyslotDevice, error) {
-	lock, err := AcquireFileLock(device)
+	lock, err := AcquireFileLockTimeout(device, keyslotLockWait)
 	if err != nil {
 		return nil, nil, &detailError{Detail: "failed to acquire lock", Err: err}
 	}

@@ -530,7 +530,7 @@ func TestEncryptAndDecryptKeyMaterialEnclaveRoundTrip(t *testing.T) {
 		t.Fatal("the ciphertext equals the plaintext")
 	}
 
-	recovered, err := decryptKeyMaterialEnclave(ciphertext, key, "aes", 512)
+	recovered, err := decryptKeyMaterialEnclave(ciphertext, key, areaTransform{mode: areaModeXTS}, 512)
 	if err != nil {
 		t.Fatalf("decryptKeyMaterialEnclave failed: %v", err)
 	}
@@ -546,18 +546,19 @@ func TestEncryptAndDecryptKeyMaterialEnclaveRoundTrip(t *testing.T) {
 func TestDecryptKeyMaterialEnclaveReleasesOnFailure(t *testing.T) {
 	key := enclaveFrom(t, mustRandom(t, 64))
 
-	if _, err := decryptKeyMaterialEnclave(nil, key, "aes", 512); err == nil {
+	if _, err := decryptKeyMaterialEnclave(nil, key, areaTransform{mode: areaModeXTS}, 512); err == nil {
 		t.Fatal("decryptKeyMaterialEnclave accepted empty ciphertext")
 	}
 
 	before := lockedKiB(t)
 
-	// An unsupported cipher fails AFTER the destination enclave has been
-	// allocated, which is exactly the path on which a missed Destroy would leak
-	// locked pages that nobody holds a handle to any more.
+	// A key the transform cannot take -- 64 bytes for AES-CBC -- fails AFTER
+	// the destination enclave has been allocated, which is exactly the path on
+	// which a missed Destroy would leak locked pages that nobody holds a
+	// handle to any more.
 	for i := 0; i < 32; i++ {
-		if _, err := decryptKeyMaterialEnclave(make([]byte, 64<<10), key, "twofish", 512); err == nil {
-			t.Fatal("decryptKeyMaterialEnclave accepted an unsupported cipher")
+		if _, err := decryptKeyMaterialEnclave(make([]byte, 64<<10), key, areaTransform{mode: areaModeCBC, iv: areaIVESSIVSHA256}, 512); err == nil {
+			t.Fatal("decryptKeyMaterialEnclave accepted a key its transform cannot take")
 		}
 	}
 

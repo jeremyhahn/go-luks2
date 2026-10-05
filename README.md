@@ -102,7 +102,7 @@ branch on, and the on-disk format.
 | [docs/cli/](docs/cli/README.md) | CLI reference |
 | [docs/FIPS.md](docs/FIPS.md) | FIPS 140-3 mode, approved KDFs, importing Argon2 volumes |
 | [docs/TESTING.md](docs/TESTING.md) | Test tiers, coverage gate, the integration container |
-| [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | Versioning and breaking-change policy |
+| [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | Versioning policy; interoperability with cryptsetup, and where this library is stricter |
 | [docs/RELEASABILITY.md](docs/RELEASABILITY.md) | What may be published, and the gate that checks it |
 | [changelog.d/](changelog.d/README.md) | How changelog entries are written |
 
@@ -118,11 +118,12 @@ make help              # every target
 
 - Linux only.
 - LUKS2 only. LUKS1 headers are detected by `IsLUKS` but not opened.
-- Keyslot areas must be AES-XTS (`aes-xts-plain64`, or `aes-xts-plain` on
-  read). The data segment cipher is passed to dm-crypt as the header declares
-  it.
-- No online reencryption (a container mid-reencryption is refused for
-  activation), and no dm-integrity.
+- Keyslot areas are AES: `aes-xts-plain64` is written; `aes-xts-plain`,
+  `aes-cbc-essiv:sha256`, `aes-cbc-plain64` and `aes-cbc-plain` are also read.
+  The data segment cipher is passed to dm-crypt as the header declares it.
+- No online reencryption and no dm-integrity: such containers are refused for
+  activation with a typed error. Detached headers are read and their keyslots
+  managed, but not activated. See [COMPATIBILITY.md](docs/COMPATIBILITY.md).
 
 ## License
 

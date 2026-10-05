@@ -130,10 +130,9 @@ var unopenableKeyslotShapes = []damagedSibling{
 		},
 	},
 	{
-		// A volume key AES-XTS cannot be keyed with. Well-formed by every
-		// other measure, and xts.NewCipher refuses it -- a rejection that lived
-		// only inside the cipher constructor, where no guard could see it.
-		name: "a volume key size AES-XTS cannot use",
+		// A volume key no AES data cipher can be keyed with. Well-formed by
+		// every other measure; its AF merge yields a key nothing can use.
+		name: "a volume key size no AES data cipher can use",
 		apply: func(_ *LUKS2Metadata, sibling *Keyslot) {
 			sibling.KeySize = 40
 		},
@@ -493,8 +492,8 @@ func TestScreenKeyslotAcceptsAKeyslotThisLibraryWrote(t *testing.T) {
 		t.Fatalf("plan describes area %d..%d, want %d..%d",
 			plan.areaOffset, plan.areaOffset+plan.areaSize, wantOffset, wantOffset+wantSize)
 	}
-	if plan.cipherAlgo != "aes" {
-		t.Fatalf("plan names cipher %q, want aes", plan.cipherAlgo)
+	if plan.area != (areaTransform{mode: areaModeXTS, iv: areaIVPlain64}) {
+		t.Fatalf("plan names transform %+v, want AES-XTS plain64", plan.area)
 	}
 	if want := keyslot.KeySize * keyslot.AF.Stripes; plan.afSplitSize != want {
 		t.Fatalf("plan needs %d bytes of AF material, want %d", plan.afSplitSize, want)
@@ -836,7 +835,7 @@ func TestScreenKeyslotRefusalsAreTypedAndAttributed(t *testing.T) {
 			ks.KDF.Iterations = &absurd
 		}},
 		{name: "a KDF type nothing implements", apply: func(ks *Keyslot) { ks.KDF.Type = "scrypt" }},
-		{name: "a volume key size AES-XTS cannot use", apply: func(ks *Keyslot) { ks.KeySize = 40 }},
+		{name: "a volume key size no AES data cipher can use", apply: func(ks *Keyslot) { ks.KeySize = 40 }},
 		{name: "an anti-forensic hash nothing implements", apply: func(ks *Keyslot) { ks.AF.Hash = "nosuchhash" }},
 	}
 

@@ -154,7 +154,12 @@ work an unlock does before any passphrase is checked.
 - Segment fields that go straight into the dm-crypt table are also
   whitelisted: cipher characters, `sector_size` (512, 1024, 2048 or 4096) and
   `iv_tweak`. Unlock refuses a segment that starts inside the header or
-  keyslots area, including a detached header's offset 0.
+  keyslots area, including a detached header's offset 0, and a segment with
+  an `integrity` member (`ErrUnsupportedSegmentLayout`). A detached header's
+  keyslots are still read and managed: its data, at offset 0 of another
+  device, overlaps no keyslot area, as cryptsetup also holds.
+- A digest is derived to the length its hash implies, or to 32 bytes (older
+  go-luks2) or 20 bytes (every LUKS1 digest, kept by `cryptsetup convert`).
 - Keyslots are validated one at a time, before each is used, so one damaged
   keyslot does not hide the others and the header can still be inspected. A
   keyslot outside the bounds below fails with an error matching
@@ -162,7 +167,8 @@ work an unlock does before any passphrase is checked.
 
 | Field | Bound |
 |---|---|
-| `key_size` | declared 1–1024 bytes; only 32, 48 or 64 is tried (AES-XTS) |
+| `key_size` | declared 1–1024 bytes; only 16, 24, 32, 48 or 64 is tried (an AES data key) |
+| `area.key_size` | 32, 48 or 64 for an XTS area, 16, 24 or 32 for CBC |
 | `af.stripes` | 1–4000 |
 | `area.size` | 1 byte – 128 MiB (cryptsetup's `LUKS2_MAX_KEYSLOTS_SIZE`) |
 | `key_size × stripes` | at most `area.size` |
@@ -170,8 +176,22 @@ work an unlock does before any passphrase is checked.
 | Argon2 time / memory / cpus | 1–10,000 / 8 KiB – 4 GiB / 1–255 |
 
 Keyslots of a type this library does not implement, such as `reencrypt`, are
-never tried. The bounds are per derivation: nothing caps the total work of an
-unlock that tries many keyslots.
+never tried, and neither is a keyslot id outside 0–31.
+
+The work of one operation is bounded as a whole too (`kdfbudget.go`):
+
+- A header with more than 32 keyslots or 32 digests is refused on read
+  (`ErrInvalidHeader`). cryptsetup reads such headers but never writes one.
+- Before its first derivation, a keyslot scan prices every derivation it could
+  make: each keyslot it would try and each digest attesting it. A total above
+  the most expensive header cryptsetup can write -- 32 keyslots, one digest
+  each, every derivation at the ceilings above -- fails with
+  `ErrKDFBudgetExceeded` (also `ErrInvalidHeader`), with nothing derived.
+- Every enclave is admitted against go-enclave's process `Allocator`
+  (`enclave.SetAllocator` in the binary sizes it; RLIMIT_MEMLOCK by default).
+  A scan whose largest keyslot needs more locked memory than that budget is
+  refused up front with `ErrProtectedMemory` matching
+  `enclave.ErrBudgetExhausted`.
 
 ## API
 

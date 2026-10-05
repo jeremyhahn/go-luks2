@@ -624,8 +624,16 @@ func acquireFileLock(path string, wait time.Duration, clk clock) (*FileLock, err
 		_ = f.Close()
 		return nil, err
 	}
+	fileLockHeld(path)
 	return &FileLock{file: f, cryptsetup: cs}, nil
 }
+
+// fileLockHeld runs once both locks are held, before the caller reads or
+// writes anything under them. A seam: it is how a test holds an operation at
+// that point and watches cryptsetup wait for it, which no result of the
+// operation can show. A no-op in production. Unexported, substituted only by
+// this package's tests.
+var fileLockHeld = func(string) {}
 
 // pollFlock flocks f in mode, retrying with backoff while another holder has
 // it, until deadline. It always makes one attempt, so a lock that is free is

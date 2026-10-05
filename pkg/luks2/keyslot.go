@@ -560,12 +560,15 @@ func addKeyslotWithMasterKey(dev *keyslotDevice, hdr *LUKS2BinaryHeader, metadat
 	//
 	// Deriving removes the question. There is nothing for the new slot to be
 	// weaker than and nothing for it to disagree with, because the master key is
-	// the thing it has to match. Its length is already known to be a legal
-	// AES-XTS key: it came out of a keyslot that passed screenKeyslot.
+	// the thing it has to match.
+	//
+	// The AREA key -- what the passphrase derives and AES-XTS wraps the
+	// stripes with -- is the volume key's length when that keys AES-XTS, and
+	// AES-256-XTS otherwise, as cryptsetup does: a volume key is whatever the
+	// data cipher takes (16 bytes for 128-bit aes-cbc-essiv, 96 for
+	// --integrity hmac-sha256), and that is not the keyslot cipher's concern.
 	newKeySize := masterKey.Size()
-	if err := validateXTSKeySize(newKeySize); err != nil {
-		return -1, &detailError{Kind: ErrInvalidKeyslot, Detail: "the recovered volume key is unusable as a keyslot key", Err: err}
-	}
+	areaKeySize := writableAreaKeySize(newKeySize)
 
 	// Read the container's reserved keyslots area out of its own header rather
 	// than assuming this library's default geometry.
@@ -591,13 +594,13 @@ func addKeyslotWithMasterKey(dev *keyslotDevice, hdr *LUKS2BinaryHeader, metadat
 		opts.InheritedArgon2Cost = inherited
 	}
 
-	kdf, err := createKDF(formatOpts, newKeySize, policy)
+	kdf, err := createKDF(formatOpts, areaKeySize, policy)
 	if err != nil {
 		return -1, &detailError{Detail: "failed to create KDF", Err: err}
 	}
 
-	// Derive key from new passphrase
-	passphraseKey, err := DeriveKeyEnclave(newPassphrase, kdf, newKeySize)
+	// Derive the area key from the new passphrase
+	passphraseKey, err := DeriveKeyEnclave(newPassphrase, kdf, areaKeySize)
 	if err != nil {
 		return -1, &detailError{Detail: "failed to derive key", Err: err}
 	}
@@ -657,7 +660,7 @@ func addKeyslotWithMasterKey(dev *keyslotDevice, hdr *LUKS2BinaryHeader, metadat
 				"bound protecting the encrypted data from a new keyslot cannot be computed",
 				id, segment.Offset)}
 		}
-		if newKeyslotsEnd > segmentOffset {
+		if !dataOnAnotherDevice(segmentOffset) && newKeyslotsEnd > segmentOffset {
 			return -1, &detailError{Kind: ErrKeyslotsAreaFull, Detail: fmt.Sprintf("a new keyslot would end at offset %d but the data segment starts at %d; reformat with a larger header",
 				newKeyslotsEnd, segmentOffset)}
 		}
@@ -682,7 +685,7 @@ func addKeyslotWithMasterKey(dev *keyslotDevice, hdr *LUKS2BinaryHeader, metadat
 		KeySize: newKeySize,
 		Area: &KeyslotArea{
 			Type:    "raw",
-			KeySize: newKeySize,
+			KeySize: areaKeySize,
 			Offset:  formatSize(newOffset),
 			Size:    formatSize(alignedSize),
 			// What this call actually encrypts the material with, stated
@@ -987,9 +990,17 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 	// The key that WRAPS the area is area.key_size long, which need not be the
 	// volume key's length (cryptsetup --keyslot-key-size; #249, A6). It is
 	// kept: a passphrase change re-wraps the same key under the same area
-	// cipher, it does not re-choose either. The unlock above has already
-	// screened it as a size AES-XTS can use.
+	// cipher, it does not re-choose either -- unless the area was CBC: the
+	// new material is always wrapped with AES-XTS, so the rewritten keyslot
+	// declares aes-xts-plain64, which is what its material is, with the area
+	// key this package writes for that volume key (a CBC key of 16 to 32
+	// bytes may not key XTS).
 	areaKeySize := targetKeyslot.Area.KeySize
+	areaEncryption := targetKeyslot.Area.Encryption
+	if area, err := parseKeyslotAreaEncryption(areaEncryption); err != nil || area.mode != areaModeXTS {
+		areaEncryption = KeyslotAreaEncryption
+		areaKeySize = writableAreaKeySize(targetKeyslot.KeySize)
+	}
 
 	// The area this call will eventually ZERO is checked here, up front, against
 	// the keyslots that must survive (#38). A keyslot's area can overlap
@@ -1202,6 +1213,8 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 	targetKeyslot.KDF = kdf
 	targetKeyslot.Area.Offset = formatSize(newOffset)
 	targetKeyslot.Area.Size = formatSize(newSize)
+	targetKeyslot.Area.KeySize = areaKeySize
+	targetKeyslot.Area.Encryption = areaEncryption
 	hdr.SequenceID++
 	if err := checkHeaderWritable(hdr, metadata); err != nil {
 		return err
@@ -1691,6 +1704,14 @@ func volumeKeyScanOrder(metadata *LUKS2Metadata) []string {
 // credential that already has an approved keyslot is found there first, without
 // running Argon2.
 func getMasterKeySlot(dev io.ReaderAt, device string, passphrase []byte, metadata *LUKS2Metadata, order []string) (*enclave.MemoryEnclave, string, error) {
+	// The whole scan is priced before its first derivation (#26): a header
+	// that would have it derive more than any cryptsetup header can, or hold
+	// more locked memory than the allocator could ever admit, is refused here
+	// rather than after the work.
+	if err := checkKDFBudget("open a keyslot", planKeyslotScan(metadata, order)); err != nil {
+		return nil, "", err
+	}
+
 	// The first reason a keyslot could not be TRIED, kept in case nothing
 	// verifies. The first rather than the last, because scan order is
 	// deterministic and the lowest-numbered damaged slot is the one an operator
@@ -2194,7 +2215,7 @@ func findFreeKeyslotArea(hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata, size i
 				"search for free keyslot space cannot be stopped before the encrypted data",
 				ErrInvalidHeader, id, segment.Offset)
 		}
-		if segmentOffset < end {
+		if !dataOnAnotherDevice(segmentOffset) && segmentOffset < end {
 			end = segmentOffset
 		}
 	}

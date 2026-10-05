@@ -17,11 +17,16 @@ mounted or mapped block device fails with `ErrDeviceInUse`.
 
 | Where | Cipher | Done by |
 |---|---|---|
-| Keyslot areas | `aes-xts-plain64` written; `aes-xts-plain64` or `aes-xts-plain` read; anything else fails with `ErrUnsupportedKeyslotCipher` | This library, `golang.org/x/crypto/xts` |
+| Keyslot areas | `aes-xts-plain64` written; also read: `aes-xts-plain`, `aes-cbc-essiv:sha256`, `aes-cbc-plain64`, `aes-cbc-plain`; anything else fails with `ErrUnsupportedKeyslotCipher` | This library, `golang.org/x/crypto/xts`, `crypto/cipher` |
 | Data segment | Whatever the header declares, after a character whitelist | The kernel, dm-crypt |
 
-XTS encrypts each sector independently with the sector number as tweak. It does
-not authenticate: changed ciphertext decrypts to garbage rather than failing.
+XTS encrypts each sector independently with the sector number as tweak; CBC
+chains within a sector from an IV derived from the sector number (ESSIV
+encrypts it under SHA-256 of the key). CBC keyslots come from `cryptsetup
+--keyslot-cipher`, a CBC data cipher, or `cryptsetup convert` from LUKS1; a
+keyslot this library rewrites becomes `aes-xts-plain64`. A new keyslot's area
+key is the volume key's length when that keys AES-XTS, and 64 bytes otherwise.
+Neither mode authenticates: changed ciphertext decrypts to garbage rather than failing.
 The header checksum detects corruption, not tampering, since anyone who can
 write the disk can recompute it.
 
@@ -47,11 +52,15 @@ the merged key are held in locked memory; see
 ## The dm-crypt table
 
 `Unlock` creates a `crypt` target whose key field is a kernel keyring
-reference, not the key. The optional-parameter count `<n>` is 0 for 512-byte
-sectors; for 1024, 2048 or 4096 it is 1, followed by `sector_size:<size>`:
+reference, not the key. The optional parameters are the persistent performance
+flags the header carries (`cryptsetup open --perf-* --persistent`:
+`same_cpu_crypt`, `submit_from_crypt_cpus`, `no_read_workqueue`,
+`no_write_workqueue`, in that order), then `sector_size:<size>` for a sector
+size above 512; `<n>` counts them. The persistent `allow-discards` flag is not
+passed (see [COMPATIBILITY.md](../COMPATIBILITY.md#stricter-than-cryptsetup)).
 
 ```
-0 <sectors> crypt aes-xts-plain64 :64:logon:luks2:<sha256 of dm UUID> <iv_tweak> <device> <offset sectors> <n> [sector_size:<size>]
+0 <sectors> crypt aes-xts-plain64 :64:logon:luks2:<sha256 of dm UUID> <iv_tweak> <device> <offset sectors> <n> [flags...] [sector_size:<size>]
 ```
 
 The key sits in the session keyring only while the target is created, then is

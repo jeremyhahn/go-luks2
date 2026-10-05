@@ -130,6 +130,8 @@ func TestPrivileges_IsExactlyTheMeasuredSet(t *testing.T) {
 	want := []string{
 		"--cap-add", "SYS_ADMIN",
 		"--cap-add", "MKNOD",
+		"--cap-add", "SETUID",
+		"--cap-add", "SETGID",
 		"--cap-drop", "ALL",
 		"--security-opt", "seccomp=/src/test/integration/seccomp.json",
 		"--security-opt", "apparmor=unconfined",

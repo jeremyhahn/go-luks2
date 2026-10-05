@@ -8,6 +8,7 @@ package luks2
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -224,6 +225,88 @@ func TestUnlockRefusesAHeaderWithMoreThanOneSegment(t *testing.T) {
 	}
 	if len(fake.created) != 0 {
 		t.Fatalf("device-mapper was reached: %v", fake.created)
+	}
+}
+
+// TestUnlockRefusesAnIntegritySegment: a cryptsetup --integrity container's
+// data sits on dm-integrity, and dm-crypt mapped straight over the device
+// reads garbage and destroys the integrity tags on every write. Its keyslots
+// can be opened -- with an XTS-sized volume key (--key-size 256 with
+// hmac-sha256) they pass every keyslot check -- so the refusal has to come
+// from the segment, before any key is derived. The real kernel half is
+// TestCompatIntegrityVolumeIsRefusedForActivation.
+func TestUnlockRefusesAnIntegritySegment(t *testing.T) {
+	device, passphrase := unlockableVolume(t)
+
+	hdr, metadata, err := ReadHeader(device)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+	if metadata.Segments["0"].unknown == nil {
+		metadata.Segments["0"].unknown = unknownFields{}
+	}
+	metadata.Segments["0"].unknown["integrity"] = json.RawMessage(`{"type":"hmac(sha256)","journal_encryption":"none","journal_integrity":"none"}`)
+	hdr.SequenceID++
+	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
+		t.Fatalf("writing the fixture failed: %v", err)
+	}
+
+	fake := newFakeDeviceMapper()
+	fake.install(t)
+	kdfCalls := 0
+	previous := passphraseKDF
+	t.Cleanup(func() { passphraseKDF = previous })
+	passphraseKDF = func(p []byte, kdf *KDF, keySize int) (*enclave.MemoryEnclave, error) {
+		kdfCalls++
+		return previous(p, kdf, keySize)
+	}
+
+	if err := Unlock(device, passphrase, "integrity"); !errors.Is(err, ErrUnsupportedSegmentLayout) {
+		t.Fatalf("Unlock = %v, want ErrUnsupportedSegmentLayout", err)
+	}
+	if len(fake.created) != 0 || kdfCalls != 0 {
+		t.Fatalf("device-mapper reached %v, KDF ran %d time(s), for a container that cannot be activated", fake.created, kdfCalls)
+	}
+	if err := TestKey(device, passphrase); err != nil {
+		t.Fatalf("the keyslots of an integrity container are no longer usable: %v", err)
+	}
+}
+
+// TestUnlockPassesThePersistentPerformanceFlags: `cryptsetup open --perf-*
+// --persistent` stores flags in config.flags and every later cryptsetup open
+// puts them in the dm-crypt table; this package does too, in cryptsetup's
+// order. allow-discards is stored the same way and is NOT passed (see
+// persistentCryptFlags), and a flag nothing knows is ignored, as cryptsetup
+// ignores it. The real-kernel half is in compatmatrix_integration_test.go.
+func TestUnlockPassesThePersistentPerformanceFlags(t *testing.T) {
+	device, passphrase := unlockableVolume(t)
+
+	hdr, metadata, err := ReadHeader(device)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+	metadata.Config.Flags = []string{"no-write-workqueue", "allow-discards", "x-unknown-flag",
+		"no-read-workqueue", "submit-from-crypt-cpus", "same-cpu-crypt"}
+	hdr.SequenceID++
+	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
+		t.Fatalf("writing the fixture failed: %v", err)
+	}
+
+	fake := newFakeDeviceMapper()
+	fake.install(t)
+	if err := Unlock(device, passphrase, "flags"); err != nil {
+		t.Fatalf("Unlock: %v", err)
+	}
+	if len(fake.loaded) != 1 {
+		t.Fatalf("loaded %d tables, want 1", len(fake.loaded))
+	}
+	crypt, ok := fake.loaded[0].(devmapper.CryptTable)
+	if !ok {
+		t.Fatalf("loaded %T, want a CryptTable", fake.loaded[0])
+	}
+	want := []string{"same_cpu_crypt", "submit_from_crypt_cpus", "no_read_workqueue", "no_write_workqueue"}
+	if !slices.Equal(crypt.Flags, want) {
+		t.Fatalf("table flags %q, want %q", crypt.Flags, want)
 	}
 }
 

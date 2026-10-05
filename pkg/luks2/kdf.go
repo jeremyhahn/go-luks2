@@ -405,12 +405,20 @@ func pbkdf2Hash(hashAlgo string) (crypto.Hash, error) {
 // PBKDF2 will produce a gigabyte if asked, and a zero-length digest would make
 // an all-zero constant-time comparison succeed against every key.
 //
-// The whitelist is {hashOutputLen(declared hash), legacyDigestLen}. The second
-// entry exists for exactly one artifact: containers written by earlier versions
-// of this package, which stored 32 bytes under a "sha512" label. Nothing else
+// The whitelist is {hashOutputLen(declared hash), legacyDigestLen,
+// luks1DigestLen}. The second entry exists for containers written by earlier
+// versions of this package, which stored 32 bytes under a "sha512" label; the
+// third for LUKS1 containers converted by `cryptsetup convert`. Nothing else
 // legitimately writes a digest whose length disagrees with its hash, so a
 // 16-byte digest labeled sha512 is refused rather than merely tolerated.
 const legacyDigestLen = 32
+
+// luks1DigestLen is the length of every LUKS1 master-key digest
+// (LUKS_DIGESTSIZE), whatever hash the container declares. `cryptsetup convert`
+// carries it into the LUKS2 digest unchanged, so a converted sha256 or sha512
+// volume holds a 20-byte digest under that label, and cryptsetup verifies it
+// at the stored length.
+const luks1DigestLen = 20
 
 // hashOutputLen returns the output length in bytes of a LUKS2 hash algorithm
 // name -- 32 for sha256, 64 for sha512, and so on.

@@ -34,6 +34,31 @@ func SetupLoopDevice(file string) (string, error) {
 	}
 	defer func() { _ = loopControl.Close() }()
 
+	// LOOP_CTL_GET_FREE names a free device without reserving it, so two
+	// callers can be handed the same one and the second LOOP_SET_FD fails
+	// with EBUSY. That is not a failure of this call, and losetup's answer is
+	// the one taken here: ask again for another free device.
+	var lastErr error
+	for range loopAttachAttempts {
+		loopDevice, err := attachFreeLoopDevice(loopControl, backingFile)
+		if err == nil {
+			return loopDevice, nil
+		}
+		if !errors.Is(err, unix.EBUSY) {
+			return "", err
+		}
+		lastErr = err
+	}
+	return "", lastErr
+}
+
+// loopAttachAttempts bounds how often SetupLoopDevice asks for another free
+// device after losing one to a concurrent attach.
+const loopAttachAttempts = 16
+
+// attachFreeLoopDevice attaches backingFile to the device LOOP_CTL_GET_FREE
+// names.
+func attachFreeLoopDevice(loopControl, backingFile *os.File) (string, error) {
 	// Get free loop device number
 	devNum, _, errno := unix.Syscall(unix.SYS_IOCTL, loopControl.Fd(), unix.LOOP_CTL_GET_FREE, 0)
 	if errno != 0 {
@@ -70,7 +95,7 @@ func SetupLoopDevice(file string) (string, error) {
 	// Attach backing file to loop device
 	_, _, errno = unix.Syscall(unix.SYS_IOCTL, loopFile.Fd(), unix.LOOP_SET_FD, backingFile.Fd())
 	if errno != 0 {
-		return "", fmt.Errorf("LOOP_SET_FD failed: %v", errno)
+		return "", fmt.Errorf("LOOP_SET_FD failed: %w", errno)
 	}
 
 	return loopDevice, nil

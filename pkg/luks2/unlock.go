@@ -420,9 +420,21 @@ func activationSegment(metadata *LUKS2Metadata) (string, *Segment, error) {
 			Detail: fmt.Sprintf("the header declares %d segments; activation maps exactly one crypt segment", len(metadata.Segments))}
 	}
 	for id, segment := range metadata.Segments {
-		if segment != nil && segment.Type == "crypt" {
-			return id, segment, nil
+		if segment == nil || segment.Type != "crypt" {
+			continue
 		}
+		// A segment with an integrity member sits on dm-integrity: its
+		// sectors interleave with integrity tags and a journal, and its
+		// volume key is the cipher key and the integrity key together.
+		// Mapping dm-crypt straight over the device, which is all this
+		// package does, reads garbage, and every write through the mapping
+		// destroys the tags cryptsetup would check. It is refused before any
+		// key is derived; the container's keyslots stay manageable.
+		if _, integrity := segment.unknown["integrity"]; integrity {
+			return "", nil, &UnlockError{Op: "select the segment to activate", Err: ErrUnsupportedSegmentLayout,
+				Detail: segmentLabel(id) + " is authenticated by dm-integrity (cryptsetup --integrity), which this package does not implement; open it with cryptsetup"}
+		}
+		return id, segment, nil
 	}
 	return "", nil, &UnlockError{Op: "select the segment to activate", Err: ErrInvalidHeader,
 		Detail: "the header declares no crypt segment, so there is nothing to map"}
@@ -623,6 +635,9 @@ func unlockLoadTable(name, uuid, backend string, params cryptSegmentParams, mast
 				Encryption: params.encryption,
 				IVTweak:    params.ivTweak,
 				SectorSize: params.sectorSize,
+				// The header's persistent performance flags, as cryptsetup
+				// passes them; see persistentCryptFlags.
+				Flags: params.flags,
 			}
 
 			// Key is deliberately NOT set, here or anywhere else in this
@@ -790,7 +805,7 @@ func recoverKeyslotKey(dev io.ReaderAt, keyslotID string, keyslot *Keyslot, plan
 	// The screen computed all of it, including that the rounded length fits the
 	// area; nothing here recomputes or re-checks any of it.
 	decryptedKeyMaterial, err := decryptKeyMaterialEnclave(
-		encryptedKeyMaterial[:plan.decryptLen], passphraseKey, plan.cipherAlgo, keyslotSectorSize)
+		encryptedKeyMaterial[:plan.decryptLen], passphraseKey, plan.area, keyslotSectorSize)
 	if err != nil {
 		return nil, err
 	}
@@ -919,6 +934,9 @@ func verifyVolumeKeyForSegment(volumeKey *enclave.MemoryEnclave, segmentID strin
 			Detail: fmt.Sprintf("the supplied key is %d bytes, which no keyslot of segment %s records as the volume key size", size, segmentID)}
 	}
 
+	// Each digest is derived at most once here, and the header carries at most
+	// LUKS2MaxKeyslots of them (validateObjectCounts), so this is within the
+	// operation budget by construction (#26).
 	return verifyKeyAgainstDigests(volumeKey, metadata.Digests,
 		func(digest *Digest) bool { return coversSegment(digest) && namesKeyslotOfSize(digest) },
 		func(applicable int) error {

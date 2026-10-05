@@ -99,6 +99,7 @@ var structureChecks = []struct {
 	check    func(*LUKS2Metadata) error
 	perEntry bool
 }{
+	{validateObjectCounts, false},
 	{validateRequirementsStructure, false},
 	{validateTokensStructure, true},
 	{validateDigestsStructure, false},
@@ -215,6 +216,22 @@ func validateTokensStructure(metadata *LUKS2Metadata) error {
 // validateDigestsStructure is hdr_validate_digests: every digest has a type and
 // a keyslots and a segments array, and names only keyslots and segments that
 // exist.
+// validateObjectCounts holds the keyslots and digests objects to
+// LUKS2MaxKeyslots entries each (#26). cryptsetup itself parses more -- it read
+// headers with 200 keyslots and 40 digests, measured with 2.7.5 -- but it
+// creates no keyslot above 31 and one digest per keyslot, so no header it
+// writes has more, and every entry past that is work a crafted header adds to
+// each unlock. Stricter than cryptsetup, and refused on read.
+func validateObjectCounts(metadata *LUKS2Metadata) error {
+	if n := len(metadata.Keyslots); n > LUKS2MaxKeyslots {
+		return headerStructureError("the header declares %d keyslots; cryptsetup creates at most %d", n, LUKS2MaxKeyslots)
+	}
+	if n := len(metadata.Digests); n > LUKS2MaxKeyslots {
+		return headerStructureError("the header declares %d digests; cryptsetup creates at most one per keyslot, %d", n, LUKS2MaxKeyslots)
+	}
+	return nil
+}
+
 func validateDigestsStructure(metadata *LUKS2Metadata) error {
 	for _, id := range sortedIDs(metadata.Digests) {
 		if !numbered(id) {

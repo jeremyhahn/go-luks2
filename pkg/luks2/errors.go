@@ -405,6 +405,25 @@ var (
 	// See LockTimeoutError for what was waited and for how to find the holder.
 	ErrLockContended = errors.New("device lock is held by another process and did not become available")
 
+	// ErrMetadataLockUnavailable indicates that cryptsetup's metadata lock for
+	// a block device could not be taken at all: its directory
+	// (/run/cryptsetup) is missing and cannot be created, is not a directory,
+	// is a symlink, or does not admit the caller. Nothing was read or written.
+	//
+	// cryptsetup refuses the same device in the same state ("Failed to
+	// acquire read lock"), for reads as well as writes, so this is not a
+	// stricter rule than the one other tools obey. A non-root caller gets it
+	// for a root-only lock directory; granting that caller's group write
+	// access to the directory admits both tools (docs/COMPATIBILITY.md).
+	ErrMetadataLockUnavailable = errors.New("cryptsetup's metadata lock for the device cannot be taken")
+
+	// ErrKDFBudgetExceeded indicates that a header would have one unlock,
+	// verification or authorization derive more than the most expensive header
+	// cryptsetup can write: LUKS2MaxKeyslots keyslots, one digest each, every
+	// derivation at its ceiling. It is refused before the first derivation; see
+	// KDFBudgetError. Every error matching it also matches ErrInvalidHeader.
+	ErrKDFBudgetExceeded = errors.New("the header asks one operation for more key derivation than any cryptsetup header can")
+
 	// ErrLoopNodeAbsent indicates that the kernel allocated a loop device but
 	// no device node for it appeared under /dev within the wait budget.
 	//
@@ -650,17 +669,24 @@ func keyringRemedy(kind error) string {
 // container runtimes still impose. A container that runs these operations must
 // raise its memlock ulimit.
 //
-// # What is NOT bounded
+// # The aggregate bounds (#26)
 //
-// There is no AGGREGATE budget across an operation, and none can be inferred
-// from the per-item bounds: an unlock derives once per keyslot and once per
-// digest per keyslot, and the digest count is not bounded at parse. go-enclave
-// ships an Allocator for exactly this -- a byte budget admitted against before
-// anything is mapped -- and this package does not use one yet. Deliberately
-// deferred rather than overlooked: the fix is a design choice with its own
-// failure mode (a budget refuses a legitimately large honest container the same
-// way it refuses a crafted one), and it is tracked with the aggregate KDF-cost
-// problem in issue #26.
+// Every enclave is admitted against go-enclave's process Allocator before its
+// pages are mapped (lockedMemoryAllocator): RLIMIT_MEMLOCK by default, or the
+// budget the binary installed with enclave.SetAllocator. A refusal there is a
+// ProtectedMemoryError whose cause matches enclave.ErrBudgetExhausted. A scan
+// whose largest keyslot could never be admitted is refused that way before any
+// derivation. Keyslots are opened one at a time, so that keyslot is the
+// scan's peak, priced allocation by allocation (keyslotOpenPeakLocked) and
+// measured against the real path in its tests. What a caller allocates after
+// the scan -- AddKey's new keyslot -- is admitted as it is allocated.
+//
+// The KEY DERIVATION of one operation is bounded too (kdfbudget.go): a header
+// is parsed with at most LUKS2MaxKeyslots keyslots and digests, only keyslots
+// 0..31 are tried, and a scan whose derivations would add up to more than the
+// most expensive header cryptsetup can write is refused, before the first one,
+// with ErrKDFBudgetExceeded. No container cryptsetup can produce is refused by
+// either bound.
 //
 // Cause is go-enclave's error and matches enclave.ErrLockedMemoryUnavailable
 // when the kernel refused the lock, so a caller can tell a resource limit from
@@ -709,9 +735,8 @@ func (e *UnsupportedKeyslotCipherError) Error() string {
 	if e.Keyslot != "" {
 		slot = fmt.Sprintf("luks2 keyslot %q: ", e.Keyslot)
 	}
-	return fmt.Sprintf("%s: %s: %sarea encryption %q; the keyslot area transforms this package implements are %s and %s",
-		ErrInvalidKeyslot.Error(), ErrUnsupportedKeyslotCipher.Error(), slot, e.Spec,
-		keyslotAreaSpecPlain64, keyslotAreaSpecPlain)
+	return fmt.Sprintf("%s: %s: %sarea encryption %q; the keyslot area transforms this package implements are %s",
+		ErrInvalidKeyslot.Error(), ErrUnsupportedKeyslotCipher.Error(), slot, e.Spec, keyslotAreaSpecs())
 }
 
 // Is reports the error as both sentinels it stands for, in the idiom of

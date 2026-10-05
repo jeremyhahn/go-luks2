@@ -130,6 +130,45 @@ type cryptSegmentParams struct {
 	encryption string
 	ivTweak    uint64
 	sectorSize uint64
+
+	// flags are the dm-crypt optional parameters the header's persistent
+	// flags ask for; see persistentCryptFlags.
+	flags []string
+}
+
+// persistentCryptFlags are the LUKS2 config.flags this package passes to
+// dm-crypt, in the order cryptsetup puts them in the table, each with its
+// dm-crypt option name. They are the performance flags `cryptsetup open
+// --perf-* --persistent` stores; they change how dm-crypt schedules its work
+// and nothing about the bytes on the medium.
+//
+// allow-discards is deliberately NOT here. cryptsetup honors it; this package
+// does not, because the header is untrusted input and the flag is a
+// disclosure: with it, TRIM through the mapping reveals which blocks are free
+// to anyone who can read the medium, and a header edit -- by anyone who has
+// had the disk -- is all it takes to switch it on. The volume opens and reads
+// and writes the same bytes either way (docs/COMPATIBILITY.md).
+var persistentCryptFlags = []struct{ luks2, dm string }{
+	{"same-cpu-crypt", "same_cpu_crypt"},
+	{"submit-from-crypt-cpus", "submit_from_crypt_cpus"},
+	{"no-read-workqueue", "no_read_workqueue"},
+	{"no-write-workqueue", "no_write_workqueue"},
+}
+
+// cryptTableFlags returns the dm-crypt options config.flags asks for. A flag
+// this package does not pass -- allow-discards, an integrity flag, one it does
+// not know -- is ignored, as cryptsetup ignores a flag it does not know.
+func cryptTableFlags(config *Config) []string {
+	if config == nil {
+		return nil
+	}
+	var flags []string
+	for _, f := range persistentCryptFlags {
+		if slices.Contains(config.Flags, f.luks2) {
+			flags = append(flags, f.dm)
+		}
+	}
+	return flags
 }
 
 // validateMetadataSegments validates every segment in parsed metadata, and is
@@ -197,7 +236,12 @@ func cryptTableParams(metadata *LUKS2Metadata, id string, segment *Segment) (cry
 		}
 		return cryptSegmentParams{}, &detailError{Kind: ErrInvalidHeader, Detail: detail}
 	}
-	return cryptSegmentChecks(id, segment)
+	params, err := cryptSegmentChecks(id, segment)
+	if err != nil {
+		return params, err
+	}
+	params.flags = cryptTableFlags(metadata.Config)
+	return params, nil
 }
 
 // cryptSegmentChecks is what every read checks about a crypt segment's three

@@ -289,12 +289,22 @@ func privileges(seccompProfile, dmMajor, stateDir string) []string {
 		// escalation.
 		"--cap-add", "MKNOD",
 
+		// CAP_SETUID and CAP_SETGID -- to start a child as a non-root uid
+		// in the disk group, the caller cryptsetup's lock directory shuts
+		// out. Root bypasses the permission checks under test, so only a
+		// real setuid/setgid child shows what an unprivileged caller gets
+		// (pkg/luks2/lockcompat_integration_test.go). MEASURED: without
+		// them setresuid in the child returns EPERM. The child holds no
+		// capability at all; the test process keeps these two.
+		"--cap-add", "SETUID",
+		"--cap-add", "SETGID",
+
 		// Everything else goes. Docker's default set -- CHOWN,
 		// DAC_OVERRIDE, FOWNER, NET_RAW, SETUID, SETGID and the rest --
 		// buys a suite that runs as root against files it created nothing.
 		// MEASURED: the full lifecycle (loop attach, luksFormat, luksOpen,
-		// mkfs, mount, close, detach) completes with exactly these two
-		// capabilities and no others.
+		// mkfs, mount, close, detach) completes with SYS_ADMIN and MKNOD
+		// and no others.
 		"--cap-drop", "ALL",
 
 		// The three keyring syscalls, and only those, on top of Docker's

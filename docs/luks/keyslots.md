@@ -16,7 +16,7 @@ never counts as the last keyslot, and its credential cannot authorize `AddKey`,
 | `type` | `luks2`. Other types (`reencrypt`) are listed but never tried. |
 | `key_size` | Volume key length in bytes: 32, 48 or 64 for AES-XTS (this library formats 32 or 64). Fixed at format, so `AddKeyOptions` has no key-size option. |
 | `af` | Anti-forensic split: `luks1`, 4000 stripes when written (1–4000 read), hash `sha256` or `sha512` (SHA-1 is read only). |
-| `area` | Where the wrapped key lives: `offset`, `size` (at least `key_size × stripes`), `encryption` (`aes-xts-plain64`; `aes-xts-plain` is also read), `key_size` (the wrapping key's length, which can differ from the volume key's, as with `cryptsetup --keyslot-key-size`). The area must lie inside the keyslots area and clear of every data segment, or the keyslot is not opened and never wiped. |
+| `area` | Where the wrapped key lives: `offset`, `size` (at least `key_size × stripes`), `encryption` (`aes-xts-plain64`; also read: `aes-xts-plain`, `aes-cbc-essiv:sha256`, `aes-cbc-plain64`, `aes-cbc-plain`), `key_size` (the wrapping key's length, which can differ from the volume key's, as with `cryptsetup --keyslot-key-size`). The area must lie inside the keyslots area and clear of every data segment on the same device (a detached header's data, at offset 0 of another device, is not), or the keyslot is not opened and never wiped. |
 | `kdf` | How the credential becomes the wrapping key; see [kdf.md](kdf.md). |
 | `priority` | Optional: 0 ignore, 1 normal, 2 prefer. Absent means normal. |
 
@@ -40,7 +40,7 @@ read.
 
 1. Derive the wrapping key, `area.key_size` long, from the credential with the
    keyslot's KDF.
-2. Read the area and decrypt it with AES-XTS.
+2. Read the area and decrypt it with the cipher `area.encryption` names.
 3. Merge the keyslot's stripes into a candidate volume key.
 4. Check the candidate against the digests that bind this keyslot.
 

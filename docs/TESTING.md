@@ -59,6 +59,7 @@ item and running the lifecycle the suite performs (loop attach, `luksFormat`,
 |---|---|---|
 | `--cap-add SYS_ADMIN` | device-mapper ioctls | `luksOpen` (`DM_DEV_CREATE`) |
 | `--cap-add MKNOD` | `/dev` is a bare tmpfs; loop and dm nodes are created in it | every `mknod`, `EPERM` |
+| `--cap-add SETUID`, `--cap-add SETGID` | the lock-directory tests run cryptsetup and go-luks2 as uid 1000 in the disk group, a real setuid/setgid child | `setresuid`, `EPERM` |
 | `--cap-drop ALL` | nothing else in Docker's default set is used | nothing |
 | `--security-opt seccomp=test/integration/seccomp.json` | `add_key`, `keyctl`, `request_key` | every keyring test |
 | `--security-opt apparmor=unconfined` | `docker-default` denies `mount(2)` | `mount` |

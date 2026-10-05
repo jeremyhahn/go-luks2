@@ -1024,7 +1024,9 @@ func TestNoRemovalPathDestroysMaterialBeforeProvingTheHeaderWritable(t *testing.
 // ignores the mode is what let the mislabel go unnoticed. So the property now
 // held is the opposite, and it has three parts:
 //
-//   - the keyslot is REFUSED with the typed error, not decrypted as XTS;
+//   - the keyslot is REFUSED, not decrypted as XTS -- since CBC areas are
+//     implemented, as the CBC it declares, whose key its 64-byte area key
+//     cannot be;
 //   - AddKey, which must unlock first, refuses the same way; and
 //   - the refusal WRITES NOTHING: the header comes back byte-identical, so no
 //     label is silently rewritten and no new keyslot is authored off a key
@@ -1053,15 +1055,18 @@ func TestLegacyMislabeledKeyslotIsRefusedAndLeftAlone(t *testing.T) {
 	}
 	before := readAreaBytes(t, device, 0, goldenPrefixBytes)
 
-	if err := TestKey(device, []byte(conformancePassphrase)); !errors.Is(err, ErrUnsupportedKeyslotCipher) {
-		t.Fatalf("TestKey on XTS material declared as CBC: got %v, want ErrUnsupportedKeyslotCipher", err)
+	// The declared CBC is what is run now that CBC areas are implemented, and
+	// its 64-byte area key cannot key AES-CBC: the keyslot is refused as
+	// invalid, before any derivation and without decrypting it as XTS.
+	if err := TestKey(device, []byte(conformancePassphrase)); !errors.Is(err, ErrInvalidKeyslot) {
+		t.Fatalf("TestKey on XTS material declared as CBC: got %v, want ErrInvalidKeyslot", err)
 	}
 
 	if slot, err := AddKey(device, []byte(conformancePassphrase), []byte("a-second-credential"), &AddKeyOptions{
 		KDFType:       KDFTypePBKDF2,
 		PBKDFIterTime: 1,
-	}); !errors.Is(err, ErrUnsupportedKeyslotCipher) {
-		t.Fatalf("AddKey on a mislabeled container: got slot %d, err %v; want ErrUnsupportedKeyslotCipher", slot, err)
+	}); err == nil {
+		t.Fatalf("AddKey on a mislabeled container wrote slot %d", slot)
 	}
 
 	if !bytes.Equal(before, readAreaBytes(t, device, 0, goldenPrefixBytes)) {

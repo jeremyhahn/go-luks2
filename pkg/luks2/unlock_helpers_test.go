@@ -348,6 +348,8 @@ func TestVerifyMasterKey(t *testing.T) {
 		{"sha512", 64},
 		{"sha512", legacyDigestLen}, // old go-luks2: 32 bytes labeled sha512
 		{"sha384", legacyDigestLen},
+		{"sha256", luks1DigestLen}, // cryptsetup convert: LUKS1's 20-byte digest under the LUKS1 hash
+		{"sha512", luks1DigestLen},
 	} {
 		t.Run(fmt.Sprintf("%s digest stored at %d bytes verifies", tc.hash, tc.digestLen), func(t *testing.T) {
 			iterations := 1000
@@ -383,9 +385,9 @@ func TestVerifyMasterKey(t *testing.T) {
 	// will produce whatever length it is asked for, and a zero-length digest
 	// would make the constant-time comparison succeed against every key.
 	//
-	// 16 and 20 are the interesting entries: both were accepted by the earlier
-	// 16..64 range, and neither is a length anything legitimate writes under a
-	// sha512 label.
+	// 16 is the interesting entry: it was accepted by the earlier 16..64
+	// range, and nothing legitimate writes it under a sha512 label. 20 is
+	// accepted, above: it is what every converted LUKS1 container carries.
 	for _, tc := range []struct {
 		hash      string
 		digestLen int
@@ -393,7 +395,7 @@ func TestVerifyMasterKey(t *testing.T) {
 		{"sha512", 0},
 		{"sha512", 1},
 		{"sha512", 16},
-		{"sha512", 20},
+		{"sha512", 21},
 		{"sha512", 48},
 		{"sha512", 65},
 		{"sha256", 64},

@@ -149,7 +149,10 @@ import (
 //     the cipher, and neither x/crypto/xts nor crypto/aes offers a way to place
 //     it elsewhere or wipe it. A round-key schedule is a deterministic expansion
 //     of the key, so recovering it recovers the key. This is on every keyslot
-//     encrypt and decrypt.
+//     encrypt and decrypt. A CBC keyslot area (keyslotarea.go) is read through
+//     crypto/aes the same way, with a second schedule for ESSIV keyed by
+//     SHA-256 of the area key; the hash itself is cleared once that schedule
+//     exists.
 //
 //     go-enclave v0.7.0-alpha erases AES key schedules under runtime/secret
 //     (enclave.KeyScheduleErasure), and that does NOT reach this entry. It
@@ -241,11 +244,66 @@ import (
 // exhausting it for real inside a test binary takes the rest of the suite with
 // it, and a refusal that only ever runs on a machine already out of locked
 // memory is a refusal nothing checks on the way in.
+//
+// All three ADMIT through go-enclave's process Allocator before anything is
+// mapped (#26): the library allocates against the one budget the binary sized
+// (enclave.SetAllocator), or against RLIMIT_MEMLOCK by default, and never
+// installs or builds an allocator of its own. A refusal is the allocator's
+// typed enclave.ErrBudgetExhausted rather than an mlock failure partway through.
 var (
-	newLockedRegion      = enclave.NewMemoryEnclaveSized
-	moveIntoLockedRegion = enclave.NewMemoryEnclave
-	copyIntoLockedRegion = enclave.NewMemoryEnclaveCopy
+	newLockedRegion      = admittedSized
+	moveIntoLockedRegion = admittedMove
+	copyIntoLockedRegion = admittedCopy
+
+	// lockedMemoryAllocator is the allocator every enclave is admitted
+	// against. A variable only so a test can stand in a small budget.
+	lockedMemoryAllocator = enclave.ProcessAllocator
 )
+
+// admittedSized is enclave.NewMemoryEnclaveSized, admitted.
+func admittedSized(n int) (*enclave.MemoryEnclave, error) {
+	a, err := lockedMemoryAllocator()
+	if err != nil {
+		return nil, err
+	}
+	return a.NewSized(n)
+}
+
+// admittedMove is enclave.NewMemoryEnclave, admitted. It owns b on every
+// path, as NewMemoryEnclave does: b is wiped even when nothing is admitted.
+func admittedMove(b []byte) (*enclave.MemoryEnclave, error) {
+	a, err := lockedMemoryAllocator()
+	if err != nil {
+		enclave.Wipe(b)
+		return nil, err
+	}
+	return a.New(b)
+}
+
+// admittedCopy is enclave.NewMemoryEnclaveCopy, admitted: the copy is made
+// into the admitted pages, which are then frozen read-only as that
+// constructor's are. src is left alone.
+func admittedCopy(src []byte) (*enclave.MemoryEnclave, error) {
+	if len(src) == 0 {
+		return nil, enclave.ErrEmptyEnclave
+	}
+	e, err := admittedSized(len(src))
+	if err != nil {
+		return nil, err
+	}
+	if err := e.WithBytes(func(dst []byte) error {
+		copy(dst, src)
+		return nil
+	}); err != nil {
+		_ = e.Destroy()
+		return nil, err
+	}
+	if err := e.Freeze(); err != nil {
+		_ = e.Destroy()
+		return nil, err
+	}
+	return e, nil
+}
 
 func newSecretEnclave(op string, n int) (*enclave.MemoryEnclave, error) {
 	e, err := newLockedRegion(n)

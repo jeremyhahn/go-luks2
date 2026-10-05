@@ -113,7 +113,7 @@ func TestCryptsetupLockTakesTheLockWhenTheHolderReleasesIt(t *testing.T) {
 		t.Fatalf("acquireCryptsetupLock after the holder released = %v", err)
 	}
 	defer func() { _ = l.release() }()
-	if !sameInode(l.file, path) {
+	if !l.named() {
 		t.Fatal("the lock held is not on the file the path names")
 	}
 }
@@ -128,11 +128,11 @@ func TestCryptsetupLockRetriesAStaleInode(t *testing.T) {
 	previous := openCryptsetupLockFile
 	t.Cleanup(func() { openCryptsetupLockFile = previous })
 	opens := 0
-	openCryptsetupLockFile = func(p string) (*os.File, error) {
-		f, err := previous(p)
+	openCryptsetupLockFile = func(d *os.File, name string) (*os.File, error) {
+		f, err := previous(d, name)
 		opens++
 		if opens == 1 && err == nil {
-			_ = os.Remove(p) // released and unlinked under us
+			_ = os.Remove(path) // released and unlinked under us
 		}
 		return f, err
 	}
@@ -143,8 +143,8 @@ func TestCryptsetupLockRetriesAStaleInode(t *testing.T) {
 		t.Fatalf("acquireCryptsetupLock = %v", err)
 	}
 	defer func() { _ = l.release() }()
-	if opens != 2 || !sameInode(l.file, path) {
-		t.Fatalf("opened %d times, holding the named file = %v; want a retry onto the live file", opens, sameInode(l.file, path))
+	if opens != 2 || !l.named() {
+		t.Fatalf("opened %d times, holding the named file = %v; want a retry onto the live file", opens, l.named())
 	}
 
 	// With the budget already spent, a stale inode ends the wait.
@@ -164,18 +164,42 @@ func TestCryptsetupLockReportsWhatItCannotDo(t *testing.T) {
 		t.Fatal(err)
 	}
 	clk := newFakeClock(t)
-	var de *DeviceError
-	if _, err := acquireCryptsetupLock(filepath.Join(notADir, "cryptsetup"), 0, lockExclusive, clk.Now(), clk.Now(), clk); !errors.As(err, &de) {
-		t.Fatalf("a lock directory that cannot be created = %v, want a DeviceError", err)
+	unavailable := func(what string, err error) {
+		t.Helper()
+		var de *DeviceError
+		if !errors.As(err, &de) || !errors.Is(err, ErrMetadataLockUnavailable) {
+			t.Fatalf("%s = %v, want a DeviceError matching ErrMetadataLockUnavailable", what, err)
+		}
+	}
+	_, err := acquireCryptsetupLock(filepath.Join(notADir, "cryptsetup"), 0, lockExclusive, clk.Now(), clk.Now(), clk)
+	unavailable("a lock directory that cannot be created", err)
+	if !errors.Is(err, unix.ENOTDIR) {
+		t.Fatalf("the cause %v is not reachable through the error", err)
+	}
+
+	// A file where the directory should be, and a symlink to a real
+	// directory: cryptsetup opens the last component O_NOFOLLOW|O_DIRECTORY
+	// and refuses both ("Locking aborted"), so a lock taken through either
+	// would exclude no cryptsetup process.
+	_, err = acquireCryptsetupLock(notADir, 0, lockExclusive, clk.Now(), clk.Now(), clk)
+	unavailable("a lock directory that is a file", err)
+	elsewhere := t.TempDir()
+	link := filepath.Join(t.TempDir(), "cryptsetup")
+	if err := os.Symlink(elsewhere, link); err != nil {
+		t.Fatal(err)
+	}
+	_, err = acquireCryptsetupLock(link, 0, lockExclusive, clk.Now(), clk.Now(), clk)
+	unavailable("a lock directory that is a symlink", err)
+	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
+		t.Fatalf("the symlink was followed: %d entries in its target", len(entries))
 	}
 
 	dir := t.TempDir()
 	if err := os.Symlink(notADir, filepath.Join(dir, "L_0:0")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := acquireCryptsetupLock(dir, 0, lockExclusive, clk.Now(), clk.Now(), clk); !errors.As(err, &de) {
-		t.Fatalf("a lock file that is a symlink = %v, want a DeviceError (O_NOFOLLOW)", err)
-	}
+	_, err = acquireCryptsetupLock(dir, 0, lockExclusive, clk.Now(), clk.Now(), clk)
+	unavailable("a lock file that is a symlink (O_NOFOLLOW)", err)
 }
 
 // TestCryptsetupLockIsNotTakenForARegularFile: cryptsetup's lock for an image
@@ -235,7 +259,7 @@ func TestASharedReleaseLeavesTheFileToTheLastHolder(t *testing.T) {
 	if err := first.release(); err != nil {
 		t.Fatal(err)
 	}
-	if !sameInode(second.file, path) {
+	if !second.named() {
 		t.Fatal("the first reader's release unlinked the file the second reader still holds")
 	}
 	if _, err := acquireCryptsetupLock(dir, unix.Mkdev(7, 5), lockExclusive, clk.Now(), clk.Now(), clk); !errors.Is(err, ErrLockContended) {

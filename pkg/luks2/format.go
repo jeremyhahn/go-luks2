@@ -612,7 +612,7 @@ func encryptKeyMaterialEnclave(data, key *enclave.MemoryEnclave, cipherAlgo stri
 //
 // data is ciphertext read from the device and is deliberately NOT enclaved; see
 // encryptKeyMaterialEnclave.
-func decryptKeyMaterialEnclave(data []byte, key *enclave.MemoryEnclave, cipherAlgo string, sectorSize int) (*enclave.MemoryEnclave, error) {
+func decryptKeyMaterialEnclave(data []byte, key *enclave.MemoryEnclave, area areaTransform, sectorSize int) (*enclave.MemoryEnclave, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("no key material to decrypt")
 	}
@@ -624,7 +624,7 @@ func decryptKeyMaterialEnclave(data []byte, key *enclave.MemoryEnclave, cipherAl
 
 	err = borrowSecret("decrypted keyslot material", plaintext, func(dst []byte) error {
 		return borrowSecret("keyslot encryption key", key, func(k []byte) error {
-			return xtsSectors(dst, data, k, cipherAlgo, sectorSize, true)
+			return keyslotAreaSectors(area, dst, data, k, sectorSize, true)
 		})
 	})
 	if err != nil {
