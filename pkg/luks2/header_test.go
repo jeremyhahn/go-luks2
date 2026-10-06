@@ -810,58 +810,6 @@ func TestCalculateHeaderChecksumEdgeCases(t *testing.T) {
 // The error is attributed to errChecksumBufferTooShort SPECIFICALLY, not to
 // ErrInvalidHeader, because that is the whole lesson of #62 -- errors.Is on a
 // shared sentinel answers "was it this class", never "was it this check".
-func TestValidateHeaderChecksumRefusesABufferTooShortForTheChecksumField(t *testing.T) {
-	// A reader long enough to satisfy any ReadAt this test makes, so nothing
-	// but the length guard can decide the outcome.
-	reader := &mockReaderAt{data: make([]byte, LUKS2HeaderSize*2)}
-	hdr := &LUKS2BinaryHeader{Version: LUKS2Version}
-	need := checksumFieldOffset + len(hdr.Checksum)
-
-	for _, tc := range []struct {
-		name string
-		size int
-	}{
-		{"negative, which make() would panic on", -1},
-		{"zero", 0},
-		{"one", 1},
-		{"far below the checksum field", 100},
-		{"one below the checksum field's end", need - 1},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			defer func() {
-				if r := recover(); r != nil {
-					t.Fatalf("validateHeaderChecksum panicked on headerSize=%d instead of returning an error: %v", tc.size, r)
-				}
-			}()
-
-			err := validateHeaderChecksum(hdr, reader, 0, tc.size)
-			if err == nil {
-				t.Fatalf("validateHeaderChecksum accepted headerSize=%d", tc.size)
-			}
-			if !errors.Is(err, errChecksumBufferTooShort) {
-				t.Errorf("error = %v, want it to be errChecksumBufferTooShort; a different guard decided this", err)
-			}
-			if !errors.Is(err, ErrInvalidHeader) {
-				t.Errorf("error = %v, want it to still classify as ErrInvalidHeader for callers", err)
-			}
-			if !strings.Contains(err.Error(), fmt.Sprint(tc.size)) {
-				t.Errorf("error = %q, want it to name the rejected size %d", err.Error(), tc.size)
-			}
-		})
-	}
-
-	// The boundary in the other direction, so the comparison cannot be
-	// off by one: a buffer exactly large enough for the checksum field gets
-	// PAST this guard. It then fails on the checksum itself, which is a
-	// different error, and that difference is the assertion.
-	t.Run("exactly large enough is not refused by this guard", func(t *testing.T) {
-		err := validateHeaderChecksum(hdr, reader, 0, need)
-		if errors.Is(err, errChecksumBufferTooShort) {
-			t.Fatalf("headerSize=%d was refused as too short, but it is exactly the %d bytes the checksum field needs", need, need)
-		}
-	})
-}
-
 // TestReadJSONMetadataRefusesAHeaderSizeWithNoRoomForJSON is the same property
 // for the other function the bound was hoisted out of.
 //

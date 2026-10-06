@@ -12,6 +12,8 @@ import (
 	"maps"
 	"slices"
 	"strings"
+
+	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
 // FilesystemType represents supported filesystem types
@@ -205,9 +207,9 @@ type FilesystemCheckResult struct {
 type commandRunner func(name string, args ...string) ([]byte, error)
 
 // execCommand is the commandRunner CheckFilesystem uses. It runs the checker
-// from a fixed system directory with a minimal environment; see runSystemTool.
+// from a fixed system directory with a minimal environment; see internal/command.
 func execCommand(name string, args ...string) ([]byte, error) {
-	return runSystemTool(name, args...)
+	return tools.Run(name, args...)
 }
 
 // runCheck runs one checker command and reports any failure as a
@@ -376,9 +378,9 @@ func makeExt4(devicePath string, opts *FilesystemOptions) error {
 	// "--" ends the options, so the device is never read as one.
 	args = append(args, "--", devicePath)
 
-	output, err := runSystemTool("mkfs.ext4", args...)
+	output, err := tools.Run("mkfs.ext4", args...)
 	if err != nil {
-		return fmt.Errorf("mkfs.ext4 failed: %w\nOutput: %s", err, string(output))
+		return &FilesystemCommandError{Command: "mkfs.ext4", Device: devicePath, Output: string(output), Err: err}
 	}
 
 	return nil
@@ -447,9 +449,9 @@ func makeXFS(devicePath string, opts *FilesystemOptions) error {
 
 	args = append(args, "--", devicePath)
 
-	output, err := runSystemTool("mkfs.xfs", args...)
+	output, err := tools.Run("mkfs.xfs", args...)
 	if err != nil {
-		return fmt.Errorf("mkfs.xfs failed: %w\nOutput: %s", err, string(output))
+		return &FilesystemCommandError{Command: "mkfs.xfs", Device: devicePath, Output: string(output), Err: err}
 	}
 
 	return nil
@@ -458,12 +460,12 @@ func makeXFS(devicePath string, opts *FilesystemOptions) error {
 // makeZFS creates a ZFS pool and dataset
 func makeZFS(devicePath string, opts *FilesystemOptions) error {
 	if opts.ZFSOptions == nil {
-		return fmt.Errorf("ZFS requires ZFSOptions to be specified")
+		return &errs.Error{Detail: "ZFS requires ZFSOptions to be specified"}
 	}
 
 	zfs := opts.ZFSOptions
 	if zfs.PoolName == "" {
-		return fmt.Errorf("ZFS pool name is required")
+		return &errs.Error{Detail: "ZFS pool name is required"}
 	}
 	if err := validateZFSOptions(zfs); err != nil {
 		return err
@@ -515,9 +517,9 @@ func makeZFS(devicePath string, opts *FilesystemOptions) error {
 	// Pool name and device, after "--" so neither is read as an option.
 	args = append(args, "--", zfs.PoolName, devicePath)
 
-	output, err := runSystemTool("zpool", args...)
+	output, err := tools.Run("zpool", args...)
 	if err != nil {
-		return fmt.Errorf("zpool create failed: %w\nOutput: %s", err, string(output))
+		return &FilesystemCommandError{Command: "zpool create", Device: devicePath, Output: string(output), Err: err}
 	}
 
 	// Create dataset if specified
@@ -528,9 +530,9 @@ func makeZFS(devicePath string, opts *FilesystemOptions) error {
 		}
 		dsArgs = append(dsArgs, "--", zfs.PoolName+"/"+zfs.DatasetName)
 
-		output, err = runSystemTool("zfs", dsArgs...)
+		output, err = tools.Run("zfs", dsArgs...)
 		if err != nil {
-			return fmt.Errorf("zfs create failed: %w\nOutput: %s", err, string(output))
+			return &FilesystemCommandError{Command: "zfs create", Device: zfs.PoolName + "/" + zfs.DatasetName, Output: string(output), Err: err}
 		}
 	}
 
@@ -563,7 +565,7 @@ func isZFSNameByte(c byte) bool {
 const zfsMaxNameLength = 255
 
 func invalidZFSOption(what, value, why string) error {
-	return &detailError{Kind: ErrInvalidFilesystemOption, Detail: fmt.Sprintf("ZFS %s %q %s", what, value, why)}
+	return &errs.Error{Kind: ErrInvalidFilesystemOption, Detail: fmt.Sprintf("ZFS %s %q %s", what, value, why)}
 }
 
 // validateZFSPoolName enforces zpool(8)'s pool naming rules: a letter first,
@@ -685,9 +687,9 @@ func makeFAT32(devicePath string, opts *FilesystemOptions) error {
 
 	args = append(args, "--", devicePath)
 
-	output, err := runSystemTool("mkfs.fat", args...)
+	output, err := tools.Run("mkfs.fat", args...)
 	if err != nil {
-		return fmt.Errorf("mkfs.fat failed: %w\nOutput: %s", err, string(output))
+		return &FilesystemCommandError{Command: "mkfs.fat", Device: devicePath, Output: string(output), Err: err}
 	}
 
 	return nil
@@ -845,13 +847,13 @@ type FilesystemInfo struct {
 // GetFilesystemInfo retrieves filesystem information from a device
 func GetFilesystemInfo(devicePath string) (*FilesystemInfo, error) {
 	// Use blkid to get filesystem information
-	cmd, err := toolCommand("blkid", "-o", "export", "--", devicePath)
+	cmd, err := tools.Command("blkid", "-o", "export", "--", devicePath)
 	if err != nil {
-		return nil, &detailError{Detail: "blkid failed", Err: err}
+		return nil, &errs.Error{Detail: "blkid failed", Err: err}
 	}
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("blkid failed: %w", err)
+		return nil, &errs.Error{Detail: "blkid failed", Err: err}
 	}
 
 	info := &FilesystemInfo{}

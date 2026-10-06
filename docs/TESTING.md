@@ -23,11 +23,12 @@ aggregate above 90% does not excuse a package below it. Floors are in
 | Tier | Measured by | Gated in |
 |---|---|---|
 | `unit` | `make test-unit`: every package from `go list ./...`, default tags, `-race` | CI's unit job and `make ci` |
-| `combined` | `make coverage-combined` inside the container: unit plus integration, with `-coverpkg` over `pkg/luks2` and `test/harness` | CI's integration job and `make ci-full` |
+| `combined` | `make coverage-combined` inside the container: unit plus integration, with `-coverpkg` over `pkg/luks2`, `test/harness`, `internal/dm` and `internal/keyring` | CI's integration job and `make ci-full` |
 
-`pkg/luks2` and `test/harness` are held to 90% in the combined tier, because
-part of each only runs against a real kernel. Each also has a unit floor at its
-measured level. Every other package is held to 90% in the unit tier. The gate
+`pkg/luks2`, `test/harness`, `internal/dm` and `internal/keyring` are held to
+90% in the combined tier, because part of each only runs against a real
+kernel. Each also has a unit floor at its measured level. Every other package
+is held to 90% in the unit tier. The gate
 also fails on a missing or unreadable profile, a package with no floor, a floor
 for a package that no longer exists, and a package held to 90% in no tier.
 

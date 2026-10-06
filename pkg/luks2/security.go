@@ -6,15 +6,16 @@ package luks2
 
 import (
 	"crypto/subtle"
-	"errors"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
+	"github.com/jeremyhahn/go-luks2/internal/clock"
+	"github.com/jeremyhahn/go-luks2/internal/device"
+	"github.com/jeremyhahn/go-luks2/internal/errs"
+	"github.com/jeremyhahn/go-luks2/internal/kdf"
 )
 
 // Security constants
@@ -69,7 +70,7 @@ const (
 	// acted on, and reverted: the flag was writing the number the measurement
 	// then attributed to cryptsetup. Take this measurement on DEFAULT
 	// containers or not at all.
-	DigestIterationTargetMs = 100
+	DigestIterationTargetMs = kdf.DigestIterationTargetMs
 
 	// DigestCalibrationKeyLen is the derived-key length the digest calibration
 	// benchmarks, fixed at 64 bytes REGARDLESS of the hash because that is what
@@ -83,34 +84,7 @@ const (
 	// implementation writes; parity is worth more here than tidiness, given the
 	// parameter defends nothing. The practical effect is that a sha256 digest
 	// costs ~50ms at unlock and a sha512 one ~100ms, exactly as cryptsetup's do.
-	DigestCalibrationKeyLen = 64
-)
-
-// Validation errors
-var (
-	ErrInvalidPath        = errors.New("invalid device path")
-	ErrPassphraseTooShort = errors.New("passphrase too short (minimum 8 bytes)")
-	ErrPassphraseTooLong  = errors.New("passphrase too long (maximum 512 bytes)")
-
-	// ErrCredentialEmpty and ErrCredentialTooLong bound an EXISTING
-	// credential -- one presented to open a keyslot, not one being created.
-	// See validateExistingCredential.
-	ErrCredentialEmpty   = errors.New("credential is empty")
-	ErrCredentialTooLong = errors.New("credential too long (maximum 8 MiB, cryptsetup's key file limit)")
-	ErrInvalidKeySize    = errors.New("invalid key size (must be 256 or 512 bits)")
-	ErrInvalidSectorSize = errors.New("invalid sector size (must be 512 or 4096)")
-	//nolint:lll // the message states the accepted set, like its siblings above
-	ErrInvalidMetadataSize = errors.New("invalid metadata size (must be 0 for the default, or a power of two from 16 KiB to 4 MiB)")
-	ErrInvalidArgon2Memory = errors.New("invalid Argon2 memory (must be 65536..4194304 KB)")
-	ErrInvalidArgon2Time   = errors.New("invalid Argon2 time cost (must be 1..10000)")
-	//nolint:lll // the message states the bound, like its two siblings above
-	ErrInvalidArgon2Parallel = errors.New("invalid Argon2 parallelism (must be 1..255)")
-	ErrIntegerOverflow       = errors.New("integer overflow detected")
-
-	// ErrInvalidMappingName indicates a device-mapper mapping name that this
-	// library will not create. See ValidateMappingName for what the name
-	// reaches and why the charset is a whitelist.
-	ErrInvalidMappingName = errors.New("invalid device-mapper mapping name")
+	DigestCalibrationKeyLen = kdf.DigestCalibrationKeyLen
 )
 
 // MaxMappingNameLength bounds a device-mapper name. The kernel's DM_NAME_LEN is
@@ -149,33 +123,45 @@ const MaxMappingNameLength = 127
 // contributing to a target-spec token.
 func ValidateMappingName(name string) error {
 	if name == "" {
-		return fmt.Errorf("%w: the name is empty", ErrInvalidMappingName)
+		return &errs.Error{Kind: ErrInvalidMappingName, Detail: "the name is empty"}
 	}
 	if len(name) > MaxMappingNameLength {
-		return fmt.Errorf("%w: %d bytes exceeds the %d the device-mapper ioctl can carry without truncation",
-			ErrInvalidMappingName, len(name), MaxMappingNameLength)
+		return &errs.Error{
+			Kind: ErrInvalidMappingName,
+			Detail: fmt.Sprintf("%d bytes exceeds the %d the device-mapper ioctl can carry without truncation",
+				len(name), MaxMappingNameLength),
+		}
 	}
 
 	// A leading dash would be read as an option by the command lines this
 	// library's own error messages tell an operator to run, and "." and ".."
 	// are directory entries rather than names.
 	if name == "." || name == ".." {
-		return fmt.Errorf("%w: %q is a directory entry, not a name", ErrInvalidMappingName, name)
+		return &errs.Error{
+			Kind:   ErrInvalidMappingName,
+			Detail: fmt.Sprintf("%q is a directory entry, not a name", name),
+		}
 	}
 	// /dev/mapper/control is device-mapper's own control node. A mapping
 	// called "control" would make /dev/mapper/<name> that node, and the node
 	// repair after an unlock would replace it (#250).
 	if name == "control" {
-		return &detailError{Kind: ErrInvalidMappingName, Detail: `"control" names the device-mapper control node`}
+		return &errs.Error{Kind: ErrInvalidMappingName, Detail: `"control" names the device-mapper control node`}
 	}
 	if first := name[0]; !isMappingNameStart(first) {
-		return fmt.Errorf("%w: %q must start with a letter or a digit", ErrInvalidMappingName, name)
+		return &errs.Error{
+			Kind:   ErrInvalidMappingName,
+			Detail: fmt.Sprintf("%q must start with a letter or a digit", name),
+		}
 	}
 
 	for i := 0; i < len(name); i++ {
 		if !isMappingNameByte(name[i]) {
-			return fmt.Errorf("%w: byte %d of %q is not one of A-Z a-z 0-9 _ . + -; a device-mapper name reaches a /dev path and a space-delimited target specification, so the permitted set is a whitelist",
-				ErrInvalidMappingName, i, name)
+			return &errs.Error{
+				Kind: ErrInvalidMappingName,
+				Detail: fmt.Sprintf("byte %d of %q is not one of A-Z a-z 0-9 _ . + -; a device-mapper name reaches a /dev path and a space-delimited target specification, so the permitted set is a whitelist",
+					i, name),
+			}
 		}
 	}
 
@@ -214,7 +200,7 @@ func ValidateDevicePath(device string) error {
 		if os.IsNotExist(err) {
 			return ErrDeviceNotFound
 		}
-		return fmt.Errorf("%w: %v", ErrInvalidPath, err)
+		return &errs.Error{Kind: ErrInvalidPath, Detail: err.Error()}
 	}
 
 	// Must be a regular file or block device
@@ -295,12 +281,12 @@ func ValidatePassphrase(passphrase []byte) error {
 // ChangeKey is deliberately NOT bound by it. It inherits the cost of the slot
 // it is rotating, which is a cost this package did not choose, on hardware that
 // has already demonstrated it can afford that and nothing more. See ChangeKey.
-const MinArgon2MemoryKB = 65536
+const MinArgon2MemoryKB = kdf.MinArgon2MemoryKB
 
 // MinArgon2Time is the smallest Argon2 time cost this package will write. It is
 // the format's own minimum; a zero or negative time cost is not a weak keyslot
 // but a malformed one.
-const MinArgon2Time = 1
+const MinArgon2Time = kdf.MinArgon2Time
 
 // MinArgon2Parallel is the smallest Argon2 parallelism this package will write.
 // Like MinArgon2Time it is the format's own minimum rather than a security
@@ -310,7 +296,7 @@ const MinArgon2Time = 1
 // Its CEILING, like Time's and Memory's, is the read side's own
 // (maxArgon2Parallel, keyslotvalidation.go), applied by validateArgon2CreateCost
 // so nothing is written that the reader would refuse (#249, A5).
-const MinArgon2Parallel = 1
+const MinArgon2Parallel = kdf.MinArgon2Parallel
 
 // validateArgon2CreateCost bounds the Argon2 costs a CALLER supplies.
 //
@@ -449,9 +435,9 @@ func CheckOverflow(a, b int) error {
 	return nil
 }
 
-// openDevice is the ONE way this package opens a device, and it exists so that
-// the CLASSIFICATION of a failure lives in one place rather than at every call
-// site.
+// openDevice is the ONE way this package opens a device -- a forward into
+// internal/device.Open, through the openFileFunc seam below, which keeps the
+// CLASSIFICATION of a failure in one place rather than at every call site.
 //
 // Every LUKS2 operation opens the device -- the header reader, the writer, the
 // keyslot paths, the size probe -- and none of them used to look at WHY an open
@@ -463,16 +449,8 @@ func CheckOverflow(a, b int) error {
 //
 // to tell "you need privileges" from "this device is broken" unless something
 // says so, and ErrPermissionDenied was declared and returned by nothing (#31).
-//
-// The mode argument is deliberately absent: nothing here passes O_CREATE, so
-// the permission bits would never be consulted. 0600 is passed for the write
-// paths purely to match what the sites this replaced spelled out.
-func openDevice(op, device string, flag int) (*os.File, error) {
-	f, err := openFileFunc(device, flag, 0600) // #nosec G304 -- the device path is the caller's subject and is validated by ValidateDevicePath before every LUKS2 operation; this function exists precisely so that check and this open are not in different places
-	if err != nil {
-		return nil, classifyDeviceOpen(op, err)
-	}
-	return f, nil
+func openDevice(op, path string, flag int) (*os.File, error) {
+	return device.Open(op, path, flag, openFileFunc)
 }
 
 // openFileFunc is the filesystem seam openDevice goes through, in the same
@@ -500,57 +478,25 @@ var openFileFunc = os.OpenFile
 // A seam for the same reason syncDevice is one: what is in the cache and what
 // is on the medium cannot be made to differ from a test without a failing
 // device, so this package's tests substitute it to model exactly that.
-// Unexported, substituted only by this package's tests.
-var dropDeviceCache = func(f *os.File) error {
-	return unix.Fadvise(int(f.Fd()), 0, 0, unix.FADV_DONTNEED)
-}
+// Unexported, substituted only by this package's tests. The real work is
+// internal/device.DropCache.
+var dropDeviceCache = device.DropCache
 
 // classifyDeviceOpen adds the package's typed vocabulary to an open failure,
-// and returns anything it cannot classify UNCHANGED.
-//
-// Returning the original error for the unclassified case is deliberate. The
-// alternative -- wrapping everything in a house error type -- would rewrite the
-// message of every failure in the package to buy a distinction only one of them
-// needs, and *fs.PathError already says which path and which syscall.
-//
-// The permission case keeps the cause reachable through the chain, so
-// errors.Is(err, os.ErrPermission) and errors.Is(err, ErrPermissionDenied) are
-// both true of the same value: a caller that already branched on the standard
-// library's sentinel does not have to change.
+// and returns anything it cannot classify UNCHANGED. The real work is
+// internal/device.ClassifyOpen.
 func classifyDeviceOpen(op string, err error) error {
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, os.ErrPermission) {
-		return fmt.Errorf("%w: could not %s: %w. %s", ErrPermissionDenied, op, err, permissionRemedy)
-	}
-	// EBUSY is what an O_EXCL open of a block device returns while the device
-	// is mounted, mapped or claimed by another exclusive opener.
-	if errors.Is(err, syscall.EBUSY) {
-		return &detailError{Kind: ErrDeviceInUse, Detail: "could not " + op + ": it is mounted, mapped or held open exclusively", Err: err}
-	}
-	return err
+	return device.ClassifyOpen(op, err)
 }
 
-// permissionRemedy is the operator guidance carried by every permission
-// failure, in the same spirit as keyringRemedy: an operator should be able to
-// act on the error without reading the source.
-const permissionRemedy = "A LUKS2 container's header, keyslots and data segment are read and written on the RAW BLOCK DEVICE rather than through a filesystem, " +
-	"so every operation in this library needs direct access to the device node -- there is no unprivileged path that does less. " +
-	"Run as root, or give this process access to the node itself (on most distributions the node is owned by root and the `disk` group)."
-
-// FileLock represents a file lock for concurrent access protection
+// FileLock represents a file lock for concurrent access protection. It wraps
+// internal/device's Pinned/Locked pair, which does the real locking: the node
+// flock, then cryptsetup's own lock for a block device, excluding cryptsetup
+// as well (internal/device's cryptsetuplock.go).
 type FileLock struct {
-	file *os.File
-
-	// cryptsetup is cryptsetup's own lock for a block device, held too so
-	// that cryptsetup is excluded as well (cryptsetuplock.go). nil for a
-	// regular file, whose flock above is already cryptsetup's lock.
-	cryptsetup *cryptsetupLock
+	locked *device.Locked
 }
 
-// Lock wait budget and backoff schedule.
-//
 // DefaultLockWait is what AcquireFileLock spends before giving up. It is a
 // BOUND, not a target: an uncontended lock is taken on the first attempt and
 // costs nothing, and the budget is consumed only when another holder has the
@@ -563,17 +509,13 @@ type FileLock struct {
 // over while still terminating a genuine deadlock in a time an operator will
 // sit through. Below about 5s it would start refusing ordinary contention,
 // which is the failure this replaces.
-const (
-	DefaultLockWait = 30 * time.Second
+const DefaultLockWait = device.DefaultLockWait
 
-	// The backoff runs from 1ms to 100ms. The floor keeps a lock released
-	// microseconds after the first attempt from costing a full sleep; the
-	// ceiling keeps a long wait from turning into a handful of samples that
-	// overshoot the budget. Doubling between them reaches the ceiling in seven
-	// steps, so a 30s wait is roughly 300 attempts rather than 30000 -- the
-	// point of a backoff being that a lock nobody drops must not cost a core.
-	lockBackoffMin = time.Millisecond
-	lockBackoffMax = 100 * time.Millisecond
+// The backoff a device lock wait uses, as internal/device.Lock does it.
+// Tests assert the acquisition's timing against these.
+const (
+	lockBackoffMin = device.LockBackoffMin
+	lockBackoffMax = device.LockBackoffMax
 )
 
 // AcquireFileLock acquires an exclusive lock on a device, waiting up to
@@ -603,29 +545,21 @@ func AcquireFileLock(path string) (*FileLock, error) {
 // it, and a lock wait that cannot time out is the deadlock this is meant to
 // terminate. Polling costs a syscall per attempt and can be bounded exactly.
 func AcquireFileLockTimeout(path string, wait time.Duration) (*FileLock, error) {
-	return acquireFileLock(path, wait, systemClock{})
+	return acquireFileLock(path, wait, clock.System{})
 }
 
 // acquireFileLock is AcquireFileLockTimeout on the given clock.
-func acquireFileLock(path string, wait time.Duration, clk clock) (*FileLock, error) {
-	f, err := openDevice("lock the device", path, os.O_RDWR)
+func acquireFileLock(path string, wait time.Duration, clk clock.Clock) (*FileLock, error) {
+	pinned, err := device.OpenPinned("lock the device", path, os.O_RDWR, openFileFunc)
 	if err != nil {
 		return nil, err
 	}
-
-	started := clk.Now()
-	deadline := started.Add(wait)
-	if err := pollFlock(f, path, lockExclusive, started, deadline, clk); err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	cs, err := acquireCryptsetupLockFor(f, path, started, deadline, clk)
+	locked, err := pinned.Lock(device.LockExclusive, wait, clk, cryptsetupLockDir, device.DefaultOpenLockFile, fileLockHeld)
 	if err != nil {
-		_ = f.Close()
+		_ = pinned.Close()
 		return nil, err
 	}
-	fileLockHeld(path)
-	return &FileLock{file: f, cryptsetup: cs}, nil
+	return &FileLock{locked: locked}, nil
 }
 
 // fileLockHeld runs once both locks are held, before the caller reads or
@@ -635,53 +569,13 @@ func acquireFileLock(path string, wait time.Duration, clk clock) (*FileLock, err
 // this package's tests.
 var fileLockHeld = func(string) {}
 
-// pollFlock flocks f in mode, retrying with backoff while another holder has
-// it, until deadline. It always makes one attempt, so a lock that is free is
-// never reported as contended, whatever the budget.
-func pollFlock(f *os.File, path string, mode lockMode, started, deadline time.Time, clk clock) error {
-	backoff := lockBackoffMin
-	for attempt := 1; ; attempt++ {
-		err := unix.Flock(int(f.Fd()), mode.flockOp())
-		if err == nil {
-			return nil
-		}
-
-		// CLASSIFY, do not assume contention. EWOULDBLOCK means someone else
-		// holds it and waiting is the right answer. Anything else -- EBADF, a
-		// descriptor closed underneath us -- will not improve by being retried,
-		// and retrying it for the whole budget would report a real fault as a
-		// timeout.
-		if !errors.Is(err, unix.EWOULDBLOCK) {
-			return &DeviceError{Device: path, Op: "lock", Err: err}
-		}
-
-		// Checked AFTER an attempt, so a zero budget still tries once.
-		remaining := deadline.Sub(clk.Now())
-		if remaining <= 0 {
-			return &LockTimeoutError{
-				Path:     path,
-				Waited:   clk.Now().Sub(started),
-				Attempts: attempt,
-				Err:      err,
-			}
-		}
-
-		// Never sleep past the deadline: doing so would report a longer wait
-		// than the caller allowed, and Waited above is meant to be true.
-		clk.Sleep(min(backoff, remaining))
-		backoff = min(backoff*2, lockBackoffMax)
-	}
-}
-
 // Release releases the file lock
 func (l *FileLock) Release() error {
-	if l.file == nil {
+	if l.locked == nil {
 		return nil
 	}
-	// cryptsetup's lock is released first: it was taken second.
-	_ = l.cryptsetup.release()
-	_ = syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN) // Ignore unlock error
-	return l.file.Close()
+	_ = l.locked.Unlock()
+	return l.locked.File().Close()
 }
 
 // OpenFileSecure opens a file with proper permissions

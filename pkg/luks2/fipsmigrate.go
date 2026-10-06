@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-luks2/internal/errs"
+	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
 // Importing a foreign Argon2 volume into a FIPS 140-3 deployment (#84).
@@ -28,7 +30,7 @@ import (
 // # Why it must run OUTSIDE FIPS mode
 //
 // Recovering the volume key means deriving through the existing Argon2 keyslot,
-// and a FIPS process cannot execute Argon2 (requireFIPSApprovedKDF). So this is
+// and a FIPS process cannot execute Argon2 (fips.Mode.RequireKDF). So this is
 // a non-FIPS import step that produces a FIPS-ready volume: the FIPS-activated
 // process that later opens it never executes the unapproved primitive, which is
 // what the owner ruling of 2026-08-31 requires. MigrateToFIPS refuses to start
@@ -311,7 +313,7 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 	}
 	o.Hash = strings.ToLower(o.Hash)
 	if !fipsApprovedKDF(KDFTypePBKDF2, o.Hash) {
-		return fail("precondition", fipsStateUntouched, &detailError{
+		return fail("precondition", fipsStateUntouched, &errs.Error{
 			Kind:   ErrUnsupportedHash,
 			Detail: "PBKDF2 hash " + strconv.Quote(o.Hash) + " is not one FIPS mode can run (sha256, sha384, sha512)",
 		})
@@ -343,12 +345,12 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 	// of it whoever wrote them, and evicting the clean pages after it means
 	// every byte this run reads -- headers above all -- comes off the medium,
 	// not out of a cache that may hold what never reached it.
-	if err := syncDevice(lock.file); err != nil {
-		return fail("sync", fipsStateUntouched, &detailError{
+	if err := syncDevice(lock.locked.File()); err != nil {
+		return fail("sync", fipsStateUntouched, &errs.Error{
 			Detail: "failed to make what an earlier write left in the page cache durable before reading", Err: err})
 	}
-	if err := dropDeviceCache(lock.file); err != nil {
-		return fail("sync", fipsStateUntouched, &detailError{
+	if err := dropDeviceCache(lock.locked.File()); err != nil {
+		return fail("sync", fipsStateUntouched, &errs.Error{
 			Detail: "failed to evict the device's cached pages, so what is read could not be shown to be on the medium", Err: err})
 	}
 	// Eviction is advisory -- a page another process holds mapped stays
@@ -405,7 +407,7 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 		}
 	}
 	if len(order) == 0 {
-		return fail("unlock", fipsStateUntouched, &detailError{
+		return fail("unlock", fipsStateUntouched, &errs.Error{
 			Kind:   ErrFIPSMigrationUnboundKey,
 			Detail: "no keyslot is attested by digests binding every data segment (" + strings.Join(dataSegmentIDs(metadata), ", ") + ")",
 		})
@@ -414,13 +416,13 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 	if err != nil {
 		return fail("unlock", fipsStateUntouched, err)
 	}
-	defer releaseSecret(masterKey)
+	defer custody.Release(masterKey)
 
 	// The prefilter above is what the header DECLARES; this is what the key
 	// recovered actually satisfies, through the same digest evaluation the
 	// unlock uses.
 	if missing := unboundSegments(metadata, metadata.Digests, openedID, masterKey); len(missing) > 0 {
-		return fail("unlock", fipsStateUntouched, &detailError{
+		return fail("unlock", fipsStateUntouched, &errs.Error{
 			Kind: ErrFIPSMigrationUnboundKey,
 			Detail: "the key keyslot " + openedID + " holds is not bound to data segment(s) " +
 				strings.Join(missing, ", ") + " by any digest it matches",
@@ -442,7 +444,7 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 		}
 		evaluated, matched := evaluateDigest(masterKey, digest)
 		if !evaluated || !matched {
-			return fail("plan", fipsStateUntouched, &detailError{
+			return fail("plan", fipsStateUntouched, &errs.Error{
 				Kind:   ErrFIPSMigrationDigest,
 				Detail: "digest " + id + " (" + refusal.String() + ")",
 			})
@@ -518,7 +520,7 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 		return fail("verify", fipsStateOriginals, err)
 	}
 	if err := headerCopiesAgree(dev.reader()); err != nil {
-		return fail("verify", fipsStateOriginals, &detailError{Kind: ErrFIPSMigrationVerification,
+		return fail("verify", fipsStateOriginals, &errs.Error{Kind: ErrFIPSMigrationVerification,
 			Detail: "the header copies do not agree after the writes", Err: err})
 	}
 
@@ -536,7 +538,7 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 			// Unreachable: slotID is approved by construction and verified in
 			// step 5. Stated so the invariant the removal rests on is a
 			// refusal rather than an assumption.
-			return fail("remove keyslot", fipsStateOriginals, &detailError{
+			return fail("remove keyslot", fipsStateOriginals, &errs.Error{
 				Kind: ErrFIPSMigrationVerification, Detail: "keyslot " + id + " is both the migrated keyslot and not approved",
 			})
 		}
@@ -574,7 +576,7 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 		unexpected = append(unexpected, "digest "+d.ID+" ("+d.String()+")")
 	}
 	if len(unexpected) > 0 {
-		return fail("final check", fipsStateFinal, &detailError{
+		return fail("final check", fipsStateFinal, &errs.Error{
 			Kind:   ErrFIPSMigrationVerification,
 			Detail: "still not approved: " + strings.Join(unexpected, ", "),
 		})
@@ -602,7 +604,7 @@ func verifyFIPSOpen(dev *keyslotDevice, passphrase []byte, id string, want *encl
 	}
 	keyslot := metadata.Keyslots[id]
 	if keyslot == nil || !keyslotFIPSApproved(keyslot) {
-		return &detailError{Kind: ErrFIPSMigrationVerification,
+		return &errs.Error{Kind: ErrFIPSMigrationVerification,
 			Detail: "keyslot " + id + " is missing or does not use a FIPS-approved KDF"}
 	}
 
@@ -615,20 +617,20 @@ func verifyFIPSOpen(dev *keyslotDevice, passphrase []byte, id string, want *encl
 
 	got, err := unlockKeyslotFrom(dev.reader(), id, passphrase, keyslot, approved)
 	if err != nil {
-		return &detailError{Kind: ErrFIPSMigrationVerification,
+		return &errs.Error{Kind: ErrFIPSMigrationVerification,
 			Detail: "keyslot " + id + " does not open through FIPS-approved KDFs", Err: err}
 	}
-	defer releaseSecret(got)
+	defer custody.Release(got)
 
 	same := false
-	if err := borrowSecret("compare the migrated volume key", got, func(b []byte) error {
+	if err := secret.Borrow("compare the migrated volume key", got, func(b []byte) error {
 		same = want.EqualTo(b)
 		return nil
 	}); err != nil {
 		return err
 	}
 	if !same {
-		return &detailError{Kind: ErrFIPSMigrationVerification,
+		return &errs.Error{Kind: ErrFIPSMigrationVerification,
 			Detail: "keyslot " + id + " opened to a key other than the volume key it was written with"}
 	}
 
@@ -636,7 +638,7 @@ func verifyFIPSOpen(dev *keyslotDevice, passphrase []byte, id string, want *encl
 	// digests the key matches must bind every data segment, or a FIPS
 	// process reaches the key and still cannot use it on the volume.
 	if missing := unboundSegments(metadata, approved, id, got); len(missing) > 0 {
-		return &detailError{Kind: ErrFIPSMigrationVerification,
+		return &errs.Error{Kind: ErrFIPSMigrationVerification,
 			Detail: "no FIPS-approved digest binds the key keyslot " + id + " holds to data segment(s) " + strings.Join(missing, ", ")}
 	}
 
@@ -649,18 +651,18 @@ func verifyFIPSOpen(dev *keyslotDevice, passphrase []byte, id string, want *encl
 	view := fipsApprovedView(metadata)
 	scanned, _, err := getMasterKeySlot(dev.reader(), dev.path, passphrase, view, volumeKeyScanOrder(view))
 	if err != nil {
-		return &detailError{Kind: ErrFIPSMigrationVerification,
+		return &errs.Error{Kind: ErrFIPSMigrationVerification,
 			Detail: "the unlock scan over FIPS-approved keyslots and digests does not open the volume", Err: err}
 	}
-	defer releaseSecret(scanned)
-	if err := borrowSecret("compare the scanned volume key", scanned, func(b []byte) error {
+	defer custody.Release(scanned)
+	if err := secret.Borrow("compare the scanned volume key", scanned, func(b []byte) error {
 		same = want.EqualTo(b)
 		return nil
 	}); err != nil {
 		return err
 	}
 	if !same {
-		return &detailError{Kind: ErrFIPSMigrationVerification,
+		return &errs.Error{Kind: ErrFIPSMigrationVerification,
 			Detail: "the unlock scan over FIPS-approved keyslots and digests recovers a key other than the volume key"}
 	}
 	return nil

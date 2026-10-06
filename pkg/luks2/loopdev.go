@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jeremyhahn/go-luks2/internal/clock"
+	"github.com/jeremyhahn/go-luks2/internal/errs"
 	"golang.org/x/sys/unix"
 )
 
@@ -23,14 +25,14 @@ func SetupLoopDevice(file string) (string, error) {
 	// Open the backing file read-write
 	backingFile, err := os.OpenFile(file, os.O_RDWR, 0) // #nosec G304 -- user-provided file path for disk image
 	if err != nil {
-		return "", fmt.Errorf("failed to open file: %w", err)
+		return "", &errs.Error{Detail: "failed to open file", Err: err}
 	}
 	defer func() { _ = backingFile.Close() }()
 
 	// Open loop control to get free device
 	loopControl, err := os.OpenFile("/dev/loop-control", os.O_RDWR, 0)
 	if err != nil {
-		return "", fmt.Errorf("failed to open loop-control: %w", err)
+		return "", &errs.Error{Detail: "failed to open loop-control", Err: err}
 	}
 	defer func() { _ = loopControl.Close() }()
 
@@ -62,7 +64,7 @@ func attachFreeLoopDevice(loopControl, backingFile *os.File) (string, error) {
 	// Get free loop device number
 	devNum, _, errno := unix.Syscall(unix.SYS_IOCTL, loopControl.Fd(), unix.LOOP_CTL_GET_FREE, 0)
 	if errno != 0 {
-		return "", fmt.Errorf("LOOP_CTL_GET_FREE failed: %v", errno)
+		return "", &errs.Error{Detail: fmt.Sprintf("LOOP_CTL_GET_FREE failed: %v", errno)}
 	}
 
 	loopDevice := fmt.Sprintf("/dev/loop%d", devNum)
@@ -81,7 +83,7 @@ func attachFreeLoopDevice(loopControl, backingFile *os.File) (string, error) {
 	//
 	// Measured, PR #89 job 34083: four devices created fine and the fifth died
 	// on `open /dev/loop8: no such file or directory`.
-	if err := waitForLoopNode(loopDevice, loopNodeTimeout, loopNodePollInterval, systemClock{}); err != nil {
+	if err := waitForLoopNode(loopDevice, loopNodeTimeout, loopNodePollInterval, clock.System{}); err != nil {
 		return "", err
 	}
 
@@ -95,7 +97,7 @@ func attachFreeLoopDevice(loopControl, backingFile *os.File) (string, error) {
 	// Attach backing file to loop device
 	_, _, errno = unix.Syscall(unix.SYS_IOCTL, loopFile.Fd(), unix.LOOP_SET_FD, backingFile.Fd())
 	if errno != 0 {
-		return "", fmt.Errorf("LOOP_SET_FD failed: %w", errno)
+		return "", &errs.Error{Detail: "LOOP_SET_FD failed", Err: errno}
 	}
 
 	return loopDevice, nil
@@ -153,7 +155,7 @@ const loopNodePollInterval = 500 * time.Microsecond
 // those for the whole budget would report a permission problem as a missing
 // node. Existence is the one question this answers; the open that follows
 // keeps its own error.
-func waitForLoopNode(device string, timeout, poll time.Duration, clk clock) error {
+func waitForLoopNode(device string, timeout, poll time.Duration, clk clock.Clock) error {
 	deadline := clk.Now().Add(timeout)
 	for {
 		_, err := os.Stat(device)
@@ -168,7 +170,7 @@ func waitForLoopNode(device string, timeout, poll time.Duration, clk clock) erro
 		if clk.Now().After(deadline) {
 			return &DeviceError{Device: device, Op: "wait for the loop device node", Err: ErrLoopNodeAbsent}
 		}
-		clk.Sleep(poll)
+		<-clk.NewTimer(poll).C()
 	}
 }
 
@@ -254,7 +256,7 @@ func detachLoopDevice(device string, timeout, poll time.Duration, read loopState
 
 	loopFile, err := os.OpenFile(device, os.O_RDWR, 0) // #nosec G304 -- loop device path from SetupLoopDevice
 	if err != nil {
-		return DetachReleased, fmt.Errorf("failed to open %s: %w", device, err)
+		return DetachReleased, &errs.Error{Detail: fmt.Sprintf("failed to open %s", device), Err: err}
 	}
 
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL, loopFile.Fd(), unix.LOOP_CLR_FD, 0)
@@ -266,7 +268,7 @@ func detachLoopDevice(device string, timeout, poll time.Duration, read loopState
 	closeErr := loopFile.Close()
 
 	if errno != 0 {
-		return DetachReleased, fmt.Errorf("LOOP_CLR_FD failed: %v", errno)
+		return DetachReleased, &errs.Error{Detail: fmt.Sprintf("LOOP_CLR_FD failed: %v", errno)}
 	}
 
 	// A failed close does NOT skip the wait. The detach itself succeeded, the
@@ -274,7 +276,7 @@ func detachLoopDevice(device string, timeout, poll time.Duration, read loopState
 	// abandon the observation this function exists to make and hand back an
 	// error a caller cannot classify. It is reported alongside whatever the
 	// wait concludes.
-	state, waitErr := waitForDetach(device, before, beforeErr == nil, timeout, poll, read, systemClock{})
+	state, waitErr := waitForDetach(device, before, beforeErr == nil, timeout, poll, read, clock.System{})
 	if closeErr != nil {
 		return state, errors.Join(&DeviceError{Device: device, Op: "close loop device after detach", Err: closeErr}, waitErr)
 	}
@@ -292,7 +294,7 @@ func detachLoopDevice(device string, timeout, poll time.Duration, read loopState
 // The contract, and it is one sentence: NO PATH RETURNS SUCCESS WITHOUT AN
 // AUTHORITATIVE OBSERVATION. An unreadable state is retried, never concluded
 // from; if it never clears, the bound reports that the state could not be read.
-func waitForDetach(device string, before loopState, knownBefore bool, timeout, poll time.Duration, read loopStateReader, clk clock) (DetachState, error) {
+func waitForDetach(device string, before loopState, knownBefore bool, timeout, poll time.Duration, read loopStateReader, clk clock.Clock) (DetachState, error) {
 	// Nothing was attached, and we KNOW that — the only case that needs no
 	// wait. An unreadable pre-detach observation is not this case, however
 	// similar an empty backing file looks.
@@ -360,7 +362,7 @@ func waitForDetach(device string, before loopState, knownBefore bool, timeout, p
 			}
 		}
 
-		clk.Sleep(poll)
+		<-clk.NewTimer(poll).C()
 	}
 }
 
@@ -379,15 +381,25 @@ func released(current, before loopState, knownBefore bool) bool {
 // is a process to find, and a sysfs we cannot read is a host to fix.
 func detachTimeoutCause(before loopState, knownBefore bool, timeout time.Duration, unreadable, held int, lastErr error) error {
 	if unreadable > held {
-		return fmt.Errorf("%w: the device's state was unreadable for %d of %d checks over %s: %w",
-			ErrDetachIncomplete, unreadable, unreadable+held, timeout, lastErr)
+		return &errs.Error{
+			Kind: ErrDetachIncomplete,
+			Detail: fmt.Sprintf("the device's state was unreadable for %d of %d checks over %s",
+				unreadable, unreadable+held, timeout),
+			Err: lastErr,
+		}
 	}
 	if knownBefore {
-		return fmt.Errorf("%w: still backed by %s after %s; something else still holds the device open",
-			ErrDetachIncomplete, before.backing, timeout)
+		return &errs.Error{
+			Kind: ErrDetachIncomplete,
+			Detail: fmt.Sprintf("still backed by %s after %s; something else still holds the device open",
+				before.backing, timeout),
+		}
 	}
-	return fmt.Errorf("%w: still attached after %s, and its state before the detach could not be read",
-		ErrDetachIncomplete, timeout)
+	return &errs.Error{
+		Kind: ErrDetachIncomplete,
+		Detail: fmt.Sprintf("still attached after %s, and its state before the detach could not be read",
+			timeout),
+	}
 }
 
 // loopState is one observation of a loop device's attributes.
@@ -438,7 +450,7 @@ func readLoopStateIn(root, device string) (loopState, error) {
 	blockDir := filepath.Join(root, name)
 
 	if _, err := os.Stat(blockDir); err != nil {
-		return loopState{}, fmt.Errorf("cannot observe block device %s: %w", name, err)
+		return loopState{}, &errs.Error{Detail: fmt.Sprintf("cannot observe block device %s", name), Err: err}
 	}
 
 	data, err := os.ReadFile(filepath.Join(blockDir, "loop", "backing_file")) // #nosec G304 -- sysfs path built from the device's base name
@@ -458,7 +470,10 @@ func readLoopStateIn(root, device string) (loopState, error) {
 
 	abs, err := filepath.Abs(backing)
 	if err != nil {
-		return loopState{}, fmt.Errorf("unreadable backing file %q for %s: %w", backing, device, err)
+		return loopState{}, &errs.Error{
+			Detail: fmt.Sprintf("unreadable backing file %q for %s", backing, device),
+			Err:    err,
+		}
 	}
 
 	return loopState{backing: abs, autoclear: readLoopFlag(blockDir, "autoclear")}, nil
@@ -586,5 +601,5 @@ func findLoopDeviceIn(root, file string) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("no loop device found for %s", file)
+	return "", &errs.Error{Detail: fmt.Sprintf("no loop device found for %s", file)}
 }

@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: coverage-gate coverage-combined changelog-assemble help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-pkg integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration seccomp-diff
+.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-pkg integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration seccomp-diff
 
 # Default target
 .DEFAULT_GOAL := help
@@ -40,8 +40,8 @@ COVERAGE_UNIT_LEGS=$(COVERAGE_LEG_PKG) $(COVERAGE_LEG_REST)
 # loop devices, device-mapper, mount(2), mkfs on a mapped device, dmsetup and
 # losetup -- so their floor of record is the union of their unit profile and
 # the integration suite's, which instruments them through -coverpkg.
-COVERAGE_COMBINED_PKGS=./pkg/luks2 ./test/harness
-COVERAGE_COMBINED_COVERPKG=./pkg/luks2,./test/harness
+COVERAGE_COMBINED_PKGS=./pkg/luks2 ./test/harness ./internal/dm ./internal/keyring
+COVERAGE_COMBINED_COVERPKG=./pkg/luks2,./test/harness,./internal/dm,./internal/keyring
 COVERAGE_COMBINED_UNIT=coverage-combined-unit.out
 COVERAGE_INTEGRATION=coverage-integration.out
 
@@ -233,11 +233,12 @@ releasability: ## Run the public-releasability gate over the tracked tree (needs
 # package's -- is in BENCHMARKS, which the ordinary unit suite never runs.
 # This target runs each once, and a failure fails the build.
 CALIBRATION_TESTS := TestBenchmarkPBKDF2|TestCalibratePBKDF2|TestPBKDF2IterationFloor|TestScalePBKDF2Iterations|TestCreateKDFPBKDF2|TestDigestCalibration
-CALIBRATION_BENCHMARKS := BenchmarkDigestCalibrationCostsItsBudget|BenchmarkPBKDF2CalibrationCostsItsBudget|BenchmarkSystemClockIsTheRealClock
+CALIBRATION_BENCHMARKS := BenchmarkDigestCalibrationCostsItsBudget|BenchmarkPBKDF2CalibrationCostsItsBudget
 
 test-calibration: ## Run the PBKDF2 calibration tests without -race (the mode the defect lives in)
 	@echo "$(COLOR_BOLD)Running PBKDF2 calibration tests (no -race)...$(COLOR_RESET)"
 	@$(GO) test -count=1 -timeout 10m -run '$(CALIBRATION_TESTS)' -bench '$(CALIBRATION_BENCHMARKS)' -benchtime=1x ./pkg/luks2
+	@$(GO) test -count=1 -timeout 10m -run '$(CALIBRATION_TESTS)' ./internal/kdf
 	@echo "$(COLOR_GREEN)✓ Calibration tests passed$(COLOR_RESET)"
 
 test-cli: ## Run CLI unit tests only
@@ -678,6 +679,22 @@ host-integration-test: build ## Run integration tests on host (requires sudo, NO
 	@echo "$(COLOR_GREEN)✓ Host integration tests complete$(COLOR_RESET)"
 
 test-integration: integration-test ## Alias for integration-test
+
+# ---- the exported-API record (API redesign, DESIGN.md H0) ----
+#
+# test/tools/apidump/baseline holds the API as released in 0.5.0-alpha and the
+# redesign's disposition of every pkg/luks2 identifier. That the dispositions
+# cover the baseline exactly is a unit test of the tool, so test-unit gates
+# it; api-diff reports how far the tree has moved from the baseline.
+API_BASELINE=test/tools/apidump/baseline
+
+api-dump: ## Print the exported API of pkg/luks2 and cmd/luks2
+	@$(GO) run ./test/tools/apidump dump ./pkg/luks2
+	@$(GO) run ./test/tools/apidump dump ./cmd/luks2
+
+api-diff: ## Report what the exported API removed and added since the 0.5.0-alpha baseline
+	@$(GO) run ./test/tools/apidump diff $(API_BASELINE)/luks2.tsv ./pkg/luks2
+	@$(GO) run ./test/tools/apidump diff $(API_BASELINE)/cmd-luks2.tsv ./cmd/luks2
 
 bench: ## Run benchmarks
 	@echo "$(COLOR_BOLD)Running benchmarks...$(COLOR_RESET)"

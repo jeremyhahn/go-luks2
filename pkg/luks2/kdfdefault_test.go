@@ -13,6 +13,8 @@ import (
 	"math"
 	"strconv"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/fips"
 )
 
 // The tests in this file hold #237: the KDF a keyslot gets when the caller
@@ -34,7 +36,7 @@ const e2eIterTimeMs = 50
 func TestDefaultKDFTypeForEachMode(t *testing.T) {
 	tests := []struct {
 		name     string
-		fipsMode bool
+		fipsMode fips.Mode
 		want     string
 	}{
 		{"FIPS 140-3 mode", true, KDFTypePBKDF2SHA512},
@@ -68,7 +70,7 @@ func TestResolveKDFTypeFor(t *testing.T) {
 		name            string
 		kdfType         string
 		argon2CostGiven bool
-		fipsMode        bool
+		fipsMode        fips.Mode
 		want            string
 	}{
 		{"a named type is kept in FIPS mode", KDFTypePBKDF2SHA256, false, true, KDFTypePBKDF2SHA256},

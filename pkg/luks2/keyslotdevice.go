@@ -8,6 +8,9 @@ import (
 	"io"
 	"os"
 	"strconv"
+
+	"github.com/jeremyhahn/go-luks2/internal/device"
+	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
 // keyslotDevice is how a keyslot operation reaches the device it is changing.
@@ -40,17 +43,19 @@ import (
 // path opens as write steps. That suite now observes the steps on the pinned
 // descriptor itself, through keyslotWriteStep.
 type keyslotDevice struct {
-	path string
-	file *os.File // the locked descriptor; the lock owns it
+	path   string
+	file   *os.File       // the locked descriptor; the lock owns it
+	locked *device.Locked // the same lock, for Claim (wipe.go)
 }
 
 // pinnedKeyslotDevice wraps the descriptor a FileLock holds. The lock still
 // owns it: releasing the lock closes it, and nothing here does.
 func pinnedKeyslotDevice(lock *FileLock, path string) (*keyslotDevice, error) {
-	if err := requireLockableDevice(lock.file, path); err != nil {
+	file := lock.locked.File()
+	if err := requireLockableDevice(file, path); err != nil {
 		return nil, err
 	}
-	return &keyslotDevice{path: path, file: lock.file}, nil
+	return &keyslotDevice{path: path, file: file, locked: lock.locked}, nil
 }
 
 // keyslotLockWait is how long a keyslot operation waits for the device's
@@ -65,7 +70,7 @@ var keyslotLockWait = DefaultLockWait
 func lockKeyslotDevice(device string) (*FileLock, *keyslotDevice, error) {
 	lock, err := AcquireFileLockTimeout(device, keyslotLockWait)
 	if err != nil {
-		return nil, nil, &detailError{Detail: "failed to acquire lock", Err: err}
+		return nil, nil, &errs.Error{Detail: "failed to acquire lock", Err: err}
 	}
 	dev, err := pinnedKeyslotDevice(lock, device)
 	if err != nil {
@@ -86,7 +91,7 @@ func requireLockableDevice(f *os.File, path string) error {
 	}
 	mode := info.Mode()
 	if !mode.IsRegular() && mode&os.ModeDevice == 0 {
-		return &detailError{Kind: ErrInvalidPath, Detail: path + " is neither a regular file nor a block device"}
+		return &errs.Error{Kind: ErrInvalidPath, Detail: path + " is neither a regular file nor a block device"}
 	}
 	return nil
 }
@@ -145,18 +150,18 @@ func (d *keyslotDevice) writeArea(op string, offset int64, data []byte, size int
 	}
 	f := d.file
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		return &detailError{Detail: "failed to seek to keyslot area", Err: err}
+		return &errs.Error{Detail: "failed to seek to keyslot area", Err: err}
 	}
 	if _, err := f.Write(data); err != nil {
-		return &detailError{Detail: "failed to write key material", Err: err}
+		return &errs.Error{Detail: "failed to write key material", Err: err}
 	}
 	if pad := size - int64(len(data)); pad > 0 {
 		if err := writeZeros(f, pad); err != nil {
-			return &detailError{Detail: "failed to write padding", Err: err}
+			return &errs.Error{Detail: "failed to write padding", Err: err}
 		}
 	}
 	if err := syncKeyslotArea(f); err != nil {
-		return &detailError{Detail: "failed to sync", Err: err}
+		return &errs.Error{Detail: "failed to sync", Err: err}
 	}
 	return nil
 }

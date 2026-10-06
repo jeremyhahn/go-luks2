@@ -8,26 +8,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+
+	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
 // MaxTokenSlots is the maximum number of token slots in LUKS2
 const MaxTokenSlots = 32
 
-// ErrTokenNotFound indicates the token was not found
-var ErrTokenNotFound = fmt.Errorf("token not found")
-
-// ErrNoFreeTokenSlot indicates no free token slots are available
-var ErrNoFreeTokenSlot = fmt.Errorf("no free token slots available")
-
 // GetToken retrieves a token by ID from a LUKS2 device
 func GetToken(device string, tokenID int) (*Token, error) {
 	if tokenID < 0 || tokenID >= MaxTokenSlots {
-		return nil, fmt.Errorf("invalid token ID: %d (must be 0-%d)", tokenID, MaxTokenSlots-1)
+		return nil, &errs.Error{
+			Detail: fmt.Sprintf("invalid token ID: %d (must be 0-%d)", tokenID, MaxTokenSlots-1),
+		}
 	}
 
 	_, metadata, err := ReadHeader(device)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read LUKS header: %w", err)
+		return nil, &errs.Error{Detail: "failed to read LUKS header", Err: err}
 	}
 
 	if metadata.Tokens == nil {
@@ -118,7 +116,7 @@ func canonicalTokenID(key string) (int, bool) {
 func ListTokens(device string) (map[int]*Token, error) {
 	_, metadata, err := ReadHeader(device)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read LUKS header: %w", err)
+		return nil, &errs.Error{Detail: "failed to read LUKS header", Err: err}
 	}
 
 	result := make(map[int]*Token)
@@ -146,7 +144,7 @@ func ExportToken(device string, tokenID int) ([]byte, error) {
 
 	jsonData, err := json.MarshalIndent(token, "", "  ")
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal token: %w", err)
+		return nil, &errs.Error{Detail: "failed to marshal token", Err: err}
 	}
 
 	return jsonData, nil
@@ -155,15 +153,17 @@ func ExportToken(device string, tokenID int) ([]byte, error) {
 // ImportToken imports a token into a LUKS2 device at the specified slot
 func ImportToken(device string, tokenID int, token *Token) error {
 	if tokenID < 0 || tokenID >= MaxTokenSlots {
-		return fmt.Errorf("invalid token ID: %d (must be 0-%d)", tokenID, MaxTokenSlots-1)
+		return &errs.Error{
+			Detail: fmt.Sprintf("invalid token ID: %d (must be 0-%d)", tokenID, MaxTokenSlots-1),
+		}
 	}
 
 	if token == nil {
-		return fmt.Errorf("token cannot be nil")
+		return &errs.Error{Detail: "token cannot be nil"}
 	}
 
 	if token.Type == "" {
-		return fmt.Errorf("token type cannot be empty")
+		return &errs.Error{Detail: "token type cannot be empty"}
 	}
 
 	// Validate device path
@@ -182,7 +182,7 @@ func ImportToken(device string, tokenID int, token *Token) error {
 
 	hdr, metadata, err := dev.readHeader()
 	if err != nil {
-		return &detailError{Detail: "failed to read LUKS header", Err: err}
+		return &errs.Error{Detail: "failed to read LUKS header", Err: err}
 	}
 
 	// Initialize tokens map if nil
@@ -213,7 +213,7 @@ func ImportToken(device string, tokenID int, token *Token) error {
 	hdr.SequenceID++
 
 	if err := dev.writeHeader(hdr, metadata); err != nil {
-		return &detailError{Detail: "failed to write header", Err: err}
+		return &errs.Error{Detail: "failed to write header", Err: err}
 	}
 	return nil
 }
@@ -222,7 +222,7 @@ func ImportToken(device string, tokenID int, token *Token) error {
 func ImportTokenJSON(device string, tokenID int, tokenJSON []byte) error {
 	var token Token
 	if err := json.Unmarshal(tokenJSON, &token); err != nil {
-		return fmt.Errorf("failed to parse token JSON: %w", err)
+		return &errs.Error{Detail: "failed to parse token JSON", Err: err}
 	}
 
 	return ImportToken(device, tokenID, &token)
@@ -231,7 +231,9 @@ func ImportTokenJSON(device string, tokenID int, tokenJSON []byte) error {
 // RemoveToken removes a token from a LUKS2 device
 func RemoveToken(device string, tokenID int) error {
 	if tokenID < 0 || tokenID >= MaxTokenSlots {
-		return fmt.Errorf("invalid token ID: %d (must be 0-%d)", tokenID, MaxTokenSlots-1)
+		return &errs.Error{
+			Detail: fmt.Sprintf("invalid token ID: %d (must be 0-%d)", tokenID, MaxTokenSlots-1),
+		}
 	}
 
 	// Validate device path
@@ -248,7 +250,7 @@ func RemoveToken(device string, tokenID int) error {
 
 	hdr, metadata, err := dev.readHeader()
 	if err != nil {
-		return &detailError{Detail: "failed to read LUKS header", Err: err}
+		return &errs.Error{Detail: "failed to read LUKS header", Err: err}
 	}
 
 	if metadata.Tokens == nil {
@@ -277,7 +279,7 @@ func RemoveToken(device string, tokenID int) error {
 	hdr.SequenceID++
 
 	if err := dev.writeHeader(hdr, metadata); err != nil {
-		return &detailError{Detail: "failed to write header", Err: err}
+		return &errs.Error{Detail: "failed to write header", Err: err}
 	}
 	return nil
 }
@@ -286,7 +288,7 @@ func RemoveToken(device string, tokenID int) error {
 func FindFreeTokenSlot(device string) (int, error) {
 	_, metadata, err := ReadHeader(device)
 	if err != nil {
-		return -1, fmt.Errorf("failed to read LUKS header: %w", err)
+		return -1, &errs.Error{Detail: "failed to read LUKS header", Err: err}
 	}
 
 	// If no tokens exist, slot 0 is free
@@ -308,12 +310,14 @@ func FindFreeTokenSlot(device string) (int, error) {
 // TokenExists checks if a token exists at the specified slot
 func TokenExists(device string, tokenID int) (bool, error) {
 	if tokenID < 0 || tokenID >= MaxTokenSlots {
-		return false, fmt.Errorf("invalid token ID: %d (must be 0-%d)", tokenID, MaxTokenSlots-1)
+		return false, &errs.Error{
+			Detail: fmt.Sprintf("invalid token ID: %d (must be 0-%d)", tokenID, MaxTokenSlots-1),
+		}
 	}
 
 	_, metadata, err := ReadHeader(device)
 	if err != nil {
-		return false, fmt.Errorf("failed to read LUKS header: %w", err)
+		return false, &errs.Error{Detail: "failed to read LUKS header", Err: err}
 	}
 
 	if metadata.Tokens == nil {
@@ -335,7 +339,7 @@ func TokenExists(device string, tokenID int) (bool, error) {
 func CountTokens(device string) (int, error) {
 	_, metadata, err := ReadHeader(device)
 	if err != nil {
-		return 0, fmt.Errorf("failed to read LUKS header: %w", err)
+		return 0, &errs.Error{Detail: "failed to read LUKS header", Err: err}
 	}
 
 	count := 0

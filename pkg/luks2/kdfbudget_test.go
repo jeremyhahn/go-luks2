@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-luks2/internal/kdf"
+	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
 // #26: the aggregate budget of one operation.
@@ -172,10 +174,10 @@ func TestTheMostExpensiveHeaderCryptsetupCanWriteFitsTheBudget(t *testing.T) {
 		t.Fatalf("the fixture is not a header cryptsetup could have written: %v", err)
 	}
 	plan := planKeyslotScan(metadata, keyslotIDsInScanOrder(metadata.Keyslots))
-	if plan.work.exceeds(operationKDFBudget) {
+	if plan.work.Exceeds(operationKDFBudget) {
 		t.Fatalf("the most expensive cryptsetup header needs %+v, over the budget %+v", plan.work, operationKDFBudget)
 	}
-	if plan.work.pbkdf2Blocks == 0 || (plan.work.argon2KiBPasses == 0) != fipsMode() {
+	if plan.work.PBKDF2Blocks == 0 || (plan.work.Argon2KiBPasses == 0) != fipsMode() {
 		t.Fatalf("the plan priced %+v; every keyslot this process can run should be priced", plan.work)
 	}
 }
@@ -188,10 +190,10 @@ func TestDerivationWork(t *testing.T) {
 		out  int
 		want kdfWork
 	}{
-		{"pbkdf2-sha256 to 64 bytes: two blocks", &KDF{Type: "pbkdf2", Hash: "sha256", Iterations: &iterations}, 64, kdfWork{pbkdf2Blocks: 2000}},
-		{"pbkdf2-sha1 to 64 bytes: four blocks", &KDF{Type: "pbkdf2", Hash: "sha1", Iterations: &iterations}, 64, kdfWork{pbkdf2Blocks: 4000}},
-		{"pbkdf2-sha512 to 32 bytes: one block", &KDF{Type: "pbkdf2", Hash: "sha512", Iterations: &iterations}, 32, kdfWork{pbkdf2Blocks: 1000}},
-		{"argon2id", &KDF{Type: "argon2id", Time: &time, Memory: &memory}, 64, kdfWork{argon2KiBPasses: 4 * 65536}},
+		{"pbkdf2-sha256 to 64 bytes: two blocks", &KDF{Type: "pbkdf2", Hash: "sha256", Iterations: &iterations}, 64, kdfWork{PBKDF2Blocks: 2000}},
+		{"pbkdf2-sha1 to 64 bytes: four blocks", &KDF{Type: "pbkdf2", Hash: "sha1", Iterations: &iterations}, 64, kdfWork{PBKDF2Blocks: 4000}},
+		{"pbkdf2-sha512 to 32 bytes: one block", &KDF{Type: "pbkdf2", Hash: "sha512", Iterations: &iterations}, 32, kdfWork{PBKDF2Blocks: 1000}},
+		{"argon2id", &KDF{Type: "argon2id", Time: &time, Memory: &memory}, 64, kdfWork{Argon2KiBPasses: 4 * 65536}},
 		{"no KDF", nil, 64, kdfWork{}},
 		{"no output", &KDF{Type: "pbkdf2", Hash: "sha256", Iterations: &iterations}, 0, kdfWork{}},
 		{"argon2 missing its cost", &KDF{Type: "argon2i"}, 64, kdfWork{}},
@@ -201,12 +203,12 @@ func TestDerivationWork(t *testing.T) {
 			t.Errorf("%s: %+v, want %+v", tc.name, got, tc.want)
 		}
 	}
-	huge := kdfWork{pbkdf2Blocks: ^uint64(0), argon2KiBPasses: ^uint64(0)}
-	if got := huge.add(kdfWork{pbkdf2Blocks: 1, argon2KiBPasses: 1}); got != huge {
+	huge := kdfWork{PBKDF2Blocks: ^uint64(0), Argon2KiBPasses: ^uint64(0)}
+	if got := huge.Add(kdfWork{PBKDF2Blocks: 1, Argon2KiBPasses: 1}); got != huge {
 		t.Fatalf("the sum wrapped: %+v", got)
 	}
-	if saturatingMul(1<<40, 1<<40) != ^uint64(0) || saturatingMul(0, 5) != 0 {
-		t.Fatal("saturatingMul")
+	if kdf.SaturatingMul(1<<40, 1<<40) != ^uint64(0) || kdf.SaturatingMul(0, 5) != 0 {
+		t.Fatal("SaturatingMul")
 	}
 }
 
@@ -254,7 +256,7 @@ func TestHeadersWithMoreKeyslotsOrDigestsThanCryptsetupCreatesAreRefusedOnRead(t
 // scan whose keyslot needs more locked memory than the allocator's whole
 // budget is refused up front, typed, rather than after its derivation.
 //
-// NOT PARALLEL: lockedMemoryAllocator is package state.
+// NOT PARALLEL: custody is package state.
 func TestAKeyslotTheAllocatorCanNeverAdmitIsRefusedBeforeDeriving(t *testing.T) {
 	device := newImage(t, "admission.img")
 	formatWithLibrary(t, device)
@@ -263,9 +265,9 @@ func TestAKeyslotTheAllocatorCanNeverAdmitIsRefusedBeforeDeriving(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	previous := lockedMemoryAllocator
-	t.Cleanup(func() { lockedMemoryAllocator = previous })
-	lockedMemoryAllocator = func() (*enclave.Allocator, error) { return small, nil }
+	previous := custody
+	t.Cleanup(func() { custody = previous })
+	custody = secret.Admitted(func() (*enclave.Allocator, error) { return small, nil })
 	calls := countKDFCalls(t)
 
 	err = TestKey(device, []byte(conformancePassphrase))
@@ -277,72 +279,11 @@ func TestAKeyslotTheAllocatorCanNeverAdmitIsRefusedBeforeDeriving(t *testing.T) 
 	}
 }
 
-// TestEnclavesAreAdmittedThroughTheProcessAllocator: the three constructors
-// charge the allocator, and give the charge back when the enclave is
-// destroyed.
-//
-// NOT PARALLEL: lockedMemoryAllocator is package state.
-func TestEnclavesAreAdmittedThroughTheProcessAllocator(t *testing.T) {
-	a, err := enclave.NewAllocator(enclave.LockedSize(4096) * 8)
-	if err != nil {
-		t.Fatal(err)
-	}
-	previous := lockedMemoryAllocator
-	t.Cleanup(func() { lockedMemoryAllocator = previous })
-	lockedMemoryAllocator = func() (*enclave.Allocator, error) { return a, nil }
-
-	sized, err := admittedSized(32)
-	if err != nil {
-		t.Fatal(err)
-	}
-	moved, err := admittedMove([]byte("moved-into-locked-memory"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	copied, err := admittedCopy([]byte("copied-into-locked-memory"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if a.InUse() != 3*enclave.LockedSize(32) {
-		t.Fatalf("in use %d after three enclaves, want %d", a.InUse(), 3*enclave.LockedSize(32))
-	}
-	if !copied.EqualTo([]byte("copied-into-locked-memory")) {
-		t.Fatal("the copy does not hold its source")
-	}
-	for _, e := range []*enclave.MemoryEnclave{sized, moved, copied} {
-		_ = e.Destroy()
-	}
-	if a.InUse() != 0 {
-		t.Fatalf("in use %d after every enclave was destroyed", a.InUse())
-	}
-	if _, err := admittedCopy(nil); !errors.Is(err, enclave.ErrEmptyEnclave) {
-		t.Fatalf("admittedCopy(nil) = %v", err)
-	}
-
-	broken := errors.New("no allocator")
-	lockedMemoryAllocator = func() (*enclave.Allocator, error) { return nil, broken }
-	material := []byte("owned-even-on-failure")
-	if _, err := admittedMove(material); !errors.Is(err, broken) {
-		t.Fatalf("admittedMove = %v", err)
-	}
-	for _, b := range material {
-		if b != 0 {
-			t.Fatal("admittedMove left the material it owns on the heap")
-		}
-	}
-	if _, err := admittedCopy([]byte("x")); !errors.Is(err, broken) {
-		t.Fatalf("admittedCopy = %v", err)
-	}
-	if err := checkKDFBudget("test", scanPlan{peakLocked: 1}); !errors.Is(err, ErrProtectedMemory) {
-		t.Fatalf("checkKDFBudget with no allocator = %v", err)
-	}
-}
-
 // peakRecorder admits every enclave against a fresh, unbounded-enough
 // allocator and records the most locked memory live at once. Allocation is
 // the only moment the total rises, so sampling after each one sees the peak.
 //
-// NOT PARALLEL, in every caller: the constructors are package state.
+// NOT PARALLEL, in every caller: custody is package state.
 func peakRecorder(t *testing.T, budget int64) (*enclave.Allocator, *int64) {
 	t.Helper()
 	a, err := enclave.NewAllocator(budget)
@@ -354,14 +295,14 @@ func peakRecorder(t *testing.T, budget int64) (*enclave.Allocator, *int64) {
 		peak = max(peak, a.InUse())
 		return e, err
 	}
-	prevAlloc, prevSized, prevMove, prevCopy := lockedMemoryAllocator, newLockedRegion, moveIntoLockedRegion, copyIntoLockedRegion
-	t.Cleanup(func() {
-		lockedMemoryAllocator, newLockedRegion, moveIntoLockedRegion, copyIntoLockedRegion = prevAlloc, prevSized, prevMove, prevCopy
-	})
-	lockedMemoryAllocator = func() (*enclave.Allocator, error) { return a, nil }
-	newLockedRegion = func(n int) (*enclave.MemoryEnclave, error) { return sample(prevSized(n)) }
-	moveIntoLockedRegion = func(b []byte) (*enclave.MemoryEnclave, error) { return sample(prevMove(b)) }
-	copyIntoLockedRegion = func(b []byte) (*enclave.MemoryEnclave, error) { return sample(prevCopy(b)) }
+	admitted := secret.Admitted(func() (*enclave.Allocator, error) { return a, nil })
+	measuring := admitted
+	measuring.Sized = func(n int) (*enclave.MemoryEnclave, error) { return sample(admitted.Sized(n)) }
+	measuring.Moved = func(b []byte) (*enclave.MemoryEnclave, error) { return sample(admitted.Moved(b)) }
+	measuring.Copied = func(b []byte) (*enclave.MemoryEnclave, error) { return sample(admitted.Copied(b)) }
+	previous := custody
+	t.Cleanup(func() { custody = previous })
+	custody = measuring
 	return a, &peak
 }
 

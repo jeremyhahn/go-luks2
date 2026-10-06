@@ -6,23 +6,16 @@ package luks2
 
 import (
 	"crypto"
-	"crypto/fips140"
-	"crypto/pbkdf2"
-	// The hashes pbkdf2Hash resolves to, linked in so crypto.Hash.New can
-	// construct them.
-	_ "crypto/sha1" // #nosec G505 - legacy LUKS interop only; refused in FIPS mode (docs/FIPS.md)
-	_ "crypto/sha256"
-	_ "crypto/sha512"
 	"encoding/base64"
-	"errors"
-	"fmt"
 	"hash"
 	"math"
 	"strings"
 	"time"
 
 	"github.com/jeremyhahn/go-enclave"
-	"golang.org/x/crypto/argon2"
+	"github.com/jeremyhahn/go-luks2/internal/errs"
+	"github.com/jeremyhahn/go-luks2/internal/fips"
+	"github.com/jeremyhahn/go-luks2/internal/kdf"
 )
 
 // FIPS-compatible KDF type constants
@@ -84,7 +77,7 @@ func DefaultKDFType() string {
 // so both answers are tested in every run: a process cannot leave FIPS mode, or
 // enter it, once it has started. DefaultKDFType asks fipsMode, the seam every
 // FIPS policy decision in this package goes through.
-func defaultKDFTypeFor(fipsMode bool) string {
+func defaultKDFTypeFor(fipsMode fips.Mode) string {
 	if fipsMode {
 		return KDFTypePBKDF2SHA512
 	}
@@ -105,7 +98,7 @@ func resolveKDFType(kdfType string, argon2CostGiven bool) string {
 }
 
 // resolveKDFTypeFor is resolveKDFType for a given mode; see defaultKDFTypeFor.
-func resolveKDFTypeFor(kdfType string, argon2CostGiven, fipsMode bool) string {
+func resolveKDFTypeFor(kdfType string, argon2CostGiven bool, fipsMode fips.Mode) string {
 	if kdfType != "" {
 		return kdfType
 	}
@@ -145,10 +138,10 @@ func normalizeKDFType(kdfType string) string {
 	return strings.ToLower(strings.TrimSpace(kdfType))
 }
 
-// fipsMode reports whether this process runs in FIPS 140-3 mode. It is
-// crypto/fips140.Enabled, and every FIPS policy decision in this package --
-// the KDF gates, the SHA-1 gate, MigrateToFIPS's refusal, and the
-// classification of a refusal as an import rather than damage -- asks it here.
+// fipsMode is the FIPS 140-3 mode every policy decision in this package --
+// the KDF gates, the SHA-1 gates, MigrateToFIPS's refusal, and the
+// classification of a refusal as an import rather than damage -- is made in:
+// fips.Probe, crypto/fips140.Enabled.
 //
 // It is a seam because FIPS mode is fixed at process start: without it, the
 // policy branches run only in a process started with GODEBUG=fips140=only, so
@@ -157,30 +150,7 @@ func normalizeKDFType(kdfType string) string {
 // run those branches in-process; what the Go Cryptographic Module itself
 // enforces in strict mode is still proved by the child-process and nightly
 // tests. Unexported, no setter, substituted only by this package's tests.
-var fipsMode = fips140.Enabled
-
-// requireFIPSApprovedKDF returns an error when kdfType is not FIPS-approved and
-// the process is running in FIPS 140-3 mode.
-//
-// Argon2 is implemented in pure Go by golang.org/x/crypto (BLAKE2b) and never
-// enters the Go Cryptographic Module, so GODEBUG=fips140=only cannot reject it.
-// Without this check a FIPS-mode process would derive volume keys with a
-// non-approved KDF while the FIPS gate reported green. See docs/FIPS.md.
-//
-// PBKDF2 hash selection is enforced separately, in getPBKDF2HashFunc.
-func requireFIPSApprovedKDF(kdfType string) error {
-	if !fipsMode() {
-		return nil
-	}
-
-	normalized := normalizeKDFType(kdfType)
-	switch normalized {
-	case KDFTypeArgon2i, KDFTypeArgon2id:
-		return &CryptoError{Op: normalized, Err: ErrFIPSNotApproved}
-	default:
-		return nil
-	}
-}
+var fipsMode = fips.Probe
 
 // DeriveKeyEnclave derives a key from a passphrase and returns it held in
 // protected memory. This is the derivation every path inside this package uses.
@@ -203,16 +173,29 @@ func requireFIPSApprovedKDF(kdfType string) error {
 // enclave.NewMemoryEnclave takes ownership of that slice and wipes it -- on the
 // failure path too -- so what survives is whatever copy the compiler or the
 // collector made in between, plus the KDF's own scratch, which is unreachable
-// from here. See ProtectedMemoryError for why a failure here is fatal.
-func DeriveKeyEnclave(passphrase []byte, kdf *KDF, keySize int) (*enclave.MemoryEnclave, error) {
-	key, err := deriveKeyPlain(passphrase, kdf, keySize)
-	if err != nil {
-		return nil, err
+// from here. See ErrProtectedMemory for why a failure here is fatal.
+// toKDFParams copies k's fields into a kdf.Params. Salt is carried as the
+// stored base64 string, so this conversion cannot fail: only the derive path
+// decodes it, and a cost-only caller (validateKDFCost, derivationWork) never
+// touches it at all. Callers check k for nil themselves, matching each
+// original function's own nil handling.
+func toKDFParams(k *KDF) kdf.Params {
+	return kdf.Params{
+		Type:       k.Type,
+		Hash:       k.Hash,
+		Salt:       k.Salt,
+		Iterations: k.Iterations,
+		Time:       k.Time,
+		Memory:     k.Memory,
+		CPUs:       k.CPUs,
 	}
+}
 
-	// adoptSecret wipes key on every path, so there is no clearBytes here and
-	// no path on which the derived key outlives this statement in the clear.
-	return adoptSecret("derived key", key)
+func DeriveKeyEnclave(passphrase []byte, k *KDF, keySize int) (*enclave.MemoryEnclave, error) {
+	if k == nil {
+		return nil, &errs.Error{Detail: "no KDF object"}
+	}
+	return kdfDeriver().Derive(passphrase, toKDFParams(k), keySize)
 }
 
 // passphraseKDF is the keyslot derivation: the passphrase-to-keyslot-key step
@@ -244,130 +227,30 @@ var passphraseKDF = DeriveKeyEnclave
 // crypto/pbkdf2 takes a string, and implementing PBKDF2 over crypto/hmac to
 // avoid that is prohibited outright by the owner ruling of 2026-08-25, which
 // rules that the protected-memory mandate yields here.
-// Recorded as exposure 2 in enclave.go.
-func deriveKeySecret(secret *enclave.MemoryEnclave, kdf *KDF, keySize int) (*enclave.MemoryEnclave, error) {
-	var derived *enclave.MemoryEnclave
-	err := borrowSecret("derive from secret", secret, func(b []byte) error {
-		var err error
-		derived, err = DeriveKeyEnclave(b, kdf, keySize)
-		return err
-	})
-	if err != nil {
-		return nil, err
+// Recorded as exposure 2 in internal/secret.
+func deriveKeySecret(material *enclave.MemoryEnclave, k *KDF, keySize int) (*enclave.MemoryEnclave, error) {
+	if k == nil {
+		return nil, &errs.Error{Detail: "no KDF object"}
 	}
-	return derived, nil
+	return kdfDeriver().DeriveFromSecret(material, toKDFParams(k), keySize)
 }
 
 // deriveKeyPlain is the derivation itself. It is the ONE place in this package
 // that produces key material outside an enclave, and it exists because the
 // stdlib KDFs give no other shape: every caller adopts the result into an
 // enclave immediately, via DeriveKeyEnclave.
-func deriveKeyPlain(passphrase []byte, kdf *KDF, keySize int) ([]byte, error) {
-	if kdf == nil {
-		return nil, &CryptoError{Op: "derive", Err: fmt.Errorf("no KDF was given")}
+func deriveKeyPlain(passphrase []byte, k *KDF, keySize int) ([]byte, error) {
+	if k == nil {
+		return nil, &errs.Error{Detail: "no KDF object"}
 	}
-
-	// The requested length is checked ONCE, here, ahead of every KDF rather
-	// than inside each of them. It is a PANIC GUARD and nothing more:
-	// crypto/pbkdf2 refuses a non-positive keyLength with an error that
-	// x/crypto used to turn into a panic, and argon2 dereferences nil on one.
-	// No caller of any kind has a use for a zero-length key.
-	//
-	// It deliberately carries no UPPER bound any more. An earlier version
-	// capped it at MaxKeyslotKeySize, which looked like defense in depth and was
-	// misplaced for the same reason validateKDFCost is not enforced here: this
-	// function serves two TRUST DOMAINS. Format, AddKey and ChangeKey derive
-	// from parameters the CALLER chose, and an untrusted-input ceiling applied
-	// to all of them rejects a caller's own deliberate choice with an error
-	// shaped like a malformed header. What a HEADER may declare is bounded
-	// where headers are read -- validateKeyslot for the key size,
-	// validateKDFCost for the work factors.
-	if keySize <= 0 {
-		return nil, &CryptoError{
-			Op:  "derive",
-			Err: fmt.Errorf("requested key length must be positive"),
-		}
-	}
-
-	if err := requireFIPSApprovedKDF(kdf.Type); err != nil {
-		return nil, err
-	}
-
-	salt, err := decodeBase64(kdf.Salt)
-	if err != nil {
-		return nil, fmt.Errorf("invalid salt: %w", err)
-	}
-
-	switch kdf.Type {
-	case "pbkdf2":
-		return derivePBKDF2(passphrase, salt, kdf, keySize)
-	case "argon2i":
-		return deriveArgon2i(passphrase, salt, kdf, keySize)
-	case "argon2id":
-		return deriveArgon2id(passphrase, salt, kdf, keySize)
-	default:
-		return nil, fmt.Errorf("%w: %s", ErrUnsupportedKDF, kdf.Type)
-	}
-}
-
-// derivePBKDF2 derives a key using PBKDF2
-// It calls the STANDARD LIBRARY's crypto/pbkdf2, not
-// golang.org/x/crypto/pbkdf2.
-//
-// The x/crypto wrapper is a two-line shim that calls the same validated
-// implementation and then does panic(err) on any error it returns -- so a
-// keyLength the module refuses became a process crash reached through a
-// function whose signature promises an error. That wrapper was the entire
-// mechanism behind the key_size panics; the guard in validateKeyslot keeps a
-// header from reaching it, and calling the erroring API keeps the next caller
-// from having to.
-//
-// It is also the API the owner ruling names: "use crypto/pbkdf2; accept the
-// bounded transient copy; document it" -- the resolution of this exact case
-// under the rule against hand-rolled cryptography (owner ruling 2026-08-25).
-// The reasoning is spelled out in enclave.go and summarized under "Key
-// custody" in docs/ARCHITECTURE.md, which are in this repository and travel
-// with it.
-func derivePBKDF2(passphrase, salt []byte, kdf *KDF, keySize int) ([]byte, error) {
-	if kdf.Iterations == nil {
-		return nil, &CryptoError{Op: "pbkdf2", Err: fmt.Errorf("PBKDF2 requires iterations")}
-	}
-
-	hashFunc, err := getPBKDF2HashFunc(kdf.Hash)
-	if err != nil {
-		return nil, err
-	}
-
-	// string(passphrase) is the unwipeable copy exposure 2 in enclave.go
-	// records. It is made HERE now rather than inside the x/crypto wrapper,
-	// which changes who makes it and not whether it is made: crypto/pbkdf2
-	// takes a string, and the module copies it again into the HMAC state
-	// regardless. The ruling above is what settles that.
-	key, err := pbkdf2.Key(hashFunc, string(passphrase), salt, *kdf.Iterations, keySize)
-	if err != nil {
-		return nil, &CryptoError{Op: "pbkdf2", Err: err}
-	}
-	return key, nil
+	return kdfDeriver().DerivePlain(passphrase, toKDFParams(k), keySize)
 }
 
 // getPBKDF2HashFunc returns the hash function for PBKDF2 key derivation
 // Supported: sha256, sha384, sha512 (FIPS-approved) and sha1 (legacy LUKS
 // headers only, refused in FIPS 140-3 mode)
 func getPBKDF2HashFunc(hashAlgo string) (func() hash.Hash, error) {
-	h, err := pbkdf2Hash(hashAlgo)
-	if err != nil {
-		return nil, err
-	}
-	// PBKDF2-HMAC-SHA1 is needed to open LUKS headers written by cryptsetup
-	// releases that defaulted to SHA-1, but the Go Cryptographic Module
-	// permits PBKDF2 only with SHA-2/SHA-3 and panics on SHA-1 under
-	// GODEBUG=fips140=only. Refuse it here so a FIPS build reports a typed
-	// error instead of crashing, and so the call never reaches the module.
-	// See docs/FIPS.md.
-	if h == crypto.SHA1 && fipsMode() {
-		return nil, &CryptoError{Op: "pbkdf2-hmac-sha1", Err: ErrFIPSNotApproved}
-	}
-	return h.New, nil
+	return kdf.PBKDF2HashFunc(fipsMode(), hashAlgo)
 }
 
 // pbkdf2Hash resolves a LUKS2 PBKDF2 hash name to the algorithm, with NO FIPS
@@ -380,18 +263,7 @@ func getPBKDF2HashFunc(hashAlgo string) (func() hash.Hash, error) {
 // read (crypto.Hash.Size is a table lookup) without instantiating SHA-1 in a
 // process where the module refuses it.
 func pbkdf2Hash(hashAlgo string) (crypto.Hash, error) {
-	switch strings.ToLower(hashAlgo) {
-	case "sha1":
-		return crypto.SHA1, nil
-	case "sha256":
-		return crypto.SHA256, nil
-	case "sha384":
-		return crypto.SHA384, nil
-	case "sha512":
-		return crypto.SHA512, nil
-	default:
-		return 0, &detailError{Kind: ErrUnsupportedHash, Detail: hashAlgo + " (supported: sha1, sha256, sha384, sha512)"}
-	}
+	return kdf.PBKDF2Hash(hashAlgo)
 }
 
 // legacyDigestLen is the ONE digest length this package accepts that the LUKS2
@@ -429,151 +301,17 @@ const luks1DigestLen = 20
 // is refused here too instead of reporting a length for a hash that will not
 // run.
 func hashOutputLen(hashAlgo string) (int, error) {
-	hashFunc, err := getPBKDF2HashFunc(hashAlgo)
-	if err != nil {
-		return 0, err
-	}
-	return hashFunc().Size(), nil
-}
-
-// u32 converts a cost or size to the uint32 the argon2 interface takes,
-// refusing what that type cannot represent.
-//
-// REPRESENTATION ONLY. A policy ceiling on a caller's deliberate choice is
-// deriveKeyPlain's business, and it declines them for a reason that is sound: an
-// untrusted-input bound applied to a caller's own decision rejects it with an
-// error shaped like a malformed header. That argument is about what is WISE.
-// This is about what the call can HOLD -- above MaxUint32 the conversion does
-// not reject a value, it changes one.
-//
-// # Why a helper rather than a checked conversion at each site
-//
-// Four conversions shared ONE BLANKET G115 SUPPRESSION. Round one justified
-// one of them;
-// round two justified all four; round three found that the fourth
-// justification was FALSE -- keySize was said to exhaust memory before it could
-// truncate, and it does not. MEASURED: a request for 4294967300 bytes returns
-// a FOUR BYTE KEY and no error, because the truncation happens before argon2
-// allocates anything.
-//
-// Each round produced a better justification for a suppression that should not
-// exist. The helper makes the unchecked conversion unwritable instead: the
-// compiler forces every call site to handle the error, so the enumeration is
-// ENFORCED rather than described, and there is no suppression left to get right.
-//
-// The directive is not written out anywhere in this comment on purpose: gosec
-// acts on that text wherever it appears in one, so quoting it here would
-// suppress the very findings this helper exists to surface. Same defect as a
-// guard that flags a pattern quoted in its own documentation.
-func u32(op, field string, v int) (uint32, error) {
-	if v < 0 {
-		return 0, &CryptoError{Op: op, Err: fmt.Errorf(
-			"%s must not be negative (got %d); the conversion below would turn it into a very large one",
-			field, v)}
-	}
-	if uint64(v) > math.MaxUint32 {
-		return 0, &CryptoError{Op: op, Err: fmt.Errorf(
-			"%s %d exceeds what the argon2 interface can represent (uint32); the conversion would "+
-				"silently truncate it rather than fail", field, v)}
-	}
-	return uint32(v), nil
-}
-
-// deriveArgon2 is the ONE implementation behind both Argon2 variants.
-//
-// It exists because the two derivations were 63 lines that differed on exactly
-// TWO: the name in their error messages, and `argon2.Key` versus
-// `argon2.IDKey`. Everything else -- the three nil checks, the parallelism
-// bound, the round-count bound, the memory floor and its reasoning, the three
-// checked uint32 conversions -- was duplicated verbatim, including an
-// eighteen-line comment. Duplication of a VALIDATION sequence is the dangerous
-// kind: a bound added to one copy and not the other is invisible, and the
-// memory floor below is itself a bound that was missing from a copy for
-// exactly that reason.
-//
-// `keyFn` is the variant. `argon2.Key` and `argon2.IDKey` share a signature
-// exactly, so no adapter is needed and no behavior is reinterpreted here.
-//
-// `op` is lower case because it is the CryptoError.Op vocabulary the rest of
-// this file uses; `name` is the human spelling that appears in the
-// missing-parameter message, kept distinct so neither message changes.
-func deriveArgon2(
-	op, name string,
-	keyFn func(password, salt []byte, time, memory uint32, threads uint8, keyLen uint32) []byte,
-	passphrase, salt []byte, kdf *KDF, keySize int,
-) ([]byte, error) {
-	if kdf.Time == nil || kdf.Memory == nil || kdf.CPUs == nil {
-		return nil, fmt.Errorf("%s requires time, memory, and cpus parameters", name)
-	}
-
-	// Validate CPUs fits in uint8 (Argon2 parallelism is 1-255)
-	cpus := *kdf.CPUs
-	if cpus < 1 || cpus > 255 {
-		return nil, &CryptoError{Op: op, Err: fmt.Errorf("cpus must be between 1 and 255")}
-	}
-
-	// And the round count, which x/crypto/argon2 PANICS on rather than
-	// refusing: "argon2: number of rounds too small" for time < 1. The cpus
-	// bound directly above was checked and this one was not, which is what made
-	// the omission easy to miss -- both are panics in the same function, from
-	// the same header fields, three lines apart.
-	if *kdf.Time < 1 {
-		return nil, &CryptoError{Op: op, Err: fmt.Errorf("time cost must be at least 1")}
-	}
-
-	// AND THE MEMORY COST, which was the third field and the one still
-	// unchecked. Time and CPUs were bounded here; Memory was not, and it is the
-	// one whose failure is silent rather than a panic: these are signed ints
-	// out of JSON and the call below converts with uint32, so -1 becomes
-	// 4294967295 KiB and argon2 is asked for a FOUR TERABYTE matrix. Not an
-	// error -- an allocation.
-	//
-	// minArgon2Memory is validateKDFCost's own constant rather than a second
-	// copy, because two spellings of one bound drift. Only the floor is
-	// enforced here, matching the Time check directly above: the ceiling is the
-	// read path's job, and applying it here could refuse a foreign volume that
-	// currently unlocks.
-	if *kdf.Memory < minArgon2Memory {
-		return nil, &CryptoError{Op: op, Err: fmt.Errorf(
-			"memory cost %d is below the %d KiB floor; a negative value becomes ~4 TiB after the uint32 conversion",
-			*kdf.Memory, minArgon2Memory)}
-	}
-
-	// A representation limit, NOT the policy ceiling this file deliberately
-	// declines (see deriveKeyPlain: an untrusted-input ceiling applied to a
-	// caller's own deliberate choice rejects it with an error shaped like a
-	// malformed header). Above MaxUint32 the conversion below does not reject
-	// the value, it SILENTLY CHANGES it -- 2^32+4 becomes 4 -- so the guard is
-	// about what the call can represent rather than about what is a sensible
-	// cost.
-
-	t32, err := u32(op, "time cost", *kdf.Time)
-	if err != nil {
-		return nil, err
-	}
-	m32, err := u32(op, "memory cost", *kdf.Memory)
-	if err != nil {
-		return nil, err
-	}
-	k32, err := u32(op, "key length", keySize)
-	if err != nil {
-		return nil, err
-	}
-
-	// cpus is the one conversion still written inline: it is bounded 1..255
-	// directly above, which is narrower than uint8 itself, so there is nothing
-	// for a checked conversion to add.
-	return keyFn(passphrase, salt, t32, m32, uint8(cpus), k32), nil
+	return kdf.HashOutputLen(fipsMode(), hashAlgo)
 }
 
 // deriveArgon2i derives a key using Argon2i.
-func deriveArgon2i(passphrase, salt []byte, kdf *KDF, keySize int) ([]byte, error) {
-	return deriveArgon2("argon2i", "Argon2i", argon2.Key, passphrase, salt, kdf, keySize)
+func deriveArgon2i(passphrase, salt []byte, k *KDF, keySize int) ([]byte, error) {
+	return kdf.DeriveArgon2i(passphrase, salt, toKDFParams(k), keySize)
 }
 
 // deriveArgon2id derives a key using Argon2id.
-func deriveArgon2id(passphrase, salt []byte, kdf *KDF, keySize int) ([]byte, error) {
-	return deriveArgon2("argon2id", "Argon2id", argon2.IDKey, passphrase, salt, kdf, keySize)
+func deriveArgon2id(passphrase, salt []byte, k *KDF, keySize int) ([]byte, error) {
+	return kdf.DeriveArgon2id(passphrase, salt, toKDFParams(k), keySize)
 }
 
 // PBKDF2 iteration calibration.
@@ -604,7 +342,7 @@ func deriveArgon2id(passphrase, salt []byte, kdf *KDF, keySize int) ([]byte, err
 const (
 	// pbkdf2ProbeStart is where the doubling begins -- the count the old
 	// implementation used as its entire measurement.
-	pbkdf2ProbeStart = 1000
+	pbkdf2ProbeStart = kdf.ProbeStart
 
 	// pbkdf2ProbeFloor is how long a probe must run before its measurement is
 	// trusted.
@@ -615,20 +353,20 @@ const (
 	// percent error while a 1ms probe would be wrong by half. Calibration
 	// therefore costs at most two floors' worth of work -- roughly 100ms, once
 	// per format -- against a default budget of 2000ms of derivation.
-	pbkdf2ProbeFloor = 50 * time.Millisecond
+	pbkdf2ProbeFloor = kdf.ProbeFloor
 
 	// pbkdf2ProbeCeiling bounds the doubling so that a clock which never
 	// advances FAILS instead of looping forever. Reaching it means over sixteen
 	// million iterations completed inside 50ms, roughly a hundred times faster
 	// than current hardware: the clock is broken, not the CPU fast.
-	pbkdf2ProbeCeiling = 1 << 24
+	pbkdf2ProbeCeiling = kdf.ProbeCeiling
 
 	// maxPBKDF2IterTimeMs bounds the requested budget. Ten minutes is already
 	// far past any iteration time anyone means, and the bound is what keeps
 	// time.Duration arithmetic on the request from overflowing into a negative
 	// duration -- which would silently return the floor instead of the very
 	// large count that was asked for.
-	maxPBKDF2IterTimeMs = 600_000
+	maxPBKDF2IterTimeMs = kdf.MaxPBKDF2IterTimeMs
 
 	// minPBKDF2Iterations is the absolute floor for a keyslot this package
 	// WRITES: cryptsetup's own minimum, and the smallest count any LUKS
@@ -638,11 +376,11 @@ const (
 	// and governs what this package will READ out of a header someone else
 	// wrote. Being liberal about a header we did not create and strict about one
 	// we are creating are different decisions.
-	minPBKDF2Iterations = 1000
+	minPBKDF2Iterations = kdf.MinPBKDF2Iterations
 
 	// pbkdf2ReferenceTargetMs is the budget the recommended minima below are
 	// stated against, and is this library's own default (see createPBKDF2KDF).
-	pbkdf2ReferenceTargetMs = 2000
+	pbkdf2ReferenceTargetMs = kdf.PBKDF2ReferenceTargetMs
 )
 
 // pbkdf2RecommendedIterations is OWASP's recommended PBKDF2 iteration count per
@@ -661,23 +399,7 @@ const (
 // recommendation whatever it is formatted on. On current hardware the
 // calibrated count at 2000ms is several million and this floor never binds; it
 // binds on hardware about ten times slower, which is exactly where it should.
-var pbkdf2RecommendedIterations = map[string]int{
-	"sha1":   1_300_000,
-	"sha256": 600_000,
-	"sha384": 210_000,
-	"sha512": 210_000,
-}
-
-var (
-	// errCalibrationTargetInvalid is the cause reported when the requested
-	// iteration time is not a usable number of milliseconds. The rejected value
-	// itself is carried on the KDFCalibrationError.
-	errCalibrationTargetInvalid = errors.New("the iteration-time target must be positive and within the supported range")
-
-	// errCalibrationImmeasurable is the cause reported when no probe up to the
-	// ceiling ran long enough to be timed.
-	errCalibrationImmeasurable = errors.New("no probe ran long enough to be timed; the clock is not advancing")
-)
+var pbkdf2RecommendedIterations = kdf.PBKDF2RecommendedIterations
 
 // BenchmarkPBKDF2 returns the number of PBKDF2 iterations that costs
 // approximately targetMs milliseconds on this machine, for the given hash and
@@ -696,12 +418,7 @@ var (
 // Supported hash algorithms: sha256, sha384, sha512 and, outside FIPS 140-3
 // mode, sha1.
 func BenchmarkPBKDF2(hashAlgo string, keySize, targetMs int) (int, error) {
-	hashFunc, err := getPBKDF2HashFunc(hashAlgo)
-	if err != nil {
-		return 0, err
-	}
-
-	return calibratePBKDF2(hashFunc, hashAlgo, keySize, targetMs, pbkdf2ProbeFloor, pbkdf2ProbeCeiling, wallClockPBKDF2)
+	return kdfDeriver().Calibrate(hashAlgo, keySize, targetMs)
 }
 
 // pbkdf2Timer runs one PBKDF2 derivation of the given iteration count and
@@ -711,7 +428,7 @@ func BenchmarkPBKDF2(hashAlgo string, keySize, targetMs int) (int, error) {
 // a known rate: with a real clock the measured rate depends on whatever else
 // the machine is doing, and a test asserting on it fails under host load for a
 // reason that has nothing to do with the code (#233).
-type pbkdf2Timer func(hashFunc func() hash.Hash, iterations, keySize int) (time.Duration, error)
+type pbkdf2Timer = kdf.Timer
 
 // wallClockPBKDF2 is the timer the package calibrates with: the real
 // derivation, timed on the wall clock.
@@ -720,81 +437,20 @@ type pbkdf2Timer func(hashFunc func() hash.Hash, iterations, keySize int) (time.
 // cost depends on the iteration count, the hash and the output length, not on
 // their contents, and nothing derived here is returned, stored, or compared
 // against anything.
-func wallClockPBKDF2(hashFunc func() hash.Hash, iterations, keySize int) (time.Duration, error) {
-	const calibrationPassphrase = "calibration"
-	calibrationSalt := make([]byte, 32)
-
-	start := time.Now()
-	if _, err := pbkdf2.Key(hashFunc, calibrationPassphrase, calibrationSalt, iterations, keySize); err != nil {
-		return 0, &CryptoError{Op: "pbkdf2 benchmark", Err: err}
-	}
-	return time.Since(start), nil
-}
+var wallClockPBKDF2 = kdf.WallClockPBKDF2
 
 // calibratePBKDF2 is the calibration itself. The probe bounds and the timer
 // are parameters so that the fail-closed path and the extrapolation can be
 // exercised by a test without needing a broken or an idle clock;
 // BenchmarkPBKDF2 supplies the real ones.
 func calibratePBKDF2(hashFunc func() hash.Hash, hashAlgo string, keySize, targetMs int, probeFloor time.Duration, probeCeiling int, timer pbkdf2Timer) (int, error) {
-	if targetMs <= 0 || targetMs > maxPBKDF2IterTimeMs {
-		return 0, &KDFCalibrationError{
-			Hash:     hashAlgo,
-			TargetMs: targetMs,
-			Err:      errCalibrationTargetInvalid,
-		}
-	}
-
-	for probe := pbkdf2ProbeStart; ; probe *= 2 {
-		elapsed, err := timer(hashFunc, probe, keySize)
-		if err != nil {
-			return 0, err
-		}
-
-		// Compared as a Duration, never as elapsed.Milliseconds(). Truncating a
-		// sub-millisecond measurement to an integer is what made the original
-		// extrapolation unreachable; truncating a 1ms one is what made it wrong
-		// by up to 3x on the occasions it was reached.
-		if elapsed >= probeFloor {
-			return scalePBKDF2Iterations(hashAlgo, probe, elapsed, targetMs), nil
-		}
-
-		// Checked after the probe rather than before, so the ceiling bounds the
-		// largest probe actually RUN. Doubling past it would double the work
-		// again for a measurement that has already failed to be timeable.
-		if probe > probeCeiling/2 {
-			return 0, &KDFCalibrationError{
-				Hash:     hashAlgo,
-				TargetMs: targetMs,
-				Probe:    probe,
-				Elapsed:  elapsed,
-				Err:      errCalibrationImmeasurable,
-			}
-		}
-	}
+	return kdf.CalibratePBKDF2(hashFunc, hashAlgo, keySize, targetMs, probeFloor, probeCeiling, timer)
 }
 
 // scalePBKDF2Iterations extrapolates a timed probe to the requested budget and
 // clamps the result into the range this package is willing to write.
 func scalePBKDF2Iterations(hashAlgo string, probe int, elapsed time.Duration, targetMs int) int {
-	perIteration := elapsed.Seconds() / float64(probe)
-	scaled := (time.Duration(targetMs) * time.Millisecond).Seconds() / perIteration
-
-	// Floor first, ceiling second: a budget large enough to push the floor past
-	// the ceiling must land on the ceiling, not above it.
-	if floor := pbkdf2IterationFloor(hashAlgo, targetMs); scaled < floor {
-		scaled = floor
-	}
-
-	// maxKDFIterations is the ceiling validateKDFCost applies when the header is
-	// read back, so exceeding it here would write a keyslot this package would
-	// then refuse to open. Clamping is also what keeps the conversion below
-	// defined -- Go leaves an out-of-range float-to-int conversion
-	// implementation-specific.
-	if scaled > maxKDFIterations {
-		scaled = maxKDFIterations
-	}
-
-	return int(scaled)
+	return kdf.ScalePBKDF2Iterations(hashAlgo, probe, elapsed, targetMs)
 }
 
 // pbkdf2IterationFloor returns the smallest iteration count this package will
@@ -805,17 +461,7 @@ func scalePBKDF2Iterations(hashAlgo string, probe int, elapsed time.Duration, ta
 // unrounded extrapolation, and rounding twice would be the sort of small
 // discrepancy that makes a floor look off by one for no reason.
 func pbkdf2IterationFloor(hashAlgo string, targetMs int) float64 {
-	floor := float64(minPBKDF2Iterations)
-
-	recommended, ok := pbkdf2RecommendedIterations[strings.ToLower(hashAlgo)]
-	if !ok {
-		return floor
-	}
-
-	if scaled := float64(recommended) * float64(targetMs) / pbkdf2ReferenceTargetMs; scaled > floor {
-		return scaled
-	}
-	return floor
+	return kdf.PBKDF2IterationFloor(hashAlgo, targetMs)
 }
 
 // keyslotCostPolicy says which PBKDF2 floor applies to a keyslot being created,
@@ -832,7 +478,7 @@ func pbkdf2IterationFloor(hashAlgo string, targetMs int) float64 {
 //
 // It makes no difference at all for a credential THIS LIBRARY GENERATED. A
 // recovery key or an enrolled provider key is 256 bits straight from
-// randomSecret; there is no candidate list, so there is no search, so there is
+// custody.Random; there is no candidate list, so there is no search, so there is
 // nothing for the multiplier to multiply. Stretching it defends against no
 // attack that exists, while the floor makes systemd's own parameters
 // unwritable: systemd enrolls pbkdf2/sha512/1000, and the sha512 floor is
@@ -870,7 +516,7 @@ const (
 	callerSuppliedCredential keyslotCostPolicy = iota
 
 	// libraryGeneratedCredential relaxes the hash-dependent floor to
-	// minPBKDF2Iterations for a credential this package drew from randomSecret.
+	// minPBKDF2Iterations for a credential this package drew from custody.Random.
 	// Only a caller that generated the bytes it is enrolling may select it.
 	// AddRecoveryKey is that caller and currently the only one; enrolling an
 	// external provider's secret has the same shape and is expected to join it,
@@ -991,7 +637,7 @@ func createKDF(opts FormatOptions, keySize int, policy keyslotCostPolicy) (*KDF,
 	// FIPS mode (DefaultKDFType), so what this refuses there is an Argon2 KDF
 	// the caller asked for -- by name, or by supplying an Argon2 cost; see
 	// docs/FIPS.md.
-	if err := requireFIPSApprovedKDF(kdfType); err != nil {
+	if err := fipsMode().RequireKDF(kdfType); err != nil {
 		return nil, err
 	}
 
@@ -1012,7 +658,7 @@ func createKDF(opts FormatOptions, keySize int, policy keyslotCostPolicy) (*KDF,
 	case KDFTypeArgon2i, KDFTypeArgon2id:
 		return createArgon2KDF(kdfType, opts, saltB64)
 	default:
-		return nil, &detailError{Kind: ErrUnsupportedKDF, Detail: kdfType + " (supported: pbkdf2, pbkdf2-sha256, pbkdf2-sha384, pbkdf2-sha512, argon2i, argon2id)"}
+		return nil, &errs.Error{Kind: ErrUnsupportedKDF, Detail: kdfType + " (supported: pbkdf2, pbkdf2-sha256, pbkdf2-sha384, pbkdf2-sha512, argon2i, argon2id)"}
 	}
 }
 
@@ -1023,11 +669,11 @@ func createKDF(opts FormatOptions, keySize int, policy keyslotCostPolicy) (*KDF,
 // existing PBKDF2-SHA1 keyslots and digests open outside FIPS mode (#239).
 func refuseSHA1ForCreation(kdfType, hashAlgo string) error {
 	if normalizeKDFType(kdfType) == KDFTypePBKDF2SHA1 {
-		return &detailError{Kind: ErrSHA1NotWritten, Err: ErrUnsupportedKDF,
+		return &errs.Error{Kind: ErrSHA1NotWritten, Err: ErrUnsupportedKDF,
 			Detail: "pbkdf2-sha1: new keyslots use pbkdf2 with sha256, sha384 or sha512, or argon2"}
 	}
 	if strings.EqualFold(strings.TrimSpace(hashAlgo), "sha1") {
-		return &detailError{Kind: ErrSHA1NotWritten, Err: ErrUnsupportedHash,
+		return &errs.Error{Kind: ErrSHA1NotWritten, Err: ErrUnsupportedHash,
 			Detail: "sha1: new keyslots and digests use sha256, sha384 or sha512"}
 	}
 	return nil
@@ -1145,7 +791,7 @@ func createArgon2KDF(kdfType string, opts FormatOptions, saltB64 string) (*KDF, 
 	// keyslot this package then refuses to open. Consumed rather than
 	// restated, for the reason the screen gives.
 	if err := validateKDFCost(kdf); err != nil {
-		return nil, &detailError{Detail: "refusing to write an Argon2 keyslot the read path would refuse", Err: err}
+		return nil, &errs.Error{Detail: "refusing to write an Argon2 keyslot the read path would refuse", Err: err}
 	}
 	return kdf, nil
 }

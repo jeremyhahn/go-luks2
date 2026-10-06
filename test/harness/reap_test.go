@@ -1095,12 +1095,12 @@ func TestReapersSerializeSoALockedLedgerAlwaysMeansALiveSuite(t *testing.T) {
 	waiting := make(chan struct{})
 	proceed := make(chan struct{})
 	var once sync.Once
-	clk.onSleep = func(time.Time) {
+	clk.OnWait(func(time.Time) {
 		once.Do(func() {
 			close(waiting)
 			<-proceed
 		})
-	}
+	})
 
 	done := make(chan error, 1)
 	go func() {
@@ -1158,7 +1158,7 @@ func TestReapTimesOutRatherThanRunningOnAnUnknownHost(t *testing.T) {
 	if err == nil {
 		t.Fatal("Reap reported success without ever taking the host reaper mutex")
 	}
-	if waited := clk.elapsed(); waited <= reaperLockTimeoutForTest || waited > reaperLockTimeoutForTest+reaperLockPoll {
+	if waited := clk.Elapsed(); waited <= reaperLockTimeoutForTest || waited > reaperLockTimeoutForTest+reaperLockPoll {
 		t.Fatalf("gave up after %s, want just past the %s bound", waited, reaperLockTimeoutForTest)
 	}
 	if !errors.Is(err, ErrReapIncomplete) {
@@ -1268,7 +1268,7 @@ func TestReapWaitsForADetachToBecomeObservable(t *testing.T) {
 		t.Fatalf("Reap: %v -- a detach that had not yet settled was reported as a failure", err)
 	}
 	// It waited for the two further queries and no longer: two polls.
-	if waited := clk.elapsed(); waited != 2*detachSettlePoll {
+	if waited := clk.Elapsed(); waited != 2*detachSettlePoll {
 		t.Fatalf("waited %s for a release two queries away, want %s", waited, 2*detachSettlePoll)
 	}
 }
@@ -1287,7 +1287,7 @@ func TestReapStillFailsOnADeviceThatNeverGoesAway(t *testing.T) {
 	clk := useFakeClock(t)
 
 	report, err := Reap(dir, "next-run", rm, io.Discard)
-	if waited := clk.elapsed(); waited <= detachSettleTimeout || waited > detachSettleTimeout+detachSettlePoll {
+	if waited := clk.Elapsed(); waited <= detachSettleTimeout || waited > detachSettleTimeout+detachSettlePoll {
 		t.Fatalf("gave up after %s, want just past the %s bound", waited, detachSettleTimeout)
 	}
 	if !errors.Is(err, ErrReapIncomplete) {

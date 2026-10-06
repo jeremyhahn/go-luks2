@@ -5,16 +5,12 @@
 package luks2
 
 import (
-	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
-	"io"
 	"os"
-	"runtime"
 
-	"golang.org/x/sys/unix"
+	keyringpkg "github.com/jeremyhahn/go-luks2/internal/keyring"
+	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
 // The volume key reaches dm-crypt through the KERNEL KEYRING, not through the
@@ -52,7 +48,7 @@ import (
 //
 // # Why the "logon" key type
 //
-// A logon key's payload is WRITE-ONLY from userspace: KEYCTL_READ returns
+// A logon key's payload is WRITE-ONLY from userspace (KEYCTL_READ returns
 // EOPNOTSUPP for it, unlike a "user" key whose payload any possessor can read
 // back. So once the bytes cross into the kernel they cannot be retrieved by
 // this process, by another process of the same user, or by root. That is a
@@ -94,7 +90,7 @@ import (
 //
 // The pinned thread is then THROWN AWAY rather than unpinned, because the same
 // commit_creds that makes the pin necessary may have installed a session
-// keyring on it alone; see runOnDiscardedThread.
+// keyring on it alone; see internal/keyring.RunOnDiscardedThread.
 //
 // # Lifetime: the activation call, and not one instant longer
 //
@@ -128,12 +124,12 @@ import (
 //     process -- or an entry planted by another process of the same uid, which
 //     the session keyring does not prevent -- would be silently overwritten or
 //     silently adopted. The description is deterministic per volume (see
-//     keyringDescription) and the ring is SEARCHED before anything is added:
-//     an entry that is already there is an anomaly and fails the unlock with
-//     ErrKeyringEntryExists.
+//     internal/keyring.Description) and the ring is SEARCHED before anything is
+//     added: an entry that is already there is an anomaly and fails the unlock
+//     with ErrKeyringEntryExists.
 //  2. A release that did not take. Trusting the revoke and unlink return values
 //     would leave the volume key in the kernel keyring whenever the kernel said
-//     one thing and did another. release VERIFIES absence by searching again,
+//     one thing and did another. Release VERIFIES absence by searching again,
 //     and reports ErrKeyringKeyNotReleased when the key is still resolvable or
 //     when its absence cannot be confirmed.
 //     The search and the add are not atomic, and that is a KNOWN, accepted
@@ -150,243 +146,64 @@ import (
 //     that would notice -- turning a config error into an outage in the middle
 //     of service. CheckKeyringAvailable is the preflight that moves it to
 //     startup.
+//
+// The syscall mechanism, the keyring entry type and the add/release/classify
+// logic live in internal/keyring (#265, H7); this file keeps the seam pkg/luks2
+// tests substitute and the entry points that need the custody/FIPS seams
+// internal/keyring cannot import.
 
+// keyringKeyType and keyringDescriptionPrefix mirror internal/keyring's
+// constants, kept under their original names so this package's own tests and
+// messages do not have to spell out the qualified name.
 const (
-	// keyringKeyType is the kernel key type the volume key is stored under.
-	// See above for why it is "logon" and not "user".
-	keyringKeyType = "logon"
-
-	// keyringDescriptionPrefix is the "subsystem" qualifier the kernel's
-	// logon_vet_description REQUIRES: a logon key description must contain a
-	// colon that is not its first character. A description without one is
-	// rejected with EINVAL, which is why this is a constant rather than
-	// something a caller could omit.
-	keyringDescriptionPrefix = "luks2"
+	keyringKeyType           = keyringpkg.KeyType
+	keyringDescriptionPrefix = keyringpkg.DescriptionPrefix
 )
 
-// kernelKeyring is the seam between this package and the kernel's key
-// management syscalls, in the same shape and for the same reason as the
-// deviceMapper seam in devicemapper.go: the failures that matter here -- a
-// seccomp profile denying the syscalls, a release that does not take, a
-// pre-existing entry -- cannot all be produced for real in a test. The happy
-// path IS exercised against the real kernel (these syscalls work unprivileged
-// for logon keys), so the seam exists for the refusals.
-type kernelKeyring struct {
-	sessionRing func() (int, error)
-	add         func(keyType, description string, payload []byte, ringID int) (int, error)
-	search      func(ringID int, keyType, description string) (int, error)
-	revoke      func(keyID int) error
-	unlink      func(keyID, ringID int) error
-}
-
-// keyring is the live kernel keyring, a package-level value for the same
-// reason dm is: every consumer wants the real kernel and only the tests want
-// anything else.
-var keyring = liveKeyring()
-
-// liveKeyring returns the real implementation.
-//
-// unix.AddKey passes &payload[0] straight to the add_key syscall without
-// copying, which is what makes it safe to hand it a slice borrowed from an
-// enclave: the bytes go from locked memory into the kernel with nothing in
-// between. Adding a keyring hop that staged the key on the heap first would
-// defeat the entire point of this change.
-func liveKeyring() kernelKeyring {
-	return kernelKeyring{
-		sessionRing: func() (int, error) {
-			// create=true. See the file comment: without it, a task with no
-			// session keyring gets the uid-shared one installed instead of a
-			// fresh anonymous one.
-			return unix.KeyctlGetKeyringID(unix.KEY_SPEC_SESSION_KEYRING, true)
-		},
-		add: unix.AddKey,
-		search: func(ringID int, keyType, description string) (int, error) {
-			return unix.KeyctlSearch(ringID, keyType, description, 0)
-		},
-		revoke: func(keyID int) error {
-			_, err := unix.KeyctlInt(unix.KEYCTL_REVOKE, keyID, 0, 0, 0)
-			return err
-		},
-		unlink: func(keyID, ringID int) error {
-			_, err := unix.KeyctlInt(unix.KEYCTL_UNLINK, keyID, ringID, 0, 0)
-			return err
-		},
-	}
-}
+// keyring is the live kernel keyring syscalls, a package-level value for the
+// same reason dm is: every consumer wants the real kernel and only the tests
+// want anything else.
+var keyring = keyringpkg.Live()
 
 // keyringVolumeKey is a live keyring entry holding a volume key, and the
-// dm-crypt reference that names it.
+// dm-crypt reference that names it. It wraps internal/keyring.VolumeKey so
+// this package's existing method names (release, tableKeyID) and callers need
+// no change.
 type keyringVolumeKey struct {
-	id          int
-	ring        int
-	description string
-	keySize     int
+	keyringpkg.VolumeKey
 }
 
 // tableKeyID returns the dm-crypt key_string for this entry -- the value that
 // goes in CryptTable.KeyID instead of the key itself.
-//
-// The size is in BYTES and the kernel CHECKS it: crypt_ctr parses it out of the
-// reference and crypt_set_keyring_key refuses the load with EINVAL if the
-// keyring payload is a different length. It is therefore taken from the
-// borrowed slice rather than from anything the header claims.
 func (k *keyringVolumeKey) tableKeyID() string {
-	return fmt.Sprintf(":%d:%s:%s", k.keySize, keyringKeyType, k.description)
+	return k.TableKeyID()
 }
 
 // release revokes the entry, unlinks it, and then VERIFIES that it is gone.
-//
-// The verification is the point. Revoking runs the key type's revoke method
-// immediately, which for a logon key frees the payload through kfree_sensitive
-// -- so the bytes are zeroed at once rather than whenever the last reference
-// happens to be dropped -- and the unlink then removes the last link. But a
-// return value of nil from either is a claim, not evidence, and the thing being
-// claimed is that a volume master key is no longer in kernel memory. So the
-// ring is searched again and the answer has to be "not there".
-//
-// A key that was ALREADY gone, or already revoked, is not a failure: ENOKEY and
-// ENOENT mean the entry no longer exists, and EKEYREVOKED means its payload has
-// already been freed. All three are the outcome this call wanted.
-//
-// Anything else -- the key still resolving, or a search that cannot say --
-// means the volume key may still be sitting in the kernel keyring, and that is
-// reported rather than swallowed. Unconfirmed is treated as still-present, the
-// same conservative direction removeCreatedMapping takes for a plaintext
-// mapping it cannot inspect.
+// See internal/keyring.VolumeKey.Release.
 func (k *keyringVolumeKey) release() error {
-	revokeErr := ignoreAbsentKey(keyring.revoke(k.id))
-	unlinkErr := ignoreAbsentKey(keyring.unlink(k.id, k.ring))
-
-	joined := errors.Join(revokeErr, unlinkErr, k.verifyGone())
-	if joined == nil {
-		return nil
-	}
-
-	// The cause is classified here too, not only on the way in. This is the
-	// path that reports A MASTER KEY MAY STILL BE RESIDENT, so it is the last
-	// place that should hand an operator a bare errno: whatever refused a
-	// revoke on a key this process just created is the same kind of condition
-	// -- a policy, a quota, a kernel -- that refuses an add, and it deserves
-	// the same remedy.
-	return fmt.Errorf("%w: the volume key may still be present in the kernel keyring as %s %q; inspect it with `keyctl show %d` and remove it with `keyctl unlink %d %d`: %w. %s",
-		ErrKeyringKeyNotReleased, keyringKeyType, k.description, k.ring, k.id, k.ring,
-		joined, keyringRemedy(classifyKeyringErrno(joined)))
-}
-
-// verifyGone reports an error unless the kernel confirms the entry is no longer
-// resolvable. See release for why a successful unlink is not accepted as proof.
-func (k *keyringVolumeKey) verifyGone() error {
-	id, err := keyring.search(k.ring, keyringKeyType, k.description)
-	switch {
-	case err == nil:
-		return fmt.Errorf("the entry is still resolvable as key %d after being revoked and unlinked", id)
-	case isAbsentKey(err):
-		return nil
-	default:
-		return fmt.Errorf("the keyring could not be searched to confirm the entry is gone: %w", err)
-	}
-}
-
-// ignoreAbsentKey maps "the key is not there" onto success and passes
-// everything else through. See release.
-func ignoreAbsentKey(err error) error {
-	if err == nil || isAbsentKey(err) || errors.Is(err, unix.EKEYREVOKED) {
-		return nil
-	}
-	return err
-}
-
-// isAbsentKey reports whether err is the kernel saying no such key, as opposed
-// to any other reason a lookup can fail. The distinction decides whether a
-// volume key is reported as possibly-still-present, so it is drawn on the errno
-// rather than on message text.
-func isAbsentKey(err error) bool {
-	return errors.Is(err, unix.ENOKEY) || errors.Is(err, unix.ENOENT)
+	return k.Release(keyring)
 }
 
 // addVolumeKeyToKeyring places key in the kernel keyring under a description
 // that identifies this volume and mapping, and returns the handle that names
-// it.
+// it. See internal/keyring.AddVolumeKey.
 //
 // key is a slice BORROWED from an enclave for the duration of this call. It is
-// handed to add_key and to nothing else: no copy, no staging buffer, no string.
-// The caller must release the returned entry.
-//
-// An entry that already exists under this description FAILS the operation. See
-// the file comment: add_key would otherwise update it in place, so overwriting
-// somebody else's key material or adopting a stale entry would both be silent.
+// handed to add_key and to nothing else: no copy, no staging buffer, no
+// string. The caller must release the returned entry.
 func addVolumeKeyToKeyring(dmUUID string, key []byte) (*keyringVolumeKey, error) {
-	ring, err := keyring.sessionRing()
+	vk, err := keyringpkg.AddVolumeKey(keyring, dmUUID, key)
 	if err != nil {
-		return nil, keyringFailure("resolve the session keyring", err)
+		return nil, err
 	}
-
-	description := keyringDescription(dmUUID)
-
-	switch id, searchErr := keyring.search(ring, keyringKeyType, description); {
-	case searchErr == nil:
-		return nil, fmt.Errorf("%w: %s key %q (the digest of device-mapper UUID %q) is already present as key %d, so this unlock would silently overwrite or adopt key material it did not create; a leftover from a crashed process can be removed with `keyctl unlink %d %d`",
-			ErrKeyringEntryExists, keyringKeyType, description, dmUUID, id, id, ring)
-	case isAbsentKey(searchErr):
-		// The expected case: nothing is there.
-	default:
-		return nil, keyringFailure("search the session keyring", searchErr)
-	}
-
-	id, err := keyring.add(keyringKeyType, description, key, ring)
-	if err != nil {
-		return nil, keyringFailure("add the volume key to the session keyring", err)
-	}
-
-	return &keyringVolumeKey{
-		id:          id,
-		ring:        ring,
-		description: description,
-		keySize:     len(key),
-	}, nil
+	return &keyringVolumeKey{VolumeKey: *vk}, nil
 }
 
-// keyringDescription builds the key description for a mapping: the subsystem
-// qualifier the kernel requires, and a SHA-256 digest of the volume's dm UUID.
-//
-// # Why a digest and not the UUID itself
-//
-// The description ends up inside CryptTable.KeyID, and devmapper.go joins the
-// target specification with strings.Join(args, " ") -- so the reference is ONE
-// SPACE-DELIMITED TOKEN in a positional grammar the kernel parses as
-// `<cipher> <key> <iv_offset> <device> <start>`. A space, a newline or a NUL
-// anywhere in that token shifts every field after it.
-//
-// The dm UUID is built from the LUKS2 header's uuid field -- 40 bytes read
-// straight off the device, whose charset the header reader does not constrain
-// and whose checksum a hostile header author also controls -- and from the
-// caller's mapping name. Before #78 those bytes only reached the fixed-width
-// DmIoctl name and uuid fields, which are not grammar-parsed. Making them
-// reach a parsed grammar is what created the exposure, so it is closed HERE.
-//
-// Hashing closes it BY CONSTRUCTION rather than by validation: the output is 64
-// characters of [0-9a-f] whatever the input was, so there is no charset to get
-// wrong, no escaping to forget, and no "one character short" whitelist. It is
-// the same move as leaving CryptTable.Key unassigned instead of defaulting it
-// off -- the bad state is unrepresentable rather than merely avoided.
-// ValidateMappingName still bounds the name, because the name reaches
-// /dev/mapper and the dm UUID by other routes that no hash covers.
-//
-// Determinism is preserved, which is what the pre-add collision guard in
-// addVolumeKeyToKeyring depends on: the same volume and mapping always hash to
-// the same description, so a leftover entry is still detected. A random nonce
-// would have made collisions impossible and that guard vacuous.
-//
-// The digest is not a secret and is not derived from anything secret -- the
-// header UUID and the mapping name are both public, printed by `dmsetup info`.
-// It is used for its closed alphabet, not for any cryptographic property; the
-// entry it names is only meaningful for the duration of one ioctl.
-//
-// The cost is that `keyctl show` no longer names the volume, so the errors in
-// this file carry both the digest and the dm UUID it came from.
+// keyringDescription builds the key description for a mapping. See
+// internal/keyring.Description.
 func keyringDescription(dmUUID string) string {
-	digest := sha256.Sum256([]byte(dmUUID))
-	return keyringDescriptionPrefix + ":" + hex.EncodeToString(digest[:])
+	return keyringpkg.Description(dmUUID)
 }
 
 // CheckKeyringAvailable verifies that this process can actually place a volume
@@ -418,8 +235,8 @@ func CheckKeyringAvailable() error {
 	// descriptions are not: a preflight must not fail because a previous probe
 	// left something behind, and it must never collide with a real volume's
 	// entry.
-	nonce := make([]byte, 8)
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+	nonce, err := randomBytes(8)
+	if err != nil {
 		return keyringFailure("draw randomness for the keyring preflight", err)
 	}
 	probe := fmt.Sprintf("preflight-%d-%s", os.Getpid(), hex.EncodeToString(nonce))
@@ -427,18 +244,18 @@ func CheckKeyringAvailable() error {
 	// A throwaway value of the length a LUKS2 aes-xts-plain64 volume key has,
 	// so the preflight also exercises the size the real path uses against any
 	// payload-length limit the kernel imposes.
-	material, err := randomSecret("keyring preflight", 64)
+	material, err := custody.Random("keyring preflight", 64, cryptoRand)
 	if err != nil {
 		return err
 	}
-	defer releaseSecret(material)
+	defer custody.Release(material)
 
 	// On a discarded thread for the same reason unlockLoadTable is: the ring
 	// belongs to the task, so the add and the release have to happen on the
 	// same one, and resolving the ring may change that thread's credentials.
 	return runOnDiscardedThread(func() error {
 		var entry *keyringVolumeKey
-		if err := borrowSecret("keyring preflight", material, func(b []byte) error {
+		if err := secret.Borrow("keyring preflight", material, func(b []byte) error {
 			var addErr error
 			entry, addErr = addVolumeKeyToKeyring(probe, b)
 			return addErr
@@ -458,85 +275,18 @@ func CheckKeyringAvailable() error {
 // credentials the sequence may have changed back to the scheduler. Only the
 // tests use it, to search a ring that already exists.
 func pinToOSThread() func() {
-	runtime.LockOSThread()
-	return runtime.UnlockOSThread
+	return keyringpkg.PinOSThread()
 }
 
 // runOnDiscardedThread runs fn on a new goroutine locked to its OS thread, and
 // lets that thread EXIT with the goroutine instead of returning it to the
-// scheduler.
-//
-// # Why the thread is thrown away
-//
-// Keyrings belong to the TASK, and every Linux thread is a task with its own
-// credentials. Resolving the session keyring with create set -- which
-// addVolumeKeyToKeyring does, deliberately; see the file comment -- INSTALLS a
-// new session keyring when the task has none, through prepare_creds and
-// commit_creds, which change the calling thread and no other. A goroutine that
-// pinned, did that, and called UnlockOSThread returned a thread with diverged
-// credentials to the Go scheduler, and whatever goroutine ran there next
-// inherited a keyring the rest of the process does not have (#250, C9).
-//
-// The Go runtime terminates a thread whose goroutine exits while still locked
-// to it ("If the calling goroutine exits without unlocking the thread, the
-// thread will be terminated" -- runtime.LockOSThread). So the work runs on a
-// goroutine that locks and never unlocks, and the changed credentials die with
-// the thread. The cost is one thread creation per unlock.
-//
-// A panic in fn is carried back and re-raised on the caller's goroutine, so it
-// behaves as it would have inline instead of killing the process from a
-// goroutine nobody can recover.
+// scheduler. See internal/keyring.RunOnDiscardedThread.
 func runOnDiscardedThread(fn func() error) error {
-	type outcome struct {
-		err      error
-		panicked bool
-		value    any
-	}
-	done := make(chan outcome, 1)
-	go func() {
-		runtime.LockOSThread()
-		// Deliberately no runtime.UnlockOSThread: see above.
-		defer func() {
-			if r := recover(); r != nil {
-				done <- outcome{panicked: true, value: r}
-			}
-		}()
-		done <- outcome{err: fn()}
-	}()
-	result := <-done
-	if result.panicked {
-		panic(result.value)
-	}
-	return result.err
+	return keyringpkg.RunOnDiscardedThread(fn)
 }
 
 // keyringFailure classifies an errno from a keyring syscall and attaches the
-// remedy for that specific cause.
-//
-// The classification is not cosmetic. A blocked syscall, a kernel without key
-// support, an exhausted quota and a genuine kernel refusal are four different
-// problems with four different fixes, and a single "keyring unavailable" would
-// be technically true and operationally useless -- it would send an operator
-// looking at their kernel config when the answer is a seccomp profile.
+// remedy for that specific cause. See internal/keyring.Failure.
 func keyringFailure(op string, err error) error {
-	return &KeyringUnavailableError{Op: op, Kind: classifyKeyringErrno(err), Err: err}
-}
-
-// classifyKeyringErrno maps an errno onto the sentinel that names its cause.
-func classifyKeyringErrno(err error) error {
-	switch {
-	case errors.Is(err, unix.EPERM), errors.Is(err, unix.EACCES):
-		// MEASURED 2026-08-31 across container configurations: Docker's default
-		// seccomp profile denies add_key, keyctl and request_key, and
-		// --cap-add SYS_ADMIN does NOT lift it -- only relaxing seccomp does.
-		// EPERM here is therefore a policy refusal far more often than a
-		// permission one, which is why the remedy talks about seccomp first.
-		return ErrKeyringBlocked
-	case errors.Is(err, unix.ENOSYS):
-		return ErrKeyringUnsupported
-	case errors.Is(err, unix.EDQUOT), errors.Is(err, unix.EKEYREJECTED):
-		return ErrKeyringQuotaExhausted
-	default:
-		return ErrKeyringFailed
-	}
+	return keyringpkg.Failure(op, err)
 }

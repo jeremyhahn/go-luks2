@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/anatol/devmapper.go"
+	"github.com/jeremyhahn/go-luks2/internal/clock"
 	"golang.org/x/sys/unix"
 )
 
@@ -29,7 +30,7 @@ import (
 // None of them is parallel: they replace package seams.
 
 // withUnlockClock runs Unlock's lock wait on clk for the rest of the test.
-func withUnlockClock(t *testing.T, clk clock) {
+func withUnlockClock(t *testing.T, clk clock.Clock) {
 	t.Helper()
 	previous := unlockClock
 	t.Cleanup(func() { unlockClock = previous })
@@ -94,7 +95,7 @@ func TestUnlockWaitsForAWriterOfTheMetadata(t *testing.T) {
 			device, passphrase := unlockableVolume(t)
 			fake := newFakeDeviceMapper()
 			fake.install(t)
-			clk := newFakeClock(t)
+			clk := clock.NewFake(t)
 			withUnlockClock(t, clk)
 			reads := countHeaderReads(t, nil)
 
@@ -112,8 +113,8 @@ func TestUnlockWaitsForAWriterOfTheMetadata(t *testing.T) {
 			if *reads != 0 || len(fake.created) != 0 {
 				t.Fatalf("read the header %d times and created %v while a writer held %s", *reads, fake.created, writer)
 			}
-			if clk.elapsed() < metadataReadLockWait || timeout.Attempts < 2 {
-				t.Fatalf("gave up after %v and %d attempts; the %v budget was not spent", clk.elapsed(), timeout.Attempts, metadataReadLockWait)
+			if clk.Elapsed() < metadataReadLockWait || timeout.Attempts < 2 {
+				t.Fatalf("gave up after %v and %d attempts; the %v budget was not spent", clk.Elapsed(), timeout.Attempts, metadataReadLockWait)
 			}
 		})
 	}
@@ -125,18 +126,18 @@ func TestUnlockReadsOnceTheWriterIsDone(t *testing.T) {
 	device, passphrase := unlockableVolume(t)
 	fake := newFakeDeviceMapper()
 	fake.install(t)
-	clk := newFakeClock(t)
+	clk := clock.NewFake(t)
 	withUnlockClock(t, clk)
 
 	release := holdFlock(t, fakeLockFile(), unix.LOCK_EX)
 	writerDone := false
-	clk.onSleep = func(now time.Time) {
-		if now.Sub(clk.start) >= time.Second && !writerDone {
+	clk.OnWait(func(now time.Time) {
+		if now.Sub(clk.Start()) >= time.Second && !writerDone {
 			writerDone = true
 			_ = os.Remove(fakeLockFile()) // cryptsetup unlinks as it releases
 			release()
 		}
-	}
+	})
 	countHeaderReads(t, func() {
 		if !writerDone {
 			t.Error("the header was read while the writer still held the lock")
@@ -158,7 +159,7 @@ func TestUnlockDoesNotWaitForOtherReaders(t *testing.T) {
 	device, passphrase := unlockableVolume(t)
 	fake := newFakeDeviceMapper()
 	fake.install(t)
-	clk := newFakeClock(t)
+	clk := clock.NewFake(t)
 	withUnlockClock(t, clk)
 
 	holdFlock(t, fakeLockFile(), unix.LOCK_SH)
@@ -167,8 +168,8 @@ func TestUnlockDoesNotWaitForOtherReaders(t *testing.T) {
 	if err := Unlock(device, passphrase, "beside-a-reader"); err != nil {
 		t.Fatalf("Unlock beside another reader = %v", err)
 	}
-	if len(clk.slept) != 0 {
-		t.Fatalf("waited %v for a reader; readers share the lock", clk.slept)
+	if len(clk.Waits()) != 0 {
+		t.Fatalf("waited %v for a reader; readers share the lock", clk.Waits())
 	}
 }
 

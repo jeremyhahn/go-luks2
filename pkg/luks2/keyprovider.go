@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-luks2/internal/errs"
+	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
 // External key providers: credentials that come from something outside this
@@ -64,7 +66,7 @@ type KeyProvider interface {
 // The protocols here produce six short lines. 64 KiB is far above that and far
 // below the point where a locked allocation -- a process-wide rlimited
 // resource -- becomes a way for a misbehaving helper to fail every other
-// operation in flight. See the RLIMIT_MEMLOCK discussion on ProtectedMemoryError.
+// operation in flight. See the RLIMIT_MEMLOCK discussion on ErrProtectedMemory.
 const maxHelperOutput = 64 << 10
 
 // maxHelperStderr bounds how much of a helper's stderr is kept for the error
@@ -80,7 +82,7 @@ const maxHelperStderr = 4 << 10
 //
 // The helper's stdout is read DIRECTLY INTO LOCKED MEMORY -- the pipe is drained
 // into the pages of an enclave rather than into a heap buffer that io.Copy would
-// have to be trusted to release. It is the same reason randomSecret draws into
+// have to be trusted to release. It is the same reason custody.Random draws into
 // locked pages instead of moving bytes afterwards: material that touches the
 // ordinary heap can be swapped or core-dumped before anything gets a chance to
 // wipe it.
@@ -154,12 +156,15 @@ func (p *CommandKeyProvider) Passphrase(ctx context.Context) (*enclave.MemoryEnc
 		return nil, &KeyProviderError{Op: "command key provider", Err: ErrHelperNotConfigured}
 	}
 	if !filepath.IsAbs(p.Path) {
-		return nil, &KeyProviderError{Op: "command key provider", Err: &detailError{Kind: ErrHelperPathNotAbsolute, Detail: strconv.Quote(p.Path)}}
+		return nil, &KeyProviderError{Op: "command key provider", Err: &errs.Error{Kind: ErrHelperPathNotAbsolute, Detail: strconv.Quote(p.Path)}}
 	}
 	if p.Line < 0 {
 		return nil, &KeyProviderError{
-			Op:  "command key provider",
-			Err: fmt.Errorf("%w: line %d is not a line number", ErrHelperOutput, p.Line),
+			Op: "command key provider",
+			Err: &errs.Error{
+				Kind:   ErrHelperOutput,
+				Detail: fmt.Sprintf("line %d is not a line number", p.Line),
+			},
 		}
 	}
 
@@ -167,7 +172,7 @@ func (p *CommandKeyProvider) Passphrase(ctx context.Context) (*enclave.MemoryEnc
 	if err != nil {
 		return nil, err
 	}
-	defer releaseSecret(out)
+	defer custody.Release(out)
 
 	return p.selectLine(out, n)
 }
@@ -203,7 +208,7 @@ func (p *CommandKeyProvider) run(ctx context.Context) (*enclave.MemoryEnclave, i
 	defer func() { _ = stdout.Close() }()
 	cmd.Stdout = writeEnd
 
-	buf, err := newSecretEnclave(op, maxHelperOutput)
+	buf, err := custody.New(op, maxHelperOutput)
 	if err != nil {
 		_ = writeEnd.Close()
 		return nil, 0, err
@@ -214,7 +219,7 @@ func (p *CommandKeyProvider) run(ctx context.Context) (*enclave.MemoryEnclave, i
 	// never sees end-of-file.
 	_ = writeEnd.Close()
 	if startErr != nil {
-		releaseSecret(buf)
+		custody.Release(buf)
 		return nil, 0, &HelperError{Path: p.Path, ExitCode: -1, Err: startErr}
 	}
 
@@ -249,7 +254,7 @@ func (p *CommandKeyProvider) run(ctx context.Context) (*enclave.MemoryEnclave, i
 	// less than the bound -- but an OVERLONG one is: silently truncating a
 	// credential produces one that enrolls and never opens.
 	var n int
-	readErr := borrowSecret(op, buf, func(dst []byte) error {
+	readErr := secret.Borrow(op, buf, func(dst []byte) error {
 		var err error
 		n, err = readFullish(stdout, dst)
 		return err
@@ -273,22 +278,22 @@ func (p *CommandKeyProvider) run(ctx context.Context) (*enclave.MemoryEnclave, i
 
 	switch {
 	case cut && ctx.Err() != nil:
-		releaseSecret(buf)
-		return nil, 0, &KeyProviderError{Op: op, Err: &detailError{Detail: p.Path + " did not finish", Err: ctx.Err()}}
+		custody.Release(buf)
+		return nil, 0, &KeyProviderError{Op: op, Err: &errs.Error{Detail: p.Path + " did not finish", Err: ctx.Err()}}
 	case cutAfterExit:
-		releaseSecret(buf)
-		return nil, 0, &KeyProviderError{Op: op, Err: &detailError{Kind: ErrHelperOutput,
+		custody.Release(buf)
+		return nil, 0, &KeyProviderError{Op: op, Err: &errs.Error{Kind: ErrHelperOutput,
 			Detail: p.Path + " exited, but its output was still held open by a process it started"}}
 	case readErr != nil:
-		releaseSecret(buf)
+		custody.Release(buf)
 		return nil, 0, &KeyProviderError{Op: op, Err: readErr}
 	case waitErr != nil:
-		releaseSecret(buf)
+		custody.Release(buf)
 		return nil, 0, &HelperError{
 			Path:     p.Path,
 			ExitCode: exitCodeOf(waitErr),
 			Stderr:   stderr.String(),
-			Err:      &detailError{Kind: ErrHelperFailed, Err: waitErr},
+			Err:      &errs.Error{Kind: ErrHelperFailed, Err: waitErr},
 		}
 	}
 
@@ -301,27 +306,34 @@ func (p *CommandKeyProvider) selectLine(out *enclave.MemoryEnclave, n int) (*enc
 	op := "helper credential"
 
 	var credential *enclave.MemoryEnclave
-	err := borrowSecret(op, out, func(all []byte) error {
+	err := secret.Borrow(op, out, func(all []byte) error {
 		body := all[:n]
 		if p.Line > 0 {
 			line, ok := nthLine(body, p.Line)
 			if !ok {
 				return &KeyProviderError{
-					Op:  op,
-					Err: fmt.Errorf("%w: %s wrote %d line(s), and the credential is on line %d", ErrHelperOutput, p.Path, countLines(body), p.Line),
+					Op: op,
+					Err: &errs.Error{
+						Kind: ErrHelperOutput,
+						Detail: fmt.Sprintf("%s wrote %d line(s), and the credential is on line %d",
+							p.Path, countLines(body), p.Line),
+					},
 				}
 			}
 			body = line
 		}
 		if len(body) == 0 {
 			return &KeyProviderError{
-				Op:  op,
-				Err: fmt.Errorf("%w: %s produced an empty credential", ErrHelperOutput, p.Path),
+				Op: op,
+				Err: &errs.Error{
+					Kind:   ErrHelperOutput,
+					Detail: fmt.Sprintf("%s produced an empty credential", p.Path),
+				},
 			}
 		}
 
 		var err error
-		credential, err = copySecret(op, body)
+		credential, err = custody.Clone(op, body)
 		return err
 	})
 	if err != nil {
@@ -341,7 +353,10 @@ func readFullish(r io.Reader, dst []byte) (int, error) {
 		// at an arbitrary boundary is the failure this refuses.
 		extra := make([]byte, 1)
 		if _, peekErr := r.Read(extra); peekErr == nil {
-			return 0, fmt.Errorf("%w: more than %d bytes of output", ErrHelperOutput, len(dst))
+			return 0, &errs.Error{
+				Kind:   ErrHelperOutput,
+				Detail: fmt.Sprintf("more than %d bytes of output", len(dst)),
+			}
 		}
 		return n, nil
 	case errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, io.EOF):
@@ -435,7 +450,7 @@ func EnrollKeyProvider(ctx context.Context, device string, existing []byte, p Ke
 	if err != nil {
 		return -1, -1, err
 	}
-	defer releaseSecret(credential)
+	defer custody.Release(credential)
 
 	// Seeded to -1 so a borrow that never runs the closure reports "no slot"
 	// rather than slot 0, which on almost every volume is somebody's primary
@@ -447,10 +462,10 @@ func EnrollKeyProvider(ctx context.Context, device string, existing []byte, p Ke
 	// number is the only record of a live credential nothing describes --
 	// dropping it here would leave the caller unable to say which slot to
 	// remove.
-	err = borrowSecret("provider credential", credential, func(raw []byte) error {
+	err = secret.Borrow("provider credential", credential, func(raw []byte) error {
 		var inner error
 		// callerSuppliedCredential, deliberately: this secret arrives from an
-		// external helper rather than from randomSecret here, so it keeps the
+		// external helper rather than from custody.Random here, so it keeps the
 		// full hash-dependent floor -- which is exactly what this path did
 		// before the policy became a parameter. The kdf.go rationale names an
 		// enrolled provider key as a candidate for the exemption on the grounds
@@ -519,7 +534,7 @@ func enrollWithToken(device string, existing, credential []byte, opts *AddKeyOpt
 	// rollback of live key material.
 	hdr, metadata, err := dev.readHeader()
 	if err != nil {
-		return -1, -1, "", &KeyProviderError{Op: "enroll", Err: &detailError{Detail: "failed to read header", Err: err}}
+		return -1, -1, "", &KeyProviderError{Op: "enroll", Err: &errs.Error{Detail: "failed to read header", Err: err}}
 	}
 	tokenID = -1
 	if token != nil {
@@ -532,9 +547,9 @@ func enrollWithToken(device string, existing, credential []byte, opts *AddKeyOpt
 	// nothing about the volume (#249, A1).
 	masterKey, _, err := getVolumeKey(dev.file, device, existing, metadata)
 	if err != nil {
-		return -1, -1, "", &KeyProviderError{Op: "enroll", Err: &detailError{Detail: "failed to unlock with existing passphrase", Err: err}}
+		return -1, -1, "", &KeyProviderError{Op: "enroll", Err: &errs.Error{Detail: "failed to unlock with existing passphrase", Err: err}}
 	}
-	defer releaseSecret(masterKey)
+	defer custody.Release(masterKey)
 
 	// The slot is the one addKeyslotWithMasterKey CHOSE, reported from the
 	// point of decision under the device lock, so the token below names the
@@ -550,7 +565,7 @@ func enrollWithToken(device string, existing, credential []byte, opts *AddKeyOpt
 		// only use is telling an operator which credential is which.
 		return -1, -1, "", &KeyProviderError{
 			Op:  "enroll",
-			Err: &detailError{Kind: ErrInvalidKeyslot, Detail: "the credential was written but the keyslot it went to was not reported"},
+			Err: &errs.Error{Kind: ErrInvalidKeyslot, Detail: "the credential was written but the keyslot it went to was not reported"},
 		}
 	}
 
@@ -588,10 +603,10 @@ func enrollWithToken(device string, existing, credential []byte, opts *AddKeyOpt
 // type.
 func importTokenLocked(dev *keyslotDevice, tokenID int, token *Token) error {
 	if tokenID < 0 || tokenID >= MaxTokenSlots {
-		return &detailError{Kind: ErrInvalidHeader, Detail: "token id " + strconv.Itoa(tokenID) + " is out of range"}
+		return &errs.Error{Kind: ErrInvalidHeader, Detail: "token id " + strconv.Itoa(tokenID) + " is out of range"}
 	}
 	if token == nil || token.Type == "" {
-		return &detailError{Kind: ErrUnsupportedTokenType, Detail: "a token must have a type"}
+		return &errs.Error{Kind: ErrUnsupportedTokenType, Detail: "a token must have a type"}
 	}
 	hdr, metadata, err := dev.readHeader()
 	if err != nil {
@@ -602,7 +617,7 @@ func importTokenLocked(dev *keyslotDevice, tokenID int, token *Token) error {
 	}
 	key := strconv.Itoa(tokenID)
 	if _, taken := metadata.Tokens[key]; taken {
-		return &detailError{Kind: ErrNoFreeTokenSlot, Detail: "token slot " + key + " was taken while this enrollment held the device lock"}
+		return &errs.Error{Kind: ErrNoFreeTokenSlot, Detail: "token slot " + key + " was taken while this enrollment held the device lock"}
 	}
 	metadata.Tokens[key] = token
 	hdr.SequenceID++
@@ -628,7 +643,7 @@ func killKeyslotLocked(dev *keyslotDevice, keyslot int) error {
 	}
 	id := strconv.Itoa(keyslot)
 	if _, ok := metadata.Keyslots[id]; !ok {
-		return &detailError{Kind: ErrInvalidKeyslot, Detail: "keyslot " + id + " does not exist"}
+		return &errs.Error{Kind: ErrInvalidKeyslot, Detail: "keyslot " + id + " does not exist"}
 	}
 	// Through the pinned descriptor: the rollback must remove the keyslot
 	// from the device the enrollment wrote, not whatever the path names now.
@@ -667,9 +682,9 @@ func UnlockWithProvider(ctx context.Context, device, name string, p KeyProvider)
 	if err != nil {
 		return err
 	}
-	defer releaseSecret(credential)
+	defer custody.Release(credential)
 
-	return borrowSecret("provider credential", credential, func(raw []byte) error {
+	return secret.Borrow("provider credential", credential, func(raw []byte) error {
 		return Unlock(device, raw, name)
 	})
 }
@@ -690,7 +705,7 @@ func ProviderFromToken(t *Token, exec ExecConfig) (KeyProvider, error) {
 	default:
 		return nil, &KeyProviderError{
 			Op:  "provider from token",
-			Err: fmt.Errorf("%w: %q", ErrUnsupportedTokenType, t.Type),
+			Err: &errs.Error{Kind: ErrUnsupportedTokenType, Detail: fmt.Sprintf("%q", t.Type)},
 		}
 	}
 }
@@ -904,23 +919,26 @@ func normalizeFIDO2Secret(line []byte) (*enclave.MemoryEnclave, error) {
 	if len(line) == 0 {
 		return nil, &KeyProviderError{
 			Op:  op,
-			Err: fmt.Errorf("%w: the authenticator returned an empty secret", ErrHelperOutput),
+			Err: &errs.Error{Kind: ErrHelperOutput, Detail: "the authenticator returned an empty secret"},
 		}
 	}
 
-	raw, err := newSecretEnclave(op, fido2SecretEncoding.DecodedLen(len(line)))
+	raw, err := custody.New(op, fido2SecretEncoding.DecodedLen(len(line)))
 	if err != nil {
 		return nil, err
 	}
-	defer releaseSecret(raw)
+	defer custody.Release(raw)
 
 	var rawLen int
-	if err := borrowSecret(op, raw, func(dst []byte) error {
+	if err := secret.Borrow(op, raw, func(dst []byte) error {
 		n, err := fido2SecretEncoding.Decode(dst, line)
 		if err != nil {
 			return &KeyProviderError{
-				Op:  op,
-				Err: fmt.Errorf("%w: the authenticator's secret is not %s base64", ErrHelperOutput, fido2EncodingName()),
+				Op: op,
+				Err: &errs.Error{
+					Kind:   ErrHelperOutput,
+					Detail: fmt.Sprintf("the authenticator's secret is not %s base64", fido2EncodingName()),
+				},
 			}
 		}
 		rawLen = n
@@ -931,21 +949,21 @@ func normalizeFIDO2Secret(line []byte) (*enclave.MemoryEnclave, error) {
 	if rawLen == 0 {
 		return nil, &KeyProviderError{
 			Op:  op,
-			Err: fmt.Errorf("%w: the authenticator returned an empty secret", ErrHelperOutput),
+			Err: &errs.Error{Kind: ErrHelperOutput, Detail: "the authenticator returned an empty secret"},
 		}
 	}
 
-	encoded, err := newSecretEnclave(op, fido2SecretEncoding.EncodedLen(rawLen))
+	encoded, err := custody.New(op, fido2SecretEncoding.EncodedLen(rawLen))
 	if err != nil {
 		return nil, err
 	}
-	if err := borrowSecret(op, raw, func(src []byte) error {
-		return borrowSecret(op, encoded, func(dst []byte) error {
+	if err := secret.Borrow(op, raw, func(src []byte) error {
+		return secret.Borrow(op, encoded, func(dst []byte) error {
 			fido2SecretEncoding.Encode(dst, src[:rawLen])
 			return nil
 		})
 	}); err != nil {
-		releaseSecret(encoded)
+		custody.Release(encoded)
 		return nil, err
 	}
 
@@ -1013,9 +1031,9 @@ func (p FIDO2Params) relyingParty() string {
 func (p FIDO2Params) validate() error {
 	switch {
 	case len(p.CredentialID) == 0:
-		return &KeyProviderError{Op: "fido2 binding", Err: fmt.Errorf("%w: no credential id", ErrInvalidFIDO2Binding)}
+		return &KeyProviderError{Op: "fido2 binding", Err: &errs.Error{Kind: ErrInvalidFIDO2Binding, Detail: "no credential id"}}
 	case len(p.Salt) == 0:
-		return &KeyProviderError{Op: "fido2 binding", Err: fmt.Errorf("%w: no salt", ErrInvalidFIDO2Binding)}
+		return &KeyProviderError{Op: "fido2 binding", Err: &errs.Error{Kind: ErrInvalidFIDO2Binding, Detail: "no salt"}}
 	}
 	return nil
 }
@@ -1052,10 +1070,10 @@ func (p *fido2Provider) Passphrase(ctx context.Context) (*enclave.MemoryEnclave,
 	if err != nil {
 		return nil, err
 	}
-	defer releaseSecret(line)
+	defer custody.Release(line)
 
 	var credential *enclave.MemoryEnclave
-	if err := borrowSecret("fido2 secret", line, func(b []byte) error {
+	if err := secret.Borrow("fido2 secret", line, func(b []byte) error {
 		var err error
 		credential, err = normalizeFIDO2Secret(b)
 		return err
@@ -1068,11 +1086,14 @@ func (p *fido2Provider) Passphrase(ctx context.Context) (*enclave.MemoryEnclave,
 	// from the helper was not the hmac-secret -- see fido2AssertSecretLine --
 	// and enrolling it would produce a keyslot that opens nothing.
 	if want := fido2SecretEncoding.EncodedLen(FIDO2SecretLength); credential.Size() != want {
-		releaseSecret(credential)
+		custody.Release(credential)
 		return nil, &KeyProviderError{
 			Op: "fido2 secret",
-			Err: fmt.Errorf("%w: line %d of the assertion is not a %d-byte hmac-secret; the helper's output format is not the one this package expects",
-				ErrHelperOutput, p.cmd.Line, FIDO2SecretLength),
+			Err: &errs.Error{
+				Kind: ErrHelperOutput,
+				Detail: fmt.Sprintf("line %d of the assertion is not a %d-byte hmac-secret; the helper's output format is not the one this package expects",
+					p.cmd.Line, FIDO2SecretLength),
+			},
 		}
 	}
 
@@ -1219,15 +1240,15 @@ func NewFIDO2Credential(ctx context.Context, cfg ExecConfig, opts FIDO2Credentia
 	if err != nil {
 		return nil, err
 	}
-	defer releaseSecret(encoded)
+	defer custody.Release(encoded)
 
 	var id []byte
-	if err := borrowSecret("fido2 credential id", encoded, func(b []byte) error {
+	if err := secret.Borrow("fido2 credential id", encoded, func(b []byte) error {
 		decoded, err := base64.StdEncoding.DecodeString(string(b))
 		if err != nil {
 			return &KeyProviderError{
 				Op:  "fido2 credential id",
-				Err: fmt.Errorf("%w: the credential id is not base64", ErrHelperOutput),
+				Err: &errs.Error{Kind: ErrHelperOutput, Detail: "the credential id is not base64"},
 			}
 		}
 		id = decoded
@@ -1314,14 +1335,14 @@ func fido2ParamsFromToken(t *Token) (FIDO2Params, error) {
 	if err != nil {
 		return FIDO2Params{}, &KeyProviderError{
 			Op:  "fido2 token",
-			Err: fmt.Errorf("%w: fido2-credential is not base64", ErrInvalidFIDO2Binding),
+			Err: &errs.Error{Kind: ErrInvalidFIDO2Binding, Detail: "fido2-credential is not base64"},
 		}
 	}
 	salt, err := base64.StdEncoding.DecodeString(t.FIDO2Salt)
 	if err != nil {
 		return FIDO2Params{}, &KeyProviderError{
 			Op:  "fido2 token",
-			Err: fmt.Errorf("%w: fido2-salt is not base64", ErrInvalidFIDO2Binding),
+			Err: &errs.Error{Kind: ErrInvalidFIDO2Binding, Detail: "fido2-salt is not base64"},
 		}
 	}
 
@@ -1361,69 +1382,11 @@ func fido2ProviderFromToken(t *Token, cfg ExecConfig) (KeyProvider, error) {
 // ---------------------------------------------------------------------------
 // Errors
 //
-// These live here rather than in errors.go because they are the external-key
-// vocabulary and nothing outside this file raises them. They follow the same
-// shape as everything in errors.go: a sentinel to match on, a structured type
-// carrying what a diagnosis needs, and an Is that reports the type as the
-// sentinel so a caller never has to know the type exists.
+// The external-key sentinels are in errors.go with every other sentinel. The
+// types here follow the same shape: a structured type carrying what a
+// diagnosis needs, and an Is that reports the type as its sentinel so a caller
+// never has to know the type exists.
 // ---------------------------------------------------------------------------
-
-var (
-	// ErrKeyProvider is the sentinel every failure in this file matches.
-	ErrKeyProvider = errors.New("external key provider")
-
-	// ErrNoKeyProvider indicates an operation was given no provider, or a token
-	// with nothing in it to build one from.
-	ErrNoKeyProvider = errors.New("no key provider")
-
-	// ErrHelperNotConfigured indicates the provider has no command to run. It is
-	// distinct from a helper that is missing on disk: nothing was named, so
-	// nothing was looked for.
-	ErrHelperNotConfigured = errors.New("no helper command configured")
-
-	// ErrHelperPathNotAbsolute indicates a helper was named by a relative path
-	// or a bare command name. It is refused rather than looked up on PATH,
-	// whose contents belong to whoever invoked the process.
-	ErrHelperPathNotAbsolute = errors.New("helper path is not absolute")
-
-	// ErrNoFIDO2Device indicates a FIDO2 operation was given no authenticator
-	// device. The libfido2 helpers require one, and an empty argument in its
-	// place is not a default.
-	ErrNoFIDO2Device = errors.New("no FIDO2 authenticator device named")
-
-	// ErrHelperFailed indicates the helper ran and exited non-zero -- the
-	// authenticator refused, the touch timed out, the PIN was wrong.
-	ErrHelperFailed = errors.New("key helper failed")
-
-	// ErrHelperOutput indicates the helper SUCCEEDED and produced something this
-	// package cannot use: too few lines, an empty credential, output that is not
-	// the expected encoding.
-	//
-	// It is deliberately separate from ErrHelperFailed. A helper that exits 0
-	// and prints the wrong thing is a protocol mismatch -- a different helper
-	// version, a changed output order -- and telling an operator "the
-	// authenticator refused" would send them to look at the hardware.
-	ErrHelperOutput = errors.New("unusable key helper output")
-
-	// ErrUnsupportedTokenType indicates a token names a mechanism this package
-	// cannot drive. The token is left alone: another implementation may well be
-	// able to use it.
-	ErrUnsupportedTokenType = errors.New("unsupported token type")
-
-	// ErrInvalidFIDO2Binding indicates a FIDO2 binding is missing a field an
-	// assertion needs, or carries one that does not decode.
-	ErrInvalidFIDO2Binding = errors.New("invalid FIDO2 binding")
-
-	// ErrOrphanedKeyslot indicates a credential was written to a keyslot, the
-	// token identifying it could not be written, AND the keyslot could not be
-	// removed again.
-	//
-	// This is the one outcome in this file that needs a human. The volume now
-	// has a live credential that nothing on the device describes: it opens the
-	// volume, it cannot be told apart from a credential still in use, and the
-	// only record of which slot it is, is this error.
-	ErrOrphanedKeyslot = errors.New("orphaned keyslot")
-)
 
 // KeyProviderError reports a failure in obtaining or enrolling an external
 // credential, naming the step it happened in.

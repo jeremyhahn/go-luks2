@@ -17,23 +17,12 @@ import (
 	"strconv"
 	"unsafe"
 
+	"github.com/jeremyhahn/go-luks2/internal/errs"
 	"golang.org/x/sys/unix"
 )
 
 // BLKDISCARD ioctl number for TRIM/discard on block devices
 const BLKDISCARD = 0x1277
-
-var (
-	// ErrDeviceInUse indicates a destructive operation refused a block device
-	// that something else holds: it is mounted, it backs a device-mapper
-	// mapping or an md array, or another process opened it exclusively. The
-	// kernel reports this when the device is opened with O_EXCL.
-	ErrDeviceInUse = errors.New("the device is in use: it is mounted, mapped, or held open exclusively")
-
-	// ErrWipeVerification indicates that what was read back from the medium,
-	// past the page cache, is not what the last wipe pass wrote.
-	ErrWipeVerification = errors.New("wipe verification failed: the medium does not hold what the last pass wrote")
-)
 
 // WipePattern defines the data pattern for a wipe pass
 type WipePattern uint8
@@ -174,7 +163,7 @@ func newPassStream(pattern WipePattern) (*passStream, error) {
 		return s, nil
 	case PatternRandom:
 	default:
-		return nil, &detailError{Kind: ErrInvalidSize, Detail: "unknown wipe pattern " + strconv.Itoa(int(pattern))}
+		return nil, &errs.Error{Kind: ErrInvalidSize, Detail: "unknown wipe pattern " + strconv.Itoa(int(pattern))}
 	}
 
 	key := make([]byte, 32)
@@ -232,7 +221,7 @@ func (s *passStream) fill(buf []byte, off int64) {
 func wipePassWithStream(f *os.File, size int64, stream *passStream,
 	progress WipeProgressFunc, passNum, totalPasses int) error {
 	if size < 0 {
-		return &detailError{Kind: ErrInvalidSize, Detail: "wipe size " + strconv.FormatInt(size, 10) + " is negative"}
+		return &errs.Error{Kind: ErrInvalidSize, Detail: "wipe size " + strconv.FormatInt(size, 10) + " is negative"}
 	}
 
 	buffer := make([]byte, wipeChunk)
@@ -298,14 +287,14 @@ func openDirectReader(path string) (mediumReader, error) {
 			return nil, statErr
 		}
 		if !memory {
-			return nil, &detailError{Kind: ErrDirectIOUnsupported, Detail: path, Err: err}
+			return nil, &errs.Error{Kind: ErrDirectIOUnsupported, Detail: path, Err: err}
 		}
 		return openDevice("read the device", path, os.O_RDONLY)
 	}
 	buf, err := unix.Mmap(-1, 0, wipeChunk+2*directIOAlign, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_ANON|unix.MAP_PRIVATE)
 	if err != nil {
 		_ = f.Close()
-		return nil, &detailError{Detail: "failed to allocate an aligned buffer for a direct read", Err: err}
+		return nil, &errs.Error{Detail: "failed to allocate an aligned buffer for a direct read", Err: err}
 	}
 	return &directReader{f: f, buf: buf}, nil
 }
@@ -391,7 +380,7 @@ func compareMedium(r io.ReaderAt, src mediumSource, device string, size int64, s
 			return &DeviceError{Device: src.path, Op: "read back the wipe", Err: err}
 		}
 		if int64(read) < n {
-			return &detailError{Kind: ErrWipeVerification, Detail: fmt.Sprintf(
+			return &errs.Error{Kind: ErrWipeVerification, Detail: fmt.Sprintf(
 				"%s: %s ended at byte %d of %d", device, src.path, off+int64(read), size)}
 		}
 		stream.fill(want[:n], off)
@@ -403,7 +392,7 @@ func compareMedium(r io.ReaderAt, src mediumSource, device string, size int64, s
 					break
 				}
 			}
-			return &detailError{Kind: ErrWipeVerification, Detail: fmt.Sprintf(
+			return &errs.Error{Kind: ErrWipeVerification, Detail: fmt.Sprintf(
 				"%s: %s differs from the %s pass at byte %d", device, src.path, stream.pattern, at)}
 		}
 		off += n
@@ -466,7 +455,7 @@ func resolvePatternSequence(opts WipeOptions) ([]WipePattern, bool) {
 	return patterns, opts.Verify && !opts.NoVerify
 }
 
-// openForWipe opens device for writing, EXCLUSIVELY.
+// openForWipe claims the device for writing, EXCLUSIVELY.
 //
 // O_EXCL on a block device is the kernel's own in-use check: the open fails
 // with EBUSY while the device is mounted, backs a device-mapper mapping, an md
@@ -475,25 +464,20 @@ func resolvePatternSequence(opts WipeOptions) ([]WipePattern, bool) {
 // partition marks its disk. On a regular file Linux ignores O_EXCL without
 // O_CREAT, so a file container opens as before.
 //
-// The kernel grants that claim only on an open BY PATH, so it is a second
-// descriptor beside the locked one, and the path may name a different file by
-// now. It is refused with ErrDeviceChanged unless it is the very file the lock
-// is held on (requireSameDevice), and that check runs before anything is
-// written: a wipe proven against the lock, or no wipe.
+// The claim reopens dev's own locked descriptor via its /proc/self/fd entry
+// (Locked.Claim), so it targets by construction the exact file the lock is
+// held on: a path retargeted since the lock was taken cannot put the claim on
+// a different device than the one this wipe is proven against.
 func openForWipe(dev *keyslotDevice) (*os.File, error) {
-	f, err := openDevice("open the device for wiping", dev.path, os.O_RDWR|unix.O_EXCL)
+	claimed, err := dev.locked.Claim("open the device for wiping", os.O_RDWR|unix.O_EXCL, openFileFunc)
 	if errors.Is(err, unix.EBUSY) {
-		return nil, &DeviceError{Device: dev.path, Op: "wipe", Err: &detailError{Kind: ErrDeviceInUse,
+		return nil, &DeviceError{Device: dev.path, Op: "wipe", Err: &errs.Error{Kind: ErrDeviceInUse,
 			Detail: "unmount it, close any mapping on it, and retry", Err: err}}
 	}
 	if err != nil {
 		return nil, err
 	}
-	if err := requireSameDevice(dev.file, f, dev.path, "wipe it"); err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	return f, nil
+	return claimed.File(), nil
 }
 
 // Wipe securely wipes a LUKS volume
@@ -510,7 +494,7 @@ func Wipe(opts WipeOptions) error {
 	if len(patterns) == 0 {
 		// Fall back to legacy validation for backward compatibility
 		if opts.Passes <= 0 && opts.Standard == StandardCustom && len(opts.Patterns) == 0 {
-			return &detailError{Kind: ErrInvalidSize, Detail: "invalid number of passes " + strconv.Itoa(opts.Passes) + " (must be >= 1)"}
+			return &errs.Error{Kind: ErrInvalidSize, Detail: "invalid number of passes " + strconv.Itoa(opts.Passes) + " (must be >= 1)"}
 		}
 		// If still no patterns, default to single zeros pass
 		patterns = []WipePattern{PatternZeros}
@@ -545,7 +529,7 @@ func Wipe(opts WipeOptions) error {
 	}
 	if size <= 0 {
 		return &DeviceError{Device: opts.Device, Op: "measure the device",
-			Err: &detailError{Kind: ErrInvalidSize, Detail: "the device reports a size of " + strconv.FormatInt(size, 10)}}
+			Err: &errs.Error{Kind: ErrInvalidSize, Detail: "the device reports a size of " + strconv.FormatInt(size, 10)}}
 	}
 
 	totalPasses := len(patterns)
@@ -558,7 +542,7 @@ func Wipe(opts WipeOptions) error {
 			return err
 		}
 		if err := wipePassWithStream(f, size, stream, opts.ProgressFunc, i+1, totalPasses); err != nil {
-			return &detailError{Detail: fmt.Sprintf("wipe pass %d (%s) failed", i+1, pattern), Err: err}
+			return &errs.Error{Detail: fmt.Sprintf("wipe pass %d (%s) failed", i+1, pattern), Err: err}
 		}
 		last = stream
 	}
@@ -806,7 +790,7 @@ func wipePass(f *os.File, size int64, random bool) error {
 
 	// Validate size to prevent issues with negative values
 	if size < 0 {
-		return fmt.Errorf("invalid size: %d (must be >= 0)", size)
+		return &errs.Error{Kind: ErrInvalidSize, Detail: fmt.Sprintf("%d (must be >= 0)", size)}
 	}
 
 	buffer := make([]byte, bufferSize)
@@ -814,7 +798,7 @@ func wipePass(f *os.File, size int64, random bool) error {
 	defer clearBytes(buffer)
 
 	if _, err := f.Seek(0, 0); err != nil {
-		return fmt.Errorf("failed to seek: %w", err)
+		return &errs.Error{Detail: "failed to seek", Err: err}
 	}
 
 	remaining := size
@@ -827,7 +811,7 @@ func wipePass(f *os.File, size int64, random bool) error {
 		// Fill buffer
 		if random {
 			if _, err := rand.Read(buffer[:writeSize]); err != nil {
-				return fmt.Errorf("failed to generate random data: %w", err)
+				return &errs.Error{Detail: "failed to generate random data", Err: err}
 			}
 		} else {
 			// Zeros - clear the portion we're using
@@ -839,7 +823,7 @@ func wipePass(f *os.File, size int64, random bool) error {
 		// Write buffer
 		n, err := f.Write(buffer[:writeSize])
 		if err != nil {
-			return fmt.Errorf("write error: %w", err)
+			return &errs.Error{Detail: "write error", Err: err}
 		}
 
 		remaining -= int64(n)
@@ -874,7 +858,7 @@ func WipeKeyslot(device string, keyslot int) error {
 	keyslotID := fmt.Sprintf("%d", keyslot)
 	ks, ok := metadata.Keyslots[keyslotID]
 	if !ok {
-		return fmt.Errorf("keyslot %d not found", keyslot)
+		return &errs.Error{Kind: ErrInvalidKeyslot, Detail: fmt.Sprintf("keyslot %d not found", keyslot)}
 	}
 
 	// THE GATE, and it was missing HERE while every sibling path had it.
@@ -906,12 +890,12 @@ func WipeKeyslot(device string, keyslot int) error {
 
 	offset, err := parseSize(ks.Area.Offset)
 	if err != nil {
-		return fmt.Errorf("invalid keyslot offset: %w", err)
+		return &errs.Error{Detail: "invalid keyslot offset", Err: err}
 	}
 
 	size, err := parseSize(ks.Area.Size)
 	if err != nil {
-		return fmt.Errorf("invalid keyslot size: %w", err)
+		return &errs.Error{Detail: "invalid keyslot size", Err: err}
 	}
 
 	// The resulting metadata is proved writable BEFORE anything is destroyed,
@@ -961,16 +945,16 @@ func WipeKeyslot(device string, keyslot int) error {
 	f := dev.file
 
 	if err := checkAreaWithinDevice(f, offset, size); err != nil {
-		return fmt.Errorf("keyslot %d: %w", keyslot, err)
+		return &errs.Error{Detail: fmt.Sprintf("keyslot %d", keyslot), Err: err}
 	}
 
 	// Wipe the keyslot area in fixed-size chunks, so a header-supplied size
 	// cannot choose an allocation.
 	if err := zeroRange(f, offset, size); err != nil {
-		return fmt.Errorf("failed to wipe keyslot: %w", err)
+		return &errs.Error{Detail: "failed to wipe keyslot", Err: err}
 	}
 	if err := f.Sync(); err != nil {
-		return fmt.Errorf("failed to sync: %w", err)
+		return &errs.Error{Detail: "failed to sync", Err: err}
 	}
 
 	// Write updated metadata through the locked descriptor.
@@ -1004,7 +988,7 @@ func issueDiscard(f *os.File, size int64) error {
 	// Validate size to prevent integer overflow when converting to uint64
 	// A negative size would wrap to a very large value, potentially causing issues
 	if size <= 0 {
-		return &detailError{Kind: ErrInvalidSize, Detail: "invalid discard size " + strconv.FormatInt(size, 10) + " (must be > 0)"}
+		return &errs.Error{Kind: ErrInvalidSize, Detail: "invalid discard size " + strconv.FormatInt(size, 10) + " (must be > 0)"}
 	}
 
 	// BLKDISCARD takes a uint64[2] array: [offset, length]

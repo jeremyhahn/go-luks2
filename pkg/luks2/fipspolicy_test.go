@@ -10,6 +10,8 @@ import (
 	"bytes"
 	"errors"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/fips"
 )
 
 // The FIPS 140-3 policy branches, run in-process.
@@ -31,7 +33,7 @@ func forceFIPSPolicy(t *testing.T) {
 
 	previous := fipsMode
 	t.Cleanup(func() { fipsMode = previous })
-	fipsMode = func() bool { return true }
+	fipsMode = func() fips.Mode { return true }
 }
 
 // writeFixture rewrites device's header after mutate has changed its metadata.
@@ -183,7 +185,7 @@ func TestFIPSPolicyGates(t *testing.T) {
 	if _, err := getPBKDF2HashFunc("sha1"); err != nil && !fipsMode() {
 		t.Fatalf("outside FIPS mode PBKDF2-SHA1 is available for legacy headers, got %v", err)
 	}
-	if err := requireFIPSApprovedKDF(KDFTypeArgon2id); err != nil && !fipsMode() {
+	if err := fipsMode().RequireKDF(KDFTypeArgon2id); err != nil && !fipsMode() {
 		t.Fatalf("outside FIPS mode Argon2id is allowed, got %v", err)
 	}
 
@@ -191,7 +193,7 @@ func TestFIPSPolicyGates(t *testing.T) {
 	if _, err := getPBKDF2HashFunc("sha1"); !errors.Is(err, ErrFIPSNotApproved) {
 		t.Fatalf("PBKDF2-SHA1 under the FIPS policy: got %v, want ErrFIPSNotApproved", err)
 	}
-	if err := requireFIPSApprovedKDF(KDFTypeArgon2id); !errors.Is(err, ErrFIPSNotApproved) {
+	if err := fipsMode().RequireKDF(KDFTypeArgon2id); !errors.Is(err, ErrFIPSNotApproved) {
 		t.Fatalf("Argon2id under the FIPS policy: got %v, want ErrFIPSNotApproved", err)
 	}
 	if _, err := getPBKDF2HashFunc("sha256"); err != nil {
@@ -259,7 +261,7 @@ func TestKeyslotRefusedByFIPSIsComputed(t *testing.T) {
 	}
 
 	// Outside the policy nothing is a FIPS refusal.
-	fipsMode = func() bool { return false }
+	fipsMode = func() fips.Mode { return false }
 	if keyslotRefusedByFIPS("0", argon2(approved.KDF.Salt), digests) {
 		t.Fatal("outside FIPS mode an Argon2 keyslot was classified as a FIPS refusal")
 	}

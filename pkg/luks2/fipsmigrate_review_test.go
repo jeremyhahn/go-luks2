@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
 // Regressions for the review of #84's first round: a genuine Argon2 digest is
@@ -54,7 +55,7 @@ func argon2Digest(t *testing.T, device string, hash string) {
 
 	digest.Type, digest.Hash, digest.Iterations = KDFTypeArgon2id, hash, 0
 	digest.Time, digest.Memory, digest.CPUs = &cost, &memory, &cpus
-	if err := borrowSecret("test digest", derived, func(b []byte) error {
+	if err := secret.Borrow("test digest", derived, func(b []byte) error {
 		digest.Digest = encodeBase64(b)
 		return nil
 	}); err != nil {

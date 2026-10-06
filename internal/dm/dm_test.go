@@ -1,0 +1,308 @@
+// Copyright (c) 2025 Jeremy Hahn
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package dm
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/anatol/devmapper.go"
+	"github.com/jeremyhahn/go-luks2/internal/clock"
+	"golang.org/x/sys/unix"
+)
+
+func TestCreateTargetRefusesANameTheIoctlWouldCut(t *testing.T) {
+	if _, err := CreateTarget(strings.Repeat("n", 128), "u"); !errors.Is(err, ErrNameTooLong) {
+		t.Fatalf("CreateTarget with an oversized name = %v, want ErrNameTooLong", err)
+	}
+	if _, err := CreateTarget("n", strings.Repeat("u", 129)); !errors.Is(err, ErrNameTooLong) {
+		t.Fatalf("CreateTarget with an oversized UUID = %v, want ErrNameTooLong", err)
+	}
+	if _, err := CreateTarget("n\x00ame", "uuid"); !errors.Is(err, ErrNameTooLong) {
+		t.Fatalf("CreateTarget with an embedded NUL in the name = %v, want ErrNameTooLong", err)
+	}
+	if _, err := CreateTarget("name", "uu\x00id"); !errors.Is(err, ErrNameTooLong) {
+		t.Fatalf("CreateTarget with an embedded NUL in the UUID = %v, want ErrNameTooLong", err)
+	}
+}
+
+func TestRetryWhileBusySucceedsOnTheFirstAttemptWithoutWaiting(t *testing.T) {
+	clk := clock.NewFake(t)
+	calls := 0
+	attempts, err := RetryWhileBusy(clk, func() error {
+		calls++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("RetryWhileBusy = %v, want success", err)
+	}
+	if attempts != 1 || calls != 1 {
+		t.Fatalf("RetryWhileBusy ran %d/%d times, want exactly one attempt", attempts, calls)
+	}
+}
+
+func TestRetryWhileBusyRidesOutATransientHold(t *testing.T) {
+	clk := clock.NewFake(t)
+	calls := 0
+	attempts, err := RetryWhileBusy(clk, func() error {
+		calls++
+		if calls <= 2 {
+			return os.NewSyscallError("dm ioctl", unix.EBUSY)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("RetryWhileBusy = %v, want success once the hold clears", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("RetryWhileBusy attempts = %d, want 3", attempts)
+	}
+}
+
+func TestRetryWhileBusyGivesUpAtTheBudget(t *testing.T) {
+	clk := clock.NewFake(t)
+	attempts, err := RetryWhileBusy(clk, func() error {
+		return os.NewSyscallError("dm ioctl", unix.EBUSY)
+	})
+	if !errors.Is(err, unix.EBUSY) {
+		t.Fatalf("RetryWhileBusy = %v, want a wrapped EBUSY after the budget is spent", err)
+	}
+	if attempts < 2 {
+		t.Fatalf("RetryWhileBusy attempts = %d, want more than one attempt before giving up", attempts)
+	}
+}
+
+func TestRetryWhileBusyDoesNotRetryWhatCannotClear(t *testing.T) {
+	clk := clock.NewFake(t)
+	sentinel := errors.New("not EBUSY")
+	calls := 0
+	_, err := RetryWhileBusy(clk, func() error {
+		calls++
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("RetryWhileBusy = %v, want the non-EBUSY error unchanged", err)
+	}
+	if calls != 1 {
+		t.Fatalf("RetryWhileBusy called attempt %d times for a non-EBUSY failure, want exactly one", calls)
+	}
+}
+
+func TestPollUntilReturnsAsSoonAsDoneIsTrue(t *testing.T) {
+	clk := clock.NewFake(t)
+	calls := 0
+	if !PollUntil(clk, time.Second, time.Millisecond, func() bool { calls++; return true }) {
+		t.Fatal("PollUntil = false, want true on the first check")
+	}
+	if calls != 1 {
+		t.Fatalf("PollUntil checked done %d times, want exactly one", calls)
+	}
+}
+
+func TestPollUntilGivesUpAtTheDeadline(t *testing.T) {
+	clk := clock.NewFake(t)
+	if PollUntil(clk, time.Second, 10*time.Millisecond, func() bool { return false }) {
+		t.Fatal("PollUntil = true, want false when done never succeeds")
+	}
+}
+
+func TestNodePathMapperPathAndMapperDir(t *testing.T) {
+	if got, want := NodePath("/dev", 7), "/dev/dm-7"; got != want {
+		t.Errorf("NodePath = %q, want %q", got, want)
+	}
+	if got, want := MapperPath("/dev", "cryptroot"), "/dev/mapper/cryptroot"; got != want {
+		t.Errorf("MapperPath = %q, want %q", got, want)
+	}
+	if got, want := MapperDir("/dev"), "/dev/mapper"; got != want {
+		t.Errorf("MapperDir = %q, want %q", got, want)
+	}
+}
+
+func TestIsOurNodeMatchesOnTheDeviceNumber(t *testing.T) {
+	info := &devmapper.DeviceInfo{DevNo: unix.Mkdev(250, 3)}
+	rdev := func(path string) (uint64, error) { return unix.Mkdev(250, 3), nil }
+	if !IsOurNode(rdev, "/dev/dm-3", info) {
+		t.Fatal("IsOurNode = false for a matching device number, want true")
+	}
+}
+
+func TestIsOurNodeRefusesAMismatchedDeviceNumber(t *testing.T) {
+	info := &devmapper.DeviceInfo{DevNo: unix.Mkdev(250, 3)}
+	rdev := func(path string) (uint64, error) { return unix.Mkdev(250, 9), nil }
+	if IsOurNode(rdev, "/dev/dm-3", info) {
+		t.Fatal("IsOurNode = true for a mismatched device number, want false")
+	}
+}
+
+func TestIsOurNodeTreatsNilInfoAndStatFailureAsNotOurs(t *testing.T) {
+	rdev := func(path string) (uint64, error) { return 0, os.ErrNotExist }
+	if IsOurNode(rdev, "/dev/dm-3", nil) {
+		t.Fatal("IsOurNode = true for nil info, want false")
+	}
+	okRdev := func(path string) (uint64, error) { return unix.Mkdev(250, 3), nil }
+	if IsOurNode(okRdev, "/dev/dm-3", nil) {
+		t.Fatal("IsOurNode = true for nil info even with a resolvable path, want false")
+	}
+	info := &devmapper.DeviceInfo{DevNo: unix.Mkdev(250, 3)}
+	if IsOurNode(rdev, "/dev/dm-3", info) {
+		t.Fatal("IsOurNode = true when the node cannot be stat'd, want false")
+	}
+}
+
+func TestIsDanglingSymlink(t *testing.T) {
+	dir := t.TempDir()
+
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	live := filepath.Join(dir, "live")
+	if err := os.Symlink(target, live); err != nil {
+		t.Fatal(err)
+	}
+	if IsDanglingSymlink(live) {
+		t.Error("IsDanglingSymlink = true for a symlink whose target exists, want false")
+	}
+
+	dangling := filepath.Join(dir, "dangling")
+	if err := os.Symlink(filepath.Join(dir, "gone"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	if !IsDanglingSymlink(dangling) {
+		t.Error("IsDanglingSymlink = false for a symlink whose target is gone, want true")
+	}
+
+	if IsDanglingSymlink(target) {
+		t.Error("IsDanglingSymlink = true for a regular file, want false")
+	}
+	if IsDanglingSymlink(filepath.Join(dir, "absent")) {
+		t.Error("IsDanglingSymlink = true for a path that does not exist, want false")
+	}
+}
+
+func TestIsNoSuchDevice(t *testing.T) {
+	if !IsNoSuchDevice(unix.ENXIO) {
+		t.Error("IsNoSuchDevice(ENXIO) = false, want true")
+	}
+	if !IsNoSuchDevice(unix.ENODEV) {
+		t.Error("IsNoSuchDevice(ENODEV) = false, want true")
+	}
+	if IsNoSuchDevice(unix.ENOENT) {
+		t.Error("IsNoSuchDevice(ENOENT) = true, want false (see the doc comment: ENOENT is not the kernel's answer for an unknown dm target)")
+	}
+	if IsNoSuchDevice(unix.EPERM) {
+		t.Error("IsNoSuchDevice(EPERM) = true, want false")
+	}
+}
+
+func TestRemoveMappingNodesRemovesOnlyMatchingNodes(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "mapper"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	info := &devmapper.DeviceInfo{DevNo: unix.Mkdev(250, 3)}
+	mapperPath := MapperPath(dir, "ours")
+	if err := os.WriteFile(mapperPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dmPath := NodePath(dir, 3)
+	if err := os.WriteFile(dmPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// blockNodeRdev reports the mapper entry as ours and the dm node as
+	// somebody else's, so only the mapper entry should be removed.
+	rdev := func(path string) (uint64, error) {
+		if path == mapperPath {
+			return info.DevNo, nil
+		}
+		return unix.Mkdev(1, 2), nil
+	}
+	RemoveMappingNodes(dir, rdev, "ours", info)
+
+	if _, err := os.Lstat(mapperPath); !os.IsNotExist(err) {
+		t.Errorf("the matching mapper entry survived removal: %v", err)
+	}
+	if _, err := os.Lstat(dmPath); err != nil {
+		t.Errorf("a non-matching dm node was removed: %v", err)
+	}
+}
+
+func TestRemoveMappingNodesRemovesADanglingMapperSymlink(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "mapper"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	mapperPath := MapperPath(dir, "stale")
+	if err := os.Symlink(filepath.Join(dir, "gone"), mapperPath); err != nil {
+		t.Fatal(err)
+	}
+	rdev := func(path string) (uint64, error) { return 0, os.ErrNotExist }
+
+	RemoveMappingNodes(dir, rdev, "stale", nil)
+
+	if _, err := os.Lstat(mapperPath); !os.IsNotExist(err) {
+		t.Errorf("the dangling symlink survived removal: %v", err)
+	}
+}
+
+func TestPlaceNodeReplacesAStaleSymlink(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "node")
+	if err := os.Symlink(filepath.Join(dir, "old-target"), path); err != nil {
+		t.Fatal(err)
+	}
+
+	created := false
+	err := PlaceNode(path, func(tmp string) error {
+		created = true
+		return os.WriteFile(tmp, []byte("new"), 0o600)
+	})
+	if err != nil {
+		t.Fatalf("PlaceNode = %v, want success replacing a stale symlink", err)
+	}
+	if !created {
+		t.Fatal("PlaceNode did not call create")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != "new" {
+		t.Fatalf("PlaceNode left %q, %v; want the new content in place", got, err)
+	}
+}
+
+func TestPlaceNodeRefusesToReplaceSomethingElses(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "control")
+	if err := os.WriteFile(path, []byte("not ours"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	created := false
+	err := PlaceNode(path, func(string) error { created = true; return nil })
+	if !errors.Is(err, ErrNodeUnverified) {
+		t.Fatalf("PlaceNode over a regular file = %v, want ErrNodeUnverified", err)
+	}
+	if created {
+		t.Fatal("PlaceNode called create before refusing a non-stale entry")
+	}
+}
+
+func TestPlaceNodePropagatesACreateFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "node")
+	sentinel := errors.New("create failed")
+
+	if err := PlaceNode(path, func(string) error { return sentinel }); !errors.Is(err, sentinel) {
+		t.Fatalf("PlaceNode = %v, want the create error unchanged", err)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Error("PlaceNode left an entry behind after create failed")
+	}
+}

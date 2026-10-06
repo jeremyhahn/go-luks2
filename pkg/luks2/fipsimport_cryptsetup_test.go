@@ -20,6 +20,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
 // The end-to-end proof for #84, against a volume this package did not write.
@@ -134,7 +136,7 @@ func runFIPSImportChild(role, image string) int {
 			}
 			return childFailed
 		}
-		printErr := borrowSecret("print the scanned volume key", key, func(b []byte) error {
+		printErr := secret.Borrow("print the scanned volume key", key, func(b []byte) error {
 			fmt.Println(hex.EncodeToString(b))
 			return nil
 		})

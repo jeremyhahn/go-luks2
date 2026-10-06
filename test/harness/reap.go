@@ -534,7 +534,7 @@ func waitForNoDevices(query func() ([]LoopDevice, error)) ([]LoopDevice, error) 
 		if waitClock.Now().After(deadline) {
 			return devices, nil
 		}
-		waitClock.Sleep(detachSettlePoll)
+		<-waitClock.NewTimer(detachSettlePoll).C()
 	}
 }
 
@@ -756,7 +756,7 @@ func lockReaper(dir string) (*trustedDir, func(), error) {
 			_ = sd.Close()
 			return nil, nil, &ReaperBusyError{Path: path, Waited: reaperLockTimeoutForTest}
 		}
-		waitClock.Sleep(reaperLockPoll)
+		<-waitClock.NewTimer(reaperLockPoll).C()
 	}
 }
 

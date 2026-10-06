@@ -15,6 +15,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/af"
 )
 
 // SHA-1 anti-forensic keyslots (#236), against volumes cryptsetup wrote.
@@ -259,49 +261,6 @@ func TestNoKeyslotIsWrittenWithSHA1AF(t *testing.T) {
 	})
 }
 
-// TestAFHashTables: the split writes sha256 and sha512 only; the merge also
-// reads sha1, except under the FIPS policy, where it refuses with
-// ErrFIPSNotApproved before any hashing; the structural check accepts sha1 in
-// any mode and nothing unknown.
-func TestAFHashTables(t *testing.T) {
-	for _, name := range []string{"sha256", "sha512"} {
-		if _, err := getHashFunc(name); err != nil {
-			t.Fatalf("split %s: %v", name, err)
-		}
-		if _, err := getAFMergeHashFunc(name); err != nil {
-			t.Fatalf("merge %s: %v", name, err)
-		}
-	}
-	if _, err := getHashFunc("sha1"); !errors.Is(err, ErrUnsupportedHash) {
-		t.Fatalf("split sha1: got %v, want ErrUnsupportedHash", err)
-	}
-	for _, name := range []string{"md5", "sha384", ""} {
-		if err := afHashReadable(name); !errors.Is(err, ErrUnsupportedHash) {
-			t.Fatalf("readable %q: got %v, want ErrUnsupportedHash", name, err)
-		}
-		if _, err := getAFMergeHashFunc(name); !errors.Is(err, ErrUnsupportedHash) {
-			t.Fatalf("merge %q: got %v, want ErrUnsupportedHash", name, err)
-		}
-	}
-	if err := afHashReadable("sha1"); err != nil {
-		t.Fatalf("readable sha1: %v", err)
-	}
-	if !fips140.Enabled() {
-		h, err := getAFMergeHashFunc("sha1")
-		if err != nil || h().Size() != 20 {
-			t.Fatalf("merge sha1 outside FIPS mode: %v", err)
-		}
-	}
-
-	forceFIPSPolicy(t)
-	if _, err := getAFMergeHashFunc("sha1"); !errors.Is(err, ErrFIPSNotApproved) || !strings.Contains(err.Error(), "sha1") {
-		t.Fatalf("merge sha1 under the FIPS policy: got %v, want ErrFIPSNotApproved naming sha1", err)
-	}
-	if err := afHashReadable("sha1"); err != nil {
-		t.Fatalf("readable sha1 under the FIPS policy: %v -- the structural check must not apply the policy", err)
-	}
-}
-
 // TestSHA1AFKeyslotFIPSClassification: a SHA-1 AF hash makes a keyslot
 // non-approved whatever its KDF, and names itself; under the FIPS policy a
 // keyslot refused only for it is an import, while an unknown AF hash is
@@ -378,7 +337,7 @@ func TestChangeKeyAndAFMergeFailuresAreTyped(t *testing.T) {
 		t.Fatalf("an invalid old passphrase: got %v, want the validation error, not a credential verdict", err)
 	}
 
-	if _, err := afMergePlain(t, make([]byte, 100), 4, 32, "sha256"); !errors.Is(err, ErrInvalidKeyslot) {
+	if _, err := afCodec().Merge(enclaveFrom(t, make([]byte, 100)), 32, af.Params{Stripes: 4, Hash: "sha256"}); !errors.Is(err, ErrInvalidKeyslot) {
 		t.Fatalf("AF material of the wrong size: got %v, want ErrInvalidKeyslot", err)
 	}
 }

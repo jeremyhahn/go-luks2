@@ -20,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
 // Crash safety of MigrateToFIPS, proved against cryptsetup (#84).
@@ -206,9 +208,9 @@ func rewriteDigestAsSHA1(t *testing.T, image string, key []byte) {
 	digest := metadata.Digests["0"]
 	digest.Hash = "sha1"
 	digest.Iterations = iterations
-	mk, err := copySecret("crash fixture volume key", key)
+	mk, err := custody.Clone("crash fixture volume key", key)
 	if err != nil {
-		t.Fatalf("copySecret: %v", err)
+		t.Fatalf("custody.Clone: %v", err)
 	}
 	defer mustDestroy(t, mk)
 	derived, err := deriveKeySecret(mk, &KDF{Type: KDFTypePBKDF2, Hash: "sha1", Salt: digest.Salt, Iterations: &iterations}, 20)
@@ -216,7 +218,7 @@ func rewriteDigestAsSHA1(t *testing.T, image string, key []byte) {
 		t.Fatalf("deriving the sha1 digest failed: %v", err)
 	}
 	defer mustDestroy(t, derived)
-	if err := borrowSecret("crash fixture digest", derived, func(b []byte) error {
+	if err := secret.Borrow("crash fixture digest", derived, func(b []byte) error {
 		digest.Digest = encodeBase64(b)
 		return nil
 	}); err != nil {

@@ -16,6 +16,10 @@ import (
 	"strings"
 
 	"github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-luks2/internal/af"
+	"github.com/jeremyhahn/go-luks2/internal/areacipher"
+	"github.com/jeremyhahn/go-luks2/internal/errs"
+	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
 // LUKS2 keyslot constants
@@ -336,7 +340,7 @@ func TestKey(device string, passphrase []byte) error {
 
 	_, metadata, err := readHeaderCopyFrom(f, LUKS2PrimaryHeaderOffset)
 	if err != nil {
-		return &detailError{Detail: "failed to read header", Err: err}
+		return &errs.Error{Detail: "failed to read header", Err: err}
 	}
 
 	// The passphrase must open a keyslot holding the VOLUME key, as cryptsetup
@@ -348,12 +352,12 @@ func TestKey(device string, passphrase []byte) error {
 		// a verdict on the credential, and for a container with no usable
 		// keyslot -- or one whose keyslot is too damaged to evaluate anything
 		// -- no such verdict was ever reached. See #30.
-		return &detailError{Detail: "could not open " + device + " with this passphrase", Err: err}
+		return &errs.Error{Detail: "could not open " + device + " with this passphrase", Err: err}
 	}
 	// The key is recovered only to prove the passphrase opens a slot; it is
 	// released immediately rather than at the end of a scope that does nothing
 	// else with it.
-	releaseSecret(masterKey)
+	custody.Release(masterKey)
 
 	return nil
 }
@@ -411,7 +415,7 @@ func addKeyWithPolicy(device string, existingPassphrase, newPassphrase []byte, o
 
 	hdr, metadata, err := dev.readHeader()
 	if err != nil {
-		return -1, &detailError{Detail: "failed to read header", Err: err}
+		return -1, &errs.Error{Detail: "failed to read header", Err: err}
 	}
 
 	// Unlock with the existing passphrase to get the VOLUME key. A credential
@@ -419,9 +423,9 @@ func addKeyWithPolicy(device string, existingPassphrase, newPassphrase []byte, o
 	// would enroll another keyslot that decrypts nothing (#249, A1).
 	masterKey, _, err := getVolumeKey(dev.reader(), device, existingPassphrase, metadata)
 	if err != nil {
-		return -1, &detailError{Detail: "failed to unlock with existing passphrase", Err: err}
+		return -1, &errs.Error{Detail: "failed to unlock with existing passphrase", Err: err}
 	}
-	defer releaseSecret(masterKey)
+	defer custody.Release(masterKey)
 
 	return addKeyslotWithMasterKey(dev, hdr, metadata, masterKey, newPassphrase, opts, policy)
 }
@@ -439,10 +443,10 @@ func addKeyPreflight(device string, existingPassphrase, newPassphrase []byte, op
 		return err
 	}
 	if err := validateExistingCredential(existingPassphrase); err != nil {
-		return &detailError{Detail: "invalid existing passphrase", Err: err}
+		return &errs.Error{Detail: "invalid existing passphrase", Err: err}
 	}
 	if err := ValidatePassphrase(newPassphrase); err != nil {
-		return &detailError{Detail: "invalid new passphrase", Err: err}
+		return &errs.Error{Detail: "invalid new passphrase", Err: err}
 	}
 	// No SHA-1 keyslot, refused before the existing keyslot is unlocked --
 	// which costs a full KDF derivation -- and before anything is written.
@@ -568,7 +572,7 @@ func addKeyslotWithMasterKey(dev *keyslotDevice, hdr *LUKS2BinaryHeader, metadat
 	// data cipher takes (16 bytes for 128-bit aes-cbc-essiv, 96 for
 	// --integrity hmac-sha256), and that is not the keyslot cipher's concern.
 	newKeySize := masterKey.Size()
-	areaKeySize := writableAreaKeySize(newKeySize)
+	areaKeySize := areacipher.WritableAreaKeySize(newKeySize)
 
 	// Read the container's reserved keyslots area out of its own header rather
 	// than assuming this library's default geometry.
@@ -596,27 +600,27 @@ func addKeyslotWithMasterKey(dev *keyslotDevice, hdr *LUKS2BinaryHeader, metadat
 
 	kdf, err := createKDF(formatOpts, areaKeySize, policy)
 	if err != nil {
-		return -1, &detailError{Detail: "failed to create KDF", Err: err}
+		return -1, &errs.Error{Detail: "failed to create KDF", Err: err}
 	}
 
 	// Derive the area key from the new passphrase
 	passphraseKey, err := DeriveKeyEnclave(newPassphrase, kdf, areaKeySize)
 	if err != nil {
-		return -1, &detailError{Detail: "failed to derive key", Err: err}
+		return -1, &errs.Error{Detail: "failed to derive key", Err: err}
 	}
-	defer releaseSecret(passphraseKey)
+	defer custody.Release(passphraseKey)
 
 	// Apply anti-forensic split to master key
-	afData, err := afSplitEnclave(masterKey, AFStripes, DefaultHashAlgo)
+	afData, err := afCodec().Split(masterKey, af.Params{Stripes: AFStripes, Hash: DefaultHashAlgo})
 	if err != nil {
-		return -1, &detailError{Detail: "failed to apply AF split", Err: err}
+		return -1, &errs.Error{Detail: "failed to apply AF split", Err: err}
 	}
-	defer releaseSecret(afData)
+	defer custody.Release(afData)
 
 	// Encrypt AF-split key material with new passphrase-derived key
-	encryptedKeyMaterial, err := encryptKeyMaterialEnclave(afData, passphraseKey, DefaultCipher)
+	encryptedKeyMaterial, err := areacipher.Default().EncryptEnclave(custody, afData, passphraseKey)
 	if err != nil {
-		return -1, &detailError{Detail: "failed to encrypt key material", Err: err}
+		return -1, &errs.Error{Detail: "failed to encrypt key material", Err: err}
 	}
 	defer clearBytes(encryptedKeyMaterial)
 
@@ -635,7 +639,7 @@ func addKeyslotWithMasterKey(dev *keyslotDevice, hdr *LUKS2BinaryHeader, metadat
 	// sits past the keyslots area let a new keyslot be placed in the gap
 	// between the two.
 	if newKeyslotsEnd > keyslotsEnd {
-		return -1, &detailError{Kind: ErrKeyslotsAreaFull, Detail: fmt.Sprintf("a new keyslot would end at offset %d but the container's keyslots area is %d..%d (config.keyslots_size %s); reformat with a larger keyslots area",
+		return -1, &errs.Error{Kind: ErrKeyslotsAreaFull, Detail: fmt.Sprintf("a new keyslot would end at offset %d but the container's keyslots area is %d..%d (config.keyslots_size %s); reformat with a larger keyslots area",
 			newKeyslotsEnd, keyslotsStart, keyslotsEnd, metadata.Config.KeyslotsSize)}
 	}
 
@@ -656,12 +660,12 @@ func addKeyslotWithMasterKey(dev *keyslotDevice, hdr *LUKS2BinaryHeader, metadat
 		// header reaches here through a clean ReadHeader.
 		segmentOffset, err := parseSize(segment.Offset)
 		if err != nil {
-			return -1, &detailError{Kind: ErrInvalidHeader, Detail: fmt.Sprintf("data segment %s declares an offset of %q, which is not a valid size, so the "+
+			return -1, &errs.Error{Kind: ErrInvalidHeader, Detail: fmt.Sprintf("data segment %s declares an offset of %q, which is not a valid size, so the "+
 				"bound protecting the encrypted data from a new keyslot cannot be computed",
 				id, segment.Offset)}
 		}
 		if !dataOnAnotherDevice(segmentOffset) && newKeyslotsEnd > segmentOffset {
-			return -1, &detailError{Kind: ErrKeyslotsAreaFull, Detail: fmt.Sprintf("a new keyslot would end at offset %d but the data segment starts at %d; reformat with a larger header",
+			return -1, &errs.Error{Kind: ErrKeyslotsAreaFull, Detail: fmt.Sprintf("a new keyslot would end at offset %d but the data segment starts at %d; reformat with a larger header",
 				newKeyslotsEnd, segmentOffset)}
 		}
 	}
@@ -689,8 +693,8 @@ func addKeyslotWithMasterKey(dev *keyslotDevice, hdr *LUKS2BinaryHeader, metadat
 			Offset:  formatSize(newOffset),
 			Size:    formatSize(alignedSize),
 			// What this call actually encrypts the material with, stated
-			// rather than copied from a neighbor. encryptKeyMaterialEnclave
-			// uses DefaultCipher and xtsSectors runs XTS; there is no other
+			// rather than copied from a neighbor. The material is encrypted
+			// with areacipher.Default, which runs XTS; there is no other
 			// truthful value here, and a wrong one is a keyslot only this
 			// package can open -- with our own suite staying green, because
 			// the read path discards the mode.
@@ -758,7 +762,7 @@ func addKeyslotWithMasterKey(dev *keyslotDevice, hdr *LUKS2BinaryHeader, metadat
 
 	// Write updated headers
 	if err := dev.writeHeader(hdr, metadata); err != nil {
-		return -1, &detailError{Detail: "failed to write header", Err: err}
+		return -1, &errs.Error{Detail: "failed to write header", Err: err}
 	}
 
 	// PROVE IT OPENS, from the header as committed (#249, A3). AddKey used to
@@ -786,7 +790,7 @@ func RemoveKey(device string, passphrase []byte, keyslot int) error {
 		return err
 	}
 	if keyslot < 0 || keyslot >= MaxKeyslots {
-		return &detailError{Kind: ErrInvalidKeyslot, Detail: fmt.Sprintf("%d (must be 0-%d)", keyslot, MaxKeyslots-1)}
+		return &errs.Error{Kind: ErrInvalidKeyslot, Detail: fmt.Sprintf("%d (must be 0-%d)", keyslot, MaxKeyslots-1)}
 	}
 
 	// Lock the device and keep the locked descriptor for everything below
@@ -799,14 +803,14 @@ func RemoveKey(device string, passphrase []byte, keyslot int) error {
 
 	hdr, metadata, err := dev.readHeader()
 	if err != nil {
-		return &detailError{Detail: "failed to read header", Err: err}
+		return &errs.Error{Detail: "failed to read header", Err: err}
 	}
 
 	// Check that keyslot exists
 	slotIDStr := strconv.Itoa(keyslot)
 	targetKeyslot, exists := metadata.Keyslots[slotIDStr]
 	if !exists {
-		return &detailError{Kind: ErrInvalidKeyslot, Detail: fmt.Sprintf("keyslot %d does not exist", keyslot)}
+		return &errs.Error{Kind: ErrInvalidKeyslot, Detail: fmt.Sprintf("keyslot %d does not exist", keyslot)}
 	}
 
 	// Verify passphrase unlocks this specific keyslot. The recovered key is
@@ -814,9 +818,9 @@ func RemoveKey(device string, passphrase []byte, keyslot int) error {
 	// the rest of the removal.
 	verified, err := unlockKeyslotFrom(dev.reader(), slotIDStr, passphrase, targetKeyslot, metadata.Digests)
 	if err != nil {
-		return &detailError{Detail: fmt.Sprintf("passphrase does not match keyslot %d", keyslot), Err: err}
+		return &errs.Error{Detail: fmt.Sprintf("passphrase does not match keyslot %d", keyslot), Err: err}
 	}
-	releaseSecret(verified)
+	custody.Release(verified)
 
 	// THE GATE. Every removal path passes through checkKeyslotRemovable, which
 	// asks the one question all of them need answered: after this removal, can
@@ -840,12 +844,12 @@ func RemoveKey(device string, passphrase []byte, keyslot int) error {
 
 	// From here the operation is destructive.
 	if err := wipeKeyslotArea(dev, hdr, metadata, slotIDStr, targetKeyslot); err != nil {
-		return &detailError{Detail: "failed to wipe keyslot area", Err: err}
+		return &errs.Error{Detail: "failed to wipe keyslot area", Err: err}
 	}
 
 	// Write updated headers
 	if err := dev.writeHeader(hdr, metadata); err != nil {
-		return &detailError{Detail: "failed to write header", Err: err}
+		return &errs.Error{Detail: "failed to write header", Err: err}
 	}
 
 	return nil
@@ -868,7 +872,7 @@ func KillSlot(device string, authPassphrase []byte, targetSlot int) error {
 		return err
 	}
 	if targetSlot < 0 || targetSlot >= MaxKeyslots {
-		return &detailError{Kind: ErrInvalidKeyslot, Detail: fmt.Sprintf("%d (must be 0-%d)", targetSlot, MaxKeyslots-1)}
+		return &errs.Error{Kind: ErrInvalidKeyslot, Detail: fmt.Sprintf("%d (must be 0-%d)", targetSlot, MaxKeyslots-1)}
 	}
 
 	// Lock the device and keep the locked descriptor for everything below
@@ -881,7 +885,7 @@ func KillSlot(device string, authPassphrase []byte, targetSlot int) error {
 
 	hdr, metadata, err := dev.readHeader()
 	if err != nil {
-		return &detailError{Detail: "failed to read header", Err: err}
+		return &errs.Error{Detail: "failed to read header", Err: err}
 	}
 
 	// Authenticate through the ONE implementation of the keyslot scan, and
@@ -897,15 +901,15 @@ func KillSlot(device string, authPassphrase []byte, targetSlot int) error {
 		// this call may never have reached -- a container with no usable
 		// keyslot judged nothing. The operation is named; the outcome comes
 		// from the wrapped error.
-		return &detailError{Detail: "could not authenticate against " + device, Err: err}
+		return &errs.Error{Detail: "could not authenticate against " + device, Err: err}
 	}
-	releaseSecret(candidate)
+	custody.Release(candidate)
 
 	// Check that target keyslot exists
 	slotIDStr := strconv.Itoa(targetSlot)
 	targetKeyslot, exists := metadata.Keyslots[slotIDStr]
 	if !exists {
-		return &detailError{Kind: ErrInvalidKeyslot, Detail: fmt.Sprintf("keyslot %d does not exist", targetSlot)}
+		return &errs.Error{Kind: ErrInvalidKeyslot, Detail: fmt.Sprintf("keyslot %d does not exist", targetSlot)}
 	}
 
 	// THE GATE; see RemoveKey and checkKeyslotRemovable.
@@ -922,12 +926,12 @@ func KillSlot(device string, authPassphrase []byte, targetSlot int) error {
 
 	// From here the operation is destructive.
 	if err := wipeKeyslotArea(dev, hdr, metadata, slotIDStr, targetKeyslot); err != nil {
-		return &detailError{Detail: "failed to wipe keyslot area", Err: err}
+		return &errs.Error{Detail: "failed to wipe keyslot area", Err: err}
 	}
 
 	// Write updated headers
 	if err := dev.writeHeader(hdr, metadata); err != nil {
-		return &detailError{Detail: "failed to write header", Err: err}
+		return &errs.Error{Detail: "failed to write header", Err: err}
 	}
 
 	return nil
@@ -940,13 +944,13 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 		return err
 	}
 	if err := validateExistingCredential(oldPassphrase); err != nil {
-		return &detailError{Detail: "invalid old passphrase", Err: err}
+		return &errs.Error{Detail: "invalid old passphrase", Err: err}
 	}
 	if err := ValidatePassphrase(newPassphrase); err != nil {
-		return &detailError{Detail: "invalid new passphrase", Err: err}
+		return &errs.Error{Detail: "invalid new passphrase", Err: err}
 	}
 	if keyslot < 0 || keyslot >= MaxKeyslots {
-		return &detailError{Kind: ErrInvalidKeyslot, Detail: fmt.Sprintf("%d (must be 0-%d)", keyslot, MaxKeyslots-1)}
+		return &errs.Error{Kind: ErrInvalidKeyslot, Detail: fmt.Sprintf("%d (must be 0-%d)", keyslot, MaxKeyslots-1)}
 	}
 
 	// Lock the device and keep the locked descriptor for everything below:
@@ -961,22 +965,22 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 	// Read existing header and metadata
 	hdr, metadata, err := dev.readHeader()
 	if err != nil {
-		return &detailError{Detail: "failed to read header", Err: err}
+		return &errs.Error{Detail: "failed to read header", Err: err}
 	}
 
 	// Check that keyslot exists
 	slotIDStr := strconv.Itoa(keyslot)
 	targetKeyslot, exists := metadata.Keyslots[slotIDStr]
 	if !exists {
-		return &detailError{Kind: ErrInvalidKeyslot, Detail: fmt.Sprintf("keyslot %d does not exist", keyslot)}
+		return &errs.Error{Kind: ErrInvalidKeyslot, Detail: fmt.Sprintf("keyslot %d does not exist", keyslot)}
 	}
 
 	// Unlock with old passphrase to get master key
 	masterKey, err := unlockKeyslotFrom(dev.reader(), slotIDStr, oldPassphrase, targetKeyslot, metadata.Digests)
 	if err != nil {
-		return &detailError{Detail: fmt.Sprintf("old passphrase does not match keyslot %d", keyslot), Err: err}
+		return &errs.Error{Detail: fmt.Sprintf("old passphrase does not match keyslot %d", keyslot), Err: err}
 	}
-	defer releaseSecret(masterKey)
+	defer custody.Release(masterKey)
 
 	// The keyslot as it stands, kept whole: if the rewritten keyslot cannot be
 	// proved to open, this is what the header is put back to. Its area and af
@@ -997,9 +1001,9 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 	// bytes may not key XTS).
 	areaKeySize := targetKeyslot.Area.KeySize
 	areaEncryption := targetKeyslot.Area.Encryption
-	if area, err := parseKeyslotAreaEncryption(areaEncryption); err != nil || area.mode != areaModeXTS {
+	if area, err := parseKeyslotAreaEncryption(areaEncryption); err != nil || !area.XTS() {
 		areaEncryption = KeyslotAreaEncryption
-		areaKeySize = writableAreaKeySize(targetKeyslot.KeySize)
+		areaKeySize = areacipher.WritableAreaKeySize(targetKeyslot.KeySize)
 	}
 
 	// The area this call will eventually ZERO is checked here, up front, against
@@ -1119,7 +1123,7 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 		if rewritingSHA1 {
 			converted, err := sha256IterationsForSHA1(preserved, areaKeySize)
 			if err != nil {
-				return &detailError{Detail: "failed to carry the PBKDF2-SHA1 keyslot's cost over to PBKDF2-SHA256", Err: err}
+				return &errs.Error{Detail: "failed to carry the PBKDF2-SHA1 keyslot's cost over to PBKDF2-SHA256", Err: err}
 			}
 			preserved = converted
 		}
@@ -1131,15 +1135,15 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 
 	kdf, err := CreateKDF(formatOpts, areaKeySize)
 	if err != nil {
-		return &detailError{Detail: "failed to create KDF", Err: err}
+		return &errs.Error{Detail: "failed to create KDF", Err: err}
 	}
 
 	// Derive the area key from the new passphrase, to the area's key size.
 	passphraseKey, err := DeriveKeyEnclave(newPassphrase, kdf, areaKeySize)
 	if err != nil {
-		return &detailError{Detail: "failed to derive key", Err: err}
+		return &errs.Error{Detail: "failed to derive key", Err: err}
 	}
-	defer releaseSecret(passphraseKey)
+	defer custody.Release(passphraseKey)
 
 	// A keyslot read with SHA-1 anti-forensic hashing -- a converted LUKS1
 	// keyslot -- is REWRITTEN with the default: this package reads SHA-1
@@ -1155,17 +1159,17 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 	// foreign keyslot written with 2000 was rewritten as 4000 stripes of
 	// material under a header that merges 2000: a keyslot that opens nothing,
 	// and the old area wiped behind it (#249, A3).
-	afData, err := afSplitEnclave(masterKey, AFStripes, targetKeyslot.AF.Hash)
+	afData, err := afCodec().Split(masterKey, af.Params{Stripes: AFStripes, Hash: targetKeyslot.AF.Hash})
 	if err != nil {
-		return &detailError{Detail: "failed to apply AF split", Err: err}
+		return &errs.Error{Detail: "failed to apply AF split", Err: err}
 	}
-	defer releaseSecret(afData)
+	defer custody.Release(afData)
 	targetKeyslot.AF.Stripes = AFStripes
 
 	// Encrypt AF-split key material with new passphrase-derived key
-	encryptedKeyMaterial, err := encryptKeyMaterialEnclave(afData, passphraseKey, DefaultCipher)
+	encryptedKeyMaterial, err := areacipher.Default().EncryptEnclave(custody, afData, passphraseKey)
 	if err != nil {
-		return &detailError{Detail: "failed to encrypt key material", Err: err}
+		return &errs.Error{Detail: "failed to encrypt key material", Err: err}
 	}
 	defer clearBytes(encryptedKeyMaterial)
 
@@ -1176,7 +1180,7 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 	// 4000. Refusing there would make that keyslot's passphrase unchangeable.
 	existingSize, err := parseSize(targetKeyslot.Area.Size)
 	if err != nil {
-		return &detailError{Detail: "failed to parse keyslot size", Err: err}
+		return &errs.Error{Detail: "failed to parse keyslot size", Err: err}
 	}
 	newSize := max(existingSize, alignTo(int64(len(encryptedKeyMaterial)), KeyslotAreaAlignment))
 
@@ -1205,7 +1209,7 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 	// the area freed here is reclaimed by the next relocation.
 	newOffset, err := findFreeKeyslotArea(hdr, metadata, newSize)
 	if err != nil {
-		return &detailError{Detail: fmt.Sprintf("cannot rewrite keyslot %d safely (add a new key and remove this slot instead)", keyslot), Err: err}
+		return &errs.Error{Detail: fmt.Sprintf("cannot rewrite keyslot %d safely (add a new key and remove this slot instead)", keyslot), Err: err}
 	}
 
 	// The header is proved writable and the metadata brought to its final state
@@ -1232,7 +1236,7 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 
 	// The commit point. After this the new passphrase opens the volume.
 	if err := dev.writeHeader(hdr, metadata); err != nil {
-		return &detailError{Detail: "failed to write header", Err: err}
+		return &errs.Error{Detail: "failed to write header", Err: err}
 	}
 
 	// PROVE IT, before anything old is destroyed (#249, A3). The keyslot is
@@ -1250,7 +1254,7 @@ func ChangeKey(device string, oldPassphrase, newPassphrase []byte, keyslot int) 
 	// what can fail here is I/O, not a refusal, and a failure leaves the volume
 	// openable by the new passphrase with the old material still on the device.
 	if err := wipeKeyslotArea(dev, hdr, metadata, slotIDStr, &original); err != nil {
-		return &detailError{Detail: fmt.Sprintf("the new passphrase is live in keyslot %d, but the old key material could not be destroyed", keyslot), Err: err}
+		return &errs.Error{Detail: fmt.Sprintf("the new passphrase is live in keyslot %d, but the old key material could not be destroyed", keyslot), Err: err}
 	}
 
 	return nil
@@ -1264,7 +1268,7 @@ func KillKeyslot(device string, keyslot int) error {
 		return err
 	}
 	if keyslot < 0 || keyslot >= MaxKeyslots {
-		return &detailError{Kind: ErrInvalidKeyslot, Detail: fmt.Sprintf("%d (must be 0-%d)", keyslot, MaxKeyslots-1)}
+		return &errs.Error{Kind: ErrInvalidKeyslot, Detail: fmt.Sprintf("%d (must be 0-%d)", keyslot, MaxKeyslots-1)}
 	}
 
 	// Lock the device and keep the locked descriptor for everything below
@@ -1277,14 +1281,14 @@ func KillKeyslot(device string, keyslot int) error {
 
 	hdr, metadata, err := dev.readHeader()
 	if err != nil {
-		return &detailError{Detail: "failed to read header", Err: err}
+		return &errs.Error{Detail: "failed to read header", Err: err}
 	}
 
 	// Check that keyslot exists
 	slotIDStr := strconv.Itoa(keyslot)
 	targetKeyslot, exists := metadata.Keyslots[slotIDStr]
 	if !exists {
-		return &detailError{Kind: ErrInvalidKeyslot, Detail: fmt.Sprintf("keyslot %d does not exist", keyslot)}
+		return &errs.Error{Kind: ErrInvalidKeyslot, Detail: fmt.Sprintf("keyslot %d does not exist", keyslot)}
 	}
 
 	// THE GATE; see RemoveKey and checkKeyslotRemovable. With no passphrase it
@@ -1302,12 +1306,12 @@ func KillKeyslot(device string, keyslot int) error {
 
 	// From here the operation is destructive.
 	if err := wipeKeyslotArea(dev, hdr, metadata, slotIDStr, targetKeyslot); err != nil {
-		return &detailError{Detail: "failed to wipe keyslot area", Err: err}
+		return &errs.Error{Detail: "failed to wipe keyslot area", Err: err}
 	}
 
 	// Write updated headers
 	if err := dev.writeHeader(hdr, metadata); err != nil {
-		return &detailError{Detail: "failed to write header", Err: err}
+		return &errs.Error{Detail: "failed to write header", Err: err}
 	}
 
 	return nil
@@ -1321,7 +1325,7 @@ func ListKeyslots(device string) ([]KeyslotInfo, error) {
 
 	_, metadata, err := ReadHeader(device)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read header: %w", err)
+		return nil, &errs.Error{Detail: "failed to read header", Err: err}
 	}
 
 	return listKeyslotsFrom(metadata)
@@ -1456,85 +1460,6 @@ type KeyslotInfo struct {
 	Argon2Parallel   int
 }
 
-// canonicalKeyslotID reports the slot number a keyslot key addresses, and
-// whether any LUKS2 implementation can reach it.
-//
-// It mirrors canonicalTokenID exactly, and deliberately: the two questions are
-// the same question about two maps in the same header, and answering them
-// differently is how a listing comes to disagree with what can be retrieved.
-//
-// SPELLING, then RANGE. strconv.Atoi accepts "007", "+1" and " 1" and returns
-// the same number for each, so parsing alone does not answer whether a key
-// addresses a slot; the round trip through strconv.Itoa does. Range then bounds
-// it to the 0..LUKS2MaxKeyslots-1 that cryptsetup addresses -- the 31/32 pair in
-// the measurements above pins that boundary rather than assuming it.
-func canonicalKeyslotID(key string) (int, bool) {
-	id, err := strconv.Atoi(key)
-	if err != nil || strconv.Itoa(id) != key {
-		return 0, false
-	}
-	if id < 0 || id >= LUKS2MaxKeyslots {
-		return 0, false
-	}
-	return id, true
-}
-
-// keyslotIDsInScanOrder returns every keyslot ID in the order unlock attempts
-// are made: ascending numeric ID, with any ID that does not parse with
-// strconv.Atoi after those, in lexical order. That tail is not only
-// non-numeric spellings -- a decimal string too large for an int lands there
-// too, because Atoi reports it as an error.
-//
-// Ranging over the keyslot map directly leaves the order to Go's randomized map
-// iteration, which costs twice. Every attempt is a full derivation -- a failed
-// one costs exactly as much as a successful one, because the digest comparison
-// is the only rejection point -- and the credential in use is almost always in
-// the lowest-numbered slot, so a random start pays O(n/2) derivations where
-// ascending order pays one. It also makes the time to open a volume differ on
-// every call for reasons the caller cannot see or control.
-//
-// The ordering is TOTAL: every key in the map is returned exactly once. An ID
-// that does not parse as a number is still returned rather than skipped,
-// because dropping it would make its keyslot unreachable, and an unreachable
-// keyslot is a credential that can no longer open the volume.
-//
-// Keyslot priority is deliberately not consulted here. No unlock path reads
-// that field -- ListKeyslots reads it, but only to report it -- and honoring it
-// would change WHICH keyslots are tried rather than merely the order, which is
-// a different decision from this one. See #56: the values written for it are
-// inverted with respect to LUKS2, so it must not be wired up as it stands.
-func keyslotIDsInScanOrder(keyslots map[string]*Keyslot) []string {
-	ids := make([]string, 0, len(keyslots))
-	for id := range keyslots {
-		ids = append(ids, id)
-	}
-
-	slices.SortFunc(ids, func(a, b string) int {
-		na, errA := strconv.Atoi(a)
-		nb, errB := strconv.Atoi(b)
-		switch {
-		case errA == nil && errB == nil:
-			// Two spellings of one number ("7" and "007") parse equal. Ties
-			// must break on the raw string: slices.SortFunc is not stable and
-			// the input order comes from the map, so leaving them equal would
-			// hand exactly this header back to the randomness the ordering
-			// exists to remove.
-			if c := cmp.Compare(na, nb); c != 0 {
-				return c
-			}
-			return cmp.Compare(a, b)
-		case errA == nil:
-			return -1
-		case errB == nil:
-			return 1
-		default:
-			return cmp.Compare(a, b)
-		}
-	})
-
-	return ids
-}
-
 // getMasterKey unlocks the volume and returns the master key HELD IN PROTECTED
 // MEMORY. The caller owns the returned enclave and must Destroy it.
 //
@@ -1634,67 +1559,13 @@ func getVolumeKey(f io.ReaderAt, device string, passphrase []byte, metadata *LUK
 	}
 	if len(order) == 0 {
 		if len(metadata.Keyslots) == 0 {
-			return nil, "", &detailError{Kind: ErrNoKeyslots, Detail: "the header declares no keyslots"}
+			return nil, "", &errs.Error{Kind: ErrNoKeyslots, Detail: "the header declares no keyslots"}
 		}
-		return nil, "", &detailError{Kind: ErrNoKeyslots, Detail: fmt.Sprintf(
+		return nil, "", &errs.Error{Kind: ErrNoKeyslots, Detail: fmt.Sprintf(
 			"none of the header's %d keyslot(s) is attested by a digest binding every data segment (%s), so none holds the volume key",
 			len(metadata.Keyslots), strings.Join(dataSegmentIDs(metadata), ", "))}
 	}
 	return getMasterKeySlot(f, device, passphrase, volumeKeyDigestsView(metadata), order)
-}
-
-// volumeKeyDigestsView is metadata with its digests narrowed to those that name
-// EVERY data segment. It shares everything else with metadata and must be
-// treated as read-only.
-func volumeKeyDigestsView(metadata *LUKS2Metadata) *LUKS2Metadata {
-	segments := dataSegmentIDs(metadata)
-	view := *metadata
-	view.Digests = make(map[string]*Digest, len(metadata.Digests))
-	for id, digest := range metadata.Digests {
-		if digest == nil || len(segments) == 0 {
-			continue
-		}
-		bindsAll := true
-		for _, segment := range segments {
-			if !slices.Contains(digest.Segments, segment) {
-				bindsAll = false
-				break
-			}
-		}
-		if bindsAll {
-			view.Digests[id] = digest
-		}
-	}
-	return &view
-}
-
-// volumeKeyScanOrder is keyslotIDsInScanOrder with the keyslots whose digests
-// bind every data segment moved to the front, each group keeping its own order.
-//
-// A LUKS2 header may carry unbound keys -- keyslots whose digest names no
-// segment -- beside the volume key, and nothing stops one from sharing a
-// passphrase with a keyslot that holds the volume key. A purely numeric scan
-// finds whichever sorts first, and Unlock would hand an unbound key to
-// dm-crypt: the mapping succeeds and every byte read through it is garbage.
-// cryptsetup opens only keyslots bound to the segment it activates; trying the
-// bound ones first gives the same answer whenever a bound keyslot opens, and
-// changes nothing for a header whose keyslots are all bound, which is every
-// header this library and a default cryptsetup luksFormat write.
-//
-// It reorders and never filters: a keyslot outside the first group is still
-// tried, so no credential that opened a volume before is refused now.
-func volumeKeyScanOrder(metadata *LUKS2Metadata) []string {
-	all := keyslotIDsInScanOrder(metadata.Keyslots)
-	order := make([]string, 0, len(all))
-	var rest []string
-	for _, id := range all {
-		if keyslotDeclaredForAllSegments(metadata, id) {
-			order = append(order, id)
-		} else {
-			rest = append(rest, id)
-		}
-	}
-	return append(order, rest...)
 }
 
 // getMasterKeySlot is getMasterKey with the scan order supplied by the caller
@@ -1778,7 +1649,7 @@ func getMasterKeySlot(dev io.ReaderAt, device string, passphrase []byte, metadat
 		}
 
 		if untried == nil {
-			untried = &detailError{Detail: "keyslot " + id + " could not be tried", Err: err}
+			untried = &errs.Error{Detail: "keyslot " + id + " could not be tried", Err: err}
 		}
 	}
 
@@ -1794,9 +1665,9 @@ func getMasterKeySlot(dev io.ReaderAt, device string, passphrase []byte, metadat
 	// to report, only a header that offers no way in.
 	if tried == 0 {
 		if len(metadata.Keyslots) == 0 {
-			return nil, "", &detailError{Kind: ErrNoKeyslots, Detail: "the header declares no keyslots"}
+			return nil, "", &errs.Error{Kind: ErrNoKeyslots, Detail: "the header declares no keyslots"}
 		}
-		return nil, "", &detailError{Kind: ErrNoKeyslots, Detail: fmt.Sprintf("the header declares %d keyslot(s), none of them a luks2 keyslot at an id cryptsetup can address",
+		return nil, "", &errs.Error{Kind: ErrNoKeyslots, Detail: fmt.Sprintf("the header declares %d keyslot(s), none of them a luks2 keyslot at an id cryptsetup can address",
 			len(metadata.Keyslots))}
 	}
 
@@ -1838,7 +1709,7 @@ func digestAttestingKey(metadata *LUKS2Metadata, masterKey *enclave.MemoryEnclav
 	if other != "" {
 		return other, nil
 	}
-	return "", &detailError{Kind: ErrMasterKeyVerification,
+	return "", &errs.Error{Kind: ErrMasterKeyVerification,
 		Detail: "no digest in the header attests the key the new keyslot would hold"}
 }
 
@@ -1848,11 +1719,11 @@ func findAvailableKeyslot(metadata *LUKS2Metadata, opts *AddKeyOptions) (int, er
 	if opts != nil && opts.Keyslot != nil {
 		slot := *opts.Keyslot
 		if slot < 0 || slot >= MaxKeyslots {
-			return 0, fmt.Errorf("invalid keyslot: %d (must be 0-%d)", slot, MaxKeyslots-1)
+			return 0, &errs.Error{Kind: ErrInvalidKeyslot, Detail: fmt.Sprintf("%d (must be 0-%d)", slot, MaxKeyslots-1)}
 		}
 		slotIDStr := strconv.Itoa(slot)
 		if _, exists := metadata.Keyslots[slotIDStr]; exists {
-			return 0, fmt.Errorf("keyslot %d already in use", slot)
+			return 0, &errs.Error{Detail: fmt.Sprintf("keyslot %d already in use", slot)}
 		}
 		return slot, nil
 	}
@@ -1865,7 +1736,7 @@ func findAvailableKeyslot(metadata *LUKS2Metadata, opts *AddKeyOptions) (int, er
 		}
 	}
 
-	return 0, fmt.Errorf("no available keyslots")
+	return 0, &errs.Error{Detail: "no available keyslots"}
 }
 
 // keyslotsAreaBounds returns the half-open [start, end) byte range of the
@@ -1895,14 +1766,14 @@ func keyslotsAreaBounds(hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) (int64,
 // config.keyslots_size bytes.
 func keyslotsAreaFrom(start int64, metadata *LUKS2Metadata) (int64, int64, error) {
 	if metadata.Config == nil {
-		return 0, 0, &detailError{Kind: ErrInvalidHeader, Detail: "header has no config object, so the keyslots area is undefined"}
+		return 0, 0, &errs.Error{Kind: ErrInvalidHeader, Detail: "header has no config object, so the keyslots area is undefined"}
 	}
 	size, err := parseSize(metadata.Config.KeyslotsSize)
 	if err != nil {
-		return 0, 0, &detailError{Kind: ErrInvalidHeader, Detail: fmt.Sprintf("config.keyslots_size %q is not a size", metadata.Config.KeyslotsSize), Err: err}
+		return 0, 0, &errs.Error{Kind: ErrInvalidHeader, Detail: fmt.Sprintf("config.keyslots_size %q is not a size", metadata.Config.KeyslotsSize), Err: err}
 	}
 	if size <= 0 || size > math.MaxInt64-start {
-		return 0, 0, &detailError{Kind: ErrInvalidHeader, Detail: fmt.Sprintf("config.keyslots_size %d does not describe a keyslots area", size)}
+		return 0, 0, &errs.Error{Kind: ErrInvalidHeader, Detail: fmt.Sprintf("config.keyslots_size %d does not describe a keyslots area", size)}
 	}
 
 	return start, start + size, nil
@@ -1941,15 +1812,21 @@ func calculateNextKeyslotOffset(metadata *LUKS2Metadata, keyslotsStart int64) (i
 		}
 		offset, err := parseSize(ks.Area.Offset)
 		if err != nil {
-			return 0, fmt.Errorf("%w: keyslot %s declares an area offset of %q, which is not a valid size; a new "+
-				"keyslot cannot be placed without knowing where this one ends",
-				ErrInvalidHeader, id, ks.Area.Offset)
+			return 0, &errs.Error{
+				Kind: ErrInvalidHeader,
+				Detail: fmt.Sprintf("keyslot %s declares an area offset of %q, which is not a valid size; a new "+
+					"keyslot cannot be placed without knowing where this one ends",
+					id, ks.Area.Offset),
+			}
 		}
 		size, err := parseSize(ks.Area.Size)
 		if err != nil {
-			return 0, fmt.Errorf("%w: keyslot %s declares an area size of %q, which is not a valid size; a new "+
-				"keyslot cannot be placed without knowing where this one ends",
-				ErrInvalidHeader, id, ks.Area.Size)
+			return 0, &errs.Error{
+				Kind: ErrInvalidHeader,
+				Detail: fmt.Sprintf("keyslot %s declares an area size of %q, which is not a valid size; a new "+
+					"keyslot cannot be placed without knowing where this one ends",
+					id, ks.Area.Size),
+			}
 		}
 		end := offset + size
 		if end > maxEnd {
@@ -2139,15 +2016,15 @@ func keyslotAreaDisjointFrom(f *os.File, metadata *LUKS2Metadata, id string, are
 		// predicate cannot silently skip a survivor.
 		otherOffset, err := parseSize(survivor.Area.Offset)
 		if err != nil {
-			return &detailError{Kind: ErrInvalidKeyslot, Detail: "keyslot " + other + " has an unreadable area offset"}
+			return &errs.Error{Kind: ErrInvalidKeyslot, Detail: "keyslot " + other + " has an unreadable area offset"}
 		}
 		otherSize, err := parseSize(survivor.Area.Size)
 		if err != nil {
-			return &detailError{Kind: ErrInvalidKeyslot, Detail: "keyslot " + other + " has an unreadable area size"}
+			return &errs.Error{Kind: ErrInvalidKeyslot, Detail: "keyslot " + other + " has an unreadable area size"}
 		}
 
 		if targetOffset < otherOffset+otherSize && otherOffset < targetEnd {
-			return &detailError{Kind: ErrKeyslotAreaOverlap, Detail: fmt.Sprintf(
+			return &errs.Error{Kind: ErrKeyslotAreaOverlap, Detail: fmt.Sprintf(
 				"zeroing [%d,%d) for keyslot %s would also zero keyslot %s at [%d,%d), which still holds a key",
 				targetOffset, targetEnd, id, other, otherOffset, otherOffset+otherSize)}
 		}
@@ -2198,7 +2075,7 @@ func checkKeyslotAreaDisjointFromOthers(dev *keyslotDevice, metadata *LUKS2Metad
 // the same pair of boundaries AddKey enforces, for the same reason.
 func findFreeKeyslotArea(hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata, size int64) (int64, error) {
 	if size <= 0 {
-		return 0, fmt.Errorf("%w: a keyslot area of %d bytes", ErrInvalidSize, size)
+		return 0, &errs.Error{Kind: ErrInvalidSize, Detail: fmt.Sprintf("a keyslot area of %d bytes", size)}
 	}
 
 	start, end, err := keyslotsAreaBounds(hdr, metadata)
@@ -2211,9 +2088,12 @@ func findFreeKeyslotArea(hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata, size i
 	for id, segment := range metadata.Segments {
 		segmentOffset, err := parseSize(segment.Offset)
 		if err != nil {
-			return 0, fmt.Errorf("%w: data segment %s declares an offset of %q, which is not a valid size, so the "+
-				"search for free keyslot space cannot be stopped before the encrypted data",
-				ErrInvalidHeader, id, segment.Offset)
+			return 0, &errs.Error{
+				Kind: ErrInvalidHeader,
+				Detail: fmt.Sprintf("data segment %s declares an offset of %q, which is not a valid size, so the "+
+					"search for free keyslot space cannot be stopped before the encrypted data",
+					id, segment.Offset),
+			}
 		}
 		if !dataOnAnotherDevice(segmentOffset) && segmentOffset < end {
 			end = segmentOffset
@@ -2234,15 +2114,21 @@ func findFreeKeyslotArea(hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata, size i
 		}
 		offset, err := parseSize(ks.Area.Offset)
 		if err != nil {
-			return 0, fmt.Errorf("%w: keyslot %s declares an area offset of %q, which is not a valid size; free "+
-				"space cannot be chosen without knowing which bytes this keyslot occupies",
-				ErrInvalidHeader, id, ks.Area.Offset)
+			return 0, &errs.Error{
+				Kind: ErrInvalidHeader,
+				Detail: fmt.Sprintf("keyslot %s declares an area offset of %q, which is not a valid size; free "+
+					"space cannot be chosen without knowing which bytes this keyslot occupies",
+					id, ks.Area.Offset),
+			}
 		}
 		areaSize, err := parseSize(ks.Area.Size)
 		if err != nil {
-			return 0, fmt.Errorf("%w: keyslot %s declares an area size of %q, which is not a valid size; free "+
-				"space cannot be chosen without knowing which bytes this keyslot occupies",
-				ErrInvalidHeader, id, ks.Area.Size)
+			return 0, &errs.Error{
+				Kind: ErrInvalidHeader,
+				Detail: fmt.Sprintf("keyslot %s declares an area size of %q, which is not a valid size; free "+
+					"space cannot be chosen without knowing which bytes this keyslot occupies",
+					id, ks.Area.Size),
+			}
 		}
 		// A non-positive size is a DECLARED empty extent rather than an
 		// unreadable one: it parsed, and it occupies nothing to avoid.
@@ -2265,8 +2151,11 @@ func findFreeKeyslotArea(hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata, size i
 	}
 
 	if cursor+size > end {
-		return 0, fmt.Errorf("%w: %d bytes are needed and the keyslots area %d..%d has no gap that large",
-			ErrKeyslotsAreaFull, size, start, end)
+		return 0, &errs.Error{
+			Kind: ErrKeyslotsAreaFull,
+			Detail: fmt.Sprintf("%d bytes are needed and the keyslots area %d..%d has no gap that large",
+				size, start, end),
+		}
 	}
 	return cursor, nil
 }
@@ -2299,7 +2188,7 @@ func checkKeyslotRemovable(dev *keyslotDevice, hdr *LUKS2BinaryHeader, metadata 
 
 	f := dev.file
 	if usableKeyslotsAfterRemoving(f, hdr, metadata, id) == 0 {
-		return &detailError{Kind: ErrLastKeyslot, Detail: "removing keyslot " + id +
+		return &errs.Error{Kind: ErrLastKeyslot, Detail: "removing keyslot " + id +
 			" would leave no keyslot holding the volume key: none of the others is a keyslot the volume's data segments are bound to that could open it"}
 	}
 	return keyslotAreaDisjointFrom(f, metadata, id, areaOfKeyslot(metadata.Keyslots[id]))
@@ -2320,25 +2209,25 @@ func checkKeyslotRemovable(dev *keyslotDevice, hdr *LUKS2BinaryHeader, metadata 
 func verifyWrittenKeyslot(dev *keyslotDevice, id string, kdf *KDF, areaKey, want *enclave.MemoryEnclave) error {
 	_, metadata, err := dev.readHeader()
 	if err != nil {
-		return &detailError{Kind: ErrMasterKeyVerification, Detail: "the header could not be read back to verify keyslot " + id, Err: err}
+		return &errs.Error{Kind: ErrMasterKeyVerification, Detail: "the header could not be read back to verify keyslot " + id, Err: err}
 	}
 	keyslot := metadata.Keyslots[id]
 	plan, err := screenKeyslot(id, keyslot, metadata.Digests)
 	if err != nil {
-		return &detailError{Kind: ErrMasterKeyVerification, Detail: "keyslot " + id + " as written is not one the unlock path opens", Err: err}
+		return &errs.Error{Kind: ErrMasterKeyVerification, Detail: "keyslot " + id + " as written is not one the unlock path opens", Err: err}
 	}
 	if !sameKDF(keyslot.KDF, kdf) || plan.areaKeySize != areaKey.Size() {
-		return &detailError{Kind: ErrMasterKeyVerification, Detail: "keyslot " + id + " as written does not declare the KDF and area key it was written with"}
+		return &errs.Error{Kind: ErrMasterKeyVerification, Detail: "keyslot " + id + " as written does not declare the KDF and area key it was written with"}
 	}
 
 	got, err := recoverKeyslotKey(dev.reader(), id, keyslot, plan, areaKey, metadata.Digests)
 	if err != nil {
-		return &detailError{Kind: ErrMasterKeyVerification, Detail: "keyslot " + id + " as written does not open", Err: err}
+		return &errs.Error{Kind: ErrMasterKeyVerification, Detail: "keyslot " + id + " as written does not open", Err: err}
 	}
-	defer releaseSecret(got)
+	defer custody.Release(got)
 
 	if !sameSecret(got, want) {
-		return &detailError{Kind: ErrMasterKeyVerification, Detail: "keyslot " + id + " as written opens to a different key"}
+		return &errs.Error{Kind: ErrMasterKeyVerification, Detail: "keyslot " + id + " as written opens to a different key"}
 	}
 	return nil
 }
@@ -2361,7 +2250,7 @@ func sameSecret(a, b *enclave.MemoryEnclave) bool {
 		return false
 	}
 	equal := false
-	if err := borrowSecret("compare keys", a, func(raw []byte) error {
+	if err := secret.Borrow("compare keys", a, func(raw []byte) error {
 		equal = b.EqualTo(raw)
 		return nil
 	}); err != nil {
@@ -2389,10 +2278,10 @@ func rollBackAddedKeyslot(dev *keyslotDevice, id string, written *Keyslot, cause
 		err = wipeKeyslotArea(dev, hdr, metadata, id, written)
 	}
 	if err != nil {
-		return &detailError{Detail: "keyslot " + id + " was written and could not be verified, and taking it back out failed too; " +
+		return &errs.Error{Detail: "keyslot " + id + " was written and could not be verified, and taking it back out failed too; " +
 			"check the header and remove that keyslot", Err: errors.Join(cause, err)}
 	}
-	return &detailError{Detail: "keyslot " + id + " was written and could not be verified, so it was taken back out", Err: cause}
+	return &errs.Error{Detail: "keyslot " + id + " was written and could not be verified, so it was taken back out", Err: cause}
 }
 
 // rollBackChangedKeyslot restores keyslot id to original after ChangeKey's
@@ -2408,10 +2297,10 @@ func rollBackChangedKeyslot(dev *keyslotDevice, hdr *LUKS2BinaryHeader, metadata
 		err = wipeKeyslotArea(dev, hdr, metadata, id, rewritten)
 	}
 	if err != nil {
-		return &detailError{Detail: "the rewritten keyslot " + id + " could not be verified, and restoring the old one failed too; " +
+		return &errs.Error{Detail: "the rewritten keyslot " + id + " could not be verified, and restoring the old one failed too; " +
 			"the old passphrase's key material is still on the device -- check the header before doing anything else", Err: errors.Join(cause, err)}
 	}
-	return &detailError{Detail: "the rewritten keyslot " + id + " could not be verified, so the old one was restored and the old passphrase still opens it", Err: cause}
+	return &errs.Error{Detail: "the rewritten keyslot " + id + " could not be verified, so the old one was restored and the old passphrase still opens it", Err: cause}
 }
 
 // areaOfKeyslot returns a keyslot's area, or nil if it has none. It exists so

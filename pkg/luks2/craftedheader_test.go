@@ -7,6 +7,8 @@ package luks2
 import (
 	"os"
 	"path/filepath"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // writeHeaderUnvalidated writes hdr and metadata exactly as writeHeaderInternal
@@ -25,6 +27,24 @@ func writeHeaderUnvalidated(device string, hdr *LUKS2BinaryHeader, metadata *LUK
 	defer func() { _ = f.Close() }()
 
 	jsonData, area, err := encodeMetadata(hdr, metadata)
+	if err != nil {
+		return err
+	}
+	return writeEncodedHeader(f, hdr, jsonData, area)
+}
+
+// writeHeaderIgnoringRequirements is writeHeaderUnvalidated without the
+// requirements guard either, for a fixture that models a container declaring
+// a requirement this package does not implement -- an online reencryption,
+// above all -- which the normal write path refuses to produce (#248).
+func writeHeaderIgnoringRequirements(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) error {
+	f, err := os.OpenFile(filepath.Clean(device), os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+
+	jsonData, area, err := header.EncodeMetadataIgnoringRequirements(hdr, metadata)
 	if err != nil {
 		return err
 	}

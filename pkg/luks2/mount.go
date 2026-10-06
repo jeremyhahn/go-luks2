@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jeremyhahn/go-luks2/internal/errs"
 	"golang.org/x/sys/unix"
 )
 
@@ -49,7 +50,7 @@ func Mount(opts MountOptions) error {
 
 	// Check if mount point exists
 	if _, err := os.Stat(opts.MountPoint); os.IsNotExist(err) {
-		return &detailError{Detail: "mount point " + opts.MountPoint + " does not exist", Err: err}
+		return &errs.Error{Detail: "mount point " + opts.MountPoint + " does not exist", Err: err}
 	}
 
 	// No type named means the type ON THE DEVICE, as blkid identifies it --
@@ -65,7 +66,7 @@ func Mount(opts MountOptions) error {
 	}
 
 	if err := unix.Mount(devicePath, opts.MountPoint, fsType, opts.Flags, opts.Data); err != nil {
-		return &detailError{Detail: "mount syscall failed (" + fsType + ")", Err: err}
+		return &errs.Error{Detail: "mount syscall failed (" + fsType + ")", Err: err}
 	}
 
 	return nil
@@ -107,7 +108,7 @@ func IsMappingMounted(name string) (bool, error) {
 
 	f, err := os.Open(mountInfoPath)
 	if err != nil {
-		return false, &detailError{Detail: "failed to open " + mountInfoPath, Err: err}
+		return false, &errs.Error{Detail: "failed to open " + mountInfoPath, Err: err}
 	}
 	defer func() { _ = f.Close() }()
 
@@ -129,7 +130,7 @@ func deviceListedInMountInfo(r io.Reader, major, minor uint32) (bool, error) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return false, &detailError{Detail: "error reading " + mountInfoPath, Err: err}
+		return false, &errs.Error{Detail: "error reading " + mountInfoPath, Err: err}
 	}
 	return false, nil
 }
@@ -179,17 +180,25 @@ var unmountFunc = unix.Unmount
 // flag validation and the classification silently becomes a guess again.
 func Unmount(mountPoint string, flags int) error {
 	if unknown := flags &^ umountFlags; unknown != 0 {
-		return fmt.Errorf("invalid unmount flags: 0x%x is not among MNT_FORCE, MNT_DETACH, MNT_EXPIRE and UMOUNT_NOFOLLOW", unknown)
+		return &errs.Error{
+			Detail: fmt.Sprintf("invalid unmount flags: 0x%x is not among MNT_FORCE, MNT_DETACH, MNT_EXPIRE and UMOUNT_NOFOLLOW",
+				unknown),
+		}
 	}
 	if flags&unix.MNT_EXPIRE != 0 && flags&(unix.MNT_FORCE|unix.MNT_DETACH) != 0 {
-		return fmt.Errorf("invalid unmount flags: MNT_EXPIRE cannot be combined with MNT_FORCE or MNT_DETACH")
+		return &errs.Error{
+			Detail: "invalid unmount flags: MNT_EXPIRE cannot be combined with MNT_FORCE or MNT_DETACH",
+		}
 	}
 
 	if err := unmountFunc(mountPoint, flags); err != nil {
 		if errors.Is(err, unix.EINVAL) {
-			return fmt.Errorf("%w: %s is not a mount point", ErrNotMounted, mountPoint)
+			return &errs.Error{
+				Kind:   ErrNotMounted,
+				Detail: fmt.Sprintf("%s is not a mount point", mountPoint),
+			}
 		}
-		return fmt.Errorf("unmount syscall failed: %w", err)
+		return &errs.Error{Detail: "unmount syscall failed", Err: err}
 	}
 	return nil
 }
@@ -198,7 +207,7 @@ func Unmount(mountPoint string, flags int) error {
 func IsMounted(mountPoint string) (bool, error) {
 	file, err := os.Open("/proc/mounts")
 	if err != nil {
-		return false, fmt.Errorf("failed to open /proc/mounts: %w", err)
+		return false, &errs.Error{Detail: "failed to open /proc/mounts", Err: err}
 	}
 	defer func() { _ = file.Close() }()
 
@@ -221,7 +230,7 @@ func mountPointListed(r io.Reader, mountPoint string) (bool, error) {
 	}
 
 	if err := scanner.Err(); err != nil {
-		return false, fmt.Errorf("error reading /proc/mounts: %w", err)
+		return false, &errs.Error{Detail: "error reading /proc/mounts", Err: err}
 	}
 
 	return false, nil

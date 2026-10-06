@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
 // LUKS2 conformance tests, asserted against the cryptsetup userspace tools.
@@ -912,43 +914,6 @@ func TestConformance_MandatoryJSONObjectsArePresent(t *testing.T) {
 
 // TestEnsureRequiredObjects checks the normalization that keeps a nil Go map
 // from reaching the disk as `null`.
-func TestEnsureRequiredObjects(t *testing.T) {
-	t.Run("nil maps become empty objects", func(t *testing.T) {
-		m := &LUKS2Metadata{}
-		m.ensureRequiredObjects()
-
-		if m.Keyslots == nil {
-			t.Error("Keyslots is still nil")
-		}
-		if m.Tokens == nil {
-			t.Error("Tokens is still nil")
-		}
-		if m.Segments == nil {
-			t.Error("Segments is still nil")
-		}
-		if m.Digests == nil {
-			t.Error("Digests is still nil")
-		}
-		if m.Config != nil {
-			t.Error("Config was invented; an empty config would pass the presence check and fail on its members")
-		}
-	})
-
-	t.Run("populated maps are left alone", func(t *testing.T) {
-		m := &LUKS2Metadata{
-			Keyslots: map[string]*Keyslot{"0": {Type: "luks2"}},
-			Tokens:   map[string]*Token{"0": {Type: "systemd-tpm2"}},
-			Segments: map[string]*Segment{"0": {Type: "crypt"}},
-			Digests:  map[string]*Digest{"0": {Type: "pbkdf2"}},
-		}
-		m.ensureRequiredObjects()
-
-		if len(m.Keyslots) != 1 || len(m.Tokens) != 1 || len(m.Segments) != 1 || len(m.Digests) != 1 {
-			t.Fatalf("ensureRequiredObjects modified populated maps: %+v", m)
-		}
-	})
-}
-
 // cheapenGoldenDigests rewrites the shared golden's digests to a low iteration
 // count, re-derived from its own master key so they still verify.
 //
@@ -1005,7 +970,7 @@ func cheapenGoldenDigests(device string) (err error) {
 		if err != nil {
 			return err
 		}
-		err = borrowSecret("golden digest", derived, func(b []byte) error {
+		err = secret.Borrow("golden digest", derived, func(b []byte) error {
 			digest.Digest = encodeBase64(b)
 			return nil
 		})

@@ -10,6 +10,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/areacipher"
 )
 
 // #106: the read path HONORS the mode half of keyslots.<n>.area.encryption.
@@ -24,20 +26,20 @@ import (
 // TestParseKeyslotAreaEncryption pins the exact set of keyslot area specs the
 // read path decrypts, and that everything else is refused with the typed error.
 func TestParseKeyslotAreaEncryption(t *testing.T) {
-	accepted := map[string]areaTransform{
+	for _, spec := range []string{
 		// What cryptsetup and this package write by default.
-		"aes-xts-plain64": {mode: areaModeXTS, iv: areaIVPlain64},
+		"aes-xts-plain64",
 		// cryptsetup accepts it as --keyslot-cipher, and LUKS1 conversion
 		// carries it over. Its IV is the sector index truncated to 32 bits,
 		// identical to plain64 for every sector a keyslot area can hold.
-		"aes-xts-plain": {mode: areaModeXTS, iv: areaIVPlain},
+		"aes-xts-plain",
 		// LUKS1's long-time default, kept by cryptsetup convert, and what
 		// cryptsetup writes for --keyslot-cipher or a data cipher of the name.
-		"aes-cbc-essiv:sha256": {mode: areaModeCBC, iv: areaIVESSIVSHA256},
-		"aes-cbc-plain64":      {mode: areaModeCBC, iv: areaIVPlain64},
-		"aes-cbc-plain":        {mode: areaModeCBC, iv: areaIVPlain},
-	}
-	for spec, want := range accepted {
+		"aes-cbc-essiv:sha256",
+		"aes-cbc-plain64",
+		"aes-cbc-plain",
+	} {
+		want, _ := areacipher.Parse(spec)
 		got, err := parseKeyslotAreaEncryption(spec)
 		if err != nil {
 			t.Errorf("%q: refused a spec the read path decrypts: %v", spec, err)
@@ -281,7 +283,7 @@ func TestConformance_CryptsetupKeyslotCiphers(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if area := metadata.Keyslots["0"].Area; area.Encryption != KeyslotAreaEncryption || validateXTSKeySize(area.KeySize) != nil {
+				if area := metadata.Keyslots["0"].Area; area.Encryption != KeyslotAreaEncryption || areacipher.ValidateXTSKeySize(area.KeySize) != nil {
 					t.Fatalf("the rewritten keyslot declares %q with a %d-byte key", area.Encryption, area.KeySize)
 				}
 				if code, out := runCryptsetup(t, changed, "luksOpen", "--test-passphrase", "--batch-mode", path); code != 0 {

@@ -26,9 +26,9 @@ import (
 func secretOf(t *testing.T, b []byte) *enclave.MemoryEnclave {
 	t.Helper()
 
-	e, err := copySecret("test key", b)
+	e, err := custody.Clone("test key", b)
 	if err != nil {
-		t.Fatalf("copySecret: %v", err)
+		t.Fatalf("custody.Clone: %v", err)
 	}
 	destroyOnCleanup(t, e)
 	return e

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	devmapper "github.com/anatol/devmapper.go"
+	"github.com/jeremyhahn/go-luks2/internal/clock"
 	"golang.org/x/sys/unix"
 )
 
@@ -46,7 +47,7 @@ var releaseVolumePoll = 100 * time.Millisecond
 // releaseClock is the clock releaseVolumeErr waits on. The integration tier
 // waits on the real one; the unit tests of the helper itself substitute a
 // controlled one, so their verdicts do not depend on host load (#233).
-var releaseClock clock = systemClock{}
+var releaseClock clock.Clock = clock.System{}
 
 // releaseVolumeErr closes name and returns a diagnostic error if a
 // device-mapper mapping is still present afterwards.
@@ -92,7 +93,7 @@ func releaseVolumeErr(name string) error {
 		if !releaseClock.Now().Before(deadline) {
 			break
 		}
-		releaseClock.Sleep(releaseVolumePoll)
+		<-releaseClock.NewTimer(releaseVolumePoll).C()
 	}
 	return fmt.Errorf("device-mapper mapping %q is STILL PRESENT after %s, so "+
 		"this run is leaving it on the host for the next job, which will "+
@@ -318,8 +319,8 @@ func TestReleaseVolumeErr_RetriesThroughTransientBusy(t *testing.T) {
 	}
 	// One poll between each attempt and no more: it succeeded on the third
 	// rather than waiting out the deadline.
-	if want := 2 * releaseVolumePoll; clk.elapsed() != want {
-		t.Fatalf("retry took %s, want %s (two polls)", clk.elapsed(), want)
+	if want := 2 * releaseVolumePoll; clk.Elapsed() != want {
+		t.Fatalf("retry took %s, want %s (two polls)", clk.Elapsed(), want)
 	}
 }
 
@@ -347,8 +348,8 @@ func TestReleaseVolumeErr_ReportsAMappingItCannotRelease(t *testing.T) {
 		t.Errorf("the failure must carry the last error from Lock, got: %v", err)
 	}
 	// It gave up at the deadline, having tried once per poll until then.
-	if clk.elapsed() != volumeReleaseTimeout {
-		t.Errorf("gave up after %s, want the %s deadline", clk.elapsed(), volumeReleaseTimeout)
+	if clk.Elapsed() != volumeReleaseTimeout {
+		t.Errorf("gave up after %s, want the %s deadline", clk.Elapsed(), volumeReleaseTimeout)
 	}
 	if want := int(volumeReleaseTimeout/releaseVolumePoll) + 1; attempts != want {
 		t.Errorf("made %d attempts before giving up, want %d (one per %s poll)", attempts, want, releaseVolumePoll)
@@ -373,9 +374,9 @@ func TestReleaseVolumeErr_ReportsWhenRemoveLiesAboutSuccess(t *testing.T) {
 // at the real deadline and poll: the give-up cases wait out the full ten
 // seconds instantly, and how long they waited is exact rather than whatever
 // the scheduler allowed (#233).
-func withReleaseClock(t *testing.T) *fakeClock {
+func withReleaseClock(t *testing.T) *clock.Fake {
 	t.Helper()
-	clk := newFakeClock(t)
+	clk := clock.NewFake(t)
 	previous := releaseClock
 	t.Cleanup(func() { releaseClock = previous })
 	releaseClock = clk

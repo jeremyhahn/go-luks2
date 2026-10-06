@@ -151,7 +151,7 @@ func TestWaitForLoopReleaseRefusesADeviceStillBound(t *testing.T) {
 	}
 	// A bound that is not honored is an unbounded wait wearing a timeout. On a
 	// controlled clock (#233) it is exact: past the budget by at most a poll.
-	if waited := clk.elapsed(); waited <= budget || waited > budget+poll {
+	if waited := clk.Elapsed(); waited <= budget || waited > budget+poll {
 		t.Errorf("waited %s against a %s budget polled every %s", waited, budget, poll)
 	}
 }

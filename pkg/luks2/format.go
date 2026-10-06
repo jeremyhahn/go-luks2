@@ -5,33 +5,16 @@
 package luks2
 
 import (
-	"crypto/aes"
-	"errors"
 	"fmt"
-	"golang.org/x/sys/unix"
 	"os"
 	"slices"
 	"strings"
 
 	"github.com/jeremyhahn/go-enclave"
-	"golang.org/x/crypto/xts"
-)
-
-// Errors Format and ValidateFormatOptions refuse with before the device is
-// touched (#248).
-var (
-	// ErrUnsupportedCipher indicates a Cipher, CipherMode and KeySize that are
-	// not a combination Format writes: aes-xts-plain64 with a 256- or 512-bit
-	// key, or aes-cbc-essiv:sha256 with a 256-bit key.
-	ErrUnsupportedCipher = errors.New("unsupported cipher, mode and key size combination")
-
-	// ErrInvalidLabel indicates a Label or Subsystem that does not fit the
-	// 48-byte header field with its NUL terminator, or that contains a NUL.
-	ErrInvalidLabel = errors.New("label must be at most 47 bytes and contain no NUL byte")
-
-	// ErrDeviceTooSmall indicates a device with no room for the header copies,
-	// the keyslots area and at least one encryption sector of data.
-	ErrDeviceTooSmall = errors.New("device is too small for a LUKS2 container")
+	"github.com/jeremyhahn/go-luks2/internal/af"
+	"github.com/jeremyhahn/go-luks2/internal/areacipher"
+	"github.com/jeremyhahn/go-luks2/internal/errs"
+	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
 // maxLabelLength is the longest label or subsystem the 48-byte header field
@@ -70,38 +53,13 @@ func validateFormatChoices(opts FormatOptions) error {
 	}
 	spec := cipher + "-" + mode
 	if sizes, ok := formatCiphers[spec]; !ok || !slices.Contains(sizes, keySize) {
-		return &detailError{Kind: ErrUnsupportedCipher, Detail: fmt.Sprintf(
+		return &errs.Error{Kind: ErrUnsupportedCipher, Detail: fmt.Sprintf(
 			"%s with a %d-bit key; Format writes aes-xts-plain64 (256 or 512 bits) and aes-cbc-essiv:sha256 (256 bits)", spec, keySize)}
 	}
 	for _, field := range []struct{ name, value string }{{"label", opts.Label}, {"subsystem", opts.Subsystem}} {
 		if len(field.value) > maxLabelLength || strings.IndexByte(field.value, 0) >= 0 {
-			return &detailError{Kind: ErrInvalidLabel, Detail: fmt.Sprintf("the %s is %d bytes", field.name, len(field.value))}
+			return &errs.Error{Kind: ErrInvalidLabel, Detail: fmt.Sprintf("the %s is %d bytes", field.name, len(field.value))}
 		}
-	}
-	return nil
-}
-
-// requireSameDevice refuses unless locked and opened are descriptors of one
-// file -- the same st_dev, st_ino AND st_rdev -- so the lock held is the lock on
-// what is about to be written. op says what the second open was for.
-//
-// It exists for the opens the kernel grants only BY PATH: an O_EXCL in-use
-// claim on a block device cannot be taken on a descriptor already open. The
-// path is resolved again for it, and a symlink re-pointed since the lock was
-// taken -- a /dev/disk/by-* link, a /dev/mapper entry -- would otherwise put
-// the lock on one device and the writes on another. Every caller checks before
-// its first write and refuses with ErrDeviceChanged.
-func requireSameDevice(locked, opened *os.File, device, op string) error {
-	var a, b unix.Stat_t
-	if err := unix.Fstat(int(locked.Fd()), &a); err != nil {
-		return &DeviceError{Device: device, Op: "stat the locked descriptor", Err: err}
-	}
-	if err := unix.Fstat(int(opened.Fd()), &b); err != nil {
-		return &DeviceError{Device: device, Op: "stat the descriptor opened to " + op, Err: err}
-	}
-	if a.Dev != b.Dev || a.Ino != b.Ino || a.Rdev != b.Rdev {
-		return &DeviceError{Device: device, Op: op, Err: &detailError{Kind: ErrDeviceChanged,
-			Detail: "the path resolved to a different file between taking its lock and opening it to " + op}}
 	}
 	return nil
 }
@@ -150,12 +108,12 @@ func checkFormatDeviceSize(f *os.File, device string, layout formatLayout, secto
 	}
 	data := size - layout.dataOffset
 	if data < int64(sectorSize) {
-		return &detailError{Kind: ErrDeviceTooSmall, Detail: fmt.Sprintf(
+		return &errs.Error{Kind: ErrDeviceTooSmall, Detail: fmt.Sprintf(
 			"%s is %d bytes; the header copies and keyslots area end at %d, and the data needs at least one %d-byte sector after that",
 			device, size, layout.dataOffset, sectorSize)}
 	}
 	if usable := data - data%LUKS2SectorSize; usable%int64(sectorSize) != 0 {
-		return &detailError{Kind: ErrInvalidSize, Detail: fmt.Sprintf(
+		return &errs.Error{Kind: ErrInvalidSize, Detail: fmt.Sprintf(
 			"%s leaves %d bytes of data after the keyslots area, which is not a whole number of %d-byte sectors", device, usable, sectorSize)}
 	}
 	return nil
@@ -208,26 +166,24 @@ func Format(opts FormatOptions) error {
 	if err := refuseSHA1ForCreation(opts.KDFType, opts.HashAlgo); err != nil {
 		return err
 	}
-	if _, err := getHashFunc(opts.HashAlgo); err != nil {
+	if err := af.ValidateWriteHash(opts.HashAlgo); err != nil {
 		return err
 	}
 	if opts.SectorSize == 0 {
 		opts.SectorSize = DefaultSectorSize
 	}
 
-	// Open device, exclusively: see the function comment. The locks above were
-	// taken first, as the cryptsetup lock order requires, on a descriptor of
-	// their own; this one must be the SAME file, or a path retargeted between
-	// the two opens would have the locks held on one device while the format
-	// writes another. Every write below goes through f.
-	f, err := openDevice("format the device", opts.Device, os.O_RDWR|os.O_EXCL)
+	// Claim the device exclusively: see Format's doc comment. The claim
+	// reopens the descriptor the lock above is held on, via its /proc/self/fd
+	// entry, so it targets by construction the exact file that was locked --
+	// a path retargeted between the two opens cannot put the lock on one
+	// device and the writes on another. Every write below goes through f.
+	claimed, err := lock.locked.Claim("format the device", os.O_RDWR|os.O_EXCL, openFileFunc)
 	if err != nil {
 		return err
 	}
+	f := claimed.File()
 	defer func() { _ = f.Close() }()
-	if err := requireSameDevice(lock.file, f, opts.Device, "format it"); err != nil {
-		return err
-	}
 
 	masterKeySize := opts.KeySize / 8 // Convert bits to bytes
 
@@ -243,11 +199,11 @@ func Format(opts FormatOptions) error {
 	// the ordinary heap -- not even for the instant between rand.Read and a
 	// move, which is a window no later wipe can close because the collector may
 	// already have copied the bytes.
-	masterKey, err := randomSecret("master key", masterKeySize)
+	masterKey, err := custody.Random("master key", masterKeySize, cryptoRand)
 	if err != nil {
 		return err
 	}
-	defer releaseSecret(masterKey)
+	defer custody.Release(masterKey)
 
 	// Create binary header
 	hdr, err := CreateBinaryHeader(opts)
@@ -268,7 +224,7 @@ func Format(opts FormatOptions) error {
 	if err != nil {
 		return err
 	}
-	defer releaseSecret(passphraseKey)
+	defer custody.Release(passphraseKey)
 
 	// Create digest KDF and digest
 	digestKDF, digestValue, err := createDigest(masterKey, opts.HashAlgo)
@@ -278,12 +234,12 @@ func Format(opts FormatOptions) error {
 
 	// Apply anti-forensic split to master key. The stripes are the master key
 	// spread over keySize*AFStripes bytes and are held locked accordingly; see
-	// antiforensic.go.
-	afData, err := afSplitEnclave(masterKey, AFStripes, opts.HashAlgo)
+	// internal/af.
+	afData, err := afCodec().Split(masterKey, af.Params{Stripes: AFStripes, Hash: opts.HashAlgo})
 	if err != nil {
 		return err
 	}
-	defer releaseSecret(afData)
+	defer custody.Release(afData)
 
 	// Encrypt AF-split key material with passphrase-derived key.
 	//
@@ -292,7 +248,7 @@ func Format(opts FormatOptions) error {
 	// device in exactly this form, so locking them would protect a copy of
 	// something already on disk while doubling the locked memory this call
 	// needs. Both inputs are borrowed from their enclaves for the transform.
-	encryptedKeyMaterial, err := encryptKeyMaterialEnclave(afData, passphraseKey, opts.Cipher)
+	encryptedKeyMaterial, err := areacipher.Default().EncryptEnclave(custody, afData, passphraseKey)
 	if err != nil {
 		return err
 	}
@@ -387,7 +343,7 @@ func createMetadata(kdf, digestKDF *KDF, digestValue string, opts FormatOptions,
 			//
 			// A caller may format with any cipher dm-crypt supports, and that
 			// choice describes the SEGMENT below. Keyslot key material is
-			// wrapped by encryptKeyMaterialEnclave with AES-XTS regardless --
+			// wrapped by areacipher.Default (AES-XTS) regardless --
 			// so copying opts.Cipher+opts.CipherMode here declared, for any
 			// non-XTS choice, an encryption the material does not have. The
 			// container then opened for this package, whose read path consulted
@@ -511,7 +467,7 @@ func digestIterationsTimedBy(hashAlgo string, timer pbkdf2Timer) (int, error) {
 //
 // That is NOT the same as the key staying in protected memory, and an earlier
 // version of this comment claimed it did. The borrowed slice goes to
-// crypto/pbkdf2.Key, which stringifies it -- see exposure 2 in enclave.go. Every
+// crypto/pbkdf2.Key, which stringifies it -- see exposure 2 in internal/secret. Every
 // format puts the master key into an unwipeable Go string for the duration of
 // this derivation. Nothing here can prevent that; what it can do is not pretend
 // otherwise.
@@ -563,10 +519,10 @@ func createDigest(masterKey *enclave.MemoryEnclave, hashAlgo string) (*KDF, stri
 	if err != nil {
 		return nil, "", err
 	}
-	defer releaseSecret(digest)
+	defer custody.Release(digest)
 
 	var encoded string
-	if err := borrowSecret("master key digest", digest, func(b []byte) error {
+	if err := secret.Borrow("master key digest", digest, func(b []byte) error {
 		encoded = encodeBase64(b)
 		return nil
 	}); err != nil {
@@ -576,259 +532,12 @@ func createDigest(masterKey *enclave.MemoryEnclave, hashAlgo string) (*KDF, stri
 	return kdf, encoded, nil
 }
 
-// encryptKeyMaterialEnclave encrypts AF-split key material held in an enclave
-// with a key held in an enclave, borrowing both for the duration of the
-// transform and no longer.
-//
-// It returns the CIPHERTEXT as plain memory on purpose. Those bytes are what
-// gets written into the keyslot area of the device, byte for byte, so an
-// attacker who can read this heap can read the device instead; locking them
-// would protect a copy of something already public while doubling the
-// RLIMIT_MEMLOCK the operation needs. The plaintext -- the stripes -- never
-// leaves its enclave.
-func encryptKeyMaterialEnclave(data, key *enclave.MemoryEnclave, cipherAlgo string) ([]byte, error) {
-	var encrypted []byte
-	err := borrowSecret("af stripes", data, func(plain []byte) error {
-		return borrowSecret("keyslot encryption key", key, func(k []byte) error {
-			var err error
-			encrypted, err = encryptKeyMaterial(plain, k, cipherAlgo)
-			return err
-		})
-	})
-	if err != nil {
-		return nil, err
-	}
-	return encrypted, nil
-}
-
-// decryptKeyMaterialEnclave decrypts keyslot material read off the device into
-// PROTECTED memory, with the decryption key borrowed from its own enclave.
-//
-// This is the only decryption path any production call uses, and the direction
-// is what makes it necessary: the plaintext here is the AF stripes, which are
-// the master key, so it may not be produced onto the ordinary heap even
-// transiently. The destination enclave is allocated first and the cipher writes
-// straight into its locked pages.
-//
-// data is ciphertext read from the device and is deliberately NOT enclaved; see
-// encryptKeyMaterialEnclave.
-func decryptKeyMaterialEnclave(data []byte, key *enclave.MemoryEnclave, area areaTransform, sectorSize int) (*enclave.MemoryEnclave, error) {
-	if len(data) == 0 {
-		return nil, fmt.Errorf("no key material to decrypt")
-	}
-
-	plaintext, err := newSecretEnclave("decrypted keyslot material", len(data))
-	if err != nil {
-		return nil, err
-	}
-
-	err = borrowSecret("decrypted keyslot material", plaintext, func(dst []byte) error {
-		return borrowSecret("keyslot encryption key", key, func(k []byte) error {
-			return keyslotAreaSectors(area, dst, data, k, sectorSize, true)
-		})
-	})
-	if err != nil {
-		releaseSecret(plaintext)
-		return nil, err
-	}
-
-	return plaintext, nil
-}
-
-// encryptKeyMaterial encrypts the key material using AES-XTS.
-//
-// key must be a slice borrowed from an enclave on every production path; this
-// function does not own it and does not clear it. The returned ciphertext is
-// ordinary memory, which is the documented decision in
-// encryptKeyMaterialEnclave.
-func encryptKeyMaterial(data, key []byte, cipherAlgo string) ([]byte, error) {
-	encrypted := make([]byte, len(data))
-	if err := xtsSectors(encrypted, data, key, cipherAlgo, 512, false); err != nil {
-		return nil, err
-	}
-	return encrypted, nil
-}
-
-// decryptKeyMaterial decrypts the key material using AES-XTS onto the ordinary
-// heap.
-//
-// No production path calls this: every decryption of real keyslot material goes
-// through decryptKeyMaterialEnclave, because the plaintext is the master key in
-// AF-split form. It survives as a plain-memory helper for the unit tests that
-// exercise the transform itself over synthetic data.
-// -tags=integration, so `unused` fires on a function the default build exercises.
-//
-//nolint:unused // Test-only helper: the tests that call it are excluded under
-func decryptKeyMaterial(data, key []byte, cipherAlgo string, sectorSize int) ([]byte, error) {
-	decrypted := make([]byte, len(data))
-	if err := xtsSectors(decrypted, data, key, cipherAlgo, sectorSize, true); err != nil {
-		return nil, err
-	}
-	return decrypted, nil
-}
-
-// validateAreaCipher reports whether this package can run the named cipher over
-// a keyslot area.
-//
-// AES-XTS is the only mode implemented, so "aes" is the only accepted algorithm.
-// It is a function rather than a comparison written where it is needed because
-// [screenKeyslot] must reach the same verdict from the header alone: a keyslot
-// declaring `"encryption": "serpent-xts-plain64"` cannot open the volume, and a
-// removal guard that does not know that will count it as a survivor.
-func validateAreaCipher(cipherAlgo string) error {
-	if cipherAlgo != "aes" {
-		return fmt.Errorf("unsupported cipher: %s", cipherAlgo)
-	}
-	return nil
-}
-
-// validateXTSKeySize reports whether a volume key of this length can be used as
-// an AES-XTS key.
-//
-// XTS splits its key in half and gives each half to AES, so the length must be
-// twice a legal AES key size: 32, 48 or 64 bytes. xts.NewCipher refuses anything
-// else -- which means a keyslot declaring `"key_size": 40` is well-formed by
-// every other measure and can never yield a master key. That is exactly the
-// shape the removal guard must not count, and it could not see it while the
-// rejection lived only inside the cipher constructor.
-//
-// The bound is deliberately NOT MaxKeyslotKeySize's 1024, which asks a different
-// question: what a header may DECLARE without sizing an allocation out of
-// proportion. This asks what the cipher will actually accept.
-func validateXTSKeySize(keySize int) error {
-	switch keySize {
-	case 32, 48, 64:
-		return nil
-	default:
-		return fmt.Errorf("volume key of %d bytes cannot key AES-XTS; the accepted sizes are 32, 48 and 64 bytes", keySize)
-	}
-}
-
 // KeyslotAreaEncryption is the ONLY area encryption this package writes to a
 // keyslot, and it is exact rather than a family.
 //
-// Keyslot key material goes through encryptKeyMaterialEnclave with
-// DefaultCipher, which is AES, and xtsSectors, which is XTS tweaked on a uint64
-// sector index -- that is plain64 and nothing else. It is deliberately NOT the
+// Keyslot key material is encrypted with areacipher.Default, which is AES-XTS
+// tweaked on a uint64 sector index -- that is plain64 and nothing else. It is deliberately NOT the
 // container's DATA cipher: a caller may format a volume with any cipher
 // dm-crypt supports, and that choice describes the data segment. It says
 // nothing about how the keyslots are wrapped, which this package does one way.
-const KeyslotAreaEncryption = DefaultCipher + "-" + DefaultCipherMode
-
-// There is deliberately no validateKeyslotAreaEncryption. It existed to screen a
-// TEMPLATE keyslot whose area cipher AddKey was about to copy, and AddKey no
-// longer copies one: both writers state KeyslotAreaEncryption directly, so there
-// is nothing left to validate -- the value is a constant, and a validator over a
-// constant is a guard against a state the code cannot reach.
-//
-// Its removal also stopped AddKey refusing legacy containers whose keyslot area
-// carried the old data-cipher label. Those keyslots are now refused one step
-// earlier instead, by the read path, which honors the declared mode (#106):
-// see parseKeyslotAreaEncryption.
-
-// xtsSectors runs AES-XTS over src into dst, one sector at a time, with the
-// sector index as the tweak. It is the single implementation behind both
-// directions and both the enclave and the plain wrappers, so the two can never
-// drift into producing containers this library can write but not read.
-//
-// dst and src must be the same length. Whole sectors are transformed IN PLACE
-// between the two buffers: the previous form copied every sector through two
-// freshly allocated 512-byte scratch buffers, which for a default keyslot meant
-// ~1000 heap allocations holding AF-split master key material per operation --
-// on exactly the material the enclave work exists to keep off the heap. Only a
-// trailing PARTIAL sector still needs scratch, because XTS is run over a
-// zero-padded full sector there, and that scratch is locked.
-//
-// The output is unchanged: for a whole sector, copying into a 512-byte buffer
-// and transforming that is identical to transforming the sector directly.
-func xtsSectors(dst, src, key []byte, cipherAlgo string, sectorSize int, decrypt bool) error {
-	// Both of these are CALLABLE VALIDATORS rather than the inline literals
-	// they used to be, and that is the point of them: the keyslot screen has to
-	// be able to ask the same two questions off metadata alone, before a
-	// derivation is paid for and before a removal guard counts the keyslot as a
-	// survivor. An inline literal here is a condition nothing else can consult,
-	// which is how the guard came to miss both (#45). See keyslotscreen.go.
-	if err := validateAreaCipher(cipherAlgo); err != nil {
-		return err
-	}
-	if err := validateXTSKeySize(len(key)); err != nil {
-		return err
-	}
-	if len(dst) != len(src) {
-		return fmt.Errorf("key material buffer size mismatch")
-	}
-	if sectorSize <= 0 {
-		return fmt.Errorf("sector size must be positive")
-	}
-
-	// XTS requires key length to be 32, 64 bytes (for AES-128-XTS, AES-256-XTS)
-	// The key is already the correct size (64 bytes for 512-bit keys)
-	// XTS will internally split it: first half for cipher, second half for tweak
-	//
-	// RESIDUAL EXPOSURE: the returned *xts.Cipher holds the expanded AES round
-	// keys for both halves on the ordinary heap, and neither x/crypto/xts nor
-	// crypto/aes offers a way to place them elsewhere or to wipe them. The round
-	// keys are a deterministic expansion of this key, so recovering them
-	// recovers it. Nothing this package can do closes that; it is the stdlib
-	// crypto boundary.
-	xtsCipher, err := xts.NewCipher(aes.NewCipher, key)
-	if err != nil {
-		return fmt.Errorf("failed to create XTS cipher: %w", err)
-	}
-
-	numSectors := (len(src) + sectorSize - 1) / sectorSize
-
-	for i := 0; i < numSectors; i++ {
-		start := i * sectorSize
-		end := start + sectorSize
-		if end > len(src) {
-			end = len(src)
-		}
-
-		if end-start == sectorSize {
-			if decrypt {
-				xtsCipher.Decrypt(dst[start:end], src[start:end], uint64(i)) // #nosec G115 - loop counter bounded by data length
-			} else {
-				xtsCipher.Encrypt(dst[start:end], src[start:end], uint64(i)) // #nosec G115 - loop counter bounded by data length
-			}
-			continue
-		}
-
-		if err := xtsPartialSector(dst[start:end], src[start:end], xtsCipher, sectorSize, i, decrypt); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// xtsPartialSector transforms a final sector shorter than sectorSize by padding
-// it out to a whole sector, which is what the on-disk format requires and what
-// this package has always done.
-//
-// The two scratch buffers are LOCKED even for the encrypt direction, because
-// one of them holds plaintext key material in both directions -- the padded
-// input when encrypting, the padded output when decrypting -- and this path
-// runs at most once per operation, so the cost is one page pair rather than one
-// per sector.
-func xtsPartialSector(dst, src []byte, xtsCipher *xts.Cipher, sectorSize, index int, decrypt bool) error {
-	scratch, err := newSecretEnclave("key material sector", 2*sectorSize)
-	if err != nil {
-		return err
-	}
-	defer releaseSecret(scratch)
-
-	return borrowSecret("key material sector", scratch, func(buf []byte) error {
-		in, out := buf[:sectorSize], buf[sectorSize:]
-		copy(in, src)
-
-		if decrypt {
-			xtsCipher.Decrypt(out, in, uint64(index)) // #nosec G115 - loop counter bounded by data length
-		} else {
-			xtsCipher.Encrypt(out, in, uint64(index)) // #nosec G115 - loop counter bounded by data length
-		}
-
-		copy(dst, out[:len(dst)])
-		return nil
-	})
-}
+const KeyslotAreaEncryption = areacipher.WriteSpec

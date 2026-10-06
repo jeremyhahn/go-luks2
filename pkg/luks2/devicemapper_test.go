@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/anatol/devmapper.go"
+	"github.com/jeremyhahn/go-luks2/internal/clock"
 	"golang.org/x/sys/unix"
 )
 
@@ -72,14 +73,14 @@ func countingRemove(t *testing.T, fake *fakeDeviceMapper, failures int) *int {
 // test that actually slept would be asserting the same property at a hundred
 // times the cost, and a loaded runner would make it flaky on top -- exactly
 // the "never use a sleep as a synchronization primitive" rule.
-func recordRetryWaits(t *testing.T) *[]time.Duration {
+func recordRetryWaits(t *testing.T) *clock.Fake {
 	t.Helper()
 
-	clk := newFakeClock(t)
+	clk := clock.NewFake(t)
 	previous := dmClock
 	t.Cleanup(func() { dmClock = previous })
 	dmClock = clk
-	return &clk.slept
+	return clk
 }
 
 // TestLockRetriesATransientBusyAndSucceeds is the defect itself: the mapping
@@ -138,11 +139,11 @@ func TestLockGivesUpBoundedWhenSomethingGenuinelyHoldsTheDevice(t *testing.T) {
 	}
 
 	// BOUNDED, asserted on the budget rather than on elapsed time.
-	if len(*waits) == 0 {
+	if len(waits.Waits()) == 0 {
 		t.Fatal("no backoff was recorded, so nothing was actually retried")
 	}
 	var total time.Duration
-	for _, w := range *waits {
+	for _, w := range waits.Waits() {
 		total += w
 	}
 	// EXACTLY the budget, not merely within it. Asserting only the upper bound
@@ -257,7 +258,7 @@ func TestRemoveRetryDoesNotRetryWhatCannotClear(t *testing.T) {
 			if calls != 1 {
 				t.Fatalf("remove was attempted %d times for %v; only EBUSY is retryable", calls, errno)
 			}
-			if len(*waits) != 0 {
+			if len(waits.Waits()) != 0 {
 				t.Fatalf("backoff was spent on %v, which cannot clear", errno)
 			}
 		})
@@ -560,7 +561,7 @@ func TestRollbackDoesNotRetryWhatCannotClear(t *testing.T) {
 			if calls != 1 {
 				t.Fatalf("remove was attempted %d times for %v; only EBUSY is retryable", calls, errno)
 			}
-			if len(*waits) != 0 {
+			if len(waits.Waits()) != 0 {
 				t.Fatalf("backoff was spent on %v, which cannot clear", errno)
 			}
 		})
@@ -732,9 +733,9 @@ func TestLockRidesOutATransientIdentityLookupFailure(t *testing.T) {
 // ends within one overrun of its bound.
 func TestDeviceMapperWaitsEndAtTheirDeadlineOnALoadedHost(t *testing.T) {
 	const overrun = time.Second
-	loaded := func(t *testing.T) *fakeClock {
-		clk := newFakeClock(t)
-		clk.onSleep = func(time.Time) { clk.now = clk.now.Add(overrun) }
+	loaded := func(t *testing.T) *clock.Fake {
+		clk := clock.NewFake(t)
+		clk.OnWait(func(time.Time) { clk.Advance(overrun) })
 		previous := dmClock
 		t.Cleanup(func() { dmClock = previous })
 		dmClock = clk
@@ -747,8 +748,8 @@ func TestDeviceMapperWaitsEndAtTheirDeadlineOnALoadedHost(t *testing.T) {
 		if !errors.Is(err, unix.EBUSY) {
 			t.Fatalf("retryWhileBusy = %v, want the last EBUSY", err)
 		}
-		if clk.elapsed() > dmRemoveRetryBudget+overrun {
-			t.Fatalf("a %v retry budget took %v", dmRemoveRetryBudget, clk.elapsed())
+		if clk.Elapsed() > dmRemoveRetryBudget+overrun {
+			t.Fatalf("a %v retry budget took %v", dmRemoveRetryBudget, clk.Elapsed())
 		}
 	})
 
@@ -757,8 +758,8 @@ func TestDeviceMapperWaitsEndAtTheirDeadlineOnALoadedHost(t *testing.T) {
 		if pollUntil(deviceReadyTimeout, deviceReadyPollInterval, func() bool { return false }) {
 			t.Fatal("pollUntil reported a condition that never held")
 		}
-		if clk.elapsed() > deviceReadyTimeout+overrun {
-			t.Fatalf("a %v node wait took %v over %d sleeps", deviceReadyTimeout, clk.elapsed(), len(clk.slept))
+		if clk.Elapsed() > deviceReadyTimeout+overrun {
+			t.Fatalf("a %v node wait took %v over %d sleeps", deviceReadyTimeout, clk.Elapsed(), len(clk.Waits()))
 		}
 	})
 }

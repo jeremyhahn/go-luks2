@@ -9,6 +9,8 @@ package luks2
 import (
 	"errors"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
 // The derivation must not panic on any parameter a header can carry.
@@ -77,9 +79,9 @@ func TestDeriveKeyDoesNotPanicOnHeaderControlledParameters(t *testing.T) {
 			}
 			// A typed refusal, not a panic and not a bare string: callers
 			// classify these, and #72 is what happens when they cannot.
-			var cryptoErr *CryptoError
-			if !errors.As(err, &cryptoErr) {
-				t.Fatalf("the refusal is not a typed crypto error: %v", err)
+			var typedErr *errs.Error
+			if !errors.As(err, &typedErr) {
+				t.Fatalf("the refusal is not a typed error: %v", err)
 			}
 		})
 	}
@@ -92,8 +94,8 @@ func TestDeriveKeyDoesNotPanicOnHeaderControlledParameters(t *testing.T) {
 // two trust domains and an untrusted-input ceiling there rejected a caller's own
 // hardening), so the test could only skip, and a skipping test is a test nobody
 // reads. Where the property still matters it is asserted directly:
-// TestProtectedMemoryErrorDoesNotNameSizes, on the one error type that must
-// stay silent about sizes.
+// internal/secret's TestARefusalNamesTheMaterialAndNotItsSize, on the one
+// refusal that must stay silent about sizes.
 //
 // A keyslot refusal DOES name the size it rejected, deliberately -- key_size is
 // a cleartext LUKS2 header field, and an operator diagnosing a bad container

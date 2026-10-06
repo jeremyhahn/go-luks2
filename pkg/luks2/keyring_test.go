@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	keyringpkg "github.com/jeremyhahn/go-luks2/internal/keyring"
 	"golang.org/x/sys/unix"
 )
 
@@ -75,7 +76,7 @@ func testDMUUID(name string) string {
 func testRing(t *testing.T) int {
 	t.Helper()
 
-	ring, err := keyring.sessionRing()
+	ring, err := keyring.SessionRing()
 	if err != nil {
 		t.Fatalf("could not resolve the session keyring: %v", err)
 	}
@@ -94,18 +95,18 @@ func TestKeyringHoldsTheVolumeKeyAndThenDoesNot(t *testing.T) {
 		t.Fatalf("the volume key could not be placed in the kernel keyring: %v", err)
 	}
 
-	id, err := keyring.search(entry.ring, keyringKeyType, entry.description)
+	id, err := keyring.Search(entry.Ring, keyringKeyType, entry.Description)
 	if err != nil {
 		t.Fatalf("the kernel could not resolve the reference dm-crypt would be given: %v", err)
 	}
-	if id != entry.id {
-		t.Fatalf("the description resolves to key %d, not to the one that was added (%d)", id, entry.id)
+	if id != entry.ID {
+		t.Fatalf("the description resolves to key %d, not to the one that was added (%d)", id, entry.ID)
 	}
 
 	if err := entry.release(); err != nil {
 		t.Fatalf("release reported a failure: %v", err)
 	}
-	if _, err := keyring.search(entry.ring, keyringKeyType, entry.description); err == nil {
+	if _, err := keyring.Search(entry.Ring, keyringKeyType, entry.Description); err == nil {
 		t.Fatal("the volume key is still resolvable in the kernel keyring after release")
 	}
 }
@@ -142,12 +143,12 @@ func TestKeyringRefusesAPreExistingEntry(t *testing.T) {
 
 	// The refusal must not have disturbed what was already there: the first
 	// entry is still the one the description resolves to.
-	id, err := keyring.search(first.ring, keyringKeyType, first.description)
+	id, err := keyring.Search(first.Ring, keyringKeyType, first.Description)
 	if err != nil {
 		t.Fatalf("the refused add removed the existing entry: %v", err)
 	}
-	if id != first.id {
-		t.Fatalf("the description now resolves to key %d, not the original %d", id, first.id)
+	if id != first.ID {
+		t.Fatalf("the description now resolves to key %d, not the original %d", id, first.ID)
 	}
 }
 
@@ -217,7 +218,7 @@ func TestTableKeyIDDeclaresTheKeySizeInBytes(t *testing.T) {
 			t.Fatalf("adding a %d-byte key failed: %v", size, err)
 		}
 
-		want := fmt.Sprintf(":%d:logon:%s", size, entry.description)
+		want := fmt.Sprintf(":%d:logon:%s", size, entry.Description)
 		if got := entry.tableKeyID(); got != want {
 			t.Errorf("tableKeyID() = %q, want %q", got, want)
 		}
@@ -405,7 +406,7 @@ func TestKeyringSentinelsFormOneFamily(t *testing.T) {
 	}
 
 	// And so does a real release failure, through the other branch.
-	stuck := &keyringVolumeKey{id: 1, ring: 2, description: "luks2:deadbeef"}
+	stuck := &keyringVolumeKey{VolumeKey: keyringpkg.VolumeKey{ID: 1, Ring: 2, Description: "luks2:deadbeef"}}
 	(&fakeKeyring{revokeErr: unix.EPERM, unlinkErr: unix.EPERM, stillThere: true}).install(t)
 	releaseErr := stuck.release()
 	if !errors.Is(releaseErr, ErrKeyring) || !errors.Is(releaseErr, ErrKeyringKeyNotReleased) {
@@ -511,7 +512,7 @@ func TestReleaseReportsAnEntryItCouldNotRemove(t *testing.T) {
 			if !errors.Is(err, ErrKeyringKeyNotReleased) {
 				t.Fatalf("the failure does not match ErrKeyringKeyNotReleased: %v", err)
 			}
-			if !strings.Contains(err.Error(), entry.description) {
+			if !strings.Contains(err.Error(), entry.Description) {
 				t.Fatalf("the error does not say which entry is still there: %v", err)
 			}
 			if !strings.Contains(err.Error(), "keyctl unlink") {

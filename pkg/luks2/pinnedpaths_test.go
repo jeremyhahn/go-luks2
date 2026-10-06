@@ -8,7 +8,6 @@ package luks2
 
 import (
 	"bytes"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -45,13 +44,15 @@ func retargetedPair(t *testing.T) (link, locked, other string, otherBefore [32]b
 	return link, locked, other, fileDigest(t, other)
 }
 
-// TestTheExclusiveClaimMustBeTheLockedDevice: Wipe and WipeKeyslot take an
-// O_EXCL claim by path after the lock. Claimed on whatever the path names by
-// then, Wipe wiped -- and WipeKeyslot vetted -- a device that was never
-// locked. Now the claim is compared with the locked descriptor before any
-// write, and a mismatch is refused with ErrDeviceChanged with neither device
-// touched.
-func TestTheExclusiveClaimMustBeTheLockedDevice(t *testing.T) {
+// TestTheExclusiveClaimTargetsTheLockedDescriptorDespiteARetarget: Wipe and
+// WipeKeyslot used to take their O_EXCL claim by reopening the path after the
+// lock, so a path re-pointed in between claimed, wiped -- and for
+// WipeKeyslot, vetted -- a device that was never locked. The claim now
+// reopens the LOCKED descriptor's own /proc/self/fd entry (Locked.Claim)
+// rather than resolving the path again, so it cannot be retargeted: the
+// operation lands on the file that was locked, and the device the path was
+// re-pointed at is never touched.
+func TestTheExclusiveClaimTargetsTheLockedDescriptorDespiteARetarget(t *testing.T) {
 	for _, op := range []struct {
 		name string
 		run  func(device string) error
@@ -64,14 +65,14 @@ func TestTheExclusiveClaimMustBeTheLockedDevice(t *testing.T) {
 			link, locked, other, otherBefore := retargetedPair(t)
 			lockedBefore := fileDigest(t, locked)
 
-			if err := op.run(link); !errors.Is(err, ErrDeviceChanged) {
-				t.Fatalf("%s through a re-pointed path = %v, want ErrDeviceChanged", op.name, err)
+			if err := op.run(link); err != nil {
+				t.Fatalf("%s through a re-pointed path = %v, want success on the locked file", op.name, err)
 			}
 			if fileDigest(t, other) != otherBefore {
 				t.Fatal("the device the path was re-pointed at was written to")
 			}
-			if fileDigest(t, locked) != lockedBefore {
-				t.Fatal("the locked device was written to although the operation was refused")
+			if fileDigest(t, locked) == lockedBefore {
+				t.Fatal("the locked device was not written to")
 			}
 		})
 	}

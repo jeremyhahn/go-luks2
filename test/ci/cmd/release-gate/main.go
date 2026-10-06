@@ -48,6 +48,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/jeremyhahn/go-luks2/internal/clock"
 )
 
 // githubServer is the one server whose API is GitHub's rather than Gitea's.
@@ -77,8 +79,7 @@ type host struct {
 	// could not be run at all.
 	git    func(args ...string) (status int, output string, err error)
 	client *http.Client
-	now    func() time.Time
-	sleep  func(time.Duration)
+	clock  clock.Clock
 }
 
 func main() {
@@ -115,8 +116,7 @@ func systemHost() host {
 			return 0, string(out), nil
 		},
 		client: &http.Client{Timeout: 30 * time.Second},
-		now:    time.Now,
-		sleep:  time.Sleep,
+		clock:  clock.System{},
 	}
 }
 
@@ -232,7 +232,7 @@ func gateReader(h host, req request) (reader, string, error) {
 
 // waitForGate polls until the gate passes, fails, or the deadline expires.
 func waitForGate(out io.Writer, h host, req request, name string, read reader) error {
-	deadline := h.now().Add(req.timeout)
+	deadline := h.clock.Now().Add(req.timeout)
 	var lastErr error
 	for {
 		state, detail, err := read()
@@ -251,10 +251,10 @@ func waitForGate(out io.Writer, h host, req request, name string, read reader) e
 			lastErr = nil
 			fmt.Fprintf(out, "..  CI's gate %q has not finished for %s; waiting\n", name, req.sha)
 		}
-		if !h.now().Before(deadline) {
+		if !h.clock.Now().Before(deadline) {
 			return &GateTimeoutError{SHA: req.sha, Gate: name, Waited: req.timeout, LastErr: lastErr}
 		}
-		h.sleep(req.poll)
+		<-h.clock.NewTimer(req.poll).C()
 	}
 }
 

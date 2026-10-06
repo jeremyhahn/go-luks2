@@ -371,13 +371,13 @@ func TestCheckFilesystemDetailedRefusesUnsupported(t *testing.T) {
 }
 
 // fakeTools puts stand-ins for external programs in the ONLY directory the
-// creators resolve programs from (toolDirs), so their real lookups reach them.
+// creators resolve programs from (tools.Dirs), so their real lookups reach them.
 // Each records the argv it was run with, one argument per line, prints stdout
 // and exits with code; record returns what a tool was run with, or nil if it
 // never ran.
 //
-// toolDirs is package state, so every caller is sequential.
-func fakeTools(t *testing.T, tools map[string]fakeTool) (record func(name string) []string) {
+// tools is package state, so every caller is sequential.
+func fakeTools(t *testing.T, fakes map[string]fakeTool) (record func(name string) []string) {
 	t.Helper()
 	bin := t.TempDir()
 	// t.TempDir makes its directories 0777 less the umask, and a program
@@ -386,16 +386,16 @@ func fakeTools(t *testing.T, tools map[string]fakeTool) (record func(name string
 		t.Fatalf("restricting the fake tool directory: %v", err)
 	}
 	logs := t.TempDir()
-	for name, tool := range tools {
+	for name, tool := range fakes {
 		script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %s\nprintf '%%s' %s\nexit %d\n",
 			shellQuote(filepath.Join(logs, name)), shellQuote(tool.stdout), tool.code)
 		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o700); err != nil { // #nosec G306 -- an executable test fixture under t.TempDir()
 			t.Fatalf("writing the fake %s: %v", name, err)
 		}
 	}
-	previous := toolDirs
-	t.Cleanup(func() { toolDirs = previous })
-	toolDirs = []string{bin}
+	previous := tools
+	t.Cleanup(func() { tools = previous })
+	tools.Dirs = []string{bin}
 	return func(name string) []string {
 		data, err := os.ReadFile(filepath.Join(logs, name)) // #nosec G304 -- under t.TempDir()
 		if errors.Is(err, os.ErrNotExist) {
@@ -482,10 +482,12 @@ func TestFilesystemCreatorsReportTheToolsFailure(t *testing.T) {
 			if err == nil {
 				t.Fatalf("create succeeded although %s exited 1", tt.tool)
 			}
-			for _, want := range []string{tt.tool + " failed", "exit status 1", "the device is too small"} {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("error %q does not carry %q", err, want)
-				}
+			var fce *FilesystemCommandError
+			if !errors.As(err, &fce) || fce.Command != tt.tool || fce.Device != "/dev/mapper/vol" || fce.Output != "the device is too small" {
+				t.Fatalf("create = %v, want a FilesystemCommandError naming %s, the device and its output", err, tt.tool)
+			}
+			if !strings.Contains(err.Error(), "exit status 1") {
+				t.Errorf("error %q does not carry the exit status", err)
 			}
 		})
 	}
@@ -556,13 +558,14 @@ func TestMakeZFSRefusesWhatItCannotCreate(t *testing.T) {
 
 	fakeTools(t, map[string]fakeTool{"zpool": {stdout: "no such pool", code: 1}})
 	err := makeZFS("/dev/mapper/vol", &FilesystemOptions{ZFSOptions: &ZFSOptions{PoolName: "tank"}})
-	if err == nil || !strings.Contains(err.Error(), "zpool create failed") || !strings.Contains(err.Error(), "no such pool") {
+	var fce *FilesystemCommandError
+	if !errors.As(err, &fce) || fce.Command != "zpool create" || fce.Device != "/dev/mapper/vol" || fce.Output != "no such pool" {
 		t.Errorf("zpool exiting 1: %v, want zpool's failure with its output", err)
 	}
 
 	fakeTools(t, map[string]fakeTool{"zpool": {}, "zfs": {stdout: "dataset already exists", code: 1}})
 	err = makeZFS("/dev/mapper/vol", &FilesystemOptions{ZFSOptions: &ZFSOptions{PoolName: "tank", DatasetName: "data"}})
-	if err == nil || !strings.Contains(err.Error(), "zfs create failed") || !strings.Contains(err.Error(), "dataset already exists") {
+	if !errors.As(err, &fce) || fce.Command != "zfs create" || fce.Device != "tank/data" || fce.Output != "dataset already exists" {
 		t.Errorf("zfs exiting 1: %v, want zfs's failure with its output", err)
 	}
 }

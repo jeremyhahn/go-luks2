@@ -24,13 +24,20 @@ func TestGetVolumeInfoReportsTheVolumeKeySize(t *testing.T) {
 		}
 	}
 
+	volumeKeySizeFixture := func() *LUKS2Metadata {
+		m := minimalValidMetadata()
+		m.Keyslots["0"] = &Keyslot{Type: "luks2", KeySize: 64, Area: &KeyslotArea{Type: "raw", Offset: "32768", Size: "258048"}}
+		m.Digests["0"].Keyslots = []string{"0"}
+		return m
+	}
+
 	// No keyslot attested for the segment: no key size to report.
-	m := structureFixture()
+	m := volumeKeySizeFixture()
 	m.Digests["0"].Keyslots = []string{}
 	if got := volumeKeyBits(m, "0"); got != 0 {
 		t.Errorf("volumeKeyBits with no attested keyslot = %d, want 0", got)
 	}
-	m = structureFixture()
+	m = volumeKeySizeFixture()
 	m.Digests["0"].Segments = []string{}
 	if got := volumeKeyBits(m, "0"); got != 0 {
 		t.Errorf("volumeKeyBits with no digest for the segment = %d, want 0", got)

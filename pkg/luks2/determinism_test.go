@@ -32,7 +32,7 @@ import (
 //
 // THE SUBSTITUTE IS A STREAM CIPHER, NOT A CONSTANT, and that is a requirement
 // rather than a nicety. The obvious stand-in -- a reader that yields zeroes --
-// would silently invalidate every measurement taken through it: afSplitInto
+// would silently invalidate every measurement taken through it: the AF split
 // draws stripes*keySize bytes (~256 KiB for a default keyslot) and XORs them
 // together, so under a zero reader the stripes collapse and the keyslot area
 // stops resembling the thing under test. It would also make "the keyslots area

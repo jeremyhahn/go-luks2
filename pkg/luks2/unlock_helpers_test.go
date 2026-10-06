@@ -101,7 +101,7 @@ func TestVerifyMasterKey(t *testing.T) {
 	// merely rejected. That is a stronger guarantee, and it is asserted at the
 	// constructor instead.
 	t.Run("empty master key cannot be held at all", func(t *testing.T) {
-		e, err := newSecretEnclave("master key", 0)
+		e, err := custody.New("master key", 0)
 		if err == nil {
 			mustDestroy(t, e)
 			t.Fatal("an enclave over an empty master key was created")
@@ -126,9 +126,9 @@ func TestVerifyMasterKey(t *testing.T) {
 
 		// A destroyed enclave is what "no readable master key" looks like once
 		// custody is enclave-owned, and it must not verify.
-		destroyed, err := randomSecret("master key", 32)
+		destroyed, err := custody.Random("master key", 32, cryptoRand)
 		if err != nil {
-			t.Fatalf("randomSecret failed: %v", err)
+			t.Fatalf("custody.Random failed: %v", err)
 		}
 		mustDestroy(t, destroyed)
 

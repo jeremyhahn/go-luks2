@@ -161,8 +161,8 @@ so converted volumes have `af.hash: "sha1"` keyslots and a PBKDF2-SHA1 digest.
 
 ### The PBKDF2-HMAC-SHA1 exemption
 
-`getPBKDF2HashFunc("sha1")` (`pkg/luks2/kdf.go`) and `getAFMergeHashFunc("sha1")`
-(`pkg/luks2/antiforensic.go`) are the only uses of SHA-1. (Argon2, the other
+`getPBKDF2HashFunc("sha1")` (`pkg/luks2/kdf.go`) and the anti-forensic merge of a
+SHA-1 keyslot (`internal/af`) are the only uses of SHA-1. (Argon2, the other
 non-approved primitive, is covered above.)
 They exist to read headers cryptsetup wrote before 1.7.0 and LUKS1 volumes
 converted to LUKS2, which cannot be opened any other way. No keyslot or digest

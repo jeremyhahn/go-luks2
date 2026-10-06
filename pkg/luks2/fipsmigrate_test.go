@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
 // In-process tests for MigrateToFIPS (#84). The real-cryptsetup, real-FIPS
@@ -232,7 +234,7 @@ func volumeKey(t *testing.T, device string, passphrase []byte) []byte {
 	}
 	defer mustDestroy(t, mk)
 	var out []byte
-	if err := borrowSecret("test copy", mk, func(b []byte) error {
+	if err := secret.Borrow("test copy", mk, func(b []byte) error {
 		out = bytes.Clone(b)
 		return nil
 	}); err != nil {
@@ -415,7 +417,7 @@ func sha1DigestVolume(t *testing.T, name string) string {
 	digest := metadata.Digests["0"]
 	digest.Hash = "sha1"
 	digest.Iterations = iterations
-	if err := borrowSecret("test digest", derived, func(b []byte) error {
+	if err := secret.Borrow("test digest", derived, func(b []byte) error {
 		digest.Digest = encodeBase64(b)
 		return nil
 	}); err != nil {

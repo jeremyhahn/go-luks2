@@ -6,9 +6,9 @@ package luks2
 
 import (
 	"fmt"
-	"math"
 
 	"github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-luks2/internal/kdf"
 )
 
 // The aggregate key-derivation budget of one operation (#26).
@@ -30,85 +30,25 @@ import (
 // PBKDF2 in PRF blocks (iterations times output blocks), Argon2 in KiB-passes
 // (time cost times memory). Neither is converted into the other.
 
-// kdfWork is an amount of key-derivation work.
-type kdfWork struct {
-	pbkdf2Blocks    uint64
-	argon2KiBPasses uint64
-}
+// kdfWork is an amount of key-derivation work. Add is a saturating sum, so a
+// crafted header cannot wrap the total, and Exceeds reports whether one
+// amount is more than a budget in either unit; both live on kdf.Work, which
+// this is an alias of.
+type kdfWork = kdf.Work
 
-// add is a saturating sum, so a crafted header cannot wrap the total.
-func (w kdfWork) add(o kdfWork) kdfWork {
-	return kdfWork{
-		pbkdf2Blocks:    saturatingAdd(w.pbkdf2Blocks, o.pbkdf2Blocks),
-		argon2KiBPasses: saturatingAdd(w.argon2KiBPasses, o.argon2KiBPasses),
-	}
-}
-
-// exceeds reports whether w is more than budget in either unit.
-func (w kdfWork) exceeds(budget kdfWork) bool {
-	return w.pbkdf2Blocks > budget.pbkdf2Blocks || w.argon2KiBPasses > budget.argon2KiBPasses
-}
-
-func saturatingAdd(a, b uint64) uint64 {
-	if a > math.MaxUint64-b {
-		return math.MaxUint64
-	}
-	return a + b
-}
-
-func saturatingMul(a, b uint64) uint64 {
-	if a != 0 && b > math.MaxUint64/a {
-		return math.MaxUint64
-	}
-	return a * b
-}
-
-// maxDerivedKeyLen is the longest output any derivation in an unlock asks
-// for: an area key (at most 64 bytes, XTS) or a digest (at most 64, sha512).
-const maxDerivedKeyLen = 64
-
-// minPRFOutputLen is the shortest PBKDF2 PRF output: SHA-1's 20 bytes, which
-// needs the most blocks for a given output length.
-const minPRFOutputLen = 20
-
-// derivationWork is what one derivation of kdf to outLen bytes costs. The KDF
+// derivationWork is what one derivation of k to outLen bytes costs. The KDF
 // has passed the screen, so its parameters are present and bounded.
-func derivationWork(kdf *KDF, outLen int) kdfWork {
-	if kdf == nil || outLen <= 0 {
+func derivationWork(k *KDF, outLen int) kdfWork {
+	if k == nil || outLen <= 0 {
 		return kdfWork{}
 	}
-	switch normalizeKDFType(kdf.Type) {
-	case KDFTypeArgon2i, KDFTypeArgon2id:
-		if kdf.Time == nil || kdf.Memory == nil || *kdf.Time < 0 || *kdf.Memory < 0 {
-			return kdfWork{}
-		}
-		return kdfWork{argon2KiBPasses: saturatingMul(uint64(*kdf.Time), uint64(*kdf.Memory))} // #nosec G115 -- non-negative, checked above
-	default:
-		if kdf.Iterations == nil || *kdf.Iterations < 0 {
-			return kdfWork{}
-		}
-		hashLen := minPRFOutputLen
-		if h, err := pbkdf2Hash(kdf.Hash); err == nil {
-			hashLen = h.Size()
-		}
-		blocks := (outLen + hashLen - 1) / hashLen
-		return kdfWork{pbkdf2Blocks: saturatingMul(uint64(*kdf.Iterations), uint64(blocks))} // #nosec G115 -- non-negative, checked above
-	}
-}
-
-// ceilingWork is one derivation at the per-derivation ceilings, of either KDF.
-var ceilingWork = kdfWork{
-	pbkdf2Blocks:    uint64(maxKDFIterations) * ((maxDerivedKeyLen + minPRFOutputLen - 1) / minPRFOutputLen),
-	argon2KiBPasses: uint64(maxArgon2Time) * uint64(maxArgon2Memory),
+	return kdf.DerivationWork(toKDFParams(k), outLen)
 }
 
 // operationKDFBudget is the work one unlock, verify or authorize operation may
-// do: a keyslot derivation and a digest derivation, at the ceilings, for each
-// of LUKS2MaxKeyslots keyslots.
-var operationKDFBudget = kdfWork{
-	pbkdf2Blocks:    2 * LUKS2MaxKeyslots * ceilingWork.pbkdf2Blocks,
-	argon2KiBPasses: 2 * LUKS2MaxKeyslots * ceilingWork.argon2KiBPasses,
-}
+// do: a keyslot derivation and a digest derivation, at the per-derivation
+// ceilings, for each of LUKS2MaxKeyslots keyslots.
+var operationKDFBudget = kdf.OperationBudget(LUKS2MaxKeyslots)
 
 // scanPlan is what a keyslot scan over order would cost at most, were every
 // keyslot tried: the derivations it would make, and the most locked memory
@@ -136,9 +76,9 @@ func planKeyslotScan(metadata *LUKS2Metadata, order []string) scanPlan {
 		if err != nil {
 			continue
 		}
-		plan.work = plan.work.add(derivationWork(keyslot.KDF, kp.areaKeySize))
+		plan.work = plan.work.Add(derivationWork(keyslot.KDF, kp.areaKeySize))
 		digestWork, longestDigest := planDigests(metadata.Digests, func(d *Digest) bool { return digestCovers(d, id) })
-		plan.work = plan.work.add(digestWork)
+		plan.work = plan.work.Add(digestWork)
 		plan.peakLocked = max(plan.peakLocked, keyslotOpenPeakLocked(kp, keyslot.KeySize, longestDigest))
 	}
 	return plan
@@ -147,10 +87,10 @@ func planKeyslotScan(metadata *LUKS2Metadata, order []string) scanPlan {
 // keyslotOpenPeakLocked is the most locked memory opening one keyslot holds at
 // once: unlockKeyslotFrom and recoverKeyslotKey, allocation by allocation.
 //
-//	area key            passphraseKDF -> adoptSecret          areaKeySize   held to the end
-//	decrypted stripes   decryptKeyMaterialEnclave             decryptLen    held to the end
-//	merged key          afMergeEnclave, result                keySize       held to the end
-//	diffusion state     afMergeEnclave, buffer                keySize       freed after the merge
+//	area key            passphraseKDF -> custody.Adopt          areaKeySize   held to the end
+//	decrypted stripes   areacipher DecryptEnclave             decryptLen    held to the end
+//	merged key          af.Codec.Merge, result                keySize       held to the end
+//	diffusion state     af.Codec.Merge, buffer                keySize       freed after the merge
 //	derived digest      evaluateDigest -> deriveKeySecret     digest length one at a time, after the merge
 //
 // decryptLen is whole sectors, so the transform needs no partial-sector
@@ -181,7 +121,7 @@ func planDigests(digests map[string]*Digest, covers func(*Digest) bool) (work kd
 		if err != nil {
 			continue
 		}
-		work = work.add(derivationWork(kdf, n))
+		work = work.Add(derivationWork(kdf, n))
 		longest = max(longest, n)
 	}
 	return work, longest
@@ -191,17 +131,11 @@ func planDigests(digests map[string]*Digest, covers func(*Digest) bool) (work kd
 // over the aggregate budget, or whose single keyslot needs more locked memory
 // than the process allocator could ever admit.
 func checkKDFBudget(op string, plan scanPlan) error {
-	if plan.work.exceeds(operationKDFBudget) {
+	if plan.work.Exceeds(operationKDFBudget) {
 		return &KDFBudgetError{Op: op, Need: plan.work, Budget: operationKDFBudget}
 	}
 	if plan.peakLocked > 0 {
-		allocator, err := lockedMemoryAllocator()
-		if err != nil {
-			return &ProtectedMemoryError{Op: op, Err: err}
-		}
-		if limit := allocator.Limit(); plan.peakLocked > limit {
-			return &ProtectedMemoryError{Op: op, Err: &enclave.BudgetError{Requested: plan.peakLocked, Limit: limit}}
-		}
+		return custody.Admissible(op, plan.peakLocked)
 	}
 	return nil
 }
@@ -219,7 +153,7 @@ type KDFBudgetError struct {
 
 func (e *KDFBudgetError) Error() string {
 	return fmt.Sprintf("%s: %s: the header asks for %d PBKDF2 blocks and %d Argon2 KiB-passes; one operation may spend %d and %d, the most any header cryptsetup writes can ask for",
-		ErrKDFBudgetExceeded.Error(), e.Op, e.Need.pbkdf2Blocks, e.Need.argon2KiBPasses, e.Budget.pbkdf2Blocks, e.Budget.argon2KiBPasses)
+		ErrKDFBudgetExceeded.Error(), e.Op, e.Need.PBKDF2Blocks, e.Need.Argon2KiBPasses, e.Budget.PBKDF2Blocks, e.Budget.Argon2KiBPasses)
 }
 
 // Is reports the error as both sentinels it stands for.

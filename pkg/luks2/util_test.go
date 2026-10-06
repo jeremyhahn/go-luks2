@@ -174,35 +174,3 @@ func TestDecodeBase64Error(t *testing.T) {
 		})
 	}
 }
-
-// TestGetHashFunc tests hash function retrieval
-func TestGetHashFunc(t *testing.T) {
-	tests := []struct {
-		algo    string
-		wantErr bool
-	}{
-		{"sha256", false},
-		{"sha512", false},
-		{"sha1", true},
-		{"invalid", true},
-		{"md5", true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.algo, func(t *testing.T) {
-			fn, err := getHashFunc(tt.algo)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("Expected error, got nil")
-				}
-			} else {
-				if err != nil {
-					t.Fatalf("Unexpected error: %v", err)
-				}
-				if fn == nil {
-					t.Fatal("Hash function is nil")
-				}
-			}
-		})
-	}
-}

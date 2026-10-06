@@ -16,6 +16,10 @@ import (
 	"testing"
 
 	"github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-luks2/internal/af"
+	"github.com/jeremyhahn/go-luks2/internal/areacipher"
+	"github.com/jeremyhahn/go-luks2/internal/errs"
+	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
 // Regressions for the second review of #84.
@@ -63,7 +67,7 @@ func weakenForStrictFIPS(device string, passphrase []byte, keyslotID string) (er
 
 	digest := metadata.Digests["0"]
 	if digest == nil {
-		return &detailError{Detail: "the fixture has no digest 0"}
+		return &errs.Error{Detail: "the fixture has no digest 0"}
 	}
 	kdf := shortSaltKDF()
 	value, err := deriveKeySecret(masterKey, kdf, sha256DigestLen)
@@ -75,7 +79,7 @@ func weakenForStrictFIPS(device string, passphrase []byte, keyslotID string) (er
 	defer func() { err = errors.Join(err, value.Destroy()) }()
 	digest.Type, digest.Hash, digest.Salt, digest.Iterations = kdf.Type, kdf.Hash, kdf.Salt, *kdf.Iterations
 	digest.Time, digest.Memory, digest.CPUs = nil, nil, nil
-	if err := borrowSecret("fixture digest", value, func(b []byte) error {
+	if err := secret.Borrow("fixture digest", value, func(b []byte) error {
 		digest.Digest = encodeBase64(b)
 		return nil
 	}); err != nil {
@@ -85,7 +89,7 @@ func weakenForStrictFIPS(device string, passphrase []byte, keyslotID string) (er
 	if keyslotID != "" {
 		keyslot := metadata.Keyslots[keyslotID]
 		if keyslot == nil || keyslot.Area == nil {
-			return &detailError{Detail: "the fixture has no keyslot " + keyslotID}
+			return &errs.Error{Detail: "the fixture has no keyslot " + keyslotID}
 		}
 		if err := rewrapKeyslotInPlace(device, keyslot, masterKey, passphrase, shortSaltKDF()); err != nil {
 			return err
@@ -108,7 +112,7 @@ func rewrapKeyslotInPlace(device string, keyslot *Keyslot, masterKey *enclave.Me
 	// the enclave reports joins the returned error rather than vanishing.
 	defer func() { err = errors.Join(err, passphraseKey.Destroy()) }()
 
-	afData, err := afSplitEnclave(masterKey, keyslot.AF.Stripes, keyslot.AF.Hash)
+	afData, err := afCodec().Split(masterKey, af.Params{Stripes: keyslot.AF.Stripes, Hash: keyslot.AF.Hash})
 	if err != nil {
 		return err
 	}
@@ -116,7 +120,7 @@ func rewrapKeyslotInPlace(device string, keyslot *Keyslot, masterKey *enclave.Me
 	// the enclave reports joins the returned error rather than vanishing.
 	defer func() { err = errors.Join(err, afData.Destroy()) }()
 
-	encrypted, err := encryptKeyMaterialEnclave(afData, passphraseKey, DefaultCipher)
+	encrypted, err := areacipher.Default().EncryptEnclave(custody, afData, passphraseKey)
 	if err != nil {
 		return err
 	}
@@ -131,7 +135,7 @@ func rewrapKeyslotInPlace(device string, keyslot *Keyslot, masterKey *enclave.Me
 		return err
 	}
 	if int64(len(encrypted)) > size {
-		return &detailError{Detail: "the re-wrapped key material does not fit the keyslot's area"}
+		return &errs.Error{Detail: "the re-wrapped key material does not fit the keyslot's area"}
 	}
 
 	f, err := os.OpenFile(device, os.O_WRONLY, 0o600) // #nosec G304 -- a test image
@@ -278,9 +282,9 @@ func unboundKeyslot(t *testing.T, device string, passphrase []byte) {
 	if err != nil {
 		t.Fatalf("randomBytes failed: %v", err)
 	}
-	unbound, err := adoptSecret("fixture unbound key", raw)
+	unbound, err := custody.Adopt("fixture unbound key", raw)
 	if err != nil {
-		t.Fatalf("adoptSecret failed: %v", err)
+		t.Fatalf("custody.Adopt failed: %v", err)
 	}
 	defer mustDestroy(t, unbound)
 

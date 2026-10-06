@@ -85,7 +85,7 @@ func keyringStillHolds(t *testing.T, reference string) bool {
 	t.Helper()
 	defer pinToOSThread()()
 
-	_, err := keyring.search(testRing(t), keyringKeyType, descriptionOf(reference))
+	_, err := keyring.Search(testRing(t), keyringKeyType, descriptionOf(reference))
 	return err == nil
 }
 
@@ -182,12 +182,12 @@ func TestTheKeyringEntryIsLiveExactlyDuringActivation(t *testing.T) {
 		// The goroutine is pinned by unlockLoadTable for exactly this window,
 		// so a search here runs against the same task credentials -- and
 		// therefore the same ring -- that dm-crypt's request_key would use.
-		ring, ringErr := keyring.sessionRing()
+		ring, ringErr := keyring.SessionRing()
 		if ringErr != nil {
 			resolvedDuring = ringErr
 			return
 		}
-		_, resolvedDuring = keyring.search(ring, keyringKeyType, descriptionOf(reference))
+		_, resolvedDuring = keyring.Search(ring, keyringKeyType, descriptionOf(reference))
 	}
 	fake.install(t)
 
@@ -477,7 +477,7 @@ func TestAHostileHeaderUUIDCannotSplitTheTargetSpecification(t *testing.T) {
 			fake := newFakeDeviceMapper()
 			fake.install(t)
 
-			key, err := randomSecret("hostile uuid test", 64)
+			key, err := custody.Random("hostile uuid test", 64, cryptoRand)
 			if err != nil {
 				t.Fatalf("could not obtain protected memory: %v", err)
 			}

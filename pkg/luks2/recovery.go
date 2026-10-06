@@ -5,10 +5,6 @@
 package luks2
 
 import (
-	"bytes"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -18,23 +14,14 @@ import (
 	"time"
 
 	"github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-luks2/internal/errs"
+	"github.com/jeremyhahn/go-luks2/internal/recoverykey"
+	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
 // RecoveryKeyLength is the default length for recovery keys (32 bytes = 256
 // bits), and also the SHORTEST one GenerateRecoveryKey will draw.
 const RecoveryKeyLength = 32
-
-// Recovery-key generation refusals (#249, A4).
-var (
-	// ErrRecoveryKeyTooShort is returned for a recovery key of fewer than
-	// RecoveryKeyLength random bytes, or one whose rendering is too long to be
-	// enrolled as a passphrase.
-	ErrRecoveryKeyTooShort = errors.New("recovery key length out of range (at least 32 random bytes, and a rendering no longer than 512 bytes)")
-
-	// ErrInvalidRecoveryKeyFormat is returned for a format other than hex,
-	// base64 or dashed.
-	ErrInvalidRecoveryKeyFormat = errors.New("unknown recovery key format (hex, base64 or dashed)")
-)
 
 // RecoveryKeyFormat specifies the output format for recovery keys
 type RecoveryKeyFormat string
@@ -60,19 +47,22 @@ const (
 func ParseRecoveryKeyFormat(name string) (RecoveryKeyFormat, error) {
 	format := RecoveryKeyFormat(name)
 	if !format.known() {
-		return "", &detailError{Kind: ErrInvalidRecoveryKeyFormat, Detail: fmt.Sprintf("%q", name)}
+		return "", &errs.Error{Kind: ErrInvalidRecoveryKeyFormat, Detail: fmt.Sprintf("%q", name)}
 	}
 	return format, nil
 }
 
 // known reports whether f is one of the three renderings.
 func (f RecoveryKeyFormat) known() bool {
-	switch f {
-	case RecoveryKeyFormatHex, RecoveryKeyFormatBase64, RecoveryKeyFormatDashed:
-		return true
-	default:
-		return false
-	}
+	_, ok := recoveryRenderings[f]
+	return ok
+}
+
+// recoveryRenderings maps each format name to the rendering it selects.
+var recoveryRenderings = map[RecoveryKeyFormat]recoverykey.Format{
+	RecoveryKeyFormatDashed: recoverykey.Dashed,
+	RecoveryKeyFormatHex:    recoverykey.Hex,
+	RecoveryKeyFormatBase64: recoverykey.Base64,
 }
 
 // RecoveryKey is a generated credential for a volume.
@@ -216,7 +206,7 @@ type RecoveryKeyOptions struct {
 	// CALLER supplied.
 	//
 	// It is safe HERE and nowhere else: the credential this enrolls is drawn by
-	// GenerateRecoveryKey from randomSecret, 256 bits with no candidate list, so
+	// GenerateRecoveryKey from custody.Random, 256 bits with no candidate list, so
 	// the iteration count has no search to multiply. The same field on
 	// AddKeyOptions is held to the full hash-dependent floor, because the bytes
 	// arriving there came from outside. The exemption still keeps
@@ -252,7 +242,7 @@ func GenerateRecoveryKey(length int, format RecoveryKeyFormat) (*RecoveryKey, er
 	// for a format that does not exist got a key in one they did not ask for
 	// and could not tell (#249, A4).
 	if !format.known() {
-		return nil, &detailError{Kind: ErrInvalidRecoveryKeyFormat, Detail: fmt.Sprintf("%q", format)}
+		return nil, &errs.Error{Kind: ErrInvalidRecoveryKeyFormat, Detail: fmt.Sprintf("%q", format)}
 	}
 
 	// AT LEAST 256 BITS, because that is what the recovery key's whole cost
@@ -265,44 +255,28 @@ func GenerateRecoveryKey(length int, format RecoveryKeyFormat) (*RecoveryKey, er
 	// seconds, with no volume needed. The floor is what keeps both statements
 	// true. The ceiling is the passphrase policy: a rendering longer than 512
 	// bytes could never be enrolled.
-	if length < RecoveryKeyLength || formattedLen(length, format) > MaxPassphraseLength {
-		return nil, &detailError{Kind: ErrRecoveryKeyTooShort, Detail: fmt.Sprintf("%d random bytes rendered %s", length, format)}
+	rendering := recoveryRenderings[format]
+	if length < RecoveryKeyLength || recoverykey.Len(length, rendering) > MaxPassphraseLength {
+		return nil, &errs.Error{Kind: ErrRecoveryKeyTooShort, Detail: fmt.Sprintf("%d random bytes rendered %s", length, format)}
 	}
 
-	key, err := randomSecret("recovery key", length)
+	key, err := custody.Random("recovery key", length, cryptoRand)
 	if err != nil {
 		return nil, err
 	}
-	defer releaseSecret(key)
+	defer custody.Release(key)
 
-	credential, err := newSecretEnclave("recovery key", formattedLen(length, format))
+	credential, err := recoverykey.Render(custody, key, rendering)
 	if err != nil {
-		return nil, err
-	}
-
-	if err := borrowSecret("recovery key", key, func(raw []byte) error {
-		return borrowSecret("recovery key", credential, func(dst []byte) error {
-			formatRecoveryKeyInto(dst, raw, format)
-			return nil
-		})
-	}); err != nil {
-		releaseSecret(credential)
 		return nil, err
 	}
 
 	// The hash is of the CREDENTIAL, not of the bytes behind it -- the
 	// credential is the thing an operator transcribes and the thing a keyslot
-	// holds, so it is the thing worth being able to check. It is a one-way
-	// function of it and is written to the recovery file in the clear, so it is
-	// not protected; it is computed inside the borrow only because that is
-	// where the credential is readable.
-	var credentialHash string
-	if err := borrowSecret("recovery key", credential, func(b []byte) error {
-		sum := sha256.Sum256(b)
-		credentialHash = hex.EncodeToString(sum[:])
-		return nil
-	}); err != nil {
-		releaseSecret(credential)
+	// holds, so it is the thing worth being able to check.
+	credentialHash, err := recoverykey.Hash(credential)
+	if err != nil {
+		custody.Release(credential)
 		return nil, err
 	}
 
@@ -373,7 +347,7 @@ func AddRecoveryKey(device string, existingPassphrase []byte, opts *RecoveryKeyO
 	// fails.
 	//
 	// libraryGeneratedCredential, because THIS function drew the bytes it is
-	// enrolling: the credential is randomSecret output, 256 bits with no
+	// enrolling: the credential is custody.Random output, 256 bits with no
 	// candidate list behind it. A PBKDF2 iteration count multiplies the cost of
 	// each guess in an offline search, and there is no search to multiply here,
 	// so the hash-dependent floor buys nothing while making systemd's own
@@ -384,14 +358,14 @@ func AddRecoveryKey(device string, existingPassphrase []byte, opts *RecoveryKeyO
 	// caller hands in and why no exported API can select this.
 	var keyslot, tokenID int
 	var volumeUUID string
-	if err := borrowSecret("recovery key", recoveryKey.Credential, func(credential []byte) error {
+	if err := secret.Borrow("recovery key", recoveryKey.Credential, func(credential []byte) error {
 		var err error
 		keyslot, tokenID, volumeUUID, err = enrollWithToken(device, existingPassphrase, credential, addOpts,
 			recoveryToken(), libraryGeneratedCredential)
 		return err
 	}); err != nil {
 		recoveryKey.Clear()
-		return nil, &detailError{Detail: "failed to add recovery key", Err: err}
+		return nil, &errs.Error{Detail: "failed to add recovery key", Err: err}
 	}
 
 	recoveryKey.Keyslot = keyslot
@@ -404,7 +378,7 @@ func AddRecoveryKey(device string, existingPassphrase []byte, opts *RecoveryKeyO
 	if opts.OutputPath != "" {
 		if err := SaveRecoveryKey(recoveryKey, opts.OutputPath); err != nil {
 			// Non-fatal - key was still added, but caller should be aware
-			recoveryKey.SaveError = &detailError{Detail: "failed to save recovery key to " + opts.OutputPath, Err: err}
+			recoveryKey.SaveError = &errs.Error{Detail: "failed to save recovery key to " + opts.OutputPath, Err: err}
 		}
 	}
 
@@ -481,7 +455,7 @@ func SaveRecoveryKey(key *RecoveryKey, path string) error {
 	// Ensure directory exists
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
+		return &errs.Error{Detail: "failed to create directory", Err: err}
 	}
 
 	// Staged in the destination directory so the publish below is a
@@ -489,7 +463,7 @@ func SaveRecoveryKey(key *RecoveryKey, path string) error {
 	// never briefly readable through a wider mode.
 	tmp, err := os.CreateTemp(dir, ".recovery-key-*.tmp")
 	if err != nil {
-		return fmt.Errorf("failed to write recovery key: %w", err)
+		return &errs.Error{Detail: "failed to write recovery key", Err: err}
 	}
 	tmpPath := tmp.Name()
 
@@ -514,7 +488,7 @@ func SaveRecoveryKey(key *RecoveryKey, path string) error {
 	}()
 
 	if err := tmp.Chmod(0400); err != nil {
-		return fmt.Errorf("failed to write recovery key: %w", err)
+		return &errs.Error{Detail: "failed to write recovery key", Err: err}
 	}
 
 	if err := writeRecoveryKeyContent(tmp, key); err != nil {
@@ -523,18 +497,21 @@ func SaveRecoveryKey(key *RecoveryKey, path string) error {
 
 	// The DATA is durable before the name that points at it exists.
 	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("failed to write recovery key: %w", err)
+		return &errs.Error{Detail: "failed to write recovery key", Err: err}
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("failed to write recovery key: %w", err)
+		return &errs.Error{Detail: "failed to write recovery key", Err: err}
 	}
 
 	// Publish. EEXIST here means an existing recovery key was left untouched.
 	if err := os.Link(tmpPath, path); err != nil {
 		if errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("refusing to replace the existing recovery key file %s: remove it first if that is intended", path)
+			return &errs.Error{
+				Detail: fmt.Sprintf("refusing to replace the existing recovery key file %s: remove it first if that is intended",
+					path),
+			}
 		}
-		return fmt.Errorf("failed to write recovery key: %w", err)
+		return &errs.Error{Detail: "failed to write recovery key", Err: err}
 	}
 	// Explicit as well as deferred, so a failure is REPORTED rather than
 	// retried in silence. The deferred attempt above is the backstop; between
@@ -545,8 +522,11 @@ func SaveRecoveryKey(key *RecoveryKey, path string) error {
 	// credential had been lost when what actually happened is that a duplicate
 	// of it may remain.
 	if err := removeFile(tmpPath); err != nil {
-		return fmt.Errorf("the recovery key was written to %s, but its staging copy %s could not be removed and may still hold the credential: %w",
-			path, tmpPath, err)
+		return &errs.Error{
+			Detail: fmt.Sprintf("the recovery key was written to %s, but its staging copy %s could not be removed and may still hold the credential",
+				path, tmpPath),
+			Err: err,
+		}
 	}
 
 	return syncDir(dir)
@@ -577,18 +557,18 @@ func writeRecoveryKeyContent(w io.Writer, key *RecoveryKey) error {
 	preamble.WriteString("# Recovery Key:\n")
 
 	if _, err := io.WriteString(w, preamble.String()); err != nil {
-		return fmt.Errorf("failed to write recovery key: %w", err)
+		return &errs.Error{Detail: "failed to write recovery key", Err: err}
 	}
 
-	if err := borrowSecret("recovery key", key.Credential, func(b []byte) error {
+	if err := secret.Borrow("recovery key", key.Credential, func(b []byte) error {
 		_, err := w.Write(b)
 		return err
 	}); err != nil {
-		return fmt.Errorf("failed to write recovery key: %w", err)
+		return &errs.Error{Detail: "failed to write recovery key", Err: err}
 	}
 
 	if _, err := io.WriteString(w, "\n"); err != nil {
-		return fmt.Errorf("failed to write recovery key: %w", err)
+		return &errs.Error{Detail: "failed to write recovery key", Err: err}
 	}
 
 	return nil
@@ -601,12 +581,12 @@ func writeRecoveryKeyContent(w io.Writer, key *RecoveryKey) error {
 func syncDir(dir string) error {
 	d, err := os.Open(dir) // #nosec G304 -- the directory the caller asked to write into
 	if err != nil {
-		return fmt.Errorf("failed to sync the recovery key directory: %w", err)
+		return &errs.Error{Detail: "failed to sync the recovery key directory", Err: err}
 	}
 	defer func() { _ = d.Close() }()
 
 	if err := d.Sync(); err != nil {
-		return fmt.Errorf("failed to sync the recovery key directory: %w", err)
+		return &errs.Error{Detail: "failed to sync the recovery key directory", Err: err}
 	}
 	return nil
 }
@@ -636,15 +616,15 @@ func syncDir(dir string) error {
 // Nothing about those copies was forced. They were this package's own choice of
 // how to read a file, not a validated primitive's internals, so the
 // protected-memory mandate does not yield to them the way it does inside
-// PBKDF2 -- see exposure 2 in enclave.go for the case where it does.
+// PBKDF2 -- see exposure 2 in internal/secret for the case where it does.
 func LoadRecoveryKey(path string) (*enclave.MemoryEnclave, error) {
 	line, err := readRecoveryKeyLine(path)
 	if err != nil {
 		return nil, err
 	}
-	defer releaseSecret(line)
+	defer custody.Release(line)
 
-	return parseRecoveryKeySecret(line)
+	return recoverykey.Decode(custody, line)
 }
 
 // LoadRecoveryCredential reads a saved recovery key file and returns THE
@@ -675,47 +655,50 @@ func LoadRecoveryCredential(path string) (*enclave.MemoryEnclave, error) {
 // Nothing about those copies was forced. They were this package's own choice of
 // how to read a file, not a validated primitive's internals, so the
 // protected-memory mandate does not yield to them the way it does inside
-// PBKDF2 -- see exposure 2 in enclave.go for the case where it does.
+// PBKDF2 -- see exposure 2 in internal/secret for the case where it does.
 func readRecoveryKeyLine(path string) (*enclave.MemoryEnclave, error) {
 	f, err := os.Open(path) // #nosec G304 -- user-provided path for recovery key file
 	if err != nil {
-		return nil, fmt.Errorf("failed to read recovery key file: %w", err)
+		return nil, &errs.Error{Detail: "failed to read recovery key file", Err: err}
 	}
 	defer func() { _ = f.Close() }()
 
 	info, err := f.Stat()
 	if err != nil {
-		return nil, fmt.Errorf("failed to read recovery key file: %w", err)
+		return nil, &errs.Error{Detail: "failed to read recovery key file", Err: err}
 	}
 
 	// The size decides a LOCKED allocation, so it is bounded before anything is
 	// mapped rather than after.
 	size := info.Size()
 	if size <= 0 || size > maxRecoveryKeyFileSize {
-		return nil, fmt.Errorf("%w: %s is %d bytes; a recovery key file must be between 1 and %d",
-			ErrInvalidSize, path, size, maxRecoveryKeyFileSize)
+		return nil, &errs.Error{
+			Kind: ErrInvalidSize,
+			Detail: fmt.Sprintf("%s is %d bytes; a recovery key file must be between 1 and %d",
+				path, size, maxRecoveryKeyFileSize),
+		}
 	}
 
-	contents, err := newSecretEnclave("recovery key file", int(size))
+	contents, err := custody.New("recovery key file", int(size))
 	if err != nil {
 		return nil, err
 	}
-	defer releaseSecret(contents)
+	defer custody.Release(contents)
 
 	var keyLine *enclave.MemoryEnclave
-	err = borrowSecret("recovery key file", contents, func(b []byte) error {
+	err = secret.Borrow("recovery key file", contents, func(b []byte) error {
 		if _, err := io.ReadFull(f, b); err != nil {
-			return fmt.Errorf("failed to read recovery key file: %w", err)
+			return &errs.Error{Detail: "failed to read recovery key file", Err: err}
 		}
 
 		// A sub-slice of the locked pages: the line is located by index, never
 		// copied out.
-		line := firstRecoveryKeyLine(b)
+		line := recoverykey.FirstLine(b)
 		if len(line) == 0 {
-			return fmt.Errorf("no recovery key found in file")
+			return &errs.Error{Detail: "no recovery key found in file"}
 		}
 
-		keyLine, err = copySecret("recovery key", line)
+		keyLine, err = custody.Clone("recovery key", line)
 		return err
 	})
 	if err != nil {
@@ -753,79 +736,15 @@ func readRecoveryKeyLine(path string) (*enclave.MemoryEnclave, error) {
 // here at all.
 func RecoveryCredential(formatted string) (*enclave.MemoryEnclave, error) {
 	// One copy, into locked memory. []byte(formatted) is the last ordinary
-	// allocation the credential sees, and adoptSecret's enclave takes ownership
+	// allocation the credential sees, and custody.Adopt's enclave takes ownership
 	// of it and wipes it -- including on the failure path.
-	held, err := adoptSecret("recovery key", []byte(formatted))
+	held, err := custody.Adopt("recovery key", []byte(formatted))
 	if err != nil {
 		return nil, err
 	}
+	defer custody.Release(held)
 
-	var credential *enclave.MemoryEnclave
-	if err := borrowSecret("recovery key", held, func(b []byte) error {
-		body := trimASCIISpace(b)
-		if len(body) == 0 {
-			return fmt.Errorf("recovery key is empty")
-		}
-		// A newline inside the body means more than one line was handed in --
-		// the whole file, most likely. Refused rather than silently taking the
-		// first line, because guessing which line somebody meant is how the
-		// wrong string gets enrolled or tested.
-		if bytes.IndexByte(body, '\n') >= 0 {
-			return fmt.Errorf("a recovery key is a single line; use LoadRecoveryCredential to read a saved file")
-		}
-
-		var err error
-		credential, err = copySecret("recovery key", body)
-		return err
-	}); err != nil {
-		releaseSecret(held)
-		return nil, err
-	}
-	releaseSecret(held)
-
-	return credential, nil
-}
-
-// firstRecoveryKeyLine returns the first line of the file that is neither blank
-// nor a comment, as a SUB-SLICE of the input rather than a copy.
-//
-// It walks bytes rather than using strings.Split, which would allocate an
-// unwipeable string per line of a file whose whole point is to hold a
-// credential.
-func firstRecoveryKeyLine(contents []byte) []byte {
-	for len(contents) > 0 {
-		line := contents
-		if i := bytes.IndexByte(contents, '\n'); i >= 0 {
-			line, contents = contents[:i], contents[i+1:]
-		} else {
-			contents = nil
-		}
-
-		line = trimASCIISpace(line)
-		if len(line) == 0 || line[0] == '#' {
-			continue
-		}
-		return line
-	}
-	return nil
-}
-
-// trimASCIISpace returns b without leading or trailing ASCII whitespace, as a
-// sub-slice. strings.TrimSpace's byte equivalent that does not copy.
-func trimASCIISpace(b []byte) []byte {
-	start := 0
-	for start < len(b) && isASCIISpace(b[start]) {
-		start++
-	}
-	end := len(b)
-	for end > start && isASCIISpace(b[end-1]) {
-		end--
-	}
-	return b[start:end]
-}
-
-func isASCIISpace(c byte) bool {
-	return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r'
+	return recoverykey.Credential(custody, held)
 }
 
 // ParseRecoveryKey decodes a formatted recovery key into the KEY MATERIAL
@@ -862,112 +781,19 @@ func isASCIISpace(c byte) bool {
 // should not come through here at all.
 func ParseRecoveryKey(formatted string) (*enclave.MemoryEnclave, error) {
 	if len(formatted) == 0 {
-		return nil, fmt.Errorf("recovery key is empty")
+		return nil, &errs.Error{Detail: "recovery key is empty"}
 	}
 
 	// One copy, into locked memory. []byte(formatted) is the last ordinary
-	// allocation the key sees, and copySecret's enclave takes ownership of it
+	// allocation the key sees, and custody.Clone's enclave takes ownership of it
 	// and wipes it.
-	held, err := adoptSecret("recovery key", []byte(formatted))
+	held, err := custody.Adopt("recovery key", []byte(formatted))
 	if err != nil {
 		return nil, err
 	}
-	defer releaseSecret(held)
+	defer custody.Release(held)
 
-	return parseRecoveryKeySecret(held)
-}
-
-// parseRecoveryKeySecret decodes a formatted recovery key that is already in
-// protected memory, normalising in place and decoding into a new enclave.
-//
-// The format detection is byte-for-byte the same decision tree the string
-// version made: dashes mean dashed-hex, an all-hex even-length body is tried as
-// hex first, a trailing '=' or any non-hex character admits base64, and hex is
-// the fallback.
-func parseRecoveryKeySecret(formatted *enclave.MemoryEnclave) (*enclave.MemoryEnclave, error) {
-	var key *enclave.MemoryEnclave
-
-	err := borrowSecret("recovery key", formatted, func(raw []byte) error {
-		body := trimASCIISpace(raw)
-		if len(body) == 0 {
-			return fmt.Errorf("recovery key is empty")
-		}
-
-		// Dashed: strip the separators and lower-case, into locked scratch.
-		if bytes.IndexByte(body, '-') >= 0 {
-			stripped, err := copySecretFiltered("recovery key", body, func(c byte) bool { return c != '-' })
-			if err != nil {
-				return err
-			}
-			defer releaseSecret(stripped)
-
-			return borrowSecret("recovery key", stripped, func(hexBody []byte) error {
-				lowerASCII(hexBody)
-				key, err = decodeHexSecret(hexBody)
-				return err
-			})
-		}
-
-		// Not dashed. The hex test is on the lower-cased body, so a WRITABLE
-		// copy is taken to lower-case in -- the borrowed pages of an enclave
-		// built from existing material, copySecret's included, are frozen
-		// read-only and a write through them faults.
-		normalized, err := copySecretWritable("recovery key", body)
-		if err != nil {
-			return err
-		}
-		defer releaseSecret(normalized)
-
-		return borrowSecret("recovery key", normalized, func(b []byte) error {
-			lowerASCII(b)
-			isHex := isAllHex(b)
-
-			if isHex && len(b)%2 == 0 {
-				if k, err := decodeHexSecret(b); err == nil {
-					key = k
-					return nil
-				}
-			}
-
-			// base64 is case-sensitive, so it decodes the ORIGINAL body rather
-			// than the lower-cased copy.
-			if body[len(body)-1] == '=' || !isHex {
-				if k, err := decodeBase64Secret(body); err == nil {
-					key = k
-					return nil
-				}
-			}
-
-			key, err = decodeHexSecret(b)
-			return err
-		})
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return key, nil
-}
-
-// lowerASCII lower-cases ASCII letters in place. strings.ToLower is not usable:
-// it returns a new string, and that string would be the recovery key on the
-// unprotected heap.
-func lowerASCII(b []byte) {
-	for i, c := range b {
-		if c >= 'A' && c <= 'Z' {
-			b[i] = c + ('a' - 'A')
-		}
-	}
-}
-
-// isAllHex reports whether every byte is a lower-case hex digit.
-func isAllHex(b []byte) bool {
-	for _, c := range b {
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return false
-		}
-	}
-	return true
+	return recoverykey.Decode(custody, held)
 }
 
 // VerifyRecoveryKey reports whether a recovery key unlocks the volume.
@@ -1025,7 +851,7 @@ func VerifyRecoveryKey(device string, key *enclave.MemoryEnclave) (bool, error) 
 	// VOLUME key: a recovery key that opened only an unbound keyslot would
 	// recover nothing the data can be read with (#249, A1).
 	var unlocked bool
-	if err := borrowSecret("recovery key", key, func(raw []byte) error {
+	if err := secret.Borrow("recovery key", key, func(raw []byte) error {
 		masterKey, _, err := getVolumeKey(f, device, raw, metadata)
 		if err != nil {
 			if errors.Is(err, ErrMasterKeyVerification) {
@@ -1038,7 +864,7 @@ func VerifyRecoveryKey(device string, key *enclave.MemoryEnclave) (bool, error) 
 			// never actually made.
 			return err
 		}
-		releaseSecret(masterKey)
+		custody.Release(masterKey)
 		unlocked = true
 		return nil
 	}); err != nil {
@@ -1046,154 +872,6 @@ func VerifyRecoveryKey(device string, key *enclave.MemoryEnclave) (bool, error) 
 	}
 
 	return unlocked, nil
-}
-
-// formattedLen returns the exact number of bytes a key of n bytes occupies in
-// the given rendering, so the destination can be allocated in locked memory up
-// front rather than grown on the heap.
-func formattedLen(n int, format RecoveryKeyFormat) int {
-	switch format {
-	case RecoveryKeyFormatBase64:
-		return base64.StdEncoding.EncodedLen(n)
-	case RecoveryKeyFormatHex:
-		return hex.EncodedLen(n)
-	default: // dashed: GenerateRecoveryKey has refused every other value
-		hexLen := hex.EncodedLen(n)
-		if hexLen == 0 {
-			return 0
-		}
-		groups := (hexLen + dashedGroupSize - 1) / dashedGroupSize
-		return hexLen + groups - 1
-	}
-}
-
-// dashedGroupSize is the number of hex characters between dashes in the
-// BitLocker-style rendering.
-const dashedGroupSize = 6
-
-// formatRecoveryKeyInto renders key into dst, which must be exactly
-// formattedLen(len(key), format) bytes.
-//
-// It encodes in place rather than returning a string because a string holding a
-// recovery key can never be wiped. The dashed form is built by encoding the hex
-// RIGHT-ALIGNED in dst and then walking left to right inserting separators: the
-// read cursor stays ahead of the write cursor for every group, so the expansion
-// needs no second buffer.
-func formatRecoveryKeyInto(dst, key []byte, format RecoveryKeyFormat) {
-	switch format {
-	case RecoveryKeyFormatBase64:
-		base64.StdEncoding.Encode(dst, key)
-	case RecoveryKeyFormatHex:
-		hex.Encode(dst, key)
-	default:
-		hexLen := hex.EncodedLen(len(key))
-		if hexLen == 0 {
-			return
-		}
-
-		src := dst[len(dst)-hexLen:]
-		hex.Encode(src, key)
-
-		w, r := 0, len(dst)-hexLen
-		for remaining := hexLen; remaining > 0; {
-			n := dashedGroupSize
-			if remaining < n {
-				n = remaining
-			}
-			copy(dst[w:w+n], dst[r:r+n])
-			w += n
-			r += n
-			remaining -= n
-			if remaining > 0 {
-				dst[w] = '-'
-				w++
-			}
-		}
-
-		toUpperASCII(dst)
-	}
-}
-
-// toUpperASCII uppercases hex digits in place. strings.ToUpper is not usable
-// here: it returns a new string, and that string would be the recovery key on
-// the unprotected heap.
-func toUpperASCII(b []byte) {
-	for i, c := range b {
-		if c >= 'a' && c <= 'z' {
-			b[i] = c - ('a' - 'A')
-		}
-	}
-}
-
-// decodeHexSecret decodes hex bytes DIRECTLY into locked memory.
-//
-// It takes a []byte rather than a string, and the caller has already trimmed
-// and lower-cased in place: doing either here would mean strings.TrimSpace and
-// strings.ToLower, each yielding an unwipeable copy of the credential.
-func decodeHexSecret(src []byte) (*enclave.MemoryEnclave, error) {
-	n := hex.DecodedLen(len(src))
-	if n == 0 {
-		return nil, hex.ErrLength
-	}
-
-	return decodeSecret("recovery key", n, func(dst []byte) (int, error) {
-		return hex.Decode(dst, src)
-	})
-}
-
-// decodeBase64Secret decodes base64 bytes DIRECTLY into locked memory.
-func decodeBase64Secret(src []byte) (*enclave.MemoryEnclave, error) {
-	n := base64.StdEncoding.DecodedLen(len(src))
-	if n == 0 {
-		return nil, base64.CorruptInputError(0)
-	}
-
-	return decodeSecret("recovery key", n, func(dst []byte) (int, error) {
-		return base64.StdEncoding.Decode(dst, src)
-	})
-}
-
-// decodeSecret allocates maxLen bytes of locked memory, lets decode fill it,
-// and returns an enclave holding exactly the bytes decode reported.
-//
-// The two-step exists because base64's DecodedLen is an upper bound -- padding
-// makes the real length shorter -- and an enclave sized from the bound would
-// hand back trailing zeros as part of the key. The oversized region is
-// destroyed once the exact-sized one has been filled, so the surplus is wiped
-// rather than merely ignored.
-func decodeSecret(op string, maxLen int, decode func(dst []byte) (int, error)) (*enclave.MemoryEnclave, error) {
-	scratch, err := newSecretEnclave(op, maxLen)
-	if err != nil {
-		return nil, err
-	}
-	defer releaseSecret(scratch)
-
-	var exact *enclave.MemoryEnclave
-	err = borrowSecret(op, scratch, func(dst []byte) error {
-		n, err := decode(dst)
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return fmt.Errorf("recovery key is empty")
-		}
-		// The exact-sized enclave is allocated even when n == maxLen, so that
-		// the caller's handle never aliases scratch, which is destroyed here.
-		exact, err = newSecretEnclave(op, n)
-		if err != nil {
-			return err
-		}
-		return borrowSecret(op, exact, func(out []byte) error {
-			copy(out, dst[:n])
-			return nil
-		})
-	})
-	if err != nil {
-		releaseSecret(exact)
-		return nil, err
-	}
-
-	return exact, nil
 }
 
 // FormattedString materializes the credential as a Go string, for display.
@@ -1211,7 +889,7 @@ func decodeSecret(op string, maxLen int, decode func(dst []byte) (int, error)) (
 func (r *RecoveryKey) FormattedString() (string, error) {
 	s, err := r.Credential.OpenString()
 	if err != nil {
-		return "", &ProtectedMemoryError{Op: "recovery key", Err: err}
+		return "", &errs.Error{Kind: ErrProtectedMemory, Detail: "recovery key", Err: err}
 	}
 	return s, nil
 }
@@ -1219,6 +897,6 @@ func (r *RecoveryKey) FormattedString() (string, error) {
 // Clear releases the key material from protected memory. It is idempotent and
 // safe on a zero-valued RecoveryKey, so it can always be deferred.
 func (r *RecoveryKey) Clear() {
-	destroySecrets(r.Credential)
+	custody.Release(r.Credential)
 	r.Credential = nil
 }

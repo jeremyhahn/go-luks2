@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/jeremyhahn/go-luks2/internal/clock"
 )
 
 func TestValidateDevicePath(t *testing.T) {
@@ -416,7 +418,7 @@ func TestFileLock_NonexistentFile(t *testing.T) {
 }
 
 func TestFileLock_ReleaseNilFile(t *testing.T) {
-	lock := &FileLock{file: nil}
+	lock := &FileLock{locked: nil}
 	if err := lock.Release(); err != nil {
 		t.Errorf("Release() on nil file = %v, want nil", err)
 	}
@@ -735,16 +737,16 @@ func TestAcquireFileLockWaitsForARelease(t *testing.T) {
 	// The holder lets go 150ms into the wait, on a clock only the wait moves
 	// (#233): the release happens at a controlled moment, not a scheduled one.
 	const holdFor = 150 * time.Millisecond
-	clk := newFakeClock(t)
+	clk := clock.NewFake(t)
 	released := false
-	clk.onSleep = func(time.Time) {
-		if !released && clk.elapsed() >= holdFor {
+	clk.OnWait(func(time.Time) {
+		if !released && clk.Elapsed() >= holdFor {
 			if err := held.Release(); err != nil {
 				t.Errorf("Release() error = %v", err)
 			}
 			released = true
 		}
-	}
+	})
 
 	second, err := acquireFileLock(tmpFile.Name(), 10*time.Second, clk)
 	if err != nil {
@@ -756,14 +758,14 @@ func TestAcquireFileLockWaitsForARelease(t *testing.T) {
 		t.Fatal("the second lock was granted while the first was still held -- it cannot have been exclusive")
 	}
 	// Noticed within one backoff of the release, not at the deadline.
-	if waited := clk.elapsed(); waited < holdFor || waited > holdFor+lockBackoffMax {
+	if waited := clk.Elapsed(); waited < holdFor || waited > holdFor+lockBackoffMax {
 		t.Errorf("acquired after %v, want within %v of the %v release", waited, lockBackoffMax, holdFor)
 	}
 	// The pacing: the documented backoff, doubling from the minimum.
-	if len(clk.slept) < 2 || clk.slept[0] != lockBackoffMin || clk.slept[1] != 2*lockBackoffMin {
-		t.Errorf("backoff began %v, want %v then %v", clk.slept, lockBackoffMin, 2*lockBackoffMin)
+	if len(clk.Waits()) < 2 || clk.Waits()[0] != lockBackoffMin || clk.Waits()[1] != 2*lockBackoffMin {
+		t.Errorf("backoff began %v, want %v then %v", clk.Waits(), lockBackoffMin, 2*lockBackoffMin)
 	}
-	for i, d := range clk.slept {
+	for i, d := range clk.Waits() {
 		if d > lockBackoffMax {
 			t.Errorf("sleep %d was %v, above the %v backoff ceiling", i, d, lockBackoffMax)
 		}
@@ -788,7 +790,7 @@ func TestAcquireFileLockTimesOutWithATypedError(t *testing.T) {
 	defer func() { _ = held.Release() }()
 
 	const budget = 120 * time.Millisecond
-	clk := newFakeClock(t)
+	clk := clock.NewFake(t)
 	_, err = acquireFileLock(tmpFile.Name(), budget, clk)
 	if err == nil {
 		t.Fatal("acquireFileLock() on a held lock = nil, want a timeout")
@@ -808,12 +810,12 @@ func TestAcquireFileLockTimesOutWithATypedError(t *testing.T) {
 	// The budget is a bound, honored EXACTLY on a controlled clock: the last
 	// sleep is cut to what remains, so the wait ends on the deadline and the
 	// error reports the wait that happened.
-	if clk.elapsed() != budget || lockErr.Waited != budget {
-		t.Errorf("waited %v and reported %v against a %v budget", clk.elapsed(), lockErr.Waited, budget)
+	if clk.Elapsed() != budget || lockErr.Waited != budget {
+		t.Errorf("waited %v and reported %v against a %v budget", clk.Elapsed(), lockErr.Waited, budget)
 	}
-	if lockErr.Attempts != len(clk.slept)+1 {
+	if lockErr.Attempts != len(clk.Waits())+1 {
 		t.Errorf("LockTimeoutError.Attempts = %d after %d sleeps, want one attempt more than the sleeps between them",
-			lockErr.Attempts, len(clk.slept))
+			lockErr.Attempts, len(clk.Waits()))
 	}
 	// The message must name the device; an operator reading a CI log has
 	// nothing else to go on.
@@ -841,7 +843,7 @@ func TestAcquireFileLockZeroBudgetTriesOnce(t *testing.T) {
 
 	// Held: one attempt is not enough, and there is no budget to spend -- so
 	// there is no sleep at all.
-	clk := newFakeClock(t)
+	clk := clock.NewFake(t)
 	_, err = acquireFileLock(tmpFile.Name(), 0, clk)
 	if err == nil {
 		t.Fatal("acquireFileLock(held, 0) = nil, want a timeout")
@@ -849,8 +851,8 @@ func TestAcquireFileLockZeroBudgetTriesOnce(t *testing.T) {
 	if !errors.Is(err, ErrLockContended) {
 		t.Errorf("errors.Is(err, ErrLockContended) = false for %v", err)
 	}
-	if len(clk.slept) != 0 {
-		t.Errorf("a zero budget slept %v -- it is not returning immediately", clk.slept)
+	if len(clk.Waits()) != 0 {
+		t.Errorf("a zero budget slept %v -- it is not returning immediately", clk.Waits())
 	}
 	_ = free.Release()
 }

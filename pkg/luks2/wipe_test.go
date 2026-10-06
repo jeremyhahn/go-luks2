@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jeremyhahn/go-luks2/internal/errs"
 	"golang.org/x/sys/unix"
 )
 
@@ -1728,7 +1729,7 @@ func TestVerifyWipePropagatesAMediumOpenFailure(t *testing.T) {
 	path, _ := writeWipeFixture(t, 4096, 0)
 	previous := openMediumReader
 	openMediumReader = func(p string) (mediumReader, error) {
-		return nil, &detailError{Kind: ErrDirectIOUnsupported, Detail: p}
+		return nil, &errs.Error{Kind: ErrDirectIOUnsupported, Detail: p}
 	}
 	t.Cleanup(func() { openMediumReader = previous })
 
@@ -2461,7 +2462,10 @@ func busyExclusiveOpens(t *testing.T, path string) *bool {
 	attempted := false
 	previous := openFileFunc
 	openFileFunc = func(name string, flag int, perm os.FileMode) (*os.File, error) {
-		if name == path && flag&unix.O_EXCL != 0 {
+		// The exclusive open is the claim: it reopens the LOCKED descriptor's
+		// own /proc/self/fd entry (Locked.Claim), not path again, so that is
+		// what this intercepts.
+		if strings.HasPrefix(name, "/proc/self/fd/") && flag&unix.O_EXCL != 0 {
 			attempted = true
 			return nil, &os.PathError{Op: "open", Path: name, Err: unix.EBUSY}
 		}

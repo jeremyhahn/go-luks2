@@ -17,6 +17,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/af"
+	"github.com/jeremyhahn/go-luks2/internal/areacipher"
 )
 
 func TestFindAvailableKeyslot(t *testing.T) {
@@ -890,6 +893,182 @@ func TestAddKeyDerivesTheNewKeyslotsKeySizeFromTheVolumeKey(t *testing.T) {
 	if added2.KeySize != 64 || added2.Area.KeySize != 64 {
 		t.Fatalf("the new keyslot declares key size %d/%d; it took the template's rather than the volume key's",
 			added2.KeySize, added2.Area.KeySize)
+	}
+}
+
+// TestAddKeyAndUnlockRoundTripOnAES192CBCVolume reproduces, at the unit
+// level, the local Codex review's PR #279 finding: a cryptsetup
+// "aes-cbc-essiv:sha256" --key-size 192 volume has a 24-byte master key.
+// 4000 AF stripes puts the AF split at 96000 bytes, 256 short of a whole
+// 512-byte sector, and WritableAreaKeySize(24) wraps the keyslot area in
+// AES-256-XTS (a 64-byte area key, not 24), so the write path runs exactly
+// the EncryptEnclave/xtsPartialSector code the finding names.
+//
+// Format() itself refuses a 192-bit master key (ValidateFormatOptions and
+// the cbc-essiv entry in formatCiphers both only admit 256/512-bit keys), so
+// this fixture is built the way heterogeneousVolume and twoVolumeKeyContainer
+// build theirs: format a normal volume for the on-disk skeleton, then
+// hand-write keyslot 0 to wrap a real 24-byte master key under its own
+// 64-byte area key, exactly as cryptsetup's own luksFormat --key-size 192
+// would leave it. writeKeyslot is not reused here because it derives the
+// area key to the volume key's own length, which is only correct while the
+// volume key itself keys AES-XTS -- not the shape this fixture needs.
+func TestAddKeyAndUnlockRoundTripOnAES192CBCVolume(t *testing.T) {
+	defer parallel(t)()
+
+	path := newImage(t, "aes192-cbc.img")
+	firstPassphrase := []byte("the-first-credential")
+	if err := Format(FormatOptions{
+		Device:        path,
+		Passphrase:    firstPassphrase,
+		Cipher:        "aes",
+		CipherMode:    "xts-plain64",
+		KeySize:       512,
+		HashAlgo:      "sha256",
+		SectorSize:    512,
+		KDFType:       KDFTypePBKDF2,
+		PBKDFIterTime: 1,
+	}); err != nil {
+		t.Fatalf("Format failed: %v", err)
+	}
+
+	hdr, metadata, err := ReadHeader(path)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+	metadata.Segments["0"].Encryption = "aes-cbc-essiv:sha256"
+
+	const newKeySize = 24 // AES-192, a cryptsetup --key-size 192 volume
+	areaKeySize := areacipher.WritableAreaKeySize(newKeySize)
+
+	rawKey, err := randomBytes(newKeySize)
+	if err != nil {
+		t.Fatalf("randomBytes failed: %v", err)
+	}
+	masterKey, err := custody.Adopt("fixture 192-bit master key", rawKey)
+	if err != nil {
+		t.Fatalf("failed to hold the fixture master key: %v", err)
+	}
+	defer mustDestroy(t, masterKey)
+
+	// Rewrite keyslot 0 from scratch so calculateNextKeyslotOffset places it
+	// at the start of the keyslots area again, as cryptsetup's own first
+	// keyslot would be.
+	delete(metadata.Keyslots, "0")
+
+	kdf, err := CreateKDF(FormatOptions{KDFType: KDFTypePBKDF2, HashAlgo: "sha256", PBKDFIterTime: 1}, areaKeySize)
+	if err != nil {
+		t.Fatalf("CreateKDF failed: %v", err)
+	}
+	passphraseKey, err := DeriveKeyEnclave(firstPassphrase, kdf, areaKeySize)
+	if err != nil {
+		t.Fatalf("DeriveKeyEnclave failed: %v", err)
+	}
+	defer mustDestroy(t, passphraseKey)
+
+	afData, err := afCodec().Split(masterKey, af.Params{Stripes: AFStripes, Hash: DefaultHashAlgo})
+	if err != nil {
+		t.Fatalf("af Split failed: %v", err)
+	}
+	defer mustDestroy(t, afData)
+
+	encrypted, err := areacipher.Default().EncryptEnclave(custody, afData, passphraseKey)
+	if err != nil {
+		t.Fatalf("EncryptEnclave failed: %v", err)
+	}
+	defer clearBytes(encrypted)
+	t.Logf("EncryptEnclave produced %d ciphertext bytes for %d AF-split bytes (afSplitSize=%d)",
+		len(encrypted), newKeySize*AFStripes, newKeySize*AFStripes)
+
+	// screenKeyslot/recoverKeyslotKey round decryptLen UP to a whole sector,
+	// never the raw AF-split length, so the unlock path always asks for a
+	// whole number of sectors' worth of ciphertext. cryptsetup writes exactly
+	// that many ciphertext bytes for the same AF split; a shorter ciphertext
+	// here means the bytes beyond it are on-disk zero padding (writeArea)
+	// standing in for real ciphertext.
+	afSplitSize := newKeySize * AFStripes
+	wantCiphertextLen := ((afSplitSize + areacipher.SectorSize - 1) / areacipher.SectorSize) * areacipher.SectorSize
+	if len(encrypted) != wantCiphertextLen {
+		t.Fatalf("EncryptEnclave produced %d ciphertext bytes, want %d (afSplitSize rounded up to a whole %d-byte sector, as cryptsetup writes it)",
+			len(encrypted), wantCiphertextLen, areacipher.SectorSize)
+	}
+
+	keyslotsStart, keyslotsEnd, err := keyslotsAreaBounds(hdr, metadata)
+	if err != nil {
+		t.Fatalf("keyslotsAreaBounds failed: %v", err)
+	}
+	offset, err := calculateNextKeyslotOffset(metadata, keyslotsStart)
+	if err != nil {
+		t.Fatalf("calculateNextKeyslotOffset failed: %v", err)
+	}
+	alignedSize := alignTo(int64(len(encrypted)), KeyslotAreaAlignment)
+	if offset+alignedSize > keyslotsEnd {
+		t.Fatalf("the fixture keyslot would end at %d, past the keyslots area end %d", offset+alignedSize, keyslotsEnd)
+	}
+
+	func() {
+		f, ferr := os.OpenFile(path, os.O_WRONLY, 0o600) // #nosec G304 -- path is under t.TempDir()
+		if ferr != nil {
+			t.Fatalf("failed to open the image for writing: %v", ferr)
+		}
+		defer f.Close()
+		if _, ferr := f.WriteAt(encrypted, offset); ferr != nil {
+			t.Fatalf("failed to write the fixture keyslot area: %v", ferr)
+		}
+	}()
+
+	priority := 1
+	metadata.Keyslots["0"] = &Keyslot{
+		Type:     "luks2",
+		KeySize:  newKeySize,
+		Priority: &priority,
+		Area: &KeyslotArea{
+			Type:       "raw",
+			KeySize:    areaKeySize,
+			Offset:     formatSize(offset),
+			Size:       formatSize(alignedSize),
+			Encryption: KeyslotAreaEncryption,
+		},
+		KDF: kdf,
+		AF: &AntiForensic{
+			Type:    "luks1",
+			Stripes: AFStripes,
+			Hash:    DefaultHashAlgo,
+		},
+	}
+
+	digestKDF, digestValue, err := createDigest(masterKey, "sha256")
+	if err != nil {
+		t.Fatalf("createDigest failed: %v", err)
+	}
+	metadata.Digests["0"] = &Digest{
+		Type:       "pbkdf2",
+		Keyslots:   []string{"0"},
+		Segments:   []string{"0"},
+		Hash:       digestKDF.Hash,
+		Iterations: *digestKDF.Iterations,
+		Salt:       digestKDF.Salt,
+		Digest:     digestValue,
+	}
+
+	if err := writeHeaderInternal(path, hdr, metadata); err != nil {
+		t.Fatalf("failed to write the AES-192-CBC fixture: %v", err)
+	}
+
+	if err := TestKey(path, firstPassphrase); err != nil {
+		t.Fatalf("the hand-written 192-bit keyslot does not open under its own passphrase: %v", err)
+	}
+
+	added := []byte("a-second-credential")
+	if _, err := AddKey(path, firstPassphrase, added, &AddKeyOptions{
+		KDFType:       KDFTypePBKDF2,
+		PBKDFIterTime: 1,
+	}); err != nil {
+		t.Fatalf("AddKey failed on a volume whose AF split is not sector-aligned: %v", err)
+	}
+
+	if err := TestKey(path, added); err != nil {
+		t.Fatalf("AddKey reported success and the credential it added does not open the volume: %v", err)
 	}
 }
 

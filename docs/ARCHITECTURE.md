@@ -99,12 +99,12 @@ the library has to protect it itself.
   the string copy `crypto/pbkdf2` makes of its input (on unlock and format that
   input is the master key), KDF output before it is moved into an enclave,
   AES key schedules inside `xts.Cipher` (and, reading a CBC keyslot, `crypto/aes`), and the kernel keyring entry. The
-  canonical list with reasoning is the comment at the top of
-  [`pkg/luks2/enclave.go`](../pkg/luks2/enclave.go).
+  canonical list with reasoning is the package documentation of
+  [`internal/secret`](../internal/secret/doc.go).
 - Every enclave is admitted against go-enclave's process `Allocator` before
   its pages are mapped; the binary sizes that budget with
   `enclave.SetAllocator`, and RLIMIT_MEMLOCK is the default.
-- Enclaves are released through `releaseSecret`, which drops go-enclave's
+- Enclaves are released through `secret.Custody.Release`, which drops go-enclave's
   release report: the operation's outcome is already decided and the library
   does not log. The CLI warns when releasing a recovery credential reports a
   problem.

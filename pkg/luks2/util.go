@@ -7,10 +7,15 @@ package luks2
 import (
 	"crypto/rand"
 	"encoding/base64"
-	"fmt"
 	"io"
 	"os"
 	"strconv"
+
+	"github.com/jeremyhahn/go-luks2/internal/af"
+	"github.com/jeremyhahn/go-luks2/internal/command"
+	"github.com/jeremyhahn/go-luks2/internal/errs"
+	"github.com/jeremyhahn/go-luks2/internal/kdf"
+	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
 // cryptoRand is the source every secret and every random fill in this package
@@ -30,6 +35,32 @@ import (
 // feeding it a constant changes the very property under measurement.
 var cryptoRand io.Reader = rand.Reader
 
+// custody is where this package's key material is allocated and released:
+// secret.System, every enclave admitted through go-enclave's process
+// Allocator. It is a variable only so the fail-closed tests can stand in a
+// custody that refuses, or one that measures; nothing in the package changes
+// it.
+var custody = secret.System()
+
+// tools runs the external programs this package depends on, from the fixed
+// system directories and with a minimal environment (internal/command). It is
+// a variable only so the unit tests can point it at stand-in programs;
+// nothing in the package changes it.
+var tools = command.System()
+
+// afCodec is the anti-forensic codec this package splits and merges with: its
+// custody, its randomness and its FIPS mode, read at the call so a test that
+// substitutes one of them is honored.
+func afCodec() af.Codec {
+	return af.Codec{Custody: custody, Rand: cryptoRand, FIPS: fipsMode()}
+}
+
+// kdfDeriver builds the internal/kdf.Deriver each KDF call runs through,
+// reading the same custody and FIPS seams afCodec does.
+func kdfDeriver() kdf.Deriver {
+	return kdf.Deriver{Custody: custody, FIPS: fipsMode()}
+}
+
 // clearBytes securely zeros a byte slice. The clear builtin is a memclr the
 // compiler cannot drop: the slice's memory outlives the call.
 func clearBytes(b []byte) {
@@ -40,7 +71,7 @@ func clearBytes(b []byte) {
 func randomBytes(n int) ([]byte, error) {
 	b := make([]byte, n)
 	if _, err := io.ReadFull(cryptoRand, b); err != nil {
-		return nil, fmt.Errorf("failed to generate random bytes: %w", err)
+		return nil, &errs.Error{Detail: "failed to generate random bytes", Err: err}
 	}
 	return b, nil
 }
@@ -109,7 +140,7 @@ func writeRandom(f *os.File, size int64) error {
 			n = remaining
 		}
 		if _, err := io.ReadFull(cryptoRand, buf[:n]); err != nil {
-			return fmt.Errorf("failed to generate random fill: %w", err)
+			return &errs.Error{Detail: "failed to generate random fill", Err: err}
 		}
 		if _, err := f.Write(buf[:n]); err != nil {
 			return err

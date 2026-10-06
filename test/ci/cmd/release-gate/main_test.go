@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jeremyhahn/go-luks2/internal/clock"
 )
 
 // ghCanceled is GitHub's own spelling of a canceled check run's conclusion,
@@ -26,20 +28,6 @@ const (
 	gateJob = "CI Gate"
 	ciFile  = "ci.yml"
 )
-
-// fakeClock advances only when the gate sleeps, so a two-hour wait takes no
-// time and no assertion depends on the wall clock.
-type fakeClock struct {
-	t      time.Time
-	sleeps int
-}
-
-func (c *fakeClock) now() time.Time { return c.t }
-
-func (c *fakeClock) sleep(d time.Duration) {
-	c.sleeps++
-	c.t = c.t.Add(d)
-}
 
 // forge serves one scripted answer per request, repeating the last.
 type forge struct {
@@ -142,7 +130,7 @@ func httpStatus(code int) func(http.ResponseWriter, *http.Request) {
 }
 
 // testHost wires a fake forge and git. gitStatus is merge-base's exit status.
-func testHost(t *testing.T, srv *httptest.Server, server string, gitStatus int, clock *fakeClock) (host, *[][]string) {
+func testHost(t *testing.T, srv *httptest.Server, server string, gitStatus int, clk clock.Clock) (host, *[][]string) {
 	t.Helper()
 	var gitCalls [][]string
 	env := map[string]string{
@@ -158,8 +146,7 @@ func testHost(t *testing.T, srv *httptest.Server, server string, gitStatus int, 
 			return gitStatus, "", nil
 		},
 		client: srv.Client(),
-		now:    clock.now,
-		sleep:  clock.sleep,
+		clock:  clk,
 	}, &gitCalls
 }
 
@@ -182,8 +169,8 @@ func TestGiteaGatePassedReleases(t *testing.T) {
 	}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
-	clock := &fakeClock{t: time.Unix(0, 0)}
-	h, gitCalls := testHost(t, srv, srv.URL, 0, clock)
+	clk := clock.NewFake(t)
+	h, gitCalls := testHost(t, srv, srv.URL, 0, clk)
 
 	code, out, stderr := run(t, h, args())
 	if code != 0 {
@@ -215,14 +202,14 @@ func TestGiteaGateWaitsForAPendingGate(t *testing.T) {
 	}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
-	clock := &fakeClock{t: time.Unix(0, 0)}
-	h, _ := testHost(t, srv, srv.URL, 0, clock)
+	clk := clock.NewFake(t)
+	h, _ := testHost(t, srv, srv.URL, 0, clk)
 
 	if code, _, stderr := run(t, h, args()); code != 0 {
 		t.Fatalf("exit %d, stderr %s", code, stderr)
 	}
-	if clock.sleeps != 3 {
-		t.Errorf("slept %d times, want 3 (two pending readings and one 502)", clock.sleeps)
+	if len(clk.Waits()) != 3 {
+		t.Errorf("slept %d times, want 3 (two pending readings and one 502)", len(clk.Waits()))
 	}
 }
 
@@ -232,8 +219,8 @@ func TestGiteaGateFailureRefuses(t *testing.T) {
 			f := &forge{answers: []func(http.ResponseWriter, *http.Request){giteaJSON(1, gateCtx, state)}}
 			srv := httptest.NewServer(f)
 			defer srv.Close()
-			clock := &fakeClock{t: time.Unix(0, 0)}
-			h, _ := testHost(t, srv, srv.URL, 0, clock)
+			clk := clock.NewFake(t)
+			h, _ := testHost(t, srv, srv.URL, 0, clk)
 
 			var out, errb bytes.Buffer
 			req, err := parseArgs(args(), &errb)
@@ -245,8 +232,8 @@ func TestGiteaGateFailureRefuses(t *testing.T) {
 			if !errors.As(err, &failed) || failed.State != state {
 				t.Fatalf("err = %v, want *GateFailedError with state %q", err, state)
 			}
-			if clock.sleeps != 0 {
-				t.Errorf("a finished gate was waited on (%d sleeps)", clock.sleeps)
+			if len(clk.Waits()) != 0 {
+				t.Errorf("a finished gate was waited on (%d sleeps)", len(clk.Waits()))
 			}
 		})
 	}
@@ -259,8 +246,8 @@ func TestGiteaGateIgnoresOtherContexts(t *testing.T) {
 	}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
-	clock := &fakeClock{t: time.Unix(0, 0)}
-	h, _ := testHost(t, srv, srv.URL, 0, clock)
+	clk := clock.NewFake(t)
+	h, _ := testHost(t, srv, srv.URL, 0, clk)
 
 	var out, errb bytes.Buffer
 	req, _ := parseArgs(args(), &errb)
@@ -269,8 +256,8 @@ func TestGiteaGateIgnoresOtherContexts(t *testing.T) {
 	if !errors.As(err, &timeout) {
 		t.Fatalf("err = %v, want *GateTimeoutError", err)
 	}
-	if clock.sleeps != 10 {
-		t.Errorf("slept %d times over a 10m timeout at 1m polls, want 10", clock.sleeps)
+	if len(clk.Waits()) != 10 {
+		t.Errorf("slept %d times over a 10m timeout at 1m polls, want 10", len(clk.Waits()))
 	}
 }
 
@@ -281,8 +268,8 @@ func TestGiteaGatePagesToFindTheContext(t *testing.T) {
 	}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
-	clock := &fakeClock{t: time.Unix(0, 0)}
-	h, _ := testHost(t, srv, srv.URL, 0, clock)
+	clk := clock.NewFake(t)
+	h, _ := testHost(t, srv, srv.URL, 0, clk)
 
 	if code, _, stderr := run(t, h, args()); code != 0 {
 		t.Fatalf("exit %d, stderr %s", code, stderr)
@@ -290,8 +277,8 @@ func TestGiteaGatePagesToFindTheContext(t *testing.T) {
 	if len(f.paths) != 2 || !strings.HasSuffix(f.paths[1], "page=2") {
 		t.Errorf("paths = %v, want a second page", f.paths)
 	}
-	if clock.sleeps != 0 {
-		t.Errorf("slept %d times", clock.sleeps)
+	if len(clk.Waits()) != 0 {
+		t.Errorf("slept %d times", len(clk.Waits()))
 	}
 }
 
@@ -299,8 +286,8 @@ func TestGateTimeoutKeepsTheLastTransientError(t *testing.T) {
 	f := &forge{answers: []func(http.ResponseWriter, *http.Request){httpStatus(http.StatusServiceUnavailable)}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
-	clock := &fakeClock{t: time.Unix(0, 0)}
-	h, _ := testHost(t, srv, srv.URL, 0, clock)
+	clk := clock.NewFake(t)
+	h, _ := testHost(t, srv, srv.URL, 0, clk)
 
 	var out, errb bytes.Buffer
 	req, _ := parseArgs(args(), &errb)
@@ -322,8 +309,8 @@ func TestForgeRefusalIsFinal(t *testing.T) {
 	for _, code := range []int{http.StatusUnauthorized, http.StatusNotFound} {
 		f := &forge{answers: []func(http.ResponseWriter, *http.Request){httpStatus(code)}}
 		srv := httptest.NewServer(f)
-		clock := &fakeClock{t: time.Unix(0, 0)}
-		h, _ := testHost(t, srv, srv.URL, 0, clock)
+		clk := clock.NewFake(t)
+		h, _ := testHost(t, srv, srv.URL, 0, clk)
 
 		var out, errb bytes.Buffer
 		req, _ := parseArgs(args(), &errb)
@@ -332,7 +319,7 @@ func TestForgeRefusalIsFinal(t *testing.T) {
 		if !errors.As(err, &forgeErr) || forgeErr.Status != code {
 			t.Errorf("HTTP %d: err = %v, want *ForgeError", code, err)
 		}
-		if clock.sleeps != 0 {
+		if len(clk.Waits()) != 0 {
 			t.Errorf("HTTP %d was retried", code)
 		}
 		srv.Close()
@@ -345,8 +332,8 @@ func TestMalformedForgeAnswerIsFinal(t *testing.T) {
 	}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
-	clock := &fakeClock{t: time.Unix(0, 0)}
-	h, _ := testHost(t, srv, srv.URL, 0, clock)
+	clk := clock.NewFake(t)
+	h, _ := testHost(t, srv, srv.URL, 0, clk)
 
 	var out, errb bytes.Buffer
 	req, _ := parseArgs(args(), &errb)
@@ -363,8 +350,8 @@ func TestMalformedForgeAnswerIsFinal(t *testing.T) {
 func TestUnreachableForgeIsTransient(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	srv.Close() // nothing listens
-	clock := &fakeClock{t: time.Unix(0, 0)}
-	h, _ := testHost(t, srv, srv.URL, 0, clock)
+	clk := clock.NewFake(t)
+	h, _ := testHost(t, srv, srv.URL, 0, clk)
 
 	var out, errb bytes.Buffer
 	req, _ := parseArgs(args("-timeout", "2m"), &errb)
@@ -373,8 +360,8 @@ func TestUnreachableForgeIsTransient(t *testing.T) {
 	if !errors.As(err, &timeout) {
 		t.Fatalf("err = %v, want *GateTimeoutError", err)
 	}
-	if clock.sleeps != 2 {
-		t.Errorf("sleeps = %d, want 2", clock.sleeps)
+	if len(clk.Waits()) != 2 {
+		t.Errorf("sleeps = %d, want 2", len(clk.Waits()))
 	}
 }
 
@@ -382,8 +369,8 @@ func TestNotOnMainRefusesBeforeReadingCI(t *testing.T) {
 	f := &forge{answers: []func(http.ResponseWriter, *http.Request){giteaJSON(1, gateCtx, "success")}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
-	clock := &fakeClock{t: time.Unix(0, 0)}
-	h, _ := testHost(t, srv, srv.URL, 1, clock)
+	clk := clock.NewFake(t)
+	h, _ := testHost(t, srv, srv.URL, 1, clk)
 
 	var out, errb bytes.Buffer
 	req, _ := parseArgs(args(), &errb)
@@ -403,10 +390,10 @@ func TestNotOnMainRefusesBeforeReadingCI(t *testing.T) {
 func TestAncestryUnansweredRefuses(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	defer srv.Close()
-	clock := &fakeClock{t: time.Unix(0, 0)}
+	clk := clock.NewFake(t)
 
 	// git exits 128 (unknown commit, missing ref).
-	h, _ := testHost(t, srv, srv.URL, 128, clock)
+	h, _ := testHost(t, srv, srv.URL, 128, clk)
 	var out, errb bytes.Buffer
 	req, _ := parseArgs(args(), &errb)
 	err := gate(&out, h, req)
@@ -439,8 +426,8 @@ func TestGitHubGatePassed(t *testing.T) {
 	g := &fakeGitHub{runs: []*ghRun{push}}
 	srv := httptest.NewServer(g)
 	defer srv.Close()
-	clock := &fakeClock{t: time.Unix(0, 0)}
-	h, _ := testHost(t, srv, githubServer, 0, clock)
+	clk := clock.NewFake(t)
+	h, _ := testHost(t, srv, githubServer, 0, clk)
 
 	if code, out, stderr := run(t, h, args()); code != 0 {
 		t.Fatalf("exit %d\n%s%s", code, out, stderr)
@@ -455,8 +442,8 @@ func TestGitHubGatePassed(t *testing.T) {
 	if g.auth[0] != "Bearer secret-token" {
 		t.Errorf("Authorization = %q", g.auth[0])
 	}
-	if clock.sleeps != 2 {
-		t.Errorf("sleeps = %d, want 2 (gate job not created, then running)", clock.sleeps)
+	if len(clk.Waits()) != 2 {
+		t.Errorf("sleeps = %d, want 2 (gate job not created, then running)", len(clk.Waits()))
 	}
 }
 
@@ -476,8 +463,8 @@ func TestGitHubGateIgnoresEveryRunButThisCommitsPushToMain(t *testing.T) {
 	}}
 	srv := httptest.NewServer(g)
 	defer srv.Close()
-	clock := &fakeClock{t: time.Unix(0, 0)}
-	h, _ := testHost(t, srv, githubServer, 0, clock)
+	clk := clock.NewFake(t)
+	h, _ := testHost(t, srv, githubServer, 0, clk)
 
 	var out, errb bytes.Buffer
 	req, _ := parseArgs(args(), &errb)
@@ -502,8 +489,8 @@ func TestGitHubGateUsesTheLatestRun(t *testing.T) {
 	}}
 	srv := httptest.NewServer(g)
 	defer srv.Close()
-	clock := &fakeClock{t: time.Unix(0, 0)}
-	h, _ := testHost(t, srv, githubServer, 0, clock)
+	clk := clock.NewFake(t)
+	h, _ := testHost(t, srv, githubServer, 0, clk)
 	if code, out, stderr := run(t, h, args()); code != 0 {
 		t.Fatalf("exit %d\n%s%s", code, out, stderr)
 	}
@@ -518,8 +505,8 @@ func TestGitHubRunThatEndedWithoutTheGateJobFails(t *testing.T) {
 	}}
 	srv := httptest.NewServer(g)
 	defer srv.Close()
-	clock := &fakeClock{t: time.Unix(0, 0)}
-	h, _ := testHost(t, srv, githubServer, 0, clock)
+	clk := clock.NewFake(t)
+	h, _ := testHost(t, srv, githubServer, 0, clk)
 
 	var out, errb bytes.Buffer
 	req, _ := parseArgs(args(), &errb)
@@ -528,8 +515,8 @@ func TestGitHubRunThatEndedWithoutTheGateJobFails(t *testing.T) {
 	if !errors.As(err, &failed) || !strings.Contains(failed.State, "without a CI Gate job") {
 		t.Fatalf("err = %v, want *GateFailedError naming the missing job", err)
 	}
-	if clock.sleeps != 0 {
-		t.Errorf("a finished run was waited on (%d sleeps)", clock.sleeps)
+	if len(clk.Waits()) != 0 {
+		t.Errorf("a finished run was waited on (%d sleeps)", len(clk.Waits()))
 	}
 }
 
@@ -537,8 +524,8 @@ func TestGitHubNoRunYetWaitsThenTimesOut(t *testing.T) {
 	g := &fakeGitHub{}
 	srv := httptest.NewServer(g)
 	defer srv.Close()
-	clock := &fakeClock{t: time.Unix(0, 0)}
-	h, _ := testHost(t, srv, githubServer, 0, clock)
+	clk := clock.NewFake(t)
+	h, _ := testHost(t, srv, githubServer, 0, clk)
 
 	var out, errb bytes.Buffer
 	req, _ := parseArgs(args(), &errb)
@@ -559,8 +546,8 @@ func TestGitHubJobsRefusalIsFinal(t *testing.T) {
 		g.ServeHTTP(w, r)
 	}))
 	defer srv.Close()
-	clock := &fakeClock{t: time.Unix(0, 0)}
-	h, _ := testHost(t, srv, githubServer, 0, clock)
+	clk := clock.NewFake(t)
+	h, _ := testHost(t, srv, githubServer, 0, clk)
 
 	var out, errb bytes.Buffer
 	req, _ := parseArgs(args(), &errb)
@@ -657,7 +644,7 @@ func TestCLIExitStatus(t *testing.T) {
 
 func TestSystemHostRunsGit(t *testing.T) {
 	h := systemHost()
-	if h.client == nil || h.now == nil || h.sleep == nil || h.getenv == nil {
+	if h.client == nil || h.clock == nil || h.getenv == nil {
 		t.Fatal("systemHost left a field unset")
 	}
 	// The repository's own HEAD is an ancestor of itself: exit 0.

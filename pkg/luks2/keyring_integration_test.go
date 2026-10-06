@@ -61,17 +61,17 @@ func integrationDMUUID(t *testing.T) string {
 func addRealKey(t *testing.T, description string) (id, ring int) {
 	t.Helper()
 
-	ring, err := keyring.sessionRing()
+	ring, err := keyring.SessionRing()
 	if err != nil {
 		t.Fatalf("could not resolve the session keyring: %v", err)
 	}
-	id, err = keyring.add(keyringKeyType, description, integrationTestKey, ring)
+	id, err = keyring.Add(keyringKeyType, description, integrationTestKey, ring)
 	if err != nil {
 		t.Fatalf("add_key failed: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = keyring.revoke(id)
-		_ = keyring.unlink(id, ring)
+		_ = keyring.Revoke(id)
+		_ = keyring.Unlink(id, ring)
 	})
 	return id, ring
 }
@@ -139,7 +139,7 @@ func TestKernelUpdatesAKeyInPlaceRatherThanRefusing(t *testing.T) {
 	description := keyringDescription(integrationDMUUID(t))
 	first, ring := addRealKey(t, description)
 
-	second, err := keyring.add(keyringKeyType, description, []byte("a completely different volume key"), ring)
+	second, err := keyring.Add(keyringKeyType, description, []byte("a completely different volume key"), ring)
 	if err != nil {
 		t.Fatalf("a second add_key on the same description failed, which the collision guard does not expect: %v", err)
 	}
@@ -153,12 +153,12 @@ func TestKernelUpdatesAKeyInPlaceRatherThanRefusing(t *testing.T) {
 func TestKernelRefusesAnUnqualifiedLogonDescription(t *testing.T) {
 	defer pinToOSThread()()
 
-	ring, err := keyring.sessionRing()
+	ring, err := keyring.SessionRing()
 	if err != nil {
 		t.Fatalf("could not resolve the session keyring: %v", err)
 	}
 
-	if _, err := keyring.add(keyringKeyType, "unqualified", integrationTestKey, ring); err == nil {
+	if _, err := keyring.Add(keyringKeyType, "unqualified", integrationTestKey, ring); err == nil {
 		t.Fatal("the kernel accepted a logon key with no subsystem qualifier")
 	} else if !errors.Is(err, unix.EINVAL) {
 		t.Fatalf("the description was refused for an unexpected reason: %v", err)
@@ -178,18 +178,18 @@ func TestRealKeyringLifecycle(t *testing.T) {
 		t.Fatalf("the volume key could not be placed in the kernel keyring: %v", err)
 	}
 
-	id, err := keyring.search(entry.ring, keyringKeyType, entry.description)
+	id, err := keyring.Search(entry.Ring, keyringKeyType, entry.Description)
 	if err != nil {
 		t.Fatalf("the kernel could not resolve the reference dm-crypt would be given: %v", err)
 	}
-	if id != entry.id {
-		t.Fatalf("the description resolves to key %d, not the one that was added (%d)", id, entry.id)
+	if id != entry.ID {
+		t.Fatalf("the description resolves to key %d, not the one that was added (%d)", id, entry.ID)
 	}
 
 	if err := entry.release(); err != nil {
 		t.Fatalf("release reported a failure: %v", err)
 	}
-	if _, err := keyring.search(entry.ring, keyringKeyType, entry.description); !errors.Is(err, unix.ENOKEY) {
+	if _, err := keyring.Search(entry.Ring, keyringKeyType, entry.Description); !errors.Is(err, unix.ENOKEY) {
 		t.Fatalf("the volume key is still resolvable after release, or failed oddly: %v", err)
 	}
 

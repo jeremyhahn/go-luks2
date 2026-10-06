@@ -557,7 +557,7 @@ var compatMatrix = []matrixRow{
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer releaseSecret(credential)
+		defer custody.Release(credential)
 		if ok, err := VerifyRecoveryKey(loop, credential); !ok || err != nil {
 			t.Fatalf("VerifyRecoveryKey = %v, %v", ok, err)
 		}

@@ -12,6 +12,8 @@ import (
 	"testing"
 
 	"github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-luks2/internal/af"
+	"github.com/jeremyhahn/go-luks2/internal/areacipher"
 )
 
 // A LUKS2 digest states WHICH keyslots it authenticates, and honoring that is
@@ -71,7 +73,7 @@ func twoVolumeKeyContainer(t *testing.T, name string, passA, passB []byte) strin
 	if err != nil {
 		t.Fatalf("randomBytes failed: %v", err)
 	}
-	keyB, err := adoptSecret("fixture second volume key", rawB)
+	keyB, err := custody.Adopt("fixture second volume key", rawB)
 	if err != nil {
 		t.Fatalf("failed to hold the second volume key: %v", err)
 	}
@@ -120,15 +122,15 @@ func writeKeyslot(t *testing.T, path string, hdr *LUKS2BinaryHeader, metadata *L
 	}
 	defer mustDestroy(t, passphraseKey)
 
-	afData, err := afSplitEnclave(masterKey, AFStripes, DefaultHashAlgo)
+	afData, err := afCodec().Split(masterKey, af.Params{Stripes: AFStripes, Hash: DefaultHashAlgo})
 	if err != nil {
-		t.Fatalf("afSplitEnclave failed: %v", err)
+		t.Fatalf("af Split failed: %v", err)
 	}
 	defer mustDestroy(t, afData)
 
-	encrypted, err := encryptKeyMaterialEnclave(afData, passphraseKey, DefaultCipher)
+	encrypted, err := areacipher.Default().EncryptEnclave(custody, afData, passphraseKey)
 	if err != nil {
-		t.Fatalf("encryptKeyMaterialEnclave failed: %v", err)
+		t.Fatalf("EncryptEnclave failed: %v", err)
 	}
 	defer clearBytes(encrypted)
 

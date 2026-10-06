@@ -8,6 +8,8 @@ package luks2
 
 import (
 	"strings"
+
+	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
 // blkidNothingFound and blkidAmbivalent are the exit statuses blkid(8) gives
@@ -24,7 +26,7 @@ const (
 // Not the combined output the checkers use: the probe's stdout is parsed as
 // KEY=VALUE lines, and a warning on stderr is not part of that grammar.
 var probeOutput commandRunner = func(name string, args ...string) ([]byte, error) {
-	cmd, err := toolCommand(name, args...)
+	cmd, err := tools.Command(name, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -58,9 +60,9 @@ func probeFilesystem(run commandRunner, devicePath string) (FilesystemType, erro
 	if err != nil {
 		switch exitStatus(err) {
 		case blkidNothingFound:
-			return "", &detailError{Kind: ErrFilesystemNotDetected, Detail: devicePath + " carries no signature blkid recognizes; make a filesystem on it first, or name the type explicitly"}
+			return "", &errs.Error{Kind: ErrFilesystemNotDetected, Detail: devicePath + " carries no signature blkid recognizes; make a filesystem on it first, or name the type explicitly"}
 		case blkidAmbivalent:
-			return "", &detailError{Kind: ErrFilesystemNotDetected, Detail: devicePath + " carries more than one filesystem signature, and blkid cannot tell which is current; name the type explicitly"}
+			return "", &errs.Error{Kind: ErrFilesystemNotDetected, Detail: devicePath + " carries more than one filesystem signature, and blkid cannot tell which is current; name the type explicitly"}
 		default:
 			return "", &FilesystemCommandError{Command: "blkid", Device: devicePath, Output: string(output), Err: err}
 		}
@@ -81,10 +83,10 @@ func probeFilesystem(run commandRunner, devicePath string) (FilesystemType, erro
 	}
 
 	if fsType == "" {
-		return "", &detailError{Kind: ErrFilesystemNotDetected, Detail: "blkid reported no TYPE for " + devicePath}
+		return "", &errs.Error{Kind: ErrFilesystemNotDetected, Detail: "blkid reported no TYPE for " + devicePath}
 	}
 	if usage != "filesystem" {
-		return "", &detailError{Kind: ErrFilesystemNotDetected,
+		return "", &errs.Error{Kind: ErrFilesystemNotDetected,
 			Detail: devicePath + " holds " + fsType + " (usage " + usageOrUnknown(usage) + "), which is not a mountable filesystem"}
 	}
 	return FilesystemType(fsType), nil

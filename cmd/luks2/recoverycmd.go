@@ -296,7 +296,7 @@ func (c *CLI) cmdRecoveryVerify() int {
 // releaseCredential destroys a credential the library handed this command and
 // tells the operator when go-enclave reports the release as anything but clean.
 //
-// The library drops its own release reports (pkg/luks2 releaseSecret: it can
+// The library drops its own release reports (internal/secret Custody.Release: it can
 // neither act on them nor log), and says an application sees the same
 // conditions on the enclaves it is handed. This is that application. Both
 // reports describe the HOST, not this command: enclave.ErrReleasedWithoutWipe

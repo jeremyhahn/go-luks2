@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
 // Tests for the PBKDF2 floor exemption granted to credentials THIS LIBRARY
@@ -270,7 +272,7 @@ func TestAddRecoveryKeyReachesTheExemption(t *testing.T) {
 
 	// And it opens the volume, so the exemption produced a usable keyslot
 	// rather than merely a well-formed header.
-	if err := borrowSecret("recovery key", recoveryKey.Credential, func(raw []byte) error {
+	if err := secret.Borrow("recovery key", recoveryKey.Credential, func(raw []byte) error {
 		return TestKey(path, raw)
 	}); err != nil {
 		t.Fatalf("the recovery key does not open the volume: %v", err)

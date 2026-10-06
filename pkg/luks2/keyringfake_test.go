@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	keyringpkg "github.com/jeremyhahn/go-luks2/internal/keyring"
 	"golang.org/x/sys/unix"
 )
 
@@ -104,14 +105,14 @@ type fakeKeyring struct {
 	revoked []int
 }
 
-// seam returns the kernelKeyring this fake implements.
-func (f *fakeKeyring) seam() kernelKeyring {
-	return kernelKeyring{
-		sessionRing: f.sessionRing,
-		add:         f.add,
-		search:      f.search,
-		revoke:      f.revoke,
-		unlink:      f.unlink,
+// seam returns the keyringpkg.Syscalls this fake implements.
+func (f *fakeKeyring) seam() keyringpkg.Syscalls {
+	return keyringpkg.Syscalls{
+		SessionRing: f.sessionRing,
+		Add:         f.add,
+		Search:      f.search,
+		Revoke:      f.revoke,
+		Unlink:      f.unlink,
 	}
 }
 

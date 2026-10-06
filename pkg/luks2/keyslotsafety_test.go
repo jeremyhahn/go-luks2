@@ -20,6 +20,8 @@ import (
 	"testing"
 
 	"github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-luks2/internal/af"
+	"github.com/jeremyhahn/go-luks2/internal/areacipher"
 )
 
 // Regression tests for #249 (Lane A, keyslot safety). Where a finding is about
@@ -363,14 +365,14 @@ func writeHandKeyslot(t *testing.T, device, id string, passphrase []byte, stripe
 		t.Fatalf("DeriveKeyEnclave failed: %v", err)
 	}
 	defer mustDestroy(t, wrap)
-	split, err := afSplitEnclave(mk, stripes, "sha256")
+	split, err := afCodec().Split(mk, af.Params{Stripes: stripes, Hash: "sha256"})
 	if err != nil {
-		t.Fatalf("afSplitEnclave failed: %v", err)
+		t.Fatalf("af Split failed: %v", err)
 	}
 	defer mustDestroy(t, split)
-	material, err := encryptKeyMaterialEnclave(split, wrap, DefaultCipher)
+	material, err := areacipher.Default().EncryptEnclave(custody, split, wrap)
 	if err != nil {
-		t.Fatalf("encryptKeyMaterialEnclave failed: %v", err)
+		t.Fatalf("EncryptEnclave failed: %v", err)
 	}
 	if int64(len(material)) > areaSize {
 		t.Fatalf("%d bytes of material do not fit a %d-byte area", len(material), areaSize)

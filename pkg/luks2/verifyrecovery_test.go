@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
 // VerifyRecoveryKey must not report "this key does not work" for reasons that
@@ -241,24 +242,8 @@ func TestGetMasterKeyDistinguishesFailureToTryFromFailureToVerify(t *testing.T) 
 func withFailingProtectedMemory(t *testing.T) {
 	t.Helper()
 
-	previousNew, previousMove, previousCopy := newLockedRegion, moveIntoLockedRegion, copyIntoLockedRegion
-	t.Cleanup(func() {
-		newLockedRegion, moveIntoLockedRegion, copyIntoLockedRegion = previousNew, previousMove, previousCopy
-	})
-
-	refuse := func() (*enclave.MemoryEnclave, error) {
-		return nil, &enclave.LockedMemoryError{
-			Cause: errors.New("synthetic RLIMIT_MEMLOCK exhaustion"),
-		}
-	}
-	newLockedRegion = func(int) (*enclave.MemoryEnclave, error) { return refuse() }
-	moveIntoLockedRegion = func(b []byte) (*enclave.MemoryEnclave, error) {
-		// go-enclave wipes the caller's slice on every path including failure,
-		// and adoptSecret's contract depends on that, so the fake keeps it.
-		enclave.Wipe(b)
-		return refuse()
-	}
-	// The copy constructor never touches its source, so the fake must not
-	// either: copySecret's callers keep reading the bytes they copied from.
-	copyIntoLockedRegion = func([]byte) (*enclave.MemoryEnclave, error) { return refuse() }
+	previous := custody
+	t.Cleanup(func() { custody = previous })
+	refusal := &enclave.LockedMemoryError{Cause: errors.New("synthetic RLIMIT_MEMLOCK exhaustion")}
+	custody = secret.Admitted(func() (*enclave.Allocator, error) { return nil, refusal })
 }

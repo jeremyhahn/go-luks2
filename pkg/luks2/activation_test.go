@@ -120,9 +120,11 @@ func TestAddKeyRefusesAnExistingPassphraseThatOpensOnlyAnUnboundKey(t *testing.T
 
 // --- C2: requirements and multi-segment headers are refused for activation ---
 
-// writeRequirement stamps config.requirements onto device. The writer refuses
-// a requirement it does not implement -- correctly -- so the fixture marks it
-// implemented for the one write that creates it.
+// writeRequirement stamps config.requirements onto device. The write path
+// refuses a requirement it does not implement -- correctly -- so the fixture
+// goes around that one guard (header.EncodeMetadataIgnoringRequirements)
+// rather than through it, the way a header this package did not write would
+// have to be modeled anyway.
 func writeRequirement(t *testing.T, device, requirement string) {
 	t.Helper()
 
@@ -138,18 +140,15 @@ func writeRequirement(t *testing.T, device, requirement string) {
 	if slices.Contains(onlineReencryptRequirements, requirement) {
 		for id, flag := range map[string]string{"1": "backup-previous", "2": "backup-final"} {
 			backup := *metadata.Segments["0"]
-			backup.unknown = nil
-			withUnknown(&backup, "flags", `["`+flag+`"]`)
+			backup.ClearUnknownMembers()
+			backup.SetUnknownMember("flags", json.RawMessage(`["`+flag+`"]`))
 			metadata.Segments[id] = &backup
 		}
 		metadata.Digests["0"].Segments = []string{"0", "1", "2"}
 	}
 	hdr.SequenceID++
 
-	implementedRequirements[requirement] = true
-	err = writeHeaderUnvalidated(device, hdr, metadata)
-	delete(implementedRequirements, requirement)
-	if err != nil {
+	if err := writeHeaderIgnoringRequirements(device, hdr, metadata); err != nil {
 		t.Fatalf("writing the fixture failed: %v", err)
 	}
 }
@@ -242,10 +241,7 @@ func TestUnlockRefusesAnIntegritySegment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
-	if metadata.Segments["0"].unknown == nil {
-		metadata.Segments["0"].unknown = unknownFields{}
-	}
-	metadata.Segments["0"].unknown["integrity"] = json.RawMessage(`{"type":"hmac(sha256)","journal_encryption":"none","journal_integrity":"none"}`)
+	metadata.Segments["0"].SetUnknownMember("integrity", json.RawMessage(`{"type":"hmac(sha256)","journal_encryption":"none","journal_integrity":"none"}`))
 	hdr.SequenceID++
 	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
 		t.Fatalf("writing the fixture failed: %v", err)
@@ -514,8 +510,8 @@ func TestGetMappedDevicePathRefusesANodeThatIsNotTheMapping(t *testing.T) {
 	if !errors.Is(err, ErrDeviceNodeUnverified) {
 		t.Fatalf("GetMappedDevicePath = %q, %v; want ErrDeviceNodeUnverified", path, err)
 	}
-	if want := int(mappedNodeTimeout / deviceReadyPollInterval); len(*waits) != want {
-		t.Fatalf("waited %d times for a verified node, want the %d-poll budget", len(*waits), want)
+	if want := int(mappedNodeTimeout / deviceReadyPollInterval); len(waits.Waits()) != want {
+		t.Fatalf("waited %d times for a verified node, want the %d-poll budget", len(waits.Waits()), want)
 	}
 }
 
@@ -578,8 +574,8 @@ func TestWaitForDeviceReadyReplacesAStaleMapperEntry(t *testing.T) {
 	if err := waitForDeviceReady("fresh", info); err != nil {
 		t.Fatalf("waitForDeviceReady = %v", err)
 	}
-	if want := int(deviceReadyTimeout / deviceReadyPollInterval); len(*waits) != want {
-		t.Fatalf("waited %d times for udev, want the %d-poll budget before acting", len(*waits), want)
+	if want := int(deviceReadyTimeout / deviceReadyPollInterval); len(waits.Waits()) != want {
+		t.Fatalf("waited %d times for udev, want the %d-poll budget before acting", len(waits.Waits()), want)
 	}
 	target, err := os.Readlink(stale)
 	if err != nil {
@@ -782,9 +778,9 @@ func TestFilesystemToolsRunWithAMinimalEnvironment(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bin, "blkid"), []byte(script), 0o700); err != nil { // #nosec G306 -- an executable test fixture under t.TempDir()
 		t.Fatalf("writing the fake failed: %v", err)
 	}
-	previous := toolDirs
-	t.Cleanup(func() { toolDirs = previous })
-	toolDirs = []string{bin}
+	previous := tools
+	t.Cleanup(func() { tools = previous })
+	tools.Dirs = []string{bin}
 	t.Setenv("LD_PRELOAD", "/nonexistent/evil.so")
 	t.Setenv("LUKS2_TEST_INHERITED", "must-not-reach-the-tool")
 
@@ -807,7 +803,7 @@ func TestFilesystemToolsRunWithAMinimalEnvironment(t *testing.T) {
 // is not run.
 func TestUntrustedToolsAreRefused(t *testing.T) {
 	record := fakeTools(t, map[string]fakeTool{"mkfs.ext4": {}})
-	if err := os.Chmod(toolDirs[0], 0o777); err != nil { // #nosec G302 -- deliberately unsafe, to be refused
+	if err := os.Chmod(tools.Dirs[0], 0o777); err != nil { // #nosec G302 -- deliberately unsafe, to be refused
 		t.Fatalf("chmod failed: %v", err)
 	}
 
@@ -876,28 +872,6 @@ func TestZFSAcceptsOrdinaryNames(t *testing.T) {
 	}
 }
 
-// TestResolveToolRefusesWhatItCannotTrust covers the resolver's refusals on
-// their own: a non-bare name, a missing program, and a file that is not an
-// executable.
-func TestResolveToolRefusesWhatItCannotTrust(t *testing.T) {
-	bin := t.TempDir()
-	if err := os.Chmod(bin, 0o700); err != nil {
-		t.Fatalf("chmod failed: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(bin, "not-exec"), nil, 0o600); err != nil {
-		t.Fatalf("writing the fixture failed: %v", err)
-	}
-	previous := toolDirs
-	t.Cleanup(func() { toolDirs = previous })
-	toolDirs = []string{bin}
-
-	for _, name := range []string{"", "../bin/sh", "/bin/sh", "absent", "not-exec"} {
-		if path, _, err := resolveTool(name); !errors.Is(err, ErrFilesystemTool) {
-			t.Errorf("resolveTool(%q) = %q, %v; want ErrFilesystemTool", name, path, err)
-		}
-	}
-}
-
 // TestToolSymlinksAreFollowedOnlyIntoTrustedDirectories: a trusted directory
 // entry that is a symlink is judged by what it resolves to. Into a directory
 // others can write, it is refused; into a trusted one, the resolved file runs
@@ -907,9 +881,9 @@ func TestToolSymlinksAreFollowedOnlyIntoTrustedDirectories(t *testing.T) {
 	if err := os.Chmod(bin, 0o700); err != nil {
 		t.Fatalf("chmod failed: %v", err)
 	}
-	previous := toolDirs
-	t.Cleanup(func() { toolDirs = previous })
-	toolDirs = []string{bin}
+	previous := tools
+	t.Cleanup(func() { tools = previous })
+	tools.Dirs = []string{bin}
 
 	shared := t.TempDir()
 	if err := os.Chmod(shared, 0o777); err != nil { // #nosec G302 -- deliberately unsafe, to be refused
@@ -956,7 +930,7 @@ func TestToolSymlinksAreFollowedOnlyIntoTrustedDirectories(t *testing.T) {
 	// A shell script cannot see argv[0] (the kernel hands it its own path), so
 	// the command is inspected: the resolved file is executed, under the name
 	// it was found by.
-	cmd, err := toolCommand("mkfs.ext4")
+	cmd, err := tools.Command("mkfs.ext4")
 	if err != nil {
 		t.Fatalf("toolCommand = %v", err)
 	}

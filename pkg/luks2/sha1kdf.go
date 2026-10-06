@@ -4,14 +4,6 @@
 
 package luks2
 
-import (
-	"crypto/sha1" // #nosec G505 -- sized, never derived with: Size is the PBKDF2-SHA1 block length a rewrite replaces
-	"crypto/sha256"
-	"hash"
-	"math"
-	"strconv"
-)
-
 // Rewriting a PBKDF2-SHA1 keyslot as PBKDF2-SHA256 at no lower cost (#239).
 //
 // ChangeKey never writes SHA-1, so a PBKDF2-SHA1 keyslot -- a converted LUKS1
@@ -33,16 +25,16 @@ import (
 //
 // The caller then raises the result to the SHA-256 floor, and a count past
 // the ceiling is refused by CreateKDF before anything is written.
+//
+// The measurement and the cost math live in internal/kdf
+// (Deriver.SHA1Iterations); this file keeps the seam the measurement runs
+// through.
 
 // sha1CostTimer is the timer sha256IterationsForSHA1 measures with. A seam for
-// the reason calibratePBKDF2 takes its timer as an argument: what it measures
+// the reason CalibratePBKDF2 takes its timer as an argument: what it measures
 // is the machine, and a test substitutes a model of one rather than depend on
 // the wall clock.
 var sha1CostTimer pbkdf2Timer = wallClockPBKDF2
-
-// sha1CostSamples is how many times each hash is measured; the extreme of the
-// samples is used in the conservative direction.
-const sha1CostSamples = 3
 
 // sha256IterationsForSHA1 returns the PBKDF2-SHA256 iteration count whose
 // derivation of keySize bytes costs at least what sha1Iterations of
@@ -50,57 +42,5 @@ const sha1CostSamples = 3
 // past maxKDFIterations is returned as maxKDFIterations+1, for the caller's
 // range check to refuse rather than for this to wrap.
 func sha256IterationsForSHA1(sha1Iterations, keySize int) (int, error) {
-	if sha1Iterations <= 0 || keySize <= 0 {
-		return 0, &detailError{Kind: ErrInvalidKeyslot, Detail: "a PBKDF2-SHA1 keyslot of " + strconv.Itoa(sha1Iterations) +
-			" iterations and " + strconv.Itoa(keySize) + " key bytes has no cost to carry over"}
-	}
-
-	blocks := func(hashSize int) float64 { return float64((keySize + hashSize - 1) / hashSize) }
-	work := float64(sha1Iterations) * blocks(sha1.Size) / blocks(sha256.Size)
-
-	sha1Func, err := getPBKDF2HashFunc("sha1")
-	if err != nil {
-		return 0, err
-	}
-	sha256Func, err := getPBKDF2HashFunc("sha256")
-	if err != nil {
-		return 0, err
-	}
-	slowestSHA1, fastestSHA256 := 0.0, math.MaxFloat64
-	for range sha1CostSamples {
-		s1, err := pbkdf2SecondsPerIteration(sha1Func, "sha1", keySize)
-		if err != nil {
-			return 0, err
-		}
-		s256, err := pbkdf2SecondsPerIteration(sha256Func, "sha256", keySize)
-		if err != nil {
-			return 0, err
-		}
-		slowestSHA1, fastestSHA256 = max(slowestSHA1, s1), min(fastestSHA256, s256)
-	}
-	measured := float64(sha1Iterations) * slowestSHA1 / fastestSHA256
-
-	needed := math.Ceil(max(work, measured))
-	if needed > maxKDFIterations {
-		return maxKDFIterations + 1, nil
-	}
-	return int(needed), nil
-}
-
-// pbkdf2SecondsPerIteration measures one iteration of hashFunc's PBKDF2 to
-// keySize bytes: the probe doubles, as calibratePBKDF2's does, until a run
-// lasts pbkdf2ProbeFloor, and the run is divided by its count. Unlike the
-// calibration it applies no floor or ceiling to what it reports -- a floor
-// would make the two hashes' figures incomparable.
-func pbkdf2SecondsPerIteration(hashFunc func() hash.Hash, hashAlgo string, keySize int) (float64, error) {
-	for probe := pbkdf2ProbeStart; probe <= pbkdf2ProbeCeiling; probe *= 2 {
-		elapsed, err := sha1CostTimer(hashFunc, probe, keySize)
-		if err != nil {
-			return 0, err
-		}
-		if elapsed >= pbkdf2ProbeFloor {
-			return elapsed.Seconds() / float64(probe), nil
-		}
-	}
-	return 0, &KDFCalibrationError{Hash: hashAlgo, Err: errCalibrationImmeasurable}
+	return kdfDeriver().SHA1Iterations(sha1Iterations, keySize, sha1CostTimer)
 }

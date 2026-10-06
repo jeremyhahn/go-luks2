@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/anatol/devmapper.go"
+	"github.com/jeremyhahn/go-luks2/internal/clock"
 	"golang.org/x/sys/unix"
 )
 
@@ -477,9 +478,17 @@ func waitForLoopRelease(sysBlock string, dev LoopDevice, timeout, poll time.Dura
 			return fmt.Errorf("%s still backs %q %s after LOOP_CLR_FD reported success: the release is deferred "+
 				"and something still holds the device open", dev.Path, dev.Backing, timeout)
 		}
-		waitClock.Sleep(poll)
+		<-waitClock.NewTimer(poll).C()
 	}
 }
+
+// waitClock is the clock every wait in this package uses: the reaper's wait
+// for another reaper, its wait for a detach to settle, and DetachLoop's wait
+// for a release. Tests substitute a clock.Fake so that a bound is asserted on
+// the code rather than on how busy the machine running it is (#233). The
+// package has no parallel tests, which is what makes a package-level clock
+// safe to substitute.
+var waitClock clock.Clock = clock.System{}
 
 // loopIdentity is the kernel's own identity for a loop device's CURRENT
 // binding: the device number and inode of the file behind it.

@@ -11,6 +11,8 @@ import (
 	"errors"
 	"os"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/areacipher"
 )
 
 // The removal guard and the unlock path must answer ONE question -- can this
@@ -74,7 +76,7 @@ var unopenableKeyslotShapes = []damagedSibling{
 		},
 	},
 	{
-		// #45: the rejection lived as an inline literal inside xtsSectors and
+		// #45: the rejection lived as an inline literal inside the XTS transform and
 		// nothing else could consult it.
 		name: "an area cipher nothing implements",
 		apply: func(_ *LUKS2Metadata, sibling *Keyslot) {
@@ -492,7 +494,7 @@ func TestScreenKeyslotAcceptsAKeyslotThisLibraryWrote(t *testing.T) {
 		t.Fatalf("plan describes area %d..%d, want %d..%d",
 			plan.areaOffset, plan.areaOffset+plan.areaSize, wantOffset, wantOffset+wantSize)
 	}
-	if plan.area != (areaTransform{mode: areaModeXTS, iv: areaIVPlain64}) {
+	if plan.area != areacipher.Default() {
 		t.Fatalf("plan names transform %+v, want AES-XTS plain64", plan.area)
 	}
 	if want := keyslot.KeySize * keyslot.AF.Stripes; plan.afSplitSize != want {
@@ -554,7 +556,7 @@ func TestValidateXTSKeySize(t *testing.T) {
 		{32, true}, {48, true}, {64, true},
 		{0, false}, {16, false}, {31, false}, {40, false}, {63, false}, {65, false}, {128, false},
 	} {
-		err := validateXTSKeySize(tc.keySize)
+		err := areacipher.ValidateXTSKeySize(tc.keySize)
 		if tc.wantOK && err != nil {
 			t.Errorf("key size %d rejected: %v", tc.keySize, err)
 		}

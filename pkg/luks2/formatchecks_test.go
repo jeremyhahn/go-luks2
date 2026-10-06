@@ -92,7 +92,10 @@ func TestFormatOpensTheDeviceExclusively(t *testing.T) {
 	previous := openFileFunc
 	t.Cleanup(func() { openFileFunc = previous })
 	openFileFunc = func(name string, flag int, perm os.FileMode) (*os.File, error) {
-		if name == path && flag&os.O_EXCL != 0 {
+		// The exclusive open is the claim: it reopens the locked descriptor's
+		// own /proc/self/fd entry (Locked.Claim), not path again, so that is
+		// what this intercepts.
+		if strings.HasPrefix(name, "/proc/self/fd/") && flag&os.O_EXCL != 0 {
 			return nil, &fs.PathError{Op: "open", Path: name, Err: syscall.EBUSY}
 		}
 		return previous(name, flag, perm)
@@ -148,27 +151,54 @@ func TestClassifyDeviceOpenReportsABusyDeviceAsInUse(t *testing.T) {
 	}
 }
 
-// TestFormatWritesOnlyTheFileItLocked: the locks are taken on one open of the
-// path and the format writes through a second, exclusive one. If the path
-// resolves to a different file in between -- a symlink retargeted -- Format
-// refuses before writing, and neither file is touched.
-func TestFormatWritesOnlyTheFileItLocked(t *testing.T) {
-	// Not parallel: it substitutes the package's open seam.
-	path, pattern := sizedImage(t, 64<<20)
-	other, otherPattern := sizedImage(t, 64<<20)
-
-	previous := openFileFunc
-	t.Cleanup(func() { openFileFunc = previous })
-	openFileFunc = func(name string, flag int, perm os.FileMode) (*os.File, error) {
-		if name == path && flag&os.O_EXCL != 0 {
-			return previous(other, flag, perm)
+// TestFormatClaimsTheLockedDescriptorRegardlessOfASymlinkRetarget: the locks
+// are taken on one open of the path and the format writes through a second,
+// exclusive one -- the claim -- which reopens the FIRST descriptor's own
+// /proc/self/fd entry rather than resolving the path again (Locked.Claim).
+// So a symlink retargeted between the lock and the claim cannot move the
+// write to a different file: the format still lands on the file that was
+// locked, and the file the symlink now names is untouched. This replaces an
+// older test of requireSameDevice, which this design deletes -- the
+// retargeting it guarded against is now impossible by construction rather
+// than caught after the fact.
+func TestFormatClaimsTheLockedDescriptorRegardlessOfASymlinkRetarget(t *testing.T) {
+	// Not parallel: it substitutes the package's lock-held hook.
+	dir := t.TempDir()
+	pattern := bytes.Repeat([]byte{0xA5}, 4096)
+	makeTarget := func(name string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, pattern, 0o600); err != nil {
+			t.Fatalf("create %s: %v", path, err)
 		}
-		return previous(name, flag, perm)
+		if err := os.Truncate(path, 64<<20); err != nil {
+			t.Fatalf("size %s: %v", path, err)
+		}
+		return path
+	}
+	locked := makeTarget("locked.img")
+	retargeted := makeTarget("retargeted.img")
+
+	link := filepath.Join(dir, "device.img")
+	if err := os.Symlink(locked, link); err != nil {
+		t.Fatal(err)
 	}
 
-	if err := Format(standardFormatOptions(path)); !errors.Is(err, ErrDeviceChanged) {
-		t.Fatalf("Format of a path that changed between lock and open: got %v, want ErrDeviceChanged", err)
+	previous := fileLockHeld
+	t.Cleanup(func() { fileLockHeld = previous })
+	fileLockHeld = func(string) {
+		if err := os.Remove(link); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(retargeted, link); err != nil {
+			t.Fatal(err)
+		}
 	}
-	assertUntouched(t, path, 64<<20, pattern)
-	assertUntouched(t, other, 64<<20, otherPattern)
+
+	if err := Format(standardFormatOptions(link)); err != nil {
+		t.Fatalf("Format through a symlink retargeted after the lock: %v", err)
+	}
+	assertUntouched(t, retargeted, 64<<20, pattern)
+	if bytes.Equal(readAreaBytes(t, locked, 0, int64(len(pattern))), pattern) {
+		t.Fatal("Format did not write to the file it locked")
+	}
 }

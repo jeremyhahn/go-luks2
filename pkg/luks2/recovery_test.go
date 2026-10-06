@@ -20,6 +20,8 @@ import (
 	"testing"
 
 	"github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-luks2/internal/recoverykey"
+	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
 func TestGenerateRecoveryKey(t *testing.T) {
@@ -86,7 +88,7 @@ func TestGenerateRecoveryKey(t *testing.T) {
 
 			// length names the RANDOM BYTES drawn; the credential is those
 			// bytes rendered, which is longer.
-			if want := formattedLen(tt.expectLen, key.Format); key.Credential.Size() != want {
+			if want := recoverykey.Len(tt.expectLen, recoveryRenderings[key.Format]); key.Credential.Size() != want {
 				t.Errorf("expected credential length %d for %d random bytes, got %d",
 					want, tt.expectLen, key.Credential.Size())
 			}
@@ -120,48 +122,6 @@ func TestGenerateRecoveryKey(t *testing.T) {
 			}
 			if key.Format != expectedFormat {
 				t.Errorf("expected format %s, got %s", expectedFormat, key.Format)
-			}
-		})
-	}
-}
-
-// TestFormatDashedKey pins the dashed rendering byte for byte.
-//
-// It matters more than it looks: the rendering is now built IN PLACE inside
-// locked memory, by encoding the hex right-aligned in the destination and
-// expanding it leftward around the separators, rather than by joining strings.
-// These fixtures are what stands between that rewrite and a recovery key that
-// prints differently from the one that was stored.
-func TestFormatDashedKey(t *testing.T) {
-	tests := []struct {
-		name     string
-		key      []byte
-		expected string
-	}{
-		{
-			name:     "simple 6 bytes",
-			key:      []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
-			expected: "010203-040506",
-		},
-		{
-			name:     "12 bytes",
-			key:      []byte{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66},
-			expected: "AABBCC-DDEEFF-112233-445566",
-		},
-		{
-			name:     "uneven bytes",
-			key:      []byte{0x01, 0x02, 0x03, 0x04, 0x05},
-			expected: "010203-0405",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dst := make([]byte, formattedLen(len(tt.key), RecoveryKeyFormatDashed))
-			formatRecoveryKeyInto(dst, tt.key, RecoveryKeyFormatDashed)
-
-			if result := string(dst); result != tt.expected {
-				t.Errorf("expected %s, got %s", tt.expected, result)
 			}
 		})
 	}
@@ -461,75 +421,6 @@ func TestRecoveryKeyOptions(t *testing.T) {
 	}
 }
 
-func TestDecodeHex(t *testing.T) {
-	tests := []struct {
-		name      string
-		input     string
-		expected  []byte
-		expectErr bool
-	}{
-		{
-			name:     "lowercase hex",
-			input:    "aabbccdd",
-			expected: []byte{0xAA, 0xBB, 0xCC, 0xDD},
-		},
-		{
-			name:     "uppercase hex",
-			input:    "AABBCCDD",
-			expected: []byte{0xAA, 0xBB, 0xCC, 0xDD},
-		},
-		{
-			name:     "with whitespace",
-			input:    "  aabbccdd  ",
-			expected: []byte{0xAA, 0xBB, 0xCC, 0xDD},
-		},
-		{
-			name:      "invalid hex chars",
-			input:     "gghhii",
-			expectErr: true,
-		},
-		{
-			name:      "odd length",
-			input:     "aabbc",
-			expectErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// decodeHexSecret takes bytes and expects them already trimmed and
-			// lower-cased -- the caller normalises in place inside locked
-			// memory rather than through strings.TrimSpace/ToLower, which each
-			// yield an unwipeable copy of the credential. The test does the
-			// same normalisation the parser does.
-			normalized := []byte(tt.input)
-			normalized = trimASCIISpace(normalized)
-			lowerASCII(normalized)
-
-			result, err := decodeHexSecret(normalized)
-
-			if tt.expectErr {
-				if err == nil {
-					mustDestroy(t, result)
-					t.Error("expected error but got none")
-				}
-				return
-			}
-
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			defer mustDestroy(t, result)
-
-			// The decode writes straight into locked memory, so what is
-			// asserted on here is a test-only copy taken back out of it.
-			if got := openSecret(t, result); hex.EncodeToString(got) != hex.EncodeToString(tt.expected) {
-				t.Errorf("expected %x, got %x", tt.expected, got)
-			}
-		})
-	}
-}
-
 func TestLoadRecoveryKeyNonExistent(t *testing.T) {
 	_, err := LoadRecoveryKey("/nonexistent/path/key.txt")
 	if err == nil {
@@ -720,7 +611,7 @@ func TestAddRecoveryKeyReportsTheKeyslotItActuallyUsed(t *testing.T) {
 
 	// The report has to name the slot the recovery key actually opens.
 	var actual string
-	if err := borrowSecret("recovery key", recoveryKey.Credential, func(raw []byte) error {
+	if err := secret.Borrow("recovery key", recoveryKey.Credential, func(raw []byte) error {
 		actual = keyslotOpenedBy(t, device, raw)
 		return nil
 	}); err != nil {
@@ -779,14 +670,14 @@ func savedFileContains(t *testing.T, path, substr string) bool {
 		t.Fatalf("stat on the saved recovery key: %v", err)
 	}
 
-	contents, err := newSecretEnclave("recovery key file", int(info.Size()))
+	contents, err := custody.New("recovery key file", int(info.Size()))
 	if err != nil {
 		t.Fatalf("could not obtain protected memory for the saved file: %v", err)
 	}
 	defer mustDestroy(t, contents)
 
 	found := false
-	if err := borrowSecret("recovery key file", contents, func(b []byte) error {
+	if err := secret.Borrow("recovery key file", contents, func(b []byte) error {
 		if _, err := io.ReadFull(f, b); err != nil {
 			return err
 		}
@@ -825,7 +716,7 @@ func TestAddRecoveryKeyHonoursAnExplicitKeyslot(t *testing.T) {
 	}
 
 	var actual string
-	if err := borrowSecret("recovery key", recoveryKey.Credential, func(raw []byte) error {
+	if err := secret.Borrow("recovery key", recoveryKey.Credential, func(raw []byte) error {
 		actual = keyslotOpenedBy(t, device, raw)
 		return nil
 	}); err != nil {
@@ -863,7 +754,7 @@ func TestAddRecoveryKeyPicksTheFreeSlotEvenWhenTheGapIsFilledFirst(t *testing.T)
 	defer recoveryKey.Clear()
 
 	var actual string
-	if err := borrowSecret("recovery key", recoveryKey.Credential, func(raw []byte) error {
+	if err := secret.Borrow("recovery key", recoveryKey.Credential, func(raw []byte) error {
 		actual = keyslotOpenedBy(t, device, raw)
 		return nil
 	}); err != nil {
@@ -1202,7 +1093,7 @@ func TestAddRecoveryKeyKeepsTheKeyLiveWhenTheSaveFails(t *testing.T) {
 	// The credential is live on the volume, which is what the caller has to be
 	// told so they can write it down by hand.
 	var opened string
-	if err := borrowSecret("recovery key", recoveryKey.Credential, func(raw []byte) error {
+	if err := secret.Borrow("recovery key", recoveryKey.Credential, func(raw []byte) error {
 		opened = keyslotOpenedBy(t, device, raw)
 		return nil
 	}); err != nil {

@@ -1,0 +1,406 @@
+AFStripes	UNEXPORT	internal/header
+AcquireFileLock	UNEXPORT	internal/device: (*Pinned).Lock(ctx, mode)
+AcquireFileLockTimeout	UNEXPORT	internal/device: (*Pinned).Lock(ctx, mode)
+AddKey	RENAME	(*luks2.Volume).AddKeyslot(ctx, *Key, pass, KeyslotParams)
+AddKeyOptions	RENAME	luks2.KeyslotParams{Slot, Priority, KDF KDFParams}; InheritedArgon2Cost becomes the returned KeyslotInfo.KDF
+AddRecoveryKey	RENAME	(*luks2.Volume).AddRecoveryKey(ctx, *Key, *RecoveryKey, KeyslotParams)
+AntiForensic	UNEXPORT	internal/header (public read model: luks2.Header, KeyslotInfo, Segment)
+AntiForensic.MarshalJSON	UNEXPORT	moves with AntiForensic
+AntiForensic.UnmarshalJSON	UNEXPORT	moves with AntiForensic
+Argon2CostError	RENAME	luks2.KDFCostError{Param, Value, Min, Max} (one type)
+Argon2CostError.Error	RENAME	with Argon2CostError
+Argon2CostError.Unwrap	RENAME	with Argon2CostError
+BLKDISCARD	UNEXPORT	internal/device (unix.BLKDISCARD)
+BenchmarkPBKDF2	UNEXPORT	internal/kdf.Calibrate(ctx, ...)
+ChangeKey	RENAME	(*luks2.Volume).ChangeKeyslot(ctx, *Key, pass, KeyslotParams)
+CheckFilesystem	RENAME	filesystem.Check(ctx, dev, t) / filesystem.Repair(ctx, dev, t) (no bool flag)
+CheckFilesystemDetailed	RENAME	filesystem.Check(ctx, dev, t) / filesystem.Repair(ctx, dev, t) (no bool flag)
+CheckKeyringAvailable	MOVE	dmcrypt.CheckKeyring(ctx)
+CheckOverflow	UNEXPORT	internal/header (guarded narrowing helpers, clean-code 4.3)
+CommandKeyProvider	RENAME	keyprovider.Command via keyprovider.NewCommand(path, ...CommandOption)
+CommandKeyProvider.Passphrase	MOVE	(*keyprovider.Command).Passphrase
+CommandKeyProvider.Token	MOVE	(*keyprovider.Command).Token
+Config	UNEXPORT	internal/header (public read model: luks2.Header, KeyslotInfo, Segment)
+Config.MarshalJSON	UNEXPORT	moves with Config
+Config.UnmarshalJSON	UNEXPORT	moves with Config
+ConstantTimeEqual	DELETE	callers use crypto/subtle.ConstantTimeCompare
+CountTokens	DELETE	(*Header).Tokens() map; AddToken picks the free slot
+CreateBinaryHeader	UNEXPORT	internal/header, internal/kdf (raw header writes leave the public API)
+CreateKDF	UNEXPORT	internal/header, internal/kdf (raw header writes leave the public API)
+CryptoError	DELETE	luks2.Error{Op, Path, Kind, Detail, Err}; the data lives in Kind + Detail
+CryptoError.Error	DELETE	with CryptoError
+CryptoError.Unwrap	DELETE	with CryptoError
+DefaultCipher	KEEP	luks2 (zero FormatParams fields resolve to these)
+DefaultCipherMode	DELETE	FormatParams.Cipher is one cryptsetup spec, e.g. aes-xts-plain64; DefaultCipher becomes that spec
+DefaultFIDO2AssertPath	UNEXPORT	pkg/keyprovider (defaults behind WithFIDO2Tools)
+DefaultFIDO2CredPath	UNEXPORT	pkg/keyprovider (defaults behind WithFIDO2Tools)
+DefaultFIDO2RelyingParty	MOVE	keyprovider.DefaultRelyingParty / SaltLength / SecretLength
+DefaultHashAlgo	RENAME	luks2.DefaultHash (crypto.Hash)
+DefaultKDFType	KEEP	luks2.DefaultKDFType() KDFType
+DefaultKeySize	KEEP	luks2 (zero FormatParams fields resolve to these)
+DefaultLockWait	KEEP	luks2.DefaultLockWait; per-Volume override luks2.WithLockWait
+DefaultSectorSize	KEEP	luks2 (zero FormatParams fields resolve to these)
+DeriveKeyEnclave	UNEXPORT	internal/header, internal/kdf (raw header writes leave the public API)
+DetachDeferred	MOVE	loop.Deferred / loop.Released / loop.DetachState
+DetachLoopDevice	DELETE	(*loop.Device).Detach(ctx) (DetachState, error); loop.Lookup(ctx, "/dev/loopN") yields the Device
+DetachLoopDeviceState	RENAME	(*loop.Device).Detach(ctx) (DetachState, error)
+DetachReleased	MOVE	loop.Deferred / loop.Released / loop.DetachState
+DetachState	MOVE	loop.Deferred / loop.Released / loop.DetachState
+DetectFilesystem	RENAME	filesystem.Detect(ctx, dev)
+DeviceError	DELETE	luks2.Error{Op, Path, Kind, Detail, Err}; the data lives in Kind + Detail
+DeviceError.Error	DELETE	with DeviceError
+DeviceError.Unwrap	DELETE	with DeviceError
+Digest	UNEXPORT	internal/header (public read model: luks2.Header, KeyslotInfo, Segment)
+Digest.MarshalJSON	UNEXPORT	moves with Digest
+Digest.UnmarshalJSON	UNEXPORT	moves with Digest
+DigestCalibrationKeyLen	UNEXPORT	internal/kdf
+DigestIterationTargetMs	UNEXPORT	internal/kdf
+DroppedEntry	KEEP	luks2.DroppedEntry via (*Header).Dropped()
+DroppedEntry.String	KEEP	
+DroppedKindKeyslot	UNEXPORT	internal/header
+DroppedKindToken	UNEXPORT	internal/header
+EnrollKeyProvider	RENAME	(*luks2.Volume).Enroll(ctx, *Key, KeyProvider, KeyslotParams)
+ErrAmbiguousJSONMember	DELETE	luks2.ErrInvalidHeader with detail
+ErrCredentialEmpty	RENAME	luks2.ErrInvalidCredential
+ErrCredentialTooLong	RENAME	luks2.ErrInvalidCredential
+ErrDetachIncomplete	MOVE	loop.ErrDetachIncomplete
+ErrDeviceCacheStale	KEEP	luks2 (same value re-exported by wipe; defined once in internal/device)
+ErrDeviceChanged	KEEP	luks2 (same value re-exported by wipe; defined once in internal/device)
+ErrDeviceInUse	KEEP	luks2 (same value re-exported by wipe; defined once in internal/device)
+ErrDeviceNodeUnverified	RENAME	dmcrypt.ErrNodeUnverified
+ErrDeviceNotFound	KEEP	luks2 (same value re-exported by wipe; defined once in internal/device)
+ErrDeviceTooSmall	RENAME	luks2.ErrInvalidArgument
+ErrDirectIOUnsupported	RENAME	luks2.ErrUnsupported
+ErrFIPSImportRequired	KEEP	luks2
+ErrFIPSMigrationDigest	RENAME	luks2.ErrFIPSMigration + typed FIPSMigrationError.Stage
+ErrFIPSMigrationUnboundKey	RENAME	luks2.ErrFIPSMigration + typed FIPSMigrationError.Stage
+ErrFIPSMigrationUnderFIPS	RENAME	luks2.ErrFIPSMigration + typed FIPSMigrationError.Stage
+ErrFIPSMigrationVerification	RENAME	luks2.ErrFIPSMigration + typed FIPSMigrationError.Stage
+ErrFIPSNotApproved	KEEP	luks2
+ErrFilesystemNotDetected	RENAME	filesystem.ErrNotDetected
+ErrFilesystemTool	RENAME	filesystem.ErrTool
+ErrHelperFailed	MOVE	keyprovider.<same name>
+ErrHelperNotConfigured	RENAME	keyprovider.ErrInvalidArgument (NewCommand validation)
+ErrHelperOutput	MOVE	keyprovider.<same name>
+ErrHelperPathNotAbsolute	RENAME	keyprovider.ErrInvalidArgument (NewCommand validation)
+ErrIntegerOverflow	RENAME	luks2.ErrInvalidArgument
+ErrInvalidArgon2Memory	DELETE	*luks2.KDFCostError (Is ErrInvalidArgument)
+ErrInvalidArgon2Parallel	DELETE	*luks2.KDFCostError (Is ErrInvalidArgument)
+ErrInvalidArgon2Time	DELETE	*luks2.KDFCostError (Is ErrInvalidArgument)
+ErrInvalidFIDO2Binding	RENAME	keyprovider.ErrInvalidBinding
+ErrInvalidFilesystemOption	RENAME	filesystem.ErrInvalidArgument
+ErrInvalidHeader	KEEP	luks2.ErrInvalidHeader
+ErrInvalidKeySize	RENAME	luks2.ErrInvalidArgument
+ErrInvalidKeyslot	RENAME	luks2.ErrKeyslotNotFound (structural keyslot faults are ErrInvalidHeader)
+ErrInvalidLabel	RENAME	luks2.ErrInvalidArgument
+ErrInvalidMappingName	RENAME	dmcrypt.ErrInvalidName
+ErrInvalidMetadataSize	RENAME	luks2.ErrInvalidArgument
+ErrInvalidPath	RENAME	luks2.ErrInvalidArgument
+ErrInvalidRecoveryKeyFormat	RENAME	luks2.ErrInvalidArgument
+ErrInvalidSectorSize	RENAME	luks2.ErrInvalidArgument
+ErrInvalidSize	RENAME	luks2.ErrInvalidArgument
+ErrInvalidVolumeKey	RENAME	luks2.ErrInvalidCredential
+ErrKDFBudgetExceeded	RENAME	luks2.ErrInvalidHeader
+ErrKDFCalibration	KEEP	luks2
+ErrKeyProvider	KEEP	luks2
+ErrKeyring	MOVE	dmcrypt.<same name>
+ErrKeyringBlocked	MOVE	dmcrypt.<same name>
+ErrKeyringEntryExists	MOVE	dmcrypt.<same name>
+ErrKeyringFailed	MOVE	dmcrypt.<same name>
+ErrKeyringKeyNotReleased	MOVE	dmcrypt.<same name>
+ErrKeyringQuotaExhausted	MOVE	dmcrypt.<same name>
+ErrKeyringUnavailable	MOVE	dmcrypt.<same name>
+ErrKeyringUnsupported	MOVE	dmcrypt.<same name>
+ErrKeyslotAreaOverlap	KEEP	luks2
+ErrKeyslotsAreaFull	RENAME	luks2.ErrNoSpace
+ErrLastKeyslot	KEEP	luks2
+ErrLockContended	KEEP	luks2 (same value re-exported by wipe; defined once in internal/device)
+ErrLoopNodeAbsent	RENAME	loop.ErrNodeAbsent
+ErrMappingBusy	RENAME	dmcrypt.ErrBusy
+ErrMappingStillLive	RENAME	dmcrypt.ErrStillLive
+ErrMasterKeyVerification	RENAME	luks2.ErrWrongKey
+ErrMetadataJSON	DELETE	luks2.ErrInvalidHeader with detail
+ErrMetadataLockUnavailable	KEEP	luks2 (shared; defined once in internal/device)
+ErrMetadataTooLarge	RENAME	luks2.ErrNoSpace
+ErrNoFIDO2Device	RENAME	keyprovider.ErrNoDevice
+ErrNoFreeTokenSlot	RENAME	luks2.ErrNoSpace
+ErrNoKeyProvider	RENAME	luks2.ErrInvalidArgument (nil provider)
+ErrNoKeyslots	RENAME	luks2.ErrWrongKey
+ErrNotBlockDevice	RENAME	luks2.ErrInvalidArgument
+ErrNotMounted	MOVE	filesystem.ErrNotMounted
+ErrOrphanedKeyslot	KEEP	luks2
+ErrPBKDFIterationsTooHigh	DELETE	*luks2.KDFCostError (Is ErrInvalidArgument)
+ErrPBKDFIterationsTooLow	DELETE	*luks2.KDFCostError (Is ErrInvalidArgument)
+ErrPassphraseTooLong	RENAME	luks2.ErrInvalidCredential
+ErrPassphraseTooShort	RENAME	luks2.ErrInvalidCredential
+ErrPermissionDenied	KEEP	luks2 (same value re-exported by wipe; defined once in internal/device)
+ErrPrimaryHeaderCurrent	KEEP	luks2
+ErrProtectedMemory	KEEP	luks2
+ErrRecoveryKeyTooShort	RENAME	luks2.ErrInvalidArgument
+ErrSHA1NotWritten	RENAME	luks2.ErrInvalidArgument
+ErrTokenNotFound	KEEP	luks2
+ErrUnsupportedCipher	RENAME	luks2.ErrUnsupported
+ErrUnsupportedFilesystem	RENAME	filesystem.ErrUnsupported
+ErrUnsupportedHash	RENAME	luks2.ErrUnsupported
+ErrUnsupportedHeaderChecksum	RENAME	luks2.ErrUnsupported
+ErrUnsupportedKDF	RENAME	luks2.ErrUnsupported
+ErrUnsupportedKeyslotCipher	RENAME	luks2.ErrUnsupported
+ErrUnsupportedLUKSVersion	RENAME	luks2.ErrNotLUKS2
+ErrUnsupportedRequirement	KEEP	luks2.ErrUnsupportedRequirement
+ErrUnsupportedSegmentLayout	RENAME	luks2.ErrUnsupported
+ErrUnsupportedTokenType	MOVE	keyprovider.ErrUnsupportedToken
+ErrVolumeAlreadyUnlocked	RENAME	dmcrypt.ErrActive
+ErrVolumeNotUnlocked	RENAME	dmcrypt.ErrNotActive
+ErrWipeVerification	RENAME	wipe.ErrVerification
+ExecConfig	DELETE	keyprovider.WithFIDO2Tools / WithDevice options
+ExportToken	DELETE	json.Marshal / json.Unmarshal on luks2.Token
+Ext4Options	RENAME	filesystem.Ext4Params / XFSParams / ZFSParams
+FIDO2CredentialOptions	RENAME	keyprovider.FIDO2CredentialParams
+FIDO2Params	MOVE	keyprovider.FIDO2Params
+FIDO2SaltLength	MOVE	keyprovider.DefaultRelyingParty / SaltLength / SecretLength
+FIDO2SecretLength	MOVE	keyprovider.DefaultRelyingParty / SaltLength / SecretLength
+FIPSImportRequiredError	KEEP	luks2
+FIPSImportRequiredError.Error	KEEP	with FIPSImportRequiredError
+FIPSImportRequiredError.Is	DELETE	Unwrap() []error {Kind, Err} replaces hand-written Is
+FIPSMigrationError	KEEP	luks2
+FIPSMigrationError.Error	KEEP	with FIPSMigrationError
+FIPSMigrationError.Unwrap	KEEP	with FIPSMigrationError
+FIPSMigrationOptions	RENAME	luks2.MigrateParams
+FIPSMigrationResult	RENAME	luks2.Migration
+FileLock	UNEXPORT	internal/device.Locked
+FileLock.Release	UNEXPORT	(*device.Locked).Release
+FilesystemCheckResult	RENAME	filesystem.CheckResult
+FilesystemCommandError	RENAME	filesystem.CommandError
+FilesystemCommandError.Error	RENAME	with FilesystemCommandError
+FilesystemCommandError.Unwrap	RENAME	with FilesystemCommandError
+FilesystemExt2	DELETE	unsupported by design (#195); Detect still reports them as filesystem.Type("ext2")
+FilesystemExt3	DELETE	unsupported by design (#195); Detect still reports them as filesystem.Type("ext2")
+FilesystemExt4	MOVE	filesystem.Ext4 / FAT32 / XFS / ZFS
+FilesystemFAT32	MOVE	filesystem.Ext4 / FAT32 / XFS / ZFS
+FilesystemInfo	RENAME	filesystem.Info
+FilesystemOptions	RENAME	filesystem.MakeParams
+FilesystemType	RENAME	filesystem.Type
+FilesystemXFS	MOVE	filesystem.Ext4 / FAT32 / XFS / ZFS
+FilesystemZFS	MOVE	filesystem.Ext4 / FAT32 / XFS / ZFS
+FindFreeTokenSlot	DELETE	(*Header).Tokens() map; AddToken picks the free slot
+FindLoopDevice	RENAME	loop.Find(ctx, file)
+Format	RENAME	(*luks2.Volume).Format(ctx, pass, FormatParams)
+FormatOptions	RENAME	luks2.FormatParams (Device and Passphrase leave it)
+GenerateRecoveryKey	RENAME	luks2.NewRecoveryKey(...RecoveryKeyOption)
+GetFilesystemInfo	RENAME	filesystem.Inspect(ctx, dev)
+GetMappedDevicePath	DELETE	dmcrypt.Lookup(ctx, name) -> *Mapping (ErrNotActive); (*Mapping).Path()
+GetToken	DELETE	(*Header).Tokens() map; AddToken picks the free slot
+GetVolumeInfo	DELETE	(*luks2.Volume).Header(ctx) getters
+HelperError	MOVE	keyprovider.HelperError
+HelperError.Error	MOVE	with HelperError
+HelperError.Is	DELETE	Unwrap() []error {Kind, Err} replaces hand-written Is
+HelperError.Unwrap	MOVE	with HelperError
+ImportToken	RENAME	(*luks2.Volume).SetToken(ctx, id, Token)
+ImportTokenJSON	DELETE	json.Marshal / json.Unmarshal on luks2.Token
+InvalidKeyslotError	DELETE	luks2.Error{Op, Path, Kind, Detail, Err}; the data lives in Kind + Detail
+InvalidKeyslotError.Error	DELETE	with InvalidKeyslotError
+InvalidKeyslotError.Is	DELETE	with InvalidKeyslotError
+InvalidKeyslotError.Unwrap	DELETE	with InvalidKeyslotError
+IsFIPSCompliantKDF	DELETE	operations refuse with ErrFIPSNotApproved; (KDFParams).Validate() for pre-flight
+IsFilesystemSupported	RENAME	filesystem.Supported() []Type
+IsLUKS	DELETE	(*luks2.Volume).Header(ctx): ErrNotLUKS2 when absent or LUKS1
+IsLUKS2	DELETE	(*luks2.Volume).Header(ctx): ErrNotLUKS2 when absent or LUKS1
+IsMappingMounted	RENAME	filesystem.DeviceMounted(ctx, devNo) with dmcrypt.Lookup
+IsMounted	MOVE	filesystem.IsMounted(ctx, target)
+IsUnlocked	DELETE	dmcrypt.Lookup(ctx, name) -> *Mapping (ErrNotActive); (*Mapping).Path()
+KDF	UNEXPORT	internal/header (public read model: luks2.Header, KeyslotInfo, Segment)
+KDF.MarshalJSON	UNEXPORT	moves with KDF
+KDF.UnmarshalJSON	UNEXPORT	moves with KDF
+KDFBudgetError	DELETE	luks2.Error with Kind luks2.ErrInvalidHeader; the need and budget are Detail
+KDFBudgetError.Error	DELETE	with KDFBudgetError
+KDFBudgetError.Is	DELETE	with KDFBudgetError
+KDFCalibrationError	KEEP	luks2.KDFCalibrationError
+KDFCalibrationError.Error	KEEP	with KDFCalibrationError
+KDFCalibrationError.Is	DELETE	Unwrap() []error {Kind, Err} replaces hand-written Is
+KDFCalibrationError.Unwrap	KEEP	with KDFCalibrationError
+KDFTypeArgon2i	RENAME	luks2.KDFArgon2i / KDFArgon2id / KDFPBKDF2 of type KDFType
+KDFTypeArgon2id	RENAME	luks2.KDFArgon2i / KDFArgon2id / KDFPBKDF2 of type KDFType
+KDFTypePBKDF2	RENAME	luks2.KDFArgon2i / KDFArgon2id / KDFPBKDF2 of type KDFType
+KDFTypePBKDF2SHA1	DELETE	KDFParams{Type: KDFPBKDF2, Hash: crypto.SHA512}; the CLI keeps parsing pbkdf2-sha512
+KDFTypePBKDF2SHA256	DELETE	KDFParams{Type: KDFPBKDF2, Hash: crypto.SHA512}; the CLI keeps parsing pbkdf2-sha512
+KDFTypePBKDF2SHA384	DELETE	KDFParams{Type: KDFPBKDF2, Hash: crypto.SHA512}; the CLI keeps parsing pbkdf2-sha512
+KDFTypePBKDF2SHA512	DELETE	KDFParams{Type: KDFPBKDF2, Hash: crypto.SHA512}; the CLI keeps parsing pbkdf2-sha512
+KeyProvider	KEEP	luks2.KeyProvider{Passphrase(ctx); Token() Token}
+KeyProviderError	DELETE	luks2.Error{Op, Path, Kind, Detail, Err}; the data lives in Kind + Detail
+KeyProviderError.Error	DELETE	with KeyProviderError
+KeyProviderError.Is	DELETE	with KeyProviderError
+KeyProviderError.Unwrap	DELETE	with KeyProviderError
+KeyringUnavailableError	RENAME	dmcrypt.KeyringError
+KeyringUnavailableError.Error	RENAME	with KeyringUnavailableError
+KeyringUnavailableError.Is	DELETE	Unwrap() []error {Kind, Err} replaces hand-written Is
+KeyringUnavailableError.Unwrap	RENAME	with KeyringUnavailableError
+Keyslot	UNEXPORT	internal/header (public read model: luks2.Header, KeyslotInfo, Segment)
+Keyslot.MarshalJSON	UNEXPORT	moves with Keyslot
+Keyslot.UnmarshalJSON	UNEXPORT	moves with Keyslot
+KeyslotArea	UNEXPORT	internal/header (public read model: luks2.Header, KeyslotInfo, Segment)
+KeyslotArea.MarshalJSON	UNEXPORT	moves with KeyslotArea
+KeyslotArea.UnmarshalJSON	UNEXPORT	moves with KeyslotArea
+KeyslotAreaAlignment	UNEXPORT	internal/header
+KeyslotAreaEncryption	UNEXPORT	internal/header
+KeyslotError	DELETE	luks2.Error{Op, Path, Kind, Detail, Err}; the data lives in Kind + Detail
+KeyslotError.Error	DELETE	with KeyslotError
+KeyslotError.Unwrap	DELETE	with KeyslotError
+KeyslotInfo	KEEP	luks2.KeyslotInfo (KDF field is KDFParams)
+KeyslotPriorityIgnore	RENAME	luks2.PriorityIgnore / PriorityNormal / PriorityPrefer of type Priority
+KeyslotPriorityNormal	RENAME	luks2.PriorityIgnore / PriorityNormal / PriorityPrefer of type Priority
+KeyslotPriorityPrefer	RENAME	luks2.PriorityIgnore / PriorityNormal / PriorityPrefer of type Priority
+KillKeyslot	RENAME	(*luks2.Volume).RemoveKeyslot(ctx, slot): guarded (ErrLastKeyslot, ErrKeyslotAreaOverlap); authorization is the caller's policy
+KillSlot	DELETE	credential checks are CLI policy: Unlock / UnlockKeyslot, then RemoveKeyslot
+LUKS2BinaryHeader	UNEXPORT	internal/header (public read model: luks2.Header, KeyslotInfo, Segment)
+LUKS2DefaultKeyslotsSize	UNEXPORT	internal/header
+LUKS2DefaultSize	UNEXPORT	internal/header
+LUKS2HeaderDefaultSize	UNEXPORT	internal/header
+LUKS2HeaderMaxOffset	UNEXPORT	internal/header
+LUKS2HeaderMaxSize	UNEXPORT	internal/header
+LUKS2HeaderMinSize	UNEXPORT	internal/header
+LUKS2HeaderSize	UNEXPORT	internal/header
+LUKS2Magic	UNEXPORT	internal/header
+LUKS2MagicLen	UNEXPORT	internal/header
+LUKS2MaxKeyslots	DELETE	duplicate of MaxKeyslots
+LUKS2MaxKeyslotsSize	UNEXPORT	internal/header
+LUKS2Metadata	UNEXPORT	internal/header (public read model: luks2.Header, KeyslotInfo, Segment)
+LUKS2PrimaryHeaderOffset	UNEXPORT	internal/header
+LUKS2SecondaryHeaderOffset	UNEXPORT	internal/header
+LUKS2SecondaryMagic	UNEXPORT	internal/header
+LUKS2SectorSize	UNEXPORT	internal/header
+LUKS2Version	UNEXPORT	internal/header
+ListKeyslots	RENAME	(*luks2.Header).Keyslots()
+ListTokens	DELETE	(*Header).Tokens() map; AddToken picks the free slot
+LoadRecoveryCredential	DELETE	file I/O moves to internal/cli; library offers (*RecoveryKey).WriteTo and ParseRecoveryKey
+LoadRecoveryKey	DELETE	file I/O moves to internal/cli; library offers (*RecoveryKey).WriteTo and ParseRecoveryKey
+Lock	RENAME	dmcrypt.Deactivate(ctx, name)
+LockTimeoutError	KEEP	luks2.LockTimeoutError (re-exported alias of internal/device's)
+LockTimeoutError.Error	KEEP	with LockTimeoutError
+LockTimeoutError.Is	DELETE	Unwrap() []error {Kind, Err} replaces hand-written Is
+LockTimeoutError.Unwrap	KEEP	with LockTimeoutError
+MakeFilesystem	RENAME	filesystem.Make(ctx, dev, t, MakeParams)
+MakeFilesystemWithOptions	RENAME	filesystem.Make(ctx, dev, t, MakeParams)
+MaxCredentialLength	UNEXPORT	internal/secret
+MaxKeySize	UNEXPORT	internal/header (reported in ErrInvalidArgument detail)
+MaxKeyslotKeySize	UNEXPORT	internal/header
+MaxKeyslots	KEEP	luks2.MaxKeyslots
+MaxMappingNameLength	MOVE	dmcrypt.MaxNameLength
+MaxPassphraseLength	KEEP	luks2
+MaxSectorSize	UNEXPORT	internal/header (reported in ErrInvalidArgument detail)
+MaxTokenSlots	RENAME	luks2.MaxTokens
+MetadataJSONError	DELETE	luks2.Error{Op, Path, Kind, Detail, Err}; the data lives in Kind + Detail
+MetadataJSONError.Error	DELETE	with MetadataJSONError
+MetadataJSONError.Is	DELETE	with MetadataJSONError
+MetadataJSONError.Unwrap	DELETE	with MetadataJSONError
+MigrateToFIPS	RENAME	(*luks2.Volume).MigrateToFIPS(ctx, pass, MigrateParams)
+MinArgon2MemoryKB	UNEXPORT	internal/kdf (reported through *KDFCostError.Min)
+MinArgon2Parallel	UNEXPORT	internal/kdf (reported through *KDFCostError.Min)
+MinArgon2Time	UNEXPORT	internal/kdf (reported through *KDFCostError.Min)
+MinKeySize	UNEXPORT	internal/header (reported in ErrInvalidArgument detail)
+MinPassphraseLength	KEEP	luks2
+MinSectorSize	UNEXPORT	internal/header (reported in ErrInvalidArgument detail)
+Mount	MOVE	filesystem.Mount(ctx, MountParams)
+MountOptions	MOVE	filesystem.Mount(ctx, MountParams)
+NewFIDO2Credential	MOVE	keyprovider.NewFIDO2Credential / NewFIDO2Salt
+NewFIDO2KeyProvider	RENAME	keyprovider.NewFIDO2(FIDO2Params, ...FIDO2Option) (*FIDO2, error)
+NewFIDO2Salt	MOVE	keyprovider.NewFIDO2Credential / NewFIDO2Salt
+NonApprovedKDF	KEEP	luks2
+NonApprovedKDF.String	KEEP	
+OpenFileSecure	DELETE	os.OpenFile; device opens go through internal/device
+OrphanedKeyslotError	KEEP	luks2.OrphanedKeyslotError
+OrphanedKeyslotError.Error	KEEP	with OrphanedKeyslotError
+OrphanedKeyslotError.Is	DELETE	Unwrap() []error {Kind, Err} replaces hand-written Is
+OrphanedKeyslotError.Unwrap	KEEP	with OrphanedKeyslotError
+PBKDFIterationsError	RENAME	luks2.KDFCostError{Param, Value, Min, Max} (one type)
+PBKDFIterationsError.Error	RENAME	with PBKDFIterationsError
+PBKDFIterationsError.Unwrap	RENAME	with PBKDFIterationsError
+ParseRecoveryKey	KEEP	luks2.ParseRecoveryKey(*enclave.MemoryEnclave) (*enclave.MemoryEnclave, error)
+ParseRecoveryKeyFormat	KEEP	luks2.ParseRecoveryKeyFormat
+PatternOnes	MOVE	wipe.Ones / Random / Zeros
+PatternRandom	MOVE	wipe.Ones / Random / Zeros
+PatternZeros	MOVE	wipe.Ones / Random / Zeros
+ProtectedMemoryError	DELETE	luks2.Error{Op, Path, Kind, Detail, Err}; the data lives in Kind + Detail
+ProtectedMemoryError.Error	DELETE	with ProtectedMemoryError
+ProtectedMemoryError.Is	DELETE	with ProtectedMemoryError
+ProtectedMemoryError.Unwrap	DELETE	with ProtectedMemoryError
+ProviderFromToken	RENAME	keyprovider.FromToken(luks2.Token, ...FIDO2Option)
+ReadHeader	RENAME	(*luks2.Volume).Header(ctx)
+ReadSecondaryHeader	RENAME	(*luks2.Volume).SecondaryHeader(ctx)
+RecoveryCredential	DELETE	ParseRecoveryKey takes an enclave
+RecoveryKey	KEEP	luks2.RecoveryKey (unexported fields; accessors)
+RecoveryKey.Clear	RENAME	(*RecoveryKey).Destroy
+RecoveryKey.FormattedString	DELETE	(*RecoveryKey).WriteTo(io.Writer): a credential never becomes a Go string
+RecoveryKeyFormat	KEEP	luks2.RecoveryKeyFormat (uint8 enum)
+RecoveryKeyFormatBase64	RENAME	luks2.RecoveryBase64 / RecoveryDashed / RecoveryHex
+RecoveryKeyFormatDashed	RENAME	luks2.RecoveryBase64 / RecoveryDashed / RecoveryHex
+RecoveryKeyFormatHex	RENAME	luks2.RecoveryBase64 / RecoveryDashed / RecoveryHex
+RecoveryKeyLength	RENAME	luks2.DefaultRecoveryKeyLength
+RecoveryKeyOptions	RENAME	luks2.RecoveryKeyOption (WithRecoveryFormat, WithRecoveryLength) + KeyslotParams; OutputPath deleted
+RemoveKey	DELETE	credential checks are CLI policy: Unlock / UnlockKeyslot, then RemoveKeyslot
+RemoveToken	RENAME	(*luks2.Volume).RemoveToken(ctx, id)
+Requirements	UNEXPORT	internal/header (public read model: luks2.Header, KeyslotInfo, Segment)
+Requirements.MarshalJSON	UNEXPORT	moves with Requirements
+Requirements.UnmarshalJSON	UNEXPORT	moves with Requirements
+RestoreHeaderOptions	DELETE	Force=true is (*luks2.Volume).ReplacePrimaryHeader(ctx) (no flag argument)
+RestorePrimaryHeader	RENAME	(*luks2.Volume).RestorePrimaryHeader(ctx)
+RestorePrimaryHeaderWithOptions	DELETE	Force=true is (*luks2.Volume).ReplacePrimaryHeader(ctx) (no flag argument)
+SafeInt64ToUint64	UNEXPORT	internal/header (guarded narrowing helpers, clean-code 4.3)
+SafeUint64ToInt	UNEXPORT	internal/header (guarded narrowing helpers, clean-code 4.3)
+SafeUint64ToInt64	UNEXPORT	internal/header (guarded narrowing helpers, clean-code 4.3)
+SaveRecoveryKey	DELETE	file I/O moves to internal/cli; library offers (*RecoveryKey).WriteTo and ParseRecoveryKey
+Segment	RENAME	on-disk struct -> internal/header; luks2.Segment becomes a typed read-only value (Offset/Size int64)
+Segment.MarshalJSON	UNEXPORT	moves with Segment
+Segment.UnmarshalJSON	UNEXPORT	moves with Segment
+SetupLoopDevice	RENAME	loop.Attach(ctx, file, ...loop.Option)
+StandardCustom	DELETE	zero wipe.Params.Standard means custom
+StandardDoD3Pass	MOVE	wipe.DoD3Pass / DoD7Pass / NIST
+StandardDoD7Pass	MOVE	wipe.DoD3Pass / DoD7Pass / NIST
+StandardNIST	MOVE	wipe.DoD3Pass / DoD7Pass / NIST
+SupportedFilesystems	RENAME	filesystem.Supported() []Type
+TestKey	DELETE	(*luks2.Volume).Unlock(ctx, cred) then (*Key).Destroy
+Token	KEEP	luks2.Token{Type, Keyslots, Members map[string]json.RawMessage}; FIDO2 fields move to keyprovider
+Token.MarshalJSON	KEEP	luks2.Token
+Token.UnmarshalJSON	KEEP	luks2.Token
+TokenExists	DELETE	(*Header).Tokens() map; AddToken picks the free slot
+TokenTypeSystemdFIDO2	MOVE	keyprovider.TokenTypeFIDO2
+TokenTypeSystemdRecovery	RENAME	luks2.TokenTypeRecovery
+TrimRight	DELETE	bytes.TrimRight; the NUL-field trim moves to internal/header
+Unlock	RENAME	(*luks2.Volume).Unlock(ctx, pass) + dmcrypt.Activate(ctx, v, key, name)
+UnlockError	DELETE	luks2.Error{Op, Path, Kind, Detail, Err}; the data lives in Kind + Detail
+UnlockError.Error	DELETE	with UnlockError
+UnlockError.Unwrap	DELETE	with UnlockError
+UnlockWithProvider	RENAME	(*luks2.Volume).UnlockWithProvider(ctx, p) + dmcrypt.Activate
+UnlockWithVolumeKey	RENAME	(*luks2.Volume).UnlockWithVolumeKey(ctx, vk) + dmcrypt.Activate
+Unmount	MOVE	filesystem.Unmount(ctx, target, UnmountFlags)
+UnsupportedFilesystemError	DELETE	filesystem.Error with Kind filesystem.ErrUnsupported
+UnsupportedFilesystemError.Error	DELETE	with UnsupportedFilesystemError
+UnsupportedFilesystemError.Unwrap	DELETE	with UnsupportedFilesystemError
+UnsupportedKeyslotCipherError	DELETE	luks2.Error{Op, Path, Kind, Detail, Err}; the data lives in Kind + Detail
+UnsupportedKeyslotCipherError.Error	DELETE	with UnsupportedKeyslotCipherError
+UnsupportedKeyslotCipherError.Is	DELETE	with UnsupportedKeyslotCipherError
+UnsupportedRequirementError	DELETE	luks2.Error{Op, Path, Kind, Detail, Err}; the data lives in Kind + Detail
+UnsupportedRequirementError.Error	DELETE	with UnsupportedRequirementError
+UnsupportedRequirementError.Unwrap	DELETE	with UnsupportedRequirementError
+ValidateDevicePath	DELETE	luks2.Open validates and pins
+ValidateFormatOptions	RENAME	(luks2.FormatParams).Validate()
+ValidateMappingName	MOVE	dmcrypt.ValidateName
+ValidatePassphrase	KEEP	luks2.ValidatePassphrase(*enclave.MemoryEnclave)
+VerifyRecoveryKey	DELETE	(*luks2.Volume).Unlock(ctx, cred) then (*Key).Destroy
+VolumeError	DELETE	luks2.Error{Op, Path, Kind, Detail, Err}; the data lives in Kind + Detail
+VolumeError.Error	DELETE	with VolumeError
+VolumeError.Unwrap	DELETE	with VolumeError
+VolumeInfo	DELETE	(*luks2.Volume).Header(ctx) getters
+Wipe	RENAME	wipe.Sanitize(ctx, path, wipe.Params); HeaderOnly is (*luks2.Volume).Erase(ctx)
+WipeKeyslot	DELETE	same operation as RemoveKeyslot (which always destroys the area)
+WipeOptions	RENAME	wipe.Sanitize(ctx, path, wipe.Params); HeaderOnly is (*luks2.Volume).Erase(ctx)
+WipePattern	RENAME	wipe.Pattern / wipe.Standard
+WipePattern.String	MOVE	wipe.Pattern.String
+WipeProgress	RENAME	wipe.Progress (PercentComplete dropped: derivable) / wipe.Params.Progress func(Progress)
+WipeProgressFunc	RENAME	wipe.Progress (PercentComplete dropped: derivable) / wipe.Params.Progress func(Progress)
+WipeStandard	RENAME	wipe.Pattern / wipe.Standard
+WipeStandard.GetPatternSequence	RENAME	wipe.Standard.Patterns()
+WipeStandard.RequiresVerification	UNEXPORT	pkg/wipe
+WipeStandard.String	MOVE	wipe.Standard.String
+WriteHeader	UNEXPORT	internal/header, internal/kdf (raw header writes leave the public API)
+XFSOptions	RENAME	filesystem.Ext4Params / XFSParams / ZFSParams
+ZFSOptions	RENAME	filesystem.Ext4Params / XFSParams / ZFSParams

@@ -7,15 +7,12 @@
 package luks2
 
 import (
-	"bytes"
-	"crypto/aes"
 	"crypto/rand"
 	"errors"
-	"hash"
 	"testing"
 
 	"github.com/jeremyhahn/go-enclave"
-	"golang.org/x/crypto/xts"
+	"github.com/jeremyhahn/go-luks2/internal/recoverykey"
 )
 
 // Custody tests.
@@ -31,242 +28,6 @@ import (
 // paths that decide whether a container can be read back at all, so "it still
 // round-trips through this package" is not sufficient evidence: the reference
 // implementations here are what make a behavioral drift visible.
-
-// legacyDiffuse is the allocating formulation diffuse replaced: accumulate the
-// hashed blocks in a fresh slice, then copy it over the input. It is kept here,
-// and only here, as the oracle for the in-place rewrite.
-func legacyDiffuse(data []byte, hashFunc func() hash.Hash, blockSize int) {
-	h := hashFunc()
-	digestSize := h.Size()
-	numBlocks := blockSize / digestSize
-
-	result := make([]byte, 0, blockSize)
-
-	for i := 0; i < numBlocks; i++ {
-		block := data[i*digestSize : (i+1)*digestSize]
-		result = append(result, legacyHashBlock(block, h, i)...)
-	}
-
-	if remainder := blockSize % digestSize; remainder != 0 {
-		lastBlock := data[blockSize-remainder:]
-		hashed := legacyHashBlock(lastBlock, h, numBlocks)
-		result = append(result, hashed[:remainder]...)
-	}
-
-	copy(data, result)
-}
-
-// legacyHashBlock is the allocating hashBlock the in-place version replaced.
-func legacyHashBlock(block []byte, h hash.Hash, iv int) []byte {
-	h.Reset()
-
-	ivBytes := make([]byte, 4)
-	ivBytes[0] = byte(iv >> 24)
-	ivBytes[1] = byte(iv >> 16)
-	ivBytes[2] = byte(iv >> 8)
-	ivBytes[3] = byte(iv)
-	h.Write(ivBytes)
-	h.Write(block)
-
-	return h.Sum(nil)
-}
-
-// TestDiffuseInPlaceMatchesTheAllocatingFormulation is the guard on the
-// rewrite that removed ~4000 heap copies of diffusion state per operation.
-//
-// Diffusion feeds every stripe of the AF split, so a single differing byte here
-// produces containers this library writes and cannot read -- and, worse,
-// containers cryptsetup cannot read either. Round-tripping through this package
-// would not catch it, because both directions would drift together.
-func TestDiffuseInPlaceMatchesTheAllocatingFormulation(t *testing.T) {
-	cases := []struct {
-		name      string
-		blockSize int
-		hashAlgo  string
-	}{
-		{"sha256 over a 32-byte block", 32, "sha256"},
-		{"sha256 over a 64-byte block", 64, "sha256"},
-		{"sha512 over a 64-byte block", 64, "sha512"},
-		{"sha512 over a 128-byte block", 128, "sha512"},
-		// A block that is NOT a multiple of the digest size exercises the
-		// remainder path, which is the one branch a real LUKS2 key size never
-		// reaches and therefore the one nothing else covers.
-		{"sha256 over a 40-byte block", 40, "sha256"},
-		{"sha512 over a 100-byte block", 100, "sha512"},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			hashFunc, err := getHashFunc(tc.hashAlgo)
-			if err != nil {
-				t.Fatalf("getHashFunc failed: %v", err)
-			}
-
-			seed := make([]byte, tc.blockSize)
-			if _, err := rand.Read(seed); err != nil {
-				t.Fatalf("failed to seed the block: %v", err)
-			}
-
-			got := append([]byte(nil), seed...)
-			want := append([]byte(nil), seed...)
-
-			diffuse(got, hashFunc, tc.blockSize)
-			legacyDiffuse(want, hashFunc, tc.blockSize)
-
-			if !bytes.Equal(got, want) {
-				t.Fatalf("in-place diffuse differs from the allocating one:\n got %x\nwant %x", got, want)
-			}
-			if bytes.Equal(got, seed) {
-				t.Fatal("diffuse left the block unchanged, so the comparison above proves nothing")
-			}
-		})
-	}
-}
-
-// legacyXtsSectors is the per-sector scratch-buffer loop that xtsSectors
-// replaced, kept as the oracle for the in-place rewrite.
-func legacyXtsSectors(dst, src, key []byte, sectorSize int, decrypt bool) error {
-	xtsCipher, err := xts.NewCipher(aes.NewCipher, key)
-	if err != nil {
-		return err
-	}
-
-	numSectors := (len(src) + sectorSize - 1) / sectorSize
-	for i := 0; i < numSectors; i++ {
-		start := i * sectorSize
-		end := start + sectorSize
-		if end > len(src) {
-			end = len(src)
-		}
-
-		sector := make([]byte, sectorSize)
-		copy(sector, src[start:end])
-
-		out := make([]byte, sectorSize)
-		if decrypt {
-			xtsCipher.Decrypt(out, sector, uint64(i))
-		} else {
-			xtsCipher.Encrypt(out, sector, uint64(i))
-		}
-
-		copy(dst[start:end], out[:end-start])
-	}
-
-	return nil
-}
-
-// TestXtsSectorsMatchesThePerSectorScratchFormulation pins the transform that
-// stopped copying every sector through two fresh heap buffers.
-//
-// The lengths deliberately include one that is NOT a whole number of sectors,
-// because that is the only case where the two formulations do anything
-// different: the rewrite transforms whole sectors between the caller's buffers
-// and keeps the zero-padded scratch path only for a trailing partial sector.
-func TestXtsSectorsMatchesThePerSectorScratchFormulation(t *testing.T) {
-	key := make([]byte, 64)
-	if _, err := rand.Read(key); err != nil {
-		t.Fatalf("failed to generate a key: %v", err)
-	}
-
-	for _, length := range []int{512, 1024, 4096, 100, 600, 1500} {
-		t.Run(formatSize(int64(length))+" bytes", func(t *testing.T) {
-			src := make([]byte, length)
-			if _, err := rand.Read(src); err != nil {
-				t.Fatalf("failed to generate plaintext: %v", err)
-			}
-
-			got := make([]byte, length)
-			want := make([]byte, length)
-
-			if err := xtsSectors(got, src, key, "aes", 512, false); err != nil {
-				t.Fatalf("xtsSectors failed: %v", err)
-			}
-			if err := legacyXtsSectors(want, src, key, 512, false); err != nil {
-				t.Fatalf("legacyXtsSectors failed: %v", err)
-			}
-			if !bytes.Equal(got, want) {
-				t.Fatal("encryption differs from the formulation it replaced")
-			}
-
-			// Decryption is checked against the same oracle rather than by
-			// round trip, because a round trip is not something this transform
-			// can promise for every length -- see
-			// TestKeyMaterialTransformDoesNotRoundTripAPartialSector.
-			gotBack := make([]byte, length)
-			wantBack := make([]byte, length)
-
-			if err := xtsSectors(gotBack, got, key, "aes", 512, true); err != nil {
-				t.Fatalf("xtsSectors decrypt failed: %v", err)
-			}
-			if err := legacyXtsSectors(wantBack, want, key, 512, true); err != nil {
-				t.Fatalf("legacyXtsSectors decrypt failed: %v", err)
-			}
-			if !bytes.Equal(gotBack, wantBack) {
-				t.Fatal("decryption differs from the formulation it replaced")
-			}
-
-			if length%512 == 0 && !bytes.Equal(gotBack, src) {
-				t.Fatal("a whole-sector round trip did not recover the plaintext")
-			}
-		})
-	}
-}
-
-// TestKeyMaterialTransformDoesNotRoundTripAPartialSector records a PRE-EXISTING
-// limitation rather than asserting a desirable property.
-//
-// A final sector shorter than 512 bytes is zero-padded to a whole sector before
-// the transform, in both directions. On the way out only the first n ciphertext
-// bytes are kept; on the way back those n bytes are padded with zeros again,
-// which is not the ciphertext that was produced. XTS decrypts each 16-byte
-// block independently, so everything past the last whole AES block inside that
-// final sector comes back as garbage.
-//
-// This is not reachable from any LUKS2 path: keyslot material is
-// keySize*stripes bytes -- 128000 or 256000 -- both whole numbers of sectors,
-// and unlockKeyslot rounds its decryption length UP to a sector boundary
-// precisely so it stays that way. It is pinned here so that the limitation is
-// recorded where someone reusing these helpers will meet it, and so that a
-// future fix is visible as a change in behavior rather than an accident.
-func TestKeyMaterialTransformDoesNotRoundTripAPartialSector(t *testing.T) {
-	key := mustRandom(t, 64)
-	src := mustRandom(t, 600) // one whole sector plus 88 bytes
-
-	enc, err := encryptKeyMaterial(src, key, "aes")
-	if err != nil {
-		t.Fatalf("encryptKeyMaterial failed: %v", err)
-	}
-
-	back, err := decryptKeyMaterial(enc, key, "aes", 512)
-	if err != nil {
-		t.Fatalf("decryptKeyMaterial failed: %v", err)
-	}
-
-	if bytes.Equal(back, src) {
-		t.Fatal("the partial-sector round trip now succeeds; this limitation was fixed and the note above is stale")
-	}
-
-	// The damage is confined to the tail of the final partial sector: whole AES
-	// blocks within it still decrypt correctly.
-	const intact = 512 + 80 // 88 bytes of tail, of which 5 whole 16-byte blocks
-	if !bytes.Equal(back[:intact], src[:intact]) {
-		t.Fatal("the corruption reaches further than the incomplete AES block at the end")
-	}
-}
-
-func TestXtsSectorsRefusesMismatchedBuffers(t *testing.T) {
-	key := make([]byte, 64)
-
-	if err := xtsSectors(make([]byte, 512), make([]byte, 1024), key, "aes", 512, false); err == nil {
-		t.Fatal("xtsSectors accepted buffers of different lengths")
-	}
-	if err := xtsSectors(make([]byte, 512), make([]byte, 512), key, "aes", 0, false); err == nil {
-		t.Fatal("xtsSectors accepted a zero sector size")
-	}
-	if err := xtsSectors(make([]byte, 512), make([]byte, 512), key, "twofish", 512, false); err == nil {
-		t.Fatal("xtsSectors accepted an unsupported cipher")
-	}
-}
 
 func TestDeriveKeyEnclaveAgreesWithTheUnprotectedDerivation(t *testing.T) {
 	iterations := 1000
@@ -381,9 +142,9 @@ func TestDeriveKeySecretRefusesADestroyedInput(t *testing.T) {
 		Iterations: &iterations,
 	}
 
-	source, err := randomSecret("master key", 64)
+	source, err := custody.Random("master key", 64, cryptoRand)
 	if err != nil {
-		t.Fatalf("randomSecret failed: %v", err)
+		t.Fatalf("custody.Random failed: %v", err)
 	}
 	mustDestroy(t, source)
 
@@ -394,176 +155,6 @@ func TestDeriveKeySecretRefusesADestroyedInput(t *testing.T) {
 	}
 	if !errors.Is(err, ErrProtectedMemory) {
 		t.Fatalf("error does not match ErrProtectedMemory: %v", err)
-	}
-}
-
-func TestAFSplitEnclaveRoundTripsWithoutLeavingProtectedMemory(t *testing.T) {
-	for _, hashAlgo := range []string{"sha256", "sha512"} {
-		t.Run(hashAlgo, func(t *testing.T) {
-			const stripes = 64
-
-			secret := make([]byte, 64)
-			if _, err := rand.Read(secret); err != nil {
-				t.Fatalf("failed to generate a secret: %v", err)
-			}
-
-			held := enclaveFrom(t, secret)
-
-			split, err := afSplitEnclave(held, stripes, hashAlgo)
-			if err != nil {
-				t.Fatalf("afSplitEnclave failed: %v", err)
-			}
-			defer mustDestroy(t, split)
-
-			if split.Size() != len(secret)*stripes {
-				t.Fatalf("split holds %d bytes, want %d", split.Size(), len(secret)*stripes)
-			}
-
-			// The stripes must not simply be the key repeated or appended: they
-			// are the key spread across random material, so no stripe-aligned
-			// window may equal it.
-			raw := openSecret(t, split)
-			for i := 0; i+len(secret) <= len(raw); i += len(secret) {
-				if bytes.Equal(raw[i:i+len(secret)], secret) {
-					t.Fatalf("the master key appears verbatim at stripe offset %d", i)
-				}
-			}
-
-			merged, err := afMergeEnclave(split, split.Size(), stripes, len(secret), hashAlgo)
-			if err != nil {
-				t.Fatalf("afMergeEnclave failed: %v", err)
-			}
-			defer mustDestroy(t, merged)
-
-			if !merged.EqualTo(secret) {
-				t.Fatal("the enclave AF round trip did not recover the secret")
-			}
-		})
-	}
-}
-
-// TestAFMergeEnclaveAgreesWithTheUnprotectedMerge pins afMergeEnclave against
-// afMergeInto -- the same merge core, run directly over plain slices -- over
-// the SAME stripes, which is the only way to compare them: a split draws
-// fresh randomness every time, so two splits of one key never match. This
-// proves the enclave plumbing (borrowSecret, the locked diffusion buffer)
-// does not change the answer relative to computing over ordinary memory.
-func TestAFMergeEnclaveAgreesWithTheUnprotectedMerge(t *testing.T) {
-	const (
-		stripes   = 32
-		blockSize = 64
-	)
-
-	stripeBytes := make([]byte, blockSize*stripes)
-	if _, err := rand.Read(stripeBytes); err != nil {
-		t.Fatalf("failed to generate stripes: %v", err)
-	}
-
-	hashFunc, err := getHashFunc("sha256")
-	if err != nil {
-		t.Fatalf("getHashFunc failed: %v", err)
-	}
-
-	want := make([]byte, blockSize)
-	buffer := make([]byte, blockSize)
-	defer clearBytes(buffer)
-	afMergeInto(want, stripeBytes, buffer, stripes, blockSize, hashFunc)
-	defer clearBytes(want)
-
-	held := enclaveFrom(t, stripeBytes)
-	got, err := afMergeEnclave(held, len(stripeBytes), stripes, blockSize, "sha256")
-	if err != nil {
-		t.Fatalf("afMergeEnclave failed: %v", err)
-	}
-	defer mustDestroy(t, got)
-
-	if !got.EqualTo(want) {
-		t.Fatal("the enclave merge and the plain merge disagree")
-	}
-}
-
-func TestAFMergeEnclaveRefusesASizeThatIsNotTheSplit(t *testing.T) {
-	held := enclaveFrom(t, make([]byte, 64*32))
-
-	// splitLen must be exactly blockSize*stripes; anything else would merge
-	// alignment padding into the key.
-	if merged, err := afMergeEnclave(held, 64*32, 32, 63, "sha256"); err == nil {
-		mustDestroy(t, merged)
-		t.Fatal("afMergeEnclave accepted a length that is not blockSize*stripes")
-	}
-	if merged, err := afMergeEnclave(held, 64*31, 32, 64, "sha256"); err == nil {
-		mustDestroy(t, merged)
-		t.Fatal("afMergeEnclave accepted a short split length")
-	}
-}
-
-func TestAFSplitEnclaveRefusesADestroyedSecret(t *testing.T) {
-	secret, err := randomSecret("master key", 64)
-	if err != nil {
-		t.Fatalf("randomSecret failed: %v", err)
-	}
-	mustDestroy(t, secret)
-
-	split, err := afSplitEnclave(secret, 16, "sha256")
-	if err == nil {
-		mustDestroy(t, split)
-		t.Fatal("afSplitEnclave split a destroyed secret")
-	}
-	if !errors.Is(err, ErrProtectedMemory) {
-		t.Fatalf("error does not match ErrProtectedMemory: %v", err)
-	}
-}
-
-func TestEncryptAndDecryptKeyMaterialEnclaveRoundTrip(t *testing.T) {
-	key := enclaveFrom(t, mustRandom(t, 64))
-
-	plaintext := mustRandom(t, 2048)
-	held := enclaveFrom(t, plaintext)
-
-	ciphertext, err := encryptKeyMaterialEnclave(held, key, "aes")
-	if err != nil {
-		t.Fatalf("encryptKeyMaterialEnclave failed: %v", err)
-	}
-	defer clearBytes(ciphertext)
-
-	if bytes.Equal(ciphertext, plaintext) {
-		t.Fatal("the ciphertext equals the plaintext")
-	}
-
-	recovered, err := decryptKeyMaterialEnclave(ciphertext, key, areaTransform{mode: areaModeXTS}, 512)
-	if err != nil {
-		t.Fatalf("decryptKeyMaterialEnclave failed: %v", err)
-	}
-	defer mustDestroy(t, recovered)
-
-	// The plaintext comes back INSIDE an enclave -- it is the AF-split master
-	// key on a real volume, so it must never be produced as a slice.
-	if !recovered.EqualTo(plaintext) {
-		t.Fatal("the enclave round trip did not recover the key material")
-	}
-}
-
-func TestDecryptKeyMaterialEnclaveReleasesOnFailure(t *testing.T) {
-	key := enclaveFrom(t, mustRandom(t, 64))
-
-	if _, err := decryptKeyMaterialEnclave(nil, key, areaTransform{mode: areaModeXTS}, 512); err == nil {
-		t.Fatal("decryptKeyMaterialEnclave accepted empty ciphertext")
-	}
-
-	before := lockedKiB(t)
-
-	// A key the transform cannot take -- 64 bytes for AES-CBC -- fails AFTER
-	// the destination enclave has been allocated, which is exactly the path on
-	// which a missed Destroy would leak locked pages that nobody holds a
-	// handle to any more.
-	for i := 0; i < 32; i++ {
-		if _, err := decryptKeyMaterialEnclave(make([]byte, 64<<10), key, areaTransform{mode: areaModeCBC, iv: areaIVESSIVSHA256}, 512); err == nil {
-			t.Fatal("decryptKeyMaterialEnclave accepted a key its transform cannot take")
-		}
-	}
-
-	if after := lockedKiB(t); after > before+lockedSlackKiB {
-		t.Fatalf("locked memory grew from %d KiB to %d KiB across 32 failed decryptions", before, after)
 	}
 }
 
@@ -767,8 +358,8 @@ func TestRecoveryKeyRenderingRoundTripsInEveryFormat(t *testing.T) {
 			}
 			defer key.Clear()
 
-			if key.Credential.Size() != formattedLen(32, format) {
-				t.Fatalf("credential holds %d bytes, want %d", key.Credential.Size(), formattedLen(32, format))
+			if key.Credential.Size() != recoverykey.Len(32, recoveryRenderings[format]) {
+				t.Fatalf("credential holds %d bytes, want %d", key.Credential.Size(), recoverykey.Len(32, recoveryRenderings[format]))
 			}
 
 			rendered, err := key.FormattedString()

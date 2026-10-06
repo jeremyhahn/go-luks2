@@ -16,6 +16,10 @@ import (
 
 	"github.com/anatol/devmapper.go"
 	"github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-luks2/internal/af"
+	"github.com/jeremyhahn/go-luks2/internal/clock"
+	"github.com/jeremyhahn/go-luks2/internal/errs"
+	"github.com/jeremyhahn/go-luks2/internal/secret"
 	"golang.org/x/sys/unix"
 )
 
@@ -53,7 +57,7 @@ func Unlock(device string, passphrase []byte, name string) error {
 			}
 			// The derived key is THIS package's, so releasing it destroys it,
 			// through the one place this package handles a release report.
-			return masterKey, func() { releaseSecret(masterKey) }, nil
+			return masterKey, func() { custody.Release(masterKey) }, nil
 		})
 }
 
@@ -84,7 +88,7 @@ func Unlock(device string, passphrase []byte, name string) error {
 // key gets.
 //
 // That check derives from the volume key through the DIGEST's PBKDF2, so
-// residual exposure 2 in enclave.go still applies to this path on its digest
+// residual exposure 2 in internal/secret still applies to this path on its digest
 // leg, once per digest tried. What this path removes is the keyslot leg: the
 // passphrase derivation and everything downstream of it.
 //
@@ -215,7 +219,7 @@ func unlockVolume(device, name string, validateCredential func() error,
 	// partly under the old one, split across several segments, and mapping any
 	// one segment with any one key returns garbage for the rest. Reads stay
 	// allowed (ReadHeader), so an operator can still see the state.
-	if err := metadata.checkRequirementsImplemented(); err != nil {
+	if err := metadata.CheckRequirementsImplemented(); err != nil {
 		return &UnlockError{Op: "activate the volume", Err: err,
 			Detail: "the container must be finished or recovered with the tool that set the requirement (for an interrupted reencryption: cryptsetup reencrypt --resume-only) before it can be activated"}
 	}
@@ -374,7 +378,7 @@ func mappingUUID(hdr *LUKS2BinaryHeader, name string) string {
 // unlockClock is the clock the activation's metadata lock waits on. A
 // variable so the unit tests can make a contended lock time out without
 // spending the wait; nothing else changes it.
-var unlockClock clock = systemClock{}
+var unlockClock clock.Clock = clock.System{}
 
 // readUnlockHeader is how the activation reads the header, under its read
 // lock. A variable so a test can see WHICH header the activation read -- the
@@ -430,7 +434,7 @@ func activationSegment(metadata *LUKS2Metadata) (string, *Segment, error) {
 		// package does, reads garbage, and every write through the mapping
 		// destroys the tags cryptsetup would check. It is refused before any
 		// key is derived; the container's keyslots stay manageable.
-		if _, integrity := segment.unknown["integrity"]; integrity {
+		if segment.HasIntegrity() {
 			return "", nil, &UnlockError{Op: "select the segment to activate", Err: ErrUnsupportedSegmentLayout,
 				Detail: segmentLabel(id) + " is authenticated by dm-integrity (cryptsetup --integrity), which this package does not implement; open it with cryptsetup"}
 		}
@@ -487,9 +491,15 @@ func Lock(name string) error {
 		return err
 	}); err != nil {
 		if isNoSuchDevice(err) {
-			return fmt.Errorf("%w: no device-mapper mapping named %q exists", ErrVolumeNotUnlocked, name)
+			return &errs.Error{
+				Kind:   ErrVolumeNotUnlocked,
+				Detail: fmt.Sprintf("no device-mapper mapping named %q exists", name),
+			}
 		}
-		return fmt.Errorf("cannot establish the identity of mapping %q, so it will not be removed: %w", name, err)
+		return &errs.Error{
+			Detail: fmt.Sprintf("cannot establish the identity of mapping %q, so it will not be removed", name),
+			Err:    err,
+		}
 	}
 
 	// A close rides out a transient hold rather than failing on it (#122).
@@ -529,10 +539,14 @@ func Lock(name string) error {
 	}
 	if err != nil {
 		if errors.Is(err, unix.EBUSY) {
-			return fmt.Errorf("%w: %q was still held after %d attempts over %v (%w); find the holder with `lsof /dev/mapper/%s`, `mount | grep %s` or `dmsetup info -c %s`, or schedule the removal for when it frees with `dmsetup remove --deferred %s`",
-				ErrMappingBusy, name, attempts, dmRemoveRetryBudget, err, name, name, name, name)
+			return &errs.Error{
+				Kind: ErrMappingBusy,
+				Detail: fmt.Sprintf("%q was still held after %d attempts over %v; find the holder with `lsof /dev/mapper/%s`, `mount | grep %s` or `dmsetup info -c %s`, or schedule the removal for when it frees with `dmsetup remove --deferred %s`",
+					name, attempts, dmRemoveRetryBudget, name, name, name, name),
+				Err: err,
+			}
 		}
-		return fmt.Errorf("failed to remove device-mapper: %w", err)
+		return &errs.Error{Detail: "failed to remove device-mapper", Err: err}
 	}
 
 	// Clean up device nodes that we may have created. This is the same cleanup
@@ -611,7 +625,7 @@ func unlockLoadTable(name, uuid, backend string, params cryptSegmentParams, mast
 				return &UnlockError{Op: "unlock", Err: ErrVolumeAlreadyUnlocked,
 					Detail: fmt.Sprintf("the device-mapper name %q was taken by another activation (%v) - close it first with: luks2 close %s", name, createErr, name)}
 			}
-			return &detailError{Detail: "failed to create device-mapper", Err: createErr}
+			return &errs.Error{Detail: "failed to create device-mapper", Err: createErr}
 		}
 		created = true
 
@@ -621,7 +635,7 @@ func unlockLoadTable(name, uuid, backend string, params cryptSegmentParams, mast
 		// could not be removed is neither of those things.
 		var loadErr, releaseErr error
 
-		borrowErr := borrowSecret("master key", masterKey, func(key []byte) error {
+		borrowErr := secret.Borrow("master key", masterKey, func(key []byte) error {
 			// Note: The devmapper library expects Length and BackendOffset in
 			// BYTES (it converts them to sectors internally).
 			table := devmapper.CryptTable{
@@ -632,12 +646,12 @@ func unlockLoadTable(name, uuid, backend string, params cryptSegmentParams, mast
 				BackendOffset: backendOffset,
 				// Validated at the header read boundary and converted by
 				// cryptTableParams (#40).
-				Encryption: params.encryption,
-				IVTweak:    params.ivTweak,
-				SectorSize: params.sectorSize,
+				Encryption: params.Encryption,
+				IVTweak:    params.IVTweak,
+				SectorSize: params.SectorSize,
 				// The header's persistent performance flags, as cryptsetup
 				// passes them; see persistentCryptFlags.
-				Flags: params.flags,
+				Flags: params.Flags,
 			}
 
 			// Key is deliberately NOT set, here or anywhere else in this
@@ -667,7 +681,7 @@ func unlockLoadTable(name, uuid, backend string, params cryptSegmentParams, mast
 			return releaseErr
 		}
 		if loadErr != nil {
-			return errors.Join(&detailError{Detail: "failed to create device-mapper", Err: loadErr}, releaseErr)
+			return errors.Join(&errs.Error{Detail: "failed to create device-mapper", Err: loadErr}, releaseErr)
 		}
 		return errors.Join(borrowErr, releaseErr)
 	})
@@ -704,7 +718,7 @@ func confirmCreated(name, uuid string, devNo uint64) error {
 		return &VolumeError{Volume: name, Op: "confirm the identity of the target created for", Err: err}
 	}
 	if current.UUID != uuid || current.DevNo != devNo {
-		return &VolumeError{Volume: name, Op: "activate", Err: &detailError{
+		return &VolumeError{Volume: name, Op: "activate", Err: &errs.Error{
 			Detail: "the device-mapper target this unlock created was replaced before it was activated"}}
 	}
 	return nil
@@ -721,7 +735,7 @@ func confirmCreated(name, uuid string, devNo uint64) error {
 // passphrase-derived key, the decrypted AF stripes, the merged key itself --
 // lives in an enclave and is destroyed on every path out, success or failure.
 // What is deliberately not enclaved is the ciphertext read off the device,
-// which is already on the device; see decryptKeyMaterialEnclave.
+// which is already on the device; see areacipher.Transform.DecryptEnclave.
 func unlockKeyslot(device string, keyslotID string, passphrase []byte, keyslot *Keyslot, digests map[string]*Digest) (*enclave.MemoryEnclave, error) {
 	f, err := openDevice("read the keyslot area", device, os.O_RDONLY)
 	if err != nil {
@@ -768,7 +782,7 @@ func unlockKeyslotFrom(dev io.ReaderAt, keyslotID string, passphrase []byte, key
 	if err != nil {
 		return nil, err
 	}
-	defer releaseSecret(passphraseKey)
+	defer custody.Release(passphraseKey)
 
 	return recoverKeyslotKey(dev, keyslotID, keyslot, plan, passphraseKey, digests)
 }
@@ -804,26 +818,25 @@ func recoverKeyslotKey(dev io.ReaderAt, keyslotID string, keyslot *Keyslot, plan
 	//
 	// The screen computed all of it, including that the rounded length fits the
 	// area; nothing here recomputes or re-checks any of it.
-	decryptedKeyMaterial, err := decryptKeyMaterialEnclave(
-		encryptedKeyMaterial[:plan.decryptLen], passphraseKey, plan.area, keyslotSectorSize)
+	decryptedKeyMaterial, err := plan.area.DecryptEnclave(custody, encryptedKeyMaterial[:plan.decryptLen], passphraseKey)
 	if err != nil {
 		return nil, err
 	}
-	defer releaseSecret(decryptedKeyMaterial)
+	defer custody.Release(decryptedKeyMaterial)
 
 	if decryptedKeyMaterial.Size() < plan.afSplitSize {
 		return nil, &UnlockError{Op: "decrypt keyslot " + keyslotID,
 			Detail: fmt.Sprintf("decrypted data too small: got %d, need %d", decryptedKeyMaterial.Size(), plan.afSplitSize)}
 	}
 
-	masterKey, err := afMergeEnclave(decryptedKeyMaterial, plan.afSplitSize, keyslot.AF.Stripes, keyslot.KeySize, keyslot.AF.Hash)
+	masterKey, err := afCodec().Merge(decryptedKeyMaterial, keyslot.KeySize, af.Params{Stripes: keyslot.AF.Stripes, Hash: keyslot.AF.Hash})
 	if err != nil {
 		return nil, err
 	}
 
 	// Verify master key using the digests that authenticate THIS keyslot
 	if err := verifyMasterKey(masterKey, keyslotID, digests); err != nil {
-		releaseSecret(masterKey)
+		custody.Release(masterKey)
 		return nil, err
 	}
 
@@ -1070,7 +1083,7 @@ func evaluateDigest(masterKey *enclave.MemoryEnclave, digest *Digest) (evaluated
 	// It does leave protected memory once inside the KDF, though: pbkdf2
 	// stringifies its password argument, so every digest tried here puts
 	// the master key into an unwipeable Go string. See exposure 2 in
-	// enclave.go. Trying N digests materializes it N times.
+	// internal/secret. Trying N digests materializes it N times.
 	derived, err := deriveKeySecret(masterKey, kdf, len(expected))
 	if err != nil {
 		return false, false // e.g. non-approved KDF in FIPS mode (#58)
@@ -1083,6 +1096,6 @@ func evaluateDigest(masterKey *enclave.MemoryEnclave, digest *Digest) (evaluated
 	// derived one is destroyed before returning, so a caller trying several
 	// digests never holds more than one locked region for them at a time.
 	matched = derived.EqualTo(expected)
-	releaseSecret(derived)
+	custody.Release(derived)
 	return true, matched
 }
