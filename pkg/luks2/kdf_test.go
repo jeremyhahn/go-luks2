@@ -12,6 +12,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/fips"
 )
 
 // TestDeriveKeyPBKDF2 tests PBKDF2 key derivation
@@ -20,7 +22,7 @@ func TestDeriveKeyPBKDF2(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       saltB64,
@@ -66,7 +68,7 @@ func TestDeriveKeyPBKDF2SHA512(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:       "pbkdf2",
 		Hash:       "sha512",
 		Salt:       saltB64,
@@ -96,7 +98,7 @@ func TestDeriveKeyArgon2i(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:   "argon2i",
 		Salt:   saltB64,
 		Time:   &time,
@@ -154,7 +156,7 @@ func TestDeriveKeyArgon2id(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:   "argon2id",
 		Salt:   saltB64,
 		Time:   &time,
@@ -207,7 +209,7 @@ func TestDeriveKeyInvalidType(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type: "unsupported",
 		Salt: saltB64,
 	}
@@ -224,7 +226,7 @@ func TestDeriveKeyInvalidType(t *testing.T) {
 // TestDeriveKeyInvalidSalt tests error handling for invalid base64 salt
 func TestDeriveKeyInvalidSalt(t *testing.T) {
 	iterations := 1000
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       "!!!invalid-base64!!!",
@@ -245,7 +247,7 @@ func TestDerivePBKDF2MissingIterations(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       saltB64,
@@ -267,7 +269,7 @@ func TestDerivePBKDF2UnsupportedHash(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:       "pbkdf2",
 		Hash:       "md5", // Unsupported
 		Salt:       saltB64,
@@ -290,7 +292,7 @@ func TestDeriveArgon2iMissingTime(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:   "argon2i",
 		Salt:   saltB64,
 		Time:   nil, // Missing
@@ -323,7 +325,7 @@ func TestDeriveArgon2iMissingMemory(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:   "argon2i",
 		Salt:   saltB64,
 		Time:   &time,
@@ -356,7 +358,7 @@ func TestDeriveArgon2iMissingCPUs(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:   "argon2i",
 		Salt:   saltB64,
 		Time:   &time,
@@ -415,7 +417,7 @@ func TestDeriveArgon2idMissingParams(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			kdf := &KDF{
+			kdf := &rawKDF{
 				Type:   "argon2id",
 				Salt:   saltB64,
 				Time:   tt.time,
@@ -443,7 +445,7 @@ func TestDeriveArgon2idMissingParams(t *testing.T) {
 func TestBenchmarkPBKDF2SHA256(t *testing.T) {
 	defer parallel(t)()
 
-	iterations, err := BenchmarkPBKDF2("sha256", 32, 100)
+	iterations, err := benchmarkPBKDF2("sha256", 32, 100)
 	if err != nil {
 		t.Fatalf("BenchmarkPBKDF2 failed: %v", err)
 	}
@@ -457,7 +459,7 @@ func TestBenchmarkPBKDF2SHA256(t *testing.T) {
 func TestBenchmarkPBKDF2SHA512(t *testing.T) {
 	defer parallel(t)()
 
-	iterations, err := BenchmarkPBKDF2("sha512", 64, 100)
+	iterations, err := benchmarkPBKDF2("sha512", 64, 100)
 	if err != nil {
 		t.Fatalf("BenchmarkPBKDF2 failed: %v", err)
 	}
@@ -469,7 +471,7 @@ func TestBenchmarkPBKDF2SHA512(t *testing.T) {
 
 // TestBenchmarkPBKDF2InvalidHash tests error handling for unsupported hash
 func TestBenchmarkPBKDF2InvalidHash(t *testing.T) {
-	_, err := BenchmarkPBKDF2("md5", 32, 100)
+	_, err := benchmarkPBKDF2("md5", 32, 100)
 	if err == nil {
 		t.Fatal("Expected error for unsupported hash algorithm")
 	}
@@ -489,7 +491,7 @@ func TestBenchmarkPBKDF2MinimumIterations(t *testing.T) {
 
 	const targetMs = 1
 
-	iterations, err := BenchmarkPBKDF2("sha256", 32, targetMs)
+	iterations, err := benchmarkPBKDF2("sha256", 32, targetMs)
 	if err != nil {
 		t.Fatalf("BenchmarkPBKDF2 failed: %v", err)
 	}
@@ -506,11 +508,11 @@ func TestBenchmarkPBKDF2MinimumIterations(t *testing.T) {
 func TestCreateKDFPBKDF2(t *testing.T) {
 	defer parallel(t)()
 
-	opts := FormatOptions{
+	opts := formatOptionsForTest{
 		KDFType: "pbkdf2",
 	}
 
-	kdf, err := CreateKDF(opts, 32)
+	kdf, err := createKDFStrict(opts, 32)
 	if err != nil {
 		t.Fatalf("CreateKDF failed: %v", err)
 	}
@@ -546,12 +548,12 @@ func TestCreateKDFPBKDF2(t *testing.T) {
 func TestCreateKDFPBKDF2CustomHash(t *testing.T) {
 	defer parallel(t)()
 
-	opts := FormatOptions{
+	opts := formatOptionsForTest{
 		KDFType:  "pbkdf2",
 		HashAlgo: "sha512",
 	}
 
-	kdf, err := CreateKDF(opts, 64)
+	kdf, err := createKDFStrict(opts, 64)
 	if err != nil {
 		t.Fatalf("CreateKDF failed: %v", err)
 	}
@@ -565,12 +567,12 @@ func TestCreateKDFPBKDF2CustomHash(t *testing.T) {
 func TestCreateKDFPBKDF2CustomIterTime(t *testing.T) {
 	defer parallel(t)()
 
-	opts := FormatOptions{
+	opts := formatOptionsForTest{
 		KDFType:       "pbkdf2",
 		PBKDFIterTime: 100, // Short time for fast test
 	}
 
-	kdf, err := CreateKDF(opts, 32)
+	kdf, err := createKDFStrict(opts, 32)
 	if err != nil {
 		t.Fatalf("CreateKDF failed: %v", err)
 	}
@@ -587,18 +589,18 @@ func TestCreateKDFPBKDF2CustomIterTime(t *testing.T) {
 
 // TestCreateKDFArgon2i tests creating an Argon2i KDF
 func TestCreateKDFArgon2i(t *testing.T) {
-	opts := FormatOptions{
+	opts := formatOptionsForTest{
 		KDFType: "argon2i",
 	}
 
 	if fips140.Enabled() {
-		if _, err := CreateKDF(opts, 32); !errors.Is(err, ErrFIPSNotApproved) {
+		if _, err := createKDFStrict(opts, 32); !errors.Is(err, ErrFIPSNotApproved) {
 			t.Fatalf("CreateKDF with argon2i in FIPS mode: got error %v, want ErrFIPSNotApproved", err)
 		}
 		return
 	}
 
-	kdf, err := CreateKDF(opts, 32)
+	kdf, err := createKDFStrict(opts, 32)
 	if err != nil {
 		t.Fatalf("CreateKDF failed: %v", err)
 	}
@@ -626,18 +628,18 @@ func TestCreateKDFArgon2i(t *testing.T) {
 
 // TestCreateKDFArgon2id tests creating an Argon2id KDF with defaults
 func TestCreateKDFArgon2id(t *testing.T) {
-	opts := FormatOptions{
+	opts := formatOptionsForTest{
 		KDFType: "argon2id",
 	}
 
 	if fips140.Enabled() {
-		if _, err := CreateKDF(opts, 32); !errors.Is(err, ErrFIPSNotApproved) {
+		if _, err := createKDFStrict(opts, 32); !errors.Is(err, ErrFIPSNotApproved) {
 			t.Fatalf("CreateKDF with argon2id in FIPS mode: got error %v, want ErrFIPSNotApproved", err)
 		}
 		return
 	}
 
-	kdf, err := CreateKDF(opts, 32)
+	kdf, err := createKDFStrict(opts, 32)
 	if err != nil {
 		t.Fatalf("CreateKDF failed: %v", err)
 	}
@@ -665,7 +667,7 @@ func TestCreateKDFArgon2id(t *testing.T) {
 
 // TestCreateKDFArgon2idCustomParams tests creating Argon2id with custom params
 func TestCreateKDFArgon2idCustomParams(t *testing.T) {
-	opts := FormatOptions{
+	opts := formatOptionsForTest{
 		KDFType:        "argon2id",
 		Argon2Time:     2,
 		Argon2Memory:   65536, // 64 MB
@@ -673,13 +675,13 @@ func TestCreateKDFArgon2idCustomParams(t *testing.T) {
 	}
 
 	if fips140.Enabled() {
-		if _, err := CreateKDF(opts, 32); !errors.Is(err, ErrFIPSNotApproved) {
+		if _, err := createKDFStrict(opts, 32); !errors.Is(err, ErrFIPSNotApproved) {
 			t.Fatalf("CreateKDF with argon2id in FIPS mode: got error %v, want ErrFIPSNotApproved", err)
 		}
 		return
 	}
 
-	kdf, err := CreateKDF(opts, 32)
+	kdf, err := createKDFStrict(opts, 32)
 	if err != nil {
 		t.Fatalf("CreateKDF failed: %v", err)
 	}
@@ -699,11 +701,11 @@ func TestCreateKDFArgon2idCustomParams(t *testing.T) {
 
 // TestCreateKDFInvalidType tests error handling for unsupported KDF type
 func TestCreateKDFInvalidType(t *testing.T) {
-	opts := FormatOptions{
+	opts := formatOptionsForTest{
 		KDFType: "unsupported",
 	}
 
-	_, err := CreateKDF(opts, 32)
+	_, err := createKDFStrict(opts, 32)
 	if err == nil {
 		t.Fatal("Expected error for unsupported KDF type")
 	}
@@ -711,12 +713,12 @@ func TestCreateKDFInvalidType(t *testing.T) {
 
 // TestCreateKDFInvalidHashAlgo tests error handling for invalid hash in PBKDF2
 func TestCreateKDFInvalidHashAlgo(t *testing.T) {
-	opts := FormatOptions{
+	opts := formatOptionsForTest{
 		KDFType:  "pbkdf2",
 		HashAlgo: "md5", // Invalid
 	}
 
-	_, err := CreateKDF(opts, 32)
+	_, err := createKDFStrict(opts, 32)
 	if err == nil {
 		t.Fatal("Expected error for unsupported hash algorithm")
 	}
@@ -728,7 +730,7 @@ func TestDeriveKeyDifferentKeySizes(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       saltB64,
@@ -764,7 +766,7 @@ func TestArgon2iVsArgon2id(t *testing.T) {
 	passphrase := []byte("testpassphrase")
 	keySize := 32
 
-	kdfI := &KDF{
+	kdfI := &rawKDF{
 		Type:   "argon2i",
 		Salt:   saltB64,
 		Time:   &time,
@@ -772,7 +774,7 @@ func TestArgon2iVsArgon2id(t *testing.T) {
 		CPUs:   &cpus,
 	}
 
-	kdfID := &KDF{
+	kdfID := &rawKDF{
 		Type:   "argon2id",
 		Salt:   saltB64,
 		Time:   &time,
@@ -781,7 +783,7 @@ func TestArgon2iVsArgon2id(t *testing.T) {
 	}
 
 	if fips140.Enabled() {
-		for _, kdf := range []*KDF{kdfI, kdfID} {
+		for _, kdf := range []*rawKDF{kdfI, kdfID} {
 			if _, err := deriveKeyPlain(passphrase, kdf, keySize); !errors.Is(err, ErrFIPSNotApproved) {
 				t.Fatalf("deriveKeyPlain with %s in FIPS mode: got error %v, want ErrFIPSNotApproved", kdf.Type, err)
 			}
@@ -815,19 +817,52 @@ func TestKDFTypeConstants(t *testing.T) {
 		constant string
 		expected string
 	}{
-		{"PBKDF2", KDFTypePBKDF2, "pbkdf2"},
-		{"PBKDF2-SHA1", KDFTypePBKDF2SHA1, "pbkdf2-sha1"},
-		{"PBKDF2-SHA256", KDFTypePBKDF2SHA256, "pbkdf2-sha256"},
-		{"PBKDF2-SHA384", KDFTypePBKDF2SHA384, "pbkdf2-sha384"},
-		{"PBKDF2-SHA512", KDFTypePBKDF2SHA512, "pbkdf2-sha512"},
-		{"Argon2i", KDFTypeArgon2i, "argon2i"},
-		{"Argon2id", KDFTypeArgon2id, "argon2id"},
+		{"PBKDF2", kdfTypePBKDF2, "pbkdf2"},
+		{"PBKDF2-SHA1", kdfTypePBKDF2SHA1, "pbkdf2-sha1"},
+		{"PBKDF2-SHA256", kdfTypePBKDF2SHA256, "pbkdf2-sha256"},
+		{"PBKDF2-SHA384", kdfTypePBKDF2SHA384, "pbkdf2-sha384"},
+		{"PBKDF2-SHA512", kdfTypePBKDF2SHA512, "pbkdf2-sha512"},
+		{"Argon2i", kdfTypeArgon2i, "argon2i"},
+		{"Argon2id", kdfTypeArgon2id, "argon2id"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.constant != tt.expected {
 				t.Errorf("Expected %s, got %s", tt.expected, tt.constant)
+			}
+		})
+	}
+}
+
+func TestKDFParamsValidateAcceptsEveryKnownType(t *testing.T) {
+	for _, typ := range []KDFType{"", KDFPBKDF2, KDFArgon2id, KDFArgon2i} {
+		if err := (KDFParams{Type: typ}).Validate(); err != nil {
+			t.Errorf("Validate() for Type %q = %v, want nil", typ, err)
+		}
+	}
+}
+
+func TestKDFParamsValidateRejectsAnUnknownType(t *testing.T) {
+	if err := (KDFParams{Type: "scrypt"}).Validate(); !errors.Is(err, ErrUnsupported) {
+		t.Errorf("Validate() for an unknown type = %v, want ErrUnsupported", err)
+	}
+}
+
+func TestKDFParamsValidateRejectsANegativeCostParameter(t *testing.T) {
+	tests := []struct {
+		name string
+		p    KDFParams
+	}{
+		{"negative Iterations", KDFParams{Iterations: -1}},
+		{"negative Time", KDFParams{Time: -1}},
+		{"negative MemoryKiB", KDFParams{MemoryKiB: -1}},
+		{"negative Parallel", KDFParams{Parallel: -1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.p.Validate(); err == nil {
+				t.Error("Validate() = nil, want an error for a negative cost parameter")
 			}
 		})
 	}
@@ -841,10 +876,10 @@ func TestIsFIPSCompliantKDF(t *testing.T) {
 		description string
 	}{
 		// FIPS-compliant types
-		{KDFTypePBKDF2, true, "pbkdf2 should be FIPS compliant"},
-		{KDFTypePBKDF2SHA256, true, "pbkdf2-sha256 should be FIPS compliant"},
-		{KDFTypePBKDF2SHA384, true, "pbkdf2-sha384 should be FIPS compliant"},
-		{KDFTypePBKDF2SHA512, true, "pbkdf2-sha512 should be FIPS compliant"},
+		{kdfTypePBKDF2, true, "pbkdf2 should be FIPS compliant"},
+		{kdfTypePBKDF2SHA256, true, "pbkdf2-sha256 should be FIPS compliant"},
+		{kdfTypePBKDF2SHA384, true, "pbkdf2-sha384 should be FIPS compliant"},
+		{kdfTypePBKDF2SHA512, true, "pbkdf2-sha512 should be FIPS compliant"},
 		// Case insensitivity
 		{"PBKDF2", true, "uppercase PBKDF2 should be FIPS compliant"},
 		{"PBKDF2-SHA256", true, "uppercase PBKDF2-SHA256 should be FIPS compliant"},
@@ -852,10 +887,10 @@ func TestIsFIPSCompliantKDF(t *testing.T) {
 		// Non-FIPS compliant types
 		// PBKDF2-HMAC-SHA1 is rejected by the Go Cryptographic Module, which
 		// permits PBKDF2 only with SHA-2/SHA-3 (docs/FIPS.md).
-		{KDFTypePBKDF2SHA1, false, "pbkdf2-sha1 should NOT be FIPS compliant"},
+		{kdfTypePBKDF2SHA1, false, "pbkdf2-sha1 should NOT be FIPS compliant"},
 		{"PBKDF2-SHA1", false, "uppercase PBKDF2-SHA1 should NOT be FIPS compliant"},
-		{KDFTypeArgon2i, false, "argon2i should NOT be FIPS compliant"},
-		{KDFTypeArgon2id, false, "argon2id should NOT be FIPS compliant"},
+		{kdfTypeArgon2i, false, "argon2i should NOT be FIPS compliant"},
+		{kdfTypeArgon2id, false, "argon2id should NOT be FIPS compliant"},
 		{"ARGON2ID", false, "uppercase argon2id should NOT be FIPS compliant"},
 		// Invalid types
 		{"scrypt", false, "scrypt should NOT be FIPS compliant"},
@@ -866,7 +901,7 @@ func TestIsFIPSCompliantKDF(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.description, func(t *testing.T) {
-			result := IsFIPSCompliantKDF(tt.kdfType)
+			result := isFIPSCompliantKDF(tt.kdfType)
 			if result != tt.expectFIPS {
 				t.Errorf("IsFIPSCompliantKDF(%q) = %v, expected %v", tt.kdfType, result, tt.expectFIPS)
 			}
@@ -906,13 +941,13 @@ func TestIsPBKDF2Type(t *testing.T) {
 		kdfType  string
 		expected bool
 	}{
-		{KDFTypePBKDF2, true},
-		{KDFTypePBKDF2SHA1, true},
-		{KDFTypePBKDF2SHA256, true},
-		{KDFTypePBKDF2SHA384, true},
-		{KDFTypePBKDF2SHA512, true},
-		{KDFTypeArgon2i, false},
-		{KDFTypeArgon2id, false},
+		{kdfTypePBKDF2, true},
+		{kdfTypePBKDF2SHA1, true},
+		{kdfTypePBKDF2SHA256, true},
+		{kdfTypePBKDF2SHA384, true},
+		{kdfTypePBKDF2SHA512, true},
+		{kdfTypeArgon2i, false},
+		{kdfTypeArgon2id, false},
 		{"scrypt", false},
 		{"", false},
 	}
@@ -935,15 +970,15 @@ func TestGetHashAlgoForKDFType(t *testing.T) {
 		expected     string
 	}{
 		// With override
-		{KDFTypePBKDF2, "sha512", "sha512"},
-		{KDFTypePBKDF2SHA256, "sha512", "sha512"}, // Override takes precedence
+		{kdfTypePBKDF2, "sha512", "sha512"},
+		{kdfTypePBKDF2SHA256, "sha512", "sha512"}, // Override takes precedence
 		// From KDF type alias
-		{KDFTypePBKDF2SHA1, "", "sha1"},
-		{KDFTypePBKDF2SHA256, "", "sha256"},
-		{KDFTypePBKDF2SHA384, "", "sha384"},
-		{KDFTypePBKDF2SHA512, "", "sha512"},
+		{kdfTypePBKDF2SHA1, "", "sha1"},
+		{kdfTypePBKDF2SHA256, "", "sha256"},
+		{kdfTypePBKDF2SHA384, "", "sha384"},
+		{kdfTypePBKDF2SHA512, "", "sha512"},
 		// Default for plain pbkdf2
-		{KDFTypePBKDF2, "", "sha256"},
+		{kdfTypePBKDF2, "", "sha256"},
 		{"unknown", "", "sha256"}, // Default fallback
 	}
 
@@ -972,7 +1007,7 @@ func TestDeriveKeyPBKDF2SHA1(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:       "pbkdf2",
 		Hash:       "sha1",
 		Salt:       saltB64,
@@ -1015,7 +1050,7 @@ func TestDeriveKeyPBKDF2SHA384(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:       "pbkdf2",
 		Hash:       "sha384",
 		Salt:       saltB64,
@@ -1051,13 +1086,13 @@ func TestBenchmarkPBKDF2SHA1(t *testing.T) {
 	defer parallel(t)()
 
 	if fips140.Enabled() {
-		if _, err := BenchmarkPBKDF2("sha1", 20, 100); !errors.Is(err, ErrFIPSNotApproved) {
+		if _, err := benchmarkPBKDF2("sha1", 20, 100); !errors.Is(err, ErrFIPSNotApproved) {
 			t.Fatalf("BenchmarkPBKDF2 with SHA-1 in FIPS mode: got error %v, want ErrFIPSNotApproved", err)
 		}
 		return
 	}
 
-	iterations, err := BenchmarkPBKDF2("sha1", 20, 100)
+	iterations, err := benchmarkPBKDF2("sha1", 20, 100)
 	if err != nil {
 		t.Fatalf("BenchmarkPBKDF2 with SHA-1 failed: %v", err)
 	}
@@ -1071,7 +1106,7 @@ func TestBenchmarkPBKDF2SHA1(t *testing.T) {
 func TestBenchmarkPBKDF2SHA384(t *testing.T) {
 	defer parallel(t)()
 
-	iterations, err := BenchmarkPBKDF2("sha384", 48, 100)
+	iterations, err := benchmarkPBKDF2("sha384", 48, 100)
 	if err != nil {
 		t.Fatalf("BenchmarkPBKDF2 with SHA-384 failed: %v", err)
 	}
@@ -1082,15 +1117,15 @@ func TestBenchmarkPBKDF2SHA384(t *testing.T) {
 }
 
 // TestCreateKDFPBKDF2SHA1Alias: the pbkdf2-sha1 alias creates nothing (#239,
-// BREAKING). It is refused with ErrSHA1NotWritten, and with ErrUnsupportedKDF
+// BREAKING). It is refused with ErrInvalidArgument, and with ErrUnsupported
 // for callers that branched on that, in every mode -- before FIPS policy is
 // consulted, because no process may write it.
 func TestCreateKDFPBKDF2SHA1Alias(t *testing.T) {
 	defer parallel(t)()
 
-	kdf, err := CreateKDF(FormatOptions{KDFType: KDFTypePBKDF2SHA1, PBKDFIterTime: 100}, 20)
-	if kdf != nil || !errors.Is(err, ErrSHA1NotWritten) || !errors.Is(err, ErrUnsupportedKDF) {
-		t.Fatalf("CreateKDF with pbkdf2-sha1: got %+v, %v; want ErrSHA1NotWritten and ErrUnsupportedKDF", kdf, err)
+	kdf, err := createKDFStrict(formatOptionsForTest{KDFType: kdfTypePBKDF2SHA1, PBKDFIterTime: 100}, 20)
+	if kdf != nil || !errors.Is(err, ErrInvalidArgument) || !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("CreateKDF with pbkdf2-sha1: got %+v, %v; want ErrInvalidArgument and ErrUnsupported", kdf, err)
 	}
 }
 
@@ -1098,18 +1133,18 @@ func TestCreateKDFPBKDF2SHA1Alias(t *testing.T) {
 func TestCreateKDFPBKDF2SHA256Alias(t *testing.T) {
 	defer parallel(t)()
 
-	opts := FormatOptions{
-		KDFType:       KDFTypePBKDF2SHA256,
+	opts := formatOptionsForTest{
+		KDFType:       kdfTypePBKDF2SHA256,
 		PBKDFIterTime: 100,
 	}
 
-	kdf, err := CreateKDF(opts, 32)
+	kdf, err := createKDFStrict(opts, 32)
 	if err != nil {
 		t.Fatalf("CreateKDF with pbkdf2-sha256 failed: %v", err)
 	}
 
-	if kdf.Type != KDFTypePBKDF2 {
-		t.Fatalf("Expected type %s, got %s", KDFTypePBKDF2, kdf.Type)
+	if kdf.Type != kdfTypePBKDF2 {
+		t.Fatalf("Expected type %s, got %s", kdfTypePBKDF2, kdf.Type)
 	}
 
 	if kdf.Hash != "sha256" {
@@ -1121,18 +1156,18 @@ func TestCreateKDFPBKDF2SHA256Alias(t *testing.T) {
 func TestCreateKDFPBKDF2SHA384Alias(t *testing.T) {
 	defer parallel(t)()
 
-	opts := FormatOptions{
-		KDFType:       KDFTypePBKDF2SHA384,
+	opts := formatOptionsForTest{
+		KDFType:       kdfTypePBKDF2SHA384,
 		PBKDFIterTime: 100,
 	}
 
-	kdf, err := CreateKDF(opts, 48)
+	kdf, err := createKDFStrict(opts, 48)
 	if err != nil {
 		t.Fatalf("CreateKDF with pbkdf2-sha384 failed: %v", err)
 	}
 
-	if kdf.Type != KDFTypePBKDF2 {
-		t.Fatalf("Expected type %s, got %s", KDFTypePBKDF2, kdf.Type)
+	if kdf.Type != kdfTypePBKDF2 {
+		t.Fatalf("Expected type %s, got %s", kdfTypePBKDF2, kdf.Type)
 	}
 
 	if kdf.Hash != "sha384" {
@@ -1144,18 +1179,18 @@ func TestCreateKDFPBKDF2SHA384Alias(t *testing.T) {
 func TestCreateKDFPBKDF2SHA512Alias(t *testing.T) {
 	defer parallel(t)()
 
-	opts := FormatOptions{
-		KDFType:       KDFTypePBKDF2SHA512,
+	opts := formatOptionsForTest{
+		KDFType:       kdfTypePBKDF2SHA512,
 		PBKDFIterTime: 100,
 	}
 
-	kdf, err := CreateKDF(opts, 64)
+	kdf, err := createKDFStrict(opts, 64)
 	if err != nil {
 		t.Fatalf("CreateKDF with pbkdf2-sha512 failed: %v", err)
 	}
 
-	if kdf.Type != KDFTypePBKDF2 {
-		t.Fatalf("Expected type %s, got %s", KDFTypePBKDF2, kdf.Type)
+	if kdf.Type != kdfTypePBKDF2 {
+		t.Fatalf("Expected type %s, got %s", kdfTypePBKDF2, kdf.Type)
 	}
 
 	if kdf.Hash != "sha512" {
@@ -1176,12 +1211,12 @@ func TestCreateKDFCaseInsensitive(t *testing.T) {
 
 	for _, kdfType := range tests {
 		t.Run(kdfType, func(t *testing.T) {
-			opts := FormatOptions{
+			opts := formatOptionsForTest{
 				KDFType:       kdfType,
 				PBKDFIterTime: 100,
 			}
 
-			kdf, err := CreateKDF(opts, 32)
+			kdf, err := createKDFStrict(opts, 32)
 			if err != nil {
 				t.Fatalf("CreateKDF with %s failed: %v", kdfType, err)
 			}
@@ -1197,13 +1232,13 @@ func TestCreateKDFCaseInsensitive(t *testing.T) {
 func TestCreateKDFWithHashOverride(t *testing.T) {
 	defer parallel(t)()
 
-	opts := FormatOptions{
-		KDFType:       KDFTypePBKDF2SHA256, // Would normally use sha256
+	opts := formatOptionsForTest{
+		KDFType:       kdfTypePBKDF2SHA256, // Would normally use sha256
 		HashAlgo:      "sha512",            // Override to sha512
 		PBKDFIterTime: 100,
 	}
 
-	kdf, err := CreateKDF(opts, 64)
+	kdf, err := createKDFStrict(opts, 64)
 	if err != nil {
 		t.Fatalf("CreateKDF with hash override failed: %v", err)
 	}
@@ -1229,7 +1264,7 @@ func TestPBKDF2HashFunctionsDifferent(t *testing.T) {
 	keys := make(map[string][]byte)
 
 	for _, hashAlgo := range hashAlgos {
-		kdf := &KDF{
+		kdf := &rawKDF{
 			Type:       "pbkdf2",
 			Hash:       hashAlgo,
 			Salt:       saltB64,
@@ -1280,7 +1315,7 @@ func TestGetPBKDF2HashFunc(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.hashAlgo, func(t *testing.T) {
-			hashFunc, err := getPBKDF2HashFunc(tt.hashAlgo)
+			hashFunc, err := getPBKDF2HashFunc(tt.hashAlgo, fips.Probe)
 			if tt.expectError {
 				if err == nil {
 					t.Errorf("Expected error for hash %q, got nil", tt.hashAlgo)
@@ -1323,7 +1358,7 @@ func TestArgon2CPUsBoundsValidation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cpus := tt.cpus
-			kdf := &KDF{
+			kdf := &rawKDF{
 				Type:   "argon2id",
 				Salt:   saltB64,
 				Time:   &time,
@@ -1355,25 +1390,25 @@ func TestFIPSCompliantKDFWorkflow(t *testing.T) {
 	defer parallel(t)()
 
 	// Step 1: Verify the KDF type is FIPS-compliant
-	kdfType := KDFTypePBKDF2SHA256
-	if !IsFIPSCompliantKDF(kdfType) {
+	kdfType := kdfTypePBKDF2SHA256
+	if !isFIPSCompliantKDF(kdfType) {
 		t.Fatalf("%s should be FIPS compliant", kdfType)
 	}
 
 	// Step 2: Create a KDF with FIPS-compliant settings
-	opts := FormatOptions{
+	opts := formatOptionsForTest{
 		KDFType:       kdfType,
 		PBKDFIterTime: 100, // Short time for test
 	}
 
-	kdf, err := CreateKDF(opts, 32)
+	kdf, err := createKDFStrict(opts, 32)
 	if err != nil {
 		t.Fatalf("CreateKDF failed: %v", err)
 	}
 
 	// Step 3: Verify the created KDF has expected properties
-	if kdf.Type != KDFTypePBKDF2 {
-		t.Fatalf("Expected type %s, got %s", KDFTypePBKDF2, kdf.Type)
+	if kdf.Type != kdfTypePBKDF2 {
+		t.Fatalf("Expected type %s, got %s", kdfTypePBKDF2, kdf.Type)
 	}
 
 	if kdf.Hash != "sha256" {
@@ -1408,11 +1443,11 @@ func TestFIPSCompliantKDFWorkflow(t *testing.T) {
 func TestCreateKDFPBKDF2SHA1HashAlgoOverride(t *testing.T) {
 	defer parallel(t)()
 
-	for _, kdfType := range []string{KDFTypePBKDF2, KDFTypeArgon2id} {
+	for _, kdfType := range []string{kdfTypePBKDF2, kdfTypeArgon2id} {
 		for _, hash := range []string{"sha1", "SHA1", " sha1 "} {
-			kdf, err := CreateKDF(FormatOptions{KDFType: kdfType, HashAlgo: hash, PBKDFIterTime: 100}, 20)
-			if kdf != nil || !errors.Is(err, ErrSHA1NotWritten) || !errors.Is(err, ErrUnsupportedHash) {
-				t.Fatalf("CreateKDF %s with HashAlgo %q: got %+v, %v; want ErrSHA1NotWritten and ErrUnsupportedHash", kdfType, hash, kdf, err)
+			kdf, err := createKDFStrict(formatOptionsForTest{KDFType: kdfType, HashAlgo: hash, PBKDFIterTime: 100}, 20)
+			if kdf != nil || !errors.Is(err, ErrInvalidArgument) || !errors.Is(err, ErrUnsupported) {
+				t.Fatalf("CreateKDF %s with HashAlgo %q: got %+v, %v; want ErrInvalidArgument and ErrUnsupported", kdfType, hash, kdf, err)
 			}
 		}
 	}
@@ -1434,9 +1469,9 @@ func TestArgon2RefusedInFIPSMode(t *testing.T) {
 	saltB64 := encodeBase64([]byte("testsalt12345678"))
 	passphrase := []byte("testpassphrase")
 
-	for _, kdfType := range []string{KDFTypeArgon2i, KDFTypeArgon2id} {
+	for _, kdfType := range []string{kdfTypeArgon2i, kdfTypeArgon2id} {
 		t.Run("derive/"+kdfType, func(t *testing.T) {
-			kdf := &KDF{
+			kdf := &rawKDF{
 				Type:   kdfType,
 				Salt:   saltB64,
 				Time:   &argonTime,
@@ -1460,7 +1495,7 @@ func TestArgon2RefusedInFIPSMode(t *testing.T) {
 		})
 
 		t.Run("create/"+kdfType, func(t *testing.T) {
-			_, err := CreateKDF(FormatOptions{KDFType: kdfType}, 32)
+			_, err := createKDFStrict(formatOptionsForTest{KDFType: kdfType}, 32)
 			if fips140.Enabled() {
 				if !errors.Is(err, ErrFIPSNotApproved) {
 					t.Fatalf("got error %v, want ErrFIPSNotApproved", err)
@@ -1476,25 +1511,25 @@ func TestArgon2RefusedInFIPSMode(t *testing.T) {
 	// The default is not refused in FIPS mode: it is PBKDF2-SHA512 there
 	// (#237), so a caller that names no KDF is never given Argon2.
 	t.Run("create/default", func(t *testing.T) {
-		kdf, err := CreateKDF(FormatOptions{}, 32)
+		kdf, err := createKDFStrict(formatOptionsForTest{}, 32)
 		if err != nil {
 			t.Fatalf("CreateKDF with the default KDF failed: %v", err)
 		}
 		if fips140.Enabled() {
-			if kdf.Type != KDFTypePBKDF2 || kdf.Hash != "sha512" {
+			if kdf.Type != kdfTypePBKDF2 || kdf.Hash != "sha512" {
 				t.Fatalf("in FIPS mode the default is %s/%s, want pbkdf2/sha512", kdf.Type, kdf.Hash)
 			}
 			return
 		}
-		if kdf.Type != KDFTypeArgon2id {
-			t.Fatalf("expected default type %s, got %s", KDFTypeArgon2id, kdf.Type)
+		if kdf.Type != kdfTypeArgon2id {
+			t.Fatalf("expected default type %s, got %s", kdfTypeArgon2id, kdf.Type)
 		}
 	})
 
 	// The approved alternative must remain usable in both modes, so that the
 	// refusals above are a KDF boundary and not a broken package.
 	t.Run("approved-alternative", func(t *testing.T) {
-		kdf, err := CreateKDF(FormatOptions{KDFType: KDFTypePBKDF2SHA256, PBKDFIterTime: 100}, 32)
+		kdf, err := createKDFStrict(formatOptionsForTest{KDFType: kdfTypePBKDF2SHA256, PBKDFIterTime: 100}, 32)
 		if err != nil {
 			t.Fatalf("CreateKDF with pbkdf2-sha256 failed: %v", err)
 		}
@@ -1504,7 +1539,7 @@ func TestArgon2RefusedInFIPSMode(t *testing.T) {
 	})
 }
 
-// ErrUnsupportedKDF and ErrUnsupportedHash were declared and returned by
+// ErrUnsupported and ErrUnsupported were declared and returned by
 // nothing (#70): both conditions were reported with fmt.Errorf, so a caller
 // could not tell "this header names an algorithm we do not implement" from any
 // other derivation failure.
@@ -1512,7 +1547,7 @@ func TestArgon2RefusedInFIPSMode(t *testing.T) {
 // TestDeriveKeyReportsAnUnsupportedKDFType covers the dispatch a header reaches.
 func TestDeriveKeyReportsAnUnsupportedKDFType(t *testing.T) {
 	iterations := 1000
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:       "scrypt",
 		Hash:       "sha256",
 		Salt:       encodeBase64([]byte("unsupported-kdf-salt")),
@@ -1523,8 +1558,8 @@ func TestDeriveKeyReportsAnUnsupportedKDFType(t *testing.T) {
 	if err == nil {
 		t.Fatal("deriveKeyPlain accepted a KDF type this package does not implement")
 	}
-	if !errors.Is(err, ErrUnsupportedKDF) {
-		t.Fatalf("deriveKeyPlain = %v, want an error wrapping ErrUnsupportedKDF", err)
+	if !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("deriveKeyPlain = %v, want an error wrapping ErrUnsupported", err)
 	}
 	if !strings.Contains(err.Error(), "scrypt") {
 		t.Fatalf("the refusal does not name the type it refused: %v", err)
@@ -1539,7 +1574,7 @@ func TestDeriveKeyReportsAnUnsupportedKDFType(t *testing.T) {
 // algorithm the package genuinely does not have.
 func TestDeriveKeyReportsAnUnsupportedHash(t *testing.T) {
 	iterations := 1000
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:       "pbkdf2",
 		Hash:       "md5",
 		Salt:       encodeBase64([]byte("unsupported-hash-salt")),
@@ -1550,8 +1585,8 @@ func TestDeriveKeyReportsAnUnsupportedHash(t *testing.T) {
 	if err == nil {
 		t.Fatal("deriveKeyPlain accepted a hash this package does not implement")
 	}
-	if !errors.Is(err, ErrUnsupportedHash) {
-		t.Fatalf("deriveKeyPlain = %v, want an error wrapping ErrUnsupportedHash", err)
+	if !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("deriveKeyPlain = %v, want an error wrapping ErrUnsupported", err)
 	}
 	if errors.Is(err, ErrFIPSNotApproved) {
 		t.Fatalf("an unimplemented hash was reported as a FIPS refusal: %v", err)
@@ -1561,11 +1596,11 @@ func TestDeriveKeyReportsAnUnsupportedHash(t *testing.T) {
 // TestCreateKDFReportsAnUnsupportedKDFType covers the WRITE side, where the
 // unsupported type comes from a caller's options rather than from a header.
 func TestCreateKDFReportsAnUnsupportedKDFType(t *testing.T) {
-	_, err := CreateKDF(FormatOptions{KDFType: "bcrypt"}, 32)
+	_, err := createKDFStrict(formatOptionsForTest{KDFType: "bcrypt"}, 32)
 	if err == nil {
 		t.Fatal("CreateKDF accepted a KDF type this package does not implement")
 	}
-	if !errors.Is(err, ErrUnsupportedKDF) {
-		t.Fatalf("CreateKDF = %v, want an error wrapping ErrUnsupportedKDF", err)
+	if !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("CreateKDF = %v, want an error wrapping ErrUnsupported", err)
 	}
 }

@@ -8,6 +8,7 @@ package luks2
 
 import (
 	"bytes"
+	"context"
 	"crypto/fips140"
 	"errors"
 	"fmt"
@@ -17,6 +18,8 @@ import (
 	"testing"
 
 	"github.com/jeremyhahn/go-enclave"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
@@ -31,11 +34,11 @@ import (
 func argon2Digest(t *testing.T, device string, hash string) {
 	t.Helper()
 
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
-	mk, err := getMasterKey(device, migrationPassphrase, metadata)
+	mk, err := getMasterKey(device, migrationPassphrase, metadata, testVolumeSys())
 	if err != nil {
 		t.Fatalf("getMasterKey failed: %v", err)
 	}
@@ -44,16 +47,16 @@ func argon2Digest(t *testing.T, device string, hash string) {
 	// The lowest Argon2 cost the reader accepts: this is a foreign header's
 	// digest, which nothing here writes, and every unlock of the fixture
 	// derives through it -- under -race, at the package's budget (ci.yml).
-	cost, memory, cpus := MinArgon2Time, fixtureArgon2MemoryKB, 1
+	cost, memory, cpus := minArgon2Time, fixtureArgon2MemoryKB, 1
 	digest := metadata.Digests["0"]
-	kdf := &KDF{Type: KDFTypeArgon2id, Salt: digest.Salt, Time: &cost, Memory: &memory, CPUs: &cpus}
-	derived, err := deriveKeySecret(mk, kdf, argon2DigestLen)
+	kdf := &rawKDF{Type: kdfTypeArgon2id, Salt: digest.Salt, Time: &cost, Memory: &memory, CPUs: &cpus}
+	derived, err := deriveKeySecret(context.Background(), mk, kdf, argon2DigestLen, testVolumeSys())
 	if err != nil {
 		t.Fatalf("deriving the argon2 digest failed: %v", err)
 	}
 	defer mustDestroy(t, derived)
 
-	digest.Type, digest.Hash, digest.Iterations = KDFTypeArgon2id, hash, 0
+	digest.Type, digest.Hash, digest.Iterations = kdfTypeArgon2id, hash, 0
 	digest.Time, digest.Memory, digest.CPUs = &cost, &memory, &cpus
 	if err := secret.Borrow("test digest", derived, func(b []byte) error {
 		digest.Digest = encodeBase64(b)
@@ -89,7 +92,7 @@ func readJSONArea(t *testing.T, device string) []byte {
 	if err != nil {
 		t.Fatalf("read %s: %v", device, err)
 	}
-	hdr, _, err := ReadHeader(device)
+	hdr, _, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -97,7 +100,7 @@ func readJSONArea(t *testing.T, device string) []byte {
 	if err != nil {
 		t.Fatalf("header area size: %v", err)
 	}
-	return bytes.TrimRight(b[LUKS2HeaderSize:area], "\x00")
+	return bytes.TrimRight(b[header.HeaderSize:area], "\x00")
 }
 
 // TestMigrateToFIPSMigratesAnArgon2Digest is the digest trap in its sharpest
@@ -120,7 +123,7 @@ func TestMigrateToFIPSMigratesAnArgon2Digest(t *testing.T) {
 			keyBefore := volumeKey(t, device, migrationPassphrase)
 			dataBefore := dataAreaDigest(t, device)
 
-			result, err := MigrateToFIPS(device, migrationPassphrase, cheapMigration())
+			result, err := migrateToFIPSForTest(device, migrationPassphrase, cheapMigration())
 			if err != nil {
 				t.Fatalf("MigrateToFIPS failed: %v", err)
 			}
@@ -135,13 +138,13 @@ func TestMigrateToFIPSMigratesAnArgon2Digest(t *testing.T) {
 			}
 			assertFIPSReady(t, device)
 
-			_, metadata, err := ReadHeader(device)
+			_, metadata, err := readHeaderForTest(device)
 			if err != nil {
 				t.Fatalf("ReadHeader failed: %v", err)
 			}
 			digest := metadata.Digests["0"]
-			if digest.Type != KDFTypePBKDF2 || digest.Hash != DefaultHashAlgo {
-				t.Fatalf("digest is %s-%s, want pbkdf2-%s", digest.Type, digest.Hash, DefaultHashAlgo)
+			if digest.Type != kdfTypePBKDF2 || digest.Hash != defaultHashAlgo {
+				t.Fatalf("digest is %s-%s, want pbkdf2-%s", digest.Type, digest.Hash, defaultHashAlgo)
 			}
 			if digest.Time != nil || digest.Memory != nil || digest.CPUs != nil {
 				t.Fatal("the migrated digest still declares Argon2 cost")
@@ -172,26 +175,26 @@ func TestFIPSRefusalNamesAnArgon2Digest(t *testing.T) {
 		// A FIPS process cannot derive the Argon2 fixture itself, so the
 		// digest is written with a value it never has to compute: the refusal
 		// comes before any derivation, which is the point.
-		hdr, metadata, err := ReadHeader(device)
+		hdr, metadata, err := readHeaderForTest(device)
 		if err != nil {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
-		cost, memory, cpus := MinArgon2Time, MinArgon2MemoryKB, 1
+		cost, memory, cpus := minArgon2Time, minArgon2MemoryKB, 1
 		digest := metadata.Digests["0"]
-		digest.Type, digest.Hash, digest.Iterations = KDFTypeArgon2id, "", 0
+		digest.Type, digest.Hash, digest.Iterations = kdfTypeArgon2id, "", 0
 		digest.Time, digest.Memory, digest.CPUs = &cost, &memory, &cpus
 		digest.Digest = encodeBase64(bytes.Repeat([]byte{0x5a}, argon2DigestLen))
 		hdr.SequenceID++
 		if err := writeHeaderInternal(device, hdr, metadata); err != nil {
 			t.Fatalf("writing the fixture failed: %v", err)
 		}
-		assertImportRequired(t, TestKey(device, migrationPassphrase), device, nil,
-			[]NonApprovedKDF{{ID: "0", Type: KDFTypeArgon2id}})
+		assertImportRequired(t, testKeyForTest(device, migrationPassphrase), device, nil,
+			[]NonApprovedKDF{{ID: 0, Type: kdfTypeArgon2id}})
 		return
 	}
 
 	argon2Digest(t, device, "")
-	if err := TestKey(device, migrationPassphrase); err != nil {
+	if err := testKeyForTest(device, migrationPassphrase); err != nil {
 		t.Fatalf("outside FIPS mode an Argon2 digest must be evaluated, got %v", err)
 	}
 }
@@ -203,7 +206,7 @@ func TestFIPSRefusalNamesAnArgon2Digest(t *testing.T) {
 func TestFIPSRefusalDoesNotCallAMalformedDigestAnImport(t *testing.T) {
 	device := newImage(t, "fips-malformed-digest.img")
 	formatWithLibrary(t, device)
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -216,7 +219,7 @@ func TestFIPSRefusalDoesNotCallAMalformedDigestAnImport(t *testing.T) {
 		t.Fatalf("writing the fixture failed: %v", err)
 	}
 
-	err = TestKey(device, migrationPassphrase)
+	err = testKeyForTest(device, migrationPassphrase)
 	if errors.Is(err, ErrFIPSImportRequired) || errors.Is(err, ErrFIPSNotApproved) {
 		t.Fatalf("a malformed digest was reported as a FIPS refusal: %v", err)
 	}
@@ -238,10 +241,10 @@ func TestMigrateToFIPSRefusesToWipeOutsideTheKeyslotsArea(t *testing.T) {
 
 	cases := []struct {
 		name   string
-		offset func(metadata *LUKS2Metadata) string
+		offset func(metadata *header.Metadata) string
 	}{
-		{"into the data segment", func(metadata *LUKS2Metadata) string { return metadata.Segments["0"].Offset }},
-		{"into the header", func(*LUKS2Metadata) string { return "4096" }},
+		{"into the data segment", func(metadata *header.Metadata) string { return metadata.Segments["0"].Offset }},
+		{"into the header", func(*header.Metadata) string { return "4096" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -249,7 +252,7 @@ func TestMigrateToFIPSRefusesToWipeOutsideTheKeyslotsArea(t *testing.T) {
 			formatWithLibrary(t, device)
 			fillDataArea(t, device)
 
-			hdr, metadata, err := ReadHeader(device)
+			hdr, metadata, err := readHeaderForTest(device)
 			if err != nil {
 				t.Fatalf("ReadHeader failed: %v", err)
 			}
@@ -257,8 +260,8 @@ func TestMigrateToFIPSRefusesToWipeOutsideTheKeyslotsArea(t *testing.T) {
 			area := *stray.Area
 			area.Offset = tc.offset(metadata)
 			stray.Area = &area
-			cost, memory, cpus := MinArgon2Time, MinArgon2MemoryKB, 1
-			stray.KDF = &KDF{Type: KDFTypeArgon2id, Salt: stray.KDF.Salt, Time: &cost, Memory: &memory, CPUs: &cpus}
+			cost, memory, cpus := minArgon2Time, minArgon2MemoryKB, 1
+			stray.KDF = &rawKDF{Type: kdfTypeArgon2id, Salt: stray.KDF.Salt, Time: &cost, Memory: &memory, CPUs: &cpus}
 			metadata.Keyslots["1"] = &stray
 			hdr.SequenceID++
 			if err := writeHeaderUnvalidated(device, hdr, metadata); err != nil {
@@ -266,7 +269,7 @@ func TestMigrateToFIPSRefusesToWipeOutsideTheKeyslotsArea(t *testing.T) {
 			}
 			before := fileDigest(t, device)
 
-			_, err = MigrateToFIPS(device, migrationPassphrase, cheapMigration())
+			_, err = migrateToFIPSForTest(device, migrationPassphrase, cheapMigration())
 			if !errors.Is(err, ErrKeyslotAreaOverlap) {
 				t.Fatalf("got %v, want ErrKeyslotAreaOverlap", err)
 			}
@@ -296,7 +299,7 @@ func TestMigrateToFIPSReadsNoKeyslotOutsideKeyslotSpace(t *testing.T) {
 	for _, keep := range []bool{false, true} {
 		t.Run(fmt.Sprintf("keep=%v", keep), func(t *testing.T) {
 			device := argon2Volume(t, "oversized-area.img", false)
-			hdr, metadata, err := ReadHeader(device)
+			hdr, metadata, err := readHeaderForTest(device)
 			if err != nil {
 				t.Fatalf("ReadHeader failed: %v", err)
 			}
@@ -319,16 +322,16 @@ func TestMigrateToFIPSReadsNoKeyslotOutsideKeyslotSpace(t *testing.T) {
 			before := fileDigest(t, device)
 
 			derivations := 0
-			previous := passphraseKDF
-			t.Cleanup(func() { passphraseKDF = previous })
-			passphraseKDF = func(passphrase []byte, kdf *KDF, keySize int) (*enclave.MemoryEnclave, error) {
+			sys := testVolumeSys()
+			real := sys.passphraseKDF
+			sys.passphraseKDF = func(ctx context.Context, passphrase []byte, kdf *rawKDF, keySize int) (*enclave.MemoryEnclave, error) {
 				derivations++
-				return previous(passphrase, kdf, keySize)
+				return real(ctx, passphrase, kdf, keySize)
 			}
 
 			opts := cheapMigration()
 			opts.KeepNonApprovedKeyslots = keep
-			_, err = MigrateToFIPS(device, migrationPassphrase, opts)
+			_, err = migrateToFIPSAt(context.Background(), device, migrationPassphrase, opts, sys)
 			var merr *FIPSMigrationError
 			if !errors.Is(err, ErrKeyslotAreaOverlap) || !errors.As(err, &merr) ||
 				merr.Stage != "precondition" || merr.State != fipsStateUntouched {

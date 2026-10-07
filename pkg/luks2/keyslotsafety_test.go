@@ -8,9 +8,11 @@ package luks2
 
 import (
 	"bytes"
+	"context"
 	"crypto/fips140"
 	"crypto/rand"
 	"errors"
+	"github.com/jeremyhahn/go-luks2/internal/fips"
 	"io"
 	"os"
 	"path/filepath"
@@ -20,8 +22,10 @@ import (
 	"testing"
 
 	"github.com/jeremyhahn/go-enclave"
+
 	"github.com/jeremyhahn/go-luks2/internal/af"
 	"github.com/jeremyhahn/go-luks2/internal/areacipher"
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // Regression tests for #249 (Lane A, keyslot safety). Where a finding is about
@@ -41,7 +45,7 @@ const (
 )
 
 // cheapCryptsetupArgs format or enroll at cryptsetup's own PBKDF2 minimum, so a
-// fixture costs nothing to open. Keyslot cost is not what these tests are about.
+// fixture costs nothing to open. header.Keyslot cost is not what these tests are about.
 // sha512 because ChangeKey raises a preserved count to the floor for its hash,
 // and sha512's is a sixth of sha256's in work.
 var cheapCryptsetupArgs = []string{"--pbkdf", "pbkdf2", "--hash", "sha512", "--pbkdf-force-iterations", "1000", "--batch-mode"}
@@ -85,7 +89,7 @@ func unboundFixture(t *testing.T) string {
 		t.Fatalf("cryptsetup luksAddKey --unbound exited %d\n%s", code, out)
 	}
 
-	_, metadata, err := ReadHeader(image)
+	_, metadata, err := readHeaderForTest(image)
 	if err != nil {
 		t.Fatalf("ReadHeader on cryptsetup's volume failed: %v", err)
 	}
@@ -93,6 +97,30 @@ func unboundFixture(t *testing.T) string {
 		t.Fatal("the fixture is not a bound keyslot 0 beside an unbound keyslot 1")
 	}
 	return image
+}
+
+// verifyRecoveryKeyForTest reports whether key unlocks device, the way the
+// pre-redesign library's VerifyRecoveryKey did before B.6 deleted it in
+// favor of (*Volume).Unlock: a failure to verify (ErrWrongKey) is (false,
+// nil) rather than an error, so a caller that cares can tell "not this key"
+// from "this volume cannot answer the question".
+func verifyRecoveryKeyForTest(device string, key *enclave.MemoryEnclave) (bool, error) {
+	ctx := context.Background()
+	v, err := Open(ctx, device, withTestSys(testVolumeSys()), WithReadOnly())
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = v.Close() }()
+
+	unlocked, err := v.Unlock(ctx, key)
+	if err != nil {
+		if errors.Is(err, ErrWrongKey) {
+			return false, nil
+		}
+		return false, err
+	}
+	unlocked.Destroy()
+	return true, nil
 }
 
 // TestTheRemovalGuardDoesNotCountAnUnboundKeyslot is A1: a keyslot that opens
@@ -133,7 +161,7 @@ func TestTheRemovalGuardDoesNotCountAnUnboundKeyslot(t *testing.T) {
 		if code, out := runCryptsetup(t, conformancePassphrase+"\n"+rotatedPassphrase+"\n", addKey...); code != 0 {
 			t.Fatalf("cryptsetup luksAddKey exited %d\n%s", code, out)
 		}
-		if err := KillKeyslot(device, 0); err != nil {
+		if err := killKeyslotForTest(device, 0); err != nil {
 			t.Fatalf("KillKeyslot refused a removal that leaves a bound keyslot: %v", err)
 		}
 		if !cryptsetupOpensSlot(t, device, rotatedPassphrase, -1) {
@@ -156,16 +184,16 @@ func TestAnUnboundCredentialProvesNothingAboutTheVolume(t *testing.T) {
 	if cryptsetupOpensSlot(t, device, unboundPassphrase, -1) {
 		t.Fatal("the fixture is wrong: cryptsetup opens the volume with the unbound passphrase")
 	}
-	if err := TestKey(device, unbound); !errors.Is(err, ErrMasterKeyVerification) {
-		t.Errorf("TestKey with the unbound passphrase returned %v, want ErrMasterKeyVerification", err)
+	if err := testKeyForTest(device, unbound); !errors.Is(err, ErrWrongKey) {
+		t.Errorf("TestKey with the unbound passphrase returned %v, want ErrWrongKey", err)
 	}
-	if slot, err := AddKey(device, unbound, []byte(rotatedPassphrase), nil); !errors.Is(err, ErrMasterKeyVerification) || slot != -1 {
-		t.Errorf("AddKey authenticated by the unbound passphrase returned slot %d, %v; want -1, ErrMasterKeyVerification", slot, err)
+	if slot, err := addKeyForTest(device, unbound, []byte(rotatedPassphrase), nil); !errors.Is(err, ErrWrongKey) || slot != -1 {
+		t.Errorf("AddKey authenticated by the unbound passphrase returned slot %d, %v; want -1, ErrWrongKey", slot, err)
 	}
-	if err := KillSlot(device, unbound, 1); !errors.Is(err, ErrMasterKeyVerification) {
-		t.Errorf("KillSlot authenticated by the unbound passphrase returned %v, want ErrMasterKeyVerification", err)
+	if err := killSlotForTest(device, unbound, 1); !errors.Is(err, ErrWrongKey) {
+		t.Errorf("KillSlot authenticated by the unbound passphrase returned %v, want ErrWrongKey", err)
 	}
-	ok, err := VerifyRecoveryKey(device, secretOf(t, unbound))
+	ok, err := verifyRecoveryKeyForTest(device, secretOf(t, unbound))
 	if ok || err != nil {
 		t.Errorf("VerifyRecoveryKey with the unbound passphrase returned %v, %v; want false, nil", ok, err)
 	}
@@ -174,10 +202,10 @@ func TestAnUnboundCredentialProvesNothingAboutTheVolume(t *testing.T) {
 	}
 
 	// The volume's own credential still does all of it.
-	if err := TestKey(device, []byte(conformancePassphrase)); err != nil {
+	if err := testKeyForTest(device, []byte(conformancePassphrase)); err != nil {
 		t.Fatalf("TestKey with the volume's passphrase failed: %v", err)
 	}
-	slot, err := AddKey(device, []byte(conformancePassphrase), []byte(rotatedPassphrase), fastAddKeyOptions())
+	slot, err := addKeyForTest(device, []byte(conformancePassphrase), []byte(rotatedPassphrase), fastAddKeyOptions())
 	if err != nil {
 		t.Fatalf("AddKey with the volume's passphrase failed: %v", err)
 	}
@@ -205,7 +233,7 @@ func TestAnUnboundKeyslotSharingThePassphraseDoesNotHijackAddKey(t *testing.T) {
 		t.Fatalf("cryptsetup luksAddKey --unbound exited %d\n%s", code, out)
 	}
 
-	slot, err := AddKey(image, []byte(conformancePassphrase), []byte(rotatedPassphrase), fastAddKeyOptions())
+	slot, err := addKeyForTest(image, []byte(conformancePassphrase), []byte(rotatedPassphrase), fastAddKeyOptions())
 	if err != nil {
 		t.Fatalf("AddKey failed: %v", err)
 	}
@@ -216,8 +244,8 @@ func TestAnUnboundKeyslotSharingThePassphraseDoesNotHijackAddKey(t *testing.T) {
 
 // fastAddKeyOptions asks AddKey for the cheapest keyslot it will calibrate; see
 // calibratedCountFloor for what the unit suite makes of that.
-func fastAddKeyOptions() *AddKeyOptions {
-	return &AddKeyOptions{KDFType: KDFTypePBKDF2, Hash: "sha512", PBKDFIterTime: 1}
+func fastAddKeyOptions() *addKeyOptionsForTest {
+	return &addKeyOptionsForTest{KDFType: kdfTypePBKDF2, Hash: "sha512", PBKDFIterTime: 1}
 }
 
 // confinementFixture formats a container, fills its data segment, and gives it
@@ -231,7 +259,7 @@ func confinementFixture(t *testing.T, at func(dataOffset int64) int64, keyslotTy
 	formatWithLibrary(t, device)
 	fillDataArea(t, device)
 
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -309,7 +337,7 @@ func TestEveryKeyslotWipeIsConfinedToTheKeyslotsArea(t *testing.T) {
 	t.Run("ChangeKey", func(t *testing.T) {
 		device, offset, size := confinementFixture(t, func(data int64) int64 { return data + 4096 }, "luks2")
 		before := fileDigest(t, device)
-		err := ChangeKey(device, passphrase, []byte(rotatedPassphrase), 1)
+		err := changeKeyForTest(device, passphrase, []byte(rotatedPassphrase), 1)
 		if !errors.Is(err, ErrKeyslotAreaOverlap) {
 			t.Fatalf("got %v, want ErrKeyslotAreaOverlap", err)
 		}
@@ -326,7 +354,7 @@ func TestTheUnlockScanRefusesAKeyslotOutsideKeyslotSpace(t *testing.T) {
 	defer parallel(t)()
 
 	device, _, _ := confinementFixture(t, func(data int64) int64 { return data + 4096 }, "luks2")
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -335,8 +363,8 @@ func TestTheUnlockScanRefusesAKeyslotOutsideKeyslotSpace(t *testing.T) {
 		t.Fatalf("failed to drop keyslot 0: %v", err)
 	}
 
-	err = TestKey(device, []byte(conformancePassphrase))
-	if !errors.Is(err, ErrInvalidKeyslot) || !errors.Is(err, ErrKeyslotAreaOverlap) {
+	err = testKeyForTest(device, []byte(conformancePassphrase))
+	if !errors.Is(err, ErrKeyslotNotFound) || !errors.Is(err, ErrKeyslotAreaOverlap) {
 		t.Fatalf("TestKey opened a keyslot whose area lies in the payload: %v", err)
 	}
 }
@@ -348,24 +376,24 @@ func TestTheUnlockScanRefusesAKeyslotOutsideKeyslotSpace(t *testing.T) {
 func writeHandKeyslot(t *testing.T, device, id string, passphrase []byte, stripes int, areaSize int64) {
 	t.Helper()
 
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 	mk := secretOf(t, volumeKey(t, device, []byte(conformancePassphrase)))
 	keySize := mk.Size()
 
-	kdf, err := createKDF(FormatOptions{KDFType: KDFTypePBKDF2, HashAlgo: "sha512", PBKDFIterations: minPBKDF2Iterations},
-		keySize, libraryGeneratedCredential)
+	kdf, err := createKDF(formatOptionsForTest{KDFType: kdfTypePBKDF2, HashAlgo: "sha512", PBKDFIterations: minPBKDF2Iterations},
+		keySize, libraryGeneratedCredential, testVolumeSys().fipsMode, testVolumeSys().calibratedCountFloor, testVolumeSys().cryptoRand)
 	if err != nil {
 		t.Fatalf("createKDF failed: %v", err)
 	}
-	wrap, err := DeriveKeyEnclave(passphrase, kdf, keySize)
+	wrap, err := deriveKeyEnclave(context.Background(), passphrase, kdf, keySize)
 	if err != nil {
 		t.Fatalf("DeriveKeyEnclave failed: %v", err)
 	}
 	defer mustDestroy(t, wrap)
-	split, err := afCodec().Split(mk, af.Params{Stripes: stripes, Hash: "sha256"})
+	split, err := afCodec(testVolumeSys()).Split(mk, af.Params{Stripes: stripes, Hash: "sha256"})
 	if err != nil {
 		t.Fatalf("af Split failed: %v", err)
 	}
@@ -397,13 +425,13 @@ func writeHandKeyslot(t *testing.T, device, id string, passphrase []byte, stripe
 		t.Fatalf("close: %v", err)
 	}
 
-	metadata.Keyslots[id] = &Keyslot{
+	metadata.Keyslots[id] = &header.Keyslot{
 		Type:    "luks2",
 		KeySize: keySize,
-		Area: &KeyslotArea{Type: "raw", KeySize: keySize, Offset: formatSize(offset), Size: formatSize(areaSize),
-			Encryption: KeyslotAreaEncryption},
+		Area: &header.KeyslotArea{Type: "raw", KeySize: keySize, Offset: formatSize(offset), Size: formatSize(areaSize),
+			Encryption: keyslotAreaEncryption},
 		KDF: kdf,
-		AF:  &AntiForensic{Type: "luks1", Stripes: stripes, Hash: "sha256"},
+		AF:  &header.AntiForensic{Type: "luks1", Stripes: stripes, Hash: "sha256"},
 	}
 	metadata.Digests["0"].Keyslots = append(metadata.Digests["0"].Keyslots, id)
 	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
@@ -425,7 +453,7 @@ func TestChangeKeyRewritesAForeignStripeCount(t *testing.T) {
 		area int64
 	}{
 		{"in an area that holds 4000 stripes", 258048},
-		{"in an area sized for its 2000", alignTo(64*2000, KeyslotAreaAlignment)},
+		{"in an area sized for its 2000", alignTo(64*2000, keyslotAreaAlignment)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			device := newImage(t, "stripes.img")
@@ -436,22 +464,22 @@ func TestChangeKeyRewritesAForeignStripeCount(t *testing.T) {
 			// (4000) whatever af.stripes says, and the digest then fails --
 			// so a rewrite that leaves 4000 stripes of material DECLARING 4000
 			// is also the one that makes the keyslot cryptsetup's again.
-			if err := TestKey(device, []byte(handPassphrase)); err != nil {
+			if err := testKeyForTest(device, []byte(handPassphrase)); err != nil {
 				t.Fatalf("the fixture is wrong: the 2000-stripe keyslot does not open here: %v", err)
 			}
 			offset, size := keyslotAreaExtent(t, device, "1")
 			before := readAreaBytes(t, device, offset, size)
 
-			if err := ChangeKey(device, []byte(handPassphrase), []byte(rotatedPassphrase), 1); err != nil {
+			if err := changeKeyForTest(device, []byte(handPassphrase), []byte(rotatedPassphrase), 1); err != nil {
 				t.Fatalf("ChangeKey failed: %v", err)
 			}
 
-			_, metadata, err := ReadHeader(device)
+			_, metadata, err := readHeaderForTest(device)
 			if err != nil {
 				t.Fatalf("ReadHeader failed: %v", err)
 			}
-			if got := metadata.Keyslots["1"].AF.Stripes; got != AFStripes {
-				t.Errorf("the rewritten keyslot declares %d stripes, want %d", got, AFStripes)
+			if got := metadata.Keyslots["1"].AF.Stripes; got != header.AFStripes {
+				t.Errorf("the rewritten keyslot declares %d stripes, want %d", got, header.AFStripes)
 			}
 			if !cryptsetupOpensSlot(t, device, rotatedPassphrase, 1) {
 				t.Fatal("cryptsetup does not open the rewritten keyslot with the new passphrase")
@@ -471,13 +499,13 @@ func TestChangeKeyRewritesAForeignStripeCount(t *testing.T) {
 // written -- it ends where the descriptor's position is -- is overwritten with
 // random. The keyslot is written correctly and READ BACK wrong, which is
 // exactly the failure the read-back exists to catch.
-func corruptTheNextWrittenArea(t *testing.T) {
+func corruptTheNextWrittenArea(t *testing.T) volumeSys {
 	t.Helper()
 
-	previous := syncKeyslotArea
-	t.Cleanup(func() { syncKeyslotArea = previous })
+	sys := testVolumeSys()
+	previous := sys.syncKeyslotArea
 	done := false
-	syncKeyslotArea = func(f *os.File) error {
+	sys.syncKeyslotArea = func(f *os.File) error {
 		if !done {
 			done = true
 			end, err := f.Seek(0, io.SeekCurrent)
@@ -494,6 +522,7 @@ func corruptTheNextWrittenArea(t *testing.T) {
 		}
 		return previous(f)
 	}
+	return sys
 }
 
 // TestAKeyslotThatDoesNotOpenOnceWrittenIsRolledBack is A3's second half: the
@@ -511,11 +540,11 @@ func TestAKeyslotThatDoesNotOpenOnceWrittenIsRolledBack(t *testing.T) {
 		formatWithLibrary(t, device)
 		offset, size := keyslotAreaExtent(t, device, "0")
 		before := readAreaBytes(t, device, offset, size)
-		corruptTheNextWrittenArea(t)
+		sys := corruptTheNextWrittenArea(t)
 
-		err := ChangeKey(device, passphrase, rotated, 0)
-		if !errors.Is(err, ErrMasterKeyVerification) {
-			t.Fatalf("got %v, want ErrMasterKeyVerification", err)
+		err := changeKeyWithSys(device, passphrase, rotated, 0, sys)
+		if !errors.Is(err, ErrWrongKey) {
+			t.Fatalf("got %v, want ErrWrongKey", err)
 		}
 		if !bytes.Equal(before, readAreaBytes(t, device, offset, size)) {
 			t.Fatal("the old keyslot's material was destroyed although its replacement does not open")
@@ -526,7 +555,7 @@ func TestAKeyslotThatDoesNotOpenOnceWrittenIsRolledBack(t *testing.T) {
 		if o, _ := keyslotAreaExtent(t, device, "0"); o != offset {
 			t.Fatal("the header still names the rewritten area")
 		}
-		if err := TestKey(device, passphrase); err != nil {
+		if err := testKeyForTest(device, passphrase); err != nil {
 			t.Fatalf("the old passphrase no longer opens the volume: %v", err)
 		}
 	})
@@ -534,13 +563,13 @@ func TestAKeyslotThatDoesNotOpenOnceWrittenIsRolledBack(t *testing.T) {
 	t.Run("AddKey", func(t *testing.T) {
 		device := newImage(t, "rollback-add.img")
 		formatWithLibrary(t, device)
-		corruptTheNextWrittenArea(t)
+		sys := corruptTheNextWrittenArea(t)
 
-		slot, err := AddKey(device, passphrase, rotated, fastAddKeyOptions())
-		if !errors.Is(err, ErrMasterKeyVerification) || slot != -1 {
-			t.Fatalf("got slot %d, %v; want -1, ErrMasterKeyVerification", slot, err)
+		slot, err := addKeyWithPolicy(context.Background(), device, passphrase, rotated, fastAddKeyOptions(), callerSuppliedCredential, sys)
+		if !errors.Is(err, ErrWrongKey) || slot != -1 {
+			t.Fatalf("got slot %d, %v; want -1, ErrWrongKey", slot, err)
 		}
-		_, metadata, err := ReadHeader(device)
+		_, metadata, err := readHeaderForTest(device)
 		if err != nil {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
@@ -548,7 +577,7 @@ func TestAKeyslotThatDoesNotOpenOnceWrittenIsRolledBack(t *testing.T) {
 			t.Fatalf("the unverified keyslot was left in the header: keyslots %v, digest %v",
 				len(metadata.Keyslots), metadata.Digests["0"].Keyslots)
 		}
-		if err := TestKey(device, passphrase); err != nil {
+		if err := testKeyForTest(device, passphrase); err != nil {
 			t.Fatalf("the volume no longer opens: %v", err)
 		}
 	})
@@ -564,40 +593,37 @@ func TestRecoveryKeysAreAtLeast256BitsInAKnownFormat(t *testing.T) {
 		format RecoveryKeyFormat
 		want   error
 	}{
-		{"4 bytes", 4, RecoveryKeyFormatDashed, ErrRecoveryKeyTooShort},
-		{"31 bytes", 31, RecoveryKeyFormatHex, ErrRecoveryKeyTooShort},
-		{"a negative length", -1, RecoveryKeyFormatDashed, ErrRecoveryKeyTooShort},
-		{"a rendering too long to enroll", 257, RecoveryKeyFormatHex, ErrRecoveryKeyTooShort},
-		{"an unknown format", 32, RecoveryKeyFormat("bogus"), ErrInvalidRecoveryKeyFormat},
+		{"4 bytes", 4, RecoveryDashed, ErrInvalidArgument},
+		{"31 bytes", 31, RecoveryHex, ErrInvalidArgument},
+		{"a negative length", -1, RecoveryDashed, ErrInvalidArgument},
+		{"a rendering too long to enroll", 257, RecoveryHex, ErrInvalidArgument},
+		{"an unknown format", 32, RecoveryKeyFormat(99), ErrInvalidArgument},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			key, err := GenerateRecoveryKey(tc.length, tc.format)
+			key, err := NewRecoveryKey(WithRecoveryLength(tc.length), WithRecoveryFormat(tc.format))
 			if !errors.Is(err, tc.want) {
 				if key != nil {
-					key.Clear()
+					key.Destroy()
 				}
-				t.Fatalf("GenerateRecoveryKey(%d, %q) = %v, want %v", tc.length, tc.format, err, tc.want)
+				t.Fatalf("NewRecoveryKey(%d, %v) = %v, want %v", tc.length, tc.format, err, tc.want)
 			}
 		})
 	}
 
-	for _, format := range []RecoveryKeyFormat{RecoveryKeyFormatHex, RecoveryKeyFormatBase64, RecoveryKeyFormatDashed} {
-		key, err := GenerateRecoveryKey(RecoveryKeyLength, format)
+	for _, format := range []RecoveryKeyFormat{RecoveryHex, RecoveryBase64, RecoveryDashed} {
+		key, err := NewRecoveryKey(WithRecoveryLength(DefaultRecoveryKeyLength), WithRecoveryFormat(format))
 		if err != nil {
-			t.Fatalf("GenerateRecoveryKey(32, %q) failed: %v", format, err)
+			t.Fatalf("NewRecoveryKey(32, %v) failed: %v", format, err)
 		}
-		key.Clear()
+		key.Destroy()
 	}
 
-	// AddRecoveryKey refuses before anything is written.
-	device := newImage(t, "short-recovery.img")
-	formatWithLibrary(t, device)
-	before := fileDigest(t, device)
-	if _, err := AddRecoveryKey(device, []byte(conformancePassphrase), &RecoveryKeyOptions{Length: 4}); !errors.Is(err, ErrRecoveryKeyTooShort) {
-		t.Fatalf("AddRecoveryKey with a 4-byte key returned %v, want ErrRecoveryKeyTooShort", err)
-	}
-	if fileDigest(t, device) != before {
-		t.Fatal("a refused recovery key changed the device")
+	// NewRecoveryKey refuses a too-short length on its own, before there is
+	// any rk to hand (*Volume).AddRecoveryKey at all -- the two are
+	// deliberately two-phase (DESIGN.md §B.2), unlike the old combined
+	// AddRecoveryKey(device, existing, &RecoveryKeyOptions{Length: 4}).
+	if _, err := NewRecoveryKey(WithRecoveryLength(4)); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("NewRecoveryKey with a 4-byte length returned %v, want ErrInvalidArgument", err)
 	}
 }
 
@@ -608,17 +634,17 @@ func TestArgon2CreationIsBoundedByWhatTheReaderAccepts(t *testing.T) {
 
 	for _, tc := range []struct {
 		name string
-		opts FormatOptions
+		opts formatOptionsForTest
 		want error
 	}{
-		{"memory over the 4 GiB ceiling", FormatOptions{KDFType: KDFTypeArgon2id, Argon2Memory: maxArgon2Memory + 1}, ErrInvalidArgon2Memory},
-		{"time over the ceiling", FormatOptions{KDFType: KDFTypeArgon2id, Argon2Time: maxArgon2Time + 1}, ErrInvalidArgon2Time},
-		{"parallelism over 255", FormatOptions{KDFType: KDFTypeArgon2i, Argon2Parallel: maxArgon2Parallel + 1}, ErrInvalidArgon2Parallel},
+		{"memory over the 4 GiB ceiling", formatOptionsForTest{KDFType: kdfTypeArgon2id, Argon2Memory: maxArgon2Memory + 1}, ErrInvalidArgument},
+		{"time over the ceiling", formatOptionsForTest{KDFType: kdfTypeArgon2id, Argon2Time: maxArgon2Time + 1}, ErrInvalidArgument},
+		{"parallelism over 255", formatOptionsForTest{KDFType: kdfTypeArgon2i, Argon2Parallel: maxArgon2Parallel + 1}, ErrInvalidArgument},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := validateArgon2CreateCost(tc.opts)
-			var costErr *Argon2CostError
-			if !errors.Is(err, tc.want) || !errors.As(err, &costErr) || costErr.Maximum == 0 {
+			var costErr *KDFCostError
+			if !errors.Is(err, tc.want) || !errors.As(err, &costErr) || costErr.Max == 0 {
 				t.Fatalf("validateArgon2CreateCost = %v, want %v carrying the ceiling", err, tc.want)
 			}
 			if !strings.Contains(err.Error(), "permitted range") {
@@ -629,11 +655,11 @@ func TestArgon2CreationIsBoundedByWhatTheReaderAccepts(t *testing.T) {
 
 	// createKDF itself, which every creation path reaches -- ChangeKey's
 	// inherited cost included -- refuses what the reader would.
-	for _, opts := range []FormatOptions{
-		{KDFType: KDFTypeArgon2id, Argon2Memory: maxArgon2Memory + 1, Argon2Time: 4, Argon2Parallel: 4},
-		{KDFType: KDFTypeArgon2i, Argon2Memory: 65536, Argon2Time: maxArgon2Time + 1, Argon2Parallel: 4},
+	for _, opts := range []formatOptionsForTest{
+		{KDFType: kdfTypeArgon2id, Argon2Memory: maxArgon2Memory + 1, Argon2Time: 4, Argon2Parallel: 4},
+		{KDFType: kdfTypeArgon2i, Argon2Memory: 65536, Argon2Time: maxArgon2Time + 1, Argon2Parallel: 4},
 	} {
-		if kdf, err := createKDF(opts, 64, callerSuppliedCredential); err == nil {
+		if kdf, err := createKDF(opts, 64, callerSuppliedCredential, testVolumeSys().fipsMode, testVolumeSys().calibratedCountFloor, testVolumeSys().cryptoRand); err == nil {
 			t.Errorf("createKDF wrote %+v, a cost validateKDFCost refuses on read", kdf)
 		}
 	}
@@ -642,8 +668,8 @@ func TestArgon2CreationIsBoundedByWhatTheReaderAccepts(t *testing.T) {
 	device := newImage(t, "argon2-ceiling.img")
 	before := fileDigest(t, device)
 	opts := standardFormatOptions(device)
-	opts.KDFType, opts.Argon2Memory = KDFTypeArgon2id, maxArgon2Memory+1
-	if err := Format(opts); !errors.Is(err, ErrInvalidArgon2Memory) {
+	opts.KDFType, opts.Argon2Memory = kdfTypeArgon2id, maxArgon2Memory+1
+	if err := formatForTest(opts); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("Format with Argon2 memory over the ceiling returned %v", err)
 	}
 	if fileDigest(t, device) != before {
@@ -658,7 +684,7 @@ func TestTheAreaKeySizeIsTheWrappingKeysLength(t *testing.T) {
 
 	device := cryptsetupFormat(t, "keyslot-key-size.img", conformancePassphrase,
 		"--key-size", "512", "--keyslot-cipher", "aes-xts-plain64", "--keyslot-key-size", "256")
-	_, metadata, err := ReadHeader(device)
+	_, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -666,7 +692,7 @@ func TestTheAreaKeySizeIsTheWrappingKeysLength(t *testing.T) {
 		t.Fatalf("the fixture keyslot has key_size %d and area.key_size %d, want 64 and 32", ks.KeySize, ks.Area.KeySize)
 	}
 
-	if err := TestKey(device, []byte(conformancePassphrase)); err != nil {
+	if err := testKeyForTest(device, []byte(conformancePassphrase)); err != nil {
 		t.Fatalf("TestKey cannot open cryptsetup's --keyslot-key-size volume: %v", err)
 	}
 	if got := hexOf(volumeKey(t, device, []byte(conformancePassphrase))); got != cryptsetupVolumeKey(t, device) {
@@ -675,13 +701,13 @@ func TestTheAreaKeySizeIsTheWrappingKeysLength(t *testing.T) {
 
 	// A passphrase change keeps the area's key size and stays a keyslot
 	// cryptsetup opens.
-	if err := ChangeKey(device, []byte(conformancePassphrase), []byte(rotatedPassphrase), 0); err != nil {
+	if err := changeKeyForTest(device, []byte(conformancePassphrase), []byte(rotatedPassphrase), 0); err != nil {
 		t.Fatalf("ChangeKey failed: %v", err)
 	}
 	if !cryptsetupOpensSlot(t, device, rotatedPassphrase, 0) {
 		t.Fatal("cryptsetup does not open the keyslot ChangeKey rewrote")
 	}
-	_, metadata, err = ReadHeader(device)
+	_, metadata, err = readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -698,7 +724,7 @@ func TestTheScreenRefusesAnAreaKeySizeXTSCannotUse(t *testing.T) {
 	for _, size := range []int{0, 16, 63} {
 		keyslot := cloneKeyslot(metadata.Keyslots["0"])
 		keyslot.Area.KeySize = size
-		if _, err := screenKeyslot("0", keyslot, metadata.Digests); !errors.Is(err, ErrInvalidKeyslot) {
+		if _, err := screenKeyslot("0", keyslot, metadata.Digests, fips.Probe); !errors.Is(err, ErrKeyslotNotFound) {
 			t.Errorf("area.key_size %d screened as %v, want ErrInvalidKeyslot", size, err)
 		}
 	}
@@ -731,20 +757,20 @@ func TestExistingCredentialsAreNotHeldToTheNewPassphrasePolicy(t *testing.T) {
 
 	t.Run("a 4 KiB key file", func(t *testing.T) {
 		device := cryptsetupFormat(t, "keyfile.img", "", "--key-file", keyPath)
-		if err := TestKey(device, keyFile); err != nil {
+		if err := testKeyForTest(device, keyFile); err != nil {
 			t.Fatalf("TestKey with cryptsetup's key file failed: %v", err)
 		}
-		slot, err := AddKey(device, keyFile, []byte(rotatedPassphrase), fastAddKeyOptions())
+		slot, err := addKeyForTest(device, keyFile, []byte(rotatedPassphrase), fastAddKeyOptions())
 		if err != nil {
 			t.Fatalf("AddKey authenticated by the key file failed: %v", err)
 		}
-		if err := KillSlot(device, keyFile, slot); err != nil {
+		if err := killSlotForTest(device, keyFile, slot); err != nil {
 			t.Fatalf("KillSlot authenticated by the key file failed: %v", err)
 		}
-		if _, err := AddKey(device, keyFile, []byte(rotatedPassphrase), fastAddKeyOptions()); err != nil {
+		if _, err := addKeyForTest(device, keyFile, []byte(rotatedPassphrase), fastAddKeyOptions()); err != nil {
 			t.Fatalf("AddKey failed: %v", err)
 		}
-		if err := RemoveKey(device, keyFile, 0); err != nil {
+		if err := removeKeyForTest(device, keyFile, 0); err != nil {
 			t.Fatalf("RemoveKey with the key file failed: %v", err)
 		}
 		if !cryptsetupOpensSlot(t, device, rotatedPassphrase, -1) {
@@ -754,13 +780,13 @@ func TestExistingCredentialsAreNotHeldToTheNewPassphrasePolicy(t *testing.T) {
 
 	t.Run("a short legacy passphrase", func(t *testing.T) {
 		device := cryptsetupFormat(t, "short.img", "abc")
-		if err := TestKey(device, []byte("abc")); err != nil {
+		if err := testKeyForTest(device, []byte("abc")); err != nil {
 			t.Fatalf("TestKey with a 3-byte passphrase cryptsetup enrolled failed: %v", err)
 		}
-		if _, err := AddKey(device, []byte("abc"), []byte(rotatedPassphrase), fastAddKeyOptions()); err != nil {
+		if _, err := addKeyForTest(device, []byte("abc"), []byte(rotatedPassphrase), fastAddKeyOptions()); err != nil {
 			t.Fatalf("AddKey authenticated by the short passphrase failed: %v", err)
 		}
-		if err := RemoveKey(device, []byte("abc"), 0); err != nil {
+		if err := removeKeyForTest(device, []byte("abc"), 0); err != nil {
 			t.Fatalf("RemoveKey with the short passphrase failed: %v", err)
 		}
 	})
@@ -768,14 +794,14 @@ func TestExistingCredentialsAreNotHeldToTheNewPassphrasePolicy(t *testing.T) {
 	t.Run("the bounds that remain", func(t *testing.T) {
 		device := newImage(t, "bounds.img")
 		formatWithLibrary(t, device)
-		if err := TestKey(device, nil); !errors.Is(err, ErrCredentialEmpty) {
-			t.Errorf("an empty credential returned %v, want ErrCredentialEmpty", err)
+		if err := testKeyForTest(device, nil); !errors.Is(err, ErrInvalidCredential) {
+			t.Errorf("an empty credential returned %v, want ErrInvalidCredential", err)
 		}
-		if err := TestKey(device, make([]byte, MaxCredentialLength+1)); !errors.Is(err, ErrCredentialTooLong) {
-			t.Errorf("a credential over 8 MiB returned %v, want ErrCredentialTooLong", err)
+		if err := testKeyForTest(device, make([]byte, maxCredentialLength+1)); !errors.Is(err, ErrInvalidCredential) {
+			t.Errorf("a credential over 8 MiB returned %v, want ErrInvalidCredential", err)
 		}
 		// A NEW credential is still held to the policy.
-		if _, err := AddKey(device, []byte(conformancePassphrase), []byte("abc"), nil); !errors.Is(err, ErrPassphraseTooShort) {
+		if _, err := addKeyForTest(device, []byte(conformancePassphrase), []byte("abc"), nil); !errors.Is(err, ErrInvalidCredential) {
 			t.Errorf("AddKey enrolled a 3-byte NEW passphrase: %v", err)
 		}
 	})
@@ -787,12 +813,8 @@ func TestExistingCredentialsAreNotHeldToTheNewPassphrasePolicy(t *testing.T) {
 //
 // Not parallel: it substitutes a package variable.
 func TestACalibratedCountIsHeldToTheCallerFloor(t *testing.T) {
-	previous := calibratedCountFloor
-	t.Cleanup(func() { calibratedCountFloor = previous })
-	calibratedCountFloor = pbkdf2FloorFor
-
-	opts := FormatOptions{KDFType: KDFTypePBKDF2, HashAlgo: "sha256", PBKDFIterTime: 1}
-	kdf, err := createKDF(opts, 64, callerSuppliedCredential)
+	opts := formatOptionsForTest{KDFType: kdfTypePBKDF2, HashAlgo: "sha256", PBKDFIterTime: 1}
+	kdf, err := createKDF(opts, 64, callerSuppliedCredential, defaultVolumeSys().fipsMode, defaultVolumeSys().calibratedCountFloor, defaultVolumeSys().cryptoRand)
 	if err != nil {
 		t.Fatalf("createKDF failed: %v", err)
 	}
@@ -801,7 +823,7 @@ func TestACalibratedCountIsHeldToTheCallerFloor(t *testing.T) {
 	}
 
 	// The library-generated exemption is unchanged: its floor is LUKS2's own.
-	kdf, err = createKDF(opts, 64, libraryGeneratedCredential)
+	kdf, err = createKDF(opts, 64, libraryGeneratedCredential, defaultVolumeSys().fipsMode, defaultVolumeSys().calibratedCountFloor, defaultVolumeSys().cryptoRand)
 	if err != nil {
 		t.Fatalf("createKDF failed: %v", err)
 	}
@@ -817,7 +839,7 @@ func nonCanonicalFixture(t *testing.T) string {
 
 	device := newImage(t, "noncanonical.img")
 	formatWithLibrary(t, device)
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -837,11 +859,11 @@ func TestANonCanonicalKeyslotIDIsNeitherOpenedNorCounted(t *testing.T) {
 	defer parallel(t)()
 
 	device := nonCanonicalFixture(t)
-	if err := KillKeyslot(device, 0); !errors.Is(err, ErrLastKeyslot) {
-		t.Fatalf("KillKeyslot(0) beside a keyslot at id \"01\" returned %v, want ErrLastKeyslot", err)
+	if err := killKeyslotForTest(device, 0); !errors.Is(err, ErrLastKeyslot) {
+		t.Fatalf("killKeyslotForTest(0) beside a keyslot at id \"01\" returned %v, want ErrLastKeyslot", err)
 	}
 
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -849,20 +871,20 @@ func TestANonCanonicalKeyslotIDIsNeitherOpenedNorCounted(t *testing.T) {
 	if err := writeHeaderUnvalidated(device, hdr, metadata); err != nil {
 		t.Fatalf("failed to drop keyslot 0: %v", err)
 	}
-	if err := TestKey(device, []byte(handPassphrase)); err == nil {
+	if err := testKeyForTest(device, []byte(handPassphrase)); err == nil {
 		t.Fatal("the unlock scan opened a keyslot at id \"01\", which cryptsetup cannot address")
 	}
 }
 
 // relinkDuring repoints link at to when the derivation seam first runs: in the
 // middle of a keyslot operation, after it has locked and read the device.
-func relinkDuring(t *testing.T, link, to string) {
+func relinkDuring(t *testing.T, link, to string) volumeSys {
 	t.Helper()
 
-	previous := passphraseKDF
-	t.Cleanup(func() { passphraseKDF = previous })
+	sys := testVolumeSys()
+	real := sys.passphraseKDF
 	moved := false
-	passphraseKDF = func(p []byte, kdf *KDF, keySize int) (*enclave.MemoryEnclave, error) {
+	sys.passphraseKDF = func(ctx context.Context, p []byte, kdf *rawKDF, keySize int) (*enclave.MemoryEnclave, error) {
 		if !moved {
 			moved = true
 			if err := os.Remove(link); err != nil {
@@ -872,8 +894,9 @@ func relinkDuring(t *testing.T, link, to string) {
 				return nil, err
 			}
 		}
-		return previous(p, kdf, keySize)
+		return real(ctx, p, kdf, keySize)
 	}
+	return sys
 }
 
 // TestAKeyslotOperationStaysOnTheDeviceItLocked is A10: the path is resolved
@@ -886,11 +909,11 @@ func TestAKeyslotOperationStaysOnTheDeviceItLocked(t *testing.T) {
 
 	for _, op := range []struct {
 		name string
-		run  func(device string) error
+		run  func(device string, sys volumeSys) error
 	}{
-		{"ChangeKey", func(device string) error { return ChangeKey(device, passphrase, rotated, 0) }},
-		{"AddKey", func(device string) error {
-			_, err := AddKey(device, passphrase, rotated, fastAddKeyOptions())
+		{"ChangeKey", func(device string, sys volumeSys) error { return changeKeyWithSys(device, passphrase, rotated, 0, sys) }},
+		{"AddKey", func(device string, sys volumeSys) error {
+			_, err := addKeyWithPolicy(context.Background(), device, passphrase, rotated, fastAddKeyOptions(), callerSuppliedCredential, sys)
 			return err
 		}},
 	} {
@@ -905,16 +928,15 @@ func TestAKeyslotOperationStaysOnTheDeviceItLocked(t *testing.T) {
 			if err := os.Symlink(locked, link); err != nil {
 				t.Fatalf("symlink: %v", err)
 			}
-			relinkDuring(t, link, other)
+			sys := relinkDuring(t, link, other)
 
-			if err := op.run(link); err != nil {
+			if err := op.run(link, sys); err != nil {
 				t.Fatalf("%s failed: %v", op.name, err)
 			}
 			if fileDigest(t, other) != otherBefore {
 				t.Fatal("the device the path was re-pointed at was written to; the operation did not stay on the device it locked")
 			}
-			passphraseKDF = DeriveKeyEnclave
-			if err := TestKey(locked, rotated); err != nil {
+			if err := testKeyForTest(locked, rotated); err != nil {
 				t.Fatalf("the locked device does not open with the new passphrase: %v", err)
 			}
 		})
@@ -930,10 +952,10 @@ func TestADevicePathMayContainTwoDots(t *testing.T) {
 	if err := os.WriteFile(device, []byte("x"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if err := ValidateDevicePath(device); err != nil {
+	if err := validateDevicePath(device); err != nil {
 		t.Fatalf("ValidateDevicePath refused %q: %v", device, err)
 	}
-	if err := ValidateDevicePath("../" + filepath.Base(device)); !errors.Is(err, ErrInvalidPath) {
+	if err := validateDevicePath("../" + filepath.Base(device)); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("a relative path was accepted: %v", err)
 	}
 }
@@ -947,13 +969,13 @@ func TestTheLockedDescriptorMustBeAFileOrABlockDevice(t *testing.T) {
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 		t.Fatalf("mkfifo: %v", err)
 	}
-	lock, err := AcquireFileLock(fifo)
+	lock, err := acquireDeviceLock(fifo)
 	if err != nil {
-		t.Fatalf("AcquireFileLock: %v", err)
+		t.Fatalf("acquireDeviceLock: %v", err)
 	}
 	defer func() { _ = lock.Release() }()
 
-	if _, err := pinnedKeyslotDevice(lock, fifo); !errors.Is(err, ErrInvalidPath) {
+	if _, err := pinnedKeyslotDevice(lock, fifo, testVolumeSys()); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("a FIFO was accepted as a keyslot device: %v", err)
 	}
 }
@@ -968,8 +990,8 @@ func TestANewKeyslotJoinsTheDigestBindingEverySegment(t *testing.T) {
 	metadata, key := bindingFixture(t)
 	mk := secretOf(t, key)
 	twoSegments := *metadata
-	twoSegments.Segments = map[string]*Segment{"0": metadata.Segments["0"], "1": metadata.Segments["0"]}
-	twoSegments.Digests = map[string]*Digest{
+	twoSegments.Segments = map[string]*header.Segment{"0": metadata.Segments["0"], "1": metadata.Segments["0"]}
+	twoSegments.Digests = map[string]*rawDigest{
 		"0": digestVariant(metadata.Digests["0"], []string{"0"}, []string{"0"}),
 		"1": digestVariant(metadata.Digests["0"], []string{"0"}, []string{"0", "1"}),
 	}
@@ -989,7 +1011,7 @@ func TestMigrateToFIPSHoldsItsSourceToTheStrictBinding(t *testing.T) {
 	}
 	device := newImage(t, "strict-source.img")
 	formatWithLibrary(t, device)
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -999,7 +1021,7 @@ func TestMigrateToFIPSHoldsItsSourceToTheStrictBinding(t *testing.T) {
 	}
 	before := fileDigest(t, device)
 
-	if _, err := MigrateToFIPS(device, migrationPassphrase, cheapMigration()); !errors.Is(err, ErrFIPSMigrationUnboundKey) {
+	if _, err := migrateToFIPSForTest(device, migrationPassphrase, cheapMigration()); !errors.Is(err, errFIPSMigrationUnboundKey) {
 		t.Fatalf("MigrateToFIPS from a keyslot with a bound and an unbound digest returned %v, want ErrFIPSMigrationUnboundKey", err)
 	}
 	if fileDigest(t, device) != before {

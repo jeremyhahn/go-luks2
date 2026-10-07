@@ -79,7 +79,6 @@ const (
 // need, and because a role check here cannot be forgotten by a later TestMain.
 func init() {
 	if role := os.Getenv(fipsImportRoleEnv); role != "" {
-		useCheapCalibratedCounts()
 		os.Exit(runFIPSImportChild(role, os.Getenv(fipsImportImageEnv)))
 	}
 }
@@ -92,7 +91,7 @@ func runFIPSImportChild(role, image string) int {
 
 	switch role {
 	case childRoleOpen:
-		err := TestKey(image, []byte(conformancePassphrase))
+		err := testKeyForTest(image, []byte(conformancePassphrase))
 		if err == nil {
 			return childOK
 		}
@@ -108,10 +107,10 @@ func runFIPSImportChild(role, image string) int {
 		// package's -race budget (ci.yml) calibrating and then deriving PBKDF2
 		// in this child and in every open after it, and defend nothing this
 		// test proves.
-		result, err := MigrateToFIPS(image, []byte(conformancePassphrase), cheapMigration())
+		result, err := migrateToFIPSForTest(image, []byte(conformancePassphrase), cheapMigration())
 		if err != nil {
 			fmt.Println(err)
-			if errors.Is(err, ErrFIPSMigrationUnderFIPS) {
+			if errors.Is(err, errFIPSMigrationUnderFIPS) {
 				return childRefusedFIPS
 			}
 			return childFailed
@@ -123,12 +122,12 @@ func runFIPSImportChild(role, image string) int {
 		return childOK
 
 	case childRoleVolumeKey:
-		_, metadata, err := ReadHeader(image)
+		_, metadata, err := readHeaderForTest(image)
 		if err != nil {
 			fmt.Println(err)
 			return childFailed
 		}
-		key, err := getMasterKey(image, []byte(conformancePassphrase), metadata)
+		key, err := getMasterKey(image, []byte(conformancePassphrase), metadata, testVolumeSys())
 		if err != nil {
 			fmt.Println(err)
 			if errors.Is(err, ErrFIPSImportRequired) {
@@ -155,7 +154,7 @@ func runFIPSImportChild(role, image string) int {
 		// Derivations through that salt are what a FIPS parent cannot do,
 		// which is why this is a child.
 		passphrase := []byte(conformancePassphrase)
-		slot, err := AddKey(image, passphrase, passphrase, &AddKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterTime: 1})
+		slot, err := addKeyForTest(image, passphrase, passphrase, &addKeyOptionsForTest{KDFType: kdfTypePBKDF2, PBKDFIterTime: 1})
 		if err != nil {
 			fmt.Println(err)
 			return childFailed
@@ -244,12 +243,12 @@ func TestFIPSImportOfACryptsetupArgon2idVolume(t *testing.T) {
 
 	// The fixture is what the test claims: an Argon2id keyslot. Without this
 	// the whole test could pass against a volume that never needed importing.
-	_, metadata, err := ReadHeader(image)
+	_, metadata, err := readHeaderForTest(image)
 	if err != nil {
 		t.Fatalf("ReadHeader on cryptsetup's volume failed: %v", err)
 	}
 	keyslots, _ := nonApprovedKDFs(metadata)
-	if len(keyslots) != 1 || keyslots[0].Type != KDFTypeArgon2id {
+	if len(keyslots) != 1 || keyslots[0].Type != kdfTypeArgon2id {
 		t.Fatalf("cryptsetup's volume has non-approved keyslots %v, want exactly one argon2id", keyslots)
 	}
 
@@ -282,7 +281,7 @@ func TestFIPSImportOfACryptsetupArgon2idVolume(t *testing.T) {
 	if code != childOK {
 		t.Fatalf("migration in a non-FIPS process exited %d\n%s", code, out)
 	}
-	var result FIPSMigrationResult
+	var result fipsMigrationResultForTest
 	if err := json.Unmarshal([]byte(out), &result); err != nil {
 		t.Fatalf("could not read the migration result %q: %v", out, err)
 	}
@@ -337,16 +336,16 @@ func TestFIPSImportOfACryptsetupVolumeWithShortSalts(t *testing.T) {
 
 	// The fixture is what the test claims: the Argon2 keyslot, plus a keyslot
 	// and a digest whose names are approved and whose salts are not.
-	_, metadata, err := ReadHeader(image)
+	_, metadata, err := readHeaderForTest(image)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 	keyslots, digests := nonApprovedKDFs(metadata)
-	if len(keyslots) != 2 || keyslots[0].Type != KDFTypeArgon2id ||
-		keyslots[1].Type != KDFTypePBKDF2 || keyslots[1].Hash != "sha256" || keyslots[1].Reason == "" {
+	if len(keyslots) != 2 || keyslots[0].Type != kdfTypeArgon2id ||
+		keyslots[1].Type != kdfTypePBKDF2 || keyslots[1].Hash != "sha256" || keyslots[1].Reason == "" {
 		t.Fatalf("fixture keyslots %v, want argon2id and a short-salt pbkdf2-sha256", keyslots)
 	}
-	if len(digests) != 1 || digests[0].Type != KDFTypePBKDF2 || digests[0].Hash != "sha256" || digests[0].Reason == "" {
+	if len(digests) != 1 || digests[0].Type != kdfTypePBKDF2 || digests[0].Hash != "sha256" || digests[0].Reason == "" {
 		t.Fatalf("fixture digests %v, want one short-salt pbkdf2-sha256", digests)
 	}
 
@@ -363,7 +362,7 @@ func TestFIPSImportOfACryptsetupVolumeWithShortSalts(t *testing.T) {
 	if code != childOK {
 		t.Fatalf("migration in a non-FIPS process exited %d\n%s", code, out)
 	}
-	var result FIPSMigrationResult
+	var result fipsMigrationResultForTest
 	if err := json.Unmarshal([]byte(out), &result); err != nil {
 		t.Fatalf("could not read the migration result %q: %v", out, err)
 	}
@@ -411,12 +410,12 @@ func TestFIPSImportOfACryptsetupVolumeWithAnUnboundKey(t *testing.T) {
 
 	// The fixture is what the test claims: an Argon2 keyslot 0 bound to the
 	// data, and an approved keyslot 1 bound to nothing.
-	_, metadata, err := ReadHeader(image)
+	_, metadata, err := readHeaderForTest(image)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 	keyslots, _ := nonApprovedKDFs(metadata)
-	if len(keyslots) != 1 || keyslots[0].ID != "0" || keyslots[0].Type != KDFTypeArgon2id {
+	if len(keyslots) != 1 || keyslots[0].ID != 0 || keyslots[0].Type != kdfTypeArgon2id {
 		t.Fatalf("fixture non-approved keyslots %v, want exactly argon2id keyslot 0", keyslots)
 	}
 	if !keyslotFIPSApproved(metadata.Keyslots["1"]) || keyslotDeclaredForAllSegments(metadata, "1") {
@@ -430,7 +429,7 @@ func TestFIPSImportOfACryptsetupVolumeWithAnUnboundKey(t *testing.T) {
 	if code != childOK {
 		t.Fatalf("migration in a non-FIPS process exited %d\n%s", code, out)
 	}
-	var result FIPSMigrationResult
+	var result fipsMigrationResultForTest
 	if err := json.Unmarshal([]byte(out), &result); err != nil {
 		t.Fatalf("could not read the migration result %q: %v", out, err)
 	}

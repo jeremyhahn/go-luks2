@@ -14,6 +14,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // setHeaderOffset patches the big-endian uint64 HeaderOffset field, which sits
@@ -49,7 +51,7 @@ func TestSetHeaderOffsetPatchesTheRightField(t *testing.T) {
 	defer parallel(t)()
 
 	device, _ := headerSizeVolume(t)
-	setHeaderOffset(t, device, uint64(LUKS2SecondaryHeaderOffset))
+	setHeaderOffset(t, device, uint64(header.SecondaryHeaderOffset))
 
 	f, err := os.Open(device) // #nosec G304 -- device is under t.TempDir()
 	if err != nil {
@@ -57,20 +59,20 @@ func TestSetHeaderOffsetPatchesTheRightField(t *testing.T) {
 	}
 	defer func() { _ = f.Close() }()
 
-	raw := make([]byte, LUKS2HeaderSize)
+	raw := make([]byte, header.HeaderSize)
 	if _, err := f.ReadAt(raw, 0); err != nil {
 		t.Fatalf("failed to read the header: %v", err)
 	}
 
-	var hdr LUKS2BinaryHeader
+	var hdr header.BinaryHeader
 	if err := binary.Read(bytes.NewReader(raw), binary.BigEndian, &hdr); err != nil {
 		t.Fatalf("failed to decode the header: %v", err)
 	}
-	if hdr.HeaderOffset != uint64(LUKS2SecondaryHeaderOffset) {
+	if hdr.HeaderOffset != uint64(header.SecondaryHeaderOffset) {
 		t.Fatalf("HeaderOffset = %d after patching, want %d -- the patcher is writing the wrong field",
-			hdr.HeaderOffset, LUKS2SecondaryHeaderOffset)
+			hdr.HeaderOffset, header.SecondaryHeaderOffset)
 	}
-	if hdr.HeaderSize != uint64(LUKS2HeaderSize+LUKS2DefaultSize) {
+	if hdr.HeaderSize != uint64(header.HeaderSize+header.DefaultSize) {
 		t.Fatalf("HeaderSize = %d after patching HeaderOffset -- the patcher clobbered a neighboring field",
 			hdr.HeaderSize)
 	}
@@ -95,10 +97,10 @@ func TestReadHeaderRefusesAnOutOfRangeHeaderOffset(t *testing.T) {
 	}{
 		{"one byte in, before any legal copy", 1},
 		{"a sector in", 512},
-		{"one below the minimum secondary offset", LUKS2HeaderMinSize - 1},
-		{"unaligned, between two legal offsets", LUKS2HeaderMinSize + 1},
-		{"unaligned by one sector", LUKS2HeaderMinSize + 512},
-		{"just past the maximum offset", LUKS2HeaderMaxOffset + LUKS2HeaderMinSize},
+		{"one below the minimum secondary offset", header.HeaderMinSize - 1},
+		{"unaligned, between two legal offsets", header.HeaderMinSize + 1},
+		{"unaligned by one sector", header.HeaderMinSize + 512},
+		{"just past the maximum offset", header.HeaderMaxOffset + header.HeaderMinSize},
 		{"four gigabytes", 1 << 32},
 		{"larger than any device", 1 << 62},
 		{"the largest uint64", ^uint64(0)},
@@ -113,7 +115,7 @@ func TestReadHeaderRefusesAnOutOfRangeHeaderOffset(t *testing.T) {
 				}
 			}()
 
-			_, _, err := ReadHeader(device)
+			_, _, err := readHeaderForTest(device)
 			if err == nil {
 				t.Fatalf("ReadHeader accepted HeaderOffset=%d", tc.offset)
 			}
@@ -134,7 +136,7 @@ func TestReadHeaderRefusesAnOutOfRangeHeaderOffset(t *testing.T) {
 // The accepted set is not just {0, 0x4000}: a container formatted with a larger
 // metadata area puts its second copy further out, and this library has to keep
 // reading those. The bound is therefore 0, or a 16 KiB-aligned offset up to
-// LUKS2HeaderMaxOffset.
+// header.HeaderMaxOffset.
 func TestHeaderAreaOffsetAcceptsEveryLegalCopyLocation(t *testing.T) {
 	for _, tc := range []struct {
 		offset uint64
@@ -142,16 +144,16 @@ func TestHeaderAreaOffsetAcceptsEveryLegalCopyLocation(t *testing.T) {
 	}{
 		{0, true}, // the primary copy
 		{1, false},
-		{LUKS2HeaderMinSize - 1, false},
-		{LUKS2HeaderMinSize, true}, // the secondary copy at the default 16 KiB metadata size
-		{LUKS2HeaderMinSize + 1, false},
-		{2 * LUKS2HeaderMinSize, true}, // 32 KiB metadata area
-		{1 << 20, true},                // 1 MiB metadata area
-		{LUKS2HeaderMaxOffset, true},
-		{LUKS2HeaderMaxOffset + LUKS2HeaderMinSize, false},
+		{header.HeaderMinSize - 1, false},
+		{header.HeaderMinSize, true}, // the secondary copy at the default 16 KiB metadata size
+		{header.HeaderMinSize + 1, false},
+		{2 * header.HeaderMinSize, true}, // 32 KiB metadata area
+		{1 << 20, true},                  // 1 MiB metadata area
+		{header.HeaderMaxOffset, true},
+		{header.HeaderMaxOffset + header.HeaderMinSize, false},
 		{^uint64(0), false},
 	} {
-		got, err := headerAreaOffset(&LUKS2BinaryHeader{HeaderOffset: tc.offset})
+		got, err := headerAreaOffset(&header.BinaryHeader{HeaderOffset: tc.offset})
 		switch {
 		case tc.accept && err != nil:
 			t.Errorf("headerAreaOffset(%d) = error %v, want it accepted", tc.offset, err)
@@ -165,7 +167,7 @@ func TestHeaderAreaOffsetAcceptsEveryLegalCopyLocation(t *testing.T) {
 
 // TestHeaderOffsetBoundStillAdmitsTheSecondaryHeader is the interaction check
 // between this bound and the SKUL fix: the secondary header legitimately lives
-// at LUKS2SecondaryHeaderOffset and records that offset in its own
+// at header.SecondaryHeaderOffset and records that offset in its own
 // HeaderOffset field, so a bound that only admitted 0 would make the backup
 // unreadable -- trading one broken recovery path for another.
 func TestHeaderOffsetBoundStillAdmitsTheSecondaryHeader(t *testing.T) {
@@ -173,16 +175,16 @@ func TestHeaderOffsetBoundStillAdmitsTheSecondaryHeader(t *testing.T) {
 
 	device, passphrase := headerSizeVolume(t)
 
-	hdr, metadata, err := ReadSecondaryHeader(device)
+	hdr, metadata, err := readSecondaryHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadSecondaryHeader rejected the backup this library just wrote: %v", err)
 	}
-	if hdr.HeaderOffset != uint64(LUKS2SecondaryHeaderOffset) {
-		t.Fatalf("secondary HeaderOffset = %d, want %d", hdr.HeaderOffset, LUKS2SecondaryHeaderOffset)
+	if hdr.HeaderOffset != uint64(header.SecondaryHeaderOffset) {
+		t.Fatalf("secondary HeaderOffset = %d, want %d", hdr.HeaderOffset, header.SecondaryHeaderOffset)
 	}
 
 	// The backup is only a backup if the key material it describes still opens.
-	key, err := getMasterKey(device, passphrase, metadata)
+	key, err := getMasterKey(device, passphrase, metadata, testVolumeSys())
 	if err != nil {
 		t.Fatalf("the metadata from the secondary header does not open the volume: %v", err)
 	}
@@ -202,7 +204,7 @@ func TestReadSecondaryHeaderRejectsThePrimaryMagic(t *testing.T) {
 	device, _ := headerSizeVolume(t)
 
 	// The primary copy read as if it were the secondary.
-	if _, _, err := readHeaderCopy(device, LUKS2PrimaryHeaderOffset); err != nil {
+	if _, _, err := readHeaderCopy(device, header.PrimaryHeaderOffset); err != nil {
 		t.Fatalf("sanity: the primary copy should read as the primary: %v", err)
 	}
 
@@ -212,7 +214,7 @@ func TestReadSecondaryHeaderRejectsThePrimaryMagic(t *testing.T) {
 	}
 	// Overwrite the secondary copy's magic with the primary's, which is exactly
 	// what this library used to write there.
-	if _, err := f.WriteAt([]byte(LUKS2Magic), LUKS2SecondaryHeaderOffset); err != nil {
+	if _, err := f.WriteAt([]byte(header.Magic), header.SecondaryHeaderOffset); err != nil {
 		_ = f.Close()
 		t.Fatalf("failed to patch the secondary magic: %v", err)
 	}
@@ -220,7 +222,7 @@ func TestReadSecondaryHeaderRejectsThePrimaryMagic(t *testing.T) {
 		t.Fatalf("failed to close the volume: %v", err)
 	}
 
-	_, _, err = ReadSecondaryHeader(device)
+	_, _, err = readSecondaryHeaderForTest(device)
 	if err == nil {
 		t.Fatal("ReadSecondaryHeader accepted a backup carrying the PRIMARY magic")
 	}
@@ -235,9 +237,9 @@ func TestExpectedMagic(t *testing.T) {
 		offset int64
 		want   string
 	}{
-		{LUKS2PrimaryHeaderOffset, LUKS2Magic},
-		{LUKS2SecondaryHeaderOffset, LUKS2SecondaryMagic},
-		{1 << 20, LUKS2SecondaryMagic}, // a larger metadata area moves the copy, not its magic
+		{header.PrimaryHeaderOffset, header.Magic},
+		{header.SecondaryHeaderOffset, header.SecondaryMagic},
+		{1 << 20, header.SecondaryMagic}, // a larger metadata area moves the copy, not its magic
 	} {
 		if got := expectedMagic(tc.offset); got != tc.want {
 			t.Errorf("expectedMagic(%d) = %q, want %q", tc.offset, got, tc.want)
@@ -245,10 +247,10 @@ func TestExpectedMagic(t *testing.T) {
 	}
 
 	// The two magics must differ, which is the entire point of the second one.
-	if LUKS2Magic == LUKS2SecondaryMagic {
+	if header.Magic == header.SecondaryMagic {
 		t.Fatal("the primary and secondary magics are identical")
 	}
-	if len(LUKS2SecondaryMagic) != LUKS2MagicLen {
-		t.Fatalf("LUKS2SecondaryMagic is %d bytes, want %d", len(LUKS2SecondaryMagic), LUKS2MagicLen)
+	if len(header.SecondaryMagic) != header.MagicLen {
+		t.Fatalf("header.SecondaryMagic is %d bytes, want %d", len(header.SecondaryMagic), header.MagicLen)
 	}
 }

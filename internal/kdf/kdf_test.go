@@ -5,11 +5,13 @@
 package kdf
 
 import (
+	"context"
 	"crypto"
 	"encoding/base64"
 	"errors"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 	"github.com/jeremyhahn/go-luks2/internal/fips"
@@ -33,18 +35,18 @@ func TestDerivePlainPBKDF2(t *testing.T) {
 	iterations := 1000
 	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: b64("salt"), Iterations: &iterations}
 
-	key1, err := testDeriver.DerivePlain([]byte("passphrase"), p, 32)
+	key1, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), p, 32)
 	if err != nil {
 		t.Fatalf("DerivePlain: %v", err)
 	}
-	key2, err := testDeriver.DerivePlain([]byte("passphrase"), p, 32)
+	key2, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), p, 32)
 	if err != nil {
 		t.Fatalf("DerivePlain: %v", err)
 	}
 	if string(key1) != string(key2) {
 		t.Fatal("the same parameters derived different keys")
 	}
-	key3, err := testDeriver.DerivePlain([]byte("different"), p, 32)
+	key3, err := testDeriver.DerivePlain(context.Background(), []byte("different"), p, 32)
 	if err != nil {
 		t.Fatalf("DerivePlain: %v", err)
 	}
@@ -59,16 +61,16 @@ func TestDerivePlainArgon2(t *testing.T) {
 		t.Run(typ, func(t *testing.T) {
 			p := Params{Type: typ, Salt: b64("saltsaltsaltsalt"), Time: &time, Memory: &memory, CPUs: &cpus}
 			if fips.Probe() {
-				if _, err := testDeriver.DerivePlain([]byte("passphrase"), p, 32); !errors.Is(err, fips.ErrNotApproved) {
+				if _, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), p, 32); !errors.Is(err, fips.ErrNotApproved) {
 					t.Fatalf("argon2 in FIPS mode: got %v, want ErrNotApproved", err)
 				}
 				return
 			}
-			key1, err := testDeriver.DerivePlain([]byte("passphrase"), p, 32)
+			key1, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), p, 32)
 			if err != nil {
 				t.Fatalf("DerivePlain: %v", err)
 			}
-			key2, err := testDeriver.DerivePlain([]byte("passphrase"), p, 32)
+			key2, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), p, 32)
 			if err != nil {
 				t.Fatalf("DerivePlain: %v", err)
 			}
@@ -83,7 +85,7 @@ func TestDerivePlainRefusesAZeroOrNegativeKeySize(t *testing.T) {
 	iterations := 1000
 	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: b64("salt"), Iterations: &iterations}
 	for _, keySize := range []int{0, -1} {
-		if _, err := testDeriver.DerivePlain([]byte("passphrase"), p, keySize); err == nil {
+		if _, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), p, keySize); err == nil {
 			t.Fatalf("keySize %d: accepted", keySize)
 		}
 	}
@@ -92,14 +94,14 @@ func TestDerivePlainRefusesAZeroOrNegativeKeySize(t *testing.T) {
 func TestDerivePlainRefusesAnInvalidSalt(t *testing.T) {
 	iterations := 1000
 	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: "!!!not-base64!!!", Iterations: &iterations}
-	if _, err := testDeriver.DerivePlain([]byte("passphrase"), p, 32); err == nil {
+	if _, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), p, 32); err == nil {
 		t.Fatal("an invalid salt was accepted")
 	}
 }
 
 func TestDerivePlainRefusesAnUnsupportedType(t *testing.T) {
 	p := Params{Type: "scrypt", Salt: b64("salt")}
-	_, err := testDeriver.DerivePlain([]byte("passphrase"), p, 32)
+	_, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), p, 32)
 	if !errors.Is(err, ErrUnsupportedKDF) {
 		t.Fatalf("got %v, want an error wrapping ErrUnsupportedKDF", err)
 	}
@@ -107,7 +109,7 @@ func TestDerivePlainRefusesAnUnsupportedType(t *testing.T) {
 
 func TestDerivePlainPBKDF2MissingIterations(t *testing.T) {
 	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: b64("salt")}
-	if _, err := testDeriver.DerivePlain([]byte("passphrase"), p, 32); err == nil {
+	if _, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), p, 32); err == nil {
 		t.Fatal("missing iterations was accepted")
 	}
 }
@@ -115,7 +117,7 @@ func TestDerivePlainPBKDF2MissingIterations(t *testing.T) {
 func TestDerivePlainPBKDF2UnsupportedHash(t *testing.T) {
 	iterations := 1000
 	p := Params{Type: "pbkdf2", Hash: "md5", Salt: b64("salt"), Iterations: &iterations}
-	if _, err := testDeriver.DerivePlain([]byte("passphrase"), p, 32); err == nil {
+	if _, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), p, 32); err == nil {
 		t.Fatal("an unsupported hash was accepted")
 	}
 }
@@ -132,7 +134,7 @@ func TestDeriveArgon2MissingParams(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := testDeriver.DerivePlain([]byte("passphrase"), tc.p, 32); err == nil {
+			if _, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), tc.p, 32); err == nil {
 				t.Fatal("accepted")
 			}
 		})
@@ -143,7 +145,7 @@ func TestDeriveArgon2CPUsBounds(t *testing.T) {
 	timeVal, memory := 1, 64
 	for _, cpus := range []int{0, 256, -1} {
 		p := Params{Type: "argon2i", Salt: b64("salt"), Time: &timeVal, Memory: &memory, CPUs: &cpus}
-		if _, err := testDeriver.DerivePlain([]byte("passphrase"), p, 32); err == nil && !fips.Probe() {
+		if _, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), p, 32); err == nil && !fips.Probe() {
 			t.Fatalf("cpus %d: accepted", cpus)
 		}
 	}
@@ -152,7 +154,7 @@ func TestDeriveArgon2CPUsBounds(t *testing.T) {
 func TestDeriveArgon2TimeBelowOne(t *testing.T) {
 	zero, memory, cpus := 0, 64, 1
 	p := Params{Type: "argon2i", Salt: b64("salt"), Time: &zero, Memory: &memory, CPUs: &cpus}
-	if _, err := testDeriver.DerivePlain([]byte("passphrase"), p, 32); err == nil && !fips.Probe() {
+	if _, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), p, 32); err == nil && !fips.Probe() {
 		t.Fatal("a time cost of 0 was accepted")
 	}
 }
@@ -161,7 +163,7 @@ func TestDeriveArgon2MemoryBelowFloor(t *testing.T) {
 	timeVal, cpus := 1, 1
 	for _, memory := range []int{0, -1, MinArgon2Memory - 1} {
 		p := Params{Type: "argon2i", Salt: b64("salt"), Time: &timeVal, Memory: &memory, CPUs: &cpus}
-		if _, err := testDeriver.DerivePlain([]byte("passphrase"), p, 32); err == nil && !fips.Probe() {
+		if _, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), p, 32); err == nil && !fips.Probe() {
 			t.Fatalf("memory %d: accepted", memory)
 		}
 	}
@@ -170,7 +172,7 @@ func TestDeriveArgon2MemoryBelowFloor(t *testing.T) {
 func TestDeriveArgon2KeySizeOverflow(t *testing.T) {
 	timeVal, memory, cpus := 1, 64, 1
 	p := Params{Type: "argon2i", Salt: b64("salt"), Time: &timeVal, Memory: &memory, CPUs: &cpus}
-	if _, err := testDeriver.DerivePlain([]byte("passphrase"), p, -1); err == nil {
+	if _, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), p, -1); err == nil {
 		t.Fatal("a negative key length was accepted")
 	}
 }
@@ -178,7 +180,7 @@ func TestDeriveArgon2KeySizeOverflow(t *testing.T) {
 func TestDerive(t *testing.T) {
 	iterations := 1000
 	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: b64("salt"), Iterations: &iterations}
-	e, err := testDeriver.Derive([]byte("passphrase"), p, 32)
+	e, err := testDeriver.Derive(context.Background(), []byte("passphrase"), p, 32)
 	if err != nil {
 		t.Fatalf("Derive: %v", err)
 	}
@@ -192,7 +194,7 @@ func TestDeriveFromSecret(t *testing.T) {
 	iterations := 1000
 	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: b64("salt"), Iterations: &iterations}
 
-	plain, err := testDeriver.DerivePlain([]byte("the master key"), p, 32)
+	plain, err := testDeriver.DerivePlain(context.Background(), []byte("the master key"), p, 32)
 	if err != nil {
 		t.Fatalf("DerivePlain: %v", err)
 	}
@@ -203,7 +205,7 @@ func TestDeriveFromSecret(t *testing.T) {
 	}
 	defer mustDestroy(t, material)
 
-	derived, err := testDeriver.DeriveFromSecret(material, p, 32)
+	derived, err := testDeriver.DeriveFromSecret(context.Background(), material, p, 32)
 	if err != nil {
 		t.Fatalf("DeriveFromSecret: %v", err)
 	}
@@ -292,7 +294,7 @@ func TestU32(t *testing.T) {
 
 func TestDeriveErrorPath(t *testing.T) {
 	p := Params{Type: "scrypt", Salt: b64("salt")}
-	if _, err := testDeriver.Derive([]byte("passphrase"), p, 32); err == nil {
+	if _, err := testDeriver.Derive(context.Background(), []byte("passphrase"), p, 32); err == nil {
 		t.Fatal("Derive accepted an unsupported type")
 	}
 }
@@ -305,8 +307,64 @@ func TestDeriveFromSecretErrorPath(t *testing.T) {
 	defer mustDestroy(t, material)
 
 	p := Params{Type: "scrypt", Salt: b64("salt")}
-	if _, err := testDeriver.DeriveFromSecret(material, p, 32); err == nil {
+	if _, err := testDeriver.DeriveFromSecret(context.Background(), material, p, 32); err == nil {
 		t.Fatal("DeriveFromSecret accepted an unsupported type")
+	}
+}
+
+// TestDerivePlainCancelledBeforeDerivationReturnsCtxErr is D.2's KDF row: a
+// ctx canceled before the derivation starts is checked before any work is
+// done, and no key material is produced.
+func TestDerivePlainCancelledBeforeDerivationReturnsCtxErr(t *testing.T) {
+	iterations := 1000
+	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: b64("salt"), Iterations: &iterations}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	key, err := testDeriver.DerivePlain(ctx, []byte("passphrase"), p, 32)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("DerivePlain with an already-canceled ctx = %v, want context.Canceled", err)
+	}
+	if key != nil {
+		t.Fatal("DerivePlain with an already-canceled ctx returned key bytes")
+	}
+}
+
+// TestDeriveCancelledBeforeDerivationReturnsNoEnclave is Derive's half of the
+// same row: a canceled ctx produces no enclave for Custody to leak.
+func TestDeriveCancelledBeforeDerivationReturnsNoEnclave(t *testing.T) {
+	iterations := 1000
+	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: b64("salt"), Iterations: &iterations}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	e, err := testDeriver.Derive(ctx, []byte("passphrase"), p, 32)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Derive with an already-canceled ctx = %v, want context.Canceled", err)
+	}
+	if e != nil {
+		t.Fatal("Derive with an already-canceled ctx returned a non-nil enclave")
+	}
+}
+
+// TestDerivePlainCancelledDuringDerivationDestroysOutput is D.2's KDF row's
+// other half: a derivation already in flight when its ctx is canceled is
+// NOT interrupted (crypto/pbkdf2.Key has no interruption point), but once it
+// finishes, the output is destroyed rather than handed back, and ctx.Err()'s
+// kind is returned. The iteration count is large enough, against the 1ms
+// deadline, that the derivation is still running when the deadline fires.
+func TestDerivePlainCancelledDuringDerivationDestroysOutput(t *testing.T) {
+	iterations := 100_000
+	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: b64("salt"), Iterations: &iterations}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+
+	key, err := testDeriver.DerivePlain(ctx, []byte("passphrase"), p, 32)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("DerivePlain canceled mid-derivation = %v, want context.DeadlineExceeded", err)
+	}
+	if key != nil {
+		t.Fatal("DerivePlain canceled mid-derivation handed back key bytes instead of destroying them")
 	}
 }
 

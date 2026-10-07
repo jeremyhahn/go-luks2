@@ -41,7 +41,8 @@
 //     enclaved, because that is the master key spread wide.
 //   - KDF salts and the stored digest. Both are cleartext fields of the LUKS2
 //     header. They are not secret and locking them protects nothing.
-//   - Passphrases arriving as []byte from a caller. See below.
+//   - The few credentials that reach this module as plain bytes from outside
+//     it. See exposure 1.
 //
 // # The residual exposures
 //
@@ -49,21 +50,31 @@
 // guarantee this file provides is narrower than "the key is never in ordinary
 // memory" and an overclaim is worse than the current state.
 //
-//  1. CALLER-SUPPLIED CREDENTIALS. The exported API takes passphrases as plain
-//     []byte (Format, Unlock, AddKey, ...) and a recovery key as a string
-//     (ParseRecoveryKey). Those bytes are the caller's, in the caller's memory,
-//     before this module is entered; it cannot lock them retroactively and must
-//     not wipe a buffer it does not own. It borrows them and, for the string,
-//     copies once into locked memory -- a Go string cannot be borrowed without
-//     copying and cannot be wiped at all.
+//  1. CREDENTIALS THAT ARRIVE AS PLAIN BYTES. The library API does not have this
+//     problem: Format, Unlock, UnlockKeyslot, AddKeyslot, ChangeKeyslot and
+//     ParseRecoveryKey all take a *enclave.MemoryEnclave, which the caller owns
+//     and this module only borrows. What is left is the places a credential is
+//     first read from outside the process, before any enclave exists:
 //
-//     What this does NOT cover is copies this module makes for its own
-//     convenience afterwards. LoadRecoveryKey used to read the file into a
-//     []byte, stringify it and split it, and ParseRecoveryKey used to normalise
-//     through ReplaceAll and ToLower -- four unwipeable copies between them, all
-//     avoidable, none of them forced by a boundary. They are gone rather than
-//     listed here. This entry is for material that arrives already exposed, not
-//     a place to record exposure this module chose.
+//     - The CLI's terminal prompt. term.ReadPassword returns a plain []byte; it
+//     is moved into an enclave (and the source wiped) immediately, but the
+//     bytes exist on the heap until then and in whatever the terminal driver
+//     buffered. --key-file is read straight into locked memory a byte at a
+//     time, so no plain copy is made in this process; the file or pipe it
+//     comes from is outside this module's reach.
+//     - keyprovider.WithStdin takes a []byte. It is for NON-SECRET helper
+//     input only (the FIDO2 protocols pass a salt and a relying-party id
+//     through it). Passing a credential through it would put the credential
+//     in an unwipeable buffer, so do not.
+//     - keyprovider.NewFIDO2Credential returns the credential id as a []byte.
+//     The id is not secret: it is written into the LUKS2 header in the clear.
+//
+//     This module cannot lock those bytes retroactively and must not wipe a
+//     buffer it does not own. What it does NOT do is make copies of its own
+//     afterwards: normalising or parsing a recovery key works on enclave
+//     contents in place and never goes through a Go string. This entry is for
+//     material that arrives already exposed, not a place to record exposure
+//     this module chose.
 //
 //  2. VALIDATED-MODULE KDF INPUT -- and on two paths the input is THE MASTER
 //     KEY. This one is a RULED position, not an oversight; see below.
@@ -80,18 +91,26 @@
 //     a second copy, and derives the ipad/opad pair held for the whole
 //     derivation; recovering either recovers the input exactly.
 //
-//     For a passphrase that only widens exposure 1. What matters is
-//     deriveKeySecret, which borrows an enclave and hands the borrowed slice
-//     straight down this path -- so the "password" is the VOLUME MASTER KEY.
-//     Its two callers are verifyMasterKey, on every unlock, once per digest
-//     tried, and createDigest, on every format.
+//     This applies to EVERY credential an enclave holds, not only the master
+//     key: derivePBKDF2 is reached by borrowing the enclave (the passphrase, a
+//     recovery key, a key-provider secret) and handing the borrowed slice to
+//     pbkdf2.Key(string(...)). The enclave stays the owner; the string copy is
+//     the exposure.
 //
-//     "Every unlock" includes UnlockWithVolumeKey (#79). That path takes the
-//     key from the caller and skips the keyslot derivation entirely, so the
-//     passphrase side of this entry does not apply to it. It still verifies
-//     the key against the segment's digests through the same loop, so the
-//     master-key side does, once per digest tried. Skipping that check would
-//     let a wrong key map garbage as the plaintext device.
+//     On two paths the "password" is the VOLUME MASTER KEY, because
+//     deriveKeySecret borrows an enclave and hands the slice straight down
+//     this path. Its two callers are verifyMasterKey, on every unlock, once per
+//     digest tried, and createDigest, on every format. "Every unlock" includes
+//     Volume.UnlockWithVolumeKey (#79): that path takes the key from the
+//     caller and skips the keyslot derivation, but it still verifies the key
+//     against the segment's digests through the same loop, once per digest
+//     tried. Skipping that check would let a wrong key map garbage as the
+//     plaintext device.
+//
+//     The Argon2 types have the same shape. golang.org/x/crypto/argon2
+//     copies its password input into BLAKE2b state that is never wiped, and
+//     returns its result on the heap (exposure 3), so an enclave-held
+//     credential is exposed there too, for as long as that memory survives.
 //
 //     # Why this is accepted rather than fixed
 //
@@ -130,9 +149,8 @@
 //
 //  3. KDF OUTPUT. crypto/pbkdf2.Key and argon2.IDKey allocate and RETURN their
 //     result on the ordinary Go heap; neither can be asked to write into a
-//     caller-provided buffer. DeriveKeyEnclave moves that result into an enclave
-//     immediately -- enclave.NewMemoryEnclave takes ownership and wipes the
-//     source -- so the window is the return statement plus one copy, but it is
+//     caller-provided buffer. The derivation moves that result into an enclave
+//     immediately -- Custody.Adopt takes ownership and wipes the source -- so the window is the return statement plus one copy, but it is
 //     not zero, and the KDF's own internal scratch is beyond reach entirely.
 //
 //  4. EXPANDED CIPHER KEYS. xts.NewCipher(aes.NewCipher, key) holds the AES key
@@ -151,6 +169,11 @@
 //     package does not use; the XTS ciphers here are built by this module
 //     through x/crypto/xts, outside any runtime/secret.Do, so their schedules
 //     persist on the heap exactly as described whichever build is running.
+//
+//     FIPS: the keyslot wrap uses golang.org/x/crypto/xts, which is NOT part of
+//     the Go Cryptographic Module. Only the AES block cipher underneath it is.
+//     The XTS mode itself therefore runs outside the validated boundary; see
+//     docs/fips for what that means for a FIPS deployment.
 //
 //  5. THE KERNEL KEYRING. This entry used to be THE DEVICE-MAPPER TABLE, and
 //     it was the largest hole in this list: dm-crypt was handed the volume key
@@ -185,12 +208,19 @@
 //     keyring, the window is one ioctl wide and confers use-by-reference, not
 //     disclosure.
 //
-// That list is FIVE, and it is meant to be exhaustive. It was three, and the
-// missing two were the input side of the KDF -- documented only as an output
-// problem -- and the cipher schedule, which was noted locally beside the
-// keyslot cipher and never brought here. If a sixth is found, it belongs in this list on the same
-// commit that finds it: the preamble above says an overclaim is worse than the
-// current state, and a list that is quietly short IS the overclaim.
+//  6. HASH STATE. sha256.Sum256 leaves its input in the hash's internal state,
+//     which is on the stack or heap and cannot be wiped. Two calls hash secret
+//     material: areacipher's cbcSectors derives the ESSIV salt as
+//     sha256.Sum256(area key), and recoverykey.Hash digests the credential.
+//     The ESSIV salt array is cleared after use and the
+//     recovery-key digest is public by design, but the hash's internal state,
+//     which held the key or credential, is out of reach: the stdlib offers no
+//     way to wipe it.
+//
+// That list is SIX, and it is meant to be exhaustive. If a seventh is found,
+// it belongs in this list on the same commit that finds it: the preamble above
+// says an overclaim is worse than the current state, and a list that is quietly
+// short IS the overclaim.
 //
 // Entry 5 was REWRITTEN rather than struck out, and that distinction is the
 // preamble's rule in action. The exposure it named is genuinely closed, but
@@ -207,4 +237,6 @@
 // # Release
 //
 // Every enclave this module creates is released through Custody.Release, the
+// one place that destroys an enclave and reports a failed release. Code that
+// owns an enclave defers it; code that only borrows one never releases it.
 package secret

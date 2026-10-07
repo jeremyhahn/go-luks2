@@ -53,4 +53,4 @@ import "errors"
 // be admitted is refused before any derivation (Custody.Admissible); keyslots
 // are opened one at a time, so that keyslot is the scan's peak. The key
 // DERIVATION of one operation is bounded too, by the module's KDF budget.
-var ErrProtectedMemory = errors.New("key material could not be held in protected memory")
+var ErrProtectedMemory = errors.New("luks2: key material could not be held in protected memory")

@@ -8,6 +8,7 @@ package luks2
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -20,6 +21,8 @@ import (
 
 	"github.com/jeremyhahn/go-luks2/internal/af"
 	"github.com/jeremyhahn/go-luks2/internal/areacipher"
+	"github.com/jeremyhahn/go-luks2/internal/fips"
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 func TestFindAvailableKeyslot(t *testing.T) {
@@ -84,14 +87,14 @@ func TestFindAvailableKeyslot(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Build metadata with existing slots
-			metadata := &LUKS2Metadata{
-				Keyslots: make(map[string]*Keyslot),
+			metadata := &header.Metadata{
+				Keyslots: make(map[string]*header.Keyslot),
 			}
 			for _, slot := range tt.existingSlots {
-				metadata.Keyslots[strconv.Itoa(slot)] = &Keyslot{Type: "luks2"}
+				metadata.Keyslots[strconv.Itoa(slot)] = &header.Keyslot{Type: "luks2"}
 			}
 
-			opts := &AddKeyOptions{}
+			opts := &addKeyOptionsForTest{}
 			if tt.requestedSlot != nil {
 				opts.Keyslot = tt.requestedSlot
 			}
@@ -118,13 +121,13 @@ func TestCalculateNextKeyslotOffset(t *testing.T) {
 	tests := []struct {
 		name           string
 		keyslotsStart  int64
-		keyslots       map[string]*Keyslot
+		keyslots       map[string]*header.Keyslot
 		expectedOffset int64
 	}{
 		{
 			name:           "no existing keyslots",
 			keyslotsStart:  0x8000,
-			keyslots:       map[string]*Keyslot{},
+			keyslots:       map[string]*header.Keyslot{},
 			expectedOffset: 0x8000, // 32KB: twice a 16 KiB header area
 		},
 		{
@@ -134,15 +137,15 @@ func TestCalculateNextKeyslotOffset(t *testing.T) {
 			// rather than at the 0x8000 this function used to hardcode.
 			name:           "no existing keyslots, 32 KiB metadata area",
 			keyslotsStart:  0x10000,
-			keyslots:       map[string]*Keyslot{},
+			keyslots:       map[string]*header.Keyslot{},
 			expectedOffset: 0x10000,
 		},
 		{
 			name:          "one keyslot",
 			keyslotsStart: 0x8000,
-			keyslots: map[string]*Keyslot{
+			keyslots: map[string]*header.Keyslot{
 				"0": {
-					Area: &KeyslotArea{
+					Area: &header.KeyslotArea{
 						Offset: "32768",  // 0x8000
 						Size:   "262144", // 256KB
 					},
@@ -153,15 +156,15 @@ func TestCalculateNextKeyslotOffset(t *testing.T) {
 		{
 			name:          "multiple keyslots",
 			keyslotsStart: 0x8000,
-			keyslots: map[string]*Keyslot{
+			keyslots: map[string]*header.Keyslot{
 				"0": {
-					Area: &KeyslotArea{
+					Area: &header.KeyslotArea{
 						Offset: "32768",
 						Size:   "262144",
 					},
 				},
 				"1": {
-					Area: &KeyslotArea{
+					Area: &header.KeyslotArea{
 						Offset: "294912",
 						Size:   "262144",
 					},
@@ -173,7 +176,7 @@ func TestCalculateNextKeyslotOffset(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			metadata := &LUKS2Metadata{
+			metadata := &header.Metadata{
 				Keyslots: tt.keyslots,
 			}
 
@@ -195,8 +198,8 @@ func TestKeyslotInfoList(t *testing.T) {
 		ID:         1,
 		Type:       "luks2",
 		KeySize:    64,
-		Priority:   1,
-		KDFType:    "argon2id",
+		Priority:   PriorityNormal,
+		KDF:        KDFParams{Type: KDFArgon2id},
 		Encryption: "aes-xts-plain64",
 	}
 
@@ -212,8 +215,8 @@ func TestKeyslotInfoList(t *testing.T) {
 	if info.Priority != 1 {
 		t.Errorf("expected Priority 1, got %d", info.Priority)
 	}
-	if info.KDFType != "argon2id" {
-		t.Errorf("expected KDFType 'argon2id', got %s", info.KDFType)
+	if info.KDF.Type != KDFArgon2id {
+		t.Errorf("expected KDF.Type %q, got %s", KDFArgon2id, info.KDF.Type)
 	}
 	if info.Encryption != "aes-xts-plain64" {
 		t.Errorf("expected Encryption 'aes-xts-plain64', got %s", info.Encryption)
@@ -222,10 +225,10 @@ func TestKeyslotInfoList(t *testing.T) {
 
 func TestAddKeyOptionsDefaults(t *testing.T) {
 	// Test that nil options doesn't cause panic
-	opts := &AddKeyOptions{}
+	opts := &addKeyOptionsForTest{}
 
 	if opts.Keyslot != nil {
-		t.Error("expected Keyslot to be nil by default")
+		t.Error("expected header.Keyslot to be nil by default")
 	}
 	if opts.KDFType != "" {
 		t.Error("expected KDFType to be empty by default")
@@ -248,8 +251,8 @@ func TestMaxKeyslotsConstant(t *testing.T) {
 }
 
 func TestKeyslotAreaAlignment(t *testing.T) {
-	if KeyslotAreaAlignment != 4096 {
-		t.Errorf("expected KeyslotAreaAlignment to be 4096, got %d", KeyslotAreaAlignment)
+	if keyslotAreaAlignment != 4096 {
+		t.Errorf("expected keyslotAreaAlignment to be 4096, got %d", keyslotAreaAlignment)
 	}
 }
 
@@ -265,18 +268,36 @@ type keyslotRemovalPath struct {
 	remove func(device string, passphrase []byte, slot int) error
 }
 
+// killKeyslotForTest removes slot unconditionally, the way the pre-redesign
+// library's luks2.KillKeyslot did before B.6 renamed it to
+// (*luks2.Volume).RemoveKeyslot(ctx, slot).
+func killKeyslotForTest(device string, slot int) error {
+	v, err := Open(context.Background(), device, withTestSys(testVolumeSys()))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = v.Close() }()
+	return v.RemoveKeyslot(context.Background(), slot)
+}
+
+// removeKeyForTest and killSlotForTest are in writeheaderpath_test.go (no
+// build constraint): lockcompat_integration_test.go and
+// lockwait_integration_test.go need them too.
+
 var keyslotRemovalPaths = []keyslotRemovalPath{
 	{"RemoveKey", func(device string, passphrase []byte, slot int) error {
-		return RemoveKey(device, passphrase, slot)
+		return removeKeyForTest(device, passphrase, slot)
 	}},
 	{"KillSlot", func(device string, passphrase []byte, slot int) error {
-		return KillSlot(device, passphrase, slot)
+		return killSlotForTest(device, passphrase, slot)
 	}},
-	{"KillKeyslot", func(device string, _ []byte, slot int) error {
-		return KillKeyslot(device, slot)
-	}},
-	{"WipeKeyslot", func(device string, _ []byte, slot int) error {
-		return WipeKeyslot(device, slot)
+	{"RemoveKeyslot", func(device string, _ []byte, slot int) error {
+		v, err := Open(context.Background(), device, withTestSys(testVolumeSys()))
+		if err != nil {
+			return err
+		}
+		defer func() { _ = v.Close() }()
+		return v.RemoveKeyslot(context.Background(), slot)
 	}},
 }
 
@@ -347,7 +368,7 @@ func TestEveryKeyslotRemovalPathRefusesToDestroyTheLastUsableKeyslot(t *testing.
 					t.Fatalf("%s destroyed the only keyslot that can open this volume", path.name)
 				}
 			}
-			if err := TestKey(device, passphrase); err != nil {
+			if err := testKeyForTest(device, passphrase); err != nil {
 				t.Fatalf("the volume no longer opens after four REFUSED removals: %v", err)
 			}
 		})
@@ -359,7 +380,7 @@ func TestEveryKeyslotRemovalPathRefusesToDestroyTheLastUsableKeyslot(t *testing.
 func keyslotAreaExtent(t *testing.T, device, id string) (offset, size int64) {
 	t.Helper()
 
-	_, metadata, err := ReadHeader(device)
+	_, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -398,7 +419,7 @@ func TestEveryKeyslotRemovalPathPermitsARemovalThatLeavesASurvivor(t *testing.T)
 				t.Fatalf("a removal leaving a counted survivor was refused: %v", err)
 			}
 
-			_, metadata, err := ReadHeader(device)
+			_, metadata, err := readHeaderForTest(device)
 			if err != nil {
 				t.Fatalf("ReadHeader failed: %v", err)
 			}
@@ -432,7 +453,7 @@ func overlappingSiblingVolume(t *testing.T, name string, shift int64) (device st
 	device = newImage(t, name)
 	formatWithLibrary(t, device)
 
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -498,7 +519,7 @@ func TestRemovingAKeyslotRefusesWhenItsAreaOverlapsAKeyslotThatStillWorks(t *tes
 	}{
 		{"identical areas", 0},
 		// A partial overlap is the case a "same offset" check would miss.
-		{"partially overlapping areas", KeyslotAreaAlignment},
+		{"partially overlapping areas", keyslotAreaAlignment},
 	} {
 		golden, offset, size := goldenOverlappingVolume(t, overlap.shift)
 
@@ -507,7 +528,7 @@ func TestRemovingAKeyslotRefusesWhenItsAreaOverlapsAKeyslotThatStillWorks(t *tes
 				device := restoreVolume(t, "overlap.img", golden)
 				before := readAreaBytes(t, device, offset, size)
 
-				// Keyslot 0 is the one removed, and keyslot 1 is a survivor by
+				// header.Keyslot 0 is the one removed, and keyslot 1 is a survivor by
 				// the guard's count, so the ENTRY-level half of the gate
 				// permits this and only the BYTE-level half can refuse it.
 				//
@@ -528,7 +549,7 @@ func TestRemovingAKeyslotRefusesWhenItsAreaOverlapsAKeyslotThatStillWorks(t *tes
 				if !bytes.Equal(before, readAreaBytes(t, device, offset, size)) {
 					t.Fatal("the removal was refused AND the surviving keyslot's key material was modified")
 				}
-				if err := TestKey(device, passphrase); err != nil {
+				if err := testKeyForTest(device, passphrase); err != nil {
 					t.Fatalf("the volume no longer opens after a REFUSED removal: %v", err)
 				}
 			})
@@ -551,7 +572,7 @@ func TestChangeKeyRefusesToZeroAKeyslotThatStillWorks(t *testing.T) {
 	device, offset, size := overlappingSiblingVolume(t, "changekey-overlap.img", 0)
 	before := readAreaBytes(t, device, offset, size)
 
-	err := ChangeKey(device, passphrase, []byte("a-replacement-credential"), 1)
+	err := changeKeyForTest(device, passphrase, []byte("a-replacement-credential"), 1)
 	if err == nil {
 		t.Fatal("ChangeKey zeroed an area another keyslot still needs, and reported success")
 	}
@@ -561,7 +582,7 @@ func TestChangeKeyRefusesToZeroAKeyslotThatStillWorks(t *testing.T) {
 	if !bytes.Equal(before, readAreaBytes(t, device, offset, size)) {
 		t.Fatal("ChangeKey was refused AND the overlapping keyslot's key material was modified")
 	}
-	if err := TestKey(device, passphrase); err != nil {
+	if err := testKeyForTest(device, passphrase); err != nil {
 		t.Fatalf("the volume no longer opens after a REFUSED ChangeKey: %v", err)
 	}
 }
@@ -578,13 +599,13 @@ func TestChangeKeyOnASingleKeyslotVolumeIsStillAllowed(t *testing.T) {
 	old := []byte(conformancePassphrase)
 	updated := []byte("the-replacement-credential")
 
-	if err := ChangeKey(device, old, updated, 0); err != nil {
+	if err := changeKeyForTest(device, old, updated, 0); err != nil {
 		t.Fatalf("ChangeKey was refused on the one-keyslot volume it exists for: %v", err)
 	}
-	if err := TestKey(device, updated); err != nil {
+	if err := testKeyForTest(device, updated); err != nil {
 		t.Fatalf("the new passphrase does not open the volume: %v", err)
 	}
-	if err := TestKey(device, old); err == nil {
+	if err := testKeyForTest(device, old); err == nil {
 		t.Fatal("the old passphrase still opens the volume after ChangeKey")
 	}
 }
@@ -615,7 +636,7 @@ func TestChangeKeyWritesTheNewMaterialBeforeDestroyingTheOld(t *testing.T) {
 	old := []byte(conformancePassphrase)
 	updated := []byte("the-replacement-credential")
 
-	_, before, err := ReadHeader(device)
+	_, before, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -630,11 +651,11 @@ func TestChangeKeyWritesTheNewMaterialBeforeDestroyingTheOld(t *testing.T) {
 
 	materialBefore := readAreaBytes(t, device, oldOffset, oldSize)
 
-	if err := ChangeKey(device, old, updated, 0); err != nil {
+	if err := changeKeyForTest(device, old, updated, 0); err != nil {
 		t.Fatalf("ChangeKey failed: %v", err)
 	}
 
-	_, after, err := ReadHeader(device)
+	_, after, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader after ChangeKey failed: %v", err)
 	}
@@ -676,10 +697,10 @@ func TestChangeKeyWritesTheNewMaterialBeforeDestroyingTheOld(t *testing.T) {
 		t.Fatal("the old keyslot area was zeroed; that discloses which slots have been retired")
 	}
 
-	if err := TestKey(device, updated); err != nil {
+	if err := testKeyForTest(device, updated); err != nil {
 		t.Fatalf("the new passphrase does not open the volume: %v", err)
 	}
-	if err := TestKey(device, old); err == nil {
+	if err := testKeyForTest(device, old); err == nil {
 		t.Fatal("the old passphrase still opens the volume after ChangeKey")
 	}
 }
@@ -698,7 +719,7 @@ func TestChangeKeyRefusesRatherThanRewriteInPlaceWhenThereIsNoFreeArea(t *testin
 	device := newImage(t, "changekey-full.img")
 	formatWithLibrary(t, device)
 
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -723,17 +744,17 @@ func TestChangeKeyRefusesRatherThanRewriteInPlaceWhenThereIsNoFreeArea(t *testin
 	old := []byte(conformancePassphrase)
 	before := readAreaBytes(t, device, offset, size)
 
-	err = ChangeKey(device, old, []byte("a-replacement-credential"), 0)
+	err = changeKeyForTest(device, old, []byte("a-replacement-credential"), 0)
 	if err == nil {
 		t.Fatal("ChangeKey rewrote a keyslot in place when it had nowhere safe to relocate")
 	}
-	if !errors.Is(err, ErrKeyslotsAreaFull) {
+	if !errors.Is(err, ErrNoSpace) {
 		t.Fatalf("ChangeKey was refused for some other reason: %v", err)
 	}
 	if !bytes.Equal(before, readAreaBytes(t, device, offset, size)) {
 		t.Fatal("ChangeKey was refused AND the keyslot's key material was modified")
 	}
-	if err := TestKey(device, old); err != nil {
+	if err := testKeyForTest(device, old); err != nil {
 		t.Fatalf("the volume no longer opens with the original passphrase after a REFUSED ChangeKey: %v", err)
 	}
 }
@@ -746,25 +767,25 @@ func TestChangeKeyRefusesRatherThanRewriteInPlaceWhenThereIsNoFreeArea(t *testin
 // number of times a passphrase can be changed a function of how much room the
 // container was formatted with.
 func TestFindFreeKeyslotAreaReusesGaps(t *testing.T) {
-	hdr := &LUKS2BinaryHeader{HeaderSize: LUKS2HeaderMinSize}
-	area := func(offset, size int64) *Keyslot {
-		return &Keyslot{
+	hdr := &header.BinaryHeader{HeaderSize: header.HeaderMinSize}
+	area := func(offset, size int64) *header.Keyslot {
+		return &header.Keyslot{
 			Type: "luks2",
-			Area: &KeyslotArea{Offset: formatSize(offset), Size: formatSize(size)},
+			Area: &header.KeyslotArea{Offset: formatSize(offset), Size: formatSize(size)},
 		}
 	}
-	const start int64 = 2 * LUKS2HeaderMinSize // where keyslots begin for this geometry
+	const start int64 = 2 * header.HeaderMinSize // where keyslots begin for this geometry
 
-	metadata := func(keyslots map[string]*Keyslot, keyslotsSize int64) *LUKS2Metadata {
-		return &LUKS2Metadata{
+	metadata := func(keyslots map[string]*header.Keyslot, keyslotsSize int64) *header.Metadata {
+		return &header.Metadata{
 			Keyslots: keyslots,
-			Config:   &Config{KeyslotsSize: formatSize(keyslotsSize)},
+			Config:   &rawConfig{KeyslotsSize: formatSize(keyslotsSize)},
 		}
 	}
 
 	t.Run("the first fit is the gap, not the end", func(t *testing.T) {
 		// Slot 0 relocated forward and left a hole at the start of the area.
-		md := metadata(map[string]*Keyslot{
+		md := metadata(map[string]*header.Keyslot{
 			"0": area(start+0x40000, 0x40000),
 		}, 0x200000)
 		got, err := findFreeKeyslotArea(hdr, md, 0x40000)
@@ -777,7 +798,7 @@ func TestFindFreeKeyslotAreaReusesGaps(t *testing.T) {
 	})
 
 	t.Run("a gap too small is skipped", func(t *testing.T) {
-		md := metadata(map[string]*Keyslot{
+		md := metadata(map[string]*header.Keyslot{
 			"0": area(start+0x1000, 0x40000),
 		}, 0x200000)
 		got, err := findFreeKeyslotArea(hdr, md, 0x40000)
@@ -790,10 +811,10 @@ func TestFindFreeKeyslotAreaReusesGaps(t *testing.T) {
 	})
 
 	t.Run("no room at all is refused", func(t *testing.T) {
-		md := metadata(map[string]*Keyslot{
+		md := metadata(map[string]*header.Keyslot{
 			"0": area(start, 0x40000),
 		}, 0x40000)
-		if _, err := findFreeKeyslotArea(hdr, md, 0x40000); !errors.Is(err, ErrKeyslotsAreaFull) {
+		if _, err := findFreeKeyslotArea(hdr, md, 0x40000); !errors.Is(err, ErrNoSpace) {
 			t.Fatalf("a full keyslots area was not refused: %v", err)
 		}
 	})
@@ -801,13 +822,13 @@ func TestFindFreeKeyslotAreaReusesGaps(t *testing.T) {
 	t.Run("the data segment is a second ceiling", func(t *testing.T) {
 		// config.keyslots_size overstates the space available; the encrypted
 		// data starts before the area it declares ends.
-		md := metadata(map[string]*Keyslot{
+		md := metadata(map[string]*header.Keyslot{
 			"0": area(start, 0x40000),
 		}, 0x1000000)
-		md.Segments = map[string]*Segment{
+		md.Segments = map[string]*header.Segment{
 			"0": {Type: "crypt", Offset: formatSize(start + 0x40000)},
 		}
-		if _, err := findFreeKeyslotArea(hdr, md, 0x40000); !errors.Is(err, ErrKeyslotsAreaFull) {
+		if _, err := findFreeKeyslotArea(hdr, md, 0x40000); !errors.Is(err, ErrNoSpace) {
 			t.Fatalf("a keyslot was placed on top of the encrypted data: %v", err)
 		}
 	})
@@ -828,14 +849,14 @@ func heterogeneousVolume(t *testing.T, name string) (device string, strongPassph
 	formatWithLibrary(t, device)
 
 	strongPassphrase = []byte("the-second-credential")
-	if _, err := AddKey(device, []byte(conformancePassphrase), strongPassphrase, &AddKeyOptions{
-		KDFType:       KDFTypePBKDF2,
+	if _, err := addKeyForTest(device, []byte(conformancePassphrase), strongPassphrase, &addKeyOptionsForTest{
+		KDFType:       kdfTypePBKDF2,
 		PBKDFIterTime: 1,
 	}); err != nil {
 		t.Fatalf("AddKey failed while building the fixture: %v", err)
 	}
 
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -870,18 +891,18 @@ func TestAddKeyDerivesTheNewKeyslotsKeySizeFromTheVolumeKey(t *testing.T) {
 	device, strong := heterogeneousVolume(t, "heterogeneous.img")
 	added := []byte("a-third-credential")
 
-	if _, err := AddKey(device, strong, added, &AddKeyOptions{
-		KDFType:       KDFTypePBKDF2,
+	if _, err := addKeyForTest(device, strong, added, &addKeyOptionsForTest{
+		KDFType:       kdfTypePBKDF2,
 		PBKDFIterTime: 1,
 	}); err != nil {
 		t.Fatalf("AddKey failed on a container whose keyslots disagree: %v", err)
 	}
 
-	if err := TestKey(device, added); err != nil {
+	if err := testKeyForTest(device, added); err != nil {
 		t.Fatalf("AddKey reported success and the credential it added does not open the volume: %v", err)
 	}
 
-	_, metadata, err := ReadHeader(device)
+	_, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -896,6 +917,127 @@ func TestAddKeyDerivesTheNewKeyslotsKeySizeFromTheVolumeKey(t *testing.T) {
 	}
 }
 
+// TestAddKeyslotWithMasterKeyCancelledBeforeWriteLeavesNoPartialKeyslot is
+// DESIGN.md §D.2's write-transaction row: ctx is consulted only at
+// keyslotWriteStep's boundaries, so a ctx already canceled before the first
+// write of a new keyslot stops the operation there, before a byte of key
+// material or header reaches the device, and leaves no partial keyslot.
+func TestAddKeyslotWithMasterKeyCancelledBeforeWriteLeavesNoPartialKeyslot(t *testing.T) {
+	defer parallel(t)()
+
+	device := filepath.Join(t.TempDir(), "volume.img")
+	if err := os.WriteFile(device, make([]byte, 32<<20), 0600); err != nil {
+		t.Fatalf("failed to create the backing file: %v", err)
+	}
+
+	passphrase := []byte("the original credential")
+	if err := formatForTest(formatOptionsForTest{
+		Device:        device,
+		Passphrase:    passphrase,
+		KDFType:       kdfTypePBKDF2,
+		HashAlgo:      "sha256",
+		PBKDFIterTime: 1,
+	}); err != nil {
+		t.Fatalf("Format returned error: %v", err)
+	}
+
+	dev := lockedDevice(t, device)
+	hdr, metadata, err := dev.readHeader()
+	if err != nil {
+		t.Fatalf("readHeader: %v", err)
+	}
+	beforeCount := len(metadata.Keyslots)
+
+	masterKey, _, err := getVolumeKey(context.Background(), dev.reader(), device, passphrase, metadata, dev.sys)
+	if err != nil {
+		t.Fatalf("getVolumeKey: %v", err)
+	}
+	defer custody.Release(masterKey)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	slot, err := addKeyslotWithMasterKey(ctx, dev, hdr, metadata, masterKey, []byte("a new credential"),
+		&addKeyOptionsForTest{KDFType: kdfTypePBKDF2, Hash: "sha256", PBKDFIterTime: 1}, callerSuppliedCredential)
+	if slot != -1 {
+		t.Fatalf("addKeyslotWithMasterKey canceled before its write returned slot %d, want -1", slot)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("addKeyslotWithMasterKey canceled before its write = %v, want context.Canceled", err)
+	}
+
+	_, after, err := dev.readHeader()
+	if err != nil {
+		t.Fatalf("readHeader after cancellation: %v", err)
+	}
+	if len(after.Keyslots) != beforeCount {
+		t.Fatalf("a canceled add left %d keyslots on the device, want the original %d (no partial keyslot)",
+			len(after.Keyslots), beforeCount)
+	}
+}
+
+// TestRollBackAddedKeyslotRunsDespiteACancelledCtx is DESIGN.md §D.2's dm
+// rollback rule, applied to a keyslot rollback: cleanup that must undo an
+// already-written keyslot runs under context.WithoutCancel and is never
+// skipped because the ctx that started the operation was canceled.
+func TestRollBackAddedKeyslotRunsDespiteACancelledCtx(t *testing.T) {
+	defer parallel(t)()
+
+	device := filepath.Join(t.TempDir(), "volume.img")
+	if err := os.WriteFile(device, make([]byte, 32<<20), 0600); err != nil {
+		t.Fatalf("failed to create the backing file: %v", err)
+	}
+
+	passphrase := []byte("the original credential")
+	if err := formatForTest(formatOptionsForTest{
+		Device:        device,
+		Passphrase:    passphrase,
+		KDFType:       kdfTypePBKDF2,
+		HashAlgo:      "sha256",
+		PBKDFIterTime: 1,
+	}); err != nil {
+		t.Fatalf("Format returned error: %v", err)
+	}
+
+	dev := lockedDevice(t, device)
+	hdr, metadata, err := dev.readHeader()
+	if err != nil {
+		t.Fatalf("readHeader: %v", err)
+	}
+
+	masterKey, _, err := getVolumeKey(context.Background(), dev.reader(), device, passphrase, metadata, dev.sys)
+	if err != nil {
+		t.Fatalf("getVolumeKey: %v", err)
+	}
+	defer custody.Release(masterKey)
+
+	slot, err := addKeyslotWithMasterKey(context.Background(), dev, hdr, metadata, masterKey, []byte("to be rolled back"),
+		&addKeyOptionsForTest{KDFType: kdfTypePBKDF2, Hash: "sha256", PBKDFIterTime: 1}, callerSuppliedCredential)
+	if err != nil {
+		t.Fatalf("addKeyslotWithMasterKey: %v", err)
+	}
+	slotIDStr := strconv.Itoa(slot)
+	written := metadata.Keyslots[slotIDStr]
+	if written == nil {
+		t.Fatalf("keyslot %s was not written", slotIDStr)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cause := errors.New("verification failed (simulated)")
+	rollbackErr := rollBackAddedKeyslot(ctx, dev, slotIDStr, written, cause)
+	if !errors.Is(rollbackErr, cause) {
+		t.Fatalf("rollBackAddedKeyslot = %v, want it to carry the original cause", rollbackErr)
+	}
+
+	_, after, err := dev.readHeader()
+	if err != nil {
+		t.Fatalf("readHeader after rollback: %v", err)
+	}
+	if _, present := after.Keyslots[slotIDStr]; present {
+		t.Fatalf("rollBackAddedKeyslot with a canceled ctx left keyslot %s in place instead of rolling it back", slotIDStr)
+	}
+}
+
 // TestAddKeyAndUnlockRoundTripOnAES192CBCVolume reproduces, at the unit
 // level, the local Codex review's PR #279 finding: a cryptsetup
 // "aes-cbc-essiv:sha256" --key-size 192 volume has a 24-byte master key.
@@ -904,7 +1046,7 @@ func TestAddKeyDerivesTheNewKeyslotsKeySizeFromTheVolumeKey(t *testing.T) {
 // AES-256-XTS (a 64-byte area key, not 24), so the write path runs exactly
 // the EncryptEnclave/xtsPartialSector code the finding names.
 //
-// Format() itself refuses a 192-bit master key (ValidateFormatOptions and
+// Format() itself refuses a 192-bit master key (validateFormatOptionsForTest and
 // the cbc-essiv entry in formatCiphers both only admit 256/512-bit keys), so
 // this fixture is built the way heterogeneousVolume and twoVolumeKeyContainer
 // build theirs: format a normal volume for the on-disk skeleton, then
@@ -918,7 +1060,7 @@ func TestAddKeyAndUnlockRoundTripOnAES192CBCVolume(t *testing.T) {
 
 	path := newImage(t, "aes192-cbc.img")
 	firstPassphrase := []byte("the-first-credential")
-	if err := Format(FormatOptions{
+	if err := formatForTest(formatOptionsForTest{
 		Device:        path,
 		Passphrase:    firstPassphrase,
 		Cipher:        "aes",
@@ -926,13 +1068,13 @@ func TestAddKeyAndUnlockRoundTripOnAES192CBCVolume(t *testing.T) {
 		KeySize:       512,
 		HashAlgo:      "sha256",
 		SectorSize:    512,
-		KDFType:       KDFTypePBKDF2,
+		KDFType:       kdfTypePBKDF2,
 		PBKDFIterTime: 1,
 	}); err != nil {
 		t.Fatalf("Format failed: %v", err)
 	}
 
-	hdr, metadata, err := ReadHeader(path)
+	hdr, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -941,7 +1083,7 @@ func TestAddKeyAndUnlockRoundTripOnAES192CBCVolume(t *testing.T) {
 	const newKeySize = 24 // AES-192, a cryptsetup --key-size 192 volume
 	areaKeySize := areacipher.WritableAreaKeySize(newKeySize)
 
-	rawKey, err := randomBytes(newKeySize)
+	rawKey, err := randomBytes(newKeySize, testVolumeSys().cryptoRand)
 	if err != nil {
 		t.Fatalf("randomBytes failed: %v", err)
 	}
@@ -956,17 +1098,17 @@ func TestAddKeyAndUnlockRoundTripOnAES192CBCVolume(t *testing.T) {
 	// keyslot would be.
 	delete(metadata.Keyslots, "0")
 
-	kdf, err := CreateKDF(FormatOptions{KDFType: KDFTypePBKDF2, HashAlgo: "sha256", PBKDFIterTime: 1}, areaKeySize)
+	kdf, err := createKDFStrict(formatOptionsForTest{KDFType: kdfTypePBKDF2, HashAlgo: "sha256", PBKDFIterTime: 1}, areaKeySize)
 	if err != nil {
 		t.Fatalf("CreateKDF failed: %v", err)
 	}
-	passphraseKey, err := DeriveKeyEnclave(firstPassphrase, kdf, areaKeySize)
+	passphraseKey, err := deriveKeyEnclave(context.Background(), firstPassphrase, kdf, areaKeySize)
 	if err != nil {
 		t.Fatalf("DeriveKeyEnclave failed: %v", err)
 	}
 	defer mustDestroy(t, passphraseKey)
 
-	afData, err := afCodec().Split(masterKey, af.Params{Stripes: AFStripes, Hash: DefaultHashAlgo})
+	afData, err := afCodec(testVolumeSys()).Split(masterKey, af.Params{Stripes: header.AFStripes, Hash: defaultHashAlgo})
 	if err != nil {
 		t.Fatalf("af Split failed: %v", err)
 	}
@@ -978,7 +1120,7 @@ func TestAddKeyAndUnlockRoundTripOnAES192CBCVolume(t *testing.T) {
 	}
 	defer clearBytes(encrypted)
 	t.Logf("EncryptEnclave produced %d ciphertext bytes for %d AF-split bytes (afSplitSize=%d)",
-		len(encrypted), newKeySize*AFStripes, newKeySize*AFStripes)
+		len(encrypted), newKeySize*header.AFStripes, newKeySize*header.AFStripes)
 
 	// screenKeyslot/recoverKeyslotKey round decryptLen UP to a whole sector,
 	// never the raw AF-split length, so the unlock path always asks for a
@@ -986,7 +1128,7 @@ func TestAddKeyAndUnlockRoundTripOnAES192CBCVolume(t *testing.T) {
 	// that many ciphertext bytes for the same AF split; a shorter ciphertext
 	// here means the bytes beyond it are on-disk zero padding (writeArea)
 	// standing in for real ciphertext.
-	afSplitSize := newKeySize * AFStripes
+	afSplitSize := newKeySize * header.AFStripes
 	wantCiphertextLen := ((afSplitSize + areacipher.SectorSize - 1) / areacipher.SectorSize) * areacipher.SectorSize
 	if len(encrypted) != wantCiphertextLen {
 		t.Fatalf("EncryptEnclave produced %d ciphertext bytes, want %d (afSplitSize rounded up to a whole %d-byte sector, as cryptsetup writes it)",
@@ -1001,7 +1143,7 @@ func TestAddKeyAndUnlockRoundTripOnAES192CBCVolume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("calculateNextKeyslotOffset failed: %v", err)
 	}
-	alignedSize := alignTo(int64(len(encrypted)), KeyslotAreaAlignment)
+	alignedSize := alignTo(int64(len(encrypted)), keyslotAreaAlignment)
 	if offset+alignedSize > keyslotsEnd {
 		t.Fatalf("the fixture keyslot would end at %d, past the keyslots area end %d", offset+alignedSize, keyslotsEnd)
 	}
@@ -1018,30 +1160,30 @@ func TestAddKeyAndUnlockRoundTripOnAES192CBCVolume(t *testing.T) {
 	}()
 
 	priority := 1
-	metadata.Keyslots["0"] = &Keyslot{
+	metadata.Keyslots["0"] = &header.Keyslot{
 		Type:     "luks2",
 		KeySize:  newKeySize,
 		Priority: &priority,
-		Area: &KeyslotArea{
+		Area: &header.KeyslotArea{
 			Type:       "raw",
 			KeySize:    areaKeySize,
 			Offset:     formatSize(offset),
 			Size:       formatSize(alignedSize),
-			Encryption: KeyslotAreaEncryption,
+			Encryption: keyslotAreaEncryption,
 		},
 		KDF: kdf,
-		AF: &AntiForensic{
+		AF: &header.AntiForensic{
 			Type:    "luks1",
-			Stripes: AFStripes,
-			Hash:    DefaultHashAlgo,
+			Stripes: header.AFStripes,
+			Hash:    defaultHashAlgo,
 		},
 	}
 
-	digestKDF, digestValue, err := createDigest(masterKey, "sha256")
+	digestKDF, digestValue, err := createDigest(masterKey, "sha256", testVolumeSys())
 	if err != nil {
 		t.Fatalf("createDigest failed: %v", err)
 	}
-	metadata.Digests["0"] = &Digest{
+	metadata.Digests["0"] = &rawDigest{
 		Type:       "pbkdf2",
 		Keyslots:   []string{"0"},
 		Segments:   []string{"0"},
@@ -1055,19 +1197,19 @@ func TestAddKeyAndUnlockRoundTripOnAES192CBCVolume(t *testing.T) {
 		t.Fatalf("failed to write the AES-192-CBC fixture: %v", err)
 	}
 
-	if err := TestKey(path, firstPassphrase); err != nil {
+	if err := testKeyForTest(path, firstPassphrase); err != nil {
 		t.Fatalf("the hand-written 192-bit keyslot does not open under its own passphrase: %v", err)
 	}
 
 	added := []byte("a-second-credential")
-	if _, err := AddKey(path, firstPassphrase, added, &AddKeyOptions{
-		KDFType:       KDFTypePBKDF2,
+	if _, err := addKeyForTest(path, firstPassphrase, added, &addKeyOptionsForTest{
+		KDFType:       kdfTypePBKDF2,
 		PBKDFIterTime: 1,
 	}); err != nil {
 		t.Fatalf("AddKey failed on a volume whose AF split is not sector-aligned: %v", err)
 	}
 
-	if err := TestKey(path, added); err != nil {
+	if err := testKeyForTest(path, added); err != nil {
 		t.Fatalf("AddKey reported success and the credential it added does not open the volume: %v", err)
 	}
 }
@@ -1085,7 +1227,7 @@ func TestAddKeyAndUnlockRoundTripOnAES192CBCVolume(t *testing.T) {
 //
 // What it was protecting -- that no wrong area cipher is ever written into a new
 // keyslot -- is now guaranteed by construction rather than by a screen, because
-// AddKey states KeyslotAreaEncryption instead of copying a neighbour's label.
+// AddKey states keyslotAreaEncryption instead of copying a neighbour's label.
 // TestAddKeyStatesItsOwnAreaCipherAndDoesNotRefuseALegacyContainer asserts both
 // halves of that, and its two assertions fail against the two ways of getting
 // this wrong: copying the stale label, and refusing the container.
@@ -1156,7 +1298,7 @@ func TestNoRemovalPathDestroysMaterialBeforeProvingTheHeaderWritable(t *testing.
 		t.Run(path.name, func(t *testing.T) {
 			device := restoreVolume(t, "unwritable-header.img", golden)
 
-			_, metadata, err := ReadHeader(device)
+			hdr, metadata, err := readHeaderForTest(device)
 			if err != nil {
 				t.Fatalf("ReadHeader failed: %v", err)
 			}
@@ -1169,7 +1311,10 @@ func TestNoRemovalPathDestroysMaterialBeforeProvingTheHeaderWritable(t *testing.
 				t.Fatalf("unreadable area size: %v", err)
 			}
 
-			shrinkHeaderArea(t, device, LUKS2HeaderSize*2)
+			shrinkHeaderArea(t, device, header.HeaderSize*2)
+			// The secondary too: with only the primary damaged the removal reads
+			// the secondary, as cryptsetup does (H1), and rightly goes ahead.
+			tearSecondary(t, device, int64(hdr.HeaderSize)) // #nosec G115 -- a legal header area size
 			before := readAreaBytes(t, device, offset, size)
 
 			err = path.remove(device, passphrase, 0)
@@ -1218,13 +1363,13 @@ func TestLegacyMislabeledKeyslotIsRefusedAndLeftAlone(t *testing.T) {
 
 	// Precondition: the unmodified container opens, so the refusal below is
 	// about the label and not a broken fixture.
-	if err := TestKey(device, []byte(conformancePassphrase)); err != nil {
+	if err := testKeyForTest(device, []byte(conformancePassphrase)); err != nil {
 		t.Fatalf("control: the unmodified fixture does not open: %v", err)
 	}
 
 	// The legacy shape, written directly because current Format no longer
 	// produces it.
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -1237,12 +1382,12 @@ func TestLegacyMislabeledKeyslotIsRefusedAndLeftAlone(t *testing.T) {
 	// The declared CBC is what is run now that CBC areas are implemented, and
 	// its 64-byte area key cannot key AES-CBC: the keyslot is refused as
 	// invalid, before any derivation and without decrypting it as XTS.
-	if err := TestKey(device, []byte(conformancePassphrase)); !errors.Is(err, ErrInvalidKeyslot) {
+	if err := testKeyForTest(device, []byte(conformancePassphrase)); !errors.Is(err, ErrKeyslotNotFound) {
 		t.Fatalf("TestKey on XTS material declared as CBC: got %v, want ErrInvalidKeyslot", err)
 	}
 
-	if slot, err := AddKey(device, []byte(conformancePassphrase), []byte("a-second-credential"), &AddKeyOptions{
-		KDFType:       KDFTypePBKDF2,
+	if slot, err := addKeyForTest(device, []byte(conformancePassphrase), []byte("a-second-credential"), &addKeyOptionsForTest{
+		KDFType:       kdfTypePBKDF2,
 		PBKDFIterTime: 1,
 	}); err == nil {
 		t.Fatalf("AddKey on a mislabeled container wrote slot %d", slot)
@@ -1273,7 +1418,7 @@ func TestFormatDeclaresTheKeyslotAreaCipherItActuallyUses(t *testing.T) {
 
 	// A non-XTS DATA cipher. Only the segment is affected by this choice; the
 	// keyslot area must still describe what wraps the key material.
-	if err := Format(FormatOptions{
+	if err := formatForTest(formatOptionsForTest{
 		Device:        device,
 		Passphrase:    []byte(conformancePassphrase),
 		Cipher:        "aes",
@@ -1281,19 +1426,19 @@ func TestFormatDeclaresTheKeyslotAreaCipherItActuallyUses(t *testing.T) {
 		KeySize:       256, // CBC-ESSIV takes one AES key; there is no 512-bit form (#248)
 		HashAlgo:      "sha512",
 		SectorSize:    512,
-		KDFType:       KDFTypePBKDF2,
+		KDFType:       kdfTypePBKDF2,
 		PBKDFIterTime: 1,
 	}); err != nil {
 		t.Fatalf("Format failed: %v", err)
 	}
 
-	_, metadata, err := ReadHeader(device)
+	_, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 
-	if got := metadata.Keyslots["0"].Area.Encryption; got != KeyslotAreaEncryption {
-		t.Fatalf("the keyslot area declares %q; the material is %s and nothing else", got, KeyslotAreaEncryption)
+	if got := metadata.Keyslots["0"].Area.Encryption; got != keyslotAreaEncryption {
+		t.Fatalf("the keyslot area declares %q; the material is %s and nothing else", got, keyslotAreaEncryption)
 	}
 
 	// The caller's choice still reaches the DATA segment, which is what it was
@@ -1304,16 +1449,16 @@ func TestFormatDeclaresTheKeyslotAreaCipherItActuallyUses(t *testing.T) {
 
 	// And the container is still fully usable: it opens, and AddKey can
 	// template off it rather than refusing a slot this library just wrote.
-	if err := TestKey(device, []byte(conformancePassphrase)); err != nil {
+	if err := testKeyForTest(device, []byte(conformancePassphrase)); err != nil {
 		t.Fatalf("the volume does not open: %v", err)
 	}
-	if _, err := AddKey(device, []byte(conformancePassphrase), []byte("a-second-credential"), &AddKeyOptions{
-		KDFType:       KDFTypePBKDF2,
+	if _, err := addKeyForTest(device, []byte(conformancePassphrase), []byte("a-second-credential"), &addKeyOptionsForTest{
+		KDFType:       kdfTypePBKDF2,
 		PBKDFIterTime: 1,
 	}); err != nil {
 		t.Fatalf("AddKey refused a template this library itself wrote: %v", err)
 	}
-	if err := TestKey(device, []byte("a-second-credential")); err != nil {
+	if err := testKeyForTest(device, []byte("a-second-credential")); err != nil {
 		t.Fatalf("the added credential does not open the volume: %v", err)
 	}
 }
@@ -1353,7 +1498,7 @@ func TestEveryKeyslotRemovalPathAdvancesTheSequenceID(t *testing.T) {
 		t.Run(path.name, func(t *testing.T) {
 			device := restoreVolume(t, "sequence.img", golden)
 
-			before, _, err := ReadHeader(device)
+			before, _, err := readHeaderForTest(device)
 			if err != nil {
 				t.Fatalf("ReadHeader failed: %v", err)
 			}
@@ -1366,7 +1511,7 @@ func TestEveryKeyslotRemovalPathAdvancesTheSequenceID(t *testing.T) {
 			// would pass for a path that incremented the field and never
 			// persisted it, which is the same shape as asserting an error
 			// instead of the damage.
-			after, _, err := ReadHeader(device)
+			after, _, err := readHeaderForTest(device)
 			if err != nil {
 				t.Fatalf("ReadHeader after the removal failed: %v", err)
 			}
@@ -1388,17 +1533,17 @@ func TestEveryKeyslotRemovalPathAdvancesTheSequenceID(t *testing.T) {
 func TestAddKeyOptionsDoesNotSilentlyDiscardANegativeArgon2Cost(t *testing.T) {
 	for _, tc := range []struct {
 		field string
-		opts  AddKeyOptions
-		got   func(FormatOptions) int
+		opts  addKeyOptionsForTest
+		got   func(formatOptionsForTest) int
 		deflt int
 	}{
-		{"Argon2Time", AddKeyOptions{Argon2Time: -1}, func(f FormatOptions) int { return f.Argon2Time }, 4},
-		{"Argon2Memory", AddKeyOptions{Argon2Memory: -1}, func(f FormatOptions) int { return f.Argon2Memory }, 1048576},
-		{"Argon2Parallel", AddKeyOptions{Argon2Parallel: -1}, func(f FormatOptions) int { return f.Argon2Parallel }, 4},
+		{"Argon2Time", addKeyOptionsForTest{Argon2Time: -1}, func(f formatOptionsForTest) int { return f.Argon2Time }, 4},
+		{"Argon2Memory", addKeyOptionsForTest{Argon2Memory: -1}, func(f formatOptionsForTest) int { return f.Argon2Memory }, 1048576},
+		{"Argon2Parallel", addKeyOptionsForTest{Argon2Parallel: -1}, func(f formatOptionsForTest) int { return f.Argon2Parallel }, 4},
 	} {
 		t.Run(tc.field, func(t *testing.T) {
 			opts := tc.opts
-			formatOpts, _ := addKeyFormatOptions(&opts, nil)
+			formatOpts, _ := addKeyFormatOptions(&opts, nil, fips.Probe)
 			got := tc.got(formatOpts)
 			if got == tc.deflt {
 				t.Fatalf("%s: -1 was discarded and the default %d used instead. The caller passed a "+
@@ -1415,7 +1560,7 @@ func TestAddKeyOptionsDoesNotSilentlyDiscardANegativeArgon2Cost(t *testing.T) {
 // unset field into a propagated zero, or every caller using AddKeyOptions{}
 // would get a KDF with zero cost.
 func TestZeroStillMeansUseTheDefault(t *testing.T) {
-	f, _ := addKeyFormatOptions(&AddKeyOptions{}, nil)
+	f, _ := addKeyFormatOptions(&addKeyOptionsForTest{}, nil, fips.Probe)
 	if f.Argon2Time != 4 || f.Argon2Memory != 1048576 || f.Argon2Parallel != 4 {
 		t.Fatalf("an unset AddKeyOptions no longer yields the defaults: time=%d memory=%d parallel=%d",
 			f.Argon2Time, f.Argon2Memory, f.Argon2Parallel)
@@ -1434,7 +1579,7 @@ func TestZeroStillMeansUseTheDefault(t *testing.T) {
 //
 // A table forces the enumeration to be written down where a reviewer can count
 // it. Adding a third derivation here without a guard fails immediately.
-var argon2Derivations = map[string]func([]byte, []byte, *KDF, int) ([]byte, error){
+var argon2Derivations = map[string]func([]byte, []byte, *rawKDF, int) ([]byte, error){
 	"deriveArgon2i":  deriveArgon2i,
 	"deriveArgon2id": deriveArgon2id,
 }
@@ -1505,7 +1650,7 @@ func TestEveryArgon2DerivationRefusesACostItCannotRepresent(t *testing.T) {
 
 	type costCase struct {
 		name string
-		kdf  KDF
+		kdf  rawKDF
 	}
 
 	// The negative cases run everywhere. The over-range cases are APPENDED
@@ -1524,14 +1669,14 @@ func TestEveryArgon2DerivationRefusesACostItCannotRepresent(t *testing.T) {
 	// Prose asserting a property the code does not have is the shape this
 	// branch has now produced three times.
 	cases := []costCase{
-		{"negative time", KDF{Time: &neg, Memory: &mem, CPUs: &ok}},
-		{"negative memory", KDF{Time: &ok, Memory: &neg, CPUs: &ok}},
-		{"negative cpus", KDF{Time: &ok, Memory: &mem, CPUs: &neg}},
+		{"negative time", rawKDF{Time: &neg, Memory: &mem, CPUs: &ok}},
+		{"negative memory", rawKDF{Time: &ok, Memory: &neg, CPUs: &ok}},
+		{"negative cpus", rawKDF{Time: &ok, Memory: &mem, CPUs: &neg}},
 	}
 	if canExceedUint32() {
 		cases = append(cases,
-			costCase{"time above MaxUint32", KDF{Time: &big, Memory: &mem, CPUs: &ok}},
-			costCase{"memory above MaxUint32", KDF{Time: &ok, Memory: &big, CPUs: &ok}},
+			costCase{"time above MaxUint32", rawKDF{Time: &big, Memory: &mem, CPUs: &ok}},
+			costCase{"memory above MaxUint32", rawKDF{Time: &ok, Memory: &big, CPUs: &ok}},
 		)
 	}
 
@@ -1567,10 +1712,10 @@ func TestANegativeCostIsRefusedAsTooSmallNotTooLarge(t *testing.T) {
 	for fname, derive := range argon2Derivations {
 		for _, tc := range []struct {
 			name string
-			kdf  KDF
+			kdf  rawKDF
 		}{
-			{"time", KDF{Time: &neg, Memory: &mem, CPUs: &ok}},
-			{"memory", KDF{Time: &ok, Memory: &neg, CPUs: &ok}},
+			{"time", rawKDF{Time: &neg, Memory: &mem, CPUs: &ok}},
+			{"memory", rawKDF{Time: &ok, Memory: &neg, CPUs: &ok}},
 		} {
 			t.Run(fname+"/"+tc.name, func(t *testing.T) {
 				kdf := tc.kdf
@@ -1617,7 +1762,7 @@ func TestEveryArgon2DerivationRefusesAKeySizeItCannotRepresent(t *testing.T) {
 
 		for _, tc := range sizes {
 			t.Run(fname+"/"+tc.name, func(t *testing.T) {
-				kdf := KDF{Time: &time, Memory: &mem, CPUs: &cpus}
+				kdf := rawKDF{Time: &time, Memory: &mem, CPUs: &cpus}
 				key, err := derive([]byte("pass"), []byte("saltsaltsaltsalt"), &kdf, tc.keySize)
 				if err == nil {
 					t.Fatalf("%s accepted a %s key size and returned %d bytes -- the caller asked "+
@@ -1646,7 +1791,7 @@ func TestEveryArgon2DerivationAcceptsOrdinaryCosts(t *testing.T) {
 	time, mem, cpus := 4, 65536, 4
 	for fname, derive := range argon2Derivations {
 		t.Run(fname, func(t *testing.T) {
-			kdf := KDF{Time: &time, Memory: &mem, CPUs: &cpus}
+			kdf := rawKDF{Time: &time, Memory: &mem, CPUs: &cpus}
 			if _, err := derive([]byte("pass"), []byte("saltsaltsaltsalt"), &kdf, 32); err != nil {
 				t.Fatalf("%s refused an ordinary cost set: %v", fname, err)
 			}
@@ -1672,19 +1817,19 @@ func TestEveryArgon2DerivationAcceptsOrdinaryCosts(t *testing.T) {
 // refuse that". There are no such checks. That comment is why this survived
 // review, and it is deleted by the same change these cases cover.
 func TestKeyslotPlacementRefusesAnUnreadableSiblingExtent(t *testing.T) {
-	hdr := &LUKS2BinaryHeader{HeaderSize: LUKS2HeaderMinSize}
-	const start int64 = 2 * LUKS2HeaderMinSize
+	hdr := &header.BinaryHeader{HeaderSize: header.HeaderMinSize}
+	const start int64 = 2 * header.HeaderMinSize
 
-	good := &Keyslot{Type: "luks2", Area: &KeyslotArea{Offset: formatSize(start), Size: formatSize(0x40000)}}
-	md := func(ks map[string]*Keyslot) *LUKS2Metadata {
-		return &LUKS2Metadata{Keyslots: ks, Config: &Config{KeyslotsSize: formatSize(0x200000)}}
+	good := &header.Keyslot{Type: "luks2", Area: &header.KeyslotArea{Offset: formatSize(start), Size: formatSize(0x40000)}}
+	md := func(ks map[string]*header.Keyslot) *header.Metadata {
+		return &header.Metadata{Keyslots: ks, Config: &rawConfig{KeyslotsSize: formatSize(0x200000)}}
 	}
 
 	// THE POSITIVE CONTROL FIRST. Without it, every case below is also
 	// satisfied by a function that refuses everything -- which would make the
 	// library unable to add or change a key at all.
 	t.Run("an ordinary container still places a keyslot", func(t *testing.T) {
-		m := md(map[string]*Keyslot{"0": good})
+		m := md(map[string]*header.Keyslot{"0": good})
 		if _, err := calculateNextKeyslotOffset(m, start); err != nil {
 			t.Fatalf("calculateNextKeyslotOffset on a healthy container = %v, want success", err)
 		}
@@ -1695,13 +1840,13 @@ func TestKeyslotPlacementRefusesAnUnreadableSiblingExtent(t *testing.T) {
 
 	for _, tc := range []struct {
 		name string
-		bad  *Keyslot
+		bad  *header.Keyslot
 	}{
-		{"an unparseable area offset", &Keyslot{Type: "luks2", Area: &KeyslotArea{Offset: "not-a-size", Size: formatSize(0x40000)}}},
-		{"an unparseable area size", &Keyslot{Type: "luks2", Area: &KeyslotArea{Offset: formatSize(start), Size: "enormous"}}},
+		{"an unparseable area offset", &header.Keyslot{Type: "luks2", Area: &header.KeyslotArea{Offset: "not-a-size", Size: formatSize(0x40000)}}},
+		{"an unparseable area size", &header.Keyslot{Type: "luks2", Area: &header.KeyslotArea{Offset: formatSize(start), Size: "enormous"}}},
 	} {
 		t.Run(tc.name+" is refused by AddKey's placement", func(t *testing.T) {
-			m := md(map[string]*Keyslot{"0": good, "3": tc.bad})
+			m := md(map[string]*header.Keyslot{"0": good, "3": tc.bad})
 			_, err := calculateNextKeyslotOffset(m, start)
 			if err == nil {
 				t.Fatal("calculateNextKeyslotOffset accepted a sibling whose extent it could not read -- " +
@@ -1718,7 +1863,7 @@ func TestKeyslotPlacementRefusesAnUnreadableSiblingExtent(t *testing.T) {
 		})
 
 		t.Run(tc.name+" is refused by ChangeKey's allocator", func(t *testing.T) {
-			m := md(map[string]*Keyslot{"0": good, "3": tc.bad})
+			m := md(map[string]*header.Keyslot{"0": good, "3": tc.bad})
 			_, err := findFreeKeyslotArea(hdr, m, 0x40000)
 			if err == nil {
 				t.Fatal("findFreeKeyslotArea accepted a sibling whose extent it could not read -- " +
@@ -1733,9 +1878,9 @@ func TestKeyslotPlacementRefusesAnUnreadableSiblingExtent(t *testing.T) {
 	// A DECLARED empty extent is not an unreadable one. It parsed; it occupies
 	// nothing to avoid. Refusing it would reject containers that are fine.
 	t.Run("a zero-size area is not an unreadable one", func(t *testing.T) {
-		m := md(map[string]*Keyslot{
+		m := md(map[string]*header.Keyslot{
 			"0": good,
-			"3": {Type: "luks2", Area: &KeyslotArea{Offset: formatSize(start + 0x100000), Size: formatSize(0)}},
+			"3": {Type: "luks2", Area: &header.KeyslotArea{Offset: formatSize(start + 0x100000), Size: formatSize(0)}},
 		})
 		if _, err := findFreeKeyslotArea(hdr, m, 0x40000); err != nil {
 			t.Fatalf("findFreeKeyslotArea refused a zero-size extent: %v", err)
@@ -1747,7 +1892,7 @@ func TestKeyslotPlacementRefusesAnUnreadableSiblingExtent(t *testing.T) {
 // 2.7.0 actually does, measured on crafted headers rather than assumed.
 //
 // The 31/32 pair is the boundary and is not decoration: cryptsetup lists a
-// keyslot at "31" and silently omits one at "32", so LUKS2MaxKeyslots is where
+// keyslot at "31" and silently omits one at "32", so MaxKeyslots is where
 // addressability stops. "007" and "+3" parse with Atoi to numbers in range and
 // are still unreachable, which is why the round trip is checked and not just
 // the parse.
@@ -1800,55 +1945,56 @@ func TestKeyslotEntryPointsRefuseInvalidInputBeforeWriting(t *testing.T) {
 		call call
 		want error
 	}
-	newTooShort := func(c call) refusal { return refusal{c, ErrPassphraseTooShort} }
-	existingEmpty := func(c call) refusal { return refusal{c, ErrCredentialEmpty} }
+	newTooShort := func(c call) refusal { return refusal{c, ErrInvalidCredential} }
+	existingEmpty := func(c call) refusal { return refusal{c, ErrInvalidCredential} }
 	entryPoints := map[string]struct {
 		valid        call
 		passphrases  []refusal // each with exactly one passphrase argument refused
 		keyslotRange []call    // each with exactly one keyslot number out of range
 	}{
 		"TestKey": {
-			valid:       func(d string) error { return TestKey(d, good) },
-			passphrases: []refusal{existingEmpty(func(d string) error { return TestKey(d, nil) })},
+			valid:       func(d string) error { return testKeyForTest(d, good) },
+			passphrases: []refusal{existingEmpty(func(d string) error { return testKeyForTest(d, nil) })},
 		},
 		"AddKey": {
-			valid: func(d string) error { _, err := AddKey(d, good, other, fipsSafeAddKeyOptions()); return err },
+			valid: func(d string) error { _, err := addKeyForTest(d, good, other, fipsSafeAddKeyOptions()); return err },
 			passphrases: []refusal{
-				existingEmpty(func(d string) error { _, err := AddKey(d, nil, other, fipsSafeAddKeyOptions()); return err }),
-				newTooShort(func(d string) error { _, err := AddKey(d, good, short, fipsSafeAddKeyOptions()); return err }),
+				existingEmpty(func(d string) error { _, err := addKeyForTest(d, nil, other, fipsSafeAddKeyOptions()); return err }),
+				newTooShort(func(d string) error { _, err := addKeyForTest(d, good, short, fipsSafeAddKeyOptions()); return err }),
 			},
 		},
 		"RemoveKey": {
-			valid:        func(d string) error { return RemoveKey(d, good, 0) },
-			passphrases:  []refusal{existingEmpty(func(d string) error { return RemoveKey(d, nil, 0) })},
-			keyslotRange: []call{func(d string) error { return RemoveKey(d, good, -1) }, func(d string) error { return RemoveKey(d, good, MaxKeyslots) }},
+			// No passphrases/existingEmpty entry: credential checks are CLI
+			// policy now (Unlock/UnlockKeyslot, then RemoveKeyslot), not the
+			// library's -- the same reason KillKeyslot below has none.
+			valid:        func(d string) error { return removeKeyForTest(d, good, 0) },
+			keyslotRange: []call{func(d string) error { return removeKeyForTest(d, good, -1) }, func(d string) error { return removeKeyForTest(d, good, MaxKeyslots) }},
 		},
 		"KillSlot": {
-			valid:        func(d string) error { return KillSlot(d, good, 0) },
-			passphrases:  []refusal{existingEmpty(func(d string) error { return KillSlot(d, nil, 0) })},
-			keyslotRange: []call{func(d string) error { return KillSlot(d, good, -1) }, func(d string) error { return KillSlot(d, good, MaxKeyslots) }},
+			valid:        func(d string) error { return killSlotForTest(d, good, 0) },
+			keyslotRange: []call{func(d string) error { return killSlotForTest(d, good, -1) }, func(d string) error { return killSlotForTest(d, good, MaxKeyslots) }},
 		},
 		"ChangeKey": {
-			valid: func(d string) error { return ChangeKey(d, good, other, 0) },
+			valid: func(d string) error { return changeKeyForTest(d, good, other, 0) },
 			passphrases: []refusal{
-				existingEmpty(func(d string) error { return ChangeKey(d, nil, other, 0) }),
-				newTooShort(func(d string) error { return ChangeKey(d, good, short, 0) }),
+				existingEmpty(func(d string) error { return changeKeyForTest(d, nil, other, 0) }),
+				newTooShort(func(d string) error { return changeKeyForTest(d, good, short, 0) }),
 			},
-			keyslotRange: []call{func(d string) error { return ChangeKey(d, good, other, -1) }, func(d string) error { return ChangeKey(d, good, other, MaxKeyslots) }},
+			keyslotRange: []call{func(d string) error { return changeKeyForTest(d, good, other, -1) }, func(d string) error { return changeKeyForTest(d, good, other, MaxKeyslots) }},
 		},
 		"KillKeyslot": {
-			valid:        func(d string) error { return KillKeyslot(d, 0) },
-			keyslotRange: []call{func(d string) error { return KillKeyslot(d, -1) }, func(d string) error { return KillKeyslot(d, MaxKeyslots) }},
+			valid:        func(d string) error { return killKeyslotForTest(d, 0) },
+			keyslotRange: []call{func(d string) error { return killKeyslotForTest(d, -1) }, func(d string) error { return killKeyslotForTest(d, MaxKeyslots) }},
 		},
 		"ListKeyslots": {
-			valid: func(d string) error { _, err := ListKeyslots(d); return err },
+			valid: func(d string) error { _, err := listKeyslotsForTest(d); return err },
 		},
 	}
 
 	for name, ep := range entryPoints {
 		t.Run(name, func(t *testing.T) {
-			if err := ep.valid(""); !errors.Is(err, ErrInvalidPath) {
-				t.Errorf("an empty path: %v, want ErrInvalidPath", err)
+			if err := ep.valid(""); !errors.Is(err, ErrInvalidArgument) {
+				t.Errorf("an empty path: %v, want ErrInvalidArgument", err)
 			}
 			if err := ep.valid(filepath.Join(t.TempDir(), "absent.img")); !errors.Is(err, ErrDeviceNotFound) {
 				t.Errorf("a missing device: %v, want ErrDeviceNotFound", err)

@@ -125,7 +125,7 @@ ErrMetadataTooLarge	RENAME	luks2.ErrNoSpace
 ErrNoFIDO2Device	RENAME	keyprovider.ErrNoDevice
 ErrNoFreeTokenSlot	RENAME	luks2.ErrNoSpace
 ErrNoKeyProvider	RENAME	luks2.ErrInvalidArgument (nil provider)
-ErrNoKeyslots	RENAME	luks2.ErrWrongKey
+ErrNoKeyslots	KEEP	luks2.ErrNoKeyslots (distinct from ErrWrongKey (#30))
 ErrNotBlockDevice	RENAME	luks2.ErrInvalidArgument
 ErrNotMounted	MOVE	filesystem.ErrNotMounted
 ErrOrphanedKeyslot	KEEP	luks2

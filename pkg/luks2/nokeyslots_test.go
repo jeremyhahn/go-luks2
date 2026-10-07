@@ -10,6 +10,8 @@ import (
 	"errors"
 	"strconv"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // Issue #30: a volume with no keyslot the unlock path can try used to be
@@ -44,25 +46,25 @@ func noUsableKeyslotVolume(t *testing.T, name string, reencryptOnly bool) string
 	path := newImage(t, name)
 	formatWithLibrary(t, path)
 
-	hdr, metadata, err := ReadHeader(path)
+	hdr, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 
 	if reencryptOnly {
-		metadata.Keyslots = map[string]*Keyslot{
+		metadata.Keyslots = map[string]*header.Keyslot{
 			"0": {
 				// A reencrypt keyslot carries no kdf object at all, which is
 				// why reaching the derivation with one used to dereference nil.
 				Type:    "reencrypt",
 				KeySize: 1,
-				Area:    &KeyslotArea{Type: "checksum", Offset: "32768", Size: "4096"},
+				Area:    &header.KeyslotArea{Type: "checksum", Offset: "32768", Size: "4096"},
 			},
 		}
 	} else {
 		// No keyslots, and so no digest naming one: a header cryptsetup
 		// itself accepts, as it is left by removing the last keyslot.
-		metadata.Keyslots = map[string]*Keyslot{}
+		metadata.Keyslots = map[string]*header.Keyslot{}
 		metadata.Digests["0"].Keyslots = []string{}
 	}
 
@@ -89,7 +91,7 @@ func TestAVolumeWithNoUsableKeyslotIsNotReportedAsAWrongPassphrase(t *testing.T)
 		t.Run(tc.name, func(t *testing.T) {
 			path := noUsableKeyslotVolume(t, "no-keyslots-"+strconv.FormatBool(tc.reencryptOnly)+".img", tc.reencryptOnly)
 
-			_, metadata, err := ReadHeader(path)
+			_, metadata, err := readHeaderForTest(path)
 			if err != nil {
 				t.Fatalf("ReadHeader failed: %v", err)
 			}
@@ -97,7 +99,7 @@ func TestAVolumeWithNoUsableKeyslotIsNotReportedAsAWrongPassphrase(t *testing.T)
 			// Non-vacuity for the reencrypt case: the container must still LOOK
 			// populated, or this is just the empty-map case under another name.
 			if tc.reencryptOnly {
-				slots, err := ListKeyslots(path)
+				slots, err := listKeyslotsForTest(path)
 				if err != nil {
 					t.Fatalf("ListKeyslots failed: %v", err)
 				}
@@ -106,7 +108,7 @@ func TestAVolumeWithNoUsableKeyslotIsNotReportedAsAWrongPassphrase(t *testing.T)
 				}
 			}
 
-			key, err := getMasterKey(path, passphrase, metadata)
+			key, err := getMasterKey(path, passphrase, metadata, testVolumeSys())
 			if err == nil {
 				mustDestroy(t, key)
 				t.Fatal("a container with no usable keyslot opened")
@@ -116,7 +118,7 @@ func TestAVolumeWithNoUsableKeyslotIsNotReportedAsAWrongPassphrase(t *testing.T)
 			}
 			// The two errors an operator would act on wrongly. A verification
 			// verdict says a credential was judged; nothing was judged here.
-			if errors.Is(err, ErrMasterKeyVerification) {
+			if errors.Is(err, ErrWrongKey) {
 				t.Fatalf("no keyslot was tried, yet the failure claims verification was attempted: %v", err)
 			}
 			// The assertion that used to sit here -- that the failure is not
@@ -126,10 +128,10 @@ func TestAVolumeWithNoUsableKeyslotIsNotReportedAsAWrongPassphrase(t *testing.T)
 
 			// The exported paths that reach the same scan must carry the
 			// sentinel through rather than flatten it.
-			if err := TestKey(path, passphrase); !errors.Is(err, ErrNoKeyslots) {
+			if err := testKeyForTest(path, passphrase); !errors.Is(err, ErrNoKeyslots) {
 				t.Fatalf("TestKey does not report the container state: %v", err)
 			}
-			if err := KillSlot(path, passphrase, 0); !errors.Is(err, ErrNoKeyslots) {
+			if err := killSlotForTest(path, passphrase, 0); !errors.Is(err, ErrNoKeyslots) {
 				t.Fatalf("KillSlot does not report the container state: %v", err)
 			}
 		})
@@ -143,12 +145,12 @@ func TestAVolumeWithNoUsableKeyslotIsNotReportedAsAWrongPassphrase(t *testing.T)
 		path := newImage(t, "healthy.img")
 		formatWithLibrary(t, path)
 
-		_, metadata, err := ReadHeader(path)
+		_, metadata, err := readHeaderForTest(path)
 		if err != nil {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
 
-		key, err := getMasterKey(path, []byte(conformanceWrongPassphrase), metadata)
+		key, err := getMasterKey(path, []byte(conformanceWrongPassphrase), metadata, testVolumeSys())
 		if err == nil {
 			mustDestroy(t, key)
 			t.Fatal("a wrong passphrase opened a healthy volume")
@@ -156,13 +158,13 @@ func TestAVolumeWithNoUsableKeyslotIsNotReportedAsAWrongPassphrase(t *testing.T)
 		if errors.Is(err, ErrNoKeyslots) {
 			t.Fatalf("a healthy volume met with a wrong passphrase reports no keyslots: %v", err)
 		}
-		if !errors.Is(err, ErrMasterKeyVerification) {
+		if !errors.Is(err, ErrWrongKey) {
 			t.Fatalf("a credential that was judged and rejected is not reported as such: %v", err)
 		}
 
 		// And the right passphrase still opens it, so the fixture is a volume
 		// and not a brick.
-		key, err = getMasterKey(path, []byte(conformancePassphrase), metadata)
+		key, err = getMasterKey(path, []byte(conformancePassphrase), metadata, testVolumeSys())
 		if err != nil {
 			t.Fatalf("the correct passphrase no longer opens a healthy volume: %v", err)
 		}

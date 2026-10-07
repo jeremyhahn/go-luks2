@@ -7,6 +7,7 @@
 package luks2
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"math"
@@ -34,7 +35,7 @@ func TestValidateDevicePath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateDevicePath(tt.path)
+			err := validateDevicePath(tt.path)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ValidateDevicePath(%q) error = %v, wantErr %v", tt.path, err, tt.wantErr)
 			}
@@ -50,7 +51,7 @@ func TestValidateDevicePath(t *testing.T) {
 		defer func() { _ = os.Remove(tmpFile.Name()) }()
 		_ = tmpFile.Close()
 
-		if err := ValidateDevicePath(tmpFile.Name()); err != nil {
+		if err := validateDevicePath(tmpFile.Name()); err != nil {
 			t.Errorf("ValidateDevicePath(valid file) = %v, want nil", err)
 		}
 	})
@@ -64,53 +65,53 @@ func TestValidateDevicePath_InvalidFile(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	err = ValidateDevicePath(tmpDir)
-	if err != ErrInvalidPath {
-		t.Errorf("ValidateDevicePath(directory) = %v, want %v", err, ErrInvalidPath)
+	err = validateDevicePath(tmpDir)
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("ValidateDevicePath(directory) = %v, want %v", err, ErrInvalidArgument)
 	}
 }
 
-func TestValidatePassphrase(t *testing.T) {
+func TestValidatePassphraseBytes(t *testing.T) {
 	tests := []struct {
 		name       string
 		passphrase []byte
 		wantErr    error
 	}{
-		{"empty passphrase", []byte{}, ErrPassphraseTooShort},
-		{"too short", []byte("short"), ErrPassphraseTooShort},
+		{"empty passphrase", []byte{}, ErrInvalidCredential},
+		{"too short", []byte("short"), ErrInvalidCredential},
 		{"minimum length", []byte("12345678"), nil},
 		{"valid length", []byte("this-is-a-valid-passphrase"), nil},
 		{"maximum length", make([]byte, MaxPassphraseLength), nil},
-		{"too long", make([]byte, MaxPassphraseLength+1), ErrPassphraseTooLong},
+		{"too long", make([]byte, MaxPassphraseLength+1), ErrInvalidCredential},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ValidatePassphrase(tt.passphrase)
+			err := validatePassphraseBytes(tt.passphrase)
 			if err != tt.wantErr {
-				t.Errorf("ValidatePassphrase() = %v, want %v", err, tt.wantErr)
+				t.Errorf("validatePassphraseBytes() = %v, want %v", err, tt.wantErr)
 			}
 		})
 	}
 }
 
-func TestValidatePassphrase_EdgeCases(t *testing.T) {
+func TestValidatePassphraseBytes_EdgeCases(t *testing.T) {
 	t.Run("exactly MinPassphraseLength", func(t *testing.T) {
 		passphrase := make([]byte, MinPassphraseLength)
-		if err := ValidatePassphrase(passphrase); err != nil {
-			t.Errorf("ValidatePassphrase(min length) = %v, want nil", err)
+		if err := validatePassphraseBytes(passphrase); err != nil {
+			t.Errorf("validatePassphraseBytes(min length) = %v, want nil", err)
 		}
 	})
 
 	t.Run("one byte below minimum", func(t *testing.T) {
 		passphrase := make([]byte, MinPassphraseLength-1)
-		if err := ValidatePassphrase(passphrase); err != ErrPassphraseTooShort {
-			t.Errorf("ValidatePassphrase(min-1) = %v, want %v", err, ErrPassphraseTooShort)
+		if err := validatePassphraseBytes(passphrase); err != ErrInvalidCredential {
+			t.Errorf("validatePassphraseBytes(min-1) = %v, want %v", err, ErrInvalidCredential)
 		}
 	})
 }
 
-func TestValidateFormatOptions(t *testing.T) {
+func TestValidateFormatOptionsForTest(t *testing.T) {
 	// Create a temp file for testing
 	tmpFile, err := os.CreateTemp("", "luks-test-*")
 	if err != nil {
@@ -121,12 +122,12 @@ func TestValidateFormatOptions(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		opts    FormatOptions
+		opts    formatOptionsForTest
 		wantErr bool
 	}{
 		{
 			name: "valid options",
-			opts: FormatOptions{
+			opts: formatOptionsForTest{
 				Device:     tmpFile.Name(),
 				Passphrase: []byte("valid-passphrase"),
 				KeySize:    512,
@@ -136,7 +137,7 @@ func TestValidateFormatOptions(t *testing.T) {
 		},
 		{
 			name: "valid with 256 key size",
-			opts: FormatOptions{
+			opts: formatOptionsForTest{
 				Device:     tmpFile.Name(),
 				Passphrase: []byte("valid-passphrase"),
 				KeySize:    256,
@@ -146,7 +147,7 @@ func TestValidateFormatOptions(t *testing.T) {
 		},
 		{
 			name: "valid with 4096 sector size",
-			opts: FormatOptions{
+			opts: formatOptionsForTest{
 				Device:     tmpFile.Name(),
 				Passphrase: []byte("valid-passphrase"),
 				KeySize:    512,
@@ -156,7 +157,7 @@ func TestValidateFormatOptions(t *testing.T) {
 		},
 		{
 			name: "zero key size is valid (defaults will be used)",
-			opts: FormatOptions{
+			opts: formatOptionsForTest{
 				Device:     tmpFile.Name(),
 				Passphrase: []byte("valid-passphrase"),
 				KeySize:    0,
@@ -166,7 +167,7 @@ func TestValidateFormatOptions(t *testing.T) {
 		},
 		{
 			name: "zero sector size is valid (defaults will be used)",
-			opts: FormatOptions{
+			opts: formatOptionsForTest{
 				Device:     tmpFile.Name(),
 				Passphrase: []byte("valid-passphrase"),
 				KeySize:    512,
@@ -176,7 +177,7 @@ func TestValidateFormatOptions(t *testing.T) {
 		},
 		{
 			name: "invalid key size",
-			opts: FormatOptions{
+			opts: formatOptionsForTest{
 				Device:     tmpFile.Name(),
 				Passphrase: []byte("valid-passphrase"),
 				KeySize:    128,
@@ -185,7 +186,7 @@ func TestValidateFormatOptions(t *testing.T) {
 		},
 		{
 			name: "invalid sector size",
-			opts: FormatOptions{
+			opts: formatOptionsForTest{
 				Device:     tmpFile.Name(),
 				Passphrase: []byte("valid-passphrase"),
 				SectorSize: 1024,
@@ -194,7 +195,7 @@ func TestValidateFormatOptions(t *testing.T) {
 		},
 		{
 			name: "short passphrase",
-			opts: FormatOptions{
+			opts: formatOptionsForTest{
 				Device:     tmpFile.Name(),
 				Passphrase: []byte("short"),
 			},
@@ -202,7 +203,7 @@ func TestValidateFormatOptions(t *testing.T) {
 		},
 		{
 			name: "invalid device path",
-			opts: FormatOptions{
+			opts: formatOptionsForTest{
 				Device:     "/nonexistent/path",
 				Passphrase: []byte("valid-passphrase"),
 			},
@@ -210,7 +211,7 @@ func TestValidateFormatOptions(t *testing.T) {
 		},
 		{
 			name: "argon2id with valid parameters",
-			opts: FormatOptions{
+			opts: formatOptionsForTest{
 				Device:       tmpFile.Name(),
 				Passphrase:   []byte("valid-passphrase"),
 				KDFType:      "argon2id",
@@ -221,7 +222,7 @@ func TestValidateFormatOptions(t *testing.T) {
 		},
 		{
 			name: "argon2i with valid parameters",
-			opts: FormatOptions{
+			opts: formatOptionsForTest{
 				Device:       tmpFile.Name(),
 				Passphrase:   []byte("valid-passphrase"),
 				KDFType:      "argon2i",
@@ -232,7 +233,7 @@ func TestValidateFormatOptions(t *testing.T) {
 		},
 		{
 			name: "argon2id with insufficient memory",
-			opts: FormatOptions{
+			opts: formatOptionsForTest{
 				Device:       tmpFile.Name(),
 				Passphrase:   []byte("valid-passphrase"),
 				KDFType:      "argon2id",
@@ -242,7 +243,7 @@ func TestValidateFormatOptions(t *testing.T) {
 		},
 		{
 			name: "argon2id with negative time cost",
-			opts: FormatOptions{
+			opts: formatOptionsForTest{
 				Device:       tmpFile.Name(),
 				Passphrase:   []byte("valid-passphrase"),
 				KDFType:      "argon2id",
@@ -255,15 +256,15 @@ func TestValidateFormatOptions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateFormatOptions(tt.opts)
+			err := validateFormatOptionsForTest(tt.opts)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("ValidateFormatOptions() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("validateFormatOptionsForTest() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
 }
 
-func TestValidateFormatOptions_OverflowDetection(t *testing.T) {
+func TestValidateFormatOptionsForTest_OverflowDetection(t *testing.T) {
 	tmpFile, err := os.CreateTemp("", "luks-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -273,57 +274,18 @@ func TestValidateFormatOptions_OverflowDetection(t *testing.T) {
 
 	// This test verifies integer overflow detection in size calculations
 	// KeySize is in bits, so we divide by 8 to get bytes
-	// Then multiply by AFStripes (4000)
+	// Then multiply by header.AFStripes (4000)
 	// We want to test that the overflow check works
 	t.Run("normal key size no overflow", func(t *testing.T) {
-		opts := FormatOptions{
+		opts := formatOptionsForTest{
 			Device:     tmpFile.Name(),
 			Passphrase: []byte("valid-passphrase"),
 			KeySize:    512,
 		}
-		if err := ValidateFormatOptions(opts); err != nil {
-			t.Errorf("ValidateFormatOptions() unexpected error = %v", err)
+		if err := validateFormatOptionsForTest(opts); err != nil {
+			t.Errorf("validateFormatOptionsForTest() unexpected error = %v", err)
 		}
 	})
-}
-
-func TestConstantTimeEqual(t *testing.T) {
-	tests := []struct {
-		name string
-		a, b []byte
-		want bool
-	}{
-		{"equal slices", []byte("hello"), []byte("hello"), true},
-		{"different slices", []byte("hello"), []byte("world"), false},
-		{"different lengths", []byte("hello"), []byte("hi"), false},
-		{"empty slices", []byte{}, []byte{}, true},
-		{"nil slices", nil, nil, true},
-		{"one nil one empty", nil, []byte{}, true},
-		{"same content different case", []byte("Hello"), []byte("hello"), false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := ConstantTimeEqual(tt.a, tt.b); got != tt.want {
-				t.Errorf("ConstantTimeEqual() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestConstantTimeEqual_ActuallyConstantTime(t *testing.T) {
-	// Verify that comparison is constant time regardless of where difference occurs
-	a := []byte("aaaaaaaaaaaaaaaaaaaa")
-	b1 := []byte("baaaaaaaaaaaaaaaaaaaa") // Differs at position 0
-	b2 := []byte("aaaaaaaaaaaaaaaaaaaab") // Differs at position 19
-
-	// Both should be false
-	if ConstantTimeEqual(a, b1) {
-		t.Error("Expected false for b1")
-	}
-	if ConstantTimeEqual(a, b2) {
-		t.Error("Expected false for b2")
-	}
 }
 
 func TestCheckOverflow(t *testing.T) {
@@ -344,12 +306,12 @@ func TestCheckOverflow(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := CheckOverflow(tt.a, tt.b)
+			err := checkOverflow(tt.a, tt.b)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("CheckOverflow(%d, %d) error = %v, wantErr %v", tt.a, tt.b, err, tt.wantErr)
 			}
-			if err != nil && err != ErrIntegerOverflow {
-				t.Errorf("CheckOverflow() error = %v, want %v", err, ErrIntegerOverflow)
+			if err != nil && err != ErrInvalidArgument {
+				t.Errorf("CheckOverflow() error = %v, want %v", err, ErrInvalidArgument)
 			}
 		})
 	}
@@ -358,7 +320,7 @@ func TestCheckOverflow(t *testing.T) {
 func TestCheckOverflow_EdgeCases(t *testing.T) {
 	t.Run("exactly at boundary", func(t *testing.T) {
 		// math.MaxInt / 2 * 2 should not overflow
-		err := CheckOverflow(math.MaxInt/2, 2)
+		err := checkOverflow(math.MaxInt/2, 2)
 		if err != nil {
 			t.Errorf("CheckOverflow(MaxInt/2, 2) = %v, want nil", err)
 		}
@@ -366,7 +328,7 @@ func TestCheckOverflow_EdgeCases(t *testing.T) {
 
 	t.Run("just over boundary", func(t *testing.T) {
 		// (math.MaxInt / 2 + 1) * 2 should overflow
-		err := CheckOverflow(math.MaxInt/2+1, 2)
+		err := checkOverflow(math.MaxInt/2+1, 2)
 		if err == nil {
 			t.Error("CheckOverflow(MaxInt/2+1, 2) = nil, want error")
 		}
@@ -383,16 +345,16 @@ func TestFileLock(t *testing.T) {
 	_ = tmpFile.Close()
 
 	// Acquire lock
-	lock, err := AcquireFileLock(tmpFile.Name())
+	lock, err := acquireDeviceLock(tmpFile.Name())
 	if err != nil {
-		t.Fatalf("AcquireFileLock() error = %v", err)
+		t.Fatalf("acquireDeviceLock() error = %v", err)
 	}
 
 	// Try to acquire again while the first is held. This uses the explicit
-	// budget: AcquireFileLock now waits DefaultLockWait (30s) before giving
+	// budget: acquireDeviceLock now waits DefaultLockWait (30s) before giving
 	// up, so calling it here would make this test sit for half a minute to
 	// assert a failure that is decided in the first millisecond.
-	_, err = AcquireFileLockTimeout(tmpFile.Name(), 20*time.Millisecond)
+	_, err = acquireDeviceLockTimeout(tmpFile.Name(), 20*time.Millisecond)
 	if err == nil {
 		t.Error("Expected error acquiring second lock, got nil")
 	}
@@ -403,22 +365,22 @@ func TestFileLock(t *testing.T) {
 	}
 
 	// Should be able to acquire again
-	lock2, err := AcquireFileLock(tmpFile.Name())
+	lock2, err := acquireDeviceLock(tmpFile.Name())
 	if err != nil {
-		t.Fatalf("AcquireFileLock() after release error = %v", err)
+		t.Fatalf("acquireDeviceLock() after release error = %v", err)
 	}
 	defer func() { _ = lock2.Release() }()
 }
 
 func TestFileLock_NonexistentFile(t *testing.T) {
-	_, err := AcquireFileLock("/nonexistent/file/path")
+	_, err := acquireDeviceLock("/nonexistent/file/path")
 	if err == nil {
-		t.Error("AcquireFileLock(nonexistent) = nil, want error")
+		t.Error("acquireDeviceLock(nonexistent) = nil, want error")
 	}
 }
 
 func TestFileLock_ReleaseNilFile(t *testing.T) {
-	lock := &FileLock{locked: nil}
+	lock := &deviceLock{locked: nil}
 	if err := lock.Release(); err != nil {
 		t.Errorf("Release() on nil file = %v, want nil", err)
 	}
@@ -434,7 +396,7 @@ func TestFileLock_MultipleRelease(t *testing.T) {
 	defer func() { _ = os.Remove(tmpFile.Name()) }()
 	_ = tmpFile.Close()
 
-	lock, err := AcquireFileLock(tmpFile.Name())
+	lock, err := acquireDeviceLock(tmpFile.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,66 +411,6 @@ func TestFileLock_MultipleRelease(t *testing.T) {
 	if err := lock.Release(); err == nil {
 		// File is already closed, so we expect an error
 		t.Log("Second Release() returned nil (expected error for closed file)")
-	}
-}
-
-func TestOpenFileSecure(t *testing.T) {
-	tmpDir := os.TempDir()
-	path := filepath.Join(tmpDir, "luks-secure-test")
-	defer func() { _ = os.Remove(path) }()
-
-	// Open with secure function (create new file)
-	f, err := OpenFileSecure(path, os.O_RDWR|os.O_CREATE)
-	if err != nil {
-		t.Fatalf("OpenFileSecure() error = %v", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	// Verify file is open
-	if _, err := f.Stat(); err != nil {
-		t.Errorf("File not properly opened: %v", err)
-	}
-
-	// Verify permissions are 0600
-	info, err := f.Stat()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	mode := info.Mode().Perm()
-	if mode != 0600 {
-		t.Errorf("File permissions = %o, want 0600", mode)
-	}
-}
-
-func TestOpenFileSecure_NewFile(t *testing.T) {
-	tmpDir := os.TempDir()
-	path := filepath.Join(tmpDir, "luks-secure-new-test")
-	defer func() { _ = os.Remove(path) }()
-
-	// Open non-existent file with O_CREATE
-	f, err := OpenFileSecure(path, os.O_RDWR|os.O_CREATE)
-	if err != nil {
-		t.Fatalf("OpenFileSecure() error = %v", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	// Verify permissions are 0600
-	info, err := f.Stat()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	mode := info.Mode().Perm()
-	if mode != 0600 {
-		t.Errorf("File permissions = %o, want 0600", mode)
-	}
-}
-
-func TestOpenFileSecure_InvalidPath(t *testing.T) {
-	_, err := OpenFileSecure("/nonexistent/dir/file", os.O_RDWR)
-	if err == nil {
-		t.Error("OpenFileSecure(nonexistent) = nil, want error")
 	}
 }
 
@@ -529,7 +431,7 @@ func TestValidateDevicePath_SymlinkHandling(t *testing.T) {
 	defer func() { _ = os.Remove(symlinkPath) }()
 
 	// Symlink should be validated successfully
-	if err := ValidateDevicePath(symlinkPath); err != nil {
+	if err := validateDevicePath(symlinkPath); err != nil {
 		t.Errorf("ValidateDevicePath(symlink) = %v, want nil", err)
 	}
 }
@@ -543,17 +445,17 @@ func TestSecurityConstants(t *testing.T) {
 	}{
 		{"MinPassphraseLength", MinPassphraseLength, 8},
 		{"MaxPassphraseLength", MaxPassphraseLength, 512},
-		{"MinKeySize", MinKeySize, 256},
-		{"MaxKeySize", MaxKeySize, 512},
-		{"MinSectorSize", MinSectorSize, 512},
-		{"MaxSectorSize", MaxSectorSize, 4096},
+		{"MinKeySize", minKeySize, 256},
+		{"MaxKeySize", maxKeySize, 512},
+		{"MinSectorSize", minSectorSize, 512},
+		{"MaxSectorSize", maxSectorSize, 4096},
 		// The digest cost is CALIBRATED now, so there is no constant here to
 		// bound. What is bounded is its target: see
 		// TestDigestCalibrationTargetsItsBudget, and DigestIterationTargetMs
 		// for why this parameter defends nothing and 100ms is cryptsetup's own
 		// measured target.
-		{"DigestIterationTargetMs", DigestIterationTargetMs, 1},
-		{"DigestCalibrationKeyLen", DigestCalibrationKeyLen, 32},
+		{"DigestIterationTargetMs", digestIterationTargetMs, 1},
+		{"DigestCalibrationKeyLen", digestCalibrationKeyLen, 32},
 	}
 
 	for _, tt := range tests {
@@ -584,14 +486,14 @@ func TestSecurityConstants(t *testing.T) {
 
 // failOpensWith makes every openDevice call fail with err wrapped in the
 // *fs.PathError shape the kernel produces, and restores the seam afterwards.
-func failOpensWith(t *testing.T, err error) {
+func failOpensWith(t *testing.T, err error) volumeSys {
 	t.Helper()
 
-	previous := openFileFunc
-	t.Cleanup(func() { openFileFunc = previous })
-	openFileFunc = func(name string, _ int, _ os.FileMode) (*os.File, error) {
+	sys := testVolumeSys()
+	sys.openFile = func(name string, _ int, _ os.FileMode) (*os.File, error) {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: err}
 	}
+	return sys
 }
 
 // TestClassifyDeviceOpen_TypesAPermissionFailure is the contract itself: both
@@ -630,13 +532,17 @@ func TestClassifyDeviceOpen_TypesAPermissionFailure(t *testing.T) {
 // every open failure would rewrite the message of every failure in the package
 // to buy a distinction only one of them needs.
 func TestClassifyDeviceOpen_LeavesEverythingElseAlone(t *testing.T) {
-	for _, errno := range []syscall.Errno{syscall.ENOENT, syscall.ENOTDIR, syscall.EIO} {
+	for errno, kind := range map[syscall.Errno]error{syscall.ENOENT: ErrDeviceNotFound, syscall.ENOTDIR: ErrIO, syscall.EIO: ErrIO} {
 		t.Run(errno.Error(), func(t *testing.T) {
 			cause := &fs.PathError{Op: "open", Path: "/dev/sdb1", Err: errno}
 
 			err := classifyDeviceOpen("read the LUKS2 header", cause)
-			if err != error(cause) {
-				t.Fatalf("classifyDeviceOpen rewrote a %v failure as %v", errno, err)
+			var e *Error
+			if !errors.As(err, &e) || !errors.Is(err, kind) {
+				t.Fatalf("classifyDeviceOpen of a %v failure = %v, want an *Error of kind %v", errno, err, kind)
+			}
+			if !errors.Is(err, cause) {
+				t.Fatalf("the cause of a %v failure is not reachable: %v", errno, err)
 			}
 			if errors.Is(err, ErrPermissionDenied) {
 				t.Fatalf("a %v failure was classified as a permission failure: %v", errno, err)
@@ -652,9 +558,9 @@ func TestClassifyDeviceOpen_LeavesEverythingElseAlone(t *testing.T) {
 // TestOpenDeviceClassifiesAPermissionFailure covers the wrapper rather than the
 // classifier, so a future openDevice that forgot to call it would be caught.
 func TestOpenDeviceClassifiesAPermissionFailure(t *testing.T) {
-	failOpensWith(t, syscall.EACCES)
+	sys := failOpensWith(t, syscall.EACCES)
 
-	f, err := openDevice("read the LUKS2 header", "/dev/sdb1", os.O_RDONLY)
+	f, err := openDevice("read the LUKS2 header", "/dev/sdb1", os.O_RDONLY, sys)
 	if err == nil {
 		_ = f.Close()
 		t.Fatal("openDevice reported success against a seam that always refuses")
@@ -678,27 +584,30 @@ func TestTheExportedPathsReportAPermissionFailureAsOne(t *testing.T) {
 
 	tests := []struct {
 		name string
-		call func() error
+		call func(sys volumeSys) error
 	}{
-		{"ReadHeader", func() error { _, _, err := ReadHeader(device); return err }},
-		{"IsLUKS", func() error { _, err := IsLUKS(device); return err }},
-		{"IsLUKS2", func() error { _, err := IsLUKS2(device); return err }},
-		{"AcquireFileLock", func() error { _, err := AcquireFileLock(device); return err }},
-		{"Format", func() error {
-			return Format(FormatOptions{
+		{"ReadHeader", func(sys volumeSys) error { _, _, err := readHeaderForTestWithSys(device, sys); return err }},
+		{"IsLUKS", func(sys volumeSys) error { _, err := isLUKSForTestWithSys(device, sys); return err }},
+		{"IsLUKS2", func(sys volumeSys) error { _, err := isLUKS2ForTestWithSys(device, sys); return err }},
+		{"AcquireFileLock", func(sys volumeSys) error {
+			_, err := acquireFileLock(context.Background(), device, DefaultLockWait, clock.System{}, sys)
+			return err
+		}},
+		{"Format", func(sys volumeSys) error {
+			return formatWithSys(formatOptionsForTest{
 				Device:        device,
 				Passphrase:    []byte(conformancePassphrase),
-				KDFType:       KDFTypePBKDF2,
+				KDFType:       kdfTypePBKDF2,
 				PBKDFIterTime: 1,
-			})
+			}, sys)
 		}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			failOpensWith(t, syscall.EACCES)
+			sys := failOpensWith(t, syscall.EACCES)
 
-			err := tt.call()
+			err := tt.call(sys)
 			if err == nil {
 				t.Fatal("the call reported success against a seam that always refuses to open the device")
 			}
@@ -729,9 +638,9 @@ func TestAcquireFileLockWaitsForARelease(t *testing.T) {
 	defer func() { _ = os.Remove(tmpFile.Name()) }()
 	_ = tmpFile.Close()
 
-	held, err := AcquireFileLock(tmpFile.Name())
+	held, err := acquireDeviceLock(tmpFile.Name())
 	if err != nil {
-		t.Fatalf("first AcquireFileLock() error = %v", err)
+		t.Fatalf("first acquireDeviceLock() error = %v", err)
 	}
 
 	// The holder lets go 150ms into the wait, on a clock only the wait moves
@@ -748,7 +657,7 @@ func TestAcquireFileLockWaitsForARelease(t *testing.T) {
 		}
 	})
 
-	second, err := acquireFileLock(tmpFile.Name(), 10*time.Second, clk)
+	second, err := acquireFileLock(context.Background(), tmpFile.Name(), 10*time.Second, clk, testVolumeSys())
 	if err != nil {
 		t.Fatalf("second acquireFileLock() error = %v, want it to queue and succeed", err)
 	}
@@ -783,15 +692,15 @@ func TestAcquireFileLockTimesOutWithATypedError(t *testing.T) {
 	defer func() { _ = os.Remove(tmpFile.Name()) }()
 	_ = tmpFile.Close()
 
-	held, err := AcquireFileLock(tmpFile.Name())
+	held, err := acquireDeviceLock(tmpFile.Name())
 	if err != nil {
-		t.Fatalf("AcquireFileLock() error = %v", err)
+		t.Fatalf("acquireDeviceLock() error = %v", err)
 	}
 	defer func() { _ = held.Release() }()
 
 	const budget = 120 * time.Millisecond
 	clk := clock.NewFake(t)
-	_, err = acquireFileLock(tmpFile.Name(), budget, clk)
+	_, err = acquireFileLock(context.Background(), tmpFile.Name(), budget, clk, testVolumeSys())
 	if err == nil {
 		t.Fatal("acquireFileLock() on a held lock = nil, want a timeout")
 	}
@@ -836,15 +745,15 @@ func TestAcquireFileLockZeroBudgetTriesOnce(t *testing.T) {
 
 	// Free: one attempt is enough, so a zero budget must still SUCCEED. A
 	// version that checked the deadline before attempting would fail here.
-	free, err := AcquireFileLockTimeout(tmpFile.Name(), 0)
+	free, err := acquireDeviceLockTimeout(tmpFile.Name(), 0)
 	if err != nil {
-		t.Fatalf("AcquireFileLockTimeout(free, 0) error = %v, want success on the first attempt", err)
+		t.Fatalf("acquireDeviceLockTimeout(free, 0) error = %v, want success on the first attempt", err)
 	}
 
 	// Held: one attempt is not enough, and there is no budget to spend -- so
 	// there is no sleep at all.
 	clk := clock.NewFake(t)
-	_, err = acquireFileLock(tmpFile.Name(), 0, clk)
+	_, err = acquireFileLock(context.Background(), tmpFile.Name(), 0, clk, testVolumeSys())
 	if err == nil {
 		t.Fatal("acquireFileLock(held, 0) = nil, want a timeout")
 	}
@@ -862,9 +771,9 @@ func TestAcquireFileLockZeroBudgetTriesOnce(t *testing.T) {
 // device-open classification; reporting it as contention would send an
 // operator looking for a lock holder that does not exist.
 func TestAcquireFileLockOnAnUnopenableDeviceIsNotAContentionError(t *testing.T) {
-	_, err := AcquireFileLockTimeout("/nonexistent/file/path", 50*time.Millisecond)
+	_, err := acquireDeviceLockTimeout("/nonexistent/file/path", 50*time.Millisecond)
 	if err == nil {
-		t.Fatal("AcquireFileLockTimeout(nonexistent) = nil, want error")
+		t.Fatal("acquireDeviceLockTimeout(nonexistent) = nil, want error")
 	}
 	if errors.Is(err, ErrLockContended) {
 		t.Errorf("a missing device is reported as lock contention: %v", err)

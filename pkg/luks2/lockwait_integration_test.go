@@ -7,7 +7,9 @@
 package luks2
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -24,7 +26,7 @@ import (
 // Every go-luks2 write path against a cryptsetup write on the same volume, in
 // both orders. TestCryptsetupWaitsForTheDeviceLock and
 // TestUnlockWaitsForCryptsetupsWriteLock prove the lock for a bare
-// AcquireFileLock and for Unlock; these prove it for each operation that
+// acquireDeviceLock and for Unlock; these prove it for each operation that
 // rewrites the header, and that the result is one header both tools read,
 // carrying both changes:
 //
@@ -47,48 +49,54 @@ const (
 // to tell afterwards that it took effect.
 type mutualWriteOp struct {
 	name   string
-	run    func(device string) error
+	run    func(device string, sys volumeSys) error
 	effect func(t *testing.T, device string)
 }
 
 var mutualWriteOps = []mutualWriteOp{
-	{"AddKey", func(d string) error {
-		_, err := AddKey(d, []byte(laneDPassphrase), []byte(mutualNewPassphrase), &AddKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterTime: 1})
+	{"AddKey", func(d string, sys volumeSys) error {
+		_, err := addKeyWithPolicy(context.Background(), d, []byte(laneDPassphrase), []byte(mutualNewPassphrase),
+			&addKeyOptionsForTest{KDFType: kdfTypePBKDF2, PBKDFIterTime: 1}, callerSuppliedCredential, sys)
 		return err
 	}, func(t *testing.T, d string) {
 		mustCryptsetupPassphrase(t, mutualNewPassphrase, "open", "--test-passphrase", d)
 	}},
-	{"RemoveKey", func(d string) error {
-		return RemoveKey(d, []byte(mutualSlotOnePassphrase), 1)
+	{"RemoveKey", func(d string, sys volumeSys) error {
+		return removeKeyForTest(d, []byte(mutualSlotOnePassphrase), 1, withTestSys(sys))
 	}, func(t *testing.T, d string) { assertNoKeyslot(t, d, "1") }},
-	{"KillSlot", func(d string) error {
-		return KillSlot(d, []byte(laneDPassphrase), 1)
+	{"KillSlot", func(d string, sys volumeSys) error {
+		return killSlotForTest(d, []byte(laneDPassphrase), 1, withTestSys(sys))
 	}, func(t *testing.T, d string) { assertNoKeyslot(t, d, "1") }},
-	{"ChangeKey", func(d string) error {
-		return ChangeKey(d, []byte(mutualSlotOnePassphrase), []byte(mutualNewPassphrase), 1)
+	{"ChangeKey", func(d string, sys volumeSys) error {
+		return changeKeyWithSys(d, []byte(mutualSlotOnePassphrase), []byte(mutualNewPassphrase), 1, sys)
 	}, func(t *testing.T, d string) {
 		mustCryptsetupPassphrase(t, mutualNewPassphrase, "open", "--test-passphrase", "--key-slot", "1", d)
 		if out, ok := cryptsetupWithStdin(t, mutualSlotOnePassphrase, "open", "--test-passphrase", d); ok {
 			t.Errorf("the replaced passphrase still opens the volume:\n%s", out)
 		}
 	}},
-	{"ImportToken", func(d string) error {
-		return ImportTokenJSON(d, 4, []byte(mutualLibraryToken))
+	{"SetToken", func(d string, sys volumeSys) error {
+		return setTokenJSONForTest(d, 4, []byte(mutualLibraryToken), withTestSys(sys))
 	}, func(t *testing.T, d string) {
 		mustCryptsetupPassphrase(t, "", "token", "export", "--token-id", "4", d)
 	}},
-	{"RemoveToken", func(d string) error {
-		return RemoveToken(d, 2)
+	{"RemoveToken", func(d string, sys volumeSys) error {
+		return removeTokenForTest(d, 2, withTestSys(sys))
 	}, func(t *testing.T, d string) {
 		if out, ok := cryptsetupWithStdin(t, "", "token", "export", "--token-id", "2", d); ok {
 			t.Errorf("cryptsetup still exports the removed token:\n%s", out)
 		}
 	}},
-	{"RestorePrimaryHeader", func(d string) error {
-		return RestorePrimaryHeaderWithOptions(d, RestoreHeaderOptions{Force: true})
+	{"ReplacePrimaryHeader", func(d string, sys volumeSys) error {
+		return replacePrimaryHeaderForTest(d, withTestSys(sys))
 	}, func(t *testing.T, d string) {}},
-	{"WipeKeyslot", func(d string) error {
-		return WipeKeyslot(d, 1)
+	{"RemoveKeyslot", func(d string, sys volumeSys) error {
+		v, err := Open(context.Background(), d, withTestSys(sys))
+		if err != nil {
+			return err
+		}
+		defer func() { _ = v.Close() }()
+		return v.RemoveKeyslot(context.Background(), 1)
 	}, func(t *testing.T, d string) { assertNoKeyslot(t, d, "1") }},
 }
 
@@ -97,11 +105,11 @@ var mutualWriteOps = []mutualWriteOp{
 func mutualFixture(t *testing.T) string {
 	t.Helper()
 	loop, _ := laneDLoop(t)
-	if _, err := AddKey(loop, []byte(laneDPassphrase), []byte(mutualSlotOnePassphrase), &AddKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterTime: 1}); err != nil {
+	if _, err := addKeyForTest(loop, []byte(laneDPassphrase), []byte(mutualSlotOnePassphrase), &addKeyOptionsForTest{KDFType: kdfTypePBKDF2, PBKDFIterTime: 1}); err != nil {
 		t.Fatalf("AddKey: %v", err)
 	}
-	if err := ImportTokenJSON(loop, 2, []byte(`{"type":"x-mutual-fixture","keyslots":[]}`)); err != nil {
-		t.Fatalf("ImportTokenJSON: %v", err)
+	if err := setTokenJSONForTest(loop, 2, []byte(`{"type":"x-mutual-fixture","keyslots":[]}`)); err != nil {
+		t.Fatalf("SetToken: %v", err)
 	}
 	return loop
 }
@@ -114,14 +122,14 @@ func assertMutualResult(t *testing.T, device string, sequenceBefore uint64, op m
 	mustCryptsetupPassphrase(t, "", "isLuks", device)
 	mustCryptsetupPassphrase(t, "", "luksDump", device)
 	mustCryptsetupPassphrase(t, laneDPassphrase, "open", "--test-passphrase", "--key-slot", "0", device)
-	if err := TestKey(device, []byte(laneDPassphrase)); err != nil {
+	if err := testKeyForTest(device, []byte(laneDPassphrase)); err != nil {
 		t.Errorf("TestKey: %v", err)
 	}
-	primary, metadata, err := ReadHeader(device)
+	primary, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader: %v", err)
 	}
-	secondary, _, err := ReadSecondaryHeader(device)
+	secondary, _, err := readSecondaryHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadSecondaryHeader: %v", err)
 	}
@@ -139,7 +147,7 @@ func assertMutualResult(t *testing.T, device string, sequenceBefore uint64, op m
 
 func assertNoKeyslot(t *testing.T, device, id string) {
 	t.Helper()
-	_, metadata, err := ReadHeader(device)
+	_, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader: %v", err)
 	}
@@ -164,9 +172,41 @@ func cryptsetupWithStdin(t *testing.T, stdin string, args ...string) (string, bo
 	return string(out), err == nil
 }
 
+// cryptsetupLockHeldExclusively reports whether this process holds the
+// exclusive flock on cryptsetup's lock file for device, read from /proc/locks.
+// It runs inside the lock hook, so it reports a failure as false rather than
+// failing the test from a goroutine that is not the test's.
+func cryptsetupLockHeldExclusively(device string) bool {
+	var dev unix.Stat_t
+	if err := unix.Stat(device, &dev); err != nil {
+		return false
+	}
+	rdev := uint64(dev.Rdev) // #nosec G115 -- a device number
+	lockPath := filepath.Join(cryptsetupLockDir, "L_"+strconv.FormatUint(uint64(unix.Major(rdev)), 10)+":"+strconv.FormatUint(uint64(unix.Minor(rdev)), 10))
+	var lock unix.Stat_t
+	if err := unix.Stat(lockPath, &lock); err != nil {
+		return false
+	}
+	f, err := os.Open("/proc/locks")
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+	suffix := ":" + strconv.FormatUint(lock.Ino, 10)
+	pid := strconv.Itoa(os.Getpid())
+	s := bufio.NewScanner(f)
+	for s.Scan() {
+		fields := strings.Fields(s.Text())
+		if len(fields) > 5 && fields[1] == "FLOCK" && fields[3] == "WRITE" && fields[4] == pid && strings.HasSuffix(fields[5], suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 func sequenceID(t *testing.T, device string) uint64 {
 	t.Helper()
-	hdr, _, err := ReadHeader(device)
+	hdr, _, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader: %v", err)
 	}
@@ -177,8 +217,8 @@ func sequenceID(t *testing.T, device string) uint64 {
 // has taken the locks, and a cryptsetup write started then waits on its lock
 // file until the operation is done.
 //
-// NOT PARALLEL: fileLockHeld is package state. A sequential top-level test
-// runs alone, so no other test's lock passes through the substitute.
+// The hold is the operation's own Volume.sys.lockHeld, so no other test's
+// lock passes through it.
 func TestCryptsetupWaitsForEveryWritePath(t *testing.T) {
 	requireCryptsetupDeclared(t)
 	tokenFile := filepath.Join(t.TempDir(), "token.json")
@@ -193,9 +233,14 @@ func TestCryptsetupWaitsForEveryWritePath(t *testing.T) {
 
 			held, proceed := make(chan struct{}), make(chan struct{})
 			var once sync.Once
-			previous := fileLockHeld
-			fileLockHeld = func(path string) {
-				if path == loop {
+			sys := defaultVolumeSys()
+			// Only the exclusive acquisition is held. An operation that is now
+			// an Unlock under a shared lock followed by a write under an
+			// exclusive one would otherwise stop at the shared read, where
+			// cryptsetup loads the header and queues for its write lock, and
+			// then fail on the header this operation rewrote in between.
+			sys.lockHeld = func(path string) {
+				if path == loop && cryptsetupLockHeldExclusively(path) {
 					once.Do(func() { close(held); <-proceed })
 				}
 			}
@@ -206,10 +251,10 @@ func TestCryptsetupWaitsForEveryWritePath(t *testing.T) {
 					close(proceed)
 				}
 			}
-			defer func() { release(); fileLockHeld = previous }()
+			defer release()
 
 			result := make(chan error, 1)
-			go func() { result <- op.run(loop) }()
+			go func() { result <- op.run(loop, sys) }()
 			<-held
 
 			var st unix.Stat_t
@@ -257,7 +302,7 @@ func TestEveryWritePathWaitsForCryptsetup(t *testing.T) {
 	requireCryptsetupDeclared(t)
 	stracePath, err := exec.LookPath("strace")
 	if err != nil {
-		t.Fatalf("strace is not installed (%v); test/integration/Dockerfile installs it", err)
+		t.Fatalf("strace is not installed (%v); build/docker/integration/Dockerfile installs it", err)
 	}
 
 	for _, op := range mutualWriteOps {
@@ -307,7 +352,7 @@ func TestEveryWritePathWaitsForCryptsetup(t *testing.T) {
 				}
 			}
 
-			if err := op.run(loop); err != nil {
+			if err := op.run(loop, defaultVolumeSys()); err != nil {
 				t.Fatalf("%s beside cryptsetup's write: %v", op.name, err)
 			}
 			if err := <-done; err != nil {

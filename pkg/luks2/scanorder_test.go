@@ -7,20 +7,24 @@
 package luks2
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // keyslotMap builds a keyslot map with the given IDs. The values are only ever
 // compared by identity here, so the contents do not matter.
-func keyslotMap(ids ...string) map[string]*Keyslot {
-	m := make(map[string]*Keyslot, len(ids))
+func keyslotMap(ids ...string) map[string]*header.Keyslot {
+	m := make(map[string]*header.Keyslot, len(ids))
 	for _, id := range ids {
-		m[id] = &Keyslot{Type: "luks2"}
+		m[id] = &header.Keyslot{Type: "luks2"}
 	}
 	return m
 }
@@ -145,10 +149,10 @@ func TestAKeyslotAfterTheFirstStillOpensTheVolume(t *testing.T) {
 	}
 
 	first := []byte("correct horse battery staple")
-	if err := Format(FormatOptions{
+	if err := formatForTest(formatOptionsForTest{
 		Device:        device,
 		Passphrase:    first,
-		KDFType:       KDFTypePBKDF2,
+		KDFType:       kdfTypePBKDF2,
 		HashAlgo:      "sha256",
 		PBKDFIterTime: 1,
 	}); err != nil {
@@ -156,15 +160,15 @@ func TestAKeyslotAfterTheFirstStillOpensTheVolume(t *testing.T) {
 	}
 
 	second := []byte("a second credential entirely")
-	if _, err := AddKey(device, first, second, &AddKeyOptions{
-		KDFType:       KDFTypePBKDF2,
+	if _, err := addKeyForTest(device, first, second, &addKeyOptionsForTest{
+		KDFType:       kdfTypePBKDF2,
 		Hash:          "sha256",
 		PBKDFIterTime: 1,
 	}); err != nil {
 		t.Fatalf("AddKey returned error: %v", err)
 	}
 
-	_, metadata, err := ReadHeader(device)
+	_, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader returned error: %v", err)
 	}
@@ -178,7 +182,7 @@ func TestAKeyslotAfterTheFirstStillOpensTheVolume(t *testing.T) {
 	if len(order) < 2 {
 		t.Fatalf("expected at least 2 keyslots, got %d: %v", len(order), order)
 	}
-	if _, err := unlockKeyslot(device, order[0], second, metadata.Keyslots[order[0]], metadata.Digests); err == nil {
+	if _, err := unlockKeyslot(context.Background(), device, order[0], second, metadata.Keyslots[order[0]], metadata.Digests, testVolumeSys()); err == nil {
 		t.Fatalf("the added credential opens keyslot %s, the first slot scanned; "+
 			"this fixture cannot show that the scan continues past it", order[0])
 	}
@@ -189,14 +193,14 @@ func TestAKeyslotAfterTheFirstStillOpensTheVolume(t *testing.T) {
 	// the second credential eventually. Determinism is pinned one level down, on
 	// the helper, by TestKeyslotScanOrderIsStableAcrossCalls. What this test
 	// alone establishes is traversal -- that the scan does not stop early.
-	key, err := getMasterKey(device, second, metadata)
+	key, err := getMasterKey(device, second, metadata, testVolumeSys())
 	if err != nil {
 		t.Fatalf("a credential in a later keyslot no longer opens the volume: %v", err)
 	}
 	mustDestroy(t, key)
 
 	// And the first credential still works, so the scan did not merely move.
-	key, err = getMasterKey(device, first, metadata)
+	key, err = getMasterKey(device, first, metadata, testVolumeSys())
 	if err != nil {
 		t.Fatalf("the original credential no longer opens the volume: %v", err)
 	}
@@ -204,9 +208,61 @@ func TestAKeyslotAfterTheFirstStillOpensTheVolume(t *testing.T) {
 
 	// A genuinely wrong passphrase must still be rejected, or the two
 	// assertions above would pass against a function that accepts anything.
-	if mk, err := getMasterKey(device, []byte("not either of them"), metadata); err == nil {
+	if mk, err := getMasterKey(device, []byte("not either of them"), metadata, testVolumeSys()); err == nil {
 		mustDestroy(t, mk)
 		t.Fatal("getMasterKey accepted a passphrase matching no keyslot")
+	}
+}
+
+// cancelAfterNErrChecks is a context.Context whose Err() returns nil for its
+// first n calls and context.Canceled on every call after, so a test can make
+// a specific ctx.Err() check in a loop be the one that observes cancellation
+// without a clock or a second goroutine.
+type cancelAfterNErrChecks struct {
+	context.Context
+	calls *int
+	n     int
+}
+
+func (c cancelAfterNErrChecks) Err() error {
+	*c.calls++
+	if *c.calls > c.n {
+		return context.Canceled
+	}
+	return nil
+}
+
+// TestGetMasterKeySlotCancelledBetweenKeyslotsReturnsCtxErr is DESIGN.md
+// §D.2's "checked between keyslots in a scan" clause: a ctx canceled after
+// the first keyslot in scan order is skipped stops the scan before the
+// second keyslot is even looked at, and reports ctx.Err()'s kind.
+//
+// The first entry in order names no keyslot at all, so reaching it costs
+// nothing beyond the loop's own ctx check -- this isolates the "between
+// keyslots" boundary from the KDF/digest cost a real keyslot would add,
+// which internal/kdf's own cancellation tests already cover.
+func TestGetMasterKeySlotCancelledBetweenKeyslotsReturnsCtxErr(t *testing.T) {
+	metadata := &header.Metadata{Keyslots: map[string]*header.Keyslot{}}
+	order := []string{"absent-0", "absent-1"}
+
+	calls := 0
+	ctx := cancelAfterNErrChecks{Context: context.Background(), calls: &calls, n: 1}
+
+	key, id, err := getMasterKeySlot(ctx, nil, "device", []byte("passphrase"), metadata, order, testVolumeSys())
+	if key != nil {
+		t.Fatal("getMasterKeySlot canceled between keyslots returned a non-nil key")
+	}
+	if id != "" {
+		t.Fatalf("getMasterKeySlot canceled between keyslots named keyslot %q", id)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("getMasterKeySlot canceled between keyslots = %v, want context.Canceled", err)
+	}
+	// Exactly 2 checks: one that let the (absent) first keyslot be skipped,
+	// and the one for the second that observed the cancellation -- so the
+	// second keyslot's own handling was never reached.
+	if calls != 2 {
+		t.Fatalf("getMasterKeySlot checked ctx %d times, want exactly 2", calls)
 	}
 }
 
@@ -222,17 +278,17 @@ func multiKeyslotVolume(t *testing.T, ids ...string) string {
 	if err := os.WriteFile(device, make([]byte, 32<<20), 0600); err != nil {
 		t.Fatalf("failed to create the backing file: %v", err)
 	}
-	if err := Format(FormatOptions{
+	if err := formatForTest(formatOptionsForTest{
 		Device:        device,
 		Passphrase:    []byte("correct horse battery staple"),
-		KDFType:       KDFTypePBKDF2,
+		KDFType:       kdfTypePBKDF2,
 		HashAlgo:      "sha256",
 		PBKDFIterTime: 1,
 	}); err != nil {
 		t.Fatalf("Format returned error: %v", err)
 	}
 
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader returned error: %v", err)
 	}
@@ -240,7 +296,7 @@ func multiKeyslotVolume(t *testing.T, ids ...string) string {
 	if template == nil {
 		t.Fatal("the formatted container has no keyslot 0 to clone")
 	}
-	metadata.Keyslots = make(map[string]*Keyslot, len(ids))
+	metadata.Keyslots = make(map[string]*header.Keyslot, len(ids))
 	for _, id := range ids {
 		clone := *template
 		metadata.Keyslots[id] = &clone
@@ -274,7 +330,7 @@ func TestKeyslotInspectionOrderIsDeterministic(t *testing.T) {
 	want := []int{0, 1, 2, 3, 4, 7, 10, 11}
 
 	for i := 0; i < 25; i++ {
-		info, err := GetVolumeInfo(device)
+		info, err := getVolumeInfoForTest(device)
 		if err != nil {
 			t.Fatalf("GetVolumeInfo failed on read %d: %v", i, err)
 		}
@@ -283,7 +339,7 @@ func TestKeyslotInspectionOrderIsDeterministic(t *testing.T) {
 				i, info.ActiveKeyslots, want)
 		}
 
-		slots, err := ListKeyslots(device)
+		slots, err := listKeyslotsForTest(device)
 		if err != nil {
 			t.Fatalf("ListKeyslots failed on read %d: %v", i, err)
 		}
@@ -314,7 +370,7 @@ func TestKeyslotInspectionOrderMatchesUnlockOrder(t *testing.T) {
 
 	device := multiKeyslotVolume(t, "5", "reencrypt-in-progress", "0", "12", "2")
 
-	_, metadata, err := ReadHeader(device)
+	_, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -331,7 +387,7 @@ func TestKeyslotInspectionOrderMatchesUnlockOrder(t *testing.T) {
 		t.Fatalf("the fixture yielded %d numeric keyslot ids, want 4: %v", len(want), want)
 	}
 
-	info, err := GetVolumeInfo(device)
+	info, err := getVolumeInfoForTest(device)
 	if err != nil {
 		t.Fatalf("GetVolumeInfo failed: %v", err)
 	}
@@ -339,7 +395,7 @@ func TestKeyslotInspectionOrderMatchesUnlockOrder(t *testing.T) {
 		t.Fatalf("GetVolumeInfo.ActiveKeyslots = %v, want the scan order %v", info.ActiveKeyslots, want)
 	}
 
-	slots, err := ListKeyslots(device)
+	slots, err := listKeyslotsForTest(device)
 	if err != nil {
 		t.Fatalf("ListKeyslots failed: %v", err)
 	}

@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/jeremyhahn/go-luks2/internal/af"
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // SHA-1 anti-forensic keyslots (#236), against volumes cryptsetup wrote.
@@ -50,7 +51,7 @@ var sha1AFKinds = []sha1AFKind{
 				t.Fatalf("cryptsetup luksFormat --hash sha1 exited %d\n%s", code, out)
 			}
 		},
-		keyslot: NonApprovedKDF{ID: "0", Type: KDFTypeArgon2id, Reason: "anti-forensic hash sha1"},
+		keyslot: NonApprovedKDF{ID: 0, Type: kdfTypeArgon2id, Reason: "anti-forensic hash sha1"},
 	},
 	{
 		name: "luks1 --hash sha1, converted",
@@ -64,7 +65,7 @@ var sha1AFKinds = []sha1AFKind{
 				t.Fatalf("cryptsetup convert exited %d\n%s", code, out)
 			}
 		},
-		keyslot: NonApprovedKDF{ID: "0", Type: KDFTypePBKDF2, Hash: "sha1", Reason: "anti-forensic hash sha1"},
+		keyslot: NonApprovedKDF{ID: 0, Type: kdfTypePBKDF2, Hash: "sha1", Reason: "anti-forensic hash sha1"},
 	},
 }
 
@@ -76,7 +77,7 @@ func sha1AFVolume(t *testing.T, kind sha1AFKind) string {
 	requireCryptsetup(t)
 	image := newImage(t, "sha1-af.img")
 	kind.build(t, image)
-	_, metadata, err := ReadHeader(image)
+	_, metadata, err := readHeaderForTest(image)
 	if err != nil {
 		t.Fatalf("ReadHeader on cryptsetup's volume failed: %v", err)
 	}
@@ -98,18 +99,18 @@ func TestSHA1AFVolumesOpenWithCryptsetupsVolumeKey(t *testing.T) {
 		t.Run(kind.name, func(t *testing.T) {
 			image := sha1AFVolume(t, kind)
 			if fips140.Enabled() {
-				assertImportRequired(t, TestKey(image, migrationPassphrase), image,
-					[]NonApprovedKDF{kind.keyslot}, []NonApprovedKDF{{ID: "0", Type: KDFTypePBKDF2, Hash: "sha1"}})
+				assertImportRequired(t, testKeyForTest(image, migrationPassphrase), image,
+					[]NonApprovedKDF{kind.keyslot}, []NonApprovedKDF{{ID: 0, Type: kdfTypePBKDF2, Hash: "sha1"}})
 				return
 			}
-			if err := TestKey(image, migrationPassphrase); err != nil {
+			if err := testKeyForTest(image, migrationPassphrase); err != nil {
 				t.Fatalf("TestKey on cryptsetup's SHA-1 AF volume: %v", err)
 			}
 			if got, want := hex.EncodeToString(volumeKey(t, image, migrationPassphrase)), cryptsetupVolumeKey(t, image); got != want {
 				t.Fatal("the volume key recovered through the SHA-1 merge differs from cryptsetup's")
 			}
-			if err := TestKey(image, []byte(conformanceWrongPassphrase)); !errors.Is(err, ErrMasterKeyVerification) {
-				t.Fatalf("a wrong passphrase: got %v, want ErrMasterKeyVerification", err)
+			if err := testKeyForTest(image, []byte(conformanceWrongPassphrase)); !errors.Is(err, ErrWrongKey) {
+				t.Fatalf("a wrong passphrase: got %v, want ErrWrongKey", err)
 			}
 		})
 	}
@@ -123,10 +124,11 @@ func TestSHA1AFVolumesAreRefusedUnderTheFIPSPolicy(t *testing.T) {
 	for _, kind := range sha1AFKinds {
 		t.Run(kind.name, func(t *testing.T) {
 			image := sha1AFVolume(t, kind)
-			forceFIPSPolicy(t)
-			err := TestKey(image, migrationPassphrase)
+			sys := testVolumeSys()
+			sys.fipsMode = forceFIPSPolicy(t)
+			err := testKeyForTestWithSys(image, migrationPassphrase, sys)
 			assertImportRequired(t, err, image,
-				[]NonApprovedKDF{kind.keyslot}, []NonApprovedKDF{{ID: "0", Type: KDFTypePBKDF2, Hash: "sha1"}})
+				[]NonApprovedKDF{kind.keyslot}, []NonApprovedKDF{{ID: 0, Type: kdfTypePBKDF2, Hash: "sha1"}})
 			if !strings.Contains(err.Error(), "anti-forensic hash sha1") {
 				t.Fatalf("the refusal does not name the SHA-1 anti-forensic hash: %v", err)
 			}
@@ -160,7 +162,7 @@ func TestFIPSImportOfSHA1AFVolumes(t *testing.T) {
 			if code != childOK {
 				t.Fatalf("migration in a non-FIPS process exited %d\n%s", code, out)
 			}
-			var result FIPSMigrationResult
+			var result fipsMigrationResultForTest
 			if err := json.Unmarshal([]byte(out), &result); err != nil {
 				t.Fatalf("could not read the migration result %q: %v", out, err)
 			}
@@ -170,7 +172,7 @@ func TestFIPSImportOfSHA1AFVolumes(t *testing.T) {
 			}
 
 			assertFIPSReady(t, image)
-			_, metadata, err := ReadHeader(image)
+			_, metadata, err := readHeaderForTest(image)
 			if err != nil {
 				t.Fatalf("ReadHeader failed: %v", err)
 			}
@@ -198,18 +200,17 @@ func TestNoKeyslotIsWrittenWithSHA1AF(t *testing.T) {
 		// Every step below opens a SHA-1 keyslot first, which FIPS mode
 		// refuses; that refusal is TestSHA1AFVolumesOpenWithCryptsetupsVolumeKey's.
 		image := sha1AFVolume(t, sha1AFKinds[1])
-		if _, err := AddKey(image, migrationPassphrase, []byte("another-credential"), &AddKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterTime: 1}); !errors.Is(err, ErrFIPSNotApproved) {
+		if _, err := addKeyForTest(image, migrationPassphrase, []byte("another-credential"), &addKeyOptionsForTest{KDFType: kdfTypePBKDF2, PBKDFIterTime: 1}); !errors.Is(err, ErrFIPSNotApproved) {
 			t.Fatalf("AddKey through a SHA-1 keyslot in FIPS mode: got %v, want ErrFIPSNotApproved", err)
 		}
 		return
 	}
 
-	pinDigestIterations(t, minPBKDF2Iterations)
 	for _, kind := range sha1AFKinds {
 		t.Run(kind.name, func(t *testing.T) {
 			image := sha1AFVolume(t, kind)
 			other := []byte("another-credential")
-			slot, err := AddKey(image, migrationPassphrase, other, &AddKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterTime: 1})
+			slot, err := addKeyForTest(image, migrationPassphrase, other, &addKeyOptionsForTest{KDFType: kdfTypePBKDF2, PBKDFIterTime: 1})
 			if err != nil {
 				t.Fatalf("AddKey on a SHA-1 AF volume: %v", err)
 			}
@@ -218,13 +219,13 @@ func TestNoKeyslotIsWrittenWithSHA1AF(t *testing.T) {
 			// PBKDF2-SHA1 -- so it runs on the Argon2 shape only: the AF rewrite
 			// it is here for is the same code for both.
 			credentials := []string{"another-credential"}
-			if kind.keyslot.Type == KDFTypeArgon2id {
-				if err := ChangeKey(image, migrationPassphrase, []byte("a-changed-credential"), 0); err != nil {
+			if kind.keyslot.Type == kdfTypeArgon2id {
+				if err := changeKeyForTest(image, migrationPassphrase, []byte("a-changed-credential"), 0); err != nil {
 					t.Fatalf("ChangeKey on a SHA-1 AF keyslot: %v", err)
 				}
 				credentials = append(credentials, "a-changed-credential")
 			}
-			_, metadata, err := ReadHeader(image)
+			_, metadata, err := readHeaderForTest(image)
 			if err != nil {
 				t.Fatalf("ReadHeader failed: %v", err)
 			}
@@ -234,8 +235,8 @@ func TestNoKeyslotIsWrittenWithSHA1AF(t *testing.T) {
 				if id == "0" && len(credentials) == 1 {
 					continue
 				}
-				if ks.AF == nil || ks.AF.Hash != DefaultHashAlgo {
-					t.Fatalf("keyslot %s was written with anti-forensic hash %+v, want %s", id, ks.AF, DefaultHashAlgo)
+				if ks.AF == nil || ks.AF.Hash != defaultHashAlgo {
+					t.Fatalf("keyslot %s was written with anti-forensic hash %+v, want %s", id, ks.AF, defaultHashAlgo)
 				}
 			}
 			for _, credential := range credentials {
@@ -252,8 +253,8 @@ func TestNoKeyslotIsWrittenWithSHA1AF(t *testing.T) {
 		before := fileDigest(t, image)
 		opts := standardFormatOptions(image)
 		opts.HashAlgo = "sha1"
-		if err := Format(opts); !errors.Is(err, ErrUnsupportedHash) || !errors.Is(err, ErrSHA1NotWritten) {
-			t.Fatalf("got %v, want ErrUnsupportedHash and ErrSHA1NotWritten", err)
+		if err := formatForTest(opts); !errors.Is(err, ErrUnsupported) || !errors.Is(err, ErrInvalidArgument) {
+			t.Fatalf("got %v, want ErrUnsupported and ErrInvalidArgument", err)
 		}
 		if fileDigest(t, image) != before {
 			t.Fatal("the refused Format changed the device")
@@ -268,13 +269,13 @@ func TestNoKeyslotIsWrittenWithSHA1AF(t *testing.T) {
 func TestSHA1AFKeyslotFIPSClassification(t *testing.T) {
 	device := newImage(t, "classify.img")
 	formatWithLibrary(t, device)
-	_, metadata, err := ReadHeader(device)
+	_, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 	approved := metadata.Keyslots["0"]
 	original := approved.AF.Hash
-	withAF := func(ks *Keyslot, hash string) *Keyslot {
+	withAF := func(ks *header.Keyslot, hash string) *header.Keyslot {
 		c := *ks
 		af := *ks.AF
 		af.Hash = hash
@@ -282,29 +283,29 @@ func TestSHA1AFKeyslotFIPSClassification(t *testing.T) {
 		return &c
 	}
 	argon2 := *approved
-	cost, memory, cpus := MinArgon2Time, MinArgon2MemoryKB, 1
-	argon2.KDF = &KDF{Type: KDFTypeArgon2id, Salt: approved.KDF.Salt, Time: &cost, Memory: &memory, CPUs: &cpus}
+	cost, memory, cpus := minArgon2Time, minArgon2MemoryKB, 1
+	argon2.KDF = &rawKDF{Type: kdfTypeArgon2id, Salt: approved.KDF.Salt, Time: &cost, Memory: &memory, CPUs: &cpus}
 
 	if refusal, ok := keyslotFIPSRefusal("0", withAF(approved, "sha1")); ok || refusal.Reason != "anti-forensic hash sha1" ||
-		refusal.Type != KDFTypePBKDF2 {
+		refusal.Type != kdfTypePBKDF2 {
 		t.Fatalf("approved KDF with SHA-1 AF: %+v, %v", refusal, ok)
 	}
 	if refusal, ok := keyslotFIPSRefusal("0", withAF(&argon2, "sha1")); ok || refusal.Reason != "anti-forensic hash sha1" ||
-		refusal.Type != KDFTypeArgon2id {
+		refusal.Type != kdfTypeArgon2id {
 		t.Fatalf("argon2 with SHA-1 AF: %+v, %v", refusal, ok)
 	}
 	if _, ok := keyslotFIPSRefusal("0", approved); !ok {
 		t.Fatal("an approved keyslot with a SHA-256 AF hash was refused")
 	}
 
-	forceFIPSPolicy(t)
-	if !keyslotRefusedByFIPS("0", withAF(approved, "sha1"), metadata.Digests) {
+	forced := forceFIPSPolicy(t)
+	if !keyslotRefusedByFIPS("0", withAF(approved, "sha1"), metadata.Digests, forced) {
 		t.Fatal("a keyslot refused only for its SHA-1 AF hash was not classified as a FIPS refusal")
 	}
-	if !keyslotRefusedByFIPS("0", withAF(&argon2, "sha1"), metadata.Digests) {
+	if !keyslotRefusedByFIPS("0", withAF(&argon2, "sha1"), metadata.Digests, forced) {
 		t.Fatal("an Argon2 keyslot with a SHA-1 AF hash was not classified as a FIPS refusal")
 	}
-	if keyslotRefusedByFIPS("0", withAF(&argon2, "md5"), metadata.Digests) {
+	if keyslotRefusedByFIPS("0", withAF(&argon2, "md5"), metadata.Digests, forced) {
 		t.Fatal("an unknown AF hash was classified as a FIPS refusal; it is damage")
 	}
 	if approved.AF.Hash != original {
@@ -321,23 +322,23 @@ func TestChangeKeyAndAFMergeFailuresAreTyped(t *testing.T) {
 	formatWithLibrary(t, device)
 	newPassphrase := []byte("a-new-credential-for-the-test")
 
-	if err := ChangeKey(device, migrationPassphrase, newPassphrase, MaxKeyslots); !errors.Is(err, ErrInvalidKeyslot) {
+	if err := changeKeyForTest(device, migrationPassphrase, newPassphrase, MaxKeyslots); !errors.Is(err, ErrKeyslotNotFound) {
 		t.Fatalf("out-of-range keyslot: got %v, want ErrInvalidKeyslot", err)
 	}
-	if err := ChangeKey(device, migrationPassphrase, newPassphrase, 5); !errors.Is(err, ErrInvalidKeyslot) ||
+	if err := changeKeyForTest(device, migrationPassphrase, newPassphrase, 5); !errors.Is(err, ErrKeyslotNotFound) ||
 		!strings.Contains(err.Error(), "does not exist") {
 		t.Fatalf("absent keyslot: got %v, want ErrInvalidKeyslot saying it does not exist", err)
 	}
-	if err := ChangeKey(device, []byte(conformanceWrongPassphrase), newPassphrase, 0); !errors.Is(err, ErrMasterKeyVerification) {
-		t.Fatalf("wrong old passphrase: got %v, want ErrMasterKeyVerification reachable", err)
+	if err := changeKeyForTest(device, []byte(conformanceWrongPassphrase), newPassphrase, 0); !errors.Is(err, ErrWrongKey) {
+		t.Fatalf("wrong old passphrase: got %v, want ErrWrongKey reachable", err)
 	}
 	// An EXISTING credential is refused only when nothing could open a
 	// keyslot with it (#249, A7): empty. A short one is tried, like any other.
-	if err := ChangeKey(device, nil, newPassphrase, 0); !errors.Is(err, ErrCredentialEmpty) {
+	if err := changeKeyForTest(device, nil, newPassphrase, 0); !errors.Is(err, ErrInvalidCredential) {
 		t.Fatalf("an invalid old passphrase: got %v, want the validation error, not a credential verdict", err)
 	}
 
-	if _, err := afCodec().Merge(enclaveFrom(t, make([]byte, 100)), 32, af.Params{Stripes: 4, Hash: "sha256"}); !errors.Is(err, ErrInvalidKeyslot) {
+	if _, err := afCodec(testVolumeSys()).Merge(enclaveFrom(t, make([]byte, 100)), 32, af.Params{Stripes: 4, Hash: "sha256"}); !errors.Is(err, ErrKeyslotNotFound) {
 		t.Fatalf("AF material of the wrong size: got %v, want ErrInvalidKeyslot", err)
 	}
 }

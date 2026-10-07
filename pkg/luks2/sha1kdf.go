@@ -30,17 +30,11 @@ package luks2
 // (Deriver.SHA1Iterations); this file keeps the seam the measurement runs
 // through.
 
-// sha1CostTimer is the timer sha256IterationsForSHA1 measures with. A seam for
-// the reason CalibratePBKDF2 takes its timer as an argument: what it measures
-// is the machine, and a test substitutes a model of one rather than depend on
-// the wall clock.
-var sha1CostTimer pbkdf2Timer = wallClockPBKDF2
-
 // sha256IterationsForSHA1 returns the PBKDF2-SHA256 iteration count whose
 // derivation of keySize bytes costs at least what sha1Iterations of
 // PBKDF2-SHA1 to keySize bytes cost, by work and by measured time. A result
 // past maxKDFIterations is returned as maxKDFIterations+1, for the caller's
 // range check to refuse rather than for this to wrap.
-func sha256IterationsForSHA1(sha1Iterations, keySize int) (int, error) {
-	return kdfDeriver().SHA1Iterations(sha1Iterations, keySize, sha1CostTimer)
+func sha256IterationsForSHA1(sha1Iterations, keySize int, sys volumeSys) (int, error) {
+	return kdfDeriver(sys).SHA1Iterations(sha1Iterations, keySize, sys.sha1CostTimer)
 }

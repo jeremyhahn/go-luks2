@@ -9,6 +9,7 @@ import (
 	"io"
 
 	"github.com/jeremyhahn/go-enclave"
+
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
@@ -162,7 +163,7 @@ func (c Custody) Random(op string, n int, rand io.Reader) (*enclave.MemoryEnclav
 		return err
 	}); err != nil {
 		c.Release(e)
-		return nil, &errs.Error{Detail: op, Err: err}
+		return nil, &errs.Error{Kind: errs.ErrIO, Detail: op, Err: err}
 	}
 	return e, nil
 }

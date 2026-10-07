@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build linux
+//go:build unix
 
 // Package command runs the external programs this module depends on -- mkfs.*,
 // e2fsck, xfs_repair, fsck.fat, zpool, zfs, blkid -- from a FIXED set of
@@ -17,14 +17,21 @@
 package command
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
+
+// killGrace is exec.Cmd.WaitDelay for a program this package started: how
+// long a program gets to exit, after its process group is killed on ctx
+// cancellation, before Wait gives up and reports it anyway.
+const killGrace = 5 * time.Second
 
 // Tools resolves and runs programs from Dirs, in order, with Env as their
 // whole environment.
@@ -34,6 +41,10 @@ type Tools struct {
 
 	// Env is the whole environment a program runs with.
 	Env []string
+
+	// KillGrace is how long a canceled program gets after SIGTERM before its
+	// process group is killed. Zero is the default, killGrace.
+	KillGrace time.Duration
 }
 
 // System is the production Tools: the system program directories, and an
@@ -142,24 +153,76 @@ func ownedAndUnwritable(path string, info os.FileInfo, stickyOK bool) error {
 // resolved file is executed, argv[0] is the path it was found under -- mke2fs
 // decides which filesystem to make from it, so mkfs.ext4 must stay mkfs.ext4 --
 // and t.Env is its entire environment.
-func (t Tools) Command(name string, args ...string) (*exec.Cmd, error) {
+//
+// The program runs in its own process group (Setpgid), and a canceled ctx
+// kills that whole group rather than just the program named directly: mkfs.*,
+// fsck.* and zpool/zfs can each fork their own helpers, and a cancellation
+// that left those running would not be a cancellation. WaitDelay bounds how
+// long Wait gives the group to actually exit after that kill.
+func (t Tools) Command(ctx context.Context, name string, args ...string) (*exec.Cmd, error) {
 	execPath, argv0, err := t.Resolve(name)
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.Command(execPath, args...) // #nosec G204 -- execPath is resolved from fixed system directories by Resolve; args are flags the caller builds, "--", and a validated operand
+	cmd := exec.CommandContext(ctx, execPath, args...) // #nosec G204 -- execPath is resolved from fixed system directories by Resolve; args are flags the caller builds, "--", and a validated operand
 	cmd.Args[0] = argv0
 	cmd.Env = t.Env
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	grace := t.KillGrace
+	if grace <= 0 {
+		grace = killGrace
+	}
+	cmd.Cancel = func() error {
+		pgid := cmd.Process.Pid
+		// os/exec's own kill when WaitDelay expires reaches only the leader,
+		// so the group's SIGKILL is scheduled here, for the same moment: a
+		// helper that ignores SIGTERM must not outlive the cancellation.
+		time.AfterFunc(grace, func() { _ = syscall.Kill(-pgid, syscall.SIGKILL) })
+		return syscall.Kill(-pgid, syscall.SIGTERM)
+	}
+	cmd.WaitDelay = grace
 	return cmd, nil
 }
 
 // Run runs the program name with args and returns its combined output. A
 // program that cannot be resolved is an error matching ErrTool, and nothing is
 // run.
-func (t Tools) Run(name string, args ...string) ([]byte, error) {
-	cmd, err := t.Command(name, args...)
+//
+// A program killed by a canceled ctx exits on the signal Cancel sent it --
+// a non-success status -- and os/exec reports that as the plain exit error,
+// not ctx.Err() (its Cancel doc: that substitution happens only when the
+// killed program manages to still exit 0). So ctx is checked explicitly once
+// CombinedOutput returns, and its error takes over whenever ctx is the
+// reason, which is what lets a caller match errors.Is(err, context.Canceled).
+func (t Tools) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmd, err := t.Command(ctx, name, args...)
 	if err != nil {
 		return nil, err
 	}
-	return cmd.CombinedOutput()
+	out, err := cmd.CombinedOutput()
+	return out, ctxError(ctx, err)
+}
+
+// Output is Run for a program whose STANDARD OUTPUT alone is parsed: stderr
+// is not part of what is returned. A cancellation is reported as in Run.
+func (t Tools) Output(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmd, err := t.Command(ctx, name, args...)
+	if err != nil {
+		return nil, err
+	}
+	out, err := cmd.Output()
+	return out, ctxError(ctx, err)
+}
+
+// ctxError is the one place a failed run is reconciled with its ctx: err
+// stands unless ctx is the reason the program died, in which case the error
+// is classified as ctx's own, with err kept as the cause.
+func ctxError(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return &errs.Error{Kind: ctxErr, Err: err}
+	}
+	return err
 }

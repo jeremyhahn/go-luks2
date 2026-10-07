@@ -7,9 +7,12 @@
 package luks2
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // A keyslot written as JSON `null` is neither malformed enough to be refused
@@ -45,13 +48,13 @@ func nullKeyslotVolume(t *testing.T, name string) string {
 	path := newImage(t, name)
 	formatWithLibrary(t, path)
 
-	hdr, metadata, err := ReadHeader(path)
+	hdr, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 
 	healthy := cloneKeyslot(metadata.Keyslots["0"])
-	metadata.Keyslots = map[string]*Keyslot{
+	metadata.Keyslots = map[string]*header.Keyslot{
 		"0": nil,
 		"1": healthy,
 	}
@@ -76,7 +79,7 @@ func nullKeyslotVolume(t *testing.T, name string) string {
 func TestNullKeyslotDoesNotSurviveTheHeaderRead(t *testing.T) {
 	path := nullKeyslotVolume(t, "null-keyslot.img")
 
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("a container with a null keyslot no longer reads: %v", err)
 	}
@@ -105,20 +108,27 @@ func TestNullKeyslotDoesNotSurviveTheHeaderRead(t *testing.T) {
 // TestWipeKeyslotDoesNotPanicOnANullKeyslot is the first of the two sites that
 // were not saved by a callee.
 //
-// WipeKeyslot is EXPORTED and reaches parseSize(ks.Area.Offset) with ks nil.
-// There is no validateKeyslot call and no nil check anywhere in wipe.go, so a
-// crafted header panics a public API.
-func TestWipeKeyslotDoesNotPanicOnANullKeyslot(t *testing.T) {
+// (*Volume).RemoveKeyslot used to be WipeKeyslot, EXPORTED and reaching
+// parseSize(ks.Area.Offset) with ks nil. There is no validateKeyslot call
+// and no nil check anywhere in the old wipe.go, so a crafted header panicked
+// a public API.
+func TestRemoveKeyslotDoesNotPanicOnANullKeyslot(t *testing.T) {
 	defer parallel(t)()
 
 	path := nullKeyslotVolume(t, "null-wipe.img")
 
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
 	// After the boundary fix the slot is gone, so this is the ordinary
 	// does-not-exist path -- which is the point. A null must be indistinguishable
 	// from absent to every consumer.
-	err := WipeKeyslot(path, 0)
+	err = v.RemoveKeyslot(context.Background(), 0)
 	if err == nil {
-		t.Fatal("WipeKeyslot acted on a keyslot that is not there")
+		t.Fatal("RemoveKeyslot acted on a keyslot that is not there")
 	}
 	if !strings.Contains(err.Error(), "0") {
 		t.Fatalf("the error does not name the keyslot it refused: %v", err)
@@ -126,8 +136,8 @@ func TestWipeKeyslotDoesNotPanicOnANullKeyslot(t *testing.T) {
 
 	// The healthy keyslot is untouched: refusing a null must not damage the
 	// volume around it.
-	if err := TestKey(path, []byte(conformancePassphrase)); err != nil {
-		t.Fatalf("the volume no longer opens after a refused WipeKeyslot: %v", err)
+	if err := testKeyForTest(path, []byte(conformancePassphrase)); err != nil {
+		t.Fatalf("the volume no longer opens after a refused RemoveKeyslot: %v", err)
 	}
 }
 
@@ -141,12 +151,12 @@ func TestGetMasterKeyDoesNotPanicOnANullKeyslot(t *testing.T) {
 
 	path := nullKeyslotVolume(t, "null-scan.img")
 
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 
-	key, err := getMasterKey(path, []byte(conformancePassphrase), metadata)
+	key, err := getMasterKey(path, []byte(conformancePassphrase), metadata, testVolumeSys())
 	if err != nil {
 		t.Fatalf("a null keyslot ahead of a healthy one denied the volume: %v", err)
 	}
@@ -167,13 +177,13 @@ func TestEveryExportedPathToleratesANullKeyslot(t *testing.T) {
 
 	// A fresh volume per operation: several of these mutate the header.
 	t.Run("ReadHeader", func(t *testing.T) {
-		if _, _, err := ReadHeader(nullKeyslotVolume(t, "n1.img")); err != nil {
+		if _, _, err := readHeaderForTest(nullKeyslotVolume(t, "n1.img")); err != nil {
 			t.Fatalf("ReadHeader: %v", err)
 		}
 	})
 
 	t.Run("GetVolumeInfo", func(t *testing.T) {
-		info, err := GetVolumeInfo(nullKeyslotVolume(t, "n2.img"))
+		info, err := getVolumeInfoForTest(nullKeyslotVolume(t, "n2.img"))
 		if err != nil {
 			t.Fatalf("GetVolumeInfo: %v", err)
 		}
@@ -185,7 +195,7 @@ func TestEveryExportedPathToleratesANullKeyslot(t *testing.T) {
 	})
 
 	t.Run("ListKeyslots", func(t *testing.T) {
-		slots, err := ListKeyslots(nullKeyslotVolume(t, "n3.img"))
+		slots, err := listKeyslotsForTest(nullKeyslotVolume(t, "n3.img"))
 		if err != nil {
 			t.Fatalf("ListKeyslots: %v", err)
 		}
@@ -195,15 +205,15 @@ func TestEveryExportedPathToleratesANullKeyslot(t *testing.T) {
 	})
 
 	t.Run("TestKey", func(t *testing.T) {
-		if err := TestKey(nullKeyslotVolume(t, "n4.img"), passphrase); err != nil {
+		if err := testKeyForTest(nullKeyslotVolume(t, "n4.img"), passphrase); err != nil {
 			t.Fatalf("TestKey: %v", err)
 		}
 	})
 
 	t.Run("AddKey", func(t *testing.T) {
 		path := nullKeyslotVolume(t, "n5.img")
-		if _, err := AddKey(path, passphrase, []byte("a-second-credential"), &AddKeyOptions{
-			KDFType:       KDFTypePBKDF2,
+		if _, err := addKeyForTest(path, passphrase, []byte("a-second-credential"), &addKeyOptionsForTest{
+			KDFType:       kdfTypePBKDF2,
 			PBKDFIterTime: 1,
 		}); err != nil {
 			t.Fatalf("AddKey: %v", err)
@@ -213,28 +223,28 @@ func TestEveryExportedPathToleratesANullKeyslot(t *testing.T) {
 	t.Run("KillSlot", func(t *testing.T) {
 		// Only one usable slot remains after the null is dropped, so this must
 		// refuse -- cleanly, naming the reason, not panic.
-		err := KillSlot(nullKeyslotVolume(t, "n6.img"), passphrase, 1)
+		err := killSlotForTest(nullKeyslotVolume(t, "n6.img"), passphrase, 1)
 		if err == nil {
 			t.Fatal("KillSlot removed the last usable keyslot")
 		}
 	})
 
 	t.Run("KillKeyslot", func(t *testing.T) {
-		err := KillKeyslot(nullKeyslotVolume(t, "n7.img"), 0)
+		err := killKeyslotForTest(nullKeyslotVolume(t, "n7.img"), 0)
 		if err == nil {
 			t.Fatal("KillKeyslot acted on a keyslot that is not there")
 		}
 	})
 
 	t.Run("RemoveKey", func(t *testing.T) {
-		err := RemoveKey(nullKeyslotVolume(t, "n8.img"), passphrase, 0)
+		err := removeKeyForTest(nullKeyslotVolume(t, "n8.img"), passphrase, 0)
 		if err == nil {
 			t.Fatal("RemoveKey acted on a keyslot that is not there")
 		}
 	})
 
 	t.Run("ChangeKey", func(t *testing.T) {
-		err := ChangeKey(nullKeyslotVolume(t, "n9.img"), passphrase, []byte("a-new-credential"), 0)
+		err := changeKeyForTest(nullKeyslotVolume(t, "n9.img"), passphrase, []byte("a-new-credential"), 0)
 		if err == nil {
 			t.Fatal("ChangeKey acted on a keyslot that is not there")
 		}
@@ -254,11 +264,11 @@ func TestNullsAreRefusedWhereTheyCannotBeDropped(t *testing.T) {
 
 	cases := []struct {
 		name   string
-		mutate func(*LUKS2Metadata)
+		mutate func(*header.Metadata)
 	}{
-		{"null segment", func(m *LUKS2Metadata) { m.Segments["0"] = nil }},
-		{"null digest", func(m *LUKS2Metadata) { m.Digests["0"] = nil }},
-		{"null config", func(m *LUKS2Metadata) { m.Config = nil }},
+		{"null segment", func(m *header.Metadata) { m.Segments["0"] = nil }},
+		{"null digest", func(m *header.Metadata) { m.Digests["0"] = nil }},
+		{"null config", func(m *header.Metadata) { m.Config = nil }},
 	}
 
 	for _, tc := range cases {
@@ -266,7 +276,7 @@ func TestNullsAreRefusedWhereTheyCannotBeDropped(t *testing.T) {
 			path := newImage(t, "null-refused.img")
 			formatWithLibrary(t, path)
 
-			hdr, metadata, err := ReadHeader(path)
+			hdr, metadata, err := readHeaderForTest(path)
 			if err != nil {
 				t.Fatalf("ReadHeader failed: %v", err)
 			}
@@ -279,7 +289,7 @@ func TestNullsAreRefusedWhereTheyCannotBeDropped(t *testing.T) {
 				t.Fatalf("the fixture could not be written, so the reader was never exercised: %v", err)
 			}
 
-			if _, _, err := ReadHeader(path); !errors.Is(err, ErrInvalidHeader) {
+			if _, _, err := readHeaderForTest(path); !errors.Is(err, ErrInvalidHeader) {
 				t.Fatalf("a null that cannot be dropped was not refused: %v", err)
 			}
 		})
@@ -295,17 +305,17 @@ func TestNullTokenIsDroppedToo(t *testing.T) {
 	path := newImage(t, "null-token.img")
 	formatWithLibrary(t, path)
 
-	hdr, metadata, err := ReadHeader(path)
+	hdr, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
-	metadata.Tokens = map[string]*Token{"0": nil}
+	metadata.Tokens = map[string]*LegacyToken{"0": nil}
 
 	if err := writeHeaderUnvalidated(path, hdr, metadata); err != nil {
 		t.Fatalf("failed to write the fixture: %v", err)
 	}
 
-	_, reread, err := ReadHeader(path)
+	_, reread, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("a container with a null token no longer reads: %v", err)
 	}
@@ -313,7 +323,7 @@ func TestNullTokenIsDroppedToo(t *testing.T) {
 		t.Fatal("the null token survived the read")
 	}
 
-	if err := TestKey(path, []byte(conformancePassphrase)); err != nil {
+	if err := testKeyForTest(path, []byte(conformancePassphrase)); err != nil {
 		t.Fatalf("a null token stopped the volume opening by passphrase: %v", err)
 	}
 }

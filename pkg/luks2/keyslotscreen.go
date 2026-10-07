@@ -11,10 +11,13 @@ import (
 	"slices"
 
 	"github.com/jeremyhahn/go-enclave"
+
 	"github.com/jeremyhahn/go-luks2/internal/af"
 	"github.com/jeremyhahn/go-luks2/internal/areacipher"
 	"github.com/jeremyhahn/go-luks2/internal/device"
 	"github.com/jeremyhahn/go-luks2/internal/errs"
+	"github.com/jeremyhahn/go-luks2/internal/fips"
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // The ONE answer to "can this keyslot open this volume?", asked without the
@@ -167,18 +170,18 @@ type keyslotPlan struct {
 // failure that aborted the scan would deny a volume the keyslots that still
 // work, which is the data loss this package spends most of its guards avoiding.
 // getMasterKey aborts on ErrProtectedMemory and on nothing else.
-func screenKeyslot(id string, keyslot *Keyslot, digests map[string]*Digest) (keyslotPlan, error) {
+func screenKeyslot(id string, keyslot *header.Keyslot, digests map[string]*rawDigest, fipsMode func() fips.Mode) (keyslotPlan, error) {
 	var plan keyslotPlan
 
 	// A LUKS2 "reencrypt" keyslot has no kdf object and its area is a checksum
 	// region rather than key material, so it holds no passphrase-wrapped volume
 	// key. It is valid metadata that cannot open anything.
 	if keyslot == nil {
-		return plan, &InvalidKeyslotError{Keyslot: id, Reason: "is null"}
+		return plan, &errs.Error{Kind: ErrKeyslotNotFound, Detail: fmt.Sprintf("luks2 keyslot %q: is null", id)}
 	}
 	if keyslot.Type != "luks2" {
-		return plan, &InvalidKeyslotError{Keyslot: id,
-			Reason: fmt.Sprintf("type %q cannot be opened; only luks2 keyslots hold a passphrase-wrapped volume key", keyslot.Type)}
+		return plan, &errs.Error{Kind: ErrKeyslotNotFound,
+			Detail: fmt.Sprintf("luks2 keyslot %q: type %q cannot be opened; only luks2 keyslots hold a passphrase-wrapped volume key", id, keyslot.Type)}
 	}
 
 	// THE GATE. Everything below trusts the keyslot's declared geometry: that
@@ -193,12 +196,12 @@ func screenKeyslot(id string, keyslot *Keyslot, digests map[string]*Digest) (key
 	// validateKeyslot because a deliberately expensive KDF is still a fine
 	// template for a new keyslot; see validateKDFCost.
 	if err := validateKDFCost(keyslot.KDF); err != nil {
-		return plan, &InvalidKeyslotError{Keyslot: id, Reason: "declares a KDF cost this package refuses", Err: err}
+		return plan, &errs.Error{Kind: ErrKeyslotNotFound, Detail: fmt.Sprintf("luks2 keyslot %q: declares a KDF cost this package refuses", id), Err: err}
 	}
 
 	// What the KDF would REFUSE, as opposed to what it would cost.
-	if err := screenKDFParameters(keyslot.KDF); err != nil {
-		return plan, &InvalidKeyslotError{Keyslot: id, Reason: "declares KDF parameters the derivation refuses", Err: err}
+	if err := screenKDFParameters(keyslot.KDF, fipsMode); err != nil {
+		return plan, &errs.Error{Kind: ErrKeyslotNotFound, Detail: fmt.Sprintf("luks2 keyslot %q: declares KDF parameters the derivation refuses", id), Err: err}
 	}
 
 	// From here the order MIRRORS unlockKeyslot's, and that is deliberate rather
@@ -213,13 +216,13 @@ func screenKeyslot(id string, keyslot *Keyslot, digests map[string]*Digest) (key
 	var err error
 	plan.areaOffset, err = parseSize(keyslot.Area.Offset)
 	if err != nil {
-		return plan, &InvalidKeyslotError{Keyslot: id,
-			Reason: fmt.Sprintf("declares an area offset %q that is not a number", keyslot.Area.Offset), Err: err}
+		return plan, &errs.Error{Kind: ErrKeyslotNotFound,
+			Detail: fmt.Sprintf("luks2 keyslot %q: declares an area offset %q that is not a number", id, keyslot.Area.Offset), Err: err}
 	}
 	plan.areaSize, err = parseSize(keyslot.Area.Size)
 	if err != nil {
-		return plan, &InvalidKeyslotError{Keyslot: id,
-			Reason: fmt.Sprintf("declares an area size %q that is not a number", keyslot.Area.Size), Err: err}
+		return plan, &errs.Error{Kind: ErrKeyslotNotFound,
+			Detail: fmt.Sprintf("luks2 keyslot %q: declares an area size %q that is not a number", id, keyslot.Area.Size), Err: err}
 	}
 
 	// validateKeyslot has already established that this product does not
@@ -237,9 +240,9 @@ func screenKeyslot(id string, keyslot *Keyslot, digests map[string]*Digest) (key
 		// to something other than what was written -- so the merge would fail
 		// with a message about the AF material rather than about the geometry
 		// that caused it, and an operator would go looking in the wrong place.
-		return plan, &InvalidKeyslotError{Keyslot: id,
-			Reason: fmt.Sprintf("area of %d bytes is not a whole number of %d-byte sectors and cannot hold the %d bytes of AF material this keyslot declares",
-				plan.areaSize, keyslotSectorSize, plan.afSplitSize)}
+		return plan, &errs.Error{Kind: ErrKeyslotNotFound,
+			Detail: fmt.Sprintf("luks2 keyslot %q: area of %d bytes is not a whole number of %d-byte sectors and cannot hold the %d bytes of AF material this keyslot declares",
+				id, plan.areaSize, keyslotSectorSize, plan.afSplitSize)}
 	}
 
 	// The area cipher is read WHOLE -- algorithm, mode and IV generator -- and
@@ -256,10 +259,12 @@ func screenKeyslot(id string, keyslot *Keyslot, digests map[string]*Digest) (key
 	// merge yields a key no segment this package maps can use.
 	plan.area, err = parseKeyslotAreaEncryption(keyslot.Area.Encryption)
 	if err != nil {
-		return plan, &UnsupportedKeyslotCipherError{Keyslot: id, Spec: keyslot.Area.Encryption}
+		return plan, &errs.Error{Kind: ErrUnsupported, Detail: fmt.Sprintf(
+			"keyslot %s area encryption %q; the keyslot area transforms this package implements are %s",
+			id, keyslot.Area.Encryption, areacipher.Specs()), Err: ErrKeyslotNotFound}
 	}
 	if err := areacipher.ValidateVolumeKeySize(keyslot.KeySize); err != nil {
-		return plan, &InvalidKeyslotError{Keyslot: id, Reason: "declares a volume key size no AES data cipher can use", Err: err}
+		return plan, &errs.Error{Kind: ErrKeyslotNotFound, Detail: fmt.Sprintf("luks2 keyslot %q: declares a volume key size no AES data cipher can use", id), Err: err}
 	}
 	// The AREA's key size is what the KDF derives and the area cipher is keyed
 	// with (#249, A6). It used to be ignored and keyslot.KeySize used in its
@@ -269,20 +274,20 @@ func screenKeyslot(id string, keyslot *Keyslot, digests map[string]*Digest) (key
 	// every version of this package's writer.
 	plan.areaKeySize = keyslot.Area.KeySize
 	if err := plan.area.ValidateKeySize(plan.areaKeySize); err != nil {
-		return plan, &InvalidKeyslotError{Keyslot: id,
-			Reason: fmt.Sprintf("declares an area key size of %d bytes, which its %s area cipher cannot use", plan.areaKeySize, keyslot.Area.Encryption), Err: err}
+		return plan, &errs.Error{Kind: ErrKeyslotNotFound,
+			Detail: fmt.Sprintf("luks2 keyslot %q: declares an area key size of %d bytes, which its %s area cipher cannot use", id, plan.areaKeySize, keyslot.Area.Encryption), Err: err}
 	}
 
 	// The anti-forensic merge resolves this name and fails if it cannot. SHA-1
 	// resolves (#236): it is what a converted LUKS1 volume carries.
 	if err := af.ValidateReadHash(keyslot.AF.Hash); err != nil {
-		return plan, &InvalidKeyslotError{Keyslot: id, Reason: "declares an anti-forensic hash nothing implements", Err: err}
+		return plan, &errs.Error{Kind: ErrKeyslotNotFound, Detail: fmt.Sprintf("luks2 keyslot %q: declares an anti-forensic hash nothing implements", id), Err: err}
 	}
 	// The FIPS 140-3 gate on it, after the structural check so a refusal here
 	// is a well-formed keyslot this process may not run -- which is what
 	// keyslotRefusedByFIPS depends on to call it an import, not damage.
 	if err := af.RequireApprovedHash(fipsMode(), keyslot.AF.Hash); err != nil {
-		return plan, &InvalidKeyslotError{Keyslot: id, Reason: "declares an anti-forensic hash the merge refuses", Err: err}
+		return plan, &errs.Error{Kind: ErrKeyslotNotFound, Detail: fmt.Sprintf("luks2 keyslot %q: declares an anti-forensic hash the merge refuses", id), Err: err}
 	}
 
 	// A keyslot no digest attests cannot be authenticated at all -- see
@@ -301,7 +306,7 @@ func screenKeyslot(id string, keyslot *Keyslot, digests map[string]*Digest) (key
 	// Worded by unverifiableKeyslotError, which verifyMasterKey also uses.
 	// Screening earlier must not change WHAT the operator is told: the same
 	// header reached from two places is one fault.
-	applicable, usable := keyslotDigestCounts(id, digests)
+	applicable, usable := keyslotDigestCounts(id, digests, fipsMode)
 	if usable == 0 {
 		return plan, unverifiableKeyslotError(id, applicable)
 	}
@@ -330,9 +335,9 @@ func screenKeyslot(id string, keyslot *Keyslot, digests map[string]*Digest) (key
 // The Argon2 cost fields are not re-checked: validateKDFCost has already
 // bounded time, memory and cpus more tightly than deriveArgon2i/deriveArgon2id
 // do, and screenKeyslot runs it first.
-func screenKDFParameters(kdf *KDF) error {
+func screenKDFParameters(kdf *rawKDF, fipsMode func() fips.Mode) error {
 	if kdf == nil {
-		return &errs.Error{Detail: "no KDF object"}
+		return &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "no KDF object"}
 	}
 
 	if err := fipsMode().RequireKDF(kdf.Type); err != nil {
@@ -346,8 +351,8 @@ func screenKDFParameters(kdf *KDF) error {
 	// The second FIPS gate, and the last check: PBKDF2 over SHA-1. Its name
 	// has already resolved in screenKDFStructure, so the only thing this can
 	// still refuse is the policy.
-	if kdf.Type == KDFTypePBKDF2 {
-		if _, err := getPBKDF2HashFunc(kdf.Hash); err != nil {
+	if kdf.Type == kdfTypePBKDF2 {
+		if _, err := getPBKDF2HashFunc(kdf.Hash, fipsMode); err != nil {
 			return err
 		}
 	}
@@ -364,34 +369,34 @@ func screenKDFParameters(kdf *KDF) error {
 // structural checks would be a second copy of the screen, which is the drift
 // this file exists to remove; answering it with the screen minus its gates is
 // the same checks by construction.
-func screenKDFStructure(kdf *KDF) error {
+func screenKDFStructure(kdf *rawKDF) error {
 	if kdf == nil {
-		return &errs.Error{Detail: "no KDF object"}
+		return &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "no KDF object"}
 	}
 
 	if _, err := decodeBase64(kdf.Salt); err != nil {
-		return &errs.Error{Detail: "invalid salt", Err: err}
+		return &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "invalid salt", Err: err}
 	}
 
 	switch kdf.Type {
-	case KDFTypePBKDF2:
+	case kdfTypePBKDF2:
 		if _, err := pbkdf2Hash(kdf.Hash); err != nil {
 			return err
 		}
-	case KDFTypeArgon2i, KDFTypeArgon2id:
+	case kdfTypeArgon2i, kdfTypeArgon2id:
 		// Nothing further is decidable without the passphrase: cost is
 		// validateKDFCost's, and argon2 has no algorithm name to resolve.
 	default:
-		return &errs.Error{Detail: "unsupported KDF type: " + kdf.Type}
+		return &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "unsupported KDF type: " + kdf.Type}
 	}
 
 	return nil
 }
 
 // parseKeyslotAreaEncryption reads a keyslot's area.encryption as the full
-// cipher spec it is and returns the transform it names, or an
-// *UnsupportedKeyslotCipherError if this package cannot run it. The accepted
-// set, and why the mode is honored rather than discarded (#106), is
+// cipher spec it is and returns the transform it names, or an *errs.Error
+// with Kind ErrUnsupported if this package cannot run it. The
+// accepted set, and why the mode is honored rather than discarded (#106), is
 // areacipher.Parse's.
 //
 // It is a function rather than an inline lookup so the unlock path and the
@@ -400,7 +405,9 @@ func screenKDFStructure(kdf *KDF) error {
 func parseKeyslotAreaEncryption(spec string) (areacipher.Transform, error) {
 	t, ok := areacipher.Parse(spec)
 	if !ok {
-		return areacipher.Transform{}, &UnsupportedKeyslotCipherError{Spec: spec}
+		return areacipher.Transform{}, &errs.Error{Kind: ErrUnsupported, Detail: fmt.Sprintf(
+			"area encryption %q; the keyslot area transforms this package implements are %s",
+			spec, areacipher.Specs()), Err: ErrKeyslotNotFound}
 	}
 	return t, nil
 }
@@ -410,7 +417,7 @@ func parseKeyslotAreaEncryption(spec string) (areacipher.Transform, error) {
 // A LUKS2 digest carries a "keyslots" array and it is not advisory: a container
 // can hold more than one volume key, and each digest attests one of them. See
 // verifyMasterKey, which uses this to filter the digest set it will try.
-func digestCovers(digest *Digest, keyslotID string) bool {
+func digestCovers(digest *rawDigest, keyslotID string) bool {
 	return digest != nil && slices.Contains(digest.Keyslots, keyslotID)
 }
 
@@ -438,7 +445,7 @@ func digestCovers(digest *Digest, keyslotID string) bool {
 //
 // The order mirrors verifyMasterKey's, and the decode comes first because its
 // LENGTH is what the derivation has to match.
-func screenDigest(digest *Digest) ([]byte, *KDF, error) {
+func screenDigest(digest *rawDigest, fipsMode func() fips.Mode) ([]byte, *rawKDF, error) {
 	expected, kdf, err := screenDigestStructure(digest)
 	if err != nil {
 		return expected, nil, err
@@ -447,7 +454,7 @@ func screenDigest(digest *Digest) ([]byte, *KDF, error) {
 	// The FIPS 140-3 gates run LAST, after every structural check has passed,
 	// so a digest refused here is a well-formed digest this process may not
 	// evaluate -- never a damaged one. keyslotRefusedByFIPS depends on that.
-	if err := screenKDFParameters(kdf); err != nil {
+	if err := screenKDFParameters(kdf, fipsMode); err != nil {
 		return expected, nil, err
 	}
 
@@ -473,14 +480,14 @@ const argon2DigestLen = 32
 //
 // An Argon2 digest carries its cost the way an Argon2 keyslot KDF does, in
 // time, memory and cpus members, and is bounded by the same validateKDFCost.
-func screenDigestStructure(digest *Digest) ([]byte, *KDF, error) {
+func screenDigestStructure(digest *rawDigest) ([]byte, *rawKDF, error) {
 	if digest == nil {
-		return nil, nil, &errs.Error{Detail: "digest is null"}
+		return nil, nil, &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "digest is null"}
 	}
 
 	expected, err := decodeBase64(digest.Digest)
 	if err != nil {
-		return nil, nil, &errs.Error{Detail: "digest value is not base64", Err: err}
+		return nil, nil, &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "digest value is not base64", Err: err}
 	}
 
 	// Which lengths are derived to is a whitelist, not a range: the length the
@@ -488,7 +495,7 @@ func screenDigestStructure(digest *Digest) ([]byte, *KDF, error) {
 	// version of this package wrote and luks1DigestLen for converted LUKS1
 	// containers. See legacyDigestLen. Resolved WITHOUT the
 	// FIPS gate, which screenKDFParameters applies afterwards.
-	argon2 := digest.Type == KDFTypeArgon2i || digest.Type == KDFTypeArgon2id
+	argon2 := digest.Type == kdfTypeArgon2i || digest.Type == kdfTypeArgon2id
 	wantLen := argon2DigestLen
 	if !argon2 || digest.Hash != "" {
 		h, err := pbkdf2Hash(digest.Hash)
@@ -498,11 +505,11 @@ func screenDigestStructure(digest *Digest) ([]byte, *KDF, error) {
 		wantLen = h.Size()
 	}
 	if len(expected) != wantLen && len(expected) != legacyDigestLen && len(expected) != luks1DigestLen {
-		return expected, nil, &errs.Error{Detail: fmt.Sprintf(
+		return expected, nil, &errs.Error{Kind: errs.ErrInvalidHeader, Detail: fmt.Sprintf(
 			"digest is %d bytes, which agrees with neither %s nor a legacy carve-out", len(expected), digest.Hash)}
 	}
 
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:       digest.Type,
 		Hash:       digest.Hash,
 		Salt:       digest.Salt,
@@ -539,13 +546,13 @@ func screenDigestStructure(digest *Digest) ([]byte, *KDF, error) {
 //
 // Both counts come back because the two zero cases are different faults; see
 // unverifiableKeyslotError.
-func keyslotDigestCounts(keyslotID string, digests map[string]*Digest) (applicable, usable int) {
+func keyslotDigestCounts(keyslotID string, digests map[string]*rawDigest, fipsMode func() fips.Mode) (applicable, usable int) {
 	for _, digest := range digests {
 		if !digestCovers(digest, keyslotID) {
 			continue
 		}
 		applicable++
-		expected, _, err := screenDigest(digest)
+		expected, _, err := screenDigest(digest, fipsMode)
 		clearBytes(expected)
 		if err == nil {
 			usable++
@@ -609,7 +616,7 @@ func unverifiableKeyslotError(keyslotID string, applicable int) error {
 //
 // The last condition is what keeps a crafted header from passing: a keyslot
 // attested both by a digest bound to the segment and by an unbound one is a
-// header cryptsetup refuses outright ("Keyslot N is not assigned to exactly 1
+// header cryptsetup refuses outright ("header.Keyslot N is not assigned to exactly 1
 // digest"), and nothing static can say which of the two keys the keyslot really
 // holds. Counting it would be counting a survivor on a guess; refusing it costs
 // only a spurious refusal, and THE INVARIANT on the file comment says which of
@@ -625,7 +632,7 @@ func unverifiableKeyslotError(keyslotID string, applicable int) error {
 // It is a pure function of the metadata. Lane C's unlock (C1) and the removal
 // guard below ask the same question through it, so the two cannot come to
 // disagree about which keyslots hold the volume key.
-func keyslotBoundToSegment(metadata *LUKS2Metadata, keyslotID, segmentID string) bool {
+func keyslotBoundToSegment(metadata *header.Metadata, keyslotID, segmentID string) bool {
 	if metadata == nil || metadata.Segments[segmentID] == nil {
 		return false
 	}
@@ -647,7 +654,7 @@ func keyslotBoundToSegment(metadata *LUKS2Metadata, keyslotID, segmentID string)
 // with. A header that declares no segment has no volume key to hold, and is
 // answered false rather than vacuously true -- a removal guard must not find a
 // survivor in a header that describes nothing to survive for.
-func keyslotBoundToDataSegments(metadata *LUKS2Metadata, keyslotID string) bool {
+func keyslotBoundToDataSegments(metadata *header.Metadata, keyslotID string) bool {
 	if metadata == nil {
 		return false
 	}
@@ -672,7 +679,7 @@ func keyslotBoundToDataSegments(metadata *LUKS2Metadata, keyslotID string) bool 
 // makes. An activation must use this one before it maps a key: a declaration is
 // not proof, and the key decides which digest it matches. It derives once per
 // candidate digest, so it is called once, after the key is recovered.
-func recoveredKeyBoundToSegment(metadata *LUKS2Metadata, keyslotID, segmentID string, key *enclave.MemoryEnclave) bool {
+func recoveredKeyBoundToSegment(metadata *header.Metadata, keyslotID, segmentID string, key *enclave.MemoryEnclave) bool {
 	if metadata == nil || key == nil || metadata.Segments[segmentID] == nil {
 		return false
 	}
@@ -681,7 +688,7 @@ func recoveredKeyBoundToSegment(metadata *LUKS2Metadata, keyslotID, segmentID st
 		if !digestCovers(digest, keyslotID) || !slices.Contains(digest.Segments, segmentID) {
 			continue
 		}
-		if _, matched := evaluateDigest(key, digest); matched {
+		if _, matched := evaluateDigest(key, digest, fips.Probe); matched {
 			return true
 		}
 	}
@@ -715,11 +722,11 @@ func recoveredKeyBoundToSegment(metadata *LUKS2Metadata, keyslotID, segmentID st
 //     (checkKeyslotAreaConfined; A2) -- an area reaching into the header or the
 //     payload is one the next header write or data write destroys, and one
 //     cryptsetup refuses the whole header over.
-func keyslotCanOpenVolume(f *os.File, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata, id string) bool {
+func keyslotCanOpenVolume(f *os.File, hdr *header.BinaryHeader, metadata *header.Metadata, id string, measureDeviceSize func(*os.File) (int64, error)) bool {
 	if _, ok := canonicalKeyslotID(id); !ok {
 		return false
 	}
-	if !keyslotHoldsKeyMaterial(f, id, metadata.Keyslots[id], metadata.Digests) {
+	if !keyslotHoldsKeyMaterial(f, id, metadata.Keyslots[id], metadata.Digests, measureDeviceSize) {
 		return false
 	}
 	if !keyslotBoundToDataSegments(metadata, id) {
@@ -735,21 +742,21 @@ func keyslotCanOpenVolume(f *os.File, hdr *LUKS2BinaryHeader, metadata *LUKS2Met
 // survivor for the purposes of the last-keyslot guard, but its key is still
 // somebody's key, and a wipe aimed at another keyslot must not destroy it. For
 // the overlap check, protecting more is the safe direction.
-func keyslotHoldsKeyMaterial(f *os.File, id string, keyslot *Keyslot, digests map[string]*Digest) bool {
-	plan, err := screenKeyslot(id, keyslot, digests)
+func keyslotHoldsKeyMaterial(f *os.File, id string, keyslot *header.Keyslot, digests map[string]*rawDigest, measureDeviceSize func(*os.File) (int64, error)) bool {
+	plan, err := screenKeyslot(id, keyslot, digests, fips.Probe)
 	if err != nil {
 		return false
 	}
-	return checkAreaWithinDevice(f, plan.areaOffset, plan.areaSize) == nil
+	return checkAreaWithinDevice(f, plan.areaOffset, plan.areaSize, measureDeviceSize) == nil
 }
 
 // checkKeyslotAreaConfined refuses a keyslot whose area is not wholly inside the
 // container's reserved keyslots area (keyslotsAreaBounds), or that reaches into
 // any data segment. See checkAreaConfined.
-func checkKeyslotAreaConfined(hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata, id string) error {
+func checkKeyslotAreaConfined(hdr *header.BinaryHeader, metadata *header.Metadata, id string) error {
 	keyslot := metadata.Keyslots[id]
 	if keyslot == nil {
-		return &errs.Error{Kind: ErrInvalidKeyslot, Detail: "keyslot " + id + " declares no area, so what removing it would wipe is unknown"}
+		return &errs.Error{Kind: ErrKeyslotNotFound, Detail: "keyslot " + id + " declares no area, so what removing it would wipe is unknown"}
 	}
 	return checkAreaConfined(hdr, metadata, id, keyslot.Area)
 }
@@ -777,7 +784,7 @@ func checkKeyslotAreaConfined(hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata, i
 // outright, so confining every wipe refuses nothing cryptsetup opens.
 //
 // Both boundaries are read from the container, never assumed.
-func checkAreaConfined(hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata, id string, area *KeyslotArea) error {
+func checkAreaConfined(hdr *header.BinaryHeader, metadata *header.Metadata, id string, area *header.KeyslotArea) error {
 	start, limit, err := keyslotsAreaBounds(hdr, metadata)
 	if err != nil {
 		return err
@@ -790,20 +797,20 @@ func checkAreaConfined(hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata, id strin
 // starts after both header copies, and their size is config.json_size plus the
 // binary header -- the relation cryptsetup itself validates (hdr_size =
 // json_size + 4096), so a header whose two disagree is one cryptsetup refuses.
-func checkKeyslotAreaConfinedByMetadata(metadata *LUKS2Metadata, id string) error {
+func checkKeyslotAreaConfinedByMetadata(metadata *header.Metadata, id string) error {
 	keyslot := metadata.Keyslots[id]
 	if keyslot == nil {
-		return &errs.Error{Kind: ErrInvalidKeyslot, Detail: "keyslot " + id + " is null"}
+		return &errs.Error{Kind: ErrKeyslotNotFound, Detail: "keyslot " + id + " is null"}
 	}
 	if metadata.Config == nil {
 		return &errs.Error{Kind: ErrInvalidHeader, Detail: "header has no config object, so the keyslots area is undefined"}
 	}
 	jsonSize, err := parseSize(metadata.Config.JSONSize)
-	if err != nil || jsonSize <= 0 || jsonSize > LUKS2HeaderMaxSize-LUKS2HeaderSize {
+	if err != nil || jsonSize <= 0 || jsonSize > header.HeaderMaxSize-header.HeaderSize {
 		return &errs.Error{Kind: ErrInvalidHeader, Detail: fmt.Sprintf(
 			"config.json_size %q does not describe a LUKS2 header area, so where the keyslots area starts is unknown", metadata.Config.JSONSize)}
 	}
-	start, limit, err := keyslotsAreaFrom(2*(jsonSize+LUKS2HeaderSize), metadata)
+	start, limit, err := keyslotsAreaFrom(2*(jsonSize+header.HeaderSize), metadata)
 	if err != nil {
 		return err
 	}
@@ -821,14 +828,14 @@ func dataOnAnotherDevice(segmentOffset int64) bool {
 }
 
 // confineArea is the check itself, against a keyslots area [start, limit).
-func confineArea(start, limit int64, metadata *LUKS2Metadata, id string, area *KeyslotArea) error {
+func confineArea(start, limit int64, metadata *header.Metadata, id string, area *header.KeyslotArea) error {
 	if area == nil {
-		return &errs.Error{Kind: ErrInvalidKeyslot, Detail: "keyslot " + id + " declares no area, so what removing it would wipe is unknown"}
+		return &errs.Error{Kind: ErrKeyslotNotFound, Detail: "keyslot " + id + " declares no area, so what removing it would wipe is unknown"}
 	}
 	offset, offErr := parseSize(area.Offset)
 	size, sizeErr := parseSize(area.Size)
 	if offErr != nil || sizeErr != nil || offset < 0 || size <= 0 || offset > math.MaxInt64-size {
-		return &errs.Error{Kind: ErrInvalidKeyslot, Detail: fmt.Sprintf(
+		return &errs.Error{Kind: ErrKeyslotNotFound, Detail: fmt.Sprintf(
 			"keyslot %s declares an area at offset %q of size %q, which is not a byte range", id, area.Offset, area.Size)}
 	}
 	end := offset + size
@@ -884,14 +891,11 @@ func deviceSizeFromFile(f *os.File) (int64, error) {
 	return device.Size(f)
 }
 
-// measureDeviceSize is deviceSizeFromFile, reached through a variable so a test
-// can present what a real block device reports without needing one -- the same
-// seam as dm, devDir, nodeRdev and removeFile elsewhere in this package.
-//
-// The case that matters cannot be built in a unit test any other way: a block
-// device answers Stat with 0, and the defect this guards was precisely that a 0
-// was read as "no bound to check" rather than as "no measurement".
-var measureDeviceSize = deviceSizeFromFile
+// measureDeviceSize (volumeSys.measureDeviceSize) is deviceSizeFromFile. A
+// test presents what a real block device reports, without needing one, by
+// overriding the field: a block device answers Stat with 0, and the defect
+// this guards was precisely that a 0 was read as "no bound to check" rather
+// than as "no measurement".
 
 // checkAreaWithinDevice reports whether a keyslot area lies inside the device,
 // and FAILS CLOSED when it cannot tell.
@@ -918,11 +922,11 @@ var measureDeviceSize = deviceSizeFromFile
 // Failing closed here is safe in both directions: an unmeasurable device makes
 // keyslotCanOpenVolume count nothing, so every removal is refused, and it makes
 // a wipe refuse outright. Neither loses data.
-func checkAreaWithinDevice(f *os.File, offset, size int64) error {
+func checkAreaWithinDevice(f *os.File, offset, size int64, measureDeviceSize func(*os.File) (int64, error)) error {
 	deviceSize, err := measureDeviceSize(f)
 	if err != nil {
 		return &errs.Error{
-			Kind:   ErrInvalidKeyslot,
+			Kind:   ErrKeyslotNotFound,
 			Detail: "the size of this device could not be measured, so a keyslot area cannot be proved to lie inside it",
 			Err:    err,
 		}
@@ -930,7 +934,7 @@ func checkAreaWithinDevice(f *os.File, offset, size int64) error {
 
 	if deviceSize <= 0 {
 		return &errs.Error{
-			Kind: ErrInvalidKeyslot,
+			Kind: ErrKeyslotNotFound,
 			Detail: fmt.Sprintf("this device reports a size of %d, so a keyslot area at %d..%d cannot be proved to lie inside it",
 				deviceSize, offset, offset+size),
 		}
@@ -938,7 +942,7 @@ func checkAreaWithinDevice(f *os.File, offset, size int64) error {
 
 	if offset+size > deviceSize {
 		return &errs.Error{
-			Kind: ErrInvalidKeyslot,
+			Kind: ErrKeyslotNotFound,
 			Detail: fmt.Sprintf("keyslot area %d..%d lies outside the %d byte device",
 				offset, offset+size, deviceSize),
 		}

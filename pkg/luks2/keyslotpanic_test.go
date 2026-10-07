@@ -7,9 +7,12 @@
 package luks2
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // A malformed keyslot must produce an ERROR, never a panic, and must never take
@@ -49,7 +52,7 @@ func TestMalformedKeyslotIsRefusedNotPanicked(t *testing.T) {
 	path := newImage(t, "malformed.img")
 	formatWithLibrary(t, path)
 
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -57,21 +60,21 @@ func TestMalformedKeyslotIsRefusedNotPanicked(t *testing.T) {
 
 	cases := []struct {
 		name   string
-		mutate func(*Keyslot)
+		mutate func(*header.Keyslot)
 	}{
 		// x/crypto/pbkdf2.Key panics when crypto/pbkdf2 refuses the key
 		// length, and it refuses keyLength <= 0.
-		{"key size of zero", func(ks *Keyslot) { ks.KeySize = 0 }},
-		{"negative key size", func(ks *Keyslot) { ks.KeySize = -1 }},
+		{"key size of zero", func(ks *header.Keyslot) { ks.KeySize = 0 }},
+		{"negative key size", func(ks *header.Keyslot) { ks.KeySize = -1 }},
 		// Nil dereferences, each on a field the unlock path reads before
 		// anything checks it exists.
-		{"no kdf object", func(ks *Keyslot) { ks.KDF = nil }},
-		{"no area object", func(ks *Keyslot) { ks.Area = nil }},
-		{"no anti-forensic object", func(ks *Keyslot) { ks.AF = nil }},
+		{"no kdf object", func(ks *header.Keyslot) { ks.KDF = nil }},
+		{"no area object", func(ks *header.Keyslot) { ks.Area = nil }},
+		{"no anti-forensic object", func(ks *header.Keyslot) { ks.AF = nil }},
 		// Resource bounds, which must also be applied before the derivation
 		// rather than after it.
-		{"absurd key size", func(ks *Keyslot) { ks.KeySize = 1 << 20 }},
-		{"zero stripes", func(ks *Keyslot) { ks.AF = &AntiForensic{Type: "luks1", Stripes: 0, Hash: "sha256"} }},
+		{"absurd key size", func(ks *header.Keyslot) { ks.KeySize = 1 << 20 }},
+		{"zero stripes", func(ks *header.Keyslot) { ks.AF = &header.AntiForensic{Type: "luks1", Stripes: 0, Hash: "sha256"} }},
 	}
 
 	for _, tc := range cases {
@@ -79,7 +82,7 @@ func TestMalformedKeyslotIsRefusedNotPanicked(t *testing.T) {
 			keyslot := cloneKeyslot(good)
 			tc.mutate(keyslot)
 
-			key, err := unlockKeyslot(path, "0", []byte(conformancePassphrase), keyslot, metadata.Digests)
+			key, err := unlockKeyslot(context.Background(), path, "0", []byte(conformancePassphrase), keyslot, metadata.Digests, testVolumeSys())
 			if err == nil {
 				mustDestroy(t, key)
 				t.Fatal("unlockKeyslot accepted a malformed keyslot")
@@ -88,7 +91,7 @@ func TestMalformedKeyslotIsRefusedNotPanicked(t *testing.T) {
 			// the scan reads as "this slot is unusable, try the next one".
 			// A failure typed anything else would abort the whole unlock and
 			// deny a volume its good keyslots can still open.
-			if !errors.Is(err, ErrInvalidKeyslot) {
+			if !errors.Is(err, ErrKeyslotNotFound) {
 				t.Fatalf("the refusal is not an unusable-keyslot error, so the scan will not skip past it: %v", err)
 			}
 		})
@@ -110,7 +113,7 @@ func TestOneMalformedKeyslotDoesNotDenyTheVolume(t *testing.T) {
 	path := newImage(t, "one-bad-slot.img")
 	formatWithLibrary(t, path)
 
-	hdr, metadata, err := ReadHeader(path)
+	hdr, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -130,19 +133,19 @@ func TestOneMalformedKeyslotDoesNotDenyTheVolume(t *testing.T) {
 
 	// The header still READS. A keyslot is a part of a container, not the
 	// container, and an operator has to be able to look at a damaged one.
-	if _, _, err := ReadHeader(path); err != nil {
+	if _, _, err := readHeaderForTest(path); err != nil {
 		t.Fatalf("a container with one damaged keyslot no longer reads: %v", err)
 	}
 
 	// And it still OPENS, through the keyslot that is intact.
-	if err := TestKey(path, []byte(conformancePassphrase)); err != nil {
+	if err := testKeyForTest(path, []byte(conformancePassphrase)); err != nil {
 		t.Fatalf("a container with one damaged keyslot no longer opens through its good keyslot: %v", err)
 	}
 
 	// The damaged slot is still visible to an operator rather than silently
 	// dropped: a keyslot that vanishes from an inventory is a keyslot nobody
 	// repairs.
-	slots, err := ListKeyslots(path)
+	slots, err := listKeyslotsForTest(path)
 	if err != nil {
 		t.Fatalf("ListKeyslots failed: %v", err)
 	}
@@ -152,7 +155,7 @@ func TestOneMalformedKeyslotDoesNotDenyTheVolume(t *testing.T) {
 
 	// A wrong passphrase must still be refused, or the assertions above would
 	// pass against an unlock that accepts anything.
-	if err := TestKey(path, []byte(conformanceWrongPassphrase)); err == nil {
+	if err := testKeyForTest(path, []byte(conformanceWrongPassphrase)); err == nil {
 		t.Fatal("the damaged container accepted a wrong passphrase")
 	}
 }
@@ -170,7 +173,7 @@ func TestKillKeyslotRefusesAMalformedKeyslotArea(t *testing.T) {
 	path := newImage(t, "kill-malformed.img")
 	formatWithLibrary(t, path)
 
-	hdr, metadata, err := ReadHeader(path)
+	hdr, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -183,15 +186,15 @@ func TestKillKeyslotRefusesAMalformedKeyslotArea(t *testing.T) {
 		t.Fatalf("failed to write the damaged fixture: %v", err)
 	}
 
-	if err := KillKeyslot(path, 1); err == nil {
+	if err := killKeyslotForTest(path, 1); err == nil {
 		t.Fatal("KillKeyslot acted on a keyslot with no area object")
-	} else if !errors.Is(err, ErrInvalidKeyslot) {
+	} else if !errors.Is(err, ErrKeyslotNotFound) {
 		t.Fatalf("the refusal does not name an unusable keyslot: %v", err)
 	}
 
 	// The good keyslot still opens the volume: refusing to wipe a damaged slot
 	// must not damage anything else.
-	if err := TestKey(path, []byte(conformancePassphrase)); err != nil {
+	if err := testKeyForTest(path, []byte(conformancePassphrase)); err != nil {
 		t.Fatalf("the volume no longer opens after a refused KillKeyslot: %v", err)
 	}
 }
@@ -204,8 +207,8 @@ func TestKillKeyslotRefusesAMalformedKeyslotArea(t *testing.T) {
 // way AddKey does in production, or the new slot authenticates nothing. Sharing
 // the digest pointers with the original metadata makes that registration leak
 // into every other subtest.
-func cloneDigests(src map[string]*Digest) map[string]*Digest {
-	out := make(map[string]*Digest, len(src))
+func cloneDigests(src map[string]*rawDigest) map[string]*rawDigest {
+	out := make(map[string]*rawDigest, len(src))
 	for id, d := range src {
 		if d == nil {
 			out[id] = nil
@@ -221,7 +224,7 @@ func cloneDigests(src map[string]*Digest) map[string]*Digest {
 
 // cloneKeyslot returns a deep enough copy that a test can damage one field
 // without disturbing the keyslot it was copied from.
-func cloneKeyslot(src *Keyslot) *Keyslot {
+func cloneKeyslot(src *header.Keyslot) *header.Keyslot {
 	out := *src
 	if src.KDF != nil {
 		kdf := *src.KDF
@@ -255,7 +258,7 @@ func TestUnlockKeyslotRefusesANonSectorArea(t *testing.T) {
 	path := newImage(t, "ragged-area.img")
 	formatWithLibrary(t, path)
 
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -273,12 +276,12 @@ func TestUnlockKeyslotRefusesANonSectorArea(t *testing.T) {
 		t.Fatalf("fixture precondition: %d bytes of AF material is a whole number of sectors", afBytes)
 	}
 
-	key, err := unlockKeyslot(path, "0", []byte(conformancePassphrase), keyslot, metadata.Digests)
+	key, err := unlockKeyslot(context.Background(), path, "0", []byte(conformancePassphrase), keyslot, metadata.Digests, testVolumeSys())
 	if err == nil {
 		mustDestroy(t, key)
 		t.Fatal("unlockKeyslot accepted an area that is not a whole number of sectors")
 	}
-	if !errors.Is(err, ErrInvalidKeyslot) {
+	if !errors.Is(err, ErrKeyslotNotFound) {
 		t.Fatalf("the refusal is not an unusable-keyslot error: %v", err)
 	}
 	if !strings.Contains(err.Error(), "sector") {
@@ -297,7 +300,7 @@ func TestAddKeyDoesNotTemplateOffADamagedKeyslot(t *testing.T) {
 	path := newImage(t, "damaged-template.img")
 	formatWithLibrary(t, path)
 
-	hdr, metadata, err := ReadHeader(path)
+	hdr, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -318,12 +321,12 @@ func TestAddKeyDoesNotTemplateOffADamagedKeyslot(t *testing.T) {
 	// Repeated because a map-order-dependent pick passes intermittently, and a
 	// test that passes intermittently is the one that hides this.
 	for i := 0; i < 8; i++ {
-		_, reread, err := ReadHeader(path)
+		_, reread, err := readHeaderForTest(path)
 		if err != nil {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
 
-		var reference *Keyslot
+		var reference *header.Keyslot
 		for _, id := range keyslotIDsInScanOrder(reread.Keyslots) {
 			ks := reread.Keyslots[id]
 			if ks.Type != "luks2" || validateKeyslot(id, ks) != nil {

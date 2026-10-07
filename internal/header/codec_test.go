@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 

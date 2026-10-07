@@ -6,6 +6,7 @@ package device
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -76,7 +77,7 @@ func MediumSources(path, sysDevBlockRoot string, statRdev func(string) (uint64, 
 	self := []MediumSource{{Path: path}}
 	rdev, err := statRdev(path)
 	if err != nil {
-		return nil, &errs.Error{Detail: "failed to stat " + path, Err: err}
+		return nil, &errs.Error{Kind: errs.KindOf(err, errs.ErrIO), Detail: "failed to stat " + path, Err: err}
 	}
 	if rdev == 0 {
 		return self, nil // a regular file: its own O_DIRECT read reaches the medium
@@ -120,21 +121,21 @@ func loopAttributes(dir string) (backing string, offset int64, buffered, isLoop 
 		return "", 0, false, false, nil
 	}
 	if err != nil {
-		return "", 0, false, false, &errs.Error{Detail: "failed to read the loop device's backing file from sysfs", Err: err}
+		return "", 0, false, false, &errs.Error{Kind: errs.ErrIO, Detail: "failed to read the loop device's backing file from sysfs", Err: err}
 	}
 	backing = strings.TrimSpace(string(data))
 	dio, err := os.ReadFile(filepath.Join(dir, "loop", "dio")) // #nosec G304 -- sysfs path built from a device number
 	if err != nil {
-		return "", 0, false, false, &errs.Error{Detail: "failed to read whether the loop device uses direct I/O", Err: err}
+		return "", 0, false, false, &errs.Error{Kind: errs.ErrIO, Detail: "failed to read whether the loop device uses direct I/O", Err: err}
 	}
 	buffered = strings.TrimSpace(string(dio)) != "1"
 	raw, err := os.ReadFile(filepath.Join(dir, "loop", "offset")) // #nosec G304 -- sysfs path built from a device number
 	if err != nil {
-		return "", 0, false, false, &errs.Error{Detail: "failed to read the loop device's offset", Err: err}
+		return "", 0, false, false, &errs.Error{Kind: errs.ErrIO, Detail: "failed to read the loop device's offset", Err: err}
 	}
 	offset, err = strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64)
 	if err != nil || offset < 0 {
-		return "", 0, false, false, &errs.Error{Detail: "the loop device's offset " + strconv.Quote(string(raw)) + " is not a byte offset", Err: err}
+		return "", 0, false, false, &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "the loop device's offset " + strconv.Quote(string(raw)) + " is not a byte offset", Err: err}
 	}
 	return backing, offset, buffered, true, nil
 }
@@ -146,7 +147,7 @@ func loopAttributes(dir string) (backing string, offset int64, buffered, isLoop 
 func bufferedLoopBelow(dir, sysDevBlockRoot string, statRdev func(string) (uint64, error)) (string, error) {
 	resolved, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		return "", &errs.Error{Detail: "failed to resolve the device in sysfs", Err: err}
+		return "", &errs.Error{Kind: errs.ErrIO, Detail: "failed to resolve the device in sysfs", Err: err}
 	}
 	var below []string
 	if _, err := os.Stat(filepath.Join(resolved, "partition")); err == nil {
@@ -154,7 +155,7 @@ func bufferedLoopBelow(dir, sysDevBlockRoot string, statRdev func(string) (uint6
 	}
 	slaves, err := os.ReadDir(filepath.Join(resolved, "slaves"))
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return "", &errs.Error{Detail: "failed to list the device's slaves in sysfs", Err: err}
+		return "", &errs.Error{Kind: errs.ErrIO, Detail: "failed to list the device's slaves in sysfs", Err: err}
 	}
 	for _, slave := range slaves {
 		below = append(below, filepath.Join(resolved, "slaves", slave.Name()))
@@ -182,7 +183,7 @@ func bufferedLoopAt(dir, sysDevBlockRoot string, statRdev func(string) (uint64, 
 		// .../block/loop1.
 		resolved, err := filepath.EvalSymlinks(dir)
 		if err != nil {
-			return "", &errs.Error{Detail: "failed to resolve the device in sysfs", Err: err}
+			return "", &errs.Error{Kind: errs.ErrIO, Detail: "failed to resolve the device in sysfs", Err: err}
 		}
 		return filepath.Base(resolved), nil
 	}
@@ -200,7 +201,7 @@ func bufferedLoopAt(dir, sysDevBlockRoot string, statRdev func(string) (uint64, 
 func bufferedLoopBehind(backing, sysDevBlockRoot string, statRdev func(string) (uint64, error)) (string, error) {
 	rdev, err := statRdev(backing)
 	if err != nil {
-		return "", &errs.Error{Detail: "failed to stat the loop device's backing " + backing, Err: err}
+		return "", &errs.Error{Kind: errs.ErrIO, Detail: "failed to stat the loop device's backing " + backing, Err: err}
 	}
 	if rdev == 0 {
 		return "", nil
@@ -214,15 +215,18 @@ func bufferedLoopBehind(backing, sysDevBlockRoot string, statRdev func(string) (
 // bytes if all agree. readPastCache is a parameter rather than a call to
 // ReadPastCache directly, so a caller with its own fault-injection seam over
 // that read (pkg/luks2's readDeviceDirect) is honored here too.
-func CompareRegion(cached io.ReaderAt, device string, sources []MediumSource, n int, readPastCache func(path string, off int64, n int) ([]byte, error)) ([]byte, error) {
+func CompareRegion(ctx context.Context, cached io.ReaderAt, device string, sources []MediumSource, n int, readPastCache func(ctx context.Context, path string, off int64, n int) ([]byte, error)) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, &errs.Error{Kind: errs.KindOf(err, errs.ErrIO), Detail: "failed to read the device", Err: err}
+	}
 	buf := make([]byte, n)
 	read, err := cached.ReadAt(buf, 0)
 	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, &errs.Error{Detail: "failed to read the device", Err: err}
+		return nil, &errs.Error{Kind: errs.KindOf(err, errs.ErrIO), Detail: "failed to read the device", Err: err}
 	}
 	buf = buf[:read]
 	for _, src := range sources {
-		medium, err := readPastCache(src.Path, src.Offset, len(buf))
+		medium, err := readPastCache(ctx, src.Path, src.Offset, len(buf))
 		if err != nil {
 			return nil, err
 		}

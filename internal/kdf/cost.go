@@ -70,21 +70,24 @@ func ValidateCost(p Params) error {
 		// four-terabyte matrix. Checking against a positive minimum is what
 		// catches that; checking only the ceiling would not.
 		if p.Time == nil || p.Memory == nil || p.CPUs == nil {
-			return &errs.Error{Detail: "argon2 KDF is missing its time, memory or cpus cost"}
+			return &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "argon2 KDF is missing its time, memory or cpus cost"}
 		}
 		if *p.Time < MinArgon2Time || *p.Time > MaxArgon2Time {
 			return &errs.Error{
+				Kind:   errs.ErrInvalidArgument,
 				Detail: fmt.Sprintf("argon2 time cost %d is outside %d..%d", *p.Time, MinArgon2Time, MaxArgon2Time),
 			}
 		}
 		if *p.Memory < MinArgon2Memory || *p.Memory > MaxArgon2Memory {
 			return &errs.Error{
+				Kind: errs.ErrInvalidArgument,
 				Detail: fmt.Sprintf("argon2 memory cost %d KiB is outside %d..%d",
 					*p.Memory, MinArgon2Memory, MaxArgon2Memory),
 			}
 		}
 		if *p.CPUs < MinArgon2Parallel || *p.CPUs > MaxArgon2Parallel {
 			return &errs.Error{
+				Kind: errs.ErrInvalidArgument,
 				Detail: fmt.Sprintf("argon2 parallelism %d is outside %d..%d",
 					*p.CPUs, MinArgon2Parallel, MaxArgon2Parallel),
 			}
@@ -95,10 +98,11 @@ func ValidateCost(p Params) error {
 		// so this ceiling is about not hanging on a crafted header rather
 		// than about memory.
 		if p.Iterations == nil {
-			return &errs.Error{Detail: "pbkdf2 KDF is missing its iteration count"}
+			return &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "pbkdf2 KDF is missing its iteration count"}
 		}
 		if *p.Iterations < MinKDFIterations || *p.Iterations > MaxKDFIterations {
 			return &errs.Error{
+				Kind: errs.ErrInvalidArgument,
 				Detail: fmt.Sprintf("pbkdf2 iteration count %d is outside %d..%d",
 					*p.Iterations, MinKDFIterations, MaxKDFIterations),
 			}
@@ -109,7 +113,7 @@ func ValidateCost(p Params) error {
 		// non-argon2 as pbkdf2 reports a header claiming type "sha256-crypt"
 		// as "missing its iteration count", naming a field that type never
 		// claimed to have.
-		return &errs.Error{Detail: fmt.Sprintf("unsupported KDF type %q", p.Type)}
+		return &errs.Error{Kind: ErrUnsupportedKDF, Detail: fmt.Sprintf("unsupported KDF type %q", p.Type)}
 	}
 
 	return nil
@@ -162,22 +166,18 @@ func ForcedPBKDF2Iterations(hashAlgo string, iterations int, policy CostPolicy) 
 	minimum := PBKDF2FloorFor(hashAlgo, policy)
 
 	if iterations < minimum {
-		return 0, &PBKDF2IterationsError{
-			Hash:       hashAlgo,
-			Iterations: iterations,
-			Minimum:    minimum,
-			Maximum:    MaxKDFIterations,
-			Err:        ErrPBKDFIterationsTooLow,
+		return 0, &errs.Error{
+			Kind: errs.ErrInvalidArgument,
+			Detail: fmt.Sprintf("hash %s, requested %d iterations, permitted range %d..%d (below the minimum this package will write)",
+				hashAlgo, iterations, minimum, MaxKDFIterations),
 		}
 	}
 
 	if iterations > MaxKDFIterations {
-		return 0, &PBKDF2IterationsError{
-			Hash:       hashAlgo,
-			Iterations: iterations,
-			Minimum:    minimum,
-			Maximum:    MaxKDFIterations,
-			Err:        ErrPBKDFIterationsTooHigh,
+		return 0, &errs.Error{
+			Kind: errs.ErrInvalidArgument,
+			Detail: fmt.Sprintf("hash %s, requested %d iterations, permitted range %d..%d (above the maximum this package will write)",
+				hashAlgo, iterations, minimum, MaxKDFIterations),
 		}
 	}
 

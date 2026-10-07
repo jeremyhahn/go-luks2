@@ -27,6 +27,10 @@ type Iface interface {
 // Named is a defined non-struct type.
 type Named string
 
+// Alias is a type alias: it carries Named's method set without declaring
+// any FuncDecl of its own.
+type Alias = Named
+
 // Generic is a generic type.
 type Generic[T any] struct{ v T }
 

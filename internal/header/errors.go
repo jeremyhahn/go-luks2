@@ -14,7 +14,7 @@ var (
 	// ErrUnsupportedRequirement indicates the container declares a mandatory
 	// requirement this package does not implement, so it must not be
 	// modified. The container is still READABLE; see Requirements.
-	ErrUnsupportedRequirement = errors.New("container declares a mandatory requirement this package does not implement")
+	ErrUnsupportedRequirement = errors.New("luks2: container declares a mandatory requirement this package does not implement")
 
 	// ErrAmbiguousJSONMember indicates a LUKS2 metadata object that names one
 	// member twice, or names a member this package models in a case LUKS2
@@ -31,11 +31,11 @@ var (
 
 	// ErrPrimaryHeaderCurrent indicates RestorePrimaryHeader was refused
 	// because the primary is intact and not older than the secondary.
-	ErrPrimaryHeaderCurrent = errors.New("the primary header is intact and not older than the secondary; restoring would roll the volume back")
+	ErrPrimaryHeaderCurrent = errors.New("luks2: the primary header is intact and not older than the secondary; restoring would roll the volume back")
 
 	// ErrUnsupportedLUKSVersion indicates a header names a LUKS version other
 	// than 2.
-	ErrUnsupportedLUKSVersion = errors.New("unsupported LUKS version")
+	ErrUnsupportedLUKSVersion = errors.New("luks2: unsupported LUKS version")
 
 	// ErrUnsupportedHeaderChecksum indicates a binary header whose checksum
 	// algorithm field names anything but sha256.

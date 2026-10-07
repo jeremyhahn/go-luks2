@@ -8,13 +8,17 @@ package luks2
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // FormatOptions.MetadataSize (#47).
@@ -36,7 +40,7 @@ import (
 
 // metadataSizeFormatOptions formats a cheap container with a chosen metadata
 // area size.
-func metadataSizeFormatOptions(path string, size int) FormatOptions {
+func metadataSizeFormatOptions(path string, size int) formatOptionsForTest {
 	opts := standardFormatOptions(path)
 	opts.MetadataSize = size
 	return opts
@@ -55,32 +59,32 @@ func TestFormatMetadataSizeLaysOutEveryLegalSize(t *testing.T) {
 			defer parallel(t)()
 
 			path := newImage(t, "metadata-size.img")
-			if err := Format(metadataSizeFormatOptions(path, int(size))); err != nil {
+			if err := formatForTest(metadataSizeFormatOptions(path, int(size))); err != nil {
 				t.Fatalf("Format with MetadataSize %d failed: %v", size, err)
 			}
 
-			hdr, metadata, err := ReadHeader(path)
+			hdr, metadata, err := readHeaderForTest(path)
 			if err != nil {
 				t.Fatalf("ReadHeader failed: %v", err)
 			}
 			if hdr.HeaderSize != uint64(size) {
 				t.Errorf("hdr_size = %d, want %d", hdr.HeaderSize, size)
 			}
-			if got, want := metadata.Config.JSONSize, formatSize(size-LUKS2HeaderSize); got != want {
+			if got, want := metadata.Config.JSONSize, formatSize(size-header.HeaderSize); got != want {
 				t.Errorf("config.json_size = %s, want %s", got, want)
 			}
-			wantKeyslots := int64(LUKS2HeaderDefaultSize) - 2*size
+			wantKeyslots := int64(header.HeaderDefaultSize) - 2*size
 			if got, want := metadata.Config.KeyslotsSize, formatSize(wantKeyslots); got != want {
 				t.Errorf("config.keyslots_size = %s, want %s", got, want)
 			}
 			if got, want := metadata.Keyslots["0"].Area.Offset, formatSize(2*size); got != want {
 				t.Errorf("keyslot 0 area offset = %s, want %s (2 x the metadata area)", got, want)
 			}
-			if got, want := metadata.Segments["0"].Offset, formatSize(LUKS2HeaderDefaultSize); got != want {
+			if got, want := metadata.Segments["0"].Offset, formatSize(header.HeaderDefaultSize); got != want {
 				t.Errorf("segment 0 offset = %s, want %s", got, want)
 			}
 
-			secondary, _, err := ReadSecondaryHeader(path)
+			secondary, _, err := readSecondaryHeaderForTest(path)
 			if err != nil {
 				t.Fatalf("ReadSecondaryHeader failed: %v", err)
 			}
@@ -88,7 +92,7 @@ func TestFormatMetadataSizeLaysOutEveryLegalSize(t *testing.T) {
 				t.Errorf("secondary hdr_offset = %d, want %d", secondary.HeaderOffset, size)
 			}
 
-			if err := TestKey(path, []byte(conformancePassphrase)); err != nil {
+			if err := testKeyForTest(path, []byte(conformancePassphrase)); err != nil {
 				t.Errorf("this package cannot open its own %d-byte-metadata container: %v", size, err)
 			}
 
@@ -99,7 +103,7 @@ func TestFormatMetadataSizeLaysOutEveryLegalSize(t *testing.T) {
 			for _, want := range []string{
 				fmt.Sprintf("Metadata area: \t%d [bytes]", size),
 				fmt.Sprintf("Keyslots area: \t%d [bytes]", wantKeyslots),
-				fmt.Sprintf("offset: %d [bytes]", LUKS2HeaderDefaultSize),
+				fmt.Sprintf("offset: %d [bytes]", header.HeaderDefaultSize),
 			} {
 				if !strings.Contains(out, want) {
 					t.Errorf("luksDump output is missing %q\n%s", want, out)
@@ -128,14 +132,14 @@ func TestFormatMetadataSizeRefusesIllegalSizes(t *testing.T) {
 		16385,   // not a power of two
 		3 << 20, // inside the range, not a power of two
 		8 << 20, // above the maximum
-		LUKS2HeaderMaxSize * 2,
+		header.HeaderMaxSize * 2,
 	} {
 		t.Run(fmt.Sprintf("%d", size), func(t *testing.T) {
 			path := newImage(t, "illegal-metadata-size.img")
 
-			err := Format(metadataSizeFormatOptions(path, size))
-			if !errors.Is(err, ErrInvalidMetadataSize) {
-				t.Fatalf("Format with MetadataSize %d returned %v, want ErrInvalidMetadataSize", size, err)
+			err := formatForTest(metadataSizeFormatOptions(path, size))
+			if !errors.Is(err, ErrInvalidArgument) {
+				t.Fatalf("Format with MetadataSize %d returned %v, want ErrInvalidArgument", size, err)
 			}
 
 			prefix, err := readImagePrefix(path)
@@ -149,9 +153,9 @@ func TestFormatMetadataSizeRefusesIllegalSizes(t *testing.T) {
 	}
 }
 
-// TestValidateFormatOptionsMetadataSize pins the accepted set exactly: zero
+// TestvalidateFormatOptionsForTestMetadataSize pins the accepted set exactly: zero
 // (the default) and every power of two from 16 KiB to 4 MiB.
-func TestValidateFormatOptionsMetadataSize(t *testing.T) {
+func TestValidateFormatOptionsForTestMetadataSize(t *testing.T) {
 	path := newImage(t, "validate.img")
 
 	accepted := []int{0}
@@ -159,14 +163,14 @@ func TestValidateFormatOptionsMetadataSize(t *testing.T) {
 		accepted = append(accepted, int(size))
 	}
 	for _, size := range accepted {
-		if err := ValidateFormatOptions(metadataSizeFormatOptions(path, size)); err != nil {
-			t.Errorf("ValidateFormatOptions refused the legal MetadataSize %d: %v", size, err)
+		if err := validateFormatOptionsForTest(metadataSizeFormatOptions(path, size)); err != nil {
+			t.Errorf("validateFormatOptionsForTest refused the legal MetadataSize %d: %v", size, err)
 		}
 	}
 
 	for _, size := range []int{-16384, 1, 16383, 16385, 24576, 4194303, 4194305, 8388608} {
-		if err := ValidateFormatOptions(metadataSizeFormatOptions(path, size)); !errors.Is(err, ErrInvalidMetadataSize) {
-			t.Errorf("ValidateFormatOptions(MetadataSize %d) = %v, want ErrInvalidMetadataSize", size, err)
+		if err := validateFormatOptionsForTest(metadataSizeFormatOptions(path, size)); !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("validateFormatOptionsForTest(MetadataSize %d) = %v, want ErrInvalidArgument", size, err)
 		}
 	}
 }
@@ -191,35 +195,42 @@ func TestFormatMetadataSizeHoldsMetadataTheDefaultRefuses(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to read the image: %v", err)
 		}
-		if err := ImportTokenJSON(path, 0, []byte(token)); !errors.Is(err, ErrMetadataTooLarge) {
-			t.Fatalf("ImportTokenJSON on a 16 KiB container returned %v, want ErrMetadataTooLarge", err)
+		if err := setTokenJSONForTest(path, 0, []byte(token)); !errors.Is(err, ErrNoSpace) {
+			t.Fatalf("SetToken on a 16 KiB container returned %v, want ErrNoSpace", err)
 		}
 		after, err := readImagePrefix(path)
 		if err != nil {
 			t.Fatalf("failed to read the image: %v", err)
 		}
 		if !bytes.Equal(before, after) {
-			t.Fatal("a refused ImportTokenJSON changed the device")
+			t.Fatal("a refused SetToken changed the device")
 		}
 	})
 
 	t.Run("64 KiB metadata holds it", func(t *testing.T) {
 		path := newImage(t, "large.img")
-		if err := Format(metadataSizeFormatOptions(path, 64<<10)); err != nil {
+		if err := formatForTest(metadataSizeFormatOptions(path, 64<<10)); err != nil {
 			t.Fatalf("Format failed: %v", err)
 		}
-		if err := ImportTokenJSON(path, 0, []byte(token)); err != nil {
-			t.Fatalf("ImportTokenJSON on a 64 KiB container failed: %v", err)
+		if err := setTokenJSONForTest(path, 0, []byte(token)); err != nil {
+			t.Fatalf("SetToken on a 64 KiB container failed: %v", err)
 		}
 
-		got, err := ExportToken(path, 0)
+		tok, ok, err := getTokenForTest(path, 0)
 		if err != nil {
-			t.Fatalf("ExportToken failed: %v", err)
+			t.Fatalf("getTokenForTest failed: %v", err)
+		}
+		if !ok {
+			t.Fatalf("Tokens()[0] missing after SetToken")
+		}
+		got, err := json.Marshal(tok)
+		if err != nil {
+			t.Fatalf("Marshal failed: %v", err)
 		}
 		if !bytes.Contains(got, []byte(strings.Repeat("A", 20000))) {
 			t.Error("the large token did not survive the round trip")
 		}
-		if err := TestKey(path, []byte(conformancePassphrase)); err != nil {
+		if err := testKeyForTest(path, []byte(conformancePassphrase)); err != nil {
 			t.Errorf("the container no longer opens after the token import: %v", err)
 		}
 
@@ -250,13 +261,13 @@ func TestWipeHeaderOnlyDestroysBothCopiesOfALargerArea(t *testing.T) {
 
 	requireCryptsetup(t)
 
-	for _, size := range []int{LUKS2HeaderMinSize, 32 << 10, 1 << 20} {
+	for _, size := range []int{header.HeaderMinSize, 32 << 10, 1 << 20} {
 		t.Run(fmt.Sprintf("%dKiB", size/1024), func(t *testing.T) {
 			path := newImage(t, "wipe.img")
-			if err := Format(metadataSizeFormatOptions(path, size)); err != nil {
+			if err := formatForTest(metadataSizeFormatOptions(path, size)); err != nil {
 				t.Fatalf("Format failed: %v", err)
 			}
-			hdr, metadata, err := ReadHeader(path)
+			hdr, metadata, err := readHeaderForTest(path)
 			if err != nil {
 				t.Fatalf("ReadHeader: %v", err)
 			}
@@ -268,14 +279,19 @@ func TestWipeHeaderOnlyDestroysBothCopiesOfALargerArea(t *testing.T) {
 			payload := bytes.Repeat([]byte("payload!"), 512)
 			writeImageAt(t, path, dataOffset, payload)
 
-			if err := Wipe(WipeOptions{Device: path, Passes: 1, HeaderOnly: true}); err != nil {
-				t.Fatalf("header-only Wipe failed: %v", err)
+			v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+			if err != nil {
+				t.Fatalf("Open failed: %v", err)
 			}
+			if err := v.Erase(context.Background()); err != nil {
+				t.Fatalf("header-only Erase failed: %v", err)
+			}
+			_ = v.Close()
 
-			if _, _, err := ReadHeader(path); err == nil {
+			if _, _, err := readHeaderForTest(path); err == nil {
 				t.Error("the primary header still reads after a header-only wipe")
 			}
-			if _, _, err := ReadSecondaryHeader(path); err == nil {
+			if _, _, err := readSecondaryHeaderForTest(path); err == nil {
 				t.Error("the secondary header still reads after a header-only wipe")
 			}
 			if code, out := runCryptsetup(t, "", "isLuks", path); code == 0 {
@@ -318,7 +334,7 @@ func TestWipeHeaderOnlyDoesNotTrustADamagedPrimarysSize(t *testing.T) {
 	const size = 64 << 10
 
 	path := newImage(t, "wipe-damaged-primary.img")
-	if err := Format(metadataSizeFormatOptions(path, size)); err != nil {
+	if err := formatForTest(metadataSizeFormatOptions(path, size)); err != nil {
 		t.Fatalf("Format failed: %v", err)
 	}
 
@@ -329,7 +345,7 @@ func TestWipeHeaderOnlyDoesNotTrustADamagedPrimarysSize(t *testing.T) {
 		t.Fatalf("failed to open the image: %v", err)
 	}
 	var declared [8]byte
-	binary.BigEndian.PutUint64(declared[:], LUKS2HeaderMinSize)
+	binary.BigEndian.PutUint64(declared[:], header.HeaderMinSize)
 	if _, err := f.WriteAt(declared[:], 8); err != nil {
 		_ = f.Close()
 		t.Fatalf("failed to damage the primary: %v", err)
@@ -339,18 +355,23 @@ func TestWipeHeaderOnlyDoesNotTrustADamagedPrimarysSize(t *testing.T) {
 	}
 
 	// Precondition: the damage leaves the secondary as the recoverable copy.
-	if _, _, err := ReadSecondaryHeader(path); err != nil {
+	if _, _, err := readSecondaryHeaderForTest(path); err != nil {
 		t.Fatalf("precondition: the secondary does not read after damaging the primary: %v", err)
 	}
 
-	if err := Wipe(WipeOptions{Device: path, Passes: 1, HeaderOnly: true}); err != nil {
-		t.Fatalf("header-only Wipe failed: %v", err)
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
 	}
+	if err := v.Erase(context.Background()); err != nil {
+		t.Fatalf("header-only Erase failed: %v", err)
+	}
+	_ = v.Close()
 
-	if _, _, err := ReadHeader(path); err == nil {
+	if _, _, err := readHeaderForTest(path); err == nil {
 		t.Error("the container still reads after a header-only wipe")
 	}
-	if _, _, err := ReadSecondaryHeader(path); err == nil {
+	if _, _, err := readSecondaryHeaderForTest(path); err == nil {
 		t.Error("the secondary header survived a header-only wipe of a container whose primary understated its size")
 	}
 
@@ -436,19 +457,24 @@ func TestWipeHeaderOnlyDoesNotTrustAnOverstatedPrimarySize(t *testing.T) {
 		t.Fatalf("failed to close the image: %v", err)
 	}
 
-	damageDeclaredSize(t, path, LUKS2PrimaryHeaderOffset, LUKS2HeaderMaxSize)
-	if _, _, err := ReadSecondaryHeader(path); err != nil {
+	damageDeclaredSize(t, path, header.PrimaryHeaderOffset, header.HeaderMaxSize)
+	if _, _, err := readSecondaryHeaderForTest(path); err != nil {
 		t.Fatalf("precondition: the secondary does not read after damaging the primary: %v", err)
 	}
 
-	if err := Wipe(WipeOptions{Device: path, Passes: 1, HeaderOnly: true}); err != nil {
-		t.Fatalf("header-only Wipe failed: %v", err)
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
 	}
+	if err := v.Erase(context.Background()); err != nil {
+		t.Fatalf("header-only Erase failed: %v", err)
+	}
+	_ = v.Close()
 
 	if !bytes.Equal(readImageAt(t, path, dataOffset, len(payload)), payload) {
 		t.Error("a header-only wipe destroyed payload because a damaged primary overstated its size")
 	}
-	if _, _, err := ReadSecondaryHeader(path); err == nil {
+	if _, _, err := readSecondaryHeaderForTest(path); err == nil {
 		t.Error("the secondary header survived a header-only wipe")
 	}
 	if region := readImageAt(t, path, 0, 2*area); !bytes.Equal(region, make([]byte, len(region))) {
@@ -469,16 +495,16 @@ func TestWipeHeaderOnlyWithNoValidCopy(t *testing.T) {
 	const size = 64 << 10
 
 	path := newImage(t, "wipe-no-valid-copy.img")
-	if err := Format(metadataSizeFormatOptions(path, size)); err != nil {
+	if err := formatForTest(metadataSizeFormatOptions(path, size)); err != nil {
 		t.Fatalf("Format failed: %v", err)
 	}
 	// Primary overstates, secondary's checksum is broken by a JSON byte.
-	damageDeclaredSize(t, path, LUKS2PrimaryHeaderOffset, LUKS2HeaderMaxSize)
+	damageDeclaredSize(t, path, header.PrimaryHeaderOffset, header.HeaderMaxSize)
 	f, err := os.OpenFile(path, os.O_RDWR, 0) // #nosec G304 -- path is under t.TempDir()
 	if err != nil {
 		t.Fatalf("failed to open the image: %v", err)
 	}
-	if _, err := f.WriteAt([]byte{'X'}, size+LUKS2HeaderSize); err != nil {
+	if _, err := f.WriteAt([]byte{'X'}, size+header.HeaderSize); err != nil {
 		_ = f.Close()
 		t.Fatalf("failed to damage the secondary: %v", err)
 	}
@@ -487,11 +513,16 @@ func TestWipeHeaderOnlyWithNoValidCopy(t *testing.T) {
 	}
 	keyslots := readImageAt(t, path, 2*size, 4096)
 
-	if err := Wipe(WipeOptions{Device: path, Passes: 1, HeaderOnly: true}); err != nil {
-		t.Fatalf("header-only Wipe failed: %v", err)
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
 	}
+	if err := v.Erase(context.Background()); err != nil {
+		t.Fatalf("header-only Erase failed: %v", err)
+	}
+	_ = v.Close()
 
-	if front := readImageAt(t, path, 0, 2*LUKS2HeaderMinSize); !bytes.Equal(front, make([]byte, len(front))) {
+	if front := readImageAt(t, path, 0, 2*header.HeaderMinSize); !bytes.Equal(front, make([]byte, len(front))) {
 		t.Error("the default 32 KiB front is not all zeroes")
 	}
 	if copy2 := readImageAt(t, path, size, size); !bytes.Equal(copy2, make([]byte, len(copy2))) {

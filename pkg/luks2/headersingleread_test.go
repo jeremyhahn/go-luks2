@@ -9,6 +9,8 @@ package luks2
 import (
 	"errors"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // The header copy was read three times -- binary header, checksum area, JSON --
@@ -41,11 +43,11 @@ func TestReadHeaderParsesOnlyBytesItChecksummed(t *testing.T) {
 
 	path := newImage(t, "flip.img")
 	formatWithLibrary(t, path)
-	before := readAreaBytes(t, path, 0, 2*LUKS2HeaderMinSize)
-	if err := ImportToken(path, 0, &Token{Type: TokenTypeSystemdRecovery, Keyslots: []string{"0"}}); err != nil {
-		t.Fatalf("ImportToken: %v", err)
+	before := readAreaBytes(t, path, 0, 2*header.HeaderMinSize)
+	if err := setTokenForTest(path, 0, Token{Type: TokenTypeRecovery, Keyslots: []int{0}}); err != nil {
+		t.Fatalf("SetToken: %v", err)
 	}
-	after := readAreaBytes(t, path, 0, 2*LUKS2HeaderMinSize)
+	after := readAreaBytes(t, path, 0, 2*header.HeaderMinSize)
 
 	beforeHdr, _, err := readHeaderCopyFrom(&flippingReader{before: before, after: before}, 0)
 	if err != nil {

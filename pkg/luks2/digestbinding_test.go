@@ -7,13 +7,16 @@
 package luks2
 
 import (
+	"context"
 	"errors"
 	"os"
 	"testing"
 
 	"github.com/jeremyhahn/go-enclave"
+
 	"github.com/jeremyhahn/go-luks2/internal/af"
 	"github.com/jeremyhahn/go-luks2/internal/areacipher"
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // A LUKS2 digest states WHICH keyslots it authenticates, and honoring that is
@@ -45,7 +48,7 @@ func twoVolumeKeyContainer(t *testing.T, name string, passA, passB []byte) strin
 	t.Helper()
 
 	path := newImage(t, name)
-	if err := Format(FormatOptions{
+	if err := formatForTest(formatOptionsForTest{
 		Device:        path,
 		Passphrase:    passA,
 		Cipher:        "aes",
@@ -53,13 +56,13 @@ func twoVolumeKeyContainer(t *testing.T, name string, passA, passB []byte) strin
 		KeySize:       512,
 		HashAlgo:      "sha256",
 		SectorSize:    512,
-		KDFType:       KDFTypePBKDF2,
+		KDFType:       kdfTypePBKDF2,
 		PBKDFIterTime: 1,
 	}); err != nil {
 		t.Fatalf("Format failed: %v", err)
 	}
 
-	hdr, metadata, err := ReadHeader(path)
+	hdr, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -69,7 +72,7 @@ func twoVolumeKeyContainer(t *testing.T, name string, passA, passB []byte) strin
 	}
 
 	// A second volume key, unrelated to the one Format generated.
-	rawB, err := randomBytes(reference.KeySize)
+	rawB, err := randomBytes(reference.KeySize, testVolumeSys().cryptoRand)
 	if err != nil {
 		t.Fatalf("randomBytes failed: %v", err)
 	}
@@ -83,11 +86,11 @@ func twoVolumeKeyContainer(t *testing.T, name string, passA, passB []byte) strin
 
 	// Digest 1 attests keyB and names keyslot 1 ALONE. Digest 0, written by
 	// Format, attests keyA and names keyslot 0 alone.
-	digestKDF, digestValue, err := createDigest(keyB, "sha256")
+	digestKDF, digestValue, err := createDigest(keyB, "sha256", testVolumeSys())
 	if err != nil {
 		t.Fatalf("createDigest for the second volume key failed: %v", err)
 	}
-	metadata.Digests["1"] = &Digest{
+	metadata.Digests["1"] = &rawDigest{
 		Type:       "pbkdf2",
 		Keyslots:   []string{"1"},
 		Segments:   []string{"0"},
@@ -107,22 +110,22 @@ func twoVolumeKeyContainer(t *testing.T, name string, passA, passB []byte) strin
 // passphrase, updating metadata in place. It does NOT touch the digests: which
 // digest attests the slot is the thing under test here, so the caller states it
 // explicitly rather than having this helper decide.
-func writeKeyslot(t *testing.T, path string, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata,
-	id string, reference *Keyslot, masterKey *enclave.MemoryEnclave, passphrase []byte) {
+func writeKeyslot(t *testing.T, path string, hdr *header.BinaryHeader, metadata *header.Metadata,
+	id string, reference *header.Keyslot, masterKey *enclave.MemoryEnclave, passphrase []byte) {
 	t.Helper()
 
-	kdf, err := CreateKDF(FormatOptions{KDFType: KDFTypePBKDF2, HashAlgo: "sha256", PBKDFIterTime: 1}, reference.KeySize)
+	kdf, err := createKDFStrict(formatOptionsForTest{KDFType: kdfTypePBKDF2, HashAlgo: "sha256", PBKDFIterTime: 1}, reference.KeySize)
 	if err != nil {
 		t.Fatalf("CreateKDF failed: %v", err)
 	}
 
-	passphraseKey, err := DeriveKeyEnclave(passphrase, kdf, reference.KeySize)
+	passphraseKey, err := deriveKeyEnclave(context.Background(), passphrase, kdf, reference.KeySize)
 	if err != nil {
 		t.Fatalf("DeriveKeyEnclave failed: %v", err)
 	}
 	defer mustDestroy(t, passphraseKey)
 
-	afData, err := afCodec().Split(masterKey, af.Params{Stripes: AFStripes, Hash: DefaultHashAlgo})
+	afData, err := afCodec(testVolumeSys()).Split(masterKey, af.Params{Stripes: header.AFStripes, Hash: defaultHashAlgo})
 	if err != nil {
 		t.Fatalf("af Split failed: %v", err)
 	}
@@ -142,7 +145,7 @@ func writeKeyslot(t *testing.T, path string, hdr *LUKS2BinaryHeader, metadata *L
 	if err != nil {
 		t.Fatalf("calculateNextKeyslotOffset failed: %v", err)
 	}
-	alignedSize := alignTo(int64(len(encrypted)), KeyslotAreaAlignment)
+	alignedSize := alignTo(int64(len(encrypted)), keyslotAreaAlignment)
 	if offset+alignedSize > keyslotsEnd {
 		t.Fatalf("the fixture keyslot would end at %d, past the keyslots area end %d", offset+alignedSize, keyslotsEnd)
 	}
@@ -160,11 +163,11 @@ func writeKeyslot(t *testing.T, path string, hdr *LUKS2BinaryHeader, metadata *L
 	}
 
 	priority := 1
-	metadata.Keyslots[id] = &Keyslot{
+	metadata.Keyslots[id] = &header.Keyslot{
 		Type:     "luks2",
 		KeySize:  reference.KeySize,
 		Priority: &priority,
-		Area: &KeyslotArea{
+		Area: &header.KeyslotArea{
 			Type:       "raw",
 			KeySize:    reference.KeySize,
 			Offset:     formatSize(offset),
@@ -172,10 +175,10 @@ func writeKeyslot(t *testing.T, path string, hdr *LUKS2BinaryHeader, metadata *L
 			Encryption: reference.Area.Encryption,
 		},
 		KDF: kdf,
-		AF: &AntiForensic{
+		AF: &header.AntiForensic{
 			Type:    "luks1",
-			Stripes: AFStripes,
-			Hash:    DefaultHashAlgo,
+			Stripes: header.AFStripes,
+			Hash:    defaultHashAlgo,
 		},
 	}
 }
@@ -199,13 +202,13 @@ func TestADigestCannotAuthenticateAKeyslotItDoesNotName(t *testing.T) {
 		// passing vacuously: an implementation that refused everything would
 		// satisfy the mutated case and fail this one.
 		path := twoVolumeKeyContainer(t, "binding-control.img", passA, passB)
-		_, metadata, err := ReadHeader(path)
+		_, metadata, err := readHeaderForTest(path)
 		if err != nil {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
 
 		for _, tc := range []struct{ id, pass string }{{"0", string(passA)}, {"1", string(passB)}} {
-			key, err := unlockKeyslot(path, tc.id, []byte(tc.pass), metadata.Keyslots[tc.id], metadata.Digests)
+			key, err := unlockKeyslot(context.Background(), path, tc.id, []byte(tc.pass), metadata.Keyslots[tc.id], metadata.Digests, testVolumeSys())
 			if err != nil {
 				t.Fatalf("keyslot %s did not open under its own credential and digest: %v", tc.id, err)
 			}
@@ -215,7 +218,7 @@ func TestADigestCannotAuthenticateAKeyslotItDoesNotName(t *testing.T) {
 
 	t.Run("a keyslot cannot borrow another keyslot's digest", func(t *testing.T) {
 		path := twoVolumeKeyContainer(t, "binding-mutated.img", passA, passB)
-		hdr, metadata, err := ReadHeader(path)
+		hdr, metadata, err := readHeaderForTest(path)
 		if err != nil {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
@@ -227,12 +230,12 @@ func TestADigestCannotAuthenticateAKeyslotItDoesNotName(t *testing.T) {
 			t.Fatalf("failed to write the mutated header: %v", err)
 		}
 
-		_, mutated, err := ReadHeader(path)
+		_, mutated, err := readHeaderForTest(path)
 		if err != nil {
 			t.Fatalf("ReadHeader after mutation failed: %v", err)
 		}
 
-		key, err := unlockKeyslot(path, "0", passA, mutated.Keyslots["0"], mutated.Digests)
+		key, err := unlockKeyslot(context.Background(), path, "0", passA, mutated.Keyslots["0"], mutated.Digests, testVolumeSys())
 		if err == nil {
 			mustDestroy(t, key)
 			t.Fatal("keyslot 0 authenticated against a digest the header associates only with keyslot 1")
@@ -243,13 +246,13 @@ func TestADigestCannotAuthenticateAKeyslotItDoesNotName(t *testing.T) {
 		if !errors.Is(err, ErrInvalidHeader) {
 			t.Fatalf("a keyslot no digest names is not reported as a header fault: %v", err)
 		}
-		if errors.Is(err, ErrMasterKeyVerification) {
+		if errors.Is(err, ErrWrongKey) {
 			t.Fatalf("a keyslot no digest names was reported as a failed verification: %v", err)
 		}
 
 		// And keyslot 1 is unaffected: the refusal above is scoped to the slot
 		// whose association was removed, not applied to the whole container.
-		key, err = unlockKeyslot(path, "1", passB, mutated.Keyslots["1"], mutated.Digests)
+		key, err = unlockKeyslot(context.Background(), path, "1", passB, mutated.Keyslots["1"], mutated.Digests, testVolumeSys())
 		if err != nil {
 			t.Fatalf("keyslot 1 stopped opening after keyslot 0 lost its digest: %v", err)
 		}

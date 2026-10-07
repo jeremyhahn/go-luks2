@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // Unknown-member passthrough for the three objects #143 did not reach:
@@ -63,7 +65,7 @@ func TestUnmodeledMembersSurviveARoundTrip(t *testing.T) {
 			name: "segment",
 			in:   segmentWithExtras,
 			decode: func(t *testing.T, data []byte) any {
-				var v Segment
+				var v header.Segment
 				if err := json.Unmarshal(data, &v); err != nil {
 					t.Fatalf("decoding the segment: %v", err)
 				}
@@ -81,7 +83,7 @@ func TestUnmodeledMembersSurviveARoundTrip(t *testing.T) {
 			name: "digest",
 			in:   digestWithExtras,
 			decode: func(t *testing.T, data []byte) any {
-				var v Digest
+				var v rawDigest
 				if err := json.Unmarshal(data, &v); err != nil {
 					t.Fatalf("decoding the digest: %v", err)
 				}
@@ -98,7 +100,7 @@ func TestUnmodeledMembersSurviveARoundTrip(t *testing.T) {
 			name: "config",
 			in:   configWithExtras,
 			decode: func(t *testing.T, data []byte) any {
-				var v Config
+				var v rawConfig
 				if err := json.Unmarshal(data, &v); err != nil {
 					t.Fatalf("decoding the config: %v", err)
 				}
@@ -142,7 +144,7 @@ func TestUnmodeledMembersSurviveARoundTrip(t *testing.T) {
 // TestUnmodeledMembersSurviveAMutation is the defect's real shape: read a
 // foreign object, change a member this package DOES model, write it back.
 func TestUnmodeledMembersSurviveAMutation(t *testing.T) {
-	var segment Segment
+	var segment header.Segment
 	if err := json.Unmarshal([]byte(segmentWithExtras), &segment); err != nil {
 		t.Fatalf("decoding: %v", err)
 	}
@@ -163,12 +165,12 @@ func TestUnmodeledMembersSurviveAMutation(t *testing.T) {
 
 // TestAMarshalerIsReachedThroughTheEnclosingMetadata proves the passthrough
 // works where it actually matters -- these objects are encoded as part of
-// LUKS2Metadata, not on their own.
+// header.Metadata, not on their own.
 func TestAMarshalerIsReachedThroughTheEnclosingMetadata(t *testing.T) {
 	var (
-		segment Segment
-		digest  Digest
-		config  Config
+		segment header.Segment
+		digest  rawDigest
+		config  rawConfig
 	)
 	for _, p := range []struct {
 		in string
@@ -179,11 +181,11 @@ func TestAMarshalerIsReachedThroughTheEnclosingMetadata(t *testing.T) {
 		}
 	}
 
-	metadata := &LUKS2Metadata{
-		Keyslots: map[string]*Keyslot{},
-		Tokens:   map[string]*Token{},
-		Segments: map[string]*Segment{"0": &segment},
-		Digests:  map[string]*Digest{"0": &digest},
+	metadata := &header.Metadata{
+		Keyslots: map[string]*header.Keyslot{},
+		Tokens:   map[string]*LegacyToken{},
+		Segments: map[string]*header.Segment{"0": &segment},
+		Digests:  map[string]*rawDigest{"0": &digest},
 		Config:   &config,
 	}
 
@@ -193,7 +195,7 @@ func TestAMarshalerIsReachedThroughTheEnclosingMetadata(t *testing.T) {
 	}
 	for _, member := range []string{`"integrity"`, `"vendor-attestation"`, `"vendor-policy"`} {
 		if !strings.Contains(string(out), member) {
-			t.Errorf("%s was dropped when encoded through LUKS2Metadata\n got: %s", member, out)
+			t.Errorf("%s was dropped when encoded through header.Metadata\n got: %s", member, out)
 		}
 	}
 }

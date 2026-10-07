@@ -19,10 +19,12 @@ import (
 // exported name, and the file that declares it.
 //
 // Kind is one of func, method, type, iface, var, const, fields (the exported
-// fields of a struct type, as Name{A,B}) and ifacemethods (the methods of an
-// interface type, as Name{A,B}). Fields and interface methods are recorded so
-// a dump shows a struct gaining or losing a field, but they are not
-// identifiers of their own: a disposition covers them through their type.
+// fields of a struct type, as Name{A,B}), ifacemethods (the methods of an
+// interface type, as Name{A,B}) and alias (a type declared with `type X =
+// Y`, alongside its own "type" entry). Fields, interface methods and the
+// alias marker are recorded so a dump shows a struct gaining or losing a
+// field or a type becoming an alias, but they are not identifiers of their
+// own: a disposition covers them through their type.
 type Entry struct {
 	Kind string
 	Name string
@@ -36,7 +38,7 @@ func (e Entry) String() string {
 
 // Identifier reports whether e names something a disposition must cover.
 func (e Entry) Identifier() bool {
-	return e.Kind != "fields" && e.Kind != "ifacemethods"
+	return e.Kind != "fields" && e.Kind != "ifacemethods" && e.Kind != "alias"
 }
 
 // Dump returns the exported API declared by the non-test Go files in dir,
@@ -169,7 +171,18 @@ func typeEntries(s *ast.TypeSpec, base string) []Entry {
 		}
 		return out
 	default:
-		return []Entry{{Kind: "type", Name: s.Name.Name, File: base}}
+		out := []Entry{{Kind: "type", Name: s.Name.Name, File: base}}
+		if s.Assign.IsValid() {
+			// A type alias (type X = Y) has no method set of its own: every
+			// method Y declares is X's too, through Go's alias semantics,
+			// even though no FuncDecl with receiver X exists in this
+			// package's source for this AST-only dump to find. The "alias"
+			// marker lets CheckHonored trust the compiler here instead of
+			// requiring a syntactic method declaration that an alias is
+			// specifically written to avoid needing.
+			out = append(out, Entry{Kind: "alias", Name: s.Name.Name, File: base})
+		}
+		return out
 	}
 }
 

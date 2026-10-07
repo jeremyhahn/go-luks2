@@ -15,12 +15,14 @@ import (
 	"slices"
 	"strconv"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // Regression tests for the header-area overlap.
 //
 // writeHeaderInternal used to SIZE THE HEADER AREA FROM THE METADATA:
-// `nextPowerOf2(len(jsonData)+1)`, floored at LUKS2DefaultSize, while the
+// `nextPowerOf2(len(jsonData)+1)`, floored at header.DefaultSize, while the
 // backup copy was written at a hardcoded 0x4000. Those two disagree the moment
 // the JSON outgrows the floor.
 //
@@ -53,13 +55,13 @@ const keyslotJSONCost = 514
 //
 // Each clone is also registered with the digest that covers keyslot 0. LUKS2
 // requires every keyslot to be assigned to exactly one digest -- measured:
-// without it cryptsetup reports "Keyslot 1 is not assigned to exactly 1 digest"
+// without it cryptsetup reports "header.Keyslot 1 is not assigned to exactly 1 digest"
 // and fails validation -- and it is what AddKey does for a real keyslot.
 //
-// The cloned key material is of course garbage, which does not matter. Keyslot
+// The cloned key material is of course garbage, which does not matter. header.Keyslot
 // 0 is tried first in ascending scan order and succeeds before any clone is
 // reached, and cryptsetup's luksDump does not decrypt keyslots at all.
-func padKeyslots(t *testing.T, metadata *LUKS2Metadata, n int) {
+func padKeyslots(t *testing.T, metadata *header.Metadata, n int) {
 	t.Helper()
 
 	template, ok := metadata.Keyslots["0"]
@@ -106,7 +108,7 @@ func jsonAreaBytes(t *testing.T, device string, offset int64, jsonSize int) []by
 	defer func() { _ = f.Close() }()
 
 	raw := make([]byte, jsonSize)
-	if _, err := f.ReadAt(raw, offset+LUKS2HeaderSize); err != nil {
+	if _, err := f.ReadAt(raw, offset+header.HeaderSize); err != nil {
 		t.Fatalf("failed to read the JSON area at %d: %v", offset, err)
 	}
 	if i := bytes.IndexByte(raw, 0); i != -1 {
@@ -128,7 +130,7 @@ func TestWriteHeaderKeepsTheBackupOutOfThePrimaryArea(t *testing.T) {
 
 	device, passphrase := headerSizeVolume(t)
 
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -156,28 +158,28 @@ func TestWriteHeaderKeepsTheBackupOutOfThePrimaryArea(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to marshal the fixture: %v", err)
 	}
-	if len(encoded) >= LUKS2DefaultSize {
+	if len(encoded) >= header.DefaultSize {
 		t.Fatalf("fixture JSON is %d bytes, which does not fit the %d-byte area at all;"+
 			" this test needs the window where the old code corrupted and the new code succeeds",
-			len(encoded), LUKS2DefaultSize)
+			len(encoded), header.DefaultSize)
 	}
 	t.Logf("fixture: %d keyslots, %d bytes of JSON (%d indented; area %d, JSON area %d)",
-		keyslots, len(encoded), len(indented), LUKS2HeaderMinSize, LUKS2DefaultSize)
+		keyslots, len(encoded), len(indented), header.HeaderMinSize, header.DefaultSize)
 
 	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
 		t.Fatalf("writeHeaderInternal refused metadata that fits: %v", err)
 	}
 
 	// The area must still be the legal 16 KiB the container was formatted with.
-	if hdr.HeaderSize != LUKS2HeaderMinSize {
+	if hdr.HeaderSize != header.HeaderMinSize {
 		t.Fatalf("HeaderSize = %d after writing %d keyslots, want %d -- the area was resized",
-			hdr.HeaderSize, keyslots, LUKS2HeaderMinSize)
+			hdr.HeaderSize, keyslots, header.HeaderMinSize)
 	}
 
 	// The primary must still parse, with all its keyslots. Under the old code
 	// the backup landed at 16384, inside a 20480-byte primary area, and
 	// truncated exactly this.
-	_, primary, err := ReadHeader(device)
+	_, primary, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("the primary header no longer parses after a large write: %v", err)
 	}
@@ -186,31 +188,31 @@ func TestWriteHeaderKeepsTheBackupOutOfThePrimaryArea(t *testing.T) {
 	}
 
 	// The backup must sit at the area size and carry the same JSON.
-	secondaryHdr, secondary, err := ReadSecondaryHeader(device)
+	secondaryHdr, secondary, err := readSecondaryHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("the secondary header no longer parses after a large write: %v", err)
 	}
-	if secondaryHdr.HeaderOffset != LUKS2HeaderMinSize {
-		t.Errorf("secondary hdr_offset = %d, want %d", secondaryHdr.HeaderOffset, LUKS2HeaderMinSize)
+	if secondaryHdr.HeaderOffset != header.HeaderMinSize {
+		t.Errorf("secondary hdr_offset = %d, want %d", secondaryHdr.HeaderOffset, header.HeaderMinSize)
 	}
 	if len(secondary.Keyslots) != keyslots {
 		t.Errorf("secondary header has %d keyslots after writing %d", len(secondary.Keyslots), keyslots)
 	}
 
-	primaryJSON := jsonAreaBytes(t, device, LUKS2PrimaryHeaderOffset, LUKS2DefaultSize)
-	secondaryJSON := jsonAreaBytes(t, device, LUKS2HeaderMinSize, LUKS2DefaultSize)
+	primaryJSON := jsonAreaBytes(t, device, header.PrimaryHeaderOffset, header.DefaultSize)
+	secondaryJSON := jsonAreaBytes(t, device, header.HeaderMinSize, header.DefaultSize)
 	if !bytes.Equal(primaryJSON, secondaryJSON) {
 		t.Errorf("the two header copies carry different JSON (%d vs %d bytes)",
 			len(primaryJSON), len(secondaryJSON))
 	}
 
 	// config.json_size must describe the area that was actually written.
-	if want := formatSize(LUKS2DefaultSize); primary.Config.JSONSize != want {
+	if want := formatSize(header.DefaultSize); primary.Config.JSONSize != want {
 		t.Errorf("config.json_size = %s, want %s", primary.Config.JSONSize, want)
 	}
 
 	// And the volume must still open, which is what the header is for.
-	key, err := getMasterKey(device, passphrase, primary)
+	key, err := getMasterKey(device, passphrase, primary, testVolumeSys())
 	if err != nil {
 		t.Fatalf("the volume no longer opens after a large header write: %v", err)
 	}
@@ -232,11 +234,11 @@ func TestWriteHeaderKeepsTheBackupOutOfThePrimaryArea(t *testing.T) {
 func TestWriteHeaderRefusesMetadataThatDoesNotFit(t *testing.T) {
 	defer parallel(t)()
 
-	const keyslots = LUKS2MaxKeyslots // 32, the LUKS2 maximum
+	const keyslots = MaxKeyslots // 32, the LUKS2 maximum
 
 	device, passphrase := headerSizeVolume(t)
 
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -246,8 +248,8 @@ func TestWriteHeaderRefusesMetadataThatDoesNotFit(t *testing.T) {
 	// the passthrough, so a token big enough to overflow the area has to be
 	// constructed the way a real one arrives -- from JSON.
 	oversized := fmt.Sprintf(`{"type":"systemd-tpm2","keyslots":["0"],"tpm2-blob":%q}`,
-		encodeBase64(bytes.Repeat([]byte{0x5A}, LUKS2DefaultSize)))
-	var token Token
+		encodeBase64(bytes.Repeat([]byte{0x5A}, header.DefaultSize)))
+	var token LegacyToken
 	if err := json.Unmarshal([]byte(oversized), &token); err != nil {
 		t.Fatalf("building the oversized token: %v", err)
 	}
@@ -257,43 +259,43 @@ func TestWriteHeaderRefusesMetadataThatDoesNotFit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to marshal the fixture: %v", err)
 	}
-	if len(encoded) < LUKS2DefaultSize {
+	if len(encoded) < header.DefaultSize {
 		t.Fatalf("fixture JSON is %d bytes, which still fits the %d-byte area; this test needs it not to",
-			len(encoded), LUKS2DefaultSize)
+			len(encoded), header.DefaultSize)
 	}
 
 	// Snapshot both header copies and the start of the keyslot area. The last
 	// of those is the one that matters: growing the area to hold this metadata
 	// would put the backup header on top of it.
-	before := deviceHead(t, device, 2*LUKS2HeaderMinSize+4096)
+	before := deviceHead(t, device, 2*header.HeaderMinSize+4096)
 
 	err = writeHeaderInternal(device, hdr, metadata)
-	if !errors.Is(err, ErrMetadataTooLarge) {
-		t.Fatalf("writeHeaderInternal(%d bytes of JSON) = %v, want ErrMetadataTooLarge", len(encoded), err)
+	if !errors.Is(err, ErrNoSpace) {
+		t.Fatalf("writeHeaderInternal(%d bytes of JSON) = %v, want ErrNoSpace", len(encoded), err)
 	}
 	// The operator has to be able to act on this: which numbers, not just that
 	// something did not fit.
 	for _, want := range []string{
 		strconv.Itoa(len(encoded)),
-		strconv.Itoa(LUKS2DefaultSize),
-		strconv.Itoa(LUKS2HeaderMinSize),
+		strconv.Itoa(header.DefaultSize),
+		strconv.Itoa(header.HeaderMinSize),
 	} {
 		if !bytes.Contains([]byte(err.Error()), []byte(want)) {
 			t.Errorf("error %q does not name %s", err.Error(), want)
 		}
 	}
 
-	after := deviceHead(t, device, 2*LUKS2HeaderMinSize+4096)
+	after := deviceHead(t, device, 2*header.HeaderMinSize+4096)
 	if !bytes.Equal(before, after) {
 		t.Fatal("a refused header write still modified the device")
 	}
 
 	// The container is untouched, so it still opens.
-	_, reread, err := ReadHeader(device)
+	_, reread, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed after a refused write: %v", err)
 	}
-	key, err := getMasterKey(device, passphrase, reread)
+	key, err := getMasterKey(device, passphrase, reread, testVolumeSys())
 	if err != nil {
 		t.Fatalf("the volume no longer opens after a refused write: %v", err)
 	}
@@ -312,11 +314,11 @@ func TestWriteHeaderRefusesMetadataThatDoesNotFit(t *testing.T) {
 func TestWriteHeaderAcceptsTheMaximumKeyslotCount(t *testing.T) {
 	defer parallel(t)()
 
-	const keyslots = LUKS2MaxKeyslots
+	const keyslots = MaxKeyslots
 
 	device, passphrase := headerSizeVolume(t)
 
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -325,18 +327,18 @@ func TestWriteHeaderAcceptsTheMaximumKeyslotCount(t *testing.T) {
 	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
 		t.Fatalf("writeHeaderInternal refused the %d keyslots LUKS2 permits: %v", keyslots, err)
 	}
-	if hdr.HeaderSize != LUKS2HeaderMinSize {
-		t.Fatalf("HeaderSize = %d, want %d -- the area was resized to hold the keyslots", hdr.HeaderSize, LUKS2HeaderMinSize)
+	if hdr.HeaderSize != header.HeaderMinSize {
+		t.Fatalf("HeaderSize = %d, want %d -- the area was resized to hold the keyslots", hdr.HeaderSize, header.HeaderMinSize)
 	}
 
-	_, primary, err := ReadHeader(device)
+	_, primary, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("the primary header no longer parses: %v", err)
 	}
 	if len(primary.Keyslots) != keyslots {
 		t.Fatalf("primary header has %d keyslots after writing %d", len(primary.Keyslots), keyslots)
 	}
-	_, secondary, err := ReadSecondaryHeader(device)
+	_, secondary, err := readSecondaryHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("the secondary header no longer parses: %v", err)
 	}
@@ -344,7 +346,7 @@ func TestWriteHeaderAcceptsTheMaximumKeyslotCount(t *testing.T) {
 		t.Fatalf("secondary header has %d keyslots after writing %d", len(secondary.Keyslots), keyslots)
 	}
 
-	key, err := getMasterKey(device, passphrase, primary)
+	key, err := getMasterKey(device, passphrase, primary, testVolumeSys())
 	if err != nil {
 		t.Fatalf("the volume no longer opens with a full keyslot complement: %v", err)
 	}
@@ -359,28 +361,28 @@ func TestWriteHeaderRefusesOversizedTokenMetadata(t *testing.T) {
 
 	device, _ := headerSizeVolume(t)
 
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 	// Decoded rather than constructed, for the reason given at the other
 	// oversized-token fixture: TPM2 members are unmodeled (#189) and reach a
-	// Token only through the passthrough.
+	// LegacyToken only through the passthrough.
 	oversized := fmt.Sprintf(`{"type":"systemd-tpm2","keyslots":["0"],`+
 		`"tpm2-blob":%q,"tpm2-pcrs":[0,7],"tpm2-pcr-bank":"sha256"}`,
-		encodeBase64(bytes.Repeat([]byte{0x5A}, LUKS2DefaultSize)))
-	var token Token
+		encodeBase64(bytes.Repeat([]byte{0x5A}, header.DefaultSize)))
+	var token LegacyToken
 	if err := json.Unmarshal([]byte(oversized), &token); err != nil {
 		t.Fatalf("building the oversized token: %v", err)
 	}
 	metadata.Tokens["0"] = &token
 
-	before := deviceHead(t, device, 2*LUKS2HeaderMinSize+4096)
+	before := deviceHead(t, device, 2*header.HeaderMinSize+4096)
 
-	if err := writeHeaderInternal(device, hdr, metadata); !errors.Is(err, ErrMetadataTooLarge) {
-		t.Fatalf("writeHeaderInternal(oversized token) = %v, want ErrMetadataTooLarge", err)
+	if err := writeHeaderInternal(device, hdr, metadata); !errors.Is(err, ErrNoSpace) {
+		t.Fatalf("writeHeaderInternal(oversized token) = %v, want ErrNoSpace", err)
 	}
-	if after := deviceHead(t, device, 2*LUKS2HeaderMinSize+4096); !bytes.Equal(before, after) {
+	if after := deviceHead(t, device, 2*header.HeaderMinSize+4096); !bytes.Equal(before, after) {
 		t.Fatal("a refused header write still modified the device")
 	}
 }
@@ -392,13 +394,13 @@ func TestWriteHeaderAcceptsATokenThatFits(t *testing.T) {
 
 	device, passphrase := headerSizeVolume(t)
 
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 	fits := fmt.Sprintf(`{"type":"systemd-tpm2","keyslots":["0"],"tpm2-blob":%q}`,
 		encodeBase64(bytes.Repeat([]byte{0x5A}, 1024)))
-	var token Token
+	var token LegacyToken
 	if err := json.Unmarshal([]byte(fits), &token); err != nil {
 		t.Fatalf("building the token: %v", err)
 	}
@@ -408,17 +410,17 @@ func TestWriteHeaderAcceptsATokenThatFits(t *testing.T) {
 		t.Fatalf("writeHeaderInternal refused a token that fits: %v", err)
 	}
 
-	_, reread, err := ReadHeader(device)
+	_, reread, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed after writing a token: %v", err)
 	}
 	if len(reread.Tokens) != 1 {
 		t.Fatalf("token count = %d, want 1", len(reread.Tokens))
 	}
-	if _, _, err := ReadSecondaryHeader(device); err != nil {
+	if _, _, err := readSecondaryHeaderForTest(device); err != nil {
 		t.Fatalf("the secondary header no longer parses after writing a token: %v", err)
 	}
-	key, err := getMasterKey(device, passphrase, reread)
+	key, err := getMasterKey(device, passphrase, reread, testVolumeSys())
 	if err != nil {
 		t.Fatalf("the volume no longer opens after writing a token: %v", err)
 	}
@@ -456,20 +458,20 @@ func TestHeaderAreaSizeForWrite(t *testing.T) {
 		want   int
 		accept bool
 	}{
-		{"unwritten header defaults to the minimum area", 0, LUKS2HeaderMinSize, true},
-		{"the default 16 KiB area", LUKS2HeaderMinSize, LUKS2HeaderMinSize, true},
-		{"a 32 KiB area", 2 * LUKS2HeaderMinSize, 2 * LUKS2HeaderMinSize, true},
+		{"unwritten header defaults to the minimum area", 0, header.HeaderMinSize, true},
+		{"the default 16 KiB area", header.HeaderMinSize, header.HeaderMinSize, true},
+		{"a 32 KiB area", 2 * header.HeaderMinSize, 2 * header.HeaderMinSize, true},
 		{"a 1 MiB area", 1 << 20, 1 << 20, true},
-		{"the maximum area", LUKS2HeaderMaxSize, LUKS2HeaderMaxSize, true},
+		{"the maximum area", header.HeaderMaxSize, header.HeaderMaxSize, true},
 
-		{"below the minimum", LUKS2HeaderMinSize - 1, 0, false},
+		{"below the minimum", header.HeaderMinSize - 1, 0, false},
 		{"the old grown size, not a power of two", 20480, 0, false},
 		{"a power of two below the minimum", 8192, 0, false},
-		{"above the maximum", LUKS2HeaderMaxSize * 2, 0, false},
+		{"above the maximum", header.HeaderMaxSize * 2, 0, false},
 		{"the largest uint64", ^uint64(0), 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := headerAreaSizeForWrite(&LUKS2BinaryHeader{HeaderSize: tc.size})
+			got, err := headerAreaSizeForWrite(&header.BinaryHeader{HeaderSize: tc.size})
 			switch {
 			case tc.accept && err != nil:
 				t.Fatalf("headerAreaSizeForWrite(%d) = error %v, want %d", tc.size, err, tc.want)
@@ -484,7 +486,7 @@ func TestHeaderAreaSizeForWrite(t *testing.T) {
 			// Every accepted area doubles as a secondary offset, so the read
 			// side must accept it there.
 			if tc.accept {
-				if _, err := headerAreaOffset(&LUKS2BinaryHeader{HeaderOffset: uint64(got)}); err != nil {
+				if _, err := headerAreaOffset(&header.BinaryHeader{HeaderOffset: uint64(got)}); err != nil {
 					t.Errorf("the write side would place the secondary copy at %d, which the read side rejects: %v",
 						got, err)
 				}
@@ -506,16 +508,16 @@ func TestReadHeaderRefusesAMismatchedHeaderOffset(t *testing.T) {
 	device, _ := headerSizeVolume(t)
 
 	// In range for the bound, wrong for the copy it sits in.
-	setHeaderOffset(t, device, uint64(LUKS2SecondaryHeaderOffset))
+	setHeaderOffset(t, device, uint64(header.SecondaryHeaderOffset))
 
-	_, _, err := ReadHeader(device)
+	_, _, err := readHeaderForTest(device)
 	if err == nil {
 		t.Fatal("ReadHeader accepted a primary header recording hdr_offset 0x4000")
 	}
 	if !errors.Is(err, ErrInvalidHeader) {
 		t.Errorf("error = %v, want it to wrap ErrInvalidHeader", err)
 	}
-	if !bytes.Contains([]byte(err.Error()), []byte(strconv.Itoa(int(LUKS2SecondaryHeaderOffset)))) {
+	if !bytes.Contains([]byte(err.Error()), []byte(strconv.Itoa(int(header.SecondaryHeaderOffset)))) {
 		t.Errorf("error = %q, want it to name the recorded offset", err.Error())
 	}
 }

@@ -6,8 +6,12 @@ package luks2
 
 import (
 	"fmt"
+	"github.com/jeremyhahn/go-luks2/internal/fips"
 
 	"github.com/jeremyhahn/go-enclave"
+
+	"github.com/jeremyhahn/go-luks2/internal/errs"
+	"github.com/jeremyhahn/go-luks2/internal/header"
 	"github.com/jeremyhahn/go-luks2/internal/kdf"
 )
 
@@ -20,7 +24,7 @@ import (
 // do that ceiling's work many times over before it refuses the passphrase.
 //
 // The budget is the work of the most expensive header cryptsetup can write:
-// LUKS2MaxKeyslots keyslots (cryptsetup creates no more, and the scan tries
+// MaxKeyslots keyslots (cryptsetup creates no more, and the scan tries
 // no other ids), each attested by exactly one digest (cryptsetup refuses any
 // other header, measured), every derivation at the per-derivation ceiling.
 // So no container cryptsetup can produce is ever refused by it, and a crafted
@@ -38,7 +42,7 @@ type kdfWork = kdf.Work
 
 // derivationWork is what one derivation of k to outLen bytes costs. The KDF
 // has passed the screen, so its parameters are present and bounded.
-func derivationWork(k *KDF, outLen int) kdfWork {
+func derivationWork(k *rawKDF, outLen int) kdfWork {
 	if k == nil || outLen <= 0 {
 		return kdfWork{}
 	}
@@ -47,8 +51,8 @@ func derivationWork(k *KDF, outLen int) kdfWork {
 
 // operationKDFBudget is the work one unlock, verify or authorize operation may
 // do: a keyslot derivation and a digest derivation, at the per-derivation
-// ceilings, for each of LUKS2MaxKeyslots keyslots.
-var operationKDFBudget = kdf.OperationBudget(LUKS2MaxKeyslots)
+// ceilings, for each of MaxKeyslots keyslots.
+var operationKDFBudget = kdf.OperationBudget(MaxKeyslots)
 
 // scanPlan is what a keyslot scan over order would cost at most, were every
 // keyslot tried: the derivations it would make, and the most locked memory
@@ -62,7 +66,7 @@ type scanPlan struct {
 // counts only what the scan would derive -- keyslots it would try, which the
 // screen passes, and the digests that attest each of them and pass theirs --
 // so a damaged entry costs nothing here, as it costs nothing there.
-func planKeyslotScan(metadata *LUKS2Metadata, order []string) scanPlan {
+func planKeyslotScan(metadata *header.Metadata, order []string) scanPlan {
 	var plan scanPlan
 	for _, id := range order {
 		keyslot := metadata.Keyslots[id]
@@ -72,12 +76,12 @@ func planKeyslotScan(metadata *LUKS2Metadata, order []string) scanPlan {
 		if _, ok := canonicalKeyslotID(id); !ok {
 			continue
 		}
-		kp, err := screenKeyslot(id, keyslot, metadata.Digests)
+		kp, err := screenKeyslot(id, keyslot, metadata.Digests, fips.Probe)
 		if err != nil {
 			continue
 		}
 		plan.work = plan.work.Add(derivationWork(keyslot.KDF, kp.areaKeySize))
-		digestWork, longestDigest := planDigests(metadata.Digests, func(d *Digest) bool { return digestCovers(d, id) })
+		digestWork, longestDigest := planDigests(metadata.Digests, func(d *rawDigest) bool { return digestCovers(d, id) })
 		plan.work = plan.work.Add(digestWork)
 		plan.peakLocked = max(plan.peakLocked, keyslotOpenPeakLocked(kp, keyslot.KeySize, longestDigest))
 	}
@@ -109,13 +113,13 @@ func keyslotOpenPeakLocked(kp keyslotPlan, keySize, longestDigest int) int64 {
 
 // planDigests prices deriving every digest covers selects that passes its
 // screen, and reports the longest of them.
-func planDigests(digests map[string]*Digest, covers func(*Digest) bool) (work kdfWork, longest int) {
+func planDigests(digests map[string]*rawDigest, covers func(*rawDigest) bool) (work kdfWork, longest int) {
 	for _, id := range sortedIDs(digests) {
 		digest := digests[id]
 		if !covers(digest) {
 			continue
 		}
-		expected, kdf, err := screenDigest(digest)
+		expected, kdf, err := screenDigest(digest, fips.Probe)
 		n := len(expected)
 		clearBytes(expected)
 		if err != nil {
@@ -132,7 +136,9 @@ func planDigests(digests map[string]*Digest, covers func(*Digest) bool) (work kd
 // than the process allocator could ever admit.
 func checkKDFBudget(op string, plan scanPlan) error {
 	if plan.work.Exceeds(operationKDFBudget) {
-		return &KDFBudgetError{Op: op, Need: plan.work, Budget: operationKDFBudget}
+		return &errs.Error{Kind: ErrInvalidHeader, Detail: fmt.Sprintf(
+			"%s: the header asks for %d PBKDF2 blocks and %d Argon2 KiB-passes; one operation may spend %d and %d, the most any header cryptsetup writes can ask for",
+			op, plan.work.PBKDF2Blocks, plan.work.Argon2KiBPasses, operationKDFBudget.PBKDF2Blocks, operationKDFBudget.Argon2KiBPasses)}
 	}
 	if plan.peakLocked > 0 {
 		return custody.Admissible(op, plan.peakLocked)
@@ -140,23 +146,7 @@ func checkKDFBudget(op string, plan scanPlan) error {
 	return nil
 }
 
-// KDFBudgetError reports an operation refused because the header would have it
-// derive more than operationKDFBudget allows. Nothing was derived. It matches
-// ErrKDFBudgetExceeded, and ErrInvalidHeader: no header cryptsetup can write
-// asks for this much, so the header is the defect.
-type KDFBudgetError struct {
-	Op string
-	// Need and Budget are in PBKDF2 PRF blocks and Argon2 KiB-passes; see
-	// kdfWork. They are diagnostic, not contract.
-	Need, Budget kdfWork
-}
-
-func (e *KDFBudgetError) Error() string {
-	return fmt.Sprintf("%s: %s: the header asks for %d PBKDF2 blocks and %d Argon2 KiB-passes; one operation may spend %d and %d, the most any header cryptsetup writes can ask for",
-		ErrKDFBudgetExceeded.Error(), e.Op, e.Need.PBKDF2Blocks, e.Need.Argon2KiBPasses, e.Budget.PBKDF2Blocks, e.Budget.Argon2KiBPasses)
-}
-
-// Is reports the error as both sentinels it stands for.
-func (e *KDFBudgetError) Is(target error) bool {
-	return target == ErrKDFBudgetExceeded || target == ErrInvalidHeader
-}
+// An operation refused because the header would have it derive more than
+// operationKDFBudget allows -- nothing was derived -- is an *errs.Error
+// with Kind ErrInvalidHeader: no header cryptsetup can write asks for this
+// much, so the header is the defect.

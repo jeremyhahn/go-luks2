@@ -9,6 +9,8 @@ package luks2
 import (
 	"crypto/rand"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // TestCreateDigest tests digest creation
@@ -51,14 +53,16 @@ func TestCreateDigest(t *testing.T) {
 			// measurement, so it is pinned here rather than measured a second
 			// time. See the iteration assertion below for why (#204).
 			const pinnedIterations = 123_457
-			askedFor := recordDigestCalibration(t, pinnedIterations)
+			askedFor, digestIterationsFor := recordDigestCalibration(t, pinnedIterations)
+			sys := testVolumeSys()
+			sys.digestIterationsFor = digestIterationsFor
 
 			// Generate random master key
 			if _, err := rand.Read(tt.masterKey); err != nil {
 				t.Fatalf("Failed to generate master key: %v", err)
 			}
 
-			kdf, digestValue, err := createDigest(enclaveFrom(t, tt.masterKey), tt.hashAlgo)
+			kdf, digestValue, err := createDigest(enclaveFrom(t, tt.masterKey), tt.hashAlgo, sys)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("Expected error, got nil")
@@ -153,12 +157,12 @@ func TestCreateDigestDeterministic(t *testing.T) {
 		t.Fatalf("Failed to generate master key: %v", err)
 	}
 
-	kdf1, digest1, err := createDigest(enclaveFrom(t, masterKey), "sha256")
+	kdf1, digest1, err := createDigest(enclaveFrom(t, masterKey), "sha256", testVolumeSys())
 	if err != nil {
 		t.Fatalf("First createDigest failed: %v", err)
 	}
 
-	kdf2, digest2, err := createDigest(enclaveFrom(t, masterKey), "sha256")
+	kdf2, digest2, err := createDigest(enclaveFrom(t, masterKey), "sha256", testVolumeSys())
 	if err != nil {
 		t.Fatalf("Second createDigest failed: %v", err)
 	}
@@ -183,7 +187,7 @@ func TestCreateDigestVerification(t *testing.T) {
 		t.Fatalf("Failed to generate master key: %v", err)
 	}
 
-	kdf, expectedDigest, err := createDigest(enclaveFrom(t, masterKey), "sha256")
+	kdf, expectedDigest, err := createDigest(enclaveFrom(t, masterKey), "sha256", testVolumeSys())
 	if err != nil {
 		t.Fatalf("createDigest failed: %v", err)
 	}
@@ -228,7 +232,7 @@ func TestCreateDigestInvalidHashAlgo(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, err := createDigest(enclaveFrom(t, masterKey), tt.hashAlgo)
+			_, _, err := createDigest(enclaveFrom(t, masterKey), tt.hashAlgo, testVolumeSys())
 			if err == nil {
 				t.Fatal("Expected error for unsupported hash algorithm, got nil")
 			}
@@ -241,14 +245,14 @@ func TestCreateMetadata(t *testing.T) {
 	// Create test KDFs
 	iterations := 100000
 
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       "dGVzdHNhbHQ=",
 		Iterations: &iterations,
 	}
 
-	digestKDF := &KDF{
+	digestKDF := &rawKDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       "ZGlnZXN0c2FsdA==",
@@ -257,7 +261,7 @@ func TestCreateMetadata(t *testing.T) {
 
 	digestValue := "dGVzdGRpZ2VzdA=="
 
-	opts := FormatOptions{
+	opts := formatOptionsForTest{
 		Device:     "/dev/test",
 		Cipher:     "aes",
 		CipherMode: "xts-plain64",
@@ -284,7 +288,7 @@ func TestCreateMetadata(t *testing.T) {
 
 	keyslot, ok := metadata.Keyslots["0"]
 	if !ok {
-		t.Fatal("Keyslot 0 not found")
+		t.Fatal("header.Keyslot 0 not found")
 	}
 	if keyslot.Type != "luks2" {
 		t.Fatalf("Expected keyslot type 'luks2', got %s", keyslot.Type)
@@ -302,7 +306,7 @@ func TestCreateMetadata(t *testing.T) {
 
 	// Verify keyslot area
 	if keyslot.Area == nil {
-		t.Fatal("Keyslot area is nil")
+		t.Fatal("header.Keyslot area is nil")
 	}
 	if keyslot.Area.Type != "raw" {
 		t.Fatalf("Expected area type 'raw', got %s", keyslot.Area.Type)
@@ -322,7 +326,7 @@ func TestCreateMetadata(t *testing.T) {
 
 	// Verify KDF
 	if keyslot.KDF == nil {
-		t.Fatal("Keyslot KDF is nil")
+		t.Fatal("header.Keyslot KDF is nil")
 	}
 	if keyslot.KDF.Type != kdf.Type {
 		t.Fatalf("Expected KDF type %s, got %s", kdf.Type, keyslot.KDF.Type)
@@ -335,8 +339,8 @@ func TestCreateMetadata(t *testing.T) {
 	if keyslot.AF.Type != "luks1" {
 		t.Fatalf("Expected AF type 'luks1', got %s", keyslot.AF.Type)
 	}
-	if keyslot.AF.Stripes != AFStripes {
-		t.Fatalf("Expected AF stripes %d, got %d", AFStripes, keyslot.AF.Stripes)
+	if keyslot.AF.Stripes != header.AFStripes {
+		t.Fatalf("Expected AF stripes %d, got %d", header.AFStripes, keyslot.AF.Stripes)
 	}
 	if keyslot.AF.Hash != opts.HashAlgo {
 		t.Fatalf("Expected AF hash %s, got %s", opts.HashAlgo, keyslot.AF.Hash)
@@ -420,7 +424,7 @@ func TestCreateMetadata(t *testing.T) {
 	if metadata.Config == nil {
 		t.Fatal("Config is nil")
 	}
-	expectedJSONSize := formatSize(int64(LUKS2DefaultSize))
+	expectedJSONSize := formatSize(int64(header.DefaultSize))
 	if metadata.Config.JSONSize != expectedJSONSize {
 		t.Fatalf("Expected JSON size %s, got %s", expectedJSONSize, metadata.Config.JSONSize)
 	}
@@ -441,7 +445,7 @@ func TestCreateMetadataWithArgon2(t *testing.T) {
 	argonMemory := 1048576
 	argonCPUs := 4
 
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:   "argon2id",
 		Salt:   "dGVzdHNhbHQ=",
 		Time:   &argonTime,
@@ -450,7 +454,7 @@ func TestCreateMetadataWithArgon2(t *testing.T) {
 	}
 
 	digestIterations := 100000
-	digestKDF := &KDF{
+	digestKDF := &rawKDF{
 		Type:       "pbkdf2",
 		Hash:       "sha512",
 		Salt:       "ZGlnZXN0c2FsdA==",
@@ -459,7 +463,7 @@ func TestCreateMetadataWithArgon2(t *testing.T) {
 
 	digestValue := "dGVzdGRpZ2VzdA=="
 
-	opts := FormatOptions{
+	opts := formatOptionsForTest{
 		Device:     "/dev/test",
 		Cipher:     "aes",
 		CipherMode: "xts-plain64",
@@ -505,14 +509,14 @@ func TestCreateMetadataWithArgon2(t *testing.T) {
 // TestCreateMetadataVariousOffsets tests metadata creation with different offset configurations
 func TestCreateMetadataVariousOffsets(t *testing.T) {
 	iterations := 100000
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       "dGVzdHNhbHQ=",
 		Iterations: &iterations,
 	}
 
-	digestKDF := &KDF{
+	digestKDF := &rawKDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       "ZGlnZXN0c2FsdA==",
@@ -521,7 +525,7 @@ func TestCreateMetadataVariousOffsets(t *testing.T) {
 
 	digestValue := "dGVzdGRpZ2VzdA=="
 
-	opts := FormatOptions{
+	opts := formatOptionsForTest{
 		Device:     "/dev/test",
 		Cipher:     "aes",
 		CipherMode: "xts-plain64",

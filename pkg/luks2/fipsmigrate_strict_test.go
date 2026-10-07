@@ -8,6 +8,7 @@ package luks2
 
 import (
 	"bytes"
+	"context"
 	"crypto/fips140"
 	"errors"
 	"os"
@@ -16,9 +17,11 @@ import (
 	"testing"
 
 	"github.com/jeremyhahn/go-enclave"
+
 	"github.com/jeremyhahn/go-luks2/internal/af"
 	"github.com/jeremyhahn/go-luks2/internal/areacipher"
 	"github.com/jeremyhahn/go-luks2/internal/errs"
+	"github.com/jeremyhahn/go-luks2/internal/header"
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
@@ -37,9 +40,9 @@ import (
 var shortFIPSSalt = []byte("8-bytes!")
 
 // shortSaltKDF is PBKDF2-SHA256 -- an approved name -- over shortFIPSSalt.
-func shortSaltKDF() *KDF {
+func shortSaltKDF() *rawKDF {
 	iterations := minKDFIterations
-	return &KDF{Type: KDFTypePBKDF2, Hash: "sha256", Salt: encodeBase64(shortFIPSSalt), Iterations: &iterations}
+	return &rawKDF{Type: kdfTypePBKDF2, Hash: "sha256", Salt: encodeBase64(shortFIPSSalt), Iterations: &iterations}
 }
 
 // weakenForStrictFIPS rewrites device so every KDF the migration might be
@@ -53,11 +56,11 @@ func shortSaltKDF() *KDF {
 // test runs it in a non-FIPS child (fipsimport_cryptsetup_test.go): a FIPS
 // parent cannot derive through the salt it writes.
 func weakenForStrictFIPS(device string, passphrase []byte, keyslotID string) (err error) {
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		return err
 	}
-	masterKey, err := getMasterKey(device, passphrase, metadata)
+	masterKey, err := getMasterKey(device, passphrase, metadata, testVolumeSys())
 	if err != nil {
 		return err
 	}
@@ -70,7 +73,7 @@ func weakenForStrictFIPS(device string, passphrase []byte, keyslotID string) (er
 		return &errs.Error{Detail: "the fixture has no digest 0"}
 	}
 	kdf := shortSaltKDF()
-	value, err := deriveKeySecret(masterKey, kdf, sha256DigestLen)
+	value, err := deriveKeySecret(context.Background(), masterKey, kdf, sha256DigestLen, testVolumeSys())
 	if err != nil {
 		return err
 	}
@@ -103,8 +106,8 @@ func weakenForStrictFIPS(device string, passphrase []byte, keyslotID string) (er
 // rewrapKeyslotInPlace re-wraps masterKey under passphrase through kdf into
 // keyslot's existing area, and sets keyslot.KDF. The area is the same size for
 // the same key size and stripe count, so nothing else moves.
-func rewrapKeyslotInPlace(device string, keyslot *Keyslot, masterKey *enclave.MemoryEnclave, passphrase []byte, kdf *KDF) (err error) {
-	passphraseKey, err := DeriveKeyEnclave(passphrase, kdf, keyslot.KeySize)
+func rewrapKeyslotInPlace(device string, keyslot *header.Keyslot, masterKey *enclave.MemoryEnclave, passphrase []byte, kdf *rawKDF) (err error) {
+	passphraseKey, err := deriveKeyEnclave(context.Background(), passphrase, kdf, keyslot.KeySize)
 	if err != nil {
 		return err
 	}
@@ -112,7 +115,7 @@ func rewrapKeyslotInPlace(device string, keyslot *Keyslot, masterKey *enclave.Me
 	// the enclave reports joins the returned error rather than vanishing.
 	defer func() { err = errors.Join(err, passphraseKey.Destroy()) }()
 
-	afData, err := afCodec().Split(masterKey, af.Params{Stripes: keyslot.AF.Stripes, Hash: keyslot.AF.Hash})
+	afData, err := afCodec(testVolumeSys()).Split(masterKey, af.Params{Stripes: keyslot.AF.Stripes, Hash: keyslot.AF.Hash})
 	if err != nil {
 		return err
 	}
@@ -159,7 +162,7 @@ func rewrapKeyslotInPlace(device string, keyslot *Keyslot, masterKey *enclave.Me
 func assertStrictRefusal(t *testing.T, device string, wantKeyslots, wantDigests []string) {
 	t.Helper()
 
-	_, metadata, err := ReadHeader(device)
+	_, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -167,7 +170,7 @@ func assertStrictRefusal(t *testing.T, device string, wantKeyslots, wantDigests 
 	ids := func(list []NonApprovedKDF) []string {
 		var out []string
 		for _, k := range list {
-			out = append(out, k.ID)
+			out = append(out, strconv.Itoa(k.ID))
 		}
 		return out
 	}
@@ -175,7 +178,7 @@ func assertStrictRefusal(t *testing.T, device string, wantKeyslots, wantDigests 
 		t.Fatalf("non-approved keyslots %v and digests %v, want %v and %v", keyslots, digests, wantKeyslots, wantDigests)
 	}
 	for _, k := range slices.Concat(keyslots, digests) {
-		if k.Type == KDFTypePBKDF2 && k.Reason != "salt shorter than 128 bits" {
+		if k.Type == kdfTypePBKDF2 && k.Reason != "salt shorter than 128 bits" {
 			t.Fatalf("%s: want the short salt named as the reason", k)
 		}
 	}
@@ -201,7 +204,7 @@ func TestMigrateToFIPSMigratesAShortSaltDigest(t *testing.T) {
 	keyBefore := volumeKey(t, device, migrationPassphrase)
 	dataBefore := dataAreaDigest(t, device)
 
-	result, err := MigrateToFIPS(device, migrationPassphrase, cheapMigration())
+	result, err := migrateToFIPSForTest(device, migrationPassphrase, cheapMigration())
 	if err != nil {
 		t.Fatalf("MigrateToFIPS failed: %v", err)
 	}
@@ -210,7 +213,7 @@ func TestMigrateToFIPSMigratesAShortSaltDigest(t *testing.T) {
 	}
 	assertFIPSReady(t, device)
 
-	_, metadata, err := ReadHeader(device)
+	_, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -249,7 +252,7 @@ func TestMigrateToFIPSDoesNotReuseAShortSaltKeyslot(t *testing.T) {
 		t.Fatal("the weakened fixture no longer holds the volume key")
 	}
 
-	result, err := MigrateToFIPS(device, migrationPassphrase, cheapMigration())
+	result, err := migrateToFIPSForTest(device, migrationPassphrase, cheapMigration())
 	if err != nil {
 		t.Fatalf("MigrateToFIPS failed: %v", err)
 	}
@@ -273,12 +276,12 @@ func TestMigrateToFIPSDoesNotReuseAShortSaltKeyslot(t *testing.T) {
 func unboundKeyslot(t *testing.T, device string, passphrase []byte) {
 	t.Helper()
 
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 	reference := metadata.Keyslots["0"]
-	raw, err := randomBytes(reference.KeySize)
+	raw, err := randomBytes(reference.KeySize, testVolumeSys().cryptoRand)
 	if err != nil {
 		t.Fatalf("randomBytes failed: %v", err)
 	}
@@ -289,12 +292,12 @@ func unboundKeyslot(t *testing.T, device string, passphrase []byte) {
 	defer mustDestroy(t, unbound)
 
 	writeKeyslot(t, device, hdr, metadata, "1", reference, unbound, passphrase)
-	kdf, value, err := createDigest(unbound, "sha256")
+	kdf, value, err := createDigest(unbound, "sha256", testVolumeSys())
 	if err != nil {
 		t.Fatalf("createDigest failed: %v", err)
 	}
-	metadata.Digests["1"] = &Digest{
-		Type:       KDFTypePBKDF2,
+	metadata.Digests["1"] = &rawDigest{
+		Type:       kdfTypePBKDF2,
 		Keyslots:   []string{"1"},
 		Segments:   []string{},
 		Hash:       kdf.Hash,
@@ -326,7 +329,7 @@ func TestMigrateToFIPSCarriesTheVolumeKeyNotAnUnboundKey(t *testing.T) {
 	unboundKeyslot(t, device, migrationPassphrase)
 	dataBefore := dataAreaDigest(t, device)
 
-	result, err := MigrateToFIPS(device, migrationPassphrase, cheapMigration())
+	result, err := migrateToFIPSForTest(device, migrationPassphrase, cheapMigration())
 	if err != nil {
 		t.Fatalf("MigrateToFIPS failed: %v", err)
 	}
@@ -339,11 +342,11 @@ func TestMigrateToFIPSCarriesTheVolumeKeyNotAnUnboundKey(t *testing.T) {
 
 	// The migrated keyslot holds the VOLUME key, and a digest binds it to the
 	// data segment.
-	_, metadata, err := ReadHeader(device)
+	_, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
-	got, err := unlockKeyslot(device, "2", migrationPassphrase, metadata.Keyslots["2"], metadata.Digests)
+	got, err := unlockKeyslot(context.Background(), device, "2", migrationPassphrase, metadata.Keyslots["2"], metadata.Digests, testVolumeSys())
 	if err != nil {
 		t.Fatalf("the migrated keyslot does not open: %v", err)
 	}
@@ -363,7 +366,7 @@ func TestMigrateToFIPSCarriesTheVolumeKeyNotAnUnboundKey(t *testing.T) {
 	// passphrase and sorts first. The normal scan -- the one Unlock hands to
 	// dm-crypt -- must recover the volume key, both as this process runs it
 	// and as a FIPS process would (approved keyslots and digests only).
-	normal, err := getMasterKey(device, migrationPassphrase, metadata)
+	normal, err := getMasterKey(device, migrationPassphrase, metadata, testVolumeSys())
 	if err != nil {
 		t.Fatalf("the normal unlock scan failed: %v", err)
 	}
@@ -372,7 +375,7 @@ func TestMigrateToFIPSCarriesTheVolumeKeyNotAnUnboundKey(t *testing.T) {
 		t.Fatal("the normal unlock scan recovered the unbound key, not the volume key the data needs")
 	}
 	fipsView := fipsApprovedView(metadata)
-	underFIPS, err := getMasterKey(device, migrationPassphrase, fipsView)
+	underFIPS, err := getMasterKey(device, migrationPassphrase, fipsView, testVolumeSys())
 	if err != nil {
 		t.Fatalf("the unlock scan over the FIPS-approved view failed: %v", err)
 	}
@@ -396,7 +399,7 @@ func TestMigrateToFIPSRefusesWhenNoKeyslotHoldsTheVolumeKey(t *testing.T) {
 		unboundKeyslot(t, device, otherPassphrase)
 		before := fileDigest(t, device)
 
-		_, err := MigrateToFIPS(device, otherPassphrase, cheapMigration())
+		_, err := migrateToFIPSForTest(device, otherPassphrase, cheapMigration())
 		var merr *FIPSMigrationError
 		if !errors.As(err, &merr) || merr.Stage != "unlock" || merr.State != fipsStateUntouched {
 			t.Fatalf("got %v, want a refusal at unlock with the volume untouched", err)
@@ -408,7 +411,7 @@ func TestMigrateToFIPSRefusesWhenNoKeyslotHoldsTheVolumeKey(t *testing.T) {
 
 	t.Run("no digest binds any keyslot to the data segment", func(t *testing.T) {
 		device := argon2Volume(t, "unbound-all.img", false)
-		hdr, metadata, err := ReadHeader(device)
+		hdr, metadata, err := readHeaderForTest(device)
 		if err != nil {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
@@ -425,8 +428,8 @@ func TestMigrateToFIPSRefusesWhenNoKeyslotHoldsTheVolumeKey(t *testing.T) {
 		}
 		before := fileDigest(t, device)
 
-		_, err = MigrateToFIPS(device, migrationPassphrase, cheapMigration())
-		if !errors.Is(err, ErrFIPSMigrationUnboundKey) {
+		_, err = migrateToFIPSForTest(device, migrationPassphrase, cheapMigration())
+		if !errors.Is(err, errFIPSMigrationUnboundKey) {
 			t.Fatalf("got %v, want ErrFIPSMigrationUnboundKey", err)
 		}
 		if fileDigest(t, device) != before {
@@ -461,23 +464,23 @@ func TestFIPSParameterRefusal(t *testing.T) {
 // TestAddKeyJoinsOnlyTheDigestOfTheKeyItWraps: on a header carrying an unbound
 // key beside the volume key, a new keyslot must be assigned to the volume key's
 // digest alone. It used to be appended to every digest, which cryptsetup
-// refuses outright ("Keyslot N is not assigned to exactly 1 digest") -- the
+// refuses outright ("header.Keyslot N is not assigned to exactly 1 digest") -- the
 // migration adds its keyslot through the same path, so every import of such a
 // volume left it unreadable to cryptsetup.
 func TestAddKeyJoinsOnlyTheDigestOfTheKeyItWraps(t *testing.T) {
 	device := newImage(t, "addkey-digest.img")
-	if err := Format(standardFormatOptions(device)); err != nil {
+	if err := formatForTest(standardFormatOptions(device)); err != nil {
 		t.Fatalf("Format failed: %v", err)
 	}
 	unboundKeyslot(t, device, otherPassphrase)
 
-	slot, err := AddKey(device, migrationPassphrase, []byte("a-third-credential"), &AddKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterTime: 1})
+	slot, err := addKeyForTest(device, migrationPassphrase, []byte("a-third-credential"), &addKeyOptionsForTest{KDFType: kdfTypePBKDF2, PBKDFIterTime: 1})
 	if err != nil {
 		t.Fatalf("AddKey failed: %v", err)
 	}
 	id := strconv.Itoa(slot)
 
-	_, metadata, err := ReadHeader(device)
+	_, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}

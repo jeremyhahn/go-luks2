@@ -5,7 +5,9 @@
 package device
 
 import (
+	"context"
 	"errors"
+	"github.com/jeremyhahn/go-luks2/internal/errs"
 	"io/fs"
 	"os"
 	"strings"
@@ -57,13 +59,17 @@ func TestClassifyOpenTypesAnInUseFailure(t *testing.T) {
 // TestClassifyOpenLeavesEverythingElseAlone is the other half. Wrapping every
 // open failure would rewrite the message of every failure to buy a
 // distinction only some of them need.
-func TestClassifyOpenLeavesEverythingElseAlone(t *testing.T) {
-	for _, errno := range []syscall.Errno{syscall.ENOENT, syscall.ENOTDIR, syscall.EIO} {
+func TestClassifyOpenClassifiesEverythingElse(t *testing.T) {
+	for errno, kind := range map[syscall.Errno]error{syscall.ENOENT: ErrNotFound, syscall.ENOTDIR: errs.ErrIO, syscall.EIO: errs.ErrIO} {
 		t.Run(errno.Error(), func(t *testing.T) {
 			cause := &fs.PathError{Op: "open", Path: "/dev/sdb1", Err: errno}
 			err := ClassifyOpen("read the LUKS2 header", cause)
-			if err != error(cause) {
-				t.Fatalf("ClassifyOpen rewrote a %v failure as %v", errno, err)
+			var e *errs.Error
+			if !errors.As(err, &e) || !errors.Is(err, kind) {
+				t.Fatalf("ClassifyOpen of a %v failure = %v, want an *errs.Error of kind %v", errno, err, kind)
+			}
+			if !errors.Is(err, cause) {
+				t.Fatalf("the cause of a %v failure is not reachable: %v", errno, err)
 			}
 			if errors.Is(err, ErrPermissionDenied) {
 				t.Fatalf("a %v failure was classified as a permission failure: %v", errno, err)
@@ -82,7 +88,7 @@ func TestOpenClassifiesAPermissionFailure(t *testing.T) {
 	refuse := func(name string, _ int, _ os.FileMode) (*os.File, error) {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: syscall.EACCES}
 	}
-	f, err := Open("read the LUKS2 header", "/dev/sdb1", os.O_RDONLY, refuse)
+	f, err := Open(context.Background(), "read the LUKS2 header", "/dev/sdb1", os.O_RDONLY, refuse)
 	if err == nil {
 		_ = f.Close()
 		t.Fatal("Open reported success against a seam that always refuses")
@@ -95,7 +101,7 @@ func TestOpenClassifiesAPermissionFailure(t *testing.T) {
 // TestOpenSucceeds: the success path, through the real opener.
 func TestOpenSucceeds(t *testing.T) {
 	path := lockRegular(t)
-	f, err := Open("read the device", path, os.O_RDONLY, os.OpenFile)
+	f, err := Open(context.Background(), "read the device", path, os.O_RDONLY, os.OpenFile)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

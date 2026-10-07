@@ -18,6 +18,7 @@ import (
 	"strconv"
 
 	"github.com/google/uuid"
+
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
@@ -58,7 +59,7 @@ func CreateBinaryHeader(rng io.Reader, newUUID func() uuid.UUID, p NewHeaderPara
 
 	// Generate salt for checksum.
 	if _, err := io.ReadFull(rng, hdr.Salt[:]); err != nil {
-		return nil, &errs.Error{Detail: "generate header salt", Err: err}
+		return nil, &errs.Error{Kind: errs.ErrIO, Detail: "generate header salt", Err: err}
 	}
 
 	// Sequence ID starts at 1.
@@ -76,11 +77,11 @@ func ReadHeaderCopyFrom(f io.ReaderAt, offset int64) (*BinaryHeader, *Metadata, 
 	// Read binary header (LUKS2 uses big-endian for integer fields).
 	raw := make([]byte, HeaderSize)
 	if _, err := f.ReadAt(raw, offset); err != nil {
-		return nil, nil, &errs.Error{Detail: "failed to read header", Err: err}
+		return nil, nil, &errs.Error{Kind: errs.ErrIO, Detail: "failed to read header", Err: err}
 	}
 	var hdr BinaryHeader
 	if err := binary.Read(bytes.NewReader(raw), binary.BigEndian, &hdr); err != nil {
-		return nil, nil, &errs.Error{Detail: "failed to read header", Err: err}
+		return nil, nil, &errs.Error{Kind: errs.ErrIO, Detail: "failed to read header", Err: err}
 	}
 
 	// Validate magic -- which copy this is decides which magic is correct.
@@ -122,7 +123,7 @@ func ReadHeaderCopyFrom(f io.ReaderAt, offset int64) (*BinaryHeader, *Metadata, 
 	// JSON all come from that one buffer (#248).
 	buf := make([]byte, area)
 	if _, err := f.ReadAt(buf, offset); err != nil {
-		return nil, nil, &errs.Error{Detail: "failed to read header area", Err: err}
+		return nil, nil, &errs.Error{Kind: errs.ErrIO, Detail: "failed to read header area", Err: err}
 	}
 	if !bytes.Equal(buf[:HeaderSize], raw) {
 		return nil, nil, &errs.Error{Kind: errs.ErrInvalidHeader, Detail: fmt.Sprintf(
@@ -161,15 +162,9 @@ func ReadSecondaryHeaderFrom(device io.ReaderAt) (*BinaryHeader, *Metadata, erro
 		}
 	}
 
-	var firstErr error
-	for _, offset := range LegalHeaderAreaSizes() {
-		hdr, metadata, err := ReadHeaderCopyFrom(device, offset)
-		if err == nil {
-			return hdr, metadata, nil
-		}
-		if firstErr == nil {
-			firstErr = err
-		}
+	hdr, metadata, _, firstErr := probeSecondaryHeader(device)
+	if firstErr == nil {
+		return hdr, metadata, nil
 	}
 
 	return nil, nil, &errs.Error{
@@ -249,7 +244,7 @@ func EncodeMetadataIgnoringRequirements(hdr *BinaryHeader, metadata *Metadata) (
 	// Marshal JSON metadata.
 	jsonData, err := MarshalCanonicalJSON(metadata)
 	if err != nil {
-		return nil, 0, &errs.Error{Detail: "failed to marshal metadata", Err: err}
+		return nil, 0, &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "failed to marshal metadata", Err: err}
 	}
 
 	// Refuse metadata that does not fit rather than enlarging the area to hold
@@ -306,7 +301,7 @@ func WriteHeaderTo(f *os.File, hdr *BinaryHeader, metadata *Metadata, sync func(
 // encoded for a header area of area bytes, primary first.
 func WriteEncodedHeader(f *os.File, hdr *BinaryHeader, jsonData []byte, area int, sync func(*os.File) error) error {
 	if _, err := f.Seek(PrimaryHeaderOffset, io.SeekStart); err != nil {
-		return &errs.Error{Detail: "failed to seek to the primary header", Err: err}
+		return &errs.Error{Kind: errs.ErrIO, Detail: "failed to seek to the primary header", Err: err}
 	}
 	jsonSize := area - HeaderSize
 	secondaryOffset := int64(area)
@@ -325,22 +320,22 @@ func WriteEncodedHeader(f *os.File, hdr *BinaryHeader, jsonData []byte, area int
 
 	// Write binary header (LUKS2 uses big-endian for integer fields).
 	if err := binary.Write(f, binary.BigEndian, hdr); err != nil {
-		return &errs.Error{Detail: "failed to write header", Err: err}
+		return &errs.Error{Kind: errs.ErrIO, Detail: "failed to write header", Err: err}
 	}
 
 	// Write JSON metadata with padding.
 	if _, err := f.Write(jsonData); err != nil {
-		return &errs.Error{Detail: "failed to write metadata", Err: err}
+		return &errs.Error{Kind: errs.ErrIO, Detail: "failed to write metadata", Err: err}
 	}
 
 	padding := make([]byte, jsonSize-len(jsonData))
 	if _, err := f.Write(padding); err != nil {
-		return &errs.Error{Detail: "failed to write padding", Err: err}
+		return &errs.Error{Kind: errs.ErrIO, Detail: "failed to write padding", Err: err}
 	}
 
 	// THE PRIMARY IS DURABLE BEFORE THE SECONDARY IS TOUCHED.
 	if err := sync(f); err != nil {
-		return &errs.Error{Detail: "failed to sync the primary header before writing the secondary", Err: err}
+		return &errs.Error{Kind: errs.ErrIO, Detail: "failed to sync the primary header before writing the secondary", Err: err}
 	}
 
 	if err := WriteSecondaryCopy(f, hdr, jsonData, jsonSize, secondaryOffset); err != nil {
@@ -354,7 +349,7 @@ func WriteEncodedHeader(f *os.File, hdr *BinaryHeader, jsonData []byte, area int
 // describe the primary, with jsonData padded to jsonSize, at secondaryOffset.
 func WriteSecondaryCopy(f *os.File, hdr *BinaryHeader, jsonData []byte, jsonSize int, secondaryOffset int64) error {
 	if _, err := f.Seek(secondaryOffset, io.SeekStart); err != nil {
-		return &errs.Error{Detail: "failed to seek to backup header", Err: err}
+		return &errs.Error{Kind: errs.ErrIO, Detail: "failed to seek to backup header", Err: err}
 	}
 
 	// Update header offset and MAGIC for the backup copy.
@@ -369,15 +364,15 @@ func WriteSecondaryCopy(f *os.File, hdr *BinaryHeader, jsonData []byte, jsonSize
 
 	// Write backup header (LUKS2 uses big-endian for integer fields).
 	if err := binary.Write(f, binary.BigEndian, &backupHdr); err != nil {
-		return &errs.Error{Detail: "failed to write backup header", Err: err}
+		return &errs.Error{Kind: errs.ErrIO, Detail: "failed to write backup header", Err: err}
 	}
 
 	// Write backup JSON metadata.
 	if _, err := f.Write(jsonData); err != nil {
-		return &errs.Error{Detail: "failed to write backup metadata", Err: err}
+		return &errs.Error{Kind: errs.ErrIO, Detail: "failed to write backup metadata", Err: err}
 	}
 	if _, err := f.Write(make([]byte, jsonSize-len(jsonData))); err != nil {
-		return &errs.Error{Detail: "failed to write backup padding", Err: err}
+		return &errs.Error{Kind: errs.ErrIO, Detail: "failed to write backup padding", Err: err}
 	}
 	return nil
 }
@@ -519,7 +514,7 @@ func ValidateHeaderChecksum(hdr *BinaryHeader, r io.ReaderAt, headerOffset int64
 
 	headerData := make([]byte, headerSize)
 	if _, err := r.ReadAt(headerData, headerOffset); err != nil {
-		return &errs.Error{Detail: "failed to read header for checksum", Err: err}
+		return &errs.Error{Kind: errs.ErrIO, Detail: "failed to read header for checksum", Err: err}
 	}
 	return ValidateAreaChecksum(hdr, headerData)
 }
@@ -559,7 +554,7 @@ func CalculateHeaderChecksum(hdr *BinaryHeader, jsonData []byte, jsonSize int) e
 	tmpHdr.Checksum = [64]byte{}
 
 	if err := binary.Write(buf, binary.BigEndian, &tmpHdr); err != nil {
-		return &errs.Error{Detail: "failed to write header for checksum", Err: err}
+		return &errs.Error{Kind: errs.ErrIO, Detail: "failed to write header for checksum", Err: err}
 	}
 
 	buf.Write(jsonData)
@@ -591,7 +586,7 @@ func ReadJSONMetadata(r io.ReaderAt, hdr *BinaryHeader, headerOffset int64, head
 
 	offset := headerOffset + HeaderSize
 	if _, err := r.ReadAt(jsonData, offset); err != nil {
-		return nil, &errs.Error{Detail: "failed to read JSON metadata", Err: err}
+		return nil, &errs.Error{Kind: errs.ErrIO, Detail: "failed to read JSON metadata", Err: err}
 	}
 	return ParseJSONMetadata(jsonData, headerSize)
 }

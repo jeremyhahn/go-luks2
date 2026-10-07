@@ -9,7 +9,7 @@ package cli_test
 import (
 	"testing"
 
-	"github.com/jeremyhahn/go-luks2/test/harness"
+	"github.com/jeremyhahn/go-luks2/test/internal/harness"
 )
 
 // runSuite is the harness suite this process registered, and the single source
@@ -25,7 +25,7 @@ var runSuite *harness.Suite
 // for every one of those names, and the entrypoint guard refused a run whenever
 // a sibling's mapping was live.
 //
-// The rule itself lives in test/harness (VolumeName) because all three tiers
+// The rule itself lives in test/internal/harness (VolumeName) because all three tiers
 // allocate in that one namespace, and a rule reimplemented per tier is a rule
 // two of them can drift from.
 //

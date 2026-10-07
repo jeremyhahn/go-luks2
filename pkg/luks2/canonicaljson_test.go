@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // Tests for the on-disk JSON ENCODING itself: the LUKS2 metadata area holds
@@ -77,7 +79,7 @@ import (
 // and a future edit could reintroduce indentation there without touching
 // marshalCanonicalJSON.
 func TestEncodeMetadataForHeaderEmitsCompactJSON(t *testing.T) {
-	hdr, err := CreateBinaryHeader(FormatOptions{})
+	hdr, err := createBinaryHeader(formatOptionsForTest{}, testVolumeSys())
 	if err != nil {
 		t.Fatalf("CreateBinaryHeader failed: %v", err)
 	}
@@ -86,8 +88,8 @@ func TestEncodeMetadataForHeaderEmitsCompactJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encodeMetadataForHeader failed: %v", err)
 	}
-	if area != LUKS2HeaderMinSize {
-		t.Fatalf("area = %d, want %d", area, LUKS2HeaderMinSize)
+	if area != header.HeaderMinSize {
+		t.Fatalf("area = %d, want %d", area, header.HeaderMinSize)
 	}
 	if bytes.Contains(jsonData, []byte("\n")) {
 		t.Fatalf("the write path is still emitting indented JSON\n%s", jsonData)
@@ -105,7 +107,7 @@ func TestEncodeMetadataForHeaderEmitsCompactJSON(t *testing.T) {
 // allows; the test walks the keyslot count up until the refusal appears and
 // requires that the full complement now fits.
 func TestCompactJSONRaisesTheKeyslotCeiling(t *testing.T) {
-	hdr, err := CreateBinaryHeader(FormatOptions{})
+	hdr, err := createBinaryHeader(formatOptionsForTest{}, testVolumeSys())
 	if err != nil {
 		t.Fatalf("CreateBinaryHeader failed: %v", err)
 	}
@@ -132,15 +134,16 @@ func TestCompactJSONRaisesTheKeyslotCeiling(t *testing.T) {
 // TestHeaderJSONAreaIsNULTerminatedAndZeroPadded asserts the bytes that follow
 // the JSON on disk, which is where a stray encoder newline would surface.
 func TestHeaderJSONAreaIsNULTerminatedAndZeroPadded(t *testing.T) {
-	pinCryptoRand(t, 0x21)
-	pinUUID(t, "6c9e1a04-3d52-4b8f-8e21-77a0c5b31d9e")
+	sys := testVolumeSys()
+	sys.cryptoRand = pinCryptoRand(0x21)
+	sys.newUUID = pinUUID(t, "6c9e1a04-3d52-4b8f-8e21-77a0c5b31d9e")
 
 	path := filepath.Join(t.TempDir(), "header.img")
-	if err := os.WriteFile(path, make([]byte, LUKS2HeaderMinSize*2), 0600); err != nil {
+	if err := os.WriteFile(path, make([]byte, header.HeaderMinSize*2), 0600); err != nil {
 		t.Fatalf("failed to create the image: %v", err)
 	}
 
-	hdr, err := CreateBinaryHeader(FormatOptions{})
+	hdr, err := createBinaryHeader(formatOptionsForTest{}, sys)
 	if err != nil {
 		t.Fatalf("CreateBinaryHeader failed: %v", err)
 	}
@@ -153,7 +156,7 @@ func TestHeaderJSONAreaIsNULTerminatedAndZeroPadded(t *testing.T) {
 		t.Fatalf("failed to read the image back: %v", err)
 	}
 
-	area := image[LUKS2HeaderSize:LUKS2HeaderMinSize]
+	area := image[header.HeaderSize:header.HeaderMinSize]
 	end := bytes.IndexByte(area, 0)
 	if end < 0 {
 		t.Fatal("the JSON area has no NUL terminator")
@@ -177,14 +180,15 @@ func TestHeaderJSONAreaIsNULTerminatedAndZeroPadded(t *testing.T) {
 // twice must produce the same header.
 func TestHeaderIsReproducibleUnderPinnedInputs(t *testing.T) {
 	write := func(seed byte) []byte {
-		pinCryptoRand(t, seed)
-		pinUUID(t, "6c9e1a04-3d52-4b8f-8e21-77a0c5b31d9e")
+		sys := testVolumeSys()
+		sys.cryptoRand = pinCryptoRand(seed)
+		sys.newUUID = pinUUID(t, "6c9e1a04-3d52-4b8f-8e21-77a0c5b31d9e")
 
 		path := filepath.Join(t.TempDir(), "header.img")
-		if err := os.WriteFile(path, make([]byte, LUKS2HeaderMinSize*2), 0600); err != nil {
+		if err := os.WriteFile(path, make([]byte, header.HeaderMinSize*2), 0600); err != nil {
 			t.Fatalf("failed to create the image: %v", err)
 		}
-		hdr, err := CreateBinaryHeader(FormatOptions{})
+		hdr, err := createBinaryHeader(formatOptionsForTest{}, sys)
 		if err != nil {
 			t.Fatalf("CreateBinaryHeader failed: %v", err)
 		}
@@ -212,11 +216,11 @@ func TestHeaderIsReproducibleUnderPinnedInputs(t *testing.T) {
 // with every value fixed. The numbers are the ones a 64 MiB container carries:
 // keyslot 0 at 0x8000 for 258048 bytes, data at 16777216, keyslots area
 // 16744448.
-func sampleMetadata() *LUKS2Metadata {
-	return &LUKS2Metadata{
-		Keyslots: map[string]*Keyslot{"0": sampleKeyslot(0)},
-		Tokens:   map[string]*Token{},
-		Segments: map[string]*Segment{
+func sampleMetadata() *header.Metadata {
+	return &header.Metadata{
+		Keyslots: map[string]*header.Keyslot{"0": sampleKeyslot(0)},
+		Tokens:   map[string]*LegacyToken{},
+		Segments: map[string]*header.Segment{
 			"0": {
 				Type:       "crypt",
 				Offset:     "16777216",
@@ -226,7 +230,7 @@ func sampleMetadata() *LUKS2Metadata {
 				SectorSize: 512,
 			},
 		},
-		Digests: map[string]*Digest{
+		Digests: map[string]*rawDigest{
 			"0": {
 				Type:       "pbkdf2",
 				Keyslots:   []string{"0"},
@@ -237,7 +241,7 @@ func sampleMetadata() *LUKS2Metadata {
 				Digest:     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 			},
 		},
-		Config: &Config{
+		Config: &rawConfig{
 			JSONSize:     "12288",
 			KeyslotsSize: "16744448",
 		},
@@ -245,25 +249,25 @@ func sampleMetadata() *LUKS2Metadata {
 }
 
 // sampleKeyslot returns keyslot i with the geometry Format lays out for it.
-func sampleKeyslot(i int) *Keyslot {
+func sampleKeyslot(i int) *header.Keyslot {
 	iterations := 210000
-	return &Keyslot{
+	return &header.Keyslot{
 		Type:    "luks2",
 		KeySize: 64,
-		Area: &KeyslotArea{
+		Area: &header.KeyslotArea{
 			Type:       "raw",
 			KeySize:    64,
 			Offset:     fmt.Sprint(0x8000 + i*258048),
 			Size:       "258048",
-			Encryption: KeyslotAreaEncryption,
+			Encryption: keyslotAreaEncryption,
 		},
-		KDF: &KDF{
+		KDF: &rawKDF{
 			Type:       "pbkdf2",
 			Hash:       "sha512",
 			Salt:       "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 			Iterations: &iterations,
 		},
-		AF: &AntiForensic{
+		AF: &header.AntiForensic{
 			Type:    "luks1",
 			Stripes: 4000,
 			Hash:    "sha512",

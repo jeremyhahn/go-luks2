@@ -8,11 +8,14 @@ package luks2
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // Tests for what occupies the keyslots area where no key material does.
@@ -112,7 +115,7 @@ func TestWriteRandomFillsExactlyTheRequestedRange(t *testing.T) {
 	if _, err := f.Seek(prefix, 0); err != nil {
 		t.Fatalf("seek failed: %v", err)
 	}
-	if err := writeRandom(f, fill); err != nil {
+	if err := writeRandom(context.Background(), f, fill, testVolumeSys().cryptoRand); err != nil {
 		t.Fatalf("writeRandom failed: %v", err)
 	}
 	if err := f.Close(); err != nil {
@@ -147,7 +150,7 @@ func TestWriteRandomWritesNothingForANonPositiveSize(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to open the image: %v", err)
 		}
-		err = writeRandom(f, size)
+		err = writeRandom(context.Background(), f, size, testVolumeSys().cryptoRand)
 		_ = f.Close()
 		if err != nil {
 			t.Fatalf("writeRandom(%d) returned %v, want nil", size, err)
@@ -160,6 +163,42 @@ func TestWriteRandomWritesNothingForANonPositiveSize(t *testing.T) {
 		if !bytes.Equal(got, original) {
 			t.Fatalf("writeRandom(%d) modified the file", size)
 		}
+	}
+}
+
+// TestWriteRandomCancelledBeforeTheFirstChunkWritesNothing is DESIGN.md
+// §D.2's "checked per 1 MiB chunk" row: ctx is checked before every chunk,
+// including the first, so a ctx already canceled leaves the file untouched
+// and reports ctx.Err()'s kind with how many bytes were written (zero).
+func TestWriteRandomCancelledBeforeTheFirstChunkWritesNothing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "canceled.img")
+	original := bytes.Repeat([]byte{0x5a}, 256*1024)
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatalf("failed to create the image: %v", err)
+	}
+
+	f, err := os.OpenFile(path, os.O_RDWR, 0600) // #nosec G304 -- path is under t.TempDir()
+	if err != nil {
+		t.Fatalf("failed to open the image: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = writeRandom(ctx, f, int64(len(original)), testVolumeSys().cryptoRand)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("writeRandom with an already-canceled ctx = %v, want context.Canceled", err)
+	}
+	if !strings.Contains(err.Error(), "0 of") {
+		t.Errorf("writeRandom canceled before any chunk = %q, want it to say 0 bytes were written", err)
+	}
+
+	got, err := os.ReadFile(path) // #nosec G304 -- path is under t.TempDir()
+	if err != nil {
+		t.Fatalf("failed to read the image back: %v", err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatal("writeRandom with an already-canceled ctx modified the file")
 	}
 }
 
@@ -178,7 +217,7 @@ func TestWriteRandomReportsAWriteFailure(t *testing.T) {
 	}
 	defer func() { _ = f.Close() }()
 
-	if err := writeRandom(f, 1024); err == nil {
+	if err := writeRandom(context.Background(), f, 1024, testVolumeSys().cryptoRand); err == nil {
 		t.Fatal("writeRandom reported success writing to a read-only file handle")
 	}
 }
@@ -194,8 +233,6 @@ func (r deadRNG) Read([]byte) (int, error) { return 0, r.err }
 // disclosure the fill exists to remove, and a silent fallback would reinstate
 // it at exactly the moment nobody is watching.
 func TestWriteRandomReportsAnRNGFailure(t *testing.T) {
-	useCryptoRand(t, deadRNG{err: errors.New("the entropy source is unavailable")})
-
 	path := filepath.Join(t.TempDir(), "norng.img")
 	original := bytes.Repeat([]byte{0x77}, 8192)
 	if err := os.WriteFile(path, original, 0600); err != nil {
@@ -206,7 +243,7 @@ func TestWriteRandomReportsAnRNGFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to open the image: %v", err)
 	}
-	err = writeRandom(f, int64(len(original)))
+	err = writeRandom(context.Background(), f, int64(len(original)), deadRNG{err: errors.New("the entropy source is unavailable")})
 	_ = f.Close()
 
 	if err == nil {
@@ -229,9 +266,7 @@ func TestWriteRandomReportsAnRNGFailure(t *testing.T) {
 // salt and every key in this package comes through randomBytes, so a swallowed
 // failure here would produce a container with predictable material.
 func TestRandomBytesReportsAnRNGFailure(t *testing.T) {
-	useCryptoRand(t, deadRNG{err: errors.New("the entropy source is unavailable")})
-
-	b, err := randomBytes(32)
+	b, err := randomBytes(32, deadRNG{err: errors.New("the entropy source is unavailable")})
 	if err == nil {
 		t.Fatalf("randomBytes returned %x with no entropy available", b)
 	}
@@ -247,9 +282,10 @@ func TestRandomBytesReportsAnRNGFailure(t *testing.T) {
 // salt: a header whose checksum salt is not random is a header whose checksum
 // can be precomputed.
 func TestCreateBinaryHeaderReportsAnRNGFailure(t *testing.T) {
-	useCryptoRand(t, deadRNG{err: errors.New("the entropy source is unavailable")})
+	sys := testVolumeSys()
+	sys.cryptoRand = deadRNG{err: errors.New("the entropy source is unavailable")}
 
-	hdr, err := CreateBinaryHeader(FormatOptions{})
+	hdr, err := createBinaryHeader(formatOptionsForTest{}, sys)
 	if err == nil {
 		t.Fatalf("CreateBinaryHeader returned a header with salt %x and no entropy available", hdr.Salt)
 	}
@@ -266,7 +302,7 @@ func TestFormatFillsTheWholeKeyslotsAreaWithRandom(t *testing.T) {
 	defer parallel(t)()
 
 	path := newImage(t, "filled.img")
-	if err := Format(standardFormatOptions(path)); err != nil {
+	if err := formatForTest(standardFormatOptions(path)); err != nil {
 		t.Fatalf("Format failed: %v", err)
 	}
 
@@ -275,7 +311,7 @@ func TestFormatFillsTheWholeKeyslotsAreaWithRandom(t *testing.T) {
 		t.Fatalf("failed to read the image back: %v", err)
 	}
 
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -292,9 +328,9 @@ func TestFormatFillsTheWholeKeyslotsAreaWithRandom(t *testing.T) {
 		t.Fatalf("segment 0 has an unparseable offset: %v", err)
 	}
 
-	// The material itself is keySize*AFStripes bytes; the rest of the declared
+	// The material itself is keySize*header.AFStripes bytes; the rest of the declared
 	// area is padding, and it used to be zero.
-	material := int64(metadata.Keyslots["0"].KeySize) * AFStripes
+	material := int64(metadata.Keyslots["0"].KeySize) * header.AFStripes
 	requireRandomFill(t, "the tail of keyslot 0's declared area", image[areaOffset+material:areaOffset+areaSize])
 	requireRandomFill(t, "the unallocated keyslots region", image[areaOffset+areaSize:dataOffset])
 
@@ -309,7 +345,7 @@ func TestFormatFillsTheWholeKeyslotsAreaWithRandom(t *testing.T) {
 
 	// And the container must still be one: a fill that ran over the headers or
 	// the key material would show up here and nowhere else in this test.
-	if err := TestKey(path, []byte(conformancePassphrase)); err != nil {
+	if err := testKeyForTest(path, []byte(conformancePassphrase)); err != nil {
 		t.Fatalf("the passphrase no longer opens the container after the fill: %v", err)
 	}
 }
@@ -334,22 +370,22 @@ func TestWipeKeyslotAreaLeavesRandomNotZeroes(t *testing.T) {
 		t.Fatalf("failed to create the image: %v", err)
 	}
 
-	keyslot := &Keyslot{
+	keyslot := &header.Keyslot{
 		Type:    "luks2",
 		KeySize: 64,
-		Area: &KeyslotArea{
+		Area: &header.KeyslotArea{
 			Type:       "raw",
 			KeySize:    64,
 			Offset:     formatSize(areaOffset),
 			Size:       formatSize(areaSize),
-			Encryption: KeyslotAreaEncryption,
+			Encryption: keyslotAreaEncryption,
 		},
-		KDF: &KDF{Type: "pbkdf2", Hash: "sha512", Salt: "AAAA", Iterations: intPtr(210000)},
-		AF:  &AntiForensic{Type: "luks1", Stripes: AFStripes, Hash: "sha512"},
+		KDF: &rawKDF{Type: "pbkdf2", Hash: "sha512", Salt: "AAAA", Iterations: intPtr(210000)},
+		AF:  &header.AntiForensic{Type: "luks1", Stripes: header.AFStripes, Hash: "sha512"},
 	}
 
 	hdr, metadata := bareKeyslotsGeometry(areaOffset + areaSize)
-	if err := wipeKeyslotArea(lockedDevice(t, path), hdr, metadata, "0", keyslot); err != nil {
+	if err := wipeKeyslotArea(context.Background(), lockedDevice(t, path), hdr, metadata, "0", keyslot); err != nil {
 		t.Fatalf("wipeKeyslotArea failed: %v", err)
 	}
 
@@ -383,21 +419,21 @@ func TestWipeKeyslotAreaRefusesAKeyslotItCannotLocate(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		keyslot *Keyslot
+		keyslot *header.Keyslot
 	}{
-		{"no area", &Keyslot{Type: "luks2", KeySize: 64}},
+		{"no area", &header.Keyslot{Type: "luks2", KeySize: 64}},
 		{
 			"unparseable offset",
-			&Keyslot{Type: "luks2", KeySize: 64, Area: &KeyslotArea{
+			&header.Keyslot{Type: "luks2", KeySize: 64, Area: &header.KeyslotArea{
 				Type: "raw", KeySize: 64, Offset: "not-a-number", Size: "4096",
-				Encryption: KeyslotAreaEncryption,
+				Encryption: keyslotAreaEncryption,
 			}},
 		},
 		{
 			"area beyond the end of the device",
-			&Keyslot{Type: "luks2", KeySize: 64, Area: &KeyslotArea{
+			&header.Keyslot{Type: "luks2", KeySize: 64, Area: &header.KeyslotArea{
 				Type: "raw", KeySize: 64, Offset: "0", Size: "1073741824",
-				Encryption: KeyslotAreaEncryption,
+				Encryption: keyslotAreaEncryption,
 			}},
 		},
 	}
@@ -405,7 +441,7 @@ func TestWipeKeyslotAreaRefusesAKeyslotItCannotLocate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			hdr, metadata := bareKeyslotsGeometry(1 << 30)
-			if err := wipeKeyslotArea(lockedDevice(t, path), hdr, metadata, "0", tt.keyslot); err == nil {
+			if err := wipeKeyslotArea(context.Background(), lockedDevice(t, path), hdr, metadata, "0", tt.keyslot); err == nil {
 				t.Fatal("wipeKeyslotArea accepted a keyslot whose area it cannot locate")
 			}
 
@@ -425,11 +461,11 @@ func TestWipeKeyslotAreaRefusesAKeyslotItCannotLocate(t *testing.T) {
 // and no data segment. wipeKeyslotArea confines every wipe to that area
 // (#249, A2), so a test that wipes outside a container still has to say where
 // the keyslots area is.
-func bareKeyslotsGeometry(end int64) (*LUKS2BinaryHeader, *LUKS2Metadata) {
-	hdr := &LUKS2BinaryHeader{HeaderSize: LUKS2HeaderMinSize}
-	metadata := &LUKS2Metadata{
-		Config:   &Config{KeyslotsSize: formatSize(end - 2*LUKS2HeaderMinSize)},
-		Segments: map[string]*Segment{},
+func bareKeyslotsGeometry(end int64) (*header.BinaryHeader, *header.Metadata) {
+	hdr := &header.BinaryHeader{HeaderSize: header.HeaderMinSize}
+	metadata := &header.Metadata{
+		Config:   &rawConfig{KeyslotsSize: formatSize(end - 2*header.HeaderMinSize)},
+		Segments: map[string]*header.Segment{},
 	}
 	return hdr, metadata
 }

@@ -10,6 +10,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // The data segment's offset and size were never validated (#248, B1). An
@@ -25,19 +27,19 @@ func TestReadHeaderRefusesASegmentOutOfPlace(t *testing.T) {
 
 	for _, tc := range []struct {
 		name   string
-		mutate func(*Segment)
+		mutate func(*header.Segment)
 		says   string
 	}{
-		{"offset off the sector grid", func(s *Segment) { s.Offset = "16777217" }, "multiples of 512"},
-		{"size off the sector grid", func(s *Segment) { s.Size = "1048000" }, "multiples of 512"},
-		{"size not a whole number of encryption sectors", func(s *Segment) { s.SectorSize, s.Size = 4096, "1049088" }, "sector size"},
-		{"data inside the keyslots area", func(s *Segment) { s.Offset = "1048576" }, "does not fit"},
-		{"data inside the header copies", func(s *Segment) { s.Offset = "16384" }, "does not fit"},
-		{"offset that is not a number", func(s *Segment) { s.Offset = "16M" }, "offset"},
+		{"offset off the sector grid", func(s *header.Segment) { s.Offset = "16777217" }, "multiples of 512"},
+		{"size off the sector grid", func(s *header.Segment) { s.Size = "1048000" }, "multiples of 512"},
+		{"size not a whole number of encryption sectors", func(s *header.Segment) { s.SectorSize, s.Size = 4096, "1049088" }, "sector size"},
+		{"data inside the keyslots area", func(s *header.Segment) { s.Offset = "1048576" }, "does not fit"},
+		{"data inside the header copies", func(s *header.Segment) { s.Offset = "16384" }, "does not fit"},
+		{"offset that is not a number", func(s *header.Segment) { s.Offset = "16M" }, "offset"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := craftedSegmentVolume(t, "misplaced-segment.img", tc.mutate)
-			_, _, err := ReadHeader(path)
+			_, _, err := readHeaderForTest(path)
 			if !errors.Is(err, ErrInvalidHeader) || !strings.Contains(err.Error(), tc.says) {
 				t.Fatalf("ReadHeader: got %v, want ErrInvalidHeader saying %q", err, tc.says)
 			}
@@ -53,8 +55,8 @@ func TestReadHeaderRefusesASegmentOutOfPlace(t *testing.T) {
 func TestADetachedHeaderReadsButIsNeverActivated(t *testing.T) {
 	defer parallel(t)()
 
-	path := craftedSegmentVolume(t, "detached.img", func(s *Segment) { s.Offset = "0" })
-	_, metadata, err := ReadHeader(path)
+	path := craftedSegmentVolume(t, "detached.img", func(s *header.Segment) { s.Offset = "0" })
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader refused a detached header cryptsetup reads: %v", err)
 	}
@@ -71,7 +73,7 @@ func TestADetachedHeaderReadsButIsNeverActivated(t *testing.T) {
 	}
 
 	broken := *metadata
-	broken.Config = &Config{JSONSize: "x", KeyslotsSize: "0"}
+	broken.Config = &rawConfig{JSONSize: "x", KeyslotsSize: "0"}
 	if _, err := cryptTableParams(&broken, "0", metadata.Segments["0"]); !errors.Is(err, ErrInvalidHeader) {
 		t.Errorf("activation with an unreadable config: got %v, want ErrInvalidHeader", err)
 	}

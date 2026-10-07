@@ -8,124 +8,17 @@ package luks2
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/jeremyhahn/go-enclave"
-	"github.com/jeremyhahn/go-luks2/internal/recoverykey"
-	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
-
-func TestGenerateRecoveryKey(t *testing.T) {
-	tests := []struct {
-		name      string
-		length    int
-		format    RecoveryKeyFormat
-		expectLen int
-		expectErr bool
-	}{
-		{
-			name:      "default length hex format",
-			length:    0, // Will use default
-			format:    RecoveryKeyFormatHex,
-			expectLen: RecoveryKeyLength,
-			expectErr: false,
-		},
-		{
-			name:      "32 bytes hex format",
-			length:    32,
-			format:    RecoveryKeyFormatHex,
-			expectLen: 32,
-			expectErr: false,
-		},
-		{
-			name:      "64 bytes base64 format",
-			length:    64,
-			format:    RecoveryKeyFormatBase64,
-			expectLen: 64,
-			expectErr: false,
-		},
-		{
-			name:      "32 bytes dashed format",
-			length:    32,
-			format:    RecoveryKeyFormatDashed,
-			expectLen: 32,
-			expectErr: false,
-		},
-		{
-			name:      "empty format defaults to dashed",
-			length:    32,
-			format:    "",
-			expectLen: 32,
-			expectErr: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			key, err := GenerateRecoveryKey(tt.length, tt.format)
-
-			if tt.expectErr {
-				if err == nil {
-					t.Error("expected error but got none")
-				}
-				return
-			}
-
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-
-			defer key.Clear()
-
-			// length names the RANDOM BYTES drawn; the credential is those
-			// bytes rendered, which is longer.
-			if want := recoverykey.Len(tt.expectLen, recoveryRenderings[key.Format]); key.Credential.Size() != want {
-				t.Errorf("expected credential length %d for %d random bytes, got %d",
-					want, tt.expectLen, key.Credential.Size())
-			}
-
-			// The credential is held in an ENCLAVE, not a slice: it can be
-			// destroyed, and reading it afterwards fails rather than returning
-			// stale bytes.
-			if !key.Credential.IsAlive() {
-				t.Error("the generated credential is not held in live protected memory")
-			}
-
-			if key.CredentialHash == "" {
-				t.Error("expected credential hash to be non-empty")
-			}
-
-			// It has not been added to anything yet, and the two slot numbers
-			// say so rather than defaulting to 0 -- which on almost every
-			// volume is somebody's primary passphrase.
-			if key.Keyslot != -1 || key.TokenID != -1 {
-				t.Errorf("a freshly generated key reports keyslot %d, token %d; want -1, -1", key.Keyslot, key.TokenID)
-			}
-
-			if key.CreatedAt.IsZero() {
-				t.Error("expected created at to be set")
-			}
-
-			// Verify format
-			expectedFormat := tt.format
-			if expectedFormat == "" {
-				expectedFormat = RecoveryKeyFormatDashed
-			}
-			if key.Format != expectedFormat {
-				t.Errorf("expected format %s, got %s", expectedFormat, key.Format)
-			}
-		})
-	}
-}
 
 func TestParseRecoveryKey(t *testing.T) {
 	tests := []struct {
@@ -168,7 +61,7 @@ func TestParseRecoveryKey(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			key, err := ParseRecoveryKey(tt.input)
+			key, err := parseLegacyRecoveryKey(tt.input)
 
 			if tt.expectErr {
 				if err == nil {
@@ -193,28 +86,26 @@ func TestParseRecoveryKey(t *testing.T) {
 }
 
 func TestRecoveryKeyRoundTrip(t *testing.T) {
-	// Generate a key
-	original, err := GenerateRecoveryKey(32, RecoveryKeyFormatDashed)
+	original, err := NewRecoveryKey(WithRecoveryFormat(RecoveryDashed))
 	if err != nil {
 		t.Fatalf("failed to generate key: %v", err)
 	}
+	defer original.Destroy()
 
-	defer original.Clear()
-
-	formatted, err := original.FormattedString()
-	if err != nil {
+	var buf bytes.Buffer
+	if _, err := original.WriteTo(&buf); err != nil {
 		t.Fatalf("failed to materialize the formatted key: %v", err)
 	}
 
 	// Parse it back
-	parsed, err := ParseRecoveryKey(formatted)
+	parsed, err := parseLegacyRecoveryKey(buf.String())
 	if err != nil {
 		t.Fatalf("failed to parse key: %v", err)
 	}
 	defer mustDestroy(t, parsed)
 
 	// The decode still yields the 32 bytes behind the rendering, which is what
-	// ParseRecoveryKey is for. It is no longer the credential: see
+	// ParseLegacyRecoveryKey is for. It is no longer the credential: see
 	// TestTheCredentialIsThePrintedText below.
 	if parsed.Size() != 32 {
 		t.Errorf("round-trip failed: decoded %d bytes, want 32", parsed.Size())
@@ -228,249 +119,27 @@ func TestRecoveryKeyRoundTrip(t *testing.T) {
 // The cross-check against cryptsetup lives in the CLI tests, where a real
 // container can be opened with it.
 func TestTheCredentialIsThePrintedText(t *testing.T) {
-	for _, format := range []RecoveryKeyFormat{RecoveryKeyFormatDashed, RecoveryKeyFormatHex, RecoveryKeyFormatBase64} {
-		t.Run(string(format), func(t *testing.T) {
-			key, err := GenerateRecoveryKey(32, format)
+	for _, format := range []RecoveryKeyFormat{RecoveryDashed, RecoveryHex, RecoveryBase64} {
+		t.Run(format.String(), func(t *testing.T) {
+			key, err := NewRecoveryKey(WithRecoveryFormat(format))
 			if err != nil {
-				t.Fatalf("GenerateRecoveryKey failed: %v", err)
+				t.Fatalf("NewRecoveryKey failed: %v", err)
 			}
-			defer key.Clear()
+			defer key.Destroy()
 
-			printed, err := key.FormattedString()
-			if err != nil {
-				t.Fatalf("FormattedString failed: %v", err)
+			var buf bytes.Buffer
+			if _, err := key.WriteTo(&buf); err != nil {
+				t.Fatalf("WriteTo failed: %v", err)
 			}
+			printed := buf.String()
 
-			if !key.Credential.EqualTo([]byte(printed)) {
-				t.Fatalf("the credential is not the printed text %q", printed)
-			}
-
-			// And the hash published in the saved file identifies THAT string,
-			// so a transcription can be checked without touching the volume.
+			// The hash published alongside the key identifies THAT string, so
+			// a transcription can be checked without touching the volume.
 			sum := sha256.Sum256([]byte(printed))
-			if key.CredentialHash != hex.EncodeToString(sum[:]) {
-				t.Error("CredentialHash is not the hash of the printed text")
+			if key.Hash() != hex.EncodeToString(sum[:]) {
+				t.Error("Hash() is not the hash of the printed text")
 			}
 		})
-	}
-}
-
-func TestSaveAndLoadRecoveryKey(t *testing.T) {
-	defer parallel(t)()
-
-	// Create temp directory
-	tmpDir, err := os.MkdirTemp("", "luks-recovery-test-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-
-	// Generate key
-	key, err := GenerateRecoveryKey(32, RecoveryKeyFormatDashed)
-	if err != nil {
-		t.Fatalf("failed to generate key: %v", err)
-	}
-	key.VolumeUUID = "test-uuid-1234"
-	key.Keyslot = 2
-
-	// Save to file
-	keyPath := filepath.Join(tmpDir, "recovery-key.txt")
-	if err := SaveRecoveryKey(key, keyPath); err != nil {
-		t.Fatalf("failed to save key: %v", err)
-	}
-
-	// Verify file permissions
-	info, err := os.Stat(keyPath)
-	if err != nil {
-		t.Fatalf("failed to stat key file: %v", err)
-	}
-	if info.Mode().Perm() != 0400 {
-		t.Errorf("expected file permissions 0400, got %o", info.Mode().Perm())
-	}
-
-	// Load and verify
-	loaded, err := LoadRecoveryCredential(keyPath)
-	if err != nil {
-		t.Fatalf("failed to load key: %v", err)
-	}
-
-	defer mustDestroy(t, loaded)
-
-	if !key.Credential.EqualTo(openSecret(t, loaded)) {
-		t.Error("loaded credential doesn't match original")
-	}
-}
-
-func TestSaveRecoveryKeyContent(t *testing.T) {
-	defer parallel(t)()
-
-	// Create temp directory
-	tmpDir, err := os.MkdirTemp("", "luks-recovery-test-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-
-	// Generate key with specific values
-	key := &RecoveryKey{
-		Credential:     enclaveFrom(t, []byte("010203-040506")),
-		Format:         RecoveryKeyFormatDashed,
-		CredentialHash: "testhash",
-		VolumeUUID:     "test-uuid",
-		Keyslot:        1,
-		TokenID:        4,
-	}
-
-	keyPath := filepath.Join(tmpDir, "recovery-key.txt")
-	if err := SaveRecoveryKey(key, keyPath); err != nil {
-		t.Fatalf("failed to save key: %v", err)
-	}
-
-	// Verify the file carries the expected elements. This searches the file
-	// in locked memory rather than copying it into a plain heap string --
-	// see savedFileContains -- because the file holds a USABLE CREDENTIAL.
-	if !savedFileContains(t, keyPath, "LUKS Recovery Key") {
-		t.Error("expected header in file")
-	}
-	if !savedFileContains(t, keyPath, "test-uuid") {
-		t.Error("expected UUID in file")
-	}
-	if !savedFileContains(t, keyPath, "Keyslot: 1") {
-		t.Error("expected keyslot in file")
-	}
-	if !savedFileContains(t, keyPath, "010203-040506") {
-		t.Error("expected recovery key in file")
-	}
-}
-
-func TestRecoveryKeyClear(t *testing.T) {
-	key, err := GenerateRecoveryKey(32, RecoveryKeyFormatHex)
-	if err != nil {
-		t.Fatalf("failed to generate key: %v", err)
-	}
-
-	// Verify key is set
-	if key.Credential.Size() == 0 {
-		t.Fatal("credential should not be empty")
-	}
-
-	held := key.Credential
-
-	// Clear the key
-	key.Clear()
-
-	// Verify key is cleared. Both halves matter: the handle is dropped AND the
-	// locked region behind it is destroyed, so a copy of the handle taken
-	// before Clear cannot still read the key.
-	if key.Credential != nil {
-		t.Error("credential should be nil after clear")
-	}
-	if held.IsAlive() {
-		t.Error("the credential's locked region survived Clear")
-	}
-	if err := held.WithBytes(func([]byte) error { return nil }); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
-		t.Errorf("a cleared key is still readable: %v", err)
-	}
-
-	// Clear is idempotent, because error paths call it after a partial setup.
-	key.Clear()
-}
-
-func TestRecoveryKeyFormats(t *testing.T) {
-	// Test each format constant
-	if RecoveryKeyFormatHex != "hex" {
-		t.Errorf("expected 'hex', got %s", RecoveryKeyFormatHex)
-	}
-	if RecoveryKeyFormatBase64 != "base64" {
-		t.Errorf("expected 'base64', got %s", RecoveryKeyFormatBase64)
-	}
-	if RecoveryKeyFormatDashed != "dashed" {
-		t.Errorf("expected 'dashed', got %s", RecoveryKeyFormatDashed)
-	}
-}
-
-func TestRecoveryKeyLength(t *testing.T) {
-	if RecoveryKeyLength != 32 {
-		t.Errorf("expected RecoveryKeyLength to be 32, got %d", RecoveryKeyLength)
-	}
-}
-
-func TestRecoveryKeyOptions(t *testing.T) {
-	opts := &RecoveryKeyOptions{
-		Length:         64,
-		Format:         RecoveryKeyFormatHex,
-		Keyslot:        intPtr(5),
-		OutputPath:     "/tmp/test-key.txt",
-		KDFType:        "argon2id",
-		Argon2Time:     4,
-		Argon2Memory:   1048576,
-		Argon2Parallel: 4,
-	}
-
-	if opts.Length != 64 {
-		t.Errorf("expected Length 64, got %d", opts.Length)
-	}
-	if opts.Format != RecoveryKeyFormatHex {
-		t.Errorf("expected Format hex, got %s", opts.Format)
-	}
-	if *opts.Keyslot != 5 {
-		t.Errorf("expected Keyslot 5, got %d", *opts.Keyslot)
-	}
-	if opts.OutputPath != "/tmp/test-key.txt" {
-		t.Errorf("expected OutputPath /tmp/test-key.txt, got %s", opts.OutputPath)
-	}
-}
-
-func TestLoadRecoveryKeyNonExistent(t *testing.T) {
-	_, err := LoadRecoveryKey("/nonexistent/path/key.txt")
-	if err == nil {
-		t.Error("expected error for non-existent file")
-	}
-}
-
-func TestLoadRecoveryKeyEmptyFile(t *testing.T) {
-	// Create temp directory
-	tmpDir, err := os.MkdirTemp("", "luks-recovery-test-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-
-	// Create empty file
-	keyPath := filepath.Join(tmpDir, "empty-key.txt")
-	if err := os.WriteFile(keyPath, []byte("# Comment only\n"), 0400); err != nil {
-		t.Fatalf("failed to create empty file: %v", err)
-	}
-
-	_, err = LoadRecoveryKey(keyPath)
-	if err == nil {
-		t.Error("expected error for empty/comment-only file")
-	}
-}
-
-func TestRecoveryKeySaveError(t *testing.T) {
-	// Test that SaveError field can be set and checked
-	key := &RecoveryKey{
-		Credential: enclaveFrom(t, []byte("010203")),
-		Format:     RecoveryKeyFormatHex,
-		VolumeUUID: "test-uuid",
-		Keyslot:    0,
-	}
-
-	// Initially SaveError should be nil
-	if key.SaveError != nil {
-		t.Error("expected SaveError to be nil initially")
-	}
-
-	// Set SaveError
-	key.SaveError = os.ErrPermission
-
-	// Verify SaveError is set
-	if key.SaveError == nil {
-		t.Error("expected SaveError to be set")
-	}
-	if key.SaveError != os.ErrPermission {
-		t.Errorf("expected SaveError to be ErrPermission, got %v", key.SaveError)
 	}
 }
 
@@ -497,8 +166,8 @@ func TestRecoveryKeySaveError(t *testing.T) {
 //
 // The iteration time is the minimum, because these fixtures add several
 // credentials each and the KDF cost is not what any of them is about.
-func fipsSafeAddKeyOptions() *AddKeyOptions {
-	return &AddKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterTime: 1}
+func fipsSafeAddKeyOptions() *addKeyOptionsForTest {
+	return &addKeyOptionsForTest{KDFType: kdfTypePBKDF2, PBKDFIterTime: 1}
 }
 
 // recoveryTestIterations is the explicit PBKDF2 count the AddRecoveryKey tests
@@ -528,14 +197,14 @@ func volumeWithAKeyslotGap(t *testing.T) (device string, primary, third []byte) 
 	second := []byte("second-credential-passphrase")
 	third = []byte("third-credential-passphrase")
 
-	if _, err := AddKey(device, primary, second, fipsSafeAddKeyOptions()); err != nil {
+	if _, err := addKeyForTest(device, primary, second, fipsSafeAddKeyOptions()); err != nil {
 		t.Fatalf("AddKey for slot 1: %v", err)
 	}
-	if _, err := AddKey(device, primary, third, fipsSafeAddKeyOptions()); err != nil {
+	if _, err := addKeyForTest(device, primary, third, fipsSafeAddKeyOptions()); err != nil {
 		t.Fatalf("AddKey for slot 2: %v", err)
 	}
-	if err := RemoveKey(device, second, 1); err != nil {
-		t.Fatalf("RemoveKey(1): %v", err)
+	if err := removeKeyForTest(device, second, 1); err != nil {
+		t.Fatalf("removeKeyForTest(1): %v", err)
 	}
 
 	assertKeyslotIDs(t, device, []string{"0", "2"})
@@ -548,7 +217,7 @@ func volumeWithAKeyslotGap(t *testing.T) (device string, primary, third []byte) 
 func assertKeyslotIDs(t *testing.T, device string, want []string) {
 	t.Helper()
 
-	_, metadata, err := ReadHeader(device)
+	_, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader: %v", err)
 	}
@@ -570,14 +239,14 @@ func assertKeyslotIDs(t *testing.T, device string, want []string) {
 func keyslotOpenedBy(t *testing.T, device string, passphrase []byte) string {
 	t.Helper()
 
-	_, metadata, err := ReadHeader(device)
+	_, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader: %v", err)
 	}
 
 	opened := ""
 	for _, id := range keyslotIDsInScanOrder(metadata.Keyslots) {
-		key, err := unlockKeyslot(device, id, passphrase, metadata.Keyslots[id], metadata.Digests)
+		key, err := unlockKeyslot(context.Background(), device, id, passphrase, metadata.Keyslots[id], metadata.Digests, testVolumeSys())
 		if err != nil {
 			continue
 		}
@@ -599,28 +268,17 @@ func TestAddRecoveryKeyReportsTheKeyslotItActuallyUsed(t *testing.T) {
 
 	device, primary, third := volumeWithAKeyslotGap(t)
 
-	saved := filepath.Join(t.TempDir(), "recovery.key")
-	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{OutputPath: saved, KDFType: KDFTypePBKDF2, PBKDFIterations: recoveryTestIterations})
+	credential, keyslot, _, err := enrollRecoveryKeyForTest(t, device, primary)
 	if err != nil {
 		t.Fatalf("AddRecoveryKey: %v", err)
 	}
-	defer recoveryKey.Clear()
-	if recoveryKey.SaveError != nil {
-		t.Fatalf("saving the recovery key failed: %v", recoveryKey.SaveError)
-	}
 
 	// The report has to name the slot the recovery key actually opens.
-	var actual string
-	if err := secret.Borrow("recovery key", recoveryKey.Credential, func(raw []byte) error {
-		actual = keyslotOpenedBy(t, device, raw)
-		return nil
-	}); err != nil {
-		t.Fatalf("could not borrow the recovery key: %v", err)
-	}
+	actual := keyslotOpenedBy(t, device, []byte(credential))
 	if actual == "" {
 		t.Fatal("the recovery key opens no keyslot at all")
 	}
-	if got := strconv.Itoa(recoveryKey.Keyslot); got != actual {
+	if got := strconv.Itoa(keyslot); got != actual {
 		t.Fatalf("AddRecoveryKey reports keyslot %s; the recovery key opens keyslot %s. Revoking as reported destroys a different credential and leaves the recovery key live",
 			got, actual)
 	}
@@ -628,72 +286,11 @@ func TestAddRecoveryKeyReportsTheKeyslotItActuallyUsed(t *testing.T) {
 	// The damage plane, stated as the operator's action: revoking the reported
 	// slot must not take a credential a human still uses with it.
 	for name, credential := range map[string][]byte{"primary": primary, "third": third} {
-		if opened := keyslotOpenedBy(t, device, credential); opened == strconv.Itoa(recoveryKey.Keyslot) {
+		if opened := keyslotOpenedBy(t, device, credential); opened == strconv.Itoa(keyslot) {
 			t.Fatalf("the %s passphrase opens keyslot %s, which is the slot reported for the recovery key; revoking it would destroy a live credential",
 				name, opened)
 		}
 	}
-
-	// The number is PERSISTED, and the file is what an operator reads months
-	// later. A correct in-memory struct and a wrong file would be the same
-	// defect with an extra step.
-	if !savedFileRecordsKeyslot(t, saved, actual) {
-		t.Fatalf("the saved recovery key file does not record keyslot %s", actual)
-	}
-}
-
-// savedFileContains reports whether the saved recovery-key file contains substr.
-//
-// It reads the file into LOCKED memory and searches it in place, which is not
-// ceremony: that file contains a USABLE CREDENTIAL. An earlier version of a
-// test in this package used os.ReadFile plus string(contents) -- two
-// unwipeable heap copies of the recovery key -- and printed the whole file in
-// its failure message, which would have put the credential in CI logs. Codex
-// blocked it on PR #103 and was right; it violates the protected-memory
-// mandate and the prohibition on secrets reaching logs.
-//
-// The idiom is LoadRecoveryKey's own: allocate an enclave sized from the file,
-// fill it inside a borrow, and locate what is wanted by SEARCH rather than
-// copying anything out. Nothing here returns or logs file contents -- only a
-// bool -- so no caller can leak them either.
-func savedFileContains(t *testing.T, path, substr string) bool {
-	t.Helper()
-
-	f, err := os.Open(path) // #nosec G304 -- path is under t.TempDir()
-	if err != nil {
-		t.Fatalf("opening the saved recovery key: %v", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	info, err := f.Stat()
-	if err != nil {
-		t.Fatalf("stat on the saved recovery key: %v", err)
-	}
-
-	contents, err := custody.New("recovery key file", int(info.Size()))
-	if err != nil {
-		t.Fatalf("could not obtain protected memory for the saved file: %v", err)
-	}
-	defer mustDestroy(t, contents)
-
-	found := false
-	if err := secret.Borrow("recovery key file", contents, func(b []byte) error {
-		if _, err := io.ReadFull(f, b); err != nil {
-			return err
-		}
-		found = bytes.Contains(b, []byte(substr))
-		return nil
-	}); err != nil {
-		t.Fatalf("reading the saved recovery key: %v", err)
-	}
-	return found
-}
-
-// savedFileRecordsKeyslot reports whether the saved recovery-key file carries
-// the "# Keyslot: <id>" preamble line.
-func savedFileRecordsKeyslot(t *testing.T, path, keyslotID string) bool {
-	t.Helper()
-	return savedFileContains(t, path, "# Keyslot: "+keyslotID+"\n")
 }
 
 // TestAddRecoveryKeyHonoursAnExplicitKeyslot covers the other branch, which was
@@ -705,23 +302,45 @@ func TestAddRecoveryKeyHonoursAnExplicitKeyslot(t *testing.T) {
 	device, primary, _ := volumeWithAKeyslotGap(t)
 
 	requested := 7
-	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{Keyslot: &requested, KDFType: KDFTypePBKDF2, PBKDFIterations: recoveryTestIterations})
+
+	ctx := context.Background()
+	v, err := Open(ctx, device, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
+	pass, err := enclave.NewMemoryEnclaveCopy(primary)
+	if err != nil {
+		t.Fatalf("could not build a test passphrase enclave: %v", err)
+	}
+	defer func() { _ = pass.Destroy() }()
+	key, err := v.Unlock(ctx, pass)
+	if err != nil {
+		t.Fatalf("Unlock failed: %v", err)
+	}
+	defer key.Destroy()
+
+	rk, err := NewRecoveryKey()
+	if err != nil {
+		t.Fatalf("NewRecoveryKey failed: %v", err)
+	}
+	defer rk.Destroy()
+
+	enrollment, err := v.AddRecoveryKey(ctx, key, rk, KeyslotParams{Slot: &requested, KDF: KDFParams{Type: KDFPBKDF2, Iterations: recoveryTestIterations}})
 	if err != nil {
 		t.Fatalf("AddRecoveryKey: %v", err)
 	}
-	defer recoveryKey.Clear()
 
-	if recoveryKey.Keyslot != requested {
-		t.Fatalf("AddRecoveryKey reports keyslot %d, want the requested %d", recoveryKey.Keyslot, requested)
+	if enrollment.Keyslot.ID != requested {
+		t.Fatalf("AddRecoveryKey reports keyslot %d, want the requested %d", enrollment.Keyslot.ID, requested)
 	}
 
-	var actual string
-	if err := secret.Borrow("recovery key", recoveryKey.Credential, func(raw []byte) error {
-		actual = keyslotOpenedBy(t, device, raw)
-		return nil
-	}); err != nil {
-		t.Fatalf("could not borrow the recovery key: %v", err)
+	var buf bytes.Buffer
+	if _, err := rk.WriteTo(&buf); err != nil {
+		t.Fatalf("WriteTo failed: %v", err)
 	}
+	actual := keyslotOpenedBy(t, device, buf.Bytes())
 	if actual != strconv.Itoa(requested) {
 		t.Fatalf("the recovery key opens keyslot %s, but slot %d was requested", actual, requested)
 	}
@@ -742,28 +361,21 @@ func TestAddRecoveryKeyPicksTheFreeSlotEvenWhenTheGapIsFilledFirst(t *testing.T)
 	occupied := 1
 	occupyOpts := fipsSafeAddKeyOptions()
 	occupyOpts.Keyslot = &occupied
-	if _, err := AddKey(device, primary, []byte("occupies-the-gap-slot"), occupyOpts); err != nil {
+	if _, err := addKeyForTest(device, primary, []byte("occupies-the-gap-slot"), occupyOpts); err != nil {
 		t.Fatalf("AddKey into the gap: %v", err)
 	}
 	assertKeyslotIDs(t, device, []string{"0", "1", "2"})
 
-	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterations: recoveryTestIterations})
+	credential, keyslot, _, err := enrollRecoveryKeyForTest(t, device, primary)
 	if err != nil {
 		t.Fatalf("AddRecoveryKey: %v", err)
 	}
-	defer recoveryKey.Clear()
 
-	var actual string
-	if err := secret.Borrow("recovery key", recoveryKey.Credential, func(raw []byte) error {
-		actual = keyslotOpenedBy(t, device, raw)
-		return nil
-	}); err != nil {
-		t.Fatalf("could not borrow the recovery key: %v", err)
-	}
+	actual := keyslotOpenedBy(t, device, []byte(credential))
 	if actual == "" {
 		t.Fatal("the recovery key opens no keyslot at all")
 	}
-	if got := strconv.Itoa(recoveryKey.Keyslot); got != actual {
+	if got := strconv.Itoa(keyslot); got != actual {
 		t.Fatalf("AddRecoveryKey reports keyslot %s; the recovery key opens keyslot %s", got, actual)
 	}
 	// And it must not have taken a slot that was already someone else's.
@@ -779,7 +391,7 @@ func TestAddKeyReportsTheSlotItChose(t *testing.T) {
 
 	device, primary, _ := volumeWithAKeyslotGap(t)
 
-	assigned, err := AddKey(device, primary, []byte("a-new-credential-here"), fipsSafeAddKeyOptions())
+	assigned, err := addKeyForTest(device, primary, []byte("a-new-credential-here"), fipsSafeAddKeyOptions())
 	if err != nil {
 		t.Fatalf("AddKey: %v", err)
 	}
@@ -794,7 +406,7 @@ func TestAddKeyReportsTheSlotItChose(t *testing.T) {
 
 	// With the gap filled the next free slot is past the occupied ones, and
 	// the report must follow the choice rather than repeat the last answer.
-	next, err := AddKey(device, primary, []byte("another-new-credential"), fipsSafeAddKeyOptions())
+	next, err := addKeyForTest(device, primary, []byte("another-new-credential"), fipsSafeAddKeyOptions())
 	if err != nil {
 		t.Fatalf("AddKey: %v", err)
 	}
@@ -811,7 +423,7 @@ func TestAddKeyReportsNoSlotOnFailure(t *testing.T) {
 
 	device, _, _ := volumeWithAKeyslotGap(t)
 
-	slot, err := AddKey(device, []byte("not-the-primary-passphrase"), []byte("a-new-credential-here"), fipsSafeAddKeyOptions())
+	slot, err := addKeyForTest(device, []byte("not-the-primary-passphrase"), []byte("a-new-credential-here"), fipsSafeAddKeyOptions())
 	if err == nil {
 		t.Fatal("AddKey with a wrong existing passphrase succeeded")
 	}
@@ -830,35 +442,37 @@ func TestAddRecoveryKeyWritesTheSystemdRecoveryToken(t *testing.T) {
 
 	device, primary, _ := volumeWithAKeyslotGap(t)
 
-	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterations: recoveryTestIterations})
+	_, keyslot, tokenID, err := enrollRecoveryKeyForTest(t, device, primary)
 	if err != nil {
 		t.Fatalf("AddRecoveryKey: %v", err)
 	}
-	defer recoveryKey.Clear()
 
-	if recoveryKey.TokenID < 0 {
+	if tokenID < 0 {
 		t.Fatal("AddRecoveryKey wrote no token")
 	}
 
-	token, err := GetToken(device, recoveryKey.TokenID)
+	token, ok, err := getTokenForTest(device, tokenID)
 	if err != nil {
-		t.Fatalf("GetToken(%d): %v", recoveryKey.TokenID, err)
+		t.Fatalf("getTokenForTest(%d): %v", tokenID, err)
+	}
+	if !ok {
+		t.Fatalf("Tokens()[%d] missing after AddRecoveryKey", tokenID)
 	}
 	if token.Type != recoveryTokenType {
 		t.Errorf("token type is %q, want %q", token.Type, recoveryTokenType)
 	}
 	// It names the slot the library CHOSE, on a container whose slots are not
 	// contiguous -- which is the case an inferred number gets wrong (#42).
-	if len(token.Keyslots) != 1 || token.Keyslots[0] != strconv.Itoa(recoveryKey.Keyslot) {
-		t.Errorf("token names keyslots %v, want [%d]", token.Keyslots, recoveryKey.Keyslot)
+	if len(token.Keyslots) != 1 || token.Keyslots[0] != keyslot {
+		t.Errorf("token names keyslots %v, want [%d]", token.Keyslots, keyslot)
 	}
 
 	// systemd's recovery token carries NOTHING ELSE. There is no material to
 	// record, and a member of our own invention here would be a token systemd
 	// reads differently from the way it was written.
-	encoded, err := ExportToken(device, recoveryKey.TokenID)
+	encoded, err := json.Marshal(token)
 	if err != nil {
-		t.Fatalf("ExportToken: %v", err)
+		t.Fatalf("Marshal: %v", err)
 	}
 	var members map[string]any
 	if err := json.Unmarshal(encoded, &members); err != nil {
@@ -877,22 +491,20 @@ func TestAddRecoveryKeyWritesTheSystemdRecoveryToken(t *testing.T) {
 func TestAddRecoveryKeyRollsBackAKeyslotItCannotIdentify(t *testing.T) {
 	device, primary, _ := volumeWithAKeyslotGap(t)
 
-	previous := importToken
-	importToken = func(*keyslotDevice, int, *Token) error { return errors.New("the header could not be written") }
-	t.Cleanup(func() { importToken = previous })
-
-	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterations: recoveryTestIterations})
-	if err == nil {
-		recoveryKey.Clear()
-		t.Fatal("AddRecoveryKey reported success with an unwritable token")
+	sys := testVolumeSys()
+	sys.importToken = func(context.Context, *keyslotDevice, int, *LegacyToken) error {
+		return errors.New("the header could not be written")
 	}
-	if errors.Is(err, ErrOrphanedKeyslot) {
+
+	if _, _, _, err := enrollRecoveryKeyForTest(t, device, primary, withTestSys(sys)); err == nil {
+		t.Fatal("AddRecoveryKey reported success with an unwritable token")
+	} else if errors.Is(err, ErrOrphanedKeyslot) {
 		t.Fatalf("the keyslot was orphaned rather than rolled back: %v", err)
 	}
 
 	// The container is as it was: no extra slot, and the primary still opens it.
 	assertKeyslotIDs(t, device, []string{"0", "2"})
-	if err := TestKey(device, primary); err != nil {
+	if err := testKeyForTest(device, primary); err != nil {
 		t.Fatalf("the volume no longer opens with the primary passphrase: %v", err)
 	}
 }
@@ -902,17 +514,14 @@ func TestAddRecoveryKeyRollsBackAKeyslotItCannotIdentify(t *testing.T) {
 func TestAddRecoveryKeyReportsAnOrphanItCannotRemove(t *testing.T) {
 	device, primary, _ := volumeWithAKeyslotGap(t)
 
-	previousImport := importToken
-	importToken = func(*keyslotDevice, int, *Token) error { return errors.New("the header could not be written") }
-	t.Cleanup(func() { importToken = previousImport })
+	sys := testVolumeSys()
+	sys.importToken = func(context.Context, *keyslotDevice, int, *LegacyToken) error {
+		return errors.New("the header could not be written")
+	}
+	sys.killKeyslot = func(context.Context, *keyslotDevice, int) error { return errors.New("the device is read-only") }
 
-	previousKill := killKeyslot
-	killKeyslot = func(*keyslotDevice, int) error { return errors.New("the device is read-only") }
-	t.Cleanup(func() { killKeyslot = previousKill })
-
-	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterations: recoveryTestIterations})
+	_, _, _, err := enrollRecoveryKeyForTest(t, device, primary, withTestSys(sys))
 	if err == nil {
-		recoveryKey.Clear()
 		t.Fatal("AddRecoveryKey reported success")
 	}
 	if !errors.Is(err, ErrOrphanedKeyslot) {
@@ -940,19 +549,16 @@ func TestAddRecoveryKeyRefusesWhenNoTokenSlotIsFree(t *testing.T) {
 
 	device, primary, _ := volumeWithAKeyslotGap(t)
 
-	for id := 0; id < MaxTokenSlots; id++ {
-		if err := ImportToken(device, id, &Token{Type: "occupied"}); err != nil {
-			t.Fatalf("ImportToken(%d): %v", id, err)
+	for id := 0; id < MaxTokens; id++ {
+		if err := setTokenForTest(device, id, Token{Type: "occupied"}); err != nil {
+			t.Fatalf("SetToken(%d): %v", id, err)
 		}
 	}
 
-	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterations: recoveryTestIterations})
-	if err == nil {
-		recoveryKey.Clear()
+	if _, _, _, err := enrollRecoveryKeyForTest(t, device, primary); err == nil {
 		t.Fatal("AddRecoveryKey succeeded with every token slot occupied")
-	}
-	if !errors.Is(err, ErrNoFreeTokenSlot) {
-		t.Errorf("error = %v, want errors.Is(_, ErrNoFreeTokenSlot)", err)
+	} else if !errors.Is(err, ErrNoSpace) {
+		t.Errorf("error = %v, want errors.Is(_, ErrNoSpace)", err)
 	}
 
 	// No key material was written.
@@ -980,14 +586,20 @@ func TestRecoveryCredentialDoesNotNormalize(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			credential, err := RecoveryCredential(tt.typed)
+			typed, err := enclave.NewMemoryEnclaveCopy([]byte(tt.typed))
 			if err != nil {
-				t.Fatalf("RecoveryCredential(%q): %v", tt.typed, err)
+				t.Fatalf("could not build a test enclave: %v", err)
+			}
+			defer func() { _ = typed.Destroy() }()
+
+			credential, err := ParseRecoveryKey(typed)
+			if err != nil {
+				t.Fatalf("ParseRecoveryKey(%q): %v", tt.typed, err)
 			}
 			defer mustDestroy(t, credential)
 
 			if got := string(openSecret(t, credential)); got != tt.want {
-				t.Errorf("RecoveryCredential(%q) = %q, want %q", tt.typed, got, tt.want)
+				t.Errorf("ParseRecoveryKey(%q) = %q, want %q", tt.typed, got, tt.want)
 			}
 		})
 	}
@@ -1006,116 +618,72 @@ func TestRecoveryCredentialRefusesWhatCannotBeOne(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			credential, err := RecoveryCredential(tt.typed)
+			typed, err := enclave.NewMemoryEnclaveCopy([]byte(tt.typed))
+			if err != nil {
+				// Refused before ParseRecoveryKey even runs -- an empty
+				// enclave is refused at the enclave boundary itself, which
+				// still satisfies "cannot be a recovery key".
+				return
+			}
+			defer func() { _ = typed.Destroy() }()
+
+			credential, err := ParseRecoveryKey(typed)
 			if err == nil {
 				mustDestroy(t, credential)
-				t.Fatalf("RecoveryCredential(%q) accepted something that cannot be a recovery key", tt.typed)
+				t.Fatalf("ParseRecoveryKey(%q) accepted something that cannot be a recovery key", tt.typed)
 			}
 		})
 	}
 }
 
-// TestLoadRecoveryCredentialReturnsTheLineNotItsDecoding pins the difference
-// between the two loaders, which is the whole reason both exist.
-func TestLoadRecoveryCredentialReturnsTheLineNotItsDecoding(t *testing.T) {
-	key, err := GenerateRecoveryKey(32, RecoveryKeyFormatDashed)
+// TestTheTwoParsersDecodeDifferently pins the difference between
+// ParseRecoveryKey and ParseLegacyRecoveryKey, which is the whole reason
+// both exist: a keyslot this package enrolls holds the printed TEXT, and one
+// enrolled before that change holds the DECODED bytes behind it. B.6 moved
+// the two loaders' file I/O to internal/cli (LoadRecoveryCredential,
+// LoadRecoveryKey), but the parsing distinction itself is still the
+// library's to keep.
+func TestTheTwoParsersDecodeDifferently(t *testing.T) {
+	key, err := NewRecoveryKey(WithRecoveryFormat(RecoveryDashed))
 	if err != nil {
-		t.Fatalf("GenerateRecoveryKey: %v", err)
+		t.Fatalf("NewRecoveryKey: %v", err)
 	}
-	defer key.Clear()
+	defer key.Destroy()
 
-	path := filepath.Join(t.TempDir(), "recovery.key")
-	if err := SaveRecoveryKey(key, path); err != nil {
-		t.Fatalf("SaveRecoveryKey: %v", err)
+	var buf bytes.Buffer
+	if _, err := key.WriteTo(&buf); err != nil {
+		t.Fatalf("WriteTo: %v", err)
 	}
+	printed := buf.String()
 
-	credential, err := LoadRecoveryCredential(path)
+	typed, err := enclave.NewMemoryEnclaveCopy(buf.Bytes())
 	if err != nil {
-		t.Fatalf("LoadRecoveryCredential: %v", err)
+		t.Fatalf("could not build a test enclave: %v", err)
+	}
+	defer func() { _ = typed.Destroy() }()
+
+	credential, err := ParseRecoveryKey(typed)
+	if err != nil {
+		t.Fatalf("ParseRecoveryKey: %v", err)
 	}
 	defer mustDestroy(t, credential)
 
-	if !key.Credential.EqualTo(openSecret(t, credential)) {
-		t.Error("LoadRecoveryCredential did not return the credential that was saved")
+	if got := string(openSecret(t, credential)); got != printed {
+		t.Error("ParseRecoveryKey did not return the credential verbatim")
 	}
 
-	// The other loader decodes the same line, and the two must NOT agree --
+	// The other parser decodes the same line, and the two must NOT agree --
 	// if they did, one of them is not doing what its name says.
-	decoded, err := LoadRecoveryKey(path)
+	decoded, err := parseLegacyRecoveryKey(printed)
 	if err != nil {
-		t.Fatalf("LoadRecoveryKey: %v", err)
+		t.Fatalf("ParseLegacyRecoveryKey: %v", err)
 	}
 	defer mustDestroy(t, decoded)
 
 	if decoded.Size() != 32 {
-		t.Errorf("LoadRecoveryKey returned %d bytes, want the 32 behind the rendering", decoded.Size())
+		t.Errorf("ParseLegacyRecoveryKey returned %d bytes, want the 32 behind the rendering", decoded.Size())
 	}
-	if key.Credential.EqualTo(openSecret(t, decoded)) {
-		t.Error("LoadRecoveryKey returned the credential rather than its decoding")
-	}
-}
-
-// TestAddRecoveryKeyKeepsTheKeyLiveWhenTheSaveFails.
-//
-// A save failure is NOT a failure of the enrollment: the credential is already
-// in a keyslot, and the only copy of it is the one the caller is holding. If
-// this returned an error the caller would reasonably conclude nothing had
-// happened, discard the key, and leave a live credential on the volume that
-// nobody has.
-func TestAddRecoveryKeyKeepsTheKeyLiveWhenTheSaveFails(t *testing.T) {
-	defer parallel(t)()
-
-	device, primary, _ := volumeWithAKeyslotGap(t)
-
-	// A path whose parent is a FILE, so the directory cannot be created.
-	blocked := filepath.Join(t.TempDir(), "not-a-directory")
-	if err := os.WriteFile(blocked, []byte("in the way"), 0o600); err != nil {
-		t.Fatalf("failed to create the blocking file: %v", err)
-	}
-
-	recoveryKey, err := AddRecoveryKey(device, primary, &RecoveryKeyOptions{
-		OutputPath:      filepath.Join(blocked, "recovery.key"),
-		KDFType:         KDFTypePBKDF2,
-		PBKDFIterations: recoveryTestIterations,
-	})
-	if err != nil {
-		t.Fatalf("AddRecoveryKey reported failure for a save it could not do: %v", err)
-	}
-	defer recoveryKey.Clear()
-
-	if recoveryKey.SaveError == nil {
-		t.Fatal("the key was not saved and SaveError is nil")
-	}
-	if recoveryKey.Keyslot < 0 {
-		t.Fatal("no keyslot was reported")
-	}
-
-	// The credential is live on the volume, which is what the caller has to be
-	// told so they can write it down by hand.
-	var opened string
-	if err := secret.Borrow("recovery key", recoveryKey.Credential, func(raw []byte) error {
-		opened = keyslotOpenedBy(t, device, raw)
-		return nil
-	}); err != nil {
-		t.Fatalf("could not borrow the credential: %v", err)
-	}
-	if opened != strconv.Itoa(recoveryKey.Keyslot) {
-		t.Fatalf("the credential opens keyslot %q, reported as %d", opened, recoveryKey.Keyslot)
-	}
-}
-
-// TestParseRecoveryKeyFormatAcceptsExactlyTheThreeRenderings: a name is one of
-// hex, base64 or dashed, spelled exactly. The empty string is refused here --
-// a caller that names a format has not asked for the default.
-func TestParseRecoveryKeyFormatAcceptsExactlyTheThreeRenderings(t *testing.T) {
-	for _, name := range []string{"hex", "base64", "dashed"} {
-		if got, err := ParseRecoveryKeyFormat(name); err != nil || string(got) != name {
-			t.Errorf("ParseRecoveryKeyFormat(%q) = %q, %v", name, got, err)
-		}
-	}
-	for _, name := range []string{"", "morse", "HEX", " dashed", "base32"} {
-		if got, err := ParseRecoveryKeyFormat(name); !errors.Is(err, ErrInvalidRecoveryKeyFormat) || got != "" {
-			t.Errorf("ParseRecoveryKeyFormat(%q) = %q, %v; want ErrInvalidRecoveryKeyFormat", name, got, err)
-		}
+	if string(openSecret(t, decoded)) == printed {
+		t.Error("ParseLegacyRecoveryKey returned the credential rather than its decoding")
 	}
 }

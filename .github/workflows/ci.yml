@@ -129,7 +129,7 @@ jobs:
       - name: Require golangci-lint at the pinned version
         run: |
           set -eu
-          go run ./test/ci/cmd/require-tool \
+          go run ./test/tools/require-tool \
             golangci-lint "$GOLANGCI_LINT_VERSION" \
             "github.com/golangci/golangci-lint/v2/cmd/golangci-lint"
 
@@ -167,11 +167,11 @@ jobs:
       - name: Require gosec and govulncheck at the pinned versions
         run: |
           set -eu
-          go run ./test/ci/cmd/require-tool \
+          go run ./test/tools/require-tool \
             gosec "$GOSEC_VERSION" \
             "github.com/securego/gosec/v2/cmd/gosec" \
             -ldflags "-X main.Version=${GOSEC_VERSION}"
-          go run ./test/ci/cmd/require-tool \
+          go run ./test/tools/require-tool \
             govulncheck "$GOVULNCHECK_VERSION" \
             "golang.org/x/vuln/cmd/govulncheck"
 
@@ -250,7 +250,7 @@ jobs:
       # Neither is restated here; change them in the Makefile.
       #
       # The second leg is every package `go list ./...` reports besides
-      # ./pkg/luks2 -- cmd/luks2, test/harness and its reaper, the coverage gate,
+      # ./pkg/luks2 -- cmd/luks2, test/internal/harness and its reaper, the coverage gate,
       # the Makefile's own regression tests -- so a package added later is raced
       # and gated without being listed here.
       #
@@ -285,6 +285,14 @@ jobs:
       # command and not a package test.
       - name: Public-releasability gate
         run: make releasability
+
+      # DESIGN.md §B.6 / H0 / H13: the current pkg/luks2 API must honor
+      # every disposition in the redesign's table exactly, so a KEEP
+      # identifier that regressed and a DELETE/RENAME/MOVE/UNEXPORT
+      # identifier that lingers under its old name both fail the build,
+      # not just a human reading `make api-diff`'s report.
+      - name: API-diff gate (every disposition honored)
+        run: make api-diff
       # RLIMIT_MEMLOCK is the one that turns a correct design into a red suite:
       # measured on a workstation, the suite passes down to 512 KiB and fails
       # comprehensively at 64 KiB with "could not allocate locked memory ...
@@ -469,7 +477,7 @@ jobs:
       # run can be under -- lives in the Makefile's ITEST_PRUNE, so this
       # workflow and a developer's `make integration-test` cannot drift into
       # reaping by different rules. Same reason the privilege flags live in
-      # test/integration/cmd/docker-run (#80).
+      # test/tools/docker-run (#80).
       #
       # Never fails the job: an unreapable image is a disk problem, not a test
       # result, and this job's own names are removed by name regardless.
@@ -491,7 +499,7 @@ jobs:
           docker build \
             --secret id=gomodauth,src="${RUNNER_TEMP}/gomodauth.env" \
             --label "$label" \
-            -f test/integration/Dockerfile \
+            -f build/docker/integration/Dockerfile \
             -t "$ITEST_IMAGE" .
 
       - name: Remove staged credentials
@@ -559,7 +567,7 @@ jobs:
           # device-mapper namespace it meant to protect are host-global.
           #
           # No privilege flags here, on purpose. They all live in
-          # test/integration/cmd/docker-run, which the Makefile targets call
+          # test/tools/docker-run, which the Makefile targets call
           # too, so this workflow and a developer's `make integration-test`
           # cannot drift into running under different privilege (#80).
           #

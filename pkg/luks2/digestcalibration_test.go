@@ -27,18 +27,14 @@ import (
 // recordDigestCalibration fixes the digest cost exactly as pinDigestIterations
 // does and additionally records the hash each call asked for, so a test can
 // assert that a digest was calibrated for the hash it declares.
-func recordDigestCalibration(t *testing.T, iterations int) *[]string {
+func recordDigestCalibration(t *testing.T, iterations int) (*[]string, func(string) (int, error)) {
 	t.Helper()
 
 	asked := new([]string)
-	previous := digestIterationsFor
-	digestIterationsFor = func(hashAlgo string) (int, error) {
+	return asked, func(hashAlgo string) (int, error) {
 		*asked = append(*asked, hashAlgo)
 		return iterations, nil
 	}
-	t.Cleanup(func() { digestIterationsFor = previous })
-
-	return asked
 }
 
 // TestDigestCalibrationTargetsItsBudget is the property that replaced the
@@ -159,7 +155,7 @@ func BenchmarkDigestCalibrationCostsItsBudget(b *testing.B) {
 	for _, hashAlgo := range []string{"sha256", "sha512"} {
 		b.Run(hashAlgo, func(b *testing.B) {
 			for b.Loop() {
-				checkCalibrationCost(b, hashAlgo, DigestCalibrationKeyLen, DigestIterationTargetMs,
+				checkCalibrationCost(b, hashAlgo, digestCalibrationKeyLen, digestIterationTargetMs,
 					func(timer pbkdf2Timer) (int, error) { return digestIterationsTimedBy(hashAlgo, timer) })
 			}
 		})
@@ -174,8 +170,8 @@ func TestDigestCalibrationRejectsAnUnsupportedHash(t *testing.T) {
 	if err == nil {
 		t.Fatalf("calibrateDigestIterations accepted md5 and returned %d", iterations)
 	}
-	if !errors.Is(err, ErrUnsupportedHash) {
-		t.Fatalf("error = %v, want ErrUnsupportedHash", err)
+	if !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("error = %v, want ErrUnsupported", err)
 	}
 }
 
@@ -184,10 +180,9 @@ func TestDigestCalibrationRejectsAnUnsupportedHash(t *testing.T) {
 // substituted after a failed benchmark is the defect ErrKDFCalibration exists
 // to prevent, and the digest path must not reintroduce it.
 func TestFormatSurfacesADigestCalibrationFailure(t *testing.T) {
-	previous := digestIterationsFor
 	sentinel := errors.New("the digest benchmark could not run")
-	digestIterationsFor = func(string) (int, error) { return 0, sentinel }
-	t.Cleanup(func() { digestIterationsFor = previous })
+	sys := testVolumeSys()
+	sys.digestIterationsFor = func(string) (int, error) { return 0, sentinel }
 
 	path := newImage(t, "digest-calibration-failure.img")
 	before, err := os.ReadFile(path) // #nosec G304 -- path is under t.TempDir()
@@ -195,7 +190,7 @@ func TestFormatSurfacesADigestCalibrationFailure(t *testing.T) {
 		t.Fatalf("failed to read the blank image: %v", err)
 	}
 
-	err = Format(standardFormatOptions(path))
+	err = formatWithSys(standardFormatOptions(path), sys)
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("Format = %v, want the calibration failure", err)
 	}
@@ -221,16 +216,17 @@ func TestPinnedDigestIterationsReachTheHeader(t *testing.T) {
 	const digestCost = 123_456
 	const keyslotCost = 250_000
 
-	pinDigestIterations(t, digestCost)
+	sys := testVolumeSys()
+	sys.digestIterationsFor = pinDigestIterations(digestCost)
 
 	path := newImage(t, "pinned-digest.img")
 	opts := standardFormatOptions(path)
 	opts.PBKDFIterations = keyslotCost
-	if err := Format(opts); err != nil {
+	if err := formatWithSys(opts, sys); err != nil {
 		t.Fatalf("Format failed: %v", err)
 	}
 
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -244,7 +240,7 @@ func TestPinnedDigestIterationsReachTheHeader(t *testing.T) {
 		t.Fatal("the keyslot and digest costs are the same value; the two knobs are not independent")
 	}
 
-	if err := TestKey(path, []byte(conformancePassphrase)); err != nil {
+	if err := testKeyForTest(path, []byte(conformancePassphrase)); err != nil {
 		t.Fatalf("a container with a pinned digest cost does not open: %v", err)
 	}
 }

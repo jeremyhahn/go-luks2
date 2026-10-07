@@ -15,9 +15,6 @@ import (
 // under their original names so every existing caller and test in this
 // package keeps compiling unchanged. They are removed at H13.
 
-// cryptSegmentParams is a type alias of header.CryptSegmentParams.
-type cryptSegmentParams = header.CryptSegmentParams
-
 // maxSegmentEncryptionLength forwards to header.MaxSegmentEncryptionLength.
 const maxSegmentEncryptionLength = header.MaxSegmentEncryptionLength
 
@@ -25,7 +22,9 @@ const maxSegmentEncryptionLength = header.MaxSegmentEncryptionLength
 var segmentSectorSizes = header.SegmentSectorSizes
 
 // cryptTableParams forwards to header.CryptTableParams.
-var cryptTableParams = header.CryptTableParams
+func cryptTableParams(metadata *header.Metadata, id string, segment *header.Segment) (header.CryptSegmentParams, error) {
+	return header.CryptTableParams(metadata, id, segment)
+}
 
 // segmentLabel is a private copy of internal/header's unexported helper of
 // the same name, for the one call site (unlock.go) that needs it outside the

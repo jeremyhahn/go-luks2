@@ -8,6 +8,7 @@ package luks2
 
 import (
 	"bytes"
+	"context"
 	"crypto/fips140"
 	"encoding/binary"
 	"errors"
@@ -21,6 +22,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/jeremyhahn/go-luks2/internal/header"
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
@@ -100,7 +102,7 @@ type crashFixtureEntry struct {
 	// The migration from prefix, recorded once by recordedMigration.
 	recorded bool
 	steps    []crashStep
-	result   *FIPSMigrationResult
+	result   *fipsMigrationResultForTest
 	final    []byte
 }
 
@@ -110,7 +112,6 @@ type crashFixtureEntry struct {
 func crashFixture(t *testing.T, sha1Digest bool) (prefix []byte, dataOffset int64, key []byte) {
 	t.Helper()
 
-	pinDigestIterations(t, minPBKDF2Iterations)
 	e := crashFixtureFor(t, sha1Digest)
 	return e.prefix, e.dataOffset, e.key
 }
@@ -138,7 +139,6 @@ func crashFixtureFor(t *testing.T, sha1Digest bool) *crashFixtureEntry {
 func recordedMigration(t *testing.T, sha1Digest bool) (*crashFixtureEntry, []crashStep) {
 	t.Helper()
 
-	pinDigestIterations(t, minPBKDF2Iterations)
 	e := crashFixtureFor(t, sha1Digest)
 	crashFixtureCache.Lock()
 	recorded := e.recorded
@@ -159,11 +159,8 @@ func recordedMigration(t *testing.T, sha1Digest bool) (*crashFixtureEntry, []cra
 func buildCrashFixture(t *testing.T, sha1Digest bool) (prefix []byte, dataOffset int64, key []byte) {
 	t.Helper()
 
-	// Every resumed import rewrites the digest; pinned at the floor, as
-	// argon2Volume pins it, so none of them calibrates. No caller here tests
-	// a digest's cost.
-	pinDigestIterations(t, minPBKDF2Iterations)
-
+	// Every resumed import rewrites the digest, through a real (uncalibrated
+	// override) calibration: no caller here tests a digest's cost.
 	image := filepath.Join(t.TempDir(), "crash-fixture.img")
 	placeImage(t, image, cryptsetupArgon2Prefix(t, true))
 
@@ -174,7 +171,7 @@ func buildCrashFixture(t *testing.T, sha1Digest bool) (prefix []byte, dataOffset
 		wantDigests = 1
 	}
 
-	_, metadata, err := ReadHeader(image)
+	_, metadata, err := readHeaderForTest(image)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -200,7 +197,7 @@ func buildCrashFixture(t *testing.T, sha1Digest bool) (prefix []byte, dataOffset
 func rewriteDigestAsSHA1(t *testing.T, image string, key []byte) {
 	t.Helper()
 
-	hdr, metadata, err := ReadHeader(image)
+	hdr, metadata, err := readHeaderForTest(image)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -213,7 +210,7 @@ func rewriteDigestAsSHA1(t *testing.T, image string, key []byte) {
 		t.Fatalf("custody.Clone: %v", err)
 	}
 	defer mustDestroy(t, mk)
-	derived, err := deriveKeySecret(mk, &KDF{Type: KDFTypePBKDF2, Hash: "sha1", Salt: digest.Salt, Iterations: &iterations}, 20)
+	derived, err := deriveKeySecret(context.Background(), mk, &rawKDF{Type: kdfTypePBKDF2, Hash: "sha1", Salt: digest.Salt, Iterations: &iterations}, 20, testVolumeSys())
 	if err != nil {
 		t.Fatalf("deriving the sha1 digest failed: %v", err)
 	}
@@ -291,22 +288,20 @@ var errInjectedOpen = errors.New("injected: the device could not be opened, or a
 // other descriptor would not be a step here -- and is what
 // TestMigrateToFIPSWritesOnlyTheDeviceItLocked rules out.
 type writeStepRecorder struct {
-	device       string
-	limit        int64
-	failAt       int
-	opens        int
-	snaps        [][]byte
-	previous     func(string, int, os.FileMode) (*os.File, error)
-	previousStep func(*keyslotDevice, string) error
+	device string
+	limit  int64
+	failAt int
+	opens  int
+	snaps  [][]byte
+	sys    volumeSys
 }
 
-// install substitutes openFileFunc and keyslotWriteStep until uninstall, or
-// the end of the test.
-func (r *writeStepRecorder) install(t *testing.T) {
+// install populates r.sys with openFile and keyslotWriteStep fields that
+// record write steps; the caller threads r.sys into the operation under test.
+func (r *writeStepRecorder) install(t *testing.T, base volumeSys) {
 	t.Helper()
 
-	r.previous, r.previousStep = openFileFunc, keyslotWriteStep
-	t.Cleanup(r.uninstall)
+	r.sys = base
 	step := func() error {
 		r.opens++
 		if r.opens == r.failAt {
@@ -315,27 +310,27 @@ func (r *writeStepRecorder) install(t *testing.T) {
 		r.snaps = append(r.snaps, readPrefix(t, r.device, r.limit))
 		return nil
 	}
-	previous, previousStep := r.previous, r.previousStep
-	openFileFunc = func(name string, flag int, perm os.FileMode) (*os.File, error) {
+	previousOpen, previousStep := r.sys.openFile, r.sys.keyslotWriteStep
+	r.sys.openFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
 		if name == r.device && flag&(os.O_WRONLY|os.O_RDWR) != 0 {
 			if err := step(); err != nil {
 				return nil, err
 			}
 		}
-		return previous(name, flag, perm)
+		return previousOpen(name, flag, perm)
 	}
-	keyslotWriteStep = func(d *keyslotDevice, op string) error {
+	r.sys.keyslotWriteStep = func(ctx context.Context, d *keyslotDevice, op string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if d.path == r.device {
 			if err := step(); err != nil {
 				return err
 			}
 		}
-		return previousStep(d, op)
+		return previousStep(ctx, d, op)
 	}
 }
-
-// uninstall restores what install replaced.
-func (r *writeStepRecorder) uninstall() { openFileFunc, keyslotWriteStep = r.previous, r.previousStep }
 
 // crashStep is one write step: the region before and after it.
 type crashStep struct {
@@ -425,15 +420,14 @@ func tornStates(step crashStep, headerArea int) []tornState {
 // migrateRecording runs MigrateToFIPS on a copy of prefix with the recorder
 // installed, and returns the recorder, the result, the error, and the region as
 // the migration left it.
-func migrateRecording(t *testing.T, prefix []byte, failAt int) (*writeStepRecorder, *FIPSMigrationResult, error, []byte) {
+func migrateRecording(t *testing.T, prefix []byte, failAt int) (*writeStepRecorder, *fipsMigrationResultForTest, error, []byte) {
 	t.Helper()
 
 	image := filepath.Join(t.TempDir(), "migrated.img")
 	placeImage(t, image, prefix)
 	r := &writeStepRecorder{device: image, limit: int64(len(prefix)), failAt: failAt}
-	r.install(t)
-	result, err := MigrateToFIPS(image, migrationPassphrase, cheapMigration())
-	r.uninstall()
+	r.install(t, testVolumeSys())
+	result, err := migrateToFIPSAt(context.Background(), image, migrationPassphrase, cheapMigration(), r.sys)
 	return r, result, err, readPrefix(t, image, int64(len(prefix)))
 }
 
@@ -455,20 +449,20 @@ func assertStateOpens(t *testing.T, dir string, state []byte, key []byte) (prima
 
 	ours := filepath.Join(dir, "library.img")
 	placeImage(t, ours, state)
-	shdr, _, err := ReadSecondaryHeader(ours)
+	shdr, _, err := readSecondaryHeaderForTest(ours)
 	if err != nil {
 		secondaryTorn = true
 	}
-	if _, _, err := ReadHeader(ours); err != nil {
+	if _, _, err := readHeaderForTest(ours); err != nil {
 		primaryTorn = true
 		if secondaryTorn {
 			t.Fatalf("both header copies are unreadable in this state; primary: %v", err)
 		}
-		if err := RestorePrimaryHeader(ours); err != nil {
+		if err := restorePrimaryHeaderForTest(ours); err != nil {
 			t.Fatalf("the primary is torn and RestorePrimaryHeader cannot rebuild it from the secondary: %v", err)
 		}
 	}
-	hdr, _, err := ReadHeader(ours)
+	hdr, _, err := readHeaderForTest(ours)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -491,7 +485,7 @@ func assertStateOpens(t *testing.T, dir string, state []byte, key []byte) (prima
 func assertImportResumes(t *testing.T, image string, key []byte) {
 	t.Helper()
 
-	result, err := MigrateToFIPS(image, migrationPassphrase, cheapMigration())
+	result, err := migrateToFIPSForTest(image, migrationPassphrase, cheapMigration())
 	if err != nil {
 		t.Fatalf("re-running MigrateToFIPS on this state failed: %v", err)
 	}
@@ -629,7 +623,7 @@ func TestMigrateToFIPSFailingAtEachWriteLeavesAnOpenableVolume(t *testing.T) {
 func TestWriteHeaderMakesThePrimaryDurableBeforeTheSecondary(t *testing.T) {
 	device := newImage(t, "header-barrier.img")
 	formatWithLibrary(t, device)
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -638,22 +632,22 @@ func TestWriteHeaderMakesThePrimaryDurableBeforeTheSecondary(t *testing.T) {
 
 	type seen struct{ primary, secondary uint64 }
 	var syncs []seen
-	previous := syncDevice
-	t.Cleanup(func() { syncDevice = previous })
-	syncDevice = func(f *os.File) error {
-		p, _, err := ReadHeader(device)
+	sys := testVolumeSys()
+	real := sys.syncDevice
+	sys.syncDevice = func(f *os.File) error {
+		p, _, err := readHeaderForTest(device)
 		if err != nil {
 			t.Fatalf("primary unreadable at a sync point: %v", err)
 		}
-		s, _, err := ReadSecondaryHeader(device)
+		s, _, err := readSecondaryHeaderForTest(device)
 		if err != nil {
 			t.Fatalf("secondary unreadable at a sync point: %v", err)
 		}
 		syncs = append(syncs, seen{p.SequenceID, s.SequenceID})
-		return previous(f)
+		return real(f)
 	}
 
-	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
+	if err := writeHeaderInternalWithSys(device, hdr, metadata, sys); err != nil {
 		t.Fatalf("writeHeaderInternal failed: %v", err)
 	}
 	want := []seen{{old + 1, old}, {old + 1, old + 1}}
@@ -668,7 +662,7 @@ func TestWriteHeaderMakesThePrimaryDurableBeforeTheSecondary(t *testing.T) {
 func TestWriteHeaderStopsBeforeTheSecondaryWhenThePrimarySyncFails(t *testing.T) {
 	device := newImage(t, "header-barrier-fails.img")
 	formatWithLibrary(t, device)
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -676,14 +670,13 @@ func TestWriteHeaderStopsBeforeTheSecondaryWhenThePrimarySyncFails(t *testing.T)
 	hdr.SequenceID++
 
 	errSync := errors.New("injected sync failure")
-	previous := syncDevice
-	t.Cleanup(func() { syncDevice = previous })
-	syncDevice = func(*os.File) error { return errSync }
+	sys := testVolumeSys()
+	sys.syncDevice = func(*os.File) error { return errSync }
 
-	if err := writeHeaderInternal(device, hdr, metadata); !errors.Is(err, errSync) {
+	if err := writeHeaderInternalWithSys(device, hdr, metadata, sys); !errors.Is(err, errSync) {
 		t.Fatalf("got %v, want the injected sync failure", err)
 	}
-	s, _, err := ReadSecondaryHeader(device)
+	s, _, err := readSecondaryHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("the secondary is unreadable after a failed primary sync: %v", err)
 	}
@@ -768,7 +761,7 @@ func damagePrimary(t *testing.T, device string) {
 		t.Fatalf("open %s: %v", device, err)
 	}
 	defer func() { _ = f.Close() }()
-	if _, err := f.WriteAt(bytes.Repeat([]byte{0xa5}, crashSector), LUKS2HeaderSize); err != nil {
+	if _, err := f.WriteAt(bytes.Repeat([]byte{0xa5}, crashSector), header.HeaderSize); err != nil {
 		t.Fatalf("damaging the primary failed: %v", err)
 	}
 }
@@ -777,7 +770,7 @@ func damagePrimary(t *testing.T, device string) {
 func damageSecondary(t *testing.T, device string) {
 	t.Helper()
 
-	hdr, _, err := ReadHeader(device)
+	hdr, _, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -786,26 +779,27 @@ func damageSecondary(t *testing.T, device string) {
 		t.Fatalf("open %s: %v", device, err)
 	}
 	defer func() { _ = f.Close() }()
-	if _, err := f.WriteAt(bytes.Repeat([]byte{0xa5}, crashSector), int64(hdr.HeaderSize)+LUKS2HeaderSize); err != nil {
+	if _, err := f.WriteAt(bytes.Repeat([]byte{0xa5}, crashSector), int64(hdr.HeaderSize)+header.HeaderSize); err != nil {
 		t.Fatalf("damaging the secondary failed: %v", err)
 	}
 }
 
 // onSync substitutes syncDevice: hook runs at the n-th call (1-based) and its
 // result is returned instead of syncing.
-func onSync(t *testing.T, n int, hook func(f *os.File) error) {
+func onSync(t *testing.T, n int, hook func(f *os.File) error) volumeSys {
 	t.Helper()
 
-	previous := syncDevice
-	t.Cleanup(func() { syncDevice = previous })
+	sys := testVolumeSys()
+	real := sys.syncDevice
 	calls := 0
-	syncDevice = func(f *os.File) error {
+	sys.syncDevice = func(f *os.File) error {
 		calls++
 		if calls == n {
 			return hook(f)
 		}
-		return previous(f)
+		return real(f)
 	}
+	return sys
 }
 
 // errInjectedSync is the sync failure the tests below inject.
@@ -843,12 +837,11 @@ func TestMigrateToFIPSReportsADamagedPrimaryAfterAFailedHeaderWrite(t *testing.T
 		t.Run(tc.name, func(t *testing.T) {
 			image := filepath.Join(t.TempDir(), "damaged.img")
 			placeImage(t, image, prefix)
-			onSync(t, tc.barrier, func(*os.File) error {
+			sys := onSync(t, tc.barrier, func(*os.File) error {
 				damagePrimary(t, image)
 				return errInjectedSync
 			})
-			_, err := MigrateToFIPS(image, migrationPassphrase, cheapMigration())
-			syncDevice = (*os.File).Sync
+			_, err := migrateToFIPSAt(context.Background(), image, migrationPassphrase, cheapMigration(), sys)
 
 			var merr *FIPSMigrationError
 			if !errors.Is(err, errInjectedSync) || !errors.As(err, &merr) || merr.Stage != tc.stage || merr.State != tc.state {
@@ -879,21 +872,21 @@ func TestMigrateToFIPSStopsWhenTheHeaderCopiesDisagreeAfterItsWrites(t *testing.
 	// The second sync of the add-header write (the run's durability barrier
 	// is the first sync of all), after both copies: the write itself
 	// succeeds and the secondary is then damaged.
-	onSync(t, 3, func(f *os.File) error {
+	sys := onSync(t, 3, func(f *os.File) error {
 		if err := f.Sync(); err != nil {
 			return err
 		}
 		damageSecondary(t, image)
 		return nil
 	})
-	_, err := MigrateToFIPS(image, migrationPassphrase, cheapMigration())
+	_, err := migrateToFIPSAt(context.Background(), image, migrationPassphrase, cheapMigration(), sys)
 
 	var merr *FIPSMigrationError
-	if !errors.Is(err, ErrFIPSMigrationVerification) || !errors.As(err, &merr) ||
+	if !errors.Is(err, errFIPSMigrationVerification) || !errors.As(err, &merr) ||
 		merr.Stage != "verify" || merr.State != fipsStateOriginals {
 		t.Fatalf("got %#v, want a verify-stage refusal with no keyslot removed", err)
 	}
-	_, metadata, err := ReadHeader(image)
+	_, metadata, err := readHeaderForTest(image)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -920,9 +913,8 @@ func TestMigrateToFIPSReconcileFailureLeavesThePrimaryAlone(t *testing.T) {
 
 	// The run's own durability barrier is the first sync; the repair's
 	// barrier is the second.
-	onSync(t, 2, func(*os.File) error { return errInjectedSync })
-	_, err := MigrateToFIPS(image, migrationPassphrase, cheapMigration())
-	syncDevice = (*os.File).Sync
+	sys := onSync(t, 2, func(*os.File) error { return errInjectedSync })
+	_, err := migrateToFIPSAt(context.Background(), image, migrationPassphrase, cheapMigration(), sys)
 
 	var merr *FIPSMigrationError
 	if !errors.Is(err, errInjectedSync) || !errors.As(err, &merr) ||
@@ -953,12 +945,12 @@ func TestHeaderCopiesAgree(t *testing.T) {
 	}
 	repairs := func(t *testing.T, device string) {
 		t.Helper()
-		hdr, metadata, err := ReadHeader(device)
+		hdr, metadata, err := readHeaderForTest(device)
 		if err != nil {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
 		primary := readPrefix(t, device, int64(hdr.HeaderSize))
-		if err := repairOn(t, device, hdr, metadata); err != nil {
+		if err := repairOn(t, device, hdr, metadata, testVolumeSys()); err != nil {
 			t.Fatalf("repairSecondaryHeader failed: %v", err)
 		}
 		if err := copiesAgree(t, device); err != nil {
@@ -979,16 +971,15 @@ func TestHeaderCopiesAgree(t *testing.T) {
 	})
 	t.Run("secondary stale", func(t *testing.T) {
 		device := fresh(t)
-		hdr, metadata, err := ReadHeader(device)
+		hdr, metadata, err := readHeaderForTest(device)
 		if err != nil {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
 		hdr.SequenceID++
-		onSync(t, 1, func(*os.File) error { return errInjectedSync })
-		if err := writeHeaderInternal(device, hdr, metadata); !errors.Is(err, errInjectedSync) {
+		sys := onSync(t, 1, func(*os.File) error { return errInjectedSync })
+		if err := writeHeaderInternalWithSys(device, hdr, metadata, sys); !errors.Is(err, errInjectedSync) {
 			t.Fatalf("got %v, want the injected sync failure", err)
 		}
-		syncDevice = (*os.File).Sync
 		if err := copiesAgree(t, device); !errors.Is(err, ErrInvalidHeader) || !strings.Contains(err.Error(), "sequence ids") {
 			t.Fatalf("got %v, want the differing sequence ids named", err)
 		}
@@ -996,18 +987,18 @@ func TestHeaderCopiesAgree(t *testing.T) {
 	})
 	t.Run("same sequence id, different metadata", func(t *testing.T) {
 		device := fresh(t)
-		hdr, metadata, err := ReadHeader(device)
+		hdr, metadata, err := readHeaderForTest(device)
 		if err != nil {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
 		other := *metadata
-		other.Digests = map[string]*Digest{}
+		other.Digests = map[string]*rawDigest{}
 		for id, d := range metadata.Digests {
 			changed := *d
 			changed.Iterations++
 			other.Digests[id] = &changed
 		}
-		if err := repairOn(t, device, hdr, &other); err != nil {
+		if err := repairOn(t, device, hdr, &other, testVolumeSys()); err != nil {
 			t.Fatalf("writing a differing secondary failed: %v", err)
 		}
 		if err := copiesAgree(t, device); !errors.Is(err, ErrInvalidHeader) || !strings.Contains(err.Error(), "different metadata") {
@@ -1025,20 +1016,20 @@ func TestHeaderCopiesAgree(t *testing.T) {
 	t.Run("the primary is made durable before the secondary is touched", func(t *testing.T) {
 		device := fresh(t)
 		damageSecondary(t, device)
-		hdr, metadata, err := ReadHeader(device)
+		hdr, metadata, err := readHeaderForTest(device)
 		if err != nil {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
 		before := readPrefix(t, device, 2*int64(hdr.HeaderSize))
 		// The first sync is the barrier: at it, not one secondary byte may
 		// have been written yet. Failing it must leave the secondary as is.
-		onSync(t, 1, func(*os.File) error {
+		sys := onSync(t, 1, func(*os.File) error {
 			if now := readPrefix(t, device, 2*int64(hdr.HeaderSize)); !bytes.Equal(now, before) {
 				t.Fatal("the secondary was written before the primary was made durable")
 			}
 			return errInjectedSync
 		})
-		if err := repairOn(t, device, hdr, metadata); !errors.Is(err, errInjectedSync) {
+		if err := repairOn(t, device, hdr, metadata, sys); !errors.Is(err, errInjectedSync) {
 			t.Fatalf("got %v, want the injected sync failure", err)
 		}
 		if now := readPrefix(t, device, 2*int64(hdr.HeaderSize)); !bytes.Equal(now, before) {
@@ -1047,26 +1038,27 @@ func TestHeaderCopiesAgree(t *testing.T) {
 	})
 	t.Run("repair cannot sync the secondary", func(t *testing.T) {
 		device := fresh(t)
-		hdr, metadata, err := ReadHeader(device)
+		hdr, metadata, err := readHeaderForTest(device)
 		if err != nil {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
-		onSync(t, 2, func(*os.File) error { return errInjectedSync })
-		if err := repairOn(t, device, hdr, metadata); !errors.Is(err, errInjectedSync) {
+		sys := onSync(t, 2, func(*os.File) error { return errInjectedSync })
+		if err := repairOn(t, device, hdr, metadata, sys); !errors.Is(err, errInjectedSync) {
 			t.Fatalf("got %v, want the injected sync failure", err)
 		}
 	})
 	t.Run("the repair's write step fails", func(t *testing.T) {
 		device := fresh(t)
-		hdr, metadata, err := ReadHeader(device)
+		hdr, metadata, err := readHeaderForTest(device)
 		if err != nil {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
 		before := readPrefix(t, device, 2*int64(hdr.HeaderSize))
 		dev := lockedDevice(t, device)
 		r := &writeStepRecorder{device: device, limit: 1, failAt: 1}
-		r.install(t)
-		if err := repairSecondaryHeader(dev, hdr, metadata); !errors.Is(err, errInjectedOpen) {
+		r.install(t, testVolumeSys())
+		dev.sys = r.sys
+		if err := repairSecondaryHeader(context.Background(), dev, hdr, metadata); !errors.Is(err, errInjectedOpen) {
 			t.Fatalf("got %v, want the injected write-step failure", err)
 		}
 		if !bytes.Equal(readPrefix(t, device, 2*int64(hdr.HeaderSize)), before) {
@@ -1080,28 +1072,28 @@ func TestHeaderCopiesAgree(t *testing.T) {
 func TestStateAfterWriteFailureReadsTheDevice(t *testing.T) {
 	device := newImage(t, "state.img")
 	formatWithLibrary(t, device)
-	hdr, _, err := ReadHeader(device)
+	hdr, _, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 	area := int64(hdr.HeaderSize)
 
-	if got := stateAfterWriteFailure(device, area, fipsStateOriginals); got != fipsStateOriginals {
+	if got := stateAfterWriteFailure(device, area, fipsStateOriginals, testVolumeSys()); got != fipsStateOriginals {
 		t.Fatalf("intact header: got %q", got)
 	}
 	damagePrimary(t, device)
-	if got := stateAfterWriteFailure(device, area, fipsStateOriginals); got != fipsStatePrimaryDamagedOriginals {
+	if got := stateAfterWriteFailure(device, area, fipsStateOriginals, testVolumeSys()); got != fipsStatePrimaryDamagedOriginals {
 		t.Fatalf("damaged primary before removal: got %q", got)
 	}
-	if got := stateAfterWriteFailure(device, area, fipsStateRemoving); got != fipsStatePrimaryDamagedRemoving {
+	if got := stateAfterWriteFailure(device, area, fipsStateRemoving, testVolumeSys()); got != fipsStatePrimaryDamagedRemoving {
 		t.Fatalf("damaged primary during removal: got %q", got)
 	}
-	if err := RestorePrimaryHeader(device); err != nil {
+	if err := restorePrimaryHeaderForTest(device); err != nil {
 		t.Fatalf("RestorePrimaryHeader failed: %v", err)
 	}
 	damageSecondary(t, device)
 	damagePrimary(t, device)
-	if got := stateAfterWriteFailure(device, area, fipsStateRemoving); got != fipsStateNoHeader {
+	if got := stateAfterWriteFailure(device, area, fipsStateRemoving, testVolumeSys()); got != fipsStateNoHeader {
 		t.Fatalf("both copies damaged: got %q", got)
 	}
 }
@@ -1114,11 +1106,11 @@ func TestStateAfterWriteFailureReadsTheDevice(t *testing.T) {
 // report must not, because on such a layout that offset can be encrypted data.
 func TestStateAfterWriteFailureReadsOnlyTheKnownSecondary(t *testing.T) {
 	small := newImage(t, "small-metadata.img")
-	if err := Format(metadataSizeFormatOptions(small, 32<<10)); err != nil {
+	if err := formatForTest(metadataSizeFormatOptions(small, 32<<10)); err != nil {
 		t.Fatalf("Format with 32 KiB metadata failed: %v", err)
 	}
 	large := newImage(t, "large-metadata.img")
-	if err := Format(metadataSizeFormatOptions(large, LUKS2HeaderMaxSize)); err != nil {
+	if err := formatForTest(metadataSizeFormatOptions(large, header.HeaderMaxSize)); err != nil {
 		t.Fatalf("Format with 4 MiB metadata failed: %v", err)
 	}
 	planted, err := os.ReadFile(large) // #nosec G304 -- path is under t.TempDir()
@@ -1129,7 +1121,7 @@ func TestStateAfterWriteFailureReadsOnlyTheKnownSecondary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if _, err := f.WriteAt(planted[LUKS2HeaderMaxSize:2*LUKS2HeaderMaxSize], LUKS2HeaderMaxSize); err != nil {
+	if _, err := f.WriteAt(planted[header.HeaderMaxSize:2*header.HeaderMaxSize], header.HeaderMaxSize); err != nil {
 		t.Fatalf("planting the copy failed: %v", err)
 	}
 	if err := f.Close(); err != nil {
@@ -1139,10 +1131,10 @@ func TestStateAfterWriteFailureReadsOnlyTheKnownSecondary(t *testing.T) {
 	damageSecondary(t, small)
 	damagePrimary(t, small)
 	// The planted copy is a real probe target: a probing reader finds it.
-	if _, _, err := ReadSecondaryHeader(small); err != nil {
+	if _, _, err := readSecondaryHeaderForTest(small); err != nil {
 		t.Fatalf("the planted copy is not one a probing reader finds, so the test measures nothing: %v", err)
 	}
-	if got := stateAfterWriteFailure(small, 32<<10, fipsStateRemoving); got != fipsStateNoHeader {
+	if got := stateAfterWriteFailure(small, 32<<10, fipsStateRemoving, testVolumeSys()); got != fipsStateNoHeader {
 		t.Fatalf("got %q; want %q -- the report read past the volume's own secondary", got, fipsStateNoHeader)
 	}
 }
@@ -1161,7 +1153,7 @@ func TestMigrateToFIPSRefusesATornPrimaryBeforeWriting(t *testing.T) {
 	damagePrimary(t, device)
 	before := fileDigest(t, device)
 
-	_, err := MigrateToFIPS(device, migrationPassphrase, cheapMigration())
+	_, err := migrateToFIPSForTest(device, migrationPassphrase, cheapMigration())
 	var merr *FIPSMigrationError
 	if !errors.Is(err, ErrInvalidHeader) || !errors.As(err, &merr) || merr.Stage != "unlock" || merr.State != fipsStateUntouched {
 		t.Fatalf("got %#v, want an unlock-stage ErrInvalidHeader with the volume untouched", err)
@@ -1169,7 +1161,7 @@ func TestMigrateToFIPSRefusesATornPrimaryBeforeWriting(t *testing.T) {
 	if fileDigest(t, device) != before {
 		t.Fatal("the refused import changed the device")
 	}
-	if _, _, err := ReadSecondaryHeader(device); err != nil {
+	if _, _, err := readSecondaryHeaderForTest(device); err != nil {
 		t.Fatalf("the secondary copy is not readable after the refusal: %v", err)
 	}
 }
@@ -1197,21 +1189,19 @@ func TestMigrateToFIPSMakesAgreeingCopiesDurableBeforeWriting(t *testing.T) {
 	// there would leave it. Chosen by what the device holds rather than by
 	// counting syncs, so the fixture does not depend on the barrier under
 	// test.
-	previous := syncDevice
-	t.Cleanup(func() { syncDevice = previous })
-	syncDevice = func(f *os.File) error {
-		if _, m, err := ReadSecondaryHeader(image); err == nil && m.Keyslots["2"] != nil {
-			syncDevice = previous
+	sys := testVolumeSys()
+	real := sys.syncDevice
+	sys.syncDevice = func(f *os.File) error {
+		if _, m, err := readSecondaryHeaderForTest(image); err == nil && m.Keyslots["2"] != nil {
 			return errInjectedSync
 		}
-		return previous(f)
+		return real(f)
 	}
-	_, err := MigrateToFIPS(image, migrationPassphrase, cheapMigration())
+	_, err := migrateToFIPSAt(context.Background(), image, migrationPassphrase, cheapMigration(), sys)
 	var merr *FIPSMigrationError
 	if !errors.Is(err, errInjectedSync) || !errors.As(err, &merr) || merr.Stage != "add keyslot" {
 		t.Fatalf("got %#v, want the add-keyslot header write to fail at its final sync", err)
 	}
-	syncDevice = (*os.File).Sync
 	if err := copiesAgree(t, image); err != nil {
 		t.Fatalf("the fixture's copies must agree, as both were written: %v", err)
 	}
@@ -1220,8 +1210,8 @@ func TestMigrateToFIPSMakesAgreeingCopiesDurableBeforeWriting(t *testing.T) {
 	t.Run("the barrier fails: nothing is written", func(t *testing.T) {
 		retry := filepath.Join(t.TempDir(), "retry.img")
 		placeImage(t, retry, left)
-		onSync(t, 1, func(*os.File) error { return errInjectedSync })
-		_, err := MigrateToFIPS(retry, migrationPassphrase, cheapMigration())
+		sys := onSync(t, 1, func(*os.File) error { return errInjectedSync })
+		_, err := migrateToFIPSAt(context.Background(), retry, migrationPassphrase, cheapMigration(), sys)
 		var merr *FIPSMigrationError
 		if !errors.Is(err, errInjectedSync) || !errors.As(err, &merr) || merr.Stage != "sync" || merr.State != fipsStateUntouched {
 			t.Fatalf("got %#v, want a sync-stage failure with the volume untouched", err)
@@ -1234,13 +1224,13 @@ func TestMigrateToFIPSMakesAgreeingCopiesDurableBeforeWriting(t *testing.T) {
 	t.Run("nothing is written before the barrier", func(t *testing.T) {
 		retry := filepath.Join(t.TempDir(), "retry.img")
 		placeImage(t, retry, left)
-		onSync(t, 1, func(f *os.File) error {
+		sys := onSync(t, 1, func(f *os.File) error {
 			if !bytes.Equal(readPrefix(t, retry, int64(len(prefix))), left) {
 				t.Fatal("the retry wrote to the device before making it durable")
 			}
 			return f.Sync()
 		})
-		result, err := MigrateToFIPS(retry, migrationPassphrase, cheapMigration())
+		result, err := migrateToFIPSAt(context.Background(), retry, migrationPassphrase, cheapMigration(), sys)
 		if err != nil || !result.Complete || result.KeyslotAdded {
 			t.Fatalf("the retry: result %+v, error %v; want complete, reusing the keyslot the first run added", result, err)
 		}
@@ -1275,9 +1265,8 @@ func TestMigrateToFIPSReadsTheMediumNotThePageCache(t *testing.T) {
 	m := newCacheModel(t, true)
 
 	rec := &writeStepRecorder{device: m.device, limit: int64(len(m.prefix))}
-	rec.install(t)
-	result, err := MigrateToFIPS(m.device, migrationPassphrase, cheapMigration())
-	rec.uninstall()
+	rec.install(t, m.sys)
+	result, err := migrateToFIPSAt(context.Background(), m.device, migrationPassphrase, cheapMigration(), rec.sys)
 	if err != nil || !result.Complete {
 		t.Fatalf("the retry: result %+v, error %v; want complete", result, err)
 	}
@@ -1317,7 +1306,7 @@ func TestMigrateToFIPSRefusesWhenTheCacheOutlivesItsEviction(t *testing.T) {
 	m := newCacheModel(t, false)
 	before := readPrefix(t, m.device, int64(len(m.prefix)))
 
-	_, err := MigrateToFIPS(m.device, migrationPassphrase, cheapMigration())
+	_, err := migrateToFIPSAt(context.Background(), m.device, migrationPassphrase, cheapMigration(), m.sys)
 	var merr *FIPSMigrationError
 	if !errors.Is(err, ErrDeviceCacheStale) || !errors.As(err, &merr) || merr.Stage != "sync" || merr.State != fipsStateUntouched {
 		t.Fatalf("got %#v, want a sync-stage ErrDeviceCacheStale with the volume untouched", err)
@@ -1341,6 +1330,7 @@ type cacheModel struct {
 	prefix     []byte
 	headerArea int
 	key        []byte
+	sys        volumeSys
 }
 
 func newCacheModel(t *testing.T, evicts bool) *cacheModel {
@@ -1375,11 +1365,10 @@ func newCacheModel(t *testing.T, evicts bool) *cacheModel {
 		t.Fatalf("open the cache image: %v", err)
 	}
 	t.Cleanup(func() { _ = cached.Close() })
-	previousReader := pinnedDeviceReader
-	t.Cleanup(func() { pinnedDeviceReader = previousReader })
-	pinnedDeviceReader = func(f *os.File) io.ReaderAt {
+	sys := testVolumeSys()
+	sys.pinnedDeviceReader = func(f *os.File) io.ReaderAt {
 		if !sameFile(t, f.Name(), device) {
-			return previousReader(f)
+			return f
 		}
 		return readerFunc(func(p []byte, off int64) (int, error) {
 			if !dropped {
@@ -1388,17 +1377,14 @@ func newCacheModel(t *testing.T, evicts bool) *cacheModel {
 			return f.ReadAt(p, off)
 		})
 	}
-	previousDrop := dropDeviceCache
-	t.Cleanup(func() { dropDeviceCache = previousDrop })
-	dropDeviceCache = func(*os.File) error {
+	sys.dropDeviceCache = func(*os.File) error {
 		dropped = evicts
 		return nil
 	}
-	previousDirect := readDeviceDirect
-	t.Cleanup(func() { readDeviceDirect = previousDirect })
-	readDeviceDirect = func(path string, off int64, n int) ([]byte, error) {
+	previousDirect := sys.readDeviceDirect
+	sys.readDeviceDirect = func(ctx context.Context, path string, off int64, n int) ([]byte, error) {
 		if !sameFile(t, path, device) {
-			return previousDirect(path, off, n)
+			return previousDirect(ctx, path, off, n)
 		}
 		medium := readPrefix(t, device, off+int64(n))
 		return medium[off:], nil
@@ -1415,7 +1401,7 @@ func newCacheModel(t *testing.T, evicts bool) *cacheModel {
 	if !bytes.Equal(readPrefix(t, device, int64(len(prefix))), medium) {
 		t.Fatal("the modeled medium is not the torn state")
 	}
-	return &cacheModel{device: device, prefix: prefix, headerArea: headerArea, key: key}
+	return &cacheModel{device: device, prefix: prefix, headerArea: headerArea, key: key, sys: sys}
 }
 
 // TestMigrateToFIPSStopsWhenTheCacheCannotBeDropped: if what the run reads
@@ -1430,11 +1416,10 @@ func TestMigrateToFIPSStopsWhenTheCacheCannotBeDropped(t *testing.T) {
 	device := argon2Volume(t, "no-drop.img", false)
 	before := fileDigest(t, device)
 	errDrop := errors.New("injected: the cache could not be dropped")
-	previous := dropDeviceCache
-	t.Cleanup(func() { dropDeviceCache = previous })
-	dropDeviceCache = func(*os.File) error { return errDrop }
+	sys := testVolumeSys()
+	sys.dropDeviceCache = func(*os.File) error { return errDrop }
 
-	_, err := MigrateToFIPS(device, migrationPassphrase, cheapMigration())
+	_, err := migrateToFIPSAt(context.Background(), device, migrationPassphrase, cheapMigration(), sys)
 	var merr *FIPSMigrationError
 	if !errors.Is(err, errDrop) || !errors.As(err, &merr) || merr.Stage != "sync" || merr.State != fipsStateUntouched {
 		t.Fatalf("got %#v, want a sync-stage failure with the volume untouched", err)
@@ -1452,13 +1437,13 @@ func TestDropDeviceCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if err := dropDeviceCache(f); err != nil {
+	if err := testVolumeSys().dropDeviceCache(f); err != nil {
 		t.Fatalf("dropDeviceCache on an open image: %v", err)
 	}
 	if err := f.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	if err := dropDeviceCache(f); err == nil {
+	if err := testVolumeSys().dropDeviceCache(f); err == nil {
 		t.Fatal("dropDeviceCache on a closed descriptor reported success")
 	}
 }
@@ -1496,18 +1481,21 @@ func TestMigrateToFIPSReportsTheStateOnTheMediumNotInTheCache(t *testing.T) {
 			placeImage(t, image, prefix)
 
 			failed := false
-			previousDirect := readDeviceDirect
-			t.Cleanup(func() { readDeviceDirect = previousDirect })
-			readDeviceDirect = func(path string, off int64, n int) ([]byte, error) {
+			sys := onSync(t, tc.barrier, func(*os.File) error {
+				failed = true
+				return errInjectedSync
+			})
+			previousDirect := sys.readDeviceDirect
+			sys.readDeviceDirect = func(ctx context.Context, path string, off int64, n int) ([]byte, error) {
 				if !failed {
-					return previousDirect(path, off, n)
+					return previousDirect(ctx, path, off, n)
 				}
 				if tc.medium == "unreadable" {
 					return nil, errDirect
 				}
-				medium, err := previousDirect(path, off, n)
+				medium, err := previousDirect(ctx, path, off, n)
 				if err == nil {
-					for i := LUKS2HeaderSize; i < LUKS2HeaderSize+crashSector; i++ {
+					for i := header.HeaderSize; i < header.HeaderSize+crashSector; i++ {
 						if int64(i) >= off && int64(i) < off+int64(len(medium)) {
 							medium[int64(i)-off] ^= 0xa5
 						}
@@ -1515,19 +1503,15 @@ func TestMigrateToFIPSReportsTheStateOnTheMediumNotInTheCache(t *testing.T) {
 				}
 				return medium, err
 			}
-			onSync(t, tc.barrier, func(*os.File) error {
-				failed = true
-				return errInjectedSync
-			})
 
-			_, err := MigrateToFIPS(image, migrationPassphrase, cheapMigration())
+			_, err := migrateToFIPSAt(context.Background(), image, migrationPassphrase, cheapMigration(), sys)
 			var merr *FIPSMigrationError
 			if !errors.Is(err, errInjectedSync) || !errors.As(err, &merr) || merr.Stage != tc.stage || merr.State != tc.state {
 				t.Fatalf("got %#v, want stage %q reporting %q", err, tc.stage, tc.state)
 			}
 			// The cache still reads the primary whole: the report did not
 			// come from it.
-			if _, _, err := ReadHeader(image); err != nil {
+			if _, _, err := readHeaderForTest(image); err != nil {
 				t.Fatalf("the cached view's primary must still read whole: %v", err)
 			}
 		})
@@ -1542,7 +1526,7 @@ func TestMigrateToFIPSReportsTheStateOnTheMediumNotInTheCache(t *testing.T) {
 func TestReadHeaderCopyFromClassifiesEveryRejection(t *testing.T) {
 	device := newImage(t, "reader.img")
 	formatWithLibrary(t, device)
-	hdr, _, err := ReadHeader(device)
+	hdr, _, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -1573,10 +1557,10 @@ func TestReadHeaderCopyFromClassifiesEveryRejection(t *testing.T) {
 	}{
 		{"short read", intact[:100], 0, io.EOF, nil},
 		{"bad magic", mutate(0, func(b []byte) { b[0] ^= 0xff }), 0, ErrInvalidHeader, nil},
-		{"LUKS1", mutate(0, func(b []byte) { binary.BigEndian.PutUint16(b[versionAt:], 1) }), 0, ErrUnsupportedLUKSVersion, ErrInvalidHeader},
+		{"LUKS1", mutate(0, func(b []byte) { binary.BigEndian.PutUint16(b[versionAt:], 1) }), 0, ErrNotLUKS2, ErrInvalidHeader},
 		{"recorded offset disagrees", mutate(0, func(b []byte) { binary.BigEndian.PutUint64(b[recordedOffsetAt:], uint64(area)) }), 0, ErrInvalidHeader, nil},
 		{"secondary size disagrees", mutate(area, func(b []byte) { binary.BigEndian.PutUint64(b[sizeAt:], uint64(2*area)) }), area, ErrInvalidHeader, nil},
-		{"checksum", mutate(LUKS2HeaderSize, func(b []byte) { b[0] ^= 0xff }), 0, ErrInvalidHeader, nil},
+		{"checksum", mutate(header.HeaderSize, func(b []byte) { b[0] ^= 0xff }), 0, ErrInvalidHeader, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1597,7 +1581,7 @@ func TestReadHeaderCopyFromClassifiesEveryRejection(t *testing.T) {
 func lockedDevice(t *testing.T, path string) *keyslotDevice {
 	t.Helper()
 
-	lock, dev, err := lockKeyslotDevice(path)
+	lock, dev, err := lockKeyslotDevice(context.Background(), path, testVolumeSys())
 	if err != nil {
 		t.Fatalf("lockKeyslotDevice(%s): %v", path, err)
 	}
@@ -1607,15 +1591,15 @@ func lockedDevice(t *testing.T, path string) *keyslotDevice {
 
 // repairOn runs repairSecondaryHeader on path under its own lock, released
 // before it returns.
-func repairOn(t *testing.T, path string, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) error {
+func repairOn(t *testing.T, path string, hdr *header.BinaryHeader, metadata *header.Metadata, sys volumeSys) error {
 	t.Helper()
 
-	lock, dev, err := lockKeyslotDevice(path)
+	lock, dev, err := lockKeyslotDevice(context.Background(), path, sys)
 	if err != nil {
 		t.Fatalf("lockKeyslotDevice(%s): %v", path, err)
 	}
 	defer func() { _ = lock.Release() }()
-	return repairSecondaryHeader(dev, hdr, metadata)
+	return repairSecondaryHeader(context.Background(), dev, hdr, metadata)
 }
 
 // copiesAgree is headerCopiesAgree on path, read through a descriptor of its

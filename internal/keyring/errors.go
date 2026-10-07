@@ -78,40 +78,40 @@ var (
 	// ErrKeyring is the ROOT of every keyring condition this package raises,
 	// and the only sentinel that is safe to use as a catch-all: every other
 	// sentinel below matches it too.
-	ErrKeyring error = Sentinel("a kernel keyring operation failed")
+	ErrKeyring error = Sentinel("dmcrypt: a kernel keyring operation failed")
 
 	// ErrUnavailable indicates that the volume key could not be placed in the
 	// kernel keyring, and that the operation was therefore REFUSED. It is the
 	// umbrella for UNAVAILABILITY specifically; it is NOT the catch-all for
 	// everything keyring-shaped (ErrEntryExists and ErrKeyNotReleased do not
 	// match it -- use ErrKeyring for that).
-	ErrUnavailable error = Sentinel("the volume key could not be placed in the kernel keyring")
+	ErrUnavailable error = Sentinel("dmcrypt: the volume key could not be placed in the kernel keyring")
 
 	// ErrBlocked indicates the kernel keyring syscalls are refused by policy
 	// rather than being absent -- almost always a container seccomp profile.
-	ErrBlocked error = Sentinel("the kernel keyring syscalls are blocked by policy")
+	ErrBlocked error = Sentinel("dmcrypt: the kernel keyring syscalls are blocked by policy")
 
 	// ErrUnsupported indicates the kernel does not implement the keyring
 	// syscalls at all -- built without CONFIG_KEYS.
-	ErrUnsupported error = Sentinel("this kernel does not implement the keyring syscalls")
+	ErrUnsupported error = Sentinel("dmcrypt: this kernel does not implement the keyring syscalls")
 
 	// ErrQuotaExhausted indicates the per-user kernel key quota is full.
-	ErrQuotaExhausted error = Sentinel("the kernel key quota for this user is exhausted")
+	ErrQuotaExhausted error = Sentinel("dmcrypt: the kernel key quota for this user is exhausted")
 
 	// ErrFailed indicates the keyring syscalls are reachable and the kernel
 	// refused the operation anyway, for a reason none of the other three
 	// describe.
-	ErrFailed error = Sentinel("the kernel keyring refused the operation")
+	ErrFailed error = Sentinel("dmcrypt: the kernel keyring refused the operation")
 
 	// ErrEntryExists indicates a key was ALREADY present under the
 	// description this unlock was about to use -- an anomaly, refused rather
 	// than resolved (see AddVolumeKey).
-	ErrEntryExists error = Sentinel("a kernel keyring entry already exists for this volume")
+	ErrEntryExists error = Sentinel("dmcrypt: a kernel keyring entry already exists for this volume")
 
 	// ErrKeyNotReleased indicates that a keyring entry holding a volume key
 	// could not be revoked and unlinked after the activation that needed it,
 	// and that the key MAY STILL BE PRESENT in the kernel keyring.
-	ErrKeyNotReleased error = Sentinel("a kernel keyring entry holding the volume key could not be released")
+	ErrKeyNotReleased error = Sentinel("dmcrypt: a kernel keyring entry holding the volume key could not be released")
 )
 
 // UnavailableError reports that the kernel keyring could not hold the volume

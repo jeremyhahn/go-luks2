@@ -5,179 +5,96 @@
 // No build constraint. Everything here runs in memory or on a file under
 // t.TempDir() and needs no system binary, so it belongs in both tiers -- and
 // tokenIDVolume/stampTokens below are the fixture the integration tier's
-// cryptsetup measurement builds on (token_integration_test.go).
+// cryptsetup measurement builds on (token_integration_test.go). The ForTest
+// helpers below are needed by both tiers too, which is why they live in this
+// untagged file rather than in token_v2_test.go (!integration).
 
 package luks2
 
 import (
+	"context"
 	"encoding/json"
-	"errors"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-func TestGetToken_InvalidTokenID(t *testing.T) {
-	tests := []struct {
-		name    string
-		tokenID int
-	}{
-		{"negative ID", -1},
-		{"ID too large", MaxTokenSlots},
-		{"ID way too large", 100},
+// setTokenForTest, removeTokenForTest, getTokenForTest, listTokensForTest and
+// countTokensForTest open device, do the one call, and close it again -- the
+// way the pre-redesign library's luks2.ImportToken/RemoveToken/GetToken/
+// ListTokens/CountTokens did before B.6 moved them onto
+// (*luks2.Volume).SetToken/RemoveToken and (*Header).Tokens().
+func setTokenForTest(device string, id int, t Token, opts ...Option) error {
+	v, err := Open(context.Background(), device, cheapOpts(opts)...)
+	if err != nil {
+		return err
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := GetToken("/dev/null", tt.tokenID)
-			if err == nil {
-				t.Error("expected error for invalid token ID")
-			}
-		})
-	}
+	defer func() { _ = v.Close() }()
+	return v.SetToken(context.Background(), id, t)
 }
 
-func TestGetToken_InvalidDevice(t *testing.T) {
-	_, err := GetToken("/nonexistent/device", 0)
-	if err == nil {
-		t.Error("expected error for nonexistent device")
+// setTokenJSONForTest is setTokenForTest for a caller holding raw token
+// JSON rather than a Token value -- the way the pre-redesign library's
+// luks2.ImportTokenJSON did before B.6 deleted it in favor of
+// json.Unmarshal onto luks2.Token.
+func setTokenJSONForTest(device string, id int, data []byte, opts ...Option) error {
+	var t Token
+	if err := json.Unmarshal(data, &t); err != nil {
+		return err
 	}
+	return setTokenForTest(device, id, t, opts...)
 }
 
-func TestListTokens_InvalidDevice(t *testing.T) {
-	_, err := ListTokens("/nonexistent/device")
-	if err == nil {
-		t.Error("expected error for nonexistent device")
+func removeTokenForTest(device string, id int, opts ...Option) error {
+	v, err := Open(context.Background(), device, cheapOpts(opts)...)
+	if err != nil {
+		return err
 	}
+	defer func() { _ = v.Close() }()
+	return v.RemoveToken(context.Background(), id)
 }
 
-func TestExportToken_InvalidDevice(t *testing.T) {
-	_, err := ExportToken("/nonexistent/device", 0)
-	if err == nil {
-		t.Error("expected error for nonexistent device")
+func getTokenForTest(device string, id int) (Token, bool, error) {
+	v, err := Open(context.Background(), device, withTestSys(testVolumeSys()))
+	if err != nil {
+		return Token{}, false, err
 	}
+	defer func() { _ = v.Close() }()
+	hdr, err := v.Header(context.Background())
+	if err != nil {
+		return Token{}, false, err
+	}
+	t, ok := hdr.Tokens()[id]
+	return t, ok, nil
 }
 
-func TestImportToken_InvalidTokenID(t *testing.T) {
-	token := &Token{Type: "test"}
-	tests := []struct {
-		name    string
-		tokenID int
-	}{
-		{"negative ID", -1},
-		{"ID too large", MaxTokenSlots},
+func listTokensForTest(device string) (map[int]Token, error) {
+	v, err := Open(context.Background(), device, withTestSys(testVolumeSys()))
+	if err != nil {
+		return nil, err
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := ImportToken("/dev/null", tt.tokenID, token)
-			if err == nil {
-				t.Error("expected error for invalid token ID")
-			}
-		})
+	defer func() { _ = v.Close() }()
+	hdr, err := v.Header(context.Background())
+	if err != nil {
+		return nil, err
 	}
+	return hdr.Tokens(), nil
 }
 
-func TestImportToken_NilToken(t *testing.T) {
-	err := ImportToken("/dev/null", 0, nil)
-	if err == nil {
-		t.Error("expected error for nil token")
+func countTokensForTest(device string) (int, error) {
+	tokens, err := listTokensForTest(device)
+	if err != nil {
+		return 0, err
 	}
-}
-
-func TestImportToken_EmptyType(t *testing.T) {
-	token := &Token{Type: ""}
-	err := ImportToken("/dev/null", 0, token)
-	if err == nil {
-		t.Error("expected error for empty token type")
-	}
-}
-
-func TestImportToken_InvalidDevice(t *testing.T) {
-	token := &Token{Type: "test", Keyslots: []string{"0"}}
-	err := ImportToken("/nonexistent/device", 0, token)
-	if err == nil {
-		t.Error("expected error for invalid device")
-	}
-}
-
-func TestImportTokenJSON_InvalidJSON(t *testing.T) {
-	err := ImportTokenJSON("/dev/null", 0, []byte("not json"))
-	if err == nil {
-		t.Error("expected error for invalid JSON")
-	}
-}
-
-func TestRemoveToken_InvalidTokenID(t *testing.T) {
-	tests := []struct {
-		name    string
-		tokenID int
-	}{
-		{"negative ID", -1},
-		{"ID too large", MaxTokenSlots},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := RemoveToken("/dev/null", tt.tokenID)
-			if err == nil {
-				t.Error("expected error for invalid token ID")
-			}
-		})
-	}
-}
-
-func TestRemoveToken_InvalidDevice(t *testing.T) {
-	err := RemoveToken("/nonexistent/device", 0)
-	if err == nil {
-		t.Error("expected error for invalid device")
-	}
-}
-
-func TestFindFreeTokenSlot_InvalidDevice(t *testing.T) {
-	_, err := FindFreeTokenSlot("/nonexistent/device")
-	if err == nil {
-		t.Error("expected error for invalid device")
-	}
-}
-
-func TestTokenExists_InvalidTokenID(t *testing.T) {
-	tests := []struct {
-		name    string
-		tokenID int
-	}{
-		{"negative ID", -1},
-		{"ID too large", MaxTokenSlots},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := TokenExists("/dev/null", tt.tokenID)
-			if err == nil {
-				t.Error("expected error for invalid token ID")
-			}
-		})
-	}
-}
-
-func TestTokenExists_InvalidDevice(t *testing.T) {
-	_, err := TokenExists("/nonexistent/device", 0)
-	if err == nil {
-		t.Error("expected error for invalid device")
-	}
-}
-
-func TestCountTokens_InvalidDevice(t *testing.T) {
-	_, err := CountTokens("/nonexistent/device")
-	if err == nil {
-		t.Error("expected error for invalid device")
-	}
+	return len(tokens), nil
 }
 
 func TestTokenJSONMarshal(t *testing.T) {
-	token := &Token{
-		Type:            TokenTypeSystemdFIDO2,
+	token := &LegacyToken{
+		Type:            "systemd-fido2",
 		Keyslots:        []string{"1"},
 		FIDO2Credential: "dGVzdC1jcmVkZW50aWFs",
 		FIDO2Salt:       "dGVzdC1zYWx0",
@@ -190,7 +107,7 @@ func TestTokenJSONMarshal(t *testing.T) {
 		t.Fatalf("failed to marshal token: %v", err)
 	}
 
-	var parsed Token
+	var parsed LegacyToken
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		t.Fatalf("failed to unmarshal token: %v", err)
 	}
@@ -235,7 +152,7 @@ func TestSystemdTPM2TokenSurvivesUnmodeled(t *testing.T) {
 		`"tpm2-pcr-bank":"sha256","tpm2-primary-alg":"ecc",` +
 		`"tpm2-policy-hash":"dGVzdC1wb2xpY3ktaGFzaA==","tpm2-pin":false}`
 
-	var token Token
+	var token LegacyToken
 	if err := json.Unmarshal([]byte(real), &token); err != nil {
 		t.Fatalf("decoding a systemd-tpm2 token: %v", err)
 	}
@@ -248,7 +165,7 @@ func TestSystemdTPM2TokenSurvivesUnmodeled(t *testing.T) {
 		t.Errorf("Keyslots = %v, want [2]", token.Keyslots)
 	}
 
-	// Value receiver on purpose: json.Marshal of a bare Token does not take
+	// Value receiver on purpose: json.Marshal of a bare LegacyToken does not take
 	// its address, and a pointer-receiver marshaler would silently not fire.
 	out, err := json.Marshal(token)
 	if err != nil {
@@ -273,18 +190,18 @@ func TestSystemdTPM2TokenSurvivesUnmodeled(t *testing.T) {
 // typed TPM2 field back, this fails and points at the ruling rather than at a
 // style preference.
 func TestTPM2MembersAreNotModelled(t *testing.T) {
-	for _, name := range jsonMemberNames(reflect.TypeOf(Token{})) {
+	for _, name := range jsonMemberNames(reflect.TypeOf(LegacyToken{})) {
 		if strings.HasPrefix(name, "tpm2-") {
-			t.Errorf("Token models the TPM2 member %q. go-xkms owns TPM2 (#189); "+
+			t.Errorf("LegacyToken models the TPM2 member %q. go-xkms owns TPM2 (#189); "+
 				"a consumer that needs to interpret such a token supplies it through "+
 				"KeyProvider, and the passthrough carries it meanwhile.", name)
 		}
 	}
 }
 
-func TestMaxTokenSlots(t *testing.T) {
-	if MaxTokenSlots != 32 {
-		t.Errorf("MaxTokenSlots should be 32, got %d", MaxTokenSlots)
+func TestMaxTokens(t *testing.T) {
+	if MaxTokens != 32 {
+		t.Errorf("MaxTokens should be 32, got %d", MaxTokens)
 	}
 }
 
@@ -292,22 +209,22 @@ func TestErrTokenNotFound(t *testing.T) {
 	if ErrTokenNotFound == nil {
 		t.Error("ErrTokenNotFound should not be nil")
 	}
-	if ErrTokenNotFound.Error() != "token not found" {
+	if ErrTokenNotFound.Error() != "luks2: token not found" {
 		t.Errorf("unexpected error message: %s", ErrTokenNotFound.Error())
 	}
 }
 
 func TestErrNoFreeTokenSlot(t *testing.T) {
-	if ErrNoFreeTokenSlot == nil {
-		t.Error("ErrNoFreeTokenSlot should not be nil")
+	if ErrNoSpace == nil {
+		t.Error("ErrNoSpace should not be nil")
 	}
-	if ErrNoFreeTokenSlot.Error() != "no free token slots available" {
-		t.Errorf("unexpected error message: %s", ErrNoFreeTokenSlot.Error())
+	if ErrNoSpace.Error() != "luks2: no space" {
+		t.Errorf("unexpected error message: %s", ErrNoSpace.Error())
 	}
 }
 
 // tokenIDVolume writes a container whose token map carries the given keys
-// VERBATIM, so a non-canonical spelling reaches the disk. ImportToken cannot
+// VERBATIM, so a non-canonical spelling reaches the disk. SetToken cannot
 // produce one -- it keys by strconv.Itoa -- which is exactly why the fixture
 // goes through the header writer instead.
 //
@@ -321,22 +238,22 @@ func TestErrNoFreeTokenSlot(t *testing.T) {
 func tokenIDVolume(t *testing.T, name string, keys ...string) string {
 	t.Helper()
 
-	path := formattedImage(t, "tokenIDVolume", name, 64<<20, func() FormatOptions {
-		return FormatOptions{
+	path := formattedImage(t, "tokenIDVolume", name, 64<<20, func() formatOptionsForTest {
+		return formatOptionsForTest{
 			Passphrase:    []byte("token-id-fixture-passphrase"),
 			Cipher:        "aes",
 			CipherMode:    "xts-plain64",
 			KeySize:       512,
 			HashAlgo:      "sha512",
 			SectorSize:    512,
-			KDFType:       KDFTypePBKDF2,
+			KDFType:       kdfTypePBKDF2,
 			PBKDFIterTime: 1,
 		}
 	})
 
-	tokens := make(map[string]*Token, len(keys))
+	tokens := make(map[string]*LegacyToken, len(keys))
 	for _, key := range keys {
-		tokens[key] = &Token{Type: "written-as-" + key, Keyslots: []string{"0"}}
+		tokens[key] = &LegacyToken{Type: "written-as-" + key, Keyslots: []string{"0"}}
 	}
 	stampTokens(t, path, tokens)
 	return path
@@ -345,10 +262,10 @@ func tokenIDVolume(t *testing.T, name string, keys ...string) string {
 // stampTokens replaces a container's token map with exactly the map given,
 // through the header writer, so entries the exported token API cannot create --
 // a non-canonical id, a JSON null -- reach the disk.
-func stampTokens(t *testing.T, path string, tokens map[string]*Token) {
+func stampTokens(t *testing.T, path string, tokens map[string]*LegacyToken) {
 	t.Helper()
 
-	hdr, metadata, err := ReadHeader(path)
+	hdr, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -361,7 +278,7 @@ func stampTokens(t *testing.T, path string, tokens map[string]*Token) {
 // TestListTokensDoesNotCollapseTwoSpellingsOfOneTokenID is the fix for #35.
 //
 // strconv.Atoi accepts "01" and returns 1, so a header carrying both "1" and
-// "01" produced ONE entry in the returned map[int]*Token -- whichever spelling
+// "01" produced ONE entry in the returned map[int]Token -- whichever spelling
 // Go's randomized map iteration reached last silently overwrote the other. The
 // damage is not that "01" is invisible; it is that the WORKING token at "1"
 // could disappear from inspection, on a different read each time.
@@ -376,19 +293,20 @@ func TestListTokensDoesNotCollapseTwoSpellingsOfOneTokenID(t *testing.T) {
 	// Repeated because the defect is decided by map iteration order: a single
 	// read passes roughly half the time against the unfixed code.
 	for i := 0; i < 25; i++ {
-		tokens, err := ListTokens(path)
+		tokens, err := listTokensForTest(path)
 		if err != nil {
-			t.Fatalf("ListTokens failed on read %d: %v", i, err)
+			t.Fatalf("Tokens failed on read %d: %v", i, err)
 		}
 		if len(tokens) != 1 {
 			t.Fatalf("read %d returned %d tokens, want 1", i, len(tokens))
 		}
-		if tokens[1] == nil {
+		tok, ok := tokens[1]
+		if !ok {
 			t.Fatalf("read %d returned no token at slot 1", i)
 		}
-		if tokens[1].Type != "written-as-1" {
+		if tok.Type != "written-as-1" {
 			t.Fatalf("read %d returned the token written under %q at slot 1; the non-canonical spelling displaced the real one",
-				i, strings.TrimPrefix(tokens[1].Type, "written-as-"))
+				i, strings.TrimPrefix(tok.Type, "written-as-"))
 		}
 	}
 }
@@ -403,17 +321,17 @@ func TestListTokensSkipsANonCanonicalTokenIDOnItsOwn(t *testing.T) {
 
 	path := tokenIDVolume(t, "token-id-lone.img", "01")
 
-	tokens, err := ListTokens(path)
+	tokens, err := listTokensForTest(path)
 	if err != nil {
-		t.Fatalf("ListTokens failed: %v", err)
+		t.Fatalf("Tokens failed: %v", err)
 	}
 	if len(tokens) != 0 {
-		t.Fatalf("ListTokens = %v, want no tokens: %q is not a token id any implementation can reach", tokens, "01")
+		t.Fatalf("Tokens() = %v, want no tokens: %q is not a token id any implementation can reach", tokens, "01")
 	}
 
 	// The header is still readable and still opens. Refusing it would be the
 	// bricking direction the tokens-are-tolerated ruling exists to avoid.
-	if _, _, err := ReadHeader(path); err != nil {
+	if _, _, err := readHeaderForTest(path); err != nil {
 		t.Fatalf("the header no longer reads: %v", err)
 	}
 }
@@ -485,20 +403,20 @@ func TestCountTokensCountsOnlyTheTokensAnyoneCanAddress(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			path := tokenIDVolume(t, "token-count.img", tc.keys...)
 
-			count, err := CountTokens(path)
+			count, err := countTokensForTest(path)
 			if err != nil {
-				t.Fatalf("CountTokens failed: %v", err)
+				t.Fatalf("countTokensForTest failed: %v", err)
 			}
 			if count != tc.want {
-				t.Fatalf("CountTokens = %d, want %d", count, tc.want)
+				t.Fatalf("len(Tokens()) = %d, want %d", count, tc.want)
 			}
 
-			tokens, err := ListTokens(path)
+			tokens, err := listTokensForTest(path)
 			if err != nil {
-				t.Fatalf("ListTokens failed: %v", err)
+				t.Fatalf("Tokens failed: %v", err)
 			}
 			if len(tokens) != count {
-				t.Fatalf("CountTokens = %d but ListTokens returned %d entries; the two must describe the same header",
+				t.Fatalf("count = %d but Tokens() returned %d entries; the two must describe the same header",
 					count, len(tokens))
 			}
 		})
@@ -513,9 +431,9 @@ func TestListTokensIsUnaffectedByKeysThatAreNotNumbersAtAll(t *testing.T) {
 
 	path := tokenIDVolume(t, "token-id-junk.img", "0", "keyring", "")
 
-	tokens, err := ListTokens(path)
+	tokens, err := listTokensForTest(path)
 	if err != nil {
-		t.Fatalf("ListTokens failed: %v", err)
+		t.Fatalf("Tokens failed: %v", err)
 	}
 	ids := make([]int, 0, len(tokens))
 	for id := range tokens {
@@ -523,115 +441,81 @@ func TestListTokensIsUnaffectedByKeysThatAreNotNumbersAtAll(t *testing.T) {
 	}
 	slices.Sort(ids)
 	if !slices.Equal(ids, []int{0}) {
-		t.Fatalf("ListTokens returned slots %v, want [0]", ids)
+		t.Fatalf("Tokens returned slots %v, want [0]", ids)
 	}
 }
 
-// TestGetTokenNeverReturnsNilWithoutAnError is the standing guard for #69.
+// TestTokensNormalizesTheNullSlotAsAbsent is the standing guard for #69.
 //
 // #69 was measured on dev/main at 1cef774, BEFORE null entries were normalized
 // at the parse. Then, a token written as JSON null survived the round trip as
-// a present key holding a nil pointer, and GetToken's `token, exists :=` check
-// reported it as FOUND -- so it returned (nil, nil) and a caller following the
-// documented contract dereferenced nil. The parse-time normalization closed it:
-// the entry is removed before GetToken ever sees the map, so "present and null"
-// no longer exists as a state.
+// a present key holding a nil pointer, and the old GetToken's `token, exists :=`
+// check reported it as FOUND -- so it returned (nil, nil) and a caller
+// following the documented contract dereferenced nil. The parse-time
+// normalization closed it: the entry is removed before any token lookup ever
+// sees the map, so "present and null" no longer exists as a state.
 //
-// This test is what stops that from being re-opened silently. It asserts the
-// CONTRACT rather than the mechanism -- (nil, nil) is never returned -- so it
-// fails if the normalization is removed, if a second read path skips it, or if
-// GetToken is ever handed metadata from somewhere that does not normalize.
-//
-// No nil guard was added inside GetToken. It could not fire today, and #62
-// records what this package pays for controls that cannot fire: they look like
-// safety, they are never exercised, and their tests pass for reasons unrelated
-// to them.
-func TestGetTokenNeverReturnsNilWithoutAnError(t *testing.T) {
+// This test is what stops that from being re-opened silently: it fails if the
+// normalization is removed, if a second read path skips it, or if Tokens is
+// ever handed metadata from somewhere that does not normalize.
+func TestTokensNormalizesTheNullSlotAsAbsent(t *testing.T) {
 	defer parallel(t)()
 
 	path := tokenIDVolume(t, "null-token-api.img")
-	stampTokens(t, path, map[string]*Token{
+	stampTokens(t, path, map[string]*LegacyToken{
 		"0": nil,
 		"1": {Type: "healthy", Keyslots: []string{"0"}},
 	})
 
-	t.Run("GetToken reports the null slot as absent", func(t *testing.T) {
-		token, err := GetToken(path, 0)
-		// The VALUE first: a store that reports missing as (nil, nil) makes an
-		// error-only assertion vacuous, and (nil, nil) is precisely the state
-		// under test.
-		if token != nil {
-			t.Fatalf("GetToken(0) returned a token for a null entry: %+v", token)
+	t.Run("Tokens reports the null slot as absent", func(t *testing.T) {
+		_, ok, err := getTokenForTest(path, 0)
+		if err != nil {
+			t.Fatalf("getTokenForTest(0): %v", err)
 		}
-		if err == nil {
-			t.Fatal("GetToken(0) returned (nil, nil): absent and present-but-null are again indistinguishable")
-		}
-		if !errors.Is(err, ErrTokenNotFound) {
-			t.Fatalf("GetToken(0) error = %v, want ErrTokenNotFound", err)
+		if ok {
+			t.Fatal("Tokens()[0] reports a token for a null entry")
 		}
 	})
 
 	t.Run("the healthy token is untouched", func(t *testing.T) {
-		token, err := GetToken(path, 1)
+		token, ok, err := getTokenForTest(path, 1)
 		if err != nil {
-			t.Fatalf("GetToken(1) failed: %v", err)
+			t.Fatalf("getTokenForTest(1): %v", err)
 		}
-		if token == nil || token.Type != "healthy" {
-			t.Fatalf("GetToken(1) = %+v, want the healthy token", token)
+		if !ok || token.Type != "healthy" {
+			t.Fatalf("Tokens()[1] = %+v, %v; want the healthy token", token, ok)
 		}
 	})
 
-	t.Run("ListTokens hands no nil to its callers", func(t *testing.T) {
-		tokens, err := ListTokens(path)
+	t.Run("Tokens hands no null entry to its callers", func(t *testing.T) {
+		tokens, err := listTokensForTest(path)
 		if err != nil {
-			t.Fatalf("ListTokens failed: %v", err)
+			t.Fatalf("listTokensForTest failed: %v", err)
 		}
-		for id, token := range tokens {
-			if token == nil {
-				t.Fatalf("ListTokens returned a nil token at slot %d; every caller iterating this map dereferences it", id)
-			}
-		}
-		if len(tokens) != 1 || tokens[1] == nil {
-			t.Fatalf("ListTokens = %v, want only the healthy token at slot 1", tokens)
+		if _, ok := tokens[1]; len(tokens) != 1 || !ok {
+			t.Fatalf("Tokens() = %v, want only the healthy token at slot 1", tokens)
 		}
 	})
 
-	t.Run("TokenExists and CountTokens agree with the listing", func(t *testing.T) {
-		exists, err := TokenExists(path, 0)
+	t.Run("the count agrees with the listing", func(t *testing.T) {
+		count, err := countTokensForTest(path)
 		if err != nil {
-			t.Fatalf("TokenExists failed: %v", err)
-		}
-		if exists {
-			t.Fatal("TokenExists(0) reports the null entry as a token")
-		}
-		count, err := CountTokens(path)
-		if err != nil {
-			t.Fatalf("CountTokens failed: %v", err)
+			t.Fatalf("countTokensForTest failed: %v", err)
 		}
 		if count != 1 {
-			t.Fatalf("CountTokens = %d, want 1", count)
-		}
-	})
-
-	t.Run("ExportToken does not marshal a nil token", func(t *testing.T) {
-		data, err := ExportToken(path, 0)
-		if data != nil {
-			t.Fatalf("ExportToken(0) produced %q for a null entry", data)
-		}
-		if !errors.Is(err, ErrTokenNotFound) {
-			t.Fatalf("ExportToken(0) error = %v, want ErrTokenNotFound", err)
+			t.Fatalf("len(Tokens()) = %d, want 1", count)
 		}
 	})
 
 	t.Run("the caller can learn the entry was dropped", func(t *testing.T) {
 		// The other half of the contract, from #27: absent-because-never-there
 		// and absent-because-removed are different facts about a container, and
-		// a caller that only sees ErrTokenNotFound cannot tell them apart.
-		_, metadata, err := ReadHeader(path)
+		// a caller that only sees an absent slot cannot tell them apart.
+		_, metadata, err := readHeaderForTest(path)
 		if err != nil {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
-		want := []DroppedEntry{{Kind: DroppedKindToken, ID: "0"}}
+		want := []header.DroppedEntry{{Kind: header.DroppedKindToken, ID: "0"}}
 		if !slices.Equal(metadata.DroppedNullEntries, want) {
 			t.Fatalf("DroppedNullEntries = %v, want %v", metadata.DroppedNullEntries, want)
 		}
@@ -643,9 +527,9 @@ func TestGetTokenNeverReturnsNilWithoutAnError(t *testing.T) {
 //
 // "-1", "32" and "999" are canonical spellings of numbers, so the round-trip
 // check admits them on its own. Every other token entry point rejects them --
-// GetToken, ImportToken, RemoveToken and TokenExists all bound the id to
-// 0..MaxTokenSlots-1 -- so listing them produced exactly the state #35 exists
-// to remove: a listing naming a token no caller can retrieve.
+// AddToken, SetToken and RemoveToken all bound the id to 0..MaxTokens-1 -- so
+// listing them produced exactly the state #35 exists to remove: a listing
+// naming a token no caller can retrieve.
 //
 // The assertion is the AGREEMENT, not the count. It retrieves every id the
 // listing reports and requires the retrieval to succeed, so a listing and a
@@ -669,9 +553,9 @@ func TestListTokensSkipsAnIDNoOtherEntryPointAccepts(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			path := tokenIDVolume(t, "token-range.img", tc.keys...)
 
-			tokens, err := ListTokens(path)
+			tokens, err := listTokensForTest(path)
 			if err != nil {
-				t.Fatalf("ListTokens failed: %v", err)
+				t.Fatalf("Tokens failed: %v", err)
 			}
 			got := make([]int, 0, len(tokens))
 			for id := range tokens {
@@ -679,18 +563,18 @@ func TestListTokensSkipsAnIDNoOtherEntryPointAccepts(t *testing.T) {
 			}
 			slices.Sort(got)
 			if !slices.Equal(got, tc.want) {
-				t.Fatalf("ListTokens returned slots %v, want %v", got, tc.want)
+				t.Fatalf("Tokens returned slots %v, want %v", got, tc.want)
 			}
 
 			// Every listed id must be retrievable. This is the property, and
 			// it is what a count assertion cannot express.
 			for _, id := range got {
-				token, err := GetToken(path, id)
+				_, ok, err := getTokenForTest(path, id)
 				if err != nil {
-					t.Fatalf("ListTokens reported slot %d but GetToken(%d) failed: %v", id, id, err)
+					t.Fatalf("Tokens reported slot %d but getTokenForTest(%d) failed: %v", id, id, err)
 				}
-				if token == nil {
-					t.Fatalf("ListTokens reported slot %d but GetToken(%d) returned no token", id, id)
+				if !ok {
+					t.Fatalf("Tokens reported slot %d but Tokens()[%d] returned no token", id, id)
 				}
 			}
 
@@ -698,7 +582,7 @@ func TestListTokensSkipsAnIDNoOtherEntryPointAccepts(t *testing.T) {
 			// tolerated, not grounds to refuse a container. An operator has to
 			// be able to inspect a damaged header, which is precisely when they
 			// need to.
-			if _, _, err := ReadHeader(path); err != nil {
+			if _, _, err := readHeaderForTest(path); err != nil {
 				t.Fatalf("the header no longer reads: %v", err)
 			}
 		})

@@ -7,6 +7,7 @@
 package luks2
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -45,7 +46,7 @@ const digestScanRepeats = 64
 //
 // The association rule itself is tested where it belongs, on its own fixtures,
 // in digestbinding_test.go.
-func boundTo(id string, digests map[string]*Digest) map[string]*Digest {
+func boundTo(id string, digests map[string]*rawDigest) map[string]*rawDigest {
 	for _, d := range digests {
 		if d != nil {
 			d.Keyslots = []string{id}
@@ -61,11 +62,11 @@ func boundTo(id string, digests map[string]*Digest) map[string]*Digest {
 // times, and at the 1000 iterations this used to carry each repeat paid two
 // full derivations for nothing it asserts -- these were among the slowest
 // tests in the package under -race (#92).
-func usableDigest(t *testing.T, masterKey []byte, length int) *Digest {
+func usableDigest(t *testing.T, masterKey []byte, length int) *rawDigest {
 	t.Helper()
 
 	iterations := minKDFIterations
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       encodeBase64([]byte("digest-scan-salt")),
@@ -77,7 +78,7 @@ func usableDigest(t *testing.T, masterKey []byte, length int) *Digest {
 		t.Fatalf("failed to derive the usable digest: %v", err)
 	}
 
-	return &Digest{
+	return &rawDigest{
 		Type:       kdf.Type,
 		Hash:       kdf.Hash,
 		Salt:       kdf.Salt,
@@ -90,12 +91,12 @@ func usableDigest(t *testing.T, masterKey []byte, length int) *Digest {
 // fails at a different point: base64 decode, salt decode, KDF dispatch, and
 // argon2 parameter validation -- the last standing in for the FIPS refusal,
 // which cannot be toggled inside a running process.
-func unusableDigests(t *testing.T) map[string]*Digest {
+func unusableDigests(t *testing.T) map[string]*rawDigest {
 	t.Helper()
 
 	iterations := 1000
 
-	return map[string]*Digest{
+	return map[string]*rawDigest{
 		"undecodable digest value": {
 			Type:       "pbkdf2",
 			Hash:       "sha256",
@@ -163,12 +164,12 @@ func TestVerifyMasterKeySkipsUnusableDigests(t *testing.T) {
 			defer parallel(t)()
 
 			for i := 0; i < digestScanRepeats; i++ {
-				digests := map[string]*Digest{
+				digests := map[string]*rawDigest{
 					"0": bad,
 					"1": usableDigest(t, masterKey, 32),
 				}
 
-				if err := verifyMasterKey(enclaveFrom(t, masterKey), "0", boundTo("0", digests)); err != nil {
+				if err := verifyMasterKey(context.Background(), enclaveFrom(t, masterKey), "0", boundTo("0", digests)); err != nil {
 					t.Fatalf("run %d: a %s hid the usable digest behind it: %v", i, name, err)
 				}
 			}
@@ -193,7 +194,7 @@ func TestVerifyMasterKeySkipsEveryUnusableDigestAtOnce(t *testing.T) {
 	usable := usableDigest(t, masterKey, 32)
 
 	for i := 0; i < digestScanRepeats; i++ {
-		digests := map[string]*Digest{}
+		digests := map[string]*rawDigest{}
 		id := 0
 		for _, bad := range unusable {
 			digests[string(rune('a'+id))] = bad
@@ -201,7 +202,7 @@ func TestVerifyMasterKeySkipsEveryUnusableDigestAtOnce(t *testing.T) {
 		}
 		digests["z"] = usable
 
-		if err := verifyMasterKey(enclaveFrom(t, masterKey), "0", boundTo("0", digests)); err != nil {
+		if err := verifyMasterKey(context.Background(), enclaveFrom(t, masterKey), "0", boundTo("0", digests)); err != nil {
 			t.Fatalf("run %d: the usable digest was not reached past %d unusable ones: %v", i, id, err)
 		}
 	}
@@ -217,7 +218,7 @@ func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
 	masterKey := []byte("digest-scan-master-key-32-bytes!")
 
 	t.Run("every digest unusable is a HEADER fault, because nothing was compared", func(t *testing.T) {
-		// This subtest asserted ErrMasterKeyVerification until #41, and it was
+		// This subtest asserted ErrWrongKey until #41, and it was
 		// DEFENDING the defect rather than guarding against one: not one of
 		// these digests reaches EqualTo, so no key was ever judged, and a
 		// verification verdict claims a judgement that did not happen.
@@ -227,18 +228,18 @@ func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
 		// subtest below, and the two must not be collapsed: the whole reason
 		// this case may be distinguished at all is that no comparison outcome
 		// exists to leak.
-		digests := map[string]*Digest{}
+		digests := map[string]*rawDigest{}
 		id := 0
 		for _, bad := range unusableDigests(t) {
 			digests[string(rune('a'+id))] = bad
 			id++
 		}
 
-		err := verifyMasterKey(enclaveFrom(t, masterKey), "0", boundTo("0", digests))
+		err := verifyMasterKey(context.Background(), enclaveFrom(t, masterKey), "0", boundTo("0", digests))
 		if !errors.Is(err, ErrInvalidHeader) {
 			t.Fatalf("verifyMasterKey = %v, want ErrInvalidHeader", err)
 		}
-		if errors.Is(err, ErrMasterKeyVerification) {
+		if errors.Is(err, ErrWrongKey) {
 			t.Fatalf("a set nothing could compare was reported as a failed verification: %v", err)
 		}
 	})
@@ -252,14 +253,14 @@ func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
 		// into a header fault.
 		for name, bad := range unusableDigests(t) {
 			t.Run(name, func(t *testing.T) {
-				digests := map[string]*Digest{
+				digests := map[string]*rawDigest{
 					"0": bad,
 					"1": usableDigest(t, []byte("some-other-master-key-32-bytes!!"), 32),
 				}
 
-				err := verifyMasterKey(enclaveFrom(t, masterKey), "0", boundTo("0", digests))
-				if !errors.Is(err, ErrMasterKeyVerification) {
-					t.Fatalf("verifyMasterKey = %v, want ErrMasterKeyVerification", err)
+				err := verifyMasterKey(context.Background(), enclaveFrom(t, masterKey), "0", boundTo("0", digests))
+				if !errors.Is(err, ErrWrongKey) {
+					t.Fatalf("verifyMasterKey = %v, want ErrWrongKey", err)
 				}
 				if errors.Is(err, ErrInvalidHeader) {
 					t.Fatalf("a set with one comparable digest was reported as a header fault: %v", err)
@@ -269,13 +270,13 @@ func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
 	})
 
 	t.Run("a usable digest for a different key", func(t *testing.T) {
-		digests := map[string]*Digest{
+		digests := map[string]*rawDigest{
 			"0": usableDigest(t, []byte("some-other-master-key-32-bytes!!"), 32),
 		}
 
-		err := verifyMasterKey(enclaveFrom(t, masterKey), "0", boundTo("0", digests))
-		if !errors.Is(err, ErrMasterKeyVerification) {
-			t.Fatalf("verifyMasterKey = %v, want ErrMasterKeyVerification", err)
+		err := verifyMasterKey(context.Background(), enclaveFrom(t, masterKey), "0", boundTo("0", digests))
+		if !errors.Is(err, ErrWrongKey) {
+			t.Fatalf("verifyMasterKey = %v, want ErrWrongKey", err)
 		}
 	})
 
@@ -294,10 +295,10 @@ func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
 		// exists to pin. It carries a usable digest beside the unusable one so
 		// that the ONLY difference between the two sets is the presence of a
 		// digest that could not be evaluated.
-		mismatch := verifyMasterKey(enclaveFrom(t, masterKey), "0", boundTo("0", map[string]*Digest{
+		mismatch := verifyMasterKey(context.Background(), enclaveFrom(t, masterKey), "0", boundTo("0", map[string]*rawDigest{
 			"0": usableDigest(t, []byte("some-other-master-key-32-bytes!!"), 32),
 		}))
-		mixed := verifyMasterKey(enclaveFrom(t, masterKey), "0", boundTo("0", map[string]*Digest{
+		mixed := verifyMasterKey(context.Background(), enclaveFrom(t, masterKey), "0", boundTo("0", map[string]*rawDigest{
 			"0": unusableDigests(t)["unsupported kdf type"],
 			"1": usableDigest(t, []byte("some-other-master-key-32-bytes!!"), 32),
 		}))
@@ -316,12 +317,12 @@ func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
 func TestVerifyMasterKeyAcceptsTheUsableDigestAlone(t *testing.T) {
 	masterKey := []byte("digest-scan-master-key-32-bytes!")
 
-	digests := map[string]*Digest{"0": usableDigest(t, masterKey, 32)}
-	if err := verifyMasterKey(enclaveFrom(t, masterKey), "0", boundTo("0", digests)); err != nil {
+	digests := map[string]*rawDigest{"0": usableDigest(t, masterKey, 32)}
+	if err := verifyMasterKey(context.Background(), enclaveFrom(t, masterKey), "0", boundTo("0", digests)); err != nil {
 		t.Fatalf("the fixture's own usable digest does not verify: %v", err)
 	}
 
-	if err := verifyMasterKey(enclaveFrom(t, []byte("some-other-master-key-32-bytes!!")), "0", boundTo("0", digests)); err == nil {
+	if err := verifyMasterKey(context.Background(), enclaveFrom(t, []byte("some-other-master-key-32-bytes!!")), "0", boundTo("0", digests)); err == nil {
 		t.Fatal("the fixture's usable digest verified a DIFFERENT master key")
 	}
 }
@@ -341,7 +342,7 @@ func TestAWrongLengthDigestIsAHeaderFaultEndToEnd(t *testing.T) {
 	path := newImage(t, "wrong-length-digest.img")
 	formatWithLibrary(t, path)
 
-	hdr, metadata, err := ReadHeader(path)
+	hdr, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader on the freshly formatted container failed: %v", err)
 	}
@@ -359,14 +360,14 @@ func TestAWrongLengthDigestIsAHeaderFaultEndToEnd(t *testing.T) {
 		t.Fatalf("failed to write the wrong-length-digest fixture: %v", err)
 	}
 
-	err = TestKey(path, []byte(conformancePassphrase))
+	err = testKeyForTest(path, []byte(conformancePassphrase))
 	if err == nil {
 		t.Fatal("TestKey accepted a container whose only digest cannot be compared against anything")
 	}
 	if !errors.Is(err, ErrInvalidHeader) {
 		t.Fatalf("TestKey = %v, want an error wrapping ErrInvalidHeader", err)
 	}
-	if errors.Is(err, ErrMasterKeyVerification) {
+	if errors.Is(err, ErrWrongKey) {
 		t.Fatalf("a correct passphrase over an uncomparable digest was reported as a failed verification: %v", err)
 	}
 

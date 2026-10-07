@@ -5,8 +5,7 @@
 package luks2
 
 import (
-	"crypto/subtle"
-	"fmt"
+	"context"
 	"math"
 	"os"
 	"path/filepath"
@@ -15,6 +14,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/clock"
 	"github.com/jeremyhahn/go-luks2/internal/device"
 	"github.com/jeremyhahn/go-luks2/internal/errs"
+	"github.com/jeremyhahn/go-luks2/internal/header"
 	"github.com/jeremyhahn/go-luks2/internal/kdf"
 )
 
@@ -22,11 +22,11 @@ import (
 const (
 	MinPassphraseLength = 8
 	MaxPassphraseLength = 512
-	MinKeySize          = 256
-	MaxKeySize          = 512
-	MinSectorSize       = 512
-	MaxSectorSize       = 4096
-	// DigestIterationTargetMs is how long the master-key digest's PBKDF2 is
+	minKeySize          = 256
+	maxKeySize          = 512
+	minSectorSize       = 512
+	maxSectorSize       = 4096
+	// digestIterationTargetMs is how long the master-key digest's PBKDF2 is
 	// calibrated to take, and it replaces the DigestIterations constant that
 	// used to fix the count at 600000.
 	//
@@ -70,9 +70,9 @@ const (
 	// acted on, and reverted: the flag was writing the number the measurement
 	// then attributed to cryptsetup. Take this measurement on DEFAULT
 	// containers or not at all.
-	DigestIterationTargetMs = kdf.DigestIterationTargetMs
+	digestIterationTargetMs = kdf.DigestIterationTargetMs
 
-	// DigestCalibrationKeyLen is the derived-key length the digest calibration
+	// digestCalibrationKeyLen is the derived-key length the digest calibration
 	// benchmarks, fixed at 64 bytes REGARDLESS of the hash because that is what
 	// cryptsetup does.
 	//
@@ -84,102 +84,13 @@ const (
 	// implementation writes; parity is worth more here than tidiness, given the
 	// parameter defends nothing. The practical effect is that a sha256 digest
 	// costs ~50ms at unlock and a sha512 one ~100ms, exactly as cryptsetup's do.
-	DigestCalibrationKeyLen = kdf.DigestCalibrationKeyLen
+	digestCalibrationKeyLen = kdf.DigestCalibrationKeyLen
 )
 
-// MaxMappingNameLength bounds a device-mapper name. The kernel's DM_NAME_LEN is
-// 128 bytes INCLUDING the terminating NUL, and devmapper.go copies the name into
-// that fixed-width ioctl field, so 127 is the largest value that cannot be
-// truncated on the way in. A truncated name is not a cosmetic problem: the
-// rollback identifies its own target by name, so two names that differ only past
-// the cut would become the same target.
-const MaxMappingNameLength = 127
-
-// ValidateMappingName validates a device-mapper mapping name.
-//
-// # What the name reaches
-//
-// It is not just a label. The name becomes, in order: the dm ioctl's name
-// field; the /dev/mapper/<name> path this package creates, stats and unlinks;
-// part of the dm UUID used to prove a target belongs to this unlock; and --
-// since #78 -- part of the identity the kernel-keyring description is derived
-// from. A dm target's parameter string is SPACE-DELIMITED and positional
-// (<cipher> <key> <iv_offset> <device> <start>), so a token carrying a space,
-// a newline or a NUL shifts the fields after it.
-//
-// The keyring description is hashed before it reaches that grammar, which
-// closes the parser-confusion route by construction rather than by charset --
-// see keyringDescription. This validator is the other half: it stops a hostile
-// or careless name from reaching the /dev/mapper path, the ioctl field, or the
-// dm UUID in the first place, and it is a WHITELIST because enumerating what a
-// path and a positional grammar both consider harmless is the kind of list
-// that is always one character short.
-//
-// # Why it is checked here and not only at the callers
-//
-// Unlock validated the device path and the passphrase and never the name. That
-// was survivable while the name only reached fixed-width ioctl fields, which
-// are not grammar-parsed. It stopped being survivable when the name started
-// contributing to a target-spec token.
-func ValidateMappingName(name string) error {
-	if name == "" {
-		return &errs.Error{Kind: ErrInvalidMappingName, Detail: "the name is empty"}
-	}
-	if len(name) > MaxMappingNameLength {
-		return &errs.Error{
-			Kind: ErrInvalidMappingName,
-			Detail: fmt.Sprintf("%d bytes exceeds the %d the device-mapper ioctl can carry without truncation",
-				len(name), MaxMappingNameLength),
-		}
-	}
-
-	// A leading dash would be read as an option by the command lines this
-	// library's own error messages tell an operator to run, and "." and ".."
-	// are directory entries rather than names.
-	if name == "." || name == ".." {
-		return &errs.Error{
-			Kind:   ErrInvalidMappingName,
-			Detail: fmt.Sprintf("%q is a directory entry, not a name", name),
-		}
-	}
-	// /dev/mapper/control is device-mapper's own control node. A mapping
-	// called "control" would make /dev/mapper/<name> that node, and the node
-	// repair after an unlock would replace it (#250).
-	if name == "control" {
-		return &errs.Error{Kind: ErrInvalidMappingName, Detail: `"control" names the device-mapper control node`}
-	}
-	if first := name[0]; !isMappingNameStart(first) {
-		return &errs.Error{
-			Kind:   ErrInvalidMappingName,
-			Detail: fmt.Sprintf("%q must start with a letter or a digit", name),
-		}
-	}
-
-	for i := 0; i < len(name); i++ {
-		if !isMappingNameByte(name[i]) {
-			return &errs.Error{
-				Kind: ErrInvalidMappingName,
-				Detail: fmt.Sprintf("byte %d of %q is not one of A-Z a-z 0-9 _ . + -; a device-mapper name reaches a /dev path and a space-delimited target specification, so the permitted set is a whitelist",
-					i, name),
-			}
-		}
-	}
-
-	return nil
-}
-
-func isMappingNameStart(c byte) bool {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
-}
-
-func isMappingNameByte(c byte) bool {
-	return isMappingNameStart(c) || c == '_' || c == '.' || c == '+' || c == '-'
-}
-
-// ValidateDevicePath validates a device path for security
-func ValidateDevicePath(device string) error {
+// validateDevicePath validates a device path for security
+func validateDevicePath(device string) error {
 	if device == "" {
-		return ErrInvalidPath
+		return &errs.Error{Kind: ErrInvalidArgument, Detail: "device path is empty"}
 	}
 
 	// Clean the path. On an ABSOLUTE path Clean resolves every ".." element
@@ -191,32 +102,32 @@ func ValidateDevicePath(device string) error {
 
 	// Must be absolute path
 	if !filepath.IsAbs(cleaned) {
-		return ErrInvalidPath
+		return &errs.Error{Kind: ErrInvalidArgument, Detail: "device path is not absolute"}
 	}
 
 	// Check that device exists
 	info, err := os.Stat(cleaned)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return ErrDeviceNotFound
+			return &errs.Error{Kind: ErrDeviceNotFound, Err: err}
 		}
-		return &errs.Error{Kind: ErrInvalidPath, Detail: err.Error()}
+		return &errs.Error{Kind: ErrInvalidArgument, Detail: err.Error()}
 	}
 
 	// Must be a regular file or block device
 	mode := info.Mode()
 	if !mode.IsRegular() && (mode&os.ModeDevice == 0) {
-		return ErrInvalidPath
+		return &errs.Error{Kind: ErrInvalidArgument, Detail: "device path is neither a regular file nor a block device"}
 	}
 
 	return nil
 }
 
-// MaxCredentialLength is the longest EXISTING credential this package will
+// maxCredentialLength is the longest EXISTING credential this package will
 // present to a keyslot: cryptsetup's key file limit (DEFAULT_KEYFILE_SIZE_MAXKB,
 // 8 MiB). A keyslot cryptsetup enrolled from a key file can only be opened with
 // the whole file.
-const MaxCredentialLength = 8 << 20
+const maxCredentialLength = 8 << 20
 
 // validateExistingCredential bounds a credential presented to OPEN a keyslot --
 // Unlock, TestKey, the existing passphrase of AddKey, ChangeKey's old one,
@@ -238,29 +149,29 @@ const MaxCredentialLength = 8 << 20
 // will not read past.
 func validateExistingCredential(credential []byte) error {
 	if len(credential) == 0 {
-		return ErrCredentialEmpty
+		return ErrInvalidCredential
 	}
-	if len(credential) > MaxCredentialLength {
-		return ErrCredentialTooLong
+	if len(credential) > maxCredentialLength {
+		return ErrInvalidCredential
 	}
 	return nil
 }
 
-// ValidatePassphrase validates the length of a NEW passphrase: the policy for a
+// validatePassphraseBytes validates the length of a NEW passphrase: the policy for a
 // credential this package enrolls (Format, AddKey's new passphrase, ChangeKey's
 // new one). A credential presented to open an existing keyslot is bounded by
 // validateExistingCredential instead.
-func ValidatePassphrase(passphrase []byte) error {
+func validatePassphraseBytes(passphrase []byte) error {
 	if len(passphrase) < MinPassphraseLength {
-		return ErrPassphraseTooShort
+		return ErrInvalidCredential
 	}
 	if len(passphrase) > MaxPassphraseLength {
-		return ErrPassphraseTooLong
+		return ErrInvalidCredential
 	}
 	return nil
 }
 
-// MinArgon2MemoryKB is the smallest Argon2 memory cost this package will WRITE
+// minArgon2MemoryKB is the smallest Argon2 memory cost this package will WRITE
 // when a caller chooses it.
 //
 // # A CREATE FLOOR, NOT AN ACCEPT FLOOR
@@ -281,26 +192,22 @@ func ValidatePassphrase(passphrase []byte) error {
 // ChangeKey is deliberately NOT bound by it. It inherits the cost of the slot
 // it is rotating, which is a cost this package did not choose, on hardware that
 // has already demonstrated it can afford that and nothing more. See ChangeKey.
-const MinArgon2MemoryKB = kdf.MinArgon2MemoryKB
+const minArgon2MemoryKB = kdf.MinArgon2MemoryKB
 
-// MinArgon2Time is the smallest Argon2 time cost this package will write. It is
-// the format's own minimum; a zero or negative time cost is not a weak keyslot
-// but a malformed one.
-const MinArgon2Time = kdf.MinArgon2Time
-
-// MinArgon2Parallel is the smallest Argon2 parallelism this package will write.
-// Like MinArgon2Time it is the format's own minimum rather than a security
-// judgement: Argon2 parallelism is a uint8 in 1..255, so zero or negative is
-// malformed, not weak.
+// minArgon2Time, in keyslotvalidation.go, is the smallest Argon2 time cost
+// this package will write. It is the format's own minimum; a zero or
+// negative time cost is not a weak keyslot but a malformed one.
 //
-// Its CEILING, like Time's and Memory's, is the read side's own
-// (maxArgon2Parallel, keyslotvalidation.go), applied by validateArgon2CreateCost
-// so nothing is written that the reader would refuse (#249, A5).
-const MinArgon2Parallel = kdf.MinArgon2Parallel
+// minArgon2Parallel, also there, is the smallest Argon2 parallelism this
+// package will write, for the same reason: Argon2 parallelism is a uint8 in
+// 1..255, so zero or negative is malformed, not weak. Its CEILING, like
+// Time's and Memory's, is the read side's own (maxArgon2Parallel,
+// keyslotvalidation.go), applied by validateArgon2CreateCost so nothing is
+// written that the reader would refuse (#249, A5).
 
 // validateArgon2CreateCost bounds the Argon2 costs a CALLER supplies.
 //
-// Split out of ValidateFormatOptions so AddKey can apply the identical bound
+// Split out of validateFormatOptionsForTest so AddKey can apply the identical bound
 // without inheriting the rest of it -- device paths, passphrase lengths, sector
 // sizes -- none of which AddKey is in a position to check. Before this, the
 // bound existed on Format alone, so AddKey with an explicit Argon2Memory of 32
@@ -312,7 +219,7 @@ const MinArgon2Parallel = kdf.MinArgon2Parallel
 // with an Argon2 cost resolves to Argon2id (resolveKDFType), and the bound
 // applies to it. Checking the spelling let FormatOptions{Argon2Memory: 32}
 // past this floor because the type was left to the default (#237).
-func validateArgon2CreateCost(opts FormatOptions) error {
+func validateArgon2CreateCost(opts formatOptionsForTest) error {
 	if !isArgon2Type(resolveKDFType(normalizeKDFType(opts.KDFType), formatArgon2CostGiven(opts))) {
 		return nil
 	}
@@ -323,22 +230,20 @@ func validateArgon2CreateCost(opts FormatOptions) error {
 	// later unlock refused the keyslot: a volume nothing can open, created on
 	// request. The read-side bounds are the ones used, not restated, so the
 	// two can never disagree about what a keyslot may cost.
-	if opts.Argon2Memory != 0 && (opts.Argon2Memory < MinArgon2MemoryKB || opts.Argon2Memory > maxArgon2Memory) {
-		return &Argon2CostError{
-			Parameter: "memory",
-			Value:     opts.Argon2Memory,
-			Minimum:   MinArgon2MemoryKB,
-			Maximum:   maxArgon2Memory,
-			Err:       ErrInvalidArgon2Memory,
+	if opts.Argon2Memory != 0 && (opts.Argon2Memory < minArgon2MemoryKB || opts.Argon2Memory > maxArgon2Memory) {
+		return &KDFCostError{
+			Param: "memory",
+			Value: opts.Argon2Memory,
+			Min:   minArgon2MemoryKB,
+			Max:   maxArgon2Memory,
 		}
 	}
-	if opts.Argon2Time != 0 && (opts.Argon2Time < MinArgon2Time || opts.Argon2Time > maxArgon2Time) {
-		return &Argon2CostError{
-			Parameter: "time",
-			Value:     opts.Argon2Time,
-			Minimum:   MinArgon2Time,
-			Maximum:   maxArgon2Time,
-			Err:       ErrInvalidArgon2Time,
+	if opts.Argon2Time != 0 && (opts.Argon2Time < minArgon2Time || opts.Argon2Time > maxArgon2Time) {
+		return &KDFCostError{
+			Param: "time",
+			Value: opts.Argon2Time,
+			Min:   minArgon2Time,
+			Max:   maxArgon2Time,
 		}
 	}
 	// Parallelism is checked HERE, with its siblings, rather than being left to
@@ -347,38 +252,37 @@ func validateArgon2CreateCost(opts FormatOptions) error {
 	// CryptoError rather than the Argon2CostError the other two produce. Same
 	// mistake by the caller, two different error shapes and two different
 	// moments.
-	if opts.Argon2Parallel != 0 && (opts.Argon2Parallel < MinArgon2Parallel || opts.Argon2Parallel > maxArgon2Parallel) {
-		return &Argon2CostError{
-			Parameter: "parallelism",
-			Value:     opts.Argon2Parallel,
-			Minimum:   MinArgon2Parallel,
-			Maximum:   maxArgon2Parallel,
-			Err:       ErrInvalidArgon2Parallel,
+	if opts.Argon2Parallel != 0 && (opts.Argon2Parallel < minArgon2Parallel || opts.Argon2Parallel > maxArgon2Parallel) {
+		return &KDFCostError{
+			Param: "parallelism",
+			Value: opts.Argon2Parallel,
+			Min:   minArgon2Parallel,
+			Max:   maxArgon2Parallel,
 		}
 	}
 	return nil
 }
 
-// ValidateFormatOptions validates all format options
-func ValidateFormatOptions(opts FormatOptions) error {
+// validateFormatOptionsForTest validates all format options
+func validateFormatOptionsForTest(opts formatOptionsForTest) error {
 	// Validate device path
-	if err := ValidateDevicePath(opts.Device); err != nil {
+	if err := validateDevicePath(opts.Device); err != nil {
 		return err
 	}
 
 	// Validate passphrase
-	if err := ValidatePassphrase(opts.Passphrase); err != nil {
+	if err := validatePassphraseBytes(opts.Passphrase); err != nil {
 		return err
 	}
 
 	// Validate key size
 	if opts.KeySize != 0 && opts.KeySize != 256 && opts.KeySize != 512 {
-		return ErrInvalidKeySize
+		return ErrInvalidArgument
 	}
 
 	// Validate sector size
 	if opts.SectorSize != 0 && opts.SectorSize != 512 && opts.SectorSize != 4096 {
-		return ErrInvalidSectorSize
+		return ErrInvalidArgument
 	}
 
 	if err := validateMetadataSize(opts.MetadataSize); err != nil {
@@ -398,9 +302,9 @@ func ValidateFormatOptions(opts FormatOptions) error {
 	// Check for integer overflow in size calculations
 	if opts.KeySize > 0 {
 		keyBytes := opts.KeySize / 8
-		afSize := keyBytes * AFStripes
-		if afSize/AFStripes != keyBytes {
-			return ErrIntegerOverflow
+		afSize := keyBytes * header.AFStripes
+		if afSize/header.AFStripes != keyBytes {
+			return ErrInvalidArgument
 		}
 	}
 
@@ -409,35 +313,31 @@ func ValidateFormatOptions(opts FormatOptions) error {
 
 // validateMetadataSize checks FormatOptions.MetadataSize against exactly the
 // set cryptsetup's --luks2-metadata-size accepts: zero for the default, or a
-// power of two from LUKS2HeaderMinSize to LUKS2HeaderMaxSize. Measured against
+// power of two from header.HeaderMinSize to header.HeaderMaxSize. Measured against
 // cryptsetup 2.7.0 on #47 -- 8k, 12288, 20k and 8m are all refused there with
 // "Unsupported LUKS2 metadata size options".
 func validateMetadataSize(size int) error {
 	if size == 0 {
 		return nil
 	}
-	if size < LUKS2HeaderMinSize || size > LUKS2HeaderMaxSize || !isPowerOf2(size) {
-		return ErrInvalidMetadataSize
+	if size < header.HeaderMinSize || size > header.HeaderMaxSize || !isPowerOf2(size) {
+		return ErrInvalidArgument
 	}
 	return nil
 }
 
 // ConstantTimeEqual compares two byte slices in constant time
-func ConstantTimeEqual(a, b []byte) bool {
-	return subtle.ConstantTimeCompare(a, b) == 1
-}
-
-// CheckOverflow checks if a*b would overflow
-func CheckOverflow(a, b int) error {
+// checkOverflow checks if a*b would overflow
+func checkOverflow(a, b int) error {
 	if a > 0 && b > 0 && a > math.MaxInt/b {
-		return ErrIntegerOverflow
+		return ErrInvalidArgument
 	}
 	return nil
 }
 
 // openDevice is the ONE way this package opens a device -- a forward into
-// internal/device.Open, through the openFileFunc seam below, which keeps the
-// CLASSIFICATION of a failure in one place rather than at every call site.
+// internal/device.Open, through sys.openFile, which keeps the CLASSIFICATION
+// of a failure in one place rather than at every call site.
 //
 // Every LUKS2 operation opens the device -- the header reader, the writer, the
 // keyslot paths, the size probe -- and none of them used to look at WHY an open
@@ -449,38 +349,9 @@ func CheckOverflow(a, b int) error {
 //
 // to tell "you need privileges" from "this device is broken" unless something
 // says so, and ErrPermissionDenied was declared and returned by nothing (#31).
-func openDevice(op, path string, flag int) (*os.File, error) {
-	return device.Open(op, path, flag, openFileFunc)
+func openDevice(op, path string, flag int, sys volumeSys) (*os.File, error) {
+	return device.Open(context.Background(), op, path, flag, sys.openFile)
 }
-
-// openFileFunc is the filesystem seam openDevice goes through, in the same
-// idiom as the dm value in devicemapper.go.
-//
-// It is here for a measured reason. A permission failure cannot be produced by
-// permission bits in a test: CI job containers run as ROOT, and root bypasses
-// discretionary access checks, so an os.Chmod-based negative test passes
-// locally and fails on the runner. That is why this project's testing rules
-// forbid building a failure case out of permission bits: inject faults only
-// through means that hold for EVERY uid. Four candidate uid-independent EACCES
-// sources were measured on a
-// dev host -- /proc/version and /proc/self/cmdline opened O_RDWR,
-// /sys/kernel/vmcoreinfo, /proc/1/mem -- and root opened ALL FOUR. There is no
-// real open that fails this way for every uid, so the fault is injected at the
-// seam instead, which holds for root and for uid 1000 alike.
-var openFileFunc = os.OpenFile
-
-// dropDeviceCache evicts f's clean pages from the page cache, so the next read
-// of them comes from the medium. It is called only after the device has been
-// synced, when no page of it should be dirty; one that is (written since by
-// another process) is not evicted, which is the kernel's contract and leaves
-// what is read current rather than stale.
-//
-// A seam for the same reason syncDevice is one: what is in the cache and what
-// is on the medium cannot be made to differ from a test without a failing
-// device, so this package's tests substitute it to model exactly that.
-// Unexported, substituted only by this package's tests. The real work is
-// internal/device.DropCache.
-var dropDeviceCache = device.DropCache
 
 // classifyDeviceOpen adds the package's typed vocabulary to an open failure,
 // and returns anything it cannot classify UNCHANGED. The real work is
@@ -489,15 +360,15 @@ func classifyDeviceOpen(op string, err error) error {
 	return device.ClassifyOpen(op, err)
 }
 
-// FileLock represents a file lock for concurrent access protection. It wraps
+// deviceLock represents a file lock for concurrent access protection. It wraps
 // internal/device's Pinned/Locked pair, which does the real locking: the node
 // flock, then cryptsetup's own lock for a block device, excluding cryptsetup
 // as well (internal/device's cryptsetuplock.go).
-type FileLock struct {
+type deviceLock struct {
 	locked *device.Locked
 }
 
-// DefaultLockWait is what AcquireFileLock spends before giving up. It is a
+// DefaultLockWait is what acquireDeviceLock spends before giving up. It is a
 // BOUND, not a target: an uncontended lock is taken on the first attempt and
 // costs nothing, and the budget is consumed only when another holder has the
 // device.
@@ -518,7 +389,7 @@ const (
 	lockBackoffMax = device.LockBackoffMax
 )
 
-// AcquireFileLock acquires an exclusive lock on a device, waiting up to
+// acquireDeviceLock acquires an exclusive lock on a device, waiting up to
 // DefaultLockWait for a competing holder to release it.
 //
 // IT WAITS, AND THAT IS THE POINT. This call used to be LOCK_NB with no retry:
@@ -528,11 +399,11 @@ const (
 // failure, and one that presents inconsistently enough to be filed as
 // flakiness rather than as contention (#107). Shortening the hold time hides
 // it; bounding the wait fixes it.
-func AcquireFileLock(path string) (*FileLock, error) {
-	return AcquireFileLockTimeout(path, DefaultLockWait)
+func acquireDeviceLock(path string) (*deviceLock, error) {
+	return acquireDeviceLockTimeout(path, DefaultLockWait)
 }
 
-// AcquireFileLockTimeout is AcquireFileLock with an explicit wait budget, for
+// acquireDeviceLockTimeout is acquireDeviceLock with an explicit wait budget, for
 // callers that know their own latency requirement -- and for tests, which need
 // contention to resolve in milliseconds rather than in DefaultLockWait.
 //
@@ -544,33 +415,27 @@ func AcquireFileLock(path string) (*FileLock, error) {
 // flock cannot be given a deadline without arranging for a signal to interrupt
 // it, and a lock wait that cannot time out is the deadlock this is meant to
 // terminate. Polling costs a syscall per attempt and can be bounded exactly.
-func AcquireFileLockTimeout(path string, wait time.Duration) (*FileLock, error) {
-	return acquireFileLock(path, wait, clock.System{})
+func acquireDeviceLockTimeout(path string, wait time.Duration) (*deviceLock, error) {
+	ctx := context.Background()
+	return acquireFileLock(ctx, path, wait, clock.System{}, defaultVolumeSys())
 }
 
-// acquireFileLock is AcquireFileLockTimeout on the given clock.
-func acquireFileLock(path string, wait time.Duration, clk clock.Clock) (*FileLock, error) {
-	pinned, err := device.OpenPinned("lock the device", path, os.O_RDWR, openFileFunc)
+// acquireFileLock is acquireDeviceLockTimeout on the given clock and sys.
+func acquireFileLock(ctx context.Context, path string, wait time.Duration, clk clock.Clock, sys volumeSys) (*deviceLock, error) {
+	pinned, err := device.OpenPinned(ctx, "lock the device", path, os.O_RDWR, sys.openFile)
 	if err != nil {
 		return nil, err
 	}
-	locked, err := pinned.Lock(device.LockExclusive, wait, clk, cryptsetupLockDir, device.DefaultOpenLockFile, fileLockHeld)
+	locked, err := pinned.Lock(ctx, device.LockExclusive, wait, clk, cryptsetupLockDir, device.DefaultOpenLockFile, sys.lockHeld)
 	if err != nil {
 		_ = pinned.Close()
 		return nil, err
 	}
-	return &FileLock{locked: locked}, nil
+	return &deviceLock{locked: locked}, nil
 }
 
-// fileLockHeld runs once both locks are held, before the caller reads or
-// writes anything under them. A seam: it is how a test holds an operation at
-// that point and watches cryptsetup wait for it, which no result of the
-// operation can show. A no-op in production. Unexported, substituted only by
-// this package's tests.
-var fileLockHeld = func(string) {}
-
 // Release releases the file lock
-func (l *FileLock) Release() error {
+func (l *deviceLock) Release() error {
 	if l.locked == nil {
 		return nil
 	}
@@ -579,30 +444,26 @@ func (l *FileLock) Release() error {
 }
 
 // OpenFileSecure opens a file with proper permissions
-func OpenFileSecure(path string, flag int) (*os.File, error) {
-	return os.OpenFile(path, flag, 0600) // #nosec G304 -- wrapper for secure file operations
-}
-
-// SafeUint64ToInt64 converts uint64 to int64 safely, returning error on overflow
-func SafeUint64ToInt64(v uint64) (int64, error) {
+// safeUint64ToInt64 converts uint64 to int64 safely, returning error on overflow
+func safeUint64ToInt64(v uint64) (int64, error) {
 	if v > math.MaxInt64 {
-		return 0, ErrIntegerOverflow
+		return 0, ErrInvalidArgument
 	}
 	return int64(v), nil
 }
 
-// SafeUint64ToInt converts uint64 to int safely, returning error on overflow
-func SafeUint64ToInt(v uint64) (int, error) {
+// safeUint64ToInt converts uint64 to int safely, returning error on overflow
+func safeUint64ToInt(v uint64) (int, error) {
 	if v > uint64(math.MaxInt) {
-		return 0, ErrIntegerOverflow
+		return 0, ErrInvalidArgument
 	}
 	return int(v), nil
 }
 
-// SafeInt64ToUint64 converts int64 to uint64 safely, returning error on negative
-func SafeInt64ToUint64(v int64) (uint64, error) {
+// safeInt64ToUint64 converts int64 to uint64 safely, returning error on negative
+func safeInt64ToUint64(v int64) (uint64, error) {
 	if v < 0 {
-		return 0, ErrIntegerOverflow
+		return 0, ErrInvalidArgument
 	}
 	return uint64(v), nil
 }

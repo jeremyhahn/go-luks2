@@ -103,9 +103,9 @@ func TestKeyslotRemovalUpdatesTokensAsCryptsetupDoes(t *testing.T) {
 	}
 
 	paths := map[string]func(device string) error{
-		"KillSlot":    func(d string) error { return KillSlot(d, []byte(tokenParityPassphrase), 1) },
-		"KillKeyslot": func(d string) error { return KillKeyslot(d, 1) },
-		"RemoveKey":   func(d string) error { return RemoveKey(d, []byte(tokenParitySecond), 1) },
+		"KillSlot":    func(d string) error { return killSlotForTest(d, []byte(tokenParityPassphrase), 1) },
+		"KillKeyslot": func(d string) error { return killKeyslotForTest(d, 1) },
+		"RemoveKey":   func(d string) error { return removeKeyForTest(d, []byte(tokenParitySecond), 1) },
 	}
 	for name, remove := range paths {
 		device := clone(name + ".img")
@@ -141,7 +141,7 @@ func TestCryptsetupWritesASHA256HeaderChecksum(t *testing.T) {
 	defer parallel(t)()
 
 	image := cryptsetupFormat(t, "csum-alg.img", tokenParityPassphrase)
-	hdr, _, err := ReadHeader(image)
+	hdr, _, err := readHeaderForTest(image)
 	if err != nil {
 		t.Fatalf("ReadHeader of a cryptsetup header: %v", err)
 	}

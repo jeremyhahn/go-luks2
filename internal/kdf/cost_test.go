@@ -6,7 +6,11 @@ package kdf
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
 func TestValidateCostPBKDF2(t *testing.T) {
@@ -86,23 +90,23 @@ func TestForcedPBKDF2Iterations(t *testing.T) {
 		t.Fatalf("at the floor: got %d, %v; want %d, nil", got, err, floor)
 	}
 
-	if _, err := ForcedPBKDF2Iterations("sha512", floor-1, CallerSuppliedCredential); !errors.Is(err, ErrPBKDFIterationsTooLow) {
-		t.Fatalf("below the floor: got %v, want ErrPBKDFIterationsTooLow", err)
+	if _, err := ForcedPBKDF2Iterations("sha512", floor-1, CallerSuppliedCredential); !errors.Is(err, errs.ErrInvalidArgument) {
+		t.Fatalf("below the floor: got %v, want errs.ErrInvalidArgument", err)
 	}
 
-	if _, err := ForcedPBKDF2Iterations("sha512", MaxKDFIterations+1, CallerSuppliedCredential); !errors.Is(err, ErrPBKDFIterationsTooHigh) {
-		t.Fatalf("above the ceiling: got %v, want ErrPBKDFIterationsTooHigh", err)
+	if _, err := ForcedPBKDF2Iterations("sha512", MaxKDFIterations+1, CallerSuppliedCredential); !errors.Is(err, errs.ErrInvalidArgument) {
+		t.Fatalf("above the ceiling: got %v, want errs.ErrInvalidArgument", err)
 	}
 
 	if got, err := ForcedPBKDF2Iterations("sha512", MinPBKDF2Iterations, LibraryGeneratedCredential); err != nil || got != MinPBKDF2Iterations {
 		t.Fatalf("library-generated at the absolute minimum: got %d, %v", got, err)
 	}
 
-	var refusal *PBKDF2IterationsError
+	var refusal *errs.Error
 	if _, err := ForcedPBKDF2Iterations("sha512", 1, CallerSuppliedCredential); !errors.As(err, &refusal) {
-		t.Fatalf("got %v, want a *PBKDF2IterationsError", err)
-	} else if refusal.Maximum != MaxKDFIterations {
-		t.Fatalf("reported maximum = %d, want %d", refusal.Maximum, MaxKDFIterations)
+		t.Fatalf("got %v, want an *errs.Error", err)
+	} else if !strings.Contains(refusal.Detail, fmt.Sprintf("..%d", MaxKDFIterations)) {
+		t.Fatalf("detail = %q, want it to report the ceiling %d", refusal.Detail, MaxKDFIterations)
 	}
 }
 

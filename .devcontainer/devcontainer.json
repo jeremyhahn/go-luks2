@@ -1,7 +1,7 @@
 {
   "name": "go-luks2 Development Container",
   "build": {
-    "dockerfile": "Dockerfile",
+    "dockerfile": "../build/docker/devcontainer/Dockerfile",
     "context": ".."
   },
   "runArgs": [

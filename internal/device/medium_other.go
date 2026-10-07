@@ -6,10 +6,14 @@
 
 package device
 
-import "github.com/jeremyhahn/go-luks2/internal/errs"
+import (
+	"context"
+
+	"github.com/jeremyhahn/go-luks2/internal/errs"
+)
 
 // ReadPastCache fails closed off Linux (A.3): there is no portable O_DIRECT,
 // so what is on the medium can never be confirmed here.
-func ReadPastCache(op, path string, off int64, n int, openFile OpenFunc) ([]byte, error) {
+func ReadPastCache(ctx context.Context, op, path string, off int64, n int, openFile OpenFunc) ([]byte, error) {
 	return nil, &errs.Error{Kind: ErrUnsupported, Detail: path}
 }

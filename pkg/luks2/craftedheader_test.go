@@ -19,7 +19,7 @@ import (
 // damaged one, a hostile one, or one cryptsetup itself would refuse. Those are
 // exactly the headers the reader has to cope with, and since #248 the package
 // can no longer produce them through its own writer.
-func writeHeaderUnvalidated(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) error {
+func writeHeaderUnvalidated(device string, hdr *header.BinaryHeader, metadata *header.Metadata) error {
 	f, err := os.OpenFile(filepath.Clean(device), os.O_RDWR, 0)
 	if err != nil {
 		return err
@@ -30,14 +30,14 @@ func writeHeaderUnvalidated(device string, hdr *LUKS2BinaryHeader, metadata *LUK
 	if err != nil {
 		return err
 	}
-	return writeEncodedHeader(f, hdr, jsonData, area)
+	return writeEncodedHeader(f, hdr, jsonData, area, (*os.File).Sync)
 }
 
 // writeHeaderIgnoringRequirements is writeHeaderUnvalidated without the
 // requirements guard either, for a fixture that models a container declaring
 // a requirement this package does not implement -- an online reencryption,
 // above all -- which the normal write path refuses to produce (#248).
-func writeHeaderIgnoringRequirements(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) error {
+func writeHeaderIgnoringRequirements(device string, hdr *header.BinaryHeader, metadata *header.Metadata) error {
 	f, err := os.OpenFile(filepath.Clean(device), os.O_RDWR, 0)
 	if err != nil {
 		return err
@@ -48,5 +48,5 @@ func writeHeaderIgnoringRequirements(device string, hdr *LUKS2BinaryHeader, meta
 	if err != nil {
 		return err
 	}
-	return writeEncodedHeader(f, hdr, jsonData, area)
+	return writeEncodedHeader(f, hdr, jsonData, area, (*os.File).Sync)
 }

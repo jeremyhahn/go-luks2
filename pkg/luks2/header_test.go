@@ -23,16 +23,18 @@ import (
 	"unsafe"
 
 	"github.com/google/uuid"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // TestHeaderStructSize tests the binary header struct size (pure unit test)
 func TestHeaderStructSize(t *testing.T) {
-	var hdr LUKS2BinaryHeader
+	var hdr header.BinaryHeader
 	size := unsafe.Sizeof(hdr)
-	t.Logf("LUKS2BinaryHeader size: %d bytes (expected: %d)", size, LUKS2HeaderSize)
+	t.Logf("header.BinaryHeader size: %d bytes (expected: %d)", size, header.HeaderSize)
 
-	if size != LUKS2HeaderSize {
-		t.Errorf("Header size mismatch: got %d, want %d", size, LUKS2HeaderSize)
+	if size != header.HeaderSize {
+		t.Errorf("Header size mismatch: got %d, want %d", size, header.HeaderSize)
 	}
 }
 
@@ -40,19 +42,19 @@ func TestHeaderStructSize(t *testing.T) {
 func TestCreateBinaryHeader(t *testing.T) {
 	tests := []struct {
 		name    string
-		opts    FormatOptions
+		opts    formatOptionsForTest
 		wantErr bool
 	}{
 		{
 			name: "minimal options",
-			opts: FormatOptions{
+			opts: formatOptionsForTest{
 				Device: "/dev/test",
 			},
 			wantErr: false,
 		},
 		{
 			name: "with label",
-			opts: FormatOptions{
+			opts: formatOptionsForTest{
 				Device: "/dev/test",
 				Label:  "test-volume",
 			},
@@ -60,7 +62,7 @@ func TestCreateBinaryHeader(t *testing.T) {
 		},
 		{
 			name: "with subsystem",
-			opts: FormatOptions{
+			opts: formatOptionsForTest{
 				Device:    "/dev/test",
 				Subsystem: "test-subsystem",
 			},
@@ -68,7 +70,7 @@ func TestCreateBinaryHeader(t *testing.T) {
 		},
 		{
 			name: "with label and subsystem",
-			opts: FormatOptions{
+			opts: formatOptionsForTest{
 				Device:    "/dev/test",
 				Label:     "test-volume",
 				Subsystem: "test-subsystem",
@@ -77,7 +79,7 @@ func TestCreateBinaryHeader(t *testing.T) {
 		},
 		{
 			name: "with long label",
-			opts: FormatOptions{
+			opts: formatOptionsForTest{
 				Device: "/dev/test",
 				Label:  "this-is-a-very-long-label-that-exceeds-normal-length",
 			},
@@ -87,7 +89,7 @@ func TestCreateBinaryHeader(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			hdr, err := CreateBinaryHeader(tt.opts)
+			hdr, err := createBinaryHeader(tt.opts, testVolumeSys())
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("CreateBinaryHeader() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -96,13 +98,13 @@ func TestCreateBinaryHeader(t *testing.T) {
 			}
 
 			// Validate magic
-			if !bytes.Equal(hdr.Magic[:], []byte(LUKS2Magic)) {
-				t.Errorf("Invalid magic: got %v, want %v", hdr.Magic[:], []byte(LUKS2Magic))
+			if !bytes.Equal(hdr.Magic[:], []byte(header.Magic)) {
+				t.Errorf("Invalid magic: got %v, want %v", hdr.Magic[:], []byte(header.Magic))
 			}
 
 			// Validate version
-			if hdr.Version != LUKS2Version {
-				t.Errorf("Invalid version: got %d, want %d", hdr.Version, LUKS2Version)
+			if hdr.Version != header.Version {
+				t.Errorf("Invalid version: got %d, want %d", hdr.Version, header.Version)
 			}
 
 			// Validate checksum algorithm
@@ -169,26 +171,26 @@ func TestCreateBinaryHeader(t *testing.T) {
 func TestCalculateHeaderChecksum(t *testing.T) {
 	tests := []struct {
 		name     string
-		hdr      *LUKS2BinaryHeader
+		hdr      *header.BinaryHeader
 		jsonData []byte
 		jsonSize int
 	}{
 		{
 			name: "minimal header",
-			hdr: &LUKS2BinaryHeader{
-				Version:    LUKS2Version,
+			hdr: &header.BinaryHeader{
+				Version:    header.Version,
 				SequenceID: 1,
-				HeaderSize: uint64(LUKS2HeaderSize + LUKS2DefaultSize),
+				HeaderSize: uint64(header.HeaderSize + header.DefaultSize),
 			},
 			jsonData: []byte(`{"keyslots":{},` + minimalHeaderJSONTail),
-			jsonSize: LUKS2DefaultSize,
+			jsonSize: header.DefaultSize,
 		},
 		{
 			name: "with metadata",
-			hdr: &LUKS2BinaryHeader{
-				Version:    LUKS2Version,
+			hdr: &header.BinaryHeader{
+				Version:    header.Version,
 				SequenceID: 1,
-				HeaderSize: uint64(LUKS2HeaderSize + 16384),
+				HeaderSize: uint64(header.HeaderSize + 16384),
 			},
 			jsonData: []byte(`{"keyslots":{"0":{"type":"luks2"}},"segments":{},"digests":{},"config":{"json_size":"16384"}}`),
 			jsonSize: 16384,
@@ -198,7 +200,7 @@ func TestCalculateHeaderChecksum(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Set magic and checksum algorithm
-			copy(tt.hdr.Magic[:], LUKS2Magic)
+			copy(tt.hdr.Magic[:], header.Magic)
 			copy(tt.hdr.ChecksumAlgorithm[:], "sha256")
 
 			// Calculate checksum
@@ -245,16 +247,16 @@ func TestCalculateHeaderChecksum(t *testing.T) {
 
 // TestCalculateHeaderChecksumDeterministic tests that checksum calculation is deterministic
 func TestCalculateHeaderChecksumDeterministic(t *testing.T) {
-	hdr := &LUKS2BinaryHeader{
-		Version:    LUKS2Version,
+	hdr := &header.BinaryHeader{
+		Version:    header.Version,
 		SequenceID: 1,
-		HeaderSize: uint64(LUKS2HeaderSize + LUKS2DefaultSize),
+		HeaderSize: uint64(header.HeaderSize + header.DefaultSize),
 	}
-	copy(hdr.Magic[:], LUKS2Magic)
+	copy(hdr.Magic[:], header.Magic)
 	copy(hdr.ChecksumAlgorithm[:], "sha256")
 
 	jsonData := []byte(`{"keyslots":{},` + minimalHeaderJSONTail)
-	jsonSize := LUKS2DefaultSize
+	jsonSize := header.DefaultSize
 
 	// Calculate checksum first time
 	err := calculateHeaderChecksum(hdr, jsonData, jsonSize)
@@ -296,22 +298,22 @@ func (m *mockReaderAt) ReadAt(p []byte, off int64) (n int, err error) {
 func TestValidateHeaderChecksum(t *testing.T) {
 	tests := []struct {
 		name        string
-		setupHeader func() (*LUKS2BinaryHeader, []byte)
+		setupHeader func() (*header.BinaryHeader, []byte)
 	}{
 		{
 			name: "valid checksum",
-			setupHeader: func() (*LUKS2BinaryHeader, []byte) {
-				hdr := &LUKS2BinaryHeader{
-					Version:      LUKS2Version,
+			setupHeader: func() (*header.BinaryHeader, []byte) {
+				hdr := &header.BinaryHeader{
+					Version:      header.Version,
 					SequenceID:   1,
-					HeaderSize:   uint64(LUKS2HeaderSize + LUKS2DefaultSize),
+					HeaderSize:   uint64(header.HeaderSize + header.DefaultSize),
 					HeaderOffset: 0,
 				}
-				copy(hdr.Magic[:], LUKS2Magic)
+				copy(hdr.Magic[:], header.Magic)
 				copy(hdr.ChecksumAlgorithm[:], "sha256")
 
 				jsonData := []byte(`{"keyslots":{},` + minimalHeaderJSONTail)
-				jsonSize := LUKS2DefaultSize
+				jsonSize := header.DefaultSize
 
 				// Calculate correct checksum
 				if err := calculateHeaderChecksum(hdr, jsonData, jsonSize); err != nil {
@@ -332,18 +334,18 @@ func TestValidateHeaderChecksum(t *testing.T) {
 		},
 		{
 			name: "valid checksum with backup offset",
-			setupHeader: func() (*LUKS2BinaryHeader, []byte) {
-				hdr := &LUKS2BinaryHeader{
-					Version:      LUKS2Version,
+			setupHeader: func() (*header.BinaryHeader, []byte) {
+				hdr := &header.BinaryHeader{
+					Version:      header.Version,
 					SequenceID:   1,
-					HeaderSize:   uint64(LUKS2HeaderSize + LUKS2DefaultSize),
+					HeaderSize:   uint64(header.HeaderSize + header.DefaultSize),
 					HeaderOffset: 0x4000,
 				}
-				copy(hdr.Magic[:], LUKS2Magic)
+				copy(hdr.Magic[:], header.Magic)
 				copy(hdr.ChecksumAlgorithm[:], "sha256")
 
 				jsonData := []byte(`{"keyslots":{},` + minimalHeaderJSONTail)
-				jsonSize := LUKS2DefaultSize
+				jsonSize := header.DefaultSize
 
 				// Calculate correct checksum
 				if err := calculateHeaderChecksum(hdr, jsonData, jsonSize); err != nil {
@@ -382,23 +384,23 @@ func TestValidateHeaderChecksum(t *testing.T) {
 func TestValidateHeaderChecksumInvalid(t *testing.T) {
 	tests := []struct {
 		name        string
-		setupHeader func() (*LUKS2BinaryHeader, []byte)
+		setupHeader func() (*header.BinaryHeader, []byte)
 		wantErr     bool
 	}{
 		{
 			name: "corrupted checksum",
-			setupHeader: func() (*LUKS2BinaryHeader, []byte) {
-				hdr := &LUKS2BinaryHeader{
-					Version:      LUKS2Version,
+			setupHeader: func() (*header.BinaryHeader, []byte) {
+				hdr := &header.BinaryHeader{
+					Version:      header.Version,
 					SequenceID:   1,
-					HeaderSize:   uint64(LUKS2HeaderSize + LUKS2DefaultSize),
+					HeaderSize:   uint64(header.HeaderSize + header.DefaultSize),
 					HeaderOffset: 0,
 				}
-				copy(hdr.Magic[:], LUKS2Magic)
+				copy(hdr.Magic[:], header.Magic)
 				copy(hdr.ChecksumAlgorithm[:], "sha256")
 
 				jsonData := []byte(`{"keyslots":{},` + minimalHeaderJSONTail)
-				jsonSize := LUKS2DefaultSize
+				jsonSize := header.DefaultSize
 
 				// Calculate correct checksum
 				if err := calculateHeaderChecksum(hdr, jsonData, jsonSize); err != nil {
@@ -423,18 +425,18 @@ func TestValidateHeaderChecksumInvalid(t *testing.T) {
 		},
 		{
 			name: "corrupted data",
-			setupHeader: func() (*LUKS2BinaryHeader, []byte) {
-				hdr := &LUKS2BinaryHeader{
-					Version:      LUKS2Version,
+			setupHeader: func() (*header.BinaryHeader, []byte) {
+				hdr := &header.BinaryHeader{
+					Version:      header.Version,
 					SequenceID:   1,
-					HeaderSize:   uint64(LUKS2HeaderSize + LUKS2DefaultSize),
+					HeaderSize:   uint64(header.HeaderSize + header.DefaultSize),
 					HeaderOffset: 0,
 				}
-				copy(hdr.Magic[:], LUKS2Magic)
+				copy(hdr.Magic[:], header.Magic)
 				copy(hdr.ChecksumAlgorithm[:], "sha256")
 
 				jsonData := []byte(`{"keyslots":{},` + minimalHeaderJSONTail)
-				jsonSize := LUKS2DefaultSize
+				jsonSize := header.DefaultSize
 
 				// Calculate correct checksum
 				if err := calculateHeaderChecksum(hdr, jsonData, jsonSize); err != nil {
@@ -452,7 +454,7 @@ func TestValidateHeaderChecksumInvalid(t *testing.T) {
 
 				// Corrupt data after the header
 				data := buf.Bytes()
-				data[LUKS2HeaderSize] ^= 0xFF
+				data[header.HeaderSize] ^= 0xFF
 
 				return hdr, data
 			},
@@ -460,18 +462,18 @@ func TestValidateHeaderChecksumInvalid(t *testing.T) {
 		},
 		{
 			name: "truncated data",
-			setupHeader: func() (*LUKS2BinaryHeader, []byte) {
-				hdr := &LUKS2BinaryHeader{
-					Version:      LUKS2Version,
+			setupHeader: func() (*header.BinaryHeader, []byte) {
+				hdr := &header.BinaryHeader{
+					Version:      header.Version,
 					SequenceID:   1,
-					HeaderSize:   uint64(LUKS2HeaderSize + LUKS2DefaultSize),
+					HeaderSize:   uint64(header.HeaderSize + header.DefaultSize),
 					HeaderOffset: 0,
 				}
-				copy(hdr.Magic[:], LUKS2Magic)
+				copy(hdr.Magic[:], header.Magic)
 				copy(hdr.ChecksumAlgorithm[:], "sha256")
 
 				// Create truncated data (not enough for full header)
-				data := make([]byte, LUKS2HeaderSize/2)
+				data := make([]byte, header.HeaderSize/2)
 				return hdr, data
 			},
 			wantErr: true,
@@ -495,14 +497,14 @@ func TestValidateHeaderChecksumInvalid(t *testing.T) {
 func TestReadJSONMetadata(t *testing.T) {
 	tests := []struct {
 		name     string
-		hdr      *LUKS2BinaryHeader
+		hdr      *header.BinaryHeader
 		jsonData []byte
 		wantErr  bool
 	}{
 		{
 			name: "minimal metadata",
-			hdr: &LUKS2BinaryHeader{
-				HeaderSize:   uint64(LUKS2HeaderSize + LUKS2DefaultSize),
+			hdr: &header.BinaryHeader{
+				HeaderSize:   uint64(header.HeaderSize + header.DefaultSize),
 				HeaderOffset: 0,
 			},
 			jsonData: []byte(`{"keyslots":{},` + minimalHeaderJSONTail),
@@ -516,8 +518,8 @@ func TestReadJSONMetadata(t *testing.T) {
 			// for against a realistic keyslot; the incomplete form is kept
 			// below, because parsing it is the documented behavior.
 			name: "with keyslots",
-			hdr: &LUKS2BinaryHeader{
-				HeaderSize:   uint64(LUKS2HeaderSize + LUKS2DefaultSize),
+			hdr: &header.BinaryHeader{
+				HeaderSize:   uint64(header.HeaderSize + header.DefaultSize),
 				HeaderOffset: 0,
 			},
 			jsonData: []byte(`{"keyslots":{"0":{"type":"luks2","key_size":64,` +
@@ -533,8 +535,8 @@ func TestReadJSONMetadata(t *testing.T) {
 			// one damaged keyslot unreadable through its intact ones. See
 			// keyslotvalidation.go.
 			name: "keyslot missing its kdf, af and area still parses",
-			hdr: &LUKS2BinaryHeader{
-				HeaderSize:   uint64(LUKS2HeaderSize + LUKS2DefaultSize),
+			hdr: &header.BinaryHeader{
+				HeaderSize:   uint64(header.HeaderSize + header.DefaultSize),
 				HeaderOffset: 0,
 			},
 			jsonData: []byte(`{"keyslots":{"0":{"type":"luks2","key_size":64}},` + minimalHeaderJSONTail),
@@ -542,8 +544,8 @@ func TestReadJSONMetadata(t *testing.T) {
 		},
 		{
 			name: "with null terminator",
-			hdr: &LUKS2BinaryHeader{
-				HeaderSize:   uint64(LUKS2HeaderSize + LUKS2DefaultSize),
+			hdr: &header.BinaryHeader{
+				HeaderSize:   uint64(header.HeaderSize + header.DefaultSize),
 				HeaderOffset: 0,
 			},
 			jsonData: append([]byte(`{"keyslots":{},`+minimalHeaderJSONTail), 0, 0, 0),
@@ -551,8 +553,8 @@ func TestReadJSONMetadata(t *testing.T) {
 		},
 		{
 			name: "invalid JSON",
-			hdr: &LUKS2BinaryHeader{
-				HeaderSize:   uint64(LUKS2HeaderSize + LUKS2DefaultSize),
+			hdr: &header.BinaryHeader{
+				HeaderSize:   uint64(header.HeaderSize + header.DefaultSize),
 				HeaderOffset: 0,
 			},
 			jsonData: []byte(`{invalid json`),
@@ -560,8 +562,8 @@ func TestReadJSONMetadata(t *testing.T) {
 		},
 		{
 			name: "empty JSON",
-			hdr: &LUKS2BinaryHeader{
-				HeaderSize:   uint64(LUKS2HeaderSize + LUKS2DefaultSize),
+			hdr: &header.BinaryHeader{
+				HeaderSize:   uint64(header.HeaderSize + header.DefaultSize),
 				HeaderOffset: 0,
 			},
 			jsonData: []byte(``),
@@ -580,13 +582,13 @@ func TestReadJSONMetadata(t *testing.T) {
 			}
 
 			// Write a dummy header (size matters for offset calculation)
-			var dummyHdr LUKS2BinaryHeader
+			var dummyHdr header.BinaryHeader
 			if err := binary.Write(buf, binary.BigEndian, &dummyHdr); err != nil {
 				t.Fatalf("Failed to write dummy header: %v", err)
 			}
 
 			// Write JSON data with padding
-			jsonSize := int(tt.hdr.HeaderSize) - LUKS2HeaderSize
+			jsonSize := int(tt.hdr.HeaderSize) - header.HeaderSize
 			buf.Write(tt.jsonData)
 			if len(tt.jsonData) < jsonSize {
 				padding := make([]byte, jsonSize-len(tt.jsonData))
@@ -627,19 +629,19 @@ func TestReadJSONMetadata(t *testing.T) {
 
 // TestReadJSONMetadataRoundTrip tests that metadata can be marshaled and unmarshaled
 func TestReadJSONMetadataRoundTrip(t *testing.T) {
-	original := &LUKS2Metadata{
-		Keyslots: map[string]*Keyslot{
+	original := &header.Metadata{
+		Keyslots: map[string]*header.Keyslot{
 			"0": {
 				Type:    "luks2",
 				KeySize: 64,
-				Area: &KeyslotArea{
+				Area: &header.KeyslotArea{
 					Type:       "raw",
 					Offset:     "32768",
 					Size:       "258048",
 					Encryption: "aes-xts-plain64",
 					KeySize:    64,
 				},
-				KDF: &KDF{
+				KDF: &rawKDF{
 					Type: "pbkdf2",
 					Hash: "sha256",
 					Salt: "dGVzdHNhbHQ=",
@@ -647,15 +649,15 @@ func TestReadJSONMetadataRoundTrip(t *testing.T) {
 				// The af object is mandatory on a luks2 keyslot: it is what
 				// says how the volume key is spread across the area above. The
 				// fixture omitted it and only parsed because nothing checked.
-				AF: &AntiForensic{
+				AF: &header.AntiForensic{
 					Type:    "luks1",
-					Stripes: AFStripes,
+					Stripes: header.AFStripes,
 					Hash:    "sha256",
 				},
 			},
 		},
-		Tokens: map[string]*Token{}, // mandatory: cryptsetup refuses a header without it (#248)
-		Segments: map[string]*Segment{
+		Tokens: map[string]*LegacyToken{}, // mandatory: cryptsetup refuses a header without it (#248)
+		Segments: map[string]*header.Segment{
 			"0": {
 				Type:       "crypt",
 				Offset:     "8388608",
@@ -665,7 +667,7 @@ func TestReadJSONMetadataRoundTrip(t *testing.T) {
 				SectorSize: 512,
 			},
 		},
-		Digests: map[string]*Digest{
+		Digests: map[string]*rawDigest{
 			"0": {
 				Type:       "pbkdf2",
 				Keyslots:   []string{"0"},
@@ -676,7 +678,7 @@ func TestReadJSONMetadataRoundTrip(t *testing.T) {
 				Digest:     "ZGlnZXN0dmFsdWU=",
 			},
 		},
-		Config: &Config{
+		Config: &rawConfig{
 			JSONSize:     "12288",
 			KeyslotsSize: "8355840",
 		},
@@ -689,19 +691,19 @@ func TestReadJSONMetadataRoundTrip(t *testing.T) {
 	}
 
 	// Create header
-	hdr := &LUKS2BinaryHeader{
-		HeaderSize:   uint64(LUKS2HeaderSize + LUKS2DefaultSize),
+	hdr := &header.BinaryHeader{
+		HeaderSize:   uint64(header.HeaderSize + header.DefaultSize),
 		HeaderOffset: 0,
 	}
 
 	// Create buffer
 	buf := new(bytes.Buffer)
-	var dummyHdr LUKS2BinaryHeader
+	var dummyHdr header.BinaryHeader
 	if err := binary.Write(buf, binary.BigEndian, &dummyHdr); err != nil {
 		t.Fatalf("Failed to write dummy header: %v", err)
 	}
 
-	jsonSize := int(hdr.HeaderSize) - LUKS2HeaderSize
+	jsonSize := int(hdr.HeaderSize) - header.HeaderSize
 	buf.Write(jsonData)
 	padding := make([]byte, jsonSize-len(jsonData))
 	buf.Write(padding)
@@ -715,7 +717,7 @@ func TestReadJSONMetadataRoundTrip(t *testing.T) {
 
 	// Verify key structures are present
 	if len(recovered.Keyslots) != len(original.Keyslots) {
-		t.Errorf("Keyslot count mismatch: got %d, want %d", len(recovered.Keyslots), len(original.Keyslots))
+		t.Errorf("header.Keyslot count mismatch: got %d, want %d", len(recovered.Keyslots), len(original.Keyslots))
 	}
 	if len(recovered.Segments) != len(original.Segments) {
 		t.Errorf("Segment count mismatch: got %d, want %d", len(recovered.Segments), len(original.Segments))
@@ -727,13 +729,13 @@ func TestReadJSONMetadataRoundTrip(t *testing.T) {
 	// Verify keyslot details
 	if ks, ok := recovered.Keyslots["0"]; ok {
 		if ks.Type != "luks2" {
-			t.Errorf("Keyslot type mismatch: got %s, want luks2", ks.Type)
+			t.Errorf("header.Keyslot type mismatch: got %s, want luks2", ks.Type)
 		}
 		if ks.KeySize != 64 {
-			t.Errorf("Keyslot key size mismatch: got %d, want 64", ks.KeySize)
+			t.Errorf("header.Keyslot key size mismatch: got %d, want 64", ks.KeySize)
 		}
 	} else {
-		t.Error("Keyslot 0 not found")
+		t.Error("header.Keyslot 0 not found")
 	}
 }
 
@@ -741,26 +743,26 @@ func TestReadJSONMetadataRoundTrip(t *testing.T) {
 func TestCalculateHeaderChecksumEdgeCases(t *testing.T) {
 	tests := []struct {
 		name     string
-		hdr      *LUKS2BinaryHeader
+		hdr      *header.BinaryHeader
 		jsonData []byte
 		jsonSize int
 		wantErr  bool
 	}{
 		{
 			name: "empty JSON",
-			hdr: &LUKS2BinaryHeader{
-				Version:    LUKS2Version,
-				HeaderSize: uint64(LUKS2HeaderSize + LUKS2DefaultSize),
+			hdr: &header.BinaryHeader{
+				Version:    header.Version,
+				HeaderSize: uint64(header.HeaderSize + header.DefaultSize),
 			},
 			jsonData: []byte{},
-			jsonSize: LUKS2DefaultSize,
+			jsonSize: header.DefaultSize,
 			wantErr:  false,
 		},
 		{
 			name: "large JSON",
-			hdr: &LUKS2BinaryHeader{
-				Version:    LUKS2Version,
-				HeaderSize: uint64(LUKS2HeaderSize + 32768),
+			hdr: &header.BinaryHeader{
+				Version:    header.Version,
+				HeaderSize: uint64(header.HeaderSize + 32768),
 			},
 			jsonData: make([]byte, 20000),
 			jsonSize: 32768,
@@ -768,9 +770,9 @@ func TestCalculateHeaderChecksumEdgeCases(t *testing.T) {
 		},
 		{
 			name: "exact fit JSON",
-			hdr: &LUKS2BinaryHeader{
-				Version:    LUKS2Version,
-				HeaderSize: uint64(LUKS2HeaderSize + 16384),
+			hdr: &header.BinaryHeader{
+				Version:    header.Version,
+				HeaderSize: uint64(header.HeaderSize + 16384),
 			},
 			jsonData: make([]byte, 16384),
 			jsonSize: 16384,
@@ -780,7 +782,7 @@ func TestCalculateHeaderChecksumEdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			copy(tt.hdr.Magic[:], LUKS2Magic)
+			copy(tt.hdr.Magic[:], header.Magic)
 			copy(tt.hdr.ChecksumAlgorithm[:], "sha256")
 
 			err := calculateHeaderChecksum(tt.hdr, tt.jsonData, tt.jsonSize)
@@ -813,14 +815,14 @@ func TestCalculateHeaderChecksumEdgeCases(t *testing.T) {
 // TestReadJSONMetadataRefusesAHeaderSizeWithNoRoomForJSON is the same property
 // for the other function the bound was hoisted out of.
 //
-// jsonSize is headerSize - LUKS2HeaderSize. A size at or below LUKS2HeaderSize
+// jsonSize is headerSize - header.HeaderSize. A size at or below header.HeaderSize
 // makes that zero or negative, and make() panics on a negative length, so this
 // check is what turns a caller's mistake into an error the caller can see.
 func TestReadJSONMetadataRefusesAHeaderSizeWithNoRoomForJSON(t *testing.T) {
-	reader := &mockReaderAt{data: make([]byte, LUKS2HeaderSize*2)}
-	hdr := &LUKS2BinaryHeader{Version: LUKS2Version}
+	reader := &mockReaderAt{data: make([]byte, header.HeaderSize*2)}
+	hdr := &header.BinaryHeader{Version: header.Version}
 
-	for _, size := range []int{-1, 0, 1, LUKS2HeaderSize - 1, LUKS2HeaderSize} {
+	for _, size := range []int{-1, 0, 1, header.HeaderSize - 1, header.HeaderSize} {
 		t.Run(fmt.Sprintf("size %d", size), func(t *testing.T) {
 			defer func() {
 				if r := recover(); r != nil {
@@ -842,7 +844,7 @@ func TestReadJSONMetadataRefusesAHeaderSizeWithNoRoomForJSON(t *testing.T) {
 	// is not enough to parse but IS enough to get past this guard. The failure
 	// must move to the JSON parse.
 	t.Run("one byte of JSON area is not refused by this guard", func(t *testing.T) {
-		_, err := readJSONMetadata(reader, hdr, 0, LUKS2HeaderSize+1)
+		_, err := readJSONMetadata(reader, hdr, 0, header.HeaderSize+1)
 		if err == nil {
 			t.Fatal("readJSONMetadata accepted a one-byte JSON area")
 		}
@@ -874,7 +876,7 @@ func TestReadHeaderBoundsTheDeclaredSizeBeforeAnythingElseUsesIt(t *testing.T) {
 	setHeaderSize(t, device, craftedSize)
 	setHeaderOffset(t, device, craftedOffset)
 
-	_, _, err := ReadHeader(device)
+	_, _, err := readHeaderForTest(device)
 	if err == nil {
 		t.Fatal("ReadHeader accepted a header with both an out-of-range size and an illegal offset")
 	}
@@ -899,19 +901,19 @@ func nullEntryVolume(t *testing.T, name string) string {
 	path := newImage(t, name)
 	formatWithLibrary(t, path)
 
-	hdr, metadata, err := ReadHeader(path)
+	hdr, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 
 	healthy := cloneKeyslot(metadata.Keyslots["0"])
-	metadata.Keyslots = map[string]*Keyslot{
+	metadata.Keyslots = map[string]*header.Keyslot{
 		"0":  nil,
 		"1":  healthy,
 		"10": nil,
 		"2":  nil,
 	}
-	metadata.Tokens = map[string]*Token{
+	metadata.Tokens = map[string]*LegacyToken{
 		"0": {Type: "healthy-token", Keyslots: []string{"1"}},
 		"3": nil,
 	}
@@ -940,16 +942,16 @@ func TestReadHeaderReportsTheNullEntriesItDropped(t *testing.T) {
 
 	path := nullEntryVolume(t, "null-entries.img")
 
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("a container with null entries no longer reads: %v", err)
 	}
 
-	want := []DroppedEntry{
-		{Kind: DroppedKindKeyslot, ID: "0"},
-		{Kind: DroppedKindKeyslot, ID: "2"},
-		{Kind: DroppedKindKeyslot, ID: "10"},
-		{Kind: DroppedKindToken, ID: "3"},
+	want := []header.DroppedEntry{
+		{Kind: header.DroppedKindKeyslot, ID: "0"},
+		{Kind: header.DroppedKindKeyslot, ID: "2"},
+		{Kind: header.DroppedKindKeyslot, ID: "10"},
+		{Kind: header.DroppedKindToken, ID: "3"},
 	}
 	if !slices.Equal(metadata.DroppedNullEntries, want) {
 		t.Fatalf("DroppedNullEntries = %v, want %v", metadata.DroppedNullEntries, want)
@@ -968,7 +970,7 @@ func TestReadHeaderReportsTheNullEntriesItDropped(t *testing.T) {
 	// between reads of an unchanged device -- and a diagnostic an operator
 	// compares against last time's is exactly where that is unacceptable.
 	for i := 0; i < 20; i++ {
-		_, again, err := ReadHeader(path)
+		_, again, err := readHeaderForTest(path)
 		if err != nil {
 			t.Fatalf("ReadHeader failed on repeat %d: %v", i, err)
 		}
@@ -988,7 +990,7 @@ func TestReadHeaderReportsNothingDroppedForAnIntactHeader(t *testing.T) {
 	path := newImage(t, "intact.img")
 	formatWithLibrary(t, path)
 
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -1010,7 +1012,7 @@ func TestReadHeaderReportsNothingDroppedForAnIntactHeader(t *testing.T) {
 // object and rejects members it does not expect.
 func TestDroppedNullEntriesNeverReachesTheDisk(t *testing.T) {
 	var got []string
-	typ := reflect.TypeOf(LUKS2Metadata{})
+	typ := reflect.TypeOf(header.Metadata{})
 	for i := 0; i < typ.NumField(); i++ {
 		tag := typ.Field(i).Tag.Get("json")
 		name, _, _ := strings.Cut(tag, ",")
@@ -1028,7 +1030,7 @@ func TestDroppedNullEntriesNeverReachesTheDisk(t *testing.T) {
 	slices.Sort(got)
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
-		t.Fatalf("LUKS2Metadata marshals %v, want exactly %v -- a LUKS2 JSON object carries these five members and nothing else",
+		t.Fatalf("header.Metadata marshals %v, want exactly %v -- a LUKS2 JSON object carries these five members and nothing else",
 			got, want)
 	}
 }
@@ -1039,7 +1041,7 @@ func TestDroppedNullEntriesNeverReachesTheDisk(t *testing.T) {
 func TestDroppedNullEntriesDoesNotSurviveAWriteBack(t *testing.T) {
 	path := nullEntryVolume(t, "null-entries-writeback.img")
 
-	hdr, metadata, err := ReadHeader(path)
+	hdr, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -1052,7 +1054,7 @@ func TestDroppedNullEntriesDoesNotSurviveAWriteBack(t *testing.T) {
 		t.Fatalf("failed to write the repaired header: %v", err)
 	}
 
-	_, reread, err := ReadHeader(path)
+	_, reread, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed after the write-back: %v", err)
 	}
@@ -1067,15 +1069,15 @@ func TestDroppedNullEntriesDoesNotSurviveAWriteBack(t *testing.T) {
 // keyslot 3 or token 3 was lost, and they are different things.
 func TestDroppedEntryStringNamesBothTheKindAndTheID(t *testing.T) {
 	for _, tc := range []struct {
-		entry DroppedEntry
+		entry header.DroppedEntry
 		want  string
 	}{
-		{DroppedEntry{Kind: DroppedKindKeyslot, ID: "3"}, `keyslot "3"`},
-		{DroppedEntry{Kind: DroppedKindToken, ID: "3"}, `token "3"`},
-		{DroppedEntry{Kind: DroppedKindKeyslot, ID: "01"}, `keyslot "01"`},
+		{header.DroppedEntry{Kind: header.DroppedKindKeyslot, ID: "3"}, `keyslot "3"`},
+		{header.DroppedEntry{Kind: header.DroppedKindToken, ID: "3"}, `token "3"`},
+		{header.DroppedEntry{Kind: header.DroppedKindKeyslot, ID: "01"}, `keyslot "01"`},
 	} {
 		if got := tc.entry.String(); got != tc.want {
-			t.Errorf("DroppedEntry%v.String() = %q, want %q", tc.entry, got, tc.want)
+			t.Errorf("header.DroppedEntry%v.String() = %q, want %q", tc.entry, got, tc.want)
 		}
 	}
 }
@@ -1092,12 +1094,12 @@ func luksPrefixImage(t *testing.T, name string, prefix []byte) string {
 }
 
 // luksVersionPrefix is the magic followed by a big-endian version -- all that
-// IsLUKS and IsLUKS2 read -- padded to a whole binary header, which is what
-// ReadHeader reads before it looks at the version.
+// isLUKSForTest and isLUKS2ForTest read -- padded to a whole binary header,
+// which is what readHeaderForTest reads before it looks at the version.
 func luksVersionPrefix(version uint16) []byte {
-	prefix := append([]byte(LUKS2Magic), 0, 0)
-	binary.BigEndian.PutUint16(prefix[LUKS2MagicLen:], version)
-	return append(prefix, make([]byte, LUKS2HeaderSize-len(prefix))...)
+	prefix := append([]byte(header.Magic), 0, 0)
+	binary.BigEndian.PutUint16(prefix[header.MagicLen:], version)
+	return append(prefix, make([]byte, header.HeaderSize-len(prefix))...)
 }
 
 // TestIsLUKSAndIsLUKS2TellTheVersionsApart pins the two probes against each
@@ -1119,16 +1121,16 @@ func TestIsLUKSAndIsLUKS2TellTheVersionsApart(t *testing.T) {
 		{"the LUKS magic with an unknown version", luksPrefixImage(t, "luks3.img", luksVersionPrefix(3)), true, false},
 		{"no LUKS magic", luksPrefixImage(t, "plain.img", make([]byte, 4096)), false, false},
 		{"the secondary header's magic at offset 0", luksPrefixImage(t, "skul.img",
-			append([]byte(LUKS2SecondaryMagic), 0, 2)), false, false},
+			append([]byte(header.SecondaryMagic), 0, 2)), false, false},
 		{"fewer bytes than the magic", luksPrefixImage(t, "tiny.img", []byte("LUK")), false, false},
-		{"the magic and half a version", luksPrefixImage(t, "seven.img", append([]byte(LUKS2Magic), 0)), true, false},
+		{"the magic and half a version", luksPrefixImage(t, "seven.img", append([]byte(header.Magic), 0)), true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := IsLUKS(tc.device)
+			got, err := isLUKSForTest(tc.device)
 			if err != nil || got != tc.luks {
 				t.Errorf("IsLUKS = %v, %v; want %v, nil", got, err, tc.luks)
 			}
-			got, err = IsLUKS2(tc.device)
+			got, err = isLUKS2ForTest(tc.device)
 			if err != nil || got != tc.luksV2 {
 				t.Errorf("IsLUKS2 = %v, %v; want %v, nil", got, err, tc.luksV2)
 			}
@@ -1144,16 +1146,16 @@ func TestIsLUKSRefusesAPathItCannotProbe(t *testing.T) {
 		name, device string
 		want         error
 	}{
-		{"an empty path", "", ErrInvalidPath},
-		{"a relative path", "relative/volume.img", ErrInvalidPath},
+		{"an empty path", "", ErrInvalidArgument},
+		{"a relative path", "relative/volume.img", ErrInvalidArgument},
 		{"a path that does not exist", filepath.Join(t.TempDir(), "absent.img"), ErrDeviceNotFound},
-		{"a directory", t.TempDir(), ErrInvalidPath},
+		{"a directory", t.TempDir(), ErrInvalidArgument},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got, err := IsLUKS(tc.device); !errors.Is(err, tc.want) {
+			if got, err := isLUKSForTest(tc.device); !errors.Is(err, tc.want) {
 				t.Errorf("IsLUKS = %v, %v; want an error wrapping %v", got, err, tc.want)
 			}
-			if got, err := IsLUKS2(tc.device); !errors.Is(err, tc.want) {
+			if got, err := isLUKS2ForTest(tc.device); !errors.Is(err, tc.want) {
 				t.Errorf("IsLUKS2 = %v, %v; want an error wrapping %v", got, err, tc.want)
 			}
 		})
@@ -1166,7 +1168,7 @@ func TestIsLUKSRefusesAPathItCannotProbe(t *testing.T) {
 // offsets as JSON sizes.
 func TestReadHeaderRefusesALUKS1Container(t *testing.T) {
 	device := luksPrefixImage(t, "luks1.img", luksVersionPrefix(1))
-	if _, _, err := ReadHeader(device); err == nil || !strings.Contains(err.Error(), "unsupported LUKS version: 1") {
+	if _, _, err := readHeaderForTest(device); err == nil || !strings.Contains(err.Error(), "unsupported LUKS version: 1") {
 		t.Fatalf("ReadHeader = %v, want it to refuse LUKS version 1 by name", err)
 	}
 }

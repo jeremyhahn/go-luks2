@@ -11,6 +11,8 @@ import (
 	"errors"
 	"os"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // End-to-end tests for the documented recovery flow.
@@ -51,7 +53,7 @@ func destroyPrimaryHeader(t *testing.T, device string, areaSize int64) {
 		t.Fatalf("failed to close the volume: %v", err)
 	}
 
-	if _, _, err := ReadHeader(device); err == nil {
+	if _, _, err := readHeaderForTest(device); err == nil {
 		t.Fatal("the primary header still reads after being zeroed; the fixture is not testing recovery")
 	}
 }
@@ -72,10 +74,10 @@ func assertHeaderCopiesAreDistinct(t *testing.T, device string, areaSize int64) 
 		offset int64
 		magic  string
 	}{
-		{"primary", LUKS2PrimaryHeaderOffset, LUKS2Magic},
-		{"secondary", areaSize, LUKS2SecondaryMagic},
+		{"primary", header.PrimaryHeaderOffset, header.Magic},
+		{"secondary", areaSize, header.SecondaryMagic},
 	} {
-		magic := make([]byte, LUKS2MagicLen)
+		magic := make([]byte, header.MagicLen)
 		if _, err := f.ReadAt(magic, tc.offset); err != nil {
 			t.Fatalf("failed to read the %s magic: %v", tc.name, err)
 		}
@@ -85,15 +87,15 @@ func assertHeaderCopiesAreDistinct(t *testing.T, device string, areaSize int64) 
 		}
 	}
 
-	primary, _, err := ReadHeader(device)
+	primary, _, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("the primary header does not read back: %v", err)
 	}
-	if primary.HeaderOffset != uint64(LUKS2PrimaryHeaderOffset) { // #nosec G115 -- zero
+	if primary.HeaderOffset != uint64(header.PrimaryHeaderOffset) { // #nosec G115 -- zero
 		t.Errorf("restored primary records hdr_offset %d, want 0", primary.HeaderOffset)
 	}
 
-	secondary, _, err := ReadSecondaryHeader(device)
+	secondary, _, err := readSecondaryHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("the secondary header does not read back: %v", err)
 	}
@@ -109,16 +111,16 @@ func TestRecoveryFlow_RestorePrimaryHeader(t *testing.T) {
 
 	device, passphrase := headerSizeVolume(t)
 
-	destroyPrimaryHeader(t, device, LUKS2SecondaryHeaderOffset)
+	destroyPrimaryHeader(t, device, header.SecondaryHeaderOffset)
 
-	if err := RestorePrimaryHeader(device); err != nil {
+	if err := restorePrimaryHeaderForTest(device); err != nil {
 		t.Fatalf("RestorePrimaryHeader failed: %v", err)
 	}
 
-	assertHeaderCopiesAreDistinct(t, device, LUKS2SecondaryHeaderOffset)
+	assertHeaderCopiesAreDistinct(t, device, header.SecondaryHeaderOffset)
 
 	// The end state that matters: the volume opens again.
-	if err := TestKey(device, passphrase); err != nil {
+	if err := testKeyForTest(device, passphrase); err != nil {
 		t.Fatalf("the volume does not open after recovery: %v", err)
 	}
 }
@@ -132,9 +134,9 @@ func TestRecoveryFlow_WriteBackTheSecondaryHeader(t *testing.T) {
 
 	device, passphrase := headerSizeVolume(t)
 
-	destroyPrimaryHeader(t, device, LUKS2SecondaryHeaderOffset)
+	destroyPrimaryHeader(t, device, header.SecondaryHeaderOffset)
 
-	hdr, metadata, err := ReadSecondaryHeader(device)
+	hdr, metadata, err := readSecondaryHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadSecondaryHeader failed: %v", err)
 	}
@@ -142,31 +144,31 @@ func TestRecoveryFlow_WriteBackTheSecondaryHeader(t *testing.T) {
 	// The returned header IS a secondary header -- that is what was asked for,
 	// and asserting it here pins the precondition the write path has to cope
 	// with rather than assuming it away.
-	if !bytes.Equal(hdr.Magic[:], []byte(LUKS2SecondaryMagic)) {
-		t.Fatalf("ReadSecondaryHeader returned magic %q, want %q", hdr.Magic[:], LUKS2SecondaryMagic)
+	if !bytes.Equal(hdr.Magic[:], []byte(header.SecondaryMagic)) {
+		t.Fatalf("ReadSecondaryHeader returned magic %q, want %q", hdr.Magic[:], header.SecondaryMagic)
 	}
-	if hdr.HeaderOffset != uint64(LUKS2SecondaryHeaderOffset) { // #nosec G115 -- a legal area size
+	if hdr.HeaderOffset != uint64(header.SecondaryHeaderOffset) { // #nosec G115 -- a legal area size
 		t.Fatalf("ReadSecondaryHeader returned hdr_offset %d, want %d",
-			hdr.HeaderOffset, LUKS2SecondaryHeaderOffset)
+			hdr.HeaderOffset, header.SecondaryHeaderOffset)
 	}
 
-	if err := WriteHeader(device, hdr, metadata); err != nil {
+	if err := writeHeaderForTest(device, hdr, metadata); err != nil {
 		t.Fatalf("WriteHeader failed: %v", err)
 	}
 
-	assertHeaderCopiesAreDistinct(t, device, LUKS2SecondaryHeaderOffset)
+	assertHeaderCopiesAreDistinct(t, device, header.SecondaryHeaderOffset)
 
 	// The caller's header must also have been normalized to describe what was
 	// actually written, the way HeaderSize already is.
-	if !bytes.Equal(hdr.Magic[:], []byte(LUKS2Magic)) {
+	if !bytes.Equal(hdr.Magic[:], []byte(header.Magic)) {
 		t.Errorf("after WriteHeader the caller's header carries magic %q, want %q",
-			hdr.Magic[:], LUKS2Magic)
+			hdr.Magic[:], header.Magic)
 	}
-	if hdr.HeaderOffset != uint64(LUKS2PrimaryHeaderOffset) { // #nosec G115 -- zero
+	if hdr.HeaderOffset != uint64(header.PrimaryHeaderOffset) { // #nosec G115 -- zero
 		t.Errorf("after WriteHeader the caller's header records hdr_offset %d, want 0", hdr.HeaderOffset)
 	}
 
-	if err := TestKey(device, passphrase); err != nil {
+	if err := testKeyForTest(device, passphrase); err != nil {
 		t.Fatalf("the volume does not open after recovery: %v", err)
 	}
 }
@@ -182,7 +184,7 @@ func TestRecoveryFlow_RefusesWhenBothCopiesAreGone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to open the volume: %v", err)
 	}
-	if _, err := f.WriteAt(make([]byte, 2*LUKS2SecondaryHeaderOffset), 0); err != nil {
+	if _, err := f.WriteAt(make([]byte, 2*header.SecondaryHeaderOffset), 0); err != nil {
 		_ = f.Close()
 		t.Fatalf("failed to destroy the headers: %v", err)
 	}
@@ -190,9 +192,9 @@ func TestRecoveryFlow_RefusesWhenBothCopiesAreGone(t *testing.T) {
 		t.Fatalf("failed to close the volume: %v", err)
 	}
 
-	before := deviceHead(t, device, 2*LUKS2HeaderMinSize)
+	before := deviceHead(t, device, 2*header.HeaderMinSize)
 
-	err = RestorePrimaryHeader(device)
+	err = restorePrimaryHeaderForTest(device)
 	if err == nil {
 		t.Fatal("RestorePrimaryHeader reported success with no secondary header to restore from")
 	}
@@ -200,7 +202,7 @@ func TestRecoveryFlow_RefusesWhenBothCopiesAreGone(t *testing.T) {
 		t.Errorf("error = %v, want it to wrap ErrInvalidHeader", err)
 	}
 
-	if after := deviceHead(t, device, 2*LUKS2HeaderMinSize); !bytes.Equal(before, after) {
+	if after := deviceHead(t, device, 2*header.HeaderMinSize); !bytes.Equal(before, after) {
 		t.Fatal("a failed recovery still modified the device")
 	}
 }
@@ -227,14 +229,14 @@ func TestConformance_RecoveredContainerIsAcceptedByCryptsetup(t *testing.T) {
 	path := newImage(t, "recovered.img")
 	formatWithLibrary(t, path)
 
-	destroyPrimaryHeader(t, path, LUKS2SecondaryHeaderOffset)
+	destroyPrimaryHeader(t, path, header.SecondaryHeaderOffset)
 
-	if err := RestorePrimaryHeader(path); err != nil {
+	if err := restorePrimaryHeaderForTest(path); err != nil {
 		t.Fatalf("RestorePrimaryHeader failed: %v", err)
 	}
 
-	assertHeaderCopiesAreDistinct(t, path, LUKS2SecondaryHeaderOffset)
-	if err := TestKey(path, []byte(conformancePassphrase)); err != nil {
+	assertHeaderCopiesAreDistinct(t, path, header.SecondaryHeaderOffset)
+	if err := testKeyForTest(path, []byte(conformancePassphrase)); err != nil {
 		t.Fatalf("this package cannot open the container it just recovered: %v", err)
 	}
 
@@ -283,7 +285,7 @@ func TestConformance_RecoverForeignGeometryContainer(t *testing.T) {
 
 	destroyPrimaryHeader(t, path, areaSize)
 
-	if err := RestorePrimaryHeader(path); err != nil {
+	if err := restorePrimaryHeaderForTest(path); err != nil {
 		t.Fatalf("RestorePrimaryHeader failed on a 32 KiB-metadata container: %v", err)
 	}
 
@@ -291,7 +293,7 @@ func TestConformance_RecoverForeignGeometryContainer(t *testing.T) {
 
 	// The area size must survive the repair; restoring at the default geometry
 	// would move the second copy onto the keyslots.
-	hdr, _, err := ReadHeader(path)
+	hdr, _, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed after recovery: %v", err)
 	}
@@ -305,7 +307,7 @@ func TestConformance_RecoverForeignGeometryContainer(t *testing.T) {
 	if code, out := runCryptsetup(t, conformancePassphrase, "luksOpen", "--test-passphrase", path); code != 0 {
 		t.Fatalf("after recovery, cryptsetup rejected the correct passphrase (exit %d)\n%s", code, out)
 	}
-	if err := TestKey(path, []byte(conformancePassphrase)); err != nil {
+	if err := testKeyForTest(path, []byte(conformancePassphrase)); err != nil {
 		t.Fatalf("this package cannot open the recovered container: %v", err)
 	}
 }

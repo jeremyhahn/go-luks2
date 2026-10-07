@@ -13,8 +13,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/jeremyhahn/go-luks2/test/harness"
+	"github.com/jeremyhahn/go-luks2/test/internal/harness"
 )
 
 var binaryPath string
@@ -58,11 +59,37 @@ func detachLoopDevicesBackedBy(t *testing.T, path string) {
 		if !found || dev == "" {
 			continue
 		}
-		if err := exec.Command("losetup", "-d", dev).Run(); err != nil {
+		if err := exec.Command("losetup", "-d", dev).Run(); err != nil &&
+			stillAttached(path, dev) {
 			t.Errorf("could not detach %s (attached for %s): %v -- a loop device "+
 				"this test attached is still on the host", dev, path, err)
 		}
 	}
+}
+
+// stillAttached reports whether dev is still listed as backed by path after a
+// failed `losetup -d`. The kernel can keep listing a device for a moment while
+// it tears it down (or after another detach already won), so the check is
+// repeated for up to about two seconds before the device is called leaked. A
+// lookup that fails counts as still attached: the leak check is not weakened.
+func stillAttached(path, dev string) bool {
+	for i := 0; i < 10; i++ {
+		out, err := exec.Command("losetup", "-j", path).Output()
+		if err != nil {
+			return true
+		}
+		listed := false
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			if d, _, found := strings.Cut(line, ":"); found && d == dev {
+				listed = true
+			}
+		}
+		if !listed {
+			return false
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return true
 }
 
 // TestMain records the host state this suite is about to create (#96), then
@@ -499,17 +526,28 @@ func TestCLI_InfoValidLuksDevice(t *testing.T) {
 package main
 
 import (
+	"context"
+
+	"github.com/jeremyhahn/go-enclave"
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
 func main() {
-	err := luks2.Format(luks2.FormatOptions{
-		Device:     "` + tmpfile + `",
-		Passphrase: []byte("testpass"),
-		Label:      "TestInfoCLI",
-		KDFType:    "pbkdf2",
-	})
+	ctx := context.Background()
+	v, err := luks2.Open(ctx, "` + tmpfile + `")
 	if err != nil {
+		panic(err)
+	}
+	defer v.Close()
+	pass, err := enclave.NewMemoryEnclaveCopy([]byte("testpass"))
+	if err != nil {
+		panic(err)
+	}
+	defer pass.Destroy()
+	if err := v.Format(ctx, pass, luks2.FormatParams{
+		Label: "TestInfoCLI",
+		KDF:   luks2.KDFParams{Type: luks2.KDFPBKDF2},
+	}); err != nil {
 		panic(err)
 	}
 }
@@ -614,16 +652,27 @@ func TestCLI_OpenAndClose(t *testing.T) {
 package main
 
 import (
+	"context"
+
+	"github.com/jeremyhahn/go-enclave"
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
 func main() {
-	err := luks2.Format(luks2.FormatOptions{
-		Device:     "` + tmpfile + `",
-		Passphrase: []byte("testpass"),
-		KDFType:    "pbkdf2",
-	})
+	ctx := context.Background()
+	v, err := luks2.Open(ctx, "` + tmpfile + `")
 	if err != nil {
+		panic(err)
+	}
+	defer v.Close()
+	pass, err := enclave.NewMemoryEnclaveCopy([]byte("testpass"))
+	if err != nil {
+		panic(err)
+	}
+	defer pass.Destroy()
+	if err := v.Format(ctx, pass, luks2.FormatParams{
+		KDF: luks2.KDFParams{Type: luks2.KDFPBKDF2},
+	}); err != nil {
 		panic(err)
 	}
 }
@@ -648,7 +697,6 @@ func main() {
 		t.Fatalf("Failed to setup loop device: %v", err)
 	}
 	loopDev := strings.TrimSpace(string(loopOut))
-	defer exec.Command("losetup", "-d", loopDev).Run()
 
 	t.Logf("Loop device: %s", loopDev)
 
@@ -693,16 +741,27 @@ func TestCLI_WipeConfirmed(t *testing.T) {
 package main
 
 import (
+	"context"
+
+	"github.com/jeremyhahn/go-enclave"
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
 func main() {
-	err := luks2.Format(luks2.FormatOptions{
-		Device:     "` + tmpfile + `",
-		Passphrase: []byte("testpass"),
-		KDFType:    "pbkdf2",
-	})
+	ctx := context.Background()
+	v, err := luks2.Open(ctx, "` + tmpfile + `")
 	if err != nil {
+		panic(err)
+	}
+	defer v.Close()
+	pass, err := enclave.NewMemoryEnclaveCopy([]byte("testpass"))
+	if err != nil {
+		panic(err)
+	}
+	defer pass.Destroy()
+	if err := v.Format(ctx, pass, luks2.FormatParams{
+		KDF: luks2.KDFParams{Type: luks2.KDFPBKDF2},
+	}); err != nil {
 		panic(err)
 	}
 }

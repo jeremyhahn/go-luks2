@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jeremyhahn/go-luks2/internal/fips"
+
 	"golang.org/x/sys/unix"
 )
 
@@ -92,7 +94,7 @@ func checkCalibrationCost(b *testing.B, hashAlgo string, keySize, targetMs int, 
 	if err != nil {
 		b.Fatalf("calibrating %s: %v", hashAlgo, err)
 	}
-	hashFunc, err := getPBKDF2HashFunc(hashAlgo)
+	hashFunc, err := getPBKDF2HashFunc(hashAlgo, fips.Probe)
 	if err != nil {
 		b.Fatalf("getPBKDF2HashFunc(%q): %v", hashAlgo, err)
 	}
@@ -137,7 +139,7 @@ func TestBenchmarkPBKDF2CalibratesToRequestedTime(t *testing.T) {
 		{"sha512", 64, 500, 900 * time.Nanosecond},
 	} {
 		t.Run(fmt.Sprintf("%s %dms at %v", tc.hashAlgo, tc.targetMs, tc.perIteration), func(t *testing.T) {
-			hashFunc, err := getPBKDF2HashFunc(tc.hashAlgo)
+			hashFunc, err := getPBKDF2HashFunc(tc.hashAlgo, fips.Probe)
 			if err != nil {
 				t.Fatalf("getPBKDF2HashFunc: %v", err)
 			}
@@ -180,7 +182,7 @@ func TestBenchmarkPBKDF2ScalesWithRequestedTime(t *testing.T) {
 		shortMs = 100
 		longMs  = 2000
 	)
-	hashFunc, err := getPBKDF2HashFunc("sha256")
+	hashFunc, err := getPBKDF2HashFunc("sha256", fips.Probe)
 	if err != nil {
 		t.Fatalf("getPBKDF2HashFunc: %v", err)
 	}
@@ -241,7 +243,7 @@ func TestBenchmarkPBKDF2MeetsRecommendedMinimum(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			iterations, err := BenchmarkPBKDF2(tt.hashAlgo, tt.keySize, pbkdf2ReferenceTargetMs)
+			iterations, err := benchmarkPBKDF2(tt.hashAlgo, tt.keySize, pbkdf2ReferenceTargetMs)
 			if err != nil {
 				t.Fatalf("BenchmarkPBKDF2(%q, %d, %d): %v", tt.hashAlgo, tt.keySize, pbkdf2ReferenceTargetMs, err)
 			}
@@ -276,7 +278,7 @@ func TestBenchmarkPBKDF2RejectsUnusableTarget(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			iterations, err := BenchmarkPBKDF2("sha256", 32, tt.targetMs)
+			iterations, err := benchmarkPBKDF2("sha256", 32, tt.targetMs)
 			if err == nil {
 				t.Fatalf("BenchmarkPBKDF2 with a target of %dms returned %d iterations and no error", tt.targetMs, iterations)
 			}
@@ -312,7 +314,7 @@ func TestBenchmarkPBKDF2RejectsUnusableTarget(t *testing.T) {
 //
 // This is the case the old implementation answered with `return 100000, nil`.
 func TestCalibratePBKDF2FailsClosedWhenUnmeasurable(t *testing.T) {
-	hashFunc, err := getPBKDF2HashFunc("sha256")
+	hashFunc, err := getPBKDF2HashFunc("sha256", fips.Probe)
 	if err != nil {
 		t.Fatalf("getPBKDF2HashFunc: %v", err)
 	}
@@ -350,7 +352,7 @@ func TestCalibratePBKDF2FailsClosedWhenUnmeasurable(t *testing.T) {
 // WORK and not just the loop. A clock that never advances must not be answered
 // by a derivation that runs for minutes before failing.
 func TestCalibratePBKDF2StopsDoublingAtTheCeiling(t *testing.T) {
-	hashFunc, err := getPBKDF2HashFunc("sha256")
+	hashFunc, err := getPBKDF2HashFunc("sha256", fips.Probe)
 	if err != nil {
 		t.Fatalf("getPBKDF2HashFunc: %v", err)
 	}
@@ -395,7 +397,7 @@ func BenchmarkPBKDF2CalibrationCostsItsBudget(b *testing.B) {
 		keySize  int
 	}{{"sha256", 32}, {"sha512", 64}} {
 		b.Run(tc.hashAlgo, func(b *testing.B) {
-			hashFunc, err := getPBKDF2HashFunc(tc.hashAlgo)
+			hashFunc, err := getPBKDF2HashFunc(tc.hashAlgo, fips.Probe)
 			if err != nil {
 				b.Fatalf("getPBKDF2HashFunc: %v", err)
 			}
@@ -501,7 +503,7 @@ func TestScalePBKDF2IterationsClamps(t *testing.T) {
 func TestCreateKDFPBKDF2CalibratesTheKeyslot(t *testing.T) {
 	defer parallel(t)()
 
-	kdf, err := CreateKDF(FormatOptions{KDFType: KDFTypePBKDF2SHA256}, 32)
+	kdf, err := createKDFStrictAtProductionFloor(formatOptionsForTest{KDFType: kdfTypePBKDF2SHA256}, 32)
 	if err != nil {
 		t.Fatalf("CreateKDF: %v", err)
 	}
@@ -530,7 +532,7 @@ func TestCreateKDFPBKDF2CalibratesTheKeyslot(t *testing.T) {
 // an unusable PBKDFIterTime fails the format rather than silently producing a
 // keyslot with some other cost.
 func TestCreateKDFPBKDF2RejectsUnusableIterTime(t *testing.T) {
-	kdf, err := CreateKDF(FormatOptions{KDFType: KDFTypePBKDF2SHA256, PBKDFIterTime: -1}, 32)
+	kdf, err := createKDFStrict(formatOptionsForTest{KDFType: kdfTypePBKDF2SHA256, PBKDFIterTime: -1}, 32)
 	if err == nil {
 		t.Fatalf("CreateKDF with a negative PBKDFIterTime produced a keyslot with %v iterations", kdf.Iterations)
 	}
@@ -552,14 +554,14 @@ func TestCreateKDFPBKDF2RejectsUnusableIterTime(t *testing.T) {
 func TestAddKeyFormatOptionsPropagatesTheIterTime(t *testing.T) {
 	tests := []struct {
 		name string
-		opts *AddKeyOptions
+		opts *addKeyOptionsForTest
 		want int
 	}{
 		{"nil options leave it unset", nil, 0},
-		{"unset stays unset so the default applies", &AddKeyOptions{KDFType: KDFTypePBKDF2}, 0},
-		{"a usable budget is carried", &AddKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterTime: 500}, 500},
-		{"a negative budget is carried, not dropped", &AddKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterTime: -1}, -1},
-		{"an out-of-range budget is carried, not dropped", &AddKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterTime: maxPBKDF2IterTimeMs + 1}, maxPBKDF2IterTimeMs + 1},
+		{"unset stays unset so the default applies", &addKeyOptionsForTest{KDFType: kdfTypePBKDF2}, 0},
+		{"a usable budget is carried", &addKeyOptionsForTest{KDFType: kdfTypePBKDF2, PBKDFIterTime: 500}, 500},
+		{"a negative budget is carried, not dropped", &addKeyOptionsForTest{KDFType: kdfTypePBKDF2, PBKDFIterTime: -1}, -1},
+		{"an out-of-range budget is carried, not dropped", &addKeyOptionsForTest{KDFType: kdfTypePBKDF2, PBKDFIterTime: maxPBKDF2IterTimeMs + 1}, maxPBKDF2IterTimeMs + 1},
 	}
 
 	for _, tt := range tests {
@@ -575,9 +577,9 @@ func TestAddKeyFormatOptionsPropagatesTheIterTime(t *testing.T) {
 // options are handed to CreateKDF, and that is where the refusal has to land.
 // Asserting the field alone would pin the plumbing without pinning the outcome.
 func TestAddKeyFormatOptionsRefusesAnUnusableIterTime(t *testing.T) {
-	opts := baseAddKeyFormatOptions(&AddKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterTime: -1})
+	opts := baseAddKeyFormatOptions(&addKeyOptionsForTest{KDFType: kdfTypePBKDF2, PBKDFIterTime: -1})
 
-	kdf, err := CreateKDF(opts, 32)
+	kdf, err := createKDFStrict(opts, 32)
 	if err == nil {
 		t.Fatalf("CreateKDF accepted a negative PBKDFIterTime through AddKeyOptions and produced %v iterations", kdf.Iterations)
 	}
@@ -593,9 +595,9 @@ func TestAddKeyFormatOptionsKeepsItsDefaults(t *testing.T) {
 	got := baseAddKeyFormatOptions(nil)
 
 	// The KDF is the mode's default (#237), and the hash is the one it names.
-	wantKDF, wantHash := KDFTypeArgon2id, DefaultHashAlgo
+	wantKDF, wantHash := kdfTypeArgon2id, defaultHashAlgo
 	if fips140.Enabled() {
-		wantKDF, wantHash = KDFTypePBKDF2SHA512, "sha512"
+		wantKDF, wantHash = kdfTypePBKDF2SHA512, "sha512"
 	}
 	if got.KDFType != wantKDF {
 		t.Fatalf("default KDFType = %q, want %q", got.KDFType, wantKDF)
@@ -609,11 +611,11 @@ func TestAddKeyFormatOptionsKeepsItsDefaults(t *testing.T) {
 	}
 
 	// An explicit choice overrides each default.
-	custom := baseAddKeyFormatOptions(&AddKeyOptions{
-		KDFType: KDFTypePBKDF2SHA512, Hash: "sha512",
+	custom := baseAddKeyFormatOptions(&addKeyOptionsForTest{
+		KDFType: kdfTypePBKDF2SHA512, Hash: "sha512",
 		Argon2Time: 8, Argon2Memory: 2048, Argon2Parallel: 2,
 	})
-	if custom.KDFType != KDFTypePBKDF2SHA512 || custom.HashAlgo != "sha512" ||
+	if custom.KDFType != kdfTypePBKDF2SHA512 || custom.HashAlgo != "sha512" ||
 		custom.Argon2Time != 8 || custom.Argon2Memory != 2048 || custom.Argon2Parallel != 2 {
 		t.Fatalf("explicit options were not carried through: %+v", custom)
 	}

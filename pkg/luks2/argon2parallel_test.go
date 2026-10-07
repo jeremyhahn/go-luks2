@@ -30,27 +30,23 @@ import (
 func TestAllThreeArgon2CostsAreRefusedAlike(t *testing.T) {
 	tests := []struct {
 		name      string
-		opts      FormatOptions
+		opts      formatOptionsForTest
 		parameter string
-		sentinel  error
 	}{
 		{
 			name:      "memory below the floor",
-			opts:      FormatOptions{KDFType: "argon2id", Argon2Memory: 32},
+			opts:      formatOptionsForTest{KDFType: "argon2id", Argon2Memory: 32},
 			parameter: "memory",
-			sentinel:  ErrInvalidArgon2Memory,
 		},
 		{
 			name:      "negative time",
-			opts:      FormatOptions{KDFType: "argon2id", Argon2Time: -1},
+			opts:      formatOptionsForTest{KDFType: "argon2id", Argon2Time: -1},
 			parameter: "time",
-			sentinel:  ErrInvalidArgon2Time,
 		},
 		{
 			name:      "negative parallelism",
-			opts:      FormatOptions{KDFType: "argon2id", Argon2Parallel: -1},
+			opts:      formatOptionsForTest{KDFType: "argon2id", Argon2Parallel: -1},
 			parameter: "parallelism",
-			sentinel:  ErrInvalidArgon2Parallel,
 		},
 	}
 
@@ -60,16 +56,16 @@ func TestAllThreeArgon2CostsAreRefusedAlike(t *testing.T) {
 			if err == nil {
 				t.Fatalf("validateArgon2CreateCost(%+v) = nil, want a refusal", tt.opts)
 			}
-			if !errors.Is(err, tt.sentinel) {
-				t.Errorf("error = %v, want errors.Is(_, %v)", err, tt.sentinel)
+			if !errors.Is(err, ErrInvalidArgument) {
+				t.Errorf("error = %v, want errors.Is(_, ErrInvalidArgument)", err)
 			}
 
-			var costErr *Argon2CostError
+			var costErr *KDFCostError
 			if !errors.As(err, &costErr) {
-				t.Fatalf("error = %v, want an *Argon2CostError -- the shape its siblings produce", err)
+				t.Fatalf("error = %v, want a *KDFCostError -- the shape its siblings produce", err)
 			}
-			if costErr.Parameter != tt.parameter {
-				t.Errorf("Parameter = %q, want %q", costErr.Parameter, tt.parameter)
+			if costErr.Param != tt.parameter {
+				t.Errorf("Param = %q, want %q", costErr.Param, tt.parameter)
 			}
 		})
 	}
@@ -79,7 +75,7 @@ func TestAllThreeArgon2CostsAreRefusedAlike(t *testing.T) {
 // value has to arrive at the pre-check, which means callerArgon2Options must
 // forward it. Before the fix this returned nil.
 func TestNegativeParallelismReachesTheCallerPreCheck(t *testing.T) {
-	opts := &AddKeyOptions{KDFType: "argon2id", Argon2Parallel: -1}
+	opts := &addKeyOptionsForTest{KDFType: "argon2id", Argon2Parallel: -1}
 
 	forwarded := callerArgon2Options(opts)
 	if forwarded.Argon2Parallel != -1 {
@@ -88,8 +84,8 @@ func TestNegativeParallelismReachesTheCallerPreCheck(t *testing.T) {
 			forwarded.Argon2Parallel)
 	}
 
-	if err := validateArgon2CreateCost(forwarded); !errors.Is(err, ErrInvalidArgon2Parallel) {
-		t.Errorf("validateArgon2CreateCost = %v, want ErrInvalidArgon2Parallel", err)
+	if err := validateArgon2CreateCost(forwarded); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("validateArgon2CreateCost = %v, want ErrInvalidArgument", err)
 	}
 }
 
@@ -97,7 +93,7 @@ func TestNegativeParallelismReachesTheCallerPreCheck(t *testing.T) {
 // zero means "caller said nothing" and must still inherit or default, exactly
 // as it does for time and memory.
 func TestZeroParallelismIsNotAChoice(t *testing.T) {
-	for _, opts := range []FormatOptions{
+	for _, opts := range []formatOptionsForTest{
 		{KDFType: "argon2id"},
 		{KDFType: "argon2id", Argon2Parallel: 0},
 		{KDFType: "argon2id", Argon2Parallel: 1},
@@ -112,7 +108,7 @@ func TestZeroParallelismIsNotAChoice(t *testing.T) {
 // TestParallelismIsNotCheckedForPBKDF2 pins the type guard: the Argon2 bounds
 // must not fire on a pbkdf2 keyslot that happens to carry a stray value.
 func TestParallelismIsNotCheckedForPBKDF2(t *testing.T) {
-	opts := FormatOptions{KDFType: KDFTypePBKDF2, Argon2Parallel: -1}
+	opts := formatOptionsForTest{KDFType: kdfTypePBKDF2, Argon2Parallel: -1}
 	if err := validateArgon2CreateCost(opts); err != nil {
 		t.Errorf("validateArgon2CreateCost on a pbkdf2 keyslot = %v, want nil", err)
 	}

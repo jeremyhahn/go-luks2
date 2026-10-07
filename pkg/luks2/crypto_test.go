@@ -17,7 +17,7 @@ import (
 func TestRandomBytes(t *testing.T) {
 	sizes := []int{16, 32, 64, 128}
 	for _, size := range sizes {
-		data1, err := randomBytes(size)
+		data1, err := randomBytes(size, testVolumeSys().cryptoRand)
 		if err != nil {
 			t.Fatalf("randomBytes(%d) failed: %v", size, err)
 		}
@@ -26,7 +26,7 @@ func TestRandomBytes(t *testing.T) {
 		}
 
 		// Verify randomness
-		data2, err := randomBytes(size)
+		data2, err := randomBytes(size, testVolumeSys().cryptoRand)
 		if err != nil {
 			t.Fatalf("randomBytes(%d) failed: %v", size, err)
 		}
@@ -38,11 +38,11 @@ func TestRandomBytes(t *testing.T) {
 
 // TestRandomBase64 tests random base64 string generation
 func TestRandomBase64(t *testing.T) {
-	str1, err := randomBase64(32)
+	str1, err := randomBase64(32, testVolumeSys().cryptoRand)
 	if err != nil {
 		t.Fatalf("randomBase64 failed: %v", err)
 	}
-	str2, err := randomBase64(32)
+	str2, err := randomBase64(32, testVolumeSys().cryptoRand)
 	if err != nil {
 		t.Fatalf("randomBase64 failed: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestCreateKDF(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			opts := FormatOptions{
+			opts := formatOptionsForTest{
 				KDFType:        tt.kdfType,
 				PBKDFIterTime:  2000,
 				Argon2Time:     4,
@@ -84,7 +84,7 @@ func TestCreateKDF(t *testing.T) {
 				HashAlgo:       "sha256",
 			}
 
-			_, err := CreateKDF(opts, 32)
+			_, err := createKDFStrict(opts, 32)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("Expected error, got nil")

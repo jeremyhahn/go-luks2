@@ -10,6 +10,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // Tests for the LUKS2 keyslot priority member, whose two failure modes were
@@ -32,12 +34,12 @@ func TestAbsentKeyslotPriorityIsNormal(t *testing.T) {
 	tests := []struct {
 		name     string
 		priority *int
-		want     int
+		want     Priority
 	}{
-		{"absent", nil, KeyslotPriorityNormal},
-		{"explicit ignore", intPtr(KeyslotPriorityIgnore), KeyslotPriorityIgnore},
-		{"explicit normal", intPtr(KeyslotPriorityNormal), KeyslotPriorityNormal},
-		{"explicit prefer", intPtr(KeyslotPriorityPrefer), KeyslotPriorityPrefer},
+		{"absent", nil, keyslotPriorityNormal},
+		{"explicit ignore", intPtr(keyslotPriorityIgnore), keyslotPriorityIgnore},
+		{"explicit normal", intPtr(keyslotPriorityNormal), keyslotPriorityNormal},
+		{"explicit prefer", intPtr(keyslotPriorityPrefer), keyslotPriorityPrefer},
 	}
 
 	for _, tt := range tests {
@@ -52,7 +54,7 @@ func TestAbsentKeyslotPriorityIsNormal(t *testing.T) {
 			if len(slots) != 1 {
 				t.Fatalf("listKeyslotsFrom returned %d slots, want 1", len(slots))
 			}
-			if slots[0].Priority != tt.want {
+			if slots[0].Priority != Priority(tt.want) {
 				t.Fatalf("priority = %d, want %d", slots[0].Priority, tt.want)
 			}
 		})
@@ -65,11 +67,11 @@ func TestAbsentKeyslotPriorityIsNormal(t *testing.T) {
 // the member. An inverted constant here would silently invert every decision
 // made from it.
 func TestKeyslotPriorityConstantsMatchTheFormat(t *testing.T) {
-	if KeyslotPriorityIgnore != 0 || KeyslotPriorityNormal != 1 || KeyslotPriorityPrefer != 2 {
+	if keyslotPriorityIgnore != 0 || keyslotPriorityNormal != 1 || keyslotPriorityPrefer != 2 {
 		t.Fatalf("priority constants are ignore=%d normal=%d prefer=%d, want 0/1/2",
-			KeyslotPriorityIgnore, KeyslotPriorityNormal, KeyslotPriorityPrefer)
+			keyslotPriorityIgnore, keyslotPriorityNormal, keyslotPriorityPrefer)
 	}
-	if KeyslotPriorityPrefer <= KeyslotPriorityNormal {
+	if keyslotPriorityPrefer <= keyslotPriorityNormal {
 		t.Fatal("prefer must sort above normal; the larger value is the one tried first")
 	}
 }
@@ -80,10 +82,10 @@ func TestKeyslotPriorityConstantsMatchTheFormat(t *testing.T) {
 // and the nil pointer together.
 func TestCreateMetadataWritesNoPriorityMember(t *testing.T) {
 	metadata := createMetadata(
-		&KDF{Type: "pbkdf2", Hash: "sha512", Salt: "AAAA", Iterations: intPtr(210000)},
-		&KDF{Type: "pbkdf2", Hash: "sha512", Salt: "AAAA", Iterations: intPtr(210000)},
+		&rawKDF{Type: "pbkdf2", Hash: "sha512", Salt: "AAAA", Iterations: intPtr(210000)},
+		&rawKDF{Type: "pbkdf2", Hash: "sha512", Salt: "AAAA", Iterations: intPtr(210000)},
 		"AAAA",
-		FormatOptions{Cipher: "aes", CipherMode: "xts-plain64", HashAlgo: "sha512", SectorSize: 512},
+		formatOptionsForTest{Cipher: "aes", CipherMode: "xts-plain64", HashAlgo: "sha512", SectorSize: 512},
 		64, 0x8000, 258048, 16744448, 16777216,
 	)
 
@@ -106,7 +108,7 @@ func TestCreateMetadataWritesNoPriorityMember(t *testing.T) {
 // priority, and a change that dropped the field entirely would pass the test
 // above and lose data.
 func TestANonDefaultPriorityIsStillWritten(t *testing.T) {
-	for _, priority := range []int{KeyslotPriorityIgnore, KeyslotPriorityPrefer} {
+	for _, priority := range []int{keyslotPriorityIgnore, keyslotPriorityPrefer} {
 		metadata := sampleMetadata()
 		metadata.Keyslots["0"].Priority = intPtr(priority)
 
@@ -117,12 +119,12 @@ func TestANonDefaultPriorityIsStillWritten(t *testing.T) {
 
 		// KeyslotPriorityIgnore is 0, which is exactly the value a
 		// non-pointer omitempty field would silently drop. That is why
-		// Keyslot.Priority is a *int, and this is the case that proves it.
+		// header.Keyslot.Priority is a *int, and this is the case that proves it.
 		if !bytes.Contains(encoded, []byte(`"priority":`)) {
 			t.Fatalf("priority %d was dropped from the encoding\n%s", priority, encoded)
 		}
 
-		var round LUKS2Metadata
+		var round header.Metadata
 		if err := json.Unmarshal(encoded, &round); err != nil {
 			t.Fatalf("failed to parse the encoding back: %v", err)
 		}

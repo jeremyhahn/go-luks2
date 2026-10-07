@@ -2,14 +2,17 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build linux
+//go:build unix
 
 package command
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -104,7 +107,7 @@ func TestASymlinkIsFollowedOnlyIntoATrustedDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	tools := Tools{Dirs: []string{bin}}
-	if _, err := tools.Command("mkfs.ext4"); !errors.Is(err, ErrTool) {
+	if _, err := tools.Command(context.Background(), "mkfs.ext4"); !errors.Is(err, ErrTool) {
 		t.Fatalf("Command through a link into a world-writable directory = %v, want ErrTool", err)
 	}
 
@@ -116,7 +119,7 @@ func TestASymlinkIsFollowedOnlyIntoATrustedDirectory(t *testing.T) {
 	if err := os.Symlink(filepath.Join(trusted, "mke2fs"), link); err != nil {
 		t.Fatal(err)
 	}
-	cmd, err := tools.Command("mkfs.ext4", "-q")
+	cmd, err := tools.Command(context.Background(), "mkfs.ext4", "-q")
 	if err != nil {
 		t.Fatalf("Command through a trusted link = %v", err)
 	}
@@ -137,7 +140,7 @@ func TestRunPassesOnlyTheGivenEnvironment(t *testing.T) {
 	t.Setenv("LD_PRELOAD", "/nonexistent/evil.so")
 	t.Setenv("LUKS2_TEST_INHERITED", "must-not-reach-the-tool")
 
-	out, err := Tools{Dirs: []string{bin}, Env: []string{"LC_ALL=C"}}.Run("show-env")
+	out, err := Tools{Dirs: []string{bin}, Env: []string{"LC_ALL=C"}}.Run(context.Background(), "show-env")
 	if err != nil {
 		t.Fatalf("Run = %v", err)
 	}
@@ -149,7 +152,7 @@ func TestRunPassesOnlyTheGivenEnvironment(t *testing.T) {
 	if !strings.Contains(string(out), "LC_ALL=C") {
 		t.Errorf("the program ran without the given environment:\n%s", out)
 	}
-	if _, err := (Tools{Dirs: []string{bin}}).Run("absent"); !errors.Is(err, ErrTool) {
+	if _, err := (Tools{Dirs: []string{bin}}).Run(context.Background(), "absent"); !errors.Is(err, ErrTool) {
 		t.Fatalf("Run of a missing program = %v, want ErrTool", err)
 	}
 }
@@ -169,6 +172,153 @@ func TestAnEntryInAnUntrustedDirectoryIsRefusedEvenWhenItsTargetIsTrusted(t *tes
 	}
 	if _, _, err := (Tools{Dirs: []string{shared}}).Resolve("prog"); !errors.Is(err, ErrTool) {
 		t.Fatalf("Resolve through a world-writable directory = %v, want ErrTool", err)
+	}
+}
+
+// TestCommandWithAnAlreadyCancelledCtxNeverStartsTheProgram is D.2's exec row,
+// the fail-fast half: a ctx canceled before Start is called means the
+// program never runs at all.
+func TestCommandWithAnAlreadyCancelledCtxNeverStartsTheProgram(t *testing.T) {
+	bin := trustedDir(t)
+	marker := filepath.Join(bin, "ran")
+	writeScript(t, filepath.Join(bin, "prog"), "touch "+marker+"\n")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := (Tools{Dirs: []string{bin}}).Run(ctx, "prog"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run with an already-canceled ctx = %v, want context.Canceled", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("the program ran despite its ctx being canceled before Start")
+	}
+}
+
+// TestRunKillsTheWholeProcessGroupOnCancel is D.2's exec row, the live-process
+// half: canceling ctx while the program runs kills its whole process group,
+// not just the program named directly -- mkfs.* and friends can fork helpers
+// of their own, and a cancellation that left those running would not be one.
+func TestRunKillsTheWholeProcessGroupOnCancel(t *testing.T) {
+	bin := trustedDir(t)
+	pidFile := filepath.Join(bin, "child.pid")
+	writeScript(t, filepath.Join(bin, "longrun"), "sleep 30 &\necho $! > "+pidFile+"\nwait\n")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := (Tools{Dirs: []string{bin}}).Run(ctx, "longrun")
+		done <- err
+	}()
+
+	var childPID string
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if b, err := os.ReadFile(pidFile); err == nil && len(b) > 0 { // #nosec G304 -- path built from t.TempDir() above
+			childPID = strings.TrimSpace(string(b))
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the backgrounded child never recorded its PID")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run canceled while running = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return within the wait-delay budget after cancellation")
+	}
+
+	pid, err := strconv.Atoi(childPID)
+	if err != nil {
+		t.Fatalf("the recorded PID %q does not parse: %v", childPID, err)
+	}
+	// Not a liveness check by kill(pid, 0): a terminated child is reparented
+	// to PID 1, and a container's PID 1 is not guaranteed to reap it, so it
+	// can sit as a zombie -- still "alive" by that signal -- indefinitely.
+	// /proc's State is read instead: gone, or zombie, both mean the signal
+	// that killed the group reached this grandchild too; only a process
+	// still actually running (R/S/D) means it did not.
+	state, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid)) // #nosec G304 -- /proc/<pid> of a PID this test itself started
+	if err != nil {
+		return // the entry is gone entirely: reaped, which is also termination
+	}
+	if !strings.Contains(string(state), "State:\tZ ") {
+		t.Fatalf("the backgrounded grandchild (pid %d) is still running after cancellation:\n%s", pid, state)
+	}
+}
+
+// TestRunKillsTheWholeGroupWhenTermIsIgnored is S8: a program and a helper
+// that both ignore SIGTERM outlast the grace, and the kill that follows it
+// takes the process group (-pgid), not only the leader.
+func TestRunKillsTheWholeGroupWhenTermIsIgnored(t *testing.T) {
+	bin := trustedDir(t)
+	pidFile := filepath.Join(bin, "child.pid")
+	writeScript(t, filepath.Join(bin, "stubborn"),
+		"trap '' TERM\n(trap '' TERM; exec sleep 30) &\necho $! > "+pidFile+"\nwait\n")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := (Tools{Dirs: []string{bin}, KillGrace: 200 * time.Millisecond}).Run(ctx, "stubborn")
+		done <- err
+	}()
+
+	var childPID string
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if b, err := os.ReadFile(pidFile); err == nil && len(b) > 0 { // #nosec G304 -- path built from t.TempDir() above
+			childPID = strings.TrimSpace(string(b))
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the backgrounded child never recorded its PID")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run canceled while running = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after the grace expired")
+	}
+
+	pid, err := strconv.Atoi(childPID)
+	if err != nil {
+		t.Fatalf("the recorded PID %q does not parse: %v", childPID, err)
+	}
+	// The SIGKILL of the group is sent as the grace expires; give the kernel a
+	// moment to deliver it. A zombie or an absent entry is a dead process.
+	for end := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		state, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid)) // #nosec G304 -- /proc/<pid> of a PID this test itself started
+		if err != nil || strings.Contains(string(state), "State:\tZ ") {
+			return
+		}
+		if time.Now().After(end) {
+			t.Fatalf("the SIGTERM-ignoring grandchild (pid %d) survived the grace expiry:\n%s", pid, state)
+		}
+	}
+}
+
+// TestOutputMapsACanceledCtxToItsError is S9: the stdout-only runner reports
+// a cancellation the way Run does.
+func TestOutputMapsACanceledCtxToItsError(t *testing.T) {
+	bin := trustedDir(t)
+	writeScript(t, filepath.Join(bin, "slow"), "sleep 30\n")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, cancel)
+	_, err := (Tools{Dirs: []string{bin}, KillGrace: 200 * time.Millisecond}).Output(ctx, "slow")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Output canceled while running = %v, want context.Canceled", err)
 	}
 }
 

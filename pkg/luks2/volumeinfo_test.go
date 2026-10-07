@@ -6,7 +6,11 @@
 
 package luks2
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
+)
 
 // VolumeInfo.KeySize was declared and never set (#248, B7).
 func TestGetVolumeInfoReportsTheVolumeKeySize(t *testing.T) {
@@ -15,7 +19,7 @@ func TestGetVolumeInfoReportsTheVolumeKeySize(t *testing.T) {
 	path512 := newImage(t, "info-512.img")
 	formatWithLibrary(t, path512)
 	for path, want := range map[string]int{path512: 512, keySize256Volume(t): 256} {
-		info, err := GetVolumeInfo(path)
+		info, err := getVolumeInfoForTest(path)
 		if err != nil {
 			t.Fatalf("GetVolumeInfo: %v", err)
 		}
@@ -24,9 +28,9 @@ func TestGetVolumeInfoReportsTheVolumeKeySize(t *testing.T) {
 		}
 	}
 
-	volumeKeySizeFixture := func() *LUKS2Metadata {
+	volumeKeySizeFixture := func() *header.Metadata {
 		m := minimalValidMetadata()
-		m.Keyslots["0"] = &Keyslot{Type: "luks2", KeySize: 64, Area: &KeyslotArea{Type: "raw", Offset: "32768", Size: "258048"}}
+		m.Keyslots["0"] = &header.Keyslot{Type: "luks2", KeySize: 64, Area: &header.KeyslotArea{Type: "raw", Offset: "32768", Size: "258048"}}
 		m.Digests["0"].Keyslots = []string{"0"}
 		return m
 	}

@@ -5,6 +5,7 @@
 package keyring
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -125,7 +126,7 @@ func TestAddVolumeKeyThenReleaseLeavesNoEntry(t *testing.T) {
 	fake := newFakeSyscalls()
 	s := fake.seam()
 
-	entry, err := AddVolumeKey(s, "CRYPT-LUKS2-deadbeef-held", []byte("a volume key"))
+	entry, err := AddVolumeKey(context.Background(), s, "CRYPT-LUKS2-deadbeef-held", []byte("a volume key"))
 	if err != nil {
 		t.Fatalf("AddVolumeKey: %v", err)
 	}
@@ -144,13 +145,13 @@ func TestAddVolumeKeyRefusesAPreExistingEntry(t *testing.T) {
 	fake := newFakeSyscalls()
 	s := fake.seam()
 
-	first, err := AddVolumeKey(s, "CRYPT-LUKS2-deadbeef-occupied", []byte("key one"))
+	first, err := AddVolumeKey(context.Background(), s, "CRYPT-LUKS2-deadbeef-occupied", []byte("key one"))
 	if err != nil {
 		t.Fatalf("AddVolumeKey: %v", err)
 	}
 	defer func() { _ = first.Release(s) }()
 
-	if _, err := AddVolumeKey(s, "CRYPT-LUKS2-deadbeef-occupied", []byte("key two")); !errors.Is(err, ErrEntryExists) {
+	if _, err := AddVolumeKey(context.Background(), s, "CRYPT-LUKS2-deadbeef-occupied", []byte("key two")); !errors.Is(err, ErrEntryExists) {
 		t.Fatalf("AddVolumeKey over an existing entry = %v, want ErrEntryExists", err)
 	}
 }
@@ -160,7 +161,7 @@ func TestAddVolumeKeyClassifiesSessionRingFailures(t *testing.T) {
 	fake.sessionRingErr = unix.EPERM
 	s := fake.seam()
 
-	_, err := AddVolumeKey(s, "uuid", []byte("key"))
+	_, err := AddVolumeKey(context.Background(), s, "uuid", []byte("key"))
 	if !errors.Is(err, ErrBlocked) {
 		t.Fatalf("AddVolumeKey with a blocked session ring = %v, want ErrBlocked", err)
 	}
@@ -174,7 +175,7 @@ func TestReleaseTreatsAnAlreadyGoneEntryAsReleased(t *testing.T) {
 	fake := newFakeSyscalls()
 	s := fake.seam()
 
-	entry, err := AddVolumeKey(s, "uuid-twice", []byte("key"))
+	entry, err := AddVolumeKey(context.Background(), s, "uuid-twice", []byte("key"))
 	if err != nil {
 		t.Fatalf("AddVolumeKey: %v", err)
 	}
@@ -191,7 +192,7 @@ func TestReleaseVerifiesRatherThanTrustsASuccessfulUnlink(t *testing.T) {
 	fake.stillThere = true
 	s := fake.seam()
 
-	entry, err := AddVolumeKey(s, "uuid-lying", []byte("key"))
+	entry, err := AddVolumeKey(context.Background(), s, "uuid-lying", []byte("key"))
 	if err != nil {
 		t.Fatalf("AddVolumeKey: %v", err)
 	}
@@ -206,7 +207,7 @@ func TestReleaseReportsAnEntryItCannotRevoke(t *testing.T) {
 	fake.unlinkErr = unix.EPERM
 	s := fake.seam()
 
-	entry, err := AddVolumeKey(s, "uuid-stuck", []byte("key"))
+	entry, err := AddVolumeKey(context.Background(), s, "uuid-stuck", []byte("key"))
 	if err != nil {
 		t.Fatalf("AddVolumeKey: %v", err)
 	}
@@ -220,7 +221,7 @@ func TestAddVolumeKeySearchFailureIsClassified(t *testing.T) {
 	fake.searchErr = unix.EACCES
 	s := fake.seam()
 
-	_, err := AddVolumeKey(s, "uuid-unsearchable", []byte("key"))
+	_, err := AddVolumeKey(context.Background(), s, "uuid-unsearchable", []byte("key"))
 	if !errors.Is(err, ErrBlocked) {
 		t.Fatalf("AddVolumeKey when the collision search is refused = %v, want ErrBlocked", err)
 	}
@@ -230,7 +231,7 @@ func TestVerifyGoneReportsAnUnsearchableRing(t *testing.T) {
 	fake := newFakeSyscalls()
 	s := fake.seam()
 
-	entry, err := AddVolumeKey(s, "uuid-unverifiable", []byte("key"))
+	entry, err := AddVolumeKey(context.Background(), s, "uuid-unverifiable", []byte("key"))
 	if err != nil {
 		t.Fatalf("AddVolumeKey: %v", err)
 	}
@@ -258,7 +259,7 @@ func TestTableKeyIDDeclaresTheKeySizeInBytes(t *testing.T) {
 	s := fake.seam()
 
 	key := make([]byte, 64)
-	entry, err := AddVolumeKey(s, "uuid-sized", key)
+	entry, err := AddVolumeKey(context.Background(), s, "uuid-sized", key)
 	if err != nil {
 		t.Fatalf("AddVolumeKey: %v", err)
 	}

@@ -8,6 +8,7 @@ package luks2
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jeremyhahn/go-luks2/internal/fips"
 	"golang.org/x/sys/unix"
 )
 
@@ -99,7 +101,7 @@ func TestReadDirectAtReadsTheBytes(t *testing.T) {
 				off int64
 				n   int
 			}{{0, directIOAlign}, {0, len(data)}, {0, len(data) + 5000}, {directIOAlign, 100}, {513, 2 * directIOAlign}, {int64(len(data)) + 10, 10}} {
-				got, err := readDirectAt(path, c.off, c.n)
+				got, err := readDirectAt(context.Background(), path, c.off, c.n, os.OpenFile)
 				if err != nil {
 					t.Fatalf("readDirectAt(%d, %d): %v", c.off, c.n, err)
 				}
@@ -117,29 +119,27 @@ func TestReadDirectAtReadsTheBytes(t *testing.T) {
 
 // TestReadDirectAtWhereODirectIsRefused: on a memory filesystem the cache is
 // the storage and an ordinary read stands in; anywhere else the read is
-// refused with ErrDirectIOUnsupported rather than reported as confirmed.
+// refused with ErrUnsupported rather than reported as confirmed.
 func TestReadDirectAtWhereODirectIsRefused(t *testing.T) {
-	previous := openFileFunc
-	t.Cleanup(func() { openFileFunc = previous })
-	openFileFunc = func(name string, flag int, perm os.FileMode) (*os.File, error) {
+	openFile := func(name string, flag int, perm os.FileMode) (*os.File, error) {
 		if flag&unix.O_DIRECT != 0 {
 			return nil, &os.PathError{Op: "open", Path: name, Err: unix.EINVAL}
 		}
-		return previous(name, flag, perm)
+		return os.OpenFile(name, flag, perm)
 	}
 
 	disk, _ := patternFile(t, diskDir(t), directIOAlign)
-	if _, err := readDirectAt(disk, 0, directIOAlign); !errors.Is(err, ErrDirectIOUnsupported) {
-		t.Fatalf("on a disk filesystem: got %v, want ErrDirectIOUnsupported", err)
+	if _, err := readDirectAt(context.Background(), disk, 0, directIOAlign, openFile); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("on a disk filesystem: got %v, want ErrUnsupported", err)
 	}
 
 	memory, data := patternFile(t, memoryDir(t), directIOAlign)
-	got, err := readDirectAt(memory, 100, 200)
+	got, err := readDirectAt(context.Background(), memory, 100, 200, openFile)
 	if err != nil || !bytes.Equal(got, data[100:300]) {
 		t.Fatalf("on a memory filesystem: got %d bytes, %v; want the file's bytes", len(got), err)
 	}
 
-	if _, err := readDirectAt(filepath.Join(t.TempDir(), "absent.img"), 0, directIOAlign); err == nil {
+	if _, err := readDirectAt(context.Background(), filepath.Join(t.TempDir(), "absent.img"), 0, directIOAlign, openFile); err == nil {
 		t.Fatal("readDirectAt of a missing device reported success")
 	}
 }
@@ -161,23 +161,24 @@ func TestCacheIsTheStorage(t *testing.T) {
 // fakeSysfs is a /sys/dev/block tree for devices a test cannot create, and the
 // device numbers of the paths that stand for them.
 type fakeSysfs struct {
-	t    *testing.T
-	root string
-	rdev map[string]uint64
+	t        *testing.T
+	root     string
+	rdev     map[string]uint64
+	nodeRdev func(string) (uint64, error)
 }
 
 func newFakeSysfs(t *testing.T) *fakeSysfs {
 	t.Helper()
 
 	f := &fakeSysfs{t: t, root: t.TempDir(), rdev: map[string]uint64{}}
-	previousRoot, previousRdev := sysDevBlockRoot, nodeRdev
-	t.Cleanup(func() { sysDevBlockRoot, nodeRdev = previousRoot, previousRdev })
+	previousRoot := sysDevBlockRoot
+	t.Cleanup(func() { sysDevBlockRoot = previousRoot })
 	sysDevBlockRoot = filepath.Join(f.root, "dev", "block")
-	nodeRdev = func(path string) (uint64, error) {
+	f.nodeRdev = func(path string) (uint64, error) {
 		if rdev, ok := f.rdev[path]; ok {
 			return rdev, nil
 		}
-		return previousRdev(path)
+		return statRdev(path)
 	}
 	if err := os.MkdirAll(sysDevBlockRoot, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
@@ -240,7 +241,7 @@ func TestMediumSourcesWalksTheStack(t *testing.T) {
 	}
 
 	t.Run("a regular file is its own medium", func(t *testing.T) {
-		got, err := mediumSources(file)
+		got, err := mediumSources(file, statRdev)
 		if err != nil || !slices.Equal(got, []mediumSource{{path: file}}) {
 			t.Fatalf("got %v, %v", got, err)
 		}
@@ -248,7 +249,7 @@ func TestMediumSourcesWalksTheStack(t *testing.T) {
 	t.Run("a loop device with direct I/O adds its backing too", func(t *testing.T) {
 		f := newFakeSysfs(t)
 		f.loop(f.device("/dev/loop0", 7, 0, "loop0"), file, "1", "1024")
-		got, err := mediumSources("/dev/loop0")
+		got, err := mediumSources("/dev/loop0", f.nodeRdev)
 		if err != nil || !slices.Equal(got, []mediumSource{{path: "/dev/loop0"}, {path: file, offset: 1024}}) {
 			t.Fatalf("got %v, %v", got, err)
 		}
@@ -257,7 +258,7 @@ func TestMediumSourcesWalksTheStack(t *testing.T) {
 		f := newFakeSysfs(t)
 		f.loop(f.device("/dev/loop1", 7, 1, "loop1"), file, "0", "512")
 		f.loop(f.device("/dev/loop0", 7, 0, "loop0"), "/dev/loop1", "1", "4096")
-		got, err := mediumSources("/dev/loop0")
+		got, err := mediumSources("/dev/loop0", f.nodeRdev)
 		want := []mediumSource{{path: "/dev/loop0"}, {path: "/dev/loop1", offset: 4096}, {path: file, offset: 4608}}
 		if err != nil || !slices.Equal(got, want) {
 			t.Fatalf("got %v, %v; want %v", got, err, want)
@@ -269,8 +270,8 @@ func TestMediumSourcesWalksTheStack(t *testing.T) {
 		outer := f.device("/dev/loop0", 7, 0, "loop0")
 		f.loop(outer, "/dev/loop1", "1", "0")
 		f.slave(f.device("/dev/dm-0", 253, 0, "dm-0"), outer)
-		if _, err := mediumSources("/dev/dm-0"); !errors.Is(err, ErrDirectIOUnsupported) || !strings.Contains(err.Error(), "loop1") {
-			t.Fatalf("got %v, want ErrDirectIOUnsupported naming loop1", err)
+		if _, err := mediumSources("/dev/dm-0", f.nodeRdev); !errors.Is(err, ErrUnsupported) || !strings.Contains(err.Error(), "loop1") {
+			t.Fatalf("got %v, want ErrUnsupported naming loop1", err)
 		}
 	})
 	t.Run("a mapping over two direct-I/O loop devices over a buffered one is refused", func(t *testing.T) {
@@ -280,10 +281,10 @@ func TestMediumSourcesWalksTheStack(t *testing.T) {
 		outer := f.device("/dev/loop0", 7, 0, "loop0")
 		f.loop(outer, "/dev/loop1", "1", "0")
 		f.slave(f.device("/dev/dm-0", 253, 0, "dm-0"), outer)
-		if _, err := mediumSources("/dev/dm-0"); !errors.Is(err, ErrDirectIOUnsupported) || !strings.Contains(err.Error(), "loop2") {
-			t.Fatalf("got %v, want ErrDirectIOUnsupported naming loop2", err)
+		if _, err := mediumSources("/dev/dm-0", f.nodeRdev); !errors.Is(err, ErrUnsupported) || !strings.Contains(err.Error(), "loop2") {
+			t.Fatalf("got %v, want ErrUnsupported naming loop2", err)
 		}
-		got, err := mediumSources("/dev/loop0")
+		got, err := mediumSources("/dev/loop0", f.nodeRdev)
 		want := []mediumSource{{path: "/dev/loop0"}, {path: "/dev/loop1"}, {path: "/dev/loop2"}, {path: file}}
 		if err != nil || !slices.Equal(got, want) {
 			t.Fatalf("the stack itself: got %v, %v; want %v", got, err, want)
@@ -294,7 +295,7 @@ func TestMediumSourcesWalksTheStack(t *testing.T) {
 		outer := f.device("/dev/loop0", 7, 0, "loop0")
 		f.loop(outer, file, "1", "0")
 		f.slave(f.device("/dev/dm-0", 253, 0, "dm-0"), outer)
-		got, err := mediumSources("/dev/dm-0")
+		got, err := mediumSources("/dev/dm-0", f.nodeRdev)
 		if err != nil || !slices.Equal(got, []mediumSource{{path: "/dev/dm-0"}}) {
 			t.Fatalf("got %v, %v", got, err)
 		}
@@ -302,7 +303,7 @@ func TestMediumSourcesWalksTheStack(t *testing.T) {
 	t.Run("a buffered loop device adds its backing file at the loop offset", func(t *testing.T) {
 		f := newFakeSysfs(t)
 		f.loop(f.device("/dev/loop0", 7, 0, "loop0"), file, "0", "4096")
-		got, err := mediumSources("/dev/loop0")
+		got, err := mediumSources("/dev/loop0", f.nodeRdev)
 		if err != nil || !slices.Equal(got, []mediumSource{{path: "/dev/loop0"}, {path: file, offset: 4096}}) {
 			t.Fatalf("got %v, %v", got, err)
 		}
@@ -311,7 +312,7 @@ func TestMediumSourcesWalksTheStack(t *testing.T) {
 		f := newFakeSysfs(t)
 		f.loop(f.device("/dev/loop1", 7, 1, "loop1"), file, "0", "512")
 		f.loop(f.device("/dev/loop0", 7, 0, "loop0"), "/dev/loop1", "0", "4096")
-		got, err := mediumSources("/dev/loop0")
+		got, err := mediumSources("/dev/loop0", f.nodeRdev)
 		want := []mediumSource{{path: "/dev/loop0"}, {path: "/dev/loop1", offset: 4096}, {path: file, offset: 4608}}
 		if err != nil || !slices.Equal(got, want) {
 			t.Fatalf("got %v, %v; want %v", got, err, want)
@@ -322,15 +323,15 @@ func TestMediumSourcesWalksTheStack(t *testing.T) {
 		loop := f.device("/dev/loop0", 7, 0, "loop0")
 		f.loop(loop, file, "0", "0")
 		f.slave(f.device("/dev/dm-0", 253, 0, "dm-0"), loop)
-		if _, err := mediumSources("/dev/dm-0"); !errors.Is(err, ErrDirectIOUnsupported) || !strings.Contains(err.Error(), "loop0") {
-			t.Fatalf("got %v, want ErrDirectIOUnsupported naming loop0", err)
+		if _, err := mediumSources("/dev/dm-0", f.nodeRdev); !errors.Is(err, ErrUnsupported) || !strings.Contains(err.Error(), "loop0") {
+			t.Fatalf("got %v, want ErrUnsupported naming loop0", err)
 		}
 	})
 	t.Run("a mapping over a disk reaches the medium itself", func(t *testing.T) {
 		f := newFakeSysfs(t)
 		disk := f.device("/dev/sda", 8, 0, "sda")
 		f.slave(f.device("/dev/dm-0", 253, 0, "dm-0"), disk)
-		got, err := mediumSources("/dev/dm-0")
+		got, err := mediumSources("/dev/dm-0", f.nodeRdev)
 		if err != nil || !slices.Equal(got, []mediumSource{{path: "/dev/dm-0"}}) {
 			t.Fatalf("got %v, %v", got, err)
 		}
@@ -342,28 +343,28 @@ func TestMediumSourcesWalksTheStack(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(part, "partition"), []byte("1\n"), 0o600); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
-		if _, err := mediumSources("/dev/loop0p1"); !errors.Is(err, ErrDirectIOUnsupported) {
-			t.Fatalf("got %v, want ErrDirectIOUnsupported", err)
+		if _, err := mediumSources("/dev/loop0p1", f.nodeRdev); !errors.Is(err, ErrUnsupported) {
+			t.Fatalf("got %v, want ErrUnsupported", err)
 		}
 	})
 	t.Run("unreadable loop attributes are errors, not answers", func(t *testing.T) {
 		f := newFakeSysfs(t)
 		f.loop(f.device("/dev/loop0", 7, 0, "loop0"), file, "", "0")
-		if _, err := mediumSources("/dev/loop0"); err == nil {
+		if _, err := mediumSources("/dev/loop0", f.nodeRdev); err == nil {
 			t.Fatal("a loop device with no dio attribute was judged")
 		}
 		f.loop(f.device("/dev/loop1", 7, 1, "loop1"), file, "0", "not-a-number")
-		if _, err := mediumSources("/dev/loop1"); err == nil {
+		if _, err := mediumSources("/dev/loop1", f.nodeRdev); err == nil {
 			t.Fatal("a loop device with a garbage offset was judged")
 		}
 		f.device("/dev/dm-0", 253, 0, "dm-0")
 		if err := os.WriteFile(filepath.Join(f.root, "devices", "dm-0", "slaves"), []byte("not a directory"), 0o600); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
-		if _, err := mediumSources("/dev/dm-0"); err == nil {
+		if _, err := mediumSources("/dev/dm-0", f.nodeRdev); err == nil {
 			t.Fatal("unlistable slaves were judged")
 		}
-		if _, err := mediumSources(filepath.Join(t.TempDir(), "absent")); err == nil {
+		if _, err := mediumSources(filepath.Join(t.TempDir(), "absent"), f.nodeRdev); err == nil {
 			t.Fatal("a missing device was judged")
 		}
 	})
@@ -376,20 +377,20 @@ func TestMediumSourcesWalksTheStack(t *testing.T) {
 func TestRequireCacheMatchesMedium(t *testing.T) {
 	device := filepath.Join(diskDir(t), "luks.img")
 	placeImage(t, device, cryptsetupArgon2Prefix(t, false))
-	hdr, _, err := ReadHeader(device)
+	hdr, _, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 	headers := 2 * int64(hdr.HeaderSize)
 
-	previous := readDeviceDirect
-	t.Cleanup(func() { readDeviceDirect = previous })
+	sys := testVolumeSys()
+	real := sys.readDeviceDirect
 	var furthest int64
-	readDeviceDirect = func(path string, off int64, n int) ([]byte, error) {
+	sys.readDeviceDirect = func(ctx context.Context, path string, off int64, n int) ([]byte, error) {
 		furthest = max(furthest, off+int64(n))
-		return previous(path, off, n)
+		return real(ctx, path, off, n)
 	}
-	if err := requireCacheMatchesMedium(device); err != nil {
+	if err := requireCacheMatchesMedium(device, sys); err != nil {
 		t.Fatalf("an undisturbed device: %v", err)
 	}
 	if furthest != headers {
@@ -397,8 +398,8 @@ func TestRequireCacheMatchesMedium(t *testing.T) {
 	}
 
 	flip := func(at int64) {
-		readDeviceDirect = func(path string, off int64, n int) ([]byte, error) {
-			medium, err := previous(path, off, n)
+		sys.readDeviceDirect = func(ctx context.Context, path string, off int64, n int) ([]byte, error) {
+			medium, err := real(ctx, path, off, n)
 			if err == nil && at >= off && at < off+int64(len(medium)) {
 				medium[at-off] ^= 0xff
 			}
@@ -407,30 +408,30 @@ func TestRequireCacheMatchesMedium(t *testing.T) {
 	}
 	for _, at := range []int64{100, int64(hdr.HeaderSize) + 100} {
 		flip(at)
-		if err := requireCacheMatchesMedium(device); !errors.Is(err, ErrDeviceCacheStale) ||
+		if err := requireCacheMatchesMedium(device, sys); !errors.Is(err, ErrDeviceCacheStale) ||
 			!strings.Contains(err.Error(), fmt.Sprintf("first difference at byte %d", at)) {
 			t.Fatalf("a difference at byte %d: got %v", at, err)
 		}
 	}
 	flip(headers + 100)
-	if err := requireCacheMatchesMedium(device); err != nil {
+	if err := requireCacheMatchesMedium(device, sys); err != nil {
 		t.Fatalf("a difference past the header copies -- which must not even be read -- was reported: %v", err)
 	}
 
-	readDeviceDirect = func(path string, off int64, n int) ([]byte, error) {
-		medium, err := previous(path, off, n)
+	sys.readDeviceDirect = func(ctx context.Context, path string, off int64, n int) ([]byte, error) {
+		medium, err := real(ctx, path, off, n)
 		return medium[:n/2], err
 	}
-	if err := requireCacheMatchesMedium(device); !errors.Is(err, ErrDeviceCacheStale) {
+	if err := requireCacheMatchesMedium(device, sys); !errors.Is(err, ErrDeviceCacheStale) {
 		t.Fatalf("a shorter medium: got %v, want ErrDeviceCacheStale", err)
 	}
 
 	errRead := errors.New("injected: the direct read failed")
-	readDeviceDirect = func(string, int64, int) ([]byte, error) { return nil, errRead }
-	if err := requireCacheMatchesMedium(device); !errors.Is(err, errRead) {
+	sys.readDeviceDirect = func(context.Context, string, int64, int) ([]byte, error) { return nil, errRead }
+	if err := requireCacheMatchesMedium(device, sys); !errors.Is(err, errRead) {
 		t.Fatalf("a failed direct read: got %v", err)
 	}
-	readDeviceDirect = previous
+	sys.readDeviceDirect = real
 
 	t.Run("a loop device's backing file is compared at the loop offset", func(t *testing.T) {
 		const offset = 8192
@@ -439,25 +440,26 @@ func TestRequireCacheMatchesMedium(t *testing.T) {
 		placeImage(t, backing, append(make([]byte, offset), image...))
 		f := newFakeSysfs(t)
 		f.loop(f.device(device, 7, 0, "loop0"), backing, "0", fmt.Sprint(offset))
-		if err := requireCacheMatchesMedium(device); err != nil {
+		sys.nodeRdev = f.nodeRdev
+		if err := requireCacheMatchesMedium(device, sys); err != nil {
 			t.Fatalf("a backing file holding the same bytes: %v", err)
 		}
 		image[200] ^= 0xff
 		placeImage(t, backing, append(make([]byte, offset), image...))
-		if err := requireCacheMatchesMedium(device); !errors.Is(err, ErrDeviceCacheStale) || !strings.Contains(err.Error(), backing) {
+		if err := requireCacheMatchesMedium(device, sys); !errors.Is(err, ErrDeviceCacheStale) || !strings.Contains(err.Error(), backing) {
 			t.Fatalf("a backing file that differs: got %v, want ErrDeviceCacheStale naming it", err)
 		}
 	})
 
 	t.Run("a device that cannot be resolved is refused", func(t *testing.T) {
-		if err := requireCacheMatchesMedium(filepath.Join(t.TempDir(), "absent.img")); err == nil {
+		if err := requireCacheMatchesMedium(filepath.Join(t.TempDir(), "absent.img"), testVolumeSys()); err == nil {
 			t.Fatal("a missing device reported a match")
 		}
 	})
 
 	t.Run("a primary whose size is not a header size is left to the reader", func(t *testing.T) {
 		plain, _ := patternFile(t, diskDir(t), 4*directIOAlign)
-		if err := requireCacheMatchesMedium(plain); err != nil {
+		if err := requireCacheMatchesMedium(plain, testVolumeSys()); err != nil {
 			t.Fatalf("got %v", err)
 		}
 	})
@@ -468,20 +470,19 @@ func TestRequireCacheMatchesMedium(t *testing.T) {
 // legal header span. Every comparison read stays inside the two header
 // copies.
 func TestMigrateToFIPSNeverReadsTheDataSegmentToCompare(t *testing.T) {
-	if fipsMode() {
+	if fips.Probe() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
 	}
 
 	requireCryptsetup(t)
-	pinDigestIterations(t, minPBKDF2Iterations)
 	image := newImage(t, "small-layout.img")
 	args := append(append([]string{"luksFormat"}, crashFormatArgs...),
 		"--luks2-metadata-size", "32k", "--luks2-keyslots-size", "1m", "--offset", "8192", image)
 	if code, out := runCryptsetup(t, conformancePassphrase, args...); code != 0 {
 		t.Fatalf("cryptsetup luksFormat exited %d\n%s", code, out)
 	}
-	_, metadata, err := ReadHeader(image)
+	_, metadata, err := readHeaderForTest(image)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -490,14 +491,14 @@ func TestMigrateToFIPSNeverReadsTheDataSegmentToCompare(t *testing.T) {
 		t.Fatalf("data offset %d (%v), want the 4 MiB the fixture asks for", dataOffset, err)
 	}
 
-	previous := readDeviceDirect
-	t.Cleanup(func() { readDeviceDirect = previous })
+	sys := testVolumeSys()
+	real := sys.readDeviceDirect
 	var furthest int64
-	readDeviceDirect = func(path string, off int64, n int) ([]byte, error) {
+	sys.readDeviceDirect = func(ctx context.Context, path string, off int64, n int) ([]byte, error) {
 		furthest = max(furthest, off+int64(n))
-		return previous(path, off, n)
+		return real(ctx, path, off, n)
 	}
-	result, err := MigrateToFIPS(image, migrationPassphrase, cheapMigration())
+	result, err := migrateToFIPSAt(context.Background(), image, migrationPassphrase, cheapMigration(), sys)
 	if err != nil || !result.Complete {
 		t.Fatalf("MigrateToFIPS: %+v, %v", result, err)
 	}

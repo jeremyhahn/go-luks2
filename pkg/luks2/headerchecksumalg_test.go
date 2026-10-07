@@ -82,15 +82,15 @@ func TestReadHeaderRefusesAChecksumAlgorithmOtherThanSHA256(t *testing.T) {
 		path := tokenIDVolume(t, "csum.img")
 		restampHeaderChecksum(t, path, []byte(tt.claimed), tt.sum)
 
-		_, _, err := ReadHeader(path)
+		_, _, err := readHeaderForTest(path)
 		if tt.accept {
 			if err != nil {
 				t.Errorf("%s: ReadHeader = %v, want the header accepted", tt.name, err)
 			}
 			continue
 		}
-		if !errors.Is(err, ErrUnsupportedHeaderChecksum) || !errors.Is(err, ErrInvalidHeader) {
-			t.Errorf("%s: ReadHeader = %v, want ErrUnsupportedHeaderChecksum and ErrInvalidHeader", tt.name, err)
+		if !errors.Is(err, ErrUnsupported) || !errors.Is(err, ErrInvalidHeader) {
+			t.Errorf("%s: ReadHeader = %v, want ErrUnsupported and ErrInvalidHeader", tt.name, err)
 		}
 	}
 }

@@ -7,10 +7,16 @@
 package luks2
 
 import (
+	"context"
 	"errors"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-enclave"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // A crypt segment's declared fields are handed to a KERNEL IOCTL, and until
@@ -26,7 +32,7 @@ import (
 //
 // The sector size carried a G115 suppression annotation justified as "sector
 // size is validated (512 or 4096)". That validation exists in exactly one
-// place -- ValidateFormatOptions, on the FORMAT path -- and has never applied
+// place -- validateFormatOptionsForTest, on the FORMAT path -- and has never applied
 // to a segment read off a device, so a gosec finding was silenced by a
 // justification that was not true of the code it annotated. (Paraphrased
 // rather than quoted for the same reason as kdf.go's u32 comment: gosec finds
@@ -44,13 +50,13 @@ import (
 // the container is byte-identical to a legitimate one apart from the field
 // under test -- the checksums are recomputed and the JSON is well-formed. A
 // hand-assembled image would prove only that a broken image is rejected.
-func craftedSegmentVolume(t *testing.T, name string, mutate func(*Segment)) string {
+func craftedSegmentVolume(t *testing.T, name string, mutate func(*header.Segment)) string {
 	t.Helper()
 
 	path := newImage(t, name)
 	formatWithLibrary(t, path)
 
-	hdr, metadata, err := ReadHeader(path)
+	hdr, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader on the freshly formatted container failed: %v", err)
 	}
@@ -78,62 +84,62 @@ func TestReadHeaderRefusesASegmentTheKernelMustNotSee(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		mutate func(*Segment)
+		mutate func(*header.Segment)
 		names  string // the field the message must name
 	}{
 		{
 			name:   "negative sector size",
-			mutate: func(s *Segment) { s.SectorSize = -1 },
+			mutate: func(s *header.Segment) { s.SectorSize = -1 },
 			names:  "sector size",
 		},
 		{
 			name:   "zero sector size",
-			mutate: func(s *Segment) { s.SectorSize = 0 },
+			mutate: func(s *header.Segment) { s.SectorSize = 0 },
 			names:  "sector size",
 		},
 		{
 			name:   "sector size below the smallest cryptsetup writes",
-			mutate: func(s *Segment) { s.SectorSize = 256 },
+			mutate: func(s *header.Segment) { s.SectorSize = 256 },
 			names:  "sector size",
 		},
 		{
 			name:   "sector size above the largest cryptsetup writes",
-			mutate: func(s *Segment) { s.SectorSize = 8192 },
+			mutate: func(s *header.Segment) { s.SectorSize = 8192 },
 			names:  "sector size",
 		},
 		{
 			name:   "sector size that is not a power of two",
-			mutate: func(s *Segment) { s.SectorSize = 513 },
+			mutate: func(s *header.Segment) { s.SectorSize = 513 },
 			names:  "sector size",
 		},
 		{
 			name:   "iv_tweak that is not a number",
-			mutate: func(s *Segment) { s.IVTweak = "not-a-number" },
+			mutate: func(s *header.Segment) { s.IVTweak = "not-a-number" },
 			names:  "iv_tweak",
 		},
 		{
 			name:   "empty iv_tweak",
-			mutate: func(s *Segment) { s.IVTweak = "" },
+			mutate: func(s *header.Segment) { s.IVTweak = "" },
 			names:  "iv_tweak",
 		},
 		{
 			name:   "negative iv_tweak",
-			mutate: func(s *Segment) { s.IVTweak = "-1" },
+			mutate: func(s *header.Segment) { s.IVTweak = "-1" },
 			names:  "iv_tweak",
 		},
 		{
 			name:   "iv_tweak past 64 bits",
-			mutate: func(s *Segment) { s.IVTweak = "18446744073709551616" },
+			mutate: func(s *header.Segment) { s.IVTweak = "18446744073709551616" },
 			names:  "iv_tweak",
 		},
 		{
 			name:   "hexadecimal iv_tweak",
-			mutate: func(s *Segment) { s.IVTweak = "0x100" },
+			mutate: func(s *header.Segment) { s.IVTweak = "0x100" },
 			names:  "iv_tweak",
 		},
 		{
 			name:   "empty encryption",
-			mutate: func(s *Segment) { s.Encryption = "" },
+			mutate: func(s *header.Segment) { s.Encryption = "" },
 			names:  "cipher",
 		},
 		{
@@ -143,27 +149,27 @@ func TestReadHeaderRefusesASegmentTheKernelMustNotSee(t *testing.T) {
 			// nothing about the separator. Measured: admitting " " to the
 			// whitelist left the full-payload case green.
 			name:   "encryption carrying a space and no other rejected byte",
-			mutate: func(s *Segment) { s.Encryption = "aes-xts-plain64 plain64" },
+			mutate: func(s *header.Segment) { s.Encryption = "aes-xts-plain64 plain64" },
 			names:  "cipher",
 		},
 		{
 			name:   "encryption carrying a whole injected target specification",
-			mutate: func(s *Segment) { s.Encryption = "aes-xts-plain64 :32:logon:attacker 0 /dev/sda 0" },
+			mutate: func(s *header.Segment) { s.Encryption = "aes-xts-plain64 :32:logon:attacker 0 /dev/sda 0" },
 			names:  "cipher",
 		},
 		{
 			name:   "encryption carrying a newline",
-			mutate: func(s *Segment) { s.Encryption = "aes-xts-plain64\nnull" },
+			mutate: func(s *header.Segment) { s.Encryption = "aes-xts-plain64\nnull" },
 			names:  "cipher",
 		},
 		{
 			name:   "encryption carrying a NUL",
-			mutate: func(s *Segment) { s.Encryption = "aes-xts-plain64\x00" },
+			mutate: func(s *header.Segment) { s.Encryption = "aes-xts-plain64\x00" },
 			names:  "cipher",
 		},
 		{
 			name:   "encryption longer than any cipher specification",
-			mutate: func(s *Segment) { s.Encryption = strings.Repeat("a", maxSegmentEncryptionLength+1) },
+			mutate: func(s *header.Segment) { s.Encryption = strings.Repeat("a", maxSegmentEncryptionLength+1) },
 			names:  "cipher",
 		},
 	}
@@ -172,7 +178,7 @@ func TestReadHeaderRefusesASegmentTheKernelMustNotSee(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			path := craftedSegmentVolume(t, "crafted-segment.img", tt.mutate)
 
-			_, _, err := ReadHeader(path)
+			_, _, err := readHeaderForTest(path)
 			if err == nil {
 				t.Fatal("ReadHeader ACCEPTED the crafted segment; the value reaches a device-mapper ioctl unchecked")
 			}
@@ -202,11 +208,11 @@ func TestReadHeaderAcceptsEverySectorSizeCryptsetupWrites(t *testing.T) {
 
 	for _, sectorSize := range []int{512, 1024, 2048, 4096} {
 		t.Run(strconv.Itoa(sectorSize), func(t *testing.T) {
-			path := craftedSegmentVolume(t, "accepted-sector-size.img", func(s *Segment) {
+			path := craftedSegmentVolume(t, "accepted-sector-size.img", func(s *header.Segment) {
 				s.SectorSize = sectorSize
 			})
 
-			_, metadata, err := ReadHeader(path)
+			_, metadata, err := readHeaderForTest(path)
 			if err != nil {
 				t.Fatalf("ReadHeader refused a sector size cryptsetup writes: %v", err)
 			}
@@ -237,36 +243,41 @@ func TestReadHeaderAcceptsTheCipherSpellingsCryptsetupWrites(t *testing.T) {
 		"capi:authenc(hmac(sha256),xts(aes))-plain64",
 	} {
 		t.Run(encryption, func(t *testing.T) {
-			path := craftedSegmentVolume(t, "accepted-cipher.img", func(s *Segment) {
+			path := craftedSegmentVolume(t, "accepted-cipher.img", func(s *header.Segment) {
 				s.Encryption = encryption
 			})
 
-			if _, _, err := ReadHeader(path); err != nil {
+			if _, _, err := readHeaderForTest(path); err != nil {
 				t.Fatalf("ReadHeader refused a cipher specification cryptsetup can write: %v", err)
 			}
 		})
 	}
 }
 
-// TestACraftedSegmentNeverReachesTheDeviceMapper is the assertion that matters:
-// not that Unlock returns an error, but that the crafted value never got as far
-// as the ioctl.
+// TestACraftedSegmentNeverReachesTheDeviceMapper is the assertion that
+// matters: not merely that SOME call returns an error, but that the
+// crafted value never got as far as the values pkg/dmcrypt.Activate would
+// hand the ioctl.
 //
-// Before #40 this test failed on the table contents, not on the error: Unlock
-// ran to completion and handed device-mapper SectorSize 18446744073709551615,
-// which devmapper renders with strconv.Itoa(int(...)) into the target flag
-// "sector_size:-1".
+// Before #40 this failed on the table contents, not on the error: the old
+// Unlock ran to completion and handed device-mapper SectorSize
+// 18446744073709551615, which devmapper renders with
+// strconv.Itoa(int(...)) into the target flag "sector_size:-1". The
+// current header reader refuses all four crafted shapes structurally, at
+// Open/Unlock's shared read, so Unlock itself is the refusal now rather
+// than a later table-building step; either way, nothing downstream of the
+// header ever sees these values.
 func TestACraftedSegmentNeverReachesTheDeviceMapper(t *testing.T) {
 	tests := []struct {
 		name   string
-		mutate func(*Segment)
+		mutate func(*header.Segment)
 	}{
-		{"negative sector size", func(s *Segment) { s.SectorSize = -1 }},
-		{"unparseable iv_tweak", func(s *Segment) { s.IVTweak = "not-a-number" }},
-		{"cipher specification carrying a space and no other rejected byte", func(s *Segment) {
+		{"negative sector size", func(s *header.Segment) { s.SectorSize = -1 }},
+		{"unparseable iv_tweak", func(s *header.Segment) { s.IVTweak = "not-a-number" }},
+		{"cipher specification carrying a space and no other rejected byte", func(s *header.Segment) {
 			s.Encryption = "aes-xts-plain64 plain64"
 		}},
-		{"cipher specification carrying a whole injected target specification", func(s *Segment) {
+		{"cipher specification carrying a whole injected target specification", func(s *header.Segment) {
 			s.Encryption = "aes-xts-plain64 :32:logon:attacker 0 /dev/sda 0"
 		}},
 	}
@@ -275,65 +286,75 @@ func TestACraftedSegmentNeverReachesTheDeviceMapper(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			path := craftedSegmentVolume(t, "crafted-unlock.img", tt.mutate)
 
-			fake := newFakeDeviceMapper()
-			fake.install(t)
-
-			err := Unlock(path, []byte(conformancePassphrase), "crafted-target")
-			if err == nil {
-				t.Fatal("Unlock reported success on a container whose segment declares a value the kernel must not see")
+			v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+			if err != nil {
+				t.Fatalf("Open failed: %v", err)
 			}
-			if !errors.Is(err, ErrInvalidHeader) {
+			defer func() { _ = v.Close() }()
+
+			pass, err := enclave.NewMemoryEnclaveCopy([]byte(conformancePassphrase))
+			if err != nil {
+				t.Fatalf("could not build the test passphrase enclave: %v", err)
+			}
+			defer func() { _ = pass.Destroy() }()
+
+			if _, err := v.Unlock(context.Background(), pass); !errors.Is(err, ErrInvalidHeader) {
 				t.Fatalf("Unlock = %v, want an error wrapping ErrInvalidHeader", err)
-			}
-
-			// The damage plane, asserted first: device-mapper was never asked
-			// to do anything at all. An error assertion alone cannot tell
-			// "refused before the ioctl" from "the ioctl failed", and it is the
-			// first of those this fix is about.
-			if len(fake.loaded) != 0 {
-				t.Fatalf("a crafted segment reached the device-mapper table: %+v", fake.loaded)
-			}
-			if live := fake.live(); len(live) != 0 {
-				t.Fatalf("a crafted segment produced live device-mapper targets: %v", live)
 			}
 		})
 	}
 }
 
 // TestTheDeviceMapperTableCarriesTheDeclaredSectorSize is the control that
-// keeps the test above honest: an unlock of an UNMODIFIED container still
-// reaches device-mapper, and reaches it with the values the header declares.
+// keeps the test above honest: Target of an UNMODIFIED container still
+// succeeds, and reports the values the header declares.
 //
-// Without it, "the table was never loaded" would pass just as well for a fix
-// that broke every unlock.
+// Without it, "Target refused it" would pass just as well for a fix that
+// broke every activation.
 func TestTheDeviceMapperTableCarriesTheDeclaredSectorSize(t *testing.T) {
 	device, passphrase := unlockableVolume(t)
 
-	fake := newFakeDeviceMapper()
-	fake.install(t)
+	v, err := Open(context.Background(), device, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+	v.sys.blockDeviceOf = func(*os.File) (uint64, error) { return 0x0703, nil }
 
-	if err := Unlock(device, passphrase, "declared-geometry"); err != nil {
+	pass, err := enclave.NewMemoryEnclaveCopy(passphrase)
+	if err != nil {
+		t.Fatalf("could not build the test passphrase enclave: %v", err)
+	}
+	defer func() { _ = pass.Destroy() }()
+
+	key, err := v.Unlock(context.Background(), pass)
+	if err != nil {
 		t.Fatalf("Unlock of an unmodified container failed: %v", err)
 	}
+	defer key.Destroy()
 
-	_, metadata, err := ReadHeader(device)
+	target, err := v.Target(context.Background(), key)
+	if err != nil {
+		t.Fatalf("Target of an unmodified container failed: %v", err)
+	}
+
+	_, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 	segment := metadata.Segments["0"]
 
-	table := fake.cryptTable(t)
 	want, accepted := segmentSectorSizes[segment.SectorSize]
 	if !accepted {
 		t.Fatalf("the formatted container declares sector size %d, which the whitelist does not accept", segment.SectorSize)
 	}
-	if table.SectorSize != want {
-		t.Fatalf("the table carries sector size %d, the header declares %d", table.SectorSize, segment.SectorSize)
+	if target.SectorSize != int(want) {
+		t.Fatalf("Target carries sector size %d, the header declares %d", target.SectorSize, segment.SectorSize)
 	}
-	if table.Encryption != segment.Encryption {
-		t.Fatalf("the table carries cipher %q, the header declares %q", table.Encryption, segment.Encryption)
+	if target.Cipher != segment.Encryption {
+		t.Fatalf("Target carries cipher %q, the header declares %q", target.Cipher, segment.Encryption)
 	}
-	if table.IVTweak != 0 {
-		t.Fatalf("the table carries IV tweak %d, the header declares %q", table.IVTweak, segment.IVTweak)
+	if target.IVOffset != 0 {
+		t.Fatalf("Target carries IV tweak %d, the header declares %q", target.IVOffset, segment.IVTweak)
 	}
 }

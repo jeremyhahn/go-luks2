@@ -1,0 +1,79 @@
+# Wipe — architecture
+
+> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1)
+> Conflicts with this document are defects. Fix them here first.
+
+Destroying a volume, two ways: a crypto-erase that destroys only the header
+copies and keyslots (fast, leaves ciphertext in place but unopenable), and a
+full-device overwrite (slow, destroys the ciphertext itself). Keyslot-level
+destruction (removing one credential without touching the others) is
+[keyslots](../keyslots/architecture.md)'s contract, not this one's.
+
+## The problem and the shape chosen
+
+A crypto-erase is sufficient when the goal is "this device can no longer be
+opened" — overwriting the data segment buys nothing once the keys that
+protect it are gone. A full overwrite is for when the goal is "no bytes on
+this medium should be recoverable", including by someone who already has
+every header backup ever taken. The two are genuinely different operations
+with different costs, so this library keeps them as two call sites
+(`HeaderOnly` vs. full `Wipe`) rather than one call with a mode flag that
+callers could set by habit.
+
+## Component boundaries
+
+`pkg/wipe` is its own public package (DESIGN.md §A.4): "LUKS-independent,
+consumed directly by go-trusted-platform, with its own trust boundary
+(whole-device destruction)." The header-only crypto-erase is
+`(*luks2.Volume).Erase(ctx)` instead, since it needs the volume handle's
+lock, not device-level sanitization:
+
+```go
+// pkg/luks2
+func (v *Volume) Erase(ctx context.Context) error // header-only crypto-erase under the volume's exclusive lock
+
+// pkg/wipe
+type Pattern uint8
+const (Zeros Pattern = iota; Ones; Random)
+type Standard uint8
+const (NoStandard Standard = iota; DoD3Pass; DoD7Pass; NIST)
+func (s Standard) Patterns() []Pattern
+type VerifyMode uint8
+const (VerifyDefault VerifyMode = iota; VerifyAlways; VerifyNever)
+type Params struct { Standard Standard; Patterns []Pattern; Verify VerifyMode; Discard bool; Progress func(Progress) }
+func Sanitize(ctx context.Context, path string, p Params) error
+```
+
+`VerifyMode` is one three-valued field rather than a boolean pair (no boolean
+arguments, DESIGN.md §B.1). Single-keyslot zeroing is
+`(*Volume).RemoveKeyslot`, documented with
+[keyslots](../keyslots/engineering.md#persistence).
+
+## Data flow
+
+**Header-only (default, crypto-erase).** Zeroes both header copies and the
+whole keyslots area, plus every keyslot area the header lists, using the
+geometry of a header copy whose checksum is valid. Any other header copy
+found at a legal offset is zeroed too: its binary header and its JSON.
+Nothing at or past the start of the data segment is touched. If no header
+copy has a valid checksum, the keyslots area cannot be located: the first
+32 KiB and every recognisable copy are zeroed, and a full wipe is the only
+remaining option.
+
+**Full device.** Overwrites the whole device, then syncs. A standard
+(`nist`/`dod3`/`dod7`) is a fixed pattern sequence overriding passes/random;
+verification reads the device back with `O_DIRECT`, past the page cache (for
+a loop device, its backing file too), and compares every byte with the final
+pass. `dod3` and `dod7` turn verification on by default.
+
+Both modes open the device with `O_EXCL`: a mounted, mapped or otherwise held
+device is refused, and a path that names a different file at open time than
+at lock time (a symlink re-pointed in between) is refused before anything is
+written.
+
+## What this feature deliberately does not do
+
+No partial-pattern recovery claims: a header-only wipe makes no promise about
+the data segment's recoverability, and a full wipe with `--trim` makes no
+promise beyond what `BLKDISCARD` guarantees on the underlying medium. There
+is no undo for a full wipe.

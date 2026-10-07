@@ -5,14 +5,17 @@
 package device
 
 import (
+	"context"
 	"errors"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
 
 	"github.com/jeremyhahn/go-luks2/internal/clock"
+	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
 // LockMode is how a device lock is held: exclusive for a writer, shared for
@@ -58,14 +61,26 @@ const (
 )
 
 // Pinned is a descriptor opened on a device or file path, not yet locked.
+//
+// flock does not count holders within one open file description: two shared
+// holders on this descriptor hold ONE lock, and the first LOCK_UN would drop
+// it under the second -- for a file image, where the node flock is
+// cryptsetup's only lock, letting a foreign writer in mid-read. mu guards the
+// holder count, so the flock is taken by the first holder and released by
+// the last, and a writer on this same descriptor waits for the readers
+// rather than converting their lock.
 type Pinned struct {
 	path string
 	file *os.File
+
+	mu        sync.Mutex
+	shared    int
+	exclusive bool
 }
 
 // OpenPinned opens path with flag and pins the descriptor to it.
-func OpenPinned(op, path string, flag int, openFile OpenFunc) (*Pinned, error) {
-	f, err := Open(op, path, flag, openFile)
+func OpenPinned(ctx context.Context, op, path string, flag int, openFile OpenFunc) (*Pinned, error) {
+	f, err := Open(ctx, op, path, flag, openFile)
 	if err != nil {
 		return nil, err
 	}
@@ -90,34 +105,75 @@ func (p *Pinned) Close() error { return p.file.Close() }
 // IT WAITS, AND THAT IS THE POINT: a bare LOCK_NB with no retry turns
 // ordinary contention for a host-global device into an immediate failure.
 // See pollFlock.
-func (p *Pinned) Lock(mode LockMode, wait time.Duration, clk clock.Clock, lockDir string, openLockFile OpenLockFileFunc, held func(string)) (*Locked, error) {
+func (p *Pinned) Lock(ctx context.Context, mode LockMode, wait time.Duration, clk clock.Clock, lockDir string, openLockFile OpenLockFileFunc, held func(string)) (*Locked, error) {
 	started := clk.Now()
 	deadline := started.Add(wait)
-	if err := pollFlock(p.file, p.path, mode, started, deadline, clk); err != nil {
+	if err := pollLock(ctx, p.path, started, deadline, clk, func() error { return p.acquire(mode) }); err != nil {
 		return nil, err
 	}
-	cs, err := acquireCryptsetupLockFor(p.file, p.path, lockDir, mode, started, deadline, clk, openLockFile)
+	cs, err := acquireCryptsetupLockFor(ctx, p.file, p.path, lockDir, mode, started, deadline, clk, openLockFile)
 	if err != nil {
-		_ = unix.Flock(int(p.file.Fd()), unix.LOCK_UN)
+		_ = p.release(mode)
 		return nil, err
 	}
 	if held != nil {
 		held(p.path)
 	}
-	return &Locked{path: p.path, file: p.file, cryptsetup: cs}, nil
+	return &Locked{path: p.path, file: p.file, cryptsetup: cs, pinned: p, mode: mode}, nil
+}
+
+// acquire makes one non-blocking attempt at the node flock in mode, counting
+// holders on this descriptor. A shared holder joins one already held; any
+// other combination with a holder present is contention, reported as
+// EWOULDBLOCK so pollLock waits for it like a foreign holder.
+func (p *Pinned) acquire(mode LockMode) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.exclusive || (mode == LockExclusive && p.shared > 0) {
+		return unix.EWOULDBLOCK
+	}
+	if mode == LockShared && p.shared > 0 {
+		p.shared++
+		return nil
+	}
+	if err := unix.Flock(int(p.file.Fd()), mode.flockOp()); err != nil {
+		return err
+	}
+	if mode == LockShared {
+		p.shared = 1
+	} else {
+		p.exclusive = true
+	}
+	return nil
+}
+
+// release gives up one hold taken by acquire in mode, unlocking the node
+// flock only when it was the last.
+func (p *Pinned) release(mode LockMode) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if mode == LockShared {
+		p.shared--
+		if p.shared > 0 {
+			return nil
+		}
+	} else {
+		p.exclusive = false
+	}
+	return unix.Flock(int(p.file.Fd()), unix.LOCK_UN)
 }
 
 // LockExisting takes the node flock and cryptsetup's lock, in mode, on a
 // descriptor the caller already opened for its own reasons and whose device
 // number (rdev) it already knows -- the shape an activation's metadata read
 // lock needs, as opposed to Lock's, which opens the descriptor itself.
-func LockExisting(f *os.File, path string, rdev uint64, mode LockMode, wait time.Duration, clk clock.Clock, lockDir string, openLockFile OpenLockFileFunc) (*Locked, error) {
+func LockExisting(ctx context.Context, f *os.File, path string, rdev uint64, mode LockMode, wait time.Duration, clk clock.Clock, lockDir string, openLockFile OpenLockFileFunc) (*Locked, error) {
 	started := clk.Now()
 	deadline := started.Add(wait)
-	if err := pollFlock(f, path, mode, started, deadline, clk); err != nil {
+	if err := pollFlock(ctx, f, path, mode, started, deadline, clk); err != nil {
 		return nil, err
 	}
-	cs, err := AcquireCryptsetupLock(lockDir, rdev, mode, started, deadline, clk, openLockFile)
+	cs, err := AcquireCryptsetupLock(ctx, lockDir, rdev, mode, started, deadline, clk, openLockFile)
 	if err != nil {
 		_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
 		return nil, err
@@ -128,10 +184,15 @@ func LockExisting(f *os.File, path string, rdev uint64, mode LockMode, wait time
 // pollFlock flocks f in mode, retrying with backoff while another holder has
 // it, until deadline. It always makes one attempt, so a lock that is free is
 // never reported as contended, whatever the budget.
-func pollFlock(f *os.File, path string, mode LockMode, started, deadline time.Time, clk clock.Clock) error {
+func pollFlock(ctx context.Context, f *os.File, path string, mode LockMode, started, deadline time.Time, clk clock.Clock) error {
+	return pollLock(ctx, path, started, deadline, clk, func() error { return unix.Flock(int(f.Fd()), mode.flockOp()) })
+}
+
+// pollLock is pollFlock's loop over one non-blocking attempt, try.
+func pollLock(ctx context.Context, path string, started, deadline time.Time, clk clock.Clock, try func() error) error {
 	backoff := lockBackoffMin
 	for attempt := 1; ; attempt++ {
-		err := unix.Flock(int(f.Fd()), mode.flockOp())
+		err := try()
 		if err == nil {
 			return nil
 		}
@@ -142,7 +203,7 @@ func pollFlock(f *os.File, path string, mode LockMode, started, deadline time.Ti
 		// retried, and retrying it for the whole budget would report a real
 		// fault as a timeout.
 		if !errors.Is(err, unix.EWOULDBLOCK) {
-			return &Error{Device: path, Op: "lock", Err: err}
+			return &errs.Error{Kind: errs.ErrIO, Detail: "could not lock " + path, Err: err}
 		}
 
 		// Checked AFTER an attempt, so a zero budget still tries once.
@@ -154,7 +215,15 @@ func pollFlock(f *os.File, path string, mode LockMode, started, deadline time.Ti
 		// Never sleep past the deadline: doing so would report a longer
 		// wait than the caller allowed, and Waited above is meant to be
 		// true.
-		<-clk.NewTimer(min(backoff, remaining)).C()
+		t := clk.NewTimer(min(backoff, remaining))
+		select {
+		case <-ctx.Done():
+		case <-t.C():
+		}
+		t.Stop()
+		if err := ctx.Err(); err != nil {
+			return &errs.Error{Kind: errs.KindOf(err, errs.ErrIO), Detail: "waiting to lock " + path, Err: err}
+		}
 		backoff = min(backoff*2, lockBackoffMax)
 	}
 }
@@ -166,6 +235,11 @@ type Locked struct {
 	file       *os.File
 	cryptsetup *CryptsetupLock
 	released   bool
+
+	// pinned is the descriptor whose holder count this hold is part of, nil
+	// for LockExisting's caller-owned descriptor.
+	pinned *Pinned
+	mode   LockMode
 }
 
 // File is the locked descriptor.
@@ -185,6 +259,9 @@ func (l *Locked) Unlock() error {
 	l.released = true
 	// cryptsetup's lock is released first: it was taken second.
 	_ = l.cryptsetup.release()
+	if l.pinned != nil {
+		return l.pinned.release(l.mode)
+	}
 	return unix.Flock(int(l.file.Fd()), unix.LOCK_UN)
 }
 
@@ -199,9 +276,9 @@ func (l *Locked) Unlock() error {
 // the claim on another. Reopening the locked descriptor's own fd entry closes
 // that window by construction rather than by comparing the two descriptors
 // after the fact.
-func (l *Locked) Claim(op string, flag int, openFile OpenFunc) (*Claimed, error) {
+func (l *Locked) Claim(ctx context.Context, op string, flag int, openFile OpenFunc) (*Claimed, error) {
 	fdPath := "/proc/self/fd/" + strconv.Itoa(int(l.file.Fd())) // #nosec G115 -- a descriptor number fits an int
-	f, err := Open(op, fdPath, flag, openFile)
+	f, err := Open(ctx, op, fdPath, flag, openFile)
 	if err != nil {
 		return nil, err
 	}

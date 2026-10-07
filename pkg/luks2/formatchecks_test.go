@@ -55,25 +55,25 @@ func TestFormatRefusesBeforeWritingAnything(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		size   int64
-		mutate func(*FormatOptions)
+		mutate func(*formatOptionsForTest)
 		want   error
 	}{
-		{"a mode dm-crypt cannot parse", 64 << 20, func(o *FormatOptions) { o.CipherMode = "xts-plain64 x" }, ErrUnsupportedCipher},
-		{"aes-cbc with a 512-bit key", 64 << 20, func(o *FormatOptions) { o.CipherMode, o.KeySize = "cbc-essiv:sha256", 512 }, ErrUnsupportedCipher},
-		{"a cipher outside the allow-list", 64 << 20, func(o *FormatOptions) { o.Cipher = "serpent" }, ErrUnsupportedCipher},
-		{"a 48-byte label", 64 << 20, func(o *FormatOptions) { o.Label = strings.Repeat("L", 48) }, ErrInvalidLabel},
-		{"a label with a NUL", 64 << 20, func(o *FormatOptions) { o.Label = "ab\x00cd" }, ErrInvalidLabel},
-		{"a 48-byte subsystem", 64 << 20, func(o *FormatOptions) { o.Subsystem = strings.Repeat("S", 48) }, ErrInvalidLabel},
-		{"no room for data", 16 << 20, func(*FormatOptions) {}, ErrDeviceTooSmall},
-		{"no room for one 4 KiB sector", 16<<20 + 2048, func(o *FormatOptions) { o.SectorSize = 4096 }, ErrDeviceTooSmall},
-		{"data not a whole number of 4 KiB sectors", 17<<20 + 512, func(o *FormatOptions) { o.SectorSize = 4096 }, ErrInvalidSize},
-		{"no room for a larger key's keyslot", 16 << 20, func(o *FormatOptions) { o.MetadataSize = 4 << 20 }, ErrDeviceTooSmall},
+		{"a mode dm-crypt cannot parse", 64 << 20, func(o *formatOptionsForTest) { o.CipherMode = "xts-plain64 x" }, ErrUnsupported},
+		{"aes-cbc with a 512-bit key", 64 << 20, func(o *formatOptionsForTest) { o.CipherMode, o.KeySize = "cbc-essiv:sha256", 512 }, ErrUnsupported},
+		{"a cipher outside the allow-list", 64 << 20, func(o *formatOptionsForTest) { o.Cipher = "serpent" }, ErrUnsupported},
+		{"a 48-byte label", 64 << 20, func(o *formatOptionsForTest) { o.Label = strings.Repeat("L", 48) }, ErrInvalidArgument},
+		{"a label with a NUL", 64 << 20, func(o *formatOptionsForTest) { o.Label = "ab\x00cd" }, ErrInvalidArgument},
+		{"a 48-byte subsystem", 64 << 20, func(o *formatOptionsForTest) { o.Subsystem = strings.Repeat("S", 48) }, ErrInvalidArgument},
+		{"no room for data", 16 << 20, func(*formatOptionsForTest) {}, ErrInvalidArgument},
+		{"no room for one 4 KiB sector", 16<<20 + 2048, func(o *formatOptionsForTest) { o.SectorSize = 4096 }, ErrInvalidArgument},
+		{"data not a whole number of 4 KiB sectors", 17<<20 + 512, func(o *formatOptionsForTest) { o.SectorSize = 4096 }, ErrInvalidArgument},
+		{"no room for a larger key's keyslot", 16 << 20, func(o *formatOptionsForTest) { o.MetadataSize = 4 << 20 }, ErrInvalidArgument},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path, pattern := sizedImage(t, tc.size)
 			opts := standardFormatOptions(path)
 			tc.mutate(&opts)
-			if err := Format(opts); !errors.Is(err, tc.want) {
+			if err := formatForTest(opts); !errors.Is(err, tc.want) {
 				t.Fatalf("Format: got %v, want %v", err, tc.want)
 			}
 			assertUntouched(t, path, tc.size, pattern)
@@ -89,9 +89,9 @@ func TestFormatOpensTheDeviceExclusively(t *testing.T) {
 	// Not parallel: it substitutes the package's open seam.
 	path, pattern := sizedImage(t, 64<<20)
 
-	previous := openFileFunc
-	t.Cleanup(func() { openFileFunc = previous })
-	openFileFunc = func(name string, flag int, perm os.FileMode) (*os.File, error) {
+	sys := testVolumeSys()
+	previous := sys.openFile
+	sys.openFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
 		// The exclusive open is the claim: it reopens the locked descriptor's
 		// own /proc/self/fd entry (Locked.Claim), not path again, so that is
 		// what this intercepts.
@@ -101,7 +101,7 @@ func TestFormatOpensTheDeviceExclusively(t *testing.T) {
 		return previous(name, flag, perm)
 	}
 
-	if err := Format(standardFormatOptions(path)); !errors.Is(err, ErrDeviceInUse) || !errors.Is(err, syscall.EBUSY) {
+	if err := formatWithSys(standardFormatOptions(path), sys); !errors.Is(err, ErrDeviceInUse) || !errors.Is(err, syscall.EBUSY) {
 		t.Fatalf("Format of a device the kernel reports busy: got %v, want ErrDeviceInUse", err)
 	}
 	assertUntouched(t, path, 64<<20, pattern)
@@ -114,14 +114,14 @@ func TestFormatWritesTheLongestLabelAndASmallerKey(t *testing.T) {
 	defer parallel(t)()
 
 	path := keySize256Volume(t)
-	info, err := GetVolumeInfo(path)
+	info, err := getVolumeInfoForTest(path)
 	if err != nil {
 		t.Fatalf("GetVolumeInfo: %v", err)
 	}
 	if info.Label != strings.Repeat("L", maxLabelLength) {
 		t.Fatalf("Label = %q, want the 47-byte label", info.Label)
 	}
-	hdr, _, err := ReadHeader(path)
+	hdr, _, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestFormatWritesTheLongestLabelAndASmallerKey(t *testing.T) {
 // labels the header holds, shared by the tests that need one.
 func keySize256Volume(t *testing.T) string {
 	t.Helper()
-	return formattedImage(t, "keySize256Volume", "volume.img", 17<<20, func() FormatOptions {
+	return formattedImage(t, "keySize256Volume", "volume.img", 17<<20, func() formatOptionsForTest {
 		opts := standardFormatOptions("")
 		opts.KeySize = 256
 		opts.Label = strings.Repeat("L", maxLabelLength)
@@ -183,9 +183,8 @@ func TestFormatClaimsTheLockedDescriptorRegardlessOfASymlinkRetarget(t *testing.
 		t.Fatal(err)
 	}
 
-	previous := fileLockHeld
-	t.Cleanup(func() { fileLockHeld = previous })
-	fileLockHeld = func(string) {
+	sys := testVolumeSys()
+	sys.lockHeld = func(string) {
 		if err := os.Remove(link); err != nil {
 			t.Fatal(err)
 		}
@@ -194,7 +193,7 @@ func TestFormatClaimsTheLockedDescriptorRegardlessOfASymlinkRetarget(t *testing.
 		}
 	}
 
-	if err := Format(standardFormatOptions(link)); err != nil {
+	if err := formatWithSys(standardFormatOptions(link), sys); err != nil {
 		t.Fatalf("Format through a symlink retargeted after the lock: %v", err)
 	}
 	assertUntouched(t, retargeted, 64<<20, pattern)

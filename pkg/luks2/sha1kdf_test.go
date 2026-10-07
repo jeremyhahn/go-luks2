@@ -7,6 +7,7 @@
 package luks2
 
 import (
+	"context"
 	"crypto/fips140"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -26,7 +27,7 @@ import (
 //
 // #236 stopped this package writing SHA-1 anti-forensic splits; this closes
 // the other half of a keyslot. Every creation path refuses a PBKDF2-SHA1 KDF
-// with ErrSHA1NotWritten before it derives or writes anything, ChangeKey
+// with ErrInvalidArgument before it derives or writes anything, ChangeKey
 // rewrites an existing PBKDF2-SHA1 keyslot as PBKDF2-SHA256, and existing
 // SHA-1 keyslots still open outside FIPS mode (sha1af_test.go opens a
 // cryptsetup-converted LUKS1 volume, whose keyslot is PBKDF2-SHA1, to
@@ -35,48 +36,49 @@ import (
 // countDerivations counts keyslot-key derivations for the rest of the test.
 // The unlock derives before it reads anything, so zero derivations means no
 // keyslot was even unlocked.
-func countDerivations(t *testing.T) *int {
+func countDerivations(t *testing.T) (*int, volumeSys) {
 	t.Helper()
 
 	n := new(int)
-	previous := passphraseKDF
-	t.Cleanup(func() { passphraseKDF = previous })
-	passphraseKDF = func(passphrase []byte, kdf *KDF, keySize int) (*enclave.MemoryEnclave, error) {
+	sys := testVolumeSys()
+	real := sys.passphraseKDF
+	sys.passphraseKDF = func(ctx context.Context, passphrase []byte, kdf *rawKDF, keySize int) (*enclave.MemoryEnclave, error) {
 		*n++
-		return previous(passphrase, kdf, keySize)
+		return real(ctx, passphrase, kdf, keySize)
 	}
-	return n
+	return n, sys
 }
 
 // TestNoCreationPathWritesASHA1KDF: Format, AddKey and the digest writer refuse
 // every way of asking for SHA-1 -- the pbkdf2-sha1 type, a sha1 hash in any
-// case -- with ErrSHA1NotWritten, deriving nothing and writing nothing.
+// case -- with ErrInvalidArgument, deriving nothing and writing nothing.
 func TestNoCreationPathWritesASHA1KDF(t *testing.T) {
-	format := func(kdfType, hash string) func(device string) error {
-		return func(device string) error {
+	format := func(kdfType, hash string) func(device string, sys volumeSys) error {
+		return func(device string, sys volumeSys) error {
 			opts := standardFormatOptions(device)
 			opts.KDFType, opts.HashAlgo = kdfType, hash
-			return Format(opts)
+			return formatWithSys(opts, sys)
 		}
 	}
-	addKey := func(kdfType, hash string) func(device string) error {
-		return func(device string) error {
-			_, err := AddKey(device, migrationPassphrase, []byte("a-new-credential"), &AddKeyOptions{KDFType: kdfType, Hash: hash, PBKDFIterTime: 1})
+	addKey := func(kdfType, hash string) func(device string, sys volumeSys) error {
+		return func(device string, sys volumeSys) error {
+			_, err := addKeyWithPolicy(context.Background(), device, migrationPassphrase, []byte("a-new-credential"),
+				&addKeyOptionsForTest{KDFType: kdfType, Hash: hash, PBKDFIterTime: 1}, callerSuppliedCredential, sys)
 			return err
 		}
 	}
 	cases := []struct {
 		name      string
 		formatted bool // the path needs an existing volume
-		run       func(device string) error
+		run       func(device string, sys volumeSys) error
 		also      error
 	}{
-		{"Format pbkdf2-sha1", false, format(KDFTypePBKDF2SHA1, ""), ErrUnsupportedKDF},
-		{"Format pbkdf2 with sha1", false, format(KDFTypePBKDF2, "sha1"), ErrUnsupportedHash},
-		{"Format argon2id with sha1", false, format(KDFTypeArgon2id, "SHA1"), ErrUnsupportedHash},
-		{"AddKey pbkdf2-sha1", true, addKey(KDFTypePBKDF2SHA1, ""), ErrUnsupportedKDF},
-		{"AddKey pbkdf2 with sha1", true, addKey(KDFTypePBKDF2, "sha1"), ErrUnsupportedHash},
-		{"AddKey argon2id with sha1", true, addKey(KDFTypeArgon2id, " Sha1 "), ErrUnsupportedHash},
+		{"Format pbkdf2-sha1", false, format(kdfTypePBKDF2SHA1, ""), ErrUnsupported},
+		{"Format pbkdf2 with sha1", false, format(kdfTypePBKDF2, "sha1"), ErrUnsupported},
+		{"Format argon2id with sha1", false, format(kdfTypeArgon2id, "SHA1"), ErrUnsupported},
+		{"AddKey pbkdf2-sha1", true, addKey(kdfTypePBKDF2SHA1, ""), ErrUnsupported},
+		{"AddKey pbkdf2 with sha1", true, addKey(kdfTypePBKDF2, "sha1"), ErrUnsupported},
+		{"AddKey argon2id with sha1", true, addKey(kdfTypeArgon2id, " Sha1 "), ErrUnsupported},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -85,11 +87,11 @@ func TestNoCreationPathWritesASHA1KDF(t *testing.T) {
 				formatWithLibrary(t, device)
 			}
 			before := fileDigest(t, device)
-			derivations := countDerivations(t)
+			derivations, sys := countDerivations(t)
 
-			err := tc.run(device)
-			if !errors.Is(err, ErrSHA1NotWritten) || !errors.Is(err, tc.also) {
-				t.Fatalf("got %v, want ErrSHA1NotWritten and %v", err, tc.also)
+			err := tc.run(device, sys)
+			if !errors.Is(err, ErrInvalidArgument) || !errors.Is(err, tc.also) {
+				t.Fatalf("got %v, want ErrInvalidArgument and %v", err, tc.also)
 			}
 			if *derivations != 0 {
 				t.Fatalf("%d keyslot key(s) were derived before the refusal; want none", *derivations)
@@ -102,8 +104,8 @@ func TestNoCreationPathWritesASHA1KDF(t *testing.T) {
 
 	t.Run("createDigest", func(t *testing.T) {
 		mk := secretOf(t, make([]byte, 64))
-		if kdf, value, err := createDigest(mk, "sha1"); kdf != nil || value != "" || !errors.Is(err, ErrSHA1NotWritten) {
-			t.Fatalf("createDigest sha1: got %+v, %q, %v; want ErrSHA1NotWritten", kdf, value, err)
+		if kdf, value, err := createDigest(mk, "sha1", testVolumeSys()); kdf != nil || value != "" || !errors.Is(err, ErrInvalidArgument) {
+			t.Fatalf("createDigest sha1: got %+v, %q, %v; want ErrInvalidArgument", kdf, value, err)
 		}
 	})
 }
@@ -115,19 +117,19 @@ func TestRefuseSHA1ForCreation(t *testing.T) {
 		kdfType, hash string
 		refused       bool
 	}{
-		{KDFTypePBKDF2SHA1, "", true},
+		{kdfTypePBKDF2SHA1, "", true},
 		{" PBKDF2-SHA1 ", "", true},
-		{KDFTypePBKDF2, "sha1", true},
-		{KDFTypeArgon2id, "SHA1", true},
+		{kdfTypePBKDF2, "sha1", true},
+		{kdfTypeArgon2id, "SHA1", true},
 		{"", " sha1", true},
-		{KDFTypePBKDF2, "sha256", false},
-		{KDFTypePBKDF2SHA256, "", false},
-		{KDFTypeArgon2id, "", false},
+		{kdfTypePBKDF2, "sha256", false},
+		{kdfTypePBKDF2SHA256, "", false},
+		{kdfTypeArgon2id, "", false},
 		{"", "", false},
-		{KDFTypePBKDF2, "sha512", false},
+		{kdfTypePBKDF2, "sha512", false},
 	} {
 		err := refuseSHA1ForCreation(tc.kdfType, tc.hash)
-		if refused := errors.Is(err, ErrSHA1NotWritten); refused != tc.refused {
+		if refused := errors.Is(err, ErrInvalidArgument); refused != tc.refused {
 			t.Fatalf("refuseSHA1ForCreation(%q, %q) = %v, want refused=%v", tc.kdfType, tc.hash, err, tc.refused)
 		}
 	}
@@ -141,12 +143,12 @@ func TestRefuseSHA1ForCreation(t *testing.T) {
 // one no longer does.
 func TestChangeKeyRewritesAPBKDF2SHA1KeyslotAsSHA256(t *testing.T) {
 	image := sha1AFVolume(t, sha1AFKinds[1])
-	_, metadata, err := ReadHeader(image)
+	_, metadata, err := readHeaderForTest(image)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 	old := metadata.Keyslots["0"].KDF
-	if old.Type != KDFTypePBKDF2 || old.Hash != "sha1" || old.Iterations == nil {
+	if old.Type != kdfTypePBKDF2 || old.Hash != "sha1" || old.Iterations == nil {
 		t.Fatalf("fixture keyslot 0 KDF is %+v, want pbkdf2-sha1", old)
 	}
 	oldIterations := *old.Iterations
@@ -154,9 +156,9 @@ func TestChangeKeyRewritesAPBKDF2SHA1KeyslotAsSHA256(t *testing.T) {
 	changed := []byte("a-changed-credential")
 	// A machine whose HMAC-SHA256 costs twice an HMAC-SHA1: the converted
 	// count is the work bound, far under the SHA-256 floor at 1000.
-	modelPBKDF2Cost(t, func(int) float64 { return 1 }, func(int) float64 { return 2 })
+	sys := modelPBKDF2Cost(t, func(int) float64 { return 1 }, func(int) float64 { return 2 })
 
-	err = ChangeKey(image, migrationPassphrase, changed, 0)
+	err = changeKeyWithSys(image, migrationPassphrase, changed, 0, sys)
 	if fips140.Enabled() {
 		// Opening the SHA-1 keyslot is refused in FIPS mode, before anything
 		// is written; the rewrite is what MigrateToFIPS is for there.
@@ -169,24 +171,24 @@ func TestChangeKeyRewritesAPBKDF2SHA1KeyslotAsSHA256(t *testing.T) {
 		t.Fatalf("ChangeKey on a PBKDF2-SHA1 keyslot: %v", err)
 	}
 
-	_, metadata, err = ReadHeader(image)
+	_, metadata, err = readHeaderForTest(image)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 	ks := metadata.Keyslots["0"]
-	converted, err := sha256IterationsForSHA1(oldIterations, ks.KeySize)
+	converted, err := sha256IterationsForSHA1(oldIterations, ks.KeySize, sys)
 	if err != nil {
 		t.Fatalf("sha256IterationsForSHA1: %v", err)
 	}
 	want := max(converted, int(math.Ceil(pbkdf2IterationFloor("sha256", pbkdf2ReferenceTargetMs))))
-	if ks.KDF.Type != KDFTypePBKDF2 || ks.KDF.Hash != "sha256" || ks.KDF.Iterations == nil || *ks.KDF.Iterations != want {
+	if ks.KDF.Type != kdfTypePBKDF2 || ks.KDF.Hash != "sha256" || ks.KDF.Iterations == nil || *ks.KDF.Iterations != want {
 		t.Fatalf("rewritten keyslot KDF is %+v, want pbkdf2-sha256 at %d iterations", ks.KDF, want)
 	}
 	if *ks.KDF.Iterations < oldIterations {
 		t.Fatalf("the rewrite lowered the iteration count from %d to %d", oldIterations, *ks.KDF.Iterations)
 	}
-	if ks.AF.Hash != DefaultHashAlgo {
-		t.Fatalf("rewritten keyslot AF hash is %q, want %s", ks.AF.Hash, DefaultHashAlgo)
+	if ks.AF.Hash != defaultHashAlgo {
+		t.Fatalf("rewritten keyslot AF hash is %q, want %s", ks.AF.Hash, defaultHashAlgo)
 	}
 	if code, out := runCryptsetup(t, string(changed), "luksOpen", "--test-passphrase", image); code != 0 {
 		t.Fatalf("cryptsetup cannot open the rewritten keyslot: exit %d\n%s", code, out)
@@ -224,13 +226,12 @@ func cryptsetupVolumeKeyWith(t *testing.T, image, passphrase string) string {
 // gives for that hash on that call (in microseconds), so tests decide what
 // the "machine" measures instead of depending on the wall clock (#234). The
 // call index lets a model vary between samples, as a noisy machine does.
-func modelPBKDF2Cost(t *testing.T, sha1Cost, sha256Cost func(call int) float64) {
+func modelPBKDF2Cost(t *testing.T, sha1Cost, sha256Cost func(call int) float64) volumeSys {
 	t.Helper()
 
-	previous := sha1CostTimer
-	t.Cleanup(func() { sha1CostTimer = previous })
+	sys := testVolumeSys()
 	calls := map[int]int{}
-	sha1CostTimer = func(hashFunc func() hash.Hash, iterations, keySize int) (time.Duration, error) {
+	sys.sha1CostTimer = func(hashFunc func() hash.Hash, iterations, keySize int) (time.Duration, error) {
 		size := hashFunc().Size()
 		cost := sha256Cost
 		if size == sha1.Size {
@@ -241,6 +242,7 @@ func modelPBKDF2Cost(t *testing.T, sha1Cost, sha256Cost func(call int) float64) 
 		calls[size]++
 		return time.Duration(float64(iterations*blocks) * perHMAC * float64(time.Microsecond)), nil
 	}
+	return sys
 }
 
 // TestSHA256IterationsForSHA1 pins the conversion: the larger of equal work
@@ -249,7 +251,7 @@ func modelPBKDF2Cost(t *testing.T, sha1Cost, sha256Cost func(call int) float64) 
 // took, and a count past the ceiling reported as such.
 func TestSHA256IterationsForSHA1(t *testing.T) {
 	if fips140.Enabled() {
-		if _, err := sha256IterationsForSHA1(1000, 64); !errors.Is(err, ErrFIPSNotApproved) {
+		if _, err := sha256IterationsForSHA1(1000, 64, testVolumeSys()); !errors.Is(err, ErrFIPSNotApproved) {
 			t.Fatalf("in FIPS mode SHA-1 is not measured: got %v, want ErrFIPSNotApproved", err)
 		}
 		return
@@ -279,8 +281,8 @@ func TestSHA256IterationsForSHA1(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			modelPBKDF2Cost(t, tc.sha1Cost, tc.sha2Cost)
-			got, err := sha256IterationsForSHA1(tc.n, tc.keySize)
+			sys := modelPBKDF2Cost(t, tc.sha1Cost, tc.sha2Cost)
+			got, err := sha256IterationsForSHA1(tc.n, tc.keySize, sys)
 			// Exactly tc.want, or one more where floating point lands a hair
 			// above an integer -- rounding may err upward, never down.
 			if err != nil || got < tc.want || got > tc.want+1 {
@@ -298,19 +300,18 @@ func TestSHA256IterationsForSHA1(t *testing.T) {
 
 	t.Run("refusals", func(t *testing.T) {
 		for _, args := range [][2]int{{0, 64}, {-1, 64}, {1000, 0}} {
-			if _, err := sha256IterationsForSHA1(args[0], args[1]); !errors.Is(err, ErrInvalidKeyslot) {
+			if _, err := sha256IterationsForSHA1(args[0], args[1], testVolumeSys()); !errors.Is(err, ErrKeyslotNotFound) {
 				t.Fatalf("sha256IterationsForSHA1(%d, %d): got %v, want ErrInvalidKeyslot", args[0], args[1], err)
 			}
 		}
 		errTimer := errors.New("injected: the timer failed")
-		previous := sha1CostTimer
-		t.Cleanup(func() { sha1CostTimer = previous })
-		sha1CostTimer = func(func() hash.Hash, int, int) (time.Duration, error) { return 0, errTimer }
-		if _, err := sha256IterationsForSHA1(1000, 64); !errors.Is(err, errTimer) {
+		sys := testVolumeSys()
+		sys.sha1CostTimer = func(func() hash.Hash, int, int) (time.Duration, error) { return 0, errTimer }
+		if _, err := sha256IterationsForSHA1(1000, 64, sys); !errors.Is(err, errTimer) {
 			t.Fatalf("a failing timer: got %v", err)
 		}
-		sha1CostTimer = func(func() hash.Hash, int, int) (time.Duration, error) { return 0, nil }
-		if _, err := sha256IterationsForSHA1(1000, 64); !errors.Is(err, ErrKDFCalibration) {
+		sys.sha1CostTimer = func(func() hash.Hash, int, int) (time.Duration, error) { return 0, nil }
+		if _, err := sha256IterationsForSHA1(1000, 64, sys); !errors.Is(err, ErrKDFCalibration) {
 			t.Fatalf("a clock that never advances: got %v, want ErrKDFCalibration", err)
 		}
 	})
@@ -330,15 +331,15 @@ func TestChangeKeyConvertsAboveTheFloor(t *testing.T) {
 		image := sha1AFVolume(t, sha1AFKinds[1])
 		// HMAC-SHA256 at 1/330 of HMAC-SHA1: 1000 SHA-1 iterations of a 64-byte
 		// key convert to 660000, above the 600000 floor.
-		modelPBKDF2Cost(t, func(int) float64 { return 330 }, func(int) float64 { return 1 })
-		want, err := sha256IterationsForSHA1(1000, 64)
+		sys := modelPBKDF2Cost(t, func(int) float64 { return 330 }, func(int) float64 { return 1 })
+		want, err := sha256IterationsForSHA1(1000, 64, sys)
 		if err != nil || want <= floor {
 			t.Fatalf("the model converts to %d (%v); the test needs a count above the %d floor", want, err, floor)
 		}
-		if err := ChangeKey(image, migrationPassphrase, []byte("a-changed-credential"), 0); err != nil {
+		if err := changeKeyWithSys(image, migrationPassphrase, []byte("a-changed-credential"), 0, sys); err != nil {
 			t.Fatalf("ChangeKey: %v", err)
 		}
-		_, metadata, err := ReadHeader(image)
+		_, metadata, err := readHeaderForTest(image)
 		if err != nil {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
@@ -350,10 +351,10 @@ func TestChangeKeyConvertsAboveTheFloor(t *testing.T) {
 	t.Run("past the ceiling", func(t *testing.T) {
 		image := sha1AFVolume(t, sha1AFKinds[1])
 		before := fileDigest(t, image)
-		modelPBKDF2Cost(t, func(int) float64 { return 1e9 }, func(int) float64 { return 1 })
-		err := ChangeKey(image, migrationPassphrase, []byte("a-changed-credential"), 0)
-		if !errors.Is(err, ErrPBKDFIterationsTooHigh) {
-			t.Fatalf("got %v, want ErrPBKDFIterationsTooHigh", err)
+		sys := modelPBKDF2Cost(t, func(int) float64 { return 1e9 }, func(int) float64 { return 1 })
+		err := changeKeyWithSys(image, migrationPassphrase, []byte("a-changed-credential"), 0, sys)
+		if !errors.Is(err, ErrInvalidArgument) {
+			t.Fatalf("got %v, want ErrInvalidArgument", err)
 		}
 		if fileDigest(t, image) != before {
 			t.Fatal("a refused ChangeKey changed the device")

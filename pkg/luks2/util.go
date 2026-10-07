@@ -5,35 +5,18 @@
 package luks2
 
 import (
-	"crypto/rand"
+	"context"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"os"
 	"strconv"
 
 	"github.com/jeremyhahn/go-luks2/internal/af"
-	"github.com/jeremyhahn/go-luks2/internal/command"
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 	"github.com/jeremyhahn/go-luks2/internal/kdf"
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
-
-// cryptoRand is the source every secret and every random fill in this package
-// draws from.
-//
-// It is a package var rather than a direct rand.Reader reference for one
-// reason: without it there is NO way to write a test that formats the same
-// container twice and compares the bytes, so "the header this library writes is
-// byte-for-byte what cryptsetup writes" cannot be asserted at all -- the salts,
-// the UUID and the AF stripes differ on every run. crypto/tls solves the same
-// problem the same way with Config.Rand.
-//
-// It is unexported and has no setter. Nothing outside this package can weaken
-// the RNG through it, and the only code that substitutes a reader is this
-// package's own tests -- which must supply a CSPRNG-shaped one (a seeded stream
-// cipher, not a zero reader): AF-split consumes ~256 KiB per keyslot, and
-// feeding it a constant changes the very property under measurement.
-var cryptoRand io.Reader = rand.Reader
 
 // custody is where this package's key material is allocated and released:
 // secret.System, every enclave admitted through go-enclave's process
@@ -42,23 +25,17 @@ var cryptoRand io.Reader = rand.Reader
 // it.
 var custody = secret.System()
 
-// tools runs the external programs this package depends on, from the fixed
-// system directories and with a minimal environment (internal/command). It is
-// a variable only so the unit tests can point it at stand-in programs;
-// nothing in the package changes it.
-var tools = command.System()
-
 // afCodec is the anti-forensic codec this package splits and merges with: its
 // custody, its randomness and its FIPS mode, read at the call so a test that
 // substitutes one of them is honored.
-func afCodec() af.Codec {
-	return af.Codec{Custody: custody, Rand: cryptoRand, FIPS: fipsMode()}
+func afCodec(sys volumeSys) af.Codec {
+	return af.Codec{Custody: custody, Rand: sys.cryptoRand, FIPS: sys.fipsMode()}
 }
 
 // kdfDeriver builds the internal/kdf.Deriver each KDF call runs through,
 // reading the same custody and FIPS seams afCodec does.
-func kdfDeriver() kdf.Deriver {
-	return kdf.Deriver{Custody: custody, FIPS: fipsMode()}
+func kdfDeriver(sys volumeSys) kdf.Deriver {
+	return kdf.Deriver{Custody: custody, FIPS: sys.fipsMode()}
 }
 
 // clearBytes securely zeros a byte slice. The clear builtin is a memclr the
@@ -68,10 +45,10 @@ func clearBytes(b []byte) {
 }
 
 // randomBytes generates cryptographically secure random bytes
-func randomBytes(n int) ([]byte, error) {
+func randomBytes(n int, cryptoRand io.Reader) ([]byte, error) {
 	b := make([]byte, n)
 	if _, err := io.ReadFull(cryptoRand, b); err != nil {
-		return nil, &errs.Error{Detail: "failed to generate random bytes", Err: err}
+		return nil, &errs.Error{Kind: errs.ErrIO, Detail: "failed to generate random bytes", Err: err}
 	}
 	return b, nil
 }
@@ -80,8 +57,8 @@ func randomBytes(n int) ([]byte, error) {
 // -tags=integration, so `unused` fires on a function the default build exercises.
 //
 //nolint:unused // Test-only helper: the tests that call it are excluded under
-func randomBase64(byteCount int) (string, error) {
-	b, err := randomBytes(byteCount)
+func randomBase64(byteCount int, cryptoRand io.Reader) (string, error) {
+	b, err := randomBytes(byteCount, cryptoRand)
 	if err != nil {
 		return "", err
 	}
@@ -124,7 +101,7 @@ const randomFillChunk = keyslotWipeChunk
 // an attacker-influenced number to the allocator. Here the argument is stronger
 // still -- the largest caller fills the whole unallocated keyslots region, ~16
 // MiB on a default container, which is not an allocation worth making at once.
-func writeRandom(f *os.File, size int64) error {
+func writeRandom(ctx context.Context, f *os.File, size int64, cryptoRand io.Reader) error {
 	if size <= 0 {
 		return nil
 	}
@@ -134,17 +111,24 @@ func writeRandom(f *os.File, size int64) error {
 	// clearing it would protect a copy of something already on disk.
 	buf := make([]byte, randomFillChunk)
 
+	var written int64
 	for remaining := size; remaining > 0; {
+		// Checked per chunk (DESIGN.md §D.2), so a cancellation is observed
+		// between writes rather than only before the first or after the last.
+		if err := ctx.Err(); err != nil {
+			return &errs.Error{Kind: errs.KindOf(err, errs.ErrIO), Detail: fmt.Sprintf("canceled after writing %d of %d bytes", written, size), Err: err}
+		}
 		n := int64(len(buf))
 		if remaining < n {
 			n = remaining
 		}
 		if _, err := io.ReadFull(cryptoRand, buf[:n]); err != nil {
-			return &errs.Error{Detail: "failed to generate random fill", Err: err}
+			return &errs.Error{Kind: errs.ErrIO, Detail: "failed to generate random fill", Err: err}
 		}
 		if _, err := f.Write(buf[:n]); err != nil {
 			return err
 		}
+		written += n
 		remaining -= n
 	}
 	return nil

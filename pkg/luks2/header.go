@@ -6,65 +6,102 @@ package luks2
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
 
-	"github.com/google/uuid"
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// LUKS2 header copy locations. LUKS2 stores the header twice so a torn or
-// damaged primary can be recovered from the secondary; the two copies differ in
-// their magic (see LUKS2SecondaryMagic) and in the hdr_offset they record.
-const (
-	LUKS2PrimaryHeaderOffset   = header.PrimaryHeaderOffset
-	LUKS2SecondaryHeaderOffset = header.SecondaryHeaderOffset
+// checksumFieldOffset is where the 64-byte checksum field sits inside the
+// 4096-byte binary header.
+const checksumFieldOffset = header.ChecksumFieldOffset
 
-	// LUKS2HeaderMaxSize bounds the header size accepted from disk.
-	LUKS2HeaderMaxSize = header.HeaderMaxSize
-
-	// checksumFieldOffset is where the 64-byte checksum field sits inside the
-	// 4096-byte binary header.
-	checksumFieldOffset = header.ChecksumFieldOffset
-
-	// headerChecksumAlgorithm is the only checksum algorithm this package
-	// reads or writes a LUKS2 binary header with.
-	headerChecksumAlgorithm = header.HeaderChecksumAlgorithm
-)
+// headerChecksumAlgorithm is the only checksum algorithm this package
+// reads or writes a LUKS2 binary header with.
+const headerChecksumAlgorithm = header.HeaderChecksumAlgorithm
 
 // The binary header, the JSON codec, canonical JSON, checksums and
 // requirements now live in internal/header; see docs/design/DECISIONS.md's
 // H5 entry. The pure functions below are transitional forwards, kept under
 // their original names so every existing caller and test in this package
-// keeps compiling unchanged. They are removed at H13.
-var (
-	readHeaderCopyFrom      = header.ReadHeaderCopyFrom
-	legalHeaderAreaSizes    = header.LegalHeaderAreaSizes
-	expectedMagic           = header.ExpectedMagic
-	checkHeaderWritable     = header.CheckHeaderWritable
-	headerCopiesAgree       = header.HeaderCopiesAgree
-	headerAreaSizeForWrite  = header.HeaderAreaSizeForWrite
-	headerAreaSize          = header.HeaderAreaSize
-	headerAreaOffset        = header.HeaderAreaOffset
-	calculateHeaderChecksum = header.CalculateHeaderChecksum
-	readJSONMetadata        = header.ReadJSONMetadata
-	forgetKeyslotID         = header.ForgetKeyslotID
-	withoutID               = header.WithoutID
-	volumeKeyBits           = header.VolumeKeyBits
-	marshalCanonicalJSON    = header.MarshalCanonicalJSON
-	encodeMetadata          = header.EncodeMetadata
-	encodeMetadataForHeader = header.EncodeMetadataForHeader
+// keeps compiling unchanged. Functions, not package-level vars: nothing
+// substitutes them, so there is no seam to move into Volume.sys (§E).
+func readHeaderCopyFrom(f readerAt, offset int64) (*header.BinaryHeader, *header.Metadata, error) {
+	hdr, metadata, err := header.ReadHeaderCopyFrom(f, offset)
+	return hdr, metadata, reclassifyUnsupportedChecksum(err)
+}
 
-	canonicalKeyslotID    = header.CanonicalKeyslotID
-	keyslotIDsInScanOrder = header.KeyslotIDsInScanOrder
-	volumeKeyScanOrder    = header.VolumeKeyScanOrder
-	volumeKeyDigestsView  = header.VolumeKeyDigestsView
-)
+// reclassifyUnsupportedChecksum is header.ErrUnsupportedHeaderChecksum
+// (DESIGN.md §C.3): internal/header's own sentinel, folded into the
+// public ErrUnsupported at every place a header read crosses the package
+// boundary, without internal/header changing what it already matches
+// (ErrInvalidHeader, via its own Is).
+func reclassifyUnsupportedChecksum(err error) error {
+	if err != nil && errors.Is(err, header.ErrUnsupportedHeaderChecksum) {
+		return &errs.Error{Kind: ErrUnsupported, Err: err}
+	}
+	return err
+}
+func legalHeaderAreaSizes() []int64     { return header.LegalHeaderAreaSizes() }
+func expectedMagic(offset int64) string { return header.ExpectedMagic(offset) }
+func checkHeaderWritable(hdr *header.BinaryHeader, metadata *header.Metadata) error {
+	return reclassifyMetadataTooLarge(header.CheckHeaderWritable(hdr, metadata))
+}
+
+// reclassifyMetadataTooLarge is header.ErrMetadataTooLarge (DESIGN.md §C.3):
+// internal/header's own sentinel, folded into the public ErrNoSpace at
+// every place this package's metadata encoding crosses the package
+// boundary.
+func reclassifyMetadataTooLarge(err error) error {
+	if err != nil && errors.Is(err, header.ErrMetadataTooLarge) {
+		return &errs.Error{Kind: ErrNoSpace, Err: err}
+	}
+	return err
+}
+func headerCopiesAgree(r readerAt) error { return header.HeaderCopiesAgree(r) }
+func headerAreaSizeForWrite(hdr *header.BinaryHeader) (int, error) {
+	return header.HeaderAreaSizeForWrite(hdr)
+}
+func headerAreaSize(hdr *header.BinaryHeader) (int, error)     { return header.HeaderAreaSize(hdr) }
+func headerAreaOffset(hdr *header.BinaryHeader) (int64, error) { return header.HeaderAreaOffset(hdr) }
+func calculateHeaderChecksum(hdr *header.BinaryHeader, jsonData []byte, jsonSize int) error {
+	return header.CalculateHeaderChecksum(hdr, jsonData, jsonSize)
+}
+func readJSONMetadata(r readerAt, hdr *header.BinaryHeader, headerOffset int64, headerSize int) (*header.Metadata, error) {
+	return header.ReadJSONMetadata(r, hdr, headerOffset, headerSize)
+}
+func forgetKeyslotID(metadata *header.Metadata, id string) { header.ForgetKeyslotID(metadata, id) }
+func withoutID(ids []string, id string) []string           { return header.WithoutID(ids, id) }
+func volumeKeyBits(metadata *header.Metadata, segmentID string) int {
+	return header.VolumeKeyBits(metadata, segmentID)
+}
+func marshalCanonicalJSON(v any) ([]byte, error) { return header.MarshalCanonicalJSON(v) }
+func encodeMetadata(hdr *header.BinaryHeader, metadata *header.Metadata) ([]byte, int, error) {
+	jsonData, area, err := header.EncodeMetadata(hdr, metadata)
+	return jsonData, area, reclassifyMetadataTooLarge(err)
+}
+func encodeMetadataForHeader(hdr *header.BinaryHeader, metadata *header.Metadata) ([]byte, int, error) {
+	jsonData, area, err := header.EncodeMetadataForHeader(hdr, metadata)
+	return jsonData, area, reclassifyMetadataTooLarge(err)
+}
+
+func canonicalKeyslotID(key string) (int, bool) { return header.CanonicalKeyslotID(key) }
+func keyslotIDsInScanOrder(keyslots map[string]*header.Keyslot) []string {
+	return header.KeyslotIDsInScanOrder(keyslots)
+}
+func volumeKeyScanOrder(metadata *header.Metadata) []string {
+	return header.VolumeKeyScanOrder(metadata)
+}
+func volumeKeyDigestsView(metadata *header.Metadata) *header.Metadata {
+	return header.VolumeKeyDigestsView(metadata)
+}
 
 // validateHeaderChecksum forwards to header.ValidateHeaderChecksum.
-func validateHeaderChecksum(hdr *LUKS2BinaryHeader, r readerAt, headerOffset int64, headerSize int) error {
+func validateHeaderChecksum(hdr *header.BinaryHeader, r readerAt, headerOffset int64, headerSize int) error {
 	return header.ValidateHeaderChecksum(hdr, r, headerOffset, headerSize)
 }
 
@@ -76,17 +113,17 @@ type readerAt = interface {
 
 // writeHeaderTo forwards to header.WriteHeaderTo, supplying this package's
 // syncDevice seam.
-func writeHeaderTo(f *os.File, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) error {
-	return header.WriteHeaderTo(f, hdr, metadata, syncDevice)
+func writeHeaderTo(f *os.File, hdr *header.BinaryHeader, metadata *header.Metadata, sync func(*os.File) error) error {
+	return reclassifyMetadataTooLarge(header.WriteHeaderTo(f, hdr, metadata, sync))
 }
 
 // writeEncodedHeader forwards to header.WriteEncodedHeader, supplying this
 // package's syncDevice seam.
-func writeEncodedHeader(f *os.File, hdr *LUKS2BinaryHeader, jsonData []byte, area int) error {
-	return header.WriteEncodedHeader(f, hdr, jsonData, area, syncDevice)
+func writeEncodedHeader(f *os.File, hdr *header.BinaryHeader, jsonData []byte, area int, sync func(*os.File) error) error {
+	return header.WriteEncodedHeader(f, hdr, jsonData, area, sync)
 }
 
-// ReadHeader reads and validates the PRIMARY LUKS2 header from a device.
+// readHeaderForTest reads and validates the PRIMARY LUKS2 header from a device.
 // For the second copy -- which carries a different magic -- see
 // ReadSecondaryHeader.
 //
@@ -94,14 +131,21 @@ func writeEncodedHeader(f *os.File, hdr *LUKS2BinaryHeader, jsonData []byte, are
 // returned metadata rather than handed back as a nil map entry -- see
 // internal/header for why, and for why segments, digests and config are
 // refused instead. The removed entries are reported on
-// LUKS2Metadata.DroppedNullEntries, so a caller can tell that a
-// ReadHeader -> mutate -> WriteHeader cycle is about to drop them from the
-// header on disk.
-func ReadHeader(device string) (*LUKS2BinaryHeader, *LUKS2Metadata, error) {
-	return readHeaderCopy(device, LUKS2PrimaryHeaderOffset)
+// header.Metadata.DroppedNullEntries, so a caller can tell that a
+// readHeaderForTest -> mutate -> writeHeaderForTest cycle is about to drop
+// them from the header on disk.
+func readHeaderForTest(device string) (*header.BinaryHeader, *header.Metadata, error) {
+	return readHeaderCopy(device, header.PrimaryHeaderOffset)
 }
 
-// ReadSecondaryHeader reads and validates the SECOND LUKS2 header copy, the one
+// readHeaderForTestWithSys is readHeaderForTest, parameterized by sys so
+// this package's tests can inject a seam the unparameterized helper has no
+// room for.
+func readHeaderForTestWithSys(device string, sys volumeSys) (*header.BinaryHeader, *header.Metadata, error) {
+	return readHeaderCopyWithSys(device, header.PrimaryHeaderOffset, sys)
+}
+
+// readSecondaryHeaderForTest reads and validates the SECOND LUKS2 header copy, the one
 // carrying the SKUL magic.
 //
 // It exists because writing a spec-correct backup header is only half of a
@@ -109,42 +153,40 @@ func ReadHeader(device string) (*LUKS2BinaryHeader, *LUKS2Metadata, error) {
 // would produce a copy it could not itself open, which is the state #64
 // describes.
 //
-// The header it returns is a SECONDARY header: its magic is LUKS2SecondaryMagic
+// The header it returns is a SECONDARY header: its magic is header.SecondaryMagic
 // and its hdr_offset is the copy's own offset, because that is what is on disk.
-// Callers repairing a damaged primary should use RestorePrimaryHeader rather
+// Callers repairing a damaged primary should use (*Volume).RestorePrimaryHeader rather
 // than assembling the sequence themselves; writing this header back is safe --
 // WriteHeaderTo stamps each copy's identity -- but the named operation
 // takes the lock for the whole read-and-write.
-func ReadSecondaryHeader(device string) (*LUKS2BinaryHeader, *LUKS2Metadata, error) {
-	if err := ValidateDevicePath(device); err != nil {
+func readSecondaryHeaderForTest(device string) (*header.BinaryHeader, *header.Metadata, error) {
+	if err := validateDevicePath(device); err != nil {
 		return nil, nil, err
 	}
-	f, err := openDevice("read the LUKS2 header", device, os.O_RDONLY)
+	f, err := openDevice("read the LUKS2 header", device, os.O_RDONLY, defaultVolumeSys())
 	if err != nil {
 		return nil, nil, err
 	}
 	defer func() { _ = f.Close() }()
-	return header.ReadSecondaryHeaderFrom(f)
+	hdr, metadata, err := header.ReadSecondaryHeaderFrom(f)
+	return hdr, metadata, reclassifyUnsupportedChecksum(err)
 }
 
-// RestoreHeaderOptions controls RestorePrimaryHeaderWithOptions.
-type RestoreHeaderOptions struct {
-	// Force restores the secondary copy even over an intact primary that is
-	// as new as it or newer. That ROLLS THE VOLUME BACK to the secondary's
-	// state: a keyslot removed since -- a revoked passphrase -- opens the
-	// volume again if its key material has not yet been overwritten.
-	Force bool
-}
-
-// RestorePrimaryHeader rebuilds a damaged primary header from the secondary
-// copy, and is the operation ReadSecondaryHeader's documentation describes.
+// restorePrimaryHeaderCore rewrites the primary header from the secondary
+// copy read through f, refusing with ErrPrimaryHeaderCurrent when the
+// primary is intact and at least as new, unless force is set. It is the
+// core (*Volume).RestorePrimaryHeader and (*Volume).ReplacePrimaryHeader
+// share: every read and the write go through f, so the copies compared, the
+// copy restored and the device written are all the one descriptor the
+// caller locked (and, for the new API, claimed) -- nothing here resolves
+// path again.
 //
 // It exists because "read the secondary and write it back" is a sequence a
-// caller should not have to get right. The header returned by
-// ReadSecondaryHeader is a SECONDARY header -- that is what it was asked for --
-// and what makes writing it back safe is that WriteHeaderTo stamps each
-// copy's identity itself. Naming the operation puts that guarantee behind an
-// API instead of behind a comment, and makes it one locked step rather than a
+// caller should not have to get right. The header ReadSecondaryHeaderFrom
+// returns is a SECONDARY header -- that is what it was asked for -- and what
+// makes writing it back safe is that WriteHeaderTo stamps each copy's
+// identity itself. Naming the operation puts that guarantee behind an API
+// instead of behind a comment, and makes it one locked step rather than a
 // read and a write with a window between them.
 //
 // The secondary copy is validated in full before anything is written: magic,
@@ -154,53 +196,33 @@ type RestoreHeaderOptions struct {
 // # It repairs; it does not roll back
 //
 // It refuses with ErrPrimaryHeaderCurrent when the primary is intact and its
-// sequence id is not lower than the secondary's (#248). Header writes put the
-// primary on the medium first, so an interrupted ChangeKey or RemoveKey can
-// leave a NEWER primary -- the passphrase already revoked -- over an OLDER
-// secondary that still lists it. Restoring that secondary would bring the
-// revoked passphrase back. cryptsetup resolves the same state the other way,
-// keeping the higher sequence id. Use RestorePrimaryHeaderWithOptions with
-// Force to restore anyway.
+// sequence id is not lower than the secondary's (#248), unless force is set.
+// Header writes put the primary on the medium first, so an interrupted
+// ChangeKey or RemoveKey can leave a NEWER primary -- the passphrase already
+// revoked -- over an OLDER secondary that still lists it. Restoring that
+// secondary would bring the revoked passphrase back. cryptsetup resolves the
+// same state the other way, keeping the higher sequence id.
+// (*Volume).ReplacePrimaryHeader sets force to restore anyway.
 //
 // The restored header is written at a sequence id one above both copies', so
 // no reader can mistake the restored state for either earlier one.
-func RestorePrimaryHeader(device string) error {
-	return RestorePrimaryHeaderWithOptions(device, RestoreHeaderOptions{})
-}
-
-// RestorePrimaryHeaderWithOptions is RestorePrimaryHeader with options; see
-// RestoreHeaderOptions.
-func RestorePrimaryHeaderWithOptions(device string, opts RestoreHeaderOptions) error {
-	if err := ValidateDevicePath(device); err != nil {
-		return err
-	}
-
-	lock, err := AcquireFileLock(device)
-	if err != nil {
-		return &errs.Error{Detail: "failed to acquire lock", Err: err}
-	}
-	defer func() { _ = lock.Release() }()
-
-	// EVERY READ AND THE WRITE GO THROUGH THE LOCKED DESCRIPTOR, so the
-	// copies compared, the copy restored and the device written are the one
-	// the lock is held on: the path is not resolved again (#248, as #249 does
-	// for the keyslot operations).
-	f := lock.locked.File()
-	if err := requireLockableDevice(f, device); err != nil {
+func restorePrimaryHeaderCore(f *os.File, path string, force bool, sync func(*os.File) error) error {
+	if err := requireLockableDevice(f, path); err != nil {
 		return err
 	}
 
 	hdr, metadata, err := header.ReadSecondaryHeaderFrom(f)
+	err = reclassifyUnsupportedChecksum(err)
 	if err != nil {
-		return &errs.Error{Detail: "cannot restore the primary header", Err: err}
+		return &errs.Error{Kind: errs.KindOf(err, errs.ErrIO), Detail: "cannot restore the primary header", Err: err}
 	}
 
 	sequence := hdr.SequenceID
-	if primary, _, err := header.ReadHeaderCopyFrom(f, LUKS2PrimaryHeaderOffset); err == nil {
-		if primary.SequenceID >= hdr.SequenceID && !opts.Force {
+	if primary, _, err := header.ReadHeaderCopyFrom(f, header.PrimaryHeaderOffset); err == nil {
+		if primary.SequenceID >= hdr.SequenceID && !force {
 			return &errs.Error{Kind: ErrPrimaryHeaderCurrent, Detail: fmt.Sprintf(
 				"%s: primary sequence id %d, secondary %d; the secondary copy is repaired by the next header write",
-				device, primary.SequenceID, hdr.SequenceID)}
+				path, primary.SequenceID, hdr.SequenceID)}
 		}
 		sequence = max(sequence, primary.SequenceID)
 	}
@@ -223,58 +245,79 @@ func RestorePrimaryHeaderWithOptions(device string, opts RestoreHeaderOptions) e
 	if err := header.ValidateHeaderWideStructure(area, metadata); err != nil {
 		return err
 	}
-	return header.WriteEncodedHeader(f, hdr, jsonData, area, syncDevice)
+	return header.WriteEncodedHeader(f, hdr, jsonData, area, sync)
 }
 
 // readHeaderCopy reads and validates one header copy at a known offset.
-func readHeaderCopy(device string, offset int64) (*LUKS2BinaryHeader, *LUKS2Metadata, error) {
-	if err := ValidateDevicePath(device); err != nil {
-		return nil, nil, err
-	}
-
-	f, err := openDevice("read the LUKS2 header", device, os.O_RDONLY)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer func() { _ = f.Close() }()
-
-	return header.ReadHeaderCopyFrom(f, offset)
+func readHeaderCopy(device string, offset int64) (*header.BinaryHeader, *header.Metadata, error) {
+	return readHeaderCopyWithSys(device, offset, defaultVolumeSys())
 }
 
-// IsLUKS checks if a device or file contains a LUKS header (either LUKS1 or LUKS2).
+// readHeaderCopyWithSys is readHeaderCopy, parameterized by sys so this
+// package's tests can inject a seam the unparameterized helper has no room
+// for.
+func readHeaderCopyWithSys(device string, offset int64, sys volumeSys) (*header.BinaryHeader, *header.Metadata, error) {
+	if err := validateDevicePath(device); err != nil {
+		return nil, nil, err
+	}
+
+	f, err := openDevice("read the LUKS2 header", device, os.O_RDONLY, sys)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	return readHeaderCopyFrom(f, offset)
+}
+
+// isLUKSForTest checks if a device or file contains a LUKS header (either LUKS1 or LUKS2).
 // This is a pure Go implementation that doesn't require the cryptsetup CLI.
 // It checks for LUKS magic bytes at offset 0.
-func IsLUKS(device string) (bool, error) {
-	if err := ValidateDevicePath(device); err != nil {
+func isLUKSForTest(device string) (bool, error) {
+	return isLUKSForTestWithSys(device, defaultVolumeSys())
+}
+
+// isLUKSForTestWithSys is isLUKSForTest, parameterized by sys so this
+// package's tests can inject a seam the unparameterized helper has no room
+// for.
+func isLUKSForTestWithSys(device string, sys volumeSys) (bool, error) {
+	if err := validateDevicePath(device); err != nil {
 		return false, err
 	}
 
-	f, err := openDevice("read the LUKS magic", device, os.O_RDONLY)
+	f, err := openDevice("read the LUKS magic", device, os.O_RDONLY, sys)
 	if err != nil {
 		return false, err
 	}
 	defer func() { _ = f.Close() }()
 
-	magic := make([]byte, LUKS2MagicLen)
+	magic := make([]byte, header.MagicLen)
 	n, err := f.Read(magic)
 	if err != nil {
-		return false, &errs.Error{Detail: "failed to read device", Err: err}
+		return false, &errs.Error{Kind: errs.ErrIO, Detail: "failed to read device", Err: err}
 	}
-	if n < LUKS2MagicLen {
+	if n < header.MagicLen {
 		return false, nil // Too small to be LUKS
 	}
 
-	return bytes.Equal(magic, []byte(LUKS2Magic)), nil
+	return bytes.Equal(magic, []byte(header.Magic)), nil
 }
 
-// IsLUKS2 checks if a device contains a LUKS2 header specifically.
+// isLUKS2ForTest checks if a device contains a LUKS2 header specifically.
 // Returns true only for LUKS2 (not LUKS1).
-func IsLUKS2(device string) (bool, error) {
-	if err := ValidateDevicePath(device); err != nil {
+func isLUKS2ForTest(device string) (bool, error) {
+	return isLUKS2ForTestWithSys(device, defaultVolumeSys())
+}
+
+// isLUKS2ForTestWithSys is isLUKS2ForTest, parameterized by sys so this
+// package's tests can inject a seam the unparameterized helper has no room
+// for.
+func isLUKS2ForTestWithSys(device string, sys volumeSys) (bool, error) {
+	if err := validateDevicePath(device); err != nil {
 		return false, err
 	}
 
-	f, err := openDevice("read the LUKS magic and version", device, os.O_RDONLY)
+	f, err := openDevice("read the LUKS magic and version", device, os.O_RDONLY, sys)
 	if err != nil {
 		return false, err
 	}
@@ -283,61 +326,51 @@ func IsLUKS2(device string) (bool, error) {
 	hdr := make([]byte, 8)
 	n, err := f.Read(hdr)
 	if err != nil {
-		return false, &errs.Error{Detail: "failed to read device", Err: err}
+		return false, &errs.Error{Kind: errs.ErrIO, Detail: "failed to read device", Err: err}
 	}
 	if n < 8 {
 		return false, nil // Too small to be LUKS
 	}
 
-	if !bytes.Equal(hdr[:LUKS2MagicLen], []byte(LUKS2Magic)) {
+	if !bytes.Equal(hdr[:header.MagicLen], []byte(header.Magic)) {
 		return false, nil // Not LUKS at all
 	}
 
 	version := uint16(hdr[6])<<8 | uint16(hdr[7])
-	return version == LUKS2Version, nil
+	return version == header.Version, nil
 }
 
-// WriteHeader writes a LUKS2 header to a device (acquires lock)
-func WriteHeader(device string, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) error {
-	if err := ValidateDevicePath(device); err != nil {
+// writeHeaderForTest writes a LUKS2 header to a device (acquires lock)
+func writeHeaderForTest(device string, hdr *header.BinaryHeader, metadata *header.Metadata) error {
+	return writeHeaderWithSys(device, hdr, metadata, defaultVolumeSys())
+}
+
+// writeHeaderWithSys is writeHeaderForTest, parameterized by sys so this
+// package's tests can inject a seam the wrapper has no room for.
+func writeHeaderWithSys(device string, hdr *header.BinaryHeader, metadata *header.Metadata, sys volumeSys) error {
+	ctx := context.Background()
+	if err := validateDevicePath(device); err != nil {
 		return err
 	}
 
 	// Written through the descriptor the lock is held on, not a second open
 	// of the path, which a re-pointed symlink could send elsewhere.
-	lock, dev, err := lockKeyslotDevice(device)
+	lock, dev, err := lockKeyslotDevice(ctx, device, sys)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = lock.Release() }()
 
-	return dev.writeHeader(hdr, metadata)
+	return dev.writeHeader(ctx, hdr, metadata)
 }
 
-// newUUID is the source of a new container's UUID.
-//
-// It exists for the same reason cryptoRand (util.go) does and nothing else: a
-// UUID is 40 bytes of the binary header, so with no seam here no test can ever
-// compare two headers byte for byte. Unexported, no setter, substituted only by
-// this package's own tests.
-var newUUID = uuid.New
-
-// syncDevice flushes a device written by WriteHeaderTo to stable storage.
-//
-// It is a seam for one reason: the ORDER of the two header copies' durability
-// is the crash-safety property, and it is not observable from outside a
-// process -- a test substitutes this to see the device exactly as a power loss
-// at each sync point would leave it, and to fail the sync between the copies.
-// Unexported and substituted only by this package's own tests, like
-// openFileFunc.
-var syncDevice = (*os.File).Sync
-
-// CreateBinaryHeader creates a new LUKS2 binary header
-func CreateBinaryHeader(opts FormatOptions) (*LUKS2BinaryHeader, error) {
+// createBinaryHeader creates a new LUKS2 binary header from sys's cryptoRand
+// and newUUID, so formatCore and this package's tests can supply their own.
+func createBinaryHeader(opts formatOptionsForTest, sys volumeSys) (*header.BinaryHeader, error) {
 	if err := validateMetadataSize(opts.MetadataSize); err != nil {
 		return nil, err
 	}
-	return header.CreateBinaryHeader(cryptoRand, newUUID, header.NewHeaderParams{
+	return header.CreateBinaryHeader(sys.cryptoRand, sys.newUUID, header.NewHeaderParams{
 		Label:        opts.Label,
 		Subsystem:    opts.Subsystem,
 		MetadataSize: opts.MetadataSize,
@@ -359,41 +392,41 @@ func CreateBinaryHeader(opts FormatOptions) (*LUKS2BinaryHeader, error) {
 // repair the bad one.
 //
 // It writes through the caller's pinned descriptor (#255), as one write step.
-func repairSecondaryHeader(dev *keyslotDevice, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) error {
-	if err := keyslotWriteStep(dev, "repair the secondary LUKS2 header"); err != nil {
+func repairSecondaryHeader(ctx context.Context, dev *keyslotDevice, hdr *header.BinaryHeader, metadata *header.Metadata) error {
+	if err := dev.sys.keyslotWriteStep(ctx, dev, "repair the secondary LUKS2 header"); err != nil {
 		return err
 	}
 	f := dev.file
 
 	jsonData, area, err := header.EncodeMetadataForHeader(hdr, metadata)
 	if err != nil {
-		return err
+		return reclassifyMetadataTooLarge(err)
 	}
 
 	// THE PRIMARY IS MADE DURABLE BEFORE A SINGLE SECONDARY BYTE IS WRITTEN.
-	if err := syncDevice(f); err != nil {
-		return &errs.Error{Detail: "failed to make the primary header durable before repairing the secondary", Err: err}
+	if err := dev.sys.syncDevice(f); err != nil {
+		return &errs.Error{Kind: errs.ErrIO, Detail: "failed to make the primary header durable before repairing the secondary", Err: err}
 	}
 
 	primary := *hdr
-	primary.HeaderSize = uint64(area) // #nosec G115 -- HeaderAreaSizeForWrite bounds this to LUKS2HeaderMaxSize
-	if err := header.WriteSecondaryCopy(f, &primary, jsonData, area-LUKS2HeaderSize, int64(area)); err != nil {
+	primary.HeaderSize = uint64(area) // #nosec G115 -- HeaderAreaSizeForWrite bounds this to header.HeaderMaxSize
+	if err := header.WriteSecondaryCopy(f, &primary, jsonData, area-header.HeaderSize, int64(area)); err != nil {
 		return err
 	}
-	if err := syncDevice(f); err != nil {
-		return &errs.Error{Detail: "failed to sync the repaired secondary header", Err: err}
+	if err := dev.sys.syncDevice(f); err != nil {
+		return &errs.Error{Kind: errs.ErrIO, Detail: "failed to sync the repaired secondary header", Err: err}
 	}
 	return nil
 }
 
-// GetVolumeInfo extracts volume information from a LUKS device
-func GetVolumeInfo(device string) (*VolumeInfo, error) {
-	hdr, metadata, err := ReadHeader(device)
+// getVolumeInfoForTest extracts volume information from a LUKS device
+func getVolumeInfoForTest(device string) (*volumeInfoForTest, error) {
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		return nil, err
 	}
 
-	info := &VolumeInfo{
+	info := &volumeInfoForTest{
 		UUID:     string(bytes.TrimRight(hdr.UUID[:], "\x00")),
 		Label:    string(bytes.TrimRight(hdr.Label[:], "\x00")),
 		Version:  int(hdr.Version),

@@ -467,7 +467,7 @@ func TestCoverageGateFailsWhenALegLeftNoProfile(t *testing.T) {
 
 // fakeGoForCI stands in for the go command so `make ci` can run its real
 // recipes in milliseconds. A `go test` that writes a coverage profile takes a
-// second to do it, as the real unit legs take minutes; `go run ./test/covergate`
+// second to do it, as the real unit legs take minutes; `go run ./test/tools/covergate`
 // succeeds only if every profile it was handed already exists, which is what
 // the real gate needs.
 const fakeGoForCI = `#!/bin/sh
@@ -675,4 +675,365 @@ func mode(t *testing.T, path string) fs.FileMode {
 		t.Fatal(err)
 	}
 	return info.Mode().Perm()
+}
+
+// modulePath is this module's import-path prefix, e.g.
+// "github.com/jeremyhahn/go-luks2". `go list` output is stripped of it to
+// get the repository-relative path the Makefile's PKG_<name> map uses.
+func modulePath(t *testing.T) string {
+	t.Helper()
+	cmd := exec.Command(resolveGo(t), "list", "-m") // #nosec G204 -- go is resolved as the Makefile resolves it; arguments are constants
+	cmd.Dir = repoRoot(t)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go list -m: %v", err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// currentPkgAndInternalPackages returns the repository-relative path of
+// every package under pkg/ and internal/ -- the set the per-package quartet
+// (test-%, coverage-%, bench-%, integration-test-%) is built to cover, per
+// DESIGN.md G.2. test/ and cmd/ are out of this lane's scope: test-cli and
+// the test/ targets are their own, pre-existing, explicit rules.
+func currentPkgAndInternalPackages(t *testing.T) []string {
+	t.Helper()
+	prefix := modulePath(t) + "/"
+	var rel []string
+	for _, imp := range listPackages(t) {
+		p := strings.TrimPrefix(imp, prefix)
+		if p == imp {
+			continue // not under this module; `go list ./...` should never report this
+		}
+		if strings.HasPrefix(p, "pkg/") || strings.HasPrefix(p, "internal/") {
+			rel = append(rel, p)
+		}
+	}
+	return rel
+}
+
+// TestPerPackageQuartetCoversEveryCurrentPackage is the "adding a package is
+// one line" contract (#276 / DESIGN.md G.2): every package `go list` finds
+// under pkg/ and internal/ must resolve through PKG_<name> for test-%,
+// coverage-% and bench-%, named for its last path element. A package added
+// without its PKG_<name> line fails here instead of silently having no
+// per-package target -- `make -n` is enough to prove the map resolves,
+// without paying for a real build or test run per package.
+func TestPerPackageQuartetCoversEveryCurrentPackage(t *testing.T) {
+	for _, rel := range currentPkgAndInternalPackages(t) {
+		name := rel[strings.LastIndex(rel, "/")+1:]
+		t.Run(name, func(t *testing.T) {
+			for _, target := range []string{"test-" + name, "coverage-" + name, "bench-" + name} {
+				stdout, stderr := runMake(t, environ(nil, nil), "-n", target)
+				if !strings.Contains(stdout, "./"+rel) {
+					t.Errorf("make -n %s does not reference ./%s; PKG_%s is missing or wrong:\n%s%s",
+						target, rel, name, stdout, stderr)
+				}
+			}
+		})
+	}
+}
+
+// TestPerPackageTargetFailsClearlyWhenUnmapped is the error path for a name
+// with no PKG_<name>: the rule must refuse with a message naming the
+// variable to add, not run `go test` against an empty path (which `go test
+// -v -race -count=1 ""` would otherwise do, against the current directory).
+func TestPerPackageTargetFailsClearlyWhenUnmapped(t *testing.T) {
+	stdout, stderr, err := runMakeErr(t, environ(nil, nil), "test-nonexistentpkg123")
+	if err == nil {
+		t.Fatalf("make test-nonexistentpkg123 passed with no PKG_nonexistentpkg123:\n%s%s", stdout, stderr)
+	}
+	if !strings.Contains(stdout, "PKG_nonexistentpkg123") {
+		t.Errorf("the failure does not name the variable to add:\n%s%s", stdout, stderr)
+	}
+}
+
+// dockerInvocationMarker returns a PATH entry carrying a stand-in `docker`
+// that records being run, and the marker file to check. Used to prove a
+// target never reaches a real docker invocation.
+func dockerInvocationMarker(t *testing.T) (binDir, marker string) {
+	t.Helper()
+	bin := t.TempDir()
+	marker = filepath.Join(bin, "docker-was-invoked")
+	script := "#!/bin/sh\ndate >> " + marker + "\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(script), 0o700); err != nil { // #nosec G306 -- an executable test fixture under t.TempDir()
+		t.Fatalf("writing the docker stand-in: %v", err)
+	}
+	return bin, marker
+}
+
+// TestIntegrationTestPatternRuleDryRunNeverInvokesDocker pins the #146
+// hazard integration-test-% is deliberately built to avoid: GNU make
+// executes a recipe line for real, even under `-n`, when the line's own
+// text contains the literal "$(MAKE)" (see the ITEST_BUILD_IMAGE comment in
+// the Makefile) -- and #146 was exactly a container `make -n` started by
+// accident through that exception. The pattern rule hides its recursive
+// call behind a variable so its one shared shell -- needed so an absent
+// integration directory can skip the rest of it -- never contains that
+// literal text. This proves a dry run never reaches the real `docker` on
+// PATH at all.
+func TestIntegrationTestPatternRuleDryRunNeverInvokesDocker(t *testing.T) {
+	bin, marker := dockerInvocationMarker(t)
+	env := environ(nil, map[string]string{"PATH": bin + string(os.PathListSeparator) + os.Getenv("PATH")})
+	stdout, stderr := runMake(t, env, "-n", "integration-test-luks2")
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatalf("docker was invoked during `make -n integration-test-luks2`:\n%s%s", stdout, stderr)
+	}
+}
+
+// TestIntegrationTestSkipsCleanlyWithNoSuiteYet is the common case today:
+// most internal packages have no test/integration/<name> directory yet
+// (DESIGN.md A.1's per-package tree is a later lane's work, out of this
+// one's scope), and the rule must say so and exit clean -- never silently
+// reach for docker anyway, and never fail either.
+func TestIntegrationTestSkipsCleanlyWithNoSuiteYet(t *testing.T) {
+	bin, marker := dockerInvocationMarker(t)
+	env := environ(nil, map[string]string{"PATH": bin + string(os.PathListSeparator) + os.Getenv("PATH")})
+	stdout, stderr, err := runMakeErr(t, env, "integration-test-errs")
+	if err != nil {
+		t.Fatalf("make integration-test-errs failed with no integration suite for internal/errs: %v\n%s%s", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "no integration suite yet") {
+		t.Errorf("the skip does not say so:\n%s%s", stdout, stderr)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatalf("docker was invoked even though internal/errs has no integration suite:\n%s%s", stdout, stderr)
+	}
+}
+
+// TestTestPkgRequiresPKG is the `test-pkg PKG=` contract's guard: nothing to
+// run is a stated error, not `go test` against an empty import path (which
+// would silently test the current directory).
+func TestTestPkgRequiresPKG(t *testing.T) {
+	stdout, stderr, err := runMakeErr(t, environ(nil, nil), "test-pkg")
+	if err == nil {
+		t.Fatalf("make test-pkg passed with no PKG:\n%s%s", stdout, stderr)
+	}
+	if !strings.Contains(stdout, "make test-pkg PKG=") {
+		t.Errorf("the failure does not show the usage:\n%s%s", stdout, stderr)
+	}
+}
+
+// TestTestPkgRunsTheNamedPackage is the success path, against the smallest
+// real package in the tree.
+func TestTestPkgRunsTheNamedPackage(t *testing.T) {
+	stdout, stderr, err := runMakeErr(t, environ(nil, nil), "test-pkg", "PKG=./internal/errs")
+	if err != nil {
+		t.Fatalf("make test-pkg PKG=./internal/errs failed: %v\n%s%s", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "ok") || !strings.Contains(stdout, "internal/errs") {
+		t.Errorf("stdout does not show internal/errs passing:\n%s", stdout)
+	}
+}
+
+// TestProtoIsAnHonestNoop is the scaffold §4 contract: this module has no
+// .proto sources, and the target says so rather than silently succeeding at
+// nothing with no explanation.
+func TestProtoIsAnHonestNoop(t *testing.T) {
+	stdout, stderr, err := runMakeErr(t, environ(nil, nil), "proto")
+	if err != nil {
+		t.Fatalf("make proto failed: %v\n%s%s", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "no .proto sources") {
+		t.Errorf("proto does not explain itself:\n%s", stdout)
+	}
+}
+
+// TestVulnIsAnAliasForGovulncheck is the scaffold §4 contract's name for it.
+func TestVulnIsAnAliasForGovulncheck(t *testing.T) {
+	stdout, stderr, err := runMakeErr(t, environ(nil, nil), "vuln")
+	if err != nil {
+		t.Fatalf("make vuln failed: %v\n%s%s", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "govulncheck") {
+		t.Errorf("vuln does not run through govulncheck:\n%s", stdout)
+	}
+}
+
+// TestCoverageReportRequiresAProfile is the failure path: no gated profile,
+// no report, and a message saying which make target to run first.
+func TestCoverageReportRequiresAProfile(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "coverage.out")
+	stdout, stderr, err := runMakeErr(t, environ(nil, nil), "coverage-report", "COVERAGE_FILE="+missing)
+	if err == nil {
+		t.Fatalf("make coverage-report passed with no profile at %s:\n%s", missing, stdout)
+	}
+	if !strings.Contains(stdout, "coverage-gate") {
+		t.Errorf("the failure does not say what to run first:\n%s%s", stdout, stderr)
+	}
+}
+
+// TestCoverageReportWritesTheHTMLFromAnExistingProfile is the success path:
+// given an already-written profile -- coverage-gate's job, not this
+// target's -- it writes the HTML report and prints the func summary,
+// without re-running any tests.
+func TestCoverageReportWritesTheHTMLFromAnExistingProfile(t *testing.T) {
+	dir := t.TempDir()
+	profile := filepath.Join(dir, "coverage.out")
+	html := filepath.Join(dir, "coverage.html")
+
+	// `go tool cover -html` reads the SOURCE each profile line names, unlike
+	// -func, so the fixture has to be a profile over a real package rather
+	// than a hand-written line naming a file that does not exist.
+	cmd := exec.Command(resolveGo(t), "test", "-count=1", "-covermode=atomic", "-coverprofile="+profile, "./internal/errs") // #nosec G204 -- go is resolved as the Makefile resolves it; arguments are constants
+	cmd.Dir = repoRoot(t)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("writing a real profile fixture over internal/errs: %v\n%s", err, out)
+	}
+
+	stdout, stderr, err := runMakeErr(t, environ(nil, nil), "coverage-report",
+		"COVERAGE_FILE="+profile, "COVERAGE_HTML="+html)
+	if err != nil {
+		t.Fatalf("make coverage-report failed: %v\n%s%s", err, stdout, stderr)
+	}
+	if _, err := os.Stat(html); err != nil {
+		t.Errorf("coverage-report did not write the HTML report: %v", err)
+	}
+	if !strings.Contains(stdout, "total:") {
+		t.Errorf("coverage-report did not print the func summary:\n%s", stdout)
+	}
+}
+
+// TestDockerBuildUsesTheCLIDockerfile is a dry-run check that docker-build
+// builds build/docker/cli's Dockerfile, not build/docker/integration's or
+// build/docker/devcontainer's.
+func TestDockerBuildUsesTheCLIDockerfile(t *testing.T) {
+	stdout, stderr := runMake(t, environ(nil, nil), "-n", "docker-build")
+	if !strings.Contains(stdout, "build/docker/cli/Dockerfile") {
+		t.Errorf("docker-build does not reference build/docker/cli/Dockerfile:\n%s%s", stdout, stderr)
+	}
+}
+
+// TestDockerRunUsesTheCLIImageAndTheIntegrationLauncher is a dry-run check
+// that docker-run hands CLI_IMAGE to the same launcher
+// (test/integration/cmd/docker-run, built as INTEGRATION_DOCKER_RUN) the
+// integration suite uses, which is where the seccomp profile and device
+// scoping DESIGN.md G.2 asks docker-run to carry actually live.
+func TestDockerRunUsesTheCLIImageAndTheIntegrationLauncher(t *testing.T) {
+	stdout, stderr := runMake(t, environ(nil, nil), "-n", "docker-run")
+	for _, want := range []string{"IMAGE=go-luks2-cli", "docker-run --rm -it"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("docker-run output does not contain %q:\n%s%s", want, stdout, stderr)
+		}
+	}
+}
+
+// TestCleanPreservesTrackedDockerfilesButRemovesEverythingElseUnderBuildDir
+// is the companion to the .gitignore fix ("build/*" / "!build/docker/"):
+// build/docker holds Dockerfiles DESIGN.md G.4 tracks as source, not build
+// output, and clean's old `rm -rf $(BUILD_DIR)` would delete them from the
+// working tree on every run -- recoverable only via `git checkout`, and a
+// surprising thing for a "clean" target to do to committed source. This
+// proves a tracked Dockerfile survives while an ordinary build artifact,
+// anywhere under BUILD_DIR including a nested one, does not.
+func TestCleanPreservesTrackedDockerfilesButRemovesEverythingElseUnderBuildDir(t *testing.T) {
+	// clean's recipe reaches past BUILD_DIR into bare, CWD-relative globs --
+	// *.log, *.test, gosec-report.json, coverage-cli.out, and a recursive
+	// `find . -name "*.out" -type f -delete` -- that no Makefile variable
+	// can redirect. runMake/runMakeErr always set cmd.Dir to the real
+	// repository root, so running a real (non "-n") `clean` through them
+	// would delete real files a concurrent `make test-unit` leg left there
+	// (coverage-pkg.out, coverage-rest.out: the defect this test exists to
+	// catch). So this test runs make, for real, against a copy of the
+	// Makefile in its own temporary directory instead.
+	dir := t.TempDir()
+	// The Makefile's toolchain-pin block reads go.mod, unconditionally, from
+	// make's own working directory -- so the copy needs it alongside.
+	for _, name := range []string{"Makefile", "go.mod"} {
+		src, err := os.ReadFile(filepath.Join(repoRoot(t), name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), src, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	buildDir := filepath.Join(dir, "build")
+	dockerfile := filepath.Join(buildDir, "docker", "cli", "Dockerfile")
+	if err := os.MkdirAll(filepath.Dir(dockerfile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dockerfile, []byte("FROM golang\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(buildDir, "tools", "fake", "x")
+	if err := os.MkdirAll(filepath.Dir(artifact), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(artifact, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(dir, "luks2")
+	if err := os.WriteFile(binary, []byte("x"), 0o700); err != nil { // #nosec G306 -- a throwaway test fixture under t.TempDir()
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(lookPath(t, "make"), "clean", "BUILD_DIR="+buildDir) // #nosec G204 -- make is resolved from PATH; arguments are test constants
+	cmd.Dir = dir
+	cmd.Env = environ(nil, nil)
+	var out, errOut bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("make clean failed: %v\n%s%s", err, out.String(), errOut.String())
+	}
+	if _, err := os.Stat(dockerfile); err != nil {
+		t.Errorf("make clean removed the tracked Dockerfile at %s: %v", dockerfile, err)
+	}
+	if _, err := os.Stat(artifact); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("make clean left the build artifact at %s (err=%v), want it removed", artifact, err)
+	}
+	if _, err := os.Stat(binary); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("make clean left the binary at %s (err=%v), want it removed", binary, err)
+	}
+}
+
+// gitStatus is the porcelain status of root, tracked and untracked files
+// alike -- exactly what no test in this package may change.
+func gitStatus(root string) (string, error) {
+	cmd := exec.Command("git", "status", "--porcelain") // #nosec G204 -- git is resolved from PATH; arguments are constants
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+// TestMain is this package's own guard against the defect its tests exist to
+// catch: a test that runs a real make target must sandbox every path the
+// target can touch, because this suite runs inside the actual repository
+// checkout, alongside -- not inside -- whatever invoked it. A test that
+// forgets, the way TestCleanPreservesTrackedDockerfilesButRemovesEverythingElseUnderBuildDir
+// once did, deletes real files a concurrent `make test-unit` leg left at the
+// repository root, such as coverage-pkg.out. TestMain snapshots `git status
+// --porcelain` at the repository root before and after the suite and fails
+// if a single byte differs.
+func TestMain(m *testing.M) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "resolving the repository root: %v\n", err)
+		os.Exit(1)
+	}
+	before, err := gitStatus(root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "git status before the suite: %v\n", err)
+		os.Exit(1)
+	}
+	code := m.Run()
+	after, err := gitStatus(root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "git status after the suite: %v\n", err)
+		os.Exit(1)
+	}
+	if before != after {
+		fmt.Fprintf(os.Stderr,
+			"a test in this package left the repository root changed\nbefore:\n%s\nafter:\n%s",
+			before, after)
+		if code == 0 {
+			code = 1
+		}
+	}
+	os.Exit(code)
 }

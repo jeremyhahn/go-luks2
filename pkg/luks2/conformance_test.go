@@ -8,6 +8,7 @@ package luks2
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/jeremyhahn/go-luks2/internal/header"
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
@@ -136,8 +138,8 @@ func newImage(t *testing.T, name string) string {
 
 // standardFormatOptions is the one configuration 51 call sites format with. It
 // is a function rather than a var so no test can mutate the shared value.
-func standardFormatOptions(path string) FormatOptions {
-	return FormatOptions{
+func standardFormatOptions(path string) formatOptionsForTest {
+	return formatOptionsForTest{
 		Device:        path,
 		Passphrase:    []byte(conformancePassphrase),
 		Cipher:        "aes",
@@ -145,7 +147,7 @@ func standardFormatOptions(path string) FormatOptions {
 		KeySize:       512,
 		HashAlgo:      "sha512",
 		SectorSize:    512,
-		KDFType:       KDFTypePBKDF2,
+		KDFType:       kdfTypePBKDF2,
 		PBKDFIterTime: 1, // keep the keyslot KDF cheap
 	}
 }
@@ -194,7 +196,7 @@ func formatWithLibrary(t *testing.T, path string) {
 			goldenStandardErr = err
 			return
 		}
-		if err := Format(standardFormatOptions(seed)); err != nil {
+		if err := formatForTest(standardFormatOptions(seed)); err != nil {
 			goldenStandardErr = err
 			return
 		}
@@ -368,22 +370,22 @@ func TestConformance_SecondaryHeaderMagic(t *testing.T) {
 		}
 		defer func() { _ = f.Close() }()
 
-		magic := make([]byte, LUKS2MagicLen)
-		if _, err := f.ReadAt(magic, LUKS2SecondaryHeaderOffset); err != nil {
+		magic := make([]byte, header.MagicLen)
+		if _, err := f.ReadAt(magic, header.SecondaryHeaderOffset); err != nil {
 			t.Fatalf("failed to read secondary magic: %v", err)
 		}
-		if !bytes.Equal(magic, []byte(LUKS2SecondaryMagic)) {
-			t.Fatalf("secondary header magic = %q, want %q", magic, LUKS2SecondaryMagic)
+		if !bytes.Equal(magic, []byte(header.SecondaryMagic)) {
+			t.Fatalf("secondary header magic = %q, want %q", magic, header.SecondaryMagic)
 		}
 	})
 
 	t.Run("this library can read back its own secondary header", func(t *testing.T) {
-		hdr, metadata, err := ReadSecondaryHeader(path)
+		hdr, metadata, err := readSecondaryHeaderForTest(path)
 		if err != nil {
 			t.Fatalf("ReadSecondaryHeader failed: %v", err)
 		}
-		if hdr.HeaderOffset != uint64(LUKS2SecondaryHeaderOffset) {
-			t.Errorf("secondary hdr.HeaderOffset = %d, want %d", hdr.HeaderOffset, LUKS2SecondaryHeaderOffset)
+		if hdr.HeaderOffset != uint64(header.SecondaryHeaderOffset) {
+			t.Errorf("secondary hdr.HeaderOffset = %d, want %d", hdr.HeaderOffset, header.SecondaryHeaderOffset)
 		}
 		if metadata.Config == nil || metadata.Config.KeyslotsSize == "" {
 			t.Error("secondary header carries no usable config")
@@ -397,7 +399,7 @@ func TestConformance_SecondaryHeaderMagic(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to open image: %v", err)
 		}
-		if _, err := f.WriteAt(make([]byte, LUKS2SecondaryHeaderOffset), 0); err != nil {
+		if _, err := f.WriteAt(make([]byte, header.SecondaryHeaderOffset), 0); err != nil {
 			_ = f.Close()
 			t.Fatalf("failed to destroy primary header: %v", err)
 		}
@@ -446,7 +448,7 @@ func TestConformance_CryptsetupWrites_WeRead(t *testing.T) {
 	}
 
 	t.Run("the header parses and stores a sha512-length digest", func(t *testing.T) {
-		_, metadata, err := ReadHeader(path)
+		_, metadata, err := readHeaderForTest(path)
 		if err != nil {
 			t.Fatalf("ReadHeader failed on a cryptsetup-written container: %v", err)
 		}
@@ -470,13 +472,13 @@ func TestConformance_CryptsetupWrites_WeRead(t *testing.T) {
 	})
 
 	t.Run("TestKey accepts the correct passphrase", func(t *testing.T) {
-		if err := TestKey(path, []byte(conformancePassphrase)); err != nil {
+		if err := testKeyForTest(path, []byte(conformancePassphrase)); err != nil {
 			t.Fatalf("TestKey rejected the CORRECT passphrase on a cryptsetup-written volume: %v", err)
 		}
 	})
 
 	t.Run("TestKey rejects a wrong passphrase", func(t *testing.T) {
-		if err := TestKey(path, []byte(conformanceWrongPassphrase)); err == nil {
+		if err := testKeyForTest(path, []byte(conformanceWrongPassphrase)); err == nil {
 			t.Fatal("TestKey accepted a WRONG passphrase on a cryptsetup-written volume")
 		}
 	})
@@ -525,7 +527,7 @@ func TestConformance_CryptsetupMultiKeyslotDigestAssociation(t *testing.T) {
 		t.Fatalf("cryptsetup luksAddKey exited %d, want 0\n%s", code, out)
 	}
 
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed on a cryptsetup-written container: %v", err)
 	}
@@ -551,12 +553,12 @@ func TestConformance_CryptsetupMultiKeyslotDigestAssociation(t *testing.T) {
 	}
 
 	for _, passphrase := range []string{conformancePassphrase, second} {
-		if err := TestKey(path, []byte(passphrase)); err != nil {
+		if err := testKeyForTest(path, []byte(passphrase)); err != nil {
 			t.Fatalf("a cryptsetup-written keyslot no longer opens under the digest association rule: %v", err)
 		}
 	}
 
-	if err := TestKey(path, []byte(conformanceWrongPassphrase)); err == nil {
+	if err := testKeyForTest(path, []byte(conformanceWrongPassphrase)); err == nil {
 		t.Fatal("TestKey accepted a WRONG passphrase on a two-keyslot cryptsetup container")
 	}
 }
@@ -611,8 +613,8 @@ func TestConformance_StaysValidAfterMutation(t *testing.T) {
 		formatWithLibrary(t, path)
 		assertStillValid(t, path, "Format", conformancePassphrase)
 
-		if _, err := AddKey(path, []byte(conformancePassphrase), []byte(secondPassphrase), &AddKeyOptions{
-			KDFType:       KDFTypePBKDF2,
+		if _, err := addKeyForTest(path, []byte(conformancePassphrase), []byte(secondPassphrase), &addKeyOptionsForTest{
+			KDFType:       kdfTypePBKDF2,
 			Hash:          "sha256",
 			PBKDFIterTime: 1,
 		}); err != nil {
@@ -624,7 +626,7 @@ func TestConformance_StaysValidAfterMutation(t *testing.T) {
 		// Both passphrases must still work through this library too, so the
 		// check is not one-sided.
 		for _, passphrase := range []string{conformancePassphrase, secondPassphrase} {
-			if err := TestKey(path, []byte(passphrase)); err != nil {
+			if err := testKeyForTest(path, []byte(passphrase)); err != nil {
 				t.Errorf("after AddKey, TestKey rejected %q: %v", passphrase, err)
 			}
 		}
@@ -642,17 +644,17 @@ func TestConformance_StaysValidAfterMutation(t *testing.T) {
 		formatWithLibrary(t, path)
 		assertStillValid(t, path, "Format", conformancePassphrase)
 
-		_, before, err := ReadHeader(path)
+		_, before, err := readHeaderForTest(path)
 		if err != nil {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
 		originalOffset := before.Keyslots["0"].Area.Offset
 
-		if err := ChangeKey(path, []byte(conformancePassphrase), []byte(secondPassphrase), 0); err != nil {
+		if err := changeKeyForTest(path, []byte(conformancePassphrase), []byte(secondPassphrase), 0); err != nil {
 			t.Fatalf("ChangeKey failed: %v", err)
 		}
 
-		_, after, err := ReadHeader(path)
+		_, after, err := readHeaderForTest(path)
 		if err != nil {
 			t.Fatalf("ReadHeader after ChangeKey failed: %v", err)
 		}
@@ -666,7 +668,7 @@ func TestConformance_StaysValidAfterMutation(t *testing.T) {
 		if code, out := runCryptsetup(t, conformancePassphrase, "luksOpen", "--test-passphrase", path); code == 0 {
 			t.Fatalf("after ChangeKey, cryptsetup still accepts the retired passphrase\n%s", out)
 		}
-		if err := TestKey(path, []byte(secondPassphrase)); err != nil {
+		if err := testKeyForTest(path, []byte(secondPassphrase)); err != nil {
 			t.Errorf("after ChangeKey, TestKey rejected the new passphrase: %v", err)
 		}
 	})
@@ -682,24 +684,24 @@ func TestConformance_StaysValidAfterMutation(t *testing.T) {
 		path := newImage(t, "after-keyslot-with-token.img")
 		formatWithLibrary(t, path)
 
-		if _, err := AddKey(path, []byte(conformancePassphrase), []byte(secondPassphrase), &AddKeyOptions{
-			KDFType:       KDFTypePBKDF2,
+		if _, err := addKeyForTest(path, []byte(conformancePassphrase), []byte(secondPassphrase), &addKeyOptionsForTest{
+			KDFType:       kdfTypePBKDF2,
 			Hash:          "sha256",
 			PBKDFIterTime: 1,
 		}); err != nil {
 			t.Fatalf("AddKey failed: %v", err)
 		}
-		if err := ImportToken(path, 0, &Token{Type: "systemd-tpm2", Keyslots: []string{"1"}}); err != nil {
-			t.Fatalf("ImportToken failed: %v", err)
+		if err := setTokenForTest(path, 0, Token{Type: "systemd-tpm2", Keyslots: []int{1}}); err != nil {
+			t.Fatalf("SetToken failed: %v", err)
 		}
-		assertStillValid(t, path, "ImportToken", conformancePassphrase, secondPassphrase)
+		assertStillValid(t, path, "SetToken", conformancePassphrase, secondPassphrase)
 
-		if err := KillKeyslot(path, 1); err != nil {
+		if err := killKeyslotForTest(path, 1); err != nil {
 			t.Fatalf("KillKeyslot failed: %v", err)
 		}
 		assertStillValid(t, path, "KillKeyslot", conformancePassphrase)
 
-		_, metadata, err := ReadHeader(path)
+		_, metadata, err := readHeaderForTest(path)
 		if err != nil {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
@@ -716,12 +718,12 @@ func TestConformance_StaysValidAfterMutation(t *testing.T) {
 		path := newImage(t, "after-token.img")
 		formatWithLibrary(t, path)
 
-		if err := ImportToken(path, 0, &Token{Type: "systemd-tpm2", Keyslots: []string{"0"}}); err != nil {
-			t.Fatalf("ImportToken failed: %v", err)
+		if err := setTokenForTest(path, 0, Token{Type: "systemd-tpm2", Keyslots: []int{0}}); err != nil {
+			t.Fatalf("SetToken failed: %v", err)
 		}
-		assertStillValid(t, path, "ImportToken", conformancePassphrase)
+		assertStillValid(t, path, "SetToken", conformancePassphrase)
 
-		if err := RemoveToken(path, 0); err != nil {
+		if err := removeTokenForTest(path, 0); err != nil {
 			t.Fatalf("RemoveToken failed: %v", err)
 		}
 		assertStillValid(t, path, "RemoveToken", conformancePassphrase)
@@ -752,7 +754,7 @@ func TestConformance_LargeHeaderStaysValid(t *testing.T) {
 	path := newImage(t, "large-header.img")
 	formatWithLibrary(t, path)
 
-	hdr, metadata, err := ReadHeader(path)
+	hdr, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -808,12 +810,12 @@ func TestConformance_LegacyDigestLengthStillOpens(t *testing.T) {
 	path := newImage(t, "legacy-digest.img")
 	formatWithLibrary(t, path)
 
-	hdr, metadata, err := ReadHeader(path)
+	hdr, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 
-	masterKey, err := getMasterKey(path, []byte(conformancePassphrase), metadata)
+	masterKey, err := getMasterKey(path, []byte(conformancePassphrase), metadata, testVolumeSys())
 	if err != nil {
 		t.Fatalf("failed to recover the master key: %v", err)
 	}
@@ -829,12 +831,12 @@ func TestConformance_LegacyDigestLengthStillOpens(t *testing.T) {
 
 	// Re-derive at the OLD hardcoded length of 32 bytes, leaving the "sha512"
 	// label in place -- the exact inconsistency the old code wrote to disk.
-	legacy, err := deriveKeySecret(masterKey, &KDF{
+	legacy, err := deriveKeySecret(context.Background(), masterKey, &rawKDF{
 		Type:       digest.Type,
 		Hash:       digest.Hash,
 		Salt:       digest.Salt,
 		Iterations: &digest.Iterations,
-	}, 32)
+	}, 32, testVolumeSys())
 	if err != nil {
 		t.Fatalf("failed to derive the legacy digest: %v", err)
 	}
@@ -851,7 +853,7 @@ func TestConformance_LegacyDigestLengthStillOpens(t *testing.T) {
 	}
 
 	// Confirm the fixture really is a legacy one before asserting on it.
-	_, reread, err := ReadHeader(path)
+	_, reread, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed on the legacy fixture: %v", err)
 	}
@@ -863,10 +865,10 @@ func TestConformance_LegacyDigestLengthStillOpens(t *testing.T) {
 		t.Fatalf("legacy fixture stores a %d-byte digest, want 32", len(raw))
 	}
 
-	if err := TestKey(path, []byte(conformancePassphrase)); err != nil {
+	if err := testKeyForTest(path, []byte(conformancePassphrase)); err != nil {
 		t.Fatalf("a container written by the OLD code (32-byte digest labeled sha512) no longer opens: %v", err)
 	}
-	if err := TestKey(path, []byte(conformanceWrongPassphrase)); err == nil {
+	if err := testKeyForTest(path, []byte(conformanceWrongPassphrase)); err == nil {
 		t.Fatal("the legacy fixture accepted a WRONG passphrase")
 	}
 }
@@ -888,9 +890,9 @@ func TestConformance_MandatoryJSONObjectsArePresent(t *testing.T) {
 	}
 	defer func() { _ = f.Close() }()
 
-	for _, hdrOffset := range []int64{LUKS2PrimaryHeaderOffset, LUKS2SecondaryHeaderOffset} {
-		raw := make([]byte, LUKS2DefaultSize)
-		if _, err := f.ReadAt(raw, hdrOffset+LUKS2HeaderSize); err != nil {
+	for _, hdrOffset := range []int64{header.PrimaryHeaderOffset, header.SecondaryHeaderOffset} {
+		raw := make([]byte, header.DefaultSize)
+		if _, err := f.ReadAt(raw, hdrOffset+header.HeaderSize); err != nil {
 			t.Fatalf("failed to read the JSON area at offset %d: %v", hdrOffset, err)
 		}
 		if i := bytes.IndexByte(raw, 0); i != -1 {
@@ -937,12 +939,12 @@ func TestConformance_MandatoryJSONObjectsArePresent(t *testing.T) {
 // The digest value is a public header field, not a secret. The master key it is
 // derived from is borrowed in place and never copied out.
 func cheapenGoldenDigests(device string) (err error) {
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		return err
 	}
 
-	masterKey, err := getMasterKey(device, []byte(conformancePassphrase), metadata)
+	masterKey, err := getMasterKey(device, []byte(conformancePassphrase), metadata, testVolumeSys())
 	if err != nil {
 		return fmt.Errorf("the golden container does not open: %w", err)
 	}
@@ -957,7 +959,7 @@ func cheapenGoldenDigests(device string) (err error) {
 	const cheapIterations = 1000
 	for _, digest := range metadata.Digests {
 		iterations := cheapIterations
-		kdf := &KDF{Type: digest.Type, Hash: digest.Hash, Salt: digest.Salt, Iterations: &iterations}
+		kdf := &rawKDF{Type: digest.Type, Hash: digest.Hash, Salt: digest.Salt, Iterations: &iterations}
 
 		// Derived exactly as verifyMasterKey will re-derive it, to the length
 		// already stored, so the rewritten digest verifies by the route
@@ -966,7 +968,7 @@ func cheapenGoldenDigests(device string) (err error) {
 		if err != nil {
 			return err
 		}
-		derived, err := deriveKeySecret(masterKey, kdf, len(expected))
+		derived, err := deriveKeySecret(context.Background(), masterKey, kdf, len(expected), testVolumeSys())
 		if err != nil {
 			return err
 		}
@@ -990,7 +992,7 @@ func cheapenGoldenDigests(device string) (err error) {
 	// The golden must still OPEN. Without this, a mistake here would hand every
 	// test in the package a container that fails for a reason unrelated to what
 	// it asserts, and the whole suite would go red for the wrong cause.
-	if err := TestKey(device, []byte(conformancePassphrase)); err != nil {
+	if err := testKeyForTest(device, []byte(conformancePassphrase)); err != nil {
 		return fmt.Errorf("the golden container stopped opening after its digests were cheapened: %w", err)
 	}
 	return nil

@@ -87,22 +87,19 @@ func TestForcedPBKDF2IterationsRefusesBelowTheFloor(t *testing.T) {
 			if got != 0 {
 				t.Errorf("a refused count still returned %d; a caller ignoring the error would write it", got)
 			}
-			if !errors.Is(err, ErrPBKDFIterationsTooLow) {
-				t.Fatalf("error = %v, want ErrPBKDFIterationsTooLow", err)
+			if !errors.Is(err, ErrInvalidArgument) {
+				t.Fatalf("error = %v, want ErrInvalidArgument", err)
 			}
 
-			var refusal *PBKDFIterationsError
+			var refusal *KDFCostError
 			if !errors.As(err, &refusal) {
-				t.Fatalf("error %v is not a *PBKDFIterationsError; a caller cannot learn the floor from it", err)
+				t.Fatalf("error %v is not a *KDFCostError; a caller cannot learn the floor from it", err)
 			}
-			if refusal.Minimum != tt.wantMin {
-				t.Errorf("reported minimum = %d, want %d", refusal.Minimum, tt.wantMin)
+			if refusal.Min != tt.wantMin {
+				t.Errorf("reported minimum = %d, want %d", refusal.Min, tt.wantMin)
 			}
-			if refusal.Iterations != tt.iterations {
-				t.Errorf("reported request = %d, want %d", refusal.Iterations, tt.iterations)
-			}
-			if refusal.Hash != tt.hash {
-				t.Errorf("reported hash = %q, want %q", refusal.Hash, tt.hash)
+			if refusal.Value != tt.iterations {
+				t.Errorf("reported request = %d, want %d", refusal.Value, tt.iterations)
 			}
 
 			// The operator has to be able to act on the message: both numbers,
@@ -130,16 +127,16 @@ func TestForcedPBKDF2IterationsRefusesAboveTheCeiling(t *testing.T) {
 		if got != 0 {
 			t.Errorf("a refused count still returned %d", got)
 		}
-		if !errors.Is(err, ErrPBKDFIterationsTooHigh) {
-			t.Fatalf("error = %v, want ErrPBKDFIterationsTooHigh", err)
+		if !errors.Is(err, ErrInvalidArgument) {
+			t.Fatalf("error = %v, want ErrInvalidArgument", err)
 		}
 
-		var refusal *PBKDFIterationsError
+		var refusal *KDFCostError
 		if !errors.As(err, &refusal) {
-			t.Fatalf("error %v is not a *PBKDFIterationsError", err)
+			t.Fatalf("error %v is not a *KDFCostError", err)
 		}
-		if refusal.Maximum != maxKDFIterations {
-			t.Errorf("reported maximum = %d, want %d", refusal.Maximum, maxKDFIterations)
+		if refusal.Max != maxKDFIterations {
+			t.Errorf("reported maximum = %d, want %d", refusal.Max, maxKDFIterations)
 		}
 	}
 }
@@ -155,7 +152,7 @@ func TestForcedPBKDF2IterationsAppliesTheSameFloorAsCalibration(t *testing.T) {
 
 		// One below the calibration floor must be refused...
 		below := int(math.Floor(calibrationFloor)) - 1
-		if _, err := forcedPBKDF2Iterations(hashAlgo, below, callerSuppliedCredential); !errors.Is(err, ErrPBKDFIterationsTooLow) {
+		if _, err := forcedPBKDF2Iterations(hashAlgo, below, callerSuppliedCredential); !errors.Is(err, ErrInvalidArgument) {
 			t.Errorf("%s: %d is below the calibration floor of %.0f but forcedPBKDF2Iterations returned %v",
 				hashAlgo, below, calibrationFloor, err)
 		}
@@ -174,8 +171,8 @@ func TestForcedPBKDF2IterationsAppliesTheSameFloorAsCalibration(t *testing.T) {
 func TestCreateKDFWritesAnExplicitIterationCount(t *testing.T) {
 	const iterations = 750_000
 
-	kdf, err := CreateKDF(FormatOptions{
-		KDFType:         KDFTypePBKDF2,
+	kdf, err := createKDFStrict(formatOptionsForTest{
+		KDFType:         kdfTypePBKDF2,
 		HashAlgo:        "sha512",
 		PBKDFIterations: iterations,
 		// Deliberately also set, and deliberately ignored: an explicit count
@@ -199,8 +196,8 @@ func TestCreateKDFWritesAnExplicitIterationCount(t *testing.T) {
 // refusal side. The floor has to be reachable from the exported API, not only
 // from the unexported validator.
 func TestCreateKDFRefusesAnExplicitCountBelowTheFloor(t *testing.T) {
-	kdf, err := CreateKDF(FormatOptions{
-		KDFType:         KDFTypePBKDF2,
+	kdf, err := createKDFStrict(formatOptionsForTest{
+		KDFType:         kdfTypePBKDF2,
 		HashAlgo:        "sha512",
 		PBKDFIterations: 1,
 	}, 64)
@@ -210,8 +207,8 @@ func TestCreateKDFRefusesAnExplicitCountBelowTheFloor(t *testing.T) {
 	if kdf != nil {
 		t.Error("CreateKDF returned a KDF alongside its error")
 	}
-	if !errors.Is(err, ErrPBKDFIterationsTooLow) {
-		t.Fatalf("error = %v, want ErrPBKDFIterationsTooLow", err)
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("error = %v, want ErrInvalidArgument", err)
 	}
 }
 
@@ -224,7 +221,7 @@ func TestFormatWritesAnExplicitIterationCount(t *testing.T) {
 	const iterations = 250_000
 
 	path := newImage(t, "explicit-iterations.img")
-	if err := Format(FormatOptions{
+	if err := formatForTest(formatOptionsForTest{
 		Device:          path,
 		Passphrase:      []byte(conformancePassphrase),
 		Cipher:          "aes",
@@ -232,13 +229,13 @@ func TestFormatWritesAnExplicitIterationCount(t *testing.T) {
 		KeySize:         512,
 		HashAlgo:        "sha512",
 		SectorSize:      512,
-		KDFType:         KDFTypePBKDF2,
+		KDFType:         kdfTypePBKDF2,
 		PBKDFIterations: iterations,
 	}); err != nil {
 		t.Fatalf("Format failed: %v", err)
 	}
 
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -252,7 +249,7 @@ func TestFormatWritesAnExplicitIterationCount(t *testing.T) {
 
 	// The container must still open. A pinned count that produced a keyslot no
 	// passphrase derives would be worse than a calibrated one.
-	if err := TestKey(path, []byte(conformancePassphrase)); err != nil {
+	if err := testKeyForTest(path, []byte(conformancePassphrase)); err != nil {
 		t.Fatalf("the passphrase does not open a container formatted with an explicit count: %v", err)
 	}
 }
@@ -269,7 +266,7 @@ func TestFormatRefusesAnExplicitCountBelowTheFloor(t *testing.T) {
 		t.Fatalf("failed to read the blank image: %v", err)
 	}
 
-	err = Format(FormatOptions{
+	err = formatForTest(formatOptionsForTest{
 		Device:          path,
 		Passphrase:      []byte(conformancePassphrase),
 		Cipher:          "aes",
@@ -277,11 +274,11 @@ func TestFormatRefusesAnExplicitCountBelowTheFloor(t *testing.T) {
 		KeySize:         512,
 		HashAlgo:        "sha512",
 		SectorSize:      512,
-		KDFType:         KDFTypePBKDF2,
+		KDFType:         kdfTypePBKDF2,
 		PBKDFIterations: minPBKDF2Iterations, // cryptsetup would accept this
 	})
-	if !errors.Is(err, ErrPBKDFIterationsTooLow) {
-		t.Fatalf("Format = %v, want ErrPBKDFIterationsTooLow", err)
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("Format = %v, want ErrInvalidArgument", err)
 	}
 
 	after, err := os.ReadFile(path) // #nosec G304 -- path is under t.TempDir()
@@ -304,15 +301,15 @@ func TestAddKeyWritesAnExplicitIterationCount(t *testing.T) {
 	path := newImage(t, "addkey-iterations.img")
 	formatWithLibrary(t, path)
 
-	if _, err := AddKey(path, []byte(conformancePassphrase), []byte("a-second-credential"), &AddKeyOptions{
-		KDFType:         KDFTypePBKDF2,
+	if _, err := addKeyForTest(path, []byte(conformancePassphrase), []byte("a-second-credential"), &addKeyOptionsForTest{
+		KDFType:         kdfTypePBKDF2,
 		Hash:            "sha512",
 		PBKDFIterations: iterations,
 	}); err != nil {
 		t.Fatalf("AddKey failed: %v", err)
 	}
 
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -331,7 +328,7 @@ func TestAddKeyWritesAnExplicitIterationCount(t *testing.T) {
 		t.Fatal("AddKey did not create a second keyslot")
 	}
 
-	if err := TestKey(path, []byte("a-second-credential")); err != nil {
+	if err := testKeyForTest(path, []byte("a-second-credential")); err != nil {
 		t.Fatalf("the new passphrase does not open the volume: %v", err)
 	}
 }
@@ -344,21 +341,21 @@ func TestAddKeyRefusesAnExplicitCountBelowTheFloor(t *testing.T) {
 	path := newImage(t, "addkey-weak.img")
 	formatWithLibrary(t, path)
 
-	_, before, err := ReadHeader(path)
+	_, before, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 
-	_, err = AddKey(path, []byte(conformancePassphrase), []byte("a-second-credential"), &AddKeyOptions{
-		KDFType:         KDFTypePBKDF2,
+	_, err = addKeyForTest(path, []byte(conformancePassphrase), []byte("a-second-credential"), &addKeyOptionsForTest{
+		KDFType:         kdfTypePBKDF2,
 		Hash:            "sha512",
 		PBKDFIterations: 1,
 	})
-	if !errors.Is(err, ErrPBKDFIterationsTooLow) {
-		t.Fatalf("AddKey = %v, want ErrPBKDFIterationsTooLow", err)
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("AddKey = %v, want ErrInvalidArgument", err)
 	}
 
-	_, after, err := ReadHeader(path)
+	_, after, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader after the refusal failed: %v", err)
 	}
@@ -366,7 +363,7 @@ func TestAddKeyRefusesAnExplicitCountBelowTheFloor(t *testing.T) {
 		t.Fatalf("the container has %d keyslots after a refused AddKey, had %d",
 			len(after.Keyslots), len(before.Keyslots))
 	}
-	if err := TestKey(path, []byte("a-second-credential")); err == nil {
+	if err := testKeyForTest(path, []byte("a-second-credential")); err == nil {
 		t.Fatal("the refused passphrase opens the volume")
 	}
 }
@@ -391,7 +388,7 @@ func TestChangeKeyPreservesTheKeyslotsPBKDF2Cost(t *testing.T) {
 	const iterations = 210_001
 
 	path := newImage(t, "changekey-cost.img")
-	if err := Format(FormatOptions{
+	if err := formatForTest(formatOptionsForTest{
 		Device:          path,
 		Passphrase:      []byte(conformancePassphrase),
 		Cipher:          "aes",
@@ -399,18 +396,18 @@ func TestChangeKeyPreservesTheKeyslotsPBKDF2Cost(t *testing.T) {
 		KeySize:         512,
 		HashAlgo:        "sha512",
 		SectorSize:      512,
-		KDFType:         KDFTypePBKDF2,
+		KDFType:         kdfTypePBKDF2,
 		PBKDFIterations: iterations,
 	}); err != nil {
 		t.Fatalf("Format failed: %v", err)
 	}
 
 	updated := []byte("the-replacement-credential")
-	if err := ChangeKey(path, []byte(conformancePassphrase), updated, 0); err != nil {
+	if err := changeKeyForTest(path, []byte(conformancePassphrase), updated, 0); err != nil {
 		t.Fatalf("ChangeKey failed: %v", err)
 	}
 
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -427,10 +424,10 @@ func TestChangeKeyPreservesTheKeyslotsPBKDF2Cost(t *testing.T) {
 		t.Fatalf("ChangeKey changed the keyslot hash to %q, was sha512", kdf.Hash)
 	}
 
-	if err := TestKey(path, updated); err != nil {
+	if err := testKeyForTest(path, updated); err != nil {
 		t.Fatalf("the new passphrase does not open the volume: %v", err)
 	}
-	if err := TestKey(path, []byte(conformancePassphrase)); err == nil {
+	if err := testKeyForTest(path, []byte(conformancePassphrase)); err == nil {
 		t.Fatal("the old passphrase still opens the volume")
 	}
 }

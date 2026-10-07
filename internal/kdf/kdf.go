@@ -16,6 +16,7 @@
 package kdf
 
 import (
+	"context"
 	"crypto"
 	"crypto/pbkdf2"
 	_ "crypto/sha512" // registers SHA-384/SHA-512 for crypto.Hash.New, resolved below
@@ -26,10 +27,11 @@ import (
 	"strings"
 
 	"github.com/jeremyhahn/go-enclave"
+	"golang.org/x/crypto/argon2"
+
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 	"github.com/jeremyhahn/go-luks2/internal/fips"
 	"github.com/jeremyhahn/go-luks2/internal/secret"
-	"golang.org/x/crypto/argon2"
 )
 
 // Params is the derivation parameter set: the on-disk KDF object, with cost
@@ -64,8 +66,8 @@ type Deriver struct {
 // into an enclave. custody.Adopt wipes the intermediate key on every path, so
 // there is no window in which the derived key outlives this call in the
 // clear.
-func (d Deriver) Derive(passphrase []byte, p Params, keySize int) (*enclave.MemoryEnclave, error) {
-	key, err := d.DerivePlain(passphrase, p, keySize)
+func (d Deriver) Derive(ctx context.Context, passphrase []byte, p Params, keySize int) (*enclave.MemoryEnclave, error) {
+	key, err := d.DerivePlain(ctx, passphrase, p, keySize)
 	if err != nil {
 		return nil, err
 	}
@@ -75,11 +77,11 @@ func (d Deriver) Derive(passphrase []byte, p Params, keySize int) (*enclave.Memo
 // DeriveFromSecret runs Derive with passphrase material borrowed from an
 // enclave, for the two callers whose "passphrase" is the volume master key
 // (digest verification and digest creation).
-func (d Deriver) DeriveFromSecret(material *enclave.MemoryEnclave, p Params, keySize int) (*enclave.MemoryEnclave, error) {
+func (d Deriver) DeriveFromSecret(ctx context.Context, material *enclave.MemoryEnclave, p Params, keySize int) (*enclave.MemoryEnclave, error) {
 	var derived *enclave.MemoryEnclave
 	err := secret.Borrow("derive from secret", material, func(b []byte) error {
 		var err error
-		derived, err = d.Derive(b, p, keySize)
+		derived, err = d.Derive(ctx, b, p, keySize)
 		return err
 	})
 	if err != nil {
@@ -91,7 +93,7 @@ func (d Deriver) DeriveFromSecret(material *enclave.MemoryEnclave, p Params, key
 // DerivePlain runs the KDF named by p against passphrase and returns the raw
 // derived bytes, before any enclave custody. Most callers want Derive;
 // DerivePlain exists for the callers that compare or test the bytes directly.
-func (d Deriver) DerivePlain(passphrase []byte, p Params, keySize int) ([]byte, error) {
+func (d Deriver) DerivePlain(ctx context.Context, passphrase []byte, p Params, keySize int) ([]byte, error) {
 	// A PANIC GUARD, not a policy ceiling: crypto/pbkdf2 refuses a
 	// non-positive keyLength with an error x/crypto used to turn into a
 	// panic, and argon2 dereferences nil on one. The ceiling a header must
@@ -99,7 +101,7 @@ func (d Deriver) DerivePlain(passphrase []byte, p Params, keySize int) ([]byte, 
 	// also serves Format/AddKey/ChangeKey, deriving from a size the CALLER
 	// chose.
 	if keySize <= 0 {
-		return nil, &errs.Error{Detail: "requested key length must be positive"}
+		return nil, &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "requested key length must be positive"}
 	}
 
 	if err := d.FIPS.RequireKDF(p.Type); err != nil {
@@ -108,24 +110,44 @@ func (d Deriver) DerivePlain(passphrase []byte, p Params, keySize int) ([]byte, 
 
 	salt, err := base64.StdEncoding.DecodeString(p.Salt)
 	if err != nil {
-		return nil, &errs.Error{Detail: "invalid salt", Err: err}
+		return nil, &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "invalid salt", Err: err}
 	}
 
+	// Checked before each derivation (DESIGN.md §D.2): a PBKDF2/argon2 run in
+	// flight cannot be interrupted, so cancellation is observed here, at the
+	// one point before the derivation starts, rather than attempted inside it.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	var key []byte
 	switch p.Type {
 	case "pbkdf2":
-		return derivePBKDF2(passphrase, salt, p, keySize, d.FIPS)
+		key, err = derivePBKDF2(passphrase, salt, p, keySize, d.FIPS)
 	case "argon2i":
-		return DeriveArgon2i(passphrase, salt, p, keySize)
+		key, err = DeriveArgon2i(passphrase, salt, p, keySize)
 	case "argon2id":
-		return DeriveArgon2id(passphrase, salt, p, keySize)
+		key, err = DeriveArgon2id(passphrase, salt, p, keySize)
 	default:
 		return nil, &errs.Error{Kind: ErrUnsupportedKDF, Detail: p.Type}
 	}
+	if err != nil {
+		return nil, err
+	}
+
+	// A derivation that finished while its ctx was being canceled is not
+	// handed back: the output is destroyed and the cancellation is reported,
+	// exactly as if the derivation had never been allowed to start.
+	if err := ctx.Err(); err != nil {
+		clear(key)
+		return nil, err
+	}
+	return key, nil
 }
 
 func derivePBKDF2(passphrase, salt []byte, p Params, keySize int, mode fips.Mode) ([]byte, error) {
 	if p.Iterations == nil {
-		return nil, &errs.Error{Detail: "crypto pbkdf2: PBKDF2 requires iterations"}
+		return nil, &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "crypto pbkdf2: PBKDF2 requires iterations"}
 	}
 
 	hashFunc, err := PBKDF2HashFunc(mode, p.Hash)
@@ -140,7 +162,7 @@ func derivePBKDF2(passphrase, salt []byte, p Params, keySize int, mode fips.Mode
 	// regardless. The ruling above is what settles that.
 	key, err := pbkdf2.Key(hashFunc, string(passphrase), salt, *p.Iterations, keySize)
 	if err != nil {
-		return nil, &errs.Error{Detail: "crypto pbkdf2", Err: err}
+		return nil, &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "crypto pbkdf2", Err: err}
 	}
 	return key, nil
 }
@@ -164,19 +186,19 @@ func deriveArgon2(
 	passphrase, salt []byte, keySize int,
 ) ([]byte, error) {
 	if p.Time == nil || p.Memory == nil || p.CPUs == nil {
-		return nil, &errs.Error{Detail: fmt.Sprintf("%s requires time, memory, and cpus parameters", name)}
+		return nil, &errs.Error{Kind: errs.ErrInvalidArgument, Detail: fmt.Sprintf("%s requires time, memory, and cpus parameters", name)}
 	}
 
 	// Validate CPUs fits in uint8 (Argon2 parallelism is 1-255)
 	cpus := *p.CPUs
 	if cpus < 1 || cpus > 255 {
-		return nil, &errs.Error{Detail: "crypto " + op + ": cpus must be between 1 and 255"}
+		return nil, &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "crypto " + op + ": cpus must be between 1 and 255"}
 	}
 
 	// The round count, which x/crypto/argon2 PANICS on rather than refusing:
 	// "argon2: number of rounds too small" for time < 1.
 	if *p.Time < 1 {
-		return nil, &errs.Error{Detail: "crypto " + op + ": time cost must be at least 1"}
+		return nil, &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "crypto " + op + ": time cost must be at least 1"}
 	}
 
 	// AND THE MEMORY COST: these are signed ints out of JSON converted with
@@ -185,7 +207,7 @@ func deriveArgon2(
 	// enforced here; the ceiling is the read path's job (ValidateCost), so a
 	// foreign volume that currently unlocks is not newly refused.
 	if *p.Memory < MinArgon2Memory {
-		return nil, &errs.Error{Detail: fmt.Sprintf("crypto %s: memory cost %d is below the %d KiB floor; "+
+		return nil, &errs.Error{Kind: errs.ErrInvalidArgument, Detail: fmt.Sprintf("crypto %s: memory cost %d is below the %d KiB floor; "+
 			"a negative value becomes ~4 TiB after the uint32 conversion", op, *p.Memory, MinArgon2Memory)}
 	}
 
@@ -210,11 +232,11 @@ func deriveArgon2(
 // silently truncating it.
 func u32(op, field string, v int) (uint32, error) {
 	if v < 0 {
-		return 0, &errs.Error{Detail: fmt.Sprintf("crypto %s: %s must not be negative (got %d); "+
+		return 0, &errs.Error{Kind: errs.ErrInvalidArgument, Detail: fmt.Sprintf("crypto %s: %s must not be negative (got %d); "+
 			"the conversion below would turn it into a very large one", op, field, v)}
 	}
 	if uint64(v) > math.MaxUint32 {
-		return 0, &errs.Error{Detail: fmt.Sprintf("crypto %s: %s %d exceeds what the argon2 interface can "+
+		return 0, &errs.Error{Kind: errs.ErrInvalidArgument, Detail: fmt.Sprintf("crypto %s: %s %d exceeds what the argon2 interface can "+
 			"represent (uint32); the conversion would silently truncate it rather than fail", op, field, v)}
 	}
 	return uint32(v), nil
@@ -244,7 +266,7 @@ func PBKDF2Hash(hashAlgo string) (crypto.Hash, error) {
 // releases that defaulted to SHA-1, but the Go Cryptographic Module permits
 // PBKDF2 only with SHA-2/SHA-3 and panics on SHA-1 under GODEBUG=fips140=only.
 // Refuse it here so a FIPS build reports a typed error instead of crashing,
-// and so the call never reaches the module. See docs/FIPS.md.
+// and so the call never reaches the module. See docs/fips/architecture.md.
 func PBKDF2HashFunc(mode fips.Mode, hashAlgo string) (func() hash.Hash, error) {
 	h, err := PBKDF2Hash(hashAlgo)
 	if err != nil {

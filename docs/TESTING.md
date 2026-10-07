@@ -1,6 +1,6 @@
 # Testing
 
-> **Status: REFERENCE** · Last verified: 2026-10-04 against v0.3.1-alpha
+> **Status: REFERENCE** · Last verified: 2026-10-07 against v1.0.0-rc.1 (ef01368)
 
 ```bash
 make test-unit          # unit tests, -race, per-package coverage profiles
@@ -12,22 +12,22 @@ make ci-full            # ci, then the container and the combined coverage gate
 
 Unit tests need no root, devices or network. The integration suite needs a real
 kernel (loop devices, device-mapper, the kernel keyring, mounts), so it runs in
-a container launched by `test/integration/cmd/docker-run`.
+a container launched by `test/tools/docker-run`.
 
 ## Coverage
 
 Every package is held to 90%, per package and exactly: 89.99% fails, and an
 aggregate above 90% does not excuse a package below it. Floors are in
-`coverage-floors.txt`; the gate is `test/covergate`.
+`coverage-floors.txt`; the gate is `test/tools/covergate`.
 
 | Tier | Measured by | Gated in |
 |---|---|---|
 | `unit` | `make test-unit`: every package from `go list ./...`, default tags, `-race` | CI's unit job and `make ci` |
-| `combined` | `make coverage-combined` inside the container: unit plus integration, with `-coverpkg` over `pkg/luks2`, `test/harness`, `internal/dm` and `internal/keyring` | CI's integration job and `make ci-full` |
+| `combined` | `make coverage-combined` inside the container: unit plus integration, with `-coverpkg` over the packages `coverage-floors.txt` lists as `combined` | CI's integration job and `make ci-full` |
 
-`pkg/luks2`, `test/harness`, `internal/dm` and `internal/keyring` are held to
-90% in the combined tier, because part of each only runs against a real
-kernel. Each also has a unit floor at its measured level. Every other package
+`pkg/luks2`, `pkg/dmcrypt`, `pkg/filesystem`, `pkg/loop`, `internal/dm`,
+`internal/keyring` and `test/internal/harness` are held to 90% in the combined
+tier, because part of each only runs against a real kernel. Each also has a unit floor at its measured level. Every other package
 is held to 90% in the unit tier. The gate
 also fails on a missing or unreadable profile, a package with no floor, a floor
 for a package that no longer exists, and a package held to 90% in no tier.
@@ -49,7 +49,7 @@ its own vet leg.
 `docker run --privileged` grants every capability, disables seccomp and
 AppArmor, and exposes the host's whole `/dev`. The suite does not use it. The
 narrowest set that was measured to work lives in one place, the `privileges`
-function in `test/integration/cmd/docker-run`, and a unit test pins it flag by
+function in `test/tools/docker-run`, and a unit test pins it flag by
 flag. Every Makefile target and the CI workflow go through that launcher.
 
 Each row was measured on Linux 6.17 with Docker 29.1.3 by removing that one
@@ -88,7 +88,7 @@ custom profile would mean changing the CI host.
 Device-mapper and loop devices are not namespaced. `dmsetup ls` in the
 container lists every mapping on the host, and the cgroup rules allow opening
 any loop device and any dm mapping. What keeps the suite off other devices is
-`test/harness`: it records every loop device and mapping in a host-side ledger
+`test/internal/harness`: it records every loop device and mapping in a host-side ledger
 before creating it, removes only what it recorded, and never sweeps. Treat the
 state directory as part of that boundary.
 
@@ -122,14 +122,14 @@ losetup -d /dev/loopN   # detach the one you attributed
 This is policy (owner ruling, 2026-09-22). Ownership is never inferred from
 appearance: a path prefix, a deleted backing file or an absence of holders all
 match devices that belong to someone else. The refusals in
-`test/harness/system.go` and `test/harness/cmd/luks2-testreap` are deliberate.
+`test/internal/harness/system.go` and `test/tools/luks2-testreap` are deliberate.
 Do not add a sweep.
 
 ## Running part of the suite
 
 ```bash
 make docker-test-specific TEST=TestSHA1AFVolumesMapTheSameDataOnTheKernel
-make integration-test-pkg
+make integration-test-luks2   # test/integration/<name>/ for any package named in the Makefile's PKG_<name>
 make integration-test-cli
 
 # A shell under the suite's privilege set

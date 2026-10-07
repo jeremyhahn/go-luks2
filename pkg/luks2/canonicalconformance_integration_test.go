@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // BYTE-FOR-BYTE conformance against cryptsetup 2.7.0.
@@ -37,7 +39,7 @@ import (
 // UnaddressableTokenID: a conformance measurement that reports success on a
 // host with no third party to check against converts "unverified" into
 // "verified" (#90). A hard failure is only correct where the binary is a
-// DECLARED dependency, and in this tier it is -- test/integration/Dockerfile
+// DECLARED dependency, and in this tier it is -- build/docker/integration/Dockerfile
 // installs cryptsetup-bin. The unit tier's conformance_test.go skips instead,
 // because there the binary is not declared.
 
@@ -64,7 +66,7 @@ const (
 	// it does whenever an operator's memory limit binds. Left to itself
 	// cryptsetup would pick up to 1 GiB, which is slow and hostile to a CI
 	// container; 64 MiB is also this package's enforced minimum
-	// (ValidateFormatOptions), so it is the smallest value both sides accept.
+	// (validateFormatOptionsForTest), so it is the smallest value both sides accept.
 	canonicalArgon2MemoryKB = 65536
 
 	// canonicalCheapIterations is for containers this package formats FOR
@@ -78,9 +80,9 @@ const (
 	canonicalCheapIterations = 210_000
 )
 
-// canonicalKDF is one keyslot KDF shape, expressed for both implementations.
+// canonicalKDF is one keyslot rawKDF shape, expressed for both implementations.
 //
-// BOTH SHAPES ARE COVERED BECAUSE ONE DECLARATION SERVES BOTH. The KDF struct
+// BOTH SHAPES ARE COVERED BECAUSE ONE DECLARATION SERVES BOTH. The rawKDF struct
 // carries the pbkdf2 members and the argon2 members together, each set
 // omitempty, so which members appear is decided by which are populated -- and a
 // key order that is right for one shape can be wrong for the other. A
@@ -104,13 +106,13 @@ const (
 type canonicalKDF struct {
 	name string
 
-	// cryptsetupArgs are appended to luksFormat. They select the KDF and cap
+	// cryptsetupArgs are appended to luksFormat. They select the rawKDF and cap
 	// the Argon2 memory; nothing here pins a calibrated cost.
 	cryptsetupArgs []string
 
 	// mirror copies the costs cryptsetup CHOSE into this package's options, so
 	// the two containers differ in nothing that either side got to decide.
-	mirror func(t *testing.T, opts *FormatOptions, theirs *KDF)
+	mirror func(t *testing.T, opts *formatOptionsForTest, theirs *rawKDF)
 }
 
 func canonicalKDFs() []canonicalKDF {
@@ -118,12 +120,12 @@ func canonicalKDFs() []canonicalKDF {
 		{
 			name:           "pbkdf2",
 			cryptsetupArgs: []string{"--pbkdf", "pbkdf2", "--hash", "sha512"},
-			mirror: func(t *testing.T, opts *FormatOptions, theirs *KDF) {
+			mirror: func(t *testing.T, opts *formatOptionsForTest, theirs *rawKDF) {
 				t.Helper()
 				if theirs.Iterations == nil {
 					t.Fatalf("cryptsetup's pbkdf2 keyslot has no iteration count: %+v", theirs)
 				}
-				opts.KDFType = KDFTypePBKDF2
+				opts.KDFType = kdfTypePBKDF2
 				opts.PBKDFIterations = *theirs.Iterations
 			},
 		},
@@ -134,12 +136,12 @@ func canonicalKDFs() []canonicalKDF {
 				"--hash", "sha512",
 				"--pbkdf-memory", fmt.Sprint(canonicalArgon2MemoryKB),
 			},
-			mirror: func(t *testing.T, opts *FormatOptions, theirs *KDF) {
+			mirror: func(t *testing.T, opts *formatOptionsForTest, theirs *rawKDF) {
 				t.Helper()
 				if theirs.Time == nil || theirs.Memory == nil || theirs.CPUs == nil {
 					t.Fatalf("cryptsetup's argon2id keyslot is missing a cost member: %+v", theirs)
 				}
-				opts.KDFType = KDFTypeArgon2id
+				opts.KDFType = kdfTypeArgon2id
 				opts.Argon2Time = *theirs.Time
 				opts.Argon2Memory = *theirs.Memory
 				opts.Argon2Parallel = *theirs.CPUs
@@ -149,7 +151,7 @@ func canonicalKDFs() []canonicalKDF {
 }
 
 // Binary header field offsets, from the LUKS2 On-Disk Format specification and
-// matching LUKS2BinaryHeader. Named here because the comparison below excludes
+// matching header.BinaryHeader. Named here because the comparison below excludes
 // three of them and an unnamed 104:168 tells a reader nothing; hdr_size and
 // hdr_offset are named because the secondary header is located and identified
 // by them.
@@ -171,7 +173,7 @@ func requireCryptsetupDeclared(t *testing.T) {
 
 	if _, err := exec.LookPath("cryptsetup"); err != nil {
 		t.Fatalf("cryptsetup is not installed (%v). This tier DECLARES it -- "+
-			"test/integration/Dockerfile installs cryptsetup-bin -- so its absence is a broken "+
+			"build/docker/integration/Dockerfile installs cryptsetup-bin -- so its absence is a broken "+
 			"environment, not a reason to report success. Nothing here was verified against a "+
 			"third-party LUKS2 implementation.", err)
 	}
@@ -232,7 +234,7 @@ func formatWithCryptsetup(t *testing.T, path string, kdf canonicalKDF) {
 // distinction is the whole lesson of this file: that flag pins the DIGEST cost
 // as well as the keyslot cost, so a container made with it is not the container
 // an operator's machine produces, and a byte baseline taken from one measures
-// the wrong thing. It is harmless where the KDF cost is irrelevant to the
+// the wrong thing. It is harmless where the rawKDF cost is irrelevant to the
 // assertion -- the priority tests are about a member no cost touches -- and it
 // removes cryptsetup's ~2s calibration from each fixture.
 func formatWithCryptsetupCheap(t *testing.T, path string) {
@@ -280,10 +282,10 @@ type canonicalPair struct {
 	// oursSecondary and theirsSecondary are the 4096-byte binary header of
 	// the SECOND copy, read from the offset each primary records.
 	oursSecondary, theirsSecondary []byte
-	oursKDF, theirsKDF             *KDF
-	oursKeyslot                    *Keyslot
-	theirsKeyslot                  *Keyslot
-	oursDigest, theirsDigest       *Digest
+	oursKDF, theirsKDF             *rawKDF
+	oursKeyslot                    *header.Keyslot
+	theirsKeyslot                  *header.Keyslot
+	oursDigest, theirsDigest       *rawDigest
 }
 
 // buildCanonicalPair formats both containers and returns their bytes.
@@ -295,7 +297,7 @@ type canonicalPair struct {
 // (it pins the digest too), so the reference side would no longer be the
 // reference.
 //
-// It is memoized per KDF shape. A calibrated format is ~2s on each side and
+// It is memoized per rawKDF shape. A calibrated format is ~2s on each side and
 // three tests want the same pair; the bytes are immutable, so building them
 // once per process is the whole saving with none of the risk.
 func buildCanonicalPair(t *testing.T, kdf canonicalKDF) *canonicalPair {
@@ -313,20 +315,20 @@ func buildCanonicalPair(t *testing.T, kdf canonicalKDF) *canonicalPair {
 	theirs := canonicalImage(t, "cryptsetup.img")
 	formatWithCryptsetup(t, theirs, kdf)
 
-	_, theirMetadata, err := ReadHeader(theirs)
+	_, theirMetadata, err := readHeaderForTest(theirs)
 	if err != nil {
 		t.Fatalf("this package cannot read cryptsetup's own header: %v", err)
 	}
 	theirKeyslot := theirMetadata.Keyslots["0"]
 	if theirKeyslot == nil || theirKeyslot.KDF == nil {
-		t.Fatal("cryptsetup's container has no keyslot 0 with a KDF")
+		t.Fatal("cryptsetup's container has no keyslot 0 with a rawKDF")
 	}
 	theirDigest := theirMetadata.Digests["0"]
 	if theirDigest == nil {
 		t.Fatal("cryptsetup's container has no digest 0")
 	}
 
-	opts := FormatOptions{
+	opts := formatOptionsForTest{
 		Device:     canonicalImage(t, "library.img"),
 		Passphrase: []byte(canonicalPassphrase),
 		Cipher:     "aes",
@@ -338,27 +340,28 @@ func buildCanonicalPair(t *testing.T, kdf canonicalKDF) *canonicalPair {
 	kdf.mirror(t, &opts, theirKeyslot.KDF)
 
 	// The DIGEST cost is mirrored too, through the digestIterationsFor seam --
-	// FormatOptions deliberately has no knob for it. cryptsetup still
+	// formatOptionsForTest deliberately has no knob for it. cryptsetup still
 	// calibrates freely; this package is told the count it chose, exactly as
 	// it is told the keyslot costs. Letting this package run a second
 	// calibration of its own would put two wall-clock measurements, taken
 	// moments apart on a host that is also running a test suite, into a
 	// comparison about ENCODING -- and under load they land 2x apart and fail
 	// a correct tree (#209).
-	pinDigestIterations(t, theirDigest.Iterations)
-	pinCryptoRand(t, 0x9c)
-	pinUUID(t, conformanceUUID)
-	if err := Format(opts); err != nil {
+	sys := defaultVolumeSys()
+	sys.digestIterationsFor = pinDigestIterations(theirDigest.Iterations)
+	sys.cryptoRand = pinCryptoRand(0x9c)
+	sys.newUUID = pinUUID(t, conformanceUUID)
+	if err := formatWithSys(opts, sys); err != nil {
 		t.Fatalf("Format failed mirroring cryptsetup's %s costs: %v", kdf.name, err)
 	}
 
-	_, ourMetadata, err := ReadHeader(opts.Device)
+	_, ourMetadata, err := readHeaderForTest(opts.Device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 	ourKeyslot := ourMetadata.Keyslots["0"]
 	if ourKeyslot == nil || ourKeyslot.KDF == nil {
-		t.Fatal("the formatted container has no keyslot 0 with a KDF")
+		t.Fatal("the formatted container has no keyslot 0 with a rawKDF")
 	}
 
 	// The mirroring has to have taken effect, or every comparison below would
@@ -407,10 +410,11 @@ var (
 func formatWithLibraryCheap(t *testing.T, path string) {
 	t.Helper()
 
-	pinCryptoRand(t, 0x9c)
-	pinUUID(t, conformanceUUID)
+	sys := defaultVolumeSys()
+	sys.cryptoRand = pinCryptoRand(0x9c)
+	sys.newUUID = pinUUID(t, conformanceUUID)
 
-	if err := Format(FormatOptions{
+	if err := formatWithSys(formatOptionsForTest{
 		Device:          path,
 		Passphrase:      []byte(canonicalPassphrase),
 		Cipher:          "aes",
@@ -418,20 +422,20 @@ func formatWithLibraryCheap(t *testing.T, path string) {
 		KeySize:         512,
 		HashAlgo:        "sha512",
 		SectorSize:      512,
-		KDFType:         KDFTypePBKDF2,
+		KDFType:         kdfTypePBKDF2,
 		PBKDFIterations: canonicalCheapIterations,
-	}); err != nil {
+	}, sys); err != nil {
 		t.Fatalf("Format failed: %v", err)
 	}
 }
 
 // assertKDFCostsMatch fails unless the two keyslot KDFs cost the same. Every
 // member is compared except the salt, which is two independent random draws.
-func assertKDFCostsMatch(t *testing.T, ours, theirs *KDF) {
+func assertKDFCostsMatch(t *testing.T, ours, theirs *rawKDF) {
 	t.Helper()
 
 	if ours.Type != theirs.Type || ours.Hash != theirs.Hash {
-		t.Fatalf("KDF type/hash differ: ours %s/%s, cryptsetup %s/%s", ours.Type, ours.Hash, theirs.Type, theirs.Hash)
+		t.Fatalf("rawKDF type/hash differ: ours %s/%s, cryptsetup %s/%s", ours.Type, ours.Hash, theirs.Type, theirs.Hash)
 	}
 	for _, cost := range []struct {
 		name         string
@@ -463,8 +467,8 @@ func readJSONArea(t *testing.T, path string) []byte {
 	}
 	defer func() { _ = f.Close() }()
 
-	buf := make([]byte, LUKS2DefaultSize)
-	if _, err := f.ReadAt(buf, LUKS2HeaderSize); err != nil {
+	buf := make([]byte, header.DefaultSize)
+	if _, err := f.ReadAt(buf, header.HeaderSize); err != nil {
 		t.Fatalf("failed to read the JSON area of %s: %v", path, err)
 	}
 	end := bytes.IndexByte(buf, 0)
@@ -483,7 +487,7 @@ func readBinaryHeader(t *testing.T, path string) []byte {
 	}
 	defer func() { _ = f.Close() }()
 
-	buf := make([]byte, LUKS2HeaderSize)
+	buf := make([]byte, header.HeaderSize)
 	if _, err := f.ReadAt(buf, 0); err != nil {
 		t.Fatalf("failed to read the binary header of %s: %v", path, err)
 	}
@@ -503,7 +507,7 @@ func readSecondaryBinaryHeader(t *testing.T, path string) []byte {
 
 	primary := readBinaryHeader(t, path)
 	offset := binary.BigEndian.Uint64(primary[hdrSizeStart:hdrSizeEnd])
-	if offset < LUKS2HeaderSize || offset > canonicalImageSize-LUKS2HeaderSize {
+	if offset < header.HeaderSize || offset > canonicalImageSize-header.HeaderSize {
 		t.Fatalf("the primary header of %s records hdr_size %d, which cannot locate a secondary header", path, offset)
 	}
 
@@ -513,12 +517,12 @@ func readSecondaryBinaryHeader(t *testing.T, path string) []byte {
 	}
 	defer func() { _ = f.Close() }()
 
-	buf := make([]byte, LUKS2HeaderSize)
+	buf := make([]byte, header.HeaderSize)
 	if _, err := f.ReadAt(buf, int64(offset)); err != nil {
 		t.Fatalf("failed to read the secondary binary header of %s at %d: %v", path, offset, err)
 	}
-	if got := string(buf[:LUKS2MagicLen]); got != LUKS2SecondaryMagic {
-		t.Fatalf("the header at %d in %s has magic %q, not the secondary magic %q", offset, path, got, LUKS2SecondaryMagic)
+	if got := string(buf[:header.MagicLen]); got != header.SecondaryMagic {
+		t.Fatalf("the header at %d in %s has magic %q, not the secondary magic %q", offset, path, got, header.SecondaryMagic)
 	}
 	if got := binary.BigEndian.Uint64(buf[hdrOffsetStart:hdrOffsetEnd]); got != offset {
 		t.Fatalf("the secondary header of %s was read at %d but records hdr_offset %d", path, offset, got)
@@ -559,7 +563,7 @@ func TestCanonicalJSONReencodesCryptsetupsHeaderByteForByte(t *testing.T) {
 			// the format comparison uses, and a calibrated one.
 			original := buildCanonicalPair(t, kdf).theirsJSON
 
-			var metadata LUKS2Metadata
+			var metadata header.Metadata
 			if err := json.Unmarshal(original, &metadata); err != nil {
 				t.Fatalf("this package cannot parse cryptsetup's own metadata: %v\n%s", err, original)
 			}
@@ -635,11 +639,11 @@ func formattedJSONMatchesCryptsetup(t *testing.T, kdf canonicalKDF) {
 
 	pair := buildCanonicalPair(t, kdf)
 
-	var ourMetadata LUKS2Metadata
+	var ourMetadata header.Metadata
 	if err := json.Unmarshal(pair.oursJSON, &ourMetadata); err != nil {
 		t.Fatalf("failed to parse this package's own metadata: %v", err)
 	}
-	var theirMetadata LUKS2Metadata
+	var theirMetadata header.Metadata
 	if err := json.Unmarshal(pair.theirsJSON, &theirMetadata); err != nil {
 		t.Fatalf("failed to parse cryptsetup's metadata: %v", err)
 	}
@@ -696,8 +700,8 @@ func formattedJSONMatchesCryptsetup(t *testing.T, kdf canonicalKDF) {
 
 // cryptsetupDigestTargetMs and cryptsetupDigestKeyLen are cryptsetup 2.7.0's
 // digest calibration: it benchmarks a 64-byte PBKDF2 derivation to 100ms.
-// Measured, not taken from its documentation -- see DigestIterationTargetMs and
-// DigestCalibrationKeyLen (security.go) for the 14-container measurement.
+// Measured, not taken from its documentation -- see digestIterationTargetMs and
+// digestCalibrationKeyLen (security.go) for the 14-container measurement.
 const (
 	cryptsetupDigestTargetMs = 100
 	cryptsetupDigestKeyLen   = 64
@@ -715,15 +719,15 @@ const (
 func assertDigestCalibrationTargetIsCryptsetups(t *testing.T) {
 	t.Helper()
 
-	if DigestIterationTargetMs != cryptsetupDigestTargetMs {
-		t.Errorf("DigestIterationTargetMs is %d; cryptsetup calibrates its digest to %dms, "+
+	if digestIterationTargetMs != cryptsetupDigestTargetMs {
+		t.Errorf("digestIterationTargetMs is %d; cryptsetup calibrates its digest to %dms, "+
 			"so this package's digest cost has drifted from cryptsetup's",
-			DigestIterationTargetMs, cryptsetupDigestTargetMs)
+			digestIterationTargetMs, cryptsetupDigestTargetMs)
 	}
-	if DigestCalibrationKeyLen != cryptsetupDigestKeyLen {
-		t.Errorf("DigestCalibrationKeyLen is %d; cryptsetup benchmarks a %d-byte derivation whatever the hash, "+
+	if digestCalibrationKeyLen != cryptsetupDigestKeyLen {
+		t.Errorf("digestCalibrationKeyLen is %d; cryptsetup benchmarks a %d-byte derivation whatever the hash, "+
 			"so the sha256 digest cost has drifted from cryptsetup's",
-			DigestCalibrationKeyLen, cryptsetupDigestKeyLen)
+			digestCalibrationKeyLen, cryptsetupDigestKeyLen)
 	}
 	if minPBKDF2Iterations != 1000 {
 		t.Errorf("minPBKDF2Iterations is %d; the LUKS2 floor cryptsetup enforces is 1000", minPBKDF2Iterations)
@@ -762,7 +766,7 @@ func assertDigestCalibrationTargetIsCryptsetups(t *testing.T) {
 func TestFormattedBinaryHeaderMatchesCryptsetup(t *testing.T) {
 	requireCryptsetupDeclared(t)
 
-	// Run for both KDF shapes even though the binary header holds no KDF
+	// Run for both rawKDF shapes even though the binary header holds no rawKDF
 	// parameters. That independence is the claim; asserting it costs one extra
 	// format and turns an assumption into a measurement.
 	for _, kdf := range canonicalKDFs() {
@@ -780,7 +784,7 @@ func formattedBinaryHeaderMatchesCryptsetup(t *testing.T, kdf canonicalKDF) {
 // comparedBinaryHeaderBytes is how many of the 4096 binary-header bytes the
 // comparison covers: everything but sequence_id, the header salt and the
 // checksum.
-const comparedBinaryHeaderBytes = LUKS2HeaderSize -
+const comparedBinaryHeaderBytes = header.HeaderSize -
 	(hdrSequenceIDEnd - hdrSequenceIDStart) -
 	(hdrSaltEnd - hdrSaltStart) -
 	(hdrChecksumEnd - hdrChecksumStart)
@@ -820,9 +824,9 @@ func differingBinaryHeaderBytes(got, want []byte) []int {
 func assertBinaryHeaderMatches(t *testing.T, copyName string, got, want []byte) {
 	t.Helper()
 
-	if len(got) != LUKS2HeaderSize || len(want) != LUKS2HeaderSize {
+	if len(got) != header.HeaderSize || len(want) != header.HeaderSize {
 		t.Fatalf("the %s binary headers are %d and %d bytes; both must be %d",
-			copyName, len(got), len(want), LUKS2HeaderSize)
+			copyName, len(got), len(want), header.HeaderSize)
 	}
 
 	if differing := differingBinaryHeaderBytes(got, want); len(differing) > 0 {
@@ -890,12 +894,12 @@ func TestSecondaryHeaderMatchesCryptsetup(t *testing.T) {
 	t.Run("detects-one-corrupted-byte", func(t *testing.T) {
 		pair := buildCanonicalPair(t, canonicalKDFs()[0])
 		for _, offset := range []int{
-			0,                    // the secondary magic
-			hdrSizeStart + 7,     // hdr_size
-			hdrOffsetStart + 6,   // hdr_offset, the field only the secondary sets non-zero
-			hdrSaltEnd,           // first UUID byte, just past an excluded range
-			hdrChecksumStart - 1, // last reserved byte before the checksum
-			LUKS2HeaderSize - 1,  // the final padding byte
+			0,                     // the secondary magic
+			hdrSizeStart + 7,      // hdr_size
+			hdrOffsetStart + 6,    // hdr_offset, the field only the secondary sets non-zero
+			hdrSaltEnd,            // first UUID byte, just past an excluded range
+			hdrChecksumStart - 1,  // last reserved byte before the checksum
+			header.HeaderSize - 1, // the final padding byte
 		} {
 			corrupted := bytes.Clone(pair.theirsSecondary)
 			corrupted[offset] ^= 0xff
@@ -945,11 +949,11 @@ func TestSequenceIDRecordsTheContainersWriteHistory(t *testing.T) {
 	path := canonicalImage(t, "seqid.img")
 	formatWithLibraryCheap(t, path)
 
-	primary, _, err := ReadHeader(path)
+	primary, _, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
-	secondary, _, err := ReadSecondaryHeader(path)
+	secondary, _, err := readSecondaryHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadSecondaryHeader failed: %v", err)
 	}
@@ -969,15 +973,15 @@ func TestSequenceIDRecordsTheContainersWriteHistory(t *testing.T) {
 	// rule depends on: without it, a torn write leaves two copies a reader
 	// cannot order.
 	before := primary.SequenceID
-	if _, err := AddKey(path, []byte(canonicalPassphrase), []byte("a-second-credential"), &AddKeyOptions{
-		KDFType:       KDFTypePBKDF2,
+	if _, err := addKeyForTest(path, []byte(canonicalPassphrase), []byte("a-second-credential"), &addKeyOptionsForTest{
+		KDFType:       kdfTypePBKDF2,
 		Hash:          "sha512",
 		PBKDFIterTime: 1,
 	}); err != nil {
 		t.Fatalf("AddKey failed: %v", err)
 	}
 
-	after, _, err := ReadHeader(path)
+	after, _, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader after AddKey failed: %v", err)
 	}

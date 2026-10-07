@@ -8,11 +8,15 @@ package luks2
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"github.com/jeremyhahn/go-luks2/internal/fips"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/jeremyhahn/go-luks2/internal/areacipher"
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // The removal guard and the unlock path must answer ONE question -- can this
@@ -33,7 +37,7 @@ import (
 // statement about the slot rather than to the slot.
 type damagedSibling struct {
 	name  string
-	apply func(metadata *LUKS2Metadata, sibling *Keyslot)
+	apply func(metadata *header.Metadata, sibling *header.Keyslot)
 }
 
 // unopenableKeyslotShapes is the set of ways a keyslot can be well-formed
@@ -50,20 +54,20 @@ var unopenableKeyslotShapes = []damagedSibling{
 		// reencryption, so it must be preserved -- and no unlock path will try
 		// it. It reads as a keyslot to len(metadata.Keyslots).
 		name: "a reencrypt keyslot",
-		apply: func(_ *LUKS2Metadata, sibling *Keyslot) {
+		apply: func(_ *header.Metadata, sibling *header.Keyslot) {
 			sibling.Type = "reencrypt"
 		},
 	},
 	{
 		// #37, the shape that reproduced permanent data loss.
 		name: "a luks2 keyslot with no anti-forensic object",
-		apply: func(_ *LUKS2Metadata, sibling *Keyslot) {
+		apply: func(_ *header.Metadata, sibling *header.Keyslot) {
 			sibling.AF = nil
 		},
 	},
 	{
 		name: "a luks2 keyslot with no kdf object",
-		apply: func(_ *LUKS2Metadata, sibling *Keyslot) {
+		apply: func(_ *header.Metadata, sibling *header.Keyslot) {
 			sibling.KDF = nil
 		},
 	},
@@ -71,7 +75,7 @@ var unopenableKeyslotShapes = []damagedSibling{
 		// #45: the area cannot hold the AF material the keyslot declares, so
 		// the merge can never be satisfied.
 		name: "an area smaller than the keyslot's own AF split",
-		apply: func(_ *LUKS2Metadata, sibling *Keyslot) {
+		apply: func(_ *header.Metadata, sibling *header.Keyslot) {
 			sibling.Area.Size = "4096"
 		},
 	},
@@ -79,34 +83,34 @@ var unopenableKeyslotShapes = []damagedSibling{
 		// #45: the rejection lived as an inline literal inside the XTS transform and
 		// nothing else could consult it.
 		name: "an area cipher nothing implements",
-		apply: func(_ *LUKS2Metadata, sibling *Keyslot) {
+		apply: func(_ *header.Metadata, sibling *header.Keyslot) {
 			sibling.Area.Encryption = "serpent-xts-plain64"
 		},
 	},
 	{
 		// #45: resolved inside the anti-forensic merge.
 		name: "an anti-forensic hash nothing implements",
-		apply: func(_ *LUKS2Metadata, sibling *Keyslot) {
+		apply: func(_ *header.Metadata, sibling *header.Keyslot) {
 			sibling.AF.Hash = "nosuchhash"
 		},
 	},
 	{
 		// #45: resolved inside the derivation.
 		name: "a PBKDF2 hash nothing implements",
-		apply: func(_ *LUKS2Metadata, sibling *Keyslot) {
+		apply: func(_ *header.Metadata, sibling *header.Keyslot) {
 			sibling.KDF.Hash = "nosuchhash"
 		},
 	},
 	{
 		// #45: decoded inside the derivation.
 		name: "a KDF salt that is not base64",
-		apply: func(_ *LUKS2Metadata, sibling *Keyslot) {
+		apply: func(_ *header.Metadata, sibling *header.Keyslot) {
 			sibling.KDF.Salt = "this is not base64!!"
 		},
 	},
 	{
 		name: "a KDF type nothing implements",
-		apply: func(_ *LUKS2Metadata, sibling *Keyslot) {
+		apply: func(_ *header.Metadata, sibling *header.Keyslot) {
 			sibling.KDF.Type = "scrypt"
 		},
 	},
@@ -114,7 +118,7 @@ var unopenableKeyslotShapes = []damagedSibling{
 		// #45: an Argon2 keyslot with no parallelism. Written as argon2id so
 		// the cost fields are the ones actually consulted.
 		name: "an argon2 KDF with a parallelism outside the accepted range",
-		apply: func(_ *LUKS2Metadata, sibling *Keyslot) {
+		apply: func(_ *header.Metadata, sibling *header.Keyslot) {
 			zero, four, memory := 0, 4, 65536
 			sibling.KDF.Type = "argon2id"
 			sibling.KDF.Iterations = nil
@@ -126,7 +130,7 @@ var unopenableKeyslotShapes = []damagedSibling{
 	{
 		// A cost ceiling this package applies before spending it.
 		name: "a PBKDF2 iteration count past the accepted ceiling",
-		apply: func(_ *LUKS2Metadata, sibling *Keyslot) {
+		apply: func(_ *header.Metadata, sibling *header.Keyslot) {
 			absurd := maxKDFIterations + 1
 			sibling.KDF.Iterations = &absurd
 		},
@@ -135,7 +139,7 @@ var unopenableKeyslotShapes = []damagedSibling{
 		// A volume key no AES data cipher can be keyed with. Well-formed by
 		// every other measure; its AF merge yields a key nothing can use.
 		name: "a volume key size no AES data cipher can use",
-		apply: func(_ *LUKS2Metadata, sibling *Keyslot) {
+		apply: func(_ *header.Metadata, sibling *header.Keyslot) {
 			sibling.KeySize = 40
 		},
 	},
@@ -143,7 +147,7 @@ var unopenableKeyslotShapes = []damagedSibling{
 		// verifyMasterKey refuses to authenticate a keyslot no digest names,
 		// so a key recovered from it is never returned.
 		name: "a keyslot no digest in the header attests",
-		apply: func(metadata *LUKS2Metadata, _ *Keyslot) {
+		apply: func(metadata *header.Metadata, _ *header.Keyslot) {
 			for _, digest := range metadata.Digests {
 				digest.Keyslots = withoutID(digest.Keyslots, siblingSlotID)
 			}
@@ -160,11 +164,11 @@ var unopenableKeyslotShapes = []damagedSibling{
 		// one and stays openable; that is what makes this a removal-guard case
 		// rather than a broken container.
 		name: "a keyslot whose only digest cannot be evaluated",
-		apply: func(metadata *LUKS2Metadata, _ *Keyslot) {
+		apply: func(metadata *header.Metadata, _ *header.Keyslot) {
 			for _, digest := range metadata.Digests {
 				digest.Keyslots = withoutID(digest.Keyslots, siblingSlotID)
 			}
-			metadata.Digests["9"] = &Digest{
+			metadata.Digests["9"] = &rawDigest{
 				Type:       "pbkdf2",
 				Hash:       "sha256",
 				Salt:       encodeBase64([]byte("removal-guard-salt")),
@@ -180,11 +184,11 @@ var unopenableKeyslotShapes = []damagedSibling{
 		// a hash nothing implements, so the length the derivation must match
 		// cannot even be established.
 		name: "a keyslot whose only digest declares a hash nothing implements",
-		apply: func(metadata *LUKS2Metadata, _ *Keyslot) {
+		apply: func(metadata *header.Metadata, _ *header.Keyslot) {
 			for _, digest := range metadata.Digests {
 				digest.Keyslots = withoutID(digest.Keyslots, siblingSlotID)
 			}
-			metadata.Digests["9"] = &Digest{
+			metadata.Digests["9"] = &rawDigest{
 				Type:       "pbkdf2",
 				Hash:       "md5",
 				Salt:       encodeBase64([]byte("removal-guard-salt")),
@@ -200,11 +204,11 @@ var unopenableKeyslotShapes = []damagedSibling{
 		// keyslot's -- the one that is easy to miss because it is not where a
 		// reader looks for a keyslot's cost.
 		name: "a keyslot whose only digest costs more than a header may ask",
-		apply: func(metadata *LUKS2Metadata, _ *Keyslot) {
+		apply: func(metadata *header.Metadata, _ *header.Keyslot) {
 			for _, digest := range metadata.Digests {
 				digest.Keyslots = withoutID(digest.Keyslots, siblingSlotID)
 			}
-			metadata.Digests["9"] = &Digest{
+			metadata.Digests["9"] = &rawDigest{
 				Type:       "pbkdf2",
 				Hash:       "sha256",
 				Salt:       encodeBase64([]byte("removal-guard-salt")),
@@ -221,13 +225,13 @@ var unopenableKeyslotShapes = []damagedSibling{
 		// could not be established -- which, before the measurement was fixed,
 		// was every block device.
 		name: "a keyslot whose area lies beyond the end of the device",
-		apply: func(_ *LUKS2Metadata, sibling *Keyslot) {
+		apply: func(_ *header.Metadata, sibling *header.Keyslot) {
 			sibling.Area.Offset = formatSize(conformanceImageSize)
 		},
 	},
 	{
 		name: "an area offset that is not a number",
-		apply: func(_ *LUKS2Metadata, sibling *Keyslot) {
+		apply: func(_ *header.Metadata, sibling *header.Keyslot) {
 			sibling.Area.Offset = "0x8000"
 		},
 	},
@@ -236,7 +240,7 @@ var unopenableKeyslotShapes = []damagedSibling{
 		// to a syscall that refused it, which is why it survived -- but a guard
 		// does ARITHMETIC with it.
 		name: "a negative area offset",
-		apply: func(_ *LUKS2Metadata, sibling *Keyslot) {
+		apply: func(_ *header.Metadata, sibling *header.Keyslot) {
 			sibling.Area.Offset = "-4096"
 		},
 	},
@@ -256,7 +260,7 @@ const siblingSlotID = "1"
 // tests assert is about the shapes the guard CAN see.
 //
 // damage may be nil, for the control.
-func volumeWithSibling(t *testing.T, name string, damage func(*LUKS2Metadata, *Keyslot)) string {
+func volumeWithSibling(t *testing.T, name string, damage func(*header.Metadata, *header.Keyslot)) string {
 	t.Helper()
 	return restoreVolume(t, name, goldenSiblingVolume(t, damage))
 }
@@ -286,7 +290,7 @@ const goldenVolumePrefix = 2 << 20
 // and the XTS pass are exactly what they were; only the number of times they are
 // paid changes. Weakening a fixture to buy time is how a control stops catching
 // what it was written for.
-func goldenSiblingVolume(t *testing.T, damage func(*LUKS2Metadata, *Keyslot)) []byte {
+func goldenSiblingVolume(t *testing.T, damage func(*header.Metadata, *header.Keyslot)) []byte {
 	t.Helper()
 	return goldenBytes(t, buildVolumeWithSibling(t, "golden-sibling.img", damage))
 }
@@ -334,13 +338,13 @@ func restoreVolume(t *testing.T, name string, golden []byte) string {
 // every fixture in the package inherits it and the expensive unlock it costs
 // is paid once per process rather than once per shape.
 
-func buildVolumeWithSibling(t *testing.T, name string, damage func(*LUKS2Metadata, *Keyslot)) string {
+func buildVolumeWithSibling(t *testing.T, name string, damage func(*header.Metadata, *header.Keyslot)) string {
 	t.Helper()
 
 	path := newImage(t, name)
 	formatWithLibrary(t, path)
 
-	hdr, metadata, err := ReadHeader(path)
+	hdr, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -359,7 +363,7 @@ func buildVolumeWithSibling(t *testing.T, name string, damage func(*LUKS2Metadat
 	if err != nil {
 		t.Fatalf("the formatted keyslot has an unreadable area size: %v", err)
 	}
-	sibling.Area.Offset = formatSize(alignTo(offset+size, KeyslotAreaAlignment))
+	sibling.Area.Offset = formatSize(alignTo(offset+size, keyslotAreaAlignment))
 	metadata.Keyslots[siblingSlotID] = sibling
 
 	for _, digest := range metadata.Digests {
@@ -393,7 +397,7 @@ func TestTheUnlockPathRefusesEveryShapeTheRemovalGuardMustNotCount(t *testing.T)
 		t.Run(shape.name, func(t *testing.T) {
 			path := volumeWithSibling(t, "yardstick.img", shape.apply)
 
-			hdr, metadata, err := ReadHeader(path)
+			hdr, metadata, err := readHeaderForTest(path)
 			if err != nil {
 				t.Fatalf("ReadHeader failed: %v", err)
 			}
@@ -402,7 +406,7 @@ func TestTheUnlockPathRefusesEveryShapeTheRemovalGuardMustNotCount(t *testing.T)
 				t.Fatalf("the fixture lost its sibling keyslot")
 			}
 
-			key, err := unlockKeyslot(path, siblingSlotID, []byte(conformancePassphrase), sibling, metadata.Digests)
+			key, err := unlockKeyslot(context.Background(), path, siblingSlotID, []byte(conformancePassphrase), sibling, metadata.Digests, testVolumeSys())
 			if err == nil {
 				mustDestroy(t, key)
 				t.Fatal("the unlock path accepted a keyslot this test asserts it cannot open; the shape is not damaged the way it claims")
@@ -415,7 +419,7 @@ func TestTheUnlockPathRefusesEveryShapeTheRemovalGuardMustNotCount(t *testing.T)
 			}
 			defer func() { _ = f.Close() }()
 
-			if keyslotCanOpenVolume(f, hdr, metadata, siblingSlotID) {
+			if keyslotCanOpenVolume(f, hdr, metadata, siblingSlotID, deviceSizeFromFile) {
 				t.Fatalf("the removal guard counts a keyslot the unlock path refuses (%v); counting one too many is how a removal destroys the last working credential", err)
 			}
 		})
@@ -437,7 +441,7 @@ func TestTheRemovalGuardCountsTheSlotsTheUnlockPathWouldOpen(t *testing.T) {
 
 	path := volumeWithSibling(t, "control.img", nil)
 
-	hdr, metadata, err := ReadHeader(path)
+	hdr, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -448,15 +452,15 @@ func TestTheRemovalGuardCountsTheSlotsTheUnlockPathWouldOpen(t *testing.T) {
 	defer func() { _ = f.Close() }()
 
 	for _, id := range []string{"0", siblingSlotID} {
-		if !keyslotCanOpenVolume(f, hdr, metadata, id) {
+		if !keyslotCanOpenVolume(f, hdr, metadata, id, deviceSizeFromFile) {
 			t.Fatalf("keyslot %s is not counted, so every refusal this file asserts could come from a predicate that counts nothing", id)
 		}
 	}
 
-	if got := usableKeyslotsAfterRemoving(f, hdr, metadata, "0"); got != 1 {
+	if got := usableKeyslotsAfterRemoving(f, hdr, metadata, "0", deviceSizeFromFile); got != 1 {
 		t.Fatalf("removing keyslot 0 leaves %d counted keyslots, want 1", got)
 	}
-	if got := usableKeyslotsAfterRemoving(f, hdr, metadata, "nosuchslot"); got != 2 {
+	if got := usableKeyslotsAfterRemoving(f, hdr, metadata, "nosuchslot", deviceSizeFromFile); got != 2 {
 		t.Fatalf("removing a keyslot that does not exist leaves %d counted keyslots, want 2", got)
 	}
 }
@@ -470,13 +474,13 @@ func TestScreenKeyslotAcceptsAKeyslotThisLibraryWrote(t *testing.T) {
 	path := newImage(t, "screen-accepts.img")
 	formatWithLibrary(t, path)
 
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 	keyslot := metadata.Keyslots["0"]
 
-	plan, err := screenKeyslot("0", keyslot, metadata.Digests)
+	plan, err := screenKeyslot("0", keyslot, metadata.Digests, fips.Probe)
 	if err != nil {
 		t.Fatalf("the screen refused a keyslot this library just wrote: %v", err)
 	}
@@ -524,7 +528,7 @@ func TestScreenKeyslotKeepsTheDigestBindingClassification(t *testing.T) {
 	path := newImage(t, "screen-digest-binding.img")
 	formatWithLibrary(t, path)
 
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -532,14 +536,14 @@ func TestScreenKeyslotKeepsTheDigestBindingClassification(t *testing.T) {
 		digest.Keyslots = nil
 	}
 
-	_, err = screenKeyslot("0", metadata.Keyslots["0"], metadata.Digests)
+	_, err = screenKeyslot("0", metadata.Keyslots["0"], metadata.Digests, fips.Probe)
 	if err == nil {
 		t.Fatal("the screen accepted a keyslot no digest authenticates")
 	}
 	if !errors.Is(err, ErrInvalidHeader) {
 		t.Fatalf("a keyslot no digest names is not reported as a header fault: %v", err)
 	}
-	if errors.Is(err, ErrMasterKeyVerification) {
+	if errors.Is(err, ErrWrongKey) {
 		t.Fatalf("a keyslot no digest names was reported as a failed verification: %v", err)
 	}
 }
@@ -575,14 +579,14 @@ func TestValidateXTSKeySize(t *testing.T) {
 // [offset, offset+size) and compares it against other keyslots: a negative
 // start intersects nothing, and a sum that wraps is "before everything".
 func TestValidateKeyslotRefusesAreaArithmeticThatCannotBeReasonedAbout(t *testing.T) {
-	base := func() *Keyslot {
-		stripes := AFStripes
-		return &Keyslot{
+	base := func() *header.Keyslot {
+		stripes := header.AFStripes
+		return &header.Keyslot{
 			Type:    "luks2",
 			KeySize: 64,
-			Area:    &KeyslotArea{Type: "raw", Offset: "32768", Size: "258048", Encryption: "aes-xts-plain64"},
-			KDF:     &KDF{Type: "pbkdf2", Hash: "sha256", Salt: "", Iterations: intPtr(1000)},
-			AF:      &AntiForensic{Type: "luks1", Stripes: stripes, Hash: "sha256"},
+			Area:    &header.KeyslotArea{Type: "raw", Offset: "32768", Size: "258048", Encryption: "aes-xts-plain64"},
+			KDF:     &rawKDF{Type: "pbkdf2", Hash: "sha256", Salt: "", Iterations: intPtr(1000)},
+			AF:      &header.AntiForensic{Type: "luks1", Stripes: stripes, Hash: "sha256"},
 		}
 	}
 
@@ -592,14 +596,14 @@ func TestValidateKeyslotRefusesAreaArithmeticThatCannotBeReasonedAbout(t *testin
 
 	negative := base()
 	negative.Area.Offset = "-4096"
-	if err := validateKeyslot("0", negative); !errors.Is(err, ErrInvalidKeyslot) {
+	if err := validateKeyslot("0", negative); !errors.Is(err, ErrKeyslotNotFound) {
 		t.Fatalf("a negative area offset is accepted: %v", err)
 	}
 
 	// 2^63-1 minus a fraction of the area size: the sum wraps negative.
 	overflowing := base()
 	overflowing.Area.Offset = "9223372036854775807"
-	if err := validateKeyslot("0", overflowing); !errors.Is(err, ErrInvalidKeyslot) {
+	if err := validateKeyslot("0", overflowing); !errors.Is(err, ErrKeyslotNotFound) {
 		t.Fatalf("an area whose offset plus size overflows int64 is accepted: %v", err)
 	}
 }
@@ -614,8 +618,8 @@ func TestValidateKeyslotRefusesAreaArithmeticThatCannotBeReasonedAbout(t *testin
 func TestAKeyslotWithOneUsableDigestIsStillCounted(t *testing.T) {
 	defer parallel(t)()
 
-	device := volumeWithSibling(t, "one-good-digest.img", func(metadata *LUKS2Metadata, _ *Keyslot) {
-		metadata.Digests["9"] = &Digest{
+	device := volumeWithSibling(t, "one-good-digest.img", func(metadata *header.Metadata, _ *header.Keyslot) {
+		metadata.Digests["9"] = &rawDigest{
 			Type:       "pbkdf2",
 			Hash:       "sha256",
 			Salt:       encodeBase64([]byte("removal-guard-salt")),
@@ -626,7 +630,7 @@ func TestAKeyslotWithOneUsableDigestIsStillCounted(t *testing.T) {
 		}
 	})
 
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -637,14 +641,14 @@ func TestAKeyslotWithOneUsableDigestIsStillCounted(t *testing.T) {
 	defer func() { _ = f.Close() }()
 
 	for _, id := range []string{"0", siblingSlotID} {
-		if !keyslotCanOpenVolume(f, hdr, metadata, id) {
+		if !keyslotCanOpenVolume(f, hdr, metadata, id, deviceSizeFromFile) {
 			t.Fatalf("keyslot %s stopped being counted because ONE of its digests is unusable; the screen must require any, not all", id)
 		}
 	}
 
 	// And end to end: the volume still opens, so the count is not merely
 	// self-consistent.
-	if err := TestKey(device, []byte(conformancePassphrase)); err != nil {
+	if err := testKeyForTest(device, []byte(conformancePassphrase)); err != nil {
 		t.Fatalf("the volume no longer opens with an unusable digest alongside a usable one: %v", err)
 	}
 }
@@ -670,17 +674,40 @@ func TestTheRemovalGuardRefusesWhenTheDeviceSizeCannotBeEstablished(t *testing.T
 	passphrase := []byte(conformancePassphrase)
 	golden := goldenSiblingVolume(t, nil)
 
-	for _, path := range keyslotRemovalPaths {
+	// What a block device answers Stat with, which is the case the old code
+	// read as "no bound to check".
+	unmeasurable := func(*os.File) (int64, error) { return 0, nil }
+
+	paths := []struct {
+		name   string
+		remove func(device string, passphrase []byte, slot int) error
+	}{
+		{"RemoveKey", func(device string, passphrase []byte, slot int) error {
+			sys := testVolumeSys()
+			sys.measureDeviceSize = unmeasurable
+			return removeKeyForTest(device, passphrase, slot, withTestSys(sys))
+		}},
+		{"KillSlot", func(device string, passphrase []byte, slot int) error {
+			sys := testVolumeSys()
+			sys.measureDeviceSize = unmeasurable
+			return killSlotForTest(device, passphrase, slot, withTestSys(sys))
+		}},
+		{"RemoveKeyslot", func(device string, _ []byte, slot int) error {
+			v, err := Open(context.Background(), device, withTestSys(testVolumeSys()))
+			if err != nil {
+				return err
+			}
+			defer func() { _ = v.Close() }()
+			v.sys.measureDeviceSize = unmeasurable
+			return v.RemoveKeyslot(context.Background(), slot)
+		}},
+	}
+
+	for _, path := range paths {
 		t.Run(path.name, func(t *testing.T) {
 			device := restoreVolume(t, "unmeasurable.img", golden)
 			offset, size := keyslotAreaExtent(t, device, "0")
 			before := readAreaBytes(t, device, offset, size)
-
-			// What a block device answers Stat with, which is the case the old
-			// code read as "no bound to check".
-			original := measureDeviceSize
-			measureDeviceSize = func(*os.File) (int64, error) { return 0, nil }
-			t.Cleanup(func() { measureDeviceSize = original })
 
 			err := path.remove(device, passphrase, 0)
 			if err == nil {
@@ -710,7 +737,7 @@ func TestDeviceSizeIsMeasuredNotAssumed(t *testing.T) {
 	}
 	defer func() { _ = f.Close() }()
 
-	size, err := measureDeviceSize(f)
+	size, err := deviceSizeFromFile(f)
 	if err != nil {
 		t.Fatalf("failed to measure the image: %v", err)
 	}
@@ -721,10 +748,10 @@ func TestDeviceSizeIsMeasuredNotAssumed(t *testing.T) {
 	// And the bound it feeds accepts an area inside the device and refuses one
 	// past its end -- both halves, so neither a permissive nor a rejecting
 	// implementation passes.
-	if err := checkAreaWithinDevice(f, 0x8000, 0x40000); err != nil {
+	if err := checkAreaWithinDevice(f, 0x8000, 0x40000, deviceSizeFromFile); err != nil {
 		t.Fatalf("a keyslot area well inside the device was refused: %v", err)
 	}
-	if err := checkAreaWithinDevice(f, conformanceImageSize, 0x40000); !errors.Is(err, ErrInvalidKeyslot) {
+	if err := checkAreaWithinDevice(f, conformanceImageSize, 0x40000, deviceSizeFromFile); !errors.Is(err, ErrKeyslotNotFound) {
 		t.Fatalf("a keyslot area past the end of the device was accepted: %v", err)
 	}
 }
@@ -759,7 +786,7 @@ func TestScreenDigestNeverAcceptsWhatTheDerivationRefuses(t *testing.T) {
 	// The hash that is legal outside FIPS 140-3 and refused inside it. Its
 	// length is sha1's, so the length check cannot be what decides it and the
 	// hash question is isolated.
-	shapes["a sha1 digest, which FIPS mode refuses"] = &Digest{
+	shapes["a sha1 digest, which FIPS mode refuses"] = &rawDigest{
 		Type:       "pbkdf2",
 		Hash:       "sha1",
 		Salt:       encodeBase64([]byte("digest-screen-salt")),
@@ -770,7 +797,7 @@ func TestScreenDigestNeverAcceptsWhatTheDerivationRefuses(t *testing.T) {
 	accepted := 0
 	for name, digest := range shapes {
 		t.Run(name, func(t *testing.T) {
-			expected, _, screenErr := screenDigest(digest)
+			expected, _, screenErr := screenDigest(digest, fips.Probe)
 			deriveLen := len(expected)
 			clearBytes(expected)
 			if deriveLen == 0 {
@@ -793,7 +820,7 @@ func TestScreenDigestNeverAcceptsWhatTheDerivationRefuses(t *testing.T) {
 
 			// THE YARDSTICK, taken from the path being screened for rather than
 			// from the predicate under test. verifyMasterKey ends up here.
-			kdf := &KDF{
+			kdf := &rawKDF{
 				Type:       digest.Type,
 				Hash:       digest.Hash,
 				Salt:       digest.Salt,
@@ -827,23 +854,23 @@ func TestScreenKeyslotRefusalsAreTypedAndAttributed(t *testing.T) {
 	cases := []struct {
 		name      string
 		nilSlot   bool
-		apply     func(*Keyslot)
+		apply     func(*header.Keyslot)
 		wantCause error
 	}{
 		{name: "a null keyslot", nilSlot: true},
-		{name: "a reencrypt keyslot", apply: func(ks *Keyslot) { ks.Type = "reencrypt" }},
-		{name: "a PBKDF2 iteration count past the accepted ceiling", apply: func(ks *Keyslot) {
+		{name: "a reencrypt keyslot", apply: func(ks *header.Keyslot) { ks.Type = "reencrypt" }},
+		{name: "a PBKDF2 iteration count past the accepted ceiling", apply: func(ks *header.Keyslot) {
 			absurd := maxKDFIterations + 1
 			ks.KDF.Iterations = &absurd
 		}},
-		{name: "a KDF type nothing implements", apply: func(ks *Keyslot) { ks.KDF.Type = "scrypt" }},
-		{name: "a volume key size no AES data cipher can use", apply: func(ks *Keyslot) { ks.KeySize = 40 }},
-		{name: "an anti-forensic hash nothing implements", apply: func(ks *Keyslot) { ks.AF.Hash = "nosuchhash" }},
+		{name: "a KDF type nothing implements", apply: func(ks *header.Keyslot) { ks.KDF.Type = "scrypt" }},
+		{name: "a volume key size no AES data cipher can use", apply: func(ks *header.Keyslot) { ks.KeySize = 40 }},
+		{name: "an anti-forensic hash nothing implements", apply: func(ks *header.Keyslot) { ks.AF.Hash = "nosuchhash" }},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, metadata, err := ReadHeader(path)
+			_, metadata, err := readHeaderForTest(path)
 			if err != nil {
 				t.Fatalf("ReadHeader failed: %v", err)
 			}
@@ -854,47 +881,47 @@ func TestScreenKeyslotRefusalsAreTypedAndAttributed(t *testing.T) {
 				tc.apply(keyslot)
 			}
 
-			_, err = screenKeyslot("0", keyslot, metadata.Digests)
+			_, err = screenKeyslot("0", keyslot, metadata.Digests, fips.Probe)
 			if err == nil {
 				t.Fatal("the screen accepted the keyslot")
 			}
-			if !errors.Is(err, ErrInvalidKeyslot) {
+			if !errors.Is(err, ErrKeyslotNotFound) {
 				t.Fatalf("refusal does not match ErrInvalidKeyslot: %v", err)
 			}
-			var typed *InvalidKeyslotError
+			var typed *Error
 			if !errors.As(err, &typed) {
-				t.Fatalf("refusal is %T, want *InvalidKeyslotError: %v", err, err)
+				t.Fatalf("refusal is %T, want *Error: %v", err, err)
 			}
-			if typed.Keyslot != "0" {
-				t.Fatalf("refusal names keyslot %q, want \"0\"", typed.Keyslot)
+			if !strings.Contains(typed.Detail, `"0"`) {
+				t.Fatalf("refusal does not name keyslot %q: %q", "0", typed.Detail)
 			}
-			if typed.Reason == "" {
-				t.Fatal("refusal carries no reason")
+			if typed.Detail == "" {
+				t.Fatal("refusal carries no detail")
 			}
 		})
 	}
 }
 
-// TestInvalidKeyslotErrorKeepsItsCause pins that the typed wrapper neither
-// reclassifies nor hides what it wraps.
+// TestInvalidKeyslotErrorKeepsItsCause pins that the classified wrapper
+// neither reclassifies nor hides what it wraps.
 func TestInvalidKeyslotErrorKeepsItsCause(t *testing.T) {
-	err := error(&InvalidKeyslotError{Keyslot: "3", Reason: "declares an anti-forensic", Err: ErrUnsupportedHash})
-	if !errors.Is(err, ErrInvalidKeyslot) || !errors.Is(err, ErrUnsupportedHash) {
+	err := error(&Error{Kind: ErrKeyslotNotFound, Detail: "keyslot 3 declares an anti-forensic", Err: ErrUnsupported})
+	if !errors.Is(err, ErrKeyslotNotFound) || !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("wrapper lost a classification: %v", err)
 	}
-	if errors.Is(err, ErrMasterKeyVerification) {
+	if errors.Is(err, ErrWrongKey) {
 		t.Fatalf("wrapper matches a sentinel it does not stand for: %v", err)
 	}
-	want := `invalid keyslot: luks2 keyslot "3": declares an anti-forensic: ` + ErrUnsupportedHash.Error()
+	want := ErrKeyslotNotFound.Error() + `: keyslot 3 declares an anti-forensic: ` + ErrUnsupported.Error()
 	if err.Error() != want {
 		t.Fatalf("message is %q, want %q", err.Error(), want)
 	}
 
-	bare := &InvalidKeyslotError{Keyslot: "3", Reason: "is null"}
-	if got, want := bare.Error(), `invalid keyslot: luks2 keyslot "3": is null`; got != want {
+	bare := &Error{Kind: ErrKeyslotNotFound, Detail: `luks2 keyslot "3": is null`}
+	if got, want := bare.Error(), ErrKeyslotNotFound.Error()+`: luks2 keyslot "3": is null`; got != want {
 		t.Fatalf("message is %q, want %q", got, want)
 	}
-	if bare.Unwrap() != nil {
-		t.Fatal("a wrapper with no cause unwraps to one")
+	if len(bare.Unwrap()) != 1 {
+		t.Fatal("a wrapper with no cause unwraps to more than its Kind")
 	}
 }

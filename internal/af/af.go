@@ -20,7 +20,7 @@ package af
 
 import (
 	"crypto"
-	"crypto/sha1" // #nosec G505 -- legacy LUKS interop only: SHA-1 AF keyslots are read, never written, and refused in FIPS mode (docs/FIPS.md)
+	"crypto/sha1" // #nosec G505 -- legacy LUKS interop only: SHA-1 AF keyslots are read, never written, and refused in FIPS mode (docs/fips/architecture.md)
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/subtle"
@@ -29,6 +29,7 @@ import (
 	"io"
 
 	"github.com/jeremyhahn/go-enclave"
+
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 	"github.com/jeremyhahn/go-luks2/internal/fips"
 	"github.com/jeremyhahn/go-luks2/internal/secret"
@@ -58,7 +59,7 @@ type Codec struct {
 // destroy. p.Hash must be one a new keyslot may be written with (ValidateWriteHash).
 func (c Codec) Split(key *enclave.MemoryEnclave, p Params) (*enclave.MemoryEnclave, error) {
 	if p.Stripes <= 0 {
-		return nil, &errs.Error{Detail: "stripes must be positive"}
+		return nil, &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "stripes must be positive"}
 	}
 
 	hashFunc, err := writeHash(p.Hash)
@@ -164,7 +165,7 @@ func splitInto(dst, data, buffer []byte, stripes int, hashFunc func() hash.Hash,
 	// anywhere else.
 	randomSize := blockSize * (stripes - 1)
 	if _, err := io.ReadFull(rand, dst[:randomSize]); err != nil {
-		return &errs.Error{Detail: "failed to generate random data", Err: err}
+		return &errs.Error{Kind: errs.ErrIO, Detail: "failed to generate random data", Err: err}
 	}
 
 	for i := 0; i < stripes-1; i++ {

@@ -39,7 +39,7 @@ import (
 // The failure is carried out of the sync.Once rather than reported inside it,
 // for the reason formatWithLibrary gives: a t.Fatalf in there would abort
 // whichever test happened to be first.
-func formattedImage(t *testing.T, key, name string, size int64, opts func() FormatOptions) string {
+func formattedImage(t *testing.T, key, name string, size int64, opts func() formatOptionsForTest) string {
 	t.Helper()
 
 	entry := formatCacheEntry(key)
@@ -94,7 +94,7 @@ func formatCacheEntry(key string) *formatCacheItem {
 
 // formatSnapshot runs a real Format on a scratch image of size bytes and
 // returns the image's contents up to its last non-zero byte.
-func formatSnapshot(size int64, opts FormatOptions) ([]byte, error) {
+func formatSnapshot(size int64, opts formatOptionsForTest) ([]byte, error) {
 	dir, err := os.MkdirTemp("", "luks2-formatcache-*")
 	if err != nil {
 		return nil, err
@@ -115,7 +115,7 @@ func formatSnapshot(size int64, opts FormatOptions) ([]byte, error) {
 	}
 
 	opts.Device = seed
-	if err := Format(opts); err != nil {
+	if err := formatForTest(opts); err != nil {
 		return nil, err
 	}
 

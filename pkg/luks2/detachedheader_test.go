@@ -33,30 +33,30 @@ func TestDetachedHeaderKeyslotsAreManageable(t *testing.T) {
 		return code == 0
 	}
 
-	if err := TestKey(header, []byte(conformancePassphrase)); err != nil {
+	if err := testKeyForTest(header, []byte(conformancePassphrase)); err != nil {
 		t.Fatalf("TestKey on cryptsetup's detached header: %v", err)
 	}
 	const second, third = "detached-second-passphrase", "detached-third-passphrase"
-	slot, err := AddKey(header, []byte(conformancePassphrase), []byte(second), &AddKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterTime: 1})
+	slot, err := addKeyForTest(header, []byte(conformancePassphrase), []byte(second), &addKeyOptionsForTest{KDFType: kdfTypePBKDF2, PBKDFIterTime: 1})
 	if err != nil {
 		t.Fatalf("AddKey: %v", err)
 	}
 	if !opensWith(second) {
 		t.Fatal("cryptsetup does not open the data with the keyslot AddKey wrote to its detached header")
 	}
-	if err := ChangeKey(header, []byte(second), []byte(third), slot); err != nil {
+	if err := changeKeyForTest(header, []byte(second), []byte(third), slot); err != nil {
 		t.Fatalf("ChangeKey: %v", err)
 	}
 	if !opensWith(third) || opensWith(second) {
 		t.Fatal("cryptsetup does not see ChangeKey's passphrase change")
 	}
-	if err := KillSlot(header, []byte(conformancePassphrase), slot); err != nil {
+	if err := killSlotForTest(header, []byte(conformancePassphrase), slot); err != nil {
 		t.Fatalf("KillSlot: %v", err)
 	}
 	if opensWith(third) || !opensWith(conformancePassphrase) {
 		t.Fatal("cryptsetup does not see KillSlot's removal")
 	}
-	if err := KillKeyslot(header, 0); !errors.Is(err, ErrLastKeyslot) {
+	if err := killKeyslotForTest(header, 0); !errors.Is(err, ErrLastKeyslot) {
 		t.Fatalf("KillKeyslot of the last keyslot = %v, want ErrLastKeyslot", err)
 	}
 }

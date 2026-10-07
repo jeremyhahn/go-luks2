@@ -23,9 +23,10 @@ coverage.html
 *.swo
 
 # Code-analysis tooling scratch state (#66). Untracked and gitignored, but it
-# still exists in a developer's working directory, and test/integration/Dockerfile
-# ends in `COPY . .` — so without this line a local `make integration-test` bakes
-# the tool's notes into an image layer.
+# still exists in a developer's working directory, and
+# build/docker/integration/Dockerfile ends in `COPY . .` — so without this
+# line a local `make integration-test` bakes the tool's notes into an image
+# layer.
 .serena/
 
 # OS files

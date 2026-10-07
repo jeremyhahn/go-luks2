@@ -5,7 +5,7 @@ name: Release
 #
 #   1. Verify   the tag is a plain version string and agrees with VERSION.
 #   2. CI gate  the tagged commit is on main, and CI's gate job passed for that
-#               exact commit (test/ci/cmd/release-gate). `make release-alpha`
+#               exact commit (test/tools/release-gate). `make release-alpha`
 #               pushes the release commit and its tag together, so CI is
 #               normally still running when this starts: the gate WAITS for
 #               its result, and anything but a pass stops the release.
@@ -122,7 +122,7 @@ jobs:
         run: |
           set -eu
           git fetch --no-tags --quiet origin main
-          go run ./test/ci/cmd/release-gate -sha "$SHA" -main-ref FETCH_HEAD \
+          go run ./test/tools/release-gate -sha "$SHA" -main-ref FETCH_HEAD \
             -status-context 'CI / CI Gate (push)' -workflow ci.yml -job-name 'CI Gate' \
             -timeout 2h -poll 30s
 
@@ -177,11 +177,11 @@ jobs:
       - name: Require gosec and govulncheck at the pinned versions
         run: |
           set -eu
-          go run ./test/ci/cmd/require-tool \
+          go run ./test/tools/require-tool \
             gosec "$GOSEC_VERSION" \
             "github.com/securego/gosec/v2/cmd/gosec" \
             -ldflags "-X main.Version=${GOSEC_VERSION}"
-          go run ./test/ci/cmd/require-tool \
+          go run ./test/tools/require-tool \
             govulncheck "$GOVULNCHECK_VERSION" \
             "golang.org/x/vuln/cmd/govulncheck"
 
@@ -260,7 +260,7 @@ jobs:
           set -eu
           for arch in amd64 arm64; do
             GOOS=linux GOARCH=$arch go build -trimpath \
-              -ldflags="-s -w -X main.Version=${TAG}" \
+              -ldflags="-s -w -X main.version=${TAG}" \
               -o "luks-${TAG}-linux-${arch}" ./cmd/luks2
           done
 

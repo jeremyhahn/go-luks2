@@ -133,21 +133,22 @@ type lockOpSpec struct {
 
 // lockCompatOps are the go-luks2 operations a step can run: two reads that
 // take no lock, and three writes that take cryptsetup's.
-var lockCompatOps = map[string]func(device string, passphrase []byte) error{
-	"ReadHeader": func(device string, _ []byte) error {
-		_, _, err := ReadHeader(device)
+var lockCompatOps = map[string]func(device string, passphrase []byte, sys volumeSys) error{
+	"ReadHeader": func(device string, _ []byte, sys volumeSys) error {
+		_, _, err := readHeaderForTestWithSys(device, sys)
 		return err
 	},
-	"TestKey": TestKey,
-	"AddKey": func(device string, passphrase []byte) error {
-		_, err := AddKey(device, passphrase, []byte(lockCompatNewPassphrase), &AddKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterTime: 1})
+	"TestKey": testKeyForTestWithSys,
+	"AddKey": func(device string, passphrase []byte, sys volumeSys) error {
+		_, err := addKeyWithPolicy(context.Background(), device, passphrase, []byte(lockCompatNewPassphrase),
+			&addKeyOptionsForTest{KDFType: kdfTypePBKDF2, PBKDFIterTime: 1}, callerSuppliedCredential, sys)
 		return err
 	},
-	"KillSlot": func(device string, passphrase []byte) error {
-		return KillSlot(device, passphrase, 1)
+	"KillSlot": func(device string, passphrase []byte, sys volumeSys) error {
+		return killSlotForTest(device, passphrase, 1, withTestSys(sys))
 	},
-	"ImportToken": func(device string, _ []byte) error {
-		return ImportTokenJSON(device, 5, []byte(lockCompatToken))
+	"ImportToken": func(device string, _ []byte, sys volumeSys) error {
+		return setTokenJSONForTest(device, 5, []byte(lockCompatToken), withTestSys(sys))
 	},
 }
 
@@ -159,8 +160,9 @@ func runLockCompatOp(raw string) int {
 		fmt.Printf(`{"Err":%q}`, err.Error())
 		return 0
 	}
-	// As the suite's TestMain does: keyslot cost is not under test.
-	calibratedCountFloor = func(string, keyslotCostPolicy) int { return minPBKDF2Iterations }
+	// As the suite's TestMain used to: keyslot cost is not under test.
+	sys := defaultVolumeSys()
+	sys.calibratedCountFloor = func(string, keyslotCostPolicy) int { return minPBKDF2Iterations }
 	// A held lock is refused within this, not DefaultLockWait.
 	keyslotLockWait = 300 * time.Millisecond
 
@@ -168,7 +170,7 @@ func runLockCompatOp(raw string) int {
 	op, ok := lockCompatOps[spec.Op]
 	if !ok {
 		res.Err = "unknown operation " + spec.Op
-	} else if err := op(spec.Device, []byte(spec.Passphrase)); err != nil {
+	} else if err := op(spec.Device, []byte(spec.Passphrase), sys); err != nil {
 		res = lockOpResult{Err: err.Error(),
 			Unavailable: errors.Is(err, ErrMetadataLockUnavailable),
 			Contended:   errors.Is(err, ErrLockContended),
@@ -626,7 +628,7 @@ func TestCompatMetadataLockDirectoryStates(t *testing.T) {
 			defer parallel(t)()
 
 			loop, _ := laneDLoop(t)
-			if _, err := AddKey(loop, []byte(laneDPassphrase), []byte("lock-compat-slot-one"), &AddKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterTime: 1}); err != nil {
+			if _, err := addKeyForTest(loop, []byte(laneDPassphrase), []byte("lock-compat-slot-one"), &addKeyOptionsForTest{KDFType: kdfTypePBKDF2, PBKDFIterTime: 1}); err != nil {
 				t.Fatalf("AddKey: %v", err)
 			}
 			before := deviceDigest(t, loop, 16<<20)
@@ -651,7 +653,7 @@ func TestCompatMetadataLockDirectoryStates(t *testing.T) {
 
 			// Whatever happened, the volume is intact for both tools.
 			mustCryptsetupPassphrase(t, laneDPassphrase, "open", "--test-passphrase", loop)
-			if err := TestKey(loop, []byte(laneDPassphrase)); err != nil {
+			if err := testKeyForTest(loop, []byte(laneDPassphrase)); err != nil {
 				t.Errorf("TestKey afterwards: %v", err)
 			}
 			if sc.writes {

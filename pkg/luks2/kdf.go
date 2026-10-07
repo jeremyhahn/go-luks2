@@ -5,14 +5,20 @@
 package luks2
 
 import (
+	"context"
 	"crypto"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"hash"
+	"io"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jeremyhahn/go-enclave"
+
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 	"github.com/jeremyhahn/go-luks2/internal/fips"
 	"github.com/jeremyhahn/go-luks2/internal/kdf"
@@ -21,45 +27,45 @@ import (
 // FIPS-compatible KDF type constants
 // These provide convenience aliases for PBKDF2 with specific hash algorithms
 const (
-	// KDFTypePBKDF2 is the base PBKDF2 KDF type (uses HashAlgo option for hash selection)
-	KDFTypePBKDF2 = "pbkdf2"
+	// kdfTypePBKDF2 is the base PBKDF2 KDF type (uses HashAlgo option for hash selection)
+	kdfTypePBKDF2 = "pbkdf2"
 
-	// KDFTypePBKDF2SHA1 names PBKDF2 with SHA-1. It is NOT a type a keyslot
+	// kdfTypePBKDF2SHA1 names PBKDF2 with SHA-1. It is NOT a type a keyslot
 	// can be created with: every creation path refuses it with
-	// ErrSHA1NotWritten (#239, a breaking change). Existing PBKDF2-SHA1
+	// ErrInvalidArgument (#239, a breaking change). Existing PBKDF2-SHA1
 	// keyslots -- on disk, type "pbkdf2" with hash "sha1", as cryptsetup and
 	// converted LUKS1 volumes carry -- still open outside FIPS 140-3 mode.
-	// See docs/FIPS.md.
-	KDFTypePBKDF2SHA1 = "pbkdf2-sha1"
+	// See docs/fips/architecture.md.
+	kdfTypePBKDF2SHA1 = "pbkdf2-sha1"
 
-	// KDFTypePBKDF2SHA256 is PBKDF2 with SHA-256 (FIPS-approved, recommended)
-	KDFTypePBKDF2SHA256 = "pbkdf2-sha256"
+	// kdfTypePBKDF2SHA256 is PBKDF2 with SHA-256 (FIPS-approved, recommended)
+	kdfTypePBKDF2SHA256 = "pbkdf2-sha256"
 
-	// KDFTypePBKDF2SHA384 is PBKDF2 with SHA-384 (FIPS-approved)
-	KDFTypePBKDF2SHA384 = "pbkdf2-sha384"
+	// kdfTypePBKDF2SHA384 is PBKDF2 with SHA-384 (FIPS-approved)
+	kdfTypePBKDF2SHA384 = "pbkdf2-sha384"
 
-	// KDFTypePBKDF2SHA512 is PBKDF2 with SHA-512 (FIPS-approved)
-	KDFTypePBKDF2SHA512 = "pbkdf2-sha512"
+	// kdfTypePBKDF2SHA512 is PBKDF2 with SHA-512 (FIPS-approved)
+	kdfTypePBKDF2SHA512 = "pbkdf2-sha512"
 
-	// KDFTypeArgon2i is the Argon2i KDF type. It is NOT FIPS-approved and is
-	// refused while the process runs in FIPS 140-3 mode. See docs/FIPS.md.
-	KDFTypeArgon2i = "argon2i"
+	// kdfTypeArgon2i is the Argon2i KDF type. It is NOT FIPS-approved and is
+	// refused while the process runs in FIPS 140-3 mode. See docs/fips/architecture.md.
+	kdfTypeArgon2i = "argon2i"
 
-	// KDFTypeArgon2id is the Argon2id KDF type and the library default outside
+	// kdfTypeArgon2id is the Argon2id KDF type and the library default outside
 	// FIPS 140-3 mode. It is NOT FIPS-approved and is refused while the process
-	// runs in FIPS 140-3 mode. See DefaultKDFType and docs/FIPS.md.
-	KDFTypeArgon2id = "argon2id"
+	// runs in FIPS 140-3 mode. See DefaultKDFSpec and docs/fips/architecture.md.
+	kdfTypeArgon2id = "argon2id"
 )
 
-// DefaultKDFType returns the KDF a keyslot is created with when the caller
+// DefaultKDFSpec returns the KDF a keyslot is created with when the caller
 // names none, and it depends on the mode the process runs in, as cryptsetup's
 // default does (#237):
 //
-//   - In FIPS 140-3 mode it is KDFTypePBKDF2SHA512. The iteration count is
+//   - In FIPS 140-3 mode it is "pbkdf2-sha512". The iteration count is
 //     calibrated to the time budget (PBKDFIterTime, 2000 ms by default) and
 //     never falls below the policy floor for SHA-512, so the keyslot gets
 //     whichever of the two is greater.
-//   - Otherwise it is KDFTypeArgon2id, as it always has been.
+//   - Otherwise it is "argon2id", as it always has been.
 //
 // Before #237 the default was Argon2id in both modes, so in FIPS mode every
 // caller that named no KDF -- the CLI's recovery add among them -- was refused
@@ -67,26 +73,144 @@ const (
 // without choosing one explicitly.
 //
 // A caller that names no KDF but supplies an Argon2 cost has chosen Argon2 by
-// its parameters, and gets KDFTypeArgon2id in either mode rather than having
+// its parameters, and gets "argon2id" in either mode rather than having
 // the cost silently dropped; see resolveKDFType.
-func DefaultKDFType() string {
-	return defaultKDFTypeFor(fipsMode())
+func DefaultKDFSpec() string {
+	return defaultKDFTypeFor(fips.Probe())
 }
 
-// defaultKDFTypeFor is DefaultKDFType for a given mode. The mode is a parameter
+// KDFType names a keyslot's key-derivation function in the DESIGN.md §B.2
+// API: the DESTINATION of a resolved KDFParams, as opposed to kdfTypePBKDF2
+// and its aliases above, which are the on-disk strings this package's
+// pre-§B.2 internals read and write. The two constant sets are deliberately
+// distinct: KDFType carries no hash, because KDFParams.Hash says that
+// separately, and a §B.2 caller never needs the alias spellings
+// ("pbkdf2-sha512") the legacy FormatOptions.KDFType field overloads.
+type KDFType string
+
+const (
+	KDFArgon2id KDFType = "argon2id"
+	KDFArgon2i  KDFType = "argon2i"
+	KDFPBKDF2   KDFType = "pbkdf2"
+)
+
+// KDFParams is the KDF a keyslot is created or re-derived with (DESIGN.md
+// §B.2). Hash and the cost fields apply to exactly one of Type's two
+// families and are ignored for the other: Hash and IterTime are PBKDF2's
+// (Iterations overrides IterTime's calibration when it is non-zero, the same
+// override FormatOptions.PBKDFIterations has always given); Time, MemoryKiB
+// and Parallel are Argon2's.
+type KDFParams struct {
+	Type KDFType // zero: DefaultKDFType()
+
+	Hash     crypto.Hash   // PBKDF2 PRF
+	IterTime time.Duration // calibration target; zero: 2s
+
+	Iterations int // exact PBKDF2 count (floors still apply)
+
+	Time, MemoryKiB, Parallel int // Argon2
+}
+
+// Validate refuses a KDFParams this package cannot create: a Type outside
+// the three KDFType constants, an Argon2 cost (named or implied by a nonzero
+// Time/MemoryKiB/Parallel) outside the floors and ceilings
+// validateArgon2CreateCost enforces, and -- the FIPS approval DESIGN.md §B.2
+// calls out -- an Argon2 KDF, named or implied, while the process runs in
+// FIPS 140-3 mode (ErrFIPSNotApproved). An empty Type is judged by what it
+// resolves to, the same way Format and AddKeyslot resolve it, so a
+// FIPS-mode caller that gives no Type but an Argon2 cost sees the refusal
+// here rather than after a device is claimed.
+func (p KDFParams) Validate() error {
+	return p.validateWith(fips.Probe)
+}
+
+// validateWith is Validate against a given FIPS policy source: Volume.Format
+// passes its sys's, so a policy forced on a Volume reaches the KDF gate.
+func (p KDFParams) validateWith(fipsMode func() fips.Mode) error {
+	switch p.Type {
+	case "", KDFArgon2id, KDFArgon2i, KDFPBKDF2:
+	default:
+		return &errs.Error{Kind: ErrUnsupported, Detail: string(p.Type)}
+	}
+	if p.Iterations < 0 {
+		return &errs.Error{Kind: ErrKeyslotNotFound, Detail: "KDFParams: Iterations is negative"}
+	}
+
+	argon2CostGiven := p.Time != 0 || p.MemoryKiB != 0 || p.Parallel != 0
+	resolved := resolveKDFTypeFor(string(p.Type), argon2CostGiven, fipsMode())
+	if err := fipsMode().RequireKDF(resolved); err != nil {
+		return err
+	}
+
+	return validateArgon2CreateCost(formatOptionsForTest{
+		KDFType:        resolved,
+		Argon2Time:     p.Time,
+		Argon2Memory:   p.MemoryKiB,
+		Argon2Parallel: p.Parallel,
+	})
+}
+
+// DefaultKDFType returns the KDFType a keyslot is created with when
+// KDFParams names none: KDFPBKDF2 in FIPS 140-3 mode, KDFArgon2id otherwise.
+// It carries no hash -- KDFParams.Hash says that separately -- unlike
+// DefaultKDFSpec, which this replaces as the exported "default KDF" entry
+// point for DESIGN.md §B.2 callers; DefaultKDFSpec stays exported for the
+// legacy FormatOptions/AddKeyOptions path, which still needs the aliased
+// spelling.
+func DefaultKDFType() KDFType {
+	return defaultKDFTypeWith(fips.Probe)
+}
+
+func defaultKDFTypeWith(fipsMode func() fips.Mode) KDFType {
+	if fipsMode() {
+		return KDFPBKDF2
+	}
+	return KDFArgon2id
+}
+
+// resolved is p with its zero fields defaulted against fipsMode, mirroring
+// resolveKDFTypeFor/defaultKDFTypeFor: an empty Type with no Argon2 cost
+// becomes DefaultKDFType(); a PBKDF2 Type (named or defaulted to) with a
+// zero Hash becomes SHA-512 when the default put it there (matching
+// DefaultKDFSpec's FIPS-mode "pbkdf2-sha512") and SHA-256 otherwise
+// (matching getHashAlgoForKDFType's plain-"pbkdf2" default) -- never SHA-1,
+// which no path here can select.
+func (p KDFParams) resolved(fipsMode fips.Mode) (kdfType KDFType, hash crypto.Hash) {
+	argon2CostGiven := p.Time != 0 || p.MemoryKiB != 0 || p.Parallel != 0
+	kdfType = p.Type
+	typeWasDefaulted := false
+	if kdfType == "" {
+		typeWasDefaulted = !argon2CostGiven
+		kdfType = KDFArgon2id
+		if typeWasDefaulted && bool(fipsMode) {
+			kdfType = KDFPBKDF2
+		}
+	}
+
+	hash = p.Hash
+	if kdfType == KDFPBKDF2 && hash == 0 {
+		hash = crypto.SHA256
+		if typeWasDefaulted && bool(fipsMode) {
+			hash = crypto.SHA512
+		}
+	}
+	return kdfType, hash
+}
+
+// defaultKDFTypeFor is DefaultKDFSpec for a given mode. The mode is a parameter
 // so both answers are tested in every run: a process cannot leave FIPS mode, or
-// enter it, once it has started. DefaultKDFType asks fipsMode, the seam every
+// enter it, once it has started. DefaultKDFSpec asks fipsMode, the seam every
 // FIPS policy decision in this package goes through.
 func defaultKDFTypeFor(fipsMode fips.Mode) string {
 	if fipsMode {
-		return KDFTypePBKDF2SHA512
+		return kdfTypePBKDF2SHA512
 	}
-	return KDFTypeArgon2id
+	return kdfTypeArgon2id
 }
 
 // resolveKDFType returns the KDF type a keyslot is created with: kdfType when
-// the caller named one, KDFTypeArgon2id when the caller named none but supplied
-// an Argon2 cost, and DefaultKDFType otherwise.
+// the caller named one, "argon2id" when the caller named none but supplied
+// an Argon2 cost, and DefaultKDFSpec otherwise.
 //
 // The middle case is what keeps a caller's parameter from being ignored. In
 // FIPS mode the default is PBKDF2, and resolving to it would discard the Argon2
@@ -94,7 +218,7 @@ func defaultKDFTypeFor(fipsMode fips.Mode) string {
 // the FIPS refusal, which says what is wrong. Outside FIPS mode the default is
 // Argon2id anyway, so nothing there changes.
 func resolveKDFType(kdfType string, argon2CostGiven bool) string {
-	return resolveKDFTypeFor(kdfType, argon2CostGiven, fipsMode())
+	return resolveKDFTypeFor(kdfType, argon2CostGiven, fips.Probe())
 }
 
 // resolveKDFTypeFor is resolveKDFType for a given mode; see defaultKDFTypeFor.
@@ -103,7 +227,7 @@ func resolveKDFTypeFor(kdfType string, argon2CostGiven bool, fipsMode fips.Mode)
 		return kdfType
 	}
 	if argon2CostGiven {
-		return KDFTypeArgon2id
+		return kdfTypeArgon2id
 	}
 	return defaultKDFTypeFor(fipsMode)
 }
@@ -111,22 +235,22 @@ func resolveKDFTypeFor(kdfType string, argon2CostGiven bool, fipsMode fips.Mode)
 // formatArgon2CostGiven reports whether a FormatOptions carries any Argon2
 // cost, including a negative one -- != 0 for the reason callerChoseArgon2Cost
 // gives: a negative is still a deliberate choice, and must reach the refusal.
-func formatArgon2CostGiven(opts FormatOptions) bool {
+func formatArgon2CostGiven(opts formatOptionsForTest) bool {
 	return opts.Argon2Time != 0 || opts.Argon2Memory != 0 || opts.Argon2Parallel != 0
 }
 
-// IsFIPSCompliantKDF returns true if the KDF type is FIPS-approved.
+// isFIPSCompliantKDF returns true if the KDF type is FIPS-approved.
 //
 // "pbkdf2-sha1" returns false: the Go Cryptographic Module permits PBKDF2 only
 // with SHA-2 and SHA-3, and rejects SHA-1 outright under GODEBUG=fips140=only.
-// See docs/FIPS.md.
+// See docs/fips/architecture.md.
 //
 // "pbkdf2" returns true because it derives with SHA-256 by default. Overriding
 // that with FormatOptions.HashAlgo = "sha1" yields a KDF that is not
 // FIPS-approved and that CreateKDF refuses in FIPS mode.
-func IsFIPSCompliantKDF(kdfType string) bool {
+func isFIPSCompliantKDF(kdfType string) bool {
 	switch normalizeKDFType(kdfType) {
-	case KDFTypePBKDF2, KDFTypePBKDF2SHA256, KDFTypePBKDF2SHA384, KDFTypePBKDF2SHA512:
+	case kdfTypePBKDF2, kdfTypePBKDF2SHA256, kdfTypePBKDF2SHA384, kdfTypePBKDF2SHA512:
 		return true
 	default:
 		return false
@@ -137,20 +261,6 @@ func IsFIPSCompliantKDF(kdfType string) bool {
 func normalizeKDFType(kdfType string) string {
 	return strings.ToLower(strings.TrimSpace(kdfType))
 }
-
-// fipsMode is the FIPS 140-3 mode every policy decision in this package --
-// the KDF gates, the SHA-1 gates, MigrateToFIPS's refusal, and the
-// classification of a refusal as an import rather than damage -- is made in:
-// fips.Probe, crypto/fips140.Enabled.
-//
-// It is a seam because FIPS mode is fixed at process start: without it, the
-// policy branches run only in a process started with GODEBUG=fips140=only, so
-// the ordinary unit run would exercise none of them and a regression there
-// would wait for the nightly FIPS job. This package's tests substitute it to
-// run those branches in-process; what the Go Cryptographic Module itself
-// enforces in strict mode is still proved by the child-process and nightly
-// tests. Unexported, no setter, substituted only by this package's tests.
-var fipsMode = fips.Probe
 
 // DeriveKeyEnclave derives a key from a passphrase and returns it held in
 // protected memory. This is the derivation every path inside this package uses.
@@ -179,7 +289,7 @@ var fipsMode = fips.Probe
 // decodes it, and a cost-only caller (validateKDFCost, derivationWork) never
 // touches it at all. Callers check k for nil themselves, matching each
 // original function's own nil handling.
-func toKDFParams(k *KDF) kdf.Params {
+func toKDFParams(k *rawKDF) kdf.Params {
 	return kdf.Params{
 		Type:       k.Type,
 		Hash:       k.Hash,
@@ -191,24 +301,37 @@ func toKDFParams(k *KDF) kdf.Params {
 	}
 }
 
-func DeriveKeyEnclave(passphrase []byte, k *KDF, keySize int) (*enclave.MemoryEnclave, error) {
+func deriveKeyEnclave(ctx context.Context, passphrase []byte, k *rawKDF, keySize int) (*enclave.MemoryEnclave, error) {
 	if k == nil {
-		return nil, &errs.Error{Detail: "no KDF object"}
+		return nil, &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "no KDF object"}
 	}
-	return kdfDeriver().Derive(passphrase, toKDFParams(k), keySize)
+	key, err := kdfDeriver(defaultVolumeSys()).Derive(ctx, passphrase, toKDFParams(k), keySize)
+	return key, reclassifyUnsupportedKDF(err)
 }
 
-// passphraseKDF is the keyslot derivation: the passphrase-to-keyslot-key step
-// unlockKeyslot runs for every keyslot it tries. It is DeriveKeyEnclave, and it
-// is reached through this variable for one reason -- so a test can prove that
-// UnlockWithVolumeKey never reaches it (#79). A path that must not run a KDF is
-// a claim nothing checks unless the KDF can be observed.
+// reclassifyUnsupportedKDF folds errs.ErrUnsupportedHash and
+// kdf.ErrUnsupportedKDF -- internal/kdf's and internal/errs' own sentinels
+// for a hash algorithm or KDF type this package does not implement -- into
+// the public ErrUnsupported (DESIGN.md §C.3), at every place a derivation
+// crosses the package boundary. A FIPS-mode refusal (fips.ErrNotApproved)
+// is a different condition -- the algorithm IS implemented -- and is
+// deliberately left unreclassified.
+func reclassifyUnsupportedKDF(err error) error {
+	if err != nil && (errors.Is(err, errs.ErrUnsupportedHash) || errors.Is(err, kdf.ErrUnsupportedKDF)) {
+		return &errs.Error{Kind: ErrUnsupported, Err: err}
+	}
+	return err
+}
+
+// passphraseKDF (volumeSys.passphraseKDF) is the keyslot derivation: the
+// passphrase-to-keyslot-key step unlockKeyslot runs for every keyslot it
+// tries. It defaults to DeriveKeyEnclave; a test proves that
+// UnlockWithVolumeKey never reaches it (#79) by overriding the field on a
+// Volume it constructs, rather than the whole package's derivation.
 //
 // Only the keyslot derivation goes through it. The digest derivation in
 // deriveKeySecret calls DeriveKeyEnclave directly, because the injected-key path
 // DOES run that one and a test forbidding this seam must not forbid it too.
-var passphraseKDF = DeriveKeyEnclave
-
 // deriveKeySecret derives a key from material ALREADY held in protected memory,
 // borrowing the input in place rather than copying it out.
 //
@@ -228,29 +351,39 @@ var passphraseKDF = DeriveKeyEnclave
 // avoid that is prohibited outright by the owner ruling of 2026-08-25, which
 // rules that the protected-memory mandate yields here.
 // Recorded as exposure 2 in internal/secret.
-func deriveKeySecret(material *enclave.MemoryEnclave, k *KDF, keySize int) (*enclave.MemoryEnclave, error) {
+func deriveKeySecret(ctx context.Context, material *enclave.MemoryEnclave, k *rawKDF, keySize int, sys volumeSys) (*enclave.MemoryEnclave, error) {
+	return deriveKeySecretIn(ctx, material, k, keySize, sys.fipsMode())
+}
+
+// deriveKeySecretIn is deriveKeySecret under an explicit FIPS mode, for a
+// caller that is handed the operation's mode rather than its whole volumeSys
+// (evaluateDigest). It is the mode the caller's sys reports, never a default.
+func deriveKeySecretIn(ctx context.Context, material *enclave.MemoryEnclave, k *rawKDF, keySize int, mode fips.Mode) (*enclave.MemoryEnclave, error) {
 	if k == nil {
-		return nil, &errs.Error{Detail: "no KDF object"}
+		return nil, &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "no KDF object"}
 	}
-	return kdfDeriver().DeriveFromSecret(material, toKDFParams(k), keySize)
+	key, err := kdf.Deriver{Custody: custody, FIPS: mode}.DeriveFromSecret(ctx, material, toKDFParams(k), keySize)
+	return key, reclassifyUnsupportedKDF(err)
 }
 
 // deriveKeyPlain is the derivation itself. It is the ONE place in this package
 // that produces key material outside an enclave, and it exists because the
 // stdlib KDFs give no other shape: every caller adopts the result into an
 // enclave immediately, via DeriveKeyEnclave.
-func deriveKeyPlain(passphrase []byte, k *KDF, keySize int) ([]byte, error) {
+func deriveKeyPlain(passphrase []byte, k *rawKDF, keySize int) ([]byte, error) {
 	if k == nil {
-		return nil, &errs.Error{Detail: "no KDF object"}
+		return nil, &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "no KDF object"}
 	}
-	return kdfDeriver().DerivePlain(passphrase, toKDFParams(k), keySize)
+	key, err := kdfDeriver(defaultVolumeSys()).DerivePlain(context.Background(), passphrase, toKDFParams(k), keySize)
+	return key, reclassifyUnsupportedKDF(err)
 }
 
 // getPBKDF2HashFunc returns the hash function for PBKDF2 key derivation
 // Supported: sha256, sha384, sha512 (FIPS-approved) and sha1 (legacy LUKS
 // headers only, refused in FIPS 140-3 mode)
-func getPBKDF2HashFunc(hashAlgo string) (func() hash.Hash, error) {
-	return kdf.PBKDF2HashFunc(fipsMode(), hashAlgo)
+func getPBKDF2HashFunc(hashAlgo string, fipsMode func() fips.Mode) (func() hash.Hash, error) {
+	f, err := kdf.PBKDF2HashFunc(fipsMode(), hashAlgo)
+	return f, reclassifyUnsupportedKDF(err)
 }
 
 // pbkdf2Hash resolves a LUKS2 PBKDF2 hash name to the algorithm, with NO FIPS
@@ -301,16 +434,16 @@ const luks1DigestLen = 20
 // is refused here too instead of reporting a length for a hash that will not
 // run.
 func hashOutputLen(hashAlgo string) (int, error) {
-	return kdf.HashOutputLen(fipsMode(), hashAlgo)
+	return kdf.HashOutputLen(fips.Probe(), hashAlgo)
 }
 
 // deriveArgon2i derives a key using Argon2i.
-func deriveArgon2i(passphrase, salt []byte, k *KDF, keySize int) ([]byte, error) {
+func deriveArgon2i(passphrase, salt []byte, k *rawKDF, keySize int) ([]byte, error) {
 	return kdf.DeriveArgon2i(passphrase, salt, toKDFParams(k), keySize)
 }
 
 // deriveArgon2id derives a key using Argon2id.
-func deriveArgon2id(passphrase, salt []byte, k *KDF, keySize int) ([]byte, error) {
+func deriveArgon2id(passphrase, salt []byte, k *rawKDF, keySize int) ([]byte, error) {
 	return kdf.DeriveArgon2id(passphrase, salt, toKDFParams(k), keySize)
 }
 
@@ -401,7 +534,7 @@ const (
 // binds on hardware about ten times slower, which is exactly where it should.
 var pbkdf2RecommendedIterations = kdf.PBKDF2RecommendedIterations
 
-// BenchmarkPBKDF2 returns the number of PBKDF2 iterations that costs
+// benchmarkPBKDF2 returns the number of PBKDF2 iterations that costs
 // approximately targetMs milliseconds on this machine, for the given hash and
 // derived-key size.
 //
@@ -417,8 +550,8 @@ var pbkdf2RecommendedIterations = kdf.PBKDF2RecommendedIterations
 //
 // Supported hash algorithms: sha256, sha384, sha512 and, outside FIPS 140-3
 // mode, sha1.
-func BenchmarkPBKDF2(hashAlgo string, keySize, targetMs int) (int, error) {
-	return kdfDeriver().Calibrate(hashAlgo, keySize, targetMs)
+func benchmarkPBKDF2(hashAlgo string, keySize, targetMs int) (int, error) {
+	return kdfDeriver(defaultVolumeSys()).Calibrate(context.Background(), hashAlgo, keySize, targetMs)
 }
 
 // pbkdf2Timer runs one PBKDF2 derivation of the given iteration count and
@@ -437,14 +570,16 @@ type pbkdf2Timer = kdf.Timer
 // cost depends on the iteration count, the hash and the output length, not on
 // their contents, and nothing derived here is returned, stored, or compared
 // against anything.
-var wallClockPBKDF2 = kdf.WallClockPBKDF2
+func wallClockPBKDF2(hashFunc func() hash.Hash, iterations, keySize int) (time.Duration, error) {
+	return kdf.WallClockPBKDF2(hashFunc, iterations, keySize)
+}
 
 // calibratePBKDF2 is the calibration itself. The probe bounds and the timer
 // are parameters so that the fail-closed path and the extrapolation can be
 // exercised by a test without needing a broken or an idle clock;
 // BenchmarkPBKDF2 supplies the real ones.
 func calibratePBKDF2(hashFunc func() hash.Hash, hashAlgo string, keySize, targetMs int, probeFloor time.Duration, probeCeiling int, timer pbkdf2Timer) (int, error) {
-	return kdf.CalibratePBKDF2(hashFunc, hashAlgo, keySize, targetMs, probeFloor, probeCeiling, timer)
+	return kdf.CalibratePBKDF2(context.Background(), hashFunc, hashAlgo, keySize, targetMs, probeFloor, probeCeiling, timer)
 }
 
 // scalePBKDF2Iterations extrapolates a timed probe to the requested budget and
@@ -539,20 +674,9 @@ func pbkdf2FloorFor(hashAlgo string, policy keyslotCostPolicy) int {
 	return int(math.Ceil(pbkdf2IterationFloor(hashAlgo, pbkdf2ReferenceTargetMs)))
 }
 
-// calibratedCountFloor is the floor a CALIBRATED iteration count is raised to
-// for a new keyslot (#249, A8): pbkdf2FloorFor, under the keyslot's policy.
-//
-// It is a variable for the reason fipsMode is one. This package's unit suite
-// writes hundreds of keyslots whose cost is not what the test is about, and
-// asks for them with PBKDFIterTime: 1; held to the OWASP floor, each one costs
-// up to 600,000 PBKDF2 rounds per derivation -- seconds under the race
-// detector -- which the suite's runtime budget (#92) cannot carry. TestMain
-// lowers it to LUKS2's own minimum, the cost those keyslots had before this
-// floor existed, exactly as cheapenGoldenDigests cheapens the fixture digests.
-// Production never assigns it, and the test whose subject IS this floor
-// restores it.
-var calibratedCountFloor = pbkdf2FloorFor
-
+// calibratedCountFloor (volumeSys.calibratedCountFloor) is the floor a
+// CALIBRATED iteration count is raised to for a new keyslot (#249, A8):
+// pbkdf2FloorFor, under the keyslot's policy.
 // forcedPBKDF2Iterations validates an explicit PBKDF2 iteration count -- the
 // one a caller supplies through FormatOptions.PBKDFIterations or
 // AddKeyOptions.PBKDFIterations -- and returns it unchanged if it is one this
@@ -582,51 +706,44 @@ var calibratedCountFloor = pbkdf2FloorFor
 // why.
 func forcedPBKDF2Iterations(hashAlgo string, iterations int, policy keyslotCostPolicy) (int, error) {
 	minimum := pbkdf2FloorFor(hashAlgo, policy)
+	param := fmt.Sprintf("pbkdf2 iterations (%s)", hashAlgo)
 
 	if iterations < minimum {
-		return 0, &PBKDFIterationsError{
-			Hash:       hashAlgo,
-			Iterations: iterations,
-			Minimum:    minimum,
-			Maximum:    maxKDFIterations,
-			Err:        ErrPBKDFIterationsTooLow,
+		return 0, &KDFCostError{
+			Param: param,
+			Value: iterations,
+			Min:   minimum,
+			Max:   maxKDFIterations,
 		}
 	}
 
 	if iterations > maxKDFIterations {
-		return 0, &PBKDFIterationsError{
-			Hash:       hashAlgo,
-			Iterations: iterations,
-			Minimum:    minimum,
-			Maximum:    maxKDFIterations,
-			Err:        ErrPBKDFIterationsTooHigh,
+		return 0, &KDFCostError{
+			Param: param,
+			Value: iterations,
+			Min:   minimum,
+			Max:   maxKDFIterations,
 		}
 	}
 
 	return iterations, nil
 }
 
-// CreateKDF creates a KDF structure based on options
-// Supported KDF types:
+// createKDF creates a KDF structure based on options and the keyslot's cost
+// policy. Supported KDF types:
 //   - "pbkdf2" - PBKDF2 with hash from HashAlgo option (default: sha256) [FIPS-approved]
-//   - "pbkdf2-sha1" - REFUSED with ErrSHA1NotWritten: SHA-1 is never written (#239)
+//   - "pbkdf2-sha1" - REFUSED with ErrInvalidArgument: SHA-1 is never written (#239)
 //   - "pbkdf2-sha256" - PBKDF2 with SHA-256 [FIPS-approved, recommended]
 //   - "pbkdf2-sha384" - PBKDF2 with SHA-384 [FIPS-approved]
 //   - "pbkdf2-sha512" - PBKDF2 with SHA-512 [FIPS-approved]
 //   - "argon2i" - Argon2i [NOT FIPS-approved, refused in FIPS mode]
 //   - "argon2id" - Argon2id [NOT FIPS-approved, refused in FIPS mode]
 //
-// An empty KDFType resolves through resolveKDFType: to DefaultKDFType --
+// An empty KDFType resolves through resolveKDFType: to DefaultKDFSpec --
 // "pbkdf2-sha512" in FIPS 140-3 mode, "argon2id" otherwise -- unless an Argon2
 // cost is set, which selects "argon2id".
-func CreateKDF(opts FormatOptions, keySize int) (*KDF, error) {
-	// The EXPORTED entry point is always strict. The exemption has no route
-	// through the public API by construction -- see keyslotCostPolicy.
-	return createKDF(opts, keySize, callerSuppliedCredential)
-}
-
-func createKDF(opts FormatOptions, keySize int, policy keyslotCostPolicy) (*KDF, error) {
-	kdfType := resolveKDFType(normalizeKDFType(opts.KDFType), formatArgon2CostGiven(opts))
+func createKDF(opts formatOptionsForTest, keySize int, policy keyslotCostPolicy, fipsMode func() fips.Mode, calibratedCountFloor func(string, keyslotCostPolicy) int, cryptoRand io.Reader) (*rawKDF, error) {
+	kdfType := resolveKDFTypeFor(normalizeKDFType(opts.KDFType), formatArgon2CostGiven(opts), fipsMode())
 
 	// No keyslot is created with SHA-1, before any other choice is judged.
 	if err := refuseSHA1ForCreation(kdfType, opts.HashAlgo); err != nil {
@@ -634,14 +751,14 @@ func createKDF(opts FormatOptions, keySize int, policy keyslotCostPolicy) (*KDF,
 	}
 
 	// Checked after the default is resolved. The default itself is approved in
-	// FIPS mode (DefaultKDFType), so what this refuses there is an Argon2 KDF
+	// FIPS mode (DefaultKDFSpec), so what this refuses there is an Argon2 KDF
 	// the caller asked for -- by name, or by supplying an Argon2 cost; see
-	// docs/FIPS.md.
+	// docs/fips/architecture.md.
 	if err := fipsMode().RequireKDF(kdfType); err != nil {
 		return nil, err
 	}
 
-	salt, err := randomBytes(32)
+	salt, err := randomBytes(32, cryptoRand)
 	if err != nil {
 		return nil, err
 	}
@@ -650,15 +767,15 @@ func createKDF(opts FormatOptions, keySize int, policy keyslotCostPolicy) (*KDF,
 
 	// Handle PBKDF2 variants (including convenience aliases)
 	if isPBKDF2Type(kdfType) {
-		return createPBKDF2KDF(kdfType, opts, saltB64, keySize, policy)
+		return createPBKDF2KDF(kdfType, opts, saltB64, keySize, policy, calibratedCountFloor)
 	}
 
 	// Handle Argon2 variants
 	switch kdfType {
-	case KDFTypeArgon2i, KDFTypeArgon2id:
+	case kdfTypeArgon2i, kdfTypeArgon2id:
 		return createArgon2KDF(kdfType, opts, saltB64)
 	default:
-		return nil, &errs.Error{Kind: ErrUnsupportedKDF, Detail: kdfType + " (supported: pbkdf2, pbkdf2-sha256, pbkdf2-sha384, pbkdf2-sha512, argon2i, argon2id)"}
+		return nil, &errs.Error{Kind: ErrUnsupported, Detail: kdfType + " (supported: pbkdf2, pbkdf2-sha256, pbkdf2-sha384, pbkdf2-sha512, argon2i, argon2id)"}
 	}
 }
 
@@ -668,12 +785,12 @@ func createKDF(opts FormatOptions, keySize int, policy keyslotCostPolicy) (*KDF,
 // split's, and an AddKey hash names the new keyslot's. Reading is unaffected:
 // existing PBKDF2-SHA1 keyslots and digests open outside FIPS mode (#239).
 func refuseSHA1ForCreation(kdfType, hashAlgo string) error {
-	if normalizeKDFType(kdfType) == KDFTypePBKDF2SHA1 {
-		return &errs.Error{Kind: ErrSHA1NotWritten, Err: ErrUnsupportedKDF,
+	if normalizeKDFType(kdfType) == kdfTypePBKDF2SHA1 {
+		return &errs.Error{Kind: ErrInvalidArgument, Err: ErrUnsupported,
 			Detail: "pbkdf2-sha1: new keyslots use pbkdf2 with sha256, sha384 or sha512, or argon2"}
 	}
 	if strings.EqualFold(strings.TrimSpace(hashAlgo), "sha1") {
-		return &errs.Error{Kind: ErrSHA1NotWritten, Err: ErrUnsupportedHash,
+		return &errs.Error{Kind: ErrInvalidArgument, Err: ErrUnsupported,
 			Detail: "sha1: new keyslots and digests use sha256, sha384 or sha512"}
 	}
 	return nil
@@ -682,7 +799,7 @@ func refuseSHA1ForCreation(kdfType, hashAlgo string) error {
 // isPBKDF2Type returns true if the KDF type is a PBKDF2 variant
 func isPBKDF2Type(kdfType string) bool {
 	switch kdfType {
-	case KDFTypePBKDF2, KDFTypePBKDF2SHA1, KDFTypePBKDF2SHA256, KDFTypePBKDF2SHA384, KDFTypePBKDF2SHA512:
+	case kdfTypePBKDF2, kdfTypePBKDF2SHA1, kdfTypePBKDF2SHA256, kdfTypePBKDF2SHA384, kdfTypePBKDF2SHA512:
 		return true
 	default:
 		return false
@@ -690,7 +807,7 @@ func isPBKDF2Type(kdfType string) bool {
 }
 
 // createPBKDF2KDF creates a PBKDF2 KDF structure
-func createPBKDF2KDF(kdfType string, opts FormatOptions, saltB64 string, keySize int, policy keyslotCostPolicy) (*KDF, error) {
+func createPBKDF2KDF(kdfType string, opts formatOptionsForTest, saltB64 string, keySize int, policy keyslotCostPolicy, calibratedCountFloor func(string, keyslotCostPolicy) int) (*rawKDF, error) {
 	// Determine hash algorithm from KDF type or HashAlgo option
 	hashAlgo := getHashAlgoForKDFType(kdfType, opts.HashAlgo)
 
@@ -715,7 +832,7 @@ func createPBKDF2KDF(kdfType string, opts FormatOptions, saltB64 string, keySize
 		if iterTime == 0 {
 			iterTime = pbkdf2ReferenceTargetMs
 		}
-		iterations, err = BenchmarkPBKDF2(hashAlgo, keySize, iterTime)
+		iterations, err = benchmarkPBKDF2(hashAlgo, keySize, iterTime)
 		// A CALIBRATED count is held to the same floor an explicit one is
 		// (#249, A8). BenchmarkPBKDF2 scales the OWASP floor by the budget, so
 		// PBKDFIterTime: 1 calibrated a caller's passphrase down to ~1000
@@ -730,8 +847,8 @@ func createPBKDF2KDF(kdfType string, opts FormatOptions, saltB64 string, keySize
 		return nil, err
 	}
 
-	return &KDF{
-		Type:       KDFTypePBKDF2, // Always store as "pbkdf2" for LUKS2 compatibility
+	return &rawKDF{
+		Type:       kdfTypePBKDF2, // Always store as "pbkdf2" for LUKS2 compatibility
 		Hash:       hashAlgo,
 		Salt:       saltB64,
 		Iterations: &iterations,
@@ -747,13 +864,13 @@ func getHashAlgoForKDFType(kdfType, hashAlgoOverride string) string {
 
 	// Extract hash from KDF type alias
 	switch kdfType {
-	case KDFTypePBKDF2SHA1:
+	case kdfTypePBKDF2SHA1:
 		return "sha1"
-	case KDFTypePBKDF2SHA256:
+	case kdfTypePBKDF2SHA256:
 		return "sha256"
-	case KDFTypePBKDF2SHA384:
+	case kdfTypePBKDF2SHA384:
 		return "sha384"
-	case KDFTypePBKDF2SHA512:
+	case kdfTypePBKDF2SHA512:
 		return "sha512"
 	default:
 		// Default to SHA-256 for plain "pbkdf2"
@@ -762,7 +879,7 @@ func getHashAlgoForKDFType(kdfType, hashAlgoOverride string) string {
 }
 
 // createArgon2KDF creates an Argon2 KDF structure
-func createArgon2KDF(kdfType string, opts FormatOptions, saltB64 string) (*KDF, error) {
+func createArgon2KDF(kdfType string, opts formatOptionsForTest, saltB64 string) (*rawKDF, error) {
 	time := opts.Argon2Time
 	if time == 0 {
 		time = 4 // Default
@@ -776,7 +893,7 @@ func createArgon2KDF(kdfType string, opts FormatOptions, saltB64 string) (*KDF, 
 		cpus = 4 // Default
 	}
 
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:   kdfType,
 		Salt:   saltB64,
 		Time:   &time,
@@ -791,7 +908,7 @@ func createArgon2KDF(kdfType string, opts FormatOptions, saltB64 string) (*KDF, 
 	// keyslot this package then refuses to open. Consumed rather than
 	// restated, for the reason the screen gives.
 	if err := validateKDFCost(kdf); err != nil {
-		return nil, &errs.Error{Detail: "refusing to write an Argon2 keyslot the read path would refuse", Err: err}
+		return nil, &errs.Error{Kind: errs.KindOf(err, errs.ErrInvalidArgument), Detail: "refusing to write an Argon2 keyslot the read path would refuse", Err: err}
 	}
 	return kdf, nil
 }
@@ -804,4 +921,107 @@ func encodeBase64(data []byte) string {
 // decodeBase64 decodes base64 string to bytes
 func decodeBase64(s string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(s)
+}
+
+// cryptoHashNames maps the crypto.Hash values this package's KDF paths
+// actually produce or consume to and from the lowercase name LUKS2's JSON
+// carries, so KDFParams.Hash and AddKeyOptions.Hash/KeyslotInfo's PBKDF2 hash
+// string can be converted without a dependency on every crypto.Hash the
+// standard library knows about.
+var cryptoHashNames = []struct {
+	hash crypto.Hash
+	name string
+}{
+	{crypto.SHA1, "sha1"},
+	{crypto.SHA256, "sha256"},
+	{crypto.SHA384, "sha384"},
+	{crypto.SHA512, "sha512"},
+}
+
+// cryptoHashFromName is cryptoHashNames' lookup by LUKS2's on-disk spelling.
+// The zero crypto.Hash is returned, deliberately, for a name this table does
+// not carry: the caller sites (addKeyOptionsFromKeyslotParams) treat that the
+// same as "unset", which is what AddKeyOptions.Hash's own empty string means.
+func cryptoHashFromName(name string) crypto.Hash {
+	for _, e := range cryptoHashNames {
+		if e.name == name {
+			return e.hash
+		}
+	}
+	return 0
+}
+
+// cryptoHashName is cryptoHashFromName's inverse.
+func cryptoHashName(h crypto.Hash) string {
+	for _, e := range cryptoHashNames {
+		if e.hash == h {
+			return e.name
+		}
+	}
+	return ""
+}
+
+// addKeyOptionsFromKeyslotParams converts a KeyslotParams into the
+// AddKeyOptions addKeyslotWithMasterKey already takes, so Enroll (provider.go)
+// is built on that existing internal rather than a second cost-handling path.
+func addKeyOptionsFromKeyslotParams(kp KeyslotParams) *addKeyOptionsForTest {
+	opts := &addKeyOptionsForTest{
+		Keyslot:         kp.Slot,
+		KDFType:         string(kp.KDF.Type),
+		Hash:            cryptoHashName(kp.KDF.Hash),
+		Argon2Time:      kp.KDF.Time,
+		Argon2Memory:    kp.KDF.MemoryKiB,
+		Argon2Parallel:  kp.KDF.Parallel,
+		PBKDFIterations: kp.KDF.Iterations,
+	}
+	if kp.KDF.IterTime > 0 {
+		opts.PBKDFIterTime = int(kp.KDF.IterTime.Milliseconds())
+	}
+	return opts
+}
+
+// kdfParamsFromHeaderKDF converts a keyslot's on-disk KDF into KDFParams, for
+// KeyslotInfo's KDF field (header_v2.go's listKeyslotsFrom and provider.go's
+// Enroll). It is lossy in exactly the way KeyslotInfo's old PBKDF2Iterations/
+// Argon2* fields already were not: a hash name this package's own KDF paths
+// never write (cryptoHashFromName's empty-table case) reports the zero
+// crypto.Hash rather than refusing the whole listing, because listing is an
+// inspection operation that must report what is there (see
+// listKeyslotsFrom's own reasoning for kdf being optional).
+func kdfParamsFromHeaderKDF(k *rawKDF) KDFParams {
+	var p KDFParams
+	switch k.Type {
+	case kdfTypeArgon2id:
+		p.Type = KDFArgon2id
+	case kdfTypeArgon2i:
+		p.Type = KDFArgon2i
+	default:
+		p.Type = KDFPBKDF2
+	}
+	p.Hash = cryptoHashFromName(k.Hash)
+	if k.Iterations != nil {
+		p.Iterations = *k.Iterations
+	}
+	if k.Time != nil {
+		p.Time = *k.Time
+	}
+	if k.Memory != nil {
+		p.MemoryKiB = *k.Memory
+	}
+	if k.CPUs != nil {
+		p.Parallel = *k.CPUs
+	}
+	return p
+}
+
+// kdfParamsFromDisk is kdfParamsFromHeaderKDF for a caller (Enrollment's
+// AddRecoveryKey/MigrateToFIPS path) that needs to refuse an unparseable
+// on-disk KDF type rather than silently defaulting it to KDFPBKDF2.
+func kdfParamsFromDisk(k *rawKDF) (KDFParams, error) {
+	switch k.Type {
+	case kdfTypeArgon2id, kdfTypeArgon2i, kdfTypePBKDF2:
+	default:
+		return KDFParams{}, &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "unknown on-disk KDF type " + strconv.Quote(k.Type)}
+	}
+	return kdfParamsFromHeaderKDF(k), nil
 }

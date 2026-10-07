@@ -7,12 +7,16 @@
 package luks2
 
 import (
+	"context"
 	"errors"
 	"os"
 	"strconv"
 	"testing"
 
 	"github.com/jeremyhahn/go-enclave"
+
+	"github.com/jeremyhahn/go-luks2/internal/fips"
+	"github.com/jeremyhahn/go-luks2/internal/header"
 	"github.com/jeremyhahn/go-luks2/internal/kdf"
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
@@ -21,7 +25,7 @@ import (
 
 // cloneKeyslots gives metadata n keyslots, copies of keyslot 0 at disjoint
 // areas, and returns their ids.
-func cloneKeyslots(t *testing.T, metadata *LUKS2Metadata, n int) []string {
+func cloneKeyslots(t *testing.T, metadata *header.Metadata, n int) []string {
 	t.Helper()
 	template := metadata.Keyslots["0"]
 	start, err := parseSize(template.Area.Offset)
@@ -51,8 +55,8 @@ func cloneKeyslots(t *testing.T, metadata *LUKS2Metadata, n int) []string {
 func budgetFixture(t *testing.T) string {
 	t.Helper()
 	device := newImage(t, "budget.img")
-	if err := Format(FormatOptions{Device: device, Passphrase: []byte(conformancePassphrase),
-		KDFType: KDFTypePBKDF2, PBKDFIterTime: 1, MetadataSize: 256 << 10}); err != nil {
+	if err := formatForTest(formatOptionsForTest{Device: device, Passphrase: []byte(conformancePassphrase),
+		KDFType: kdfTypePBKDF2, PBKDFIterTime: 1, MetadataSize: 256 << 10}); err != nil {
 		t.Fatalf("Format: %v", err)
 	}
 	return device
@@ -60,7 +64,7 @@ func budgetFixture(t *testing.T) string {
 
 // writeRawHeader writes metadata as it is, both copies, with no validation:
 // the header a crafted disk carries.
-func writeRawHeader(t *testing.T, path string, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata) {
+func writeRawHeader(t *testing.T, path string, hdr *header.BinaryHeader, metadata *header.Metadata) {
 	t.Helper()
 	jsonData, err := marshalCanonicalJSON(metadata)
 	if err != nil {
@@ -72,23 +76,22 @@ func writeRawHeader(t *testing.T, path string, hdr *LUKS2BinaryHeader, metadata 
 	}
 	defer func() { _ = f.Close() }()
 	hdr.SequenceID++
-	if err := writeEncodedHeader(f, hdr, jsonData, int(hdr.HeaderSize)); err != nil { // #nosec G115 -- a header ReadHeader bounded
+	if err := writeEncodedHeader(f, hdr, jsonData, int(hdr.HeaderSize), (*os.File).Sync); err != nil { // #nosec G115 -- a header ReadHeader bounded
 		t.Fatal(err)
 	}
 }
 
 // countKDFCalls counts keyslot derivations, and makes each fail at once so a
 // test of the unfixed code ends quickly instead of deriving at the ceiling.
-func countKDFCalls(t *testing.T) *int {
+func countKDFCalls(t *testing.T) (*int, volumeSys) {
 	t.Helper()
 	calls := 0
-	previous := passphraseKDF
-	t.Cleanup(func() { passphraseKDF = previous })
-	passphraseKDF = func([]byte, *KDF, int) (*enclave.MemoryEnclave, error) {
+	sys := testVolumeSys()
+	sys.passphraseKDF = func(context.Context, []byte, *rawKDF, int) (*enclave.MemoryEnclave, error) {
 		calls++
 		return nil, errors.New("derivation reached")
 	}
-	return &calls
+	return &calls, sys
 }
 
 // TestAHeaderAskingForMoreDerivationThanCryptsetupCanIsRefusedBeforeDeriving:
@@ -99,33 +102,33 @@ func countKDFCalls(t *testing.T) *int {
 // package refuses the operation, typed, before the first derivation.
 func TestAHeaderAskingForMoreDerivationThanCryptsetupCanIsRefusedBeforeDeriving(t *testing.T) {
 	device := budgetFixture(t)
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ids := cloneKeyslots(t, metadata, LUKS2MaxKeyslots)
+	ids := cloneKeyslots(t, metadata, MaxKeyslots)
 	template := metadata.Digests["0"]
-	for i := range LUKS2MaxKeyslots {
+	for i := range MaxKeyslots {
 		d := *template
 		d.Keyslots = ids
 		d.Iterations = maxKDFIterations
 		metadata.Digests[strconv.Itoa(i)] = &d
 	}
 	writeRawHeader(t, device, hdr, metadata)
-	calls := countKDFCalls(t)
+	calls, sys := countKDFCalls(t)
 
 	for name, run := range map[string]func() error{
-		"TestKey": func() error { return TestKey(device, []byte(conformancePassphrase)) },
+		"TestKey": func() error { return testKeyForTestWithSys(device, []byte(conformancePassphrase), sys) },
 		"AddKey": func() error {
-			_, err := AddKey(device, []byte(conformancePassphrase), []byte("a-new-passphrase"), &AddKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterTime: 1})
+			_, err := addKeyWithPolicy(context.Background(), device, []byte(conformancePassphrase), []byte("a-new-passphrase"),
+				&addKeyOptionsForTest{KDFType: kdfTypePBKDF2, PBKDFIterTime: 1}, callerSuppliedCredential, sys)
 			return err
 		},
-		"KillSlot": func() error { return KillSlot(device, []byte(conformancePassphrase), 1) },
+		"KillSlot": func() error { return killSlotForTest(device, []byte(conformancePassphrase), 1, withTestSys(sys)) },
 	} {
 		err := run()
-		var budget *KDFBudgetError
-		if !errors.Is(err, ErrKDFBudgetExceeded) || !errors.Is(err, ErrInvalidHeader) || !errors.As(err, &budget) {
-			t.Errorf("%s = %v, want a KDFBudgetError", name, err)
+		if !errors.Is(err, ErrInvalidHeader) {
+			t.Errorf("%s = %v, want ErrInvalidHeader", name, err)
 		}
 	}
 	if *calls != 0 {
@@ -134,7 +137,7 @@ func TestAHeaderAskingForMoreDerivationThanCryptsetupCanIsRefusedBeforeDeriving(
 }
 
 // TestTheMostExpensiveHeaderCryptsetupCanWriteFitsTheBudget is the other
-// half, and the one that must never regress: LUKS2MaxKeyslots keyslots, one
+// half, and the one that must never regress: MaxKeyslots keyslots, one
 // digest each, every derivation at its ceiling -- Argon2 at 4 GiB and 10,000
 // passes, PBKDF2-SHA1 at 100,000,000 iterations over a 64-byte area key -- is
 // within the budget. The real-container half is
@@ -142,27 +145,27 @@ func TestAHeaderAskingForMoreDerivationThanCryptsetupCanIsRefusedBeforeDeriving(
 func TestTheMostExpensiveHeaderCryptsetupCanWriteFitsTheBudget(t *testing.T) {
 	defer parallel(t)()
 	device := budgetFixture(t)
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ids := cloneKeyslots(t, metadata, LUKS2MaxKeyslots)
+	ids := cloneKeyslots(t, metadata, MaxKeyslots)
 	template := metadata.Digests["0"]
-	metadata.Digests = map[string]*Digest{}
+	metadata.Digests = map[string]*rawDigest{}
 	// SHA-1 is the costliest PBKDF2 per output byte; a FIPS 140-3 process
 	// runs neither it nor Argon2, so there the ceiling is SHA-512's.
 	hash, digestLen := "sha1", 20
-	if fipsMode() {
+	if fips.Probe() {
 		hash, digestLen = "sha512", 64
 	}
 	for i, id := range ids {
 		k := metadata.Keyslots[id]
 		if i%2 == 0 {
 			time, memory, cpus := maxArgon2Time, maxArgon2Memory, 4
-			k.KDF = &KDF{Type: KDFTypeArgon2id, Salt: k.KDF.Salt, Time: &time, Memory: &memory, CPUs: &cpus}
+			k.KDF = &rawKDF{Type: kdfTypeArgon2id, Salt: k.KDF.Salt, Time: &time, Memory: &memory, CPUs: &cpus}
 		} else {
 			iterations := maxKDFIterations
-			k.KDF = &KDF{Type: KDFTypePBKDF2, Hash: hash, Salt: k.KDF.Salt, Iterations: &iterations}
+			k.KDF = &rawKDF{Type: kdfTypePBKDF2, Hash: hash, Salt: k.KDF.Salt, Iterations: &iterations}
 		}
 		d := *template
 		d.Keyslots = []string{id}
@@ -177,7 +180,7 @@ func TestTheMostExpensiveHeaderCryptsetupCanWriteFitsTheBudget(t *testing.T) {
 	if plan.work.Exceeds(operationKDFBudget) {
 		t.Fatalf("the most expensive cryptsetup header needs %+v, over the budget %+v", plan.work, operationKDFBudget)
 	}
-	if plan.work.PBKDF2Blocks == 0 || (plan.work.Argon2KiBPasses == 0) != fipsMode() {
+	if plan.work.PBKDF2Blocks == 0 || (plan.work.Argon2KiBPasses == 0) != fips.Probe() {
 		t.Fatalf("the plan priced %+v; every keyslot this process can run should be priced", plan.work)
 	}
 }
@@ -186,18 +189,18 @@ func TestDerivationWork(t *testing.T) {
 	iterations, time, memory := 1000, 4, 65536
 	for _, tc := range []struct {
 		name string
-		kdf  *KDF
+		kdf  *rawKDF
 		out  int
 		want kdfWork
 	}{
-		{"pbkdf2-sha256 to 64 bytes: two blocks", &KDF{Type: "pbkdf2", Hash: "sha256", Iterations: &iterations}, 64, kdfWork{PBKDF2Blocks: 2000}},
-		{"pbkdf2-sha1 to 64 bytes: four blocks", &KDF{Type: "pbkdf2", Hash: "sha1", Iterations: &iterations}, 64, kdfWork{PBKDF2Blocks: 4000}},
-		{"pbkdf2-sha512 to 32 bytes: one block", &KDF{Type: "pbkdf2", Hash: "sha512", Iterations: &iterations}, 32, kdfWork{PBKDF2Blocks: 1000}},
-		{"argon2id", &KDF{Type: "argon2id", Time: &time, Memory: &memory}, 64, kdfWork{Argon2KiBPasses: 4 * 65536}},
+		{"pbkdf2-sha256 to 64 bytes: two blocks", &rawKDF{Type: "pbkdf2", Hash: "sha256", Iterations: &iterations}, 64, kdfWork{PBKDF2Blocks: 2000}},
+		{"pbkdf2-sha1 to 64 bytes: four blocks", &rawKDF{Type: "pbkdf2", Hash: "sha1", Iterations: &iterations}, 64, kdfWork{PBKDF2Blocks: 4000}},
+		{"pbkdf2-sha512 to 32 bytes: one block", &rawKDF{Type: "pbkdf2", Hash: "sha512", Iterations: &iterations}, 32, kdfWork{PBKDF2Blocks: 1000}},
+		{"argon2id", &rawKDF{Type: "argon2id", Time: &time, Memory: &memory}, 64, kdfWork{Argon2KiBPasses: 4 * 65536}},
 		{"no KDF", nil, 64, kdfWork{}},
-		{"no output", &KDF{Type: "pbkdf2", Hash: "sha256", Iterations: &iterations}, 0, kdfWork{}},
-		{"argon2 missing its cost", &KDF{Type: "argon2i"}, 64, kdfWork{}},
-		{"pbkdf2 missing its count", &KDF{Type: "pbkdf2", Hash: "sha256"}, 64, kdfWork{}},
+		{"no output", &rawKDF{Type: "pbkdf2", Hash: "sha256", Iterations: &iterations}, 0, kdfWork{}},
+		{"argon2 missing its cost", &rawKDF{Type: "argon2i"}, 64, kdfWork{}},
+		{"pbkdf2 missing its count", &rawKDF{Type: "pbkdf2", Hash: "sha256"}, 64, kdfWork{}},
 	} {
 		if got := derivationWork(tc.kdf, tc.out); got != tc.want {
 			t.Errorf("%s: %+v, want %+v", tc.name, got, tc.want)
@@ -220,16 +223,16 @@ func TestHeadersWithMoreKeyslotsOrDigestsThanCryptsetupCreatesAreRefusedOnRead(t
 	defer parallel(t)()
 	for _, tc := range []struct {
 		name   string
-		mutate func(*LUKS2Metadata, []string)
+		mutate func(*header.Metadata, []string)
 	}{
-		{"33 keyslots", func(m *LUKS2Metadata, ids []string) { m.Digests["0"].Keyslots = ids }},
-		{"33 digests", func(m *LUKS2Metadata, ids []string) {
+		{"33 keyslots", func(m *header.Metadata, ids []string) { m.Digests["0"].Keyslots = ids }},
+		{"33 digests", func(m *header.Metadata, ids []string) {
 			for k := range m.Keyslots {
 				if k != "0" {
 					delete(m.Keyslots, k)
 				}
 			}
-			for i := 1; i <= LUKS2MaxKeyslots; i++ {
+			for i := 1; i <= MaxKeyslots; i++ {
 				d := *m.Digests["0"]
 				d.Keyslots = []string{}
 				m.Digests[strconv.Itoa(i)] = &d
@@ -238,13 +241,13 @@ func TestHeadersWithMoreKeyslotsOrDigestsThanCryptsetupCreatesAreRefusedOnRead(t
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			device := budgetFixture(t)
-			hdr, metadata, err := ReadHeader(device)
+			hdr, metadata, err := readHeaderForTest(device)
 			if err != nil {
 				t.Fatal(err)
 			}
-			tc.mutate(metadata, cloneKeyslots(t, metadata, LUKS2MaxKeyslots+1))
+			tc.mutate(metadata, cloneKeyslots(t, metadata, MaxKeyslots+1))
 			writeRawHeader(t, device, hdr, metadata)
-			if _, _, err := ReadHeader(device); !errors.Is(err, ErrInvalidHeader) {
+			if _, _, err := readHeaderForTest(device); !errors.Is(err, ErrInvalidHeader) {
 				t.Fatalf("ReadHeader = %v, want ErrInvalidHeader", err)
 			}
 		})
@@ -268,9 +271,9 @@ func TestAKeyslotTheAllocatorCanNeverAdmitIsRefusedBeforeDeriving(t *testing.T) 
 	previous := custody
 	t.Cleanup(func() { custody = previous })
 	custody = secret.Admitted(func() (*enclave.Allocator, error) { return small, nil })
-	calls := countKDFCalls(t)
+	calls, sys := countKDFCalls(t)
 
-	err = TestKey(device, []byte(conformancePassphrase))
+	err = testKeyForTestWithSys(device, []byte(conformancePassphrase), sys)
 	if !errors.Is(err, ErrProtectedMemory) || !errors.Is(err, enclave.ErrBudgetExhausted) {
 		t.Fatalf("TestKey under a one-page budget = %v, want ErrProtectedMemory matching enclave.ErrBudgetExhausted", err)
 	}
@@ -309,7 +312,7 @@ func peakRecorder(t *testing.T, budget int64) (*enclave.Allocator, *int64) {
 // scanPeak is the planned peak of the scan TestKey makes on device.
 func scanPeak(t *testing.T, device string) int64 {
 	t.Helper()
-	_, metadata, err := ReadHeader(device)
+	_, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,7 +346,7 @@ func TestKeyslotOpenPeakIsWhatTheUnlockAllocates(t *testing.T) {
 	}
 	// A FIPS 140-3 process opens no Argon2 keyslot, so it has no Argon2 open
 	// to measure.
-	if !fipsMode() {
+	if !fips.Probe() {
 		geometries = append(geometries, geometry{"argon2id", []string{"--pbkdf", "argon2id", "--pbkdf-memory", "32768", "--pbkdf-force-iterations", "4"}})
 	}
 	for _, tc := range geometries {
@@ -355,7 +358,7 @@ func TestKeyslotOpenPeakIsWhatTheUnlockAllocates(t *testing.T) {
 			}
 			want := scanPeak(t, device)
 			_, peak := peakRecorder(t, 1<<30)
-			if err := TestKey(device, []byte(conformancePassphrase)); err != nil {
+			if err := testKeyForTest(device, []byte(conformancePassphrase)); err != nil {
 				t.Fatalf("TestKey: %v", err)
 			}
 			if *peak != want {
@@ -379,27 +382,37 @@ func TestAnAllocatorSizedToThePlannedPeakOpensTheVolume(t *testing.T) {
 
 	t.Run("exactly the peak", func(t *testing.T) {
 		peakRecorder(t, want)
-		if err := TestKey(device, passphrase); err != nil {
+		if err := testKeyForTest(device, passphrase); err != nil {
 			t.Fatalf("TestKey under a budget of the planned peak: %v", err)
 		}
-		withImageAsBlockDevice(t)
-		fake := newFakeDeviceMapper()
-		fake.install(t)
-		if err := Unlock(device, passphrase, "planned-peak"); err != nil {
+
+		v, err := Open(context.Background(), device)
+		if err != nil {
+			t.Fatalf("Open failed: %v", err)
+		}
+		defer func() { _ = v.Close() }()
+		pass, err := enclave.NewMemoryEnclaveCopy(passphrase)
+		if err != nil {
+			t.Fatalf("could not build the test passphrase enclave: %v", err)
+		}
+		defer func() { _ = pass.Destroy() }()
+		key, err := v.Unlock(context.Background(), pass)
+		if err != nil {
 			t.Fatalf("Unlock under a budget of the planned peak: %v", err)
 		}
+		key.Destroy()
 	})
 
 	t.Run("one page less", func(t *testing.T) {
 		peakRecorder(t, want-enclave.LockedSize(1))
 		calls := 0
-		previous := passphraseKDF
-		t.Cleanup(func() { passphraseKDF = previous })
-		passphraseKDF = func(p []byte, kdf *KDF, n int) (*enclave.MemoryEnclave, error) {
+		sys := testVolumeSys()
+		real := sys.passphraseKDF
+		sys.passphraseKDF = func(ctx context.Context, p []byte, kdf *rawKDF, n int) (*enclave.MemoryEnclave, error) {
 			calls++
-			return previous(p, kdf, n)
+			return real(ctx, p, kdf, n)
 		}
-		err := TestKey(device, passphrase)
+		err := testKeyForTestWithSys(device, passphrase, sys)
 		if !errors.Is(err, ErrProtectedMemory) || !errors.Is(err, enclave.ErrBudgetExhausted) {
 			t.Fatalf("TestKey one page under the planned peak = %v, want ErrProtectedMemory matching enclave.ErrBudgetExhausted", err)
 		}

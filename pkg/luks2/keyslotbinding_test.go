@@ -9,6 +9,8 @@ package luks2
 import (
 	"bytes"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // The segment-binding predicates (#249, A1): which keyslots hold the key the
@@ -17,13 +19,13 @@ import (
 
 // bindingFixture returns a real container's metadata and volume key, so the
 // digests below are genuine ones a recovered key can be evaluated against.
-func bindingFixture(t *testing.T) (*LUKS2Metadata, []byte) {
+func bindingFixture(t *testing.T) (*header.Metadata, []byte) {
 	t.Helper()
 
 	device := newImage(t, "binding.img")
 	formatWithLibrary(t, device)
 	key := volumeKey(t, device, migrationPassphrase)
-	_, metadata, err := ReadHeader(device)
+	_, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -32,14 +34,14 @@ func bindingFixture(t *testing.T) (*LUKS2Metadata, []byte) {
 
 // withDigests returns a shallow copy of metadata carrying digests instead of its
 // own, so each case below states the exact digest set it is about.
-func withDigests(metadata *LUKS2Metadata, digests map[string]*Digest) *LUKS2Metadata {
+func withDigests(metadata *header.Metadata, digests map[string]*rawDigest) *header.Metadata {
 	m := *metadata
 	m.Digests = digests
 	return &m
 }
 
 // digestVariant returns a copy of d naming the given keyslots and segments.
-func digestVariant(d *Digest, keyslots, segments []string) *Digest {
+func digestVariant(d *rawDigest, keyslots, segments []string) *rawDigest {
 	c := *d
 	c.Keyslots = keyslots
 	c.Segments = segments
@@ -56,29 +58,29 @@ func TestKeyslotBoundToSegment(t *testing.T) {
 
 	for _, tc := range []struct {
 		name    string
-		digests map[string]*Digest
+		digests map[string]*rawDigest
 		segment string
 		want    bool
 	}{
-		{"a digest binding the segment", map[string]*Digest{"0": bound}, "0", true},
+		{"a digest binding the segment", map[string]*rawDigest{"0": bound}, "0", true},
 		{"an unbound digest, as cryptsetup luksAddKey --unbound writes",
-			map[string]*Digest{"0": digestVariant(bound, []string{"0"}, []string{})}, "0", false},
+			map[string]*rawDigest{"0": digestVariant(bound, []string{"0"}, []string{})}, "0", false},
 		{"a digest bound to another segment",
-			map[string]*Digest{"0": digestVariant(bound, []string{"0"}, []string{"1"})}, "0", false},
+			map[string]*rawDigest{"0": digestVariant(bound, []string{"0"}, []string{"1"})}, "0", false},
 		{"no digest attests the keyslot",
-			map[string]*Digest{"0": digestVariant(bound, []string{"1"}, []string{"0"})}, "0", false},
+			map[string]*rawDigest{"0": digestVariant(bound, []string{"1"}, []string{"0"})}, "0", false},
 		// A declaration, not an evaluation: whether the digest can be USED is
 		// the screen's question, reported there as the header fault it is.
-		{"the only binding digest is damaged", map[string]*Digest{"0": unusable}, "0", true},
+		{"the only binding digest is damaged", map[string]*rawDigest{"0": unusable}, "0", true},
 		{"a damaged unbound digest beside a bound one",
-			map[string]*Digest{"0": bound, "1": func() *Digest {
+			map[string]*rawDigest{"0": bound, "1": func() *rawDigest {
 				d := digestVariant(bound, []string{"0"}, nil)
 				d.Digest = "not base64!"
 				return d
 			}()}, "0", false},
 		{"a bound and an unbound digest both attest it, which no static check can resolve",
-			map[string]*Digest{"0": bound, "1": digestVariant(bound, []string{"0"}, nil)}, "0", false},
-		{"the segment does not exist", map[string]*Digest{"0": bound}, "7", false},
+			map[string]*rawDigest{"0": bound, "1": digestVariant(bound, []string{"0"}, nil)}, "0", false},
+		{"the segment does not exist", map[string]*rawDigest{"0": bound}, "7", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := keyslotBoundToSegment(withDigests(metadata, tc.digests), "0", tc.segment); got != tc.want {
@@ -101,13 +103,13 @@ func TestKeyslotBoundToDataSegments(t *testing.T) {
 	}
 
 	twoSegments := *metadata
-	twoSegments.Segments = map[string]*Segment{"0": metadata.Segments["0"], "1": metadata.Segments["0"]}
+	twoSegments.Segments = map[string]*header.Segment{"0": metadata.Segments["0"], "1": metadata.Segments["0"]}
 	if keyslotBoundToDataSegments(&twoSegments, "0") {
 		t.Error("a keyslot bound to segment 0 only is reported bound to segments 0 and 1")
 	}
 
 	noSegments := *metadata
-	noSegments.Segments = map[string]*Segment{}
+	noSegments.Segments = map[string]*header.Segment{}
 	if keyslotBoundToDataSegments(&noSegments, "0") {
 		t.Error("a header with no segment reports a keyslot bound to all of them")
 	}
@@ -126,16 +128,16 @@ func TestRecoveredKeyBoundToSegment(t *testing.T) {
 
 	for _, tc := range []struct {
 		name    string
-		digests map[string]*Digest
+		digests map[string]*rawDigest
 		segment string
 		want    bool
 	}{
-		{"the key matches a digest binding the segment", map[string]*Digest{"0": bound}, "0", true},
+		{"the key matches a digest binding the segment", map[string]*rawDigest{"0": bound}, "0", true},
 		{"the key matches only an unbound digest",
-			map[string]*Digest{"0": digestVariant(bound, []string{"0"}, nil)}, "0", false},
+			map[string]*rawDigest{"0": digestVariant(bound, []string{"0"}, nil)}, "0", false},
 		{"the binding digest names another keyslot",
-			map[string]*Digest{"0": digestVariant(bound, []string{"3"}, []string{"0"})}, "0", false},
-		{"the segment does not exist", map[string]*Digest{"0": bound}, "9", false},
+			map[string]*rawDigest{"0": digestVariant(bound, []string{"3"}, []string{"0"})}, "0", false},
+		{"the segment does not exist", map[string]*rawDigest{"0": bound}, "9", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := recoveredKeyBoundToSegment(withDigests(metadata, tc.digests), "0", tc.segment, mk); got != tc.want {

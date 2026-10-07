@@ -13,6 +13,7 @@
 package dm
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -25,9 +26,10 @@ import (
 	"unsafe"
 
 	"github.com/anatol/devmapper.go"
+	"golang.org/x/sys/unix"
+
 	"github.com/jeremyhahn/go-luks2/internal/clock"
 	"github.com/jeremyhahn/go-luks2/internal/errs"
-	"golang.org/x/sys/unix"
 )
 
 // ControlPath is the device-mapper control node every dm ioctl is issued on.
@@ -59,7 +61,10 @@ const (
 // and between the two another process can remove the target and create its
 // own under the same name. The reply is the one answer that cannot belong to
 // anyone else, so the ioctl is issued here directly.
-func CreateTarget(name, uuid string) (uint64, error) {
+func CreateTarget(ctx context.Context, name, uuid string) (uint64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	var req unix.DmIoctl
 	// The kernel would silently cut either string, and every identity check
 	// after this compares against what it stored. Refused rather than cut, so
@@ -102,7 +107,7 @@ func CreateTarget(name, uuid string) (uint64, error) {
 // It reports the LAST error and leaves the meaning to the caller, because
 // different callers face the same errno and owe the operator different
 // answers.
-func RetryWhileBusy(clk clock.Clock, attempt func() error) (attempts int, err error) {
+func RetryWhileBusy(ctx context.Context, clk clock.Clock, attempt func() error) (attempts int, err error) {
 	deadline := clk.Now().Add(RemoveRetryBudget)
 	delay := RemoveRetryInitialDelay
 
@@ -118,7 +123,15 @@ func RetryWhileBusy(clk clock.Clock, attempt func() error) (attempts int, err er
 		}
 		// The LAST wait is clipped to whatever is left, rather than the loop
 		// giving up as soon as the next doubling would overshoot (#122).
-		<-clk.NewTimer(min(delay, remaining)).C()
+		t := clk.NewTimer(min(delay, remaining))
+		select {
+		case <-ctx.Done():
+		case <-t.C():
+		}
+		t.Stop()
+		if err := ctx.Err(); err != nil {
+			return attempts, err
+		}
 		delay *= 2
 	}
 }
@@ -126,18 +139,27 @@ func RetryWhileBusy(clk clock.Clock, attempt func() error) (attempts int, err er
 // PollUntil checks done until it reports true or timeout has passed on clk,
 // sleeping interval between checks (the last sleep clipped to the deadline),
 // and reports whether done ever did. It always checks at least once and
-// checks once more at the deadline.
-func PollUntil(clk clock.Clock, timeout, interval time.Duration, done func() bool) bool {
+// checks once more at the deadline. A canceled ctx stops the wait and
+// returns ctx.Err(); the met bool is meaningless when err is non-nil.
+func PollUntil(ctx context.Context, clk clock.Clock, timeout, interval time.Duration, done func() bool) (met bool, err error) {
 	deadline := clk.Now().Add(timeout)
 	for {
 		if done() {
-			return true
+			return true, nil
 		}
 		remaining := deadline.Sub(clk.Now())
 		if remaining <= 0 {
-			return false
+			return false, nil
 		}
-		<-clk.NewTimer(min(interval, remaining)).C()
+		t := clk.NewTimer(min(interval, remaining))
+		select {
+		case <-ctx.Done():
+		case <-t.C():
+		}
+		t.Stop()
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
 	}
 }
 
@@ -219,7 +241,10 @@ func IsNoSuchDevice(err error) bool {
 // Errors from the unlinks themselves stay ignored on purpose: a node may never
 // have existed or may already have been reaped by udev, and neither changes
 // the outcome the caller cares about, which is whether the dm target is gone.
-func RemoveMappingNodes(devDir string, blockNodeRdev func(path string) (uint64, error), name string, info *devmapper.DeviceInfo) {
+func RemoveMappingNodes(ctx context.Context, devDir string, blockNodeRdev func(path string) (uint64, error), name string, info *devmapper.DeviceInfo) {
+	if ctx.Err() != nil {
+		return
+	}
 	// The mapper entry goes FIRST, while its target still resolves. Removing
 	// the dm node first would turn this symlink into a dangling one and force
 	// it down the exception path for no reason.
@@ -247,7 +272,10 @@ func RemoveMappingNodes(devDir string, blockNodeRdev func(path string) (uint64, 
 // confirming the existing entry does NOT name the device dm reports: it is
 // stale, and leaving it is how a mapping name comes to resolve to some other
 // device (#250, C5).
-func PlaceNode(path string, create func(tmp string) error) error {
+func PlaceNode(ctx context.Context, path string, create func(tmp string) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// Only an entry that could be a stale device-mapper node is replaced: a
 	// symlink, or a block device. A character device -- /dev/mapper/control
 	// above all -- a directory, a regular file or anything else is somebody
@@ -281,7 +309,7 @@ func PlaceNode(path string, create func(tmp string) error) error {
 func randomSuffix(n int) (string, error) {
 	b := make([]byte, n)
 	if _, err := io.ReadFull(rand.Reader, b); err != nil {
-		return "", &errs.Error{Detail: "failed to generate a random suffix", Err: err}
+		return "", &errs.Error{Kind: errs.ErrIO, Detail: "failed to generate a random suffix", Err: err}
 	}
 	return hex.EncodeToString(b), nil
 }

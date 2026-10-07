@@ -9,6 +9,8 @@ package luks2
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // TestSegmentUnmarshalJSON tests segment JSON unmarshaling
@@ -41,7 +43,7 @@ func TestSegmentUnmarshalJSON(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var seg Segment
+			var seg header.Segment
 			err := json.Unmarshal([]byte(tt.input), &seg)
 			if tt.wantErr {
 				if err == nil {
@@ -80,7 +82,7 @@ func TestKeyslotUnmarshalJSON(t *testing.T) {
 		}
 	}`
 
-	var ks Keyslot
+	var ks header.Keyslot
 	err := json.Unmarshal([]byte(input), &ks)
 	if err != nil {
 		t.Fatalf("Unmarshal failed: %v", err)

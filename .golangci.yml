@@ -31,6 +31,7 @@ linters:
     - misspell
     - gocritic
     - forbidigo
+    - depguard
 
   settings:
     # Typed errors only (errors.md 2, DESIGN.md C.2). Library and command code
@@ -48,6 +49,256 @@ linters:
         # internal/clock.Clock, so it can be bounded, cancelled and tested.
         - pattern: ^time\.Sleep$
           msg: "wait on a timer from an internal/clock.Clock instead"
+    # The import DAG (DESIGN.md §A.2) as data, one rule per row: each
+    # in-module package names exactly what it may import, so a layering
+    # violation is a lint finding rather than something that only shows up
+    # as a cycle (most of this DAG does NOT round-trip into a cycle if
+    # violated -- pkg/luks2 importing pkg/filesystem is not a compile error,
+    # since pkg/filesystem never imports pkg/luks2 back). Every rule's Allow
+    # list repeats the same six entries (stdlib plus the handful of
+    # third-party deps this module uses nowhere root- or layering-sensitive:
+    # YAML anchors cannot splice a sequence into another sequence's
+    # elements, only full-document merges, so there is no shorter way to
+    # write this) and the exact
+    # in-module packages that row names; nothing else in this module's own
+    # tree is reachable. pkg/luks2 additionally denies os/exec outright
+    # (over Allow's $gostd, which would otherwise cover it through plain
+    # "os"): the one case in this table where a narrower Deny has to win
+    # over a broader Allow, because neither $gostd nor any of these lists
+    # can name "every os/* package except exec" directly. _test.go is
+    # exempt throughout: fixtures legitimately reach across the DAG for
+    # setup (pkg/luks2's own white-box tests attach loop devices, format
+    # through pkg/dmcrypt's test helpers, and so on) in ways production
+    # code must not.
+    depguard:
+      rules:
+        internal-errs:
+          files: [internal/errs/**, "!**/*_test.go"]
+          allow: [$gostd, golang.org/x/sys, golang.org/x/crypto, golang.org/x/term, github.com/jeremyhahn/go-enclave, github.com/google/uuid]
+        internal-clock:
+          files: [internal/clock/**, "!**/*_test.go"]
+          allow: [$gostd, golang.org/x/sys, golang.org/x/crypto, golang.org/x/term, github.com/jeremyhahn/go-enclave, github.com/google/uuid]
+        internal-fips:
+          files: [internal/fips/**, "!**/*_test.go"]
+          allow: [$gostd, golang.org/x/sys, golang.org/x/crypto, golang.org/x/term, github.com/jeremyhahn/go-enclave, github.com/google/uuid, github.com/jeremyhahn/go-luks2/internal/errs]
+        internal-secret:
+          files: [internal/secret/**, "!**/*_test.go"]
+          allow: [$gostd, golang.org/x/sys, golang.org/x/crypto, golang.org/x/term, github.com/jeremyhahn/go-enclave, github.com/google/uuid, github.com/jeremyhahn/go-luks2/internal/errs]
+        internal-af:
+          files: [internal/af/**, "!**/*_test.go"]
+          allow:
+            - $gostd
+            - golang.org/x/sys
+            - golang.org/x/crypto
+            - golang.org/x/term
+            - github.com/jeremyhahn/go-enclave
+            - github.com/google/uuid
+            - github.com/jeremyhahn/go-luks2/internal/secret
+            - github.com/jeremyhahn/go-luks2/internal/fips
+            - github.com/jeremyhahn/go-luks2/internal/errs
+        internal-areacipher:
+          files: [internal/areacipher/**, "!**/*_test.go"]
+          allow:
+            - $gostd
+            - golang.org/x/sys
+            - golang.org/x/crypto
+            - golang.org/x/term
+            - github.com/jeremyhahn/go-enclave
+            - github.com/google/uuid
+            - github.com/jeremyhahn/go-luks2/internal/secret
+            - github.com/jeremyhahn/go-luks2/internal/errs
+        internal-kdf:
+          files: [internal/kdf/**, "!**/*_test.go"]
+          allow:
+            - $gostd
+            - golang.org/x/sys
+            - golang.org/x/crypto
+            - golang.org/x/term
+            - github.com/jeremyhahn/go-enclave
+            - github.com/google/uuid
+            - github.com/jeremyhahn/go-luks2/internal/secret
+            - github.com/jeremyhahn/go-luks2/internal/fips
+            - github.com/jeremyhahn/go-luks2/internal/clock
+            - github.com/jeremyhahn/go-luks2/internal/errs
+        internal-header:
+          files: [internal/header/**, "!**/*_test.go"]
+          allow:
+            - $gostd
+            - golang.org/x/sys
+            - golang.org/x/crypto
+            - golang.org/x/term
+            - github.com/jeremyhahn/go-enclave
+            - github.com/google/uuid
+            - github.com/jeremyhahn/go-luks2/internal/kdf
+            - github.com/jeremyhahn/go-luks2/internal/fips
+            - github.com/jeremyhahn/go-luks2/internal/errs
+        internal-recoverykey:
+          files: [internal/recoverykey/**, "!**/*_test.go"]
+          allow:
+            - $gostd
+            - golang.org/x/sys
+            - golang.org/x/crypto
+            - golang.org/x/term
+            - github.com/jeremyhahn/go-enclave
+            - github.com/google/uuid
+            - github.com/jeremyhahn/go-luks2/internal/secret
+            - github.com/jeremyhahn/go-luks2/internal/errs
+        internal-volkey:
+          files: [internal/volkey/**, "!**/*_test.go"]
+          allow:
+            - $gostd
+            - golang.org/x/sys
+            - golang.org/x/crypto
+            - golang.org/x/term
+            - github.com/jeremyhahn/go-enclave
+            - github.com/google/uuid
+            - github.com/jeremyhahn/go-luks2/internal/secret
+            - github.com/jeremyhahn/go-luks2/internal/errs
+        internal-device:
+          files: [internal/device/**, "!**/*_test.go"]
+          allow:
+            - $gostd
+            - golang.org/x/sys
+            - golang.org/x/crypto
+            - golang.org/x/term
+            - github.com/jeremyhahn/go-enclave
+            - github.com/google/uuid
+            - github.com/jeremyhahn/go-luks2/internal/clock
+            - github.com/jeremyhahn/go-luks2/internal/errs
+        internal-dm:
+          files: [internal/dm/**, "!**/*_test.go"]
+          allow:
+            - $gostd
+            - golang.org/x/sys
+            - golang.org/x/crypto
+            - golang.org/x/term
+            - github.com/jeremyhahn/go-enclave
+            - github.com/google/uuid
+            - github.com/anatol/devmapper.go
+            - github.com/jeremyhahn/go-luks2/internal/clock
+            - github.com/jeremyhahn/go-luks2/internal/errs
+        internal-keyring:
+          files: [internal/keyring/**, "!**/*_test.go"]
+          allow:
+            - $gostd
+            - golang.org/x/sys
+            - golang.org/x/crypto
+            - golang.org/x/term
+            - github.com/jeremyhahn/go-enclave
+            - github.com/google/uuid
+            - github.com/jeremyhahn/go-luks2/internal/secret
+            - github.com/jeremyhahn/go-luks2/internal/errs
+        internal-command:
+          files: [internal/command/**, "!**/*_test.go"]
+          allow: [$gostd, golang.org/x/sys, golang.org/x/crypto, golang.org/x/term, github.com/jeremyhahn/go-enclave, github.com/google/uuid, github.com/jeremyhahn/go-luks2/internal/errs]
+        internal-cli:
+          files: [internal/cli/**, "!**/*_test.go"]
+          allow:
+            - $gostd
+            - golang.org/x/sys
+            - golang.org/x/crypto
+            - golang.org/x/term
+            - github.com/jeremyhahn/go-enclave
+            - github.com/google/uuid
+            - github.com/jeremyhahn/go-luks2/pkg/luks2
+            - github.com/jeremyhahn/go-luks2/pkg/dmcrypt
+            - github.com/jeremyhahn/go-luks2/pkg/keyprovider
+            - github.com/jeremyhahn/go-luks2/pkg/loop
+            - github.com/jeremyhahn/go-luks2/pkg/filesystem
+            - github.com/jeremyhahn/go-luks2/pkg/wipe
+            - github.com/jeremyhahn/go-luks2/internal/secret
+            - github.com/jeremyhahn/go-luks2/internal/errs
+        pkg-luks2:
+          files: [pkg/luks2/**, "!**/*_test.go"]
+          allow:
+            - $gostd
+            - golang.org/x/sys
+            - golang.org/x/crypto
+            - golang.org/x/term
+            - github.com/jeremyhahn/go-enclave
+            - github.com/google/uuid
+            - github.com/jeremyhahn/go-luks2/internal/errs
+            - github.com/jeremyhahn/go-luks2/internal/clock
+            - github.com/jeremyhahn/go-luks2/internal/fips
+            - github.com/jeremyhahn/go-luks2/internal/secret
+            - github.com/jeremyhahn/go-luks2/internal/af
+            - github.com/jeremyhahn/go-luks2/internal/areacipher
+            - github.com/jeremyhahn/go-luks2/internal/kdf
+            - github.com/jeremyhahn/go-luks2/internal/header
+            - github.com/jeremyhahn/go-luks2/internal/recoverykey
+            - github.com/jeremyhahn/go-luks2/internal/volkey
+            - github.com/jeremyhahn/go-luks2/internal/device
+          deny:
+            - pkg: os/exec
+              desc: "pkg/luks2 is rootless and exec-free (DESIGN.md §A.2); root/exec code lives in dmcrypt, loop, filesystem, keyprovider, internal/dm, internal/keyring and internal/command"
+        pkg-dmcrypt:
+          files: [pkg/dmcrypt/**, "!**/*_test.go"]
+          allow:
+            - $gostd
+            - golang.org/x/sys
+            - golang.org/x/crypto
+            - golang.org/x/term
+            - github.com/jeremyhahn/go-enclave
+            - github.com/google/uuid
+            - github.com/anatol/devmapper.go
+            - github.com/jeremyhahn/go-luks2/pkg/luks2
+            - github.com/jeremyhahn/go-luks2/internal/volkey
+            - github.com/jeremyhahn/go-luks2/internal/dm
+            - github.com/jeremyhahn/go-luks2/internal/keyring
+            - github.com/jeremyhahn/go-luks2/internal/device
+            - github.com/jeremyhahn/go-luks2/internal/clock
+            - github.com/jeremyhahn/go-luks2/internal/errs
+        pkg-keyprovider:
+          files: [pkg/keyprovider/**, "!**/*_test.go"]
+          allow:
+            - $gostd
+            - golang.org/x/sys
+            - golang.org/x/crypto
+            - golang.org/x/term
+            - github.com/jeremyhahn/go-enclave
+            - github.com/google/uuid
+            - github.com/jeremyhahn/go-luks2/pkg/luks2
+            - github.com/jeremyhahn/go-luks2/internal/command
+            - github.com/jeremyhahn/go-luks2/internal/secret
+            - github.com/jeremyhahn/go-luks2/internal/errs
+        pkg-loop:
+          files: [pkg/loop/**, "!**/*_test.go"]
+          allow:
+            - $gostd
+            - golang.org/x/sys
+            - golang.org/x/crypto
+            - golang.org/x/term
+            - github.com/jeremyhahn/go-enclave
+            - github.com/google/uuid
+            - github.com/jeremyhahn/go-luks2/internal/device
+            - github.com/jeremyhahn/go-luks2/internal/clock
+            - github.com/jeremyhahn/go-luks2/internal/errs
+        pkg-filesystem:
+          files: [pkg/filesystem/**, "!**/*_test.go"]
+          allow:
+            - $gostd
+            - golang.org/x/sys
+            - golang.org/x/crypto
+            - golang.org/x/term
+            - github.com/jeremyhahn/go-enclave
+            - github.com/google/uuid
+            - github.com/jeremyhahn/go-luks2/internal/command
+            - github.com/jeremyhahn/go-luks2/internal/errs
+        pkg-wipe:
+          files: [pkg/wipe/**, "!**/*_test.go"]
+          allow:
+            - $gostd
+            - golang.org/x/sys
+            - golang.org/x/crypto
+            - golang.org/x/term
+            - github.com/jeremyhahn/go-enclave
+            - github.com/google/uuid
+            - github.com/jeremyhahn/go-luks2/internal/device
+            - github.com/jeremyhahn/go-luks2/internal/clock
+            - github.com/jeremyhahn/go-luks2/internal/errs
+        cmd-luks2:
+          files: [cmd/luks2/**, "!**/*_test.go"]
+          allow: [$gostd, golang.org/x/sys, golang.org/x/crypto, golang.org/x/term, github.com/jeremyhahn/go-enclave, github.com/google/uuid, github.com/jeremyhahn/go-luks2/internal/cli]
     misspell:
       locale: US
     gocritic:

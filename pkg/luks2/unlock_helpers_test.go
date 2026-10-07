@@ -8,6 +8,7 @@ package luks2
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -32,7 +33,7 @@ func TestVerifyMasterKey(t *testing.T) {
 	t.Run("valid master key with pbkdf2 digest", func(t *testing.T) {
 		// Derive the expected digest from the test master key
 		iterations := 1000
-		kdf := &KDF{
+		kdf := &rawKDF{
 			Type:       "pbkdf2",
 			Hash:       "sha256",
 			Salt:       encodeBase64([]byte("test-salt-16byte")),
@@ -44,7 +45,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			t.Fatalf("Failed to derive test digest: %v", err)
 		}
 
-		digests := map[string]*Digest{
+		digests := map[string]*rawDigest{
 			"0": {
 				Type:       "pbkdf2",
 				Hash:       "sha256",
@@ -54,7 +55,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			},
 		}
 
-		err = verifyMasterKey(enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
+		err = verifyMasterKey(context.Background(), enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
 		if err != nil {
 			t.Errorf("verifyMasterKey failed with valid key: %v", err)
 		}
@@ -63,7 +64,7 @@ func TestVerifyMasterKey(t *testing.T) {
 	t.Run("invalid master key", func(t *testing.T) {
 		invalidKey := []byte("wrong-master-key-32-bytes-long!!")
 		iterations := 1000
-		kdf := &KDF{
+		kdf := &rawKDF{
 			Type:       "pbkdf2",
 			Hash:       "sha256",
 			Salt:       encodeBase64([]byte("test-salt-16byte")),
@@ -76,7 +77,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			t.Fatalf("Failed to derive test digest: %v", err)
 		}
 
-		digests := map[string]*Digest{
+		digests := map[string]*rawDigest{
 			"0": {
 				Type:       "pbkdf2",
 				Hash:       "sha256",
@@ -86,12 +87,12 @@ func TestVerifyMasterKey(t *testing.T) {
 			},
 		}
 
-		err = verifyMasterKey(enclaveFrom(t, invalidKey), "0", boundTo("0", digests))
+		err = verifyMasterKey(context.Background(), enclaveFrom(t, invalidKey), "0", boundTo("0", digests))
 		if err == nil {
 			t.Error("verifyMasterKey should fail with invalid key")
 		}
-		if err.Error() != "master key verification failed" {
-			t.Errorf("Expected 'master key verification failed', got: %v", err)
+		if err.Error() != "luks2: master key verification failed" {
+			t.Errorf("Expected 'luks2: master key verification failed', got: %v", err)
 		}
 	})
 
@@ -114,7 +115,7 @@ func TestVerifyMasterKey(t *testing.T) {
 	t.Run("destroyed master key", func(t *testing.T) {
 		iterations := 1000
 
-		digests := map[string]*Digest{
+		digests := map[string]*rawDigest{
 			"0": {
 				Type:       "pbkdf2",
 				Hash:       "sha256",
@@ -126,13 +127,13 @@ func TestVerifyMasterKey(t *testing.T) {
 
 		// A destroyed enclave is what "no readable master key" looks like once
 		// custody is enclave-owned, and it must not verify.
-		destroyed, err := custody.Random("master key", 32, cryptoRand)
+		destroyed, err := custody.Random("master key", 32, testVolumeSys().cryptoRand)
 		if err != nil {
 			t.Fatalf("custody.Random failed: %v", err)
 		}
 		mustDestroy(t, destroyed)
 
-		if err := verifyMasterKey(destroyed, "0", boundTo("0", digests)); err == nil {
+		if err := verifyMasterKey(context.Background(), destroyed, "0", boundTo("0", digests)); err == nil {
 			t.Error("verifyMasterKey accepted a destroyed master key")
 		}
 	})
@@ -140,7 +141,7 @@ func TestVerifyMasterKey(t *testing.T) {
 	t.Run("nil master key", func(t *testing.T) {
 		iterations := 1000
 
-		digests := map[string]*Digest{
+		digests := map[string]*rawDigest{
 			"0": {
 				Type:       "pbkdf2",
 				Hash:       "sha256",
@@ -150,20 +151,20 @@ func TestVerifyMasterKey(t *testing.T) {
 			},
 		}
 
-		err := verifyMasterKey(nil, "0", boundTo("0", digests))
+		err := verifyMasterKey(context.Background(), nil, "0", boundTo("0", digests))
 		if err == nil {
 			t.Error("verifyMasterKey should fail with nil key")
 		}
 	})
 
 	t.Run("empty digests map", func(t *testing.T) {
-		digests := map[string]*Digest{}
+		digests := map[string]*rawDigest{}
 
-		err := verifyMasterKey(enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
+		err := verifyMasterKey(context.Background(), enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
 		if err == nil {
 			t.Fatal("verifyMasterKey should fail with empty digests map")
 		}
-		// ErrInvalidHeader, NOT ErrMasterKeyVerification. This assertion used to
+		// ErrInvalidHeader, NOT ErrWrongKey. This assertion used to
 		// demand the verification message, which said a credential had been
 		// judged and rejected when nothing had been judged at all: a header with
 		// no digest cannot evaluate any key. The operator it misdirects is the
@@ -171,13 +172,13 @@ func TestVerifyMasterKey(t *testing.T) {
 		if !errors.Is(err, ErrInvalidHeader) {
 			t.Errorf("a header with no digests is not reported as a header fault: %v", err)
 		}
-		if errors.Is(err, ErrMasterKeyVerification) {
+		if errors.Is(err, ErrWrongKey) {
 			t.Errorf("a header with no digests was reported as a failed verification: %v", err)
 		}
 	})
 
 	t.Run("nil digests map", func(t *testing.T) {
-		err := verifyMasterKey(enclaveFrom(t, testMasterKey), "0", boundTo("0", nil))
+		err := verifyMasterKey(context.Background(), enclaveFrom(t, testMasterKey), "0", boundTo("0", nil))
 		if err == nil {
 			t.Error("verifyMasterKey should fail with nil digests map")
 		}
@@ -185,7 +186,7 @@ func TestVerifyMasterKey(t *testing.T) {
 
 	t.Run("multiple digests, first invalid, second valid", func(t *testing.T) {
 		iterations := 1000
-		kdf := &KDF{
+		kdf := &rawKDF{
 			Type:       "pbkdf2",
 			Hash:       "sha256",
 			Salt:       encodeBase64([]byte("test-salt-16byte")),
@@ -197,7 +198,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			t.Fatalf("Failed to derive test digest: %v", err)
 		}
 
-		digests := map[string]*Digest{
+		digests := map[string]*rawDigest{
 			"0": {
 				Type:       "pbkdf2",
 				Hash:       "sha256",
@@ -214,7 +215,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			},
 		}
 
-		err = verifyMasterKey(enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
+		err = verifyMasterKey(context.Background(), enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
 		if err != nil {
 			t.Errorf("verifyMasterKey failed with at least one valid digest: %v", err)
 		}
@@ -223,7 +224,7 @@ func TestVerifyMasterKey(t *testing.T) {
 	t.Run("invalid base64 in digest", func(t *testing.T) {
 		iterations := 1000
 
-		digests := map[string]*Digest{
+		digests := map[string]*rawDigest{
 			"0": {
 				Type:       "pbkdf2",
 				Hash:       "sha256",
@@ -233,7 +234,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			},
 		}
 
-		err := verifyMasterKey(enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
+		err := verifyMasterKey(context.Background(), enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
 		if err == nil {
 			t.Error("verifyMasterKey should fail with invalid base64 digest")
 		}
@@ -242,7 +243,7 @@ func TestVerifyMasterKey(t *testing.T) {
 	t.Run("invalid hash algorithm", func(t *testing.T) {
 		iterations := 1000
 
-		digests := map[string]*Digest{
+		digests := map[string]*rawDigest{
 			"0": {
 				Type:       "pbkdf2",
 				Hash:       "invalid-hash",
@@ -252,7 +253,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			},
 		}
 
-		err := verifyMasterKey(enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
+		err := verifyMasterKey(context.Background(), enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
 		if err == nil {
 			t.Error("verifyMasterKey should fail with invalid hash algorithm")
 		}
@@ -260,7 +261,7 @@ func TestVerifyMasterKey(t *testing.T) {
 
 	t.Run("sha512 hash algorithm", func(t *testing.T) {
 		iterations := 1000
-		kdf := &KDF{
+		kdf := &rawKDF{
 			Type:       "pbkdf2",
 			Hash:       "sha512",
 			Salt:       encodeBase64([]byte("test-salt-16byte")),
@@ -272,7 +273,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			t.Fatalf("Failed to derive test digest: %v", err)
 		}
 
-		digests := map[string]*Digest{
+		digests := map[string]*rawDigest{
 			"0": {
 				Type:       "pbkdf2",
 				Hash:       "sha512",
@@ -282,7 +283,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			},
 		}
 
-		err = verifyMasterKey(enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
+		err = verifyMasterKey(context.Background(), enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
 		if err != nil {
 			t.Errorf("verifyMasterKey failed with sha512: %v", err)
 		}
@@ -291,7 +292,7 @@ func TestVerifyMasterKey(t *testing.T) {
 	t.Run("zero iterations", func(t *testing.T) {
 		iterations := 0
 
-		digests := map[string]*Digest{
+		digests := map[string]*rawDigest{
 			"0": {
 				Type:       "pbkdf2",
 				Hash:       "sha256",
@@ -301,7 +302,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			},
 		}
 
-		err := verifyMasterKey(enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
+		err := verifyMasterKey(context.Background(), enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
 		if err == nil {
 			t.Error("verifyMasterKey should handle zero iterations")
 		}
@@ -310,7 +311,7 @@ func TestVerifyMasterKey(t *testing.T) {
 	t.Run("invalid base64 in salt", func(t *testing.T) {
 		iterations := 1000
 
-		digests := map[string]*Digest{
+		digests := map[string]*rawDigest{
 			"0": {
 				Type:       "pbkdf2",
 				Hash:       "sha256",
@@ -320,7 +321,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			},
 		}
 
-		err := verifyMasterKey(enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
+		err := verifyMasterKey(context.Background(), enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
 		if err == nil {
 			t.Error("verifyMasterKey should fail with invalid base64 salt")
 		}
@@ -353,7 +354,7 @@ func TestVerifyMasterKey(t *testing.T) {
 	} {
 		t.Run(fmt.Sprintf("%s digest stored at %d bytes verifies", tc.hash, tc.digestLen), func(t *testing.T) {
 			iterations := 1000
-			kdf := &KDF{
+			kdf := &rawKDF{
 				Type:       "pbkdf2",
 				Hash:       tc.hash,
 				Salt:       encodeBase64([]byte("test-salt-16byte")),
@@ -365,7 +366,7 @@ func TestVerifyMasterKey(t *testing.T) {
 				t.Fatalf("Failed to derive test digest: %v", err)
 			}
 
-			digests := map[string]*Digest{
+			digests := map[string]*rawDigest{
 				"0": {
 					Type:       "pbkdf2",
 					Hash:       tc.hash,
@@ -375,7 +376,7 @@ func TestVerifyMasterKey(t *testing.T) {
 				},
 			}
 
-			if err := verifyMasterKey(enclaveFrom(t, testMasterKey), "0", boundTo("0", digests)); err != nil {
+			if err := verifyMasterKey(context.Background(), enclaveFrom(t, testMasterKey), "0", boundTo("0", digests)); err != nil {
 				t.Errorf("verifyMasterKey failed for a %d-byte %s digest: %v", tc.digestLen, tc.hash, err)
 			}
 		})
@@ -410,7 +411,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			// length -- see the out-of-scope note in the report).
 			stored := bytes.Repeat([]byte{0xA5}, tc.digestLen)
 
-			digests := map[string]*Digest{
+			digests := map[string]*rawDigest{
 				"0": {
 					Type:       "pbkdf2",
 					Hash:       tc.hash,
@@ -420,19 +421,19 @@ func TestVerifyMasterKey(t *testing.T) {
 				},
 			}
 
-			// ErrInvalidHeader, NOT ErrMasterKeyVerification (#41). This
+			// ErrInvalidHeader, NOT ErrWrongKey (#41). This
 			// assertion demanded the verification verdict until the boundary
 			// was drawn, and it was DEFENDING the defect: the only digest that
 			// attests this keyslot is unusable, so nothing was ever compared,
 			// and a verification verdict claims a judgement that never
 			// happened. The operator it misdirects is the one whose header is
 			// damaged and whose passphrase is perfectly good.
-			err := verifyMasterKey(enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
+			err := verifyMasterKey(context.Background(), enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
 			if !errors.Is(err, ErrInvalidHeader) {
 				t.Errorf("verifyMasterKey(%d-byte %s digest) = %v, want ErrInvalidHeader",
 					tc.digestLen, tc.hash, err)
 			}
-			if errors.Is(err, ErrMasterKeyVerification) {
+			if errors.Is(err, ErrWrongKey) {
 				t.Errorf("verifyMasterKey(%d-byte %s digest) claimed a verification that never ran: %v",
 					tc.digestLen, tc.hash, err)
 			}
@@ -447,7 +448,7 @@ func TestVerifyMasterKeyDoesNotModifyInput(t *testing.T) {
 	copy(originalKey, testMasterKey)
 
 	iterations := 1000
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       encodeBase64([]byte("test-salt-16byte")),
@@ -459,7 +460,7 @@ func TestVerifyMasterKeyDoesNotModifyInput(t *testing.T) {
 		t.Fatalf("Failed to derive test digest: %v", err)
 	}
 
-	digests := map[string]*Digest{
+	digests := map[string]*rawDigest{
 		"0": {
 			Type:       "pbkdf2",
 			Hash:       "sha256",
@@ -469,7 +470,7 @@ func TestVerifyMasterKeyDoesNotModifyInput(t *testing.T) {
 		},
 	}
 
-	_ = verifyMasterKey(enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
+	_ = verifyMasterKey(context.Background(), enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
 
 	if !bytes.Equal(testMasterKey, originalKey) {
 		t.Error("verifyMasterKey modified the input master key")

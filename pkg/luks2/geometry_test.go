@@ -11,6 +11,8 @@ import (
 	"os"
 	"strconv"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // Foreign-geometry tests.
@@ -73,7 +75,7 @@ func newForeignContainer(t *testing.T, name string, geo foreignGeometry) string 
 	}
 
 	// Confirm the fixture is the shape the test needs before relying on it.
-	hdr, metadata, err := ReadHeader(path)
+	hdr, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed on the cryptsetup fixture: %v", err)
 	}
@@ -113,7 +115,7 @@ func TestForeignGeometry_RecoverSecondaryHeaderWithoutThePrimary(t *testing.T) {
 	})
 
 	// Sanity: with the primary intact, the area size is simply read off it.
-	if _, _, err := ReadSecondaryHeader(path); err != nil {
+	if _, _, err := readSecondaryHeaderForTest(path); err != nil {
 		t.Fatalf("ReadSecondaryHeader failed while the primary was intact: %v", err)
 	}
 
@@ -130,11 +132,11 @@ func TestForeignGeometry_RecoverSecondaryHeaderWithoutThePrimary(t *testing.T) {
 		t.Fatalf("failed to close the fixture: %v", err)
 	}
 
-	if _, _, err := ReadHeader(path); err == nil {
+	if _, _, err := readHeaderForTest(path); err == nil {
 		t.Fatal("the primary header still reads after being zeroed; the fixture is not testing recovery")
 	}
 
-	hdr, metadata, err := ReadSecondaryHeader(path)
+	hdr, metadata, err := readSecondaryHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadSecondaryHeader could not recover a 32 KiB-metadata container with a destroyed primary: %v", err)
 	}
@@ -146,7 +148,7 @@ func TestForeignGeometry_RecoverSecondaryHeaderWithoutThePrimary(t *testing.T) {
 	}
 
 	// The recovered metadata has to be usable, not merely parseable.
-	key, err := getMasterKey(path, []byte(conformancePassphrase), metadata)
+	key, err := getMasterKey(path, []byte(conformancePassphrase), metadata, testVolumeSys())
 	if err != nil {
 		t.Fatalf("the recovered metadata does not open the volume: %v", err)
 	}
@@ -184,7 +186,7 @@ func TestForeignGeometry_ProbeRejectsEveryWrongOffset(t *testing.T) {
 		t.Fatalf("failed to close the fixture: %v", err)
 	}
 
-	_, _, err = ReadSecondaryHeader(path)
+	_, _, err = readSecondaryHeaderForTest(path)
 	if err == nil {
 		t.Fatal("ReadSecondaryHeader found a secondary header on a device with none")
 	}
@@ -200,11 +202,11 @@ func TestLegalHeaderAreaSizes(t *testing.T) {
 	if len(sizes) == 0 {
 		t.Fatal("no legal header area sizes")
 	}
-	if sizes[0] != LUKS2HeaderMinSize {
-		t.Errorf("first legal size = %d, want %d", sizes[0], LUKS2HeaderMinSize)
+	if sizes[0] != header.HeaderMinSize {
+		t.Errorf("first legal size = %d, want %d", sizes[0], header.HeaderMinSize)
 	}
-	if last := sizes[len(sizes)-1]; last != LUKS2HeaderMaxSize {
-		t.Errorf("last legal size = %d, want %d", last, LUKS2HeaderMaxSize)
+	if last := sizes[len(sizes)-1]; last != header.HeaderMaxSize {
+		t.Errorf("last legal size = %d, want %d", last, header.HeaderMaxSize)
 	}
 
 	// Every entry must be one the writer can emit and the reader will accept as
@@ -214,10 +216,10 @@ func TestLegalHeaderAreaSizes(t *testing.T) {
 		if !isPowerOf2(int(size)) {
 			t.Errorf("legal size %d is not a power of two", size)
 		}
-		if _, err := headerAreaSizeForWrite(&LUKS2BinaryHeader{HeaderSize: uint64(size)}); err != nil {
+		if _, err := headerAreaSizeForWrite(&header.BinaryHeader{HeaderSize: uint64(size)}); err != nil {
 			t.Errorf("the probe searches offset %d, which the writer cannot produce: %v", size, err)
 		}
-		if _, err := headerAreaOffset(&LUKS2BinaryHeader{HeaderOffset: uint64(size)}); err != nil {
+		if _, err := headerAreaOffset(&header.BinaryHeader{HeaderOffset: uint64(size)}); err != nil {
 			t.Errorf("the probe searches offset %d, which the reader rejects: %v", size, err)
 		}
 	}
@@ -258,7 +260,7 @@ func TestForeignGeometry_AddKeyStaysInsideTheDeclaredKeyslotsArea(t *testing.T) 
 
 	// Confirm the fixture really does leave a gap; without it this test proves
 	// nothing, because the two boundaries would coincide.
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -274,16 +276,16 @@ func TestForeignGeometry_AddKeyStaysInsideTheDeclaredKeyslotsArea(t *testing.T) 
 			" the two boundaries must disagree for this test to mean anything", segmentOffset, keyslotsEnd)
 	}
 
-	opts := &AddKeyOptions{KDFType: KDFTypePBKDF2, Hash: "sha256", PBKDFIterTime: 1}
+	opts := &addKeyOptionsForTest{KDFType: kdfTypePBKDF2, Hash: "sha256", PBKDFIterTime: 1}
 
 	// Fill the declared area. Slot 0 already occupies the first span, so three
 	// more fit.
 	added := 0
 	for i := 0; ; i++ {
 		next := []byte("foreign-added-passphrase-" + strconv.Itoa(i))
-		_, err := AddKey(path, []byte(conformancePassphrase), next, opts)
+		_, err := addKeyForTest(path, []byte(conformancePassphrase), next, opts)
 		if err != nil {
-			if !errors.Is(err, ErrKeyslotsAreaFull) {
+			if !errors.Is(err, ErrNoSpace) {
 				t.Fatalf("AddKey #%d failed with an unexpected error: %v", i, err)
 			}
 			t.Logf("AddKey refused after %d additions: %v", added, err)
@@ -300,7 +302,7 @@ func TestForeignGeometry_AddKeyStaysInsideTheDeclaredKeyslotsArea(t *testing.T) 
 	}
 
 	// Nothing may have been placed outside the declared area.
-	_, metadata, err = ReadHeader(path)
+	_, metadata, err = readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed after AddKey: %v", err)
 	}
@@ -338,66 +340,66 @@ func TestKeyslotsAreaBounds(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		headerSize uint64
-		config     *Config
+		config     *rawConfig
 		wantStart  int64
 		wantEnd    int64
 		wantErr    bool
 	}{
 		{
 			name:       "the default 16 KiB geometry",
-			headerSize: LUKS2HeaderMinSize,
-			config:     &Config{KeyslotsSize: "16744448"},
+			headerSize: header.HeaderMinSize,
+			config:     &rawConfig{KeyslotsSize: "16744448"},
 			wantStart:  0x8000,
 			wantEnd:    0x8000 + 16744448,
 		},
 		{
 			name:       "a 32 KiB metadata area moves the start",
-			headerSize: 2 * LUKS2HeaderMinSize,
-			config:     &Config{KeyslotsSize: "1048576"},
+			headerSize: 2 * header.HeaderMinSize,
+			config:     &rawConfig{KeyslotsSize: "1048576"},
 			wantStart:  0x10000,
 			wantEnd:    0x10000 + 1048576,
 		},
 		{
 			name:       "a 1 MiB metadata area moves it further",
 			headerSize: 1 << 20,
-			config:     &Config{KeyslotsSize: "1048576"},
+			config:     &rawConfig{KeyslotsSize: "1048576"},
 			wantStart:  2 << 20,
 			wantEnd:    (2 << 20) + 1048576,
 		},
 		{
 			name:       "no config",
-			headerSize: LUKS2HeaderMinSize,
+			headerSize: header.HeaderMinSize,
 			config:     nil,
 			wantErr:    true,
 		},
 		{
 			name:       "unparseable keyslots_size",
-			headerSize: LUKS2HeaderMinSize,
-			config:     &Config{KeyslotsSize: "lots"},
+			headerSize: header.HeaderMinSize,
+			config:     &rawConfig{KeyslotsSize: "lots"},
 			wantErr:    true,
 		},
 		{
 			name:       "zero keyslots_size",
-			headerSize: LUKS2HeaderMinSize,
-			config:     &Config{KeyslotsSize: "0"},
+			headerSize: header.HeaderMinSize,
+			config:     &rawConfig{KeyslotsSize: "0"},
 			wantErr:    true,
 		},
 		{
 			name:       "negative keyslots_size",
-			headerSize: LUKS2HeaderMinSize,
-			config:     &Config{KeyslotsSize: "-4096"},
+			headerSize: header.HeaderMinSize,
+			config:     &rawConfig{KeyslotsSize: "-4096"},
 			wantErr:    true,
 		},
 		{
 			name:       "unusable header size",
 			headerSize: 1,
-			config:     &Config{KeyslotsSize: "16744448"},
+			config:     &rawConfig{KeyslotsSize: "16744448"},
 			wantErr:    true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			hdr := &LUKS2BinaryHeader{HeaderSize: tc.headerSize}
-			metadata := &LUKS2Metadata{Config: tc.config}
+			hdr := &header.BinaryHeader{HeaderSize: tc.headerSize}
+			metadata := &header.Metadata{Config: tc.config}
 
 			start, end, err := keyslotsAreaBounds(hdr, metadata)
 			if tc.wantErr {

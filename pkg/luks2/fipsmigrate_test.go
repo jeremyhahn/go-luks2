@@ -8,6 +8,7 @@ package luks2
 
 import (
 	"bytes"
+	"context"
 	"crypto/fips140"
 	"crypto/sha256"
 	"errors"
@@ -40,8 +41,8 @@ var (
 
 // cheapMigration keeps the new keyslot's calibration short; the cost is test
 // latency here and defends nothing.
-func cheapMigration() *FIPSMigrationOptions {
-	return &FIPSMigrationOptions{PBKDFIterTime: 1}
+func cheapMigration() *fipsMigrationOptionsForTest {
+	return &fipsMigrationOptionsForTest{PBKDFIterTime: 1}
 }
 
 // assertMigrationRefusedUnderFIPS is what every fixture-building test asserts
@@ -54,8 +55,8 @@ func assertMigrationRefusedUnderFIPS(t *testing.T) {
 	formatWithLibrary(t, device)
 	before := fileDigest(t, device)
 
-	_, err := MigrateToFIPS(device, migrationPassphrase, cheapMigration())
-	if !errors.Is(err, ErrFIPSMigrationUnderFIPS) {
+	_, err := migrateToFIPSForTest(device, migrationPassphrase, cheapMigration())
+	if !errors.Is(err, errFIPSMigrationUnderFIPS) {
 		t.Fatalf("MigrateToFIPS in a FIPS process: got %v, want ErrFIPSMigrationUnderFIPS", err)
 	}
 	var merr *FIPSMigrationError
@@ -82,11 +83,10 @@ func assertMigrationRefusedUnderFIPS(t *testing.T) {
 func argon2Volume(t *testing.T, name string, withSecond bool) string {
 	t.Helper()
 
-	pinDigestIterations(t, minPBKDF2Iterations)
 	device := filepath.Join(t.TempDir(), name)
 	placeImage(t, device, cryptsetupArgon2Prefix(t, withSecond))
 
-	_, metadata, err := ReadHeader(device)
+	_, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -137,7 +137,7 @@ func cryptsetupArgon2Prefix(t *testing.T, withSecond bool) []byte {
 			t.Fatalf("cryptsetup luksAddKey exited %d\n%s", code, out)
 		}
 	}
-	_, metadata, err := ReadHeader(image)
+	_, metadata, err := readHeaderForTest(image)
 	if err != nil {
 		t.Fatalf("ReadHeader on cryptsetup's container failed: %v", err)
 	}
@@ -170,7 +170,7 @@ func fileDigest(t *testing.T, path string) [32]byte {
 func dataAreaDigest(t *testing.T, path string) [32]byte {
 	t.Helper()
 
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -201,7 +201,7 @@ func dataAreaDigest(t *testing.T, path string) [32]byte {
 func fillDataArea(t *testing.T, path string) {
 	t.Helper()
 
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -224,11 +224,11 @@ func fillDataArea(t *testing.T, path string) {
 func volumeKey(t *testing.T, device string, passphrase []byte) []byte {
 	t.Helper()
 
-	_, metadata, err := ReadHeader(device)
+	_, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
-	mk, err := getMasterKey(device, passphrase, metadata)
+	mk, err := getMasterKey(device, passphrase, metadata, testVolumeSys())
 	if err != nil {
 		t.Fatalf("getMasterKey failed: %v", err)
 	}
@@ -248,7 +248,7 @@ func volumeKey(t *testing.T, device string, passphrase []byte) []byte {
 func assertFIPSReady(t *testing.T, device string) {
 	t.Helper()
 
-	_, metadata, err := ReadHeader(device)
+	_, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -273,7 +273,7 @@ func TestMigrateToFIPSRewrapsTheVolumeKeyAndRemovesArgon2Keyslots(t *testing.T) 
 	keyBefore := volumeKey(t, device, migrationPassphrase)
 	dataBefore := dataAreaDigest(t, device)
 
-	result, err := MigrateToFIPS(device, migrationPassphrase, cheapMigration())
+	result, err := migrateToFIPSForTest(device, migrationPassphrase, cheapMigration())
 	if err != nil {
 		t.Fatalf("MigrateToFIPS failed: %v", err)
 	}
@@ -300,7 +300,7 @@ func TestMigrateToFIPSRewrapsTheVolumeKeyAndRemovesArgon2Keyslots(t *testing.T) 
 	if dataAreaDigest(t, device) != dataBefore {
 		t.Fatal("the data area changed; a keyslot migration must never touch it")
 	}
-	if err := TestKey(device, otherPassphrase); err == nil {
+	if err := testKeyForTest(device, otherPassphrase); err == nil {
 		t.Fatal("the removed Argon2 keyslot's credential still opens the volume")
 	}
 }
@@ -318,7 +318,7 @@ func TestMigrateToFIPSKeepsNonApprovedKeyslotsOnlyWhenAskedAndSaysSo(t *testing.
 	opts := cheapMigration()
 	opts.KeepNonApprovedKeyslots = true
 
-	result, err := MigrateToFIPS(device, migrationPassphrase, opts)
+	result, err := migrateToFIPSForTest(device, migrationPassphrase, opts)
 	if err != nil {
 		t.Fatalf("MigrateToFIPS failed: %v", err)
 	}
@@ -329,20 +329,20 @@ func TestMigrateToFIPSKeepsNonApprovedKeyslotsOnlyWhenAskedAndSaysSo(t *testing.
 		t.Fatalf("retained %v removed %v, want retained [0 1] and nothing removed",
 			result.RetainedNonApprovedKeyslots, result.RemovedKeyslots)
 	}
-	if err := TestKey(device, otherPassphrase); err != nil {
+	if err := testKeyForTest(device, otherPassphrase); err != nil {
 		t.Fatalf("a kept keyslot no longer opens the volume: %v", err)
 	}
 
 	// The staged rollout the option exists for: migrate the second credential,
 	// then a final call without the option removes the originals.
-	second, err := MigrateToFIPS(device, otherPassphrase, opts)
+	second, err := migrateToFIPSForTest(device, otherPassphrase, opts)
 	if err != nil {
 		t.Fatalf("migrating the second credential failed: %v", err)
 	}
 	if !second.KeyslotAdded {
 		t.Fatal("the second credential was not given its own approved keyslot")
 	}
-	final, err := MigrateToFIPS(device, migrationPassphrase, cheapMigration())
+	final, err := migrateToFIPSForTest(device, migrationPassphrase, cheapMigration())
 	if err != nil {
 		t.Fatalf("the final migration failed: %v", err)
 	}
@@ -351,7 +351,7 @@ func TestMigrateToFIPSKeepsNonApprovedKeyslotsOnlyWhenAskedAndSaysSo(t *testing.
 	}
 	assertFIPSReady(t, device)
 	for _, p := range [][]byte{migrationPassphrase, otherPassphrase} {
-		if err := TestKey(device, p); err != nil {
+		if err := testKeyForTest(device, p); err != nil {
 			t.Fatalf("a migrated credential does not open the volume: %v", err)
 		}
 	}
@@ -366,19 +366,19 @@ func TestMigrateToFIPSOnAMigratedVolumeChangesNothing(t *testing.T) {
 	}
 
 	device := argon2Volume(t, "rerun.img", false)
-	first, err := MigrateToFIPS(device, migrationPassphrase, cheapMigration())
+	first, err := migrateToFIPSForTest(device, migrationPassphrase, cheapMigration())
 	if err != nil {
 		t.Fatalf("first MigrateToFIPS failed: %v", err)
 	}
 
-	again, err := MigrateToFIPS(device, migrationPassphrase, cheapMigration())
+	again, err := migrateToFIPSForTest(device, migrationPassphrase, cheapMigration())
 	if err != nil {
 		t.Fatalf("second MigrateToFIPS failed: %v", err)
 	}
 	if again.KeyslotAdded || again.Keyslot != first.Keyslot || len(again.RemovedKeyslots) != 0 || !again.Complete {
 		t.Fatalf("re-run changed the volume: %+v (first run %+v)", again, first)
 	}
-	_, metadata, err := ReadHeader(device)
+	_, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -397,19 +397,19 @@ func sha1DigestVolume(t *testing.T, name string) string {
 	device := newImage(t, name)
 	formatWithLibrary(t, device)
 
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
-	mk, err := getMasterKey(device, migrationPassphrase, metadata)
+	mk, err := getMasterKey(device, migrationPassphrase, metadata, testVolumeSys())
 	if err != nil {
 		t.Fatalf("getMasterKey failed: %v", err)
 	}
 	defer mustDestroy(t, mk)
 
 	iterations := 1000
-	kdf := &KDF{Type: KDFTypePBKDF2, Hash: "sha1", Salt: metadata.Digests["0"].Salt, Iterations: &iterations}
-	derived, err := deriveKeySecret(mk, kdf, 20)
+	kdf := &rawKDF{Type: kdfTypePBKDF2, Hash: "sha1", Salt: metadata.Digests["0"].Salt, Iterations: &iterations}
+	derived, err := deriveKeySecret(context.Background(), mk, kdf, 20, testVolumeSys())
 	if err != nil {
 		t.Fatalf("deriving the sha1 digest failed: %v", err)
 	}
@@ -427,7 +427,7 @@ func sha1DigestVolume(t *testing.T, name string) string {
 	if err := writeHeaderInternal(device, hdr, metadata); err != nil {
 		t.Fatalf("writing the sha1 digest failed: %v", err)
 	}
-	if err := TestKey(device, migrationPassphrase); err != nil {
+	if err := testKeyForTest(device, migrationPassphrase); err != nil {
 		t.Fatalf("the sha1-digest fixture does not open outside FIPS mode: %v", err)
 	}
 	return device
@@ -446,7 +446,7 @@ func TestMigrateToFIPSMigratesANonApprovedDigest(t *testing.T) {
 	device := sha1DigestVolume(t, "sha1-digest.img")
 	keyBefore := volumeKey(t, device, migrationPassphrase)
 
-	result, err := MigrateToFIPS(device, migrationPassphrase, cheapMigration())
+	result, err := migrateToFIPSForTest(device, migrationPassphrase, cheapMigration())
 	if err != nil {
 		t.Fatalf("MigrateToFIPS failed: %v", err)
 	}
@@ -461,13 +461,13 @@ func TestMigrateToFIPSMigratesANonApprovedDigest(t *testing.T) {
 	}
 	assertFIPSReady(t, device)
 
-	_, metadata, err := ReadHeader(device)
+	_, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 	digest := metadata.Digests["0"]
-	if digest.Type != KDFTypePBKDF2 || digest.Hash != DefaultHashAlgo {
-		t.Fatalf("digest is %s-%s, want pbkdf2-%s", digest.Type, digest.Hash, DefaultHashAlgo)
+	if digest.Type != kdfTypePBKDF2 || digest.Hash != defaultHashAlgo {
+		t.Fatalf("digest is %s-%s, want pbkdf2-%s", digest.Type, digest.Hash, defaultHashAlgo)
 	}
 	if !slices.Equal(digest.Keyslots, []string{"0"}) || !slices.Equal(digest.Segments, []string{"0"}) {
 		t.Fatalf("the migrated digest lost its associations: keyslots %v segments %v", digest.Keyslots, digest.Segments)
@@ -488,7 +488,7 @@ func TestMigrateToFIPSRefusesADigestThatDoesNotAttestTheKey(t *testing.T) {
 
 	device := newImage(t, "foreign-digest.img")
 	formatWithLibrary(t, device)
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -503,8 +503,8 @@ func TestMigrateToFIPSRefusesADigestThatDoesNotAttestTheKey(t *testing.T) {
 	}
 	before := fileDigest(t, device)
 
-	_, err = MigrateToFIPS(device, migrationPassphrase, cheapMigration())
-	if !errors.Is(err, ErrFIPSMigrationDigest) {
+	_, err = migrateToFIPSForTest(device, migrationPassphrase, cheapMigration())
+	if !errors.Is(err, errFIPSMigrationDigest) {
 		t.Fatalf("got %v, want ErrFIPSMigrationDigest", err)
 	}
 	var merr *FIPSMigrationError
@@ -529,9 +529,9 @@ func TestMigrateToFIPSRemovesNothingWhenTheKeyslotCannotBeAdded(t *testing.T) {
 
 	// Below the iteration floor: createKDF refuses it, after the unlock and
 	// before anything is written.
-	_, err := MigrateToFIPS(device, migrationPassphrase, &FIPSMigrationOptions{PBKDFIterations: 1000})
-	if !errors.Is(err, ErrPBKDFIterationsTooLow) {
-		t.Fatalf("got %v, want ErrPBKDFIterationsTooLow", err)
+	_, err := migrateToFIPSForTest(device, migrationPassphrase, &fipsMigrationOptionsForTest{PBKDFIterations: 1000})
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("got %v, want ErrInvalidArgument", err)
 	}
 	var merr *FIPSMigrationError
 	if !errors.As(err, &merr) || merr.Stage != "add keyslot" || merr.State != fipsStateOriginals {
@@ -540,7 +540,7 @@ func TestMigrateToFIPSRemovesNothingWhenTheKeyslotCannotBeAdded(t *testing.T) {
 	if fileDigest(t, device) != before {
 		t.Fatal("a failed add changed the device")
 	}
-	if err := TestKey(device, migrationPassphrase); err != nil {
+	if err := testKeyForTest(device, migrationPassphrase); err != nil {
 		t.Fatalf("the volume no longer opens after a failed migration: %v", err)
 	}
 }
@@ -557,9 +557,9 @@ func TestMigrateToFIPSRefusesAHashFIPSModeCannotRun(t *testing.T) {
 	formatWithLibrary(t, device)
 	before := fileDigest(t, device)
 
-	_, err := MigrateToFIPS(device, migrationPassphrase, &FIPSMigrationOptions{Hash: "sha1", PBKDFIterTime: 1})
-	if !errors.Is(err, ErrUnsupportedHash) {
-		t.Fatalf("got %v, want ErrUnsupportedHash", err)
+	_, err := migrateToFIPSForTest(device, migrationPassphrase, &fipsMigrationOptionsForTest{Hash: "sha1", PBKDFIterTime: 1})
+	if !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("got %v, want ErrUnsupported", err)
 	}
 	if fileDigest(t, device) != before {
 		t.Fatal("the refusal changed the device")
@@ -576,13 +576,13 @@ func fakeArgon2KeyslotVolume(t *testing.T, name string) string {
 
 	device := newImage(t, name)
 	formatWithLibrary(t, device)
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
-	cost, memory, cpus := MinArgon2Time, MinArgon2MemoryKB, 1
+	cost, memory, cpus := minArgon2Time, minArgon2MemoryKB, 1
 	kdf := metadata.Keyslots["0"].KDF
-	kdf.Type, kdf.Hash, kdf.Iterations = KDFTypeArgon2id, "", nil
+	kdf.Type, kdf.Hash, kdf.Iterations = kdfTypeArgon2id, "", nil
 	kdf.Time, kdf.Memory, kdf.CPUs = &cost, &memory, &cpus
 	hdr.SequenceID++
 	if err := writeHeaderUnvalidated(device, hdr, metadata); err != nil {
@@ -598,19 +598,19 @@ func fakeArgon2KeyslotVolume(t *testing.T, name string) string {
 // FIPS refusal.
 func TestFIPSRefusalOfAnArgon2VolumeNamesTheImport(t *testing.T) {
 	device := fakeArgon2KeyslotVolume(t, "fips-refusal-message.img")
-	err := TestKey(device, migrationPassphrase)
+	err := testKeyForTest(device, migrationPassphrase)
 
 	if !fips140.Enabled() {
 		if errors.Is(err, ErrFIPSImportRequired) {
 			t.Fatalf("a non-FIPS process reported a FIPS refusal: %v", err)
 		}
-		if !errors.Is(err, ErrMasterKeyVerification) {
+		if !errors.Is(err, ErrWrongKey) {
 			t.Fatalf("outside FIPS the relabelled keyslot is derived and does not verify; got %v", err)
 		}
 		return
 	}
 
-	assertImportRequired(t, err, device, []NonApprovedKDF{{ID: "0", Type: KDFTypeArgon2id}}, nil)
+	assertImportRequired(t, err, device, []NonApprovedKDF{{ID: 0, Type: kdfTypeArgon2id}}, nil)
 }
 
 // TestFIPSRefusalNamesANonApprovedDigest is the digest half: an approved
@@ -619,7 +619,7 @@ func TestFIPSRefusalOfAnArgon2VolumeNamesTheImport(t *testing.T) {
 func TestFIPSRefusalNamesANonApprovedDigest(t *testing.T) {
 	device := newImage(t, "fips-digest-message.img")
 	formatWithLibrary(t, device)
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -632,14 +632,14 @@ func TestFIPSRefusalNamesANonApprovedDigest(t *testing.T) {
 		t.Fatalf("writing the fixture failed: %v", err)
 	}
 
-	err = TestKey(device, migrationPassphrase)
+	err = testKeyForTest(device, migrationPassphrase)
 	if !fips140.Enabled() {
 		if errors.Is(err, ErrFIPSImportRequired) {
 			t.Fatalf("a non-FIPS process reported a FIPS refusal: %v", err)
 		}
 		return
 	}
-	assertImportRequired(t, err, device, nil, []NonApprovedKDF{{ID: "0", Type: KDFTypePBKDF2, Hash: "sha1"}})
+	assertImportRequired(t, err, device, nil, []NonApprovedKDF{{ID: 0, Type: kdfTypePBKDF2, Hash: "sha1"}})
 }
 
 // TestFIPSRefusalDoesNotMaskDamage: when a keyslot could not be tried for a
@@ -647,7 +647,7 @@ func TestFIPSRefusalNamesANonApprovedDigest(t *testing.T) {
 // migration would not fix a damaged keyslot, and saying "intact" would be false.
 func TestFIPSRefusalDoesNotMaskDamage(t *testing.T) {
 	device := fakeArgon2KeyslotVolume(t, "fips-and-damage.img")
-	hdr, metadata, err := ReadHeader(device)
+	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -656,7 +656,7 @@ func TestFIPSRefusalDoesNotMaskDamage(t *testing.T) {
 	area.Encryption = "serpent-xts-plain64"
 	damaged.Area = &area
 	iterations := 1000
-	damaged.KDF = &KDF{Type: KDFTypePBKDF2, Hash: DefaultHashAlgo, Salt: damaged.KDF.Salt, Iterations: &iterations}
+	damaged.KDF = &rawKDF{Type: kdfTypePBKDF2, Hash: defaultHashAlgo, Salt: damaged.KDF.Salt, Iterations: &iterations}
 	metadata.Keyslots["1"] = &damaged
 	metadata.Digests["0"].Keyslots = append(metadata.Digests["0"].Keyslots, "1")
 	hdr.SequenceID++
@@ -664,7 +664,7 @@ func TestFIPSRefusalDoesNotMaskDamage(t *testing.T) {
 		t.Fatalf("writing the fixture failed: %v", err)
 	}
 
-	err = TestKey(device, migrationPassphrase)
+	err = testKeyForTest(device, migrationPassphrase)
 	if err == nil {
 		t.Fatal("TestKey succeeded on a volume nothing can open")
 	}
@@ -685,7 +685,7 @@ func assertImportRequired(t *testing.T, err error, device string, keyslots, dige
 	if !errors.Is(err, ErrFIPSImportRequired) || !errors.Is(err, ErrFIPSNotApproved) {
 		t.Fatal("the error must match ErrFIPSImportRequired and, for existing callers, ErrFIPSNotApproved")
 	}
-	if errors.Is(err, ErrInvalidKeyslot) || errors.Is(err, ErrInvalidHeader) {
+	if errors.Is(err, ErrKeyslotNotFound) || errors.Is(err, ErrInvalidHeader) {
 		t.Fatal("the error must not match a damage sentinel; the volume is not damaged")
 	}
 	if ierr.Device != device || !slices.Equal(ierr.Keyslots, keyslots) || !slices.Equal(ierr.Digests, digests) {
@@ -725,5 +725,36 @@ func TestFIPSApprovedKDFIncludesTheHash(t *testing.T) {
 		if got := fipsApprovedKDF(c.kdfType, c.hash); got != c.want {
 			t.Errorf("fipsApprovedKDF(%q, %q) = %v, want %v", c.kdfType, c.hash, got, c.want)
 		}
+	}
+}
+
+// TestFIPSMigrationErrorMigrationStageMapsEveryStageString locks down
+// FIPSMigrationError.MigrationStage's mapping from migrateToFIPS's ten
+// Stage strings onto DESIGN.md §B.2's five FIPSMigrationStage values,
+// recorded in DECISIONS.md's H9 train-merge entry.
+func TestFIPSMigrationErrorMigrationStageMapsEveryStageString(t *testing.T) {
+	tests := []struct {
+		stage string
+		want  FIPSMigrationStage
+	}{
+		{"precondition", StagePreflight},
+		{"sync", StagePreflight},
+		{"unlock", StageVerify},
+		{"plan", StageVerify},
+		{"reconcile header copies", StageWrite},
+		{"add keyslot", StageWrite},
+		{"migrate digest", StageWrite},
+		{"verify", StageVerify},
+		{"remove keyslot", StageRemove},
+		{"final check", StageVerifyWritten},
+		{"an unrecognized stage", StagePreflight},
+	}
+	for _, tt := range tests {
+		t.Run(tt.stage, func(t *testing.T) {
+			e := &FIPSMigrationError{Stage: tt.stage}
+			if got := e.MigrationStage(); got != tt.want {
+				t.Errorf("MigrationStage() for Stage %q = %v, want %v", tt.stage, got, tt.want)
+			}
+		})
 	}
 }

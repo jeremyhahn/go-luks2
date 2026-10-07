@@ -7,6 +7,7 @@
 package luks2
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"os"
@@ -41,25 +42,36 @@ func imageDigest(t *testing.T, image string) [32]byte {
 func TestWipeKeyslotRefusesAnActiveDeviceDespiteARetarget(t *testing.T) {
 	loopA, imageA := laneDLoop(t)
 	loopB, imageB := laneDLoop(t)
-	if _, err := AddKey(loopA, []byte(laneDPassphrase), []byte("a-second-passphrase"), &AddKeyOptions{KDFType: KDFTypePBKDF2, PBKDFIterTime: 1}); err != nil {
+	if _, err := addKeyForTest(loopA, []byte(laneDPassphrase), []byte("a-second-passphrase"), &addKeyOptionsForTest{KDFType: kdfTypePBKDF2, PBKDFIterTime: 1}); err != nil {
 		t.Fatalf("AddKey: %v", err)
 	}
 
-	name := runVolume(t, "pinned-claim")
-	defer releaseVolume(t, name)
-	if err := Unlock(loopA, []byte(laneDPassphrase), name); err != nil {
-		t.Fatalf("Unlock: %v", err)
+	// A device is "in use" to WipeKeyslot's O_EXCL check for the same
+	// kernel reason regardless of who holds the exclusive open -- a real
+	// dm-crypt mapping (what the original, pre-#268 Unlock produced here)
+	// or, as below, this test's own exclusive open of the block device.
+	// Activation now lives in pkg/dmcrypt, which pkg/luks2 cannot import
+	// (DESIGN.md A.2), so this stands in for it; see the file comment.
+	excl, err := os.OpenFile(loopA, os.O_RDWR|os.O_EXCL, 0) // #nosec G304 -- a loop device this test attached
+	if err != nil {
+		t.Fatalf("holding an exclusive open on %s failed: %v", loopA, err)
 	}
+	defer func() { _ = excl.Close() }()
 	beforeA, beforeB := imageDigest(t, imageA), imageDigest(t, imageB)
 
 	link := filepath.Join(t.TempDir(), "device")
 	if err := os.Symlink(loopA, link); err != nil {
 		t.Fatal(err)
 	}
-	relinkAfterFirstOpen(t, link, loopB)
+	sys := relinkAfterFirstOpen(t, link, loopB)
 
-	if err := WipeKeyslot(link, 1); !errors.Is(err, ErrDeviceInUse) {
-		t.Fatalf("WipeKeyslot through a link re-pointed from an open volume to an idle one = %v, want ErrDeviceInUse", err)
+	v, err := Open(context.Background(), link, withTestSys(sys))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+	if err := v.RemoveKeyslot(context.Background(), 1); !errors.Is(err, ErrDeviceInUse) {
+		t.Fatalf("RemoveKeyslot through a link re-pointed from an open volume to an idle one = %v, want ErrDeviceInUse", err)
 	}
 	if imageDigest(t, imageA) != beforeA {
 		t.Fatal("the open volume the lock was taken on was written to")
@@ -71,26 +83,33 @@ func TestWipeKeyslotRefusesAnActiveDeviceDespiteARetarget(t *testing.T) {
 
 // TestWipeAndTokenWritesStayOnTheLockedLoopDevice: on real loop devices, a
 // link re-pointed after the lock never receives a byte. The exclusive claim
-// (Wipe) and the header rewrite (ImportToken) both reopen the LOCKED
+// (Erase) and the header rewrite (ImportToken) both reopen the LOCKED
 // descriptor via /proc/self/fd (H6) rather than resolving the path again, so
 // both operations succeed and land on the device that was locked; the
 // device the link now names is never touched.
 func TestWipeAndTokenWritesStayOnTheLockedLoopDevice(t *testing.T) {
 	for _, op := range []struct {
 		name   string
-		run    func(link string) error
+		run    func(link string, sys volumeSys) error
 		verify func(t *testing.T, loopA string)
 	}{
-		{"Wipe", func(l string) error { return Wipe(WipeOptions{Device: l, HeaderOnly: true}) },
+		{"Erase", func(l string, sys volumeSys) error {
+			v, err := Open(context.Background(), l, withTestSys(sys))
+			if err != nil {
+				return err
+			}
+			defer func() { _ = v.Close() }()
+			return v.Erase(context.Background())
+		},
 			func(t *testing.T, loopA string) {
-				if _, _, err := ReadHeader(loopA); err == nil {
+				if _, _, err := readHeaderForTest(loopA); err == nil {
 					t.Fatal("the locked device still reads as LUKS2 after a header-only wipe")
 				}
 			}},
-		{"ImportToken", func(l string) error {
-			return ImportToken(l, 3, &Token{Type: "x-pinned", Keyslots: []string{"0"}})
+		{"SetToken", func(l string, sys volumeSys) error {
+			return setTokenForTest(l, 3, Token{Type: "x-pinned", Keyslots: []int{0}}, withTestSys(sys))
 		}, func(t *testing.T, loopA string) {
-			_, metadata, err := ReadHeader(loopA)
+			_, metadata, err := readHeaderForTest(loopA)
 			if err != nil || metadata.Tokens["3"] == nil {
 				t.Fatalf("token 3 is not on the locked device: %v", err)
 			}
@@ -105,9 +124,9 @@ func TestWipeAndTokenWritesStayOnTheLockedLoopDevice(t *testing.T) {
 			if err := os.Symlink(loopA, link); err != nil {
 				t.Fatal(err)
 			}
-			relinkAfterFirstOpen(t, link, loopB)
+			sys := relinkAfterFirstOpen(t, link, loopB)
 
-			if err := op.run(link); err != nil {
+			if err := op.run(link, sys); err != nil {
 				t.Fatalf("%s: %v", op.name, err)
 			}
 			if imageDigest(t, imageB) != beforeB {

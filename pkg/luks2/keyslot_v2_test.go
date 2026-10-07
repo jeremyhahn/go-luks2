@@ -1,0 +1,498 @@
+// Copyright (c) 2025 Jeremy Hahn
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build !integration
+
+package luks2
+
+import (
+	"context"
+	"errors"
+	"io/fs"
+	"os"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/jeremyhahn/go-enclave"
+)
+
+// newPassphraseEnclave is newTestPassphrase, parameterized on the text: used
+// here for the SECOND credential a keyslot test enrolls or rotates to.
+func newPassphraseEnclave(t *testing.T, text string) *enclave.MemoryEnclave {
+	t.Helper()
+	e, err := enclave.NewMemoryEnclaveCopy([]byte(text))
+	if err != nil {
+		t.Fatalf("could not build a passphrase enclave: %v", err)
+	}
+	return e
+}
+
+func TestVolumeAddKeyslotAddsAWorkingCredential(t *testing.T) {
+	path := formattedVolumeImage(t, "addkeyslot.img", "", "")
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
+	pass := newTestPassphrase(t)
+	defer func() { _ = pass.Destroy() }()
+	key, err := v.Unlock(context.Background(), pass)
+	if err != nil {
+		t.Fatalf("Unlock failed: %v", err)
+	}
+	defer key.Destroy()
+
+	newPass := newPassphraseEnclave(t, "a second credential")
+	defer func() { _ = newPass.Destroy() }()
+
+	info, err := v.AddKeyslot(context.Background(), key, newPass, KeyslotParams{
+		Priority: PriorityNormal,
+		KDF:      KDFParams{Type: KDFPBKDF2, IterTime: time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("AddKeyslot failed: %v", err)
+	}
+	if info.ID != 1 {
+		t.Errorf("AddKeyslot returned slot %d, want 1 (the lowest free slot)", info.ID)
+	}
+	if info.KDF.Type != KDFPBKDF2 {
+		t.Errorf("KDF.Type = %q, want %q", info.KDF.Type, KDFPBKDF2)
+	}
+	if info.KDF.Iterations < minPBKDF2Iterations {
+		t.Errorf("KDF.Iterations = %d, want at least the test floor %d", info.KDF.Iterations, minPBKDF2Iterations)
+	}
+
+	// The new keyslot must actually open the volume.
+	recovered, err := v.UnlockKeyslot(context.Background(), info.ID, newPass)
+	if err != nil {
+		t.Fatalf("UnlockKeyslot on the new slot failed: %v", err)
+	}
+	defer recovered.Destroy()
+
+	// Reading it back through the header must agree with what AddKeyslot
+	// returned: there is exactly one source of truth, listKeyslotsFrom.
+	h, err := v.Header(context.Background())
+	if err != nil {
+		t.Fatalf("Header failed: %v", err)
+	}
+	slots := h.Keyslots()
+	if len(slots) != 2 {
+		t.Fatalf("Keyslots() returned %d slots, want 2", len(slots))
+	}
+}
+
+func TestVolumeAddKeyslotWithAnExplicitSlot(t *testing.T) {
+	path := formattedVolumeImage(t, "addkeyslot-explicit.img", "", "")
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
+	pass := newTestPassphrase(t)
+	defer func() { _ = pass.Destroy() }()
+	key, err := v.Unlock(context.Background(), pass)
+	if err != nil {
+		t.Fatalf("Unlock failed: %v", err)
+	}
+	defer key.Destroy()
+
+	newPass := newPassphraseEnclave(t, "slot five's credential")
+	defer func() { _ = newPass.Destroy() }()
+
+	slot := 5
+	info, err := v.AddKeyslot(context.Background(), key, newPass, KeyslotParams{
+		Slot: &slot,
+		KDF:  KDFParams{Type: KDFPBKDF2, IterTime: time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("AddKeyslot failed: %v", err)
+	}
+	if info.ID != 5 {
+		t.Errorf("AddKeyslot returned slot %d, want the requested 5", info.ID)
+	}
+}
+
+func TestVolumeAddKeyslotWithPriorityPreferWritesIt(t *testing.T) {
+	path := formattedVolumeImage(t, "addkeyslot-prefer.img", "", "")
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
+	pass := newTestPassphrase(t)
+	defer func() { _ = pass.Destroy() }()
+	key, err := v.Unlock(context.Background(), pass)
+	if err != nil {
+		t.Fatalf("Unlock failed: %v", err)
+	}
+	defer key.Destroy()
+
+	newPass := newPassphraseEnclave(t, "the preferred credential")
+	defer func() { _ = newPass.Destroy() }()
+
+	info, err := v.AddKeyslot(context.Background(), key, newPass, KeyslotParams{
+		Priority: PriorityPrefer,
+		KDF:      KDFParams{Type: KDFPBKDF2, IterTime: time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("AddKeyslot failed: %v", err)
+	}
+	if info.Priority != PriorityPrefer {
+		t.Errorf("AddKeyslot returned Priority %v, want PriorityPrefer", info.Priority)
+	}
+
+	// The write must be durable, not just reflected in the return value.
+	h, err := v.Header(context.Background())
+	if err != nil {
+		t.Fatalf("Header failed: %v", err)
+	}
+	for _, s := range h.Keyslots() {
+		if s.ID == info.ID && s.Priority != PriorityPrefer {
+			t.Errorf("re-read Priority = %v, want PriorityPrefer", s.Priority)
+		}
+	}
+}
+
+func TestVolumeAddKeyslotOnAReadOnlyVolumeFails(t *testing.T) {
+	path := formattedVolumeImage(t, "addkeyslot-readonly.img", "", "")
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()), WithReadOnly())
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
+	pass := newTestPassphrase(t)
+	defer func() { _ = pass.Destroy() }()
+
+	rw, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open (rw, for Unlock) failed: %v", err)
+	}
+	defer func() { _ = rw.Close() }()
+	key, err := rw.Unlock(context.Background(), pass)
+	if err != nil {
+		t.Fatalf("Unlock failed: %v", err)
+	}
+	defer key.Destroy()
+
+	newPass := newPassphraseEnclave(t, "should never be written")
+	defer func() { _ = newPass.Destroy() }()
+
+	if _, err := v.AddKeyslot(context.Background(), key, newPass, KeyslotParams{}); !errors.Is(err, ErrReadOnly) {
+		t.Errorf("AddKeyslot on a read-only Volume = %v, want ErrReadOnly", err)
+	}
+}
+
+func TestVolumeChangeKeyslotRotatesThePassphrase(t *testing.T) {
+	path := formattedVolumeImage(t, "changekeyslot.img", "", "")
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
+	original := newTestPassphrase(t)
+	defer func() { _ = original.Destroy() }()
+	key, err := v.Unlock(context.Background(), original)
+	if err != nil {
+		t.Fatalf("Unlock failed: %v", err)
+	}
+	defer key.Destroy()
+
+	rotated := newPassphraseEnclave(t, "the rotated credential")
+	defer func() { _ = rotated.Destroy() }()
+
+	info, err := v.ChangeKeyslot(context.Background(), key, rotated, KeyslotParams{})
+	if err != nil {
+		t.Fatalf("ChangeKeyslot failed: %v", err)
+	}
+	if info.ID != key.Keyslot() {
+		t.Errorf("ChangeKeyslot reported slot %d, want the key's own slot %d", info.ID, key.Keyslot())
+	}
+
+	if _, err := v.UnlockKeyslot(context.Background(), key.Keyslot(), rotated); err != nil {
+		t.Fatalf("UnlockKeyslot with the rotated credential failed: %v", err)
+	}
+
+	stale, err := enclave.NewMemoryEnclaveCopy([]byte(testPassphraseText))
+	if err != nil {
+		t.Fatalf("could not build the stale-passphrase enclave: %v", err)
+	}
+	defer func() { _ = stale.Destroy() }()
+	if _, err := v.UnlockKeyslot(context.Background(), key.Keyslot(), stale); err == nil {
+		t.Error("UnlockKeyslot with the old passphrase still succeeded after ChangeKeyslot")
+	}
+}
+
+// TestVolumeChangeKeyslotWithPriorityPreferWritesIt is
+// TestVolumeAddKeyslotWithPriorityPreferWritesIt's counterpart for a
+// rotation: ChangeKeyslot's p.Priority is written (onDiskPriority), even
+// though p.KDF is not -- see the method's own doc comment.
+func TestVolumeChangeKeyslotWithPriorityPreferWritesIt(t *testing.T) {
+	path := formattedVolumeImage(t, "changekeyslot-prefer.img", "", "")
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
+	original := newTestPassphrase(t)
+	defer func() { _ = original.Destroy() }()
+	key, err := v.Unlock(context.Background(), original)
+	if err != nil {
+		t.Fatalf("Unlock failed: %v", err)
+	}
+	defer key.Destroy()
+
+	rotated := newPassphraseEnclave(t, "the re-prioritized credential")
+	defer func() { _ = rotated.Destroy() }()
+
+	info, err := v.ChangeKeyslot(context.Background(), key, rotated, KeyslotParams{Priority: PriorityPrefer})
+	if err != nil {
+		t.Fatalf("ChangeKeyslot failed: %v", err)
+	}
+	if info.Priority != PriorityPrefer {
+		t.Errorf("ChangeKeyslot returned Priority %v, want PriorityPrefer", info.Priority)
+	}
+
+	// The write must be durable, not just reflected in the return value.
+	h, err := v.Header(context.Background())
+	if err != nil {
+		t.Fatalf("Header failed: %v", err)
+	}
+	for _, s := range h.Keyslots() {
+		if s.ID == info.ID && s.Priority != PriorityPrefer {
+			t.Errorf("re-read Priority = %v, want PriorityPrefer", s.Priority)
+		}
+	}
+}
+
+// TestVolumeChangeKeyslotPreservesTheExistingPBKDF2Cost is changeKeyslotCore's
+// "a passphrase rotation is not a request to re-cost the keyslot" contract,
+// the same one the old ChangeKey keeps. iterations sits above the sha256
+// caller-credential floor (600,000) on purpose: ChangeKeyslot must carry it
+// through UNCHANGED rather than recalibrate, and a recalibration would almost
+// certainly not land on this exact number.
+func TestVolumeChangeKeyslotPreservesTheExistingPBKDF2Cost(t *testing.T) {
+	const iterations = 700_000
+
+	path := newImage(t, "changekeyslot-cost.img")
+	if err := formatForTest(formatOptionsForTest{
+		Device:          path,
+		Passphrase:      []byte(testPassphraseText),
+		Cipher:          "aes",
+		CipherMode:      "xts-plain64",
+		KeySize:         512,
+		HashAlgo:        "sha256",
+		SectorSize:      512,
+		KDFType:         kdfTypePBKDF2,
+		PBKDFIterations: iterations,
+	}); err != nil {
+		t.Fatalf("Format failed: %v", err)
+	}
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
+	pass := newPassphraseEnclave(t, testPassphraseText)
+	defer func() { _ = pass.Destroy() }()
+	key, err := v.Unlock(context.Background(), pass)
+	if err != nil {
+		t.Fatalf("Unlock failed: %v", err)
+	}
+	defer key.Destroy()
+
+	rotated := newPassphraseEnclave(t, "cost-preserving rotation")
+	defer func() { _ = rotated.Destroy() }()
+
+	info, err := v.ChangeKeyslot(context.Background(), key, rotated, KeyslotParams{})
+	if err != nil {
+		t.Fatalf("ChangeKeyslot failed: %v", err)
+	}
+	if info.KDF.Iterations != iterations {
+		t.Errorf("ChangeKeyslot's reported iterations = %d, want the preserved %d", info.KDF.Iterations, iterations)
+	}
+}
+
+func TestVolumeChangeKeyslotOnAReadOnlyVolumeFails(t *testing.T) {
+	path := formattedVolumeImage(t, "changekeyslot-readonly.img", "", "")
+
+	rw, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open (rw, for Unlock) failed: %v", err)
+	}
+	defer func() { _ = rw.Close() }()
+
+	pass := newTestPassphrase(t)
+	defer func() { _ = pass.Destroy() }()
+	key, err := rw.Unlock(context.Background(), pass)
+	if err != nil {
+		t.Fatalf("Unlock failed: %v", err)
+	}
+	defer key.Destroy()
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()), WithReadOnly())
+	if err != nil {
+		t.Fatalf("Open (ro) failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
+	rotated := newPassphraseEnclave(t, "should never be written")
+	defer func() { _ = rotated.Destroy() }()
+
+	if _, err := v.ChangeKeyslot(context.Background(), key, rotated, KeyslotParams{}); !errors.Is(err, ErrReadOnly) {
+		t.Errorf("ChangeKeyslot on a read-only Volume = %v, want ErrReadOnly", err)
+	}
+}
+
+func TestVolumeRemoveKeyslotRemovesItWithoutDisturbingOthers(t *testing.T) {
+	path := formattedVolumeImage(t, "removekeyslot.img", "", "")
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
+	pass := newTestPassphrase(t)
+	defer func() { _ = pass.Destroy() }()
+	key, err := v.Unlock(context.Background(), pass)
+	if err != nil {
+		t.Fatalf("Unlock failed: %v", err)
+	}
+	defer key.Destroy()
+
+	newPass := newPassphraseEnclave(t, "the doomed credential")
+	defer func() { _ = newPass.Destroy() }()
+	added, err := v.AddKeyslot(context.Background(), key, newPass, KeyslotParams{
+		KDF: KDFParams{Type: KDFPBKDF2, IterTime: time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("AddKeyslot failed: %v", err)
+	}
+
+	if err := v.RemoveKeyslot(context.Background(), added.ID); err != nil {
+		t.Fatalf("RemoveKeyslot failed: %v", err)
+	}
+
+	if _, err := v.UnlockKeyslot(context.Background(), added.ID, newPass); !errors.Is(err, ErrKeyslotNotFound) {
+		t.Errorf("UnlockKeyslot on the removed slot = %v, want ErrInvalidKeyslot", err)
+	}
+	// The original keyslot must still work.
+	if _, err := v.UnlockKeyslot(context.Background(), 0, pass); err != nil {
+		t.Errorf("UnlockKeyslot on the surviving slot 0 failed: %v", err)
+	}
+}
+
+func TestVolumeRemoveKeyslotRefusesTheLastKeyslot(t *testing.T) {
+	path := formattedVolumeImage(t, "removekeyslot-last.img", "", "")
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
+	if err := v.RemoveKeyslot(context.Background(), 0); !errors.Is(err, ErrLastKeyslot) {
+		t.Errorf("RemoveKeyslot on the only keyslot = %v, want ErrLastKeyslot", err)
+	}
+}
+
+func TestVolumeRemoveKeyslotOnAMissingSlotFails(t *testing.T) {
+	path := formattedVolumeImage(t, "removekeyslot-missing.img", "", "")
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
+	if err := v.RemoveKeyslot(context.Background(), 7); !errors.Is(err, ErrKeyslotNotFound) {
+		t.Errorf("RemoveKeyslot on an unused slot = %v, want ErrInvalidKeyslot", err)
+	}
+}
+
+func TestVolumeRemoveKeyslotOnAReadOnlyVolumeFails(t *testing.T) {
+	path := formattedVolumeImage(t, "removekeyslot-readonly.img", "", "")
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()), WithReadOnly())
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
+	if err := v.RemoveKeyslot(context.Background(), 0); !errors.Is(err, ErrReadOnly) {
+		t.Errorf("RemoveKeyslot on a read-only Volume = %v, want ErrReadOnly", err)
+	}
+}
+
+// TestVolumeRemoveKeyslotRefusesAnInUseDevice is #246 D4 for the no-credential
+// removal path: RemoveKeyslot takes no passphrase, so the exclusive claim
+// (locked.Claim, the same call Format and Erase already make) is the only
+// thing refusing it on a volume that is open, or a device something else
+// holds. This substitutes the openFile seam the claim's O_EXCL reopen goes
+// through, rather than a real mapping, so it needs no root and no loop
+// device; the kernel's own EBUSY is proved against a real device in
+// TestWipeKeyslotRefusesAnActiveDeviceDespiteARetarget (integration).
+func TestVolumeRemoveKeyslotRefusesAnInUseDevice(t *testing.T) {
+	path := formattedVolumeImage(t, "removekeyslot-inuse.img", "", "")
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
+	pass := newTestPassphrase(t)
+	defer func() { _ = pass.Destroy() }()
+	key, err := v.Unlock(context.Background(), pass)
+	if err != nil {
+		t.Fatalf("Unlock failed: %v", err)
+	}
+	defer key.Destroy()
+
+	newPass := newPassphraseEnclave(t, "the slot a refused RemoveKeyslot must not touch")
+	defer func() { _ = newPass.Destroy() }()
+	added, err := v.AddKeyslot(context.Background(), key, newPass, KeyslotParams{
+		KDF: KDFParams{Type: KDFPBKDF2, IterTime: time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("AddKeyslot failed: %v", err)
+	}
+
+	real := v.sys.openFile
+	v.sys.openFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
+		// The exclusive claim reopens the locked descriptor's own
+		// /proc/self/fd entry (device.Locked.Claim); intercepting that
+		// exact open stands in for the kernel's EBUSY on an active mapping.
+		if strings.HasPrefix(name, "/proc/self/fd/") && flag&os.O_EXCL != 0 {
+			return nil, &fs.PathError{Op: "open", Path: name, Err: syscall.EBUSY}
+		}
+		return real(name, flag, perm)
+	}
+
+	if err := v.RemoveKeyslot(context.Background(), added.ID); !errors.Is(err, ErrDeviceInUse) {
+		t.Fatalf("RemoveKeyslot of an in-use device = %v, want ErrDeviceInUse", err)
+	}
+
+	// Nothing written: the keyslot a refused removal targeted must still
+	// open with its own credential.
+	if _, err := v.UnlockKeyslot(context.Background(), added.ID, newPass); err != nil {
+		t.Errorf("UnlockKeyslot on the slot a refused RemoveKeyslot targeted failed: %v", err)
+	}
+}

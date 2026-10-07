@@ -149,10 +149,10 @@ func Credential(c secret.Custody, text *enclave.MemoryEnclave) (*enclave.MemoryE
 	err := secret.Borrow("recovery key", text, func(b []byte) error {
 		body := trimASCIISpace(b)
 		if len(body) == 0 {
-			return &errs.Error{Detail: "recovery key is empty"}
+			return &errs.Error{Kind: errs.ErrInvalidCredential, Detail: "recovery key is empty"}
 		}
 		if bytes.IndexByte(body, '\n') >= 0 {
-			return &errs.Error{Detail: "a recovery key is a single line; read a saved file line by line"}
+			return &errs.Error{Kind: errs.ErrInvalidCredential, Detail: "a recovery key is a single line; read a saved file line by line"}
 		}
 		var err error
 		credential, err = c.Clone("recovery key", body)
@@ -201,7 +201,7 @@ func Decode(c secret.Custody, rendered *enclave.MemoryEnclave) (*enclave.MemoryE
 	err := secret.Borrow("recovery key", rendered, func(raw []byte) error {
 		body := trimASCIISpace(raw)
 		if len(body) == 0 {
-			return &errs.Error{Detail: "recovery key is empty"}
+			return &errs.Error{Kind: errs.ErrInvalidCredential, Detail: "recovery key is empty"}
 		}
 
 		// Dashed: strip the separators and lower-case, into locked scratch.
@@ -263,12 +263,20 @@ func Decode(c secret.Custody, rendered *enclave.MemoryEnclave) (*enclave.MemoryE
 // already trimmed and lower-cased in place.
 func decodeHex(c secret.Custody, src []byte) (*enclave.MemoryEnclave, error) {
 	n := hex.DecodedLen(len(src))
+	invalid := &errs.Error{Kind: errs.ErrInvalidCredential, Detail: "recovery key is not valid hex"}
 	if n == 0 {
-		return nil, hex.ErrLength
+		return nil, invalid
 	}
-	return decodeExact(c, n, func(dst []byte) (int, error) {
-		return hex.Decode(dst, src)
+	key, err := decodeExact(c, n, func(dst []byte) (int, error) {
+		// hex.InvalidByteError names the offending byte, which is a
+		// character of the credential: it is dropped, not wrapped.
+		n, err := hex.Decode(dst, src)
+		if err != nil {
+			return n, invalid
+		}
+		return n, nil
 	})
+	return key, err
 }
 
 // decodeBase64 decodes base64 bytes DIRECTLY into locked memory.
@@ -304,7 +312,7 @@ func decodeExact(c secret.Custody, maxLen int, decode func(dst []byte) (int, err
 			return err
 		}
 		if n == 0 {
-			return &errs.Error{Detail: "recovery key is empty"}
+			return &errs.Error{Kind: errs.ErrInvalidCredential, Detail: "recovery key is empty"}
 		}
 		exact, err = c.New("recovery key", n)
 		if err != nil {

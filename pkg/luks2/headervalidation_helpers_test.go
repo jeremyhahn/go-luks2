@@ -6,6 +6,8 @@
 
 package luks2
 
+import "github.com/jeremyhahn/go-luks2/internal/header"
+
 // minimalHeaderJSONTail completes a JSON area after its keyslots member with the
 // smallest segments, digests and config cryptsetup accepts: one crypt segment
 // at 16 MiB, attested by a digest that names no keyslot, in a default-geometry
@@ -18,17 +20,17 @@ const minimalHeaderJSONTail = `"tokens":{},` +
 
 // minimalValidMetadata is minimalHeaderJSONTail as typed metadata, with no
 // keyslots, for a default-geometry (16 KiB) header.
-func minimalValidMetadata() *LUKS2Metadata {
-	return &LUKS2Metadata{
-		Keyslots: map[string]*Keyslot{},
-		Tokens:   map[string]*Token{},
-		Segments: map[string]*Segment{"0": {
+func minimalValidMetadata() *header.Metadata {
+	return &header.Metadata{
+		Keyslots: map[string]*header.Keyslot{},
+		Tokens:   map[string]*LegacyToken{},
+		Segments: map[string]*header.Segment{"0": {
 			Type: "crypt", Offset: "16777216", Size: "dynamic", IVTweak: "0",
 			Encryption: "aes-xts-plain64", SectorSize: 512,
 		}},
-		Digests: map[string]*Digest{"0": {
+		Digests: map[string]*rawDigest{"0": {
 			Type: "pbkdf2", Keyslots: []string{}, Segments: []string{"0"}, Hash: "sha256", Iterations: 1000,
 		}},
-		Config: &Config{JSONSize: "12288", KeyslotsSize: "16744448"},
+		Config: &rawConfig{JSONSize: "12288", KeyslotsSize: "16744448"},
 	}
 }

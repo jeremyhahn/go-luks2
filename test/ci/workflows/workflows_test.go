@@ -202,7 +202,7 @@ func TestReleaseRequiresMainAndCIsGate(t *testing.T) {
 
 	gate := job(t, wf, "ci-gate")
 	for _, want := range []string{
-		"go run ./test/ci/cmd/release-gate",
+		"go run ./test/tools/release-gate",
 		"-main-ref FETCH_HEAD",
 		"git fetch --no-tags --quiet origin main",
 		"-status-context 'CI / CI Gate (push)'",

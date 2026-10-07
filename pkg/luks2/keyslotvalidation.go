@@ -8,12 +8,12 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// Keyslot geometry and KDF-cost validation now live in internal/header; see
+// header.Keyslot geometry and KDF-cost validation now live in internal/header; see
 // docs/design/DECISIONS.md's H5 entry. These are transitional forwards, kept
 // under their original names so every existing caller and test in this
 // package keeps compiling unchanged. They are removed at H13.
 const (
-	MaxKeyslotKeySize  = header.MaxKeyslotKeySize
+	maxKeyslotKeySize  = header.MaxKeyslotKeySize
 	maxKeyslotAreaSize = header.MaxKeyslotAreaSize
 	maxKeyslotStripes  = header.MaxKeyslotStripes
 
@@ -32,7 +32,11 @@ const (
 
 // validateKeyslot forwards to header.ValidateKeyslot. See keyslot.go's
 // callers.
-var validateKeyslot = header.ValidateKeyslot
+func validateKeyslot(id string, keyslot *header.Keyslot) error {
+	return header.ValidateKeyslot(id, keyslot)
+}
 
 // validateKDFCost forwards to header.ValidateKDFCost.
-var validateKDFCost = header.ValidateKDFCost
+func validateKDFCost(k *rawKDF) error {
+	return header.ValidateKDFCost(k)
+}

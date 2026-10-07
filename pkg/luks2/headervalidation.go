@@ -24,4 +24,6 @@ func sortedIDs[V any](m map[string]V) []string {
 var onlineReencryptRequirements = header.OnlineReencryptRequirements
 
 // validateHeaderStructure forwards to header.ValidateHeaderStructure.
-var validateHeaderStructure = header.ValidateHeaderStructure
+func validateHeaderStructure(hdrSize int, metadata *header.Metadata) error {
+	return header.ValidateHeaderStructure(hdrSize, metadata)
+}

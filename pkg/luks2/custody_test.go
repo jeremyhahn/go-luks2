@@ -7,12 +7,13 @@
 package luks2
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
 	"errors"
 	"testing"
 
 	"github.com/jeremyhahn/go-enclave"
-	"github.com/jeremyhahn/go-luks2/internal/recoverykey"
 )
 
 // Custody tests.
@@ -31,7 +32,7 @@ import (
 
 func TestDeriveKeyEnclaveAgreesWithTheUnprotectedDerivation(t *testing.T) {
 	iterations := 1000
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       encodeBase64([]byte("a-sixteen-byte!!")),
@@ -39,7 +40,7 @@ func TestDeriveKeyEnclaveAgreesWithTheUnprotectedDerivation(t *testing.T) {
 	}
 	passphrase := []byte("custody-test-passphrase")
 
-	held, err := DeriveKeyEnclave(passphrase, kdf, 64)
+	held, err := deriveKeyEnclave(context.Background(), passphrase, kdf, 64)
 	if err != nil {
 		t.Fatalf("DeriveKeyEnclave failed: %v", err)
 	}
@@ -67,14 +68,14 @@ func TestDeriveKeyEnclaveAgreesWithTheUnprotectedDerivation(t *testing.T) {
 // forgets to wipe one gets no error, just a live copy of the key.
 func TestDeriveKeyEnclaveHandsBackAnEnclaveNotASlice(t *testing.T) {
 	iterations := 1000
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       encodeBase64([]byte("a-sixteen-byte!!")),
 		Iterations: &iterations,
 	}
 
-	held, err := DeriveKeyEnclave([]byte("custody-test-passphrase"), kdf, 64)
+	held, err := deriveKeyEnclave(context.Background(), []byte("custody-test-passphrase"), kdf, 64)
 	if err != nil {
 		t.Fatalf("DeriveKeyEnclave failed: %v", err)
 	}
@@ -98,7 +99,7 @@ func TestDeriveKeyEnclaveHandsBackAnEnclaveNotASlice(t *testing.T) {
 
 func TestDeriveKeySecretKeepsTheInputInsideItsEnclave(t *testing.T) {
 	iterations := 1000
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       encodeBase64([]byte("a-sixteen-byte!!")),
@@ -108,7 +109,7 @@ func TestDeriveKeySecretKeepsTheInputInsideItsEnclave(t *testing.T) {
 	secret := []byte("a master key that never leaves protected memory!")
 	source := enclaveFrom(t, secret)
 
-	derived, err := deriveKeySecret(source, kdf, 32)
+	derived, err := deriveKeySecret(context.Background(), source, kdf, 32, testVolumeSys())
 	if err != nil {
 		t.Fatalf("deriveKeySecret failed: %v", err)
 	}
@@ -135,20 +136,20 @@ func TestDeriveKeySecretKeepsTheInputInsideItsEnclave(t *testing.T) {
 
 func TestDeriveKeySecretRefusesADestroyedInput(t *testing.T) {
 	iterations := 1000
-	kdf := &KDF{
+	kdf := &rawKDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       encodeBase64([]byte("a-sixteen-byte!!")),
 		Iterations: &iterations,
 	}
 
-	source, err := custody.Random("master key", 64, cryptoRand)
+	source, err := custody.Random("master key", 64, testVolumeSys().cryptoRand)
 	if err != nil {
 		t.Fatalf("custody.Random failed: %v", err)
 	}
 	mustDestroy(t, source)
 
-	derived, err := deriveKeySecret(source, kdf, 32)
+	derived, err := deriveKeySecret(context.Background(), source, kdf, 32, testVolumeSys())
 	if err == nil {
 		mustDestroy(t, derived)
 		t.Fatal("deriveKeySecret derived from a destroyed enclave")
@@ -167,12 +168,12 @@ func TestUnlockKeyslotHoldsTheMasterKeyInProtectedMemory(t *testing.T) {
 	path := newImage(t, "custody.img")
 	formatWithLibrary(t, path)
 
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 
-	masterKey, err := getMasterKey(path, []byte(conformancePassphrase), metadata)
+	masterKey, err := getMasterKey(path, []byte(conformancePassphrase), metadata, testVolumeSys())
 	if err != nil {
 		t.Fatalf("getMasterKey failed: %v", err)
 	}
@@ -207,14 +208,14 @@ func TestFailedUnlocksReleaseEveryLockedRegion(t *testing.T) {
 	path := newImage(t, "custody-failure.img")
 	formatWithLibrary(t, path)
 
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 
 	// One warm-up attempt first: the first pass through these paths allocates
 	// package-level state that would otherwise be counted as a leak.
-	if _, err := getMasterKey(path, []byte(conformanceWrongPassphrase), metadata); err == nil {
+	if _, err := getMasterKey(path, []byte(conformanceWrongPassphrase), metadata, testVolumeSys()); err == nil {
 		t.Fatal("a wrong passphrase opened the volume")
 	}
 
@@ -227,7 +228,7 @@ func TestFailedUnlocksReleaseEveryLockedRegion(t *testing.T) {
 	// a CI runner and bought nothing the fourth did not.
 	const attempts = 4
 	for i := 0; i < attempts; i++ {
-		key, err := getMasterKey(path, []byte(conformanceWrongPassphrase), metadata)
+		key, err := getMasterKey(path, []byte(conformanceWrongPassphrase), metadata, testVolumeSys())
 		if err == nil {
 			mustDestroy(t, key)
 			t.Fatal("a wrong passphrase opened the volume")
@@ -246,12 +247,12 @@ func TestSuccessfulUnlocksReleaseEveryLockedRegion(t *testing.T) {
 	path := newImage(t, "custody-success.img")
 	formatWithLibrary(t, path)
 
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 
-	key, err := getMasterKey(path, []byte(conformancePassphrase), metadata)
+	key, err := getMasterKey(path, []byte(conformancePassphrase), metadata, testVolumeSys())
 	if err != nil {
 		t.Fatalf("getMasterKey failed: %v", err)
 	}
@@ -262,7 +263,7 @@ func TestSuccessfulUnlocksReleaseEveryLockedRegion(t *testing.T) {
 	// Three rounds, for the reason given in the failed-unlock test above.
 	const attempts = 3
 	for i := 0; i < attempts; i++ {
-		key, err := getMasterKey(path, []byte(conformancePassphrase), metadata)
+		key, err := getMasterKey(path, []byte(conformancePassphrase), metadata, testVolumeSys())
 		if err != nil {
 			t.Fatalf("getMasterKey failed: %v", err)
 		}
@@ -284,7 +285,7 @@ func TestUnlockKeyslotRefusesAnAbsurdKeyslotArea(t *testing.T) {
 	path := newImage(t, "custody-absurd-area.img")
 	formatWithLibrary(t, path)
 
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -300,14 +301,14 @@ func TestUnlockKeyslotRefusesAnAbsurdKeyslotArea(t *testing.T) {
 			keyslot.Area.Size = size
 			defer func() { keyslot.Area.Size = original }()
 
-			key, err := unlockKeyslot(path, "0", []byte(conformancePassphrase), keyslot, metadata.Digests)
+			key, err := unlockKeyslot(context.Background(), path, "0", []byte(conformancePassphrase), keyslot, metadata.Digests, testVolumeSys())
 			if err == nil {
 				mustDestroy(t, key)
 				t.Fatalf("unlockKeyslot accepted a keyslot area of %s bytes", size)
 			}
 			// ErrInvalidKeyslot, not ErrInvalidHeader: damage to one keyslot
 			// must let the scan move on to the others.
-			if !errors.Is(err, ErrInvalidKeyslot) {
+			if !errors.Is(err, ErrKeyslotNotFound) {
 				t.Fatalf("error does not match ErrInvalidKeyslot: %v", err)
 			}
 		})
@@ -318,62 +319,63 @@ func TestUnlockKeyslotRefusesAnAbsurdKeyslotArea(t *testing.T) {
 // is easiest to leave behind: the printable form, which used to be a plain Go
 // string that could never be wiped -- and which is now the credential itself.
 func TestRecoveryKeyIsHeldInProtectedMemory(t *testing.T) {
-	key, err := GenerateRecoveryKey(32, RecoveryKeyFormatDashed)
+	key, err := NewRecoveryKey()
 	if err != nil {
-		t.Fatalf("GenerateRecoveryKey failed: %v", err)
+		t.Fatalf("NewRecoveryKey failed: %v", err)
 	}
-	defer key.Clear()
+	defer key.Destroy()
 
-	if !key.Credential.IsAlive() {
-		t.Fatal("the credential is not in live protected memory")
+	var buf bytes.Buffer
+	if _, err := key.WriteTo(&buf); err != nil {
+		t.Fatalf("WriteTo failed: %v", err)
 	}
+	rendered := buf.String()
 
-	// What is displayed is the credential, byte for byte. Anything else means
-	// the string an operator writes down is not the string the keyslot holds.
-	rendered, err := key.FormattedString()
+	typedEnclave, err := enclave.NewMemoryEnclaveCopy([]byte(rendered))
 	if err != nil {
-		t.Fatalf("FormattedString failed: %v", err)
+		t.Fatalf("could not build a test enclave: %v", err)
 	}
-	if !key.Credential.EqualTo([]byte(rendered)) {
-		t.Fatal("the displayed string is not the credential")
-	}
+	defer func() { _ = typedEnclave.Destroy() }()
 
-	typed, err := RecoveryCredential(rendered)
+	typed, err := ParseRecoveryKey(typedEnclave)
 	if err != nil {
-		t.Fatalf("RecoveryCredential failed: %v", err)
+		t.Fatalf("ParseRecoveryKey failed: %v", err)
 	}
 	defer mustDestroy(t, typed)
 
-	if !key.Credential.EqualTo(openSecret(t, typed)) {
+	if s := openSecret(t, typed); string(s) != rendered {
 		t.Fatal("typing the displayed string back does not reproduce the credential")
 	}
 }
 
 func TestRecoveryKeyRenderingRoundTripsInEveryFormat(t *testing.T) {
-	for _, format := range []RecoveryKeyFormat{RecoveryKeyFormatHex, RecoveryKeyFormatBase64, RecoveryKeyFormatDashed} {
-		t.Run(string(format), func(t *testing.T) {
-			key, err := GenerateRecoveryKey(32, format)
+	for _, format := range []RecoveryKeyFormat{RecoveryHex, RecoveryBase64, RecoveryDashed} {
+		t.Run(format.String(), func(t *testing.T) {
+			key, err := NewRecoveryKey(WithRecoveryFormat(format))
 			if err != nil {
-				t.Fatalf("GenerateRecoveryKey failed: %v", err)
+				t.Fatalf("NewRecoveryKey failed: %v", err)
 			}
-			defer key.Clear()
+			defer key.Destroy()
 
-			if key.Credential.Size() != recoverykey.Len(32, recoveryRenderings[format]) {
-				t.Fatalf("credential holds %d bytes, want %d", key.Credential.Size(), recoverykey.Len(32, recoveryRenderings[format]))
+			var buf bytes.Buffer
+			if _, err := key.WriteTo(&buf); err != nil {
+				t.Fatalf("WriteTo failed: %v", err)
 			}
+			rendered := buf.String()
 
-			rendered, err := key.FormattedString()
+			typedEnclave, err := enclave.NewMemoryEnclaveCopy([]byte(rendered))
 			if err != nil {
-				t.Fatalf("FormattedString failed: %v", err)
+				t.Fatalf("could not build a test enclave: %v", err)
 			}
+			defer func() { _ = typedEnclave.Destroy() }()
 
-			typed, err := RecoveryCredential(rendered)
+			typed, err := ParseRecoveryKey(typedEnclave)
 			if err != nil {
-				t.Fatalf("RecoveryCredential(%q) failed: %v", rendered, err)
+				t.Fatalf("ParseRecoveryKey(%q) failed: %v", rendered, err)
 			}
 			defer mustDestroy(t, typed)
 
-			if !key.Credential.EqualTo(openSecret(t, typed)) {
+			if s := openSecret(t, typed); string(s) != rendered {
 				t.Fatalf("the %s credential does not survive being typed back", format)
 			}
 
@@ -381,7 +383,7 @@ func TestRecoveryKeyRenderingRoundTripsInEveryFormat(t *testing.T) {
 			// which is where its strength comes from. Nothing depends on the
 			// decode any more, but if it ever stopped decoding to 32 bytes the
 			// generator would be producing something other than what it claims.
-			decoded, err := ParseRecoveryKey(rendered)
+			decoded, err := parseLegacyRecoveryKey(rendered)
 			if err != nil {
 				t.Fatalf("ParseRecoveryKey(%q) failed: %v", rendered, err)
 			}

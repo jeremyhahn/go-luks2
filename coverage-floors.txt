@@ -1,6 +1,6 @@
 # Coverage floors: <import path> <tier> <floor%>
 #
-# Read by test/covergate (`make coverage-gate`, `make coverage-combined`). The
+# Read by test/tools/covergate (`make coverage-gate`, `make coverage-combined`). The
 # bar is 90% for EVERY package (testing-guidelines.md; project-scaffold.md 6),
 # compared per package and exactly -- 89.99% is below 90.
 #
@@ -20,7 +20,7 @@
 # few branches (lock backoff, retry loops) run or not by timing, and a floor at
 # the exact measurement would fail on that alone -- and down to the whole point
 # where the half point would leave less than two statements of slack
-# (test/harness: 466 of 551 is 84.57%, and 84.50% needs 466 -- no slack at
+# (test/internal/harness: 466 of 551 is 84.57%, and 84.50% needs 466 -- no slack at
 # all). So neither suite can lose coverage unnoticed. RAISE a unit floor
 # when unit coverage rises; never lower one.
 #
@@ -28,11 +28,15 @@
 # line, if a line names a package that no longer exists, or if no tier holds a
 # package to the 90% target. `none` declares a package with no statements, and
 # the gate checks that claim against the profile.
+github.com/jeremyhahn/go-luks2/pkg/filesystem                    unit      90.50
+github.com/jeremyhahn/go-luks2/pkg/filesystem                    combined  90
 github.com/jeremyhahn/go-luks2/pkg/luks2                         unit      87.50
 github.com/jeremyhahn/go-luks2/pkg/luks2                         combined  90
-github.com/jeremyhahn/go-luks2/cmd/luks2                         unit      90
+github.com/jeremyhahn/go-luks2/cmd/luks2                         unit      100
+github.com/jeremyhahn/go-luks2/pkg/keyprovider                   unit      90
 github.com/jeremyhahn/go-luks2/internal/af                       unit      90
 github.com/jeremyhahn/go-luks2/internal/areacipher               unit      90
+github.com/jeremyhahn/go-luks2/internal/cli                      unit      90
 github.com/jeremyhahn/go-luks2/internal/clock                    unit      90
 github.com/jeremyhahn/go-luks2/internal/command                  unit      90
 github.com/jeremyhahn/go-luks2/internal/device                   unit      90
@@ -42,19 +46,26 @@ github.com/jeremyhahn/go-luks2/internal/errs                     unit      90
 github.com/jeremyhahn/go-luks2/internal/fips                     unit      90
 github.com/jeremyhahn/go-luks2/internal/header                   unit      90
 github.com/jeremyhahn/go-luks2/internal/kdf                      unit      90
+github.com/jeremyhahn/go-luks2/pkg/dmcrypt                       unit      80.50
+github.com/jeremyhahn/go-luks2/pkg/dmcrypt                       combined  90
 github.com/jeremyhahn/go-luks2/internal/keyring                  unit      87.50
 github.com/jeremyhahn/go-luks2/internal/keyring                  combined  90
 github.com/jeremyhahn/go-luks2/internal/recoverykey              unit      90
 github.com/jeremyhahn/go-luks2/internal/secret                   unit      90
-github.com/jeremyhahn/go-luks2/test/harness                      unit      87.00
-github.com/jeremyhahn/go-luks2/test/harness                      combined  90
-github.com/jeremyhahn/go-luks2/test/harness/cmd/luks2-testreap   unit      90
-github.com/jeremyhahn/go-luks2/test/covergate                    unit      90
+github.com/jeremyhahn/go-luks2/test/internal/harness              unit      87.00
+github.com/jeremyhahn/go-luks2/test/internal/harness              combined  90
+github.com/jeremyhahn/go-luks2/test/tools/luks2-testreap          unit      90
+github.com/jeremyhahn/go-luks2/test/tools/covergate               unit      90
+github.com/jeremyhahn/go-luks2/internal/volkey                   unit      90
+github.com/jeremyhahn/go-luks2/pkg/loop                           unit      55.50
+github.com/jeremyhahn/go-luks2/pkg/loop                           combined  90
+github.com/jeremyhahn/go-luks2/pkg/wipe                           unit      90
 github.com/jeremyhahn/go-luks2/test/tools/apidump                unit      90
 github.com/jeremyhahn/go-luks2/test/makefile                     unit      none
-github.com/jeremyhahn/go-luks2/test/labstrings                   unit      90
-github.com/jeremyhahn/go-luks2/test/labstrings/cmd/releasability-gate unit 90
-github.com/jeremyhahn/go-luks2/test/ci/cmd/require-tool          unit      90
-github.com/jeremyhahn/go-luks2/test/ci/cmd/release-gate          unit      90
+github.com/jeremyhahn/go-luks2/test/integration/cli/commands     unit      90
+github.com/jeremyhahn/go-luks2/test/internal/labstrings           unit      90
+github.com/jeremyhahn/go-luks2/test/tools/releasability-gate      unit      90
+github.com/jeremyhahn/go-luks2/test/tools/require-tool            unit      90
+github.com/jeremyhahn/go-luks2/test/tools/release-gate            unit      90
 github.com/jeremyhahn/go-luks2/test/ci/workflows                 unit      none
-github.com/jeremyhahn/go-luks2/test/integration/cmd/docker-run   unit      90
+github.com/jeremyhahn/go-luks2/test/tools/docker-run              unit      90

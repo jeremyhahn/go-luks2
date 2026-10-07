@@ -23,6 +23,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/binary"
 	"fmt"
 	"strings"
@@ -31,6 +32,7 @@ import (
 	"golang.org/x/crypto/xts"
 
 	"github.com/jeremyhahn/go-luks2/internal/errs"
+	"github.com/jeremyhahn/go-luks2/internal/fips"
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
@@ -69,6 +71,7 @@ const (
 type Transform struct {
 	mode mode
 	iv   ivGen
+	fips fips.Mode // see WithFIPS
 }
 
 // WriteSpec is the ONLY area encryption this module writes to a keyslot:
@@ -92,11 +95,11 @@ const (
 
 // transforms maps each accepted spec to what it runs.
 var transforms = map[string]Transform{
-	specXTSPlain64: {modeXTS, ivPlain64},
-	specXTSPlain:   {modeXTS, ivPlain},
-	specCBCESSIV:   {modeCBC, ivESSIVSHA256},
-	specCBCPlain64: {modeCBC, ivPlain64},
-	specCBCPlain:   {modeCBC, ivPlain},
+	specXTSPlain64: {mode: modeXTS, iv: ivPlain64},
+	specXTSPlain:   {mode: modeXTS, iv: ivPlain},
+	specCBCESSIV:   {mode: modeCBC, iv: ivESSIVSHA256},
+	specCBCPlain64: {mode: modeCBC, iv: ivPlain64},
+	specCBCPlain:   {mode: modeCBC, iv: ivPlain},
 }
 
 // Parse reads a keyslot's area.encryption as the full cipher spec it is --
@@ -160,6 +163,7 @@ func (t Transform) ValidateKeySize(n int) error {
 		return nil
 	default:
 		return &errs.Error{
+			Kind:   errs.ErrInvalidArgument,
 			Detail: fmt.Sprintf("area key of %d bytes cannot key AES-CBC; the accepted sizes are 16, 24 and 32 bytes", n),
 		}
 	}
@@ -175,11 +179,38 @@ const SectorSize = 512
 // partial XTS sector comes from c.
 func (t Transform) run(c secret.Custody, dst, src, key []byte, sectorSize int, dir direction) error {
 	if t.mode == modeXTS {
+		if err := t.requireXTSKey(key); err != nil {
+			return err
+		}
 		// XTS tweaks on the 64-bit index; plain's 32-bit truncation names the
 		// same bytes for every area that is admitted (see Parse).
 		return xtsSectors(c, dst, src, key, sectorSize, dir)
 	}
 	return cbcSectors(t.iv, dst, src, key, sectorSize, dir)
+}
+
+// WithFIPS returns t bound to FIPS mode m. In FIPS 140-3 mode an AES-XTS key
+// whose two halves -- the data key and the tweak key -- are equal is refused
+// in both directions, as SP 800-38E and FIPS 140-3 IG C.I require and as the
+// kernel's xts_verify_key does. Outside FIPS mode such a key is still used,
+// again as the kernel does, so a container that opens under cryptsetup opens
+// here.
+func (t Transform) WithFIPS(m fips.Mode) Transform {
+	t.fips = m
+	return t
+}
+
+// requireXTSKey is WithFIPS's check, made before the cipher is keyed. The
+// halves are compared in constant time: they are key material.
+func (t Transform) requireXTSKey(key []byte) error {
+	if !t.fips {
+		return nil
+	}
+	half := len(key) / 2
+	if subtle.ConstantTimeCompare(key[:half], key[half:]) == 1 {
+		return &errs.Error{Kind: fips.ErrNotApproved, Detail: "an AES-XTS key whose two halves are equal"}
+	}
+	return nil
 }
 
 // EncryptEnclave encrypts AF-split key material held in an enclave with a key
@@ -247,7 +278,7 @@ func (t Transform) EncryptEnclave(c secret.Custody, data, key *enclave.MemoryEnc
 // read from the device and is deliberately NOT enclaved.
 func (t Transform) DecryptEnclave(c secret.Custody, data []byte, key *enclave.MemoryEnclave) (*enclave.MemoryEnclave, error) {
 	if len(data) == 0 {
-		return nil, &errs.Error{Detail: "no key material to decrypt"}
+		return nil, &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "no key material to decrypt"}
 	}
 
 	plaintext, err := c.New("decrypted keyslot material", len(data))
@@ -282,6 +313,7 @@ func ValidateXTSKeySize(n int) error {
 		return nil
 	default:
 		return &errs.Error{
+			Kind:   errs.ErrInvalidArgument,
 			Detail: fmt.Sprintf("volume key of %d bytes cannot key AES-XTS; the accepted sizes are 32, 48 and 64 bytes", n),
 		}
 	}
@@ -298,6 +330,7 @@ func ValidateVolumeKeySize(n int) error {
 		return nil
 	default:
 		return &errs.Error{
+			Kind:   errs.ErrInvalidArgument,
 			Detail: fmt.Sprintf("volume key of %d bytes keys no AES data cipher; the accepted sizes are 16, 24, 32, 48 and 64 bytes", n),
 		}
 	}
@@ -336,17 +369,17 @@ func xtsSectors(c secret.Custody, dst, src, key []byte, sectorSize int, dir dire
 		return err
 	}
 	if len(dst) != len(src) {
-		return &errs.Error{Detail: "key material buffer size mismatch"}
+		return &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "key material buffer size mismatch"}
 	}
 	if sectorSize <= 0 {
-		return &errs.Error{Detail: "sector size must be positive"}
+		return &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "sector size must be positive"}
 	}
 
 	// XTS splits the key internally: the first half for the cipher, the
 	// second for the tweak.
 	xtsCipher, err := xts.NewCipher(aes.NewCipher, key)
 	if err != nil {
-		return &errs.Error{Detail: "failed to create XTS cipher", Err: err}
+		return &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "failed to create XTS cipher", Err: err}
 	}
 
 	numSectors := (len(src) + sectorSize - 1) / sectorSize
@@ -410,10 +443,11 @@ func cbcSectors(iv ivGen, dst, src, key []byte, sectorSize int, dir direction) e
 		return err
 	}
 	if len(dst) != len(src) {
-		return &errs.Error{Detail: "key material buffer size mismatch"}
+		return &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "key material buffer size mismatch"}
 	}
 	if sectorSize <= 0 || sectorSize%aes.BlockSize != 0 || len(src)%sectorSize != 0 {
 		return &errs.Error{
+			Kind: errs.ErrInvalidArgument,
 			Detail: fmt.Sprintf("AES-CBC runs over whole sectors: %d bytes is not a whole number of %d-byte sectors",
 				len(src), sectorSize),
 		}
@@ -421,7 +455,7 @@ func cbcSectors(iv ivGen, dst, src, key []byte, sectorSize int, dir direction) e
 
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return &errs.Error{Detail: "failed to create AES cipher", Err: err}
+		return &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "failed to create AES cipher", Err: err}
 	}
 	var essiv cipher.Block
 	if iv == ivESSIVSHA256 {
@@ -429,7 +463,7 @@ func cbcSectors(iv ivGen, dst, src, key []byte, sectorSize int, dir direction) e
 		essiv, err = aes.NewCipher(salt[:])
 		clear(salt[:])
 		if err != nil {
-			return &errs.Error{Detail: "failed to create the ESSIV cipher", Err: err}
+			return &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "failed to create the ESSIV cipher", Err: err}
 		}
 	}
 

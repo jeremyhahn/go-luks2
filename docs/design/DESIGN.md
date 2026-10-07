@@ -1,7 +1,7 @@
 # go-luks2 target architecture and public API
 
-> **Status: PROPOSED (design)** · Baseline: `g50/main` 7d40045 (0.4.0-alpha) plus `fix/g-compat` (assumed merged first) · Date: 2026-10-05
-> Breaking by intent (owner direction: no backward compatibility). Target release: `0.5.0-alpha`, `BREAKING:` heading (release-versioning §5).
+> **Status: IMPLEMENTED in v1.0.0-rc.1** · Baseline: `g50/main` 7d40045 (0.4.0-alpha) plus `fix/g-compat` (assumed merged first) · Date: 2026-10-05
+> Breaking by intent (owner direction: no backward compatibility). Released: `1.0.0-rc.1`, `BREAKING:` heading (release-versioning §5). DECISIONS.md is the record of what each step actually landed, including what is still outstanding (the token free functions, `EnrollKeyProvider`, and the rest of the pre-redesign API; the seam-variable cleanup); this document is the plan it was built from and is not updated to match drift.
 
 Inventory this design is based on, measured from the tree:
 
@@ -378,7 +378,7 @@ func Sanitize(ctx context.Context, path string, p Params) error
 
 ### B.6 Disposition of every exported identifier in pkg/luks2 (401)
 
-Generated from a go/ast dump of `g50/main`, with coverage checked by script: none missing, none extra. Counts: KEEP 54, RENAME 133, MOVE 47, UNEXPORT 73, DELETE 94.
+Generated from a go/ast dump of `g50/main`, with coverage checked by script: none missing, none extra. Counts: KEEP 55, RENAME 132, MOVE 47, UNEXPORT 73, DELETE 94.
 
 Exported struct fields follow their type. Fields named in a target are renamed as shown.
 
@@ -391,8 +391,13 @@ Exported struct fields follow their type. Fields named in a target are renamed a
 | `DroppedEntry.String`, `NonApprovedKDF.String` | KEEP |  |
 | `ErrDeviceCacheStale`, `ErrDeviceChanged`, `ErrDeviceInUse`, `ErrDeviceNotFound`, `ErrLockContended`, `ErrPermissionDenied` | KEEP | luks2 (same value re-exported by wipe; defined once in internal/device) |
 | `ErrInvalidHeader` | KEEP | luks2.ErrInvalidHeader |
+| `ErrNoKeyslots` | KEEP | luks2.ErrNoKeyslots (distinct from ErrWrongKey (#30)) |
 | `ErrUnsupportedRequirement` | KEEP | luks2.ErrUnsupportedRequirement |
 | `FIPSImportRequiredError.Error`, `FIPSMigrationError.Error`, `FIPSMigrationError.Unwrap`, `KDFCalibrationError.Error`, `KDFCalibrationError.Unwrap`, `LockTimeoutError.Error`, `LockTimeoutError.Unwrap`, `OrphanedKeyslotError.Error`, `OrphanedKeyslotError.Unwrap` | KEEP | Follows its type (see the type row). |
+| `DefaultKDFSpec` | KEEP | luks2.DefaultKDFSpec() string: the LUKS2 spelling (`pbkdf2-sha512` in FIPS mode, `argon2id` otherwise) of the type DefaultKDFType() returns; retained exported for callers that name a KDF as a string |
+| `LegacyToken` | KEEP | luks2.LegacyToken (= header.Token): the on-disk token codec with its typed FIDO2 members and unknown-field passthrough; callers use the generic Token |
+| `ErrIntegerOverflow` | KEEP | dmcrypt.ErrIntegerOverflow, raised by pkg/dmcrypt when a segment size or offset does not fit the device-mapper table; pkg/luks2's own is luks2.ErrInvalidArgument (see the RENAME row) |
+| `ErrDeviceChanged` | KEEP | also dmcrypt.ErrDeviceChanged: the same value as luks2's, re-exported by pkg/dmcrypt for the target Activate just created (internal/device.ErrChanged, defined once) |
 | `KDFCalibrationError` | KEEP | luks2.KDFCalibrationError |
 | `KeyProvider` | KEEP | luks2.KeyProvider{Passphrase(ctx); Token() Token} |
 | `KeyslotInfo` | KEEP | luks2.KeyslotInfo (KDF field is KDFParams) |
@@ -435,7 +440,7 @@ Exported struct fields follow their type. Fields named in a target are renamed a
 | `ErrLoopNodeAbsent` | RENAME | loop.ErrNodeAbsent |
 | `ErrMappingBusy` | RENAME | dmcrypt.ErrBusy |
 | `ErrMappingStillLive` | RENAME | dmcrypt.ErrStillLive |
-| `ErrMasterKeyVerification`, `ErrNoKeyslots` | RENAME | luks2.ErrWrongKey |
+| `ErrMasterKeyVerification` | RENAME | luks2.ErrWrongKey |
 | `ErrNoFIDO2Device` | RENAME | keyprovider.ErrNoDevice |
 | `ErrNoKeyProvider` | RENAME | luks2.ErrInvalidArgument (nil provider) |
 | `ErrUnsupportedFilesystem` | RENAME | filesystem.ErrUnsupported |
@@ -553,6 +558,7 @@ Exported struct fields follow their type. Fields named in a target are renamed a
 | `LUKS2MaxKeyslots` | DELETE | duplicate of MaxKeyslots |
 | `OpenFileSecure` | DELETE | os.OpenFile; device opens go through internal/device |
 | `RecoveryCredential` | DELETE | ParseRecoveryKey takes an enclave |
+| `ParseLegacyRecoveryKey` | UNEXPORT | parseLegacyRecoveryKey: ParseRecoveryKey is the one public parse (the code at rc.1 still exports it; see DECISIONS.md, cr-docs) |
 | `RecoveryKey.FormattedString` | DELETE | (*RecoveryKey).WriteTo(io.Writer): a credential never becomes a Go string |
 | `RestorePrimaryHeaderWithOptions`, `RestoreHeaderOptions` | DELETE | Force=true is (*luks2.Volume).ReplacePrimaryHeader(ctx) (no flag argument) |
 | `StandardCustom` | DELETE | zero wipe.Params.Standard means custom |
@@ -612,7 +618,7 @@ func (e *Error) Unwrap() []error // {Kind, Err}
 
 | Package | Sentinels | Error types |
 |---|---|---|
-| luks2 | `ErrInvalidArgument`, `ErrInvalidCredential`, `ErrNotLUKS2`, `ErrInvalidHeader`, `ErrUnsupported`, `ErrUnsupportedRequirement`, `ErrNoSpace`, `ErrWrongKey`, `ErrKeyslotNotFound`, `ErrLastKeyslot`, `ErrKeyslotAreaOverlap`, `ErrTokenNotFound`, `ErrPrimaryHeaderCurrent`, `ErrKeyProvider`, `ErrOrphanedKeyslot`, `ErrFIPSNotApproved`, `ErrFIPSImportRequired`, `ErrFIPSMigration`, `ErrKDFCalibration`, `ErrProtectedMemory`, `ErrIO`, `ErrReadOnly`, `ErrClosed`; shared: `ErrDeviceNotFound`, `ErrPermissionDenied`, `ErrDeviceInUse`, `ErrDeviceChanged`, `ErrDeviceCacheStale`, `ErrLockContended`, `ErrMetadataLockUnavailable` | `Error`, `LockTimeoutError{Path, Waited, Attempts}`, `KDFCostError{Param, Value, Min, Max}` (Is `ErrInvalidArgument`), `KDFCalibrationError{Hash, Target, Probe, Elapsed}`, `FIPSImportRequiredError{Path, Keyslots, Digests}`, `FIPSMigrationError{Path, Stage, State}`, `OrphanedKeyslotError{Keyslot, Cause}` |
+| luks2 | `ErrInvalidArgument`, `ErrInvalidCredential`, `ErrNotLUKS2`, `ErrInvalidHeader`, `ErrUnsupported`, `ErrUnsupportedRequirement`, `ErrNoSpace`, `ErrWrongKey`, `ErrNoKeyslots`, `ErrKeyslotNotFound`, `ErrLastKeyslot`, `ErrKeyslotAreaOverlap`, `ErrTokenNotFound`, `ErrPrimaryHeaderCurrent`, `ErrKeyProvider`, `ErrOrphanedKeyslot`, `ErrFIPSNotApproved`, `ErrFIPSImportRequired`, `ErrFIPSMigration`, `ErrKDFCalibration`, `ErrProtectedMemory`, `ErrIO`, `ErrReadOnly`, `ErrClosed`; shared: `ErrDeviceNotFound`, `ErrPermissionDenied`, `ErrDeviceInUse`, `ErrDeviceChanged`, `ErrDeviceCacheStale`, `ErrLockContended`, `ErrMetadataLockUnavailable` | `Error`, `LockTimeoutError{Path, Waited, Attempts}`, `KDFCostError{Param, Value, Min, Max}` (Is `ErrInvalidArgument`), `KDFCalibrationError{Hash, Target, Probe, Elapsed}`, `FIPSImportRequiredError{Path, Keyslots, Digests}`, `FIPSMigrationError{Path, Stage, State}`, `OrphanedKeyslotError{Keyslot, Cause}` |
 | dmcrypt | `ErrActive`, `ErrNotActive`, `ErrBusy`, `ErrStillLive`, `ErrInvalidName`, `ErrNodeUnverified`, `ErrKeyring`, `ErrKeyringUnavailable`, `ErrKeyringBlocked`, `ErrKeyringUnsupported`, `ErrKeyringQuotaExhausted`, `ErrKeyringFailed`, `ErrKeyringEntryExists`, `ErrKeyringKeyNotReleased`; shared `ErrPermissionDenied` | `Error`, `KeyringError` |
 | keyprovider | `ErrInvalidArgument`, `ErrHelperFailed`, `ErrHelperOutput`, `ErrNoDevice`, `ErrInvalidBinding`, `ErrUnsupportedToken` | `Error`, `HelperError` |
 | loop | `ErrNotFound`, `ErrDetachIncomplete`, `ErrNodeAbsent`; shared `ErrPermissionDenied` | `Error` |
@@ -685,12 +691,36 @@ This removes global state (tests can `t.Parallel()`) and makes "no production co
 
 | From | To |
 |---|---|
-| 15 black-box `pkg/luks2/*_integration_test.go` (argon2interop, format, header, info, keyslotpriority, keyslotsafety, loopdev, persistence, pinnedpaths, release, root, token, unlock, volumename, wipe, workflow) | `test/integration/{luks2,dmcrypt,loop,wipe}/` by package under test, converted to the new API |
-| 11 white-box files (activation, canonicalconformance, filesystem, headervalidation, kdfiterations, keyring, laned, leakledger, mount, unlockreadlock) | `test/integration/{dm,keyring,header,kdf,device,filesystem}/`. Their 27 unexported identifiers become exported-within-internal API, which test/ can import because it is in the same module. |
-| g-compat's compatmatrix, lockcompat, lockwait | `test/integration/interop/`: cryptsetup and systemd are the real peer (testing-guidelines), both directions |
+| 15 black-box `pkg/luks2/*_integration_test.go` (argon2interop, format, header, info, keyslotpriority, keyslotsafety, loopdev, persistence, pinnedpaths, release, root, token, unlock, volumename, wipe, workflow) | `test/integration/{luks2,dmcrypt,loop,wipe}/` by package under test, converted to the new API. `pinnedpaths_integration_test.go`'s white-box retargeted-symlink tests are a second, permanent file of the same base name -- see below -- and do not move with this row. |
+| 10 white-box files (activation, filesystem, headervalidation, kdfiterations, keyring, laned, leakledger, mount, unlockreadlock -- **not** canonicalconformance, see below) | `test/integration/{dm,keyring,header,kdf,device,filesystem}/`. Their unexported identifiers become exported-within-internal API, which test/ can import because it is in the same module. |
+| g-compat's compatmatrix -- **not** lockcompat or lockwait, see below | `test/integration/interop/`: cryptsetup and systemd are the real peer (testing-guidelines), both directions |
 | `test/integration/pkg/*` | split into `test/integration/<pkg>/` |
 | `test/harness`, `test/labstrings` | `test/internal/harness`, `test/internal/labstrings` (only test/ may import them) |
 | `test/covergate`, `test/*/cmd/*`, `test/integration/cmd/docker-run` | `test/tools/<name>/` |
+
+**Four white-box integration files stay in `pkg/luks2`, permanently** (H13d,
+ratified): `canonicalconformance_integration_test.go`,
+`lockcompat_integration_test.go`, `lockwait_integration_test.go` and
+`pinnedpaths_integration_test.go`. Each needs a hook the public API must
+never expose -- `cryptoRand`/`newUUID`/`digestIterationsFor` (determinism:
+byte-for-byte conformance against a cryptsetup-written golden image),
+`calibratedCountFloor` (a cheap KDF cost so a real-cryptsetup-interop lock
+test runs in budget), `fileLockHeld` (simulating a lock already held, to
+drive wait behaviour), and `openFileFunc` (retargeting a symlink the instant
+it is first opened, to prove a writer stays on the descriptor it locked) --
+and exporting any of them, even "within-internal API" as the row above
+describes for the general case, would make a security- or
+determinism-relevant seam of a Layer 0 library reachable from outside it.
+This is the deviation from this section's "integration tests live under
+`test/integration/`" rule the H12c/H13 entries in DECISIONS.md deferred and
+H13d ratifies: these four build a `Volume`/call the unexported
+`*WithSys`-suffixed core directly, with a `volumeSys` they construct and
+override, exactly as an in-package unit test does, and stay
+`//go:build integration` so they still run in the devcontainer with real
+loop devices/cryptsetup. Nothing else qualifies for this exception without
+the same two-part test: the hook is a correctness-or-security-relevant seam
+of this package specifically, and no shape of exported API could carry it
+without exposing it to every caller.
 
 **CLI parity** (integration-testing §5, §9 floor): `test/integration/cli/commands/` holds a `CommandDefinition`/`ArgDefinition` table owned per command group. A runner crosses it with the columns {CLI binary, embedded (library calls)}. An enumerating test fails when a registry verb has no definition (P2 recommendation), and the `cli.md` verbs are the same list.
 

@@ -13,14 +13,16 @@
 package keyring
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"runtime"
 
-	"github.com/jeremyhahn/go-luks2/internal/errs"
 	"golang.org/x/sys/unix"
+
+	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
 const (
@@ -108,6 +110,10 @@ func (k *VolumeKey) TableKeyID() string {
 // payload has already been freed. Anything else -- the key still resolving,
 // or a search that cannot say -- means the volume key may still be sitting in
 // the kernel keyring, and that is reported rather than swallowed.
+// Release is cleanup: it always runs to completion regardless of ctx
+// cancellation, the same as Locked.Unlock -- a volume key already placed in
+// the kernel keyring must not be left there because the caller that asked
+// for it was canceled.
 func (k *VolumeKey) Release(s Syscalls) error {
 	revokeErr := IgnoreAbsent(s.Revoke(k.ID))
 	unlinkErr := IgnoreAbsent(s.Unlink(k.ID, k.Ring))
@@ -134,12 +140,14 @@ func (k *VolumeKey) verifyGone(s Syscalls) error {
 	switch {
 	case err == nil:
 		return &errs.Error{
+			Kind:   ErrKeyNotReleased,
 			Detail: fmt.Sprintf("the entry is still resolvable as key %d after being revoked and unlinked", id),
 		}
 	case IsAbsent(err):
 		return nil
 	default:
 		return &errs.Error{
+			Kind:   errs.ErrIO,
 			Detail: "the keyring could not be searched to confirm the entry is gone",
 			Err:    err,
 		}
@@ -180,7 +188,10 @@ func IsAbsent(err error) bool {
 // An entry that already exists under this description FAILS the operation.
 // add_key would otherwise update it in place, so overwriting somebody else's
 // key material or adopting a stale entry would both be silent.
-func AddVolumeKey(s Syscalls, dmUUID string, key []byte) (*VolumeKey, error) {
+func AddVolumeKey(ctx context.Context, s Syscalls, dmUUID string, key []byte) (*VolumeKey, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	ring, err := s.SessionRing()
 	if err != nil {
 		return nil, Failure("resolve the session keyring", err)

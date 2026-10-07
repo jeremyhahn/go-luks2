@@ -7,6 +7,127 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.1] - 2026-10-07
+
+### Changed — BREAKING: the public API is now a `*Volume` handle, not device-path free functions
+
+- **`pkg/luks2.Open(ctx, path, ...Option) (*Volume, error)` replaces most
+  free functions.** A `*Volume` pins one descriptor; every method takes the
+  lock it needs, does its I/O and releases it — no lock is held between
+  calls. `Volume` is safe for concurrent use (an internal `sync.RWMutex`), and
+  the lock order (node flock, then cryptsetup's lock, then an O_EXCL claim) is
+  now a type property (`internal/device`'s `Pinned`/`Locked`/`Claimed`), not a
+  calling convention.
+- **Credentials are `*enclave.MemoryEnclave`, not `[]byte`.** Every secret
+  crossing the API — `Format`'s passphrase, `Unlock`'s, a recovery key's text
+  — is a caller-owned enclave. The volume key is no longer extractable: `*Key`
+  (`= volkey.Key`) is obtained only from `Unlock`/`UnlockKeyslot`/
+  `UnlockWithProvider`/`UnlockWithVolumeKey`, and its bytes cannot be read
+  through the public API at all.
+- **Activation split out of `Unlock`.** `(*Volume).Unlock` derives and
+  verifies the key without touching dm-crypt; `pkg/dmcrypt.Activate(ctx, v,
+  key, name)` maps it. `pkg/dmcrypt`, `pkg/loop`, `pkg/filesystem`,
+  `pkg/keyprovider` and `pkg/wipe` are now separate packages, split along the
+  root/exec trust boundary (`depguard`-enforced): `pkg/luks2` itself has no
+  root and no exec.
+- **Params structs replace option structs; a zero value means library
+  policy.** `FormatParams`, `KDFParams`, `KeyslotParams`, `MigrateParams`,
+  `filesystem.MakeParams`/`MountParams`, `wipe.Params` take the place of
+  `FormatOptions`, `AddKeyOptions`, `FIPSMigrationOptions`, and so on.
+- **Keyslot removal is guarded, not authenticated.**
+  `(*Volume).RemoveKeyslot(ctx, slot)` keeps every data-safety guard
+  (`ErrLastKeyslot`, `ErrKeyslotAreaOverlap`) but drops the
+  `RemoveKey`/`KillSlot`/`KillKeyslot` authentication distinction; who may
+  remove a slot is now the caller's policy.
+- **One error shape.** Every failure is `*errs.Error{Op, Path, Kind, Detail,
+  Err}` (aliased `luks2.Error`, `filesystem.Error`, `keyprovider.Error`), with
+  `Kind` enforced non-nil across the module. `ErrInvalidArgument`,
+  `ErrInvalidCredential` and `ErrIO` are now module-wide kinds
+  (`internal/errs`, re-exported by value). `VolumeError`, `KeyslotError`,
+  `CryptoError`, `InvalidKeyslotError` and `UnlockError` are deleted;
+  `ErrMasterKeyVerification` is renamed `ErrWrongKey`; `Argon2CostError`/
+  `PBKDFIterationsError` unify into `KDFCostError{Param, Value, Min, Max}`.
+- **Errors are typed across the packages (#277).** Failures in `pkg/dmcrypt`,
+  `pkg/loop`, `pkg/wipe`, `pkg/keyprovider` and `pkg/luks2` carry a sentinel
+  kind that `errors.Is` matches, with the specific cause in the error's
+  detail, so a caller branches on the kind instead of on message text.
+- **The CLI (`internal/cli`) is rewritten** on this API, split by command
+  group, with a map-based dispatch, cryptsetup-compatible exit codes
+  (`cryptsetup(8)`: 1 usage, 2 wrong passphrase/no permission, 3 out of
+  memory, 4 wrong device, 5 exists/busy), and root-only operations tested
+  through fake host interfaces. `cmd/luks2` is now `main.go` only.
+
+**Migration map.** DESIGN.md §B.6 is the exhaustive, per-identifier
+disposition (KEEP/RENAME/MOVE/UNEXPORT/DELETE) for every one of
+`pkg/luks2`'s 401 pre-redesign exported identifiers, cross-checked against
+`test/tools/apidump`'s baseline. `make api-diff` reports that `pkg/luks2`
+honours every disposition in that baseline: the free-function API is gone, not
+deprecated. That covers the keyslot writes (`AddKey`, `ChangeKey`, `RemoveKey`,
+`KillSlot`), the token cluster (`GetToken`, `ListTokens`, `ImportToken`,
+`ExportToken`, `RemoveToken`, `FindFreeTokenSlot`, `TokenExists`,
+`CountTokens`, `ImportTokenJSON`), `EnrollKeyProvider`, the recovery-key free
+functions, `Format(FormatOptions)`, `RestorePrimaryHeader(device)`/
+`RestorePrimaryHeaderWithOptions`, `MigrateToFIPS(device, ...)` and the
+low-level helpers. Errors follow DESIGN.md §C.3's consolidation, and
+`pkg/luks2`'s seam-variable allowlist is empty: its seams live on `Volume`'s
+`volumeSys`.
+
+**Retained exports.** Four identifiers outside the new shape stay exported on
+purpose, each recorded in DESIGN.md §B.6:
+
+- `luks2.DefaultKDFSpec`, the LUKS2 spelling of `DefaultKDFType()`.
+- `luks2.LegacyToken`, the on-disk token codec with its typed FIDO2 members;
+  callers use the generic `Token`.
+- `dmcrypt.ErrIntegerOverflow`, raised when a segment size or offset does not
+  fit the device-mapper table.
+- `dmcrypt.ErrDeviceChanged`, the same value as `luks2.ErrDeviceChanged`.
+
+See `docs/design/DECISIONS.md` for what each step did.
+
+### Changed — BREAKING: `luks2 mount` defaults to `nosuid,nodev`, and `wipe` refuses full-wipe options without `--full`
+
+- `luks2 mount` mounts a decrypted volume `nosuid,nodev`. `--allow-suid` and
+  `--allow-dev` opt back in. A relative mount point is resolved first, so a
+  second mount no longer stacks on the first.
+- `luks2 wipe` refuses `--random`, `--passes`, `--standard`, `--verify` and
+  `--trim` unless `--full` is given. Before, they were ignored, and a
+  header-only wipe reported success.
+
+### Fixed
+
+- **Multi-pass wipes reached the medium as one pass.** `wipe.Sanitize` now
+  syncs after every pass, so DoD3 and DoD7 write each pattern to the device,
+  not only the last one through the page cache. Unknown patterns and
+  standards are refused before the first write.
+- **A torn primary header made a volume unopenable that cryptsetup opens.**
+  Reads use the valid header copy with the higher sequence id, as cryptsetup
+  does, and the next write repairs the stale copy. Token writes read the
+  current copy too, so an older primary can no longer overwrite a newer
+  token.
+- **Crash and cancellation safety of keyslot writes.** Format writes keyslot
+  material before the header that names it, and zeroes the previous
+  container's header copies first. `AddKeyslot` and `ChangeKeyslot` honour
+  cancellation only before their first write, so a cancelled call no longer
+  leaves wrapped key material in an area no header names. Rollbacks run to
+  completion under a cancelled context. `ChangeKeyslot` checks the key
+  against the volume's digest before writing anything, and keeps the
+  slot's priority unless one is given.
+- **Concurrent reads on one `Volume` dropped each other's lock.** The shared
+  lock is held until the last reader releases it, so cryptsetup cannot
+  write in the middle of a read.
+- **Key providers ran under the volume's locks.** `Enroll` and
+  `UnlockWithProvider` obtain the credential before locking, so a slow
+  FIDO2 touch no longer blocks cryptsetup. `Enroll` applies the same KDF and
+  credential checks as `AddKeyslot`.
+- **Token operations and `Enroll` failed on a mapped or mounted volume**
+  with `ErrDeviceInUse`; they now work there, as `cryptsetup token import`
+  does. `MigrateToFIPS` uses the volume's open descriptor and its lock
+  options instead of reopening the path.
+- **CLI cleanup after Ctrl-C.** `luks2 create` removes its mapping and loop
+  device even when interrupted.
+- In FIPS 140-3 mode an AES-XTS keyslot key whose two halves are equal is
+  refused.
+
 ## [0.5.0-alpha] - 2026-10-05
 
 ### Changed

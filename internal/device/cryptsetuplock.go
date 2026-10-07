@@ -5,6 +5,7 @@
 package device
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"os"
@@ -86,7 +87,7 @@ func openCryptsetupLockDir(dir string) (*os.File, error) {
 // metadataLockUnavailable is the error for a lock that cannot be taken at
 // all, as opposed to one somebody holds (LockTimeoutError).
 func metadataLockUnavailable(path, op string, err error) error {
-	return &Error{Device: path, Op: op, Err: &errs.Error{Kind: ErrMetadataLockUnavailable, Err: err}}
+	return &errs.Error{Kind: ErrMetadataLockUnavailable, Detail: op + " " + path, Err: err}
 }
 
 // CryptsetupLock is cryptsetup's lock file for one block device, held in the
@@ -102,20 +103,20 @@ type CryptsetupLock struct {
 // node open as node, if it is a block device, by the deadline. A regular
 // file returns nil: cryptsetup's lock for it is the flock the caller already
 // holds.
-func acquireCryptsetupLockFor(node *os.File, device, lockDir string, mode LockMode, started, deadline time.Time, clk clock.Clock, openLockFile OpenLockFileFunc) (*CryptsetupLock, error) {
+func acquireCryptsetupLockFor(ctx context.Context, node *os.File, device, lockDir string, mode LockMode, started, deadline time.Time, clk clock.Clock, openLockFile OpenLockFileFunc) (*CryptsetupLock, error) {
 	var st unix.Stat_t
 	if err := unix.Fstat(int(node.Fd()), &st); err != nil {
-		return nil, &Error{Device: device, Op: "stat the device to lock it", Err: err}
+		return nil, &errs.Error{Kind: errs.ErrIO, Detail: "stat " + device + " to lock it", Err: err}
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFBLK {
 		return nil, nil
 	}
-	return AcquireCryptsetupLock(lockDir, uint64(st.Rdev), mode, started, deadline, clk, openLockFile) // #nosec G115 -- Rdev is a device number; its width differs by architecture
+	return AcquireCryptsetupLock(ctx, lockDir, uint64(st.Rdev), mode, started, deadline, clk, openLockFile) // #nosec G115 -- Rdev is a device number; its width differs by architecture
 }
 
 // AcquireCryptsetupLock takes dir/L_<major>:<minor> in mode, polling with the
 // same backoff as a node flock until deadline.
-func AcquireCryptsetupLock(dir string, rdev uint64, mode LockMode, started, deadline time.Time, clk clock.Clock, openLockFile OpenLockFileFunc) (*CryptsetupLock, error) {
+func AcquireCryptsetupLock(ctx context.Context, dir string, rdev uint64, mode LockMode, started, deadline time.Time, clk clock.Clock, openLockFile OpenLockFileFunc) (*CryptsetupLock, error) {
 	dirFile, err := openCryptsetupLockDir(dir)
 	if err != nil {
 		return nil, err
@@ -158,7 +159,15 @@ func AcquireCryptsetupLock(dir string, rdev uint64, mode LockMode, started, dead
 		if remaining <= 0 {
 			return fail(&LockTimeoutError{Path: path, Waited: clk.Now().Sub(started), Attempts: attempt, Err: err})
 		}
-		<-clk.NewTimer(min(backoff, remaining)).C()
+		t := clk.NewTimer(min(backoff, remaining))
+		select {
+		case <-ctx.Done():
+		case <-t.C():
+		}
+		t.Stop()
+		if err := ctx.Err(); err != nil {
+			return fail(&errs.Error{Kind: errs.KindOf(err, errs.ErrIO), Detail: "waiting to lock " + path, Err: err})
+		}
 		backoff = min(backoff*2, lockBackoffMax)
 	}
 }

@@ -17,7 +17,7 @@ import (
 func Size(f *os.File) (int64, error) {
 	stat, err := f.Stat()
 	if err != nil {
-		return 0, &errs.Error{Detail: "failed to get device/file size", Err: err}
+		return 0, &errs.Error{Kind: errs.ErrIO, Detail: "failed to get device/file size", Err: err}
 	}
 	return stat.Size(), nil
 }

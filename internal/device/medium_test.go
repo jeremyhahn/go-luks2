@@ -12,6 +12,7 @@ package device
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -102,7 +103,7 @@ func TestReadPastCacheReadsTheBytes(t *testing.T) {
 				off int64
 				n   int
 			}{{0, directIOAlign}, {0, len(data)}, {0, len(data) + 5000}, {directIOAlign, 100}, {513, 2 * directIOAlign}, {int64(len(data)) + 10, 10}} {
-				got, err := ReadPastCache("read the device past the page cache", path, c.off, c.n, os.OpenFile)
+				got, err := ReadPastCache(context.Background(), "read the device past the page cache", path, c.off, c.n, os.OpenFile)
 				if err != nil {
 					t.Fatalf("ReadPastCache(%d, %d): %v", c.off, c.n, err)
 				}
@@ -130,17 +131,17 @@ func TestReadPastCacheWhereODirectIsRefused(t *testing.T) {
 	}
 
 	disk, _ := patternFile(t, diskDir(t), directIOAlign)
-	if _, err := ReadPastCache("op", disk, 0, directIOAlign, refuseDirect); !errors.Is(err, ErrUnsupported) {
+	if _, err := ReadPastCache(context.Background(), "op", disk, 0, directIOAlign, refuseDirect); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("on a disk filesystem: got %v, want ErrUnsupported", err)
 	}
 
 	memory, data := patternFile(t, memoryDir(t), directIOAlign)
-	got, err := ReadPastCache("op", memory, 100, 200, refuseDirect)
+	got, err := ReadPastCache(context.Background(), "op", memory, 100, 200, refuseDirect)
 	if err != nil || !bytes.Equal(got, data[100:300]) {
 		t.Fatalf("on a memory filesystem: got %d bytes, %v; want the file's bytes", len(got), err)
 	}
 
-	if _, err := ReadPastCache("op", filepath.Join(t.TempDir(), "absent.img"), 0, directIOAlign, refuseDirect); err == nil {
+	if _, err := ReadPastCache(context.Background(), "op", filepath.Join(t.TempDir(), "absent.img"), 0, directIOAlign, refuseDirect); err == nil {
 		t.Fatal("ReadPastCache of a missing device reported success")
 	}
 }
@@ -406,24 +407,24 @@ func TestCompareRegion(t *testing.T) {
 	path, data := patternFile(t, dir, directIOAlign)
 	cached := bytes.NewReader(data)
 	sources := []MediumSource{{Path: path}}
-	readPastCache := func(path string, off int64, n int) ([]byte, error) {
-		return ReadPastCache("read the device past the page cache", path, off, n, os.OpenFile)
+	readPastCache := func(ctx context.Context, path string, off int64, n int) ([]byte, error) {
+		return ReadPastCache(ctx, "read the device past the page cache", path, off, n, os.OpenFile)
 	}
 
-	if got, err := CompareRegion(cached, path, sources, len(data), readPastCache); err != nil || !bytes.Equal(got, data) {
+	if got, err := CompareRegion(context.Background(), cached, path, sources, len(data), readPastCache); err != nil || !bytes.Equal(got, data) {
 		t.Fatalf("an undisturbed comparison: got %v, %v", got, err)
 	}
 
 	flipped := bytes.Clone(data)
 	flipped[100] ^= 0xff
-	if _, err := CompareRegion(bytes.NewReader(flipped), path, sources, len(data), readPastCache); !errors.Is(err, ErrCacheStale) ||
+	if _, err := CompareRegion(context.Background(), bytes.NewReader(flipped), path, sources, len(data), readPastCache); !errors.Is(err, ErrCacheStale) ||
 		!strings.Contains(err.Error(), "first difference at byte 100") {
 		t.Fatalf("a difference at byte 100: got %v", err)
 	}
 
 	errRead := errors.New("injected: the direct read failed")
-	failRead := func(string, int64, int) ([]byte, error) { return nil, errRead }
-	if _, err := CompareRegion(cached, path, sources, len(data), failRead); !errors.Is(err, errRead) {
+	failRead := func(context.Context, string, int64, int) ([]byte, error) { return nil, errRead }
+	if _, err := CompareRegion(context.Background(), cached, path, sources, len(data), failRead); !errors.Is(err, errRead) {
 		t.Fatalf("a failed direct read: got %v", err)
 	}
 }

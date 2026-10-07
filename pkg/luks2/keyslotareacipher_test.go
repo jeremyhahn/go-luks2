@@ -8,10 +8,12 @@ package luks2
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/jeremyhahn/go-luks2/internal/areacipher"
+	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
 // #106: the read path HONORS the mode half of keyslots.<n>.area.encryption.
@@ -81,35 +83,37 @@ func TestParseKeyslotAreaEncryption(t *testing.T) {
 			t.Errorf("%q: accepted as %+v; the read path cannot decrypt it", spec, got)
 			continue
 		}
-		if !errors.Is(err, ErrUnsupportedKeyslotCipher) {
-			t.Errorf("%q: error %v does not wrap ErrUnsupportedKeyslotCipher", spec, err)
+		if !errors.Is(err, ErrUnsupported) {
+			t.Errorf("%q: error %v does not wrap ErrUnsupported", spec, err)
 		}
-		var cipherErr *UnsupportedKeyslotCipherError
+		var cipherErr *errs.Error
 		if !errors.As(err, &cipherErr) {
-			t.Errorf("%q: error %v is not an *UnsupportedKeyslotCipherError", spec, err)
-		} else if cipherErr.Spec != spec {
-			t.Errorf("%q: error carries spec %q", spec, cipherErr.Spec)
+			t.Errorf("%q: error %v is not an *errs.Error", spec, err)
+		} else if !strings.Contains(cipherErr.Detail, spec) {
+			t.Errorf("%q: error does not carry the spec: %q", spec, cipherErr.Detail)
 		}
 	}
 }
 
 // TestUnsupportedKeyslotCipherErrorMatchesBothSentinels pins the contract the
-// keyslot scan depends on: the typed refusal is ErrUnsupportedKeyslotCipher for
+// keyslot scan depends on: the typed refusal is ErrUnsupported for
 // a caller asking why, and ErrInvalidKeyslot so getMasterKey moves on to the
 // next keyslot rather than aborting.
 func TestUnsupportedKeyslotCipherErrorMatchesBothSentinels(t *testing.T) {
-	err := error(&UnsupportedKeyslotCipherError{Keyslot: "3", Spec: "serpent-xts-plain64"})
-	if !errors.Is(err, ErrUnsupportedKeyslotCipher) {
-		t.Errorf("%v does not match ErrUnsupportedKeyslotCipher", err)
+	err := error(&errs.Error{Kind: ErrUnsupported, Detail: fmt.Sprintf(
+		"keyslot %s area encryption %q; the keyslot area transforms this package implements are %s",
+		"3", "serpent-xts-plain64", areacipher.Specs()), Err: ErrKeyslotNotFound})
+	if !errors.Is(err, ErrUnsupported) {
+		t.Errorf("%v does not match ErrUnsupported", err)
 	}
-	if !errors.Is(err, ErrInvalidKeyslot) {
+	if !errors.Is(err, ErrKeyslotNotFound) {
 		t.Errorf("%v does not match ErrInvalidKeyslot", err)
 	}
-	if errors.Is(err, ErrMasterKeyVerification) {
-		t.Errorf("%v matches ErrMasterKeyVerification", err)
+	if errors.Is(err, ErrWrongKey) {
+		t.Errorf("%v matches ErrWrongKey", err)
 	}
 	msg := err.Error()
-	for _, want := range []string{`"3"`, `"serpent-xts-plain64"`, "aes-xts-plain64", "aes-cbc-essiv:sha256"} {
+	for _, want := range []string{"keyslot 3", `"serpent-xts-plain64"`, "aes-xts-plain64", "aes-cbc-essiv:sha256"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("message %q does not name %s", msg, want)
 		}
@@ -131,12 +135,12 @@ func TestKeyslotDeclaringAModeItDoesNotUseIsRefused(t *testing.T) {
 		t.Helper()
 		device := newImage(t, "declared-mode.img")
 		formatWithLibrary(t, device)
-		hdr, metadata, err := ReadHeader(device)
+		hdr, metadata, err := readHeaderForTest(device)
 		if err != nil {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
-		if got := metadata.Keyslots["0"].Area.Encryption; got != KeyslotAreaEncryption {
-			t.Fatalf("fixture keyslot declares %q, want %q", got, KeyslotAreaEncryption)
+		if got := metadata.Keyslots["0"].Area.Encryption; got != keyslotAreaEncryption {
+			t.Fatalf("fixture keyslot declares %q, want %q", got, keyslotAreaEncryption)
 		}
 		metadata.Keyslots["0"].Area.Encryption = spec
 		if err := writeHeaderInternal(device, hdr, metadata); err != nil {
@@ -148,9 +152,9 @@ func TestKeyslotDeclaringAModeItDoesNotUseIsRefused(t *testing.T) {
 	// The control: the declaration this material really has opens, as does
 	// the other spelling cryptsetup uses for the same bytes. Without this a
 	// refusal below would prove nothing about the declaration.
-	for _, spec := range []string{KeyslotAreaEncryption, "aes-xts-plain"} {
+	for _, spec := range []string{keyslotAreaEncryption, "aes-xts-plain"} {
 		t.Run(spec+" opens", func(t *testing.T) {
-			if err := TestKey(declare(t, spec), []byte(conformancePassphrase)); err != nil {
+			if err := testKeyForTest(declare(t, spec), []byte(conformancePassphrase)); err != nil {
 				t.Fatalf("a keyslot truthfully declaring %q was refused: %v", spec, err)
 			}
 		})
@@ -163,11 +167,11 @@ func TestKeyslotDeclaringAModeItDoesNotUseIsRefused(t *testing.T) {
 	// the material is never decrypted as XTS.
 	for _, spec := range []string{"aes-cbc-essiv:sha256", "aes-cbc-plain64", "aes-cbc-plain"} {
 		t.Run(spec+" does not open", func(t *testing.T) {
-			err := TestKey(declare(t, spec), []byte(conformancePassphrase))
+			err := testKeyForTest(declare(t, spec), []byte(conformancePassphrase))
 			if err == nil {
 				t.Fatalf("a keyslot declaring %q over AES-XTS material OPENED; no conforming implementation can open it", spec)
 			}
-			if !errors.Is(err, ErrInvalidKeyslot) || errors.Is(err, ErrUnsupportedKeyslotCipher) {
+			if !errors.Is(err, ErrKeyslotNotFound) || errors.Is(err, ErrUnsupported) {
 				t.Fatalf("refused as %v; want ErrInvalidKeyslot for the area key, not an unsupported cipher", err)
 			}
 		})
@@ -179,26 +183,22 @@ func TestKeyslotDeclaringAModeItDoesNotUseIsRefused(t *testing.T) {
 		"aes",
 	} {
 		t.Run(spec+" is refused", func(t *testing.T) {
-			err := TestKey(declare(t, spec), []byte(conformancePassphrase))
+			err := testKeyForTest(declare(t, spec), []byte(conformancePassphrase))
 			if err == nil {
 				t.Fatalf("a keyslot declaring %q over AES-XTS material OPENED; no conforming implementation can open it", spec)
 			}
-			if !errors.Is(err, ErrUnsupportedKeyslotCipher) {
-				t.Fatalf("refused, but not with ErrUnsupportedKeyslotCipher: %v", err)
+			if !errors.Is(err, ErrUnsupported) {
+				t.Fatalf("refused, but not with ErrUnsupported: %v", err)
 			}
-			if !errors.Is(err, ErrInvalidKeyslot) {
+			if !errors.Is(err, ErrKeyslotNotFound) {
 				t.Fatalf("refused, but not as ErrInvalidKeyslot, which is what keeps the keyslot scan going: %v", err)
 			}
-			if errors.Is(err, ErrMasterKeyVerification) {
+			if errors.Is(err, ErrWrongKey) {
 				t.Fatalf("refused as a digest mismatch, which reads as a wrong passphrase: %v", err)
 			}
-			var cipherErr *UnsupportedKeyslotCipherError
-			if !errors.As(err, &cipherErr) {
-				t.Fatalf("refused, but not as an *UnsupportedKeyslotCipherError: %v", err)
-			}
-			if cipherErr.Keyslot != "0" || cipherErr.Spec != spec {
-				t.Fatalf("error carries keyslot %q spec %q, want keyslot \"0\" spec %q",
-					cipherErr.Keyslot, cipherErr.Spec, spec)
+			msg := err.Error()
+			if !strings.Contains(msg, "keyslot 0") || !strings.Contains(msg, spec) {
+				t.Fatalf("error %q does not name keyslot 0 and spec %q", msg, spec)
 			}
 		})
 	}
@@ -237,7 +237,7 @@ func TestConformance_CryptsetupKeyslotCiphers(t *testing.T) {
 			"luksOpen", "--test-passphrase", "--batch-mode", path); code != 0 {
 			t.Fatalf("cryptsetup cannot open its own %s keyslot (exit %d)\n%s", keyslotCipher, code, out)
 		}
-		_, metadata, err := ReadHeader(path)
+		_, metadata, err := readHeaderForTest(path)
 		if err != nil {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
@@ -250,10 +250,10 @@ func TestConformance_CryptsetupKeyslotCiphers(t *testing.T) {
 	for _, spec := range []string{"aes-xts-plain64", "aes-xts-plain"} {
 		t.Run(spec+" opens", func(t *testing.T) {
 			path := format(t, spec, "512")
-			if err := TestKey(path, []byte(conformancePassphrase)); err != nil {
+			if err := testKeyForTest(path, []byte(conformancePassphrase)); err != nil {
 				t.Fatalf("TestKey rejected a cryptsetup %s keyslot with the correct passphrase: %v", spec, err)
 			}
-			if err := TestKey(path, []byte(conformanceWrongPassphrase)); err == nil {
+			if err := testKeyForTest(path, []byte(conformanceWrongPassphrase)); err == nil {
 				t.Fatal("TestKey accepted a WRONG passphrase")
 			}
 		})
@@ -267,23 +267,23 @@ func TestConformance_CryptsetupKeyslotCiphers(t *testing.T) {
 		for _, bits := range []string{"128", "256"} {
 			t.Run(spec+" "+bits+" opens", func(t *testing.T) {
 				path := format(t, spec, bits)
-				if err := TestKey(path, []byte(conformancePassphrase)); err != nil {
+				if err := testKeyForTest(path, []byte(conformancePassphrase)); err != nil {
 					t.Fatalf("TestKey rejected a cryptsetup %s/%s keyslot with the correct passphrase: %v", spec, bits, err)
 				}
-				if err := TestKey(path, []byte(conformanceWrongPassphrase)); err == nil {
+				if err := testKeyForTest(path, []byte(conformanceWrongPassphrase)); err == nil {
 					t.Fatal("TestKey accepted a WRONG passphrase")
 				}
 				// A passphrase change rewraps the key with AES-XTS and says
 				// so; cryptsetup opens the result.
 				const changed = "conformance-changed-passphrase"
-				if err := ChangeKey(path, []byte(conformancePassphrase), []byte(changed), 0); err != nil {
+				if err := changeKeyForTest(path, []byte(conformancePassphrase), []byte(changed), 0); err != nil {
 					t.Fatalf("ChangeKey on a %s keyslot: %v", spec, err)
 				}
-				_, metadata, err := ReadHeader(path)
+				_, metadata, err := readHeaderForTest(path)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if area := metadata.Keyslots["0"].Area; area.Encryption != KeyslotAreaEncryption || areacipher.ValidateXTSKeySize(area.KeySize) != nil {
+				if area := metadata.Keyslots["0"].Area; area.Encryption != keyslotAreaEncryption || areacipher.ValidateXTSKeySize(area.KeySize) != nil {
 					t.Fatalf("the rewritten keyslot declares %q with a %d-byte key", area.Encryption, area.KeySize)
 				}
 				if code, out := runCryptsetup(t, changed, "luksOpen", "--test-passphrase", "--batch-mode", path); code != 0 {

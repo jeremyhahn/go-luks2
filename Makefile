@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build install test test-verbose test-coverage test-integration coverage clean fmt vet lint gosec govulncheck trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-pkg integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration seccomp-diff
+.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build install test test-verbose test-coverage test-integration coverage coverage-report clean fmt vet lint gosec govulncheck vuln trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration seccomp-diff proto test-pkg docker-build docker-run
 
 # Default target
 .DEFAULT_GOAL := help
@@ -12,19 +12,23 @@ BUILD_DIR=build
 CMD_DIR=cmd/luks2
 COVERAGE_FILE=coverage.out
 COVERAGE_HTML=coverage.html
+# The image `docker-build`/`docker-run` build and run: the CLI alone, from
+# build/docker/cli, for someone who wants the tool without a devcontainer or
+# the integration suite's test dependencies.
+CLI_IMAGE ?= go-luks2-cli
 
 # ---- the coverage gate (#141) ----
 #
 # COVERAGE_THRESHOLD is the bar testing-guidelines.md sets for EVERY package
 # (project-scaffold.md 6). COVERAGE_FLOORS holds one floor per package per
-# tier, and test/covergate compares each package against its own floor in
+# tier, and test/tools/covergate compares each package against its own floor in
 # integer arithmetic -- never the aggregate, and never a rounded percentage.
 # The gate also refuses a floors file that leaves a package unmeasured, names
 # one that no longer exists, or holds a package to the target in no tier, so a
 # floor cannot be lowered past the target without the gate saying so.
 COVERAGE_THRESHOLD=90
 COVERAGE_FLOORS=coverage-floors.txt
-COVERAGE_GATE=$(GO) run ./test/covergate -floors $(COVERAGE_FLOORS) -target $(COVERAGE_THRESHOLD)
+COVERAGE_GATE=$(GO) run ./test/tools/covergate -floors $(COVERAGE_FLOORS) -target $(COVERAGE_THRESHOLD)
 
 # The unit tier's profiles, one per leg of test-unit. They are handed to the
 # gate SEPARATELY rather than concatenated first: a leg that wrote no profile
@@ -40,8 +44,8 @@ COVERAGE_UNIT_LEGS=$(COVERAGE_LEG_PKG) $(COVERAGE_LEG_REST)
 # loop devices, device-mapper, mount(2), mkfs on a mapped device, dmsetup and
 # losetup -- so their floor of record is the union of their unit profile and
 # the integration suite's, which instruments them through -coverpkg.
-COVERAGE_COMBINED_PKGS=./pkg/luks2 ./test/harness ./internal/dm ./internal/keyring
-COVERAGE_COMBINED_COVERPKG=./pkg/luks2,./test/harness,./internal/dm,./internal/keyring
+COVERAGE_COMBINED_PKGS=./pkg/luks2 ./pkg/dmcrypt ./pkg/loop ./pkg/filesystem ./test/internal/harness ./internal/dm ./internal/keyring
+COVERAGE_COMBINED_COVERPKG=./pkg/luks2,./pkg/dmcrypt,./pkg/loop,./pkg/filesystem,./test/internal/harness,./internal/dm,./internal/keyring
 COVERAGE_COMBINED_UNIT=coverage-combined-unit.out
 COVERAGE_INTEGRATION=coverage-integration.out
 
@@ -87,7 +91,7 @@ GOBIN=$(GOPATH)/bin
 # was unreachable, which is the failure mode a fail-closed recipe is supposed
 # not to have. Renaming the build variable frees the argument name.
 BUILD_VERSION=$(shell cat VERSION 2>/dev/null | tr -d 'v' || echo "dev")
-LDFLAGS=-ldflags "-X main.Version=$(BUILD_VERSION)"
+LDFLAGS=-ldflags "-X main.version=$(BUILD_VERSION)"
 
 # Colors for output
 COLOR_RESET=\033[0m
@@ -112,6 +116,10 @@ help: ## Show this help message
 	@echo "  make coverage           # Run all tests with coverage"
 	@echo "  make ci                 # Run CI pipeline locally"
 	@echo "  make check              # Run all quality checks"
+	@echo "  make test-kdf           # Unit tests for one package by name (PKG_NAMES)"
+	@echo "  make coverage-kdf       # Coverage for one package by name"
+	@echo "  make bench-kdf          # Benchmarks for one package by name"
+	@echo "  make integration-test-luks2  # Integration tests for one package by name"
 	@echo ""
 
 all: clean fmt vet test build ## Run all checks and build
@@ -121,6 +129,10 @@ build: ## Build the CLI binary
 	@mkdir -p $(BUILD_DIR)
 	@$(GO) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./$(CMD_DIR)
 	@echo "$(COLOR_GREEN)✓ Build complete: $(BUILD_DIR)/$(BINARY_NAME) (v$(BUILD_VERSION))$(COLOR_RESET)"
+	@echo "$(COLOR_BOLD)Cross-compiling pkg/luks2 and pkg/keyprovider for darwin (§A.3)...$(COLOR_RESET)"
+	@GOOS=darwin GOARCH=amd64 $(GO) build ./pkg/luks2 ./pkg/keyprovider
+	@GOOS=darwin GOARCH=arm64 $(GO) build ./pkg/luks2 ./pkg/keyprovider
+	@echo "$(COLOR_GREEN)✓ darwin/amd64 and darwin/arm64 build$(COLOR_RESET)"
 
 install: ## Install the CLI binary to $GOPATH/bin
 	@echo "$(COLOR_BOLD)Installing $(BINARY_NAME) v$(BUILD_VERSION)...$(COLOR_RESET)"
@@ -204,7 +216,7 @@ test-unit: ## Run only unit tests with coverage and the race detector (fast, no 
 # the integration image excludes .git/ and runs `go test ./...`. Without a
 # checkout it fails; it never reports a tree it could not list as clean.
 releasability: ## Run the public-releasability gate over the tracked tree (needs a git checkout)
-	@$(GO) run ./test/labstrings/cmd/releasability-gate .
+	@$(GO) run ./test/tools/releasability-gate .
 
 # The PBKDF2 calibration tests, deliberately WITHOUT -race.
 #
@@ -242,11 +254,8 @@ test-calibration: ## Run the PBKDF2 calibration tests without -race (the mode th
 	@echo "$(COLOR_GREEN)✓ Calibration tests passed$(COLOR_RESET)"
 
 test-cli: ## Run CLI unit tests only
-	@echo "$(COLOR_BOLD)Running CLI unit tests...$(COLOR_RESET)"
-	@$(GO) test -v -coverprofile=coverage-cli.out -covermode=atomic ./cmd/luks2
-	@echo ""
-	@echo "$(COLOR_BOLD)CLI Coverage:$(COLOR_RESET)"
-	@$(GO) tool cover -func=coverage-cli.out | tail -1
+	@echo "$(COLOR_BOLD)Running unit tests for ./internal/cli ./cmd/luks2 (cli)...$(COLOR_RESET)"
+	@$(GO) test -v -race -count=1 ./internal/cli ./cmd/luks2
 
 test-verbose: ## Run tests with verbose output
 	@echo "$(COLOR_BOLD)Running tests (verbose)...$(COLOR_RESET)"
@@ -408,7 +417,7 @@ docker-build-integration:
 	DOCKER_BUILDKIT=1 docker build \
 		--secret id=gomodauth,src="$$stage" \
 		--label $(ITEST_LABEL) \
-		-f test/integration/Dockerfile \
+		-f build/docker/integration/Dockerfile \
 		-t $(ITEST_IMAGE) .; \
 	if [ -n "$(ITEST_BUILD_IS_GOAL)" ]; then \
 		docker image rm -f $(ITEST_IMAGE) >/dev/null 2>&1 || true; \
@@ -438,7 +447,7 @@ docker-prune-itest: ## Remove orphaned integration images (label-scoped, age-bou
 # that does not match the thing that exists, which is the defect this whole
 # section descends from. So the workflow reads it from here rather than
 # repeating the literal, the same reason the privilege flags live in
-# test/integration/cmd/docker-run and not in five call sites. Deliberately
+# test/tools/docker-run and not in five call sites. Deliberately
 # undocumented in help: it is a seam for the workflow, not a target anyone runs.
 print-itest-label:
 	@echo $(ITEST_LABEL)
@@ -446,18 +455,6 @@ print-itest-label:
 integration-test: build ## Run all integration tests in Docker (isolated, recommended)
 	@echo "$(COLOR_BOLD)Running all integration tests in Docker container...$(COLOR_RESET)"
 	@$(MAKE) docker-integration-test
-
-integration-test-pkg: build docker-run-bin ## Run package integration tests in Docker
-	@echo "$(COLOR_BOLD)Running package integration tests in Docker...$(COLOR_RESET)"
-	@$(MAKE) docker-build-integration
-	@# One shell with a trap: the per-invocation image tag is never reused, so
-	@# if this target simply exits -- and it aborts on a failing suite -- the
-	@# image is orphaned on the host forever.
-	@set -eu; \
-	trap 'docker image rm -f $(ITEST_IMAGE) >/dev/null 2>&1 || true' EXIT INT TERM; \
-	  env IMAGE="$(ITEST_IMAGE)" TEST_STATE_DIR="$(TEST_STATE_DIR)" \
-	    $(INTEGRATION_DOCKER_RUN) --rm -- \
-		go test -v -tags=integration ./test/integration/pkg/...
 
 integration-test-cli: build docker-run-bin ## Run CLI integration tests in Docker
 	@echo "$(COLOR_BOLD)Running CLI integration tests in Docker...$(COLOR_RESET)"
@@ -480,7 +477,7 @@ integration-test-cli: build docker-run-bin ## Run CLI integration tests in Docke
 # with no profile made the total go UP; and the one comparison there was
 # truncated the percentage to an integer, so 89.9% passed a 90% bar.
 #
-# test/covergate is the gate, and every caller reaches it through these
+# test/tools/covergate is the gate, and every caller reaches it through these
 # targets: ci.yml's unit job runs `make coverage-gate`, the devcontainer's
 # entrypoint runs `make coverage-combined`, so a developer's number is the
 # number that blocks the merge. It is a Go program with its own tests rather
@@ -492,7 +489,17 @@ coverage-gate: ## Refuse unit coverage below any package's floor (reads test-uni
 
 coverage: test-unit ## Measure unit coverage, gate it per package, and write the HTML report
 	@$(MAKE) --no-print-directory coverage-gate
+	@$(MAKE) --no-print-directory coverage-report
+
+# coverage-report is coverage's own last two lines, split out so the report
+# can be regenerated from an already-gated $(COVERAGE_FILE) -- e.g. right
+# after `make coverage-gate` in CI -- without paying for `test-unit` again.
+# It never gates: coverage-gate already did, over the SEPARATE per-leg
+# profiles (#141); this only reads the merged copy test-unit leaves behind.
+coverage-report: ## Print the func summary and write the HTML report from the already-gated profile
+	@test -s $(COVERAGE_FILE) || { echo "$(COLOR_RED)✗ $(COVERAGE_FILE) is missing or empty; run 'make coverage-gate' (or 'make coverage') first$(COLOR_RESET)"; exit 1; }
 	@$(GO) tool cover -html=$(COVERAGE_FILE) -o $(COVERAGE_HTML)
+	@$(GO) tool cover -func=$(COVERAGE_FILE) | tail -1
 	@echo "$(COLOR_GREEN)✓ Coverage report: $(COVERAGE_HTML)$(COLOR_RESET)"
 
 # The COMBINED tier: unit plus integration, for the packages whose remaining
@@ -503,18 +510,23 @@ coverage: test-unit ## Measure unit coverage, gate it per package, and write the
 #
 # Both suites are measured in the same container so the union is of two
 # profiles of the same tree. The integration leg instruments the combined
-# packages through -coverpkg, so test/integration/pkg's calls into the library
-# count toward pkg/luks2, and its ledger and reaper use counts toward
-# test/harness -- whose own integration tests drive the reaper's removals
-# against the real kernel. -p 1 keeps the integration packages from contending
-# for loop devices at once. The unit leg is not raced: -race is the unit job's
-# business, and this leg is here for its profile.
+# packages through -coverpkg, so each test/integration/<pkg> suite's calls
+# into the library count toward its package, and dm/keyring's ledger and
+# reaper use counts toward test/internal/harness -- whose own integration
+# tests drive the reaper's removals against the real kernel. -p 1 keeps the
+# integration packages from contending for loop devices at once. The unit
+# leg is not raced: -race is the unit job's business, and this leg is here
+# for its profile.
 coverage-combined: ## (devcontainer only) Run the integration suite and gate unit+integration coverage
 	@rm -f $(COVERAGE_INTEGRATION) $(COVERAGE_COMBINED_UNIT)
 	@echo "$(COLOR_BOLD)Integration suite, instrumenting $(COVERAGE_COMBINED_COVERPKG)...$(COLOR_RESET)"
 	@$(GO) test -v -count=1 -p 1 -tags=integration -timeout 30m -covermode=atomic \
 		-coverpkg=$(COVERAGE_COMBINED_COVERPKG) -coverprofile=$(COVERAGE_INTEGRATION) \
-		./pkg/luks2 ./test/harness ./test/integration/pkg/... ./test/integration/cli/...
+		./test/internal/harness ./test/integration/cli/... \
+		./test/integration/luks2/... ./test/integration/loop/... ./test/integration/wipe/... \
+		./test/integration/dmcrypt/... ./test/integration/keyring/... ./test/integration/header/... \
+		./test/integration/kdf/... ./test/integration/device/... ./test/integration/filesystem/... \
+		./test/integration/interop/... ./pkg/luks2
 	@echo "$(COLOR_BOLD)Unit suite for the combined packages...$(COLOR_RESET)"
 	@$(GO) test -count=1 -timeout $(UNIT_TEST_TIMEOUT) -covermode=atomic \
 		-coverprofile=$(COVERAGE_COMBINED_UNIT) $(COVERAGE_COMBINED_PKGS)
@@ -595,7 +607,7 @@ TEST_STATE_DIR ?= /var/tmp/go-luks2-test-state
 # status and an interactive -it terminal reach the caller unchanged -- which
 # holds only because the targets run the BUILT binary. Under `go run` the go
 # tool stays as the parent process and reports any nonzero child status as 1,
-# so docker's 125/126/127 would be lost. test/integration/cmd/docker-run's
+# so docker's 125/126/127 would be lost. test/tools/docker-run's
 # TestBinary_PropagatesDockersExitStatus pins this.
 DOCKER_RUN_BIN := $(BUILD_DIR)/docker-run
 INTEGRATION_DOCKER_RUN := $(DOCKER_RUN_BIN)
@@ -604,7 +616,135 @@ INTEGRATION_DOCKER_RUN := $(DOCKER_RUN_BIN)
 # so a rebuild with nothing changed costs next to nothing.
 docker-run-bin: ## Build the integration container launcher (build/docker-run)
 	@mkdir -p $(BUILD_DIR)
-	@$(GO) build -o $(DOCKER_RUN_BIN) ./test/integration/cmd/docker-run
+	@$(GO) build -o $(DOCKER_RUN_BIN) ./test/tools/docker-run
+
+# ---- the CLI image (#276 / DESIGN.md G.2) ----
+#
+# build/docker/cli is the production image: the luks2 binary and the
+# cryptsetup userspace tools it shells out to, nothing a developer or CI
+# needs (no go toolchain, no lint/scan tools). It is built and run exactly
+# like docker-build-integration/$(INTEGRATION_DOCKER_RUN) do, because the
+# library needs the same device-mapper and loop access either way; see
+# test/integration/cmd/docker-run for what that privilege set is and why.
+docker-build: ## Build the CLI image from build/docker/cli
+	@echo "$(COLOR_BOLD)Building $(CLI_IMAGE)...$(COLOR_RESET)"
+	@set -eu; \
+	umask 077; \
+	stage="$$(mktemp -t gomodauth.XXXXXX)"; \
+	trap 'rm -f "$$stage"' EXIT INT TERM; \
+	if [ -n "$${GIT_CONFIG_KEY_0:-}" ]; then \
+		{ \
+			printf 'export GOPRIVATE=%s\n' "$${GOPRIVATE:-}"; \
+			printf 'export GIT_CONFIG_COUNT=%s\n' "$${GIT_CONFIG_COUNT:-}"; \
+			printf 'export GIT_CONFIG_KEY_0=%s\n' "$${GIT_CONFIG_KEY_0}"; \
+			printf 'export GIT_CONFIG_VALUE_0=%s\n' "$${GIT_CONFIG_VALUE_0:-}"; \
+		} > "$$stage"; \
+	fi; \
+	DOCKER_BUILDKIT=1 docker build \
+		--secret id=gomodauth,src="$$stage" \
+		-f build/docker/cli/Dockerfile \
+		-t $(CLI_IMAGE) .
+	@echo "$(COLOR_GREEN)✓ CLI image built: $(CLI_IMAGE)$(COLOR_RESET)"
+
+docker-run: docker-build docker-run-bin ## Run the CLI image, with the integration seccomp profile and device scoping (ARGS="..." passes CLI args)
+	@IMAGE=$(CLI_IMAGE) $(INTEGRATION_DOCKER_RUN) --rm -it -- $(ARGS)
+
+# ---- the per-package quartet (#276 / DESIGN.md G.2) ----
+#
+# PKG_<name> maps a short name to its import path, one entry per package this
+# lane owns: every CURRENT pkg/ and internal/ package. (DESIGN.md B.5's
+# remaining public packages that have no line here yet -- keyprovider --
+# do not have one simply because no lane has added it; whichever lane does
+# adds its line here, same as any other new package.) PKG_NAMES lists every
+# key so test-%,
+# coverage-%, bench-% and integration-test-% below can resolve PKG_$* for
+# ANY name without a second edit anywhere else: adding a package is exactly
+# the two lines below, nothing in the pattern rules changes.
+PKG_af          := ./internal/af
+PKG_areacipher  := ./internal/areacipher
+PKG_cli         := ./internal/cli
+PKG_clock       := ./internal/clock
+PKG_command     := ./internal/command
+PKG_device      := ./internal/device
+PKG_dm          := ./internal/dm
+PKG_errs        := ./internal/errs
+PKG_fips        := ./internal/fips
+PKG_header      := ./internal/header
+PKG_kdf         := ./internal/kdf
+PKG_keyring     := ./internal/keyring
+PKG_recoverykey := ./internal/recoverykey
+PKG_secret      := ./internal/secret
+PKG_volkey      := ./internal/volkey
+PKG_dmcrypt     := ./pkg/dmcrypt
+PKG_filesystem  := ./pkg/filesystem
+PKG_keyprovider := ./pkg/keyprovider
+PKG_loop        := ./pkg/loop
+PKG_wipe        := ./pkg/wipe
+PKG_luks2       := ./pkg/luks2
+PKG_NAMES := af areacipher cli clock command device dm errs fips header kdf keyring recoverykey secret volkey dmcrypt filesystem keyprovider loop wipe luks2
+
+test-%: ## Unit tests for one package by name, e.g. `make test-kdf` (see PKG_NAMES)
+	@pkg="$(PKG_$*)"; test -n "$$pkg" || { echo "$(COLOR_RED)✗ no package mapped to '$*'; add PKG_$* to the Makefile$(COLOR_RESET)"; exit 1; }; \
+	echo "$(COLOR_BOLD)Running unit tests for $$pkg ($*)...$(COLOR_RESET)"; \
+	$(GO) test -v -race -count=1 "$$pkg"
+
+# Named coverage-<name>.out rather than a shared file: running two of these
+# back to back must not clobber each other's profile, unlike test-unit's
+# fixed legs, which only ever run as a pair. `make clean` already removes
+# every *.out file.
+coverage-%: ## Coverage for one package by name, e.g. `make coverage-kdf` (writes coverage-<name>.out)
+	@pkg="$(PKG_$*)"; test -n "$$pkg" || { echo "$(COLOR_RED)✗ no package mapped to '$*'; add PKG_$* to the Makefile$(COLOR_RESET)"; exit 1; }; \
+	echo "$(COLOR_BOLD)Running coverage for $$pkg ($*)...$(COLOR_RESET)"; \
+	$(GO) test -count=1 -covermode=atomic -coverprofile=coverage-$*.out "$$pkg" && \
+	$(GO) tool cover -func=coverage-$*.out | tail -1
+
+bench-%: ## Benchmarks for one package by name, e.g. `make bench-kdf` (a package with none exits clean)
+	@pkg="$(PKG_$*)"; test -n "$$pkg" || { echo "$(COLOR_RED)✗ no package mapped to '$*'; add PKG_$* to the Makefile$(COLOR_RESET)"; exit 1; }; \
+	echo "$(COLOR_BOLD)Running benchmarks for $$pkg ($*)...$(COLOR_RESET)"; \
+	$(GO) test -run='^$$' -bench=. -benchmem "$$pkg"
+
+# integration-test-% runs the test/integration/<name>/ directory DESIGN.md
+# A.1 plans per package (#274 relocated the per-package suites out of the
+# former test/integration/pkg catch-all). A name with no directory yet exits
+# clean rather than claiming a pass for a suite that does not exist: a
+# silent no-op here is indistinguishable from "nothing to test" only if it
+# is the TRUTH, not an assumption. No ITEST_DIR_<name> overrides remain --
+# every mapped name's test directory now matches its own.
+
+# ITEST_BUILD_IMAGE holds the recursive call, so the pattern rule below can
+# reference it WITHOUT the literal text "$(MAKE)" appearing in its own
+# recipe. That literal text is what GNU make scans a recipe line for to mark
+# it "always run, even under -n" (the docker-prune-itest comment above
+# explains why that exception exists and the #146 container it once started
+# during a dry run). The whole point here is the OPPOSITE: the skip branch
+# below must stay inert under -n, and it shares a shell with the build/run
+# steps so an absent integration directory can `exit 0` before either of
+# them -- which only works if they are ONE recipe line. Indirecting through
+# this variable keeps that one line a plain command as far as the scan is
+# concerned, confirmed by a throwaway Makefile: a recipe referencing a
+# variable whose VALUE contains $(MAKE) is not force-run under -n; one that
+# spells $(MAKE) directly, is.
+ITEST_BUILD_IMAGE := $(MAKE) --no-print-directory docker-build-integration
+
+integration-test-%: docker-run-bin ## Integration tests for one package by name, in the devcontainer (see ITEST_DIR_<name>)
+	@pkg="$(PKG_$*)"; test -n "$$pkg" || { echo "$(COLOR_RED)✗ no package mapped to '$*'; add PKG_$* to the Makefile$(COLOR_RESET)"; exit 1; }; \
+	dir="$(if $(ITEST_DIR_$*),$(ITEST_DIR_$*),$*)"; \
+	if [ ! -d "test/integration/$$dir" ]; then \
+		echo "$(COLOR_YELLOW)no integration suite yet for $$pkg ($*); nothing to run$(COLOR_RESET)"; \
+		exit 0; \
+	fi; \
+	echo "$(COLOR_BOLD)Running the test/integration/$$dir suite for $$pkg ($*)...$(COLOR_RESET)"; \
+	$(ITEST_BUILD_IMAGE); \
+	set -eu; \
+	trap 'docker image rm -f $(ITEST_IMAGE) >/dev/null 2>&1 || true' EXIT INT TERM; \
+	env IMAGE="$(ITEST_IMAGE)" TEST_STATE_DIR="$(TEST_STATE_DIR)" \
+		$(INTEGRATION_DOCKER_RUN) --rm -- \
+		go test -v -tags=integration "./test/integration/$$dir/..."
+
+test-pkg: ## Unit tests for one package by import path (make test-pkg PKG=./internal/kdf)
+	@test -n "$(PKG)" || { echo "$(COLOR_RED)✗ state the package: make test-pkg PKG=./internal/kdf$(COLOR_RESET)"; exit 1; }
+	@echo "$(COLOR_BOLD)Running unit tests for $(PKG)...$(COLOR_RESET)"
+	@$(GO) test -v -race -count=1 $(PKG)
 
 # test/integration/seccomp.json is Docker's own default profile with one block
 # appended, and the value of that arrangement is entirely in being able to
@@ -644,7 +784,7 @@ seccomp-diff: ## Diff the integration seccomp profile against Docker's default
 	diff -u "$$dir/default.json" $(SECCOMP_PROFILE) || true
 
 # No host lock. Every device-mapper name the suite creates carries the
-# container's scope and the process's run id (test/harness VolumeName), so
+# container's scope and the process's run id (test/internal/harness VolumeName), so
 # concurrent runs cannot collide and nothing needs serializing (#178).
 #
 # The lock that used to live here was also inert in CI: the runner executes job
@@ -680,25 +820,30 @@ host-integration-test: build ## Run integration tests on host (requires sudo, NO
 
 test-integration: integration-test ## Alias for integration-test
 
-# ---- the exported-API record (API redesign, DESIGN.md H0) ----
+# ---- the exported-API record (API redesign, DESIGN.md H0, H13) ----
 #
 # test/tools/apidump/baseline holds the API as released in 0.5.0-alpha and the
 # redesign's disposition of every pkg/luks2 identifier. That the dispositions
 # cover the baseline exactly is a unit test of the tool, so test-unit gates
-# it; api-diff reports how far the tree has moved from the baseline.
+# it. api-diff is the gate that every disposition is HONOURED: a KEEP
+# identifier is still there, and every RENAME/MOVE/UNEXPORT/DELETE identifier
+# is gone from the current API (DESIGN.md §B.6, H0 "H13 turns it into the
+# gate").
 API_BASELINE=test/tools/apidump/baseline
 
 api-dump: ## Print the exported API of pkg/luks2 and cmd/luks2
 	@$(GO) run ./test/tools/apidump dump ./pkg/luks2
 	@$(GO) run ./test/tools/apidump dump ./cmd/luks2
 
-api-diff: ## Report what the exported API removed and added since the 0.5.0-alpha baseline
-	@$(GO) run ./test/tools/apidump diff $(API_BASELINE)/luks2.tsv ./pkg/luks2
-	@$(GO) run ./test/tools/apidump diff $(API_BASELINE)/cmd-luks2.tsv ./cmd/luks2
+api-diff: ## Gate: the current pkg/luks2 API honors every disposition in baseline/disposition-luks2.tsv
+	@$(GO) run ./test/tools/apidump honor $(API_BASELINE)/luks2.tsv $(API_BASELINE)/disposition-luks2.tsv ./pkg/luks2
 
 bench: ## Run benchmarks
 	@echo "$(COLOR_BOLD)Running benchmarks...$(COLOR_RESET)"
 	@$(GO) test -bench=. -benchmem ./...
+
+proto: ## No-op: this module has no .proto sources (scaffold §4 contract; Layer 0 library, docs/00 L1 exemption)
+	@echo "no .proto sources (Layer 0 library)"
 
 fmt: ## Format code with gofmt
 	@echo "$(COLOR_BOLD)Formatting code...$(COLOR_RESET)"
@@ -836,6 +981,8 @@ govulncheck: ## Run govulncheck (known vulns in stdlib and the dependency call g
 		echo "  Install: go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)"; \
 	fi
 
+vuln: govulncheck ## Alias for govulncheck (scaffold §4 contract names it `vuln`)
+
 # ---- trivy: a pinned release archive, verified before it is unpacked (#247) ----
 #
 # trivy is not in the runner image, so the nightly workflow and the release
@@ -930,6 +1077,7 @@ security: gosec govulncheck verify trivy-fs ## Run the full §8 security suite (
 # clean tree, or a pass on the previous run's profiles (#141 review).
 ci: fmt-check vet lint security ## Run CI pipeline locally (format, lint, security suite, releasability gate, unit tests + coverage gate, build)
 	@$(MAKE) --no-print-directory releasability
+	@$(MAKE) --no-print-directory api-diff
 	@$(MAKE) --no-print-directory test-unit
 	@$(MAKE) --no-print-directory coverage-gate
 	@$(MAKE) --no-print-directory test-calibration
@@ -943,6 +1091,7 @@ ci: fmt-check vet lint security ## Run CI pipeline locally (format, lint, securi
 	@echo "$(COLOR_GREEN)✓ Vet passed$(COLOR_RESET)"
 	@echo "$(COLOR_GREEN)✓ Lint passed$(COLOR_RESET)"
 	@echo "$(COLOR_GREEN)✓ Security scan passed$(COLOR_RESET)"
+	@echo "$(COLOR_GREEN)✓ API-diff gate passed (every disposition honored)$(COLOR_RESET)"
 	@echo "$(COLOR_GREEN)✓ Unit tests passed$(COLOR_RESET)"
 	@echo "$(COLOR_GREEN)✓ Unit coverage at or above every package floor$(COLOR_RESET)"
 	@echo "$(COLOR_GREEN)✓ Build successful$(COLOR_RESET)"
@@ -970,7 +1119,12 @@ check: fmt vet test ## Run all quality checks (format, vet, test)
 
 clean: ## Clean build artifacts and test files
 	@echo "$(COLOR_BOLD)Cleaning...$(COLOR_RESET)"
-	@rm -rf $(BUILD_DIR) *.log *.test
+	@# $(BUILD_DIR)/docker holds TRACKED Dockerfiles (DESIGN.md G.4), not
+	@# build output -- the same reason .gitignore excludes it from "build/*".
+	@# A plain `rm -rf $(BUILD_DIR)` would delete committed source from the
+	@# working tree on every `make clean`, recoverable only via `git checkout`.
+	@if [ -d $(BUILD_DIR) ]; then find $(BUILD_DIR) -mindepth 1 -maxdepth 1 ! -name docker -exec rm -rf {} +; fi
+	@rm -f *.log *.test
 	@rm -f $(BINARY_NAME)
 	@rm -f $(COVERAGE_FILE) $(COVERAGE_HTML)
 	@rm -f coverage-docker.out coverage-docker.html $(COVERAGE_INTEGRATION) $(COVERAGE_COMBINED_UNIT) coverage-integration.html $(COVERAGE_UNIT_LEGS)
@@ -1022,7 +1176,7 @@ info: ## Show project information
 
 devcontainer: ## Build and run the devcontainer
 	@echo "$(COLOR_BOLD)Building devcontainer...$(COLOR_RESET)"
-	@docker build -f .devcontainer/Dockerfile -t go-luks2-devcontainer .
+	@docker build -f build/docker/devcontainer/Dockerfile -t go-luks2-devcontainer .
 	@echo "$(COLOR_GREEN)✓ Devcontainer built$(COLOR_RESET)"
 	@echo ""
 	@echo "$(COLOR_BOLD)To run:$(COLOR_RESET)"
@@ -1197,7 +1351,7 @@ RELEASE_REMOTE ?= dev
 # whether or not any rule names the variable. That is a property of invoking
 # make, not of this recipe, and this recipe cannot close it.
 
-.PHONY: release-alpha deps-latest
+.PHONY: release release-alpha deps-latest
 
 # changelog-assemble folds changelog.d fragments into a new CHANGELOG.md section.
 #
@@ -1230,13 +1384,17 @@ changelog-assemble: ## Fold changelog.d fragments into a CHANGELOG.md section (V
 	echo "Assembled $$(echo "$$frags" | wc -w) fragment(s) into CHANGELOG.md as [$$ver]."; \
 	echo "Review the diff, then commit CHANGELOG.md and the fragment deletions together."
 
-release-alpha: export REL_VERSION   := $(value VERSION)
-release-alpha: export REL_REMOTE    := $(RELEASE_REMOTE)
-release-alpha: export REL_REPO      := $(REPO_NAME)
-release-alpha: export REL_AGENT_GIT := $(AGENT_GIT)
-release-alpha:
-	@test -n "$$REL_VERSION" || { echo 'ERROR: state the version explicitly: make release-alpha VERSION=vX.Y.Z-alpha (you decide patch/minor/major — the recipe refuses to guess)'; exit 1; }
-	@printf '%s' "$$REL_VERSION" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-alpha$$' || { echo "ERROR: VERSION is not of the form vX.Y.Z-alpha (no leading zeroes): $$REL_VERSION"; exit 1; }
+# release-alpha is the original name, kept as an alias: the recipe below takes
+# -alpha, -rc.N and final versions, and VERSION is still stated explicitly.
+release-alpha: release
+
+release: export REL_VERSION   := $(value VERSION)
+release: export REL_REMOTE    := $(RELEASE_REMOTE)
+release: export REL_REPO      := $(REPO_NAME)
+release: export REL_AGENT_GIT := $(AGENT_GIT)
+release: ## Tag and push a release (VERSION=vX.Y.Z, vX.Y.Z-alpha or vX.Y.Z-rc.N)
+	@test -n "$$REL_VERSION" || { echo 'ERROR: state the version explicitly: make release VERSION=vX.Y.Z[-alpha|-rc.N] (you decide patch/minor/major — the recipe refuses to guess)'; exit 1; }
+	@printf '%s' "$$REL_VERSION" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-alpha|-rc\.[1-9][0-9]*)?$$' || { echo "ERROR: VERSION is not of the form vX.Y.Z, vX.Y.Z-alpha or vX.Y.Z-rc.N (no leading zeroes): $$REL_VERSION"; exit 1; }
 	@test "$$(git rev-parse --abbrev-ref HEAD)" = main || { echo "ERROR: releases are cut from main; you are on $$(git rev-parse --abbrev-ref HEAD). 'push $$REL_REMOTE HEAD' would publish this branch."; exit 1; }
 	@test -n "$$REL_REPO" || { echo 'ERROR: REPO_NAME is empty — set it to the literal repo name, never $$(notdir $$(CURDIR))'; exit 1; }
 	@test -x "$$REL_AGENT_GIT" || { echo 'ERROR: AGENT_GIT does not point at an executable agent-git.sh. Every git write below signs through it, and a bad path must fail HERE rather than at the first signed write, with a tag already cut. No default path is baked in (#20): put agent-git.sh on PATH, or run: make release-alpha AGENT_GIT=/path/to/agent-git.sh VERSION=vX.Y.Z-alpha'; exit 1; }
@@ -1256,9 +1414,16 @@ release-alpha:
 	@frags=$$(ls changelog.d/*.md 2>/dev/null | grep -v '/README\.md$$' || true); \
 	test -z "$$frags" || { echo "ERROR: changelog.d still holds unassembled fragments:"; echo "$$frags" | sed 's/^/  /'; echo "Tagging now would publish a release whose CHANGELOG omits them. Run: make changelog-assemble VERSION=$$REL_VERSION, review, commit, then release."; exit 1; }
 	@ver="## [$${REL_VERSION#v}]"; awk -v ver="$$ver" 'index($$0, ver) == 1 { f = 1 } END { exit f ? 0 : 1 }' CHANGELOG.md || { echo "ERROR: CHANGELOG.md has no \"$$ver\" section heading. Matched LITERALLY and anchored at the line start — an unanchored prose mention does not count, and neither does a near-miss heading"; exit 1; }
+	@# Idempotent: when VERSION already reads this release (the rc.1 case, where
+	@# the file was bumped ahead of the tag) there is nothing to commit, and an
+	@# empty commit would fail the recipe with the tag not yet cut.
 	@printf '%s\n' "$${REL_VERSION#v}" > VERSION
-	"$$REL_AGENT_GIT" "$$REL_REPO" add VERSION
-	"$$REL_AGENT_GIT" "$$REL_REPO" commit -m "chore(release): $$REL_VERSION"
+	@if git diff --quiet HEAD -- VERSION; then \
+	  echo "VERSION already reads $${REL_VERSION#v}; no version commit"; \
+	else \
+	  "$$REL_AGENT_GIT" "$$REL_REPO" add VERSION && \
+	  "$$REL_AGENT_GIT" "$$REL_REPO" commit -m "chore(release): $$REL_VERSION"; \
+	fi
 	"$$REL_AGENT_GIT" "$$REL_REPO" tag -a "$$REL_VERSION" -m "$$REL_VERSION"
 	"$$REL_AGENT_GIT" "$$REL_REPO" push --atomic "$$REL_REMOTE" HEAD "refs/tags/$$REL_VERSION"
 	@echo "Released $$REL_VERSION (signed, annotated, single tag pushed)"

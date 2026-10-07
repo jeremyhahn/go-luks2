@@ -7,10 +7,14 @@
 package luks2
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // encoding/json binds a member to a struct field case-insensitively and lets
@@ -22,7 +26,7 @@ import (
 // checksummed: a header whose bytes no writer of this package could produce.
 func writeHeaderJSON(t *testing.T, path, jsonData string) {
 	t.Helper()
-	hdr, _, err := ReadHeader(path)
+	hdr, _, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader: %v", err)
 	}
@@ -31,7 +35,7 @@ func writeHeaderJSON(t *testing.T, path, jsonData string) {
 		t.Fatalf("open %s: %v", path, err)
 	}
 	defer func() { _ = f.Close() }()
-	if err := writeEncodedHeader(f, hdr, []byte(jsonData), LUKS2HeaderMinSize); err != nil {
+	if err := writeEncodedHeader(f, hdr, []byte(jsonData), header.HeaderMinSize, (*os.File).Sync); err != nil {
 		t.Fatalf("writeEncodedHeader: %v", err)
 	}
 }
@@ -41,7 +45,7 @@ func TestReadHeaderRefusesAmbiguousMembers(t *testing.T) {
 
 	path := newImage(t, "ambiguous-base.img")
 	formatWithLibrary(t, path)
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader: %v", err)
 	}
@@ -72,9 +76,9 @@ func TestReadHeaderRefusesAmbiguousMembers(t *testing.T) {
 			image := newImage(t, "ambiguous.img")
 			formatWithLibrary(t, image)
 			writeHeaderJSON(t, image, tc.json)
-			_, _, err := ReadHeader(image)
-			if !errors.Is(err, ErrInvalidHeader) || !errors.Is(err, ErrAmbiguousJSONMember) {
-				t.Fatalf("ReadHeader: got %v, want ErrInvalidHeader and ErrAmbiguousJSONMember", err)
+			_, _, err := readHeaderForTest(image)
+			if !errors.Is(err, ErrInvalidHeader) || !errors.Is(err, header.ErrAmbiguousJSONMember) {
+				t.Fatalf("ReadHeader: got %v, want ErrInvalidHeader and header.ErrAmbiguousJSONMember", err)
 			}
 		})
 	}
@@ -85,27 +89,42 @@ func TestReadHeaderRefusesAmbiguousMembers(t *testing.T) {
 		image := newImage(t, "unmodeled-case.img")
 		formatWithLibrary(t, image)
 		writeHeaderJSON(t, image, inject(`"segments":{"0":{`, `"note":"a","NOTE":"b",`))
-		if _, _, err := ReadHeader(image); err != nil {
+		if _, _, err := readHeaderForTest(image); err != nil {
 			t.Fatalf("ReadHeader: %v", err)
 		}
 	})
 }
 
-func TestImportTokenJSONRefusesAmbiguousMembers(t *testing.T) {
+func TestSetTokenRefusesAmbiguousMembers(t *testing.T) {
 	defer parallel(t)()
 
 	path := newImage(t, "token-ambiguous.img")
 	formatWithLibrary(t, path)
-	for _, doc := range []string{
-		`{"type":"systemd-recovery","keyslots":["0"],"Keyslots":["7"]}`,
-		`{"type":"systemd-recovery","keyslots":["0"],"keyslots":[]}`,
-	} {
-		if err := ImportTokenJSON(path, 0, []byte(doc)); !errors.Is(err, ErrAmbiguousJSONMember) {
-			t.Errorf("ImportTokenJSON(%s): got %v, want ErrAmbiguousJSONMember", doc, err)
-		}
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
 	}
-	if err := ImportTokenJSON(path, 0, []byte(`{"type":"systemd-recovery","keyslots":["0"]`)); err == nil {
-		t.Error("ImportTokenJSON accepted a truncated object")
+	defer func() { _ = v.Close() }()
+
+	// A case-insensitive duplicate -- the typed Keyslots field's own spelling
+	// and an unmodeled member differing only in case -- is still caught: the
+	// write path round-trips the token through LegacyToken (toLegacyToken),
+	// whose decoder is the same case-sensitive one a header read uses. An
+	// EXACT duplicate key ("keyslots" twice) is not: encoding/json collapses
+	// it to the last occurrence while decoding the caller's JSON into Token's
+	// Members map, before this package ever sees two keys to compare.
+	doc := `{"type":"systemd-recovery","keyslots":["0"],"Keyslots":["7"]}`
+	var token Token
+	if err := json.Unmarshal([]byte(doc), &token); err != nil {
+		t.Fatalf("Unmarshal(%s): %v", doc, err)
+	}
+	if err := v.SetToken(context.Background(), 0, token); !errors.Is(err, header.ErrAmbiguousJSONMember) {
+		t.Errorf("SetToken(%s): got %v, want header.ErrAmbiguousJSONMember", doc, err)
+	}
+
+	var truncated Token
+	if err := json.Unmarshal([]byte(`{"type":"systemd-recovery","keyslots":["0"]`), &truncated); err == nil {
+		t.Error("Unmarshal accepted a truncated object")
 	}
 }
 
@@ -117,7 +136,7 @@ func TestReadHeaderRequiresTheMandatoryObjects(t *testing.T) {
 
 	path := newImage(t, "mandatory-base.img")
 	formatWithLibrary(t, path)
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader: %v", err)
 	}
@@ -139,7 +158,7 @@ func TestReadHeaderRequiresTheMandatoryObjects(t *testing.T) {
 			image := newImage(t, "mandatory.img")
 			formatWithLibrary(t, image)
 			writeHeaderJSON(t, image, doc)
-			if _, _, err := ReadHeader(image); !errors.Is(err, ErrInvalidHeader) {
+			if _, _, err := readHeaderForTest(image); !errors.Is(err, ErrInvalidHeader) {
 				t.Fatalf("ReadHeader: got %v, want ErrInvalidHeader", err)
 			}
 		})

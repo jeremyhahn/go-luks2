@@ -5,41 +5,18 @@
 package luks2
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strconv"
 
+	"github.com/jeremyhahn/go-luks2/internal/device"
 	"github.com/jeremyhahn/go-luks2/internal/errs"
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// MaxTokenSlots is the maximum number of token slots in LUKS2
-const MaxTokenSlots = 32
-
-// GetToken retrieves a token by ID from a LUKS2 device
-func GetToken(device string, tokenID int) (*Token, error) {
-	if tokenID < 0 || tokenID >= MaxTokenSlots {
-		return nil, &errs.Error{
-			Detail: fmt.Sprintf("invalid token ID: %d (must be 0-%d)", tokenID, MaxTokenSlots-1),
-		}
-	}
-
-	_, metadata, err := ReadHeader(device)
-	if err != nil {
-		return nil, &errs.Error{Detail: "failed to read LUKS header", Err: err}
-	}
-
-	if metadata.Tokens == nil {
-		return nil, ErrTokenNotFound
-	}
-
-	tokenKey := strconv.Itoa(tokenID)
-	token, exists := metadata.Tokens[tokenKey]
-	if !exists {
-		return nil, ErrTokenNotFound
-	}
-
-	return token, nil
-}
+// MaxTokens is the maximum number of token slots in LUKS2 (DESIGN.md §B.2).
+const MaxTokens = 32
 
 // canonicalTokenID returns the slot a token map key names, and whether the key
 // ADDRESSES a token at all: it must be the canonical spelling of a number, and
@@ -55,10 +32,10 @@ func GetToken(device string, tokenID int) (*Token, error) {
 // strconv.Itoa produces.
 //
 // RANGE. "-1", "32" and "999" are canonical spellings, so the round trip alone
-// admits them -- and every other entry point rejects them, because GetToken,
-// ImportToken, RemoveToken and TokenExists all bound the id to 0..MaxTokenSlots-1.
-// A listing that reports a token GetToken refuses to retrieve is exactly the
-// inconsistency #35 exists to remove, so the same bound applies here.
+// admits them -- and every other entry point rejects them, because AddToken,
+// SetToken and RemoveToken all bound the id to 0..MaxTokens-1. A listing that
+// reports a token no lookup can retrieve is exactly the inconsistency #35
+// exists to remove, so the same bound applies here.
 //
 // # Why an unaddressable key is IGNORED rather than refused or honored
 //
@@ -77,7 +54,7 @@ func GetToken(device string, tokenID int) (*Token, error) {
 // cryptsetup neither rejects those headers nor reaches those entries: it
 // addresses tokens by looking up the canonical spelling of each slot number
 // from 0 to LUKS2_TOKENS_MAX-1, so "01", "32" and "999" are all unreachable to
-// it while "31" is not. MaxTokenSlots is the same boundary, which the 31/32
+// it while "31" is not. MaxTokens is the same boundary, which the 31/32
 // pair pins rather than assumes.
 //
 // So such a key is not a working token that refusing would strand -- no LUKS2
@@ -95,259 +72,291 @@ func GetToken(device string, tokenID int) (*Token, error) {
 // "01" could silently REPLACE the working token at "1" -- both mapped to the
 // same int key and Go's randomized map iteration decided which survived, so a
 // real token vanished from inspection on a different read each time -- and that
-// an out-of-range key was listed as a token that GetToken then refused.
+// an out-of-range key was listed as a token no lookup could retrieve.
 func canonicalTokenID(key string) (int, bool) {
 	id, err := strconv.Atoi(key)
 	if err != nil || strconv.Itoa(id) != key {
 		return 0, false
 	}
-	if id < 0 || id >= MaxTokenSlots {
+	if id < 0 || id >= MaxTokens {
 		return 0, false
 	}
 	return id, true
 }
 
-// ListTokens returns all tokens from a LUKS2 device, keyed by slot.
+// TokenTypeRecovery is the LUKS2 token type for this package's own recovery
+// keys (DESIGN.md §B.2): systemd-cryptenroll's "systemd-recovery".
+const TokenTypeRecovery = header.TokenTypeSystemdRecovery
+
+// Token is a LUKS2 token: a named external-credential binding recorded in the
+// header (DESIGN.md §B.2). Keyslots is the set of keyslot ids the token
+// identifies -- empty for a token that names none, never nil on the wire,
+// since LUKS2 requires the member to be an array. Members carries every field
+// this package does not model as a typed one itself -- a systemd-fido2
+// token's fido2-credential/fido2-salt/fido2-rp and requirement flags, a
+// systemd-tpm2 token's fields, or any other token type's -- untouched, so
+// writing a token back never drops what wrote it.
 //
-// A key that does not address a token -- a non-canonical spelling, or a number
-// outside 0..MaxTokenSlots-1 -- is skipped rather than folded onto a slot or
-// reported as one. Every id in the returned map is one GetToken will retrieve;
-// see canonicalTokenID for the cryptsetup measurement that settles why.
-func ListTokens(device string) (map[int]*Token, error) {
-	_, metadata, err := ReadHeader(device)
-	if err != nil {
-		return nil, &errs.Error{Detail: "failed to read LUKS header", Err: err}
-	}
-
-	result := make(map[int]*Token)
-	if metadata.Tokens == nil {
-		return result, nil
-	}
-
-	for key, token := range metadata.Tokens {
-		id, ok := canonicalTokenID(key)
-		if !ok {
-			continue
-		}
-		result[id] = token
-	}
-
-	return result, nil
+// A zero Token (empty Type) is the KeyProvider.Token anonymous case: no token
+// should be written for it.
+type Token struct {
+	Type     string
+	Keyslots []int
+	Members  map[string]json.RawMessage
 }
 
-// ExportToken exports a token as JSON from a LUKS2 device
-func ExportToken(device string, tokenID int) ([]byte, error) {
-	token, err := GetToken(device, tokenID)
+// MarshalJSON renders the token as LUKS2 writes it on disk: type and keyslots
+// (as the canonical decimal-string array the format requires), merged with
+// every member in Members.
+func (t Token) MarshalJSON() ([]byte, error) {
+	out := make(map[string]json.RawMessage, len(t.Members)+2)
+	for k, v := range t.Members {
+		out[k] = v
+	}
+
+	typeJSON, err := json.Marshal(t.Type)
+	if err != nil {
+		return nil, &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "failed to encode token type", Err: err}
+	}
+	out["type"] = typeJSON
+
+	keyslots := make([]string, len(t.Keyslots))
+	for i, id := range t.Keyslots {
+		keyslots[i] = strconv.Itoa(id)
+	}
+	keyslotsJSON, err := json.Marshal(keyslots)
+	if err != nil {
+		return nil, &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "failed to encode token keyslots", Err: err}
+	}
+	out["keyslots"] = keyslotsJSON
+
+	return json.Marshal(out)
+}
+
+// UnmarshalJSON reads a token's type and keyslots out of the on-disk object
+// and keeps everything else, verbatim and unparsed, in Members.
+func (t *Token) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "token is not a JSON object", Err: err}
+	}
+
+	var typ string
+	if v, ok := raw["type"]; ok {
+		if err := json.Unmarshal(v, &typ); err != nil {
+			return &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "token type is not a string", Err: err}
+		}
+		delete(raw, "type")
+	}
+
+	var keyslots []int
+	if v, ok := raw["keyslots"]; ok {
+		var ids []string
+		if err := json.Unmarshal(v, &ids); err != nil {
+			return &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "token keyslots is not an array of strings", Err: err}
+		}
+		keyslots = make([]int, len(ids))
+		for i, id := range ids {
+			n, err := strconv.Atoi(id)
+			if err != nil {
+				return &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "token keyslots entry " + id + " is not a number", Err: err}
+			}
+			keyslots[i] = n
+		}
+		delete(raw, "keyslots")
+	}
+
+	if len(raw) == 0 {
+		raw = nil
+	}
+	t.Type = typ
+	t.Keyslots = keyslots
+	t.Members = raw
+	return nil
+}
+
+// toLegacyToken converts t to the on-disk LegacyToken shape, through
+// LegacyToken's own JSON codec: a member this package models as a typed
+// field (the systemd-fido2 schema) lands there, and everything else passes
+// through LegacyToken's own unknown-field passthrough untouched.
+func (t Token) toLegacyToken() (*LegacyToken, error) {
+	raw, err := t.MarshalJSON()
 	if err != nil {
 		return nil, err
 	}
-
-	jsonData, err := json.MarshalIndent(token, "", "  ")
-	if err != nil {
-		return nil, &errs.Error{Detail: "failed to marshal token", Err: err}
+	var lt LegacyToken
+	if err := json.Unmarshal(raw, &lt); err != nil {
+		return nil, &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "failed to decode token", Err: err}
 	}
-
-	return jsonData, nil
+	return &lt, nil
 }
 
-// ImportToken imports a token into a LUKS2 device at the specified slot
-func ImportToken(device string, tokenID int, token *Token) error {
-	if tokenID < 0 || tokenID >= MaxTokenSlots {
-		return &errs.Error{
-			Detail: fmt.Sprintf("invalid token ID: %d (must be 0-%d)", tokenID, MaxTokenSlots-1),
-		}
-	}
-
-	if token == nil {
-		return &errs.Error{Detail: "token cannot be nil"}
-	}
-
-	if token.Type == "" {
-		return &errs.Error{Detail: "token type cannot be empty"}
-	}
-
-	// Validate device path
-	if err := ValidateDevicePath(device); err != nil {
-		return err
-	}
-
-	// One descriptor: locked, read through and written through, so a path
-	// re-pointed after the lock cannot have the header of one device rewritten
-	// onto another (as the keyslot operations, #249 A10).
-	lock, dev, err := lockKeyslotDevice(device)
+// tokenFromLegacy is toLegacyToken's inverse.
+func tokenFromLegacy(lt *LegacyToken) (Token, error) {
+	raw, err := json.Marshal(lt)
 	if err != nil {
-		return err
+		return Token{}, &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "failed to encode token", Err: err}
 	}
-	defer func() { _ = lock.Release() }()
+	var t Token
+	if err := json.Unmarshal(raw, &t); err != nil {
+		return Token{}, &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "failed to decode token", Err: err}
+	}
+	return t, nil
+}
 
+// AddToken writes t to the first free token slot and returns its id.
+func (v *Volume) AddToken(ctx context.Context, t Token) (int, error) {
+	const op = "Volume.AddToken"
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if err := v.checkOpen(op); err != nil {
+		return 0, err
+	}
+	if err := v.checkWritable(op); err != nil {
+		return 0, err
+	}
+
+	if t.Type == "" {
+		return 0, errAt(op, v.path, &errs.Error{Kind: ErrInvalidArgument, Detail: "a token must have a type"})
+	}
+
+	locked, err := v.lockFor(ctx, device.LockExclusive)
+	if err != nil {
+		return 0, errAt(op, v.path, err)
+	}
+	defer func() { _ = locked.Unlock() }()
+
+	// No exclusive open: the exclusive flock is what excludes other writers,
+	// as for AddKeyslot and cryptsetup token import, and a claim would refuse
+	// a volume that is mapped or mounted. The header is the CURRENT copy, as
+	// for the keyslot writes, and reading it levels a stale one: a primary one
+	// write behind the secondary must not hide a token from freeTokenSlot.
+	dev, err := v.keyslotDeviceFor(locked)
+	if err != nil {
+		return 0, errAt(op, v.path, err)
+	}
+	f := dev.file
 	hdr, metadata, err := dev.readHeader()
 	if err != nil {
-		return &errs.Error{Detail: "failed to read LUKS header", Err: err}
+		return 0, errAt(op, v.path, err)
 	}
 
-	// Initialize tokens map if nil
+	id, err := freeTokenSlot(metadata)
+	if err != nil {
+		return 0, errAt(op, v.path, err)
+	}
+
+	lt, err := t.toLegacyToken()
+	if err != nil {
+		return 0, errAt(op, v.path, err)
+	}
 	if metadata.Tokens == nil {
-		metadata.Tokens = make(map[string]*Token)
+		metadata.Tokens = make(map[string]*LegacyToken)
 	}
-
-	// LUKS2 requires a token's keyslots member to be an ARRAY. A nil slice
-	// encodes as `"keyslots":null`, which cryptsetup and systemd-cryptsetup
-	// refuse along with the whole header, so a token that names no keyslot is
-	// written with an empty one. The caller's token is copied rather than
-	// changed (#248).
-	//
-	// Whether the keyslots it names exist, under their canonical ids, is not
-	// checked here: the header write below refuses a dangling reference along
-	// with every other header cryptsetup would not read (headervalidation.go),
-	// and that is one rule rather than two that could disagree.
-	imported := *token
-	if imported.Keyslots == nil {
-		imported.Keyslots = []string{}
-	}
-
-	// Add or replace token
-	tokenKey := strconv.Itoa(tokenID)
-	metadata.Tokens[tokenKey] = &imported
-
-	// Increment sequence ID
+	metadata.Tokens[strconv.Itoa(id)] = lt
 	hdr.SequenceID++
 
-	if err := dev.writeHeader(hdr, metadata); err != nil {
-		return &errs.Error{Detail: "failed to write header", Err: err}
+	if err := writeHeaderTo(f, hdr, metadata, v.sys.syncDevice); err != nil {
+		return 0, errAt(op, v.path, err)
+	}
+	return id, nil
+}
+
+// SetToken writes t to slot id, replacing whatever is there.
+func (v *Volume) SetToken(ctx context.Context, id int, t Token) error {
+	const op = "Volume.SetToken"
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if err := v.checkOpen(op); err != nil {
+		return err
+	}
+	if err := v.checkWritable(op); err != nil {
+		return err
+	}
+
+	if id < 0 || id >= MaxTokens {
+		return errAt(op, v.path, &errs.Error{Kind: errs.ErrInvalidArgument, Detail: fmt.Sprintf("invalid token ID: %d (must be 0-%d)", id, MaxTokens-1)})
+	}
+	if t.Type == "" {
+		return errAt(op, v.path, &errs.Error{Kind: ErrInvalidArgument, Detail: "a token must have a type"})
+	}
+
+	locked, err := v.lockFor(ctx, device.LockExclusive)
+	if err != nil {
+		return errAt(op, v.path, err)
+	}
+	defer func() { _ = locked.Unlock() }()
+
+	// No exclusive open, and the current header copy: see AddToken.
+	dev, err := v.keyslotDeviceFor(locked)
+	if err != nil {
+		return errAt(op, v.path, err)
+	}
+	f := dev.file
+	hdr, metadata, err := dev.readHeader()
+	if err != nil {
+		return errAt(op, v.path, err)
+	}
+
+	lt, err := t.toLegacyToken()
+	if err != nil {
+		return errAt(op, v.path, err)
+	}
+	if metadata.Tokens == nil {
+		metadata.Tokens = make(map[string]*LegacyToken)
+	}
+	metadata.Tokens[strconv.Itoa(id)] = lt
+	hdr.SequenceID++
+
+	if err := writeHeaderTo(f, hdr, metadata, v.sys.syncDevice); err != nil {
+		return errAt(op, v.path, err)
 	}
 	return nil
 }
 
-// ImportTokenJSON imports a token from JSON into a LUKS2 device
-func ImportTokenJSON(device string, tokenID int, tokenJSON []byte) error {
-	var token Token
-	if err := json.Unmarshal(tokenJSON, &token); err != nil {
-		return &errs.Error{Detail: "failed to parse token JSON", Err: err}
+// RemoveToken removes the token at id, refusing with ErrTokenNotFound if
+// there is none.
+func (v *Volume) RemoveToken(ctx context.Context, id int) error {
+	const op = "Volume.RemoveToken"
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if err := v.checkOpen(op); err != nil {
+		return err
 	}
-
-	return ImportToken(device, tokenID, &token)
-}
-
-// RemoveToken removes a token from a LUKS2 device
-func RemoveToken(device string, tokenID int) error {
-	if tokenID < 0 || tokenID >= MaxTokenSlots {
-		return &errs.Error{
-			Detail: fmt.Sprintf("invalid token ID: %d (must be 0-%d)", tokenID, MaxTokenSlots-1),
-		}
-	}
-
-	// Validate device path
-	if err := ValidateDevicePath(device); err != nil {
+	if err := v.checkWritable(op); err != nil {
 		return err
 	}
 
-	// One descriptor, as ImportToken.
-	lock, dev, err := lockKeyslotDevice(device)
+	if id < 0 || id >= MaxTokens {
+		return errAt(op, v.path, &errs.Error{Kind: errs.ErrInvalidArgument, Detail: fmt.Sprintf("invalid token ID: %d (must be 0-%d)", id, MaxTokens-1)})
+	}
+
+	locked, err := v.lockFor(ctx, device.LockExclusive)
 	if err != nil {
-		return err
+		return errAt(op, v.path, err)
 	}
-	defer func() { _ = lock.Release() }()
+	defer func() { _ = locked.Unlock() }()
 
+	// No exclusive open, and the current header copy: see AddToken.
+	dev, err := v.keyslotDeviceFor(locked)
+	if err != nil {
+		return errAt(op, v.path, err)
+	}
+	f := dev.file
 	hdr, metadata, err := dev.readHeader()
 	if err != nil {
-		return &errs.Error{Detail: "failed to read LUKS header", Err: err}
+		return errAt(op, v.path, err)
 	}
 
-	if metadata.Tokens == nil {
-		return ErrTokenNotFound
+	key := strconv.Itoa(id)
+	if _, exists := metadata.Tokens[key]; !exists {
+		return errAt(op, v.path, &errs.Error{Kind: ErrTokenNotFound, Detail: "token " + key})
 	}
-
-	tokenKey := strconv.Itoa(tokenID)
-	if _, exists := metadata.Tokens[tokenKey]; !exists {
-		return ErrTokenNotFound
-	}
-
-	// Remove token
-	delete(metadata.Tokens, tokenKey)
-
-	// The map is deliberately left in place when it empties. Nilling it out
-	// existed to make the `tokens,omitempty` tag drop the key entirely, which
-	// is the opposite of what LUKS2 wants: tokens is mandatory and a container
-	// with no tokens carries `{}`.
-	//
-	// ensureRequiredObjects would restore the empty map before this metadata
-	// reached the disk either way, so removing the nilling is not what makes
-	// the container valid -- it removes a second place that has to be reasoned
-	// about to see that it stays valid.
-
-	// Increment sequence ID
+	delete(metadata.Tokens, key)
 	hdr.SequenceID++
 
-	if err := dev.writeHeader(hdr, metadata); err != nil {
-		return &errs.Error{Detail: "failed to write header", Err: err}
+	if err := writeHeaderTo(f, hdr, metadata, v.sys.syncDevice); err != nil {
+		return errAt(op, v.path, err)
 	}
 	return nil
-}
-
-// FindFreeTokenSlot finds the first available token slot
-func FindFreeTokenSlot(device string) (int, error) {
-	_, metadata, err := ReadHeader(device)
-	if err != nil {
-		return -1, &errs.Error{Detail: "failed to read LUKS header", Err: err}
-	}
-
-	// If no tokens exist, slot 0 is free
-	if metadata.Tokens == nil {
-		return 0, nil
-	}
-
-	// Find first free slot
-	for i := 0; i < MaxTokenSlots; i++ {
-		tokenKey := strconv.Itoa(i)
-		if _, exists := metadata.Tokens[tokenKey]; !exists {
-			return i, nil
-		}
-	}
-
-	return -1, ErrNoFreeTokenSlot
-}
-
-// TokenExists checks if a token exists at the specified slot
-func TokenExists(device string, tokenID int) (bool, error) {
-	if tokenID < 0 || tokenID >= MaxTokenSlots {
-		return false, &errs.Error{
-			Detail: fmt.Sprintf("invalid token ID: %d (must be 0-%d)", tokenID, MaxTokenSlots-1),
-		}
-	}
-
-	_, metadata, err := ReadHeader(device)
-	if err != nil {
-		return false, &errs.Error{Detail: "failed to read LUKS header", Err: err}
-	}
-
-	if metadata.Tokens == nil {
-		return false, nil
-	}
-
-	tokenKey := strconv.Itoa(tokenID)
-	_, exists := metadata.Tokens[tokenKey]
-	return exists, nil
-}
-
-// CountTokens returns the number of tokens in the LUKS2 header.
-//
-// It counts the entries ListTokens returns, not the size of the map on disk.
-// len() would count a key that no LUKS2 implementation can address, so a
-// container carrying both "1" and "01" -- or one carrying "32" -- would report
-// a token that every listing omitted and every lookup refused, a count nothing
-// else in the library or in cryptsetup agrees with. See canonicalTokenID.
-func CountTokens(device string) (int, error) {
-	_, metadata, err := ReadHeader(device)
-	if err != nil {
-		return 0, &errs.Error{Detail: "failed to read LUKS header", Err: err}
-	}
-
-	count := 0
-	for key := range metadata.Tokens {
-		if _, ok := canonicalTokenID(key); ok {
-			count++
-		}
-	}
-
-	return count, nil
 }

@@ -5,6 +5,7 @@
 package kdf
 
 import (
+	"context"
 	"crypto/pbkdf2"
 	"hash"
 	"time"
@@ -53,32 +54,32 @@ func WallClockPBKDF2(hashFunc func() hash.Hash, iterations, keySize int) (time.D
 
 	start := time.Now()
 	if _, err := pbkdf2.Key(hashFunc, calibrationPassphrase, calibrationSalt, iterations, keySize); err != nil {
-		return 0, &errs.Error{Detail: "crypto pbkdf2 benchmark", Err: err}
+		return 0, &errs.Error{Kind: errs.ErrIO, Detail: "crypto pbkdf2 benchmark", Err: err}
 	}
 	return time.Since(start), nil
 }
 
 // Calibrate estimates the PBKDF2 iteration count for hashAlgo that costs
 // targetMs on this hardware, timed by WallClockPBKDF2.
-func (d Deriver) Calibrate(hashAlgo string, keySize, targetMs int) (int, error) {
-	return d.CalibrateWithTimer(hashAlgo, keySize, targetMs, WallClockPBKDF2)
+func (d Deriver) Calibrate(ctx context.Context, hashAlgo string, keySize, targetMs int) (int, error) {
+	return d.CalibrateWithTimer(ctx, hashAlgo, keySize, targetMs, WallClockPBKDF2)
 }
 
 // CalibrateWithTimer is Calibrate with the probe timer given explicitly, for
 // the digest-calibration caller which measures at a different key length and
 // budget, and for tests that model the timing instead of running it.
-func (d Deriver) CalibrateWithTimer(hashAlgo string, keySize, targetMs int, timer Timer) (int, error) {
+func (d Deriver) CalibrateWithTimer(ctx context.Context, hashAlgo string, keySize, targetMs int, timer Timer) (int, error) {
 	hashFunc, err := PBKDF2HashFunc(d.FIPS, hashAlgo)
 	if err != nil {
 		return 0, err
 	}
-	return CalibratePBKDF2(hashFunc, hashAlgo, keySize, targetMs, ProbeFloor, ProbeCeiling, timer)
+	return CalibratePBKDF2(ctx, hashFunc, hashAlgo, keySize, targetMs, ProbeFloor, ProbeCeiling, timer)
 }
 
 // CalibratePBKDF2 is the calibration loop itself, with every seam (the probe
 // floor/ceiling and the timer) given explicitly so a test can bound or
 // replace them without running real derivations.
-func CalibratePBKDF2(hashFunc func() hash.Hash, hashAlgo string, keySize, targetMs int, probeFloor time.Duration, probeCeiling int, timer Timer) (int, error) {
+func CalibratePBKDF2(ctx context.Context, hashFunc func() hash.Hash, hashAlgo string, keySize, targetMs int, probeFloor time.Duration, probeCeiling int, timer Timer) (int, error) {
 	if targetMs <= 0 || targetMs > MaxPBKDF2IterTimeMs {
 		return 0, &CalibrationError{
 			Hash:     hashAlgo,
@@ -88,6 +89,11 @@ func CalibratePBKDF2(hashFunc func() hash.Hash, hashAlgo string, keySize, target
 	}
 
 	for probe := ProbeStart; ; probe *= 2 {
+		// Checked before each probe (DESIGN.md §D.2): a probe, like a
+		// derivation, cannot be interrupted once started.
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
 		elapsed, err := timer(hashFunc, probe, keySize)
 		if err != nil {
 			return 0, err

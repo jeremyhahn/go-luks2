@@ -1,6 +1,6 @@
 # Public releasability
 
-> **Status: NORMATIVE** · Last verified: 2026-10-04 against v0.3.1-alpha
+> **Status: NORMATIVE** · Last verified: 2026-10-07 against v1.0.0-rc.1 (ef01368)
 > Conflicts with this rule are defects.
 
 The public release is a single commit whose tree is byte-identical to the
@@ -18,12 +18,12 @@ path.
 | `lab-host` | A fleet hostname | A role: `ci-runner-01`, `luks.example.com`, `*.internal` |
 | `owner-path` | A path under the owner's home or the lab NFS mount | A repository-relative path, or `/var/lib`, `/srv`, `/var/tmp` |
 
-The patterns live in one place, `patterns` in `test/labstrings/labstrings.go`.
+The patterns live in one place, `patterns` in `test/internal/labstrings/labstrings.go`.
 
 These files are never published, whatever their content:
 
 - Shell scripts: `*.sh`, `*.bash`, or anything starting with `#!`. Tools are
-  Go commands (`test/ci/cmd/require-tool`, `test/integration/cmd/docker-run`)
+  Go commands (`test/tools/require-tool`, `test/tools/docker-run`)
   or Makefile recipes.
 - Workflows other than `ci.yml`, `nightly.yml` and `release.yml`
   (`PublishedWorkflows`), including `.yaml` variants and subdirectories.
@@ -39,12 +39,12 @@ These files are tracked on `main` and stripped at publish (#211):
 The gate passes them, lists each on every run and does not call the tree
 publishable while one is tracked. Their content is still scanned, and a script
 or binary among them still fails. The lists are `DefaultUnpublishable` and
-`DefaultStripAtPublish` in `test/labstrings/published.go`.
+`DefaultStripAtPublish` in `test/internal/labstrings/published.go`.
 
 ## The gate
 
 `make releasability` (part of `make ci` and CI's unit job) runs
-`test/labstrings/cmd/releasability-gate`. It scans the staged blobs of every
+`test/tools/releasability-gate`. It scans the staged blobs of every
 git index entry, not the working tree, because the index is what the next
 commit carries. Matching is textual, so it covers every file type. Without a
 git checkout, or with an unreadable blob, it exits 2 rather than reporting
@@ -69,7 +69,7 @@ Expr: regexp.MustCompile(`...`), // lab-string-ok: the pattern this gate matches
 ```
 
 For a whole tree, or a file that cannot hold a comment, add an entry with
-classes and a reason to `DefaultAllowList` in `test/labstrings/allowlist.go`.
+classes and a reason to `DefaultAllowList` in `test/internal/labstrings/allowlist.go`.
 It has one entry, the gate's own test fixtures.
 
 There is no waiver for an unpublishable file: remove it from the index.

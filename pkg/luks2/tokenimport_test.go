@@ -8,62 +8,77 @@ package luks2
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// ImportToken used to write any token with a type (#248, B2): a nil keyslot
+// SetToken used to write any token with a type (#248, B2): a nil keyslot
 // list went to disk as "keyslots":null and a keyslot id the header does not
 // have went to disk as written. cryptsetup refuses either header outright, so
 // systemd-cryptsetup could no longer open the volume while this package still
 // could.
 
-// TestImportTokenWritesAKeyslotsArray: a token naming no keyslot is written
-// with an empty array, and the caller's token is not changed.
-func TestImportTokenWritesAKeyslotsArray(t *testing.T) {
+// TestSetTokenWritesAKeyslotsArray: a token naming no keyslot is written
+// with an empty array.
+func TestSetTokenWritesAKeyslotsArray(t *testing.T) {
 	defer parallel(t)()
 
 	path := newImage(t, "token-null-keyslots.img")
 	formatWithLibrary(t, path)
 
-	token := &Token{Type: TokenTypeSystemdRecovery}
-	if err := ImportToken(path, 0, token); err != nil {
-		t.Fatalf("ImportToken: %v", err)
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
 	}
-	if token.Keyslots != nil {
-		t.Fatalf("ImportToken changed the caller's token: Keyslots = %#v", token.Keyslots)
+	defer func() { _ = v.Close() }()
+
+	if err := v.SetToken(context.Background(), 0, Token{Type: TokenTypeRecovery}); err != nil {
+		t.Fatalf("SetToken: %v", err)
 	}
-	if json := readAreaBytes(t, path, LUKS2HeaderSize, LUKS2DefaultSize); !bytes.Contains(json, []byte(`"keyslots":[]`)) ||
+	if json := readAreaBytes(t, path, header.HeaderSize, header.DefaultSize); !bytes.Contains(json, []byte(`"keyslots":[]`)) ||
 		bytes.Contains(json, []byte(`"keyslots":null`)) {
 		t.Fatalf("the token was not written with an empty keyslots array:\n%s", bytes.TrimRight(json, "\x00"))
 	}
-	got, err := GetToken(path, 0)
-	if err != nil || got.Keyslots == nil || len(got.Keyslots) != 0 {
-		t.Fatalf("GetToken = %+v, %v; want a token with an empty keyslots array", got, err)
+	hdr, err := v.Header(context.Background())
+	if err != nil {
+		t.Fatalf("Header: %v", err)
+	}
+	got, ok := hdr.Tokens()[0]
+	if !ok || got.Keyslots == nil || len(got.Keyslots) != 0 {
+		t.Fatalf("Tokens()[0] = %+v, %v; want a token with an empty keyslots array", got, ok)
 	}
 }
 
-// TestImportTokenRefusesAKeyslotTheHeaderDoesNotHave: a reference cryptsetup
+// TestSetTokenRefusesAKeyslotTheHeaderDoesNotHave: a reference cryptsetup
 // would refuse the header for is refused before anything is written.
-func TestImportTokenRefusesAKeyslotTheHeaderDoesNotHave(t *testing.T) {
+func TestSetTokenRefusesAKeyslotTheHeaderDoesNotHave(t *testing.T) {
 	defer parallel(t)()
 
 	path := newImage(t, "token-dangling.img")
 	formatWithLibrary(t, path)
-	before := readAreaBytes(t, path, 0, 2*LUKS2HeaderMinSize)
+	before := readAreaBytes(t, path, 0, 2*header.HeaderMinSize)
 
-	for _, refs := range [][]string{{"7"}, {"0", "31"}, {"00"}, {"-0"}} {
-		err := ImportToken(path, 0, &Token{Type: TokenTypeSystemdRecovery, Keyslots: refs})
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
+	for _, refs := range [][]int{{7}, {0, 31}} {
+		err := v.SetToken(context.Background(), 0, Token{Type: TokenTypeRecovery, Keyslots: refs})
 		if !errors.Is(err, ErrInvalidHeader) {
-			t.Errorf("ImportToken naming keyslots %q: got %v, want ErrInvalidHeader", refs, err)
+			t.Errorf("SetToken naming keyslots %v: got %v, want ErrInvalidHeader", refs, err)
 		}
 	}
-	if !bytes.Equal(before, readAreaBytes(t, path, 0, 2*LUKS2HeaderMinSize)) {
-		t.Fatal("a refused ImportToken changed the header")
+	if !bytes.Equal(before, readAreaBytes(t, path, 0, 2*header.HeaderMinSize)) {
+		t.Fatal("a refused SetToken changed the header")
 	}
 
-	if err := ImportToken(path, 0, &Token{Type: TokenTypeSystemdRecovery, Keyslots: []string{"0"}}); err != nil {
-		t.Fatalf("ImportToken naming the keyslot the header has: %v", err)
+	if err := v.SetToken(context.Background(), 0, Token{Type: TokenTypeRecovery, Keyslots: []int{0}}); err != nil {
+		t.Fatalf("SetToken naming the keyslot the header has: %v", err)
 	}
 }
 
@@ -77,18 +92,18 @@ func TestAddKeyWritesNoMaterialItsHeaderCannotName(t *testing.T) {
 
 	path := newImage(t, "addkey-damaged-header.img")
 	formatWithLibrary(t, path)
-	hdr, metadata, err := ReadHeader(path)
+	hdr, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader: %v", err)
 	}
-	metadata.Tokens["0"] = &Token{Type: TokenTypeSystemdRecovery, Keyslots: []string{"7"}}
+	metadata.Tokens["0"] = &LegacyToken{Type: TokenTypeRecovery, Keyslots: []string{"7"}}
 	if err := writeHeaderUnvalidated(path, hdr, metadata); err != nil {
 		t.Fatalf("writeHeaderUnvalidated: %v", err)
 	}
 	before := fileDigest(t, path)
 
-	_, err = AddKey(path, []byte(conformancePassphrase), []byte("a-second-credential"), &AddKeyOptions{
-		KDFType: KDFTypePBKDF2, PBKDFIterTime: 1,
+	_, err = addKeyForTest(path, []byte(conformancePassphrase), []byte("a-second-credential"), &addKeyOptionsForTest{
+		KDFType: kdfTypePBKDF2, PBKDFIterTime: 1,
 	})
 	if !errors.Is(err, ErrInvalidHeader) {
 		t.Fatalf("AddKey on a header carrying a dangling token: got %v, want ErrInvalidHeader", err)

@@ -824,11 +824,11 @@ func TestDecryptKeyMaterialEnclaveReleasesOnFailure(t *testing.T) {
 // the one WriteSpec names.
 func TestParseAcceptsExactlyTheSpecsCryptsetupWrites(t *testing.T) {
 	accepted := map[string]Transform{
-		"aes-xts-plain64":      {modeXTS, ivPlain64},
-		"aes-xts-plain":        {modeXTS, ivPlain},
-		"aes-cbc-essiv:sha256": {modeCBC, ivESSIVSHA256},
-		"aes-cbc-plain64":      {modeCBC, ivPlain64},
-		"aes-cbc-plain":        {modeCBC, ivPlain},
+		"aes-xts-plain64":      {mode: modeXTS, iv: ivPlain64},
+		"aes-xts-plain":        {mode: modeXTS, iv: ivPlain},
+		"aes-cbc-essiv:sha256": {mode: modeCBC, iv: ivESSIVSHA256},
+		"aes-cbc-plain64":      {mode: modeCBC, iv: ivPlain64},
+		"aes-cbc-plain":        {mode: modeCBC, iv: ivPlain},
 	}
 	for spec, want := range accepted {
 		got, ok := Parse(spec)

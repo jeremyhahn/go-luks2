@@ -6,12 +6,17 @@ package luks2
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/jeremyhahn/go-enclave"
+
 	"github.com/jeremyhahn/go-luks2/internal/errs"
+	"github.com/jeremyhahn/go-luks2/internal/fips"
+	"github.com/jeremyhahn/go-luks2/internal/header"
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
@@ -139,10 +144,10 @@ import (
 // lane that migrates a real cryptsetup volume and opens it under
 // GODEBUG=fips140=only in a separate process.
 
-// FIPSMigrationOptions tunes MigrateToFIPS. The zero value -- or nil -- is the
+// fipsMigrationOptionsForTest tunes MigrateToFIPS. The zero value -- or nil -- is the
 // complete import: a PBKDF2-SHA256 keyslot at a calibrated cost, and every
 // non-approved keyslot removed.
-type FIPSMigrationOptions struct {
+type fipsMigrationOptionsForTest struct {
 	// KeepNonApprovedKeyslots keeps the original Argon2 (or PBKDF2-SHA1)
 	// keyslots instead of removing them. The default is to remove them.
 	//
@@ -165,9 +170,9 @@ type FIPSMigrationOptions struct {
 	PBKDFIterations int
 }
 
-// FIPSMigrationResult is what MigrateToFIPS did, reported from the point of
+// fipsMigrationResultForTest is what MigrateToFIPS did, reported from the point of
 // decision rather than left to be inferred from the header afterwards.
-type FIPSMigrationResult struct {
+type fipsMigrationResultForTest struct {
 	// Keyslot is the FIPS-approved keyslot the passphrase now opens.
 	Keyslot int
 
@@ -235,13 +240,13 @@ const (
 // the secondary is read THERE and nowhere else. A reader probing every legal
 // offset up to 4 MiB would, on a small layout, read the encrypted data, which
 // the import never reads.
-func stateAfterWriteFailure(device string, area int64, state string) string {
-	sources, err := mediumSources(device)
+func stateAfterWriteFailure(device string, area int64, state string, sys volumeSys) string {
+	sources, err := mediumSources(device, sys.nodeRdev)
 	if err != nil {
 		return fipsStateUnconfirmed
 	}
 	deepest := sources[len(sources)-1]
-	medium, err := readDeviceDirect(deepest.path, deepest.offset, int(2*area))
+	medium, err := sys.readDeviceDirect(context.Background(), deepest.path, deepest.offset, int(2*area))
 	if err != nil {
 		return fipsStateUnconfirmed
 	}
@@ -258,24 +263,14 @@ func stateAfterWriteFailure(device string, area int64, state string) string {
 	return fipsStatePrimaryDamagedOriginals
 }
 
-// MigrateToFIPS imports a volume into a FIPS 140-3 deployment by rewrapping its
-// existing volume key under PBKDF2: it adds a PBKDF2 keyslot for passphrase
-// holding the same volume key, migrates every digest whose KDF is not approved,
-// verifies the volume opens through approved KDFs alone, and then removes the
-// keyslots FIPS mode cannot execute. No data is re-encrypted.
+// migrateToFIPS is (*Volume).MigrateToFIPS's implementation, with ctx
+// threaded through.
 //
-// It must run in a process that is NOT in FIPS mode, because unlocking the
-// volume executes its Argon2 keyslot; in a FIPS process it returns
-// ErrFIPSMigrationUnderFIPS without touching the device.
-//
-// Only passphrase's credential is carried across. Other credentials held only
-// in non-approved keyslots are removed with them unless
-// KeepNonApprovedKeyslots is set; migrate each with that option and remove the
-// originals with a final call without it.
-//
-// On failure the error is a *FIPSMigrationError whose State says what the
-// volume was left as.
-func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions) (*FIPSMigrationResult, error) {
+// lockDevice takes the device's exclusive lock and returns it pinned, with
+// the release the run defers. It is called once, after the preconditions:
+// (*Volume).MigrateToFIPS locks the descriptor Open pinned, through the
+// Volume's own lock wait, clock and lock directory.
+func migrateToFIPS(ctx context.Context, device string, passphrase []byte, opts *fipsMigrationOptionsForTest, sys volumeSys, lockDevice func() (*keyslotDevice, func(), error)) (*fipsMigrationResultForTest, error) {
 	// The header area size, once the run has read and validated one: what a
 	// failure report reads the secondary at (stateAfterWriteFailure).
 	var area int64
@@ -283,18 +278,15 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 	// own file once the device is locked (#255). Only states reached after the
 	// lock consult it.
 	mediumPath := device
-	fail := func(stage, state string, err error) (*FIPSMigrationResult, error) {
+	fail := func(stage, state string, err error) (*fipsMigrationResultForTest, error) {
 		if state == fipsStateOriginals || state == fipsStateRemoving {
-			state = stateAfterWriteFailure(mediumPath, area, state)
+			state = stateAfterWriteFailure(mediumPath, area, state, sys)
 		}
 		return nil, &FIPSMigrationError{Device: device, Stage: stage, State: state, Err: err}
 	}
 
-	if fipsMode() {
-		return fail("precondition", fipsStateUntouched, ErrFIPSMigrationUnderFIPS)
-	}
-	if err := ValidateDevicePath(device); err != nil {
-		return fail("precondition", fipsStateUntouched, err)
+	if sys.fipsMode() {
+		return fail("precondition", fipsStateUntouched, fipsRefusal(errFIPSMigrationUnderFIPS, "", nil))
 	}
 	// The passphrase is an EXISTING credential -- the one the import
 	// re-wraps, not a new one chosen here -- so it is judged by what can open a
@@ -304,24 +296,24 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 		return fail("precondition", fipsStateUntouched, err)
 	}
 
-	o := FIPSMigrationOptions{}
+	o := fipsMigrationOptionsForTest{}
 	if opts != nil {
 		o = *opts
 	}
 	if o.Hash == "" {
-		o.Hash = DefaultHashAlgo
+		o.Hash = defaultHashAlgo
 	}
 	o.Hash = strings.ToLower(o.Hash)
-	if !fipsApprovedKDF(KDFTypePBKDF2, o.Hash) {
+	if !fipsApprovedKDF(kdfTypePBKDF2, o.Hash) {
 		return fail("precondition", fipsStateUntouched, &errs.Error{
-			Kind:   ErrUnsupportedHash,
+			Kind:   ErrUnsupported,
 			Detail: "PBKDF2 hash " + strconv.Quote(o.Hash) + " is not one FIPS mode can run (sha256, sha384, sha512)",
 		})
 	}
 	// The new keyslot's cost is judged where AddKey judges it, in createKDF,
 	// which runs before anything is written.
-	addOpts := &AddKeyOptions{
-		KDFType:         KDFTypePBKDF2,
+	addOpts := &addKeyOptionsForTest{
+		KDFType:         kdfTypePBKDF2,
 		Hash:            o.Hash,
 		PBKDFIterTime:   o.PBKDFIterTime,
 		PBKDFIterations: o.PBKDFIterations,
@@ -333,35 +325,38 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 	// so a path re-pointed mid-import cannot send a write, or a read the
 	// import acts on, to a device that was never locked. This used to resolve
 	// the path at every step, like the keyslot operations before #249 (A10).
-	lock, dev, err := lockKeyslotDevice(device)
+	dev, release, err := lockDevice()
 	if err != nil {
 		return fail("precondition", fipsStateUntouched, err)
 	}
-	defer func() { _ = lock.Release() }()
+	defer release()
 	mediumPath = dev.mediumPath()
+	// The header copies are this run's to reconcile, as "Both header copies"
+	// above says; the keyslot code it reuses must not repair them for it.
+	dev.leveled = true
 
 	// SYNC, then READ FROM THE MEDIUM: see "Both header copies" above. The
 	// lock's descriptor is the device's own; fsync flushes every dirty page
 	// of it whoever wrote them, and evicting the clean pages after it means
 	// every byte this run reads -- headers above all -- comes off the medium,
 	// not out of a cache that may hold what never reached it.
-	if err := syncDevice(lock.locked.File()); err != nil {
+	if err := sys.syncDevice(dev.file); err != nil {
 		return fail("sync", fipsStateUntouched, &errs.Error{
-			Detail: "failed to make what an earlier write left in the page cache durable before reading", Err: err})
+			Kind: errs.ErrIO, Detail: "failed to make what an earlier write left in the page cache durable before reading", Err: err})
 	}
-	if err := dropDeviceCache(lock.locked.File()); err != nil {
+	if err := sys.dropDeviceCache(dev.file); err != nil {
 		return fail("sync", fipsStateUntouched, &errs.Error{
-			Detail: "failed to evict the device's cached pages, so what is read could not be shown to be on the medium", Err: err})
+			Kind: errs.ErrIO, Detail: "failed to evict the device's cached pages, so what is read could not be shown to be on the medium", Err: err})
 	}
 	// Eviction is advisory -- a page another process holds mapped stays
 	// cached and the call still succeeds -- so it is not the proof. This is:
 	// the header region read through the cache must equal the same bytes read
 	// past it.
-	if err := requireCacheMatchesMediumOf(dev.reader(), mediumPath); err != nil {
+	if err := requireCacheMatchesMediumOf(ctx, dev.reader(), mediumPath, sys); err != nil {
 		return fail("sync", fipsStateUntouched, err)
 	}
 
-	hdr, metadata, err := dev.readHeader()
+	hdr, metadata, err := dev.readPrimaryHeader()
 	if err != nil {
 		return fail("unlock", fipsStateUntouched, err)
 	}
@@ -407,12 +402,9 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 		}
 	}
 	if len(order) == 0 {
-		return fail("unlock", fipsStateUntouched, &errs.Error{
-			Kind:   ErrFIPSMigrationUnboundKey,
-			Detail: "no keyslot is attested by digests binding every data segment (" + strings.Join(dataSegmentIDs(metadata), ", ") + ")",
-		})
+		return fail("unlock", fipsStateUntouched, fipsRefusal(errFIPSMigrationUnboundKey, "no keyslot is attested by digests binding every data segment ("+strings.Join(dataSegmentIDs(metadata), ", ")+")", nil))
 	}
-	masterKey, openedID, err := getMasterKeySlot(dev.reader(), device, passphrase, volumeKeyDigestsView(metadata), order)
+	masterKey, openedID, err := getMasterKeySlot(ctx, dev.reader(), device, passphrase, volumeKeyDigestsView(metadata), order, sys)
 	if err != nil {
 		return fail("unlock", fipsStateUntouched, err)
 	}
@@ -422,11 +414,8 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 	// recovered actually satisfies, through the same digest evaluation the
 	// unlock uses.
 	if missing := unboundSegments(metadata, metadata.Digests, openedID, masterKey); len(missing) > 0 {
-		return fail("unlock", fipsStateUntouched, &errs.Error{
-			Kind: ErrFIPSMigrationUnboundKey,
-			Detail: "the key keyslot " + openedID + " holds is not bound to data segment(s) " +
-				strings.Join(missing, ", ") + " by any digest it matches",
-		})
+		return fail("unlock", fipsStateUntouched, fipsRefusal(errFIPSMigrationUnboundKey, "the key keyslot "+openedID+" holds is not bound to data segment(s) "+
+			strings.Join(missing, ", ")+" by any digest it matches", nil))
 	}
 
 	// 2. PLAN. Every non-approved digest must attest the key just recovered.
@@ -442,12 +431,9 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 		if approved {
 			continue
 		}
-		evaluated, matched := evaluateDigest(masterKey, digest)
+		evaluated, matched := evaluateDigest(masterKey, digest, fips.Probe)
 		if !evaluated || !matched {
-			return fail("plan", fipsStateUntouched, &errs.Error{
-				Kind:   ErrFIPSMigrationDigest,
-				Detail: "digest " + id + " (" + refusal.String() + ")",
-			})
+			return fail("plan", fipsStateUntouched, fipsRefusal(errFIPSMigrationDigest, "digest "+id+" ("+refusal.String()+")", nil))
 		}
 		digestsToMigrate = append(digestsToMigrate, id)
 	}
@@ -457,7 +443,7 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 	// they already agree, which is every run that does not follow an
 	// interrupted one.
 	if headerCopiesAgree(dev.reader()) != nil {
-		if err := repairSecondaryHeader(dev, hdr, metadata); err != nil {
+		if err := repairSecondaryHeader(ctx, dev, hdr, metadata); err != nil {
 			return fail("reconcile header copies", fipsStateOriginals, err)
 		}
 		if err := headerCopiesAgree(dev.reader()); err != nil {
@@ -465,14 +451,14 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 		}
 	}
 
-	result := &FIPSMigrationResult{}
+	result := &fipsMigrationResultForTest{}
 
 	// 3. ADD KEYSLOT -- through AddKey's own code, under the lock held here.
 	// If it fails, nothing has been removed and nothing will be.
 	slot, reusable := canonicalKeyslotID(openedID)
 	reusable = reusable && keyslotFIPSApproved(metadata.Keyslots[openedID])
 	if !reusable {
-		added, err := addKeyslotWithMasterKey(dev, hdr, metadata, masterKey, passphrase, addOpts, callerSuppliedCredential)
+		added, err := addKeyslotWithMasterKey(ctx, dev, hdr, metadata, masterKey, passphrase, addOpts, callerSuppliedCredential)
 		if err != nil {
 			return fail("add keyslot", fipsStateOriginals, err)
 		}
@@ -486,12 +472,12 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 	// volume key, keeping the keyslots and segments it attests. Every header
 	// either copy of the write can leave behind attests the same key.
 	if len(digestsToMigrate) > 0 {
-		hdr, metadata, err = dev.readHeader()
+		hdr, metadata, err = dev.readPrimaryHeader()
 		if err != nil {
 			return fail("migrate digest", fipsStateOriginals, err)
 		}
 		for _, id := range digestsToMigrate {
-			kdf, value, err := createDigest(masterKey, o.Hash)
+			kdf, value, err := createDigest(masterKey, o.Hash, sys)
 			if err != nil {
 				return fail("migrate digest", fipsStateOriginals, err)
 			}
@@ -507,7 +493,7 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 			digest.Digest = value
 		}
 		hdr.SequenceID++
-		if err := dev.writeHeader(hdr, metadata); err != nil {
+		if err := dev.writeHeader(ctx, hdr, metadata); err != nil {
 			return fail("migrate digest", fipsStateOriginals, err)
 		}
 		result.MigratedDigests = digestsToMigrate
@@ -516,16 +502,15 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 	// 5. VERIFY, before anything is removed -- including that BOTH header
 	// copies describe the volume just verified, so a removal interrupted later
 	// leaves either one opening it.
-	if err := verifyFIPSOpen(dev, passphrase, slotID, masterKey); err != nil {
+	if err := verifyFIPSOpen(ctx, dev, passphrase, slotID, masterKey, sys); err != nil {
 		return fail("verify", fipsStateOriginals, err)
 	}
 	if err := headerCopiesAgree(dev.reader()); err != nil {
-		return fail("verify", fipsStateOriginals, &errs.Error{Kind: ErrFIPSMigrationVerification,
-			Detail: "the header copies do not agree after the writes", Err: err})
+		return fail("verify", fipsStateOriginals, fipsRefusal(errFIPSMigrationVerification, "the header copies do not agree after the writes", err))
 	}
 
 	// 6. REMOVE the non-approved keyslots, or record that they were kept.
-	hdr, metadata, err = dev.readHeader()
+	hdr, metadata, err = dev.readPrimaryHeader()
 	if err != nil {
 		return fail("remove keyslot", fipsStateOriginals, err)
 	}
@@ -538,15 +523,13 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 			// Unreachable: slotID is approved by construction and verified in
 			// step 5. Stated so the invariant the removal rests on is a
 			// refusal rather than an assumption.
-			return fail("remove keyslot", fipsStateOriginals, &errs.Error{
-				Kind: ErrFIPSMigrationVerification, Detail: "keyslot " + id + " is both the migrated keyslot and not approved",
-			})
+			return fail("remove keyslot", fipsStateOriginals, fipsRefusal(errFIPSMigrationVerification, "keyslot "+id+" is both the migrated keyslot and not approved", nil))
 		}
 		if o.KeepNonApprovedKeyslots {
 			result.RetainedNonApprovedKeyslots = append(result.RetainedNonApprovedKeyslots, id)
 			continue
 		}
-		if destroyed, err := removeKeyslotOn(dev, hdr, metadata, id); err != nil {
+		if destroyed, err := removeKeyslotOn(ctx, dev, hdr, metadata, id); err != nil {
 			// A refusal before the wipe, with nothing removed yet, leaves the
 			// originals intact; anything else leaves the verified keyslot.
 			state := fipsStateRemoving
@@ -561,27 +544,24 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 	// 7. FINAL CHECK, against the header as written. Static first -- nothing
 	// non-approved may remain except what the caller asked to keep -- and then
 	// a real open again, because the outcome being reported is THIS header.
-	_, metadata, err = dev.readHeader()
+	_, metadata, err = dev.readPrimaryHeader()
 	if err != nil {
 		return fail("final check", fipsStateFinal, err)
 	}
 	keyslots, digests := nonApprovedKDFs(metadata)
 	var unexpected []string
 	for _, k := range keyslots {
-		if !slices.Contains(result.RetainedNonApprovedKeyslots, k.ID) {
-			unexpected = append(unexpected, "keyslot "+k.ID+" ("+k.String()+")")
+		if !slices.Contains(result.RetainedNonApprovedKeyslots, strconv.Itoa(k.ID)) {
+			unexpected = append(unexpected, fmt.Sprintf("keyslot %d (%s)", k.ID, k))
 		}
 	}
 	for _, d := range digests {
-		unexpected = append(unexpected, "digest "+d.ID+" ("+d.String()+")")
+		unexpected = append(unexpected, fmt.Sprintf("digest %d (%s)", d.ID, d))
 	}
 	if len(unexpected) > 0 {
-		return fail("final check", fipsStateFinal, &errs.Error{
-			Kind:   ErrFIPSMigrationVerification,
-			Detail: "still not approved: " + strings.Join(unexpected, ", "),
-		})
+		return fail("final check", fipsStateFinal, fipsRefusal(errFIPSMigrationVerification, "still not approved: "+strings.Join(unexpected, ", "), nil))
 	}
-	if err := verifyFIPSOpen(dev, passphrase, slotID, masterKey); err != nil {
+	if err := verifyFIPSOpen(ctx, dev, passphrase, slotID, masterKey, sys); err != nil {
 		return fail("final check", fipsStateFinal, err)
 	}
 
@@ -597,28 +577,46 @@ func MigrateToFIPS(device string, passphrase []byte, opts *FIPSMigrationOptions)
 // is refused unless its own KDF is approved, and the digest set handed to the
 // unlock is filtered to approved ones before it gets there. It is therefore the
 // path a FIPS process would take, run in a process that cannot BE one.
-func verifyFIPSOpen(dev *keyslotDevice, passphrase []byte, id string, want *enclave.MemoryEnclave) error {
-	_, metadata, err := dev.readHeader()
+// fipsRefusal is one of the migration's own refusals, classified at its
+// source (DESIGN.md §C.1): Kind is the public ErrFIPSMigration, and the
+// refusal's sentinel -- with the failure that led to it, when there is one --
+// stays reachable through Err. A bare sentinel, or one used as the Kind,
+// left errAt nothing it recognized, and a policy refusal read as ErrIO.
+func fipsRefusal(refusal error, detail string, cause error) *errs.Error {
+	err := refusal
+	if cause != nil {
+		err = &fipsRefusalCause{refusal: refusal, err: cause}
+	}
+	return &errs.Error{Kind: ErrFIPSMigration, Detail: detail, Err: err}
+}
+
+// fipsRefusalCause is the cause of a refusal that follows from another
+// failure: errors.Is and errors.As reach both the refusal and the failure.
+type fipsRefusalCause struct{ refusal, err error }
+
+func (c *fipsRefusalCause) Error() string   { return c.refusal.Error() + ": " + c.err.Error() }
+func (c *fipsRefusalCause) Unwrap() []error { return []error{c.refusal, c.err} }
+
+func verifyFIPSOpen(ctx context.Context, dev *keyslotDevice, passphrase []byte, id string, want *enclave.MemoryEnclave, sys volumeSys) error {
+	_, metadata, err := dev.readPrimaryHeader()
 	if err != nil {
 		return err
 	}
 	keyslot := metadata.Keyslots[id]
 	if keyslot == nil || !keyslotFIPSApproved(keyslot) {
-		return &errs.Error{Kind: ErrFIPSMigrationVerification,
-			Detail: "keyslot " + id + " is missing or does not use a FIPS-approved KDF"}
+		return fipsRefusal(errFIPSMigrationVerification, "keyslot "+id+" is missing or does not use a FIPS-approved KDF", nil)
 	}
 
-	approved := make(map[string]*Digest, len(metadata.Digests))
+	approved := make(map[string]*rawDigest, len(metadata.Digests))
 	for digestID, digest := range metadata.Digests {
 		if digestFIPSApproved(digest) {
 			approved[digestID] = digest
 		}
 	}
 
-	got, err := unlockKeyslotFrom(dev.reader(), id, passphrase, keyslot, approved)
+	got, err := unlockKeyslotFrom(ctx, dev.reader(), id, passphrase, keyslot, approved, sys)
 	if err != nil {
-		return &errs.Error{Kind: ErrFIPSMigrationVerification,
-			Detail: "keyslot " + id + " does not open through FIPS-approved KDFs", Err: err}
+		return fipsRefusal(errFIPSMigrationVerification, "keyslot "+id+" does not open through FIPS-approved KDFs", err)
 	}
 	defer custody.Release(got)
 
@@ -630,29 +628,26 @@ func verifyFIPSOpen(dev *keyslotDevice, passphrase []byte, id string, want *encl
 		return err
 	}
 	if !same {
-		return &errs.Error{Kind: ErrFIPSMigrationVerification,
-			Detail: "keyslot " + id + " opened to a key other than the volume key it was written with"}
+		return fipsRefusal(errFIPSMigrationVerification, "keyslot "+id+" opened to a key other than the volume key it was written with", nil)
 	}
 
 	// Opening to the right key is not yet opening the DATA: the approved
 	// digests the key matches must bind every data segment, or a FIPS
 	// process reaches the key and still cannot use it on the volume.
 	if missing := unboundSegments(metadata, approved, id, got); len(missing) > 0 {
-		return &errs.Error{Kind: ErrFIPSMigrationVerification,
-			Detail: "no FIPS-approved digest binds the key keyslot " + id + " holds to data segment(s) " + strings.Join(missing, ", ")}
+		return fipsRefusal(errFIPSMigrationVerification, "no FIPS-approved digest binds the key keyslot "+id+" holds to data segment(s) "+strings.Join(missing, ", "), nil)
 	}
 
-	// Keyslot id opening to the volume key is still not what a FIPS process
+	// header.Keyslot id opening to the volume key is still not what a FIPS process
 	// DOES: Unlock runs the keyslot scan and maps whatever it finds first. A
 	// retained approved keyslot holding an unbound key under the same
 	// passphrase would be found by a scan that ignored segment binding, and
 	// dm-crypt would be handed the wrong key. So the scan itself is run, over
 	// exactly what a FIPS process can execute, and must recover the volume key.
 	view := fipsApprovedView(metadata)
-	scanned, _, err := getMasterKeySlot(dev.reader(), dev.path, passphrase, view, volumeKeyScanOrder(view))
+	scanned, _, err := getMasterKeySlot(ctx, dev.reader(), dev.path, passphrase, view, volumeKeyScanOrder(view), sys)
 	if err != nil {
-		return &errs.Error{Kind: ErrFIPSMigrationVerification,
-			Detail: "the unlock scan over FIPS-approved keyslots and digests does not open the volume", Err: err}
+		return fipsRefusal(errFIPSMigrationVerification, "the unlock scan over FIPS-approved keyslots and digests does not open the volume", err)
 	}
 	defer custody.Release(scanned)
 	if err := secret.Borrow("compare the scanned volume key", scanned, func(b []byte) error {
@@ -662,8 +657,7 @@ func verifyFIPSOpen(dev *keyslotDevice, passphrase []byte, id string, want *encl
 		return err
 	}
 	if !same {
-		return &errs.Error{Kind: ErrFIPSMigrationVerification,
-			Detail: "the unlock scan over FIPS-approved keyslots and digests recovers a key other than the volume key"}
+		return fipsRefusal(errFIPSMigrationVerification, "the unlock scan over FIPS-approved keyslots and digests recovers a key other than the volume key", nil)
 	}
 	return nil
 }
@@ -672,15 +666,15 @@ func verifyFIPSOpen(dev *keyslotDevice, passphrase []byte, id string, want *encl
 // process can execute: luks2 keyslots whose KDF is approved and digests whose
 // KDF is approved. Running the ordinary unlock scan over it is running the scan
 // a FIPS process runs, without Argon2 ever being reachable.
-func fipsApprovedView(metadata *LUKS2Metadata) *LUKS2Metadata {
+func fipsApprovedView(metadata *header.Metadata) *header.Metadata {
 	view := *metadata
-	view.Keyslots = make(map[string]*Keyslot, len(metadata.Keyslots))
+	view.Keyslots = make(map[string]*header.Keyslot, len(metadata.Keyslots))
 	for id, keyslot := range metadata.Keyslots {
 		if keyslot != nil && keyslot.Type == "luks2" && keyslotFIPSApproved(keyslot) {
 			view.Keyslots[id] = keyslot
 		}
 	}
-	view.Digests = make(map[string]*Digest, len(metadata.Digests))
+	view.Digests = make(map[string]*rawDigest, len(metadata.Digests))
 	for id, digest := range metadata.Digests {
 		if digestFIPSApproved(digest) {
 			view.Digests[id] = digest
@@ -698,7 +692,7 @@ func fipsApprovedView(metadata *LUKS2Metadata) *LUKS2Metadata {
 //
 // removeKeyslotOn is the name the rollback paths use (#246); every caller holds
 // the locked descriptor and removes through it.
-func removeKeyslotOn(dev *keyslotDevice, hdr *LUKS2BinaryHeader, metadata *LUKS2Metadata, id string) (destroyed bool, err error) {
+func removeKeyslotOn(ctx context.Context, dev *keyslotDevice, hdr *header.BinaryHeader, metadata *header.Metadata, id string) (destroyed bool, err error) {
 	target := metadata.Keyslots[id]
 
 	// THE GATE -- the same one RemoveKey, KillSlot and KillKeyslot take:
@@ -716,10 +710,10 @@ func removeKeyslotOn(dev *keyslotDevice, hdr *LUKS2BinaryHeader, metadata *LUKS2
 	}
 
 	// From here the operation is destructive.
-	if err := wipeKeyslotArea(dev, hdr, metadata, id, target); err != nil {
+	if err := wipeKeyslotArea(ctx, dev, hdr, metadata, id, target); err != nil {
 		return true, err
 	}
-	return true, dev.writeHeader(hdr, metadata)
+	return true, dev.writeHeader(ctx, hdr, metadata)
 }
 
 // fipsApprovedKDF reports whether a KDF, as a header declares it, is one a FIPS
@@ -728,10 +722,10 @@ func removeKeyslotOn(dev *keyslotDevice, hdr *LUKS2BinaryHeader, metadata *LUKS2
 // SHA-1 is refused in FIPS mode (getPBKDF2HashFunc) even though the type alone
 // is approved.
 func fipsApprovedKDF(kdfType, hash string) bool {
-	if !IsFIPSCompliantKDF(kdfType) {
+	if !isFIPSCompliantKDF(kdfType) {
 		return false
 	}
-	if normalizeKDFType(kdfType) != KDFTypePBKDF2 {
+	if normalizeKDFType(kdfType) != kdfTypePBKDF2 {
 		return true
 	}
 	switch strings.ToLower(hash) {
@@ -773,8 +767,8 @@ func fipsParameterRefusal(salt string, outputLen int) string {
 // a strict FIPS process, as a NonApprovedKDF with its ID set, or reports ok when
 // it could: the algorithm approved (fipsApprovedKDF) and its parameters above
 // the floors crypto/pbkdf2 enforces, the output being the keyslot's key size.
-func keyslotFIPSRefusal(id string, keyslot *Keyslot) (refusal NonApprovedKDF, ok bool) {
-	refusal.ID = id
+func keyslotFIPSRefusal(id string, keyslot *header.Keyslot) (refusal NonApprovedKDF, ok bool) {
+	refusal.ID, _ = strconv.Atoi(id) // id is always a canonical keyslot ID (a small decimal integer)
 	if keyslot == nil || keyslot.KDF == nil {
 		refusal.Reason = "no KDF object"
 		return refusal, false
@@ -804,8 +798,8 @@ func keyslotFIPSRefusal(id string, keyslot *Keyslot) (refusal NonApprovedKDF, ok
 
 // digestFIPSRefusal is keyslotFIPSRefusal for a digest, whose output length is
 // the length of its stored value.
-func digestFIPSRefusal(id string, digest *Digest) (refusal NonApprovedKDF, ok bool) {
-	refusal.ID = id
+func digestFIPSRefusal(id string, digest *rawDigest) (refusal NonApprovedKDF, ok bool) {
+	refusal.ID, _ = strconv.Atoi(id) // id is always a canonical digest ID (a small decimal integer)
 	if digest == nil {
 		refusal.Reason = "digest is null"
 		return refusal, false
@@ -825,14 +819,14 @@ func digestFIPSRefusal(id string, digest *Digest) (refusal NonApprovedKDF, ok bo
 
 // keyslotFIPSApproved reports whether a strict FIPS process could run a
 // keyslot's own KDF: algorithm and parameters both.
-func keyslotFIPSApproved(keyslot *Keyslot) bool {
+func keyslotFIPSApproved(keyslot *header.Keyslot) bool {
 	_, ok := keyslotFIPSRefusal("", keyslot)
 	return ok
 }
 
 // digestFIPSApproved reports whether a strict FIPS process could run a
 // digest's KDF: algorithm and parameters both.
-func digestFIPSApproved(digest *Digest) bool {
+func digestFIPSApproved(digest *rawDigest) bool {
 	_, ok := digestFIPSRefusal("", digest)
 	return ok
 }
@@ -840,7 +834,7 @@ func digestFIPSApproved(digest *Digest) bool {
 // dataSegmentIDs returns every segment id the header declares, sorted. A
 // volume's data is reachable only through a key some digest binds to each of
 // them.
-func dataSegmentIDs(metadata *LUKS2Metadata) []string {
+func dataSegmentIDs(metadata *header.Metadata) []string {
 	ids := make([]string, 0, len(metadata.Segments))
 	for id, segment := range metadata.Segments {
 		if segment != nil {
@@ -855,7 +849,7 @@ func dataSegmentIDs(metadata *LUKS2Metadata) []string {
 // id, taken together, name every data segment. It is the static half of "does
 // this keyslot hold the volume key": a keyslot failing it holds, at best, an
 // unbound key, and is never the one the migration carries across.
-func keyslotDeclaredForAllSegments(metadata *LUKS2Metadata, id string) bool {
+func keyslotDeclaredForAllSegments(metadata *header.Metadata, id string) bool {
 	var bound []string
 	for _, digest := range metadata.Digests {
 		if digestCovers(digest, id) {
@@ -874,14 +868,14 @@ func keyslotDeclaredForAllSegments(metadata *LUKS2Metadata, id string) bool {
 // through keyslot id: each digest must attest the keyslot AND be evaluated to
 // match key, so what is checked is the key actually recovered, not what the
 // header declares about the keyslot. Empty means key opens every segment.
-func unboundSegments(metadata *LUKS2Metadata, digests map[string]*Digest, id string, key *enclave.MemoryEnclave) []string {
+func unboundSegments(metadata *header.Metadata, digests map[string]*rawDigest, id string, key *enclave.MemoryEnclave) []string {
 	var bound []string
 	for _, digestID := range sortedDigestIDs(digests) {
 		digest := digests[digestID]
 		if !digestCovers(digest, id) {
 			continue
 		}
-		if _, matched := evaluateDigest(key, digest); matched {
+		if _, matched := evaluateDigest(key, digest, fips.Probe); matched {
 			bound = append(bound, digest.Segments...)
 		}
 	}
@@ -901,7 +895,7 @@ func unboundSegments(metadata *LUKS2Metadata, digests map[string]*Digest, id str
 // Keyslots of any other type are not listed. A "reencrypt" keyslot carries no
 // passphrase-wrapped key and no KDF a FIPS process would run to open the
 // volume.
-func nonApprovedKDFs(metadata *LUKS2Metadata) (keyslots, digests []NonApprovedKDF) {
+func nonApprovedKDFs(metadata *header.Metadata) (keyslots, digests []NonApprovedKDF) {
 	for _, id := range keyslotIDsInScanOrder(metadata.Keyslots) {
 		keyslot := metadata.Keyslots[id]
 		if keyslot == nil || keyslot.Type != "luks2" {
@@ -924,7 +918,7 @@ func nonApprovedKDFs(metadata *LUKS2Metadata) (keyslots, digests []NonApprovedKD
 
 // fipsFirstScanOrder is keyslotIDsInScanOrder with the FIPS-approved keyslots
 // moved to the front, each group keeping its own order.
-func fipsFirstScanOrder(metadata *LUKS2Metadata) []string {
+func fipsFirstScanOrder(metadata *header.Metadata) []string {
 	all := keyslotIDsInScanOrder(metadata.Keyslots)
 	order := make([]string, 0, len(all))
 	for _, id := range all {
@@ -942,7 +936,7 @@ func fipsFirstScanOrder(metadata *LUKS2Metadata) []string {
 
 // sortedDigestIDs returns the digest ids in a fixed order, so what is migrated
 // and what is reported do not depend on map iteration.
-func sortedDigestIDs(digests map[string]*Digest) []string {
+func sortedDigestIDs(digests map[string]*rawDigest) []string {
 	ids := make([]string, 0, len(digests))
 	for id := range digests {
 		ids = append(ids, id)
@@ -965,14 +959,14 @@ func sortedDigestIDs(digests map[string]*Digest) []string {
 // refusal. If it fails, something else is wrong with the keyslot or its
 // digests, and the caller reports that instead: a SHA-1 digest whose value is
 // not base64 is a damaged header whatever mode reads it.
-func keyslotRefusedByFIPS(id string, keyslot *Keyslot, digests map[string]*Digest) bool {
+func keyslotRefusedByFIPS(id string, keyslot *header.Keyslot, digests map[string]*rawDigest, fipsMode func() fips.Mode) bool {
 	if !fipsMode() || keyslot == nil || keyslot.Type != "luks2" {
 		return false
 	}
 
 	// A keyslot the screen passes was refused later -- reading or decrypting
 	// its area -- and no FIPS gate runs there.
-	if _, err := screenKeyslot(id, keyslot, digests); err == nil {
+	if _, err := screenKeyslot(id, keyslot, digests, fipsMode); err == nil {
 		return false
 	}
 
@@ -980,7 +974,7 @@ func keyslotRefusedByFIPS(id string, keyslot *Keyslot, digests map[string]*Diges
 	if !ok {
 		return false
 	}
-	standInDigests := make(map[string]*Digest, len(digests))
+	standInDigests := make(map[string]*rawDigest, len(digests))
 	for digestID, digest := range digests {
 		standInDigests[digestID] = digest
 		if !digestCovers(digest, id) || digestFIPSApproved(digest) {
@@ -995,7 +989,7 @@ func keyslotRefusedByFIPS(id string, keyslot *Keyslot, digests map[string]*Diges
 		return false
 	}
 
-	_, err := screenKeyslot(id, standIn, standInDigests)
+	_, err := screenKeyslot(id, standIn, standInDigests, fipsMode)
 	return err == nil
 }
 
@@ -1003,7 +997,7 @@ func keyslotRefusedByFIPS(id string, keyslot *Keyslot, digests map[string]*Diges
 // PBKDF2 stand-in, when its own KDF is not approved but is well formed.
 // substituted reports whether a replacement was made; ok is false when the KDF
 // is malformed, which no FIPS policy explains.
-func fipsStandInKeyslot(keyslot *Keyslot) (standIn *Keyslot, substituted, ok bool) {
+func fipsStandInKeyslot(keyslot *header.Keyslot) (standIn *header.Keyslot, substituted, ok bool) {
 	if keyslotFIPSApproved(keyslot) {
 		return keyslot, false, true
 	}
@@ -1017,7 +1011,7 @@ func fipsStandInKeyslot(keyslot *Keyslot) (standIn *Keyslot, substituted, ok boo
 	// screen still reports it as the damage it is.
 	if keyslot.AF != nil && keyslot.AF.Hash == "sha1" {
 		af := *keyslot.AF
-		af.Hash = DefaultHashAlgo
+		af.Hash = defaultHashAlgo
 		replaced.AF = &af
 	}
 	return &replaced, true, true
@@ -1025,7 +1019,7 @@ func fipsStandInKeyslot(keyslot *Keyslot) (standIn *Keyslot, substituted, ok boo
 
 // fipsStandInDigest returns digest with its KDF replaced by an approved PBKDF2
 // stand-in, when it is well formed apart from its KDF's approval.
-func fipsStandInDigest(digest *Digest) (*Digest, bool) {
+func fipsStandInDigest(digest *rawDigest) (*rawDigest, bool) {
 	expected, _, err := screenDigestStructure(digest)
 	clearBytes(expected)
 	if err != nil {
@@ -1044,15 +1038,15 @@ const sha256DigestLen = 32
 
 // fipsStandInKDF is an approved KDF over salt, which the caller has already
 // checked decodes. It is screened, never run.
-func fipsStandInKDF(salt string) *KDF {
+func fipsStandInKDF(salt string) *rawKDF {
 	iterations := minKDFIterations
-	return &KDF{Type: KDFTypePBKDF2, Hash: "sha256", Salt: salt, Iterations: &iterations}
+	return &rawKDF{Type: kdfTypePBKDF2, Hash: "sha256", Salt: salt, Iterations: &iterations}
 }
 
 // newFIPSImportRequiredError names what a FIPS process refused on the keyslots
 // in blocked: each one's own KDF if that is not approved, and every
 // non-approved digest attesting any of them.
-func newFIPSImportRequiredError(device string, metadata *LUKS2Metadata, blocked []string) error {
+func newFIPSImportRequiredError(device string, metadata *header.Metadata, blocked []string) error {
 	e := &FIPSImportRequiredError{Device: device}
 	for _, id := range blocked {
 		keyslot := metadata.Keyslots[id]

@@ -8,13 +8,18 @@ package cli_test
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jeremyhahn/go-enclave"
 
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
+	"github.com/jeremyhahn/go-luks2/test/internal/harness"
 )
 
 // #246 against the built binary and real block devices: create on a block
@@ -34,6 +39,28 @@ func blankLoop(t *testing.T) (string, string) {
 	}
 	t.Cleanup(func() { detachLoopDevicesBackedBy(t, image) })
 	return strings.TrimSpace(string(out)), image
+}
+
+// formatForTest formats path as a minimal PBKDF2 LUKS2 container, the way
+// the pre-redesign library's luks2.Format(luks2.FormatOptions{...}) did
+// before B.6 moved Format behind (*luks2.Volume).Format.
+func formatForTest(path, passphrase string) error {
+	ctx := context.Background()
+	v, err := luks2.Open(ctx, path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = v.Close() }()
+
+	pass, err := enclave.NewMemoryEnclaveCopy([]byte(passphrase))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = pass.Destroy() }()
+
+	return v.Format(ctx, pass, luks2.FormatParams{
+		KDF: luks2.KDFParams{Type: luks2.KDFPBKDF2, IterTime: time.Millisecond},
+	})
 }
 
 // TestCLI_CreateOnABlockDeviceAsksAndRefusesData is #246 D10: create formatted
@@ -57,10 +84,10 @@ func TestCLI_CreateOnABlockDeviceAsksAndRefusesData(t *testing.T) {
 	if _, stderr, err := runCLIWithInput("YES\n", "create", "--key-file", keyFile, loop); err != nil {
 		t.Fatalf("create with YES: %v\n%s", err, stderr)
 	}
-	if ok, err := luks2.IsLUKS2(loop); err != nil || !ok {
+	if ok, err := harness.IsLUKS2(loop); err != nil || !ok {
 		t.Fatalf("the confirmed create left no LUKS2 header (%v)", err)
 	}
-	_, before, err := luks2.ReadHeader(loop)
+	_, before, err := harness.ReadHeader(loop)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +96,7 @@ func TestCLI_CreateOnABlockDeviceAsksAndRefusesData(t *testing.T) {
 	if _, stderr, err := runCLI("create", "--batch-mode", "--key-file", keyFile, loop); err == nil || !strings.Contains(stderr, "a LUKS header") {
 		t.Fatalf("create over a LUKS header: %v, stderr %q", err, stderr)
 	}
-	_, after, err := luks2.ReadHeader(loop)
+	_, after, err := harness.ReadHeader(loop)
 	if err != nil || after.Config == nil || before.Config == nil {
 		t.Fatalf("the refused create damaged the header: %v", err)
 	}
@@ -88,7 +115,7 @@ func TestCLI_RelativePathsWork(t *testing.T) {
 	if err := os.WriteFile(image, make([]byte, 32<<20), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := luks2.Format(luks2.FormatOptions{Device: image, Passphrase: []byte("lane-d-cli-passphrase"), KDFType: luks2.KDFTypePBKDF2, PBKDFIterTime: 1}); err != nil {
+	if err := formatForTest(image, "lane-d-cli-passphrase"); err != nil {
 		t.Fatal(err)
 	}
 

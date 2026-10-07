@@ -24,7 +24,8 @@ import (
 const usage = `usage:
   apidump dump <dir>
   apidump diff <baseline> <dir>
-  apidump check <baseline> <dispositions>`
+  apidump check <baseline> <dispositions>
+  apidump honor <baseline> <dispositions> <dir>`
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -48,6 +49,7 @@ var commands = map[string]struct {
 	"dump":  {1, dumpCommand},
 	"diff":  {2, diffCommand},
 	"check": {2, checkCommand},
+	"honor": {3, honorCommand},
 }
 
 func dispatch(args []string, stdout io.Writer) error {
@@ -108,5 +110,25 @@ func checkCommand(operands []string, stdout io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(stdout, "%d dispositions cover %s exactly\n", len(dispositions), operands[0])
+	return nil
+}
+
+func honorCommand(operands []string, stdout io.Writer) error {
+	base, err := ReadDump(operands[0])
+	if err != nil {
+		return err
+	}
+	dispositions, err := ReadDispositions(operands[1])
+	if err != nil {
+		return err
+	}
+	current, err := Dump(operands[2])
+	if err != nil {
+		return err
+	}
+	if err := CheckHonored(base, current, dispositions); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "%s honors every disposition in %s\n", operands[2], operands[1])
 	return nil
 }

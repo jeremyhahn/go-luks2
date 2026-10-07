@@ -7,11 +7,14 @@
 package luks2
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
 	"runtime"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // A keyslot's declared fields come off an UNTRUSTED device and they size work.
@@ -33,13 +36,13 @@ import (
 //
 // The header is written through writeHeaderInternal, which does not validate
 // keyslots, so the fixture really is a container an attacker could hand us.
-func craftKeyslot(t *testing.T, name string, mutate func(*Keyslot)) string {
+func craftKeyslot(t *testing.T, name string, mutate func(*header.Keyslot)) string {
 	t.Helper()
 
 	path := newImage(t, name)
 	formatWithLibrary(t, path)
 
-	hdr, metadata, err := ReadHeader(path)
+	hdr, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed on the freshly formatted fixture: %v", err)
 	}
@@ -73,7 +76,7 @@ func TestCraftedKeySizeIsRefusedBeforeAnyDerivation(t *testing.T) {
 	// finish inside the test binary's 480-second timeout.
 	const craftedKeySize = 1 << 20
 
-	device := craftKeyslot(t, "crafted-keysize.img", func(ks *Keyslot) {
+	device := craftKeyslot(t, "crafted-keysize.img", func(ks *header.Keyslot) {
 		ks.KeySize = craftedKeySize
 		ks.Area.KeySize = craftedKeySize
 	})
@@ -82,7 +85,7 @@ func TestCraftedKeySizeIsRefusedBeforeAnyDerivation(t *testing.T) {
 	runtime.GC()
 	runtime.ReadMemStats(&before)
 
-	err := TestKey(device, []byte(conformancePassphrase))
+	err := testKeyForTest(device, []byte(conformancePassphrase))
 
 	runtime.ReadMemStats(&after)
 
@@ -113,15 +116,15 @@ func TestCraftedKeySizeIsRefusedBeforeAnyDerivation(t *testing.T) {
 // satisfied by refusing the header outright, which is the shape this package
 // deliberately does not have.
 func TestCraftedKeySizeStillReadsButDoesNotOpen(t *testing.T) {
-	device := craftKeyslot(t, "crafted-read.img", func(ks *Keyslot) {
+	device := craftKeyslot(t, "crafted-read.img", func(ks *header.Keyslot) {
 		ks.KeySize = 1 << 24
 		ks.Area.KeySize = 1 << 24
 	})
 
-	if _, _, err := ReadHeader(device); err != nil {
+	if _, _, err := readHeaderForTest(device); err != nil {
 		t.Fatalf("a container with a damaged keyslot no longer reads: %v", err)
 	}
-	if err := TestKey(device, []byte(conformancePassphrase)); err == nil {
+	if err := testKeyForTest(device, []byte(conformancePassphrase)); err == nil {
 		t.Fatal("a keyslot declaring a 16 MiB volume key opened the volume")
 	}
 }
@@ -136,12 +139,12 @@ func TestCraftedKeyslotFieldsAreRefused(t *testing.T) {
 	// dominated by a 600000-iteration digest derivation, so on a CI runner
 	// roughly fourteen times slower than a workstation this single test cost 72
 	// seconds and helped push the package past the 10-minute go test timeout.
-	// The mutation only has to reach unlockKeyslot, which takes a *Keyslot, so
+	// The mutation only has to reach unlockKeyslot, which takes a *header.Keyslot, so
 	// it is applied to an in-memory clone and nothing is rewritten to disk.
 	path := newImage(t, "crafted.img")
 	formatWithLibrary(t, path)
 
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -149,25 +152,25 @@ func TestCraftedKeyslotFieldsAreRefused(t *testing.T) {
 
 	cases := []struct {
 		name   string
-		mutate func(*Keyslot)
+		mutate func(*header.Keyslot)
 	}{
-		{"key size of zero", func(ks *Keyslot) { ks.KeySize = 0 }},
-		{"negative key size", func(ks *Keyslot) { ks.KeySize = -64 }},
-		{"key size past the bound", func(ks *Keyslot) { ks.KeySize = MaxKeyslotKeySize + 1 }},
-		{"zero stripes", func(ks *Keyslot) { ks.AF.Stripes = 0 }},
-		{"negative stripes", func(ks *Keyslot) { ks.AF.Stripes = -1 }},
-		{"stripes past the spec value", func(ks *Keyslot) { ks.AF.Stripes = AFStripes + 1 }},
-		{"no anti-forensic object", func(ks *Keyslot) { ks.AF = nil }},
-		{"no kdf object", func(ks *Keyslot) { ks.KDF = nil }},
-		{"no area object", func(ks *Keyslot) { ks.Area = nil }},
-		{"area size of zero", func(ks *Keyslot) { ks.Area.Size = "0" }},
-		{"negative area size", func(ks *Keyslot) { ks.Area.Size = "-4096" }},
-		{"area size that is not a number", func(ks *Keyslot) { ks.Area.Size = "lots" }},
-		{"area offset that is not a number", func(ks *Keyslot) { ks.Area.Offset = "somewhere" }},
-		{"area size past the bound", func(ks *Keyslot) {
+		{"key size of zero", func(ks *header.Keyslot) { ks.KeySize = 0 }},
+		{"negative key size", func(ks *header.Keyslot) { ks.KeySize = -64 }},
+		{"key size past the bound", func(ks *header.Keyslot) { ks.KeySize = maxKeyslotKeySize + 1 }},
+		{"zero stripes", func(ks *header.Keyslot) { ks.AF.Stripes = 0 }},
+		{"negative stripes", func(ks *header.Keyslot) { ks.AF.Stripes = -1 }},
+		{"stripes past the spec value", func(ks *header.Keyslot) { ks.AF.Stripes = header.AFStripes + 1 }},
+		{"no anti-forensic object", func(ks *header.Keyslot) { ks.AF = nil }},
+		{"no kdf object", func(ks *header.Keyslot) { ks.KDF = nil }},
+		{"no area object", func(ks *header.Keyslot) { ks.Area = nil }},
+		{"area size of zero", func(ks *header.Keyslot) { ks.Area.Size = "0" }},
+		{"negative area size", func(ks *header.Keyslot) { ks.Area.Size = "-4096" }},
+		{"area size that is not a number", func(ks *header.Keyslot) { ks.Area.Size = "lots" }},
+		{"area offset that is not a number", func(ks *header.Keyslot) { ks.Area.Offset = "somewhere" }},
+		{"area size past the bound", func(ks *header.Keyslot) {
 			ks.Area.Size = formatSize(maxKeyslotAreaSize + 1)
 		}},
-		{"overflowing key size and stripe count", func(ks *Keyslot) {
+		{"overflowing key size and stripe count", func(ks *header.Keyslot) {
 			// math.MaxInt/4, not 1<<62. The property under test is that
 			// KeySize * Stripes OVERFLOWS, and no single constant expresses
 			// that on every width: 1<<62 overflows an int on a 32-bit target
@@ -179,9 +182,9 @@ func TestCraftedKeyslotFieldsAreRefused(t *testing.T) {
 		}},
 		// Measured against cryptsetup 2.7.0: a keyslot whose AF material does
 		// not fit its own declared area is refused by cryptsetup too --
-		// luksOpen reports "Keyslot open failed" -- so refusing it here costs
+		// luksOpen reports "header.Keyslot open failed" -- so refusing it here costs
 		// no container that any implementation can open.
-		{"anti-forensic material larger than the area that holds it", func(ks *Keyslot) {
+		{"anti-forensic material larger than the area that holds it", func(ks *header.Keyslot) {
 			ks.Area.Size = formatSize(int64(ks.KeySize) * int64(ks.AF.Stripes) / 2)
 		}},
 	}
@@ -191,12 +194,12 @@ func TestCraftedKeyslotFieldsAreRefused(t *testing.T) {
 			keyslot := cloneKeyslot(good)
 			tc.mutate(keyslot)
 
-			key, err := unlockKeyslot(path, "0", []byte(conformancePassphrase), keyslot, metadata.Digests)
+			key, err := unlockKeyslot(context.Background(), path, "0", []byte(conformancePassphrase), keyslot, metadata.Digests, testVolumeSys())
 			if err == nil {
 				mustDestroy(t, key)
 				t.Fatal("unlockKeyslot accepted the crafted keyslot")
 			}
-			if !errors.Is(err, ErrInvalidKeyslot) {
+			if !errors.Is(err, ErrKeyslotNotFound) {
 				t.Fatalf("the refusal is not an unusable-keyslot error: %v", err)
 			}
 		})
@@ -209,12 +212,12 @@ func TestCraftedKeyslotFieldsAreRefused(t *testing.T) {
 // field was damaged, and re-establishing it sixteen times bought nothing but
 // fifteen more formats.
 func TestACraftedKeyslotStillLeavesTheHeaderReadable(t *testing.T) {
-	device := craftKeyslot(t, "crafted-ondisk.img", func(ks *Keyslot) { ks.AF = nil })
+	device := craftKeyslot(t, "crafted-ondisk.img", func(ks *header.Keyslot) { ks.AF = nil })
 
-	if _, _, err := ReadHeader(device); err != nil {
+	if _, _, err := readHeaderForTest(device); err != nil {
 		t.Fatalf("a container with a crafted keyslot no longer reads: %v", err)
 	}
-	if err := TestKey(device, []byte(conformancePassphrase)); err == nil {
+	if err := testKeyForTest(device, []byte(conformancePassphrase)); err == nil {
 		t.Fatal("a keyslot with no anti-forensic object opened the volume")
 	}
 }
@@ -228,16 +231,16 @@ func TestValidKeyslotGeometryIsAccepted(t *testing.T) {
 	// bits" -- plus the AF geometry this library and cryptsetup both write.
 	for _, keySize := range []int{32, 64} {
 		t.Run(fmt.Sprintf("%d-byte key", keySize), func(t *testing.T) {
-			keyslot := &Keyslot{
+			keyslot := &header.Keyslot{
 				Type:    "luks2",
 				KeySize: keySize,
-				KDF:     &KDF{Type: "pbkdf2", Hash: "sha256", Salt: "c2FsdA=="},
-				AF:      &AntiForensic{Type: "luks1", Stripes: AFStripes, Hash: "sha256"},
-				Area: &KeyslotArea{
+				KDF:     &rawKDF{Type: "pbkdf2", Hash: "sha256", Salt: "c2FsdA=="},
+				AF:      &header.AntiForensic{Type: "luks1", Stripes: header.AFStripes, Hash: "sha256"},
+				Area: &header.KeyslotArea{
 					Type:       "raw",
 					KeySize:    keySize,
 					Offset:     "32768",
-					Size:       formatSize(alignTo(int64(keySize)*AFStripes, KeyslotAreaAlignment)),
+					Size:       formatSize(alignTo(int64(keySize)*header.AFStripes, keyslotAreaAlignment)),
 					Encryption: "aes-xts-plain64",
 				},
 			}
@@ -258,10 +261,10 @@ func TestValidKeyslotGeometryIsAccepted(t *testing.T) {
 // middle of a reencryption unreadable -- including by GetVolumeInfo, which is
 // exactly what an operator reaches for when something is wrong.
 func TestKeyslotValidationLeavesOtherKeyslotTypesAlone(t *testing.T) {
-	reencrypt := &Keyslot{
+	reencrypt := &header.Keyslot{
 		Type:    "reencrypt",
 		KeySize: 1,
-		Area: &KeyslotArea{
+		Area: &header.KeyslotArea{
 			Type:   "checksum",
 			Offset: "32768",
 			Size:   "4096",
@@ -275,7 +278,7 @@ func TestKeyslotValidationLeavesOtherKeyslotTypesAlone(t *testing.T) {
 	// The generic resource bound still applies to it, though: an area size is
 	// an area size whatever the keyslot type.
 	reencrypt.Area.Size = formatSize(maxKeyslotAreaSize + 1)
-	if err := validateKeyslot("1", reencrypt); !errors.Is(err, ErrInvalidKeyslot) {
+	if err := validateKeyslot("1", reencrypt); !errors.Is(err, ErrKeyslotNotFound) {
 		t.Fatalf("an absurd area size was accepted because the keyslot type is not luks2: %v", err)
 	}
 }
@@ -292,23 +295,23 @@ func TestUnlockKeyslotRefusesAKeyslotTypeItCannotOpen(t *testing.T) {
 	path := newImage(t, "wrong-type.img")
 	formatWithLibrary(t, path)
 
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 
-	reencrypt := &Keyslot{
+	reencrypt := &header.Keyslot{
 		Type:    "reencrypt",
 		KeySize: 1,
-		Area:    &KeyslotArea{Type: "checksum", Offset: "32768", Size: "4096"},
+		Area:    &header.KeyslotArea{Type: "checksum", Offset: "32768", Size: "4096"},
 	}
 
-	key, err := unlockKeyslot(path, "0", []byte(conformancePassphrase), reencrypt, metadata.Digests)
+	key, err := unlockKeyslot(context.Background(), path, "0", []byte(conformancePassphrase), reencrypt, metadata.Digests, testVolumeSys())
 	if err == nil {
 		mustDestroy(t, key)
 		t.Fatal("unlockKeyslot opened a keyslot type it does not implement")
 	}
-	if !errors.Is(err, ErrInvalidKeyslot) {
+	if !errors.Is(err, ErrKeyslotNotFound) {
 		t.Fatalf("the refusal does not name an unusable keyslot: %v", err)
 	}
 }
@@ -325,11 +328,11 @@ func TestListKeyslotsSurvivesAKeyslotWithNoKDF(t *testing.T) {
 	// Reached directly rather than through a crafted header, because the point
 	// is that this function must not panic even if something hands it a keyslot
 	// the reader would have refused.
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
-	metadata.Keyslots["1"] = &Keyslot{Type: "reencrypt", KeySize: 1}
+	metadata.Keyslots["1"] = &header.Keyslot{Type: "reencrypt", KeySize: 1}
 
 	slots, err := listKeyslotsFrom(metadata)
 	if err != nil {
@@ -339,8 +342,8 @@ func TestListKeyslotsSurvivesAKeyslotWithNoKDF(t *testing.T) {
 		t.Fatalf("listKeyslotsFrom returned %d slots, want 2", len(slots))
 	}
 	for _, slot := range slots {
-		if slot.ID == 1 && slot.KDFType != "" {
-			t.Fatalf("a keyslot with no KDF reported KDF type %q", slot.KDFType)
+		if slot.ID == 1 && slot.KDF.Type != "" {
+			t.Fatalf("a keyslot with no KDF reported KDF type %q", slot.KDF.Type)
 		}
 	}
 }

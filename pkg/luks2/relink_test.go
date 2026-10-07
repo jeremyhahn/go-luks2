@@ -16,13 +16,13 @@ import (
 // of link has returned -- the lock's open, which every writer makes O_RDWR --
 // before anything else the operation does by path. A read-only preflight
 // before the lock does not trigger it.
-func relinkAfterFirstOpen(t *testing.T, link, to string) {
+func relinkAfterFirstOpen(t *testing.T, link, to string) volumeSys {
 	t.Helper()
-	previous := openFileFunc
-	t.Cleanup(func() { openFileFunc = previous })
+	sys := testVolumeSys()
+	real := sys.openFile
 	moved := false
-	openFileFunc = func(name string, flag int, perm os.FileMode) (*os.File, error) {
-		f, err := previous(name, flag, perm)
+	sys.openFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
+		f, err := real(name, flag, perm)
 		if name == link && !moved && flag&(os.O_RDWR|os.O_WRONLY) != 0 {
 			moved = true
 			if rmErr := os.Remove(link); rmErr != nil {
@@ -34,4 +34,5 @@ func relinkAfterFirstOpen(t *testing.T, link, to string) {
 		}
 		return f, err
 	}
+	return sys
 }

@@ -230,7 +230,7 @@ func ToKDFParams(k *KDF) kdf.Params {
 // misattribute the other.
 func ValidateKDFCost(k *KDF) error {
 	if k == nil {
-		return &errs.Error{Detail: "no KDF object"}
+		return &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "no KDF object"}
 	}
 	return kdf.ValidateCost(ToKDFParams(k))
 }

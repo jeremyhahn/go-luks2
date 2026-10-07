@@ -5,6 +5,7 @@
 package kdf
 
 import (
+	"context"
 	"errors"
 	"hash"
 	"testing"
@@ -28,7 +29,7 @@ func TestCalibratePBKDF2CalibratesToRequestedTime(t *testing.T) {
 	}
 	rate := &knownRate{perIteration: time.Microsecond}
 	const targetMs = 3000
-	iterations, err := CalibratePBKDF2(hashFunc, "sha256", 32, targetMs, ProbeFloor, ProbeCeiling, rate.time)
+	iterations, err := CalibratePBKDF2(context.Background(), hashFunc, "sha256", 32, targetMs, ProbeFloor, ProbeCeiling, rate.time)
 	if err != nil {
 		t.Fatalf("CalibratePBKDF2: %v", err)
 	}
@@ -44,7 +45,7 @@ func TestCalibratePBKDF2RejectsAnUnusableTarget(t *testing.T) {
 		t.Fatalf("PBKDF2HashFunc: %v", err)
 	}
 	for _, targetMs := range []int{0, -1, MaxPBKDF2IterTimeMs + 1} {
-		_, err := CalibratePBKDF2(hashFunc, "sha256", 32, targetMs, ProbeFloor, ProbeCeiling, WallClockPBKDF2)
+		_, err := CalibratePBKDF2(context.Background(), hashFunc, "sha256", 32, targetMs, ProbeFloor, ProbeCeiling, WallClockPBKDF2)
 		if !errors.Is(err, ErrKDFCalibration) || !errors.Is(err, ErrCalibrationTargetInvalid) {
 			t.Fatalf("targetMs %d: got %v, want ErrKDFCalibration and ErrCalibrationTargetInvalid", targetMs, err)
 		}
@@ -61,7 +62,7 @@ func TestCalibratePBKDF2FailsClosedWhenUnmeasurable(t *testing.T) {
 		t.Fatalf("PBKDF2HashFunc: %v", err)
 	}
 	rate := &knownRate{perIteration: time.Microsecond}
-	_, err = CalibratePBKDF2(hashFunc, "sha256", 32, 2000, time.Hour, ProbeStart, rate.time)
+	_, err = CalibratePBKDF2(context.Background(), hashFunc, "sha256", 32, 2000, time.Hour, ProbeStart, rate.time)
 	if err == nil {
 		t.Fatal("a probe floor no real duration can cross was accepted")
 	}
@@ -78,7 +79,7 @@ func TestCalibratePBKDF2StopsDoublingAtTheCeiling(t *testing.T) {
 	rate := &knownRate{perIteration: time.Microsecond}
 	const ceiling = 8000
 	start := time.Now()
-	_, err = CalibratePBKDF2(hashFunc, "sha256", 32, 2000, time.Hour, ceiling, rate.time)
+	_, err = CalibratePBKDF2(context.Background(), hashFunc, "sha256", 32, 2000, time.Hour, ceiling, rate.time)
 	if time.Since(start) > 5*time.Second {
 		t.Fatal("the calibration loop ran far longer than the ceiling should allow")
 	}
@@ -88,6 +89,33 @@ func TestCalibratePBKDF2StopsDoublingAtTheCeiling(t *testing.T) {
 	}
 	if calErr.Probe > ceiling {
 		t.Fatalf("probe %d exceeded the ceiling %d", calErr.Probe, ceiling)
+	}
+}
+
+// TestCalibratePBKDF2CancelledBetweenProbesReturnsCtxErr is D.2's "checked
+// between calibration probes" clause: a ctx canceled after one probe stops
+// the loop before the next one runs, and reports ctx.Err()'s kind.
+func TestCalibratePBKDF2CancelledBetweenProbesReturnsCtxErr(t *testing.T) {
+	hashFunc, err := PBKDF2HashFunc(testDeriver.FIPS, "sha256")
+	if err != nil {
+		t.Fatalf("PBKDF2HashFunc: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	probeBelowFloor := func(hashFunc func() hash.Hash, iterations, keySize int) (time.Duration, error) {
+		calls++
+		if calls == 2 {
+			cancel()
+		}
+		return time.Microsecond, nil // always below ProbeFloor, so the loop keeps doubling
+	}
+
+	_, err = CalibratePBKDF2(ctx, hashFunc, "sha256", 32, 2000, ProbeFloor, ProbeCeiling, probeBelowFloor)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("CalibratePBKDF2 canceled between probes = %v, want context.Canceled", err)
+	}
+	if calls != 2 {
+		t.Fatalf("CalibratePBKDF2 ran %d probes after cancellation, want exactly 2 (the ctx check runs before the 3rd)", calls)
 	}
 }
 
@@ -159,7 +187,7 @@ func TestPBKDF2IterationFloor(t *testing.T) {
 }
 
 func TestCalibrateAndCalibrateWithTimer(t *testing.T) {
-	iterations, err := testDeriver.Calibrate("sha256", 32, 100)
+	iterations, err := testDeriver.Calibrate(context.Background(), "sha256", 32, 100)
 	if err != nil {
 		t.Fatalf("Calibrate: %v", err)
 	}
@@ -168,7 +196,7 @@ func TestCalibrateAndCalibrateWithTimer(t *testing.T) {
 	}
 
 	rate := &knownRate{perIteration: time.Microsecond}
-	n, err := testDeriver.CalibrateWithTimer("sha256", 32, 2000, rate.time)
+	n, err := testDeriver.CalibrateWithTimer(context.Background(), "sha256", 32, 2000, rate.time)
 	if err != nil {
 		t.Fatalf("CalibrateWithTimer: %v", err)
 	}
@@ -178,7 +206,7 @@ func TestCalibrateAndCalibrateWithTimer(t *testing.T) {
 }
 
 func TestCalibrateWithTimerUnsupportedHash(t *testing.T) {
-	if _, err := testDeriver.CalibrateWithTimer("md5", 32, 100, WallClockPBKDF2); err == nil {
+	if _, err := testDeriver.CalibrateWithTimer(context.Background(), "md5", 32, 100, WallClockPBKDF2); err == nil {
 		t.Fatal("an unsupported hash was accepted")
 	}
 }

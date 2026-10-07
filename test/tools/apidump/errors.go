@@ -25,4 +25,9 @@ var (
 	// ErrCoverage indicates a disposition file that does not cover its
 	// baseline exactly.
 	ErrCoverage = errors.New("dispositions do not cover the baseline exactly")
+
+	// ErrDishonored indicates a disposition the current API does not match:
+	// a KEEP identifier that is gone, or a RENAME/MOVE/UNEXPORT/DELETE
+	// identifier that is still there under its old name.
+	ErrDishonored = errors.New("the current API does not honor every disposition")
 )

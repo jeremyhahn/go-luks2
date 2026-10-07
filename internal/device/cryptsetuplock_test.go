@@ -5,7 +5,9 @@
 package device
 
 import (
+	"context"
 	"errors"
+	"github.com/jeremyhahn/go-luks2/internal/errs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -28,7 +30,7 @@ func TestCryptsetupLockTakesAndReleasesTheDevicesFile(t *testing.T) {
 
 	dir := filepath.Join(t.TempDir(), "cryptsetup")
 	clk := clock.NewFake(t)
-	l, err := AcquireCryptsetupLock(dir, unix.Mkdev(7, 3), LockExclusive, clk.Now(), clk.Now(), clk, DefaultOpenLockFile)
+	l, err := AcquireCryptsetupLock(context.Background(), dir, unix.Mkdev(7, 3), LockExclusive, clk.Now(), clk.Now(), clk, DefaultOpenLockFile)
 	if err != nil {
 		t.Fatalf("AcquireCryptsetupLock: %v", err)
 	}
@@ -78,7 +80,7 @@ func TestCryptsetupLockWaitsForAHolderAndTimesOut(t *testing.T) {
 	}
 
 	clk := clock.NewFake(t)
-	_, err = AcquireCryptsetupLock(dir, unix.Mkdev(253, 0), LockExclusive, clk.Now(), clk.Now().Add(time.Second), clk, DefaultOpenLockFile)
+	_, err = AcquireCryptsetupLock(context.Background(), dir, unix.Mkdev(253, 0), LockExclusive, clk.Now(), clk.Now().Add(time.Second), clk, DefaultOpenLockFile)
 	var timeout *LockTimeoutError
 	if !errors.As(err, &timeout) || !errors.Is(err, ErrLockContended) {
 		t.Fatalf("AcquireCryptsetupLock against a holder = %v, want a LockTimeoutError", err)
@@ -111,7 +113,7 @@ func TestCryptsetupLockTakesTheLockWhenTheHolderReleasesIt(t *testing.T) {
 			holder = nil
 		}
 	})
-	l, err := AcquireCryptsetupLock(dir, unix.Mkdev(7, 0), LockExclusive, clk.Now(), clk.Now().Add(time.Minute), clk, DefaultOpenLockFile)
+	l, err := AcquireCryptsetupLock(context.Background(), dir, unix.Mkdev(7, 0), LockExclusive, clk.Now(), clk.Now().Add(time.Minute), clk, DefaultOpenLockFile)
 	if err != nil {
 		t.Fatalf("AcquireCryptsetupLock after the holder released = %v", err)
 	}
@@ -139,7 +141,7 @@ func TestCryptsetupLockRetriesAStaleInode(t *testing.T) {
 	}
 
 	clk := clock.NewFake(t)
-	l, err := AcquireCryptsetupLock(dir, unix.Mkdev(7, 1), LockExclusive, clk.Now(), clk.Now().Add(time.Minute), clk, openLockFile)
+	l, err := AcquireCryptsetupLock(context.Background(), dir, unix.Mkdev(7, 1), LockExclusive, clk.Now(), clk.Now().Add(time.Minute), clk, openLockFile)
 	if err != nil {
 		t.Fatalf("AcquireCryptsetupLock = %v", err)
 	}
@@ -151,7 +153,7 @@ func TestCryptsetupLockRetriesAStaleInode(t *testing.T) {
 	// With the budget already spent, a stale inode ends the wait.
 	opens = 0
 	_ = l.release()
-	if _, err := AcquireCryptsetupLock(dir, unix.Mkdev(7, 1), LockExclusive, clk.Now(), clk.Now(), clk, openLockFile); !errors.Is(err, ErrLockContended) {
+	if _, err := AcquireCryptsetupLock(context.Background(), dir, unix.Mkdev(7, 1), LockExclusive, clk.Now(), clk.Now(), clk, openLockFile); !errors.Is(err, ErrLockContended) {
 		t.Fatalf("a stale inode at the deadline = %v, want ErrLockContended", err)
 	}
 }
@@ -167,12 +169,12 @@ func TestCryptsetupLockReportsWhatItCannotDo(t *testing.T) {
 	clk := clock.NewFake(t)
 	unavailable := func(what string, err error) {
 		t.Helper()
-		var de *Error
+		var de *errs.Error
 		if !errors.As(err, &de) || !errors.Is(err, ErrMetadataLockUnavailable) {
-			t.Fatalf("%s = %v, want an Error matching ErrMetadataLockUnavailable", what, err)
+			t.Fatalf("%s = %v, want an *errs.Error matching ErrMetadataLockUnavailable", what, err)
 		}
 	}
-	_, err := AcquireCryptsetupLock(filepath.Join(notADir, "cryptsetup"), 0, LockExclusive, clk.Now(), clk.Now(), clk, DefaultOpenLockFile)
+	_, err := AcquireCryptsetupLock(context.Background(), filepath.Join(notADir, "cryptsetup"), 0, LockExclusive, clk.Now(), clk.Now(), clk, DefaultOpenLockFile)
 	unavailable("a lock directory that cannot be created", err)
 	if !errors.Is(err, unix.ENOTDIR) {
 		t.Fatalf("the cause %v is not reachable through the error", err)
@@ -182,14 +184,14 @@ func TestCryptsetupLockReportsWhatItCannotDo(t *testing.T) {
 	// directory: cryptsetup opens the last component O_NOFOLLOW|O_DIRECTORY
 	// and refuses both ("Locking aborted"), so a lock taken through either
 	// would exclude no cryptsetup process.
-	_, err = AcquireCryptsetupLock(notADir, 0, LockExclusive, clk.Now(), clk.Now(), clk, DefaultOpenLockFile)
+	_, err = AcquireCryptsetupLock(context.Background(), notADir, 0, LockExclusive, clk.Now(), clk.Now(), clk, DefaultOpenLockFile)
 	unavailable("a lock directory that is a file", err)
 	elsewhere := t.TempDir()
 	link := filepath.Join(t.TempDir(), "cryptsetup")
 	if err := os.Symlink(elsewhere, link); err != nil {
 		t.Fatal(err)
 	}
-	_, err = AcquireCryptsetupLock(link, 0, LockExclusive, clk.Now(), clk.Now(), clk, DefaultOpenLockFile)
+	_, err = AcquireCryptsetupLock(context.Background(), link, 0, LockExclusive, clk.Now(), clk.Now(), clk, DefaultOpenLockFile)
 	unavailable("a lock directory that is a symlink", err)
 	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
 		t.Fatalf("the symlink was followed: %d entries in its target", len(entries))
@@ -199,7 +201,7 @@ func TestCryptsetupLockReportsWhatItCannotDo(t *testing.T) {
 	if err := os.Symlink(notADir, filepath.Join(dir, "L_0:0")); err != nil {
 		t.Fatal(err)
 	}
-	_, err = AcquireCryptsetupLock(dir, 0, LockExclusive, clk.Now(), clk.Now(), clk, DefaultOpenLockFile)
+	_, err = AcquireCryptsetupLock(context.Background(), dir, 0, LockExclusive, clk.Now(), clk.Now(), clk, DefaultOpenLockFile)
 	unavailable("a lock file that is a symlink (O_NOFOLLOW)", err)
 }
 
@@ -212,11 +214,11 @@ func TestCryptsetupLockIsNotTakenForARegularFile(t *testing.T) {
 	if err := os.WriteFile(path, make([]byte, 4096), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	pinned, err := OpenPinned("lock the device", path, os.O_RDWR, os.OpenFile)
+	pinned, err := OpenPinned(context.Background(), "lock the device", path, os.O_RDWR, os.OpenFile)
 	if err != nil {
 		t.Fatalf("OpenPinned: %v", err)
 	}
-	locked, err := pinned.Lock(LockExclusive, DefaultLockWait, clock.System{}, t.TempDir(), DefaultOpenLockFile, nil)
+	locked, err := pinned.Lock(context.Background(), LockExclusive, DefaultLockWait, clock.System{}, t.TempDir(), DefaultOpenLockFile, nil)
 	if err != nil {
 		t.Fatalf("Lock: %v", err)
 	}
@@ -231,9 +233,9 @@ func TestCryptsetupLockIsNotTakenForARegularFile(t *testing.T) {
 	}
 	_ = f.Close()
 	clk := clock.NewFake(t)
-	var de *Error
-	if _, err := acquireCryptsetupLockFor(f, path, t.TempDir(), LockExclusive, clk.Now(), clk.Now(), clk, DefaultOpenLockFile); !errors.As(err, &de) {
-		t.Fatalf("a closed descriptor = %v, want an Error", err)
+	var de *errs.Error
+	if _, err := acquireCryptsetupLockFor(context.Background(), f, path, t.TempDir(), LockExclusive, clk.Now(), clk.Now(), clk, DefaultOpenLockFile); !errors.As(err, &de) || de.Kind == nil {
+		t.Fatalf("a closed descriptor = %v, want a classified *errs.Error", err)
 	}
 }
 
@@ -249,15 +251,15 @@ func TestASharedReleaseLeavesTheFileToTheLastHolder(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "L_7:5")
 	clk := clock.NewFake(t)
-	first, err := AcquireCryptsetupLock(dir, unix.Mkdev(7, 5), LockShared, clk.Now(), clk.Now(), clk, DefaultOpenLockFile)
+	first, err := AcquireCryptsetupLock(context.Background(), dir, unix.Mkdev(7, 5), LockShared, clk.Now(), clk.Now(), clk, DefaultOpenLockFile)
 	if err != nil {
 		t.Fatalf("first reader: %v", err)
 	}
-	second, err := AcquireCryptsetupLock(dir, unix.Mkdev(7, 5), LockShared, clk.Now(), clk.Now(), clk, DefaultOpenLockFile)
+	second, err := AcquireCryptsetupLock(context.Background(), dir, unix.Mkdev(7, 5), LockShared, clk.Now(), clk.Now(), clk, DefaultOpenLockFile)
 	if err != nil {
 		t.Fatalf("a second reader beside the first = %v; readers share the lock", err)
 	}
-	if _, err := AcquireCryptsetupLock(dir, unix.Mkdev(7, 5), LockExclusive, clk.Now(), clk.Now(), clk, DefaultOpenLockFile); !errors.Is(err, ErrLockContended) {
+	if _, err := AcquireCryptsetupLock(context.Background(), dir, unix.Mkdev(7, 5), LockExclusive, clk.Now(), clk.Now(), clk, DefaultOpenLockFile); !errors.Is(err, ErrLockContended) {
 		t.Fatalf("a writer while two readers hold the lock = %v, want ErrLockContended", err)
 	}
 
@@ -267,7 +269,7 @@ func TestASharedReleaseLeavesTheFileToTheLastHolder(t *testing.T) {
 	if !second.named() {
 		t.Fatal("the first reader's release unlinked the file the second reader still holds")
 	}
-	if _, err := AcquireCryptsetupLock(dir, unix.Mkdev(7, 5), LockExclusive, clk.Now(), clk.Now(), clk, DefaultOpenLockFile); !errors.Is(err, ErrLockContended) {
+	if _, err := AcquireCryptsetupLock(context.Background(), dir, unix.Mkdev(7, 5), LockExclusive, clk.Now(), clk.Now(), clk, DefaultOpenLockFile); !errors.Is(err, ErrLockContended) {
 		t.Fatalf("a writer while one reader still holds the lock = %v, want ErrLockContended", err)
 	}
 
@@ -276,5 +278,48 @@ func TestASharedReleaseLeavesTheFileToTheLastHolder(t *testing.T) {
 	}
 	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the last reader out left the lock file (%v); cryptsetup removes it", err)
+	}
+}
+
+// TestAcquireCryptsetupLockCancelledDuringWaitReturnsCtxErr is D.2's
+// cryptsetup-lock half of the "Node flock, cryptsetup lock" row: a ctx
+// canceled during the backoff wait surfaces ctx.Err()'s kind rather than a
+// LockTimeoutError, and the canceled waiter leaves the lock acquirable
+// cleanly once the real holder releases it.
+func TestAcquireCryptsetupLockCancelledDuringWaitReturnsCtxErr(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	clk := clock.NewFake(t)
+	holder, err := AcquireCryptsetupLock(context.Background(), dir, unix.Mkdev(7, 9), LockExclusive, clk.Now(), clk.Now(), clk, DefaultOpenLockFile)
+	if err != nil {
+		t.Fatalf("holder: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	clk.OnWait(func(time.Time) { cancel() })
+
+	started := clk.Now()
+	locked, err := AcquireCryptsetupLock(ctx, dir, unix.Mkdev(7, 9), LockExclusive, started, started.Add(time.Second), clk, DefaultOpenLockFile)
+	if locked != nil {
+		t.Fatal("AcquireCryptsetupLock canceled mid-wait returned a non-nil lock")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("AcquireCryptsetupLock canceled mid-wait = %v, want context.Canceled", err)
+	}
+	var lockErr *LockTimeoutError
+	if errors.As(err, &lockErr) {
+		t.Fatalf("AcquireCryptsetupLock canceled mid-wait returned a LockTimeoutError (%v), want ctx.Err()'s kind", err)
+	}
+
+	if err := holder.release(); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	fresh, err := AcquireCryptsetupLock(context.Background(), dir, unix.Mkdev(7, 9), LockExclusive, clk.Now(), clk.Now(), clk, DefaultOpenLockFile)
+	if err != nil {
+		t.Fatalf("a fresh lock after the real holder released = %v, want success", err)
+	}
+	if err := fresh.release(); err != nil {
+		t.Fatal(err)
 	}
 }

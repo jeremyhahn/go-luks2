@@ -5,6 +5,7 @@
 package device
 
 import (
+	"context"
 	"errors"
 	"os"
 	"syscall"
@@ -29,7 +30,10 @@ type OpenFunc func(name string, flag int, perm os.FileMode) (*os.File, error)
 // The mode argument is deliberately absent: nothing here passes O_CREATE, so
 // permission bits would never be consulted. 0600 is passed for the write
 // paths purely to match what the sites this replaced spelled out.
-func Open(op, path string, flag int, openFile OpenFunc) (*os.File, error) {
+func Open(ctx context.Context, op, path string, flag int, openFile OpenFunc) (*os.File, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, &errs.Error{Kind: errs.KindOf(err, errs.ErrIO), Detail: "could not " + op + " " + path, Err: err}
+	}
 	f, err := openFile(path, flag, 0600) // #nosec G304 -- the device path is the caller's subject, validated by the caller before every LUKS2 operation
 	if err != nil {
 		return nil, ClassifyOpen(op, err)
@@ -37,17 +41,15 @@ func Open(op, path string, flag int, openFile OpenFunc) (*os.File, error) {
 	return f, nil
 }
 
-// ClassifyOpen adds this package's typed vocabulary to an open failure, and
-// returns anything it cannot classify UNCHANGED.
-//
-// Returning the original error for the unclassified case is deliberate. The
-// alternative -- wrapping everything in a house error type -- would rewrite
-// the message of every failure to buy a distinction only some of them need,
-// and *fs.PathError already says which path and which syscall.
+// ClassifyOpen adds this package's typed vocabulary to an open failure: every
+// result is an *errs.Error with a Kind (DESIGN.md §C.1), and the original
+// error stays reachable as its cause, so *fs.PathError still says which path
+// and which syscall.
 //
 // The permission case keeps the cause reachable through the chain, so
 // errors.Is(err, os.ErrPermission) and errors.Is(err, ErrPermissionDenied)
-// are both true of the same value.
+// are both true of the same value. A missing path is ErrNotFound; anything
+// else is ErrIO.
 func ClassifyOpen(op string, err error) error {
 	if err == nil {
 		return nil
@@ -60,5 +62,11 @@ func ClassifyOpen(op string, err error) error {
 	if errors.Is(err, syscall.EBUSY) {
 		return &errs.Error{Kind: ErrInUse, Detail: "could not " + op + ": it is mounted, mapped or held open exclusively", Err: err}
 	}
-	return err
+	if errors.Is(err, syscall.ENOENT) {
+		return &errs.Error{Kind: ErrNotFound, Detail: "could not " + op + ": no such file or directory", Err: err}
+	}
+	if ctxKind := errs.KindOf(err, nil); ctxKind != nil {
+		return &errs.Error{Kind: ctxKind, Detail: "could not " + op, Err: err}
+	}
+	return &errs.Error{Kind: errs.ErrIO, Detail: "could not " + op, Err: err}
 }

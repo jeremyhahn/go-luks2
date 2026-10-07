@@ -8,6 +8,7 @@ package luks2
 
 import (
 	"bytes"
+	"context"
 	"crypto/fips140"
 	"os"
 	"path/filepath"
@@ -39,9 +40,9 @@ func TestMigrateToFIPSWritesOnlyTheDeviceItLocked(t *testing.T) {
 	if err := os.Symlink(locked, link); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
-	relinkDuring(t, link, other)
+	sys := relinkDuring(t, link, other)
 
-	result, err := MigrateToFIPS(link, migrationPassphrase, cheapMigration())
+	result, err := migrateToFIPSAt(context.Background(), link, migrationPassphrase, cheapMigration(), sys)
 	if err != nil {
 		t.Fatalf("MigrateToFIPS through a link re-pointed mid-import failed: %v", err)
 	}
@@ -52,7 +53,6 @@ func TestMigrateToFIPSWritesOnlyTheDeviceItLocked(t *testing.T) {
 		t.Fatal("the volume the link was re-pointed at was written to; the import did not stay on the device it locked")
 	}
 
-	passphraseKDF = DeriveKeyEnclave
 	assertFIPSReady(t, locked)
 	if got := volumeKey(t, locked, migrationPassphrase); !bytes.Equal(got, key) {
 		t.Fatal("the locked volume no longer opens to its key")

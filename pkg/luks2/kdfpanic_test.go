@@ -7,6 +7,7 @@
 package luks2
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -37,17 +38,17 @@ func TestDeriveKeyDoesNotPanicOnHeaderControlledParameters(t *testing.T) {
 
 	cases := []struct {
 		name    string
-		kdf     *KDF
+		kdf     *rawKDF
 		keySize int
 	}{
 		{
 			name:    "pbkdf2 with a zero key size",
-			kdf:     &KDF{Type: "pbkdf2", Hash: "sha256", Salt: "c2FsdA==", Iterations: &iterations},
+			kdf:     &rawKDF{Type: "pbkdf2", Hash: "sha256", Salt: "c2FsdA==", Iterations: &iterations},
 			keySize: 0,
 		},
 		{
 			name:    "pbkdf2 with a negative key size",
-			kdf:     &KDF{Type: "pbkdf2", Hash: "sha256", Salt: "c2FsdA==", Iterations: &iterations},
+			kdf:     &rawKDF{Type: "pbkdf2", Hash: "sha256", Salt: "c2FsdA==", Iterations: &iterations},
 			keySize: -1,
 		},
 		{
@@ -55,24 +56,24 @@ func TestDeriveKeyDoesNotPanicOnHeaderControlledParameters(t *testing.T) {
 			// bound next to it was checked, which is what made the omission
 			// easy to miss.
 			name:    "argon2id with zero rounds",
-			kdf:     &KDF{Type: "argon2id", Salt: "c2FsdA==", Time: &zero, Memory: &memory, CPUs: &cpus},
+			kdf:     &rawKDF{Type: "argon2id", Salt: "c2FsdA==", Time: &zero, Memory: &memory, CPUs: &cpus},
 			keySize: 32,
 		},
 		{
 			name:    "argon2i with zero rounds",
-			kdf:     &KDF{Type: "argon2i", Salt: "c2FsdA==", Time: &zero, Memory: &memory, CPUs: &cpus},
+			kdf:     &rawKDF{Type: "argon2i", Salt: "c2FsdA==", Time: &zero, Memory: &memory, CPUs: &cpus},
 			keySize: 32,
 		},
 		{
 			name:    "argon2id with a zero key size",
-			kdf:     &KDF{Type: "argon2id", Salt: "c2FsdA==", Time: &one, Memory: &memory, CPUs: &cpus},
+			kdf:     &rawKDF{Type: "argon2id", Salt: "c2FsdA==", Time: &one, Memory: &memory, CPUs: &cpus},
 			keySize: 0,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			key, err := DeriveKeyEnclave([]byte("a passphrase"), tc.kdf, tc.keySize)
+			key, err := deriveKeyEnclave(context.Background(), []byte("a passphrase"), tc.kdf, tc.keySize)
 			if err == nil {
 				mustDestroy(t, key)
 				t.Fatal("the derivation accepted a parameter no derivation can run with")

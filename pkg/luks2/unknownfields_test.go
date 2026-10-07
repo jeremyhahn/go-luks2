@@ -18,6 +18,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // realReencryptKeyslot is the shape cryptsetup gives the keyslot it allocates
@@ -141,16 +143,16 @@ func readHeaderJSONArea(t *testing.T, path string) []byte {
 	}
 	defer func() { _ = f.Close() }()
 
-	var hdr LUKS2BinaryHeader
+	var hdr header.BinaryHeader
 	if err := binaryRead(f, &hdr); err != nil {
 		t.Fatalf("failed to read the binary header of %s: %v", path, err)
 	}
-	if hdr.HeaderSize <= LUKS2HeaderSize {
+	if hdr.HeaderSize <= header.HeaderSize {
 		t.Fatalf("header size %d leaves no JSON area", hdr.HeaderSize)
 	}
 
-	area := make([]byte, hdr.HeaderSize-LUKS2HeaderSize)
-	if _, err := f.ReadAt(area, LUKS2HeaderSize); err != nil {
+	area := make([]byte, hdr.HeaderSize-header.HeaderSize)
+	if _, err := f.ReadAt(area, header.HeaderSize); err != nil {
 		t.Fatalf("failed to read the JSON area of %s: %v", path, err)
 	}
 	if end := bytes.IndexByte(area, 0); end != -1 {
@@ -162,7 +164,7 @@ func readHeaderJSONArea(t *testing.T, path string) []byte {
 // binaryRead decodes the fixed-size LUKS2 binary header. It is spelled out
 // here so the helper above does not depend on which of this package's readers
 // happens to be exported.
-func binaryRead(r io.Reader, hdr *LUKS2BinaryHeader) error {
+func binaryRead(r io.Reader, hdr *header.BinaryHeader) error {
 	return binary.Read(r, binary.BigEndian, hdr)
 }
 
@@ -181,24 +183,24 @@ func TestConformance_TokenSurvivesAnUnrelatedKeyslotChange(t *testing.T) {
 
 	mutations := map[string]func(t *testing.T, path string){
 		"AddKey": func(t *testing.T, path string) {
-			if _, err := AddKey(path, []byte(conformancePassphrase), []byte(secondPassphrase), &AddKeyOptions{
-				KDFType:       KDFTypePBKDF2,
+			if _, err := addKeyForTest(path, []byte(conformancePassphrase), []byte(secondPassphrase), &addKeyOptionsForTest{
+				KDFType:       kdfTypePBKDF2,
 				Hash:          "sha256",
 				PBKDFIterTime: 1,
 			}); err != nil {
 				t.Fatalf("AddKey failed: %v", err)
 			}
 		},
-		"ImportToken into another slot": func(t *testing.T, path string) {
-			if err := ImportToken(path, 5, &Token{Type: TokenTypeSystemdRecovery, Keyslots: []string{"0"}}); err != nil {
-				t.Fatalf("ImportToken failed: %v", err)
+		"SetToken into another slot": func(t *testing.T, path string) {
+			if err := setTokenForTest(path, 5, Token{Type: TokenTypeRecovery, Keyslots: []int{0}}); err != nil {
+				t.Fatalf("SetToken failed: %v", err)
 			}
 		},
 		"RemoveToken from another slot": func(t *testing.T, path string) {
-			if err := ImportToken(path, 5, &Token{Type: TokenTypeSystemdRecovery, Keyslots: []string{"0"}}); err != nil {
-				t.Fatalf("ImportToken failed: %v", err)
+			if err := setTokenForTest(path, 5, Token{Type: TokenTypeRecovery, Keyslots: []int{0}}); err != nil {
+				t.Fatalf("SetToken failed: %v", err)
 			}
-			if err := RemoveToken(path, 5); err != nil {
+			if err := removeTokenForTest(path, 5); err != nil {
 				t.Fatalf("RemoveToken failed: %v", err)
 			}
 		},
@@ -267,8 +269,8 @@ func TestConformance_UnmodeledTokenMembersSurviveOurRewrite(t *testing.T) {
 		t.Fatalf("cryptsetup token import failed (exit %d)\n%s", code, out)
 	}
 
-	if _, err := AddKey(path, []byte(conformancePassphrase), []byte("another-passphrase"), &AddKeyOptions{
-		KDFType:       KDFTypePBKDF2,
+	if _, err := addKeyForTest(path, []byte(conformancePassphrase), []byte("another-passphrase"), &addKeyOptionsForTest{
+		KDFType:       kdfTypePBKDF2,
 		Hash:          "sha256",
 		PBKDFIterTime: 1,
 	}); err != nil {
@@ -454,14 +456,14 @@ func TestConformance_ReencryptKeyslotSurvivesOnDisk(t *testing.T) {
 		t.Fatalf("premise broken: cryptsetup rejected the freshly formatted container (exit %d)\n%s", code, out)
 	}
 
-	var injected Keyslot
+	var injected header.Keyslot
 	if err := json.Unmarshal([]byte(realReencryptKeyslot), &injected); err != nil {
 		t.Fatalf("failed to parse the reencrypt keyslot: %v", err)
 	}
 	// Clear of keyslot 0's area, which runs from 32768 for 258048 bytes.
 	injected.Area.Offset = "294912"
 
-	hdr, metadata, err := ReadHeader(path)
+	hdr, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -478,7 +480,7 @@ func TestConformance_ReencryptKeyslotSurvivesOnDisk(t *testing.T) {
 	// reencryption requirement flag"), and with the flag the requirements
 	// guard refuses every write. So no write of this package carries such a
 	// keyslot -- and the refusal must leave it on disk untouched.
-	if err := ImportToken(path, 2, &Token{Type: TokenTypeSystemdRecovery, Keyslots: []string{"0"}}); !errors.Is(err, ErrInvalidHeader) {
+	if err := setTokenForTest(path, 2, Token{Type: TokenTypeRecovery, Keyslots: []int{0}}); !errors.Is(err, ErrInvalidHeader) {
 		t.Fatalf("ImportToken beside an orphan reencrypt keyslot: got %v, want ErrInvalidHeader", err)
 	}
 	if got := asObject(t, readHeaderJSONArea(t, path))["keyslots"].(map[string]any)["1"]; !reflect.DeepEqual(want, got) {
@@ -489,11 +491,11 @@ func TestConformance_ReencryptKeyslotSurvivesOnDisk(t *testing.T) {
 	// back and re-encode it with an unrelated change, exactly as a write
 	// would, and the reencrypt keyslot it never touched must come out the
 	// same, member for member.
-	hdr, metadata, err = ReadHeader(path)
+	hdr, metadata, err = readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
-	metadata.Tokens["2"] = &Token{Type: TokenTypeSystemdRecovery, Keyslots: []string{"0"}}
+	metadata.Tokens["2"] = &LegacyToken{Type: TokenTypeRecovery, Keyslots: []string{"0"}}
 	hdr.SequenceID++
 	if err := writeHeaderUnvalidated(path, hdr, metadata); err != nil {
 		t.Fatalf("re-encoding the header failed: %v", err)
@@ -540,7 +542,7 @@ func TestConformance_CryptsetupKeyslotRoundTripsUnchanged(t *testing.T) {
 
 	before := asObject(t, readHeaderJSONArea(t, path))
 
-	if err := ImportToken(path, 0, &Token{Type: TokenTypeSystemdRecovery, Keyslots: []string{"0"}}); err != nil {
+	if err := setTokenForTest(path, 0, Token{Type: TokenTypeRecovery, Keyslots: []int{0}}); err != nil {
 		t.Fatalf("ImportToken failed: %v", err)
 	}
 

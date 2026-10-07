@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
+	"github.com/jeremyhahn/go-luks2/test/internal/harness"
 )
 
 // TestCLI_FIPSModeCreateAndRecoveryAddOpenWithCryptsetup is the acceptance
@@ -114,7 +115,7 @@ func TestCLI_FIPSModeCreateAndRecoveryAddOpenWithCryptsetup(t *testing.T) {
 
 	// Both keyslots are PBKDF2-SHA512 at no less than the SHA-512 floor for the
 	// default budget.
-	_, metadata, err := luks2.ReadHeader(image)
+	_, metadata, err := harness.ReadHeader(image)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -123,7 +124,7 @@ func TestCLI_FIPSModeCreateAndRecoveryAddOpenWithCryptsetup(t *testing.T) {
 	}
 	for id, keyslot := range metadata.Keyslots {
 		kdf := keyslot.KDF
-		if kdf.Type != luks2.KDFTypePBKDF2 || kdf.Hash != "sha512" {
+		if kdf.Type != "pbkdf2" || kdf.Hash != "sha512" {
 			t.Fatalf("keyslot %s KDF = %s/%s, want pbkdf2/sha512", id, kdf.Type, kdf.Hash)
 		}
 		if kdf.Iterations == nil || *kdf.Iterations < 210000 {

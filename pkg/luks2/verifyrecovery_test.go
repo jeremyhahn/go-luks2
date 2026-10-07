@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"github.com/jeremyhahn/go-enclave"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
@@ -48,7 +50,7 @@ func TestVerifyRecoveryKeyReportsAnUnreadableDevice(t *testing.T) {
 
 	key := enclaveFrom(t, []byte("a recovery key that never gets tried"))
 
-	ok, err := VerifyRecoveryKey(path, key)
+	ok, err := verifyRecoveryKeyForTest(path, key)
 	if ok {
 		t.Fatal("VerifyRecoveryKey reported success against a device with no LUKS header")
 	}
@@ -63,7 +65,7 @@ func TestVerifyRecoveryKeyReportsAnUnusableKeyslot(t *testing.T) {
 	path := newImage(t, "verify-damaged.img")
 	formatWithLibrary(t, path)
 
-	hdr, metadata, err := ReadHeader(path)
+	hdr, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
@@ -80,14 +82,14 @@ func TestVerifyRecoveryKeyReportsAnUnusableKeyslot(t *testing.T) {
 
 	key := enclaveFrom(t, []byte(conformancePassphrase))
 
-	ok, err := VerifyRecoveryKey(path, key)
+	ok, err := verifyRecoveryKeyForTest(path, key)
 	if ok {
 		t.Fatal("VerifyRecoveryKey reported success against a container whose only keyslot is unusable")
 	}
 	if err == nil {
 		t.Fatal("a container whose only keyslot is unusable was reported as a wrong recovery key")
 	}
-	if !errors.Is(err, ErrInvalidKeyslot) {
+	if !errors.Is(err, ErrKeyslotNotFound) {
 		t.Fatalf("the failure does not name the unusable keyslot: %v", err)
 	}
 }
@@ -104,7 +106,7 @@ func TestVerifyRecoveryKeyReportsAProtectedMemoryFailure(t *testing.T) {
 	// ulimit.
 	withFailingProtectedMemory(t)
 
-	ok, err := VerifyRecoveryKey(path, key)
+	ok, err := verifyRecoveryKeyForTest(path, key)
 	if ok {
 		t.Fatal("VerifyRecoveryKey reported success while protected memory was unavailable")
 	}
@@ -126,7 +128,7 @@ func TestVerifyRecoveryKeyStillReportsAKeyThatDoesNotOpenTheVolume(t *testing.T)
 
 	wrong := enclaveFrom(t, []byte(conformanceWrongPassphrase))
 
-	ok, err := VerifyRecoveryKey(path, wrong)
+	ok, err := verifyRecoveryKeyForTest(path, wrong)
 	if err != nil {
 		t.Fatalf("a key that merely does not open the volume produced an error: %v", err)
 	}
@@ -137,7 +139,7 @@ func TestVerifyRecoveryKeyStillReportsAKeyThatDoesNotOpenTheVolume(t *testing.T)
 	// And the credential that DOES open it still verifies, or the above would
 	// pass against a function that always says no.
 	right := enclaveFrom(t, []byte(conformancePassphrase))
-	ok, err = VerifyRecoveryKey(path, right)
+	ok, err = verifyRecoveryKeyForTest(path, right)
 	if err != nil {
 		t.Fatalf("verifying a working credential failed: %v", err)
 	}
@@ -158,18 +160,18 @@ func TestGetMasterKeyDistinguishesFailureToTryFromFailureToVerify(t *testing.T) 
 	path := newImage(t, "classify.img")
 	formatWithLibrary(t, path)
 
-	_, metadata, err := ReadHeader(path)
+	_, metadata, err := readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 
 	t.Run("tried and did not verify", func(t *testing.T) {
-		key, err := getMasterKey(path, []byte(conformanceWrongPassphrase), metadata)
+		key, err := getMasterKey(path, []byte(conformanceWrongPassphrase), metadata, testVolumeSys())
 		if err == nil {
 			mustDestroy(t, key)
 			t.Fatal("a wrong credential opened the volume")
 		}
-		if !errors.Is(err, ErrMasterKeyVerification) {
+		if !errors.Is(err, ErrWrongKey) {
 			t.Fatalf("a credential that reached the digest and failed it is not reported as such: %v", err)
 		}
 		// It must NOT claim the passphrase is wrong. Per #68 a digest mismatch
@@ -183,23 +185,23 @@ func TestGetMasterKeyDistinguishesFailureToTryFromFailureToVerify(t *testing.T) 
 		// Config and segments come along: the scan confines every keyslot area
 		// to keyslot space before reading it (#249), and the header it reads
 		// that from is part of the fixture.
-		damaged := &LUKS2Metadata{
-			Keyslots: map[string]*Keyslot{"0": cloneKeyslot(metadata.Keyslots["0"])},
+		damaged := &header.Metadata{
+			Keyslots: map[string]*header.Keyslot{"0": cloneKeyslot(metadata.Keyslots["0"])},
 			Digests:  metadata.Digests,
 			Segments: metadata.Segments,
 			Config:   metadata.Config,
 		}
 		damaged.Keyslots["0"].KDF = nil
 
-		key, err := getMasterKey(path, []byte(conformancePassphrase), damaged)
+		key, err := getMasterKey(path, []byte(conformancePassphrase), damaged, testVolumeSys())
 		if err == nil {
 			mustDestroy(t, key)
 			t.Fatal("a keyslot with no kdf object opened the volume")
 		}
-		if !errors.Is(err, ErrInvalidKeyslot) {
+		if !errors.Is(err, ErrKeyslotNotFound) {
 			t.Fatalf("a keyslot that could not be tried is not reported as such: %v", err)
 		}
-		if errors.Is(err, ErrMasterKeyVerification) {
+		if errors.Is(err, ErrWrongKey) {
 			t.Fatal("a keyslot that was never tried was reported as having failed verification")
 		}
 	})
@@ -216,8 +218,8 @@ func TestGetMasterKeyDistinguishesFailureToTryFromFailureToVerify(t *testing.T) 
 			d.Keyslots = append(d.Keyslots, "7")
 		}
 
-		mixed := &LUKS2Metadata{
-			Keyslots: map[string]*Keyslot{
+		mixed := &header.Metadata{
+			Keyslots: map[string]*header.Keyslot{
 				"0": cloneKeyslot(metadata.Keyslots["0"]),
 				"7": cloneKeyslot(metadata.Keyslots["0"]),
 			},
@@ -227,7 +229,7 @@ func TestGetMasterKeyDistinguishesFailureToTryFromFailureToVerify(t *testing.T) 
 		}
 		mixed.Keyslots["0"].KDF = nil
 
-		key, err := getMasterKey(path, []byte(conformancePassphrase), mixed)
+		key, err := getMasterKey(path, []byte(conformancePassphrase), mixed, testVolumeSys())
 		if err != nil {
 			t.Fatalf("an unusable keyslot ahead of a usable one denied the volume: %v", err)
 		}
