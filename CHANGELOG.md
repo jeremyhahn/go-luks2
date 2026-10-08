@@ -7,6 +7,163 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.3] - 2026-10-08
+
+### Added
+
+- **`--pbkdf argon2i` is accepted (#211).** `create`, `addkey`, `changekey`
+  and `recovery add` take all three values cryptsetup's `--pbkdf` does:
+  `argon2id`, `argon2i` and `pbkdf2`, so a script written for cryptsetup runs
+  unchanged. `--pbkdf-memory` and `--pbkdf-parallel` apply to both Argon2
+  variants. Argon2 of either kind is still refused in FIPS 140-3 mode.
+
+### Changed — BREAKING: `Priority` zero value is `PriorityDefault`
+
+- **`PriorityIgnore` can now be requested, and the zero `Priority` means
+  "default" (#211).** `PriorityDefault` is the new zero value of `Priority`.
+  It makes a new keyslot normal and leaves a changed keyslot's priority as it
+  was. `PriorityIgnore`, `PriorityNormal` and `PriorityPrefer` are now 1/2/3,
+  the LUKS2 on-disk value plus one, and each is written when it is asked for.
+  Before this change an unset priority and an explicit ignore were the same
+  value, so there was no way to create an ignored keyslot. Code that converts
+  a `Priority` to or from the LUKS2 integer must add or subtract one. An
+  undeclared `Priority` is refused with `ErrInvalidArgument`.
+
+### Added
+
+- **`luks2 addkey` and `luks2 changekey` take the shared KDF options (#287).**
+  `--pbkdf`, `--hash`, `--iter-time`, `--pbkdf-force-iterations`,
+  `--pbkdf-memory` and `--pbkdf-parallel` work on `create`, `recovery add`,
+  `addkey` and `changekey` alike, named as cryptsetup names them. They are
+  checked before the passphrase prompt; an option that does not apply to the
+  chosen KDF is refused rather than ignored. With none given, the library's
+  default or inherited cost applies as before.
+
+### Changed: `ChangeKeyslot` and `luks2 changekey` honor KDF options
+
+- **An explicit KDF re-costs the changed keyslot.** `(*Volume).ChangeKeyslot`
+  with a non-zero `KeyslotParams.KDF` now writes that KDF, validated and
+  resolved exactly as `AddKeyslot` does (Argon2 is refused in FIPS mode).
+  `luks2 changekey --pbkdf`, `--hash`, `--iter-time`,
+  `--pbkdf-force-iterations`, `--pbkdf-memory` and `--pbkdf-parallel` now
+  take effect, as they do for cryptsetup's luksChangeKey. Before this change
+  they were accepted and ignored. A zero `KDF` still keeps the keyslot's
+  existing type and cost.
+
+### Changed — BREAKING: `MigrateToFIPS` errors are classified at their source
+
+- **A migration refusal is now an `*errs.Error` whose `Kind` is the refusal's own
+  sentinel, and the text of every migration error changed (#287).**
+  `MigrateToFIPS` still returns a `*FIPSMigrationError` under the package's
+  `*errs.Error` with `Kind` `ErrFIPSMigration`, so `errors.Is(err,
+  ErrFIPSMigration)` holds as before, and the refusal's sentinel and the failure
+  behind it are each reachable with `errors.Is` and `errors.As`. The message no
+  longer repeats the device or the sentinel name, which the `*errs.Error` head
+  already carries: it reads `at <stage>: <cause>; <state>`. Code that matched
+  the old text, or read the `Kind` of the inner refusal, must use `errors.Is`.
+
+### Removed — BREAKING: `luks2 addkey --kdf` is gone
+
+- **`addkey` takes the same KDF options as `create` (#287).** The combined
+  `--kdf pbkdf2-sha512` spelling is removed, with no replacement flag of that
+  name. Use `--pbkdf`, `--hash`, `--iter-time`, `--pbkdf-force-iterations`,
+  `--pbkdf-memory` and `--pbkdf-parallel`. A script that passed `--kdf` now
+  fails with a usage error instead of being silently accepted.
+
+### Fixed
+
+- **`luks2 header show` labels the copy it prints (#289).** When the primary
+  header is damaged or older, `show` prints the secondary copy; it used to
+  label it `Primary` at offset 0. It now prints `Secondary header:` with the
+  secondary's offset and says on stderr that the secondary is shown.
+
+### Added
+
+- **`(*luks2.Header).Offset()` (#289)** reports which copy a `Header` was read
+  from: 0 for the primary, the header area size for the secondary.
+
+### Security
+
+- **A key helper must be a file only root or the caller could have written
+  (#289).** `keyprovider.Command` (and the FIDO2 helpers it runs) now applies
+  the trusted-executable checks every system tool gets before it runs the
+  helper: a regular executable file owned by root or the calling user, not
+  group- or world-writable, reached only through directories that are the same
+  or sticky and through symlinks owned by root or the caller. A helper that
+  fails them is refused with `ErrHelperFailed` and is not run. Install helpers
+  where only root can replace them.
+- **A helper or system tool runs from the file that was checked (#289).** The
+  path is walked from `/` one descriptor at a time, so every directory and
+  symlink it passes through is judged, including those a symlink later leads
+  away from, and the program is executed from the checked descriptor rather
+  than reopened by path. Running a key helper now needs Linux with `/proc`
+  mounted; elsewhere it is refused.
+
+### Added
+
+- **`luks2 isluks -v`/`--verbose` (#289)** prints the reason a device is not
+  a LUKS (or, with `--luks2`, LUKS2) device on stderr, as `cryptsetup isLuks
+  -v` does. The exit status is unchanged.
+
+### Changed
+
+- **BREAKING: `Unlock` honours keyslot priority (#289).** The scan tries every
+  `prefer` keyslot before any `normal` one and no longer tries an `ignore`
+  keyslot at all, as cryptsetup does when no keyslot is named. A passphrase
+  that opens only an `ignore` keyslot now fails `Unlock` (and `luks2 open`)
+  with `ErrWrongKey`, or with `ErrNoKeyslots` when every bound keyslot is
+  `ignore`; `UnlockKeyslot` still opens it by number. `Key.Keyslot()` reports
+  a `prefer` keyslot when one opens.
+
+### Fixed
+
+- **`(*loop.Device).Detach` no longer detaches a loop device that was
+  reassigned in between (#289).** It checks, on the descriptor it clears,
+  that the device is still backed by the file recorded when the `Device` was
+  obtained, and refuses with the new `loop.ErrDeviceReassigned` otherwise, or
+  with an I/O error when nothing is attached any more. A `Device` from
+  `Lookup` is held to the file attached when it was looked up.
+
+### Fixed
+
+- **`luks2 recovery verify` help states the exit status it uses (#289).** The
+  help said a key that does not open the volume exits 1; it exits 2, the
+  wrong-passphrase status, as documented. The `does NOT open` line is now
+  printed only when the key was tried and refused, not for a failure that
+  never reached it.
+
+### Fixed
+
+- **BREAKING: a failed recovery-key write is an I/O error, not a memory one
+  (#289).** `(*RecoveryKey).WriteTo` reported its writer's failure as
+  `ErrProtectedMemory`; it now returns `ErrIO` wrapping the writer's error.
+  `luks2 recovery generate`/`add` exit 1 instead of 3 when the key cannot be
+  written to stdout or the key file.
+
+### Security
+
+- **Activation re-verifies the key against the header it maps (#289).**
+  `(*Volume).Target`, and so `dmcrypt.Activate`, used to re-read the header
+  but check only the key's size, so a header rewritten between `Unlock` and
+  activation, or a key from another volume, was mapped anyway. The key is now
+  verified against the re-read header's digest for the mapped segment, and a
+  key it does not verify is refused with `ErrWrongKey`.
+
+### Fixed
+
+- **`UnlockWithProvider` tries a token's keyslots by priority (#289).** The
+  keyslots the provider's token names are tried `prefer` first, then `normal`,
+  then `ignore`, each group in the token's order, as cryptsetup does for a
+  token named with `--token-id`. A `normal` keyslot listed first no longer
+  wins over a `prefer` one.
+
+### Fixed
+
+- **`luks2 wipe`'s header-only warning no longer says a header backup stops
+  working (#289).** A backup taken with `cryptsetup luksHeaderBackup` holds
+  the keyslots, and the data is left in place, so restoring it opens the
+  volume again. The warning now says so and points to `--full`.
+
 ## [1.0.0-rc.2] - 2026-10-08
 
 ### Changed — BREAKING: go-enclave v0.7.0-alpha → v0.8.0-alpha (#285)
