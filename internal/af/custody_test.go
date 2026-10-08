@@ -145,7 +145,7 @@ func TestSplitRoundTripsWithoutLeavingProtectedMemory(t *testing.T) {
 			}
 			defer mustDestroy(t, merged)
 
-			if !merged.EqualTo(key) {
+			if ok, err := merged.EqualTo(key); err != nil || !ok {
 				t.Fatal("the enclave AF round trip did not recover the key")
 			}
 		})
@@ -187,7 +187,7 @@ func TestMergeAgreesWithTheUnprotectedMerge(t *testing.T) {
 	}
 	defer mustDestroy(t, got)
 
-	if !got.EqualTo(want) {
+	if ok, err := got.EqualTo(want); err != nil || !ok {
 		t.Fatal("the enclave merge and the plain merge disagree")
 	}
 }

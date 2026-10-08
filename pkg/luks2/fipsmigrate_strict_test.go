@@ -351,7 +351,7 @@ func TestMigrateToFIPSCarriesTheVolumeKeyNotAnUnboundKey(t *testing.T) {
 		t.Fatalf("the migrated keyslot does not open: %v", err)
 	}
 	defer mustDestroy(t, got)
-	if !got.EqualTo(volumeKeyBefore) {
+	if ok, err := got.EqualTo(volumeKeyBefore); err != nil || !ok {
 		t.Fatal("the migrated keyslot holds a key other than the one the data is encrypted with")
 	}
 	if missing := unboundSegments(metadata, metadata.Digests, "2", got); len(missing) != 0 {
@@ -371,7 +371,7 @@ func TestMigrateToFIPSCarriesTheVolumeKeyNotAnUnboundKey(t *testing.T) {
 		t.Fatalf("the normal unlock scan failed: %v", err)
 	}
 	defer mustDestroy(t, normal)
-	if !normal.EqualTo(volumeKeyBefore) {
+	if ok, err := normal.EqualTo(volumeKeyBefore); err != nil || !ok {
 		t.Fatal("the normal unlock scan recovered the unbound key, not the volume key the data needs")
 	}
 	fipsView := fipsApprovedView(metadata)
@@ -380,7 +380,7 @@ func TestMigrateToFIPSCarriesTheVolumeKeyNotAnUnboundKey(t *testing.T) {
 		t.Fatalf("the unlock scan over the FIPS-approved view failed: %v", err)
 	}
 	defer mustDestroy(t, underFIPS)
-	if !underFIPS.EqualTo(volumeKeyBefore) {
+	if ok, err := underFIPS.EqualTo(volumeKeyBefore); err != nil || !ok {
 		t.Fatal("the FIPS unlock scan recovered the unbound key, not the volume key the data needs")
 	}
 }

@@ -478,29 +478,33 @@ func TestReleaseReleasesPastAReport(t *testing.T) {
 	requireReleased(t, "second", second)
 }
 
-// TestReleaseDoesNotSwallowCorruption pins the other half of the decision:
-// detected corruption is go-enclave's one panic, and Release must let it
-// reach the caller rather than recover it into a dropped report.
-func TestReleaseDoesNotSwallowCorruption(t *testing.T) {
-	e, err := enclave.NewMemoryEnclaveCopy([]byte("volume key material"))
+// TestReleaseDropsCorruptionReportAndKeepsReleasing pins the other half of the
+// decision: Destroy reports detected corruption as enclave.ErrEnclaveCorrupted
+// (it no longer panics), after wiping, and the next WipeAll reports it again.
+// Release drops the report like any other and still releases what follows.
+func TestReleaseDropsCorruptionReportAndKeepsReleasing(t *testing.T) {
+	first, err := enclave.NewMemoryEnclaveCopy([]byte("volume key material"))
 	if err != nil {
 		t.Fatalf("could not allocate a test enclave: %v", err)
 	}
-	destroyOnCleanup(t, e)
+	second, err := enclave.NewMemoryEnclaveCopy([]byte("more volume key material"))
+	if err != nil {
+		t.Fatalf("could not allocate a test enclave: %v", err)
+	}
+	destroyOnCleanup(t, first)
+	destroyOnCleanup(t, second)
 	c := System()
-	c.Destroy = func(*enclave.MemoryEnclave) error {
-		panic(enclave.ErrEnclaveCorrupted)
+	var seen []*enclave.MemoryEnclave
+	c.Destroy = func(e *enclave.MemoryEnclave) error {
+		seen = append(seen, e)
+		return enclave.ErrEnclaveCorrupted
 	}
 
-	defer func() {
-		r := recover()
-		perr, ok := r.(error)
-		if !ok || !errors.Is(perr, enclave.ErrEnclaveCorrupted) {
-			t.Fatalf("recovered %v, want a panic matching enclave.ErrEnclaveCorrupted", r)
-		}
-	}()
-	c.Release(e)
-	t.Fatal("Release returned normally from a corrupted release")
+	c.Release(first, second)
+
+	if len(seen) != 2 || seen[0] != first || seen[1] != second {
+		t.Fatalf("release saw %v, want first then second", seen)
+	}
 }
 
 // refusingCustody is a custody every constructor of which refuses, as a
@@ -606,7 +610,7 @@ func TestEnclavesAreAdmittedThroughTheAllocator(t *testing.T) {
 	if a.InUse() != 3*enclave.LockedSize(32) {
 		t.Fatalf("in use %d after three enclaves, want %d", a.InUse(), 3*enclave.LockedSize(32))
 	}
-	if !copied.EqualTo([]byte("copied-into-locked-memory")) {
+	if ok, err := copied.EqualTo([]byte("copied-into-locked-memory")); err != nil || !ok {
 		t.Fatal("the copy does not hold its source")
 	}
 	c.Release(sized, moved, copied)

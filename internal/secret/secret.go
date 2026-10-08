@@ -244,8 +244,8 @@ func (c Custody) CloneFiltered(op string, b []byte, keep func(byte) bool) (*encl
 //
 // # What the report can say, and why it is not an operation failure
 //
-// Destroy returns the release report directly (go-enclave v0.7.0-alpha).
-// Apart from nil it is one of two things, and neither means key material
+// Destroy returns the release report directly (go-enclave v0.8.0-alpha).
+// Apart from nil it is one of three things, and none means key material
 // escaped locked memory:
 //
 //   - enclave.ErrReleasedWithoutWipe: the mprotect that makes a frozen region
@@ -261,8 +261,13 @@ func (c Custody) CloneFiltered(op string, b []byte, keep func(byte) bool) (*encl
 //     if the wipe ran the pages hold zeroes, and if it could not run the pages
 //     are still mlock'd, as they have been all along. Only the process's
 //     WipeAll, or its exit, takes them back.
+//   - enclave.ErrEnclaveCorrupted: Destroy found the enclave's canary or
+//     guard pages overwritten. It returns this instead of panicking
+//     (go-enclave v0.8.0-alpha), and only AFTER it has wiped the material and
+//     released the pages, so the report is about the region's history, not
+//     about anything still held.
 //
-// This module can do nothing with either. It cannot remedy the environment,
+// This module can do nothing with any of them. It cannot remedy the environment,
 // retrying at once with nothing changed is refused again (go-enclave's own
 // guidance), and WipeAll belongs to the binary that owns the process, never to
 // a library. Nor may it turn either into the operation's error: every release
@@ -281,10 +286,10 @@ func (c Custody) CloneFiltered(op string, b []byte, keep func(byte) bool) (*encl
 // reports, as a *enclave.SweepError, the unwiped releases and corruption the
 // sweep itself meets.
 //
-// Detected CORRUPTION is not a report and is not dropped: go-enclave panics
-// with enclave.ErrEnclaveCorrupted, after wiping, and Release does not recover
-// it. A process whose locked memory was written by something that did not own
-// it must not carry on.
+// That includes the corruption Destroy detected: go-enclave reports every one
+// of them again in the next WipeAll's SweepError, so dropping the Destroy
+// report here does not lose it. The process's owner learns of it at shutdown,
+// where it can act on it; this layer cannot.
 func (c Custody) Release(secrets ...*enclave.MemoryEnclave) {
 	for _, s := range secrets {
 		if s == nil {

@@ -485,7 +485,10 @@ func evaluateDigest(masterKey *enclave.MemoryEnclave, digest *header.Digest, fip
 	// stored digest is a cleartext header field and is cleared anyway; the
 	// derived one is destroyed before returning, so a caller trying several
 	// digests never holds more than one locked region for them at a time.
-	matched = derived.EqualTo(expected)
+	matched, err = derived.EqualTo(expected)
 	custody.Release(derived)
+	if err != nil {
+		return false, false // the derived digest could not be compared: unusable, like a refused KDF
+	}
 	return true, matched
 }

@@ -622,8 +622,9 @@ func verifyFIPSOpen(ctx context.Context, dev *keyslotDevice, passphrase []byte, 
 
 	same := false
 	if err := secret.Borrow("compare the migrated volume key", got, func(b []byte) error {
-		same = want.EqualTo(b)
-		return nil
+		var err error
+		same, err = want.EqualTo(b)
+		return err
 	}); err != nil {
 		return err
 	}
@@ -651,8 +652,9 @@ func verifyFIPSOpen(ctx context.Context, dev *keyslotDevice, passphrase []byte, 
 	}
 	defer custody.Release(scanned)
 	if err := secret.Borrow("compare the scanned volume key", scanned, func(b []byte) error {
-		same = want.EqualTo(b)
-		return nil
+		var err error
+		same, err = want.EqualTo(b)
+		return err
 	}); err != nil {
 		return err
 	}

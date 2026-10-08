@@ -118,9 +118,12 @@ func TestParseRecoveryKeyNormalizesWhitespaceWithoutAGoString(t *testing.T) {
 	}
 	defer custody.Release(credential)
 
-	s, err := credential.OpenString()
-	if err != nil {
-		t.Fatalf("OpenString failed: %v", err)
+	var s string
+	if err := credential.WithBytes(func(b []byte) error {
+		s = string(b)
+		return nil
+	}); err != nil {
+		t.Fatalf("WithBytes failed: %v", err)
 	}
 	if s != "9F3A2C-4B81DE" {
 		t.Errorf("ParseRecoveryKey normalized to %q, want %q", s, "9F3A2C-4B81DE")

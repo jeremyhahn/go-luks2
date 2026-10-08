@@ -790,7 +790,7 @@ func TestEncryptAndDecryptKeyMaterialEnclaveRoundTrip(t *testing.T) {
 
 	// The plaintext comes back INSIDE an enclave -- it is the AF-split master
 	// key on a real volume, so it must never be produced as a slice.
-	if !recovered.EqualTo(plaintext) {
+	if ok, err := recovered.EqualTo(plaintext); err != nil || !ok {
 		t.Fatal("the enclave round trip did not recover the key material")
 	}
 }

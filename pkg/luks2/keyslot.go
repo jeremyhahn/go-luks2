@@ -2176,8 +2176,9 @@ func sameSecret(a, b *enclave.MemoryEnclave) bool {
 	}
 	equal := false
 	if err := secret.Borrow("compare keys", a, func(raw []byte) error {
-		equal = b.EqualTo(raw)
-		return nil
+		var err error
+		equal, err = b.EqualTo(raw)
+		return err
 	}); err != nil {
 		return false
 	}

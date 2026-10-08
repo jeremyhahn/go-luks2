@@ -55,7 +55,7 @@ func TestDeriveKeyEnclaveAgreesWithTheUnprotectedDerivation(t *testing.T) {
 
 	// Constant-time comparison inside the enclave: the derived key is never
 	// copied out to be checked.
-	if !held.EqualTo(plain) {
+	if ok, err := held.EqualTo(plain); err != nil || !ok {
 		t.Fatal("the enclave derivation and the plain one produced different keys")
 	}
 	if held.Size() != 64 {
@@ -93,8 +93,8 @@ func TestDeriveKeyEnclaveHandsBackAnEnclaveNotASlice(t *testing.T) {
 	if err := held.WithBytes(func([]byte) error { return nil }); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
 		t.Fatalf("a destroyed derived key is still readable: %v", err)
 	}
-	if held.EqualTo(make([]byte, 64)) {
-		t.Fatal("a destroyed enclave compared equal to something")
+	if ok, err := held.EqualTo(make([]byte, 64)); ok || !errors.Is(err, enclave.ErrEnclaveDestroyed) {
+		t.Fatalf("a destroyed enclave compared as (%v, %v), want (false, ErrEnclaveDestroyed)", ok, err)
 	}
 }
 
@@ -124,7 +124,7 @@ func TestDeriveKeySecretKeepsTheInputInsideItsEnclave(t *testing.T) {
 	}
 	defer clearBytes(want)
 
-	if !derived.EqualTo(want) {
+	if ok, err := derived.EqualTo(want); err != nil || !ok {
 		t.Fatal("deriving from an enclave produced a different key")
 	}
 

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — BREAKING: go-enclave v0.7.0-alpha → v0.8.0-alpha (#285)
+
+- **go-enclave v0.7.0-alpha → v0.8.0-alpha (#285).** Go resolves one
+  go-enclave per build, and every consumer moves to the latest so it carries
+  the hardening: a zero-value `Sealer` no longer panics, enclave pages are
+  excluded from forked children on Linux, and the residue sweep sees keys
+  outside anonymous memory.
+
+  **Why BREAKING here.** This library's own signatures are unchanged, but the
+  `*enclave.MemoryEnclave` values it returns are go-enclave v0.8's type:
+  `EqualTo` returns `(bool, error)` and reports `ErrEnclaveDestroyed` for a
+  destroyed enclave instead of a bare `false`, `EqualToErr`, `Open`,
+  `OpenString` and `NewMemoryEnclaveFromString` are gone (read through
+  `WithBytes`), and `Destroy` returns `ErrEnclaveCorrupted` instead of
+  panicking. See go-enclave's changelog for v0.8.0-alpha.
+
+  **What this library does with it.** Its own key comparisons treat an
+  `EqualTo` error as "not equal": an unusable digest is skipped like a refused
+  KDF, and a failed keyslot comparison reports a mismatch. `secret.Custody.Release`
+  drops the corruption report with the others, because go-enclave reports it
+  again in the next `WipeAll`'s `SweepError`; it no longer lets a panic through.
+
 ## [1.0.0-rc.1] - 2026-10-07
 
 ### Changed — BREAKING: the public API is now a `*Volume` handle, not device-path free functions
