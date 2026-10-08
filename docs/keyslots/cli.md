@@ -28,9 +28,9 @@ Slot  Type     Key size  KDF        Encryption
 ```
 
 Listed by ascending slot number, with gaps where slots were removed. `open`
-tries only slots bound to the data segment, in that order; keyslot priority is
-not used. A header with no keyslots prints a message on
-stderr and exits 1.
+tries only slots bound to the data segment: `prefer` slots first, then `normal`
+ones, each in that order, and never an `ignore` slot, as `cryptsetup open`
+without `--key-slot` does. A header with no keyslots prints a message on stderr and exits 1.
 
 ## testkey
 

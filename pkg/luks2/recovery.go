@@ -248,13 +248,21 @@ func (r *RecoveryKey) Hash() string { return r.hash }
 // itself, byte for byte, never a Go string. It is the only way to
 // materialize the credential for display or storage; call it as late as
 // possible, at the point of output, and do not store the result.
+//
+// A failure of w is ErrIO, wrapping w's error; a failure to reach the
+// protected memory holding the credential is ErrProtectedMemory.
 func (r *RecoveryKey) WriteTo(w io.Writer) (int64, error) {
 	var n int64
+	var werr error
 	err := secret.Borrow("recovery key", r.credential, func(b []byte) error {
-		written, werr := w.Write(b)
+		var written int
+		written, werr = w.Write(b)
 		n = int64(written)
 		return werr
 	})
+	if werr != nil {
+		return n, &errs.Error{Kind: ErrIO, Detail: "write the recovery key", Err: werr}
+	}
 	if err != nil {
 		return n, &errs.Error{Kind: ErrProtectedMemory, Detail: "recovery key", Err: err}
 	}

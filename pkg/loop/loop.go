@@ -88,6 +88,13 @@ type sys struct {
 	// is backed by, as the loop driver itself records them.
 	loopBackingIdentity func(path string) (dev, ino uint64, err error)
 
+	// fdBackingIdentity is loopBackingIdentity for a loop device already
+	// open as f, so [Device.Detach] checks the descriptor it then clears.
+	fdBackingIdentity func(f *os.File) (dev, ino uint64, err error)
+
+	// clearFD sends LOOP_CLR_FD on the loop device open as f.
+	clearFD func(f *os.File) error
+
 	attachAttempts int
 	nodeTimeout    time.Duration
 	nodePoll       time.Duration
@@ -105,6 +112,8 @@ func defaultSys() sys {
 		openFile:            os.OpenFile,
 		readDir:             os.ReadDir,
 		loopBackingIdentity: loopBackingIdentityIoctl,
+		fdBackingIdentity:   fdBackingIdentityIoctl,
+		clearFD:             clearFDIoctl,
 		attachAttempts:      loopAttachAttempts,
 		nodeTimeout:         defaultNodeTimeout,
 		nodePoll:            defaultNodePoll,
@@ -123,7 +132,22 @@ func (s sys) readState(device string) (loopState, error) {
 type Device struct {
 	path    string
 	backing string
+	ident   backingIdentity
 	sys     sys
+}
+
+// backingIdentity is the device and inode of the file a [Device] was backed
+// by when it was obtained, as LOOP_GET_STATUS64 reports them. known is false
+// for a [Device] that [Lookup] found with nothing attached.
+//
+// It is what [Device.Detach] checks before LOOP_CLR_FD. The loop-device
+// namespace is host-global and a device number is reused as soon as it is
+// free, so the node this Device names may since have been released and
+// attached to someone else's file; detaching that would pull a device out
+// from under a caller that never handed it to us.
+type backingIdentity struct {
+	dev, ino uint64
+	known    bool
 }
 
 // Path returns the device's node, such as "/dev/loop0".
@@ -165,6 +189,14 @@ func attach(ctx context.Context, file string, s sys) (*Device, error) {
 		return nil, &errs.Error{Kind: errs.ErrIO, Detail: fmt.Sprintf("resolve backing file path %q", file), Err: err}
 	}
 
+	// The descriptor LOOP_SET_FD hands the kernel, so this is the identity
+	// LOOP_GET_STATUS64 will report for the device.
+	var st unix.Stat_t
+	if err := unix.Fstat(int(backingFile.Fd()), &st); err != nil {
+		return nil, &errs.Error{Kind: errs.ErrIO, Detail: "identify the backing file " + file, Err: err}
+	}
+	ident := backingIdentity{dev: uint64(st.Dev), ino: st.Ino, known: true} //nolint:unconvert // Dev is not uint64 on every GOARCH
+
 	// LOOP_CTL_GET_FREE names a free device without reserving it, so two
 	// callers can be handed the same one and the second LOOP_SET_FD fails
 	// with EBUSY. That is not a failure of this call, and losetup's answer
@@ -173,7 +205,7 @@ func attach(ctx context.Context, file string, s sys) (*Device, error) {
 	for range s.attachAttempts {
 		path, err := attachFreeLoopDevice(ctx, loopControl, backingFile, s)
 		if err == nil {
-			return &Device{path: path, backing: abs, sys: s}, nil
+			return &Device{path: path, backing: abs, ident: ident, sys: s}, nil
 		}
 		if !errors.Is(err, unix.EBUSY) {
 			return nil, err

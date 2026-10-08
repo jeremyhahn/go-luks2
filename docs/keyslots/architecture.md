@@ -47,17 +47,24 @@ Priority, KDF}`, via `(*Volume).AddKeyslot`/`ChangeKeyslot`); see
 
 ## Data flow: unlock order
 
-`(*Volume).Unlock` scans: it tries only keyslots bound to the data segment, in
-ascending slot number, and the key must verify against a digest of that
+`(*Volume).Unlock` scans: it tries only keyslots bound to the data segment,
+every `prefer` keyslot before any `normal` one and each group in ascending slot
+number, and never an `ignore` keyslot -- cryptsetup's order when no keyslot is
+named. A header whose bound keyslots are all `ignore` gets `ErrNoKeyslots`
+(cryptsetup's "no usable keyslot"). The key must verify against a digest of that
 segment; a passphrase that opens only an unbound keyslot gets `ErrWrongKey`.
 `UnlockKeyslot` does not scan: it tries exactly the slot it is given, and a
 slot that does not exist or is not bound to the data segment is refused up
 front with `ErrKeyslotNotFound`, before any derivation, whatever the
 credential. A bound slot with the wrong passphrase gets `ErrWrongKey`.
+`UnlockWithProvider` tries only the keyslots its provider's token names, as
+cryptsetup tries a token named with `--token-id`: the `prefer` ones, then the
+`normal` ones, then the `ignore` ones, each group in the token's order.
 `AddKeyslot` and `ChangeKeyslot` take an already-recovered `Key` and unlock
-nothing. **`priority` is not read by
-any unlock path.** `(*Header).Keyslots()` lists ascending slot numbers and
-reports each slot's priority and KDF cost.
+nothing. **An `ignore` keyslot opens only when the caller names it:** through
+`UnlockKeyslot`, or through a token passed to `UnlockWithProvider`, after the
+token's other keyslots. `(*Header).Keyslots()` lists ascending slot numbers and reports each
+slot's priority and KDF cost.
 
 Keyslots this library creates carry no `priority` member unless the caller
 asks for one, as cryptsetup writes them: `KeyslotParams.Priority`'s zero value
@@ -120,5 +127,6 @@ The work of one operation is bounded as a whole, not just per keyslot
 
 No support for a keyslot type this library does not implement (`reencrypt`);
 such a keyslot is listed but never tried, and the header is otherwise usable.
-No keyslot priority in any unlock path, matching the cryptsetup behaviour this
-library holds itself to ([cryptsetup-interop](../cryptsetup-interop/architecture.md)).
+No unlock order of its own: a scan follows keyslot priority exactly as
+cryptsetup's does ([unlock order](#data-flow-unlock-order),
+[cryptsetup-interop](../cryptsetup-interop/architecture.md)).

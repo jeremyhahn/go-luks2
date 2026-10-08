@@ -60,16 +60,23 @@ const (
 // kernel had got there yet. A deferred release is not an early exit: the
 // wait keeps looking, because a holder is usually momentary and waiting
 // turns most deferred cases into observed releases.
+//
+// The device is detached only while it is still backed by the file it was
+// backed by when this Device was obtained -- the same device and inode, read
+// with LOOP_GET_STATUS64 on the descriptor LOOP_CLR_FD is then sent on. A
+// device since released and attached to another file is refused with
+// [ErrDeviceReassigned], and one with nothing attached any more with an
+// error matching ErrIO; neither is touched.
 func (d *Device) Detach(ctx context.Context) (DetachState, error) {
-	state, err := detachDevice(ctx, d.path, d.sys.detachTimeout, d.sys.detachPoll, d.sys.readState, d.sys.clk)
+	state, err := detachDevice(ctx, d.path, d.ident, d.sys, d.sys.readState)
 	return state, errs.At("loop", "Device.Detach", d.path, err)
 }
 
-// detachDevice carries the bound, the poll interval and the reader as
-// parameters so the waiting logic can be exercised without a loop device
-// and without waiting out a real timeout. The kernel-facing path is covered
-// separately, by the integration tests that drive a real device.
-func detachDevice(ctx context.Context, path string, timeout, poll time.Duration, read loopStateReader, clk clock.Clock) (DetachState, error) {
+// detachDevice carries the seams and the reader as parameters so the
+// identity check and the waiting logic can be exercised without a loop
+// device and without waiting out a real timeout. The kernel-facing path is
+// covered separately, by the integration tests that drive a real device.
+func detachDevice(ctx context.Context, path string, want backingIdentity, s sys, read loopStateReader) (DetachState, error) {
 	if err := ctx.Err(); err != nil {
 		return Released, &errs.Error{Kind: err}
 	}
@@ -82,12 +89,17 @@ func detachDevice(ctx context.Context, path string, timeout, poll time.Duration,
 	// then time out on a detach that had in fact succeeded.
 	before, beforeErr := read(path)
 
-	loopFile, err := os.OpenFile(path, os.O_RDWR, 0) // #nosec G304 -- loop device path from Attach or Lookup
+	loopFile, err := s.openFile(path, os.O_RDWR, 0) // #nosec G304 -- loop device path from Attach or Lookup
 	if err != nil {
 		return Released, &errs.Error{Kind: errs.ErrIO, Detail: fmt.Sprintf("failed to open %s", path), Err: err}
 	}
 
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL, loopFile.Fd(), unix.LOOP_CLR_FD, 0)
+	if err := checkBackingIdentity(path, loopFile, want, s); err != nil {
+		_ = loopFile.Close()
+		return Released, err
+	}
+
+	clearErr := s.clearFD(loopFile)
 
 	// Closed explicitly rather than deferred, because the close has to
 	// happen BEFORE the wait below rather than after the function returns:
@@ -96,8 +108,8 @@ func detachDevice(ctx context.Context, path string, timeout, poll time.Duration,
 	// itself.
 	closeErr := loopFile.Close()
 
-	if errno != 0 {
-		return Released, &errs.Error{Kind: errs.ErrIO, Detail: fmt.Sprintf("LOOP_CLR_FD failed: %v", errno)}
+	if clearErr != nil {
+		return Released, &errs.Error{Kind: errs.ErrIO, Detail: fmt.Sprintf("LOOP_CLR_FD failed: %v", clearErr)}
 	}
 
 	// A failed close does NOT skip the wait. The detach itself succeeded,
@@ -105,13 +117,44 @@ func detachDevice(ctx context.Context, path string, timeout, poll time.Duration,
 	// would both abandon the observation this function exists to make and
 	// hand back an error a caller cannot classify. It is reported alongside
 	// whatever the wait concludes.
-	state, waitErr := waitForDetach(ctx, path, before, beforeErr == nil, timeout, poll, read, clk)
+	state, waitErr := waitForDetach(ctx, path, before, beforeErr == nil, s.detachTimeout, s.detachPoll, read, s.clk)
 	if closeErr != nil {
 		closeFailed := errs.At("loop", "Device.Detach", path,
 			&errs.Error{Kind: errs.ErrIO, Detail: "close loop device " + path + " after detach", Err: closeErr})
 		return state, errors.Join(closeFailed, waitErr)
 	}
 	return state, waitErr
+}
+
+// checkBackingIdentity reports an error unless the loop device open as f is
+// still backed by the file want records. It reads the identity from f
+// itself, the descriptor LOOP_CLR_FD is sent on, so the device checked is the
+// device cleared.
+func checkBackingIdentity(path string, f *os.File, want backingIdentity, s sys) error {
+	dev, ino, err := s.fdBackingIdentity(f)
+	switch {
+	case errors.Is(err, unix.ENXIO):
+		// The loop driver's "not bound": there is nothing to detach, and
+		// clearing would race whoever attaches the device next.
+		return &errs.Error{Kind: errs.ErrIO, Detail: path + " is not attached to a file", Err: err}
+	case err != nil:
+		return &errs.Error{Kind: errs.ErrIO, Detail: "identify the file backing " + path + " before detaching it", Err: err}
+	case !want.known:
+		return &errs.Error{Kind: ErrDeviceReassigned,
+			Detail: path + " had nothing attached when it was looked up and is now attached to a file"}
+	case dev != want.dev || ino != want.ino:
+		return &errs.Error{Kind: ErrDeviceReassigned,
+			Detail: fmt.Sprintf("%s is now backed by device %d inode %d, not device %d inode %d", path, dev, ino, want.dev, want.ino)}
+	}
+	return nil
+}
+
+// clearFDIoctl sends LOOP_CLR_FD on the loop device open as f.
+func clearFDIoctl(f *os.File) error {
+	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, f.Fd(), unix.LOOP_CLR_FD, 0); errno != 0 {
+		return errno
+	}
+	return nil
 }
 
 // waitForDetach blocks until the device is released, until the kernel says

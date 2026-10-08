@@ -9,11 +9,16 @@ package loop
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/jeremyhahn/go-luks2/internal/clock"
+	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
 // The waiting logic is exercised here without a loop device; the
@@ -335,7 +340,90 @@ func TestDetachDeviceRefusesAnAlreadyCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if _, err := detachDevice(ctx, "/dev/loop0", testDetachTimeout, testDetachPoll, reader(loopState{}), clock.NewFake(t)); !errors.Is(err, context.Canceled) {
+	if _, err := detachDevice(ctx, "/dev/loop0", backingIdentity{}, detachSys(t, nil, nil), reader(loopState{})); !errors.Is(err, context.Canceled) {
 		t.Errorf("detachDevice() with a canceled context = %v, want context.Canceled", err)
+	}
+}
+
+// detachSys is a sys whose loop device is a temporary file, whose
+// LOOP_GET_STATUS64 answers identity, and whose LOOP_CLR_FD only counts
+// itself into cleared.
+func detachSys(t *testing.T, identity func(*os.File) (uint64, uint64, error), cleared *int) sys {
+	t.Helper()
+	node := filepath.Join(t.TempDir(), "loop0")
+	if err := os.WriteFile(node, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := defaultSys()
+	s.clk = clock.NewFake(t)
+	s.detachTimeout, s.detachPoll = testDetachTimeout, testDetachPoll
+	s.openFile = func(string, int, os.FileMode) (*os.File, error) { return os.OpenFile(node, os.O_RDWR, 0) } // #nosec G304 -- a test fixture under t.TempDir()
+	s.fdBackingIdentity = identity
+	s.clearFD = func(*os.File) error {
+		*cleared++
+		return nil
+	}
+	return s
+}
+
+// TestDetachRefusesADeviceNoLongerBackedByItsFile is the reassignment race:
+// between obtaining a Device and detaching it, the loop device was released
+// and attached to someone else's file. Detach must refuse BEFORE LOOP_CLR_FD.
+func TestDetachRefusesADeviceNoLongerBackedByItsFile(t *testing.T) {
+	ours := backingIdentity{dev: 2049, ino: 12, known: true}
+	tests := []struct {
+		name     string
+		want     backingIdentity
+		identity func(*os.File) (uint64, uint64, error)
+		kind     error
+	}{
+		{
+			name:     "another file's inode",
+			want:     ours,
+			identity: func(*os.File) (uint64, uint64, error) { return 2049, 13, nil },
+			kind:     ErrDeviceReassigned,
+		},
+		{
+			name:     "another filesystem's device",
+			want:     ours,
+			identity: func(*os.File) (uint64, uint64, error) { return 2050, 12, nil },
+			kind:     ErrDeviceReassigned,
+		},
+		{
+			name:     "looked up unattached, attached since",
+			want:     backingIdentity{},
+			identity: func(*os.File) (uint64, uint64, error) { return 2049, 12, nil },
+			kind:     ErrDeviceReassigned,
+		},
+		{
+			name:     "nothing attached any more",
+			want:     ours,
+			identity: func(*os.File) (uint64, uint64, error) { return 0, 0, unix.ENXIO },
+			kind:     errs.ErrIO,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cleared := 0
+			s := detachSys(t, tt.identity, &cleared)
+			_, err := detachDevice(context.Background(), "/dev/loop0", tt.want, s, reader(attachedTo("/img")))
+			if !errors.Is(err, tt.kind) {
+				t.Errorf("detachDevice() = %v, want errors.Is(_, %v)", err, tt.kind)
+			}
+			if cleared != 0 {
+				t.Errorf("LOOP_CLR_FD sent %d time(s), want none", cleared)
+			}
+		})
+	}
+
+	// The control: the same file, and the device is cleared.
+	cleared := 0
+	s := detachSys(t, func(*os.File) (uint64, uint64, error) { return ours.dev, ours.ino, nil }, &cleared)
+	state, err := detachDevice(context.Background(), "/dev/loop0", ours, s, reader(attachedTo("/img"), loopState{}))
+	if err != nil || state != Released {
+		t.Fatalf("detachDevice() = %v, %v; want Released, nil", state, err)
+	}
+	if cleared != 1 {
+		t.Errorf("LOOP_CLR_FD sent %d time(s), want 1", cleared)
 	}
 }

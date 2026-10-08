@@ -11,6 +11,7 @@ import (
 
 	"github.com/jeremyhahn/go-enclave"
 
+	"github.com/jeremyhahn/go-luks2/internal/errs"
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
@@ -115,4 +116,43 @@ func TestDestroyIsIdempotent(t *testing.T) {
 	k := New(e, 0)
 	k.Destroy()
 	k.Destroy()
+}
+
+func TestVerifyRefusesANilKeyWithoutCallingVerify(t *testing.T) {
+	err := Verify(nil, func(*enclave.MemoryEnclave) error {
+		t.Fatal("verify must not run for a nil key")
+		return nil
+	})
+	if !errors.Is(err, errs.ErrInvalidArgument) {
+		t.Fatalf("Verify(nil) = %v, want errs.ErrInvalidArgument", err)
+	}
+}
+
+func TestVerifyRefusesAKeyWithNoEnclaveWithoutCallingVerify(t *testing.T) {
+	err := Verify(&Key{}, func(*enclave.MemoryEnclave) error {
+		t.Fatal("verify must not run for a key with no enclave")
+		return nil
+	})
+	if !errors.Is(err, errs.ErrInvalidArgument) {
+		t.Fatalf("Verify(empty key) = %v, want errs.ErrInvalidArgument", err)
+	}
+}
+
+func TestVerifyPassesTheKeysOwnEnclaveAndReturnsItsErrorUnchanged(t *testing.T) {
+	e := newTestEnclave(t, []byte("0123456789abcdef"))
+	k := New(e, 0)
+	defer k.Destroy()
+
+	sentinel := errors.New("verify failure")
+	var got *enclave.MemoryEnclave
+	err := Verify(k, func(m *enclave.MemoryEnclave) error {
+		got = m
+		return sentinel
+	})
+	if got != e {
+		t.Fatal("verify was not handed the key's own enclave")
+	}
+	if err != sentinel {
+		t.Fatalf("Verify error = %v, want the callback's error unchanged", err)
+	}
 }

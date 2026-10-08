@@ -6,6 +6,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
@@ -52,7 +53,8 @@ func recoveryCommand() *command {
 				name:     "recovery verify",
 				synopsis: "Check that a recovery key still opens a volume",
 				usage: "Usage: luks2 recovery verify [--recovery-file <path>] <device>\n\n" +
-					"Read-only. Exit 0 if the key opens the volume, 1 otherwise.\n",
+					"Read-only. Exit 0 if the key opens the volume, 2 if it does not (as for\n" +
+					"a wrong passphrase); any other failure exits with its own status.\n",
 				run: runRecoveryVerify,
 			},
 		},
@@ -245,7 +247,11 @@ func runRecoveryVerify(ctx context.Context, e *env, args []string) error {
 
 	key, err := v.Unlock(ctx, normalized)
 	if err != nil {
-		_, _ = fmt.Fprintf(e.stderr, "That recovery key does NOT open %s\n", device)
+		// Only a verdict on the key gets the verdict line; a failure that never
+		// tried it (a lock, an unreadable keyslot) is reported as itself.
+		if errors.Is(err, luks2.ErrWrongKey) {
+			_, _ = fmt.Fprintf(e.stderr, "That recovery key does NOT open %s\n", device)
+		}
 		return err
 	}
 	key.Destroy()

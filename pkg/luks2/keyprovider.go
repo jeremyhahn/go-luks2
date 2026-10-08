@@ -141,9 +141,11 @@ func killKeyslotLocked(ctx context.Context, dev *keyslotDevice, keyslot int) err
 // never has to know the type exists.
 // ---------------------------------------------------------------------------
 
-// A failure obtaining or enrolling an external credential is an
-// *errs.Error with Kind ErrKeyProvider and Detail naming the step it
-// happened in -- "enroll" or "enroll token" -- never credential material.
+// A failure obtaining or enrolling an external credential keeps its own
+// sentinel: the provider's error is returned as the provider gave it, and
+// this package's refusals are ErrInvalidArgument or ErrKeyslotNotFound. Only
+// an OrphanedKeyslotError matches ErrKeyProvider. None carries credential
+// material.
 
 // OrphanedKeyslotError reports a keyslot holding a live credential that no
 // token describes and that could not be removed.

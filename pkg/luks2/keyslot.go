@@ -44,7 +44,8 @@ const (
 // higher means "try this first". A bare 2 under a comment saying "lower
 // priority" is how addKey came to mark every added key as the preferred one.
 const (
-	// keyslotPriorityIgnore marks a keyslot that should not be tried.
+	// keyslotPriorityIgnore marks a keyslot a scan does not try; only naming
+	// it opens it.
 	keyslotPriorityIgnore = 0
 
 	// keyslotPriorityNormal is the default, and the meaning of an ABSENT
@@ -60,9 +61,14 @@ const (
 //
 // Its zero value, PriorityDefault, is "not asked for": a new keyslot gets the
 // LUKS2 default (normal) and ChangeKeyslot keeps the slot's existing
-// priority. Every other value is an explicit request, so PriorityIgnore --
-// a slot an unlock does not try -- is something a caller can only get by
-// naming it, never by leaving a field unset.
+// priority. Every other value is an explicit request, so PriorityIgnore is
+// something a caller can only get by naming it, never by leaving a field
+// unset.
+//
+// Priority governs Unlock, which tries every PriorityPrefer keyslot before any
+// PriorityNormal one and never tries a PriorityIgnore keyslot, as cryptsetup
+// does when no keyslot is named. A PriorityIgnore keyslot still opens through
+// UnlockKeyslot, which names it.
 //
 // The values are the on-disk encoding plus one (keyslotPriorityIgnore/Normal/
 // Prefer are 0/1/2; PriorityIgnore/Normal/Prefer are 1/2/3), so the mapping
@@ -1507,22 +1513,57 @@ func getMasterKey(device string, passphrase []byte, metadata *header.Metadata, s
 // A passphrase that opens only an unbound keyslot is therefore reported exactly
 // as cryptsetup reports it, as a credential that opens nothing here:
 // ErrWrongKey.
+//
+// The bound keyslots are tried by priority, as cryptsetup's any-slot open
+// tries them: every prefer keyslot first, then every normal one, each group in
+// scan order. An ignore keyslot is never tried by the scan; it opens only when
+// it is named (UnlockKeyslot). A header whose bound keyslots are all ignore
+// has none a scan may try: ErrNoKeyslots, cryptsetup's "no usable keyslot".
 func getVolumeKey(ctx context.Context, f io.ReaderAt, device string, passphrase []byte, metadata *header.Metadata, sys volumeSys) (*enclave.MemoryEnclave, string, error) {
-	var order []string
+	var bound []string
 	for _, id := range header.KeyslotIDsInScanOrder(metadata.Keyslots) {
 		if keyslotBoundToDataSegments(metadata, id) {
-			order = append(order, id)
+			bound = append(bound, id)
 		}
 	}
+	preferred, normal, ignored := keyslotsByPriority(metadata, bound)
+	order := slices.Concat(preferred, normal)
 	if len(order) == 0 {
 		if len(metadata.Keyslots) == 0 {
 			return nil, "", &errs.Error{Kind: ErrNoKeyslots, Detail: "the header declares no keyslots"}
+		}
+		if len(ignored) > 0 {
+			return nil, "", &errs.Error{Kind: ErrNoKeyslots, Detail: fmt.Sprintf(
+				"every keyslot holding the volume key (%s) has priority ignore, which a scan never tries; name the keyslot to unlock it",
+				strings.Join(ignored, ", "))}
 		}
 		return nil, "", &errs.Error{Kind: ErrNoKeyslots, Detail: fmt.Sprintf(
 			"none of the header's %d keyslot(s) is attested by a digest binding every data segment (%s), so none holds the volume key",
 			len(metadata.Keyslots), strings.Join(dataSegmentIDs(metadata), ", "))}
 	}
 	return getMasterKeySlot(ctx, f, device, passphrase, header.VolumeKeyDigestsView(metadata), order, sys)
+}
+
+// keyslotsByPriority splits ids into metadata's prefer, normal and ignore
+// keyslots, each group keeping the order ids gave it -- the groups cryptsetup's
+// priority passes try in turn. A null keyslot carries no priority; it is put
+// with the normal ones and goes on to getMasterKeySlot, which reports it as
+// the damage it is.
+func keyslotsByPriority(metadata *header.Metadata, ids []string) (preferred, normal, ignored []string) {
+	for _, id := range ids {
+		ks := metadata.Keyslots[id]
+		switch {
+		case ks == nil:
+			normal = append(normal, id)
+		case priorityFromDisk(ks.Priority) == PriorityIgnore:
+			ignored = append(ignored, id)
+		case priorityFromDisk(ks.Priority) == PriorityPrefer:
+			preferred = append(preferred, id)
+		default:
+			normal = append(normal, id)
+		}
+	}
+	return preferred, normal, ignored
 }
 
 // getMasterKeySlot is getMasterKey with the scan order supplied by the caller

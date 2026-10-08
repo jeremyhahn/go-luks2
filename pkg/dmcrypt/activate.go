@@ -7,8 +7,9 @@
 // (DESIGN.md §A.4).
 //
 // Activate calls (*luks2.Volume).Target, which re-reads the header under
-// the volume's own shared lock and re-derives the dm-crypt table
-// parameters; it then maps the pinned descriptor's major:minor, never a
+// the volume's own shared lock, re-verifies the key against it -- a key the
+// re-read header does not verify is refused with luks2.ErrWrongKey -- and
+// re-derives the dm-crypt table parameters; it then maps the pinned descriptor's major:minor, never a
 // path. The mapping is a transaction from the moment its create ioctl
 // succeeds: every failure after that point rolls the target back, under a
 // cancellation-proof context and its own clock budget, so a canceled

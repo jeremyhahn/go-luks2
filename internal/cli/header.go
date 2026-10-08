@@ -95,23 +95,22 @@ func runHeaderRestore(ctx context.Context, e *env, args []string) error {
 }
 
 func runHeaderShow(ctx context.Context, e *env, args []string) error {
-	return showHeader(ctx, e, args, "header show", "Primary", func(ctx context.Context, v *luks2.Volume) (*luks2.Header, error) {
+	return showHeader(ctx, e, args, "header show", func(ctx context.Context, v *luks2.Volume) (*luks2.Header, error) {
 		return v.Header(ctx)
 	})
 }
 
 func runHeaderSecondary(ctx context.Context, e *env, args []string) error {
-	return showHeader(ctx, e, args, "header secondary", "Secondary", func(ctx context.Context, v *luks2.Volume) (*luks2.Header, error) {
+	return showHeader(ctx, e, args, "header secondary", func(ctx context.Context, v *luks2.Volume) (*luks2.Header, error) {
 		return v.SecondaryHeader(ctx)
 	})
 }
 
-// showHeader reads one header copy and prints it. The secondary copy's
-// offset is not a published constant -- it depends on the volume's
-// MetadataSize -- so it is read back as the header's own Size(), which
-// DESIGN.md's "the secondary's header offset equals the header size" makes
-// correct for either copy.
-func showHeader(ctx context.Context, e *env, args []string, command, which string, read func(context.Context, *luks2.Volume) (*luks2.Header, error)) error {
+// showHeader reads one header copy and prints it, labeled by the copy it
+// is. `header show` prints the current copy, which is the secondary when the
+// primary is damaged or older, so the label and offset come from the copy
+// read (Header.Offset), never from the command that asked for it.
+func showHeader(ctx context.Context, e *env, args []string, command string, read func(context.Context, *luks2.Volume) (*luks2.Header, error)) error {
 	if len(args) < 1 {
 		return &UsageError{Command: command, Detail: "want <device>"}
 	}
@@ -132,9 +131,13 @@ func showHeader(ctx context.Context, e *env, args []string, command, which strin
 	}
 	warnAboutDroppedEntries(e, device, hdr)
 
-	offset := int64(0) // the primary header copy always starts at offset 0
-	if which != "Primary" {
-		offset = hdr.Size()
+	offset := hdr.Offset()
+	which := "Primary"
+	if offset != 0 {
+		which = "Secondary"
+		if command == "header show" {
+			_, _ = fmt.Fprintf(e.stderr, "%s: the primary header copy is damaged or older than the secondary; showing the secondary\n", device)
+		}
 	}
 
 	_, _ = fmt.Fprintf(e.stdout, "%s header: %s\n", which, device)

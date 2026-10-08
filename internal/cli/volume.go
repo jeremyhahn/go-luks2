@@ -123,9 +123,10 @@ func isluksCommand() *command {
 	return &command{
 		name:     "isluks",
 		synopsis: "Exit 0 if the device holds a LUKS container",
-		usage: "Usage: luks2 isluks [--luks2] <device>\n\n" +
+		usage: "Usage: luks2 isluks [--luks2] [-v|--verbose] <device>\n\n" +
 			"Exit 0 if the device holds a LUKS header, 1 if it does not.\n" +
-			"--luks2 narrows the question to LUKS2 specifically.\n",
+			"--luks2 narrows the question to LUKS2 specifically.\n" +
+			"-v, --verbose prints the reason for a no on stderr.\n",
 		run: runIsLUKS,
 	}
 }
@@ -133,6 +134,8 @@ func isluksCommand() *command {
 func runIsLUKS(ctx context.Context, e *env, args []string) error {
 	f := newFlags("isluks")
 	luks2Only := f.Bool("luks2")
+	verbose := f.Bool("verbose")
+	verboseShort := f.Bool("v")
 	positional, err := f.parse(args)
 	if err != nil {
 		return err
@@ -150,12 +153,21 @@ func runIsLUKS(ctx context.Context, e *env, args []string) error {
 		kind = "LUKS2"
 	}
 
+	// notLUKS answers no. Under --verbose the reason goes to stderr, as
+	// cryptsetup isLuks -v reports it; the exit status is 1 either way.
+	notLUKS := func(reason error) error {
+		_, _ = fmt.Fprintf(e.stdout, "%s is not a %s device\n", device, kind)
+		if *verbose || *verboseShort {
+			_, _ = fmt.Fprintf(e.stderr, "%s: %v\n", device, reason)
+		}
+		// Deliberately not reason itself: isluks's contract is exit 0/1 (§F),
+		// and its sentinel could otherwise land it on exitTable's 2-5.
+		return &Error{Kind: errNotLUKSDevice}
+	}
+
 	v, err := luks2.Open(ctx, device, luks2.WithReadOnly())
 	if err != nil {
-		_, _ = fmt.Fprintf(e.stdout, "%s is not a %s device\n", device, kind)
-		// Deliberately not err itself: isluks's contract is exit 0/1 (§F),
-		// and err's sentinel could otherwise land it on exitTable's 2-5.
-		return &Error{Kind: errNotLUKSDevice}
+		return notLUKS(err)
 	}
 	defer func() { _ = v.Close() }()
 
@@ -166,8 +178,7 @@ func runIsLUKS(ctx context.Context, e *env, args []string) error {
 	_, herr := v.Header(ctx)
 	is := herr == nil || (!*luks2Only && errors.Is(herr, luks2.ErrNotLUKS2))
 	if !is {
-		_, _ = fmt.Fprintf(e.stdout, "%s is not a %s device\n", device, kind)
-		return &Error{Kind: errNotLUKSDevice}
+		return notLUKS(herr)
 	}
 
 	_, _ = fmt.Fprintf(e.stdout, "%s is a %s device\n", device, kind)

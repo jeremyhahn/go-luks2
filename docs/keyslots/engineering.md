@@ -30,7 +30,7 @@ caller's policy — the CLI's own passphrase prompt before it calls
 separate read-only probe method: checking that a passphrase opens a volume is
 `(*Volume).Unlock` followed by `(*Key).Destroy`.
 
-$1
+## Invariants
 
 - A volume always keeps at least one keyslot that can open it
   (`ErrLastKeyslot`); only a keyslot bound to every data segment counts

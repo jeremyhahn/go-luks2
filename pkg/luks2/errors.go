@@ -655,7 +655,11 @@ var (
 // raised only by Volume.Enroll, Volume.UnlockWithProvider and importTokenLocked,
 // which stay (DECISIONS.md H10d).
 var (
-	// ErrKeyProvider is the sentinel every external-key failure matches.
+	// ErrKeyProvider is matched only by an OrphanedKeyslotError, alongside
+	// ErrOrphanedKeyslot. Other external-key failures carry their own
+	// sentinels: a provider's error passes through as the provider returned
+	// it (pkg/keyprovider's ErrHelperFailed and the rest), and a refused
+	// argument or keyslot is ErrInvalidArgument or ErrKeyslotNotFound.
 	ErrKeyProvider = errors.New("luks2: external key provider")
 
 	// ErrNoKeyProvider folded into ErrInvalidArgument (DESIGN.md §C.3): an

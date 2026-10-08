@@ -38,6 +38,6 @@ you are certain you want that anyway, add `--force`.
 
 | Symptom | Likely cause | Next step |
 |---|---|---|
-| cryptsetup reports a damaged primary, yet `header show` prints a header | The primary copy is damaged or missing; `header show` prints the current valid copy, here the secondary, still labeled `Primary` | `header secondary` to check the other copy, then `header restore` |
+| `header show` prints `Secondary header:` and a stderr note | The primary copy is damaged, missing or older; `header show` prints the current valid copy, here the secondary | `header restore` to rebuild the primary from it |
 | `header restore` refuses without `--force` | The primary header's sequence ID is not lower than the secondary's | Confirm you actually want a rollback before adding `--force` |
-| `isluks` exits 1 on a device you believe is LUKS2 | Either it genuinely is not, its header fails validation, or it cannot be read (permissions, wrong path, lock) | `isluks` does not report the reason; `header show` on the same device does. `isluks` without `--luks2` also accepts LUKS1 |
+| `isluks` exits 1 on a device you believe is LUKS2 | Either it genuinely is not, its header fails validation, or it cannot be read (permissions, wrong path, lock) | `isluks --verbose` prints the reason on stderr. `isluks` without `--luks2` also accepts LUKS1 |

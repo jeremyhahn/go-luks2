@@ -91,7 +91,7 @@ func (v *Volume) AddKeyslot(ctx context.Context, key *Key, pass *enclave.MemoryE
 	if err := v.checkWritable(op); err != nil {
 		return KeyslotInfo{}, err
 	}
-	if err := p.KDF.Validate(); err != nil {
+	if err := p.KDF.validateWith(v.sys.fipsMode); err != nil {
 		return KeyslotInfo{}, errAt(op, v.path, err)
 	}
 	if !p.Priority.valid() {
@@ -175,7 +175,7 @@ func (v *Volume) ChangeKeyslot(ctx context.Context, key *Key, pass *enclave.Memo
 	// the lock is taken; a zero one is the slot's own cost and needs none.
 	var recost *addKeyOptionsForTest
 	if p.KDF != (KDFParams{}) {
-		if err := p.KDF.Validate(); err != nil {
+		if err := p.KDF.validateWith(v.sys.fipsMode); err != nil {
 			return KeyslotInfo{}, errAt(op, v.path, err)
 		}
 		recost = p.toAddKeyOptions()

@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jeremyhahn/go-enclave"
 	"golang.org/x/sys/unix"
 )
 
@@ -131,24 +132,56 @@ type lockOpSpec struct {
 	Passphrase string
 }
 
-// lockCompatOps are the go-luks2 operations a step can run: two reads that
-// take no lock, and three writes that take cryptsetup's.
-var lockCompatOps = map[string]func(device string, passphrase []byte, sys volumeSys) error{
-	"ReadHeader": func(device string, _ []byte, sys volumeSys) error {
-		_, _, err := readHeaderForTestWithSys(device, sys)
+// lockCompatLockWait bounds every lock an operation step waits for: a held
+// lock is refused within this, not DefaultLockWait.
+const lockCompatLockWait = 300 * time.Millisecond
+
+// lockCompatOp is one go-luks2 operation on a Volume the step opened, with the
+// scenario's passphrase.
+type lockCompatOp func(ctx context.Context, v *Volume, pass *enclave.MemoryEnclave) error
+
+// lockCompatOps are the go-luks2 operations a step can run, each through the
+// public Volume method a caller uses, so each takes the lock that caller's
+// call takes: two reads under cryptsetup's lock held shared (Header, Unlock),
+// and three writes under it held exclusively. AddKey unlocks first, as a
+// caller must, so a state that refuses reads stops it there; KillSlot and
+// ImportToken reach the exclusive lock directly.
+var lockCompatOps = map[string]lockCompatOp{
+	"ReadHeader": func(ctx context.Context, v *Volume, _ *enclave.MemoryEnclave) error {
+		_, err := v.Header(ctx)
 		return err
 	},
-	"TestKey": testKeyForTestWithSys,
-	"AddKey": func(device string, passphrase []byte, sys volumeSys) error {
-		_, err := addKeyWithPolicy(context.Background(), device, passphrase, []byte(lockCompatNewPassphrase),
-			&addKeyOptionsForTest{KDFType: kdfTypePBKDF2, PBKDFIterTime: 1}, callerSuppliedCredential, sys)
+	"TestKey": func(ctx context.Context, v *Volume, pass *enclave.MemoryEnclave) error {
+		key, err := v.Unlock(ctx, pass)
+		if err != nil {
+			return err
+		}
+		key.Destroy()
+		return nil
+	},
+	"AddKey": func(ctx context.Context, v *Volume, pass *enclave.MemoryEnclave) error {
+		key, err := v.Unlock(ctx, pass)
+		if err != nil {
+			return err
+		}
+		defer key.Destroy()
+		newPass, err := enclave.NewMemoryEnclaveCopy([]byte(lockCompatNewPassphrase))
+		if err != nil {
+			return err
+		}
+		defer func() { _ = newPass.Destroy() }()
+		_, err = v.AddKeyslot(ctx, key, newPass, KeyslotParams{KDF: KDFParams{Type: KDFPBKDF2, IterTime: time.Millisecond}})
 		return err
 	},
-	"KillSlot": func(device string, passphrase []byte, sys volumeSys) error {
-		return killSlotForTest(device, passphrase, 1, withTestSys(sys))
+	"KillSlot": func(ctx context.Context, v *Volume, _ *enclave.MemoryEnclave) error {
+		return v.RemoveKeyslot(ctx, 1)
 	},
-	"ImportToken": func(device string, _ []byte, sys volumeSys) error {
-		return setTokenJSONForTest(device, 5, []byte(lockCompatToken), withTestSys(sys))
+	"ImportToken": func(ctx context.Context, v *Volume, _ *enclave.MemoryEnclave) error {
+		var t Token
+		if err := json.Unmarshal([]byte(lockCompatToken), &t); err != nil {
+			return err
+		}
+		return v.SetToken(ctx, 5, t)
 	},
 }
 
@@ -160,17 +193,12 @@ func runLockCompatOp(raw string) int {
 		fmt.Printf(`{"Err":%q}`, err.Error())
 		return 0
 	}
-	// As the suite's TestMain used to: keyslot cost is not under test.
-	sys := defaultVolumeSys()
-	sys.calibratedCountFloor = func(string, keyslotCostPolicy) int { return minPBKDF2Iterations }
-	// A held lock is refused within this, not DefaultLockWait.
-	keyslotLockWait = 300 * time.Millisecond
 
 	var res lockOpResult
 	op, ok := lockCompatOps[spec.Op]
 	if !ok {
 		res.Err = "unknown operation " + spec.Op
-	} else if err := op(spec.Device, []byte(spec.Passphrase), sys); err != nil {
+	} else if err := runLockCompatVolumeOp(spec, op); err != nil {
 		res = lockOpResult{Err: err.Error(),
 			Unavailable: errors.Is(err, ErrMetadataLockUnavailable),
 			Contended:   errors.Is(err, ErrLockContended),
@@ -179,6 +207,26 @@ func runLockCompatOp(raw string) int {
 	out, _ := json.Marshal(res)
 	_, _ = os.Stdout.Write(out)
 	return 0
+}
+
+// runLockCompatVolumeOp opens the device as a caller does and runs op on it.
+func runLockCompatVolumeOp(spec lockOpSpec, op lockCompatOp) error {
+	// As the suite's TestMain used to: keyslot cost is not under test.
+	sys := defaultVolumeSys()
+	sys.calibratedCountFloor = func(string, keyslotCostPolicy) int { return minPBKDF2Iterations }
+
+	ctx := context.Background()
+	v, err := Open(ctx, spec.Device, withTestSys(sys), WithLockWait(lockCompatLockWait))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = v.Close() }()
+	pass, err := enclave.NewMemoryEnclaveCopy([]byte(spec.Passphrase))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = pass.Destroy() }()
+	return op(ctx, v, pass)
 }
 
 // runLockCompatScenario is the scenario child, root in a private mount
@@ -548,8 +596,7 @@ var lockCompatScenarios = []struct {
 		lib(wantOK, "AddKey"),
 	}},
 	// (b) Missing and not creatable: cryptsetup refuses every command,
-	// reads included. go-luks2 refuses every write and reads without the
-	// lock (docs/COMPATIBILITY.md).
+	// reads included, and so does go-luks2, whose reads take the lock shared.
 	{"readonly", false, []lockCase{
 		cs(wantSilent5, "isLuks", "{dev}"),
 		cs(wantReadLockErr, "luksDump", "{dev}"),
@@ -557,8 +604,8 @@ var lockCompatScenarios = []struct {
 		cs(wantReadLockErr, csLockAddKey...),
 		cs(wantReadLockErr, csKillSlot...),
 		cs(wantReadLockErr, csToken...),
-		lib(wantOK, "ReadHeader"),
-		lib(wantOK, "TestKey"),
+		lib(wantUnavailable, "ReadHeader"),
+		lib(wantUnavailable, "TestKey"),
 		lib(wantUnavailable, "AddKey"),
 		lib(wantUnavailable, "KillSlot"),
 		lib(wantUnavailable, "ImportToken"),
@@ -568,19 +615,20 @@ var lockCompatScenarios = []struct {
 	{"symlink", false, []lockCase{
 		cs(wantAborted, "luksDump", "{dev}"),
 		cs(wantAborted, csLockAddKey...),
+		lib(wantUnavailable, "ReadHeader"),
 		lib(wantUnavailable, "AddKey"),
 		lib(wantUnavailable, "ImportToken"),
 	}},
 	// (c) Present but root's alone, the caller uid 1000 in the disk group:
-	// cryptsetup refuses everything; go-luks2 refuses every write.
+	// both refuse everything, reads included.
 	{"rootonly", false, asUser(
 		cs(wantSilent5, "isLuks", "{dev}"),
 		cs(wantReadLockErr, "luksDump", "{dev}"),
 		cs(wantReadLockErr, csTestPass...),
 		cs(wantReadLockErr, csLockAddKey...),
 		cs(wantReadLockErr, csToken...),
-		lib(wantOK, "ReadHeader"),
-		lib(wantOK, "TestKey"),
+		lib(wantDenied, "ReadHeader"),
+		lib(wantDenied, "TestKey"),
 		lib(wantDenied, "AddKey"),
 		lib(wantDenied, "KillSlot"),
 		lib(wantDenied, "ImportToken"),
@@ -594,12 +642,13 @@ var lockCompatScenarios = []struct {
 		lib(wantOK, "AddKey"),
 	)},
 	// (d) The lock file held exclusively by someone else: cryptsetup waits
-	// for it with no timeout, reads included. go-luks2 reads without it and
-	// refuses a write once its bound is spent.
+	// for it with no timeout, reads included. go-luks2 waits for it too, reads
+	// included, and refuses once its bound is spent.
 	{"held-exclusive", false, []lockCase{
 		cs(wantBlocked, "luksDump", "{dev}"),
 		cs(wantBlocked, csLockAddKey...),
-		lib(wantOK, "ReadHeader"),
+		lib(wantContended, "ReadHeader"),
+		lib(wantContended, "TestKey"),
 		lib(wantContended, "AddKey"),
 		lib(wantContended, "ImportToken"),
 	}},
@@ -608,6 +657,7 @@ var lockCompatScenarios = []struct {
 		cs(wantOK, "luksDump", "{dev}"),
 		cs(wantOK, csTestPass...),
 		cs(wantBlocked, csLockAddKey...),
+		lib(wantOK, "ReadHeader"),
 		lib(wantOK, "TestKey"),
 		lib(wantContended, "AddKey"),
 	}},
@@ -615,7 +665,9 @@ var lockCompatScenarios = []struct {
 
 // TestCompatMetadataLockDirectoryStates is Part 1: for each state of
 // cryptsetup's lock directory, cryptsetup's measured behaviour beside
-// go-luks2's, on one volume.
+// go-luks2's, on one volume. go-luks2's steps go through Open and the public
+// Volume methods (lockCompatOps), so what is measured is the lock a caller's
+// call takes.
 func TestCompatMetadataLockDirectoryStates(t *testing.T) {
 	requireCryptsetupDeclared(t)
 	disk, err := diskGID()

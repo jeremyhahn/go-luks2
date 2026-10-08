@@ -48,6 +48,33 @@ func TestNewRecoveryKeyDefaultsToDashedAt32Bytes(t *testing.T) {
 	}
 }
 
+// failingWriter accepts nothing and fails every Write with err.
+type failingWriter struct{ err error }
+
+func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }
+
+// TestRecoveryKeyWriteToReportsAWriteFailureAsIO: a failing writer is an I/O
+// failure with the writer's error as its cause, not a protected-memory one.
+func TestRecoveryKeyWriteToReportsAWriteFailureAsIO(t *testing.T) {
+	rk, err := NewRecoveryKey()
+	if err != nil {
+		t.Fatalf("NewRecoveryKey failed: %v", err)
+	}
+	defer rk.Destroy()
+
+	cause := errors.New("disk full")
+	_, err = rk.WriteTo(failingWriter{err: cause})
+	if !errors.Is(err, ErrIO) {
+		t.Errorf("WriteTo error = %v, want ErrIO", err)
+	}
+	if errors.Is(err, ErrProtectedMemory) {
+		t.Errorf("WriteTo error = %v, reports a write failure as ErrProtectedMemory", err)
+	}
+	if !errors.Is(err, cause) {
+		t.Errorf("WriteTo error = %v, does not wrap the writer's error", err)
+	}
+}
+
 func TestNewRecoveryKeyHonorsFormatAndLengthOptions(t *testing.T) {
 	rk, err := NewRecoveryKey(WithRecoveryFormat(RecoveryHex), WithRecoveryLength(64))
 	if err != nil {

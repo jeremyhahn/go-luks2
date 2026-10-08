@@ -190,8 +190,10 @@
 //     is structurally unreachable rather than conditionally avoided.
 //
 //     What replaces it is smaller but real, and it is recorded here rather
-//     than presented as a clean win. The key spends the duration of one
-//     activation ioctl in the KERNEL's keyring, and KERNEL KEYRINGS ARE NOT
+//     than presented as a clean win. The key spends the activation's table
+//     load, the re-check that the name still names the target this call
+//     created, and the resume (pkg/dmcrypt activateCreated) in the KERNEL's
+//     keyring, and KERNEL KEYRINGS ARE NOT
 //     NAMESPACED BY CONTAINER: keys live in the host's key subsystem scoped by
 //     uid and by session. Three things bound it. The type is "logon", whose
 //     payload is write-only: KEYCTL_READ returns EOPNOTSUPP, so no process --
@@ -200,13 +202,13 @@
 //     reference, not learn the key. The ring is the SESSION keyring, never the
 //     uid-wide user keyring, and container runtimes give each container its own
 //     (measured: runc creates `_ses.<hash>` per container). And the entry exists
-//     for one ioctl and is then revoked, unlinked and VERIFIED gone; it never
-//     outlives its mapping.
+//     only from the load to the resume and is then revoked, unlinked and
+//     VERIFIED gone; it never outlives the activation call.
 //
 //     This is much better than an unwipeable userspace string, and it is not
 //     nothing. On a host where several containers share a uid AND a session
-//     keyring, the window is one ioctl wide and confers use-by-reference, not
-//     disclosure.
+//     keyring, the window spans the load, a re-check and the resume, and
+//     confers use-by-reference, not disclosure.
 //
 //  6. HASH STATE. sha256.Sum256 leaves its input in the hash's internal state,
 //     which is on the stack or heap and cannot be wiped. Two calls hash secret

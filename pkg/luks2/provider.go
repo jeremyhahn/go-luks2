@@ -6,6 +6,7 @@ package luks2
 
 import (
 	"context"
+	"slices"
 	"strconv"
 
 	"github.com/jeremyhahn/go-enclave"
@@ -58,7 +59,7 @@ func (v *Volume) Enroll(ctx context.Context, key *Key, p KeyProvider, kp Keyslot
 	if p == nil {
 		return Enrollment{}, errAt(op, v.path, &errs.Error{Kind: ErrInvalidArgument})
 	}
-	if err := kp.KDF.Validate(); err != nil {
+	if err := kp.KDF.validateWith(v.sys.fipsMode); err != nil {
 		return Enrollment{}, errAt(op, v.path, err)
 	}
 	opts := addKeyOptionsFromKeyslotParams(kp)
@@ -169,6 +170,13 @@ func (v *Volume) Enroll(ctx context.Context, key *Key, p KeyProvider, kp Keyslot
 // only the keyslots p.Token().Keyslots names (DESIGN.md §B.2) -- unlike
 // Unlock, which tries every keyslot bound to the data segment.
 //
+// They are tried by priority, as cryptsetup tries the keyslots of a token the
+// caller names (luks2_token.c, LUKS2_keyslot_open_by_token): every prefer
+// keyslot first, then every normal one, then every ignore one, each group in
+// the token's order. A named token makes its ignore keyslots eligible, last;
+// only cryptsetup's scan of every token skips them, and this library never
+// chooses a token for the caller.
+//
 // The provider runs BEFORE mu and the shared device lock (DESIGN.md §B.1),
 // for the reasons Enroll gives.
 func (v *Volume) UnlockWithProvider(ctx context.Context, p KeyProvider) (*Key, error) {
@@ -215,11 +223,17 @@ func (v *Volume) UnlockWithProvider(ctx context.Context, p KeyProvider) (*Key, e
 		}
 	}
 
+	// The token was chosen by the caller, so its keyslots are tried as
+	// cryptsetup tries a token named with --token-id: the prefer ones, then
+	// the normal ones, then the ignore ones, each group in the token's order.
+	preferred, normal, ignored := keyslotsByPriority(metadata, ids)
+	order := slices.Concat(preferred, normal, ignored)
+
 	var masterKey *enclave.MemoryEnclave
 	var slotID string
 	err = secret.Borrow(op, credential, func(b []byte) error {
 		var derr error
-		masterKey, slotID, derr = getMasterKeySlot(ctx, locked.File(), v.path, b, metadata, ids, v.sys)
+		masterKey, slotID, derr = getMasterKeySlot(ctx, locked.File(), v.path, b, metadata, order, v.sys)
 		return derr
 	})
 	if err != nil {

@@ -62,10 +62,11 @@ setuid child in the disk group):
 | Lock file held exclusively | every command waits, with no timeout | `Header`, `Unlock` and writes wait 30 s, then `ErrLockContended` |
 | Lock file held shared | reads proceed; writes wait, with no timeout | same; writes stop at 30 s |
 
-The go-luks2 write rows are measured. Its read rows follow from the code
-(`(*Volume).Header` and `Unlock` take the lock shared through the same
-`internal/device` path a write takes exclusively) rather than from this
-test, whose read steps run the package's lockless internal read helpers.
+The go-luks2 rows are measured, reads and writes alike: each step opens the
+device with `Open` and calls the `Volume` method a caller would (`Header`,
+`Unlock`, `AddKeyslot`, `RemoveKeyslot`, `SetToken`), so it takes the lock
+that call takes. The test bounds the wait with `WithLockWait`; 30 s is
+`DefaultLockWait`.
 
 A non-root caller can manage keyslots on a block device when the lock
 directory admits its group, for example with a `tmpfiles.d` entry

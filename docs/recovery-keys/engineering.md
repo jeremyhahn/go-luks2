@@ -30,7 +30,9 @@ type Enrollment struct { Keyslot KeyslotInfo; Token int }
 `WriteTo(io.Writer)` is the only way to get the text out: a credential never
 becomes a Go string in this API (it cannot be wiped). `internal/cli`
 (`recoveryfile.go`) does its own file reads/writes against `WriteTo`/
-`ParseRecoveryKey`; the library itself has no file I/O in this path.
+`ParseRecoveryKey`; the library itself has no file I/O in this path. A
+failure of the writer is `ErrIO` wrapping the writer's error; only a failure to
+reach the protected memory holding the credential is `ErrProtectedMemory`.
 
 `make api-diff` holds this surface to DESIGN.md §B.6: the old generate, save,
 load and verify free functions are not exported.

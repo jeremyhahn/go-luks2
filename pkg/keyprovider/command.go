@@ -142,7 +142,11 @@ func WithToken(t luks2.Token) CommandOption {
 //
 // A relative or bare name is refused rather than searched for on PATH: an
 // unlock credential must not depend on the environment of whoever happened to
-// invoke the process.
+// invoke the process. Each Passphrase checks path as internal/command checks a
+// system tool before running it, and refuses, with ErrHelperFailed, a helper
+// that anyone but root or this process's user could have replaced, or that is
+// reached through a directory or symlink that could have been; the helper then
+// runs from the descriptor that was checked, not from path again.
 func NewCommand(path string, opts ...CommandOption) (*Command, error) {
 	const op = "NewCommand"
 	if path == "" {
@@ -203,7 +207,16 @@ func (p *Command) run(ctx context.Context) (*enclave.MemoryEnclave, int, error) 
 	const op = "helper output"
 	custody := secret.System()
 
-	cmd := exec.CommandContext(ctx, p.path, p.args...) // #nosec G204 -- the helper is an absolute path named by the caller or by a token it authored
+	// The helper produces the credential, so it gets the trust a system tool
+	// gets: a file someone other than root or this user could have replaced
+	// is refused, not run. It runs through the descriptor that was checked,
+	// so a path swapped after the check cannot substitute another file.
+	prog, err := command.Open(p.path)
+	if err != nil {
+		return nil, 0, &errs.Error{Kind: ErrHelperFailed, Detail: "the helper is not trusted", Err: err}
+	}
+	defer func() { _ = prog.Close() }()
+	cmd := prog.Cmd(ctx, p.args...)
 	cmd.Env = append(append([]string(nil), p.sys.env...), p.env...)
 	cmd.WaitDelay = p.sys.waitDelay
 	if len(p.stdin) > 0 {

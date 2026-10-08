@@ -231,6 +231,47 @@ func TestVolumeTargetReportsTheSegmentGeometry(t *testing.T) {
 	}
 }
 
+// TestVolumeTargetRefusesAKeyTheCurrentHeaderDoesNotVerify pins that Target
+// re-verifies the key against the header it re-reads: a header rewritten
+// between Unlock and activation -- here, the volume re-formatted in place
+// with a new volume key -- must not be mapped with the old key.
+func TestVolumeTargetRefusesAKeyTheCurrentHeaderDoesNotVerify(t *testing.T) {
+	path := formattedVolumeImage(t, "target-rewritten.img", "", "")
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+	v.sys.blockDeviceOf = func(*os.File) (uint64, error) { return 0xabcd, nil }
+
+	pass := newTestPassphrase(t)
+	defer func() { _ = pass.Destroy() }()
+	key, err := v.Unlock(context.Background(), pass)
+	if err != nil {
+		t.Fatalf("Unlock failed: %v", err)
+	}
+	defer key.Destroy()
+
+	if err := formatForTest(formatOptionsForTest{
+		Device:        path,
+		Passphrase:    []byte("correct horse battery staple"),
+		Cipher:        "aes",
+		CipherMode:    "xts-plain64",
+		KeySize:       512,
+		HashAlgo:      "sha256",
+		SectorSize:    512,
+		KDFType:       kdfTypePBKDF2,
+		PBKDFIterTime: 1,
+	}); err != nil {
+		t.Fatalf("re-format failed: %v", err)
+	}
+
+	if _, err := v.Target(context.Background(), key); !errors.Is(err, ErrWrongKey) {
+		t.Fatalf("Target = %v, want ErrWrongKey for a key the rewritten header does not verify", err)
+	}
+}
+
 // TestVolumeTargetRefusesAnythingButABlockDevice is Target's half of C6
 // (#250): dm-crypt maps a block device, and a regular file -- all an
 // unprivileged test can format -- is refused rather than silently treated

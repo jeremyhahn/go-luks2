@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -33,6 +34,65 @@ func TestRunWipeHeaderOnly(t *testing.T) {
 	if _, err := v.Header(context.Background()); err == nil {
 		t.Error("Header after wipe: want an error -- the header is gone")
 	}
+}
+
+// TestRunWipeHeaderOnlyWarnsThatAHeaderBackupStillOpens: a header-only wipe
+// leaves the data in place, so a full header backup (what cryptsetup
+// luksHeaderBackup saves: everything before the data segment) restored
+// afterwards opens the volume again. The warning must say so, not the
+// opposite.
+func TestRunWipeHeaderOnlyWarnsThatAHeaderBackupStillOpens(t *testing.T) {
+	ctx := context.Background()
+	path := newTestVolumeImage(t, "wipe-header-backup.img")
+
+	v, err := luks2.Open(ctx, path, luks2.WithReadOnly())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	hdr, err := v.Header(ctx)
+	_ = v.Close()
+	if err != nil {
+		t.Fatalf("Header: %v", err)
+	}
+	image, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read image: %v", err)
+	}
+	backup := bytes.Clone(image[:hdr.Segments()[0].Offset])
+
+	e, _, _, stdout, _ := newTestEnv(bytes.NewBufferString("YES\n"))
+	if err := runWipe(ctx, e, []string{path}); err != nil {
+		t.Fatalf("runWipe: %v", err)
+	}
+	warning := stdout.String()
+	if strings.Contains(warning, "no\nlonger opens") || !strings.Contains(warning, "luksHeaderBackup") {
+		t.Errorf("warning = %q, want it to say a header backup taken before still opens the data", warning)
+	}
+
+	// The warning's claim, demonstrated: restore the backup and unlock.
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open image: %v", err)
+	}
+	if _, err := f.WriteAt(backup, 0); err != nil {
+		_ = f.Close()
+		t.Fatalf("restore the backup: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close image: %v", err)
+	}
+	v, err = luks2.Open(ctx, path, luks2.WithReadOnly())
+	if err != nil {
+		t.Fatalf("Open after restore: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+	pass := newTestPassphraseEnclave(t)
+	defer func() { _ = pass.Destroy() }()
+	key, err := v.Unlock(ctx, pass)
+	if err != nil {
+		t.Fatalf("Unlock after restoring a pre-wipe header backup: %v", err)
+	}
+	key.Destroy()
 }
 
 func TestRunWipeHeaderOnlyInvalidPasses(t *testing.T) {

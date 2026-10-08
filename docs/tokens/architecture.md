@@ -51,8 +51,16 @@ its own public package — "the only way to keep `pkg/luks2` exec-free"
 members are interpreted by `pkg/keyprovider` alone. FIDO2 runs `fido2-cred`
 and `fido2-assert` from libfido2 as external helpers, from absolute paths
 (`/usr/bin/fido2-cred` and `/usr/bin/fido2-assert` unless
-`WithFIDO2Tools` names others), never looked up on `PATH`, and with the same
-fixed minimal environment every exec'd command gets
+`WithFIDO2Tools` names others), never looked up on `PATH`. A helper, like any
+`Command`, must pass the trusted-executable checks every system tool does
+(`internal/command`'s `Open`): a regular executable file owned by root or the
+caller, not group- or world-writable, reached only through directories owned
+the same way or sticky and through symlinks owned the same way, each judged
+by the descriptor the walk opened rather than by name. One that fails is
+refused with `ErrHelperFailed` and never run, and one that passes runs from
+that same descriptor, so a path swapped after the check cannot substitute
+another file. It runs
+with the same fixed minimal environment every exec'd command gets
 ([volumes/architecture.md](../volumes/architecture.md#device-layer)); it does
 not link a cgo binding, keeping the package pure Go.
 
@@ -68,7 +76,11 @@ has no type is anonymous: Enroll writes the keyslot only and reports token
 `-1`.
 
 **Unlock with a provider** (`(*Volume).UnlockWithProvider` plus
-`dmcrypt.Activate`): `ctx` bounds the helper. An authenticator waiting for a
+`dmcrypt.Activate`): only the keyslots the provider's token names are tried,
+by priority as cryptsetup tries a token named with `--token-id` (`prefer`,
+then `normal`, then `ignore`, each in the token's order;
+[keyslots](../keyslots/architecture.md#data-flow-unlock-order)). `ctx` bounds
+the helper. An authenticator waiting for a
 touch blocks until someone touches it; an unattended unlock needs a deadline.
 The read of the helper's output ends with `ctx` even if a process the helper
 started still holds its stdout; if the helper exits while such a process

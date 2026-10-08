@@ -180,6 +180,34 @@ func TestRunIsLUKSDeviceDoesNotExist(t *testing.T) {
 	}
 }
 
+// TestRunIsLUKSVerboseGivesTheReason: under -v or --verbose a no carries its
+// reason on stderr, as cryptsetup isLuks -v does, and still exits 1; without
+// it stderr stays empty.
+func TestRunIsLUKSVerboseGivesTheReason(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		flag []string
+		want bool
+	}{
+		{"quiet", nil, false},
+		{"long", []string{"--verbose"}, true},
+		{"short", []string{"-v"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "does-not-exist.img")
+			e, _, _, _, stderr := newTestEnv(&bytes.Buffer{})
+
+			err := runIsLUKS(context.Background(), e, append(append([]string{}, tc.flag...), path))
+			if got := exitCode(err); got != 1 {
+				t.Fatalf("exit status = %d (%v), want 1", got, err)
+			}
+			if gave := strings.Contains(stderr.String(), path+":"); gave != tc.want {
+				t.Errorf("stderr = %q, reason reported = %v, want %v", stderr.String(), gave, tc.want)
+			}
+		})
+	}
+}
+
 func TestRunInfoOnARealVolume(t *testing.T) {
 	path := newTestVolumeImage(t, "info.img")
 	e, _, _, stdout, _ := newTestEnv(&bytes.Buffer{})

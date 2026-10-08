@@ -184,6 +184,7 @@ func (h *Header) Label() string
 func (h *Header) Subsystem() string
 func (h *Header) SequenceID() uint64
 func (h *Header) Size() int64
+func (h *Header) Offset() int64                                        // which copy: 0 primary, else secondary
 func (h *Header) Keyslots() []KeyslotInfo
 func (h *Header) Segments() []Segment
 func (h *Header) Tokens() map[int]Token
@@ -284,7 +285,7 @@ func (e *KeyringError) Unwrap() []error
 func (e *KeyringError) Remedy() string
 ```
 
-`Activate` calls `v.Target(ctx, key)`, which re-reads the header under the shared lock and re-verifies the key if `SequenceID` changed. It then maps the pinned descriptor's major:minor, never a path.
+`Activate` calls `v.Target(ctx, key)`, which re-reads the header under the shared lock and re-verifies the key against that header's digest for the mapped segment, every time (p-bugs; a key it does not verify is `ErrWrongKey`). It then maps the pinned descriptor's major:minor, never a path.
 
 The mapping is a transaction from the moment the create succeeds. Rollback runs under `context.WithoutCancel(ctx)` with its own clock budget, so a cancelled caller never leaves a plaintext device behind.
 
@@ -621,7 +622,7 @@ func (e *Error) Unwrap() []error // {Kind, Err}
 | luks2 | `ErrInvalidArgument`, `ErrInvalidCredential`, `ErrNotLUKS2`, `ErrInvalidHeader`, `ErrUnsupported`, `ErrUnsupportedRequirement`, `ErrNoSpace`, `ErrWrongKey`, `ErrNoKeyslots`, `ErrKeyslotNotFound`, `ErrLastKeyslot`, `ErrKeyslotAreaOverlap`, `ErrTokenNotFound`, `ErrPrimaryHeaderCurrent`, `ErrKeyProvider`, `ErrOrphanedKeyslot`, `ErrFIPSNotApproved`, `ErrFIPSImportRequired`, `ErrFIPSMigration`, `ErrKDFCalibration`, `ErrProtectedMemory`, `ErrIO`, `ErrReadOnly`, `ErrClosed`; shared: `ErrDeviceNotFound`, `ErrPermissionDenied`, `ErrDeviceInUse`, `ErrDeviceChanged`, `ErrDeviceCacheStale`, `ErrLockContended`, `ErrMetadataLockUnavailable` | `Error`, `LockTimeoutError{Path, Waited, Attempts}`, `KDFCostError{Param, Value, Min, Max}` (Is `ErrInvalidArgument`), `KDFCalibrationError{Hash, Target, Probe, Elapsed}`, `FIPSImportRequiredError{Path, Keyslots, Digests}`, `FIPSMigrationError{Path, Stage, State}`, `OrphanedKeyslotError{Keyslot, Cause}` |
 | dmcrypt | `ErrActive`, `ErrNotActive`, `ErrBusy`, `ErrStillLive`, `ErrInvalidName`, `ErrNodeUnverified`, `ErrKeyring`, `ErrKeyringUnavailable`, `ErrKeyringBlocked`, `ErrKeyringUnsupported`, `ErrKeyringQuotaExhausted`, `ErrKeyringFailed`, `ErrKeyringEntryExists`, `ErrKeyringKeyNotReleased`; shared `ErrPermissionDenied` | `Error`, `KeyringError` |
 | keyprovider | `ErrInvalidArgument`, `ErrHelperFailed`, `ErrHelperOutput`, `ErrNoDevice`, `ErrInvalidBinding`, `ErrUnsupportedToken` | `Error`, `HelperError` |
-| loop | `ErrNotFound`, `ErrDetachIncomplete`, `ErrNodeAbsent`; shared `ErrPermissionDenied` | `Error` |
+| loop | `ErrNotFound`, `ErrDetachIncomplete`, `ErrNodeAbsent`, `ErrDeviceReassigned`; shared `ErrPermissionDenied` | `Error` |
 | filesystem | `ErrInvalidArgument`, `ErrUnsupported`, `ErrNotDetected`, `ErrTool`, `ErrNotMounted` | `Error`, `CommandError` |
 | wipe | `ErrVerification`; shared `ErrDeviceInUse`, `ErrDeviceChanged`, `ErrPermissionDenied`, `ErrLockContended` | `Error` |
 

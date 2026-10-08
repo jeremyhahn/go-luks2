@@ -5,9 +5,11 @@
 package makefile
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -40,6 +42,26 @@ func gitIn(t *testing.T, dir string, args ...string) string {
 // a VERSION file, a CHANGELOG with the section for each version in sections and
 // a bare remote named dev. It returns the work tree, the bare remote and the
 // agent-git stand-in.
+// noBackgroundMaintenance turns off the automatic maintenance git starts after
+// a commit, and after a push in the repository it pushed to. Since git 2.47
+// that run detaches (maintenance.autoDetach) and nothing waits for it, so it
+// can still be writing the fixture's objects/pack when t.TempDir removes the
+// directory. The settings go in the repository's own config rather than in
+// GIT_CONFIG_* because git drops those for the receive-pack a local push runs
+// in the remote. maintenance.auto alone stops the run; the rest keep any gc
+// that does start in the foreground, where its caller waits for it.
+func noBackgroundMaintenance(t *testing.T, repo string) {
+	t.Helper()
+	for _, kv := range [][2]string{
+		{"maintenance.auto", "false"},
+		{"maintenance.autoDetach", "false"},
+		{"gc.auto", "0"},
+		{"gc.autoDetach", "false"},
+	} {
+		gitIn(t, repo, "config", kv[0], kv[1])
+	}
+}
+
 func releaseFixture(t *testing.T, version string, sections ...string) (work, remote, agentGit string) {
 	t.Helper()
 	root := repoRoot(t)
@@ -81,6 +103,8 @@ func releaseFixture(t *testing.T, version string, sections ...string) (work, rem
 	}
 	gitIn(t, base, "init", "-q", "--bare", remote)
 	gitIn(t, work, "init", "-q", "-b", "main")
+	noBackgroundMaintenance(t, remote)
+	noBackgroundMaintenance(t, work)
 	gitIn(t, work, "remote", "add", "dev", remote)
 	gitIn(t, work, "add", ".")
 	gitIn(t, work, "commit", "-q", "-m", "fixture")
@@ -228,5 +252,43 @@ func TestReleaseAliasReleaseAlphaStillWorks(t *testing.T) {
 	}
 	if got := gitIn(t, remote, "tag", "--list", "v0.3.2-alpha"); got != "v0.3.2-alpha" {
 		t.Errorf("tag not pushed (got %q)", got)
+	}
+}
+
+// TestReleaseFixtureLeavesNoGitRunning: no git the fixture or the recipe runs
+// starts automatic maintenance, in the work tree or in the remote, so nothing
+// is left writing either repository when the test returns. git's trace2 log
+// names every child a git process starts, including one it detaches.
+func TestReleaseFixtureLeavesNoGitRunning(t *testing.T) {
+	trace := filepath.Join(t.TempDir(), "trace2.json")
+	t.Setenv("GIT_TRACE2_EVENT", trace)
+	work, _, agentGit := releaseFixture(t, "0.9.0", "1.0.0")
+	if out, ok := runRelease(t, work, agentGit, "v1.0.0"); !ok {
+		t.Fatalf("make release failed:\n%s", out)
+	}
+
+	log, err := os.ReadFile(trace) // #nosec G304 -- a path in the test's temp dir
+	if err != nil {
+		t.Fatal(err)
+	}
+	starts := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(log)), "\n") {
+		var event struct {
+			Event string   `json:"event"`
+			Argv  []string `json:"argv"`
+		}
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("trace2 line %q: %v", line, err)
+		}
+		if event.Event != "start" {
+			continue
+		}
+		starts++
+		if slices.Contains(event.Argv, "maintenance") || slices.Contains(event.Argv, "gc") {
+			t.Errorf("git started %q, which outlives the command that started it", strings.Join(event.Argv, " "))
+		}
+	}
+	if starts == 0 {
+		t.Fatal("the trace2 log records no git at all; it cannot show that none ran maintenance")
 	}
 }

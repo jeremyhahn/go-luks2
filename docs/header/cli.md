@@ -7,7 +7,7 @@
 luks2 header show      <device>
 luks2 header secondary <device>
 luks2 header restore   [--batch-mode | --yes] [--force] <device>
-luks2 isluks [--luks2] <device>
+luks2 isluks [--luks2] [-v|--verbose] <device>
 ```
 
 A LUKS2 container has two header copies, written together on every change.
@@ -33,10 +33,11 @@ Tokens:         1
 Segments:       1
 ```
 
-`show` prints the current copy (the one `(*Volume).Header` returns), always
-labeled `Primary` with offset 0, even when the primary is damaged or older
-and the secondary's contents are shown. `secondary` prints the same for the
-second copy, whose header offset equals the header size. The copy with the
+`show` prints the current copy (the one `(*Volume).Header` returns), labeled
+and offset as the copy it is: normally the primary at offset 0, but when the
+primary is damaged or older it prints the secondary, labeled `Secondary` with
+its own offset, and says so on stderr. `secondary` always prints the second
+copy, whose header offset equals the header size. The copy with the
 higher sequence ID was written last; if the secondary is ahead, the primary
 is stale.
 
@@ -63,8 +64,9 @@ requires a LUKS2 header that passes validation. Unlike `cryptsetup isLuks`
 this is not a magic-only check: a LUKS2 header that fails validation, or a
 metadata lock that cannot be taken, is also 1. A device that cannot be opened
 or read is 1 too. The answer, `<device> is a LUKS device` or
-`<device> is not a LUKS device` (`LUKS2` with `--luks2`), goes to stdout; the
-underlying reason for a no is not reported.
+`<device> is not a LUKS device` (`LUKS2` with `--luks2`), goes to stdout.
+With `-v` or `--verbose` the reason for a no is printed on stderr, as
+`cryptsetup isLuks -v` does; the exit status is the same.
 
 ```bash
 if sudo luks2 isluks --luks2 /dev/sdb1; then sudo luks2 open /dev/sdb1 backup; fi

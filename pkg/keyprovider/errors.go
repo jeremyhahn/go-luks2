@@ -33,7 +33,10 @@ var (
 
 	// ErrHelperFailed indicates a helper could not be run, or ran and
 	// exited non-zero -- the authenticator refused, the touch timed out,
-	// the PIN was wrong.
+	// the PIN was wrong. A helper that someone other than root or this
+	// process's user could have replaced -- the file, or a directory above
+	// it, is theirs or is group- or world-writable -- is not run, and
+	// matches this too.
 	ErrHelperFailed = errors.New("keyprovider: key helper failed")
 
 	// ErrHelperOutput indicates a helper SUCCEEDED and produced something

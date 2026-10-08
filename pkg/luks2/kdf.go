@@ -126,8 +126,11 @@ func (p KDFParams) Validate() error {
 	return p.validateWith(fips.Probe)
 }
 
-// validateWith is Validate against a given FIPS policy source: Volume.Format
-// passes its sys's, so a policy forced on a Volume reaches the KDF gate.
+// validateWith is Validate against a given FIPS policy source. Every Volume
+// method that takes a KDFParams -- Format, AddKeyslot, ChangeKeyslot, Enroll,
+// AddRecoveryKey -- passes its sys's, so the preflight judges a KDF by the
+// policy the volume's derivation will apply; only the public Validate, which
+// has no volume, reads the process's mode.
 func (p KDFParams) validateWith(fipsMode func() fips.Mode) error {
 	switch p.Type {
 	case "", KDFArgon2id, KDFArgon2i, KDFPBKDF2:

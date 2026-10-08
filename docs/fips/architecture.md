@@ -28,17 +28,23 @@ a `Volume` operation, not a separate subsystem to configure.
 as methods on it. Two policy sources are in play, and they differ by what
 they judge:
 
-- **Derivations** use the volume's own policy. Each `Volume` carries a
-  `volumeSys`, and `volumeSys.fipsMode` (`pkg/luks2/volume.go`) is what every
-  key derivation on that volume consults. It defaults to `fips.Probe`, the
-  process's mode, and a test can force a different policy on one volume without
-  touching the others.
-- **The parameter preflight** uses the process mode. `AddKeyslot` and
-  `ChangeKeyslot` call the public `KDFParams.Validate()` on an explicit KDF
-  before writing, and that reads `fips.Probe` directly, not the volume's
-  policy. (`Format` passes its volume's policy to the same check.) A policy
-  forced on one volume therefore reaches its derivations but not the
-  `AddKeyslot`/`ChangeKeyslot` preflight.
+- **New KDFs and derivations** use the volume's own policy. Each `Volume`
+  carries a `volumeSys`, and `volumeSys.fipsMode` (`pkg/luks2/volume.go`)
+  defaults to `fips.Probe`, the process's mode; a test can force a different
+  policy on one volume without touching the others. The preflight of an
+  explicit KDF in `Format`, `AddKeyslot`, `ChangeKeyslot`, `Enroll` and
+  `AddRecoveryKey`, before any lock is taken, reads it, and so does every key
+  derivation and area cipher on that volume.
+- **Checks with no volume, and the screening of what is already on disk**,
+  use the process mode. The public `KDFParams.Validate()` and
+  `FormatParams.Validate()` read `fips.Probe` directly; they are the only
+  checks of caller-supplied KDF parameters that do. The screening of keyslots
+  and digests already on disk outside a derivation (the scan's cost budget,
+  the digest a new keyslot joins, the read-back of a written keyslot,
+  verification of a supplied volume key, `MigrateToFIPS`'s digest walk) also
+  reads `fips.Probe` (DECISIONS.md, H13d).
+
+In production both sources are the same function.
 
 `MigrateToFIPS` itself stays in `pkg/luks2` because it needs the keyslot/
 digest/header machinery that already lives there.

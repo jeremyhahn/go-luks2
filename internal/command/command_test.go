@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -68,8 +67,8 @@ func TestResolveRefusesWhatItCannotTrust(t *testing.T) {
 	tools := Tools{Dirs: []string{bin}}
 
 	for _, name := range []string{"", "../bin/sh", "/bin/sh", "absent", "not-exec", "a-directory", "dangling"} {
-		if path, _, err := tools.Resolve(name); !errors.Is(err, ErrTool) {
-			t.Errorf("Resolve(%q) = %q, %v; want ErrTool", name, path, err)
+		if prog, err := tools.Resolve(name); !errors.Is(err, ErrTool) {
+			t.Errorf("Resolve(%q) = %v, %v; want ErrTool", name, prog, err)
 		}
 	}
 
@@ -78,7 +77,7 @@ func TestResolveRefusesWhatItCannotTrust(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeScript(t, filepath.Join(shared, "prog"), "exit 0\n")
-	if _, _, err := (Tools{Dirs: []string{shared}}).Resolve("prog"); !errors.Is(err, ErrTool) {
+	if _, err := (Tools{Dirs: []string{shared}}).Resolve("prog"); !errors.Is(err, ErrTool) {
 		t.Fatalf("Resolve from a world-writable directory = %v, want ErrTool", err)
 	}
 
@@ -87,7 +86,7 @@ func TestResolveRefusesWhatItCannotTrust(t *testing.T) {
 	if err := os.Chmod(writable, 0o770); err != nil { // #nosec G302 -- deliberately unsafe, to be refused
 		t.Fatal(err)
 	}
-	if _, _, err := tools.Resolve("group-writable"); !errors.Is(err, ErrTool) {
+	if _, err := tools.Resolve("group-writable"); !errors.Is(err, ErrTool) {
 		t.Fatalf("Resolve of a group-writable program = %v, want ErrTool", err)
 	}
 }
@@ -107,28 +106,29 @@ func TestASymlinkIsFollowedOnlyIntoATrustedDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	tools := Tools{Dirs: []string{bin}}
-	if _, err := tools.Command(context.Background(), "mkfs.ext4"); !errors.Is(err, ErrTool) {
-		t.Fatalf("Command through a link into a world-writable directory = %v, want ErrTool", err)
+	if _, err := tools.Run(context.Background(), "mkfs.ext4"); !errors.Is(err, ErrTool) {
+		t.Fatalf("Run through a link into a world-writable directory = %v, want ErrTool", err)
 	}
 
 	trusted := trustedDir(t)
-	writeScript(t, filepath.Join(trusted, "mke2fs"), "exit 0\n")
+	writeScript(t, filepath.Join(trusted, "mke2fs"), "echo made\n")
 	if err := os.Remove(link); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(filepath.Join(trusted, "mke2fs"), link); err != nil {
 		t.Fatal(err)
 	}
-	cmd, err := tools.Command(context.Background(), "mkfs.ext4", "-q")
+	prog, err := tools.Resolve("mkfs.ext4")
 	if err != nil {
-		t.Fatalf("Command through a trusted link = %v", err)
+		t.Fatalf("Resolve through a trusted link = %v", err)
 	}
-	resolved, err := filepath.EvalSymlinks(filepath.Join(trusted, "mke2fs"))
-	if err != nil {
-		t.Fatal(err)
+	defer func() { _ = prog.Close() }()
+	cmd := tools.command(context.Background(), prog, "-q")
+	if cmd.Args[0] != link || cmd.Args[1] != "-q" {
+		t.Fatalf("runs as %q, want %q -q", cmd.Args, link)
 	}
-	if cmd.Path != resolved || cmd.Args[0] != link || cmd.Args[1] != "-q" {
-		t.Fatalf("runs %q as %q, want %q as %q", cmd.Path, cmd.Args, resolved, link)
+	if out, err := cmd.Output(); err != nil || string(out) != "made\n" {
+		t.Fatalf("the trusted target ran with %q, %v", out, err)
 	}
 }
 
@@ -170,7 +170,7 @@ func TestAnEntryInAnUntrustedDirectoryIsRefusedEvenWhenItsTargetIsTrusted(t *tes
 	if err := os.Symlink(filepath.Join(trusted, "prog"), filepath.Join(shared, "prog")); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := (Tools{Dirs: []string{shared}}).Resolve("prog"); !errors.Is(err, ErrTool) {
+	if _, err := (Tools{Dirs: []string{shared}}).Resolve("prog"); !errors.Is(err, ErrTool) {
 		t.Fatalf("Resolve through a world-writable directory = %v, want ErrTool", err)
 	}
 }
@@ -325,20 +325,6 @@ func TestOutputMapsACanceledCtxToItsError(t *testing.T) {
 	}
 }
 
-// fileInfo is an os.FileInfo with a chosen mode and owner record, for the
-// ownership rule, which reads both from what Lstat returned.
-type fileInfo struct {
-	mode os.FileMode
-	sys  any
-}
-
-func (f fileInfo) Name() string       { return "f" }
-func (f fileInfo) Size() int64        { return 0 }
-func (f fileInfo) Mode() os.FileMode  { return f.mode }
-func (f fileInfo) ModTime() time.Time { return time.Time{} }
-func (f fileInfo) IsDir() bool        { return f.mode.IsDir() }
-func (f fileInfo) Sys() any           { return f.sys }
-
 // TestOwnershipRule: a file must be owned by root or this user and writable
 // by neither group nor others; a directory may be group- or world-writable
 // only when it is sticky.
@@ -350,19 +336,19 @@ func TestOwnershipRule(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name     string
-		info     fileInfo
+		uid      uint32
+		mode     os.FileMode
 		stickyOK bool
 		trusted  bool
 	}{
-		{"root-owned, read-only to others", fileInfo{0o755, &syscall.Stat_t{Uid: 0}}, false, true},
-		{"own, read-only to others", fileInfo{0o700, &syscall.Stat_t{Uid: self}}, false, true},
-		{"someone else's", fileInfo{0o755, &syscall.Stat_t{Uid: other}}, false, other == 0},
-		{"group-writable", fileInfo{0o775, &syscall.Stat_t{Uid: 0}}, false, false},
-		{"a sticky world-writable directory", fileInfo{os.ModeDir | os.ModeSticky | 0o777, &syscall.Stat_t{Uid: 0}}, true, true},
-		{"a sticky directory where none is allowed", fileInfo{os.ModeDir | os.ModeSticky | 0o777, &syscall.Stat_t{Uid: 0}}, false, false},
-		{"no owner record", fileInfo{0o755, nil}, false, false},
+		{"root-owned, read-only to others", 0, 0o755, false, true},
+		{"own, read-only to others", self, 0o700, false, true},
+		{"someone else's", other, 0o755, false, other == 0},
+		{"group-writable", 0, 0o775, false, false},
+		{"a sticky world-writable directory", 0, os.ModeDir | os.ModeSticky | 0o777, true, true},
+		{"a sticky directory where none is allowed", 0, os.ModeDir | os.ModeSticky | 0o777, false, false},
 	} {
-		err := ownedAndUnwritable("/x", tc.info, tc.stickyOK)
+		err := ownedAndUnwritable("/x", tc.uid, tc.mode, tc.stickyOK)
 		if (err == nil) != tc.trusted {
 			t.Errorf("%s: ownedAndUnwritable = %v, trusted %v", tc.name, err, tc.trusted)
 		}

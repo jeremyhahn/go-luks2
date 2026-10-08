@@ -58,114 +58,85 @@ func System() Tools {
 	}
 }
 
-// Resolve returns the program name as it is found in the first of t.Dirs
-// that holds it: the path to execute, which has every symlink
-// resolved, and the path it was found under, which becomes argv[0].
+// Program is an executable file that passed the trust checks, held open by
+// the descriptor those checks were made on.
 //
-// A candidate is accepted only when the file it resolves to is a regular,
-// executable file that no one but root or this process's own user can write,
-// and every directory above it -- and above the allowlisted entry -- is the
-// same, or is sticky (as /tmp is), so nobody else can replace an entry in it.
-// A symlink into a writable directory is refused rather than followed, and an
-// absent program is refused rather than looked up anywhere else.
-func (t Tools) Resolve(name string) (execPath, argv0 string, err error) {
+// It is run through that descriptor, never by path again: Cmd executes
+// pinnedPath, which names descriptor 3 of the child, and hands the descriptor
+// over as ExtraFiles[0]. The file that runs is therefore the file that was
+// checked, whatever has been renamed over its path since. The descriptor is
+// left open in the program -- a script's interpreter reopens it by that name
+// -- and refers only to the program's own file.
+type Program struct {
+	// Name is the path the program was asked for, which becomes argv[0].
+	Name string
+
+	file *os.File
+}
+
+// pinnedPath is where the child finds the program's descriptor: ExtraFiles[0]
+// is descriptor 3, and /proc/self is the child once it has forked.
+const pinnedPath = "/proc/self/fd/3"
+
+// Cmd builds the command that runs p with args, under the name p was asked
+// for. The caller sets the environment and anything else the run needs, but
+// must not replace ExtraFiles, and must keep p open until Start returns.
+func (p *Program) Cmd(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, pinnedPath, args...) // #nosec G204 -- the descriptor Open checked; args are the caller's
+	cmd.Args[0] = p.Name
+	cmd.ExtraFiles = []*os.File{p.file}
+	return cmd
+}
+
+// Close releases the descriptor. A command already started keeps its own copy.
+func (p *Program) Close() error {
+	return p.file.Close()
+}
+
+// Resolve opens the program name as it is found in the first of t.Dirs that
+// holds it, with Open's checks; the Program's Name is the path it was found
+// under. An absent program is refused rather than looked up anywhere else.
+func (t Tools) Resolve(name string) (*Program, error) {
 	if name == "" || filepath.Base(name) != name {
-		return "", "", &errs.Error{Kind: ErrTool, Detail: "the program name " + name + " is not a bare name"}
+		return nil, &errs.Error{Kind: ErrTool, Detail: "the program name " + name + " is not a bare name"}
 	}
 	for _, dir := range t.Dirs {
 		candidate := filepath.Join(dir, name)
+		// Only whether the entry is there: Open decides whether it is trusted.
 		if _, err := os.Lstat(candidate); err != nil {
 			continue
 		}
-		canonical, err := filepath.EvalSymlinks(candidate)
-		if err != nil {
-			return "", "", &errs.Error{Kind: ErrTool, Detail: "cannot resolve " + candidate, Err: err}
-		}
-		if err := trustedExecutable(canonical); err != nil {
-			return "", "", err
-		}
-		if err := trustedDirectories(dir); err != nil {
-			return "", "", err
-		}
-		return canonical, candidate, nil
+		return Open(candidate)
 	}
-	return "", "", &errs.Error{Kind: ErrTool, Detail: name + " was not found in any of " + strings.Join(t.Dirs, ", ")}
+	return nil, &errs.Error{Kind: ErrTool, Detail: name + " was not found in any of " + strings.Join(t.Dirs, ", ")}
 }
 
-// trustedExecutable reports an error unless path, which has no symlinks left
-// in it, is an executable regular file writable only by root or the current
-// user, in directories with the property trustedDirectories checks.
-func trustedExecutable(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return &errs.Error{Kind: ErrTool, Detail: "cannot inspect " + path, Err: err}
-	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
-		return &errs.Error{Kind: ErrTool, Detail: path + " is not an executable regular file"}
-	}
-	if err := ownedAndUnwritable(path, info, false); err != nil {
-		return err
-	}
-	return trustedDirectories(filepath.Dir(path))
-}
-
-// trustedDirectories walks from dir up to / and reports an error unless every
-// directory is owned by root or the current user and is not writable by group
-// or others -- unless it is sticky, which stops others replacing what they do
-// not own.
-func trustedDirectories(dir string) error {
-	resolved, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		return &errs.Error{Kind: ErrTool, Detail: "cannot resolve " + dir, Err: err}
-	}
-	for current := resolved; ; current = filepath.Dir(current) {
-		info, err := os.Lstat(current)
-		if err != nil {
-			return &errs.Error{Kind: ErrTool, Detail: "cannot inspect " + current, Err: err}
-		}
-		if err := ownedAndUnwritable(current, info, true); err != nil {
-			return err
-		}
-		if current == filepath.Dir(current) {
-			return nil
-		}
-	}
-}
-
-// ownedAndUnwritable reports an error unless path is owned by root or the
-// current user and is not writable by group or others. A directory that is
-// group- or world-writable passes only when stickyOK and its sticky bit is set.
-func ownedAndUnwritable(path string, info os.FileInfo, stickyOK bool) error {
-	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return &errs.Error{Kind: ErrTool, Detail: "cannot read the owner of " + path}
-	}
-	if st.Uid != 0 && int64(st.Uid) != int64(os.Geteuid()) {
+// ownedAndUnwritable reports an error unless path, with owner uid and mode, is
+// owned by root or the current user and is not writable by group or others. A
+// directory that is group- or world-writable passes only when stickyOK and its
+// sticky bit is set.
+func ownedAndUnwritable(path string, uid uint32, mode os.FileMode, stickyOK bool) error {
+	if uid != 0 && int64(uid) != int64(os.Geteuid()) {
 		return &errs.Error{Kind: ErrTool, Detail: path + " is owned by another user, so it could have been replaced"}
 	}
-	if info.Mode().Perm()&0o022 != 0 && (!stickyOK || info.Mode()&os.ModeSticky == 0) {
+	if mode.Perm()&0o022 != 0 && (!stickyOK || mode&os.ModeSticky == 0) {
 		return &errs.Error{Kind: ErrTool, Detail: path + " is writable by group or others, so it could have been replaced"}
 	}
 	return nil
 }
 
-// Command builds the command that runs the program name with args: the
-// resolved file is executed, argv[0] is the path it was found under -- mke2fs
-// decides which filesystem to make from it, so mkfs.ext4 must stay mkfs.ext4 --
-// and t.Env is its entire environment.
+// command builds the command that runs prog with args: the checked file is
+// executed, argv[0] is the path it was found under -- mke2fs decides which
+// filesystem to make from it, so mkfs.ext4 must stay mkfs.ext4 -- and t.Env is
+// its entire environment.
 //
 // The program runs in its own process group (Setpgid), and a canceled ctx
 // kills that whole group rather than just the program named directly: mkfs.*,
 // fsck.* and zpool/zfs can each fork their own helpers, and a cancellation
 // that left those running would not be a cancellation. WaitDelay bounds how
 // long Wait gives the group to actually exit after that kill.
-func (t Tools) Command(ctx context.Context, name string, args ...string) (*exec.Cmd, error) {
-	execPath, argv0, err := t.Resolve(name)
-	if err != nil {
-		return nil, err
-	}
-	cmd := exec.CommandContext(ctx, execPath, args...) // #nosec G204 -- execPath is resolved from fixed system directories by Resolve; args are flags the caller builds, "--", and a validated operand
-	cmd.Args[0] = argv0
+func (t Tools) command(ctx context.Context, prog *Program, args ...string) *exec.Cmd {
+	cmd := prog.Cmd(ctx, args...)
 	cmd.Env = t.Env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	grace := t.KillGrace
@@ -181,7 +152,7 @@ func (t Tools) Command(ctx context.Context, name string, args ...string) (*exec.
 		return syscall.Kill(-pgid, syscall.SIGTERM)
 	}
 	cmd.WaitDelay = grace
-	return cmd, nil
+	return cmd
 }
 
 // Run runs the program name with args and returns its combined output. A
@@ -195,10 +166,12 @@ func (t Tools) Command(ctx context.Context, name string, args ...string) (*exec.
 // CombinedOutput returns, and its error takes over whenever ctx is the
 // reason, which is what lets a caller match errors.Is(err, context.Canceled).
 func (t Tools) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
-	cmd, err := t.Command(ctx, name, args...)
+	prog, err := t.Resolve(name)
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = prog.Close() }()
+	cmd := t.command(ctx, prog, args...)
 	out, err := cmd.CombinedOutput()
 	return out, ctxError(ctx, err)
 }
@@ -206,10 +179,12 @@ func (t Tools) Run(ctx context.Context, name string, args ...string) ([]byte, er
 // Output is Run for a program whose STANDARD OUTPUT alone is parsed: stderr
 // is not part of what is returned. A cancellation is reported as in Run.
 func (t Tools) Output(ctx context.Context, name string, args ...string) ([]byte, error) {
-	cmd, err := t.Command(ctx, name, args...)
+	prog, err := t.Resolve(name)
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = prog.Close() }()
+	cmd := t.command(ctx, prog, args...)
 	out, err := cmd.Output()
 	return out, ctxError(ctx, err)
 }

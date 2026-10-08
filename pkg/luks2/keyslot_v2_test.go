@@ -472,6 +472,77 @@ func TestVolumeChangeKeyslotRefusesAnExplicitKDFLikeAddKeyslot(t *testing.T) {
 	}
 }
 
+// TestVolumeKeyslotWritesJudgeAnExplicitKDFByTheVolumePolicy pins that the
+// preflight of AddKeyslot, ChangeKeyslot and Enroll reads the Volume's FIPS
+// policy, not the process's: with the policy forced on, an explicit Argon2
+// KDF is refused before the lock is taken, and the image -- the keyslot
+// included -- is byte for byte what it was.
+func TestVolumeKeyslotWritesJudgeAnExplicitKDFByTheVolumePolicy(t *testing.T) {
+	argon2 := KeyslotParams{KDF: KDFParams{Type: KDFArgon2id, Time: 1, MemoryKiB: minArgon2MemoryKB, Parallel: 1}}
+	cases := []struct {
+		name  string
+		write func(v *Volume, key *Key, pass *enclave.MemoryEnclave) error
+	}{
+		{"AddKeyslot", func(v *Volume, key *Key, pass *enclave.MemoryEnclave) error {
+			_, err := v.AddKeyslot(context.Background(), key, pass, argon2)
+			return err
+		}},
+		{"ChangeKeyslot", func(v *Volume, key *Key, pass *enclave.MemoryEnclave) error {
+			_, err := v.ChangeKeyslot(context.Background(), key, pass, argon2)
+			return err
+		}},
+		{"Enroll", func(v *Volume, key *Key, _ *enclave.MemoryEnclave) error {
+			_, err := v.Enroll(context.Background(), key, &fakeKeyProvider{credential: []byte("a provider credential"), token: Token{Type: "x-provider"}}, argon2)
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := formattedVolumeImage(t, "keyslot-volume-policy.img", "", "")
+			v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+			if err != nil {
+				t.Fatalf("Open failed: %v", err)
+			}
+			defer func() { _ = v.Close() }()
+
+			pass := newTestPassphrase(t)
+			defer func() { _ = pass.Destroy() }()
+			key, err := v.Unlock(context.Background(), pass)
+			if err != nil {
+				t.Fatalf("Unlock failed: %v", err)
+			}
+			defer key.Destroy()
+
+			rotated := newPassphraseEnclave(t, "never written")
+			defer func() { _ = rotated.Destroy() }()
+
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("could not snapshot the image: %v", err)
+			}
+
+			v.sys.fipsMode = forceFIPSPolicy(t)
+			locks := 0
+			v.sys.lockHeld = func(string) { locks++ }
+
+			if err := tc.write(v, key, rotated); !errors.Is(err, ErrFIPSNotApproved) {
+				t.Fatalf("%s with an Argon2 KDF under the volume's FIPS policy = %v, want ErrFIPSNotApproved", tc.name, err)
+			}
+			if locks != 0 {
+				t.Errorf("%s took the lock %d time(s): the volume's policy must refuse the KDF in the preflight", tc.name, locks)
+			}
+
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("could not re-read the image: %v", err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Errorf("a refused %s changed the image", tc.name)
+			}
+		})
+	}
+}
+
 func TestVolumeChangeKeyslotOnAReadOnlyVolumeFails(t *testing.T) {
 	path := formattedVolumeImage(t, "changekeyslot-readonly.img", "", "")
 

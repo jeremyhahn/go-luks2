@@ -222,6 +222,170 @@ func TestHelperErrorCarriesWhatTheHelperSaid(t *testing.T) {
 	}
 }
 
+// TestCommandRefusesAnUntrustedHelper pins that a helper is held to the checks
+// a system tool is (internal/command): one that someone other than root or
+// this user could have replaced is refused, and is NOT run.
+func TestCommandRefusesAnUntrustedHelper(t *testing.T) {
+	// writeHelper writes, into dir, a helper that leaves ran behind when it
+	// runs, with mode set explicitly so the umask does not decide the test.
+	writeHelper := func(t *testing.T, dir string, mode os.FileMode) (helper, ran string) {
+		t.Helper()
+		helper = filepath.Join(dir, "helper")
+		ran = filepath.Join(t.TempDir(), "ran")
+		script := fmt.Sprintf("#!/bin/sh\n: > %s\nprintf secret\n", shellQuote(ran))
+		if err := os.WriteFile(helper, []byte(script), 0o700); err != nil { // #nosec G306 -- an executable test fixture under t.TempDir()
+			t.Fatal(err)
+		}
+		if err := os.Chmod(helper, mode); err != nil {
+			t.Fatal(err)
+		}
+		return helper, ran
+	}
+	chmodDir := func(t *testing.T, dir string, mode os.FileMode) {
+		t.Helper()
+		if err := os.Chmod(dir, mode); err != nil { // #nosec G302 -- a deliberately unsafe test directory
+			t.Fatal(err)
+		}
+	}
+
+	tests := []struct {
+		name  string
+		setup func(t *testing.T) (path, ran string)
+		trust bool
+	}{
+		{
+			name: "a helper only this user can write runs",
+			setup: func(t *testing.T) (string, string) {
+				return writeHelper(t, t.TempDir(), 0o700)
+			},
+			trust: true,
+		},
+		{
+			name: "a group-writable helper",
+			setup: func(t *testing.T) (string, string) {
+				return writeHelper(t, t.TempDir(), 0o770)
+			},
+		},
+		{
+			name: "a world-writable helper",
+			setup: func(t *testing.T) (string, string) {
+				return writeHelper(t, t.TempDir(), 0o707)
+			},
+		},
+		{
+			name: "a helper in a world-writable directory",
+			setup: func(t *testing.T) (string, string) {
+				dir := t.TempDir()
+				helper, ran := writeHelper(t, dir, 0o700)
+				chmodDir(t, dir, 0o777)
+				return helper, ran
+			},
+		},
+		{
+			name: "a symlink in a world-writable directory to a trusted helper",
+			setup: func(t *testing.T) (string, string) {
+				helper, ran := writeHelper(t, t.TempDir(), 0o700)
+				dir := t.TempDir()
+				link := filepath.Join(dir, "link")
+				if err := os.Symlink(helper, link); err != nil {
+					t.Fatal(err)
+				}
+				chmodDir(t, dir, 0o777)
+				return link, ran
+			},
+		},
+		{
+			name: "a symlinked directory in a world-writable directory",
+			setup: func(t *testing.T) (string, string) {
+				trusted := t.TempDir()
+				_, ran := writeHelper(t, trusted, 0o700)
+				dir := t.TempDir()
+				if err := os.Symlink(trusted, filepath.Join(dir, "link")); err != nil {
+					t.Fatal(err)
+				}
+				chmodDir(t, dir, 0o777)
+				return filepath.Join(dir, "link", "helper"), ran
+			},
+		},
+		{
+			name: "a group-writable directory reached through a symlink",
+			setup: func(t *testing.T) (string, string) {
+				trusted := t.TempDir()
+				_, ran := writeHelper(t, trusted, 0o700)
+				group := t.TempDir()
+				if err := os.Symlink(trusted, filepath.Join(group, "onward")); err != nil {
+					t.Fatal(err)
+				}
+				chmodDir(t, group, 0o775)
+				entry := t.TempDir()
+				if err := os.Symlink(group, filepath.Join(entry, "via")); err != nil {
+					t.Fatal(err)
+				}
+				return filepath.Join(entry, "via", "onward", "helper"), ran
+			},
+		},
+		{
+			name: "a helper reached through a symlink in a trusted directory runs",
+			setup: func(t *testing.T) (string, string) {
+				trusted := t.TempDir()
+				_, ran := writeHelper(t, trusted, 0o700)
+				entry := t.TempDir()
+				if err := os.Symlink(trusted, filepath.Join(entry, "via")); err != nil {
+					t.Fatal(err)
+				}
+				return filepath.Join(entry, "via", "helper"), ran
+			},
+			trust: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path, ran := tt.setup(t)
+			p, err := NewCommand(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := p.Passphrase(context.Background())
+			_, statErr := os.Stat(ran)
+			if tt.trust {
+				if err != nil {
+					t.Fatalf("Passphrase() error = %v", err)
+				}
+				mustDestroy(t, got)
+				if statErr != nil {
+					t.Errorf("the trusted helper did not run: %v", statErr)
+				}
+				return
+			}
+			if !errors.Is(err, ErrHelperFailed) {
+				t.Fatalf("Passphrase() error = %v, want errors.Is(_, ErrHelperFailed)", err)
+			}
+			if !errors.Is(statErr, os.ErrNotExist) {
+				t.Errorf("the untrusted helper ran (stat error %v)", statErr)
+			}
+		})
+	}
+}
+
+// TestCommandRunsASystemHelper: an ordinary root-owned program under /usr/bin
+// passes the checks and runs.
+func TestCommandRunsASystemHelper(t *testing.T) {
+	p, err := NewCommand("/usr/bin/echo", WithArgs("secret"), WithLine(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := p.Passphrase(context.Background())
+	if err != nil {
+		t.Fatalf("Passphrase() error = %v", err)
+	}
+	defer mustDestroy(t, got)
+	if s := string(openSecret(t, got)); s != "secret" {
+		t.Errorf("Passphrase() = %q, want %q", s, "secret")
+	}
+}
+
 // TestCommandHonorsContext proves the unattended case: a helper waiting for
 // a touch that never comes has to end.
 func TestCommandHonorsContext(t *testing.T) {

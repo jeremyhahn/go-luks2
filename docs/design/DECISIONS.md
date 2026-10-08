@@ -3636,3 +3636,93 @@ behavior. See `pkg/luks2/fipsmigrate.go:72-104`,
   shared fixtures use Argon2id at the library minimum (64 MiB, time 1,
   parallel 1). The one test that asserts PBKDF2 iteration counts has its own
   PBKDF2 template.
+
+## p-bugs
+
+- **A key helper is held to the system-tool trust checks.**
+  `keyprovider.Command` opens its absolute helper path through
+  `command.Open`, which applies `internal/command`'s checks: a regular
+  executable file owned by root or the caller, not group- or world-writable,
+  reached only through directories owned the same way or sticky (see the
+  pinned-descriptor entry below). A helper that fails them is refused with
+  `ErrHelperFailed` before it runs. The helper produces the unlock credential
+  and runs with this process's privileges, so it needs the same trust a
+  `mkfs` does.
+- **`(*Volume).Target` re-verifies the key against the header it re-reads.**
+  It runs the same digest check `UnlockWithVolumeKey` does, against the
+  digest of the segment being mapped, on every call, and refuses a key that
+  does not verify with `ErrWrongKey`. A header rewritten between Unlock and
+  activation, or a key from another volume, used to be mapped with only its
+  size checked. The check costs one digest derivation per activation, as
+  cryptsetup's own activation by volume key does. It binds the key to the
+  header Target reads under its shared lock; that lock is released before
+  `dmcrypt.Activate` loads the table, so a rewrite in that last window is not
+  covered. Re-verifying always was chosen over re-verifying only when
+  `SequenceID` changed (the earlier DESIGN.md wording): a header rewritten
+  by another tool need not advance it.
+- **`(*loop.Device).Detach` refuses a device no longer backed by its file.**
+  A `Device` records the backing file's device and inode when it is obtained
+  (`Attach` from the descriptor it hands LOOP_SET_FD, `Find` from the match,
+  `Lookup` from LOOP_GET_STATUS64, or none if nothing is attached). Detach
+  reads the identity with LOOP_GET_STATUS64 on the descriptor it then sends
+  LOOP_CLR_FD on, and refuses with the new `loop.ErrDeviceReassigned` when it
+  differs, or with an `ErrIO` error when nothing is attached any more. Loop
+  numbers are host-global and reused as soon as they are free, so a path is
+  not an identity. The CLI's file-volume flow now detaches the `Device`
+  `Attach` returned instead of rebuilding one with `Lookup`, which would have
+  recorded whatever the number held at that later moment. The check and the
+  clear are two ioctls, so a reassignment between them remains possible.
+- **The unlock scan honours keyslot priority.** Every path that scans for the
+  volume key (`Unlock`, `AddKey`'s existing credential, the passphrase test)
+  tries the bound `prefer` keyslots first, then the `normal` ones, each group
+  in ascending id order, and never an `ignore` keyslot, matching cryptsetup's
+  `CRYPT_ANY_SLOT` open. `UnlockKeyslot` still opens an `ignore` keyslot,
+  because it names it. A header whose bound keyslots are all `ignore` returns
+  `ErrNoKeyslots`, cryptsetup's "no usable keyslot", rather than
+  `ErrWrongKey`: the passphrase was never judged. Before this change,
+  priority was written and reported but never read, so a keyslot an operator
+  had set to `ignore` still opened the volume.
+- **A provider's token keyslots are tried by priority.** `UnlockWithProvider`
+  tries the keyslots its token names `prefer` first, then `normal`, then
+  `ignore`, each group in the token's order, as cryptsetup's
+  `LUKS2_keyslot_open_by_token` does for a token named with `--token-id`
+  (`luks2_token.c`: a specific token runs the prefer, normal and ignore
+  passes). It used to take the token's order as written, so a `normal`
+  keyslot listed first won over a `prefer` one. cryptsetup skips `ignore`
+  keyslots only when it scans every token itself; this library never picks a
+  token for the caller, so that case does not arise, and an `ignore` keyslot
+  a token names stays reachable, last, as it is under `--token-id`.
+- **A volume's KDF preflight reads the volume's FIPS policy.** `AddKeyslot`,
+  `ChangeKeyslot` and `Enroll` now check an explicit KDF with
+  `validateWith(v.sys.fipsMode)`, as `Format` and `AddRecoveryKey` already did,
+  so a policy forced on a volume refuses an Argon2 KDF before the lock instead
+  of after it; the public `Validate()` keeps the process mode. In production
+  both sources are `fips.Probe`; the on-disk screening H13d left on
+  `fips.Probe` is unchanged.
+- **A program runs from the descriptor its checks were made on.**
+  `command.Open` replaces the path-based check (`Trusted`, and `Resolve`'s
+  copy of it), which judged the directories left once `EvalSymlinks` had
+  resolved the path, so a directory or link on the path as named was never
+  judged, and which let `exec` reopen the path afterwards. `Open` walks the
+  path from `/` one component at a time with
+  `openat(O_PATH|O_NOFOLLOW|O_CLOEXEC)` relative to the directory before it,
+  judges each by `fstat` of its descriptor (directories: owned by root or the
+  caller, not group- or world-writable unless sticky; the file: a regular,
+  executable file owned the same way and writable by neither), and returns the
+  file's descriptor. `Program.Cmd` executes `/proc/self/fd/3` with that
+  descriptor as `ExtraFiles[0]`, so the file that runs is the file checked. The
+  descriptor stays open in the program because a script's interpreter reopens
+  it by that name; it refers only to the program's own file. `Resolve` (system
+  tools) and `keyprovider.Command` (key helpers) both go through `Open`, so the
+  two cannot drift.
+  Symlinks are resolved through the same walk, not refused: a link must be
+  owned by root or the caller (in a sticky directory anyone can create one,
+  and only its owner can replace it), is read from its own descriptor, and its
+  target is walked with the same checks from `/` or from the checked directory
+  holding it; `..` climbs only to a directory already checked, and more than
+  40 links are refused. Refusing every symlink would be stricter, but merged
+  `/usr` layouts (`/sbin` → `usr/sbin`) and the `mkfs.ext4` → `mke2fs` links
+  some distributions ship are symlinks, and a helper installed as a link into
+  `/opt` is ordinary; the walk judges every directory such a path passes
+  through, which is what the refusal would have protected. Off Linux, with no
+  `O_PATH` or `/proc/self/fd`, `Open` fails closed with `ErrTool`.

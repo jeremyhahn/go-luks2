@@ -36,24 +36,24 @@ func find(ctx context.Context, file string, s sys) (*Device, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, &errs.Error{Kind: err}
 	}
-	path, backing, err := findLoopDeviceIn(s.sysBlockRoot, file, s)
+	path, backing, ident, err := findLoopDeviceIn(s.sysBlockRoot, file, s)
 	if err != nil {
 		return nil, err
 	}
-	return &Device{path: path, backing: backing, sys: s}, nil
+	return &Device{path: path, backing: backing, ident: ident, sys: s}, nil
 }
 
 // findLoopDeviceIn is [Find] against a given sysfs root.
-func findLoopDeviceIn(root, file string, s sys) (path, backing string, err error) {
+func findLoopDeviceIn(root, file string, s sys) (path, backing string, ident backingIdentity, err error) {
 	var st unix.Stat_t
 	if err := unix.Stat(file, &st); err != nil {
-		return "", "", &errs.Error{Kind: errs.ErrIO, Detail: "identify the backing file " + file, Err: err}
+		return "", "", backingIdentity{}, &errs.Error{Kind: errs.ErrIO, Detail: "identify the backing file " + file, Err: err}
 	}
 	wantDev, wantIno := uint64(st.Dev), st.Ino //nolint:unconvert // Dev is not uint64 on every GOARCH
 
 	entries, err := s.readDir(root)
 	if err != nil {
-		return "", "", err
+		return "", "", backingIdentity{}, err
 	}
 
 	// Counted rather than remembered, in the same idiom as waitForDetach.
@@ -93,7 +93,7 @@ func findLoopDeviceIn(root, file string, s sys) (path, backing string, err error
 			continue
 		}
 		if dev == wantDev && ino == wantIno {
-			return filepath.Join(s.devDir, name), state.backing, nil
+			return filepath.Join(s.devDir, name), state.backing, backingIdentity{dev: dev, ino: ino, known: true}, nil
 		}
 	}
 
@@ -105,7 +105,7 @@ func findLoopDeviceIn(root, file string, s sys) (path, backing string, err error
 	// file, giving the kernel two independent writers of one LUKS
 	// container.
 	if unreadable > 0 {
-		return "", "", &errs.Error{
+		return "", "", backingIdentity{}, &errs.Error{
 			Kind: errs.ErrIO,
 			Detail: fmt.Sprintf("find the loop device backing %s (%d of %d candidates could not be inspected, so absence cannot be concluded)",
 				file, unreadable, len(entries)),
@@ -113,7 +113,7 @@ func findLoopDeviceIn(root, file string, s sys) (path, backing string, err error
 		}
 	}
 
-	return "", "", &errs.Error{Kind: ErrNotFound, Detail: file}
+	return "", "", backingIdentity{}, &errs.Error{Kind: ErrNotFound, Detail: file}
 }
 
 // loopBackingIdentityIoctl reports the device and inode of the file the loop
@@ -125,6 +125,12 @@ func loopBackingIdentityIoctl(path string) (dev, ino uint64, err error) {
 		return 0, 0, err
 	}
 	defer func() { _ = f.Close() }()
+	return fdBackingIdentityIoctl(f)
+}
+
+// fdBackingIdentityIoctl is loopBackingIdentityIoctl for a loop device
+// already open as f.
+func fdBackingIdentityIoctl(f *os.File) (dev, ino uint64, err error) {
 	info, err := unix.IoctlLoopGetStatus64(int(f.Fd()))
 	if err != nil {
 		return 0, 0, err
@@ -135,7 +141,8 @@ func loopBackingIdentityIoctl(path string) (dev, ino uint64, err error) {
 // Lookup returns a [Device] for an already-named loop device node, such as
 // "/dev/loop3". Unlike [Attach] and [Find], it does not require the device
 // to be currently attached to a file: [Device.BackingFile] reports "" for
-// one that is not.
+// one that is not. The identity of the file attached now, or the absence of
+// one, is what [Device.Detach] later holds the device to.
 func Lookup(ctx context.Context, path string) (*Device, error) {
 	d, err := lookup(ctx, path, defaultSys())
 	return d, errs.At("loop", "Lookup", path, err)
@@ -169,5 +176,20 @@ func lookup(ctx context.Context, path string, s sys) (*Device, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Device{path: path, backing: state.backing, sys: s}, nil
+	// The identity Detach will hold the device to: whatever it is attached
+	// to now, or nothing.
+	var ident backingIdentity
+	if state.backing != "" {
+		dev, ino, err := s.loopBackingIdentity(path)
+		switch {
+		case errors.Is(err, unix.ENXIO):
+			// Released between the sysfs read and the ioctl.
+			state.backing = ""
+		case err != nil:
+			return nil, &errs.Error{Kind: errs.ErrIO, Detail: "identify the file backing " + path, Err: err}
+		default:
+			ident = backingIdentity{dev: dev, ino: ino, known: true}
+		}
+	}
+	return &Device{path: path, backing: state.backing, ident: ident, sys: s}, nil
 }

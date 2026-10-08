@@ -134,9 +134,10 @@ func runWipe(ctx context.Context, e *env, args []string) error {
 func runWipeHeaderOnly(ctx context.Context, e *env, device string, batch bool) error {
 	_, _ = fmt.Fprintln(e.stdout, "*** WARNING: DESTRUCTIVE OPERATION ***")
 	_, _ = fmt.Fprintf(e.stdout, "This wipes the LUKS2 header and keyslot areas on: %s\n", device)
-	_, _ = fmt.Fprintln(e.stdout, "This is a crypto-erase: the data segment is left in place, but nothing")
-	_, _ = fmt.Fprintln(e.stdout, "can derive its key afterwards. A header backup taken before this no")
-	_, _ = fmt.Fprintln(e.stdout, "longer opens the volume.")
+	_, _ = fmt.Fprintln(e.stdout, "This is a crypto-erase: the data segment is left in place, and nothing")
+	_, _ = fmt.Fprintln(e.stdout, "on this device can derive its key afterwards. A header backup taken")
+	_, _ = fmt.Fprintln(e.stdout, "before this (cryptsetup luksHeaderBackup) still holds the keyslots and")
+	_, _ = fmt.Fprintln(e.stdout, "opens the data again once restored: destroy it too, or use --full.")
 
 	if err := confirmDestructive(e, "Type 'YES' to confirm wipe: ", batch); err != nil {
 		return refuseUnconfirmed(e, "Wipe", err)

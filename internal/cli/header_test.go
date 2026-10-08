@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -93,6 +94,42 @@ func TestRunHeaderSecondary(t *testing.T) {
 	}
 	if strings.Contains(out, "Header offset:  0") {
 		t.Errorf("stdout = %q, want a nonzero header offset for the secondary copy", out)
+	}
+}
+
+// TestRunHeaderShowLabelsTheCopyItShows: with the primary copy damaged,
+// `header show` prints the secondary (the current copy), and must say so and
+// give the secondary's offset rather than "Primary" and 0.
+func TestRunHeaderShowLabelsTheCopyItShows(t *testing.T) {
+	path := newTestVolumeImage(t, "header-show-secondary.img")
+
+	// Byte 24 is inside the primary's label field, which its checksum
+	// covers, so the primary no longer verifies and the secondary is current.
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open image: %v", err)
+	}
+	if _, err := f.WriteAt([]byte{'X'}, 24); err != nil {
+		_ = f.Close()
+		t.Fatalf("damage the primary: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close image: %v", err)
+	}
+
+	e, _, _, stdout, stderr := newTestEnv(&bytes.Buffer{})
+	if err := runHeaderShow(context.Background(), e, []string{path}); err != nil {
+		t.Fatalf("runHeaderShow: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Secondary header:") {
+		t.Errorf("stdout = %q, want it labeled Secondary header", out)
+	}
+	if strings.Contains(out, "Primary header:") || strings.Contains(out, "Header offset:  0\n") {
+		t.Errorf("stdout = %q, labels the secondary copy as the primary", out)
+	}
+	if !strings.Contains(stderr.String(), "showing the secondary") {
+		t.Errorf("stderr = %q, want a note that the secondary is shown", stderr.String())
 	}
 }
 

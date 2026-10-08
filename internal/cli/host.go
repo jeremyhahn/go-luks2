@@ -54,6 +54,12 @@ type mounter interface {
 // it (its path) and to detach it again.
 type loopDevice struct {
 	devPath string
+
+	// dev is the device Attach returned, which detach must use: it holds
+	// the backing file's identity, and Detach refuses a device no longer
+	// backed by that file. A device rebuilt from devPath by Lookup would
+	// take whatever the number is attached to at that later moment.
+	dev *loop.Device
 }
 
 func (d loopDevice) path() string { return d.devPath }
@@ -75,13 +81,16 @@ func (realLooper) attach(ctx context.Context, file string) (loopDevice, error) {
 	if err != nil {
 		return loopDevice{}, err
 	}
-	return loopDevice{devPath: d.Path()}, nil
+	return loopDevice{devPath: d.Path(), dev: d}, nil
 }
 
 func (realLooper) detach(ctx context.Context, d loopDevice) (loop.DetachState, error) {
-	dev, err := loop.Lookup(ctx, d.devPath)
-	if err != nil {
-		return 0, err
+	dev := d.dev
+	if dev == nil {
+		var err error
+		if dev, err = loop.Lookup(ctx, d.devPath); err != nil {
+			return 0, err
+		}
 	}
 	return dev.Detach(ctx)
 }

@@ -297,6 +297,64 @@ func TestVolumeUnlockWithProviderOpensTheNamedKeyslot(t *testing.T) {
 	}
 }
 
+// TestVolumeUnlockWithProviderTriesTheTokensKeyslotsByPriority: one credential
+// opens a normal, a prefer and an ignore keyslot, and the token lists them out
+// of priority order. As cryptsetup does for a token named with --token-id, the
+// prefer keyslot opens before the normal one, the normal one before the ignore
+// one, and the ignore one still opens when it is all the token names.
+func TestVolumeUnlockWithProviderTriesTheTokensKeyslotsByPriority(t *testing.T) {
+	path := formattedVolumeImage(t, "unlockwithprovider-priority.img", "", "")
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
+	pass := newTestPassphrase(t)
+	defer func() { _ = pass.Destroy() }()
+	key, err := v.Unlock(context.Background(), pass)
+	if err != nil {
+		t.Fatalf("Unlock failed: %v", err)
+	}
+	defer key.Destroy()
+
+	const credential = "one-credential-for-every-slot"
+	slots := map[Priority]int{}
+	for _, priority := range []Priority{PriorityNormal, PriorityPrefer, PriorityIgnore} {
+		kp := cheapKeyslotParams()
+		kp.Priority = priority
+		enrollment, err := v.Enroll(context.Background(), key, &fakeKeyProvider{credential: []byte(credential)}, kp)
+		if err != nil {
+			t.Fatalf("Enroll(%v) failed: %v", priority, err)
+		}
+		slots[priority] = enrollment.Keyslot.ID
+	}
+
+	for _, tc := range []struct {
+		name  string
+		token []int
+		want  int
+	}{
+		{"prefer before normal", []int{slots[PriorityNormal], slots[PriorityPrefer]}, slots[PriorityPrefer]},
+		{"normal before ignore", []int{slots[PriorityIgnore], slots[PriorityNormal]}, slots[PriorityNormal]},
+		{"prefer before ignore and normal", []int{slots[PriorityIgnore], slots[PriorityNormal], slots[PriorityPrefer]}, slots[PriorityPrefer]},
+		{"an ignore keyslot the named token holds alone", []int{slots[PriorityIgnore]}, slots[PriorityIgnore]},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &fakeKeyProvider{credential: []byte(credential), token: Token{Type: "x-provider", Keyslots: tc.token}}
+			unlocked, err := v.UnlockWithProvider(context.Background(), provider)
+			if err != nil {
+				t.Fatalf("UnlockWithProvider(%v) failed: %v", tc.token, err)
+			}
+			defer unlocked.Destroy()
+			if got := unlocked.Keyslot(); got != tc.want {
+				t.Errorf("UnlockWithProvider(%v) opened keyslot %d, want %d", tc.token, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestVolumeUnlockWithProviderRefusesATokenWithNoKeyslots(t *testing.T) {
 	path := formattedVolumeImage(t, "unlockwithprovider-nokeyslots.img", "", "")
 

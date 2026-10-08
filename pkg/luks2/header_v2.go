@@ -71,8 +71,15 @@ func (h *Header) Dropped() []DroppedEntry { return h.metadata.DroppedNullEntries
 // its JSON metadata area, in bytes.
 func (h *Header) Size() int64 { return int64(h.hdr.HeaderSize) } // #nosec G115 -- bounded by header.HeaderMaxSize (4 MiB), far under int64's range
 
-// Keyslots lists the volume's keyslots, in the order an unlock attempts
-// them. It shares listKeyslotsFrom with the old ListKeyslots, so the two
+// Offset is where this header copy was read: 0 for the primary, the header
+// area size for the secondary. (*Volume).Header returns the current copy,
+// which is the secondary when the primary is damaged or older, so Offset is
+// how a caller tells which one it has.
+func (h *Header) Offset() int64 { return int64(h.hdr.HeaderOffset) } // #nosec G115 -- the read refuses an hdr_offset other than the copy's own location, at most header.HeaderMaxOffset
+
+// Keyslots lists the volume's keyslots in ascending id order, each with its
+// Priority; Unlock tries them by priority within that order (see Priority).
+// It shares listKeyslotsFrom with the old ListKeyslots, so the two
 // never report a different shape for one container.
 func (h *Header) Keyslots() []KeyslotInfo {
 	slots, _ := listKeyslotsFrom(h.metadata)

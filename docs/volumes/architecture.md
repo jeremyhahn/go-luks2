@@ -91,8 +91,9 @@ names a keyslot that is not yet on the device. Cipher and AF detail:
 on `/run/cryptsetup/L_<maj>:<min>`), so a writer holding it exclusively is
 waited for; reads the header, size and keyslots through the pinned descriptor;
 refuses an unimplemented mandatory requirement or more than one segment; tries
-only keyslots bound to the crypt segment (ascending number; priority is not
-read); derives, decrypts, AF-merges and verifies against that segment's digest;
+only keyslots bound to the crypt segment (`prefer` before `normal`, each in
+ascending number, never `ignore`; see
+[keyslots](../keyslots/architecture.md#data-flow-unlock-order)); derives, decrypts, AF-merges and verifies against that segment's digest;
 and releases the read lock. It returns a `*Key` and touches no device-mapper
 state. `Volume.UnlockWithVolumeKey` skips the keyslots and verifies the
 caller's key against the segment's digest.
@@ -115,8 +116,9 @@ the lock — no lock is held between calls, matching cryptsetup's own
 behaviour. Unlock and activation are two calls: `(*Volume).Unlock(ctx, pass)
 (*Key, error)` derives and verifies the key without touching dm-crypt, and
 `dmcrypt.Activate(ctx, v, key, name)` calls `v.Target(ctx, key)` (re-reads the
-header under the shared lock; the key is consulted only for its size and is
-not re-verified against the re-read header) before mapping the pinned descriptor's major:minor. Rollback after a failed or
+header under the shared lock and re-verifies the key against its digest, so a
+header rewritten since Unlock, or another volume's key, is refused with
+`ErrWrongKey`; the lock is released before the table is loaded) before mapping the pinned descriptor's major:minor. Rollback after a failed or
 cancelled `Activate` runs under `context.WithoutCancel(ctx)` with its own
 clock budget, so a cancelled caller never leaves a plaintext device behind.
 
@@ -249,9 +251,9 @@ gets `*FIPSImportRequiredError` naming `MigrateToFIPS`. Full detail:
 | LUKS2 header and keyslot areas | Untrusted: anyone with the disk can write them | Segments whitelisted at read; each keyslot bounded before use; removal and `MigrateToFIPS` also check areas against the device, the keyslots area and other keyslots |
 | Passphrase, volume key, key provider output | Secret | Borrowed or moved into enclaves; never logged |
 | Mapping name | Caller-chosen | Validated before use in the dm UUID, the keyring description (hashed) and `/dev/mapper` |
-| Key provider helper | Runs with the caller's privileges | Absolute path required; minimal environment (system `PATH` and `LC_ALL=C`, plus `WithEnv`); output capped at 64 KiB and read into locked memory |
+| Key provider helper | Runs with the caller's privileges | Absolute path required; walked from `/` by descriptor, every directory, symlink and the file owned by root or the caller and not writable by others (directories may be sticky), and run from the descriptor that was checked; minimal environment (system `PATH` and `LC_ALL=C`, plus `WithEnv`); output capped at 64 KiB and read into locked memory |
 | Kernel keyring | Shared per uid and session | `logon` type, session keyring, released as soon as the table load and resume return |
-| Device-mapper and loop | Global to the host | Device-mapper: identity checked before every removal; the check and the removal are separate ioctls, so a same-name race between them remains. Loop: `Detach` clears the device at its path with no identity check |
+| Device-mapper and loop | Global to the host | Device-mapper: identity checked before every removal; the check and the removal are separate ioctls, so a same-name race between them remains. Loop: `Detach` reads the backing file's device and inode (LOOP_GET_STATUS64) on the descriptor it then clears, and refuses with `loop.ErrDeviceReassigned` unless they are the ones recorded when the `Device` was obtained; the check and LOOP_CLR_FD are separate ioctls, so a reassignment between them remains |
 
 ## What this feature deliberately does not do
 

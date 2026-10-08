@@ -83,10 +83,11 @@ func (v *Volume) unlockHeader(ctx context.Context, op string) (*device.Locked, s
 	return locked, segmentID, metadata, nil
 }
 
-// Unlock recovers the volume key by trying every keyslot bound to the
-// volume's data segment against pass, in the same scan order the old
-// Unlock uses. pass is the caller's enclave and stays the caller's: it is
-// only ever borrowed.
+// Unlock recovers the volume key by trying the keyslots bound to the volume's
+// data segment against pass: every PriorityPrefer keyslot, then every
+// PriorityNormal one, each in ascending id order. A PriorityIgnore keyslot is
+// not tried; UnlockKeyslot opens it by name. pass is the caller's enclave and
+// stays the caller's: it is only ever borrowed.
 func (v *Volume) Unlock(ctx context.Context, pass *enclave.MemoryEnclave) (*Key, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
@@ -116,10 +117,11 @@ func (v *Volume) Unlock(ctx context.Context, pass *enclave.MemoryEnclave) (*Key,
 	return volkey.New(masterKey, slot), nil
 }
 
-// UnlockKeyslot recovers the volume key from exactly keyslot, refusing with
-// ErrInvalidKeyslot if it is not bound to the volume's data segment --
-// trying it anyway would risk recovering a key this volume's data segment
-// was never encrypted with (#250).
+// UnlockKeyslot recovers the volume key from exactly keyslot, whatever its
+// priority, refusing with ErrKeyslotNotFound if it does not exist or is not
+// bound to the volume's data segment -- trying it anyway would risk
+// recovering a key this volume's data segment was never encrypted with
+// (#250).
 func (v *Volume) UnlockKeyslot(ctx context.Context, keyslot int, pass *enclave.MemoryEnclave) (*Key, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
@@ -191,8 +193,15 @@ func (v *Volume) UnlockWithVolumeKey(ctx context.Context, vk *enclave.MemoryEncl
 }
 
 // Target computes the dm-crypt activation parameters for the volume's
-// current header, re-reading it under the shared lock. key is consulted
-// only for its size.
+// current header, re-reading it under the shared lock, and verifies key
+// against that header's digest for the segment it maps.
+//
+// key was verified when it was unlocked, against the header as it was then.
+// The header can have been rewritten since, by this process or another, and
+// a table built from the new header must not be handed a key that does not
+// open it: a key the re-read header does not verify is refused with
+// ErrWrongKey, as is a key unlocked from a different volume. Beyond that
+// check, key is consulted only for its size.
 func (v *Volume) Target(ctx context.Context, key *Key) (*Target, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
@@ -206,6 +215,13 @@ func (v *Volume) Target(ctx context.Context, key *Key) (*Target, error) {
 		return nil, err
 	}
 	defer func() { _ = locked.Unlock() }()
+
+	if err := volkey.Verify(key, func(vk *enclave.MemoryEnclave) error {
+		return verifyVolumeKeyForSegment(ctx, vk, segmentID, metadata)
+	}); err != nil {
+		return nil, errAt(op, v.path, &errs.Error{Kind: errs.KindOf(err, ErrWrongKey),
+			Detail: "verify the key against the volume's current header (a header rewritten since the key was unlocked, or another volume's key, does not verify)", Err: err})
+	}
 
 	f := locked.File()
 	segment := metadata.Segments[segmentID]

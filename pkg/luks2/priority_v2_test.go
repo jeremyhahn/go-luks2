@@ -177,6 +177,80 @@ func TestVolumeKeyslotWritesRefuseAnUndeclaredPriority(t *testing.T) {
 
 // assertOnDiskPriority reads the header from path and checks keyslot id's raw
 // priority member: nil means it must be absent.
+// TestVolumeUnlockScanHonoursPriority: Unlock tries a prefer keyslot before a
+// normal one and never tries an ignore keyslot, as cryptsetup's any-slot open
+// does; UnlockKeyslot still opens the ignore keyslot by name.
+func TestVolumeUnlockScanHonoursPriority(t *testing.T) {
+	ctx := context.Background()
+	kdf := KDFParams{Type: KDFPBKDF2, IterTime: time.Millisecond}
+
+	t.Run("prefer before normal", func(t *testing.T) {
+		path := formattedVolumeImage(t, "scan-prefer.img", "", "")
+		v := txnVolume(t, path)
+		key := txnKey(t, v)
+
+		// The same passphrase as keyslot 0, so ascending id order alone would
+		// stop at keyslot 0.
+		same := newTestPassphrase(t)
+		t.Cleanup(func() { _ = same.Destroy() })
+		info, err := v.AddKeyslot(ctx, key, same, KeyslotParams{Priority: PriorityPrefer, KDF: kdf})
+		if err != nil {
+			t.Fatalf("AddKeyslot(prefer) failed: %v", err)
+		}
+		if info.ID == 0 {
+			t.Fatal("the preferred keyslot is keyslot 0; the fixture cannot tell priority from id order")
+		}
+		got := txnKey(t, v)
+		if got.Keyslot() != info.ID {
+			t.Fatalf("Unlock opened keyslot %d, want the preferred keyslot %d", got.Keyslot(), info.ID)
+		}
+	})
+
+	t.Run("ignore is skipped by the scan", func(t *testing.T) {
+		path := formattedVolumeImage(t, "scan-ignore.img", "", "")
+		v := txnVolume(t, path)
+		key := txnKey(t, v)
+
+		info, err := v.AddKeyslot(ctx, key, txnPassphrase(t, "an ignored slot"), KeyslotParams{Priority: PriorityIgnore, KDF: kdf})
+		if err != nil {
+			t.Fatalf("AddKeyslot(ignore) failed: %v", err)
+		}
+		if k, err := v.Unlock(ctx, txnPassphrase(t, "an ignored slot")); !errors.Is(err, ErrWrongKey) {
+			if k != nil {
+				k.Destroy()
+			}
+			t.Fatalf("Unlock with only an ignore keyslot's passphrase: error = %v, want ErrWrongKey", err)
+		}
+		k, err := v.UnlockKeyslot(ctx, info.ID, txnPassphrase(t, "an ignored slot"))
+		if err != nil {
+			t.Fatalf("UnlockKeyslot on the ignore keyslot failed: %v", err)
+		}
+		k.Destroy()
+	})
+
+	t.Run("only ignore keyslots", func(t *testing.T) {
+		path := formattedVolumeImage(t, "scan-only-ignore.img", "", "")
+		v := txnVolume(t, path)
+		key := txnKey(t, v)
+
+		info, err := v.ChangeKeyslot(ctx, key, txnPassphrase(t, "the only slot"), KeyslotParams{Priority: PriorityIgnore})
+		if err != nil {
+			t.Fatalf("ChangeKeyslot(ignore) failed: %v", err)
+		}
+		if k, err := v.Unlock(ctx, txnPassphrase(t, "the only slot")); !errors.Is(err, ErrNoKeyslots) {
+			if k != nil {
+				k.Destroy()
+			}
+			t.Fatalf("Unlock with every keyslot ignore: error = %v, want ErrNoKeyslots", err)
+		}
+		k, err := v.UnlockKeyslot(ctx, info.ID, txnPassphrase(t, "the only slot"))
+		if err != nil {
+			t.Fatalf("UnlockKeyslot on the ignore keyslot failed: %v", err)
+		}
+		k.Destroy()
+	})
+}
+
 func assertOnDiskPriority(t *testing.T, path string, id int, want *int) {
 	t.Helper()
 	_, metadata, err := readHeaderForTest(path)

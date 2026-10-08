@@ -50,6 +50,12 @@ var (
 	// depending on how many loop devices the host already has in use.
 	ErrNodeAbsent = errors.New("loop: allocated device's node did not appear under /dev")
 
+	// ErrDeviceReassigned indicates [Device.Detach] refused because the loop
+	// device is no longer backed by the file it was backed by when the
+	// [Device] was obtained: it was released and attached to another file in
+	// between. The device is left alone; it is someone else's now.
+	ErrDeviceReassigned = errors.New("loop: the device is now attached to a different file")
+
 	// ErrPermissionDenied indicates an operation could not open a device
 	// because the process lacks access to it. Defined once, in
 	// internal/device, and re-exported by value.

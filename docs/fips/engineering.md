@@ -23,7 +23,9 @@ thing: it returns the package's internal combined spelling (`pbkdf2-sha512` or
 `argon2id`), not a string form of the public type. `ChangeKeyslot` with a zero
 `KDF` does not apply the default; it keeps the slot's existing KDF.
 `(KDFParams).Validate()` is the pre-flight check, including FIPS approval →
-`ErrFIPSNotApproved`; it accepts only the three public types.
+`ErrFIPSNotApproved`; it accepts only the three public types. It judges by
+the process's mode; the `Volume` methods that take a `KDFParams` run the same
+check against the volume's policy ([architecture.md](architecture.md#component-boundaries)).
 `MigratedDigests`/`RemovedKeyslots`/`RetainedNonApproved` are `[]int`
 (canonical keyslot/digest ids).
 

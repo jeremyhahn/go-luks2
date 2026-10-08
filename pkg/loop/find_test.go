@@ -77,7 +77,7 @@ func TestFindLoopDeviceMatchesTheFileNotItsPath(t *testing.T) {
 	root := fakeLoopSysfs(t, file)
 	dev, ino := statIdentity(t, file)
 
-	got, _, err := findLoopDeviceIn(root, link, identitySys(dev, ino))
+	got, _, _, err := findLoopDeviceIn(root, link, identitySys(dev, ino))
 	if err != nil || got != "/dev/loop5" {
 		t.Fatalf("findLoopDeviceIn(%s) = %q, %v; want /dev/loop5", link, got, err)
 	}
@@ -92,7 +92,7 @@ func TestFindLoopDeviceDoesNotMatchAReplacedFile(t *testing.T) {
 	root := fakeLoopSysfs(t, file)
 	dev, ino := statIdentity(t, file)
 
-	if got, _, err := findLoopDeviceIn(root, file, identitySys(dev, ino+1)); err == nil {
+	if got, _, _, err := findLoopDeviceIn(root, file, identitySys(dev, ino+1)); err == nil {
 		t.Fatalf("findLoopDeviceIn = %q; a loop device backed by another inode was reported as this file's", got)
 	}
 }
@@ -107,14 +107,14 @@ func TestFindLoopDeviceCountsAnUnidentifiableDevice(t *testing.T) {
 	s := defaultSys()
 	s.loopBackingIdentity = func(string) (uint64, uint64, error) { return 0, 0, unix.EACCES }
 
-	_, _, err := findLoopDeviceIn(root, file, s)
+	_, _, _, err := findLoopDeviceIn(root, file, s)
 	if !errors.Is(err, errs.ErrIO) || !errors.Is(err, unix.EACCES) || errors.Is(err, ErrNotFound) {
 		t.Fatalf("findLoopDeviceIn = %v, want an ErrIO error carrying the cause, not not-found", err)
 	}
 
 	// A device released between the sysfs read and the ioctl is unbound.
 	s.loopBackingIdentity = func(string) (uint64, uint64, error) { return 0, 0, unix.ENXIO }
-	if _, _, err := findLoopDeviceIn(root, file, s); !errors.Is(err, ErrNotFound) {
+	if _, _, _, err := findLoopDeviceIn(root, file, s); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("findLoopDeviceIn = %v, want plain not-found for a released device", err)
 	}
 }
@@ -194,5 +194,38 @@ func TestLookupReportsAnUnattachedDevice(t *testing.T) {
 	}
 	if d.Path() != "/dev/loop0" {
 		t.Errorf("Path() = %q, want %q", d.Path(), "/dev/loop0")
+	}
+}
+
+// TestLookupRecordsTheBackingIdentity pins what Detach is later held to: the
+// device and inode the loop driver reports for an attached device, and no
+// identity for one released before it could be read.
+func TestLookupRecordsTheBackingIdentity(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "loop0", "loop"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "loop0", "loop", "backing_file"), []byte("/img\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := defaultSys()
+	s.sysBlockRoot = root
+
+	s.loopBackingIdentity = func(string) (uint64, uint64, error) { return 2049, 12, nil }
+	d, err := lookup(context.Background(), "/dev/loop0", s)
+	if err != nil {
+		t.Fatalf("lookup() = %v", err)
+	}
+	if want := (backingIdentity{dev: 2049, ino: 12, known: true}); d.ident != want {
+		t.Errorf("ident = %+v, want %+v", d.ident, want)
+	}
+
+	s.loopBackingIdentity = func(string) (uint64, uint64, error) { return 0, 0, unix.ENXIO }
+	d, err = lookup(context.Background(), "/dev/loop0", s)
+	if err != nil {
+		t.Fatalf("lookup() = %v", err)
+	}
+	if d.ident.known || d.BackingFile() != "" {
+		t.Errorf("ident = %+v, backing %q; want neither for a released device", d.ident, d.BackingFile())
 	}
 }

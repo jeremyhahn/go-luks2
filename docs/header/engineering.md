@@ -18,6 +18,7 @@ func (h *Header) Label() string
 func (h *Header) Subsystem() string
 func (h *Header) SequenceID() uint64
 func (h *Header) Size() int64
+func (h *Header) Offset() int64 // 0 for the primary copy, the header area size for the secondary
 func (h *Header) Keyslots() []KeyslotInfo
 func (h *Header) Segments() []Segment
 func (h *Header) Tokens() map[int]Token

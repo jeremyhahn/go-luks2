@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
 // fastKDFArgs are the shared KDF flags recovery add and create tests pass
@@ -100,11 +102,51 @@ func TestRunRecoveryAddAndVerify(t *testing.T) {
 
 func TestRunRecoveryVerifyWrongKey(t *testing.T) {
 	path := newTestVolumeImage(t, "recovery-verify-wrong.img")
-	e, _, _, _, _ := newTestEnv(bytes.NewBufferString(
+	e, _, _, _, stderr := newTestEnv(bytes.NewBufferString(
 		"ABCDEF-ABCDEF-ABCDEF-ABCDEF-ABCDEF-ABCDEF-ABCDEF-ABCDEF-ABCDEF-ABCDEF-AB\n"))
 
-	if err := runRecoveryVerify(context.Background(), e, []string{path}); err == nil {
+	err := runRecoveryVerify(context.Background(), e, []string{path})
+	if err == nil {
 		t.Fatal("runRecoveryVerify: want an error for a key that does not open the volume")
+	}
+	if got := exitCode(err); got != 2 {
+		t.Errorf("exit status = %d, want 2 (a key that does not open the volume)", got)
+	}
+	if !strings.Contains(stderr.String(), "does NOT open") {
+		t.Errorf("stderr = %q, want the verdict line", stderr.String())
+	}
+
+	// The help text must state the status the command exits with.
+	usage := recoveryCommand().sub["verify"].usage
+	if !strings.Contains(usage, "2 if it does not") || strings.Contains(usage, "1 otherwise") {
+		t.Errorf("recovery verify help = %q, does not say a key that does not open the volume exits 2", usage)
+	}
+}
+
+// A failure that never tried the key is not a verdict on it: no "does NOT
+// open" line, and the status is the failure's own, not the wrong-key 2.
+func TestRunRecoveryVerifyOperationalFailureIsNotAVerdict(t *testing.T) {
+	path := newTestVolumeImage(t, "recovery-verify-unreadable.img")
+	// Cut the image inside the keyslots area: the header still opens, but the
+	// keyslot cannot be read.
+	if err := os.Truncate(path, 32*1024); err != nil {
+		t.Fatal(err)
+	}
+	e, _, _, stdout, stderr := newTestEnv(bytes.NewBufferString(
+		"ABCDEF-ABCDEF-ABCDEF-ABCDEF-ABCDEF-ABCDEF-ABCDEF-ABCDEF-ABCDEF-ABCDEF-AB\n"))
+
+	err := runRecoveryVerify(context.Background(), e, []string{path})
+	if err == nil {
+		t.Fatal("runRecoveryVerify: want an error for a volume whose keyslot cannot be read")
+	}
+	if errors.Is(err, luks2.ErrWrongKey) {
+		t.Fatalf("runRecoveryVerify = %v, want a failure other than a wrong key", err)
+	}
+	if strings.Contains(stderr.String(), "does NOT open") || strings.Contains(stdout.String(), "does NOT open") {
+		t.Errorf("stdout = %q, stderr = %q, want no verdict on a key that was never tried", stdout.String(), stderr.String())
+	}
+	if got := exitCode(err); got != 4 {
+		t.Errorf("exit status = %d, want 4 (an unreadable keyslot is an invalid header, not the wrong-key 2)", got)
 	}
 }
 
