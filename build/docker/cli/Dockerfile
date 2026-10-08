@@ -12,7 +12,7 @@
 # nothing. This one ships to a user, so the build stage's toolchain and
 # module cache stay out of the final layer.
 
-FROM golang:1.27.0 AS build
+FROM golang:1.27.1 AS build
 WORKDIR /app
 
 # go.mod pins github.com/jeremyhahn/go-enclave, served from a private module

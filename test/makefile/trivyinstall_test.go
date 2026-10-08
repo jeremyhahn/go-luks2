@@ -67,7 +67,7 @@ type trivyFixture struct {
 	tools    string
 }
 
-// newTrivyFixture serves archive as the v0.74.0 release for both
+// newTrivyFixture serves archive as the v0.75.0 release for both
 // architectures, over TLS, and returns where.
 func newTrivyFixture(t *testing.T, archive, binary []byte) *trivyFixture {
 	t.Helper()
@@ -75,7 +75,7 @@ func newTrivyFixture(t *testing.T, archive, binary []byte) *trivyFixture {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.requests.Add(1)
 		switch r.URL.Path {
-		case "/v0.74.0/trivy_0.74.0_Linux-64bit.tar.gz", "/v0.74.0/trivy_0.74.0_Linux-ARM64.tar.gz":
+		case "/v0.75.0/trivy_0.75.0_Linux-64bit.tar.gz", "/v0.75.0/trivy_0.75.0_Linux-ARM64.tar.gz":
 			_, _ = w.Write(f.archive)
 		default:
 			http.NotFound(w, r)
@@ -110,11 +110,11 @@ func (f *trivyFixture) install(t *testing.T, archiveSum, binarySum string) (stri
 }
 
 func (f *trivyFixture) installed() string {
-	return filepath.Join(f.tools, "trivy-v0.74.0", "trivy")
+	return filepath.Join(f.tools, "trivy-v0.75.0", "trivy")
 }
 
 func TestTrivyInstallVerifiesThenInstalls(t *testing.T) {
-	binary := []byte("#!/bin/sh\necho 'Version: 0.74.0'\n")
+	binary := []byte("#!/bin/sh\necho 'Version: 0.75.0'\n")
 	f := newTrivyFixture(t, trivyArchive(t, binary), binary)
 
 	out, err := f.install(t, sum(f.archive), sum(binary))
@@ -154,7 +154,7 @@ func TestTrivyInstallVerifiesThenInstalls(t *testing.T) {
 // The archive's hash is checked BEFORE it is unpacked: a substituted archive
 // installs nothing.
 func TestTrivyInstallRefusesAnArchiveThatDoesNotMatchItsPin(t *testing.T) {
-	binary := []byte("#!/bin/sh\necho 'Version: 0.74.0'\n")
+	binary := []byte("#!/bin/sh\necho 'Version: 0.75.0'\n")
 	f := newTrivyFixture(t, trivyArchive(t, binary), binary)
 
 	out, err := f.install(t, strings.Repeat("0", 64), sum(binary))
@@ -172,14 +172,14 @@ func TestTrivyInstallRefusesAnArchiveThatDoesNotMatchItsPin(t *testing.T) {
 // The binary inside is checked too: an archive whose pin was raised without
 // its binary's is refused.
 func TestTrivyInstallRefusesABinaryThatDoesNotMatchItsPin(t *testing.T) {
-	binary := []byte("#!/bin/sh\necho 'Version: 0.74.0'\n")
+	binary := []byte("#!/bin/sh\necho 'Version: 0.75.0'\n")
 	f := newTrivyFixture(t, trivyArchive(t, binary), binary)
 
 	out, err := f.install(t, sum(f.archive), strings.Repeat("f", 64))
 	if err == nil {
 		t.Fatalf("trivy-install accepted a binary that does not match its pin\n%s", out)
 	}
-	if !strings.Contains(out, "binary in trivy_0.74.0_Linux-") {
+	if !strings.Contains(out, "binary in trivy_0.75.0_Linux-") {
 		t.Errorf("output does not name the binary mismatch:\n%s", out)
 	}
 	if _, err := os.Stat(f.installed()); !os.IsNotExist(err) {

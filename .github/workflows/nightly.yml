@@ -21,7 +21,7 @@ permissions:
 env:
   # Kept in lockstep with ci.yml. The template omits this block, which leaves
   # `env.GO_VERSION` empty in the fips job below — reported upstream.
-  GO_VERSION: "1.27.0"
+  GO_VERSION: "1.27.1"
 
 jobs:
   fips:

@@ -17,9 +17,9 @@ import (
 // tools themselves. A parser tested against invented output proves nothing
 // about the output it will meet in CI.
 const (
-	golangciReport    = "golangci-lint has version 2.13.2 built with go1.26.7 from 1a2b3c4 on 2026-08-01T00:00:00Z\n"
+	golangciReport    = "golangci-lint has version 2.14.0 built with go1.27.1 from 1a2b3c4 on 2026-08-01T00:00:00Z\n"
 	gosecReport       = "Version: v2.29.0\nGit tag: v2.29.0\nBuild date: 2026-08-01\n"
-	govulncheckReport = "Go: go1.26.7\nScanner: govulncheck@v1.7.0\nDB: https://vuln.go.dev\n"
+	govulncheckReport = "Go: go1.27.1\nScanner: govulncheck@v1.8.0\nDB: https://vuln.go.dev\n"
 )
 
 func TestExtractVersion_ReadsEachToolsDocumentedLine(t *testing.T) {
@@ -28,11 +28,11 @@ func TestExtractVersion_ReadsEachToolsDocumentedLine(t *testing.T) {
 		report string
 		want   string
 	}{
-		{"golangci-lint", golangciReport, "2.13.2"},
+		{"golangci-lint", golangciReport, "2.14.0"},
 		{"gosec", gosecReport, "v2.29.0"},
 		// The FIRST version-shaped token in govulncheck's output is the Go
-		// toolchain's. A generic extractor pins go1.26.7; this must not.
-		{"govulncheck", govulncheckReport, "v1.7.0"},
+		// toolchain's. A generic extractor pins go1.27.1; this must not.
+		{"govulncheck", govulncheckReport, "v1.8.0"},
 		{"gosec", "Version:   v2.29.0   \n", "v2.29.0"},
 	}
 	for _, tc := range cases {
@@ -67,11 +67,11 @@ func TestExtractVersion_RefusesAReportItCannotParse(t *testing.T) {
 		// gosec built without -X main.Version (#21).
 		{"gosec", "Version: dev\nGit tag: \n"},
 		{"gosec", "gosec v2.29.0\n"},
-		{"govulncheck", "Go: go1.26.7\n"},
-		{"golangci-lint", "version 2.13.2\n"},
+		{"govulncheck", "Go: go1.27.1\n"},
+		{"golangci-lint", "version 2.14.0\n"},
 		// Not anchored at the start of the line: a prefix that merely
 		// contains the documented text is not the documented line.
-		{"govulncheck", "note: Scanner: govulncheck@v1.7.0\n"},
+		{"govulncheck", "note: Scanner: govulncheck@v1.8.0\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.bin+"/"+tc.report, func(t *testing.T) {
@@ -99,11 +99,11 @@ func TestSameVersion_IsExactWithTheVPrefixOptional(t *testing.T) {
 		got, pin string
 		want     bool
 	}{
-		{"2.13.2", "v2.13.2", true},
+		{"2.14.0", "v2.14.0", true},
 		{"v2.29.0", "v2.29.0", true},
-		{"v1.7.0", "1.7.0", true},
+		{"v1.8.0", "1.8.0", true},
 		// The substring test these replace accepted both of these.
-		{"v11.7.0", "v1.7.0", false},
+		{"v11.8.0", "v1.8.0", false},
 		{"v12.29.0", "v2.29.0", false},
 		{"dev", "v2.29.0", false},
 		{"v2.29.0-rc1", "v2.29.0", false},
@@ -162,14 +162,14 @@ func TestRequire_AcceptsThePinnedVersion(t *testing.T) {
 	h := &fakeHost{
 		onPath:   map[string]bool{"govulncheck": true},
 		outputs:  map[string]string{"govulncheck --version": govulncheckReport},
-		manifest: "govulncheck v1.7.0\n",
+		manifest: "govulncheck v1.8.0\n",
 	}
 	var out bytes.Buffer
-	err := require(&out, h.host(), request{bin: "govulncheck", pin: "v1.7.0", module: "golang.org/x/vuln/cmd/govulncheck"})
+	err := require(&out, h.host(), request{bin: "govulncheck", pin: "v1.8.0", module: "golang.org/x/vuln/cmd/govulncheck"})
 	if err != nil {
 		t.Fatalf("require: %v", err)
 	}
-	for _, want := range []string{"ok  govulncheck v1.7.0", "runner image tool manifest", "  govulncheck v1.7.0"} {
+	for _, want := range []string{"ok  govulncheck v1.8.0", "runner image tool manifest", "  govulncheck v1.8.0"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output omits %q:\n%s", want, out.String())
 		}
@@ -369,7 +369,7 @@ func TestCLI_ExitStatusFollowsTheOutcome(t *testing.T) {
 			outputs: map[string]string{"govulncheck --version": govulncheckReport},
 		}).host()
 	}
-	args := []string{"govulncheck", "v1.7.0", "golang.org/x/vuln/cmd/govulncheck"}
+	args := []string{"govulncheck", "v1.8.0", "golang.org/x/vuln/cmd/govulncheck"}
 
 	var stdout, stderr bytes.Buffer
 	if code := cli(args, &stdout, &stderr, good()); code != 0 {
@@ -378,7 +378,7 @@ func TestCLI_ExitStatusFollowsTheOutcome(t *testing.T) {
 
 	for name, tc := range map[string][]string{
 		"no arguments":    nil,
-		"a different pin": {"govulncheck", "v1.8.0", "golang.org/x/vuln/cmd/govulncheck"},
+		"a different pin": {"govulncheck", "v1.9.0", "golang.org/x/vuln/cmd/govulncheck"},
 		"an unknown tool": {"staticcheck", "v1", "honnef.co/go/tools/cmd/staticcheck"},
 	} {
 		t.Run(name, func(t *testing.T) {

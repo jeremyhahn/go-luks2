@@ -965,9 +965,9 @@ gosec: ## Run gosec security scanner
 #
 # These are also the versions baked into the CI runner image. Bumping one is a
 # deliberate change, one issue per bump, made here and in the image together.
-GOLANGCI_LINT_VERSION ?= v2.13.2
+GOLANGCI_LINT_VERSION ?= v2.14.0
 GOSEC_VERSION ?= v2.29.0
-GOVULNCHECK_VERSION ?= v1.7.0
+GOVULNCHECK_VERSION ?= v1.8.0
 
 govulncheck: ## Run govulncheck (known vulns in stdlib and the dependency call graph)
 	@echo "$(COLOR_BOLD)Running govulncheck...$(COLOR_RESET)"
@@ -993,17 +993,17 @@ vuln: govulncheck ## Alias for govulncheck (scaffold §4 contract names it `vuln
 # Four SHA-256s, raised together or not at all: the archive per architecture,
 # checked BEFORE anything is unpacked, and the binary inside it, checked after
 # unpacking and again before an installed copy is reused. The archive hashes
-# match upstream's trivy_0.74.0_checksums.txt; the binary hashes are go-enclave's
+# match upstream's trivy_0.75.0_checksums.txt; the binary hashes are go-enclave's
 # pins for the same release. Never a checksum file fetched next to the archive:
 # whoever can replace the archive can replace that file too.
 #
 # The binary lands in build/tools, inside the checkout, so the target does not
 # touch anything outside the repository.
-TRIVY_VERSION                := v0.74.0
-TRIVY_SHA256_LINUX_AMD64     := 2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
-TRIVY_SHA256_LINUX_ARM64     := b94ce1976bbf3c15b514b605ee88be7c6d94a29be2302847ff01cb794d47aad5
-TRIVY_BIN_SHA256_LINUX_AMD64 := d89bcc6510a267f11b773398cbf1be5520ce39f9e8b6633178c4487f05b7d791
-TRIVY_BIN_SHA256_LINUX_ARM64 := fed2c9ca7d27191ada34524b5eaf5216a845c6d6f3246143c3b475552ffe5358
+TRIVY_VERSION                := v0.75.0
+TRIVY_SHA256_LINUX_AMD64     := c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f
+TRIVY_SHA256_LINUX_ARM64     := a1ee9f6ffb7d112b64ff726a2a0717c21175c1114361391f4a132956751a13b3
+TRIVY_BIN_SHA256_LINUX_AMD64 := 93f9da8e4ba5e0c1c76d8234ed2494cf9afb0a96fd21953e424bb795f3299b8e
+TRIVY_BIN_SHA256_LINUX_ARM64 := 869e310e208f0f2e3e90e4f842cc6adaa2b2c046fecbaade481e6b23fcc8f2a9
 TRIVY_DOWNLOAD_BASE          ?= https://github.com/aquasecurity/trivy/releases/download
 TOOLS_DIR                    ?= $(CURDIR)/$(BUILD_DIR)/tools
 TRIVY_BIN                     = $(TOOLS_DIR)/trivy-$(TRIVY_VERSION)/trivy
@@ -1217,7 +1217,7 @@ export GOWORK=off
 # of the shared image. A gate that READS instead of BUILDS and still votes is
 # the thing to close, and pinning the exact directive is the remedy the
 # handbook names (OWNER-QUEUE-2026-08-28 item 26) and the mechanism the dev
-# hosts already use by hand (`GOTOOLCHAIN=go1.27.0`).
+# hosts already use by hand (`GOTOOLCHAIN=go1.27.1`).
 #
 # Why the exact version and not `auto`: `auto` may pick a NEWER toolchain
 # than the directive when one is installed, so two hosts build one commit on
@@ -1245,8 +1245,8 @@ export GOWORK=off
 # The pairing trick below reads as: list every word of go.mod suffixed with
 # `@`, zip it against the word list shifted by one, and keep the pair whose
 # left half is the bare token `go` and whose right half starts with a digit
-# -- i.e. `go@1.27.0` from the directive, never `toolchain go1.27.0` (its
-# token is `go1.27.0`, not `go`) and never a module path containing `go`.
+# -- i.e. `go@1.27.1` from the directive, never `toolchain go1.27.1` (its
+# token is `go1.27.1`, not `go`) and never a module path containing `go`.
 TOOLCHAIN_PIN ?= 1
 GO_MOD_WORDS := $(file < go.mod)
 GO_FLOOR := $(firstword $(patsubst go@%,%,$(filter go@0% go@1% go@2% go@3% go@4% go@5% go@6% go@7% go@8% go@9%,$(join $(addsuffix @,$(GO_MOD_WORDS)),$(wordlist 2,$(words $(GO_MOD_WORDS)),$(GO_MOD_WORDS)) end-of-go-mod))))

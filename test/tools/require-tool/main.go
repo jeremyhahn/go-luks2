@@ -71,15 +71,15 @@ const githubServer = "https://github.com"
 // A GENERIC "find something version-shaped" regex is not safe, and govulncheck
 // shows why: its output's FIRST version-shaped token is the Go toolchain's.
 //
-//	Go: go1.26.7
-//	Scanner: govulncheck@v1.7.0
+//	Go: go1.27.1
+//	Scanner: govulncheck@v1.8.0
 //
 // A loose extractor pins the wrong number. So each tool is parsed by its own
 // documented line:
 //
-//	golangci-lint   golangci-lint has version 2.13.2 built with go1.26.7 ...
+//	golangci-lint   golangci-lint has version 2.14.0 built with go1.27.1 ...
 //	gosec           Version: v2.29.0
-//	govulncheck     Scanner: govulncheck@v1.7.0
+//	govulncheck     Scanner: govulncheck@v1.8.0
 //
 // An UNRECOGNIZED tool is a hard failure rather than a fallback to something
 // looser. A version format nobody has read is a version that cannot be verified.
@@ -223,10 +223,10 @@ func extractVersion(bin, report string) (string, error) {
 }
 
 // sameVersion compares EXACTLY, with the `v` prefix optional on either side:
-// golangci-lint reports bare (2.13.2) while gosec and govulncheck report
+// golangci-lint reports bare (2.14.0) while gosec and govulncheck report
 // prefixed (v2.29.0), and the pins are written prefixed. Nothing else is
-// normalised away. The substring test this replaced FAILED OPEN: a v1.7.0 pin
-// accepted a report of v11.7.0.
+// normalised away. The substring test this replaced FAILED OPEN: a v1.8.0 pin
+// accepted a report of v11.8.0.
 func sameVersion(got, pin string) bool {
 	return strings.TrimPrefix(got, "v") == strings.TrimPrefix(pin, "v")
 }

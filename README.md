@@ -27,7 +27,7 @@ go get github.com/jeremyhahn/go-luks2/pkg/luks2               # library
   [Key custody](docs/volumes/architecture.md#key-custody).
 - `mkfs.ext4`, `mkfs.xfs` or `mkfs.fat` when the CLI's `create` is asked to
   make a filesystem. Everything else in the CLI is pure Go.
-- Go 1.27.0 to build.
+- Go 1.27.1 to build.
 
 ## CLI quick start
 

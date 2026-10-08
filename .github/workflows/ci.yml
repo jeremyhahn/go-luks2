@@ -76,15 +76,16 @@ permissions:
   security-events: write
 
 env:
-  # 1.27.0 is the module floor since #201: go-enclave v0.5.0-alpha requires
-  # `go 1.27.0`, and adopting the latest dependency is owner-ruled (sdlc.md
-  # §2a-2). The 2026-08-20 block on 1.27.0 named a transitive dependency
+  # 1.27.1 is the module floor (#282): the upstream latest Go, per the owner
+  # ruling of 2026-10-07 that nothing is pinned below its latest release.
+  # go-enclave v0.5.0-alpha requires `go 1.27.0` (#201), which 1.27.1
+  # satisfies. The 2026-08-20 block on 1.27 named a transitive dependency
   # that failed to compile under it (undefined fastrand64); measured on
   # adoption, nothing in THIS module's graph does, so the block's reason no
-  # longer applies here. Never `stable`: a floating version flipped to 1.27.0
+  # longer applies here. Never `stable`: a floating version flipped to 1.27
   # mid-campaign and broke every repo riding it — that lesson is about the
   # float, not the number.
-  GO_VERSION: "1.27.0"
+  GO_VERSION: "1.27.1"
 
   # ANALYSIS TOOL PINS (#21, #44). These are the versions BAKED into the
   # self-hosted runner image; the steps below assert the binary they got
@@ -101,9 +102,9 @@ env:
   # Bumping one of these is a DELIBERATE change, one issue per bump, and the
   # runner image is bumped in the same breath — a version skew between the two
   # fails this job rather than silently scanning with something else.
-  GOLANGCI_LINT_VERSION: "v2.13.2"
+  GOLANGCI_LINT_VERSION: "v2.14.0"
   GOSEC_VERSION: "v2.29.0"
-  GOVULNCHECK_VERSION: "v1.7.0"
+  GOVULNCHECK_VERSION: "v1.8.0"
 
 jobs:
   lint:
