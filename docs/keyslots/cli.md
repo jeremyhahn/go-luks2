@@ -1,6 +1,6 @@
 # Keyslots — CLI
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
 > Conflicts with this document are defects. Fix them here first.
 
 ```

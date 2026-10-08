@@ -1,6 +1,6 @@
 # Tokens — user guide
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
 > Conflicts with this document are defects. Fix them here first.
 
 Prerequisites: an existing LUKS2 volume ([volumes/user.md](../volumes/user.md)).
@@ -51,4 +51,4 @@ There is no CLI verb for FIDO2 enrollment today; it is a library-only call
 |---|---|---|
 | `token remove` ran but the volume still opens with the old credential | `remove` deletes metadata only, never a keyslot | Use [`killslot`](../keyslots/cli.md#removekey-and-killslot) to revoke the credential itself |
 | A FIDO2 unlock fails with a helper error | Wrong PIN, timed out waiting for touch, or the device is not the one named by `keyprovider.WithDevice` | Check `HelperError`'s captured stderr |
-| `token import` refuses the JSON | A keyslot number in `keyslots` does not exist on this header, or is written with leading zeros (`"01"`) | Use the canonical id (`"1"`) and confirm the keyslot exists first with [keyslots](../keyslots/cli.md#keyslots) |
+| `token import` refuses the JSON | A keyslot number in `keyslots` does not exist on this header, the token has no `type`, or the file is not a JSON token object | Confirm the keyslot exists first with [keyslots](../keyslots/cli.md#keyslots) (`"01"` is read as keyslot 1 and written back as `"1"`) |

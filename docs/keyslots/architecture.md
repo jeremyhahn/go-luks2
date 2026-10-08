@@ -1,6 +1,6 @@
 # Keyslots — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
 > Conflicts with this document are defects. Fix them here first.
 
 A LUKS2 volume has up to 32 keyslots (0–31). Each normally wraps the same
@@ -47,10 +47,15 @@ Priority, KDF}`, via `(*Volume).AddKeyslot`/`ChangeKeyslot`); see
 
 ## Data flow: unlock order
 
-`(*Volume).Unlock`, `UnlockKeyslot`, `AddKeyslot` and `ChangeKeyslot` try only
-keyslots bound to the data segment, in ascending slot number, and the key must
-verify against a digest of that segment; a passphrase that opens only an
-unbound keyslot gets `ErrWrongKey`. **`priority` is not read by
+`(*Volume).Unlock` scans: it tries only keyslots bound to the data segment, in
+ascending slot number, and the key must verify against a digest of that
+segment; a passphrase that opens only an unbound keyslot gets `ErrWrongKey`.
+`UnlockKeyslot` does not scan: it tries exactly the slot it is given, and a
+slot that does not exist or is not bound to the data segment is refused up
+front with `ErrKeyslotNotFound`, before any derivation, whatever the
+credential. A bound slot with the wrong passphrase gets `ErrWrongKey`.
+`AddKeyslot` and `ChangeKeyslot` take an already-recovered `Key` and unlock
+nothing. **`priority` is not read by
 any unlock path.** `(*Header).Keyslots()` lists ascending slot numbers and
 reports each slot's priority and KDF cost.
 

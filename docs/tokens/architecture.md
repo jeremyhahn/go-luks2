@@ -1,6 +1,6 @@
 # Tokens — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
 > Conflicts with this document are defects. Fix them here first.
 
 A token is a JSON object in the header that records what opens a keyslot: a
@@ -27,9 +27,10 @@ from or how to ask for it again. A token is the header's answer: metadata a
 tool can read to reconstruct the prompt (a FIDO2 relying party, a TPM PCR
 policy, a helper command) without that metadata being guessable from the
 keyslot itself. go-luks2 keeps the type genuinely generic — `Token{Type,
-Keyslots, Members}` — rather than modeling every vendor's fields, because the
-FIPS-mode exemption for FIDO2 flags and TPM policy would otherwise have to be
-re-derived for every new token type a tool outside this library invents.
+Keyslots, Members}` — rather than modeling every vendor's fields: every member
+it does not model (a FIDO2 token's credential, salt and requirement flags, a
+TPM token's policy, any type a tool outside this library invents) is carried
+in `Members` untouched, so writing a token back never drops what wrote it.
 
 A key provider is this library's generic answer to "where does a credential
 come from": one interface, `Passphrase`/`Token`, with the FIDO2 and
@@ -40,15 +41,18 @@ code of its own; a consumer that needs to act on a TPM token implements
 
 ## Component boundaries
 
-Token read/write (`token.go`, `token_v2.go`) lives in `pkg/luks2`.
+Token read/write (`token.go`; `Enroll` and `UnlockWithProvider` in
+`provider.go`) lives in `pkg/luks2`.
 Key-provider implementations (`Command`, FIDO2) live in `pkg/keyprovider`,
 its own public package — "the only way to keep `pkg/luks2` exec-free"
 (DESIGN.md §A.4) — implementing `luks2.KeyProvider`, defined at the consumer
 (`pkg/luks2`) rather than at the implementer. `luks2.Token` stays generic
 (`Type`, `Keyslots`, `Members map[string]json.RawMessage`); the FIDO2-specific
 members are interpreted by `pkg/keyprovider` alone. FIDO2 runs `fido2-cred`
-and `fido2-assert` from libfido2 as external helpers, through the same
-trusted-tool resolution every exec'd command uses
+and `fido2-assert` from libfido2 as external helpers, from absolute paths
+(`/usr/bin/fido2-cred` and `/usr/bin/fido2-assert` unless
+`WithFIDO2Tools` names others), never looked up on `PATH`, and with the same
+fixed minimal environment every exec'd command gets
 ([volumes/architecture.md](../volumes/architecture.md#device-layer)); it does
 not link a cgo binding, keeping the package pure Go.
 
@@ -59,7 +63,9 @@ token naming the slot it was given, all under one device lock, so two
 enrollments at once cannot pick the same token slot. If the token write fails
 the keyslot is removed, because a keyslot that nothing describes cannot be
 told apart from a forgotten credential. If that removal also fails, the
-error is an `OrphanedKeyslotError` naming the slot.
+error is an `OrphanedKeyslotError` naming the slot. A provider whose token
+has no type is anonymous: Enroll writes the keyslot only and reports token
+`-1`.
 
 **Unlock with a provider** (`(*Volume).UnlockWithProvider` plus
 `dmcrypt.Activate`): `ctx` bounds the helper. An authenticator waiting for a
@@ -70,9 +76,10 @@ keeps the pipe open, the read is cut off after a short grace period with
 `ErrHelperOutput`.
 
 **Rebuilding a provider from a token already on disk**
-(`keyprovider.FromToken`): reads the token's members back into a provider
-that can be used for `(*Volume).UnlockWithProvider` without the caller having
-kept its own configuration around.
+(`keyprovider.FromToken`): reads a `systemd-fido2` token's members back into a
+provider that can be used for `(*Volume).UnlockWithProvider` without the
+caller having kept its own configuration around. Any other token type is
+refused with `ErrUnsupportedToken`.
 
 ## What this feature deliberately does not do
 

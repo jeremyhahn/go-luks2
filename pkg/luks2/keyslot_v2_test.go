@@ -7,7 +7,9 @@
 package luks2
 
 import (
+	"bytes"
 	"context"
+	"crypto"
 	"errors"
 	"io/fs"
 	"os"
@@ -18,6 +20,7 @@ import (
 
 	"github.com/jeremyhahn/go-enclave"
 
+	"github.com/jeremyhahn/go-luks2/internal/fips"
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
@@ -400,6 +403,72 @@ func TestVolumeChangeKeyslotWithAZeroKDFKeepsTheOnDiskCost(t *testing.T) {
 	kdf := changeKeyslotOnDiskKDF(t, iterations, KeyslotParams{})
 	if kdf.Type != kdfTypePBKDF2 || *kdf.Iterations != iterations {
 		t.Errorf("on-disk KDF after ChangeKeyslot = %s/%d, want the preserved %s/%d", kdf.Type, *kdf.Iterations, kdfTypePBKDF2, iterations)
+	}
+}
+
+// TestVolumeChangeKeyslotRefusesAnExplicitKDFLikeAddKeyslot: an explicit KDF
+// is validated as AddKeyslot validates it, so a request AddKeyslot refuses is
+// refused here too, and the refusal writes nothing -- the image is byte for
+// byte what it was.
+func TestVolumeChangeKeyslotRefusesAnExplicitKDFLikeAddKeyslot(t *testing.T) {
+	cases := []struct {
+		name  string
+		fips  bool
+		kdf   KDFParams
+		wantA error
+	}{
+		{"argon2id under the FIPS policy", true,
+			KDFParams{Type: KDFArgon2id, Time: 1, MemoryKiB: minArgon2MemoryKB, Parallel: 1}, ErrFIPSNotApproved},
+		{"argon2i under the FIPS policy", true,
+			KDFParams{Type: KDFArgon2i, Time: 1, MemoryKiB: minArgon2MemoryKB, Parallel: 1}, ErrFIPSNotApproved},
+		{"pbkdf2 with sha1", false,
+			KDFParams{Type: KDFPBKDF2, Hash: crypto.SHA1, IterTime: time.Millisecond}, ErrInvalidArgument},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := formattedVolumeImage(t, "changekeyslot-refused.img", "", "")
+			v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+			if err != nil {
+				t.Fatalf("Open failed: %v", err)
+			}
+			defer func() { _ = v.Close() }()
+
+			pass := newTestPassphrase(t)
+			defer func() { _ = pass.Destroy() }()
+			key, err := v.Unlock(context.Background(), pass)
+			if err != nil {
+				t.Fatalf("Unlock failed: %v", err)
+			}
+			defer key.Destroy()
+
+			rotated := newPassphraseEnclave(t, "never written")
+			defer func() { _ = rotated.Destroy() }()
+
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("could not snapshot the image: %v", err)
+			}
+
+			// AddKeyslot is the reference: it must refuse the same request.
+			v.sys.fipsMode = func() fips.Mode { return fips.Mode(tc.fips) }
+			_, addErr := v.AddKeyslot(context.Background(), key, rotated, KeyslotParams{KDF: tc.kdf})
+			if !errors.Is(addErr, tc.wantA) {
+				t.Fatalf("AddKeyslot = %v, want %v (the reference refusal)", addErr, tc.wantA)
+			}
+
+			_, err = v.ChangeKeyslot(context.Background(), key, rotated, KeyslotParams{KDF: tc.kdf})
+			if !errors.Is(err, tc.wantA) {
+				t.Fatalf("ChangeKeyslot = %v, want %v", err, tc.wantA)
+			}
+
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("could not re-read the image: %v", err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Error("a refused ChangeKeyslot changed the image")
+			}
+		})
 	}
 }
 

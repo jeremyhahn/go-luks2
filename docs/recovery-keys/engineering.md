@@ -1,6 +1,6 @@
 # Recovery keys — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
 > Conflicts with this document are defects. Fix them here first.
 
 ## Exported surface
@@ -39,14 +39,16 @@ load and verify free functions are not exported.
 
 - The printed/written text, not the decoded bytes, is what the keyslot
   holds, so the same recovery key opens the volume through stock cryptsetup.
-  `ParseRecoveryKey` still accepts the older decoded-bytes form for keys
-  enrolled before this was the case.
+  `ParseRecoveryKey` only trims surrounding whitespace and refuses anything
+  that is not one line; it does not decode, so a key enrolled before this was
+  the case (its keyslot holds the decoded bytes) has no exported path.
 - Two-phase enrollment: the caller shows or persists the key **before**
   `AddRecoveryKey` is called. If the CLI's `recovery add` cannot print the
-  key (the write to standard output fails) and it was not saved with
-  `--output`, the keyslot and token are removed again and the command exits
-  1; if that removal fails, the error names the slot to kill (CLI behaviour,
-  [cli.md](cli.md)).
+  key (the write to standard output fails), the keyslot and token are removed
+  again and the command fails; `--output` is written only after a successful
+  print, so an unprinted key was never saved. If a removal fails, the message
+  names the command that finishes it (`killslot` or `token remove`) (CLI
+  behavior, [cli.md](cli.md)).
 - A credential presented to `(*Volume).Unlock` is subject
   to the same untrusted-keyslot bounds as any other credential
   ([keyslots/architecture.md](../keyslots/architecture.md#untrusted-keyslots)).
@@ -98,12 +100,12 @@ volume UUID, keyslot, token and checksum, then the key.
 
 Covered by `pkg/luks2`'s unit suite (generation, rendering, parsing, the
 lower floor, the two-phase rollback on a token-write failure) and the
-cryptsetup compatibility matrix's `recovery_key*` rows and
+cryptsetup compatibility matrix's `recovery key*` rows and
 `TestCLI_FIPSModeCreateAndRecoveryAddOpenWithCryptsetup`
 ([cryptsetup-interop/engineering.md](../cryptsetup-interop/engineering.md)).
 
 ## Observability
 
-No logging. The CLI warns when releasing a recovery credential's enclave
-reports a problem ([volumes/engineering.md](../volumes/engineering.md#key-custody-detail)),
-but the library itself does not log.
+No logging. Neither the CLI nor the library reports a problem releasing a
+recovery credential's enclave; the release outcome is dropped
+([volumes/engineering.md](../volumes/engineering.md#key-custody-detail)).

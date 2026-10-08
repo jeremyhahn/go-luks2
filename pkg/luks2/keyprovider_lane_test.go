@@ -129,7 +129,7 @@ func TestConcurrentEnrollmentsKeepBothTokens(t *testing.T) {
 	}
 
 	// Enrolled through AddRecoveryKey, which shares enrollWithToken with
-	// EnrollKeyProvider and, holding a credential this package drew, may use
+	// (*Volume).Enroll and, holding a credential this package drew, may use
 	// the minimum iteration count: the subject is the token slot, not the KDF.
 	enroll := func(string) (int, int, error) {
 		_, slot, tok, err := enrollRecoveryKeyForTest(t, image, []byte(existing), withTestSys(sys))

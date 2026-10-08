@@ -869,8 +869,8 @@ func TestKDFParamsValidateRejectsANegativeCostParameter(t *testing.T) {
 	}
 }
 
-// TestIsFIPSCompliantKDF tests the FIPS compliance checker
-func TestIsFIPSCompliantKDF(t *testing.T) {
+// TestFIPSCompliantKDF tests the FIPS compliance checker
+func TestFIPSCompliantKDF(t *testing.T) {
 	tests := []struct {
 		kdfType     string
 		expectFIPS  bool
@@ -904,7 +904,7 @@ func TestIsFIPSCompliantKDF(t *testing.T) {
 		t.Run(tt.description, func(t *testing.T) {
 			result := isFIPSCompliantKDF(tt.kdfType)
 			if result != tt.expectFIPS {
-				t.Errorf("IsFIPSCompliantKDF(%q) = %v, expected %v", tt.kdfType, result, tt.expectFIPS)
+				t.Errorf("isFIPSCompliantKDF(%q) = %v, expected %v", tt.kdfType, result, tt.expectFIPS)
 			}
 		})
 	}

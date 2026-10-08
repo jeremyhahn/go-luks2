@@ -1,6 +1,6 @@
 # Wipe — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
 > Conflicts with this document are defects. Fix them here first.
 
 ## Exported surface
@@ -27,12 +27,12 @@ returns a standard's pass sequence. Single-keyslot zeroing is `(*Volume).RemoveK
 
 - The device is opened with `O_EXCL` for the whole operation; a device the
   kernel reports in use is refused before anything is written.
-- A path that resolves to a different file at open time than at lock time
-  (a symlink re-pointed in between) is refused before anything is written —
-  the same claim-targets-the-locked-descriptor invariant as the rest of the
-  write path ([volumes/architecture.md](../volumes/architecture.md#volume-target-and-activation)).
+- The `O_EXCL` claim reopens the locked descriptor's own inode (its
+  `/proc/self/fd` entry), never the path again, so a symlink re-pointed after
+  the lock cannot redirect the wipe — the same
+  claim-targets-the-locked-descriptor invariant as the rest of the write path ([volumes/architecture.md](../volumes/architecture.md#volume-target-and-activation)).
 - Header-only wipe never touches at or past the start of the data segment.
-- Full-device wipe syncs after the last pass, always, whether or not
+- Full-device wipe syncs after every pass, the last included, whether or not
   verification is requested.
 - Removing a keyslot via `(*Volume).RemoveKeyslot` is guarded by the same
   last-keyslot and area-overlap checks as any other removal path
@@ -67,7 +67,8 @@ refuses, or a regular file, is ignored silently.
 | Error | Meaning |
 |---|---|
 | `ErrDeviceInUse` | The device is mounted, mapped, or otherwise held; refused before any write |
-| `ErrDeviceChanged` | The path named a different file at open time than at lock time |
+| `ErrDeviceChanged` | Declared by `pkg/wipe` for consistency with `luks2` and `dmcrypt`; never returned by a wipe, whose claim reopens the locked inode rather than the path |
+| `ErrLockContended` | Another holder kept the device's lock for the whole wait budget (`LockTimeoutError`) |
 | `wipe.ErrVerification` | A verification pass found a byte that did not match |
 | `ErrLastKeyslot`, `ErrKeyslotAreaOverlap` | `RemoveKeyslot`'s removal guards ([keyslots](../keyslots/engineering.md#error-semantics)) |
 
@@ -77,16 +78,18 @@ A header-only wipe zeroes exactly the layout `header/architecture.md`
 describes (both header copies, the keyslots area, every keyslot area the
 header lists, and any other recognisable header copy at a legal offset). See
 [header/architecture.md#layout](../header/architecture.md#layout) for the
-byte ranges. There is no recovery from either wipe mode; a header backup
-taken before a header-only wipe no longer opens the volume, because the
-keyslot material it needs is gone.
+byte ranges. Nothing on the device recovers from either wipe mode. A
+header-only wipe leaves the data segment in place, so a header backup taken
+before it that holds the keyslots area (`cryptsetup luksHeaderBackup` does)
+opens the data again once restored; only a full wipe removes that route.
 
 ## Test strategy
 
-Covered by `pkg/luks2`'s unit suite against real temp files (pattern
-sequencing, verification, the EXCL/retarget guards) and the cryptsetup
-compatibility matrix's `wipe_keyslot*` row and
-`TestHeaderOnlyWipeIsACryptoEraseOnTheMedium`
+Covered by `pkg/wipe`'s unit suite against real temp files (pattern
+sequencing, verification, the `O_EXCL` claim), `pkg/luks2`'s (the header-only
+wipe plan) and the cryptsetup compatibility matrix's `wipe_keyslot*` row and
+header-only-wipe row, `TestHeaderOnlyWipeIsACryptoEraseOnTheMedium` in
+`test/integration/device`
 ([cryptsetup-interop/engineering.md](../cryptsetup-interop/engineering.md)).
 Full-device sanitize with `--trim`/verification needs a real block device and
 is part of the integration tier.

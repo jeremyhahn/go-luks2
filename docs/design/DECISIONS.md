@@ -3564,8 +3564,8 @@ Polish for #211. Supersedes the H9e note that `PriorityIgnore` is
   `addkey` and `changekey`. With none given, both commands pass a zero
   `KDFParams`, keeping the library's default/inherited-cost policy (unlike
   `create`, which always resolves a KDF). `argon2i` is no longer selectable
-  from the CLI, as it already was not on `create`. No compatibility shim
-  (owner ruling 2026-10-05). The FIPS hint "use --pbkdf pbkdf2" is now true
+  from the CLI, as it already was not on `create` (reversed below, p-final).
+  No compatibility shim (owner ruling 2026-10-05). The FIPS hint "use --pbkdf pbkdf2" is now true
   for every command that prints it.
 
 ## p-docs (versioning text; TESTING/RELEASABILITY fold)
@@ -3621,3 +3621,18 @@ behavior. See `pkg/luks2/fipsmigrate.go:72-104`,
   Rationale: cryptsetup's luksChangeKey honors `--pbkdf`, `--iter-time` and
   `--pbkdf-force-iterations`, and `luks2 changekey` accepted the same flags
   and silently ignored them. A CLI flag that does nothing is a defect.
+
+## p-final
+
+- **`--pbkdf` accepts `argon2i`.** `create`, `recovery add`, `addkey` and
+  `changekey` take `argon2id`, `argon2i` and `pbkdf2`, the three values
+  cryptsetup's `--pbkdf` takes. This reverses the p-cli entry that dropped
+  `argon2i`. Owner ruling 2026-10-05: stricter than cryptsetup is fine,
+  incompatibility is not, and a script doing `--pbkdf argon2i` must work.
+  `--pbkdf-memory` and `--pbkdf-parallel` apply to both Argon2 variants;
+  FIPS refusal is unchanged.
+- **CLI unit tests format with the cheapest KDF.** PBKDF2 cannot go below its
+  iteration floor, which costs seconds per derivation under `-race`, so the
+  shared fixtures use Argon2id at the library minimum (64 MiB, time 1,
+  parallel 1). The one test that asserts PBKDF2 iteration counts has its own
+  PBKDF2 template.

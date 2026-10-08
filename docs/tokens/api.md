@@ -1,6 +1,6 @@
 # Tokens — API
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
 > Conflicts with this document are defects. Fix them here first.
 
 The Go API, embedded transport only. go-luks2 is a Layer 0 library (docs/00
@@ -8,7 +8,7 @@ The Go API, embedded transport only. go-luks2 is a Layer 0 library (docs/00
 
 | Capability | Embedded (Go call) |
 |---|---|
-| List / read tokens | `(*Volume).Header().Tokens() map[int]Token` |
+| List / read tokens | `(*Volume).Header(ctx) (*Header, error)`, then `(*Header).Tokens() map[int]Token` |
 | Write / replace / remove a token | `(*Volume).AddToken`, `SetToken`, `RemoveToken` |
 | Enroll a `KeyProvider`-backed credential | `(*Volume).Enroll(ctx, key, provider, KeyslotParams) (Enrollment, error)` |
 | Unlock through a `KeyProvider` | `(*Volume).UnlockWithProvider(ctx, provider) (*Key, error)`, then `dmcrypt.Activate` |

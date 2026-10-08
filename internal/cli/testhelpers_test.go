@@ -7,7 +7,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"crypto"
 	"errors"
 	"fmt"
 	"os"
@@ -17,6 +16,7 @@ import (
 
 	"github.com/jeremyhahn/go-enclave"
 
+	"github.com/jeremyhahn/go-luks2/internal/fips"
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 	"github.com/jeremyhahn/go-luks2/pkg/filesystem"
 	"github.com/jeremyhahn/go-luks2/pkg/loop"
@@ -38,10 +38,41 @@ func newTestVolumeImage(t *testing.T, name string) string {
 	return testVolume.copyTo(t, name)
 }
 
+// fipsProcess reports whether this test binary runs in FIPS 140-3 mode (the
+// nightly FIPS job runs it under GODEBUG=fips140=only). FIPS mode is fixed at
+// process start, and the library refuses Argon2 in it.
+var fipsProcess = bool(fips.Probe())
+
+// fastTestKDF is the cheapest KDF the library will write in this process:
+// Argon2id at its minimum memory, time and parallelism, or, in FIPS mode where
+// Argon2 is refused, PBKDF2 at its iteration floor. PBKDF2 cannot be made
+// cheaper than that floor, which costs seconds per derivation under the race
+// detector, so it is only the choice where Argon2 is not available.
+var fastTestKDF = func() luks2.KDFParams {
+	if fipsProcess {
+		return luks2.KDFParams{Type: luks2.KDFPBKDF2, IterTime: time.Millisecond}
+	}
+	return luks2.KDFParams{Type: luks2.KDFArgon2id, Time: 1, MemoryKiB: 65536, Parallel: 1}
+}()
+
+// fastTestKDFLabel is the label the CLI prints for fastTestKDF.
+var fastTestKDFLabel = map[bool]string{false: "Argon2id", true: "PBKDF2-SHA512"}[fipsProcess]
+
 // formatTestVolume formats testVolume through (*luks2.Volume).Format in a
-// new image under dir. The 1ms PBKDF2 budget is held to the production
-// iteration floor, so the derivation is still a full-cost one.
+// new image under dir at fastTestKDF.
 func formatTestVolume(dir string) (string, error) {
+	return formatTestVolumeWith(dir, fastTestKDF)
+}
+
+// pbkdf2TestVolume is testVolume with a PBKDF2 keyslot 0, for the tests that
+// assert on PBKDF2 iteration counts. Its unlock costs the iteration floor, so
+// only those tests use it.
+var pbkdf2TestVolume = &volumeTemplate{build: func(dir string) (string, error) {
+	return formatTestVolumeWith(dir, luks2.KDFParams{Type: luks2.KDFPBKDF2, IterTime: time.Millisecond})
+}}
+
+// formatTestVolumeWith is formatTestVolume at the given KDF.
+func formatTestVolumeWith(dir string, kdf luks2.KDFParams) (string, error) {
 	path := filepath.Join(dir, "volume.img")
 	f, err := os.Create(path) // #nosec G304 -- path is under the fixture's temp dir
 	if err != nil {
@@ -70,7 +101,7 @@ func formatTestVolume(dir string) (string, error) {
 
 	if err := v.Format(ctx, pass, luks2.FormatParams{
 		KeySize: 512,
-		KDF:     luks2.KDFParams{Type: luks2.KDFPBKDF2, IterTime: time.Millisecond},
+		KDF:     kdf,
 	}); err != nil {
 		return "", fmt.Errorf("Format: %w", err)
 	}
@@ -91,8 +122,8 @@ func newTwoSlotVolumeImage(t *testing.T, name string) string {
 }
 
 // addSecondPassphrase copies testVolume under dir and adds
-// testSecondPassphrase to it through (*luks2.Volume).AddKeyslot, at the same
-// production-floor PBKDF2 cost as keyslot 0.
+// testSecondPassphrase to it through (*luks2.Volume).AddKeyslot, at the
+// same fastTestKDF cost as keyslot 0.
 func addSecondPassphrase(dir string) (string, error) {
 	path := filepath.Join(dir, "volume.img")
 	if err := testVolume.writeImage(path); err != nil {
@@ -128,7 +159,7 @@ func addSecondPassphrase(dir string) (string, error) {
 	if _, err := v.AddKeyslot(ctx, key, added, luks2.KeyslotParams{
 		Slot:     &slot,
 		Priority: luks2.PriorityNormal,
-		KDF:      luks2.KDFParams{Type: luks2.KDFPBKDF2, Hash: crypto.SHA512, IterTime: time.Millisecond},
+		KDF:      fastTestKDF,
 	}); err != nil {
 		return "", fmt.Errorf("AddKeyslot: %w", err)
 	}

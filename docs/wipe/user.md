@@ -1,6 +1,6 @@
 # Wipe — user guide
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
 > Conflicts with this document are defects. Fix them here first.
 
 Prerequisites: the volume must be closed first
@@ -14,9 +14,11 @@ sudo luks2 wipe /dev/sdb1
 ```
 
 This destroys the header copies and keyslots only; it is fast because it does
-not touch the (still-encrypted) data segment. Any existing header backup
-becomes useless at the same moment. Use this when the goal is "nobody can
-open this again," not "nobody can recover any bytes from this medium."
+not touch the (still-encrypted) data segment. A header backup taken before
+it (`cryptsetup luksHeaderBackup`) still holds the keyslots, so restoring it
+opens the data again: if such a backup exists and is not destroyed too, use
+the full wipe below. Use this when the goal is "nobody can open this again,"
+not "nobody can recover any bytes from this medium."
 
 ## Destroy the data itself before disposing of a device
 
@@ -32,5 +34,5 @@ For a device you are about to discard entirely, add `--trim`.
 | Symptom | Likely cause | Next step |
 |---|---|---|
 | `wipe` refuses with a device-in-use error | The volume is still open or mounted | `luks2 unmount` then `luks2 close` first |
-| `wipe` says the keyslots area could not be located | No header copy had a valid checksum | Use `--full`; a header-only wipe cannot target an area it cannot find |
+| A header-only `wipe` of a volume whose header was already damaged reports success | No header copy had a valid checksum, so only the first 32 KiB and every recognizable copy were zeroed; keyslot material further out may remain | Use `--full`; a header-only wipe cannot target an area it cannot find |
 | `wipe --full --verify` fails verification | A byte did not match the final pass — possibly a flaky device | Re-run; if it fails consistently, suspect the medium itself |

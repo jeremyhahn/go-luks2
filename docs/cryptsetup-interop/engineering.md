@@ -1,12 +1,12 @@
 # cryptsetup interop — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1) and cryptsetup 2.7.5
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163) and cryptsetup 2.7.5
 > Conflicts with this document are defects. Fix them here first.
 
 ## The interop matrix
 
 Each row is done by one tool and checked by the other; the tests are in
-`pkg/luks2` unless a path is given.
+`test/integration/interop` unless a path is given.
 
 | Operation | go-luks2 → cryptsetup | cryptsetup → go-luks2 | Test |
 |---|---|---|---|
@@ -20,12 +20,12 @@ Each row is done by one tool and checked by the other; the tests are in
 | Tokens: `systemd-tpm2`, `systemd-fido2` JSON, import and remove | ✓ | ✓ | `TestCompatMatrix/token*` |
 | Header backup and restore (`luksHeaderBackup`/`luksHeaderRestore`; `(*Volume).RestorePrimaryHeader`) | ✓ | ✓ | `TestCompatMatrix/header*` |
 | Wipe keyslot (`(*Volume).RemoveKeyslot`; `luksErase`) | ✓ | ✓ | `TestCompatMatrix/wipe_keyslot*` |
-| Header-only wipe | ✓ | – | `TestHeaderOnlyWipeIsACryptoEraseOnTheMedium` |
+| Header-only wipe | ✓ | – | `test/integration/device` `TestHeaderOnlyWipeIsACryptoEraseOnTheMedium` |
 | Recovery keys (printed key; `systemd-cryptenroll` form) | ✓ | ✓ | `TestCompatMatrix/recovery_key*`, `test/integration/cli` `TestCLI_FIPSModeCreateAndRecoveryAddOpenWithCryptsetup` |
 | FIPS import | ✓ | – | `test/integration/interop` `TestFIPSImportOfADefaultCryptsetupVolumeMapsTheSameData` |
-| Detached header (`--header`): read, keyslots managed | – | ✓ | `TestCompatMatrix/detached_header*`, `TestDetachedHeaderKeyslotsAreManageable` |
-| Detached header: activation | – | refused | `TestADetachedHeaderIsNeverActivated` |
-| Concurrent writers: every write path against a cryptsetup write | ✓ | ✓ | `TestCryptsetupWaitsForEveryWritePath`, `TestEveryWritePathWaitsForCryptsetup` |
+| Detached header (`--header`): read, keyslots managed | – | ✓ | `TestCompatMatrix/detached_header*`, `pkg/luks2` `TestDetachedHeaderKeyslotsAreManageable` |
+| Detached header: activation | – | refused | `test/integration/header` `TestADetachedHeaderIsNeverActivated` |
+| Concurrent writers: every write path against a cryptsetup write | ✓ | ✓ | `pkg/luks2` `TestCryptsetupWaitsForEveryWritePath`, `TestEveryWritePathWaitsForCryptsetup` |
 
 cryptsetup-formatted volumes go-luks2 opens, maps and adds keyslots to
 (`TestCompatCryptsetupFormats`): `--pbkdf pbkdf2` with `--hash sha256` and
@@ -41,9 +41,9 @@ Out of scope, refused with a typed error and nothing written:
 | Container | go-luks2 | Test |
 |---|---|---|
 | `--integrity` (dm-integrity) | `Volume.Unlock` (and so `AddKeyslot`'s key recovery) and activation: `ErrUnsupported`, whatever the volume key size; the container is untouched, open it with cryptsetup | `TestCompatIntegrityVolumeIsRefusedForActivation` |
-| Mid-reencryption (`cryptsetup reencrypt`) | `ErrUnsupportedRequirement` | `TestAnInterruptedCryptsetupReencryptIsRefusedForActivation` |
-| LUKS1 (convert it with `cryptsetup convert --type luks2`) | `ErrNotLUKS2` from `(*Volume).Header` | `TestReadHeaderRefusesALUKS1Container` |
-| Keyslot ciphers other than AES XTS/CBC | `ErrUnsupported` | `TestParseKeyslotAreaEncryption` |
+| Mid-reencryption (`cryptsetup reencrypt`) | `Volume.Unlock`: `ErrUnsupportedRequirement` | `test/integration/dmcrypt` `TestAnInterruptedCryptsetupReencryptIsRefusedForActivation` |
+| LUKS1 (convert it with `cryptsetup convert --type luks2`) | `ErrNotLUKS2` from `(*Volume).Header` | `pkg/luks2` `TestReadHeaderRefusesALUKS1Container` |
+| Keyslot ciphers other than AES XTS/CBC | `ErrUnsupported` | `pkg/luks2` `TestParseKeyslotAreaEncryption` |
 
 ## Metadata lock
 
@@ -55,12 +55,17 @@ setuid child in the disk group):
 | State | cryptsetup 2.7.5 | go-luks2 |
 |---|---|---|
 | Missing, creatable | creates it 0700, proceeds | same |
-| Missing, not creatable (read-only `/run`) | every command, `isLuks` and `luksDump` included: exit 5, "Failed to acquire read lock" | writes: `ErrMetadataLockUnavailable`, header unchanged; reads proceed |
-| A symlink | exit 5, "Locking aborted" | writes: `ErrMetadataLockUnavailable`, nothing created through it |
-| Root's 0700, caller uid 1000 | every command: exit 5 (`isLuks` silently) | writes: `ErrMetadataLockUnavailable` wrapping `EACCES`; reads proceed |
+| Missing, not creatable (read-only `/run`) | every command, `isLuks` and `luksDump` included: exit 5, "Failed to acquire read lock" | every operation, `Header` and `Unlock` included: `ErrMetadataLockUnavailable`, header unchanged |
+| A symlink | exit 5, "Locking aborted" | every operation: `ErrMetadataLockUnavailable`, nothing created through it |
+| Root's 0700, caller uid 1000 | every command: exit 5 (`isLuks` silently) | every operation, `Header` and `Unlock` included: `ErrMetadataLockUnavailable` wrapping `EACCES` |
 | 0770 group `disk`, caller uid 1000 | works | works |
-| Lock file held exclusively | every command waits, with no timeout | `Header` reads proceed; `Unlock` and writes wait 30 s, then `ErrLockContended` |
+| Lock file held exclusively | every command waits, with no timeout | `Header`, `Unlock` and writes wait 30 s, then `ErrLockContended` |
 | Lock file held shared | reads proceed; writes wait, with no timeout | same; writes stop at 30 s |
+
+The go-luks2 write rows are measured. Its read rows follow from the code
+(`(*Volume).Header` and `Unlock` take the lock shared through the same
+`internal/device` path a write takes exclusively) rather than from this
+test, whose read steps run the package's lockless internal read helpers.
 
 A non-root caller can manage keyslots on a block device when the lock
 directory admits its group, for example with a `tmpfiles.d` entry

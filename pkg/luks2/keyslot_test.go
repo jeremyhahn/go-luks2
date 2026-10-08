@@ -1104,7 +1104,7 @@ func TestAddKeyAndUnlockRoundTripOnAES192CBCVolume(t *testing.T) {
 	}
 	passphraseKey, err := deriveKeyEnclave(context.Background(), firstPassphrase, kdf, areaKeySize, defaultVolumeSys())
 	if err != nil {
-		t.Fatalf("DeriveKeyEnclave failed: %v", err)
+		t.Fatalf("deriveKeyEnclave failed: %v", err)
 	}
 	defer mustDestroy(t, passphraseKey)
 

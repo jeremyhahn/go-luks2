@@ -16,8 +16,14 @@ import (
 
 // fastKDFArgs are the shared KDF flags recovery add and create tests pass
 // to avoid the library's default (a multi-second PBKDF2 calibration, or a
-// 1 GiB Argon2id derivation).
-var fastKDFArgs = []string{"--pbkdf", "pbkdf2", "--hash", "sha256", "--iter-time", "1"}
+// 1 GiB Argon2id derivation): Argon2id at the cheapest cost the library
+// writes, or PBKDF2 at its iteration floor in FIPS mode, which refuses Argon2.
+var fastKDFArgs = func() []string {
+	if fipsProcess {
+		return []string{"--pbkdf", "pbkdf2", "--iter-time", "1"}
+	}
+	return []string{"--pbkdf", "argon2id", "--pbkdf-force-iterations", "1", "--pbkdf-memory", "65536", "--pbkdf-parallel", "1"}
+}()
 
 func TestRunRecoveryGenerate(t *testing.T) {
 	e, _, _, stdout, _ := newTestEnv(&bytes.Buffer{})

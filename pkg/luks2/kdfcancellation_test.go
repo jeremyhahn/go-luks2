@@ -31,7 +31,7 @@ import (
 // what is exercised is mid-flight cancellation, not an already-canceled ctx
 // (covered elsewhere, e.g. TestVolumeFormatRefusesAnAlreadyCanceledContext).
 
-func TestDeriveKeyEnclaveCancelledDuringDerivationDestroysOutput(t *testing.T) {
+func TestDerivedEnclaveCancelledDuringDerivationDestroysOutput(t *testing.T) {
 	iterations := 100_000
 	kdf := &header.KDF{Type: kdfTypePBKDF2, Hash: "sha256", Salt: encodeBase64([]byte("cancellation-salt")), Iterations: &iterations}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)

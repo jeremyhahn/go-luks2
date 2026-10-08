@@ -1,6 +1,6 @@
 # FIPS 140-3 — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
 > Conflicts with this document are defects. Fix them here first.
 
 go-luks2 runs under the Go Cryptographic Module in FIPS 140-3 mode. "FIPS
@@ -25,8 +25,21 @@ a `Volume` operation, not a separate subsystem to configure.
 
 `internal/fips` (H3b, DECISIONS.md) owns the mode value (`fips.Mode` from
 `fips.Probe()`) and the two policy predicates, `RequireKDF`/`RequireHash`,
-as methods on it. `pkg/luks2`'s own `fipsMode` seam is
-`var fipsMode = fips.Probe` until the per-package `sys` struct lands (H9);
+as methods on it. Two policy sources are in play, and they differ by what
+they judge:
+
+- **Derivations** use the volume's own policy. Each `Volume` carries a
+  `volumeSys`, and `volumeSys.fipsMode` (`pkg/luks2/volume.go`) is what every
+  key derivation on that volume consults. It defaults to `fips.Probe`, the
+  process's mode, and a test can force a different policy on one volume without
+  touching the others.
+- **The parameter preflight** uses the process mode. `AddKeyslot` and
+  `ChangeKeyslot` call the public `KDFParams.Validate()` on an explicit KDF
+  before writing, and that reads `fips.Probe` directly, not the volume's
+  policy. (`Format` passes its volume's policy to the same check.) A policy
+  forced on one volume therefore reaches its derivations but not the
+  `AddKeyslot`/`ChangeKeyslot` preflight.
+
 `MigrateToFIPS` itself stays in `pkg/luks2` because it needs the keyslot/
 digest/header machinery that already lives there.
 

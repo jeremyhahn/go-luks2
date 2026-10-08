@@ -216,6 +216,11 @@ func TestResolveOptionalKDF(t *testing.T) {
 	}{
 		{"none given", nil, "", 0, false},
 		{"argon2id", []string{"--pbkdf", "argon2id"}, luks2.KDFArgon2id, 0, false},
+		{"argon2i", []string{"--pbkdf", "argon2i"}, luks2.KDFArgon2i, 0, false},
+		{"argon2i with memory and parallel", []string{"--pbkdf", "argon2i", "--pbkdf-memory", "65536", "--pbkdf-parallel", "2"}, luks2.KDFArgon2i, 0, false},
+		{"argon2i with iter-time refused", []string{"--pbkdf", "argon2i", "--iter-time", "10"}, "", 0, true},
+		{"argon2i with hash refused", []string{"--pbkdf", "argon2i", "--hash", "sha256"}, "", 0, true},
+		{"pbkdf2 with argon2 memory refused", []string{"--pbkdf", "pbkdf2", "--pbkdf-memory", "65536"}, "", 0, true},
 		{"pbkdf2 defaults to sha512", []string{"--pbkdf", "pbkdf2"}, luks2.KDFPBKDF2, crypto.SHA512, false},
 		{"pbkdf2 sha256", []string{"--pbkdf", "pbkdf2", "--hash", "sha256", "--iter-time", "10"}, luks2.KDFPBKDF2, crypto.SHA256, false},
 		{"sha1 refused", []string{"--pbkdf", "pbkdf2", "--hash", "sha1"}, "", 0, true},
@@ -232,6 +237,13 @@ func TestResolveOptionalKDF(t *testing.T) {
 		if c.wantErr {
 			if err == nil {
 				t.Errorf("%s: want an error", c.name)
+			}
+			continue
+		}
+		if fipsProcess && (c.wantType == luks2.KDFArgon2id || c.wantType == luks2.KDFArgon2i) {
+			// A FIPS-mode process refuses Argon2 where it resolves the choice.
+			if !errors.Is(err, luks2.ErrFIPSNotApproved) {
+				t.Errorf("%s: want ErrFIPSNotApproved in FIPS mode, got %v", c.name, err)
 			}
 			continue
 		}

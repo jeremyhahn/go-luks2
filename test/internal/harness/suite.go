@@ -17,9 +17,9 @@ import (
 // the run's record open, points TMPDIR at a directory the run owns, and reaps
 // what previous runs left behind.
 //
-// It exists because three separate test processes need identical setup --
-// pkg/luks2, test/integration/pkg and test/integration/cli -- and setup copied
-// three times is setup that drifts in two of them.
+// It exists because the separate test processes (pkg/luks2 and each
+// test/integration/<package> directory) need identical setup, and setup copied
+// into each of them is setup that drifts in all but one.
 type Suite struct {
 	Ledger  *Ledger
 	TempDir string

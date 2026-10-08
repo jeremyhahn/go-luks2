@@ -111,7 +111,7 @@ func TestRunCreateFileVolumeOpenLoopDeviceFailure(t *testing.T) {
 	lp := e.host.looper.(*fakeLooper)
 	lp.device.devPath = filepath.Join(t.TempDir(), "nonexistent-loop-target")
 
-	args := []string{"--pbkdf", "pbkdf2", "--hash", "sha256", "--iter-time", "1", path, "24M"}
+	args := append(append([]string{}, fastKDFArgs...), path, "24M")
 	if err := runCreate(context.Background(), e, args); err == nil {
 		t.Fatal("runCreate: want an error when the loop device cannot be opened")
 	}
@@ -129,7 +129,7 @@ func TestRunCreateFileVolumeMkfsFailureDeactivateAlsoFails(t *testing.T) {
 	mnt.makeErr = errMkfsFailed
 	act.deactivateErr = errSentinel
 
-	args := []string{"--pbkdf", "pbkdf2", "--hash", "sha256", "--iter-time", "1", path, "24M"}
+	args := append(append([]string{}, fastKDFArgs...), path, "24M")
 	if err := runCreate(context.Background(), e, args); err == nil {
 		t.Fatal("runCreate: want an error when mkfs fails")
 	}

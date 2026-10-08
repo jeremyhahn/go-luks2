@@ -50,6 +50,7 @@ func runAddKey(ctx context.Context, e *env, args []string) error {
 	// type two credentials to learn the KDF was never going to be written.
 	kdf, err := kdfOpts.resolveOptional()
 	if err != nil {
+		reportKDFRefusal(e, err)
 		return err
 	}
 	if err := kdf.Validate(); err != nil {
@@ -132,6 +133,7 @@ func runChangeKey(ctx context.Context, e *env, args []string) error {
 	}
 	kdf, err := kdfOpts.resolveOptional()
 	if err != nil {
+		reportKDFRefusal(e, err)
 		return err
 	}
 	if err := kdf.Validate(); err != nil {

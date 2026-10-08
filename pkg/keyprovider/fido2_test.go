@@ -364,7 +364,7 @@ func TestFromTokenRefusesWhatItCannotDrive(t *testing.T) {
 	}
 }
 
-// TestEnrollKeyProviderWritesTheKeyslotAndTheTokenThatNamesIt-equivalent
+// TestVolumeEnrollWritesTheKeyslotAndTheTokenThatNamesIt-equivalent
 // coverage for FIDO2's own Token wiring lives in pkg/luks2 no longer -- this
 // is the provider-side half: FIDO2.Token must carry what FromToken rebuilds.
 func TestFIDO2CarriesItsToken(t *testing.T) {

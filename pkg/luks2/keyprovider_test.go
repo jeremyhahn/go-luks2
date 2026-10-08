@@ -20,7 +20,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// Tests for EnrollKeyProvider and UnlockWithProvider's own bookkeeping: the
+// Tests for (*Volume).Enroll and UnlockWithProvider's own bookkeeping: the
 // keyslot/token sequencing, the rollback on an unwritable token, and the
 // error vocabulary. The exec mechanics -- a real helper, FIDO2, the base64
 // round trip -- moved to pkg/keyprovider with the code that implements them
@@ -54,7 +54,7 @@ func shellQuote(s string) string {
 
 // enrollForTest opens image, unlocks it with existing and enrolls provider
 // via (*Volume).Enroll at the fixtures' cheap PBKDF2-sha512 cost, the way
-// the pre-redesign library's EnrollKeyProvider(image, existing, provider,
+// the pre-redesign library's free-function enroll (image, existing, provider,
 // opts) did before B.6 moved it behind the Volume. It returns the enrolled
 // keyslot and token id.
 func enrollForTest(t *testing.T, image string, existing []byte, provider KeyProvider, opts ...Option) (slot, tokenID int, err error) {
@@ -85,13 +85,13 @@ func enrollForTest(t *testing.T, image string, existing []byte, provider KeyProv
 	return enrollment.Keyslot.ID, enrollment.Token, nil
 }
 
-// TestEnrollKeyProviderWritesTheKeyslotAndTheTokenThatNamesIt is the
+// TestVolumeEnrollWritesTheKeyslotAndTheTokenThatNamesIt is the
 // end-to-end statement, against a real container and checked with cryptsetup.
 //
 // The credential the provider hands back must open the volume for the THIRD
 // PARTY, not merely for this package: a keyslot only this library can use is
 // exactly the failure the conformance suite exists to catch.
-func TestEnrollKeyProviderWritesTheKeyslotAndTheTokenThatNamesIt(t *testing.T) {
+func TestVolumeEnrollWritesTheKeyslotAndTheTokenThatNamesIt(t *testing.T) {
 	defer parallel(t)()
 
 	requireCryptsetup(t)
@@ -144,15 +144,15 @@ func TestEnrollKeyProviderWritesTheKeyslotAndTheTokenThatNamesIt(t *testing.T) {
 	}
 }
 
-// TestEnrollKeyProviderRollsBackAKeyslotItCannotIdentify is the orphan
+// TestVolumeEnrollRollsBackAKeyslotItCannotIdentify is the orphan
 // guarantee, checked against a REAL THIRD PARTY: a keyslot whose token could
 // not be written must not survive, and cryptsetup -- not just this
 // package's own Unlock -- must agree the rolled-back credential is gone.
 // TestVolumeEnrollRollsBackTheKeyslotIfTheTokenWriteFails covers the same
 // property without cryptsetup.
-func TestEnrollKeyProviderRollsBackAKeyslotItCannotIdentify(t *testing.T) {
+func TestVolumeEnrollRollsBackAKeyslotItCannotIdentify(t *testing.T) {
 	// Not parallel: it overwrites the package-level importToken seam, which a
-	// parallel sibling (e.g. TestEnrollKeyProviderWritesTheKeyslotAndTheTokenThatNamesIt)
+	// parallel sibling (e.g. TestVolumeEnrollWritesTheKeyslotAndTheTokenThatNamesIt)
 	// reads through addKeyslotWithMasterKey while running concurrently (#246
 	// D8 class of bug).
 	requireCryptsetup(t)
@@ -204,9 +204,9 @@ func TestEnrollKeyProviderRollsBackAKeyslotItCannotIdentify(t *testing.T) {
 	}
 }
 
-// TestEnrollKeyProviderReportsAnOrphanItCannotRemove covers the one outcome
+// TestVolumeEnrollReportsAnOrphanItCannotRemove covers the one outcome
 // that needs a human.
-func TestEnrollKeyProviderReportsAnOrphanItCannotRemove(t *testing.T) {
+func TestVolumeEnrollReportsAnOrphanItCannotRemove(t *testing.T) {
 	requireCryptsetup(t)
 
 	image := newImage(t, "orphan.img")
@@ -243,11 +243,11 @@ func TestEnrollKeyProviderReportsAnOrphanItCannotRemove(t *testing.T) {
 	}
 }
 
-// TestEnrollKeyProviderRefusesBadInput covers edge cases
+// TestVolumeEnrollRefusesBadInput covers edge cases
 // TestVolumeEnrollRefusesANilProvider/RefusesOnAReadOnlyVolume do not: a
 // device that cannot be opened at all, a provider that itself refuses, and
 // an existing credential that does not open the volume.
-func TestEnrollKeyProviderRefusesBadInput(t *testing.T) {
+func TestVolumeEnrollRefusesBadInput(t *testing.T) {
 	image := newImage(t, "refuse.img")
 	formatWithLibrary(t, image)
 

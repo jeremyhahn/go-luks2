@@ -1,6 +1,6 @@
 # Volumes — CLI
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
 > Conflicts with this document are defects. Fix them here first.
 
 `luks2` creates, opens, mounts and closes LUKS2 volumes. It is a thin layer
@@ -139,19 +139,21 @@ Named as cryptsetup names them. Also accepted by
 
 | Option | Applies to | Meaning |
 |---|---|---|
-| `--pbkdf <name>` | | `argon2id` or `pbkdf2`. Default: `pbkdf2` (SHA-512) in FIPS 140-3 mode, `argon2id` otherwise. |
+| `--pbkdf <name>` | | `argon2id`, `argon2i` or `pbkdf2`, the three values cryptsetup's `--pbkdf` takes. Default: `pbkdf2` (SHA-512) in FIPS 140-3 mode, `argon2id` otherwise. |
 | `--hash <name>` | pbkdf2 | `sha256`, `sha384` or `sha512` (default `sha512`) |
 | `--iter-time <ms>` | pbkdf2 | Calibration budget (default 2000). The count never falls below the hash's floor. |
 | `--pbkdf-force-iterations <n>` | both | PBKDF2 iteration count (no calibration, floor still applies), or Argon2 time cost |
-| `--pbkdf-memory <KiB>` | argon2id | Argon2 memory, at least 65536 |
-| `--pbkdf-parallel <n>` | argon2id | Argon2 threads |
+| `--pbkdf-memory <KiB>` | argon2id, argon2i | Argon2 memory, at least 65536 |
+| `--pbkdf-parallel <n>` | argon2id, argon2i | Argon2 threads |
 
 These are checked before the passphrase prompt and before any file is made: an
 option that does not apply to the chosen KDF, an empty value, a value that is
-not a whole number above zero, and `--pbkdf argon2id` in FIPS mode
-(`ErrFIPSNotApproved`) all exit 1. The cost bounds themselves (Argon2 memory
-under 65536, a PBKDF2 count under the floor, `--iter-time` over 600000) are the
-library's and fail at format time, after the prompt.
+not a whole number above zero, and `--pbkdf argon2id` or `argon2i` in FIPS mode
+(`ErrFIPSNotApproved`) all exit 1. The Argon2 cost bounds (memory under 65536,
+and the time and thread limits) are part of the same pre-prompt check
+(`KDFParams.Validate`), so they fail before the prompt too. The PBKDF2 bounds (a
+count under the hash's floor, `--iter-time` over 600000) are the library's and
+are only enforced when the keyslot is written, after the prompt.
 
 Defaults without options: AES-XTS with a 512-bit key, 512-byte sectors,
 Argon2id at time 4, 1 GiB, 4 threads. The output names the KDF used. See

@@ -1,6 +1,6 @@
 # cryptsetup interop — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1) and cryptsetup 2.7.5
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163) and cryptsetup 2.7.5
 > Conflicts with this document are defects. Fix them here first.
 
 go-luks2 does not define its own on-disk format: the format is cryptsetup's,
@@ -31,7 +31,7 @@ incompatible header acceptable.
 
 ## Component boundaries
 
-The matrix below is measured against cryptsetup 2.7.5 and the Linux kernel in
+The [interop matrix](engineering.md#the-interop-matrix) is measured against cryptsetup 2.7.5 and the Linux kernel in
 the integration container ([test strategy](engineering.md#test-strategy)).
 The cryptsetup/systemd two-way tests (`compatmatrix`, `fipsimport`, `sha1af`)
 live in `test/integration/interop/`, "cryptsetup and systemd are the real
@@ -39,8 +39,8 @@ peer" (DESIGN.md §E). Four white-box integration files stay in `pkg/luks2`
 rather than moving, by deliberate decision (H12c, DECISIONS.md):
 `canonicalconformance_integration_test.go`, `lockcompat_integration_test.go`,
 `lockwait_integration_test.go` and `pinnedpaths_integration_test.go` — each
-reaches a seam (`cryptoRand`/`newUUID`/`digestIterationsFor`, `fileLockHeld`,
-`calibratedCountFloor`) that is security- or determinism-relevant in a
+reaches a seam (`cryptoRand`/`newUUID`/`digestIterationsFor`, `lockHeld`,
+`calibratedCountFloor`, `openFile`) that is security- or determinism-relevant in a
 Layer-0 library, and moving them would mean exporting that seam across a
 package boundary with no decided shape for it yet.
 
@@ -51,10 +51,10 @@ wrote it; none stops a cryptsetup volume from opening.
 
 | go-luks2 | cryptsetup | Why |
 |---|---|---|
-| A lock wait ends after 30 s with `ErrLockContended` | waits forever | a wait nothing will end is a hang |
+| A lock wait ends after 30 s (`DefaultLockWait`; `WithLockWait` sets another bound) with `ErrLockContended` | waits forever | a wait nothing will end is a hang |
 | A new passphrase is 8–512 bytes (`ErrPassphraseTooShort`, `ErrPassphraseTooLong`); an existing one may be 1 byte to 8 MiB | enrolls any length, an 8 MiB key file included | a new credential is chosen now and can meet a floor |
 | Persistent `allow-discards` is not passed to dm-crypt; the performance flags are | passes all of them | the header is untrusted, and discards disclose which blocks are free to anyone who can read the medium; the data is the same either way |
-| Activation refused for a detached header | activates with `--header` | `Unlock` maps the device it read the header from and takes no second device; the keyslots are still managed |
+| Activation refused for a detached header | activates with `--header` | activation (`Target`) maps the device the header was read from and takes no second device; the keyslots are still managed |
 | Keyslots tried only if bound to the data segment, never by priority | priority order | an unbound key maps garbage |
 | Headers that fail cryptsetup's structural rules, or carry an ambiguous JSON member, are refused | refuses most of the same | see [header/architecture.md](../header/architecture.md#untrusted-headers) |
 | SHA-1 and Argon2 refused in FIPS 140-3 mode | no FIPS mode of its own | see [fips/architecture.md](../fips/architecture.md) |
@@ -62,12 +62,12 @@ wrote it; none stops a cryptsetup volume from opening.
 | One operation's key derivation is capped at the most a cryptsetup header can ask for (`ErrInvalidHeader`, before any derivation) | no aggregate cap | a crafted header could otherwise multiply the per-derivation ceiling; `TestCompatCryptsetupsMaximumKeyslotsAndCostsAreNotRefused`, `TestCompatAmplifiedDigestsAreRefusedByBothTools` |
 | Per derivation: PBKDF2 at most 100,000,000 iterations, Argon2 at most 10,000 passes | up to 2^32 − 1 | see [header/architecture.md](../header/architecture.md#untrusted-headers) |
 
-go-luks2 reads without the lock (`(*Volume).Header`)
-where cryptsetup takes it shared: a read racing a write fails its checksum or
-digest and reports an error, and nothing is written.
+Reads (`(*Volume).Header`, `SecondaryHeader`, `Unlock`) take the lock
+shared, as cryptsetup's do, so a read waits behind a write rather than
+racing it; only the 30 s bound differs.
 
 ## What this feature deliberately does not do
 
 No attempt to match cryptsetup's own bugs or undocumented leniency beyond
-what the matrix below measures; a divergence not in this matrix is a defect
+what the [interop matrix](engineering.md#the-interop-matrix) measures; a divergence not in that matrix is a defect
 to investigate, not an assumed-fine gap.

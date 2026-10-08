@@ -69,13 +69,36 @@ func TestRunAddKeyAddsSecondPassphrase(t *testing.T) {
 	path := newTestVolumeImage(t, "addkey.img")
 	e, _, _, stdout, _ := newTestEnv(bytes.NewBufferString(testPassphrase + "\nsecond-pass\n"))
 
-	if err := runAddKey(context.Background(), e, []string{"--pbkdf", "pbkdf2", "--hash", "sha256", "--iter-time", "10", path}); err != nil {
+	if err := runAddKey(context.Background(), e, append(append([]string{}, fastKDFArgs...), path)); err != nil {
 		t.Fatalf("runAddKey: %v", err)
 	}
 	if !strings.Contains(stdout.String(), "Passphrase added") {
 		t.Errorf("stdout = %q, want confirmation", stdout.String())
 	}
 
+	e2, _, _, _, _ := newTestEnv(bytes.NewBufferString("second-pass\n"))
+	if err := runTestKey(context.Background(), e2, []string{path}); err != nil {
+		t.Fatalf("runTestKey with the new passphrase: %v", err)
+	}
+}
+
+func TestRunAddKeyAcceptsArgon2i(t *testing.T) {
+	path := newTestVolumeImage(t, "addkey-argon2i.img")
+	e, _, _, _, _ := newTestEnv(bytes.NewBufferString(testPassphrase + "\nsecond-pass\n"))
+
+	args := []string{"--pbkdf", "argon2i", "--pbkdf-force-iterations", "1", "--pbkdf-memory", "65536", "--pbkdf-parallel", "1", path}
+	err := runAddKey(context.Background(), e, args)
+	if fipsProcess {
+		// A FIPS-mode process refuses Argon2; the hint is asserted in
+		// TestKDFChoiceRefusedInFIPSModeCarriesTheHint.
+		if !errors.Is(err, luks2.ErrFIPSNotApproved) {
+			t.Fatalf("runAddKey --pbkdf argon2i in FIPS mode: want ErrFIPSNotApproved, got %v", err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("runAddKey --pbkdf argon2i: %v", err)
+	}
 	e2, _, _, _, _ := newTestEnv(bytes.NewBufferString("second-pass\n"))
 	if err := runTestKey(context.Background(), e2, []string{path}); err != nil {
 		t.Fatalf("runTestKey with the new passphrase: %v", err)
@@ -97,7 +120,7 @@ func TestRunChangeKeyReplacesPassphrase(t *testing.T) {
 	path := newTestVolumeImage(t, "changekey.img")
 	e, _, _, stdout, _ := newTestEnv(bytes.NewBufferString(testPassphrase + "\nreplacement\n"))
 
-	if err := runChangeKey(context.Background(), e, []string{"--pbkdf", "pbkdf2", "--iter-time", "10", path, "0"}); err != nil {
+	if err := runChangeKey(context.Background(), e, append(append([]string{}, fastKDFArgs...), path, "0")); err != nil {
 		t.Fatalf("runChangeKey: %v", err)
 	}
 	if !strings.Contains(stdout.String(), "Keyslot 0") {
@@ -139,7 +162,7 @@ func slotIterations(t *testing.T, path string, slot int) int {
 // changekey's KDF options re-cost the slot, as luksChangeKey's do: the count
 // --pbkdf-force-iterations names is the count on disk afterwards.
 func TestRunChangeKeyForceIterationsRecostsTheSlot(t *testing.T) {
-	path := newTestVolumeImage(t, "changekey-recost.img")
+	path := pbkdf2TestVolume.copyTo(t, "changekey-recost.img")
 	want := 2 * slotIterations(t, path, 0)
 	e, _, _, _, _ := newTestEnv(bytes.NewBufferString(testPassphrase + "\nreplacement\n"))
 

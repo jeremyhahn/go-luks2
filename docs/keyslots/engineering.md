@@ -1,6 +1,6 @@
 # Keyslots — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
 > Conflicts with this document are defects. Fix them here first.
 
 ## Exported surface
@@ -75,17 +75,28 @@ Each keyslot turns its credential into a wrapping key with its own KDF
 (`internal/kdf`, landed H4). A separate PBKDF2 digest checks the recovered
 volume key.
 
-| `KDFType` | Notes |
+| `KDFParams.Type` | Notes |
 |---|---|
-| `argon2id` | Default outside FIPS mode. Time 4, memory 1048576 KiB (1 GiB), 4 threads unless set. |
-| `argon2i` | Same parameters. |
-| `pbkdf2` | SHA-256 unless `KDFParams.Hash` names another. |
-| `pbkdf2-sha256`, `pbkdf2-sha384`, `pbkdf2-sha512` | The hash is in the name. `pbkdf2-sha512` is the default in FIPS 140-3 mode. |
-| `pbkdf2-sha1` | Never written: refused with `ErrInvalidArgument`. Existing SHA-1 keyslots are read outside FIPS mode. |
+| `KDFArgon2id` (`argon2id`) | Default outside FIPS mode. Time 4, memory 1048576 KiB (1 GiB), 4 threads unless set. |
+| `KDFArgon2i` (`argon2i`) | Same parameters. |
+| `KDFPBKDF2` (`pbkdf2`) | The PRF is `KDFParams.Hash`: SHA-256 when it is zero, or SHA-512 when the type was left empty and FIPS mode defaulted it to PBKDF2. SHA-1 is never written: refused with `ErrInvalidArgument`. Existing SHA-1 keyslots (`pbkdf2` with hash `sha1` on disk) are read outside FIPS mode. |
 
-`DefaultKDFType()` returns the default for the current mode. A caller that
-names no type but sets an Argon2 cost gets `argon2id`. Salts are 32 random
-bytes. FIPS rules: [fips/architecture.md](../fips/architecture.md).
+Public validation (`KDFParams.Validate`) accepts exactly these three types, plus
+the empty type, which means `DefaultKDFType()`; anything else is
+`ErrUnsupported`. The hash is never part of the public type. The combined
+spellings `pbkdf2-sha256`, `pbkdf2-sha384`, `pbkdf2-sha512` and `pbkdf2-sha1`
+are internal aliases the package's own on-disk and test code uses, and
+`DefaultKDFSpec()` returns one of them (`pbkdf2-sha512` in FIPS mode,
+`argon2id` otherwise) for callers that need that internal spelling; use
+`DefaultKDFType()` plus `Hash` in new code.
+
+`DefaultKDFType()` returns the default for the current mode (`KDFPBKDF2` in
+FIPS mode, `KDFArgon2id` otherwise). A caller that names no type but sets an
+Argon2 cost gets `argon2id`. `ChangeKeyslot` with a zero `KDF` does not select
+the default: it keeps the slot's existing KDF type and cost (a PBKDF2-SHA1 slot
+is rewritten as PBKDF2-SHA256), and a non-zero `KDF` re-costs the slot exactly
+as `AddKeyslot` would write it. Salts are 32 random bytes. FIPS rules:
+[fips/architecture.md](../fips/architecture.md).
 
 ```go
 // AddKeyslot: Argon2id at 512 MiB

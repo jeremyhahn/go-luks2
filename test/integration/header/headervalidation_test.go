@@ -72,7 +72,7 @@ func agreementImage(t *testing.T, name string, size int64) string {
 }
 
 // formatForTest formats path with an explicit cipher and key size, the way
-// the pre-redesign library's luks2.Format(luks2.FormatOptions{...}) did
+// the pre-redesign library's free function Format did
 // before B.6 moved Format behind (*luks2.Volume).Format.
 func formatForTest(path, passphrase, cipher string, keySize int) error {
 	ctx := context.Background()

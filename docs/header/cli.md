@@ -1,6 +1,6 @@
 # Header — CLI
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
 > Conflicts with this document are defects. Fix them here first.
 
 ```
@@ -33,9 +33,12 @@ Tokens:         1
 Segments:       1
 ```
 
-`secondary` prints the same for the second copy, whose header offset equals the
-header size. The copy with the higher sequence ID was written last; if the
-secondary is ahead, the primary is stale.
+`show` prints the current copy (the one `(*Volume).Header` returns), always
+labeled `Primary` with offset 0, even when the primary is damaged or older
+and the secondary's contents are shown. `secondary` prints the same for the
+second copy, whose header offset equals the header size. The copy with the
+higher sequence ID was written last; if the secondary is ahead, the primary
+is stale.
 
 ## restore
 
@@ -45,7 +48,7 @@ or a read error exits 1). The secondary is validated first. Restore is refused
 when the primary is intact and its sequence ID is not lower than the
 secondary's, since that would roll the volume back: a passphrase removed since
 may open it again. `--force` restores anyway; it still asks for `YES` unless
-`--batch-mode` is given. Keep a backup:
+`--batch-mode` or `--yes` is given. Keep a backup:
 
 ```bash
 cryptsetup luksHeaderBackup /dev/sdb1 --header-backup-file /root/sdb1.header
@@ -54,9 +57,14 @@ sudo luks2 header restore /dev/sdb1
 
 ## isluks
 
-Exit 0 if the device starts with the LUKS magic, 1 otherwise, like
-`cryptsetup isLuks`. `--luks2` also requires version 2. A device that cannot be
-read is also 1, with the reason on stderr.
+Exit 0 if the device holds a readable LUKS header, 1 otherwise, like
+`cryptsetup isLuks`. Without `--luks2` a LUKS1 header also counts; `--luks2`
+requires a LUKS2 header that passes validation. Unlike `cryptsetup isLuks`
+this is not a magic-only check: a LUKS2 header that fails validation, or a
+metadata lock that cannot be taken, is also 1. A device that cannot be opened
+or read is 1 too. The answer, `<device> is a LUKS device` or
+`<device> is not a LUKS device` (`LUKS2` with `--luks2`), goes to stdout; the
+underlying reason for a no is not reported.
 
 ```bash
 if sudo luks2 isluks --luks2 /dev/sdb1; then sudo luks2 open /dev/sdb1 backup; fi

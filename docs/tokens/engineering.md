@@ -1,6 +1,6 @@
 # Tokens — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
 > Conflicts with this document are defects. Fix them here first.
 
 ## Exported surface
@@ -48,8 +48,9 @@ for its own header codec; callers use `Token`.
 ## Invariants
 
 - Every token has `type` and `keyslots`; `Keyslots` must name keyslots the
-  header has, by canonical id (`"1"`, not `"01"`), or the write fails with
-  `ErrInvalidHeader` and nothing is written. A token with no keyslots is
+  header has, or the write fails with `ErrInvalidHeader` and nothing is
+  written. They are written as canonical ids (`"1"`); token JSON read with
+  `"01"` is read as keyslot 1. A token with no keyslots is
   written as `"keyslots":[]`.
 - Members `Token` does not model survive a read-modify-write in every header
   rewrite ([header/engineering.md](../header/engineering.md#persistence)), so
@@ -66,7 +67,7 @@ for its own header codec; callers use `Token`.
 
 ## Token types
 
-| Type | Written by | Members modeled in `Token` |
+| Type | Written by | Members the library interprets |
 |---|---|---|
 | `systemd-recovery` | `AddRecoveryKey` | `type`, `keyslots` only, as `systemd-cryptenroll --recovery-key` writes it |
 | `systemd-fido2` | `Enroll` with a `keyprovider.FIDO2` provider | `fido2-credential`, `fido2-salt`, `fido2-rp`, `fido2-clientPin-required`, `fido2-up-required`, `fido2-uv-required` |
@@ -116,7 +117,8 @@ func WithToken(t luks2.Token) CommandOption // the token to record; absent means
 ```
 
 The helper does not inherit the process environment: it gets
-`PATH=/usr/sbin:/usr/bin:/sbin:/bin` plus whatever `WithEnv` adds. `WithLine(n)`
+`PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/sbin:/usr/local/bin` and
+`LC_ALL=C`, plus whatever `WithEnv` adds. `WithLine(n)`
 with `n > 0` takes that line without its newline; with no `WithLine`, all of
 stdout is taken verbatim, newline included, as `cryptsetup --key-file` would.
 Stdout is read straight into locked memory; more than 64 KiB is refused, not
@@ -175,11 +177,12 @@ Two details that would otherwise enroll a credential that never opens:
 
 | Error | Meaning | Package |
 |---|---|---|
-| `ErrKeyProvider` | Matches every `KeyProvider`-related failure in `pkg/luks2` (`Enroll`, `UnlockWithProvider`) | `luks2` |
-| `ErrInvalidArgument` | No provider, or a token with nothing to build one from | `luks2` |
+| `ErrKeyProvider` | Matched by an `OrphanedKeyslotError`, alongside `ErrOrphanedKeyslot`. A provider's own failure is returned as the provider reported it (from `pkg/keyprovider`: the rows marked `keyprovider` below), not as `ErrKeyProvider` | `luks2` |
+| `ErrInvalidArgument` | No provider, a provider whose token names no keyslot (`UnlockWithProvider`), a token with no type (`AddToken`, `SetToken`), or a token id outside 0–31 | `luks2` |
+| `ErrKeyslotNotFound` | `UnlockWithProvider`: the token names a keyslot that does not exist or is not bound to the data segment | `luks2` |
 | `ErrUnsupportedToken` | The token names a mechanism this provider cannot drive (`FromToken`) | `keyprovider` |
 | `ErrOrphanedKeyslot` | A keyslot is live with no token and could not be removed | `luks2` |
-| `ErrTokenNotFound` | `SetToken` or `RemoveToken` found no token at that id | `luks2` |
+| `ErrTokenNotFound` | `RemoveToken` found no token at that id (`SetToken` writes the id whether or not one is there) | `luks2` |
 | `ErrNoSpace` | All 32 token slots are in use | `luks2` |
 | `ErrInvalidArgument` | A helper path that is not absolute or not configured, a negative line number | `keyprovider` |
 | `ErrHelperFailed` | The helper exited non-zero: refused, timed out, wrong PIN | `keyprovider` |
@@ -197,7 +200,8 @@ every header rewrite.
 ## Test strategy
 
 Covered by `pkg/luks2`'s unit suite (enroll/unlock round trips against fake
-helpers, FIDO2 secret encoding, orphaned-keyslot rollback) and the
+providers, orphaned-keyslot rollback), `pkg/keyprovider`'s (fake helpers,
+FIDO2 secret encoding) and the
 cryptsetup compatibility matrix's `token*` row
 ([cryptsetup-interop/engineering.md](../cryptsetup-interop/engineering.md)).
 

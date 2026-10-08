@@ -1,6 +1,6 @@
 # Volumes — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
 > Conflicts with this document are defects. Fix them here first.
 
 The volume lifecycle: creating a LUKS2 container, unlocking it to a
@@ -52,33 +52,38 @@ Rejected alternatives for the package split (DESIGN.md §A.4):
 | `pkg/wipe` | Whole-device sanitization. |
 | `cmd/luks2` | `main.go` only: a signal context in, `internal/cli.Run`, `os.Exit`. |
 | `internal/cli` | The CLI (DESIGN.md §F). Built on the `Volume` API, `pkg/dmcrypt`, `pkg/loop`, `pkg/filesystem` and `pkg/wipe`. Root-only boundaries (activation, loop devices, mounting) sit behind small unexported interfaces so unit tests run without root. It holds no LUKS2 logic of its own. |
-| `internal/secret`, `internal/fips`, `internal/af`, `internal/areacipher`, `internal/kdf`, `internal/header`, `internal/recoverykey`, `internal/command`, `internal/device`, `internal/dm`, `internal/keyring` | Leaf packages below the public API. |
+| `internal/errs`, `internal/clock`, `internal/secret`, `internal/fips`, `internal/af`, `internal/areacipher`, `internal/kdf`, `internal/header`, `internal/recoverykey`, `internal/volkey`, `internal/command`, `internal/device`, `internal/dm`, `internal/keyring` | Leaf packages below the public API. |
 
 Runtime dependencies: `github.com/jeremyhahn/go-enclave` (locked memory),
 `github.com/anatol/devmapper.go` (device-mapper ioctls), `golang.org/x/crypto`
 (Argon2, XTS), `golang.org/x/sys`, `golang.org/x/term`, `github.com/google/uuid`.
 
 `depguard` enforces this layout mechanically, one rule per DESIGN.md §A.2 row.
-`pkg/luks2` additionally denies `os/exec`, `github.com/anatol/devmapper.go`,
+`pkg/luks2`'s allow list names none of `github.com/anatol/devmapper.go`,
 `pkg/dmcrypt`, `pkg/loop`, `pkg/filesystem`, `pkg/wipe`, `pkg/keyprovider`,
-`internal/dm`, `internal/keyring` and `internal/command`, so the core cannot
-regain root or exec without a red lint (`make lint`: 0 issues).
+`internal/dm`, `internal/keyring` or `internal/command`, and it additionally
+denies `os/exec`, so the core cannot regain root or exec without a red lint.
 
 `make api-diff` (`test/tools/apidump` against
-`baseline/disposition-luks2.tsv`) is the mechanical check that the exported
-surface of `pkg/luks2` is exactly what DESIGN.md §B.6 specifies. A few
-exports are retained on purpose and are recorded there: `DefaultKDFSpec`,
-`LegacyToken`, and `dmcrypt.ErrIntegerOverflow` and `ErrDeviceChanged`.
+`baseline/disposition-luks2.tsv`) is the mechanical check that every export
+of the pre-redesign `pkg/luks2` (`baseline/luks2.tsv`) went where its
+disposition row says: a `KEEP` row (`ErrDeviceChanged`, for one) is still
+exported under its name, and a `RENAME`, `MOVE`, `UNEXPORT` or `DELETE` row
+is gone under its old one (`ErrIntegerOverflow` became
+`ErrInvalidArgument`). Exports added since, such as `DefaultKDFSpec` and
+`LegacyToken`, are not in the baseline, and the check does not see them.
 
-$1
+## Data flow
 
 ### Format
 
 Draw the master key into an enclave, create the keyslot KDF, derive the
 passphrase key, create the PBKDF2 digest, AF-split the master key (4000
-stripes), encrypt the stripes with AES-XTS, write both header copies, write
+stripes), encrypt the stripes with AES-XTS, wipe any old header copies, write
 the keyslot material, fill the rest of the keyslots area with random bytes,
-sync. Cipher and AF detail: [keyslots](../keyslots/architecture.md).
+sync, and write both header copies last (each synced), so no header ever
+names a keyslot that is not yet on the device. Cipher and AF detail:
+[keyslots](../keyslots/architecture.md).
 
 ### Unlock
 
@@ -110,8 +115,8 @@ the lock — no lock is held between calls, matching cryptsetup's own
 behaviour. Unlock and activation are two calls: `(*Volume).Unlock(ctx, pass)
 (*Key, error)` derives and verifies the key without touching dm-crypt, and
 `dmcrypt.Activate(ctx, v, key, name)` calls `v.Target(ctx, key)` (re-reads the
-header under the shared lock, re-verifies the key if `SequenceID` changed)
-before mapping the pinned descriptor's major:minor. Rollback after a failed or
+header under the shared lock; the key is consulted only for its size and is
+not re-verified against the re-read header) before mapping the pinned descriptor's major:minor. Rollback after a failed or
 cancelled `Activate` runs under `context.WithoutCancel(ctx)` with its own
 clock budget, so a cancelled caller never leaves a plaintext device behind.
 
@@ -168,13 +173,13 @@ the library has to protect it itself.
   `enclave.SetAllocator`, and RLIMIT_MEMLOCK is the default.
 - Enclaves are released through `secret.Custody.Release`, which drops
   go-enclave's release report: the operation's outcome is already decided and
-  the library does not log. The CLI warns when releasing a recovery credential
-  reports a problem.
+  the library does not log. The CLI releases through the same `secret.Custody`,
+  so it does not report a release problem either.
 
 The largest locked allocation is the AF stripe material, `key_size × 4000`
-bytes: 256,000 bytes for a 64-byte key. Keyslots with a key size other than 32,
-48 or 64 bytes are refused before derivation, so a foreign header cannot raise
-that. Budget about 1 MiB of `RLIMIT_MEMLOCK` per concurrent operation, which is
+bytes: 256,000 bytes for a 64-byte key. Keyslots with a key size other than 16,
+24, 32, 48 or 64 bytes are refused before derivation, so a foreign header cannot
+raise that. Budget about 1 MiB of `RLIMIT_MEMLOCK` per concurrent operation, which is
 what the test suite allows. Some container runtimes default to 64 KiB, which is
 not enough.
 
@@ -208,7 +213,7 @@ The keyring logic lives in `internal/keyring`, called from `pkg/dmcrypt`;
 | Part | Implementation |
 |---|---|
 | Device-mapper | Wraps `anatol/devmapper.go` behind a seam. The dm UUID is `CRYPT-LUKS2-<header uuid without dashes>-<name>`. Without udev the library creates `/dev/dm-N` and `/dev/mapper/<name>` with `mknod`. |
-| Mapping names | `dmcrypt.ValidateName`: `[A-Za-z0-9]`, then `[A-Za-z0-9_.+-]`, at most 127 bytes |
+| Mapping names | `dmcrypt.ValidateName`: `[A-Za-z0-9]`, then `[A-Za-z0-9_.+-]`, at most 127 bytes, and not `control` (the device-mapper control node) |
 | Close | `dmcrypt.Deactivate` records the target's UUID and device number, then retries removal on `EBUSY` for up to 3 s, re-checking them before each attempt. A mapping recreated under the same name normally gets a new device number and is left alone; a reused number in the gap between check and removal is a remaining race. Still held: `dmcrypt.ErrBusy`. |
 | Loop devices | Loop ioctls through `/dev/loop-control` |
 | Mount | `mount(2)` and `umount2(2)` |
@@ -220,7 +225,7 @@ device number matches the target's (`dmcrypt.ErrNodeUnverified`).
 External programs run only for work that is not LUKS2: `mkfs.ext4`,
 `mkfs.xfs`, `mkfs.fat`, `zpool` and `zfs` to make filesystems; `e2fsck`,
 `xfs_repair`, `fsck.fat` and `zpool scrub` to check them; `blkid` for
-`filesystem.Inspect`; and whatever helper a `keyprovider.Command` names, such as
+`filesystem.Inspect` and `filesystem.Detect`; and whatever helper a `keyprovider.Command` names, such as
 `fido2-assert` (detail: [tokens](../tokens/architecture.md)). The filesystem
 programs come from `/usr/sbin`, `/usr/bin`, `/sbin`, `/bin`, `/usr/local/sbin`
 or `/usr/local/bin`, never `PATH`, only if nobody but root or the caller can
@@ -229,7 +234,9 @@ environment and `--` before every operand.
 
 ## FIPS mode
 
-Every FIPS decision asks one function, `fipsMode` (`crypto/fips140.Enabled`).
+Every FIPS decision asks one function, `internal/fips.Probe`
+(`crypto/fips140.Enabled`), which `pkg/luks2` reaches through its `fipsMode`
+seam.
 In FIPS mode the default KDF is PBKDF2-SHA512, Argon2 and SHA-1 derivations are
 refused with `ErrFIPSNotApproved`, and a volume that only opens through them
 gets `*FIPSImportRequiredError` naming `MigrateToFIPS`. Full detail:
@@ -242,9 +249,9 @@ gets `*FIPSImportRequiredError` naming `MigrateToFIPS`. Full detail:
 | LUKS2 header and keyslot areas | Untrusted: anyone with the disk can write them | Segments whitelisted at read; each keyslot bounded before use; removal and `MigrateToFIPS` also check areas against the device, the keyslots area and other keyslots |
 | Passphrase, volume key, key provider output | Secret | Borrowed or moved into enclaves; never logged |
 | Mapping name | Caller-chosen | Validated before use in the dm UUID, the keyring description (hashed) and `/dev/mapper` |
-| Key provider helper | Runs with the caller's privileges | Absolute path required; minimal environment (system `PATH` plus `Env`); output capped at 64 KiB and read into locked memory |
-| Kernel keyring | Shared per uid and session | `logon` type, session keyring, removed after one ioctl |
-| Device-mapper and loop | Global to the host | Identity checked before every removal; the check and the removal are separate ioctls, so a same-name race between them remains |
+| Key provider helper | Runs with the caller's privileges | Absolute path required; minimal environment (system `PATH` and `LC_ALL=C`, plus `WithEnv`); output capped at 64 KiB and read into locked memory |
+| Kernel keyring | Shared per uid and session | `logon` type, session keyring, released as soon as the table load and resume return |
+| Device-mapper and loop | Global to the host | Device-mapper: identity checked before every removal; the check and the removal are separate ioctls, so a same-name race between them remains. Loop: `Detach` clears the device at its path with no identity check |
 
 ## What this feature deliberately does not do
 

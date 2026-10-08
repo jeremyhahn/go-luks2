@@ -390,7 +390,7 @@ func writeHandKeyslot(t *testing.T, device, id string, passphrase []byte, stripe
 	}
 	wrap, err := deriveKeyEnclave(context.Background(), passphrase, kdf, keySize, defaultVolumeSys())
 	if err != nil {
-		t.Fatalf("DeriveKeyEnclave failed: %v", err)
+		t.Fatalf("deriveKeyEnclave failed: %v", err)
 	}
 	defer mustDestroy(t, wrap)
 	split, err := afCodec(testVolumeSys()).Split(mk, af.Params{Stripes: stripes, Hash: "sha256"})

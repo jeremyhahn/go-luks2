@@ -1,6 +1,6 @@
 # Wipe — CLI
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
 > Conflicts with this document are defects. Fix them here first.
 
 ```
@@ -16,9 +16,9 @@ question.
 
 The device is opened with `O_EXCL`, so a device that is mounted, open as a
 mapping, or otherwise held is refused. Close the volume first
-([volumes/cli.md](../volumes/cli.md#close)). If the path names a different
-file when it is opened than when it was locked (a symlink re-pointed in
-between), the wipe is refused before anything is written.
+([volumes/cli.md](../volumes/cli.md#close)). The exclusive open reopens the
+locked device itself, never the path again, so a symlink re-pointed after the
+lock cannot redirect the wipe.
 
 ## Header-only (default)
 
@@ -31,11 +31,14 @@ the header lists, using the geometry of a header copy whose checksum is valid.
 Any other header copy found at a legal offset is zeroed too: its binary header
 and its JSON. Nothing at or past the start of the data segment is touched.
 
-This is a crypto-erase. A header backup taken before the wipe
-(`cryptsetup luksHeaderBackup`, or a copy of the first megabytes) no longer
-opens the volume, because the keyslot material it needs is gone. If no header
-copy has a valid checksum, the keyslots area cannot be located: the first
-32 KiB and every recognisable copy are zeroed, and you should use `--full`.
+This is a crypto-erase: the data segment is left in place, and nothing on
+the device can derive its key afterwards. A header backup that holds the
+keyslots area (`cryptsetup luksHeaderBackup`, or a copy of the first
+megabytes) still holds that key material, and restored onto the device it
+opens the data again; where such a backup may exist, use `--full`. If no
+header copy has a valid checksum, the keyslots area cannot be located: the
+first 32 KiB and every recognizable copy are zeroed, the wipe still reports
+success, and you should use `--full`.
 
 `--passes`, `--random`, `--standard`, `--verify`, `--no-verify` and `--trim`
 shape the full overwrite, so without `--full` they are a usage error (exit 1)

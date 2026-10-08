@@ -1,6 +1,6 @@
 # Header — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
 > Conflicts with this document are defects. Fix them here first.
 
 A LUKS2 header is two copies of a 4096-byte binary header plus a JSON area,
@@ -26,10 +26,11 @@ an accident of a stricter parser.
 
 The on-disk model, JSON codec, structural validator, checksum/binary-header
 codec and keyslot scan order live in `internal/header` (H5, DECISIONS.md).
-`pkg/luks2`'s own types (`LUKS2BinaryHeader`, `LUKS2Metadata`, `Keyslot`,
-`Token`, `Segment`, ...) are aliases of `internal/header`'s. `internal/header`
-sits below `internal/kdf` and `internal/fips` in the import DAG and must not
-import `pkg/luks2` (DESIGN.md §A.2); a handful of small pure helpers
+`pkg/luks2` does not re-export that model: its `Header`, `Segment`, `Token`
+and `KeyslotInfo` are its own types built from it, and `DroppedEntry` and
+`LegacyToken` are the only aliases of `internal/header`'s. `internal/header`
+sits above `internal/kdf` and `internal/fips` in the import DAG (it may import
+them) and must not import `pkg/luks2` (DESIGN.md §A.2); a handful of small pure helpers
 (`parseSize`, the overflow conversions, the segment/digest/keyslot-coverage
 helpers) are duplicated rather than threaded across that boundary — each is a
 few lines, and duplicating them is cheaper than exporting `pkg/luks2`
@@ -44,9 +45,10 @@ reads or writes a header by device path.
 
 ## Data flow
 
-- `(*Volume).Header` reads the primary copy's area once and checks magic,
-  version, area size, checksum and the JSON, then cryptsetup's structural
-  rules. Every write runs the full structural validator first, except
+- `(*Volume).Header` reads each copy's area once and checks magic, version,
+  area size, checksum and the JSON, then cryptsetup's structural rules, and
+  returns the current copy: the one with the higher sequence ID, the primary
+  at a tie, the other copy when one fails those checks. Every write runs the full structural validator first, except
   `RestorePrimaryHeader`, which copies an existing secondary and applies only
   the header-wide rules.
 - Keyslots are screened one at a time before use: geometry, key size and KDF
@@ -110,14 +112,15 @@ Integers are big-endian.
 The checksum covers the binary header (checksum field zeroed) followed by the
 whole JSON area. This library writes `sha256` in the algorithm field, as
 cryptsetup does, and refuses a header naming any other algorithm
-(`ErrUnsupportedHeaderChecksum`). cryptsetup verifies with whatever hash the
+(`ErrUnsupported`). cryptsetup verifies with whatever hash the
 field names, so a header re-checksummed with `sha1` or `sha512` opens there and
 not here. The two copies differ in magic and header offset.
 
 The specification has `sequence_id` increase on each update and readers prefer
 the copy with the higher value. This library writes 1 on format and advances it
-on keyslot and token changes. `(*Volume).Header` reads the primary copy only and
-does not compare sequence IDs; the CLI's `header show` and `header secondary` show both so you can.
+on keyslot and token changes. `(*Volume).Header` follows that rule (the primary
+at a tie); `SecondaryHeader` reads the secondary alone, and the CLI's
+`header show` and `header secondary` print each copy's sequence ID.
 cryptsetup writes 3 on format because it does three header writes.
 
 ## JSON metadata
@@ -159,7 +162,7 @@ Pretty-printed here; values are illustrative.
 | `config` | JSON area size, keyslots area size, optional `requirements` |
 
 A container whose `config.requirements.mandatory` lists anything is refused
-for writing and for activation (`UnsupportedRequirementError`): this library
+for writing, unlocking and activation (`ErrUnsupportedRequirement`): this library
 implements none of those features, online reencryption included. It can still
 be read.
 
@@ -198,7 +201,7 @@ work an unlock does before any passphrase is checked.
 
 - The header area is read once; the checksum and the JSON come from the same
   bytes. An object that names a member twice, or a modeled member in another
-  case (`"Keyslots"`), fails with `ErrAmbiguousJSONMember`: cryptsetup's JSON
+  case (`"Keyslots"`), fails with `ErrInvalidHeader`: cryptsetup's JSON
   parser is case-sensitive and Go's is not.
 - The header is checked against cryptsetup's structural rules
   (`LUKS2_hdr_validate`): segment offsets and sizes on the 512-byte grid, the
@@ -211,9 +214,10 @@ work an unlock does before any passphrase is checked.
   rules, so a damaged keyslot or token cannot block the repair.
 - Segment fields that go straight into the dm-crypt table are also
   whitelisted: cipher characters, `sector_size` (512, 1024, 2048 or 4096) and
-  `iv_tweak`. Unlock refuses a segment that starts inside the header or
-  keyslots area, including a detached header's offset 0, and a segment with
-  an `integrity` member (`ErrUnsupportedSegmentLayout`). A detached header's
+  `iv_tweak`. Activation (`Target`) refuses a segment that starts inside the
+  header or keyslots area, including a detached header's offset 0
+  (`ErrInvalidHeader`); unlocking refuses a segment with an `integrity` member
+  (`ErrUnsupported`). A detached header's
   keyslots are still read and managed: its data, at offset 0 of another
   device, overlaps no keyslot area, as cryptsetup also holds.
 - A digest is derived to the length its hash implies, or to 32 bytes (older
@@ -225,14 +229,14 @@ work an unlock does before any passphrase is checked.
 
 ```go
 v, err := luks2.Open(ctx, device)
-hdr, err := v.Header(ctx)             // primary copy
+hdr, err := v.Header(ctx)             // current copy
 hdr, err = v.SecondaryHeader(ctx)
 err = v.RestorePrimaryHeader(ctx)     // rebuild primary from secondary
 err = v.ReplacePrimaryHeader(ctx)     // unconditional
 ```
 
-`SecondaryHeader` finds the secondary copy by probing the legal area sizes,
-so it works when the primary is unreadable. `RestorePrimaryHeader` reads and
+`SecondaryHeader` finds the secondary copy at the area size the primary
+states, or by probing the legal area sizes when the primary is unreadable. `RestorePrimaryHeader` reads and
 validates the secondary copy (magic, checksum, header-wide structure; a
 damaged keyslot or token does not block it) before writing, and refuses with
 `ErrPrimaryHeaderCurrent` when the primary is intact and not older (restoring
@@ -242,5 +246,6 @@ unconditionally. Both write a sequence ID one above both copies.
 ## What this feature deliberately does not do
 
 No online reencryption, no dm-integrity segments, no mandatory requirement
-this library does not name explicitly — any of those is `UnsupportedRequirementError`,
-read-only, never silently accepted.
+this library does not name explicitly — a mandatory requirement is
+`ErrUnsupportedRequirement` and a dm-integrity segment is refused for
+unlocking with `ErrUnsupported`; neither is silently accepted.

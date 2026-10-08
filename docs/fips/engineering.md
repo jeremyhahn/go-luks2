@@ -1,6 +1,6 @@
 # FIPS 140-3 — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
 > Conflicts with this document are defects. Fix them here first.
 
 ## Exported surface
@@ -17,9 +17,13 @@ type FIPSMigrationStage uint8 // StagePreflight, StageVerify, StageWrite, StageR
 ```
 
 `DefaultKDFType()` applies when `Format`/`AddKeyslot`/`AddRecoveryKey` are
-given no KDF type (`DefaultKDFSpec()` is its string form, retained for
-callers that name the type by its LUKS2 spelling). `(KDFParams).Validate()`
-is the pre-flight check, including FIPS approval → `ErrFIPSNotApproved`.
+given no KDF type; it returns `KDFPBKDF2` in FIPS mode and `KDFArgon2id`
+otherwise, with the hash in `KDFParams.Hash`. `DefaultKDFSpec()` is a different
+thing: it returns the package's internal combined spelling (`pbkdf2-sha512` or
+`argon2id`), not a string form of the public type. `ChangeKeyslot` with a zero
+`KDF` does not apply the default; it keeps the slot's existing KDF.
+`(KDFParams).Validate()` is the pre-flight check, including FIPS approval →
+`ErrFIPSNotApproved`; it accepts only the three public types.
 `MigratedDigests`/`RemovedKeyslots`/`RetainedNonApproved` are `[]int`
 (canonical keyslot/digest ids).
 
@@ -41,16 +45,17 @@ is the pre-flight check, including FIPS approval → `ErrFIPSNotApproved`.
 
 ## Approved KDFs
 
-| KDF type | FIPS-approved | Notes |
+| `KDFParams.Type` and `Hash` | FIPS-approved | Notes |
 |---|---|---|
-| `pbkdf2` | true | SHA-256 unless a hash is given |
-| `pbkdf2-sha256`, `pbkdf2-sha384` | true | |
-| `pbkdf2-sha512` | true | Default in FIPS mode |
-| `pbkdf2-sha1` | false | Read from old headers outside FIPS mode, never written |
-| `argon2i`, `argon2id` | false | Refused in FIPS mode; `argon2id` is the default otherwise |
+| `KDFPBKDF2` with `SHA256`, `SHA384` or `SHA512` | true | SHA-256 when `Hash` is zero; SHA-512 when the type was defaulted in FIPS mode |
+| `KDFPBKDF2` with SHA-1 | false | Never written; read from old headers outside FIPS mode only |
+| `KDFArgon2i`, `KDFArgon2id` | false | Refused in FIPS mode; `KDFArgon2id` is the default otherwise |
 
-`DefaultKDFType()` applies when `Format`, `AddKeyslot`, `ChangeKeyslot` or
-`AddRecoveryKey` is given no KDF type. The FIPS default is calibrated to
+The combined `pbkdf2-sha*` spellings are internal aliases, not public types.
+
+`DefaultKDFType()` applies when `Format`, `AddKeyslot` or `AddRecoveryKey` is
+given no KDF type; `ChangeKeyslot` with a zero `KDF` keeps the slot's existing
+KDF instead. The FIPS default is calibrated to
 `PBKDFIterTime` (2000 ms by default) and never below the SHA-512 floor for
 that budget (210,000 at 2000 ms). A caller that names no type but sets an
 Argon2 cost gets `argon2id`, which FIPS mode refuses.

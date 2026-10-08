@@ -63,7 +63,7 @@ func acquireFileLockForTest(ctx context.Context, path string, wait time.Duration
 }
 
 // formatForTest formats path as a minimal PBKDF2 LUKS2 container, the way
-// the pre-redesign library's luks2.Format(luks2.FormatOptions{...}) did
+// the pre-redesign library's free function Format did
 // before B.6 moved Format behind (*luks2.Volume).Format.
 func formatForTest(path string, passphrase string) error {
 	ctx := context.Background()
@@ -85,7 +85,7 @@ func formatForTest(path string, passphrase string) error {
 }
 
 // addKeyForTest adds a PBKDF2 keyslot, the way the pre-redesign library's
-// luks2.AddKey(luks2.AddKeyOptions{...}) did before B.6 moved AddKey behind
+// free function AddKey did before B.6 moved AddKey behind
 // (*luks2.Volume).AddKeyslot.
 func addKeyForTest(path, existing, newPassphrase string) error {
 	ctx := context.Background()

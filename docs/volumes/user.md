@@ -1,6 +1,6 @@
 # Volumes — user guide
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
 > Conflicts with this document are defects. Fix them here first.
 
 ## Prerequisites
@@ -83,7 +83,7 @@ Detail: [keyslots/cli.md](../keyslots/cli.md#testkey).
 | `open` fails with `master key verification failed` | Wrong passphrase, or damaged key material (the two look the same) | Try the passphrase again; if certain it is right, check with another keyslot or a recovery key ([recovery-keys](../recovery-keys/user.md)) |
 | `open` fails with `kernel keyring` | Keyring syscalls blocked or unsupported | Inside a container, allow `add_key`/`keyctl`/`request_key` in seccomp |
 | `close` fails with `device-mapper target is held open` | Something still has the mapping open (a mount, a ZFS pool) | Find the holder; `fuser -mv <mountpoint>` if it was mounted |
-| `mount` refuses with "nothing found" or "more than one signature" | `blkid` could not pick one filesystem type | Pass `--type`/`-t` explicitly |
+| `mount` refuses with "carries no signature blkid recognizes" or "carries more than one filesystem signature" | `blkid` could not pick one filesystem type | With no signature, make a filesystem first; otherwise pass `--type`/`-t` explicitly |
 | A key file "does not work" though the text looks right | The trailing newline from `echo` is part of the passphrase | Use `printf %s` instead of `echo` when writing the key file, or know that `create` wrote the passphrase with the newline it was given — see [cli.md](cli.md#the-trailing-newline) |
 | `create` on a block device refuses, naming a filesystem or LUKS signature | The device already holds data | Confirm it is the right device, then `--force` |
 

@@ -181,7 +181,7 @@ func TestPublicEntryPointsCannotReachTheExemption(t *testing.T) {
 
 // TestTheInternalSeamWritesSystemdsCountToTheHeader is the end-to-end form of
 // the exemption, through the same unexported entry point (*Volume).AddRecoveryKey
-// and EnrollKeyProvider will call.
+// and (*Volume).Enroll will call.
 func TestTheInternalSeamWritesSystemdsCountToTheHeader(t *testing.T) {
 	defer parallel(t)()
 

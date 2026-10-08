@@ -870,7 +870,7 @@ The total is about 27 agent-days serial and about 15 calendar days with the para
 
 1. **Freeze window (decision).** pkg/luks2 must take no other changes on main from H5 to merge, about 2 calendar weeks. The alternative is to accept repeated rebases of a 20k-line move, which is where moved-code regressions hide. Approve the freeze, or name the lanes that must keep landing.
 2. **Feature-doc granularity (decision).** §G.1 follows feature-docs P1's *unratified* recommendation: one folder per CLI command group. Feature folders are requirements, and feature-docs §7 makes their shape the owner's call, so confirm or override before H15.
-3. **Consumer break (risk, no decision needed).** go-trusted-platform (16 files) and go-xkms/xkey (9 files) stay pinned to 0.4.x until they migrate under the H16 issues. Two behavioural points they must absorb:
+3. **Consumer break (risk, no decision needed).** go-trusted-platform (15 files) and go-xkms/xkey (7 files) stay pinned to v0.1.7-alpha, and both need Go 1.27.1, until they migrate under the H16 issues (filed: jeremyhahn/go-trusted-platform#746 and jeremyhahn/go-xkms#1427). Two behavioural points they must absorb:
    - The volume key is no longer extractable: no consumer extracts it today.
    - Credentials are enclaves, not `[]byte`.
 

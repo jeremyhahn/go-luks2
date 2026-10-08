@@ -7,20 +7,16 @@ package cli
 import (
 	"bytes"
 	"context"
-	"crypto"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
-// fastKDF is a PBKDF2 KDFParams calibrated for test speed, the same
-// technique newTestVolumeImage uses through the old API.
-var fastKDF = luks2.KDFParams{Type: luks2.KDFPBKDF2, Hash: crypto.SHA256, IterTime: time.Millisecond}
+// fastKDF is the cheapest KDFParams the library writes, the one
+// newTestVolumeImage formats with.
+var fastKDF = fastTestKDF
 
 func TestCreatePathKind(t *testing.T) {
 	dir := t.TempDir()
@@ -87,7 +83,7 @@ func TestCreateBlockDeviceFormatsSuccessfully(t *testing.T) {
 
 	e, _, _, stdout, _ := newTestEnv(bytes.NewBufferString("YES\n" + testPassphrase + "\n"))
 
-	if err := createBlockDevice(context.Background(), e, path, keySource{}, fastKDF, "PBKDF2-SHA256", false, false); err != nil {
+	if err := createBlockDevice(context.Background(), e, path, keySource{}, fastKDF, fastTestKDFLabel, false, false); err != nil {
 		t.Fatalf("createBlockDevice: %v", err)
 	}
 	if !strings.Contains(stdout.String(), "created successfully") {
@@ -105,7 +101,7 @@ func TestCreateBlockDeviceRefusesExistingSignatureWithoutForce(t *testing.T) {
 
 	e, _, _, _, _ := newTestEnv(&bytes.Buffer{})
 
-	err := createBlockDevice(context.Background(), e, path, keySource{}, fastKDF, "PBKDF2-SHA256", true, false)
+	err := createBlockDevice(context.Background(), e, path, keySource{}, fastKDF, fastTestKDFLabel, true, false)
 	if err == nil {
 		t.Fatal("createBlockDevice: want an error for an existing signature without --force")
 	}
@@ -124,7 +120,7 @@ func TestCreateBlockDeviceForceOverwritesExistingSignature(t *testing.T) {
 
 	e, _, _, stdout, _ := newTestEnv(bytes.NewBufferString(testPassphrase + "\n"))
 
-	if err := createBlockDevice(context.Background(), e, path, keySource{}, fastKDF, "PBKDF2-SHA256", true, true); err != nil {
+	if err := createBlockDevice(context.Background(), e, path, keySource{}, fastKDF, fastTestKDFLabel, true, true); err != nil {
 		t.Fatalf("createBlockDevice: %v", err)
 	}
 	if !strings.Contains(stdout.String(), "created successfully") {
@@ -151,7 +147,7 @@ func TestCreateBlockDeviceRefusesWithoutConfirmation(t *testing.T) {
 
 	e, _, _, _, stderr := newTestEnv(&bytes.Buffer{})
 
-	if err := createBlockDevice(context.Background(), e, path, keySource{}, fastKDF, "PBKDF2-SHA256", false, false); err == nil {
+	if err := createBlockDevice(context.Background(), e, path, keySource{}, fastKDF, fastTestKDFLabel, false, false); err == nil {
 		t.Fatal("createBlockDevice: want an error when nothing confirms the prompt")
 	}
 	if !strings.Contains(stderr.String(), "canceled") {
@@ -163,7 +159,7 @@ func TestRunCreateFileVolumeEndToEnd(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "vol.luks")
 	e, act, mnt, stdout, _ := newTestEnv(bytes.NewBufferString(testPassphrase + "\n"))
 
-	args := []string{"--pbkdf", "pbkdf2", "--hash", "sha256", "--iter-time", "1", path, "24M"}
+	args := append(append([]string{}, fastKDFArgs...), path, "24M")
 	if err := runCreate(context.Background(), e, args); err != nil {
 		t.Fatalf("runCreate: %v", err)
 	}
@@ -204,7 +200,7 @@ func TestRunCreateFileVolumeLoopAttachFailure(t *testing.T) {
 	lp := e.host.looper.(*fakeLooper)
 	lp.attachErr = errAttachFailed
 
-	args := []string{"--pbkdf", "pbkdf2", "--hash", "sha256", "--iter-time", "1", path, "24M"}
+	args := append(append([]string{}, fastKDFArgs...), path, "24M")
 	if err := runCreate(context.Background(), e, args); err == nil {
 		t.Fatal("runCreate: want an error when the loop device cannot be attached")
 	}
@@ -223,7 +219,7 @@ func TestRunCreateFileVolumeMkfsFailure(t *testing.T) {
 	e, act, mnt, _, stderr := newTestEnv(bytes.NewBufferString(testPassphrase + "\n"))
 	mnt.makeErr = errMkfsFailed
 
-	args := []string{"--pbkdf", "pbkdf2", "--hash", "sha256", "--iter-time", "1", path, "24M"}
+	args := append(append([]string{}, fastKDFArgs...), path, "24M")
 	if err := runCreate(context.Background(), e, args); err == nil {
 		t.Fatal("runCreate: want an error when mkfs fails")
 	}
@@ -240,8 +236,8 @@ func TestRunCreateFileVolumeMkfsFailure(t *testing.T) {
 // create itself set up, or they would be left behind.
 func TestRunCreateCleanupSurvivesACanceledCtx(t *testing.T) {
 	args := func() []string {
-		return []string{"--pbkdf", "pbkdf2", "--hash", "sha256", "--iter-time", "1",
-			filepath.Join(t.TempDir(), "vol.luks"), "24M"}
+		return append(append([]string{}, fastKDFArgs...),
+			filepath.Join(t.TempDir(), "vol.luks"), "24M")
 	}
 
 	t.Run("mkfs failure", func(t *testing.T) {

@@ -42,7 +42,7 @@ func blankLoop(t *testing.T) (string, string) {
 }
 
 // formatForTest formats path as a minimal PBKDF2 LUKS2 container, the way
-// the pre-redesign library's luks2.Format(luks2.FormatOptions{...}) did
+// the pre-redesign library's free function Format did
 // before B.6 moved Format behind (*luks2.Volume).Format.
 func formatForTest(path, passphrase string) error {
 	ctx := context.Background()

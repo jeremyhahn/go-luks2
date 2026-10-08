@@ -1,6 +1,7 @@
 # Volumes — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163),
+> except the measured flag table and "What the container does not isolate"
 > Conflicts with this document are defects. Fix them here first.
 
 The implementation contract for the volume lifecycle: create, unlock, mount,
@@ -62,12 +63,13 @@ Full signatures, including every params struct field: DESIGN.md §B.2–§B.5,
 cross-checked against `go doc` for each package.
 
 `make api-diff` (`test/tools/apidump` against
-`baseline/disposition-luks2.tsv`) checks that the exported surface of
-`pkg/luks2` is exactly DESIGN.md §B.6's. The few exports retained on purpose
-(`DefaultKDFSpec`, `LegacyToken`, `dmcrypt.ErrIntegerOverflow`,
-`dmcrypt.ErrDeviceChanged`) are recorded there.
+`baseline/disposition-luks2.tsv`) checks that every export of the
+pre-redesign `pkg/luks2` (`baseline/luks2.tsv`) is where its disposition row
+says: `KEEP` rows still exported, `RENAME`/`MOVE`/`UNEXPORT`/`DELETE` rows
+gone under the old name. It does not see exports added since, such as
+`DefaultKDFSpec` and `LegacyToken`.
 
-$1
+## Invariants
 
 - **Lock order is a type property.** `internal/device` implements it (H6,
   DECISIONS.md): `Pinned` is read-only; `Pinned.Lock(ctx, mode)` takes the
@@ -145,8 +147,8 @@ Zero value of a params struct means library policy (target shape, DESIGN.md
 | `KDF` | `DefaultKDFType()`: PBKDF2-SHA512 in FIPS mode, Argon2id otherwise |
 
 `filesystem.MountParams` carries source, target, type,
-mount flags and data string; there is no default mount beyond what the kernel
-itself defaults.
+mount flags and data string. An empty type is detected with `blkid`;
+otherwise there is no default mount beyond what the kernel itself defaults.
 
 ## Persistence
 
@@ -161,7 +163,7 @@ data area is left as it was. A header-only wipe (crypto-erase) is
 ## Test strategy
 
 **Unit** (`make test-unit`): the rootless core (`pkg/luks2`) makes format,
-unlock, mount and close real against temp files at minimum legal KDF cost; no
+unlock and close real against temp files at minimum legal KDF cost; no
 device-mapper or loop-device mock. Root-only paths (device-mapper, loop,
 mount) are covered by the unit tier's fakes plus the combined tier below.
 `pkg/luks2` is held to a 90% floor in the combined tier (`coverage-floors.txt`);
@@ -389,8 +391,8 @@ preamble treats an undercount as worse than the current state:
    schedule on the ordinary heap for the cipher's lifetime; neither offers a
    way to place it elsewhere or wipe it. The keyslot wrap uses
    `golang.org/x/crypto/xts`, which is outside the Go Cryptographic Module.
-5. **The kernel keyring.** The key spends the duration of one activation ioctl
-   in the kernel's session keyring, as a write-only `logon` key, then is
+5. **The kernel keyring.** The key spends the table load and resume in the
+   kernel's session keyring, as a write-only `logon` key, then is
    revoked, unlinked and verified gone. Kernel keyrings are not namespaced by
    container (see [architecture.md](architecture.md#kernel-keyring)).
 6. **Hash state.** `sha256.Sum256` leaves the area key (ESSIV salt) or the

@@ -121,7 +121,7 @@ func writeKeyslot(t *testing.T, path string, hdr *header.BinaryHeader, metadata 
 
 	passphraseKey, err := deriveKeyEnclave(context.Background(), passphrase, kdf, reference.KeySize, defaultVolumeSys())
 	if err != nil {
-		t.Fatalf("DeriveKeyEnclave failed: %v", err)
+		t.Fatalf("deriveKeyEnclave failed: %v", err)
 	}
 	defer mustDestroy(t, passphraseKey)
 

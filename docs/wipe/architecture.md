@@ -1,6 +1,6 @@
 # Wipe — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
 > Conflicts with this document are defects. Fix them here first.
 
 Destroying a volume, two ways: a crypto-erase that destroys only the header
@@ -17,7 +17,7 @@ protect it are gone. A full overwrite is for when the goal is "no bytes on
 this medium should be recoverable", including by someone who already has
 every header backup ever taken. The two are genuinely different operations
 with different costs, so this library keeps them as two call sites
-(`HeaderOnly` vs. full `Wipe`) rather than one call with a mode flag that
+(`(*luks2.Volume).Erase` vs. `wipe.Sanitize`) rather than one call with a mode flag that
 callers could set by habit.
 
 ## Component boundaries
@@ -57,7 +57,7 @@ geometry of a header copy whose checksum is valid. Any other header copy
 found at a legal offset is zeroed too: its binary header and its JSON.
 Nothing at or past the start of the data segment is touched. If no header
 copy has a valid checksum, the keyslots area cannot be located: the first
-32 KiB and every recognisable copy are zeroed, and a full wipe is the only
+32 KiB and every recognizable copy are zeroed, and a full wipe is the only
 remaining option.
 
 **Full device.** Overwrites the whole device, then syncs. A standard
@@ -67,9 +67,10 @@ a loop device, its backing file too), and compares every byte with the final
 pass. `dod3` and `dod7` turn verification on by default.
 
 Both modes open the device with `O_EXCL`: a mounted, mapped or otherwise held
-device is refused, and a path that names a different file at open time than
-at lock time (a symlink re-pointed in between) is refused before anything is
-written.
+device is refused before anything is written. The exclusive open reopens the
+locked descriptor's own inode (its `/proc/self/fd` entry), never the path
+again, so a symlink re-pointed after the lock cannot redirect the wipe to
+another device.
 
 ## What this feature deliberately does not do
 

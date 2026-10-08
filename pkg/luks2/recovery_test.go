@@ -106,7 +106,7 @@ func TestRecoveryKeyRoundTrip(t *testing.T) {
 	defer mustDestroy(t, parsed)
 
 	// The decode still yields the 32 bytes behind the rendering, which is what
-	// ParseLegacyRecoveryKey is for. It is no longer the credential: see
+	// parseLegacyRecoveryKey is for. It is no longer the credential: see
 	// TestTheCredentialIsThePrintedText below.
 	if parsed.Size() != 32 {
 		t.Errorf("round-trip failed: decoded %d bytes, want 32", parsed.Size())
@@ -638,7 +638,7 @@ func TestRecoveryCredentialRefusesWhatCannotBeOne(t *testing.T) {
 }
 
 // TestTheTwoParsersDecodeDifferently pins the difference between
-// ParseRecoveryKey and ParseLegacyRecoveryKey, which is the whole reason
+// ParseRecoveryKey and parseLegacyRecoveryKey, which is the whole reason
 // both exist: a keyslot this package enrolls holds the printed TEXT, and one
 // enrolled before that change holds the DECODED bytes behind it. B.6 moved
 // the two loaders' file I/O to internal/cli (LoadRecoveryCredential,
@@ -677,14 +677,14 @@ func TestTheTwoParsersDecodeDifferently(t *testing.T) {
 	// if they did, one of them is not doing what its name says.
 	decoded, err := parseLegacyRecoveryKey(printed)
 	if err != nil {
-		t.Fatalf("ParseLegacyRecoveryKey: %v", err)
+		t.Fatalf("parseLegacyRecoveryKey: %v", err)
 	}
 	defer mustDestroy(t, decoded)
 
 	if decoded.Size() != 32 {
-		t.Errorf("ParseLegacyRecoveryKey returned %d bytes, want the 32 behind the rendering", decoded.Size())
+		t.Errorf("parseLegacyRecoveryKey returned %d bytes, want the 32 behind the rendering", decoded.Size())
 	}
 	if string(openSecret(t, decoded)) == printed {
-		t.Error("ParseLegacyRecoveryKey returned the credential rather than its decoding")
+		t.Error("parseLegacyRecoveryKey returned the credential rather than its decoding")
 	}
 }

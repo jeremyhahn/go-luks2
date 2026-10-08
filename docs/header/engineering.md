@@ -1,6 +1,6 @@
 # Header — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
 > Conflicts with this document are defects. Fix them here first.
 
 ## Exported surface
@@ -30,8 +30,10 @@ type DroppedEntry struct{ Kind, ID string }
 func (e DroppedEntry) String() string
 ```
 
-`(*Volume).Header(ctx)` returns `ErrNotLUKS2` when the device has no valid
-header or is LUKS1, and the accessors above are the header summary. The on-disk model and codec
+`(*Volume).Header(ctx)` returns the current copy (the primary, or the
+secondary when the primary is damaged or older), `ErrNotLUKS2` when the
+device is LUKS1 and `ErrInvalidHeader` when neither copy is a valid header;
+the accessors above are the header summary. The on-disk model and codec
 this is built on, `internal/header`, is unchanged by this layer
 ([architecture.md](architecture.md#component-boundaries)).
 
@@ -59,11 +61,12 @@ writes a header by device path.
 |---|---|
 | `ErrInvalidHeader` | A rule about the header as a whole failed (magic, checksum, structure, a member named twice) |
 | `ErrInvalidArgument` | `FormatParams.MetadataSize` is not a power of two from 16 KiB to 4 MiB |
-| `ErrNotLUKS2` | The device is LUKS1, not LUKS2, or has no valid header at all |
-| `ErrUnsupported` | The checksum algorithm field names anything but `sha256`, more than one segment, a segment with an `integrity` member, or a mandatory requirement this library does not implement |
+| `ErrNotLUKS2` | The device is LUKS1, not LUKS2 |
+| `ErrUnsupported` | The checksum algorithm field names anything but `sha256`; on unlock, more than one segment or a segment with an `integrity` member |
+| `ErrUnsupportedRequirement` | A write or unlock met a mandatory requirement this library does not implement |
 | `ErrPrimaryHeaderCurrent` | `RestorePrimaryHeader` would roll the volume back; use `ReplacePrimaryHeader` deliberately |
 | `ErrDeviceChanged` | An in-use claim's re-opened path no longer names the locked file |
-| `LockTimeoutError` | Another writer held the device's exclusive lock for `DefaultLockWait` |
+| `LockTimeoutError` | The device's lock was held in a conflicting mode (a writer against a read, or anyone against a write) for the lock wait, `DefaultLockWait` unless `WithLockWait` sets another |
 
 `ErrInvalidHeader`, `ErrInvalidArgument`, `ErrInvalidCredential` and `ErrIO`
 are module-wide kinds (`internal/errs`, re-exported by value), and

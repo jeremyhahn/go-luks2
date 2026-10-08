@@ -28,9 +28,9 @@ var pbkdf2Hashes = []string{"sha256", "sha384", "sha512"}
 
 // kdfFlagsHelp is the help text for the KDF options, shared by every command
 // that declares them.
-const kdfFlagsHelp = `  --pbkdf <name>                  argon2id or pbkdf2. Default: pbkdf2 (SHA-512) in
-                                  FIPS 140-3 mode, argon2id otherwise. argon2id is
-                                  refused in FIPS 140-3 mode.
+const kdfFlagsHelp = `  --pbkdf <name>                  argon2id, argon2i or pbkdf2. Default: pbkdf2
+                                  (SHA-512) in FIPS 140-3 mode, argon2id otherwise.
+                                  argon2 is refused in FIPS 140-3 mode.
   --hash <name>                   PBKDF2 hash: sha256, sha384 or sha512 (default)
   --iter-time <ms>                PBKDF2 time budget to calibrate to (default 2000);
                                   never below the hash's iteration floor
@@ -90,9 +90,9 @@ func (f *kdfFlags) resolve() (luks2.KDFParams, string, error) {
 	switch family {
 	case "":
 		family = string(luks2.DefaultKDFType())
-	case string(luks2.KDFArgon2id), string(luks2.KDFPBKDF2):
+	case string(luks2.KDFArgon2id), string(luks2.KDFArgon2i), string(luks2.KDFPBKDF2):
 	default:
-		return luks2.KDFParams{}, "", f.usage("--pbkdf must be %s or %s, not %q", luks2.KDFArgon2id, luks2.KDFPBKDF2, family)
+		return luks2.KDFParams{}, "", f.usage("--pbkdf must be %s, %s or %s, not %q", luks2.KDFArgon2id, luks2.KDFArgon2i, luks2.KDFPBKDF2, family)
 	}
 
 	forced, err := f.positive("pbkdf-force-iterations", *f.forceIterations)
@@ -102,10 +102,10 @@ func (f *kdfFlags) resolve() (luks2.KDFParams, string, error) {
 
 	var p luks2.KDFParams
 	var label string
-	if family == string(luks2.KDFArgon2id) {
-		p, label, err = f.argon2Choice(forced)
-	} else {
+	if family == string(luks2.KDFPBKDF2) {
 		p, label, err = f.pbkdf2Choice(forced)
+	} else {
+		p, label, err = f.argon2Choice(luks2.KDFType(family), forced)
 	}
 	if err != nil {
 		return luks2.KDFParams{}, "", err
@@ -117,16 +117,16 @@ func (f *kdfFlags) resolve() (luks2.KDFParams, string, error) {
 	return p, label, nil
 }
 
-// argon2Choice resolves the options for an Argon2id keyslot. The PBKDF2-only
-// options are refused rather than ignored: an operator who gave --iter-time
-// believes it took effect.
-func (f *kdfFlags) argon2Choice(timeCost int) (luks2.KDFParams, string, error) {
+// argon2Choice resolves the options for an Argon2 keyslot of the given variant
+// (argon2id or argon2i). The PBKDF2-only options are refused rather than
+// ignored: an operator who gave --iter-time believes it took effect.
+func (f *kdfFlags) argon2Choice(variant luks2.KDFType, timeCost int) (luks2.KDFParams, string, error) {
 	if *f.hash != "" {
 		return luks2.KDFParams{}, "", f.usage("--hash applies to pbkdf2 only; add --pbkdf pbkdf2")
 	}
 	if *f.iterTime != "" {
 		return luks2.KDFParams{}, "", f.usage("--iter-time applies to pbkdf2 only; add --pbkdf pbkdf2 " +
-			"(an argon2id cost is set with --pbkdf-force-iterations, --pbkdf-memory and --pbkdf-parallel)")
+			"(an argon2 cost is set with --pbkdf-force-iterations, --pbkdf-memory and --pbkdf-parallel)")
 	}
 	memory, err := f.positive("pbkdf-memory", *f.memory)
 	if err != nil {
@@ -137,18 +137,18 @@ func (f *kdfFlags) argon2Choice(timeCost int) (luks2.KDFParams, string, error) {
 		return luks2.KDFParams{}, "", err
 	}
 	return luks2.KDFParams{
-		Type:      luks2.KDFArgon2id,
+		Type:      variant,
 		Time:      timeCost,
 		MemoryKiB: memory,
 		Parallel:  parallel,
-	}, "Argon2id", nil
+	}, "Argon2" + strings.TrimPrefix(string(variant), "argon2"), nil
 }
 
 // pbkdf2Choice resolves the options for a PBKDF2 keyslot. The hash is
 // --hash, or sha512 when it is not given.
 func (f *kdfFlags) pbkdf2Choice(iterations int) (luks2.KDFParams, string, error) {
 	if *f.memory != "" || *f.parallel != "" {
-		return luks2.KDFParams{}, "", f.usage("--pbkdf-memory and --pbkdf-parallel apply to argon2id only")
+		return luks2.KDFParams{}, "", f.usage("--pbkdf-memory and --pbkdf-parallel apply to argon2id and argon2i only")
 	}
 
 	hashName := "sha512"

@@ -31,7 +31,7 @@ import (
 // round-trips through this package" is not sufficient evidence: the reference
 // implementations here are what make a behavioral drift visible.
 
-func TestDeriveKeyEnclaveAgreesWithTheUnprotectedDerivation(t *testing.T) {
+func TestDerivedEnclaveAgreesWithTheUnprotectedDerivation(t *testing.T) {
 	iterations := 1000
 	kdf := &header.KDF{
 		Type:       "pbkdf2",
@@ -43,7 +43,7 @@ func TestDeriveKeyEnclaveAgreesWithTheUnprotectedDerivation(t *testing.T) {
 
 	held, err := deriveKeyEnclave(context.Background(), passphrase, kdf, 64, defaultVolumeSys())
 	if err != nil {
-		t.Fatalf("DeriveKeyEnclave failed: %v", err)
+		t.Fatalf("deriveKeyEnclave failed: %v", err)
 	}
 	defer mustDestroy(t, held)
 
@@ -63,11 +63,11 @@ func TestDeriveKeyEnclaveAgreesWithTheUnprotectedDerivation(t *testing.T) {
 	}
 }
 
-// TestDeriveKeyEnclaveHandsBackAnEnclaveNotASlice asserts the custody property
+// TestDerivedEnclaveHandsBackAnEnclaveNotASlice asserts the custody property
 // itself rather than the value: what comes back can be DESTROYED, and reading
 // it afterwards fails. A []byte return has neither property -- a caller who
 // forgets to wipe one gets no error, just a live copy of the key.
-func TestDeriveKeyEnclaveHandsBackAnEnclaveNotASlice(t *testing.T) {
+func TestDerivedEnclaveHandsBackAnEnclaveNotASlice(t *testing.T) {
 	iterations := 1000
 	kdf := &header.KDF{
 		Type:       "pbkdf2",
@@ -78,7 +78,7 @@ func TestDeriveKeyEnclaveHandsBackAnEnclaveNotASlice(t *testing.T) {
 
 	held, err := deriveKeyEnclave(context.Background(), []byte("custody-test-passphrase"), kdf, 64, defaultVolumeSys())
 	if err != nil {
-		t.Fatalf("DeriveKeyEnclave failed: %v", err)
+		t.Fatalf("deriveKeyEnclave failed: %v", err)
 	}
 
 	if !held.IsAlive() {

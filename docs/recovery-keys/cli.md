@@ -1,6 +1,6 @@
 # Recovery keys — CLI
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
 > Conflicts with this document are defects. Fix them here first.
 
 ```
@@ -28,9 +28,11 @@ with stock cryptsetup: `cryptsetup open /dev/sdb1 vault` and paste. Type it
 exactly as shown; dashes and case are part of it. The `Checksum (not secret)`
 line is a SHA-256 of the key for checking a transcription; it opens nothing.
 
-If `add` cannot print the key (the write to standard output fails) and it was
-not saved with `--output`, the keyslot and token are removed again and the
-command exits 1. If that removal fails, the error names the slot to kill.
+If `add` cannot print the key (the write to standard output fails), the
+keyslot and token are removed again and the command fails; `--output` is
+written only after the key is printed, so it was not saved either. If a
+removal fails, stderr names the command that finishes it (`luks2 killslot`
+or `luks2 token remove`).
 
 | `--format` | Example | Characters for 32 bytes |
 |---|---|---|
@@ -77,9 +79,10 @@ sudo luks2 recovery add --pbkdf pbkdf2 --hash sha512 --pbkdf-force-iterations 10
 ```
 
 `--output` writes a file with mode 0400: comment lines with the volume UUID,
-keyslot, token and checksum, then the key. If the file cannot be written the
-command exits 1, but the key is already in the keyslot and on screen; copy it
-then.
+keyslot, token and checksum, then the key. The file is created exclusively,
+so an existing path is refused rather than overwritten. If the file cannot
+be written the command fails, but the key is already in the keyslot and on
+screen; copy it then.
 
 ## verify
 
@@ -93,8 +96,11 @@ echo '56D3DF-C65CED-...' | sudo luks2 recovery verify /dev/sdb1
 `--recovery-file` takes the first line that is not blank or a `#` comment.
 Without it, the key is read from the terminal or the first line of a pipe.
 Surrounding whitespace is stripped; nothing else is changed. Exit 0 if the key
-opens the volume, 1 if it does not or the check failed.
+opens the volume. A key that does not open it exits 2 (`ErrWrongKey`, the
+same status as a wrong passphrase) after `That recovery key does NOT open
+<device>` on stderr; any other failure exits with its own status.
 
 Keys enrolled by older versions hold the decoded bytes rather than the text, so
-`verify` rejects them. The library's `ParseRecoveryKey` and `LoadRecoveryKey`
-handle those.
+`verify` rejects them. No exported library function decodes those any more
+(`ParseRecoveryKey` only trims and checks the text); re-enroll a fresh key
+while a passphrase still opens the volume.
