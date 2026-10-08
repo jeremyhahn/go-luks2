@@ -344,8 +344,9 @@ func TestReleaseTargetsKeepTheirOwnKindWhenNamedTogether(t *testing.T) {
 	}
 }
 
-// TestReleaseTargetsRequireAnExplicitVersion: none of the three guesses a
-// version, release-alpha included, and each names itself in the refusal.
+// TestReleaseTargetsRequireAnExplicitVersion: release-candidate and release
+// never guess a version. release-alpha derives one from the alpha tags, so the
+// fixture here has none and it refuses; each names itself in the refusal.
 func TestReleaseTargetsRequireAnExplicitVersion(t *testing.T) {
 	for _, tgt := range releaseTargets {
 		t.Run(tgt.target, func(t *testing.T) {
@@ -359,6 +360,230 @@ func TestReleaseTargetsRequireAnExplicitVersion(t *testing.T) {
 			}
 		})
 	}
+}
+
+// tagFixture creates each tag on the fixture's HEAD and publishes it to the
+// remote. A tag in remoteOnly is then deleted from the work tree, so only the
+// remote knows it.
+func tagFixture(t *testing.T, work string, tags, remoteOnly []string) {
+	t.Helper()
+	for _, tag := range tags {
+		gitIn(t, work, "tag", tag)
+		gitIn(t, work, "push", "-q", "dev", "refs/tags/"+tag)
+	}
+	for _, tag := range remoteOnly {
+		gitIn(t, work, "tag", "-d", tag)
+	}
+}
+
+// remoteTags lists the remote's tags, one per line.
+func remoteTags(t *testing.T, remote string) []string {
+	t.Helper()
+	out := gitIn(t, remote, "tag", "--list")
+	if out == "" {
+		return nil
+	}
+	return strings.Split(out, "\n")
+}
+
+// TestReleaseAlphaDerivesTheNextPatchFromTheHighestAlphaTag: with no VERSION,
+// release-alpha counts PATCH + 1 from the highest alpha tag by number (not by
+// text, so .10 outranks .9), reading the tags of the checkout and of the remote,
+// prints the version before writing, and cuts it through the usual guards.
+func TestReleaseAlphaDerivesTheNextPatchFromTheHighestAlphaTag(t *testing.T) {
+	cases := []struct {
+		name       string
+		tags       []string
+		remoteOnly []string
+		want       string
+	}{
+		{"highest by number", []string{"v0.3.9-alpha", "v0.3.10-alpha", "v0.2.99-alpha"}, nil, "v0.3.11-alpha"},
+		{"highest on the remote only", []string{"v0.3.1-alpha", "v0.3.2-alpha"}, []string{"v0.3.2-alpha"}, "v0.3.3-alpha"},
+		{"highest in the checkout only", []string{"v0.3.1-alpha"}, nil, "v0.3.6-alpha"},
+		{"lower rc and final do not matter", []string{"v0.4.0-alpha", "v0.3.0-rc.2", "v0.3.0"}, nil, "v0.4.1-alpha"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			work, remote, agentGit := releaseFixture(t, "0.0.0", strings.TrimPrefix(c.want, "v"))
+			tagFixture(t, work, c.tags, c.remoteOnly)
+			if c.name == "highest in the checkout only" {
+				gitIn(t, work, "tag", "v0.3.5-alpha") // never pushed: only this checkout knows it
+			}
+			before := remoteTags(t, remote)
+			out, ok := runTarget(t, "release-alpha", work, agentGit, "")
+			if !ok {
+				t.Fatalf("make release-alpha failed:\n%s", out)
+			}
+			if want := "Next alpha: " + c.want + " "; !strings.Contains(out, want) {
+				t.Errorf("output does not announce %q before writing:\n%s", want, out)
+			}
+			if got := gitIn(t, remote, "tag", "--list", c.want); got != c.want {
+				t.Errorf("tag %s was not pushed (got %q)", c.want, got)
+			}
+			if got := len(remoteTags(t, remote)); got != len(before)+1 {
+				t.Errorf("remote holds %d tags, want %d: exactly one is cut", got, len(before)+1)
+			}
+			ver, err := os.ReadFile(filepath.Join(work, "VERSION")) // #nosec G304 -- fixture path
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.TrimSpace(string(ver)); got != strings.TrimPrefix(c.want, "v") {
+				t.Errorf("VERSION = %q, want %q", got, strings.TrimPrefix(c.want, "v"))
+			}
+		})
+	}
+}
+
+// TestReleaseAlphaPrefersAnExplicitVersion: the derived version is only the
+// default. An explicit VERSION cuts exactly what it says (the hand-tagged MINOR
+// bump), derives nothing, and still refuses any other kind.
+func TestReleaseAlphaPrefersAnExplicitVersion(t *testing.T) {
+	t.Run("explicit alpha wins", func(t *testing.T) {
+		work, remote, agentGit := releaseFixture(t, "0.0.0", "0.4.0-alpha", "0.3.2-alpha")
+		tagFixture(t, work, []string{"v0.3.1-alpha"}, nil)
+		out, ok := runTarget(t, "release-alpha", work, agentGit, "v0.4.0-alpha")
+		if !ok {
+			t.Fatalf("make release-alpha VERSION=v0.4.0-alpha failed:\n%s", out)
+		}
+		if strings.Contains(out, "Next alpha:") {
+			t.Errorf("derived a version although VERSION was given:\n%s", out)
+		}
+		if got := gitIn(t, remote, "tag", "--list", "v0.4.0-alpha"); got != "v0.4.0-alpha" {
+			t.Errorf("tag v0.4.0-alpha was not pushed (got %q)", got)
+		}
+		if got := gitIn(t, remote, "tag", "--list", "v0.3.2-alpha"); got != "" {
+			t.Errorf("the derived version %q was cut as well", got)
+		}
+	})
+	t.Run("empty VERSION derives", func(t *testing.T) {
+		work, remote, agentGit := releaseFixture(t, "0.0.0", "0.3.2-alpha")
+		tagFixture(t, work, []string{"v0.3.1-alpha"}, nil)
+		cmd := exec.Command(lookPath(t, "make"), "release-alpha", "VERSION=", "AGENT_GIT="+agentGit) // #nosec G204 -- test values
+		cmd.Dir = work
+		cmd.Env = append(environ(nil, nil),
+			"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.invalid",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.invalid")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("make release-alpha VERSION= failed:\n%s", out)
+		}
+		if got := gitIn(t, remote, "tag", "--list", "v0.3.2-alpha"); got != "v0.3.2-alpha" {
+			t.Errorf("tag v0.3.2-alpha was not pushed (got %q)", got)
+		}
+	})
+	t.Run("other kinds still refused", func(t *testing.T) {
+		work, remote, agentGit := releaseFixture(t, "0.0.0", "1.0.0-rc.4")
+		tagFixture(t, work, []string{"v0.3.1-alpha"}, nil)
+		out, ok := runTarget(t, "release-alpha", work, agentGit, "v1.0.0-rc.4")
+		if ok || !strings.Contains(out, "Use: make release-candidate VERSION=v1.0.0-rc.4") {
+			t.Fatalf("an rc was not refused by release-alpha (ok=%v):\n%s", ok, out)
+		}
+		if got := remoteTags(t, remote); !slices.Equal(got, []string{"v0.3.1-alpha"}) {
+			t.Errorf("remote tags changed on a refusal: %q", got)
+		}
+	})
+}
+
+// TestReleaseAlphaRefusesWhenThereIsNoAlphaTagToCountFrom: nothing to derive
+// from, so it prints the explicit form instead of inventing a version. An rc or
+// a final release is not an alpha tag to count from.
+func TestReleaseAlphaRefusesWhenThereIsNoAlphaTagToCountFrom(t *testing.T) {
+	for _, tags := range [][]string{nil, {"v1.0.0-rc.3", "v0.9.0"}} {
+		t.Run(strings.Join(tags, ","), func(t *testing.T) {
+			work, remote, agentGit := releaseFixture(t, "0.0.0", "0.0.1-alpha", "1.0.0-rc.4")
+			tagFixture(t, work, tags, nil)
+			out, ok := runTarget(t, "release-alpha", work, agentGit, "")
+			if ok {
+				t.Fatalf("make release-alpha succeeded with no alpha tag:\n%s", out)
+			}
+			for _, want := range []string{"no vX.Y.Z-alpha tag exists", "state the version explicitly: make release-alpha VERSION=vX.Y.Z-alpha"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("refusal does not say %q:\n%s", want, out)
+				}
+			}
+			if got := remoteTags(t, remote); !slices.Equal(got, slices.Sorted(slices.Values(tags))) {
+				t.Errorf("remote tags changed on a refusal: %q", got)
+			}
+		})
+	}
+}
+
+// TestReleaseAlphaNeverDerivesAVersionAtOrBelowAnExistingTag: semver order, not
+// the alpha count alone, decides. An rc or a final release outranks the alpha of
+// the same X.Y.Z, and a higher tag of any kind outranks a lower alpha. Local and
+// remote-only tags both count. Every case is refused with nothing written.
+func TestReleaseAlphaNeverDerivesAVersionAtOrBelowAnExistingTag(t *testing.T) {
+	cases := []struct {
+		name       string
+		tags       []string
+		remoteOnly []string
+		blocker    string
+	}{
+		{"rc of the same X.Y.Z, local", []string{"v0.3.1-alpha", "v0.3.2-rc.1"}, nil, "v0.3.2-rc.1"},
+		{"final of the same X.Y.Z, remote only", []string{"v0.3.1-alpha", "v0.3.2"}, []string{"v0.3.2"}, "v0.3.2"},
+		{"rc of a higher X.Y.Z", []string{"v0.9.5-alpha", "v1.0.0-rc.3"}, nil, "v1.0.0-rc.3"},
+		{"final of a higher X.Y.Z, remote only", []string{"v0.9.5-alpha", "v1.2.0"}, []string{"v1.2.0"}, "v1.2.0"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			work, remote, agentGit := releaseFixture(t, "0.0.0", "0.3.2-alpha", "0.9.6-alpha")
+			tagFixture(t, work, c.tags, c.remoteOnly)
+			head := gitIn(t, work, "rev-parse", "HEAD")
+			out, ok := runTarget(t, "release-alpha", work, agentGit, "")
+			if ok {
+				t.Fatalf("make release-alpha succeeded; want refusal:\n%s", out)
+			}
+			for _, want := range []string{"does not outrank the existing tag " + c.blocker, "state the version explicitly: make release-alpha VERSION=vX.Y.Z-alpha"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("refusal does not say %q:\n%s", want, out)
+				}
+			}
+			if got := gitIn(t, work, "rev-parse", "HEAD"); got != head {
+				t.Errorf("HEAD moved from %s to %s on a refusal", head, got)
+			}
+			if got := remoteTags(t, remote); !slices.Equal(got, slices.Sorted(slices.Values(c.tags))) {
+				t.Errorf("remote tags changed on a refusal: %q", got)
+			}
+		})
+	}
+}
+
+// TestReleaseAlphaRunsEveryGuardOnTheDerivedVersion: the derived version goes
+// through the same guards as a typed one, so a missing CHANGELOG section, a
+// side branch or an unreachable remote refuses it with nothing cut.
+func TestReleaseAlphaRunsEveryGuardOnTheDerivedVersion(t *testing.T) {
+	t.Run("no changelog section", func(t *testing.T) {
+		work, remote, agentGit := releaseFixture(t, "0.0.0", "0.3.1-alpha")
+		tagFixture(t, work, []string{"v0.3.1-alpha"}, nil)
+		out, ok := runTarget(t, "release-alpha", work, agentGit, "")
+		if ok || !strings.Contains(out, "no \"## [0.3.2-alpha]\" section heading") {
+			t.Fatalf("missing CHANGELOG section not refused (ok=%v):\n%s", ok, out)
+		}
+		if got := remoteTags(t, remote); !slices.Equal(got, []string{"v0.3.1-alpha"}) {
+			t.Errorf("remote tags changed on a refusal: %q", got)
+		}
+	})
+	t.Run("not on main", func(t *testing.T) {
+		work, _, agentGit := releaseFixture(t, "0.0.0", "0.3.2-alpha")
+		tagFixture(t, work, []string{"v0.3.1-alpha"}, nil)
+		gitIn(t, work, "checkout", "-q", "-b", "side")
+		out, ok := runTarget(t, "release-alpha", work, agentGit, "")
+		if ok || !strings.Contains(out, "releases are cut from main") {
+			t.Fatalf("non-main branch not refused (ok=%v):\n%s", ok, out)
+		}
+	})
+	t.Run("unreachable remote", func(t *testing.T) {
+		work, _, agentGit := releaseFixture(t, "0.0.0", "0.3.2-alpha")
+		tagFixture(t, work, []string{"v0.3.1-alpha"}, nil)
+		gitIn(t, work, "remote", "set-url", "dev", filepath.Join(t.TempDir(), "absent.git"))
+		out, ok := runTarget(t, "release-alpha", work, agentGit, "")
+		if ok || !strings.Contains(out, "could not list the tags") {
+			t.Fatalf("unreachable remote not refused (ok=%v):\n%s", ok, out)
+		}
+		if got := gitIn(t, work, "tag", "--list", "v0.3.2-alpha"); got != "" {
+			t.Errorf("a version was derived from local tags alone and cut: %q", got)
+		}
+	})
 }
 
 // TestReleaseFixtureLeavesNoGitRunning: no git the fixture or the recipe runs

@@ -3747,12 +3747,23 @@ behavior. See `pkg/luks2/fipsmigrate.go:72-104`,
   The `release` target taking `-rc.N` is a breaking change for anyone who cut
   candidates with it (rc.3 was cut that way); `test/makefile/release_test.go`
   pins the matrix.
-- **`VERSION` stays explicit for `release-alpha`.** The handbook's alpha row
-  and its "Tooling gap" note (`release-versioning.md` §2: `make release-alpha`
-  "increments only PATCH") describe a target that guesses the next alpha. This
-  repository's recipe never guessed, for the reason in the `Makefile` comment
-  block above the recipe: an auto-increment labels an API addition a bug fix, and
-  the version is the only signal a pinning consumer gets. The note itself calls
-  the PATCH-only increment a gap, so adopting it would copy the defect.
-  `make release-alpha VERSION=vX.Y.Z-alpha` is therefore required, as it is for
-  the other two targets; a deliberate keep, not an omission.
+- **`release-alpha` derives its version; `VERSION` stays required for the other
+  two.** Owner ruling 2026-10-08, aligning with the company standard (handbook
+  `release-versioning.md` §1a alpha row and §2: `make release-alpha` "increments
+  only PATCH"). This replaces the earlier keep of an explicit `VERSION` for
+  `release-alpha`, which rested on the objection that an auto-increment labels an
+  API addition a bug fix. The handbook rule answers it: `make release-alpha`
+  with no `VERSION` takes the highest `vX.Y.Z-alpha` tag, local and on the
+  release remote, and adds 1 to PATCH, and a MINOR or MAJOR bump is cut by hand
+  with `make release-alpha VERSION=vX.Y.Z-alpha`, which stays valid and skips the
+  derivation. The derivation is read-only and prints the version first; it then
+  runs the unchanged `RELEASE_RECIPE` on it through a nested make, so main-only,
+  the remote, the duplicate tag, the clean tree and the changelog checks, the
+  `VERSION` commit, the signed tag and the atomic push all apply to it. It
+  refuses, printing the explicit form, when no alpha tag exists, when the remote
+  cannot be listed (an unreachable remote is not an absent tag), and when the
+  result would be at or below ANY existing tag in semver order: an rc or a final
+  release outranks the alpha of the same `X.Y.Z`, so `v0.3.1-alpha` with
+  `v0.3.2-rc.1` present derives nothing. `release-candidate` and `release`
+  still refuse to guess: there `VERSION` is the decision of whoever cuts the
+  release. `test/makefile/release_test.go` pins all of it.

@@ -82,15 +82,17 @@ GOBIN=$(GOPATH)/bin
 # Version stamped into the binary, read from the VERSION file.
 #
 # Named BUILD_VERSION, not VERSION, and that is not cosmetic (#19). The release
-# targets take the version as `make release-alpha VERSION=vX.Y.Z-alpha`,
-# `make release-candidate VERSION=vX.Y.Z-rc.N` or `make release VERSION=vX.Y.Z`
-# and refuse to guess. A make variable also called VERSION SHADOWS that argument:
-# measured on adoption, `make release-alpha` with no argument sailed past the
-# "state the version explicitly" guard — REL_VERSION was never empty, it held
-# this line's text — and died one guard later on a grammar error naming
+# targets take the version as `make release-candidate VERSION=vX.Y.Z-rc.N` or
+# `make release VERSION=vX.Y.Z` and refuse to guess; `make release-alpha` derives
+# it when VERSION is omitted and accepts `VERSION=vX.Y.Z-alpha` as an override.
+# A make variable also called VERSION SHADOWS that argument: measured on
+# adoption, `make release-alpha` with no argument sailed past the "state the
+# version explicitly" guard — REL_VERSION was never empty, it held this line's
+# text — and died one guard later on a grammar error naming
 # `$(shell cat VERSION ...)`. The guard written to give the clearest message
 # was unreachable, which is the failure mode a fail-closed recipe is supposed
-# not to have. Renaming the build variable frees the argument name.
+# not to have. Renaming the build variable frees the argument name, and it is
+# what lets release-alpha tell "VERSION omitted" from "VERSION set" at all.
 BUILD_VERSION=$(shell cat VERSION 2>/dev/null | tr -d 'v' || echo "dev")
 LDFLAGS=-ldflags "-X main.version=$(BUILD_VERSION)"
 
@@ -1317,16 +1319,23 @@ RELEASE_REMOTE ?= dev
 #   - There is ONE TARGET PER KIND (release-versioning.md 1a, owner ruling
 #     2026-10-07), each refusing the other two BEFORE anything is written, and
 #     naming the right target in the refusal:
-#       make release-alpha     VERSION=vX.Y.Z-alpha   an alpha
+#       make release-alpha    [VERSION=vX.Y.Z-alpha]  an alpha (derived if omitted)
 #       make release-candidate VERSION=vX.Y.Z-rc.N    a release candidate
 #       make release           VERSION=vX.Y.Z         a final release
 #     All three expand the same RELEASE_RECIPE (below), so the guards cannot
 #     drift apart; a target adds only the kind it exports.
-#   - The version is EXPLICIT for all three, release-alpha included. No
-#     auto-increment; whoever cuts the release decides patch/minor/major and
-#     says so. The recipe refuses to guess. (The handbook's "Tooling gap" note
-#     describes an alpha target that bumps PATCH only; this one does not, and
-#     docs/design/DECISIONS.md records why it stays that way.)
+#   - The version is EXPLICIT for release-candidate and release: whoever cuts
+#     one decides patch/minor/major and says so, and the recipe refuses to guess.
+#     release-alpha alone derives it (owner ruling 2026-10-08, release-versioning.md
+#     1a and 2): with no VERSION it takes the highest vX.Y.Z-alpha tag, local and
+#     on the release remote, adds 1 to PATCH, prints the result and then runs the
+#     same RELEASE_RECIPE on it through a nested make, so every guard below still
+#     runs on the derived version. It refuses, and prints the explicit form, when
+#     there is no alpha tag to count from, when the remote cannot be listed, or
+#     when any existing tag (an rc or a final release of the same or a higher
+#     X.Y.Z outranks the alpha) is at or above the result. An explicit
+#     VERSION=vX.Y.Z-alpha is still valid and is how a MINOR bump is cut by hand;
+#     derivation is skipped for it. docs/design/DECISIONS.md records the ruling.
 #   - Every git write goes through AGENT_GIT (identity + SSH signing); the tag
 #     is ANNOTATED and signed, not lightweight.
 #   - Pushes ONLY the release commit and the named tag, atomically. Never --tags.
@@ -1454,14 +1463,65 @@ define RELEASE_RECIPE
 	@echo "Released $$REL_VERSION (signed, annotated, single tag pushed)"
 endef
 
+# release-alpha with no VERSION: derive the next alpha, print it, and hand it to
+# a nested make that runs RELEASE_RECIPE on it, so every guard (main only, the
+# remote, the duplicate tag, a clean tree, the changelog checks) sees the derived
+# version exactly as it would see a typed one. Nothing here writes.
+#
+# The derivation reads the tags of BOTH the checkout and the release remote: a
+# tag cut from another checkout is as real as a local one, and a published tag
+# is immutable. An unreachable remote refuses rather than deriving from local
+# tags alone, the same fail-closed reading as the duplicate-tag guard.
+#
+# Semver order decides what the result may be. The alpha of an X.Y.Z sorts below
+# its rc and its final release, so the result is refused unless its X.Y.Z is
+# strictly above the X.Y.Z of EVERY tag (alpha, rc or final): anything else
+# would be a version at or below an existing tag.
+#
+# The nested make receives the version as a command-line VERSION, which also
+# wins over any VERSION= the caller passed empty. The leading + keeps the make
+# jobserver and lets the line run under -n, as a line naming a recursive make
+# does.
+define ALPHA_DERIVE
+	@test -n "$$REL_REMOTE" || { echo 'ERROR: RELEASE_REMOTE is empty — set it to the git remote that serves this module'; exit 1; }
+	@git remote get-url "$$REL_REMOTE" >/dev/null 2>&1 || { echo "ERROR: no git remote named $$REL_REMOTE. Set RELEASE_REMOTE; the next alpha cannot be derived without its tags"; exit 1; }
+	+@set -eu; \
+	core='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'; \
+	byver() { sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1; }; \
+	rc=0; remote=$$(git ls-remote --tags --refs "$$REL_REMOTE" 2>/dev/null) || rc=$$?; \
+	test "$$rc" = 0 || { echo "ERROR: could not list the tags on $$REL_REMOTE. Refusing to derive from local tags alone: an unreachable remote is not an absent tag. To go ahead, state the version explicitly: make $$REL_TARGET VERSION=$$REL_SHAPE"; exit 1; }; \
+	tags=$$({ git tag -l 'v*'; printf '%s\n' "$$remote" | sed 's|^.*refs/tags/||'; } | sort -u); \
+	latest=$$(printf '%s\n' "$$tags" | grep -E "^v$$core-alpha$$" | sed 's/^v//; s/-alpha$$//' | byver || true); \
+	test -n "$$latest" || { echo "ERROR: no vX.Y.Z-alpha tag exists, locally or on $$REL_REMOTE, to count from. Nothing to derive: state the version explicitly: make $$REL_TARGET VERSION=$$REL_SHAPE"; exit 1; }; \
+	oldifs="$$IFS"; IFS=.; set -- $$latest; IFS="$$oldifs"; \
+	next="$$1.$$2.$$(( $$3 + 1 ))"; \
+	top=$$(printf '%s\n' "$$tags" | grep -E "^v$$core(-alpha|-rc\.[1-9][0-9]*)?$$" | sed 's/^v//; s/-.*$$//' | byver || true); \
+	hi=$$(printf '%s\n%s\n' "$$top" "$$next" | byver); \
+	if test "$$hi" != "$$next" || test "$$top" = "$$next"; then \
+	  topre=$$(printf '%s' "$$top" | sed 's/\./\\./g'); \
+	  blocker=$$(printf '%s\n' "$$tags" | grep -E "^v$$topre(-|$$)" | sort -V | tail -n 1); \
+	  echo "ERROR: the next alpha after v$$latest-alpha would be v$$next-alpha, which does not outrank the existing tag $$blocker (an rc or a final release outranks the alpha of the same X.Y.Z). To choose a version above it, state the version explicitly: make $$REL_TARGET VERSION=$$REL_SHAPE"; exit 1; \
+	fi; \
+	v="v$$next-alpha"; \
+	echo "Next alpha: $$v (PATCH + 1 on the highest alpha tag, v$$latest-alpha; tags read from the checkout and $$REL_REMOTE)"; \
+	exec "$$REL_MAKE" --no-print-directory $$REL_TARGET VERSION="$$v"
+endef
+
 release-alpha: export REL_TARGET    := release-alpha
 release-alpha: export REL_SHAPE     := vX.Y.Z-alpha
 release-alpha: export REL_VERSION   := $(value VERSION)
 release-alpha: export REL_REMOTE    := $(RELEASE_REMOTE)
 release-alpha: export REL_REPO      := $(REPO_NAME)
 release-alpha: export REL_AGENT_GIT := $(AGENT_GIT)
-release-alpha: ## Tag and push an alpha (VERSION=vX.Y.Z-alpha); refuses any other kind
+release-alpha: export REL_MAKE      := $(MAKE)
+release-alpha: ## Tag and push the next alpha (derived, PATCH + 1) or VERSION=vX.Y.Z-alpha; refuses any other kind
+# ifndef does not expand VERSION; it asks only whether VERSION has a value, so
+# no settable text is read as make syntax here.
+ifndef VERSION
+	$(ALPHA_DERIVE)
+else
 	$(RELEASE_RECIPE)
+endif
 
 release-candidate: export REL_TARGET    := release-candidate
 release-candidate: export REL_SHAPE     := vX.Y.Z-rc.N

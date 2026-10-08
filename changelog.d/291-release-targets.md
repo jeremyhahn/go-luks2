@@ -8,5 +8,5 @@
   change `make release` accepted all three and `release-alpha` was an alias of
   it, so `make release VERSION=vX.Y.Z-rc.N` (how rc.3 was cut) and
   `make release-alpha VERSION=vX.Y.Z` now fail: use `make release-candidate`
-  and `make release`. `VERSION` is still stated explicitly for all three. The
-  guards are one recipe shared by the three targets, so they cannot drift.
+  and `make release`. `VERSION` is stated explicitly for the candidate and the final
+  release; `release-alpha` derives it when omitted (next entry). The guards are one recipe shared by the three targets, so they cannot drift.
