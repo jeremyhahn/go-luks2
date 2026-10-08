@@ -11,6 +11,7 @@ The Go API, embedded transport only. go-luks2 is a Layer 0 library (docs/00
 | Test a passphrase | `(*Volume).Unlock(ctx, pass)`, then `(*Key).Destroy()` |
 | Add a passphrase | `(*Volume).AddKeyslot(ctx, key, pass, KeyslotParams) (KeyslotInfo, error)` |
 | Change a passphrase in place | `(*Volume).ChangeKeyslot(ctx, key, pass, KeyslotParams) (KeyslotInfo, error)` |
+| Set a keyslot's priority | `KeyslotParams.Priority`: `PriorityIgnore`, `PriorityNormal` or `PriorityPrefer`; the zero value `PriorityDefault` makes a new slot normal and leaves a changed slot's priority as it was |
 | Remove a keyslot | `(*Volume).RemoveKeyslot(ctx, slot) error` (guarded, not authenticated) |
 | List keyslots | `(*Header).Keyslots() []KeyslotInfo`, from `(*Volume).Header(ctx)` |
 

@@ -212,8 +212,8 @@ func TestKeyslotInfoList(t *testing.T) {
 	if info.KeySize != 64 {
 		t.Errorf("expected KeySize 64, got %d", info.KeySize)
 	}
-	if info.Priority != 1 {
-		t.Errorf("expected Priority 1, got %d", info.Priority)
+	if info.Priority != PriorityNormal {
+		t.Errorf("expected PriorityNormal, got %d", info.Priority)
 	}
 	if info.KDF.Type != KDFArgon2id {
 		t.Errorf("expected KDF.Type %q, got %s", KDFArgon2id, info.KDF.Type)
@@ -1102,7 +1102,7 @@ func TestAddKeyAndUnlockRoundTripOnAES192CBCVolume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateKDF failed: %v", err)
 	}
-	passphraseKey, err := deriveKeyEnclave(context.Background(), firstPassphrase, kdf, areaKeySize)
+	passphraseKey, err := deriveKeyEnclave(context.Background(), firstPassphrase, kdf, areaKeySize, defaultVolumeSys())
 	if err != nil {
 		t.Fatalf("DeriveKeyEnclave failed: %v", err)
 	}

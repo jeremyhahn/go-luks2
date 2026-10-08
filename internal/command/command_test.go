@@ -242,13 +242,16 @@ func TestRunKillsTheWholeProcessGroupOnCancel(t *testing.T) {
 	// can sit as a zombie -- still "alive" by that signal -- indefinitely.
 	// /proc's State is read instead: gone, or zombie, both mean the signal
 	// that killed the group reached this grandchild too; only a process
-	// still actually running (R/S/D) means it did not.
-	state, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid)) // #nosec G304 -- /proc/<pid> of a PID this test itself started
-	if err != nil {
-		return // the entry is gone entirely: reaped, which is also termination
-	}
-	if !strings.Contains(string(state), "State:\tZ ") {
-		t.Fatalf("the backgrounded grandchild (pid %d) is still running after cancellation:\n%s", pid, state)
+	// still actually running (R/S/D) means it did not. The SIGKILL may not have
+	// been delivered yet when Run returns, so poll for a moment.
+	for end := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		state, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid)) // #nosec G304 -- /proc/<pid> of a PID this test itself started
+		if err != nil || strings.Contains(string(state), "State:\tZ ") {
+			return // gone (reaped) or a zombie: terminated either way
+		}
+		if time.Now().After(end) {
+			t.Fatalf("the backgrounded grandchild (pid %d) is still running after cancellation:\n%s", pid, state)
+		}
 	}
 }
 

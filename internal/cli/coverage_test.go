@@ -11,6 +11,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jeremyhahn/go-luks2/pkg/filesystem"
@@ -205,38 +206,50 @@ func TestReportKDFRefusalPrintsFIPSHint(t *testing.T) {
 	}
 }
 
-func TestParseAddKeyKDFEveryBranch(t *testing.T) {
+func TestResolveOptionalKDF(t *testing.T) {
 	cases := []struct {
 		name     string
+		args     []string
 		wantType luks2.KDFType
 		wantHash crypto.Hash
 		wantErr  bool
 	}{
-		{"", "", 0, false},
-		{"argon2id", luks2.KDFArgon2id, 0, false},
-		{"argon2i", luks2.KDFArgon2i, 0, false},
-		{"pbkdf2", luks2.KDFPBKDF2, crypto.SHA256, false},
-		{"pbkdf2-sha256", luks2.KDFPBKDF2, crypto.SHA256, false},
-		{"pbkdf2-sha384", luks2.KDFPBKDF2, crypto.SHA384, false},
-		{"pbkdf2-sha512", luks2.KDFPBKDF2, crypto.SHA512, false},
-		{"pbkdf2-sha1", "", 0, true},
-		{"nonsense", "", 0, true},
+		{"none given", nil, "", 0, false},
+		{"argon2id", []string{"--pbkdf", "argon2id"}, luks2.KDFArgon2id, 0, false},
+		{"pbkdf2 defaults to sha512", []string{"--pbkdf", "pbkdf2"}, luks2.KDFPBKDF2, crypto.SHA512, false},
+		{"pbkdf2 sha256", []string{"--pbkdf", "pbkdf2", "--hash", "sha256", "--iter-time", "10"}, luks2.KDFPBKDF2, crypto.SHA256, false},
+		{"sha1 refused", []string{"--pbkdf", "pbkdf2", "--hash", "sha1"}, "", 0, true},
+		{"empty value refused", []string{"--iter-time", ""}, "", 0, true},
+		{"argon2id with iter-time refused", []string{"--pbkdf", "argon2id", "--iter-time", "10"}, "", 0, true},
 	}
 	for _, c := range cases {
-		got, err := parseAddKeyKDF("addkey", c.name)
+		f := newFlags("addkey")
+		kdf := declareKDFFlags(f)
+		if _, err := f.parse(c.args); err != nil {
+			t.Fatalf("%s: parse: %v", c.name, err)
+		}
+		got, err := kdf.resolveOptional()
 		if c.wantErr {
 			if err == nil {
-				t.Errorf("parseAddKeyKDF(%q): want an error", c.name)
+				t.Errorf("%s: want an error", c.name)
 			}
 			continue
 		}
 		if err != nil {
-			t.Errorf("parseAddKeyKDF(%q): %v", c.name, err)
+			t.Errorf("%s: %v", c.name, err)
 			continue
 		}
 		if got.Type != c.wantType || got.Hash != c.wantHash {
-			t.Errorf("parseAddKeyKDF(%q) = %+v, want Type=%q Hash=%v", c.name, got, c.wantType, c.wantHash)
+			t.Errorf("%s: got %+v, want Type=%q Hash=%v", c.name, got, c.wantType, c.wantHash)
 		}
+	}
+}
+
+func TestReportKDFRefusalNamesAFlagTheCommandsHave(t *testing.T) {
+	e, _, _, _, stderr := newTestEnv(&bytes.Buffer{})
+	reportKDFRefusal(e, luks2.ErrFIPSNotApproved)
+	if !strings.Contains(stderr.String(), "--pbkdf pbkdf2") {
+		t.Fatalf("hint = %q, want it to name --pbkdf pbkdf2", stderr.String())
 	}
 }
 

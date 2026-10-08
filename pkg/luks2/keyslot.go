@@ -56,17 +56,47 @@ const (
 	keyslotPriorityPrefer = 2
 )
 
-// Priority is a keyslot's try-order preference (DESIGN.md §B.2). Its values
-// mirror keyslotPriorityIgnore/Normal/Prefer exactly -- the on-disk LUKS2
-// encoding this package already reads and writes -- under the typed name the
-// new read model and KeyslotParams use.
+// Priority is a keyslot's try-order preference (DESIGN.md §B.2).
+//
+// Its zero value, PriorityDefault, is "not asked for": a new keyslot gets the
+// LUKS2 default (normal) and ChangeKeyslot keeps the slot's existing
+// priority. Every other value is an explicit request, so PriorityIgnore --
+// a slot an unlock does not try -- is something a caller can only get by
+// naming it, never by leaving a field unset.
+//
+// The values are the on-disk encoding plus one (keyslotPriorityIgnore/Normal/
+// Prefer are 0/1/2; PriorityIgnore/Normal/Prefer are 1/2/3), so the mapping
+// each way is a single rule that loses nothing: priorityFromDisk and
+// onDiskPriority. A KeyslotInfo never reports PriorityDefault, because an
+// absent on-disk member reads back as PriorityNormal.
 type Priority int
 
 const (
-	PriorityIgnore Priority = iota
+	PriorityDefault Priority = iota
+	PriorityIgnore
 	PriorityNormal
 	PriorityPrefer
 )
+
+// valid reports whether p is one of the declared values.
+func (p Priority) valid() bool {
+	return p >= PriorityDefault && p <= PriorityPrefer
+}
+
+// priorityFromDisk reads a keyslot's priority member: absent is
+// PriorityNormal, the LUKS2 default; a present value v is Priority(v+1).
+func priorityFromDisk(v *int) Priority {
+	if v == nil {
+		return PriorityNormal
+	}
+	return Priority(*v + 1)
+}
+
+// errInvalidPriority refuses a Priority outside the declared values instead
+// of writing it.
+func errInvalidPriority(p Priority) error {
+	return &errs.Error{Kind: errs.ErrInvalidArgument, Detail: fmt.Sprintf("invalid keyslot priority %d", int(p))}
+}
 
 // keyslotInfoFromMetadata builds a KeyslotInfo for keyslot id from its
 // on-disk metadata, as written by addKeyslotWithMasterKey. Equivalent to
@@ -75,10 +105,7 @@ const (
 // (recovery.go) use this one so a write they just made is read back exactly
 // or reported as broken, never silently misreported.
 func keyslotInfoFromMetadata(id int, ks *header.Keyslot) (KeyslotInfo, error) {
-	info := KeyslotInfo{ID: id, Type: ks.Type, KeySize: ks.KeySize, Priority: PriorityNormal}
-	if ks.Priority != nil {
-		info.Priority = Priority(*ks.Priority)
-	}
+	info := KeyslotInfo{ID: id, Type: ks.Type, KeySize: ks.KeySize, Priority: priorityFromDisk(ks.Priority)}
 	if ks.Area != nil {
 		info.Encryption = ks.Area.Encryption
 	}
@@ -129,7 +156,7 @@ type addKeyOptionsForTest struct {
 	// which cost was used and that it was taken from the volume.
 	//
 	// A field rather than a log line, for the reason recorded on
-	// header.ForgetKeyslotID (internal/header/codec.go): a logger in a layer-0 primitive, or a write
+	// header.Metadata.DroppedNullEntries (internal/header/types.go): a logger in a layer-0 primitive, or a write
 	// to log/slog's process-global default, imposes a logging decision on every
 	// embedding application. cmd/luks2 is the application that turns this into
 	// something an operator reads.
@@ -169,16 +196,15 @@ type KeyslotParams struct {
 	// *Key came from.
 	Slot *int
 
-	// Priority is the keyslot's try-order preference, written explicitly for
-	// PriorityIgnore and PriorityPrefer and omitted (the on-disk default,
-	// read back as PriorityNormal) for PriorityNormal -- the same contract
-	// listKeyslotsFrom already reads. ChangeKeyslot keeps the slot's existing
-	// priority when Priority is left at its zero value, and rewrites it only
-	// for an explicit PriorityNormal or PriorityPrefer.
+	// Priority is the keyslot's try-order preference. PriorityDefault, the
+	// zero value, gives a new keyslot the LUKS2 default (normal) and makes
+	// ChangeKeyslot keep the slot's existing priority. PriorityIgnore and
+	// PriorityPrefer are written as an explicit member; PriorityNormal is
+	// written as no member at all, cryptsetup's own encoding of normal.
 	Priority Priority
 
 	// KDF is the new keyslot's key-derivation cost. A zero KDFParams resolves
-	// through the same policy AddKeyOptions already does: the library's
+	// through this package's add-key policy: the library's
 	// default KDF, or an inherited Argon2 cost when the container already
 	// has one and the caller named neither a type nor a cost.
 	KDF KDFParams
@@ -205,17 +231,7 @@ func (p KeyslotParams) toAddKeyOptions() *addKeyOptionsForTest {
 	return opts
 }
 
-// TestKey verifies that a passphrase can unlock the LUKS volume.
-// Returns nil if the passphrase opens a keyslot, error otherwise.
-//
-// A failure is NOT a statement that the passphrase is wrong. getMasterKey
-// distinguishes a keyslot that judged the credential and rejected it from one
-// that could not be tried and from a container with no usable keyslot at all
-// (#30), and this wrapper carries that distinction through instead of
-// flattening every outcome into a credential verdict. Match on the wrapped
-// error -- ErrWrongKey, ErrInvalidKeyslot, ErrNoKeyslots -- rather
-// than on the message.
-// addKeyFormatOptions maps AddKeyOptions onto the FormatOptions that create the
+// addKeyFormatOptions maps the add-key options onto the format options that create the
 // new keyslot's KDF, applying this package's defaults for anything the caller
 // left unset.
 //
@@ -225,7 +241,7 @@ func (p KeyslotParams) toAddKeyOptions() *addKeyOptionsForTest {
 // default instead. That was harmless before #52, when nothing validated the
 // budget; it stopped being harmless the moment BenchmarkPBKDF2 began refusing an
 // unusable one, because the same nonsense value then errored through
-// FormatOptions and was quietly ignored through AddKeyOptions -- two contracts
+// Format and was quietly ignored through AddKey -- two contracts
 // for one parameter, on adjacent APIs. Propagating it is what makes the refusal
 // reach every caller.
 //
@@ -348,7 +364,7 @@ func containerArgon2Cost(metadata *header.Metadata) *header.KDF {
 	return nil
 }
 
-// baseAddKeyFormatOptions maps the caller's AddKeyOptions onto FormatOptions,
+// baseAddKeyFormatOptions maps the caller's add-key options onto format options,
 // with this package's defaults for whatever the caller left unset.
 //
 // The KDF type resolves through resolveKDFType, so a caller that names none
@@ -471,7 +487,7 @@ func testKeyForTestWithSys(device string, passphrase []byte, sys volumeSys) erro
 // rather than one a human chose -- but it does not exist in this package yet,
 // and naming it here as though it did would describe a wiring that is not
 // there. See keyslotCostPolicy (kdf.go) for what the exemption is, what it is
-// not, and why it is not a field on AddKeyOptions.
+// not, and why it is not a field on the add-key options.
 func addKeyWithPolicy(ctx context.Context, device string, existingPassphrase, newPassphrase []byte, opts *addKeyOptionsForTest, policy keyslotCostPolicy, sys volumeSys) (int, error) {
 	if err := addKeyPreflight(device, existingPassphrase, newPassphrase, opts); err != nil {
 		return -1, err
@@ -570,6 +586,10 @@ func addKeyslotWithMasterKey(ctx context.Context, dev *keyslotDevice, hdr *heade
 // keyslot (see the no-priority-written comment below).
 func addKeyslotWithMasterKeyAndPriority(ctx context.Context, dev *keyslotDevice, hdr *header.BinaryHeader, metadata *header.Metadata, masterKey *enclave.MemoryEnclave,
 	newPassphrase []byte, opts *addKeyOptionsForTest, policy keyslotCostPolicy, priority *int) (int, error) {
+	if priority != nil && (*priority < keyslotPriorityIgnore || *priority > keyslotPriorityPrefer) {
+		return -1, errInvalidPriority(priorityFromDisk(priority))
+	}
+
 	// Find available keyslot
 	targetSlot, err := findAvailableKeyslot(metadata, opts)
 	if err != nil {
@@ -917,7 +937,7 @@ func changeKeyWithSys(device string, oldPassphrase, newPassphrase []byte, keyslo
 	}
 	defer custody.Release(masterKey)
 
-	return changeKeyslotCore(ctx, dev, hdr, metadata, slotIDStr, keyslot, targetKeyslot, masterKey, newPassphrase)
+	return changeKeyslotCore(ctx, dev, hdr, metadata, slotIDStr, keyslot, targetKeyslot, masterKey, newPassphrase, nil)
 }
 
 // changeKeyslotCore is ChangeKey's write path, factored out so
@@ -925,7 +945,10 @@ func changeKeyWithSys(device string, oldPassphrase, newPassphrase []byte, keyslo
 // already holds the master key, keyed by keyslot/slotIDStr rather than
 // re-deriving either. targetKeyslot is the container's own keyslot object
 // (metadata.Keyslots[slotIDStr]), mutated and then written in place.
-func changeKeyslotCore(ctx context.Context, dev *keyslotDevice, hdr *header.BinaryHeader, metadata *header.Metadata, slotIDStr string, keyslot int, targetKeyslot *header.Keyslot, masterKey *enclave.MemoryEnclave, newPassphrase []byte) error {
+// recost is nil to keep the keyslot's KDF type and cost
+// (inheritedKeyslotFormatOptions), or the caller's already-validated KDF
+// options, resolved exactly as AddKeyslot resolves them.
+func changeKeyslotCore(ctx context.Context, dev *keyslotDevice, hdr *header.BinaryHeader, metadata *header.Metadata, slotIDStr string, keyslot int, targetKeyslot *header.Keyslot, masterKey *enclave.MemoryEnclave, newPassphrase []byte, recost *addKeyOptionsForTest) error {
 	// THE KEY MUST BE THIS VOLUME'S, established before anything is derived
 	// or written -- the check AddKey makes. A key from another volume would
 	// otherwise be wrapped, committed under the header and only caught by the
@@ -986,104 +1009,20 @@ func changeKeyslotCore(ctx context.Context, dev *keyslotDevice, hdr *header.Bina
 		return err
 	}
 
-	// Create the new KDF WITH THE COST THE KEYSLOT ALREADY HAD.
-	//
-	// A passphrase change is not a request to re-cost the keyslot. The argon2
-	// branch below always understood that; the pbkdf2 side did not, and left
-	// both its cost and its hash to be re-decided:
-	//
-	//	iterations  recalibrated against the 2000ms default budget
-	//	hash        replaced with DefaultHashAlgo -- sha256, whatever it was
-	//
-	// So an operator who deliberately configured a cost had it discarded by an
-	// unrelated passphrase change, silently and in both directions. MEASURED: a
-	// single ChangeKey on a container formatted with --pbkdf-force-iterations
-	// 1000 took ~6.3 seconds and left the keyslot at several million
-	// iterations. The volume still opened, which is why nothing caught it.
-	kdfType := targetKeyslot.KDF.Type
-	formatOpts := formatOptionsForTest{
-		KDFType:  kdfType,
-		HashAlgo: defaultHashAlgo,
-	}
-	if targetKeyslot.KDF.Hash != "" {
-		formatOpts.HashAlgo = targetKeyslot.KDF.Hash
-	}
-	// EXCEPT SHA-1, which is never written (#239). A PBKDF2-SHA1 keyslot -- a
-	// converted LUKS1 one -- is rewritten as PBKDF2-SHA256, and its iteration
-	// count is CONVERTED from what it cost, not copied: see
-	// sha256IterationsForSHA1 for why a copied count can halve the work.
-	rewritingSHA1 := strings.EqualFold(formatOpts.HashAlgo, "sha1")
-	if rewritingSHA1 {
-		formatOpts.HashAlgo = defaultHashAlgo
-	}
-
-	// Copy existing Argon2 parameters or set defaults.
-	//
-	// AN INHERITED ARGON2 MEMORY COST IS PRESERVED, NOT RAISED TO
-	// MinArgon2MemoryKB, and this is the one place the create floor deliberately
-	// does not reach.
-	//
-	// THE INVARIANT, the same one AddKey keeps: every keyslot in a volume should
-	// be derivable by the hardware that owns the volume. A cost read out of the
-	// container is the only evidence this package has about that hardware --
-	// a volume formatted at 32 MiB was formatted by something that had 32 MiB --
-	// so raising it produces a keyslot that cannot be derived at all on the only
-	// hardware that uses the volume. Preserving makes nothing weaker than it
-	// already was: the operator is changing the credential, not the cost, and
-	// the volume's resistance is bounded by its weakest slot either way.
-	//
-	// It is the opposite of the PBKDF2 rule below, which DOES raise an inherited
-	// count to the floor, and the asymmetry is PHYSICAL rather than a
-	// preference: PBKDF2 iterations cost time, which any machine can spend;
-	// Argon2 memory costs RAM, which it may simply not have.
-	//
-	// The floor still binds where the cost is the CALLER's -- Format and AddKey
-	// -- because there is no container to take evidence from. See
-	// MinArgon2MemoryKB.
-	if kdfType == "argon2id" || kdfType == "argon2i" {
-		formatOpts.Argon2Time = 4
-		formatOpts.Argon2Memory = 1048576
-		formatOpts.Argon2Parallel = 4
-		if targetKeyslot.KDF.Time != nil {
-			formatOpts.Argon2Time = *targetKeyslot.KDF.Time
+	// The new KDF: the keyslot's own cost unless the caller named one. A
+	// caller that names one -- (*Volume).ChangeKeyslot with a non-zero
+	// KeyslotParams.KDF, cryptsetup luksChangeKey's --pbkdf* options -- gets
+	// exactly what AddKeyslot would write for the same options, validated by
+	// the caller before the lock; ChangeKey and a zero KDF keep the old cost.
+	var formatOpts formatOptionsForTest
+	if recost != nil {
+		formatOpts, _ = addKeyFormatOptions(recost, metadata, dev.sys.fipsMode)
+	} else {
+		var err error
+		formatOpts, err = inheritedKeyslotFormatOptions(dev, targetKeyslot, areaKeySize)
+		if err != nil {
+			return err
 		}
-		if targetKeyslot.KDF.Memory != nil {
-			formatOpts.Argon2Memory = *targetKeyslot.KDF.Memory
-		}
-		if targetKeyslot.KDF.CPUs != nil {
-			formatOpts.Argon2Parallel = *targetKeyslot.KDF.CPUs
-		}
-	}
-
-	// The pbkdf2 equivalent, with one asymmetry that is not an oversight: the
-	// preserved count is RAISED TO THIS PACKAGE'S FLOOR if it sits below it.
-	//
-	// Argon2 has no such floor, so preserving there is unconditional. PBKDF2
-	// does (pbkdf2IterationFloor), and a container written elsewhere may
-	// legitimately carry a count under it -- cryptsetup's
-	// --pbkdf-force-iterations will write 1000. Preserving that exactly would
-	// mean forcedPBKDF2Iterations refusing the write, so an imported container
-	// could never have its passphrase changed at all; that is a worse outcome
-	// than a keyslot stronger than the one asked for, and it would be this
-	// package refusing to let an operator rotate a credential.
-	//
-	// Raising is also CLOSER to the old behavior than refusing: recalibration
-	// already replaced a low count with a much larger one. What changes is that
-	// the increase now stops at the floor instead of at whatever this machine
-	// benchmarks.
-	if isPBKDF2Type(normalizeKDFType(kdfType)) && targetKeyslot.KDF.Iterations != nil {
-		preserved := *targetKeyslot.KDF.Iterations
-		if rewritingSHA1 {
-			converted, err := sha256IterationsForSHA1(preserved, areaKeySize, dev.sys)
-			if err != nil {
-				return &errs.Error{Kind: errs.KindOf(err, errs.ErrInvalidArgument), Detail: "failed to carry the PBKDF2-SHA1 keyslot's cost over to PBKDF2-SHA256", Err: err}
-			}
-			preserved = converted
-		}
-		if floor := int(math.Ceil(pbkdf2IterationFloor(formatOpts.HashAlgo, pbkdf2ReferenceTargetMs))); preserved < floor {
-			preserved = floor
-		}
-		formatOpts.PBKDFIterations = preserved
 	}
 
 	kdf, err := createKDF(formatOpts, areaKeySize, callerSuppliedCredential, dev.sys.fipsMode, dev.sys.calibratedCountFloor, dev.sys.cryptoRand)
@@ -1220,6 +1159,110 @@ func changeKeyslotCore(ctx context.Context, dev *keyslotDevice, hdr *header.Bina
 	return nil
 }
 
+// inheritedKeyslotFormatOptions is the KDF a passphrase change writes when
+// the caller names none: THE COST THE KEYSLOT ALREADY HAD.
+//
+// A passphrase change with no KDF options is not a request to re-cost the
+// keyslot. The argon2 branch below always understood that; the pbkdf2 side
+// did not, and left both its cost and its hash to be re-decided:
+//
+//	iterations  recalibrated against the 2000ms default budget
+//	hash        replaced with DefaultHashAlgo -- sha256, whatever it was
+//
+// So an operator who deliberately configured a cost had it discarded by an
+// unrelated passphrase change, silently and in both directions. MEASURED: a
+// single ChangeKey on a container formatted with --pbkdf-force-iterations
+// 1000 took ~6.3 seconds and left the keyslot at several million
+// iterations. The volume still opened, which is why nothing caught it.
+func inheritedKeyslotFormatOptions(dev *keyslotDevice, targetKeyslot *header.Keyslot, areaKeySize int) (formatOptionsForTest, error) {
+	kdfType := targetKeyslot.KDF.Type
+	formatOpts := formatOptionsForTest{
+		KDFType:  kdfType,
+		HashAlgo: defaultHashAlgo,
+	}
+	if targetKeyslot.KDF.Hash != "" {
+		formatOpts.HashAlgo = targetKeyslot.KDF.Hash
+	}
+	// EXCEPT SHA-1, which is never written (#239). A PBKDF2-SHA1 keyslot -- a
+	// converted LUKS1 one -- is rewritten as PBKDF2-SHA256, and its iteration
+	// count is CONVERTED from what it cost, not copied: see
+	// sha256IterationsForSHA1 for why a copied count can halve the work.
+	rewritingSHA1 := strings.EqualFold(formatOpts.HashAlgo, "sha1")
+	if rewritingSHA1 {
+		formatOpts.HashAlgo = defaultHashAlgo
+	}
+
+	// Copy existing Argon2 parameters or set defaults.
+	//
+	// AN INHERITED ARGON2 MEMORY COST IS PRESERVED, NOT RAISED TO
+	// MinArgon2MemoryKB, and this is the one place the create floor deliberately
+	// does not reach.
+	//
+	// THE INVARIANT, the same one AddKey keeps: every keyslot in a volume should
+	// be derivable by the hardware that owns the volume. A cost read out of the
+	// container is the only evidence this package has about that hardware --
+	// a volume formatted at 32 MiB was formatted by something that had 32 MiB --
+	// so raising it produces a keyslot that cannot be derived at all on the only
+	// hardware that uses the volume. Preserving makes nothing weaker than it
+	// already was: the operator is changing the credential, not the cost, and
+	// the volume's resistance is bounded by its weakest slot either way.
+	//
+	// It is the opposite of the PBKDF2 rule below, which DOES raise an inherited
+	// count to the floor, and the asymmetry is PHYSICAL rather than a
+	// preference: PBKDF2 iterations cost time, which any machine can spend;
+	// Argon2 memory costs RAM, which it may simply not have.
+	//
+	// The floor still binds where the cost is the CALLER's -- Format, AddKey
+	// and a ChangeKeyslot that names a KDF -- because there is no container to
+	// take evidence from. See MinArgon2MemoryKB.
+	if kdfType == "argon2id" || kdfType == "argon2i" {
+		formatOpts.Argon2Time = 4
+		formatOpts.Argon2Memory = 1048576
+		formatOpts.Argon2Parallel = 4
+		if targetKeyslot.KDF.Time != nil {
+			formatOpts.Argon2Time = *targetKeyslot.KDF.Time
+		}
+		if targetKeyslot.KDF.Memory != nil {
+			formatOpts.Argon2Memory = *targetKeyslot.KDF.Memory
+		}
+		if targetKeyslot.KDF.CPUs != nil {
+			formatOpts.Argon2Parallel = *targetKeyslot.KDF.CPUs
+		}
+	}
+
+	// The pbkdf2 equivalent, with one asymmetry that is not an oversight: the
+	// preserved count is RAISED TO THIS PACKAGE'S FLOOR if it sits below it.
+	//
+	// Argon2 has no such floor, so preserving there is unconditional. PBKDF2
+	// does (pbkdf2IterationFloor), and a container written elsewhere may
+	// legitimately carry a count under it -- cryptsetup's
+	// --pbkdf-force-iterations will write 1000. Preserving that exactly would
+	// mean forcedPBKDF2Iterations refusing the write, so an imported container
+	// could never have its passphrase changed at all; that is a worse outcome
+	// than a keyslot stronger than the one asked for, and it would be this
+	// package refusing to let an operator rotate a credential.
+	//
+	// Raising is also CLOSER to the old behavior than refusing: recalibration
+	// already replaced a low count with a much larger one. What changes is that
+	// the increase now stops at the floor instead of at whatever this machine
+	// benchmarks.
+	if isPBKDF2Type(normalizeKDFType(kdfType)) && targetKeyslot.KDF.Iterations != nil {
+		preserved := *targetKeyslot.KDF.Iterations
+		if rewritingSHA1 {
+			converted, err := sha256IterationsForSHA1(preserved, areaKeySize, dev.sys)
+			if err != nil {
+				return formatOptionsForTest{}, &errs.Error{Kind: errs.KindOf(err, errs.ErrInvalidArgument), Detail: "failed to carry the PBKDF2-SHA1 keyslot's cost over to PBKDF2-SHA256", Err: err}
+			}
+			preserved = converted
+		}
+		if floor := int(math.Ceil(pbkdf2IterationFloor(formatOpts.HashAlgo, pbkdf2ReferenceTargetMs))); preserved < floor {
+			preserved = floor
+		}
+		formatOpts.PBKDFIterations = preserved
+	}
+	return formatOpts, nil
+}
+
 // removeKeyslotCore is (*Volume).RemoveKeyslot's write path, factored out so
 // it can be reused by call sites that have already read the header.
 func removeKeyslotCore(ctx context.Context, dev *keyslotDevice, hdr *header.BinaryHeader, metadata *header.Metadata, slotIDStr string, targetKeyslot *header.Keyslot) error {
@@ -1335,16 +1378,11 @@ func listKeyslotsFrom(metadata *header.Metadata) ([]KeyslotInfo, error) {
 // in a state nothing else can handle. It must report what is there rather
 // than crash on what is not.
 func keyslotInfoFromEntry(id int, ks *header.Keyslot) KeyslotInfo {
-	priority := keyslotPriorityNormal
-	if ks.Priority != nil {
-		priority = *ks.Priority
-	}
-
 	info := KeyslotInfo{
 		ID:       id,
 		Type:     ks.Type,
 		KeySize:  ks.KeySize,
-		Priority: Priority(priority),
+		Priority: priorityFromDisk(ks.Priority),
 	}
 	if ks.KDF != nil {
 		// kdfParamsFromHeaderKDF reads through the pointers rather than
@@ -1367,7 +1405,7 @@ type KeyslotInfo struct {
 	Encryption string
 
 	// KDF reports the cost actually written, including an inherited Argon2
-	// cost (was the AddKeyOptions.InheritedArgon2Cost out-parameter).
+	// cost (formerly an InheritedArgon2Cost out-parameter on the add-key options).
 	//
 	// It matters most where the costs on one volume DIFFER. ChangeKeyslot
 	// preserves a slot's existing Argon2 memory cost even when it sits below
@@ -1836,10 +1874,9 @@ func wipeKeyslotArea(ctx context.Context, dev *keyslotDevice, hdr *header.Binary
 //
 // The three removal paths used to open-code this, and each open-coding deleted
 // the map entry and filtered the digests -- and none of them touched the tokens,
-// so a token could outlive the keyslot it named on every route. That is the
-// hand-written-cleanup failure recorded on header.ForgetKeyslotID (internal/header/codec.go), reached
-// from the other direction: the header READ already had to forget a dropped
-// keyslot's references, so the code existed and the removal paths simply did not
+// so a token could outlive the keyslot it named on every route. The header
+// READ already had to forget a dropped keyslot's references
+// (normalizeMetadataNulls calls header.ForgetKeyslotID, internal/header/codec.go), so the code existed and the removal paths simply did not
 // call it.
 //
 // One function owning the whole removal is what stops the next author having to

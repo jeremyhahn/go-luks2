@@ -59,6 +59,47 @@
 // API, and a release gate is not something a consumer imports; only test/ may
 // import this package.
 //
+// FILES THAT ARE NEVER PUBLISHED, whatever their content (published.go):
+//
+//   - Shell scripts: `*.sh`, `*.bash`, or anything starting with `#!`. Tools are
+//     Go commands (test/tools/require-tool, test/tools/docker-run) or Makefile
+//     recipes.
+//   - Workflows other than ci.yml, nightly.yml and release.yml
+//     (PublishedWorkflows), including `.yaml` variants and subdirectories.
+//
+// FILES TRACKED ON main AND STRIPPED AT PUBLISH (#211), listed by
+// DefaultStripAtPublish: the agent files CLAUDE.md, AGENTS.md and `.claude/` at
+// any depth (standards project-scaffold.md §7, #252; only the local tool state
+// `.claude/settings.local.json` is gitignored), and
+// .github/workflows/automerge.yml, which the forge requires (that exact name; a
+// `.yaml` variant or nested copy fails). The gate passes them, lists each on
+// every run and does not call the tree publishable while one is tracked. Their
+// content is still scanned, and a script or binary among them still fails.
+// There is no waiver for an unpublishable file: remove it from the index.
+//
+// FAILURES AND EXEMPTIONS. A failure names the file, line, class, matched text
+// and the replacement; a match in a path is reported as such. Without a git
+// checkout, or with an unreadable blob, the gate exits 2 rather than reporting
+// clean. A binary (a NUL byte) or an oversize blob (over 32 MiB, exit 2) fails
+// unless listed in releasability-exempt.txt with a reason. A listed binary is
+// still scanned; a listed oversize file is not, and the gate says so on every
+// run. The list is read from the index, and a stale entry, a missing reason or a
+// duplicate stops the gate. It is empty. The replacement values for each class
+// are the RFC 5737 / RFC 2606 / role names above and, for owner-path, a
+// repository-relative path or /var/lib, /srv, /var/tmp.
+//
+// THE FIRST-RELEASE SCRUB. When the gate was added the tree already held no lab
+// address, hostname or owner path. The scrub replaced .github/require-tool.sh
+// and test/integration/docker-run.sh with the Go commands above (same
+// behavior) and removed CLAUDE.md from the index; #252 tracks it again,
+// stripped at publish.
+//
+// Where the patterns live: `patterns`, below. The only DefaultAllowList entry is
+// the gate's own test fixtures.
+//
+// This is the canonical statement of the public-releasability rule (it was
+// docs/RELEASABILITY.md before the DESIGN.md §G.1 fold).
+//
 // RESOLUTION is textual, deliberately: it needs no build tags, no module
 // loading and no parser, so it runs on every tree state including one that does
 // not compile, and it covers Markdown, YAML, Dockerfiles and JSON as readily as

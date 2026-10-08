@@ -224,9 +224,6 @@ func TestDeriveFromSecret(t *testing.T) {
 }
 
 func TestDeriveArgon2iAndArgon2idDirect(t *testing.T) {
-	if fips.Probe() {
-		t.Skip("argon2 is not approved in FIPS mode")
-	}
 	timeVal, memory, cpus := 1, 64, 1
 	p := Params{Time: &timeVal, Memory: &memory, CPUs: &cpus}
 	salt := []byte("saltsaltsaltsalt")

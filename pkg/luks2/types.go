@@ -80,7 +80,7 @@ type volumeInfoForTest struct {
 	Label   string
 	Version int
 	Cipher  string
-	// KeySize is the volume key size in BITS, as FormatOptions.KeySize states
+	// KeySize is the volume key size in BITS, as formatOptionsForTest.KeySize states
 	// it: the key_size of a keyslot attested for the crypt segment, times 8.
 	// It is 0 when no keyslot is attested for that segment.
 	KeySize        int

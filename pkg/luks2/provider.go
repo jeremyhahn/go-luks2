@@ -28,7 +28,7 @@ type Enrollment struct {
 // caller's already-recovered volume key -- and records the provider's token
 // alongside the keyslot it went to.
 //
-// It is built on the same internals EnrollKeyProvider (keyprovider.go) uses:
+// It is built on the internals AddRecoveryKey also uses:
 // addKeyslotWithMasterKey for the keyslot, which re-verifies key against the
 // header's digests under THIS call's own exclusive lock (DESIGN.md §B.1: the
 // header may have changed since Unlock), and importTokenLocked for the
@@ -36,9 +36,8 @@ type Enrollment struct {
 // addKeyslotWithMasterKey consumes, so the caller's Key is unchanged and
 // still theirs to Destroy.
 //
-// If the token write fails, the keyslot is rolled back -- the same guard
-// enrollWithToken gives EnrollKeyProvider and AddRecoveryKey: a keyslot
-// nothing describes is a live credential indistinguishable from one still in
+// If the token write fails, the keyslot is rolled back, as AddRecoveryKey
+// does: a keyslot nothing describes is a live credential indistinguishable from one still in
 // use.
 //
 // The provider runs BEFORE mu and the device lock (DESIGN.md §B.1), and so
@@ -143,7 +142,7 @@ func (v *Volume) Enroll(ctx context.Context, key *Key, p KeyProvider, kp Keyslot
 	}
 
 	// A COPY, so enrolling the same provider twice does not accumulate
-	// keyslot references on the caller's token (enrollWithToken's rule).
+	// keyslot references on the caller's token.
 	record := t
 	record.Keyslots = []int{slot}
 	// The rollback runs whether or not ctx is still live, as

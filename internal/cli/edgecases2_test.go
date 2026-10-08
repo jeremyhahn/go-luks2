@@ -136,7 +136,7 @@ func TestRunAddKeyWrongExistingPassphrase(t *testing.T) {
 	path := newTestVolumeImage(t, "addkey-wrong.img")
 	e, _, _, _, _ := newTestEnv(bytes.NewBufferString("not it\nsecond-pass\n"))
 
-	if err := runAddKey(context.Background(), e, []string{"--kdf", "pbkdf2-sha256", path}); err == nil {
+	if err := runAddKey(context.Background(), e, []string{"--pbkdf", "pbkdf2", "--hash", "sha256", "--iter-time", "10", path}); err == nil {
 		t.Fatal("runAddKey: want an error for the wrong existing passphrase")
 	}
 }

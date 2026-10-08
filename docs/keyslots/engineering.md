@@ -15,7 +15,7 @@ func (v *Volume) ChangeKeyslot(ctx context.Context, key *Key, pass *enclave.Memo
 func (v *Volume) RemoveKeyslot(ctx context.Context, slot int) error
 type KeyslotInfo struct { ID int; Type string; KeySize int; Priority Priority; Encryption string; KDF KDFParams }
 type Priority int
-const (PriorityIgnore Priority = iota; PriorityNormal; PriorityPrefer)
+const (PriorityDefault Priority = iota; PriorityIgnore; PriorityNormal; PriorityPrefer)
 ```
 
 `AddKeyslot`/`ChangeKeyslot` need the `*Key` capability from
@@ -49,9 +49,11 @@ $1
 ## Cost inheritance
 
 When the caller sets no Argon2 cost, `AddKeyslot` takes it from the
-volume's first Argon2 keyslot, and `ChangeKeyslot` keeps the cost
-of the slot it rewrites. Either may be below the create floor: a volume
-formatted small to stay openable on small hardware stays that way.
+volume's first Argon2 keyslot. `ChangeKeyslot` with a zero `KDFParams`
+keeps the cost of the slot it rewrites. Either may be below the create
+floor: a volume formatted small to stay openable on small hardware stays
+that way. `ChangeKeyslot` with a non-zero `KDFParams` re-costs the slot
+exactly as `AddKeyslot` would, as cryptsetup's luksChangeKey does.
 `AddKeyslot`/`ChangeKeyslot` report the cost written in the returned
 `KeyslotInfo.KDF`.
 
@@ -176,6 +178,16 @@ adds no real security; the keyslot KDF is what defends the passphrase.
 `KeyslotParams{Slot, Priority, KDF KDFParams}` ([engineering.md](#exported-surface)
 above). A zero `KDFParams` resolves to the library default, or to an inherited
 Argon2 cost (see "Cost inheritance").
+
+`Priority`'s zero value is `PriorityDefault`, "not asked for": `AddKeyslot`,
+`Enroll` and `AddRecoveryKey` create a normal keyslot, and `ChangeKeyslot`
+keeps the slot's existing priority. `PriorityIgnore`, `PriorityNormal` and
+`PriorityPrefer` are explicit requests and are written: ignore as `0`, prefer
+as `2`, and normal as no member, cryptsetup's own encoding. Each value is the
+on-disk number plus one, so `KeyslotInfo.Priority` reads an on-disk `v` as
+`Priority(v+1)` and an absent member as `PriorityNormal`; it never reports
+`PriorityDefault`. A value outside the four is refused with
+`ErrInvalidArgument` before anything is written.
 
 ## Persistence
 

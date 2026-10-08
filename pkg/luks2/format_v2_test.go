@@ -9,12 +9,13 @@ package luks2
 import (
 	"bytes"
 	"context"
-	"crypto/fips140"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/jeremyhahn/go-enclave"
+
+	"github.com/jeremyhahn/go-luks2/internal/fips"
 )
 
 // TestVolumeFormatWritesAPBKDF2Container holds (*Volume).Format to a PBKDF2
@@ -63,15 +64,16 @@ func TestVolumeFormatWritesAPBKDF2Container(t *testing.T) {
 }
 
 // TestVolumeFormatWritesAnArgon2idContainer: a zero KDFParams outside FIPS
-// mode is Argon2id, at the lane's floor cost (m=64MiB, t=1, p=1).
+// mode is Argon2id, at the lane's floor cost (m=64MiB, t=1, p=1). The
+// Volume's sys is out of FIPS mode whatever the process is, so this runs in
+// a FIPS process too: Format and Unlock derive under the Volume's own mode.
 func TestVolumeFormatWritesAnArgon2idContainer(t *testing.T) {
-	if fips140.Enabled() {
-		t.Skip("Argon2id is refused in FIPS 140-3 mode; see TestVolumeFormatRefusesArgon2InFIPSMode")
-	}
 	defer parallel(t)()
 
 	path := newImage(t, "volume-format-argon2.img")
-	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	sys := testVolumeSys()
+	sys.fipsMode = func() fips.Mode { return false }
+	v, err := Open(context.Background(), path, withTestSys(sys))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}

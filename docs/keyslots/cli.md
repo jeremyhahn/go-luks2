@@ -6,8 +6,8 @@
 ```
 luks2 keyslots  <device>
 luks2 testkey   [--key-file <path>] <device>
-luks2 addkey    [--key-file <path>] [--new-key-file <path>] [--slot <n>] [--kdf <name>] <device>
-luks2 changekey [--key-file <path>] [--new-key-file <path>] <device> <slot>
+luks2 addkey    [--key-file <path>] [--new-key-file <path>] [--slot <n>] [KDF options] <device>
+luks2 changekey [--key-file <path>] [--new-key-file <path>] [KDF options] <device> <slot>
 luks2 removekey [--key-file <path>] <device> <slot>
 luks2 killslot  [--key-file <path>] <device> <slot>
 ```
@@ -47,14 +47,17 @@ sudo luks2 testkey --key-file /etc/luks/backup.key /dev/sdb1
 Adds a passphrase. The existing one unwraps the volume key; the new one goes
 into the first free slot, or `--slot <n>`.
 
-`--kdf` is `argon2id`, `argon2i`, `pbkdf2` (SHA-256), `pbkdf2-sha256`,
-`pbkdf2-sha384` or `pbkdf2-sha512`. Default: `pbkdf2-sha512` in FIPS 140-3
-mode, `argon2id` otherwise. A new Argon2 keyslot takes the cost of the
-volume's first Argon2 keyslot. `pbkdf2-sha1` is refused before any prompt.
+The KDF options are the ones `create` takes (`--pbkdf`, `--hash`,
+`--iter-time`, `--pbkdf-force-iterations`, `--pbkdf-memory`, `--pbkdf-parallel`;
+[volumes/cli.md](../volumes/cli.md#kdf-options)). With none given, the new
+keyslot is `pbkdf2` (SHA-512) in FIPS 140-3 mode and `argon2id` otherwise, and
+an Argon2 keyslot takes the cost of the volume's first Argon2 keyslot. SHA-1
+is refused, as is any option that does not apply to the chosen KDF, before any
+prompt.
 
 ```bash
 sudo luks2 addkey --key-file current.key --new-key-file next.key /dev/sdb1
-sudo luks2 addkey --slot 5 --kdf pbkdf2-sha512 /dev/sdb1
+sudo luks2 addkey --slot 5 --pbkdf pbkdf2 --hash sha512 --iter-time 1000 /dev/sdb1
 ```
 
 It does not print the slot it used; run `luks2 keyslots`.
@@ -62,11 +65,13 @@ It does not print the slot it used; run `luks2 keyslots`.
 ## changekey
 
 Replaces the passphrase in `<slot>` in place. The old passphrase must be the
-one in that slot. The slot keeps its KDF type and Argon2 cost; a PBKDF2-SHA1
-slot is rewritten as PBKDF2-SHA256.
+one in that slot. With no KDF option the slot keeps its KDF type and Argon2
+cost; a PBKDF2-SHA1 slot is rewritten as PBKDF2-SHA256. The same KDF options as
+`addkey` set a new cost instead.
 
 ```bash
 sudo luks2 changekey --key-file old.key --new-key-file new.key /dev/sdb1 0
+sudo luks2 changekey --pbkdf pbkdf2 --iter-time 1000 /dev/sdb1 0
 ```
 
 ## removekey and killslot

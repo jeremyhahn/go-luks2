@@ -33,7 +33,7 @@ import (
 // That absence is ruled policy, not an omission: a device no ledger recorded is
 // cleared by an operator, per device, on positive attribution with stock
 // losetup, and never by code here (owner ruling 2026-09-22, issue #114). The
-// reasoning is in docs/TESTING.md, "A device no ledger recorded is an
+// reasoning is in docs/volumes/engineering.md, "A device no ledger recorded is an
 // operator's job, not this repository's".
 type SystemRemover struct{}
 

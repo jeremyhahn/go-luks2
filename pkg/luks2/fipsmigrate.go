@@ -139,13 +139,14 @@ import (
 // A process cannot switch into FIPS mode, so "confirm it opens under fips140"
 // cannot be done in the migrating process. It is done in three layers: the
 // static check (every remaining keyslot and digest approved, via
-// IsFIPSCompliantKDF), a real open through the new keyslot and approved digests
+// fipsApprovedKDF), a real open through the new keyslot and approved digests
 // with Argon2 structurally absent from the path, and a test in the nightly FIPS
 // lane that migrates a real cryptsetup volume and opens it under
 // GODEBUG=fips140=only in a separate process.
 
-// fipsMigrationOptionsForTest tunes MigrateToFIPS. The zero value -- or nil -- is the
-// complete import: a PBKDF2-SHA256 keyslot at a calibrated cost, and every
+// fipsMigrationOptionsForTest tunes migrateToFIPS; (*Volume).MigrateToFIPS
+// builds it from MigrateParams. The zero value -- or nil -- is the complete
+// import: a PBKDF2-SHA256 keyslot at a calibrated cost, and every
 // non-approved keyslot removed.
 type fipsMigrationOptionsForTest struct {
 	// KeepNonApprovedKeyslots keeps the original Argon2 (or PBKDF2-SHA1)
@@ -155,8 +156,8 @@ type fipsMigrationOptionsForTest struct {
 	// non-FIPS process through a KDF FIPS mode cannot execute, which is not
 	// "imported" in any meaningful sense. It is offered for a staged rollout
 	// -- migrate each credential in turn, then remove the originals -- and the
-	// result says so: FIPSMigrationResult.Complete is false and
-	// RetainedNonApprovedKeyslots names what was kept.
+	// result says so: Migration.Complete is false and
+	// Migration.RetainedNonApproved names what was kept.
 	KeepNonApprovedKeyslots bool
 
 	// Hash is the PBKDF2 hash for the new keyslot and for any digest that is
@@ -569,6 +570,16 @@ func migrateToFIPS(ctx context.Context, device string, passphrase []byte, opts *
 	return result, nil
 }
 
+// fipsRefusal is one of the migration's own refusals, classified at its
+// source (DESIGN.md §C.1): Kind is the refusal's sentinel and Err the failure
+// that led to it, when there is one, so errors.Is reaches both. It is only
+// ever returned through fail, whose *FIPSMigrationError makes it an
+// ErrFIPSMigration and which errAt classifies as one; Kind is therefore not
+// ErrFIPSMigration as well, which would name the migration twice.
+func fipsRefusal(refusal error, detail string, cause error) *errs.Error {
+	return &errs.Error{Kind: refusal, Detail: detail, Err: cause}
+}
+
 // verifyFIPSOpen is the real-open half of the verification: it re-reads the
 // header from the device, unlocks keyslot id with passphrase through
 // FIPS-approved digests only, and requires the key recovered to be want.
@@ -577,26 +588,6 @@ func migrateToFIPS(ctx context.Context, device string, passphrase []byte, opts *
 // is refused unless its own KDF is approved, and the digest set handed to the
 // unlock is filtered to approved ones before it gets there. It is therefore the
 // path a FIPS process would take, run in a process that cannot BE one.
-// fipsRefusal is one of the migration's own refusals, classified at its
-// source (DESIGN.md §C.1): Kind is the public ErrFIPSMigration, and the
-// refusal's sentinel -- with the failure that led to it, when there is one --
-// stays reachable through Err. A bare sentinel, or one used as the Kind,
-// left errAt nothing it recognized, and a policy refusal read as ErrIO.
-func fipsRefusal(refusal error, detail string, cause error) *errs.Error {
-	err := refusal
-	if cause != nil {
-		err = &fipsRefusalCause{refusal: refusal, err: cause}
-	}
-	return &errs.Error{Kind: ErrFIPSMigration, Detail: detail, Err: err}
-}
-
-// fipsRefusalCause is the cause of a refusal that follows from another
-// failure: errors.Is and errors.As reach both the refusal and the failure.
-type fipsRefusalCause struct{ refusal, err error }
-
-func (c *fipsRefusalCause) Error() string   { return c.refusal.Error() + ": " + c.err.Error() }
-func (c *fipsRefusalCause) Unwrap() []error { return []error{c.refusal, c.err} }
-
 func verifyFIPSOpen(ctx context.Context, dev *keyslotDevice, passphrase []byte, id string, want *enclave.MemoryEnclave, sys volumeSys) error {
 	_, metadata, err := dev.readPrimaryHeader()
 	if err != nil {
@@ -719,7 +710,7 @@ func removeKeyslotOn(ctx context.Context, dev *keyslotDevice, hdr *header.Binary
 }
 
 // fipsApprovedKDF reports whether a KDF, as a header declares it, is one a FIPS
-// 140-3 process can execute. It is IsFIPSCompliantKDF plus the hash: on disk a
+// 140-3 process can execute. It is isFIPSCompliantKDF plus the hash: on disk a
 // PBKDF2 KDF is type "pbkdf2" with a separate hash member, and "pbkdf2" over
 // SHA-1 is refused in FIPS mode (getPBKDF2HashFunc) even though the type alone
 // is approved.

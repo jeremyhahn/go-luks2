@@ -5,6 +5,7 @@
 package kdf
 
 import (
+	"context"
 	"crypto/sha1" // #nosec G505 -- sized, never derived with: a test fixture for the cost-conversion model
 	"crypto/sha256"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jeremyhahn/go-luks2/internal/errs"
+	"github.com/jeremyhahn/go-luks2/internal/fips"
 )
 
 // modelTimer returns a Timer whose reported cost per HMAC comes from
@@ -93,5 +95,27 @@ func TestSHA1IterationsRefusals(t *testing.T) {
 	stuckTimer := func(func() hash.Hash, int, int) (time.Duration, error) { return 0, nil }
 	if _, err := testDeriver.SHA1Iterations(1000, 64, stuckTimer); !errors.Is(err, ErrKDFCalibration) {
 		t.Fatalf("a clock that never advances: got %v, want ErrKDFCalibration", err)
+	}
+}
+
+// TestFIPSDeriverRefusesTheUnapproved needs no skip: the Deriver's FIPS field
+// is set explicitly, so the refusals are exercised in every process mode.
+func TestFIPSDeriverRefusesTheUnapproved(t *testing.T) {
+	d := Deriver{Custody: testDeriver.Custody, FIPS: true}
+
+	timer := func(func() hash.Hash, int, int) (time.Duration, error) {
+		t.Fatal("the timer ran: the refusal must come before any measurement")
+		return 0, nil
+	}
+	if _, err := d.SHA1Iterations(1000, 64, timer); !errors.Is(err, fips.ErrNotApproved) {
+		t.Fatalf("SHA1Iterations under FIPS: got %v, want fips.ErrNotApproved", err)
+	}
+
+	timeVal, memory, cpus := 1, 64, 1
+	for _, typ := range []string{"argon2i", "argon2id"} {
+		p := Params{Type: typ, Salt: b64("saltsaltsaltsalt"), Time: &timeVal, Memory: &memory, CPUs: &cpus}
+		if _, err := d.DerivePlain(context.Background(), []byte("passphrase"), p, 32); !errors.Is(err, fips.ErrNotApproved) {
+			t.Fatalf("DerivePlain(%s) under FIPS: got %v, want fips.ErrNotApproved", typ, err)
+		}
 	}
 }

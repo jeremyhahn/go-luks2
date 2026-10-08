@@ -112,6 +112,10 @@ func WithArgs(args ...string) CommandOption {
 
 // WithStdin sets what is fed to the helper. The FIDO2 protocols pass their
 // parameters this way.
+//
+// Stdin is for NON-SECRET helper input only. The bytes are copied into
+// ordinary memory that is never wiped, so a credential passed through it would
+// sit in an unwipeable buffer (internal/secret/doc.go lists this boundary).
 func WithStdin(b []byte) CommandOption {
 	return func(c *Command) { c.stdin = append([]byte(nil), b...) }
 }

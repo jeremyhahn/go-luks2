@@ -277,7 +277,7 @@ func formatCore(ctx context.Context, f *os.File, device string, opts, kdfOpts fo
 	}
 
 	// Derive key from passphrase. The passphrase is the caller's memory and
-	// stays that way -- see DeriveKeyEnclave -- but what is derived from it is
+	// stays that way -- see deriveKeyEnclave -- but what is derived from it is
 	// held locked from here on.
 	passphraseKey, err := deriveAreaKey(kdf, masterKeySize)
 	if err != nil {
@@ -394,12 +394,12 @@ const DefaultHash = crypto.SHA256
 
 // FormatParams is a new LUKS2 container's parameters (DESIGN.md §B.2).
 //
-// Cipher is one cryptsetup spec ("aes-xts-plain64"), unlike the legacy
-// FormatOptions.Cipher/CipherMode pair, because that is the form dm-crypt's
+// Cipher is one cryptsetup spec ("aes-xts-plain64"), unlike the internal
+// formatOptionsForTest.Cipher/CipherMode pair, because that is the form dm-crypt's
 // table entry takes and a caller who knows cryptsetup's option already
 // knows it. Hash is FormatParams' own digest and anti-forensic hash; it is
 // independent of KDF.Hash, the keyslot's PBKDF2 PRF -- the two were one
-// conflated FormatOptions.HashAlgo field before this type, with an alias
+// conflated formatOptionsForTest.HashAlgo field before this type, with an alias
 // spelling in KDFType breaking the tie when a caller set only one of them.
 // A FormatParams caller sets each the API names for.
 type FormatParams struct {
@@ -469,7 +469,7 @@ func cipherSpecOrDefault(spec string) string {
 }
 
 // splitCipherSpec splits a cryptsetup cipher spec into the base cipher and
-// its mode, the pair the legacy FormatOptions still carries separately:
+// its mode, the pair formatOptionsForTest still carries separately:
 // "aes-xts-plain64" splits to ("aes", "xts-plain64"), which
 // validateFormatChoices rejoins with one "-" to look up in formatCiphers. A
 // spec with no "-" splits to (spec, ""), which no formatCiphers entry
@@ -503,8 +503,8 @@ func hashAlgoName(h crypto.Hash) string {
 	}
 }
 
-// toFormatOptions converts p, already validated, into the legacy
-// FormatOptions the format internals still take: opts carries the digest
+// toFormatOptions converts p, already validated, into the
+// formatOptionsForTest the format internals still take: opts carries the digest
 // and anti-forensic hash, kdfOpts the keyslot's KDF. The two are
 // independent fields on FormatParams/KDFParams, so, unlike the legacy
 // Format, nothing here infers one hash from the other or from an alias
@@ -730,7 +730,7 @@ func createMetadata(kdf, digestKDF *header.KDF, digestValue string, opts formatO
 // digestIterationsFor (volumeSys.digestIterationsFor) is the digest
 // calibration.
 //
-// FormatOptions.PBKDFIterations deliberately does NOT pin this. Pinning the
+// formatOptionsForTest.PBKDFIterations deliberately does NOT pin this. Pinning the
 // keyslot count and the digest count with one knob is exactly what
 // cryptsetup's --pbkdf-force-iterations does, and that conflation is what
 // produced a confounded measurement, a wrong ruling and a revert here. They are
@@ -824,7 +824,7 @@ func createDigest(masterKey *enclave.MemoryEnclave, hashAlgo string, sys volumeS
 	// context.Background(), not the caller's ctx: this derivation decides
 	// WHICH digest a key belongs to and must always run to completion -- see
 	// evaluateDigest. Only the slow, cancellable passphrase KDF (sys.passphraseKDF
-	// / DeriveKeyEnclave) observes ctx; see DESIGN.md §D.2's KDF row.
+	// / deriveKeyEnclave) observes ctx; see DESIGN.md §D.2's KDF row.
 	digest, err := deriveKeySecret(context.Background(), masterKey, kdf, digestLen, sys)
 	if err != nil {
 		return nil, "", err

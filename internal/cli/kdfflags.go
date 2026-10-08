@@ -17,10 +17,10 @@ import (
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
-// The KDF options create and recovery add share, named as cryptsetup names
-// them: --pbkdf, --hash, --iter-time, --pbkdf-force-iterations,
-// --pbkdf-memory and --pbkdf-parallel (docs/volumes/cli.md#kdf-options).
-// addkey takes a single --kdf flag instead; see parseAddKeyKDF.
+// The KDF options create, recovery add, addkey and changekey share, named as
+// cryptsetup names them: --pbkdf, --hash, --iter-time,
+// --pbkdf-force-iterations, --pbkdf-memory and --pbkdf-parallel
+// (docs/volumes/cli.md#kdf-options).
 
 // pbkdf2Hashes are the hashes --hash accepts. SHA-1 is not among them: it is
 // accepted for reading legacy headers only, never for writing a new one.
@@ -206,36 +206,23 @@ func hashFromName(name string) (crypto.Hash, error) {
 	}
 }
 
-// addKeyKDFNames are the --kdf values addkey accepts.
-var addKeyKDFNames = []string{"argon2id", "argon2i", "pbkdf2", "pbkdf2-sha256", "pbkdf2-sha384", "pbkdf2-sha512"}
-
-// parseAddKeyKDF resolves addkey's single --kdf flag, which names the KDF
-// with cryptsetup's combined spelling ("pbkdf2-sha512") rather than the
-// separate --pbkdf/--hash pair create and recovery add use
-// (docs/keyslots/cli.md#addkey). An empty name resolves to a zero
-// KDFParams, which AddKeyslot reads as "the library default, or the
-// container's inherited Argon2 cost".
-func parseAddKeyKDF(command, name string) (luks2.KDFParams, error) {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "":
-		return luks2.KDFParams{}, nil
-	case "argon2id":
-		return luks2.KDFParams{Type: luks2.KDFArgon2id}, nil
-	case "argon2i":
-		return luks2.KDFParams{Type: luks2.KDFArgon2i}, nil
-	case "pbkdf2", "pbkdf2-sha256":
-		return luks2.KDFParams{Type: luks2.KDFPBKDF2, Hash: crypto.SHA256}, nil
-	case "pbkdf2-sha384":
-		return luks2.KDFParams{Type: luks2.KDFPBKDF2, Hash: crypto.SHA384}, nil
-	case "pbkdf2-sha512":
-		return luks2.KDFParams{Type: luks2.KDFPBKDF2, Hash: crypto.SHA512}, nil
-	case "pbkdf2-sha1":
-		return luks2.KDFParams{}, &UsageError{Command: command, Detail: "--kdf pbkdf2-sha1: no keyslot is created with SHA-1; " +
-			"use pbkdf2 (SHA-256), pbkdf2-sha384, pbkdf2-sha512 or argon2id"}
-	default:
-		return luks2.KDFParams{}, &UsageError{Command: command, Detail: fmt.Sprintf("--kdf must be one of %s, not %q",
-			strings.Join(addKeyKDFNames, ", "), name)}
+// resolveOptional is resolve for commands that may leave the KDF to the
+// library: with no KDF option given it returns a zero KDFParams, which
+// AddKeyslot and ChangeKeyslot read as "the library default, or the
+// container's inherited cost". Any option given resolves as in resolve.
+func (f *kdfFlags) resolveOptional() (luks2.KDFParams, error) {
+	any := false
+	for _, name := range []string{"pbkdf", "hash", "iter-time", "pbkdf-force-iterations", "pbkdf-memory", "pbkdf-parallel"} {
+		if f.given(name) {
+			any = true
+			break
+		}
 	}
+	if !any {
+		return luks2.KDFParams{}, nil
+	}
+	p, _, err := f.resolve()
+	return p, err
 }
 
 // reportKDFRefusal prints a hint to stderr when a KDF choice was refused

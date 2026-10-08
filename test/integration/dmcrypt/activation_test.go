@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -128,6 +129,23 @@ func openAndUnlock(t *testing.T, device string, passphrase []byte) (*luks2.Volum
 	return v, key
 }
 
+// activateRecorded is dmcrypt.Activate plus the write-ahead ledger record of the
+// mapping it created, so a run that dies before releaseVolume still leaves an
+// entry a later run's reaper can remove (#96). A Record failure is fatal to the
+// activation: the mapping is deactivated rather than left unattributable.
+func activateRecorded(v *luks2.Volume, key *luks2.Key, name string) error {
+	ctx := context.Background()
+	mapping, err := dmcrypt.Activate(ctx, v, key, name)
+	if err != nil {
+		return err
+	}
+	if err := runSuite.Ledger.Record(harness.KindMapping, name, mapping.UUID); err != nil {
+		_ = dmcrypt.Deactivate(ctx, name)
+		return fmt.Errorf("recording dm %q in the run ledger: %w", name, err)
+	}
+	return nil
+}
+
 // mappedPath resolves name's mapping to its device-mapper path, the old
 // luks2.GetMappedDevicePath (#268), now pkg/dmcrypt.Lookup plus
 // Mapping.Path.
@@ -234,7 +252,7 @@ func TestConcurrentActivatesLeaveTheWinnersMappingIntact(t *testing.T) {
 	defer releaseVolume(t, name)
 
 	marker := []byte("written-through-the-winners-mapping")
-	if _, err := dmcrypt.Activate(context.Background(), v, key, name); err != nil {
+	if err := activateRecorded(v, key, name); err != nil {
 		t.Fatalf("the setup activation failed: %v", err)
 	}
 	writeThroughMapping(t, name, marker)
@@ -252,7 +270,7 @@ func TestConcurrentActivatesLeaveTheWinnersMappingIntact(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				<-start
-				_, errs[i] = dmcrypt.Activate(context.Background(), v, key, name)
+				errs[i] = activateRecorded(v, key, name)
 			}()
 		}
 		close(start)
@@ -296,7 +314,7 @@ func TestActivateUnderTheLongestValidNameOnTheRealKernel(t *testing.T) {
 	v, key := openAndUnlock(t, loopDev, []byte(canonicalPassphrase))
 
 	defer releaseVolume(t, name)
-	if _, err := dmcrypt.Activate(context.Background(), v, key, name); err != nil {
+	if err := activateRecorded(v, key, name); err != nil {
 		t.Fatalf("Activate under a valid %d-byte name failed: %v", len(name), err)
 	}
 	info, err := devmapper.InfoByName(name)
@@ -353,7 +371,7 @@ func TestAStaleMapperNodeIsNotTrusted(t *testing.T) {
 	loopDev := libraryVolumeLoop(t, "stale-volume.img")
 	v, key := openAndUnlock(t, loopDev, []byte(canonicalPassphrase))
 
-	if _, err := dmcrypt.Activate(context.Background(), v, key, name); err != nil {
+	if err := activateRecorded(v, key, name); err != nil {
 		t.Fatalf("Activate under a name with a stale node failed: %v", err)
 	}
 	info, err := devmapper.InfoByName(name)
@@ -499,7 +517,7 @@ func TestAnUnboundCryptsetupKeyslotDoesNotActivate(t *testing.T) {
 		t.Fatalf("Unlock with the bound passphrase failed: %v", err)
 	}
 	defer key.Destroy()
-	if _, err := dmcrypt.Activate(context.Background(), v, key, name); err != nil {
+	if err := activateRecorded(v, key, name); err != nil {
 		t.Fatalf("Activate with the bound passphrase's key failed: %v", err)
 	}
 }

@@ -1,7 +1,7 @@
 # go-luks2 target architecture and public API
 
 > **Status: IMPLEMENTED in v1.0.0-rc.1** · Baseline: `g50/main` 7d40045 (0.4.0-alpha) plus `fix/g-compat` (assumed merged first) · Date: 2026-10-05
-> Breaking by intent (owner direction: no backward compatibility). Released: `1.0.0-rc.1`, `BREAKING:` heading (release-versioning §5). DECISIONS.md is the record of what each step actually landed, including what is still outstanding (the token free functions, `EnrollKeyProvider`, and the rest of the pre-redesign API; the seam-variable cleanup); this document is the plan it was built from and is not updated to match drift.
+> Breaking by intent (owner direction: no backward compatibility). Released: `1.0.0-rc.1`, `BREAKING:` heading (release-versioning §5). DECISIONS.md is the record of what each step actually landed, including the corrections made after the plan (H13b and H13d finished the token free functions, `EnrollKeyProvider` and the seam-variable cleanup, and H13e, #284, removed the last transitional forwards); this document is the plan it was built from and is not updated to match drift.
 
 Inventory this design is based on, measured from the tree:
 
@@ -194,7 +194,7 @@ type Segment struct { ID int; Type string; Offset, Size int64; Encryption string
 const SizeDynamic int64 = -1
 type KeyslotInfo struct { ID int; Type string; KeySize int; Priority Priority; Encryption string; KDF KDFParams }
 type Priority int
-const (PriorityIgnore Priority = iota; PriorityNormal; PriorityPrefer)
+const (PriorityDefault Priority = iota; PriorityIgnore; PriorityNormal; PriorityPrefer) // zero = keep/normal; DECISIONS.md "Priority zero value (pre-1.0)"
 type DroppedEntry struct{ Kind, ID string }
 func (e DroppedEntry) String() string
 
@@ -558,7 +558,7 @@ Exported struct fields follow their type. Fields named in a target are renamed a
 | `LUKS2MaxKeyslots` | DELETE | duplicate of MaxKeyslots |
 | `OpenFileSecure` | DELETE | os.OpenFile; device opens go through internal/device |
 | `RecoveryCredential` | DELETE | ParseRecoveryKey takes an enclave |
-| `ParseLegacyRecoveryKey` | UNEXPORT | parseLegacyRecoveryKey: ParseRecoveryKey is the one public parse (the code at rc.1 still exports it; see DECISIONS.md, cr-docs) |
+| `ParseLegacyRecoveryKey` | UNEXPORT | parseLegacyRecoveryKey: ParseRecoveryKey is the one public parse (done: unexported in 37078b0; the rc.1 code still exported it, see DECISIONS.md, cr-docs and its correction) |
 | `RecoveryKey.FormattedString` | DELETE | (*RecoveryKey).WriteTo(io.Writer): a credential never becomes a Go string |
 | `RestorePrimaryHeaderWithOptions`, `RestoreHeaderOptions` | DELETE | Force=true is (*luks2.Volume).ReplacePrimaryHeader(ctx) (no flag argument) |
 | `StandardCustom` | DELETE | zero wipe.Params.Standard means custom |

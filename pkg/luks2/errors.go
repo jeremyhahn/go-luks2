@@ -549,8 +549,12 @@ type FIPSMigrationError struct {
 	Err error
 }
 
+// Error renders the stage, the cause and the state. It names neither the
+// device nor ErrFIPSMigration, and drops the cause's own "luks2: " prefix:
+// MigrateToFIPS returns it under the package's *errs.Error, whose head
+// already says each of those once (DESIGN.md §C.2 rule 3).
 func (e *FIPSMigrationError) Error() string {
-	return fmt.Sprintf("FIPS import of %s failed at %s: %v; %s", e.Device, e.Stage, e.Err, e.State)
+	return fmt.Sprintf("at %s: %s; %s", e.Stage, strings.TrimPrefix(fmt.Sprint(e.Err), "luks2: "), e.State)
 }
 
 // Unwrap reports a FIPSMigrationError as both ErrFIPSMigration -- the one
@@ -648,7 +652,7 @@ var (
 // (ErrHelperNotConfigured, ErrHelperPathNotAbsolute, ErrNoFIDO2Device,
 // ErrHelperFailed, ErrHelperOutput, ErrInvalidFIDO2Binding) moved to
 // pkg/keyprovider with the code that raised it (#271); what is left here is
-// raised only by EnrollKeyProvider, UnlockWithProvider and importTokenLocked,
+// raised only by Volume.Enroll, Volume.UnlockWithProvider and importTokenLocked,
 // which stay (DECISIONS.md H10d).
 var (
 	// ErrKeyProvider is the sentinel every external-key failure matches.

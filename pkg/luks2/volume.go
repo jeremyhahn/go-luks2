@@ -51,13 +51,16 @@ type volumeSys struct {
 	measureDeviceSize    func(*os.File) (int64, error)
 	newUUID              func() uuid.UUID
 	nodeRdev             func(string) (uint64, error)
-	passphraseKDF        func(context.Context, []byte, *header.KDF, int) (*enclave.MemoryEnclave, error)
 	pinnedDeviceReader   func(*os.File) io.ReaderAt
 	readDeviceDirect     func(context.Context, string, int64, int) ([]byte, error)
 	removeFile           func(string) error
 	sha1CostTimer        pbkdf2Timer
 	syncDevice           func(*os.File) error
 	syncKeyslotArea      func(*os.File) error
+
+	// passphraseKDFOverride, when set, replaces the keyslot derivation
+	// (volumeSys.passphraseKDF). Nil outside tests.
+	passphraseKDFOverride func(context.Context, []byte, *header.KDF, int) (*enclave.MemoryEnclave, error)
 }
 
 func defaultVolumeSys() volumeSys {
@@ -82,7 +85,6 @@ func defaultVolumeSys() volumeSys {
 		measureDeviceSize:    deviceSizeFromFile,
 		newUUID:              uuid.New,
 		nodeRdev:             statRdev,
-		passphraseKDF:        deriveKeyEnclave,
 		pinnedDeviceReader:   func(f *os.File) io.ReaderAt { return f },
 		readDeviceDirect: func(ctx context.Context, path string, off int64, n int) ([]byte, error) {
 			return readDirectAt(ctx, path, off, n, os.OpenFile)
@@ -233,10 +235,8 @@ func (v *Volume) checkWritable(op string) error {
 }
 
 // lockFor takes the node flock and the cryptsetup lock on the pinned
-// descriptor in mode. ctx is checked at this boundary because
-// internal/device.Pinned.Lock does not take one yet (H8 threads ctx through
-// the internal layers); the wait itself is still the timer Lock already
-// uses.
+// descriptor in mode. ctx is checked first so a call that is
+// already canceled never starts waiting; Pinned.Lock takes the ctx too.
 func (v *Volume) lockFor(ctx context.Context, mode device.LockMode) (*device.Locked, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -266,9 +266,26 @@ func errAt(op, path string, err error) error {
 	return errs.At("luks2", op, path, err)
 }
 
-// unclassifiedKind names the kind of an error that carries none: the context
-// error if it is one, the first sentinel of this package it matches, or ErrIO.
+// unclassifiedKind names the kind of an error that is not itself an
+// *errs.Error: ErrFIPSMigration if it is a *FIPSMigrationError (even one a
+// canceled context stopped), the context error if it is one, the kind its
+// chain already carries, the first sentinel
+// of this package it matches, or ErrIO.
 func unclassifiedKind(err error) error {
+	// A migration that stopped is a migration failure whatever stopped it,
+	// a canceled context included, so this is asked first: the cause stays
+	// reachable through errors.Is, and the stage and state through
+	// *FIPSMigrationError.
+	var migration *FIPSMigrationError
+	if errors.As(err, &migration) {
+		return ErrFIPSMigration
+	}
+	switch {
+	case errors.Is(err, context.Canceled):
+		return context.Canceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return context.DeadlineExceeded
+	}
 	if kind := errs.KindOf(err, nil); kind != nil {
 		return kind
 	}

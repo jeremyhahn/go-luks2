@@ -217,7 +217,7 @@ const minArgon2MemoryKB = kdf.MinArgon2MemoryKB
 //
 // The KDF is judged as it RESOLVES, not as it is spelled: an empty KDFType
 // with an Argon2 cost resolves to Argon2id (resolveKDFType), and the bound
-// applies to it. Checking the spelling let FormatOptions{Argon2Memory: 32}
+// applies to it. Checking the spelling let formatOptionsForTest{Argon2Memory: 32}
 // past this floor because the type was left to the default (#237).
 func validateArgon2CreateCost(opts formatOptionsForTest) error {
 	if !isArgon2Type(resolveKDFType(normalizeKDFType(opts.KDFType), formatArgon2CostGiven(opts))) {
@@ -311,7 +311,7 @@ func validateFormatOptionsForTest(opts formatOptionsForTest) error {
 	return nil
 }
 
-// validateMetadataSize checks FormatOptions.MetadataSize against exactly the
+// validateMetadataSize checks formatOptionsForTest.MetadataSize against exactly the
 // set cryptsetup's --luks2-metadata-size accepts: zero for the default, or a
 // power of two from header.HeaderMinSize to header.HeaderMaxSize. Measured against
 // cryptsetup 2.7.0 on #47 -- 8k, 12288, 20k and 8m are all refused there with

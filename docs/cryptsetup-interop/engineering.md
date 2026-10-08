@@ -90,8 +90,8 @@ the integration container. The container's capability set
 the dm/loop device-cgroup rules) is documented and pinned flag by flag in
 `test/tools/docker-run`'s `privileges` function; this folder does
 not duplicate that inventory, since it is test infrastructure rather than
-compatibility policy, and its migration into a feature-folder test-strategy
-section is tracked as not-yet-done in [docs/README.md](../README.md#migration-state).
+compatibility policy; it is in
+[volumes/engineering.md](../volumes/engineering.md#the-integration-container).
 
 `compatmatrix`, `fipsimport` and `sha1af` live in `test/integration/interop/`
 (DESIGN.md §E). `lockcompat` and `lockwait` stay in `pkg/luks2` as

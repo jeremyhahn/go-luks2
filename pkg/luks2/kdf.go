@@ -86,7 +86,8 @@ func DefaultKDFSpec() string {
 // pre-§B.2 internals read and write. The two constant sets are deliberately
 // distinct: KDFType carries no hash, because KDFParams.Hash says that
 // separately, and a §B.2 caller never needs the alias spellings
-// ("pbkdf2-sha512") the legacy FormatOptions.KDFType field overloads.
+// ("pbkdf2-sha512") the internal formatOptionsForTest.KDFType field
+// overloads.
 type KDFType string
 
 const (
@@ -98,8 +99,8 @@ const (
 // KDFParams is the KDF a keyslot is created or re-derived with (DESIGN.md
 // §B.2). Hash and the cost fields apply to exactly one of Type's two
 // families and are ignored for the other: Hash and IterTime are PBKDF2's
-// (Iterations overrides IterTime's calibration when it is non-zero, the same
-// override FormatOptions.PBKDFIterations has always given); Time, MemoryKiB
+// (Iterations overrides IterTime's calibration when it is non-zero, and is
+// held to the same floor a calibrated count is); Time, MemoryKiB
 // and Parallel are Argon2's.
 type KDFParams struct {
 	Type KDFType // zero: DefaultKDFType()
@@ -154,10 +155,9 @@ func (p KDFParams) validateWith(fipsMode func() fips.Mode) error {
 // DefaultKDFType returns the KDFType a keyslot is created with when
 // KDFParams names none: KDFPBKDF2 in FIPS 140-3 mode, KDFArgon2id otherwise.
 // It carries no hash -- KDFParams.Hash says that separately -- unlike
-// DefaultKDFSpec, which this replaces as the exported "default KDF" entry
-// point for DESIGN.md §B.2 callers; DefaultKDFSpec stays exported for the
-// legacy FormatOptions/AddKeyOptions path, which still needs the aliased
-// spelling.
+// DefaultKDFSpec, which returns this package's internal combined alias
+// ("pbkdf2-sha512", "argon2id") instead. On disk a PBKDF2 keyslot spells
+// that as "type":"pbkdf2" plus "hash":"sha512".
 func DefaultKDFType() KDFType {
 	return defaultKDFTypeWith(fips.Probe)
 }
@@ -233,7 +233,7 @@ func resolveKDFTypeFor(kdfType string, argon2CostGiven bool, fipsMode fips.Mode)
 	return defaultKDFTypeFor(fipsMode)
 }
 
-// formatArgon2CostGiven reports whether a FormatOptions carries any Argon2
+// formatArgon2CostGiven reports whether opts carries any Argon2
 // cost, including a negative one -- != 0 for the reason callerChoseArgon2Cost
 // gives: a negative is still a deliberate choice, and must reach the refusal.
 func formatArgon2CostGiven(opts formatOptionsForTest) bool {
@@ -247,8 +247,8 @@ func formatArgon2CostGiven(opts formatOptionsForTest) bool {
 // See docs/fips/architecture.md.
 //
 // "pbkdf2" returns true because it derives with SHA-256 by default. Overriding
-// that with FormatOptions.HashAlgo = "sha1" yields a KDF that is not
-// FIPS-approved and that CreateKDF refuses in FIPS mode.
+// that with KDFParams.Hash = crypto.SHA1 yields a KDF that is not
+// FIPS-approved, and that createKDF refuses for any new keyslot.
 func isFIPSCompliantKDF(kdfType string) bool {
 	switch normalizeKDFType(kdfType) {
 	case kdfTypePBKDF2, kdfTypePBKDF2SHA256, kdfTypePBKDF2SHA384, kdfTypePBKDF2SHA512:
@@ -263,28 +263,6 @@ func normalizeKDFType(kdfType string) string {
 	return strings.ToLower(strings.TrimSpace(kdfType))
 }
 
-// DeriveKeyEnclave derives a key from a passphrase and returns it held in
-// protected memory. This is the derivation every path inside this package uses.
-//
-// In FIPS 140-3 mode an Argon2 KDF is refused with ErrFIPSNotApproved before
-// any derivation is attempted, so an externally supplied header cannot make a
-// FIPS-mode process run a non-approved KDF.
-//
-// # The exposure this cannot close
-//
-// passphrase is the CALLER'S memory, ordinary and unlocked. This function
-// borrows it for the derivation and never wipes it: wiping a buffer this
-// package does not own would corrupt the caller. Bringing it into protected
-// memory at this depth would not help either -- the bytes were already on the
-// heap before the call.
-//
-// The derived key spends the width of one return statement on the heap, and
-// that is not closable in Go: crypto/pbkdf2.Key and argon2.IDKey allocate their result
-// internally and return it, with no variant that writes into a provided buffer.
-// enclave.NewMemoryEnclave takes ownership of that slice and wipes it -- on the
-// failure path too -- so what survives is whatever copy the compiler or the
-// collector made in between, plus the KDF's own scratch, which is unreachable
-// from here. See ErrProtectedMemory for why a failure here is fatal.
 // toKDFParams copies k's fields into a kdf.Params. Salt is carried as the
 // stored base64 string, so this conversion cannot fail: only the derive path
 // decodes it, and a cost-only caller (header.ValidateKDFCost, derivationWork) never
@@ -302,11 +280,38 @@ func toKDFParams(k *header.KDF) kdf.Params {
 	}
 }
 
-func deriveKeyEnclave(ctx context.Context, passphrase []byte, k *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
+// deriveKeyEnclave derives a key from a passphrase under sys's FIPS mode and
+// custody, and returns it held in protected memory. It is the keyslot
+// derivation volumeSys.passphraseKDF runs.
+//
+// In FIPS 140-3 mode an Argon2 KDF is refused with ErrFIPSNotApproved before
+// any derivation is attempted, so an externally supplied header cannot make a
+// FIPS-mode process run a non-approved KDF.
+//
+// # The exposure this cannot close
+//
+// passphrase is the CALLER'S buffer. On every production path it is the
+// window a secret.Borrow opened onto the caller's protected enclave
+// (AddKeyslot, ChangeKeyslot, Unlock and the rest), valid only for that
+// borrow; this function neither copies nor wipes it, because the enclave
+// owns it. Where the bytes do leave protected memory is the derivation
+// below: kdfDeriver hands the slice to crypto/pbkdf2.Key or argon2.IDKey,
+// the stdlib KDF-input boundary internal/secret's package documentation
+// lists, and what those functions copy into their own state is beyond this
+// package's reach.
+//
+// The derived key spends the width of one return statement on the heap, and
+// that is not closable in Go: crypto/pbkdf2.Key and argon2.IDKey allocate their result
+// internally and return it, with no variant that writes into a provided buffer.
+// enclave.NewMemoryEnclave takes ownership of that slice and wipes it -- on the
+// failure path too -- so what survives is whatever copy the compiler or the
+// collector made in between, plus the KDF's own scratch, which is unreachable
+// from here. See ErrProtectedMemory for why a failure here is fatal.
+func deriveKeyEnclave(ctx context.Context, passphrase []byte, k *header.KDF, keySize int, sys volumeSys) (*enclave.MemoryEnclave, error) {
 	if k == nil {
 		return nil, &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "no KDF object"}
 	}
-	key, err := kdfDeriver(defaultVolumeSys()).Derive(ctx, passphrase, toKDFParams(k), keySize)
+	key, err := kdfDeriver(sys).Derive(ctx, passphrase, toKDFParams(k), keySize)
 	return key, reclassifyUnsupportedKDF(err)
 }
 
@@ -324,15 +329,28 @@ func reclassifyUnsupportedKDF(err error) error {
 	return err
 }
 
-// passphraseKDF (volumeSys.passphraseKDF) is the keyslot derivation: the
-// passphrase-to-keyslot-key step unlockKeyslot runs for every keyslot it
-// tries. It defaults to DeriveKeyEnclave; a test proves that
-// UnlockWithVolumeKey never reaches it (#79) by overriding the field on a
-// Volume it constructs, rather than the whole package's derivation.
+// passphraseKDF is the keyslot derivation: the passphrase-to-keyslot-key
+// step unlockKeyslot runs for every keyslot it tries, and the one Format,
+// AddKeyslot and ChangeKeyslot run for the keyslot they write. It derives
+// under s's own FIPS mode and custody, so a Volume's derivation follows the
+// Volume's sys rather than a package default.
+//
+// passphraseKDFOverride, when set, replaces it: a test proves that
+// UnlockWithVolumeKey never reaches it (#79) by setting it on a Volume it
+// constructs, rather than on the whole package's derivation. The receiver is
+// a value, so a test that wraps the derivation (real := sys.passphraseKDF)
+// captures sys as it was before the override and does not call itself.
 //
 // Only the keyslot derivation goes through it. The digest derivation in
-// deriveKeySecret calls DeriveKeyEnclave directly, because the injected-key path
-// DOES run that one and a test forbidding this seam must not forbid it too.
+// deriveKeySecret does not, because the injected-key path DOES run that one
+// and a test forbidding this seam must not forbid it too.
+func (s volumeSys) passphraseKDF(ctx context.Context, passphrase []byte, k *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
+	if s.passphraseKDFOverride != nil {
+		return s.passphraseKDFOverride(ctx, passphrase, k, keySize)
+	}
+	return deriveKeyEnclave(ctx, passphrase, k, keySize, s)
+}
+
 // deriveKeySecret derives a key from material ALREADY held in protected memory,
 // borrowing the input in place rather than copying it out.
 //
@@ -340,8 +358,8 @@ func reclassifyUnsupportedKDF(err error) error {
 // than from a passphrase, and it keeps THIS package from making a copy.
 //
 // It does NOT keep the input inside the enclave for the derivation, which is
-// what this comment used to claim. The borrow is handed to DeriveKeyEnclave and
-// from there to pbkdf2.Key, whose first act is string(password) -- an immutable
+// what this comment used to claim. The borrow is handed to internal/kdf's
+// DeriveFromSecret and from there to pbkdf2.Key, whose first act is string(password) -- an immutable
 // Go string nobody can wipe -- followed by hmac.New taking another copy. So on
 // this path the VOLUME MASTER KEY is materialized in unprotected, unwipeable
 // memory once per derivation, on every unlock (verifyMasterKey, once per digest
@@ -364,18 +382,6 @@ func deriveKeySecretIn(ctx context.Context, material *enclave.MemoryEnclave, k *
 		return nil, &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "no KDF object"}
 	}
 	key, err := kdf.Deriver{Custody: custody, FIPS: mode}.DeriveFromSecret(ctx, material, toKDFParams(k), keySize)
-	return key, reclassifyUnsupportedKDF(err)
-}
-
-// deriveKeyPlain is the derivation itself. It is the ONE place in this package
-// that produces key material outside an enclave, and it exists because the
-// stdlib KDFs give no other shape: every caller adopts the result into an
-// enclave immediately, via DeriveKeyEnclave.
-func deriveKeyPlain(passphrase []byte, k *header.KDF, keySize int) ([]byte, error) {
-	if k == nil {
-		return nil, &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "no KDF object"}
-	}
-	key, err := kdfDeriver(defaultVolumeSys()).DerivePlain(context.Background(), passphrase, toKDFParams(k), keySize)
 	return key, reclassifyUnsupportedKDF(err)
 }
 
@@ -550,9 +556,9 @@ var pbkdf2RecommendedIterations = kdf.PBKDF2RecommendedIterations
 // would go on to reject.
 //
 // Supported hash algorithms: sha256, sha384, sha512 and, outside FIPS 140-3
-// mode, sha1.
-func benchmarkPBKDF2(hashAlgo string, keySize, targetMs int) (int, error) {
-	return kdfDeriver(defaultVolumeSys()).Calibrate(context.Background(), hashAlgo, keySize, targetMs)
+// mode, sha1. fipsMode is the caller's sys's, never a default.
+func benchmarkPBKDF2(fipsMode fips.Mode, hashAlgo string, keySize, targetMs int) (int, error) {
+	return kdf.Deriver{Custody: custody, FIPS: fipsMode}.Calibrate(context.Background(), hashAlgo, keySize, targetMs)
 }
 
 // pbkdf2Timer runs one PBKDF2 derivation of the given iteration count and
@@ -578,7 +584,7 @@ func wallClockPBKDF2(hashFunc func() hash.Hash, iterations, keySize int) (time.D
 // calibratePBKDF2 is the calibration itself. The probe bounds and the timer
 // are parameters so that the fail-closed path and the extrapolation can be
 // exercised by a test without needing a broken or an idle clock;
-// BenchmarkPBKDF2 supplies the real ones.
+// benchmarkPBKDF2 supplies the real ones.
 func calibratePBKDF2(hashFunc func() hash.Hash, hashAlgo string, keySize, targetMs int, probeFloor time.Duration, probeCeiling int, timer pbkdf2Timer) (int, error) {
 	return kdf.CalibratePBKDF2(context.Background(), hashFunc, hashAlgo, keySize, targetMs, probeFloor, probeCeiling, timer)
 }
@@ -679,8 +685,7 @@ func pbkdf2FloorFor(hashAlgo string, policy keyslotCostPolicy) int {
 // CALIBRATED iteration count is raised to for a new keyslot (#249, A8):
 // pbkdf2FloorFor, under the keyslot's policy.
 // forcedPBKDF2Iterations validates an explicit PBKDF2 iteration count -- the
-// one a caller supplies through FormatOptions.PBKDFIterations or
-// AddKeyOptions.PBKDFIterations -- and returns it unchanged if it is one this
+// one a caller supplies through KDFParams.Iterations -- and returns it unchanged if it is one this
 // package is willing to write.
 //
 // WHY AN EXPLICIT COUNT EXISTS AT ALL. Calibration answers "how much work fits
@@ -698,7 +703,7 @@ func pbkdf2FloorFor(hashAlgo string, policy keyslotCostPolicy) int {
 // on disk. The bound applied is exactly the one calibration would have applied
 // at the reference budget, so an explicit count and a calibrated one are held
 // to the same standard and the option cannot be used to obtain a keyslot
-// BenchmarkPBKDF2 would have refused to return.
+// benchmarkPBKDF2 would have refused to return.
 //
 // The floor is hash-dependent (pbkdf2IterationFloor): 600000 for sha256,
 // 210000 for sha384 and sha512, and minPBKDF2Iterations for a hash with no
@@ -768,7 +773,7 @@ func createKDF(opts formatOptionsForTest, keySize int, policy keyslotCostPolicy,
 
 	// Handle PBKDF2 variants (including convenience aliases)
 	if isPBKDF2Type(kdfType) {
-		return createPBKDF2KDF(kdfType, opts, saltB64, keySize, policy, calibratedCountFloor)
+		return createPBKDF2KDF(kdfType, opts, saltB64, keySize, policy, fipsMode(), calibratedCountFloor)
 	}
 
 	// Handle Argon2 variants
@@ -808,7 +813,7 @@ func isPBKDF2Type(kdfType string) bool {
 }
 
 // createPBKDF2KDF creates a PBKDF2 KDF structure
-func createPBKDF2KDF(kdfType string, opts formatOptionsForTest, saltB64 string, keySize int, policy keyslotCostPolicy, calibratedCountFloor func(string, keyslotCostPolicy) int) (*header.KDF, error) {
+func createPBKDF2KDF(kdfType string, opts formatOptionsForTest, saltB64 string, keySize int, policy keyslotCostPolicy, fipsMode fips.Mode, calibratedCountFloor func(string, keyslotCostPolicy) int) (*header.KDF, error) {
 	// Determine hash algorithm from KDF type or HashAlgo option
 	hashAlgo := getHashAlgoForKDFType(kdfType, opts.HashAlgo)
 
@@ -833,9 +838,9 @@ func createPBKDF2KDF(kdfType string, opts formatOptionsForTest, saltB64 string, 
 		if iterTime == 0 {
 			iterTime = pbkdf2ReferenceTargetMs
 		}
-		iterations, err = benchmarkPBKDF2(hashAlgo, keySize, iterTime)
+		iterations, err = benchmarkPBKDF2(fipsMode, hashAlgo, keySize, iterTime)
 		// A CALIBRATED count is held to the same floor an explicit one is
-		// (#249, A8). BenchmarkPBKDF2 scales the OWASP floor by the budget, so
+		// (#249, A8). benchmarkPBKDF2 scales the OWASP floor by the budget, so
 		// PBKDFIterTime: 1 calibrated a caller's passphrase down to ~1000
 		// iterations -- the exact outcome forcedPBKDF2Iterations refuses for
 		// PBKDFIterations: 1000 on the same path. The budget is a way to ask
@@ -926,7 +931,7 @@ func decodeBase64(s string) ([]byte, error) {
 
 // cryptoHashNames maps the crypto.Hash values this package's KDF paths
 // actually produce or consume to and from the lowercase name LUKS2's JSON
-// carries, so KDFParams.Hash and AddKeyOptions.Hash/KeyslotInfo's PBKDF2 hash
+// carries, so KDFParams.Hash and the internal addKeyOptionsForTest.Hash
 // string can be converted without a dependency on every crypto.Hash the
 // standard library knows about.
 var cryptoHashNames = []struct {
@@ -942,7 +947,8 @@ var cryptoHashNames = []struct {
 // cryptoHashFromName is cryptoHashNames' lookup by LUKS2's on-disk spelling.
 // The zero crypto.Hash is returned, deliberately, for a name this table does
 // not carry: the caller sites (addKeyOptionsFromKeyslotParams) treat that the
-// same as "unset", which is what AddKeyOptions.Hash's own empty string means.
+// same as "unset", which is what addKeyOptionsForTest.Hash's own empty
+// string means.
 func cryptoHashFromName(name string) crypto.Hash {
 	for _, e := range cryptoHashNames {
 		if e.name == name {
@@ -963,7 +969,7 @@ func cryptoHashName(h crypto.Hash) string {
 }
 
 // addKeyOptionsFromKeyslotParams converts a KeyslotParams into the
-// AddKeyOptions addKeyslotWithMasterKey already takes, so Enroll (provider.go)
+// addKeyOptionsForTest addKeyslotWithMasterKey takes, so Enroll (provider.go)
 // is built on that existing internal rather than a second cost-handling path.
 func addKeyOptionsFromKeyslotParams(kp KeyslotParams) *addKeyOptionsForTest {
 	opts := &addKeyOptionsForTest{

@@ -21,8 +21,7 @@ import (
 var runSuite *harness.Suite
 
 // runVolume returns a device-mapper name unique to this container and
-// process -- see test/integration/pkg/runvolume_test.go, which this mirrors:
-// device-mapper is a flat, host-wide namespace, so every tier that creates a
+// process: device-mapper is a flat, host-wide namespace, so every tier that creates a
 // mapping draws its name from the one rule in test/internal/harness.
 func runVolume(t *testing.T, base string) string {
 	t.Helper()
@@ -40,22 +39,14 @@ func runVolume(t *testing.T, base string) string {
 
 // TestMain records the host state this suite is about to create (#96).
 //
-// # What it covers, and what it does not
+// # What it covers
 //
-// COVERED: loop devices, through the recorded temp root (below).
-//
-// NOT COVERED: dm mappings, on the SIGKILL path. This package is an EXTERNAL
-// test package -- it imports pkg/luks2 like any other caller -- so it cannot
-// reach pkg/luks2's own unexported dm.create seam, which is what let
-// pkg/luks2's own (now-deleted) integration suite write a mapping record
-// before the kernel was ever asked. test/integration/pkg's TestMain (which
-// this is copied from) accepted exactly this gap on 2026-09-01: an
-// integration-build-tagged EXPORTED observer on pkg/luks2 would close it, but
-// new exported surface on a Layer-0 library is an owner's decision, not a
-// lane's. Every test here still removes its mapping on pass, fail and panic
-// through releaseVolume; only the SIGKILL window is open, and the
-// cross-run reaper (test/internal/harness's reap.go) is what closes that one
-// on the next run.
+// Loop devices, through the recorded temp root (below), and dm mappings:
+// Unlock records each mapping it activates in the run ledger right after
+// dmcrypt.Activate (activation is public in pkg/dmcrypt), and every test still
+// removes its mapping on pass, fail and panic through releaseVolume. The
+// cross-run reaper (test/internal/harness's reap.go) removes what a killed run
+// left behind.
 func TestMain(m *testing.M) {
 	suite, err := harness.BeginSuite(os.Stderr)
 	if err != nil {

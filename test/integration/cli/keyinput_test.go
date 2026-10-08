@@ -58,7 +58,7 @@ func TestCLI_KeyFilesAreReadAsCryptsetupReadsThem(t *testing.T) {
 	t.Run("luks2 addkey -> cryptsetup", func(t *testing.T) {
 		image := cliImage(t, first)
 		withNewline := cliKeyFile(t, "cli-new-passphrase\n")
-		if _, stderr, err := runCLI("addkey", "--kdf", "pbkdf2", "--key-file", first, "--new-key-file", withNewline, image); err != nil {
+		if _, stderr, err := runCLI("addkey", "--pbkdf", "pbkdf2", "--iter-time", "100", "--key-file", first, "--new-key-file", withNewline, image); err != nil {
 			t.Fatalf("luks2 addkey: %v\n%s", err, stderr)
 		}
 		cryptsetup(t, true, "open", "--test-passphrase", "--key-file", withNewline, image)

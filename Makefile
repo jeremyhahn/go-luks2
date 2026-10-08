@@ -82,8 +82,8 @@ GOBIN=$(GOPATH)/bin
 # Version stamped into the binary, read from the VERSION file.
 #
 # Named BUILD_VERSION, not VERSION, and that is not cosmetic (#19). The release
-# target takes the version as `make release-alpha VERSION=vX.Y.Z-alpha` and
-# refuses to guess. A make variable also called VERSION SHADOWS that argument:
+# target takes the version as `make release VERSION=vX.Y.Z-alpha` (or
+# vX.Y.Z-rc.N; release-alpha is an alias) and refuses to guess. A make variable also called VERSION SHADOWS that argument:
 # measured on adoption, `make release-alpha` with no argument sailed past the
 # "state the version explicitly" guard — REL_VERSION was never empty, it held
 # this line's text — and died one guard later on a grammar error naming
@@ -1258,8 +1258,8 @@ override export GOTOOLCHAIN := go$(GO_FLOOR)
 endif
 
 # ---- dependency-resolution targets (2026-08-13 cutover) ----
-# deps-latest runs before compiling in a consumer repo; release-alpha publishes
-# this repo's next -alpha tag.
+# deps-latest runs before compiling in a consumer repo; release (alias
+# release-alpha) publishes this repo's next -alpha or -rc.N tag.
 #
 # SUBMODULE_TAGS is GONE with the old recipe (#19). It existed to tag nested
 # modules in lockstep with the root, and it was always empty here: `find . -name
@@ -1296,7 +1296,7 @@ REPO_NAME ?= go-luks2
 # for a checkout that names its remote differently.
 RELEASE_REMOTE ?= dev
 
-# ---- release-alpha (template v2.3.5) ----
+# ---- release (-alpha and -rc.N; alias release-alpha) (template v2.3.5) ----
 #
 # Replaces a recipe that failed only when you looked at it. The old one:
 #   1. auto-incremented PATCH only, so an API addition shipped labeled a bugfix
@@ -1312,7 +1312,8 @@ RELEASE_REMOTE ?= dev
 # locally. Two releases had to be cut by hand because of it.
 #
 # The contract now:
-#   - The version is EXPLICIT: `make release-alpha VERSION=v0.2.0-alpha`. No
+#   - The version is EXPLICIT: `make release VERSION=v0.2.0-alpha` or
+#     `VERSION=v1.0.0-rc.2` (release-alpha is an alias). No
 #     auto-increment; whoever cuts the release decides patch/minor/major and
 #     says so. The recipe refuses to guess.
 #   - Every git write goes through AGENT_GIT (identity + SSH signing); the tag
@@ -1359,12 +1360,12 @@ RELEASE_REMOTE ?= dev
 # the workflow only overwrites the runner-workspace copy, so a fragment folded in
 # there would never reach the repository (release-versioning.md 5).
 #
-# Run it, read the diff, commit it, then `make release-alpha VERSION=...`. It
+# Run it, read the diff, commit it, then `make release VERSION=...`. It
 # does not commit for you: the changelog is the one artefact of a release a human
 # should look at before it is published.
 changelog-assemble: export ASM_VERSION := $(value VERSION)
-changelog-assemble: ## Fold changelog.d fragments into a CHANGELOG.md section (VERSION=vX.Y.Z-alpha)
-	@test -n "$$ASM_VERSION" || { echo 'ERROR: state the version explicitly: make changelog-assemble VERSION=vX.Y.Z-alpha'; exit 1; }
+changelog-assemble: ## Fold changelog.d fragments into a CHANGELOG.md section (VERSION=vX.Y.Z-alpha or vX.Y.Z-rc.N)
+	@test -n "$$ASM_VERSION" || { echo 'ERROR: state the version explicitly: make changelog-assemble VERSION=vX.Y.Z[-alpha|-rc.N]'; exit 1; }
 	@ls changelog.d/*.md >/dev/null 2>&1 || { echo 'ERROR: changelog.d holds no fragments; nothing to assemble'; exit 1; }
 	@set -eu; \
 	ver="$${ASM_VERSION#v}"; \
@@ -1397,7 +1398,7 @@ release: ## Tag and push a release (VERSION=vX.Y.Z, vX.Y.Z-alpha or vX.Y.Z-rc.N)
 	@printf '%s' "$$REL_VERSION" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-alpha|-rc\.[1-9][0-9]*)?$$' || { echo "ERROR: VERSION is not of the form vX.Y.Z, vX.Y.Z-alpha or vX.Y.Z-rc.N (no leading zeroes): $$REL_VERSION"; exit 1; }
 	@test "$$(git rev-parse --abbrev-ref HEAD)" = main || { echo "ERROR: releases are cut from main; you are on $$(git rev-parse --abbrev-ref HEAD). 'push $$REL_REMOTE HEAD' would publish this branch."; exit 1; }
 	@test -n "$$REL_REPO" || { echo 'ERROR: REPO_NAME is empty — set it to the literal repo name, never $$(notdir $$(CURDIR))'; exit 1; }
-	@test -x "$$REL_AGENT_GIT" || { echo 'ERROR: AGENT_GIT does not point at an executable agent-git.sh. Every git write below signs through it, and a bad path must fail HERE rather than at the first signed write, with a tag already cut. No default path is baked in (#20): put agent-git.sh on PATH, or run: make release-alpha AGENT_GIT=/path/to/agent-git.sh VERSION=vX.Y.Z-alpha'; exit 1; }
+	@test -x "$$REL_AGENT_GIT" || { echo 'ERROR: AGENT_GIT does not point at an executable agent-git.sh. Every git write below signs through it, and a bad path must fail HERE rather than at the first signed write, with a tag already cut. No default path is baked in (#20): put agent-git.sh on PATH, or run: make release AGENT_GIT=/path/to/agent-git.sh VERSION=vX.Y.Z[-alpha|-rc.N]'; exit 1; }
 	@test -n "$$REL_REMOTE" || { echo 'ERROR: RELEASE_REMOTE is empty — set it to the git remote that serves this module'; exit 1; }
 	@git remote get-url "$$REL_REMOTE" >/dev/null 2>&1 || { echo "ERROR: no git remote named $$REL_REMOTE. Set RELEASE_REMOTE; the duplicate-tag check below cannot answer against a remote that does not resolve"; exit 1; }
 	@! git rev-parse -q --verify "refs/tags/$$REL_VERSION" >/dev/null || { echo "ERROR: tag $$REL_VERSION already exists locally"; exit 1; }

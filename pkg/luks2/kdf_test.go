@@ -446,7 +446,7 @@ func TestDeriveArgon2idMissingParams(t *testing.T) {
 func TestBenchmarkPBKDF2SHA256(t *testing.T) {
 	defer parallel(t)()
 
-	iterations, err := benchmarkPBKDF2("sha256", 32, 100)
+	iterations, err := benchmarkPBKDF2(defaultVolumeSys().fipsMode(), "sha256", 32, 100)
 	if err != nil {
 		t.Fatalf("BenchmarkPBKDF2 failed: %v", err)
 	}
@@ -460,7 +460,7 @@ func TestBenchmarkPBKDF2SHA256(t *testing.T) {
 func TestBenchmarkPBKDF2SHA512(t *testing.T) {
 	defer parallel(t)()
 
-	iterations, err := benchmarkPBKDF2("sha512", 64, 100)
+	iterations, err := benchmarkPBKDF2(defaultVolumeSys().fipsMode(), "sha512", 64, 100)
 	if err != nil {
 		t.Fatalf("BenchmarkPBKDF2 failed: %v", err)
 	}
@@ -472,7 +472,7 @@ func TestBenchmarkPBKDF2SHA512(t *testing.T) {
 
 // TestBenchmarkPBKDF2InvalidHash tests error handling for unsupported hash
 func TestBenchmarkPBKDF2InvalidHash(t *testing.T) {
-	_, err := benchmarkPBKDF2("md5", 32, 100)
+	_, err := benchmarkPBKDF2(defaultVolumeSys().fipsMode(), "md5", 32, 100)
 	if err == nil {
 		t.Fatal("Expected error for unsupported hash algorithm")
 	}
@@ -492,7 +492,7 @@ func TestBenchmarkPBKDF2MinimumIterations(t *testing.T) {
 
 	const targetMs = 1
 
-	iterations, err := benchmarkPBKDF2("sha256", 32, targetMs)
+	iterations, err := benchmarkPBKDF2(defaultVolumeSys().fipsMode(), "sha256", 32, targetMs)
 	if err != nil {
 		t.Fatalf("BenchmarkPBKDF2 failed: %v", err)
 	}
@@ -1087,13 +1087,13 @@ func TestBenchmarkPBKDF2SHA1(t *testing.T) {
 	defer parallel(t)()
 
 	if fips140.Enabled() {
-		if _, err := benchmarkPBKDF2("sha1", 20, 100); !errors.Is(err, ErrFIPSNotApproved) {
+		if _, err := benchmarkPBKDF2(defaultVolumeSys().fipsMode(), "sha1", 20, 100); !errors.Is(err, ErrFIPSNotApproved) {
 			t.Fatalf("BenchmarkPBKDF2 with SHA-1 in FIPS mode: got error %v, want ErrFIPSNotApproved", err)
 		}
 		return
 	}
 
-	iterations, err := benchmarkPBKDF2("sha1", 20, 100)
+	iterations, err := benchmarkPBKDF2(defaultVolumeSys().fipsMode(), "sha1", 20, 100)
 	if err != nil {
 		t.Fatalf("BenchmarkPBKDF2 with SHA-1 failed: %v", err)
 	}
@@ -1107,7 +1107,7 @@ func TestBenchmarkPBKDF2SHA1(t *testing.T) {
 func TestBenchmarkPBKDF2SHA384(t *testing.T) {
 	defer parallel(t)()
 
-	iterations, err := benchmarkPBKDF2("sha384", 48, 100)
+	iterations, err := benchmarkPBKDF2(defaultVolumeSys().fipsMode(), "sha384", 48, 100)
 	if err != nil {
 		t.Fatalf("BenchmarkPBKDF2 with SHA-384 failed: %v", err)
 	}

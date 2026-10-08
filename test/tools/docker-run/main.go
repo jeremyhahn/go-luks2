@@ -20,7 +20,7 @@
 // computing platform (owner direction, 2026-08-31), and a test rig is not where
 // that gets handed away for convenience.
 //
-// Every flag was MEASURED, not assumed. docs/TESTING.md carries the table of
+// Every flag was MEASURED, not assumed. docs/volumes/engineering.md carries the table of
 // what fails when each one is removed; the reasons are repeated at each flag in
 // privileges because that is where someone deletes one.
 //

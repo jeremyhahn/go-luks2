@@ -107,7 +107,7 @@ func weakenForStrictFIPS(device string, passphrase []byte, keyslotID string) (er
 // keyslot's existing area, and sets keyslot.KDF. The area is the same size for
 // the same key size and stripe count, so nothing else moves.
 func rewrapKeyslotInPlace(device string, keyslot *header.Keyslot, masterKey *enclave.MemoryEnclave, passphrase []byte, kdf *header.KDF) (err error) {
-	passphraseKey, err := deriveKeyEnclave(context.Background(), passphrase, kdf, keyslot.KeySize)
+	passphraseKey, err := deriveKeyEnclave(context.Background(), passphrase, kdf, keyslot.KeySize, defaultVolumeSys())
 	if err != nil {
 		return err
 	}

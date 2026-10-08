@@ -388,7 +388,7 @@ func writeHandKeyslot(t *testing.T, device, id string, passphrase []byte, stripe
 	if err != nil {
 		t.Fatalf("createKDF failed: %v", err)
 	}
-	wrap, err := deriveKeyEnclave(context.Background(), passphrase, kdf, keySize)
+	wrap, err := deriveKeyEnclave(context.Background(), passphrase, kdf, keySize, defaultVolumeSys())
 	if err != nil {
 		t.Fatalf("DeriveKeyEnclave failed: %v", err)
 	}
@@ -884,7 +884,7 @@ func relinkDuring(t *testing.T, link, to string) volumeSys {
 	sys := testVolumeSys()
 	real := sys.passphraseKDF
 	moved := false
-	sys.passphraseKDF = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
+	sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
 		if !moved {
 			moved = true
 			if err := os.Remove(link); err != nil {

@@ -41,7 +41,7 @@ func TestDeriveKeyEnclaveAgreesWithTheUnprotectedDerivation(t *testing.T) {
 	}
 	passphrase := []byte("custody-test-passphrase")
 
-	held, err := deriveKeyEnclave(context.Background(), passphrase, kdf, 64)
+	held, err := deriveKeyEnclave(context.Background(), passphrase, kdf, 64, defaultVolumeSys())
 	if err != nil {
 		t.Fatalf("DeriveKeyEnclave failed: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestDeriveKeyEnclaveHandsBackAnEnclaveNotASlice(t *testing.T) {
 		Iterations: &iterations,
 	}
 
-	held, err := deriveKeyEnclave(context.Background(), []byte("custody-test-passphrase"), kdf, 64)
+	held, err := deriveKeyEnclave(context.Background(), []byte("custody-test-passphrase"), kdf, 64, defaultVolumeSys())
 	if err != nil {
 		t.Fatalf("DeriveKeyEnclave failed: %v", err)
 	}

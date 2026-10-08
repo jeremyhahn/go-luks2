@@ -410,7 +410,7 @@ func TestVolumeUnlockRefusesAContainerMidReencryption(t *testing.T) {
 
 	kdfCalls := 0
 	real := v.sys.passphraseKDF
-	v.sys.passphraseKDF = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
+	v.sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
 		kdfCalls++
 		return real(ctx, p, kdf, keySize)
 	}
@@ -511,7 +511,7 @@ func TestVolumeUnlockRefusesAnIntegritySegment(t *testing.T) {
 
 	kdfCalls := 0
 	real := v.sys.passphraseKDF
-	v.sys.passphraseKDF = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
+	v.sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
 		kdfCalls++
 		return real(ctx, p, kdf, keySize)
 	}
@@ -619,7 +619,7 @@ func TestVolumeUnlockReadsTheKeyslotsThroughThePinnedDescriptor(t *testing.T) {
 		t.Fatalf("Open failed: %v", err)
 	}
 	real := v.sys.passphraseKDF
-	v.sys.passphraseKDF = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
+	v.sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
 		_ = os.Remove(link)
 		if err := os.Symlink(other, link); err != nil {
 			t.Errorf("re-pointing the symlink failed: %v", err)

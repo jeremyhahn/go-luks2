@@ -26,7 +26,7 @@ sudo luks2 create /dev/sdb1
 sudo luks2 create --pbkdf argon2id /dev/sdb1
 ```
 
-`addkey --kdf` and `recovery add`'s KDF options are checked the same way:
+The KDF options of `addkey`, `changekey` and `recovery add` are checked the same way:
 an Argon2 request in FIPS mode is refused before the passphrase prompt, not
 after.
 

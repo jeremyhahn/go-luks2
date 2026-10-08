@@ -9,6 +9,7 @@ package header_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -47,8 +48,21 @@ func Unlock(device string, passphrase []byte, name string) error {
 	}
 	defer key.Destroy()
 
-	_, err = dmcrypt.Activate(ctx, v, key, name)
-	return err
+	mapping, err := dmcrypt.Activate(ctx, v, key, name)
+	if err != nil {
+		return err
+	}
+
+	// Write-ahead for the host state Activate just created, so a run that dies
+	// before its teardown still leaves a ledger entry a later run's reaper can
+	// remove (#96). A Record failure is fatal to the activation: an unrecorded
+	// mapping is host state nothing can attribute.
+	if err := runSuite.Ledger.Record(harness.KindMapping, name, mapping.UUID); err != nil {
+		_ = dmcrypt.Deactivate(ctx, name)
+		return fmt.Errorf("recording dm %q in the run ledger: %w", name, err)
+	}
+
+	return nil
 }
 
 func Lock(name string) error {

@@ -3500,3 +3500,124 @@ cluster those names waited for, so nothing was left to wait for. Owner ruling
   seams transitional. `internal/dm` now says its callers supply the state
   through `pkg/dmcrypt`'s `sys`; `pkg/dmcrypt` contrasts that with
   pkg/luks2's per-Volume `Volume.sys` (§E).
+
+## p-fips — FIPS migration error text, Volume-scoped derivation
+
+- **One migration error, said once.** A `MigrateToFIPS` failure renders
+  `luks2: Volume.MigrateToFIPS <path>: FIPS 140-3 migration failed: at
+  <stage>: <cause>; <state>`. `errAt` classifies every `*FIPSMigrationError`
+  as `ErrFIPSMigration` (context errors still win), so a stage failure caused
+  by, say, a wrong passphrase now has `Kind` `ErrFIPSMigration` rather than
+  `ErrWrongKey`; the cause is still matched by `errors.Is`.
+  `FIPSMigrationError.Error()` no longer names the device or the phrase, and
+  the migration's own refusals carry their sentinel as `Kind` (no second
+  `ErrFIPSMigration`, no `fipsRefusalCause` type).
+- **A Volume derives under its own sys.** `volumeSys.passphraseKDF` is now a
+  method that derives under the sys's `fipsMode` and `custody`, and tests use
+  the `passphraseKDFOverride` field to replace it. PBKDF2 calibration
+  (`benchmarkPBKDF2`) takes the caller's FIPS mode. `kdfDeriver` uses
+  `sys.custody`. Production does not change: the defaults are `fips.Probe` and
+  the package custody.
+
+## Priority zero value (pre-1.0)
+
+Polish for #211. Supersedes the H9e note that `PriorityIgnore` is
+`Priority`'s zero value and cannot be requested through `KeyslotParams`.
+
+- **Shape.** `const (PriorityDefault Priority = iota; PriorityIgnore;
+  PriorityNormal; PriorityPrefer)`. The zero value means "not asked for": a
+  new keyslot (`AddKeyslot`, `Enroll`, `AddRecoveryKey`) is normal, and
+  `ChangeKeyslot` keeps the slot's existing priority. Ignore, normal and
+  prefer are explicit requests, and all three are now written: ignore as `0`,
+  prefer as `2`, normal as no member (cryptsetup's encoding).
+- **Why a fourth value, not `PriorityNormal` as the zero value.**
+  `ChangeKeyslot` needs a "keep" that differs from every real priority, or a
+  rotation would reset prefer/ignore to normal. Making normal the zero value
+  only moves the gap. A zero value that means "default" is what
+  `KDFParams{}` already means, so the two fields of `KeyslotParams` now read
+  the same way. A `*Priority` would also work, but the `Slot *int` style is
+  meant for "pick for me" choices, not for an enum that can name its own
+  default.
+- **Values are the on-disk number plus one.** `priorityFromDisk` (absent →
+  normal, `v` → `Priority(v+1)`) and `onDiskPriority` are inverses with one
+  rule each way. Nothing is lost for an out-of-range on-disk value either.
+  `KeyslotInfo.Priority` never reports `PriorityDefault`. A `Priority`
+  outside the four declared values is refused with `ErrInvalidArgument`
+  before any write: by `AddKeyslot`/`ChangeKeyslot` up front, and by
+  `addKeyslotWithMasterKeyAndPriority` for `Enroll` and `AddRecoveryKey`.
+- **CLI.** `changekey` no longer reads the slot's priority back to pass it
+  through. It sends `KeyslotParams{}`, which keeps the priority. The CLI has
+  no `--priority` flag. `addkey` still passes `PriorityNormal`, which gives
+  the same result as the default.
+- **Breaking.** The numeric values of `PriorityIgnore/Normal/Prefer` changed
+  (0/1/2 → 1/2/3). Code that converts a `Priority` to or from the LUKS2
+  integer has to add or subtract one. No compatibility shim (owner ruling
+  2026-10-05). On-disk behaviour is unchanged except that ignore can now be
+  written.
+
+## p-cli
+
+- **`addkey` and `changekey` take the shared KDF options.** `addkey`'s
+  combined `--kdf pbkdf2-sha512` flag and `parseAddKeyKDF` are removed; one
+  spelling (`--pbkdf`, `--hash`, `--iter-time`, `--pbkdf-force-iterations`,
+  `--pbkdf-memory`, `--pbkdf-parallel`) now serves `create`, `recovery add`,
+  `addkey` and `changekey`. With none given, both commands pass a zero
+  `KDFParams`, keeping the library's default/inherited-cost policy (unlike
+  `create`, which always resolves a KDF). `argon2i` is no longer selectable
+  from the CLI, as it already was not on `create`. No compatibility shim
+  (owner ruling 2026-10-05). The FIPS hint "use --pbkdf pbkdf2" is now true
+  for every command that prints it.
+
+## p-docs (versioning text; TESTING/RELEASABILITY fold)
+
+- **DESIGN §G.1 fold done, with one deviation.** `TESTING.md` is now
+  `docs/volumes/engineering.md#test-strategy` (the other folders link to it)
+  rather than being split across every folder: its content is project-wide
+  test infrastructure, and `volumes/` owns the device layer it runs against.
+  `test/integration/CLAUDE.md`/`AGENTS.md` keep their rules and were not
+  duplicated with it. `RELEASABILITY.md` is folded into `test/internal/labstrings`
+  package documentation as designed. The releasability gate scans the whole
+  index and has no fixed docs path, so nothing needed to stay. This supersedes
+  the cr-docs deferral above.
+- **Versioning text states the 1.0 policy.** Post-1.0 follows the standards
+  `release-versioning.md` §1: PATCH fix, MINOR backward-compatible API, MAJOR
+  breaking with `/vN`. No deprecation policy is stated because the standards
+  have none (§5); the docs say so rather than invent one.
+
+## Corrections (2026-10-08, polish/p-comments)
+
+Older entries above are left as written. Two statements in them no longer
+hold:
+
+- The cr-docs entry saying `ParseLegacyRecoveryKey` is still exported was
+  true at its commit only. It was unexported in 37078b0 (`parseLegacyRecoveryKey`);
+  `ParseRecoveryKey` is the one public parse, as DESIGN §B.6 says.
+- DESIGN.md's status line listed the token free functions, `EnrollKeyProvider`
+  and the seam-variable cleanup as outstanding. H13b and H13d finished them
+  and H13e (#284) removed the last transitional forwards. DESIGN.md's header
+  now says so.
+
+## MigrateToFIPS: the primary header is authoritative
+
+`MigrateToFIPS` treats the primary header copy as the authority. Before its
+first write it reconciles the secondary to the primary, and it never repairs a
+torn primary itself: a primary that does not read back is refused before any
+write, because rebuilding it from the secondary would mean trusting a copy the
+migration's own ordering never makes the survivor. The remedy is outside the
+migration: `RestorePrimaryHeader`, or cryptsetup, which repairs on its own,
+rebuilds the primary from the secondary, after which the migration can be run
+again. This is deliberate, stricter than a silent repair, and intended
+behavior. See `pkg/luks2/fipsmigrate.go:72-104`,
+`pkg/luks2/keyslotdevice.go:143-151` and `docs/fips/architecture.md:66-71`.
+
+## p-review-fix
+
+- **`ChangeKeyslot` re-costs the slot when `p.KDF` is non-zero.** This
+  supersedes H9c's and the priority lane's "`p.KDF` is not consulted". A zero
+  `KDFParams` still keeps the slot's KDF type and cost (a PBKDF2-SHA1 slot is
+  still rewritten as PBKDF2-SHA256). A non-zero one is validated and resolved
+  exactly as `AddKeyslot` resolves it: the same SHA-1 and Argon2 cost checks,
+  Argon2 refused under FIPS, and a benchmark when only `IterTime` is given.
+  Rationale: cryptsetup's luksChangeKey honors `--pbkdf`, `--iter-time` and
+  `--pbkdf-force-iterations`, and `luks2 changekey` accepted the same flags
+  and silently ignored them. A CLI flag that does nothing is a defect.

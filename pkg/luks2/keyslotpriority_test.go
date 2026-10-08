@@ -36,10 +36,10 @@ func TestAbsentKeyslotPriorityIsNormal(t *testing.T) {
 		priority *int
 		want     Priority
 	}{
-		{"absent", nil, keyslotPriorityNormal},
-		{"explicit ignore", intPtr(keyslotPriorityIgnore), keyslotPriorityIgnore},
-		{"explicit normal", intPtr(keyslotPriorityNormal), keyslotPriorityNormal},
-		{"explicit prefer", intPtr(keyslotPriorityPrefer), keyslotPriorityPrefer},
+		{"absent", nil, PriorityNormal},
+		{"explicit ignore", intPtr(keyslotPriorityIgnore), PriorityIgnore},
+		{"explicit normal", intPtr(keyslotPriorityNormal), PriorityNormal},
+		{"explicit prefer", intPtr(keyslotPriorityPrefer), PriorityPrefer},
 	}
 
 	for _, tt := range tests {
@@ -54,7 +54,7 @@ func TestAbsentKeyslotPriorityIsNormal(t *testing.T) {
 			if len(slots) != 1 {
 				t.Fatalf("listKeyslotsFrom returned %d slots, want 1", len(slots))
 			}
-			if slots[0].Priority != Priority(tt.want) {
+			if slots[0].Priority != tt.want {
 				t.Fatalf("priority = %d, want %d", slots[0].Priority, tt.want)
 			}
 		})

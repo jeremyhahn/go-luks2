@@ -60,18 +60,17 @@ const cryptsetupWriteHold = 5 * time.Second
 //     -- flagged for the owner rather than attempted here, the same
 //     reasoning as the two below.
 //   - lockwait_integration_test.go's TestCryptsetupWaitsForEveryWritePath
-//     substitutes fileLockHeld (security.go), another unexported seam, to
+//     substitutes volumeSys.lockHeld (volume.go), an unexported seam, to
 //     catch a write path exactly after it has taken its locks.
 //   - lockcompat_integration_test.go's TestCompatMetadataLockDirectoryStates
 //     re-execs this package's own test binary and, inside that child, sets
-//     calibratedCountFloor and keyslotLockWait -- both unexported package
-//     vars -- before running a go-luks2 operation. A copy of the binary
-//     re-exec'd from test/integration/interop would be THAT package's test
-//     binary, which cannot reach these vars either.
+//     volumeSys.calibratedCountFloor and the package var keyslotLockWait
+//     (keyslotdevice.go) -- both unexported -- before running a go-luks2
+//     operation. A copy of the binary re-exec'd from test/integration/interop
+//     would be THAT package's test binary, which cannot reach them either.
 //
-// All three are flagged for the owner, the same way test/integration/pkg's
-// own TestMain already flags the dm.create write-ahead-ledger gap it
-// accepted on 2026-09-01: new exported-within-internal surface on a Layer-0
+// All three are flagged for the owner, the same way the write-ahead-ledger gap
+// for dm.create once was (since closed: dmcrypt.Activate is public): new exported-within-internal surface on a Layer-0
 // library's production seams is an owner's decision, not a lane's to invent
 // -- doubly so here, where the candidate seams (random-number source,
 // lock-held observer, KDF calibration floor) are security-relevant and the

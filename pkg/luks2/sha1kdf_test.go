@@ -43,7 +43,7 @@ func countDerivations(t *testing.T) (*int, volumeSys) {
 	n := new(int)
 	sys := testVolumeSys()
 	real := sys.passphraseKDF
-	sys.passphraseKDF = func(ctx context.Context, passphrase []byte, kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
+	sys.passphraseKDFOverride = func(ctx context.Context, passphrase []byte, kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
 		*n++
 		return real(ctx, passphrase, kdf, keySize)
 	}

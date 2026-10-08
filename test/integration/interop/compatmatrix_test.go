@@ -42,7 +42,7 @@ import (
 //
 // Checked elsewhere and not repeated here: byte-for-byte header equality
 // (canonicalconformance_integration_test.go, which stays in pkg/luks2), the
-// FIPS import (test/integration/pkg/fipsimport_test.go), the header-only
+// FIPS import (fipsimport_test.go in this directory), the header-only
 // wipe and detached-header activation (test/integration/header,
 // test/integration/dm).
 

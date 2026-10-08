@@ -1,6 +1,6 @@
 # go-luks2 docs
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against v1.0.0-rc.2 (12a364e)
 > Conflicts with this document are defects. Fix them here first.
 
 Documentation is organized as one feature folder per CLI command group
@@ -35,34 +35,36 @@ surface to DESIGN.md §B.6. The seam-variable allowlist
 ## Versioning policy
 
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html). Tags carry
-a `v` (`v1.0.0-rc.1`); the `VERSION` file does not (`1.0.0-rc.1`). A `-rc.N`
+a `v` (`v1.0.0-rc.2`); the `VERSION` file does not (`1.0.0-rc.2`). A `-rc.N`
 or `-alpha` suffix is a prerelease (lower precedence than the version it
-precedes) and promises nothing outside this project.
+precedes) and promises nothing outside this project: `-rc.N` says only "this
+is what `1.0.0` will be unless a defect is found".
 
-go-luks2 is pre-1.0:
+go-luks2 is at `1.0.0-rc.2`, the release candidate for `1.0.0`. From `1.0.0`:
 
 | Bump | Means |
 |---|---|
-| PATCH (`0.3.0` → `0.3.1`) | A fix. No exported API change, no change to what is written to disk. |
-| MINOR (`0.3.x` → `0.4.0`) | New API **or a breaking change**. Before 1.0 a breaking change is a MINOR bump, never a PATCH. |
-| MAJOR | Reserved for `1.0.0`. After that, a breaking change is a new major version and the module path gains `/vN`. |
+| PATCH (`1.0.0` → `1.0.1`) | A fix. No exported API change, no change to what is written to disk. |
+| MINOR (`1.0.x` → `1.1.0`) | New API, backward compatible. |
+| MAJOR (`1.x` → `2.0.0`) | A breaking change. The module path gains `/vN`, so every consumer's import lines change with it; a major is taken deliberately, never mechanically. |
 
 A breaking change is anything that can stop a correct consumer compiling or
 change what it observes: a removed or renamed exported identifier, a changed
 signature, a changed error a caller is documented to match, a refused input
 that used to be accepted, or a change to what is written to a LUKS2 header.
 
-### Before the first public release
+### Until `1.0.0`
 
-Backward compatibility was not a goal. API, on-disk choices and CLI changed
-when the design required it, with no shims. `CHANGELOG.md` marks those
-changes with `BREAKING:` in the heading. The in-flight API redesign
-(DESIGN.md) is exactly such a change: it lands with a `BREAKING:` changelog
-heading and no compatibility shim, by owner direction.
+Backward compatibility is not a goal for any release candidate. API, on-disk
+choices and CLI change when the design requires it, with no shims, migration
+code or deprecated aliases (owner ruling 2026-10-05: the cleanest API wins, and
+stricter than cryptsetup is fine). `CHANGELOG.md` marks such changes with
+`BREAKING:` in the heading. The API redesign (DESIGN.md) was such a change and
+shipped that way. The pre-1.0 rule expires at the `1.0.0` release.
 
-### From the first public release
+### From `1.0.0`
 
-- A breaking change bumps MINOR (pre-1.0), and its changelog heading carries
+- A breaking change is a new major version, and its changelog heading carries
   `BREAKING:` and what a consumer must change.
 - A breaking change lands with its consumers: dependent projects are updated,
   built and tested against it, bottom of the dependency graph up, before it
@@ -74,9 +76,14 @@ heading and no compatibility shim, by owner direction.
   cryptsetup and the reverse; breaking that is a defect, not a breaking
   change — see [cryptsetup-interop](cryptsetup-interop/architecture.md).
 
-There is no deprecation window before 1.0: an API is removed in the MINOR
-release that announces it. A deprecation policy will be stated here before
-1.0.
+**Deprecation.** There is no deprecation window and no deprecation policy:
+the engineering standards (`release-versioning.md` §5) state that none exists
+for the portfolio, and this project does not invent one. Until `1.0.0` an API
+is removed in the release that announces it. From `1.0.0` a removal is a
+breaking change and follows the rules above, so it waits for a new major
+version. If a window is ever adopted it will be stated here and in the
+changelog. The interop contract is in
+[cryptsetup-interop](cryptsetup-interop/architecture.md).
 
 ## Migration state
 
@@ -98,13 +105,14 @@ the API redesign). What moved, and what is still outstanding:
 All of the above legacy files are deleted in the same commits that landed
 this index (feature-docs §9).
 
-**Not migrated for 1.0.0-rc.1:** `TESTING.md` and `RELEASABILITY.md` stay at
-the `docs/` root. The DESIGN.md §G.1 fold (`TESTING.md`'s
-coverage/unit-runtime/integration-container detail into each folder's
-`engineering.md#test-strategy`, `RELEASABILITY.md`'s gate/waiver rules into
-`test/internal/labstrings`'s package documentation) is deferred past the
-release candidate (DECISIONS.md). Both files were re-verified against the
-tree and re-stamped for rc.1. `CLAUDE.md`/`AGENTS.md` now exist at `cmd/luks2/` and
+**The DESIGN.md §G.1 fold is done** (after v1.0.0-rc.2). `TESTING.md`'s coverage,
+unit-runtime and integration-container detail is in
+[volumes/engineering.md](volumes/engineering.md#test-strategy), which the other
+folders' test-strategy sections link to, and `RELEASABILITY.md`'s gate and
+waiver rules are the package documentation of `test/internal/labstrings`
+(`go doc ./test/internal/labstrings`). Both files are deleted. The
+releasability gate does not need a fixed docs path: it scans the whole index.
+`CLAUDE.md`/`AGENTS.md` now exist at `cmd/luks2/` and
 `test/integration/` (DESIGN.md §G.1, project-scaffold §7), alongside the
 root pair. The portfolio view of conversion progress is derived, never
 maintained by hand: count `docs/*/architecture.md` per repo (feature-docs

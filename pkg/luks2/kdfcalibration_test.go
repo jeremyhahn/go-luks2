@@ -244,7 +244,7 @@ func TestBenchmarkPBKDF2MeetsRecommendedMinimum(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			iterations, err := benchmarkPBKDF2(tt.hashAlgo, tt.keySize, pbkdf2ReferenceTargetMs)
+			iterations, err := benchmarkPBKDF2(defaultVolumeSys().fipsMode(), tt.hashAlgo, tt.keySize, pbkdf2ReferenceTargetMs)
 			if err != nil {
 				t.Fatalf("BenchmarkPBKDF2(%q, %d, %d): %v", tt.hashAlgo, tt.keySize, pbkdf2ReferenceTargetMs, err)
 			}
@@ -279,7 +279,7 @@ func TestBenchmarkPBKDF2RejectsUnusableTarget(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			iterations, err := benchmarkPBKDF2("sha256", 32, tt.targetMs)
+			iterations, err := benchmarkPBKDF2(defaultVolumeSys().fipsMode(), "sha256", 32, tt.targetMs)
 			if err == nil {
 				t.Fatalf("BenchmarkPBKDF2 with a target of %dms returned %d iterations and no error", tt.targetMs, iterations)
 			}

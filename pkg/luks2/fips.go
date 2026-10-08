@@ -102,7 +102,8 @@ func atoiIDs(ids []string) []int {
 //
 // It must be called from a process that is NOT in FIPS mode, because
 // unlocking the volume may need to execute its Argon2 keyslot; from a FIPS
-// process it returns ErrFIPSMigrationUnderFIPS without touching the device.
+// process it returns an error matching ErrFIPSMigration, a
+// *FIPSMigrationError at Stage "precondition", without touching the device.
 //
 // The migration runs on the descriptor Open pinned, under this Volume's own
 // exclusive lock -- its lock wait, clock and lock directory -- as AddKeyslot

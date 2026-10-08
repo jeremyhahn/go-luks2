@@ -6,8 +6,9 @@ cryptsetup. Volumes interoperate with cryptsetup in both directions.
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-The project is pre-1.0. See [docs/README.md](docs/README.md#versioning-policy)
-for what a version number promises.
+The project is at release candidate `v1.0.0-rc.2` for `1.0.0`. See
+[docs/README.md](docs/README.md#versioning-policy) for what a version number
+promises and the compatibility policy.
 
 ## Install
 
@@ -147,8 +148,8 @@ with architecture, engineering, CLI, API and user-guide pages; start at
 | [docs/wipe/](docs/wipe/) | Crypto-erase and full-device sanitization |
 | [docs/fips/](docs/fips/) | FIPS 140-3 mode, approved KDFs, importing Argon2 volumes |
 | [docs/cryptsetup-interop/](docs/cryptsetup-interop/) | Versioning policy; interoperability with cryptsetup, and where this library is stricter |
-| [docs/TESTING.md](docs/TESTING.md) | Test tiers, coverage gate, the integration container |
-| [docs/RELEASABILITY.md](docs/RELEASABILITY.md) | What may be published, and the gate that checks it |
+| [docs/volumes/engineering.md](docs/volumes/engineering.md#test-strategy) | Test tiers, coverage gate, the integration container |
+| [`test/internal/labstrings`](test/internal/labstrings/labstrings.go) | What may be published, and the gate that checks it (package documentation) |
 | [changelog.d/](changelog.d/README.md) | How changelog entries are written |
 
 ## Development

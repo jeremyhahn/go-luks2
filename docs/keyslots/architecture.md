@@ -54,9 +54,12 @@ unbound keyslot gets `ErrWrongKey`. **`priority` is not read by
 any unlock path.** `(*Header).Keyslots()` lists ascending slot numbers and
 reports each slot's priority and KDF cost.
 
-Keyslots this library creates carry no `priority` member, as cryptsetup
-writes them; an absent member reads as normal and a present one is kept as
-read.
+Keyslots this library creates carry no `priority` member unless the caller
+asks for one, as cryptsetup writes them: `KeyslotParams.Priority`'s zero value
+`PriorityDefault` means normal for a new keyslot and "unchanged" for
+`ChangeKeyslot`, so an ignored keyslot exists only when a caller names
+`PriorityIgnore`. An absent member reads as normal and a present one is kept
+as read.
 
 Steps, per keyslot tried:
 

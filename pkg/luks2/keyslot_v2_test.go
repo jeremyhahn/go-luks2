@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/jeremyhahn/go-enclave"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // newPassphraseEnclave is newTestPassphrase, parameterized on the text: used
@@ -326,6 +328,78 @@ func TestVolumeChangeKeyslotPreservesTheExistingPBKDF2Cost(t *testing.T) {
 	}
 	if info.KDF.Iterations != iterations {
 		t.Errorf("ChangeKeyslot's reported iterations = %d, want the preserved %d", info.KDF.Iterations, iterations)
+	}
+}
+
+// changeKeyslotOnDiskKDF formats a PBKDF2-SHA256 volume at iterations, changes
+// keyslot 0's passphrase with p, and returns the keyslot's KDF as re-read
+// from the device -- what a later open will use, not what the call reported.
+func changeKeyslotOnDiskKDF(t *testing.T, iterations int, p KeyslotParams) *header.KDF {
+	t.Helper()
+	path := newImage(t, "changekeyslot-recost.img")
+	if err := formatForTest(formatOptionsForTest{
+		Device:          path,
+		Passphrase:      []byte(testPassphraseText),
+		Cipher:          "aes",
+		CipherMode:      "xts-plain64",
+		KeySize:         512,
+		HashAlgo:        "sha256",
+		SectorSize:      512,
+		KDFType:         kdfTypePBKDF2,
+		PBKDFIterations: iterations,
+	}); err != nil {
+		t.Fatalf("Format failed: %v", err)
+	}
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	pass := newPassphraseEnclave(t, testPassphraseText)
+	defer func() { _ = pass.Destroy() }()
+	key, err := v.Unlock(context.Background(), pass)
+	if err != nil {
+		_ = v.Close()
+		t.Fatalf("Unlock failed: %v", err)
+	}
+	rotated := newPassphraseEnclave(t, "re-costing rotation")
+	defer func() { _ = rotated.Destroy() }()
+	_, err = v.ChangeKeyslot(context.Background(), key, rotated, p)
+	key.Destroy()
+	_ = v.Close()
+	if err != nil {
+		t.Fatalf("ChangeKeyslot failed: %v", err)
+	}
+
+	_, metadata, err := readHeaderForTest(path)
+	if err != nil {
+		t.Fatalf("readHeaderForTest failed: %v", err)
+	}
+	slot, ok := metadata.Keyslots["0"]
+	if !ok || slot.KDF == nil || slot.KDF.Iterations == nil {
+		t.Fatalf("keyslot 0 has no PBKDF2 KDF on disk after ChangeKeyslot: %+v", slot)
+	}
+	return slot.KDF
+}
+
+// An explicit KDF is a request to re-cost the slot, as cryptsetup
+// luksChangeKey's --pbkdf-force-iterations is: the count asked for is the
+// count on disk afterwards.
+func TestVolumeChangeKeyslotWithAnExplicitKDFRecostsTheSlot(t *testing.T) {
+	const before, after = 700_000, 800_000
+	kdf := changeKeyslotOnDiskKDF(t, before, KeyslotParams{KDF: KDFParams{Type: KDFPBKDF2, Iterations: after}})
+	if kdf.Type != kdfTypePBKDF2 || *kdf.Iterations != after {
+		t.Errorf("on-disk KDF after ChangeKeyslot = %s/%d, want %s/%d", kdf.Type, *kdf.Iterations, kdfTypePBKDF2, after)
+	}
+}
+
+// A zero KDF keeps the slot's own cost, re-read from the device rather than
+// taken from ChangeKeyslot's report.
+func TestVolumeChangeKeyslotWithAZeroKDFKeepsTheOnDiskCost(t *testing.T) {
+	const iterations = 700_000
+	kdf := changeKeyslotOnDiskKDF(t, iterations, KeyslotParams{})
+	if kdf.Type != kdfTypePBKDF2 || *kdf.Iterations != iterations {
+		t.Errorf("on-disk KDF after ChangeKeyslot = %s/%d, want the preserved %s/%d", kdf.Type, *kdf.Iterations, kdfTypePBKDF2, iterations)
 	}
 }
 

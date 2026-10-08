@@ -7,6 +7,7 @@ package luks2
 import (
 	"context"
 
+	"github.com/jeremyhahn/go-luks2/internal/errs"
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
@@ -35,6 +36,18 @@ func createKDFStrictAtProductionFloor(opts formatOptionsForTest, keySize int) (*
 
 func createKDFStrictOn(sys volumeSys, opts formatOptionsForTest, keySize int) (*header.KDF, error) {
 	return createKDF(opts, keySize, callerSuppliedCredential, sys.fipsMode, sys.calibratedCountFloor, sys.cryptoRand)
+}
+
+// deriveKeyPlain is the derivation with its result left in an ordinary
+// slice, under the production sys's FIPS mode: the shape a test compares
+// against a known answer. The package itself never derives outside an
+// enclave.
+func deriveKeyPlain(passphrase []byte, k *header.KDF, keySize int) ([]byte, error) {
+	if k == nil {
+		return nil, &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "no KDF object"}
+	}
+	key, err := kdfDeriver(defaultVolumeSys()).DerivePlain(context.Background(), passphrase, toKDFParams(k), keySize)
+	return key, reclassifyUnsupportedKDF(err)
 }
 
 // cheapOpts puts testVolumeSys ahead of opts, so an option in opts that sets its

@@ -1,6 +1,6 @@
 # FIPS 140-3 — user guide
 
-> **Status: NORMATIVE** · Last verified: 2026-10-06 against v1.0.0-rc.1 (8924d5d1)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against v1.0.0-rc.2 (12a364e) plus the polish/p-fips change
 > Conflicts with this document are defects. Fix them here first.
 
 Prerequisites: a build running under `GODEBUG=fips140=on` or
@@ -18,10 +18,18 @@ PBKDF2-SHA512. Requesting Argon2 explicitly is refused before any prompt.
 
 ## Bring an existing (non-FIPS) volume into compliance
 
-`MigrateToFIPS` has no CLI verb today; call it from Go:
+`MigrateToFIPS` has no CLI verb today; call it from Go, on a Volume opened
+read-write:
 
 ```go
-res, err := luks2.MigrateToFIPS("/dev/sdb1", passphrase, nil)
+v, err := luks2.Open(ctx, "/dev/sdb1")
+if err != nil {
+	return err
+}
+defer v.Close()
+
+// pass is the passphrase, held in an *enclave.MemoryEnclave.
+res, err := v.MigrateToFIPS(ctx, pass, luks2.MigrateParams{})
 // res.Complete: no keyslot or digest FIPS mode cannot run remains
 ```
 

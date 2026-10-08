@@ -35,7 +35,7 @@ func afCodec(sys volumeSys) af.Codec {
 // kdfDeriver builds the internal/kdf.Deriver each KDF call runs through,
 // reading the same custody and FIPS seams afCodec does.
 func kdfDeriver(sys volumeSys) kdf.Deriver {
-	return kdf.Deriver{Custody: custody, FIPS: sys.fipsMode()}
+	return kdf.Deriver{Custody: sys.custody, FIPS: sys.fipsMode()}
 }
 
 // clearBytes securely zeros a byte slice. The clear builtin is a memclr the

@@ -134,7 +134,8 @@ mkfs wrote may be partial.
 ### KDF options
 
 Named as cryptsetup names them. Also accepted by
-[`recovery add`](../recovery-keys/cli.md#add).
+[`recovery add`](../recovery-keys/cli.md#add),
+[`addkey` and `changekey`](../keyslots/cli.md#addkey).
 
 | Option | Applies to | Meaning |
 |---|---|---|

@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,8 +56,21 @@ func Unlock(device string, passphrase []byte, name string) error {
 	}
 	defer key.Destroy()
 
-	_, err = dmcrypt.Activate(ctx, v, key, name)
-	return err
+	mapping, err := dmcrypt.Activate(ctx, v, key, name)
+	if err != nil {
+		return err
+	}
+
+	// Write-ahead for the host state Activate just created, so a run that dies
+	// before its teardown still leaves a ledger entry a later run's reaper can
+	// remove (#96). A Record failure is fatal to the activation: an unrecorded
+	// mapping is host state nothing can attribute.
+	if err := runSuite.Ledger.Record(harness.KindMapping, name, mapping.UUID); err != nil {
+		_ = dmcrypt.Deactivate(ctx, name)
+		return fmt.Errorf("recording dm %q in the run ledger: %w", name, err)
+	}
+
+	return nil
 }
 
 // FormatOptions and Format are the old FormatOptions/luks2.Format
@@ -367,7 +381,7 @@ func requireRoot(t *testing.T) {
 // Lock(volumeName) written here would be flagged as unprovably scoped even
 // though it is safe, because every call site is independently checked.
 //
-// Same helper and reasoning as test/integration/pkg's: this package cannot
+// Same helper and reasoning as the other integration suites': this package cannot
 // reach pkg/luks2's own unexported releaseVolumeErr (which additionally
 // unmounts whatever is mounted from the volume's own device), so a caller
 // that mounted a filesystem on the mapping must unmount it itself before
@@ -398,9 +412,8 @@ func releaseVolume(t *testing.T, volumeName string, lock func() error) {
 
 // mappingConfirmedGone reports whether the mapping is CONFIRMED absent, by
 // asking dmsetup directly rather than trusting luks2.IsUnlocked -- see
-// test/integration/pkg/common_test.go's mappingConfirmedGone for the full
-// reasoning (the measured "Device does not exist." string, and why
-// "unknown" must be treated as present).
+// the measured "Device does not exist." string below, and why "unknown" must
+// be treated as present.
 func mappingConfirmedGone(volumeName string) bool {
 	out, err := exec.Command("dmsetup", "info", volumeName).CombinedOutput()
 	if err == nil {

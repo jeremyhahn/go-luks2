@@ -122,7 +122,7 @@ func TestSplitArgs_RefusesAMissingSeparator(t *testing.T) {
 }
 
 // TestPrivileges_IsExactlyTheMeasuredSet pins the privilege set flag by flag.
-// Each one was measured (docs/TESTING.md carries the table), so a flag added or
+// Each one was measured (docs/volumes/engineering.md carries the table), so a flag added or
 // dropped here is a security decision, and it has to show up as a failing test
 // rather than as a quiet diff.
 func TestPrivileges_IsExactlyTheMeasuredSet(t *testing.T) {

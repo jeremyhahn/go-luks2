@@ -16,7 +16,7 @@ import (
 )
 
 // TestMain records the host state this suite is about to create (#96), the
-// same pattern as test/integration/pkg and test/integration/luks2: every
+// same pattern as test/integration/luks2: every
 // loop device this package attaches is backed by a file under t.TempDir(),
 // which this suite points at the recorded root before any test runs.
 func TestMain(m *testing.M) {

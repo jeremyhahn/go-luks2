@@ -37,7 +37,7 @@ import (
 // still missed the KDF hash, the KDF salt, the area cipher, the AF hash and the
 // area-too-small-for-its-own-AF-split case. Enumeration kept failing because
 // the conditions are not in unlockKeyslot: they are scattered through
-// deriveKeyPlain, the area cipher, af.ValidateReadHash and verifyMasterKey, interleaved with
+// deriveKeyEnclave, the area cipher, af.ValidateReadHash and verifyMasterKey, interleaved with
 // the work they guard, and several were inline literals rather than callable
 // validators.
 //
@@ -145,7 +145,7 @@ type keyslotPlan struct {
 //	keyslot type                unlockKeyslot's own first check
 //	geometry and shape          header.ValidateKeyslot          (internal/header/keyslot.go)
 //	KDF cost                    header.ValidateKDFCost          (internal/header/keyslot.go)
-//	KDF approval, salt, hash    screenKDFParameters      (below, over deriveKeyPlain's rejections)
+//	KDF approval, salt, hash    screenKDFParameters      (below, over deriveKeyEnclave's rejections)
 //	area cipher, whole spec     parseKeyslotAreaEncryption (below; #106)
 //	volume key size             areacipher.ValidateVolumeKeySize
 //	area key size               areacipher.Transform.ValidateKeySize (shared with the transform)
@@ -314,10 +314,10 @@ func screenKeyslot(id string, keyslot *header.Keyslot, digests map[string]*heade
 	return plan, nil
 }
 
-// screenKDFParameters rejects a KDF that deriveKeyPlain would refuse, without
+// screenKDFParameters rejects a KDF that deriveKeyEnclave would refuse, without
 // running it and without a passphrase.
 //
-// It mirrors deriveKeyPlain's prefix in order and delegates to the same helpers,
+// It mirrors deriveKeyEnclave's prefix in order and delegates to the same helpers,
 // so the two cannot disagree about which KDF is usable:
 //
 //	fips.Mode.RequireKDF     Argon2 in a FIPS 140-3 process
@@ -326,8 +326,8 @@ func screenKeyslot(id string, keyslot *header.Keyslot, digests map[string]*heade
 //	getPBKDF2HashFunc        a PBKDF2 hash nothing implements, and SHA-1 in FIPS mode
 //
 // The type switch is deliberately over kdf.Type RAW, not normalized. That is
-// what deriveKeyPlain switches on, and this function exists to predict
-// deriveKeyPlain rather than to have an opinion of its own: a header declaring
+// what deriveKeyEnclave switches on, and this function exists to predict
+// deriveKeyEnclave rather than to have an opinion of its own: a header declaring
 // "PBKDF2" in capitals is refused there, so it must be refused here or the
 // guard would count a keyslot the unlock cannot open. (header.ValidateKDFCost DOES
 // normalize, which is why a screen built only from it was too permissive.)

@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -35,26 +36,63 @@ import (
 // DefaultLuksOperations for the same forward.
 func Unlock(device string, passphrase []byte, name string) error {
 	ctx := context.Background()
-	v, err := luks2.Open(ctx, device)
+	mapping, err := activateUnrecorded(ctx, device, passphrase, name, dmcrypt.Activate)
 	if err != nil {
 		return err
+	}
+
+	// Write-ahead for the host state Activate just created, so a run that dies
+	// before its teardown still leaves a ledger entry a later run's reaper can
+	// remove (#96). A Record failure is fatal to the activation: an unrecorded
+	// mapping is host state nothing can attribute.
+	if err := recordMapping(name, mapping.UUID); err != nil {
+		_ = dmcrypt.Deactivate(ctx, name)
+		return err
+	}
+
+	return nil
+}
+
+// recordMapping records name's mapping in the run ledger. A process with no
+// registered suite -- a FIPS child, which exits from init() before TestMain
+// runs -- gets an error, not a nil dereference.
+func recordMapping(name, uuid string) error {
+	if runSuite == nil {
+		return fmt.Errorf("recording dm %q: TestMain did not register the suite in this process", name)
+	}
+	if err := runSuite.Ledger.Record(harness.KindMapping, name, uuid); err != nil {
+		return fmt.Errorf("recording dm %q in the run ledger: %w", name, err)
+	}
+	return nil
+}
+
+// activator is dmcrypt.Activate's shape, so the FIPS child can run its path
+// with a stand-in for device-mapper (fipsChildRoleStandIn).
+type activator func(context.Context, *luks2.Volume, *luks2.Key, string) (*dmcrypt.Mapping, error)
+
+// activateUnrecorded is Unlock without the ledger record: Open, Unlock, and
+// activate. The FIPS child runs this alone, and its parent records the
+// mapping it left (unlockInFIPSProcess).
+func activateUnrecorded(ctx context.Context, device string, passphrase []byte, name string, activate activator) (*dmcrypt.Mapping, error) {
+	v, err := luks2.Open(ctx, device)
+	if err != nil {
+		return nil, err
 	}
 	defer func() { _ = v.Close() }()
 
 	pass, err := enclave.NewMemoryEnclaveCopy(passphrase)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = pass.Destroy() }()
 
 	key, err := v.Unlock(ctx, pass)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer key.Destroy()
 
-	_, err = dmcrypt.Activate(ctx, v, key, name)
-	return err
+	return activate(ctx, v, key, name)
 }
 
 func Lock(name string) error {
@@ -75,9 +113,8 @@ func GetMappedDevicePath(name string) (string, error) {
 }
 
 // run executes name with args and fails the test on a non-zero exit,
-// returning combined output -- moved from test/integration/pkg's
-// keyring_test.go (#274), which fipsimport_test.go and sha1af_test.go
-// (also moved here) still need.
+// returning combined output (moved here with fipsimport_test.go and
+// sha1af_test.go in #274, when test/integration/pkg was removed).
 func run(t *testing.T, name string, args ...string) string {
 	t.Helper()
 
@@ -89,8 +126,8 @@ func run(t *testing.T, name string, args ...string) string {
 }
 
 // lockWithRetry rides out the transient EBUSY the host's own udev produces
-// right after a write to a mapped device (#274, moved from
-// test/integration/pkg's keyring_test.go): the suite shares the HOST's
+// right after a write to a mapped device (moved here in #274,
+// when test/integration/pkg was removed): the suite shares the HOST's
 // device-mapper, and closing a device just written to can lose the race
 // against udev's blkid probe.
 func lockWithRetry(t *testing.T, volumeName string) {
@@ -109,8 +146,8 @@ func lockWithRetry(t *testing.T, volumeName string) {
 	t.Fatalf("Lock failed: %v", err)
 }
 
-// createTestFile creates a test file with the given size, moved from
-// test/integration/pkg's common_test.go (#274).
+// createTestFile creates a test file with the given size (moved here in #274,
+// when test/integration/pkg was removed).
 func createTestFile(path string, sizeMB int) error {
 	f, err := os.Create(path) // #nosec G304 -- path is a test fixture under t.TempDir()
 	if err != nil {
@@ -122,17 +159,13 @@ func createTestFile(path string, sizeMB int) error {
 }
 
 // This package is test/integration/interop/: cryptsetup and systemd are the
-// real peer (testing-guidelines), checked in both directions. Only
-// compatmatrix_integration_test.go moves here from pkg/luks2 (#274):
-// lockcompat_integration_test.go and lockwait_integration_test.go's
-// TestCompatMetadataLockDirectoryStates and TestCryptsetupWaitsForEvery-
-// WritePath each re-exec this package's own test binary and tweak a
-// pkg/luks2-private seam inside it (calibratedCountFloor/keyslotLockWait,
-// fileLockHeld) that has no external setter -- the same class of gap
-// test/integration/pkg's own TestMain already accepted on 2026-09-01 for
-// dm.create's write-ahead ledger, for the same reason: new exported surface
-// on a Layer-0 library is an owner's decision, not a lane's. Both stay in
-// pkg/luks2, flagged there for the owner.
+// real peer (testing-guidelines), checked in both directions. The two
+// pkg/luks2 tests that re-exec their own test binary (see
+// pkg/luks2/lockcompat_integration_test.go and lockwait_integration_test.go:
+// TestCompatMetadataLockDirectoryStates and TestCryptsetupWaitsForEveryWritePath)
+// stay in pkg/luks2, because they set unexported seams (volumeSys.lockHeld and
+// volumeSys.calibratedCountFloor, and the package var keyslotLockWait) that
+// have no external setter.
 
 var runSuite *harness.Suite
 

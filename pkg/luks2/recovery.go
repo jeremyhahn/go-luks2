@@ -92,8 +92,8 @@ const DefaultRecoveryKeyLength = 32
 // printed text. Adding fields of our own here would produce a token systemd
 // reads differently from the way we wrote it.
 //
-// Keyslots is filled in by enrollWithToken, which is the only place that knows
-// the answer.
+// Keyslots is filled in by AddRecoveryKey once it knows which slot the
+// credential landed in.
 func recoveryToken() *LegacyToken {
 	return &LegacyToken{Type: recoveryTokenType}
 }
@@ -275,8 +275,9 @@ func (r *RecoveryKey) Destroy() {
 // ParseRecoveryKey normalizes a typed-or-pasted recovery key that the caller
 // has already placed in protected memory: trims surrounding whitespace and
 // refuses anything that cannot be a single-line credential. text stays the
-// caller's; the result is a new enclave. Unlike ParseLegacyRecoveryKey, the
-// input never passes through a Go string at this boundary.
+// caller's; the result is a new enclave. Unlike the internal
+// parseLegacyRecoveryKey, the input never passes through a Go string at this
+// boundary.
 func ParseRecoveryKey(text *enclave.MemoryEnclave) (*enclave.MemoryEnclave, error) {
 	return recoverykey.Credential(custody, text)
 }

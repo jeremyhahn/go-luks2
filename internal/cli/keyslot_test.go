@@ -8,8 +8,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
 func TestRunTestKeyAcceptsTheRightPassphrase(t *testing.T) {
@@ -66,7 +69,7 @@ func TestRunAddKeyAddsSecondPassphrase(t *testing.T) {
 	path := newTestVolumeImage(t, "addkey.img")
 	e, _, _, stdout, _ := newTestEnv(bytes.NewBufferString(testPassphrase + "\nsecond-pass\n"))
 
-	if err := runAddKey(context.Background(), e, []string{"--kdf", "pbkdf2-sha256", path}); err != nil {
+	if err := runAddKey(context.Background(), e, []string{"--pbkdf", "pbkdf2", "--hash", "sha256", "--iter-time", "10", path}); err != nil {
 		t.Fatalf("runAddKey: %v", err)
 	}
 	if !strings.Contains(stdout.String(), "Passphrase added") {
@@ -83,7 +86,7 @@ func TestRunAddKeyRefusesPBKDF2SHA1(t *testing.T) {
 	path := newTestVolumeImage(t, "addkey-sha1.img")
 	e, _, _, _, _ := newTestEnv(bytes.NewBufferString(testPassphrase + "\nsecond-pass\n"))
 
-	err := runAddKey(context.Background(), e, []string{"--kdf", "pbkdf2-sha1", path})
+	err := runAddKey(context.Background(), e, []string{"--pbkdf", "pbkdf2", "--hash", "sha1", path})
 	var ue *UsageError
 	if !errors.As(err, &ue) {
 		t.Fatalf("runAddKey error = %T, want *UsageError", err)
@@ -94,7 +97,7 @@ func TestRunChangeKeyReplacesPassphrase(t *testing.T) {
 	path := newTestVolumeImage(t, "changekey.img")
 	e, _, _, stdout, _ := newTestEnv(bytes.NewBufferString(testPassphrase + "\nreplacement\n"))
 
-	if err := runChangeKey(context.Background(), e, []string{path, "0"}); err != nil {
+	if err := runChangeKey(context.Background(), e, []string{"--pbkdf", "pbkdf2", "--iter-time", "10", path, "0"}); err != nil {
 		t.Fatalf("runChangeKey: %v", err)
 	}
 	if !strings.Contains(stdout.String(), "Keyslot 0") {
@@ -109,6 +112,43 @@ func TestRunChangeKeyReplacesPassphrase(t *testing.T) {
 	e3, _, _, _, _ := newTestEnv(bytes.NewBufferString(testPassphrase + "\n"))
 	if err := runTestKey(context.Background(), e3, []string{path}); err == nil {
 		t.Fatal("runTestKey: want the old passphrase to no longer open the volume")
+	}
+}
+
+// slotIterations re-reads keyslot slot's PBKDF2 iteration count from path.
+func slotIterations(t *testing.T, path string, slot int) int {
+	t.Helper()
+	v, err := luks2.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+	h, err := v.Header(context.Background())
+	if err != nil {
+		t.Fatalf("Header: %v", err)
+	}
+	for _, s := range h.Keyslots() {
+		if s.ID == slot {
+			return s.KDF.Iterations
+		}
+	}
+	t.Fatalf("keyslot %d not found in %s", slot, path)
+	return 0
+}
+
+// changekey's KDF options re-cost the slot, as luksChangeKey's do: the count
+// --pbkdf-force-iterations names is the count on disk afterwards.
+func TestRunChangeKeyForceIterationsRecostsTheSlot(t *testing.T) {
+	path := newTestVolumeImage(t, "changekey-recost.img")
+	want := 2 * slotIterations(t, path, 0)
+	e, _, _, _, _ := newTestEnv(bytes.NewBufferString(testPassphrase + "\nreplacement\n"))
+
+	args := []string{"--pbkdf", "pbkdf2", "--pbkdf-force-iterations", strconv.Itoa(want), path, "0"}
+	if err := runChangeKey(context.Background(), e, args); err != nil {
+		t.Fatalf("runChangeKey: %v", err)
+	}
+	if got := slotIterations(t, path, 0); got != want {
+		t.Errorf("keyslot 0 iterations after changekey = %d, want %d", got, want)
 	}
 }
 

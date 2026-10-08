@@ -302,7 +302,7 @@ func TestVolumeKeyslotWritesDeriveThroughTheInjectedKDF(t *testing.T) {
 
 	calls := 0
 	real := v.sys.passphraseKDF
-	v.sys.passphraseKDF = func(ctx context.Context, p []byte, kdf *header.KDF, n int) (*enclave.MemoryEnclave, error) {
+	v.sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, n int) (*enclave.MemoryEnclave, error) {
 		calls++
 		return real(ctx, p, kdf, n)
 	}

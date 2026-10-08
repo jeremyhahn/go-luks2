@@ -12,10 +12,10 @@ import (
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
-// addKeyKDFHelp is the help text for addkey's single --kdf flag.
-const addKeyKDFHelp = "  --kdf <name>            argon2id, argon2i, pbkdf2 (SHA-256), pbkdf2-sha384 or\n" +
-	"                          pbkdf2-sha512 (default: pbkdf2-sha512 in FIPS 140-3\n" +
-	"                          mode, argon2id otherwise); never pbkdf2-sha1\n"
+// slotKDFHelp is the KDF help for addkey and changekey. Unlike create, giving
+// no KDF option leaves the cost to the library: the volume's own Argon2 cost
+// when it has one, the default otherwise.
+const slotKDFHelp = "\nKDF options (none given: the volume's existing cost, else the default):\n" + kdfFlagsHelp
 
 func addkeyCommand() *command {
 	return &command{
@@ -27,7 +27,7 @@ func addkeyCommand() *command {
 			"Options:\n" + keyFileHelp +
 			"  --new-key-file <path>   Read the NEW passphrase from a file\n" +
 			"  --slot <n>              Use this keyslot instead of the first free one\n" +
-			addKeyKDFHelp,
+			slotKDFHelp,
 		run: runAddKey,
 	}
 }
@@ -37,7 +37,7 @@ func runAddKey(ctx context.Context, e *env, args []string) error {
 	key := keyFileFlag(f, "key-file")
 	newKey := keyFileFlag(f, "new-key-file")
 	slot := f.Int("slot", -1)
-	kdfName := f.String("kdf", "")
+	kdfOpts := declareKDFFlags(f)
 	positional, err := f.parse(args)
 	if err != nil {
 		return err
@@ -48,7 +48,7 @@ func runAddKey(ctx context.Context, e *env, args []string) error {
 
 	// Judged before either passphrase is asked for: an operator should not
 	// type two credentials to learn the KDF was never going to be written.
-	kdf, err := parseAddKeyKDF("addkey", *kdfName)
+	kdf, err := kdfOpts.resolveOptional()
 	if err != nil {
 		return err
 	}
@@ -112,7 +112,8 @@ func changekeyCommand() *command {
 			"Replace the passphrase in a keyslot, in place. The old passphrase must be\n" +
 			"the one in that slot.\n\n" +
 			"Options:\n" + keyFileHelp +
-			"  --new-key-file <path>   Read the NEW passphrase from a file\n",
+			"  --new-key-file <path>   Read the NEW passphrase from a file\n" +
+			slotKDFHelp,
 		run: runChangeKey,
 	}
 }
@@ -121,12 +122,21 @@ func runChangeKey(ctx context.Context, e *env, args []string) error {
 	f := newFlags("changekey")
 	key := keyFileFlag(f, "key-file")
 	newKey := keyFileFlag(f, "new-key-file")
+	kdfOpts := declareKDFFlags(f)
 	positional, err := f.parse(args)
 	if err != nil {
 		return err
 	}
 	if len(positional) < 2 {
 		return &UsageError{Command: "changekey", Detail: "want <device> <slot>"}
+	}
+	kdf, err := kdfOpts.resolveOptional()
+	if err != nil {
+		return err
+	}
+	if err := kdf.Validate(); err != nil {
+		reportKDFRefusal(e, err)
+		return err
 	}
 	device, err := absPath("changekey", positional[0])
 	if err != nil {
@@ -161,22 +171,12 @@ func runChangeKey(ctx context.Context, e *env, args []string) error {
 	}
 	defer volumeKey.Destroy()
 
-	// The slot's existing priority is preserved explicitly: KeyslotParams's
-	// zero Priority is PriorityIgnore, not PriorityNormal, so leaving it
-	// unset would silently stop open from trying this slot again.
-	priority := luks2.PriorityNormal
-	hdr, err := v.Header(ctx)
-	if err != nil {
-		return err
-	}
-	for _, s := range hdr.Keyslots() {
-		if s.ID == slot {
-			priority = s.Priority
-			break
-		}
-	}
-
-	if _, err := v.ChangeKeyslot(ctx, volumeKey, replacement, luks2.KeyslotParams{Priority: priority}); err != nil {
+	// KeyslotParams's zero Priority is PriorityDefault, so ChangeKeyslot keeps
+	// the slot's existing priority -- prefer, normal or ignore -- exactly as
+	// it was: a passphrase change does not re-prioritize the slot. kdf is
+	// zero unless a KDF option was given, so the slot keeps its cost unless
+	// the operator asked for a new one, as with luksChangeKey.
+	if _, err := v.ChangeKeyslot(ctx, volumeKey, replacement, luks2.KeyslotParams{KDF: kdf}); err != nil {
 		return err
 	}
 

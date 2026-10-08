@@ -27,37 +27,21 @@ func (v *Volume) keyslotDeviceFor(locked *device.Locked) (*keyslotDevice, error)
 }
 
 // onDiskPriority converts p to the *int addKeyslotWithMasterKeyAndPriority
-// writes: nil for PriorityNormal, matching the on-disk convention that an
-// absent priority member already means normal (see listKeyslotsFrom and
-// the "NO PRIORITY IS WRITTEN" comment on addKeyslotWithMasterKeyAndPriority).
-// onDiskPriority is the single rule every priority-writing path
-// (AddKeyslot, ChangeKeyslot, Enroll, AddRecoveryKey) applies: an explicit
-// member is written ONLY for PriorityPrefer.
+// and ChangeKeyslot write, the inverse of priorityFromDisk: nil (no member)
+// for PriorityDefault and PriorityNormal, matching the on-disk convention
+// that an absent priority means normal and cryptsetup's own omission of it;
+// int(p)-1 for everything else, so PriorityIgnore writes 0 and
+// PriorityPrefer writes 2. It is the single rule every priority-writing path
+// (AddKeyslot, ChangeKeyslot, Enroll, AddRecoveryKey) applies.
 //
-// This is narrower than "write whatever p says" because DESIGN.md §B.2
-// makes PriorityIgnore Priority's zero value -- the literal enum order --
-// while this package's own, pre-existing convention (the on-disk
-// keyslotPriorityIgnore/Normal/Prefer block above) has always read an
-// ABSENT member as normal, specifically so a caller who never touches
-// Priority does not get a silently-skipped keyslot. A caller that leaves
-// KeyslotParams.Priority unset therefore produces the Go zero value
-// PriorityIgnore, which is indistinguishable from an explicit request to
-// ignore the slot; writing it literally would make every default-priority
-// AddKeyslot/Enroll/AddRecoveryKey call silently create an ignored keyslot.
-// Treating PriorityIgnore the same as PriorityNormal -- both absent, both
-// read back as normal -- is the safe side of that ambiguity: no call
-// through this field can ever create a keyslot an unlock silently skips.
-//
-// This is a genuine DESIGN.md defect (flagged in DECISIONS.md's H9e entry),
-// not something resolved here by reordering the Priority enum unilaterally:
-// that is the owner's call, since Priority is depended on by every §B.2
-// keyslot-writing path, not just this one. Until then, a caller that wants
-// PriorityIgnore in fact has no way to ask for it through KeyslotParams.
+// An undeclared Priority maps outside 0..2 and is refused by
+// addKeyslotWithMasterKeyAndPriority (and by ChangeKeyslot before it writes),
+// never written.
 func onDiskPriority(p Priority) *int {
-	if p != PriorityPrefer {
+	if p == PriorityDefault || p == PriorityNormal {
 		return nil
 	}
-	v := int(p)
+	v := int(p) - 1
 	return &v
 }
 
@@ -109,6 +93,9 @@ func (v *Volume) AddKeyslot(ctx context.Context, key *Key, pass *enclave.MemoryE
 	}
 	if err := p.KDF.Validate(); err != nil {
 		return KeyslotInfo{}, errAt(op, v.path, err)
+	}
+	if !p.Priority.valid() {
+		return KeyslotInfo{}, errAt(op, v.path, errInvalidPriority(p.Priority))
 	}
 
 	opts := p.toAddKeyOptions()
@@ -162,12 +149,15 @@ func (v *Volume) AddKeyslot(ctx context.Context, key *Key, pass *enclave.MemoryE
 // ChangeKeyslot re-wraps key's volume key under a new passphrase, in the
 // keyslot key was recovered from (DESIGN.md §B.2: "the slot key came from").
 // p.Slot is not consulted -- the slot is key's, not a choice this call
-// makes -- and, as for the old ChangeKey this shares its write path with,
-// the keyslot's existing KDF cost is preserved rather than re-read from p:
-// a passphrase rotation is not a request to re-cost the slot (see
-// changeKeyslotCore). p.Priority IS consulted and written (onDiskPriority),
-// the same way AddKeyslot's is: a rotation can re-prioritize the slot even
-// though it cannot re-cost it.
+// makes. A zero p.KDF keeps the keyslot's existing KDF type and cost, as the
+// old ChangeKey this shares its write path with does (a PBKDF2-SHA1 slot is
+// still rewritten as PBKDF2-SHA256; see changeKeyslotCore). A non-zero p.KDF
+// re-costs the slot exactly as AddKeyslot would write it -- the same
+// validation, the same FIPS refusal of Argon2, the same benchmark when only
+// IterTime is given -- which is cryptsetup luksChangeKey's --pbkdf* behavior.
+// p.Priority is consulted too: PriorityDefault keeps the slot's existing
+// priority, and any other value is written (onDiskPriority) the same way
+// AddKeyslot's is.
 func (v *Volume) ChangeKeyslot(ctx context.Context, key *Key, pass *enclave.MemoryEnclave, p KeyslotParams) (KeyslotInfo, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -177,6 +167,24 @@ func (v *Volume) ChangeKeyslot(ctx context.Context, key *Key, pass *enclave.Memo
 	}
 	if err := v.checkWritable(op); err != nil {
 		return KeyslotInfo{}, err
+	}
+	if !p.Priority.valid() {
+		return KeyslotInfo{}, errAt(op, v.path, errInvalidPriority(p.Priority))
+	}
+	// An explicit KDF is held to everything AddKeyslot holds one to, before
+	// the lock is taken; a zero one is the slot's own cost and needs none.
+	var recost *addKeyOptionsForTest
+	if p.KDF != (KDFParams{}) {
+		if err := p.KDF.Validate(); err != nil {
+			return KeyslotInfo{}, errAt(op, v.path, err)
+		}
+		recost = p.toAddKeyOptions()
+		if err := refuseSHA1ForCreation(recost.KDFType, recost.Hash); err != nil {
+			return KeyslotInfo{}, errAt(op, v.path, err)
+		}
+		if err := validateArgon2CreateCost(callerArgon2Options(recost)); err != nil {
+			return KeyslotInfo{}, errAt(op, v.path, err)
+		}
 	}
 
 	slot := key.Keyslot()
@@ -213,12 +221,10 @@ func (v *Volume) ChangeKeyslot(ctx context.Context, key *Key, pass *enclave.Memo
 	}
 	defer v.sys.custody.Release(clonedKey)
 
-	// A passphrase change is not a request to re-prioritize the slot. The
-	// zero Priority -- which onDiskPriority already reads as "not asked for",
-	// never as a request to ignore the slot -- keeps whatever priority the
-	// keyslot has, "prefer" or a cryptsetup-written "ignore" alike; only an
-	// explicit PriorityNormal or PriorityPrefer rewrites it.
-	if p.Priority != PriorityIgnore {
+	// A passphrase change is not a request to re-prioritize the slot:
+	// PriorityDefault keeps whatever priority the keyslot has, "prefer" or a
+	// cryptsetup-written "ignore" alike. Any explicit value rewrites it.
+	if p.Priority != PriorityDefault {
 		targetKeyslot.Priority = onDiskPriority(p.Priority)
 	}
 
@@ -226,7 +232,7 @@ func (v *Volume) ChangeKeyslot(ctx context.Context, key *Key, pass *enclave.Memo
 		if verr := validatePassphraseBytes(b); verr != nil {
 			return verr
 		}
-		return changeKeyslotCore(ctx, dev, hdr, metadata, slotIDStr, slot, targetKeyslot, clonedKey, b)
+		return changeKeyslotCore(ctx, dev, hdr, metadata, slotIDStr, slot, targetKeyslot, clonedKey, b, recost)
 	})
 	if err != nil {
 		return KeyslotInfo{}, errAt(op, v.path, err)

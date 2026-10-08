@@ -246,9 +246,9 @@ KeyslotError	DELETE	luks2.Error{Op, Path, Kind, Detail, Err}; the data lives in 
 KeyslotError.Error	DELETE	with KeyslotError
 KeyslotError.Unwrap	DELETE	with KeyslotError
 KeyslotInfo	KEEP	luks2.KeyslotInfo (KDF field is KDFParams)
-KeyslotPriorityIgnore	RENAME	luks2.PriorityIgnore / PriorityNormal / PriorityPrefer of type Priority
-KeyslotPriorityNormal	RENAME	luks2.PriorityIgnore / PriorityNormal / PriorityPrefer of type Priority
-KeyslotPriorityPrefer	RENAME	luks2.PriorityIgnore / PriorityNormal / PriorityPrefer of type Priority
+KeyslotPriorityIgnore	RENAME	luks2.PriorityIgnore / PriorityNormal / PriorityPrefer of type Priority (zero value PriorityDefault, so each is the on-disk value plus one)
+KeyslotPriorityNormal	RENAME	luks2.PriorityIgnore / PriorityNormal / PriorityPrefer of type Priority (zero value PriorityDefault, so each is the on-disk value plus one)
+KeyslotPriorityPrefer	RENAME	luks2.PriorityIgnore / PriorityNormal / PriorityPrefer of type Priority (zero value PriorityDefault, so each is the on-disk value plus one)
 KillKeyslot	RENAME	(*luks2.Volume).RemoveKeyslot(ctx, slot): guarded (ErrLastKeyslot, ErrKeyslotAreaOverlap); authorization is the caller's policy
 KillSlot	DELETE	credential checks are CLI policy: Unlock / UnlockKeyslot, then RemoveKeyslot
 LUKS2BinaryHeader	UNEXPORT	internal/header (public read model: luks2.Header, KeyslotInfo, Segment)

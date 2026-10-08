@@ -87,7 +87,7 @@ func countKDFCalls(t *testing.T) (*int, volumeSys) {
 	t.Helper()
 	calls := 0
 	sys := testVolumeSys()
-	sys.passphraseKDF = func(context.Context, []byte, *header.KDF, int) (*enclave.MemoryEnclave, error) {
+	sys.passphraseKDFOverride = func(context.Context, []byte, *header.KDF, int) (*enclave.MemoryEnclave, error) {
 		calls++
 		return nil, errors.New("derivation reached")
 	}
@@ -408,7 +408,7 @@ func TestAnAllocatorSizedToThePlannedPeakOpensTheVolume(t *testing.T) {
 		calls := 0
 		sys := testVolumeSys()
 		real := sys.passphraseKDF
-		sys.passphraseKDF = func(ctx context.Context, p []byte, kdf *header.KDF, n int) (*enclave.MemoryEnclave, error) {
+		sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, n int) (*enclave.MemoryEnclave, error) {
 			calls++
 			return real(ctx, p, kdf, n)
 		}

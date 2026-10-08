@@ -270,7 +270,7 @@ func (c Custody) CloneFiltered(op string, b []byte, keep func(byte) bool) (*encl
 // This module can do nothing with any of them. It cannot remedy the environment,
 // retrying at once with nothing changed is refused again (go-enclave's own
 // guidance), and WipeAll belongs to the binary that owns the process, never to
-// a library. Nor may it turn either into the operation's error: every release
+// a library. Nor may it turn any of them into the operation's error: every release
 // happens after the operation's outcome is already decided -- a volume
 // formatted, a keyslot written, a mapping created -- or while an earlier error
 // is already being returned. Reporting a completed Format or Unlock as failed

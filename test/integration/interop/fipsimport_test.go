@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jeremyhahn/go-luks2/pkg/dmcrypt"
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 	"github.com/jeremyhahn/go-luks2/test/internal/harness"
 )
@@ -49,6 +50,9 @@ const (
 	fipsChildVolumeEnv = "GO_LUKS2_ITEST_FIPS_VOLUME"
 
 	fipsChildRoleUnlock = "unlock"
+	// fipsChildRoleStandIn runs the unlock role's whole path with
+	// standInActivate in place of dmcrypt.Activate, so it needs no root.
+	fipsChildRoleStandIn = "unlock-stand-in"
 
 	fipsChildOK             = 0
 	fipsChildImportRequired = 10
@@ -67,11 +71,19 @@ func init() {
 
 func runFIPSChild(role, device, volume string) int {
 	fmt.Printf("fips140.Enabled=%v\n", fips140.Enabled())
-	if role != fipsChildRoleUnlock {
+	var activate activator
+	switch role {
+	case fipsChildRoleUnlock:
+		activate = dmcrypt.Activate
+	case fipsChildRoleStandIn:
+		activate = standInActivate
+	default:
 		fmt.Printf("unknown role %q\n", role)
 		return fipsChildFailed
 	}
-	err := Unlock(device, []byte(fipsImportPassphrase), volume)
+	// Unrecorded: this process has no suite (see init). The parent records
+	// whatever mapping it leaves.
+	_, err := activateUnrecorded(context.Background(), device, []byte(fipsImportPassphrase), volume, activate)
 	if err == nil {
 		return fipsChildOK
 	}
@@ -82,10 +94,39 @@ func runFIPSChild(role, device, volume string) int {
 	return fipsChildFailed
 }
 
-// unlockInFIPSProcess runs luks2.Unlock in a child under GODEBUG=fips140=only
-// and returns its exit code and output. It fails the test if the child did not
-// actually run in FIPS mode.
+// standInActivate is dmcrypt.Activate's stand-in for fipsChildRoleStandIn:
+// it requires the volume and the key Unlock recovered and maps nothing.
+func standInActivate(_ context.Context, v *luks2.Volume, key *luks2.Key, name string) (*dmcrypt.Mapping, error) {
+	if v == nil || key == nil {
+		return nil, errors.New("the stand-in activation was given no volume or no key")
+	}
+	return &dmcrypt.Mapping{Name: name}, nil
+}
+
+// unlockInFIPSProcess unlocks and activates device as volume in a child under
+// GODEBUG=fips140=only, records any mapping the child left in this run's
+// ledger, and returns the child's exit code and output. It fails the test if
+// the child did not actually run in FIPS mode.
 func unlockInFIPSProcess(t *testing.T, device, volume string) (int, string) {
+	t.Helper()
+	code, out := runFIPSChildProcess(t, fipsChildRoleUnlock, device, volume)
+
+	// The child has no suite to record in, so a mapping it activated is
+	// recorded here, once it has exited -- whatever its exit code says.
+	switch m, err := dmcrypt.Lookup(t.Context(), volume); {
+	case err == nil:
+		if err := recordMapping(volume, m.UUID); err != nil {
+			t.Fatalf("the FIPS child's mapping %q: %v", volume, err)
+		}
+	case !errors.Is(err, dmcrypt.ErrNotActive):
+		t.Fatalf("looking up the mapping the FIPS child may have left: %v", err)
+	}
+	return code, out
+}
+
+// runFIPSChildProcess re-executes this test binary as a FIPS child in role,
+// and returns its exit code and what it printed after the mode line.
+func runFIPSChildProcess(t *testing.T, role, device, volume string) (int, string) {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
@@ -94,7 +135,7 @@ func unlockInFIPSProcess(t *testing.T, device, volume string) (int, string) {
 	env := slices.DeleteFunc(os.Environ(), func(kv string) bool {
 		return strings.HasPrefix(kv, "GODEBUG=") || strings.HasPrefix(kv, "GO_LUKS2_ITEST_FIPS_")
 	})
-	cmd.Env = append(env, "GODEBUG=fips140=only", fipsChildRoleEnv+"="+fipsChildRoleUnlock,
+	cmd.Env = append(env, "GODEBUG=fips140=only", fipsChildRoleEnv+"="+role,
 		fipsChildDeviceEnv+"="+device, fipsChildVolumeEnv+"="+volume)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -112,7 +153,9 @@ func unlockInFIPSProcess(t *testing.T, device, volume string) (int, string) {
 	if !strings.HasPrefix(string(out), want) {
 		t.Fatalf("the child given GODEBUG=fips140=only did not run in FIPS mode\nstdout:\n%s\nstderr:\n%s", out, stderr.String())
 	}
-	return code, strings.TrimPrefix(string(out), want)
+	// stderr is where a panic's stack goes; without it a crashed child is
+	// only an exit code.
+	return code, strings.TrimPrefix(string(out), want) + stderr.String()
 }
 
 // cryptsetupWithPassphrase runs cryptsetup with the passphrase on stdin and
@@ -330,4 +373,36 @@ func TestFIPSImportOfADefaultCryptsetupVolumeMapsTheSameData(t *testing.T) {
 	cryptsetupWithPassphrase(t, "open", "--type", "luks2", loopDev, csRead)
 	plaintext.assertReads(t, csRead, "cryptsetup")
 	lockWithRetry(t, csRead)
+}
+
+// TestFIPSChildUnlocksAMigratedImageWithoutTheSuite runs the FIPS child's
+// unlock path end to end -- a real re-execution under GODEBUG=fips140=only,
+// the real Open and Unlock of a migrated cryptsetup-default volume -- with
+// only device-mapper stood in, so it needs no root and no loop device.
+//
+// The child exits from init(), before TestMain registers runSuite, so
+// anything on its path that reaches for the suite dereferences nil. That is
+// how both kernel tests above once failed with exit 2 (a panic) only AFTER
+// the migration: the un-migrated unlock is refused before activation, and
+// only a successful activation went on to record the mapping in a ledger the
+// child does not have. The parent records it instead (unlockInFIPSProcess).
+func TestFIPSChildUnlocksAMigratedImageWithoutTheSuite(t *testing.T) {
+	image := filepath.Join(t.TempDir(), "fips-child.img")
+	if err := createTestFile(image, 32); err != nil {
+		t.Fatalf("creating the image failed: %v", err)
+	}
+	cryptsetupWithPassphrase(t, "luksFormat", "--type", "luks2", "--batch-mode", image)
+
+	if code, out := runFIPSChildProcess(t, fipsChildRoleStandIn, image, "fips-child-before"); code != fipsChildImportRequired {
+		t.Fatalf("FIPS unlock of the un-migrated image exited %d, want %d (ErrFIPSImportRequired)\n%s",
+			code, fipsChildImportRequired, out)
+	}
+
+	if _, err := migrateToFIPSForTest(image, []byte(fipsImportPassphrase)); err != nil {
+		t.Fatalf("MigrateToFIPS failed: %v", err)
+	}
+
+	if code, out := runFIPSChildProcess(t, fipsChildRoleStandIn, image, "fips-child-after"); code != fipsChildOK {
+		t.Fatalf("FIPS unlock of the migrated image exited %d, want %d\n%s", code, fipsChildOK, out)
+	}
 }

@@ -37,7 +37,7 @@ func TestDeriveKeyEnclaveCancelledDuringDerivationDestroysOutput(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancel()
 
-	key, err := deriveKeyEnclave(ctx, []byte("a passphrase"), kdf, 32)
+	key, err := deriveKeyEnclave(ctx, []byte("a passphrase"), kdf, 32, defaultVolumeSys())
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("deriveKeyEnclave canceled mid-derivation = %v, want context.DeadlineExceeded", err)
 	}
