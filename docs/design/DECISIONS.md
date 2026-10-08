@@ -3462,7 +3462,8 @@ under a different shape)
   `VERSION` write is idempotent: when `VERSION` already reads the release
   version (it is bumped ahead of the tag for a release candidate) no version
   commit is made, instead of failing on an empty commit. Every other guard is
-  unchanged, and `release-alpha` stays as an alias. `test/makefile/release_test.go`
+  unchanged (superseded 2026-10-08: see `release-targets` below, where each kind
+  has its own target). `test/makefile/release_test.go`
   runs the real recipe against a throwaway repository.
 - **`ParseLegacyRecoveryKey` is still exported.** DESIGN §B.6 disposes it as
   unexported; the code at this commit still exports it from `pkg/luks2`
@@ -3726,3 +3727,32 @@ behavior. See `pkg/luks2/fipsmigrate.go:72-104`,
   `/opt` is ordinary; the walk judges every directory such a path passes
   through, which is what the refusal would have protected. Off Linux, with no
   `O_PATH` or `/proc/self/fd`, `Open` fails closed with `ErrTool`.
+
+## release-targets (one release target per kind)
+
+- **`release-alpha`, `release-candidate` and `release` each cut one kind and
+  refuse the other two.** Owner ruling 2026-10-07 (handbook
+  `release-versioning.md` §1a, "One target per kind"), aligned 2026-10-08. This
+  supersedes the `cr-docs` entry above, where `release` took all three kinds and
+  `release-alpha` was an alias: `release-alpha` now takes only `vX.Y.Z-alpha`,
+  `release-candidate` only `vX.Y.Z-rc.N`, `release` only `vX.Y.Z`. All three
+  expand one recipe (`RELEASE_RECIPE` in the `Makefile`), so the guards cannot
+  drift; a target adds only the kind it exports. A wrong kind is refused right
+  after the grammar check, before any guard that reads the repository and before
+  anything is written, with a message naming the right target (`make release
+  VERSION=v1.0.0-rc.4` says to use `make release-candidate`). The recipe is a
+  variable each target expands, not a shared prerequisite, because a prerequisite
+  runs once per invocation and `make release-candidate release VERSION=...` would
+  then clear one target's kind check with the other's.
+  The `release` target taking `-rc.N` is a breaking change for anyone who cut
+  candidates with it (rc.3 was cut that way); `test/makefile/release_test.go`
+  pins the matrix.
+- **`VERSION` stays explicit for `release-alpha`.** The handbook's alpha row
+  and its "Tooling gap" note (`release-versioning.md` §2: `make release-alpha`
+  "increments only PATCH") describe a target that guesses the next alpha. This
+  repository's recipe never guessed, for the reason in the `Makefile` comment
+  block above the recipe: an auto-increment labels an API addition a bug fix, and
+  the version is the only signal a pinning consumer gets. The note itself calls
+  the PATCH-only increment a gap, so adopting it would copy the defect.
+  `make release-alpha VERSION=vX.Y.Z-alpha` is therefore required, as it is for
+  the other two targets; a deliberate keep, not an omission.

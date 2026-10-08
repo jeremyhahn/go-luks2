@@ -82,8 +82,9 @@ GOBIN=$(GOPATH)/bin
 # Version stamped into the binary, read from the VERSION file.
 #
 # Named BUILD_VERSION, not VERSION, and that is not cosmetic (#19). The release
-# target takes the version as `make release VERSION=vX.Y.Z-alpha` (or
-# vX.Y.Z-rc.N; release-alpha is an alias) and refuses to guess. A make variable also called VERSION SHADOWS that argument:
+# targets take the version as `make release-alpha VERSION=vX.Y.Z-alpha`,
+# `make release-candidate VERSION=vX.Y.Z-rc.N` or `make release VERSION=vX.Y.Z`
+# and refuse to guess. A make variable also called VERSION SHADOWS that argument:
 # measured on adoption, `make release-alpha` with no argument sailed past the
 # "state the version explicitly" guard — REL_VERSION was never empty, it held
 # this line's text — and died one guard later on a grammar error naming
@@ -1258,15 +1259,16 @@ override export GOTOOLCHAIN := go$(GO_FLOOR)
 endif
 
 # ---- dependency-resolution targets (2026-08-13 cutover) ----
-# deps-latest runs before compiling in a consumer repo; release (alias
-# release-alpha) publishes this repo's next -alpha or -rc.N tag.
+# deps-latest runs before compiling in a consumer repo; release-alpha,
+# release-candidate and release each publish one kind of tag (-alpha, -rc.N and
+# final) for this repo.
 #
 # SUBMODULE_TAGS is GONE with the old recipe (#19). It existed to tag nested
 # modules in lockstep with the root, and it was always empty here: `find . -name
 # go.mod` returns exactly one file, the root. An empty knob for a case this
 # repository does not have is a thing to maintain and to misread, not a
 # feature. A repo that grows a nested module adds its lockstep check back as a
-# PREREQUISITE of release-alpha, where a failure aborts before the tag exists.
+# PREREQUISITE of each release target, where a failure aborts before the tag exists.
 # deps-latest picks the highest tag INCLUDING -alpha prereleases — bare
 # 'go get @latest' ignores prereleases and would downgrade to legacy v0.0.0.
 
@@ -1296,7 +1298,7 @@ REPO_NAME ?= go-luks2
 # for a checkout that names its remote differently.
 RELEASE_REMOTE ?= dev
 
-# ---- release (-alpha and -rc.N; alias release-alpha) (template v2.3.5) ----
+# ---- release-alpha, release-candidate, release: one target per kind (template v2.3.5) ----
 #
 # Replaces a recipe that failed only when you looked at it. The old one:
 #   1. auto-incremented PATCH only, so an API addition shipped labeled a bugfix
@@ -1312,10 +1314,19 @@ RELEASE_REMOTE ?= dev
 # locally. Two releases had to be cut by hand because of it.
 #
 # The contract now:
-#   - The version is EXPLICIT: `make release VERSION=v0.2.0-alpha` or
-#     `VERSION=v1.0.0-rc.2` (release-alpha is an alias). No
+#   - There is ONE TARGET PER KIND (release-versioning.md 1a, owner ruling
+#     2026-10-07), each refusing the other two BEFORE anything is written, and
+#     naming the right target in the refusal:
+#       make release-alpha     VERSION=vX.Y.Z-alpha   an alpha
+#       make release-candidate VERSION=vX.Y.Z-rc.N    a release candidate
+#       make release           VERSION=vX.Y.Z         a final release
+#     All three expand the same RELEASE_RECIPE (below), so the guards cannot
+#     drift apart; a target adds only the kind it exports.
+#   - The version is EXPLICIT for all three, release-alpha included. No
 #     auto-increment; whoever cuts the release decides patch/minor/major and
-#     says so. The recipe refuses to guess.
+#     says so. The recipe refuses to guess. (The handbook's "Tooling gap" note
+#     describes an alpha target that bumps PATCH only; this one does not, and
+#     docs/design/DECISIONS.md records why it stays that way.)
 #   - Every git write goes through AGENT_GIT (identity + SSH signing); the tag
 #     is ANNOTATED and signed, not lightweight.
 #   - Pushes ONLY the release commit and the named tag, atomically. Never --tags.
@@ -1341,7 +1352,7 @@ RELEASE_REMOTE ?= dev
 # v2.3.3 SECURITY: every settable Make variable crosses into the recipe ONCE,
 # via a target-specific export, and the body references only shell parameters
 # ($$REL_*). Before that, $(VERSION) was expanded into recipe TEXT before the
-# grammar guard ran, so `make release-alpha 'VERSION=v0.0.0-alpha`cmd`'`
+# grammar guard ran, so `make release 'VERSION=v0.0.0-alpha`cmd`'`
 # executed the backtick at the first guard line. Quoting is no boundary against
 # a value that becomes recipe source. `$(value VERSION)` also stops the double
 # evaluation the export would otherwise add.
@@ -1352,7 +1363,7 @@ RELEASE_REMOTE ?= dev
 # whether or not any rule names the variable. That is a property of invoking
 # make, not of this recipe, and this recipe cannot close it.
 
-.PHONY: release release-alpha deps-latest
+.PHONY: release release-alpha release-candidate deps-latest
 
 # changelog-assemble folds changelog.d fragments into a new CHANGELOG.md section.
 #
@@ -1360,12 +1371,13 @@ RELEASE_REMOTE ?= dev
 # the workflow only overwrites the runner-workspace copy, so a fragment folded in
 # there would never reach the repository (release-versioning.md 5).
 #
-# Run it, read the diff, commit it, then `make release VERSION=...`. It
+# Run it, read the diff, commit it, then the release target for the kind
+# (release-alpha, release-candidate or release) with the same VERSION. It
 # does not commit for you: the changelog is the one artefact of a release a human
 # should look at before it is published.
 changelog-assemble: export ASM_VERSION := $(value VERSION)
 changelog-assemble: ## Fold changelog.d fragments into a CHANGELOG.md section (VERSION=vX.Y.Z-alpha or vX.Y.Z-rc.N)
-	@test -n "$$ASM_VERSION" || { echo 'ERROR: state the version explicitly: make changelog-assemble VERSION=vX.Y.Z[-alpha|-rc.N]'; exit 1; }
+	@test -n "$$ASM_VERSION" || { echo 'ERROR: state the version explicitly: make changelog-assemble VERSION=vX.Y.Z[-alpha|-rc.N] (the same VERSION the release target will take)'; exit 1; }
 	@ls changelog.d/*.md >/dev/null 2>&1 || { echo 'ERROR: changelog.d holds no fragments; nothing to assemble'; exit 1; }
 	@set -eu; \
 	ver="$${ASM_VERSION#v}"; \
@@ -1385,20 +1397,32 @@ changelog-assemble: ## Fold changelog.d fragments into a CHANGELOG.md section (V
 	echo "Assembled $$(echo "$$frags" | wc -w) fragment(s) into CHANGELOG.md as [$$ver]."; \
 	echo "Review the diff, then commit CHANGELOG.md and the fragment deletions together."
 
-# release-alpha is the original name, kept as an alias: the recipe below takes
-# -alpha, -rc.N and final versions, and VERSION is still stated explicitly.
-release-alpha: release
-
-release: export REL_VERSION   := $(value VERSION)
-release: export REL_REMOTE    := $(RELEASE_REMOTE)
-release: export REL_REPO      := $(REPO_NAME)
-release: export REL_AGENT_GIT := $(AGENT_GIT)
-release: ## Tag and push a release (VERSION=vX.Y.Z, vX.Y.Z-alpha or vX.Y.Z-rc.N)
-	@test -n "$$REL_VERSION" || { echo 'ERROR: state the version explicitly: make release VERSION=vX.Y.Z[-alpha|-rc.N] (you decide patch/minor/major — the recipe refuses to guess)'; exit 1; }
+# ONE RECIPE, THREE TARGETS. RELEASE_RECIPE holds every guard and every write;
+# release-alpha, release-candidate and release each expand it and differ only in
+# the kind they export as REL_TARGET, which the first guard after the grammar
+# check compares with the kind the VERSION argument is. The recipe is a variable
+# rather than a shared prerequisite on purpose: a prerequisite runs once per
+# invocation, so `make release-candidate release VERSION=...` would run it once
+# under whichever kind make visited first and clear the other target's check.
+# Expanded per target, each gets its own kind check and its own run.
+#
+# The body references only shell parameters ($$REL_*), as v2.3.3 requires: the
+# one $(RELEASE_RECIPE) reference in each target below carries no settable value.
+define RELEASE_RECIPE
+	@test -n "$$REL_VERSION" || { echo "ERROR: state the version explicitly: make $$REL_TARGET VERSION=$$REL_SHAPE (you decide patch/minor/major — the recipe refuses to guess)"; exit 1; }
 	@printf '%s' "$$REL_VERSION" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-alpha|-rc\.[1-9][0-9]*)?$$' || { echo "ERROR: VERSION is not of the form vX.Y.Z, vX.Y.Z-alpha or vX.Y.Z-rc.N (no leading zeroes): $$REL_VERSION"; exit 1; }
+	@# One target per kind (release-versioning.md 1a). The kind is read off the
+	@# VERSION just validated; a mismatch is refused here, before any guard that
+	@# reads the repository and long before anything is written.
+	@case "$$REL_VERSION" in \
+	  *-alpha) got=release-alpha; what='an alpha' ;; \
+	  *-rc.*)  got=release-candidate; what='a release candidate' ;; \
+	  *)       got=release; what='a final release' ;; \
+	esac; \
+	test "$$got" = "$$REL_TARGET" || { echo "ERROR: $$REL_VERSION is $$what, which make $$REL_TARGET does not cut. Use: make $$got VERSION=$$REL_VERSION"; exit 1; }
 	@test "$$(git rev-parse --abbrev-ref HEAD)" = main || { echo "ERROR: releases are cut from main; you are on $$(git rev-parse --abbrev-ref HEAD). 'push $$REL_REMOTE HEAD' would publish this branch."; exit 1; }
 	@test -n "$$REL_REPO" || { echo 'ERROR: REPO_NAME is empty — set it to the literal repo name, never $$(notdir $$(CURDIR))'; exit 1; }
-	@test -x "$$REL_AGENT_GIT" || { echo 'ERROR: AGENT_GIT does not point at an executable agent-git.sh. Every git write below signs through it, and a bad path must fail HERE rather than at the first signed write, with a tag already cut. No default path is baked in (#20): put agent-git.sh on PATH, or run: make release AGENT_GIT=/path/to/agent-git.sh VERSION=vX.Y.Z[-alpha|-rc.N]'; exit 1; }
+	@test -x "$$REL_AGENT_GIT" || { echo "ERROR: AGENT_GIT does not point at an executable agent-git.sh. Every git write below signs through it, and a bad path must fail HERE rather than at the first signed write, with a tag already cut. No default path is baked in (#20): put agent-git.sh on PATH, or run: make $$REL_TARGET AGENT_GIT=/path/to/agent-git.sh VERSION=$$REL_SHAPE"; exit 1; }
 	@test -n "$$REL_REMOTE" || { echo 'ERROR: RELEASE_REMOTE is empty — set it to the git remote that serves this module'; exit 1; }
 	@git remote get-url "$$REL_REMOTE" >/dev/null 2>&1 || { echo "ERROR: no git remote named $$REL_REMOTE. Set RELEASE_REMOTE; the duplicate-tag check below cannot answer against a remote that does not resolve"; exit 1; }
 	@! git rev-parse -q --verify "refs/tags/$$REL_VERSION" >/dev/null || { echo "ERROR: tag $$REL_VERSION already exists locally"; exit 1; }
@@ -1413,7 +1437,7 @@ release: ## Tag and push a release (VERSION=vX.Y.Z, vX.Y.Z-alpha or vX.Y.Z-rc.N)
 	@# match, so under pipefail the pipeline reports ls's SIGPIPE rather than
 	@# grep's verdict and the check silently never fires -- measured.
 	@frags=$$(ls changelog.d/*.md 2>/dev/null | grep -v '/README\.md$$' || true); \
-	test -z "$$frags" || { echo "ERROR: changelog.d still holds unassembled fragments:"; echo "$$frags" | sed 's/^/  /'; echo "Tagging now would publish a release whose CHANGELOG omits them. Run: make changelog-assemble VERSION=$$REL_VERSION, review, commit, then release."; exit 1; }
+	test -z "$$frags" || { echo "ERROR: changelog.d still holds unassembled fragments:"; echo "$$frags" | sed 's/^/  /'; echo "Tagging now would publish a release whose CHANGELOG omits them. Run: make changelog-assemble VERSION=$$REL_VERSION, review, commit, then make $$REL_TARGET."; exit 1; }
 	@ver="## [$${REL_VERSION#v}]"; awk -v ver="$$ver" 'index($$0, ver) == 1 { f = 1 } END { exit f ? 0 : 1 }' CHANGELOG.md || { echo "ERROR: CHANGELOG.md has no \"$$ver\" section heading. Matched LITERALLY and anchored at the line start — an unanchored prose mention does not count, and neither does a near-miss heading"; exit 1; }
 	@# Idempotent: when VERSION already reads this release (the rc.1 case, where
 	@# the file was bumped ahead of the tag) there is nothing to commit, and an
@@ -1428,6 +1452,34 @@ release: ## Tag and push a release (VERSION=vX.Y.Z, vX.Y.Z-alpha or vX.Y.Z-rc.N)
 	"$$REL_AGENT_GIT" "$$REL_REPO" tag -a "$$REL_VERSION" -m "$$REL_VERSION"
 	"$$REL_AGENT_GIT" "$$REL_REPO" push --atomic "$$REL_REMOTE" HEAD "refs/tags/$$REL_VERSION"
 	@echo "Released $$REL_VERSION (signed, annotated, single tag pushed)"
+endef
+
+release-alpha: export REL_TARGET    := release-alpha
+release-alpha: export REL_SHAPE     := vX.Y.Z-alpha
+release-alpha: export REL_VERSION   := $(value VERSION)
+release-alpha: export REL_REMOTE    := $(RELEASE_REMOTE)
+release-alpha: export REL_REPO      := $(REPO_NAME)
+release-alpha: export REL_AGENT_GIT := $(AGENT_GIT)
+release-alpha: ## Tag and push an alpha (VERSION=vX.Y.Z-alpha); refuses any other kind
+	$(RELEASE_RECIPE)
+
+release-candidate: export REL_TARGET    := release-candidate
+release-candidate: export REL_SHAPE     := vX.Y.Z-rc.N
+release-candidate: export REL_VERSION   := $(value VERSION)
+release-candidate: export REL_REMOTE    := $(RELEASE_REMOTE)
+release-candidate: export REL_REPO      := $(REPO_NAME)
+release-candidate: export REL_AGENT_GIT := $(AGENT_GIT)
+release-candidate: ## Tag and push a release candidate (VERSION=vX.Y.Z-rc.N); refuses any other kind
+	$(RELEASE_RECIPE)
+
+release: export REL_TARGET    := release
+release: export REL_SHAPE     := vX.Y.Z
+release: export REL_VERSION   := $(value VERSION)
+release: export REL_REMOTE    := $(RELEASE_REMOTE)
+release: export REL_REPO      := $(REPO_NAME)
+release: export REL_AGENT_GIT := $(AGENT_GIT)
+release: ## Tag and push a final release (VERSION=vX.Y.Z); refuses any other kind
+	$(RELEASE_RECIPE)
 
 deps-latest:
 	@GOWORK=off sh -c ' \

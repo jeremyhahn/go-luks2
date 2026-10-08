@@ -111,11 +111,28 @@ func releaseFixture(t *testing.T, version string, sections ...string) (work, rem
 	return work, remote, agentGit
 }
 
-// runRelease runs `make release` in the fixture and returns the combined output
-// and whether it succeeded.
-func runRelease(t *testing.T, work, agentGit, version string) (string, bool) {
+// targetFor names the one release target that cuts version's kind.
+func targetFor(version string) string {
+	switch {
+	case strings.HasSuffix(version, "-alpha"):
+		return "release-alpha"
+	case strings.Contains(version, "-rc."):
+		return "release-candidate"
+	default:
+		return "release"
+	}
+}
+
+// runTarget runs `make <target> VERSION=<version>` in the fixture and returns
+// the combined output and whether it succeeded. An empty version passes no
+// VERSION argument at all.
+func runTarget(t *testing.T, target, work, agentGit, version string) (string, bool) {
 	t.Helper()
-	cmd := exec.Command(lookPath(t, "make"), "release", "VERSION="+version, "AGENT_GIT="+agentGit) // #nosec G204 -- make is resolved from PATH; arguments are test values
+	args := []string{target, "AGENT_GIT=" + agentGit}
+	if version != "" {
+		args = append(args, "VERSION="+version)
+	}
+	cmd := exec.Command(lookPath(t, "make"), args...) // #nosec G204 -- make is resolved from PATH; arguments are test values
 	cmd.Dir = work
 	cmd.Env = append(environ(nil, nil),
 		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
@@ -123,6 +140,12 @@ func runRelease(t *testing.T, work, agentGit, version string) (string, bool) {
 		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.invalid")
 	out, err := cmd.CombinedOutput()
 	return string(out), err == nil
+}
+
+// runRelease cuts version with the target for its own kind.
+func runRelease(t *testing.T, work, agentGit, version string) (string, bool) {
+	t.Helper()
+	return runTarget(t, targetFor(version), work, agentGit, version)
 }
 
 // TestReleaseAcceptsAlphaRCAndFinalVersions: the recipe was alpha-only, so the
@@ -238,20 +261,103 @@ func TestReleaseKeepsItsGuards(t *testing.T) {
 	})
 }
 
-// TestReleaseAlphaAliasStillWorks: the old target name keeps working.
-func TestReleaseAliasReleaseAlphaStillWorks(t *testing.T) {
-	work, remote, agentGit := releaseFixture(t, "0.0.0", "0.3.2-alpha")
-	cmd := exec.Command(lookPath(t, "make"), "release-alpha", "VERSION=v0.3.2-alpha", "AGENT_GIT="+agentGit) // #nosec G204 -- test values
+// releaseTargets are the three kinds' targets, each with a version of its kind.
+var releaseTargets = []struct{ target, version string }{
+	{"release-alpha", "v0.3.2-alpha"},
+	{"release-candidate", "v1.0.0-rc.4"},
+	{"release", "v1.0.0"},
+}
+
+// TestEachReleaseTargetCutsOnlyItsOwnKind: one target per kind. Each target
+// cuts its own kind and refuses the other two, and the refusal names the target
+// that does cut the kind.
+func TestEachReleaseTargetCutsOnlyItsOwnKind(t *testing.T) {
+	for _, tgt := range releaseTargets {
+		for _, v := range releaseTargets {
+			t.Run(tgt.target+"/"+v.version, func(t *testing.T) {
+				work, remote, agentGit := releaseFixture(t, "0.0.0", strings.TrimPrefix(v.version, "v"))
+				head := gitIn(t, work, "rev-parse", "HEAD")
+				out, ok := runTarget(t, tgt.target, work, agentGit, v.version)
+				if tgt.target == v.target {
+					if !ok {
+						t.Fatalf("make %s VERSION=%s failed:\n%s", tgt.target, v.version, out)
+					}
+					if got := gitIn(t, remote, "tag", "--list", v.version); got != v.version {
+						t.Errorf("tag %s was not pushed (got %q)", v.version, got)
+					}
+					return
+				}
+				if ok {
+					t.Fatalf("make %s VERSION=%s succeeded; want refusal:\n%s", tgt.target, v.version, out)
+				}
+				if want := "Use: make " + v.target + " VERSION=" + v.version; !strings.Contains(out, want) {
+					t.Errorf("refusal does not name %q:\n%s", want, out)
+				}
+				// Refused before anything is written: no commit, no tag, no push, and
+				// the VERSION file as the fixture left it.
+				if got := gitIn(t, work, "rev-parse", "HEAD"); got != head {
+					t.Errorf("HEAD moved from %s to %s on a refusal", head, got)
+				}
+				if got := gitIn(t, work, "tag", "--list"); got != "" {
+					t.Errorf("a local tag was cut on a refusal: %q", got)
+				}
+				if got := gitIn(t, remote, "tag", "--list"); got != "" {
+					t.Errorf("a tag was pushed on a refusal: %q", got)
+				}
+				if got := gitIn(t, work, "status", "--porcelain"); got != "" {
+					t.Errorf("the tree was written on a refusal: %q", got)
+				}
+			})
+		}
+	}
+}
+
+// TestReleaseKindCheckComesBeforeTheRepositoryGuards: a wrong kind is refused
+// for being the wrong kind even where the repository guards would also fire, so
+// the message names the right target rather than a symptom.
+func TestReleaseKindCheckComesBeforeTheRepositoryGuards(t *testing.T) {
+	work, _, agentGit := releaseFixture(t, "1.0.0-rc.4", "1.0.0-rc.4")
+	gitIn(t, work, "checkout", "-q", "-b", "side")
+	out, ok := runTarget(t, "release", work, agentGit, "v1.0.0-rc.4")
+	if ok || !strings.Contains(out, "Use: make release-candidate VERSION=v1.0.0-rc.4") {
+		t.Fatalf("wrong kind off main not refused as a wrong kind (ok=%v):\n%s", ok, out)
+	}
+}
+
+// TestReleaseTargetsKeepTheirOwnKindWhenNamedTogether: the targets share one
+// recipe body, not one run, so naming two of them cannot clear one's kind check
+// with the other's.
+func TestReleaseTargetsKeepTheirOwnKindWhenNamedTogether(t *testing.T) {
+	work, remote, agentGit := releaseFixture(t, "0.0.0", "1.0.0")
+	cmd := exec.Command(lookPath(t, "make"), "release-candidate", "release", "VERSION=v1.0.0", "AGENT_GIT="+agentGit) // #nosec G204 -- test values
 	cmd.Dir = work
 	cmd.Env = append(environ(nil, nil),
 		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
 		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.invalid",
 		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.invalid")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("make release-alpha failed: %v\n%s", err, out)
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "Use: make release VERSION=v1.0.0") {
+		t.Fatalf("release-candidate cut a final release (err=%v):\n%s", err, out)
 	}
-	if got := gitIn(t, remote, "tag", "--list", "v0.3.2-alpha"); got != "v0.3.2-alpha" {
-		t.Errorf("tag not pushed (got %q)", got)
+	if got := gitIn(t, remote, "tag", "--list"); got != "" {
+		t.Errorf("a tag was pushed: %q", got)
+	}
+}
+
+// TestReleaseTargetsRequireAnExplicitVersion: none of the three guesses a
+// version, release-alpha included, and each names itself in the refusal.
+func TestReleaseTargetsRequireAnExplicitVersion(t *testing.T) {
+	for _, tgt := range releaseTargets {
+		t.Run(tgt.target, func(t *testing.T) {
+			work, remote, agentGit := releaseFixture(t, "0.0.0", "0.0.0")
+			out, ok := runTarget(t, tgt.target, work, agentGit, "")
+			if ok || !strings.Contains(out, "state the version explicitly: make "+tgt.target+" VERSION=") {
+				t.Fatalf("missing VERSION not refused by %s (ok=%v):\n%s", tgt.target, ok, out)
+			}
+			if got := gitIn(t, remote, "tag", "--list"); got != "" {
+				t.Errorf("a tag was pushed: %q", got)
+			}
+		})
 	}
 }
 

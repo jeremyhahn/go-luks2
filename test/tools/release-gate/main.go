@@ -14,7 +14,7 @@
 // A `v*` tag used to publish on its own: the release workflow ran on the tag
 // push with no dependency on CI, so a tag on a commit whose CI was red, still
 // running, canceled or never run published binaries all the same. The release
-// commit and its tag are pushed together (`make release-alpha`), so CI for the
+// commit and its tag are pushed together (`make release-alpha`, `release-candidate` or `release`), so CI for the
 // commit is normally still running when this starts. This command therefore
 // WAITS for the gate's result rather than reading it once, and refuses on
 // anything but a pass.
