@@ -367,12 +367,12 @@ func writeRequirement(t *testing.T, device, requirement string) {
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
-	metadata.Config.Requirements = &rawRequirements{Mandatory: []string{requirement}}
+	metadata.Config.Requirements = &header.Requirements{Mandatory: []string{requirement}}
 	// An online reencryption carries its backup-previous and backup-final
 	// segments, attested by the digest, as cryptsetup writes them; without
 	// them the header is one cryptsetup and this package's reader refuse
 	// before activation is ever asked (#248).
-	if slices.Contains(onlineReencryptRequirements, requirement) {
+	if slices.Contains(header.OnlineReencryptRequirements, requirement) {
 		for id, flag := range map[string]string{"1": "backup-previous", "2": "backup-final"} {
 			backup := *metadata.Segments["0"]
 			backup.ClearUnknownMembers()
@@ -410,7 +410,7 @@ func TestVolumeUnlockRefusesAContainerMidReencryption(t *testing.T) {
 
 	kdfCalls := 0
 	real := v.sys.passphraseKDF
-	v.sys.passphraseKDF = func(ctx context.Context, p []byte, kdf *rawKDF, keySize int) (*enclave.MemoryEnclave, error) {
+	v.sys.passphraseKDF = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
 		kdfCalls++
 		return real(ctx, p, kdf, keySize)
 	}
@@ -511,7 +511,7 @@ func TestVolumeUnlockRefusesAnIntegritySegment(t *testing.T) {
 
 	kdfCalls := 0
 	real := v.sys.passphraseKDF
-	v.sys.passphraseKDF = func(ctx context.Context, p []byte, kdf *rawKDF, keySize int) (*enclave.MemoryEnclave, error) {
+	v.sys.passphraseKDF = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
 		kdfCalls++
 		return real(ctx, p, kdf, keySize)
 	}
@@ -619,7 +619,7 @@ func TestVolumeUnlockReadsTheKeyslotsThroughThePinnedDescriptor(t *testing.T) {
 		t.Fatalf("Open failed: %v", err)
 	}
 	real := v.sys.passphraseKDF
-	v.sys.passphraseKDF = func(ctx context.Context, p []byte, kdf *rawKDF, keySize int) (*enclave.MemoryEnclave, error) {
+	v.sys.passphraseKDF = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
 		_ = os.Remove(link)
 		if err := os.Symlink(other, link); err != nil {
 			t.Errorf("re-pointing the symlink failed: %v", err)

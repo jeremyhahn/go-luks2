@@ -83,7 +83,7 @@ func TestUnmodeledMembersSurviveARoundTrip(t *testing.T) {
 			name: "digest",
 			in:   digestWithExtras,
 			decode: func(t *testing.T, data []byte) any {
-				var v rawDigest
+				var v header.Digest
 				if err := json.Unmarshal(data, &v); err != nil {
 					t.Fatalf("decoding the digest: %v", err)
 				}
@@ -100,7 +100,7 @@ func TestUnmodeledMembersSurviveARoundTrip(t *testing.T) {
 			name: "config",
 			in:   configWithExtras,
 			decode: func(t *testing.T, data []byte) any {
-				var v rawConfig
+				var v header.Config
 				if err := json.Unmarshal(data, &v); err != nil {
 					t.Fatalf("decoding the config: %v", err)
 				}
@@ -169,8 +169,8 @@ func TestUnmodeledMembersSurviveAMutation(t *testing.T) {
 func TestAMarshalerIsReachedThroughTheEnclosingMetadata(t *testing.T) {
 	var (
 		segment header.Segment
-		digest  rawDigest
-		config  rawConfig
+		digest  header.Digest
+		config  header.Config
 	)
 	for _, p := range []struct {
 		in string
@@ -185,7 +185,7 @@ func TestAMarshalerIsReachedThroughTheEnclosingMetadata(t *testing.T) {
 		Keyslots: map[string]*header.Keyslot{},
 		Tokens:   map[string]*LegacyToken{},
 		Segments: map[string]*header.Segment{"0": &segment},
-		Digests:  map[string]*rawDigest{"0": &digest},
+		Digests:  map[string]*header.Digest{"0": &digest},
 		Config:   &config,
 	}
 

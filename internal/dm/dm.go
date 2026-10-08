@@ -8,7 +8,7 @@
 //
 // Every seam this package needs -- the clock, the device directory, and the
 // node-identity check -- is a parameter, never a package-level variable: the
-// caller (today, pkg/luks2's transitional deviceMapper seam) owns the state
+// caller (pkg/dmcrypt, through its sys state) supplies the state
 // and this package stays reference-transparent.
 package dm
 

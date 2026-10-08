@@ -38,12 +38,12 @@ func TestGetVolumeInfoReportsTheVolumeKeySize(t *testing.T) {
 	// No keyslot attested for the segment: no key size to report.
 	m := volumeKeySizeFixture()
 	m.Digests["0"].Keyslots = []string{}
-	if got := volumeKeyBits(m, "0"); got != 0 {
-		t.Errorf("volumeKeyBits with no attested keyslot = %d, want 0", got)
+	if got := header.VolumeKeyBits(m, "0"); got != 0 {
+		t.Errorf("header.VolumeKeyBits with no attested keyslot = %d, want 0", got)
 	}
 	m = volumeKeySizeFixture()
 	m.Digests["0"].Segments = []string{}
-	if got := volumeKeyBits(m, "0"); got != 0 {
-		t.Errorf("volumeKeyBits with no digest for the segment = %d, want 0", got)
+	if got := header.VolumeKeyBits(m, "0"); got != 0 {
+		t.Errorf("header.VolumeKeyBits with no digest for the segment = %d, want 0", got)
 	}
 }

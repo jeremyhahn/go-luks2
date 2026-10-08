@@ -245,14 +245,14 @@ func TestCreateMetadata(t *testing.T) {
 	// Create test KDFs
 	iterations := 100000
 
-	kdf := &rawKDF{
+	kdf := &header.KDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       "dGVzdHNhbHQ=",
 		Iterations: &iterations,
 	}
 
-	digestKDF := &rawKDF{
+	digestKDF := &header.KDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       "ZGlnZXN0c2FsdA==",
@@ -445,7 +445,7 @@ func TestCreateMetadataWithArgon2(t *testing.T) {
 	argonMemory := 1048576
 	argonCPUs := 4
 
-	kdf := &rawKDF{
+	kdf := &header.KDF{
 		Type:   "argon2id",
 		Salt:   "dGVzdHNhbHQ=",
 		Time:   &argonTime,
@@ -454,7 +454,7 @@ func TestCreateMetadataWithArgon2(t *testing.T) {
 	}
 
 	digestIterations := 100000
-	digestKDF := &rawKDF{
+	digestKDF := &header.KDF{
 		Type:       "pbkdf2",
 		Hash:       "sha512",
 		Salt:       "ZGlnZXN0c2FsdA==",
@@ -509,14 +509,14 @@ func TestCreateMetadataWithArgon2(t *testing.T) {
 // TestCreateMetadataVariousOffsets tests metadata creation with different offset configurations
 func TestCreateMetadataVariousOffsets(t *testing.T) {
 	iterations := 100000
-	kdf := &rawKDF{
+	kdf := &header.KDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       "dGVzdHNhbHQ=",
 		Iterations: &iterations,
 	}
 
-	digestKDF := &rawKDF{
+	digestKDF := &header.KDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       "ZGlnZXN0c2FsdA==",

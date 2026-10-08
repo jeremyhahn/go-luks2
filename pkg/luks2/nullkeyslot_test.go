@@ -109,7 +109,7 @@ func TestNullKeyslotDoesNotSurviveTheHeaderRead(t *testing.T) {
 // were not saved by a callee.
 //
 // (*Volume).RemoveKeyslot used to be WipeKeyslot, EXPORTED and reaching
-// parseSize(ks.Area.Offset) with ks nil. There is no validateKeyslot call
+// parseSize(ks.Area.Offset) with ks nil. There is no header.ValidateKeyslot call
 // and no nil check anywhere in the old wipe.go, so a crafted header panicked
 // a public API.
 func TestRemoveKeyslotDoesNotPanicOnANullKeyslot(t *testing.T) {

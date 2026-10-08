@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/jeremyhahn/go-luks2/internal/fips"
+	"github.com/jeremyhahn/go-luks2/internal/header"
 
 	"golang.org/x/sys/unix"
 )
@@ -105,7 +106,7 @@ func checkCalibrationCost(b *testing.B, hashAlgo string, keySize, targetMs int, 
 	target := time.Duration(targetMs) * time.Millisecond
 	perIteration := float64(cost) / float64(iterations)
 	want := math.Max(pbkdf2IterationFloor(hashAlgo, targetMs), float64(target)/perIteration)
-	want = math.Min(want, maxKDFIterations)
+	want = math.Min(want, header.MaxKDFIterations)
 	if got := float64(iterations); got < want/4 || got > want*4 {
 		b.Errorf("calibrated to %d %s iterations; the derivation's own CPU rate (%v per iteration) puts the %v target at %.0f",
 			iterations, hashAlgo, time.Duration(perIteration), target, want)
@@ -255,9 +256,9 @@ func TestBenchmarkPBKDF2MeetsRecommendedMinimum(t *testing.T) {
 				t.Fatalf("%s at the %dms default: got %d iterations, want at least the recommended %d",
 					tt.hashAlgo, pbkdf2ReferenceTargetMs, iterations, want)
 			}
-			if iterations > maxKDFIterations {
-				t.Fatalf("%s: got %d iterations, above the %d ceiling validateKDFCost enforces on read-back",
-					tt.hashAlgo, iterations, maxKDFIterations)
+			if iterations > header.MaxKDFIterations {
+				t.Fatalf("%s: got %d iterations, above the %d ceiling header.ValidateKDFCost enforces on read-back",
+					tt.hashAlgo, iterations, header.MaxKDFIterations)
 			}
 		})
 	}
@@ -460,17 +461,17 @@ func TestScalePBKDF2IterationsClamps(t *testing.T) {
 		},
 		{
 			// 1000000 iterations in 1ms extrapolates to 2e12, far past the
-			// ceiling validateKDFCost applies on read-back.
+			// ceiling header.ValidateKDFCost applies on read-back.
 			name:     "an implausibly fast machine is capped at the header ceiling",
 			hashAlgo: "sha256", probe: 1_000_000, elapsed: time.Millisecond,
-			targetMs: pbkdf2ReferenceTargetMs, want: maxKDFIterations,
+			targetMs: pbkdf2ReferenceTargetMs, want: header.MaxKDFIterations,
 		},
 		{
 			// A budget whose floor alone exceeds the ceiling must land ON the
 			// ceiling: the floor is applied first and the ceiling second.
 			name:     "the ceiling wins over a floor that exceeds it",
 			hashAlgo: "sha1", probe: 1000, elapsed: time.Second,
-			targetMs: maxPBKDF2IterTimeMs, want: maxKDFIterations,
+			targetMs: maxPBKDF2IterTimeMs, want: header.MaxKDFIterations,
 		},
 		{
 			name:     "a measurement between the two is used as measured",
@@ -523,7 +524,7 @@ func TestCreateKDFPBKDF2CalibratesTheKeyslot(t *testing.T) {
 
 	// A count outside the read-back bounds would produce a keyslot this package
 	// refuses to open, which is the other way a wrong count breaks a volume.
-	if err := validateKDFCost(kdf); err != nil {
+	if err := header.ValidateKDFCost(kdf); err != nil {
 		t.Fatalf("the KDF CreateKDF produced does not pass its own read-back validation: %v", err)
 	}
 }

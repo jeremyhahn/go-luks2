@@ -19,6 +19,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/device"
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 	"github.com/jeremyhahn/go-luks2/internal/fips"
+	"github.com/jeremyhahn/go-luks2/internal/header"
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
@@ -50,7 +51,7 @@ type volumeSys struct {
 	measureDeviceSize    func(*os.File) (int64, error)
 	newUUID              func() uuid.UUID
 	nodeRdev             func(string) (uint64, error)
-	passphraseKDF        func(context.Context, []byte, *rawKDF, int) (*enclave.MemoryEnclave, error)
+	passphraseKDF        func(context.Context, []byte, *header.KDF, int) (*enclave.MemoryEnclave, error)
 	pinnedDeviceReader   func(*os.File) io.ReaderAt
 	readDeviceDirect     func(context.Context, string, int64, int) ([]byte, error)
 	removeFile           func(string) error

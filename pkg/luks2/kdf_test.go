@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/jeremyhahn/go-luks2/internal/fips"
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // TestDeriveKeyPBKDF2 tests PBKDF2 key derivation
@@ -22,7 +23,7 @@ func TestDeriveKeyPBKDF2(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &rawKDF{
+	kdf := &header.KDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       saltB64,
@@ -68,7 +69,7 @@ func TestDeriveKeyPBKDF2SHA512(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &rawKDF{
+	kdf := &header.KDF{
 		Type:       "pbkdf2",
 		Hash:       "sha512",
 		Salt:       saltB64,
@@ -98,7 +99,7 @@ func TestDeriveKeyArgon2i(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &rawKDF{
+	kdf := &header.KDF{
 		Type:   "argon2i",
 		Salt:   saltB64,
 		Time:   &time,
@@ -156,7 +157,7 @@ func TestDeriveKeyArgon2id(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &rawKDF{
+	kdf := &header.KDF{
 		Type:   "argon2id",
 		Salt:   saltB64,
 		Time:   &time,
@@ -209,7 +210,7 @@ func TestDeriveKeyInvalidType(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &rawKDF{
+	kdf := &header.KDF{
 		Type: "unsupported",
 		Salt: saltB64,
 	}
@@ -226,7 +227,7 @@ func TestDeriveKeyInvalidType(t *testing.T) {
 // TestDeriveKeyInvalidSalt tests error handling for invalid base64 salt
 func TestDeriveKeyInvalidSalt(t *testing.T) {
 	iterations := 1000
-	kdf := &rawKDF{
+	kdf := &header.KDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       "!!!invalid-base64!!!",
@@ -247,7 +248,7 @@ func TestDerivePBKDF2MissingIterations(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &rawKDF{
+	kdf := &header.KDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       saltB64,
@@ -269,7 +270,7 @@ func TestDerivePBKDF2UnsupportedHash(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &rawKDF{
+	kdf := &header.KDF{
 		Type:       "pbkdf2",
 		Hash:       "md5", // Unsupported
 		Salt:       saltB64,
@@ -292,7 +293,7 @@ func TestDeriveArgon2iMissingTime(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &rawKDF{
+	kdf := &header.KDF{
 		Type:   "argon2i",
 		Salt:   saltB64,
 		Time:   nil, // Missing
@@ -325,7 +326,7 @@ func TestDeriveArgon2iMissingMemory(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &rawKDF{
+	kdf := &header.KDF{
 		Type:   "argon2i",
 		Salt:   saltB64,
 		Time:   &time,
@@ -358,7 +359,7 @@ func TestDeriveArgon2iMissingCPUs(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &rawKDF{
+	kdf := &header.KDF{
 		Type:   "argon2i",
 		Salt:   saltB64,
 		Time:   &time,
@@ -417,7 +418,7 @@ func TestDeriveArgon2idMissingParams(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			kdf := &rawKDF{
+			kdf := &header.KDF{
 				Type:   "argon2id",
 				Salt:   saltB64,
 				Time:   tt.time,
@@ -730,7 +731,7 @@ func TestDeriveKeyDifferentKeySizes(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &rawKDF{
+	kdf := &header.KDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       saltB64,
@@ -766,7 +767,7 @@ func TestArgon2iVsArgon2id(t *testing.T) {
 	passphrase := []byte("testpassphrase")
 	keySize := 32
 
-	kdfI := &rawKDF{
+	kdfI := &header.KDF{
 		Type:   "argon2i",
 		Salt:   saltB64,
 		Time:   &time,
@@ -774,7 +775,7 @@ func TestArgon2iVsArgon2id(t *testing.T) {
 		CPUs:   &cpus,
 	}
 
-	kdfID := &rawKDF{
+	kdfID := &header.KDF{
 		Type:   "argon2id",
 		Salt:   saltB64,
 		Time:   &time,
@@ -783,7 +784,7 @@ func TestArgon2iVsArgon2id(t *testing.T) {
 	}
 
 	if fips140.Enabled() {
-		for _, kdf := range []*rawKDF{kdfI, kdfID} {
+		for _, kdf := range []*header.KDF{kdfI, kdfID} {
 			if _, err := deriveKeyPlain(passphrase, kdf, keySize); !errors.Is(err, ErrFIPSNotApproved) {
 				t.Fatalf("deriveKeyPlain with %s in FIPS mode: got error %v, want ErrFIPSNotApproved", kdf.Type, err)
 			}
@@ -1007,7 +1008,7 @@ func TestDeriveKeyPBKDF2SHA1(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &rawKDF{
+	kdf := &header.KDF{
 		Type:       "pbkdf2",
 		Hash:       "sha1",
 		Salt:       saltB64,
@@ -1050,7 +1051,7 @@ func TestDeriveKeyPBKDF2SHA384(t *testing.T) {
 	salt := []byte("testsalt12345678")
 	saltB64 := encodeBase64(salt)
 
-	kdf := &rawKDF{
+	kdf := &header.KDF{
 		Type:       "pbkdf2",
 		Hash:       "sha384",
 		Salt:       saltB64,
@@ -1264,7 +1265,7 @@ func TestPBKDF2HashFunctionsDifferent(t *testing.T) {
 	keys := make(map[string][]byte)
 
 	for _, hashAlgo := range hashAlgos {
-		kdf := &rawKDF{
+		kdf := &header.KDF{
 			Type:       "pbkdf2",
 			Hash:       hashAlgo,
 			Salt:       saltB64,
@@ -1358,7 +1359,7 @@ func TestArgon2CPUsBoundsValidation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cpus := tt.cpus
-			kdf := &rawKDF{
+			kdf := &header.KDF{
 				Type:   "argon2id",
 				Salt:   saltB64,
 				Time:   &time,
@@ -1471,7 +1472,7 @@ func TestArgon2RefusedInFIPSMode(t *testing.T) {
 
 	for _, kdfType := range []string{kdfTypeArgon2i, kdfTypeArgon2id} {
 		t.Run("derive/"+kdfType, func(t *testing.T) {
-			kdf := &rawKDF{
+			kdf := &header.KDF{
 				Type:   kdfType,
 				Salt:   saltB64,
 				Time:   &argonTime,
@@ -1547,7 +1548,7 @@ func TestArgon2RefusedInFIPSMode(t *testing.T) {
 // TestDeriveKeyReportsAnUnsupportedKDFType covers the dispatch a header reaches.
 func TestDeriveKeyReportsAnUnsupportedKDFType(t *testing.T) {
 	iterations := 1000
-	kdf := &rawKDF{
+	kdf := &header.KDF{
 		Type:       "scrypt",
 		Hash:       "sha256",
 		Salt:       encodeBase64([]byte("unsupported-kdf-salt")),
@@ -1574,7 +1575,7 @@ func TestDeriveKeyReportsAnUnsupportedKDFType(t *testing.T) {
 // algorithm the package genuinely does not have.
 func TestDeriveKeyReportsAnUnsupportedHash(t *testing.T) {
 	iterations := 1000
-	kdf := &rawKDF{
+	kdf := &header.KDF{
 		Type:       "pbkdf2",
 		Hash:       "md5",
 		Salt:       encodeBase64([]byte("unsupported-hash-salt")),

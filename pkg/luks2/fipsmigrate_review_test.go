@@ -47,9 +47,9 @@ func argon2Digest(t *testing.T, device string, hash string) {
 	// The lowest Argon2 cost the reader accepts: this is a foreign header's
 	// digest, which nothing here writes, and every unlock of the fixture
 	// derives through it -- under -race, at the package's budget (ci.yml).
-	cost, memory, cpus := minArgon2Time, fixtureArgon2MemoryKB, 1
+	cost, memory, cpus := header.MinArgon2Time, fixtureArgon2MemoryKB, 1
 	digest := metadata.Digests["0"]
-	kdf := &rawKDF{Type: kdfTypeArgon2id, Salt: digest.Salt, Time: &cost, Memory: &memory, CPUs: &cpus}
+	kdf := &header.KDF{Type: kdfTypeArgon2id, Salt: digest.Salt, Time: &cost, Memory: &memory, CPUs: &cpus}
 	derived, err := deriveKeySecret(context.Background(), mk, kdf, argon2DigestLen, testVolumeSys())
 	if err != nil {
 		t.Fatalf("deriving the argon2 digest failed: %v", err)
@@ -81,7 +81,7 @@ func argon2Digest(t *testing.T, device string, hash string) {
 
 // fixtureArgon2MemoryKB is the Argon2 memory of foreign fixtures this package
 // derives through but never writes: cryptsetup's own minimum, 32 KiB, which
-// the reader accepts (minArgon2Memory) and Format would refuse.
+// the reader accepts (header.MinArgon2Memory) and Format would refuse.
 const fixtureArgon2MemoryKB = 32
 
 // readJSONArea returns the primary header's JSON area, trimmed of padding.
@@ -96,7 +96,7 @@ func readJSONArea(t *testing.T, device string) []byte {
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
-	area, err := headerAreaSize(hdr)
+	area, err := header.HeaderAreaSize(hdr)
 	if err != nil {
 		t.Fatalf("header area size: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestFIPSRefusalNamesAnArgon2Digest(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
-		cost, memory, cpus := minArgon2Time, minArgon2MemoryKB, 1
+		cost, memory, cpus := header.MinArgon2Time, minArgon2MemoryKB, 1
 		digest := metadata.Digests["0"]
 		digest.Type, digest.Hash, digest.Iterations = kdfTypeArgon2id, "", 0
 		digest.Time, digest.Memory, digest.CPUs = &cost, &memory, &cpus
@@ -260,8 +260,8 @@ func TestMigrateToFIPSRefusesToWipeOutsideTheKeyslotsArea(t *testing.T) {
 			area := *stray.Area
 			area.Offset = tc.offset(metadata)
 			stray.Area = &area
-			cost, memory, cpus := minArgon2Time, minArgon2MemoryKB, 1
-			stray.KDF = &rawKDF{Type: kdfTypeArgon2id, Salt: stray.KDF.Salt, Time: &cost, Memory: &memory, CPUs: &cpus}
+			cost, memory, cpus := header.MinArgon2Time, minArgon2MemoryKB, 1
+			stray.KDF = &header.KDF{Type: kdfTypeArgon2id, Salt: stray.KDF.Salt, Time: &cost, Memory: &memory, CPUs: &cpus}
 			metadata.Keyslots["1"] = &stray
 			hdr.SequenceID++
 			if err := writeHeaderUnvalidated(device, hdr, metadata); err != nil {
@@ -324,7 +324,7 @@ func TestMigrateToFIPSReadsNoKeyslotOutsideKeyslotSpace(t *testing.T) {
 			derivations := 0
 			sys := testVolumeSys()
 			real := sys.passphraseKDF
-			sys.passphraseKDF = func(ctx context.Context, passphrase []byte, kdf *rawKDF, keySize int) (*enclave.MemoryEnclave, error) {
+			sys.passphraseKDF = func(ctx context.Context, passphrase []byte, kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
 				derivations++
 				return real(ctx, passphrase, kdf, keySize)
 			}

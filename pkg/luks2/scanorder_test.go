@@ -68,7 +68,7 @@ func TestKeyslotScanOrderIsAscendingNumeric(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := keyslotIDsInScanOrder(keyslotMap(tc.ids...))
+			got := header.KeyslotIDsInScanOrder(keyslotMap(tc.ids...))
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("scan order = %v, want %v", got, tc.want)
 			}
@@ -90,7 +90,7 @@ func TestKeyslotScanOrderVisitsEveryKeyslot(t *testing.T) {
 	ids := []string{"3", "0", "not-a-number", "11", "", "007", "1", "99999999999999999999"}
 	m := keyslotMap(ids...)
 
-	got := keyslotIDsInScanOrder(m)
+	got := header.KeyslotIDsInScanOrder(m)
 
 	if len(got) != len(m) {
 		t.Fatalf("scan order returned %d IDs for a map of %d: %v", len(got), len(m), got)
@@ -121,9 +121,9 @@ func TestKeyslotScanOrderIsStableAcrossCalls(t *testing.T) {
 	}
 	m := keyslotMap(ids...)
 
-	first := keyslotIDsInScanOrder(m)
+	first := header.KeyslotIDsInScanOrder(m)
 	for i := 0; i < 50; i++ {
-		if got := keyslotIDsInScanOrder(m); !slices.Equal(got, first) {
+		if got := header.KeyslotIDsInScanOrder(m); !slices.Equal(got, first) {
 			t.Fatalf("scan order changed between calls: %v then %v", first, got)
 		}
 	}
@@ -178,7 +178,7 @@ func TestAKeyslotAfterTheFirstStillOpensTheVolume(t *testing.T) {
 	// AddKey ever allocated into the first-scanned slot, this test would go
 	// vacuous and stay green while the regression it exists to catch went
 	// undetected.
-	order := keyslotIDsInScanOrder(metadata.Keyslots)
+	order := header.KeyslotIDsInScanOrder(metadata.Keyslots)
 	if len(order) < 2 {
 		t.Fatalf("expected at least 2 keyslots, got %d: %v", len(order), order)
 	}
@@ -357,7 +357,7 @@ func TestKeyslotInspectionOrderIsDeterministic(t *testing.T) {
 // the package already has, rather than to ascending order as such.
 //
 // #57 could have been closed with a sort at each site. Reusing
-// keyslotIDsInScanOrder is what keeps the order an operator reads identical to
+// header.KeyslotIDsInScanOrder is what keeps the order an operator reads identical to
 // the order unlock tries the slots in; two independent orderings that happen to
 // agree today are two things that can drift.
 //
@@ -376,7 +376,7 @@ func TestKeyslotInspectionOrderMatchesUnlockOrder(t *testing.T) {
 	}
 
 	var want []int
-	for _, id := range keyslotIDsInScanOrder(metadata.Keyslots) {
+	for _, id := range header.KeyslotIDsInScanOrder(metadata.Keyslots) {
 		n, err := strconv.Atoi(id)
 		if err != nil {
 			continue

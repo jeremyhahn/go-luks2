@@ -190,7 +190,7 @@ func TestSystemdTPM2TokenSurvivesUnmodeled(t *testing.T) {
 // typed TPM2 field back, this fails and points at the ruling rather than at a
 // style preference.
 func TestTPM2MembersAreNotModelled(t *testing.T) {
-	for _, name := range jsonMemberNames(reflect.TypeOf(LegacyToken{})) {
+	for _, name := range header.JSONMemberNames(reflect.TypeOf(LegacyToken{})) {
 		if strings.HasPrefix(name, "tpm2-") {
 			t.Errorf("LegacyToken models the TPM2 member %q. go-xkms owns TPM2 (#189); "+
 				"a consumer that needs to interpret such a token supplies it through "+

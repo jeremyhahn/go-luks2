@@ -17,7 +17,7 @@ import (
 
 // The aggregate key-derivation budget of one operation (#26).
 //
-// Every derivation is bounded on its own (validateKDFCost), but an unlock
+// Every derivation is bounded on its own (header.ValidateKDFCost), but an unlock
 // derives once per keyslot it tries and once per digest attesting that
 // keyslot, and the header chooses how many of those there are. A header that
 // declares each of them at the per-derivation ceiling makes one unlock attempt
@@ -42,7 +42,7 @@ type kdfWork = kdf.Work
 
 // derivationWork is what one derivation of k to outLen bytes costs. The KDF
 // has passed the screen, so its parameters are present and bounded.
-func derivationWork(k *rawKDF, outLen int) kdfWork {
+func derivationWork(k *header.KDF, outLen int) kdfWork {
 	if k == nil || outLen <= 0 {
 		return kdfWork{}
 	}
@@ -73,7 +73,7 @@ func planKeyslotScan(metadata *header.Metadata, order []string) scanPlan {
 		if keyslot == nil || keyslot.Type != "luks2" {
 			continue
 		}
-		if _, ok := canonicalKeyslotID(id); !ok {
+		if _, ok := header.CanonicalKeyslotID(id); !ok {
 			continue
 		}
 		kp, err := screenKeyslot(id, keyslot, metadata.Digests, fips.Probe)
@@ -81,7 +81,7 @@ func planKeyslotScan(metadata *header.Metadata, order []string) scanPlan {
 			continue
 		}
 		plan.work = plan.work.Add(derivationWork(keyslot.KDF, kp.areaKeySize))
-		digestWork, longestDigest := planDigests(metadata.Digests, func(d *rawDigest) bool { return digestCovers(d, id) })
+		digestWork, longestDigest := planDigests(metadata.Digests, func(d *header.Digest) bool { return digestCovers(d, id) })
 		plan.work = plan.work.Add(digestWork)
 		plan.peakLocked = max(plan.peakLocked, keyslotOpenPeakLocked(kp, keyslot.KeySize, longestDigest))
 	}
@@ -102,7 +102,7 @@ func planKeyslotScan(metadata *header.Metadata, order []string) scanPlan {
 // measures the real sequence against this for each keyslot geometry, so the
 // two cannot drift apart silently.
 func keyslotOpenPeakLocked(kp keyslotPlan, keySize, longestDigest int) int64 {
-	held := enclave.LockedSize(kp.areaKeySize) + enclave.LockedSize(int(kp.decryptLen)) + enclave.LockedSize(keySize) // #nosec G115 -- decryptLen is bounded by validateKeyslot
+	held := enclave.LockedSize(kp.areaKeySize) + enclave.LockedSize(int(kp.decryptLen)) + enclave.LockedSize(keySize) // #nosec G115 -- decryptLen is bounded by header.ValidateKeyslot
 	merge := enclave.LockedSize(keySize)
 	verify := int64(0)
 	if longestDigest > 0 {
@@ -113,8 +113,8 @@ func keyslotOpenPeakLocked(kp keyslotPlan, keySize, longestDigest int) int64 {
 
 // planDigests prices deriving every digest covers selects that passes its
 // screen, and reports the longest of them.
-func planDigests(digests map[string]*rawDigest, covers func(*rawDigest) bool) (work kdfWork, longest int) {
-	for _, id := range sortedIDs(digests) {
+func planDigests(digests map[string]*header.Digest, covers func(*header.Digest) bool) (work kdfWork, longest int) {
+	for _, id := range header.SortedIDs(digests) {
 		digest := digests[id]
 		if !covers(digest) {
 			continue

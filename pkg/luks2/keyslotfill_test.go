@@ -359,7 +359,7 @@ func TestWipeKeyslotAreaLeavesRandomNotZeroes(t *testing.T) {
 	const (
 		areaOffset = 0x8000
 		// The declared area must hold a full complement of AF stripes --
-		// validateKeyslot refuses anything smaller -- so this is the size
+		// header.ValidateKeyslot refuses anything smaller -- so this is the size
 		// Format lays out for a 512-bit volume key.
 		areaSize = 258048
 	)
@@ -380,7 +380,7 @@ func TestWipeKeyslotAreaLeavesRandomNotZeroes(t *testing.T) {
 			Size:       formatSize(areaSize),
 			Encryption: keyslotAreaEncryption,
 		},
-		KDF: &rawKDF{Type: "pbkdf2", Hash: "sha512", Salt: "AAAA", Iterations: intPtr(210000)},
+		KDF: &header.KDF{Type: "pbkdf2", Hash: "sha512", Salt: "AAAA", Iterations: intPtr(210000)},
 		AF:  &header.AntiForensic{Type: "luks1", Stripes: header.AFStripes, Hash: "sha512"},
 	}
 
@@ -464,7 +464,7 @@ func TestWipeKeyslotAreaRefusesAKeyslotItCannotLocate(t *testing.T) {
 func bareKeyslotsGeometry(end int64) (*header.BinaryHeader, *header.Metadata) {
 	hdr := &header.BinaryHeader{HeaderSize: header.HeaderMinSize}
 	metadata := &header.Metadata{
-		Config:   &rawConfig{KeyslotsSize: formatSize(end - 2*header.HeaderMinSize)},
+		Config:   &header.Config{KeyslotsSize: formatSize(end - 2*header.HeaderMinSize)},
 		Segments: map[string]*header.Segment{},
 	}
 	return hdr, metadata

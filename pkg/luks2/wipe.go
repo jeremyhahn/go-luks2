@@ -86,7 +86,7 @@ func wipeHeaderPlan(f *os.File) []wipeRegion {
 		chosenOffset int64 = -1
 		area         int64
 		strays       []wipeRegion
-		offsets      = append([]int64{header.PrimaryHeaderOffset}, legalHeaderAreaSizes()...)
+		offsets      = append([]int64{header.PrimaryHeaderOffset}, header.LegalHeaderAreaSizes()...)
 	)
 	for _, offset := range offsets {
 		size, valid, ok := wipeProbeHeaderCopy(f, offset)
@@ -190,7 +190,7 @@ func declaredKeyslotAreas(metadata *header.Metadata) []wipeRegion {
 		}
 		off, offErr := parseSize(ks.Area.Offset)
 		size, sizeErr := parseSize(ks.Area.Size)
-		if offErr != nil || sizeErr != nil || off < 0 || size <= 0 || size > maxKeyslotAreaSize || off > (1<<62) {
+		if offErr != nil || sizeErr != nil || off < 0 || size <= 0 || size > header.MaxKeyslotAreaSize || off > (1<<62) {
 			continue
 		}
 		areas = append(areas, wipeRegion{offset: off, size: size})
@@ -212,20 +212,20 @@ func wipeProbeHeaderCopy(f *os.File, offset int64) (size int64, valid, ok bool) 
 	if err := binary.Read(bytes.NewReader(raw), binary.BigEndian, &hdr); err != nil {
 		return 0, false, false
 	}
-	if !bytes.Equal(hdr.Magic[:], []byte(expectedMagic(offset))) || hdr.Version != header.Version {
+	if !bytes.Equal(hdr.Magic[:], []byte(header.ExpectedMagic(offset))) || hdr.Version != header.Version {
 		return 0, false, false
 	}
-	area, err := headerAreaSize(&hdr)
+	area, err := header.HeaderAreaSize(&hdr)
 	if err != nil {
 		return 0, false, false
 	}
-	if recorded, err := headerAreaOffset(&hdr); err != nil || recorded != offset {
+	if recorded, err := header.HeaderAreaOffset(&hdr); err != nil || recorded != offset {
 		return 0, false, false
 	}
 	if offset != header.PrimaryHeaderOffset && int64(area) != offset {
 		return 0, false, false
 	}
-	valid = validateHeaderChecksum(&hdr, f, offset, area) == nil
+	valid = header.ValidateHeaderChecksum(&hdr, f, offset, area) == nil
 	return int64(area), valid, true
 }
 

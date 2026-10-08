@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 func TestParseRecoveryKey(t *testing.T) {
@@ -221,7 +222,7 @@ func assertKeyslotIDs(t *testing.T, device string, want []string) {
 	if err != nil {
 		t.Fatalf("ReadHeader: %v", err)
 	}
-	got := keyslotIDsInScanOrder(metadata.Keyslots)
+	got := header.KeyslotIDsInScanOrder(metadata.Keyslots)
 	if len(got) != len(want) {
 		t.Fatalf("keyslots are %v, want %v", got, want)
 	}
@@ -245,7 +246,7 @@ func keyslotOpenedBy(t *testing.T, device string, passphrase []byte) string {
 	}
 
 	opened := ""
-	for _, id := range keyslotIDsInScanOrder(metadata.Keyslots) {
+	for _, id := range header.KeyslotIDsInScanOrder(metadata.Keyslots) {
 		key, err := unlockKeyslot(context.Background(), device, id, passphrase, metadata.Keyslots[id], metadata.Digests, testVolumeSys())
 		if err != nil {
 			continue

@@ -33,7 +33,7 @@ chosen when a caller does not set one (see
 ## Component boundaries
 
 Keyslot logic lives inside `pkg/luks2` (`keyslot.go`, `keyslot_v2.go`,
-`keyslotvalidation.go`, `keyslotscreen.go`, `keyslotdevice.go`). The KDF
+`keyslotscreen.go`, `keyslotdevice.go`). The KDF
 derivation itself (PBKDF2/Argon2, calibration, cost floors) is
 `internal/kdf` (H4, DECISIONS.md); the anti-forensic split is `internal/af`
 (H3c) and the area cipher is `internal/areacipher` (H3d). `pkg/luks2` owns

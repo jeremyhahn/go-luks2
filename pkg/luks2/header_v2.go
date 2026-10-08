@@ -7,6 +7,7 @@ package luks2
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"strconv"
 
@@ -259,7 +260,7 @@ func (v *Volume) restorePrimaryHeader(ctx context.Context, op string, force bool
 // permit a write, and promoting it would let a read block on, or race, a
 // writer. The stale copy is rewritten by the next operation that holds the
 // exclusive lock (keyslotDevice.readHeader), or by RestorePrimaryHeader.
-func readCurrentHeader(r readerAt) (*header.CurrentHeader, error) {
+func readCurrentHeader(r io.ReaderAt) (*header.CurrentHeader, error) {
 	cur, err := header.ReadCurrentHeader(r)
 	if err != nil {
 		return nil, reclassifyUnsupportedChecksum(err)

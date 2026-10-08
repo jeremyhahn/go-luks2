@@ -70,7 +70,7 @@ var (
 	// ErrUnsupportedKDF and ErrUnsupportedHash folded into ErrUnsupported
 	// (DESIGN.md §C.3): raised where a KDF is DISPATCHED (kdf.go) or a hash
 	// algorithm is resolved, with Detail naming what was refused.
-	// validateKDFCost deliberately returns an unclassified error for the
+	// header.ValidateKDFCost deliberately returns an unclassified error for the
 	// same KDF condition, because only its caller knows whether an unusable
 	// KDF condemns a keyslot or a digest.
 

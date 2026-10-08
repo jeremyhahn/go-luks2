@@ -100,7 +100,7 @@ func TestAlignTo(t *testing.T) {
 // backup-header offset, and destroyed 4080 bytes of keyslot 0's key material.
 // The function was correct; using it there was the bug, and a tested helper
 // reads as endorsed. isPowerOf2 next to it was checked the same way and is
-// LIVE: header.go's headerAreaSize calls it.
+// LIVE: header.go's header.HeaderAreaSize calls it.
 
 // TestIsPowerOf2 tests power of 2 detection
 func TestIsPowerOf2(t *testing.T) {

@@ -204,9 +204,9 @@ func TestCalculateHeaderChecksum(t *testing.T) {
 			copy(tt.hdr.ChecksumAlgorithm[:], "sha256")
 
 			// Calculate checksum
-			err := calculateHeaderChecksum(tt.hdr, tt.jsonData, tt.jsonSize)
+			err := header.CalculateHeaderChecksum(tt.hdr, tt.jsonData, tt.jsonSize)
 			if err != nil {
-				t.Fatalf("calculateHeaderChecksum() error = %v", err)
+				t.Fatalf("header.CalculateHeaderChecksum() error = %v", err)
 			}
 
 			// Verify checksum is not all zeros
@@ -259,17 +259,17 @@ func TestCalculateHeaderChecksumDeterministic(t *testing.T) {
 	jsonSize := header.DefaultSize
 
 	// Calculate checksum first time
-	err := calculateHeaderChecksum(hdr, jsonData, jsonSize)
+	err := header.CalculateHeaderChecksum(hdr, jsonData, jsonSize)
 	if err != nil {
-		t.Fatalf("calculateHeaderChecksum() error = %v", err)
+		t.Fatalf("header.CalculateHeaderChecksum() error = %v", err)
 	}
 	firstChecksum := make([]byte, 64)
 	copy(firstChecksum, hdr.Checksum[:])
 
 	// Calculate checksum second time
-	err = calculateHeaderChecksum(hdr, jsonData, jsonSize)
+	err = header.CalculateHeaderChecksum(hdr, jsonData, jsonSize)
 	if err != nil {
-		t.Fatalf("calculateHeaderChecksum() error = %v", err)
+		t.Fatalf("header.CalculateHeaderChecksum() error = %v", err)
 	}
 
 	// Verify they match
@@ -316,7 +316,7 @@ func TestValidateHeaderChecksum(t *testing.T) {
 				jsonSize := header.DefaultSize
 
 				// Calculate correct checksum
-				if err := calculateHeaderChecksum(hdr, jsonData, jsonSize); err != nil {
+				if err := header.CalculateHeaderChecksum(hdr, jsonData, jsonSize); err != nil {
 					t.Fatalf("Failed to calculate checksum: %v", err)
 				}
 
@@ -348,7 +348,7 @@ func TestValidateHeaderChecksum(t *testing.T) {
 				jsonSize := header.DefaultSize
 
 				// Calculate correct checksum
-				if err := calculateHeaderChecksum(hdr, jsonData, jsonSize); err != nil {
+				if err := header.CalculateHeaderChecksum(hdr, jsonData, jsonSize); err != nil {
 					t.Fatalf("Failed to calculate checksum: %v", err)
 				}
 
@@ -372,9 +372,9 @@ func TestValidateHeaderChecksum(t *testing.T) {
 			hdr, data := tt.setupHeader()
 			reader := &mockReaderAt{data: data}
 
-			err := validateHeaderChecksum(hdr, reader, int64(hdr.HeaderOffset), int(hdr.HeaderSize)) // #nosec G115 -- test fixture offsets are 0 or 0x4000 and sizes are 16384
+			err := header.ValidateHeaderChecksum(hdr, reader, int64(hdr.HeaderOffset), int(hdr.HeaderSize)) // #nosec G115 -- test fixture offsets are 0 or 0x4000 and sizes are 16384
 			if err != nil {
-				t.Errorf("validateHeaderChecksum() error = %v, want nil", err)
+				t.Errorf("header.ValidateHeaderChecksum() error = %v, want nil", err)
 			}
 		})
 	}
@@ -403,7 +403,7 @@ func TestValidateHeaderChecksumInvalid(t *testing.T) {
 				jsonSize := header.DefaultSize
 
 				// Calculate correct checksum
-				if err := calculateHeaderChecksum(hdr, jsonData, jsonSize); err != nil {
+				if err := header.CalculateHeaderChecksum(hdr, jsonData, jsonSize); err != nil {
 					t.Fatalf("Failed to calculate checksum: %v", err)
 				}
 
@@ -439,7 +439,7 @@ func TestValidateHeaderChecksumInvalid(t *testing.T) {
 				jsonSize := header.DefaultSize
 
 				// Calculate correct checksum
-				if err := calculateHeaderChecksum(hdr, jsonData, jsonSize); err != nil {
+				if err := header.CalculateHeaderChecksum(hdr, jsonData, jsonSize); err != nil {
 					t.Fatalf("Failed to calculate checksum: %v", err)
 				}
 
@@ -485,9 +485,9 @@ func TestValidateHeaderChecksumInvalid(t *testing.T) {
 			hdr, data := tt.setupHeader()
 			reader := &mockReaderAt{data: data}
 
-			err := validateHeaderChecksum(hdr, reader, int64(hdr.HeaderOffset), int(hdr.HeaderSize)) // #nosec G115 -- test fixture offsets are 0 or 0x4000 and sizes are 16384
+			err := header.ValidateHeaderChecksum(hdr, reader, int64(hdr.HeaderOffset), int(hdr.HeaderSize)) // #nosec G115 -- test fixture offsets are 0 or 0x4000 and sizes are 16384
 			if (err != nil) != tt.wantErr {
-				t.Errorf("validateHeaderChecksum() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("header.ValidateHeaderChecksum() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
@@ -533,7 +533,7 @@ func TestReadJSONMetadata(t *testing.T) {
 			// An incomplete keyslot still PARSES. It is refused where it is
 			// used, not here: refusing the header would make a container with
 			// one damaged keyslot unreadable through its intact ones. See
-			// keyslotvalidation.go.
+			// internal/header/keyslot.go.
 			name: "keyslot missing its kdf, af and area still parses",
 			hdr: &header.BinaryHeader{
 				HeaderSize:   uint64(header.HeaderSize + header.DefaultSize),
@@ -596,16 +596,16 @@ func TestReadJSONMetadata(t *testing.T) {
 			}
 
 			reader := &mockReaderAt{data: buf.Bytes()}
-			metadata, err := readJSONMetadata(reader, tt.hdr, int64(tt.hdr.HeaderOffset), int(tt.hdr.HeaderSize)) // #nosec G115 -- test fixture offsets are 0 or 0x4000 and sizes are 16384
+			metadata, err := header.ReadJSONMetadata(reader, tt.hdr, int64(tt.hdr.HeaderOffset), int(tt.hdr.HeaderSize)) // #nosec G115 -- test fixture offsets are 0 or 0x4000 and sizes are 16384
 
 			if (err != nil) != tt.wantErr {
-				t.Errorf("readJSONMetadata() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("header.ReadJSONMetadata() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 
 			if !tt.wantErr {
 				if metadata == nil {
-					t.Error("readJSONMetadata() returned nil metadata")
+					t.Error("header.ReadJSONMetadata() returned nil metadata")
 					return
 				}
 
@@ -641,7 +641,7 @@ func TestReadJSONMetadataRoundTrip(t *testing.T) {
 					Encryption: "aes-xts-plain64",
 					KeySize:    64,
 				},
-				KDF: &rawKDF{
+				KDF: &header.KDF{
 					Type: "pbkdf2",
 					Hash: "sha256",
 					Salt: "dGVzdHNhbHQ=",
@@ -667,7 +667,7 @@ func TestReadJSONMetadataRoundTrip(t *testing.T) {
 				SectorSize: 512,
 			},
 		},
-		Digests: map[string]*rawDigest{
+		Digests: map[string]*header.Digest{
 			"0": {
 				Type:       "pbkdf2",
 				Keyslots:   []string{"0"},
@@ -678,7 +678,7 @@ func TestReadJSONMetadataRoundTrip(t *testing.T) {
 				Digest:     "ZGlnZXN0dmFsdWU=",
 			},
 		},
-		Config: &rawConfig{
+		Config: &header.Config{
 			JSONSize:     "12288",
 			KeyslotsSize: "8355840",
 		},
@@ -710,9 +710,9 @@ func TestReadJSONMetadataRoundTrip(t *testing.T) {
 
 	// Read back
 	reader := &mockReaderAt{data: buf.Bytes()}
-	recovered, err := readJSONMetadata(reader, hdr, int64(hdr.HeaderOffset), int(hdr.HeaderSize)) // #nosec G115 -- test fixture offset is 0 and size is 16384
+	recovered, err := header.ReadJSONMetadata(reader, hdr, int64(hdr.HeaderOffset), int(hdr.HeaderSize)) // #nosec G115 -- test fixture offset is 0 and size is 16384
 	if err != nil {
-		t.Fatalf("readJSONMetadata() error = %v", err)
+		t.Fatalf("header.ReadJSONMetadata() error = %v", err)
 	}
 
 	// Verify key structures are present
@@ -785,9 +785,9 @@ func TestCalculateHeaderChecksumEdgeCases(t *testing.T) {
 			copy(tt.hdr.Magic[:], header.Magic)
 			copy(tt.hdr.ChecksumAlgorithm[:], "sha256")
 
-			err := calculateHeaderChecksum(tt.hdr, tt.jsonData, tt.jsonSize)
+			err := header.CalculateHeaderChecksum(tt.hdr, tt.jsonData, tt.jsonSize)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("calculateHeaderChecksum() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("header.CalculateHeaderChecksum() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
@@ -801,7 +801,7 @@ func TestCalculateHeaderChecksumEdgeCases(t *testing.T) {
 // the size itself five lines above the checksum-field write, so a guard on the
 // buffer length could not fire -- instrumented with panic("GUARD REACHED") it
 // was reached zero times across the whole suite, and a test that believed it was
-// exercising the guard was in fact being satisfied by headerAreaSize's rejection
+// exercising the guard was in fact being satisfied by header.HeaderAreaSize's rejection
 // wrapping the same sentinel.
 //
 // With the size arriving as a parameter, a short one reaches this function, and
@@ -826,13 +826,13 @@ func TestReadJSONMetadataRefusesAHeaderSizeWithNoRoomForJSON(t *testing.T) {
 		t.Run(fmt.Sprintf("size %d", size), func(t *testing.T) {
 			defer func() {
 				if r := recover(); r != nil {
-					t.Fatalf("readJSONMetadata panicked on headerSize=%d instead of returning an error: %v", size, r)
+					t.Fatalf("header.ReadJSONMetadata panicked on headerSize=%d instead of returning an error: %v", size, r)
 				}
 			}()
 
-			_, err := readJSONMetadata(reader, hdr, 0, size)
+			_, err := header.ReadJSONMetadata(reader, hdr, 0, size)
 			if err == nil {
-				t.Fatalf("readJSONMetadata accepted headerSize=%d", size)
+				t.Fatalf("header.ReadJSONMetadata accepted headerSize=%d", size)
 			}
 			if !errors.Is(err, ErrInvalidHeader) {
 				t.Errorf("error = %v, want it to wrap ErrInvalidHeader", err)
@@ -844,9 +844,9 @@ func TestReadJSONMetadataRefusesAHeaderSizeWithNoRoomForJSON(t *testing.T) {
 	// is not enough to parse but IS enough to get past this guard. The failure
 	// must move to the JSON parse.
 	t.Run("one byte of JSON area is not refused by this guard", func(t *testing.T) {
-		_, err := readJSONMetadata(reader, hdr, 0, header.HeaderSize+1)
+		_, err := header.ReadJSONMetadata(reader, hdr, 0, header.HeaderSize+1)
 		if err == nil {
-			t.Fatal("readJSONMetadata accepted a one-byte JSON area")
+			t.Fatal("header.ReadJSONMetadata accepted a one-byte JSON area")
 		}
 		if !strings.Contains(err.Error(), "parse JSON") {
 			t.Fatalf("error = %v, want the failure to have moved to the JSON parse", err)
@@ -860,7 +860,7 @@ func TestReadJSONMetadataRefusesAHeaderSizeWithNoRoomForJSON(t *testing.T) {
 // A header carrying BOTH an out-of-range HeaderSize and an illegal HeaderOffset
 // has two things wrong with it, and which one is reported says which check ran
 // first. Before the hoist the offset check ran first and the size was not
-// examined until validateHeaderChecksum re-derived it; after the hoist the size
+// examined until header.ValidateHeaderChecksum re-derived it; after the hoist the size
 // is bounded immediately after the magic and version, before anything else
 // consults the header at all.
 //

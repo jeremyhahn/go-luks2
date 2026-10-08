@@ -54,7 +54,7 @@ func TestFormatMetadataSizeLaysOutEveryLegalSize(t *testing.T) {
 
 	requireCryptsetup(t)
 
-	for _, size := range legalHeaderAreaSizes() {
+	for _, size := range header.LegalHeaderAreaSizes() {
 		t.Run(fmt.Sprintf("%dKiB", size/1024), func(t *testing.T) {
 			defer parallel(t)()
 
@@ -159,7 +159,7 @@ func TestValidateFormatOptionsForTestMetadataSize(t *testing.T) {
 	path := newImage(t, "validate.img")
 
 	accepted := []int{0}
-	for _, size := range legalHeaderAreaSizes() {
+	for _, size := range header.LegalHeaderAreaSizes() {
 		accepted = append(accepted, int(size))
 	}
 	for _, size := range accepted {

@@ -27,8 +27,7 @@ import (
 // and the clock every wait runs on. Every consumer of this library wants
 // the real kernel; only this package's own tests want anything else, so the
 // seam is a package-level value rather than a parameter threaded through
-// every call -- the same idiom pkg/luks2's transitional dm/keyring vars
-// used before this package existed.
+// every call. pkg/luks2 instead carries its seams per Volume (Volume.sys).
 type seams struct {
 	create     func(ctx context.Context, name, uuid string) (uint64, error)
 	load       func(name string, table devmapper.Table) error

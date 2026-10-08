@@ -66,7 +66,7 @@ func budgetFixture(t *testing.T) string {
 // the header a crafted disk carries.
 func writeRawHeader(t *testing.T, path string, hdr *header.BinaryHeader, metadata *header.Metadata) {
 	t.Helper()
-	jsonData, err := marshalCanonicalJSON(metadata)
+	jsonData, err := header.MarshalCanonicalJSON(metadata)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func writeRawHeader(t *testing.T, path string, hdr *header.BinaryHeader, metadat
 	}
 	defer func() { _ = f.Close() }()
 	hdr.SequenceID++
-	if err := writeEncodedHeader(f, hdr, jsonData, int(hdr.HeaderSize), (*os.File).Sync); err != nil { // #nosec G115 -- a header ReadHeader bounded
+	if err := header.WriteEncodedHeader(f, hdr, jsonData, int(hdr.HeaderSize), (*os.File).Sync); err != nil { // #nosec G115 -- a header ReadHeader bounded
 		t.Fatal(err)
 	}
 }
@@ -87,7 +87,7 @@ func countKDFCalls(t *testing.T) (*int, volumeSys) {
 	t.Helper()
 	calls := 0
 	sys := testVolumeSys()
-	sys.passphraseKDF = func(context.Context, []byte, *rawKDF, int) (*enclave.MemoryEnclave, error) {
+	sys.passphraseKDF = func(context.Context, []byte, *header.KDF, int) (*enclave.MemoryEnclave, error) {
 		calls++
 		return nil, errors.New("derivation reached")
 	}
@@ -111,7 +111,7 @@ func TestAHeaderAskingForMoreDerivationThanCryptsetupCanIsRefusedBeforeDeriving(
 	for i := range MaxKeyslots {
 		d := *template
 		d.Keyslots = ids
-		d.Iterations = maxKDFIterations
+		d.Iterations = header.MaxKDFIterations
 		metadata.Digests[strconv.Itoa(i)] = &d
 	}
 	writeRawHeader(t, device, hdr, metadata)
@@ -151,7 +151,7 @@ func TestTheMostExpensiveHeaderCryptsetupCanWriteFitsTheBudget(t *testing.T) {
 	}
 	ids := cloneKeyslots(t, metadata, MaxKeyslots)
 	template := metadata.Digests["0"]
-	metadata.Digests = map[string]*rawDigest{}
+	metadata.Digests = map[string]*header.Digest{}
 	// SHA-1 is the costliest PBKDF2 per output byte; a FIPS 140-3 process
 	// runs neither it nor Argon2, so there the ceiling is SHA-512's.
 	hash, digestLen := "sha1", 20
@@ -161,22 +161,22 @@ func TestTheMostExpensiveHeaderCryptsetupCanWriteFitsTheBudget(t *testing.T) {
 	for i, id := range ids {
 		k := metadata.Keyslots[id]
 		if i%2 == 0 {
-			time, memory, cpus := maxArgon2Time, maxArgon2Memory, 4
-			k.KDF = &rawKDF{Type: kdfTypeArgon2id, Salt: k.KDF.Salt, Time: &time, Memory: &memory, CPUs: &cpus}
+			time, memory, cpus := header.MaxArgon2Time, header.MaxArgon2Memory, 4
+			k.KDF = &header.KDF{Type: kdfTypeArgon2id, Salt: k.KDF.Salt, Time: &time, Memory: &memory, CPUs: &cpus}
 		} else {
-			iterations := maxKDFIterations
-			k.KDF = &rawKDF{Type: kdfTypePBKDF2, Hash: hash, Salt: k.KDF.Salt, Iterations: &iterations}
+			iterations := header.MaxKDFIterations
+			k.KDF = &header.KDF{Type: kdfTypePBKDF2, Hash: hash, Salt: k.KDF.Salt, Iterations: &iterations}
 		}
 		d := *template
 		d.Keyslots = []string{id}
-		d.Hash, d.Iterations = hash, maxKDFIterations
+		d.Hash, d.Iterations = hash, header.MaxKDFIterations
 		d.Digest = encodeBase64(make([]byte, digestLen))
 		metadata.Digests[id] = &d
 	}
-	if err := validateHeaderStructure(int(hdr.HeaderSize), metadata); err != nil {
+	if err := header.ValidateHeaderStructure(int(hdr.HeaderSize), metadata); err != nil {
 		t.Fatalf("the fixture is not a header cryptsetup could have written: %v", err)
 	}
-	plan := planKeyslotScan(metadata, keyslotIDsInScanOrder(metadata.Keyslots))
+	plan := planKeyslotScan(metadata, header.KeyslotIDsInScanOrder(metadata.Keyslots))
 	if plan.work.Exceeds(operationKDFBudget) {
 		t.Fatalf("the most expensive cryptsetup header needs %+v, over the budget %+v", plan.work, operationKDFBudget)
 	}
@@ -189,18 +189,18 @@ func TestDerivationWork(t *testing.T) {
 	iterations, time, memory := 1000, 4, 65536
 	for _, tc := range []struct {
 		name string
-		kdf  *rawKDF
+		kdf  *header.KDF
 		out  int
 		want kdfWork
 	}{
-		{"pbkdf2-sha256 to 64 bytes: two blocks", &rawKDF{Type: "pbkdf2", Hash: "sha256", Iterations: &iterations}, 64, kdfWork{PBKDF2Blocks: 2000}},
-		{"pbkdf2-sha1 to 64 bytes: four blocks", &rawKDF{Type: "pbkdf2", Hash: "sha1", Iterations: &iterations}, 64, kdfWork{PBKDF2Blocks: 4000}},
-		{"pbkdf2-sha512 to 32 bytes: one block", &rawKDF{Type: "pbkdf2", Hash: "sha512", Iterations: &iterations}, 32, kdfWork{PBKDF2Blocks: 1000}},
-		{"argon2id", &rawKDF{Type: "argon2id", Time: &time, Memory: &memory}, 64, kdfWork{Argon2KiBPasses: 4 * 65536}},
+		{"pbkdf2-sha256 to 64 bytes: two blocks", &header.KDF{Type: "pbkdf2", Hash: "sha256", Iterations: &iterations}, 64, kdfWork{PBKDF2Blocks: 2000}},
+		{"pbkdf2-sha1 to 64 bytes: four blocks", &header.KDF{Type: "pbkdf2", Hash: "sha1", Iterations: &iterations}, 64, kdfWork{PBKDF2Blocks: 4000}},
+		{"pbkdf2-sha512 to 32 bytes: one block", &header.KDF{Type: "pbkdf2", Hash: "sha512", Iterations: &iterations}, 32, kdfWork{PBKDF2Blocks: 1000}},
+		{"argon2id", &header.KDF{Type: "argon2id", Time: &time, Memory: &memory}, 64, kdfWork{Argon2KiBPasses: 4 * 65536}},
 		{"no KDF", nil, 64, kdfWork{}},
-		{"no output", &rawKDF{Type: "pbkdf2", Hash: "sha256", Iterations: &iterations}, 0, kdfWork{}},
-		{"argon2 missing its cost", &rawKDF{Type: "argon2i"}, 64, kdfWork{}},
-		{"pbkdf2 missing its count", &rawKDF{Type: "pbkdf2", Hash: "sha256"}, 64, kdfWork{}},
+		{"no output", &header.KDF{Type: "pbkdf2", Hash: "sha256", Iterations: &iterations}, 0, kdfWork{}},
+		{"argon2 missing its cost", &header.KDF{Type: "argon2i"}, 64, kdfWork{}},
+		{"pbkdf2 missing its count", &header.KDF{Type: "pbkdf2", Hash: "sha256"}, 64, kdfWork{}},
 	} {
 		if got := derivationWork(tc.kdf, tc.out); got != tc.want {
 			t.Errorf("%s: %+v, want %+v", tc.name, got, tc.want)
@@ -316,7 +316,7 @@ func scanPeak(t *testing.T, device string) int64 {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan := planKeyslotScan(volumeKeyDigestsView(metadata), keyslotIDsInScanOrder(metadata.Keyslots))
+	plan := planKeyslotScan(header.VolumeKeyDigestsView(metadata), header.KeyslotIDsInScanOrder(metadata.Keyslots))
 	if plan.peakLocked <= 0 {
 		t.Fatal("the plan priced no locked memory")
 	}
@@ -408,7 +408,7 @@ func TestAnAllocatorSizedToThePlannedPeakOpensTheVolume(t *testing.T) {
 		calls := 0
 		sys := testVolumeSys()
 		real := sys.passphraseKDF
-		sys.passphraseKDF = func(ctx context.Context, p []byte, kdf *rawKDF, n int) (*enclave.MemoryEnclave, error) {
+		sys.passphraseKDF = func(ctx context.Context, p []byte, kdf *header.KDF, n int) (*enclave.MemoryEnclave, error) {
 			calls++
 			return real(ctx, p, kdf, n)
 		}

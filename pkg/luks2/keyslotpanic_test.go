@@ -207,8 +207,8 @@ func TestKillKeyslotRefusesAMalformedKeyslotArea(t *testing.T) {
 // way AddKey does in production, or the new slot authenticates nothing. Sharing
 // the digest pointers with the original metadata makes that registration leak
 // into every other subtest.
-func cloneDigests(src map[string]*rawDigest) map[string]*rawDigest {
-	out := make(map[string]*rawDigest, len(src))
+func cloneDigests(src map[string]*header.Digest) map[string]*header.Digest {
+	out := make(map[string]*header.Digest, len(src))
 	for id, d := range src {
 		if d == nil {
 			out[id] = nil
@@ -327,9 +327,9 @@ func TestAddKeyDoesNotTemplateOffADamagedKeyslot(t *testing.T) {
 		}
 
 		var reference *header.Keyslot
-		for _, id := range keyslotIDsInScanOrder(reread.Keyslots) {
+		for _, id := range header.KeyslotIDsInScanOrder(reread.Keyslots) {
 			ks := reread.Keyslots[id]
-			if ks.Type != "luks2" || validateKeyslot(id, ks) != nil {
+			if ks.Type != "luks2" || header.ValidateKeyslot(id, ks) != nil {
 				continue
 			}
 			reference = ks

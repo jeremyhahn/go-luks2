@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 
@@ -16,21 +17,9 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// checksumFieldOffset is where the 64-byte checksum field sits inside the
-// 4096-byte binary header.
-const checksumFieldOffset = header.ChecksumFieldOffset
-
-// headerChecksumAlgorithm is the only checksum algorithm this package
-// reads or writes a LUKS2 binary header with.
-const headerChecksumAlgorithm = header.HeaderChecksumAlgorithm
-
-// The binary header, the JSON codec, canonical JSON, checksums and
-// requirements now live in internal/header; see docs/design/DECISIONS.md's
-// H5 entry. The pure functions below are transitional forwards, kept under
-// their original names so every existing caller and test in this package
-// keeps compiling unchanged. Functions, not package-level vars: nothing
-// substitutes them, so there is no seam to move into Volume.sys (§E).
-func readHeaderCopyFrom(f readerAt, offset int64) (*header.BinaryHeader, *header.Metadata, error) {
+// readHeaderCopyFrom reads one header copy through internal/header and folds
+// header.ErrUnsupportedHeaderChecksum into the public ErrUnsupported.
+func readHeaderCopyFrom(f io.ReaderAt, offset int64) (*header.BinaryHeader, *header.Metadata, error) {
 	hdr, metadata, err := header.ReadHeaderCopyFrom(f, offset)
 	return hdr, metadata, reclassifyUnsupportedChecksum(err)
 }
@@ -46,8 +35,9 @@ func reclassifyUnsupportedChecksum(err error) error {
 	}
 	return err
 }
-func legalHeaderAreaSizes() []int64     { return header.LegalHeaderAreaSizes() }
-func expectedMagic(offset int64) string { return header.ExpectedMagic(offset) }
+
+// checkHeaderWritable is header.CheckHeaderWritable with
+// header.ErrMetadataTooLarge folded into the public ErrNoSpace.
 func checkHeaderWritable(hdr *header.BinaryHeader, metadata *header.Metadata) error {
 	return reclassifyMetadataTooLarge(header.CheckHeaderWritable(hdr, metadata))
 }
@@ -62,65 +52,25 @@ func reclassifyMetadataTooLarge(err error) error {
 	}
 	return err
 }
-func headerCopiesAgree(r readerAt) error { return header.HeaderCopiesAgree(r) }
-func headerAreaSizeForWrite(hdr *header.BinaryHeader) (int, error) {
-	return header.HeaderAreaSizeForWrite(hdr)
-}
-func headerAreaSize(hdr *header.BinaryHeader) (int, error)     { return header.HeaderAreaSize(hdr) }
-func headerAreaOffset(hdr *header.BinaryHeader) (int64, error) { return header.HeaderAreaOffset(hdr) }
-func calculateHeaderChecksum(hdr *header.BinaryHeader, jsonData []byte, jsonSize int) error {
-	return header.CalculateHeaderChecksum(hdr, jsonData, jsonSize)
-}
-func readJSONMetadata(r readerAt, hdr *header.BinaryHeader, headerOffset int64, headerSize int) (*header.Metadata, error) {
-	return header.ReadJSONMetadata(r, hdr, headerOffset, headerSize)
-}
-func forgetKeyslotID(metadata *header.Metadata, id string) { header.ForgetKeyslotID(metadata, id) }
-func withoutID(ids []string, id string) []string           { return header.WithoutID(ids, id) }
-func volumeKeyBits(metadata *header.Metadata, segmentID string) int {
-	return header.VolumeKeyBits(metadata, segmentID)
-}
-func marshalCanonicalJSON(v any) ([]byte, error) { return header.MarshalCanonicalJSON(v) }
+
+// encodeMetadata is header.EncodeMetadata with header.ErrMetadataTooLarge
+// folded into the public ErrNoSpace.
 func encodeMetadata(hdr *header.BinaryHeader, metadata *header.Metadata) ([]byte, int, error) {
 	jsonData, area, err := header.EncodeMetadata(hdr, metadata)
 	return jsonData, area, reclassifyMetadataTooLarge(err)
 }
+
+// encodeMetadataForHeader is header.EncodeMetadataForHeader with
+// header.ErrMetadataTooLarge folded into the public ErrNoSpace.
 func encodeMetadataForHeader(hdr *header.BinaryHeader, metadata *header.Metadata) ([]byte, int, error) {
 	jsonData, area, err := header.EncodeMetadataForHeader(hdr, metadata)
 	return jsonData, area, reclassifyMetadataTooLarge(err)
 }
 
-func canonicalKeyslotID(key string) (int, bool) { return header.CanonicalKeyslotID(key) }
-func keyslotIDsInScanOrder(keyslots map[string]*header.Keyslot) []string {
-	return header.KeyslotIDsInScanOrder(keyslots)
-}
-func volumeKeyScanOrder(metadata *header.Metadata) []string {
-	return header.VolumeKeyScanOrder(metadata)
-}
-func volumeKeyDigestsView(metadata *header.Metadata) *header.Metadata {
-	return header.VolumeKeyDigestsView(metadata)
-}
-
-// validateHeaderChecksum forwards to header.ValidateHeaderChecksum.
-func validateHeaderChecksum(hdr *header.BinaryHeader, r readerAt, headerOffset int64, headerSize int) error {
-	return header.ValidateHeaderChecksum(hdr, r, headerOffset, headerSize)
-}
-
-// readerAt is io.ReaderAt, named locally so this file's forwards do not need
-// an "io" import solely for the parameter type.
-type readerAt = interface {
-	ReadAt(p []byte, off int64) (n int, err error)
-}
-
-// writeHeaderTo forwards to header.WriteHeaderTo, supplying this package's
-// syncDevice seam.
+// writeHeaderTo is header.WriteHeaderTo, supplying this package's syncDevice
+// seam, with header.ErrMetadataTooLarge folded into the public ErrNoSpace.
 func writeHeaderTo(f *os.File, hdr *header.BinaryHeader, metadata *header.Metadata, sync func(*os.File) error) error {
 	return reclassifyMetadataTooLarge(header.WriteHeaderTo(f, hdr, metadata, sync))
-}
-
-// writeEncodedHeader forwards to header.WriteEncodedHeader, supplying this
-// package's syncDevice seam.
-func writeEncodedHeader(f *os.File, hdr *header.BinaryHeader, jsonData []byte, area int, sync func(*os.File) error) error {
-	return header.WriteEncodedHeader(f, hdr, jsonData, area, sync)
 }
 
 // readHeaderForTest reads and validates the PRIMARY LUKS2 header from a device.
@@ -437,18 +387,18 @@ func getVolumeInfoForTest(device string) (*volumeInfoForTest, error) {
 	// map iteration yielded first. It is the segment Unlock maps whenever
 	// Unlock maps one (activationSegment), and unlike Unlock this reports on a
 	// multi-segment container too, which is when an operator needs to look.
-	for _, segmentID := range sortedIDs(metadata.Segments) {
+	for _, segmentID := range header.SortedIDs(metadata.Segments) {
 		if segment := metadata.Segments[segmentID]; segment != nil && segment.Type == "crypt" {
 			info.Cipher = segment.Encryption
 			info.SectorSize = segment.SectorSize
-			info.KeySize = volumeKeyBits(metadata, segmentID)
+			info.KeySize = header.VolumeKeyBits(metadata, segmentID)
 			break
 		}
 	}
 
 	// Find active keyslots, in the order unlock attempts them rather than in
 	// Go map order (#57).
-	for _, id := range keyslotIDsInScanOrder(metadata.Keyslots) {
+	for _, id := range header.KeyslotIDsInScanOrder(metadata.Keyslots) {
 		var slotNum int
 		if _, err := fmt.Sscanf(id, "%d", &slotNum); err == nil {
 			info.ActiveKeyslots = append(info.ActiveKeyslots, slotNum)

@@ -11,6 +11,7 @@ import (
 	"crypto/fips140"
 	"errors"
 	"github.com/jeremyhahn/go-luks2/internal/fips"
+	"github.com/jeremyhahn/go-luks2/internal/header"
 	"runtime"
 	"testing"
 
@@ -20,7 +21,7 @@ import (
 // A header declares how EXPENSIVE its own KDF is to run, and this package used
 // to run it on the header's word.
 //
-// validateKeyslot established that a KDF object exists and bounded the keyslot's
+// header.ValidateKeyslot established that a KDF object exists and bounded the keyslot's
 // geometry, but nothing bounded Iterations, Time, Memory or Parallelism. So a
 // crafted header could ask for four billion PBKDF2 iterations and occupy a
 // worker until it was killed, or ask for a terabyte-scale Argon2 matrix and
@@ -64,43 +65,43 @@ func TestExcessiveKDFCostIsRefusedBeforeDeriving(t *testing.T) {
 
 	cases := []struct {
 		name string
-		kdf  *rawKDF
+		kdf  *header.KDF
 	}{
 		{
 			// ~1 billion iterations. Measured: cryptsetup does not refuse this
 			// at format time -- it simply runs, and my probe was still running
 			// when a ten-minute timeout fired.
 			name: "pbkdf2 iterations past the ceiling",
-			kdf:  &rawKDF{Type: "pbkdf2", Hash: "sha256", Salt: "c2FsdA==", Iterations: &huge},
+			kdf:  &header.KDF{Type: "pbkdf2", Hash: "sha256", Salt: "c2FsdA==", Iterations: &huge},
 		},
 		{
 			name: "pbkdf2 negative iterations",
-			kdf:  &rawKDF{Type: "pbkdf2", Hash: "sha256", Salt: "c2FsdA==", Iterations: &negative},
+			kdf:  &header.KDF{Type: "pbkdf2", Hash: "sha256", Salt: "c2FsdA==", Iterations: &negative},
 		},
 		{
 			name: "pbkdf2 zero iterations",
-			kdf:  &rawKDF{Type: "pbkdf2", Hash: "sha256", Salt: "c2FsdA==", Iterations: &zero},
+			kdf:  &header.KDF{Type: "pbkdf2", Hash: "sha256", Salt: "c2FsdA==", Iterations: &zero},
 		},
 		{
 			// uint32(-1) KiB is four terabytes of Argon2 matrix.
 			name: "argon2 negative memory wraps to terabytes",
-			kdf:  &rawKDF{Type: "argon2id", Salt: "c2FsdA==", Time: &four, Memory: &negative, CPUs: &four},
+			kdf:  &header.KDF{Type: "argon2id", Salt: "c2FsdA==", Time: &four, Memory: &negative, CPUs: &four},
 		},
 		{
 			name: "argon2 memory past cryptsetup's own ceiling",
-			kdf:  &rawKDF{Type: "argon2id", Salt: "c2FsdA==", Time: &four, Memory: &huge, CPUs: &four},
+			kdf:  &header.KDF{Type: "argon2id", Salt: "c2FsdA==", Time: &four, Memory: &huge, CPUs: &four},
 		},
 		{
 			name: "argon2 time past the ceiling",
-			kdf:  &rawKDF{Type: "argon2id", Salt: "c2FsdA==", Time: &huge, Memory: &oneGiB, CPUs: &four},
+			kdf:  &header.KDF{Type: "argon2id", Salt: "c2FsdA==", Time: &huge, Memory: &oneGiB, CPUs: &four},
 		},
 		{
 			name: "argon2 negative time",
-			kdf:  &rawKDF{Type: "argon2id", Salt: "c2FsdA==", Time: &negative, Memory: &oneGiB, CPUs: &four},
+			kdf:  &header.KDF{Type: "argon2id", Salt: "c2FsdA==", Time: &negative, Memory: &oneGiB, CPUs: &four},
 		},
 		{
 			name: "argon2 missing its cost parameters",
-			kdf:  &rawKDF{Type: "argon2id", Salt: "c2FsdA=="},
+			kdf:  &header.KDF{Type: "argon2id", Salt: "c2FsdA=="},
 		},
 	}
 
@@ -110,7 +111,7 @@ func TestExcessiveKDFCostIsRefusedBeforeDeriving(t *testing.T) {
 	sys := testVolumeSys()
 	// It does not derive: on a mutation that ran it first, deriving a billion
 	// iterations would hang the test instead of failing it.
-	sys.passphraseKDF = func(context.Context, []byte, *rawKDF, int) (*enclave.MemoryEnclave, error) {
+	sys.passphraseKDF = func(context.Context, []byte, *header.KDF, int) (*enclave.MemoryEnclave, error) {
 		derivations++
 		return nil, errors.New("the keyslot KDF was reached")
 	}
@@ -162,7 +163,7 @@ func TestExcessiveKDFCostIsRefusedBeforeDeriving(t *testing.T) {
 func TestKDFCostCeilingsAcceptWhatCryptsetupWrites(t *testing.T) {
 	cases := []struct {
 		name string
-		kdf  *rawKDF
+		kdf  *header.KDF
 	}{
 		// PBKDF2: cryptsetup REFUSES --pbkdf-force-iterations below 1000
 		// ("Failed to set pbkdf parameters") and accepts everything above,
@@ -192,7 +193,7 @@ func TestKDFCostCeilingsAcceptWhatCryptsetupWrites(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := validateKDFCost(tc.kdf); err != nil {
+			if err := header.ValidateKDFCost(tc.kdf); err != nil {
 				t.Fatalf("a KDF cryptsetup can write was refused: %v", err)
 			}
 		})
@@ -204,18 +205,18 @@ func TestKDFCostCeilingsAcceptWhatCryptsetupWrites(t *testing.T) {
 func TestKDFCostCeilingsRefuseWhatNoHeaderCarries(t *testing.T) {
 	cases := []struct {
 		name string
-		kdf  *rawKDF
+		kdf  *header.KDF
 	}{
-		{"pbkdf2 one past the ceiling", pbkdf2KDF(maxKDFIterations + 1)},
-		{"argon2 memory one past cryptsetup's ceiling", argon2KDF(4, maxArgon2Memory+1, 1)},
-		{"argon2 time one past the ceiling", argon2KDF(maxArgon2Time+1, 1024, 1)},
+		{"pbkdf2 one past the ceiling", pbkdf2KDF(header.MaxKDFIterations + 1)},
+		{"argon2 memory one past cryptsetup's ceiling", argon2KDF(4, header.MaxArgon2Memory+1, 1)},
+		{"argon2 time one past the ceiling", argon2KDF(header.MaxArgon2Time+1, 1024, 1)},
 		{"argon2 parallelism past argon2's uint8 limit", argon2KDF(4, 1024, 256)},
 		{"argon2 zero parallelism", argon2KDF(4, 1024, 0)},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := validateKDFCost(tc.kdf); err == nil {
+			if err := header.ValidateKDFCost(tc.kdf); err == nil {
 				t.Fatal("a cost outside every accepted range was allowed")
 			}
 		})
@@ -228,7 +229,7 @@ func TestKDFCostCeilingsRefuseWhatNoHeaderCarries(t *testing.T) {
 // have, and sending the reader looking for a value that was never meant to be
 // there.
 func TestKDFCostNamesAnUnsupportedTypeAsSuch(t *testing.T) {
-	err := validateKDFCost(&rawKDF{Type: "sha256-crypt", Salt: "c2FsdA=="})
+	err := header.ValidateKDFCost(&header.KDF{Type: "sha256-crypt", Salt: "c2FsdA=="})
 	if err == nil {
 		t.Fatal("an unsupported KDF type was accepted")
 	}
@@ -261,7 +262,7 @@ func TestExcessiveDigestKDFCostSkipsThatDigest(t *testing.T) {
 	// An expensive digest ahead of the usable one, in a map so scan order is
 	// not something this test controls -- both must be reachable.
 	expensive := *usable
-	expensive.Iterations = maxKDFIterations + 1
+	expensive.Iterations = header.MaxKDFIterations + 1
 	metadata.Digests["1"] = &expensive
 
 	// The expensive digest is refused by the screen before any derivation --
@@ -269,7 +270,7 @@ func TestExcessiveDigestKDFCostSkipsThatDigest(t *testing.T) {
 	// (#233). verifyKeyAgainstDigests cannot skip the screen: it is the only
 	// source of the expected value and the KDF it derives with.
 	if _, _, err := screenDigest(&expensive, fips.Probe); err == nil {
-		t.Fatalf("the screen accepted a digest declaring %d iterations, past the %d ceiling", expensive.Iterations, maxKDFIterations)
+		t.Fatalf("the screen accepted a digest declaring %d iterations, past the %d ceiling", expensive.Iterations, header.MaxKDFIterations)
 	}
 
 	key, err := getMasterKey(path, []byte(conformancePassphrase), metadata, testVolumeSys())
@@ -279,12 +280,12 @@ func TestExcessiveDigestKDFCostSkipsThatDigest(t *testing.T) {
 	mustDestroy(t, key)
 }
 
-func pbkdf2KDF(iterations int) *rawKDF {
-	return &rawKDF{Type: "pbkdf2", Hash: "sha256", Salt: "c2FsdA==", Iterations: &iterations}
+func pbkdf2KDF(iterations int) *header.KDF {
+	return &header.KDF{Type: "pbkdf2", Hash: "sha256", Salt: "c2FsdA==", Iterations: &iterations}
 }
 
-func argon2KDF(t, memory, cpus int) *rawKDF {
-	return &rawKDF{Type: "argon2id", Salt: "c2FsdA==", Time: &t, Memory: &memory, CPUs: &cpus}
+func argon2KDF(t, memory, cpus int) *header.KDF {
+	return &header.KDF{Type: "argon2id", Salt: "c2FsdA==", Time: &t, Memory: &memory, CPUs: &cpus}
 }
 
 // TestCreateArgon2KDFRefusesANegativeCostRatherThanDefaultingIt covers the SEAM
@@ -296,7 +297,7 @@ func argon2KDF(t, memory, cpus int) *rawKDF {
 // `<= 0`: widen that comparison and a caller's -1 becomes this package's 1 GiB
 // default, silently.
 //
-// Since #249 (A5) createArgon2KDF holds what it builds to validateKDFCost -- the
+// Since #249 (A5) createArgon2KDF holds what it builds to header.ValidateKDFCost -- the
 // read path's own bounds -- so a negative cost is REFUSED there, with an error,
 // before anything is derived or written. What this pins is that the refusal is
 // reached at all: a createArgon2KDF that defaulted the negative would build a
@@ -331,7 +332,7 @@ func TestCreateArgon2KDFRefusesANegativeCostRatherThanDefaultingIt(t *testing.T)
 // the test above would also pass against a createArgon2KDF that had stopped
 // defaulting at all. In both modes, the same way (#235).
 func TestCreateArgon2KDFStillDefaultsAZeroCost(t *testing.T) {
-	defaulted := func(t *testing.T, kdf *rawKDF) {
+	defaulted := func(t *testing.T, kdf *header.KDF) {
 		t.Helper()
 		if kdf.Memory == nil || *kdf.Memory <= 0 {
 			t.Fatalf("no explicit cost produced memory = %v, want a positive default", kdf.Memory)
@@ -357,7 +358,7 @@ func TestCreateArgon2KDFStillDefaultsAZeroCost(t *testing.T) {
 // the mode this process runs in. Without FIPS 140-3 mode it must build the KDF,
 // which check then inspects. Under FIPS mode Argon2 is not approved, and
 // CreateKDF must refuse it with ErrFIPSNotApproved and build nothing (#235).
-func assertCreateKDFInThisMode(t *testing.T, opts formatOptionsForTest, check func(*testing.T, *rawKDF)) {
+func assertCreateKDFInThisMode(t *testing.T, opts formatOptionsForTest, check func(*testing.T, *header.KDF)) {
 	t.Helper()
 	kdf, err := createKDFStrict(opts, 32)
 	if fips140.Enabled() {

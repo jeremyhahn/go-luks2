@@ -11,6 +11,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // Regression tests for #58: verifyMasterKey aborted on the FIRST digest whose
@@ -46,7 +48,7 @@ const digestScanRepeats = 64
 //
 // The association rule itself is tested where it belongs, on its own fixtures,
 // in digestbinding_test.go.
-func boundTo(id string, digests map[string]*rawDigest) map[string]*rawDigest {
+func boundTo(id string, digests map[string]*header.Digest) map[string]*header.Digest {
 	for _, d := range digests {
 		if d != nil {
 			d.Keyslots = []string{id}
@@ -57,16 +59,16 @@ func boundTo(id string, digests map[string]*rawDigest) map[string]*rawDigest {
 
 // usableDigest builds a digest that the given master key verifies against.
 //
-// One iteration, the least a header may declare (minKDFIterations): the subject
+// One iteration, the least a header may declare (header.MinKDFIterations): the subject
 // here is the ORDER of the scan, which every case repeats digestScanRepeats
 // times, and at the 1000 iterations this used to carry each repeat paid two
 // full derivations for nothing it asserts -- these were among the slowest
 // tests in the package under -race (#92).
-func usableDigest(t *testing.T, masterKey []byte, length int) *rawDigest {
+func usableDigest(t *testing.T, masterKey []byte, length int) *header.Digest {
 	t.Helper()
 
-	iterations := minKDFIterations
-	kdf := &rawKDF{
+	iterations := header.MinKDFIterations
+	kdf := &header.KDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       encodeBase64([]byte("digest-scan-salt")),
@@ -78,7 +80,7 @@ func usableDigest(t *testing.T, masterKey []byte, length int) *rawDigest {
 		t.Fatalf("failed to derive the usable digest: %v", err)
 	}
 
-	return &rawDigest{
+	return &header.Digest{
 		Type:       kdf.Type,
 		Hash:       kdf.Hash,
 		Salt:       kdf.Salt,
@@ -91,12 +93,12 @@ func usableDigest(t *testing.T, masterKey []byte, length int) *rawDigest {
 // fails at a different point: base64 decode, salt decode, KDF dispatch, and
 // argon2 parameter validation -- the last standing in for the FIPS refusal,
 // which cannot be toggled inside a running process.
-func unusableDigests(t *testing.T) map[string]*rawDigest {
+func unusableDigests(t *testing.T) map[string]*header.Digest {
 	t.Helper()
 
 	iterations := 1000
 
-	return map[string]*rawDigest{
+	return map[string]*header.Digest{
 		"undecodable digest value": {
 			Type:       "pbkdf2",
 			Hash:       "sha256",
@@ -164,7 +166,7 @@ func TestVerifyMasterKeySkipsUnusableDigests(t *testing.T) {
 			defer parallel(t)()
 
 			for i := 0; i < digestScanRepeats; i++ {
-				digests := map[string]*rawDigest{
+				digests := map[string]*header.Digest{
 					"0": bad,
 					"1": usableDigest(t, masterKey, 32),
 				}
@@ -194,7 +196,7 @@ func TestVerifyMasterKeySkipsEveryUnusableDigestAtOnce(t *testing.T) {
 	usable := usableDigest(t, masterKey, 32)
 
 	for i := 0; i < digestScanRepeats; i++ {
-		digests := map[string]*rawDigest{}
+		digests := map[string]*header.Digest{}
 		id := 0
 		for _, bad := range unusable {
 			digests[string(rune('a'+id))] = bad
@@ -228,7 +230,7 @@ func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
 		// subtest below, and the two must not be collapsed: the whole reason
 		// this case may be distinguished at all is that no comparison outcome
 		// exists to leak.
-		digests := map[string]*rawDigest{}
+		digests := map[string]*header.Digest{}
 		id := 0
 		for _, bad := range unusableDigests(t) {
 			digests[string(rune('a'+id))] = bad
@@ -253,7 +255,7 @@ func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
 		// into a header fault.
 		for name, bad := range unusableDigests(t) {
 			t.Run(name, func(t *testing.T) {
-				digests := map[string]*rawDigest{
+				digests := map[string]*header.Digest{
 					"0": bad,
 					"1": usableDigest(t, []byte("some-other-master-key-32-bytes!!"), 32),
 				}
@@ -270,7 +272,7 @@ func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
 	})
 
 	t.Run("a usable digest for a different key", func(t *testing.T) {
-		digests := map[string]*rawDigest{
+		digests := map[string]*header.Digest{
 			"0": usableDigest(t, []byte("some-other-master-key-32-bytes!!"), 32),
 		}
 
@@ -295,10 +297,10 @@ func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
 		// exists to pin. It carries a usable digest beside the unusable one so
 		// that the ONLY difference between the two sets is the presence of a
 		// digest that could not be evaluated.
-		mismatch := verifyMasterKey(context.Background(), enclaveFrom(t, masterKey), "0", boundTo("0", map[string]*rawDigest{
+		mismatch := verifyMasterKey(context.Background(), enclaveFrom(t, masterKey), "0", boundTo("0", map[string]*header.Digest{
 			"0": usableDigest(t, []byte("some-other-master-key-32-bytes!!"), 32),
 		}))
-		mixed := verifyMasterKey(context.Background(), enclaveFrom(t, masterKey), "0", boundTo("0", map[string]*rawDigest{
+		mixed := verifyMasterKey(context.Background(), enclaveFrom(t, masterKey), "0", boundTo("0", map[string]*header.Digest{
 			"0": unusableDigests(t)["unsupported kdf type"],
 			"1": usableDigest(t, []byte("some-other-master-key-32-bytes!!"), 32),
 		}))
@@ -317,7 +319,7 @@ func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
 func TestVerifyMasterKeyAcceptsTheUsableDigestAlone(t *testing.T) {
 	masterKey := []byte("digest-scan-master-key-32-bytes!")
 
-	digests := map[string]*rawDigest{"0": usableDigest(t, masterKey, 32)}
+	digests := map[string]*header.Digest{"0": usableDigest(t, masterKey, 32)}
 	if err := verifyMasterKey(context.Background(), enclaveFrom(t, masterKey), "0", boundTo("0", digests)); err != nil {
 		t.Fatalf("the fixture's own usable digest does not verify: %v", err)
 	}

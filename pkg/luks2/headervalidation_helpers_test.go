@@ -28,9 +28,9 @@ func minimalValidMetadata() *header.Metadata {
 			Type: "crypt", Offset: "16777216", Size: "dynamic", IVTweak: "0",
 			Encryption: "aes-xts-plain64", SectorSize: 512,
 		}},
-		Digests: map[string]*rawDigest{"0": {
+		Digests: map[string]*header.Digest{"0": {
 			Type: "pbkdf2", Keyslots: []string{}, Segments: []string{"0"}, Hash: "sha256", Iterations: 1000,
 		}},
-		Config: &rawConfig{JSONSize: "12288", KeyslotsSize: "16744448"},
+		Config: &header.Config{JSONSize: "12288", KeyslotsSize: "16744448"},
 	}
 }

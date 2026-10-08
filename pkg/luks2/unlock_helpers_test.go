@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // TestParseIVTweak is GONE, with parseIVTweak itself (#40).
@@ -20,7 +22,7 @@ import (
 // produced 0 and that a value past 64 bits produced 18446744073709551615 --
 // which is exactly the silent mapping of a malformed header field onto a
 // valid-looking IV offset that the fix removes. A header's iv_tweak is now
-// parsed by cryptTableParams, which refuses what does not parse; the refusals
+// parsed by header.CryptTableParams, which refuses what does not parse; the refusals
 // are pinned in segmentvalidation_test.go.
 
 // TestVerifyMasterKey tests master key verification against digests
@@ -33,7 +35,7 @@ func TestVerifyMasterKey(t *testing.T) {
 	t.Run("valid master key with pbkdf2 digest", func(t *testing.T) {
 		// Derive the expected digest from the test master key
 		iterations := 1000
-		kdf := &rawKDF{
+		kdf := &header.KDF{
 			Type:       "pbkdf2",
 			Hash:       "sha256",
 			Salt:       encodeBase64([]byte("test-salt-16byte")),
@@ -45,7 +47,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			t.Fatalf("Failed to derive test digest: %v", err)
 		}
 
-		digests := map[string]*rawDigest{
+		digests := map[string]*header.Digest{
 			"0": {
 				Type:       "pbkdf2",
 				Hash:       "sha256",
@@ -64,7 +66,7 @@ func TestVerifyMasterKey(t *testing.T) {
 	t.Run("invalid master key", func(t *testing.T) {
 		invalidKey := []byte("wrong-master-key-32-bytes-long!!")
 		iterations := 1000
-		kdf := &rawKDF{
+		kdf := &header.KDF{
 			Type:       "pbkdf2",
 			Hash:       "sha256",
 			Salt:       encodeBase64([]byte("test-salt-16byte")),
@@ -77,7 +79,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			t.Fatalf("Failed to derive test digest: %v", err)
 		}
 
-		digests := map[string]*rawDigest{
+		digests := map[string]*header.Digest{
 			"0": {
 				Type:       "pbkdf2",
 				Hash:       "sha256",
@@ -115,7 +117,7 @@ func TestVerifyMasterKey(t *testing.T) {
 	t.Run("destroyed master key", func(t *testing.T) {
 		iterations := 1000
 
-		digests := map[string]*rawDigest{
+		digests := map[string]*header.Digest{
 			"0": {
 				Type:       "pbkdf2",
 				Hash:       "sha256",
@@ -141,7 +143,7 @@ func TestVerifyMasterKey(t *testing.T) {
 	t.Run("nil master key", func(t *testing.T) {
 		iterations := 1000
 
-		digests := map[string]*rawDigest{
+		digests := map[string]*header.Digest{
 			"0": {
 				Type:       "pbkdf2",
 				Hash:       "sha256",
@@ -158,7 +160,7 @@ func TestVerifyMasterKey(t *testing.T) {
 	})
 
 	t.Run("empty digests map", func(t *testing.T) {
-		digests := map[string]*rawDigest{}
+		digests := map[string]*header.Digest{}
 
 		err := verifyMasterKey(context.Background(), enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
 		if err == nil {
@@ -186,7 +188,7 @@ func TestVerifyMasterKey(t *testing.T) {
 
 	t.Run("multiple digests, first invalid, second valid", func(t *testing.T) {
 		iterations := 1000
-		kdf := &rawKDF{
+		kdf := &header.KDF{
 			Type:       "pbkdf2",
 			Hash:       "sha256",
 			Salt:       encodeBase64([]byte("test-salt-16byte")),
@@ -198,7 +200,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			t.Fatalf("Failed to derive test digest: %v", err)
 		}
 
-		digests := map[string]*rawDigest{
+		digests := map[string]*header.Digest{
 			"0": {
 				Type:       "pbkdf2",
 				Hash:       "sha256",
@@ -224,7 +226,7 @@ func TestVerifyMasterKey(t *testing.T) {
 	t.Run("invalid base64 in digest", func(t *testing.T) {
 		iterations := 1000
 
-		digests := map[string]*rawDigest{
+		digests := map[string]*header.Digest{
 			"0": {
 				Type:       "pbkdf2",
 				Hash:       "sha256",
@@ -243,7 +245,7 @@ func TestVerifyMasterKey(t *testing.T) {
 	t.Run("invalid hash algorithm", func(t *testing.T) {
 		iterations := 1000
 
-		digests := map[string]*rawDigest{
+		digests := map[string]*header.Digest{
 			"0": {
 				Type:       "pbkdf2",
 				Hash:       "invalid-hash",
@@ -261,7 +263,7 @@ func TestVerifyMasterKey(t *testing.T) {
 
 	t.Run("sha512 hash algorithm", func(t *testing.T) {
 		iterations := 1000
-		kdf := &rawKDF{
+		kdf := &header.KDF{
 			Type:       "pbkdf2",
 			Hash:       "sha512",
 			Salt:       encodeBase64([]byte("test-salt-16byte")),
@@ -273,7 +275,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			t.Fatalf("Failed to derive test digest: %v", err)
 		}
 
-		digests := map[string]*rawDigest{
+		digests := map[string]*header.Digest{
 			"0": {
 				Type:       "pbkdf2",
 				Hash:       "sha512",
@@ -292,7 +294,7 @@ func TestVerifyMasterKey(t *testing.T) {
 	t.Run("zero iterations", func(t *testing.T) {
 		iterations := 0
 
-		digests := map[string]*rawDigest{
+		digests := map[string]*header.Digest{
 			"0": {
 				Type:       "pbkdf2",
 				Hash:       "sha256",
@@ -311,7 +313,7 @@ func TestVerifyMasterKey(t *testing.T) {
 	t.Run("invalid base64 in salt", func(t *testing.T) {
 		iterations := 1000
 
-		digests := map[string]*rawDigest{
+		digests := map[string]*header.Digest{
 			"0": {
 				Type:       "pbkdf2",
 				Hash:       "sha256",
@@ -354,7 +356,7 @@ func TestVerifyMasterKey(t *testing.T) {
 	} {
 		t.Run(fmt.Sprintf("%s digest stored at %d bytes verifies", tc.hash, tc.digestLen), func(t *testing.T) {
 			iterations := 1000
-			kdf := &rawKDF{
+			kdf := &header.KDF{
 				Type:       "pbkdf2",
 				Hash:       tc.hash,
 				Salt:       encodeBase64([]byte("test-salt-16byte")),
@@ -366,7 +368,7 @@ func TestVerifyMasterKey(t *testing.T) {
 				t.Fatalf("Failed to derive test digest: %v", err)
 			}
 
-			digests := map[string]*rawDigest{
+			digests := map[string]*header.Digest{
 				"0": {
 					Type:       "pbkdf2",
 					Hash:       tc.hash,
@@ -411,7 +413,7 @@ func TestVerifyMasterKey(t *testing.T) {
 			// length -- see the out-of-scope note in the report).
 			stored := bytes.Repeat([]byte{0xA5}, tc.digestLen)
 
-			digests := map[string]*rawDigest{
+			digests := map[string]*header.Digest{
 				"0": {
 					Type:       "pbkdf2",
 					Hash:       tc.hash,
@@ -448,7 +450,7 @@ func TestVerifyMasterKeyDoesNotModifyInput(t *testing.T) {
 	copy(originalKey, testMasterKey)
 
 	iterations := 1000
-	kdf := &rawKDF{
+	kdf := &header.KDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       encodeBase64([]byte("test-salt-16byte")),
@@ -460,7 +462,7 @@ func TestVerifyMasterKeyDoesNotModifyInput(t *testing.T) {
 		t.Fatalf("Failed to derive test digest: %v", err)
 	}
 
-	digests := map[string]*rawDigest{
+	digests := map[string]*header.Digest{
 		"0": {
 			Type:       "pbkdf2",
 			Hash:       "sha256",

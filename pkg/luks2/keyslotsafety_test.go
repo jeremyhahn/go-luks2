@@ -637,9 +637,9 @@ func TestArgon2CreationIsBoundedByWhatTheReaderAccepts(t *testing.T) {
 		opts formatOptionsForTest
 		want error
 	}{
-		{"memory over the 4 GiB ceiling", formatOptionsForTest{KDFType: kdfTypeArgon2id, Argon2Memory: maxArgon2Memory + 1}, ErrInvalidArgument},
-		{"time over the ceiling", formatOptionsForTest{KDFType: kdfTypeArgon2id, Argon2Time: maxArgon2Time + 1}, ErrInvalidArgument},
-		{"parallelism over 255", formatOptionsForTest{KDFType: kdfTypeArgon2i, Argon2Parallel: maxArgon2Parallel + 1}, ErrInvalidArgument},
+		{"memory over the 4 GiB ceiling", formatOptionsForTest{KDFType: kdfTypeArgon2id, Argon2Memory: header.MaxArgon2Memory + 1}, ErrInvalidArgument},
+		{"time over the ceiling", formatOptionsForTest{KDFType: kdfTypeArgon2id, Argon2Time: header.MaxArgon2Time + 1}, ErrInvalidArgument},
+		{"parallelism over 255", formatOptionsForTest{KDFType: kdfTypeArgon2i, Argon2Parallel: header.MaxArgon2Parallel + 1}, ErrInvalidArgument},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := validateArgon2CreateCost(tc.opts)
@@ -656,11 +656,11 @@ func TestArgon2CreationIsBoundedByWhatTheReaderAccepts(t *testing.T) {
 	// createKDF itself, which every creation path reaches -- ChangeKey's
 	// inherited cost included -- refuses what the reader would.
 	for _, opts := range []formatOptionsForTest{
-		{KDFType: kdfTypeArgon2id, Argon2Memory: maxArgon2Memory + 1, Argon2Time: 4, Argon2Parallel: 4},
-		{KDFType: kdfTypeArgon2i, Argon2Memory: 65536, Argon2Time: maxArgon2Time + 1, Argon2Parallel: 4},
+		{KDFType: kdfTypeArgon2id, Argon2Memory: header.MaxArgon2Memory + 1, Argon2Time: 4, Argon2Parallel: 4},
+		{KDFType: kdfTypeArgon2i, Argon2Memory: 65536, Argon2Time: header.MaxArgon2Time + 1, Argon2Parallel: 4},
 	} {
 		if kdf, err := createKDF(opts, 64, callerSuppliedCredential, testVolumeSys().fipsMode, testVolumeSys().calibratedCountFloor, testVolumeSys().cryptoRand); err == nil {
-			t.Errorf("createKDF wrote %+v, a cost validateKDFCost refuses on read", kdf)
+			t.Errorf("createKDF wrote %+v, a cost header.ValidateKDFCost refuses on read", kdf)
 		}
 	}
 
@@ -668,7 +668,7 @@ func TestArgon2CreationIsBoundedByWhatTheReaderAccepts(t *testing.T) {
 	device := newImage(t, "argon2-ceiling.img")
 	before := fileDigest(t, device)
 	opts := standardFormatOptions(device)
-	opts.KDFType, opts.Argon2Memory = kdfTypeArgon2id, maxArgon2Memory+1
+	opts.KDFType, opts.Argon2Memory = kdfTypeArgon2id, header.MaxArgon2Memory+1
 	if err := formatForTest(opts); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("Format with Argon2 memory over the ceiling returned %v", err)
 	}
@@ -884,7 +884,7 @@ func relinkDuring(t *testing.T, link, to string) volumeSys {
 	sys := testVolumeSys()
 	real := sys.passphraseKDF
 	moved := false
-	sys.passphraseKDF = func(ctx context.Context, p []byte, kdf *rawKDF, keySize int) (*enclave.MemoryEnclave, error) {
+	sys.passphraseKDF = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
 		if !moved {
 			moved = true
 			if err := os.Remove(link); err != nil {
@@ -991,7 +991,7 @@ func TestANewKeyslotJoinsTheDigestBindingEverySegment(t *testing.T) {
 	mk := secretOf(t, key)
 	twoSegments := *metadata
 	twoSegments.Segments = map[string]*header.Segment{"0": metadata.Segments["0"], "1": metadata.Segments["0"]}
-	twoSegments.Digests = map[string]*rawDigest{
+	twoSegments.Digests = map[string]*header.Digest{
 		"0": digestVariant(metadata.Digests["0"], []string{"0"}, []string{"0"}),
 		"1": digestVariant(metadata.Digests["0"], []string{"0"}, []string{"0", "1"}),
 	}

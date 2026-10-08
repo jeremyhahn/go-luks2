@@ -173,14 +173,14 @@ func TestHeaderAreaSizeAcceptsTheWholeAcceptedBand(t *testing.T) {
 		{header.HeaderMaxSize, true},
 		{header.HeaderMaxSize + 1, false},
 	} {
-		got, err := headerAreaSize(&header.BinaryHeader{HeaderSize: tc.size})
+		got, err := header.HeaderAreaSize(&header.BinaryHeader{HeaderSize: tc.size})
 		switch {
 		case tc.accept && err != nil:
-			t.Errorf("headerAreaSize(%d) = error %v, want it accepted", tc.size, err)
+			t.Errorf("header.HeaderAreaSize(%d) = error %v, want it accepted", tc.size, err)
 		case !tc.accept && err == nil:
-			t.Errorf("headerAreaSize(%d) = %d, want it rejected", tc.size, got)
+			t.Errorf("header.HeaderAreaSize(%d) = %d, want it rejected", tc.size, got)
 		case tc.accept && uint64(got) != tc.size:
-			t.Errorf("headerAreaSize(%d) = %d, want the size back unchanged", tc.size, got)
+			t.Errorf("header.HeaderAreaSize(%d) = %d, want the size back unchanged", tc.size, got)
 		}
 	}
 }

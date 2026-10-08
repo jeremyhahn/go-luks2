@@ -177,7 +177,7 @@ func TestKeyslotWriteRepairsTheStaleHeaderCopy(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer func() { _ = f.Close() }()
-			if err := headerCopiesAgree(f); err != nil {
+			if err := header.HeaderCopiesAgree(f); err != nil {
 				t.Fatalf("the header copies after the write: %v", err)
 			}
 			_, metadata, err := readHeaderCopyFrom(f, header.PrimaryHeaderOffset)

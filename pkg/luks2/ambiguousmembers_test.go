@@ -35,8 +35,8 @@ func writeHeaderJSON(t *testing.T, path, jsonData string) {
 		t.Fatalf("open %s: %v", path, err)
 	}
 	defer func() { _ = f.Close() }()
-	if err := writeEncodedHeader(f, hdr, []byte(jsonData), header.HeaderMinSize, (*os.File).Sync); err != nil {
-		t.Fatalf("writeEncodedHeader: %v", err)
+	if err := header.WriteEncodedHeader(f, hdr, []byte(jsonData), header.HeaderMinSize, (*os.File).Sync); err != nil {
+		t.Fatalf("header.WriteEncodedHeader: %v", err)
 	}
 }
 
@@ -49,7 +49,7 @@ func TestReadHeaderRefusesAmbiguousMembers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadHeader: %v", err)
 	}
-	encoded, err := marshalCanonicalJSON(metadata)
+	encoded, err := header.MarshalCanonicalJSON(metadata)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestReadHeaderRequiresTheMandatoryObjects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadHeader: %v", err)
 	}
-	encoded, err := marshalCanonicalJSON(metadata)
+	encoded, err := header.MarshalCanonicalJSON(metadata)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}

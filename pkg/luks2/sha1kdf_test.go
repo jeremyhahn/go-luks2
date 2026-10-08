@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // No keyslot or digest is created with a SHA-1 KDF (#239, BREAKING).
@@ -42,7 +43,7 @@ func countDerivations(t *testing.T) (*int, volumeSys) {
 	n := new(int)
 	sys := testVolumeSys()
 	real := sys.passphraseKDF
-	sys.passphraseKDF = func(ctx context.Context, passphrase []byte, kdf *rawKDF, keySize int) (*enclave.MemoryEnclave, error) {
+	sys.passphraseKDF = func(ctx context.Context, passphrase []byte, kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
 		*n++
 		return real(ctx, passphrase, kdf, keySize)
 	}
@@ -277,7 +278,7 @@ func TestSHA256IterationsForSHA1(t *testing.T) {
 		{"noisy samples, conservatively", 300_000, 64,
 			func(i int) float64 { return []float64{100, 120, 110}[i%3] },
 			func(i int) float64 { return []float64{90, 95, 100}[i%3] }, 800_000},
-		{"past the ceiling", maxKDFIterations, 64, constant(1), constant(1), maxKDFIterations + 1},
+		{"past the ceiling", header.MaxKDFIterations, 64, constant(1), constant(1), header.MaxKDFIterations + 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -288,7 +289,7 @@ func TestSHA256IterationsForSHA1(t *testing.T) {
 			if err != nil || got < tc.want || got > tc.want+1 {
 				t.Fatalf("sha256IterationsForSHA1(%d, %d) = %d, %v; want %d (or one more)", tc.n, tc.keySize, got, err, tc.want)
 			}
-			if got > maxKDFIterations {
+			if got > header.MaxKDFIterations {
 				return // the caller's range check refuses it; there is no count to compare
 			}
 			sha1HMACs := tc.n * ((tc.keySize + sha1.Size - 1) / sha1.Size)

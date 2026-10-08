@@ -779,7 +779,7 @@ func TestFindFreeKeyslotAreaReusesGaps(t *testing.T) {
 	metadata := func(keyslots map[string]*header.Keyslot, keyslotsSize int64) *header.Metadata {
 		return &header.Metadata{
 			Keyslots: keyslots,
-			Config:   &rawConfig{KeyslotsSize: formatSize(keyslotsSize)},
+			Config:   &header.Config{KeyslotsSize: formatSize(keyslotsSize)},
 		}
 	}
 
@@ -1183,7 +1183,7 @@ func TestAddKeyAndUnlockRoundTripOnAES192CBCVolume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createDigest failed: %v", err)
 	}
-	metadata.Digests["0"] = &rawDigest{
+	metadata.Digests["0"] = &header.Digest{
 		Type:       "pbkdf2",
 		Keyslots:   []string{"0"},
 		Segments:   []string{"0"},
@@ -1257,7 +1257,7 @@ func shrinkHeaderArea(t *testing.T, device string, area int64) {
 	}
 
 	// The checksum covers the whole header area with its own field zeroed --
-	// see validateHeaderChecksum, whose layout this mirrors.
+	// see header.ValidateHeaderChecksum, whose layout this mirrors.
 	headerData := make([]byte, area)
 	if _, err := f.ReadAt(headerData, 0); err != nil {
 		t.Fatalf("failed to read the header area back: %v", err)
@@ -1579,7 +1579,7 @@ func TestZeroStillMeansUseTheDefault(t *testing.T) {
 //
 // A table forces the enumeration to be written down where a reviewer can count
 // it. Adding a third derivation here without a guard fails immediately.
-var argon2Derivations = map[string]func([]byte, []byte, *rawKDF, int) ([]byte, error){
+var argon2Derivations = map[string]func([]byte, []byte, *header.KDF, int) ([]byte, error){
 	"deriveArgon2i":  deriveArgon2i,
 	"deriveArgon2id": deriveArgon2id,
 }
@@ -1650,7 +1650,7 @@ func TestEveryArgon2DerivationRefusesACostItCannotRepresent(t *testing.T) {
 
 	type costCase struct {
 		name string
-		kdf  rawKDF
+		kdf  header.KDF
 	}
 
 	// The negative cases run everywhere. The over-range cases are APPENDED
@@ -1669,14 +1669,14 @@ func TestEveryArgon2DerivationRefusesACostItCannotRepresent(t *testing.T) {
 	// Prose asserting a property the code does not have is the shape this
 	// branch has now produced three times.
 	cases := []costCase{
-		{"negative time", rawKDF{Time: &neg, Memory: &mem, CPUs: &ok}},
-		{"negative memory", rawKDF{Time: &ok, Memory: &neg, CPUs: &ok}},
-		{"negative cpus", rawKDF{Time: &ok, Memory: &mem, CPUs: &neg}},
+		{"negative time", header.KDF{Time: &neg, Memory: &mem, CPUs: &ok}},
+		{"negative memory", header.KDF{Time: &ok, Memory: &neg, CPUs: &ok}},
+		{"negative cpus", header.KDF{Time: &ok, Memory: &mem, CPUs: &neg}},
 	}
 	if canExceedUint32() {
 		cases = append(cases,
-			costCase{"time above MaxUint32", rawKDF{Time: &big, Memory: &mem, CPUs: &ok}},
-			costCase{"memory above MaxUint32", rawKDF{Time: &ok, Memory: &big, CPUs: &ok}},
+			costCase{"time above MaxUint32", header.KDF{Time: &big, Memory: &mem, CPUs: &ok}},
+			costCase{"memory above MaxUint32", header.KDF{Time: &ok, Memory: &big, CPUs: &ok}},
 		)
 	}
 
@@ -1712,10 +1712,10 @@ func TestANegativeCostIsRefusedAsTooSmallNotTooLarge(t *testing.T) {
 	for fname, derive := range argon2Derivations {
 		for _, tc := range []struct {
 			name string
-			kdf  rawKDF
+			kdf  header.KDF
 		}{
-			{"time", rawKDF{Time: &neg, Memory: &mem, CPUs: &ok}},
-			{"memory", rawKDF{Time: &ok, Memory: &neg, CPUs: &ok}},
+			{"time", header.KDF{Time: &neg, Memory: &mem, CPUs: &ok}},
+			{"memory", header.KDF{Time: &ok, Memory: &neg, CPUs: &ok}},
 		} {
 			t.Run(fname+"/"+tc.name, func(t *testing.T) {
 				kdf := tc.kdf
@@ -1762,7 +1762,7 @@ func TestEveryArgon2DerivationRefusesAKeySizeItCannotRepresent(t *testing.T) {
 
 		for _, tc := range sizes {
 			t.Run(fname+"/"+tc.name, func(t *testing.T) {
-				kdf := rawKDF{Time: &time, Memory: &mem, CPUs: &cpus}
+				kdf := header.KDF{Time: &time, Memory: &mem, CPUs: &cpus}
 				key, err := derive([]byte("pass"), []byte("saltsaltsaltsalt"), &kdf, tc.keySize)
 				if err == nil {
 					t.Fatalf("%s accepted a %s key size and returned %d bytes -- the caller asked "+
@@ -1791,7 +1791,7 @@ func TestEveryArgon2DerivationAcceptsOrdinaryCosts(t *testing.T) {
 	time, mem, cpus := 4, 65536, 4
 	for fname, derive := range argon2Derivations {
 		t.Run(fname, func(t *testing.T) {
-			kdf := rawKDF{Time: &time, Memory: &mem, CPUs: &cpus}
+			kdf := header.KDF{Time: &time, Memory: &mem, CPUs: &cpus}
 			if _, err := derive([]byte("pass"), []byte("saltsaltsaltsalt"), &kdf, 32); err != nil {
 				t.Fatalf("%s refused an ordinary cost set: %v", fname, err)
 			}
@@ -1822,7 +1822,7 @@ func TestKeyslotPlacementRefusesAnUnreadableSiblingExtent(t *testing.T) {
 
 	good := &header.Keyslot{Type: "luks2", Area: &header.KeyslotArea{Offset: formatSize(start), Size: formatSize(0x40000)}}
 	md := func(ks map[string]*header.Keyslot) *header.Metadata {
-		return &header.Metadata{Keyslots: ks, Config: &rawConfig{KeyslotsSize: formatSize(0x200000)}}
+		return &header.Metadata{Keyslots: ks, Config: &header.Config{KeyslotsSize: formatSize(0x200000)}}
 	}
 
 	// THE POSITIVE CONTROL FIRST. Without it, every case below is also
@@ -1914,13 +1914,13 @@ func TestCanonicalKeyslotID(t *testing.T) {
 		{"", 0, false},
 		{"reencrypt-in-progress", 0, false}, // cryptsetup: "not a valid LUKS device"
 	} {
-		id, ok := canonicalKeyslotID(tc.key)
+		id, ok := header.CanonicalKeyslotID(tc.key)
 		if ok != tc.wantOK {
-			t.Errorf("canonicalKeyslotID(%q) ok = %v, want %v", tc.key, ok, tc.wantOK)
+			t.Errorf("header.CanonicalKeyslotID(%q) ok = %v, want %v", tc.key, ok, tc.wantOK)
 			continue
 		}
 		if ok && id != tc.id {
-			t.Errorf("canonicalKeyslotID(%q) = %d, want %d", tc.key, id, tc.id)
+			t.Errorf("header.CanonicalKeyslotID(%q) = %d, want %d", tc.key, id, tc.id)
 		}
 	}
 }

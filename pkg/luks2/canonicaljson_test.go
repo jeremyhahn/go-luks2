@@ -59,7 +59,7 @@ import (
 // implements MarshalJSON, not just the one that was broken when this was
 // written.
 //
-// The drift this prevents has already happened once. marshalCanonicalJSON turns
+// The drift this prevents has already happened once. header.MarshalCanonicalJSON turns
 // escaping off on the outer encoder, but a type implementing Marshaler is
 // encoded by the bytes it RETURNS -- the outer encoder compacts them and, with
 // escaping off, neither adds escapes nor removes ones already there. So any of
@@ -77,7 +77,7 @@ import (
 // TestEncodeMetadataForHeaderEmitsCompactJSON checks the WRITE PATH rather than
 // the helper, because encodeMetadataForHeader is what the header write calls
 // and a future edit could reintroduce indentation there without touching
-// marshalCanonicalJSON.
+// header.MarshalCanonicalJSON.
 func TestEncodeMetadataForHeaderEmitsCompactJSON(t *testing.T) {
 	hdr, err := createBinaryHeader(formatOptionsForTest{}, testVolumeSys())
 	if err != nil {
@@ -230,7 +230,7 @@ func sampleMetadata() *header.Metadata {
 				SectorSize: 512,
 			},
 		},
-		Digests: map[string]*rawDigest{
+		Digests: map[string]*header.Digest{
 			"0": {
 				Type:       "pbkdf2",
 				Keyslots:   []string{"0"},
@@ -241,7 +241,7 @@ func sampleMetadata() *header.Metadata {
 				Digest:     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 			},
 		},
-		Config: &rawConfig{
+		Config: &header.Config{
 			JSONSize:     "12288",
 			KeyslotsSize: "16744448",
 		},
@@ -261,7 +261,7 @@ func sampleKeyslot(i int) *header.Keyslot {
 			Size:       "258048",
 			Encryption: keyslotAreaEncryption,
 		},
-		KDF: &rawKDF{
+		KDF: &header.KDF{
 			Type:       "pbkdf2",
 			Hash:       "sha512",
 			Salt:       "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",

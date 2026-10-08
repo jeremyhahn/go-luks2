@@ -60,27 +60,27 @@ func TestADetachedHeaderReadsButIsNeverActivated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadHeader refused a detached header cryptsetup reads: %v", err)
 	}
-	if _, err := cryptTableParams(metadata, "0", metadata.Segments["0"]); !errors.Is(err, ErrInvalidHeader) || !strings.Contains(err.Error(), "detached") {
+	if _, err := header.CryptTableParams(metadata, "0", metadata.Segments["0"]); !errors.Is(err, ErrInvalidHeader) || !strings.Contains(err.Error(), "detached") {
 		t.Fatalf("activation of a segment at offset 0: got %v, want ErrInvalidHeader naming a detached header", err)
 	}
 
 	for _, offset := range []string{"16384", "16773120", "not-a-number"} {
 		segment := *metadata.Segments["0"]
 		segment.Offset = offset
-		if _, err := cryptTableParams(metadata, "0", &segment); !errors.Is(err, ErrInvalidHeader) || !strings.Contains(err.Error(), "expose") {
+		if _, err := header.CryptTableParams(metadata, "0", &segment); !errors.Is(err, ErrInvalidHeader) || !strings.Contains(err.Error(), "expose") {
 			t.Errorf("activation of a segment at %s: got %v, want ErrInvalidHeader", offset, err)
 		}
 	}
 
 	broken := *metadata
-	broken.Config = &rawConfig{JSONSize: "x", KeyslotsSize: "0"}
-	if _, err := cryptTableParams(&broken, "0", metadata.Segments["0"]); !errors.Is(err, ErrInvalidHeader) {
+	broken.Config = &header.Config{JSONSize: "x", KeyslotsSize: "0"}
+	if _, err := header.CryptTableParams(&broken, "0", metadata.Segments["0"]); !errors.Is(err, ErrInvalidHeader) {
 		t.Errorf("activation with an unreadable config: got %v, want ErrInvalidHeader", err)
 	}
 
 	segment := *metadata.Segments["0"]
 	segment.Offset = "16777216"
-	if _, err := cryptTableParams(metadata, "0", &segment); err != nil {
+	if _, err := header.CryptTableParams(metadata, "0", &segment); err != nil {
 		t.Errorf("activation of the data at 16 MiB was refused: %v", err)
 	}
 }

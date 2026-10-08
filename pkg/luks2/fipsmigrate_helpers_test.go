@@ -59,14 +59,14 @@ func TestDigestAttestingKey(t *testing.T) {
 	})
 	t.Run("only an unbound digest matches", func(t *testing.T) {
 		m := *metadata
-		m.Digests = map[string]*rawDigest{"0": &unbound}
+		m.Digests = map[string]*header.Digest{"0": &unbound}
 		if id, err := digestAttestingKey(&m, mk); err != nil || id != "0" {
 			t.Fatalf("got %q, %v; want the unbound digest 0", id, err)
 		}
 	})
 	t.Run("a bound digest is preferred to an unbound one that sorts first", func(t *testing.T) {
 		m := *metadata
-		m.Digests = map[string]*rawDigest{"0": &unbound, "1": metadata.Digests["0"], "2": nil}
+		m.Digests = map[string]*header.Digest{"0": &unbound, "1": metadata.Digests["0"], "2": nil}
 		if id, err := digestAttestingKey(&m, mk); err != nil || id != "1" {
 			t.Fatalf("got %q, %v; want the bound digest 1", id, err)
 		}
@@ -134,7 +134,7 @@ func TestVerifyFIPSOpenRefusesEveryUnprovenOpen(t *testing.T) {
 func TestFIPSRefusalDescribesMalformedObjects(t *testing.T) {
 	salt := encodeBase64(bytes.Repeat([]byte{1}, 32))
 	iterations := 1000
-	approvedKDF := &rawKDF{Type: kdfTypePBKDF2, Hash: "sha256", Salt: salt, Iterations: &iterations}
+	approvedKDF := &header.KDF{Type: kdfTypePBKDF2, Hash: "sha256", Salt: salt, Iterations: &iterations}
 
 	keyslots := []struct {
 		name    string
@@ -143,8 +143,8 @@ func TestFIPSRefusalDescribesMalformedObjects(t *testing.T) {
 	}{
 		{"nil keyslot", nil, "no KDF object"},
 		{"no KDF", &header.Keyslot{KeySize: 64}, "no KDF object"},
-		{"salt not base64", &header.Keyslot{KeySize: 64, KDF: &rawKDF{Type: kdfTypePBKDF2, Hash: "sha256", Salt: "!!!", Iterations: &iterations}}, "salt is not base64"},
-		{"sha1", &header.Keyslot{KeySize: 64, KDF: &rawKDF{Type: kdfTypePBKDF2, Hash: "sha1", Salt: salt, Iterations: &iterations}}, ""},
+		{"salt not base64", &header.Keyslot{KeySize: 64, KDF: &header.KDF{Type: kdfTypePBKDF2, Hash: "sha256", Salt: "!!!", Iterations: &iterations}}, "salt is not base64"},
+		{"sha1", &header.Keyslot{KeySize: 64, KDF: &header.KDF{Type: kdfTypePBKDF2, Hash: "sha1", Salt: salt, Iterations: &iterations}}, ""},
 	}
 	for _, tc := range keyslots {
 		t.Run("keyslot/"+tc.name, func(t *testing.T) {
@@ -161,13 +161,13 @@ func TestFIPSRefusalDescribesMalformedObjects(t *testing.T) {
 	value := encodeBase64(bytes.Repeat([]byte{2}, 32))
 	digests := []struct {
 		name   string
-		digest *rawDigest
+		digest *header.Digest
 		reason string
 	}{
 		{"nil digest", nil, "digest is null"},
-		{"value not base64", &rawDigest{Type: kdfTypePBKDF2, Hash: "sha256", Salt: salt, Iterations: 1000, Digest: "!!!"}, "digest value is not base64"},
-		{"output too short", &rawDigest{Type: kdfTypePBKDF2, Hash: "sha256", Salt: salt, Iterations: 1000, Digest: encodeBase64([]byte{1, 2, 3})}, "output shorter than 112 bits"},
-		{"argon2", &rawDigest{Type: kdfTypeArgon2id, Salt: salt, Digest: value}, ""},
+		{"value not base64", &header.Digest{Type: kdfTypePBKDF2, Hash: "sha256", Salt: salt, Iterations: 1000, Digest: "!!!"}, "digest value is not base64"},
+		{"output too short", &header.Digest{Type: kdfTypePBKDF2, Hash: "sha256", Salt: salt, Iterations: 1000, Digest: encodeBase64([]byte{1, 2, 3})}, "output shorter than 112 bits"},
+		{"argon2", &header.Digest{Type: kdfTypeArgon2id, Salt: salt, Digest: value}, ""},
 	}
 	for _, tc := range digests {
 		t.Run("digest/"+tc.name, func(t *testing.T) {
@@ -177,7 +177,7 @@ func TestFIPSRefusalDescribesMalformedObjects(t *testing.T) {
 			}
 		})
 	}
-	if _, ok := digestFIPSRefusal("0", &rawDigest{Type: kdfTypePBKDF2, Hash: "sha256", Salt: salt, Iterations: 1000, Digest: value}); !ok {
+	if _, ok := digestFIPSRefusal("0", &header.Digest{Type: kdfTypePBKDF2, Hash: "sha256", Salt: salt, Iterations: 1000, Digest: value}); !ok {
 		t.Fatal("an approved PBKDF2-SHA256 digest was refused")
 	}
 

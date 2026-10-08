@@ -8,11 +8,8 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// LUKS2 on-disk format constants and types now live in internal/header; see
-// docs/design/DECISIONS.md's H5 entry. A few names below are still
-// transitional aliases, kept under their original names until the rest of
-// B.6's old-API deletion (the token cluster, EnrollKeyProvider and its
-// supporting types) reaches them too.
+// LUKS2 on-disk format constants and types live in internal/header; see
+// docs/design/DECISIONS.md's H5 entry.
 const (
 	// Default encryption parameters. These are pkg/luks2's own public policy
 	// defaults, not part of the on-disk model, so they stay here rather than
@@ -24,19 +21,10 @@ const (
 	DefaultSectorSize = 512
 )
 
-// The LUKS2 on-disk model: the JSON metadata objects this package has not
-// yet ported its own call sites off of, plus the JSON passthrough error.
-// Type aliases of internal/header's types, so every field, method and tag
-// this package's code already depends on is unchanged.
 type (
 	// DroppedEntry is KEEP in B.6, reached through (*Header).Dropped()
 	// rather than a raw metadata field, so it stays a public alias.
 	DroppedEntry = header.DroppedEntry
-
-	rawKDF          = header.KDF
-	rawDigest       = header.Digest
-	rawConfig       = header.Config
-	rawRequirements = header.Requirements
 
 	// LegacyToken is the on-disk token shape (systemd's FIDO2 fields and all)
 	// that Token aliased before DESIGN.md §B.2's generic, value-returning

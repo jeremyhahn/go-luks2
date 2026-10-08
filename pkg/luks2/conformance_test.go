@@ -831,7 +831,7 @@ func TestConformance_LegacyDigestLengthStillOpens(t *testing.T) {
 
 	// Re-derive at the OLD hardcoded length of 32 bytes, leaving the "sha512"
 	// label in place -- the exact inconsistency the old code wrote to disk.
-	legacy, err := deriveKeySecret(context.Background(), masterKey, &rawKDF{
+	legacy, err := deriveKeySecret(context.Background(), masterKey, &header.KDF{
 		Type:       digest.Type,
 		Hash:       digest.Hash,
 		Salt:       digest.Salt,
@@ -959,7 +959,7 @@ func cheapenGoldenDigests(device string) (err error) {
 	const cheapIterations = 1000
 	for _, digest := range metadata.Digests {
 		iterations := cheapIterations
-		kdf := &rawKDF{Type: digest.Type, Hash: digest.Hash, Salt: digest.Salt, Iterations: &iterations}
+		kdf := &header.KDF{Type: digest.Type, Hash: digest.Hash, Salt: digest.Salt, Iterations: &iterations}
 
 		// Derived exactly as verifyMasterKey will re-derive it, to the length
 		// already stored, so the rewritten digest verifies by the route

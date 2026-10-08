@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"github.com/jeremyhahn/go-luks2/internal/fips"
+	"github.com/jeremyhahn/go-luks2/internal/header"
 	"testing"
 )
 
@@ -68,7 +69,7 @@ func TestVerifyVolumeKeyBindsTheKeyLength(t *testing.T) {
 	// only thing refusing it.
 	padded := volumeKeyEnclave(t, append(bytes.Clone(key), 0))
 	if err := verifyKeyAgainstDigests(context.Background(), padded, metadata.Digests,
-		func(*rawDigest) bool { return true },
+		func(*header.Digest) bool { return true },
 		func(int) error { return ErrInvalidHeader }, fips.Probe); err != nil {
 		t.Fatalf("the premise does not hold -- the zero-extended key failed the digest itself: %v", err)
 	}

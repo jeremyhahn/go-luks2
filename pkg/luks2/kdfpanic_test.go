@@ -12,11 +12,12 @@ import (
 	"testing"
 
 	"github.com/jeremyhahn/go-luks2/internal/errs"
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // The derivation must not panic on any parameter a header can carry.
 //
-// validateKeyslot now screens a keyslot before its KDF is run, and that is the
+// header.ValidateKeyslot now screens a keyslot before its KDF is run, and that is the
 // primary guard. It is not the only one that should exist. A single guard means
 // every future caller of the derivation -- and every path that reaches it other
 // than through a keyslot -- is one oversight away from crashing the process,
@@ -38,17 +39,17 @@ func TestDeriveKeyDoesNotPanicOnHeaderControlledParameters(t *testing.T) {
 
 	cases := []struct {
 		name    string
-		kdf     *rawKDF
+		kdf     *header.KDF
 		keySize int
 	}{
 		{
 			name:    "pbkdf2 with a zero key size",
-			kdf:     &rawKDF{Type: "pbkdf2", Hash: "sha256", Salt: "c2FsdA==", Iterations: &iterations},
+			kdf:     &header.KDF{Type: "pbkdf2", Hash: "sha256", Salt: "c2FsdA==", Iterations: &iterations},
 			keySize: 0,
 		},
 		{
 			name:    "pbkdf2 with a negative key size",
-			kdf:     &rawKDF{Type: "pbkdf2", Hash: "sha256", Salt: "c2FsdA==", Iterations: &iterations},
+			kdf:     &header.KDF{Type: "pbkdf2", Hash: "sha256", Salt: "c2FsdA==", Iterations: &iterations},
 			keySize: -1,
 		},
 		{
@@ -56,17 +57,17 @@ func TestDeriveKeyDoesNotPanicOnHeaderControlledParameters(t *testing.T) {
 			// bound next to it was checked, which is what made the omission
 			// easy to miss.
 			name:    "argon2id with zero rounds",
-			kdf:     &rawKDF{Type: "argon2id", Salt: "c2FsdA==", Time: &zero, Memory: &memory, CPUs: &cpus},
+			kdf:     &header.KDF{Type: "argon2id", Salt: "c2FsdA==", Time: &zero, Memory: &memory, CPUs: &cpus},
 			keySize: 32,
 		},
 		{
 			name:    "argon2i with zero rounds",
-			kdf:     &rawKDF{Type: "argon2i", Salt: "c2FsdA==", Time: &zero, Memory: &memory, CPUs: &cpus},
+			kdf:     &header.KDF{Type: "argon2i", Salt: "c2FsdA==", Time: &zero, Memory: &memory, CPUs: &cpus},
 			keySize: 32,
 		},
 		{
 			name:    "argon2id with a zero key size",
-			kdf:     &rawKDF{Type: "argon2id", Salt: "c2FsdA==", Time: &one, Memory: &memory, CPUs: &cpus},
+			kdf:     &header.KDF{Type: "argon2id", Salt: "c2FsdA==", Time: &one, Memory: &memory, CPUs: &cpus},
 			keySize: 0,
 		},
 	}

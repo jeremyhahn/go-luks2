@@ -30,7 +30,7 @@ func writeHeaderUnvalidated(device string, hdr *header.BinaryHeader, metadata *h
 	if err != nil {
 		return err
 	}
-	return writeEncodedHeader(f, hdr, jsonData, area, (*os.File).Sync)
+	return header.WriteEncodedHeader(f, hdr, jsonData, area, (*os.File).Sync)
 }
 
 // writeHeaderIgnoringRequirements is writeHeaderUnvalidated without the
@@ -48,5 +48,5 @@ func writeHeaderIgnoringRequirements(device string, hdr *header.BinaryHeader, me
 	if err != nil {
 		return err
 	}
-	return writeEncodedHeader(f, hdr, jsonData, area, (*os.File).Sync)
+	return header.WriteEncodedHeader(f, hdr, jsonData, area, (*os.File).Sync)
 }

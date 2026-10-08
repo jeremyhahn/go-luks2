@@ -82,8 +82,8 @@ func TestKeyslotPriorityConstantsMatchTheFormat(t *testing.T) {
 // and the nil pointer together.
 func TestCreateMetadataWritesNoPriorityMember(t *testing.T) {
 	metadata := createMetadata(
-		&rawKDF{Type: "pbkdf2", Hash: "sha512", Salt: "AAAA", Iterations: intPtr(210000)},
-		&rawKDF{Type: "pbkdf2", Hash: "sha512", Salt: "AAAA", Iterations: intPtr(210000)},
+		&header.KDF{Type: "pbkdf2", Hash: "sha512", Salt: "AAAA", Iterations: intPtr(210000)},
+		&header.KDF{Type: "pbkdf2", Hash: "sha512", Salt: "AAAA", Iterations: intPtr(210000)},
 		"AAAA",
 		formatOptionsForTest{Cipher: "aes", CipherMode: "xts-plain64", HashAlgo: "sha512", SectorSize: 512},
 		64, 0x8000, 258048, 16744448, 16777216,
@@ -93,9 +93,9 @@ func TestCreateMetadataWritesNoPriorityMember(t *testing.T) {
 		t.Fatalf("createMetadata set priority %d on a normal keyslot", *p)
 	}
 
-	encoded, err := marshalCanonicalJSON(metadata)
+	encoded, err := header.MarshalCanonicalJSON(metadata)
 	if err != nil {
-		t.Fatalf("marshalCanonicalJSON failed: %v", err)
+		t.Fatalf("header.MarshalCanonicalJSON failed: %v", err)
 	}
 	if bytes.Contains(encoded, []byte(`"priority"`)) {
 		t.Fatalf("the encoded metadata carries a priority member\n%s", encoded)
@@ -112,9 +112,9 @@ func TestANonDefaultPriorityIsStillWritten(t *testing.T) {
 		metadata := sampleMetadata()
 		metadata.Keyslots["0"].Priority = intPtr(priority)
 
-		encoded, err := marshalCanonicalJSON(metadata)
+		encoded, err := header.MarshalCanonicalJSON(metadata)
 		if err != nil {
-			t.Fatalf("marshalCanonicalJSON failed: %v", err)
+			t.Fatalf("header.MarshalCanonicalJSON failed: %v", err)
 		}
 
 		// KeyslotPriorityIgnore is 0, which is exactly the value a

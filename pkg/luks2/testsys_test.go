@@ -4,7 +4,11 @@
 
 package luks2
 
-import "context"
+import (
+	"context"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
+)
 
 // testVolumeSys is defaultVolumeSys with the cost floor and the digest count
 // lowered to LUKS2's own minimum, so keyslots whose cost is not under test stay as cheap as they were
@@ -19,17 +23,17 @@ func testVolumeSys() volumeSys {
 
 // createKDFStrict is createKDF under the caller-supplied policy, which is the
 // only one a public entry point can select, at the cheap floor.
-func createKDFStrict(opts formatOptionsForTest, keySize int) (*rawKDF, error) {
+func createKDFStrict(opts formatOptionsForTest, keySize int) (*header.KDF, error) {
 	return createKDFStrictOn(testVolumeSys(), opts, keySize)
 }
 
 // createKDFStrictAtProductionFloor is createKDFStrict at the production floor,
 // for tests whose subject is that floor.
-func createKDFStrictAtProductionFloor(opts formatOptionsForTest, keySize int) (*rawKDF, error) {
+func createKDFStrictAtProductionFloor(opts formatOptionsForTest, keySize int) (*header.KDF, error) {
 	return createKDFStrictOn(defaultVolumeSys(), opts, keySize)
 }
 
-func createKDFStrictOn(sys volumeSys, opts formatOptionsForTest, keySize int) (*rawKDF, error) {
+func createKDFStrictOn(sys volumeSys, opts formatOptionsForTest, keySize int) (*header.KDF, error) {
 	return createKDF(opts, keySize, callerSuppliedCredential, sys.fipsMode, sys.calibratedCountFloor, sys.cryptoRand)
 }
 

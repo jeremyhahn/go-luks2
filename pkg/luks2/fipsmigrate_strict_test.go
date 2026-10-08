@@ -40,9 +40,9 @@ import (
 var shortFIPSSalt = []byte("8-bytes!")
 
 // shortSaltKDF is PBKDF2-SHA256 -- an approved name -- over shortFIPSSalt.
-func shortSaltKDF() *rawKDF {
-	iterations := minKDFIterations
-	return &rawKDF{Type: kdfTypePBKDF2, Hash: "sha256", Salt: encodeBase64(shortFIPSSalt), Iterations: &iterations}
+func shortSaltKDF() *header.KDF {
+	iterations := header.MinKDFIterations
+	return &header.KDF{Type: kdfTypePBKDF2, Hash: "sha256", Salt: encodeBase64(shortFIPSSalt), Iterations: &iterations}
 }
 
 // weakenForStrictFIPS rewrites device so every KDF the migration might be
@@ -106,7 +106,7 @@ func weakenForStrictFIPS(device string, passphrase []byte, keyslotID string) (er
 // rewrapKeyslotInPlace re-wraps masterKey under passphrase through kdf into
 // keyslot's existing area, and sets keyslot.KDF. The area is the same size for
 // the same key size and stripe count, so nothing else moves.
-func rewrapKeyslotInPlace(device string, keyslot *header.Keyslot, masterKey *enclave.MemoryEnclave, passphrase []byte, kdf *rawKDF) (err error) {
+func rewrapKeyslotInPlace(device string, keyslot *header.Keyslot, masterKey *enclave.MemoryEnclave, passphrase []byte, kdf *header.KDF) (err error) {
 	passphraseKey, err := deriveKeyEnclave(context.Background(), passphrase, kdf, keyslot.KeySize)
 	if err != nil {
 		return err
@@ -296,7 +296,7 @@ func unboundKeyslot(t *testing.T, device string, passphrase []byte) {
 	if err != nil {
 		t.Fatalf("createDigest failed: %v", err)
 	}
-	metadata.Digests["1"] = &rawDigest{
+	metadata.Digests["1"] = &header.Digest{
 		Type:       kdfTypePBKDF2,
 		Keyslots:   []string{"1"},
 		Segments:   []string{},

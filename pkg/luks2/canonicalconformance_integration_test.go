@@ -80,9 +80,9 @@ const (
 	canonicalCheapIterations = 210_000
 )
 
-// canonicalKDF is one keyslot rawKDF shape, expressed for both implementations.
+// canonicalKDF is one keyslot header.KDF shape, expressed for both implementations.
 //
-// BOTH SHAPES ARE COVERED BECAUSE ONE DECLARATION SERVES BOTH. The rawKDF struct
+// BOTH SHAPES ARE COVERED BECAUSE ONE DECLARATION SERVES BOTH. The header.KDF struct
 // carries the pbkdf2 members and the argon2 members together, each set
 // omitempty, so which members appear is decided by which are populated -- and a
 // key order that is right for one shape can be wrong for the other. A
@@ -106,13 +106,13 @@ const (
 type canonicalKDF struct {
 	name string
 
-	// cryptsetupArgs are appended to luksFormat. They select the rawKDF and cap
+	// cryptsetupArgs are appended to luksFormat. They select the header.KDF and cap
 	// the Argon2 memory; nothing here pins a calibrated cost.
 	cryptsetupArgs []string
 
 	// mirror copies the costs cryptsetup CHOSE into this package's options, so
 	// the two containers differ in nothing that either side got to decide.
-	mirror func(t *testing.T, opts *formatOptionsForTest, theirs *rawKDF)
+	mirror func(t *testing.T, opts *formatOptionsForTest, theirs *header.KDF)
 }
 
 func canonicalKDFs() []canonicalKDF {
@@ -120,7 +120,7 @@ func canonicalKDFs() []canonicalKDF {
 		{
 			name:           "pbkdf2",
 			cryptsetupArgs: []string{"--pbkdf", "pbkdf2", "--hash", "sha512"},
-			mirror: func(t *testing.T, opts *formatOptionsForTest, theirs *rawKDF) {
+			mirror: func(t *testing.T, opts *formatOptionsForTest, theirs *header.KDF) {
 				t.Helper()
 				if theirs.Iterations == nil {
 					t.Fatalf("cryptsetup's pbkdf2 keyslot has no iteration count: %+v", theirs)
@@ -136,7 +136,7 @@ func canonicalKDFs() []canonicalKDF {
 				"--hash", "sha512",
 				"--pbkdf-memory", fmt.Sprint(canonicalArgon2MemoryKB),
 			},
-			mirror: func(t *testing.T, opts *formatOptionsForTest, theirs *rawKDF) {
+			mirror: func(t *testing.T, opts *formatOptionsForTest, theirs *header.KDF) {
 				t.Helper()
 				if theirs.Time == nil || theirs.Memory == nil || theirs.CPUs == nil {
 					t.Fatalf("cryptsetup's argon2id keyslot is missing a cost member: %+v", theirs)
@@ -234,7 +234,7 @@ func formatWithCryptsetup(t *testing.T, path string, kdf canonicalKDF) {
 // distinction is the whole lesson of this file: that flag pins the DIGEST cost
 // as well as the keyslot cost, so a container made with it is not the container
 // an operator's machine produces, and a byte baseline taken from one measures
-// the wrong thing. It is harmless where the rawKDF cost is irrelevant to the
+// the wrong thing. It is harmless where the header.KDF cost is irrelevant to the
 // assertion -- the priority tests are about a member no cost touches -- and it
 // removes cryptsetup's ~2s calibration from each fixture.
 func formatWithCryptsetupCheap(t *testing.T, path string) {
@@ -282,10 +282,10 @@ type canonicalPair struct {
 	// oursSecondary and theirsSecondary are the 4096-byte binary header of
 	// the SECOND copy, read from the offset each primary records.
 	oursSecondary, theirsSecondary []byte
-	oursKDF, theirsKDF             *rawKDF
+	oursKDF, theirsKDF             *header.KDF
 	oursKeyslot                    *header.Keyslot
 	theirsKeyslot                  *header.Keyslot
-	oursDigest, theirsDigest       *rawDigest
+	oursDigest, theirsDigest       *header.Digest
 }
 
 // buildCanonicalPair formats both containers and returns their bytes.
@@ -297,7 +297,7 @@ type canonicalPair struct {
 // (it pins the digest too), so the reference side would no longer be the
 // reference.
 //
-// It is memoized per rawKDF shape. A calibrated format is ~2s on each side and
+// It is memoized per header.KDF shape. A calibrated format is ~2s on each side and
 // three tests want the same pair; the bytes are immutable, so building them
 // once per process is the whole saving with none of the risk.
 func buildCanonicalPair(t *testing.T, kdf canonicalKDF) *canonicalPair {
@@ -321,7 +321,7 @@ func buildCanonicalPair(t *testing.T, kdf canonicalKDF) *canonicalPair {
 	}
 	theirKeyslot := theirMetadata.Keyslots["0"]
 	if theirKeyslot == nil || theirKeyslot.KDF == nil {
-		t.Fatal("cryptsetup's container has no keyslot 0 with a rawKDF")
+		t.Fatal("cryptsetup's container has no keyslot 0 with a header.KDF")
 	}
 	theirDigest := theirMetadata.Digests["0"]
 	if theirDigest == nil {
@@ -361,7 +361,7 @@ func buildCanonicalPair(t *testing.T, kdf canonicalKDF) *canonicalPair {
 	}
 	ourKeyslot := ourMetadata.Keyslots["0"]
 	if ourKeyslot == nil || ourKeyslot.KDF == nil {
-		t.Fatal("the formatted container has no keyslot 0 with a rawKDF")
+		t.Fatal("the formatted container has no keyslot 0 with a header.KDF")
 	}
 
 	// The mirroring has to have taken effect, or every comparison below would
@@ -431,11 +431,11 @@ func formatWithLibraryCheap(t *testing.T, path string) {
 
 // assertKDFCostsMatch fails unless the two keyslot KDFs cost the same. Every
 // member is compared except the salt, which is two independent random draws.
-func assertKDFCostsMatch(t *testing.T, ours, theirs *rawKDF) {
+func assertKDFCostsMatch(t *testing.T, ours, theirs *header.KDF) {
 	t.Helper()
 
 	if ours.Type != theirs.Type || ours.Hash != theirs.Hash {
-		t.Fatalf("rawKDF type/hash differ: ours %s/%s, cryptsetup %s/%s", ours.Type, ours.Hash, theirs.Type, theirs.Hash)
+		t.Fatalf("header.KDF type/hash differ: ours %s/%s, cryptsetup %s/%s", ours.Type, ours.Hash, theirs.Type, theirs.Hash)
 	}
 	for _, cost := range []struct {
 		name         string
@@ -553,7 +553,7 @@ func readSecondaryBinaryHeader(t *testing.T, path string) []byte {
 // class: encoding/json escapes U+2028 and U+2029 even with SetEscapeHTML off,
 // which json-c does not, and which no field written today can carry. Both are
 // spec-conformant on either side, since JSON objects are unordered and both
-// escapings parse to the same string. See marshalCanonicalJSON.
+// escapings parse to the same string. See header.MarshalCanonicalJSON.
 func TestCanonicalJSONReencodesCryptsetupsHeaderByteForByte(t *testing.T) {
 	requireCryptsetupDeclared(t)
 
@@ -568,9 +568,9 @@ func TestCanonicalJSONReencodesCryptsetupsHeaderByteForByte(t *testing.T) {
 				t.Fatalf("this package cannot parse cryptsetup's own metadata: %v\n%s", err, original)
 			}
 
-			reencoded, err := marshalCanonicalJSON(&metadata)
+			reencoded, err := header.MarshalCanonicalJSON(&metadata)
 			if err != nil {
-				t.Fatalf("marshalCanonicalJSON failed: %v", err)
+				t.Fatalf("header.MarshalCanonicalJSON failed: %v", err)
 			}
 
 			if !bytes.Equal(original, reencoded) {
@@ -624,7 +624,7 @@ func TestCanonicalJSONReencodesCryptsetupsHeaderByteForByte(t *testing.T) {
 // 0,1,...,9,10 and this package writes 0,1,10,2,...,9. Both are conformant --
 // JSON objects are unordered -- and both parse identically; only a byte
 // comparison sees it. The fixtures here have one keyslot, so the cap is stated
-// rather than exercised. See marshalCanonicalJSON for this and for the
+// rather than exercised. See header.MarshalCanonicalJSON for this and for the
 // U+2028/U+2029 escaping difference in the same class.
 func TestFormattedJSONMatchesCryptsetupByteForByte(t *testing.T) {
 	requireCryptsetupDeclared(t)
@@ -678,9 +678,9 @@ func formattedJSONMatchesCryptsetup(t *testing.T, kdf canonicalKDF) {
 		t.Errorf("cryptsetup wrote priority %d, so the expectation above is wrong for this version", *theirKeyslot.Priority)
 	}
 
-	got, err := marshalCanonicalJSON(&ourMetadata)
+	got, err := header.MarshalCanonicalJSON(&ourMetadata)
 	if err != nil {
-		t.Fatalf("marshalCanonicalJSON failed: %v", err)
+		t.Fatalf("header.MarshalCanonicalJSON failed: %v", err)
 	}
 
 	// Length first, and separately: an equal length with unequal bytes is an
@@ -766,7 +766,7 @@ func assertDigestCalibrationTargetIsCryptsetups(t *testing.T) {
 func TestFormattedBinaryHeaderMatchesCryptsetup(t *testing.T) {
 	requireCryptsetupDeclared(t)
 
-	// Run for both rawKDF shapes even though the binary header holds no rawKDF
+	// Run for both header.KDF shapes even though the binary header holds no header.KDF
 	// parameters. That independence is the claim; asserting it costs one extra
 	// format and turns an assumption into a measurement.
 	for _, kdf := range canonicalKDFs() {

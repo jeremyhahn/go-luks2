@@ -131,7 +131,7 @@ var unopenableKeyslotShapes = []damagedSibling{
 		// A cost ceiling this package applies before spending it.
 		name: "a PBKDF2 iteration count past the accepted ceiling",
 		apply: func(_ *header.Metadata, sibling *header.Keyslot) {
-			absurd := maxKDFIterations + 1
+			absurd := header.MaxKDFIterations + 1
 			sibling.KDF.Iterations = &absurd
 		},
 	},
@@ -149,7 +149,7 @@ var unopenableKeyslotShapes = []damagedSibling{
 		name: "a keyslot no digest in the header attests",
 		apply: func(metadata *header.Metadata, _ *header.Keyslot) {
 			for _, digest := range metadata.Digests {
-				digest.Keyslots = withoutID(digest.Keyslots, siblingSlotID)
+				digest.Keyslots = header.WithoutID(digest.Keyslots, siblingSlotID)
 			}
 		},
 	},
@@ -166,9 +166,9 @@ var unopenableKeyslotShapes = []damagedSibling{
 		name: "a keyslot whose only digest cannot be evaluated",
 		apply: func(metadata *header.Metadata, _ *header.Keyslot) {
 			for _, digest := range metadata.Digests {
-				digest.Keyslots = withoutID(digest.Keyslots, siblingSlotID)
+				digest.Keyslots = header.WithoutID(digest.Keyslots, siblingSlotID)
 			}
-			metadata.Digests["9"] = &rawDigest{
+			metadata.Digests["9"] = &header.Digest{
 				Type:       "pbkdf2",
 				Hash:       "sha256",
 				Salt:       encodeBase64([]byte("removal-guard-salt")),
@@ -186,9 +186,9 @@ var unopenableKeyslotShapes = []damagedSibling{
 		name: "a keyslot whose only digest declares a hash nothing implements",
 		apply: func(metadata *header.Metadata, _ *header.Keyslot) {
 			for _, digest := range metadata.Digests {
-				digest.Keyslots = withoutID(digest.Keyslots, siblingSlotID)
+				digest.Keyslots = header.WithoutID(digest.Keyslots, siblingSlotID)
 			}
-			metadata.Digests["9"] = &rawDigest{
+			metadata.Digests["9"] = &header.Digest{
 				Type:       "pbkdf2",
 				Hash:       "md5",
 				Salt:       encodeBase64([]byte("removal-guard-salt")),
@@ -206,13 +206,13 @@ var unopenableKeyslotShapes = []damagedSibling{
 		name: "a keyslot whose only digest costs more than a header may ask",
 		apply: func(metadata *header.Metadata, _ *header.Keyslot) {
 			for _, digest := range metadata.Digests {
-				digest.Keyslots = withoutID(digest.Keyslots, siblingSlotID)
+				digest.Keyslots = header.WithoutID(digest.Keyslots, siblingSlotID)
 			}
-			metadata.Digests["9"] = &rawDigest{
+			metadata.Digests["9"] = &header.Digest{
 				Type:       "pbkdf2",
 				Hash:       "sha256",
 				Salt:       encodeBase64([]byte("removal-guard-salt")),
-				Iterations: maxKDFIterations + 1,
+				Iterations: header.MaxKDFIterations + 1,
 				Digest:     encodeBase64(make([]byte, 32)),
 				Keyslots:   []string{siblingSlotID},
 				Segments:   []string{"0"},
@@ -585,25 +585,25 @@ func TestValidateKeyslotRefusesAreaArithmeticThatCannotBeReasonedAbout(t *testin
 			Type:    "luks2",
 			KeySize: 64,
 			Area:    &header.KeyslotArea{Type: "raw", Offset: "32768", Size: "258048", Encryption: "aes-xts-plain64"},
-			KDF:     &rawKDF{Type: "pbkdf2", Hash: "sha256", Salt: "", Iterations: intPtr(1000)},
+			KDF:     &header.KDF{Type: "pbkdf2", Hash: "sha256", Salt: "", Iterations: intPtr(1000)},
 			AF:      &header.AntiForensic{Type: "luks1", Stripes: stripes, Hash: "sha256"},
 		}
 	}
 
-	if err := validateKeyslot("0", base()); err != nil {
+	if err := header.ValidateKeyslot("0", base()); err != nil {
 		t.Fatalf("the control keyslot is refused, so the cases below prove nothing: %v", err)
 	}
 
 	negative := base()
 	negative.Area.Offset = "-4096"
-	if err := validateKeyslot("0", negative); !errors.Is(err, ErrKeyslotNotFound) {
+	if err := header.ValidateKeyslot("0", negative); !errors.Is(err, ErrKeyslotNotFound) {
 		t.Fatalf("a negative area offset is accepted: %v", err)
 	}
 
 	// 2^63-1 minus a fraction of the area size: the sum wraps negative.
 	overflowing := base()
 	overflowing.Area.Offset = "9223372036854775807"
-	if err := validateKeyslot("0", overflowing); !errors.Is(err, ErrKeyslotNotFound) {
+	if err := header.ValidateKeyslot("0", overflowing); !errors.Is(err, ErrKeyslotNotFound) {
 		t.Fatalf("an area whose offset plus size overflows int64 is accepted: %v", err)
 	}
 }
@@ -619,7 +619,7 @@ func TestAKeyslotWithOneUsableDigestIsStillCounted(t *testing.T) {
 	defer parallel(t)()
 
 	device := volumeWithSibling(t, "one-good-digest.img", func(metadata *header.Metadata, _ *header.Keyslot) {
-		metadata.Digests["9"] = &rawDigest{
+		metadata.Digests["9"] = &header.Digest{
 			Type:       "pbkdf2",
 			Hash:       "sha256",
 			Salt:       encodeBase64([]byte("removal-guard-salt")),
@@ -786,7 +786,7 @@ func TestScreenDigestNeverAcceptsWhatTheDerivationRefuses(t *testing.T) {
 	// The hash that is legal outside FIPS 140-3 and refused inside it. Its
 	// length is sha1's, so the length check cannot be what decides it and the
 	// hash question is isolated.
-	shapes["a sha1 digest, which FIPS mode refuses"] = &rawDigest{
+	shapes["a sha1 digest, which FIPS mode refuses"] = &header.Digest{
 		Type:       "pbkdf2",
 		Hash:       "sha1",
 		Salt:       encodeBase64([]byte("digest-screen-salt")),
@@ -820,7 +820,7 @@ func TestScreenDigestNeverAcceptsWhatTheDerivationRefuses(t *testing.T) {
 
 			// THE YARDSTICK, taken from the path being screened for rather than
 			// from the predicate under test. verifyMasterKey ends up here.
-			kdf := &rawKDF{
+			kdf := &header.KDF{
 				Type:       digest.Type,
 				Hash:       digest.Hash,
 				Salt:       digest.Salt,
@@ -860,7 +860,7 @@ func TestScreenKeyslotRefusalsAreTypedAndAttributed(t *testing.T) {
 		{name: "a null keyslot", nilSlot: true},
 		{name: "a reencrypt keyslot", apply: func(ks *header.Keyslot) { ks.Type = "reencrypt" }},
 		{name: "a PBKDF2 iteration count past the accepted ceiling", apply: func(ks *header.Keyslot) {
-			absurd := maxKDFIterations + 1
+			absurd := header.MaxKDFIterations + 1
 			ks.KDF.Iterations = &absurd
 		}},
 		{name: "a KDF type nothing implements", apply: func(ks *header.Keyslot) { ks.KDF.Type = "scrypt" }},

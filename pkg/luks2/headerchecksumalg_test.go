@@ -14,6 +14,8 @@ import (
 	"hash"
 	"os"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // csumAlgFieldOffset is where the 32-byte csum_alg field sits in a LUKS2
@@ -45,10 +47,10 @@ func restampHeaderChecksum(t *testing.T, path string, claimed []byte, sum func()
 	field := area[csumAlgFieldOffset : csumAlgFieldOffset+32]
 	clear(field)
 	copy(field, claimed)
-	clear(area[checksumFieldOffset : checksumFieldOffset+64])
+	clear(area[header.ChecksumFieldOffset : header.ChecksumFieldOffset+64])
 	h := sum()
 	h.Write(area)
-	copy(area[checksumFieldOffset:], h.Sum(nil))
+	copy(area[header.ChecksumFieldOffset:], h.Sum(nil))
 
 	if _, err := f.WriteAt(area, 0); err != nil {
 		t.Fatal(err)

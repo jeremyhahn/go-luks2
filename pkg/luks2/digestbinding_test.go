@@ -90,7 +90,7 @@ func twoVolumeKeyContainer(t *testing.T, name string, passA, passB []byte) strin
 	if err != nil {
 		t.Fatalf("createDigest for the second volume key failed: %v", err)
 	}
-	metadata.Digests["1"] = &rawDigest{
+	metadata.Digests["1"] = &header.Digest{
 		Type:       "pbkdf2",
 		Keyslots:   []string{"1"},
 		Segments:   []string{"0"},

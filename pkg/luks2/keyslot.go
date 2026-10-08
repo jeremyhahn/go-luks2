@@ -129,11 +129,11 @@ type addKeyOptionsForTest struct {
 	// which cost was used and that it was taken from the volume.
 	//
 	// A field rather than a log line, for the reason recorded on
-	// forgetKeyslotID (header.go): a logger in a layer-0 primitive, or a write
+	// header.ForgetKeyslotID (internal/header/codec.go): a logger in a layer-0 primitive, or a write
 	// to log/slog's process-global default, imposes a logging decision on every
 	// embedding application. cmd/luks2 is the application that turns this into
 	// something an operator reads.
-	InheritedArgon2Cost *rawKDF
+	InheritedArgon2Cost *header.KDF
 
 	// PBKDFIterations is an exact PBKDF2 iteration count. When it is non-zero
 	// it is written as given and PBKDFIterTime is not consulted, so a keyslot
@@ -238,7 +238,7 @@ func (p KeyslotParams) toAddKeyOptions() *addKeyOptionsForTest {
 // turned a silent default into a ~4 TiB allocation -- strictly worse than the
 // defect. The floor was added there in the same change; a producer must not be
 // widened into a consumer that cannot refuse what it will now receive.
-func addKeyFormatOptions(opts *addKeyOptionsForTest, metadata *header.Metadata, fipsMode func() fips.Mode) (formatOptionsForTest, *rawKDF) {
+func addKeyFormatOptions(opts *addKeyOptionsForTest, metadata *header.Metadata, fipsMode func() fips.Mode) (formatOptionsForTest, *header.KDF) {
 	formatOpts := baseAddKeyFormatOptionsWith(opts, fipsMode)
 
 	// INHERIT THE CONTAINER'S ARGON2 COST EXACTLY when the caller did not
@@ -327,15 +327,15 @@ func isArgon2Type(kdfType string) bool {
 // containerArgon2Cost returns the Argon2 cost of the first keyslot in scan
 // order that carries a complete one, or nil.
 //
-// Scan order rather than map order, for the reason keyslotIDsInScanOrder
+// Scan order rather than map order, for the reason header.KeyslotIDsInScanOrder
 // exists: ranging the map would make the inherited cost depend on which entry
 // Go happened to yield first, so two AddKey calls on one container could
 // disagree.
-func containerArgon2Cost(metadata *header.Metadata) *rawKDF {
+func containerArgon2Cost(metadata *header.Metadata) *header.KDF {
 	if metadata == nil {
 		return nil
 	}
-	for _, id := range keyslotIDsInScanOrder(metadata.Keyslots) {
+	for _, id := range header.KeyslotIDsInScanOrder(metadata.Keyslots) {
 		kdf := metadata.Keyslots[id].KDF
 		if kdf == nil || !isArgon2Type(kdf.Type) {
 			continue
@@ -1269,7 +1269,7 @@ func listKeyslotsFrom(metadata *header.Metadata) ([]KeyslotInfo, error) {
 	// different order on every call for an unchanged device (#57). This is the
 	// same order unlock attempts the slots in, so an operator reading the
 	// listing is reading the order the volume is actually tried in.
-	for _, idStr := range keyslotIDsInScanOrder(metadata.Keyslots) {
+	for _, idStr := range header.KeyslotIDsInScanOrder(metadata.Keyslots) {
 		ks := metadata.Keyslots[idStr]
 		// AN UNADDRESSABLE KEY IS IGNORED, for the reasons #35 established for
 		// tokens and MEASURED again here against cryptsetup 2.7.0, on headers
@@ -1300,7 +1300,7 @@ func listKeyslotsFrom(metadata *header.Metadata) ([]KeyslotInfo, error) {
 		// more than cryptsetup only ever costs an entry in a listing, while
 		// tolerating less would hide a keyslot from an operator inspecting a
 		// container that still opens.
-		id, ok := canonicalKeyslotID(idStr)
+		id, ok := header.CanonicalKeyslotID(idStr)
 		if !ok {
 			continue
 		}
@@ -1382,7 +1382,7 @@ type KeyslotInfo struct {
 // getMasterKey unlocks the volume and returns the master key HELD IN PROTECTED
 // MEMORY. The caller owns the returned enclave and must Destroy it.
 //
-// Keyslots are tried in the order given by keyslotIDsInScanOrder; every slot is
+// Keyslots are tried in the order given by header.KeyslotIDsInScanOrder; every slot is
 // tried before the attempt is reported as having failed.
 //
 // # Failing to VERIFY and failing to TRY are different facts
@@ -1443,7 +1443,7 @@ func getMasterKey(device string, passphrase []byte, metadata *header.Metadata, s
 	}
 	defer func() { _ = f.Close() }()
 
-	masterKey, _, err := getMasterKeySlot(context.Background(), f, device, passphrase, metadata, volumeKeyScanOrder(metadata), sys)
+	masterKey, _, err := getMasterKeySlot(context.Background(), f, device, passphrase, metadata, header.VolumeKeyScanOrder(metadata), sys)
 	return masterKey, err
 }
 
@@ -1463,7 +1463,7 @@ func getMasterKey(device string, passphrase []byte, metadata *header.Metadata, s
 //
 //   - only keyslots keyslotBoundToDataSegments declares bound are tried, and
 //   - they are verified against only the digests that bind every data segment
-//     (volumeKeyDigestsView), so a key that verifies IS one a digest attests
+//     (header.VolumeKeyDigestsView), so a key that verifies IS one a digest attests
 //     for the data -- with no derivation beyond the scan's own.
 //
 // A passphrase that opens only an unbound keyslot is therefore reported exactly
@@ -1471,7 +1471,7 @@ func getMasterKey(device string, passphrase []byte, metadata *header.Metadata, s
 // ErrWrongKey.
 func getVolumeKey(ctx context.Context, f io.ReaderAt, device string, passphrase []byte, metadata *header.Metadata, sys volumeSys) (*enclave.MemoryEnclave, string, error) {
 	var order []string
-	for _, id := range keyslotIDsInScanOrder(metadata.Keyslots) {
+	for _, id := range header.KeyslotIDsInScanOrder(metadata.Keyslots) {
 		if keyslotBoundToDataSegments(metadata, id) {
 			order = append(order, id)
 		}
@@ -1484,12 +1484,12 @@ func getVolumeKey(ctx context.Context, f io.ReaderAt, device string, passphrase 
 			"none of the header's %d keyslot(s) is attested by a digest binding every data segment (%s), so none holds the volume key",
 			len(metadata.Keyslots), strings.Join(dataSegmentIDs(metadata), ", "))}
 	}
-	return getMasterKeySlot(ctx, f, device, passphrase, volumeKeyDigestsView(metadata), order, sys)
+	return getMasterKeySlot(ctx, f, device, passphrase, header.VolumeKeyDigestsView(metadata), order, sys)
 }
 
 // getMasterKeySlot is getMasterKey with the scan order supplied by the caller
 // and the id of the keyslot that opened reported back. order must name keyslots
-// of metadata; getMasterKey passes volumeKeyScanOrder, and MigrateToFIPS
+// of metadata; getMasterKey passes header.VolumeKeyScanOrder, and MigrateToFIPS
 // passes the same order with FIPS-approved keyslots moved to the front so a
 // credential that already has an approved keyslot is found there first, without
 // running Argon2.
@@ -1535,7 +1535,7 @@ func getMasterKeySlot(ctx context.Context, dev io.ReaderAt, device string, passp
 		// An id cryptsetup cannot address -- "01", "32", "abc" -- is not a
 		// keyslot any LUKS2 implementation opens (see listKeyslotsFrom for the
 		// measurements), so it is not one this scan opens either (#249, A9).
-		if _, ok := canonicalKeyslotID(id); !ok {
+		if _, ok := header.CanonicalKeyslotID(id); !ok {
 			continue
 		}
 		tried++
@@ -1614,7 +1614,7 @@ func digestAttestingKey(metadata *header.Metadata, masterKey *enclave.MemoryEncl
 	// them, and either to an unbound one (#249): the keyslot joins the digest
 	// that makes it a volume-key credential whenever the key has one, not a
 	// stale or partial one that happens to sort first.
-	full := volumeKeyDigestsView(metadata).Digests
+	full := header.VolumeKeyDigestsView(metadata).Digests
 	var other string
 	for _, id := range sortedDigestIDs(metadata.Digests) {
 		digest := metadata.Digests[id]
@@ -1680,7 +1680,7 @@ func findAvailableKeyslot(metadata *header.Metadata, opts *addKeyOptionsForTest)
 // belongs to neither: a keyslot placed there passes a segment-overlap check
 // while falling outside the geometry the container declares about itself.
 func keyslotsAreaBounds(hdr *header.BinaryHeader, metadata *header.Metadata) (int64, int64, error) {
-	area, err := headerAreaSize(hdr)
+	area, err := header.HeaderAreaSize(hdr)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -1771,7 +1771,7 @@ func calculateNextKeyslotOffset(metadata *header.Metadata, keyslotsStart int64) 
 // decide where zeros get written, and where a missing area object dereferences
 // nil.
 func wipeKeyslotArea(ctx context.Context, dev *keyslotDevice, hdr *header.BinaryHeader, metadata *header.Metadata, id string, keyslot *header.Keyslot) error {
-	if err := validateKeyslot(id, keyslot); err != nil {
+	if err := header.ValidateKeyslot(id, keyslot); err != nil {
 		return err
 	}
 
@@ -1837,7 +1837,7 @@ func wipeKeyslotArea(ctx context.Context, dev *keyslotDevice, hdr *header.Binary
 // The three removal paths used to open-code this, and each open-coding deleted
 // the map entry and filtered the digests -- and none of them touched the tokens,
 // so a token could outlive the keyslot it named on every route. That is the
-// hand-written-cleanup failure recorded on forgetKeyslotID (header.go), reached
+// hand-written-cleanup failure recorded on header.ForgetKeyslotID (internal/header/codec.go), reached
 // from the other direction: the header READ already had to forget a dropped
 // keyslot's references, so the code existed and the removal paths simply did not
 // call it.
@@ -1846,7 +1846,7 @@ func wipeKeyslotArea(ctx context.Context, dev *keyslotDevice, hdr *header.Binary
 // know that "holds a keyslot id" is a different relation from "is a keyslot".
 func removeKeyslotFromMetadata(metadata *header.Metadata, id string) {
 	delete(metadata.Keyslots, id)
-	forgetKeyslotID(metadata, id)
+	header.ForgetKeyslotID(metadata, id)
 }
 
 // usableKeyslotsAfterRemoving reports how many keyslots would still be able to
@@ -1872,7 +1872,7 @@ func removeKeyslotFromMetadata(metadata *header.Metadata, id string) {
 // which situation it is in.
 func usableKeyslotsAfterRemoving(f *os.File, hdr *header.BinaryHeader, metadata *header.Metadata, id string, measureDeviceSize func(*os.File) (int64, error)) int {
 	remaining := 0
-	for _, other := range keyslotIDsInScanOrder(metadata.Keyslots) {
+	for _, other := range header.KeyslotIDsInScanOrder(metadata.Keyslots) {
 		if other == id {
 			continue
 		}
@@ -1907,7 +1907,7 @@ func usableKeyslotsAfterRemoving(f *os.File, hdr *header.BinaryHeader, metadata 
 func keyslotAreaDisjointFrom(f *os.File, metadata *header.Metadata, id string, area *header.KeyslotArea, measureDeviceSize func(*os.File) (int64, error)) error {
 	if area == nil {
 		// No target geometry, so no overlap can be computed -- and none needs
-		// to be. Every wipe path reaches validateKeyslot before writing a byte
+		// to be. Every wipe path reaches header.ValidateKeyslot before writing a byte
 		// and refuses there, with a message about the geometry rather than the
 		// less informative one this function could offer. Failing closed is
 		// already the downstream behavior; returning nil here does not open it.
@@ -1920,7 +1920,7 @@ func keyslotAreaDisjointFrom(f *os.File, metadata *header.Metadata, id string, a
 	}
 	targetEnd := targetOffset + targetSize
 
-	for _, other := range keyslotIDsInScanOrder(metadata.Keyslots) {
+	for _, other := range header.KeyslotIDsInScanOrder(metadata.Keyslots) {
 		if other == id {
 			continue
 		}
@@ -1936,7 +1936,7 @@ func keyslotAreaDisjointFrom(f *os.File, metadata *header.Metadata, id string, a
 		}
 
 		// keyslotHoldsKeyMaterial has already required these to parse and to be
-		// non-negative and non-overflowing (validateKeyslot); the error is
+		// non-negative and non-overflowing (header.ValidateKeyslot); the error is
 		// consumed rather than ignored so that a future loosening of the
 		// predicate cannot silently skip a survivor.
 		otherOffset, err := parseSize(survivor.Area.Offset)
@@ -2131,7 +2131,7 @@ func checkKeyslotRemovable(dev *keyslotDevice, hdr *header.BinaryHeader, metadat
 // the header is required to carry exactly the KDF the area key was derived
 // under, so the next unlock derives the same key. It is also what keeps the
 // read-back from doubling the cost of every keyslot this package writes.
-func verifyWrittenKeyslot(ctx context.Context, dev *keyslotDevice, id string, kdf *rawKDF, areaKey, want *enclave.MemoryEnclave) error {
+func verifyWrittenKeyslot(ctx context.Context, dev *keyslotDevice, id string, kdf *header.KDF, areaKey, want *enclave.MemoryEnclave) error {
 	_, metadata, err := dev.readHeader()
 	if err != nil {
 		return &errs.Error{Kind: ErrWrongKey, Detail: "the header could not be read back to verify keyslot " + id, Err: err}
@@ -2159,7 +2159,7 @@ func verifyWrittenKeyslot(ctx context.Context, dev *keyslotDevice, id string, kd
 
 // sameKDF reports whether two KDF objects declare the same derivation: every
 // parameter that decides the derived key.
-func sameKDF(a, b *rawKDF) bool {
+func sameKDF(a, b *header.KDF) bool {
 	if a == nil || b == nil {
 		return false
 	}

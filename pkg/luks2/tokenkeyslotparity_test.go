@@ -13,6 +13,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // tokenParityPassphrase opens keyslot 0 of the token parity fixture, and
@@ -135,7 +137,7 @@ func canonicalTokens(t *testing.T, tokens map[string]json.RawMessage) map[string
 }
 
 // TestCryptsetupWritesASHA256HeaderChecksum pins the measurement
-// headerChecksumAlgorithm rests on: the header cryptsetup luksFormat writes
+// header.HeaderChecksumAlgorithm rests on: the header cryptsetup luksFormat writes
 // names sha256 in its csum_alg field, and this package reads it.
 func TestCryptsetupWritesASHA256HeaderChecksum(t *testing.T) {
 	defer parallel(t)()
@@ -145,7 +147,7 @@ func TestCryptsetupWritesASHA256HeaderChecksum(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadHeader of a cryptsetup header: %v", err)
 	}
-	if got := strings.TrimRight(string(hdr.ChecksumAlgorithm[:]), "\x00"); got != headerChecksumAlgorithm {
-		t.Fatalf("cryptsetup wrote csum_alg %q, want %q", got, headerChecksumAlgorithm)
+	if got := strings.TrimRight(string(hdr.ChecksumAlgorithm[:]), "\x00"); got != header.HeaderChecksumAlgorithm {
+		t.Fatalf("cryptsetup wrote csum_alg %q, want %q", got, header.HeaderChecksumAlgorithm)
 	}
 }

@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // Tests for the explicit PBKDF2 iteration count -- the option that bypasses
@@ -36,8 +38,8 @@ func TestForcedPBKDF2IterationsAcceptsACountAtOrAboveTheFloor(t *testing.T) {
 		{"sha512", 210_000},
 		// Above it.
 		{"sha512", 4_000_000},
-		// At the ceiling validateKDFCost enforces on read.
-		{"sha512", maxKDFIterations},
+		// At the ceiling header.ValidateKDFCost enforces on read.
+		{"sha512", header.MaxKDFIterations},
 		// A hash with no recommendation falls back to the absolute minimum.
 		{"sha3-256", minPBKDF2Iterations},
 	}
@@ -114,12 +116,12 @@ func TestForcedPBKDF2IterationsRefusesBelowTheFloor(t *testing.T) {
 }
 
 // TestForcedPBKDF2IterationsRefusesAboveTheCeiling keeps the write path and the
-// read path consistent: maxKDFIterations is what validateKDFCost rejects when
+// read path consistent: header.MaxKDFIterations is what header.ValidateKDFCost rejects when
 // the header is read back, so a larger count would produce a keyslot this
 // package cannot open. Clamping instead would write less work than the caller
 // asked for and report success.
 func TestForcedPBKDF2IterationsRefusesAboveTheCeiling(t *testing.T) {
-	for _, iterations := range []int{maxKDFIterations + 1, math.MaxInt32} {
+	for _, iterations := range []int{header.MaxKDFIterations + 1, math.MaxInt32} {
 		got, err := forcedPBKDF2Iterations("sha512", iterations, callerSuppliedCredential)
 		if err == nil {
 			t.Fatalf("forcedPBKDF2Iterations(sha512, %d) = %d with no error", iterations, got)
@@ -135,8 +137,8 @@ func TestForcedPBKDF2IterationsRefusesAboveTheCeiling(t *testing.T) {
 		if !errors.As(err, &refusal) {
 			t.Fatalf("error %v is not a *KDFCostError", err)
 		}
-		if refusal.Max != maxKDFIterations {
-			t.Errorf("reported maximum = %d, want %d", refusal.Max, maxKDFIterations)
+		if refusal.Max != header.MaxKDFIterations {
+			t.Errorf("reported maximum = %d, want %d", refusal.Max, header.MaxKDFIterations)
 		}
 	}
 }

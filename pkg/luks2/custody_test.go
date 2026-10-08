@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // Custody tests.
@@ -32,7 +33,7 @@ import (
 
 func TestDeriveKeyEnclaveAgreesWithTheUnprotectedDerivation(t *testing.T) {
 	iterations := 1000
-	kdf := &rawKDF{
+	kdf := &header.KDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       encodeBase64([]byte("a-sixteen-byte!!")),
@@ -68,7 +69,7 @@ func TestDeriveKeyEnclaveAgreesWithTheUnprotectedDerivation(t *testing.T) {
 // forgets to wipe one gets no error, just a live copy of the key.
 func TestDeriveKeyEnclaveHandsBackAnEnclaveNotASlice(t *testing.T) {
 	iterations := 1000
-	kdf := &rawKDF{
+	kdf := &header.KDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       encodeBase64([]byte("a-sixteen-byte!!")),
@@ -99,7 +100,7 @@ func TestDeriveKeyEnclaveHandsBackAnEnclaveNotASlice(t *testing.T) {
 
 func TestDeriveKeySecretKeepsTheInputInsideItsEnclave(t *testing.T) {
 	iterations := 1000
-	kdf := &rawKDF{
+	kdf := &header.KDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       encodeBase64([]byte("a-sixteen-byte!!")),
@@ -136,7 +137,7 @@ func TestDeriveKeySecretKeepsTheInputInsideItsEnclave(t *testing.T) {
 
 func TestDeriveKeySecretRefusesADestroyedInput(t *testing.T) {
 	iterations := 1000
-	kdf := &rawKDF{
+	kdf := &header.KDF{
 		Type:       "pbkdf2",
 		Hash:       "sha256",
 		Salt:       encodeBase64([]byte("a-sixteen-byte!!")),
@@ -295,7 +296,7 @@ func TestUnlockKeyslotRefusesAnAbsurdKeyslotArea(t *testing.T) {
 		t.Fatal("fixture precondition: keyslot 0 is missing")
 	}
 
-	for _, size := range []string{"0", "-1", formatSize(maxKeyslotAreaSize + 1)} {
+	for _, size := range []string{"0", "-1", formatSize(header.MaxKeyslotAreaSize + 1)} {
 		t.Run(size, func(t *testing.T) {
 			original := keyslot.Area.Size
 			keyslot.Area.Size = size

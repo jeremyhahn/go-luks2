@@ -34,14 +34,14 @@ func bindingFixture(t *testing.T) (*header.Metadata, []byte) {
 
 // withDigests returns a shallow copy of metadata carrying digests instead of its
 // own, so each case below states the exact digest set it is about.
-func withDigests(metadata *header.Metadata, digests map[string]*rawDigest) *header.Metadata {
+func withDigests(metadata *header.Metadata, digests map[string]*header.Digest) *header.Metadata {
 	m := *metadata
 	m.Digests = digests
 	return &m
 }
 
 // digestVariant returns a copy of d naming the given keyslots and segments.
-func digestVariant(d *rawDigest, keyslots, segments []string) *rawDigest {
+func digestVariant(d *header.Digest, keyslots, segments []string) *header.Digest {
 	c := *d
 	c.Keyslots = keyslots
 	c.Segments = segments
@@ -58,29 +58,29 @@ func TestKeyslotBoundToSegment(t *testing.T) {
 
 	for _, tc := range []struct {
 		name    string
-		digests map[string]*rawDigest
+		digests map[string]*header.Digest
 		segment string
 		want    bool
 	}{
-		{"a digest binding the segment", map[string]*rawDigest{"0": bound}, "0", true},
+		{"a digest binding the segment", map[string]*header.Digest{"0": bound}, "0", true},
 		{"an unbound digest, as cryptsetup luksAddKey --unbound writes",
-			map[string]*rawDigest{"0": digestVariant(bound, []string{"0"}, []string{})}, "0", false},
+			map[string]*header.Digest{"0": digestVariant(bound, []string{"0"}, []string{})}, "0", false},
 		{"a digest bound to another segment",
-			map[string]*rawDigest{"0": digestVariant(bound, []string{"0"}, []string{"1"})}, "0", false},
+			map[string]*header.Digest{"0": digestVariant(bound, []string{"0"}, []string{"1"})}, "0", false},
 		{"no digest attests the keyslot",
-			map[string]*rawDigest{"0": digestVariant(bound, []string{"1"}, []string{"0"})}, "0", false},
+			map[string]*header.Digest{"0": digestVariant(bound, []string{"1"}, []string{"0"})}, "0", false},
 		// A declaration, not an evaluation: whether the digest can be USED is
 		// the screen's question, reported there as the header fault it is.
-		{"the only binding digest is damaged", map[string]*rawDigest{"0": unusable}, "0", true},
+		{"the only binding digest is damaged", map[string]*header.Digest{"0": unusable}, "0", true},
 		{"a damaged unbound digest beside a bound one",
-			map[string]*rawDigest{"0": bound, "1": func() *rawDigest {
+			map[string]*header.Digest{"0": bound, "1": func() *header.Digest {
 				d := digestVariant(bound, []string{"0"}, nil)
 				d.Digest = "not base64!"
 				return d
 			}()}, "0", false},
 		{"a bound and an unbound digest both attest it, which no static check can resolve",
-			map[string]*rawDigest{"0": bound, "1": digestVariant(bound, []string{"0"}, nil)}, "0", false},
-		{"the segment does not exist", map[string]*rawDigest{"0": bound}, "7", false},
+			map[string]*header.Digest{"0": bound, "1": digestVariant(bound, []string{"0"}, nil)}, "0", false},
+		{"the segment does not exist", map[string]*header.Digest{"0": bound}, "7", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := keyslotBoundToSegment(withDigests(metadata, tc.digests), "0", tc.segment); got != tc.want {
@@ -128,16 +128,16 @@ func TestRecoveredKeyBoundToSegment(t *testing.T) {
 
 	for _, tc := range []struct {
 		name    string
-		digests map[string]*rawDigest
+		digests map[string]*header.Digest
 		segment string
 		want    bool
 	}{
-		{"the key matches a digest binding the segment", map[string]*rawDigest{"0": bound}, "0", true},
+		{"the key matches a digest binding the segment", map[string]*header.Digest{"0": bound}, "0", true},
 		{"the key matches only an unbound digest",
-			map[string]*rawDigest{"0": digestVariant(bound, []string{"0"}, nil)}, "0", false},
+			map[string]*header.Digest{"0": digestVariant(bound, []string{"0"}, nil)}, "0", false},
 		{"the binding digest names another keyslot",
-			map[string]*rawDigest{"0": digestVariant(bound, []string{"3"}, []string{"0"})}, "0", false},
-		{"the segment does not exist", map[string]*rawDigest{"0": bound}, "9", false},
+			map[string]*header.Digest{"0": digestVariant(bound, []string{"3"}, []string{"0"})}, "0", false},
+		{"the segment does not exist", map[string]*header.Digest{"0": bound}, "9", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := recoveredKeyBoundToSegment(withDigests(metadata, tc.digests), "0", tc.segment, mk); got != tc.want {

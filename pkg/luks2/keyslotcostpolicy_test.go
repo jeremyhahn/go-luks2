@@ -117,7 +117,7 @@ func TestTheExemptPathStillHasAFloor(t *testing.T) {
 	}
 
 	// The ceiling is not relaxed either.
-	if _, err := forcedPBKDF2Iterations("sha512", maxKDFIterations+1, libraryGeneratedCredential); !errors.Is(err, ErrInvalidArgument) {
+	if _, err := forcedPBKDF2Iterations("sha512", header.MaxKDFIterations+1, libraryGeneratedCredential); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("the exempt path accepted a count above the ceiling: %v", err)
 	}
 }
@@ -338,7 +338,7 @@ func TestAddKeyInheritsTheContainersArgon2Cost(t *testing.T) {
 	const containerMemory = 512_000
 
 	container := &header.Metadata{Keyslots: map[string]*header.Keyslot{
-		"0": {Type: "luks2", KDF: &rawKDF{
+		"0": {Type: "luks2", KDF: &header.KDF{
 			Type: kdfTypeArgon2id, Salt: "AAAA",
 			Time: intPtr(4), Memory: intPtr(containerMemory), CPUs: intPtr(2),
 		}},
@@ -374,7 +374,7 @@ func TestAddKeyInheritsABelowFloorArgon2CostExactly(t *testing.T) {
 	const containerMemory = 32768
 
 	container := &header.Metadata{Keyslots: map[string]*header.Keyslot{
-		"0": {Type: "luks2", KDF: &rawKDF{
+		"0": {Type: "luks2", KDF: &header.KDF{
 			Type: kdfTypeArgon2id, Salt: "AAAA",
 			Time: intPtr(4), Memory: intPtr(containerMemory), CPUs: intPtr(1),
 		}},
@@ -411,7 +411,7 @@ func TestAddKeyInheritsABelowFloorArgon2CostExactly(t *testing.T) {
 // better default, not an override of the caller.
 func TestAddKeyDoesNotInheritWhenTheCallerChose(t *testing.T) {
 	container := &header.Metadata{Keyslots: map[string]*header.Keyslot{
-		"0": {Type: "luks2", KDF: &rawKDF{
+		"0": {Type: "luks2", KDF: &header.KDF{
 			Type: kdfTypeArgon2id, Salt: "AAAA",
 			Time: intPtr(4), Memory: intPtr(512_000), CPUs: intPtr(2),
 		}},
@@ -431,7 +431,7 @@ func TestAddKeyDoesNotInheritWhenTheCallerChose(t *testing.T) {
 // package defaults stand and nothing is reported.
 func TestAddKeyFallsBackToDefaultsForANonArgon2Container(t *testing.T) {
 	container := &header.Metadata{Keyslots: map[string]*header.Keyslot{
-		"0": {Type: "luks2", KDF: &rawKDF{Type: kdfTypePBKDF2, Hash: "sha512", Salt: "AAAA", Iterations: intPtr(210000)}},
+		"0": {Type: "luks2", KDF: &header.KDF{Type: kdfTypePBKDF2, Hash: "sha512", Salt: "AAAA", Iterations: intPtr(210000)}},
 	}}
 
 	for _, metadata := range []*header.Metadata{container, {Keyslots: map[string]*header.Keyslot{}}, nil} {
@@ -519,11 +519,11 @@ func TestAddKeyReportsTheInheritedCostToTheCaller(t *testing.T) {
 // MinArgon2MemoryKB was invisible without parsing the header by hand.
 func TestListKeyslotsReportsTheKDFCost(t *testing.T) {
 	metadata := &header.Metadata{Keyslots: map[string]*header.Keyslot{
-		"0": {Type: "luks2", KeySize: 64, KDF: &rawKDF{
+		"0": {Type: "luks2", KeySize: 64, KDF: &header.KDF{
 			Type: kdfTypeArgon2id, Salt: "AAAA",
 			Time: intPtr(4), Memory: intPtr(32768), CPUs: intPtr(1),
 		}},
-		"1": {Type: "luks2", KeySize: 64, KDF: &rawKDF{
+		"1": {Type: "luks2", KeySize: 64, KDF: &header.KDF{
 			Type: kdfTypePBKDF2, Hash: "sha512", Salt: "AAAA", Iterations: intPtr(210000),
 		}},
 	}}
@@ -569,7 +569,7 @@ func TestListKeyslotsReportsTheKDFCost(t *testing.T) {
 func TestListKeyslotsReportsNoCostForAKeyslotWithoutAKDF(t *testing.T) {
 	metadata := &header.Metadata{Keyslots: map[string]*header.Keyslot{
 		"0": {Type: "reencrypt", KeySize: 64},
-		"1": {Type: "luks2", KeySize: 64, KDF: &rawKDF{Type: kdfTypePBKDF2, Hash: "sha512", Salt: "AAAA"}},
+		"1": {Type: "luks2", KeySize: 64, KDF: &header.KDF{Type: kdfTypePBKDF2, Hash: "sha512", Salt: "AAAA"}},
 	}}
 
 	slots, err := listKeyslotsFrom(metadata)

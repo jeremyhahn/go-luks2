@@ -197,7 +197,7 @@ func TestForeignGeometry_ProbeRejectsEveryWrongOffset(t *testing.T) {
 
 // TestLegalHeaderAreaSizes pins the probe's search space.
 func TestLegalHeaderAreaSizes(t *testing.T) {
-	sizes := legalHeaderAreaSizes()
+	sizes := header.LegalHeaderAreaSizes()
 
 	if len(sizes) == 0 {
 		t.Fatal("no legal header area sizes")
@@ -216,10 +216,10 @@ func TestLegalHeaderAreaSizes(t *testing.T) {
 		if !isPowerOf2(int(size)) {
 			t.Errorf("legal size %d is not a power of two", size)
 		}
-		if _, err := headerAreaSizeForWrite(&header.BinaryHeader{HeaderSize: uint64(size)}); err != nil {
+		if _, err := header.HeaderAreaSizeForWrite(&header.BinaryHeader{HeaderSize: uint64(size)}); err != nil {
 			t.Errorf("the probe searches offset %d, which the writer cannot produce: %v", size, err)
 		}
-		if _, err := headerAreaOffset(&header.BinaryHeader{HeaderOffset: uint64(size)}); err != nil {
+		if _, err := header.HeaderAreaOffset(&header.BinaryHeader{HeaderOffset: uint64(size)}); err != nil {
 			t.Errorf("the probe searches offset %d, which the reader rejects: %v", size, err)
 		}
 	}
@@ -340,7 +340,7 @@ func TestKeyslotsAreaBounds(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		headerSize uint64
-		config     *rawConfig
+		config     *header.Config
 		wantStart  int64
 		wantEnd    int64
 		wantErr    bool
@@ -348,21 +348,21 @@ func TestKeyslotsAreaBounds(t *testing.T) {
 		{
 			name:       "the default 16 KiB geometry",
 			headerSize: header.HeaderMinSize,
-			config:     &rawConfig{KeyslotsSize: "16744448"},
+			config:     &header.Config{KeyslotsSize: "16744448"},
 			wantStart:  0x8000,
 			wantEnd:    0x8000 + 16744448,
 		},
 		{
 			name:       "a 32 KiB metadata area moves the start",
 			headerSize: 2 * header.HeaderMinSize,
-			config:     &rawConfig{KeyslotsSize: "1048576"},
+			config:     &header.Config{KeyslotsSize: "1048576"},
 			wantStart:  0x10000,
 			wantEnd:    0x10000 + 1048576,
 		},
 		{
 			name:       "a 1 MiB metadata area moves it further",
 			headerSize: 1 << 20,
-			config:     &rawConfig{KeyslotsSize: "1048576"},
+			config:     &header.Config{KeyslotsSize: "1048576"},
 			wantStart:  2 << 20,
 			wantEnd:    (2 << 20) + 1048576,
 		},
@@ -375,25 +375,25 @@ func TestKeyslotsAreaBounds(t *testing.T) {
 		{
 			name:       "unparseable keyslots_size",
 			headerSize: header.HeaderMinSize,
-			config:     &rawConfig{KeyslotsSize: "lots"},
+			config:     &header.Config{KeyslotsSize: "lots"},
 			wantErr:    true,
 		},
 		{
 			name:       "zero keyslots_size",
 			headerSize: header.HeaderMinSize,
-			config:     &rawConfig{KeyslotsSize: "0"},
+			config:     &header.Config{KeyslotsSize: "0"},
 			wantErr:    true,
 		},
 		{
 			name:       "negative keyslots_size",
 			headerSize: header.HeaderMinSize,
-			config:     &rawConfig{KeyslotsSize: "-4096"},
+			config:     &header.Config{KeyslotsSize: "-4096"},
 			wantErr:    true,
 		},
 		{
 			name:       "unusable header size",
 			headerSize: 1,
-			config:     &rawConfig{KeyslotsSize: "16744448"},
+			config:     &header.Config{KeyslotsSize: "16744448"},
 			wantErr:    true,
 		},
 	} {

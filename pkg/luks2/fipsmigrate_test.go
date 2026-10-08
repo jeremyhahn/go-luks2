@@ -20,6 +20,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/jeremyhahn/go-luks2/internal/header"
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
@@ -408,7 +409,7 @@ func sha1DigestVolume(t *testing.T, name string) string {
 	defer mustDestroy(t, mk)
 
 	iterations := 1000
-	kdf := &rawKDF{Type: kdfTypePBKDF2, Hash: "sha1", Salt: metadata.Digests["0"].Salt, Iterations: &iterations}
+	kdf := &header.KDF{Type: kdfTypePBKDF2, Hash: "sha1", Salt: metadata.Digests["0"].Salt, Iterations: &iterations}
 	derived, err := deriveKeySecret(context.Background(), mk, kdf, 20, testVolumeSys())
 	if err != nil {
 		t.Fatalf("deriving the sha1 digest failed: %v", err)
@@ -580,7 +581,7 @@ func fakeArgon2KeyslotVolume(t *testing.T, name string) string {
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
-	cost, memory, cpus := minArgon2Time, minArgon2MemoryKB, 1
+	cost, memory, cpus := header.MinArgon2Time, minArgon2MemoryKB, 1
 	kdf := metadata.Keyslots["0"].KDF
 	kdf.Type, kdf.Hash, kdf.Iterations = kdfTypeArgon2id, "", nil
 	kdf.Time, kdf.Memory, kdf.CPUs = &cost, &memory, &cpus
@@ -656,7 +657,7 @@ func TestFIPSRefusalDoesNotMaskDamage(t *testing.T) {
 	area.Encryption = "serpent-xts-plain64"
 	damaged.Area = &area
 	iterations := 1000
-	damaged.KDF = &rawKDF{Type: kdfTypePBKDF2, Hash: defaultHashAlgo, Salt: damaged.KDF.Salt, Iterations: &iterations}
+	damaged.KDF = &header.KDF{Type: kdfTypePBKDF2, Hash: defaultHashAlgo, Salt: damaged.KDF.Salt, Iterations: &iterations}
 	metadata.Keyslots["1"] = &damaged
 	metadata.Digests["0"].Keyslots = append(metadata.Digests["0"].Keyslots, "1")
 	hdr.SequenceID++

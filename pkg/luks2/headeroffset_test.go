@@ -153,14 +153,14 @@ func TestHeaderAreaOffsetAcceptsEveryLegalCopyLocation(t *testing.T) {
 		{header.HeaderMaxOffset + header.HeaderMinSize, false},
 		{^uint64(0), false},
 	} {
-		got, err := headerAreaOffset(&header.BinaryHeader{HeaderOffset: tc.offset})
+		got, err := header.HeaderAreaOffset(&header.BinaryHeader{HeaderOffset: tc.offset})
 		switch {
 		case tc.accept && err != nil:
-			t.Errorf("headerAreaOffset(%d) = error %v, want it accepted", tc.offset, err)
+			t.Errorf("header.HeaderAreaOffset(%d) = error %v, want it accepted", tc.offset, err)
 		case !tc.accept && err == nil:
-			t.Errorf("headerAreaOffset(%d) = %d, want it rejected", tc.offset, got)
+			t.Errorf("header.HeaderAreaOffset(%d) = %d, want it rejected", tc.offset, got)
 		case tc.accept && uint64(got) != tc.offset:
-			t.Errorf("headerAreaOffset(%d) = %d, want the offset back unchanged", tc.offset, got)
+			t.Errorf("header.HeaderAreaOffset(%d) = %d, want the offset back unchanged", tc.offset, got)
 		}
 	}
 }
@@ -241,8 +241,8 @@ func TestExpectedMagic(t *testing.T) {
 		{header.SecondaryHeaderOffset, header.SecondaryMagic},
 		{1 << 20, header.SecondaryMagic}, // a larger metadata area moves the copy, not its magic
 	} {
-		if got := expectedMagic(tc.offset); got != tc.want {
-			t.Errorf("expectedMagic(%d) = %q, want %q", tc.offset, got, tc.want)
+		if got := header.ExpectedMagic(tc.offset); got != tc.want {
+			t.Errorf("header.ExpectedMagic(%d) = %q, want %q", tc.offset, got, tc.want)
 		}
 	}
 

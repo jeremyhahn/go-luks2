@@ -183,7 +183,7 @@ func TestCreateKDFDefaultUnderTheFIPSPolicy(t *testing.T) {
 // keyslot the caller did not ask for.
 func TestCreateKDFWithAnArgon2CostAndNoTypeIsArgon2id(t *testing.T) {
 	opts := formatOptionsForTest{Argon2Time: 1, Argon2Memory: minArgon2MemoryKB, Argon2Parallel: 1}
-	assertCreateKDFInThisMode(t, opts, func(t *testing.T, kdf *rawKDF) {
+	assertCreateKDFInThisMode(t, opts, func(t *testing.T, kdf *header.KDF) {
 		if kdf.Type != kdfTypeArgon2id {
 			t.Fatalf("type = %q, want %q", kdf.Type, kdfTypeArgon2id)
 		}
@@ -348,7 +348,7 @@ func TestBaseAddKeyFormatOptionsResolvesTheKDFAndItsHash(t *testing.T) {
 // Argon2 cost to inherit, and none is reported.
 func TestAddKeyWithNoKDFNamedInheritsOnlyInTheArgon2Default(t *testing.T) {
 	container := &header.Metadata{Keyslots: map[string]*header.Keyslot{
-		"0": {Type: "luks2", KDF: &rawKDF{
+		"0": {Type: "luks2", KDF: &header.KDF{
 			Type: kdfTypeArgon2id, Salt: "AAAA",
 			Time: intPtr(3), Memory: intPtr(512_000), CPUs: intPtr(2),
 		}},

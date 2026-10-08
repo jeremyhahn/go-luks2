@@ -215,7 +215,7 @@ type Keyslot struct {
 	// wrong. Serialization describes what IS there; asserting what OUGHT
 	// to be there is validateKeyslot's job, and it already does exactly this
 	// -- it refuses a luks2 keyslot with no kdf or no af as ErrInvalidKeyslot,
-	// while deliberately exempting other types (keyslotvalidation.go). That
+	// while deliberately exempting other types (keyslot.go). That
 	// check is louder than a null member and reaches every path that acts on a
 	// keyslot.
 	//

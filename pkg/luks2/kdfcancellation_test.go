@@ -11,6 +11,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // These three tests close H8's KDF cancellation gap (DESIGN.md §D.2, KDF
@@ -31,7 +33,7 @@ import (
 
 func TestDeriveKeyEnclaveCancelledDuringDerivationDestroysOutput(t *testing.T) {
 	iterations := 100_000
-	kdf := &rawKDF{Type: kdfTypePBKDF2, Hash: "sha256", Salt: encodeBase64([]byte("cancellation-salt")), Iterations: &iterations}
+	kdf := &header.KDF{Type: kdfTypePBKDF2, Hash: "sha256", Salt: encodeBase64([]byte("cancellation-salt")), Iterations: &iterations}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancel()
 
@@ -46,7 +48,7 @@ func TestDeriveKeyEnclaveCancelledDuringDerivationDestroysOutput(t *testing.T) {
 
 func TestDeriveKeySecretCancelledDuringDerivationDestroysOutput(t *testing.T) {
 	iterations := 100_000
-	kdf := &rawKDF{Type: kdfTypePBKDF2, Hash: "sha256", Salt: encodeBase64([]byte("cancellation-salt")), Iterations: &iterations}
+	kdf := &header.KDF{Type: kdfTypePBKDF2, Hash: "sha256", Salt: encodeBase64([]byte("cancellation-salt")), Iterations: &iterations}
 	material := secretOf(t, []byte("the master key, 32 bytes long!!"))
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancel()

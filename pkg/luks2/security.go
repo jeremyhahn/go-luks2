@@ -184,8 +184,8 @@ func validatePassphraseBytes(passphrase []byte) error {
 // reference implementation considers valid has turned a hardening preference
 // into an interop failure.
 //
-// So the accept side is deliberately far more liberal -- minArgon2Memory in
-// keyslotvalidation.go is 8 KiB, below even cryptsetup's own 32 -- and every
+// So the accept side is deliberately far more liberal -- header.MinArgon2Memory in
+// internal/header/keyslot.go is 8 KiB, below even cryptsetup's own 32 -- and every
 // read path, RemoveKey and KillSlot go through that one instead. This bound
 // applies only where a caller SUPPLIES a cost: Format and AddKey.
 //
@@ -194,15 +194,15 @@ func validatePassphraseBytes(passphrase []byte) error {
 // has already demonstrated it can afford that and nothing more. See ChangeKey.
 const minArgon2MemoryKB = kdf.MinArgon2MemoryKB
 
-// minArgon2Time, in keyslotvalidation.go, is the smallest Argon2 time cost
+// header.MinArgon2Time, in internal/header/keyslot.go, is the smallest Argon2 time cost
 // this package will write. It is the format's own minimum; a zero or
 // negative time cost is not a weak keyslot but a malformed one.
 //
-// minArgon2Parallel, also there, is the smallest Argon2 parallelism this
+// header.MinArgon2Parallel, also there, is the smallest Argon2 parallelism this
 // package will write, for the same reason: Argon2 parallelism is a uint8 in
 // 1..255, so zero or negative is malformed, not weak. Its CEILING, like
-// Time's and Memory's, is the read side's own (maxArgon2Parallel,
-// keyslotvalidation.go), applied by validateArgon2CreateCost so nothing is
+// Time's and Memory's, is the read side's own (header.MaxArgon2Parallel,
+// internal/header/keyslot.go), applied by validateArgon2CreateCost so nothing is
 // written that the reader would refuse (#249, A5).
 
 // validateArgon2CreateCost bounds the Argon2 costs a CALLER supplies.
@@ -224,26 +224,26 @@ func validateArgon2CreateCost(opts formatOptionsForTest) error {
 		return nil
 	}
 	// Each cost has a FLOOR -- what this package will write -- and a CEILING,
-	// which is exactly what validateKDFCost refuses when the header is read
+	// which is exactly what header.ValidateKDFCost refuses when the header is read
 	// back (#249, A5). Without the ceiling, Format with Argon2Memory 8 GiB on a
 	// host that had the RAM derived, wrote and reported success, and every
 	// later unlock refused the keyslot: a volume nothing can open, created on
 	// request. The read-side bounds are the ones used, not restated, so the
 	// two can never disagree about what a keyslot may cost.
-	if opts.Argon2Memory != 0 && (opts.Argon2Memory < minArgon2MemoryKB || opts.Argon2Memory > maxArgon2Memory) {
+	if opts.Argon2Memory != 0 && (opts.Argon2Memory < minArgon2MemoryKB || opts.Argon2Memory > header.MaxArgon2Memory) {
 		return &KDFCostError{
 			Param: "memory",
 			Value: opts.Argon2Memory,
 			Min:   minArgon2MemoryKB,
-			Max:   maxArgon2Memory,
+			Max:   header.MaxArgon2Memory,
 		}
 	}
-	if opts.Argon2Time != 0 && (opts.Argon2Time < minArgon2Time || opts.Argon2Time > maxArgon2Time) {
+	if opts.Argon2Time != 0 && (opts.Argon2Time < header.MinArgon2Time || opts.Argon2Time > header.MaxArgon2Time) {
 		return &KDFCostError{
 			Param: "time",
 			Value: opts.Argon2Time,
-			Min:   minArgon2Time,
-			Max:   maxArgon2Time,
+			Min:   header.MinArgon2Time,
+			Max:   header.MaxArgon2Time,
 		}
 	}
 	// Parallelism is checked HERE, with its siblings, rather than being left to
@@ -252,12 +252,12 @@ func validateArgon2CreateCost(opts formatOptionsForTest) error {
 	// CryptoError rather than the Argon2CostError the other two produce. Same
 	// mistake by the caller, two different error shapes and two different
 	// moments.
-	if opts.Argon2Parallel != 0 && (opts.Argon2Parallel < minArgon2Parallel || opts.Argon2Parallel > maxArgon2Parallel) {
+	if opts.Argon2Parallel != 0 && (opts.Argon2Parallel < header.MinArgon2Parallel || opts.Argon2Parallel > header.MaxArgon2Parallel) {
 		return &KDFCostError{
 			Param: "parallelism",
 			Value: opts.Argon2Parallel,
-			Min:   minArgon2Parallel,
-			Max:   maxArgon2Parallel,
+			Min:   header.MinArgon2Parallel,
+			Max:   header.MaxArgon2Parallel,
 		}
 	}
 	return nil

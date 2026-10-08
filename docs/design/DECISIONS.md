@@ -3468,3 +3468,35 @@ under a different shape)
   unexported; the code at this commit still exports it from `pkg/luks2`
   (`recovery.go`). The §B.6 row records the disposition as written; the
   export is a code change outside this lane.
+
+## H13e (last transitional forwards removed, #275)
+
+H5 left `pkg/luks2` forwarding to `internal/header` under the old names so the
+package kept compiling, each marked "removed at H13". H13b deleted the token
+cluster those names waited for, so nothing was left to wait for. Owner ruling
+2026-10-05 (no backward compatibility): every caller, tests included, now says
+`header.X`. No behaviour or public identifier changed.
+
+- **Deleted.** `headervalidation.go`, `keyslotvalidation.go` and
+  `unknownfields.go` (whole files of forwards and constant aliases); in
+  `segmentvalidation.go` the `maxSegmentEncryptionLength`,
+  `segmentSectorSizes` and `cryptTableParams` forwards; in `header.go` the
+  pure forwards (`legalHeaderAreaSizes`, `expectedMagic`, `headerCopiesAgree`,
+  `headerAreaSize*`, `headerAreaOffset`, `calculateHeaderChecksum`,
+  `readJSONMetadata`, `forgetKeyslotID`, `withoutID`, `volumeKeyBits`,
+  `marshalCanonicalJSON`, `canonicalKeyslotID`, `keyslotIDsInScanOrder`,
+  `volumeKeyScanOrder`, `volumeKeyDigestsView`, `validateHeaderChecksum`,
+  `writeEncodedHeader`, the `checksumFieldOffset` and
+  `headerChecksumAlgorithm` constants and the `readerAt` alias, now
+  `io.ReaderAt`); in `types.go` the `rawKDF`, `rawDigest`, `rawConfig` and
+  `rawRequirements` aliases.
+- **Kept.** `readHeaderCopyFrom`, `checkHeaderWritable`, `encodeMetadata`,
+  `encodeMetadataForHeader` and `writeHeaderTo` each fold an `internal/header`
+  sentinel into the public `ErrUnsupported` or `ErrNoSpace` (§C.3), so they
+  are real functions, not forwards. `DroppedEntry` (public, KEEP in B.6),
+  `LegacyToken`, `segmentLabel` (a private copy of an unexported helper) and
+  pkg/luks2's own policy constants stay.
+- **Comments.** `internal/dm` and `pkg/dmcrypt` no longer call pkg/luks2's
+  seams transitional. `internal/dm` now says its callers supply the state
+  through `pkg/dmcrypt`'s `sys`; `pkg/dmcrypt` contrasts that with
+  pkg/luks2's per-Volume `Volume.sys` (§E).

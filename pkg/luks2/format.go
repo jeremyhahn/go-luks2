@@ -216,7 +216,7 @@ func formatWithSys(opts formatOptionsForTest, sys volumeSys) error {
 	f := claimed.File()
 	defer func() { _ = f.Close() }()
 
-	return formatCore(ctx, f, opts.Device, opts, kdfOpts, sys, func(kdf *rawKDF, keySize int) (*enclave.MemoryEnclave, error) {
+	return formatCore(ctx, f, opts.Device, opts, kdfOpts, sys, func(kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
 		return sys.passphraseKDF(ctx, opts.Passphrase, kdf, keySize)
 	})
 }
@@ -243,7 +243,7 @@ func formatWithSys(opts formatOptionsForTest, sys volumeSys) error {
 // open its passphrase enclave for exactly that derivation and no longer: the
 // passphrase is not borrowed across the device writes that follow.
 func formatCore(ctx context.Context, f *os.File, device string, opts, kdfOpts formatOptionsForTest, sys volumeSys,
-	deriveAreaKey func(kdf *rawKDF, keySize int) (*enclave.MemoryEnclave, error)) error {
+	deriveAreaKey func(kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error)) error {
 	masterKeySize := opts.KeySize / 8 // Convert bits to bytes
 
 	// The whole layout is known now, before the KDF is paid for and before a
@@ -603,7 +603,7 @@ func (v *Volume) Format(ctx context.Context, pass *enclave.MemoryEnclave, p Form
 	// The passphrase is borrowed for the derivation alone, not across the
 	// format: the 16 MiB of keyslot-area I/O that follows never runs with the
 	// caller's enclave open.
-	deriveAreaKey := func(kdf *rawKDF, keySize int) (*enclave.MemoryEnclave, error) {
+	deriveAreaKey := func(kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
 		var key *enclave.MemoryEnclave
 		err := secret.Borrow(op, pass, func(b []byte) error {
 			var derr error
@@ -625,7 +625,7 @@ func (v *Volume) Format(ctx context.Context, pass *enclave.MemoryEnclave, p Form
 // createMetadata creates the JSON metadata structure
 // keyslot0Size is the actual size of keyslot 0's area
 // keyslotsAreaSize is the total reserved space for all keyslots (for Config.KeyslotsSize)
-func createMetadata(kdf, digestKDF *rawKDF, digestValue string, opts formatOptionsForTest,
+func createMetadata(kdf, digestKDF *header.KDF, digestValue string, opts formatOptionsForTest,
 	masterKeySize, keyslotOffset, keyslot0Size, keyslotsAreaSize, dataOffset int) *header.Metadata {
 
 	// Create keyslot.
@@ -686,8 +686,8 @@ func createMetadata(kdf, digestKDF *rawKDF, digestValue string, opts formatOptio
 	}
 
 	// Create digests
-	digests := make(map[string]*rawDigest)
-	digests["0"] = &rawDigest{
+	digests := make(map[string]*header.Digest)
+	digests["0"] = &header.Digest{
 		Type:       "pbkdf2",
 		Keyslots:   []string{"0"},
 		Segments:   []string{"0"},
@@ -711,7 +711,7 @@ func createMetadata(kdf, digestKDF *rawKDF, digestValue string, opts formatOptio
 	// keyslots_offset, i.e. 16777216 - 32768 = 16744448 for the geometry this
 	// library writes. Measured against cryptsetup 2.7.0; see #28.
 	jsonSize := header.DefaultSize
-	config := &rawConfig{
+	config := &header.Config{
 		JSONSize:     formatSize(int64(jsonSize)),
 		KeyslotsSize: formatSize(int64(keyslotsAreaSize)),
 	}
@@ -782,7 +782,7 @@ func digestIterationsTimedBy(hashAlgo string, timer pbkdf2Timer) (int, error) {
 // header fields and are not secret; the digest is a one-way function of the
 // key, and the whole point of writing it to the header is that anyone can check
 // a candidate key against it.
-func createDigest(masterKey *enclave.MemoryEnclave, hashAlgo string, sys volumeSys) (*rawKDF, string, error) {
+func createDigest(masterKey *enclave.MemoryEnclave, hashAlgo string, sys volumeSys) (*header.KDF, string, error) {
 	// A digest is written, so it is never PBKDF2-SHA1 (#239).
 	if err := refuseSHA1ForCreation("", hashAlgo); err != nil {
 		return nil, "", err
@@ -801,7 +801,7 @@ func createDigest(masterKey *enclave.MemoryEnclave, hashAlgo string, sys volumeS
 		return nil, "", err
 	}
 
-	kdf := &rawKDF{
+	kdf := &header.KDF{
 		Type:       "pbkdf2",
 		Hash:       hashAlgo,
 		Salt:       encodeBase64(salt),

@@ -210,7 +210,7 @@ func rewriteDigestAsSHA1(t *testing.T, image string, key []byte) {
 		t.Fatalf("custody.Clone: %v", err)
 	}
 	defer mustDestroy(t, mk)
-	derived, err := deriveKeySecret(context.Background(), mk, &rawKDF{Type: kdfTypePBKDF2, Hash: "sha1", Salt: digest.Salt, Iterations: &iterations}, 20, testVolumeSys())
+	derived, err := deriveKeySecret(context.Background(), mk, &header.KDF{Type: kdfTypePBKDF2, Hash: "sha1", Salt: digest.Salt, Iterations: &iterations}, 20, testVolumeSys())
 	if err != nil {
 		t.Fatalf("deriving the sha1 digest failed: %v", err)
 	}
@@ -992,7 +992,7 @@ func TestHeaderCopiesAgree(t *testing.T) {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
 		other := *metadata
-		other.Digests = map[string]*rawDigest{}
+		other.Digests = map[string]*header.Digest{}
 		for id, d := range metadata.Digests {
 			changed := *d
 			changed.Iterations++
@@ -1602,7 +1602,7 @@ func repairOn(t *testing.T, path string, hdr *header.BinaryHeader, metadata *hea
 	return repairSecondaryHeader(context.Background(), dev, hdr, metadata)
 }
 
-// copiesAgree is headerCopiesAgree on path, read through a descriptor of its
+// copiesAgree is header.HeaderCopiesAgree on path, read through a descriptor of its
 // own.
 func copiesAgree(t *testing.T, path string) error {
 	t.Helper()
@@ -1612,7 +1612,7 @@ func copiesAgree(t *testing.T, path string) error {
 		t.Fatalf("open %s: %v", path, err)
 	}
 	defer func() { _ = f.Close() }()
-	return headerCopiesAgree(f)
+	return header.HeaderCopiesAgree(f)
 }
 
 // readerFunc adapts a function to io.ReaderAt.

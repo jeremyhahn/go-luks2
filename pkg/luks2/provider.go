@@ -227,6 +227,6 @@ func (v *Volume) UnlockWithProvider(ctx context.Context, p KeyProvider) (*Key, e
 		return nil, errAt(op, v.path, err)
 	}
 
-	slot, _ := strconv.Atoi(slotID) // slotID always came from canonicalKeyslotID, through ids above
+	slot, _ := strconv.Atoi(slotID) // slotID always came from header.CanonicalKeyslotID, through ids above
 	return volkey.New(masterKey, slot), nil
 }

@@ -112,7 +112,7 @@ func (v *Volume) Unlock(ctx context.Context, pass *enclave.MemoryEnclave) (*Key,
 		return nil, errAt(op, v.path, err)
 	}
 
-	slot, _ := strconv.Atoi(slotID) // slotID always came from canonicalKeyslotID
+	slot, _ := strconv.Atoi(slotID) // slotID always came from header.CanonicalKeyslotID
 	return volkey.New(masterKey, slot), nil
 }
 
@@ -210,7 +210,7 @@ func (v *Volume) Target(ctx context.Context, key *Key) (*Target, error) {
 	f := locked.File()
 	segment := metadata.Segments[segmentID]
 
-	params, err := cryptTableParams(metadata, segmentID, segment)
+	params, err := header.CryptTableParams(metadata, segmentID, segment)
 	if err != nil {
 		return nil, errAt(op, v.path, err)
 	}

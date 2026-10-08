@@ -62,7 +62,7 @@ func sha1Digest(m *header.Metadata) {
 
 // argon2DigestLabel relabels digest 0 as Argon2id, likewise never derived.
 func argon2DigestLabel(m *header.Metadata) {
-	cost, memory, cpus := minArgon2Time, minArgon2MemoryKB, 1
+	cost, memory, cpus := header.MinArgon2Time, minArgon2MemoryKB, 1
 	d := m.Digests["0"]
 	d.Type, d.Hash, d.Iterations = kdfTypeArgon2id, "", 0
 	d.Time, d.Memory, d.CPUs = &cost, &memory, &cpus
@@ -87,7 +87,7 @@ func TestFIPSPolicyClassifiesWhatItRefuses(t *testing.T) {
 			name: "argon2 keyslot",
 			build: func(t *testing.T, device string) {
 				writeFixture(t, device, func(m *header.Metadata) {
-					cost, memory, cpus := minArgon2Time, minArgon2MemoryKB, 1
+					cost, memory, cpus := header.MinArgon2Time, minArgon2MemoryKB, 1
 					kdf := m.Keyslots["0"].KDF
 					kdf.Type, kdf.Hash, kdf.Iterations = kdfTypeArgon2id, "", nil
 					kdf.Time, kdf.Memory, kdf.CPUs = &cost, &memory, &cpus
@@ -120,7 +120,7 @@ func TestFIPSPolicyClassifiesWhatItRefuses(t *testing.T) {
 			name: "argon2 keyslot with a salt that is not base64",
 			build: func(t *testing.T, device string) {
 				writeFixture(t, device, func(m *header.Metadata) {
-					cost, memory, cpus := minArgon2Time, minArgon2MemoryKB, 1
+					cost, memory, cpus := header.MinArgon2Time, minArgon2MemoryKB, 1
 					kdf := m.Keyslots["0"].KDF
 					kdf.Type, kdf.Hash, kdf.Iterations = kdfTypeArgon2id, "", nil
 					kdf.Time, kdf.Memory, kdf.CPUs = &cost, &memory, &cpus
@@ -140,7 +140,7 @@ func TestFIPSPolicyClassifiesWhatItRefuses(t *testing.T) {
 					damaged.Area = &area
 					m.Keyslots["1"] = &damaged
 					m.Digests["0"].Keyslots = append(m.Digests["0"].Keyslots, "1")
-					cost, memory, cpus := minArgon2Time, minArgon2MemoryKB, 1
+					cost, memory, cpus := header.MinArgon2Time, minArgon2MemoryKB, 1
 					kdf := *m.Keyslots["0"].KDF
 					kdf.Type, kdf.Hash, kdf.Iterations = kdfTypeArgon2id, "", nil
 					kdf.Time, kdf.Memory, kdf.CPUs = &cost, &memory, &cpus
@@ -234,14 +234,14 @@ func TestKeyslotRefusedByFIPSIsComputed(t *testing.T) {
 
 	argon2 := func(salt string) *header.Keyslot {
 		ks := *approved
-		cost, memory, cpus := minArgon2Time, minArgon2MemoryKB, 1
-		ks.KDF = &rawKDF{Type: kdfTypeArgon2id, Salt: salt, Time: &cost, Memory: &memory, CPUs: &cpus}
+		cost, memory, cpus := header.MinArgon2Time, minArgon2MemoryKB, 1
+		ks.KDF = &header.KDF{Type: kdfTypeArgon2id, Salt: salt, Time: &cost, Memory: &memory, CPUs: &cpus}
 		return &ks
 	}
-	withDigest := func(mutate func(*rawDigest)) map[string]*rawDigest {
+	withDigest := func(mutate func(*header.Digest)) map[string]*header.Digest {
 		d := *digests["0"]
 		mutate(&d)
-		return map[string]*rawDigest{"0": &d}
+		return map[string]*header.Digest{"0": &d}
 	}
 	badCipher := *approved
 	area := *approved.Area
@@ -253,7 +253,7 @@ func TestKeyslotRefusedByFIPSIsComputed(t *testing.T) {
 	cases := []struct {
 		name    string
 		keyslot *header.Keyslot
-		digests map[string]*rawDigest
+		digests map[string]*header.Digest
 		want    bool
 	}{
 		{"nil keyslot", nil, digests, false},
@@ -261,9 +261,9 @@ func TestKeyslotRefusedByFIPSIsComputed(t *testing.T) {
 		{"approved and well formed: refused later, not by FIPS", approved, digests, false},
 		{"argon2 keyslot", argon2(approved.KDF.Salt), digests, true},
 		{"argon2 keyslot with a malformed salt", argon2("!!! not base64 !!!"), digests, false},
-		{"approved keyslot, sha1 digest", approved, withDigest(func(d *rawDigest) { sha1Digest(&header.Metadata{Digests: map[string]*rawDigest{"0": d}}) }), true},
-		{"approved keyslot, sha1 digest not base64", approved, withDigest(func(d *rawDigest) {
-			sha1Digest(&header.Metadata{Digests: map[string]*rawDigest{"0": d}})
+		{"approved keyslot, sha1 digest", approved, withDigest(func(d *header.Digest) { sha1Digest(&header.Metadata{Digests: map[string]*header.Digest{"0": d}}) }), true},
+		{"approved keyslot, sha1 digest not base64", approved, withDigest(func(d *header.Digest) {
+			sha1Digest(&header.Metadata{Digests: map[string]*header.Digest{"0": d}})
 			d.Digest = "!!! not base64 !!!"
 		}), false},
 		{"approved keyslot with a cipher nothing implements", &badCipher, digests, false},

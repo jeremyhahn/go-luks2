@@ -97,7 +97,7 @@ func padKeyslots(t *testing.T, metadata *header.Metadata, n int) {
 }
 
 // jsonAreaBytes returns the JSON bytes stored after the header copy at offset,
-// truncated at the terminator, exactly as readJSONMetadata would see them.
+// truncated at the terminator, exactly as header.ReadJSONMetadata would see them.
 func jsonAreaBytes(t *testing.T, device string, offset int64, jsonSize int) []byte {
 	t.Helper()
 
@@ -144,7 +144,7 @@ func TestWriteHeaderKeepsTheBackupOutOfThePrimaryArea(t *testing.T) {
 	// the writer used at the time -- nextPowerOf2(len(indented)+1) crossing 8192
 	// is what moved the backup header -- so that measurement stays on
 	// MarshalIndent. Whether the fixture FITS is a question about the bytes the
-	// writer produces TODAY, which is marshalCanonicalJSON.
+	// writer produces TODAY, which is header.MarshalCanonicalJSON.
 	indented, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
 		t.Fatalf("failed to marshal the fixture: %v", err)
@@ -154,7 +154,7 @@ func TestWriteHeaderKeepsTheBackupOutOfThePrimaryArea(t *testing.T) {
 			" (a keyslot costs about %d bytes; raise the keyslot count)", len(indented), keyslotJSONCost)
 	}
 
-	encoded, err := marshalCanonicalJSON(metadata)
+	encoded, err := header.MarshalCanonicalJSON(metadata)
 	if err != nil {
 		t.Fatalf("failed to marshal the fixture: %v", err)
 	}
@@ -255,7 +255,7 @@ func TestWriteHeaderRefusesMetadataThatDoesNotFit(t *testing.T) {
 	}
 	metadata.Tokens["0"] = &token
 
-	encoded, err := marshalCanonicalJSON(metadata)
+	encoded, err := header.MarshalCanonicalJSON(metadata)
 	if err != nil {
 		t.Fatalf("failed to marshal the fixture: %v", err)
 	}
@@ -447,7 +447,7 @@ func deviceHead(t *testing.T, device string, n int) []byte {
 // TestHeaderAreaSizeForWrite pins which area sizes a write will use.
 //
 // The accepted set is the powers of two LUKS2 admits. It matters that this
-// agrees with headerAreaOffset's accepted set on the read side: the secondary
+// agrees with header.HeaderAreaOffset's accepted set on the read side: the secondary
 // offset IS the area size, so a writer that emitted a non-power-of-two would
 // produce a copy at an offset the reader rejects -- read and write disagreeing
 // about the format, which is the failure this branch exists to end.
@@ -471,22 +471,22 @@ func TestHeaderAreaSizeForWrite(t *testing.T) {
 		{"the largest uint64", ^uint64(0), 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := headerAreaSizeForWrite(&header.BinaryHeader{HeaderSize: tc.size})
+			got, err := header.HeaderAreaSizeForWrite(&header.BinaryHeader{HeaderSize: tc.size})
 			switch {
 			case tc.accept && err != nil:
-				t.Fatalf("headerAreaSizeForWrite(%d) = error %v, want %d", tc.size, err, tc.want)
+				t.Fatalf("header.HeaderAreaSizeForWrite(%d) = error %v, want %d", tc.size, err, tc.want)
 			case !tc.accept && err == nil:
-				t.Fatalf("headerAreaSizeForWrite(%d) = %d, want it rejected", tc.size, got)
+				t.Fatalf("header.HeaderAreaSizeForWrite(%d) = %d, want it rejected", tc.size, got)
 			case tc.accept && got != tc.want:
-				t.Fatalf("headerAreaSizeForWrite(%d) = %d, want %d", tc.size, got, tc.want)
+				t.Fatalf("header.HeaderAreaSizeForWrite(%d) = %d, want %d", tc.size, got, tc.want)
 			case !tc.accept && !errors.Is(err, ErrInvalidHeader):
-				t.Fatalf("headerAreaSizeForWrite(%d) = %v, want it to wrap ErrInvalidHeader", tc.size, err)
+				t.Fatalf("header.HeaderAreaSizeForWrite(%d) = %v, want it to wrap ErrInvalidHeader", tc.size, err)
 			}
 
 			// Every accepted area doubles as a secondary offset, so the read
 			// side must accept it there.
 			if tc.accept {
-				if _, err := headerAreaOffset(&header.BinaryHeader{HeaderOffset: uint64(got)}); err != nil {
+				if _, err := header.HeaderAreaOffset(&header.BinaryHeader{HeaderOffset: uint64(got)}); err != nil {
 					t.Errorf("the write side would place the secondary copy at %d, which the read side rejects: %v",
 						got, err)
 				}

@@ -38,7 +38,7 @@ import (
 // rather than quoted for the same reason as kdf.go's u32 comment: gosec finds
 // its directive by literal text, in any comment.)
 //
-// The fix is the segment counterpart of validateKeyslot: ONE validator at the
+// The fix is the segment counterpart of header.ValidateKeyslot: ONE validator at the
 // read boundary that every consumer inherits, rather than a check per call
 // site. These tests drive it through ReadHeader and through the real Unlock
 // path, because a validator nothing calls is the defect it was written to fix.
@@ -169,7 +169,7 @@ func TestReadHeaderRefusesASegmentTheKernelMustNotSee(t *testing.T) {
 		},
 		{
 			name:   "encryption longer than any cipher specification",
-			mutate: func(s *header.Segment) { s.Encryption = strings.Repeat("a", maxSegmentEncryptionLength+1) },
+			mutate: func(s *header.Segment) { s.Encryption = strings.Repeat("a", header.MaxSegmentEncryptionLength+1) },
 			names:  "cipher",
 		},
 	}
@@ -201,7 +201,7 @@ func TestReadHeaderRefusesASegmentTheKernelMustNotSee(t *testing.T) {
 // 256 and 8192 (measured; each accepted value was read back out of the header
 // it wrote). This package's own writer emits only 512 or 4096, so validating
 // the READ path against the writer's range would refuse two containers
-// cryptsetup can create -- exactly the failure keyslotvalidation.go's measured
+// cryptsetup can create -- exactly the failure internal/header/keyslot.go's measured
 // limits exist to avoid.
 func TestReadHeaderAcceptsEverySectorSizeCryptsetupWrites(t *testing.T) {
 	defer parallel(t)()
@@ -232,7 +232,7 @@ func TestReadHeaderAcceptsEverySectorSizeCryptsetupWrites(t *testing.T) {
 // measured -- cryptsetup probes the kernel crypto API for it and demands a real
 // loop device, so it cannot be formatted unprivileged against a file -- and is
 // here from the grammar in cryptsetup(8). It is also the longest spelling the
-// format can express, which is what maxSegmentEncryptionLength is sized
+// format can express, which is what header.MaxSegmentEncryptionLength is sized
 // against.
 func TestReadHeaderAcceptsTheCipherSpellingsCryptsetupWrites(t *testing.T) {
 	defer parallel(t)()
@@ -344,7 +344,7 @@ func TestTheDeviceMapperTableCarriesTheDeclaredSectorSize(t *testing.T) {
 	}
 	segment := metadata.Segments["0"]
 
-	want, accepted := segmentSectorSizes[segment.SectorSize]
+	want, accepted := header.SegmentSectorSizes[segment.SectorSize]
 	if !accepted {
 		t.Fatalf("the formatted container declares sector size %d, which the whitelist does not accept", segment.SectorSize)
 	}

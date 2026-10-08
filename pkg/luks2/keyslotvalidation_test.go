@@ -156,7 +156,7 @@ func TestCraftedKeyslotFieldsAreRefused(t *testing.T) {
 	}{
 		{"key size of zero", func(ks *header.Keyslot) { ks.KeySize = 0 }},
 		{"negative key size", func(ks *header.Keyslot) { ks.KeySize = -64 }},
-		{"key size past the bound", func(ks *header.Keyslot) { ks.KeySize = maxKeyslotKeySize + 1 }},
+		{"key size past the bound", func(ks *header.Keyslot) { ks.KeySize = header.MaxKeyslotKeySize + 1 }},
 		{"zero stripes", func(ks *header.Keyslot) { ks.AF.Stripes = 0 }},
 		{"negative stripes", func(ks *header.Keyslot) { ks.AF.Stripes = -1 }},
 		{"stripes past the spec value", func(ks *header.Keyslot) { ks.AF.Stripes = header.AFStripes + 1 }},
@@ -168,7 +168,7 @@ func TestCraftedKeyslotFieldsAreRefused(t *testing.T) {
 		{"area size that is not a number", func(ks *header.Keyslot) { ks.Area.Size = "lots" }},
 		{"area offset that is not a number", func(ks *header.Keyslot) { ks.Area.Offset = "somewhere" }},
 		{"area size past the bound", func(ks *header.Keyslot) {
-			ks.Area.Size = formatSize(maxKeyslotAreaSize + 1)
+			ks.Area.Size = formatSize(header.MaxKeyslotAreaSize + 1)
 		}},
 		{"overflowing key size and stripe count", func(ks *header.Keyslot) {
 			// math.MaxInt/4, not 1<<62. The property under test is that
@@ -234,7 +234,7 @@ func TestValidKeyslotGeometryIsAccepted(t *testing.T) {
 			keyslot := &header.Keyslot{
 				Type:    "luks2",
 				KeySize: keySize,
-				KDF:     &rawKDF{Type: "pbkdf2", Hash: "sha256", Salt: "c2FsdA=="},
+				KDF:     &header.KDF{Type: "pbkdf2", Hash: "sha256", Salt: "c2FsdA=="},
 				AF:      &header.AntiForensic{Type: "luks1", Stripes: header.AFStripes, Hash: "sha256"},
 				Area: &header.KeyslotArea{
 					Type:       "raw",
@@ -245,7 +245,7 @@ func TestValidKeyslotGeometryIsAccepted(t *testing.T) {
 				},
 			}
 
-			if err := validateKeyslot("0", keyslot); err != nil {
+			if err := header.ValidateKeyslot("0", keyslot); err != nil {
 				t.Fatalf("a keyslot cryptsetup would write was refused: %v", err)
 			}
 		})
@@ -271,14 +271,14 @@ func TestKeyslotValidationLeavesOtherKeyslotTypesAlone(t *testing.T) {
 		},
 	}
 
-	if err := validateKeyslot("1", reencrypt); err != nil {
+	if err := header.ValidateKeyslot("1", reencrypt); err != nil {
 		t.Fatalf("a reencrypt keyslot was refused: %v", err)
 	}
 
 	// The generic resource bound still applies to it, though: an area size is
 	// an area size whatever the keyslot type.
-	reencrypt.Area.Size = formatSize(maxKeyslotAreaSize + 1)
-	if err := validateKeyslot("1", reencrypt); !errors.Is(err, ErrKeyslotNotFound) {
+	reencrypt.Area.Size = formatSize(header.MaxKeyslotAreaSize + 1)
+	if err := header.ValidateKeyslot("1", reencrypt); !errors.Is(err, ErrKeyslotNotFound) {
 		t.Fatalf("an absurd area size was accepted because the keyslot type is not luks2: %v", err)
 	}
 }

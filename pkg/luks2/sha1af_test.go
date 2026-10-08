@@ -283,8 +283,8 @@ func TestSHA1AFKeyslotFIPSClassification(t *testing.T) {
 		return &c
 	}
 	argon2 := *approved
-	cost, memory, cpus := minArgon2Time, minArgon2MemoryKB, 1
-	argon2.KDF = &rawKDF{Type: kdfTypeArgon2id, Salt: approved.KDF.Salt, Time: &cost, Memory: &memory, CPUs: &cpus}
+	cost, memory, cpus := header.MinArgon2Time, minArgon2MemoryKB, 1
+	argon2.KDF = &header.KDF{Type: kdfTypeArgon2id, Salt: approved.KDF.Salt, Time: &cost, Memory: &memory, CPUs: &cpus}
 
 	if refusal, ok := keyslotFIPSRefusal("0", withAF(approved, "sha1")); ok || refusal.Reason != "anti-forensic hash sha1" ||
 		refusal.Type != kdfTypePBKDF2 {
