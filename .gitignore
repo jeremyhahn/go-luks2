@@ -34,8 +34,11 @@ go.work
 # this repository is mirrored publicly with a tree byte-identical to the release
 # tag, so whatever the tooling drops in the working directory gets published
 # unless something stops it. This is that something. A directory pattern, not a
-# file list: the contents are not ours to enumerate.
-.serena/
+# file list: the contents are not ours to enumerate. The one exception is
+# project.yml, the committed language configuration (claude-agents#46); it holds
+# no host paths.
+.serena/*
+!.serena/project.yml
 
 # Test files
 *.img

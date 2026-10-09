@@ -1,6 +1,6 @@
 # go-luks2 target architecture and public API
 
-> **Status: IMPLEMENTED in v1.0.0-rc.1** · Baseline: `g50/main` 7d40045 (0.4.0-alpha) plus `fix/g-compat` (assumed merged first) · Date: 2026-10-05
+> **Status: IMPLEMENTED in v1.0.0-rc.1** · Baseline: `g50/main` 7d40045 (0.4.0-alpha) plus `fix/g-compat` (assumed merged first) · Date: 2026-10-05 · Last verified: 2026-10-09 against main (25a0aea)
 > Breaking by intent (owner direction: no backward compatibility). Released: `1.0.0-rc.1`, `BREAKING:` heading (release-versioning §5). DECISIONS.md is the record of what each step actually landed, including the corrections made after the plan (H13b and H13d finished the token free functions, `EnrollKeyProvider` and the seam-variable cleanup, and H13e, #284, removed the last transitional forwards); this document is the plan it was built from and is not updated to match drift.
 
 Inventory this design is based on, measured from the tree:

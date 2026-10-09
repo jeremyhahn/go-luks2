@@ -841,13 +841,48 @@ func TestProtoIsAnHonestNoop(t *testing.T) {
 
 // TestVulnIsAnAliasForGovulncheck is the scaffold §4 contract's name for it.
 func TestVulnIsAnAliasForGovulncheck(t *testing.T) {
-	stdout, stderr, err := runMakeErr(t, environ(nil, nil), "vuln")
-	if err != nil {
-		t.Fatalf("make vuln failed: %v\n%s%s", err, stdout, stderr)
+	// A stub govulncheck stands in for the real one: the real tool reads the
+	// live vulnerability database, so a newly published advisory would turn
+	// this test red. Security Scan is the gate that runs the real tool.
+	stubbed := func(t *testing.T, exit int) (stdout, stderr, args string, err error) {
+		t.Helper()
+		dir := t.TempDir()
+		argsFile := filepath.Join(dir, "args")
+		script := fmt.Sprintf("#!/bin/sh\necho \"$@\" > %q\nexit %d\n", argsFile, exit)
+		if werr := os.WriteFile(filepath.Join(dir, "govulncheck"), []byte(script), 0o700); werr != nil { // #nosec G306 -- test stub must be executable
+			t.Fatalf("write stub: %v", werr)
+		}
+		env := environ(nil, map[string]string{"PATH": dir + string(os.PathListSeparator) + os.Getenv("PATH")})
+		stdout, stderr, err = runMakeErr(t, env, "vuln")
+		got, _ := os.ReadFile(argsFile) // #nosec G304 -- path built from t.TempDir
+		return stdout, stderr, strings.TrimSpace(string(got)), err
 	}
-	if !strings.Contains(stdout, "govulncheck") {
-		t.Errorf("vuln does not run through govulncheck:\n%s", stdout)
-	}
+
+	t.Run("passes when govulncheck exits 0", func(t *testing.T) {
+		stdout, stderr, args, err := stubbed(t, 0)
+		if err != nil {
+			t.Fatalf("make vuln failed: %v\n%s%s", err, stdout, stderr)
+		}
+		if args != "./..." {
+			t.Errorf("govulncheck args = %q, want %q", args, "./...")
+		}
+		if !strings.Contains(stdout, "govulncheck passed") {
+			t.Errorf("vuln did not print the passed line:\n%s", stdout)
+		}
+	})
+
+	t.Run("fails closed when govulncheck exits 1", func(t *testing.T) {
+		stdout, stderr, args, err := stubbed(t, 1)
+		if err == nil {
+			t.Fatalf("make vuln passed although govulncheck exited 1:\n%s%s", stdout, stderr)
+		}
+		if args != "./..." {
+			t.Errorf("govulncheck args = %q, want %q", args, "./...")
+		}
+		if strings.Contains(stdout, "govulncheck passed") {
+			t.Errorf("vuln printed the passed line on failure:\n%s", stdout)
+		}
+	})
 }
 
 // TestCoverageReportRequiresAProfile is the failure path: no gated profile,

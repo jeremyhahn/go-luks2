@@ -1,5 +1,8 @@
 # API redesign: decisions log (phase 1, H0-H4)
 
+> **Status: HISTORICAL** · Last verified: 2026-10-09 against main (25a0aea)
+> The record of what each redesign step landed; entries are not rewritten to match later drift.
+
 Branch `refactor/api-redesign`, from g50/main 6d9332f (v0.5.0-alpha).
 
 ## H0
