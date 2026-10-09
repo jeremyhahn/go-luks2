@@ -11,7 +11,7 @@ Key material stays in go-enclave locked memory for its whole lifetime.
 
 ## Current milestone
 
-[Release candidate (M7)](../../milestone/7): target kind RC, v1.0.0-rc.3 tagged.
+[Release candidate (M7)](../../milestone/7): target kind RC, v1.0.0-rc.4 tagged.
 Projected date: not set.
 
 ## Now

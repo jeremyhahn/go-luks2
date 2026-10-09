@@ -40,7 +40,7 @@ or `-alpha` suffix is a prerelease (lower precedence than the version it
 precedes) and promises nothing outside this project: `-rc.N` says only "this
 is what `1.0.0` will be unless a defect is found".
 
-go-luks2 is at `1.0.0-rc.3`, the release candidate for `1.0.0`. From `1.0.0`:
+go-luks2 is at `1.0.0-rc.4`, the release candidate for `1.0.0`. From `1.0.0`:
 
 | Bump | Means |
 |---|---|

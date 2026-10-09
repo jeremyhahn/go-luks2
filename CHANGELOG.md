@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.4] - 2026-10-09
+
+### Changed — BREAKING: `make release` cuts only final releases
+
+- **One release target per kind (#291+).** `make release-alpha
+  VERSION=vX.Y.Z-alpha` cuts an alpha, `make release-candidate
+  VERSION=vX.Y.Z-rc.N` cuts a release candidate and `make release
+  VERSION=vX.Y.Z` cuts a final release, and each refuses the other two kinds
+  before it writes anything, naming the target that cuts the kind. Before this
+  change `make release` accepted all three and `release-alpha` was an alias of
+  it, so `make release VERSION=vX.Y.Z-rc.N` (how rc.3 was cut) and
+  `make release-alpha VERSION=vX.Y.Z` now fail: use `make release-candidate`
+  and `make release`. `VERSION` is stated explicitly for the candidate and the final
+  release; `release-alpha` derives it when omitted (next entry). The guards are one recipe shared by the three targets, so they cannot drift.
+
+### Added
+
+- **`ROADMAP.md` states the project's mission, current milestone and queue (#295).** Documentation
+  only; no behaviour changes.
+
+### Changed
+
+- **`make lint` runs actionlint over `.github/workflows/`, and the trivy targets
+  fail when trivy is missing (#296).** Workflow syntax, expressions and runner
+  labels are now checked locally before CI parses them; `.github/actionlint.yaml`
+  is read when it exists. A missing actionlint fails `make lint` with the
+  `go install` line for the pinned version. `trivy-fs`, `trivy-sarif` and
+  `trivy-misconfig` no longer skip or fail obscurely without trivy: they exit
+  non-zero and point at `make trivy-install`, so `make security` can no longer
+  pass on a scan that never ran. Scanners, severities and exit codes are
+  unchanged when trivy is present.
+
+### Security
+
+- **The toolchain is Go 1.27.2 (#297).** It carries the standard-library fixes
+  for advisories GO-2026-6603 through GO-2026-6617, so `govulncheck` reports
+  nothing against this module. Consumers building with an older Go release
+  should move to 1.27.2 to get the same fixes in their binaries.
+
+### Changed
+
+- **`make release-alpha` derives the next alpha when `VERSION` is omitted.** It
+  takes the highest `vX.Y.Z-alpha` tag, in the checkout and on the release remote,
+  adds 1 to PATCH, prints the version and then runs every existing guard on it
+  (main only, the remote, the duplicate tag, a clean tree, the changelog checks,
+  the `VERSION` commit, the signed tag and the atomic push). It refuses, and prints
+  the explicit form, when no alpha tag exists, when the remote cannot be listed, or
+  when an existing tag of any kind (an rc or a final release outranks the alpha of
+  the same `X.Y.Z`) is at or above the result. `make release-alpha
+  VERSION=vX.Y.Z-alpha` stays valid for a hand-picked MINOR bump;
+  `release-candidate` and `release` still require `VERSION`. This follows the
+  company release-versioning standard.
+
 ## [1.0.0-rc.3] - 2026-10-08
 
 ### Added
