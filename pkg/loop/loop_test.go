@@ -11,11 +11,15 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/jeremyhahn/go-luks2/internal/clock"
+	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
 // The waiting logic is exercised here without a loop device; the
@@ -176,5 +180,130 @@ func TestAttachRefusesAnAlreadyCancelledContext(t *testing.T) {
 
 	if _, err := attach(ctx, "/nonexistent/should-not-be-opened.img", defaultSys()); !errors.Is(err, context.Canceled) {
 		t.Errorf("attach() with a canceled context = %v, want context.Canceled", err)
+	}
+}
+
+// attachSys is a sys whose loop driver is a pair of doubles: getFree hands
+// out minors 0, 1, 2… and creates each node in a temporary /dev, and setFD
+// answers from setFDErrs, one error per call, succeeding once they run out.
+// It records how many LOOP_SET_FD calls were made.
+func attachSys(t *testing.T, setFDErrs ...error) (sys, *int) {
+	t.Helper()
+	dev := t.TempDir()
+	control := filepath.Join(dev, "loop-control")
+	if err := os.WriteFile(control, nil, 0600); err != nil {
+		t.Fatalf("could not create the stand-in loop-control: %v", err)
+	}
+
+	s := defaultSys()
+	s.clk = clock.NewFake(t)
+	s.devDir = dev
+	s.openFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
+		if name == "/dev/loop-control" {
+			name = control
+		}
+		return os.OpenFile(name, flag, perm) // #nosec G304 -- test paths under t.TempDir
+	}
+	var minor uintptr
+	s.getFree = func(*os.File) (uintptr, error) {
+		n := minor
+		minor++
+		node := filepath.Join(dev, "loop"+strconv.FormatUint(uint64(n), 10))
+		if err := os.WriteFile(node, nil, 0600); err != nil {
+			return 0, err
+		}
+		return n, nil
+	}
+	calls := new(int)
+	s.setFD = func(*os.File, *os.File) error {
+		*calls++
+		if *calls <= len(setFDErrs) {
+			return setFDErrs[*calls-1]
+		}
+		return nil
+	}
+	return s, calls
+}
+
+// backingImage is a file attach can open read-write.
+func backingImage(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "disk.img")
+	if err := os.WriteFile(path, make([]byte, 4096), 0600); err != nil {
+		t.Fatalf("could not create the backing image: %v", err)
+	}
+	return path
+}
+
+// TestAttachRetriesALoopDeviceTakenByAnotherCaller covers the race
+// LOOP_CTL_GET_FREE leaves open: it names a free device without reserving
+// it, so a concurrent caller can bind it first and LOOP_SET_FD fails with
+// EBUSY. Attach must ask for another device rather than fail. A real attach
+// meets this only when two attaches collide, so the integration suite
+// covers it on some runs and not others; this test covers it on every one.
+func TestAttachRetriesALoopDeviceTakenByAnotherCaller(t *testing.T) {
+	s, calls := attachSys(t, unix.EBUSY)
+	file := backingImage(t)
+
+	d, err := attach(context.Background(), file, s)
+	if err != nil {
+		t.Fatalf("attach() error = %v, want the retry to bind the next free device", err)
+	}
+	if want := filepath.Join(s.devDir, "loop1"); d.Path() != want {
+		t.Errorf("attach() bound %s, want %s: the busy loop0 must be passed over", d.Path(), want)
+	}
+	if d.BackingFile() != file {
+		t.Errorf("BackingFile() = %s, want %s", d.BackingFile(), file)
+	}
+	if *calls != 2 {
+		t.Errorf("LOOP_SET_FD sent %d times, want 2", *calls)
+	}
+}
+
+// TestAttachGivesUpAfterItsAttempts bounds that retry: a device that is
+// busy on every attempt yields the EBUSY, after exactly attachAttempts
+// tries.
+func TestAttachGivesUpAfterItsAttempts(t *testing.T) {
+	busy := make([]error, loopAttachAttempts)
+	for i := range busy {
+		busy[i] = unix.EBUSY
+	}
+	s, calls := attachSys(t, busy...)
+
+	_, err := attach(context.Background(), backingImage(t), s)
+	if !errors.Is(err, unix.EBUSY) {
+		t.Fatalf("attach() error = %v, want EBUSY once every attempt is busy", err)
+	}
+	if *calls != loopAttachAttempts {
+		t.Errorf("LOOP_SET_FD sent %d times, want %d", *calls, loopAttachAttempts)
+	}
+}
+
+// TestAttachDoesNotRetryAnotherFailure keeps the retry to the race it is
+// for: any other LOOP_SET_FD failure is returned at once.
+func TestAttachDoesNotRetryAnotherFailure(t *testing.T) {
+	s, calls := attachSys(t, unix.EINVAL)
+
+	_, err := attach(context.Background(), backingImage(t), s)
+	if !errors.Is(err, unix.EINVAL) {
+		t.Fatalf("attach() error = %v, want EINVAL", err)
+	}
+	if *calls != 1 {
+		t.Errorf("LOOP_SET_FD sent %d times, want 1", *calls)
+	}
+}
+
+// TestAttachReportsAFailedGetFree types a LOOP_CTL_GET_FREE failure, the
+// answer of a host whose loop devices are exhausted.
+func TestAttachReportsAFailedGetFree(t *testing.T) {
+	s, calls := attachSys(t)
+	s.getFree = func(*os.File) (uintptr, error) { return 0, unix.ENOSPC }
+
+	_, err := attach(context.Background(), backingImage(t), s)
+	if !errors.Is(err, errs.ErrIO) || !strings.Contains(err.Error(), "LOOP_CTL_GET_FREE") {
+		t.Fatalf("attach() error = %v, want an ErrIO naming LOOP_CTL_GET_FREE", err)
+	}
+	if *calls != 0 {
+		t.Errorf("LOOP_SET_FD sent %d times without a device, want 0", *calls)
 	}
 }

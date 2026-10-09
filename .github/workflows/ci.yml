@@ -85,7 +85,7 @@ env:
   # longer applies here. Never `stable`: a floating version flipped to 1.27
   # mid-campaign and broke every repo riding it — that lesson is about the
   # float, not the number.
-  GO_VERSION: "1.27.1"
+  GO_VERSION: "1.27.2"
 
   # ANALYSIS TOOL PINS (#21, #44). These are the versions BAKED into the
   # self-hosted runner image; the steps below assert the binary they got

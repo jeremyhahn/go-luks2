@@ -95,6 +95,14 @@ type sys struct {
 	// clearFD sends LOOP_CLR_FD on the loop device open as f.
 	clearFD func(f *os.File) error
 
+	// getFree sends LOOP_CTL_GET_FREE on loop-control and returns the minor
+	// it names.
+	getFree func(loopControl *os.File) (uintptr, error)
+
+	// setFD sends LOOP_SET_FD, binding backing to the loop device open as
+	// loopFile.
+	setFD func(loopFile, backing *os.File) error
+
 	attachAttempts int
 	nodeTimeout    time.Duration
 	nodePoll       time.Duration
@@ -114,6 +122,8 @@ func defaultSys() sys {
 		loopBackingIdentity: loopBackingIdentityIoctl,
 		fdBackingIdentity:   fdBackingIdentityIoctl,
 		clearFD:             clearFDIoctl,
+		getFree:             getFreeIoctl,
+		setFD:               setFDIoctl,
 		attachAttempts:      loopAttachAttempts,
 		nodeTimeout:         defaultNodeTimeout,
 		nodePoll:            defaultNodePoll,
@@ -219,9 +229,9 @@ func attach(ctx context.Context, file string, s sys) (*Device, error) {
 // names.
 func attachFreeLoopDevice(ctx context.Context, loopControl, backingFile *os.File, s sys) (string, error) {
 	// Get a free loop device number.
-	devNum, _, errno := unix.Syscall(unix.SYS_IOCTL, loopControl.Fd(), unix.LOOP_CTL_GET_FREE, 0)
-	if errno != 0 {
-		return "", &errs.Error{Kind: errs.ErrIO, Detail: fmt.Sprintf("LOOP_CTL_GET_FREE failed: %v", errno)}
+	devNum, err := s.getFree(loopControl)
+	if err != nil {
+		return "", &errs.Error{Kind: errs.ErrIO, Detail: fmt.Sprintf("LOOP_CTL_GET_FREE failed: %v", err)}
 	}
 
 	loopDevice := fmt.Sprintf("%s/loop%d", s.devDir, devNum)
@@ -252,12 +262,28 @@ func attachFreeLoopDevice(ctx context.Context, loopControl, backingFile *os.File
 	defer func() { _ = loopFile.Close() }()
 
 	// Attach the backing file to the loop device.
-	_, _, errno = unix.Syscall(unix.SYS_IOCTL, loopFile.Fd(), unix.LOOP_SET_FD, backingFile.Fd())
-	if errno != 0 {
-		return "", &errs.Error{Kind: errs.ErrIO, Detail: "LOOP_SET_FD failed", Err: errno}
+	if err := s.setFD(loopFile, backingFile); err != nil {
+		return "", &errs.Error{Kind: errs.ErrIO, Detail: "LOOP_SET_FD failed", Err: err}
 	}
 
 	return loopDevice, nil
+}
+
+// getFreeIoctl is the production [sys.getFree].
+func getFreeIoctl(loopControl *os.File) (uintptr, error) {
+	devNum, _, errno := unix.Syscall(unix.SYS_IOCTL, loopControl.Fd(), unix.LOOP_CTL_GET_FREE, 0)
+	if errno != 0 {
+		return 0, errno
+	}
+	return devNum, nil
+}
+
+// setFDIoctl is the production [sys.setFD].
+func setFDIoctl(loopFile, backing *os.File) error {
+	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, loopFile.Fd(), unix.LOOP_SET_FD, backing.Fd()); errno != 0 {
+		return errno
+	}
+	return nil
 }
 
 // waitForLoopNode waits for the device node of a freshly allocated loop
