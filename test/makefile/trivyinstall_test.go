@@ -220,7 +220,25 @@ func TestToolsRequiredTurnsAMissingScannerIntoAFailure(t *testing.T) {
 	scanners := []string{"gosec", "govulncheck", "trivy"}
 	env := environ([]string{"GOBIN"}, map[string]string{"PATH": systemPathWithout(t, scanners...)})
 	emptyBin := t.TempDir()
-	for _, target := range []string{"gosec", "govulncheck", "trivy-fs"} {
+	// trivy is not part of this contract: its targets fail closed with or
+	// without TOOLS_REQUIRED (#296), asserted in the trivy-fs case below.
+	t.Run("trivy-fs", func(t *testing.T) {
+		args := []string{"--no-print-directory", "trivy-fs", "TOOLS_DIR=" + t.TempDir(), "GOBIN=" + emptyBin}
+		for _, extra := range [][]string{nil, {"TOOLS_REQUIRED=1"}} {
+			out, errOut, err := runMakeErr(t, env, append(append([]string{}, args...), extra...)...)
+			if err == nil {
+				t.Fatalf("make trivy-fs %v passed with trivy absent\n%s%s", extra, out, errOut)
+			}
+			msg := out + errOut
+			if !strings.Contains(msg, "not installed") || !strings.Contains(msg, "make trivy-install") {
+				t.Errorf("the failure does not say why or how to install (%v):\n%s", extra, msg)
+			}
+			if strings.Contains(msg, "skipping") {
+				t.Errorf("trivy-fs %v skipped instead of failing:\n%s", extra, msg)
+			}
+		}
+	})
+	for _, target := range []string{"gosec", "govulncheck"} {
 		t.Run(target, func(t *testing.T) {
 			args := []string{"--no-print-directory", target, "TOOLS_DIR=" + t.TempDir(), "GOBIN=" + emptyBin}
 			out, errOut, err := runMakeErr(t, env, append(args, "TOOLS_REQUIRED=1")...)

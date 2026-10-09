@@ -871,7 +871,17 @@ vet: ## Run go vet, including the integration build tag
 	@$(GO) vet -tags=integration ./...
 	@echo "$(COLOR_GREEN)✓ Vet passed$(COLOR_RESET)"
 
-lint: ## Run golangci-lint (if installed)
+# actionlint validates workflow syntax, expressions, shell steps and runner
+# labels before CI parses them (devops.md, the `make lint` row). It is
+# required, not skipped when absent: a lint that passes without running is the
+# vacuous gate the testing convention forbids. Self-hosted runner labels go in
+# .github/actionlint.yaml, read when the file exists; none of the workflows
+# uses one today. A finding is fixed in the workflow, never silenced here.
+ACTIONLINT_VERSION ?= v1.7.12
+ACTIONLINT_CONFIG   = .github/actionlint.yaml
+
+lint: export AL_CONFIG := $(ACTIONLINT_CONFIG)
+lint: ## Run golangci-lint (if installed) and actionlint over .github/workflows
 	@echo "$(COLOR_BOLD)Running golangci-lint...$(COLOR_RESET)"
 	@LINTER=$$(command -v golangci-lint 2>/dev/null || echo "$(GOBIN)/golangci-lint"); \
 	if [ -x "$$LINTER" ]; then \
@@ -881,6 +891,22 @@ lint: ## Run golangci-lint (if installed)
 		echo "$(COLOR_YELLOW)⚠ golangci-lint not installed, skipping...$(COLOR_RESET)"; \
 		echo "  Install: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)"; \
 	fi
+	@echo "$(COLOR_BOLD)Running actionlint...$(COLOR_RESET)"
+	@AL=$$(command -v actionlint 2>/dev/null || echo "$(GOBIN)/actionlint"); \
+	if [ ! -x "$$AL" ]; then \
+		echo "$(COLOR_RED)✗ actionlint is not installed; the workflows were not checked$(COLOR_RESET)"; \
+		echo "  Install: go install github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)"; \
+		exit 1; \
+	fi; \
+	set -- .github/workflows/*.yml .github/workflows/*.yaml; \
+	files=; for f in "$$@"; do [ -f "$$f" ] && files=1; done; \
+	[ -n "$$files" ] || { echo "$(COLOR_RED)✗ no workflow files under .github/workflows$(COLOR_RESET)"; exit 1; }; \
+	if [ -f "$$AL_CONFIG" ]; then \
+		"$$AL" -config-file "$$AL_CONFIG" || exit 1; \
+	else \
+		"$$AL" || exit 1; \
+	fi; \
+	echo "$(COLOR_GREEN)✓ actionlint passed$(COLOR_RESET)"
 
 # ---- the mandatory security-analysis suite ----
 #
@@ -897,8 +923,11 @@ lint: ## Run golangci-lint (if installed)
 # justified; a line annotation cannot.
 #
 # The tools are not installed by these targets: a make target must not mutate
-# the developer's machine. A missing tool prints how to get it and the target
-# skips -- unless TOOLS_REQUIRED=1, which turns every skip into a failure.
+# the developer's machine. A missing gosec or govulncheck prints how to get it
+# and the target skips -- unless TOOLS_REQUIRED=1, which turns every skip into
+# a failure. A missing trivy always fails, with the same hint (#296): trivy-fs
+# is the one scan here CI's per-push gate does not run, so a local skip would
+# be the only signal and it would read as a pass.
 # Where each tool gates (#247):
 #
 #   gosec, govulncheck, go mod verify   CI's Security Scan job, every push and
@@ -1043,32 +1072,37 @@ trivy-install: ## Install the pinned trivy into build/tools, verified by SHA-256
 	echo "$(COLOR_GREEN)✓ trivy $$TI_VERSION installed: $$TI_DEST$(COLOR_RESET)"
 
 # The pinned binary from trivy-install when it is there, else a trivy on PATH.
+# With neither, every trivy target FAILS with the install hint: a scan that
+# skips is a gate that cannot fail, and `make security` passing without trivy
+# would claim a scan that never ran (#296). TOOLS_REQUIRED does not soften it.
+TRIVY_RESOLVE = TRIVY=$$TI_DEST; [ -x "$$TRIVY" ] || TRIVY=$$(command -v trivy 2>/dev/null || true); \
+	if [ -z "$$TRIVY" ]; then \
+		echo "$(COLOR_RED)✗ trivy is not installed; nothing was scanned$(COLOR_RESET)"; \
+		echo "  Install: make trivy-install   (pinned $(TRIVY_VERSION), SHA-256 verified)"; \
+		exit 1; \
+	fi
+
 # build/ is skipped: it holds the pinned trivy itself and the built CLI, and
 # trivy reads the dependencies compiled into every Go binary it finds -- so it
 # would report trivy's own dependencies as this module's.
 trivy-fs: export TI_DEST := $(TRIVY_BIN)
 trivy-fs: ## Scan the working tree with trivy (dependency CVEs and leaked secrets)
 	@echo "$(COLOR_BOLD)Running trivy filesystem scan...$(COLOR_RESET)"
-	@TRIVY=$$TI_DEST; [ -x "$$TRIVY" ] || TRIVY=$$(command -v trivy 2>/dev/null || true); \
-	if [ -n "$$TRIVY" ]; then \
-		"$$TRIVY" fs --scanners vuln,secret --severity CRITICAL,HIGH --exit-code 1 --skip-dirs build . || exit 1; \
-		echo "$(COLOR_GREEN)✓ Trivy scan passed$(COLOR_RESET)"; \
-	else \
-		if [ "$$TOOLS_REQUIRED" = 1 ]; then echo "$(COLOR_RED)✗ trivy is not installed and TOOLS_REQUIRED=1 (make trivy-install)$(COLOR_RESET)"; exit 1; fi; \
-		echo "$(COLOR_YELLOW)⚠ trivy not installed, skipping filesystem scan$(COLOR_RESET)"; \
-		echo "  Install: make trivy-install   (pinned $(TRIVY_VERSION), SHA-256 verified)"; \
-		echo "  This scan is NOT part of CI's per-push gate: it gates the nightly workflow and every release."; \
-	fi
+	@$(TRIVY_RESOLVE); \
+	"$$TRIVY" fs --scanners vuln,secret --severity CRITICAL,HIGH --exit-code 1 --skip-dirs build . || exit 1; \
+	echo "$(COLOR_GREEN)✓ Trivy scan passed$(COLOR_RESET)"
 
 # The same scan as SARIF, for github.com's code-scanning upload (nightly only).
 trivy-sarif: export TI_DEST := $(TRIVY_BIN)
 trivy-sarif:
-	@"$$TI_DEST" fs --scanners vuln,secret --exit-code 0 --format sarif --output trivy-results.sarif --skip-dirs build .
+	@$(TRIVY_RESOLVE); \
+	"$$TRIVY" fs --scanners vuln,secret --exit-code 0 --format sarif --output trivy-results.sarif --skip-dirs build .
 
-# Misconfiguration scanning, ADVISORY: it reports and never fails.
+# Misconfiguration scanning, ADVISORY: it reports and never fails on a finding.
 trivy-misconfig: export TI_DEST := $(TRIVY_BIN)
 trivy-misconfig:
-	@"$$TI_DEST" fs --scanners misconfig --exit-code 0 --format table --skip-dirs build .
+	@$(TRIVY_RESOLVE); \
+	"$$TRIVY" fs --scanners misconfig --exit-code 0 --format table --skip-dirs build .
 
 security: gosec govulncheck verify trivy-fs ## Run the full §8 security suite (gosec, govulncheck, go mod verify, trivy fs)
 	@echo "$(COLOR_GREEN)✓ Security suite complete$(COLOR_RESET)"
