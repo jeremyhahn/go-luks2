@@ -8,6 +8,7 @@ package luks2
 
 import (
 	"context"
+	"crypto/fips140"
 	"errors"
 	"strings"
 	"testing"
@@ -51,6 +52,11 @@ func argon2VolumeImage(t *testing.T, name string) string {
 }
 
 func TestVolumeMigrateToFIPSImportsAnArgon2Volume(t *testing.T) {
+	if fips140.Enabled() {
+		assertMigrationRefusedUnderFIPS(t)
+		return
+	}
+
 	path := argon2VolumeImage(t, "migratefips.img")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -89,6 +95,11 @@ func TestVolumeMigrateToFIPSImportsAnArgon2Volume(t *testing.T) {
 }
 
 func TestVolumeMigrateToFIPSKeepsNonApprovedWhenAsked(t *testing.T) {
+	if fips140.Enabled() {
+		assertMigrationRefusedUnderFIPS(t)
+		return
+	}
+
 	path := argon2VolumeImage(t, "migratefipskeep.img")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -116,6 +127,11 @@ func TestVolumeMigrateToFIPSKeepsNonApprovedWhenAsked(t *testing.T) {
 }
 
 func TestVolumeMigrateToFIPSRefusesUnderFIPSMode(t *testing.T) {
+	if fips140.Enabled() {
+		assertMigrationRefusedUnderFIPS(t)
+		return
+	}
+
 	path := argon2VolumeImage(t, "migratefipsunderfips.img")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -140,6 +156,11 @@ func TestVolumeMigrateToFIPSRefusesUnderFIPSMode(t *testing.T) {
 // state, for a refusal and for a stage that failed on a cause from below.
 // The classification survives the shorter text.
 func TestVolumeMigrateToFIPSErrorSaysEachThingOnce(t *testing.T) {
+	if fips140.Enabled() {
+		assertMigrationRefusedUnderFIPS(t)
+		return
+	}
+
 	path := argon2VolumeImage(t, "migratefipsmessage.img")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -198,6 +219,11 @@ func TestVolumeMigrateToFIPSErrorSaysEachThingOnce(t *testing.T) {
 // with the cancellation reachable through errors.Is and the stage through
 // *FIPSMigrationError. The context kind must not win over the migration's.
 func TestVolumeMigrateToFIPSCanceledInAStageIsAMigrationFailure(t *testing.T) {
+	if fips140.Enabled() {
+		assertMigrationRefusedUnderFIPS(t)
+		return
+	}
+
 	path := argon2VolumeImage(t, "migratefipscanceled.img")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -287,6 +313,11 @@ func TestVolumeDerivationFollowsTheVolumeFIPSMode(t *testing.T) {
 }
 
 func TestVolumeMigrateToFIPSOnAReadOnlyVolumeFailsWithErrReadOnly(t *testing.T) {
+	if fips140.Enabled() {
+		assertMigrationRefusedUnderFIPS(t)
+		return
+	}
+
 	path := argon2VolumeImage(t, "migratefipsreadonly.img")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()), WithReadOnly())

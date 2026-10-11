@@ -9,6 +9,7 @@ package luks2
 import (
 	"bytes"
 	"context"
+	"crypto/fips140"
 	"errors"
 	"testing"
 
@@ -19,9 +20,22 @@ import (
 
 // argon2TestKDF is the floor DECISIONS.md asks keyslot tests to use:
 // m=64MiB t=1 p=1, fast enough for a unit test and still exercising the
-// Argon2 path rather than PBKDF2's.
+// Argon2 path rather than PBKDF2's. A FIPS process refuses Argon2, so there
+// it is the cheap PBKDF2 the migration tests use; wantKDFType names what the
+// keyslot comes out with.
 func argon2TestKDF() KDFParams {
+	if fips140.Enabled() {
+		return cheapMigrationParams()
+	}
 	return KDFParams{Type: KDFArgon2id, Time: 1, MemoryKiB: 64 * 1024, Parallel: 1}
+}
+
+// wantKDFType is the KDF type a keyslot written with argon2TestKDF carries.
+func wantKDFType() KDFType {
+	if fips140.Enabled() {
+		return KDFPBKDF2
+	}
+	return KDFArgon2id
 }
 
 func TestNewRecoveryKeyDefaultsToDashedAt32Bytes(t *testing.T) {
@@ -207,8 +221,8 @@ func TestVolumeAddRecoveryKeyEnrollsAWorkingKeyslot(t *testing.T) {
 	if enrollment.Keyslot.Type != "luks2" {
 		t.Errorf("header.Keyslot.Type = %q, want %q", enrollment.Keyslot.Type, "luks2")
 	}
-	if enrollment.Keyslot.KDF.Type != KDFArgon2id {
-		t.Errorf("header.Keyslot.KDF.Type = %v, want KDFArgon2id", enrollment.Keyslot.KDF.Type)
+	if got := enrollment.Keyslot.KDF.Type; got != wantKDFType() {
+		t.Errorf("header.Keyslot.KDF.Type = %v, want %v", got, wantKDFType())
 	}
 	if enrollment.Keyslot.Priority != PriorityNormal {
 		t.Errorf("header.Keyslot.Priority = %v, want PriorityNormal (unset KeyslotParams.Priority)", enrollment.Keyslot.Priority)

@@ -838,7 +838,7 @@ func TestKDFTypeConstants(t *testing.T) {
 
 func TestKDFParamsValidateAcceptsEveryKnownType(t *testing.T) {
 	for _, typ := range []KDFType{"", KDFPBKDF2, KDFArgon2id, KDFArgon2i} {
-		if err := (KDFParams{Type: typ}).Validate(); err != nil {
+		if err := (KDFParams{Type: typ}).validateWith(forceNonFIPSPolicy(t)); err != nil {
 			t.Errorf("Validate() for Type %q = %v, want nil", typ, err)
 		}
 	}

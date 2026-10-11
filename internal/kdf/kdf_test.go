@@ -33,7 +33,7 @@ func mustDestroy(t *testing.T, e interface{ Destroy() error }) {
 
 func TestDerivePlainPBKDF2(t *testing.T) {
 	iterations := 1000
-	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: b64("salt"), Iterations: &iterations}
+	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: b64("saltsaltsaltsalt"), Iterations: &iterations}
 
 	key1, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), p, 32)
 	if err != nil {
@@ -83,7 +83,7 @@ func TestDerivePlainArgon2(t *testing.T) {
 
 func TestDerivePlainRefusesAZeroOrNegativeKeySize(t *testing.T) {
 	iterations := 1000
-	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: b64("salt"), Iterations: &iterations}
+	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: b64("saltsaltsaltsalt"), Iterations: &iterations}
 	for _, keySize := range []int{0, -1} {
 		if _, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), p, keySize); err == nil {
 			t.Fatalf("keySize %d: accepted", keySize)
@@ -179,7 +179,7 @@ func TestDeriveArgon2KeySizeOverflow(t *testing.T) {
 
 func TestDerive(t *testing.T) {
 	iterations := 1000
-	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: b64("salt"), Iterations: &iterations}
+	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: b64("saltsaltsaltsalt"), Iterations: &iterations}
 	e, err := testDeriver.Derive(context.Background(), []byte("passphrase"), p, 32)
 	if err != nil {
 		t.Fatalf("Derive: %v", err)
@@ -192,7 +192,7 @@ func TestDerive(t *testing.T) {
 
 func TestDeriveFromSecret(t *testing.T) {
 	iterations := 1000
-	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: b64("salt"), Iterations: &iterations}
+	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: b64("saltsaltsaltsalt"), Iterations: &iterations}
 
 	plain, err := testDeriver.DerivePlain(context.Background(), []byte("the master key"), p, 32)
 	if err != nil {
@@ -314,7 +314,7 @@ func TestDeriveFromSecretErrorPath(t *testing.T) {
 // done, and no key material is produced.
 func TestDerivePlainCancelledBeforeDerivationReturnsCtxErr(t *testing.T) {
 	iterations := 1000
-	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: b64("salt"), Iterations: &iterations}
+	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: b64("saltsaltsaltsalt"), Iterations: &iterations}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -331,7 +331,7 @@ func TestDerivePlainCancelledBeforeDerivationReturnsCtxErr(t *testing.T) {
 // same row: a canceled ctx produces no enclave for Custody to leak.
 func TestDeriveCancelledBeforeDerivationReturnsNoEnclave(t *testing.T) {
 	iterations := 1000
-	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: b64("salt"), Iterations: &iterations}
+	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: b64("saltsaltsaltsalt"), Iterations: &iterations}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -352,7 +352,7 @@ func TestDeriveCancelledBeforeDerivationReturnsNoEnclave(t *testing.T) {
 // deadline, that the derivation is still running when the deadline fires.
 func TestDerivePlainCancelledDuringDerivationDestroysOutput(t *testing.T) {
 	iterations := 100_000
-	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: b64("salt"), Iterations: &iterations}
+	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: b64("saltsaltsaltsalt"), Iterations: &iterations}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancel()
 

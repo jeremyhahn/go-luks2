@@ -37,6 +37,16 @@ func forceFIPSPolicy(t *testing.T) func() fips.Mode {
 	return func() fips.Mode { return true }
 }
 
+// forceNonFIPSPolicy is the policy source of a process outside FIPS mode,
+// whatever mode the test process is in, for tests of the parameter checks that
+// sit behind the FIPS gate (the argon2 cost floors) and so are unreachable
+// when the process itself is in FIPS mode.
+func forceNonFIPSPolicy(t *testing.T) func() fips.Mode {
+	t.Helper()
+
+	return func() fips.Mode { return false }
+}
+
 // writeFixture rewrites device's header after mutate has changed its metadata.
 func writeFixture(t *testing.T, device string, mutate func(*header.Metadata)) {
 	t.Helper()

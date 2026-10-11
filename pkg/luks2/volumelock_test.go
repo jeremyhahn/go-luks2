@@ -8,6 +8,7 @@ package luks2
 
 import (
 	"context"
+	"crypto/fips140"
 	"errors"
 	"os"
 	"path/filepath"
@@ -263,6 +264,11 @@ func TestVolumeTokenWritesWorkOnAVolumeInUse(t *testing.T) {
 // L5: MigrateToFIPS works on the descriptor Open pinned, not on whatever the
 // path names by the time it runs.
 func TestVolumeMigrateToFIPSStaysOnThePinnedDevice(t *testing.T) {
+	if fips140.Enabled() {
+		assertMigrationRefusedUnderFIPS(t)
+		return
+	}
+
 	pinned := argon2VolumeImage(t, "pinned.img")
 	other := argon2VolumeImage(t, "other.img")
 	otherBefore := fileDigest(t, other)
@@ -301,6 +307,11 @@ func TestVolumeMigrateToFIPSStaysOnThePinnedDevice(t *testing.T) {
 
 // L5: MigrateToFIPS honors WithLockWait like every other Volume method.
 func TestVolumeMigrateToFIPSHonorsWithLockWait(t *testing.T) {
+	if fips140.Enabled() {
+		assertMigrationRefusedUnderFIPS(t)
+		return
+	}
+
 	path := argon2VolumeImage(t, "migrate-lockwait.img")
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()), WithLockWait(10*time.Millisecond))
 	if err != nil {
@@ -340,7 +351,14 @@ func TestVolumeEnrollRunsAddKeyslotsCreationChecks(t *testing.T) {
 	}{
 		{"argon2 memory below the floor", "a-provider-credential",
 			KeyslotParams{KDF: KDFParams{Type: KDFArgon2id, Time: 1, MemoryKiB: 8, Parallel: 1}},
-			func(err error) bool { var ce *KDFCostError; return errors.As(err, &ce) }},
+			func(err error) bool {
+				// A FIPS process refuses argon2 before it judges the cost.
+				if fips140.Enabled() {
+					return errors.Is(err, ErrFIPSNotApproved)
+				}
+				var ce *KDFCostError
+				return errors.As(err, &ce)
+			}},
 		{"one-byte credential", "x", cheapKeyslotParams(),
 			func(err error) bool { return errors.Is(err, ErrInvalidCredential) }},
 	}

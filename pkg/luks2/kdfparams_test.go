@@ -72,6 +72,10 @@ func TestDefaultKDFTypeUnderTheFIPSPolicy(t *testing.T) {
 }
 
 func TestKDFParamsValidate(t *testing.T) {
+	// The cost floors sit behind the FIPS gate, so the table judges them by
+	// the non-FIPS policy; TestKDFParamsValidateRefusesArgon2UnderFIPS and
+	// the process-mode test above cover the FIPS side.
+	outsideFIPS := forceNonFIPSPolicy(t)
 	tests := []struct {
 		name    string
 		p       KDFParams
@@ -87,7 +91,7 @@ func TestKDFParamsValidate(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := tt.p.Validate(); !errors.Is(err, tt.wantErr) {
+			if err := tt.p.validateWith(outsideFIPS); !errors.Is(err, tt.wantErr) {
 				t.Fatalf("Validate() = %v, want %v", err, tt.wantErr)
 			}
 		})
