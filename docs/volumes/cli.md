@@ -1,6 +1,6 @@
 # Volumes — CLI
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
+> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (f871541)
 > Conflicts with this document are defects. Fix them here first.
 
 `luks2` creates, opens, mounts and closes LUKS2 volumes. It is a thin layer
@@ -42,16 +42,45 @@ other is a defect in whichever is behind.
   Without a terminal, use `--key-file`; see [key input](#key-input), below.
 - Options take `--name value` or `--name=value`, before or after the
   positional arguments. An unknown option is refused rather than read as a
-  path. `close`, `mount`, `unmount` and `info` parse their own
-  arguments; see each command below.
-- The exit status is 0 on success and 1 on any failure, including bad
-  arguments and missing arguments (which also print the command's usage). The
-  exceptions, where 1 is an answer rather than a failure, are `isluks`,
-  `token exists` and `recovery verify`. A canceled `wipe`, `header restore` or
-  block-device `create` exits 1.
+  path. `close`, `unmount`, `info`, `keyslots`, the `token` verbs that take
+  only a device and an id, and `header show` and `header secondary` take
+  positional arguments only and do no option parsing; `mount` and every other
+  verb use the shared option parser.
+- The exit status is 0 on success and, on failure, one of the codes in
+  [Exit status](#exit-status).
 - The destructive commands, `wipe`, `header restore` and `create` on a block
   device, read `YES` from standard input. Any other answer, end of input or a
   read error cancels. `--batch-mode` (or `--yes`) skips the question.
+
+## Exit status
+
+The status follows cryptsetup(8) where the failures correspond. This is the
+one table; the other command documents link here.
+
+| Status | Meaning | Errors that give it |
+|---|---|---|
+| 0 | Success | |
+| 1 | Wrong parameters, or any failure not listed below | Usage errors (bad, missing or unknown arguments, which also print the command's usage), a canceled confirmation (`wipe`, `header restore`, block-device `create`), invalid KDF options, and every error with no row of its own |
+| 2 | No permission, or a bad passphrase | `ErrWrongKey`, `ErrInvalidCredential`, `ErrPermissionDenied`, and a new passphrase whose confirmation did not match |
+| 3 | Out of memory | `ErrProtectedMemory`: locked memory could not be obtained |
+| 4 | Wrong device | `ErrDeviceNotFound`, `ErrNotLUKS2`, `ErrInvalidHeader` |
+| 5 | Exists or busy | `ErrDeviceInUse`, `ErrLockContended`, `dmcrypt.ErrActive` (`open` on a mapping name already in use), `dmcrypt.ErrBusy` (`close` on a mapping something still holds open) |
+
+An error is matched through whatever wraps it, and the first row that matches
+wins, in the order 2, 3, 4, 5. `dmcrypt.ErrStillLive` and `dmcrypt.ErrNotActive`
+have no row and exit 1. Running `luks2` with no command, or with an
+unknown command or group verb, prints the usage and exits 1.
+
+Three verbs answer in their status:
+
+- `isluks` exits 0 for yes and 1 for no, whatever the reason for the no. It
+  never uses 2 to 5, so a device that cannot be opened or read is 1, not 4.
+- `token exists` exits 0 if the token is present and 1 if it is absent. A
+  device that cannot be opened or is not LUKS2 gives that error's own status
+  from the table.
+- `recovery verify` exits 0 if the key opens the volume and 2 if it does not
+  (`ErrWrongKey`, the same as a wrong passphrase). Any other failure gives its
+  own status.
 
 ## Transport
 
@@ -117,17 +146,18 @@ Steps, in order:
 7. Run `mkfs.<filesystem>` on the mapping with the label.
 
 If reading the passphrase or formatting fails, the file is deleted (only if it
-is still the file this run created) and the command exits 1.
+is still the file this run created) and the command exits with the failure's
+status.
 
 If step 5 or 6 fails, the command prints the error on stderr, detaches the
 loop device from step 5 (after a failed step 6), keeps the formatted container
-with the commands to finish by hand, and exits 1. A failed step 6 normally
+with the commands to finish by hand, and exits with the failure's status. A failed step 6 normally
 leaves no mapping, but if the error says the mapping may still be live, close
 `luks-auto` yourself. The name is always `luks-auto`, so creating a second file
 volume while one is open stops here.
 
 If step 7 fails, the command tries to close the mapping and detach the loop
-device, keeps the container file and exits 1. If either cleanup step fails it
+device, keeps the container file and exits with the failure's status. If either cleanup step fails it
 says so and prints the `luks2 close` or `losetup -d` command to finish. Whatever
 mkfs wrote may be partial.
 
@@ -309,7 +339,8 @@ that, and [keyslots](../keyslots/cli.md#keyslots) for KDF details.
 If the header holds keyslot or token entries written as JSON `null`, they are
 listed on stderr: they are ignored, and the next header write removes them.
 
-Exit 1 if the primary header cannot be read. To ask only "is this LUKS", use
+If the primary header cannot be read, the exit status is the error's own (4 for
+a missing device or one that is not LUKS2). To ask only "is this LUKS", use
 [isluks](../header/cli.md#isluks).
 
 ## Key input

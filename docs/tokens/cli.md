@@ -1,6 +1,6 @@
 # Tokens — CLI
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
+> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (f871541)
 > Conflicts with this document are defects. Fix them here first.
 
 ```
@@ -33,7 +33,8 @@ Slot  Type                 Keyslots
 - `remove` deletes the token only. **The keyslot still opens the volume**; to
   revoke the credential use [`killslot`](../keyslots/cli.md#removekey-and-killslot).
 - `free` and `count` print a bare number. `exists` answers in its exit status:
-  0 present, 1 absent.
+  0 present, 1 absent. Other failures keep their own
+  [exit status](../volumes/cli.md#exit-status).
 
 ```bash
 sudo luks2 token export /dev/sdb1 0 --file token0.json

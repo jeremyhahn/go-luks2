@@ -8,6 +8,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/jeremyhahn/go-luks2/internal/errs"
+	"github.com/jeremyhahn/go-luks2/pkg/dmcrypt"
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
@@ -32,6 +34,12 @@ func TestExitCodeTable(t *testing.T) {
 		{"invalid header", luks2.ErrInvalidHeader, 4},
 		{"device in use", luks2.ErrDeviceInUse, 5},
 		{"lock contended", luks2.ErrLockContended, 5},
+		{"dmcrypt active", dmcrypt.ErrActive, 5},
+		{"dmcrypt busy", dmcrypt.ErrBusy, 5},
+		{"dmcrypt wrapped active (open path)", errs.At("dmcrypt", "Activate", "", &errs.Error{Kind: dmcrypt.ErrActive, Detail: "taken"}), 5},
+		{"dmcrypt wrapped busy (close path)", errs.At("dmcrypt", "Deactivate", "", &errs.Error{Kind: dmcrypt.ErrBusy, Detail: "held", Err: errors.New("EBUSY")}), 5},
+		{"dmcrypt still live has no row", dmcrypt.ErrStillLive, 1},
+		{"dmcrypt not active has no row", dmcrypt.ErrNotActive, 1},
 		{"unmatched", errors.New("something else"), 1},
 		{"usage error", &UsageError{Command: "x", Detail: "y"}, 1},
 	}

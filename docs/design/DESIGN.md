@@ -1,6 +1,6 @@
 # go-luks2 target architecture and public API
 
-> **Status: IMPLEMENTED in v1.0.0-rc.1** · Baseline: `g50/main` 7d40045 (0.4.0-alpha) plus `fix/g-compat` (assumed merged first) · Date: 2026-10-05 · Last verified: 2026-10-09 against main (25a0aea)
+> **Status: IMPLEMENTED in v1.0.0-rc.1** · Baseline: `g50/main` 7d40045 (0.4.0-alpha) plus `fix/g-compat` (assumed merged first) · Date: 2026-10-05 · Last verified: 2026-10-11 against main (f871541)
 > Breaking by intent (owner direction: no backward compatibility). Released: `1.0.0-rc.1`, `BREAKING:` heading (release-versioning §5). DECISIONS.md is the record of what each step actually landed, including the corrections made after the plan (H13b and H13d finished the token free functions, `EnrollKeyProvider` and the seam-variable cleanup, and H13e, #284, removed the last transitional forwards); this document is the plan it was built from and is not updated to match drift.
 
 Inventory this design is based on, measured from the tree:
@@ -758,13 +758,13 @@ internal/cli/
 **Exit codes follow cryptsetup(8)**, because the owner direction is "compatible with cryptsetup's behaviour":
 
 - 0: success.
-- 1: wrong parameters (usage errors, `ErrInvalidArgument`).
-- 2: no permission or bad passphrase (`ErrWrongKey`, `ErrInvalidCredential`, `ErrPermissionDenied`).
+- 1: wrong parameters (usage errors, `ErrInvalidArgument`), and any error with no row below.
+- 2: no permission or bad passphrase (`ErrWrongKey`, `ErrInvalidCredential`, `ErrPermissionDenied`, and the CLI's `ErrPassphraseMismatch`).
 - 3: out of memory (`ErrProtectedMemory`).
 - 4: wrong device (`ErrDeviceNotFound`, `ErrNotLUKS2`, `ErrInvalidHeader`).
-- 5: exists or busy (`dmcrypt.ErrActive`, `ErrBusy`, `ErrDeviceInUse`, `ErrLockContended`).
+- 5: exists or busy (`dmcrypt.ErrActive`, `dmcrypt.ErrBusy`, `ErrDeviceInUse`, `ErrLockContended`). `dmcrypt.ErrStillLive` and `dmcrypt.ErrNotActive` exit 1.
 
-`isluks` and `token exists` keep 0/1.
+`isluks` and `token exists` keep 0/1 for their answer. `recovery verify` exits 2 for a key that does not open the volume. The shipped table is in [volumes/cli.md](../volumes/cli.md#exit-status).
 
 **Tests.** Nothing is exported "for testing", and testing goes through `Run`. Rootless verbs run against real temp-file volumes. Root verbs are tested through fake `host` interfaces. No file exceeds about 400 lines (cli.go is 1297 today). Help text sits next to each command's definition, so `usage` is built from the registry and cannot drift from it.
 

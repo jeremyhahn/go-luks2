@@ -7,6 +7,7 @@ package cli
 import (
 	"errors"
 
+	"github.com/jeremyhahn/go-luks2/pkg/dmcrypt"
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
@@ -14,10 +15,10 @@ import (
 // (DESIGN.md §F). The table is tried in order and the first match wins; an
 // unmatched non-nil error exits 1, the same status usage errors use.
 //
-// This table names the sentinels pkg/luks2 exports TODAY. ErrMasterKeyVerification
-// was renamed to ErrWrongKey at H13 (DESIGN.md §C.3); ErrInvalidCredential and
-// pkg/dmcrypt's ErrActive/ErrBusy are not yet landed. This table is updated in
-// the same change that renames or adds them.
+// Status 5 ("exists or busy") covers pkg/dmcrypt's ErrActive and ErrBusy as
+// well as pkg/luks2's. dmcrypt.ErrStillLive and dmcrypt.ErrNotActive have no
+// row in DESIGN.md §F, so they fall through to 1. Add a sentinel here in the
+// same change that adds or renames it.
 func exitCode(err error) int {
 	if err == nil {
 		return 0
@@ -43,5 +44,5 @@ var exitTable = []struct {
 	// 4: wrong device.
 	{4, []error{luks2.ErrDeviceNotFound, luks2.ErrNotLUKS2, luks2.ErrInvalidHeader}},
 	// 5: exists or busy.
-	{5, []error{luks2.ErrDeviceInUse, luks2.ErrLockContended}},
+	{5, []error{luks2.ErrDeviceInUse, luks2.ErrLockContended, dmcrypt.ErrActive, dmcrypt.ErrBusy}},
 }

@@ -1,6 +1,6 @@
 # Header — CLI
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
+> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (f871541)
 > Conflicts with this document are defects. Fix them here first.
 
 ```
@@ -66,7 +66,8 @@ metadata lock that cannot be taken, is also 1. A device that cannot be opened
 or read is 1 too. The answer, `<device> is a LUKS device` or
 `<device> is not a LUKS device` (`LUKS2` with `--luks2`), goes to stdout.
 With `-v` or `--verbose` the reason for a no is printed on stderr, as
-`cryptsetup isLuks -v` does; the exit status is the same.
+`cryptsetup isLuks -v` does; the exit status is the same. `isluks` never exits
+2 to 5; see [exit status](../volumes/cli.md#exit-status).
 
 ```bash
 if sudo luks2 isluks --luks2 /dev/sdb1; then sudo luks2 open /dev/sdb1 backup; fi

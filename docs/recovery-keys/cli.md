@@ -1,6 +1,6 @@
 # Recovery keys — CLI
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
+> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (f871541)
 > Conflicts with this document are defects. Fix them here first.
 
 ```
@@ -98,7 +98,8 @@ Without it, the key is read from the terminal or the first line of a pipe.
 Surrounding whitespace is stripped; nothing else is changed. Exit 0 if the key
 opens the volume. A key that does not open it exits 2 (`ErrWrongKey`, the
 same status as a wrong passphrase) after `That recovery key does NOT open
-<device>` on stderr; any other failure exits with its own status.
+<device>` on stderr; any other failure exits with its own
+[status](../volumes/cli.md#exit-status).
 
 Keys enrolled by older versions hold the decoded bytes rather than the text, so
 `verify` rejects them. No exported library function decodes those any more
