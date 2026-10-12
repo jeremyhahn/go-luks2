@@ -1,0 +1,3 @@
+### Added
+
+- **The feature docs now cover the last undocumented `pkg/luks2` exports, and list the cryptsetup operations this library does not provide (#316).** `ErrClosed`, `ErrReadOnly`, `ValidatePassphrase`, `MinPassphraseLength`/`MaxPassphraseLength`, `(*FIPSMigrationError).MigrationStage` and `Token`'s JSON codec are documented, including when each one returns which error. The volumes and header architecture docs list resize, suspend/resume, KDF benchmark, LUKS1-to-LUKS2 convert, UUID/label changes and header backup to a file as not provided, each with its reason. Use cryptsetup for any of these.

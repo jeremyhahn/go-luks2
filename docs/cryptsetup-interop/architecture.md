@@ -1,6 +1,6 @@
 # cryptsetup interop — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163) and cryptsetup 2.7.5
+> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (623da94) and cryptsetup 2.7.5
 > Conflicts with this document are defects. Fix them here first.
 
 go-luks2 does not define its own on-disk format: the format is cryptsetup's,
@@ -19,6 +19,20 @@ exists so that a refusal this library adds is reviewed against one question —
 does it stop a cryptsetup-written volume from opening, or only make this
 library refuse to create something cryptsetup would have allowed — rather
 than being decided ad hoc per feature.
+
+## Rejected alternatives
+
+- **Dropping a cryptsetup `--pbkdf` value (`argon2i`).** Rejected, and the
+  earlier removal reversed: stricter than cryptsetup is fine, incompatibility
+  is not, and a script doing `--pbkdf argon2i` must work (DECISIONS.md,
+  p-final).
+- **Matching cryptsetup in every behaviour.** Rejected row by row: each
+  refusal in "Stricter than cryptsetup", below, gives its reason, and none
+  stops a cryptsetup volume from opening.
+- **Moving the four white-box integration files into
+  `test/integration/interop/`.** Rejected: each reaches a security- or
+  determinism-relevant seam, and moving it would mean exporting that seam
+  with no decided shape (DECISIONS.md, H12c).
 
 ## Versioning policy
 

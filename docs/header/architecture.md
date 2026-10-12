@@ -1,6 +1,8 @@
 # Header — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163);
+> "Rejected alternatives" and "What this feature deliberately does not do"
+> verified 2026-10-11 against main (623da94)
 > Conflicts with this document are defects. Fix them here first.
 
 A LUKS2 header is two copies of a 4096-byte binary header plus a JSON area,
@@ -21,6 +23,32 @@ The one place this library's judgment differs from cryptsetup's is how much
 it trusts the header before spending CPU and locked memory on it — see
 "Untrusted headers", below, which is a deliberate, documented divergence, not
 an accident of a stricter parser.
+
+## Rejected alternatives
+
+- **Requiring a valid header to open a volume.** Rejected: `Open` pins the
+  descriptor and nothing else, because `RestorePrimaryHeader` and `Erase` must
+  work on a damaged header (DESIGN.md §B.1).
+- **A force flag on the primary-header restore.** Rejected: no boolean
+  arguments, so the unconditional restore is its own method,
+  `ReplacePrimaryHeader` (DESIGN.md §B.1, §B.6).
+- **Indented JSON, and Go's default HTML escaping.** Rejected: the JSON area
+  cannot grow after format, and indented output filled it at far fewer
+  keyslots than cryptsetup's compact json-c output does; json-c does not
+  escape `<`, `>` or `&` (commit 3082e41, "canonical JSON, calibrated digest,
+  and cost rules that match cryptsetup").
+- **A fixed digest iteration count.** Rejected: cryptsetup calibrates the
+  digest to a time target, and a hardcoded count does not. A proposal to
+  hardcode 1000 rested on a measurement taken with
+  `--pbkdf-force-iterations`, which pins the digest as well as the keyslot;
+  it was reverted (same commit).
+- **Zero-filling the unused keyslots area at format.** Rejected: zeros
+  disclose which slots are in use and which were destroyed, so `Format`
+  fills it with random bytes (same commit).
+- **Exporting internals across the `internal/header` boundary for small
+  helpers.** Rejected: duplicating a helper of a few lines is cheaper and less
+  coupled than exporting `pkg/luks2` internals or threading parameters
+  through the call chain (DECISIONS.md, H5).
 
 ## Component boundaries
 
@@ -249,3 +277,12 @@ No online reencryption, no dm-integrity segments, no mandatory requirement
 this library does not name explicitly — a mandatory requirement is
 `ErrUnsupportedRequirement` and a dm-integrity segment is refused for
 unlocking with `ErrUnsupported`; neither is silently accepted.
+
+Nor does it provide these header operations, which a volume's owner runs with
+cryptsetup itself on the same container:
+
+| Not provided | Reason |
+|---|---|
+| LUKS1-to-LUKS2 convert (`cryptsetup convert --type luks2`) | This library reads and writes LUKS2 only. A LUKS1 header is refused with `ErrNotLUKS2`, and this library has no LUKS1 writer to convert from |
+| Changing the UUID or label (`luksUUID`, `cryptsetup config --label`) | The UUID, label and subsystem are written once, by `Format`. `*Header` only reads them, and there is no call that rewrites them on an existing volume |
+| Header backup to a file (`luksHeaderBackup`/`luksHeaderRestore`) | `RestorePrimaryHeader` and `ReplacePrimaryHeader` repair the primary copy from the secondary copy on the same device. No exported function reads or writes a header through a file path |

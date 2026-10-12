@@ -1,6 +1,7 @@
 # FIPS 140-3 — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-12 against main (623da94)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against main (623da94);
+> the two `Unwrap` methods verified 2026-10-11 against 1e4cdbc
 > Conflicts with this document are defects. Fix them here first.
 
 ## Exported surface
@@ -14,7 +15,26 @@ func (v *Volume) MigrateToFIPS(ctx context.Context, pass *enclave.MemoryEnclave,
 type NonApprovedKDF struct { ID int; Type, Hash, Reason string }
 func (k NonApprovedKDF) String() string
 type FIPSMigrationStage uint8 // StagePreflight, StageVerify, StageWrite, StageRemove, StageVerifyWritten
+func (e *FIPSMigrationError) MigrationStage() FIPSMigrationStage
 ```
+
+`(*FIPSMigrationError).MigrationStage()` gives the coarse phase in which a
+migration stopped, so a caller can switch on it without matching the
+`Stage` string. Ten `Stage` strings fold onto five phases:
+
+| `Stage` | `MigrationStage()` |
+|---|---|
+| `"precondition"`, `"sync"` | `StagePreflight` |
+| `"unlock"`, `"plan"`, `"verify"` | `StageVerify` |
+| `"reconcile header copies"`, `"add keyslot"`, `"migrate digest"` | `StageWrite` |
+| `"remove keyslot"` | `StageRemove` |
+| `"final check"` | `StageVerifyWritten` |
+
+`StageVerify` covers the checks that bracket the writes on both sides:
+unlocking and planning before them, and the opens that prove the result
+after them. A `Stage` that `MigrateToFIPS` never sets, which is possible
+only for an error a caller built, maps to `StagePreflight`, which implies
+nothing was written.
 
 `DefaultKDFType()` applies when `Format`/`AddKeyslot`/`AddRecoveryKey` are
 given no KDF type; it returns `KDFPBKDF2` in FIPS mode and `KDFArgon2id`
@@ -67,8 +87,8 @@ Argon2 cost gets `argon2id`, which FIPS mode refuses.
 | Error | Meaning |
 |---|---|
 | `ErrFIPSNotApproved` | A derivation would use Argon2 or SHA-1 in FIPS mode |
-| `*FIPSImportRequiredError` / `ErrFIPSImportRequired` | Every keyslot that could not be tried was refused only for non-approval; the volume is intact and `MigrateToFIPS` would open it |
-| `*FIPSMigrationError` | A migration stage failed; names the stage and the state left behind. Calling `MigrateToFIPS` from a FIPS process, or with a passphrase whose key matches no digest binding every data segment, is reported this way, at the precondition and verify stages |
+| `*FIPSImportRequiredError` / `ErrFIPSImportRequired` | Every keyslot that could not be tried was refused only for non-approval; the volume is intact and `MigrateToFIPS` would open it. `FIPSImportRequiredError.Unwrap` reports both `ErrFIPSImportRequired` and `ErrFIPSNotApproved` |
+| `*FIPSMigrationError` | A migration stage failed; names the stage and the state left behind. Calling `MigrateToFIPS` from a FIPS process, or with a passphrase whose key matches no digest binding every data segment, is reported this way, at the precondition and verify stages. `FIPSMigrationError.Unwrap` reports `ErrFIPSMigration` for every stage, and the stage's own cause |
 | `ErrDeviceCacheStale` | The page-cache and `O_DIRECT` reads of the header disagree at the start of a run |
 | `ErrUnsupported` | The device stack cannot be read with `O_DIRECT` and is not tmpfs/ramfs |
 | `ErrKeyslotAreaOverlap` | A keyslot area is not confined to the keyslots area, clear of the data segment |

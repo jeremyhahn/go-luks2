@@ -1,6 +1,6 @@
 # Keyslots — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
+> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (623da94)
 > Conflicts with this document are defects. Fix them here first.
 
 A LUKS2 volume has up to 32 keyslots (0–31). Each normally wraps the same
@@ -29,6 +29,44 @@ reinvent the on-disk shape, only decides how strictly it is validated before
 any passphrase is checked (see "Untrusted keyslots", below) and how costs are
 chosen when a caller does not set one (see
 [engineering.md](engineering.md#cost-inheritance)).
+
+## Rejected alternatives
+
+- **A fixed Argon2 cost for new keyslots, or an inherited cost clamped to
+  the adding host.** Rejected: the machine that adds a keyslot need not be the
+  one that uses the volume, so a clamp can write a keyslot the target
+  hardware cannot derive, and it buys nothing, because a volume is only as
+  strong as its weakest keyslot. An inherited cost is copied exactly (commit
+  3082e41, "canonical JSON, calibrated digest, and cost rules that match
+  cryptsetup").
+- **Falling back to a fixed PBKDF2 count when calibration fails, or trusting
+  the calibrated count alone.** Rejected: a fallback returns a
+  weak-but-plausible number with no error, so failure is a typed
+  `*KDFCalibrationError`; and a calibrated count measures the defender's
+  hardware, not the attacker's, so a hardware-independent floor applies too
+  (commit 24cdefb, "calibrate PBKDF2 iterations instead of falling back to a
+  hardcoded 100000").
+- **Authenticating `RemoveKeyslot` with a credential.** Rejected: removal is
+  guarded (`ErrLastKeyslot`, `ErrKeyslotAreaOverlap`), not authenticated;
+  authorization belongs to the caller, such as the CLI's prompt or a
+  platform's IAM (DESIGN.md §B.1; DECISIONS.md, H9c).
+- **`ChangeKeyslot` ignoring `KeyslotParams.KDF`.** Rejected: cryptsetup's
+  luksChangeKey honours `--pbkdf`, `--iter-time` and
+  `--pbkdf-force-iterations`, and a CLI flag that does nothing is a defect
+  (DECISIONS.md, p-review-fix).
+- **`PriorityNormal`, or a `*Priority`, as "not asked for".** Rejected:
+  `ChangeKeyslot` needs a "keep" that differs from every real priority, or a
+  rotation would reset prefer and ignore to normal; a pointer is the style for
+  "pick for me" choices, not for an enum that can name its own default, so the
+  zero value is `PriorityDefault` (DECISIONS.md, "Priority zero value
+  (pre-1.0)").
+- **`ErrWrongKey` when every bound keyslot is `ignore`.** Rejected: the
+  passphrase was never judged, so the scan returns `ErrNoKeyslots`,
+  cryptsetup's "no usable keyslot" (DECISIONS.md, p-bugs).
+- **An interruptible derivation, hand-rolled or in an abandoned goroutine.**
+  Rejected: a hand-rolled PBKDF2 would leave the Go FIPS module's approved
+  service, and an orphaned goroutine would keep deriving into memory nobody
+  supervises. `ctx` is checked between derivations instead (DESIGN.md §D.2).
 
 ## Component boundaries
 

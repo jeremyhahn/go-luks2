@@ -1,6 +1,7 @@
 # Recovery keys — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163);
+> `OrphanedKeyslotError.Unwrap` verified 2026-10-11 against 1e4cdbc
 > Conflicts with this document are defects. Fix them here first.
 
 ## Exported surface
@@ -83,7 +84,7 @@ raised before the passphrase is read.
 | Error | Meaning |
 |---|---|
 | `ErrInvalidArgument` | Format name is not `dashed`/`hex`/`base64`, a length below 32 bytes or a rendering over 512 characters, or the recovery floor's own iteration count overflowed the shared ceiling (`*KDFCostError`; should not occur with library defaults); the original message is in `Detail` |
-| `*OrphanedKeyslotError` (`ErrOrphanedKeyslot`) | The keyslot was added but the token write failed and the keyslot could not be removed again; names the slot to kill by hand |
+| `*OrphanedKeyslotError` (`ErrOrphanedKeyslot`) | The keyslot was added but the token write failed and the keyslot could not be removed again; names the slot to kill by hand. `OrphanedKeyslotError.Unwrap` reports `ErrOrphanedKeyslot`, `ErrKeyProvider` and the original failure |
 
 A keyslot or token written as JSON `null` (from any source, not specific to
 recovery keys) is dropped on read; see

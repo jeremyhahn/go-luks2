@@ -1,6 +1,6 @@
 # Wipe — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
+> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (623da94)
 > Conflicts with this document are defects. Fix them here first.
 
 Destroying a volume, two ways: a crypto-erase that destroys only the header
@@ -19,6 +19,27 @@ every header backup ever taken. The two are genuinely different operations
 with different costs, so this library keeps them as two call sites
 (`(*luks2.Volume).Erase` vs. `wipe.Sanitize`) rather than one call with a mode flag that
 callers could set by habit.
+
+## Rejected alternatives
+
+- **One `Wipe` call with a header-only flag.** Rejected: no boolean
+  arguments, and the crypto-erase needs the LUKS2 header and the volume's
+  lock to decide what to zero, so it is `(*Volume).Erase` and the full
+  overwrite is `wipe.Sanitize` (DESIGN.md §B.1, §B.6; DECISIONS.md, H10e).
+- **A `Verify`/`NoVerify` boolean pair.** Rejected for the same rule: one
+  three-valued `VerifyMode` (DESIGN.md §B.5).
+- **A separate keyslot wipe.** Rejected: it is the same operation as
+  `RemoveKeyslot`, which always destroys the area (DESIGN.md §B.6).
+- **Whole-device destruction inside a single `host` package.** Rejected: it
+  would mix the exec trust boundary with ioctl code and drag `exec` into every
+  importer (DESIGN.md §A.4).
+- **Taking the lock and claim through `pkg/luks2`.** Rejected: `pkg/luks2`
+  imports `pkg/wipe`, so the reverse import would cycle; `Sanitize` uses
+  `internal/device`'s lock-and-claim sequence directly (DECISIONS.md, H10e).
+- **A dedicated `O_DIRECT` reader for verification.** Rejected: verification
+  runs once per `Sanitize`, not on a hot path, so it reuses the already-tested
+  `internal/device` read-past-cache primitive at the cost of more syscalls
+  (DECISIONS.md, H10e).
 
 ## Component boundaries
 

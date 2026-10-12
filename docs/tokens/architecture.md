@@ -1,6 +1,6 @@
 # Tokens — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
+> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (623da94)
 > Conflicts with this document are defects. Fix them here first.
 
 A token is a JSON object in the header that records what opens a keyslot: a
@@ -38,6 +38,27 @@ helper-command cases as its only implementations. This library has no TPM
 code of its own; a consumer that needs to act on a TPM token implements
 `KeyProvider` or unseals the key itself and calls `UnlockWithVolumeKey`
 ([volumes/engineering.md](../volumes/engineering.md#exported-surface)).
+
+## Rejected alternatives
+
+- **Typed vendor fields on `luks2.Token`.** Rejected: a generic `Token` with
+  `Members` carries a type this library does not model, such as a
+  systemd-tpm2 token, through a read-modify-write untouched; the
+  systemd-fido2 schema is parsed in `pkg/keyprovider` alone (DESIGN.md §B.4;
+  DECISIONS.md, H9d).
+- **Key-provider implementations inside `pkg/luks2`.** Rejected: a separate
+  `pkg/keyprovider` is the only way to keep `pkg/luks2` exec-free, and the
+  interface it implements is defined at the consumer (DESIGN.md §A.4).
+- **Checking a helper by path and executing the path afterwards.** Rejected:
+  the path check judged only the directories left after symlinks were
+  resolved, and `exec` reopened the path, so the file that ran need not be the
+  file checked. The helper runs from the descriptor its checks were made on
+  (DECISIONS.md, p-bugs).
+- **Refusing every symlink on a helper's path.** Rejected: merged `/usr`
+  layouts, distribution tool links and helpers linked into `/opt` are
+  symlinks, and the walk already judges every directory such a path passes
+  through, which is what the refusal would have protected (DECISIONS.md,
+  p-bugs).
 
 ## Component boundaries
 

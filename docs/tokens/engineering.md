@@ -1,6 +1,9 @@
 # Tokens — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163);
+> `Token`'s JSON codec verified 2026-10-11 against main (623da94);
+> `SaltLength`, `SecretLength` and `HelperError.Unwrap` verified 2026-10-11
+> against 1e4cdbc
 > Conflicts with this document are defects. Fix them here first.
 
 ## Exported surface
@@ -11,6 +14,8 @@
 const MaxTokens = 32
 const TokenTypeRecovery = "systemd-recovery"
 type Token struct { Type string; Keyslots []int; Members map[string]json.RawMessage }
+func (t Token) MarshalJSON() ([]byte, error)
+func (t *Token) UnmarshalJSON(data []byte) error
 func (v *Volume) AddToken(ctx context.Context, t Token) (int, error)
 func (v *Volume) SetToken(ctx context.Context, id int, t Token) error
 func (v *Volume) RemoveToken(ctx context.Context, id int) error
@@ -25,6 +30,8 @@ func (v *Volume) UnlockWithProvider(ctx context.Context, p KeyProvider) (*Key, e
 // pkg/keyprovider
 const TokenTypeFIDO2 = "systemd-fido2"
 const DefaultRelyingParty = "io.systemd.cryptsetup"
+const SaltLength = 32   // hmac-secret salt, bytes (what systemd writes)
+const SecretLength = 32 // hmac-secret derived from one salt, bytes
 type Command struct{ /* unexported */ }
 func NewCommand(path string, opts ...CommandOption) (*Command, error)
 type FIDO2 struct{ /* unexported */ }
@@ -38,6 +45,18 @@ func NewFIDO2Salt() ([]byte, error)
 slot itself, `SetToken` writes a chosen id, `RemoveToken` deletes one. There
 is no separate "does this id exist" or "how many tokens" call — read
 `len((*Header).Tokens())` or check the map.
+
+`Token`'s JSON codec is the on-disk token object. `UnmarshalJSON` takes
+`type` and `keyslots` (decimal strings, as LUKS2 writes them, parsed to
+ints) into the typed fields. It keeps every other member, unparsed and
+verbatim, in `Members`, which is `nil` when there are none. It returns an
+`*Error` of kind `ErrInvalidHeader` when the input is not a JSON object,
+when `type` is not a string, or when `keyslots` is not an array of decimal
+strings. A missing `type` or `keyslots` is not an error: the field is left
+zero. `MarshalJSON` is the inverse. It writes `Members`, then `type` and
+`keyslots` over them as canonical decimal strings, so a `Members` entry named
+`type` or `keyslots` never reaches the disk. `(*Header).Tokens` decodes every
+token through `UnmarshalJSON`.
 
 Build a `pkg/keyprovider.Command` with `NewCommand(path, ...CommandOption)`.
 `Command.Token()` returns the `luks2.Token` to record, built from `WithToken`.
@@ -125,6 +144,8 @@ Stdout is read straight into locked memory; more than 64 KiB is refused, not
 truncated. A helper that exits non-zero gives `ErrHelperFailed`; one that
 exits 0 with unusable output gives `ErrHelperOutput`. `HelperError{Path,
 ExitCode, Stderr, Kind, Err}` carries up to 4 KiB of the helper's stderr.
+`HelperError.Unwrap` returns `Kind` and `Err`, so `errors.Is` matches the
+classifying sentinel and the underlying cause alike.
 
 ```go
 cmd, err := keyprovider.NewCommand("/usr/local/bin/get-key", keyprovider.WithLine(1))

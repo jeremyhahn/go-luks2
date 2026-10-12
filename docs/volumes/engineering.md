@@ -1,7 +1,10 @@
 # Volumes — engineering
 
 > **Status: NORMATIVE** · Last verified: 2026-10-12 against main (623da94),
-> except the measured flag table and "What the container does not isolate".
+> except the measured flag table and "What the container does not isolate";
+> the `loop` and `filesystem` surface and the export-coverage rule verified
+> 2026-10-11 against 1e4cdbc; the `ValidatePassphrase` error kinds verified
+> 2026-10-12 against train/docs5 (adeb2ca) and the fix commit 389cdd0.
 > The pkg/dmcrypt pointer was checked 2026-10-11 against main (f871541).
 > Conflicts with this document are defects. Fix them here first.
 
@@ -39,6 +42,36 @@ func (v *Volume) Erase(ctx context.Context) error
 [recovery-keys](../recovery-keys/engineering.md)'s; `MigrateToFIPS` is
 [fips](../fips/engineering.md)'s.
 
+### Passphrase policy (`pkg/luks2`)
+
+```go
+const (
+	MinPassphraseLength = 8
+	MaxPassphraseLength = 512
+)
+func ValidatePassphrase(pass *enclave.MemoryEnclave) error
+```
+
+A credential this package enrolls must be `MinPassphraseLength` to
+`MaxPassphraseLength` bytes, inclusive. That covers the passphrase given to
+`Format`, the new passphrase of `AddKeyslot` and `ChangeKeyslot`, and the
+credential a `KeyProvider` returns to `Enroll`, and each of them runs the
+check itself. `ValidatePassphrase` exports the same check so that a caller
+can refuse a passphrase before it asks for anything else. Nothing in the
+module calls it. It borrows `pass` for the length check alone and leaves it
+usable. It returns `nil` for a passphrase within the policy, and reports
+every failure as an `*Error` whose `Op` is `ValidatePassphrase`: a
+passphrase shorter than `MinPassphraseLength` (8 bytes) or longer than
+`MaxPassphraseLength` (512 bytes) has kind `ErrInvalidCredential`, and a
+destroyed enclave has kind `ErrProtectedMemory`; `errors.Is` matches either
+kind.
+
+A credential presented to open an existing keyslot is not held to this
+policy: anything from 1 byte to 8 MiB is accepted, so a short passphrase or a
+key file that cryptsetup enrolled still opens. `AddRecoveryKey` also uses
+`MaxPassphraseLength`, refusing a recovery-key length whose rendering would
+be longer than that.
+
 ### Activation, loop, filesystems (separate packages)
 
 ```go
@@ -51,14 +84,34 @@ func loop.Attach(ctx context.Context, file string) (*Device, error)
 func loop.Find(ctx context.Context, file string) (*Device, error)
 func loop.Lookup(ctx context.Context, path string) (*Device, error)
 func (d *loop.Device) Detach(ctx context.Context) (loop.DetachState, error)
+func (d *loop.Device) BackingFile() string
 
 func filesystem.Make(ctx context.Context, device string, t Type, p MakeParams) error
 func filesystem.Check(ctx, device, t) (CheckResult, error)
 func filesystem.Repair(ctx, device, t) (CheckResult, error)
 func filesystem.Mount(ctx context.Context, p MountParams) error
 func filesystem.Unmount(ctx context.Context, target string, flags UnmountFlags) error
+func filesystem.IsMounted(ctx context.Context, target string) (bool, error)
 func filesystem.DeviceMounted(ctx context.Context, major, minor uint32) (bool, error)
+func filesystem.Inspect(ctx context.Context, device string) (*Info, error)
+func filesystem.Detect(ctx context.Context, device string) (Type, error)
+func filesystem.Supported() []Type
 ```
+
+`loop.Device.BackingFile` is the absolute path of the file the device is
+attached to, or `""` for a device from `loop.Lookup` that is attached to
+nothing. `Detach` returns `loop.Released` once the release is observed, or
+`loop.Deferred` when the kernel accepted the request but something (a mount, a
+dm-crypt mapping) still holds the device: that is a success, as it is for
+`losetup -d`, and the device is released when its last user goes away. Its
+sentinels:
+
+| Sentinel | Meaning |
+|---|---|
+| `loop.ErrNotFound` | `Find`: no loop device is attached to the file |
+| `loop.ErrDetachIncomplete` | The detach was accepted but the release was not observed before the wait expired: something else still holds the device |
+| `loop.ErrNodeAbsent` | The kernel allocated a loop device but its `/dev` node did not appear in time. The allocation succeeded; this is not "no loop devices available" |
+| `loop.ErrDeviceReassigned` | `Detach` refused: the device is now backed by a different file |
 
 Full signatures, including every params struct field: DESIGN.md §B.2, §B.4 and
 §B.5, cross-checked against `go doc` for each package. `pkg/dmcrypt` is
@@ -71,6 +124,20 @@ pre-redesign `pkg/luks2` (`baseline/luks2.tsv`) is where its disposition row
 says: `KEEP` rows still exported, `RENAME`/`MOVE`/`UNEXPORT`/`DELETE` rows
 gone under the old name. It does not see exports added since, such as
 `DefaultKDFSpec` and `LegacyToken`.
+
+Those are checked by a second gate, `TestEveryPkgExportIsNamedInAFeatureDoc`
+in `test/tools/apidump` (`apidump documented`), which the unit tests run on
+every push. Every exported constant, variable, function, type and method of
+every package under `pkg/` must be named in a feature doc: a `*.md` in a
+`docs/<feature>/` directory that has an `api.md` (so not `docs/design`).
+Only code counts, meaning inline code spans and fenced blocks, never prose,
+and only whole identifiers: `OpenVolume` does not name `Open`. A top-level
+identifier is covered by its own name. A method is covered by `Type.Method`,
+or by `Method` in a doc whose code also names `Type`. Struct fields and
+interface methods are not checked on their own. An export that no doc should
+name is listed, with its reason, in `test/tools/apidump/doc-exceptions.tsv`.
+The gate also fails on an exception whose export is gone or that a doc now
+names.
 
 ## Invariants
 
@@ -125,6 +192,15 @@ Min, Max}` (unifies what used to be two types, `Argon2CostError` and
 `InvalidKeyslotError` and `UnlockError` are gone: a keyslot or unlock refusal
 is a plain `*Error` now, with `ErrKeyslotNotFound` (or whatever the refusal
 classifies as) in `Kind` and the keyslot id or step folded into `Detail`.
+
+Two sentinels belong to the `*Volume` handle itself. Each reaches the
+caller as an `*Error` whose `Kind` is the sentinel and whose `Op` is the
+method that refused, and neither touches the device:
+
+| Sentinel | Returned when |
+|---|---|
+| `ErrClosed` | Any method except `Path` and `Close` is called after `Close`. `Close` itself is idempotent and returns `nil` the second time |
+| `ErrReadOnly` | A method that writes (`Format`, `Erase`, `AddKeyslot`, `ChangeKeyslot`, `RemoveKeyslot`, `AddToken`, `SetToken`, `RemoveToken`, `Enroll`, `AddRecoveryKey`, `RestorePrimaryHeader`, `ReplacePrimaryHeader`, `MigrateToFIPS`) is called on a `Volume` opened with `WithReadOnly`. A closed handle is checked first, so it reports `ErrClosed` |
 
 No "wrong passphrase" error exists: with an unauthenticated keyslot cipher a
 wrong passphrase and damaged key material look the same, so both match

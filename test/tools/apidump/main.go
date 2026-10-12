@@ -7,6 +7,8 @@
 //	apidump dump <dir>                        print the exported API declared in dir
 //	apidump diff <baseline> <dir>             print what dir removed (-) and added (+) since baseline
 //	apidump check <baseline> <dispositions>   fail unless every baseline identifier has exactly one disposition
+//	apidump honor <baseline> <dispositions> <dir>        fail unless dir's API honors every disposition
+//	apidump documented <exceptions> <docs> <pkg-root>    fail unless every export under pkg-root is named in a feature doc
 //
 // baseline/ holds the API as released in 0.5.0-alpha (luks2.tsv,
 // cmd-luks2.tsv) and the redesign's disposition of every pkg/luks2 identifier
@@ -25,7 +27,8 @@ const usage = `usage:
   apidump dump <dir>
   apidump diff <baseline> <dir>
   apidump check <baseline> <dispositions>
-  apidump honor <baseline> <dispositions> <dir>`
+  apidump honor <baseline> <dispositions> <dir>
+  apidump documented <exceptions> <docs> <pkg-root>`
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -50,6 +53,8 @@ var commands = map[string]struct {
 	"diff":  {2, diffCommand},
 	"check": {2, checkCommand},
 	"honor": {3, honorCommand},
+
+	"documented": {3, documentedCommand},
 }
 
 func dispatch(args []string, stdout io.Writer) error {
@@ -130,5 +135,25 @@ func honorCommand(operands []string, stdout io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(stdout, "%s honors every disposition in %s\n", operands[2], operands[1])
+	return nil
+}
+
+func documentedCommand(operands []string, stdout io.Writer) error {
+	exceptions, err := ReadExceptions(operands[0])
+	if err != nil {
+		return err
+	}
+	docs, err := ReadFeatureDocs(operands[1])
+	if err != nil {
+		return err
+	}
+	apis, err := DumpTree(operands[2])
+	if err != nil {
+		return err
+	}
+	if err := CheckDocumented(apis, docs, exceptions); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "every export under %s is named in a feature doc under %s, or excepted in %s\n", operands[2], operands[1], operands[0])
 	return nil
 }

@@ -1,6 +1,6 @@
 # Recovery keys — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
+> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (623da94)
 > Conflicts with this document are defects. Fix them here first.
 
 A recovery key is a random credential in an ordinary keyslot, meant to be
@@ -26,6 +26,22 @@ The printed text, not the decoded bytes, is what the keyslot holds. This
 means the same recovery key opens the volume through stock cryptsetup too
 (`cryptsetup open <device> <name>`, pasted), because a keyslot credential is
 just bytes to cryptsetup and the printed text is exactly those bytes.
+
+## Rejected alternatives
+
+- **The passphrase iteration floor for recovery keyslots.** Rejected: systemd
+  writes PBKDF2-SHA512 at 1000 iterations for recovery keyslots, which the
+  passphrase floor refuses many times over, and a credential of 256 CSPRNG
+  bits has nothing to enumerate (commit 3082e41, "canonical JSON, calibrated
+  digest, and cost rules that match cryptsetup").
+- **A caller-facing switch for the lower floor.** Rejected: the exemption is
+  an unexported policy whose zero value is the strict one, reachable only
+  because the library generated the credential.
+  `TestTheExemptionIsUnreachableFromOutsideThePackage` fails if an options
+  field that looks like a floor override is added (same commit).
+- **Parsing a recovery key from a Go string.** Rejected: `ParseRecoveryKey`
+  takes a credential the caller has already placed in protected memory and
+  never passes it through a string (DECISIONS.md, H9e).
 
 ## Component boundaries
 

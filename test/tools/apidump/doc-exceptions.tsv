@@ -1,0 +1,5 @@
+# Exports of pkg/... that no feature doc under docs/ is expected to name.
+# package<TAB>identifier<TAB>reason, one export per line; Type.Method for a
+# method. An export that is only undocumented belongs in its feature doc, not
+# here. The gate (apidump documented, run by TestEveryPkgExportIsNamedInAFeatureDoc)
+# refuses a row without a reason, and a row whose export is gone or now documented.

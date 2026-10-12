@@ -1,6 +1,9 @@
 # Volumes — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
+> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163);
+> "What this feature deliberately does not do" verified 2026-10-11 against
+> main (623da94); the `KeyringError` table and mapping-name limits verified
+> 2026-10-11 against 1e4cdbc
 > Conflicts with this document are defects. Fix them here first.
 
 The volume lifecycle: creating a LUKS2 container, unlocking it to a
@@ -202,6 +205,26 @@ unavailable, `dmcrypt.Activate` fails with an error matching
 `dmcrypt.ErrKeyringUnavailable`. `dmcrypt.CheckKeyring` runs the same add and
 release with a throwaway key, so a service can fail at startup instead.
 
+A keyring that is unavailable fails with a `*dmcrypt.KeyringError`. Its `Op`
+names the step that failed, its `Kind` names the cause, and `Remedy` returns
+the operator guidance for that cause. `KeyringError.Error` ends with that
+remedy. `KeyringError.Unwrap` reports `dmcrypt.ErrKeyring`,
+`dmcrypt.ErrKeyringUnavailable`, the cause and the errno, so `errors.Is`
+matches any of them:
+
+| Cause | Meaning |
+|---|---|
+| `dmcrypt.ErrKeyringBlocked` | The keyring syscalls are refused by policy (`EPERM`, `EACCES`), almost always a container seccomp profile |
+| `dmcrypt.ErrKeyringUnsupported` | The kernel has no keyring syscalls (`ENOSYS`: built without `CONFIG_KEYS`) |
+| `dmcrypt.ErrKeyringQuotaExhausted` | The per-user kernel key quota is full (`EDQUOT`, `EKEYREJECTED`) |
+| `dmcrypt.ErrKeyringFailed` | The keyring refused the operation for any other reason |
+
+Two keyring failures are not unavailability and do not match
+`dmcrypt.ErrKeyringUnavailable`: `dmcrypt.ErrKeyringEntryExists` (a key was
+already present under the description this unlock was about to use; refused,
+not resolved) and `dmcrypt.ErrKeyringKeyNotReleased`. `dmcrypt.ErrKeyring`
+is the root every keyring error matches.
+
 Keyrings are not namespaced by container. Docker's default seccomp profile
 denies the three keyring syscalls whatever the capabilities, so a container
 needs a profile that allows them (`test/integration/seccomp.json`: Docker's
@@ -215,7 +238,7 @@ The keyring logic lives in `internal/keyring`, called from `pkg/dmcrypt`;
 | Part | Implementation |
 |---|---|
 | Device-mapper | Wraps `anatol/devmapper.go` behind a seam. The dm UUID is `CRYPT-LUKS2-<header uuid without dashes>-<name>`. Without udev the library creates `/dev/dm-N` and `/dev/mapper/<name>` with `mknod`. |
-| Mapping names | `dmcrypt.ValidateName`: `[A-Za-z0-9]`, then `[A-Za-z0-9_.+-]`, at most 127 bytes, and not `control` (the device-mapper control node) |
+| Mapping names | `dmcrypt.ValidateName`: `[A-Za-z0-9]`, then `[A-Za-z0-9_.+-]`, at most `dmcrypt.MaxNameLength` (127) bytes, and not `control` (the device-mapper control node). Anything else: `dmcrypt.ErrInvalidName` |
 | Close | `dmcrypt.Deactivate` records the target's UUID and device number, then retries removal on `EBUSY` for up to 3 s, re-checking them before each attempt. A mapping recreated under the same name normally gets a new device number and is left alone; a reused number in the gap between check and removal is a remaining race. Still held: `dmcrypt.ErrBusy`. |
 | Loop devices | Loop ioctls through `/dev/loop-control` |
 | Mount | `mount(2)` and `umount2(2)` |
@@ -260,3 +283,12 @@ gets `*FIPSImportRequiredError` naming `MigrateToFIPS`. Full detail:
 No TPM, HSM or KMS code: hardware-backed keys come in through
 `Volume.UnlockWithVolumeKey` or a `KeyProvider`. No LUKS1 opening, no online
 reencryption, no dm-integrity. No logging; errors are typed and returned.
+
+Nor does it provide these cryptsetup operations, which a volume's owner runs
+with cryptsetup itself on the same container:
+
+| Not provided | Reason |
+|---|---|
+| Resize (`cryptsetup resize`) | A mapping's size is fixed when `dmcrypt.Activate` loads its table, and `pkg/dmcrypt` has no call that reloads a live mapping at a new size |
+| Suspend and resume (`luksSuspend`/`luksResume`) | `pkg/dmcrypt` has no suspend or resume call. Suspending wipes the key from the kernel and resuming asks for a credential again, and no consumer of this library needs that cycle |
+| KDF benchmark (`cryptsetup benchmark`) | PBKDF2 is calibrated internally, against `KDFParams.IterTime`, each time a keyslot is written without an iteration count. Argon2 costs are set, not measured. Nothing reports throughput as a separate result |
