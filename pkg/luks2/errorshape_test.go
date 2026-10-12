@@ -15,7 +15,7 @@ import (
 )
 
 // requireClassified fails unless err is an *errs.Error with a Kind and the Op
-// and Path the exported entry point stamps (DESIGN.md §C.1, §C.2).
+// and Path the exported entry point stamps.
 func requireClassified(t *testing.T, what string, err error, wantPath string) {
 	t.Helper()
 	if err == nil {

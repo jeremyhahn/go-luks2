@@ -15,7 +15,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// MaxTokens is the maximum number of token slots in LUKS2 (DESIGN.md §B.2).
+// MaxTokens is the maximum number of token slots in LUKS2.
 const MaxTokens = 32
 
 // canonicalTokenID returns the slot a token map key names, and whether the key
@@ -85,11 +85,11 @@ func canonicalTokenID(key string) (int, bool) {
 }
 
 // TokenTypeRecovery is the LUKS2 token type for this package's own recovery
-// keys (DESIGN.md §B.2): systemd-cryptenroll's "systemd-recovery".
+// keys: systemd-cryptenroll's "systemd-recovery".
 const TokenTypeRecovery = header.TokenTypeSystemdRecovery
 
 // Token is a LUKS2 token: a named external-credential binding recorded in the
-// header (DESIGN.md §B.2). Keyslots is the set of keyslot ids the token
+// header. Keyslots is the set of keyslot ids the token
 // identifies -- empty for a token that names none, never nil on the wire,
 // since LUKS2 requires the member to be an array. Members carries every field
 // this package does not model as a typed one itself -- a systemd-fido2

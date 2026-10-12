@@ -899,8 +899,8 @@ func TestWaitForDeviceReadyReturnsImmediatelyWhenAlreadyReady(t *testing.T) {
 }
 
 // TestWaitForDeviceReadyReportsErrNodeUnverifiedWhenNothingEverVerifies is
-// the case pkg/luks2's devicemapper.go used to cover before H13 deleted it
-// (DECISIONS.md, H13): when blockNodeRdev never reports the mapping's device
+// the case pkg/luks2's devicemapper.go used to cover before activation
+// moved to this package: when blockNodeRdev never reports the mapping's device
 // number -- for the mapper symlink, the dm-N node, or the one this repairs
 // into place -- waitForDeviceReady gives up with ErrNodeUnverified rather
 // than succeeding on an unverifiable node.

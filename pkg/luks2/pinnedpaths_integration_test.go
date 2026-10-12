@@ -33,7 +33,7 @@ func imageDigest(t *testing.T, image string) [32]byte {
 // exclusive claim exists to protect -- and the link naming it is re-pointed
 // at an idle device B after the lock is taken. The claim used to be taken by
 // path, so it claimed idle B, passed, and the keyslot was zeroed on A under
-// its live mapping. H6 makes the claim reopen the LOCKED descriptor itself
+// its live mapping. The claim now reopens the LOCKED descriptor itself
 // (Locked.Claim, via /proc/self/fd), so the busy check it performs is always
 // against A regardless of where the path now points: the operation is
 // refused with ErrDeviceInUse, the same error an active device gets with no
@@ -51,7 +51,7 @@ func TestWipeKeyslotRefusesAnActiveDeviceDespiteARetarget(t *testing.T) {
 	// dm-crypt mapping (what the original, pre-#268 Unlock produced here)
 	// or, as below, this test's own exclusive open of the block device.
 	// Activation now lives in pkg/dmcrypt, which pkg/luks2 cannot import
-	// (DESIGN.md A.2), so this stands in for it; see the file comment.
+	// (the core stays rootless), so this stands in for it; see the file comment.
 	excl, err := os.OpenFile(loopA, os.O_RDWR|os.O_EXCL, 0) // #nosec G304 -- a loop device this test attached
 	if err != nil {
 		t.Fatalf("holding an exclusive open on %s failed: %v", loopA, err)
@@ -84,7 +84,7 @@ func TestWipeKeyslotRefusesAnActiveDeviceDespiteARetarget(t *testing.T) {
 // TestWipeAndTokenWritesStayOnTheLockedLoopDevice: on real loop devices, a
 // link re-pointed after the lock never receives a byte. The exclusive claim
 // (Erase) and the header rewrite (ImportToken) both reopen the LOCKED
-// descriptor via /proc/self/fd (H6) rather than resolving the path again, so
+// descriptor via /proc/self/fd rather than resolving the path again, so
 // both operations succeed and land on the device that was locked; the
 // device the link now names is never touched.
 func TestWipeAndTokenWritesStayOnTheLockedLoopDevice(t *testing.T) {

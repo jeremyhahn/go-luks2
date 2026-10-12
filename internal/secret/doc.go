@@ -13,7 +13,7 @@
 // and which exited. Doing the work in process removes that boundary, so this
 // library has to provide the guarantee itself.
 //
-// The rule this library is held to (owner ruling 2026-08-17) is that every key,
+// The rule this library is held to is that every key,
 // password, secret or token read into memory lives in protected storage for its
 // whole lifetime and is zeroized on release -- never a plain []byte or string.
 // go-luks2 sits at the bottom of that stack: the low-level libraries that
@@ -101,7 +101,7 @@
 //     deriveKeySecret borrows an enclave and hands the slice straight down
 //     this path. Its two callers are verifyMasterKey, on every unlock, once per
 //     digest tried, and createDigest, on every format. "Every unlock" includes
-//     Volume.UnlockWithVolumeKey (#79): that path takes the key from the
+//     Volume.UnlockWithVolumeKey: that path takes the key from the
 //     caller and skips the keyslot derivation, but it still verifies the key
 //     against the segment's digests through the same loop, once per digest
 //     tried. Skipping that check would let a wrong key map garbage as the
@@ -117,22 +117,20 @@
 //     The obvious remedy -- a PBKDF2 whose password and HMAC state stay in
 //     wipeable storage -- means implementing PBKDF2 over crypto/hmac, and that
 //     is prohibited. This project's security policy forbids hand-rolled
-//     cryptography outright (owner ruling 2026-08-25):
+//     cryptography outright, and it is a requirement here:
 //
-//     "No agent implements a cryptographic primitive or construction by hand --
-//     ever. ... Hand-rolling a KDF, cipher mode, MAC, or any construction --
-//     even 'over validated sub-primitives,' even to satisfy another mandate --
-//     is prohibited."
+//     No cryptographic primitive or construction is implemented by hand: not a
+//     KDF, cipher mode, MAC or any other construction, not even over validated
+//     sub-primitives, not even to satisfy another mandate.
 //
-//     And this exact case was resolved by name: "crypto/pbkdf2 copies the
-//     password inside the validated module, so a secret cannot be kept wipeable
-//     through a validated PBKDF2 call. Ruling: use crypto/pbkdf2; accept the
-//     bounded transient copy; document it; do NOT hand-roll PBKDF2 over
-//     crypto/hmac to keep it wipeable. The protected-memory mandate yields at
-//     that boundary. This is the general rule, not a one-off."
+//     PBKDF2 is therefore crypto/pbkdf2. It copies the password inside the
+//     validated module, so the secret cannot stay wipeable through that call;
+//     that bounded transient copy is accepted and documented here, and the
+//     protected-memory mandate yields at that boundary. The same holds for
+//     every validated primitive with that shape, not only this one.
 //
-//     So this entry is the compliance artifact the ruling requires, not an
-//     excuse for a gap. Reopening it needs the owner to revisit that ruling,
+//     So this entry is the documentation that requirement demands, not an
+//     excuse for a gap. Closing it would mean changing the security policy,
 //     not a code change here.
 //
 //     Note what switching from golang.org/x/crypto/pbkdf2 to the stdlib did and
@@ -182,12 +180,13 @@
 //     third-party package this library cannot reach into and all three
 //     outliving the call by however long the collector takes.
 //
-//     That is gone (#78). The key is handed to dm-crypt as a kernel-keyring
+//     That is gone. The key is handed to dm-crypt as a kernel-keyring
 //     reference, which is what cryptsetup does, so it goes from its enclave
 //     into the kernel through add_key and no userspace string ever holds it.
 //     Nothing in this module assigns CryptTable.Key and there is no fallback
-//     that would -- owner ruling 2026-08-31, fail closed -- so the hex encoding
-//     is structurally unreachable rather than conditionally avoided.
+//     that would -- a failed keyring hand-off fails the activation closed --
+//     so the hex encoding is structurally unreachable rather than
+//     conditionally avoided.
 //
 //     What replaces it is smaller but real, and it is recorded here rather
 //     than presented as a clean win. The key spends the activation's table

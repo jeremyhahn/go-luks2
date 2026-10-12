@@ -43,7 +43,7 @@ import (
 // with SPACES (devmapper.go crypt.go, CryptTable.buildSpec). The cipher is field
 // zero, so a space inside it shifts every field after it: a header can nominate
 // the key reference the kernel resolves and the block device the target is
-// backed by. That is the same positional-grammar hazard ValidateMappingName
+// backed by. That is the same positional-grammar hazard dmcrypt.ValidateName
 // exists for, on an input the caller does not choose.
 //
 // # Why the sector-size suppression was worse than no comment
@@ -143,7 +143,7 @@ type CryptSegmentParams struct {
 // disclosure: with it, TRIM through the mapping reveals which blocks are free
 // to anyone who can read the medium, and a header edit -- by anyone who has
 // had the disk -- is all it takes to switch it on. The volume opens and reads
-// and writes the same bytes either way (docs/COMPATIBILITY.md).
+// and writes the same bytes either way (docs/cryptsetup-interop/architecture.md).
 var persistentCryptFlags = []struct{ luks2, dm string }{
 	{"same-cpu-crypt", "same_cpu_crypt"},
 	{"submit-from-crypt-cpus", "submit_from_crypt_cpus"},
@@ -281,7 +281,7 @@ func cryptSegmentChecks(id string, segment *Segment) (CryptSegmentParams, error)
 
 // validateSegmentEncryption checks the cipher specification a segment declares.
 //
-// The charset is a WHITELIST for the same reason ValidateMappingName's is: the
+// The charset is a WHITELIST for the same reason dmcrypt.ValidateName's is: the
 // value becomes field zero of a space-delimited positional target
 // specification, and enumerating which bytes such a grammar considers harmless
 // is the kind of list that is always one character short.

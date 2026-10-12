@@ -18,7 +18,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// argon2TestKDF is the floor DECISIONS.md asks keyslot tests to use:
+// argon2TestKDF is the minimum legal Argon2 cost keyslot tests use:
 // m=64MiB t=1 p=1, fast enough for a unit test and still exercising the
 // Argon2 path rather than PBKDF2's. A FIPS process refuses Argon2, so there
 // it is the cheap PBKDF2 the migration tests use; wantKDFType names what the

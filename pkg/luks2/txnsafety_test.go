@@ -21,7 +21,7 @@ import (
 )
 
 // The write-transaction suite: every mutating call either leaves the volume as
-// it found it or runs to its next consistent state (DESIGN.md §D.2), and never
+// it found it or runs to its next consistent state, and never
 // leaves a durable header naming material that is not on the device.
 
 // txnVolume opens path through the cheap test seams.

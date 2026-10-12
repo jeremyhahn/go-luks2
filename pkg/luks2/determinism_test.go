@@ -13,7 +13,7 @@ import (
 )
 
 // Test-side control of the two seams that make a container's bytes
-// unpredictable: cryptoRand and newUUID, both fields of volumeSys (§E). Each
+// unpredictable: cryptoRand and newUUID, both fields of volumeSys. Each
 // helper here returns the override; the caller sets it on a volumeSys it
 // builds (defaultVolumeSys with one field replaced) and passes that sys to
 // the unexported, sys-taking core the public function it is standing in for

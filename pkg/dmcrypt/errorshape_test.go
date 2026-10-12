@@ -12,8 +12,8 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// TestErrorIsTheModuleErrorShape pins DESIGN.md §C.3: the package exports
-// Error as an alias of errs.Error.
+// TestErrorIsTheModuleErrorShape pins the module's one error shape: the
+// package exports Error as an alias of errs.Error.
 func TestErrorIsTheModuleErrorShape(t *testing.T) {
 	var err error = &Error{Kind: ErrNotActive}
 	var e *errs.Error
@@ -22,7 +22,8 @@ func TestErrorIsTheModuleErrorShape(t *testing.T) {
 	}
 }
 
-// TestSentinelsCarryThePackagePrefix pins DESIGN.md §C.2 rule 3. A sentinel
+// TestSentinelsCarryThePackagePrefix pins that every sentinel's text starts
+// with its package's name ("dmcrypt: "). A sentinel
 // re-exported by value from internal/device keeps the module-wide "luks2: "
 // prefix, since one value cannot carry two texts.
 func TestSentinelsCarryThePackagePrefix(t *testing.T) {

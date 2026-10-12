@@ -1,6 +1,6 @@
 # Volumes — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-12 against base/331 (a9c840c);
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against 7ee49b8;
 > the container flag table was checked against `test/tools/docker-run`'s
 > `privileges`, and its measurements were not re-run.
 > Conflicts with this document are defects. Fix them here first.
@@ -165,6 +165,19 @@ names.
   header may have changed since `Unlock`. Its bytes are not exported:
   `volkey.Borrow` is reachable only inside the module, so `dmcrypt` can hand
   the key to the keyring and no consumer can extract it.
+- **`ctx` comes first.** Every exported function that does I/O on a
+  device, takes a file lock, runs a KDF or runs an external program takes
+  `ctx context.Context` as its first parameter. Functions that work only on
+  in-memory values do not (`Path`, `NewRecoveryKey`, `ParseRecoveryKey`,
+  `ValidatePassphrase`, `FormatParams.Validate`, `KDFParams.Validate`,
+  `filesystem.Supported`, the `Header` accessors), and two methods keep a
+  standard-library interface's signature: `Volume.Close` (`io.Closer`) and
+  `RecoveryKey.WriteTo` (`io.WriterTo`, onto the caller's writer).
+- **Waits run on an injected clock.** Lock polling, retry backoff and a
+  helper's exit grace period wait on a timer from an `internal/clock.Clock`; `time.Sleep` is refused by
+  `forbidigo`. A caller's deadline arrives only through `ctx.Done()`, never
+  by reading `ctx.Deadline()`, so a test drives every wait with
+  `clock.Fake` and stays deterministic.
 
 ## Cancellation
 
@@ -200,6 +213,19 @@ the same values (`pkg/wipe/errors.go`). Errors are typed only: `forbidigo` in
 `.golangci.yml` refuses `fmt.Errorf` everywhere but `_test.go` files and
 `test/`, and `errors.New` everywhere but a package's `errors.go`, where its
 sentinels are declared.
+
+A package's internals return an `*errs.Error` with `Kind` set and `Op`
+empty. Its exported entry points pass the result through `errs.At` on the
+way out, which fills the package prefix, `Op` and `Path` only where they
+are still empty and returns any other error unchanged, so an error that
+crosses two boundaries keeps the inner one's `Op` and is never wrapped a
+second time. `Error()` prints `<pkg>: <Op> <Path>: <kind>[: <Detail>][: <Err>]`
+and names the package once, dropping the sentinel's own prefix
+(`internal/errs`, `(*Error).Error`); an `*Error` that never passed through
+`errs.At` (`RecoveryKey.WriteTo`'s, for one) prints only
+`<kind>[: <Detail>][: <Err>]`. A cancelled or expired context is reported
+with `Kind` set to `ctx.Err()` (`errs.KindOf` carries it through a wrapper),
+so `errors.Is(err, context.DeadlineExceeded)` holds.
 
 A few struct types still carry data a caller needs programmatically rather
 than folding into `Kind` + `Detail` alone: `LockTimeoutError{Path, Waited,

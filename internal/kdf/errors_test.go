@@ -24,4 +24,4 @@ func TestCalibrationErrorString(t *testing.T) {
 }
 
 // PBKDF2IterationsError and Argon2CostError moved to luks2.KDFCostError
-// (DESIGN.md §B.6); their message-shape coverage moved with them.
+// in pkg/luks2; their message-shape coverage moved with them.

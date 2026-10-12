@@ -232,8 +232,8 @@ func (c cancelAfterNErrChecks) Err() error {
 	return nil
 }
 
-// TestGetMasterKeySlotCancelledBetweenKeyslotsReturnsCtxErr is DESIGN.md
-// §D.2's "checked between keyslots in a scan" clause: a ctx canceled after
+// TestGetMasterKeySlotCancelledBetweenKeyslotsReturnsCtxErr pins that ctx is
+// checked between keyslots in a scan: a ctx canceled after
 // the first keyslot in scan order is skipped stops the scan before the
 // second keyslot is even looked at, and reports ctx.Err()'s kind.
 //

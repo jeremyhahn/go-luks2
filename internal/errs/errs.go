@@ -89,8 +89,8 @@ func KindOf(err error, fallback error) error {
 
 // Error renders "<pkg>: <op> <path>: <kind>: <detail>: <cause>", leaving out
 // every part that is empty. pkg, Op and Path are empty until At has run, so
-// an *Error built and never passed through At -- every site today -- renders
-// exactly as before: "<kind>: <detail>: <cause>".
+// an *Error built and never passed through At -- an internal error before it
+// reaches an exported entry point -- renders as "<kind>: <detail>: <cause>".
 func (e *Error) Error() string {
 	head := e.pkg
 	if opPath := strings.TrimSpace(e.Op + " " + e.Path); opPath != "" {
@@ -111,8 +111,8 @@ func (e *Error) Error() string {
 		tail.WriteString(s)
 	}
 	if e.Kind != nil {
-		// The head already names the package once (§C.2 rule 3), so the
-		// sentinel's own prefix -- its package's, or the module-wide
+		// The head already names the package, and a message names it
+		// exactly once, so the sentinel's own prefix -- its package's, or the module-wide
 		// "luks2: " of a sentinel re-exported by value -- is dropped here.
 		kind := e.Kind.Error()
 		if head != "" {

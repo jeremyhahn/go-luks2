@@ -34,7 +34,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/test/internal/harness"
 )
 
-// The two-way interoperability matrix (docs/COMPATIBILITY.md): each
+// The two-way interoperability matrix (docs/cryptsetup-interop/engineering.md): each
 // operation done by one tool and checked by the other, against cryptsetup
 // and the real kernel. Rows are data; every row runs in parallel on a
 // volume of its own. See compatmatrix_integration_test.go (now moved, from
@@ -1200,7 +1200,7 @@ func TestCompatIntegrityVolumeIsRefusedForActivation(t *testing.T) {
 			}
 
 			// Volume.Unlock refuses the integrity segment before it reads a
-			// keyslot (DECISIONS.md), so key recovery -- TestKey and the
+			// keyslot (integrity is not supported), so key recovery -- TestKey and the
 			// existing credential of AddKey -- is refused for either key size.
 			if err := harness.TestKey(loop, []byte(matrixPassphrase)); !errors.Is(err, luks2.ErrUnsupported) {
 				t.Fatalf("TestKey on an integrity volume = %v, want ErrUnsupported", err)

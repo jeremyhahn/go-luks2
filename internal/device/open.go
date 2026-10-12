@@ -42,7 +42,7 @@ func Open(ctx context.Context, op, path string, flag int, openFile OpenFunc) (*o
 }
 
 // ClassifyOpen adds this package's typed vocabulary to an open failure: every
-// result is an *errs.Error with a Kind (DESIGN.md §C.1), and the original
+// result is an *errs.Error with a non-nil Kind, and the original
 // error stays reachable as its cause, so *fs.PathError still says which path
 // and which syscall.
 //

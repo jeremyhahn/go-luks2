@@ -1,6 +1,6 @@
 # Header — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-12 against base/331 (a9c840c)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against 7ee49b8
 > Conflicts with this document are defects. Fix them here first.
 
 A LUKS2 header is two copies of a 4096-byte binary header plus a JSON area,

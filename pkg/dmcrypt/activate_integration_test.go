@@ -25,8 +25,7 @@ import (
 // This file drives Activate, Deactivate and Lookup against a REAL
 // device-mapper target and a REAL kernel keyring, over a loop device. It
 // needs root (device-mapper and the loop-control ioctls both do) and runs
-// in the devcontainer only, with make integration-test (DESIGN.md §H,
-// H10a's ◆).
+// in the devcontainer only, with make integration-test.
 
 const integrationPassphrase = "dmcrypt-integration-test-passphrase"
 

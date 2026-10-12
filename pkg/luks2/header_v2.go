@@ -17,7 +17,7 @@ import (
 )
 
 // SizeDynamic is Segment.Size for a segment whose size is the device's
-// remaining space, resolved only at activation (DESIGN.md §B.2).
+// remaining space, resolved only at activation.
 const SizeDynamic int64 = -1
 
 // Segment is one of a volume's data segments: the on-disk segment's offset
@@ -34,7 +34,7 @@ type Segment struct {
 }
 
 // Header is a read-only snapshot of a volume's LUKS2 metadata, taken under
-// the shared lock (DESIGN.md §B.2). It does not change when the volume's
+// the shared lock. It does not change when the volume's
 // on-disk header does; call (*Volume).Header again for a fresh one.
 type Header struct {
 	hdr      *header.BinaryHeader
@@ -129,11 +129,10 @@ func (h *Header) Segments() []Segment {
 	return out
 }
 
-// Tokens returns every token the header carries, converted to the §B.2
-// value shape (DESIGN.md), keyed by its canonical slot id. A map key that
-// is not the canonical spelling of a slot 0..MaxTokens-1 -- "01", "-1",
-// "999" -- addresses no token in any LUKS2 implementation (cryptsetup
-// included, #35) and is omitted rather than reported, the same tolerance
+// Tokens returns every token the header carries, converted to the Token
+// value shape, keyed by its canonical slot id. A map key that is not the
+// canonical spelling of a slot 0..MaxTokens-1 -- "01", "-1", "999" --
+// addresses no token in any LUKS2 implementation (cryptsetup included) and is omitted rather than reported, the same tolerance
 // Keyslots and Segments already give a malformed entry: a listing is an
 // inspection operation.
 func (h *Header) Tokens() map[int]Token {

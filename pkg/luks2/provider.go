@@ -19,7 +19,7 @@ import (
 
 // Enrollment reports what Enroll wrote: the keyslot it added, and the token
 // slot it named or -1 when the provider was anonymous and no token was
-// written (DESIGN.md §B.2).
+// written.
 type Enrollment struct {
 	Keyslot KeyslotInfo
 	Token   int
@@ -31,7 +31,7 @@ type Enrollment struct {
 //
 // It is built on the internals AddRecoveryKey also uses:
 // addKeyslotWithMasterKey for the keyslot, which re-verifies key against the
-// header's digests under THIS call's own exclusive lock (DESIGN.md §B.1: the
+// header's digests under THIS call's own exclusive lock (the
 // header may have changed since Unlock), and importTokenLocked for the
 // token. key is only ever borrowed; a clone of its bytes is what
 // addKeyslotWithMasterKey consumes, so the caller's Key is unchanged and
@@ -41,8 +41,7 @@ type Enrollment struct {
 // does: a keyslot nothing describes is a live credential indistinguishable from one still in
 // use.
 //
-// The provider runs BEFORE mu and the device lock (DESIGN.md §B.1), and so
-// do AddKeyslot's creation checks on kp and on the credential: a provider
+// The provider runs BEFORE mu and the device lock, and so do AddKeyslot's creation checks on kp and on the credential: a provider
 // that blocks on a FIDO2 touch or a helper process must not hold off
 // cryptsetup's writers, and one that reads this Volume must not deadlock on
 // it. As for AddKeyslot, no exclusive open is taken: the exclusive flock
@@ -167,7 +166,7 @@ func (v *Volume) Enroll(ctx context.Context, key *Key, p KeyProvider, kp Keyslot
 }
 
 // UnlockWithProvider opens the volume with a KeyProvider's credential, trying
-// only the keyslots p.Token().Keyslots names (DESIGN.md §B.2) -- unlike
+// only the keyslots p.Token().Keyslots names -- unlike
 // Unlock, which tries every keyslot bound to the data segment.
 //
 // They are tried by priority, as cryptsetup tries the keyslots of a token the
@@ -177,8 +176,8 @@ func (v *Volume) Enroll(ctx context.Context, key *Key, p KeyProvider, kp Keyslot
 // only cryptsetup's scan of every token skips them, and this library never
 // chooses a token for the caller.
 //
-// The provider runs BEFORE mu and the shared device lock (DESIGN.md §B.1),
-// for the reasons Enroll gives.
+// The provider runs BEFORE mu and the shared device lock, for the reasons
+// Enroll gives.
 func (v *Volume) UnlockWithProvider(ctx context.Context, p KeyProvider) (*Key, error) {
 	const op = "Volume.UnlockWithProvider"
 	if err := v.checkOpenNow(op); err != nil {

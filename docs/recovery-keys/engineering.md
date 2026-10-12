@@ -1,6 +1,6 @@
 # Recovery keys — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-12 against base/331 (a9c840c)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against 7ee49b8
 > Conflicts with this document are defects. Fix them here first.
 
 ## Exported surface

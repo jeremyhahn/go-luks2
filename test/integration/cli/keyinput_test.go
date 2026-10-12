@@ -15,7 +15,7 @@ import (
 
 // Key files through the built binary against cryptsetup, both ways: a key
 // file is the passphrase byte for byte, trailing newline included, in both
-// tools (docs/cli/key-input.md). A tool that stripped the newline would
+// tools (docs/volumes/cli.md, "The trailing newline"). A tool that stripped the newline would
 // enroll a passphrase the other cannot open from the same file.
 
 func cliKeyFile(t *testing.T, content string) string {

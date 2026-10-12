@@ -12,7 +12,7 @@
 //
 // baseline/ holds the API as released in 0.5.0-alpha (luks2.tsv,
 // cmd-luks2.tsv) and the redesign's disposition of every pkg/luks2 identifier
-// (disposition-luks2.tsv, DESIGN.md §B.6). The check runs as a unit test of
+// (disposition-luks2.tsv). The check runs as a unit test of
 // this package, so a disposition file that drifts from its baseline fails CI.
 package main
 

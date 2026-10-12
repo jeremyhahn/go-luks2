@@ -26,7 +26,7 @@ import (
 // chunk is how much one write or one verification read covers: a multiple of
 // the O_DIRECT alignment and of the AES block size, so every chunk starts on
 // a boundary a counter-mode stream can be regenerated from on its own, and
-// ctx is checked once per chunk (DESIGN.md D.2).
+// ctx is checked once per chunk.
 const chunk = 1024 * 1024
 
 // defaultCryptsetupLockDir is cryptsetup's own locking directory.
@@ -34,7 +34,7 @@ const defaultCryptsetupLockDir = "/run/cryptsetup"
 
 // sys collects Sanitize's seams: every place it reaches the filesystem, a
 // clock or a lock protocol, defaulted by defaultSys and overridden only by
-// this package's own tests (DESIGN.md §E -- no package-level mutable vars).
+// this package's own tests (no package-level mutable vars).
 type sys struct {
 	openFile        device.OpenFunc
 	clk             clock.Clock
@@ -144,7 +144,7 @@ func sanitize(ctx context.Context, path string, p Params, s sys) error {
 
 	// Verification reads the medium PAST THE PAGE CACHE, through the locked
 	// descriptor's own /proc/self/fd entry rather than path: the claim
-	// targets exactly the inode that was locked (the H6 invariant), and
+	// targets exactly the inode that was locked (what is verified is what was locked and written), and
 	// resolving path again here would let a retargeted symlink verify one
 	// device while the passes wrote another.
 	if verify {

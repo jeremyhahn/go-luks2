@@ -3,8 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package dmcrypt is activation: the kernel keyring plus device-mapper
-// (root). It is the only way to keep pkg/luks2 rootless and exec-free
-// (DESIGN.md §A.4).
+// (root). It is the only way to keep pkg/luks2 rootless and exec-free.
 //
 // Activate calls (*luks2.Volume).Target, which re-reads the header under
 // the volume's own shared lock, re-verifies the key against it -- a key the
@@ -13,7 +12,7 @@
 // path. The mapping is a transaction from the moment its create ioctl
 // succeeds: every failure after that point rolls the target back, under a
 // cancellation-proof context and its own clock budget, so a canceled
-// caller never leaves a plaintext device behind (DESIGN.md §D.2).
+// caller never leaves a plaintext device behind.
 package dmcrypt
 
 import (
@@ -266,7 +265,7 @@ func confirmCreated(name, uuid string, devNo uint64) error {
 // rollback tears down a dm target that THIS Activate created, and refuses
 // to touch anything else.
 //
-// rollback is never cancellable (DESIGN.md §D.2): Activate derives ctx with
+// rollback is never cancellable: Activate derives ctx with
 // context.WithoutCancel before calling in, so a canceled caller still gets
 // a clean rollback rather than an abandoned plaintext device. ctx is still
 // threaded through to retryWhileBusy and removeMappingNodes -- it bounds

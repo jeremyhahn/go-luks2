@@ -49,7 +49,7 @@ type keyslotDevice struct {
 	path   string
 	file   *os.File       // the locked descriptor; the lock owns it
 	locked *device.Locked // the same lock, for Claim (wipe.go)
-	sys    volumeSys      // this operation's seams (DESIGN.md §E)
+	sys    volumeSys      // this operation's seams (see volumeSys)
 
 	// leveled is set once readHeader has brought the header copies level,
 	// or by an operation that reconciles them under its own policy

@@ -1,6 +1,6 @@
 # Filesystems — user guide
 
-> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (f871541)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against 7ee49b8
 > Conflicts with this document are defects. Fix them here first.
 
 How to put a filesystem on an unlocked volume, mount it and take it down again.
@@ -53,8 +53,8 @@ block device it formats LUKS2 only; open it and run `mkfs.<type>` on
 |---|---|---|
 | `carries no signature blkid recognizes` | No filesystem on the mapping | Make one with `mkfs.<type>` |
 | `carries more than one filesystem signature` | Old signatures remain from an earlier format | Pass `-t <type>` |
-| `not a filesystem` style refusal naming LUKS, swap, RAID or LVM | The mapping holds something else | Check you opened the right device |
-| An error that the program was not found, or "could not have been replaced" / "writable by group or others" | A tool is missing, or in a place or with permissions the library does not trust | Install the package; fix ownership and mode so only root can write the tool and its directories |
+| `which is not a mountable filesystem`, naming LUKS, swap, RAID or LVM | The mapping holds something else | Check you opened the right device |
+| `was not found in any of ...`, or `... so it could have been replaced` (owned by another user, or writable by group or others) | A tool is missing, or in a place or with permissions the library does not trust | Install the package; fix ownership and mode so only root can write the tool and its directories |
 | `mount point ... does not exist` from the library | Target directory missing (the CLI creates it for you) | Create it |
-| `not a mount point` on unmount | Nothing is mounted there | Check the path with `findmnt` |
+| `Not mounted: <mountpoint>` on unmount | Nothing is mounted there | Check the path with `findmnt` |
 | Unmount fails as busy | A process holds the filesystem | Find it with `fuser -mv <mountpoint>`; `umount -l` is the last resort |

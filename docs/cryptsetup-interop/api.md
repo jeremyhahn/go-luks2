@@ -5,6 +5,5 @@
 
 No API surface of its own: interop is a cross-cutting property of the Go API
 documented per feature ([volumes/api.md](../volumes/api.md) and its
-siblings), not a capability this folder exposes. go-luks2 is a Layer 0
-library (docs/00 §L1 exemption); REST/gRPC/QUIC/MCP/Unix: not applicable to
-any feature here, interop included.
+siblings), not a capability this folder exposes. go-luks2 is an embedded Go
+library; it has no REST, gRPC, QUIC, MCP or Unix-socket transport.

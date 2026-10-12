@@ -1,41 +1,51 @@
 # go-luks2 docs
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against v1.0.0-rc.2 (12a364e)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against base/331 (a9c840c)
 > Conflicts with this document are defects. Fix them here first.
 
-Documentation is organized as one feature folder per CLI command group
-(`software/conventions/feature-docs.md`, handbook), not as flat topic files.
-Each folder holds five files — `architecture.md`, `engineering.md`, `cli.md`,
-`api.md`, `user.md` — with its own status banner and `Last verified:` stamp.
-**An agent picking up work on a feature reads its folder before it reads
-code.**
+Documentation is organized as one feature folder per capability, not as flat
+topic files. Each folder holds five files — `architecture.md`,
+`engineering.md`, `cli.md`, `api.md`, `user.md` — with its own status banner
+and `Last verified:` stamp. **An agent picking up work on a feature reads its
+folder before it reads code.**
 
 ## Index
 
 | Folder | Covers |
 |---|---|
-| [volumes](volumes/) | Create, open, mount, close; the device layer; key custody; trust boundaries |
+| [volumes](volumes/) | Create, open, mount, close; package layout; the device layer; key custody; the error model; trust boundaries; the project-wide test strategy |
 | [keyslots](keyslots/) | Keyslot structure, KDF, cost inheritance, removal |
 | [recovery-keys](recovery-keys/) | Generated recovery credentials |
 | [tokens](tokens/) | Header token metadata, key providers (FIDO2, helper commands) |
 | [header](header/) | On-disk layout, binary header, JSON metadata, untrusted-header bounds |
+| [dm-crypt-activation](dm-crypt-activation/) | Turning an unlocked volume key into `/dev/mapper/<name>`; the dm-crypt table; teardown |
+| [kernel-keyring](kernel-keyring/) | Handing the volume key to dm-crypt through the kernel keyring; the startup preflight |
+| [loop-devices](loop-devices/) | Attaching a regular file as a block device and detaching it |
+| [filesystems](filesystems/) | Making, checking, repairing, detecting, mounting and unmounting filesystems |
 | [wipe](wipe/) | Crypto-erase and full-device sanitization |
 | [fips](fips/) | FIPS 140-3 mode, SHA-1 handling, `MigrateToFIPS` |
 | [cryptsetup-interop](cryptsetup-interop/) | Compatibility policy, the two-way interop matrix |
 
-[design/DESIGN.md](design/DESIGN.md) is the target architecture and public
-API the redesign was built against; [design/DECISIONS.md](design/DECISIONS.md)
-is the decisions log for every step, including what each step did not finish.
-The redesign has landed: every feature folder above documents the real,
-`go doc`-checked API, not a target, and `make api-diff` holds the exported
-surface to DESIGN.md §B.6. The seam-variable allowlist
-(`test/makefile/seamvars_test.go`) is empty: `pkg/luks2`'s seams live on
-`Volume`'s `volumeSys`.
+Each folder documents the API as shipped. Two checks in `test/tools/apidump`
+hold the exported surface: `make api-diff` (part of `make ci`) checks that
+every export of the pre-1.0 `pkg/luks2` (`baseline/luks2.tsv`) went where its
+row in `baseline/disposition-luks2.tsv` says, and the unit test
+`TestEveryPkgExportIsNamedInAFeatureDoc` fails when an exported identifier of
+any package under `pkg/` is named in no feature folder. Neither
+checks prose against behaviour; that is what each file's `Last verified:`
+stamp records.
+
+The package import graph is data, not prose: `.golangci.yml`'s `depguard`
+section has one rule per package, and `pkg/luks2`'s rule also denies
+`os/exec`, so the core cannot gain root-only or exec code without a lint
+failure. Package-level mutable seams are refused by
+`test/makefile/seamvars_test.go`, whose allowlist is empty: `pkg/luks2`'s
+seams live on `Volume`'s unexported `volumeSys`.
 
 ## Versioning policy
 
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html). Tags carry
-a `v` (`v1.0.0-rc.2`); the `VERSION` file does not (`1.0.0-rc.2`). A `-rc.N`
+a `v` (`v1.0.0-rc.4`); the `VERSION` file does not (`1.0.0-rc.4`). A `-rc.N`
 or `-alpha` suffix is a prerelease (lower precedence than the version it
 precedes) and promises nothing outside this project: `-rc.N` says only "this
 is what `1.0.0` will be unless a defect is found".
@@ -57,10 +67,9 @@ that used to be accepted, or a change to what is written to a LUKS2 header.
 
 Backward compatibility is not a goal for any release candidate. API, on-disk
 choices and CLI change when the design requires it, with no shims, migration
-code or deprecated aliases (owner ruling 2026-10-05: the cleanest API wins, and
-stricter than cryptsetup is fine). `CHANGELOG.md` marks such changes with
-`BREAKING:` in the heading. The API redesign (DESIGN.md) was such a change and
-shipped that way. The pre-1.0 rule expires at the `1.0.0` release.
+code or deprecated aliases: the cleanest API wins, and being stricter than
+cryptsetup is acceptable. `CHANGELOG.md` marks such changes with `BREAKING:`
+in the heading. The pre-1.0 rule expires at the `1.0.0` release.
 
 ### From `1.0.0`
 
@@ -85,35 +94,12 @@ version. If a window is ever adopted it will be stated here and in the
 changelog. The interop contract is in
 [cryptsetup-interop](cryptsetup-interop/architecture.md).
 
-## Migration state
+## Conversion state
 
-This `docs/` tree converted to the feature-folder convention in #277 (H15 of
-the API redesign). What moved, and what is still outstanding:
-
-| Absorbed into | From |
-|---|---|
-| `volumes/` | `ARCHITECTURE.md` (packages/DAG, key custody, keyring, device layer, trust boundaries), `luks/README.md`, `luks/encryption.md`, `cli/{create,open,close,mount,unmount,info,key-input}.md`, and `cli/README.md`'s general command rules and typical session |
-| `keyslots/` | `luks/keyslots.md`, `luks/kdf.md`, `cli/keyslots.md` |
-| `recovery-keys/` | `cli/recovery.md`, recovery-specific notes from `luks/keyslots.md` |
-| `tokens/` | `luks/tokens.md`, `luks/keyprovider.md`, `cli/token.md` |
-| `header/` | `luks/header.md`, `cli/header.md` |
-| `wipe/` | `cli/wipe.md` |
-| `fips/` | `FIPS.md` |
-| `cryptsetup-interop/` | `COMPATIBILITY.md`'s interop matrix, metadata-lock table and stricter-than-cryptsetup table |
-| here (versioning policy) | `COMPATIBILITY.md`'s versions section |
-
-All of the above legacy files are deleted in the same commits that landed
-this index (feature-docs §9).
-
-**The DESIGN.md §G.1 fold is done** (after v1.0.0-rc.2). `TESTING.md`'s coverage,
-unit-runtime and integration-container detail is in
-[volumes/engineering.md](volumes/engineering.md#test-strategy), which the other
-folders' test-strategy sections link to, and `RELEASABILITY.md`'s gate and
-waiver rules are the package documentation of `test/internal/labstrings`
-(`go doc ./test/internal/labstrings`). Both files are deleted. The
-releasability gate does not need a fixed docs path: it scans the whole index.
-`CLAUDE.md`/`AGENTS.md` now exist at `cmd/luks2/` and
-`test/integration/` (DESIGN.md §G.1, project-scaffold §7), alongside the
-root pair. The portfolio view of conversion progress is derived, never
-maintained by hand: count `docs/*/architecture.md` per repo (feature-docs
-§9).
+Every document in this tree is a feature folder or this index; no legacy
+topic file remains. The test-strategy detail is in
+[volumes/engineering.md](volumes/engineering.md#test-strategy), which the
+other folders' test-strategy sections link to, and the releasability gate's
+rules are the package documentation of `test/internal/labstrings`
+(`go doc ./test/internal/labstrings`). The releasability gate scans the whole
+tracked tree, so it does not depend on any docs path.

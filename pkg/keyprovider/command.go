@@ -77,7 +77,7 @@ type Command struct {
 }
 
 // commandSys is this package's seam: the production environment a Command
-// runs its helper with, read once at construction (DESIGN.md §E).
+// runs its helper with, read once at construction (no package-level mutable vars).
 type commandSys struct {
 	// env is the helper's base environment, over the fixed system
 	// directories: a helper does NOT inherit this process's environment,
@@ -169,8 +169,8 @@ func NewCommand(path string, opts ...CommandOption) (*Command, error) {
 var _ luks2.KeyProvider = (*Command)(nil)
 
 // Token returns the metadata for this credential, or the zero Token (empty
-// Type) for an anonymous one, per luks2.KeyProvider -- the identifier
-// collision DECISIONS.md H10d flagged is resolved in H9d's entry.
+// Type) for an anonymous one, per luks2.KeyProvider, which returns a Token
+// by value rather than a *Token.
 func (p *Command) Token() luks2.Token { return p.token }
 
 // Passphrase runs the command and returns the selected output in protected

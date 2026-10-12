@@ -98,8 +98,7 @@
 // Where the patterns live: `patterns`, below. The only DefaultAllowList entry is
 // the gate's own test fixtures.
 //
-// This is the canonical statement of the public-releasability rule (it was
-// docs/RELEASABILITY.md before the DESIGN.md §G.1 fold).
+// This is the canonical statement of the public-releasability rule.
 //
 // RESOLUTION is textual, deliberately: it needs no build tags, no module
 // loading and no parser, so it runs on every tree state including one that does

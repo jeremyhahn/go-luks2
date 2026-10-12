@@ -22,7 +22,7 @@ import (
 )
 
 // seams is this package's one unexported struct of substitutable state
-// (DESIGN.md §E): the device-mapper and kernel-keyring mechanism, the
+// (no package-level mutable vars): the device-mapper and kernel-keyring mechanism, the
 // directory device nodes are made under, the stat used to identify a node,
 // and the clock every wait runs on. Every consumer of this library wants
 // the real kernel; only this package's own tests want anything else, so the

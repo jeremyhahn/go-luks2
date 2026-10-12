@@ -113,7 +113,7 @@ func writeRandom(ctx context.Context, f *os.File, size int64, cryptoRand io.Read
 
 	var written int64
 	for remaining := size; remaining > 0; {
-		// Checked per chunk (DESIGN.md §D.2), so a cancellation is observed
+		// Checked per chunk, so a cancellation is observed
 		// between writes rather than only before the first or after the last.
 		if err := ctx.Err(); err != nil {
 			return &errs.Error{Kind: errs.KindOf(err, errs.ErrIO), Detail: fmt.Sprintf("canceled after writing %d of %d bytes", written, size), Err: err}

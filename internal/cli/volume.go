@@ -160,7 +160,7 @@ func runIsLUKS(ctx context.Context, e *env, args []string) error {
 		if *verbose || *verboseShort {
 			_, _ = fmt.Fprintf(e.stderr, "%s: %v\n", device, reason)
 		}
-		// Deliberately not reason itself: isluks's contract is exit 0/1 (§F),
+		// Deliberately not reason itself: isluks's contract is exit 0/1,
 		// and its sentinel could otherwise land it on exitTable's 2-5.
 		return &Error{Kind: errNotLUKSDevice}
 	}

@@ -29,7 +29,7 @@ type FilesystemCheckResult = filesystem.CheckResult
 // FilesystemCommandError reports that an external filesystem tool exited
 // unsuccessfully, the way the pre-redesign library's luks2.FilesystemCommandError
 // did: pkg/filesystem.CommandError carries the same fields except Device,
-// whose caller already has it (DESIGN.md), so this wraps it back in for
+// whose caller already has it, so this wraps it back in for
 // integration tests that still assert on it.
 type FilesystemCommandError struct {
 	Command string

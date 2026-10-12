@@ -225,7 +225,7 @@ func TestCreateDigestInvalidHashAlgo(t *testing.T) {
 	}{
 		{"MD5", "md5"},
 		// Note: SHA-1 is accepted outside FIPS mode for legacy LUKS headers, so
-		// it is not listed here as an unsupported algorithm (docs/FIPS.md).
+		// it is not listed here as an unsupported algorithm (docs/fips/architecture.md, "SHA-1").
 		{"Unknown", "unknown"},
 		{"Empty", ""},
 	}

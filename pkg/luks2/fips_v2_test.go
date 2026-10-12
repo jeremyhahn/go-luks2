@@ -29,7 +29,7 @@ func cheapMigrationParams() KDFParams {
 }
 
 // argon2VolumeImage formats a fresh temp image with an Argon2id keyslot at
-// the floor DECISIONS.md asks for (m=64MiB t=1 p=1), the shape
+// the minimum legal cost (m=64MiB t=1 p=1), the shape
 // MigrateToFIPS exists to import away from.
 func argon2VolumeImage(t *testing.T, name string) string {
 	t.Helper()

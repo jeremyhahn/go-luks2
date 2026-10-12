@@ -22,8 +22,8 @@ import (
 )
 
 // The waiting logic is exercised here without a loop device; the
-// kernel-facing path is covered by the integration suite in pkg/luks2
-// (moved there by H12), which drives a real detach. Both halves are needed:
+// kernel-facing path is covered by the integration suite in test/integration/loop,
+// which drives a real detach. Both halves are needed:
 // a seam only ever met through a double proves nothing about the plane it
 // stands in for, and a test that needs root proves nothing on a developer's
 // machine.
@@ -317,8 +317,8 @@ func TestDetachTimeoutCauseUsesTheDominantObservation(t *testing.T) {
 	}
 }
 
-// TestWaitForDetachStopsOnceContextIsCancelled is DESIGN.md D.2's
-// cancellation requirement, the detach-side twin of
+// TestWaitForDetachStopsOnceContextIsCancelled is the cancellation
+// requirement (a wait gives up once ctx is done), the detach-side twin of
 // TestWaitForLoopNodeStopsOnceContextIsCancelled.
 func TestWaitForDetachStopsOnceContextIsCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -335,7 +335,7 @@ func TestWaitForDetachStopsOnceContextIsCancelled(t *testing.T) {
 }
 
 // TestDetachDeviceRefusesAnAlreadyCancelledContext pins the ctx-first
-// boundary check DESIGN.md D rules every new exported function to.
+// boundary check every exported function makes.
 func TestDetachDeviceRefusesAnAlreadyCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

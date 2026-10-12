@@ -67,8 +67,8 @@ func DumpTree(root string) (map[string][]Entry, error) {
 }
 
 // ReadFeatureDocs reads every *.md of every feature directory under root. A
-// feature directory is one holding an api.md; anything else (docs/design's
-// decision records, docs/README.md) is not a feature doc.
+// feature directory is one holding an api.md; anything else (docs/README.md, a directory
+// without an api.md) is not a feature doc.
 func ReadFeatureDocs(root string) ([]FeatureDoc, error) {
 	apis, err := filepath.Glob(filepath.Join(root, "*", "api.md"))
 	if err != nil {

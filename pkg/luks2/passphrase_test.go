@@ -14,7 +14,7 @@ import (
 )
 
 // TestValidatePassphraseEnclave holds the enclave-based ValidatePassphrase
-// (DESIGN.md §B.2) to the same bounds validatePassphraseBytes enforces for
+// to the same bounds validatePassphraseBytes enforces for
 // the legacy []byte path: the two must agree, since they share one policy.
 //
 // There is no empty-passphrase case here, unlike

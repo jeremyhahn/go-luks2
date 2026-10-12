@@ -8,8 +8,9 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// LUKS2 on-disk format constants and types live in internal/header; see
-// docs/design/DECISIONS.md's H5 entry.
+// LUKS2 on-disk format constants and types live in internal/header; this
+// file keeps only this package's policy defaults and the header types it
+// re-exports as aliases.
 const (
 	// Default encryption parameters. These are pkg/luks2's own public policy
 	// defaults, not part of the on-disk model, so they stay here rather than
@@ -27,9 +28,8 @@ type (
 	DroppedEntry = header.DroppedEntry
 
 	// LegacyToken is the on-disk token shape (systemd's FIDO2 fields and all)
-	// that Token aliased before DESIGN.md §B.2's generic, value-returning
-	// Token{Type, Keyslots, Members} took the name -- see DECISIONS.md's H9d
-	// entry. The pre-existing free functions in token.go (GetToken,
+	// that Token aliased before the generic, value-returning
+	// Token{Type, Keyslots, Members} took the name. The pre-existing free functions in token.go (GetToken,
 	// ListTokens, ImportToken, ImportTokenJSON) and this package's own old
 	// enrollment path (keyprovider.go, recovery.go) still read and write this
 	// shape directly; Token.toLegacyToken/tokenFromLegacy convert between the

@@ -319,8 +319,8 @@ jobs:
       - name: Public-releasability gate
         run: make releasability
 
-      # DESIGN.md §B.6 / H0 / H13: the current pkg/luks2 API must honor
-      # every disposition in the redesign's table exactly, so a KEEP
+      # The current pkg/luks2 API must honor every disposition in
+      # test/tools/apidump/baseline/disposition-luks2.tsv exactly, so a KEEP
       # identifier that regressed and a DELETE/RENAME/MOVE/UNEXPORT
       # identifier that lingers under its old name both fail the build,
       # not just a human reading `make api-diff`'s report.

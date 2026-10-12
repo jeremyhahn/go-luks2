@@ -693,8 +693,8 @@ func modulePath(t *testing.T) string {
 
 // currentPkgAndInternalPackages returns the repository-relative path of
 // every package under pkg/ and internal/ -- the set the per-package quartet
-// (test-%, coverage-%, bench-%, integration-test-%) is built to cover, per
-// DESIGN.md G.2. test/ and cmd/ are out of this lane's scope: test-cli and
+// (test-%, coverage-%, bench-%, integration-test-%) is built to cover.
+// test/ and cmd/ are not in it: test-cli and
 // the test/ targets are their own, pre-existing, explicit rules.
 func currentPkgAndInternalPackages(t *testing.T) []string {
 	t.Helper()
@@ -713,7 +713,7 @@ func currentPkgAndInternalPackages(t *testing.T) []string {
 }
 
 // TestPerPackageQuartetCoversEveryCurrentPackage is the "adding a package is
-// one line" contract (#276 / DESIGN.md G.2): every package `go list` finds
+// one line" contract: every package `go list` finds
 // under pkg/ and internal/ must resolve through PKG_<name> for test-%,
 // coverage-% and bench-%, named for its last path element. A package added
 // without its PKG_<name> line fails here instead of silently having no
@@ -782,9 +782,7 @@ func TestIntegrationTestPatternRuleDryRunNeverInvokesDocker(t *testing.T) {
 }
 
 // TestIntegrationTestSkipsCleanlyWithNoSuiteYet is the common case today:
-// most internal packages have no test/integration/<name> directory yet
-// (DESIGN.md A.1's per-package tree is a later lane's work, out of this
-// one's scope), and the rule must say so and exit clean -- never silently
+// several packages have no test/integration/<name> directory, and the rule must say so and exit clean -- never silently
 // reach for docker anyway, and never fail either.
 func TestIntegrationTestSkipsCleanlyWithNoSuiteYet(t *testing.T) {
 	bin, marker := dockerInvocationMarker(t)
@@ -943,7 +941,7 @@ func TestDockerBuildUsesTheCLIDockerfile(t *testing.T) {
 // that docker-run hands CLI_IMAGE to the same launcher
 // (test/integration/cmd/docker-run, built as INTEGRATION_DOCKER_RUN) the
 // integration suite uses, which is where the seccomp profile and device
-// scoping DESIGN.md G.2 asks docker-run to carry actually live.
+// scoping docker-run must carry actually live.
 func TestDockerRunUsesTheCLIImageAndTheIntegrationLauncher(t *testing.T) {
 	stdout, stderr := runMake(t, environ(nil, nil), "-n", "docker-run")
 	for _, want := range []string{"IMAGE=go-luks2-cli", "docker-run --rm -it"} {
@@ -955,7 +953,7 @@ func TestDockerRunUsesTheCLIImageAndTheIntegrationLauncher(t *testing.T) {
 
 // TestCleanPreservesTrackedDockerfilesButRemovesEverythingElseUnderBuildDir
 // is the companion to the .gitignore fix ("build/*" / "!build/docker/"):
-// build/docker holds Dockerfiles DESIGN.md G.4 tracks as source, not build
+// build/docker holds Dockerfiles tracked as source, not build
 // output, and clean's old `rm -rf $(BUILD_DIR)` would delete them from the
 // working tree on every run -- recoverable only via `git checkout`, and a
 // surprising thing for a "clean" target to do to committed source. This

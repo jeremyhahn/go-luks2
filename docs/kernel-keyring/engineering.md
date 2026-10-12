@@ -1,6 +1,6 @@
 # Kernel keyring — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (f871541)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against 7ee49b8
 > Conflicts with this document are defects. Fix them here first.
 
 The implementation contract for the keyring path. Design and rejected
@@ -133,9 +133,10 @@ activation ioctl. Nothing is written to the volume or to disk.
   substitute. A seccomp block, a release that does not take and a pre-existing
   entry cannot be produced for real, so they are injected here; `Live()` is the
   real implementation.
-- **Integration:** `TestCheckKeyringPassesOnARealKernel` and the activation
-  tests under `test/integration/dmcrypt` run against a real kernel, in a
-  container with `test/integration/seccomp.json` (Docker's default profile plus
+- **Integration:** `TestCheckKeyringPassesOnARealKernel`
+  (`pkg/dmcrypt/activate_integration_test.go`), the keyring suite under
+  `test/integration/keyring` and the activation tests under
+  `test/integration/dmcrypt` run against a real kernel, in a container with `test/integration/seccomp.json` (Docker's default profile plus
   an allow block for the three syscalls). See
   [volumes/engineering.md](../volumes/engineering.md).
 

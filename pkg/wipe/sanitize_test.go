@@ -303,7 +303,7 @@ func TestWritePassReportsProgress(t *testing.T) {
 }
 
 // TestWritePassStopsAtTheChunkBoundaryOnCancellation: ctx is checked once per
-// chunk (DESIGN.md D.2), and a cancellation reports the kind and how far the
+// chunk, and a cancellation reports the kind and how far the
 // pass got.
 func TestWritePassStopsAtTheChunkBoundaryOnCancellation(t *testing.T) {
 	size := 3 * chunk

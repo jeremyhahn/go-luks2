@@ -22,7 +22,7 @@ import (
 // so none of this handles a secret. pkg/luks2 exposes AddToken, SetToken
 // and RemoveToken on *Volume, plus (*Header).Tokens() for reading; "free",
 // "exists" and "count" are computed from that map here, since the library
-// has no dedicated calls for them (DESIGN.md §B.2).
+// has no dedicated calls for them.
 
 // maxTokenJSONSize bounds a token document this tool will read: the whole
 // LUKS2 JSON metadata area is at most a few MiB, and one token is a small

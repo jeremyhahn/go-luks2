@@ -1,21 +1,19 @@
 # Volumes — API
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against 7ee49b8
 > Conflicts with this document are defects. Fix them here first.
 
-go-luks2 is a Layer 0 library (`docs/00-ownership-and-sdk-boundary.md` §L1
-exemption): it is consumed as an ordinary Go library, not as a stack service,
-so it carries no §R row and the six-transport tier system in
-`api-conventions.md` does not apply to it.
+The Go API, embedded transport only. go-luks2 is an embedded Go
+library; it has no REST, gRPC, QUIC, MCP or Unix-socket transport.
 
 | Transport | Form |
 |---|---|
 | Embedded (Go call) | `pkg/luks2` directly; see [engineering.md](engineering.md#exported-surface) for the volume-lifecycle surface |
-| Unix socket | Not applicable, Layer 0 library (docs/00 §L1 exemption) |
-| REST | Not applicable, Layer 0 library (docs/00 §L1 exemption) |
-| gRPC | Not applicable, Layer 0 library (docs/00 §L1 exemption) |
-| QUIC | Not applicable, Layer 0 library (docs/00 §L1 exemption) |
-| MCP | Not applicable, Layer 0 library (docs/00 §L1 exemption) |
+| Unix socket | None |
+| REST | None |
+| gRPC | None |
+| QUIC | None |
+| MCP | None |
 
 There is no request/response schema, status code mapping or `scp` permission
 to document here: this library has no process boundary of its own. A consumer

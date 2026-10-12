@@ -19,7 +19,7 @@ import (
 type Error = errs.Error
 
 // Sentinels that can be checked with errors.Is. Detail carries the object and
-// the reason; these name only the classification (DESIGN.md C.2).
+// the reason; these name only the classification.
 var (
 	// ErrNotFound indicates no loop device is attached to the file [Find] was
 	// asked about. The text is matched by existing callers, so it is kept

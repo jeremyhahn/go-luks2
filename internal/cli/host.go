@@ -15,7 +15,7 @@ import (
 
 // mapping is the host's view of one active dm-crypt mapping: enough to
 // build its device-mapper path and to check whether a filesystem on it is
-// mounted. DESIGN.md §B.3's pkg/dmcrypt.Mapping carries Name, UUID, Major
+// mounted. pkg/dmcrypt.Mapping carries Name, UUID, Major
 // and Minor; this carries only the fields open.go, close.go and mount.go
 // actually use today.
 type mapping struct {
@@ -27,7 +27,7 @@ type mapping struct {
 // pkg/dmcrypt.Mapping.Path will report it.
 func (m mapping) path() string { return "/dev/mapper/" + m.name }
 
-// activator is the dm-crypt boundary (DESIGN.md §B.3): activate a volume
+// activator is the dm-crypt boundary (pkg/dmcrypt): activate a volume
 // key as a named mapping, tear one down, and resolve a mapping name back to
 // its device number. Every method mirrors a pkg/dmcrypt function 1:1.
 // realActivator, below, is the production implementation; open, close,
@@ -38,7 +38,7 @@ type activator interface {
 	lookup(ctx context.Context, name string) (mapping, error)
 }
 
-// mounter is the filesystem boundary (DESIGN.md §B.5's pkg/filesystem),
+// mounter is the filesystem boundary (pkg/filesystem),
 // kept behind an interface so a unit test never touches the real mount
 // table.
 type mounter interface {
@@ -64,7 +64,7 @@ type loopDevice struct {
 
 func (d loopDevice) path() string { return d.devPath }
 
-// looper is the loop-device boundary (DESIGN.md §B.5's pkg/loop): attach a
+// looper is the loop-device boundary (pkg/loop): attach a
 // file as a loop device, and detach one again. create's file-volume flow is
 // the only user: it formats a regular file directly, then needs a block
 // device to activate a dm-crypt mapping on.

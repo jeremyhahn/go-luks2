@@ -42,9 +42,9 @@ const MaxNameLength = 127
 // The rules cover the name reaching the dm ioctl's fixed-width field, the
 // /dev/mapper/<name> path this package creates and removes, the dm UUID
 // that proves a target belongs to one activation, and the kernel-keyring
-// description derived from that UUID -- one whitelist for all of it. This
-// was luks2.ValidateMappingName before B.6 moved it here (#268): pkg/luks2
-// no longer has a mapping-name-shaped call site of its own.
+// description derived from that UUID -- one whitelist for all of it. It
+// lives here rather than in pkg/luks2 because pkg/luks2 has no
+// mapping-name-shaped call site of its own.
 func ValidateName(name string) error {
 	if name == "" {
 		return &errs.Error{Kind: ErrInvalidName, Detail: "the name is empty"}
@@ -127,8 +127,8 @@ func Lookup(ctx context.Context, name string) (*Mapping, error) {
 	return &Mapping{Name: name, UUID: info.UUID, Major: major, Minor: minor}, nil
 }
 
-// ctxErr reports ctx's own error, classified as DESIGN.md §C.2 rule 5
-// requires: Kind is ctx.Err() itself, so errors.Is(err,
+// ctxErr reports ctx's own error, classified the way every cancellation
+// is: Kind is ctx.Err() itself, so errors.Is(err,
 // context.DeadlineExceeded) holds.
 func ctxErr(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {

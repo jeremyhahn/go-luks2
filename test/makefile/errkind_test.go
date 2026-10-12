@@ -38,7 +38,7 @@ func errsAliasName(file *ast.File) string {
 }
 
 // declaresErrorAlias reports whether file declares `type Error = errs.Error`
-// (DESIGN.md §C.1: the struct is aliased in every public package), under
+// (the struct is aliased in every public package), under
 // whatever local name file's own import of internal/errs resolves to.
 func declaresErrorAlias(file *ast.File, errsLocal string) bool {
 	if errsLocal == "" {
@@ -157,10 +157,10 @@ func errKindDirs(t *testing.T, root string) []string {
 	return dirs
 }
 
-// TestKindIsNeverNil enforces DESIGN.md §C.1/§C.2: every errs.Error literal
+// TestKindIsNeverNil enforces that Kind is never nil: every errs.Error literal
 // in production code (pkg/ and internal/) sets Kind. There is no allowlist --
-// a nil Kind is always a defect, classified by the per-site judgment call
-// DECISIONS.md's H13 entry deferred, not by a list this test maintains.
+// a nil Kind is always a defect, fixed by classifying that site, not by a
+// list this test maintains.
 func TestKindIsNeverNil(t *testing.T) {
 	root := repoRoot(t)
 
@@ -183,7 +183,7 @@ func TestKindIsNeverNil(t *testing.T) {
 
 	sort.Slice(all, func(i, j int) bool { return all[i].pos < all[j].pos })
 	for _, f := range all {
-		t.Errorf("%s: errs.Error literal at %s has no Kind (DESIGN.md §C.1: Kind is never nil)", f.rel, f.pos)
+		t.Errorf("%s: errs.Error literal at %s has no Kind (Kind is never nil)", f.rel, f.pos)
 	}
 }
 

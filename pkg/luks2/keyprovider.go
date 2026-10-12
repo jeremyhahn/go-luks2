@@ -28,17 +28,16 @@ import (
 // pkg/keyprovider must not import.
 
 // KeyProvider yields a volume credential from outside this process, together
-// with the token that records where it came from (DESIGN.md §B.2).
+// with the token that records where it came from.
 //
 // The credential is returned in protected memory and is the CALLER's to
 // Destroy. Token returns the metadata to write into the LUKS2 header alongside
 // the keyslot; its Keyslots field is filled in by Enroll (provider.go), which
 // is the only place that knows the answer.
 //
-// This replaces the old KeyProvider{Token() *Token} in place (DECISIONS.md
-// H9d): the method set cannot be redeclared under one name with two shapes,
-// and "no backward compatibility is required" is the owner ruling that
-// settles which shape keeps the name.
+// This replaces the old KeyProvider{Token() *Token} in place: the method set
+// cannot be redeclared under one name with two shapes, and the API carries no
+// backward-compatibility promise, so the new shape keeps the name.
 type KeyProvider interface {
 	// Passphrase runs whatever produces the credential and returns it. ctx
 	// bounds the work: a hardware authenticator waiting for a touch blocks

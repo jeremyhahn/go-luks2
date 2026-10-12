@@ -571,7 +571,7 @@ func migrateToFIPS(ctx context.Context, device string, passphrase []byte, opts *
 }
 
 // fipsRefusal is one of the migration's own refusals, classified at its
-// source (DESIGN.md §C.1): Kind is the refusal's sentinel and Err the failure
+// source: Kind is the refusal's sentinel and Err the failure
 // that led to it, when there is one, so errors.Is reaches both. It is only
 // ever returned through fail, whose *FIPSMigrationError makes it an
 // ErrFIPSMigration and which errAt classifies as one; Kind is therefore not

@@ -159,11 +159,11 @@ func TestReadExceptionsRefusesMalformedRows(t *testing.T) {
 
 func TestReadFeatureDocsRefusesATreeWithoutFeatures(t *testing.T) {
 	dir := t.TempDir()
-	// A directory without an api.md is not a feature (docs/design).
-	if err := os.MkdirAll(filepath.Join(dir, "design"), 0o750); err != nil {
+	// A directory without an api.md is not a feature, whatever it holds.
+	if err := os.MkdirAll(filepath.Join(dir, "notes"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, filepath.Join(dir, "design"), "DESIGN.md", "`Volume`\n")
+	writeFile(t, filepath.Join(dir, "notes"), "NOTES.md", "`Volume`\n")
 	if _, err := ReadFeatureDocs(dir); !errors.Is(err, ErrNoDocs) {
 		t.Fatalf("ReadFeatureDocs = %v, want ErrNoDocs", err)
 	}

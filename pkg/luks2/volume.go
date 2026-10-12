@@ -23,8 +23,9 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
-// volumeSys carries Volume's seams: the fields DESIGN.md §E asks every
-// handle to hold, defaulted once at construction (Open, or a free function's
+// volumeSys carries Volume's seams as fields of the handle rather than
+// package-level variables, so no production path can flip one and tests can
+// run in parallel. They are defaulted once at construction (Open, or a free function's
 // own entry point) and never reassigned afterwards. A test that needs one
 // different builds its own volumeSys (defaultVolumeSys with one field
 // overridden) and either constructs a Volume carrying it directly or calls
@@ -244,12 +245,12 @@ func (v *Volume) lockFor(ctx context.Context, mode device.LockMode) (*device.Loc
 	return v.pinned.Lock(ctx, mode, v.sys.lockWait, v.sys.clock, v.sys.lockDir, v.sys.openLockFile, v.sys.lockHeld)
 }
 
-// errAt is this package's boundary call into errs.At (DESIGN.md §C.2 rule
-// 4): every new exported Volume method calls it exactly once, on the way
-// out, naming its own Op.
+// errAt is this package's boundary call into errs.At: every new exported
+// Volume method calls it exactly once, on the way out, naming its own Op.
+// errs.At fills Op and Path only where they are empty and never stacks a
+// second wrapper.
 func errAt(op, path string, err error) error {
-	// Nothing leaves the API unclassified or unstamped (DESIGN.md §C.1,
-	// §C.2): an error that is not itself an *errs.Error -- a bare sentinel, a
+	// Nothing leaves the API unclassified or unstamped: an error that is not itself an *errs.Error -- a bare sentinel, a
 	// context error, a typed error from below such as *FIPSMigrationError --
 	// is wrapped here, with the kind its chain already carries or, failing
 	// that, the kind errors.Is reports for it. A typed error that only holds

@@ -1,6 +1,6 @@
 # dm-crypt activation — user guide
 
-> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (f871541)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against 7ee49b8
 > Conflicts with this document are defects. Fix them here first.
 
 Opening a LUKS2 volume gives you a plaintext device at `/dev/mapper/<name>`;
@@ -57,7 +57,7 @@ open. See [api.md](api.md).
 |---|---|
 | `invalid device-mapper mapping name` | The name has a character outside letters, digits and `_ . + -`, starts with something else, is `.`, `..` or `control`, or is over 127 bytes. Choose another. |
 | `mapping is already active` | The name is in use. `luks2 close` it, or pick another name. |
-| `kernel keyring` error naming syscalls or a quota | The keyring is blocked (container seccomp profile), unsupported by the kernel, or out of quota. The message names the remedy; allow the syscalls in the container profile, or free keys. |
+| `could not … keyring` error naming syscalls or a quota | The keyring is blocked (container seccomp profile), unsupported by the kernel, or out of quota. The message names the remedy; allow the syscalls in the container profile, or free keys. |
 | `master key verification failed` | Wrong passphrase, or the header changed since the key was checked. Try again. |
 | `mapping is not active` on close | Nothing is open under that name. It may already be closed. |
 | `device-mapper target is held open` on close | Something is using the mapping. Unmount it and stop programs using it; the message names `lsof`, `mount` and `dmsetup info -c` to find the holder. `dmsetup remove --deferred <name>` removes it when it frees. |

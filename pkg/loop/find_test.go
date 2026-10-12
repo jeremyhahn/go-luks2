@@ -155,8 +155,8 @@ func TestExportedEntriesStampOpAndPath(t *testing.T) {
 }
 
 // TestFindRefusesAnAlreadyCancelledContext and TestLookupRefusesAnAlreadyCancelledContext
-// pin the ctx-first boundary check DESIGN.md D rules every new exported
-// function to.
+// pin the ctx-first boundary check every exported function makes: a
+// context already canceled is refused before any work.
 func TestFindRefusesAnAlreadyCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

@@ -31,7 +31,7 @@ Each item names the `docs/<feature>/` folder that specifies it. Folders still in
 - [#335](../../issues/335) every export gated against the feature docs, failing when an exported identifier appears in no `docs/<feature>/` file, in [docs/volumes/](docs/volumes/) (the api-diff contract): in review
 - [#330](../../issues/330) roadmap names the feature folder behind every item, across all of [docs/](docs/): in review
 - [#324](../../issues/324) keyring-unavailable remedy names `dmcrypt.CheckKeyring`, in `docs/kernel-keyring/`: in review
-- [#331](../../issues/331) docs scrub: remaining design content migrated out of [docs/design/](docs/design/) into every feature folder, feature docs publication-clean, `docs/design/` retired with the docs index and stamps current, in all of [docs/](docs/): blocked: waits for open PRs to land
+- [#331](../../issues/331) docs scrub: remaining content of the monolithic design record migrated into every feature folder, feature docs publication-clean, the design record retired with the docs index and stamps current, in all of [docs/](docs/): blocked: waits for open PRs to land
 
 ## Next
 
@@ -58,5 +58,5 @@ Nothing accepted. New work arrives as issues.
 
 ## Non-goals
 
-- Ownership boundaries and non-goals are defined in [the ownership and SDK boundary document, §R](../handbook/software/docs/00-ownership-and-sdk-boundary.md).
+- No service transport: go-luks2 is an embedded Go library with no REST, gRPC, QUIC, MCP or Unix-socket form ([docs/volumes/api.md](docs/volumes/api.md)).
 - No in-house dependency beyond go-enclave.

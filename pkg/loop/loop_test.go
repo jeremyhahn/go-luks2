@@ -23,8 +23,7 @@ import (
 )
 
 // The waiting logic is exercised here without a loop device; the
-// kernel-facing path is covered by the integration suite in pkg/luks2 (moved
-// there by H12), which drives a real attach. Both halves are needed: a seam
+// kernel-facing path is covered by the integration suite in test/integration/loop,$!1 which drives a real attach. Both halves are needed: a seam
 // only ever met through a double proves nothing about the plane it stands in
 // for, and a test that needs root proves nothing on a developer's machine.
 
@@ -144,8 +143,8 @@ func TestWaitForLoopNodeAcceptsAnExistingNodeImmediately(t *testing.T) {
 	}
 }
 
-// TestWaitForLoopNodeStopsOnceContextIsCancelled is DESIGN.md D.2's
-// cancellation requirement: a wait is a select on ctx.Done() and a clock
+// TestWaitForLoopNodeStopsOnceContextIsCancelled is the cancellation
+// requirement: a wait is a select on ctx.Done() and a clock
 // timer, so a caller that gives up is not held past its own cancellation.
 //
 // The context is canceled from the fake clock's OnWait hook, which runs
@@ -171,7 +170,7 @@ func TestWaitForLoopNodeStopsOnceContextIsCancelled(t *testing.T) {
 }
 
 // TestAttachRefusesAnAlreadyCancelledContext pins the ctx-first boundary
-// check DESIGN.md D rules every new exported function to: a caller that
+// check every exported function makes: a caller that
 // hands Attach a context canceled before the call gets ctx.Err() back
 // without the function touching the filesystem or a device.
 func TestAttachRefusesAnAlreadyCancelledContext(t *testing.T) {

@@ -12,7 +12,7 @@ import (
 
 // enclaveBuffer grows a credential directly in locked memory, one byte at a
 // time, so a key file or a piped passphrase of unknown length is never held
-// anywhere else (DESIGN.md §B.7: "input is read straight into an enclave").
+// anywhere else: credential input is read straight into an enclave.
 // It doubles capacity by allocating a new, larger enclave and copying the
 // old one's content across under a borrow of both, which is the only way to
 // grow without a plain-heap intermediate.

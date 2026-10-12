@@ -15,8 +15,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// These three tests close H8's KDF cancellation gap (DESIGN.md §D.2, KDF
-// row): a derivation in flight when ctx is canceled is not interruptible
+// These three tests pin how a KDF observes cancellation: a derivation in flight when ctx is canceled is not interruptible
 // and is not abandoned either -- it runs to completion, its output is
 // destroyed, and the call reports ctx.Err()'s kind. internal/kdf.Deriver
 // already proves this at the primitive (see internal/kdf/kdf_test.go); these

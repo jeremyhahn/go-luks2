@@ -45,7 +45,8 @@ func wipeHeaders(ctx context.Context, f *os.File) error {
 func zeroRange(ctx context.Context, f *os.File, offset, size int64) error {
 	zeros := make([]byte, keyslotWipeChunk)
 	for done := int64(0); done < size; {
-		// Checked per chunk (DESIGN.md §D.2).
+		// ctx is checked per chunk, so a cancellation stops the wipe between
+		// writes.
 		if err := ctx.Err(); err != nil {
 			return err
 		}

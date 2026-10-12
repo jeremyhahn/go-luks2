@@ -917,8 +917,8 @@ func TestAddKeyDerivesTheNewKeyslotsKeySizeFromTheVolumeKey(t *testing.T) {
 	}
 }
 
-// TestAddKeyslotWithMasterKeyCancelledBeforeWriteLeavesNoPartialKeyslot is
-// DESIGN.md §D.2's write-transaction row: ctx is consulted only at
+// TestAddKeyslotWithMasterKeyCancelledBeforeWriteLeavesNoPartialKeyslot pins
+// the write-transaction rule: ctx is consulted only at
 // keyslotWriteStep's boundaries, so a ctx already canceled before the first
 // write of a new keyslot stops the operation there, before a byte of key
 // material or header reaches the device, and leaves no partial keyslot.
@@ -975,8 +975,8 @@ func TestAddKeyslotWithMasterKeyCancelledBeforeWriteLeavesNoPartialKeyslot(t *te
 	}
 }
 
-// TestRollBackAddedKeyslotRunsDespiteACancelledCtx is DESIGN.md §D.2's dm
-// rollback rule, applied to a keyslot rollback: cleanup that must undo an
+// TestRollBackAddedKeyslotRunsDespiteACancelledCtx pins the rollback rule
+// for a keyslot: cleanup that must undo an
 // already-written keyslot runs under context.WithoutCancel and is never
 // skipped because the ctx that started the operation was canceled.
 func TestRollBackAddedKeyslotRunsDespiteACancelledCtx(t *testing.T) {
@@ -1313,7 +1313,7 @@ func TestNoRemovalPathDestroysMaterialBeforeProvingTheHeaderWritable(t *testing.
 
 			shrinkHeaderArea(t, device, header.HeaderSize*2)
 			// The secondary too: with only the primary damaged the removal reads
-			// the secondary, as cryptsetup does (H1), and rightly goes ahead.
+			// the secondary, as cryptsetup does, and rightly goes ahead.
 			tearSecondary(t, device, int64(hdr.HeaderSize)) // #nosec G115 -- a legal header area size
 			before := readAreaBytes(t, device, offset, size)
 

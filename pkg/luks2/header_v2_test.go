@@ -338,9 +338,8 @@ func TestVolumeHeaderSegmentsListsTheDataSegment(t *testing.T) {
 	}
 }
 
-// TestVolumeHeaderTokensListsAnAddedToken closes the gap H9c's and H9d's
-// own entries both flagged (DECISIONS.md): Header.Tokens was not
-// implemented because Token, the value it reports, was H9d's to define.
+// TestVolumeHeaderTokensListsAnAddedToken pins that Header.Tokens reports a
+// token added through the Volume API as a Token value.
 func TestVolumeHeaderTokensListsAnAddedToken(t *testing.T) {
 	path := formattedVolumeImage(t, "tokens-read.img", "", "")
 

@@ -146,7 +146,7 @@ func TestVolumeFormatAppliesItsDefaults(t *testing.T) {
 }
 
 // TestVolumeFormatRefusesArgon2InFIPSMode: KDFParams.Validate's FIPS
-// approval check (DESIGN.md §B.2) reaches (*Volume).Format before anything
+// approval check reaches (*Volume).Format before anything
 // is claimed or written.
 func TestVolumeFormatRefusesArgon2InFIPSMode(t *testing.T) {
 	sys := testVolumeSys()

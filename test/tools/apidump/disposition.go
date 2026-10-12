@@ -11,8 +11,8 @@ import (
 	"strings"
 )
 
-// Action is what the API redesign does to one baseline identifier
-// (DESIGN.md §B.6).
+// Action is what the API redesign does to one baseline identifier, as
+// recorded in baseline/disposition-luks2.tsv.
 type Action string
 
 // The five actions. KEEP keeps the name in its package; RENAME gives it a new
@@ -140,7 +140,7 @@ func CheckHonored(base, current []Entry, dispositions []Disposition) error {
 			problems = append(problems, "KEEP but gone from the current API: "+e.Name)
 		case action != Keep && present:
 			// A RENAME whose target text names the identifier itself
-			// (Segment, H9: redefined in place rather than renamed away)
+			// (Segment: redefined in place rather than renamed away)
 			// can never read as honored by the Kind+Name comparison above,
 			// because the "new" name is the old one. CheckHonored has no
 			// structural comparison to fall back on -- Fields/ifacemethods
@@ -163,7 +163,7 @@ func CheckHonored(base, current []Entry, dispositions []Disposition) error {
 
 // renameKeepsName reports whether a RENAME disposition's target text names
 // the identifier itself: the row describes a type redefined in place
-// (Segment, H9) rather than a move to a different name. Matched on
+// (Segment) rather than a move to a different name. Matched on
 // identifier boundaries, so a target mentioning the name only as part of a
 // longer word ("SegmentGroup") does not count.
 func renameKeepsName(name, target string) bool {

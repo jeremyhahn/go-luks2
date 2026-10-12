@@ -113,7 +113,7 @@ func (d Deriver) DerivePlain(ctx context.Context, passphrase []byte, p Params, k
 		return nil, &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "invalid salt", Err: err}
 	}
 
-	// Checked before each derivation (DESIGN.md §D.2): a PBKDF2/argon2 run in
+	// ctx is checked before each derivation: a PBKDF2/argon2 run in
 	// flight cannot be interrupted, so cancellation is observed here, at the
 	// one point before the derivation starts, rather than attempted inside it.
 	if err := ctx.Err(); err != nil {

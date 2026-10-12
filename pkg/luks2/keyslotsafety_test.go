@@ -620,7 +620,7 @@ func TestRecoveryKeysAreAtLeast256BitsInAKnownFormat(t *testing.T) {
 
 	// NewRecoveryKey refuses a too-short length on its own, before there is
 	// any rk to hand (*Volume).AddRecoveryKey at all -- the two are
-	// deliberately two-phase (DESIGN.md §B.2), unlike the old combined
+	// deliberately two-phase, unlike the old combined
 	// AddRecoveryKey(device, existing, &RecoveryKeyOptions{Length: 4}).
 	if _, err := NewRecoveryKey(WithRecoveryLength(4)); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("NewRecoveryKey with a 4-byte length returned %v, want ErrInvalidArgument", err)

@@ -29,7 +29,7 @@ import (
 // on-disk format specification's reencryption section.
 //
 // The pure, in-memory passthrough tests for this fixture now live in
-// internal/header's own test suite (H5); what remains here is the half that
+// internal/header's own test suite; what remains here is the half that
 // needs a real device and the cryptsetup binary.
 const realReencryptKeyslot = `{
 	"type": "reencrypt",

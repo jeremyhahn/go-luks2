@@ -63,7 +63,7 @@ func lockFileFor(t *testing.T, path string) string {
 //
 // The original asserted this by substituting pkg/luks2's own unexported
 // readUnlockHeader seam to see whether the header it read carried token 7 --
-// a seam that no longer exists after the H9 rewrite folded that read into
+// a seam that no longer exists after the Volume rewrite folded that read into
 // header.ReadHeaderCopyFrom with no package-level var left to intercept, and
 // that this black-box package could not reach even if it did. What the seam
 // proved is instead proven by TIMING: Volume.Unlock's first step is an

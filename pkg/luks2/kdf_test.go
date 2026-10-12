@@ -887,7 +887,8 @@ func TestFIPSCompliantKDF(t *testing.T) {
 		{"Pbkdf2-Sha512", true, "mixed case should be FIPS compliant"},
 		// Non-FIPS compliant types
 		// PBKDF2-HMAC-SHA1 is rejected by the Go Cryptographic Module, which
-		// permits PBKDF2 only with SHA-2/SHA-3 (docs/FIPS.md).
+		// permits PBKDF2 only with SHA-2/SHA-3 (docs/fips/architecture.md,
+		// "The PBKDF2-HMAC-SHA1 exemption").
 		{kdfTypePBKDF2SHA1, false, "pbkdf2-sha1 should NOT be FIPS compliant"},
 		{"PBKDF2-SHA1", false, "uppercase PBKDF2-SHA1 should NOT be FIPS compliant"},
 		{kdfTypeArgon2i, false, "argon2i should NOT be FIPS compliant"},
@@ -1002,7 +1003,8 @@ func TestGetHashAlgoForKDFType(t *testing.T) {
 // written by cryptsetup releases that defaulted to SHA-1. In FIPS 140-3 mode
 // the derivation must be refused with ErrFIPSNotApproved instead of reaching
 // the Go Cryptographic Module, which panics on PBKDF2-HMAC-SHA1 under
-// GODEBUG=fips140=only. See docs/FIPS.md.
+// GODEBUG=fips140=only. See docs/fips/architecture.md, "The PBKDF2-HMAC-SHA1
+// exemption".
 func TestDeriveKeyPBKDF2SHA1(t *testing.T) {
 	iterations := 1000
 	salt := []byte("testsalt12345678")
@@ -1082,7 +1084,7 @@ func TestDeriveKeyPBKDF2SHA384(t *testing.T) {
 }
 
 // TestBenchmarkPBKDF2SHA1 tests PBKDF2 benchmarking with SHA-1, and that it is
-// refused in FIPS 140-3 mode (docs/FIPS.md).
+// refused in FIPS 140-3 mode (docs/fips/architecture.md, "SHA-1").
 func TestBenchmarkPBKDF2SHA1(t *testing.T) {
 	defer parallel(t)()
 
@@ -1259,7 +1261,7 @@ func TestPBKDF2HashFunctionsDifferent(t *testing.T) {
 
 	hashAlgos := []string{"sha256", "sha384", "sha512"}
 	if !fips140.Enabled() {
-		// SHA-1 only participates outside FIPS mode (docs/FIPS.md).
+		// SHA-1 only participates outside FIPS mode (docs/fips/architecture.md, "SHA-1").
 		hashAlgos = append([]string{"sha1"}, hashAlgos...)
 	}
 	keys := make(map[string][]byte)
@@ -1293,7 +1295,8 @@ func TestPBKDF2HashFunctionsDifferent(t *testing.T) {
 // TestGetPBKDF2HashFunc tests the hash function getter directly
 func TestGetPBKDF2HashFunc(t *testing.T) {
 	// SHA-1 is refused while the Go Cryptographic Module is enabled; outside
-	// FIPS mode it stays available for legacy LUKS headers (docs/FIPS.md).
+	// FIPS mode it stays available for legacy LUKS headers (docs/fips/architecture.md,
+	// "SHA-1").
 	sha1Rejected := fips140.Enabled()
 
 	tests := []struct {
@@ -1460,7 +1463,7 @@ func TestCreateKDFPBKDF2SHA1HashAlgoOverride(t *testing.T) {
 // library has to. Every entry point is covered — an externally supplied header
 // reaching deriveKeyPlain, an explicit CreateKDF request, and CreateKDF's empty
 // default — so a FIPS-mode process can neither unlock nor write a non-approved
-// keyslot. Outside FIPS mode all three must keep working. See docs/FIPS.md.
+// keyslot. Outside FIPS mode all three must keep working. See docs/fips/engineering.md, "Invariants".
 func TestArgon2RefusedInFIPSMode(t *testing.T) {
 	defer parallel(t)()
 

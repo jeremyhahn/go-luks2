@@ -67,7 +67,7 @@ const defaultDetachPoll = 500 * time.Microsecond
 // and the OS-facing functions a test substitutes. Every field is set once,
 // in [defaultSys], and read -- never reassigned -- by [Attach], [Find] and
 // [Lookup], which hand it to the [Device] they return. There is no
-// package-level mutable var of func or interface type (DESIGN.md E).
+// package-level mutable var of func or interface type.
 type sys struct {
 	clk clock.Clock
 

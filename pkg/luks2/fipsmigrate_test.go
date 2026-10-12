@@ -731,8 +731,8 @@ func TestFIPSApprovedKDFIncludesTheHash(t *testing.T) {
 
 // TestFIPSMigrationErrorMigrationStageMapsEveryStageString locks down
 // FIPSMigrationError.MigrationStage's mapping from migrateToFIPS's ten
-// Stage strings onto DESIGN.md §B.2's five FIPSMigrationStage values,
-// recorded in DECISIONS.md's H9 train-merge entry.
+// Stage strings onto the five FIPSMigrationStage values, as tabled in
+// MigrationStage's doc comment.
 func TestFIPSMigrationErrorMigrationStageMapsEveryStageString(t *testing.T) {
 	tests := []struct {
 		stage string

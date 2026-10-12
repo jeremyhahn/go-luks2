@@ -138,7 +138,7 @@ build: ## Build the CLI binary
 	@mkdir -p $(BUILD_DIR)
 	@$(GO) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./$(CMD_DIR)
 	@echo "$(COLOR_GREEN)✓ Build complete: $(BUILD_DIR)/$(BINARY_NAME) (v$(BUILD_VERSION))$(COLOR_RESET)"
-	@echo "$(COLOR_BOLD)Cross-compiling pkg/luks2 and pkg/keyprovider for darwin (§A.3)...$(COLOR_RESET)"
+	@echo "$(COLOR_BOLD)Cross-compiling pkg/luks2 and pkg/keyprovider for darwin (both must build off Linux)...$(COLOR_RESET)"
 	@GOOS=darwin GOARCH=amd64 $(GO) build ./pkg/luks2 ./pkg/keyprovider
 	@GOOS=darwin GOARCH=arm64 $(GO) build ./pkg/luks2 ./pkg/keyprovider
 	@echo "$(COLOR_GREEN)✓ darwin/amd64 and darwin/arm64 build$(COLOR_RESET)"
@@ -637,7 +637,7 @@ docker-run-bin: ## Build the integration container launcher (build/docker-run)
 	@mkdir -p $(BUILD_DIR)
 	@$(GO) build -o $(DOCKER_RUN_BIN) ./test/tools/docker-run
 
-# ---- the CLI image (#276 / DESIGN.md G.2) ----
+# ---- the CLI image ----
 #
 # build/docker/cli is the production image: the luks2 binary and the
 # cryptsetup userspace tools it shells out to, nothing a developer or CI
@@ -668,14 +668,11 @@ docker-build: ## Build the CLI image from build/docker/cli
 docker-run: docker-build docker-run-bin ## Run the CLI image, with the integration seccomp profile and device scoping (ARGS="..." passes CLI args)
 	@IMAGE=$(CLI_IMAGE) $(INTEGRATION_DOCKER_RUN) --rm -it -- $(ARGS)
 
-# ---- the per-package quartet (#276 / DESIGN.md G.2) ----
+# ---- the per-package quartet ----
 #
-# PKG_<name> maps a short name to its import path, one entry per package this
-# lane owns: every CURRENT pkg/ and internal/ package. (DESIGN.md B.5's
-# remaining public packages that have no line here yet -- keyprovider --
-# do not have one simply because no lane has added it; whichever lane does
-# adds its line here, same as any other new package.) PKG_NAMES lists every
-# key so test-%,
+# PKG_<name> maps a short name to its import path, one entry per pkg/ and
+# internal/ package: every package `go list` finds there has a line, and a new
+# package adds its own. PKG_NAMES lists every key so test-%,
 # coverage-%, bench-% and integration-test-% below can resolve PKG_$* for
 # ANY name without a second edit anywhere else: adding a package is exactly
 # the two lines below, nothing in the pattern rules changes.
@@ -722,10 +719,8 @@ bench-%: ## Benchmarks for one package by name, e.g. `make bench-kdf` (a package
 	echo "$(COLOR_BOLD)Running benchmarks for $$pkg ($*)...$(COLOR_RESET)"; \
 	$(GO) test -run='^$$' -bench=. -benchmem "$$pkg"
 
-# integration-test-% runs the test/integration/<name>/ directory DESIGN.md
-# A.1 plans per package (#274 relocated the per-package suites out of the
-# former test/integration/pkg catch-all). A name with no directory yet exits
-# clean rather than claiming a pass for a suite that does not exist: a
+# integration-test-% runs the per-package suite in test/integration/<name>/.
+# A name with no directory yet exits clean rather than claiming a pass for a suite that does not exist: a
 # silent no-op here is indistinguishable from "nothing to test" only if it
 # is the TRUTH, not an assumption. No ITEST_DIR_<name> overrides remain --
 # every mapped name's test directory now matches its own.
@@ -839,15 +834,14 @@ host-integration-test: build ## Run integration tests on host (requires sudo, NO
 
 test-integration: integration-test ## Alias for integration-test
 
-# ---- the exported-API record (API redesign, DESIGN.md H0, H13) ----
+# ---- the exported-API record ----
 #
 # test/tools/apidump/baseline holds the API as released in 0.5.0-alpha and the
 # redesign's disposition of every pkg/luks2 identifier. That the dispositions
 # cover the baseline exactly is a unit test of the tool, so test-unit gates
 # it. api-diff is the gate that every disposition is HONOURED: a KEEP
 # identifier is still there, and every RENAME/MOVE/UNEXPORT/DELETE identifier
-# is gone from the current API (DESIGN.md §B.6, H0 "H13 turns it into the
-# gate").
+# is gone from the current API.
 API_BASELINE=test/tools/apidump/baseline
 
 api-dump: ## Print the exported API of pkg/luks2 and cmd/luks2
@@ -1172,7 +1166,7 @@ check: fmt vet test ## Run all quality checks (format, vet, test)
 
 clean: ## Clean build artifacts and test files
 	@echo "$(COLOR_BOLD)Cleaning...$(COLOR_RESET)"
-	@# $(BUILD_DIR)/docker holds TRACKED Dockerfiles (DESIGN.md G.4), not
+	@# $(BUILD_DIR)/docker holds TRACKED Dockerfiles (source), not
 	@# build output -- the same reason .gitignore excludes it from "build/*".
 	@# A plain `rm -rf $(BUILD_DIR)` would delete committed source from the
 	@# working tree on every `make clean`, recoverable only via `git checkout`.
@@ -1366,9 +1360,8 @@ RELEASE_REMOTE ?= dev
 # locally. Two releases had to be cut by hand because of it.
 #
 # The contract now:
-#   - There is ONE TARGET PER KIND (release-versioning.md 1a, owner ruling
-#     2026-10-07), each refusing the other two BEFORE anything is written, and
-#     naming the right target in the refusal:
+#   - There is ONE TARGET PER KIND (release-versioning.md 1a), each refusing
+#     the other two BEFORE anything is written, and naming the right target in the refusal:
 #       make release-alpha    [VERSION=vX.Y.Z-alpha]  an alpha (derived if omitted)
 #       make release-candidate VERSION=vX.Y.Z-rc.N    a release candidate
 #       make release           VERSION=vX.Y.Z         a final release
@@ -1376,8 +1369,7 @@ RELEASE_REMOTE ?= dev
 #     drift apart; a target adds only the kind it exports.
 #   - The version is EXPLICIT for release-candidate and release: whoever cuts
 #     one decides patch/minor/major and says so, and the recipe refuses to guess.
-#     release-alpha alone derives it (owner ruling 2026-10-08, release-versioning.md
-#     1a and 2): with no VERSION it takes the highest vX.Y.Z-alpha tag, local and
+#     release-alpha alone derives it (release-versioning.md 1a and 2): with no VERSION it takes the highest vX.Y.Z-alpha tag, local and
 #     on the release remote, adds 1 to PATCH, prints the result and then runs the
 #     same RELEASE_RECIPE on it through a nested make, so every guard below still
 #     runs on the derived version. It refuses, and prints the explicit form, when
@@ -1385,7 +1377,7 @@ RELEASE_REMOTE ?= dev
 #     when any existing tag (an rc or a final release of the same or a higher
 #     X.Y.Z outranks the alpha) is at or above the result. An explicit
 #     VERSION=vX.Y.Z-alpha is still valid and is how a MINOR bump is cut by hand;
-#     derivation is skipped for it. docs/design/DECISIONS.md records the ruling.
+#     derivation is skipped for it.
 #   - Every git write goes through AGENT_GIT (identity + SSH signing); the tag
 #     is ANNOTATED and signed, not lightweight.
 #   - Pushes ONLY the release commit and the named tag, atomically. Never --tags.

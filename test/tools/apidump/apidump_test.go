@@ -226,7 +226,7 @@ func TestCheckHonouredTrustsAnAliasedTypesMethodSet(t *testing.T) {
 	}
 }
 
-// TestCheckHonouredTreatsARenameInPlaceAsHonored covers Segment (H9): a
+// TestCheckHonouredTreatsARenameInPlaceAsHonored covers Segment: a
 // RENAME whose target text keeps naming the identifier itself, because the
 // type was redefined in place rather than moved to a new name. CheckHonored
 // has no structural comparison (Fields ride with their type, see

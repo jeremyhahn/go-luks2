@@ -80,12 +80,12 @@ func DefaultKDFSpec() string {
 	return defaultKDFTypeFor(fips.Probe())
 }
 
-// KDFType names a keyslot's key-derivation function in the DESIGN.md §B.2
+// KDFType names a keyslot's key-derivation function in the Volume
 // API: the DESTINATION of a resolved KDFParams, as opposed to kdfTypePBKDF2
 // and its aliases above, which are the on-disk strings this package's
-// pre-§B.2 internals read and write. The two constant sets are deliberately
+// header-level internals read and write. The two constant sets are deliberately
 // distinct: KDFType carries no hash, because KDFParams.Hash says that
-// separately, and a §B.2 caller never needs the alias spellings
+// separately, and a Volume API caller never needs the alias spellings
 // ("pbkdf2-sha512") the internal formatOptionsForTest.KDFType field
 // overloads.
 type KDFType string
@@ -96,8 +96,7 @@ const (
 	KDFPBKDF2   KDFType = "pbkdf2"
 )
 
-// KDFParams is the KDF a keyslot is created or re-derived with (DESIGN.md
-// §B.2). Hash and the cost fields apply to exactly one of Type's two
+// KDFParams is the KDF a keyslot is created or re-derived with. Hash and the cost fields apply to exactly one of Type's two
 // families and are ignored for the other: Hash and IterTime are PBKDF2's
 // (Iterations overrides IterTime's calibration when it is non-zero, and is
 // held to the same floor a calibrated count is); Time, MemoryKiB
@@ -116,8 +115,8 @@ type KDFParams struct {
 // Validate refuses a KDFParams this package cannot create: a Type outside
 // the three KDFType constants, an Argon2 cost (named or implied by a nonzero
 // Time/MemoryKiB/Parallel) outside the floors and ceilings
-// validateArgon2CreateCost enforces, and -- the FIPS approval DESIGN.md §B.2
-// calls out -- an Argon2 KDF, named or implied, while the process runs in
+// validateArgon2CreateCost enforces, and -- the FIPS approval check -- an
+// Argon2 KDF, named or implied, while the process runs in
 // FIPS 140-3 mode (ErrFIPSNotApproved). An empty Type is judged by what it
 // resolves to, the same way Format and AddKeyslot resolve it, so a
 // FIPS-mode caller that gives no Type but an Argon2 cost sees the refusal
@@ -321,7 +320,7 @@ func deriveKeyEnclave(ctx context.Context, passphrase []byte, k *header.KDF, key
 // reclassifyUnsupportedKDF folds errs.ErrUnsupportedHash and
 // kdf.ErrUnsupportedKDF -- internal/kdf's and internal/errs' own sentinels
 // for a hash algorithm or KDF type this package does not implement -- into
-// the public ErrUnsupported (DESIGN.md §C.3), at every place a derivation
+// the public ErrUnsupported, at every place a derivation
 // crosses the package boundary. A FIPS-mode refusal (fips.ErrNotApproved)
 // is a different condition -- the algorithm IS implemented -- and is
 // deliberately left unreclassified.

@@ -1,6 +1,6 @@
 # Filesystems — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (f871541)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against 7ee49b8
 > Conflicts with this document are defects. Fix them here first.
 
 Package `github.com/jeremyhahn/go-luks2/pkg/filesystem`. Linux only. Every name

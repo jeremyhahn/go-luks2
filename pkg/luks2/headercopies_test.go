@@ -17,7 +17,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// Every read used the primary header copy alone (H1). A crash that tears the
+// Every read used the primary header copy alone. A crash that tears the
 // primary write -- the primary is written first -- left the secondary holding
 // the previous header, complete, and Unlock failed with ErrInvalidHeader at
 // boot while `cryptsetup open` succeeded. These tests hold the readers to

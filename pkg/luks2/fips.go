@@ -59,7 +59,7 @@ type Migration struct {
 
 // FIPSMigrationStage names where in a MigrateToFIPS run a failure happened,
 // coarser than FIPSMigrationError's own Stage string (fipsmigrate.go has
-// ten; this groups them into the five phases DESIGN.md §B.2 names -- see
+// ten; this groups them into five phases -- see
 // FIPSMigrationError.MigrationStage for the mapping).
 type FIPSMigrationStage uint8
 

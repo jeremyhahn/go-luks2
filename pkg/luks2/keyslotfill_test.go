@@ -166,8 +166,8 @@ func TestWriteRandomWritesNothingForANonPositiveSize(t *testing.T) {
 	}
 }
 
-// TestWriteRandomCancelledBeforeTheFirstChunkWritesNothing is DESIGN.md
-// §D.2's "checked per 1 MiB chunk" row: ctx is checked before every chunk,
+// TestWriteRandomCancelledBeforeTheFirstChunkWritesNothing pins that a
+// random fill checks ctx per 1 MiB chunk: ctx is checked before every chunk,
 // including the first, so a ctx already canceled leaves the file untouched
 // and reports ctx.Err()'s kind with how many bytes were written (zero).
 func TestWriteRandomCancelledBeforeTheFirstChunkWritesNothing(t *testing.T) {

@@ -1,6 +1,6 @@
 # dm-crypt activation — CLI
 
-> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (f871541)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against 7ee49b8
 > Conflicts with this document are defects. Fix them here first.
 
 Two `luks2` verbs reach `pkg/dmcrypt`: `open` calls `dmcrypt.Activate` and
@@ -10,8 +10,9 @@ this file states what those two verbs add from the activation side and does
 not repeat the flag tables. `luks2 mount` also calls `dmcrypt.Lookup` to find
 the mapping it mounts; it is documented in volumes/cli.md.
 
-There is no verb for `Lookup`, `CheckKeyring` or `ValidateName`. A name is
-validated by `open` and `close` before anything else happens.
+There is no verb for `Lookup`, `CheckKeyring` or `ValidateName`. `open` and
+`close` do not check a name themselves: `Activate` and `Lookup` run
+`ValidateName` before they touch device-mapper.
 
 Transport: embedded only. There is no server mode and no `--local` flag.
 
@@ -31,8 +32,9 @@ Unlocks `<device>` and creates `/dev/mapper/<name>`.
 
 `<name>` starts with a letter or digit, continues with letters, digits and
 `_ . + -`, and is at most 127 bytes. `.`, `..` and `control` are refused. A
-bad name exits 1 with `invalid device-mapper mapping name`, before the
-passphrase is asked for.
+bad name exits 1 with `invalid device-mapper mapping name`. The check runs
+in `Activate`, so the passphrase is read and the volume unlocked first; no
+mapping is created.
 
 Needs root: creating a mapping is a device-mapper operation. The volume key
 reaches dm-crypt through the kernel keyring and never through the command line
@@ -55,7 +57,7 @@ sudo luks2 open --key-file /etc/luks/backup.key /dev/sdb1 backup
 |---|---|---|---|
 | `invalid device-mapper mapping name` | `ErrInvalidName` | 1 | The name breaks the rules above |
 | `mapping is already active` | `ErrActive` | 5 | `<name>` is in use; close it or pick another |
-| `kernel keyring` | `ErrKeyringUnavailable` family | 1 | The keyring syscalls are blocked, unsupported or out of quota; the message names the remedy |
+| `could not` … `keyring` | `*KeyringError` (`ErrKeyringUnavailable` family) | 1 | The keyring syscalls are blocked, unsupported or out of quota; the message names the step that failed and the remedy |
 | `may still be live` | `ErrStillLive` | 1 | The open failed and the cleanup could not confirm the removal; run `luks2 close <name>` |
 | `no device node verifiably names` | `ErrNodeUnverified` | 1 | The device node could not be confirmed; the mapping was rolled back |
 | `master key verification failed` | `luks2.ErrWrongKey` | 2 | The key does not verify against the header |

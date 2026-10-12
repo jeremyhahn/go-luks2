@@ -18,10 +18,9 @@ import (
 )
 
 // seamAllowlist names pkg/luks2's package-level vars of func or interface
-// type that are still real test seams (DESIGN.md §E), not yet folded into
-// Volume.sys. H13 folded every pkg/luks2 seam into Volume.sys or a per-call
-// sys a free function builds (docs/design/DECISIONS.md's H13 entry), so this
-// list is empty; it stays here, with TestSeamAllowlistNamesOnlyRealSeams, so
+// type that are still real test seams, not yet folded into Volume.sys.
+// Every pkg/luks2 seam now lives in Volume.sys or in a per-call sys a free
+// function builds, so this list is empty; it stays here, with TestSeamAllowlistNamesOnlyRealSeams, so
 // a future seam that cannot yet be migrated has somewhere sanctioned to go
 // rather than being quietly left unmigrated.
 //
@@ -43,7 +42,7 @@ type seamFinding struct {
 // underlying type is a function signature or an interface, skipping
 // errors.go (sentinel declarations there are typed *errs.Error, not
 // func/interface, but the file is excluded on principle: it is the one file
-// §E designates for const-like declarations, never seams).
+// that holds sentinel declarations, never seams).
 //
 // It uses go/build.Context.MatchFile, not a filename-suffix guess, so
 // build-tag pairs like a _linux.go/_other.go split on the same function name
@@ -118,7 +117,7 @@ func seamDirs(t *testing.T, root string) []string {
 	return dirs
 }
 
-// TestNoNewSeamVars enforces DESIGN.md §E: a package-level var of func or
+// TestNoNewSeamVars enforces "no package-level mutable seams": a package-level var of func or
 // interface type, outside errors.go, is a test seam. Every package except
 // pkg/luks2 has already folded its seams into an unexported sys struct (or
 // has none); pkg/luks2's remaining seams are named in seamAllowlist. Nothing
@@ -139,7 +138,7 @@ func TestNoNewSeamVars(t *testing.T) {
 			if allowed {
 				continue
 			}
-			t.Errorf("%s: package-level var %q of func/interface type at %s is a seam (DESIGN.md §E); "+
+			t.Errorf("%s: package-level var %q of func/interface type at %s is a seam; "+
 				"fold it into an unexported sys struct, or name it in seamAllowlist if it is a known, "+
 				"not-yet-migrated pkg/luks2 seam", rel, f.name, f.pos)
 		}

@@ -27,7 +27,7 @@ var (
 
 	// ErrDeviceInUse indicates that Sanitize refused a device something
 	// else holds open: it is mounted, mapped, or held exclusively. Defined
-	// once in internal/device and re-exported by value (DESIGN.md C.2.6),
+	// once in internal/device and re-exported by value,
 	// so errors.Is holds regardless of which package's name a caller
 	// matches against.
 	ErrDeviceInUse = device.ErrInUse

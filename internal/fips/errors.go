@@ -8,5 +8,5 @@ import "errors"
 
 // ErrNotApproved indicates the requested algorithm is not approved by the Go
 // Cryptographic Module and is refused while the process runs in FIPS 140-3
-// mode. See docs/FIPS.md.
+// mode. See docs/fips/engineering.md.
 var ErrNotApproved = errors.New("luks2: algorithm not approved in FIPS 140-3 mode")

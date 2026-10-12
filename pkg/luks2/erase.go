@@ -11,7 +11,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/device"
 )
 
-// Erase crypto-erases the volume (DESIGN.md §B.2): every header copy and
+// Erase crypto-erases the volume: every header copy and
 // the keyslot area are overwritten, destroying every key the volume key
 // could be recovered through. The data segment's ciphertext is left in
 // place -- undecodable without a key, but not itself erased.

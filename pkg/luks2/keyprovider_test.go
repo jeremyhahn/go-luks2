@@ -168,8 +168,8 @@ func TestVolumeEnrollRollsBackAKeyslotItCannotIdentify(t *testing.T) {
 
 	// importToken is forced to fail, which is the failure this arranges: the
 	// keyslot is already written by then. A real token write has nothing
-	// left to refuse once it has a type (DESIGN.md §B.2's Token has no
-	// members this package validates), so the old "a token with no type"
+	// left to refuse once it has a type (Token has no members this
+	// package validates), so the old "a token with no type"
 	// trigger is no longer reachable here -- the seam importToken exists
 	// for exactly this, per its own doc comment.
 	sys := testVolumeSys()

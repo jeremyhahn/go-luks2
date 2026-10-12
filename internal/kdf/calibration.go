@@ -89,7 +89,7 @@ func CalibratePBKDF2(ctx context.Context, hashFunc func() hash.Hash, hashAlgo st
 	}
 
 	for probe := ProbeStart; ; probe *= 2 {
-		// Checked before each probe (DESIGN.md §D.2): a probe, like a
+		// ctx is checked before each probe, never inside one: a probe, like a
 		// derivation, cannot be interrupted once started.
 		if err := ctx.Err(); err != nil {
 			return 0, err

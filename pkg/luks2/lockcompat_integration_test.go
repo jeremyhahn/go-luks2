@@ -31,7 +31,7 @@ import (
 )
 
 // cryptsetup's metadata lock, against cryptsetup itself, in every state its
-// lock directory can be in (docs/COMPATIBILITY.md, "Metadata lock").
+// lock directory can be in (docs/cryptsetup-interop/engineering.md, "Metadata lock").
 //
 // Each scenario runs in a CHILD of this test binary, in a mount namespace of
 // its own with a private /run: the lock directory's state is the variable

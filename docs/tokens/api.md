@@ -3,8 +3,8 @@
 > **Status: NORMATIVE** · Last verified: 2026-10-12 against a9c840c
 > Conflicts with this document are defects. Fix them here first.
 
-The Go API, embedded transport only. go-luks2 is a Layer 0 library (docs/00
-§L1 exemption); REST/gRPC/QUIC/MCP/Unix: not applicable.
+The Go API, embedded transport only. go-luks2 is an embedded Go
+library; it has no REST, gRPC, QUIC, MCP or Unix-socket transport.
 
 | Capability | Embedded (Go call) |
 |---|---|

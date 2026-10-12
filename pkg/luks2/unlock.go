@@ -358,7 +358,7 @@ func verifyKeyAgainstDigests(ctx context.Context, masterKey *enclave.MemoryEncla
 		}
 		applicable++
 
-		// Checked between digests (DESIGN.md §D.2): each digest check derives
+		// Checked between digests: each digest check derives
 		// a key, and a cancellation observed here stops trying further digests
 		// rather than running the whole remaining set.
 		if err := ctx.Err(); err != nil {
@@ -473,7 +473,8 @@ func evaluateDigest(masterKey *enclave.MemoryEnclave, digest *header.Digest, fip
 	// context.Background(), not the caller's ctx: a digest check decides
 	// WHICH key a keyslot holds and must always run to completion, exactly
 	// like createDigest. Only the slow, cancellable passphrase KDF observes
-	// ctx; see DESIGN.md §D.2's KDF row.
+	// ctx, and only before it starts: a derivation in flight is never
+	// interrupted.
 	derived, err := deriveKeySecretIn(context.Background(), masterKey, kdf, len(expected), fipsMode())
 	if err != nil {
 		return false, false // e.g. non-approved KDF in FIPS mode (#58)

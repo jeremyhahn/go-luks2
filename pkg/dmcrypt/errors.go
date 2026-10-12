@@ -14,7 +14,7 @@ import (
 
 // Error is this package's one error shape, aliased from internal/errs so a
 // caller outside the module can name the type without reaching into an
-// internal package (DESIGN.md §C.3). See errs.Error for the fields.
+// internal package. See errs.Error for the fields.
 type Error = errs.Error
 
 var (
@@ -53,12 +53,13 @@ var (
 
 	// ErrPermissionDenied is internal/device's sentinel, re-exported by
 	// value so errors.Is holds regardless of which package's name a caller
-	// matches against (DESIGN.md §C.2 rule 6).
+	// matches against.
 	ErrPermissionDenied = device.ErrPermissionDenied
 
 	// ErrDeviceChanged indicates the device-mapper target this package
 	// just created was replaced or removed before it could be confirmed.
-	// internal/device's sentinel, re-exported by value (§C.2 rule 6).
+	// internal/device's sentinel, re-exported by value so errors.Is holds
+	// under either package's name.
 	ErrDeviceChanged = device.ErrChanged
 
 	// The keyring family is internal/keyring's, re-exported by value for

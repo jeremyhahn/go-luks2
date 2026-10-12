@@ -7,8 +7,8 @@
 *.test
 *.out
 # build/ holds compiled artifacts (the CLI binary, build/tools, the
-# docker-run launcher) EXCEPT build/docker, which is source: the Dockerfiles
-# DESIGN.md G.4 puts there. "build/*" (not "build/") so the negation below
+# docker-run launcher) EXCEPT build/docker, which is source: the tracked
+# Dockerfiles. "build/*" (not "build/") so the negation below
 # can re-include that one subdirectory -- a negated pattern cannot pull a
 # file back out from under a parent git never looks inside.
 build/*

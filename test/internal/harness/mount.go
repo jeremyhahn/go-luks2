@@ -66,7 +66,7 @@ func IsMounted(mountPoint string) (bool, error) {
 
 // IsMappingMounted reports whether a filesystem on the device-mapper mapping
 // name is mounted, the way the pre-redesign library's luks2.IsMappingMounted
-// did before B.6 retired it (H10c) in favor of this exact composition:
+// did before the API redesign retired it in favor of this exact composition:
 // dmcrypt.Lookup to resolve the mapping's device number, then
 // filesystem.DeviceMounted to match it against /proc/self/mountinfo.
 func IsMappingMounted(name string) (bool, error) {

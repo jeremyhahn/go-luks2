@@ -41,7 +41,7 @@ var ErrEmptyCredential = errors.New("cli: empty credential")
 
 // errNotLUKSDevice is isluks's negative answer. It deliberately matches no
 // exitTable sentinel, because isluks's exit code is its own 0/1 contract
-// (DESIGN.md §F), not the generic error-to-exit-code mapping every other
+// (0 is a LUKS device, 1 is not, as cryptsetup isLuks), not the generic error-to-exit-code mapping every other
 // command uses.
 var errNotLUKSDevice = errors.New("cli: not a LUKS device")
 

@@ -1,6 +1,6 @@
 # dm-crypt activation — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (f871541)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against 7ee49b8
 > Conflicts with this document are defects. Fix them here first.
 
 Design and boundaries: [architecture.md](architecture.md).
@@ -86,7 +86,8 @@ detail.
 
 ## Error semantics
 
-Every error is an `*Error` (`errs.Error`): `Op`, `Path`, a `Kind` sentinel
+Every error is an `*Error` (`errs.Error`), except a `*KeyringError` and a
+rollback join (both below): `Op`, `Path`, a `Kind` sentinel
 that is never nil, a `Detail` in words, and an optional typed `Err`. `Unwrap`
 returns `{Kind, Err}`, so `errors.Is` matches either. Cancellation is the
 `Kind`, so `errors.Is(err, context.DeadlineExceeded)` holds. Errors are
@@ -148,9 +149,10 @@ to resume.
   cancellation during rollback, without root.
 - `errorshape_test.go` pins that `Error` is the module error shape and that
   the sentinels carry the package prefix.
-- `activate_integration_test.go` runs against the real kernel and needs root.
-  `make integration-test-dmcrypt` runs it in the devcontainer, and
-  `make integration-test-cli` drives `luks2 open` and `luks2 close` end to
+- `activate_integration_test.go` runs against the real kernel and needs root;
+  `make integration-test` runs it in the devcontainer.
+  `make integration-test-dmcrypt` runs the `test/integration/dmcrypt` suite
+  there, and `make integration-test-cli` drives `luks2 open` and `luks2 close` end to
   end. A container needs the keyring seccomp profile.
 - Fault injection never relies on permission bits (CI runs as root).
 

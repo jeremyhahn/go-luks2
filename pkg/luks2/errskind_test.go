@@ -14,7 +14,7 @@ import (
 )
 
 // TestAddKeyRefusesAnEmptyExistingPassphraseAsInvalidCredential pins
-// ErrInvalidCredential (DESIGN.md §C.3), the module-wide kind for a
+// ErrInvalidCredential, the module-wide kind for a
 // caller-supplied credential this package refuses before it is ever
 // compared against a keyslot.
 func TestAddKeyRefusesAnEmptyExistingPassphraseAsInvalidCredential(t *testing.T) {
@@ -27,7 +27,7 @@ func TestAddKeyRefusesAnEmptyExistingPassphraseAsInvalidCredential(t *testing.T)
 	}
 }
 
-// TestIsLUKSOnAnEmptyFileIsErrIO pins ErrIO (DESIGN.md §C.3), the
+// TestIsLUKSOnAnEmptyFileIsErrIO pins ErrIO, the
 // module-wide kind for a read/write failure that is not itself classified:
 // isLUKSForTest opens the file fine but its Read hits EOF before the magic
 // bytes it is checking for, which is reported as ErrIO rather than as "not

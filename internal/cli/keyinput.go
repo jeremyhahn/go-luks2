@@ -30,9 +30,8 @@ const keyFileHelp = "  --key-file <path|->  Read the passphrase from a file, or 
 // so a test never needs one. ReadPassword's return is the one place this
 // package reads a credential into a plain []byte: golang.org/x/term offers
 // no other shape, so the caller moves it into an enclave immediately
-// (DESIGN.md §B.7: "enclave.Wipe for the one terminal buffer" -- here that
-// wipe happens inside Custody.Adopt, which takes ownership of exactly this
-// slice).
+// and the terminal buffer is wiped: that wipe happens inside Custody.Adopt,
+// which takes ownership of exactly this slice.
 type terminal interface {
 	ReadPassword(fd int) ([]byte, error)
 	IsTerminal(fd int) bool

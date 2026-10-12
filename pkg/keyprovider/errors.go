@@ -16,7 +16,7 @@ import (
 // internal package. See errs.Error for the fields.
 type Error = errs.Error
 
-// errAt is this package's boundary call into errs.At (DESIGN.md §C.2): every
+// errAt is this package's boundary call into errs.At: every
 // exported entry point passes its error through it exactly once, with its
 // own pkg prefix, on the way out.
 func errAt(op, path string, err error) error {

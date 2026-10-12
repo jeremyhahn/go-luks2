@@ -1,6 +1,6 @@
 # Kernel keyring — CLI
 
-> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (f871541)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against 7ee49b8
 > Conflicts with this document are defects. Fix them here first.
 
 No verb of its own: the keyring is exercised by `luks2 open`, and by
@@ -14,7 +14,7 @@ failure a keyring problem produces:
 
 | Message contains | Meaning | Fix |
 |---|---|---|
-| `kernel keyring` | The keyring syscalls are blocked, unsupported, over quota or refused. The message ends with the remedy for the specific cause. | See [user.md](user.md#troubleshooting). |
+| `could not` … `keyring` | The keyring syscalls are blocked, unsupported, over quota or refused. The message ends with the remedy for the specific cause. | See [user.md](user.md#troubleshooting). |
 
 A keyring entry that cannot be released fails the verb as well, and its message
 gives the `keyctl` commands that remove it.

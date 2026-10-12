@@ -392,7 +392,7 @@ const DefaultCipher = "aes-xts-plain64"
 // FormatParams.Hash names none.
 const DefaultHash = crypto.SHA256
 
-// FormatParams is a new LUKS2 container's parameters (DESIGN.md §B.2).
+// FormatParams is a new LUKS2 container's parameters.
 //
 // Cipher is one cryptsetup spec ("aes-xts-plain64"), unlike the internal
 // formatOptionsForTest.Cipher/CipherMode pair, because that is the form dm-crypt's
@@ -551,7 +551,7 @@ func (p FormatParams) toFormatOptions(device string, fipsMode fips.Mode) (opts, 
 	return opts, kdfOpts
 }
 
-// Format creates a new LUKS2 container on v's device (DESIGN.md §B.2),
+// Format creates a new LUKS2 container on v's device,
 // writing exactly what the package-level Format writes, through v's own
 // pinned descriptor and exclusive lock rather than reopening the path a
 // second time. pass is the caller's enclave and stays the caller's: it is
@@ -824,7 +824,8 @@ func createDigest(masterKey *enclave.MemoryEnclave, hashAlgo string, sys volumeS
 	// context.Background(), not the caller's ctx: this derivation decides
 	// WHICH digest a key belongs to and must always run to completion -- see
 	// evaluateDigest. Only the slow, cancellable passphrase KDF (sys.passphraseKDF
-	// / deriveKeyEnclave) observes ctx; see DESIGN.md §D.2's KDF row.
+	// / deriveKeyEnclave) observes ctx, and only before it starts: a
+	// derivation in flight is never interrupted.
 	digest, err := deriveKeySecret(context.Background(), masterKey, kdf, digestLen, sys)
 	if err != nil {
 		return nil, "", err

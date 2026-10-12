@@ -57,7 +57,7 @@ const (
 	keyslotPriorityPrefer = 2
 )
 
-// Priority is a keyslot's try-order preference (DESIGN.md §B.2).
+// Priority is a keyslot's try-order preference.
 //
 // Its zero value, PriorityDefault, is "not asked for": a new keyslot gets the
 // LUKS2 default (normal) and ChangeKeyslot keeps the slot's existing
@@ -195,7 +195,7 @@ type addKeyOptionsForTest struct {
 	// rather than from a template keyslot. See addKey.
 }
 
-// KeyslotParams configures AddKeyslot and ChangeKeyslot (DESIGN.md §B.2).
+// KeyslotParams configures AddKeyslot and ChangeKeyslot.
 type KeyslotParams struct {
 	// Slot is the keyslot id to use. Nil picks the lowest free one.
 	// ChangeKeyslot ignores it: the slot it rewrites is the one the caller's
@@ -586,7 +586,7 @@ func addKeyslotWithMasterKey(ctx context.Context, dev *keyslotDevice, hdr *heade
 }
 
 // addKeyslotWithMasterKeyAndPriority is addKeyslotWithMasterKey, extended with
-// an explicit on-disk priority for AddKeyslot (DESIGN.md §B.2): nil writes no
+// an explicit on-disk priority for AddKeyslot: nil writes no
 // priority member at all, same as every existing caller through
 // addKeyslotWithMasterKey, and cryptsetup's own convention for a normal
 // keyslot (see the no-priority-written comment below).
@@ -869,8 +869,8 @@ func addKeyslotWithMasterKeyAndPriority(ctx context.Context, dev *keyslotDevice,
 		return -1, err
 	}
 
-	// FROM HERE THE TRANSACTION RUNS TO ITS NEXT CONSISTENT STATE (DESIGN.md
-	// §D.2). The caller's context was honored up to the first write; a
+	// FROM HERE THE TRANSACTION RUNS TO ITS NEXT CONSISTENT STATE: ctx is
+	// consulted only where the on-disk state is consistent. The caller's context was honored up to the first write; a
 	// cancellation now would stop between the area write and the header write
 	// and strand a passphrase-wrapped copy of the volume key in an area no
 	// header names and nothing wipes. So the header write and the read-back
@@ -1132,8 +1132,8 @@ func changeKeyslotCore(ctx context.Context, dev *keyslotDevice, hdr *header.Bina
 		return err
 	}
 
-	// From here the rewrite runs to its next consistent state (DESIGN.md
-	// §D.2), exactly as AddKey's does: the caller's context was honored up to
+	// From here the rewrite runs to its next consistent state, exactly as
+	// AddKey's does: the caller's context was honored up to
 	// the first write, and a cancellation now would leave the new material in
 	// an area no header names, or the old passphrase's material unwiped behind
 	// a committed header.
@@ -1601,7 +1601,7 @@ func getMasterKeySlot(ctx context.Context, dev io.ReaderAt, device string, passp
 	otherBlocked := false
 
 	for _, id := range order {
-		// Checked between keyslots in a scan (DESIGN.md §D.2): a cancellation
+		// Checked between keyslots in a scan: a cancellation
 		// stops the scan before the next keyslot's derivation starts.
 		if err := ctx.Err(); err != nil {
 			return nil, "", err
@@ -2271,8 +2271,8 @@ func sameSecret(a, b *enclave.MemoryEnclave) bool {
 // on the device.
 // rollBackAddedKeyslot runs under context.WithoutCancel(ctx): a keyslot
 // already written must be taken back out whether or not the ctx that started
-// the operation is still live, the same rule DESIGN.md §D.2 states for dm
-// rollback after a failed or canceled Activate.
+// the operation is still live: cleanup of something already written is never
+// cancellable.
 func rollBackAddedKeyslot(ctx context.Context, dev *keyslotDevice, id string, written *header.Keyslot, cause error) error {
 	ctx = context.WithoutCancel(ctx)
 	hdr, metadata, err := dev.readHeader()

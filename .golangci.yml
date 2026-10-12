@@ -34,7 +34,7 @@ linters:
     - depguard
 
   settings:
-    # Typed errors only (errors.md 2, DESIGN.md C.2). Library and command code
+    # Typed errors only (errors.md 2). Library and command code
     # builds an *errs.Error or a package error type, never an fmt.Errorf, and a
     # package declares its sentinels in its errors.go and nowhere else. And no
     # time.Sleep (go-style).
@@ -49,7 +49,7 @@ linters:
         # internal/clock.Clock, so it can be bounded, cancelled and tested.
         - pattern: ^time\.Sleep$
           msg: "wait on a timer from an internal/clock.Clock instead"
-    # The import DAG (DESIGN.md §A.2) as data, one rule per row: each
+    # The import DAG as data, one rule per row: each
     # in-module package names exactly what it may import, so a layering
     # violation is a lint finding rather than something that only shows up
     # as a cycle (most of this DAG does NOT round-trip into a cycle if
@@ -230,7 +230,7 @@ linters:
             - github.com/jeremyhahn/go-luks2/internal/device
           deny:
             - pkg: os/exec
-              desc: "pkg/luks2 is rootless and exec-free (DESIGN.md §A.2); root/exec code lives in dmcrypt, loop, filesystem, keyprovider, internal/dm, internal/keyring and internal/command"
+              desc: "pkg/luks2 is rootless and exec-free; root/exec code lives in dmcrypt, loop, filesystem, keyprovider, internal/dm, internal/keyring and internal/command"
         pkg-dmcrypt:
           files: [pkg/dmcrypt/**, "!**/*_test.go"]
           allow:

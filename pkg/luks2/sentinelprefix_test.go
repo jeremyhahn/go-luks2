@@ -16,7 +16,7 @@ import (
 
 // exportedSentinels names every exported Err* variable of this package. The
 // AST scan below fails when a sentinel is declared and not listed, so a new
-// one cannot dodge the prefix rule (DESIGN.md §C.2 rule 3).
+// one cannot dodge the prefix rule.
 var exportedSentinels = map[string]error{
 	"ErrInvalidHeader":           ErrInvalidHeader,
 	"ErrInvalidArgument":         ErrInvalidArgument,
@@ -93,7 +93,7 @@ func TestExportedSentinelsCarryThePackagePrefix(t *testing.T) {
 			continue
 		}
 		if !strings.HasPrefix(err.Error(), "luks2: ") {
-			t.Errorf("%s text %q lacks the \"luks2: \" prefix (DESIGN.md §C.2 rule 3)", n, err.Error())
+			t.Errorf("%s text %q lacks the \"luks2: \" prefix", n, err.Error())
 		}
 	}
 }

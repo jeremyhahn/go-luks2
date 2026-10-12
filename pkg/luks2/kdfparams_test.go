@@ -15,7 +15,7 @@ import (
 )
 
 // TestDefaultKDFTypeFollowsTheProcessMode holds the new, typed
-// DefaultKDFType (DESIGN.md §B.2) to the same mode-dependent default
+// DefaultKDFType to the same mode-dependent default
 // DefaultKDFSpec has always returned, just without a hash: KDFPBKDF2 in
 // FIPS 140-3 mode, KDFArgon2id otherwise.
 func TestDefaultKDFTypeFollowsTheProcessMode(t *testing.T) {
@@ -100,7 +100,7 @@ func TestKDFParamsValidate(t *testing.T) {
 
 // TestKDFParamsValidateRefusesArgon2UnderFIPS: an Argon2 KDF, named or only
 // implied by a nonzero cost, is refused under the FIPS policy -- the
-// approval check DESIGN.md §B.2 calls out on KDFParams.Validate.
+// approval check KDFParams.Validate performs.
 func TestKDFParamsValidateRefusesArgon2UnderFIPS(t *testing.T) {
 	forced := forceFIPSPolicy(t)
 

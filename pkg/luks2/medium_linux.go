@@ -11,7 +11,7 @@ import "github.com/jeremyhahn/go-luks2/internal/device"
 // cacheIsTheStorage reports whether path lives on a memory filesystem
 // (tmpfs, ramfs), where the page cache is the only copy there is. A block
 // device never does, whatever filesystem its node sits on (devtmpfs is
-// tmpfs). Linux-only (§A.3): internal/device has no darwin implementation,
+// tmpfs). Linux-only: internal/device has no darwin implementation,
 // since there is no portable way to answer this off Linux.
 func cacheIsTheStorage(path string) (bool, error) {
 	return device.CacheIsTheStorage(path)

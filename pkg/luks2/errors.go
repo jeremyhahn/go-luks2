@@ -24,7 +24,7 @@ var (
 
 	// ErrInvalidArgument indicates a caller-supplied argument this package
 	// refuses: out of range, malformed, or structurally wrong for the call.
-	// Defined once, in internal/errs, and re-exported by value (§C.3).
+	// Defined once, in internal/errs, and re-exported by value.
 	ErrInvalidArgument = errs.ErrInvalidArgument
 
 	// ErrInvalidCredential indicates a caller-supplied passphrase, recovery
@@ -45,7 +45,7 @@ var (
 	// internal/kdf, internal/header, internal/device and this package's own
 	// area-cipher and segment checks each refuse a different kind of "not
 	// implemented" -- so, like ErrInvalidArgument, it is this package's one
-	// name for all of them (§C.3). Defined once, in internal/device, and
+	// name for all of them. Defined once, in internal/device, and
 	// re-exported by value, exactly as the device-level sentinels below are.
 	// A FIPS-refused algorithm is NOT this error -- that is
 	// ErrFIPSNotApproved, because the algorithm is implemented and the mode
@@ -67,8 +67,8 @@ var (
 	// adopting an in-use mapping name was Unlock's refusal, and Unlock is
 	// pkg/dmcrypt.Activate now.
 
-	// ErrUnsupportedKDF and ErrUnsupportedHash folded into ErrUnsupported
-	// (DESIGN.md §C.3): raised where a KDF is DISPATCHED (kdf.go) or a hash
+	// ErrUnsupportedKDF and ErrUnsupportedHash folded into ErrUnsupported:
+	// raised where a KDF is DISPATCHED (kdf.go) or a hash
 	// algorithm is resolved, with Detail naming what was refused.
 	// header.ValidateKDFCost deliberately returns an unclassified error for the
 	// same KDF condition, because only its caller knows whether an unusable
@@ -77,10 +77,10 @@ var (
 	// ErrKeyslotNotFound indicates the keyslot is invalid or unavailable
 	ErrKeyslotNotFound = errs.ErrInvalidKeyslot
 
-	// ErrUnsupportedKeyslotCipher folded into ErrUnsupported (DESIGN.md
-	// §C.3): a keyslot's area.encryption names a cipher spec -- algorithm,
-	// mode AND IV generator -- this package cannot decrypt. The read path
-	// honors the whole spec rather than only its algorithm (#106): a
+	// ErrUnsupportedKeyslotCipher folded into ErrUnsupported: a keyslot's
+	// area.encryption names a cipher spec -- algorithm, mode AND IV
+	// generator -- this package cannot decrypt. The read path honors the
+	// whole spec rather than only its algorithm: a
 	// keyslot declaring "aes-cbc-essiv:sha256" is refused here, never
 	// decrypted as AES-XTS. A keyslot refused with it is also
 	// ErrKeyslotNotFound, so the keyslot scan moves on to the next one.
@@ -92,18 +92,17 @@ var (
 
 	// ErrNoKeyslots indicates no valid keyslots are available.
 	//
-	// It is deliberately distinct from ErrWrongKey: #30 is exactly the bug
-	// that collapsing them would reintroduce. A container with no usable
+	// It is deliberately distinct from ErrWrongKey, and is kept as its own
+	// sentinel rather than folded into another kind. A container with no usable
 	// keyslot and a container whose keyslot rejected a real passphrase are
 	// different failures an operator acts on differently -- one says
 	// retype nothing, the credential was never tried; the other says the
 	// credential was tried and did not match -- and
 	// TestAVolumeWithNoUsableKeyslotIsNotReportedAsAWrongPassphrase pins
-	// the two apart on both sides. The disposition table (DESIGN.md §C.3)
-	// now names this KEEP for that reason; see DECISIONS.md.
+	// the two apart on both sides.
 	ErrNoKeyslots = errors.New("luks2: no valid keyslots")
 
-	// ErrInvalidSize folded into ErrInvalidArgument (DESIGN.md §C.3): a
+	// ErrInvalidSize folded into ErrInvalidArgument: a
 	// size parameter -- key, sector, metadata or otherwise -- is invalid,
 	// with Detail naming which one and the accepted range.
 
@@ -154,7 +153,7 @@ var (
 	// there.
 	ErrWrongKey = errors.New("luks2: master key verification failed")
 
-	// ErrInvalidVolumeKey folded into ErrInvalidCredential (DESIGN.md §C.3):
+	// ErrInvalidVolumeKey folded into ErrInvalidCredential:
 	// a volume key handed to UnlockWithVolumeKey that cannot be a volume key
 	// at all -- a nil or destroyed enclave, or one whose size no keyslot of
 	// this package could hold. It is the caller's argument that is wrong,
@@ -164,7 +163,7 @@ var (
 	// error; that is ErrWrongKey, exactly as for a passphrase
 	// that recovers the wrong key, and for the same reason.
 
-	// ErrMetadataTooLarge folded into ErrNoSpace (DESIGN.md §C.3): the JSON
+	// ErrMetadataTooLarge folded into ErrNoSpace: the JSON
 	// metadata does not fit the header area the container was formatted
 	// with. The area cannot be enlarged after the fact -- the keyslots and
 	// data offsets on disk are already sized against it -- so this is a
@@ -194,7 +193,7 @@ var (
 	// permanent data loss (#38).
 	ErrKeyslotAreaOverlap = errors.New("luks2: keyslot area overlaps a keyslot that can still open the volume")
 
-	// ErrKeyslotsAreaFull folded into ErrNoSpace (DESIGN.md §C.3): the
+	// ErrKeyslotsAreaFull folded into ErrNoSpace: the
 	// container has no room for another keyslot -- the new one would fall
 	// outside the keyslots area the header declares, or past the start of
 	// the encrypted data. Both are refusals rather than retryable
@@ -202,7 +201,7 @@ var (
 
 	// ErrFIPSNotApproved indicates the requested algorithm is not approved by
 	// the Go Cryptographic Module and is refused while the process runs in
-	// FIPS 140-3 mode. See docs/FIPS.md.
+	// FIPS 140-3 mode. See docs/fips/engineering.md.
 	ErrFIPSNotApproved = fips.ErrNotApproved
 
 	// ErrFIPSImportRequired indicates that a FIPS 140-3 process met a volume
@@ -249,7 +248,7 @@ var (
 	// writing anything.
 	errFIPSMigrationUnboundKey = errors.New("the passphrase does not open a keyslot holding the key the data segments are encrypted with")
 
-	// ErrSHA1NotWritten folded into ErrInvalidArgument (DESIGN.md §C.3): a
+	// ErrSHA1NotWritten folded into ErrInvalidArgument: a
 	// request to WRITE SHA-1 into a keyslot or digest -- a PBKDF2-SHA1 KDF
 	// (KDFTypePBKDF2SHA1, or a "sha1" hash for a new keyslot or a format) or
 	// a SHA-1 anti-forensic split. SHA-1 is deprecated for key derivation
@@ -267,7 +266,7 @@ var (
 	// Defined once, in internal/device, and re-exported by value.
 	ErrDeviceCacheStale = device.ErrCacheStale
 
-	// ErrDirectIOUnsupported folded into ErrUnsupported (DESIGN.md §C.3):
+	// ErrDirectIOUnsupported folded into ErrUnsupported:
 	// the device cannot be read past the page cache (O_DIRECT is refused)
 	// and is not on a memory filesystem, where the cache would be the only
 	// copy -- or the platform has no O_DIRECT at all. What is on the
@@ -288,25 +287,25 @@ var (
 	ErrKDFCalibration = kdf.ErrKDFCalibration
 
 	// ErrPBKDFIterationsTooLow and ErrPBKDFIterationsTooHigh folded into
-	// ErrInvalidArgument (DESIGN.md §B.6): a PBKDF2 iteration count outside
+	// ErrInvalidArgument: a PBKDF2 iteration count outside
 	// the floor-to-ceiling range is *KDFCostError, which Is ErrInvalidArgument.
 
 	// ErrMappingStillLive and ErrMappingBusy moved to pkg/dmcrypt as
 	// ErrStillLive and ErrBusy (#268): both were raised only by activation
 	// code (Unlock's rollback, Lock), which no longer lives here.
 
-	// ErrNotBlockDevice folded into ErrInvalidArgument (DESIGN.md §C.3):
+	// ErrNotBlockDevice folded into ErrInvalidArgument:
 	// Unlock was given something that is not a block device. dm-crypt maps
 	// a block device by its major:minor, so a regular file must be
 	// attached to a loop device first.
 
-	// ErrUnsupportedSegmentLayout folded into ErrUnsupported (DESIGN.md
-	// §C.3): a header whose segments are not exactly one crypt segment.
+	// ErrUnsupportedSegmentLayout folded into ErrUnsupported: a header
+	// whose segments are not exactly one crypt segment.
 	// Activation maps one segment with one key, and any other layout
 	// would map part of the device with the wrong key.
 
-	// ErrUnsupportedHeaderChecksum folded into ErrUnsupported (DESIGN.md
-	// §C.3): a binary header whose checksum algorithm field names anything
+	// ErrUnsupportedHeaderChecksum folded into ErrUnsupported: a binary
+	// header whose checksum algorithm field names anything
 	// but sha256, the algorithm cryptsetup writes and the only one this
 	// package verifies. Such a header is refused on read; the error also
 	// matches ErrInvalidHeader.
@@ -353,7 +352,8 @@ var (
 	// acquire read lock"), for reads as well as writes, so this is not a
 	// stricter rule than the one other tools obey. A non-root caller gets it
 	// for a root-only lock directory; granting that caller's group write
-	// access to the directory admits both tools (docs/COMPATIBILITY.md).
+	// access to the directory admits both tools (docs/cryptsetup-interop/engineering.md, "Metadata
+	// lock").
 	//
 	// Defined once, in internal/device, and re-exported by value (owner
 	// ruling, 2026-08-23).
@@ -366,7 +366,7 @@ var (
 // KeyringUnavailableError moved to pkg/dmcrypt (#268), re-exported there
 // from internal/keyring by value exactly as they were re-exported here:
 // activation is pkg/dmcrypt's now, and this package no longer imports
-// internal/keyring at all (DESIGN.md §A.2).
+// internal/keyring at all.
 
 // A keyslot whose area.encryption names a cipher spec this package cannot
 // decrypt (#106) is reported as an *errs.Error with Kind ErrUnsupported,
@@ -374,7 +374,7 @@ var (
 // keyslots that still open, and Detail naming the keyslot and the spec
 // (parseKeyslotAreaEncryption, keyslotscreen.go).
 //
-// Error is the one error shape of this module (DESIGN.md §C.1), aliased
+// Error is the one error shape of this module, aliased
 // here so a caller can match it with errors.As(&Error{}) without importing
 // internal/errs.
 type Error = errs.Error
@@ -416,8 +416,8 @@ type KDFCalibrationError = kdf.CalibrationError
 // iteration count -- was refused, and carries the permitted range so the
 // caller can act without guessing what the floor or ceiling is.
 //
-// It unifies what used to be two types (Argon2CostError, PBKDFIterationsError,
-// DESIGN.md §B.6): an Argon2 and a PBKDF2 refusal are both a CALLER-CHOSEN
+// It unifies what used to be two types (Argon2CostError and
+// PBKDFIterationsError): an Argon2 and a PBKDF2 refusal are both a CALLER-CHOSEN
 // keyslot cost outside the range the read path would accept back, and an
 // operator should not have to learn two vocabularies for one decision. It is
 // always ErrInvalidArgument.
@@ -552,7 +552,7 @@ type FIPSMigrationError struct {
 // Error renders the stage, the cause and the state. It names neither the
 // device nor ErrFIPSMigration, and drops the cause's own "luks2: " prefix:
 // MigrateToFIPS returns it under the package's *errs.Error, whose head
-// already says each of those once (DESIGN.md §C.2 rule 3).
+// already says each of those once.
 func (e *FIPSMigrationError) Error() string {
 	return fmt.Sprintf("at %s: %s; %s", e.Stage, strings.TrimPrefix(fmt.Sprint(e.Err), "luks2: "), e.State)
 }
@@ -564,10 +564,9 @@ func (e *FIPSMigrationError) Error() string {
 func (e *FIPSMigrationError) Unwrap() []error { return []error{ErrFIPSMigration, e.Err} }
 
 // MigrationStage maps e.Stage's detailed string onto one of the five coarse
-// phases FIPSMigrationStage names (DESIGN.md §B.2), so a caller can switch
-// on where a migration failed without string-matching e.Stage. The mapping
-// is not 1:1 -- ten Stage strings onto five phases -- and is recorded in
-// DECISIONS.md's H9 train-merge entry:
+// phases FIPSMigrationStage names, so a caller can switch on where a
+// migration failed without string-matching e.Stage. The mapping is not 1:1
+// -- ten Stage strings onto five phases -- and is exactly this table:
 //
 //	"precondition", "sync"                                      -> StagePreflight
 //	"unlock", "plan", "verify"                                  -> StageVerify
@@ -598,27 +597,23 @@ func (e *FIPSMigrationError) MigrationStage() FIPSMigrationStage {
 	}
 }
 
-// ErrInvalidPath, ErrPassphraseTooShort/Long, ErrCredentialEmpty/TooLong,
-// ErrInvalidKeySize/SectorSize/MetadataSize, ErrIntegerOverflow and
-// ErrInvalidArgon2Memory/Time/Parallel (DESIGN.md §B.6) all folded into
-// ErrInvalidArgument or ErrInvalidCredential (DESIGN.md §C.3): a
-// caller-supplied device path, size or count outside the accepted range is
+// Out-of-range input has no sentinel of its own. A caller-supplied device
+// path, size or count outside the accepted range is
 // *errs.Error{Kind: ErrInvalidArgument} (or *KDFCostError, which Is it); a
-// caller-supplied passphrase or credential outside the accepted length is
-// *errs.Error{Kind: ErrInvalidCredential}. Both keep the original message
-// in Detail.
+// passphrase or credential outside MinPassphraseLength..MaxPassphraseLength
+// is *errs.Error{Kind: ErrInvalidCredential}. Detail says which value was
+// refused and why.
 //
-// ErrInvalidMappingName indicates a device-mapper mapping name that this
-// library will not create. See ValidateMappingName for what the name
-// reaches and why the charset is a whitelist.
+// A device-mapper mapping name is checked by dmcrypt.ValidateName, which
+// reports dmcrypt.ErrInvalidName and explains there why the permitted
+// charset is a whitelist.
 
-// Format and validateFormatOptionsForTest refuse before the device is
-// touched (#248). ErrUnsupportedCipher (a Cipher/CipherMode/KeySize
-// combination Format does not write), ErrInvalidLabel (a Label or
-// Subsystem that does not fit the 48-byte header field) and ErrDeviceTooSmall
-// (no room for the header copies, the keyslots area and at least one
-// encryption sector) folded into ErrUnsupported and ErrInvalidArgument
-// respectively (DESIGN.md §C.3), with the original message in Detail.
+// Format and FormatParams.Validate refuse before anything is written: a
+// Cipher/CipherMode/KeySize combination Format does not write is
+// ErrUnsupported; a Label or Subsystem that does not fit the 48-byte header
+// field, or a device with no room for the header copies, the keyslots area
+// and at least one encryption sector, is ErrInvalidArgument. Detail names
+// the value.
 
 // Wipe refusals.
 var (
@@ -630,11 +625,10 @@ var (
 	ErrDeviceInUse = device.ErrInUse
 )
 
-// Recovery-key generation refusals (#249, A4). ErrRecoveryKeyTooShort (fewer
-// than RecoveryKeyLength random bytes, or a rendering too long to be
-// enrolled as a passphrase) and ErrInvalidRecoveryKeyFormat (a format other
-// than hex, base64 or dashed) folded into ErrInvalidArgument (DESIGN.md
-// §C.3), with the original message in Detail.
+// Recovery-key generation refusals are ErrInvalidArgument: fewer than
+// DefaultRecoveryKeyLength random bytes, a rendering too long to be enrolled
+// as a passphrase (over MaxPassphraseLength), or a format other than hex,
+// base64 or dashed. Detail names the value.
 
 // The causes a KDFCalibrationError carries.
 var (
@@ -651,9 +645,9 @@ var (
 // The external-key vocabulary (keyprovider.go). The exec-helper vocabulary
 // (ErrHelperNotConfigured, ErrHelperPathNotAbsolute, ErrNoFIDO2Device,
 // ErrHelperFailed, ErrHelperOutput, ErrInvalidFIDO2Binding) moved to
-// pkg/keyprovider with the code that raised it (#271); what is left here is
-// raised only by Volume.Enroll, Volume.UnlockWithProvider and importTokenLocked,
-// which stay (DECISIONS.md H10d).
+// pkg/keyprovider with the code that raised it; what is left here is raised
+// only by Volume.Enroll, Volume.UnlockWithProvider and importTokenLocked,
+// which need no exec and so stay in this package.
 var (
 	// ErrKeyProvider is matched only by an OrphanedKeyslotError, alongside
 	// ErrOrphanedKeyslot. Other external-key failures carry their own
@@ -662,7 +656,7 @@ var (
 	// argument or keyslot is ErrInvalidArgument or ErrKeyslotNotFound.
 	ErrKeyProvider = errors.New("luks2: external key provider")
 
-	// ErrNoKeyProvider folded into ErrInvalidArgument (DESIGN.md §C.3): an
+	// ErrNoKeyProvider folded into ErrInvalidArgument: an
 	// operation was given no provider, or a token with nothing in it to
 	// build one from.
 
@@ -685,11 +679,10 @@ var ErrPrimaryHeaderCurrent = header.ErrPrimaryHeaderCurrent
 // ErrTokenNotFound indicates the token was not found
 var ErrTokenNotFound = errors.New("luks2: token not found")
 
-// ErrNoFreeTokenSlot folded into ErrNoSpace (DESIGN.md §C.3): no free
+// ErrNoFreeTokenSlot folded into ErrNoSpace: no free
 // token slots are available.
 
-// The following are the new pkg/luks2 API's (DESIGN.md §B.2, §C.3) own
-// sentinels.
+// The following are sentinels the Volume API raises itself.
 var (
 	// ErrReadOnly indicates a mutating method was called on a Volume opened
 	// with WithReadOnly.
@@ -702,6 +695,6 @@ var (
 	// version is not 2 -- a LUKS1 container, most often. It is not damage,
 	// and is not reported as ErrInvalidHeader. Defined once, in
 	// internal/header (as ErrUnsupportedLUKSVersion), and re-exported by
-	// value under the new API's name (§C.3).
+	// value under this package's name.
 	ErrNotLUKS2 = header.ErrUnsupportedLUKSVersion
 )

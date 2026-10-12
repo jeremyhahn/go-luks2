@@ -15,7 +15,8 @@ import (
 // Recovery keys: a full-strength credential, generated rather than chosen,
 // for the case where the passphrase is gone. The printed line IS the
 // passphrase -- see showRecoveryKey -- and recovery-key file I/O lives
-// here, not in pkg/luks2 (DESIGN.md §F).
+// here, not in pkg/luks2, which takes a recovery key only as an in-memory
+// *RecoveryKey.
 
 func recoveryCommand() *command {
 	return &command{

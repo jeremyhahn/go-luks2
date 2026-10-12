@@ -1,11 +1,10 @@
 # Filesystems — API
 
-> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (f871541)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against 7ee49b8
 > Conflicts with this document are defects. Fix them here first.
 
-A Layer 0 library: the embedded Go call is the only transport, and no REST,
-gRPC, QUIC, MCP or Unix-socket form exists
-([volumes/api.md](../volumes/api.md) states the exemption).
+The Go API, embedded transport only. go-luks2 is an embedded Go
+library; it has no REST, gRPC, QUIC, MCP or Unix-socket transport.
 
 | Capability | Embedded Go call |
 |---|---|

@@ -24,8 +24,8 @@ func readHeaderCopyFrom(f io.ReaderAt, offset int64) (*header.BinaryHeader, *hea
 	return hdr, metadata, reclassifyUnsupportedChecksum(err)
 }
 
-// reclassifyUnsupportedChecksum is header.ErrUnsupportedHeaderChecksum
-// (DESIGN.md §C.3): internal/header's own sentinel, folded into the
+// reclassifyUnsupportedChecksum is header.ErrUnsupportedHeaderChecksum:
+// internal/header's own sentinel, folded into the
 // public ErrUnsupported at every place a header read crosses the package
 // boundary, without internal/header changing what it already matches
 // (ErrInvalidHeader, via its own Is).
@@ -42,7 +42,7 @@ func checkHeaderWritable(hdr *header.BinaryHeader, metadata *header.Metadata) er
 	return reclassifyMetadataTooLarge(header.CheckHeaderWritable(hdr, metadata))
 }
 
-// reclassifyMetadataTooLarge is header.ErrMetadataTooLarge (DESIGN.md §C.3):
+// reclassifyMetadataTooLarge is header.ErrMetadataTooLarge:
 // internal/header's own sentinel, folded into the public ErrNoSpace at
 // every place this package's metadata encoding crosses the package
 // boundary.

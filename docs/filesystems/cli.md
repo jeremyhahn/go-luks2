@@ -1,6 +1,6 @@
 # Filesystems — CLI
 
-> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (f871541)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against 7ee49b8
 > Conflicts with this document are defects. Fix them here first.
 
 The `luks2` CLI reaches `pkg/filesystem` in three places. The verbs are defined

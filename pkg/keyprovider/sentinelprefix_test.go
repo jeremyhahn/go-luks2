@@ -9,8 +9,8 @@ import (
 	"testing"
 )
 
-// TestSentinelsCarryThePackagePrefix pins DESIGN.md §C.2 rule 3 for every
-// exported sentinel of this package.
+// TestSentinelsCarryThePackagePrefix pins that every exported sentinel of
+// this package starts with the package's name.
 func TestSentinelsCarryThePackagePrefix(t *testing.T) {
 	for name, err := range map[string]error{
 		"ErrInvalidArgument":  ErrInvalidArgument,

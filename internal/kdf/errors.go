@@ -53,7 +53,7 @@ func (e *CalibrationError) Error() string {
 // underlying cause reachable too.
 func (e *CalibrationError) Unwrap() []error { return []error{ErrKDFCalibration, e.Err} }
 
-// PBKDF2IterationsError and Argon2CostError are gone (DESIGN.md §B.6): a
+// PBKDF2IterationsError and Argon2CostError are gone: a
 // refused cost is luks2.KDFCostError now, constructed where it is
 // exported -- pkg/luks2, not here. ForcedPBKDF2Iterations (cost.go) reports
 // the same refusal as an *errs.Error with Kind errs.ErrInvalidArgument.

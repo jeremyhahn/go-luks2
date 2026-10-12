@@ -292,7 +292,7 @@ func ParseRecoveryKey(text *enclave.MemoryEnclave) (*enclave.MemoryEnclave, erro
 
 // AddRecoveryKey adds rk to the volume as a new keyslot and records a
 // systemd-recovery token naming it, re-verifying key against the volume's
-// digests under the exclusive lock taken here (DESIGN.md §B.1) rather than
+// digests under the exclusive lock taken here rather than
 // trusting it was still valid as of whatever Unlock call produced it. It is
 // built on the same keyslot and token internals as Enroll (provider.go),
 // used directly with key rather than re-deriving the master key from a
@@ -303,7 +303,7 @@ func ParseRecoveryKey(text *enclave.MemoryEnclave) (*enclave.MemoryEnclave, erro
 // keyslot is rolled back, the same guard Enroll uses, so a credential that
 // nothing describes is never left live.
 //
-// Two-phase on purpose (DESIGN.md §B.2): the caller shows or persists rk
+// Two-phase on purpose: the caller shows or persists rk
 // BEFORE calling this, so there is no save-error field to report through.
 func (v *Volume) AddRecoveryKey(ctx context.Context, key *Key, rk *RecoveryKey, p KeyslotParams) (Enrollment, error) {
 	v.mu.Lock()

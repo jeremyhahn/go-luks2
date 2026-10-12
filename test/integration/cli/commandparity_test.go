@@ -17,7 +17,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/test/integration/cli/commands"
 )
 
-// TestEveryRegistryVerbHasADefinition is DESIGN.md §E's enumerating test:
+// TestEveryRegistryVerbHasADefinition is the parity suite's enumerating test:
 // it fails when internal/cli's registry answers to a verb commands.Commands
 // has no CommandDefinition for, so the table cannot silently fall behind
 // the registry it is meant to describe.
@@ -34,7 +34,7 @@ func TestEveryRegistryVerbHasADefinition(t *testing.T) {
 }
 
 // embeddedRun calls internal/cli.Run in-process, the "embedded" column of
-// DESIGN.md §E's {CLI binary, embedded} runner.
+// the parity suite's {CLI binary, embedded} runner.
 func embeddedRun(args ...string) (stdout, stderr string, code int) {
 	var out, errBuf bytes.Buffer
 	code = clicmd.Run(context.Background(), append([]string{"luks2"}, args...), strings.NewReader(""), &out, &errBuf)
@@ -42,7 +42,7 @@ func embeddedRun(args ...string) (stdout, stderr string, code int) {
 }
 
 // exitCodeOf extracts the process exit code runCLI's error carries, the
-// same way DESIGN.md §F's exit table is read back in a test: 0 on a nil
+// same way internal/cli's exit-code table is read back in a test: 0 on a nil
 // error (the process could still have failed to start, which is reported
 // separately).
 func exitCodeOf(err error) int {
@@ -55,16 +55,15 @@ func exitCodeOf(err error) int {
 	return -1
 }
 
-// TestCommandParityRefusesMissingArgumentsIdentically is DESIGN.md §E's
-// runner, crossed over the {CLI binary, embedded} columns commands.Commands
+// TestCommandParityRefusesMissingArgumentsIdentically is the parity runner, crossed over the {CLI binary, embedded} columns commands.Commands
 // enumerates: every registered verb, called with none of its required
 // positional arguments, is refused with the same cryptsetup(8)-compatible
 // exit code (1, "wrong parameters") whether dispatched through the built
 // CLI binary (cmd/luks2, exec'd as a subprocess) or embedded
 // (internal/cli.Run, called in-process). Neither column touches a device:
 // every command here returns its UsageError during flag/argument parsing,
-// before any I/O, so this runs without root and is the parity case H11b's
-// additional verbs extend rather than replace.
+// before any I/O, so this runs without root and is the parity case every new
+// verb extends rather than replaces.
 func TestCommandParityRefusesMissingArgumentsIdentically(t *testing.T) {
 	for _, c := range commands.Commands {
 		if c.RequiredArgCount() == 0 {

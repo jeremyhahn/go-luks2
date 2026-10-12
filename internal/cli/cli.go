@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package cli is the luks2 command-line tool (DESIGN.md §F), built on
+// Package cli is the luks2 command-line tool, built on
 // pkg/luks2's Volume API, pkg/dmcrypt, pkg/loop, pkg/filesystem,
 // pkg/keyprovider and pkg/wipe only -- never on the old free-function
 // pkg/luks2 API cmd/luks2 used before this package existed. cmd/luks2 is
@@ -169,7 +169,7 @@ func registry() map[string]*command {
 // RegisteredVerbs returns every verb this package's dispatch table answers
 // to -- "<verb>" for a bare command, "<verb> <sub>" for each entry of a
 // command group -- for test/integration/cli/commands's enumerating parity
-// check (DESIGN.md §E): the table there must have a CommandDefinition for
+// check: the table there must have a CommandDefinition for
 // every name this returns, or the check fails. This is the minimum this
 // package exports toward that: the registry's keys, nothing of the
 // unexported command type itself.

@@ -104,7 +104,7 @@ func TestVerifyWriteDetectsAShortMedium(t *testing.T) {
 }
 
 // TestVerifyWriteStopsAtTheChunkBoundaryOnCancellation mirrors writePass's
-// per-chunk ctx check (DESIGN.md D.2).
+// per-chunk ctx check.
 func TestVerifyWriteStopsAtTheChunkBoundaryOnCancellation(t *testing.T) {
 	size := 3 * chunk
 	path := writeFixture(t, size, 0)

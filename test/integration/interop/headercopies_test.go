@@ -17,7 +17,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
-// Both tools must choose the same header copy (H1). cryptsetup reads both
+// Both tools must choose the same header copy. cryptsetup reads both
 // copies and uses the valid one with the higher sequence id; this library used
 // the primary alone, so a crash that tore the primary write left a volume
 // `cryptsetup open` opens and Unlock refused at boot.

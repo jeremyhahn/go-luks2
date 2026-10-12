@@ -35,8 +35,8 @@ const cryptsetupWriteLockFlock = 4
 // lock before it writes. Shared by lockwait_integration_test.go.
 const cryptsetupWriteHold = 5 * time.Second
 
-// This file backs what pkg/luks2's own integration tier still keeps after
-// #274 (H12c): unlockreadlock_integration_test.go moved out to
+// This file backs what pkg/luks2's own integration tier still keeps:
+// unlockreadlock_integration_test.go moved out to
 // test/integration/luks2/ (it no longer needed any unexported seam -- see
 // its new home's own comment). canonicalconformance_integration_test.go
 // needs none of this either. The remaining three are white-box in a way
@@ -48,17 +48,17 @@ const cryptsetupWriteHold = 5 * time.Second
 //     locked-descriptor reopen (Locked.Claim) makes its first writable
 //     open. There is no path to that seam from outside the package. It no
 //     longer activates a real mapping to produce its "device in use"
-//     fixture (#268 moved activation to pkg/dmcrypt, which pkg/luks2
-//     cannot import): an exclusive O_EXCL open of the loop device is the
+//     fixture (activation lives in pkg/dmcrypt, which pkg/luks2 cannot
+//     import): an exclusive O_EXCL open of the loop device is the
 //     same kernel condition WipeKeyslot's own busy check reacts to, per
 //     the file's own comment, so that stands in instead. relinkAfterFirstOpen
-//     itself still keeps this file from moving out: DESIGN.md §E's
-//     "exported-within-internal API" for openFileFunc would mean relocating
-//     a seam device.OpenFunc already shadows (volumeSys.openFile) into an
+//     itself still keeps this file from moving out: exporting openFileFunc
+//     even as module-internal API would make a security-relevant seam of
+//     this package reachable from outside it, and would mean relocating a
+//     seam device.OpenFunc already shadows (volumeSys.openFile) into an
 //     internal/ package that every other pkg/luks2 production call site
 //     (format.go, medium.go, security.go, wipe.go) would need to switch to
-//     -- flagged for the owner rather than attempted here, the same
-//     reasoning as the two below.
+//     -- the same reasoning as the two below.
 //   - lockwait_integration_test.go's TestCryptsetupWaitsForEveryWritePath
 //     substitutes volumeSys.lockHeld (volume.go), an unexported seam, to
 //     catch a write path exactly after it has taken its locks.
