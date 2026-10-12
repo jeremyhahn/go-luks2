@@ -72,7 +72,8 @@
 // any depth (standards project-scaffold.md §7, #252; only the local tool state
 // `.claude/settings.local.json` is gitignored), and
 // .github/workflows/automerge.yml, which the forge requires (that exact name; a
-// `.yaml` variant or nested copy fails). The gate passes them, lists each on
+// `.yaml` variant or nested copy fails), and the internal review workflows
+// .github/workflows/code-review.yml and qwen-review.yml (#336). The gate passes them, lists each on
 // every run and does not call the tree publishable while one is tracked. Their
 // content is still scanned, and a script or binary among them still fails.
 // There is no waiver for an unpublishable file: remove it from the index.

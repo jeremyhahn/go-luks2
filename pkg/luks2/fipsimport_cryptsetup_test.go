@@ -40,8 +40,8 @@ import (
 // of this test binary with GODEBUG set for it. The parent never derives
 // anything; it formats with cryptsetup, inspects headers, and judges exit codes
 // -- so the test behaves identically whether the parent is the ordinary unit
-// run or the nightly FIPS lane, which runs this package with
-// GODEBUG=fips140=only (.github/workflows/nightly.yml).
+// run or the full tier's FIPS job, which runs this package with
+// GODEBUG=fips140=only (.github/workflows/ci.yml).
 //
 // This is a TEST seam, and deliberately only that. The owner ruling of
 // 2026-09-25 rejected a re-exec seam in the library; the library's own

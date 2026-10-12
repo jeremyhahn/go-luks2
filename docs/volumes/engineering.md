@@ -1,6 +1,6 @@
 # Volumes — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163),
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against main (623da94),
 > except the measured flag table and "What the container does not isolate".
 > The pkg/dmcrypt pointer was checked 2026-10-11 against main (f871541).
 > Conflicts with this document are defects. Fix them here first.
@@ -195,6 +195,7 @@ The other feature folders' test-strategy sections link here. It was
 
 ```bash
 make test-unit          # unit tests, -race, per-package coverage profiles
+make test-unit-norace   # the same legs and profiles without -race (CI's PR tier)
 make coverage-gate      # refuse unit coverage below any package's floor
 make ci                 # everything CI's fast tier runs, including the above
 make integration-test   # integration suite in a scoped container (Docker)
@@ -213,8 +214,8 @@ aggregate above 90% does not excuse a package below it. Floors are in
 
 | Tier | Measured by | Gated in |
 |---|---|---|
-| `unit` | `make test-unit`: every package from `go list ./...`, default tags, `-race` | CI's unit job and `make ci` |
-| `combined` | `make coverage-combined` inside the container: unit plus integration, with `-coverpkg` over the packages `coverage-floors.txt` lists as `combined` | CI's integration job and `make ci-full` |
+| `unit` | `make test-unit-norace` in CI (`make test-unit`, the same legs with `-race`, locally): every package from `go list ./...`, default tags | CI's `Unit Tests` job (PR tier) and `make ci` |
+| `combined` | `make coverage-combined` inside the container: unit plus integration, with `-coverpkg` over the packages `coverage-floors.txt` lists as `combined` | CI's `Integration Tests` job (full tier) and `make ci-full` |
 
 `pkg/luks2`, `pkg/dmcrypt`, `pkg/filesystem`, `pkg/loop`, `internal/dm`,
 `internal/keyring` and `test/internal/harness` are held to 90% in the combined
@@ -228,9 +229,14 @@ for a package that no longer exists, and a package held to 90% in no tier.
 `go test -race ./pkg/luks2` has a budget of 240 s on the CI runner
 (`UNIT_TEST_TARGET`, printed against the measured time) and a hard ceiling of
 10 minutes (`UNIT_TEST_TIMEOUT`). Both are Makefile variables CI reads through
-`make test-unit`.
+`make test-unit`, in the full tier's `Race` job.
 
-The race detector covers the default-tag build of every package. The
+The race detector covers the default-tag build of every package, in the full
+tier only: push to `main`, `workflow_dispatch`, and a pull request labelled
+`ci:full`. The label is read when the pull request is opened, pushed to or
+reopened: adding it takes effect on the next push, or on closing and reopening
+the pull request, because CI does not run on label events. An ordinary pull
+request runs the same unit legs without `-race`. The
 `integration`-tagged tests run in the container without `-race`. `make vet`
 vets both the default and `integration` configurations; a new build tag needs
 its own vet leg.

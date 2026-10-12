@@ -31,7 +31,7 @@ import (
 // tested through its mode-parameterized form (defaultKDFTypeFor,
 // resolveKDFTypeFor) and both answers are checked in every run. The tests that
 // go through the public entry points assert what they do in THIS process's
-// mode; the nightly FIPS lane runs them in the other one.
+// mode; CI's full-tier FIPS job runs them in the other one.
 
 // e2eIterTimeMs is the PBKDF2 budget the end-to-end tests below calibrate to.
 // What they assert is the KDF TYPE and HASH a keyslot gets, not its cost, and

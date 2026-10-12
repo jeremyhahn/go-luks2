@@ -217,7 +217,7 @@ func TestReleaseRequiresMainAndCIsGate(t *testing.T) {
 	// The context must be the one ci.yml's gate job reports, under the name
 	// the workflow and the job carry.
 	ci := readFile(t, ".github/workflows/ci.yml")
-	if !regexp.MustCompile(`(?m)^name: CI$`).MatchString(ci) || !strings.Contains(job(t, ci, "gate"), "name: CI Gate\n") {
+	if !regexp.MustCompile(`(?m)^name: CI$`).MatchString(ci) || !strings.Contains(job(t, ci, "gate"), "    name: CI Gate\n") {
 		t.Error("ci.yml's workflow or gate job was renamed; release.yml's -status-context and -job-name must follow")
 	}
 }

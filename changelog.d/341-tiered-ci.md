@@ -1,0 +1,3 @@
+### Changed
+
+- **CI is split into a PR tier and a full tier (#341).** Every pull request runs Lint, Security Scan, Build, Merged Tree and Unit Tests, now without `-race` (`make test-unit-norace`), still with the coverage, calibration, releasability and API-diff gates; `CI Gate` aggregates exactly these and stays the single required check. FIPS, Integration Tests and Race (`make test-unit`, `-race`, with its `pkg/luks2` time budget) run on every push to `main`, on `workflow_dispatch`, and on a pull request labelled `ci:full`, aggregated by the new `Full Gate`. FIPS moved from `nightly.yml` into `ci.yml` unchanged and now runs on every push to `main` instead of once a night. `nightly.yml` has no schedule any more; it is dispatch-only and carries trivy.

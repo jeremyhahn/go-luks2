@@ -39,7 +39,7 @@ func newTestVolumeImage(t *testing.T, name string) string {
 }
 
 // fipsProcess reports whether this test binary runs in FIPS 140-3 mode (the
-// nightly FIPS job runs it under GODEBUG=fips140=only). FIPS mode is fixed at
+// full tier's FIPS job runs it under GODEBUG=fips140=only). FIPS mode is fixed at
 // process start, and the library refuses Argon2 in it.
 var fipsProcess = bool(fips.Probe())
 

@@ -140,8 +140,8 @@ import (
 // cannot be done in the migrating process. It is done in three layers: the
 // static check (every remaining keyslot and digest approved, via
 // fipsApprovedKDF), a real open through the new keyslot and approved digests
-// with Argon2 structurally absent from the path, and a test in the nightly FIPS
-// lane that migrates a real cryptsetup volume and opens it under
+// with Argon2 structurally absent from the path, and a test in CI's full-tier FIPS
+// job that migrates a real cryptsetup volume and opens it under
 // GODEBUG=fips140=only in a separate process.
 
 // fipsMigrationOptionsForTest tunes migrateToFIPS; (*Volume).MigrateToFIPS

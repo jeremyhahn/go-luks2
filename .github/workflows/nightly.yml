@@ -9,98 +9,19 @@ name: Nightly
 # demand via workflow_dispatch, and are NOT in any merge gate. When their
 # tracked issues land, a job may move back to ci.yml — that move is deliberate,
 # not automatic.
+#
+# DEVIATION (#341, sdlc §5a): NO `schedule:` trigger. No CI workflow is scheduled;
+# the coordinator's loop dispatches this file nightly, together with ci.yml,
+# whose workflow_dispatch runs the full tier. FIPS moved to ci.yml's full tier
+# then, which runs it on every push to main as well. What remains is trivy.
 on:
-  schedule:
-    - cron: '0 3 * * *'
   workflow_dispatch:
 
 permissions:
   contents: read
   security-events: write
 
-env:
-  # Kept in lockstep with ci.yml. The template omits this block, which leaves
-  # `env.GO_VERSION` empty in the fips job below — reported upstream.
-  GO_VERSION: "1.27.2"
-
 jobs:
-  fips:
-    name: FIPS
-    runs-on: ubuntu-latest
-    # needs: none — nightly runs standalone; build health is ci.yml's job.
-    timeout-minutes: 30
-    env:
-      GOFIPS140: latest
-      # STRICT mode, not `on` (ratified 2026-08-17). `fips140=on` loads the Go
-      # Cryptographic Module but still PERMITS non-approved algorithms, so a
-      # path using SHA-1 succeeds and the gate reports green — a gate that
-      # cannot fail on the thing it exists to catch is decoration.
-      # `fips140=only` makes non-approved operations error or panic, which is
-      # what a FedRAMP / PCI DSS / HIPAA compliance gate has to do.
-      #
-      # If this job fails, that failure IS the finding. Do not weaken it back
-      # to `on` to make it pass — fix the call site, or document a deliberate
-      # exemption with the owner's approval.
-      GODEBUG: fips140=only
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version: ${{ env.GO_VERSION }}
-
-      # The same provisioning as ci.yml's unit job: ./pkg/luks2's conformance
-      # tests drive the real cryptsetup and fail -- never skip -- without it, so
-      # a runner image lacking it would turn this lane red for a reason that is
-      # not FIPS (#235).
-      - name: Install cryptsetup (a test dependency of ./pkg/luks2)
-        run: |
-          set -eu
-          if ! command -v cryptsetup >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq cryptsetup-bin
-          fi
-          cryptsetup --version
-
-      - name: Build all packages (FIPS mode)
-        run: go build ./...
-
-      # ./pkg/luks2's unit tests call the real cryptsetup (the conformance
-      # suite, and the FIPS import proof below), and fail rather than skip
-      # when it is absent. Same step as the unit job in ci.yml.
-      - name: Install cryptsetup (a test dependency of ./pkg/luks2)
-        run: |
-          set -eu
-          if ! command -v cryptsetup >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq cryptsetup-bin
-          fi
-          cryptsetup --version
-
-      # THE FIPS IMPORT PROOF (#84, owner ruling 2026-09-25), named on its own
-      # so its result is visible rather than one line inside the suite below.
-      #
-      # A `cryptsetup luksFormat` Argon2id volume (cryptsetup's minimum Argon2
-      # cost; the default-cost volume is proved on the real kernel by the
-      # integration suite) is migrated with
-      # MigrateToFIPS in a NON-FIPS step, then opened by a FIPS step. FIPS mode
-      # is fixed at process start, so each step is its own re-execution of the
-      # test binary: the migration runs with GODEBUG=fips140=off, the opens with
-      # GODEBUG=fips140=only, and the test fails if either child did not run in
-      # the mode it was given. This job's GODEBUG applies to the parent, which
-      # only formats, inspects headers and judges the children -- so it proves
-      # the same thing here as in the ordinary unit run.
-      - name: FIPS import (non-FIPS migrate, then FIPS open)
-        run: go test -count=1 -timeout=900s -v -run '^TestFIPSImportOf(ACryptsetupArgon2idVolume|ACryptsetupVolumeWithShortSalts|ACryptsetupVolumeWithAnUnboundKey|SHA1AFVolumes)$' ./pkg/luks2
-
-      # Mirrors the repo's own unit-test scope with ONLY the FIPS env changed.
-      # `./...` is the right scope here because the integration suites sit
-      # behind `//go:build integration` and so are already excluded; the race
-      # detector is omitted to match the ci.yml fips job this replaces.
-      - name: Unit tests (FIPS mode)
-        run: go test -count=1 -timeout=900s ./...
-
   trivy:
     name: Trivy
     runs-on: ubuntu-latest

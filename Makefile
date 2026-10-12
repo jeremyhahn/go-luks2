@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build install test test-verbose test-coverage test-integration coverage coverage-report clean fmt vet lint gosec govulncheck vuln trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration seccomp-diff proto test-pkg docker-build docker-run
+.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build install test test-verbose test-coverage test-integration coverage coverage-report clean fmt vet lint gosec govulncheck vuln trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration test-unit-norace seccomp-diff proto test-pkg docker-build docker-run
 
 # Default target
 .DEFAULT_GOAL := help
@@ -66,6 +66,12 @@ UNIT_TEST_TIMEOUT ?= 10m
 UNIT_TEST_TARGET ?= 240
 # Extra `go test` flags for the unit legs; CI passes -v.
 UNIT_TEST_FLAGS ?=
+# The race detector for the unit legs (#341). `-race` by default, which is the
+# full tier's Race job and the run UNIT_TEST_TARGET budgets; test-unit-norace
+# empties it for the PR tier's Unit Tests job. Same legs, same profiles, same
+# coverage gate -- only the instrumentation differs.
+UNIT_TEST_RACE ?= -race
+UNIT_TEST_MODE = $(if $(strip $(UNIT_TEST_RACE)),under -race,without -race)
 
 # Simple expansion (:=), not recursive (=), and that is load-bearing (#205).
 # GNU make 4.4 exports environment-origin variables into $(shell ...). GOPATH is
@@ -179,26 +185,30 @@ test: ## Run unit tests only (no I/O, no root required)
 # `go list ./...` reports -- so a package added later is raced and measured
 # without anyone remembering to list it (#34). What this covers is the DEFAULT
 # tag set only; integration-tagged code runs in the devcontainer, without -race,
-# and the reasoning is recorded at the race legs in .github/workflows/ci.yml.
+# and the reasoning is recorded at the race legs in .github/workflows/ci.yml (the Race job).
 #
 # -count=1, because a cached result would report a runtime of zero against the
 # budget and a profile from some earlier tree.
+#
+# Raced by default; UNIT_TEST_RACE= (test-unit-norace) runs the same two legs
+# uninstrumented. CI's PR tier runs that, and its full tier runs this one
+# raced, against UNIT_TEST_TARGET (#341).
 test-unit: ## Run only unit tests with coverage and the race detector (fast, no I/O, no root required)
-	@echo "$(COLOR_BOLD)Running unit tests with coverage and -race...$(COLOR_RESET)"
+	@echo "$(COLOR_BOLD)Running unit tests with coverage $(UNIT_TEST_MODE)...$(COLOR_RESET)"
 	@rm -f $(COVERAGE_UNIT_LEGS) $(COVERAGE_FILE)
 	@set -u; \
 	start=$$(date +%s); rc=0; \
-	$(GO) test $(UNIT_TEST_FLAGS) -count=1 -race -timeout $(UNIT_TEST_TIMEOUT) -covermode=atomic \
+	$(GO) test $(UNIT_TEST_FLAGS) -count=1 $(UNIT_TEST_RACE) -timeout $(UNIT_TEST_TIMEOUT) -covermode=atomic \
 		-coverprofile=$(COVERAGE_LEG_PKG) ./pkg/luks2 || rc=$$?; \
 	elapsed=$$(( $$(date +%s) - start )); \
-	echo "pkg/luks2 under -race took $${elapsed}s: target $(UNIT_TEST_TARGET)s (UNIT_TEST_TARGET), ceiling $(UNIT_TEST_TIMEOUT) (UNIT_TEST_TIMEOUT)"; \
+	echo "pkg/luks2 $(UNIT_TEST_MODE) took $${elapsed}s: target $(UNIT_TEST_TARGET)s (UNIT_TEST_TARGET), ceiling $(UNIT_TEST_TIMEOUT) (UNIT_TEST_TIMEOUT)"; \
 	if [ "$$elapsed" -gt "$(UNIT_TEST_TARGET)" ]; then \
-		echo "::warning::pkg/luks2 under -race took $${elapsed}s, over its $(UNIT_TEST_TARGET)s budget (#92). Profile it with go test -json -race and move the slowest setup onto shared fixtures; do not raise the budget."; \
+		echo "::warning::pkg/luks2 $(UNIT_TEST_MODE) took $${elapsed}s, over its $(UNIT_TEST_TARGET)s budget (#92). Profile it with go test -json -race and move the slowest setup onto shared fixtures; do not raise the budget."; \
 	fi; \
 	exit $$rc
 	@pkgs=$$($(GO) list ./... | grep -vx 'github.com/jeremyhahn/go-luks2/pkg/luks2') && test -n "$$pkgs" || \
 		{ echo "$(COLOR_RED)go list named no package besides pkg/luks2$(COLOR_RESET)"; exit 1; }; \
-	$(GO) test $(UNIT_TEST_FLAGS) -count=1 -race -timeout $(UNIT_TEST_TIMEOUT) -covermode=atomic \
+	$(GO) test $(UNIT_TEST_FLAGS) -count=1 $(UNIT_TEST_RACE) -timeout $(UNIT_TEST_TIMEOUT) -covermode=atomic \
 		-coverprofile=$(COVERAGE_LEG_REST) $$pkgs
 	@# The merged copy, for the report only. A missing leg is still an error
 	@# here: a report computed over the legs that happened to write a profile
@@ -211,6 +221,12 @@ test-unit: ## Run only unit tests with coverage and the race detector (fast, no 
 	@echo ""
 	@echo "$(COLOR_BOLD)Coverage from unit tests (gated per package by coverage-gate):$(COLOR_RESET)"
 	@$(GO) tool cover -func=$(COVERAGE_FILE) | tail -1
+
+# The PR tier's unit run (#341): test-unit's legs, profiles and coverage report,
+# without the race detector. Not a second command line -- the knob above is the
+# only difference, so the two cannot drift. The race run is the full tier's.
+test-unit-norace: ## Run the unit tests with coverage but without -race (CI's PR tier)
+	@$(MAKE) --no-print-directory test-unit UNIT_TEST_RACE=
 
 # The public-releasability gate (#211) over THIS checkout's git index: no fleet
 # address, hostname or owner path in a tracked file, and no tracked file the
@@ -518,7 +534,7 @@ coverage-report: ## Print the func summary and write the HTML report from the al
 # reaper use counts toward test/internal/harness -- whose own integration
 # tests drive the reaper's removals against the real kernel. -p 1 keeps the
 # integration packages from contending for loop devices at once. The unit
-# leg is not raced: -race is the unit job's business, and this leg is here
+# leg is not raced: -race is the Race job's business, and this leg is here
 # for its profile.
 coverage-combined: ## (devcontainer only) Run the integration suite and gate unit+integration coverage
 	@rm -f $(COVERAGE_INTEGRATION) $(COVERAGE_COMBINED_UNIT)

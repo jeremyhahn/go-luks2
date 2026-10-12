@@ -29,7 +29,7 @@ const fipsHint = "In FIPS 140-3 mode use --pbkdf pbkdf2"
 // ErrFIPSNotApproved and prints the hint that names the approved choice. FIPS
 // mode is fixed at process start, so a non-FIPS run re-executes this test
 // binary under GODEBUG=fips140=only and judges the child; a FIPS run (the
-// nightly job) asserts directly.
+// full tier's FIPS job) asserts directly.
 func TestKDFChoiceRefusedInFIPSModeCarriesTheHint(t *testing.T) {
 	if fipsProcess {
 		assertFIPSKDFHint(t)

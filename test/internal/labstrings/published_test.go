@@ -235,6 +235,58 @@ func TestStripAtPublish_ListsTheAutomergeWorkflowAndNothingElse(t *testing.T) {
 	}
 }
 
+// The internal review workflows are tracked on main and stripped at publish
+// (#336), like automerge.yml: exact names only, so a `.yaml` variant or a
+// nested copy is still an unknown workflow and fails.
+func TestStripAtPublish_ListsTheReviewWorkflows(t *testing.T) {
+	reviewWorkflows := []string{".github/workflows/code-review.yml", ".github/workflows/qwen-review.yml"}
+	files := map[string]string{
+		".github/workflows/code-review.yml":     "on: pull_request\n",
+		".github/workflows/qwen-review.yml":     "on: pull_request\n",
+		".github/workflows/code-review.yaml":    "on: pull_request\n",
+		".github/workflows/sub/qwen-review.yml": "on: pull_request\n",
+		".github/workflows/ci.yml":              "on: push\n",
+	}
+	entries := entriesOf(files)
+
+	findings, err := ScanUnpublishable(entries, DefaultUnpublishable, DefaultStripAtPublish)
+	if err != nil {
+		t.Fatalf("ScanUnpublishable: %v", err)
+	}
+	failed := map[string]bool{}
+	for _, f := range findings {
+		failed[f.Path] = true
+	}
+	for _, name := range reviewWorkflows {
+		if failed[name] {
+			t.Errorf("%s failed the scan; it is stripped at publish, not failed", name)
+		}
+	}
+	for _, name := range []string{".github/workflows/code-review.yaml", ".github/workflows/sub/qwen-review.yml"} {
+		if !failed[name] {
+			t.Errorf("%s passed the scan; only the exact name is stripped", name)
+		}
+	}
+
+	stripped := map[string]string{}
+	for _, s := range StripAtPublish(entries, DefaultStripAtPublish) {
+		stripped[s.Path] = s.Reason
+	}
+	if len(stripped) != len(reviewWorkflows) {
+		t.Errorf("StripAtPublish = %v, want exactly %v", stripped, reviewWorkflows)
+	}
+	for _, name := range reviewWorkflows {
+		reason, ok := stripped[name]
+		if !ok {
+			t.Errorf("%s is not stripped at publish", name)
+			continue
+		}
+		if !strings.Contains(reason, "#211") {
+			t.Errorf("%s: the reason does not name the release issue: %q", name, reason)
+		}
+	}
+}
+
 // Agent instructions are tracked on main and stripped at publish (owner
 // ruling 2026-10-04, #252): at the root or nested, they pass the scan and are
 // listed. Content checks still apply -- a script under .claude/ fails as a

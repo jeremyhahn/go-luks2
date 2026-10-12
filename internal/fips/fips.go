@@ -10,7 +10,7 @@
 // start, so a process can only ever run one branch of every policy check;
 // taking the mode as a value lets a test run both branches in one process,
 // while what the Go Cryptographic Module itself enforces in strict mode
-// (GODEBUG=fips140=only) is proved by the child-process and nightly tests.
+// (GODEBUG=fips140=only) is proved by the child-process tests and CI's full-tier FIPS job.
 package fips
 
 import (

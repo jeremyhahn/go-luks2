@@ -21,13 +21,42 @@ name: CI
 # "cancellation is impossible"; the narrow claim is true and the conclusion was
 # not.
 #
-# trivy and fips moved to nightly.yml: both were known-red on every push, and a
-# known-red job burning runner-minutes per push verifies nothing.
+# TWO TIERS (#341, sdlc §5a). DEVIATION from the template, which has one.
+#
+#   PR tier    every pull_request: Lint, Security Scan, Build, Merged Tree and
+#              Unit Tests (no -race). CI Gate aggregates exactly these and is
+#              the single required check.
+#   Full tier  push to main, workflow_dispatch, and a pull_request labelled
+#              `ci:full`: FIPS, Integration Tests and Race (the -race unit run
+#              with its pkg/luks2 budget). Full Gate aggregates exactly these.
+#
+# No CI workflow is scheduled: the nightly full run is a workflow_dispatch from
+# the coordinator's loop, which this file treats exactly like a push to main.
+# FIPS moved back here from nightly.yml, so it now runs on every push to main
+# rather than once a night; trivy stays in nightly.yml, dispatch-only.
+#
+# Every full-tier job, and Full Gate's FULL_TIER, carries the SAME condition,
+# and test/ci/workflows asserts they stay identical:
+#
+#   push or workflow_dispatch                  -> full tier
+#   pull_request already labelled ci:full      -> full tier
+#
+# NO LABEL EVENTS. ci.yml does not fire on `labeled`, so ADDING ci:full takes
+# effect on the PR's next push, or on closing and reopening it; it starts
+# nothing by itself. That is deliberate. A job skipped by `if:` still posts a
+# status under its name, and both hosts count a skipped required check as
+# passing, so a label-event run would overwrite the head's real `CI Gate` with
+# a skipped one. Renaming the gate on that event is no way out: Gitea does not
+# evaluate expressions in a job's `name:` and posts the expression verbatim.
+# test/ci/workflows asserts the types below and the literal gate names.
 on:
   push:
     branches: [main]                    # trunk-based: main is the ONLY trunk
   pull_request:
     branches: [main]
+    # The defaults, listed so that `labeled` is visibly absent; see NO LABEL
+    # EVENTS above.
+    types: [opened, synchronize, reopened]
   # Lets a run be repeated without inventing a commit, which matters when a
   # failure is the runner's rather than the code's.
   workflow_dispatch:
@@ -107,6 +136,9 @@ env:
   GOVULNCHECK_VERSION: "v1.8.0"
 
 jobs:
+  # ---- PR tier ----
+  #
+  # Every PR-tier job runs on every event this workflow fires on.
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -243,26 +275,26 @@ jobs:
             exit 1
           }
 
-      # THE RACE LEGS, through the Makefile so that this job and a developer's
-      # `make test-unit` run the same commands under the same two numbers
-      # (#92): UNIT_TEST_TIMEOUT, the ceiling that fails the run, and
-      # UNIT_TEST_TARGET, the budget for ./pkg/luks2 under -race, printed with
-      # the measured time on every run and flagged with a ::warning:: past it.
-      # Neither is restated here; change them in the Makefile.
+      # THE UNIT LEGS, UNINSTRUMENTED (#341): the PR tier's run. test-unit's
+      # two legs -- ./pkg/luks2, then every other package `go list ./...`
+      # reports, so a package added later is tested and gated without being
+      # listed here -- with the same per-package profiles the coverage gate
+      # below reads, and only -race removed (UNIT_TEST_RACE in the Makefile).
+      # The raced run, with its pkg/luks2 budget, is the full tier's Race job.
       #
-      # The second leg is every package `go list ./...` reports besides
-      # ./pkg/luks2 -- cmd/luks2, test/internal/harness and its reaper, the coverage gate,
-      # the Makefile's own regression tests -- so a package added later is raced
-      # and gated without being listed here.
-      #
-      # What is raced is the DEFAULT tag set. The integration-tagged suites run
-      # in the devcontainer without -race: they drive loop devices,
-      # device-mapper and mounts, which are host-global, and are measured there
-      # for coverage instead (make coverage-combined).
-      - name: Run unit tests (-race, per-package coverage)
-        run: make test-unit UNIT_TEST_FLAGS=-v
+      # What runs is the DEFAULT tag set. The integration-tagged suites run in
+      # the devcontainer: they drive loop devices, device-mapper and mounts,
+      # which are host-global, and are measured there for coverage instead
+      # (make coverage-combined).
+      - name: Run unit tests (per-package coverage, no -race)
+        run: make test-unit-norace UNIT_TEST_FLAGS=-v
 
-      # WITHOUT -race, deliberately, and not a duplicate of the step above.
+      # Kept although the step above is now uninstrumented too: it also runs
+      # the calibration BENCHMARKS, which the ordinary unit run never does, and
+      # it stays the one place these assertions run if the step above is ever
+      # raced again.
+      #
+      # WITHOUT -race, deliberately.
       #
       # The PBKDF2 calibration defect (#52) is invisible under -race. Measured:
       # the old implementation gated its extrapolation on
@@ -273,7 +305,7 @@ jobs:
       # requested work factor. Every calibration test passes against the
       # restored defect under -race and fails against it without.
       #
-      # This job otherwise runs ./pkg/luks2 under -race only, which is how that
+      # This job used to run ./pkg/luks2 under -race only, which is how that
       # weakening survived five merges and three releases of green CI. The
       # uninstrumented build is the one that ships.
       - name: Run PBKDF2 calibration tests (no -race)
@@ -326,9 +358,14 @@ jobs:
           name: coverage-unit
           path: coverage.out
 
+  # ---- Full tier ----
+  #
+  # The condition is the same on every full-tier job and on Full Gate's
+  # FULL_TIER; the table at the top of this file reads it out.
   test-integration:
     name: Integration Tests
     runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:full'))
     # EVERY DOCKER NAME THIS JOB CREATES IS UNIQUE TO THIS JOB ATTEMPT (#105).
     #
     # Docker names and image tags are unique PER HOST, not per job. Six open
@@ -416,8 +453,8 @@ jobs:
       # anything it tests. A literal cannot diverge between hosts.
       ITEST_IMAGE: go-luks2-integration-test:${{ github.run_id }}-test-integration-${{ github.run_attempt }}
       ITEST_CONTAINER: go-luks2-test-runner-${{ github.run_id }}-test-integration-${{ github.run_attempt }}
-    # No `needs` (ci-template v1.14): starts at once; the CI Gate fails closed
-    # on it. The suite races on host-global loop devices — /dev/loop* is NOT
+    # No `needs` (ci-template v1.14): starts at once; Full Gate fails closed on
+    # it whenever the full tier runs. The suite races on host-global loop devices — /dev/loop* is NOT
     # namespaced, so two concurrent runs on one machine share one pool — which
     # is why it runs inside the container and never bare on a shared runner.
     steps:
@@ -623,6 +660,141 @@ jobs:
           path: coverage-integration.out
           if-no-files-found: error
 
+  test-race:
+    name: Race
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:full'))
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Install cryptsetup (a test dependency of ./pkg/luks2)
+        run: |
+          set -eu
+          if ! command -v cryptsetup >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq cryptsetup-bin
+          fi
+          cryptsetup --version
+          command -v cryptsetup >/dev/null 2>&1 || {
+            echo "::error::cryptsetup is still absent after install; the conformance suite would skip and report green."
+            exit 1
+          }
+
+      # THE RACE LEGS, moved here from Unit Tests unchanged (#341), through the
+      # Makefile so that this job and a developer's `make test-unit` run the
+      # same commands under the same two numbers (#92): UNIT_TEST_TIMEOUT, the
+      # ceiling that fails the run, and UNIT_TEST_TARGET, the budget for
+      # ./pkg/luks2 under -race, printed with the measured time on every run
+      # and flagged with a ::warning:: past it. Neither is restated here;
+      # change them in the Makefile.
+      #
+      # The second leg is every package `go list ./...` reports besides
+      # ./pkg/luks2 -- cmd/luks2, test/internal/harness and its reaper, the coverage gate,
+      # the Makefile's own regression tests -- so a package added later is raced
+      # and gated without being listed here.
+      #
+      # What is raced is the DEFAULT tag set. The integration-tagged suites run
+      # in the devcontainer without -race: they drive loop devices,
+      # device-mapper and mounts, which are host-global, and are measured there
+      # for coverage instead (make coverage-combined). Coverage is GATED on the
+      # PR tier's uninstrumented run, not here; this job gates the race
+      # detector's findings and the ceiling.
+      - name: Run unit tests (-race, per-package coverage)
+        run: make test-unit UNIT_TEST_FLAGS=-v
+
+      - name: Record the resource limits these tests ran under
+        if: always()
+        run: |
+          echo "RLIMIT_MEMLOCK (KiB): $(ulimit -l)"
+          echo "nproc: $(nproc)"
+          df -h /tmp | tail -1
+
+  # Moved from nightly.yml (#341) with its steps UNCHANGED, the duplicated
+  # cryptsetup step included: it ran nightly and now runs on every push to main,
+  # every dispatch and every ci:full PR -- more often, never less.
+  fips:
+    name: FIPS
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:full'))
+    timeout-minutes: 30
+    env:
+      GOFIPS140: latest
+      # STRICT mode, not `on` (ratified 2026-08-17). `fips140=on` loads the Go
+      # Cryptographic Module but still PERMITS non-approved algorithms, so a
+      # path using SHA-1 succeeds and the gate reports green — a gate that
+      # cannot fail on the thing it exists to catch is decoration.
+      # `fips140=only` makes non-approved operations error or panic, which is
+      # what a FedRAMP / PCI DSS / HIPAA compliance gate has to do.
+      #
+      # If this job fails, that failure IS the finding. Do not weaken it back
+      # to `on` to make it pass — fix the call site, or document a deliberate
+      # exemption with the owner's approval.
+      GODEBUG: fips140=only
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      # The same provisioning as the unit job: ./pkg/luks2's conformance
+      # tests drive the real cryptsetup and fail -- never skip -- without it, so
+      # a runner image lacking it would turn this lane red for a reason that is
+      # not FIPS (#235).
+      - name: Install cryptsetup (a test dependency of ./pkg/luks2)
+        run: |
+          set -eu
+          if ! command -v cryptsetup >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq cryptsetup-bin
+          fi
+          cryptsetup --version
+
+      - name: Build all packages (FIPS mode)
+        run: go build ./...
+
+      # ./pkg/luks2's unit tests call the real cryptsetup (the conformance
+      # suite, and the FIPS import proof below), and fail rather than skip
+      # when it is absent. Same step as the unit job.
+      - name: Install cryptsetup (a test dependency of ./pkg/luks2)
+        run: |
+          set -eu
+          if ! command -v cryptsetup >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq cryptsetup-bin
+          fi
+          cryptsetup --version
+
+      # THE FIPS IMPORT PROOF (#84, owner ruling 2026-09-25), named on its own
+      # so its result is visible rather than one line inside the suite below.
+      #
+      # A `cryptsetup luksFormat` Argon2id volume (cryptsetup's minimum Argon2
+      # cost; the default-cost volume is proved on the real kernel by the
+      # integration suite) is migrated with
+      # MigrateToFIPS in a NON-FIPS step, then opened by a FIPS step. FIPS mode
+      # is fixed at process start, so each step is its own re-execution of the
+      # test binary: the migration runs with GODEBUG=fips140=off, the opens with
+      # GODEBUG=fips140=only, and the test fails if either child did not run in
+      # the mode it was given. This job's GODEBUG applies to the parent, which
+      # only formats, inspects headers and judges the children -- so it proves
+      # the same thing here as in the ordinary unit run.
+      - name: FIPS import (non-FIPS migrate, then FIPS open)
+        run: go test -count=1 -timeout=900s -v -run '^TestFIPSImportOf(ACryptsetupArgon2idVolume|ACryptsetupVolumeWithShortSalts|ACryptsetupVolumeWithAnUnboundKey|SHA1AFVolumes)$' ./pkg/luks2
+
+      # Mirrors the repo's own unit-test scope with ONLY the FIPS env changed.
+      # `./...` is the right scope here because the integration suites sit
+      # behind `//go:build integration` and so are already excluded; the race
+      # detector is omitted, as in the PR tier's Unit Tests job.
+      - name: Unit tests (FIPS mode)
+        run: go test -count=1 -timeout=900s ./...
+
+  # ---- PR tier, continued ----
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -780,13 +952,18 @@ jobs:
           go vet -tags=integration ./...
           echo "the merge of this branch with $base compiles"
 
+  # THE PR TIER'S GATE, and the single required check. It needs exactly the
+  # PR-tier jobs (#341): Integration Tests left it for the full tier, and the
+  # full tier gates through Full Gate, which is not required.
+  #
+  # The name is literal and must stay so: Gitea does not evaluate expressions
+  # in a job's `name:`, and would post the expression itself as the status
+  # context, so the required `CI Gate` would never be reported.
   gate:
     name: CI Gate
     runs-on: ubuntu-latest
     if: always()
-    # v1.9: trivy and fips moved to nightly.yml (known-red jobs off the push
-    # path — owner ruling 2026-08-20); they gate nothing here.
-    needs: [lint, security, build, test-unit, test-integration, merge-check]
+    needs: [lint, security, build, test-unit, merge-check]
     steps:
       # join(needs.*.result) is a GitHub extension that evaluates to an empty
       # string on the self-hosted host, so a gate built on it reports success
@@ -799,7 +976,6 @@ jobs:
           SECURITY: ${{ needs.security.result }}
           BUILD: ${{ needs.build.result }}
           TEST_UNIT: ${{ needs.test-unit.result }}
-          TEST_INTEGRATION: ${{ needs.test-integration.result }}
           MERGE_CHECK: ${{ needs.merge-check.result }}
         run: |
           # skipped != failed, but BOTH fail the gate: a job that never ran
@@ -807,7 +983,7 @@ jobs:
           # this was written for — a red that reads as a test failure while the
           # tests in fact never ran.
           failed=0
-          for job in LINT SECURITY BUILD TEST_UNIT TEST_INTEGRATION MERGE_CHECK; do
+          for job in LINT SECURITY BUILD TEST_UNIT MERGE_CHECK; do
             eval "result=\$$job"
             case "$result" in
               success) echo "OK   ${job}" ;;
@@ -821,3 +997,53 @@ jobs:
             exit 1
           fi
           echo "CI gate passed."
+
+  # THE FULL TIER'S GATE (#341). Not a required check -- branch protection
+  # requires CI Gate only -- but red on a push to main or a dispatch whenever a
+  # full-tier job failed, was cancelled or did not run.
+  #
+  #   FULL_TIER true   every full-tier job must be `success`; skipped,
+  #                    failure, cancelled and unreadable all fail it.
+  #   FULL_TIER false  (an ordinary PR) every full-tier job must be `skipped`,
+  #                    and the gate passes saying the tier was not requested.
+  #                    A job that ran anyway means the conditions drifted
+  #                    apart, and fails it.
+  #   anything else    fails: an unevaluated expression is not a "no".
+  #
+  # Literal name, for the reason CI Gate's is.
+  full-gate:
+    name: Full Gate
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [fips, test-integration, test-race]
+    steps:
+      - name: Check job results
+        env:
+          FULL_TIER: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:full')) }}
+          FIPS: ${{ needs.fips.result }}
+          TEST_INTEGRATION: ${{ needs.test-integration.result }}
+          TEST_RACE: ${{ needs.test-race.result }}
+        run: |
+          case "$FULL_TIER" in
+            true)  want=success ;;
+            false) want=skipped ;;
+            *)     echo "FAIL FULL_TIER is '${FULL_TIER}', neither true nor false"; exit 1 ;;
+          esac
+          failed=0
+          for job in FIPS TEST_INTEGRATION TEST_RACE; do
+            eval "result=\$$job"
+            if [ "$result" = "$want" ]; then
+              echo "OK   ${job} (${result})"
+            else
+              echo "FAIL ${job} (${result:-<unreadable>}, expected ${want})"; failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "Full gate failed."
+            exit 1
+          fi
+          if [ "$FULL_TIER" = false ]; then
+            echo "Full tier not requested for this event (no ci:full label); nothing to gate."
+          else
+            echo "Full gate passed."
+          fi

@@ -57,15 +57,23 @@ var PublishedWorkflows = []string{"ci.yml", "nightly.yml", "release.yml"}
 // content: a script or a binary under .claude/ still fails, and the lab-value
 // scan reads every stripped file like any other.
 //
-// The automerge rule is an exact name: `automerge.yaml` or a nested copy is an
-// unknown workflow and fails.
+// So are the internal review workflows code-review.yml and qwen-review.yml
+// (#336). The workflow rules are exact names: `automerge.yaml` or a nested
+// copy is an unknown workflow and fails.
 var DefaultStripAtPublish = []Unpublishable{
 	{Path: "**/CLAUDE.md", Reason: agentInstructions},
 	{Path: "**/AGENTS.md", Reason: agentInstructions},
 	{Path: "**/.claude/**", Reason: agentInstructions},
 	{Path: workflowDir + "automerge.yml", Reason: "Gitea-only automerge workflow (owner ruling 2026-10-02, " +
 		"automatethethings#200): tracked on main, stripped from the public release (#211, #252)"},
+	{Path: workflowDir + "code-review.yml", Reason: internalReviewWorkflow},
+	{Path: workflowDir + "qwen-review.yml", Reason: internalReviewWorkflow},
 }
+
+// internalReviewWorkflow is the reason given for the internal code-review
+// workflows (#336).
+const internalReviewWorkflow = "internal Gitea code-review workflow: tracked on main, " +
+	"stripped from the public release (#211, #336)"
 
 // internalWorkflow is the reason given for any file under workflowDir that
 // PublishedWorkflows does not name.

@@ -20,7 +20,7 @@ import (
 //
 // FIPS mode is fixed at process start, so in the ordinary unit run every branch
 // behind fipsMode would otherwise execute only in the child processes of
-// fipsimport_cryptsetup_test.go and in the nightly FIPS job: a regression in how
+// fipsimport_cryptsetup_test.go and in CI's full-tier FIPS job: a regression in how
 // a refusal is CLASSIFIED -- import needed, or damage -- would go unseen until
 // then. These tests force the policy on, by passing a forced fipsMode into the
 // sys-accepting core the operation under test wraps, and pin each
