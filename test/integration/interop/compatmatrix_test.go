@@ -422,7 +422,9 @@ func csMapping(t *testing.T, device string, passphrase []byte) string {
 			_, _ = exec.Command("cryptsetup", "close", name).CombinedOutput() // #nosec G204 -- a run-scoped mapping name
 		}
 	})
-	mustCryptsetupPassphrase(t, "", "open", "--key-file", matrixKeyFile(t, passphrase), device, name)
+	activateRecordedAhead(t, device, name, func() {
+		mustCryptsetupPassphrase(t, "", "open", "--key-file", matrixKeyFile(t, passphrase), device, name)
+	})
 	return name
 }
 
@@ -1048,8 +1050,10 @@ var cryptsetupFormats = []struct {
 				_, _ = exec.Command("cryptsetup", "close", name).CombinedOutput() // #nosec G204 -- a run-scoped mapping name
 			}
 		})
-		mustCryptsetupPassphrase(t, "", "open", "--key-file", matrixKeyFile(t, []byte(matrixPassphrase)), "--persistent", "--allow-discards",
-			"--perf-same_cpu_crypt", "--perf-submit_from_crypt_cpus", "--perf-no_read_workqueue", "--perf-no_write_workqueue", loop, name)
+		activateRecordedAhead(t, loop, name, func() {
+			mustCryptsetupPassphrase(t, "", "open", "--key-file", matrixKeyFile(t, []byte(matrixPassphrase)), "--persistent", "--allow-discards",
+				"--perf-same_cpu_crypt", "--perf-submit_from_crypt_cpus", "--perf-no_read_workqueue", "--perf-no_write_workqueue", loop, name)
+		})
 		csClose(t, name)
 	}, check: func(t *testing.T, loop string) {
 		_, metadata, err := harness.ReadHeader(loop)

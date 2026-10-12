@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -161,7 +162,7 @@ func TestWipeMultiplePasses(t *testing.T) {
 }
 
 func TestWipeKeyslot(t *testing.T) {
-	tmpfile := "/tmp/test-luks-wipe-keyslot.img"
+	tmpfile := filepath.Join(t.TempDir(), "test-luks-wipe-keyslot.img")
 	defer os.Remove(tmpfile)
 	formatTmp(t, tmpfile, 50*1024*1024)
 
@@ -240,7 +241,7 @@ func TestWipeWithTrimOnLoopDevice(t *testing.T) {
 }
 
 func TestWipeWithTrimOnBlockDevice(t *testing.T) {
-	tmpfile := "/tmp/test-luks-wipe-trim-blk.img"
+	tmpfile := filepath.Join(t.TempDir(), "test-luks-wipe-trim-blk.img")
 	defer os.Remove(tmpfile)
 
 	f, err := os.Create(tmpfile)

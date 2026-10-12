@@ -33,12 +33,14 @@ func blankLoop(t *testing.T) (string, string) {
 	if err := os.WriteFile(image, make([]byte, 32<<20), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	out, err := exec.Command("losetup", "-f", "--show", image).Output()
+	// Through the harness, which refuses a backing file outside the recorded
+	// run root, so the next run's reaper can detach it if this one dies (#348).
+	loop, err := harness.SetupLoopDevice(image)
 	if err != nil {
-		t.Fatalf("losetup: %v", err)
+		t.Fatalf("attaching %s: %v", image, err)
 	}
 	t.Cleanup(func() { detachLoopDevicesBackedBy(t, image) })
-	return strings.TrimSpace(string(out)), image
+	return loop, image
 }
 
 // formatForTest formats path as a minimal PBKDF2 LUKS2 container, the way

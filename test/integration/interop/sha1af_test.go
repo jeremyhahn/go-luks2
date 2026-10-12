@@ -74,7 +74,7 @@ func TestSHA1AFVolumesMapTheSameDataOnTheKernel(t *testing.T) {
 			plaintext := newFIPSPlaintext(t)
 			csWrite := runVolume(t, "sha1af-cs-write")
 			defer releaseVolume(t, csWrite)
-			cryptsetupWithPassphrase(t, "open", "--type", "luks2", loopDev, csWrite)
+			cryptsetupOpen(t, loopDev, csWrite)
 			plaintext.write(t, csWrite)
 			lockWithRetry(t, csWrite)
 			ciphertext := ciphertextDigest(t, loopDev, dataOffset)
@@ -133,7 +133,7 @@ func TestSHA1AFVolumesMapTheSameDataOnTheKernel(t *testing.T) {
 			// And so does cryptsetup.
 			csRead := runVolume(t, "sha1af-cs-read")
 			defer releaseVolume(t, csRead)
-			cryptsetupWithPassphrase(t, "open", "--type", "luks2", loopDev, csRead)
+			cryptsetupOpen(t, loopDev, csRead)
 			plaintext.assertReads(t, csRead, "cryptsetup")
 			lockWithRetry(t, csRead)
 		})

@@ -73,6 +73,20 @@ func TestScan_ReportsEveryClassWithItsLineAndMatch(t *testing.T) {
 			wantLine:  1,
 		},
 		{
+			name:      "fleet hostname quoted in a workflow comment",
+			content:   "jobs:\n# the fleet is idle: Omega is at 21%\n",
+			wantClass: ClassLabHost,
+			wantMatch: "Omega",
+			wantLine:  2,
+		},
+		{
+			name:      "fleet hostname as an internal endpoint",
+			content:   "cfg.BaseURL = \"http://omega.internal:8077\"\n",
+			wantClass: ClassLabHost,
+			wantMatch: "omega.internal",
+			wantLine:  1,
+		},
+		{
 			name:      "agent hostname in a comment",
 			content:   "// observed on vm-host-4\n",
 			wantClass: ClassLabHost,
@@ -163,6 +177,10 @@ func TestScan_AcceptsWhatItShould(t *testing.T) {
 		{
 			name:    "a hostname that merely contains a fleet name as a substring",
 			content: "ungodlikeness is not a host, and vstation-0 has no second digit\n",
+		},
+		{
+			name:    "a word that merely contains the fleet name omega",
+			content: "megaomegalith and omegas are words, not hosts\n",
 		},
 	}
 
@@ -398,6 +416,7 @@ func TestPatterns_EveryNeedleIsImpliedByItsExpr(t *testing.T) {
 		`(?i)\bvstation-\d{2}\b`:       {"agent-vm-host-4", "VSTATION-01 rebooted"},
 		`(?i)\bdellemc-\d{2}\b`:        {"runner ci-node-2", "DELLEMC-01"},
 		`(?i)\bgodlike(\.internal)?\b`: {"on gpu-host", "http://GODLIKE.internal:8077"},
+		`(?i)\bomega(\.internal)?\b`:   {"omega is 21%", "http://OMEGA.internal:8077"},
 		`/home/jhahn\b`:                {ownerPathFixture + "/sources"},        // lab-string-ok: sample for the owner-path rule
 		`/mnt/vstation`:                {"/mnt/" + "vstation" + "-01/go-qrdb"}, // lab-string-ok: sample for the owner-path rule
 	}

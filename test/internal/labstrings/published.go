@@ -58,7 +58,7 @@ var PublishedWorkflows = []string{"ci.yml", "nightly.yml", "release.yml"}
 // scan reads every stripped file like any other.
 //
 // So are the internal review workflows code-review.yml and qwen-review.yml
-// (#336). The workflow rules are exact names: `automerge.yaml` or a nested
+// (#336), and the internal batch-runner workflow batch.yml (#350). The workflow rules are exact names: `automerge.yaml` or a nested
 // copy is an unknown workflow and fails.
 var DefaultStripAtPublish = []Unpublishable{
 	{Path: "**/CLAUDE.md", Reason: agentInstructions},
@@ -68,7 +68,13 @@ var DefaultStripAtPublish = []Unpublishable{
 		"automatethethings#200): tracked on main, stripped from the public release (#211, #252)"},
 	{Path: workflowDir + "code-review.yml", Reason: internalReviewWorkflow},
 	{Path: workflowDir + "qwen-review.yml", Reason: internalReviewWorkflow},
+	{Path: workflowDir + "batch.yml", Reason: internalBatchWorkflow},
 }
+
+// internalBatchWorkflow is the reason given for the internal batch-runner
+// workflow (#350).
+const internalBatchWorkflow = "internal batch-runner workflow (fuzz, race-full, soak, bench) on the " +
+	"self-hosted `batch` runners, dispatch-only: tracked on main, stripped from the public release (#211, #350)"
 
 // internalReviewWorkflow is the reason given for the internal code-review
 // workflows (#336).

@@ -8,6 +8,7 @@ package luks2_test
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -361,7 +362,7 @@ func TestGetVolumeInfoErrors(t *testing.T) {
 }
 
 func TestIsUnlockedTrue(t *testing.T) {
-	tmpfile := "/tmp/test-luks-unlocked.img"
+	tmpfile := filepath.Join(t.TempDir(), "test-luks-unlocked.img")
 	defer os.Remove(tmpfile)
 
 	f, err := os.Create(tmpfile)
@@ -406,7 +407,7 @@ func TestIsUnlockedTrue(t *testing.T) {
 }
 
 func TestIsUnlockedFalse(t *testing.T) {
-	tmpfile := "/tmp/test-luks-locked.img"
+	tmpfile := filepath.Join(t.TempDir(), "test-luks-locked.img")
 	defer os.Remove(tmpfile)
 
 	f, err := os.Create(tmpfile)
@@ -452,7 +453,7 @@ func TestIsUnlockedNonexistent(t *testing.T) {
 }
 
 func TestVolumeStateTransitions(t *testing.T) {
-	tmpfile := "/tmp/test-luks-state-transitions.img"
+	tmpfile := filepath.Join(t.TempDir(), "test-luks-state-transitions.img")
 	defer os.Remove(tmpfile)
 
 	f, err := os.Create(tmpfile)

@@ -9,7 +9,6 @@ package filesystem_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -48,25 +47,22 @@ func Unlock(device string, passphrase []byte, name string) error {
 	}
 	defer key.Destroy()
 
-	mapping, err := dmcrypt.Activate(ctx, v, key, name)
-	if err != nil {
+	// Write-ahead (#96, #348): the mapping is in the run ledger before
+	// Activate creates it, so a run that dies at any point after -- a
+	// timeout, a kill, a container torn down mid-test -- leaves an entry a
+	// later run's reaper can attribute and remove. A record failure refuses
+	// the activation. A live mapping that does not carry its recorded
+	// identity is removed here, because the reaper would leave it.
+	var mapping *dmcrypt.Mapping
+	err = runSuite.Ledger.ActivateRecordedAhead(runSuite.Remover, device, name, func() error {
+		var err error
+		mapping, err = dmcrypt.Activate(ctx, v, key, name)
 		return err
-	}
-
-	// Write-ahead for the host state Activate just created: a run that dies
-	// before the deferred releaseVolume teardown runs -- a timeout, a kill,
-	// a container torn down mid-test -- still leaves a ledger entry a later
-	// run's reaper can attribute and remove on its own, instead of leaving a
-	// human to find and delete the mapping by hand (#96, the exact failure
-	// this fixes). A Record failure is treated as fatal to the activation,
-	// matching harness.Ledger's own contract: proceeding with an unrecorded
-	// mapping recreates exactly the host state nothing can attribute.
-	if err := runSuite.Ledger.Record(harness.KindMapping, name, mapping.UUID); err != nil {
+	})
+	if err != nil && mapping != nil {
 		_ = dmcrypt.Deactivate(ctx, name)
-		return fmt.Errorf("recording dm %q in the run ledger: %w", name, err)
 	}
-
-	return nil
+	return err
 }
 
 func Lock(name string) error {

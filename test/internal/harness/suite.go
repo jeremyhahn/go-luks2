@@ -97,6 +97,7 @@ func BeginSuite(w io.Writer) (*Suite, error) {
 		_ = ledger.Close()
 		return nil, err
 	}
+	recordedRunRoot = tmpRoot
 
 	// In the container this has already run in the entrypoint, before the #85
 	// guard, and finds nothing. It runs here too for the host path

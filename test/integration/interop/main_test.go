@@ -36,34 +36,49 @@ import (
 // DefaultLuksOperations for the same forward.
 func Unlock(device string, passphrase []byte, name string) error {
 	ctx := context.Background()
-	mapping, err := activateUnrecorded(ctx, device, passphrase, name, dmcrypt.Activate)
-	if err != nil {
-		return err
-	}
-
-	// Write-ahead for the host state Activate just created, so a run that dies
-	// before its teardown still leaves a ledger entry a later run's reaper can
-	// remove (#96). A Record failure is fatal to the activation: an unrecorded
-	// mapping is host state nothing can attribute.
-	if err := recordMapping(name, mapping.UUID); err != nil {
-		_ = dmcrypt.Deactivate(ctx, name)
-		return err
-	}
-
-	return nil
-}
-
-// recordMapping records name's mapping in the run ledger. A process with no
-// registered suite -- a FIPS child, which exits from init() before TestMain
-// runs -- gets an error, not a nil dereference.
-func recordMapping(name, uuid string) error {
 	if runSuite == nil {
 		return fmt.Errorf("recording dm %q: TestMain did not register the suite in this process", name)
 	}
-	if err := runSuite.Ledger.Record(harness.KindMapping, name, uuid); err != nil {
-		return fmt.Errorf("recording dm %q in the run ledger: %w", name, err)
+
+	// Write-ahead (#96, #348): the mapping is in the run ledger before
+	// Activate creates it, so a run that dies at any point after leaves an
+	// entry a later run's reaper can remove. A record failure refuses the
+	// activation. A live mapping that does not carry its recorded identity is
+	// removed here, because the reaper would leave it.
+	_, err := activateUnrecorded(ctx, device, passphrase, name,
+		func(ctx context.Context, v *luks2.Volume, key *luks2.Key, name string) (*dmcrypt.Mapping, error) {
+			var mapping *dmcrypt.Mapping
+			err := runSuite.Ledger.ActivateRecordedAhead(runSuite.Remover, device, name, func() error {
+				var err error
+				mapping, err = dmcrypt.Activate(ctx, v, key, name)
+				return err
+			})
+			if err != nil && mapping != nil {
+				_ = dmcrypt.Deactivate(ctx, name)
+			}
+			return mapping, err
+		})
+	return err
+}
+
+// activateRecordedAhead runs activate, which maps device as name in ANOTHER
+// process -- a FIPS child, cryptsetup -- with the mapping recorded before it
+// starts (#348). Recording what that process left once it has exited is too
+// late: a run canceled while it runs, or in the moment after, leaves a
+// mapping no ledger attributes, and the next run's reaper refuses the host.
+// The live mapping is then checked against the identity recorded for it, which
+// keeps the derivation honest.
+func activateRecordedAhead(t *testing.T, device, name string, activate func()) {
+	t.Helper()
+	if runSuite == nil {
+		t.Fatalf("recording dm %q: TestMain did not register the suite in this process", name)
 	}
-	return nil
+	if err := runSuite.Ledger.ActivateRecordedAhead(runSuite.Remover, device, name, func() error {
+		activate()
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // activator is dmcrypt.Activate's shape, so the FIPS child can run its path

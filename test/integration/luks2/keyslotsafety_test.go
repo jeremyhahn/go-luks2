@@ -98,7 +98,15 @@ func TestCryptsetupKeyfileVolumeWithAnUnboundKeyOnARealDevice(t *testing.T) {
 
 	theirs := runVolume(t, "lane-a-theirs")
 	defer releaseVolume(t, theirs, func() error { return Lock(theirs) })
+	// Recorded before cryptsetup creates it (#348), as Unlock's are after.
+	theirsUUID, err := runSuite.Ledger.RecordMappingAhead(loop, theirs)
+	if err != nil {
+		t.Fatalf("recording dm %q ahead of its activation: %v", theirs, err)
+	}
 	cryptsetupRun(t, "", "open", "--type", "luks2", "--key-file", keyPath, loop, theirs)
+	if err := harness.CheckRecordedMapping(harness.SystemRemover{}, theirs, theirsUUID); err != nil {
+		t.Fatal(err)
+	}
 	got := make([]byte, len(pattern))
 	f, err := os.Open(waitForNode(t, theirs))
 	if err != nil {

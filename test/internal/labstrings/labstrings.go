@@ -73,7 +73,8 @@
 // `.claude/settings.local.json` is gitignored), and
 // .github/workflows/automerge.yml, which the forge requires (that exact name; a
 // `.yaml` variant or nested copy fails), and the internal review workflows
-// .github/workflows/code-review.yml and qwen-review.yml (#336). The gate passes them, lists each on
+// .github/workflows/code-review.yml and qwen-review.yml (#336), and the
+// internal batch-runner workflow .github/workflows/batch.yml (#350). The gate passes them, lists each on
 // every run and does not call the tree publishable while one is tracked. Their
 // content is still scanned, and a script or binary among them still fails.
 // There is no waiver for an unpublishable file: remove it from the index.
@@ -187,6 +188,12 @@ var patterns = []Pattern{
 		Expr:     regexp.MustCompile(`(?i)\bgodlike(\.internal)?\b`), // lab-string-ok: the hostname this rule exists to find
 		Needle:   "gpu-host",
 		Guidance: "name the role, not the machine: gpu-host.internal, npu-host.internal",
+	},
+	{
+		Class:    ClassLabHost,
+		Expr:     regexp.MustCompile(`(?i)\bomega(\.internal)?\b`), // lab-string-ok: the hostname this rule exists to find
+		Needle:   "omega",
+		Guidance: "name the role, not the machine: build-host.internal, batch-runner",
 	},
 	{
 		Class:    ClassOwnerPath,

@@ -626,7 +626,7 @@ func TestCLI_UnmountNotMounted(t *testing.T) {
 }
 
 func TestCLI_OpenAndClose(t *testing.T) {
-	tmpfile := "/tmp/test-cli-open-close.img"
+	tmpfile := filepath.Join(t.TempDir(), "test-cli-open-close.img")
 	volumeName := runVolume(t, "test-cli-open")
 
 	defer func() {
@@ -690,13 +690,13 @@ func main() {
 		t.Fatalf("Failed to format: %v\nOutput: %s", err, out)
 	}
 
-	// Setup loop device
-	loopCmd := exec.Command("losetup", "-f", "--show", tmpfile)
-	loopOut, err := loopCmd.Output()
+	// Through the harness, which refuses a backing file outside the recorded
+	// run root: that record is what lets the next run's reaper detach this
+	// device if the run dies before the deferred cleanup (#348).
+	loopDev, err := harness.SetupLoopDevice(tmpfile)
 	if err != nil {
 		t.Fatalf("Failed to setup loop device: %v", err)
 	}
-	loopDev := strings.TrimSpace(string(loopOut))
 
 	t.Logf("Loop device: %s", loopDev)
 

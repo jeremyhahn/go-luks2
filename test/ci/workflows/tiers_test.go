@@ -58,8 +58,14 @@ func TestNoCIWorkflowIsScheduled(t *testing.T) {
 // TestJobNamesAreLiteral: Gitea does not evaluate expressions in a job's
 // `name:`; it posts the expression verbatim as the status context, so a gate
 // named by one is never reported under the name branch protection requires.
+// batch.yml is exempt: it is the handbook's batch template verbatim, its jobs
+// are in no gate (TestBatchIsNeverInAMergeGate), and a context nobody
+// requires cannot go missing.
 func TestJobNamesAreLiteral(t *testing.T) {
 	for _, f := range workflowFiles(t) {
+		if rel(t, f) == batchWorkflow {
+			continue
+		}
 		for _, m := range jobName.FindAllStringSubmatch(readFile(t, rel(t, f)), -1) {
 			if strings.Contains(m[1], "${{") {
 				t.Errorf("%s: job name %q is an expression", rel(t, f), m[1])

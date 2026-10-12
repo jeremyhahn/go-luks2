@@ -8,6 +8,7 @@ package luks2_test
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/jeremyhahn/go-luks2/test/internal/harness"
@@ -57,7 +58,7 @@ func TestFormatWithKDFTypes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tmpfile := "/tmp/test-luks-kdf-" + tt.name + ".img"
+			tmpfile := filepath.Join(t.TempDir(), "test-luks-kdf-"+tt.name+".img")
 			defer os.Remove(tmpfile)
 
 			f, err := os.Create(tmpfile)

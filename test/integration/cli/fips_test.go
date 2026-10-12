@@ -60,11 +60,12 @@ func TestCLI_FIPSModeCreateAndRecoveryAddOpenWithCryptsetup(t *testing.T) {
 		t.Fatalf("closing the image failed: %v", err)
 	}
 
-	loopOut, err := exec.Command("losetup", "-f", "--show", image).Output()
+	// Through the harness, which refuses a backing file outside the recorded
+	// run root, so the next run's reaper can detach it if this one dies (#348).
+	loopDev, err := harness.SetupLoopDevice(image)
 	if err != nil {
 		t.Fatalf("attaching the image failed: %v", err)
 	}
-	loopDev := strings.TrimSpace(string(loopOut))
 	defer detachLoopDevicesBackedBy(t, image)
 
 	keyFile := filepath.Join(dir, "passphrase")
@@ -140,8 +141,17 @@ func TestCLI_FIPSModeCreateAndRecoveryAddOpenWithCryptsetup(t *testing.T) {
 	}
 	for i, credential := range []string{keyFile, recoveryFile} {
 		name := runVolume(t, "test-cli-fips-"+strconv.Itoa(i))
+		// Recorded before cryptsetup creates it (#348): a run canceled
+		// while it runs leaves an entry the next run's reaper can match.
+		uuid, err := runSuite.Ledger.RecordMappingAhead(loopDev, name)
+		if err != nil {
+			t.Fatalf("recording dm %q ahead of its activation: %v", name, err)
+		}
 		if out, err := exec.Command("cryptsetup", "open", "--key-file", credential, loopDev, name).CombinedOutput(); err != nil {
 			t.Fatalf("cryptsetup could not open the volume with credential %d: %v\n%s", i, err, out)
+		}
+		if err := harness.CheckRecordedMapping(harness.SystemRemover{}, name, uuid); err != nil {
+			t.Fatal(err)
 		}
 		if out, err := exec.Command("cryptsetup", "close", name).CombinedOutput(); err != nil {
 			t.Fatalf("cryptsetup could not close %s: %v\n%s", name, err, out)

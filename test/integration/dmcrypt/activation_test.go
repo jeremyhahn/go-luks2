@@ -11,7 +11,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -129,21 +128,23 @@ func openAndUnlock(t *testing.T, device string, passphrase []byte) (*luks2.Volum
 	return v, key
 }
 
-// activateRecorded is dmcrypt.Activate plus the write-ahead ledger record of the
-// mapping it created, so a run that dies before releaseVolume still leaves an
-// entry a later run's reaper can remove (#96). A Record failure is fatal to the
-// activation: the mapping is deactivated rather than left unattributable.
+// activateRecorded is dmcrypt.Activate with the mapping recorded in the run
+// ledger before it is created (#96, #348), so a run that dies at any point
+// after still leaves an entry a later run's reaper can remove. A record failure
+// refuses the activation; a mapping live under an identity other than the
+// recorded one is deactivated rather than left unattributable.
 func activateRecorded(v *luks2.Volume, key *luks2.Key, name string) error {
 	ctx := context.Background()
-	mapping, err := dmcrypt.Activate(ctx, v, key, name)
-	if err != nil {
+	var mapping *dmcrypt.Mapping
+	err := runSuite.Ledger.ActivateRecordedAhead(runSuite.Remover, v.Path(), name, func() error {
+		var err error
+		mapping, err = dmcrypt.Activate(ctx, v, key, name)
 		return err
-	}
-	if err := runSuite.Ledger.Record(harness.KindMapping, name, mapping.UUID); err != nil {
+	})
+	if err != nil && mapping != nil {
 		_ = dmcrypt.Deactivate(ctx, name)
-		return fmt.Errorf("recording dm %q in the run ledger: %w", name, err)
 	}
-	return nil
+	return err
 }
 
 // mappedPath resolves name's mapping to its device-mapper path, the old

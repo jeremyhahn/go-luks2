@@ -429,7 +429,12 @@ container lists every mapping on the host, and the cgroup rules allow opening
 any loop device and any dm mapping. What keeps the suite off other devices is
 `test/internal/harness`: it records every loop device and mapping in a host-side ledger
 before creating it, removes only what it recorded, and never sweeps. Treat the
-state directory as part of that boundary.
+state directory as part of that boundary. A loop device is recorded by the run
+root its backing file sits under, which is recorded before any test runs, and
+`SetupLoopDevice` refuses a file outside it. A mapping is recorded under the
+identity derived from its header before it is activated
+(`Ledger.ActivateRecordedAhead`). `TestEveryLoopDeviceAndMappingIsRecordedFirst`
+fails on an integration test that creates either any other way.
 
 The state directory is opened once and checked through that
 handle, and every ledger read, lock, write and delete goes through the same

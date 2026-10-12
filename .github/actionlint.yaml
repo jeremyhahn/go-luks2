@@ -27,6 +27,11 @@
 # The dead name is removed rather than kept alongside: an allowlist that still
 # accepts a label no runner has cannot catch that label as a typo.
 #
+# v4 (2026-10-12, go-luks2 #350): add `batch`, the label Infrastructure
+# registered for the batch runners that batch.yml's fuzz, race-full, soak and bench jobs run on. Added in the same
+# change as the workflow, per v2: without it actionlint reports `batch` as an
+# unknown runner and takes `Lint` red.
+#
 # Verify against the fleet, not against this comment:
 #   curl -sH "Authorization: token $TOK" \
 #     "$GITEA/api/v1/admin/actions/runners" \
@@ -40,3 +45,4 @@ self-hosted-runner:
     - codex-task
     - claude
     - code-review
+    - batch

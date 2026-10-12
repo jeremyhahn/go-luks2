@@ -81,8 +81,8 @@ func runFIPSChild(role, device, volume string) int {
 		fmt.Printf("unknown role %q\n", role)
 		return fipsChildFailed
 	}
-	// Unrecorded: this process has no suite (see init). The parent records
-	// whatever mapping it leaves.
+	// Unrecorded: this process has no suite (see init). The parent recorded
+	// the mapping before starting it (unlockInFIPSProcessObserved).
 	_, err := activateUnrecorded(context.Background(), device, []byte(fipsImportPassphrase), volume, activate)
 	if err == nil {
 		return fipsChildOK
@@ -109,18 +109,22 @@ func standInActivate(_ context.Context, v *luks2.Volume, key *luks2.Key, name st
 // the child did not actually run in FIPS mode.
 func unlockInFIPSProcess(t *testing.T, device, volume string) (int, string) {
 	t.Helper()
-	code, out := runFIPSChildProcess(t, fipsChildRoleUnlock, device, volume)
+	return unlockInFIPSProcessObserved(t, device, volume, func() {})
+}
 
-	// The child has no suite to record in, so a mapping it activated is
-	// recorded here, once it has exited -- whatever its exit code says.
-	switch m, err := dmcrypt.Lookup(t.Context(), volume); {
-	case err == nil:
-		if err := recordMapping(volume, m.UUID); err != nil {
-			t.Fatalf("the FIPS child's mapping %q: %v", volume, err)
-		}
-	case !errors.Is(err, dmcrypt.ErrNotActive):
-		t.Fatalf("looking up the mapping the FIPS child may have left: %v", err)
-	}
+// unlockInFIPSProcessObserved is unlockInFIPSProcess with childExited run the
+// moment the child exits, before the parent does anything more. What is on
+// disk then is all a run canceled at that moment leaves (#348), so the
+// child's mapping has to be recorded by then: the child has no suite to record
+// in, and the parent records it ahead of starting the child.
+func unlockInFIPSProcessObserved(t *testing.T, device, volume string, childExited func()) (int, string) {
+	t.Helper()
+	var code int
+	var out string
+	activateRecordedAhead(t, device, volume, func() {
+		code, out = runFIPSChildProcess(t, fipsChildRoleUnlock, device, volume)
+		childExited()
+	})
 	return code, out
 }
 
@@ -168,6 +172,15 @@ func cryptsetupWithPassphrase(t *testing.T, args ...string) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("cryptsetup %v failed: %v\n%s", args, err, out)
 	}
+}
+
+// cryptsetupOpen maps device as name with cryptsetup, the mapping recorded
+// ahead of its activation like every other one in this package (#348).
+func cryptsetupOpen(t *testing.T, device, name string) {
+	t.Helper()
+	activateRecordedAhead(t, device, name, func() {
+		cryptsetupWithPassphrase(t, "open", "--type", "luks2", device, name)
+	})
 }
 
 // fipsPlaintext is what is written through the mapping: random, so a wrong
@@ -312,7 +325,7 @@ func TestFIPSImportOfADefaultCryptsetupVolumeMapsTheSameData(t *testing.T) {
 	plaintext := newFIPSPlaintext(t)
 	csWrite := runVolume(t, "fips-import-cs-write")
 	defer releaseVolume(t, csWrite)
-	cryptsetupWithPassphrase(t, "open", "--type", "luks2", loopDev, csWrite)
+	cryptsetupOpen(t, loopDev, csWrite)
 	plaintext.write(t, csWrite)
 	lockWithRetry(t, csWrite)
 	ciphertext := ciphertextDigest(t, loopDev, dataOffset)
@@ -370,7 +383,7 @@ func TestFIPSImportOfADefaultCryptsetupVolumeMapsTheSameData(t *testing.T) {
 	// And so does cryptsetup: bidirectional conformance survives the import.
 	csRead := runVolume(t, "fips-import-cs-read")
 	defer releaseVolume(t, csRead)
-	cryptsetupWithPassphrase(t, "open", "--type", "luks2", loopDev, csRead)
+	cryptsetupOpen(t, loopDev, csRead)
 	plaintext.assertReads(t, csRead, "cryptsetup")
 	lockWithRetry(t, csRead)
 }
@@ -404,5 +417,77 @@ func TestFIPSChildUnlocksAMigratedImageWithoutTheSuite(t *testing.T) {
 
 	if code, out := runFIPSChildProcess(t, fipsChildRoleStandIn, image, "fips-child-after"); code != fipsChildOK {
 		t.Fatalf("FIPS unlock of the migrated image exited %d, want %d\n%s", code, fipsChildOK, out)
+	}
+}
+
+// TestAFIPSUnlockCanceledAsTheChildExitsLeavesAMappingTheReaperRemoves is
+// #348: a run canceled after the FIPS child activated its mapping and before
+// the parent did anything more left a mapping no ledger recorded, and the next
+// run's reaper -- correctly -- refused the host. The ledger is read at that
+// moment, handed to a reaper as a dead run's, and the mapping must go.
+func TestAFIPSUnlockCanceledAsTheChildExitsLeavesAMappingTheReaperRemoves(t *testing.T) {
+	image := filepath.Join(t.TempDir(), "fips-canceled.img")
+	if err := createTestFile(image, 32); err != nil {
+		t.Fatalf("creating the image failed: %v", err)
+	}
+	cryptsetupWithPassphrase(t, "luksFormat", "--type", "luks2", "--batch-mode", image)
+	if _, err := migrateToFIPSForTest(image, []byte(fipsImportPassphrase)); err != nil {
+		t.Fatalf("MigrateToFIPS failed: %v", err)
+	}
+	loopDev, err := harness.SetupLoopDevice(image)
+	if err != nil {
+		t.Fatalf("SetupLoopDevice failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := harness.DetachLoopDevice(loopDev); err != nil {
+			t.Errorf("DetachLoopDevice(%s): %v", loopDev, err)
+		}
+	})
+
+	volume := runVolume(t, "fips-canceled")
+	defer releaseVolume(t, volume)
+	var leftOnDisk []harness.Entry
+	code, out := unlockInFIPSProcessObserved(t, loopDev, volume, func() {
+		entries, err := harness.ReadLedger(runSuite.Ledger.Path())
+		if err != nil {
+			t.Fatalf("reading the run ledger as the child exits: %v", err)
+		}
+		for _, e := range entries {
+			if e.Kind == harness.KindMapping && e.Value == volume {
+				leftOnDisk = append(leftOnDisk, e)
+			}
+		}
+	})
+	if code != fipsChildOK {
+		t.Fatalf("FIPS unlock of the migrated volume exited %d\n%s", code, out)
+	}
+	if !IsUnlocked(volume) {
+		t.Fatal("the FIPS child reported success and left no mapping; the test would measure nothing")
+	}
+
+	// The next run's reaper, given only what the canceled run had recorded.
+	stateDir := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(stateDir, 0o700); err != nil {
+		t.Fatalf("creating the reaper's state dir: %v", err)
+	}
+	dead, err := harness.OpenLedger(stateDir, "canceled-run")
+	if err != nil {
+		t.Fatalf("OpenLedger: %v", err)
+	}
+	for _, e := range leftOnDisk {
+		if err := dead.Record(e.Kind, e.Value, e.Identity); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+	if err := dead.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	var log bytes.Buffer
+	if _, err := harness.Reap(stateDir, "next-run", harness.SystemRemover{}, &log); err != nil {
+		t.Fatalf("Reap: %v\n%s", err, log.String())
+	}
+	if IsUnlocked(volume) {
+		t.Fatalf("the mapping the FIPS child activated survived the next run's reaper; "+
+			"the canceled run recorded %v\n%s", leftOnDisk, log.String())
 	}
 }
