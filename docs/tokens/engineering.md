@@ -1,9 +1,6 @@
 # Tokens — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163);
-> `Token`'s JSON codec verified 2026-10-11 against main (623da94);
-> `SaltLength`, `SecretLength` and `HelperError.Unwrap` verified 2026-10-11
-> against 1e4cdbc
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against a9c840c
 > Conflicts with this document are defects. Fix them here first.
 
 ## Exported surface
@@ -33,13 +30,32 @@ const DefaultRelyingParty = "io.systemd.cryptsetup"
 const SaltLength = 32   // hmac-secret salt, bytes (what systemd writes)
 const SecretLength = 32 // hmac-secret derived from one salt, bytes
 type Command struct{ /* unexported */ }
+type CommandOption func(*Command)
 func NewCommand(path string, opts ...CommandOption) (*Command, error)
+func (p *Command) Passphrase(ctx context.Context) (*enclave.MemoryEnclave, error)
+func (p *Command) Token() luks2.Token
+type FIDO2Params struct { RelyingParty string; CredentialID, Salt []byte; UserPresence, UserVerification, ClientPIN bool }
 type FIDO2 struct{ /* unexported */ }
+type FIDO2Option func(*fido2Options)
+func WithFIDO2Tools(credPath, assertPath string) FIDO2Option // empty keeps that tool's default
+func WithDevice(path string) FIDO2Option                     // required
 func NewFIDO2(p FIDO2Params, opts ...FIDO2Option) (*FIDO2, error)
+func (f *FIDO2) Passphrase(ctx context.Context) (*enclave.MemoryEnclave, error)
+func (f *FIDO2) Token() luks2.Token
 func FromToken(t luks2.Token, opts ...FIDO2Option) (luks2.KeyProvider, error)
+type FIDO2CredentialParams struct { RelyingParty, UserName string; UserID []byte; Resident, UserVerification bool }
 func NewFIDO2Credential(ctx context.Context, p FIDO2CredentialParams, opts ...FIDO2Option) ([]byte, error)
 func NewFIDO2Salt() ([]byte, error)
+type HelperError struct { Path string; ExitCode int; Stderr string; Kind, Err error }
+func (e *HelperError) Unwrap() []error
+type Error = errs.Error
 ```
+
+`*Command` and `*FIDO2` both satisfy `luks2.KeyProvider`; the package
+asserts it at compile time. `FIDO2` wraps a `Command` running `fido2-assert`
+rather than adding a second exec path. An empty `RelyingParty` in either
+params struct means `DefaultRelyingParty`. `HelperError.ExitCode` is -1 when
+the helper never ran.
 
 `(*Header).Tokens() map[int]Token` is the reader; `AddToken` picks the free
 slot itself, `SetToken` writes a chosen id, `RemoveToken` deletes one. There

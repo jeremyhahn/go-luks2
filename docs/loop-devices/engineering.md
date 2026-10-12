@@ -1,6 +1,6 @@
 # Loop devices — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (3da0ff2)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against base/331 (a9c840c)
 > Conflicts with this document are defects. Fix them here first.
 
 ## Exported surface
@@ -107,7 +107,7 @@ as the bare `os` error.
 | `ErrIO` (`luks2.ErrIO`) | all | Opening the file, `/dev/loop-control` or the node failed; `LOOP_CTL_GET_FREE`, `LOOP_SET_FD` or `LOOP_CLR_FD` failed; the backing identity could not be read; `Detach` found nothing attached; `Find` could not inspect a candidate |
 | `ErrInvalidArgument` (`luks2.ErrInvalidArgument`) | `Lookup` | The path is not `/dev/loopN` |
 | `context.Canceled`, `context.DeadlineExceeded` | all | The context ended |
-| `ErrPermissionDenied` | none today | Declared for the shared vocabulary. A refused open is an `ErrIO` error wrapping the `os` error (which matches `fs.ErrPermission`), not this sentinel. |
+| `ErrPermissionDenied` | none | Declared for the shared vocabulary. A refused open is an `ErrIO` error wrapping the `os` error (which matches `fs.ErrPermission`), not this sentinel. |
 
 `ErrDetachIncomplete` is deliberately not "detach failed": the request
 succeeded and something else has the device. `Deferred` is not an error at

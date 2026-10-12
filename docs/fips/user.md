@@ -1,6 +1,6 @@
 # FIPS 140-3 — user guide
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against v1.0.0-rc.2 (12a364e) plus the polish/p-fips change
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against a9c840c
 > Conflicts with this document are defects. Fix them here first.
 
 Prerequisites: a build running under `GODEBUG=fips140=on` or
@@ -18,20 +18,11 @@ PBKDF2-SHA512. Requesting Argon2 explicitly is refused before any prompt.
 
 ## Bring an existing (non-FIPS) volume into compliance
 
-`MigrateToFIPS` has no CLI verb today; call it from Go, on a Volume opened
-read-write:
-
-```go
-v, err := luks2.Open(ctx, "/dev/sdb1")
-if err != nil {
-	return err
-}
-defer v.Close()
-
-// pass is the passphrase, held in an *enclave.MemoryEnclave.
-res, err := v.MigrateToFIPS(ctx, pass, luks2.MigrateParams{})
-// res.Complete: no keyslot or digest FIPS mode cannot run remains
-```
+The FIPS import has no CLI verb: a program built on the library runs it, on
+a volume it has opened read-write, with the volume's passphrase
+([api.md](api.md#import-a-volume) shows the call). The import adds an
+approved keyslot for that passphrase, rewrites the non-approved digests, and
+then removes the keyslots FIPS mode cannot run.
 
 Run it in a process that is **not** in FIPS mode — the migration itself
 needs to read the non-approved keyslots it is replacing. Keep the
@@ -41,7 +32,8 @@ import unchanged.
 ## Recognize when a migration is needed
 
 Opening a volume in a FIPS process that only has Argon2 or SHA-1 keyslots
-fails with a message naming `MigrateToFIPS` and listing the affected
+fails with a message asking for a one-time import from a process that is not
+in FIPS mode, and listing the affected
 keyslots/digests ([volumes/cli.md](../volumes/cli.md#failures)). That is the
 signal to run the migration above, not a sign of a damaged volume.
 
@@ -50,6 +42,6 @@ signal to run the migration above, not a sign of a damaged volume.
 | Symptom | Likely cause | Next step |
 |---|---|---|
 | `create --pbkdf argon2id` is refused in FIPS mode | Argon2 is never approved, by design | Omit `--pbkdf` to get the FIPS default, or run outside FIPS mode |
-| `open` fails naming `MigrateToFIPS` | The volume only has non-approved keyslots | Run `MigrateToFIPS` from a non-FIPS process, once |
-| `MigrateToFIPS` fails partway through | Interrupted by a crash or a cancelled call | Re-run it; every intermediate state still opens with the original passphrase |
+| `open` fails asking for a FIPS import | The volume only has non-approved keyslots | Run the import from a non-FIPS process, once |
+| The import fails partway through | Interrupted by a crash or a cancelled call | Re-run it; every intermediate state still opens with the original passphrase |
 | A SHA-1 keyslot (from an old `cryptsetup convert`) cannot be read | SHA-1 is refused in FIPS mode before any hashing | Migrate it, or open with a non-FIPS process |

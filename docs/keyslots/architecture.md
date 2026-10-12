@@ -1,6 +1,6 @@
 # Keyslots — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (623da94)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against base/331 (a9c840c)
 > Conflicts with this document are defects. Fix them here first.
 
 A LUKS2 volume has up to 32 keyslots (0–31). Each normally wraps the same
@@ -36,45 +36,47 @@ chosen when a caller does not set one (see
   the adding host.** Rejected: the machine that adds a keyslot need not be the
   one that uses the volume, so a clamp can write a keyslot the target
   hardware cannot derive, and it buys nothing, because a volume is only as
-  strong as its weakest keyslot. An inherited cost is copied exactly (commit
-  3082e41, "canonical JSON, calibrated digest, and cost rules that match
-  cryptsetup").
+  strong as its weakest keyslot. An inherited cost is copied exactly
+  (`TestAddKeyInheritsABelowFloorArgon2CostExactly`).
 - **Falling back to a fixed PBKDF2 count when calibration fails, or trusting
   the calibrated count alone.** Rejected: a fallback returns a
   weak-but-plausible number with no error, so failure is a typed
-  `*KDFCalibrationError`; and a calibrated count measures the defender's
-  hardware, not the attacker's, so a hardware-independent floor applies too
-  (commit 24cdefb, "calibrate PBKDF2 iterations instead of falling back to a
-  hardcoded 100000").
+  `*KDFCalibrationError` (`TestCalibratePBKDF2FailsClosedWhenUnmeasurable`);
+  and a calibrated count measures the defender's hardware, not the
+  attacker's, so a hardware-independent floor applies too
+  (`PBKDF2FloorFor` in `internal/kdf/cost.go`).
 - **Authenticating `RemoveKeyslot` with a credential.** Rejected: removal is
   guarded (`ErrLastKeyslot`, `ErrKeyslotAreaOverlap`), not authenticated;
   authorization belongs to the caller, such as the CLI's prompt or a
-  platform's IAM (DESIGN.md §B.1; DECISIONS.md, H9c).
+  platform's IAM. `RemoveKeyslot(ctx, slot)` (`pkg/luks2/keyslot_v2.go`)
+  takes no credential.
 - **`ChangeKeyslot` ignoring `KeyslotParams.KDF`.** Rejected: cryptsetup's
   luksChangeKey honours `--pbkdf`, `--iter-time` and
   `--pbkdf-force-iterations`, and a CLI flag that does nothing is a defect
-  (DECISIONS.md, p-review-fix).
+  (`TestVolumeChangeKeyslotWithAnExplicitKDFRecostsTheSlot`).
 - **`PriorityNormal`, or a `*Priority`, as "not asked for".** Rejected:
   `ChangeKeyslot` needs a "keep" that differs from every real priority, or a
   rotation would reset prefer and ignore to normal; a pointer is the style for
   "pick for me" choices, not for an enum that can name its own default, so the
-  zero value is `PriorityDefault` (DECISIONS.md, "Priority zero value
-  (pre-1.0)").
+  zero value is `PriorityDefault` (`TestPriorityZeroValueIsDefault`).
 - **`ErrWrongKey` when every bound keyslot is `ignore`.** Rejected: the
   passphrase was never judged, so the scan returns `ErrNoKeyslots`,
-  cryptsetup's "no usable keyslot" (DECISIONS.md, p-bugs).
+  cryptsetup's "no usable keyslot" (`keyslotsByPriority` in
+  `pkg/luks2/keyslot.go`).
 - **An interruptible derivation, hand-rolled or in an abandoned goroutine.**
   Rejected: a hand-rolled PBKDF2 would leave the Go FIPS module's approved
   service, and an orphaned goroutine would keep deriving into memory nobody
-  supervises. `ctx` is checked between derivations instead (DESIGN.md §D.2).
+  supervises. A derivation runs `crypto/pbkdf2` or `golang.org/x/crypto/argon2`
+  to completion; see [cancellation](#cancellation) for where `ctx` is
+  checked instead.
 
 ## Component boundaries
 
 Keyslot logic lives inside `pkg/luks2` (`keyslot.go`, `keyslot_v2.go`,
 `keyslotscreen.go`, `keyslotdevice.go`). The KDF
 derivation itself (PBKDF2/Argon2, calibration, cost floors) is
-`internal/kdf` (H4, DECISIONS.md); the anti-forensic split is `internal/af`
-(H3c) and the area cipher is `internal/areacipher` (H3d). `pkg/luks2` owns
+`internal/kdf`; the anti-forensic split is `internal/af` and the area
+cipher is `internal/areacipher`. `pkg/luks2` owns
 the keyslot *object* (which stripes, which area, which KDF it names) and the
 policy around it (cost inheritance, removal guards).
 
@@ -160,6 +162,26 @@ The work of one operation is bounded as a whole, not just per keyslot
 - Every enclave is admitted against go-enclave's process `Allocator`; a scan
   whose largest keyslot needs more locked memory than that budget is refused
   up front with `ErrProtectedMemory`.
+
+## Cancellation
+
+A key derivation cannot be interrupted once it starts: PBKDF2 and Argon2 run
+to completion, and are never moved into a goroutine that a cancellation would
+abandon. `ctx` is observed at the boundaries around derivations instead:
+
+- before each derivation, and again after it: a derivation that finishes
+  after `ctx` was cancelled has its output cleared and returns `ctx.Err()`
+  (`Deriver.DerivePlain` in `internal/kdf/kdf.go`);
+- between keyslots in a scan, before the next keyslot's derivation starts
+  (`getMasterKeySlot` in `pkg/luks2/keyslot.go`);
+- between digest checks of a recovered key (`verifyKeyAgainstDigests` in
+  `pkg/luks2/unlock.go`);
+- before each PBKDF2 calibration probe (`CalibratePBKDF2` in
+  `internal/kdf/calibration.go`).
+
+The latency of a cancellation is therefore at most one derivation, which the
+per-keyslot cost ceilings and the per-operation budget above bound.
+`kdfcancellation_test.go` pins the destroyed-output behaviour.
 
 ## What this feature deliberately does not do
 

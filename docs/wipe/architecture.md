@@ -1,6 +1,6 @@
 # Wipe — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (623da94)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against a9c840c
 > Conflicts with this document are defects. Fix them here first.
 
 Destroying a volume, two ways: a crypto-erase that destroys only the header
@@ -22,30 +22,39 @@ callers could set by habit.
 
 ## Rejected alternatives
 
-- **One `Wipe` call with a header-only flag.** Rejected: no boolean
-  arguments, and the crypto-erase needs the LUKS2 header and the volume's
-  lock to decide what to zero, so it is `(*Volume).Erase` and the full
-  overwrite is `wipe.Sanitize` (DESIGN.md §B.1, §B.6; DECISIONS.md, H10e).
+- **One `Wipe` call with a header-only flag.** Rejected: the API takes no
+  boolean arguments, and the crypto-erase needs the LUKS2 header and the
+  volume's lock to decide what to zero. So it is `(*Volume).Erase`
+  (`pkg/luks2/erase.go`), which takes the volume's exclusive lock and claim
+  before `wipeHeaders`, and the full overwrite is `wipe.Sanitize`
+  (`pkg/wipe/sanitize.go`), which needs no header at all.
 - **A `Verify`/`NoVerify` boolean pair.** Rejected for the same rule: one
-  three-valued `VerifyMode` (DESIGN.md §B.5).
+  three-valued `VerifyMode` (`VerifyDefault`, `VerifyAlways`, `VerifyNever`;
+  `pkg/wipe`).
 - **A separate keyslot wipe.** Rejected: it is the same operation as
-  `RemoveKeyslot`, which always destroys the area (DESIGN.md §B.6).
+  `(*Volume).RemoveKeyslot` (`pkg/luks2/keyslot_v2.go`), which always
+  destroys the area.
 - **Whole-device destruction inside a single `host` package.** Rejected: it
   would mix the exec trust boundary with ioctl code and drag `exec` into every
-  importer (DESIGN.md §A.4).
-- **Taking the lock and claim through `pkg/luks2`.** Rejected: `pkg/luks2`
-  imports `pkg/wipe`, so the reverse import would cycle; `Sanitize` uses
-  `internal/device`'s lock-and-claim sequence directly (DECISIONS.md, H10e).
+  importer. `pkg/wipe` imports only `internal/device`, `internal/clock` and
+  `internal/errs`; it runs no external program.
+- **Taking the lock and claim through `pkg/luks2`.** Rejected: `pkg/wipe` is
+  LUKS-independent and does not import `pkg/luks2`. `sanitize`
+  (`pkg/wipe/sanitize.go`) runs `internal/device`'s lock-and-claim sequence
+  directly, `device.OpenPinned`, then `(*Pinned).Lock`, then
+  `(*Locked).Claim`, the same sequence `(*Volume).Erase` reaches through the
+  volume handle.
 - **A dedicated `O_DIRECT` reader for verification.** Rejected: verification
-  runs once per `Sanitize`, not on a hot path, so it reuses the already-tested
-  `internal/device` read-past-cache primitive at the cost of more syscalls
-  (DECISIONS.md, H10e).
+  runs once per `Sanitize`, not on a hot path, so `verifyWrite`
+  (`pkg/wipe/verify.go`) reuses `internal/device`'s `ReadPastCache` once per
+  1 MiB chunk, at the cost of more syscalls than a reader kept open across
+  chunks.
 
 ## Component boundaries
 
-`pkg/wipe` is its own public package (DESIGN.md §A.4): "LUKS-independent,
-consumed directly by go-trusted-platform, with its own trust boundary
-(whole-device destruction)." The header-only crypto-erase is
+`pkg/wipe` is its own public package because it is LUKS-independent: a
+consumer that only needs to destroy a device imports it alone, and it carries
+its own trust boundary, whole-device destruction. The header-only crypto-erase is
 `(*luks2.Volume).Erase(ctx)` instead, since it needs the volume handle's
 lock, not device-level sanitization:
 
@@ -65,8 +74,9 @@ type Params struct { Standard Standard; Patterns []Pattern; Verify VerifyMode; D
 func Sanitize(ctx context.Context, path string, p Params) error
 ```
 
-`VerifyMode` is one three-valued field rather than a boolean pair (no boolean
-arguments, DESIGN.md §B.1). Single-keyslot zeroing is
+`VerifyMode` is one three-valued field rather than a boolean pair, because
+the API takes no boolean arguments. `Pattern` and `Standard` both have a
+`String` method. Single-keyslot zeroing is
 `(*Volume).RemoveKeyslot`, documented with
 [keyslots](../keyslots/engineering.md#persistence).
 

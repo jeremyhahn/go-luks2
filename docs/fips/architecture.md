@@ -1,6 +1,6 @@
 # FIPS 140-3 — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (3da0ff2)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against a9c840c
 > Conflicts with this document are defects. Fix them here first.
 
 go-luks2 runs under the Go Cryptographic Module in FIPS 140-3 mode. "FIPS
@@ -37,10 +37,13 @@ a `Volume` operation, not a separate subsystem to configure.
 
 ## Component boundaries
 
-`internal/fips` (H3b, DECISIONS.md) owns the mode value (`fips.Mode` from
-`fips.Probe()`) and the two policy predicates, `RequireKDF`/`RequireHash`,
-as methods on it. Two policy sources are in play, and they differ by what
-they judge:
+`internal/fips` (`fips.go`) owns the mode value (`fips.Mode`, a `bool` type,
+from `fips.Probe()`, which reports `crypto/fips140.Enabled()`) and the two
+policy predicates, `RequireKDF`/`RequireHash`, as methods on it. The hash
+approval is a positive list, `fips.ApprovedHash`: the SHA-2 and SHA-3
+families and nothing else, so a hash this module adds later is refused until
+it is listed, rather than passing for not being SHA-1. Two policy sources are
+in play, and they differ by what they judge:
 
 - **New KDFs and derivations** use the volume's own policy. Each `Volume`
   carries a `volumeSys`, and `volumeSys.fipsMode` (`pkg/luks2/volume.go`)
@@ -56,7 +59,8 @@ they judge:
   and digests already on disk outside a derivation (the scan's cost budget,
   the digest a new keyslot joins, the read-back of a written keyslot,
   verification of a supplied volume key, `MigrateToFIPS`'s digest walk) also
-  reads `fips.Probe` (DECISIONS.md, H13d).
+  reads `fips.Probe` directly (`pkg/luks2/kdfbudget.go`, `keyslotscreen.go`,
+  `keyslot.go`, `unlock.go`, `fipsmigrate.go`).
 
 In production both sources are the same function.
 

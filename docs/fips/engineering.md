@@ -1,7 +1,6 @@
 # FIPS 140-3 — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-12 against main (623da94);
-> the two `Unwrap` methods verified 2026-10-11 against 1e4cdbc
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against a9c840c
 > Conflicts with this document are defects. Fix them here first.
 
 ## Exported surface
@@ -49,9 +48,12 @@ check against the volume's policy ([architecture.md](architecture.md#component-b
 `MigratedDigests`/`RemovedKeyslots`/`RetainedNonApproved` are `[]int`
 (canonical keyslot/digest ids).
 
-`make api-diff` holds this surface to DESIGN.md §B.6: the free-function
-`MigrateToFIPS`, `FIPSMigrationOptions`, `FIPSMigrationResult` and
-`IsFIPSCompliantKDF` are not exported.
+`make api-diff` holds this surface to the per-identifier dispositions in
+`test/tools/apidump/baseline/disposition-luks2.tsv`: it fails if `pkg/luks2`
+exports a free function `MigrateToFIPS`, or `FIPSMigrationOptions`,
+`FIPSMigrationResult` or `IsFIPSCompliantKDF`. The import is the
+`(*Volume).MigrateToFIPS` method with `MigrateParams` and `Migration`, and
+the pre-flight check is `(KDFParams).Validate()`.
 
 ## Invariants
 

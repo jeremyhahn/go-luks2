@@ -1,6 +1,6 @@
 # Wipe — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against a9c840c
 > Conflicts with this document are defects. Fix them here first.
 
 ## Exported surface
@@ -34,6 +34,17 @@ returns a standard's pass sequence. Single-keyslot zeroing is `(*Volume).RemoveK
 - Header-only wipe never touches at or past the start of the data segment.
 - Full-device wipe syncs after every pass, the last included, whether or not
   verification is requested.
+- Cancellation is observed every 1 MiB. Each write pass (`writePass`,
+  `pkg/wipe/sanitize.go`) and the verification read (`verifyWrite`,
+  `pkg/wipe/verify.go`) check `ctx` before every 1 MiB chunk. A cancelled
+  `Sanitize` returns an error whose kind is the context's error, so
+  `errors.Is(err, context.Canceled)` holds, and whose detail states how many
+  bytes were written or verified. Bytes already written stay written.
+- `pkg/wipe` has no package-level seam variables. `Sanitize` calls the
+  unexported `sanitize` with a `sys` struct of filesystem, clock and
+  lock-protocol seams built by `defaultSys`; the package's tests pass their
+  own `sys`. `TestNoNewSeamVars` (`test/makefile`) fails on a new
+  package-level func or interface variable.
 - Removing a keyslot via `(*Volume).RemoveKeyslot` is guarded by the same
   last-keyslot and area-overlap checks as any other removal path
   ([keyslots/engineering.md](../keyslots/engineering.md#exported-surface)).

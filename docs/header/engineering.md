@@ -1,6 +1,6 @@
 # Header — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against base/331 (a9c840c)
 > Conflicts with this document are defects. Fix them here first.
 
 ## Exported surface
@@ -12,7 +12,7 @@ type Header struct{ /* unexported */ }
 func (v *Volume) Header(ctx context.Context) (*Header, error)
 func (v *Volume) SecondaryHeader(ctx context.Context) (*Header, error)
 func (v *Volume) RestorePrimaryHeader(ctx context.Context) error
-func (v *Volume) ReplacePrimaryHeader(ctx context.Context) error // unconditional (was Force)
+func (v *Volume) ReplacePrimaryHeader(ctx context.Context) error // unconditional
 func (h *Header) UUID() string
 func (h *Header) Label() string
 func (h *Header) Subsystem() string
@@ -38,8 +38,12 @@ the accessors above are the header summary. The on-disk model and codec
 this is built on, `internal/header`, is unchanged by this layer
 ([architecture.md](architecture.md#component-boundaries)).
 
-`make api-diff` holds this surface to DESIGN.md §B.6: no free function reads or
-writes a header by device path.
+No free function reads or writes a header by device path. `make api-diff`
+holds this surface to its disposition baseline
+(`test/tools/apidump/baseline/disposition-luks2.tsv`), where the path-taking
+`ReadHeader`, `ReadSecondaryHeader` and `RestorePrimaryHeader` are renamed to
+the `*Volume` methods above and `WriteHeader`/`CreateBinaryHeader` are
+unexported into `internal/header`.
 
 ## Invariants
 
@@ -93,12 +97,12 @@ reverse" ([cryptsetup-interop](../cryptsetup-interop/engineering.md)).
 ## Test strategy
 
 `internal/header` has its own unit suite (structural validator table, JSON
-passthrough/unknown-members, requirements, canonical JSON), ported from and
-extending `pkg/luks2`'s former test files (DECISIONS.md H5), with a 90% floor
+passthrough/unknown-members, requirements, canonical JSON; `validation_test.go`,
+`unknownfields_test.go`, `requirements_test.go`, `canonicaljson_test.go`),
+with a 90% floor
 (`coverage-floors.txt`). Device-level and cryptsetup-conformance tests
 (`TestCanonicalJSONReencodesCryptsetupsHeaderByteForByte`,
-`TestFormattedBinaryHeaderMatchesCryptsetup`) stay in `pkg/luks2` against the
-forwards, and are also exercised by the compatibility matrix's `format*` and
+`TestFormattedBinaryHeaderMatchesCryptsetup`) live in `pkg/luks2`, and are also exercised by the compatibility matrix's `format*` and
 `header*` rows
 ([cryptsetup-interop/engineering.md](../cryptsetup-interop/engineering.md)).
 

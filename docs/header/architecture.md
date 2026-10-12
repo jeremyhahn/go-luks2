@@ -1,8 +1,6 @@
 # Header — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163);
-> "Rejected alternatives" and "What this feature deliberately does not do"
-> verified 2026-10-11 against main (623da94)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against base/331 (a9c840c)
 > Conflicts with this document are defects. Fix them here first.
 
 A LUKS2 header is two copies of a 4096-byte binary header plus a JSON area,
@@ -28,42 +26,48 @@ an accident of a stricter parser.
 
 - **Requiring a valid header to open a volume.** Rejected: `Open` pins the
   descriptor and nothing else, because `RestorePrimaryHeader` and `Erase` must
-  work on a damaged header (DESIGN.md §B.1).
-- **A force flag on the primary-header restore.** Rejected: no boolean
-  arguments, so the unconditional restore is its own method,
-  `ReplacePrimaryHeader` (DESIGN.md §B.1, §B.6).
+  work on a damaged header. `Open` (`pkg/luks2/volume.go`) validates the
+  path and options and pins the descriptor; it reads no header.
+- **A force flag on the primary-header restore.** Rejected: the public API
+  takes no boolean arguments, so the unconditional restore is its own method,
+  `ReplacePrimaryHeader` (`pkg/luks2/header_v2.go`). The `make api-diff`
+  disposition baseline (`test/tools/apidump/baseline/disposition-luks2.tsv`)
+  records the force-option form as deleted, so it cannot come back unnoticed.
 - **Indented JSON, and Go's default HTML escaping.** Rejected: the JSON area
   cannot grow after format, and indented output filled it at far fewer
   keyslots than cryptsetup's compact json-c output does; json-c does not
-  escape `<`, `>` or `&` (commit 3082e41, "canonical JSON, calibrated digest,
-  and cost rules that match cryptsetup").
+  escape `<`, `>` or `&` (`TestCanonicalJSONIsCompact` and
+  `TestCanonicalJSONDoesNotEscapeHTML` in `internal/header`,
+  `TestCompactJSONRaisesTheKeyslotCeiling` in `pkg/luks2`).
 - **A fixed digest iteration count.** Rejected: cryptsetup calibrates the
-  digest to a time target, and a hardcoded count does not. A proposal to
-  hardcode 1000 rested on a measurement taken with
-  `--pbkdf-force-iterations`, which pins the digest as well as the keyslot;
-  it was reverted (same commit).
+  digest to a time target, and a hardcoded count does not. A count measured
+  with `--pbkdf-force-iterations` is not cryptsetup's digest default, because
+  that flag pins the digest as well as the keyslot
+  (`digestcalibration_test.go`).
 - **Zero-filling the unused keyslots area at format.** Rejected: zeros
   disclose which slots are in use and which were destroyed, so `Format`
-  fills it with random bytes (same commit).
+  fills it with random bytes (`TestFormatFillsTheWholeKeyslotsAreaWithRandom`).
 - **Exporting internals across the `internal/header` boundary for small
   helpers.** Rejected: duplicating a helper of a few lines is cheaper and less
   coupled than exporting `pkg/luks2` internals or threading parameters
-  through the call chain (DECISIONS.md, H5).
+  through the call chain (`parseSize` exists in both `internal/header/keyslot.go`
+  and `pkg/luks2/util.go`).
 
 ## Component boundaries
 
 The on-disk model, JSON codec, structural validator, checksum/binary-header
-codec and keyslot scan order live in `internal/header` (H5, DECISIONS.md).
+codec and keyslot scan order live in `internal/header`.
 `pkg/luks2` does not re-export that model: its `Header`, `Segment`, `Token`
 and `KeyslotInfo` are its own types built from it, and `DroppedEntry` and
 `LegacyToken` are the only aliases of `internal/header`'s. `internal/header`
 sits above `internal/kdf` and `internal/fips` in the import DAG (it may import
-them) and must not import `pkg/luks2` (DESIGN.md §A.2); a handful of small pure helpers
+them) and must not import `pkg/luks2`; the `internal-header` depguard rule in
+`.golangci.yml` allows only `internal/kdf`, `internal/fips` and
+`internal/errs` from this module, so `make lint` fails on any other edge. A handful of small pure helpers
 (`parseSize`, the overflow conversions, the segment/digest/keyslot-coverage
 helpers) are duplicated rather than threaded across that boundary — each is a
 few lines, and duplicating them is cheaper than exporting `pkg/luks2`
-internals or exporting `internal/header` internals the other way (DECISIONS.md
-H5).
+internals or exporting `internal/header` internals the other way.
 
 `pkg/luks2`'s public read model is a `*Header` type returned from
 `(*Volume).Header(ctx)`/`SecondaryHeader(ctx)`, backed by the same

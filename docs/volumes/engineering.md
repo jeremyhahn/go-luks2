@@ -1,11 +1,8 @@
 # Volumes — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-12 against main (623da94),
-> except the measured flag table and "What the container does not isolate";
-> the `loop` and `filesystem` surface and the export-coverage rule verified
-> 2026-10-11 against 1e4cdbc; the `ValidatePassphrase` error kinds verified
-> 2026-10-12 against train/docs5 (adeb2ca) and the fix commit 389cdd0.
-> The pkg/dmcrypt pointer was checked 2026-10-11 against main (f871541).
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against base/331 (a9c840c);
+> the container flag table was checked against `test/tools/docker-run`'s
+> `privileges`, and its measurements were not re-run.
 > Conflicts with this document are defects. Fix them here first.
 
 The implementation contract for the volume lifecycle: create, unlock, mount,
@@ -113,14 +110,16 @@ sentinels:
 | `loop.ErrNodeAbsent` | The kernel allocated a loop device but its `/dev` node did not appear in time. The allocation succeeded; this is not "no loop devices available" |
 | `loop.ErrDeviceReassigned` | `Detach` refused: the device is now backed by a different file |
 
-Full signatures, including every params struct field: DESIGN.md §B.2, §B.4 and
-§B.5, cross-checked against `go doc` for each package. `pkg/dmcrypt` is
-specified in [dm-crypt-activation/engineering.md](../dm-crypt-activation/engineering.md),
+Full signatures, including every params struct field, are the packages'
+own: `go doc` on `pkg/luks2`, `pkg/keyprovider`, `pkg/loop` and
+`pkg/filesystem`. `pkg/dmcrypt` is specified in
+[dm-crypt-activation/engineering.md](../dm-crypt-activation/engineering.md),
+`pkg/loop` in [loop-devices/engineering.md](../loop-devices/engineering.md),
 and `pkg/filesystem` in [filesystems/engineering.md](../filesystems/engineering.md#exported-surface).
 
 `make api-diff` (`test/tools/apidump` against
-`baseline/disposition-luks2.tsv`) checks that every export of the
-pre-redesign `pkg/luks2` (`baseline/luks2.tsv`) is where its disposition row
+`baseline/disposition-luks2.tsv`) checks that every export recorded in
+`baseline/luks2.tsv`, the earlier `pkg/luks2` surface, is where its disposition row
 says: `KEEP` rows still exported, `RENAME`/`MOVE`/`UNEXPORT`/`DELETE` rows
 gone under the old name. It does not see exports added since, such as
 `DefaultKDFSpec` and `LegacyToken`.
@@ -129,7 +128,7 @@ Those are checked by a second gate, `TestEveryPkgExportIsNamedInAFeatureDoc`
 in `test/tools/apidump` (`apidump documented`), which the unit tests run on
 every push. Every exported constant, variable, function, type and method of
 every package under `pkg/` must be named in a feature doc: a `*.md` in a
-`docs/<feature>/` directory that has an `api.md` (so not `docs/design`).
+`docs/<feature>/` directory that has an `api.md`; a directory without one does not count.
 Only code counts, meaning inline code spans and fenced blocks, never prose,
 and only whole identifiers: `OpenVolume` does not name `Open`. A top-level
 identifier is covered by its own name. A method is covered by `Type.Method`,
@@ -141,15 +140,16 @@ names.
 
 ## Invariants
 
-- **Lock order is a type property.** `internal/device` implements it (H6,
-  DECISIONS.md): `Pinned` is read-only; `Pinned.Lock(ctx, mode)` takes the
-  node flock then the cryptsetup lock and returns `*Locked`;
+- **Lock order is a type property.** `internal/device/lock.go` implements
+  it: `Pinned` is the opened descriptor; `Pinned.Lock(ctx, mode, ...)` takes
+  the node flock then the cryptsetup lock and returns `*Locked`;
   `Locked.Claim(ctx, ...)` returns `*Claimed` by reopening the locked
   descriptor's own `/proc/self/fd/N` entry, so the claim targets the locked
-  inode by construction. Every `*Volume` write method goes through it
+  inode by construction. A claim is reachable only from a `*Locked`, so it
+  cannot precede the lock. Every `*Volume` write method goes through it
   (`v.lockFor(ctx, device.LockExclusive)`, then `locked.Claim` where an
-  O_EXCL write is needed — confirmed in `volume.go`'s `lockFor` and
-  `format.go`'s `Format`).
+  O_EXCL write is needed: `volume.go`'s `lockFor` and `format.go`'s
+  `Format`).
 - **No lock is held between calls** on the `*Volume` handle: each method
   takes its lock, does its I/O and releases it before returning.
 - **Concurrency.** `Volume` is safe for concurrent use through an internal
@@ -166,6 +166,20 @@ names.
   `volkey.Borrow` is reachable only inside the module, so `dmcrypt` can hand
   the key to the keyring and no consumer can extract it.
 
+## Cancellation
+
+Every method that does I/O, takes a lock or runs a KDF takes a `ctx`, and
+observes it only where stopping leaves the device consistent:
+
+| Blocking point | How `ctx` is observed |
+|---|---|
+| Node flock and cryptsetup lock | Polled with backoff on the clock (`internal/device/lock.go`, `cryptsetuplock.go`). The budget is `WithLockWait` (default `DefaultLockWait`); running out is a `*LockTimeoutError`, a cancellation is an `*Error` whose `Kind` is `ctx.Err()` |
+| KDF (PBKDF2, Argon2) and PBKDF2 calibration | Not interruptible. `ctx` is checked before each derivation and each calibration probe; a derivation that finishes after a cancellation has its output destroyed and the cancellation is returned (`internal/kdf/kdf.go`, `calibration.go`) |
+| Keyslot, token, header and FIPS-migration writes | Checked only before each write step: the keyslot-area write, the header write, the keyslot-area wipe (`volumeSys.keyslotWriteStep`, `pkg/luks2/keyslotdevice.go`). Once `AddKeyslot` or `ChangeKeyslot` has written its keyslot area, the rest of the transaction runs under `context.WithoutCancel` to its next consistent state, so no area holding a wrapped volume key is left unnamed by the header (`pkg/luks2/keyslot.go`) |
+| Rollback of a written keyslot | Always under `context.WithoutCancel`: a keyslot that was written and could not be proved to open is taken back out whether or not the caller is still waiting |
+| Header-copy repair on read | One write step, never cancelled (`repairHeaderCopies`) |
+| `Format` random fill, header wipe | Checked per 64 KiB chunk; a cancelled fill names the bytes written in `Detail` (`writeRandom`, `zeroRange`) |
+
 ## Error semantics
 
 One struct, `errs.Error{Op, Path, Kind, Detail, Err}` (internal/errs),
@@ -176,21 +190,24 @@ aliased as `luks2.Error`. `Kind` is never nil (a public `Err*` sentinel, or
 the human-readable reason.
 
 `ErrInvalidArgument`, `ErrInvalidCredential` and `ErrIO` are module-wide
-kinds with no single owner below the public API (DESIGN.md §C.2 rule 6,
-H3c's rule generalised): defined once in `internal/errs` and re-exported by
-value from `luks2`. The shared device kinds (`ErrDeviceNotFound`,
+kinds with no single owner below the public API: defined once in
+`internal/errs` and re-exported by value from `luks2` (`pkg/luks2/errors.go`,
+`ErrInvalidArgument = errs.ErrInvalidArgument`). The shared device kinds (`ErrDeviceNotFound`,
 `ErrPermissionDenied`, `ErrDeviceInUse`, `ErrDeviceChanged`,
 `ErrDeviceCacheStale`, `ErrLockContended`, `ErrMetadataLockUnavailable`) are
-defined once in `internal/device` the same way.
+defined once in `internal/device` the same way, and `pkg/wipe` re-exports
+the same values (`pkg/wipe/errors.go`). Errors are typed only: `forbidigo` in
+`.golangci.yml` refuses `fmt.Errorf` everywhere but `_test.go` files and
+`test/`, and `errors.New` everywhere but a package's `errors.go`, where its
+sentinels are declared.
 
 A few struct types still carry data a caller needs programmatically rather
 than folding into `Kind` + `Detail` alone: `LockTimeoutError{Path, Waited,
 Attempts}` (device.LockTimeoutError, aliased), `KDFCostError{Param, Value,
-Min, Max}` (unifies what used to be two types, `Argon2CostError` and
-`PBKDFIterationsError`; `Is` reports `ErrInvalidArgument`),
-`KDFCalibrationError`, `FIPSImportRequiredError` and `FIPSMigrationError`.
-`InvalidKeyslotError` and `UnlockError` are gone: a keyslot or unlock refusal
-is a plain `*Error` now, with `ErrKeyslotNotFound` (or whatever the refusal
+Min, Max}` (one type for both KDFs' cost bounds; `Is` reports
+`ErrInvalidArgument`), `KDFCalibrationError`, `FIPSImportRequiredError` and
+`FIPSMigrationError`. A keyslot or unlock refusal has no type of its own: it
+is a plain `*Error`, with `ErrKeyslotNotFound` (or whatever the refusal
 classifies as) in `Kind` and the keyslot id or step folded into `Detail`.
 
 Two sentinels belong to the `*Volume` handle itself. Each reaches the
@@ -206,15 +223,21 @@ No "wrong passphrase" error exists: with an unauthenticated keyslot cipher a
 wrong passphrase and damaged key material look the same, so both match
 `ErrWrongKey`.
 
-Sentinels follow DESIGN.md §C.3's table: the narrower refusals (a bad size,
-a too-short passphrase, an unsupported cipher) are `ErrInvalidArgument`,
-`ErrInvalidCredential` or `ErrUnsupported` with the detail in `Detail`;
-`make api-diff` checks the exported set.
+A sentinel exists only where a caller can act on it differently (a remedy, a
+retry, an exit code, a prompt). The narrower refusals (a bad size, a
+too-short passphrase, an unsupported cipher) are `ErrInvalidArgument`,
+`ErrInvalidCredential` or `ErrUnsupported` with the detail in `Detail`
+(recorded beside the sentinels in `pkg/luks2/errors.go`); `make api-diff`
+checks the exported set.
 
 ## Configuration
 
-Zero value of a params struct means library policy (target shape, DESIGN.md
-§B.1):
+Operations take their required operands positionally plus one params
+struct, and the zero value of a params struct means library policy
+(`FormatParams`, `KDFParams`, `KeyslotParams`, `MigrateParams`,
+`filesystem.MakeParams`, `filesystem.MountParams`, `wipe.Params`). No exported
+function or method takes a boolean argument. Constructors take functional options instead
+(`Open` with `WithReadOnly` and `WithLockWait`).
 
 | `FormatParams` field | Zero means |
 |---|---|
@@ -256,13 +279,29 @@ the cryptsetup two-way compatibility matrix
 ([cryptsetup-interop](../cryptsetup-interop/engineering.md)).
 
 **Fault injection**: the seam-var enforcement test (no package-level mutable
-`var` of func/interface type outside `errors.go`, DESIGN.md §E) is on and
-enforcing for every package, `pkg/luks2` included, with an EMPTY allowlist
-(`test/makefile/seamvars_test.go`, H13/H13d, DECISIONS.md). The seams live in
+`var` of func/interface type outside `errors.go`) is on and enforcing for
+every package under `pkg/` and `internal/`, `pkg/luks2` included, with an
+EMPTY allowlist (`test/makefile/seamvars_test.go`). The seams live in
 the unexported `volumeSys` each `*Volume` carries, so a test builds a `Volume`
 with its own `volumeSys` and nothing is shared through package state. A
 separate test (`TestSeamAllowlistNamesOnlyRealSeams`) keeps the allowlist
 honest if one is ever added.
+
+Integration tests live under `test/integration/<package>/`, with one
+exception: four white-box files stay in `pkg/luks2`
+(`canonicalconformance_integration_test.go`,
+`lockcompat_integration_test.go`, `lockwait_integration_test.go` and
+`pinnedpaths_integration_test.go`). Each overrides a `volumeSys` field that
+no exported API may carry: `cryptoRand`, `newUUID` and `digestIterationsFor`
+for byte-for-byte conformance against a cryptsetup-written image,
+`calibratedCountFloor` for a cheap KDF cost in a real-cryptsetup lock test,
+`lockHeld` to act while a lock is being waited for, and the open seam that
+retargets a symlink the instant it is first opened
+(`relinkAfterFirstOpen`). They keep the `integration` build
+tag, so they run in the container with the rest of the suite. A test
+qualifies for the exception only if its hook is a correctness- or
+security-relevant seam of this package that no exported API could carry
+without handing it to every caller.
 
 The rest of this section is the project-wide test infrastructure, kept here
 because `volumes/` owns the device layer the integration tier runs against.
@@ -392,7 +431,7 @@ losetup -a              # find the backing file; attribute the device
 losetup -d /dev/loopN   # detach the one you attributed
 ```
 
-This is policy (owner ruling, 2026-09-22). Ownership is never inferred from
+This is a requirement, not a gap. Ownership is never inferred from
 appearance: a path prefix, a deleted backing file or an absence of holders all
 match devices that belong to someone else. The refusals in
 `test/internal/harness/system.go` and `test/tools/luks2-testreap` are deliberate.
@@ -466,9 +505,10 @@ preamble treats an undercount as worse than the current state:
    `derivePBKDF2` must convert, for every enclave-held credential it borrows;
    inside the Go Cryptographic Module a second copy is made for the HMAC
    state. `x/crypto/argon2` copies its input into BLAKE2b state that is never
-   wiped. This is a **ruled** position (owner ruling 2026-08-25: no hand-rolled
-   cryptography, this exact case named by name), not an oversight — see
-   `doc.go` for the full ruling text.
+   wiped. This is a deliberate position, not an oversight: the project
+   forbids hand-rolled cryptography, and a PBKDF2 or Argon2 rewritten to read
+   its input from locked memory would be exactly that (for PBKDF2, one outside
+   the Go Cryptographic Module) — see `doc.go` for the full reasoning.
 3. **KDF output.** `crypto/pbkdf2.Key` and `argon2.IDKey` return their result
    on the ordinary heap; the derivation moves it into an enclave immediately,
    so the window is the return statement plus one copy.

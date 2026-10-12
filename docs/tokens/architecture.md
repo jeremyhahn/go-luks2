@@ -1,6 +1,6 @@
 # Tokens — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (623da94)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against a9c840c
 > Conflicts with this document are defects. Fix them here first.
 
 A token is a JSON object in the header that records what opens a keyslot: a
@@ -44,29 +44,33 @@ code of its own; a consumer that needs to act on a TPM token implements
 - **Typed vendor fields on `luks2.Token`.** Rejected: a generic `Token` with
   `Members` carries a type this library does not model, such as a
   systemd-tpm2 token, through a read-modify-write untouched; the
-  systemd-fido2 schema is parsed in `pkg/keyprovider` alone (DESIGN.md §B.4;
-  DECISIONS.md, H9d).
+  systemd-fido2 members are written by `fido2Token` and read back by
+  `fido2ParamsFromToken`, both in `pkg/keyprovider/fido2.go`, and nothing in
+  `pkg/luks2` interprets them.
 - **Key-provider implementations inside `pkg/luks2`.** Rejected: a separate
-  `pkg/keyprovider` is the only way to keep `pkg/luks2` exec-free, and the
-  interface it implements is defined at the consumer (DESIGN.md §A.4).
+  `pkg/keyprovider` is the only way to keep `pkg/luks2` exec-free (it imports
+  neither `os/exec` nor `internal/command`), and the interface it implements,
+  `luks2.KeyProvider`, is defined at the consumer.
 - **Checking a helper by path and executing the path afterwards.** Rejected:
   the path check judged only the directories left after symlinks were
   resolved, and `exec` reopened the path, so the file that ran need not be the
-  file checked. The helper runs from the descriptor its checks were made on
-  (DECISIONS.md, p-bugs).
+  file checked. The helper runs from the descriptor its checks were made on:
+  `internal/command`'s `Open` (`open_linux.go`) checks the descriptor it
+  opened, and `command.go` hands that descriptor to the child as its first
+  extra file and executes it through `/proc/self/fd/3`.
 - **Refusing every symlink on a helper's path.** Rejected: merged `/usr`
   layouts, distribution tool links and helpers linked into `/opt` are
   symlinks, and the walk already judges every directory such a path passes
-  through, which is what the refusal would have protected (DECISIONS.md,
-  p-bugs).
+  through, which is what the refusal would have protected. `Open` follows a
+  symlink only when the link itself is owned by root or the caller, and walks
+  its target with the same checks.
 
 ## Component boundaries
 
 Token read/write (`token.go`; `Enroll` and `UnlockWithProvider` in
 `provider.go`) lives in `pkg/luks2`.
 Key-provider implementations (`Command`, FIDO2) live in `pkg/keyprovider`,
-its own public package — "the only way to keep `pkg/luks2` exec-free"
-(DESIGN.md §A.4) — implementing `luks2.KeyProvider`, defined at the consumer
+its own public package, which keeps `pkg/luks2` exec-free, implementing `luks2.KeyProvider`, defined at the consumer
 (`pkg/luks2`) rather than at the implementer. `luks2.Token` stays generic
 (`Type`, `Keyslots`, `Members map[string]json.RawMessage`); the FIDO2-specific
 members are interpreted by `pkg/keyprovider` alone. FIDO2 runs `fido2-cred`

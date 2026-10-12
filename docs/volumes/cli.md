@@ -1,6 +1,6 @@
 # Volumes — CLI
 
-> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (f871541)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against base/331 (a9c840c)
 > Conflicts with this document are defects. Fix them here first.
 
 `luks2` creates, opens, mounts and closes LUKS2 volumes. It is a thin layer
@@ -28,7 +28,7 @@ Every `luks2` verb, by the feature folder that documents it:
 | `version`, `--version`, `-v` | Print the version (exit 0) |
 
 Every verb above has a `CommandDefinition` in the CLI parity suite
-(`test/integration/cli/commands/`, DESIGN.md §E). A verb in one and not the
+(`test/integration/cli/commands/`). A verb in one and not the
 other is a defect in whichever is behind.
 
 ## Rules for every command
@@ -69,7 +69,13 @@ one table; the other command documents link here.
 An error is matched through whatever wraps it, and the first row that matches
 wins, in the order 2, 3, 4, 5. `dmcrypt.ErrStillLive` and `dmcrypt.ErrNotActive`
 have no row and exit 1. Running `luks2` with no command, or with an
-unknown command or group verb, prints the usage and exits 1.
+unknown command or group verb, prints the usage and exits 1. The table is
+`exitTable` in `internal/cli/exit.go`, and `exitCode` applies it.
+
+`SIGINT` and `SIGTERM` cancel the running command (`cmd/luks2/main.go` runs it
+under `signal.NotifyContext`). A write in progress stops at its next consistent
+step boundary ([engineering.md](engineering.md#cancellation)), and the command
+exits with the resulting error's status, 1 for a cancellation.
 
 Three verbs answer in their status:
 

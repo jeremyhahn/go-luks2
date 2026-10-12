@@ -1,6 +1,6 @@
 # Kernel keyring — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (f871541)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against base/331 (a9c840c)
 > Conflicts with this document are defects. Fix them here first.
 
 How a LUKS2 volume key gets from locked memory into dm-crypt without ever
@@ -52,8 +52,8 @@ there next.
 
 ### Rejected alternatives
 
-- **Fall back to an inline key when the keyring is unavailable.** Rejected by
-  owner ruling: the fallback puts the master key in memory the library cannot
+- **Fall back to an inline key when the keyring is unavailable.** Rejected: the
+  fallback puts the master key in memory the library cannot
   wipe, for an unbounded time, and a caller that got a successful return would
   believe a guarantee that did not hold. Unavailability is fatal.
 - **A `user` key instead of `logon`.** Rejected: any possessor of a `user`

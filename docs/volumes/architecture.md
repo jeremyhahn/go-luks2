@@ -1,9 +1,6 @@
 # Volumes — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (3da0ff2);
-> "What this feature deliberately does not do" verified 2026-10-11 against
-> main (623da94); the `KeyringError` table and mapping-name limits verified
-> 2026-10-11 against 1e4cdbc
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against base/331 (a9c840c)
 > Conflicts with this document are defects. Fix them here first.
 
 The volume lifecycle: creating a LUKS2 container, unlocking it to a
@@ -24,16 +21,30 @@ key-custody boundary every other feature relies on.
 
 ## The problem and the shape chosen
 
-Every other LUKS2 consumer in the portfolio used to shell out to cryptsetup,
-and that got the protected-memory guarantee for free: the master key was
-derived, held and handed to the kernel inside a separate process whose address
-space this one could not read, and which exited. go-luks2 does the work in
+A LUKS2 consumer that shells out to cryptsetup gets the protected-memory
+guarantee for free: the master key is derived, held and handed to the kernel
+inside a separate process whose address space the caller cannot read, and
+which exits. go-luks2 does the work in
 process instead — no `cryptsetup` binary, no `exec` in the core — so the
 rootless core can run in places a setuid helper cannot, at the cost of
 providing the protected-memory guarantee itself (see "Key custody", below, and
 [engineering.md](engineering.md)).
 
-Rejected alternatives for the package split (DESIGN.md §A.4):
+The public surface is six packages, split along trust boundaries so a
+consumer imports, and trusts, only what it uses:
+
+- `pkg/luks2` is the rootless, exec-free core. Opening, formatting and
+  unlocking a container needs neither root nor an external binary.
+- `pkg/dmcrypt` holds activation, which needs root and the kernel keyring.
+  Keeping it out of `pkg/luks2` is what keeps the core rootless.
+- `pkg/keyprovider` holds the providers that exec a helper. `luks2.KeyProvider`
+  is defined in `pkg/luks2`, where it is consumed, so the core stays exec-free
+  while providers that exec live beside it.
+- `pkg/loop`, `pkg/filesystem` and `pkg/wipe` do not depend on LUKS2 at all
+  (their depguard rules allow none of the `pkg/` packages) and each has a
+  trust boundary of its own: loop ioctls, mkfs and mount, whole-device writes.
+
+Rejected alternatives for the package split:
 
 - **A single `host` package** combining device-mapper, loop and mount ioctls
   with external-command execution. Rejected: it would mix the exec trust
@@ -54,14 +65,15 @@ Rejected alternatives for the package split (DESIGN.md §A.4):
 | `pkg/filesystem` | mkfs / fsck / blkid (exec) and mount(2) / umount(2) (root). |
 | `pkg/wipe` | Whole-device sanitization. |
 | `cmd/luks2` | `main.go` only: a signal context in, `internal/cli.Run`, `os.Exit`. |
-| `internal/cli` | The CLI (DESIGN.md §F). Built on the `Volume` API, `pkg/dmcrypt`, `pkg/loop`, `pkg/filesystem` and `pkg/wipe`. Root-only boundaries (activation, loop devices, mounting) sit behind small unexported interfaces so unit tests run without root. It holds no LUKS2 logic of its own. |
+| `internal/cli` | The CLI ([cli.md](cli.md)). Built on the `Volume` API, `pkg/dmcrypt`, `pkg/loop`, `pkg/filesystem` and `pkg/wipe`. Root-only boundaries (activation, loop devices, mounting) sit behind small unexported interfaces so unit tests run without root. It holds no LUKS2 logic of its own. |
 | `internal/errs`, `internal/clock`, `internal/secret`, `internal/fips`, `internal/af`, `internal/areacipher`, `internal/kdf`, `internal/header`, `internal/recoverykey`, `internal/volkey`, `internal/command`, `internal/device`, `internal/dm`, `internal/keyring` | Leaf packages below the public API. |
 
 Runtime dependencies: `github.com/jeremyhahn/go-enclave` (locked memory),
 `github.com/anatol/devmapper.go` (device-mapper ioctls), `golang.org/x/crypto`
 (Argon2, XTS), `golang.org/x/sys`, `golang.org/x/term`, `github.com/google/uuid`.
 
-`depguard` enforces this layout mechanically, one rule per DESIGN.md §A.2 row.
+`depguard` enforces this layout mechanically: `.golangci.yml`'s `depguard` settings carry one rule per
+package, each listing the in-module packages it may import.
 `pkg/luks2`'s allow list names none of `github.com/anatol/devmapper.go`,
 `pkg/dmcrypt`, `pkg/loop`, `pkg/filesystem`, `pkg/wipe`, `pkg/keyprovider`,
 `internal/dm`, `internal/keyring` or `internal/command`, and it additionally
@@ -69,13 +81,37 @@ denies `os/exec`, so the core cannot regain root or exec without a red lint.
 
 `make api-diff` (`test/tools/apidump` against
 `test/tools/apidump/baseline/disposition-luks2.tsv`) is the mechanical check
-that every export of the pre-redesign `pkg/luks2`
-(`test/tools/apidump/baseline/luks2.tsv`) went where its
+that every export recorded in `test/tools/apidump/baseline/luks2.tsv`, the
+earlier `pkg/luks2` surface, went where its
 disposition row says: a `KEEP` row (`ErrDeviceChanged`, for one) is still
 exported under its name, and a `RENAME`, `MOVE`, `UNEXPORT` or `DELETE` row
 is gone under its old one (`ErrIntegerOverflow` became
 `ErrInvalidArgument`). Exports added since, such as `DefaultKDFSpec` and
 `LegacyToken`, are not in the baseline, and the check does not see them.
+
+## Portability
+
+`pkg/luks2` and `pkg/keyprovider` build on Linux and darwin: `make build`
+cross-compiles both for `darwin/amd64` and `darwin/arm64`, so a change that
+breaks the darwin build fails the build target. Reading a header, formatting
+an image file and unlocking a key need nothing Linux-specific.
+
+The Linux-specific device calls live in `internal/device`, each in a
+`*_linux.go` file with a `//go:build !linux` sibling in `*_other.go`:
+
+| Call | Linux | Elsewhere |
+|---|---|---|
+| Device size (`size_linux.go`) | `BLKGETSIZE64` on a block device | The file's stat size |
+| Uncached read (`medium_linux.go`) | `O_DIRECT` read past the page cache | `ErrUnsupported` |
+| Discard (`discard_linux.go`) | `BLKDISCARD` | No-op |
+| Cache drop (`drop_linux.go`) | `posix_fadvise(FADV_DONTNEED)` | No-op |
+
+`pkg/dmcrypt`, `pkg/loop`, `pkg/filesystem`, `pkg/wipe` and the CLI are not
+part of the darwin build: device-mapper, the kernel keyring, loop ioctls and
+mount(2) exist only on Linux, and `pkg/loop` and `pkg/filesystem` carry
+`//go:build linux`. Windows is out of scope for every package: the device and
+cryptsetup-compatible locks are `flock(2)` (`internal/device/lock.go`,
+`internal/device/cryptsetuplock.go`).
 
 ## Data flow
 
@@ -169,7 +205,7 @@ the library has to protect it itself.
   credential. The keyslot wrap uses `golang.org/x/crypto/xts`, which is outside
   the Go Cryptographic Module.
 - The canonical, exhaustive list of the residual raw-bytes exposures — what
-  they are, why each is accepted, and the owner ruling behind each one — is
+  they are, why each is accepted — is
   the package documentation of [`internal/secret`](../../internal/secret/doc.go)
   (`doc.go`). A summary, kept in sync with that canonical copy, is in
   [engineering.md](engineering.md#key-custody-detail).

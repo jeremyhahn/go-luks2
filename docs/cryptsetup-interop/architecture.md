@@ -1,6 +1,6 @@
 # cryptsetup interop — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (623da94) and cryptsetup 2.7.5
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against a9c840c and cryptsetup 2.7.5
 > Conflicts with this document are defects. Fix them here first.
 
 go-luks2 does not define its own on-disk format: the format is cryptsetup's,
@@ -22,17 +22,18 @@ than being decided ad hoc per feature.
 
 ## Rejected alternatives
 
-- **Dropping a cryptsetup `--pbkdf` value (`argon2i`).** Rejected, and the
-  earlier removal reversed: stricter than cryptsetup is fine, incompatibility
-  is not, and a script doing `--pbkdf argon2i` must work (DECISIONS.md,
-  p-final).
+- **Dropping a cryptsetup `--pbkdf` value (`argon2i`).** Rejected: stricter
+  than cryptsetup is fine, incompatibility is not, and a script doing
+  `--pbkdf argon2i` must work. `argon2i` is a public KDF type
+  (`KDFArgon2i`, `pkg/luks2/kdf.go`) and a `--pbkdf` value
+  (`internal/cli/kdfflags.go`).
 - **Matching cryptsetup in every behaviour.** Rejected row by row: each
   refusal in "Stricter than cryptsetup", below, gives its reason, and none
   stops a cryptsetup volume from opening.
 - **Moving the four white-box integration files into
   `test/integration/interop/`.** Rejected: each reaches a security- or
   determinism-relevant seam, and moving it would mean exporting that seam
-  with no decided shape (DECISIONS.md, H12c).
+  outside `pkg/luks2` (see [Component boundaries](#component-boundaries)).
 
 ## Versioning policy
 
@@ -47,16 +48,30 @@ incompatible header acceptable.
 
 The [interop matrix](engineering.md#the-interop-matrix) is measured against cryptsetup 2.7.5 and the Linux kernel in
 the integration container ([test strategy](engineering.md#test-strategy)).
-The cryptsetup/systemd two-way tests (`compatmatrix`, `fipsimport`, `sha1af`)
-live in `test/integration/interop/`, "cryptsetup and systemd are the real
-peer" (DESIGN.md §E). Four white-box integration files stay in `pkg/luks2`
-rather than moving, by deliberate decision (H12c, DECISIONS.md):
-`canonicalconformance_integration_test.go`, `lockcompat_integration_test.go`,
-`lockwait_integration_test.go` and `pinnedpaths_integration_test.go` — each
-reaches a seam (`cryptoRand`/`newUUID`/`digestIterationsFor`, `lockHeld`,
-`calibratedCountFloor`, `openFile`) that is security- or determinism-relevant in a
-Layer-0 library, and moving them would mean exporting that seam across a
-package boundary with no decided shape for it yet.
+The cryptsetup/systemd two-way tests (`compatmatrix`, `fipsimport`,
+`sha1af`, `headercopies`) live in `test/integration/interop/`: cryptsetup and
+systemd are the real peer, so these tests drive the real binaries in both
+directions. Four white-box integration files stay in `pkg/luks2` instead,
+under `//go:build integration`: `canonicalconformance_integration_test.go`,
+`lockcompat_integration_test.go`, `lockwait_integration_test.go` and
+`pinnedpaths_integration_test.go`. Each builds a `Volume` with a
+`volumeSys` it overrides, as an in-package unit test does, because each
+needs a seam the public API must never expose:
+
+- `cryptoRand`, `newUUID` and `digestIterationsFor` (determinism: a
+  byte-for-byte comparison against a cryptsetup-written golden image);
+- `calibratedCountFloor` (a cheap KDF cost, so a real-cryptsetup lock test
+  runs in budget);
+- `lockHeld` (a lock already held, to drive the wait);
+- `openFile` (through `relinkAfterFirstOpen`, re-pointing a symlink the
+  instant it is first opened, to prove a writer stays on the descriptor it
+  locked).
+
+Exporting any of them, even to the module's own `test/` tree, would make a
+security- or determinism-relevant seam of a Layer-0 library reachable from
+outside the package. A file qualifies for this exception only when both
+hold: its hook is a correctness- or security-relevant seam of `pkg/luks2`,
+and no exported API could carry it without exposing it to every caller.
 
 ## Stricter than cryptsetup
 
@@ -66,7 +81,7 @@ wrote it; none stops a cryptsetup volume from opening.
 | go-luks2 | cryptsetup | Why |
 |---|---|---|
 | A lock wait ends after 30 s (`DefaultLockWait`; `WithLockWait` sets another bound) with `ErrLockContended` | waits forever | a wait nothing will end is a hang |
-| A new passphrase is 8–512 bytes (`ErrPassphraseTooShort`, `ErrPassphraseTooLong`); an existing one may be 1 byte to 8 MiB | enrolls any length, an 8 MiB key file included | a new credential is chosen now and can meet a floor |
+| A new passphrase is 8–512 bytes (`MinPassphraseLength`, `MaxPassphraseLength`; outside them, `ErrInvalidCredential`); an existing one may be 1 byte to 8 MiB | enrolls any length, an 8 MiB key file included | a new credential is chosen now and can meet a floor |
 | Persistent `allow-discards` is not passed to dm-crypt; the performance flags are | passes all of them | the header is untrusted, and discards disclose which blocks are free to anyone who can read the medium; the data is the same either way |
 | Activation refused for a detached header | activates with `--header` | activation (`Target`) maps the device the header was read from and takes no second device; the keyslots are still managed |
 | Keyslots tried only if bound to the data segment, never by priority | priority order | an unbound key maps garbage |

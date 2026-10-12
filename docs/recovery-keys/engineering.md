@@ -1,7 +1,6 @@
 # Recovery keys — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163);
-> `OrphanedKeyslotError.Unwrap` verified 2026-10-11 against 1e4cdbc
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against base/331 (a9c840c)
 > Conflicts with this document are defects. Fix them here first.
 
 ## Exported surface
@@ -35,8 +34,12 @@ becomes a Go string in this API (it cannot be wiped). `internal/cli`
 failure of the writer is `ErrIO` wrapping the writer's error; only a failure to
 reach the protected memory holding the credential is `ErrProtectedMemory`.
 
-`make api-diff` holds this surface to DESIGN.md §B.6: the old generate, save,
-load and verify free functions are not exported.
+No free function generates, saves, loads or verifies a recovery key. `make
+api-diff` holds this surface to its disposition baseline
+(`test/tools/apidump/baseline/disposition-luks2.tsv`): `GenerateRecoveryKey`
+is renamed to `NewRecoveryKey`, and `SaveRecoveryKey`, `LoadRecoveryKey`,
+`LoadRecoveryCredential`, `RecoveryCredential` and `VerifyRecoveryKey` are
+deleted.
 
 ## Invariants
 

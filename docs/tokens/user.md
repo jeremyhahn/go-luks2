@@ -1,6 +1,6 @@
 # Tokens — user guide
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against a9c840c
 > Conflicts with this document are defects. Fix them here first.
 
 Prerequisites: an existing LUKS2 volume ([volumes/user.md](../volumes/user.md)).
@@ -26,29 +26,18 @@ sudo luks2 token import /dev/sdb1 0 --file token0.json
 
 ## Enroll a FIDO2 authenticator
 
-```go
-v, _ := luks2.Open(ctx, device)
-defer v.Close()
-key, _ := v.Unlock(ctx, existingPassphrase) // existingPassphrase is a *enclave.MemoryEnclave
-defer key.Destroy()
-
-salt, _ := keyprovider.NewFIDO2Salt()
-credID, _ := keyprovider.NewFIDO2Credential(ctx, keyprovider.FIDO2CredentialParams{
-	RelyingParty: keyprovider.DefaultRelyingParty,
-}, keyprovider.WithDevice("/dev/hidraw0"))
-provider, _ := keyprovider.NewFIDO2(keyprovider.FIDO2Params{
-	CredentialID: credID, Salt: salt, UserPresence: true,
-}, keyprovider.WithDevice("/dev/hidraw0"))
-_, err := v.Enroll(ctx, key, provider, luks2.KeyslotParams{})
-```
-
-There is no CLI verb for FIDO2 enrollment today; it is a library-only call
-(`go doc github.com/jeremyhahn/go-luks2/pkg/keyprovider NewFIDO2`).
+There is no CLI verb for FIDO2 enrollment: it is done by a program built on
+the library, which creates a credential on the authenticator, adds a keyslot
+it opens, and records a `systemd-fido2` token naming that keyslot
+([api.md](api.md#enroll-a-fido2-authenticator) shows the calls). The token
+uses the relying party `io.systemd.cryptsetup`, so `systemd-cryptsetup` can
+open the volume with the same authenticator. Afterwards `luks2 token list`
+shows the new token.
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Next step |
 |---|---|---|
 | `token remove` ran but the volume still opens with the old credential | `remove` deletes metadata only, never a keyslot | Use [`killslot`](../keyslots/cli.md#removekey-and-killslot) to revoke the credential itself |
-| A FIDO2 unlock fails with a helper error | Wrong PIN, timed out waiting for touch, or the device is not the one named by `keyprovider.WithDevice` | Check `HelperError`'s captured stderr |
+| A FIDO2 unlock fails with a helper error | Wrong PIN, timed out waiting for touch, or the device is not the one the unlocking program named | Read the helper's own message, which the error carries |
 | `token import` refuses the JSON | A keyslot number in `keyslots` does not exist on this header, the token has no `type`, or the file is not a JSON token object | Confirm the keyslot exists first with [keyslots](../keyslots/cli.md#keyslots) (`"01"` is read as keyslot 1 and written back as `"1"`) |

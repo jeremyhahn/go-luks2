@@ -1,6 +1,6 @@
 # cryptsetup interop — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163) and cryptsetup 2.7.5
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against a9c840c and cryptsetup 2.7.5
 > Conflicts with this document are defects. Fix them here first.
 
 ## The interop matrix
@@ -99,13 +99,13 @@ not duplicate that inventory, since it is test infrastructure rather than
 compatibility policy; it is in
 [volumes/engineering.md](../volumes/engineering.md#the-integration-container).
 
-`compatmatrix`, `fipsimport` and `sha1af` live in `test/integration/interop/`
-(DESIGN.md §E). `lockcompat` and `lockwait` stay in `pkg/luks2` as
-`lockcompat_integration_test.go`/`lockwait_integration_test.go`, by
-deliberate decision (H12c, DECISIONS.md: each reaches a seam with no decided
-cross-package shape) — see
-[architecture.md](architecture.md#component-boundaries) for the other two
-files this applies to.
+`compatmatrix`, `fipsimport`, `sha1af` and `headercopies` live in
+`test/integration/interop/`. `lockcompat` and `lockwait` stay in `pkg/luks2`
+as `lockcompat_integration_test.go`/`lockwait_integration_test.go`, under
+`//go:build integration`, because each overrides a `volumeSys` seam
+(`calibratedCountFloor`, `lockHeld`) the public API must not expose; see
+[architecture.md](architecture.md#component-boundaries) for the rule and the
+other two files it applies to.
 
 ## Observability
 

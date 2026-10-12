@@ -1,6 +1,6 @@
 # Keyslots — engineering
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against base/331 (a9c840c)
 > Conflicts with this document are defects. Fix them here first.
 
 ## Exported surface
@@ -24,7 +24,7 @@ it against the digest under the exclusive lock (the header may have changed
 since `Unlock`). `RemoveKeyslot(ctx, slot)` keeps every data-safety guard
 (`ErrLastKeyslot`, `ErrKeyslotAreaOverlap`) but drops the authentication
 distinction cryptsetup's `luksKillSlot` makes: **removal is guarded, not
-authenticated** (DESIGN.md §B.1, owner decision). Authorization is the
+authenticated**. Authorization is the
 caller's policy — the CLI's own passphrase prompt before it calls
 `RemoveKeyslot`, or a platform's IAM layer above this library. There is no
 separate read-only probe method: checking that a passphrase opens a volume is
@@ -72,7 +72,7 @@ Recovery keyslots have a lower floor of their own: see
 ## KDF
 
 Each keyslot turns its credential into a wrapping key with its own KDF
-(`internal/kdf`, landed H4). A separate PBKDF2 digest checks the recovered
+(`internal/kdf`). A separate PBKDF2 digest checks the recovered
 volume key.
 
 | `KDFParams.Type` | Notes |
@@ -180,7 +180,7 @@ adds no real security; the keyslot KDF is what defends the passphrase.
 | `ErrLastKeyslot` | Removal would leave nothing that opens the volume |
 | `ErrKeyslotAreaOverlap` | A keyslot area would overlap another keyslot or a data segment |
 | `*KDFCalibrationError` / `ErrKDFCalibration` | PBKDF2 calibration could not run |
-| `*KDFCostError` (`Is ErrInvalidArgument`) | A fixed PBKDF2 iteration count, or an Argon2 cost, is outside the permitted range (DESIGN.md §C.3) |
+| `*KDFCostError` (`Is ErrInvalidArgument`) | A fixed PBKDF2 iteration count, or an Argon2 cost, is outside the permitted range; `Param`, `Value`, `Min` and `Max` name it (`pkg/luks2/errors.go`) |
 | `ErrInvalidHeader` | Includes a header that asks one unlock for more key derivation than any cryptsetup header can |
 | `ErrProtectedMemory` | No locked memory, or more than the process allocator's budget, for a keyslot scan |
 
@@ -218,10 +218,11 @@ Unit tests cover the cost floors/ceilings, inheritance, unlock-order and
 removal-guard logic against real temp-file volumes at minimum legal KDF cost
 (`kdf_test.go`, `kdfcost_test.go`, `kdfcalibration_test.go`,
 `kdfbudget_test.go`, `keyslotcostpolicy_test.go`, `kdfiterations_test.go` and
-their `internal/kdf` equivalents, per DECISIONS.md H4). Integration coverage
+`kdfcancellation_test.go`, and `internal/kdf`'s `kdf_test.go`, `cost_test.go`,
+`calibration_test.go` and `budget_test.go`). Integration coverage
 is the cryptsetup two-way matrix's add, change and remove keyslot rows: [cryptsetup-interop/engineering.md](../cryptsetup-interop/engineering.md).
 `internal/kdf` carries its own suite with a 90% floor
-(`coverage-floors.txt`); `pkg/luks2`'s unit floor is unchanged by that move.
+(`coverage-floors.txt`), separate from `pkg/luks2`'s unit floor.
 
 ## Observability
 

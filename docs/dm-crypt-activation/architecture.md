@@ -1,6 +1,6 @@
 # dm-crypt activation — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (f871541)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against base/331 (a9c840c)
 > Conflicts with this document are defects. Fix them here first.
 
 Activation turns an unlocked volume key into a plaintext block device,
@@ -15,7 +15,8 @@ subprocess. The second, loading a key into the kernel and creating a mapping,
 needs root, the kernel keyring and device-mapper ioctls.
 
 The two are separate packages so that `pkg/luks2` stays rootless and
-exec-free (DESIGN.md §A.4): `pkg/luks2` derives the key and describes the
+exec-free (its `depguard` rule in `.golangci.yml` allows neither `pkg/dmcrypt`
+nor `internal/dm` nor `internal/keyring`, and denies `os/exec`): `pkg/luks2` derives the key and describes the
 target (`(*luks2.Volume).Target`), and `pkg/dmcrypt` consumes that
 description. A consumer that only inspects, edits or tests volumes never
 links the privileged half.

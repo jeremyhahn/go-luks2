@@ -1,6 +1,6 @@
 # Loop devices — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (3da0ff2)
+> **Status: NORMATIVE** · Last verified: 2026-10-12 against base/331 (a9c840c)
 > Conflicts with this document are defects. Fix them here first.
 
 Turning a regular file into a block device and back. dm-crypt activates a
@@ -27,8 +27,8 @@ Two kernel facts shape the package.
   the release is observed, and reports a release still held at the bound as
   `Deferred`, a success, the way `losetup -d` does on a busy device.
 
-The package is `pkg/loop`, a public package of its own (DESIGN.md §A.4,
-§B.5): it is LUKS-independent, consumed directly by go-trusted-platform, and
+The package is `pkg/loop`, a public package of its own: it is LUKS-independent
+(its `depguard` rule allows no `pkg/` package), consumed directly by go-trusted-platform, and
 has its own trust boundary (root-only loop ioctls). Callers import only what
 they use.
 
