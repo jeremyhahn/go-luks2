@@ -1,7 +1,8 @@
 # Volumes — engineering
 
 > **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163),
-> except the measured flag table and "What the container does not isolate"
+> except the measured flag table and "What the container does not isolate".
+> The pkg/dmcrypt pointer was checked 2026-10-11 against main (f871541).
 > Conflicts with this document are defects. Fix them here first.
 
 The implementation contract for the volume lifecycle: create, unlock, mount,
@@ -59,8 +60,10 @@ func filesystem.Unmount(ctx context.Context, target string, flags UnmountFlags) 
 func filesystem.DeviceMounted(ctx context.Context, major, minor uint32) (bool, error)
 ```
 
-Full signatures, including every params struct field: DESIGN.md §B.2–§B.5,
-cross-checked against `go doc` for each package.
+Full signatures, including every params struct field: DESIGN.md §B.2, §B.4 and
+§B.5, cross-checked against `go doc` for each package. `pkg/dmcrypt` is
+specified in [dm-crypt-activation/engineering.md](../dm-crypt-activation/engineering.md),
+and `pkg/filesystem` in [filesystems/engineering.md](../filesystems/engineering.md#exported-surface).
 
 `make api-diff` (`test/tools/apidump` against
 `baseline/disposition-luks2.tsv`) checks that every export of the
