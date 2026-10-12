@@ -154,3 +154,97 @@ func TestBatchSoakRunsTheContainerisedSuite(t *testing.T) {
 		t.Errorf("SOAK_CMD %q runs the integration suite outside the container", cmd)
 	}
 }
+
+// cryptsetupStep is ci.yml's install step for the unit and race jobs.
+const cryptsetupStep = "Install cryptsetup (a test dependency of ./pkg/luks2)"
+
+var (
+	envVar    = regexp.MustCompile(`(?m)^  ([A-Z_]+): '([^']*)'`)
+	envRef    = regexp.MustCompile(`\$\{?([A-Z_]+)\}?`)
+	runNoTest = regexp.MustCompile(`-run='\^\$'`)
+)
+
+// TestBatchJobsReachingPkgLuks2InstallCryptsetup: ./pkg/luks2's conformance
+// suite fails, rather than skips, where cryptsetup is absent, and the batch
+// runners do not carry it (#354). Every batch job whose `go test` runs tests
+// over a scope holding ./pkg/luks2 installs it first, with ci.yml's step word
+// for word, so the two cannot drift. A job that only lists or benchmarks
+// (-run='^$') runs no test and needs no install.
+func TestBatchJobsReachingPkgLuks2InstallCryptsetup(t *testing.T) {
+	wf := readFile(t, batchWorkflow)
+	env := map[string]string{}
+	for _, m := range envVar.FindAllStringSubmatch(block(t, wf, "env"), -1) {
+		env[m[1]] = m[2]
+	}
+	want := step(readFile(t, ".github/workflows/ci.yml"), cryptsetupStep)
+	if want == "" || !strings.Contains(want, "::error::") {
+		t.Fatalf("ci.yml has no %q step that fails when cryptsetup is absent", cryptsetupStep)
+	}
+	var reaching []string
+	for _, m := range topKey.FindAllStringSubmatch(block(t, wf, "jobs"), -1) {
+		body := job(t, wf, m[1])
+		at := testsPkgLuks2(body, env)
+		if at < 0 {
+			continue
+		}
+		reaching = append(reaching, m[1])
+		got := step(body, cryptsetupStep)
+		switch {
+		case got == "":
+			t.Errorf("batch job %s tests ./pkg/luks2 and has no %q step", m[1], cryptsetupStep)
+		case got != want:
+			t.Errorf("batch job %s's %q step differs from ci.yml's:\n%s\nwant:\n%s", m[1], cryptsetupStep, got, want)
+		case strings.Index(body, got) > at:
+			t.Errorf("batch job %s installs cryptsetup after its go test", m[1])
+		}
+	}
+	if len(reaching) == 0 {
+		t.Error("no batch job tests ./pkg/luks2; this check has gone dark (the race job's RACE_PKGS covers it)")
+	}
+}
+
+// testsPkgLuks2 returns the offset in body of the first `go test` that runs
+// tests over a scope holding ./pkg/luks2, with $VARs resolved from env, or -1.
+func testsPkgLuks2(body string, env map[string]string) int {
+	off := 0
+	for _, l := range strings.SplitAfter(body, "\n") {
+		if strings.Contains(l, "go test ") && !runNoTest.MatchString(l) {
+			expanded := envRef.ReplaceAllStringFunc(l, func(ref string) string {
+				return env[envRef.FindStringSubmatch(ref)[1]]
+			})
+			for _, f := range strings.Fields(expanded) {
+				if f == "./..." || f == "./pkg/..." || strings.HasPrefix(f, "./pkg/luks2") {
+					return off
+				}
+			}
+		}
+		off += len(l)
+	}
+	return -1
+}
+
+// step returns the step named name in text, from its `- name:` line to the
+// next line indented no deeper, trailing blank lines dropped; "" if absent.
+func step(text, name string) string {
+	lines := strings.Split(text, "\n")
+	start := -1
+	for i, l := range lines {
+		if strings.TrimSpace(l) == "- name: "+name {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return ""
+	}
+	indent := len(lines[start]) - len(strings.TrimLeft(lines[start], " "))
+	end := len(lines)
+	for i := start + 1; i < len(lines); i++ {
+		l := lines[i]
+		if strings.TrimSpace(l) != "" && len(l)-len(strings.TrimLeft(l, " ")) <= indent {
+			end = i
+			break
+		}
+	}
+	return strings.TrimRight(strings.Join(lines[start:end], "\n"), " \n")
+}

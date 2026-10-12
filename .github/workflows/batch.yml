@@ -212,6 +212,25 @@ jobs:
           sudo -n sysctl -w net.core.rmem_max=7340032 net.core.wmem_max=7340032 ||
             echo "batch: sysctl not permitted; UDP buffers left at the defaults"
 
+      # CUSTOMIZE: go-luks2 (#354). RACE_PKGS holds ./pkg/luks2, whose
+      # conformance suite calls the real cryptsetup and fails rather than
+      # skips when it is absent, and the batch runners do not carry it. Same
+      # step as ci.yml's Unit Tests and Race jobs, word for word
+      # (test/ci/workflows pins it). fuzz and bench run no tests (-run='^$')
+      # and soak runs in the integration image, which installs it.
+      - name: Install cryptsetup (a test dependency of ./pkg/luks2)
+        run: |
+          set -eu
+          if ! command -v cryptsetup >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq cryptsetup-bin
+          fi
+          cryptsetup --version
+          command -v cryptsetup >/dev/null 2>&1 || {
+            echo "::error::cryptsetup is still absent after install; the conformance suite would skip and report green."
+            exit 1
+          }
+
       - name: go test -race -count=3
         run: |
           set -o pipefail
