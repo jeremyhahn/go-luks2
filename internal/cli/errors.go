@@ -39,6 +39,11 @@ var ErrKeyFileTooLarge = errors.New("cli: key material is too large")
 // ErrEmptyCredential indicates a passphrase source produced zero bytes.
 var ErrEmptyCredential = errors.New("cli: empty credential")
 
+// errHardeningIncomplete is the Kind a HardeningError's cause carries when
+// enclave.HardenProcess returned no error but reported a protection not in
+// effect.
+var errHardeningIncomplete = errors.New("cli: process hardening reported a protection not in effect")
+
 // errNotLUKSDevice is isluks's negative answer. It deliberately matches no
 // exitTable sentinel, because isluks's exit code is its own 0/1 contract
 // (0 is a LUKS device, 1 is not, as cryptsetup isLuks), not the generic error-to-exit-code mapping every other
@@ -78,6 +83,23 @@ func (e *KeyInputError) Error() string {
 }
 
 func (e *KeyInputError) Unwrap() error { return e.Err }
+
+// HardeningError reports that the process could not be hardened against
+// core dumps before the CLI handled a secret. The CLI stops there: the heap
+// copies internal/secret lists as raw-bytes boundaries sit outside
+// go-enclave's protected pages, and a process that could dump them must not
+// read a credential (docs/volumes/architecture.md#key-custody).
+type HardeningError struct {
+	// Err is go-enclave's HardenProcess error: a *ProcessHardeningError or
+	// *CoreDumpLimitError, or ErrProcessHardeningUnsupported.
+	Err error
+}
+
+func (e *HardeningError) Error() string {
+	return "refusing to handle key material: cannot disable core dumps for this process: " + e.Err.Error()
+}
+
+func (e *HardeningError) Unwrap() error { return e.Err }
 
 // ConfirmationError reports that a destructive operation's confirmation was
 // refused or could not be read.

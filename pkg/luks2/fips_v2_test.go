@@ -241,7 +241,7 @@ func TestVolumeMigrateToFIPSCanceledInAStageIsAMigrationFailure(t *testing.T) {
 	defer cancel()
 	real := v.sys
 	calls := 0
-	v.sys.passphraseKDFOverride = func(ctx context.Context, p []byte, k *header.KDF, size int) (*enclave.MemoryEnclave, error) {
+	v.sys.passphraseKDFOverride = func(ctx context.Context, p []byte, k *header.KDF, size int) (*enclave.Memory, error) {
 		calls++
 		if calls == 2 {
 			cancel()

@@ -15,9 +15,9 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
-func newTestEnclave(tb testing.TB, data []byte) *enclave.MemoryEnclave {
+func newTestEnclave(tb testing.TB, data []byte) *enclave.Memory {
 	tb.Helper()
-	e, err := enclave.NewMemoryEnclaveCopy(data)
+	e, err := enclave.NewMemoryCopy(data)
 	if err != nil {
 		tb.Fatalf("could not build a test enclave: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestDestroyIsIdempotent(t *testing.T) {
 }
 
 func TestVerifyRefusesANilKeyWithoutCallingVerify(t *testing.T) {
-	err := Verify(nil, func(*enclave.MemoryEnclave) error {
+	err := Verify(nil, func(*enclave.Memory) error {
 		t.Fatal("verify must not run for a nil key")
 		return nil
 	})
@@ -129,7 +129,7 @@ func TestVerifyRefusesANilKeyWithoutCallingVerify(t *testing.T) {
 }
 
 func TestVerifyRefusesAKeyWithNoEnclaveWithoutCallingVerify(t *testing.T) {
-	err := Verify(&Key{}, func(*enclave.MemoryEnclave) error {
+	err := Verify(&Key{}, func(*enclave.Memory) error {
 		t.Fatal("verify must not run for a key with no enclave")
 		return nil
 	})
@@ -144,8 +144,8 @@ func TestVerifyPassesTheKeysOwnEnclaveAndReturnsItsErrorUnchanged(t *testing.T) 
 	defer k.Destroy()
 
 	sentinel := errors.New("verify failure")
-	var got *enclave.MemoryEnclave
-	err := Verify(k, func(m *enclave.MemoryEnclave) error {
+	var got *enclave.Memory
+	err := Verify(k, func(m *enclave.Memory) error {
 		got = m
 		return sentinel
 	})

@@ -22,7 +22,7 @@
 //
 // # The ownership model
 //
-// Key material is OWNED by a *enclave.MemoryEnclave for its whole lifetime and
+// Key material is OWNED by a *enclave.Memory for its whole lifetime and
 // only ever BORROWED, through the narrowest WithBytes window that the consuming
 // call permits. Nothing in this module returns raw key bytes across a function
 // boundary where an enclave handle can be returned instead.
@@ -52,7 +52,7 @@
 //
 //  1. CREDENTIALS THAT ARRIVE AS PLAIN BYTES. The library API does not have this
 //     problem: Format, Unlock, UnlockKeyslot, AddKeyslot, ChangeKeyslot and
-//     ParseRecoveryKey all take a *enclave.MemoryEnclave, which the caller owns
+//     ParseRecoveryKey all take a *enclave.Memory, which the caller owns
 //     and this module only borrows. What is left is the places a credential is
 //     first read from outside the process, before any enclave exists:
 //
@@ -229,6 +229,28 @@
 // the entry would have claimed the volume key now touches nothing outside an
 // enclave -- which is not true for the duration of the ioctl. Where an exposure
 // is traded rather than removed, this list records the trade.
+//
+// # Core dumps of the raw-bytes boundaries
+//
+// go-enclave marks its own pages MADV_DONTDUMP, so an enclave's contents stay
+// out of a core file. The plain copies listed above do NOT: the prompt's
+// []byte, stdlib KDF input and output, AES key schedules and hash state are
+// ordinary heap, and a core dump written while one is live contains it.
+//
+// Keeping them out is a property of the PROCESS, and go-enclave leaves it to
+// the binary: importing go-enclave, or any package of this module, changes no
+// process state. enclave.HardenProcess sets RLIMIT_CORE to 0/0 and, on Linux,
+// PR_SET_DUMPABLE to 0. The rlimit alone does not stop a core_pattern that
+// pipes to a handler; the dumpable flag does. A non-dumpable process also
+// cannot be ptrace-attached by another process of the same uid. A child it
+// execs is dumpable again.
+//
+//   - The luks2 CLI calls enclave.HardenProcess at the top of internal/cli.Run,
+//     before any command reads a credential, and refuses to run when it fails
+//     (cli.HardeningError).
+//   - An application that embeds this library must call enclave.HardenProcess
+//     from its own main, before it handles a secret, to get the same
+//     protection. The packages under pkg/ never call it.
 //
 // # Fail closed
 //

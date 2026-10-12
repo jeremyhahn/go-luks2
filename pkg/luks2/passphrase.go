@@ -20,7 +20,7 @@ import (
 // Every failure is an *Error stamped with this operation (#334): a length
 // outside the policy is of kind ErrInvalidCredential, a destroyed enclave of
 // kind ErrProtectedMemory.
-func ValidatePassphrase(pass *enclave.MemoryEnclave) error {
+func ValidatePassphrase(pass *enclave.Memory) error {
 	const op = "ValidatePassphrase"
 	return errAt(op, "", secret.Borrow(op, pass, validatePassphraseBytes))
 }

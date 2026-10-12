@@ -54,7 +54,7 @@ func formatForTest(path, passphrase string) error {
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy([]byte(passphrase))
+	pass, err := enclave.NewMemoryCopy([]byte(passphrase))
 	if err != nil {
 		return err
 	}

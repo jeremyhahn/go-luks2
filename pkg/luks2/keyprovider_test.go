@@ -37,7 +37,7 @@ type fakeKeyProvider struct {
 
 func (p *fakeKeyProvider) Token() Token { return p.token }
 
-func (p *fakeKeyProvider) Passphrase(context.Context) (*enclave.MemoryEnclave, error) {
+func (p *fakeKeyProvider) Passphrase(context.Context) (*enclave.Memory, error) {
 	if p.err != nil {
 		return nil, p.err
 	}
@@ -67,7 +67,7 @@ func enrollForTest(t *testing.T, image string, existing []byte, provider KeyProv
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy(existing)
+	pass, err := enclave.NewMemoryCopy(existing)
 	if err != nil {
 		return -1, -1, err
 	}

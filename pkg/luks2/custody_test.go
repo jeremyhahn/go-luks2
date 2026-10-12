@@ -186,7 +186,7 @@ func TestUnlockKeyslotHoldsTheMasterKeyInProtectedMemory(t *testing.T) {
 		t.Fatalf("master key holds %d bytes, want 64", masterKey.Size())
 	}
 	// String must not spill the key if the handle is ever logged.
-	if s := masterKey.String(); s != "MemoryEnclave(redacted)" {
+	if s := masterKey.String(); s != "Memory(redacted)" {
 		t.Fatalf("the master key handle renders as %q", s)
 	}
 
@@ -332,7 +332,7 @@ func TestRecoveryKeyIsHeldInProtectedMemory(t *testing.T) {
 	}
 	rendered := buf.String()
 
-	typedEnclave, err := enclave.NewMemoryEnclaveCopy([]byte(rendered))
+	typedEnclave, err := enclave.NewMemoryCopy([]byte(rendered))
 	if err != nil {
 		t.Fatalf("could not build a test enclave: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestRecoveryKeyRenderingRoundTripsInEveryFormat(t *testing.T) {
 			}
 			rendered := buf.String()
 
-			typedEnclave, err := enclave.NewMemoryEnclaveCopy([]byte(rendered))
+			typedEnclave, err := enclave.NewMemoryCopy([]byte(rendered))
 			if err != nil {
 				t.Fatalf("could not build a test enclave: %v", err)
 			}

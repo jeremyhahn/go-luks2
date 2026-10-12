@@ -55,7 +55,7 @@ func TestVolumeUnlockDerivesTheKey(t *testing.T) {
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy(passphrase)
+	pass, err := enclave.NewMemoryCopy(passphrase)
 	if err != nil {
 		t.Fatalf("could not hold the test passphrase in protected memory: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestVolumeUnlockWithWrongPassphraseFails(t *testing.T) {
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy([]byte("wrong-password"))
+	pass, err := enclave.NewMemoryCopy([]byte("wrong-password"))
 	if err != nil {
 		t.Fatalf("could not hold the test passphrase in protected memory: %v", err)
 	}

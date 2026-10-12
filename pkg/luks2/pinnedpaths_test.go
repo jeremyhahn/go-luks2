@@ -209,7 +209,7 @@ func TestAddRecoveryKeyReportsTheVolumeItEnrolled(t *testing.T) {
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy([]byte(tokenParityPassphrase))
+	pass, err := enclave.NewMemoryCopy([]byte(tokenParityPassphrase))
 	if err != nil {
 		t.Fatal(err)
 	}

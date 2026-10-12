@@ -588,7 +588,7 @@ func fipsRefusal(refusal error, detail string, cause error) *errs.Error {
 // is refused unless its own KDF is approved, and the digest set handed to the
 // unlock is filtered to approved ones before it gets there. It is therefore the
 // path a FIPS process would take, run in a process that cannot BE one.
-func verifyFIPSOpen(ctx context.Context, dev *keyslotDevice, passphrase []byte, id string, want *enclave.MemoryEnclave, sys volumeSys) error {
+func verifyFIPSOpen(ctx context.Context, dev *keyslotDevice, passphrase []byte, id string, want *enclave.Memory, sys volumeSys) error {
 	_, metadata, err := dev.readPrimaryHeader()
 	if err != nil {
 		return err
@@ -861,7 +861,7 @@ func keyslotDeclaredForAllSegments(metadata *header.Metadata, id string) bool {
 // through keyslot id: each digest must attest the keyslot AND be evaluated to
 // match key, so what is checked is the key actually recovered, not what the
 // header declares about the keyslot. Empty means key opens every segment.
-func unboundSegments(metadata *header.Metadata, digests map[string]*header.Digest, id string, key *enclave.MemoryEnclave) []string {
+func unboundSegments(metadata *header.Metadata, digests map[string]*header.Digest, id string, key *enclave.Memory) []string {
 	var bound []string
 	for _, digestID := range sortedDigestIDs(digests) {
 		digest := digests[digestID]

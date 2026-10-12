@@ -72,7 +72,7 @@ func removeKeyForTest(device string, passphrase []byte, slot int, opts ...Option
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy(passphrase)
+	pass, err := enclave.NewMemoryCopy(passphrase)
 	if err != nil {
 		return err
 	}
@@ -99,7 +99,7 @@ func killSlotForTest(device string, passphrase []byte, targetSlot int, opts ...O
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy(passphrase)
+	pass, err := enclave.NewMemoryCopy(passphrase)
 	if err != nil {
 		return err
 	}

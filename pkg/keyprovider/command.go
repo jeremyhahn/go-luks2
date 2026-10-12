@@ -175,7 +175,7 @@ func (p *Command) Token() luks2.Token { return p.token }
 
 // Passphrase runs the command and returns the selected output in protected
 // memory.
-func (p *Command) Passphrase(ctx context.Context) (*enclave.MemoryEnclave, error) {
+func (p *Command) Passphrase(ctx context.Context) (*enclave.Memory, error) {
 	const op = "Command.Passphrase"
 
 	out, n, err := p.run(ctx)
@@ -203,7 +203,7 @@ func (p *Command) Passphrase(ctx context.Context) (*enclave.MemoryEnclave, error
 // set on it -- expiredDeadline when ctx ends, and sys.waitDelay after the
 // helper exits, for a grandchild that keeps the pipe open with no deadline in
 // ctx at all. cmd.WaitDelay does the same for the stderr copy.
-func (p *Command) run(ctx context.Context) (*enclave.MemoryEnclave, int, error) {
+func (p *Command) run(ctx context.Context) (*enclave.Memory, int, error) {
 	const op = "helper output"
 	custody := secret.System()
 
@@ -329,11 +329,11 @@ func (p *Command) run(ctx context.Context) (*enclave.MemoryEnclave, int, error) 
 
 // selectLine narrows the helper's output to the configured line, copying it
 // into an enclave of exactly the right size.
-func (p *Command) selectLine(out *enclave.MemoryEnclave, n int) (*enclave.MemoryEnclave, error) {
+func (p *Command) selectLine(out *enclave.Memory, n int) (*enclave.Memory, error) {
 	const op = "helper credential"
 	custody := secret.System()
 
-	var credential *enclave.MemoryEnclave
+	var credential *enclave.Memory
 	err := secret.Borrow(op, out, func(all []byte) error {
 		body := all[:n]
 		if p.line > 0 {

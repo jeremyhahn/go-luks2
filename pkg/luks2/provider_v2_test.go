@@ -73,7 +73,7 @@ func TestVolumeEnrollAddsAKeyslotAndWritesTheToken(t *testing.T) {
 	}
 
 	// The provider's credential actually opens the new slot.
-	newPass, err := enclave.NewMemoryEnclaveCopy([]byte(providerCredential))
+	newPass, err := enclave.NewMemoryCopy([]byte(providerCredential))
 	if err != nil {
 		t.Fatalf("could not build the enrolled-credential enclave: %v", err)
 	}

@@ -23,9 +23,9 @@ var testCustody = secret.System()
 
 // enclaveFrom returns an enclave holding a COPY of b, destroyed when the test
 // ends.
-func enclaveFrom(t *testing.T, b []byte) *enclave.MemoryEnclave {
+func enclaveFrom(t *testing.T, b []byte) *enclave.Memory {
 	t.Helper()
-	e, err := enclave.NewMemoryEnclaveCopy(b)
+	e, err := enclave.NewMemoryCopy(b)
 	if err != nil {
 		t.Fatalf("could not allocate a test enclave: %v", err)
 	}
@@ -34,7 +34,7 @@ func enclaveFrom(t *testing.T, b []byte) *enclave.MemoryEnclave {
 }
 
 // mustDestroy destroys e and fails the test if the release is reported.
-func mustDestroy(tb testing.TB, e *enclave.MemoryEnclave) {
+func mustDestroy(tb testing.TB, e *enclave.Memory) {
 	tb.Helper()
 	if err := e.Destroy(); err != nil {
 		tb.Errorf("releasing a test enclave was reported: %v", err)
@@ -42,7 +42,7 @@ func mustDestroy(tb testing.TB, e *enclave.MemoryEnclave) {
 }
 
 // openSecret copies the material out of an enclave so a test can assert on it.
-func openSecret(t *testing.T, e *enclave.MemoryEnclave) []byte {
+func openSecret(t *testing.T, e *enclave.Memory) []byte {
 	t.Helper()
 	var out []byte
 	if err := e.WithBytes(func(b []byte) error {

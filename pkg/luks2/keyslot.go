@@ -580,7 +580,7 @@ func addKeyPreflight(device string, existingPassphrase, newPassphrase []byte, op
 // is not reentrant (flock on a second descriptor waits on the first), so that
 // caller cannot go through AddKey itself without releasing the lock between its
 // steps.
-func addKeyslotWithMasterKey(ctx context.Context, dev *keyslotDevice, hdr *header.BinaryHeader, metadata *header.Metadata, masterKey *enclave.MemoryEnclave,
+func addKeyslotWithMasterKey(ctx context.Context, dev *keyslotDevice, hdr *header.BinaryHeader, metadata *header.Metadata, masterKey *enclave.Memory,
 	newPassphrase []byte, opts *addKeyOptionsForTest, policy keyslotCostPolicy) (int, error) {
 	return addKeyslotWithMasterKeyAndPriority(ctx, dev, hdr, metadata, masterKey, newPassphrase, opts, policy, nil)
 }
@@ -590,7 +590,7 @@ func addKeyslotWithMasterKey(ctx context.Context, dev *keyslotDevice, hdr *heade
 // priority member at all, same as every existing caller through
 // addKeyslotWithMasterKey, and cryptsetup's own convention for a normal
 // keyslot (see the no-priority-written comment below).
-func addKeyslotWithMasterKeyAndPriority(ctx context.Context, dev *keyslotDevice, hdr *header.BinaryHeader, metadata *header.Metadata, masterKey *enclave.MemoryEnclave,
+func addKeyslotWithMasterKeyAndPriority(ctx context.Context, dev *keyslotDevice, hdr *header.BinaryHeader, metadata *header.Metadata, masterKey *enclave.Memory,
 	newPassphrase []byte, opts *addKeyOptionsForTest, policy keyslotCostPolicy, priority *int) (int, error) {
 	if priority != nil && (*priority < keyslotPriorityIgnore || *priority > keyslotPriorityPrefer) {
 		return -1, errInvalidPriority(priorityFromDisk(priority))
@@ -954,7 +954,7 @@ func changeKeyWithSys(device string, oldPassphrase, newPassphrase []byte, keyslo
 // recost is nil to keep the keyslot's KDF type and cost
 // (inheritedKeyslotFormatOptions), or the caller's already-validated KDF
 // options, resolved exactly as AddKeyslot resolves them.
-func changeKeyslotCore(ctx context.Context, dev *keyslotDevice, hdr *header.BinaryHeader, metadata *header.Metadata, slotIDStr string, keyslot int, targetKeyslot *header.Keyslot, masterKey *enclave.MemoryEnclave, newPassphrase []byte, recost *addKeyOptionsForTest) error {
+func changeKeyslotCore(ctx context.Context, dev *keyslotDevice, hdr *header.BinaryHeader, metadata *header.Metadata, slotIDStr string, keyslot int, targetKeyslot *header.Keyslot, masterKey *enclave.Memory, newPassphrase []byte, recost *addKeyOptionsForTest) error {
 	// THE KEY MUST BE THIS VOLUME'S, established before anything is derived
 	// or written -- the check AddKey makes. A key from another volume would
 	// otherwise be wrapped, committed under the header and only caught by the
@@ -1480,7 +1480,7 @@ type KeyslotInfo struct {
 // refused for exactly that reason, and none verified, the scan instead returns
 // a FIPSImportRequiredError: it says the refusal is a policy one, names the
 // keyslots and digests involved, and names MigrateToFIPS as the remedy.
-func getMasterKey(device string, passphrase []byte, metadata *header.Metadata, sys volumeSys) (*enclave.MemoryEnclave, error) {
+func getMasterKey(device string, passphrase []byte, metadata *header.Metadata, sys volumeSys) (*enclave.Memory, error) {
 	f, err := openDevice("read the keyslot area", device, os.O_RDONLY, sys)
 	if err != nil {
 		return nil, err
@@ -1519,7 +1519,7 @@ func getMasterKey(device string, passphrase []byte, metadata *header.Metadata, s
 // scan order. An ignore keyslot is never tried by the scan; it opens only when
 // it is named (UnlockKeyslot). A header whose bound keyslots are all ignore
 // has none a scan may try: ErrNoKeyslots, cryptsetup's "no usable keyslot".
-func getVolumeKey(ctx context.Context, f io.ReaderAt, device string, passphrase []byte, metadata *header.Metadata, sys volumeSys) (*enclave.MemoryEnclave, string, error) {
+func getVolumeKey(ctx context.Context, f io.ReaderAt, device string, passphrase []byte, metadata *header.Metadata, sys volumeSys) (*enclave.Memory, string, error) {
 	var bound []string
 	for _, id := range header.KeyslotIDsInScanOrder(metadata.Keyslots) {
 		if keyslotBoundToDataSegments(metadata, id) {
@@ -1572,7 +1572,7 @@ func keyslotsByPriority(metadata *header.Metadata, ids []string) (preferred, nor
 // passes the same order with FIPS-approved keyslots moved to the front so a
 // credential that already has an approved keyslot is found there first, without
 // running Argon2.
-func getMasterKeySlot(ctx context.Context, dev io.ReaderAt, device string, passphrase []byte, metadata *header.Metadata, order []string, sys volumeSys) (*enclave.MemoryEnclave, string, error) {
+func getMasterKeySlot(ctx context.Context, dev io.ReaderAt, device string, passphrase []byte, metadata *header.Metadata, order []string, sys volumeSys) (*enclave.Memory, string, error) {
 	// The whole scan is priced before its first derivation (#26): a header
 	// that would have it derive more than any cryptsetup header can, or hold
 	// more locked memory than the allocator could ever admit, is refused here
@@ -1623,7 +1623,7 @@ func getMasterKeySlot(ctx context.Context, dev io.ReaderAt, device string, passp
 		// the keyslots area and clear of the header copies and every data
 		// segment (#249, A2). cryptsetup refuses such a header outright; here
 		// it costs that keyslot and nothing else.
-		masterKey, err := func() (*enclave.MemoryEnclave, error) {
+		masterKey, err := func() (*enclave.Memory, error) {
 			if err := checkKeyslotAreaConfinedByMetadata(metadata, id); err != nil {
 				return nil, &errs.Error{Kind: ErrKeyslotNotFound, Detail: fmt.Sprintf("luks2 keyslot %q: declares an area outside keyslot space", id), Err: err}
 			}
@@ -1688,7 +1688,7 @@ func getMasterKeySlot(ctx context.Context, dev io.ReaderAt, device string, passp
 // keyslot a digest just verified, so no match means the header changed under
 // the caller or the key is not the one it claims to be, and a keyslot joined to
 // a digest its key does not satisfy never opens.
-func digestAttestingKey(metadata *header.Metadata, masterKey *enclave.MemoryEnclave) (string, error) {
+func digestAttestingKey(metadata *header.Metadata, masterKey *enclave.Memory) (string, error) {
 	// A digest binding EVERY data segment is preferred to one binding some of
 	// them, and either to an unbound one (#249): the keyslot joins the digest
 	// that makes it a volume-key credential whenever the key has one, not a
@@ -2209,7 +2209,7 @@ func checkKeyslotRemovable(dev *keyslotDevice, hdr *header.BinaryHeader, metadat
 // the header is required to carry exactly the KDF the area key was derived
 // under, so the next unlock derives the same key. It is also what keeps the
 // read-back from doubling the cost of every keyslot this package writes.
-func verifyWrittenKeyslot(ctx context.Context, dev *keyslotDevice, id string, kdf *header.KDF, areaKey, want *enclave.MemoryEnclave) error {
+func verifyWrittenKeyslot(ctx context.Context, dev *keyslotDevice, id string, kdf *header.KDF, areaKey, want *enclave.Memory) error {
 	_, metadata, err := dev.readHeader()
 	if err != nil {
 		return &errs.Error{Kind: ErrWrongKey, Detail: "the header could not be read back to verify keyslot " + id, Err: err}
@@ -2248,7 +2248,7 @@ func sameKDF(a, b *header.KDF) bool {
 
 // sameSecret compares two keys held in protected memory, in constant time,
 // without copying either out.
-func sameSecret(a, b *enclave.MemoryEnclave) bool {
+func sameSecret(a, b *enclave.Memory) bool {
 	if a == nil || b == nil || a.Size() != b.Size() {
 		return false
 	}

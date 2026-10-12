@@ -113,7 +113,7 @@ func openAndUnlock(t *testing.T, device string, passphrase []byte) (*luks2.Volum
 	}
 	t.Cleanup(func() { _ = v.Close() })
 
-	pass, err := enclave.NewMemoryEnclaveCopy(passphrase)
+	pass, err := enclave.NewMemoryCopy(passphrase)
 	if err != nil {
 		t.Fatalf("could not hold the passphrase in protected memory: %v", err)
 	}
@@ -456,7 +456,7 @@ func TestAnInterruptedCryptsetupReencryptIsRefusedForActivation(t *testing.T) {
 		t.Fatalf("Open failed: %v", err)
 	}
 	defer func() { _ = v.Close() }()
-	pass, err := enclave.NewMemoryEnclaveCopy([]byte(passphrase))
+	pass, err := enclave.NewMemoryCopy([]byte(passphrase))
 	if err != nil {
 		t.Fatalf("could not hold the passphrase in protected memory: %v", err)
 	}
@@ -496,7 +496,7 @@ func TestAnUnboundCryptsetupKeyslotDoesNotActivate(t *testing.T) {
 	}
 	defer func() { _ = v.Close() }()
 
-	unboundPass, err := enclave.NewMemoryEnclaveCopy([]byte(unbound))
+	unboundPass, err := enclave.NewMemoryCopy([]byte(unbound))
 	if err != nil {
 		t.Fatalf("could not hold the passphrase in protected memory: %v", err)
 	}
@@ -508,7 +508,7 @@ func TestAnUnboundCryptsetupKeyslotDoesNotActivate(t *testing.T) {
 		t.Fatal("the unbound key was mapped")
 	}
 
-	boundPass, err := enclave.NewMemoryEnclaveCopy([]byte(passphrase))
+	boundPass, err := enclave.NewMemoryCopy([]byte(passphrase))
 	if err != nil {
 		t.Fatalf("could not hold the passphrase in protected memory: %v", err)
 	}

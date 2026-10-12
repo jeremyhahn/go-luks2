@@ -104,7 +104,7 @@ func unboundFixture(t *testing.T) string {
 // favor of (*Volume).Unlock: a failure to verify (ErrWrongKey) is (false,
 // nil) rather than an error, so a caller that cares can tell "not this key"
 // from "this volume cannot answer the question".
-func verifyRecoveryKeyForTest(device string, key *enclave.MemoryEnclave) (bool, error) {
+func verifyRecoveryKeyForTest(device string, key *enclave.Memory) (bool, error) {
 	ctx := context.Background()
 	v, err := Open(ctx, device, withTestSys(testVolumeSys()), WithReadOnly())
 	if err != nil {
@@ -884,7 +884,7 @@ func relinkDuring(t *testing.T, link, to string) volumeSys {
 	sys := testVolumeSys()
 	real := sys.passphraseKDF
 	moved := false
-	sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
+	sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (*enclave.Memory, error) {
 		if !moved {
 			moved = true
 			if err := os.Remove(link); err != nil {

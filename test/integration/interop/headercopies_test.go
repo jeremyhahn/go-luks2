@@ -62,7 +62,7 @@ func libraryUnlocks(t *testing.T, device string, passphrase []byte) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer func() { _ = v.Close() }()
-	pass, err := enclave.NewMemoryEnclaveCopy(passphrase)
+	pass, err := enclave.NewMemoryCopy(passphrase)
 	if err != nil {
 		t.Fatal(err)
 	}

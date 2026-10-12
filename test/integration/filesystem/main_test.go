@@ -35,7 +35,7 @@ func Unlock(device string, passphrase []byte, name string) error {
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy(passphrase)
+	pass, err := enclave.NewMemoryCopy(passphrase)
 	if err != nil {
 		return err
 	}

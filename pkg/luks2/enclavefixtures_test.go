@@ -17,18 +17,18 @@ import (
 
 // enclaveFrom returns an enclave holding a COPY of b, registered for cleanup.
 //
-// It copies rather than adopting because enclave.NewMemoryEnclave takes
+// It copies rather than adopting because enclave.NewMemory takes
 // ownership and wipes its argument, and a test that hands over a fixture and
 // then asserts against it would be asserting against zeros. That is exactly the
-// case enclave.NewMemoryEnclaveCopy was added for (go-enclave v0.5.0-alpha),
+// case enclave.NewMemoryCopy was added for (go-enclave v0.5.0-alpha),
 // replacing the Sized + WithBytes + Destroy-on-error composition this helper
 // used to carry. The result is FROZEN read-only, like every enclave built from
 // existing material: a test that needs to write into its fixture must build a
 // sized enclave itself.
-func enclaveFrom(t *testing.T, b []byte) *enclave.MemoryEnclave {
+func enclaveFrom(t *testing.T, b []byte) *enclave.Memory {
 	t.Helper()
 
-	e, err := enclave.NewMemoryEnclaveCopy(b)
+	e, err := enclave.NewMemoryCopy(b)
 	if err != nil {
 		t.Fatalf("could not allocate a test enclave: %v", err)
 	}
@@ -43,7 +43,7 @@ func enclaveFrom(t *testing.T, b []byte) *enclave.MemoryEnclave {
 // so a report means the suite ran somewhere that refuses part of the teardown
 // contract, and that is worth a red test rather than a silent drop. It uses
 // Errorf, not Fatalf, so it is safe from a deferred call and from a goroutine.
-func mustDestroy(tb testing.TB, e *enclave.MemoryEnclave) {
+func mustDestroy(tb testing.TB, e *enclave.Memory) {
 	tb.Helper()
 	if err := e.Destroy(); err != nil {
 		tb.Errorf("releasing a test enclave was reported: %v", err)
@@ -55,7 +55,7 @@ func mustDestroy(tb testing.TB, e *enclave.MemoryEnclave) {
 // the one a test CAN act on: on a healthy host every release succeeds, so a
 // report here means the suite ran somewhere that refuses part of the teardown
 // contract, which is worth a red test rather than a silent drop.
-func destroyOnCleanup(t *testing.T, e *enclave.MemoryEnclave) {
+func destroyOnCleanup(t *testing.T, e *enclave.Memory) {
 	t.Helper()
 	t.Cleanup(func() { mustDestroy(t, e) })
 }
@@ -63,7 +63,7 @@ func destroyOnCleanup(t *testing.T, e *enclave.MemoryEnclave) {
 // openSecret copies the material out of an enclave so a test can assert on it.
 // Production code must never do this; a test has to look at the bytes to prove
 // anything about them.
-func openSecret(t *testing.T, e *enclave.MemoryEnclave) []byte {
+func openSecret(t *testing.T, e *enclave.Memory) []byte {
 	t.Helper()
 
 	var out []byte

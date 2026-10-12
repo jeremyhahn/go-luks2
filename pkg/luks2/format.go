@@ -216,7 +216,7 @@ func formatWithSys(opts formatOptionsForTest, sys volumeSys) error {
 	f := claimed.File()
 	defer func() { _ = f.Close() }()
 
-	return formatCore(ctx, f, opts.Device, opts, kdfOpts, sys, func(kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
+	return formatCore(ctx, f, opts.Device, opts, kdfOpts, sys, func(kdf *header.KDF, keySize int) (*enclave.Memory, error) {
 		return sys.passphraseKDF(ctx, opts.Passphrase, kdf, keySize)
 	})
 }
@@ -243,7 +243,7 @@ func formatWithSys(opts formatOptionsForTest, sys volumeSys) error {
 // open its passphrase enclave for exactly that derivation and no longer: the
 // passphrase is not borrowed across the device writes that follow.
 func formatCore(ctx context.Context, f *os.File, device string, opts, kdfOpts formatOptionsForTest, sys volumeSys,
-	deriveAreaKey func(kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error)) error {
+	deriveAreaKey func(kdf *header.KDF, keySize int) (*enclave.Memory, error)) error {
 	masterKeySize := opts.KeySize / 8 // Convert bits to bytes
 
 	// The whole layout is known now, before the KDF is paid for and before a
@@ -556,7 +556,7 @@ func (p FormatParams) toFormatOptions(device string, fipsMode fips.Mode) (opts, 
 // pinned descriptor and exclusive lock rather than reopening the path a
 // second time. pass is the caller's enclave and stays the caller's: it is
 // only ever borrowed, for the passphrase derivation.
-func (v *Volume) Format(ctx context.Context, pass *enclave.MemoryEnclave, p FormatParams) error {
+func (v *Volume) Format(ctx context.Context, pass *enclave.Memory, p FormatParams) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if err := v.checkOpen("Volume.Format"); err != nil {
@@ -603,8 +603,8 @@ func (v *Volume) Format(ctx context.Context, pass *enclave.MemoryEnclave, p Form
 	// The passphrase is borrowed for the derivation alone, not across the
 	// format: the 16 MiB of keyslot-area I/O that follows never runs with the
 	// caller's enclave open.
-	deriveAreaKey := func(kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
-		var key *enclave.MemoryEnclave
+	deriveAreaKey := func(kdf *header.KDF, keySize int) (*enclave.Memory, error) {
+		var key *enclave.Memory
 		err := secret.Borrow(op, pass, func(b []byte) error {
 			var derr error
 			key, derr = v.sys.passphraseKDF(ctx, b, kdf, keySize)
@@ -782,7 +782,7 @@ func digestIterationsTimedBy(hashAlgo string, timer pbkdf2Timer) (int, error) {
 // header fields and are not secret; the digest is a one-way function of the
 // key, and the whole point of writing it to the header is that anyone can check
 // a candidate key against it.
-func createDigest(masterKey *enclave.MemoryEnclave, hashAlgo string, sys volumeSys) (*header.KDF, string, error) {
+func createDigest(masterKey *enclave.Memory, hashAlgo string, sys volumeSys) (*header.KDF, string, error) {
 	// A digest is written, so it is never PBKDF2-SHA1 (#239).
 	if err := refuseSHA1ForCreation("", hashAlgo); err != nil {
 		return nil, "", err

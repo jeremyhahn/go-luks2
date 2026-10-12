@@ -10,8 +10,8 @@
 ```go
 const MaxKeyslots = 32
 type KeyslotParams struct { Slot *int; Priority Priority; KDF KDFParams }
-func (v *Volume) AddKeyslot(ctx context.Context, key *Key, pass *enclave.MemoryEnclave, p KeyslotParams) (KeyslotInfo, error)
-func (v *Volume) ChangeKeyslot(ctx context.Context, key *Key, pass *enclave.MemoryEnclave, p KeyslotParams) (KeyslotInfo, error)
+func (v *Volume) AddKeyslot(ctx context.Context, key *Key, pass *enclave.Memory, p KeyslotParams) (KeyslotInfo, error)
+func (v *Volume) ChangeKeyslot(ctx context.Context, key *Key, pass *enclave.Memory, p KeyslotParams) (KeyslotInfo, error)
 func (v *Volume) RemoveKeyslot(ctx context.Context, slot int) error
 type KeyslotInfo struct { ID int; Type string; KeySize int; Priority Priority; Encryption string; KDF KDFParams }
 type Priority int
@@ -96,7 +96,9 @@ Argon2 cost gets `argon2id`. `ChangeKeyslot` with a zero `KDF` does not select
 the default: it keeps the slot's existing KDF type and cost (a PBKDF2-SHA1 slot
 is rewritten as PBKDF2-SHA256), and a non-zero `KDF` re-costs the slot exactly
 as `AddKeyslot` would write it. Salts are 32 random bytes. FIPS rules:
-[fips/architecture.md](../fips/architecture.md).
+[fips/architecture.md](../fips/architecture.md). The examples below assume a
+process that called `enclave.HardenProcess` before handling a secret
+([key custody](../volumes/engineering.md#key-custody-detail)).
 
 ```go
 // AddKeyslot: Argon2id at 512 MiB

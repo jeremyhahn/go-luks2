@@ -44,9 +44,9 @@ func formatRawHeaderFixture(t *testing.T) string {
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy([]byte(rawHeaderTestPassphrase))
+	pass, err := enclave.NewMemoryCopy([]byte(rawHeaderTestPassphrase))
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveCopy: %v", err)
+		t.Fatalf("NewMemoryCopy: %v", err)
 	}
 	defer func() { _ = pass.Destroy() }()
 

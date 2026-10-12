@@ -30,7 +30,7 @@ import (
 
 // mustDestroy destroys e now and fails the test if go-enclave reports the
 // release as anything but clean.
-func mustDestroy(tb testing.TB, e *enclave.MemoryEnclave) {
+func mustDestroy(tb testing.TB, e *enclave.Memory) {
 	tb.Helper()
 	if err := e.Destroy(); err != nil {
 		tb.Errorf("releasing a test enclave was reported: %v", err)
@@ -40,7 +40,7 @@ func mustDestroy(tb testing.TB, e *enclave.MemoryEnclave) {
 // openSecret copies the material out of an enclave so a test can assert on
 // it. Production code must never do this; a test has to look at the bytes to
 // prove anything about them.
-func openSecret(t *testing.T, e *enclave.MemoryEnclave) []byte {
+func openSecret(t *testing.T, e *enclave.Memory) []byte {
 	t.Helper()
 
 	var out []byte

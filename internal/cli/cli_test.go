@@ -7,9 +7,13 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-enclave"
 )
 
 func TestRunNoArgsShowsUsage(t *testing.T) {
@@ -151,6 +155,67 @@ func TestRunCreateFileMissingSizePrintsSizeRequired(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Size required") {
 		t.Errorf("stdout = %q, want it to contain %q", stdout.String(), "Size required")
+	}
+}
+
+// untouchedReader fails the test if anything reads it.
+type untouchedReader struct{ t *testing.T }
+
+func (r untouchedReader) Read([]byte) (int, error) {
+	r.t.Error("stdin was read after process hardening failed")
+	return 0, errors.New("untouchedReader read")
+}
+
+func TestRunFailsClosedWhenHardeningFails(t *testing.T) {
+	cause := errors.New("injected hardening failure")
+	cases := []struct {
+		name   string
+		report enclave.ProcessHardening
+		err    error
+		want   error
+	}{
+		{"error", enclave.ProcessHardening{}, cause, cause},
+		{"unsupported", enclave.ProcessHardening{}, enclave.ErrProcessHardeningUnsupported, enclave.ErrProcessHardeningUnsupported},
+		{"still dumpable", enclave.ProcessHardening{CoreDumpsDisabled: true}, nil, errHardeningIncomplete},
+		{"core limit not lowered", enclave.ProcessHardening{NotDumpable: true}, nil, errHardeningIncomplete},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			old := sys
+			sys.hardenProcess = func() (enclave.ProcessHardening, error) { return tc.report, tc.err }
+			defer func() { sys = old }()
+
+			herr := harden()
+			var typed *HardeningError
+			if !errors.As(herr, &typed) || !errors.Is(herr, tc.want) {
+				t.Fatalf("harden() = %v, want a *HardeningError wrapping %v", herr, tc.want)
+			}
+
+			vol := filepath.Join(t.TempDir(), "vol.luks")
+			stderr := &bytes.Buffer{}
+			code := Run(context.Background(), []string{"luks2", "create", "--key-file", "-", vol, "1M"}, untouchedReader{t}, &bytes.Buffer{}, stderr)
+			if code == 0 {
+				t.Fatal("code = 0, want a non-zero exit when hardening fails")
+			}
+			if !strings.Contains(stderr.String(), "cannot disable core dumps") || !strings.Contains(stderr.String(), tc.want.Error()) {
+				t.Errorf("stderr = %q, want the hardening failure and its cause", stderr.String())
+			}
+			if _, err := os.Stat(vol); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("stat %s: %v, want no volume created", vol, err)
+			}
+		})
+	}
+}
+
+func TestHardeningErrorUnwraps(t *testing.T) {
+	cause := errors.New("cause")
+	var err error = &HardeningError{Err: cause}
+	if !errors.Is(err, cause) {
+		t.Error("errors.Is(HardeningError, cause) = false, want true")
+	}
+	var herr *HardeningError
+	if !errors.As(err, &herr) {
+		t.Error("errors.As(*HardeningError) = false, want true")
 	}
 }
 

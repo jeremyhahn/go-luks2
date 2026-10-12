@@ -61,7 +61,7 @@ type volumeSys struct {
 
 	// passphraseKDFOverride, when set, replaces the keyslot derivation
 	// (volumeSys.passphraseKDF). Nil outside tests.
-	passphraseKDFOverride func(context.Context, []byte, *header.KDF, int) (*enclave.MemoryEnclave, error)
+	passphraseKDFOverride func(context.Context, []byte, *header.KDF, int) (*enclave.Memory, error)
 }
 
 func defaultVolumeSys() volumeSys {

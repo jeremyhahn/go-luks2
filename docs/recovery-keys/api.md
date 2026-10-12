@@ -12,7 +12,7 @@ library; it has no REST, gRPC, QUIC, MCP or Unix-socket transport.
 | Print the key | `(*RecoveryKey).WriteTo(io.Writer) (int64, error)` |
 | Add a generated key to a volume | `(*Volume).AddRecoveryKey(ctx, key *Key, rk *RecoveryKey, KeyslotParams) (Enrollment, error)` |
 | Verify a key still opens the volume | `(*Volume).Unlock(ctx, credential)`, then `(*Key).Destroy` |
-| Parse typed or pasted input | `ParseRecoveryKey(text *enclave.MemoryEnclave) (*enclave.MemoryEnclave, error)` |
+| Parse typed or pasted input | `ParseRecoveryKey(text *enclave.Memory) (*enclave.Memory, error)` |
 
 No request/response schema, status code mapping or `scp` permission applies.
 See [volumes/api.md](../volumes/api.md) for the general Layer 0 statement

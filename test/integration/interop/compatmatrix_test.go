@@ -111,7 +111,7 @@ func Format(opts FormatOptions) error {
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy(opts.Passphrase)
+	pass, err := enclave.NewMemoryCopy(opts.Passphrase)
 	if err != nil {
 		return err
 	}
@@ -186,7 +186,7 @@ func libVolume(t *testing.T, opts FormatOptions) string {
 // pre-redesign library's luks2.VerifyRecoveryKey did before B.6 deleted it
 // in favor of (*luks2.Volume).Unlock: a failure to verify (ErrWrongKey) is
 // (false, nil) rather than an error.
-func verifyRecoveryKeyForTest(device string, key *enclave.MemoryEnclave) (bool, error) {
+func verifyRecoveryKeyForTest(device string, key *enclave.Memory) (bool, error) {
 	ctx := context.Background()
 	v, err := luks2.Open(ctx, device, luks2.WithReadOnly())
 	if err != nil {
@@ -217,7 +217,7 @@ func migrateToFIPSForTest(device string, passphrase []byte) (*luks2.Migration, e
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy(passphrase)
+	pass, err := enclave.NewMemoryCopy(passphrase)
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +249,7 @@ func AddKey(device string, existing, newPassphrase []byte, opts *AddKeyOptions) 
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy(existing)
+	pass, err := enclave.NewMemoryCopy(existing)
 	if err != nil {
 		return err
 	}
@@ -261,7 +261,7 @@ func AddKey(device string, existing, newPassphrase []byte, opts *AddKeyOptions) 
 	}
 	defer key.Destroy()
 
-	newCred, err := enclave.NewMemoryEnclaveCopy(newPassphrase)
+	newCred, err := enclave.NewMemoryCopy(newPassphrase)
 	if err != nil {
 		return err
 	}
@@ -283,7 +283,7 @@ func changeKeyForTest(device string, oldPass, newPass []byte, slot int) error {
 	}
 	defer func() { _ = v.Close() }()
 
-	old, err := enclave.NewMemoryEnclaveCopy(oldPass)
+	old, err := enclave.NewMemoryCopy(oldPass)
 	if err != nil {
 		return err
 	}
@@ -294,7 +294,7 @@ func changeKeyForTest(device string, oldPass, newPass []byte, slot int) error {
 	}
 	defer key.Destroy()
 
-	newCred, err := enclave.NewMemoryEnclaveCopy(newPass)
+	newCred, err := enclave.NewMemoryCopy(newPass)
 	if err != nil {
 		return err
 	}
@@ -316,7 +316,7 @@ func removeKeyForTest(device string, passphrase []byte, slot int) error {
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy(passphrase)
+	pass, err := enclave.NewMemoryCopy(passphrase)
 	if err != nil {
 		return err
 	}
@@ -342,7 +342,7 @@ func killSlotForTest(device string, passphrase []byte, targetSlot int) error {
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy(passphrase)
+	pass, err := enclave.NewMemoryCopy(passphrase)
 	if err != nil {
 		return err
 	}
@@ -903,7 +903,7 @@ var compatMatrix = []matrixRow{
 		}
 		defer func() { _ = v.Close() }()
 
-		pass, err := enclave.NewMemoryEnclaveCopy([]byte(matrixPassphrase))
+		pass, err := enclave.NewMemoryCopy([]byte(matrixPassphrase))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -959,7 +959,7 @@ var compatMatrix = []matrixRow{
 		if !ok || tok.Type != luks2.TokenTypeRecovery {
 			t.Fatalf("Tokens()[0] = %+v, %v", tok, ok)
 		}
-		typed, err := enclave.NewMemoryEnclaveCopy([]byte(matrixSystemdRecovery + "\n"))
+		typed, err := enclave.NewMemoryCopy([]byte(matrixSystemdRecovery + "\n"))
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -42,7 +42,7 @@ type KeyProvider interface {
 	// Passphrase runs whatever produces the credential and returns it. ctx
 	// bounds the work: a hardware authenticator waiting for a touch blocks
 	// until the user acts, and an unattended unlock needs that to end.
-	Passphrase(ctx context.Context) (*enclave.MemoryEnclave, error)
+	Passphrase(ctx context.Context) (*enclave.Memory, error)
 
 	// Token returns the header metadata identifying this credential. A zero
 	// Token (empty Type) means the provider is anonymous and no token should

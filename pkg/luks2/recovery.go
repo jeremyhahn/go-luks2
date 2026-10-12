@@ -130,7 +130,7 @@ func recoveryToken() *LegacyToken {
 //
 // Callers that already hold the key in an enclave should not come through
 // here at all.
-func parseLegacyRecoveryKey(formatted string) (*enclave.MemoryEnclave, error) {
+func parseLegacyRecoveryKey(formatted string) (*enclave.Memory, error) {
 	if len(formatted) == 0 {
 		return nil, &errs.Error{Kind: errs.ErrInvalidCredential, Detail: "recovery key is empty"}
 	}
@@ -160,7 +160,7 @@ func parseLegacyRecoveryKey(formatted string) (*enclave.MemoryEnclave, error) {
 // it, so a printed page opens the volume from any rescue system with stock
 // cryptsetup and nothing else.
 type RecoveryKey struct {
-	credential *enclave.MemoryEnclave
+	credential *enclave.Memory
 	format     RecoveryKeyFormat
 	hash       string
 }
@@ -286,7 +286,7 @@ func (r *RecoveryKey) Destroy() {
 // caller's; the result is a new enclave. Unlike the internal
 // parseLegacyRecoveryKey, the input never passes through a Go string at this
 // boundary.
-func ParseRecoveryKey(text *enclave.MemoryEnclave) (*enclave.MemoryEnclave, error) {
+func ParseRecoveryKey(text *enclave.Memory) (*enclave.Memory, error) {
 	return recoverykey.Credential(custody, text)
 }
 

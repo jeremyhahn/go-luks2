@@ -11,7 +11,7 @@ library; it has no REST, gRPC, QUIC, MCP or Unix-socket transport.
 | Get the default KDF for the current mode | `DefaultKDFType() KDFType` (`KDFPBKDF2` in FIPS mode, `KDFArgon2id` otherwise) |
 | Check, before any device is touched, whether a KDF may be used in this process | `(KDFParams).Validate() error` (refuses an Argon2 KDF, named or implied by its cost, in FIPS mode with `ErrFIPSNotApproved`) |
 | Recognize a volume FIPS mode cannot open until it is imported | `(*Volume).Unlock` in a FIPS process fails with a `*FIPSImportRequiredError` naming the non-approved keyslots and digests; `errors.Is(err, ErrFIPSImportRequired)` |
-| Import a non-approved volume into FIPS compliance | `(*Volume).MigrateToFIPS(ctx context.Context, pass *enclave.MemoryEnclave, p MigrateParams) (*Migration, error)` |
+| Import a non-approved volume into FIPS compliance | `(*Volume).MigrateToFIPS(ctx context.Context, pass *enclave.Memory, p MigrateParams) (*Migration, error)` |
 
 `MigrateParams.KeepNonApproved` keeps the original keyslots (a
 half-migration: `Migration.Complete` is then false and
@@ -25,7 +25,8 @@ without touching the device.
 ## Import a volume
 
 Open the volume read-write and call `MigrateToFIPS` with its passphrase, from
-a process that is not in FIPS mode:
+a process that is not in FIPS mode and has already called
+`enclave.HardenProcess` ([key custody](../volumes/engineering.md#key-custody-detail)):
 
 ```go
 v, err := luks2.Open(ctx, "/dev/sdb1")
@@ -34,7 +35,7 @@ if err != nil {
 }
 defer v.Close()
 
-// pass is the passphrase, held in an *enclave.MemoryEnclave.
+// pass is the passphrase, held in an *enclave.Memory.
 res, err := v.MigrateToFIPS(ctx, pass, luks2.MigrateParams{})
 // res.Complete: no keyslot or digest FIPS mode cannot run remains
 ```

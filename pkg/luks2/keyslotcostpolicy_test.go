@@ -257,7 +257,7 @@ func TestAddRecoveryKeyReachesTheExemption(t *testing.T) {
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy([]byte(conformancePassphrase))
+	pass, err := enclave.NewMemoryCopy([]byte(conformancePassphrase))
 	if err != nil {
 		t.Fatalf("could not build a test passphrase enclave: %v", err)
 	}

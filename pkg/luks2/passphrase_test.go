@@ -18,7 +18,7 @@ import (
 // the legacy []byte path: the two must agree, since they share one policy.
 //
 // There is no empty-passphrase case here, unlike
-// TestValidatePassphraseBytes: enclave.NewMemoryEnclaveCopy itself refuses
+// TestValidatePassphraseBytes: enclave.NewMemoryCopy itself refuses
 // empty material, so an empty passphrase can never reach ValidatePassphrase
 // through the enclave boundary at all.
 func TestValidatePassphraseEnclave(t *testing.T) {
@@ -71,7 +71,7 @@ func TestValidatePassphraseErrorShape(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		pass     *enclave.MemoryEnclave
+		pass     *enclave.Memory
 		wantKind error
 	}{
 		{"too short", enclaveFrom(t, []byte("short")), ErrInvalidCredential},

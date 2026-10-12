@@ -17,7 +17,7 @@ var errFakeCustody = errors.New("fake custody failure")
 
 func TestEnclaveBufferFirstAllocationFailure(t *testing.T) {
 	custody := secret.Custody{
-		Sized: func(int) (*enclave.MemoryEnclave, error) { return nil, errFakeCustody },
+		Sized: func(int) (*enclave.Memory, error) { return nil, errFakeCustody },
 	}
 	b := newEnclaveBuffer(custody, "test", 4)
 	if err := b.append('a'); !errors.Is(err, errFakeCustody) {
@@ -29,7 +29,7 @@ func TestEnclaveBufferGrowthAllocationFailure(t *testing.T) {
 	real := secret.System()
 	calls := 0
 	custody := secret.Custody{
-		Sized: func(n int) (*enclave.MemoryEnclave, error) {
+		Sized: func(n int) (*enclave.Memory, error) {
 			calls++
 			if calls > 1 {
 				return nil, errFakeCustody
@@ -54,7 +54,7 @@ func TestEnclaveBufferFinishCloneFailure(t *testing.T) {
 	custody := secret.Custody{
 		Sized:   real.Sized,
 		Destroy: real.Destroy,
-		Copied:  func([]byte) (*enclave.MemoryEnclave, error) { return nil, errFakeCustody },
+		Copied:  func([]byte) (*enclave.Memory, error) { return nil, errFakeCustody },
 	}
 	b := newEnclaveBuffer(custody, "test", 4)
 	if err := b.append('a'); err != nil {

@@ -23,9 +23,9 @@ import (
 
 const testPassphraseText = "correct horse battery staple"
 
-func newTestPassphrase(t *testing.T) *enclave.MemoryEnclave {
+func newTestPassphrase(t *testing.T) *enclave.Memory {
 	t.Helper()
-	e, err := enclave.NewMemoryEnclaveCopy([]byte(testPassphraseText))
+	e, err := enclave.NewMemoryCopy([]byte(testPassphraseText))
 	if err != nil {
 		t.Fatalf("could not build a test passphrase enclave: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestVolumeUnlockWithTheWrongPassphraseFails(t *testing.T) {
 	}
 	defer func() { _ = v.Close() }()
 
-	wrong, err := enclave.NewMemoryEnclaveCopy([]byte("the wrong passphrase entirely"))
+	wrong, err := enclave.NewMemoryCopy([]byte("the wrong passphrase entirely"))
 	if err != nil {
 		t.Fatalf("could not build the wrong-passphrase enclave: %v", err)
 	}
@@ -138,10 +138,10 @@ func TestVolumeUnlockWithVolumeKeyAcceptsTheRecoveredKey(t *testing.T) {
 
 	// Borrow is legitimate here only because this test lives inside the
 	// module; an outside consumer has no route to these bytes at all.
-	var vk *enclave.MemoryEnclave
+	var vk *enclave.Memory
 	if err := volkey.Borrow("test setup", recovered, func(b []byte) error {
 		var berr error
-		vk, berr = enclave.NewMemoryEnclaveCopy(b)
+		vk, berr = enclave.NewMemoryCopy(b)
 		return berr
 	}); err != nil {
 		t.Fatalf("could not borrow the recovered key: %v", err)
@@ -177,7 +177,7 @@ func TestVolumeUnlockWithVolumeKeyRefusesAWrongSizeKey(t *testing.T) {
 	}
 	defer func() { _ = v.Close() }()
 
-	vk, err := enclave.NewMemoryEnclaveCopy(make([]byte, 16))
+	vk, err := enclave.NewMemoryCopy(make([]byte, 16))
 	if err != nil {
 		t.Fatalf("could not build the wrong-size enclave: %v", err)
 	}
@@ -320,7 +320,7 @@ func TestVolumeUnlockRefusesAPassphraseThatOpensOnlyAnUnboundKey(t *testing.T) {
 	}
 	defer func() { _ = v.Close() }()
 
-	wrong, err := enclave.NewMemoryEnclaveCopy(otherPassphrase)
+	wrong, err := enclave.NewMemoryCopy(otherPassphrase)
 	if err != nil {
 		t.Fatalf("could not build the test passphrase enclave: %v", err)
 	}
@@ -343,7 +343,7 @@ func TestVolumeUnlockStillOpensWithTheBoundPassphrase(t *testing.T) {
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy(passphrase)
+	pass, err := enclave.NewMemoryCopy(passphrase)
 	if err != nil {
 		t.Fatalf("could not build the test passphrase enclave: %v", err)
 	}
@@ -382,7 +382,7 @@ func TestVolumeUnlockVerifiesTheKeyAgainstTheSegmentsDigest(t *testing.T) {
 	}
 	defer func() { _ = v.Close() }()
 
-	wrong, err := enclave.NewMemoryEnclaveCopy(otherPassphrase)
+	wrong, err := enclave.NewMemoryCopy(otherPassphrase)
 	if err != nil {
 		t.Fatalf("could not build the test passphrase enclave: %v", err)
 	}
@@ -443,7 +443,7 @@ func TestVolumeUnlockRefusesAContainerMidReencryption(t *testing.T) {
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy(passphrase)
+	pass, err := enclave.NewMemoryCopy(passphrase)
 	if err != nil {
 		t.Fatalf("could not build the test passphrase enclave: %v", err)
 	}
@@ -451,7 +451,7 @@ func TestVolumeUnlockRefusesAContainerMidReencryption(t *testing.T) {
 
 	kdfCalls := 0
 	real := v.sys.passphraseKDF
-	v.sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
+	v.sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (*enclave.Memory, error) {
 		kdfCalls++
 		return real(ctx, p, kdf, keySize)
 	}
@@ -470,7 +470,7 @@ func TestVolumeUnlockRefusesAContainerMidReencryption(t *testing.T) {
 
 	// UnlockWithVolumeKey shares the path and the refusal.
 	volumeKey := masterKeyOf(t, device, passphrase)
-	vk, err := enclave.NewMemoryEnclaveCopy(volumeKey)
+	vk, err := enclave.NewMemoryCopy(volumeKey)
 	if err != nil {
 		t.Fatalf("could not build the volume key enclave: %v", err)
 	}
@@ -508,7 +508,7 @@ func TestVolumeUnlockRefusesAHeaderWithMoreThanOneSegment(t *testing.T) {
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy(passphrase)
+	pass, err := enclave.NewMemoryCopy(passphrase)
 	if err != nil {
 		t.Fatalf("could not build the test passphrase enclave: %v", err)
 	}
@@ -544,7 +544,7 @@ func TestVolumeUnlockRefusesAnIntegritySegment(t *testing.T) {
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy(passphrase)
+	pass, err := enclave.NewMemoryCopy(passphrase)
 	if err != nil {
 		t.Fatalf("could not build the test passphrase enclave: %v", err)
 	}
@@ -552,7 +552,7 @@ func TestVolumeUnlockRefusesAnIntegritySegment(t *testing.T) {
 
 	kdfCalls := 0
 	real := v.sys.passphraseKDF
-	v.sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
+	v.sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (*enclave.Memory, error) {
 		kdfCalls++
 		return real(ctx, p, kdf, keySize)
 	}
@@ -595,7 +595,7 @@ func TestVolumeTargetPassesThePersistentPerformanceFlags(t *testing.T) {
 	defer func() { _ = v.Close() }()
 	v.sys.blockDeviceOf = func(*os.File) (uint64, error) { return 0x0703, nil }
 
-	pass, err := enclave.NewMemoryEnclaveCopy(passphrase)
+	pass, err := enclave.NewMemoryCopy(passphrase)
 	if err != nil {
 		t.Fatalf("could not build the test passphrase enclave: %v", err)
 	}
@@ -660,7 +660,7 @@ func TestVolumeUnlockReadsTheKeyslotsThroughThePinnedDescriptor(t *testing.T) {
 		t.Fatalf("Open failed: %v", err)
 	}
 	real := v.sys.passphraseKDF
-	v.sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (*enclave.MemoryEnclave, error) {
+	v.sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (*enclave.Memory, error) {
 		_ = os.Remove(link)
 		if err := os.Symlink(other, link); err != nil {
 			t.Errorf("re-pointing the symlink failed: %v", err)
@@ -669,7 +669,7 @@ func TestVolumeUnlockReadsTheKeyslotsThroughThePinnedDescriptor(t *testing.T) {
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy(passphrase)
+	pass, err := enclave.NewMemoryCopy(passphrase)
 	if err != nil {
 		t.Fatalf("could not build the test passphrase enclave: %v", err)
 	}

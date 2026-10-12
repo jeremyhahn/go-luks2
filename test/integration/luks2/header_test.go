@@ -44,9 +44,9 @@ func TestHeaderWriteRead(t *testing.T) {
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy([]byte("test-passphrase"))
+	pass, err := enclave.NewMemoryCopy([]byte("test-passphrase"))
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveCopy failed: %v", err)
+		t.Fatalf("NewMemoryCopy failed: %v", err)
 	}
 	defer func() { _ = pass.Destroy() }()
 

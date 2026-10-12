@@ -48,7 +48,7 @@ func formattedVolume(t *testing.T) (*luks2.Volume, *luks2.Key) {
 	}
 
 	passphrase := []byte("dmcrypt-test-passphrase")
-	passEnclave, err := enclave.NewMemoryEnclaveCopy(passphrase)
+	passEnclave, err := enclave.NewMemoryCopy(passphrase)
 	if err != nil {
 		t.Fatalf("could not hold the test passphrase in protected memory: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestActivateReachesTargetThenFailsOnARegularFile(t *testing.T) {
 func testKey(t *testing.T, key []byte) *luks2.Key {
 	t.Helper()
 
-	e, err := enclave.NewMemoryEnclaveCopy(key)
+	e, err := enclave.NewMemoryCopy(key)
 	if err != nil {
 		t.Fatalf("could not hold the test key in protected memory: %v", err)
 	}

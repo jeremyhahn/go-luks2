@@ -15,8 +15,37 @@ import (
 	"io"
 	"os"
 
+	"github.com/jeremyhahn/go-enclave"
+
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
+
+// sysT holds the process-level operations Run reaches outside this package.
+// It is a struct, not a package func var, so a test swaps the whole of sys.
+type sysT struct {
+	// hardenProcess applies go-enclave's process hardening: RLIMIT_CORE 0/0
+	// and, on Linux, PR_SET_DUMPABLE 0.
+	hardenProcess func() (enclave.ProcessHardening, error)
+}
+
+func defaultSys() sysT {
+	return sysT{hardenProcess: enclave.HardenProcess}
+}
+
+var sys = defaultSys()
+
+// harden runs sys.hardenProcess and requires both protections it reports:
+// the CLI runs only on Linux, where both exist.
+func harden() error {
+	report, err := sys.hardenProcess()
+	if err == nil && (!report.NotDumpable || !report.CoreDumpsDisabled) {
+		err = &Error{Kind: errHardeningIncomplete, Detail: fmt.Sprintf("not dumpable: %t, core dumps disabled: %t", report.NotDumpable, report.CoreDumpsDisabled)}
+	}
+	if err != nil {
+		return &HardeningError{Err: err}
+	}
+	return nil
+}
 
 // env carries everything a command needs that is not one of its own
 // arguments: the three streams, the terminal and root-only boundaries, and
@@ -77,7 +106,20 @@ NON-INTERACTIVE USE:
 // Run dispatches args[1] (and, for a command group, args[2]) to its
 // handler and returns a cryptsetup(8)-compatible exit code. args follows
 // os.Args's own shape: args[0] is the program name.
+//
+// Run hardens the process (enclave.HardenProcess) before it dispatches, so
+// no command reads a credential in a process that could dump core; a
+// hardening failure is a *HardeningError and a non-zero exit.
 func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	// First, before any command can read a credential: Run is the binary's
+	// only entry point (cmd/luks2 main → run → Run), and go-enclave leaves
+	// process hardening to the binary. Failing to harden fails the command,
+	// unsupported platform included; there is no unhardened fallback.
+	if err := harden(); err != nil {
+		_, _ = fmt.Fprintf(stderr, "%v\n", err)
+		return exitCode(err)
+	}
+
 	fd := -1
 	if f, ok := stdin.(*os.File); ok {
 		fd = int(f.Fd())

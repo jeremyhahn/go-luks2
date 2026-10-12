@@ -22,11 +22,11 @@ func Open(ctx context.Context, path string, opts ...Option) (*Volume, error)
 func (v *Volume) Path() string
 func (v *Volume) Close() error
 
-func (v *Volume) Format(ctx context.Context, pass *enclave.MemoryEnclave, p FormatParams) error
-func (v *Volume) Unlock(ctx context.Context, pass *enclave.MemoryEnclave) (*Key, error)
-func (v *Volume) UnlockKeyslot(ctx context.Context, slot int, pass *enclave.MemoryEnclave) (*Key, error)
+func (v *Volume) Format(ctx context.Context, pass *enclave.Memory, p FormatParams) error
+func (v *Volume) Unlock(ctx context.Context, pass *enclave.Memory) (*Key, error)
+func (v *Volume) UnlockKeyslot(ctx context.Context, slot int, pass *enclave.Memory) (*Key, error)
 func (v *Volume) UnlockWithProvider(ctx context.Context, p KeyProvider) (*Key, error)
-func (v *Volume) UnlockWithVolumeKey(ctx context.Context, vk *enclave.MemoryEnclave) (*Key, error)
+func (v *Volume) UnlockWithVolumeKey(ctx context.Context, vk *enclave.Memory) (*Key, error)
 func (v *Volume) Target(ctx context.Context, key *Key) (*Target, error)
 func (v *Volume) Erase(ctx context.Context) error
 ```
@@ -46,7 +46,7 @@ const (
 	MinPassphraseLength = 8
 	MaxPassphraseLength = 512
 )
-func ValidatePassphrase(pass *enclave.MemoryEnclave) error
+func ValidatePassphrase(pass *enclave.Memory) error
 ```
 
 A credential this package enrolls must be `MinPassphraseLength` to
@@ -514,7 +514,7 @@ package documentation, which is the canonical copy — if the two disagree, that
 file is right and this one is the defect. Design rationale and the trust
 boundary are in [architecture.md](architecture.md#key-custody).
 
-The ownership model: key material is owned by an `*enclave.MemoryEnclave` for
+The ownership model: key material is owned by an `*enclave.Memory` for
 its whole lifetime and only ever borrowed, through the narrowest `WithBytes`
 window the consuming call permits. Nothing in this module returns raw key
 bytes across a function boundary where an enclave handle could be returned
@@ -526,7 +526,7 @@ Six residual exposures are documented, not five and not seven — `doc.go`'s own
 preamble treats an undercount as worse than the current state:
 
 1. **Credentials that arrive as plain bytes.** The library API takes
-   `*enclave.MemoryEnclave` (`Format`, `Unlock`, `UnlockKeyslot`, `AddKeyslot`,
+   `*enclave.Memory` (`Format`, `Unlock`, `UnlockKeyslot`, `AddKeyslot`,
    `ChangeKeyslot`, `ParseRecoveryKey`). What is left is the CLI's terminal
    prompt (`term.ReadPassword` returns a plain `[]byte`; `--key-file` is read
    straight into locked memory), `keyprovider.WithStdin` (non-secret helper
@@ -558,3 +558,21 @@ preamble treats an undercount as worse than the current state:
 
 A seventh exposure found anywhere in this codebase belongs in `doc.go`'s list
 on the same commit that finds it, not here first.
+
+**Core dumps.** go-enclave keeps an enclave's pages out of a core dump; the
+plain heap copies in exposures 1–4 and 6 it cannot. That takes process
+hardening, and go-enclave leaves it to the binary: importing go-enclave or any
+package of this module changes no process state. `enclave.HardenProcess` sets
+`RLIMIT_CORE` to 0/0 and, on Linux, `PR_SET_DUMPABLE` to 0. The rlimit alone
+does not stop a `core_pattern` that pipes to a handler; the dumpable flag does.
+
+- The `luks2` CLI calls it first thing in `internal/cli.Run`, before any
+  command reads a credential, and exits non-zero with a `HardeningError` when
+  it fails. There is no unhardened fallback.
+- An application that embeds the library must call `enclave.HardenProcess`
+  from its own `main`, before it handles a secret, to get the same protection.
+  The `pkg/` packages never call it.
+- Side effects of a non-dumpable process: its `/proc/<pid>` entries become
+  root-owned and a same-uid process cannot ptrace-attach to it. The process's
+  own `/proc/self` access is unaffected, and a program it execs (cryptsetup,
+  a key-provider helper) is dumpable again.

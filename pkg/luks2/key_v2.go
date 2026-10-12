@@ -88,7 +88,7 @@ func (v *Volume) unlockHeader(ctx context.Context, op string) (*device.Locked, s
 // PriorityNormal one, each in ascending id order. A PriorityIgnore keyslot is
 // not tried; UnlockKeyslot opens it by name. pass is the caller's enclave and
 // stays the caller's: it is only ever borrowed.
-func (v *Volume) Unlock(ctx context.Context, pass *enclave.MemoryEnclave) (*Key, error) {
+func (v *Volume) Unlock(ctx context.Context, pass *enclave.Memory) (*Key, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	if err := v.checkOpen("Volume.Unlock"); err != nil {
@@ -102,7 +102,7 @@ func (v *Volume) Unlock(ctx context.Context, pass *enclave.MemoryEnclave) (*Key,
 	}
 	defer func() { _ = locked.Unlock() }()
 
-	var masterKey *enclave.MemoryEnclave
+	var masterKey *enclave.Memory
 	var slotID string
 	err = secret.Borrow(op, pass, func(b []byte) error {
 		var derr error
@@ -122,7 +122,7 @@ func (v *Volume) Unlock(ctx context.Context, pass *enclave.MemoryEnclave) (*Key,
 // bound to the volume's data segment -- trying it anyway would risk
 // recovering a key this volume's data segment was never encrypted with
 // (#250).
-func (v *Volume) UnlockKeyslot(ctx context.Context, keyslot int, pass *enclave.MemoryEnclave) (*Key, error) {
+func (v *Volume) UnlockKeyslot(ctx context.Context, keyslot int, pass *enclave.Memory) (*Key, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	if err := v.checkOpen("Volume.UnlockKeyslot"); err != nil {
@@ -142,7 +142,7 @@ func (v *Volume) UnlockKeyslot(ctx context.Context, keyslot int, pass *enclave.M
 			Detail: fmt.Sprintf("keyslot %d does not exist or is not bound to the volume's data segment", keyslot)})
 	}
 
-	var masterKey *enclave.MemoryEnclave
+	var masterKey *enclave.Memory
 	err = secret.Borrow(op, pass, func(b []byte) error {
 		var derr error
 		masterKey, _, derr = getMasterKeySlot(ctx, locked.File(), v.path, b, metadata, []string{id}, v.sys)
@@ -158,7 +158,7 @@ func (v *Volume) UnlockKeyslot(ctx context.Context, keyslot int, pass *enclave.M
 // it as a Key bound to no keyslot (header.Keyslot() reports -1). vk is the
 // caller's enclave and stays the caller's: the returned Key holds its own
 // copy.
-func (v *Volume) UnlockWithVolumeKey(ctx context.Context, vk *enclave.MemoryEnclave) (*Key, error) {
+func (v *Volume) UnlockWithVolumeKey(ctx context.Context, vk *enclave.Memory) (*Key, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	if err := v.checkOpen("Volume.UnlockWithVolumeKey"); err != nil {
@@ -180,7 +180,7 @@ func (v *Volume) UnlockWithVolumeKey(ctx context.Context, vk *enclave.MemoryEncl
 		return nil, errAt(op, v.path, &errs.Error{Kind: errs.KindOf(err, ErrWrongKey), Detail: "open the volume with the supplied volume key", Err: err})
 	}
 
-	var cloned *enclave.MemoryEnclave
+	var cloned *enclave.Memory
 	err = secret.Borrow(op, vk, func(b []byte) error {
 		var cerr error
 		cloned, cerr = v.sys.custody.Clone(op, b)
@@ -216,7 +216,7 @@ func (v *Volume) Target(ctx context.Context, key *Key) (*Target, error) {
 	}
 	defer func() { _ = locked.Unlock() }()
 
-	if err := volkey.Verify(key, func(vk *enclave.MemoryEnclave) error {
+	if err := volkey.Verify(key, func(vk *enclave.Memory) error {
 		return verifyVolumeKeyForSegment(ctx, vk, segmentID, metadata)
 	}); err != nil {
 		return nil, errAt(op, v.path, &errs.Error{Kind: errs.KindOf(err, ErrWrongKey),

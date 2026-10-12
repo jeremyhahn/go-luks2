@@ -22,7 +22,7 @@ func (r *RecoveryKey) Format() RecoveryKeyFormat
 func (r *RecoveryKey) Hash() string                       // SHA-256 of the text, hex
 func (r *RecoveryKey) WriteTo(w io.Writer) (int64, error)  // the text; never a Go string
 func (r *RecoveryKey) Destroy()
-func ParseRecoveryKey(text *enclave.MemoryEnclave) (*enclave.MemoryEnclave, error)
+func ParseRecoveryKey(text *enclave.Memory) (*enclave.Memory, error)
 func (v *Volume) AddRecoveryKey(ctx context.Context, key *Key, rk *RecoveryKey, p KeyslotParams) (Enrollment, error)
 type Enrollment struct { Keyslot KeyslotInfo; Token int }
 ```

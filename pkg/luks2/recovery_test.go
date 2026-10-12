@@ -311,7 +311,7 @@ func TestAddRecoveryKeyHonoursAnExplicitKeyslot(t *testing.T) {
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy(primary)
+	pass, err := enclave.NewMemoryCopy(primary)
 	if err != nil {
 		t.Fatalf("could not build a test passphrase enclave: %v", err)
 	}
@@ -587,7 +587,7 @@ func TestRecoveryCredentialDoesNotNormalize(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			typed, err := enclave.NewMemoryEnclaveCopy([]byte(tt.typed))
+			typed, err := enclave.NewMemoryCopy([]byte(tt.typed))
 			if err != nil {
 				t.Fatalf("could not build a test enclave: %v", err)
 			}
@@ -619,7 +619,7 @@ func TestRecoveryCredentialRefusesWhatCannotBeOne(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			typed, err := enclave.NewMemoryEnclaveCopy([]byte(tt.typed))
+			typed, err := enclave.NewMemoryCopy([]byte(tt.typed))
 			if err != nil {
 				// Refused before ParseRecoveryKey even runs -- an empty
 				// enclave is refused at the enclave boundary itself, which
@@ -657,7 +657,7 @@ func TestTheTwoParsersDecodeDifferently(t *testing.T) {
 	}
 	printed := buf.String()
 
-	typed, err := enclave.NewMemoryEnclaveCopy(buf.Bytes())
+	typed, err := enclave.NewMemoryCopy(buf.Bytes())
 	if err != nil {
 		t.Fatalf("could not build a test enclave: %v", err)
 	}

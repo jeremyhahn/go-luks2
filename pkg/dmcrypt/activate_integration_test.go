@@ -51,7 +51,7 @@ func formatOnLoopDevice(t *testing.T) (*luks2.Volume, *luks2.Key, string) {
 	t.Cleanup(func() { _, _ = loopDev.Detach(context.Background()) })
 
 	passphrase := []byte(integrationPassphrase)
-	pass, err := enclave.NewMemoryEnclaveCopy(passphrase)
+	pass, err := enclave.NewMemoryCopy(passphrase)
 	if err != nil {
 		t.Fatalf("could not hold the test passphrase in protected memory: %v", err)
 	}

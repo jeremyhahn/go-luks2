@@ -539,7 +539,7 @@ func main() {
 		panic(err)
 	}
 	defer v.Close()
-	pass, err := enclave.NewMemoryEnclaveCopy([]byte("testpass"))
+	pass, err := enclave.NewMemoryCopy([]byte("testpass"))
 	if err != nil {
 		panic(err)
 	}
@@ -665,7 +665,7 @@ func main() {
 		panic(err)
 	}
 	defer v.Close()
-	pass, err := enclave.NewMemoryEnclaveCopy([]byte("testpass"))
+	pass, err := enclave.NewMemoryCopy([]byte("testpass"))
 	if err != nil {
 		panic(err)
 	}
@@ -754,7 +754,7 @@ func main() {
 		panic(err)
 	}
 	defer v.Close()
-	pass, err := enclave.NewMemoryEnclaveCopy([]byte("testpass"))
+	pass, err := enclave.NewMemoryCopy([]byte("testpass"))
 	if err != nil {
 		panic(err)
 	}

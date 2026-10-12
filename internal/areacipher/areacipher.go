@@ -217,7 +217,7 @@ func (t Transform) requireXTSKey(key []byte) error {
 // held in an enclave, borrowing both for the duration of the transform and no
 // longer, and returns the ciphertext as ordinary memory (see the package
 // documentation for why).
-func (t Transform) EncryptEnclave(c secret.Custody, data, key *enclave.MemoryEnclave) ([]byte, error) {
+func (t Transform) EncryptEnclave(c secret.Custody, data, key *enclave.Memory) ([]byte, error) {
 	plainLen := data.Size()
 	paddedLen := plainLen
 	if rem := paddedLen % SectorSize; rem != 0 {
@@ -276,7 +276,7 @@ func (t Transform) EncryptEnclave(c secret.Custody, data, key *enclave.MemoryEnc
 // ordinary heap even transiently. The destination enclave is allocated first
 // and the cipher writes straight into its locked pages. data is ciphertext
 // read from the device and is deliberately NOT enclaved.
-func (t Transform) DecryptEnclave(c secret.Custody, data []byte, key *enclave.MemoryEnclave) (*enclave.MemoryEnclave, error) {
+func (t Transform) DecryptEnclave(c secret.Custody, data []byte, key *enclave.Memory) (*enclave.Memory, error) {
 	if len(data) == 0 {
 		return nil, &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "no key material to decrypt"}
 	}

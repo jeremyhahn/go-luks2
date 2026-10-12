@@ -21,4 +21,11 @@
 // and FIDO2 is a configuration of it rather than a second implementation. A
 // TPM helper, a network agent or a smartcard script needs no new code in this
 // package.
+//
+// # Core dumps
+//
+// A helper's output line is read into locked memory, but the KDF and cipher
+// code a passphrase later reaches makes plain heap copies, so an application
+// that uses these providers must call enclave.HardenProcess from its own main
+// to keep core dumps off (see package luks2). This package never calls it.
 package keyprovider

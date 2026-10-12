@@ -48,11 +48,11 @@ func onDiskPriority(p Priority) *int {
 // cloneKeyEnclave borrows key's bytes into a NEW enclave this call owns --
 // the same pattern (*Volume).UnlockWithVolumeKey uses to hand back an
 // independently destroyable copy. addKeyslotWithMasterKeyAndPriority and
-// changeKeyslotCore need an *enclave.MemoryEnclave of their own; key's bytes
+// changeKeyslotCore need an *enclave.Memory of their own; key's bytes
 // are reachable only through volkey.Borrow's window, never as a value this
 // package can hold past it.
-func cloneKeyEnclave(op string, v *Volume, key *Key) (*enclave.MemoryEnclave, error) {
-	var cloned *enclave.MemoryEnclave
+func cloneKeyEnclave(op string, v *Volume, key *Key) (*enclave.Memory, error) {
+	var cloned *enclave.Memory
 	err := volkey.Borrow(op, key, func(b []byte) error {
 		var cerr error
 		cloned, cerr = v.sys.custody.Clone(op, b)
@@ -81,7 +81,7 @@ func keyslotInfoFor(metadata *header.Metadata, slot int, op, path string) (Keysl
 // the volume key key already holds. It takes no existing
 // credential: key is the caller's proof of ownership, which is what AddKey's
 // old passphrase argument was for.
-func (v *Volume) AddKeyslot(ctx context.Context, key *Key, pass *enclave.MemoryEnclave, p KeyslotParams) (KeyslotInfo, error) {
+func (v *Volume) AddKeyslot(ctx context.Context, key *Key, pass *enclave.Memory, p KeyslotParams) (KeyslotInfo, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	const op = "Volume.AddKeyslot"
@@ -158,7 +158,7 @@ func (v *Volume) AddKeyslot(ctx context.Context, key *Key, pass *enclave.MemoryE
 // p.Priority is consulted too: PriorityDefault keeps the slot's existing
 // priority, and any other value is written (onDiskPriority) the same way
 // AddKeyslot's is.
-func (v *Volume) ChangeKeyslot(ctx context.Context, key *Key, pass *enclave.MemoryEnclave, p KeyslotParams) (KeyslotInfo, error) {
+func (v *Volume) ChangeKeyslot(ctx context.Context, key *Key, pass *enclave.Memory, p KeyslotParams) (KeyslotInfo, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	const op = "Volume.ChangeKeyslot"

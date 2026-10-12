@@ -57,7 +57,9 @@ Scripts and systemd units pass passphrases with `--key-file`; see
 ## Library quick start
 
 Open the container, format it, unlock it, activate the dm-crypt mapping,
-mount a filesystem on it, and tear both down:
+mount a filesystem on it, and tear both down. Importing the library changes no
+process state, so a program that handles keys must harden itself first, or a
+core dump can expose the plain-memory copies a KDF or cipher makes:
 
 ```go
 package main
@@ -65,6 +67,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 
 	enclave "github.com/jeremyhahn/go-enclave"
@@ -74,6 +77,17 @@ import (
 )
 
 func main() {
+	// Before any secret exists: no core dumps (RLIMIT_CORE 0) and, on Linux,
+	// not dumpable, which also stops a core_pattern that pipes to a handler.
+	// A protection missing from the report is as fatal as an error.
+	hardening, err := enclave.HardenProcess()
+	if err == nil && (!hardening.NotDumpable || !hardening.CoreDumpsDisabled) {
+		err = fmt.Errorf("process hardening incomplete: %+v", hardening)
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	ctx := context.Background()
 
 	// Fails at startup, not at the first activation, if the kernel keyring
@@ -88,7 +102,7 @@ func main() {
 	}
 	defer v.Close()
 
-	pass, err := enclave.NewMemoryEnclave([]byte("correct horse battery staple"))
+	pass, err := enclave.NewMemory([]byte("correct horse battery staple"))
 	if err != nil {
 		log.Fatal(err)
 	}

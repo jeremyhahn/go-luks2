@@ -49,7 +49,7 @@ func txnKey(t *testing.T, v *Volume) *Key {
 }
 
 // txnPassphrase is newPassphraseEnclave, destroyed at cleanup.
-func txnPassphrase(t *testing.T, text string) *enclave.MemoryEnclave {
+func txnPassphrase(t *testing.T, text string) *enclave.Memory {
 	t.Helper()
 	e := newPassphraseEnclave(t, text)
 	t.Cleanup(func() { _ = e.Destroy() })
@@ -307,7 +307,7 @@ func TestVolumeKeyslotWritesDeriveThroughTheInjectedKDF(t *testing.T) {
 
 	calls := 0
 	real := v.sys.passphraseKDF
-	v.sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, n int) (*enclave.MemoryEnclave, error) {
+	v.sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, n int) (*enclave.Memory, error) {
 		calls++
 		return real(ctx, p, kdf, n)
 	}

@@ -112,7 +112,7 @@ type probingProvider struct {
 
 // Passphrase calls Header only when it can: a Volume holding mu for writing
 // would deadlock it, and a hung suite proves nothing a refusal does not.
-func (p *probingProvider) Passphrase(ctx context.Context) (*enclave.MemoryEnclave, error) {
+func (p *probingProvider) Passphrase(ctx context.Context) (*enclave.Memory, error) {
 	if p.v.mu.TryRLock() {
 		p.v.mu.RUnlock()
 		_, p.headerErr = p.v.Header(ctx)

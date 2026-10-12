@@ -222,9 +222,9 @@ func TestVolumeFormatEnforcesThePassphrasePolicyBeforeTouchingTheDevice(t *testi
 			}
 			defer func() { _ = v.Close() }()
 
-			pass, err := enclave.NewMemoryEnclaveCopy(bytes.Repeat([]byte("p"), length))
+			pass, err := enclave.NewMemoryCopy(bytes.Repeat([]byte("p"), length))
 			if err != nil {
-				t.Fatalf("NewMemoryEnclaveCopy failed: %v", err)
+				t.Fatalf("NewMemoryCopy failed: %v", err)
 			}
 			defer func() { _ = pass.Destroy() }()
 

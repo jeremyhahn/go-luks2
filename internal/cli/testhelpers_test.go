@@ -93,9 +93,9 @@ func formatTestVolumeWith(dir string, kdf luks2.KDFParams) (string, error) {
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy([]byte(testPassphrase))
+	pass, err := enclave.NewMemoryCopy([]byte(testPassphrase))
 	if err != nil {
-		return "", fmt.Errorf("NewMemoryEnclaveCopy: %w", err)
+		return "", fmt.Errorf("NewMemoryCopy: %w", err)
 	}
 	defer func() { _ = pass.Destroy() }()
 
@@ -137,9 +137,9 @@ func addSecondPassphrase(dir string) (string, error) {
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy([]byte(testPassphrase))
+	pass, err := enclave.NewMemoryCopy([]byte(testPassphrase))
 	if err != nil {
-		return "", fmt.Errorf("NewMemoryEnclaveCopy: %w", err)
+		return "", fmt.Errorf("NewMemoryCopy: %w", err)
 	}
 	defer func() { _ = pass.Destroy() }()
 
@@ -149,9 +149,9 @@ func addSecondPassphrase(dir string) (string, error) {
 	}
 	defer key.Destroy()
 
-	added, err := enclave.NewMemoryEnclaveCopy([]byte(testSecondPassphrase))
+	added, err := enclave.NewMemoryCopy([]byte(testSecondPassphrase))
 	if err != nil {
-		return "", fmt.Errorf("NewMemoryEnclaveCopy: %w", err)
+		return "", fmt.Errorf("NewMemoryCopy: %w", err)
 	}
 	defer func() { _ = added.Destroy() }()
 
@@ -187,9 +187,9 @@ func newPlainImage(t *testing.T, name string) string {
 	return path
 }
 
-func newTestPassphraseEnclave(t *testing.T) *enclave.MemoryEnclave {
+func newTestPassphraseEnclave(t *testing.T) *enclave.Memory {
 	t.Helper()
-	e, err := enclave.NewMemoryEnclaveCopy([]byte(testPassphrase))
+	e, err := enclave.NewMemoryCopy([]byte(testPassphrase))
 	if err != nil {
 		t.Fatalf("build passphrase enclave: %v", err)
 	}

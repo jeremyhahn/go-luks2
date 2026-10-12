@@ -73,7 +73,7 @@ func formatForTest(path string, passphrase string) error {
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy([]byte(passphrase))
+	pass, err := enclave.NewMemoryCopy([]byte(passphrase))
 	if err != nil {
 		return err
 	}
@@ -95,7 +95,7 @@ func addKeyForTest(path, existing, newPassphrase string) error {
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy([]byte(existing))
+	pass, err := enclave.NewMemoryCopy([]byte(existing))
 	if err != nil {
 		return err
 	}
@@ -107,7 +107,7 @@ func addKeyForTest(path, existing, newPassphrase string) error {
 	}
 	defer key.Destroy()
 
-	newCred, err := enclave.NewMemoryEnclaveCopy([]byte(newPassphrase))
+	newCred, err := enclave.NewMemoryCopy([]byte(newPassphrase))
 	if err != nil {
 		return err
 	}

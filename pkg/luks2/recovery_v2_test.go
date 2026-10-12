@@ -147,7 +147,7 @@ func TestParseRecoveryKeyFormatRefusesUnknownName(t *testing.T) {
 }
 
 func TestParseRecoveryKeyNormalizesWhitespaceWithoutAGoString(t *testing.T) {
-	typed, err := enclave.NewMemoryEnclaveCopy([]byte("  9F3A2C-4B81DE  \n"))
+	typed, err := enclave.NewMemoryCopy([]byte("  9F3A2C-4B81DE  \n"))
 	if err != nil {
 		t.Fatalf("could not build a test enclave: %v", err)
 	}
@@ -174,13 +174,13 @@ func TestParseRecoveryKeyNormalizesWhitespaceWithoutAGoString(t *testing.T) {
 // recoveryKeyEnclave materializes rk's credential as a fresh enclave, the
 // way a caller would before handing it to Unlock. Test-only: production
 // code never round-trips a RecoveryKey's credential through WriteTo.
-func recoveryKeyEnclave(t *testing.T, rk *RecoveryKey) *enclave.MemoryEnclave {
+func recoveryKeyEnclave(t *testing.T, rk *RecoveryKey) *enclave.Memory {
 	t.Helper()
 	var buf bytes.Buffer
 	if _, err := rk.WriteTo(&buf); err != nil {
 		t.Fatalf("WriteTo failed: %v", err)
 	}
-	e, err := enclave.NewMemoryEnclaveCopy(buf.Bytes())
+	e, err := enclave.NewMemoryCopy(buf.Bytes())
 	if err != nil {
 		t.Fatalf("could not build an enclave from the recovery key text: %v", err)
 	}

@@ -87,7 +87,7 @@ func countKDFCalls(t *testing.T) (*int, volumeSys) {
 	t.Helper()
 	calls := 0
 	sys := testVolumeSys()
-	sys.passphraseKDFOverride = func(context.Context, []byte, *header.KDF, int) (*enclave.MemoryEnclave, error) {
+	sys.passphraseKDFOverride = func(context.Context, []byte, *header.KDF, int) (*enclave.Memory, error) {
 		calls++
 		return nil, errors.New("derivation reached")
 	}
@@ -294,15 +294,15 @@ func peakRecorder(t *testing.T, budget int64) (*enclave.Allocator, *int64) {
 		t.Fatal(err)
 	}
 	var peak int64
-	sample := func(e *enclave.MemoryEnclave, err error) (*enclave.MemoryEnclave, error) {
+	sample := func(e *enclave.Memory, err error) (*enclave.Memory, error) {
 		peak = max(peak, a.InUse())
 		return e, err
 	}
 	admitted := secret.Admitted(func() (*enclave.Allocator, error) { return a, nil })
 	measuring := admitted
-	measuring.Sized = func(n int) (*enclave.MemoryEnclave, error) { return sample(admitted.Sized(n)) }
-	measuring.Moved = func(b []byte) (*enclave.MemoryEnclave, error) { return sample(admitted.Moved(b)) }
-	measuring.Copied = func(b []byte) (*enclave.MemoryEnclave, error) { return sample(admitted.Copied(b)) }
+	measuring.Sized = func(n int) (*enclave.Memory, error) { return sample(admitted.Sized(n)) }
+	measuring.Moved = func(b []byte) (*enclave.Memory, error) { return sample(admitted.Moved(b)) }
+	measuring.Copied = func(b []byte) (*enclave.Memory, error) { return sample(admitted.Copied(b)) }
 	previous := custody
 	t.Cleanup(func() { custody = previous })
 	custody = measuring
@@ -391,7 +391,7 @@ func TestAnAllocatorSizedToThePlannedPeakOpensTheVolume(t *testing.T) {
 			t.Fatalf("Open failed: %v", err)
 		}
 		defer func() { _ = v.Close() }()
-		pass, err := enclave.NewMemoryEnclaveCopy(passphrase)
+		pass, err := enclave.NewMemoryCopy(passphrase)
 		if err != nil {
 			t.Fatalf("could not build the test passphrase enclave: %v", err)
 		}
@@ -408,7 +408,7 @@ func TestAnAllocatorSizedToThePlannedPeakOpensTheVolume(t *testing.T) {
 		calls := 0
 		sys := testVolumeSys()
 		real := sys.passphraseKDF
-		sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, n int) (*enclave.MemoryEnclave, error) {
+		sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, n int) (*enclave.Memory, error) {
 			calls++
 			return real(ctx, p, kdf, n)
 		}

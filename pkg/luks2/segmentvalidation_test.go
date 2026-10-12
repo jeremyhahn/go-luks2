@@ -292,7 +292,7 @@ func TestACraftedSegmentNeverReachesTheDeviceMapper(t *testing.T) {
 			}
 			defer func() { _ = v.Close() }()
 
-			pass, err := enclave.NewMemoryEnclaveCopy([]byte(conformancePassphrase))
+			pass, err := enclave.NewMemoryCopy([]byte(conformancePassphrase))
 			if err != nil {
 				t.Fatalf("could not build the test passphrase enclave: %v", err)
 			}
@@ -321,7 +321,7 @@ func TestTheDeviceMapperTableCarriesTheDeclaredSectorSize(t *testing.T) {
 	defer func() { _ = v.Close() }()
 	v.sys.blockDeviceOf = func(*os.File) (uint64, error) { return 0x0703, nil }
 
-	pass, err := enclave.NewMemoryEnclaveCopy(passphrase)
+	pass, err := enclave.NewMemoryCopy(passphrase)
 	if err != nil {
 		t.Fatalf("could not build the test passphrase enclave: %v", err)
 	}

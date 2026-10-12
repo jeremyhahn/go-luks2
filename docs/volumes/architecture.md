@@ -182,7 +182,7 @@ The library does LUKS2 work in process, so key material shares the caller's
 address space. Shelling out to cryptsetup kept it in a separate process; here
 the library has to protect it itself.
 
-- Every key it derives or recovers lives in a go-enclave `*enclave.MemoryEnclave`
+- Every key it derives or recovers lives in a go-enclave `*enclave.Memory`
   (mlock'd, guard-paged, wiped on release) and is only borrowed through
   `WithBytes` for the call that needs it. That covers the master key, derived
   keys, AF stripes, digest inputs and recovery credentials.
@@ -190,7 +190,7 @@ the library has to protect it itself.
   There is no fallback to the heap.
 - Credentials cross the API as enclaves too: `Format`, `Unlock`,
   `UnlockKeyslot`, `AddKeyslot`, `ChangeKeyslot` and `ParseRecoveryKey` take a
-  `*enclave.MemoryEnclave` the caller owns and the library only borrows.
+  `*enclave.Memory` the caller owns and the library only borrows.
 - Not enclaved, on purpose: encrypted keyslot material (it is on disk in that
   form), and salts and digests (cleartext header fields).
 - Plain bytes that reach the library from outside, before any enclave exists:
@@ -209,6 +209,14 @@ the library has to protect it itself.
   the package documentation of [`internal/secret`](../../internal/secret/doc.go)
   (`doc.go`). A summary, kept in sync with that canonical copy, is in
   [engineering.md](engineering.md#key-custody-detail).
+- Those raw-bytes copies are ordinary heap, so only process hardening keeps
+  them out of a core dump, and that is the binary's decision, not the
+  library's: importing the library changes no process state.
+  `enclave.HardenProcess` sets `RLIMIT_CORE` to 0/0 and, on Linux, makes the
+  process non-dumpable, which also covers a `core_pattern` that pipes to a
+  handler. The `luks2` CLI calls it before any command reads a credential and
+  refuses to run if it fails. An application that embeds the library must call
+  it from its own `main`.
 - Every enclave is admitted against go-enclave's process `Allocator` before
   its pages are mapped; the binary sizes that budget with
   `enclave.SetAllocator`, and RLIMIT_MEMLOCK is the default.

@@ -109,9 +109,9 @@ func formatWithLibraryCheap(t *testing.T, path string) {
 		t.Fatalf("Open failed: %v", err)
 	}
 	defer func() { _ = v.Close() }()
-	pass, err := enclave.NewMemoryEnclaveCopy([]byte(canonicalPassphrase))
+	pass, err := enclave.NewMemoryCopy([]byte(canonicalPassphrase))
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveCopy failed: %v", err)
+		t.Fatalf("NewMemoryCopy failed: %v", err)
 	}
 	defer func() { _ = pass.Destroy() }()
 	if err := v.Format(ctx, pass, luks2.FormatParams{

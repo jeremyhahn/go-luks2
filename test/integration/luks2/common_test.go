@@ -43,7 +43,7 @@ func Unlock(device string, passphrase []byte, name string) error {
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy(passphrase)
+	pass, err := enclave.NewMemoryCopy(passphrase)
 	if err != nil {
 		return err
 	}
@@ -108,7 +108,7 @@ func Format(opts FormatOptions) error {
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy(opts.Passphrase)
+	pass, err := enclave.NewMemoryCopy(opts.Passphrase)
 	if err != nil {
 		return err
 	}
@@ -210,7 +210,7 @@ func AddKey(device string, existing, newPassphrase []byte, opts *AddKeyOptions) 
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy(existing)
+	pass, err := enclave.NewMemoryCopy(existing)
 	if err != nil {
 		return luks2.KeyslotInfo{}, err
 	}
@@ -222,7 +222,7 @@ func AddKey(device string, existing, newPassphrase []byte, opts *AddKeyOptions) 
 	}
 	defer key.Destroy()
 
-	newCred, err := enclave.NewMemoryEnclaveCopy(newPassphrase)
+	newCred, err := enclave.NewMemoryCopy(newPassphrase)
 	if err != nil {
 		return luks2.KeyslotInfo{}, err
 	}
@@ -243,7 +243,7 @@ func changeKeyForTest(device string, oldPass, newPass []byte, slot int) error {
 	}
 	defer func() { _ = v.Close() }()
 
-	old, err := enclave.NewMemoryEnclaveCopy(oldPass)
+	old, err := enclave.NewMemoryCopy(oldPass)
 	if err != nil {
 		return err
 	}
@@ -254,7 +254,7 @@ func changeKeyForTest(device string, oldPass, newPass []byte, slot int) error {
 	}
 	defer key.Destroy()
 
-	newCred, err := enclave.NewMemoryEnclaveCopy(newPass)
+	newCred, err := enclave.NewMemoryCopy(newPass)
 	if err != nil {
 		return err
 	}
@@ -276,7 +276,7 @@ func removeKeyForTest(device string, passphrase []byte, slot int) error {
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy(passphrase)
+	pass, err := enclave.NewMemoryCopy(passphrase)
 	if err != nil {
 		return err
 	}
@@ -302,7 +302,7 @@ func killSlotForTest(device string, passphrase []byte, targetSlot int) error {
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy(passphrase)
+	pass, err := enclave.NewMemoryCopy(passphrase)
 	if err != nil {
 		return err
 	}

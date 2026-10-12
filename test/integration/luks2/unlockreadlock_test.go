@@ -131,7 +131,7 @@ func TestUnlockWaitsForCryptsetupsWriteLock(t *testing.T) {
 		t.Fatalf("Open beside cryptsetup's write: %v", err)
 	}
 	defer func() { _ = v.Close() }()
-	pass, err := enclave.NewMemoryEnclaveCopy([]byte(canonicalPassphrase))
+	pass, err := enclave.NewMemoryCopy([]byte(canonicalPassphrase))
 	if err != nil {
 		t.Fatalf("could not hold the passphrase in protected memory: %v", err)
 	}

@@ -26,7 +26,7 @@ import (
 
 // secretOf returns b in protected memory, released when the test ends
 // (destroyOnCleanup).
-func secretOf(t *testing.T, b []byte) *enclave.MemoryEnclave {
+func secretOf(t *testing.T, b []byte) *enclave.Memory {
 	t.Helper()
 
 	e, err := custody.Clone("test key", b)
@@ -188,7 +188,7 @@ func TestFIPSRefusalDescribesMalformedObjects(t *testing.T) {
 
 // verifyOn runs verifyFIPSOpen on path under its own lock, released before it
 // returns.
-func verifyOn(t *testing.T, path string, passphrase []byte, id string, want *enclave.MemoryEnclave) error {
+func verifyOn(t *testing.T, path string, passphrase []byte, id string, want *enclave.Memory) error {
 	t.Helper()
 
 	sys := testVolumeSys()

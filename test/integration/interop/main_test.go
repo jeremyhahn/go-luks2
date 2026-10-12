@@ -95,7 +95,7 @@ func activateUnrecorded(ctx context.Context, device string, passphrase []byte, n
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy(passphrase)
+	pass, err := enclave.NewMemoryCopy(passphrase)
 	if err != nil {
 		return nil, err
 	}

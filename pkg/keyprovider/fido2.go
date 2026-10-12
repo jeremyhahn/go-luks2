@@ -279,7 +279,7 @@ func (f *FIDO2) Token() luks2.Token { return f.cmd.Token() }
 // Passphrase runs the assertion and returns the base64 text of the
 // authenticator's hmac-secret -- what is actually enrolled, per
 // fido2SecretEncoding.
-func (f *FIDO2) Passphrase(ctx context.Context) (*enclave.MemoryEnclave, error) {
+func (f *FIDO2) Passphrase(ctx context.Context) (*enclave.Memory, error) {
 	const op = "FIDO2.Passphrase"
 
 	line, err := f.cmd.Passphrase(ctx)
@@ -288,7 +288,7 @@ func (f *FIDO2) Passphrase(ctx context.Context) (*enclave.MemoryEnclave, error) 
 	}
 	defer secret.System().Release(line)
 
-	var credential *enclave.MemoryEnclave
+	var credential *enclave.Memory
 	if err := secret.Borrow("fido2 secret", line, func(b []byte) error {
 		var err error
 		credential, err = normalizeFIDO2Secret(f.encoding, b)
@@ -682,7 +682,7 @@ func randomFIDO2Bytes(n int) ([]byte, error) {
 // to print. A line that does not decode is refused: a credential built from
 // garbage enrolls perfectly well and opens nothing, which is the failure
 // this package exists to make impossible.
-func normalizeFIDO2Secret(encoding *base64.Encoding, line []byte) (*enclave.MemoryEnclave, error) {
+func normalizeFIDO2Secret(encoding *base64.Encoding, line []byte) (*enclave.Memory, error) {
 	const op = "fido2 secret"
 	custody := secret.System()
 

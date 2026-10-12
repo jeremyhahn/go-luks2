@@ -34,7 +34,7 @@ func enrollRecoveryKeyForTest(t *testing.T, image string, existing []byte, opts 
 	}
 	defer func() { _ = v.Close() }()
 
-	pass, err := enclave.NewMemoryEnclaveCopy(existing)
+	pass, err := enclave.NewMemoryCopy(existing)
 	if err != nil {
 		return "", -1, -1, err
 	}

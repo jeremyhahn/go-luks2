@@ -52,10 +52,10 @@ func masterKeyOf(t *testing.T, device string, passphrase []byte) []byte {
 
 // volumeKeyEnclave returns key held in protected memory, the way a real
 // caller's key provider would hand a volume key to UnlockWithVolumeKey.
-func volumeKeyEnclave(t *testing.T, key []byte) *enclave.MemoryEnclave {
+func volumeKeyEnclave(t *testing.T, key []byte) *enclave.Memory {
 	t.Helper()
 
-	e, err := enclave.NewMemoryEnclaveCopy(key)
+	e, err := enclave.NewMemoryCopy(key)
 	if err != nil {
 		t.Fatalf("placing the volume key in an enclave failed: %v", err)
 	}

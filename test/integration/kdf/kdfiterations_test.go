@@ -44,7 +44,7 @@ func changeKeyForTest(device string, oldPass, newPass []byte, slot int) error {
 	}
 	defer func() { _ = v.Close() }()
 
-	old, err := enclave.NewMemoryEnclaveCopy(oldPass)
+	old, err := enclave.NewMemoryCopy(oldPass)
 	if err != nil {
 		return err
 	}
@@ -55,7 +55,7 @@ func changeKeyForTest(device string, oldPass, newPass []byte, slot int) error {
 	}
 	defer key.Destroy()
 
-	newCred, err := enclave.NewMemoryEnclaveCopy(newPass)
+	newCred, err := enclave.NewMemoryCopy(newPass)
 	if err != nil {
 		return err
 	}

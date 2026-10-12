@@ -19,12 +19,13 @@ library; it has no REST, gRPC, QUIC, MCP or Unix-socket transport.
 
 FIDO2 enrollment has no CLI verb; it is these library calls. Unlock with an
 existing credential, create a credential and a salt on the authenticator,
-then enroll a provider built from them:
+then enroll a provider built from them. The process must have called
+`enclave.HardenProcess` first ([key custody](../volumes/engineering.md#key-custody-detail)):
 
 ```go
 v, _ := luks2.Open(ctx, device)
 defer v.Close()
-key, _ := v.Unlock(ctx, existingPassphrase) // existingPassphrase is a *enclave.MemoryEnclave
+key, _ := v.Unlock(ctx, existingPassphrase) // existingPassphrase is a *enclave.Memory
 defer key.Destroy()
 
 salt, _ := keyprovider.NewFIDO2Salt()
