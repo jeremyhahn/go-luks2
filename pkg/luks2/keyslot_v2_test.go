@@ -199,6 +199,7 @@ func TestVolumeAddKeyslotOnAReadOnlyVolumeFails(t *testing.T) {
 }
 
 func TestVolumeChangeKeyslotRotatesThePassphrase(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "changekeyslot.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -245,6 +246,7 @@ func TestVolumeChangeKeyslotRotatesThePassphrase(t *testing.T) {
 // rotation: ChangeKeyslot's p.Priority is written (onDiskPriority), even
 // though p.KDF is not -- see the method's own doc comment.
 func TestVolumeChangeKeyslotWithPriorityPreferWritesIt(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "changekeyslot-prefer.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -264,7 +266,7 @@ func TestVolumeChangeKeyslotWithPriorityPreferWritesIt(t *testing.T) {
 	rotated := newPassphraseEnclave(t, "the re-prioritized credential")
 	defer func() { _ = rotated.Destroy() }()
 
-	info, err := v.ChangeKeyslot(context.Background(), key, rotated, KeyslotParams{Priority: PriorityPrefer})
+	info, err := v.ChangeKeyslot(context.Background(), key, rotated, KeyslotParams{Priority: PriorityPrefer, KDF: KDFParams{Type: KDFPBKDF2, IterTime: time.Millisecond}})
 	if err != nil {
 		t.Fatalf("ChangeKeyslot failed: %v", err)
 	}
@@ -291,6 +293,7 @@ func TestVolumeChangeKeyslotWithPriorityPreferWritesIt(t *testing.T) {
 // through UNCHANGED rather than recalibrate, and a recalibration would almost
 // certainly not land on this exact number.
 func TestVolumeChangeKeyslotPreservesTheExistingPBKDF2Cost(t *testing.T) {
+	defer parallel(t)()
 	const iterations = 700_000
 
 	path := newImage(t, "changekeyslot-cost.img")
@@ -389,6 +392,7 @@ func changeKeyslotOnDiskKDF(t *testing.T, iterations int, p KeyslotParams) *head
 // luksChangeKey's --pbkdf-force-iterations is: the count asked for is the
 // count on disk afterwards.
 func TestVolumeChangeKeyslotWithAnExplicitKDFRecostsTheSlot(t *testing.T) {
+	defer parallel(t)()
 	const before, after = 700_000, 800_000
 	kdf := changeKeyslotOnDiskKDF(t, before, KeyslotParams{KDF: KDFParams{Type: KDFPBKDF2, Iterations: after}})
 	if kdf.Type != kdfTypePBKDF2 || *kdf.Iterations != after {
@@ -399,6 +403,7 @@ func TestVolumeChangeKeyslotWithAnExplicitKDFRecostsTheSlot(t *testing.T) {
 // A zero KDF keeps the slot's own cost, re-read from the device rather than
 // taken from ChangeKeyslot's report.
 func TestVolumeChangeKeyslotWithAZeroKDFKeepsTheOnDiskCost(t *testing.T) {
+	defer parallel(t)()
 	const iterations = 700_000
 	kdf := changeKeyslotOnDiskKDF(t, iterations, KeyslotParams{})
 	if kdf.Type != kdfTypePBKDF2 || *kdf.Iterations != iterations {
@@ -411,6 +416,7 @@ func TestVolumeChangeKeyslotWithAZeroKDFKeepsTheOnDiskCost(t *testing.T) {
 // refused here too, and the refusal writes nothing -- the image is byte for
 // byte what it was.
 func TestVolumeChangeKeyslotRefusesAnExplicitKDFLikeAddKeyslot(t *testing.T) {
+	defer parallel(t)()
 	cases := []struct {
 		name  string
 		fips  bool
@@ -478,6 +484,7 @@ func TestVolumeChangeKeyslotRefusesAnExplicitKDFLikeAddKeyslot(t *testing.T) {
 // KDF is refused before the lock is taken, and the image -- the keyslot
 // included -- is byte for byte what it was.
 func TestVolumeKeyslotWritesJudgeAnExplicitKDFByTheVolumePolicy(t *testing.T) {
+	defer parallel(t)()
 	argon2 := KeyslotParams{KDF: KDFParams{Type: KDFArgon2id, Time: 1, MemoryKiB: minArgon2MemoryKB, Parallel: 1}}
 	cases := []struct {
 		name  string

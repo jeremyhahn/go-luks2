@@ -389,6 +389,7 @@ func TestMigrateToFIPSCarriesTheVolumeKeyNotAnUnboundKey(t *testing.T) {
 // reaches only an unbound key, there is no volume key to carry across, and
 // nothing may be written.
 func TestMigrateToFIPSRefusesWhenNoKeyslotHoldsTheVolumeKey(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return

@@ -904,6 +904,7 @@ func relinkDuring(t *testing.T, link, to string) volumeSys {
 //
 // Not parallel: it substitutes the package's derivation seam.
 func TestAKeyslotOperationStaysOnTheDeviceItLocked(t *testing.T) {
+	defer parallel(t)()
 	passphrase := []byte(conformancePassphrase)
 	rotated := []byte(rotatedPassphrase)
 

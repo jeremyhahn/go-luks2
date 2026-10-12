@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -334,6 +335,19 @@ func TestClassifyAndRemedy(t *testing.T) {
 		if Remedy(got) == "" {
 			t.Errorf("Remedy(%v) returned an empty string", got)
 		}
+	}
+}
+
+// TestBlockedRemedyNamesThePublicPreflight pins the preflight the blocked
+// remedy points at to the one the library exports (#324):
+// CheckKeyringAvailable went with the old activation API (#268).
+func TestBlockedRemedyNamesThePublicPreflight(t *testing.T) {
+	got := Remedy(ErrBlocked)
+	if !strings.Contains(got, "dmcrypt.CheckKeyring") {
+		t.Errorf("Remedy(ErrBlocked) does not name dmcrypt.CheckKeyring: %q", got)
+	}
+	if strings.Contains(got, "CheckKeyringAvailable") {
+		t.Errorf("Remedy(ErrBlocked) names the removed CheckKeyringAvailable: %q", got)
 	}
 }
 

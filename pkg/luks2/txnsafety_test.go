@@ -151,6 +151,7 @@ func TestVolumeAddKeyslotRunsToItsCommitWhenCanceledAfterTheAreaWrite(t *testing
 
 // T2: the same for ChangeKeyslot, through to the wipe of the old area.
 func TestVolumeChangeKeyslotRunsToItsCommitWhenCanceledAfterTheAreaWrite(t *testing.T) {
+	defer parallel(t)()
 	v := txnVolume(t, formattedVolumeImage(t, "changekeyslot-cancel.img", "", ""))
 	key := txnKey(t, v)
 
@@ -159,7 +160,8 @@ func TestVolumeChangeKeyslotRunsToItsCommitWhenCanceledAfterTheAreaWrite(t *test
 	v.sys.keyslotWriteStep = cancelAfterAreaWrite(cancel)
 
 	rotated := txnPassphrase(t, "a credential rotated under a deadline")
-	if _, err := v.ChangeKeyslot(ctx, key, rotated, KeyslotParams{}); err != nil {
+	cheap := KeyslotParams{KDF: KDFParams{Type: KDFPBKDF2, IterTime: time.Millisecond}}
+	if _, err := v.ChangeKeyslot(ctx, key, rotated, cheap); err != nil {
 		t.Fatalf("ChangeKeyslot canceled after its first write = %v, want it to run to its commit", err)
 	}
 	v.sys.keyslotWriteStep = defaultVolumeSys().keyslotWriteStep
@@ -239,11 +241,13 @@ func TestVolumeAddRecoveryKeyRollsBackEvenWhenCanceledDuringTheTokenWrite(t *tes
 
 // T5: ChangeKeyslot keeps the slot's priority unless the caller names one.
 func TestVolumeChangeKeyslotKeepsThePriorityUnlessOneIsGiven(t *testing.T) {
+	defer parallel(t)()
 	v := txnVolume(t, formattedVolumeImage(t, "changekeyslot-keep-priority.img", "", ""))
 	key := txnKey(t, v)
 	ctx := context.Background()
+	kdf := KDFParams{Type: KDFPBKDF2, IterTime: time.Millisecond}
 
-	if _, err := v.ChangeKeyslot(ctx, key, txnPassphrase(t, "first rotation"), KeyslotParams{Priority: PriorityPrefer}); err != nil {
+	if _, err := v.ChangeKeyslot(ctx, key, txnPassphrase(t, "first rotation"), KeyslotParams{Priority: PriorityPrefer, KDF: kdf}); err != nil {
 		t.Fatalf("ChangeKeyslot(prefer) failed: %v", err)
 	}
 	info, err := v.ChangeKeyslot(ctx, key, txnPassphrase(t, "second rotation"), KeyslotParams{})
@@ -263,7 +267,7 @@ func TestVolumeChangeKeyslotKeepsThePriorityUnlessOneIsGiven(t *testing.T) {
 		}
 	}
 
-	info, err = v.ChangeKeyslot(ctx, key, txnPassphrase(t, "third rotation"), KeyslotParams{Priority: PriorityNormal})
+	info, err = v.ChangeKeyslot(ctx, key, txnPassphrase(t, "third rotation"), KeyslotParams{Priority: PriorityNormal, KDF: kdf})
 	if err != nil {
 		t.Fatalf("ChangeKeyslot(normal) failed: %v", err)
 	}
@@ -297,6 +301,7 @@ func TestVolumeAddRecoveryKeyValidatesTheKDFBeforeTakingTheLock(t *testing.T) {
 // T7: AddKeyslot and ChangeKeyslot derive the new area key through the
 // volume's injected passphrase KDF, not a package default.
 func TestVolumeKeyslotWritesDeriveThroughTheInjectedKDF(t *testing.T) {
+	defer parallel(t)()
 	v := txnVolume(t, formattedVolumeImage(t, "keyslot-injected-kdf.img", "", ""))
 	key := txnKey(t, v)
 

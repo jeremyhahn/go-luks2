@@ -213,6 +213,7 @@ func TestFormatSurfacesADigestCalibrationFailure(t *testing.T) {
 // the property that distinguishes this package's API from cryptsetup's
 // --pbkdf-force-iterations.
 func TestPinnedDigestIterationsReachTheHeader(t *testing.T) {
+	defer parallel(t)()
 	const digestCost = 123_456
 	const keyslotCost = 250_000
 

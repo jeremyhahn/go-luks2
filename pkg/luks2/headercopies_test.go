@@ -68,6 +68,7 @@ func openTestVolume(t *testing.T, path string) *Volume {
 }
 
 func TestVolumeReadsUseTheValidHeaderCopy(t *testing.T) {
+	defer parallel(t)()
 	cases := []struct {
 		name       string
 		damage     func(t *testing.T, path string, area int64)
@@ -140,6 +141,7 @@ func TestVolumeReadsUseTheValidHeaderCopy(t *testing.T) {
 // reads the current copy, and leaves both copies level with it before its own
 // read-modify-write -- the repair cryptsetup's LUKS2_hdr_read makes.
 func TestKeyslotWriteRepairsTheStaleHeaderCopy(t *testing.T) {
+	defer parallel(t)()
 	cases := []struct {
 		name       string
 		damage     func(t *testing.T, path string, area int64)

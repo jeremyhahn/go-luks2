@@ -1,6 +1,6 @@
 # Volumes — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163);
+> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (3da0ff2);
 > "What this feature deliberately does not do" verified 2026-10-11 against
 > main (623da94); the `KeyringError` table and mapping-name limits verified
 > 2026-10-11 against 1e4cdbc
@@ -68,8 +68,9 @@ Runtime dependencies: `github.com/jeremyhahn/go-enclave` (locked memory),
 denies `os/exec`, so the core cannot regain root or exec without a red lint.
 
 `make api-diff` (`test/tools/apidump` against
-`baseline/disposition-luks2.tsv`) is the mechanical check that every export
-of the pre-redesign `pkg/luks2` (`baseline/luks2.tsv`) went where its
+`test/tools/apidump/baseline/disposition-luks2.tsv`) is the mechanical check
+that every export of the pre-redesign `pkg/luks2`
+(`test/tools/apidump/baseline/luks2.tsv`) went where its
 disposition row says: a `KEEP` row (`ErrDeviceChanged`, for one) is still
 exported under its name, and a `RENAME`, `MOVE`, `UNEXPORT` or `DELETE` row
 is gone under its old one (`ErrIntegerOverflow` became
@@ -128,9 +129,8 @@ clock budget, so a cancelled caller never leaves a plaintext device behind.
 The lock order and the write path are type properties, not a calling
 convention. `internal/device` implements `Pinned` (read-only),
 `Pinned.Lock(ctx, mode) *Locked` (node flock, then the cryptsetup lock) and
-`Locked.Claim(ctx) *Claimed` (O_EXCL by reopening `/proc/self/fd/N`, so
-`requireSameDevice` is unnecessary: the claim targets the locked inode by
-construction). Every `*Volume` write method (`Format`, `AddKeyslot`,
+`Locked.Claim(ctx) *Claimed` (O_EXCL by reopening `/proc/self/fd/N`, so the
+claim targets the locked inode by construction). Every `*Volume` write method (`Format`, `AddKeyslot`,
 `ChangeKeyslot`, `RemoveKeyslot`, `AddToken`, `SetToken`, `RemoveToken`,
 `AddRecoveryKey`, `Enroll`, `MigrateToFIPS`, `RestorePrimaryHeader`,
 `ReplacePrimaryHeader`, `Erase`) takes its lock through `v.lockFor(ctx,
@@ -194,11 +194,17 @@ The volume key reaches dm-crypt as a kernel keyring reference, as cryptsetup
 does it. The table carries `:<size>:logon:luks2:<sha256 of the dm UUID>`, never
 the key.
 
-1. `add_key` puts the key in the session keyring as a `logon` key, whose
+1. The dm target is created under the mapping name and dm UUID, with no
+   table yet.
+2. `add_key` puts the key in the session keyring as a `logon` key, whose
    payload user space cannot read back.
-2. The target is created with a table naming that key.
-3. The key is revoked, unlinked and checked gone. If it cannot be confirmed
-   gone, activation fails with `dmcrypt.ErrKeyringKeyNotReleased`.
+3. The dm-crypt table naming that key is loaded and the target resumed.
+4. The key is revoked, unlinked and checked gone, whether or not step 3
+   succeeded. If it cannot be confirmed gone, activation fails with
+   `dmcrypt.ErrKeyringKeyNotReleased` and the target is rolled back.
+
+The key is in the keyring only for step 3. The keyring mechanism itself is
+documented in [kernel-keyring](../kernel-keyring/architecture.md).
 
 There is no fallback that puts the key in the table. If the keyring is
 unavailable, `dmcrypt.Activate` fails with an error matching

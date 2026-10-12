@@ -35,6 +35,7 @@ func tokenInCurrentCopyOnly(tearThePrimary bool) func(t *testing.T, path string,
 }
 
 func TestTokenWritesUseTheCurrentHeaderCopy(t *testing.T) {
+	defer parallel(t)()
 	extra := Token{Type: "go-luks2-test", Keyslots: []int{0}}
 	ops := []struct {
 		name       string

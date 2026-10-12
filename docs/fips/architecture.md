@@ -1,6 +1,6 @@
 # FIPS 140-3 — architecture
 
-> **Status: NORMATIVE** · Last verified: 2026-10-08 against main (bd23163)
+> **Status: NORMATIVE** · Last verified: 2026-10-11 against main (3da0ff2)
 > Conflicts with this document are defects. Fix them here first.
 
 go-luks2 runs under the Go Cryptographic Module in FIPS 140-3 mode. "FIPS
@@ -13,10 +13,24 @@ tests substitute so the policy is tested in every ordinary run.
 
 Argon2 comes from `golang.org/x/crypto`, outside the Go Cryptographic Module,
 so `GODEBUG=fips140=only` cannot stop it running — the runtime flag alone is
-not enough. The library adds its own refusal (`requireFIPSApprovedKDF`,
-raised everywhere a derivation can happen) rather than relying on the module
-boundary, so a FIPS process can neither create nor open an Argon2 keyslot
-regardless of how the header got there. Rejected: a public `fips` package
+not enough. The library adds its own refusal rather than relying on the
+module boundary: `fips.Mode.RequireKDF` (`internal/fips`) refuses Argon2 in
+FIPS mode with `ErrFIPSNotApproved`, and it is called wherever an Argon2 KDF
+could be chosen or run:
+
+- `KDFParams.validateWith` (`pkg/luks2/kdf.go`), the preflight behind the
+  public `KDFParams.Validate` and `FormatParams.Validate` and behind the
+  `Volume` methods that take a `KDFParams`. It resolves an empty type to the
+  default first, so an Argon2 cost with no type is refused too.
+- `createKDF`, when a keyslot's KDF is built.
+- `screenKDFParameters`, when a keyslot already on disk is screened.
+- `kdf.Deriver` (`internal/kdf`), before any derivation runs.
+
+So a FIPS process can neither create nor open an Argon2 keyslot regardless of
+how the header got there. `MigrateToFIPS` decides what it must replace with a
+separate predicate, `isFIPSCompliantKDF` (`pkg/luks2/kdf.go`: PBKDF2, bare or
+with SHA-256, SHA-384 or SHA-512), which `fipsApprovedKDF` extends with the
+on-disk PBKDF2 hash, so `pbkdf2` over SHA-1 also counts as non-approved. Rejected: a public `fips` package
 (see [volumes/architecture.md](../volumes/architecture.md#the-problem-and-the-shape-chosen))
 — FIPS mode is a process property, and migrating a volume into compliance is
 a `Volume` operation, not a separate subsystem to configure.

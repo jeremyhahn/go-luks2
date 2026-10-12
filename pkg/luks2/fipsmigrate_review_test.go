@@ -110,6 +110,7 @@ func readJSONArea(t *testing.T, device string) []byte {
 // unmigrated one does -- and the digest must come out PBKDF2 with no Argon2
 // cost left declared on it.
 func TestMigrateToFIPSMigratesAnArgon2Digest(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return

@@ -505,6 +505,7 @@ func assertImportResumes(t *testing.T, image string, key []byte) {
 // which TestMigrateToFIPSFailingAtEachWriteLeavesAnOpenableVolume proves the
 // import resumes.
 func TestMigrateToFIPSEveryCrashStateStillOpens(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -561,6 +562,7 @@ func TestMigrateToFIPSEveryCrashStateStillOpens(t *testing.T) {
 // open to the original key in cryptsetup and in this library, and a second
 // run to finish the import.
 func TestMigrateToFIPSFailingAtEachWriteLeavesAnOpenableVolume(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -813,6 +815,7 @@ var errInjectedSync = errors.New("injected: the header write could not be made d
 // opens in cryptsetup and, after RestorePrimaryHeader, in this library, and a
 // second run finishes the import.
 func TestMigrateToFIPSReportsADamagedPrimaryAfterAFailedHeaderWrite(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return

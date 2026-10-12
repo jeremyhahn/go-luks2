@@ -54,6 +54,7 @@ func countDerivations(t *testing.T) (*int, volumeSys) {
 // every way of asking for SHA-1 -- the pbkdf2-sha1 type, a sha1 hash in any
 // case -- with ErrInvalidArgument, deriving nothing and writing nothing.
 func TestNoCreationPathWritesASHA1KDF(t *testing.T) {
+	defer parallel(t)()
 	format := func(kdfType, hash string) func(device string, sys volumeSys) error {
 		return func(device string, sys volumeSys) error {
 			opts := standardFormatOptions(device)
@@ -143,6 +144,7 @@ func TestRefuseSHA1ForCreation(t *testing.T) {
 // new passphrase opens it in cryptsetup to the same volume key, and the old
 // one no longer does.
 func TestChangeKeyRewritesAPBKDF2SHA1KeyslotAsSHA256(t *testing.T) {
+	defer parallel(t)()
 	image := sha1AFVolume(t, sha1AFKinds[1])
 	_, metadata, err := readHeaderForTest(image)
 	if err != nil {
@@ -323,6 +325,7 @@ func TestSHA256IterationsForSHA1(t *testing.T) {
 // decides -- and a conversion past the ceiling refuses before anything is
 // written.
 func TestChangeKeyConvertsAboveTheFloor(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		return // the SHA-1 keyslot cannot be opened; TestChangeKeyRewritesAPBKDF2SHA1KeyslotAsSHA256 asserts the refusal
 	}

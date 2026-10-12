@@ -60,6 +60,7 @@ func TestPriorityDiskMapping(t *testing.T) {
 // reaches disk as the LUKS2 encoding and reads back as itself; the default
 // reads back as normal with no member written.
 func TestVolumeAddKeyslotPriorityRoundTrips(t *testing.T) {
+	defer parallel(t)()
 	tests := []struct {
 		name string
 		p    Priority
@@ -96,12 +97,14 @@ func TestVolumeAddKeyslotPriorityRoundTrips(t *testing.T) {
 // PriorityIgnore is written, PriorityDefault keeps it, and an explicit value
 // replaces it.
 func TestVolumeChangeKeyslotIgnoreIsKeptAndChangeable(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "changekeyslot-ignore.img", "", "")
 	v := txnVolume(t, path)
 	key := txnKey(t, v)
 	ctx := context.Background()
+	kdf := KDFParams{Type: KDFPBKDF2, IterTime: time.Millisecond}
 
-	info, err := v.ChangeKeyslot(ctx, key, txnPassphrase(t, "an ignored slot"), KeyslotParams{Priority: PriorityIgnore})
+	info, err := v.ChangeKeyslot(ctx, key, txnPassphrase(t, "an ignored slot"), KeyslotParams{Priority: PriorityIgnore, KDF: kdf})
 	if err != nil {
 		t.Fatalf("ChangeKeyslot(ignore) failed: %v", err)
 	}
@@ -110,7 +113,7 @@ func TestVolumeChangeKeyslotIgnoreIsKeptAndChangeable(t *testing.T) {
 	}
 	assertOnDiskPriority(t, path, info.ID, intPtr(0))
 
-	info, err = v.ChangeKeyslot(ctx, key, txnPassphrase(t, "still ignored"), KeyslotParams{})
+	info, err = v.ChangeKeyslot(ctx, key, txnPassphrase(t, "still ignored"), KeyslotParams{KDF: kdf})
 	if err != nil {
 		t.Fatalf("ChangeKeyslot(default) failed: %v", err)
 	}
@@ -119,7 +122,7 @@ func TestVolumeChangeKeyslotIgnoreIsKeptAndChangeable(t *testing.T) {
 	}
 	assertOnDiskPriority(t, path, info.ID, intPtr(0))
 
-	info, err = v.ChangeKeyslot(ctx, key, txnPassphrase(t, "preferred"), KeyslotParams{Priority: PriorityPrefer})
+	info, err = v.ChangeKeyslot(ctx, key, txnPassphrase(t, "preferred"), KeyslotParams{Priority: PriorityPrefer, KDF: kdf})
 	if err != nil {
 		t.Fatalf("ChangeKeyslot(prefer) failed: %v", err)
 	}
@@ -128,7 +131,7 @@ func TestVolumeChangeKeyslotIgnoreIsKeptAndChangeable(t *testing.T) {
 	}
 	assertOnDiskPriority(t, path, info.ID, intPtr(2))
 
-	info, err = v.ChangeKeyslot(ctx, key, txnPassphrase(t, "normal again"), KeyslotParams{Priority: PriorityNormal})
+	info, err = v.ChangeKeyslot(ctx, key, txnPassphrase(t, "normal again"), KeyslotParams{Priority: PriorityNormal, KDF: kdf})
 	if err != nil {
 		t.Fatalf("ChangeKeyslot(normal) failed: %v", err)
 	}
@@ -181,6 +184,7 @@ func TestVolumeKeyslotWritesRefuseAnUndeclaredPriority(t *testing.T) {
 // normal one and never tries an ignore keyslot, as cryptsetup's any-slot open
 // does; UnlockKeyslot still opens the ignore keyslot by name.
 func TestVolumeUnlockScanHonoursPriority(t *testing.T) {
+	defer parallel(t)()
 	ctx := context.Background()
 	kdf := KDFParams{Type: KDFPBKDF2, IterTime: time.Millisecond}
 
@@ -233,7 +237,7 @@ func TestVolumeUnlockScanHonoursPriority(t *testing.T) {
 		v := txnVolume(t, path)
 		key := txnKey(t, v)
 
-		info, err := v.ChangeKeyslot(ctx, key, txnPassphrase(t, "the only slot"), KeyslotParams{Priority: PriorityIgnore})
+		info, err := v.ChangeKeyslot(ctx, key, txnPassphrase(t, "the only slot"), KeyslotParams{Priority: PriorityIgnore, KDF: kdf})
 		if err != nil {
 			t.Fatalf("ChangeKeyslot(ignore) failed: %v", err)
 		}

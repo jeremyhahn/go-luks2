@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/jeremyhahn/go-luks2/internal/keyring"
+	"github.com/jeremyhahn/go-luks2/pkg/dmcrypt"
 )
 
 // What the KERNEL does, asserted against a kernel. See
@@ -172,8 +173,8 @@ func TestRealDescriptionIsAcceptedForEveryHostileInput(t *testing.T) {
 	}
 }
 
-func TestCheckKeyringAvailablePassesOnARealKernel(t *testing.T) {
-	if err := CheckKeyringAvailable(); err != nil {
+func TestCheckKeyringPassesOnARealKernel(t *testing.T) {
+	if err := dmcrypt.CheckKeyring(context.Background()); err != nil {
 		t.Fatalf("the preflight refused an environment where dm activation demonstrably works: %v", err)
 	}
 }

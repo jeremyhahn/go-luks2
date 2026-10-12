@@ -47,7 +47,7 @@ func Remedy(kind error) string {
 		return "This is almost always a container seccomp profile: Docker's DEFAULT profile denies the add_key, keyctl and request_key syscalls, and (measured) --cap-add SYS_ADMIN does NOT lift that -- only relaxing seccomp does. " +
 			"Allow those three syscalls in a NARROW custom profile and run with --security-opt seccomp=<profile>.json; prefer that over --security-opt seccomp=unconfined, which also drops every other syscall restriction. " +
 			"Under Kubernetes the equivalent is a localhost seccomp profile in securityContext.seccompProfile. " +
-			"Call CheckKeyringAvailable at startup so this is found at boot rather than at the first unlock."
+			"Call dmcrypt.CheckKeyring at startup so this is found at boot rather than at the first unlock."
 	case ErrUnsupported:
 		return "The kernel was built without CONFIG_KEYS, so it cannot hold a volume key at all and no runtime configuration will change that. This library requires a kernel with keyring support; it does not fall back to putting the key in the device-mapper table."
 	case ErrQuotaExhausted:

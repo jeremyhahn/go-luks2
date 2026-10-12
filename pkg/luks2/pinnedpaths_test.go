@@ -59,6 +59,7 @@ func retargetedPair(t *testing.T) (link, locked, other string, otherBefore [32]b
 // so it cannot be retargeted: the operation lands on the file that was
 // locked, and the device the path was re-pointed at is never touched.
 func TestTheExclusiveClaimTargetsTheLockedDescriptorDespiteARetarget(t *testing.T) {
+	defer parallel(t)()
 	for _, op := range []struct {
 		name string
 		run  func(device string, sys volumeSys) error
@@ -104,6 +105,7 @@ func TestTheExclusiveClaimTargetsTheLockedDescriptorDespiteARetarget(t *testing.
 // descriptor: the change lands on the device that was locked, and the other
 // is not touched.
 func TestHeaderWritersStayOnTheDeviceTheyLocked(t *testing.T) {
+	defer parallel(t)()
 	for _, op := range []struct {
 		name string
 		// run acts on link. locked is read only directly, never through the
