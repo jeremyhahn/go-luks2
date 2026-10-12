@@ -21,42 +21,46 @@ name: CI
 # "cancellation is impossible"; the narrow claim is true and the conclusion was
 # not.
 #
-# TWO TIERS (#341, sdlc §5a). DEVIATION from the template, which has one.
+# TWO TIERS, ONE GATE (#341, #343, sdlc §5a). DEVIATION from the template,
+# which has one tier.
 #
-#   PR tier    every pull_request: Lint, Security Scan, Build, Merged Tree and
-#              Unit Tests (no -race). CI Gate aggregates exactly these and is
-#              the single required check.
+#   PR tier    every event: Lint, Security Scan, Build, Merged Tree and Unit
+#              Tests (no -race).
 #   Full tier  push to main, workflow_dispatch, and a pull_request labelled
 #              `ci:full`: FIPS, Integration Tests and Race (the -race unit run
-#              with its pkg/luks2 budget). Full Gate aggregates exactly these.
+#              with its pkg/luks2 budget).
+#
+# CI Gate, the single required check, needs EVERY job and reads each by name,
+# tagged `pr` or `full`. A `full` job may be skipped only while the full tier
+# is not selected; any other skip, and every failure or cancellation, fails it.
 #
 # No CI workflow is scheduled: the nightly full run is a workflow_dispatch from
 # the coordinator's loop, which this file treats exactly like a push to main.
 # FIPS moved back here from nightly.yml, so it now runs on every push to main
 # rather than once a night; trivy stays in nightly.yml, dispatch-only.
 #
-# Every full-tier job, and Full Gate's FULL_TIER, carries the SAME condition,
-# and test/ci/workflows asserts they stay identical:
+# Every full-tier job, and CI Gate's FULL_TIER, carries the SAME condition,
+# written out on each, and test/ci/workflows asserts they stay identical:
 #
 #   push or workflow_dispatch                  -> full tier
-#   pull_request already labelled ci:full      -> full tier
+#   pull_request labelled ci:full              -> full tier
 #
-# NO LABEL EVENTS. ci.yml does not fire on `labeled`, so ADDING ci:full takes
-# effect on the PR's next push, or on closing and reopening it; it starts
-# nothing by itself. That is deliberate. A job skipped by `if:` still posts a
-# status under its name, and both hosts count a skipped required check as
-# passing, so a label-event run would overwrite the head's real `CI Gate` with
-# a skipped one. Renaming the gate on that event is no way out: Gitea does not
+# LABEL EVENTS RUN CI. ci.yml fires on `labeled`, so ADDING ci:full starts the
+# full tier on the PR's current head at once. Any other label re-runs the PR
+# tier on the same commit; that run is a real evaluation, so the CI Gate it
+# posts is a real result. Nothing here branches on the label event itself, and
+# the gate is never skipped by an event condition: a job skipped by `if:` still
+# posts a status under its name, and both hosts count a skipped required check
+# as passing. Renaming the gate per event is no way out either: Gitea does not
 # evaluate expressions in a job's `name:` and posts the expression verbatim.
-# test/ci/workflows asserts the types below and the literal gate names.
+# test/ci/workflows asserts the types below and the literal gate name.
 on:
   push:
     branches: [main]                    # trunk-based: main is the ONLY trunk
   pull_request:
     branches: [main]
-    # The defaults, listed so that `labeled` is visibly absent; see NO LABEL
-    # EVENTS above.
-    types: [opened, synchronize, reopened]
+    # The defaults plus `labeled`; see LABEL EVENTS RUN CI above.
+    types: [opened, synchronize, reopened, labeled]
   # Lets a run be repeated without inventing a commit, which matters when a
   # failure is the runner's rather than the code's.
   workflow_dispatch:
@@ -360,12 +364,12 @@ jobs:
 
   # ---- Full tier ----
   #
-  # The condition is the same on every full-tier job and on Full Gate's
+  # The condition is the same on every full-tier job and on CI Gate's
   # FULL_TIER; the table at the top of this file reads it out.
   test-integration:
     name: Integration Tests
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:full'))
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     # EVERY DOCKER NAME THIS JOB CREATES IS UNIQUE TO THIS JOB ATTEMPT (#105).
     #
     # Docker names and image tags are unique PER HOST, not per job. Six open
@@ -453,8 +457,8 @@ jobs:
       # anything it tests. A literal cannot diverge between hosts.
       ITEST_IMAGE: go-luks2-integration-test:${{ github.run_id }}-test-integration-${{ github.run_attempt }}
       ITEST_CONTAINER: go-luks2-test-runner-${{ github.run_id }}-test-integration-${{ github.run_attempt }}
-    # No `needs` (ci-template v1.14): starts at once; Full Gate fails closed on
-    # it whenever the full tier runs. The suite races on host-global loop devices — /dev/loop* is NOT
+    # No `needs` (ci-template v1.14): starts at once; CI Gate fails closed on
+    # it whenever the full tier is selected. The suite races on host-global loop devices — /dev/loop* is NOT
     # namespaced, so two concurrent runs on one machine share one pool — which
     # is why it runs inside the container and never bare on a shared runner.
     steps:
@@ -663,7 +667,7 @@ jobs:
   test-race:
     name: Race
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:full'))
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -720,7 +724,7 @@ jobs:
   fips:
     name: FIPS
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:full'))
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     timeout-minutes: 30
     env:
       GOFIPS140: latest
@@ -870,8 +874,8 @@ jobs:
           path: luks-linux-*
 
   # The single required check. Branch protection requires THIS job and nothing
-  # else, so adding a job above means adding it to `needs` AND to the results
-  # list below; a job left out of both runs and gates nothing.
+  # else, so adding a job above means adding it to `needs` AND a `check` line
+  # below; a job left out of both runs and gates nothing.
   # THE MERGE RESULT, which nothing else in this pipeline looks at.
   #
   # Every other check reads the BRANCH HEAD. actions/checkout takes the PR head,
@@ -952,9 +956,21 @@ jobs:
           go vet -tags=integration ./...
           echo "the merge of this branch with $base compiles"
 
-  # THE PR TIER'S GATE, and the single required check. It needs exactly the
-  # PR-tier jobs (#341): Integration Tests left it for the full tier, and the
-  # full tier gates through Full Gate, which is not required.
+  # THE ONE GATE, and the single required check (#343). It needs EVERY job
+  # above, in both tiers, and reads each by name on a `check` line tagged `pr`
+  # or `full`; test/ci/workflows derives the tags from the jobs' `if:` and
+  # fails on a job left out or mis-tagged.
+  #
+  #   success                         passes
+  #   skipped, `full`, tier not run   passes: the full tier was not selected
+  #   skipped, anything else          fails: a job that never ran proved nothing
+  #   failure, cancelled, unreadable  fails
+  #
+  # FULL_TIER is the full-tier jobs' condition, verbatim. A value other than
+  # `true` or `false` fails the gate: an unevaluated expression is not a "no".
+  #
+  # `if: always()` and nothing else: the gate is never skipped by an event
+  # condition, so every run, label events included, posts a real result.
   #
   # The name is literal and must stay so: Gitea does not evaluate expressions
   # in a job's `name:`, and would post the expression itself as the status
@@ -963,87 +979,45 @@ jobs:
     name: CI Gate
     runs-on: ubuntu-latest
     if: always()
-    needs: [lint, security, build, test-unit, merge-check]
+    needs: [lint, security, test-unit, test-integration, test-race, fips, build, merge-check]
     steps:
       # join(needs.*.result) is a GitHub extension that evaluates to an empty
       # string on the self-hosted host, so a gate built on it reports success
-      # while jobs are
-      # failing. Every job is listed by name, and a result that cannot be read
-      # at all is treated as a failure rather than a pass.
-      - name: Check job results
+      # while jobs are failing. Every job is listed by name, and a result that
+      # cannot be read at all is treated as a failure rather than a pass.
+      - name: Fail closed on any non-success
         env:
-          LINT: ${{ needs.lint.result }}
-          SECURITY: ${{ needs.security.result }}
-          BUILD: ${{ needs.build.result }}
-          TEST_UNIT: ${{ needs.test-unit.result }}
-          MERGE_CHECK: ${{ needs.merge-check.result }}
+          FULL_TIER: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
         run: |
-          # skipped != failed, but BOTH fail the gate: a job that never ran
-          # proved nothing, and naming it that way prevents the failure mode
-          # this was written for — a red that reads as a test failure while the
-          # tests in fact never ran.
-          failed=0
-          for job in LINT SECURITY BUILD TEST_UNIT MERGE_CHECK; do
-            eval "result=\$$job"
-            case "$result" in
-              success) echo "OK   ${job}" ;;
-              skipped) echo "SKIP ${job} (did not run — see its job)"; failed=1 ;;
-              "")      echo "FAIL ${job} (<unreadable>)"; failed=1 ;;
-              *)       echo "FAIL ${job} (${result})"; failed=1 ;;
-            esac
-          done
-          if [ "$failed" -ne 0 ]; then
-            echo "CI gate failed: not every job reported success."
-            exit 1
-          fi
-          echo "CI gate passed."
-
-  # THE FULL TIER'S GATE (#341). Not a required check -- branch protection
-  # requires CI Gate only -- but red on a push to main or a dispatch whenever a
-  # full-tier job failed, was cancelled or did not run.
-  #
-  #   FULL_TIER true   every full-tier job must be `success`; skipped,
-  #                    failure, cancelled and unreadable all fail it.
-  #   FULL_TIER false  (an ordinary PR) every full-tier job must be `skipped`,
-  #                    and the gate passes saying the tier was not requested.
-  #                    A job that ran anyway means the conditions drifted
-  #                    apart, and fails it.
-  #   anything else    fails: an unevaluated expression is not a "no".
-  #
-  # Literal name, for the reason CI Gate's is.
-  full-gate:
-    name: Full Gate
-    runs-on: ubuntu-latest
-    if: always()
-    needs: [fips, test-integration, test-race]
-    steps:
-      - name: Check job results
-        env:
-          FULL_TIER: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:full')) }}
-          FIPS: ${{ needs.fips.result }}
-          TEST_INTEGRATION: ${{ needs.test-integration.result }}
-          TEST_RACE: ${{ needs.test-race.result }}
-        run: |
-          case "$FULL_TIER" in
-            true)  want=success ;;
-            false) want=skipped ;;
-            *)     echo "FAIL FULL_TIER is '${FULL_TIER}', neither true nor false"; exit 1 ;;
+          BAD=0
+          echo "full tier selected: ${FULL_TIER}"
+          case "${FULL_TIER}" in
+            true|false) ;;
+            *) echo "FAIL FULL_TIER is '${FULL_TIER}', neither true nor false"; exit 1;;
           esac
-          failed=0
-          for job in FIPS TEST_INTEGRATION TEST_RACE; do
-            eval "result=\$$job"
-            if [ "$result" = "$want" ]; then
-              echo "OK   ${job} (${result})"
-            else
-              echo "FAIL ${job} (${result:-<unreadable>}, expected ${want})"; failed=1
-            fi
-          done
-          if [ "$failed" -ne 0 ]; then
-            echo "Full gate failed."
-            exit 1
-          fi
-          if [ "$FULL_TIER" = false ]; then
-            echo "Full tier not requested for this event (no ci:full label); nothing to gate."
+          check() { # <job> <result> <pr|full>
+            case "$2" in
+              success) echo "OK   $1";;
+              skipped)
+                if [ "$3" = full ] && [ "${FULL_TIER}" != true ]; then
+                  echo "SKIP $1 (full tier not selected)"
+                else
+                  echo "FAIL $1 (skipped)"; BAD=1
+                fi;;
+              *) echo "FAIL $1 (${2:-<unreadable>})"; BAD=1;;
+            esac
+          }
+          check lint             "${{ needs.lint.result }}" pr
+          check security         "${{ needs.security.result }}" pr
+          check test-unit        "${{ needs.test-unit.result }}" pr
+          check build            "${{ needs.build.result }}" pr
+          check merge-check      "${{ needs.merge-check.result }}" pr
+          check test-integration "${{ needs.test-integration.result }}" full
+          check test-race        "${{ needs.test-race.result }}" full
+          check fips             "${{ needs.fips.result }}" full
+          if [ "$BAD" -ne 0 ]; then
+            echo "CI gate failed: not every job reported success."
           else
-            echo "Full gate passed."
+            echo "CI gate passed."
           fi
+          exit $BAD

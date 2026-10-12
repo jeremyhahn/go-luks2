@@ -10,7 +10,7 @@ name: Nightly
 # tracked issues land, a job may move back to ci.yml — that move is deliberate,
 # not automatic.
 #
-# DEVIATION (#341, sdlc §5a): NO `schedule:` trigger. No CI workflow is scheduled;
+# DEVIATION (#341, sdlc §5a): NO `schedule` trigger. No CI workflow is scheduled;
 # the coordinator's loop dispatches this file nightly, together with ci.yml,
 # whose workflow_dispatch runs the full tier. FIPS moved to ci.yml's full tier
 # then, which runs it on every push to main as well. What remains is trivy.

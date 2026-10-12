@@ -126,7 +126,7 @@ in [architecture.md](architecture.md#interrupted-imports).
 
 CI's `FIPS` job (`.github/workflows/ci.yml`, full tier: every push to `main`,
 every `workflow_dispatch` and every pull request labelled `ci:full`; gated by
-`Full Gate`) sets `GOFIPS140=latest` and
+`CI Gate`) sets `GOFIPS140=latest` and
 `GODEBUG=fips140=only`, builds `./...`, runs the cross-process import tests
 below, and runs `go test ./...`. `fips140=only` is used because `on` still
 lets non-approved algorithms run.
