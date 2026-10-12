@@ -1,4 +1,4 @@
-# code-review-template: v4.1 -- the Codex review in Gitea CI, on the `codex`
+# code-review-template: v4.2 -- the Codex review in Gitea CI, on the `codex`
 # runner, for a pull request that carries `code-review` and `task:ready`. Codex
 # reads the change and returns structured findings with P0-P3 priorities; this
 # workflow, not the model, turns them into a review posted as the `codex` Gitea
@@ -14,6 +14,15 @@
 # the current head and holds it on any REQUEST_CHANGES; this workflow only
 # produces the review. Design: dept-software#17, and Infrastructure's
 # interface, dept-infra `gitea/docs/codex-review-ci.md` (dept-infra#94).
+#
+# v4.2 (go-luks2 #346): the first-party modules a go.mod in the change requires
+# (github.com/jeremyhahn/*) are fetched as Gitea tag archives with the reviewer
+# token and unpacked read-only under $DEPS, and the prompt says where. The
+# image has no Go and the job no module proxy, so v4.1's codex read imports it
+# could not resolve and filed P1s for them. A private repository is fetched
+# only when the base branch already requires it, so a change cannot pull a
+# private module into a public review. Anything not fetched is listed in the
+# prompt as missing here, not as a defect. Public modules are not fetched.
 #
 # v4.1 (handbook#298): api() sends /user to the instance API, not the
 # repository's. v3's identity check asked /api/v1/repos/<owner>/<repo>/user,
@@ -108,6 +117,9 @@ env:
   # uid 1000's only writable directory outside the checkout: codex writes its
   # final message here, and root copies it into $WORK reading it as uid 1000.
   OUT: /tmp/codex-review-out
+  # Root's, read-only to uid 1000: the source of the first-party modules the
+  # change requires, one directory per repository and ref (v4.2).
+  DEPS: /tmp/codex-review-deps
   GITEA_API: ${{ github.server_url }}/api/v1
   REPO_API: ${{ github.server_url }}/api/v1/repos/${{ github.repository }}
   PR_NUM: ${{ github.event.pull_request.number }}
@@ -125,9 +137,9 @@ jobs:
     runs-on: codex
     # One budget inside 55 minutes: the refresh lock waits at most 300 s and
     # the refresh runs at most 130 s, the review lock 600 s, codex runs at most
-    # 1530 s; the guard, checkout, retried API calls and posting keep the
-    # remaining 740 s, so the error comment always gets out before Gitea kills
-    # the job.
+    # 1530 s, the module fetch at most 300 s; the guard, checkout, retried API
+    # calls and posting keep the remaining 440 s, so the error comment always
+    # gets out before Gitea kills the job.
     timeout-minutes: 55
     steps:
       # ROOT. Before checkout, so a stale, duplicate or unrequested run costs a
@@ -405,6 +417,139 @@ jobs:
           persist-credentials: false
           path: src
 
+      # ROOT, before the tree is handed to uid 1000 and before any git runs in
+      # it. The checkout is only read here: plain go.mod files, never a link,
+      # parsed by awk, and nothing in them reaches a URL unless it matches the
+      # strict shapes below. A fetch that fails is a line in the prompt, never
+      # a failed job: the review runs without that module, as v4.1 did.
+      - name: Fetch the first-party modules the change requires
+        id: deps
+        if: steps.guard.outputs.requested == 'true' && steps.guard.outputs.skip == ''
+        timeout-minutes: 6
+        env:
+          SRC: ${{ github.workspace }}/src
+        run: |
+          # shellcheck source=/dev/null
+          . "$WORK/lib.sh"
+
+          rm -rf "$DEPS"
+          install -d -m 0755 "$DEPS"
+          : > "$WORK/deps.ok"
+          : > "$WORK/deps.missing"
+          owner=${GITHUB_REPOSITORY%%/*}
+          self=${GITHUB_REPOSITORY#*/}
+          prefix="github.com/$owner/"
+          deadline=$(( $(date +%s) + 240 ))
+          total=0
+          max_total=$(( 1024 * 1024 * 1024 ))
+
+          # get URL FILE -> the HTTP code; the body goes to FILE. Never dies.
+          get() {
+            curl -sS --proto '=http,https' --max-time 60 --max-filesize $(( 256 * 1024 * 1024 )) \
+              -o "$2" -w '%{http_code}' -H @"$HDR" "$1" 2>/dev/null || echo 000
+          }
+          # The first-party requires of go.mod file $1: "module version" lines.
+          requires() {
+            awk '{ sub(/\/\/.*/, ""); gsub(/"/, "") }
+                 /^[ \t]*require[ \t]*\(/ { inreq = 1; next }
+                 inreq && /^[ \t]*\)/ { inreq = 0; next }
+                 inreq && NF >= 2 { print $1, $2; next }
+                 /^[ \t]*require[ \t]+[^( \t]/ && NF >= 3 { print $2, $3 }' "$1" |
+              while read -r m v; do
+                [[ $m == "$prefix"* ]] || continue
+                [[ $m =~ ^github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$ ]] || continue
+                [[ $v =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]*)?$ ]] || continue
+                printf '%s %s\n' "$m" "$v"
+              done
+          }
+
+          # THE HEAD'S go.mod files, at most 50, none over 1 MiB, no links.
+          mapfile -t mods < <(cd "$SRC" && find . -name .git -prune -o -path '*/vendor' -prune \
+                                -o -path '*/testdata' -prune -o -type f -name go.mod -size -1024k -print |
+                              sed 's|^\./||' | sort | head -n 50)
+          [ "${#mods[@]}" -gt 0 ] || { echo "No go.mod in the change; nothing to fetch."; exit 0; }
+          : > "$WORK/deps.want"
+          for f in "${mods[@]}"; do requires "$SRC/$f" >> "$WORK/deps.want"; done
+          sort -u -o "$WORK/deps.want" "$WORK/deps.want"
+          [ -s "$WORK/deps.want" ] || { echo "The change requires no $prefix module; nothing to fetch."; exit 0; }
+
+          # THE BASE BRANCH'S first-party repositories, read through the API,
+          # not git: a private repository is fetched only if one of these.
+          base_ref=$(api GET "/pulls/$PR_NUM" | jq -r '.base.ref // empty')
+          [ -n "$base_ref" ] || die "could not read the base branch of PR $PR_NUM"
+          ref_q=$(jq -rn --arg r "$base_ref" '$r | @uri')
+          : > "$WORK/deps.base"
+          for f in "${mods[@]}"; do
+            [[ $f =~ ^[A-Za-z0-9_./-]+$ ]] || continue
+            code=$(get "$REPO_API/raw/$f?ref=$ref_q" "$WORK/base.mod")
+            [ "$code" = 200 ] || continue
+            requires "$WORK/base.mod" | awk '{ split($1, p, "/"); print p[3] }' >> "$WORK/deps.base"
+          done
+          rm -f "$WORK/base.mod"
+
+          declare -A seen=()
+          while read -r m v; do
+            rest=${m#"$prefix"}
+            repo=${rest%%/*}
+            sub=""
+            [ "$repo" = "$rest" ] || sub=${rest#*/}
+            if [ "$(date +%s)" -ge "$deadline" ] || [ "$total" -ge "$max_total" ]; then
+              echo "- $m@$v: not fetched, the fetch budget (240 s, 1 GiB) ran out" >> "$WORK/deps.missing"
+              continue
+            fi
+            if [ "$repo" != "$self" ] && ! grep -qxF -- "$repo" "$WORK/deps.base"; then
+              code=$(get "$GITEA_API/repos/$owner/$repo" "$WORK/repo.json")
+              if [ "$code" != 200 ] || [ "$(jq -r '.private' "$WORK/repo.json" 2>/dev/null)" != false ]; then
+                echo "- $m@$v: not fetched, $owner/$repo is private (or unreadable) and the base branch does not require it" >> "$WORK/deps.missing"
+                continue
+              fi
+            fi
+            # The ref: a pseudo-version names a commit; a tag is the version,
+            # under the module's directory for a module below the root, or
+            # without a /vN major suffix (the major-branch layout).
+            v0=${v%+incompatible}
+            refs=()
+            if [[ $v0 =~ [.-]([0-9]{14})-([0-9a-f]{12})$ ]]; then
+              refs=("${BASH_REMATCH[2]}")
+            else
+              [ -z "$sub" ] || refs+=("$sub/$v0")
+              if [[ $sub =~ ^(.*/)?v[0-9]+$ ]]; then
+                trimmed=${sub%v*}; trimmed=${trimmed%/}
+                refs+=("${trimmed:+$trimmed/}$v0")
+              fi
+              [ -n "$sub" ] || refs+=("$v0")
+            fi
+            got=""
+            for r in "${refs[@]}"; do
+              dest="$DEPS/$repo@${r//\//_}"
+              if [ -n "${seen[$dest]:-}" ]; then got=$dest; break; fi
+              code=$(get "$GITEA_API/repos/$owner/$repo/archive/$r.tar.gz" "$WORK/dep.tgz")
+              [ "$code" = 200 ] || continue
+              total=$(( total + $(stat -c %s "$WORK/dep.tgz") ))
+              install -d -m 0755 "$dest"
+              if tar -xzf "$WORK/dep.tgz" -C "$dest" --strip-components=1 \
+                   --no-same-owner --no-same-permissions 2>/dev/null; then
+                chmod -R u+rwX,go+rX,go-w "$dest"
+                seen[$dest]=1
+                got=$dest
+                break
+              fi
+              rm -rf "$dest"
+            done
+            rm -f "$WORK/dep.tgz" "$WORK/repo.json"
+            if [ -z "$got" ]; then
+              echo "- $m@$v: not fetched, no archive of $owner/$repo at ${refs[*]}" >> "$WORK/deps.missing"
+              continue
+            fi
+            where=$got
+            [ -z "$sub" ] || [ ! -d "$got/$sub" ] || where=$got/$sub
+            echo "- $m@$v: $where" >> "$WORK/deps.ok"
+          done < "$WORK/deps.want"
+
+          chmod -R go-w "$DEPS"
+          echo "Fetched $(wc -l < "$WORK/deps.ok") first-party module(s) into $DEPS; $(wc -l < "$WORK/deps.missing") not fetched."
+          cat "$WORK/deps.ok" "$WORK/deps.missing"
+
       # ROOT orchestrates; the git reads and codex run as uid 1000.
       - name: Review the head with codex as uid 1000
         id: codex
@@ -445,6 +590,12 @@ jobs:
             ! as_codex test -r "$f" || die "uid 1000 can read $f; refusing to run codex beside it"
           done
           as_codex test -r "$CODEX_JOB_HOME/auth.json" || die "uid 1000 cannot read its per-job Codex login"
+          # The fetched modules are root's and read-only to uid 1000 (v4.2).
+          if [ -d "$DEPS" ]; then
+            [ -z "$(find "$DEPS" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print -quit)" ] ||
+              die "$DEPS holds a file uid 1000 could own or write; refusing to run codex beside it"
+            ! as_codex test -w "$DEPS" || die "uid 1000 can write $DEPS; refusing to run codex"
+          fi
           for f in "${runner_files[@]}"; do
             [ ! -e "$f" ] || ! as_codex test -w "$f" || die "uid 1000 can write $f; refusing to run codex"
           done
@@ -475,6 +626,17 @@ jobs:
             printf 'BEGIN-PR-%s\n' "$mark"
             jq -r '"Title: \(.title // "")\n\n\(.body // "")"' <<<"$pr"
             printf 'END-PR-%s\n' "$mark"
+            printf '\n## First-party dependencies\n\n'
+            printf 'This job has no Go toolchain and no module proxy: you cannot build the code\n'
+            printf 'or run its tests, so review by reading. The source of each first-party module\n'
+            printf 'a go.mod in the change requires is unpacked read-only under %s, one\n' "$DEPS"
+            printf 'directory per repository and ref; read it to check calls into those modules.\n\n'
+            if [ -s "$WORK/deps.ok" ]; then cat "$WORK/deps.ok"; else printf -- '- none fetched\n'; fi
+            if [ -s "$WORK/deps.missing" ]; then
+              printf '\nNot available in this job. Their absence is a limit of this environment, not\n'
+              printf 'a defect of the change: never report a module missing or unresolvable for it.\n\n'
+              cat "$WORK/deps.missing"
+            fi
           } > "$WORK/prompt.md"
 
           # Root opens the lock and the prompt; codex inherits them and drops
@@ -689,4 +851,4 @@ jobs:
         if: always()
         run: |
           if [ -f "$WORK/codex-auth.json" ]; then shred -u "$WORK/codex-auth.json"; fi
-          rm -rf "$WORK" "$OUT"
+          rm -rf "$WORK" "$OUT" "$DEPS"
