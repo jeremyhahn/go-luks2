@@ -1,6 +1,6 @@
 # go-luks2 docs
 
-> **Status: NORMATIVE** · Last verified: 2026-10-12 against base/331 (a9c840c)
+> **Status: NORMATIVE** · Last verified: 2026-10-13 against fef1d25
 > Conflicts with this document are defects. Fix them here first.
 
 Documentation is organized as one feature folder per capability, not as flat
@@ -10,6 +10,9 @@ and `Last verified:` stamp. **An agent picking up work on a feature reads its
 folder before it reads code.**
 
 ## Index
+
+[SPEC.md](SPEC.md) is the normative specification: purpose, boundaries, the
+feature table every folder below is a row of, interfaces and release criteria.
 
 | Folder | Covers |
 |---|---|
@@ -25,6 +28,7 @@ folder before it reads code.**
 | [wipe](wipe/) | Crypto-erase and full-device sanitization |
 | [fips](fips/) | FIPS 140-3 mode, SHA-1 handling, `MigrateToFIPS` |
 | [cryptsetup-interop](cryptsetup-interop/) | Compatibility policy, the two-way interop matrix |
+| [release](release/) | Publishing to the public mirror: what the archive export strips and the releasability rule (one reference page, not the five-file set) |
 
 Each folder documents the API as shipped. Two checks in `test/tools/apidump`
 hold the exported surface: `make api-diff` (part of `make ci`) checks that
@@ -96,8 +100,9 @@ changelog. The interop contract is in
 
 ## Conversion state
 
-Every document in this tree is a feature folder, this index or the release
-reference [release/public-releasability.md](release/public-releasability.md);
+Every document in this tree is a feature folder, this index, the
+specification [SPEC.md](SPEC.md) or the release reference
+[release/public-releasability.md](release/public-releasability.md);
 no legacy topic file remains. The test-strategy detail is in
 [volumes/engineering.md](volumes/engineering.md#test-strategy), which the
 other folders' test-strategy sections link to, and the releasability gate's
