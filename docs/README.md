@@ -4,9 +4,9 @@
 > Conflicts with this document are defects. Fix them here first.
 
 Documentation is organized as one feature folder per capability, not as flat
-topic files. Each folder holds five files — `architecture.md`,
-`engineering.md`, `cli.md`, `api.md`, `user.md` — with its own status banner
-and `Last verified:` stamp. **An agent picking up work on a feature reads its
+topic files. Each folder holds only the files that have content, drawn from
+`architecture.md`, `engineering.md`, `cli.md`, `api.md` and `user.md`, each
+with its own status banner and `Last verified:` stamp. **An agent picking up work on a feature reads its
 folder before it reads code.**
 
 ## Index
@@ -28,7 +28,7 @@ feature table every folder below is a row of, interfaces and release criteria.
 | [wipe](wipe/) | Crypto-erase and full-device sanitization |
 | [fips](fips/) | FIPS 140-3 mode, SHA-1 handling, `MigrateToFIPS` |
 | [cryptsetup-interop](cryptsetup-interop/) | Compatibility policy, the two-way interop matrix |
-| [release](release/) | Publishing to the public mirror: what the archive export strips and the releasability rule (one reference page, not the five-file set) |
+| [release](release/) | Publishing to the public mirror: what the archive export strips and the releasability rule (one reference page) |
 
 Each folder documents the API as shipped. Two checks in `test/tools/apidump`
 hold the exported surface: `make api-diff` (part of `make ci`) checks that
