@@ -13,11 +13,13 @@
 // excludes .git/ and runs `go test -tags=integration ./...`. Run it through
 // `make releasability`, which `make ci` and the CI workflow both call.
 //
-// Exit status: 0 the tree has no finding -- publishable, or publishable once
-// the files it lists are stripped at publish (labstrings.DefaultStripAtPublish)
-// -- 1 it is not (the report says why),
+// Exit status: 0 the tree has no finding -- publishable; the strip-at-publish
+// files it lists (labstrings.DefaultStripAtPublish) are excluded from every
+// archive of it by .gitattributes -- 1 it is not (the report says why; a
+// strip-at-publish file .gitattributes does not export-ignore is a finding),
 // 2 the gate could not run -- a missing or extra argument, a root that is not
-// a git checkout, an unusable releasability-exempt.txt, or an index entry it
+// a git checkout, an export-ignore attribute git could not report, an
+// unusable releasability-exempt.txt, or an index entry it
 // could not read in full (a blob over the scan limit that the exemption list
 // does not name, one missing from the object store, or an I/O failure). A
 // tree the gate could not list is never reported clean, and the only entry it
@@ -92,6 +94,8 @@ func run(args []string, read indexReader, p policy, stdout, stderr io.Writer) in
 		fmt.Fprintf(stderr, "releasability-gate: %v\n", err)
 		return exitFailed
 	}
+	// The strip is mechanical only for a file the archive leaves out.
+	unpublishable = append(unpublishable, labstrings.NotExportIgnored(entries, p.strip)...)
 
 	if len(findings) > 0 || len(unpublishable) > 0 {
 		fmt.Fprint(stderr, "this tree cannot be published as it stands:\n\n")
@@ -116,13 +120,14 @@ func run(args []string, read indexReader, p policy, stdout, stderr io.Writer) in
 		}
 	}
 
-	// Strip-at-publish files do not fail the gate, and the tree is not called
-	// publishable while any is tracked: the tag's tree is not the published
-	// tree until the publish removes them (#211). Each is printed on every
+	// Strip-at-publish files do not fail the gate: they belong on main, and
+	// every one reaching this point is export-ignored (NotExportIgnored above
+	// fails the rest), so an archive export of the tree -- which is how the
+	// public tree is produced (#211) -- leaves it out. Each is printed on every
 	// run. A report that cannot be written is a failure -- the qualification
 	// is the point.
 	if stripped := labstrings.StripAtPublish(entries, p.strip); len(stripped) > 0 {
-		header := fmt.Sprintf("releasability-gate: %d tracked files; no finding, but NOT YET PUBLISHABLE -- %d file(s) to be stripped at publish (#211):\n\n", len(entries), len(stripped))
+		header := fmt.Sprintf("releasability-gate: %d tracked files; no finding, publishable as an archive export -- %d file(s) excluded from every archive by %s (export-ignore):\n\n", len(entries), len(stripped), labstrings.GitAttributes)
 		if err := writeItems(stdout, header, stripped); err != nil {
 			fmt.Fprintf(stderr, "releasability-gate: %v\n", err)
 			return exitFailed

@@ -29,6 +29,25 @@ coverage.html
 # layer.
 .serena/
 
+# Files tracked on main that the public release does not carry: the
+# strip-at-publish list (DefaultStripAtPublish in
+# test/internal/labstrings/published.go), which .gitattributes export-ignores.
+# A broad COPY must not bake them into a layer either.
+# test/tools/releasability-gate/export_test.go requires every entry here, and
+# for a directory entry (`<dir>/**`) the directory itself as well, as in
+# .gitattributes.
+**/CLAUDE.md
+**/AGENTS.md
+**/.claude/**
+**/.claude
+**/.serena/**
+**/.serena
+.github/workflows/automerge.yml
+.github/workflows/code-review.yml
+.github/workflows/qwen-review.yml
+.github/workflows/batch.yml
+test/ci/workflows/batch_test.go
+
 # OS files
 .DS_Store
 Thumbs.db

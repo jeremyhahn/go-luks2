@@ -51,6 +51,30 @@ func (e *ReadError) Error() string {
 
 func (e *ReadError) Unwrap() error { return e.Err }
 
+// AttrError reports that git could not say which tracked files .gitattributes
+// export-ignores. The gate cannot then vouch that a strip-at-publish file stays
+// out of the archive, so it stops rather than reporting clean.
+type AttrError struct {
+	// Root is the directory git was asked about.
+	Root string
+
+	// Stderr is what git said, if anything.
+	Stderr string
+
+	// Err is the underlying exec or parse failure.
+	Err error
+}
+
+func (e *AttrError) Error() string {
+	msg := "labstrings: cannot read the export-ignore attribute in " + e.Root + ": " + e.Err.Error()
+	if e.Stderr != "" {
+		msg += ": " + e.Stderr
+	}
+	return msg
+}
+
+func (e *AttrError) Unwrap() error { return e.Err }
+
 // IndexEntryError is returned when an index entry cannot be scanned: its blob
 // is missing from the object store (a partial clone), its mode is one the gate
 // does not understand, or git's answer about it is malformed. The gate cannot

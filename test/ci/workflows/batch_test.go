@@ -14,7 +14,10 @@ import (
 // race-full, soak and bench on main. The coordinator dispatches it; it must
 // never run on its own, never take a CI slot and never gate a merge. These
 // tests are what fails when an edit makes it do any of the three.
-const batchWorkflow = ".github/workflows/batch.yml"
+//
+// batch.yml is stripped at publish, and so is this file, which tests nothing
+// else: both are in labstrings.DefaultStripAtPublish. Nothing outside this
+// file may depend on it, or the published tree would not build.
 
 var (
 	topKey     = regexp.MustCompile(`(?m)^  ([A-Za-z_][\w-]*):`)

@@ -14,9 +14,13 @@ import (
 	"testing"
 )
 
-// ownerPathFixture is the owner home prefix this gate bans, assembled at runtime
-// so the fixture does not itself have to be waived on every line that uses it.
-var ownerPathFixture = "/home/" + "jhahn" // lab-string-ok: fixture for the owner-path rule
+// ownerAccountFixture is the owner's login this gate bans, and ownerPathFixture
+// the home prefix built on it. Both are assembled at runtime so the fixtures do
+// not themselves have to be waived on every line that uses them.
+var (
+	ownerAccountFixture = "j" + "hahn"
+	ownerPathFixture    = "/home/" + ownerAccountFixture
+)
 
 // entriesOf turns a path-to-content map into regular-file index entries,
 // sorted by path, in the form Scan takes.
@@ -94,11 +98,74 @@ func TestScan_ReportsEveryClassWithItsLineAndMatch(t *testing.T) {
 			wantLine:  1,
 		},
 		{
+			name:      "tunnel gateway in prose",
+			content:   "The tunnel comes up on tgw-01 before the runners.\n",
+			wantClass: ClassLabHost,
+			wantMatch: "tgw-01",
+			wantLine:  1,
+		},
+		{
+			name:      "tunnel gateway in a URL, mixed case",
+			content:   "proxy: https://TGW-01:8443/v1\n",
+			wantClass: ClassLabHost,
+			wantMatch: "TGW-01",
+			wantLine:  1,
+		},
+		{
+			name:      "mini node in YAML",
+			content:   "runners:\n  - host: lab-node-5\n",
+			wantClass: ClassLabHost,
+			wantMatch: "lab-node-5",
+			wantLine:  2,
+		},
+		{
+			name:      "mini node in a URL, mixed case",
+			content:   "see http://Mini-02.internal:8077/status\n",
+			wantClass: ClassLabHost,
+			wantMatch: "Mini-02",
+			wantLine:  1,
+		},
+		{
+			name:      "coordinator host in prose",
+			content:   "# Notes\nThe coordinator runs on control-b.\n",
+			wantClass: ClassLabHost,
+			wantMatch: "control-b",
+			wantLine:  2,
+		},
+		{
+			name:      "coordinator host in YAML, mixed case",
+			content:   "coordinator: Control-b\n",
+			wantClass: ClassLabHost,
+			wantMatch: "Control-b",
+			wantLine:  1,
+		},
+		{
+			name:      "coordinator host in a URL",
+			content:   "forge: http://git.example.internal:3001/api/v1\n",
+			wantClass: ClassLabHost,
+			wantMatch: "control-b",
+			wantLine:  1,
+		},
+		{
 			name:      "owner home path in a doc",
 			content:   "See " + ownerPathFixture + "/sources for the checkout.\n",
 			wantClass: ClassOwnerPath,
 			wantMatch: ownerPathFixture,
 			wantLine:  1,
+		},
+		{
+			name:      "owner account in an ssh command",
+			content:   "ssh " + ownerAccountFixture + "@ci-runner-01 uptime\n",
+			wantClass: ClassOwnerAccount,
+			wantMatch: ownerAccountFixture,
+			wantLine:  1,
+		},
+		{
+			name:      "owner account as a mixed-case author, in YAML",
+			content:   "maintainers:\n  - J" + "Hahn\n",
+			wantClass: ClassOwnerAccount,
+			wantMatch: "J" + "Hahn",
+			wantLine:  2,
 		},
 		{
 			name:      "lab NFS mount in a script default",
@@ -182,6 +249,30 @@ func TestScan_AcceptsWhatItShould(t *testing.T) {
 			name:    "a word that merely contains the fleet name omega",
 			content: "megaomegalith and omegas are words, not hosts\n",
 		},
+		{
+			name:    "words that merely start like a mini node",
+			content: "a minimal minix build, one mini-batch at a time, mini-2026 and mini-5\n",
+		},
+		{
+			name:    "words that merely start like a coordinator host",
+			content: "the control-plane talks over the control-bus; control-b2 is not a host\n",
+		},
+		{
+			name:    "a key chord is not a coordinator host",
+			content: "press Control-C to abort, Control-D at the prompt\n",
+		},
+		{
+			name:    "the forge owner in a module path and a repository URL",
+			content: "import \"github.com/jeremyhahn/go-enclave\"\nsee https://github.com/jeremyhahn/go-luks2\n",
+		},
+		{
+			name:    "a word that merely contains the owner account",
+			content: "x" + ownerAccountFixture + " and " + ownerAccountFixture + "s and " + ownerAccountFixture + "_x are not the account\n",
+		},
+		{
+			name:    "a tunnel gateway without a number",
+			content: "the tgw role, tgw-a, tgw-1 and tgw-001 are not hosts\n",
+		},
 	}
 
 	for _, tc := range cases {
@@ -230,6 +321,31 @@ func TestScan_AnAllowRuleAcceptsOnlyTheClassesItNames(t *testing.T) {
 	}
 	if findings[0].Class != ClassOwnerPath {
 		t.Errorf("class = %s, want %s", findings[0].Class, ClassOwnerPath)
+	}
+}
+
+// TestScan_AnOwnerPathIsOneFindingNotTwo: the account inside an owner path is
+// the same leak, reported once as the more specific owner-path, and an allow
+// rule that accepts the path accepts the account in it.
+func TestScan_AnOwnerPathIsOneFindingNotTwo(t *testing.T) {
+	content := "cd " + ownerPathFixture + "/sources && ssh " + ownerAccountFixture + "@ci-runner-01\n"
+	files := entriesOf(map[string]string{"notes.md": content})
+
+	findings, err := Scan(files, nil)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(findings) != 2 || findings[0].Class != ClassOwnerPath || findings[1].Class != ClassOwnerAccount {
+		t.Fatalf("want one owner-path and one owner-account finding, got %v", findings)
+	}
+
+	rules := []AllowRule{{Path: "notes.md", Classes: []Class{ClassOwnerPath}, Reason: "a path under the owner's home is the point"}}
+	findings, err = Scan(files, rules)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(findings) != 1 || findings[0].Class != ClassOwnerAccount || !strings.Contains(findings[0].Excerpt, "ssh") {
+		t.Fatalf("want only the bare account reported, got %v", findings)
 	}
 }
 
@@ -417,8 +533,12 @@ func TestPatterns_EveryNeedleIsImpliedByItsExpr(t *testing.T) {
 		`(?i)\bdellemc-\d{2}\b`:        {"runner ci-node-2", "DELLEMC-01"},
 		`(?i)\bgodlike(\.internal)?\b`: {"on gpu-host", "http://GODLIKE.internal:8077"},
 		`(?i)\bomega(\.internal)?\b`:   {"omega is 21%", "http://OMEGA.internal:8077"},
-		`/home/jhahn\b`:                {ownerPathFixture + "/sources"},        // lab-string-ok: sample for the owner-path rule
-		`/mnt/vstation`:                {"/mnt/" + "vstation" + "-01/go-qrdb"}, // lab-string-ok: sample for the owner-path rule
+		`(?i)\btgw-\d{2}\b`:            {"tunnel up on tgw-01", "https://TGW-01:8443"},
+		`(?i)\bmini-\d{2}\b`:           {"host: lab-node-5", "Mini-02.internal"},
+		`(?i:\bcontrol)-[a-z]\b`:       {"runs on control-b", "http://git.example.internal:3001"},
+		`/home/jhahn\b`:                {ownerPathFixture + "/sources"},         // lab-string-ok: sample for the owner-path rule
+		`/mnt/vstation`:                {"/mnt/" + "vstation" + "-01/go-qrdb"},  // lab-string-ok: sample for the owner-path rule
+		`(?i)\bjhahn\b`:                {ownerAccountFixture + "@ci-runner-01"}, // lab-string-ok: sample for the owner-account rule
 	}
 
 	for _, p := range patterns {

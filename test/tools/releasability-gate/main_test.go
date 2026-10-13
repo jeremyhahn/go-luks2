@@ -22,7 +22,10 @@ import (
 func entriesOf(files map[string]string) indexReader {
 	entries := make([]labstrings.Entry, 0, len(files))
 	for name, content := range files {
-		entries = append(entries, labstrings.Entry{Path: name, Kind: labstrings.KindFile, Content: []byte(content)})
+		// As this repository's .gitattributes does: every strip-at-publish
+		// file is export-ignored.
+		stripped := len(labstrings.StripAtPublish([]labstrings.Entry{{Path: name}}, labstrings.DefaultStripAtPublish)) > 0
+		entries = append(entries, labstrings.Entry{Path: name, Kind: labstrings.KindFile, Content: []byte(content), ExportIgnored: stripped})
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
 	return func(string) ([]labstrings.Entry, error) { return entries, nil }
@@ -247,79 +250,6 @@ func moduleRoot(t *testing.T) string {
 	}
 }
 
-// copyTree copies the regular files under src/rel into dst/rel.
-func copyTree(t *testing.T, src, dst, rel string) {
-	t.Helper()
-	err := filepath.WalkDir(filepath.Join(src, rel), func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		sub, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		target := filepath.Join(dst, sub)
-		if d.IsDir() {
-			return os.MkdirAll(target, 0o755)
-		}
-		if !d.Type().IsRegular() {
-			return nil
-		}
-		content, err := os.ReadFile(path) // #nosec G304 G122 -- copying this module's own sources into a test directory
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(target, content, 0o644) // #nosec G306 -- test copy of source files
-	})
-	if err != nil {
-		t.Fatalf("copying %s: %v", rel, err)
-	}
-}
-
-// TestGatePackageTestsPassWithoutACheckout reproduces the integration image:
-// the source with no .git/ anywhere above it (.dockerignore excludes it), and
-// `go test` over the gate's packages. They must pass there. Before this test
-// existed the gate itself was a package test that read the enclosing git index,
-// so `go test -tags=integration ./...` inside the container failed on it even
-// with every library test green. The gate runs as `make releasability`, where a
-// checkout is guaranteed; the packages' own tests must need none.
-//
-// This test is excluded from the nested run by -skip, or it would recurse.
-func TestGatePackageTestsPassWithoutACheckout(t *testing.T) {
-	goBin, err := exec.LookPath("go")
-	if err != nil {
-		t.Fatalf("the go tool is not on PATH: %v", err)
-	}
-	src := moduleRoot(t)
-	dst := t.TempDir()
-	for _, f := range []string{"go.mod", "go.sum"} {
-		content, err := os.ReadFile(filepath.Join(src, f)) // #nosec G304 -- this module's own go.mod and go.sum
-		if err != nil {
-			t.Fatalf("read %s: %v", f, err)
-		}
-		if err := os.WriteFile(filepath.Join(dst, f), content, 0o644); err != nil { // #nosec G306 -- test copy of source files
-			t.Fatalf("write %s: %v", f, err)
-		}
-	}
-	copyTree(t, src, dst, filepath.Join("test", "internal", "labstrings"))
-
-	env := gitEnv(dst)
-	// No enclosing checkout, and no build stamping that would look for one.
-	env = append(env, "GOFLAGS=-buildvcs=false")
-	cmd := exec.Command(goBin, "test", "-count=1", // #nosec G204 -- the go tool on PATH, fixed arguments
-		"-skip", "^TestGatePackageTestsPassWithoutACheckout$",
-		"./test/internal/labstrings/...")
-	cmd.Dir = dst
-	cmd.Env = env
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("the gate's package tests fail in a source tree with no .git: %v\n%s", err, out)
-	}
-	if _, statErr := os.Stat(filepath.Join(dst, ".git")); statErr == nil {
-		t.Fatal("the nested run created a .git in the source-only tree; the test proves nothing")
-	}
-}
-
 // TestRun_RefusesToRunOnABrokenPolicy: a malformed allow-list or rule list is
 // an error (exit 2), never a clean pass over rules that match nothing.
 func TestRun_RefusesToRunOnABrokenPolicy(t *testing.T) {
@@ -362,10 +292,9 @@ func TestRun_AReportThatCannotBeWrittenIsAFailure(t *testing.T) {
 	}
 }
 
-// TestRun_AStripAtPublishFileIsListedNotPassedAsPublishable: exit 0, but the
-// output says the tree is NOT yet publishable and names each file the publish
-// strips.
-func TestRun_AStripAtPublishFileIsListedNotPassedAsPublishable(t *testing.T) {
+// TestRun_AStripAtPublishFileIsListedAsExportIgnored: exit 0, and the output
+// names each file .gitattributes keeps out of every archive of the tree.
+func TestRun_AStripAtPublishFileIsListedAsExportIgnored(t *testing.T) {
 	read := entriesOf(map[string]string{
 		".github/workflows/ci.yml":        "on: push\n",
 		".github/workflows/automerge.yml": "on: push\n",
@@ -375,27 +304,60 @@ func TestRun_AStripAtPublishFileIsListedNotPassedAsPublishable(t *testing.T) {
 	if code != exitClean {
 		t.Fatalf("exit = %d, want %d; stderr %q", code, exitClean, stderr)
 	}
-	for _, want := range []string{"NOT YET PUBLISHABLE", "stripped at publish", ".github/workflows/automerge.yml", "CLAUDE.md"} {
+	for _, want := range []string{"excluded from every archive by .gitattributes", ".github/workflows/automerge.yml", "CLAUDE.md"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("stdout lacks %q:\n%s", want, stdout)
 		}
 	}
-	if strings.Contains(stdout, ", publishable") {
-		t.Fatalf("stdout = %q calls the tree publishable while a file awaits the strip", stdout)
+	for _, old := range []string{"NOT YET PUBLISHABLE", "tracked files, publishable"} {
+		if strings.Contains(stdout, old) {
+			t.Errorf("stdout = %q says %q", stdout, old)
+		}
+	}
+}
+
+// A strip-at-publish file that .gitattributes does not export-ignore would
+// ship in the archive the public tree is made from: it is a finding, named
+// with what to add.
+func TestRun_AStripAtPublishFileNotExportIgnoredFails(t *testing.T) {
+	read := func(string) ([]labstrings.Entry, error) {
+		return []labstrings.Entry{
+			{Path: "AGENTS.md", Kind: labstrings.KindFile, Content: []byte("# agent notes\n"), ExportIgnored: true},
+			{Path: "CLAUDE.md", Kind: labstrings.KindFile, Content: []byte("# agent notes\n")},
+		}, nil
+	}
+	code, stdout, stderr := runGate(".", read)
+	if code != exitDirty {
+		t.Fatalf("exit = %d, want %d; stderr %q", code, exitDirty, stderr)
+	}
+	if !strings.Contains(stderr, "CLAUDE.md: listed as stripped at publish") || !strings.Contains(stderr, labstrings.GitAttributes) {
+		t.Errorf("report does not name CLAUDE.md and %s:\n%s", labstrings.GitAttributes, stderr)
+	}
+	if strings.Contains(stderr, "AGENTS.md:") {
+		t.Errorf("an export-ignored file is reported:\n%s", stderr)
+	}
+	if stdout != "" {
+		t.Errorf("a failing gate printed a verdict: %q", stdout)
 	}
 }
 
 // TestRun_TrackedAgentFilesPassARealIndex: CLAUDE.md, a nested AGENTS.md and a
-// .claude/ file, tracked in a real index, pass the gate and are each listed
-// as stripped at publish; a script beside them still fails it.
+// .claude/ file, tracked in a real index beside this repository's
+// .gitattributes, pass the gate and are each listed as stripped at publish; a
+// script beside them still fails it, and so does each of them once no
+// .gitattributes export-ignores it.
 func TestRun_TrackedAgentFilesPassARealIndex(t *testing.T) {
+	attributes, err := os.ReadFile(filepath.Join(moduleRoot(t), labstrings.GitAttributes)) // #nosec G304 -- this module's own .gitattributes
+	if err != nil {
+		t.Fatalf("read %s: %v", labstrings.GitAttributes, err)
+	}
 	agentFiles := map[string]string{
 		"CLAUDE.md":                  "# agent notes\n",
 		"AGENTS.md":                  "# agent notes\n",
 		"test/integration/AGENTS.md": "# agent notes\n",
 		".claude/settings.json":      "{}\n",
 	}
-	files := map[string]string{"go.mod": "module example.com/x\n"}
+	files := map[string]string{"go.mod": "module example.com/x\n", labstrings.GitAttributes: string(attributes)}
 	for name, content := range agentFiles {
 		files[name] = content
 	}
@@ -417,6 +379,19 @@ func TestRun_TrackedAgentFilesPassARealIndex(t *testing.T) {
 	for name := range agentFiles {
 		if strings.Contains(stderr, name+": ") {
 			t.Errorf("%s is reported as a finding:\n%s", name, stderr)
+		}
+	}
+
+	// Without the export-ignore entries every agent file is a finding.
+	delete(files, "tools/run.sh")
+	delete(files, labstrings.GitAttributes)
+	code, _, stderr = runGate(gitRepo(t, files), labstrings.IndexEntries)
+	if code != exitDirty {
+		t.Fatalf("no %s: exit = %d, want %d; stderr:\n%s", labstrings.GitAttributes, code, exitDirty, stderr)
+	}
+	for name := range agentFiles {
+		if !strings.Contains(stderr, name+": listed as stripped at publish") {
+			t.Errorf("%s is not reported as missing from %s:\n%s", name, labstrings.GitAttributes, stderr)
 		}
 	}
 }

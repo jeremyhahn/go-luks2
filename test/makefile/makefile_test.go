@@ -1042,23 +1042,38 @@ func gitStatus(root string) (string, error) {
 // once did, deletes real files a concurrent `make test-unit` leg left at the
 // repository root, such as coverage-pkg.out. TestMain snapshots `git status
 // --porcelain` at the repository root before and after the suite and fails
-// if a single byte differs.
+// if a single byte differs. A tree with no .git, such as the published
+// archive, gets the same snapshot from a scratch repository (treeState); the
+// guard never stands down.
 func TestMain(m *testing.M) {
+	os.Exit(guardedRun(m))
+}
+
+// guardedRun runs the suite between the two snapshots of the tree, and
+// returns the exit code; it returns rather than exits so the scratch
+// repository of a tree with no .git is removed on every path.
+func guardedRun(m *testing.M) int {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "resolving the repository root: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
-	before, err := gitStatus(root)
+	state, cleanup, err := treeState(root)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "git status before the suite: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(os.Stderr, "snapshotting the tree before the suite: %v\n", err)
+		return 1
+	}
+	defer cleanup()
+	before, err := state()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "the tree's state before the suite: %v\n", err)
+		return 1
 	}
 	code := m.Run()
-	after, err := gitStatus(root)
+	after, err := state()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "git status after the suite: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(os.Stderr, "the tree's state after the suite: %v\n", err)
+		return 1
 	}
 	if before != after {
 		fmt.Fprintf(os.Stderr,
@@ -1068,5 +1083,5 @@ func TestMain(m *testing.M) {
 			code = 1
 		}
 	}
-	os.Exit(code)
+	return code
 }

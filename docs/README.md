@@ -96,10 +96,14 @@ changelog. The interop contract is in
 
 ## Conversion state
 
-Every document in this tree is a feature folder or this index; no legacy
-topic file remains. The test-strategy detail is in
+Every document in this tree is a feature folder, this index or the release
+reference [release/public-releasability.md](release/public-releasability.md);
+no legacy topic file remains. The test-strategy detail is in
 [volumes/engineering.md](volumes/engineering.md#test-strategy), which the
 other folders' test-strategy sections link to, and the releasability gate's
 rules are the package documentation of `test/internal/labstrings`
 (`go doc ./test/internal/labstrings`). The releasability gate scans the whole
-tracked tree, so it does not depend on any docs path.
+tracked tree, so it does not depend on any docs path. How the files that stay
+private are excluded from every archive (`.gitattributes` export-ignore,
+`.dockerignore`), and what that does not cover, is in
+[release/public-releasability.md](release/public-releasability.md).

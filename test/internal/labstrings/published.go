@@ -14,9 +14,10 @@ import (
 
 // The second half of the gate. A lab value is a line that has to change; the
 // files below are files the public release must not carry at all, whatever is
-// in them. Both are enforced for the same reason: the published tree is the
-// release tag's tree byte for byte, so the only place to keep something out of
-// it is the source, before tagging.
+// in them. Both are enforced for the same reason: the published tree is an
+// archive export of the release commit, so the only place to keep something
+// out of it is the source -- the file itself, or its export-ignore entry in
+// GitAttributes -- before tagging.
 
 // Unpublishable is one kind of tracked file the public release must not carry.
 type Unpublishable struct {
@@ -49,9 +50,13 @@ const workflowDir = ".github/workflows/"
 var PublishedWorkflows = []string{"ci.yml", "nightly.yml", "release.yml"}
 
 // DefaultStripAtPublish is the list of tracked files Gitea main carries and
-// the public release does not: the publish removes them (#211). The gate does
-// not fail on them -- they belong on main -- but it never calls a tree that
-// holds one publishable: every run lists each one, with its reason.
+// the public release does not (#211). The gate does not fail on them -- they
+// belong on main -- but each must be export-ignored by GitAttributes, which
+// keeps it out of `git archive` and a forge's tag tarball; the public tree is
+// produced as such an export. A listed file GitAttributes does not exclude is
+// a finding (NotExportIgnored), and every run lists the rest, with its reason.
+// .gitattributes and .dockerignore carry each pattern here verbatim, and the
+// gate's tests fail when either misses one.
 //
 // A strip rule exempts a file from the file-class checks only, never from its
 // content: a script or a binary under .claude/ still fails, and the lab-value
@@ -60,15 +65,23 @@ var PublishedWorkflows = []string{"ci.yml", "nightly.yml", "release.yml"}
 // So are the internal review workflows code-review.yml and qwen-review.yml
 // (#336), and the internal batch-runner workflow batch.yml (#350). The workflow rules are exact names: `automerge.yaml` or a nested
 // copy is an unknown workflow and fails.
+//
+// A test file that reads only a stripped file is stripped with it (#211), so
+// `go test ./...` passes on the published tree: batch_test.go, the tests of
+// batch.yml.
 var DefaultStripAtPublish = []Unpublishable{
 	{Path: "**/CLAUDE.md", Reason: agentInstructions},
 	{Path: "**/AGENTS.md", Reason: agentInstructions},
 	{Path: "**/.claude/**", Reason: agentInstructions},
+	{Path: "**/.serena/**", Reason: "code-analysis tool configuration for the agents (#66, claude-agents#46): " +
+		"tracked on main, stripped from the public release (#211)"},
 	{Path: workflowDir + "automerge.yml", Reason: "Gitea-only automerge workflow (owner ruling 2026-10-02, " +
 		"automatethethings#200): tracked on main, stripped from the public release (#211, #252)"},
 	{Path: workflowDir + "code-review.yml", Reason: internalReviewWorkflow},
 	{Path: workflowDir + "qwen-review.yml", Reason: internalReviewWorkflow},
 	{Path: workflowDir + "batch.yml", Reason: internalBatchWorkflow},
+	{Path: "test/ci/workflows/batch_test.go", Reason: "tests only " + workflowDir + "batch.yml " +
+		"and reads it, so it is stripped with it: the published tree's go test must pass without the workflow (#211)"},
 }
 
 // internalBatchWorkflow is the reason given for the internal batch-runner

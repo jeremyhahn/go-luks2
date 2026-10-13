@@ -5,6 +5,8 @@
 package makefile
 
 import (
+	"errors"
+	"fmt"
 	"go/ast"
 	"go/build"
 	"go/importer"
@@ -49,7 +51,18 @@ type seamFinding struct {
 // are not mistaken for a redeclaration.
 func findSeamVars(t *testing.T, dir string) []seamFinding {
 	t.Helper()
+	findings, err := seamVarsIn(dir)
+	if err != nil {
+		t.Errorf("%v", err)
+	}
+	return findings
+}
 
+// seamVarsIn is findSeamVars without the test: a package that does not parse
+// or type-check is an error naming the package and every error the checker
+// reported, never a package with no seams. A package that type-checks only
+// in part has objects with no type, and its var list would be incomplete.
+func seamVarsIn(dir string) ([]seamFinding, error) {
 	fset := token.NewFileSet()
 	bctx := build.Default
 	pkgs, err := parser.ParseDir(fset, dir, func(fi os.FileInfo) bool {
@@ -60,7 +73,7 @@ func findSeamVars(t *testing.T, dir string) []seamFinding {
 		return matchErr == nil && ok
 	}, 0)
 	if err != nil {
-		t.Fatalf("parsing %s: %v", dir, err)
+		return nil, fmt.Errorf("parsing %s: %w", dir, err)
 	}
 
 	var findings []seamFinding
@@ -70,10 +83,17 @@ func findSeamVars(t *testing.T, dir string) []seamFinding {
 			files = append(files, f)
 		}
 
-		conf := types.Config{Importer: importer.ForCompiler(fset, "source", nil)}
-		tpkg, _ := conf.Check(name, fset, files, nil)
-		if tpkg == nil {
-			continue
+		var typeErrs []error
+		conf := types.Config{
+			Importer: importer.ForCompiler(fset, "source", nil),
+			Error:    func(err error) { typeErrs = append(typeErrs, err) },
+		}
+		tpkg, err := conf.Check(name, fset, files, nil)
+		if err != nil || tpkg == nil || len(typeErrs) > 0 {
+			if len(typeErrs) == 0 {
+				typeErrs = append(typeErrs, err)
+			}
+			return nil, fmt.Errorf("type-checking package %s in %s: %w", name, dir, errors.Join(typeErrs...))
 		}
 
 		scope := tpkg.Scope()
@@ -92,7 +112,7 @@ func findSeamVars(t *testing.T, dir string) []seamFinding {
 			}
 		}
 	}
-	return findings
+	return findings, nil
 }
 
 // seamDirs lists every package directory under pkg/ and internal/ -- each
@@ -160,5 +180,30 @@ func TestSeamAllowlistNamesOnlyRealSeams(t *testing.T) {
 		if !found[name] {
 			t.Errorf("seamAllowlist names %q, but it is no longer a seam var in pkg/luks2; remove it from the allowlist", name)
 		}
+	}
+}
+
+// TestSeamVarsInReportsAPackageThatDoesNotTypeCheck: a package the checker
+// rejects in part -- one var of unknown type beside a real seam -- is an
+// error carrying the checker's message, not a panic on the var with no type
+// and not a partial, passing list.
+func TestSeamVarsInReportsAPackageThatDoesNotTypeCheck(t *testing.T) {
+	dir := t.TempDir()
+	src := "package broken\n\nimport \"example.invalid/missing\"\n\n" +
+		"var Hook func() error\n\nvar Pair, Other = missing.Two()\n\nvar Lost = undefinedFunc\n"
+	if err := os.WriteFile(filepath.Join(dir, "broken.go"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	findings, err := seamVarsIn(dir)
+	if err == nil {
+		t.Fatalf("seamVarsIn = %v, nil; want the type errors", findings)
+	}
+	for _, want := range []string{"package broken", "undefinedFunc"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+	if findings != nil {
+		t.Errorf("findings %v returned beside the error", findings)
 	}
 }

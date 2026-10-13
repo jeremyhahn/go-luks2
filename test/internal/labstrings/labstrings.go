@@ -23,10 +23,16 @@
 //   - ClassLabAddress — an address on the fleet's subnet. Unreachable for every
 //     public reader, so a copy-pasteable example containing one is broken
 //     documentation, and it publishes the operator's network layout.
-//   - ClassLabHost — a fleet hostname. Same, plus it names the machines an
-//     attacker would go looking for.
+//   - ClassLabHost — a fleet hostname, of every host family the fleet runs:
+//     the agent workstations, the CI runners, the GPU and build hosts, the
+//     tunnel gateway, the mini nodes and the coordinator hosts. Same, plus it
+//     names the machines an attacker would go looking for.
 //   - ClassOwnerPath — a path under the owner's home directory or the lab's NFS
 //     mount. Meaningless off that one machine, and it leaks the account name.
+//   - ClassOwnerAccount — the owner's login on its own: an ssh target, an
+//     author line, a mail address. Inside an owner path it is the same leak
+//     and reported once, as owner-path. The forge owner in the module path is
+//     a different, public name and does not match.
 //
 // WHAT TO DO WITH A FINDING. In order of preference:
 //
@@ -70,13 +76,18 @@
 // FILES TRACKED ON main AND STRIPPED AT PUBLISH (#211), listed by
 // DefaultStripAtPublish: the agent files CLAUDE.md, AGENTS.md and `.claude/` at
 // any depth (standards project-scaffold.md §7, #252; only the local tool state
-// `.claude/settings.local.json` is gitignored), and
+// `.claude/settings.local.json` is gitignored), the code-analysis tool
+// configuration `.serena/` at any depth, and
 // .github/workflows/automerge.yml, which the forge requires (that exact name; a
 // `.yaml` variant or nested copy fails), and the internal review workflows
 // .github/workflows/code-review.yml and qwen-review.yml (#336), and the
-// internal batch-runner workflow .github/workflows/batch.yml (#350). The gate passes them, lists each on
-// every run and does not call the tree publishable while one is tracked. Their
-// content is still scanned, and a script or binary among them still fails.
+// internal batch-runner workflow .github/workflows/batch.yml (#350) with
+// test/ci/workflows/batch_test.go, which tests only that workflow. Each is
+// export-ignored by .gitattributes, so `git archive` and a forge's tag tarball
+// leave it out, and listed in .dockerignore. The gate passes them and lists
+// each on every run; one .gitattributes does not export-ignore is a finding.
+// Their content is still scanned, and a script or binary among them still
+// fails.
 // There is no waiver for an unpublishable file: remove it from the index.
 //
 // FAILURES AND EXEMPTIONS. A failure names the file, line, class, matched text
@@ -129,6 +140,10 @@ const (
 	// ClassOwnerPath is a filesystem path that exists only on the owner's
 	// machine or on the lab's network mount.
 	ClassOwnerPath Class = "owner-path"
+
+	// ClassOwnerAccount is the owner's login name on its own, outside a path:
+	// an ssh target, an author line, a mail address.
+	ClassOwnerAccount Class = "owner-account"
 )
 
 // waiverPrefix marks a line whose lab value is the point of the line. The text
@@ -154,6 +169,11 @@ type Pattern struct {
 
 	// Guidance is what the engineer who tripped this rule should do instead.
 	Guidance string
+
+	// YieldsTo, when set, names a more specific class: a match lying inside
+	// a match of that class on the same line is the same leak and is not
+	// reported again, and an allow rule accepting that class accepts it.
+	YieldsTo Class
 }
 
 // patterns is the rule set. It is a package-level var rather than a constant
@@ -196,6 +216,26 @@ var patterns = []Pattern{
 		Guidance: "name the role, not the machine: build-host.internal, batch-runner",
 	},
 	{
+		Class:    ClassLabHost,
+		Expr:     regexp.MustCompile(`(?i)\btgw-\d{2}\b`), // lab-string-ok: the host family this rule exists to find
+		Needle:   "tgw-",
+		Guidance: "name the role, not the machine: tunnel-gateway.internal, gateway.example",
+	},
+	{
+		Class:    ClassLabHost,
+		Expr:     regexp.MustCompile(`(?i)\bmini-\d{2}\b`), // lab-string-ok: the host family this rule exists to find
+		Needle:   "mini-",
+		Guidance: "name the role, not the machine: agent-01, ci-runner-01",
+	},
+	{
+		// The prefix folds case and the letter does not: the coordinator hosts
+		// are written in lower case, and "Control-C" is a key chord.
+		Class:    ClassLabHost,
+		Expr:     regexp.MustCompile(`(?i:\bcontrol)-[a-z]\b`), // lab-string-ok: the host family this rule exists to find
+		Needle:   "control-",
+		Guidance: "name the role, not the machine: coordinator.internal, forge.example",
+	},
+	{
 		Class:    ClassOwnerPath,
 		Expr:     regexp.MustCompile(`/home/jhahn\b`), // lab-string-ok: the path prefix this rule exists to find
 		Needle:   "/home/jhahn",
@@ -206,6 +246,15 @@ var patterns = []Pattern{
 		Expr:     regexp.MustCompile(`/mnt/vstation`), // lab-string-ok: the mount prefix this rule exists to find
 		Needle:   "/mnt/vstation",
 		Guidance: "the lab's NFS mount does not exist anywhere else; use a repository-relative path",
+	},
+	{
+		// The forge owner in a module path is a different, public name and
+		// does not contain this one; \b keeps longer words out.
+		Class:    ClassOwnerAccount,
+		Expr:     regexp.MustCompile(`(?i)\bjhahn\b`), // lab-string-ok: the login this rule exists to find
+		Needle:   "jhahn",
+		Guidance: "name the role, not the person: agent, ci, user@example.com",
+		YieldsTo: ClassOwnerPath,
 	},
 }
 
@@ -329,11 +378,14 @@ func scanPath(name string, accepted map[Class]bool) []Finding {
 		if accepted[p.Class] {
 			continue
 		}
-		for _, match := range p.Expr.FindAllString(name, -1) {
+		for _, span := range p.Expr.FindAllStringIndex(name, -1) {
+			if p.YieldsTo != "" && insideClass(name, span, p.YieldsTo) {
+				continue
+			}
 			findings = append(findings, Finding{
 				Path:     name,
 				Class:    p.Class,
-				Match:    match,
+				Match:    name[span[0]:span[1]],
 				Excerpt:  excerpt(name),
 				Guidance: p.Guidance,
 			})
@@ -358,12 +410,15 @@ func scanContent(name string, content []byte, accepted map[Class]bool) []Finding
 			if accepted[p.Class] {
 				continue
 			}
-			for _, match := range p.Expr.FindAllString(line, -1) {
+			for _, span := range p.Expr.FindAllStringIndex(line, -1) {
+				if p.YieldsTo != "" && insideClass(line, span, p.YieldsTo) {
+					continue
+				}
 				findings = append(findings, Finding{
 					Path:     name,
 					Line:     i + 1,
 					Class:    p.Class,
-					Match:    match,
+					Match:    line[span[0]:span[1]],
 					Excerpt:  excerpt(line),
 					Guidance: p.Guidance,
 				})
@@ -371,6 +426,22 @@ func scanContent(name string, content []byte, accepted map[Class]bool) []Finding
 		}
 	}
 	return findings
+}
+
+// insideClass reports whether span lies within a match of class on line,
+// whether or not that class is accepted where the line was found.
+func insideClass(line string, span []int, class Class) bool {
+	for _, p := range patterns {
+		if p.Class != class {
+			continue
+		}
+		for _, outer := range p.Expr.FindAllStringIndex(line, -1) {
+			if outer[0] <= span[0] && span[1] <= outer[1] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // waived reports whether a line carries an inline waiver with a reason. The

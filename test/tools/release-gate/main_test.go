@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -647,7 +649,23 @@ func TestSystemHostRunsGit(t *testing.T) {
 	if h.client == nil || h.clock == nil || h.getenv == nil {
 		t.Fatal("systemHost left a field unset")
 	}
-	// The repository's own HEAD is an ancestor of itself: exit 0.
+	// A repository of the test's own, not the checkout it runs in: the
+	// package tests also run in an archive export, which has no .git.
+	repo := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false",
+			"commit", "-q", "--allow-empty", "-m", "fixture"},
+	} {
+		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...) // #nosec G204 -- fixed git argv; repo is the test's own
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(repo))
+	t.Chdir(repo)
+
+	// HEAD is an ancestor of itself: exit 0.
 	status, out, err := h.git("merge-base", "--is-ancestor", "HEAD", "HEAD")
 	if err != nil || status != 0 {
 		t.Fatalf("git merge-base HEAD HEAD = %d, %q, %v", status, out, err)

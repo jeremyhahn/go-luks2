@@ -1,0 +1,32 @@
+# Files tracked on main that the public release does not carry. export-ignore
+# keeps them out of `git archive` and out of a forge's tag tarball, so the
+# public tree is produced as an archive export of the release commit and these
+# never reach it. One line per entry of DefaultStripAtPublish in
+# test/internal/labstrings/published.go, in that list's own pattern syntax,
+# and for a directory entry (`<dir>/**`) a second line for `<dir>` itself:
+# the `/**` form excludes the files, but git archive still writes the
+# directory's own entry, which tells the public tree the directory exists;
+# test/tools/releasability-gate/export_test.go fails when an entry there is not
+# excluded here, and the releasability gate fails on a tracked file it lists
+# that this file does not export-ignore.
+#
+# Not covered: the Go module zip (built from the public repository's tag, so
+# it is clean only because that tag's tree is the export) and a history push
+# (every commit carries these files). See docs/release/public-releasability.md.
+
+# Agent instructions and tool state, at any depth.
+**/CLAUDE.md export-ignore
+**/AGENTS.md export-ignore
+**/.claude/** export-ignore
+**/.claude export-ignore
+**/.serena/** export-ignore
+**/.serena export-ignore
+
+# Internal workflows. The public ones are ci.yml, nightly.yml and release.yml.
+.github/workflows/automerge.yml export-ignore
+.github/workflows/code-review.yml export-ignore
+.github/workflows/qwen-review.yml export-ignore
+.github/workflows/batch.yml export-ignore
+
+# Tests that read only an internal workflow, stripped with the file they test.
+test/ci/workflows/batch_test.go export-ignore

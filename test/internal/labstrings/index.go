@@ -10,6 +10,7 @@ import (
 	"context"
 	"io"
 	"os/exec"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,6 +51,10 @@ type Entry struct {
 	// Unread is set for an oversize file ExemptFile lists: its content was
 	// not read, on the exemption's say-so. Every other entry was read in full.
 	Unread bool
+
+	// ExportIgnored is set when the index's GitAttributes marks the path
+	// export-ignore: `git archive` and a forge's tag tarball leave it out.
+	ExportIgnored bool
 }
 
 // IndexEntries reads every entry in the git index at root, content included,
@@ -109,6 +114,28 @@ func indexEntries(root string, limit int64) ([]Entry, error) {
 	}
 	if err := readBlobs(root, staged, entries, blobs, limit, ex); err != nil {
 		return nil, err
+	}
+
+	paths := make([]string, len(entries))
+	attributes := map[string][]byte{}
+	for i, e := range entries {
+		paths[i] = e.Path
+		// git reads a GitAttributes only as a regular file, never through a
+		// symlink.
+		if e.Kind != KindFile || path.Base(e.Path) != GitAttributes {
+			continue
+		}
+		if e.Unread {
+			return nil, &IndexEntryError{Path: e.Path, Problem: "too large to read, and it decides what is export-ignored"}
+		}
+		attributes[e.Path] = e.Content
+	}
+	ignored, err := exportIgnored(root, attributes, paths)
+	if err != nil {
+		return nil, err
+	}
+	for i := range entries {
+		entries[i].ExportIgnored = ignored[entries[i].Path]
 	}
 	return entries, nil
 }

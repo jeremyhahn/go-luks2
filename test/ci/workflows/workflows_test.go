@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/test/internal/labstrings"
 )
 
 // repoRoot is the directory holding .github/workflows.
@@ -35,8 +37,9 @@ func readFile(t *testing.T, rel string) string {
 	return string(b)
 }
 
-// workflowFiles lists every workflow the forge runs. An empty list fails: a
-// check over no files passes for nothing.
+// workflowFiles lists every workflow present in the tree. A list without every
+// published workflow fails, so it is never empty: a check over no files passes
+// for nothing.
 func workflowFiles(t *testing.T) []string {
 	t.Helper()
 	var files []string
@@ -48,11 +51,22 @@ func workflowFiles(t *testing.T) []string {
 		files = append(files, m...)
 	}
 	sort.Strings(files)
-	if len(files) == 0 {
-		t.Fatal("found no workflow files")
+	// The internal workflows are absent from the published tree, so the
+	// published ones are required by name: a test iterating this list covers
+	// each of them in a checkout and in the archive alike.
+	for _, name := range labstrings.PublishedWorkflows {
+		want := filepath.Join(repoRoot(t), ".github", "workflows", name)
+		if i := sort.SearchStrings(files, want); i == len(files) || files[i] != want {
+			t.Fatalf("published workflow %s is missing", name)
+		}
 	}
 	return files
 }
+
+// batchWorkflow is the internal batch-runner workflow. It is stripped at
+// publish, so it is present in a checkout and absent from the published tree;
+// a test over workflowFiles that exempts it must hold either way.
+const batchWorkflow = ".github/workflows/batch.yml"
 
 var (
 	usesLine = regexp.MustCompile(`^\s*(?:-\s+)?uses:\s*(.*)$`)
