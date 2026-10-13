@@ -30,3 +30,7 @@
 
 # Tests that read only an internal workflow, stripped with the file they test.
 test/ci/workflows/batch_test.go export-ignore
+
+# The fleet pattern set and its tests: they name the values the gate bans.
+test/internal/labstrings/fleet.go export-ignore
+test/internal/labstrings/fleet_test.go export-ignore

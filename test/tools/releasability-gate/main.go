@@ -51,6 +51,7 @@ type indexReader func(root string) ([]labstrings.Entry, error)
 // unpublishable-file rules and the strip-at-publish rules. main passes this
 // repository's; tests pass broken ones to see the gate refuse to run on them.
 type policy struct {
+	patterns      []labstrings.Pattern
 	allow         []labstrings.AllowRule
 	unpublishable []labstrings.Unpublishable
 	strip         []labstrings.Unpublishable
@@ -58,6 +59,7 @@ type policy struct {
 
 // repositoryPolicy is this repository's policy.
 var repositoryPolicy = policy{
+	patterns:      labstrings.Fleet(),
 	allow:         labstrings.DefaultAllowList,
 	unpublishable: labstrings.DefaultUnpublishable,
 	strip:         labstrings.DefaultStripAtPublish,
@@ -84,10 +86,20 @@ func run(args []string, read indexReader, p policy, stdout, stderr io.Writer) in
 		return exitFailed
 	}
 
-	findings, err := labstrings.Scan(entries, p.allow)
-	if err != nil {
-		fmt.Fprintf(stderr, "releasability-gate: %v\n", err)
-		return exitFailed
+	// The pattern set names the fleet's values, so it is compiled in from a
+	// file stripped at publish. A tree that tracks strip-at-publish files is
+	// a development tree and must carry it: Scan refuses an empty set. Only
+	// an archive export -- which by construction carries no strip-at-publish
+	// file -- runs without one, and then says on every run that it did not
+	// scan content.
+	scanContent := len(p.patterns) > 0 || len(labstrings.StripAtPublish(entries, p.strip)) > 0
+	var findings []labstrings.Finding
+	if scanContent {
+		findings, err = labstrings.Scan(entries, p.patterns, p.allow)
+		if err != nil {
+			fmt.Fprintf(stderr, "releasability-gate: %v\n", err)
+			return exitFailed
+		}
 	}
 	unpublishable, err := labstrings.ScanUnpublishable(entries, p.unpublishable, p.strip)
 	if err != nil {
@@ -130,6 +142,14 @@ func run(args []string, read indexReader, p policy, stdout, stderr io.Writer) in
 		header := fmt.Sprintf("releasability-gate: %d tracked files; no finding, publishable as an archive export -- %d file(s) excluded from every archive by %s (export-ignore):\n\n", len(entries), len(stripped), labstrings.GitAttributes)
 		if err := writeItems(stdout, header, stripped); err != nil {
 			fmt.Fprintf(stderr, "releasability-gate: %v\n", err)
+			return exitFailed
+		}
+		return exitClean
+	}
+	if !scanContent {
+		if _, err := fmt.Fprintf(stdout, "releasability-gate: %d tracked files; no strip-at-publish file and no "+
+			"fleet pattern set, as in a published tree: file rules checked, content NOT scanned for lab values\n", len(entries)); err != nil {
+			fmt.Fprintf(stderr, "releasability-gate: %v\n", &labstrings.ReportError{Err: err})
 			return exitFailed
 		}
 		return exitClean

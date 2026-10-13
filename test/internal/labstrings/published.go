@@ -82,7 +82,18 @@ var DefaultStripAtPublish = []Unpublishable{
 	{Path: workflowDir + "batch.yml", Reason: internalBatchWorkflow},
 	{Path: "test/ci/workflows/batch_test.go", Reason: "tests only " + workflowDir + "batch.yml " +
 		"and reads it, so it is stripped with it: the published tree's go test must pass without the workflow (#211)"},
+	{Path: fleetPatterns, Reason: "the fleet pattern set: it names the fleet's values, so the gate's " +
+		"published source spells none of them (#211)"},
+	{Path: fleetTests, Reason: "the fleet pattern set's tests, which plant the fleet's values; stripped " +
+		"with the set they test (#211)"},
 }
+
+// fleetPatterns and fleetTests are the only files that spell the fleet's
+// values. Both are stripped at publish, and DefaultAllowList accepts them.
+const (
+	fleetPatterns = "test/internal/labstrings/fleet.go"
+	fleetTests    = "test/internal/labstrings/fleet_test.go"
+)
 
 // internalBatchWorkflow is the reason given for the internal batch-runner
 // workflow (#350).

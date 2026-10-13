@@ -112,7 +112,7 @@ func TestIndexEntries_ReadsTheIndexSortedWithItsKinds(t *testing.T) {
 // staged file a sparse checkout never wrote all still ship, so all three must
 // still be reported -- by both halves of the gate.
 func TestIndexEntries_TheStagedContentIsScannedNotTheWorkingTree(t *testing.T) {
-	leak := "endpoint: https://198.51.100.51:8443\n" // lab-string-ok: fixture the gate must report; nothing is dialed
+	leak := "endpoint: https://203.0.113.51:8443\n"
 	script := "#!/bin/sh\nlosetup -D\n"
 	root := gitIndexTree(t, map[string]string{
 		"docs/sanitized-unstaged.md": leak,
@@ -137,7 +137,7 @@ func TestIndexEntries_TheStagedContentIsScannedNotTheWorkingTree(t *testing.T) {
 		t.Fatalf("IndexEntries: %v", err)
 	}
 
-	findings, err := Scan(entries, nil)
+	findings, err := Scan(entries, fixturePatterns, nil)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}

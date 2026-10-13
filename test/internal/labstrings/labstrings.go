@@ -7,11 +7,15 @@
 // filesystem path belonging to the private development fleet, and every
 // tracked file the public release must not carry at all (published.go).
 //
-// WHY THIS IS A GATE AND NOT A CONVENTION. go-luks2 is published: its public
-// release is one commit whose tree is byte-identical to the internal release
-// tag, so anything tracked here at the tag is published, and a value has to be
-// scrubbed in the source before tagging because rewriting it at publication
-// would break that identity. The model is go-quicbaas's gate of the same name,
+// WHY THIS IS A GATE AND NOT A CONVENTION. go-luks2 is published, and the
+// internal release tag is not what is published. That tag names a commit on
+// main, which still tracks the internal-only files. The public tree is that
+// commit's `git archive` output: the paths .gitattributes marks export-ignore
+// (the strip-at-publish set, published.go) are removed, and every other
+// tracked file is published byte-for-byte, as it stands at the tag. Nothing
+// rewrites a file on the way out, so a lab value has to be scrubbed in the
+// source before tagging. Publishing that tree and tagging it on the public
+// side are separate steps, each taken by the owner. The model is go-quicbaas's gate of the same name,
 // written after go-quicbaas#944 found a symlink into the lab's NFS mount, the
 // private forge in a release workflow and in documentation links, the private
 // registry in captured CI logs, and lab hosts in `--help` text and godoc. None
@@ -20,7 +24,8 @@
 //
 // WHAT IS REPORTED, and why each class is a leak rather than a style problem:
 //
-//   - ClassLabAddress — an address on the fleet's subnet. Unreachable for every
+//   - ClassLabAddress — an address on the fleet's subnet, or the private
+//     forge's web or ssh port. Unreachable for every
 //     public reader, so a copy-pasteable example containing one is broken
 //     documentation, and it publishes the operator's network layout.
 //   - ClassLabHost — a fleet hostname, of every host family the fleet runs:
@@ -82,7 +87,9 @@
 // `.yaml` variant or nested copy fails), and the internal review workflows
 // .github/workflows/code-review.yml and qwen-review.yml (#336), and the
 // internal batch-runner workflow .github/workflows/batch.yml (#350) with
-// test/ci/workflows/batch_test.go, which tests only that workflow. Each is
+// test/ci/workflows/batch_test.go, which tests only that workflow, and the
+// fleet pattern set test/internal/labstrings/fleet.go with its tests
+// fleet_test.go, which name the values the gate bans. Each is
 // export-ignored by .gitattributes, so `git archive` and a forge's tag tarball
 // leave it out, and listed in .dockerignore. The gate passes them and lists
 // each on every run; one .gitattributes does not export-ignore is a finding.
@@ -107,8 +114,14 @@
 // behavior) and removed CLAUDE.md from the index; #252 tracks it again,
 // stripped at publish.
 //
-// Where the patterns live: `patterns`, below. The only DefaultAllowList entry is
-// the gate's own test fixtures.
+// Where the patterns live: fleet.go, returned by Fleet, which is stripped at
+// publish so the published gate spells no fleet value; its two files are the
+// only DefaultAllowList entries. The published scanner tests use documentation
+// values, and a test in fleet_test.go requires that `git archive HEAD` names no
+// value of the set anywhere, waiver or not. A tree with no pattern set refuses
+// to scan (NoPatternsError); the releasability gate then fails a development
+// tree -- one that tracks a strip-at-publish file -- and passes a published
+// tree only with the notice that its content was not scanned.
 //
 // This is the canonical statement of the public-releasability rule.
 //
@@ -164,7 +177,7 @@ type Pattern struct {
 	// search runs at memory bandwidth where this regexp runs at a few
 	// megabytes a second, and the whole tree has to be read on every unit
 	// test pass. A Needle that is not implied by Expr would make the gate
-	// silently blind, so TestPatterns_EveryNeedleIsImpliedByItsExpr pins it.
+	// silently blind, so TestFleet_EveryNeedleIsImpliedByItsExpr pins it.
 	Needle string
 
 	// Guidance is what the engineer who tripped this rule should do instead.
@@ -176,108 +189,33 @@ type Pattern struct {
 	YieldsTo Class
 }
 
-// patterns is the rule set. It is a package-level var rather than a constant
-// list so a new fleet subnet or hostname is one line, and so the lab's own
-// values are written down in exactly one place in this repository.
-//
-// Note what is NOT here: 192.168.0.0/16 at large. Tests across this tree use
-// RFC 1918 literals as opaque addresses that are never dialed, and banning the
-// whole space would bury the real findings under hundreds of them. The fleet
-// subnet is named precisely instead.
-var patterns = []Pattern{
-	{
-		Class:    ClassLabAddress,
-		Expr:     regexp.MustCompile(`\b192\.168\.101\.\d{1,3}\b`),
-		Needle:   "192.168.101.",
-		Guidance: "use an RFC 5737 documentation address (198.51.100.0/24) or a name under .example.com",
-	},
-	{
-		Class:    ClassLabHost,
-		Expr:     regexp.MustCompile(`(?i)\bvstation-\d{2}\b`),
-		Needle:   "vstation-",
-		Guidance: "name the role, not the machine: ci-runner-01, gpu-host.internal, luks.example.com",
-	},
-	{
-		Class:    ClassLabHost,
-		Expr:     regexp.MustCompile(`(?i)\bdellemc-\d{2}\b`),
-		Needle:   "dellemc-",
-		Guidance: "a CI runner's own hostname is never load-bearing: ci-runner-01 reads the same",
-	},
-	{
-		Class:    ClassLabHost,
-		Expr:     regexp.MustCompile(`(?i)\bgodlike(\.internal)?\b`), // lab-string-ok: the hostname this rule exists to find
-		Needle:   "gpu-host",
-		Guidance: "name the role, not the machine: gpu-host.internal, npu-host.internal",
-	},
-	{
-		Class:    ClassLabHost,
-		Expr:     regexp.MustCompile(`(?i)\bomega(\.internal)?\b`), // lab-string-ok: the hostname this rule exists to find
-		Needle:   "omega",
-		Guidance: "name the role, not the machine: build-host.internal, batch-runner",
-	},
-	{
-		Class:    ClassLabHost,
-		Expr:     regexp.MustCompile(`(?i)\btgw-\d{2}\b`), // lab-string-ok: the host family this rule exists to find
-		Needle:   "tgw-",
-		Guidance: "name the role, not the machine: tunnel-gateway.internal, gateway.example",
-	},
-	{
-		Class:    ClassLabHost,
-		Expr:     regexp.MustCompile(`(?i)\bmini-\d{2}\b`), // lab-string-ok: the host family this rule exists to find
-		Needle:   "mini-",
-		Guidance: "name the role, not the machine: agent-01, ci-runner-01",
-	},
-	{
-		// The prefix folds case and the letter does not: the coordinator hosts
-		// are written in lower case, and "Control-C" is a key chord.
-		Class:    ClassLabHost,
-		Expr:     regexp.MustCompile(`(?i:\bcontrol)-[a-z]\b`), // lab-string-ok: the host family this rule exists to find
-		Needle:   "control-",
-		Guidance: "name the role, not the machine: coordinator.internal, forge.example",
-	},
-	{
-		Class:    ClassOwnerPath,
-		Expr:     regexp.MustCompile(`/home/jhahn\b`), // lab-string-ok: the path prefix this rule exists to find
-		Needle:   "/home/jhahn",
-		Guidance: "make the path relative to the repository root, or use /var/lib, /srv, /home/agent",
-	},
-	{
-		Class:    ClassOwnerPath,
-		Expr:     regexp.MustCompile(`/mnt/vstation`), // lab-string-ok: the mount prefix this rule exists to find
-		Needle:   "/mnt/vstation",
-		Guidance: "the lab's NFS mount does not exist anywhere else; use a repository-relative path",
-	},
-	{
-		// The forge owner in a module path is a different, public name and
-		// does not contain this one; \b keeps longer words out.
-		Class:    ClassOwnerAccount,
-		Expr:     regexp.MustCompile(`(?i)\bjhahn\b`), // lab-string-ok: the login this rule exists to find
-		Needle:   "jhahn",
-		Guidance: "name the role, not the person: agent, ci, user@example.com",
-		YieldsTo: ClassOwnerPath,
-	},
-}
+// fleet is this repository's pattern set. Its patterns name the fleet's own
+// values, so they cannot be published, and a gate that spelled them in its
+// source would be the leak it exists to stop. fleet.go assigns it; that file
+// is stripped at publish (DefaultStripAtPublish), so the values are written
+// down in exactly one place and that place never ships. In a build without
+// fleet.go -- the published tree -- the set is empty, and Scan refuses an
+// empty set rather than report clean.
+var fleet []Pattern
 
-// sieveNeedles is every pattern's Needle, in the form the sieve wants them.
-// Almost no file in this tree contains a lab value, and the whole tracked tree
-// is read on every unit-test pass: settling "there is nothing here" has
-// to be cheap, and a substring search is two orders of magnitude cheaper than
-// the patterns themselves.
-var sieveNeedles = func() [][]byte {
-	needles := make([][]byte, 0, len(patterns))
-	for _, p := range patterns {
-		needles = append(needles, []byte(p.Needle))
-	}
-	return needles
-}()
+// Fleet returns the pattern set compiled into this build: the fleet's values
+// in the development tree, none in the published tree.
+func Fleet() []Pattern { return fleet }
 
-// mayContainLabValue reports whether any pattern could possibly match inside
-// content. Case is folded because a hostname is as likely to appear shouted in a
-// log line as lowercased in a config file.
-func mayContainLabValue(content []byte) bool {
+// classes is every class a pattern or an allow rule may name.
+var classes = []Class{ClassLabAddress, ClassLabHost, ClassOwnerPath, ClassOwnerAccount}
+
+// mayContainLabValue reports whether any pattern of set could possibly match
+// inside content, by searching for each pattern's Needle. Almost no file in
+// this tree contains a lab value, and the whole tracked tree is read on every
+// unit-test pass: settling "there is nothing here" has to be cheap, and a
+// substring search is two orders of magnitude cheaper than the patterns
+// themselves. Case is folded because a hostname is as likely to appear shouted
+// in a log line as lowercased in a config file.
+func mayContainLabValue(set []Pattern, content []byte) bool {
 	folded := bytes.ToLower(content)
-	for _, needle := range sieveNeedles {
-		if bytes.Contains(folded, needle) {
+	for _, p := range set {
+		if bytes.Contains(folded, []byte(p.Needle)) {
 			return true
 		}
 	}
@@ -334,12 +272,13 @@ func ScanRepo(root string) ([]Finding, error) {
 	if err != nil {
 		return nil, err
 	}
-	return Scan(entries, DefaultAllowList)
+	return Scan(entries, Fleet(), DefaultAllowList)
 }
 
-// Scan reports the lab values in entries. Rules are validated first: an
-// allow-list that does not say why it allows something is a defect in the
-// gate, not a pass.
+// Scan reports the matches of set in entries. An empty set is refused with
+// NoPatternsError: it would find nothing and so report clean. Rules are
+// validated next: an allow-list that does not say why it allows something is
+// a defect in the gate, not a pass.
 //
 // Every entry's path is scanned, because a tracked filename ships as surely as
 // its content, and so is every entry's content, binary content included. Entries come from
@@ -348,38 +287,51 @@ func ScanRepo(root string) ([]Finding, error) {
 // ExemptFile lists by exact path, with a reason, arrives Unread. Its path is
 // still scanned here, its content is not, and the gate prints it as NOT READ
 // on every run (Exempted).
-func Scan(entries []Entry, rules []AllowRule) ([]Finding, error) {
+func Scan(entries []Entry, set []Pattern, rules []AllowRule) ([]Finding, error) {
+	if len(set) == 0 {
+		return nil, &NoPatternsError{Tracked: len(entries)}
+	}
 	if err := ValidateAllowList(rules); err != nil {
 		return nil, err
 	}
 	var findings []Finding
 	for _, e := range entries {
 		accepted := acceptedClasses(rules, e.Path)
-		if len(accepted) == len(patterns) {
-			// Every class this gate knows about is allowed here;
-			// scanning the entry cannot produce a finding.
+		if acceptsAll(accepted, set) {
+			// Every class this set reports is allowed here; scanning
+			// the entry cannot produce a finding.
 			continue
 		}
-		findings = append(findings, scanPath(e.Path, accepted)...)
-		findings = append(findings, scanContent(e.Path, e.Content, accepted)...)
+		findings = append(findings, scanPath(e.Path, set, accepted)...)
+		findings = append(findings, scanContent(e.Path, e.Content, set, accepted)...)
 	}
 	return findings, nil
+}
+
+// acceptsAll reports whether accepted holds the class of every pattern in set.
+func acceptsAll(accepted map[Class]bool, set []Pattern) bool {
+	for _, p := range set {
+		if !accepted[p.Class] {
+			return false
+		}
+	}
+	return true
 }
 
 // scanPath applies every pattern whose class is not accepted for this file to
 // the file's path. A path cannot carry an inline waiver; DefaultAllowList is
 // the only way to accept one.
-func scanPath(name string, accepted map[Class]bool) []Finding {
-	if !mayContainLabValue([]byte(name)) {
+func scanPath(name string, set []Pattern, accepted map[Class]bool) []Finding {
+	if !mayContainLabValue(set, []byte(name)) {
 		return nil
 	}
 	var findings []Finding
-	for _, p := range patterns {
+	for _, p := range set {
 		if accepted[p.Class] {
 			continue
 		}
 		for _, span := range p.Expr.FindAllStringIndex(name, -1) {
-			if p.YieldsTo != "" && insideClass(name, span, p.YieldsTo) {
+			if p.YieldsTo != "" && insideClass(set, name, span, p.YieldsTo) {
 				continue
 			}
 			findings = append(findings, Finding{
@@ -396,8 +348,8 @@ func scanPath(name string, accepted map[Class]bool) []Finding {
 
 // scanContent applies every pattern whose class is not accepted for this file to
 // every line of it.
-func scanContent(name string, content []byte, accepted map[Class]bool) []Finding {
-	if !mayContainLabValue(content) {
+func scanContent(name string, content []byte, set []Pattern, accepted map[Class]bool) []Finding {
+	if !mayContainLabValue(set, content) {
 		return nil
 	}
 	lines := strings.Split(string(content), "\n")
@@ -406,12 +358,12 @@ func scanContent(name string, content []byte, accepted map[Class]bool) []Finding
 		if waived(line) || (i > 0 && waived(lines[i-1])) {
 			continue
 		}
-		for _, p := range patterns {
+		for _, p := range set {
 			if accepted[p.Class] {
 				continue
 			}
 			for _, span := range p.Expr.FindAllStringIndex(line, -1) {
-				if p.YieldsTo != "" && insideClass(line, span, p.YieldsTo) {
+				if p.YieldsTo != "" && insideClass(set, line, span, p.YieldsTo) {
 					continue
 				}
 				findings = append(findings, Finding{
@@ -430,8 +382,8 @@ func scanContent(name string, content []byte, accepted map[Class]bool) []Finding
 
 // insideClass reports whether span lies within a match of class on line,
 // whether or not that class is accepted where the line was found.
-func insideClass(line string, span []int, class Class) bool {
-	for _, p := range patterns {
+func insideClass(set []Pattern, line string, span []int, class Class) bool {
+	for _, p := range set {
 		if p.Class != class {
 			continue
 		}

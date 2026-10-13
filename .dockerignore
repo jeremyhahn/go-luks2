@@ -47,6 +47,8 @@ coverage.html
 .github/workflows/qwen-review.yml
 .github/workflows/batch.yml
 test/ci/workflows/batch_test.go
+test/internal/labstrings/fleet.go
+test/internal/labstrings/fleet_test.go
 
 # OS files
 .DS_Store

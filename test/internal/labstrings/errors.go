@@ -75,6 +75,30 @@ func (e *AttrError) Error() string {
 
 func (e *AttrError) Unwrap() error { return e.Err }
 
+// ArchiveError reports that the archive of a commit could not be produced. A
+// check of the archive cannot then vouch for what it publishes, so it stops
+// rather than reporting clean.
+type ArchiveError struct {
+	// Root is the repository whose HEAD was to be archived.
+	Root string
+
+	// Stderr is what git said, if anything.
+	Stderr string
+
+	// Err is the underlying exec or file system failure.
+	Err error
+}
+
+func (e *ArchiveError) Error() string {
+	msg := "labstrings: cannot archive HEAD of " + e.Root + ": " + e.Err.Error()
+	if e.Stderr != "" {
+		msg += ": " + e.Stderr
+	}
+	return msg
+}
+
+func (e *ArchiveError) Unwrap() error { return e.Err }
+
 // IndexEntryError is returned when an index entry cannot be scanned: its blob
 // is missing from the object store (a partial clone), its mode is one the gate
 // does not understand, or git's answer about it is malformed. The gate cannot
@@ -142,6 +166,20 @@ func (e *ReportError) Error() string {
 }
 
 func (e *ReportError) Unwrap() error { return e.Err }
+
+// NoPatternsError is returned when a scan is asked to run with no pattern set.
+// Such a scan cannot find anything, so it is a failure, never a clean result.
+// The development tree's set is compiled in from fleet.go, which is stripped
+// at publish; a development tree built without it is the case this catches.
+type NoPatternsError struct {
+	// Tracked is how many tracked files the scan would have read.
+	Tracked int
+}
+
+func (e *NoPatternsError) Error() string {
+	return "labstrings: no lab-value pattern set is compiled in (fleet.go is missing from this build), so " +
+		strconv.Itoa(e.Tracked) + " tracked files cannot be scanned; a scan with no patterns would report clean"
+}
 
 // ExemptionError reports an unusable line in ExemptFile.
 type ExemptionError struct {

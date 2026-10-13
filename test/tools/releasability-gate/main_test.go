@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -19,6 +20,20 @@ import (
 
 // entriesOf returns an index reader that reports exactly files, standing in for
 // the git index.
+// testPolicy is the repository's policy with a pattern set of documentation
+// values in place of the fleet set, so these tests spell no fleet value and
+// run alike in the development tree and in the published one, which carries
+// no fleet set.
+var testPolicy = func() policy {
+	p := repositoryPolicy
+	p.patterns = []labstrings.Pattern{
+		{Class: labstrings.ClassLabAddress, Expr: regexp.MustCompile(`\b203\.0\.113\.\d{1,3}\b`), Needle: "203.0.113.", Guidance: "use 198.51.100.0/24"},
+		{Class: labstrings.ClassLabHost, Expr: regexp.MustCompile(`(?i)\bnode-\d{2}\.example\b`), Needle: "node-", Guidance: "name the role"},
+		{Class: labstrings.ClassOwnerAccount, Expr: regexp.MustCompile(`(?i)\bexample-owner\b`), Needle: "example-owner", Guidance: "name the role"},
+	}
+	return p
+}()
+
 func entriesOf(files map[string]string) indexReader {
 	entries := make([]labstrings.Entry, 0, len(files))
 	for name, content := range files {
@@ -78,7 +93,7 @@ func gitEnv(dir string) []string {
 
 func runGate(root string, read indexReader) (int, string, string) {
 	var stdout, stderr strings.Builder
-	code := run([]string{root}, read, repositoryPolicy, &stdout, &stderr)
+	code := run([]string{root}, read, testPolicy, &stdout, &stderr)
 	return code, stdout.String(), stderr.String()
 }
 
@@ -99,7 +114,7 @@ func TestRun_ACleanTreePasses(t *testing.T) {
 
 func TestRun_ALabValueFails(t *testing.T) {
 	list := entriesOf(map[string]string{
-		"cmd/luks2/help.go": "const help = \"--keyserver https://198.51.100.51:8443\"\n", // lab-string-ok: fixture the gate must report; nothing is dialed
+		"cmd/luks2/help.go": "const help = \"--keyserver https://203.0.113.51:8443\"\n",
 	})
 	code, _, stderr := runGate(t.TempDir(), list)
 	if code != exitDirty {
@@ -107,6 +122,43 @@ func TestRun_ALabValueFails(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "cmd/luks2/help.go") {
 		t.Errorf("report does not name the file:\n%s", stderr)
+	}
+}
+
+// A development tree -- one that tracks a strip-at-publish file -- must carry
+// the fleet pattern set: without it the content scan cannot run, and a gate
+// that could not look is never reported clean.
+func TestRun_ADevelopmentTreeWithNoPatternSetFails(t *testing.T) {
+	p := testPolicy
+	p.patterns = nil
+	read := entriesOf(map[string]string{"CLAUDE.md": "notes\n", "README.md": "readme\n"})
+	var stdout, stderr strings.Builder
+	if code := run([]string{"."}, read, p, &stdout, &stderr); code != exitFailed {
+		t.Fatalf("exit = %d, want %d; stdout:\n%s", code, exitFailed, stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "no lab-value pattern set") {
+		t.Errorf("stderr does not say why it could not scan:\n%s", stderr.String())
+	}
+}
+
+// A published tree carries neither the fleet set nor any strip-at-publish
+// file. Its file rules still hold, and it says on every run that it did not
+// scan content.
+func TestRun_APublishedTreeSaysItDidNotScanContent(t *testing.T) {
+	p := testPolicy
+	p.patterns = nil
+	read := entriesOf(map[string]string{"README.md": "endpoint: https://203.0.113.51:8443\n"})
+	var stdout, stderr strings.Builder
+	if code := run([]string{"."}, read, p, &stdout, &stderr); code != exitClean {
+		t.Fatalf("exit = %d, want %d; stderr:\n%s", code, exitClean, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "content NOT scanned") {
+		t.Errorf("the qualified pass does not say content was not scanned:\n%s", stdout.String())
+	}
+
+	read = entriesOf(map[string]string{"tools/run.sh": "#!/bin/sh\n"})
+	if code := run([]string{"."}, read, p, io.Discard, io.Discard); code != exitDirty {
+		t.Fatalf("an unpublishable file passed a published tree: exit = %d, want %d", code, exitDirty)
 	}
 }
 
@@ -159,7 +211,7 @@ func TestRun_AFileTooLargeToScanFailsRatherThanPasses(t *testing.T) {
 // gate must still fail on it.
 func TestRun_AStagedValueHiddenByAnUnstagedEditFails(t *testing.T) {
 	root := gitRepo(t, map[string]string{
-		"docs/guide.md": "endpoint: https://198.51.100.51:8443\n", // lab-string-ok: fixture the gate must report; nothing is dialed
+		"docs/guide.md": "endpoint: https://203.0.113.51:8443\n",
 	})
 	if err := os.WriteFile(filepath.Join(root, "docs", "guide.md"), []byte("endpoint: https://luks.example.com\n"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
@@ -204,7 +256,7 @@ func TestRun_NeedsExactlyOneRoot(t *testing.T) {
 		code := run(args, func(string) ([]labstrings.Entry, error) {
 			t.Fatal("listed files for a bad invocation")
 			return nil, nil
-		}, repositoryPolicy, io.Discard, &stderr)
+		}, testPolicy, io.Discard, &stderr)
 		if code != exitFailed {
 			t.Errorf("args %q: exit = %d, want %d", args, code, exitFailed)
 		}
@@ -255,9 +307,9 @@ func moduleRoot(t *testing.T) string {
 func TestRun_RefusesToRunOnABrokenPolicy(t *testing.T) {
 	read := entriesOf(map[string]string{"README.md": "nothing to see\n"})
 	broken := map[string]policy{
-		"allow-list":         {allow: []labstrings.AllowRule{{Path: ""}}, unpublishable: labstrings.DefaultUnpublishable, strip: labstrings.DefaultStripAtPublish},
-		"unpublishable list": {allow: labstrings.DefaultAllowList, unpublishable: []labstrings.Unpublishable{{Path: "x"}}, strip: labstrings.DefaultStripAtPublish},
-		"strip list":         {allow: labstrings.DefaultAllowList, unpublishable: labstrings.DefaultUnpublishable, strip: []labstrings.Unpublishable{{Path: "x"}}},
+		"allow-list":         {patterns: testPolicy.patterns, allow: []labstrings.AllowRule{{Path: ""}}, unpublishable: labstrings.DefaultUnpublishable, strip: labstrings.DefaultStripAtPublish},
+		"unpublishable list": {patterns: testPolicy.patterns, allow: labstrings.DefaultAllowList, unpublishable: []labstrings.Unpublishable{{Path: "x"}}, strip: labstrings.DefaultStripAtPublish},
+		"strip list":         {patterns: testPolicy.patterns, allow: labstrings.DefaultAllowList, unpublishable: labstrings.DefaultUnpublishable, strip: []labstrings.Unpublishable{{Path: "x"}}},
 	}
 	for name, p := range broken {
 		t.Run(name, func(t *testing.T) {
@@ -281,11 +333,11 @@ func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("disk ful
 // reader; a dirty tree whose report is lost exits 2, not 1 and never 0.
 func TestRun_AReportThatCannotBeWrittenIsAFailure(t *testing.T) {
 	for name, files := range map[string]map[string]string{
-		"lab value":          {"notes.txt": "ssh jhahn@vm-host-4\n"}, // lab-string-ok: the fixture the gate must catch
+		"lab value":          {"notes.txt": "ssh example-owner@node-04.example\n"},
 		"unpublishable file": {"tools/run.sh": "#!/bin/sh\n"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if code := run([]string{"."}, entriesOf(files), repositoryPolicy, io.Discard, failingWriter{}); code != exitFailed {
+			if code := run([]string{"."}, entriesOf(files), testPolicy, io.Discard, failingWriter{}); code != exitFailed {
 				t.Fatalf("exit = %d, want %d", code, exitFailed)
 			}
 		})
@@ -434,7 +486,7 @@ func TestRun_AQualificationThatCannotBeWrittenIsAFailure(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			var stderr strings.Builder
-			if code := run([]string{"."}, tc.read, repositoryPolicy, &failAfter{n: tc.writes}, &stderr); code != exitFailed {
+			if code := run([]string{"."}, tc.read, testPolicy, &failAfter{n: tc.writes}, &stderr); code != exitFailed {
 				t.Fatalf("exit = %d, want %d", code, exitFailed)
 			}
 			if !strings.Contains(stderr.String(), "disk full") {

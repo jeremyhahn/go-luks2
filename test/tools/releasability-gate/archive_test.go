@@ -21,8 +21,14 @@ import (
 // .gitattributes export-ignores. git answers both questions from a scratch
 // repository whose work tree is src, so this works the same in a checkout and
 // in a tree that is itself an archive export. The scratch repository is
-// created without templates, with no system, global or XDG configuration, so
-// only the tree's own .gitignore and .gitattributes files decide.
+// created without templates and git runs in labstrings.HermeticGitEnv, with no
+// system, global or XDG configuration or attributes file and no GIT_ variable,
+// so only the tree's own .gitignore and .gitattributes files decide.
+//
+// It copies the work tree, not an archive of HEAD, so that it works where
+// there is no commit to archive: the published tree runs this test too. Which
+// files a commit publishes is the archive checks' question (ArchiveHEAD); this
+// one asks whether the packages' tests need a checkout.
 func publishedTree(t *testing.T, src string) string {
 	t.Helper()
 	scratch := t.TempDir()
@@ -31,8 +37,7 @@ func publishedTree(t *testing.T, src string) string {
 	if err := os.Mkdir(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	env := append(gitEnv(scratch), "HOME="+home, "XDG_CONFIG_HOME="+home,
-		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
+	env := labstrings.HermeticGitEnv(home)
 	git := func(stdin string, args ...string) []byte {
 		t.Helper()
 		cmd := exec.Command("git", args...) // #nosec G204 -- git from PATH, fixed arguments over test directories

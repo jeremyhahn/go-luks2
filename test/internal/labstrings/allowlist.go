@@ -35,17 +35,23 @@ type AllowRule struct {
 // DefaultAllowList is the accepted set for THIS repository. Every entry is a
 // deliberate decision, and the list is meant to shrink.
 //
-// The one entry is this gate's own test fixtures. Nothing else in the tree
-// needed one when the gate was added (#211): the scrub had already removed the
-// values themselves, which is always preferred to listing them here.
+// The entries are the two files that must spell the fleet's values: fleet.go,
+// which defines the patterns, and fleet_test.go, which proves they match. Both
+// are stripped at publish, and TestDefaultAllowList_AcceptsOnlyStrippedFiles
+// keeps every entry on a strip-at-publish file, so nothing published is ever
+// accepted. Nothing else in the tree needed an entry when the gate was added
+// (#211): the scrub had already removed the values themselves, which is always
+// preferred to listing them here.
 var DefaultAllowList = []AllowRule{
 	{
-		Path:    "test/internal/labstrings/*_test.go",
-		Classes: []Class{ClassLabAddress, ClassLabHost},
-		Reason: "This gate's own fixtures. Each test plants a fleet address or " +
-			"hostname to prove the gate reports it; nothing is dialed. Owner paths " +
-			"are NOT allowed here: the fixtures assemble those at runtime and waive " +
-			"the lines that must spell them.",
+		Path:    fleetPatterns,
+		Classes: classes,
+		Reason:  "the fleet pattern set: it names the values the gate hunts, and it is stripped at publish",
+	},
+	{
+		Path:    fleetTests,
+		Classes: classes,
+		Reason:  "the fleet pattern set's tests: they plant the values to prove each is reported, and are stripped at publish",
 	},
 }
 
@@ -53,8 +59,8 @@ var DefaultAllowList = []AllowRule{
 // malformed rule fails the gate instead of quietly widening it.
 func ValidateAllowList(rules []AllowRule) error {
 	known := map[Class]bool{}
-	for _, p := range patterns {
-		known[p.Class] = true
+	for _, c := range classes {
+		known[c] = true
 	}
 	for i, r := range rules {
 		switch {
@@ -86,7 +92,7 @@ func ValidateAllowList(rules []AllowRule) error {
 // Patterns are already validated by the time this runs, so a malformed pattern
 // cannot silently match nothing.
 func acceptedClasses(rules []AllowRule, name string) map[Class]bool {
-	accepted := make(map[Class]bool, len(patterns))
+	accepted := make(map[Class]bool, len(classes))
 	for _, r := range rules {
 		ok, err := matchSegments(strings.Split(r.Path, "/"), strings.Split(name, "/"))
 		if err != nil || !ok {

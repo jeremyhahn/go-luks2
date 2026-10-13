@@ -35,42 +35,30 @@ const notExportIgnored = "listed as stripped at publish, but " + GitAttributes +
 // would also read its .git/info/attributes and every core.attributesFile, none
 // of which travel with the tree: a rule in one of them would make a file look
 // excluded that a forge's archive of the commit ships. So the files are
-// written into a scratch repository of their own, created without templates
-// (no info/attributes), and git runs there with no system, global or XDG
-// configuration and no GIT_ variable inherited from the caller.
+// written into a hermeticRepo of their own.
 func exportIgnored(root string, attributes map[string][]byte, paths []string) (map[string]bool, error) {
 	if len(paths) == 0 {
 		return map[string]bool{}, nil
 	}
-	scratch, err := os.MkdirTemp("", "labstrings-attr-")
+	fail := func(stderr string, err error) error { return &AttrError{Root: root, Stderr: stderr, Err: err} }
+	repo, env, cleanup, err := hermeticRepo(fail)
 	if err != nil {
-		return nil, &AttrError{Root: root, Err: err}
+		return nil, err
 	}
-	defer func() { _ = os.RemoveAll(scratch) }()
-	home := filepath.Join(scratch, "home")
-	repo := filepath.Join(scratch, "repo")
-	for _, dir := range []string{home, repo} {
-		if err := os.Mkdir(dir, 0o700); err != nil {
-			return nil, &AttrError{Root: root, Err: err}
-		}
-	}
+	defer cleanup()
 	for name, content := range attributes {
 		if !filepath.IsLocal(filepath.FromSlash(name)) || filepath.Base(filepath.FromSlash(name)) != GitAttributes {
-			return nil, &AttrError{Root: root, Err: errors.New("not a " + GitAttributes + " path in the tree: " + name)}
+			return nil, fail("", errors.New("not a "+GitAttributes+" path in the tree: "+name))
 		}
 		full := filepath.Join(repo, filepath.FromSlash(name))
 		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
-			return nil, &AttrError{Root: root, Err: err}
+			return nil, fail("", err)
 		}
 		if err := os.WriteFile(full, content, 0o600); err != nil {
-			return nil, &AttrError{Root: root, Err: err}
+			return nil, fail("", err)
 		}
 	}
-	env := hermeticGitEnv(home)
-	if _, err := runGit(root, repo, env, nil, "init", "-q", "--template="); err != nil {
-		return nil, err
-	}
-	out, err := runGit(root, repo, env, strings.NewReader(strings.Join(paths, "\x00")+"\x00"),
+	out, err := runGit(repo, env, strings.NewReader(strings.Join(paths, "\x00")+"\x00"), fail,
 		"check-attr", "--stdin", "-z", "export-ignore")
 	if err != nil {
 		return nil, err
@@ -78,11 +66,88 @@ func exportIgnored(root string, attributes map[string][]byte, paths []string) (m
 	return parseExportIgnored(root, out, len(paths))
 }
 
-// hermeticGitEnv is the caller's environment without anything that points git
-// at configuration or attributes outside the scratch repository: every GIT_
+// ArchiveHEAD returns `git archive --format=tar` of the commit HEAD names in
+// the repository at root, as a clean publishing checkout of that commit
+// produces it. Only the commit's own GitAttributes files decide what is
+// export-ignored or converted.
+//
+// Running `git archive` in root would also honor its .git/info/attributes, its
+// configuration (a core.attributesFile, tar.umask, tar.<format>.command,
+// core.autocrlf, a filter driver) and the caller's system, global and XDG
+// configuration and GIT_ variables, none of which travel with the commit: an
+// export-ignore rule in any of them would hide a published file from a check
+// of the archive. So root is asked only for the commit and its object store,
+// and the archive is written in a hermeticRepo that borrows those objects as an
+// alternate. It has no work tree content and no index, and `git archive` reads
+// attributes from the archived tree, not from either.
+func ArchiveHEAD(root string) ([]byte, error) {
+	fail := func(stderr string, err error) error { return &ArchiveError{Root: root, Stderr: stderr, Err: err} }
+	repo, env, cleanup, err := hermeticRepo(fail)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	// Opening root reads its local configuration, which says nothing about
+	// which commit HEAD names or where its objects are. The hermetic
+	// environment drops the global configuration, which may be what marks a
+	// checkout owned by another user safe, so this read marks it safe.
+	commit, err := runGit(root, env, nil, fail, "-c", "safe.directory=*", "rev-parse", "--verify", "HEAD^{commit}")
+	if err != nil {
+		return nil, err
+	}
+	objects, err := runGit(root, env, nil, fail, "-c", "safe.directory=*", "rev-parse", "--git-path", "objects")
+	if err != nil {
+		return nil, err
+	}
+	store := strings.TrimSpace(string(objects))
+	if !filepath.IsAbs(store) {
+		store = filepath.Join(root, store)
+	}
+	info := filepath.Join(repo, ".git", "objects", "info")
+	if err := os.MkdirAll(info, 0o700); err != nil {
+		return nil, fail("", err)
+	}
+	if err := os.WriteFile(filepath.Join(info, "alternates"), []byte(store+"\n"), 0o600); err != nil {
+		return nil, fail("", err)
+	}
+	return runGit(repo, env, nil, fail, "archive", "--format=tar", strings.TrimSpace(string(commit)))
+}
+
+// hermeticRepo creates an empty repository in a new scratch directory and
+// returns it with the environment that confines git to it, and a function that
+// removes the scratch directory. The repository is created without templates
+// (no info/attributes), and git runs there with no system, global or XDG
+// configuration or attributes file and no GIT_ variable inherited from the
+// caller. fail types the error of any step.
+func hermeticRepo(fail func(stderr string, err error) error) (repo string, env []string, cleanup func(), err error) {
+	scratch, err := os.MkdirTemp("", "labstrings-git-")
+	if err != nil {
+		return "", nil, nil, fail("", err)
+	}
+	cleanup = func() { _ = os.RemoveAll(scratch) }
+	home := filepath.Join(scratch, "home")
+	repo = filepath.Join(scratch, "repo")
+	for _, dir := range []string{home, repo} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			cleanup()
+			return "", nil, nil, fail("", err)
+		}
+	}
+	env = HermeticGitEnv(home)
+	if _, err := runGit(repo, env, nil, fail, "init", "-q", "--template="); err != nil {
+		cleanup()
+		return "", nil, nil, err
+	}
+	return repo, env, cleanup, nil
+}
+
+// HermeticGitEnv is the caller's environment without anything that points git
+// at configuration or attributes outside the repository it runs in: every GIT_
 // variable (GIT_DIR, GIT_CONFIG_PARAMETERS, GIT_ATTR_SOURCE, ...), HOME and
-// XDG_CONFIG_HOME, with the latter two pointed at the empty home.
-func hermeticGitEnv(home string) []string {
+// XDG_CONFIG_HOME, with the latter two pointed at home, which should be an
+// empty directory. The system configuration and attributes file are off, and
+// the global configuration is empty.
+func HermeticGitEnv(home string) []string {
 	var env []string
 	for _, kv := range os.Environ() {
 		if strings.HasPrefix(kv, "GIT_") || strings.HasPrefix(kv, "HOME=") || strings.HasPrefix(kv, "XDG_CONFIG_HOME=") {
@@ -91,20 +156,20 @@ func hermeticGitEnv(home string) []string {
 		env = append(env, kv)
 	}
 	return append(env, "HOME="+home, "XDG_CONFIG_HOME="+home,
-		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
+		"GIT_CONFIG_NOSYSTEM=1", "GIT_ATTR_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
 }
 
-// runGit runs git in dir with env and returns its stdout; a failure is an
-// AttrError about root, the repository the gate scans.
-func runGit(root, dir string, env []string, stdin io.Reader, args ...string) ([]byte, error) {
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...) // #nosec G204 -- fixed git argv; dir is the scratch repository
+// runGit runs git in dir with env and returns its stdout; a failure is the
+// error fail builds from what git said.
+func runGit(dir string, env []string, stdin io.Reader, fail func(stderr string, err error) error, args ...string) ([]byte, error) {
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...) // #nosec G204 -- fixed git argv; dir is the scratch or scanned repository
 	cmd.Env = env
 	cmd.Stdin = stdin
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, &AttrError{Root: root, Stderr: strings.TrimSpace(stderr.String()), Err: err}
+		return nil, fail(strings.TrimSpace(stderr.String()), err)
 	}
 	return out, nil
 }

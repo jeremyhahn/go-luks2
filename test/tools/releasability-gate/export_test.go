@@ -98,8 +98,14 @@ func TestThisGitattributes_GitArchiveLeavesOutEveryStripAtPublishPath(t *testing
 	gitIn(t, root, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false",
 		"commit", "-q", "-m", "fixture")
 
+	// The archive a clean publishing checkout produces: only the committed
+	// .gitattributes decides, not this machine's git configuration.
+	archive, err := labstrings.ArchiveHEAD(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	archived := map[string]bool{}
-	tr := tar.NewReader(bytes.NewReader(gitOut(t, root, nil, "archive", "--format=tar", "HEAD")))
+	tr := tar.NewReader(bytes.NewReader(archive))
 	for {
 		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {

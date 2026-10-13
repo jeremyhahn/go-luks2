@@ -15,10 +15,21 @@ how both are kept out of what is published, and what that does not cover.
 ## The rule
 
 Nothing published may carry a fleet address, a fleet hostname or an owner's
-home path. The classes, their replacement values (RFC 5737 addresses, RFC 2606
-names, role names, repository-relative paths) and the one allow-list entry are
-in `patterns` in `test/internal/labstrings/labstrings.go`, which is the single
-source: this page does not repeat the list, so it cannot drift from it.
+home path. The classes and their replacement values (RFC 5737 addresses, RFC
+2606 names, role names, repository-relative paths) are described in the
+package documentation of `test/internal/labstrings`. The patterns themselves
+name the values they ban, so they live in a file that is stripped at publish
+(next section) and is the only file the allow-list accepts; this page does not
+repeat them. The published tests of the scanner use documentation values, and
+a development-tree test requires that an archive export of the commit names no
+value of the set anywhere, a waiver notwithstanding.
+
+The internal release tag names a commit on the development trunk, which still
+tracks the internal-only files below. The public tree is that commit's archive
+export: the export-ignored paths are removed and every other tracked file is
+published byte-for-byte. Nothing rewrites a file on the way out, so a fleet
+value has to be scrubbed in the source before tagging. Publishing the tree and
+tagging it on the public mirror are separate steps, each taken by the owner.
 
 Two further classes of tracked file are refused outright, whatever they
 contain:
@@ -45,6 +56,7 @@ The strip-at-publish set is:
 | `.github/workflows/code-review.yml`, `.github/workflows/qwen-review.yml` | Internal code-review workflows |
 | `.github/workflows/batch.yml` | The internal batch-runner workflow (fuzz, race, soak, benchmarks) |
 | `test/ci/workflows/batch_test.go` | The tests of the batch-runner workflow, which read only that file |
+| `test/internal/labstrings/fleet.go`, `test/internal/labstrings/fleet_test.go` | The fleet pattern set and its tests, which name the values the gate bans |
 
 A test that reads only a strip-at-publish file is itself stripped at publish,
 with the file it tests: the published tree has no such file to read, and
@@ -83,8 +95,14 @@ it to both files fails the tests below.
   present, as CI does on every pull request, the gate fails on any tracked
   strip-at-publish file the archive would carry.
 - **2** when the gate cannot run: no checkout, a blob it could not read in
-  full, or an attribute git could not report. A gate that could not look is
-  never reported clean.
+  full, an attribute git could not report, or a tree that tracks a
+  strip-at-publish file but has no pattern set to scan it with. A gate that
+  could not look is never reported clean.
+
+In a published tree there is neither a pattern set nor a strip-at-publish
+file. There the gate checks the file rules, exits 0, and says on every run
+that content was not scanned for fleet values: the scan that matters ran on
+the development tree before the export.
 
 Only the staged `.gitattributes` files decide what is export-ignored, because
 only they travel with the commit a forge archives. The gate does not ask git
@@ -123,8 +141,7 @@ there, as in the published tree or the integration image.
 
 - **The Go module zip.** The module proxy builds it from the repository at the
   tag, not from an archive, and `.gitattributes` has no effect on what it
-includes. It is clean
-  only because the public repository's tag points at a tree made from the
+  includes. It is clean only because the public repository's tag points at a tree made from the
   archive export. Tagging the development trunk's commit on the public mirror
   would publish the strip-at-publish files in the module zip.
 - **A history push.** Every commit on the development trunk carries these

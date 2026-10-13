@@ -8,19 +8,24 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
 )
 
-// ownerAccountFixture is the owner's login this gate bans, and ownerPathFixture
-// the home prefix built on it. Both are assembled at runtime so the fixtures do
-// not themselves have to be waived on every line that uses them.
-var (
-	ownerAccountFixture = "j" + "hahn"
-	ownerPathFixture    = "/home/" + ownerAccountFixture
-)
+// fixturePatterns is a pattern set of documentation values, one pattern per
+// class, shaped like the fleet set: an address block, a numbered host family,
+// a home path and the account inside it. The scanner's mechanics are proved
+// against it, so the published tests never spell a fleet value; the fleet set
+// itself is proved in fleet_test.go, which is stripped at publish.
+var fixturePatterns = []Pattern{
+	{Class: ClassLabAddress, Expr: regexp.MustCompile(`\b203\.0\.113\.\d{1,3}\b`), Needle: "203.0.113.", Guidance: "use 198.51.100.0/24"},
+	{Class: ClassLabHost, Expr: regexp.MustCompile(`(?i)\bnode-\d{2}\.example\b`), Needle: "node-", Guidance: "name the role"},
+	{Class: ClassOwnerPath, Expr: regexp.MustCompile(`/home/example-owner\b`), Needle: "/home/example-owner", Guidance: "use a repository-relative path"},
+	{Class: ClassOwnerAccount, Expr: regexp.MustCompile(`(?i)\bexample-owner\b`), Needle: "example-owner", Guidance: "name the role", YieldsTo: ClassOwnerPath},
+}
 
 // entriesOf turns a path-to-content map into regular-file index entries,
 // sorted by path, in the form Scan takes.
@@ -55,149 +60,25 @@ func TestScan_ReportsEveryClassWithItsLineAndMatch(t *testing.T) {
 		wantMatch string
 		wantLine  int
 	}{
-		{
-			name:      "fleet address in help text",
-			content:   "package main\n\nconst help = \"dial 198.51.100.51:8443\"\n",
-			wantClass: ClassLabAddress,
-			wantMatch: "198.51.100.51",
-			wantLine:  3,
-		},
-		{
-			name:      "fleet hostname in a doc",
-			content:   "# Runbook\n\nRun it on GODLIKE first.\n",
-			wantClass: ClassLabHost,
-			wantMatch: "GODLIKE",
-			wantLine:  3,
-		},
-		{
-			name:      "runner hostname in a captured log",
-			content:   "2026-09-12T00:00:00Z ci-node-2(version:v3.1.0)\n",
-			wantClass: ClassLabHost,
-			wantMatch: "ci-node-2",
-			wantLine:  1,
-		},
-		{
-			name:      "fleet hostname quoted in a workflow comment",
-			content:   "jobs:\n# the fleet is idle: Omega is at 21%\n",
-			wantClass: ClassLabHost,
-			wantMatch: "Omega",
-			wantLine:  2,
-		},
-		{
-			name:      "fleet hostname as an internal endpoint",
-			content:   "cfg.BaseURL = \"http://omega.internal:8077\"\n",
-			wantClass: ClassLabHost,
-			wantMatch: "omega.internal",
-			wantLine:  1,
-		},
-		{
-			name:      "agent hostname in a comment",
-			content:   "// observed on vm-host-4\n",
-			wantClass: ClassLabHost,
-			wantMatch: "vm-host-4",
-			wantLine:  1,
-		},
-		{
-			name:      "tunnel gateway in prose",
-			content:   "The tunnel comes up on tgw-01 before the runners.\n",
-			wantClass: ClassLabHost,
-			wantMatch: "tgw-01",
-			wantLine:  1,
-		},
-		{
-			name:      "tunnel gateway in a URL, mixed case",
-			content:   "proxy: https://TGW-01:8443/v1\n",
-			wantClass: ClassLabHost,
-			wantMatch: "TGW-01",
-			wantLine:  1,
-		},
-		{
-			name:      "mini node in YAML",
-			content:   "runners:\n  - host: lab-node-5\n",
-			wantClass: ClassLabHost,
-			wantMatch: "lab-node-5",
-			wantLine:  2,
-		},
-		{
-			name:      "mini node in a URL, mixed case",
-			content:   "see http://Mini-02.internal:8077/status\n",
-			wantClass: ClassLabHost,
-			wantMatch: "Mini-02",
-			wantLine:  1,
-		},
-		{
-			name:      "coordinator host in prose",
-			content:   "# Notes\nThe coordinator runs on control-b.\n",
-			wantClass: ClassLabHost,
-			wantMatch: "control-b",
-			wantLine:  2,
-		},
-		{
-			name:      "coordinator host in YAML, mixed case",
-			content:   "coordinator: Control-b\n",
-			wantClass: ClassLabHost,
-			wantMatch: "Control-b",
-			wantLine:  1,
-		},
-		{
-			name:      "coordinator host in a URL",
-			content:   "forge: http://git.example.internal:3001/api/v1\n",
-			wantClass: ClassLabHost,
-			wantMatch: "control-b",
-			wantLine:  1,
-		},
-		{
-			name:      "owner home path in a doc",
-			content:   "See " + ownerPathFixture + "/sources for the checkout.\n",
-			wantClass: ClassOwnerPath,
-			wantMatch: ownerPathFixture,
-			wantLine:  1,
-		},
-		{
-			name:      "owner account in an ssh command",
-			content:   "ssh " + ownerAccountFixture + "@ci-runner-01 uptime\n",
-			wantClass: ClassOwnerAccount,
-			wantMatch: ownerAccountFixture,
-			wantLine:  1,
-		},
-		{
-			name:      "owner account as a mixed-case author, in YAML",
-			content:   "maintainers:\n  - J" + "Hahn\n",
-			wantClass: ClassOwnerAccount,
-			wantMatch: "J" + "Hahn",
-			wantLine:  2,
-		},
-		{
-			name:      "lab NFS mount in a script default",
-			content:   "QRDB=${QRDB:-/mnt/" + "vstation" + "-01/go-qrdb}\n", // lab-string-ok: fixture for the owner-path rule
-			wantClass: ClassOwnerPath,
-			wantMatch: "/mnt/" + "vstation",
-			wantLine:  1,
-		},
+		{"address in help text", "package main\n\nconst help = \"dial 203.0.113.51:8443\"\n", ClassLabAddress, "203.0.113.51", 3},
+		{"host in a doc, mixed case", "# Runbook\n\nRun it on NODE-04.example first.\n", ClassLabHost, "NODE-04.example", 3},
+		{"owner home path in a doc", "See /home/example-owner/sources for the checkout.\n", ClassOwnerPath, "/home/example-owner", 1},
+		{"owner account in an ssh command", "ssh example-owner@ci-runner-01 uptime\n", ClassOwnerAccount, "example-owner", 1},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			files := entriesOf(map[string]string{"shipping/file.txt": tc.content})
-			findings, err := Scan(files, nil)
+			findings, err := Scan(files, fixturePatterns, nil)
 			if err != nil {
 				t.Fatalf("Scan: %v", err)
 			}
-			var got *Finding
-			for i := range findings {
-				if findings[i].Class == tc.wantClass {
-					got = &findings[i]
-					break
-				}
+			if len(findings) != 1 {
+				t.Fatalf("want one finding, got %v", findings)
 			}
-			if got == nil {
-				t.Fatalf("no %s finding; got %v", tc.wantClass, findings)
-			}
-			if got.Match != tc.wantMatch {
-				t.Errorf("match = %q, want %q", got.Match, tc.wantMatch)
-			}
-			if got.Line != tc.wantLine {
-				t.Errorf("line = %d, want %d", got.Line, tc.wantLine)
+			got := findings[0]
+			if got.Class != tc.wantClass || got.Match != tc.wantMatch || got.Line != tc.wantLine {
+				t.Errorf("finding = %+v, want class %s match %q line %d", got, tc.wantClass, tc.wantMatch, tc.wantLine)
 			}
 			if got.Path != "shipping/file.txt" {
 				t.Errorf("path = %q, want shipping/file.txt", got.Path)
@@ -217,68 +98,16 @@ func TestScan_AcceptsWhatItShould(t *testing.T) {
 		name    string
 		content string
 	}{
-		{
-			name:    "documentation addresses",
-			content: "dial 198.51.100.7:8443 or 192.0.2.10 or 203.0.113.4\n",
-		},
-		{
-			name:    "RFC 1918 literals that are not the fleet subnet",
-			content: "peers: 192.168.1.10, 192.168.100.4, 10.0.0.1\n",
-		},
-		{
-			name:    "the repository's own example names",
-			content: "--keyserver https://luks.example.com:8443 --runner ci-runner-01\n",
-		},
-		{
-			name:    "a waiver on the offending line",
-			content: "Measured on gpu-host. <!-- lab-string-ok: measurement provenance -->\n",
-		},
-		{
-			name:    "a waiver on the line above",
-			content: "# lab-string-ok: measurement provenance\nMeasured on gpu-host.\n",
-		},
-		{
-			name:    "a waiver whose reason ends at a comment closer",
-			content: "x := 1 /* lab-string-ok: provenance */ // gpu-host\n",
-		},
-		{
-			name:    "a hostname that merely contains a fleet name as a substring",
-			content: "ungodlikeness is not a host, and vstation-0 has no second digit\n",
-		},
-		{
-			name:    "a word that merely contains the fleet name omega",
-			content: "megaomegalith and omegas are words, not hosts\n",
-		},
-		{
-			name:    "words that merely start like a mini node",
-			content: "a minimal minix build, one mini-batch at a time, mini-2026 and mini-5\n",
-		},
-		{
-			name:    "words that merely start like a coordinator host",
-			content: "the control-plane talks over the control-bus; control-b2 is not a host\n",
-		},
-		{
-			name:    "a key chord is not a coordinator host",
-			content: "press Control-C to abort, Control-D at the prompt\n",
-		},
-		{
-			name:    "the forge owner in a module path and a repository URL",
-			content: "import \"github.com/jeremyhahn/go-enclave\"\nsee https://github.com/jeremyhahn/go-luks2\n",
-		},
-		{
-			name:    "a word that merely contains the owner account",
-			content: "x" + ownerAccountFixture + " and " + ownerAccountFixture + "s and " + ownerAccountFixture + "_x are not the account\n",
-		},
-		{
-			name:    "a tunnel gateway without a number",
-			content: "the tgw role, tgw-a, tgw-1 and tgw-001 are not hosts\n",
-		},
+		{"values outside the set", "dial 198.51.100.7:8443, run on node-4.example or node-04.test\n"},
+		{"a waiver on the offending line", "Measured on node-04.example. <!-- lab-string-ok: measurement provenance -->\n"},
+		{"a waiver on the line above", "# lab-string-ok: measurement provenance\nMeasured on node-04.example.\n"},
+		{"a waiver whose reason ends at a comment closer", "x := 1 /* lab-string-ok: provenance */ // node-04.example\n"},
+		{"a word that merely contains the owner account", "xexample-owner and example-owners are not the account\n"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			files := entriesOf(map[string]string{"clean.txt": tc.content})
-			findings, err := Scan(files, nil)
+			findings, err := Scan(entriesOf(map[string]string{"clean.txt": tc.content}), fixturePatterns, nil)
 			if err != nil {
 				t.Fatalf("Scan: %v", err)
 			}
@@ -289,12 +118,40 @@ func TestScan_AcceptsWhatItShould(t *testing.T) {
 	}
 }
 
+// A scan with no pattern set would report every tree clean, so it is an
+// error, not an empty result.
+func TestScan_WithNoPatternsIsAnError(t *testing.T) {
+	files := entriesOf(map[string]string{"a.txt": "x\n", "b.txt": "y\n"})
+	findings, err := Scan(files, nil, nil)
+	var noPatterns *NoPatternsError
+	if !errors.As(err, &noPatterns) {
+		t.Fatalf("err = %v, want *NoPatternsError", err)
+	}
+	if noPatterns.Tracked != 2 || findings != nil {
+		t.Errorf("tracked = %d, findings = %v; want 2 and none", noPatterns.Tracked, findings)
+	}
+}
+
+// The allow-list may accept only files that never ship: an allow rule over a
+// published file would let a fleet value into the release.
+func TestDefaultAllowList_AcceptsOnlyStrippedFiles(t *testing.T) {
+	stripped := map[string]bool{}
+	for _, s := range DefaultStripAtPublish {
+		stripped[s.Path] = true
+	}
+	for _, r := range DefaultAllowList {
+		if !stripped[r.Path] {
+			t.Errorf("allow rule %q names a file that is not stripped at publish", r.Path)
+		}
+	}
+}
+
 func TestScan_AWaiverWithNoReasonIsNotAWaiver(t *testing.T) {
 	files := entriesOf(map[string]string{
-		"bare.md":       "Measured on gpu-host. <!-- lab-string-ok: -->\n",
-		"whitespace.md": "Measured on gpu-host. # lab-string-ok:    \n",
+		"bare.md":       "Measured on node-04.example. <!-- lab-string-ok: -->\n",
+		"whitespace.md": "Measured on node-04.example. # lab-string-ok:    \n",
 	})
-	findings, err := Scan(files, nil)
+	findings, err := Scan(files, fixturePatterns, nil)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -304,7 +161,7 @@ func TestScan_AWaiverWithNoReasonIsNotAWaiver(t *testing.T) {
 }
 
 func TestScan_AnAllowRuleAcceptsOnlyTheClassesItNames(t *testing.T) {
-	content := "host vm-host-4 under " + ownerPathFixture + "/sources\n"
+	content := "host node-04.example under /home/example-owner/sources\n"
 	files := entriesOf(map[string]string{"pkg/thing_test.go": content})
 
 	rules := []AllowRule{{
@@ -312,7 +169,7 @@ func TestScan_AnAllowRuleAcceptsOnlyTheClassesItNames(t *testing.T) {
 		Classes: []Class{ClassLabHost},
 		Reason:  "test fixtures may name a fleet host",
 	}}
-	findings, err := Scan(files, rules)
+	findings, err := Scan(files, fixturePatterns, rules)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -328,10 +185,10 @@ func TestScan_AnAllowRuleAcceptsOnlyTheClassesItNames(t *testing.T) {
 // the same leak, reported once as the more specific owner-path, and an allow
 // rule that accepts the path accepts the account in it.
 func TestScan_AnOwnerPathIsOneFindingNotTwo(t *testing.T) {
-	content := "cd " + ownerPathFixture + "/sources && ssh " + ownerAccountFixture + "@ci-runner-01\n"
+	content := "cd /home/example-owner/sources && ssh example-owner@ci-runner-01\n"
 	files := entriesOf(map[string]string{"notes.md": content})
 
-	findings, err := Scan(files, nil)
+	findings, err := Scan(files, fixturePatterns, nil)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -340,7 +197,7 @@ func TestScan_AnOwnerPathIsOneFindingNotTwo(t *testing.T) {
 	}
 
 	rules := []AllowRule{{Path: "notes.md", Classes: []Class{ClassOwnerPath}, Reason: "a path under the owner's home is the point"}}
-	findings, err = Scan(files, rules)
+	findings, err = Scan(files, fixturePatterns, rules)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -353,7 +210,7 @@ func TestScan_RejectsAnUnusableAllowList(t *testing.T) {
 	files := entriesOf(map[string]string{"clean.txt": "nothing here\n"})
 	rules := []AllowRule{{Path: "**/*.go", Classes: []Class{ClassLabHost}}}
 
-	_, err := Scan(files, rules)
+	_, err := Scan(files, fixturePatterns, rules)
 	var ruleErr *AllowRuleError
 	if !errors.As(err, &ruleErr) {
 		t.Fatalf("err = %v, want *AllowRuleError", err)
@@ -367,10 +224,10 @@ func TestScan_RejectsAnUnusableAllowList(t *testing.T) {
 // a tracked log or dump with binary noise in it still ships whatever it names.
 func TestScan_ABinaryFileIsScanned(t *testing.T) {
 	files := entriesOf(map[string]string{
-		"capture.bin": "\x00\x01header\x00godlike\x00more bytes\n", // lab-string-ok: fixture for the binary-content rule
+		"capture.bin": "\x00\x01header\x00node-04.example\x00more bytes\n",
 	})
 
-	findings, err := Scan(files, nil)
+	findings, err := Scan(files, fixturePatterns, nil)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -388,10 +245,10 @@ func TestScan_ScansASymlinkTarget(t *testing.T) {
 	entries := []Entry{{
 		Path:    "go-luks2",
 		Kind:    KindSymlink,
-		Content: []byte("/mnt/" + "vstation" + "-01/go-luks2/"), // lab-string-ok: fixture for the owner-path rule
+		Content: []byte("/home/example-owner/go-luks2/"),
 	}}
 
-	findings, err := Scan(entries, nil)
+	findings, err := Scan(entries, fixturePatterns, nil)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -444,6 +301,11 @@ func TestErrors_NameTheirSubjectAndUnwrap(t *testing.T) {
 			contains: []string{"entry 3", "pkg/**", "no reason given"},
 		},
 		{
+			name:     "a scan with no patterns says it cannot look",
+			err:      &NoPatternsError{Tracked: 12},
+			contains: []string{"no lab-value pattern set", "12 tracked files"},
+		},
+		{
 			name:     "report failure names the cause",
 			err:      &ReportError{Err: os.ErrClosed},
 			contains: []string{"cannot write report"},
@@ -483,8 +345,8 @@ func TestReport_SaysWhatToDoAndOnlyWhenDirty(t *testing.T) {
 		Path:     "cmd/luks2/thing.go",
 		Line:     7,
 		Class:    ClassLabHost,
-		Match:    "vm-host-4",
-		Excerpt:  "// observed on vm-host-4",
+		Match:    "node-04.example",
+		Excerpt:  "// observed on node-04.example",
 		Guidance: "name the role",
 	}})
 	if err != nil {
@@ -493,7 +355,7 @@ func TestReport_SaysWhatToDoAndOnlyWhenDirty(t *testing.T) {
 	if !dirty {
 		t.Error("dirty = false with a finding")
 	}
-	for _, want := range []string{"cmd/luks2/thing.go:7", "vm-host-4", "name the role", waiverPrefix} {
+	for _, want := range []string{"cmd/luks2/thing.go:7", "node-04.example", "name the role", waiverPrefix} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("report omits %q:\n%s", want, out.String())
 		}
@@ -520,56 +382,11 @@ func TestReport_AWriteFailureIsATypedError(t *testing.T) {
 	}
 }
 
-// TestPatterns_EveryNeedleIsImpliedByItsExpr pins the sieve's invariant: a
-// pattern whose Needle its own matches do not contain would be skipped for every
-// file in the tree, and the gate would pass while seeing nothing.
-func TestPatterns_EveryNeedleIsImpliedByItsExpr(t *testing.T) {
-	// One string per pattern that the pattern is known to match. They are the
-	// values the audit actually found, so this doubles as the record of what
-	// each rule was written for.
-	samples := map[string][]string{
-		`\b192\.168\.101\.\d{1,3}\b`:   {"198.51.100.91:3001", "at 198.51.100.51:8443"},
-		`(?i)\bvstation-\d{2}\b`:       {"agent-vm-host-4", "VSTATION-01 rebooted"},
-		`(?i)\bdellemc-\d{2}\b`:        {"runner ci-node-2", "DELLEMC-01"},
-		`(?i)\bgodlike(\.internal)?\b`: {"on gpu-host", "http://GODLIKE.internal:8077"},
-		`(?i)\bomega(\.internal)?\b`:   {"omega is 21%", "http://OMEGA.internal:8077"},
-		`(?i)\btgw-\d{2}\b`:            {"tunnel up on tgw-01", "https://TGW-01:8443"},
-		`(?i)\bmini-\d{2}\b`:           {"host: lab-node-5", "Mini-02.internal"},
-		`(?i:\bcontrol)-[a-z]\b`:       {"runs on control-b", "http://git.example.internal:3001"},
-		`/home/jhahn\b`:                {ownerPathFixture + "/sources"},         // lab-string-ok: sample for the owner-path rule
-		`/mnt/vstation`:                {"/mnt/" + "vstation" + "-01/go-qrdb"},  // lab-string-ok: sample for the owner-path rule
-		`(?i)\bjhahn\b`:                {ownerAccountFixture + "@ci-runner-01"}, // lab-string-ok: sample for the owner-account rule
-	}
-
-	for _, p := range patterns {
-		t.Run(p.Expr.String(), func(t *testing.T) {
-			if p.Needle == "" {
-				t.Fatal("pattern has no sieve needle")
-			}
-			if p.Needle != strings.ToLower(p.Needle) {
-				t.Errorf("needle %q is not lowercase; the sieve folds case before searching", p.Needle)
-			}
-			got, ok := samples[p.Expr.String()]
-			if !ok {
-				t.Fatalf("no sample for this pattern: add one so its needle stays honest")
-			}
-			for _, sample := range got {
-				if !p.Expr.MatchString(sample) {
-					t.Errorf("%q does not match its own sample %q", p.Expr, sample)
-				}
-				if !strings.Contains(strings.ToLower(sample), p.Needle) {
-					t.Errorf("sample %q matches but does not contain needle %q: the sieve would skip it", sample, p.Needle)
-				}
-			}
-		})
-	}
-}
-
 func TestScan_AMinifiedLineIsQuotedBounded(t *testing.T) {
-	long := "const x=\"" + strings.Repeat("padding;", 200) + "gpu-host\";"
+	long := "const x=\"" + strings.Repeat("padding;", 200) + "node-04.example\";"
 	files := entriesOf(map[string]string{"dist/bundle.js": long + "\n"})
 
-	findings, err := Scan(files, nil)
+	findings, err := Scan(files, fixturePatterns, nil)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -586,14 +403,7 @@ func TestScan_AMinifiedLineIsQuotedBounded(t *testing.T) {
 }
 
 func TestScan_AnEntryWhoseEveryClassIsAllowedIsAccepted(t *testing.T) {
-	every := make([]Class, 0, len(patterns))
-	seen := map[Class]bool{}
-	for _, p := range patterns {
-		if !seen[p.Class] {
-			seen[p.Class] = true
-			every = append(every, p.Class)
-		}
-	}
+	every := classes
 	rules := []AllowRule{{
 		Path:    "vendored/**",
 		Classes: every,
@@ -601,8 +411,8 @@ func TestScan_AnEntryWhoseEveryClassIsAllowedIsAccepted(t *testing.T) {
 	}}
 
 	findings, err := Scan(entriesOf(map[string]string{
-		"vendored/thing.js": "fetch('http://gpu-host.internal/')\n", // lab-string-ok: fixture for the allow-everything shortcut
-	}), rules)
+		"vendored/thing.js": "fetch('http://node-04.example/')\n",
+	}), fixturePatterns, rules)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -619,13 +429,13 @@ func TestScan_ReportsALabValueThatAppearsOnlyInThePath(t *testing.T) {
 		wantClass Class
 		wantMatch string
 	}{
-		{"logs/vm-host-4.log", ClassLabHost, "vm-host-4"},
-		{"testdata/198.51.100.7/capture.txt", ClassLabAddress, "198.51.100.7"},
-		{"docs/runs/DELLEMC-02-bench.md", ClassLabHost, "DELLEMC-02"},
+		{"logs/node-04.example.log", ClassLabHost, "node-04.example"},
+		{"testdata/203.0.113.7/capture.txt", ClassLabAddress, "203.0.113.7"},
+		{"docs/runs/NODE-02.example-bench.md", ClassLabHost, "NODE-02.example"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.path, func(t *testing.T) {
-			findings, err := Scan(entriesOf(map[string]string{tc.path: "ordinary text\n"}), nil)
+			findings, err := Scan(entriesOf(map[string]string{tc.path: "ordinary text\n"}), fixturePatterns, nil)
 			if err != nil {
 				t.Fatalf("Scan: %v", err)
 			}
@@ -649,10 +459,10 @@ func TestScan_ReportsALabValueThatAppearsOnlyInThePath(t *testing.T) {
 func TestScan_APathFindingHonorsTheAllowList(t *testing.T) {
 	rules := []AllowRule{{Path: "logs/**", Classes: []Class{ClassLabHost}, Reason: "captured logs"}}
 	files := entriesOf(map[string]string{
-		"logs/vm-host-4.log":       "ordinary text\n",
-		"logs/198.51.100.9-run.log": "ordinary text\n",
+		"logs/node-04.example.log": "ordinary text\n",
+		"logs/203.0.113.9-run.log": "ordinary text\n",
 	})
-	findings, err := Scan(files, rules)
+	findings, err := Scan(files, fixturePatterns, rules)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
