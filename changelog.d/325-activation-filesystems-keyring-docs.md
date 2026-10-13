@@ -1,0 +1,3 @@
+### Added
+
+- **Feature folders for dm-crypt activation, filesystems and the kernel keyring (#325).** `docs/dm-crypt-activation/`, `docs/filesystems/` and `docs/kernel-keyring/` each hold the five files (`architecture.md`, `engineering.md`, `cli.md`, `api.md`, `user.md`). They cover turning an unlocked volume into a `/dev/mapper/<name>` device and removing it, putting a filesystem on an unlocked volume and mounting and unmounting it, and how the key is handed to dm-crypt through the kernel keyring rather than written into the device-mapper table. `pkg/dmcrypt` and `pkg/filesystem` are now specified there, and `docs/volumes/engineering.md` links to them. Read these folders before you use `pkg/dmcrypt` or `pkg/filesystem`.

@@ -1,0 +1,3 @@
+### Removed
+
+- **`docs/design/` is gone (#349).** `docs/design/DESIGN.md` and `docs/design/DECISIONS.md` are deleted, and no doc, Makefile comment or code comment cites them any more. The feature folders are the documentation: the `docs/README.md` index lists all of them, including `dm-crypt-activation`, `kernel-keyring`, `loop-devices` and `filesystems`. It also names the two checks that hold the exported surface, `make api-diff` and `TestEveryPkgExportIsNamedInAFeatureDoc`. The `api.md` files now say directly that go-luks2 is an embedded Go library with no REST, gRPC, QUIC, MCP or Unix-socket transport. Replace any link into `docs/design/` with a link to the feature folder that covers that topic.
