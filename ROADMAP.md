@@ -53,7 +53,7 @@ Nothing accepted. New work arrives as issues.
 
 ## Dependencies
 
-- Up: `github.com/jeremyhahn/go-enclave` v0.8.0-rc.1 (locked-memory primitive, the only in-house module). It needs a final release before `v1.0.0` ([#211](../../issues/211)).
+- Up: `github.com/jeremyhahn/go-enclave` v0.8.0-rc.2 (locked-memory primitive, the only in-house module). It needs a final release before `v1.0.0` ([#211](../../issues/211)).
 - Down: go-trusted-platform (encrypted volume management).
 
 ## Non-goals
