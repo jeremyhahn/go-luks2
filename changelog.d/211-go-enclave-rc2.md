@@ -1,3 +1,0 @@
-### Changed
-
-- **go-enclave moves to v0.8.0-rc.2 (#211).** The one library change in rc.2 is that a refused open of a sealed value, or a refused unwrap through a device key, now wipes the destination buffer. This library calls neither the sealed-value nor the key-wrap API, so its behaviour is unchanged, and every go-enclave export it uses, `HardenProcess` and its errors included, is unchanged from rc.1. Callers that require go-enclave directly can move to rc.2 with no code change. Key custody is unchanged: key material still lives in locked memory for its whole lifetime and is borrowed only through `WithBytes`, and a refused allocation still fails the operation.

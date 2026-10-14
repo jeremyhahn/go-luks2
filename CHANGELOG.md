@@ -7,6 +7,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.5] - 2026-10-14
+
+### Changed — BREAKING: credentials and keys are `*enclave.Memory`, from go-enclave v0.8.0-rc.1
+
+- **go-enclave moves to v0.8.0-rc.1 (#211).** go-enclave renamed `MemoryEnclave` to `Memory` and `NewMemoryEnclave`, `NewMemoryEnclaveCopy` and `NewMemoryEnclaveSized` to `NewMemory`, `NewMemoryCopy` and `NewMemorySized`, with no deprecated aliases. Every export that took or returned an `*enclave.MemoryEnclave` (`Format`, `Unlock`, `UnlockKeyslot`, `UnlockWithVolumeKey`, `AddKeyslot`, `ChangeKeyslot`, `MigrateToFIPS`, `ParseRecoveryKey`, `ValidatePassphrase`, `KeyProvider.Passphrase` and the `pkg/keyprovider` providers) now names `*enclave.Memory`. Callers must require go-enclave v0.8.0-rc.1 and rename on their side; behaviour is unchanged. Key custody is unchanged too: key material still lives in locked memory for its whole lifetime and is borrowed only through `WithBytes`, and a refused allocation still fails the operation.
+- **Applications that embed the library must call `enclave.HardenProcess` from `main` (#211).** go-enclave v0.8.0-rc.1 no longer lowers `RLIMIT_CORE` when the package is imported. The plain heap copies the KDF, AES and hash code make, and the CLI's prompt buffer, are outside go-enclave's protected pages, so a process that can dump core can write them to a core file. Call `enclave.HardenProcess` from `main`, before handling a secret, and treat its error as fatal. This library's packages never call it, and importing them changes no process state.
+- **The `luks2` CLI hardens itself before reading any credential (#211).** `internal/cli.Run` calls `enclave.HardenProcess` first (`RLIMIT_CORE` 0/0, and the process non-dumpable), and exits non-zero with a "cannot disable core dumps" error if that fails. There is no unhardened fallback. A non-dumpable process's `/proc/<pid>` entries are root-owned and a same-uid debugger cannot attach to it; programs it executes, such as cryptsetup, are unaffected.
+
+### Added
+
+- **A feature folder for loop devices (#315).** `docs/loop-devices/` holds the five files for `pkg/loop`: attaching a regular file as a block device, which you need in order to open a LUKS2 volume kept in an image file, and detaching it. It states the prerequisites: root and a kernel with loop support (`/dev/loop-control` exists), and in a container, access to `/dev/loop-control` and to the loop devices themselves.
+
+- **The feature docs now cover the last undocumented `pkg/luks2` exports, and list the cryptsetup operations this library does not provide (#316).** `ErrClosed`, `ErrReadOnly`, `ValidatePassphrase`, `MinPassphraseLength`/`MaxPassphraseLength`, `(*FIPSMigrationError).MigrationStage` and `Token`'s JSON codec are documented, including when each one returns which error. The volumes and header architecture docs list resize, suspend/resume, KDF benchmark, LUKS1-to-LUKS2 convert, UUID/label changes and header backup to a file as not provided, each with its reason. Use cryptsetup for any of these.
+
+- **Feature folders for dm-crypt activation, filesystems and the kernel keyring (#325).** `docs/dm-crypt-activation/`, `docs/filesystems/` and `docs/kernel-keyring/` each hold the five files (`architecture.md`, `engineering.md`, `cli.md`, `api.md`, `user.md`). They cover turning an unlocked volume into a `/dev/mapper/<name>` device and removing it, putting a filesystem on an unlocked volume and mounting and unmounting it, and how the key is handed to dm-crypt through the kernel keyring rather than written into the device-mapper table. `pkg/dmcrypt` and `pkg/filesystem` are now specified there, and `docs/volumes/engineering.md` links to them. Read these folders before you use `pkg/dmcrypt` or `pkg/filesystem`.
+
+- **CI reviews a pull request labelled `code-review` and `task:ready` with
+  Codex (#327).** `.github/workflows/code-review.yml` adopts the fleet template
+  v4 verbatim: it posts the verdict as the `codex` user on the head commit,
+  which `automerge.yml` waits for before it merges a `code-review` pull request.
+  `.github/actionlint.yaml` (fleet template v3) lists the self-hosted runner
+  labels, so `make lint` accepts `runs-on: codex` and still catches a
+  misspelled label.
+
+- **A unit-test gate now fails when an export of a `pkg/...` package is not named in any feature doc (#335).** `TestEveryPkgExportIsNamedInAFeatureDoc` (`apidump documented`) requires every exported constant, variable, function, type and method to appear, as a whole identifier in code, in a `docs/<feature>/*.md`. A method counts as `Type.Method`, or as `Method` in a doc that also names `Type`. Deliberate exceptions go in `test/tools/apidump/doc-exceptions.tsv`, one reason per row, and an exception that no longer applies fails too. The exports the gate found undocumented are now documented: the `pkg/dmcrypt` keyring error family and mapping-name limits, the `pkg/loop` detach states and sentinels, the `pkg/filesystem` types, params, errors and inspection calls, `keyprovider.SaltLength`/`SecretLength`, and the `Unwrap` behaviour of `HelperError`, `FIPSImportRequiredError`, `FIPSMigrationError` and `OrphanedKeyslotError`.
+
+### Changed
+
+- **go-enclave moves to v0.8.0-rc.2 (#211).** The one library change in rc.2 is that a refused open of a sealed value, or a refused unwrap through a device key, now wipes the destination buffer. This library calls neither the sealed-value nor the key-wrap API, so its behaviour is unchanged, and every go-enclave export it uses, `HardenProcess` and its errors included, is unchanged from rc.1. Callers that require go-enclave directly can move to rc.2 with no code change. Key custody is unchanged: key material still lives in locked memory for its whole lifetime and is borrowed only through `WithBytes`, and a refused allocation still fails the operation.
+
+- **Six feature designs list the alternatives they rejected (#319).** The
+  `architecture.md` of `header`, `keyslots`, `recovery-keys`, `tokens`, `wipe`
+  and `cryptsetup-interop` gains a "Rejected alternatives" section, each entry
+  with its reason and the recorded decision it comes from, so a settled design
+  is not relitigated.
+
+- **`ROADMAP.md` names the `docs/<feature>/` folder behind every Now and Next item (#330).** Each item now links its issue, or the milestone for the `v1.0.0` cut, and carries the status the issue has on the tracker, so a reader can go from a roadmap line to the specification it delivers.
+
+- `ValidatePassphrase` now reports a passphrase that is too short or too long
+  as an `*Error` of kind `ErrInvalidCredential` with `Op` set to
+  `ValidatePassphrase`, the same shape as its destroyed-enclave failure, which
+  now carries the `Op` too. `errors.Is(err, ErrInvalidCredential)` holds as
+  before (#334).
+
+- **CI is split into a PR tier and a full tier behind one `CI Gate` (#341, #343).** Every pull request runs Lint, Security Scan, Build, Merged Tree and Unit Tests, now without `-race` (`make test-unit-norace`), still with the coverage, calibration, releasability and API-diff gates. FIPS, Integration Tests and Race (`make test-unit`, `-race`, with its `pkg/luks2` time budget) run on every push to `main`, on `workflow_dispatch`, and on a pull request labelled `ci:full`; adding the `ci:full` label to a pull request starts the full tier on its current head. `CI Gate` stays the single required check: it needs every job and reads each by name, tagged `pr` or `full`; a `full` job may be skipped only while the full tier does not run, and any other skip, failure or cancellation fails it. FIPS moved from `nightly.yml` into `ci.yml` unchanged and now runs on every push to `main` instead of once a night. `nightly.yml` has no schedule any more; it is dispatch-only and carries trivy.
+
+- **The feature folders now hold the design content that was only in `docs/design/DESIGN.md` (#347).** The new sections are:
+  - **Cancellation** (`docs/keyslots/architecture.md`, `docs/volumes/engineering.md`). A key derivation is never interrupted. `ctx` is checked before and after each derivation, between keyslots in a scan, between digest checks and before each PBKDF2 calibration probe, so a cancellation takes effect within one derivation.
+  - **Portability** (`docs/volumes/architecture.md`). `pkg/luks2` and `pkg/keyprovider` build on Linux and darwin; `pkg/dmcrypt`, `pkg/loop`, `pkg/filesystem`, `pkg/wipe` and the CLI are Linux-only; Windows is out of scope.
+  - **The `MigrateToFIPS` example**, moved from the user guide to `docs/fips/api.md`.
+  - **A FIDO2 enrollment example** in `docs/tokens/api.md`.
+
+  `docs/volumes/cli.md` now also states that `SIGINT` and `SIGTERM` cancel the running `luks2` command, that a write in progress stops at its next consistent step boundary, and that the command exits with the resulting error's status, 1 for a cancellation. Look for these topics in the feature folders, not in `docs/design/`.
+
+- **Internal-only files are `export-ignore`, so `git archive` and a forge's tag tarball leave them out (#357).** The new `.gitattributes` export-ignores agent instruction files and tool state at any depth, the internal workflows `automerge.yml`, `code-review.yml`, `qwen-review.yml` and `batch.yml`, and `test/ci/workflows/batch_test.go`. The public workflows are `ci.yml`, `nightly.yml` and `release.yml`. `.dockerignore` excludes the same list, so a broad `COPY` does not bake those files into an image layer. The new `docs/release/public-releasability.md` lists the strip-at-publish set and what it does not cover: the Go module zip is clean only because the public tag's tree is the export, and pushing history publishes every file, because every commit contains them. To publish or mirror this repository, publish the release commit's archive export, not its history.
+
+- **The public tree is the release commit's archive export, and `make releasability` in a published tree checks file rules only (#358).** The release tag on the development trunk points at a commit that still tracks the internal-only files. The public tree is that commit's export: every export-ignored path is removed, and every other tracked file is published byte-for-byte. The gate's pattern set and its tests are now stripped at publish too (export-ignored, and excluded by `.dockerignore`), because they contain the values the gate bans. A published tree therefore has no pattern set to scan with. There, `make releasability` checks the file rules, exits 0, and prints on every run that content was not scanned. A development tree that tracks a strip-at-publish file but has no pattern set fails instead of reporting clean. If you run the gate on the published tree, a clean result there does not mean the content was scanned.
+
+### Removed
+
+- **`docs/design/` is gone (#349).** `docs/design/DESIGN.md` and `docs/design/DECISIONS.md` are deleted, and no doc, Makefile comment or code comment cites them any more. The feature folders are the documentation: the `docs/README.md` index lists all of them, including `dm-crypt-activation`, `kernel-keyring`, `loop-devices` and `filesystems`. It also names the two checks that hold the exported surface, `make api-diff` and `TestEveryPkgExportIsNamedInAFeatureDoc`. The `api.md` files now say directly that go-luks2 is an embedded Go library with no REST, gRPC, QUIC, MCP or Unix-socket transport. Replace any link into `docs/design/` with a link to the feature folder that covers that topic.
+
+### Fixed
+
+- **The FIPS and volumes docs name code that exists and give the real keyring activation order (#317).** `docs/fips/architecture.md` named a refusal function, `requireFIPSApprovedKDF`, that the API redesign removed. It now names `fips.Mode.RequireKDF`, which refuses Argon2 in FIPS mode with `ErrFIPSNotApproved`, and lists every place it is called: `KDFParams.validateWith` (behind `KDFParams.Validate`, `FormatParams.Validate` and the `Volume` methods that take a `KDFParams`), `createKDF`, `screenKDFParameters` and `kdf.Deriver`. `docs/volumes/architecture.md` had the activation steps in the wrong order. The order is: the dm target is created with no table, the key is added to the session keyring, the table naming the key is loaded and the target resumed, and the key is then revoked, unlinked and checked gone whether or not the load succeeded. If the key cannot be confirmed gone, activation fails with `dmcrypt.ErrKeyringKeyNotReleased` and the target is rolled back. Stale paths and references in `docs/volumes/` are corrected too. If you used the old docs to reason about when the key is in the keyring, reread them: it is there only while the table loads.
+
+- **`luks2 open` and `luks2 close` now exit 5, not 1, when the mapping already exists or is busy (#322).** `dmcrypt.ErrActive` and `dmcrypt.ErrBusy` were missing from the exit-status table, so a script testing for cryptsetup(8)'s "exists or busy" status never saw it. Scripts that treated exit 1 as the signal for these two cases must now check for 5.
+
+- **The blocked-keyring remedy names `dmcrypt.CheckKeyring` (#324).** It told
+  operators to call `CheckKeyringAvailable` at startup, a function removed with
+  the old activation API (#268); the startup preflight is
+  `dmcrypt.CheckKeyring`.
+
+- `make releasability` passes again: the internal review workflows
+  `code-review.yml` is tracked on main and stripped from the public release
+  (as `qwen-review.yml` will be when it returns through its own PR), and
+  `.github/actionlint.yaml` names roles instead of lab hosts and addresses
+  (#336).
+
 ## [1.0.0-rc.4] - 2026-10-09
 
 ### Changed — BREAKING: `make release` cuts only final releases
