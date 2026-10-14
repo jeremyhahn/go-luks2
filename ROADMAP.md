@@ -13,7 +13,7 @@ Purpose and boundaries are in [SPEC.md](docs/SPEC.md#purpose).
 
 ## Milestones
 
-- [Release candidate (M7)](../../milestone/7) — RC — Due: 2026-10-15. `v1.0.0-rc.4` is tagged, the version is confirmed at publish approval, and it closes on the [SPEC.md release criteria](docs/SPEC.md#release-criteria).
+- [Dev complete (M7)](../../milestone/7) — Dev complete — Due: 2026-10-15. Closes on the dev-complete list of the [SPEC.md release criteria](docs/SPEC.md#release-criteria): every own feature row shipped, go-trusted-platform's seam rows on go-luks2 shipped, the API stable; `-alpha` tags only until go-trusted-platform is dev complete, and the release-candidate tags already cut stay.
 
 ## Complete
 
@@ -48,7 +48,7 @@ Shipped features, with the release or closing issues that shipped them.
 
 ## Next
 
-- **release** — v1.0.0 cut once [M7](../../milestone/7) closes — [#211](../../issues/211) — blocked: M7 open
+- **release** — v1.0.0 cut after the release candidate that follows [M7](../../milestone/7) — [#211](../../issues/211) — blocked: M7 open; go-trusted-platform dev complete
 
 ## Later
 

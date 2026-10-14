@@ -95,11 +95,26 @@ Status is one of shipped, in progress, planned or future.
 
 ## Release criteria
 
-The release-candidate milestone (M7) closes when every item below is true.
-`v1.0.0` is cut once it closes.
+The dev-complete milestone (M7) closes when every item in the first list
+below is true. Until go-trusted-platform is dev complete too, only `-alpha`
+tags are cut; an `-rc.N` is cut only if something needs one, and the
+release-candidate tags already cut stay as they are. Release candidates,
+staging and the release come after, in the second list: `v1.0.0` is cut after
+the release candidate, once every item in both lists is true.
 
-- A release candidate is tagged and checked from a consumer's point of view
-  after the tag exists. Done.
+Dev complete:
+
+- Every feature row in [Features](#features) is shipped, apart from release,
+  whose publish steps are the second list. Done.
+- Every seam row that go-trusted-platform's SPEC names on go-luks2 is
+  shipped. Today that is its `luks` feature row (add a passphrase, bind FIDO2
+  or the TPM, cut a recovery key, retire a slot, rotate a passphrase, under
+  the FIPS keyslot policy), which rests on keyslots, tokens, recovery-keys
+  and fips here; and its release criterion "a real backend on go-luks2; FIPS
+  activation restrictions hold", which rests on dm-crypt-activation and fips
+  here. Open, outside this repository.
+- The API is stable: the `pkg/` exports named in the feature folders do not
+  change before `v1.0.0`. Open.
 - CI and the FIPS gate are green on `main`. Done.
 - Releases are signed: the release target writes the version commit and an
   annotated tag through the agent's signing identity, and fails closed
@@ -109,6 +124,11 @@ The release-candidate milestone (M7) closes when every item below is true.
 - go-enclave is pinned at a release candidate. Done.
 - The internal-only files are excluded from the archive export, and the
   releasability gate passes on that export. Done.
+
+After dev complete, once go-trusted-platform is dev complete:
+
+- A release candidate is tagged and checked from a consumer's point of view
+  after the tag exists. Open.
 - go-enclave has a final release, pinned here before `v1.0.0`. Open, outside
   this repository.
 - The joint staging run has passed. Open, run by the owner.
