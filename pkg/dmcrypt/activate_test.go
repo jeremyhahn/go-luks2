@@ -536,10 +536,37 @@ func TestActivateRefusesAnAlreadyActiveName(t *testing.T) {
 	fake.targets["taken"] = "CRYPT-LUKS2-someone-elses-volume"
 	fake.install(t)
 
-	// v and key are never touched on this path: the name collision is
-	// refused before either is read.
-	if _, err := Activate(context.Background(), nil, nil, "taken"); !errors.Is(err, ErrActive) {
+	// The name collision is refused before the header or the key is read.
+	v, key := formattedVolume(t)
+	if _, err := Activate(context.Background(), v, key, "taken"); !errors.Is(err, ErrActive) {
 		t.Fatalf("Activate(taken) = %v, want ErrActive", err)
+	}
+}
+
+// A nil Volume or Key is refused before the device-mapper is consulted: the
+// name below is taken, so a guard that came after that lookup would report
+// ErrActive instead, and on a real host the outcome would turn on privilege.
+func TestActivateRefusesANilVolumeOrKey(t *testing.T) {
+	fake := newFakeDeviceMapper()
+	fake.targets["taken"] = "CRYPT-LUKS2-someone-elses-volume"
+	fake.install(t)
+	v, key := formattedVolume(t)
+
+	for _, tc := range []struct {
+		name string
+		v    *luks2.Volume
+		key  *luks2.Key
+	}{
+		{"nil volume", nil, key},
+		{"nil key", v, nil},
+		{"both nil", nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, err := Activate(context.Background(), tc.v, tc.key, "taken")
+			if !errors.Is(err, luks2.ErrInvalidArgument) || m != nil {
+				t.Fatalf("Activate(%s) = %v, %v, want nil, ErrInvalidArgument", tc.name, m, err)
+			}
+		})
 	}
 }
 

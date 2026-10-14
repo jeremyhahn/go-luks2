@@ -91,6 +91,9 @@ func (v *Volume) AddKeyslot(ctx context.Context, key *Key, pass *enclave.Memory,
 	if err := v.checkWritable(op); err != nil {
 		return KeyslotInfo{}, err
 	}
+	if key == nil {
+		return KeyslotInfo{}, errAt(op, v.path, &errs.Error{Kind: ErrInvalidArgument, Detail: "key is required"})
+	}
 	if err := p.KDF.validateWith(v.sys.fipsMode); err != nil {
 		return KeyslotInfo{}, errAt(op, v.path, err)
 	}
@@ -167,6 +170,9 @@ func (v *Volume) ChangeKeyslot(ctx context.Context, key *Key, pass *enclave.Memo
 	}
 	if err := v.checkWritable(op); err != nil {
 		return KeyslotInfo{}, err
+	}
+	if key == nil {
+		return KeyslotInfo{}, errAt(op, v.path, &errs.Error{Kind: ErrInvalidArgument, Detail: "key is required"})
 	}
 	if !p.Priority.valid() {
 		return KeyslotInfo{}, errAt(op, v.path, errInvalidPriority(p.Priority))

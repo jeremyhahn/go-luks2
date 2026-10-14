@@ -7,8 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.0-rc.5] - 2026-10-14
-
 ### Changed — BREAKING: credentials and keys are `*enclave.Memory`, from go-enclave v0.8.0-rc.1
 
 - **go-enclave moves to v0.8.0-rc.1 (#211).** go-enclave renamed `MemoryEnclave` to `Memory` and `NewMemoryEnclave`, `NewMemoryEnclaveCopy` and `NewMemoryEnclaveSized` to `NewMemory`, `NewMemoryCopy` and `NewMemorySized`, with no deprecated aliases. Every export that took or returned an `*enclave.MemoryEnclave` (`Format`, `Unlock`, `UnlockKeyslot`, `UnlockWithVolumeKey`, `AddKeyslot`, `ChangeKeyslot`, `MigrateToFIPS`, `ParseRecoveryKey`, `ValidatePassphrase`, `KeyProvider.Passphrase` and the `pkg/keyprovider` providers) now names `*enclave.Memory`. Callers must require go-enclave v0.8.0-rc.1 and rename on their side; behaviour is unchanged. Key custody is unchanged too: key material still lives in locked memory for its whole lifetime and is borrowed only through `WithBytes`, and a refused allocation still fails the operation.

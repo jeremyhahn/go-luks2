@@ -26,13 +26,16 @@ import (
 func TestRealHostWrappersDelegate(t *testing.T) {
 	ctx := context.Background()
 
-	// None of these need root or a real device: every one is given a
+	// None of these needs a real device: each is given a nil Volume, or a
 	// path or name that cannot exist, so the real package underneath
 	// returns an error quickly. The point is covering the delegation
 	// itself, not exercising dmcrypt/loop/filesystem's own logic, which
-	// is those packages' own test suites' job.
-	if _, err := (realActivator{}).activate(ctx, nil, nil, "does-not-exist"); err == nil {
-		t.Error("realActivator.activate: want an error for a nil Volume")
+	// is those packages' own test suites' job. The activate call fails on
+	// the nil Volume and Key before dmcrypt consults the kernel, so it
+	// fails the same way as root and as an unprivileged user; dmcrypt's
+	// TestActivateRefusesANilVolumeOrKey pins each of the two refusals.
+	if _, err := (realActivator{}).activate(ctx, nil, nil, "does-not-exist"); !errors.Is(err, luks2.ErrInvalidArgument) {
+		t.Errorf("realActivator.activate = %v, want ErrInvalidArgument for a nil Volume and Key", err)
 	}
 	if err := (realActivator{}).deactivate(ctx, "cli-coverage-does-not-exist"); err == nil {
 		t.Error("realActivator.deactivate: want an error for a mapping that does not exist")

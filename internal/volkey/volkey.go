@@ -53,6 +53,9 @@ func (k *Key) Destroy() {
 // them, never copying them out. op names the caller's operation, for the
 // *errs.Error a failure to borrow is reported as.
 func Borrow(op string, k *Key, fn func([]byte) error) error {
+	if k == nil || k.enclave == nil {
+		return &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "no volume key"}
+	}
 	return secret.Borrow(op, k.enclave, fn)
 }
 

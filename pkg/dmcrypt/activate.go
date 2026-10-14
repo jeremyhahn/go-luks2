@@ -81,6 +81,14 @@ func Activate(ctx context.Context, v *luks2.Volume, key *luks2.Key, name string)
 	if err := ValidateName(name); err != nil {
 		return nil, errs.At(pkgName, op, "", err)
 	}
+	// Before any device-mapper or keyring call, so a missing argument is the
+	// same typed refusal whatever privilege the caller runs with.
+	if v == nil {
+		return nil, errs.At(pkgName, op, "", &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "volume is required"})
+	}
+	if key == nil {
+		return nil, errs.At(pkgName, op, "", &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "key is required"})
+	}
 
 	// An early, cheap refusal before any key material is touched. It is
 	// NOT what keeps two activations of one name apart -- the create

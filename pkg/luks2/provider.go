@@ -55,6 +55,9 @@ func (v *Volume) Enroll(ctx context.Context, key *Key, p KeyProvider, kp Keyslot
 	if err := v.checkWritable(op); err != nil {
 		return Enrollment{}, err
 	}
+	if key == nil {
+		return Enrollment{}, errAt(op, v.path, &errs.Error{Kind: ErrInvalidArgument, Detail: "key is required"})
+	}
 	if p == nil {
 		return Enrollment{}, errAt(op, v.path, &errs.Error{Kind: ErrInvalidArgument})
 	}
