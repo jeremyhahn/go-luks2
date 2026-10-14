@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -231,7 +232,7 @@ func TestCommandRefusesAnUntrustedHelper(t *testing.T) {
 	writeHelper := func(t *testing.T, dir string, mode os.FileMode) (helper, ran string) {
 		t.Helper()
 		helper = filepath.Join(dir, "helper")
-		ran = filepath.Join(t.TempDir(), "ran")
+		ran = filepath.Join(privateDir(t), "ran")
 		script := fmt.Sprintf("#!/bin/sh\n: > %s\nprintf secret\n", shellQuote(ran))
 		if err := os.WriteFile(helper, []byte(script), 0o700); err != nil { // #nosec G306 -- an executable test fixture under t.TempDir()
 			t.Fatal(err)
@@ -248,6 +249,8 @@ func TestCommandRefusesAnUntrustedHelper(t *testing.T) {
 		}
 	}
 
+	// Every directory starts private (privateDir), so each untrusted case
+	// is refused for the one fault it names, never for the umask's.
 	tests := []struct {
 		name  string
 		setup func(t *testing.T) (path, ran string)
@@ -256,26 +259,26 @@ func TestCommandRefusesAnUntrustedHelper(t *testing.T) {
 		{
 			name: "a helper only this user can write runs",
 			setup: func(t *testing.T) (string, string) {
-				return writeHelper(t, t.TempDir(), 0o700)
+				return writeHelper(t, privateDir(t), 0o700)
 			},
 			trust: true,
 		},
 		{
 			name: "a group-writable helper",
 			setup: func(t *testing.T) (string, string) {
-				return writeHelper(t, t.TempDir(), 0o770)
+				return writeHelper(t, privateDir(t), 0o770)
 			},
 		},
 		{
 			name: "a world-writable helper",
 			setup: func(t *testing.T) (string, string) {
-				return writeHelper(t, t.TempDir(), 0o707)
+				return writeHelper(t, privateDir(t), 0o707)
 			},
 		},
 		{
 			name: "a helper in a world-writable directory",
 			setup: func(t *testing.T) (string, string) {
-				dir := t.TempDir()
+				dir := privateDir(t)
 				helper, ran := writeHelper(t, dir, 0o700)
 				chmodDir(t, dir, 0o777)
 				return helper, ran
@@ -284,8 +287,8 @@ func TestCommandRefusesAnUntrustedHelper(t *testing.T) {
 		{
 			name: "a symlink in a world-writable directory to a trusted helper",
 			setup: func(t *testing.T) (string, string) {
-				helper, ran := writeHelper(t, t.TempDir(), 0o700)
-				dir := t.TempDir()
+				helper, ran := writeHelper(t, privateDir(t), 0o700)
+				dir := privateDir(t)
 				link := filepath.Join(dir, "link")
 				if err := os.Symlink(helper, link); err != nil {
 					t.Fatal(err)
@@ -297,9 +300,9 @@ func TestCommandRefusesAnUntrustedHelper(t *testing.T) {
 		{
 			name: "a symlinked directory in a world-writable directory",
 			setup: func(t *testing.T) (string, string) {
-				trusted := t.TempDir()
+				trusted := privateDir(t)
 				_, ran := writeHelper(t, trusted, 0o700)
-				dir := t.TempDir()
+				dir := privateDir(t)
 				if err := os.Symlink(trusted, filepath.Join(dir, "link")); err != nil {
 					t.Fatal(err)
 				}
@@ -310,14 +313,14 @@ func TestCommandRefusesAnUntrustedHelper(t *testing.T) {
 		{
 			name: "a group-writable directory reached through a symlink",
 			setup: func(t *testing.T) (string, string) {
-				trusted := t.TempDir()
+				trusted := privateDir(t)
 				_, ran := writeHelper(t, trusted, 0o700)
-				group := t.TempDir()
+				group := privateDir(t)
 				if err := os.Symlink(trusted, filepath.Join(group, "onward")); err != nil {
 					t.Fatal(err)
 				}
 				chmodDir(t, group, 0o775)
-				entry := t.TempDir()
+				entry := privateDir(t)
 				if err := os.Symlink(group, filepath.Join(entry, "via")); err != nil {
 					t.Fatal(err)
 				}
@@ -327,9 +330,9 @@ func TestCommandRefusesAnUntrustedHelper(t *testing.T) {
 		{
 			name: "a helper reached through a symlink in a trusted directory runs",
 			setup: func(t *testing.T) (string, string) {
-				trusted := t.TempDir()
+				trusted := privateDir(t)
 				_, ran := writeHelper(t, trusted, 0o700)
-				entry := t.TempDir()
+				entry := privateDir(t)
 				if err := os.Symlink(trusted, filepath.Join(entry, "via")); err != nil {
 					t.Fatal(err)
 				}
@@ -369,6 +372,41 @@ func TestCommandRefusesAnUntrustedHelper(t *testing.T) {
 	}
 }
 
+// TestHelperFixturesHoldUnderAGroupWritableUmask runs a helper end to end
+// under the umask a stock Ubuntu login has (0002), where t.TempDir() is
+// group-writable: the fixtures must still be trusted, and the bare
+// t.TempDir() must still be refused. The umask is process-wide, so this
+// test must not run in parallel; no test in this package does.
+func TestHelperFixturesHoldUnderAGroupWritableUmask(t *testing.T) {
+	old := syscall.Umask(0o002)
+	t.Cleanup(func() { syscall.Umask(old) })
+
+	p, err := NewCommand(helperScript(t, "helper", "secret\n"), WithLine(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := p.Passphrase(context.Background())
+	if err != nil {
+		t.Fatalf("Passphrase() under umask 0002 = %v", err)
+	}
+	defer mustDestroy(t, got)
+	if s := string(openSecret(t, got)); s != "secret" {
+		t.Errorf("Passphrase() = %q, want %q", s, "secret")
+	}
+
+	bare := filepath.Join(t.TempDir(), "helper")
+	if err := os.WriteFile(bare, []byte("#!/bin/sh\nprintf secret\n"), 0o700); err != nil { // #nosec G306 -- an executable test fixture under t.TempDir()
+		t.Fatal(err)
+	}
+	p, err = NewCommand(bare)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Passphrase(context.Background()); !errors.Is(err, ErrHelperFailed) {
+		t.Fatalf("Passphrase() from a group-writable t.TempDir() = %v, want ErrHelperFailed", err)
+	}
+}
+
 // TestCommandRunsASystemHelper: an ordinary root-owned program under /usr/bin
 // passes the checks and runs.
 func TestCommandRunsASystemHelper(t *testing.T) {
@@ -389,7 +427,7 @@ func TestCommandRunsASystemHelper(t *testing.T) {
 // TestCommandHonorsContext proves the unattended case: a helper waiting for
 // a touch that never comes has to end.
 func TestCommandHonorsContext(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "blocking")
+	path := filepath.Join(privateDir(t), "blocking")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\nsleep 60\n"), 0o700); err != nil { // #nosec G306 -- an executable test fixture under t.TempDir()
 		t.Fatalf("failed to write helper: %v", err)
 	}
@@ -430,7 +468,7 @@ func TestCommandRefusesOverlongOutputWithoutDeadlocking(t *testing.T) {
 	// readFullish gives up.
 	const flood = 4 * maxHelperOutput
 
-	path := filepath.Join(t.TempDir(), "flood")
+	path := filepath.Join(privateDir(t), "flood")
 	script := fmt.Sprintf("#!/bin/sh\nyes A | head -c %d\n", flood)
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil { // #nosec G306 -- an executable test fixture under t.TempDir()
 		t.Fatalf("failed to write helper: %v", err)

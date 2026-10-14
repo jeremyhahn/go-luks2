@@ -55,7 +55,7 @@ func TestCommandRefusesAPathItWouldHaveToSearchFor(t *testing.T) {
 func TestCommandGivesTheHelperAMinimalEnvironment(t *testing.T) {
 	t.Setenv("LUKS2_TEST_INHERITED", "inherited")
 
-	path := filepath.Join(t.TempDir(), "env")
+	path := filepath.Join(privateDir(t), "env")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\n/usr/bin/env\n"), 0o700); err != nil { // #nosec G306 -- an executable test fixture under t.TempDir()
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestCommandGivesTheHelperAMinimalEnvironment(t *testing.T) {
 // either way.
 func lingeringHelper(t *testing.T, seconds int, block bool) (path, fifo string) {
 	t.Helper()
-	dir := t.TempDir()
+	dir := privateDir(t)
 	pidFile := filepath.Join(dir, "grandchild.pid")
 	fifo = filepath.Join(dir, "started")
 	if err := unix.Mkfifo(fifo, 0o600); err != nil {
@@ -129,11 +129,33 @@ func lingeringHelper(t *testing.T, seconds int, block bool) (path, fifo string) 
 // awaitStarted blocks until the helper has written its credential.
 func awaitStarted(t *testing.T, fifo string) {
 	t.Helper()
-	b, err := os.ReadFile(fifo) // #nosec G304 -- under t.TempDir(); blocks until the helper writes
-	if err != nil || strings.TrimSpace(string(b)) != "started" {
-		t.Fatalf("the helper did not start: %q, %v", b, err)
+	// Opening the FIFO read-write never blocks, and a FIFO is pollable, so
+	// the read below honors a deadline: a helper that never starts (one
+	// Command refused, say) fails the test here instead of at -timeout.
+	f, err := os.OpenFile(fifo, os.O_RDWR, 0) // #nosec G304 -- under t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := f.SetReadDeadline(time.Now().Add(helperStartBound)); err != nil {
+		t.Fatal(err)
+	}
+	var got []byte
+	buf := make([]byte, 64)
+	for !strings.Contains(string(got), "\n") {
+		n, err := f.Read(buf)
+		got = append(got, buf[:n]...)
+		if err != nil {
+			t.Fatalf("the helper did not write \"started\" to %s within %v: got %q, %v", fifo, helperStartBound, got, err)
+		}
+	}
+	if strings.TrimSpace(string(got)) != "started" {
+		t.Fatalf("the helper did not start: %q", got)
 	}
 }
+
+// helperStartBound is how long awaitStarted waits for a helper to start.
+const helperStartBound = 30 * time.Second
 
 // TestCommandEndsWhenItsContextDoes is #246 D6: the stdout read ignored ctx,
 // so a helper whose grandchild kept stdout open held Passphrase past

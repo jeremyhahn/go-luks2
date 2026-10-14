@@ -55,6 +55,19 @@ func openSecret(t *testing.T, e *enclave.Memory) []byte {
 
 // helperScript writes an executable shell script that prints body verbatim
 // on stdout and returns it.
+// privateDir returns a fresh t.TempDir() that only this user can write.
+// t.TempDir creates its directory with mode 0777 less the umask, so under a
+// umask of 0002 it is group-writable and Command rightly refuses a helper in
+// it; every trusted helper location in this package comes from here.
+func privateDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("failed to make %s private: %v", dir, err)
+	}
+	return dir
+}
+
 func helperScript(t *testing.T, name, body string) string {
 	t.Helper()
 	return helperScriptWith(t, name, body, "", 0)
@@ -65,7 +78,7 @@ func helperScript(t *testing.T, name, body string) string {
 func helperScriptWith(t *testing.T, name, stdout, stderr string, code int) string {
 	t.Helper()
 
-	path := filepath.Join(t.TempDir(), name)
+	path := filepath.Join(privateDir(t), name)
 	script := "#!/bin/sh\n"
 	if stdout != "" {
 		script += fmt.Sprintf("printf '%%s' %s\n", shellQuote(stdout))
@@ -92,7 +105,7 @@ func shellQuote(s string) string {
 func echoingHelper(t *testing.T, name, stdout string) (path, argsFile, stdinFile string) {
 	t.Helper()
 
-	dir := t.TempDir()
+	dir := privateDir(t)
 	path = filepath.Join(dir, name)
 	argsFile = filepath.Join(dir, "args")
 	stdinFile = filepath.Join(dir, "stdin")
