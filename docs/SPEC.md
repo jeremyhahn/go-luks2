@@ -1,6 +1,6 @@
 # go-luks2 specification
 
-> **Status: NORMATIVE** · Owner: Software Department · Last verified: 2026-10-13 against fef1d25
+> **Status: NORMATIVE** · Owner: Software Department · Last verified: 2026-10-14 against be49afb
 > Conflicts with this document are defects. Fix them here first.
 
 A feature listed in SPEC.md, in any status, is never deleted: not its docs,
@@ -11,12 +11,26 @@ SPEC.md.
 
 go-luks2 is a pure Go library and command-line tool for LUKS2 disk encryption. It
 formats, unlocks and manages LUKS2 volumes in process, without the cryptsetup
-binary, and the volumes interoperate with cryptsetup in both directions. It is
-a Layer 0 library of the portfolio, and go-trusted-platform consumes it for
-encrypted volume management. Key material stays in go-enclave locked memory
-for its whole lifetime.
+binary, and the volumes interoperate with cryptsetup in both directions.
+
+- Layer: a Layer 0 library of the portfolio. go-trusted-platform consumes it
+  for encrypted volume management.
+- Embedded library: go-enclave, the locked-memory primitive, is the one
+  portfolio project go-luks2 embeds, and it embeds it as a library.
+- Inherited: go-enclave's locked-memory custody. Key material stays in
+  go-enclave locked memory for its whole lifetime.
+- Re-exported: credentials and keys cross the `pkg/luks2` and `pkg/keyprovider`
+  API as go-enclave's own `*enclave.Memory`, unchanged and not renamed.
+  go-enclave's functions, such as `enclave.HardenProcess`, are not
+  re-exported: a consumer imports go-enclave to call them.
 
 ## Boundaries
+
+go-luks2 is embedded in its consumer's process as a library and is never run
+as a second product. It runs no cluster, engine, database or service of its
+own, and adds no second store beside its consumer's. The only state it writes
+is on the volume itself: the LUKS2 header, keyslots and tokens, in
+cryptsetup's format.
 
 go-luks2 owns:
 
