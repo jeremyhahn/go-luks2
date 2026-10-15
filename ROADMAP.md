@@ -13,7 +13,7 @@ Purpose and boundaries are in [SPEC.md](docs/SPEC.md#purpose).
 
 ## Milestones
 
-- [Dev complete (M7)](../../milestone/7) — Dev complete — Due: 2026-10-15. Closes on the dev-complete list of the [SPEC.md release criteria](docs/SPEC.md#release-criteria): every own feature row shipped, go-trusted-platform's seam rows on go-luks2 shipped, the API stable; `-alpha` tags only until go-trusted-platform is dev complete, and the release-candidate tags already cut stay.
+- [Dev complete (M7)](../../milestone/7) — Dev complete — Due: 2026-10-16. Closes on the dev-complete list of the [SPEC.md release criteria](docs/SPEC.md#release-criteria): every own feature row shipped, go-trusted-platform's seam rows on go-luks2 shipped, the API stable; `-alpha` tags only until go-trusted-platform is dev complete, and the release-candidate tags already cut stay.
 
 ## Complete
 
