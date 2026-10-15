@@ -68,7 +68,7 @@ const (
 	defaultImage    = "go-luks2-integration-test"
 
 	// containerStateDir is where the harness inside the image reads the
-	// ledgers. See test/internal/harness and build/docker/integration/Dockerfile.
+	// ledgers. See test/internal/harness and the integration stage of build/docker/devcontainer/Dockerfile.
 	containerStateDir = "/var/lib/go-luks2-test-state"
 
 	// profileRel is the seccomp profile, relative to the module root.
@@ -365,7 +365,7 @@ func privileges(seccompProfile, dmMajor, stateDir string) []string {
 		// The run ledgers, on the HOST. A record kept inside the container
 		// dies with the run it describes, which is the one run whose host
 		// state needs removing. See test/internal/harness and
-		// build/docker/integration/Dockerfile.
+		// the integration stage of build/docker/devcontainer/Dockerfile.
 		"-v", stateDir + ":" + containerStateDir,
 	}
 }

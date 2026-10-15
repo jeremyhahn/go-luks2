@@ -7,7 +7,7 @@
 # privilege set as the integration suite (test/integration/cmd/docker-run) --
 # this binary needs the same device-mapper and loop access either way.
 #
-# Multi-stage, unlike build/docker/integration's single-stage image: that one
+# The devcontainer's integration stage (build/docker/devcontainer/Dockerfile)
 # IS the Go toolchain plus every test dependency, by design, and ships
 # nothing. This one ships to a user, so the build stage's toolchain and
 # module cache stay out of the final layer.
@@ -17,7 +17,7 @@ WORKDIR /app
 
 # go.mod pins github.com/jeremyhahn/go-enclave, served from a private module
 # host despite its github.com module path. The credential arrives as a
-# BuildKit secret, exactly as build/docker/integration/Dockerfile takes it
+# BuildKit secret, exactly as build/docker/devcontainer/Dockerfile takes it
 # (see that file for why: not a build arg, not baked into GOPROXY/GOSUMDB).
 # Absent, the build still runs, resolving from whatever proxy this machine
 # can reach.

@@ -39,7 +39,7 @@ import (
 // UnaddressableTokenID: a conformance measurement that reports success on a
 // host with no third party to check against converts "unverified" into
 // "verified" (#90). A hard failure is only correct where the binary is a
-// DECLARED dependency, and in this tier it is -- build/docker/integration/Dockerfile
+// DECLARED dependency, and in this tier it is -- the integration stage of build/docker/devcontainer/Dockerfile
 // installs cryptsetup-bin. The unit tier's conformance_test.go skips instead,
 // because there the binary is not declared.
 
@@ -173,7 +173,7 @@ func requireCryptsetupDeclared(t *testing.T) {
 
 	if _, err := exec.LookPath("cryptsetup"); err != nil {
 		t.Fatalf("cryptsetup is not installed (%v). This tier DECLARES it -- "+
-			"build/docker/integration/Dockerfile installs cryptsetup-bin -- so its absence is a broken "+
+			"the integration stage of build/docker/devcontainer/Dockerfile installs cryptsetup-bin -- so its absence is a broken "+
 			"environment, not a reason to report success. Nothing here was verified against a "+
 			"third-party LUKS2 implementation.", err)
 	}

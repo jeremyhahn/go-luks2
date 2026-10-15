@@ -75,7 +75,7 @@ func TestUnlockWaitsForCryptsetupsWriteLock(t *testing.T) {
 	requireCryptsetupDeclared(t)
 	stracePath, err := exec.LookPath("strace")
 	if err != nil {
-		t.Fatalf("strace is not installed (%v). This tier DECLARES it -- build/docker/integration/Dockerfile "+
+		t.Fatalf("strace is not installed (%v). This tier DECLARES it -- the integration stage of build/docker/devcontainer/Dockerfile "+
 			"installs it -- and without it nothing can make cryptsetup hold its lock on cue.", err)
 	}
 	loop, _ := laneDLoop(t)

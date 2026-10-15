@@ -541,7 +541,7 @@ jobs:
           docker build \
             --secret id=gomodauth,src="${RUNNER_TEMP}/gomodauth.env" \
             --label "$label" \
-            -f build/docker/integration/Dockerfile \
+            -f build/docker/devcontainer/Dockerfile --target integration \
             -t "$ITEST_IMAGE" .
 
       - name: Remove staged credentials

@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build install test test-verbose test-coverage test-integration coverage coverage-report clean fmt vet lint gosec govulncheck vuln trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration test-unit-norace seccomp-diff proto test-pkg docker-build docker-run
+.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build install test test-verbose test-coverage test-integration coverage coverage-report clean fmt vet lint gosec govulncheck vuln trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration test-unit-norace seccomp-diff proto test-pkg docker-build docker-run deps-check toolchain-image docker-build-toolchain toolchain-run
 
 # Default target
 .DEFAULT_GOAL := help
@@ -393,8 +393,33 @@ ITEST_PRUNE := docker image prune --force --all \
 ITEST_NAMES_ARE_OURS := $(if $(filter-out undefined,$(ITEST_ID_ORIGIN) $(ITEST_IMAGE_ORIGIN)),,yes)
 ITEST_BUILD_IS_GOAL := $(if $(filter 0,$(MAKELEVEL)),$(ITEST_NAMES_ARE_OURS))
 
-# Builds the integration image, handing the private-module credentials over as
-# a BuildKit secret.
+# The ONE image every CI stage runs in (devcontainer.md §1): its toolchain
+# stage runs build, test, lint, security and deps-check, its integration stage
+# runs the integration suite. There is no other CI image.
+DEVCONTAINER_DOCKERFILE := build/docker/devcontainer/Dockerfile
+
+# Stages the private-module credentials for an image build into "$$stage", a
+# mktemp file the calling recipe hands to `docker build --secret`. One logical
+# shell line (make joins the continuations), so it shares the recipe's shell
+# and its EXIT trap; see docker-build-integration for why it is shaped so.
+GOMODAUTH_STAGE = umask 077; \
+	stage="$$(mktemp -t gomodauth.XXXXXX)"; \
+	trap 'rm -f "$$stage"' EXIT INT TERM; \
+	if [ -n "$${GIT_CONFIG_KEY_0:-}" ]; then \
+		{ \
+			printf 'export GOPRIVATE=%s\n' "$${GOPRIVATE:-}"; \
+			printf 'export GIT_CONFIG_COUNT=%s\n' "$${GIT_CONFIG_COUNT:-}"; \
+			printf 'export GIT_CONFIG_KEY_0=%s\n' "$${GIT_CONFIG_KEY_0}"; \
+			printf 'export GIT_CONFIG_VALUE_0=%s\n' "$${GIT_CONFIG_VALUE_0:-}"; \
+		} > "$$stage"; \
+		echo "$(COLOR_BOLD)Staged private module credentials for the image build$(COLOR_RESET)"; \
+	else \
+		echo "$(COLOR_BOLD)No private module credentials in the environment; resolving from the configured proxy$(COLOR_RESET)"; \
+	fi
+
+# Builds the integration image -- the integration stage of the devcontainer
+# Dockerfile -- handing the private-module credentials over as a BuildKit
+# secret.
 #
 # go.mod pins github.com/jeremyhahn/go-enclave, whose module PATH says
 # github.com while it is served from a private module host, so a bare
@@ -419,24 +444,12 @@ docker-build-integration:
 	@set -eu; \
 	out="$$($(ITEST_PRUNE) 2>/dev/null || true)"; \
 	case "$$out" in *Deleted*) printf '%s\n' "$$out";; esac; \
-	umask 077; \
-	stage="$$(mktemp -t gomodauth.XXXXXX)"; \
-	trap 'rm -f "$$stage"' EXIT INT TERM; \
-	if [ -n "$${GIT_CONFIG_KEY_0:-}" ]; then \
-		{ \
-			printf 'export GOPRIVATE=%s\n' "$${GOPRIVATE:-}"; \
-			printf 'export GIT_CONFIG_COUNT=%s\n' "$${GIT_CONFIG_COUNT:-}"; \
-			printf 'export GIT_CONFIG_KEY_0=%s\n' "$${GIT_CONFIG_KEY_0}"; \
-			printf 'export GIT_CONFIG_VALUE_0=%s\n' "$${GIT_CONFIG_VALUE_0:-}"; \
-		} > "$$stage"; \
-		echo "$(COLOR_BOLD)Staged private module credentials for the image build$(COLOR_RESET)"; \
-	else \
-		echo "$(COLOR_BOLD)No private module credentials in the environment; resolving from the configured proxy$(COLOR_RESET)"; \
-	fi; \
+	$(GOMODAUTH_STAGE); \
 	DOCKER_BUILDKIT=1 docker build \
 		--secret id=gomodauth,src="$$stage" \
+		--build-arg GO_BUILD_PROXY \
 		--label $(ITEST_LABEL) \
-		-f build/docker/integration/Dockerfile \
+		-f $(DEVCONTAINER_DOCKERFILE) --target integration \
 		-t $(ITEST_IMAGE) .; \
 	if [ -n "$(ITEST_BUILD_IS_GOAL)" ]; then \
 		docker image rm -f $(ITEST_IMAGE) >/dev/null 2>&1 || true; \
@@ -887,7 +900,7 @@ vet: ## Run go vet, including the integration build tag
 # vacuous gate the testing convention forbids. Self-hosted runner labels go in
 # .github/actionlint.yaml, read when the file exists; none of the workflows
 # uses one today. A finding is fixed in the workflow, never silenced here.
-ACTIONLINT_VERSION ?= v1.7.12
+# ACTIONLINT_VERSION is in the tool-pin file (TOOL PINS, below).
 ACTIONLINT_CONFIG   = .github/actionlint.yaml
 
 lint: export AL_CONFIG := $(ACTIONLINT_CONFIG)
@@ -1005,11 +1018,12 @@ gosec: ## Run gosec security scanner
 # security` used to print, and why its results could not be attributed to any
 # scanner version. The install hints below carry the -X flag for that reason.
 #
-# These are also the versions baked into the CI runner image. Bumping one is a
-# deliberate change, one issue per bump, made here and in the image together.
-GOLANGCI_LINT_VERSION ?= v2.14.0
-GOSEC_VERSION ?= v2.29.0
-GOVULNCHECK_VERSION ?= v1.8.0
+# The pins live in ONE file that the devcontainer image reads too
+# (devcontainer.md §2), so the tools in the image are the tools named here and
+# a bump is one edit, one issue per bump. It carries every tool pin: the three
+# Go scanners, actionlint and trivy with its four SHA-256s.
+TOOL_PINS := build/docker/devcontainer/tool-pins.env
+include $(TOOL_PINS)
 
 govulncheck: ## Run govulncheck (known vulns in stdlib and the dependency call graph)
 	@echo "$(COLOR_BOLD)Running govulncheck...$(COLOR_RESET)"
@@ -1040,12 +1054,8 @@ vuln: govulncheck ## Alias for govulncheck (scaffold §4 contract names it `vuln
 # whoever can replace the archive can replace that file too.
 #
 # The binary lands in build/tools, inside the checkout, so the target does not
-# touch anything outside the repository.
-TRIVY_VERSION                := v0.75.0
-TRIVY_SHA256_LINUX_AMD64     := c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f
-TRIVY_SHA256_LINUX_ARM64     := a1ee9f6ffb7d112b64ff726a2a0717c21175c1114361391f4a132956751a13b3
-TRIVY_BIN_SHA256_LINUX_AMD64 := 93f9da8e4ba5e0c1c76d8234ed2494cf9afb0a96fd21953e424bb795f3299b8e
-TRIVY_BIN_SHA256_LINUX_ARM64 := 869e310e208f0f2e3e90e4f842cc6adaa2b2c046fecbaade481e6b23fcc8f2a9
+# touch anything outside the repository. TRIVY_VERSION and the four hashes are
+# in the tool-pin file (TOOL PINS, above).
 TRIVY_DOWNLOAD_BASE          ?= https://github.com/aquasecurity/trivy/releases/download
 TOOLS_DIR                    ?= $(CURDIR)/$(BUILD_DIR)/tools
 TRIVY_BIN                     = $(TOOLS_DIR)/trivy-$(TRIVY_VERSION)/trivy
@@ -1193,6 +1203,26 @@ verify: ## Verify dependencies
 	@$(GO) mod verify
 	@echo "$(COLOR_GREEN)✓ Dependencies verified$(COLOR_RESET)"
 
+# deps-check (devops.md §4, §9): fails when any module go.mod requires, first-
+# or third-party, direct or indirect, is behind its latest release with no
+# reason written beside its require or replace line. A held-back module is a
+# decision with its reason in go.mod, printed with the result; anything else
+# is drift. test/tools/depscheck documents what "latest" means and why the
+# check fails closed.
+#
+# It is the one target that must ask a module host, so it takes its proxy
+# from DEPS_CHECK_GOPROXY when that is set (the toolchain image and the lane
+# sandboxes run with GOPROXY=off) and otherwise from the environment.
+# First-party modules resolve the way the build resolves them: GOPRIVATE and
+# git's GIT_CONFIG_* rewrite to the internal module host. It installs nothing.
+DEPS_CHECK_GOPROXY ?=
+deps-check: export DC_GOPROXY := $(DEPS_CHECK_GOPROXY)
+deps-check: ## Fail when a go.mod module is behind its latest release with no reason written beside it
+	@echo "$(COLOR_BOLD)Checking every go.mod module against its latest release...$(COLOR_RESET)"
+	@if [ -n "$$DC_GOPROXY" ]; then GOPROXY="$$DC_GOPROXY"; export GOPROXY; fi; \
+	$(GO) run ./test/tools/depscheck || exit 1; \
+	echo "$(COLOR_GREEN)✓ Every module is at its latest release or documents why not$(COLOR_RESET)"
+
 tidy: ## Tidy go.mod
 	@echo "$(COLOR_BOLD)Tidying go.mod...$(COLOR_RESET)"
 	@$(GO) mod tidy
@@ -1223,7 +1253,7 @@ info: ## Show project information
 
 devcontainer: ## Build and run the devcontainer
 	@echo "$(COLOR_BOLD)Building devcontainer...$(COLOR_RESET)"
-	@docker build -f build/docker/devcontainer/Dockerfile -t go-luks2-devcontainer .
+	@docker build -f $(DEVCONTAINER_DOCKERFILE) --target toolchain -t go-luks2-devcontainer .
 	@echo "$(COLOR_GREEN)✓ Devcontainer built$(COLOR_RESET)"
 	@echo ""
 	@echo "$(COLOR_BOLD)To run:$(COLOR_RESET)"
@@ -1240,6 +1270,51 @@ devcontainer: ## Build and run the devcontainer
 	@echo "$(COLOR_YELLOW)  Code devcontainer is NOT the same thing. Tracked separately: a$(COLOR_RESET)"
 	@echo "$(COLOR_YELLOW)  devcontainer.json cannot read the dm major out of /proc/devices, and$(COLOR_RESET)"
 	@echo "$(COLOR_YELLOW)  a hard-coded one is wrong on the next machine.$(COLOR_RESET)"
+
+# ---- the toolchain image: where build, test, lint, security and deps-check run ----
+#
+# The devcontainer's toolchain stage, tagged by the hash of everything it is
+# built from (devcontainer.md §6), so the same inputs name the same image and
+# a changed pin, Dockerfile or go.sum names a new one. `make toolchain-image`
+# prints the tag; CI uses it to build once and run every stage in it.
+TOOLCHAIN_INPUTS := $(DEVCONTAINER_DOCKERFILE) $(TOOL_PINS) go.mod go.sum
+TOOLCHAIN_IMAGE ?= go-luks2-toolchain:$(shell cat $(TOOLCHAIN_INPUTS) 2>/dev/null | sha256sum | cut -c1-16)
+
+toolchain-image: ## Print the content-hashed tag of the toolchain image
+	@echo $(TOOLCHAIN_IMAGE)
+
+docker-build-toolchain: ## Build the toolchain image (the devcontainer's toolchain stage)
+	@set -eu; \
+	$(GOMODAUTH_STAGE); \
+	DOCKER_BUILDKIT=1 docker build \
+		--secret id=gomodauth,src="$$stage" \
+		--build-arg GO_BUILD_PROXY \
+		-f $(DEVCONTAINER_DOCKERFILE) --target toolchain \
+		-t $(TOOLCHAIN_IMAGE) .
+
+# Runs CMD in the toolchain image over this checkout, as the uid that owns it
+# and with HOME=/tmp (devcontainer.md §5), so files it writes stay the
+# developer's. CMD reaches the container through the environment, never
+# spliced into this recipe's shell source. The proxy and credential variables
+# are forwarded by NAME only (`-e VAR`): docker reads their values from this
+# environment, so a token never appears on a command line. They matter only to
+# deps-check; the image itself has GOPROXY=off. An empty CMD is refused before
+# anything is built.
+#
+#   make toolchain-run CMD="make build test security deps-check releasability"
+toolchain-run: export TR_CMD := $(CMD)
+toolchain-run: export TR_IMAGE := $(TOOLCHAIN_IMAGE)
+toolchain-run: ## Run CMD in the toolchain image (make toolchain-run CMD="make test")
+	@test -n "$$TR_CMD" || { echo "$(COLOR_RED)✗ state the command: make toolchain-run CMD=\"make test\"$(COLOR_RESET)"; exit 1; }
+	@$(MAKE) --no-print-directory docker-build-toolchain
+	@docker run --rm \
+		--user "$$(id -u):$$(id -g)" \
+		-e HOME=/tmp \
+		-e DEPS_CHECK_GOPROXY -e GOPRIVATE -e GONOSUMDB -e GONOPROXY \
+		-e GIT_CONFIG_COUNT -e GIT_CONFIG_KEY_0 -e GIT_CONFIG_VALUE_0 \
+		-e GOSEC_EXTRA \
+		-v "$(CURDIR):/workspace" -w /workspace \
+		"$$TR_IMAGE" bash -c "$$TR_CMD"
 
 # Builds never resolve through a workspace: cross-repository modules come from
 # published TAGS, never from wherever a sibling repo happens to be checked out.

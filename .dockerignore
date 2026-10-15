@@ -1,5 +1,8 @@
 # Build artifacts
 build/
+# ...except the tool-pin file the Makefile includes: an image that runs make
+# (the integration stage's entrypoint) cannot parse the Makefile without it.
+!build/docker/devcontainer/tool-pins.env
 *.test
 *.out
 
@@ -24,7 +27,8 @@ coverage.html
 
 # Code-analysis tooling scratch state (#66). Untracked and gitignored, but it
 # still exists in a developer's working directory, and
-# build/docker/integration/Dockerfile ends in `COPY . .` — so without this
+# the integration stage of build/docker/devcontainer/Dockerfile ends in
+# `COPY . .` — so without this
 # line a local `make integration-test` bakes the tool's notes into an image
 # layer.
 .serena/

@@ -197,8 +197,12 @@ func TestTrivyPinsAreFullHashes(t *testing.T) {
 	} {
 		var value string
 		for _, line := range strings.Split(stdout, "\n") {
-			if v, ok := strings.CutPrefix(line, name+" := "); ok {
-				value = v
+			// The pin file is KEY=value, which make prints as a recursive
+			// variable; either form is the pin.
+			for _, op := range []string{" := ", " = "} {
+				if v, ok := strings.CutPrefix(line, name+op); ok {
+					value = v
+				}
 			}
 		}
 		if len(value) != 64 || strings.Trim(value, "0123456789abcdef") != "" {

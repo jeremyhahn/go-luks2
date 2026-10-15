@@ -803,7 +803,10 @@ func TestIntegrationTestSkipsCleanlyWithNoSuiteYet(t *testing.T) {
 // run is a stated error, not `go test` against an empty import path (which
 // would silently test the current directory).
 func TestTestPkgRequiresPKG(t *testing.T) {
-	stdout, stderr, err := runMakeErr(t, environ(nil, nil), "test-pkg")
+	// make exports its command-line variables to recipes, so under `make
+	// test-pkg PKG=./test/makefile` PKG is in this environment, and keeping it
+	// would run this suite again from inside itself.
+	stdout, stderr, err := runMakeErr(t, environ([]string{"PKG"}, nil), "test-pkg")
 	if err == nil {
 		t.Fatalf("make test-pkg passed with no PKG:\n%s%s", stdout, stderr)
 	}
@@ -928,8 +931,8 @@ func TestCoverageReportWritesTheHTMLFromAnExistingProfile(t *testing.T) {
 }
 
 // TestDockerBuildUsesTheCLIDockerfile is a dry-run check that docker-build
-// builds build/docker/cli's Dockerfile, not build/docker/integration's or
-// build/docker/devcontainer's.
+// builds build/docker/cli's Dockerfile, not build/docker/devcontainer's
+// toolchain or integration stage.
 func TestDockerBuildUsesTheCLIDockerfile(t *testing.T) {
 	stdout, stderr := runMake(t, environ(nil, nil), "-n", "docker-build")
 	if !strings.Contains(stdout, "build/docker/cli/Dockerfile") {
@@ -971,10 +974,14 @@ func TestCleanPreservesTrackedDockerfilesButRemovesEverythingElseUnderBuildDir(t
 	// Makefile in its own temporary directory instead.
 	dir := t.TempDir()
 	// The Makefile's toolchain-pin block reads go.mod, unconditionally, from
-	// make's own working directory -- so the copy needs it alongside.
-	for _, name := range []string{"Makefile", "go.mod"} {
+	// make's own working directory -- so the copy needs it alongside, and the
+	// tool pin file the Makefile includes.
+	for _, name := range []string{"Makefile", "go.mod", "build/docker/devcontainer/tool-pins.env"} {
 		src, err := os.ReadFile(filepath.Join(repoRoot(t), name))
 		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, name)), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(dir, name), src, 0o600); err != nil {

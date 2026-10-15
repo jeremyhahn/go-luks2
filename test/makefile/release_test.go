@@ -81,13 +81,21 @@ func releaseFixture(t *testing.T, version string, sections ...string) (work, rem
 	if err != nil {
 		t.Fatal(err)
 	}
+	pins, err := os.ReadFile(filepath.Join(root, "build/docker/devcontainer/tool-pins.env")) // #nosec G304 -- the repository's own tool pin file; the Makefile includes it
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(work, "build/docker/devcontainer"), 0o750); err != nil {
+		t.Fatal(err)
+	}
 	changelog := "# Changelog\n\n"
 	for _, s := range sections {
 		changelog += "## [" + s + "] - 2026-01-01\n\n- entry\n\n"
 	}
 	files := map[string]string{
-		"Makefile":              string(mk),
-		"go.mod":                string(gomod),
+		"Makefile": string(mk),
+		"go.mod":   string(gomod),
+		"build/docker/devcontainer/tool-pins.env": string(pins),
 		"VERSION":               version + "\n",
 		"CHANGELOG.md":          changelog,
 		"changelog.d/README.md": "fragments\n",

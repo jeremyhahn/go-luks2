@@ -2,7 +2,8 @@
   "name": "go-luks2 Development Container",
   "build": {
     "dockerfile": "../build/docker/devcontainer/Dockerfile",
-    "context": ".."
+    "context": "..",
+    "target": "toolchain"
   },
   "runArgs": [
     "--privileged",

@@ -302,7 +302,7 @@ func TestEveryWritePathWaitsForCryptsetup(t *testing.T) {
 	requireCryptsetupDeclared(t)
 	stracePath, err := exec.LookPath("strace")
 	if err != nil {
-		t.Fatalf("strace is not installed (%v); build/docker/integration/Dockerfile installs it", err)
+		t.Fatalf("strace is not installed (%v); the integration stage of build/docker/devcontainer/Dockerfile installs it", err)
 	}
 
 	for _, op := range mutualWriteOps {

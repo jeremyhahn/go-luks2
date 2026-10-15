@@ -56,6 +56,7 @@ github.com/jeremyhahn/go-luks2/test/internal/harness              unit      87.0
 github.com/jeremyhahn/go-luks2/test/internal/harness              combined  90
 github.com/jeremyhahn/go-luks2/test/tools/luks2-testreap          unit      90
 github.com/jeremyhahn/go-luks2/test/tools/covergate               unit      90
+github.com/jeremyhahn/go-luks2/test/tools/depscheck               unit      90
 github.com/jeremyhahn/go-luks2/internal/volkey                   unit      90
 github.com/jeremyhahn/go-luks2/pkg/loop                           unit      55.50
 github.com/jeremyhahn/go-luks2/pkg/loop                           combined  90
