@@ -116,6 +116,9 @@ Dev complete:
 - The API is stable: the `pkg/` exports named in the feature folders do not
   change before `v1.0.0`. Open.
 - CI and the FIPS gate are green on `main`. Done.
+- CI conforms to the CI standard (`ci-standard.md`): build, unit tests,
+  integration tests, security scans and a latest-version check, all in the
+  project's devcontainer image. Open.
 - Releases are signed: the release target writes the version commit and an
   annotated tag through the agent's signing identity, and fails closed
   without it. Done.
