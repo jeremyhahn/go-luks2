@@ -30,6 +30,10 @@ feature table every folder below is a row of, interfaces and release criteria.
 | [cryptsetup-interop](cryptsetup-interop/) | Compatibility policy, the two-way interop matrix |
 | [release](release/) | Publishing to the public mirror: what the archive export strips and the releasability rule (one reference page) |
 
+[reference/](reference/README.md) is not a feature folder: it holds the
+standards the code implements, copied from their publishers where the licence
+permits, with an index naming each one's revision and implementing package.
+
 Each folder documents the API as shipped. Two checks in `test/tools/apidump`
 hold the exported surface: `make api-diff` (part of `make ci`) checks that
 every export of the pre-1.0 `pkg/luks2` (`baseline/luks2.tsv`) went where its
@@ -101,8 +105,9 @@ changelog. The interop contract is in
 ## Conversion state
 
 Every document in this tree is a feature folder, this index, the
-specification [SPEC.md](SPEC.md) or the release reference
-[release/public-releasability.md](release/public-releasability.md);
+specification [SPEC.md](SPEC.md), the release reference
+[release/public-releasability.md](release/public-releasability.md) or the
+standards directory [reference/](reference/README.md);
 no legacy topic file remains. The test-strategy detail is in
 [volumes/engineering.md](volumes/engineering.md#test-strategy), which the
 other folders' test-strategy sections link to, and the releasability gate's
