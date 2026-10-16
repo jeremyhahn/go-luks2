@@ -1,0 +1,61 @@
+# go-luks2 devcontainer: the integration stage of the Dockerfile beside this
+# file, as a compose service (devcontainer.md §3, §6).
+#
+#   integration  `make integration-test`: the integration suite and the
+#                combined coverage gate (the image's default command) in the
+#                integration image, which carries the source. The Makefile
+#                builds that image, names it in GO_LUKS2_IT_IMAGE and runs this
+#                file under its own project name, so two runs on one daemon
+#                never share a container or a network.
+#
+# The toolchain stage has no service here: `make toolchain-run CMD=...` runs it
+# over a bind mount on a workstation, and CI copies the checkout in
+# (`make ci-toolchain-run`), because on a runner a bind mount resolves on the
+# daemon's host.
+#
+# THE PRIVILEGE SET is test/tools/docker-run's, flag for flag and no more:
+# every entry below is measured and explained there, and
+# TestComposeIntegrationServiceHasTheLaunchersPrivileges fails when the two
+# differ. In short:
+#
+#   cap_drop ALL, then SYS_ADMIN (the dm ioctls), MKNOD (the loop and dm
+#     nodes in a bare /dev), SETUID and SETGID (the unprivileged-caller child).
+#   seccomp: Docker's default profile plus the three keyring syscalls.
+#   apparmor unconfined: docker-default denies mount(2), and the suite mounts
+#     the filesystems it makes.
+#   devices: the two control nodes only, never the host's /dev.
+#   device_cgroup_rules: loop (major 7) and device-mapper, whose major the
+#     Makefile reads from /proc/devices.
+#   the run-ledger directory, bind-mounted from the HOST, so a record of what a
+#     run put on the machine outlives the run (test/internal/harness).
+#
+# It runs as root: it creates loop nodes, dm mappings and filesystems. The
+# canonical posture's read_only, network_mode none, no-new-privileges and
+# limits are not added here: the launcher sets none of them, and this file
+# keeps the suite's measured set rather than one nobody has run it under.
+#
+# The interpolated values are set by `make integration-test`; `:?` refuses to
+# start the service without them rather than run with an empty rule.
+
+services:
+  integration:
+    image: ${GO_LUKS2_IT_IMAGE:?set by make integration-test}
+    pull_policy: never
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_ADMIN
+      - MKNOD
+      - SETUID
+      - SETGID
+    security_opt:
+      - seccomp=${GO_LUKS2_SECCOMP_PROFILE:?set by make integration-test}
+      - apparmor=unconfined
+    devices:
+      - /dev/mapper/control
+      - /dev/loop-control
+    device_cgroup_rules:
+      - "b 7:* rwm"
+      - "b ${GO_LUKS2_DM_MAJOR:?set by make integration-test}:* rwm"
+    volumes:
+      - ${GO_LUKS2_TEST_STATE_DIR:?set by make integration-test}:/var/lib/go-luks2-test-state

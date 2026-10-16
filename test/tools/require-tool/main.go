@@ -42,7 +42,9 @@
 // The github.com fallback is deliberate and narrow: the public host runs the
 // same workflow file on GitHub-hosted runners, where no image of ours exists and
 // there is nothing to bake into. It is the only path here that touches the
-// network, and it still has to satisfy the same assertion afterwards.
+// network, and it still has to satisfy the same assertion afterwards. gosec is
+// built there the way the devcontainer image builds it, against the pin file's
+// golang.org/x/tools (see install).
 package main
 
 import (
@@ -64,6 +66,10 @@ const manifestPath = "/etc/ci-runner-tools.txt"
 // githubServer is the one server on which a missing tool is installed rather
 // than refused.
 const githubServer = "https://github.com"
+
+// pinFile is the pin file the Makefile and the devcontainer image read,
+// relative to the repository root, where CI runs this command.
+const pinFile = "build/docker/devcontainer/tool-pins.env"
 
 // knownTools maps each tool to the line its self-report documents its version
 // on, anchored at the start of that line.
@@ -105,6 +111,9 @@ type host struct {
 	run      func(name string, args ...string) (string, error)
 	getenv   func(key string) string
 	readFile func(path string) ([]byte, error)
+	// mkdirTemp and removeAll hold the throwaway module gosec builds in.
+	mkdirTemp func() (string, error)
+	removeAll func(path string) error
 }
 
 func main() {
@@ -134,8 +143,10 @@ func systemHost() host {
 			out, err := exec.Command(name, args...).CombinedOutput() // #nosec G204 -- the workflow's pinned tool name and version
 			return string(out), err
 		},
-		getenv:   os.Getenv,
-		readFile: os.ReadFile,
+		getenv:    os.Getenv,
+		readFile:  os.ReadFile,
+		mkdirTemp: func() (string, error) { return os.MkdirTemp("", "gosec-build-") },
+		removeAll: os.RemoveAll,
 	}
 }
 
@@ -170,9 +181,8 @@ func require(out io.Writer, h host, req request) error {
 		}
 		fmt.Fprintf(out, "note: %s is absent; installing %s@%s (GitHub-hosted runner, no baked image)\n",
 			req.bin, req.module, req.pin)
-		args := append(append([]string{"install"}, req.installArgs...), req.module+"@"+req.pin)
-		if output, err := h.run("go", args...); err != nil {
-			return &InstallError{Module: req.module, Pin: req.pin, Output: output, Err: err}
+		if err := install(h, req); err != nil {
+			return err
 		}
 		// actions/setup-go puts GOPATH/bin on PATH. Assert it rather than
 		// assume it.
@@ -195,6 +205,57 @@ func require(out io.Writer, h host, req request) error {
 
 	fmt.Fprintf(out, "ok  %s %s  (%s)\n", req.bin, req.pin, path)
 	return nil
+}
+
+// install runs `go install` for req at its pin. gosec is built the way the
+// devcontainer image builds it: in a throwaway module, with golang.org/x/tools
+// raised to the pin file's XTOOLS_VERSION, because the x/tools gosec's own
+// go.mod names cannot read the export data a current Go writes and every
+// import then fails to type-check.
+func install(h host, req request) error {
+	if req.bin != "gosec" {
+		args := append(append([]string{"install"}, req.installArgs...), req.module+"@"+req.pin)
+		if output, err := h.run("go", args...); err != nil {
+			return &InstallError{Module: req.module, Pin: req.pin, Output: output, Err: err}
+		}
+		return nil
+	}
+	xtools, err := pinned(h, "XTOOLS_VERSION")
+	if err != nil {
+		return err
+	}
+	dir, err := h.mkdirTemp()
+	if err != nil {
+		return &InstallError{Module: req.module, Pin: req.pin, Err: err}
+	}
+	defer func() { _ = h.removeAll(dir) }()
+	for _, args := range [][]string{
+		{"-C", dir, "mod", "init", "gosec-build"},
+		{"-C", dir, "get", req.module + "@" + req.pin, "golang.org/x/tools@" + xtools},
+		append(append([]string{"-C", dir, "install"}, req.installArgs...), req.module),
+	} {
+		if output, err := h.run("go", args...); err != nil {
+			return &InstallError{Module: req.module, Pin: req.pin, Output: output, Err: err}
+		}
+	}
+	return nil
+}
+
+// pinned reads key's value from the pin file. A pin that is absent or empty
+// fails: building against whatever x/tools happens to resolve is the defect
+// the pin exists to prevent.
+func pinned(h host, key string) (string, error) {
+	data, err := h.readFile(pinFile)
+	if err != nil {
+		return "", &PinError{Path: pinFile, Key: key, Err: err}
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		name, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if ok && name == key && value != "" {
+			return value, nil
+		}
+	}
+	return "", &PinError{Path: pinFile, Key: key}
 }
 
 // selfReport asks the tool for its version. Tools disagree on the flag, so both

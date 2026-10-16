@@ -220,9 +220,11 @@ func TestToolsRequiredTurnsAMissingScannerIntoAFailure(t *testing.T) {
 	// directory (a command-line override, so go's own GOPATH and its module
 	// cache are untouched). PATH is a directory of links to the system's
 	// executables minus the scanners, so the test does not depend on whether
-	// the host happens to have them installed (CI runners do).
+	// the host happens to have them installed (CI runners do). TOOLS_REQUIRED is
+	// dropped too: the toolchain image exports it, and inherited it would turn
+	// the run without it into a second run with it.
 	scanners := []string{"gosec", "govulncheck", "trivy"}
-	env := environ([]string{"GOBIN"}, map[string]string{"PATH": systemPathWithout(t, scanners...)})
+	env := environ([]string{"GOBIN", "TOOLS_REQUIRED"}, map[string]string{"PATH": systemPathWithout(t, scanners...)})
 	emptyBin := t.TempDir()
 	// trivy is not part of this contract: its targets fail closed with or
 	// without TOOLS_REQUIRED (#296), asserted in the trivy-fs case below.

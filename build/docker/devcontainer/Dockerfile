@@ -46,9 +46,12 @@ RUN groupadd --gid $USER_GID $USERNAME && \
     useradd --uid $USER_UID --gid $USER_GID -m $USERNAME
 
 # GOWORK=off so a stray go.work cannot change what is built; GOFLAGS so
-# nothing run in the image rewrites go.mod.
+# nothing run in the image rewrites go.mod. -buildvcs=false because stamping
+# the main module's version from its git tags writes a stat cache into the
+# module cache, which is root's and only readable to the uid a stage runs as;
+# the binary's version comes from -X main.version, not from the stamp.
 ENV GOWORK=off \
-    GOFLAGS=-mod=readonly \
+    GOFLAGS="-mod=readonly -buildvcs=false" \
     GOTOOLCHAIN=local
 
 WORKDIR /workspace
@@ -70,7 +73,9 @@ WORKDIR /workspace
 # is recorded in image metadata and readable with `docker history`, while a
 # secret is mounted on tmpfs for this RUN alone and never becomes a layer. It is
 # `source`d rather than exported, so the value never reaches a command line
-# either -- `ps` on the build host would show that.
+# either -- `ps` on the build host would show that. `set -a` exports what it
+# assigns, so the file may hold plain KEY=value lines (the CI workflow's
+# MODULE_ENV_FILE) or `export` lines (the Makefile's own staging).
 #
 # The mount is OPTIONAL by design. Where no secret is supplied -- GitHub Actions,
 # or a developer building against the public proxy -- the file is simply absent
@@ -86,7 +91,7 @@ COPY go.mod go.sum ./
 ARG GO_BUILD_PROXY
 RUN --mount=type=secret,id=gomodauth \
     set -eu; \
-    if [ -f /run/secrets/gomodauth ]; then . /run/secrets/gomodauth; fi; \
+    if [ -f /run/secrets/gomodauth ]; then set -a; . /run/secrets/gomodauth; set +a; fi; \
     if [ -n "${GO_BUILD_PROXY:-}" ]; then export GOPROXY="$GO_BUILD_PROXY"; fi; \
     go mod download; \
     chmod -R a+rX "$(go env GOMODCACHE)"
@@ -101,7 +106,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Every version is the pin file's. gosec takes its version string from
 # ldflags, not from the module path, so the -X flag is what makes it
-# self-report the pin that ci.yml asserts (#21). trivy is installed by the
+# self-report the pin that ci.yml asserts (#21). gosec builds in a throwaway
+# module so x/tools can be raised to XTOOLS_VERSION (see tool-pins.env); the
+# others build with the x/tools their go.mod names. gopls is the language server
+# devcontainer.json enables; the toolchain stage sets GOPROXY=off, so an
+# editor could not fetch it later. trivy is installed by the
 # Makefile's own trivy-install, so the image and a developer verify the same
 # archive and binary hashes the same way.
 COPY Makefile go.mod /src/
@@ -113,9 +122,14 @@ RUN set -eu; \
     if [ -n "${GO_BUILD_PROXY:-}" ]; then export GOPROXY="$GO_BUILD_PROXY"; fi; \
     export GOBIN=/opt/tools/bin GOFLAGS=; \
     go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}"; \
-    go install -ldflags "-X main.Version=${GOSEC_VERSION}" "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}"; \
+    ( d="$(mktemp -d)"; cd "$d"; \
+      go mod init gosec-build; \
+      go get "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}" "golang.org/x/tools@${XTOOLS_VERSION}"; \
+      go install -ldflags "-X main.Version=${GOSEC_VERSION}" github.com/securego/gosec/v2/cmd/gosec; \
+      cd /; rm -rf "$d" ); \
     go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"; \
     go install "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"; \
+    go install "golang.org/x/tools/gopls@${GOPLS_VERSION}"; \
     make --no-print-directory trivy-install TOOLS_DIR=/opt/tools/trivy; \
     install -m 0755 "/opt/tools/trivy/trivy-${TRIVY_VERSION}/trivy" /opt/tools/bin/trivy
 
@@ -126,14 +140,36 @@ FROM base AS toolchain
 # rather than assumed. shellcheck is what actionlint runs over the workflows'
 # shell steps: without it actionlint skips them silently. sudo is for the VS
 # Code devcontainer's integration-test-setup guard below.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    make \
-    bash \
-    git \
-    jq \
-    shellcheck \
-    sudo \
-    && rm -rf /var/lib/apt/lists/*
+#
+# curl, libcurl4t64 and libcurl3t64-gnutls come with the Go base image, and this
+# image keeps all three: it is also the devcontainer, where `make trivy-install`
+# downloads the pinned trivy with curl, and git fetches the first-party module
+# over https through libcurl3t64-gnutls. They are taken at Debian's current
+# security update in this layer, and the build fails if any of them is missing
+# or older than 8.14.1-2+deb13u7, the first release that fixes CVE-2026-8286
+# and CVE-2026-8927. The base image is pinned by digest; the packages, like
+# every apt install here, are Debian's at build time, and the floor keeps a
+# rebuild from shipping an older curl.
+RUN set -eu; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      make \
+      bash \
+      git \
+      jq \
+      shellcheck \
+      sudo \
+      curl \
+      libcurl4t64 \
+      libcurl3t64-gnutls; \
+    rm -rf /var/lib/apt/lists/*; \
+    for p in curl libcurl4t64 libcurl3t64-gnutls; do \
+      v="$(dpkg-query -W -f '${Version}' "$p")" || { echo "$p is not installed" >&2; exit 1; }; \
+      dpkg --compare-versions "$v" ge 8.14.1-2+deb13u7 || { echo "$p $v predates the curl security fixes" >&2; exit 1; }; \
+    done; \
+    for c in make bash git jq shellcheck sudo curl; do \
+      command -v "$c" >/dev/null || { echo "$c is not installed" >&2; exit 1; }; \
+    done
 
 COPY --from=tools /opt/tools/bin/ /usr/local/bin/
 
@@ -204,13 +240,40 @@ RUN printf '%s\n' \
     > /usr/local/bin/integration-test-setup && \
     chmod +x /usr/local/bin/integration-test-setup
 
+# Where CI copies the checkout (`make ci-toolchain-run`): a runner's daemon
+# cannot bind-mount it, so it is streamed in, owned by the uid the stage runs
+# as. The directory must already be that uid's for the stage to write in it.
+RUN install -d -m 0755 -o 10001 -g 10001 /src
+
 # Every fetch is done (devcontainer.md §4). A tool that reaches for the
 # network from here on fails instead of fetching something unpinned; make
 # deps-check, the one target that must ask a module host, is handed a proxy
 # explicitly (DEPS_CHECK_GOPROXY). The image runs as any uid with HOME=/tmp
 # (§5); the named user is the VS Code devcontainer's.
+#
+# GOCACHE is keyed by the Go version. The build cache holds export data in the
+# format of the Go that wrote it, and a reader older than that format fails on
+# every import, so a cache directory is never shared between two Gos. Go
+# creates it on first use, owned by the uid that runs and not world-writable.
 ENV GOPROXY=off \
-    TOOLS_REQUIRED=1
+    TOOLS_REQUIRED=1 \
+    GOCACHE=/tmp/.cache/go-build-go${GOLANG_VERSION}
+
+# Prove the image is what the Makefile and CI assume, or fail the build:
+# GOLANG_VERSION is the Go that runs, GOCACHE is keyed by it, the module cache
+# is where ci-toolchain-run reads it from, and gosec was built by this Go
+# against XTOOLS_VERSION, so it reads the export data this Go writes.
+RUN --mount=type=bind,source=build/docker/devcontainer/tool-pins.env,target=/tmp/tool-pins.env \
+    set -eu; \
+    . /tmp/tool-pins.env; \
+    gover="$(go env GOVERSION)"; \
+    test "$gover" = "go${GOLANG_VERSION}" || { echo "go reports $gover, the image names go${GOLANG_VERSION}" >&2; exit 1; }; \
+    test "$(go env GOCACHE)" = "/tmp/.cache/go-build-$gover" || { echo "GOCACHE $(go env GOCACHE) is not keyed by $gover" >&2; exit 1; }; \
+    test "$(go env GOMODCACHE)" = /go/pkg/mod || { echo "GOMODCACHE $(go env GOMODCACHE) is not /go/pkg/mod" >&2; exit 1; }; \
+    built="$(go version -m "$(command -v gosec)")"; \
+    printf '%s\n' "$built" | head -n 1 | grep -qx ".*: $gover" || { echo "gosec was not built by $gover" >&2; exit 1; }; \
+    printf '%s\n' "$built" | grep -Eq "^[[:space:]]+dep[[:space:]]+golang\.org/x/tools[[:space:]]+${XTOOLS_VERSION}[[:space:]]" || { echo "gosec is not built against golang.org/x/tools ${XTOOLS_VERSION}" >&2; exit 1; }; \
+    echo "gosec: built by $gover against golang.org/x/tools ${XTOOLS_VERSION}"
 USER $USERNAME
 
 # ---- integration ----
@@ -219,9 +282,26 @@ FROM base AS integration
 # strace is a test instrument, not a dependency of the library: it delays one
 # of cryptsetup's own syscalls so a test can make real cryptsetup hold its
 # metadata lock on cue (pkg/luks2/unlockreadlock_integration_test.go).
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    strace \
-    && rm -rf /var/lib/apt/lists/*
+#
+# curl, libcurl and git come with the Go base image, which ships them to fetch
+# modules, and nothing in this image uses them: the modules are baked into the
+# cache, GOPROXY is off and -buildvcs=false, so the go command never calls git
+# and the suite never fetches. They are purged in this layer, so the image that
+# runs with device access carries no HTTP client and none of its advisories.
+# Purging libcurl3t64-gnutls takes git with it, which depends on it. The build
+# fails if any of them is still installed, or if the purge took a tool the
+# suite drives.
+RUN set -eu; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends strace; \
+    apt-get purge -y --auto-remove curl libcurl4t64 libcurl3t64-gnutls; \
+    rm -rf /var/lib/apt/lists/*; \
+    if dpkg-query -W -f '${db:Status-Abbrev} ${Package}\n' curl 'libcurl*' git 2>/dev/null | grep -q '^ii'; then \
+      echo "curl, libcurl or git is still installed" >&2; exit 1; \
+    fi; \
+    for c in go cryptsetup dmsetup losetup mkfs.ext4 mkfs.xfs udevadm modprobe strace; do \
+      command -v "$c" >/dev/null || { echo "purging curl removed $c" >&2; exit 1; }; \
+    done
 
 # Where the run ledgers live.
 #

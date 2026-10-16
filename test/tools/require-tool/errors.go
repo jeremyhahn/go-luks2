@@ -51,6 +51,23 @@ func (e *InstallError) Error() string {
 
 func (e *InstallError) Unwrap() error { return e.Err }
 
+// PinError reports a pin the pin file does not carry, or a pin file that could
+// not be read.
+type PinError struct {
+	Path string
+	Key  string
+	Err  error
+}
+
+func (e *PinError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("cannot read %s for %s: %v", e.Path, e.Key, e.Err)
+	}
+	return fmt.Sprintf("%s does not pin %s", e.Path, e.Key)
+}
+
+func (e *PinError) Unwrap() error { return e.Err }
+
 // NotOnPathError reports an install that succeeded but left the binary
 // unreachable. It is caught HERE because an exported PATH does not survive this
 // process: if the binary is not reachable now it will not be reachable in the

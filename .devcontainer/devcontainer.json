@@ -1,10 +1,7 @@
 {
   "name": "go-luks2 Development Container",
-  "build": {
-    "dockerfile": "../build/docker/devcontainer/Dockerfile",
-    "context": "..",
-    "target": "toolchain"
-  },
+  "initializeCommand": "make --no-print-directory devcontainer",
+  "image": "go-luks2-devcontainer",
   "runArgs": [
     "--privileged",
     "--cap-add=SYS_ADMIN",

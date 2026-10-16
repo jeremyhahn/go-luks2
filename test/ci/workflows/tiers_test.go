@@ -15,7 +15,7 @@ import (
 // edited on one job and not its siblings, changes what gates a merge without
 // failing anything else; these tests are what fails.
 var (
-	prTier   = []string{"lint", "security", "build", "test-unit", "merge-check"}
+	prTier   = []string{"lint", "security", "image", "build", "test-unit", "merge-check"}
 	fullTier = []string{"fips", "test-integration", "test-race"}
 )
 

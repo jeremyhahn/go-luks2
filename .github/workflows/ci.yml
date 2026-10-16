@@ -24,8 +24,11 @@ name: CI
 # TWO TIERS, ONE GATE (#341, #343, sdlc §5a). DEVIATION from the template,
 # which has one tier.
 #
-#   PR tier    every event: Lint, Security Scan, Build, Merged Tree and Unit
-#              Tests (no -race).
+#   PR tier    every event: Lint, Security Scan, Devcontainer image, Build,
+#              Merged Tree and Unit Tests (no -race). The image job runs
+#              make build, test, security (gosec, govulncheck, go mod verify,
+#              trivy's filesystem scan) and deps-check in the toolchain image,
+#              and trivy image on the integration image.
 #   Full tier  push to main, workflow_dispatch, and a pull_request labelled
 #              `ci:full`: FIPS, Integration Tests and Race (the -race unit run
 #              with its pkg/luks2 budget).
@@ -37,7 +40,10 @@ name: CI
 # No CI workflow is scheduled: the nightly full run is a workflow_dispatch from
 # the coordinator's loop, which this file treats exactly like a push to main.
 # FIPS moved back here from nightly.yml, so it now runs on every push to main
-# rather than once a night; trivy stays in nightly.yml, dispatch-only.
+# rather than once a night. trivy's filesystem scan (through make security)
+# and trivy image gate here, in the image job, on every event; nightly.yml,
+# dispatch-only, still runs the filesystem scan, uploads its SARIF to code
+# scanning on github.com, and runs the advisory misconfiguration scan.
 #
 # Every full-tier job, and CI Gate's FULL_TIER, carries the SAME condition,
 # written out on each, and test/ci/workflows asserts they stay identical:
@@ -255,6 +261,81 @@ jobs:
       - name: Verify module integrity
         run: make verify
 
+  # CUSTOMIZE (ci-template v1.18, image job): builds the devcontainer images
+  # from build/docker/devcontainer/Dockerfile at this commit, runs the
+  # toolchain stages in the toolchain image (handbook ci-standard.md §1-§2),
+  # and gates the integration image with trivy image. The checkout is copied
+  # into each toolchain container (`make ci-toolchain-run`; the public release
+  # ships no shell scripts, so the canonical scripts are Makefile recipes
+  # here): the daemon is reached through a socket, so a bind mount would
+  # resolve on its host. make security and make deps-check get a network, for
+  # the vulnerability databases and the module proxy; build and test run
+  # without one. The scan is a gate only: nothing is uploaded to code scanning.
+  image:
+    name: Devcontainer image [build, test, security, deps-check, trivy image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      # ITEST_IMAGE is the Makefile's name for the integration image; set from
+      # the job, the image is kept for the scan below and removed at teardown.
+      ITEST_IMAGE: go-luks2-ci-it:${{ github.run_id }}-${{ github.run_attempt }}-image
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Reap stale CI stacks
+        run: make ci-reap-stacks
+
+      # As in the integration job: the forge credentials reach the build only
+      # as the gomodauth BuildKit secret, from a file outside the context.
+      - name: Write the module credential file
+        run: |
+          umask 077
+          : > "$RUNNER_TEMP/gomodauth.env"
+          for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+            if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
+          done
+
+      - name: Build the toolchain and integration images
+        run: |
+          make docker-build-toolchain docker-build-integration MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env"
+          echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
+
+      - name: make build (toolchain image)
+        run: make ci-toolchain-run CMD="make build"
+
+      - name: make test (toolchain image)
+        run: make ci-toolchain-run CMD="make test"
+
+      - name: make security (toolchain image)
+        env:
+          IN_IMAGE_NETWORK: bridge
+        run: make ci-toolchain-run CMD="make security"
+
+      - name: make deps-check (toolchain image)
+        env:
+          IN_IMAGE_NETWORK: bridge
+        run: make ci-toolchain-run CMD="make deps-check"
+
+      # The image gate fails on CRITICAL and HIGH findings that have a fix
+      # (devops.md §8, the trivy image row): the base image's
+      # OS layer carries hundreds of advisories its distribution has not fixed,
+      # which no change here can clear, so --ignore-unfixed drops those and
+      # nothing else. A fixable finding still fails the job. The filesystem scan in
+      # make security never takes --ignore-unfixed.
+      - name: trivy image (integration image)
+        env:
+          IN_IMAGE_NETWORK: bridge
+        run: |
+          docker save -o it-image.tar "$ITEST_IMAGE"
+          make ci-toolchain-run \
+            CMD="trivy image --input it-image.tar --ignore-unfixed --severity CRITICAL,HIGH --exit-code 1"
+
+      - name: Tear down
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/gomodauth.env" it-image.tar
+          docker image rm "$ITEST_IMAGE" || true
+
   test-unit:
     name: Unit Tests
     runs-on: ubuntu-latest
@@ -370,291 +451,64 @@ jobs:
     name: Integration Tests
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:full')
-    # EVERY DOCKER NAME THIS JOB CREATES IS UNIQUE TO THIS JOB ATTEMPT (#105).
-    #
-    # Docker names and image tags are unique PER HOST, not per job. Six open
-    # pull requests share four runners, so two integration jobs routinely land
-    # on one machine — and both used to use the constant name
-    # `go-luks2-test-runner` and the constant tag `go-luks2-integration-test`.
-    # Two separate defects followed, and both were measured rather than
-    # theorised:
-    #
-    #   THE KILL. `docker rm -f` sends SIGKILL. Job B's pre-run cleanup killed
-    #   job A's RUNNING container mid-suite, and A's step exited 137.
-    #   Reproduced deterministically by running the old four-line sequence
-    #   twice on one host: job A exit=137, job B exit=0. It looked like an OOM
-    #   and was not one — Infrastructure found no OOM kill in eighteen hours —
-    #   and SIGKILL cannot be caught, which is why no `defer` or `t.Cleanup` in
-    #   the suite ever ran and why the container leaked every loop device and
-    #   device-mapper mapping it held.
-    #
-    #   THE WRONG RESULT, quieter and worse. A shared image TAG is resolved at
-    #   `docker run` time. Job B's build moved the tag between job A's build
-    #   and A's run, so A tested B's tree and reported the result against A's
-    #   commit. Measured: two images built from different sources under one
-    #   tag, and the first job's run printed the SECOND job's content. That
-    #   failure is GREEN, so nothing would ever have reported it.
-    #
-    # run_attempt is part of the name because a re-run of this job must not
-    # collide with its own previous attempt.
-    #
-    # WHAT THIS FIX UNCOVERS, stated rather than left to be discovered (#104)
-    #
-    # The collision was, accidentally, the only thing SERIALISING integration
-    # jobs on a runner: two landed, the second force-removed the first, and the
-    # survivor had the host to itself. Unique names remove the kill, so two
-    # suites now genuinely run at once — privileged, on one kernel, against one
-    # loop-device pool. That can convert #104 from intermittent to routine, and
-    # it is not hypothetical arithmetic:
-    #
-    #   /sys/module/loop/parameters/max_loop = 8, so nodes loop0..loop7 exist
-    #   and nothing creates loop8. TestLoopDeviceMultiple alone holds 5 at its
-    #   peak, and no integration test calls t.Parallel(), so one suite peaks at
-    #   5 of 8. TWO CONCURRENT SUITES NEED 10 AND THE HOST HAS 8. The CI
-    #   failure log confirms the same ceiling on the runner: loop0..loop7 all
-    #   allocated, and then
-    #   `failed to open /dev/loop8: no such file or directory`.
-    #
-    # It does not follow that this change makes things worse on net. The
-    # SIGKILL it removes was ITSELF a leak source — a killed container runs no
-    # cleanup and abandons every loop device it held, which is what consumed
-    # the low minors in the first place. Fewer kills means fewer orphans means
-    # a deeper pool. Which effect dominates is not something this comment can
-    # claim, so it does not.
-    #
-    # A `concurrency:` group was considered as a companion and REJECTED, for
-    # two reasons:
-    #
-    #   It cannot be scoped to a runner. Concurrency keys are evaluated when
-    #   the job is created, before it is assigned, so `runner.*` is not in
-    #   scope for one. The only key available is a constant, which serialises
-    #   integration across ALL FOUR runners — trading a random kill for a
-    #   queue one job deep across the whole pool, on the slowest leg there is.
-    #
-    #   And it would not close the hole. The loop pool is host-global and
-    #   shared with everything else on the box; serialising this repository's
-    #   own jobs narrows the window and leaves the failure reachable.
-    #
-    # The companion is #104 itself — already filed, task:ready, effort:low —
-    # because its fix removes the ceiling rather than rationing it: create the
-    # node for the minor LOOP_CTL_GET_FREE returned (major 7) instead of
-    # assuming udev already did. Measured while answering this: in a
-    # `--privileged` container /dev is a FRESH TMPFS, not the host's — docker
-    # populates it once at creation and there is no udev inside — so a device
-    # the kernel adds later gets no node in the container, ever. The "wait
-    # briefly for udev" alternative in #104 cannot work here; mknod is the only
-    # option that does. That measurement is posted on #104.
-    env:
-      # The job term is the literal job id, NOT ${{ github.job }}. Uniqueness
-      # already comes from run_id + run_attempt; the job term only has to be a
-      # legal token, and github.job is not reliably one. This forge resolves it
-      # to the job KEY -- measured: container go-luks2-test-runner-17144-test-
-      # integration-1 on run 17144 -- but GitHub Actions documents it as unset
-      # outside step execution, and act-derived runners have resolved it to the
-      # display NAME, which here is "Integration Tests". A space makes both a
-      # container name and an image tag invalid ([a-zA-Z0-9][a-zA-Z0-9_.-]*),
-      # so the merge-gating job would die on a malformed name rather than on
-      # anything it tests. A literal cannot diverge between hosts.
-      ITEST_IMAGE: go-luks2-integration-test:${{ github.run_id }}-test-integration-${{ github.run_attempt }}
-      ITEST_CONTAINER: go-luks2-test-runner-${{ github.run_id }}-test-integration-${{ github.run_attempt }}
     # No `needs` (ci-template v1.14): starts at once; CI Gate fails closed on
-    # it whenever the full tier is selected. The suite races on host-global loop devices — /dev/loop* is NOT
-    # namespaced, so two concurrent runs on one machine share one pool — which
-    # is why it runs inside the container and never bare on a shared runner.
+    # it whenever the full tier is selected.
+    #
+    # CUSTOMIZE (ci-template v1.18, integration job that starts containers):
+    # the suite runs in the devcontainer `integration` image built at this
+    # commit, as the compose service in build/docker/devcontainer/compose.yaml
+    # (handbook ci-standard.md §2). That service carries test/tools/docker-run's
+    # privilege set and no more -- a test pins the two equal -- because the
+    # suite drives host device-mapper and loop devices; it is not the
+    # canonical hardened posture, which the suite cannot run under. The
+    # compose project is go-luks2-ci-<run>-<attempt>, the reaper runs first,
+    # and the teardown runs last under if: always().
+    #
+    # Every name here is unique to the job attempt (#105): Docker names are per
+    # HOST, and two jobs on one runner sharing one used to kill each other's
+    # container or test each other's tree. The ledger directory
+    # (TEST_STATE_DIR, /var/tmp/go-luks2-test-state) is bind-mounted from the
+    # runner host and deliberately persists between jobs (#96); the Makefile
+    # neither creates nor cleans it.
+    env:
+      IT_PROJECT: go-luks2-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      ITEST_IMAGE: go-luks2-ci-it:${{ github.run_id }}-${{ github.run_attempt }}
+      ITEST_CONTAINER: go-luks2-ci-${{ github.run_id }}-${{ github.run_attempt }}-itest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
+      - name: Reap stale CI stacks
+        run: make ci-reap-stacks
 
-      # go.mod pins github.com/jeremyhahn/go-enclave, whose module PATH says
-      # github.com while it is served from a private module host. The runner
-      # injects GOPRIVATE and the tokenised insteadOf rewrite into this job's
-      # environment, but a job environment does NOT cross into a docker build --
-      # hence handing it over explicitly.
-      #
-      # Written under RUNNER_TEMP, deliberately OUTSIDE the build context: the
-      # Dockerfile ends with `COPY . .`, so a credentials file inside the
-      # workspace would be baked into a layer. .dockerignore lists gomodauth* as
-      # a second line of defence. It is a BuildKit secret, never a build arg --
-      # an arg is recoverable with `docker history`.
-      #
-      # On GitHub none of these variables exist, the file is written empty, and
-      # the Dockerfile's mount is optional, so the same build works there
-      # against the public proxy.
-      #
-      # The variables are read straight from the shell environment, NOT through
-      # ${{ env.X }} -- that expression reads this workflow's own `env:` block,
-      # which does not define them, and would quietly write blanks. The failure
-      # then looks like an unrelated "unknown revision".
-      - name: Stage module-fetch credentials
+      # The forge credentials the runner injects (dependency-resolution.md §6)
+      # reach the image build only as the gomodauth BuildKit secret, from a
+      # file outside the build context: the Dockerfile ends with `COPY . .`.
+      # `docker build` does not inherit the job's environment.
+      - name: Write the module credential file
         run: |
-          set -eu
           umask 077
-          : > "${RUNNER_TEMP}/gomodauth.env"
-          if [ -n "${GIT_CONFIG_KEY_0:-}" ]; then
-            {
-              printf 'export GOPRIVATE=%s\n' "${GOPRIVATE:-}"
-              printf 'export GIT_CONFIG_COUNT=%s\n' "${GIT_CONFIG_COUNT:-}"
-              printf 'export GIT_CONFIG_KEY_0=%s\n' "${GIT_CONFIG_KEY_0}"
-              printf 'export GIT_CONFIG_VALUE_0=%s\n' "${GIT_CONFIG_VALUE_0:-}"
-            } > "${RUNNER_TEMP}/gomodauth.env"
-            echo "staged private-module credentials"
-          else
-            echo "no private-module credentials here; resolving from the public proxy"
-          fi
+          : > "$RUNNER_TEMP/gomodauth.env"
+          for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+            if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
+          done
 
-      # Reaps integration images this runner was left holding by EARLIER jobs
-      # (#146). Every tag here is unique to a job attempt, so a build never
-      # replaces its predecessor the way the old constant tag did, and only a
-      # delete bounds the disk. The cleanup step below covers this attempt;
-      # nothing covers an attempt whose runner died with it, and on a shared
-      # self-hosted runner the result presents as unrelated jobs failing to
-      # pull, which is a long way from this cause.
-      #
-      # The scoping -- label, unused-by-any-container, and an age floor no live
-      # run can be under -- lives in the Makefile's ITEST_PRUNE, so this
-      # workflow and a developer's `make integration-test` cannot drift into
-      # reaping by different rules. Same reason the privilege flags live in
-      # test/tools/docker-run (#80).
-      #
-      # Never fails the job: an unreapable image is a disk problem, not a test
-      # result, and this job's own names are removed by name regardless.
-      - name: Reap orphaned integration images
-        run: make docker-prune-itest || true
+      # The container's default command is `make coverage-combined`, so its
+      # exit status carries the combined coverage gate; the target copies the
+      # profile out and fails a container that passed without leaving one.
+      - name: Run integration suite in the integration image
+        run: make integration-test MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_PROJECT="$IT_PROJECT"
 
-      # --label is what makes the reap above possible AT ALL for an image built
-      # here: a trap cannot survive the SIGKILL that cancelling a job sends, and
-      # an unlabelled orphan is indistinguishable from any other image on the
-      # host. The value is read from the Makefile rather than repeated, because
-      # a label that disagrees with the prune filter reaps nothing and says so
-      # nowhere.
-      - name: Build Docker image
-        env:
-          DOCKER_BUILDKIT: "1"
-        run: |
-          set -eu
-          label="$(make -s print-itest-label)"
-          docker build \
-            --secret id=gomodauth,src="${RUNNER_TEMP}/gomodauth.env" \
-            --label "$label" \
-            -f build/docker/devcontainer/Dockerfile --target integration \
-            -t "$ITEST_IMAGE" .
-
-      - name: Remove staged credentials
-        if: always()
-        run: rm -f "${RUNNER_TEMP}/gomodauth.env"
-
-      # NO PRE-RUN `docker rm -f`. The deleted line existed to clear a leftover
-      # from this job's previous attempt; with a name unique to the attempt
-      # there is nothing of ours to clear, and a delete by any broader name is
-      # the race itself. Cleanup of THIS job's container moved to the always()
-      # step below, which is where it belongs: the old trailing `rm -f` never
-      # ran when the suite failed, because the step aborts on the failing
-      # command, so a red run left its container behind for the next job's
-      # pre-run delete to collect — the very line that did the killing.
-      - name: Run integration tests
-        id: itest
-        # LUKS2_TEST_STATE_DIR is bind-mounted from the RUNNER, not left inside
-        # the container, and that is the whole mechanism (#96).
-        #
-        # The suite creates host dm mappings and loop devices -- neither is
-        # namespaced, so they land on the machine however the container is
-        # confined. Dropping --privileged (#80) did not change that and was
-        # never going to: scoping device access decides which nodes are
-        # reachable, not which kernel dm and loop belong to. The suite records
-        # each one before creating it, and the next run removes exactly what
-        # was recorded. A record kept inside the container dies with the run it
-        # describes, which is precisely the run whose state needs removing, so
-        # the ledger has to live on the host to be worth anything.
-        #
-        # The directory deliberately persists between jobs. It is NOT cleaned
-        # here: a ledger left behind is a run that died, and erasing it would
-        # discard the only record of what that run put on this machine.
-        run: |
-          set -eu
-          STATE_DIR=/var/tmp/go-luks2-test-state
-
-          # NOT created here, deliberately. The reaper inside the container runs
-          # as root, before the #85 guard, and removes whatever the ledgers in
-          # this directory name -- so the directory is part of the trust
-          # boundary. Created by the RUNNER user it would be owned by a
-          # non-root uid, and the harness refuses that: a root process must not
-          # act on control files another user maintains.
-          #
-          # Docker creates a missing bind-mount source itself, as root:root
-          # 0755, which is what the harness accepts. If the path already exists
-          # and is not trustworthy -- someone else's, or group/other-writable,
-          # /var/tmp being world-writable and sticky -- the run FAILS with a
-          # diagnosis instead of proceeding, which is the intended outcome.
-          if [ -e "${STATE_DIR}" ]; then
-            echo "state dir already present:"
-            ls -ldn "${STATE_DIR}"
-          fi
-
-          # No pre-run remove. With a name no other job attempt can hold there
-          # is nothing of ours to clear, and a remove by any broader name is
-          # the race itself (#105).
-          # No serialization here, and none needed. Every device-mapper name the
-          # suite creates carries this container's scope, so two runs cannot
-          # collide and the entrypoint guard refuses only on a mapping already
-          # carrying this container's own scope (#178).
-          #
-          # A lock here was worse than unnecessary: the runner executes job
-          # steps INSIDE a container, so a flock on a job-local path is private
-          # per job and serializes nothing, while the loop pool and the
-          # device-mapper namespace it meant to protect are host-global.
-          #
-          # No privilege flags here, on purpose. They all live in
-          # test/tools/docker-run, which the Makefile targets call
-          # too, so this workflow and a developer's `make integration-test`
-          # cannot drift into running under different privilege (#80).
-          #
-          # The BUILT binary, not `go run`: the launcher execs docker in place,
-          # but under `go run` the go tool stays the parent and reports any
-          # nonzero status as 1, so docker's 125/126/127 would be lost.
-          make docker-run-bin
-          env IMAGE="${ITEST_IMAGE}" TEST_STATE_DIR="${STATE_DIR}" \
-            build/docker-run --name "${ITEST_CONTAINER}" --
-
-      # Separate and always(): coverage is worth extracting from a suite that
-      # failed, and this must not be skipped by the run step aborting.
-      - name: Extract integration coverage
-        if: always()
-        env:
-          ITEST_OUTCOME: ${{ steps.itest.outcome }}
-        run: |
-          set -eu
-          # The container's default command is `make coverage-combined`, so
-          # the combined coverage GATE has already run inside it and its result
-          # is the run step's outcome. When that step SUCCEEDED the container
-          # exists and holds the profile its gate read, so failing to copy it --
-          # an unreachable daemon, a container removed early -- fails this step:
-          # it used to warn and pass (#141), and a docker inspect that could
-          # not answer was read as "no container, nothing to extract".
-          #
-          # Only a run step that did NOT succeed and left no container skips
-          # the copy; the job is already red from that step.
-          if [ "${ITEST_OUTCOME}" != success ] && ! docker container inspect "${ITEST_CONTAINER}" >/dev/null 2>&1; then
-            echo "the run step ended ${ITEST_OUTCOME} without creating ${ITEST_CONTAINER}; nothing to extract"
-            exit 0
-          fi
-          docker cp "${ITEST_CONTAINER}:/app/coverage-integration.out" coverage-integration.out
-          test -s coverage-integration.out
-
-      # Removes ONLY what this job attempt created, by its unique names, so it
-      # cannot reach another job's container or image. Without this the unique
-      # names would accumulate on the runner forever, since nothing else ever
-      # deletes them now that the broad pre-run delete is gone.
-      - name: Remove this job's container and image
+      # compose interpolates the whole file even to take it down, and its
+      # required values are set only inside the make recipe; placeholders
+      # satisfy them here. `down` removes by project name.
+      - name: Tear down
         if: always()
         run: |
-          set -u
+          rm -f "$RUNNER_TEMP/gomodauth.env"
           docker rm -f "$ITEST_CONTAINER" >/dev/null 2>&1 || true
-          docker image rm -f "$ITEST_IMAGE" >/dev/null 2>&1 || true
+          GO_LUKS2_IT_IMAGE="$ITEST_IMAGE" GO_LUKS2_SECCOMP_PROFILE=unused GO_LUKS2_DM_MAJOR=0 GO_LUKS2_TEST_STATE_DIR=/unused \
+            docker compose -f build/docker/devcontainer/compose.yaml -p "$IT_PROJECT" down --volumes || true
+          docker image rm "$ITEST_IMAGE" || true
 
       - name: Upload integration coverage
         if: always() && github.server_url == 'https://github.com'
@@ -979,7 +833,7 @@ jobs:
     name: CI Gate
     runs-on: ubuntu-latest
     if: always()
-    needs: [lint, security, test-unit, test-integration, test-race, fips, build, merge-check]
+    needs: [lint, security, image, test-unit, test-integration, test-race, fips, build, merge-check]
     steps:
       # join(needs.*.result) is a GitHub extension that evaluates to an empty
       # string on the self-hosted host, so a gate built on it reports success
@@ -1009,6 +863,7 @@ jobs:
           }
           check lint             "${{ needs.lint.result }}" pr
           check security         "${{ needs.security.result }}" pr
+          check image            "${{ needs.image.result }}" pr
           check test-unit        "${{ needs.test-unit.result }}" pr
           check build            "${{ needs.build.result }}" pr
           check merge-check      "${{ needs.merge-check.result }}" pr

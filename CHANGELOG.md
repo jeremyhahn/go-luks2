@@ -84,6 +84,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.github/actionlint.yaml` names roles instead of lab hosts and addresses
   (#336).
 
+### Security
+
+- **golang.org/x/crypto is v0.58.0, golang.org/x/sys v0.49.0 and golang.org/x/term v0.47.0, so every direct dependency is at its latest release again.** Nothing this module uses changes behaviour: argon2 and blake2b gain only a loong64 vector implementation, and xts, x/term and the x/sys/unix calls used here are unchanged.
+
 ## [1.0.0-rc.4] - 2026-10-09
 
 ### Changed — BREAKING: `make release` cuts only final releases

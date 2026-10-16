@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -123,11 +124,18 @@ type fakeHost struct {
 	failures map[string]bool   // "bin arg" -> exits non-zero
 	env      map[string]string
 	manifest string
+	pins     string // the pin file's content; "" is a pin file that cannot be read
 	ran      []string
+	removed  []string
 	// installs puts the binary on PATH, the way actions/setup-go's
 	// GOPATH/bin does, unless it is false.
 	installPutsOnPath bool
 }
+
+// fakeModuleDir is the throwaway module directory fakeHost hands out.
+const fakeModuleDir = "/tmp/gosec-build-x"
+
+const pinsWithXTools = "# x/tools for gosec\nGOSEC_VERSION=v2.29.0\nXTOOLS_VERSION=v0.52.0\n"
 
 func (h *fakeHost) host() host {
 	return host{
@@ -140,7 +148,7 @@ func (h *fakeHost) host() host {
 		run: func(name string, args ...string) (string, error) {
 			key := strings.Join(append([]string{name}, args...), " ")
 			h.ran = append(h.ran, key)
-			if name == "go" && len(args) > 0 && args[0] == "install" && h.installPutsOnPath {
+			if name == "go" && slices.Contains(args, "install") && h.installPutsOnPath {
 				h.onPath[strings.Split(args[len(args)-1][strings.LastIndex(args[len(args)-1], "/")+1:], "@")[0]] = true
 			}
 			if h.failures[key] {
@@ -149,11 +157,20 @@ func (h *fakeHost) host() host {
 			return h.outputs[key], nil
 		},
 		getenv: func(k string) string { return h.env[k] },
-		readFile: func(string) ([]byte, error) {
-			if h.manifest == "" {
+		readFile: func(path string) ([]byte, error) {
+			content := h.manifest
+			if path == pinFile {
+				content = h.pins
+			}
+			if content == "" {
 				return nil, os.ErrNotExist
 			}
-			return []byte(h.manifest), nil
+			return []byte(content), nil
+		},
+		mkdirTemp: func() (string, error) { return fakeModuleDir, nil },
+		removeAll: func(path string) error {
+			h.removed = append(h.removed, path)
+			return nil
 		},
 	}
 }
@@ -252,6 +269,7 @@ func TestRequire_OnGitHubAMissingToolIsInstalledThenVerified(t *testing.T) {
 			"gosec --version": gosecReport,
 		},
 		installPutsOnPath: true,
+		pins:              pinsWithXTools,
 	}
 	var out bytes.Buffer
 	err := require(&out, h.host(), request{
@@ -263,9 +281,84 @@ func TestRequire_OnGitHubAMissingToolIsInstalledThenVerified(t *testing.T) {
 	if err != nil {
 		t.Fatalf("require: %v", err)
 	}
-	want := "go install -ldflags -X main.Version=v2.29.0 github.com/securego/gosec/v2/cmd/gosec@v2.29.0"
-	if len(h.ran) == 0 || h.ran[0] != want {
-		t.Fatalf("ran %v, want first %q", h.ran, want)
+	// The devcontainer image's recipe: a throwaway module with x/tools at the
+	// pin file's XTOOLS_VERSION, never a bare `go install gosec@pin`.
+	want := []string{
+		"go -C " + fakeModuleDir + " mod init gosec-build",
+		"go -C " + fakeModuleDir + " get github.com/securego/gosec/v2/cmd/gosec@v2.29.0 golang.org/x/tools@v0.52.0",
+		"go -C " + fakeModuleDir + " install -ldflags -X main.Version=v2.29.0 github.com/securego/gosec/v2/cmd/gosec",
+	}
+	if len(h.ran) < len(want) || !slices.Equal(h.ran[:len(want)], want) {
+		t.Fatalf("ran %q, want first %q", h.ran, want)
+	}
+	if !slices.Equal(h.removed, []string{fakeModuleDir}) {
+		t.Errorf("removed %q, want the throwaway module %q", h.removed, fakeModuleDir)
+	}
+}
+
+// Every tool but gosec builds with the x/tools its own go.mod names.
+func TestRequire_OnGitHubOtherToolsInstallAtThePin(t *testing.T) {
+	h := &fakeHost{
+		onPath:            map[string]bool{},
+		env:               map[string]string{"GITHUB_SERVER_URL": "https://github.com"},
+		outputs:           map[string]string{"govulncheck --version": govulncheckReport},
+		installPutsOnPath: true,
+	}
+	err := require(&bytes.Buffer{}, h.host(), request{bin: "govulncheck", pin: "v1.8.0", module: "golang.org/x/vuln/cmd/govulncheck"})
+	if err != nil {
+		t.Fatalf("require: %v", err)
+	}
+	if want := "go install golang.org/x/vuln/cmd/govulncheck@v1.8.0"; len(h.ran) == 0 || h.ran[0] != want {
+		t.Fatalf("ran %q, want first %q", h.ran, want)
+	}
+}
+
+// gosec without its x/tools pin is not installed at all.
+func TestRequire_OnGitHubGosecWithoutTheXToolsPinFails(t *testing.T) {
+	for name, pins := range map[string]string{
+		"unreadable pin file":  "",
+		"no XTOOLS_VERSION":    "GOSEC_VERSION=v2.29.0\n",
+		"empty XTOOLS_VERSION": "XTOOLS_VERSION=\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := &fakeHost{
+				onPath: map[string]bool{},
+				env:    map[string]string{"GITHUB_SERVER_URL": "https://github.com"},
+				pins:   pins,
+			}
+			err := require(&bytes.Buffer{}, h.host(), request{bin: "gosec", pin: "v2.29.0", module: "github.com/securego/gosec/v2/cmd/gosec"})
+			var pin *PinError
+			if !errors.As(err, &pin) || pin.Key != "XTOOLS_VERSION" {
+				t.Fatalf("err = %v, want *PinError for XTOOLS_VERSION", err)
+			}
+			if len(h.ran) != 0 {
+				t.Errorf("ran %q before the pin was known", h.ran)
+			}
+		})
+	}
+}
+
+// A failing step of the gosec build stops it, says what go said, and still
+// removes the throwaway module.
+func TestRequire_OnGitHubAFailedGosecBuildIsReported(t *testing.T) {
+	get := "go -C " + fakeModuleDir + " get github.com/securego/gosec/v2/cmd/gosec@v2.29.0 golang.org/x/tools@v0.52.0"
+	h := &fakeHost{
+		onPath:   map[string]bool{},
+		env:      map[string]string{"GITHUB_SERVER_URL": "https://github.com"},
+		pins:     pinsWithXTools,
+		failures: map[string]bool{get: true},
+		outputs:  map[string]string{get: "no route to host"},
+	}
+	err := require(&bytes.Buffer{}, h.host(), request{bin: "gosec", pin: "v2.29.0", module: "github.com/securego/gosec/v2/cmd/gosec"})
+	var install *InstallError
+	if !errors.As(err, &install) || !strings.Contains(err.Error(), "no route to host") {
+		t.Fatalf("err = %v, want *InstallError carrying go's output", err)
+	}
+	if h.ran[len(h.ran)-1] != get {
+		t.Errorf("ran %q after the failed step", h.ran)
+	}
+	if !slices.Equal(h.removed, []string{fakeModuleDir}) {
+		t.Errorf("removed %q, want the throwaway module %q", h.removed, fakeModuleDir)
 	}
 }
 
@@ -273,6 +366,7 @@ func TestRequire_OnGitHubAnInstallThatIsNotOnPathFails(t *testing.T) {
 	h := &fakeHost{
 		onPath: map[string]bool{},
 		env:    map[string]string{"GITHUB_SERVER_URL": "https://github.com"},
+		pins:   pinsWithXTools,
 	}
 	err := require(&bytes.Buffer{}, h.host(), request{bin: "gosec", pin: "v2.29.0", module: "github.com/securego/gosec/v2/cmd/gosec"})
 	var notOnPath *NotOnPathError
@@ -288,7 +382,7 @@ func TestRequire_OnGitHubAFailedInstallIsReported(t *testing.T) {
 		failures: map[string]bool{"go install m@v1": true},
 		outputs:  map[string]string{"go install m@v1": "no route to host"},
 	}
-	err := require(&bytes.Buffer{}, h.host(), request{bin: "gosec", pin: "v1", module: "m"})
+	err := require(&bytes.Buffer{}, h.host(), request{bin: "govulncheck", pin: "v1", module: "m"})
 	var install *InstallError
 	if !errors.As(err, &install) {
 		t.Fatalf("err = %v, want *InstallError", err)
@@ -341,6 +435,8 @@ func TestErrors_NameTheirSubject(t *testing.T) {
 		{&UsageError{Problem: "missing pin"}, []string{"usage", "missing pin"}, nil},
 		{&MissingToolError{Bin: "gosec", Pin: "v2.29.0"}, []string{"gosec", "v2.29.0", "#44"}, nil},
 		{&InstallError{Module: "m", Pin: "v1", Output: "out", Err: cause}, []string{"m@v1", "out"}, cause},
+		{&PinError{Path: "pins.env", Key: "XTOOLS_VERSION"}, []string{"pins.env", "XTOOLS_VERSION"}, nil},
+		{&PinError{Path: "pins.env", Key: "XTOOLS_VERSION", Err: cause}, []string{"pins.env", "XTOOLS_VERSION", "cause"}, cause},
 		{&NotOnPathError{Bin: "gosec", Module: "m", Pin: "v1"}, []string{"gosec", "PATH"}, nil},
 		{&VersionUnreadableError{Bin: "gosec"}, []string{"gosec", "not a matching version"}, nil},
 		{&UnknownToolError{Bin: "x"}, []string{"'x'", "knownTools"}, nil},
@@ -424,5 +520,35 @@ func TestSystemHost_TouchesTheRealSystem(t *testing.T) {
 	}
 	if b, err := h.readFile(path); err != nil || string(b) != "gosec v2\n" {
 		t.Fatalf("readFile = %q, %v", b, err)
+	}
+
+	dir, err := h.mkdirTemp()
+	if err != nil {
+		t.Fatalf("mkdirTemp: %v", err)
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		t.Fatalf("mkdirTemp made no directory: %v", err)
+	}
+	if err := h.removeAll(dir); err != nil {
+		t.Fatalf("removeAll: %v", err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("removeAll left %s: %v", dir, err)
+	}
+}
+
+// The pin the gosec build reads is the one the devcontainer image builds with.
+func TestPinned_ReadsTheRepositoryPinFile(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", pinFile))
+	if err != nil {
+		t.Fatalf("reading the pin file: %v", err)
+	}
+	h := (&fakeHost{pins: string(data)}).host()
+	got, err := pinned(h, "XTOOLS_VERSION")
+	if err != nil {
+		t.Fatalf("pinned: %v", err)
+	}
+	if !strings.HasPrefix(got, "v0.") {
+		t.Errorf("XTOOLS_VERSION = %q, want a v0.x x/tools version", got)
 	}
 }

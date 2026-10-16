@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build install test test-verbose test-coverage test-integration coverage coverage-report clean fmt vet lint gosec govulncheck vuln trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration test-unit-norace seccomp-diff proto test-pkg docker-build docker-run deps-check toolchain-image docker-build-toolchain toolchain-run
+.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build install test test-verbose test-coverage test-integration coverage coverage-report clean fmt vet lint gosec govulncheck vuln trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration test-unit-norace seccomp-diff proto test-pkg docker-build docker-run deps-check toolchain-image docker-build-toolchain toolchain-run ci-toolchain-run ci-reap-stacks
 
 # Default target
 .DEFAULT_GOAL := help
@@ -82,8 +82,11 @@ UNIT_TEST_MODE = $(if $(strip $(UNIT_TEST_RACE)),under -race,without -race)
 # of every failing verification's output and got diagnosed as the failure twice.
 # Evaluating both once, in order, keeps the `which` fallback that `sudo make`
 # relies on while leaving nothing for a later GOPATH expansion to re-enter.
+# GOPATH is asked only of a go that exists: a CI job container that only hands
+# a target to the toolchain image has none, and make printed "No such file or
+# directory" for the fallback on every such step.
 GO := $(shell which go 2>/dev/null || echo /usr/local/go/bin/go)
-GOPATH := $(shell $(GO) env GOPATH)
+GOPATH := $(if $(wildcard $(GO)),$(shell $(GO) env GOPATH))
 GOBIN=$(GOPATH)/bin
 # Version stamped into the binary, read from the VERSION file.
 #
@@ -402,19 +405,34 @@ DEVCONTAINER_DOCKERFILE := build/docker/devcontainer/Dockerfile
 # mktemp file the calling recipe hands to `docker build --secret`. One logical
 # shell line (make joins the continuations), so it shares the recipe's shell
 # and its EXIT trap; see docker-build-integration for why it is shaped so.
+#
+# MODULE_ENV_FILE names a credentials file the caller already wrote -- CI does,
+# as KEY=value lines outside the checkout (ci.yml's image and integration
+# jobs). It is used as it is and left for its writer to remove; a name that is
+# not a file fails the build rather than quietly building without credentials.
+MODULE_ENV_FILE ?=
 GOMODAUTH_STAGE = umask 077; \
-	stage="$$(mktemp -t gomodauth.XXXXXX)"; \
-	trap 'rm -f "$$stage"' EXIT INT TERM; \
-	if [ -n "$${GIT_CONFIG_KEY_0:-}" ]; then \
-		{ \
-			printf 'export GOPRIVATE=%s\n' "$${GOPRIVATE:-}"; \
-			printf 'export GIT_CONFIG_COUNT=%s\n' "$${GIT_CONFIG_COUNT:-}"; \
-			printf 'export GIT_CONFIG_KEY_0=%s\n' "$${GIT_CONFIG_KEY_0}"; \
-			printf 'export GIT_CONFIG_VALUE_0=%s\n' "$${GIT_CONFIG_VALUE_0:-}"; \
-		} > "$$stage"; \
-		echo "$(COLOR_BOLD)Staged private module credentials for the image build$(COLOR_RESET)"; \
+	if [ -n "$(MODULE_ENV_FILE)" ]; then \
+		stage="$(MODULE_ENV_FILE)"; \
+		if [ ! -f "$$stage" ]; then \
+			echo "$(COLOR_RED)MODULE_ENV_FILE=$$stage is not a file$(COLOR_RESET)" >&2; \
+			exit 1; \
+		fi; \
+		echo "$(COLOR_BOLD)Using private module credentials from MODULE_ENV_FILE$(COLOR_RESET)"; \
 	else \
-		echo "$(COLOR_BOLD)No private module credentials in the environment; resolving from the configured proxy$(COLOR_RESET)"; \
+		stage="$$(mktemp -t gomodauth.XXXXXX)"; \
+		trap 'rm -f "$$stage"' EXIT INT TERM; \
+		if [ -n "$${GIT_CONFIG_KEY_0:-}" ]; then \
+			{ \
+				printf 'export GOPRIVATE=%s\n' "$${GOPRIVATE:-}"; \
+				printf 'export GIT_CONFIG_COUNT=%s\n' "$${GIT_CONFIG_COUNT:-}"; \
+				printf 'export GIT_CONFIG_KEY_0=%s\n' "$${GIT_CONFIG_KEY_0}"; \
+				printf 'export GIT_CONFIG_VALUE_0=%s\n' "$${GIT_CONFIG_VALUE_0:-}"; \
+			} > "$$stage"; \
+			echo "$(COLOR_BOLD)Staged private module credentials for the image build$(COLOR_RESET)"; \
+		else \
+			echo "$(COLOR_BOLD)No private module credentials in the environment; resolving from the configured proxy$(COLOR_RESET)"; \
+		fi; \
 	fi
 
 # Builds the integration image -- the integration stage of the devcontainer
@@ -484,9 +502,66 @@ docker-prune-itest: ## Remove orphaned integration images (label-scoped, age-bou
 print-itest-label:
 	@echo $(ITEST_LABEL)
 
-integration-test: build ## Run all integration tests in Docker (isolated, recommended)
-	@echo "$(COLOR_BOLD)Running all integration tests in Docker container...$(COLOR_RESET)"
-	@$(MAKE) docker-integration-test
+# THE INTEGRATION STAGE (ci-standard.md): the devcontainer's integration stage
+# run as compose.yaml's `integration` service, here and in CI alike. The
+# service carries test/tools/docker-run's privilege set and nothing more; the
+# three values that set cannot spell statically are computed here:
+#
+#   GO_LUKS2_SECCOMP_PROFILE  the profile's absolute path. docker reads it on
+#                             the client side, so it is this checkout's file.
+#   GO_LUKS2_DM_MAJOR         device-mapper's major, from /proc/devices. It
+#                             differs between machines; with none found the
+#                             target fails rather than write an empty rule.
+#   GO_LUKS2_TEST_STATE_DIR   TEST_STATE_DIR, or its root-ledger subdirectory
+#                             when an ordinary user owns it -- the launcher's
+#                             rule, see TEST_STATE_DIR below.
+#
+# The compose project is named per invocation (IT_PROJECT; CI passes one under
+# the prefix ci-reap-stacks reaps). The container is kept until the coverage
+# profile is copied out, with the same pass/fail rule as
+# docker-integration-test: a container that passed without leaving a profile
+# fails. The trap removes the container, the project and the image on every
+# exit path.
+#
+# docker-integration-test, the launcher path, stays for the soak workflow.
+DEVCONTAINER_COMPOSE := build/docker/devcontainer/compose.yaml
+IT_PROJECT ?= go-luks2-it-$(ITEST_ID)
+PROC_DEVICES ?= /proc/devices
+
+integration-test: export GO_LUKS2_IT_IMAGE := $(ITEST_IMAGE)
+integration-test: export GO_LUKS2_SECCOMP_PROFILE := $(CURDIR)/test/integration/seccomp.json
+integration-test: ## Run all integration tests in the devcontainer's integration stage (compose)
+	@echo "$(COLOR_BOLD)Building the integration image...$(COLOR_RESET)"
+	@$(MAKE) --no-print-directory docker-build-integration
+	@echo "$(COLOR_BOLD)Running the integration suite under compose (project $(IT_PROJECT))...$(COLOR_RESET)"
+	@rm -f $(COVERAGE_INTEGRATION)
+	@set -eu; \
+	trap 'docker rm -f $(ITEST_CONTAINER) >/dev/null 2>&1 || true; \
+	      docker compose -f $(DEVCONTAINER_COMPOSE) -p $(IT_PROJECT) down --volumes >/dev/null 2>&1 || true; \
+	      docker image rm -f $(ITEST_IMAGE) >/dev/null 2>&1 || true' EXIT INT TERM; \
+	GO_LUKS2_DM_MAJOR="$$(awk '$$2 == "device-mapper" { print $$1 }' $(PROC_DEVICES))"; \
+	if [ -z "$$GO_LUKS2_DM_MAJOR" ]; then \
+		echo "$(COLOR_RED)no device-mapper line in $(PROC_DEVICES): load dm_mod on this host$(COLOR_RESET)" >&2; \
+		exit 1; \
+	fi; \
+	GO_LUKS2_TEST_STATE_DIR="$(TEST_STATE_DIR)"; \
+	if [ -d "$$GO_LUKS2_TEST_STATE_DIR" ] && [ "$$(stat -c %u "$$GO_LUKS2_TEST_STATE_DIR")" != 0 ]; then \
+		GO_LUKS2_TEST_STATE_DIR="$$GO_LUKS2_TEST_STATE_DIR/root-ledger"; \
+	fi; \
+	export GO_LUKS2_DM_MAJOR GO_LUKS2_TEST_STATE_DIR; \
+	rc=0; \
+	docker compose -f $(DEVCONTAINER_COMPOSE) -p $(IT_PROJECT) run --name $(ITEST_CONTAINER) integration || rc=$$?; \
+	if [ "$$rc" -eq 0 ]; then \
+		if ! docker cp $(ITEST_CONTAINER):/app/$(COVERAGE_INTEGRATION) $(COVERAGE_INTEGRATION) || \
+		   ! test -s $(COVERAGE_INTEGRATION); then \
+			echo "$(COLOR_RED)the container passed and left no /app/$(COVERAGE_INTEGRATION)$(COLOR_RESET)"; \
+			exit 1; \
+		fi; \
+	elif docker container inspect $(ITEST_CONTAINER) >/dev/null 2>&1; then \
+		docker cp $(ITEST_CONTAINER):/app/$(COVERAGE_INTEGRATION) $(COVERAGE_INTEGRATION) || true; \
+	fi; \
+	exit $$rc
+	@echo "$(COLOR_GREEN)✓ Integration tests passed; profile in $(COVERAGE_INTEGRATION)$(COLOR_RESET)"
 
 integration-test-cli: build docker-run-bin ## Run CLI integration tests in Docker
 	@echo "$(COLOR_BOLD)Running CLI integration tests in Docker...$(COLOR_RESET)"
@@ -949,15 +1024,18 @@ lint: ## Run golangci-lint (if installed) and actionlint over .github/workflows
 # the developer's machine. A missing gosec or govulncheck prints how to get it
 # and the target skips -- unless TOOLS_REQUIRED=1, which turns every skip into
 # a failure. A missing trivy always fails, with the same hint (#296): trivy-fs
-# is the one scan here CI's per-push gate does not run, so a local skip would
-# be the only signal and it would read as a pass.
+# is the one scan with no runner-job twin, so a local skip would be the only
+# signal and it would read as a pass.
 # Where each tool gates (#247):
 #
 #   gosec, govulncheck, go mod verify   CI's Security Scan job, every push and
 #                                       pull request (the runner image bakes
 #                                       both tools; ci.yml asserts the pins)
-#   trivy fs                            the NIGHTLY workflow and every RELEASE,
-#                                       not a merge: it is not in ci.yml
+#   the whole target, trivy fs included CI's image job, every push and pull
+#                                       request: `make security` in the
+#                                       toolchain image, which sets
+#                                       TOOLS_REQUIRED=1; also every RELEASE
+#   trivy fs alone                      the NIGHTLY workflow, dispatch-only
 #
 # The release runs this whole target with TOOLS_REQUIRED=1, so a release never
 # publishes on a scan that skipped.
@@ -1000,10 +1078,14 @@ gosec: ## Run gosec security scanner
 	else \
 		if [ "$$TOOLS_REQUIRED" = 1 ]; then echo "$(COLOR_RED)✗ gosec is not installed and TOOLS_REQUIRED=1$(COLOR_RESET)"; exit 1; fi; \
 		echo "$(COLOR_YELLOW)⚠ gosec not installed, skipping...$(COLOR_RESET)"; \
-		echo "  Install: go install -ldflags \"-X main.Version=$(GOSEC_VERSION)\" github.com/securego/gosec/v2/cmd/gosec@$(GOSEC_VERSION)"; \
-		echo "  (pinned, and the -ldflags are REQUIRED: gosec reads its version"; \
-		echo "   from ldflags, not the module path, so @$(GOSEC_VERSION) alone still"; \
-		echo "   self-reports 'dev' and its findings cannot be attributed — #21)"; \
+		echo "  Install, the way the devcontainer image builds it:"; \
+		echo "    d=\$$(mktemp -d) && cd \"\$$d\" && go mod init gosec-build &&"; \
+		echo "    go get github.com/securego/gosec/v2/cmd/gosec@$(GOSEC_VERSION) golang.org/x/tools@$(XTOOLS_VERSION) &&"; \
+		echo "    go install -ldflags \"-X main.Version=$(GOSEC_VERSION)\" github.com/securego/gosec/v2/cmd/gosec"; \
+		echo "  (a throwaway module, because the x/tools gosec's go.mod names cannot"; \
+		echo "   read the export data this Go writes; and the -ldflags are REQUIRED:"; \
+		echo "   gosec reads its version from ldflags, not the module path, so without"; \
+		echo "   them it self-reports 'dev' and its findings cannot be attributed — #21)"; \
 	fi
 
 # TOOL PINS, shared with .github/workflows/ci.yml, which asserts that the
@@ -1042,7 +1124,9 @@ vuln: govulncheck ## Alias for govulncheck (scaffold §4 contract names it `vuln
 # ---- trivy: a pinned release archive, verified before it is unpacked (#247) ----
 #
 # trivy is not in the runner image, so the nightly workflow and the release
-# install it with `make trivy-install`. That replaced `curl .../contrib/install.sh
+# install it with `make trivy-install`; the devcontainer's toolchain image runs
+# the same target at build time, which is the trivy CI's image job uses. That
+# replaced `curl .../contrib/install.sh
 # from main | sh`: an unreviewed script from a moving branch, run as the build
 # user, which then fetched whatever trivy was newest.
 #
@@ -1198,8 +1282,14 @@ deps: ## Download dependencies
 	@$(GO) mod tidy
 	@echo "$(COLOR_GREEN)✓ Dependencies updated$(COLOR_RESET)"
 
+# `go mod verify` checks only the modules already in the module cache, so on an
+# empty cache it verifies nothing and passes. The download first fills the cache
+# with every module the build needs, each checked against go.sum as it lands,
+# or fails: where nothing can be fetched (GOPROXY=off) an empty cache is an
+# error, never a pass.
 verify: ## Verify dependencies
 	@echo "$(COLOR_BOLD)Verifying dependencies...$(COLOR_RESET)"
+	@$(GO) mod download
 	@$(GO) mod verify
 	@echo "$(COLOR_GREEN)✓ Dependencies verified$(COLOR_RESET)"
 
@@ -1251,13 +1341,26 @@ info: ## Show project information
 	@echo "Coverage file: $(COVERAGE_FILE)"
 	@echo "Coverage threshold: $(COVERAGE_THRESHOLD)%"
 
+# The devcontainer image: the toolchain stage under a fixed tag, which
+# .devcontainer/devcontainer.json opens after running this target as its
+# initializeCommand. The base stage's `go mod download` resolves the private
+# module, so the build gets the same credentials staging and module proxy as
+# docker-build-toolchain; a bare `docker build` dies on go-enclave.
+DEVCONTAINER_IMAGE ?= go-luks2-devcontainer
+
 devcontainer: ## Build and run the devcontainer
 	@echo "$(COLOR_BOLD)Building devcontainer...$(COLOR_RESET)"
-	@docker build -f $(DEVCONTAINER_DOCKERFILE) --target toolchain -t go-luks2-devcontainer .
+	@set -eu; \
+	$(GOMODAUTH_STAGE); \
+	DOCKER_BUILDKIT=1 docker build \
+		--secret id=gomodauth,src="$$stage" \
+		--build-arg GO_BUILD_PROXY \
+		-f $(DEVCONTAINER_DOCKERFILE) --target toolchain \
+		-t $(DEVCONTAINER_IMAGE) .
 	@echo "$(COLOR_GREEN)✓ Devcontainer built$(COLOR_RESET)"
 	@echo ""
 	@echo "$(COLOR_BOLD)To run:$(COLOR_RESET)"
-	@echo "  make docker-run-bin && IMAGE=go-luks2-devcontainer $(INTEGRATION_DOCKER_RUN) \\"
+	@echo "  make docker-run-bin && IMAGE=$(DEVCONTAINER_IMAGE) $(INTEGRATION_DOCKER_RUN) \\"
 	@echo "      --rm -it -v \$$(pwd):/workspace -- bash"
 	@echo ""
 	@echo "$(COLOR_YELLOW)  It used to say --privileged here. Going through the command gets the$(COLOR_RESET)"
@@ -1315,6 +1418,162 @@ toolchain-run: ## Run CMD in the toolchain image (make toolchain-run CMD="make t
 		-e GOSEC_EXTRA \
 		-v "$(CURDIR):/workspace" -w /workspace \
 		"$$TR_IMAGE" bash -c "$$TR_CMD"
+
+# ---- CI: the stages in the toolchain image, and what a dead job leaves ----
+#
+# Every name CI gives a container or a compose project starts with this prefix
+# and nothing else this repository starts does, so ci-reap-stacks can never
+# touch another project's stack. `override`: it is not a knob.
+override CI_STACK_PREFIX := go-luks2-ci-
+
+# How CI runs a stage in the toolchain image (ci-standard.md §2): the canonical
+# workflow's in-toolchain-image script, as a recipe because the public release
+# ships no shell scripts (#211). A runner reaches its daemon through a socket,
+# so a bind mount -- toolchain-run's way -- would resolve on the daemon's host,
+# where this checkout does not exist. This creates the container, streams the
+# checkout in (.git included: the releasability tests read it) owned by the
+# image's CI uid, starts it and returns CMD's exit status.
+#
+# The container drops every capability, sets no-new-privileges, bounds pids
+# and ulimits (memlock leaves go-enclave its locked pages), and has no network.
+# IN_IMAGE_NETWORK=bridge gives it one for the stages that must reach one --
+# deps-check asks for the newest releases, security fetches the vulnerability
+# databases -- and only then reopens GOPROXY, moves the module cache to a
+# writable /tmp, and passes the module credentials by NAME, so no token is on a
+# command line. CMD reaches docker as one argument, never spliced into this
+# recipe's source. The container is removed on every exit.
+#
+# The reopened GOPROXY reads the image's own module cache first, as a file://
+# proxy, so the modules a stage fetches are the ones baked and verified at
+# build time, and `make verify` checks every one of them rather than an empty
+# /tmp cache. The baked cache stays root's and read-only; the image build
+# asserts its path. A module not baked falls through to the network. deps-check
+# asks for the newest releases, which the baked cache cannot answer, so it is
+# given the network proxy alone.
+#
+# GOPATH moves to /tmp too. The go command keeps the checksum database's cache
+# in $GOPATH/pkg/sumdb, not in the module cache, and the image's GOPATH is
+# root's /go, so every lookup a networked stage makes -- deps-check resolving
+# the newest release of a public module -- failed to open it. The checksum
+# database is still consulted and its answers still checked; only where they
+# are cached moves. A run without a network keeps /go: it makes no lookup, and
+# its module cache is the baked one under it.
+#
+#   make ci-toolchain-run CMD="make deps-check" IN_IMAGE_NETWORK=bridge
+IN_IMAGE_NETWORK ?= none
+CI_TOOLCHAIN_UID := 10001
+IMAGE_GOMODCACHE := /go/pkg/mod
+CI_NETWORK_GOPROXY := https://proxy.golang.org,direct
+
+ci-toolchain-run: export TR_CMD := $(CMD)
+ci-toolchain-run: export TR_IMAGE := $(TOOLCHAIN_IMAGE)
+ci-toolchain-run: export TR_NETWORK := $(IN_IMAGE_NETWORK)
+ci-toolchain-run: ## Run CMD in the toolchain image over a copy of the checkout (CI)
+	@test -n "$$TR_CMD" || { echo "$(COLOR_RED)✗ state the command: make ci-toolchain-run CMD=\"make test\"$(COLOR_RESET)"; exit 2; }
+	@set -eu; \
+	case "$$TR_NETWORK" in \
+		none|bridge) ;; \
+		*) echo "$(COLOR_RED)IN_IMAGE_NETWORK must be none or bridge: $$TR_NETWORK$(COLOR_RESET)" >&2; exit 2 ;; \
+	esac; \
+	uid=$(CI_TOOLCHAIN_UID); \
+	name="$(CI_STACK_PREFIX)tc-$$$$-$$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"; \
+	set -- --name "$$name" --init --cap-drop ALL \
+		--security-opt no-new-privileges:true --pids-limit 4096 \
+		--ulimit memlock=67108864:67108864 --ulimit core=1048576:1048576 \
+		--ulimit nofile=65536:65536 \
+		--tmpfs /tmp:rw,exec,nosuid,nodev,size=3g,mode=1777 \
+		--network "$$TR_NETWORK" --user "$$uid:$$uid" --workdir /src \
+		--env HOME=/tmp --env CI="$${CI:-}"; \
+	if [ "$$TR_NETWORK" = bridge ]; then \
+		set -- "$$@" --env "GOPROXY=file://$(IMAGE_GOMODCACHE)/cache/download,$(CI_NETWORK_GOPROXY)" \
+			--env "DEPS_CHECK_GOPROXY=$(CI_NETWORK_GOPROXY)" --env GOMODCACHE=/tmp/gomodcache \
+			--env GOPATH=/tmp/gopath; \
+		for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do \
+			eval "val=\$${$$v:-}"; \
+			if [ -n "$$val" ]; then set -- "$$@" --env "$$v"; fi; \
+		done; \
+	fi; \
+	trap 'docker rm -f -v "$$name" >/dev/null 2>&1 || true' EXIT INT TERM; \
+	docker create "$$@" "$$TR_IMAGE" sh -c "$$TR_CMD" >/dev/null; \
+	tar -C "$(CURDIR)" --owner="$$uid" --group="$$uid" --numeric-owner -cf - . | \
+		docker cp -a - "$$name:/src"; \
+	docker start -a "$$name"
+
+# The canonical workflow's stale-stack reaper (ci-template v1.18), as a recipe
+# for the same reason. A job's `if: always()` teardown runs only while the job
+# lives; when the runner or its daemon dies mid-job the stack stays behind,
+# stopped, and nothing else removes it. So the first step of every CI job that
+# starts containers runs this. On the daemon the job talks to it removes:
+#
+#   - a compose project whose name starts with CI_STACK_PREFIX, when EVERY
+#     container in it is stale, then the project's networks and volumes;
+#   - a container outside compose whose name starts with the prefix, when
+#     stale, with its anonymous volumes.
+#
+# Stale: exited or dead and finished at least REAP_MIN_AGE seconds ago, or
+# created and never started that long ago. A project with any container
+# running, paused, restarting or removing is never touched. 11100 s is the
+# runners' 3 h job timeout plus 5 min, so no job that could own the stack is
+# alive. A failed removal is reported and skipped: the reaper never fails the
+# job. REAP_DRY_RUN=1 prints what would be removed and removes nothing.
+REAP_MIN_AGE ?= 11100
+REAP_DRY_RUN ?= 0
+
+ci-reap-stacks: export RP_MIN_AGE := $(REAP_MIN_AGE)
+ci-reap-stacks: export RP_DRY := $(REAP_DRY_RUN)
+ci-reap-stacks: ## Remove this repository's stale CI containers and compose stacks
+	@set -u; \
+	prefix="$(CI_STACK_PREFIX)"; \
+	case "$$RP_MIN_AGE" in \
+		''|*[!0-9]*) echo "REAP_MIN_AGE must be a number of seconds: $$RP_MIN_AGE" >&2; exit 2 ;; \
+	esac; \
+	now=$$(date +%s); \
+	run() { if [ "$$RP_DRY" = 1 ]; then echo "dry   $$*"; else "$$@" >/dev/null; fi; }; \
+	stale() { \
+		set -- $$(docker inspect -f '{{.State.Status}} {{.State.FinishedAt}} {{.Created}}' "$$1" 2>/dev/null); \
+		[ "$$#" -eq 3 ] || return 1; \
+		case "$$1" in \
+			exited|dead) t=$$2 ;; \
+			created) t=$$3 ;; \
+			*) return 1 ;; \
+		esac; \
+		t=$$(date -d "$$t" +%s 2>/dev/null) || return 1; \
+		[ $$((now - t)) -ge "$$RP_MIN_AGE" ]; \
+	}; \
+	reaped=0; \
+	for project in $$(docker ps -a --filter label=com.docker.compose.project \
+			--format '{{.Label "com.docker.compose.project"}}' | sort -u); do \
+		case "$$project" in "$$prefix"*) ;; *) continue ;; esac; \
+		ids=$$(docker ps -aq --filter "label=com.docker.compose.project=$$project"); \
+		keep=0; \
+		for id in $$ids; do stale "$$id" || { keep=1; break; }; done; \
+		if [ "$$keep" = 1 ]; then \
+			echo "keep  $$project (a container is live or stopped within $${RP_MIN_AGE}s)"; \
+			continue; \
+		fi; \
+		echo "reap  $$project: $$(echo $$ids | wc -w) container(s)"; \
+		run docker rm -v $$ids || echo "warn  $$project: container removal failed"; \
+		for net in $$(docker network ls -q --filter "label=com.docker.compose.project=$$project"); do \
+			run docker network rm "$$net" || echo "warn  $$project: network $$net not removed"; \
+		done; \
+		for vol in $$(docker volume ls -q --filter "label=com.docker.compose.project=$$project"); do \
+			run docker volume rm "$$vol" || echo "warn  $$project: volume $$vol not removed"; \
+		done; \
+		reaped=$$((reaped + 1)); \
+	done; \
+	docker ps -a --filter "name=^$$prefix" \
+		--format '{{.ID}} {{.Names}} {{.Label "com.docker.compose.project"}}' | \
+	while read -r id cname project; do \
+		[ -z "$$project" ] || continue; \
+		case "$$cname" in "$$prefix"*) ;; *) continue ;; esac; \
+		if stale "$$id"; then \
+			echo "reap  container $$cname"; \
+			run docker rm -v "$$id" || echo "warn  container $$cname not removed"; \
+		fi; \
+	done; \
+	if [ "$$RP_DRY" = 1 ]; then done_as="would be removed"; else done_as=removed; fi; \
+	echo "reaper: $$reaped compose project(s) $$done_as for prefix '$$prefix'"; \
+	exit 0
 
 # Builds never resolve through a workspace: cross-repository modules come from
 # published TAGS, never from wherever a sibling repo happens to be checked out.

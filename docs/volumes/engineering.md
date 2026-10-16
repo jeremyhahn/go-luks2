@@ -339,13 +339,16 @@ make test-unit          # unit tests, -race, per-package coverage profiles
 make test-unit-norace   # the same legs and profiles without -race (CI's PR tier)
 make coverage-gate      # refuse unit coverage below any package's floor
 make ci                 # everything CI's fast tier runs, including the above
-make integration-test   # integration suite in a scoped container (Docker)
+make integration-test   # integration suite as the devcontainer's compose service (Docker)
 make ci-full            # ci, then the container and the combined coverage gate
 ```
 
 Unit tests need no root, devices or network. The integration suite needs a real
 kernel (loop devices, device-mapper, the kernel keyring, mounts), so it runs in
-a container launched by `test/tools/docker-run`.
+a container with the privilege set below. `make integration-test`, which CI's
+`Integration Tests` job runs, starts it as the `integration` service of
+`build/docker/devcontainer/compose.yaml`; the narrower targets under "Running
+part of the suite" start it through `test/tools/docker-run`.
 
 ### Coverage
 
@@ -389,7 +392,8 @@ its own vet leg.
 AppArmor, and exposes the host's whole `/dev`. The suite does not use it. The
 narrowest set that was measured to work lives in one place, the `privileges`
 function in `test/tools/docker-run`, and a unit test pins it flag by
-flag. Every Makefile target and the CI workflow go through that launcher.
+flag. The compose service `make integration-test` and CI use carries the same
+set and nothing more, and a second unit test fails when the two differ.
 
 Each row was measured on Linux 6.17 with Docker 29.1.3 by removing that one
 item and running the lifecycle the suite performs (loop attach, `luksFormat`,
@@ -493,7 +497,10 @@ removes its own image and container on exit. Every image carries the label
 `go-luks2-itest=1`, and `make docker-prune-itest` (also run before every
 integration build and in CI) removes labelled images no container uses that
 are older than `ITEST_PRUNE_AGE` (default `2h`). That catches what a `kill -9`
-leaves.
+leaves. CI names its containers and compose projects under the prefix
+`go-luks2-ci-`, and each job that starts containers first runs
+`make ci-reap-stacks`, which removes only stopped or never-started stacks under that prefix,
+and only once they are older than the runners' job timeout.
 
 To keep an image, name it: `ITEST_ID=debug make docker-build-integration`. It
 is still pruned once older than `ITEST_PRUNE_AGE`.

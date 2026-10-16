@@ -88,8 +88,9 @@ cryptsetup-interop behaviour is measured and asserted.
 
 **Unit** (`make test-unit`): none of the interop matrix is unit-level — every
 row needs a real cryptsetup binary or a real kernel. **Integration**
-(`make integration-test`, build tag `integration`, run in the devcontainer
-launched by `test/tools/docker-run`): the full matrix above, plus
+(`make integration-test`, build tag `integration`, run in the devcontainer's
+integration image as a compose service with `test/tools/docker-run`'s
+privilege set): the full matrix above, plus
 the metadata-lock state table, run against cryptsetup 2.7.5 and Linux 6.17 in
 the integration container. The container's capability set
 (`SYS_ADMIN`, `MKNOD`, `SETUID`/`SETGID`, the keyring/mount seccomp allowances,
