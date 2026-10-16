@@ -256,23 +256,33 @@ var goBuild = regexp.MustCompile(`\bgo build\b[^\n]*`)
 // TestReleaseAndCIBuildWithTrimpath: without -trimpath a binary records the
 // build host's paths (#247).
 func TestReleaseAndCIBuildWithTrimpath(t *testing.T) {
-	for _, wf := range []string{".github/workflows/release.yml", ".github/workflows/ci.yml"} {
-		builds := 0
-		// Join shell line continuations so a command split over lines is
-		// read whole.
-		text := regexp.MustCompile(`\\\n\s*`).ReplaceAllString(readFile(t, wf), " ")
-		for _, cmd := range goBuild.FindAllString(text, -1) {
-			if !strings.Contains(cmd, "./cmd/luks2") {
-				continue
-			}
-			builds++
-			if !strings.Contains(cmd, "-trimpath") {
-				t.Errorf("%s: %q builds without -trimpath", wf, cmd)
-			}
+	builds := 0
+	// Join shell line continuations so a command split over lines is read
+	// whole.
+	text := regexp.MustCompile(`\\\n\s*`).ReplaceAllString(readFile(t, ".github/workflows/release.yml"), " ")
+	for _, cmd := range goBuild.FindAllString(text, -1) {
+		if !strings.Contains(cmd, "./cmd/luks2") {
+			continue
 		}
-		if builds == 0 {
-			t.Errorf("%s: found no go build of the CLI", wf)
+		builds++
+		if !strings.Contains(cmd, "-trimpath") {
+			t.Errorf("release.yml: %q builds without -trimpath", cmd)
 		}
+	}
+	if builds == 0 {
+		t.Error("release.yml: found no go build of the CLI")
+	}
+
+	// CI builds its binaries in the toolchain image, through build-linux.
+	if !strings.Contains(job(t, readFile(t, ".github/workflows/ci.yml"), "image"), `CMD="make build-linux`) {
+		t.Error("ci.yml's image job does not build the linux binaries with make build-linux")
+	}
+	recipe := regexp.MustCompile(`(?m)^build-linux:.*\n((?:\t.*\n)+)`).FindStringSubmatch(readFile(t, "Makefile"))
+	if recipe == nil {
+		t.Fatal("the Makefile has no build-linux recipe")
+	}
+	if !regexp.MustCompile(`\$\(GO\) build -trimpath -o luks-linux-\$\$arch \./\$\(CMD_DIR\)`).MatchString(recipe[1]) {
+		t.Errorf("build-linux does not build the CLI with -trimpath:\n%s", recipe[1])
 	}
 }
 
@@ -308,7 +318,7 @@ func TestMakefileSaysWhereTrivyGates(t *testing.T) {
 	// What the Makefile says, ci.yml must do: the full security target, trivy
 	// fs included, in the image job and nowhere else in the workflow.
 	ci := readFile(t, ".github/workflows/ci.yml")
-	if !strings.Contains(job(t, ci, "image"), `make ci-toolchain-run CMD="make security"`) {
+	if !strings.Contains(job(t, ci, "image"), `make ci-toolchain-run CMD="make security `) {
 		t.Error("ci.yml's image job no longer runs make security in the toolchain image; update the Makefile's account of where trivy gates")
 	}
 	if regexp.MustCompile(`make trivy|trivy fs|trivy-action`).MatchString(ci) {

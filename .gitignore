@@ -16,6 +16,8 @@ build/*
 main
 /luks2
 /cmd/luks2/luks2
+/luks-linux-*
+/gosec.sarif
 test-unlock
 
 # Go workspace file

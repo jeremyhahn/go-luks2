@@ -1,6 +1,6 @@
 # go-luks2 specification
 
-> **Status: NORMATIVE** · Owner: Software Department · Last verified: 2026-10-16 against aa16242
+> **Status: NORMATIVE** · Owner: Software Department · Last verified: 2026-10-16 against af59866
 > Conflicts with this document are defects. Fix them here first.
 
 A feature listed in SPEC.md, in any status, is never deleted: not its docs,
@@ -125,7 +125,7 @@ Dev complete:
 - CI and the FIPS gate are green on `main`. Done.
 - CI conforms to the CI standard (`ci-standard.md`): build, unit tests,
   integration tests, security scans and a latest-version check, all in the
-  project's devcontainer image. Open.
+  project's devcontainer image. Done.
 - Releases are signed: the release target writes the version commit and an
   annotated tag through the agent's signing identity, and fails closed
   without it. Done.

@@ -93,7 +93,7 @@ func ciDockerEnv(t *testing.T, set map[string]string) (env []string, log string)
 		all[k] = v
 	}
 	drop := []string{"GOPRIVATE", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
-		"IN_IMAGE_NETWORK", "REAP_MIN_AGE", "REAP_DRY_RUN", "MODULE_ENV_FILE"}
+		"IN_IMAGE_NETWORK", "REAP_MIN_AGE", "REAP_DRY_RUN", "MODULE_ENV_FILE", "CI_OUT", "CI_OUT_DIR"}
 	return environ(drop, all), log
 }
 
@@ -248,8 +248,10 @@ func TestCIToolchainRunBridgeKeepsTheSumDBCacheWritable(t *testing.T) {
 
 func TestCIToolchainRunRefusesBadInput(t *testing.T) {
 	for name, args := range map[string][]string{
-		"no command":  {"TOOLCHAIN_IMAGE=example/toolchain:t"},
-		"bad network": {"CMD=make test", "TOOLCHAIN_IMAGE=example/toolchain:t", "IN_IMAGE_NETWORK=host"},
+		"no command":   {"TOOLCHAIN_IMAGE=example/toolchain:t"},
+		"bad network":  {"CMD=make test", "TOOLCHAIN_IMAGE=example/toolchain:t", "IN_IMAGE_NETWORK=host"},
+		"absolute out": {"CMD=make test", "TOOLCHAIN_IMAGE=example/toolchain:t", "CI_OUT=/etc/passwd"},
+		"out above":    {"CMD=make test", "TOOLCHAIN_IMAGE=example/toolchain:t", "CI_OUT=a ../b"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			env, log := ciDockerEnv(t, nil)
@@ -273,6 +275,50 @@ func TestCIToolchainRunPropagatesFailureAndStillRemoves(t *testing.T) {
 	}
 	if _, ok := called(logLines(t, log), "rm -f -v go-luks2-ci-tc-"); !ok {
 		t.Errorf("the failed run's container was not removed:\n%s", readLog(t, log))
+	}
+}
+
+// CI_OUT copies what CMD wrote back out after it exits, pass or fail, before
+// the container goes; a passing run that left one of them behind fails.
+func TestCIToolchainRunCopiesCIOutBack(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		set      map[string]string
+		wantPass bool
+	}{
+		{"CMD passes", nil, true},
+		{"CMD fails", map[string]string{"FAKE_START_RC": "3"}, false},
+		{"a file is missing", map[string]string{"FAKE_CP": "fail"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, log := ciDockerEnv(t, tc.set)
+			out := t.TempDir()
+			stdout, stderr, err := runMakeErr(t, env, "-s", "ci-toolchain-run", "CMD=make security",
+				"TOOLCHAIN_IMAGE=example/toolchain:t", "CI_OUT=gosec.sarif sub/coverage.out", "CI_OUT_DIR="+out)
+			if (err == nil) != tc.wantPass {
+				t.Fatalf("passed = %v, want %v:\n%s%s", err == nil, tc.wantPass, stdout, stderr)
+			}
+			lines := logLines(t, log)
+			var order []string
+			for _, l := range lines {
+				for _, prefix := range []string{"start -a ", "cp go-luks2-ci-tc-", "rm -f -v "} {
+					if strings.HasPrefix(l, prefix) {
+						order = append(order, l)
+					}
+				}
+			}
+			if len(order) != 4 || !strings.HasPrefix(order[0], "start -a ") || !strings.HasPrefix(order[3], "rm -f -v ") {
+				t.Fatalf("want start, two copies, then rm:\n%s", strings.Join(lines, "\n"))
+			}
+			for i, f := range []string{"gosec.sarif", "sub/coverage.out"} {
+				if want := ":/src/" + f + " " + filepath.Join(out, f); !strings.HasSuffix(order[i+1], want) {
+					t.Errorf("copy %d is %q, want it to end %q", i+1, order[i+1], want)
+				}
+				if _, statErr := os.Stat(filepath.Join(out, f)); (statErr == nil) != (tc.set["FAKE_CP"] != "fail") {
+					t.Errorf("%s copied back: %v", f, statErr)
+				}
+			}
+		})
 	}
 }
 

@@ -1,4 +1,4 @@
-# ci-template: v1.15 (customized)
+# ci-template: v1.19 (customized)
 
 name: CI
 
@@ -24,11 +24,17 @@ name: CI
 # TWO TIERS, ONE GATE (#341, #343, sdlc §5a). DEVIATION from the template,
 # which has one tier.
 #
-#   PR tier    every event: Lint, Security Scan, Devcontainer image, Build,
-#              Merged Tree and Unit Tests (no -race). The image job runs
-#              make build, test, security (gosec, govulncheck, go mod verify,
-#              trivy's filesystem scan) and deps-check in the toolchain image,
-#              and trivy image on the integration image.
+#   PR tier    every event: Lint, Devcontainer image and Merged Tree. The
+#              image job runs every stage but integration in the toolchain
+#              image built at this commit -- make build, test, security
+#              (gosec, govulncheck, go mod verify, trivy's filesystem scan)
+#              and deps-check, and with them the linux binaries, the 32-bit
+#              vet, the unit legs (no -race) and their coverage gate, the
+#              calibration tests and the releasability and API gates -- and
+#              trivy image on the integration image. No PR-tier stage runs on
+#              the runner; Lint and Merged Tree set up Go there. DEVIATION
+#              from the template, whose Security Scan, Build and Unit Tests
+#              jobs still set up Go on the runner (ci-standard §2).
 #   Full tier  push to main, workflow_dispatch, and a pull_request labelled
 #              `ci:full`: FIPS, Integration Tests and Race (the -race unit run
 #              with its pkg/luks2 budget).
@@ -126,9 +132,11 @@ env:
   # float, not the number.
   GO_VERSION: "1.27.2"
 
-  # ANALYSIS TOOL PINS (#21, #44). These are the versions BAKED into the
-  # self-hosted runner image; the steps below assert the binary they got
-  # matches, and refuse to run otherwise.
+  # ANALYSIS TOOL PINS (#21, #44). golangci-lint is BAKED into the self-hosted
+  # runner image, for Lint; gosec and govulncheck are built into the
+  # devcontainer image from build/docker/devcontainer/tool-pins.env, for make
+  # security. The steps below assert the binary each job got matches, and
+  # refuse to run otherwise.
   #
   # Pinned because an unpinned scanner self-updates underneath you. When it
   # does, a new rule fires on code untouched for months and reddens whichever
@@ -139,8 +147,8 @@ env:
   # could disagree and neither was reproducible.
   #
   # Bumping one of these is a DELIBERATE change, one issue per bump, and the
-  # runner image is bumped in the same breath — a version skew between the two
-  # fails this job rather than silently scanning with something else.
+  # image that carries it is bumped in the same breath — a version skew between
+  # the two fails the job rather than silently scanning with something else.
   GOLANGCI_LINT_VERSION: "v2.14.0"
   GOSEC_VERSION: "v2.29.0"
   GOVULNCHECK_VERSION: "v1.8.0"
@@ -183,98 +191,30 @@ jobs:
       - name: Run golangci-lint
         run: golangci-lint run --timeout=10m ./...
 
-  security:
-    name: Security Scan
-    runs-on: ubuntu-latest
-    # No `needs` (ci-template v1.14): starts with lint and build, not after them.
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-
-      # NO NETWORK INSTALL (#44), same reason as the lint job: both tools are
-      # baked into the self-hosted runner image at the pinned versions above,
-      # and the `go install` steps this replaces were a live source of
-      # intermittent ENETUNREACH failures on every Security Scan leg.
-      #
-      # This step is also the fix for `Gosec : dev` (#21). gosec takes its
-      # version string from ldflags, NOT from the module path, so
-      # `go install ...@v2.29.0` alone still self-reports `dev` — installing at
-      # a pin was never sufficient and that is why the assertion, rather than
-      # the pin, is the deliverable. The image builds it with the -X flag; the
-      # fallback below does the same.
-      - name: Require gosec and govulncheck at the pinned versions
-        run: |
-          set -eu
-          go run ./test/tools/require-tool \
-            gosec "$GOSEC_VERSION" \
-            "github.com/securego/gosec/v2/cmd/gosec" \
-            -ldflags "-X main.Version=${GOSEC_VERSION}"
-          go run ./test/tools/require-tool \
-            govulncheck "$GOVULNCHECK_VERSION" \
-            "golang.org/x/vuln/cmd/govulncheck"
-
-      # The Makefile carries the flags and the justification for every
-      # suppression, and CI calls that same target — so a finding a developer
-      # sees locally is the finding that blocks the merge, with no second set
-      # of flags that can drift. gosec runs with no -exclude rules: the
-      # findings this repository carries are annotated at the line that
-      # produces them, so a new occurrence elsewhere still fails.
-      # GOSEC_EXTRA only adds the SARIF written for the upload below; gosec
-      # still exits non-zero on a finding and gates here.
-      #
-      # THIS IS THE INVOCATION THE -concurrency BOUND PROTECTS (#22), and it is
-      # this job — a container-capped runner — that needs it. gosec sizes its
-      # worker pool from runtime.NumCPU(), ignoring GOMAXPROCS and ignoring
-      # cgroup CPU limits, so unbounded it spawns one worker per HOST core here
-      # and is OOM-killed. An OOM exits 137, and a non-zero exit from gosec
-      # reads as a SECURITY FINDING — so the failure would present as this gate
-      # catching something, and send the next person auditing code that was
-      # never the problem.
-      #
-      # The flag is NOT restated here on purpose. It lives at GOSEC_CONCURRENCY
-      # in the Makefile, with the same reasoning at the definition, and this job
-      # calls that target — one bound, one place, nothing to drift. Overriding
-      # it from this workflow would recreate exactly the second-set-of-flags
-      # problem the paragraph above says this arrangement avoids.
-      - name: Run gosec
-        run: make gosec GOSEC_EXTRA="-fmt=sarif -out=gosec.sarif"
-
-      # The code scanning API is github.com-only; anywhere else this 404s. The
-      # scan itself has already run and already failed the job on a finding.
-      - name: Upload gosec SARIF
-        if: always() && github.server_url == 'https://github.com'
-        uses: github/codeql-action/upload-sarif@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3
-        with:
-          sarif_file: gosec.sarif
-          category: gosec
-
-      # govulncheck is also the §9 forcing function for toolchain currency: it
-      # fails on a known-vulnerable stdlib, so a stale GO_VERSION breaks here.
-      - name: Run govulncheck
-        run: make govulncheck
-
-      - name: Verify module integrity
-        run: make verify
-
   # CUSTOMIZE (ci-template v1.18, image job): builds the devcontainer images
-  # from build/docker/devcontainer/Dockerfile at this commit, runs the
-  # toolchain stages in the toolchain image (handbook ci-standard.md §1-§2),
+  # from build/docker/devcontainer/Dockerfile at this commit, runs every
+  # toolchain stage in the toolchain image (handbook ci-standard.md §1-§2),
   # and gates the integration image with trivy image. The checkout is copied
   # into each toolchain container (`make ci-toolchain-run`; the public release
   # ships no shell scripts, so the canonical scripts are Makefile recipes
   # here): the daemon is reached through a socket, so a bind mount would
   # resolve on its host. make security and make deps-check get a network, for
-  # the vulnerability databases and the module proxy; build and test run
-  # without one. The scan is a gate only: nothing is uploaded to code scanning.
+  # the vulnerability databases and the module proxy; everything else runs
+  # without one.
+  #
+  # NOTHING RUNS ON THE RUNNER BUT DOCKER. The checks the PR tier used to run
+  # on it with actions/setup-go -- the scanner pin assertion and the gosec
+  # SARIF, the unit legs with their coverage gate, the calibration tests, the
+  # releasability and API gates, the 64-bit binaries and the 32-bit vet -- run
+  # here, each through ci-toolchain-run, and the files their uploads need come
+  # back through CI_OUT. test/ci/workflows fails any job but Lint, Race, FIPS,
+  # Merged Tree and CI Gate that sets up Go or runs go or a stage target on
+  # the runner. The image scan is a gate only; the one code-scanning upload is
+  # gosec's SARIF, on github.com.
   image:
     name: Devcontainer image [build, test, security, deps-check, trivy image]
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       # ITEST_IMAGE is the Makefile's name for the integration image; set from
       # the job, the image is kept for the scan below and removed at teardown.
@@ -303,13 +243,118 @@ jobs:
       - name: make build (toolchain image)
         run: make ci-toolchain-run CMD="make build"
 
+      # The linux/amd64 and linux/arm64 CLI, -trimpath, as the binaries
+      # artifact; and the 32-bit compile-only leg. Every other build is 64-bit,
+      # and integer-width defects that built fine on amd64 failed on 386 and
+      # arm, four of them in test files only `go vet` compiles: the reasoning
+      # is at vet-32bit in the Makefile.
+      - name: Linux binaries and 32-bit vet (toolchain image)
+        run: make ci-toolchain-run CMD="make build-linux vet-32bit" CI_OUT="luks-linux-amd64 luks-linux-arm64"
+
+      # upload-artifact v4+ refuses to run against any server that is not
+      # github.com — it detects one and reports "not currently supported on
+      # GHES", and the self-hosted forge presents as such. The build above has
+      # already run and already gated; only the artifact is skipped.
+      - name: Upload binaries
+        if: github.server_url == 'https://github.com'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: binaries
+          path: luks-linux-*
+
       - name: make test (toolchain image)
         run: make ci-toolchain-run CMD="make test"
 
+      # THE UNIT LEGS, UNINSTRUMENTED (#341), and the gate over their profiles.
+      # make test above is the stage; this is the same default tag set measured
+      # per package -- ./pkg/luks2, then every other package `go list ./...`
+      # reports, so a package added later is gated without being listed -- with
+      # only -race removed (UNIT_TEST_RACE in the Makefile). The raced run, with
+      # its pkg/luks2 budget, is the full tier's Race job. The integration-
+      # tagged suites drive loop devices, device-mapper and mounts, and are
+      # measured in the integration image instead (make coverage-combined).
+      #
+      # The legs and the gate share ONE container: the gate reads the profiles
+      # the legs write, and a container is the run's whole filesystem.
+      # `make coverage-gate` (#141) compares every package against its own
+      # floor in coverage-floors.txt, exactly, and fails on a missing profile,
+      # an unmeasured package or a floor that holds a package to 90% in no
+      # tier.
+      - name: Unit legs and coverage gate, no -race (toolchain image)
+        run: make ci-toolchain-run CMD="make test-unit-norace UNIT_TEST_FLAGS=-v && make coverage-gate" CI_OUT=coverage.out
+
+      # RLIMIT_MEMLOCK is the one that turns a correct design into a red suite:
+      # measured on a workstation, the suite passes down to 512 KiB and fails
+      # comprehensively at 64 KiB with "could not allocate locked memory ...
+      # limit reached?". Read in the image, under the limits ci-toolchain-run
+      # sets, because those are the ones the tests ran under.
+      - name: Record the resource limits these tests ran under (toolchain image)
+        if: always() && env.TOOLCHAIN_IMAGE != ''
+        run: make ci-toolchain-run CMD="echo 'RLIMIT_MEMLOCK (KiB), nproc, /tmp:' && ulimit -l && nproc && df -h /tmp"
+
+      # As for the binaries: github.com only, and the gate has already run.
+      - name: Upload coverage
+        if: github.server_url == 'https://github.com'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: coverage-unit
+          path: coverage.out
+
+      # WITHOUT -race, deliberately, and with the calibration BENCHMARKS, which
+      # the ordinary unit run never executes.
+      #
+      # The PBKDF2 calibration defect (#52) is invisible under -race. Measured:
+      # the old implementation gated its extrapolation on
+      # `elapsed.Milliseconds() > 0`, race instrumentation slows the probe past
+      # 1ms, the gate passes, and the broken code returns a plausible,
+      # correctly-scaling count. Uninstrumented, the same code returns a
+      # hardcoded 100000 on every pbkdf2 volume it formats -- 25-100x under the
+      # requested work factor. Every calibration test passes against the
+      # restored defect under -race and fails against it without. It stays its
+      # own step so these assertions keep running if the unit legs are ever
+      # raced again.
+      - name: PBKDF2 calibration tests, no -race (toolchain image)
+        run: make ci-toolchain-run CMD="make test-calibration"
+
+      # The gate itself, over this checkout's git index (ci-toolchain-run
+      # copies .git in): a fleet address, hostname or owner path in any tracked
+      # file, or any tracked file the public release must not carry (a shell
+      # script, agent instructions, an internal workflow), fails the job.
+      - name: Public-releasability gate (toolchain image)
+        run: make ci-toolchain-run CMD="make releasability"
+
+      # The current pkg/luks2 API must honor every disposition in
+      # test/tools/apidump/baseline/disposition-luks2.tsv exactly, so a KEEP
+      # identifier that regressed and a DELETE/RENAME/MOVE/UNEXPORT identifier
+      # that lingers under its old name both fail the build.
+      - name: API-diff gate (toolchain image)
+        run: make ci-toolchain-run CMD="make api-diff"
+
+      # The scanners make security runs must SAY they are the pinned versions
+      # (#21): gosec takes its version from ldflags, so a pinned install alone
+      # still self-reports `dev`, and a scan by an unknown version is no gate.
+      # The image builds both from tool-pins.env; this asserts the binaries in
+      # it against the pins at the top of this file, so a skew between the two
+      # fails here rather than scanning with something else.
+      - name: Require gosec and govulncheck at the pinned versions (toolchain image)
+        run: make ci-toolchain-run CMD="go run ./test/tools/require-tool gosec $GOSEC_VERSION github.com/securego/gosec/v2/cmd/gosec && go run ./test/tools/require-tool govulncheck $GOVULNCHECK_VERSION golang.org/x/vuln/cmd/govulncheck"
+
+      # GOSEC_EXTRA only adds the SARIF for the upload below; gosec still exits
+      # non-zero on a finding and gates here. CI_OUT copies the report out
+      # whatever the scan's result, so a failing scan still uploads it.
       - name: make security (toolchain image)
         env:
           IN_IMAGE_NETWORK: bridge
-        run: make ci-toolchain-run CMD="make security"
+        run: make ci-toolchain-run CMD="make security GOSEC_EXTRA='-fmt=sarif -out=gosec.sarif'" CI_OUT=gosec.sarif
+
+      # The code scanning API is github.com-only; anywhere else this 404s. The
+      # scan itself has already run and already failed the job on a finding.
+      - name: Upload gosec SARIF
+        if: always() && github.server_url == 'https://github.com'
+        uses: github/codeql-action/upload-sarif@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3
+        with:
+          sarif_file: gosec.sarif
+          category: gosec
 
       - name: make deps-check (toolchain image)
         env:
@@ -335,113 +380,6 @@ jobs:
         run: |
           rm -f "$RUNNER_TEMP/gomodauth.env" it-image.tar
           docker image rm "$ITEST_IMAGE" || true
-
-  test-unit:
-    name: Unit Tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-      - name: Install cryptsetup (a test dependency of ./pkg/luks2)
-        run: |
-          set -eu
-          if ! command -v cryptsetup >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq cryptsetup-bin
-          fi
-          cryptsetup --version
-          command -v cryptsetup >/dev/null 2>&1 || {
-            echo "::error::cryptsetup is still absent after install; the conformance suite would skip and report green."
-            exit 1
-          }
-
-      # THE UNIT LEGS, UNINSTRUMENTED (#341): the PR tier's run. test-unit's
-      # two legs -- ./pkg/luks2, then every other package `go list ./...`
-      # reports, so a package added later is tested and gated without being
-      # listed here -- with the same per-package profiles the coverage gate
-      # below reads, and only -race removed (UNIT_TEST_RACE in the Makefile).
-      # The raced run, with its pkg/luks2 budget, is the full tier's Race job.
-      #
-      # What runs is the DEFAULT tag set. The integration-tagged suites run in
-      # the devcontainer: they drive loop devices, device-mapper and mounts,
-      # which are host-global, and are measured there for coverage instead
-      # (make coverage-combined).
-      - name: Run unit tests (per-package coverage, no -race)
-        run: make test-unit-norace UNIT_TEST_FLAGS=-v
-
-      # Kept although the step above is now uninstrumented too: it also runs
-      # the calibration BENCHMARKS, which the ordinary unit run never does, and
-      # it stays the one place these assertions run if the step above is ever
-      # raced again.
-      #
-      # WITHOUT -race, deliberately.
-      #
-      # The PBKDF2 calibration defect (#52) is invisible under -race. Measured:
-      # the old implementation gated its extrapolation on
-      # `elapsed.Milliseconds() > 0`, race instrumentation slows the probe past
-      # 1ms, the gate passes, and the broken code returns a plausible,
-      # correctly-scaling count. Uninstrumented, the same code returns a
-      # hardcoded 100000 on every pbkdf2 volume it formats -- 25-100x under the
-      # requested work factor. Every calibration test passes against the
-      # restored defect under -race and fails against it without.
-      #
-      # This job used to run ./pkg/luks2 under -race only, which is how that
-      # weakening survived five merges and three releases of green CI. The
-      # uninstrumented build is the one that ships.
-      - name: Run PBKDF2 calibration tests (no -race)
-        run: make test-calibration
-
-      # The gate itself, over this checkout's git index: a fleet address,
-      # hostname or owner path in any tracked file, or any tracked file the
-      # public release must not carry (a shell script, agent instructions, an
-      # internal workflow), fails the job. It needs the checkout, so it is a
-      # command and not a package test.
-      - name: Public-releasability gate
-        run: make releasability
-
-      # The current pkg/luks2 API must honor every disposition in
-      # test/tools/apidump/baseline/disposition-luks2.tsv exactly, so a KEEP
-      # identifier that regressed and a DELETE/RENAME/MOVE/UNEXPORT
-      # identifier that lingers under its old name both fail the build,
-      # not just a human reading `make api-diff`'s report.
-      - name: API-diff gate (every disposition honored)
-        run: make api-diff
-      # RLIMIT_MEMLOCK is the one that turns a correct design into a red suite:
-      # measured on a workstation, the suite passes down to 512 KiB and fails
-      # comprehensively at 64 KiB with "could not allocate locked memory ...
-      # limit reached?".
-      - name: Record the resource limits these tests ran under
-        if: always()
-        run: |
-          echo "RLIMIT_MEMLOCK (KiB): $(ulimit -l)"
-          echo "nproc: $(nproc)"
-          df -h /tmp | tail -1
-
-      # THE GATE, not a print (#141). This step used to echo a total and exit
-      # zero, the merge before it ended in `|| true` so a leg with no profile
-      # made the total go UP, and COVERAGE_THRESHOLD was compared only in
-      # ci-full, which no workflow runs. `make coverage-gate` compares every
-      # package against its own floor in coverage-floors.txt, exactly, and
-      # fails on a missing profile, an unmeasured package or a floor that
-      # holds a package to 90% in no tier.
-      - name: Coverage gate
-        run: make coverage-gate
-
-      # upload-artifact v4+ refuses to run against any server that is not
-      # github.com — it detects one and reports "not currently supported on
-      # GHES", and the self-hosted forge presents as such. The tests above have
-      # already run and already gated; only the artifact is skipped.
-      - name: Upload coverage
-        if: github.server_url == 'https://github.com'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: coverage-unit
-          path: coverage.out
 
   # ---- Full tier ----
   #
@@ -648,85 +586,11 @@ jobs:
       # Mirrors the repo's own unit-test scope with ONLY the FIPS env changed.
       # `./...` is the right scope here because the integration suites sit
       # behind `//go:build integration` and so are already excluded; the race
-      # detector is omitted, as in the PR tier's Unit Tests job.
+      # detector is omitted, as in the PR tier's unit legs.
       - name: Unit tests (FIPS mode)
         run: go test -count=1 -timeout=900s ./...
 
   # ---- PR tier, continued ----
-  build:
-    name: Build
-    runs-on: ubuntu-latest
-    # No `needs`: every job starts at once (ci-template v1.14).
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-
-      - name: Build linux/amd64
-        env:
-          GOOS: linux
-          GOARCH: amd64
-        run: go build -trimpath -o luks-linux-amd64 ./cmd/luks2
-
-      - name: Build linux/arm64
-        env:
-          GOOS: linux
-          GOARCH: arm64
-        run: go build -trimpath -o luks-linux-arm64 ./cmd/luks2
-
-      # 32-BIT TARGETS, COMPILE ONLY. Both existing legs are 64-bit, so nothing
-      # in this repository had ever compiled for a platform where `int` is 32
-      # bits -- and a guard added in #112 to bound a uint32 conversion did not
-      # build on 386 or arm, while building fine on amd64. An integer-width
-      # defect in the fix for integer-width defects, invisible to CI.
-      #
-      # The PACKAGE is what matters here, not just ./cmd/luks2: the defect was
-      # in pkg/luks2 and a binary-only build would have missed it.
-      #
-      # `go vet`, NOT `go build`, and that distinction is the leg. go build does
-      # not compile TEST files, so the first version of this step -- added
-      # specifically to catch integer-width defects on 32-bit -- was
-      # structurally unable to see them in tests, which is exactly where the
-      # next FOUR landed. It passed while `go vet` failed on the same target and
-      # the same commit.
-      #
-      # vet type-checks tests without running them, which is the whole check
-      # here: every defect in this class is a compile-time one, and the suite
-      # cannot be executed on a foreign architecture anyway. Running it under
-      # emulation would be slow and would test qemu as much as the code.
-      #
-      # vet reports ONE error per package, so fixing a site reveals the next.
-      # Four were found that way and the count was not knowable in advance --
-      # if this leg fires, re-run it after each fix rather than assuming the
-      # first message is the whole list.
-      #
-      # This is not hypothetical for the portfolio: go-trusted-platform targets
-      # edge gateways, and 32-bit ARM is a real consumer architecture for a
-      # disk-encryption library. A Layer 0 library that cannot build there is a
-      # problem discovered at the consumer, which is the most expensive place.
-      - name: Vet linux/386 (32-bit int, compiles tests)
-        env:
-          GOOS: linux
-          GOARCH: "386"
-        run: go vet ./...
-
-      - name: Vet linux/arm (32-bit int, compiles tests)
-        env:
-          GOOS: linux
-          GOARCH: arm
-        run: go vet ./...
-
-      - name: Upload artifacts
-        if: github.server_url == 'https://github.com'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: binaries
-          path: luks-linux-*
-
   # The single required check. Branch protection requires THIS job and nothing
   # else, so adding a job above means adding it to `needs` AND a `check` line
   # below; a job left out of both runs and gates nothing.
@@ -833,7 +697,7 @@ jobs:
     name: CI Gate
     runs-on: ubuntu-latest
     if: always()
-    needs: [lint, security, image, test-unit, test-integration, test-race, fips, build, merge-check]
+    needs: [lint, image, test-integration, test-race, fips, merge-check]
     steps:
       # join(needs.*.result) is a GitHub extension that evaluates to an empty
       # string on the self-hosted host, so a gate built on it reports success
@@ -862,10 +726,7 @@ jobs:
             esac
           }
           check lint             "${{ needs.lint.result }}" pr
-          check security         "${{ needs.security.result }}" pr
           check image            "${{ needs.image.result }}" pr
-          check test-unit        "${{ needs.test-unit.result }}" pr
-          check build            "${{ needs.build.result }}" pr
           check merge-check      "${{ needs.merge-check.result }}" pr
           check test-integration "${{ needs.test-integration.result }}" full
           check test-race        "${{ needs.test-race.result }}" full

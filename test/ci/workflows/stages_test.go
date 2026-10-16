@@ -1,7 +1,9 @@
 package workflows
 
 import (
+	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -52,7 +54,8 @@ func TestImageJobRunsEveryToolchainStageInTheImage(t *testing.T) {
 			t.Errorf("the image job has no step %q", name)
 			continue
 		}
-		if want := `make ci-toolchain-run CMD="` + stage + `"`; !strings.Contains(run, want) {
+		// The stage, with nothing before it in CMD; make variables may follow.
+		if want := regexp.MustCompile(`make ci-toolchain-run CMD="` + regexp.QuoteMeta(stage) + `[" ]`); !want.MatchString(run) {
 			t.Errorf("step %q does not run %s", name, want)
 		}
 		block := image[strings.Index(image, "name: "+name):]
@@ -74,6 +77,38 @@ func TestImageJobRunsEveryToolchainStageInTheImage(t *testing.T) {
 	}
 	if !strings.Contains(image, "ITEST_IMAGE: go-luks2-ci-") {
 		t.Error("the image job's integration image is not named under the CI prefix")
+	}
+}
+
+// What the Security Scan and Build jobs ran on the runner now runs in the
+// image job, and what their uploads read comes back through CI_OUT. (The unit
+// legs and their gates: TestUnitTiers.)
+func TestImageJobCarriesTheChecksThatLeftTheRunner(t *testing.T) {
+	image := job(t, readFile(t, ".github/workflows/ci.yml"), "image")
+	steps := stepRun(t, image)
+	for name, want := range map[string]string{
+		"make security (toolchain image)":                                        `make ci-toolchain-run CMD="make security GOSEC_EXTRA='-fmt=sarif -out=gosec.sarif'" CI_OUT=gosec.sarif`,
+		"Require gosec and govulncheck at the pinned versions (toolchain image)": `make ci-toolchain-run CMD="go run ./test/tools/require-tool gosec $GOSEC_VERSION github.com/securego/gosec/v2/cmd/gosec && go run ./test/tools/require-tool govulncheck $GOVULNCHECK_VERSION golang.org/x/vuln/cmd/govulncheck"`,
+		"Linux binaries and 32-bit vet (toolchain image)":                        `make ci-toolchain-run CMD="make build-linux vet-32bit" CI_OUT="luks-linux-amd64 luks-linux-arm64"`,
+	} {
+		if strings.TrimSpace(steps[name]) != want {
+			t.Errorf("step %q runs %q, want %q", name, steps[name], want)
+		}
+	}
+	for _, want := range []string{"sarif_file: gosec.sarif", "path: luks-linux-*", "path: coverage.out"} {
+		if !strings.Contains(image, want) {
+			t.Errorf("the image job's uploads lack %q", want)
+		}
+	}
+	// The pin assertion runs before the scan it vouches for.
+	if strings.Index(image, "name: Require gosec") > strings.Index(image, "name: make security") {
+		t.Error("the scanner pins are asserted after make security runs")
+	}
+	mk := readFile(t, "Makefile")
+	for _, want := range []string{"VET_32BIT_ARCHES := 386 arm", "GOOS=linux GOARCH=$$arch $(GO) vet ./...", "LINUX_ARCHES := amd64 arm64"} {
+		if !strings.Contains(mk, want) {
+			t.Errorf("the Makefile lacks %q", want)
+		}
 	}
 }
 
@@ -162,6 +197,122 @@ func TestImageAndIntegrationJobsUseNoRunnerToolchain(t *testing.T) {
 		}
 		if steps := stepRun(t, j); strings.TrimSpace(steps["Reap stale CI stacks"]) != "make ci-reap-stacks" {
 			t.Errorf("%s does not reap with make ci-reap-stacks", name)
+		}
+	}
+}
+
+// runnerJobs may set up Go on the runner and run it there. None of them runs
+// one of the CI standard's five stages: Lint and Merged Tree are checks of
+// their own, and Race and FIPS run the unit suite under a mode the stages do
+// not (the race detector, the FIPS 140-3 module) and are kept as they are.
+var runnerJobs = []string{"lint", "test-race", "fips", "merge-check", "gate"}
+
+// runnerTargets are the make targets any other job may run on the runner: they
+// build the images, run a command in the toolchain image, run the integration
+// suite under compose, print the image's tag, or reap what a dead job left.
+// Everything else -- every stage, and every check beside one -- is a CMD for
+// ci-toolchain-run.
+var runnerTargets = []string{
+	"ci-toolchain-run", "ci-reap-stacks", "docker-build-toolchain",
+	"docker-build-integration", "toolchain-image", "integration-test",
+}
+
+var (
+	// setupGo is a step that installs Go on the runner.
+	setupGo = regexp.MustCompile(`(?m)^\s*(-\s+)?uses:\s*actions/setup-go@`)
+	// quotedVar is a quoted make variable: CMD, what ci-toolchain-run runs in
+	// the image, and the other quoted values, which hold no command.
+	quotedVar = regexp.MustCompile(`\b([A-Z_][A-Z0-9_]*)=("[^"]*"|'[^']*')`)
+	// makeCall is a make invocation up to the end of its shell command.
+	makeCall = regexp.MustCompile(`(?:^|[\s(])make\s+([^;&|)\n]*)`)
+	// goTool is the go command running anything on the runner.
+	goTool = regexp.MustCompile(`(?:^|[\s(;&|])go\s+(build|test|vet|run|install|generate|mod|tool)\b`)
+)
+
+// runnerViolations lists what a job's steps run on the runner that is not
+// docker or a runnerTargets target: a Go setup, the go command, or any other
+// make target.
+func runnerViolations(t *testing.T, jobText string) []string {
+	t.Helper()
+	var bad []string
+	if setupGo.MatchString(jobText) {
+		bad = append(bad, "sets up Go on the runner")
+	}
+	// Every step's run text, named or not: stepRun keys by name, and a step
+	// without one would pass unread.
+	for i, block := range strings.Split(jobText, "\n      - ")[1:] {
+		name := fmt.Sprintf("#%d", i+1)
+		if m := regexp.MustCompile(`(?m)^name: (.+)$`).FindStringSubmatch(block); m != nil {
+			name = m[1]
+		}
+		at := regexp.MustCompile(`(?m)^(?:\s*)run: `).FindStringIndex(block)
+		if at == nil {
+			continue
+		}
+		run := block[at[1]:]
+		if !strings.HasPrefix(run, "|") {
+			run, _, _ = strings.Cut(run, "\n")
+		}
+		var lines []string
+		for _, l := range strings.Split(regexp.MustCompile(`\\\n\s*`).ReplaceAllString(run, " "), "\n") {
+			if !strings.HasPrefix(strings.TrimSpace(l), "#") {
+				lines = append(lines, l)
+			}
+		}
+		text := quotedVar.ReplaceAllString(strings.Join(lines, "\n"), "$1=_")
+		if m := goTool.FindString(text); m != "" {
+			bad = append(bad, fmt.Sprintf("step %q runs %q on the runner", name, strings.TrimSpace(m)))
+		}
+		for _, m := range makeCall.FindAllStringSubmatch(text, -1) {
+			for _, word := range strings.Fields(m[1]) {
+				if strings.HasPrefix(word, "-") || strings.Contains(word, "=") {
+					continue
+				}
+				if !contains(runnerTargets, word) {
+					bad = append(bad, fmt.Sprintf("step %q runs make %s on the runner", name, word))
+				}
+			}
+		}
+	}
+	sort.Strings(bad)
+	return bad
+}
+
+// The CI standard: every stage runs in the devcontainer image built at the
+// commit under test -- the toolchain stages through ci-toolchain-run, the
+// integration suite under compose -- and none on the runner. Every job but
+// runnerJobs is held to it, so a new job, or a step moved back onto the
+// runner, fails here.
+func TestNoStageRunsOnTheRunner(t *testing.T) {
+	ci := readFile(t, ".github/workflows/ci.yml")
+	for _, id := range jobIDs(t, ci) {
+		if contains(runnerJobs, id) {
+			continue
+		}
+		for _, v := range runnerViolations(t, job(t, ci, id)) {
+			t.Errorf("job %s %s", id, v)
+		}
+	}
+}
+
+// The check itself, on the shapes it must refuse and the ones it must pass.
+func TestRunnerViolationsReadsTheSteps(t *testing.T) {
+	for _, tc := range []struct {
+		name, job string
+		bad       int
+	}{
+		{"in the image", "  j:\n    steps:\n      - name: a\n        run: make ci-toolchain-run CMD=\"make test && go vet ./...\" CI_OUT=\"x y\"\n", 0},
+		{"image tag and compose", "  j:\n    steps:\n      - name: a\n        run: |\n          make docker-build-toolchain X=\"$Y\"\n          echo \"T=$(make -s toolchain-image)\"\n          make integration-test IT_PROJECT=\"$P\"\n", 0},
+		{"a comment", "  j:\n    steps:\n      - name: a\n        run: |\n          # make test, go build\n          make ci-reap-stacks\n", 0},
+		{"a nameless step", "  j:\n    steps:\n      - run: make test\n", 1},
+		{"setup-go", "  j:\n    steps:\n      - uses: actions/setup-go@0123 # v6\n", 1},
+		{"go build", "  j:\n    steps:\n      - name: a\n        run: go build -o x ./cmd/luks2\n", 1},
+		{"go vet, continued", "  j:\n    steps:\n      - name: a\n        run: |\n          GOARCH=arm \\\n            go vet ./...\n", 1},
+		{"a stage target", "  j:\n    steps:\n      - name: a\n        run: make gosec GOSEC_EXTRA=\"-fmt=sarif\"\n", 1},
+		{"a second target", "  j:\n    steps:\n      - name: a\n        run: make ci-reap-stacks test\n", 1},
+	} {
+		if got := runnerViolations(t, tc.job); len(got) != tc.bad {
+			t.Errorf("%s: %d violations %v, want %d", tc.name, len(got), got, tc.bad)
 		}
 	}
 }

@@ -15,7 +15,7 @@ import (
 // edited on one job and not its siblings, changes what gates a merge without
 // failing anything else; these tests are what fails.
 var (
-	prTier   = []string{"lint", "security", "image", "build", "test-unit", "merge-check"}
+	prTier   = []string{"lint", "image", "merge-check"}
 	fullTier = []string{"fips", "test-integration", "test-race"}
 )
 
@@ -217,13 +217,17 @@ func TestCIGateTiersMatchTheJobs(t *testing.T) {
 // that rode on it; the -race run with its budget is the full tier's.
 func TestUnitTiers(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
-	unit := job(t, ci, "test-unit")
+	// The PR tier's unit legs, their coverage gate and the checks beside them
+	// run in the toolchain image, each through ci-toolchain-run.
+	image := job(t, ci, "image")
 	for _, want := range []string{
-		"make test-unit-norace", "make test-calibration", "make releasability",
-		"make api-diff", "make coverage-gate", "name: Unit Tests\n",
+		`make ci-toolchain-run CMD="make test-unit-norace UNIT_TEST_FLAGS=-v && make coverage-gate" CI_OUT=coverage.out`,
+		`make ci-toolchain-run CMD="make test-calibration"`,
+		`make ci-toolchain-run CMD="make releasability"`,
+		`make ci-toolchain-run CMD="make api-diff"`,
 	} {
-		if !strings.Contains(unit, want) {
-			t.Errorf("Unit Tests lacks %q", want)
+		if !strings.Contains(image, want) {
+			t.Errorf("the image job lacks %q", want)
 		}
 	}
 	race := job(t, ci, "test-race")

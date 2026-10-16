@@ -358,7 +358,7 @@ aggregate above 90% does not excuse a package below it. Floors are in
 
 | Tier | Measured by | Gated in |
 |---|---|---|
-| `unit` | `make test-unit-norace` in CI (`make test-unit`, the same legs with `-race`, locally): every package from `go list ./...`, default tags | CI's `Unit Tests` job (PR tier) and `make ci` |
+| `unit` | `make test-unit-norace` in CI (`make test-unit`, the same legs with `-race`, locally): every package from `go list ./...`, default tags | CI's image job, in the toolchain image (PR tier), and `make ci` |
 | `combined` | `make coverage-combined` inside the container: unit plus integration, with `-coverpkg` over the packages `coverage-floors.txt` lists as `combined` | CI's `Integration Tests` job (full tier) and `make ci-full` |
 
 `pkg/luks2`, `pkg/dmcrypt`, `pkg/filesystem`, `pkg/loop`, `internal/dm`,
@@ -381,7 +381,8 @@ tier only: push to `main`, `workflow_dispatch`, and a pull request labelled
 the pull request's current head at once; any other label re-runs the ordinary
 tier on the same commit. `CI Gate`, the one required check, gates both tiers: a
 full-tier job may be skipped only when the full tier was not selected. An ordinary pull
-request runs the same unit legs without `-race`. The
+request runs the same unit legs without `-race`, in the devcontainer's
+toolchain image, as CI's image job runs every PR-tier stage. The
 `integration`-tagged tests run in the container without `-race`. `make vet`
 vets both the default and `integration` configurations; a new build tag needs
 its own vet leg.

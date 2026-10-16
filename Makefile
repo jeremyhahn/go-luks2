@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build install test test-verbose test-coverage test-integration coverage coverage-report clean fmt vet lint gosec govulncheck vuln trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration test-unit-norace seccomp-diff proto test-pkg docker-build docker-run deps-check toolchain-image docker-build-toolchain toolchain-run ci-toolchain-run ci-reap-stacks
+.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build build-linux vet-32bit install test test-verbose test-coverage test-integration coverage coverage-report clean fmt vet lint gosec govulncheck vuln trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration test-unit-norace seccomp-diff proto test-pkg docker-build docker-run deps-check toolchain-image docker-build-toolchain toolchain-run ci-toolchain-run ci-reap-stacks
 
 # Default target
 .DEFAULT_GOAL := help
@@ -68,8 +68,8 @@ UNIT_TEST_TARGET ?= 240
 UNIT_TEST_FLAGS ?=
 # The race detector for the unit legs (#341). `-race` by default, which is the
 # full tier's Race job and the run UNIT_TEST_TARGET budgets; test-unit-norace
-# empties it for the PR tier's Unit Tests job. Same legs, same profiles, same
-# coverage gate -- only the instrumentation differs.
+# empties it for the PR tier's unit legs in CI's image job. Same legs, same
+# profiles, same coverage gate -- only the instrumentation differs.
 UNIT_TEST_RACE ?= -race
 UNIT_TEST_MODE = $(if $(strip $(UNIT_TEST_RACE)),under -race,without -race)
 
@@ -145,6 +145,41 @@ build: ## Build the CLI binary
 	@GOOS=darwin GOARCH=amd64 $(GO) build ./pkg/luks2 ./pkg/keyprovider
 	@GOOS=darwin GOARCH=arm64 $(GO) build ./pkg/luks2 ./pkg/keyprovider
 	@echo "$(COLOR_GREEN)✓ darwin/amd64 and darwin/arm64 build$(COLOR_RESET)"
+
+# The CLI for the 64-bit Linux targets, as CI's binaries artifact:
+# luks-linux-<arch> at the checkout root, with -trimpath so no build path is
+# embedded -- the way release.yml builds the binaries it publishes.
+LINUX_ARCHES := amd64 arm64
+
+build-linux: ## Build the CLI for linux/amd64 and linux/arm64 (luks-linux-<arch>, -trimpath)
+	@set -e; for arch in $(LINUX_ARCHES); do \
+		echo "$(COLOR_BOLD)Building luks-linux-$$arch...$(COLOR_RESET)"; \
+		GOOS=linux GOARCH=$$arch $(GO) build -trimpath -o luks-linux-$$arch ./$(CMD_DIR); \
+	done
+	@echo "$(COLOR_GREEN)✓ luks-linux-amd64 and luks-linux-arm64 built$(COLOR_RESET)"
+
+# 32-BIT TARGETS, COMPILE ONLY. Every other build here is 64-bit, so nothing
+# compiled for a platform where `int` is 32 bits -- and a guard added in #112
+# to bound a uint32 conversion did not build on 386 or arm, while building fine
+# on amd64. The PACKAGES are what matter, not just the CLI: the defect was in
+# pkg/luks2.
+#
+# `go vet`, NOT `go build`, and that distinction is the target. go build does
+# not compile TEST files, so the first version of this check was structurally
+# unable to see the next four defects of the class, all in tests. vet
+# type-checks them without running them; the suite cannot run on a foreign
+# architecture anyway, and running it under emulation would test qemu as much
+# as the code. vet reports ONE error per package, so fixing a site reveals the
+# next: re-run after each fix rather than assuming the first message is the
+# whole list.
+VET_32BIT_ARCHES := 386 arm
+
+vet-32bit: ## go vet every package for linux/386 and linux/arm (32-bit int; compiles the tests)
+	@set -e; for arch in $(VET_32BIT_ARCHES); do \
+		echo "$(COLOR_BOLD)Vetting linux/$$arch (32-bit int, compiles tests)...$(COLOR_RESET)"; \
+		GOOS=linux GOARCH=$$arch $(GO) vet ./...; \
+	done
+	@echo "$(COLOR_GREEN)✓ linux/386 and linux/arm vet clean$(COLOR_RESET)"
 
 install: ## Install the CLI binary to $GOPATH/bin
 	@echo "$(COLOR_BOLD)Installing $(BINARY_NAME) v$(BUILD_VERSION)...$(COLOR_RESET)"
@@ -1023,18 +1058,16 @@ lint: ## Run golangci-lint (if installed) and actionlint over .github/workflows
 # The tools are not installed by these targets: a make target must not mutate
 # the developer's machine. A missing gosec or govulncheck prints how to get it
 # and the target skips -- unless TOOLS_REQUIRED=1, which turns every skip into
-# a failure. A missing trivy always fails, with the same hint (#296): trivy-fs
-# is the one scan with no runner-job twin, so a local skip would be the only
-# signal and it would read as a pass.
+# a failure. A missing trivy always fails, with the same hint (#296): a local
+# trivy skip would read as a pass.
 # Where each tool gates (#247):
 #
-#   gosec, govulncheck, go mod verify   CI's Security Scan job, every push and
-#                                       pull request (the runner image bakes
-#                                       both tools; ci.yml asserts the pins)
 #   the whole target, trivy fs included CI's image job, every push and pull
 #                                       request: `make security` in the
 #                                       toolchain image, which sets
-#                                       TOOLS_REQUIRED=1; also every RELEASE
+#                                       TOOLS_REQUIRED=1, after ci.yml asserts
+#                                       the image's gosec and govulncheck pins;
+#                                       also every RELEASE
 #   trivy fs alone                      the NIGHTLY workflow, dispatch-only
 #
 # The release runs this whole target with TOOLS_REQUIRED=1, so a release never
@@ -1460,7 +1493,20 @@ override CI_STACK_PREFIX := go-luks2-ci-
 # its module cache is the baked one under it.
 #
 #   make ci-toolchain-run CMD="make deps-check" IN_IMAGE_NETWORK=bridge
+#
+# CI_OUT names the files CMD writes under the checkout that the job needs back
+# on the runner -- the gosec SARIF, the coverage profile, the release binaries
+# -- relative to the checkout. Each is copied out after CMD exits, whatever its
+# status, before the container is removed, so a failed scan still leaves its
+# report for the upload. A file a passing CMD did not write fails the run: an
+# artifact step that uploads nothing would read as one that uploaded it. They
+# land at the same path under CI_OUT_DIR, the checkout unless a test says
+# otherwise.
+#
+#   make ci-toolchain-run CMD="make build-linux" CI_OUT="luks-linux-amd64 luks-linux-arm64"
 IN_IMAGE_NETWORK ?= none
+CI_OUT ?=
+CI_OUT_DIR ?= $(CURDIR)
 CI_TOOLCHAIN_UID := 10001
 IMAGE_GOMODCACHE := /go/pkg/mod
 CI_NETWORK_GOPROXY := https://proxy.golang.org,direct
@@ -1468,6 +1514,8 @@ CI_NETWORK_GOPROXY := https://proxy.golang.org,direct
 ci-toolchain-run: export TR_CMD := $(CMD)
 ci-toolchain-run: export TR_IMAGE := $(TOOLCHAIN_IMAGE)
 ci-toolchain-run: export TR_NETWORK := $(IN_IMAGE_NETWORK)
+ci-toolchain-run: export TR_OUT := $(CI_OUT)
+ci-toolchain-run: export TR_OUT_DIR := $(CI_OUT_DIR)
 ci-toolchain-run: ## Run CMD in the toolchain image over a copy of the checkout (CI)
 	@test -n "$$TR_CMD" || { echo "$(COLOR_RED)✗ state the command: make ci-toolchain-run CMD=\"make test\"$(COLOR_RESET)"; exit 2; }
 	@set -eu; \
@@ -1475,6 +1523,11 @@ ci-toolchain-run: ## Run CMD in the toolchain image over a copy of the checkout 
 		none|bridge) ;; \
 		*) echo "$(COLOR_RED)IN_IMAGE_NETWORK must be none or bridge: $$TR_NETWORK$(COLOR_RESET)" >&2; exit 2 ;; \
 	esac; \
+	for f in $$TR_OUT; do \
+		case "$$f" in \
+			/*|..|../*|*/..|*/../*) echo "$(COLOR_RED)CI_OUT names a file under the checkout: $$f$(COLOR_RESET)" >&2; exit 2 ;; \
+		esac; \
+	done; \
 	uid=$(CI_TOOLCHAIN_UID); \
 	name="$(CI_STACK_PREFIX)tc-$$$$-$$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"; \
 	set -- --name "$$name" --init --cap-drop ALL \
@@ -1497,7 +1550,15 @@ ci-toolchain-run: ## Run CMD in the toolchain image over a copy of the checkout 
 	docker create "$$@" "$$TR_IMAGE" sh -c "$$TR_CMD" >/dev/null; \
 	tar -C "$(CURDIR)" --owner="$$uid" --group="$$uid" --numeric-owner -cf - . | \
 		docker cp -a - "$$name:/src"; \
-	docker start -a "$$name"
+	rc=0; docker start -a "$$name" || rc=$$?; \
+	for f in $$TR_OUT; do \
+		mkdir -p "$$(dirname "$$TR_OUT_DIR/$$f")"; \
+		if ! docker cp "$$name:/src/$$f" "$$TR_OUT_DIR/$$f"; then \
+			echo "$(COLOR_RED)✗ CI_OUT: the run left no $$f$(COLOR_RESET)" >&2; \
+			[ "$$rc" -ne 0 ] || rc=1; \
+		fi; \
+	done; \
+	exit "$$rc"
 
 # The canonical workflow's stale-stack reaper (ci-template v1.18), as a recipe
 # for the same reason. A job's `if: always()` teardown runs only while the job
