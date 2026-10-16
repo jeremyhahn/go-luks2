@@ -46,7 +46,7 @@ func xtsDecrypt(data, key []byte, sectorSize int) ([]byte, error) {
 
 // enclaveFrom returns an enclave holding a COPY of b, destroyed when the test
 // ends.
-func enclaveFrom(t *testing.T, b []byte) *enclave.Memory {
+func enclaveFrom(t *testing.T, b []byte) enclave.ByteAccess {
 	t.Helper()
 	e, err := enclave.NewMemoryCopy(b)
 	if err != nil {
@@ -57,7 +57,7 @@ func enclaveFrom(t *testing.T, b []byte) *enclave.Memory {
 }
 
 // mustDestroy destroys e and fails the test if the release is reported.
-func mustDestroy(tb testing.TB, e *enclave.Memory) {
+func mustDestroy(tb testing.TB, e enclave.ByteAccess) {
 	tb.Helper()
 	if err := e.Destroy(); err != nil {
 		tb.Errorf("releasing a test enclave was reported: %v", err)

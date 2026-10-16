@@ -22,11 +22,11 @@ func Open(ctx context.Context, path string, opts ...Option) (*Volume, error)
 func (v *Volume) Path() string
 func (v *Volume) Close() error
 
-func (v *Volume) Format(ctx context.Context, pass *enclave.Memory, p FormatParams) error
-func (v *Volume) Unlock(ctx context.Context, pass *enclave.Memory) (*Key, error)
-func (v *Volume) UnlockKeyslot(ctx context.Context, slot int, pass *enclave.Memory) (*Key, error)
+func (v *Volume) Format(ctx context.Context, pass enclave.ByteAccess, p FormatParams) error
+func (v *Volume) Unlock(ctx context.Context, pass enclave.ByteAccess) (*Key, error)
+func (v *Volume) UnlockKeyslot(ctx context.Context, slot int, pass enclave.ByteAccess) (*Key, error)
 func (v *Volume) UnlockWithProvider(ctx context.Context, p KeyProvider) (*Key, error)
-func (v *Volume) UnlockWithVolumeKey(ctx context.Context, vk *enclave.Memory) (*Key, error)
+func (v *Volume) UnlockWithVolumeKey(ctx context.Context, vk enclave.ByteAccess) (*Key, error)
 func (v *Volume) Target(ctx context.Context, key *Key) (*Target, error)
 func (v *Volume) Erase(ctx context.Context) error
 ```
@@ -46,7 +46,7 @@ const (
 	MinPassphraseLength = 8
 	MaxPassphraseLength = 512
 )
-func ValidatePassphrase(pass *enclave.Memory) error
+func ValidatePassphrase(pass enclave.ByteAccess) error
 ```
 
 A credential this package enrolls must be `MinPassphraseLength` to
@@ -522,11 +522,23 @@ package documentation, which is the canonical copy — if the two disagree, that
 file is right and this one is the defect. Design rationale and the trust
 boundary are in [architecture.md](architecture.md#key-custody).
 
-The ownership model: key material is owned by an `*enclave.Memory` for
-its whole lifetime and only ever borrowed, through the narrowest `WithBytes`
-window the consuming call permits. Nothing in this module returns raw key
-bytes across a function boundary where an enclave handle could be returned
-instead. Deliberately not enclaved: encrypted keyslot material (already on
+The ownership model: key material is owned by an `enclave.ByteAccess` handle
+for its whole lifetime and only ever borrowed, through the narrowest
+`WithBytes` window the consuming call permits. Nothing in this module returns
+raw key bytes across a function boundary where an enclave handle could be
+returned instead. `ByteAccess` is go-enclave's interface for a handle whose
+bytes the process may read. Every handle that crosses the API, or that this
+module creates, is go-enclave locked memory; the ones it creates come from
+go-enclave's process allocator. A caller's handle that reports any other
+backend is refused with `ErrNotLockedMemory`, its chain carrying a
+`*NotLockedMemoryError` that names the reported backend, before it is read;
+the refusal does not destroy it, because it stays the caller's. The check
+reads the backend the handle reports. go-enclave has no unforgeable
+provenance check, so a handle that misreports its backend is outside the
+guarantee, like any caller that already holds the key. A
+read-only copy is frozen through go-enclave's `Freezer` capability before it
+is handed out; a handle without that capability fails the copy and is
+destroyed. Deliberately not enclaved: encrypted keyslot material (already on
 disk in that form), and KDF salts and the stored digest (cleartext header
 fields).
 
@@ -534,7 +546,7 @@ Six residual exposures are documented, not five and not seven — `doc.go`'s own
 preamble treats an undercount as worse than the current state:
 
 1. **Credentials that arrive as plain bytes.** The library API takes
-   `*enclave.Memory` (`Format`, `Unlock`, `UnlockKeyslot`, `AddKeyslot`,
+   `enclave.ByteAccess` (`Format`, `Unlock`, `UnlockKeyslot`, `AddKeyslot`,
    `ChangeKeyslot`, `ParseRecoveryKey`). What is left is the CLI's terminal
    prompt (`term.ReadPassword` returns a plain `[]byte`; `--key-file` is read
    straight into locked memory), `keyprovider.WithStdin` (non-secret helper

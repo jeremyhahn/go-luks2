@@ -182,15 +182,23 @@ The library does LUKS2 work in process, so key material shares the caller's
 address space. Shelling out to cryptsetup kept it in a separate process; here
 the library has to protect it itself.
 
-- Every key it derives or recovers lives in a go-enclave `*enclave.Memory`
-  (mlock'd, guard-paged, wiped on release) and is only borrowed through
-  `WithBytes` for the call that needs it. That covers the master key, derived
-  keys, AF stripes, digest inputs and recovery credentials.
+- Every key it derives or recovers lives in go-enclave locked memory
+  (mlock'd, guard-paged, wiped on release), held through an
+  `enclave.ByteAccess` handle, and is only borrowed through `WithBytes` for the
+  call that needs it. That covers the master key, derived keys, AF stripes,
+  digest inputs and recovery credentials. A read-only copy is frozen before
+  it is used; a handle that cannot be frozen fails the operation.
 - If locked memory cannot be had, the operation fails with `ErrProtectedMemory`.
   There is no fallback to the heap.
 - Credentials cross the API as enclaves too: `Format`, `Unlock`,
-  `UnlockKeyslot`, `AddKeyslot`, `ChangeKeyslot` and `ParseRecoveryKey` take a
-  `*enclave.Memory` the caller owns and the library only borrows.
+  `UnlockKeyslot`, `AddKeyslot`, `ChangeKeyslot` and `ParseRecoveryKey` take an
+  `enclave.ByteAccess` the caller owns and the library only borrows. Every
+  handle that crosses the API, or that the library creates, is go-enclave
+  locked memory: a handle reporting any other backend is refused with the
+  typed error `ErrNotLockedMemory` before it is read, and is not destroyed.
+  The check reads the backend the handle reports. go-enclave has no
+  unforgeable provenance check, so a handle that misreports its backend is
+  outside the guarantee, like any caller that already holds the key.
 - Not enclaved, on purpose: encrypted keyslot material (it is on disk in that
   form), and salts and digests (cleartext header fields).
 - Plain bytes that reach the library from outside, before any enclave exists:

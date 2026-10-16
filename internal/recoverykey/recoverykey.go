@@ -61,7 +61,7 @@ func Len(n int, f Format) int {
 // Render writes the random bytes held in key out in f, into a new enclave c
 // allocates. The rendering is the credential, and it never exists outside
 // locked memory.
-func Render(c secret.Custody, key *enclave.Memory, f Format) (*enclave.Memory, error) {
+func Render(c secret.Custody, key enclave.ByteAccess, f Format) (enclave.ByteAccess, error) {
 	credential, err := c.New("recovery key", Len(key.Size(), f))
 	if err != nil {
 		return nil, err
@@ -82,7 +82,7 @@ func Render(c secret.Custody, key *enclave.Memory, f Format) (*enclave.Memory, e
 // one-way function of the credential and is not itself secret: it is printed
 // beside the key so a transcription can be checked without the volume. It is
 // computed inside the borrow only because that is where the text is readable.
-func Hash(credential *enclave.Memory) (string, error) {
+func Hash(credential enclave.ByteAccess) (string, error) {
 	var sum [sha256.Size]byte
 	if err := secret.Borrow("recovery key", credential, func(b []byte) error {
 		sum = sha256.Sum256(b)
@@ -144,8 +144,8 @@ func renderInto(dst, key []byte, f Format) {
 // a whole file, most likely -- and is refused rather than silently taking the
 // first line, because guessing which line somebody meant is how the wrong
 // string gets enrolled or tested.
-func Credential(c secret.Custody, text *enclave.Memory) (*enclave.Memory, error) {
-	var credential *enclave.Memory
+func Credential(c secret.Custody, text enclave.ByteAccess) (enclave.ByteAccess, error) {
+	var credential enclave.ByteAccess
 	err := secret.Borrow("recovery key", text, func(b []byte) error {
 		body := trimASCIISpace(b)
 		if len(body) == 0 {
@@ -195,8 +195,8 @@ func FirstLine(contents []byte) []byte {
 // than reproducing a credential. The format decision: dashes mean dashed hex;
 // an all-hex even-length body is tried as hex first; a trailing '=' or any
 // non-hex character admits base64; and hex is the fallback.
-func Decode(c secret.Custody, rendered *enclave.Memory) (*enclave.Memory, error) {
-	var key *enclave.Memory
+func Decode(c secret.Custody, rendered enclave.ByteAccess) (enclave.ByteAccess, error) {
+	var key enclave.ByteAccess
 
 	err := secret.Borrow("recovery key", rendered, func(raw []byte) error {
 		body := trimASCIISpace(raw)
@@ -261,7 +261,7 @@ func Decode(c secret.Custody, rendered *enclave.Memory) (*enclave.Memory, error)
 
 // decodeHex decodes hex bytes DIRECTLY into locked memory. The caller has
 // already trimmed and lower-cased in place.
-func decodeHex(c secret.Custody, src []byte) (*enclave.Memory, error) {
+func decodeHex(c secret.Custody, src []byte) (enclave.ByteAccess, error) {
 	n := hex.DecodedLen(len(src))
 	invalid := &errs.Error{Kind: errs.ErrInvalidCredential, Detail: "recovery key is not valid hex"}
 	if n == 0 {
@@ -280,7 +280,7 @@ func decodeHex(c secret.Custody, src []byte) (*enclave.Memory, error) {
 }
 
 // decodeBase64 decodes base64 bytes DIRECTLY into locked memory.
-func decodeBase64(c secret.Custody, src []byte) (*enclave.Memory, error) {
+func decodeBase64(c secret.Custody, src []byte) (enclave.ByteAccess, error) {
 	n := base64.StdEncoding.DecodedLen(len(src))
 	if n == 0 {
 		return nil, base64.CorruptInputError(0)
@@ -298,14 +298,14 @@ func decodeBase64(c secret.Custody, src []byte) (*enclave.Memory, error) {
 // hand back trailing zeros as part of the key. The scratch is destroyed once
 // the exact-sized enclave has been filled, so the surplus is wiped rather than
 // merely ignored, and the caller's handle never aliases it.
-func decodeExact(c secret.Custody, maxLen int, decode func(dst []byte) (int, error)) (*enclave.Memory, error) {
+func decodeExact(c secret.Custody, maxLen int, decode func(dst []byte) (int, error)) (enclave.ByteAccess, error) {
 	scratch, err := c.New("recovery key", maxLen)
 	if err != nil {
 		return nil, err
 	}
 	defer c.Release(scratch)
 
-	var exact *enclave.Memory
+	var exact enclave.ByteAccess
 	err = secret.Borrow("recovery key", scratch, func(dst []byte) error {
 		n, err := decode(dst)
 		if err != nil {

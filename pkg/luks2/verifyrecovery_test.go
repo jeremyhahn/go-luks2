@@ -247,5 +247,5 @@ func withFailingProtectedMemory(t *testing.T) {
 	previous := custody
 	t.Cleanup(func() { custody = previous })
 	refusal := &enclave.LockedMemoryError{Cause: errors.New("synthetic RLIMIT_MEMLOCK exhaustion")}
-	custody = secret.Admitted(func() (*enclave.Allocator, error) { return nil, refusal })
+	custody = secret.Admitted(func() (enclave.Allocator, error) { return nil, refusal })
 }

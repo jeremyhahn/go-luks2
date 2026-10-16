@@ -11,7 +11,7 @@ library; it has no REST, gRPC, QUIC, MCP or Unix-socket transport.
 | Get the default KDF for the current mode | `DefaultKDFType() KDFType` (`KDFPBKDF2` in FIPS mode, `KDFArgon2id` otherwise) |
 | Check, before any device is touched, whether a KDF may be used in this process | `(KDFParams).Validate() error` (refuses an Argon2 KDF, named or implied by its cost, in FIPS mode with `ErrFIPSNotApproved`) |
 | Recognize a volume FIPS mode cannot open until it is imported | `(*Volume).Unlock` in a FIPS process fails with a `*FIPSImportRequiredError` naming the non-approved keyslots and digests; `errors.Is(err, ErrFIPSImportRequired)` |
-| Import a non-approved volume into FIPS compliance | `(*Volume).MigrateToFIPS(ctx context.Context, pass *enclave.Memory, p MigrateParams) (*Migration, error)` |
+| Import a non-approved volume into FIPS compliance | `(*Volume).MigrateToFIPS(ctx context.Context, pass enclave.ByteAccess, p MigrateParams) (*Migration, error)` |
 
 `MigrateParams.KeepNonApproved` keeps the original keyslots (a
 half-migration: `Migration.Complete` is then false and
@@ -35,7 +35,7 @@ if err != nil {
 }
 defer v.Close()
 
-// pass is the passphrase, held in an *enclave.Memory.
+// pass is the passphrase, held in an enclave.ByteAccess.
 res, err := v.MigrateToFIPS(ctx, pass, luks2.MigrateParams{})
 // res.Complete: no keyslot or digest FIPS mode cannot run remains
 ```

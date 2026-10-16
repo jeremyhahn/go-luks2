@@ -20,7 +20,7 @@ binary, and the volumes interoperate with cryptsetup in both directions.
 - Inherited: go-enclave's locked-memory custody. Key material stays in
   go-enclave locked memory for its whole lifetime.
 - Re-exported: credentials and keys cross the `pkg/luks2` and `pkg/keyprovider`
-  API as go-enclave's own `*enclave.Memory`, unchanged and not renamed.
+  API as go-enclave's own `enclave.ByteAccess`, unchanged and not renamed.
   go-enclave's functions, such as `enclave.HardenProcess`, are not
   re-exported: a consumer imports go-enclave to call them.
 

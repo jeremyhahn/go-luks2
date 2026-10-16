@@ -19,7 +19,7 @@ import (
 type enclaveBuffer struct {
 	custody secret.Custody
 	op      string
-	e       *enclave.Memory
+	e       enclave.ByteAccess
 	cap     int
 	n       int
 }
@@ -75,12 +75,12 @@ func (b *enclaveBuffer) append(c byte) error {
 // finish returns a frozen, exactly-sized enclave over what was appended,
 // and releases the buffer's own scratch enclave either way. ErrEmptyCredential
 // if nothing was ever appended.
-func (b *enclaveBuffer) finish() (*enclave.Memory, error) {
+func (b *enclaveBuffer) finish() (enclave.ByteAccess, error) {
 	defer b.release()
 	if b.n == 0 {
 		return nil, &Error{Kind: ErrEmptyCredential}
 	}
-	var result *enclave.Memory
+	var result enclave.ByteAccess
 	err := secret.Borrow(b.op, b.e, func(buf []byte) error {
 		var cerr error
 		result, cerr = b.custody.Clone(b.op, buf[:b.n])

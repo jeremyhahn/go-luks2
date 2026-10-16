@@ -23,7 +23,7 @@ var system = System()
 // openSecret copies the material out of an enclave so a test can assert on it.
 // Production code must never do this; a test has to look at the bytes to prove
 // anything about them.
-func openSecret(t *testing.T, e *enclave.Memory) []byte {
+func openSecret(t *testing.T, e enclave.ByteAccess) []byte {
 	t.Helper()
 
 	var out []byte
@@ -42,7 +42,7 @@ func openSecret(t *testing.T, e *enclave.Memory) []byte {
 // so a report means the suite ran somewhere that refuses part of the teardown
 // contract, and that is worth a red test rather than a silent drop. It uses
 // Errorf, not Fatalf, so it is safe from a deferred call and from a goroutine.
-func mustDestroy(tb testing.TB, e *enclave.Memory) {
+func mustDestroy(tb testing.TB, e enclave.ByteAccess) {
 	tb.Helper()
 	if err := e.Destroy(); err != nil {
 		tb.Errorf("releasing a test enclave was reported: %v", err)
@@ -54,7 +54,7 @@ func mustDestroy(tb testing.TB, e *enclave.Memory) {
 // the one a test CAN act on: on a healthy host every release succeeds, so a
 // report here means the suite ran somewhere that refuses part of the teardown
 // contract, which is worth a red test rather than a silent drop.
-func destroyOnCleanup(t *testing.T, e *enclave.Memory) {
+func destroyOnCleanup(t *testing.T, e enclave.ByteAccess) {
 	t.Helper()
 	t.Cleanup(func() { mustDestroy(t, e) })
 }
@@ -234,11 +234,56 @@ func TestCloneLeavesTheSourceIntact(t *testing.T) {
 	}
 }
 
+// unfreezable is a handle that reads and writes like locked memory but lacks
+// the Freezer capability: embedding the interface promotes ByteAccess's
+// methods only, so enclave.As finds no Freeze on it.
+type unfreezable struct{ enclave.ByteAccess }
+
+func TestCopiedFailsClosedWhenTheEnclaveCannotFreeze(t *testing.T) {
+	var held []enclave.ByteAccess
+	sized := func(n int) (enclave.ByteAccess, error) {
+		e, err := system.Sized(n)
+		if err != nil {
+			return nil, err
+		}
+		held = append(held, e)
+		return unfreezable{e}, nil
+	}
+	c := system
+	c.Copied = copiedInto(sized)
+
+	e, err := c.Clone("test", []byte("MATERIAL that must not stay writable"))
+	if err == nil {
+		mustDestroy(t, e)
+		t.Fatal("Clone succeeded with an enclave that cannot be frozen")
+	}
+	if e != nil {
+		t.Fatal("a failed Clone returned an enclave")
+	}
+	if !errors.Is(err, ErrProtectedMemory) {
+		t.Fatalf("err = %v, want ErrProtectedMemory", err)
+	}
+	var capErr *enclave.CapabilityError
+	if !errors.As(err, &capErr) || capErr.Capability != enclave.CapabilityFreeze {
+		t.Fatalf("err = %v, want a *enclave.CapabilityError for %q", err, enclave.CapabilityFreeze)
+	}
+	if !errors.Is(err, enclave.ErrCapabilityUnsupported) {
+		t.Fatalf("err = %v, want enclave.ErrCapabilityUnsupported", err)
+	}
+	if len(held) != 1 {
+		t.Fatalf("sized was called %d times, want 1", len(held))
+	}
+	if held[0].IsAlive() {
+		_ = held[0].Destroy()
+		t.Fatal("the unfrozen enclave was not destroyed")
+	}
+}
+
 func TestCloneRefusesEmptyMaterial(t *testing.T) {
 	for _, name := range []string{"Clone", "CloneWritable"} {
 		t.Run(name, func(t *testing.T) {
 			var (
-				e   *enclave.Memory
+				e   enclave.ByteAccess
 				err error
 			)
 			if name == "Clone" {
@@ -400,11 +445,11 @@ func TestLockedMemoryIsReleasedByRelease(t *testing.T) {
 // enclave and then reports report for it, the way go-enclave does when the
 // kernel or a sandbox refuses part of the teardown. It records every enclave
 // it was given, in order, so a test can prove the release reached each one.
-func reportingCustody(t *testing.T, report error) (Custody, *[]*enclave.Memory) {
+func reportingCustody(t *testing.T, report error) (Custody, *[]enclave.ByteAccess) {
 	t.Helper()
-	var seen []*enclave.Memory
+	var seen []enclave.ByteAccess
 	c := System()
-	c.Destroy = func(e *enclave.Memory) error {
+	c.Destroy = func(e enclave.ByteAccess) error {
 		seen = append(seen, e)
 		if err := e.Destroy(); err != nil {
 			t.Errorf("the real release under the fake report failed: %v", err)
@@ -415,7 +460,7 @@ func reportingCustody(t *testing.T, report error) (Custody, *[]*enclave.Memory) 
 }
 
 // requireReleased fails unless e's material is gone.
-func requireReleased(t *testing.T, name string, e *enclave.Memory) {
+func requireReleased(t *testing.T, name string, e enclave.ByteAccess) {
 	t.Helper()
 	if err := e.WithBytes(func([]byte) error { return nil }); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
 		t.Errorf("%s: borrow after release = %v, want enclave.ErrEnclaveDestroyed", name, err)
@@ -494,8 +539,8 @@ func TestReleaseDropsCorruptionReportAndKeepsReleasing(t *testing.T) {
 	destroyOnCleanup(t, first)
 	destroyOnCleanup(t, second)
 	c := System()
-	var seen []*enclave.Memory
-	c.Destroy = func(e *enclave.Memory) error {
+	var seen []enclave.ByteAccess
+	c.Destroy = func(e enclave.ByteAccess) error {
 		seen = append(seen, e)
 		return enclave.ErrEnclaveCorrupted
 	}
@@ -511,7 +556,7 @@ func TestReleaseDropsCorruptionReportAndKeepsReleasing(t *testing.T) {
 // process out of RLIMIT_MEMLOCK does.
 func refusingCustody() Custody {
 	refusal := &enclave.LockedMemoryError{Cause: errors.New("synthetic RLIMIT_MEMLOCK exhaustion")}
-	return Admitted(func() (*enclave.Allocator, error) { return nil, refusal })
+	return Admitted(func() (enclave.Allocator, error) { return nil, refusal })
 }
 
 // TestEveryConstructorFailsClosedWhenLockedMemoryIsUnavailable: no
@@ -520,15 +565,15 @@ func refusingCustody() Custody {
 func TestEveryConstructorFailsClosedWhenLockedMemoryIsUnavailable(t *testing.T) {
 	c := refusingCustody()
 	source := []byte("material that never reaches locked memory")
-	for name, construct := range map[string]func() (*enclave.Memory, error){
-		"New":           func() (*enclave.Memory, error) { return c.New("test", 32) },
-		"Random":        func() (*enclave.Memory, error) { return c.Random("test", 32, rand.Reader) },
-		"Clone":         func() (*enclave.Memory, error) { return c.Clone("test", source) },
-		"CloneWritable": func() (*enclave.Memory, error) { return c.CloneWritable("test", source) },
-		"CloneFiltered": func() (*enclave.Memory, error) {
+	for name, construct := range map[string]func() (enclave.ByteAccess, error){
+		"New":           func() (enclave.ByteAccess, error) { return c.New("test", 32) },
+		"Random":        func() (enclave.ByteAccess, error) { return c.Random("test", 32, rand.Reader) },
+		"Clone":         func() (enclave.ByteAccess, error) { return c.Clone("test", source) },
+		"CloneWritable": func() (enclave.ByteAccess, error) { return c.CloneWritable("test", source) },
+		"CloneFiltered": func() (enclave.ByteAccess, error) {
 			return c.CloneFiltered("test", source, func(b byte) bool { return b != ' ' })
 		},
-		"Adopt": func() (*enclave.Memory, error) { return c.Adopt("test", append([]byte(nil), source...)) },
+		"Adopt": func() (enclave.ByteAccess, error) { return c.Adopt("test", append([]byte(nil), source...)) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			e, err := construct()
@@ -593,7 +638,7 @@ func TestEnclavesAreAdmittedThroughTheAllocator(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := Admitted(func() (*enclave.Allocator, error) { return a, nil })
+	c := Admitted(func() (enclave.Allocator, error) { return a, nil })
 
 	sized, err := c.Sized(32)
 	if err != nil {
@@ -630,7 +675,7 @@ func TestAdmissibleMeasuresAgainstTheAllocatorsWholeLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := Admitted(func() (*enclave.Allocator, error) { return a, nil })
+	c := Admitted(func() (enclave.Allocator, error) { return a, nil })
 	if err := c.Admissible("scan", a.Limit()); err != nil {
 		t.Fatalf("a peak at the limit was refused: %v", err)
 	}

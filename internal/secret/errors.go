@@ -4,7 +4,10 @@
 
 package secret
 
-import "errors"
+import (
+	"errors"
+	"strconv"
+)
 
 // ErrProtectedMemory indicates that key material could not be placed in, or
 // read back from, protected memory, and that the operation was therefore
@@ -54,3 +57,29 @@ import "errors"
 // are opened one at a time, so that keyslot is the scan's peak. The key
 // DERIVATION of one operation is bounded too, by the module's KDF budget.
 var ErrProtectedMemory = errors.New("luks2: key material could not be held in protected memory")
+
+// ErrNotLockedMemory indicates that a handle crossing the API reports a
+// backend other than go-enclave locked memory, and that the operation was
+// therefore REFUSED before the handle was read. The handle is the caller's:
+// it is neither read nor destroyed. The error's chain carries a
+// *NotLockedMemoryError naming the backend the handle reported.
+//
+// The check reads the backend the handle reports. go-enclave has no
+// unforgeable provenance check, so a handle that misreports its backend is
+// outside the guarantee, like any caller that already holds the key.
+var ErrNotLockedMemory = errors.New("luks2: handle is not go-enclave locked memory")
+
+// NotLockedMemoryError is the reason behind ErrNotLockedMemory: the backend
+// name the refused handle reported. errors.Is matches it to
+// ErrNotLockedMemory.
+type NotLockedMemoryError struct {
+	// Backend is the name the handle's Backend reported.
+	Backend string
+}
+
+func (e *NotLockedMemoryError) Error() string {
+	return "luks2: handle backend " + strconv.Quote(e.Backend) + " is not go-enclave locked memory"
+}
+
+// Unwrap returns ErrNotLockedMemory.
+func (e *NotLockedMemoryError) Unwrap() error { return ErrNotLockedMemory }

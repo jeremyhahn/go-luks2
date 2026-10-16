@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/jeremyhahn/go-enclave"
@@ -185,8 +186,8 @@ func TestUnlockKeyslotHoldsTheMasterKeyInProtectedMemory(t *testing.T) {
 	if masterKey.Size() != 64 {
 		t.Fatalf("master key holds %d bytes, want 64", masterKey.Size())
 	}
-	// String must not spill the key if the handle is ever logged.
-	if s := masterKey.String(); s != "Memory(redacted)" {
+	// Printing must not spill the key if the handle is ever logged.
+	if s := fmt.Sprint(masterKey); s != "Memory(redacted)" {
 		t.Fatalf("the master key handle renders as %q", s)
 	}
 

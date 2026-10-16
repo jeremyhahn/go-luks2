@@ -111,7 +111,7 @@ func twoVolumeKeyContainer(t *testing.T, name string, passA, passB []byte) strin
 // digest attests the slot is the thing under test here, so the caller states it
 // explicitly rather than having this helper decide.
 func writeKeyslot(t *testing.T, path string, hdr *header.BinaryHeader, metadata *header.Metadata,
-	id string, reference *header.Keyslot, masterKey *enclave.Memory, passphrase []byte) {
+	id string, reference *header.Keyslot, masterKey enclave.ByteAccess, passphrase []byte) {
 	t.Helper()
 
 	kdf, err := createKDFStrict(formatOptionsForTest{KDFType: kdfTypePBKDF2, HashAlgo: "sha256", PBKDFIterTime: 1}, reference.KeySize)

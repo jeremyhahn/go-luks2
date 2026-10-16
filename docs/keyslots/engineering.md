@@ -10,8 +10,8 @@
 ```go
 const MaxKeyslots = 32
 type KeyslotParams struct { Slot *int; Priority Priority; KDF KDFParams }
-func (v *Volume) AddKeyslot(ctx context.Context, key *Key, pass *enclave.Memory, p KeyslotParams) (KeyslotInfo, error)
-func (v *Volume) ChangeKeyslot(ctx context.Context, key *Key, pass *enclave.Memory, p KeyslotParams) (KeyslotInfo, error)
+func (v *Volume) AddKeyslot(ctx context.Context, key *Key, pass enclave.ByteAccess, p KeyslotParams) (KeyslotInfo, error)
+func (v *Volume) ChangeKeyslot(ctx context.Context, key *Key, pass enclave.ByteAccess, p KeyslotParams) (KeyslotInfo, error)
 func (v *Volume) RemoveKeyslot(ctx context.Context, slot int) error
 type KeyslotInfo struct { ID int; Type string; KeySize int; Priority Priority; Encryption string; KDF KDFParams }
 type Priority int

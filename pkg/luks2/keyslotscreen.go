@@ -679,7 +679,7 @@ func keyslotBoundToDataSegments(metadata *header.Metadata, keyslotID string) boo
 // makes. An activation must use this one before it maps a key: a declaration is
 // not proof, and the key decides which digest it matches. It derives once per
 // candidate digest, so it is called once, after the key is recovered.
-func recoveredKeyBoundToSegment(metadata *header.Metadata, keyslotID, segmentID string, key *enclave.Memory) bool {
+func recoveredKeyBoundToSegment(metadata *header.Metadata, keyslotID, segmentID string, key enclave.ByteAccess) bool {
 	if metadata == nil || key == nil || metadata.Segments[segmentID] == nil {
 		return false
 	}

@@ -108,7 +108,7 @@ func atoiIDs(ids []string) []int {
 // The migration runs on the descriptor Open pinned, under this Volume's own
 // exclusive lock -- its lock wait, clock and lock directory -- as AddKeyslot
 // does: a path re-pointed since Open cannot send it to another device.
-func (v *Volume) MigrateToFIPS(ctx context.Context, pass *enclave.Memory, p MigrateParams) (*Migration, error) {
+func (v *Volume) MigrateToFIPS(ctx context.Context, pass enclave.ByteAccess, p MigrateParams) (*Migration, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if err := v.checkOpen("Volume.MigrateToFIPS"); err != nil {

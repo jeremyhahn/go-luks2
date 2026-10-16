@@ -314,7 +314,7 @@ OrphanedKeyslotError.Unwrap	KEEP	with OrphanedKeyslotError
 PBKDFIterationsError	RENAME	luks2.KDFCostError{Param, Value, Min, Max} (one type)
 PBKDFIterationsError.Error	RENAME	with PBKDFIterationsError
 PBKDFIterationsError.Unwrap	RENAME	with PBKDFIterationsError
-ParseRecoveryKey	KEEP	luks2.ParseRecoveryKey(*enclave.Memory) (*enclave.Memory, error)
+ParseRecoveryKey	KEEP	luks2.ParseRecoveryKey(enclave.ByteAccess) (enclave.ByteAccess, error)
 ParseRecoveryKeyFormat	KEEP	luks2.ParseRecoveryKeyFormat
 PatternOnes	MOVE	wipe.Ones / Random / Zeros
 PatternRandom	MOVE	wipe.Ones / Random / Zeros
@@ -384,7 +384,7 @@ UnsupportedRequirementError.Unwrap	DELETE	with UnsupportedRequirementError
 ValidateDevicePath	DELETE	luks2.Open validates and pins
 ValidateFormatOptions	RENAME	(luks2.FormatParams).Validate()
 ValidateMappingName	MOVE	dmcrypt.ValidateName
-ValidatePassphrase	KEEP	luks2.ValidatePassphrase(*enclave.Memory)
+ValidatePassphrase	KEEP	luks2.ValidatePassphrase(enclave.ByteAccess)
 VerifyRecoveryKey	DELETE	(*luks2.Volume).Unlock(ctx, cred) then (*Key).Destroy
 VolumeError	DELETE	luks2.Error{Op, Path, Kind, Detail, Err}; the data lives in Kind + Detail
 VolumeError.Error	DELETE	with VolumeError

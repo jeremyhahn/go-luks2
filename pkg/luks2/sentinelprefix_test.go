@@ -39,6 +39,7 @@ var exportedSentinels = map[string]error{
 	"ErrKDFCalibration":          ErrKDFCalibration,
 	"ErrDeviceChanged":           ErrDeviceChanged,
 	"ErrProtectedMemory":         ErrProtectedMemory,
+	"ErrNotLockedMemory":         ErrNotLockedMemory,
 	"ErrLockContended":           ErrLockContended,
 	"ErrMetadataLockUnavailable": ErrMetadataLockUnavailable,
 	"ErrDeviceInUse":             ErrDeviceInUse,

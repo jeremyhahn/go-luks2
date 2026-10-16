@@ -25,7 +25,7 @@ then enroll a provider built from them. The process must have called
 ```go
 v, _ := luks2.Open(ctx, device)
 defer v.Close()
-key, _ := v.Unlock(ctx, existingPassphrase) // existingPassphrase is a *enclave.Memory
+key, _ := v.Unlock(ctx, existingPassphrase) // existingPassphrase is an enclave.ByteAccess
 defer key.Destroy()
 
 salt, _ := keyprovider.NewFIDO2Salt()

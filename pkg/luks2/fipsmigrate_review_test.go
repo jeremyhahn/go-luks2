@@ -325,7 +325,7 @@ func TestMigrateToFIPSReadsNoKeyslotOutsideKeyslotSpace(t *testing.T) {
 			derivations := 0
 			sys := testVolumeSys()
 			real := sys.passphraseKDF
-			sys.passphraseKDFOverride = func(ctx context.Context, passphrase []byte, kdf *header.KDF, keySize int) (*enclave.Memory, error) {
+			sys.passphraseKDFOverride = func(ctx context.Context, passphrase []byte, kdf *header.KDF, keySize int) (enclave.ByteAccess, error) {
 				derivations++
 				return real(ctx, passphrase, kdf, keySize)
 			}

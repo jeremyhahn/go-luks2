@@ -37,7 +37,7 @@ type fakeKeyProvider struct {
 
 func (p *fakeKeyProvider) Token() Token { return p.token }
 
-func (p *fakeKeyProvider) Passphrase(context.Context) (*enclave.Memory, error) {
+func (p *fakeKeyProvider) Passphrase(context.Context) (enclave.ByteAccess, error) {
 	if p.err != nil {
 		return nil, p.err
 	}

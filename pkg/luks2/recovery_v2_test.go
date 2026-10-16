@@ -174,7 +174,7 @@ func TestParseRecoveryKeyNormalizesWhitespaceWithoutAGoString(t *testing.T) {
 // recoveryKeyEnclave materializes rk's credential as a fresh enclave, the
 // way a caller would before handing it to Unlock. Test-only: production
 // code never round-trips a RecoveryKey's credential through WriteTo.
-func recoveryKeyEnclave(t *testing.T, rk *RecoveryKey) *enclave.Memory {
+func recoveryKeyEnclave(t *testing.T, rk *RecoveryKey) enclave.ByteAccess {
 	t.Helper()
 	var buf bytes.Buffer
 	if _, err := rk.WriteTo(&buf); err != nil {

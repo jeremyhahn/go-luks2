@@ -138,7 +138,7 @@ const lockCompatLockWait = 300 * time.Millisecond
 
 // lockCompatOp is one go-luks2 operation on a Volume the step opened, with the
 // scenario's passphrase.
-type lockCompatOp func(ctx context.Context, v *Volume, pass *enclave.Memory) error
+type lockCompatOp func(ctx context.Context, v *Volume, pass enclave.ByteAccess) error
 
 // lockCompatOps are the go-luks2 operations a step can run, each through the
 // public Volume method a caller uses, so each takes the lock that caller's
@@ -147,11 +147,11 @@ type lockCompatOp func(ctx context.Context, v *Volume, pass *enclave.Memory) err
 // caller must, so a state that refuses reads stops it there; KillSlot and
 // ImportToken reach the exclusive lock directly.
 var lockCompatOps = map[string]lockCompatOp{
-	"ReadHeader": func(ctx context.Context, v *Volume, _ *enclave.Memory) error {
+	"ReadHeader": func(ctx context.Context, v *Volume, _ enclave.ByteAccess) error {
 		_, err := v.Header(ctx)
 		return err
 	},
-	"TestKey": func(ctx context.Context, v *Volume, pass *enclave.Memory) error {
+	"TestKey": func(ctx context.Context, v *Volume, pass enclave.ByteAccess) error {
 		key, err := v.Unlock(ctx, pass)
 		if err != nil {
 			return err
@@ -159,7 +159,7 @@ var lockCompatOps = map[string]lockCompatOp{
 		key.Destroy()
 		return nil
 	},
-	"AddKey": func(ctx context.Context, v *Volume, pass *enclave.Memory) error {
+	"AddKey": func(ctx context.Context, v *Volume, pass enclave.ByteAccess) error {
 		key, err := v.Unlock(ctx, pass)
 		if err != nil {
 			return err
@@ -173,10 +173,10 @@ var lockCompatOps = map[string]lockCompatOp{
 		_, err = v.AddKeyslot(ctx, key, newPass, KeyslotParams{KDF: KDFParams{Type: KDFPBKDF2, IterTime: time.Millisecond}})
 		return err
 	},
-	"KillSlot": func(ctx context.Context, v *Volume, _ *enclave.Memory) error {
+	"KillSlot": func(ctx context.Context, v *Volume, _ enclave.ByteAccess) error {
 		return v.RemoveKeyslot(ctx, 1)
 	},
-	"ImportToken": func(ctx context.Context, v *Volume, _ *enclave.Memory) error {
+	"ImportToken": func(ctx context.Context, v *Volume, _ enclave.ByteAccess) error {
 		var t Token
 		if err := json.Unmarshal([]byte(lockCompatToken), &t); err != nil {
 			return err

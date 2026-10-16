@@ -25,7 +25,7 @@ var testCodec = Codec{Custody: secret.System(), Rand: rand.Reader, FIPS: fips.Pr
 
 // enclaveFrom returns an enclave holding a COPY of b, destroyed when the test
 // ends.
-func enclaveFrom(t *testing.T, b []byte) *enclave.Memory {
+func enclaveFrom(t *testing.T, b []byte) enclave.ByteAccess {
 	t.Helper()
 	e, err := enclave.NewMemoryCopy(b)
 	if err != nil {
@@ -37,7 +37,7 @@ func enclaveFrom(t *testing.T, b []byte) *enclave.Memory {
 
 // mustDestroy destroys e and fails the test if the release is reported as
 // anything but clean.
-func mustDestroy(tb testing.TB, e *enclave.Memory) {
+func mustDestroy(tb testing.TB, e enclave.ByteAccess) {
 	tb.Helper()
 	if err := e.Destroy(); err != nil {
 		tb.Errorf("releasing a test enclave was reported: %v", err)
@@ -45,7 +45,7 @@ func mustDestroy(tb testing.TB, e *enclave.Memory) {
 }
 
 // openSecret copies the material out of an enclave so a test can assert on it.
-func openSecret(t *testing.T, e *enclave.Memory) []byte {
+func openSecret(t *testing.T, e enclave.ByteAccess) []byte {
 	t.Helper()
 	var out []byte
 	if err := e.WithBytes(func(b []byte) error {

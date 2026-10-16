@@ -10,7 +10,7 @@
 ```go
 type MigrateParams struct { KeepNonApproved bool; KDF KDFParams }
 type Migration struct { Keyslot int; KeyslotAdded bool; MigratedDigests, RemovedKeyslots, RetainedNonApproved []int; Complete bool }
-func (v *Volume) MigrateToFIPS(ctx context.Context, pass *enclave.Memory, p MigrateParams) (*Migration, error)
+func (v *Volume) MigrateToFIPS(ctx context.Context, pass enclave.ByteAccess, p MigrateParams) (*Migration, error)
 type NonApprovedKDF struct { ID int; Type, Hash, Reason string }
 func (k NonApprovedKDF) String() string
 type FIPSMigrationStage uint8 // StagePreflight, StageVerify, StageWrite, StageRemove, StageVerifyWritten

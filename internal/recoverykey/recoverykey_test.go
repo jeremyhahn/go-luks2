@@ -23,7 +23,7 @@ var testCustody = secret.System()
 
 // enclaveFrom returns an enclave holding a COPY of b, destroyed when the test
 // ends.
-func enclaveFrom(t *testing.T, b []byte) *enclave.Memory {
+func enclaveFrom(t *testing.T, b []byte) enclave.ByteAccess {
 	t.Helper()
 	e, err := enclave.NewMemoryCopy(b)
 	if err != nil {
@@ -34,7 +34,7 @@ func enclaveFrom(t *testing.T, b []byte) *enclave.Memory {
 }
 
 // mustDestroy destroys e and fails the test if the release is reported.
-func mustDestroy(tb testing.TB, e *enclave.Memory) {
+func mustDestroy(tb testing.TB, e enclave.ByteAccess) {
 	tb.Helper()
 	if err := e.Destroy(); err != nil {
 		tb.Errorf("releasing a test enclave was reported: %v", err)
@@ -42,7 +42,7 @@ func mustDestroy(tb testing.TB, e *enclave.Memory) {
 }
 
 // openSecret copies the material out of an enclave so a test can assert on it.
-func openSecret(t *testing.T, e *enclave.Memory) []byte {
+func openSecret(t *testing.T, e enclave.ByteAccess) []byte {
 	t.Helper()
 	var out []byte
 	if err := e.WithBytes(func(b []byte) error {
@@ -56,7 +56,7 @@ func openSecret(t *testing.T, e *enclave.Memory) []byte {
 
 // refusing is a custody every constructor of which refuses.
 func refusing() secret.Custody {
-	return secret.Admitted(func() (*enclave.Allocator, error) { return nil, errors.New("no locked memory") })
+	return secret.Admitted(func() (enclave.Allocator, error) { return nil, errors.New("no locked memory") })
 }
 
 // TestFormatDashedKey pins the dashed rendering byte for byte.

@@ -20,14 +20,14 @@ import (
 // lifetime. It is bound to the keyslot it was recovered from, or -1 for a
 // key supplied directly (UnlockWithVolumeKey).
 type Key struct {
-	enclave *enclave.Memory
+	enclave enclave.ByteAccess
 	keyslot int
 }
 
 // New wraps e as a Key recovered from (or bound to) keyslot. It takes
 // ownership of e: destroying the Key destroys e, and the caller must not
 // use e again afterwards.
-func New(e *enclave.Memory, keyslot int) *Key {
+func New(e enclave.ByteAccess, keyslot int) *Key {
 	return &Key{enclave: e, keyslot: keyslot}
 }
 
@@ -64,7 +64,7 @@ func Borrow(op string, k *Key, fn func([]byte) error) error {
 // against a header's digest before the header is mapped. verify must neither
 // keep nor destroy the enclave. A nil Key, or one holding no enclave, is
 // refused with errs.ErrInvalidArgument without calling verify.
-func Verify(k *Key, verify func(*enclave.Memory) error) error {
+func Verify(k *Key, verify func(enclave.ByteAccess) error) error {
 	if k == nil || k.enclave == nil {
 		return &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "no volume key"}
 	}

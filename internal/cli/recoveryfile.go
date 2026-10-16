@@ -22,7 +22,7 @@ import (
 // passphrase would come from -- the terminal or a pipe. Either way,
 // surrounding whitespace is stripped and nothing else is changed: the
 // dashes and letter case in a recovery key's rendering are part of it.
-func readRecoveryCredential(e *env, path string) (*enclave.Memory, error) {
+func readRecoveryCredential(e *env, path string) (enclave.ByteAccess, error) {
 	if path != "" {
 		f, err := os.Open(path) // #nosec G304 -- the operator's own --recovery-file argument
 		if err != nil {
@@ -43,14 +43,14 @@ func readRecoveryCredential(e *env, path string) (*enclave.Memory, error) {
 // readRecoveryKeyFile reads r -- bounded the same way a key file is -- and
 // returns the first line that is not blank or a # comment, trimmed of
 // surrounding whitespace.
-func readRecoveryKeyFile(custody secret.Custody, r io.Reader, source string, limit int) (*enclave.Memory, error) {
+func readRecoveryKeyFile(custody secret.Custody, r io.Reader, source string, limit int) (enclave.ByteAccess, error) {
 	raw, err := readKeyFile(custody, r, source, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer custody.Release(raw)
 
-	var out *enclave.Memory
+	var out enclave.ByteAccess
 	err = secret.Borrow("recovery key", raw, func(b []byte) error {
 		for _, line := range bytes.Split(b, []byte("\n")) {
 			line = bytes.TrimSpace(line)
@@ -73,8 +73,8 @@ func readRecoveryKeyFile(custody secret.Custody, r io.Reader, source string, lim
 // trailing whitespace removed, without ever copying it outside protected
 // memory: the trim happens on a borrowed view, and the result is cloned
 // straight from that view.
-func trimEnclave(custody secret.Custody, op string, e *enclave.Memory) (*enclave.Memory, error) {
-	var out *enclave.Memory
+func trimEnclave(custody secret.Custody, op string, e enclave.ByteAccess) (enclave.ByteAccess, error) {
+	var out enclave.ByteAccess
 	err := secret.Borrow(op, e, func(b []byte) error {
 		var cerr error
 		out, cerr = custody.Clone(op, bytes.TrimSpace(b))

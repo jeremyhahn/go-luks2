@@ -57,7 +57,7 @@ type Codec struct {
 //
 // The returned enclave holds key.Size()*p.Stripes bytes and is the caller's to
 // destroy. p.Hash must be one a new keyslot may be written with (ValidateWriteHash).
-func (c Codec) Split(key *enclave.Memory, p Params) (*enclave.Memory, error) {
+func (c Codec) Split(key enclave.ByteAccess, p Params) (enclave.ByteAccess, error) {
 	if p.Stripes <= 0 {
 		return nil, &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "stripes must be positive"}
 	}
@@ -109,7 +109,7 @@ func (c Codec) Split(key *enclave.Memory, p Params) (*enclave.Memory, error) {
 // KiB-aligned, so the decrypted area usually is -- and only that many bytes
 // are consumed: merging the trailing alignment padding into the key would
 // corrupt it. A split shorter than that is refused as ErrInvalidKeyslot.
-func (c Codec) Merge(split *enclave.Memory, keySize int, p Params) (*enclave.Memory, error) {
+func (c Codec) Merge(split enclave.ByteAccess, keySize int, p Params) (enclave.ByteAccess, error) {
 	if keySize <= 0 || p.Stripes <= 0 {
 		return nil, &errs.Error{Kind: errs.ErrInvalidKeyslot, Detail: "the anti-forensic material is not the size its stripes and key size declare"}
 	}

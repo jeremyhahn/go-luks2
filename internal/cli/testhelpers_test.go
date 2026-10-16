@@ -187,7 +187,7 @@ func newPlainImage(t *testing.T, name string) string {
 	return path
 }
 
-func newTestPassphraseEnclave(t *testing.T) *enclave.Memory {
+func newTestPassphraseEnclave(t *testing.T) enclave.ByteAccess {
 	t.Helper()
 	e, err := enclave.NewMemoryCopy([]byte(testPassphrase))
 	if err != nil {

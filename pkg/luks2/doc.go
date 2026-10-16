@@ -7,9 +7,16 @@
 //
 // # Key custody and core dumps
 //
-// Credentials and keys cross this API as *enclave.Memory: go-enclave locked
-// memory, excluded from core dumps, borrowed only for the call that needs the
-// raw bytes. The standard-library KDF, AES and hash code those calls reach
+// Credentials and keys cross this API as enclave.ByteAccess handles, borrowed
+// only for the call that needs the raw bytes. Every handle that crosses the
+// API, or that this package creates, is go-enclave locked memory, excluded
+// from core dumps: a handle reporting any other backend is refused with
+// ErrNotLockedMemory, wrapping a *NotLockedMemoryError that names the
+// reported backend, before it is read, and it is not destroyed. The check
+// reads the backend the handle reports. go-enclave has no unforgeable
+// provenance check, so a handle that misreports its backend is outside the
+// guarantee, like any caller that already holds the key. The standard-library
+// KDF, AES and hash code those calls reach
 // still makes short-lived plain copies on the heap, and go-enclave cannot
 // keep those out of a core file.
 //

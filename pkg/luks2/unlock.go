@@ -18,14 +18,18 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/af"
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 	"github.com/jeremyhahn/go-luks2/internal/header"
+	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
 // validateVolumeKey rejects a volume key that cannot be one, before the device
 // is read. It checks the SHAPE only; whether the key opens this volume is the
 // digest's question, answered by verifyVolumeKeyForSegment.
-func validateVolumeKey(volumeKey *enclave.Memory) error {
+func validateVolumeKey(volumeKey enclave.ByteAccess) error {
 	if volumeKey == nil {
 		return &errs.Error{Kind: ErrInvalidCredential, Detail: "check the volume key: no enclave was given"}
+	}
+	if err := secret.Locked("check the volume key", volumeKey); err != nil {
+		return err
 	}
 	if !volumeKey.IsAlive() {
 		return &errs.Error{Kind: ErrInvalidCredential, Detail: "check the volume key: the enclave has been destroyed"}
@@ -106,7 +110,7 @@ func activationSegment(metadata *header.Metadata) (string, *header.Segment, erro
 // lives in an enclave and is destroyed on every path out, success or failure.
 // What is deliberately not enclaved is the ciphertext read off the device,
 // which is already on the device; see areacipher.Transform.DecryptEnclave.
-func unlockKeyslot(ctx context.Context, device string, keyslotID string, passphrase []byte, keyslot *header.Keyslot, digests map[string]*header.Digest, sys volumeSys) (*enclave.Memory, error) {
+func unlockKeyslot(ctx context.Context, device string, keyslotID string, passphrase []byte, keyslot *header.Keyslot, digests map[string]*header.Digest, sys volumeSys) (enclave.ByteAccess, error) {
 	f, err := openDevice("read the keyslot area", device, os.O_RDONLY, sys)
 	if err != nil {
 		return nil, err
@@ -119,7 +123,7 @@ func unlockKeyslot(ctx context.Context, device string, keyslotID string, passphr
 // unlockKeyslotFrom is unlockKeyslot reading the keyslot area through dev, a
 // descriptor the caller already holds -- the locked one, for a keyslot operation
 // pinned to the device it locked (#249, A10).
-func unlockKeyslotFrom(ctx context.Context, dev io.ReaderAt, keyslotID string, passphrase []byte, keyslot *header.Keyslot, digests map[string]*header.Digest, sys volumeSys) (*enclave.Memory, error) {
+func unlockKeyslotFrom(ctx context.Context, dev io.ReaderAt, keyslotID string, passphrase []byte, keyslot *header.Keyslot, digests map[string]*header.Digest, sys volumeSys) (enclave.ByteAccess, error) {
 	// THE GATE, and it is one call rather than a prefix of checks written here.
 	//
 	// screenKeyslot performs every rejection this function can make WITHOUT the
@@ -166,7 +170,7 @@ func unlockKeyslotFrom(ctx context.Context, dev io.ReaderAt, keyslotID string, p
 // the read-back then proves what the next unlock will see without paying the
 // KDF a second time.
 func recoverKeyslotKey(ctx context.Context, dev io.ReaderAt, keyslotID string, keyslot *header.Keyslot, plan keyslotPlan,
-	passphraseKey *enclave.Memory, digests map[string]*header.Digest, sys volumeSys) (*enclave.Memory, error) {
+	passphraseKey enclave.ByteAccess, digests map[string]*header.Digest, sys volumeSys) (enclave.ByteAccess, error) {
 	// The area bounds come from the screen, which parsed and bounded them --
 	// see screenKeyslot.
 	encryptedKeyMaterial := make([]byte, plan.areaSize)
@@ -246,7 +250,7 @@ func recoverKeyslotKey(ctx context.Context, dev io.ReaderAt, keyslotID string, k
 // whether the cause was a mismatch, an unsupported KDF, a corrupt salt or a
 // digest of implausible length: the caller learns that this key did not verify
 // and nothing about which digest rejected it or why.
-func verifyMasterKey(ctx context.Context, masterKey *enclave.Memory, keyslotID string, digests map[string]*header.Digest) error {
+func verifyMasterKey(ctx context.Context, masterKey enclave.ByteAccess, keyslotID string, digests map[string]*header.Digest) error {
 	return verifyMasterKeyWithFIPS(ctx, masterKey, keyslotID, digests, fips.Probe)
 }
 
@@ -254,7 +258,7 @@ func verifyMasterKey(ctx context.Context, masterKey *enclave.Memory, keyslotID s
 // so recoverKeyslotKey can honor sys.fipsMode: a digest whose KDF the policy
 // refuses must be classified as a FIPS refusal (keyslotRefusedByFIPS depends
 // on that), not folded into ErrWrongKey by deriving against it anyway.
-func verifyMasterKeyWithFIPS(ctx context.Context, masterKey *enclave.Memory, keyslotID string, digests map[string]*header.Digest, fipsMode func() fips.Mode) error {
+func verifyMasterKeyWithFIPS(ctx context.Context, masterKey enclave.ByteAccess, keyslotID string, digests map[string]*header.Digest, fipsMode func() fips.Mode) error {
 	return verifyKeyAgainstDigests(ctx, masterKey, digests,
 		func(digest *header.Digest) bool { return digestCovers(digest, keyslotID) },
 		func(applicable int) error { return unverifiableKeyslotError(keyslotID, applicable) }, fipsMode)
@@ -288,7 +292,7 @@ func verifyMasterKeyWithFIPS(ctx context.Context, masterKey *enclave.Memory, key
 // digest names no keyslot records no key size and cannot be checked, so it is
 // refused as a header fault. The format seam never produces one: a volume
 // formatted around an injected key always carries its recovery keyslot.
-func verifyVolumeKeyForSegment(ctx context.Context, volumeKey *enclave.Memory, segmentID string, metadata *header.Metadata) error {
+func verifyVolumeKeyForSegment(ctx context.Context, volumeKey enclave.ByteAccess, segmentID string, metadata *header.Metadata) error {
 	size := volumeKey.Size()
 
 	coversSegment := func(digest *header.Digest) bool {
@@ -340,7 +344,7 @@ func verifyVolumeKeyForSegment(ctx context.Context, volumeKey *enclave.Memory, s
 // tries every digest `covers` selects, and reports through `unverifiable` the
 // two header faults in which no comparison ran; see verifyMasterKey for why
 // those, and only those, are distinguished.
-func verifyKeyAgainstDigests(ctx context.Context, masterKey *enclave.Memory, digests map[string]*header.Digest,
+func verifyKeyAgainstDigests(ctx context.Context, masterKey enclave.ByteAccess, digests map[string]*header.Digest,
 	covers func(*header.Digest) bool, unverifiable func(applicable int) error, fipsMode func() fips.Mode) error {
 	// applicable counts the digests that ATTEST this keyslot; evaluated counts
 	// the ones that got as far as a comparison. They differ by exactly the
@@ -437,7 +441,7 @@ func verifyKeyAgainstDigests(ctx context.Context, masterKey *enclave.Memory, dig
 // It is the body of verifyMasterKey's loop, split out so MigrateToFIPS can ask
 // "does this particular digest attest this key" before it replaces the digest,
 // through the same screen and the same comparison the unlock uses.
-func evaluateDigest(masterKey *enclave.Memory, digest *header.Digest, fipsMode func() fips.Mode) (evaluated, matched bool) {
+func evaluateDigest(masterKey enclave.ByteAccess, digest *header.Digest, fipsMode func() fips.Mode) (evaluated, matched bool) {
 	// EVERY pre-derivation check lives in screenDigest, which the removal
 	// guard also consumes -- see keyslotHasUsableDigest. This function used
 	// to carry them inline, and the guard therefore had no way to ask the

@@ -23,7 +23,7 @@ import (
 
 const testPassphraseText = "correct horse battery staple"
 
-func newTestPassphrase(t *testing.T) *enclave.Memory {
+func newTestPassphrase(t *testing.T) enclave.ByteAccess {
 	t.Helper()
 	e, err := enclave.NewMemoryCopy([]byte(testPassphraseText))
 	if err != nil {
@@ -138,7 +138,7 @@ func TestVolumeUnlockWithVolumeKeyAcceptsTheRecoveredKey(t *testing.T) {
 
 	// Borrow is legitimate here only because this test lives inside the
 	// module; an outside consumer has no route to these bytes at all.
-	var vk *enclave.Memory
+	var vk enclave.ByteAccess
 	if err := volkey.Borrow("test setup", recovered, func(b []byte) error {
 		var berr error
 		vk, berr = enclave.NewMemoryCopy(b)
@@ -451,7 +451,7 @@ func TestVolumeUnlockRefusesAContainerMidReencryption(t *testing.T) {
 
 	kdfCalls := 0
 	real := v.sys.passphraseKDF
-	v.sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (*enclave.Memory, error) {
+	v.sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (enclave.ByteAccess, error) {
 		kdfCalls++
 		return real(ctx, p, kdf, keySize)
 	}
@@ -552,7 +552,7 @@ func TestVolumeUnlockRefusesAnIntegritySegment(t *testing.T) {
 
 	kdfCalls := 0
 	real := v.sys.passphraseKDF
-	v.sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (*enclave.Memory, error) {
+	v.sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (enclave.ByteAccess, error) {
 		kdfCalls++
 		return real(ctx, p, kdf, keySize)
 	}
@@ -660,7 +660,7 @@ func TestVolumeUnlockReadsTheKeyslotsThroughThePinnedDescriptor(t *testing.T) {
 		t.Fatalf("Open failed: %v", err)
 	}
 	real := v.sys.passphraseKDF
-	v.sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (*enclave.Memory, error) {
+	v.sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (enclave.ByteAccess, error) {
 		_ = os.Remove(link)
 		if err := os.Symlink(other, link); err != nil {
 			t.Errorf("re-pointing the symlink failed: %v", err)

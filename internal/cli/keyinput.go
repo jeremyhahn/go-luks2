@@ -68,7 +68,7 @@ func keyFileFlag(f *flags, name string) *keySource {
 // path or standard input, a pipe (standard input is not a terminal), or an
 // interactive prompt. The result is owned by the caller and must be
 // released through e.custody.
-func readPassphrase(e *env, prompt string, confirm bool, src keySource) (*enclave.Memory, error) {
+func readPassphrase(e *env, prompt string, confirm bool, src keySource) (enclave.ByteAccess, error) {
 	switch {
 	case src.path == "" && src.given != nil && src.given():
 		return nil, &KeyInputError{Op: "read key file", Source: `""`, Err: &Error{Kind: ErrEmptyKeyFilePath}}
@@ -102,7 +102,7 @@ func stdinIsTerminal(e *env) bool {
 
 // promptPassphrase reads a passphrase from the terminal, with echo
 // disabled, and optionally asks for and checks a confirmation.
-func promptPassphrase(e *env, prompt string, confirm bool) (*enclave.Memory, error) {
+func promptPassphrase(e *env, prompt string, confirm bool) (enclave.ByteAccess, error) {
 	_, _ = fmt.Fprint(e.stdout, prompt)
 
 	fd := e.getStdinFd()
@@ -148,7 +148,7 @@ func promptPassphrase(e *env, prompt string, confirm bool) (*enclave.Memory, err
 }
 
 // enclavesEqual compares two enclaves' contents in constant time.
-func enclavesEqual(a, b *enclave.Memory) (bool, error) {
+func enclavesEqual(a, b enclave.ByteAccess) (bool, error) {
 	var equal bool
 	err := secret.Borrow("compare credentials", a, func(ab []byte) error {
 		return secret.Borrow("compare credentials", b, func(bb []byte) error {
@@ -164,7 +164,7 @@ func enclavesEqual(a, b *enclave.Memory) (bool, error) {
 // locked memory, and refuses anything over limit. limit is a parameter
 // (production always passes maxKeyFileSize) so a test can exercise the
 // too-large path without allocating anywhere near 8 MiB of locked memory.
-func readKeyFile(custody secret.Custody, r io.Reader, source string, limit int) (*enclave.Memory, error) {
+func readKeyFile(custody secret.Custody, r io.Reader, source string, limit int) (enclave.ByteAccess, error) {
 	buf := newEnclaveBuffer(custody, "read key file", 64)
 	one := make([]byte, 1)
 	defer enclave.Wipe(one)
@@ -200,7 +200,7 @@ func readKeyFile(custody secret.Custody, r io.Reader, source string, limit int) 
 // newline -- directly into locked memory. It is the default credential
 // source when standard input is not a terminal and no --key-file was given.
 // limit is a parameter for the same reason readKeyFile's is.
-func readKeyLine(custody secret.Custody, r io.Reader, limit int) (*enclave.Memory, error) {
+func readKeyLine(custody secret.Custody, r io.Reader, limit int) (enclave.ByteAccess, error) {
 	buf := newEnclaveBuffer(custody, "read passphrase", 64)
 	one := make([]byte, 1)
 	defer enclave.Wipe(one)

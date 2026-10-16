@@ -22,10 +22,22 @@
 //
 // # The ownership model
 //
-// Key material is OWNED by a *enclave.Memory for its whole lifetime and
-// only ever BORROWED, through the narrowest WithBytes window that the consuming
-// call permits. Nothing in this module returns raw key bytes across a function
-// boundary where an enclave handle can be returned instead.
+// Key material is OWNED by an enclave.ByteAccess handle for its whole lifetime
+// and only ever BORROWED, through the narrowest WithBytes window that the
+// consuming call permits. Nothing in this module returns raw key bytes across a
+// function boundary where an enclave handle can be returned instead.
+//
+// ByteAccess is go-enclave's interface for a handle whose bytes the process
+// may read. Every handle that crosses the API, or that this module creates,
+// is go-enclave locked memory. The handles this module creates come from
+// go-enclave's process Allocator (Custody). A handle a caller passes in that
+// reports any other backend is refused with ErrNotLockedMemory before it is
+// read (Locked, which Borrow runs first); the refusal neither reads nor
+// destroys it, because it stays the caller's.
+//
+// The check reads the backend the handle reports. go-enclave has no
+// unforgeable provenance check, so a handle that misreports its backend is
+// outside the guarantee, like any caller that already holds the key.
 //
 // # What is deliberately NOT enclaved
 //
@@ -52,7 +64,7 @@
 //
 //  1. CREDENTIALS THAT ARRIVE AS PLAIN BYTES. The library API does not have this
 //     problem: Format, Unlock, UnlockKeyslot, AddKeyslot, ChangeKeyslot and
-//     ParseRecoveryKey all take a *enclave.Memory, which the caller owns
+//     ParseRecoveryKey all take an enclave.ByteAccess, which the caller owns
 //     and this module only borrows. What is left is the places a credential is
 //     first read from outside the process, before any enclave exists:
 //
@@ -255,7 +267,12 @@
 // # Fail closed
 //
 // Every helper here fails the operation when protected memory cannot be
-// obtained. There is no degradation to heap. See ErrProtectedMemory.
+// obtained. There is no degradation to heap. See ErrProtectedMemory. The
+// read-only copy Clone makes is frozen before it is handed out, through
+// go-enclave's Freezer capability; a handle without it fails the copy and is
+// destroyed, so there is no unfrozen fallback either. A caller's handle that
+// is not locked memory is refused, never copied into locked memory on the
+// caller's behalf (ErrNotLockedMemory).
 //
 // # Release
 //

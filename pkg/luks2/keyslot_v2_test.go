@@ -26,7 +26,7 @@ import (
 
 // newPassphraseEnclave is newTestPassphrase, parameterized on the text: used
 // here for the SECOND credential a keyslot test enrolls or rotates to.
-func newPassphraseEnclave(t *testing.T, text string) *enclave.Memory {
+func newPassphraseEnclave(t *testing.T, text string) enclave.ByteAccess {
 	t.Helper()
 	e, err := enclave.NewMemoryCopy([]byte(text))
 	if err != nil {
@@ -488,17 +488,17 @@ func TestVolumeKeyslotWritesJudgeAnExplicitKDFByTheVolumePolicy(t *testing.T) {
 	argon2 := KeyslotParams{KDF: KDFParams{Type: KDFArgon2id, Time: 1, MemoryKiB: minArgon2MemoryKB, Parallel: 1}}
 	cases := []struct {
 		name  string
-		write func(v *Volume, key *Key, pass *enclave.Memory) error
+		write func(v *Volume, key *Key, pass enclave.ByteAccess) error
 	}{
-		{"AddKeyslot", func(v *Volume, key *Key, pass *enclave.Memory) error {
+		{"AddKeyslot", func(v *Volume, key *Key, pass enclave.ByteAccess) error {
 			_, err := v.AddKeyslot(context.Background(), key, pass, argon2)
 			return err
 		}},
-		{"ChangeKeyslot", func(v *Volume, key *Key, pass *enclave.Memory) error {
+		{"ChangeKeyslot", func(v *Volume, key *Key, pass enclave.ByteAccess) error {
 			_, err := v.ChangeKeyslot(context.Background(), key, pass, argon2)
 			return err
 		}},
-		{"Enroll", func(v *Volume, key *Key, _ *enclave.Memory) error {
+		{"Enroll", func(v *Volume, key *Key, _ enclave.ByteAccess) error {
 			_, err := v.Enroll(context.Background(), key, &fakeKeyProvider{credential: []byte("a provider credential"), token: Token{Type: "x-provider"}}, argon2)
 			return err
 		}},

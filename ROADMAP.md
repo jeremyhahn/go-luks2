@@ -7,7 +7,7 @@
 
 go-luks2 is the Layer 0 LUKS2 disk encryption library and CLI of the portfolio.
 It creates, opens and manages LUKS2 volumes interoperably with the cryptsetup userspace tools.
-It embeds go-enclave as a library and inherits its locked-memory custody: key material stays in go-enclave locked memory for its whole lifetime, and credentials and keys cross its API as go-enclave's own `*enclave.Memory`.
+It embeds go-enclave as a library and inherits its locked-memory custody: key material stays in go-enclave locked memory for its whole lifetime, and credentials and keys cross its API as go-enclave's own `enclave.ByteAccess`.
 It runs embedded in its consumer's process, never as a second product, and keeps no store, cluster, engine or service of its own; the only state it writes is the LUKS2 header, keyslots and tokens on the volume.
 Purpose and boundaries are in [SPEC.md](docs/SPEC.md#purpose).
 
@@ -60,6 +60,6 @@ No future feature. SPEC.md lists none.
 
 ## Dependencies
 
-- Up: `github.com/jeremyhahn/go-enclave` v0.8.0-rc.2 (locked-memory primitive, the only in-house module), for **volumes** key custody. It needs a final release before `v1.0.0` ([#211](../../issues/211)).
+- Up: `github.com/jeremyhahn/go-enclave` v0.9.0-alpha (locked-memory primitive, the only in-house module), for **volumes** key custody. It needs a final release before `v1.0.0` ([#211](../../issues/211)).
 - Down: go-trusted-platform (encrypted volume management), which uses **volumes**.
 - Standards watch: LUKS2 On-Disk Format Specification (work in progress), pinned at version 1.1.3 (LUKS2-docs commit `55f31ae5`), implemented by `internal/header` and `pkg/luks2` ([docs/reference/](docs/reference/README.md)).

@@ -27,7 +27,7 @@ func (p *recordingProvider) Token() Token {
 	return Token{}
 }
 
-func (p *recordingProvider) Passphrase(context.Context) (*enclave.Memory, error) {
+func (p *recordingProvider) Passphrase(context.Context) (enclave.ByteAccess, error) {
 	p.passCalls++
 	return newTestPassphrase(p.t), nil
 }

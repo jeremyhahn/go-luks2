@@ -87,7 +87,7 @@ func countKDFCalls(t *testing.T) (*int, volumeSys) {
 	t.Helper()
 	calls := 0
 	sys := testVolumeSys()
-	sys.passphraseKDFOverride = func(context.Context, []byte, *header.KDF, int) (*enclave.Memory, error) {
+	sys.passphraseKDFOverride = func(context.Context, []byte, *header.KDF, int) (enclave.ByteAccess, error) {
 		calls++
 		return nil, errors.New("derivation reached")
 	}
@@ -270,7 +270,7 @@ func TestAKeyslotTheAllocatorCanNeverAdmitIsRefusedBeforeDeriving(t *testing.T) 
 	}
 	previous := custody
 	t.Cleanup(func() { custody = previous })
-	custody = secret.Admitted(func() (*enclave.Allocator, error) { return small, nil })
+	custody = secret.Admitted(func() (enclave.Allocator, error) { return small, nil })
 	calls, sys := countKDFCalls(t)
 
 	err = testKeyForTestWithSys(device, []byte(conformancePassphrase), sys)
@@ -287,22 +287,22 @@ func TestAKeyslotTheAllocatorCanNeverAdmitIsRefusedBeforeDeriving(t *testing.T) 
 // the only moment the total rises, so sampling after each one sees the peak.
 //
 // NOT PARALLEL, in every caller: custody is package state.
-func peakRecorder(t *testing.T, budget int64) (*enclave.Allocator, *int64) {
+func peakRecorder(t *testing.T, budget int64) (enclave.Allocator, *int64) {
 	t.Helper()
 	a, err := enclave.NewAllocator(budget)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var peak int64
-	sample := func(e *enclave.Memory, err error) (*enclave.Memory, error) {
+	sample := func(e enclave.ByteAccess, err error) (enclave.ByteAccess, error) {
 		peak = max(peak, a.InUse())
 		return e, err
 	}
-	admitted := secret.Admitted(func() (*enclave.Allocator, error) { return a, nil })
+	admitted := secret.Admitted(func() (enclave.Allocator, error) { return a, nil })
 	measuring := admitted
-	measuring.Sized = func(n int) (*enclave.Memory, error) { return sample(admitted.Sized(n)) }
-	measuring.Moved = func(b []byte) (*enclave.Memory, error) { return sample(admitted.Moved(b)) }
-	measuring.Copied = func(b []byte) (*enclave.Memory, error) { return sample(admitted.Copied(b)) }
+	measuring.Sized = func(n int) (enclave.ByteAccess, error) { return sample(admitted.Sized(n)) }
+	measuring.Moved = func(b []byte) (enclave.ByteAccess, error) { return sample(admitted.Moved(b)) }
+	measuring.Copied = func(b []byte) (enclave.ByteAccess, error) { return sample(admitted.Copied(b)) }
 	previous := custody
 	t.Cleanup(func() { custody = previous })
 	custody = measuring
@@ -408,7 +408,7 @@ func TestAnAllocatorSizedToThePlannedPeakOpensTheVolume(t *testing.T) {
 		calls := 0
 		sys := testVolumeSys()
 		real := sys.passphraseKDF
-		sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, n int) (*enclave.Memory, error) {
+		sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, n int) (enclave.ByteAccess, error) {
 			calls++
 			return real(ctx, p, kdf, n)
 		}

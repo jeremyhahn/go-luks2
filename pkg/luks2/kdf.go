@@ -309,7 +309,7 @@ func toKDFParams(k *header.KDF) kdf.Params {
 // failure path too -- so what survives is whatever copy the compiler or the
 // collector made in between, plus the KDF's own scratch, which is unreachable
 // from here. See ErrProtectedMemory for why a failure here is fatal.
-func deriveKeyEnclave(ctx context.Context, passphrase []byte, k *header.KDF, keySize int, sys volumeSys) (*enclave.Memory, error) {
+func deriveKeyEnclave(ctx context.Context, passphrase []byte, k *header.KDF, keySize int, sys volumeSys) (enclave.ByteAccess, error) {
 	if k == nil {
 		return nil, &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "no KDF object"}
 	}
@@ -346,7 +346,7 @@ func reclassifyUnsupportedKDF(err error) error {
 // Only the keyslot derivation goes through it. The digest derivation in
 // deriveKeySecret does not, because the injected-key path DOES run that one
 // and a test forbidding this seam must not forbid it too.
-func (s volumeSys) passphraseKDF(ctx context.Context, passphrase []byte, k *header.KDF, keySize int) (*enclave.Memory, error) {
+func (s volumeSys) passphraseKDF(ctx context.Context, passphrase []byte, k *header.KDF, keySize int) (enclave.ByteAccess, error) {
 	if s.passphraseKDFOverride != nil {
 		return s.passphraseKDFOverride(ctx, passphrase, k, keySize)
 	}
@@ -372,14 +372,14 @@ func (s volumeSys) passphraseKDF(ctx context.Context, passphrase []byte, k *head
 // avoid that is prohibited outright by the owner ruling of 2026-08-25, which
 // rules that the protected-memory mandate yields here.
 // Recorded as exposure 2 in internal/secret.
-func deriveKeySecret(ctx context.Context, material *enclave.Memory, k *header.KDF, keySize int, sys volumeSys) (*enclave.Memory, error) {
+func deriveKeySecret(ctx context.Context, material enclave.ByteAccess, k *header.KDF, keySize int, sys volumeSys) (enclave.ByteAccess, error) {
 	return deriveKeySecretIn(ctx, material, k, keySize, sys.fipsMode())
 }
 
 // deriveKeySecretIn is deriveKeySecret under an explicit FIPS mode, for a
 // caller that is handed the operation's mode rather than its whole volumeSys
 // (evaluateDigest). It is the mode the caller's sys reports, never a default.
-func deriveKeySecretIn(ctx context.Context, material *enclave.Memory, k *header.KDF, keySize int, mode fips.Mode) (*enclave.Memory, error) {
+func deriveKeySecretIn(ctx context.Context, material enclave.ByteAccess, k *header.KDF, keySize int, mode fips.Mode) (enclave.ByteAccess, error) {
 	if k == nil {
 		return nil, &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "no KDF object"}
 	}

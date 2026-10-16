@@ -111,7 +111,7 @@ func TestExcessiveKDFCostIsRefusedBeforeDeriving(t *testing.T) {
 	sys := testVolumeSys()
 	// It does not derive: on a mutation that ran it first, deriving a billion
 	// iterations would hang the test instead of failing it.
-	sys.passphraseKDFOverride = func(context.Context, []byte, *header.KDF, int) (*enclave.Memory, error) {
+	sys.passphraseKDFOverride = func(context.Context, []byte, *header.KDF, int) (enclave.ByteAccess, error) {
 		derivations++
 		return nil, errors.New("the keyslot KDF was reached")
 	}

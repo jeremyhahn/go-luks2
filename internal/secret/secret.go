@@ -25,21 +25,21 @@ import (
 type Custody struct {
 	// Sized returns an enclave over n bytes of locked, zeroed, writable
 	// memory, as enclave.NewMemorySized does.
-	Sized func(n int) (*enclave.Memory, error)
+	Sized func(n int) (enclave.ByteAccess, error)
 
 	// Moved moves b into a frozen enclave and wipes b on every path, as
 	// enclave.NewMemory does.
-	Moved func(b []byte) (*enclave.Memory, error)
+	Moved func(b []byte) (enclave.ByteAccess, error)
 
 	// Copied copies b into a frozen enclave and leaves b alone, as
 	// enclave.NewMemoryCopy does.
-	Copied func(b []byte) (*enclave.Memory, error)
+	Copied func(b []byte) (enclave.ByteAccess, error)
 
 	// Destroy releases an enclave and returns go-enclave's release report.
-	Destroy func(e *enclave.Memory) error
+	Destroy func(e enclave.ByteAccess) error
 
 	// Allocator returns the allocator the constructors admit through.
-	Allocator func() (*enclave.Allocator, error)
+	Allocator func() (enclave.Allocator, error)
 }
 
 // System is the custody every production path uses: the constructors admit
@@ -54,8 +54,8 @@ func System() Custody {
 // RLIMIT_MEMLOCK by default, and never installs or builds an allocator of its
 // own. A refusal is the allocator's typed enclave.ErrBudgetExhausted rather
 // than an mlock failure partway through.
-func Admitted(allocator func() (*enclave.Allocator, error)) Custody {
-	sized := func(n int) (*enclave.Memory, error) {
+func Admitted(allocator func() (enclave.Allocator, error)) Custody {
+	sized := func(n int) (enclave.ByteAccess, error) {
 		a, err := allocator()
 		if err != nil {
 			return nil, err
@@ -64,7 +64,7 @@ func Admitted(allocator func() (*enclave.Allocator, error)) Custody {
 	}
 	return Custody{
 		Sized: sized,
-		Moved: func(b []byte) (*enclave.Memory, error) {
+		Moved: func(b []byte) (enclave.ByteAccess, error) {
 			a, err := allocator()
 			if err != nil {
 				enclave.Wipe(b)
@@ -72,29 +72,43 @@ func Admitted(allocator func() (*enclave.Allocator, error)) Custody {
 			}
 			return a.New(b)
 		},
-		Copied: func(src []byte) (*enclave.Memory, error) {
-			if len(src) == 0 {
-				return nil, enclave.ErrEmptyEnclave
-			}
-			e, err := sized(len(src))
-			if err != nil {
-				return nil, err
-			}
-			if err := e.WithBytes(func(dst []byte) error {
-				copy(dst, src)
-				return nil
-			}); err != nil {
-				_ = e.Destroy()
-				return nil, err
-			}
-			if err := e.Freeze(); err != nil {
-				_ = e.Destroy()
-				return nil, err
-			}
-			return e, nil
-		},
-		Destroy:   (*enclave.Memory).Destroy,
+		Copied:    copiedInto(sized),
+		Destroy:   enclave.ByteAccess.Destroy,
 		Allocator: allocator,
+	}
+}
+
+// copiedInto builds Custody.Copied over sized: the copy is made into a fresh
+// enclave, which is then frozen read-only. Freeze is a capability reached
+// through enclave.As; a handle that is not a Freezer fails the copy with a
+// *enclave.CapabilityError and is destroyed -- the material is never handed
+// out in writable pages.
+func copiedInto(sized func(n int) (enclave.ByteAccess, error)) func([]byte) (enclave.ByteAccess, error) {
+	return func(src []byte) (enclave.ByteAccess, error) {
+		if len(src) == 0 {
+			return nil, enclave.ErrEmptyEnclave
+		}
+		e, err := sized(len(src))
+		if err != nil {
+			return nil, err
+		}
+		if err := e.WithBytes(func(dst []byte) error {
+			copy(dst, src)
+			return nil
+		}); err != nil {
+			_ = e.Destroy()
+			return nil, err
+		}
+		var f enclave.Freezer
+		if !enclave.As(e, &f) {
+			_ = e.Destroy()
+			return nil, &enclave.CapabilityError{Backend: e.Backend().Name(), Capability: enclave.CapabilityFreeze}
+		}
+		if err := f.Freeze(); err != nil {
+			_ = e.Destroy()
+			return nil, err
+		}
+		return e, nil
 	}
 }
 
@@ -120,7 +134,7 @@ func (c Custody) Admissible(op string, n int64) error {
 // Use Adopt only for material that already exists outside an enclave and
 // cannot be produced inside one. op names the material in an error; it never
 // carries key content or a key length.
-func (c Custody) New(op string, n int) (*enclave.Memory, error) {
+func (c Custody) New(op string, n int) (enclave.ByteAccess, error) {
 	e, err := c.Sized(n)
 	if err != nil {
 		return nil, &errs.Error{Kind: ErrProtectedMemory, Detail: op, Err: err}
@@ -138,7 +152,7 @@ func (c Custody) New(op string, n int) (*enclave.Memory, error) {
 // This is the second-best constructor and exists only for the stdlib boundary
 // where a value is handed back already on the heap -- a KDF return, an
 // AF-merge result. Prefer New.
-func (c Custody) Adopt(op string, b []byte) (*enclave.Memory, error) {
+func (c Custody) Adopt(op string, b []byte) (enclave.ByteAccess, error) {
 	e, err := c.Moved(b)
 	if err != nil {
 		return nil, &errs.Error{Kind: ErrProtectedMemory, Detail: op, Err: err}
@@ -153,7 +167,7 @@ func (c Custody) Adopt(op string, b []byte) (*enclave.Memory, error) {
 // A master key produced on the heap and then moved would have spent its first
 // moments on swappable, core-dumpable memory that a later wipe cannot reliably
 // reach. rand is crypto/rand.Reader on every production path.
-func (c Custody) Random(op string, n int, rand io.Reader) (*enclave.Memory, error) {
+func (c Custody) Random(op string, n int, rand io.Reader) (enclave.ByteAccess, error) {
 	e, err := c.New(op, n)
 	if err != nil {
 		return nil, err
@@ -179,7 +193,7 @@ func (c Custody) Random(op string, n int, rand io.Reader) (*enclave.Memory, erro
 // The result is read-only, exactly as Adopt's is: the material is complete
 // when this returns, so a write through a slice retained past its borrow
 // faults the process instead of silently corrupting a credential.
-func (c Custody) Clone(op string, b []byte) (*enclave.Memory, error) {
+func (c Custody) Clone(op string, b []byte) (enclave.ByteAccess, error) {
 	e, err := c.Copied(b)
 	if err != nil {
 		return nil, &errs.Error{Kind: ErrProtectedMemory, Detail: op, Err: err}
@@ -194,7 +208,7 @@ func (c Custody) Clone(op string, b []byte) (*enclave.Memory, error) {
 // of Clone cannot be. The pages are writable for the enclave's whole life, so
 // the copy should be short-lived scratch, destroyed as soon as the normalised
 // bytes have been consumed; material returned to a caller belongs in Clone.
-func (c Custody) CloneWritable(op string, b []byte) (*enclave.Memory, error) {
+func (c Custody) CloneWritable(op string, b []byte) (enclave.ByteAccess, error) {
 	return c.CloneFiltered(op, b, func(byte) bool { return true })
 }
 
@@ -204,7 +218,7 @@ func (c Custody) CloneWritable(op string, b []byte) (*enclave.Memory, error) {
 // It exists so that stripping separators out of a formatted secret happens
 // inside locked memory rather than through strings.ReplaceAll, which would
 // yield an unwipeable copy of the whole thing.
-func (c Custody) CloneFiltered(op string, b []byte, keep func(byte) bool) (*enclave.Memory, error) {
+func (c Custody) CloneFiltered(op string, b []byte, keep func(byte) bool) (enclave.ByteAccess, error) {
 	n := 0
 	for _, x := range b {
 		if keep(x) {
@@ -290,7 +304,7 @@ func (c Custody) CloneFiltered(op string, b []byte, keep func(byte) bool) (*encl
 // of them again in the next WipeAll's SweepError, so dropping the Destroy
 // report here does not lose it. The process's owner learns of it at shutdown,
 // where it can act on it; this layer cannot.
-func (c Custody) Release(secrets ...*enclave.Memory) {
+func (c Custody) Release(secrets ...enclave.ByteAccess) {
 	for _, s := range secrets {
 		if s == nil {
 			continue
@@ -309,7 +323,14 @@ func (c Custody) Release(secrets ...*enclave.Memory) {
 // both are go-enclave contracts, not local conventions. fn MAY borrow other
 // enclaves, which is what makes the crypto helpers composable. fn's own error
 // passes through unwrapped; only the custody failure is reclassified.
-func Borrow(op string, e *enclave.Memory, fn func([]byte) error) error {
+func Borrow(op string, e enclave.ByteAccess, fn func([]byte) error) error {
+	if e == nil {
+		// A nil handle holds nothing: it is reported as a destroyed one.
+		return &errs.Error{Kind: ErrProtectedMemory, Detail: op, Err: enclave.ErrEnclaveDestroyed}
+	}
+	if err := Locked(op, e); err != nil {
+		return err
+	}
 	err := e.WithBytes(fn)
 	if err == nil {
 		return nil
@@ -318,4 +339,24 @@ func Borrow(op string, e *enclave.Memory, fn func([]byte) error) error {
 		return &errs.Error{Kind: ErrProtectedMemory, Detail: op, Err: err}
 	}
 	return err
+}
+
+// Locked refuses a handle that reports a backend other than go-enclave
+// locked memory, with ErrNotLockedMemory wrapping a *NotLockedMemoryError
+// that names the backend reported. It reads only the handle's Backend: the
+// bytes are never borrowed and the handle is never destroyed, because a
+// caller's handle stays the caller's. A nil handle is left to the caller's
+// own nil rule (Borrow reports it destroyed).
+//
+// The check reads the backend the handle reports. go-enclave has no
+// unforgeable provenance check, so a handle that misreports its backend is
+// outside the guarantee, like any caller that already holds the key.
+func Locked(op string, e enclave.ByteAccess) error {
+	if e == nil {
+		return nil
+	}
+	if name := e.Backend().Name(); name != enclave.LockedMemoryBackendName {
+		return &errs.Error{Kind: ErrNotLockedMemory, Detail: op, Err: &NotLockedMemoryError{Backend: name}}
+	}
+	return nil
 }

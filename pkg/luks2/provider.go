@@ -116,7 +116,7 @@ func (v *Volume) Enroll(ctx context.Context, key *Key, p KeyProvider, kp Keyslot
 	// master key; it does not take ownership of it. A clone is handed in, the
 	// same pattern UnlockWithVolumeKey uses for the opposite direction, so
 	// the caller's key is untouched by this call.
-	var masterKey *enclave.Memory
+	var masterKey enclave.ByteAccess
 	if err := volkey.Borrow(op, key, func(b []byte) error {
 		var cerr error
 		masterKey, cerr = v.sys.custody.Clone(op, b)
@@ -231,7 +231,7 @@ func (v *Volume) UnlockWithProvider(ctx context.Context, p KeyProvider) (*Key, e
 	preferred, normal, ignored := keyslotsByPriority(metadata, ids)
 	order := slices.Concat(preferred, normal, ignored)
 
-	var masterKey *enclave.Memory
+	var masterKey enclave.ByteAccess
 	var slotID string
 	err = secret.Borrow(op, credential, func(b []byte) error {
 		var derr error

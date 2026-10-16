@@ -186,7 +186,7 @@ func libVolume(t *testing.T, opts FormatOptions) string {
 // pre-redesign library's luks2.VerifyRecoveryKey did before B.6 deleted it
 // in favor of (*luks2.Volume).Unlock: a failure to verify (ErrWrongKey) is
 // (false, nil) rather than an error.
-func verifyRecoveryKeyForTest(device string, key *enclave.Memory) (bool, error) {
+func verifyRecoveryKeyForTest(device string, key enclave.ByteAccess) (bool, error) {
 	ctx := context.Background()
 	v, err := luks2.Open(ctx, device, luks2.WithReadOnly())
 	if err != nil {

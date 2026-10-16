@@ -66,7 +66,7 @@ type Deriver struct {
 // into an enclave. custody.Adopt wipes the intermediate key on every path, so
 // there is no window in which the derived key outlives this call in the
 // clear.
-func (d Deriver) Derive(ctx context.Context, passphrase []byte, p Params, keySize int) (*enclave.Memory, error) {
+func (d Deriver) Derive(ctx context.Context, passphrase []byte, p Params, keySize int) (enclave.ByteAccess, error) {
 	key, err := d.DerivePlain(ctx, passphrase, p, keySize)
 	if err != nil {
 		return nil, err
@@ -77,8 +77,8 @@ func (d Deriver) Derive(ctx context.Context, passphrase []byte, p Params, keySiz
 // DeriveFromSecret runs Derive with passphrase material borrowed from an
 // enclave, for the two callers whose "passphrase" is the volume master key
 // (digest verification and digest creation).
-func (d Deriver) DeriveFromSecret(ctx context.Context, material *enclave.Memory, p Params, keySize int) (*enclave.Memory, error) {
-	var derived *enclave.Memory
+func (d Deriver) DeriveFromSecret(ctx context.Context, material enclave.ByteAccess, p Params, keySize int) (enclave.ByteAccess, error) {
+	var derived enclave.ByteAccess
 	err := secret.Borrow("derive from secret", material, func(b []byte) error {
 		var err error
 		derived, err = d.Derive(ctx, b, p, keySize)

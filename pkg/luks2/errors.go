@@ -325,6 +325,13 @@ var (
 	// library needs and why the refusal is not negotiable.
 	ErrProtectedMemory = secret.ErrProtectedMemory
 
+	// ErrNotLockedMemory indicates that a credential or key handle passed in
+	// reports a backend other than go-enclave locked memory, and that the
+	// operation was REFUSED before the handle was read. The handle is not
+	// destroyed: it is the caller's. errors.As reaches a
+	// *NotLockedMemoryError naming the backend the handle reported.
+	ErrNotLockedMemory = secret.ErrNotLockedMemory
+
 	// ErrLockContended indicates that the exclusive lock on a device could not
 	// be taken within the caller's wait budget, because another holder kept it
 	// for the whole of that budget.
@@ -390,6 +397,12 @@ type Error = errs.Error
 // a caller's errors.As(&LockTimeoutError{}) is unaffected by where the
 // classification happens to live.
 type LockTimeoutError = device.LockTimeoutError
+
+// NotLockedMemoryError is the reason behind ErrNotLockedMemory: Backend is
+// the name the refused handle reported. Defined in internal/secret, where
+// the check sits beside the one borrow every handle goes through, and
+// aliased here so a caller can match it with errors.As.
+type NotLockedMemoryError = secret.NotLockedMemoryError
 
 // An unlock refusal is an *errs.Error: Kind is the classifying cause when
 // the keyslot scan has one -- ErrInvalidCredential, ErrWrongKey,

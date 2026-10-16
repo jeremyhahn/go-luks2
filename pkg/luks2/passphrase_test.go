@@ -71,7 +71,7 @@ func TestValidatePassphraseErrorShape(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		pass     *enclave.Memory
+		pass     enclave.ByteAccess
 		wantKind error
 	}{
 		{"too short", enclaveFrom(t, []byte("short")), ErrInvalidCredential},

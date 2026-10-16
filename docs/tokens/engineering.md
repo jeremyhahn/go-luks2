@@ -17,7 +17,7 @@ func (v *Volume) AddToken(ctx context.Context, t Token) (int, error)
 func (v *Volume) SetToken(ctx context.Context, id int, t Token) error
 func (v *Volume) RemoveToken(ctx context.Context, id int) error
 type KeyProvider interface {
-	Passphrase(ctx context.Context) (*enclave.Memory, error)
+	Passphrase(ctx context.Context) (enclave.ByteAccess, error)
 	Token() Token
 }
 type Enrollment struct { Keyslot KeyslotInfo; Token int }
@@ -32,7 +32,7 @@ const SecretLength = 32 // hmac-secret derived from one salt, bytes
 type Command struct{ /* unexported */ }
 type CommandOption func(*Command)
 func NewCommand(path string, opts ...CommandOption) (*Command, error)
-func (p *Command) Passphrase(ctx context.Context) (*enclave.Memory, error)
+func (p *Command) Passphrase(ctx context.Context) (enclave.ByteAccess, error)
 func (p *Command) Token() luks2.Token
 type FIDO2Params struct { RelyingParty string; CredentialID, Salt []byte; UserPresence, UserVerification, ClientPIN bool }
 type FIDO2 struct{ /* unexported */ }
@@ -40,7 +40,7 @@ type FIDO2Option func(*fido2Options)
 func WithFIDO2Tools(credPath, assertPath string) FIDO2Option // empty keeps that tool's default
 func WithDevice(path string) FIDO2Option                     // required
 func NewFIDO2(p FIDO2Params, opts ...FIDO2Option) (*FIDO2, error)
-func (f *FIDO2) Passphrase(ctx context.Context) (*enclave.Memory, error)
+func (f *FIDO2) Passphrase(ctx context.Context) (enclave.ByteAccess, error)
 func (f *FIDO2) Token() luks2.Token
 func FromToken(t luks2.Token, opts ...FIDO2Option) (luks2.KeyProvider, error)
 type FIDO2CredentialParams struct { RelyingParty, UserName string; UserID []byte; Resident, UserVerification bool }
