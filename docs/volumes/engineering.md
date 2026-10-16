@@ -377,9 +377,9 @@ for a package that no longer exists, and a package held to 90% in no tier.
 
 The race detector covers the default-tag build of every package, in the full
 tier only: push to `main`, `workflow_dispatch`, and a pull request labelled
-`ci:full`. CI runs on label events, so adding the label starts the full tier on
-the pull request's current head at once; any other label re-runs the ordinary
-tier on the same commit. `CI Gate`, the one required check, gates both tiers: a
+`ci:full`. CI does not run on label events: the label is read when a run
+starts, so a `ci:full` added to an open pull request takes effect on its next
+push or update-branch, or through `workflow_dispatch`. `CI Gate`, the one required check, gates both tiers: a
 full-tier job may be skipped only when the full tier was not selected. An ordinary pull
 request runs the same unit legs without `-race`, in the devcontainer's
 toolchain image, as CI's image job runs every PR-tier stage. The

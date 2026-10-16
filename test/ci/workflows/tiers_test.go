@@ -25,6 +25,9 @@ var (
 	prTypes    = regexp.MustCompile(`(?m)^  pull_request:\n    branches: \[main\]\n(?:    #.*\n)*    types: \[(.*)\]$`)
 	fullTierEn = regexp.MustCompile(`(?m)^          FULL_TIER: \$\{\{ (.*) \}\}$`)
 	scheduleOn = regexp.MustCompile(`(?m)^\s*schedule:`)
+	// jobRunsOn is declared here, not shared with batch_test.go, which is
+	// export-ignore: the published tree has no batch_test.go to borrow from.
+	jobRunsOn = regexp.MustCompile(`(?m)^    runs-on: (\S+)`)
 )
 
 func jobIfOf(t *testing.T, jobText string) string {
@@ -78,19 +81,39 @@ func TestJobNamesAreLiteral(t *testing.T) {
 	}
 }
 
-// TestLabelEventsRunCI: adding ci:full starts the full tier, so ci.yml fires
-// on `labeled`. Any other label re-runs the PR tier on the same commit, a real
-// evaluation, so nothing in ci.yml may branch on the label event itself: a job
-// skipped by such a condition still posts a status under its name, and a
-// skipped CI Gate would overwrite the head's real one.
-func TestLabelEventsRunCI(t *testing.T) {
+// TestCIGateRunsOnTheGateRunners: CI Gate runs on `ci-gate`, the reserved
+// 1-CPU gate slots, so it never queues behind the jobs it waits for. A slot
+// that small takes no checkout and no action: the gate is one run step.
+func TestCIGateRunsOnTheGateRunners(t *testing.T) {
+	gate := job(t, readFile(t, ".github/workflows/ci.yml"), "gate")
+	if got := jobRunsOn.FindAllStringSubmatch(gate, -1); len(got) != 1 || got[0][1] != "ci-gate" {
+		t.Errorf("CI Gate runs on %v, want ci-gate", got)
+	}
+	if strings.Contains(gate, "actions/checkout") {
+		t.Error("CI Gate checks out the repository; the ci-gate slots take no checkout")
+	}
+	if regexp.MustCompile(`(?m)^\s*(-\s+)?uses:`).MatchString(gate) {
+		t.Error("CI Gate has a uses: step; the ci-gate slots take no action")
+	}
+	if !regexp.MustCompile(`(?m)^    - ci-gate$`).MatchString(readFile(t, ".github/actionlint.yaml")) {
+		t.Error(".github/actionlint.yaml does not list the ci-gate label; Lint reports it as unknown")
+	}
+}
+
+// TestNoLabelTrigger: ci.yml does not fire on `labeled`. Gitea sends every
+// label add and remove as `labeled`, so each review or task label started a
+// run that canceled the PR's run in progress. A `ci:full` added later is read
+// when the next run starts. Nothing in ci.yml may branch on the label event
+// either: a job skipped by such a condition still posts a status under its
+// name, and a skipped CI Gate would overwrite the head's real one.
+func TestNoLabelTrigger(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
 	m := prTypes.FindStringSubmatch(ci)
 	if m == nil {
 		t.Fatal("ci.yml's pull_request trigger lists no types")
 	}
-	if m[1] != "opened, synchronize, reopened, labeled" {
-		t.Errorf("ci.yml's pull_request types are [%s], want [opened, synchronize, reopened, labeled]", m[1])
+	if m[1] != "opened, synchronize, reopened" {
+		t.Errorf("ci.yml's pull_request types are [%s], want [opened, synchronize, reopened]", m[1])
 	}
 	for _, bad := range []string{"github.event.action", "github.event.label.name"} {
 		if strings.Contains(ci, bad) {

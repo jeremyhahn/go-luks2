@@ -57,22 +57,33 @@ name: CI
 #   push or workflow_dispatch                  -> full tier
 #   pull_request labelled ci:full              -> full tier
 #
-# LABEL EVENTS RUN CI. ci.yml fires on `labeled`, so ADDING ci:full starts the
-# full tier on the PR's current head at once. Any other label re-runs the PR
-# tier on the same commit; that run is a real evaluation, so the CI Gate it
-# posts is a real result. Nothing here branches on the label event itself, and
-# the gate is never skipped by an event condition: a job skipped by `if:` still
-# posts a status under its name, and both hosts count a skipped required check
-# as passing. Renaming the gate per event is no way out either: Gitea does not
-# evaluate expressions in a job's `name:` and posts the expression verbatim.
+# LABEL EVENTS DO NOT RUN CI. ci.yml does not fire on `labeled`: on this host
+# every label add and remove arrives as `labeled`, so each review or task
+# label started a run that cancelled the PR's run in progress. A label is read
+# when a run starts, so ci:full selects the full tier for any run that begins
+# with the label on the PR. The cost: ci:full added to an open PR takes effect
+# on its next push or update-branch, or through workflow_dispatch. Nothing
+# here branches on the label event itself, and the gate is never skipped by an
+# event condition: a job skipped by `if:` still posts a status under its name,
+# and both hosts count a skipped required check as passing. Renaming the gate
+# per event is no way out either: Gitea does not evaluate expressions in a
+# job's `name:` and posts the expression verbatim.
 # test/ci/workflows asserts the types below and the literal gate name.
 on:
   push:
     branches: [main]                    # trunk-based: main is the ONLY trunk
   pull_request:
     branches: [main]
-    # The defaults plus `labeled`; see LABEL EVENTS RUN CI above.
-    types: [opened, synchronize, reopened, labeled]
+    # No `labeled`. Gitea 1.27.1 sends every label add AND remove as
+    # `label_updated`, and its matcher maps that to `labeled` whichever label
+    # moved, with no `github.event.label` in the payload. Each `task:*` or
+    # `code-review` change then started a run that the `concurrency` block let
+    # cancel the PR's run in progress, and a run whose jobs an `if:` skips
+    # would post `skipped` over the real run's `CI / *` contexts, CI Gate
+    # included. An action outside `types` matches nothing: no run, no status.
+    # The cost: adding `ci:full` waits for the PR's next push or update-branch,
+    # or a workflow_dispatch run.
+    types: [opened, synchronize, reopened]
   # Lets a run be repeated without inventing a commit, which matters when a
   # failure is the runner's rather than the code's.
   workflow_dispatch:
@@ -688,14 +699,18 @@ jobs:
   # `true` or `false` fails the gate: an unevaluated expression is not a "no".
   #
   # `if: always()` and nothing else: the gate is never skipped by an event
-  # condition, so every run, label events included, posts a real result.
+  # condition, so every run posts a real result.
+  #
+  # It runs on `ci-gate`, the reserved gate slots, so it never queues behind
+  # the jobs it waits for. Those slots have one CPU each, so the gate takes no
+  # checkout and no action: one run step, reading `needs` only.
   #
   # The name is literal and must stay so: Gitea does not evaluate expressions
   # in a job's `name:`, and would post the expression itself as the status
   # context, so the required `CI Gate` would never be reported.
   gate:
     name: CI Gate
-    runs-on: ubuntu-latest
+    runs-on: ci-gate
     if: always()
     needs: [lint, image, test-integration, test-race, fips, merge-check]
     steps:

@@ -32,6 +32,10 @@
 # change as the workflow, per v2: without it actionlint reports `batch` as an
 # unknown runner and takes `Lint` red.
 #
+# v5 (2026-10-16, go-luks2 #383): add `ci-gate`, the label of the reserved
+# 1-CPU gate runners that ci.yml's CI Gate job runs on. Added in the same
+# change as the workflow, per v2.
+#
 # Verify against the fleet, not against this comment:
 #   curl -sH "Authorization: token $TOK" \
 #     "$GITEA/api/v1/admin/actions/runners" \
@@ -46,3 +50,4 @@ self-hosted-runner:
     - claude
     - code-review
     - batch
+    - ci-gate
