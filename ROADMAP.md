@@ -1,6 +1,6 @@
 # go-luks2 roadmap
 
-> **Status: REFERENCE** · Owner: Software Department · Last verified: 2026-10-14 against be49afb
+> **Status: REFERENCE** · Owner: Software Department · Last verified: 2026-10-16 against aa16242
 > Changes are proposed by docs-only PR. [docs/SPEC.md](docs/SPEC.md) is normative: every line here names one of its features, and where the two disagree, SPEC.md wins.
 
 ## Mission
@@ -13,7 +13,7 @@ Purpose and boundaries are in [SPEC.md](docs/SPEC.md#purpose).
 
 ## Milestones
 
-- [Dev complete (M7)](../../milestone/7) — Dev complete — Due: 2026-10-16. Closes on the dev-complete list of the [SPEC.md release criteria](docs/SPEC.md#release-criteria): every own feature row shipped, go-trusted-platform's seam rows on go-luks2 shipped, the API stable; `-alpha` tags only until go-trusted-platform is dev complete, and the release-candidate tags already cut stay.
+- [Dev complete (M7)](../../milestone/7) — Dev complete — Due: 2026-10-16. Closes on the dev-complete list of the [SPEC.md release criteria](docs/SPEC.md#release-criteria): every own feature row shipped, go-trusted-platform's seam rows on go-luks2 shipped on go-luks2's side; the API is stable from the release candidate on, not at dev complete; `-alpha` tags only until go-trusted-platform is dev complete, and the release-candidate tags already cut stay.
 
 ## Complete
 

@@ -1,6 +1,6 @@
 # go-luks2 specification
 
-> **Status: NORMATIVE** · Owner: Software Department · Last verified: 2026-10-14 against be49afb
+> **Status: NORMATIVE** · Owner: Software Department · Last verified: 2026-10-16 against aa16242
 > Conflicts with this document are defects. Fix them here first.
 
 A feature listed in SPEC.md, in any status, is never deleted: not its docs,
@@ -107,14 +107,21 @@ Dev complete:
 - Every feature row in [Features](#features) is shipped, apart from release,
   whose publish steps are the second list. Done.
 - Every seam row that go-trusted-platform's SPEC names on go-luks2 is
-  shipped. Today that is its `luks` feature row (add a passphrase, bind FIDO2
-  or the TPM, cut a recovery key, retire a slot, rotate a passphrase, under
-  the FIPS keyslot policy), which rests on keyslots, tokens, recovery-keys
-  and fips here; and its release criterion "a real backend on go-luks2; FIPS
-  activation restrictions hold", which rests on dm-crypt-activation and fips
-  here. Open, outside this repository.
-- The API is stable: the `pkg/` exports named in the feature folders do not
-  change before `v1.0.0`. Open.
+  shipped on go-luks2's side: the API, named here, and its tests. Today that
+  is its `luks` feature row and its release criterion "a real backend on
+  go-luks2; FIPS activation restrictions hold". go-luks2 ships each part in
+  `pkg/luks2` unless named otherwise: add a passphrase (`Volume.AddKeyslot`);
+  bind FIDO2 or the TPM by enrolling a credential provider (`Volume.Enroll`,
+  `Volume.UnlockWithProvider`, with `keyprovider.NewFIDO2`, or
+  `keyprovider.NewCommand` or the consumer's own `KeyProvider` for the TPM);
+  cut a recovery key (`NewRecoveryKey`, `Volume.AddRecoveryKey`); retire a
+  slot (`Volume.RemoveKeyslot`); rotate a passphrase (`Volume.ChangeKeyslot`);
+  the FIPS keyslot policy (Argon2 is refused in FIPS mode, and
+  `Volume.MigrateToFIPS` imports a volume onto approved KDFs); and the FIPS
+  activation restrictions: in a FIPS process `Volume.Unlock` refuses a volume
+  whose keyslots or digests FIPS mode cannot run, so no key reaches
+  `dmcrypt.Activate`. Done. Consuming them is go-trusted-platform's own row,
+  open in that repository.
 - CI and the FIPS gate are green on `main`. Done.
 - CI conforms to the CI standard (`ci-standard.md`): build, unit tests,
   integration tests, security scans and a latest-version check, all in the
@@ -129,6 +136,10 @@ Dev complete:
   releasability gate passes on that export. Done.
 
 After dev complete, once go-trusted-platform is dev complete:
+
+- The API is stable: the `pkg/` exports named in the feature folders do not
+  change before `v1.0.0`. Nothing is frozen before the release candidate.
+  Open.
 
 - A release candidate is tagged and checked from a consumer's point of view
   after the tag exists. Open.
