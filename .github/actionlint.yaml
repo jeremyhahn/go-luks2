@@ -36,6 +36,10 @@
 # 1-CPU gate runners that ci.yml's CI Gate job runs on. Added in the same
 # change as the workflow, per v2.
 #
+# v6 (2026-10-17, go-luks2 #387): add `bigdisk`, the label Infrastructure put
+# on the runners with large disks, which ci.yml's Devcontainer image job runs on.
+# Added in the same change as the workflow, per v2.
+#
 # Verify against the fleet, not against this comment:
 #   curl -sH "Authorization: token $TOK" \
 #     "$GITEA/api/v1/admin/actions/runners" \
@@ -51,3 +55,4 @@ self-hosted-runner:
     - code-review
     - batch
     - ci-gate
+    - bigdisk

@@ -100,6 +100,20 @@ func TestCIGateRunsOnTheGateRunners(t *testing.T) {
 	}
 }
 
+// TestImageJobRunsOnTheBigdiskRunners: the Devcontainer image job runs on
+// `bigdisk`, the runners whose disks are large enough to hold the toolchain and
+// integration images it builds; on the smaller runners those images filled
+// the disk.
+func TestImageJobRunsOnTheBigdiskRunners(t *testing.T) {
+	image := job(t, readFile(t, ".github/workflows/ci.yml"), "image")
+	if got := jobRunsOn.FindAllStringSubmatch(image, -1); len(got) != 1 || got[0][1] != "bigdisk" {
+		t.Errorf("Devcontainer image job runs on %v, want bigdisk", got)
+	}
+	if !regexp.MustCompile(`(?m)^    - bigdisk$`).MatchString(readFile(t, ".github/actionlint.yaml")) {
+		t.Error(".github/actionlint.yaml does not list the bigdisk label; Lint reports it as unknown")
+	}
+}
+
 // TestNoLabelTrigger: ci.yml does not fire on `labeled`. Gitea sends every
 // label add and remove as `labeled`, so each review or task label started a
 // run that canceled the PR's run in progress. A `ci:full` added later is read

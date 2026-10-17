@@ -224,7 +224,9 @@ jobs:
   # gosec's SARIF, on github.com.
   image:
     name: Devcontainer image [build, test, security, deps-check, trivy image]
-    runs-on: ubuntu-latest
+    # bigdisk: the runners whose disks are large enough to hold the toolchain and
+    # integration images this job builds.
+    runs-on: bigdisk
     timeout-minutes: 120
     env:
       # ITEST_IMAGE is the Makefile's name for the integration image; set from
