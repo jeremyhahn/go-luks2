@@ -11,7 +11,7 @@ A draft is adopted at one pinned revision. A new revision, or the final text, up
 
 | File | Standard and revision | Final or draft | Licence | Implementing package |
 |---|---|---|---|---|
-| [luks2-on-disk-format-1.1.3.pdf](luks2-on-disk-format-1.1.3.pdf) | LUKS2 On-Disk Format Specification, version 1.1.3 (2024-02-17) | Draft: the publisher calls the document work in progress. **Pinned: version 1.1.3, LUKS2-docs commit `55f31ae5`** | CC BY-SA 4.0 ([luks2-on-disk-format-LICENSE](luks2-on-disk-format-LICENSE)) | `internal/header` (binary header, JSON metadata), `pkg/luks2` (keyslots, segments, digests, tokens), `internal/areacipher` (keyslot area encryption) |
+| [luks2-on-disk-format-1.1.4.pdf](luks2-on-disk-format-1.1.4.pdf) | LUKS2 On-Disk Format Specification, version 1.1.4 (2025-06-16) | Draft: the publisher calls the document work in progress. **Pinned: version 1.1.4, LUKS2-docs commit `a81aa2fe`** | CC BY-SA 4.0 ([luks2-on-disk-format-LICENSE](luks2-on-disk-format-LICENSE)) | `internal/header` (binary header, JSON metadata), `pkg/luks2` (keyslots, segments, digests, tokens), `internal/areacipher` (keyslot area encryption) |
 | not copied: licence | LUKS1 On-Disk Format Specification, version 1.2.3 (2018-01-20). The document states no licence. It defines the anti-forensic splitter that LUKS2 keyslots of AF type `luks1` use. Obtain it from the cryptsetup project: <https://gitlab.com/cryptsetup/cryptsetup/-/wikis/LUKS-standard/on-disk-format.pdf> | Final | None stated | `internal/af` |
 | [rfc8018.txt](rfc8018.txt) | RFC 8018, PKCS #5: Password-Based Cryptography Specification, Version 2.1 (January 2017); PBKDF2 is section 5.2 | Final | IETF Trust Legal Provisions | `internal/kdf`, `pkg/luks2` (`sha1kdf.go`) |
 | [rfc9106.txt](rfc9106.txt) | RFC 9106, Argon2 Memory-Hard Function for Password Hashing and Proof-of-Work Applications (September 2021); Argon2 version 0x13 | Final | IETF Trust Legal Provisions | `internal/kdf` (argon2i, argon2id) |
@@ -43,7 +43,7 @@ A draft is adopted at one pinned revision. A new revision, or the final text, up
 
 | Publisher | Where the copies came from |
 |---|---|
-| cryptsetup project | <https://gitlab.com/cryptsetup/LUKS2-docs> at commit `55f31ae5413f9e0edd04f3836bbb66070ea81e5d` |
+| cryptsetup project | <https://gitlab.com/cryptsetup/LUKS2-docs> at commit `a81aa2fef8d176debdbec297c1e0b74bb50cfee8` |
 | RFC Editor | <https://www.rfc-editor.org/rfc/> |
 | NIST | <https://nvlpubs.nist.gov/> and <https://csrc.nist.gov/> |
 | Linux kernel | <https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/>, tag `v6.12` |

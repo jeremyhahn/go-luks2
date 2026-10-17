@@ -8,7 +8,7 @@
 # not read at all, and the gate says so on every run. A path that is not
 # tracked, a line with no reason and a path listed twice all stop the gate.
 #
-docs/reference/luks2-on-disk-format-1.1.3.pdf	the LUKS2 on-disk format standard as its publisher ships it (CC BY-SA 4.0)
+docs/reference/luks2-on-disk-format-1.1.4.pdf	the LUKS2 on-disk format standard as its publisher ships it (CC BY-SA 4.0)
 docs/reference/NIST.FIPS.140-3-IG.pdf	a NIST publication as its publisher ships it (US government work)
 docs/reference/NIST.FIPS.140-3.pdf	a NIST publication as its publisher ships it (US government work)
 docs/reference/NIST.FIPS.180-4.pdf	a NIST publication as its publisher ships it (US government work)

@@ -33,6 +33,43 @@ func TestSegmentUnknownMemberHelpers(t *testing.T) {
 	}
 }
 
+// TestSegmentIntegrityKeySize is LUKS2 On-Disk Format 1.1.4's
+// integrity.key_size [integer,optional]: read when present, absent when not,
+// and the segment re-encodes byte for byte either way.
+func TestSegmentIntegrityKeySize(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		want    int64
+		present bool
+	}{
+		{"declared", `{"type":"crypt","offset":"16777216","size":"dynamic","iv_tweak":"0","encryption":"aes-xts-plain64","sector_size":4096,` +
+			`"integrity":{"type":"hmac(sha256)","journal_encryption":"none","journal_integrity":"none","key_size":32}}`, 32, true},
+		{"absent", `{"type":"crypt","offset":"16777216","size":"dynamic","iv_tweak":"0","encryption":"aes-xts-plain64","sector_size":4096,` +
+			`"integrity":{"type":"hmac(sha256)","journal_encryption":"none","journal_integrity":"none"}}`, 0, false},
+		{"no integrity", `{"type":"crypt","offset":"16777216","size":"dynamic","iv_tweak":"0","encryption":"aes-xts-plain64","sector_size":4096}`, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var s Segment
+			if err := json.Unmarshal([]byte(tt.in), &s); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			got, present := s.IntegrityKeySize()
+			if got != tt.want || present != tt.present {
+				t.Errorf("IntegrityKeySize() = %d, %v, want %d, %v", got, present, tt.want, tt.present)
+			}
+			out, err := MarshalCanonicalJSON(&s)
+			if err != nil {
+				t.Fatalf("MarshalCanonicalJSON: %v", err)
+			}
+			if string(out) != tt.in {
+				t.Errorf("the segment did not round-trip byte for byte\n got: %s\nwant: %s", out, tt.in)
+			}
+		})
+	}
+}
+
 func TestCheckRequirementsImplementedIsNilSafe(t *testing.T) {
 	var m *Metadata
 	if err := m.CheckRequirementsImplemented(); err != nil {

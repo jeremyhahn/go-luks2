@@ -378,14 +378,20 @@ func validateCryptSegmentStructure(metadata *Metadata, id string, segment *Segme
 		return headerStructureError("%s declares an empty cipher specification", label)
 	}
 	if raw, present := segment.unknown["integrity"]; present {
-		var integrity map[string]any
+		var integrity map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &integrity); err != nil || integrity == nil {
 			return headerStructureError("%s declares an integrity member that is not an object", label)
 		}
 		for _, member := range []string{"type", "journal_encryption", "journal_integrity"} {
-			if s, ok := integrity[member].(string); !ok || s == "" {
+			var s string
+			if err := json.Unmarshal(integrity[member], &s); err != nil || s == "" {
 				return headerStructureError("%s integrity must declare %s", label, member)
 			}
+		}
+		// LUKS2 On-Disk Format 1.1.4: key_size [integer,optional]. The text
+		// gives the type and no range.
+		if keySize, present := integrity["key_size"]; present && !isJSONInteger(keySize) {
+			return headerStructureError("%s integrity must declare an integer key_size when it declares one", label)
 		}
 	}
 	if segment.SectorSize <= 0 || int64(segment.SectorSize) > math.MaxUint32 || segment.SectorSize%SectorSize != 0 {

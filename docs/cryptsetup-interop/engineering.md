@@ -41,6 +41,8 @@ Out of scope, refused with a typed error and nothing written:
 | Container | go-luks2 | Test |
 |---|---|---|
 | `--integrity` (dm-integrity) | `Volume.Unlock` (and so `AddKeyslot`'s key recovery) and activation: `ErrUnsupported`, whatever the volume key size; the container is untouched, open it with cryptsetup | `TestCompatIntegrityVolumeIsRefusedForActivation` |
+| `--integrity` with `integrity.key_size` (LUKS2 1.1.4; written by hand, cryptsetup 2.7.5 cannot) | Read and re-encoded byte for byte, also after cryptsetup's own rewrite; `Volume.Unlock`: `ErrUnsupported` | `TestCompatIntegrityKeySizeSurvivesBothTools` |
+| `inline-hw-tags` requirement (LUKS2 1.1.4; written by hand, cryptsetup 2.7.5 cannot) | Read with the flag kept; `Volume.Unlock` and `AddKeyslot`: `ErrUnsupportedRequirement` naming `inline-hw-tags`, device unchanged. cryptsetup 2.7.5 refuses it as an unknown requirement | `TestCompatInlineHWTagsIsKeptAndRefusedByBothTools` |
 | Mid-reencryption (`cryptsetup reencrypt`) | `Volume.Unlock`: `ErrUnsupportedRequirement` | `test/integration/dmcrypt` `TestAnInterruptedCryptsetupReencryptIsRefusedForActivation` |
 | LUKS1 (convert it with `cryptsetup convert --type luks2`) | `ErrNotLUKS2` from `(*Volume).Header` | `pkg/luks2` `TestReadHeaderRefusesALUKS1Container` |
 | Keyslot ciphers other than AES XTS/CBC | `ErrUnsupported` | `pkg/luks2` `TestParseKeyslotAreaEncryption` |

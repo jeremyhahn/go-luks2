@@ -114,6 +114,40 @@ func TestAnUnimplementedRequirementRefusesTheWrite(t *testing.T) {
 	}
 }
 
+// TestInlineHWTagsIsKeptAndRefusesTheWrite is LUKS2 On-Disk Format 1.1.4's
+// inline-hw-tags requirement: the segment's authentication tags live in the
+// device's per-sector inline hardware tags, with dm-crypt alone and every
+// dm-integrity option ignored. This package has no inline hardware tag
+// support, so the flag is read and re-encoded exactly, and a write refuses
+// with the requirement named rather than dropping it.
+func TestInlineHWTagsIsKeptAndRefusesTheWrite(t *testing.T) {
+	const config = `{"json_size":"12288","keyslots_size":"16744448","requirements":{"mandatory":["inline-hw-tags"]}}`
+
+	var decoded Config
+	if err := json.Unmarshal([]byte(config), &decoded); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	out, err := MarshalCanonicalJSON(&decoded)
+	if err != nil {
+		t.Fatalf("MarshalCanonicalJSON: %v", err)
+	}
+	if string(out) != config {
+		t.Errorf("the requirement did not round-trip byte for byte\n got: %s\nwant: %s", out, config)
+	}
+
+	metadata := minimalValidMetadata()
+	metadata.Config.Requirements = decoded.Requirements
+	hdr := &BinaryHeader{HeaderSize: HeaderSize + DefaultSize}
+	err = CheckHeaderWritable(hdr, metadata)
+	var reqErr *UnsupportedRequirementError
+	if !errors.As(err, &reqErr) || !errors.Is(err, ErrUnsupportedRequirement) {
+		t.Fatalf("CheckHeaderWritable = %v, want an *UnsupportedRequirementError", err)
+	}
+	if reqErr.Requirement != "inline-hw-tags" {
+		t.Errorf("Requirement = %q, want %q", reqErr.Requirement, "inline-hw-tags")
+	}
+}
+
 // TestNoRequirementsWritesNormally is the control: the guard must not refuse
 // an ordinary container. Without it, the test above would pass against a
 // guard that refused everything.

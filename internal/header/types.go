@@ -7,6 +7,7 @@ package header
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -375,6 +376,26 @@ type Segment struct {
 func (x *Segment) HasIntegrity() bool {
 	_, ok := x.unknown["integrity"]
 	return ok
+}
+
+// IntegrityKeySize reports integrity.key_size, the key size in bytes for the
+// integrity type (LUKS2 On-Disk Format 1.1.4, optional). present is false when
+// the segment declares no integrity object or the object omits key_size, in
+// which case the integrity type's default key size applies. The member stays
+// in the raw integrity object, so it re-encodes exactly as read.
+func (x *Segment) IntegrityKeySize() (size int64, present bool) {
+	var integrity struct {
+		KeySize *json.RawMessage `json:"key_size"`
+	}
+	raw, ok := x.unknown["integrity"]
+	if !ok || json.Unmarshal(raw, &integrity) != nil || integrity.KeySize == nil {
+		return 0, false
+	}
+	size, err := strconv.ParseInt(string(*integrity.KeySize), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return size, true
 }
 
 // SetUnknownMember sets a member this package does not model, as though the

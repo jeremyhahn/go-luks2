@@ -198,6 +198,21 @@ for writing, unlocking and activation (`ErrUnsupportedRequirement`): this librar
 implements none of those features, online reencryption included. It can still
 be read.
 
+That includes `inline-hw-tags` (LUKS2 On-Disk Format 1.1.4): the data
+segment uses only dm-crypt, with authentication tags kept inline by the
+hardware, and every dm-integrity option in the metadata is ignored. Unlock,
+activation and every header write refuse it with an
+`*UnsupportedRequirementError` naming `inline-hw-tags`, which unwraps to
+`ErrUnsupportedRequirement`, and leave the device unchanged. The flag is never
+stripped: a read and a re-encode keep `config.requirements` byte for byte.
+
+A segment's `integrity` object may carry `key_size` (1.1.4, integer, optional):
+the integrity key size in bytes, set only when it differs from the integrity
+type's default. `Segment.IntegrityKeySize` reports it; absent reads as absent.
+A non-integer `key_size` fails with `ErrInvalidHeader`. The specification gives
+no range, so none is enforced. The member stays in the raw object and
+re-encodes exactly as read.
+
 ## Encoding
 
 What goes to disk is compact JSON, one NUL, then zero padding to the end of the

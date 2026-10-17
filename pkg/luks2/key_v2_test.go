@@ -480,6 +480,52 @@ func TestVolumeUnlockRefusesAContainerMidReencryption(t *testing.T) {
 	}
 }
 
+// TestVolumeUnlockRefusesInlineHWTags: LUKS2 On-Disk Format 1.1.4's
+// inline-hw-tags requirement maps the segment with dm-crypt over the
+// device's inline hardware tags, which this package does not support. The
+// header still reads with the requirement intact; unlocking it refuses with
+// the requirement named, before any keyslot KDF runs.
+func TestVolumeUnlockRefusesInlineHWTags(t *testing.T) {
+	device, passphrase := unlockableVolume(t)
+	writeRequirement(t, device, "inline-hw-tags")
+
+	v, err := Open(context.Background(), device, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
+	h, err := v.Header(context.Background())
+	if err != nil {
+		t.Fatalf("Header failed: %v", err)
+	}
+	if got := h.Requirements(); !slices.Equal(got, []string{"inline-hw-tags"}) {
+		t.Errorf("Requirements() = %v, want [inline-hw-tags]", got)
+	}
+
+	pass, err := enclave.NewMemoryCopy(passphrase)
+	if err != nil {
+		t.Fatalf("could not build the test passphrase enclave: %v", err)
+	}
+	defer func() { _ = pass.Destroy() }()
+
+	kdfCalls := 0
+	real := v.sys.passphraseKDF
+	v.sys.passphraseKDFOverride = func(ctx context.Context, p []byte, kdf *header.KDF, keySize int) (enclave.ByteAccess, error) {
+		kdfCalls++
+		return real(ctx, p, kdf, keySize)
+	}
+
+	_, err = v.Unlock(context.Background(), pass)
+	var reqErr *header.UnsupportedRequirementError
+	if !errors.Is(err, ErrUnsupportedRequirement) || !errors.As(err, &reqErr) || reqErr.Requirement != "inline-hw-tags" {
+		t.Fatalf("Unlock = %v, want ErrUnsupportedRequirement naming inline-hw-tags", err)
+	}
+	if kdfCalls != 0 {
+		t.Fatalf("the keyslot KDF ran %d time(s) for a container that cannot be activated", kdfCalls)
+	}
+}
+
 // TestVolumeUnlockRefusesAHeaderWithMoreThanOneSegment is C2's other half:
 // a header that declares several segments without a requirement flag is
 // not mapped by guessing which one is the volume.

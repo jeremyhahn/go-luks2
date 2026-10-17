@@ -169,6 +169,19 @@ func TestValidateHeaderStructureFollowsCryptsetup(t *testing.T) {
 		{name: "integrity complete", mutate: func(m *Metadata) {
 			withUnknown(m.Segments["0"], "integrity", `{"type":"hmac(sha256)","journal_encryption":"none","journal_integrity":"none"}`)
 		}},
+		// LUKS2 On-Disk Format 1.1.4: integrity.key_size [integer,optional].
+		{name: "integrity key_size an integer", mutate: func(m *Metadata) {
+			withUnknown(m.Segments["0"], "integrity", `{"type":"hmac(sha256)","journal_encryption":"none","journal_integrity":"none","key_size":32}`)
+		}},
+		{name: "integrity key_size a string", mutate: func(m *Metadata) {
+			withUnknown(m.Segments["0"], "integrity", `{"type":"hmac(sha256)","journal_encryption":"none","journal_integrity":"none","key_size":"32"}`)
+		}, wantErr: "integer key_size"},
+		{name: "integrity key_size a fraction", mutate: func(m *Metadata) {
+			withUnknown(m.Segments["0"], "integrity", `{"type":"hmac(sha256)","journal_encryption":"none","journal_integrity":"none","key_size":32.5}`)
+		}, wantErr: "integer key_size"},
+		{name: "integrity key_size null", mutate: func(m *Metadata) {
+			withUnknown(m.Segments["0"], "integrity", `{"type":"hmac(sha256)","journal_encryption":"none","journal_integrity":"none","key_size":null}`)
+		}, wantErr: "integer key_size"},
 		{name: "sector size zero", mutate: func(m *Metadata) { m.Segments["0"].SectorSize = 0 }, wantErr: "sector size"},
 		{name: "sector size off the 512-byte grid", mutate: func(m *Metadata) { m.Segments["0"].SectorSize = 768 }, wantErr: "sector size"},
 		{name: "iv_tweak not a number", mutate: func(m *Metadata) { m.Segments["0"].IVTweak = "0x10" }, wantErr: "iv_tweak"},
