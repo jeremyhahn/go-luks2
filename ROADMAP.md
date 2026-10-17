@@ -30,6 +30,7 @@ Shipped features, with the release or closing issues that shipped them.
 - **tokens** — rejected alternatives recorded — [#319](../../issues/319) — done
 - **header** — exports documented and unprovided operations stated — [#316](../../issues/316) — done
 - **header** — rejected alternatives recorded — [#319](../../issues/319) — done
+- **header** — LUKS2 On-Disk Format 1.1.4: `integrity.key_size` parsed and round-tripped; `inline-hw-tags` preserved and refused with `ErrUnsupportedRequirement` for unlock, activation and every write — [#385](../../issues/385) — done
 - **dm-crypt-activation** — specified — [#312](../../issues/312) — done
 - **kernel-keyring** — specified — [#313](../../issues/313) — done
 - **kernel-keyring** — the keyring-unavailable remedy names `dmcrypt.CheckKeyring` — [#324](../../issues/324) — done
