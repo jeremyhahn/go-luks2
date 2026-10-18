@@ -43,6 +43,7 @@ func TestImageJobRunsEveryToolchainStageInTheImage(t *testing.T) {
 	steps := stepRun(t, image)
 
 	for stage, network := range map[string]string{
+		"make lint":       "",
 		"make build":      "",
 		"make test":       "",
 		"make security":   "bridge",
@@ -65,17 +66,31 @@ func TestImageJobRunsEveryToolchainStageInTheImage(t *testing.T) {
 		}
 	}
 
-	build := steps["Build the toolchain and integration images"]
+	// Every step after the image build runs in the toolchain image and runs
+	// after a failed one, so one run reports every stage (ci-template v1.21).
+	built := false
+	for _, block := range strings.Split(image, "\n      - ")[1:] {
+		name, _, _ := strings.Cut(strings.TrimPrefix(block, "name: "), "\n")
+		switch {
+		case name == "Build the devcontainer images":
+			built = true
+		case !built, name == "Tear down", strings.HasPrefix(name, "Upload "):
+		case !strings.Contains(block, "if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}"): //nolint:misspell // the Actions function's spelling, not prose
+			t.Errorf("step %q does not keep running after a failed step once the toolchain image exists", name)
+		}
+	}
+
+	build := steps["Build the devcontainer images"]
 	for _, want := range []string{
-		"make docker-build-toolchain docker-build-integration",
-		`MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env"`,
+		`make docker-build MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE"`,
+		`rm -f "$RUNNER_TEMP/gomodauth.env"`,
 		`TOOLCHAIN_IMAGE=$(make -s toolchain-image)`,
 	} {
 		if !strings.Contains(build, want) {
 			t.Errorf("the image build step lacks %q", want)
 		}
 	}
-	if !strings.Contains(image, "ITEST_IMAGE: go-luks2-ci-") {
+	if !strings.Contains(image, "IT_IMAGE: go-luks2-ci-") {
 		t.Error("the image job's integration image is not named under the CI prefix")
 	}
 }
@@ -87,22 +102,30 @@ func TestImageJobCarriesTheChecksThatLeftTheRunner(t *testing.T) {
 	image := job(t, readFile(t, ".github/workflows/ci.yml"), "image")
 	steps := stepRun(t, image)
 	for name, want := range map[string]string{
-		"make security (toolchain image)":                                        `make ci-toolchain-run CMD="make security GOSEC_EXTRA='-fmt=sarif -out=gosec.sarif'" CI_OUT=gosec.sarif`,
-		"Require gosec and govulncheck at the pinned versions (toolchain image)": `make ci-toolchain-run CMD="go run ./test/tools/require-tool gosec $GOSEC_VERSION github.com/securego/gosec/v2/cmd/gosec && go run ./test/tools/require-tool govulncheck $GOVULNCHECK_VERSION golang.org/x/vuln/cmd/govulncheck"`,
-		"Linux binaries and 32-bit vet (toolchain image)":                        `make ci-toolchain-run CMD="make build-linux vet-32bit" CI_OUT="luks-linux-amd64 luks-linux-arm64"`,
+		"make security (toolchain image)":                            `make ci-toolchain-run CMD="make security GO_BUILD_TAGS='$GO_BUILD_TAGS'"`,
+		"Require the analysis tools at their pins (toolchain image)": `make ci-toolchain-run CMD="go run ./test/tools/require-tool golangci-lint $GOLANGCI_LINT_VERSION github.com/golangci/golangci-lint/v2/cmd/golangci-lint && go run ./test/tools/require-tool gosec $GOSEC_VERSION github.com/securego/gosec/v2/cmd/gosec && go run ./test/tools/require-tool govulncheck $GOVULNCHECK_VERSION golang.org/x/vuln/cmd/govulncheck"`,
+		"Linux binaries and 32-bit vet (toolchain image)":            `make ci-toolchain-run CMD="make build-linux vet-32bit" CI_OUT="luks-linux-amd64 luks-linux-arm64"`,
+		"Assert every build tag selects code (toolchain image)":      `make ci-toolchain-run CMD="make assert-build-tags GO_BUILD_TAGS='$GO_BUILD_TAGS'"`,
 	} {
 		if strings.TrimSpace(steps[name]) != want {
 			t.Errorf("step %q runs %q, want %q", name, steps[name], want)
 		}
 	}
-	for _, want := range []string{"sarif_file: gosec.sarif", "path: luks-linux-*", "path: coverage.out"} {
+	for _, want := range []string{"path: luks-linux-*", "path: coverage.out"} {
 		if !strings.Contains(image, want) {
 			t.Errorf("the image job's uploads lack %q", want)
 		}
 	}
-	// The pin assertion runs before the scan it vouches for.
-	if strings.Index(image, "name: Require gosec") > strings.Index(image, "name: make security") {
-		t.Error("the scanner pins are asserted after make security runs")
+	// Nothing goes to code scanning (ci-template v1.21: CI runs on the forge).
+	for _, ban := range []string{"upload-sarif", "security-events", "GOSEC_EXTRA", "GO_VERSION"} {
+		if strings.Contains(readFile(t, ".github/workflows/ci.yml"), ban) {
+			t.Errorf("ci.yml still carries %q", ban)
+		}
+	}
+	// The pin assertion runs before the lint and the scan it vouches for.
+	pins := strings.Index(image, "name: Require the analysis tools")
+	if pins < 0 || pins > strings.Index(image, "name: make lint") || pins > strings.Index(image, "name: make security") {
+		t.Error("the tool pins are not asserted before make lint and make security run")
 	}
 	mk := readFile(t, "Makefile")
 	for _, want := range []string{"VET_32BIT_ARCHES := 386 arm", "GOOS=linux GOARCH=$$arch $(GO) vet ./...", "LINUX_ARCHES := amd64 arm64"} {
@@ -157,15 +180,15 @@ func TestTrivyFSNeverIgnoresUnfixed(t *testing.T) {
 }
 
 func TestIntegrationJobRunsUnderCompose(t *testing.T) {
-	it := job(t, readFile(t, ".github/workflows/ci.yml"), "test-integration")
+	it := job(t, readFile(t, ".github/workflows/ci.yml"), "integration")
 	steps := stepRun(t, it)
-	if !strings.Contains(steps["Run integration suite in the integration image"],
-		`make integration-test MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_PROJECT="$IT_PROJECT"`) {
-		t.Error("the integration job does not run make integration-test with the job's project")
+	if strings.TrimSpace(steps["make integration-test (integration image)"]) !=
+		`make integration-test MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_PROJECT="$IT_PROJECT" IT_IMAGE="$IT_IMAGE" GO_BUILD_TAGS="$GO_BUILD_TAGS"` {
+		t.Error("the integration job does not run make integration-test with the job's project and image")
 	}
 	for _, want := range []string{
 		"IT_PROJECT: go-luks2-ci-${{ github.run_id }}-${{ github.run_attempt }}",
-		"ITEST_IMAGE: go-luks2-ci-",
+		"IT_IMAGE: go-luks2-ci-",
 		"ITEST_CONTAINER: go-luks2-ci-",
 	} {
 		if !strings.Contains(it, want) {
@@ -183,29 +206,54 @@ func TestIntegrationJobRunsUnderCompose(t *testing.T) {
 // stage they run is in the image.
 func TestImageAndIntegrationJobsUseNoRunnerToolchain(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
-	for _, name := range []string{"image", "test-integration"} {
+	for _, name := range toolchainJobs {
 		j := job(t, ci, name)
 		if strings.Contains(j, "setup-go") {
 			t.Errorf("%s sets up Go on the runner; its stages run in the image", name)
 		}
-		if strings.Contains(j, "go test") || strings.Contains(j, "go build") {
-			t.Errorf("%s runs go on the runner", name)
+		if strings.Contains(j, "apt-get") {
+			t.Errorf("%s installs a tool on the runner; the image carries it", name)
 		}
-		first := regexp.MustCompile(`(?m)^      - name: (.+)$`).FindStringSubmatch(j)
-		if first == nil || first[1] != "Reap stale CI stacks" {
-			t.Errorf("%s's first named step is not the reaper: %v", name, first)
+		// ci-template v1.21.1: the forge credentials are masked before any
+		// other step, then stale stacks are reaped.
+		named := regexp.MustCompile(`(?m)^      - name: (.+)$`).FindAllStringSubmatch(j, 2)
+		if len(named) < 2 || named[0][1] != "Mask the forge credentials" || named[1][1] != "Reap stale CI stacks" {
+			t.Errorf("%s does not start by masking the credentials, then reaping: %v", name, named)
 		}
-		if steps := stepRun(t, j); strings.TrimSpace(steps["Reap stale CI stacks"]) != "make ci-reap-stacks" {
+		steps := stepRun(t, j)
+		if !strings.Contains(steps["Mask the forge credentials"], `echo "::add-mask::$val"`) {
+			t.Errorf("%s's first step does not mask the credentials", name)
+		}
+		if strings.TrimSpace(steps["Reap stale CI stacks"]) != "make ci-reap-stacks" {
 			t.Errorf("%s does not reap with make ci-reap-stacks", name)
 		}
 	}
 }
 
-// runnerJobs may set up Go on the runner and run it there. None of them runs
-// one of the CI standard's five stages: Lint and Merged Tree are checks of
-// their own, and Race and FIPS run the unit suite under a mode the stages do
-// not (the race detector, the FIPS 140-3 module) and are kept as they are.
-var runnerJobs = []string{"lint", "test-race", "fips", "merge-check", "gate"}
+// toolchainJobs are the jobs that build the devcontainer images on bigdisk
+// and run their stages in them.
+var toolchainJobs = []string{"image", "integration", "test-race", "fips", "merge-check"}
+
+// TestNoStepPrintsTheCredentials: ci-template v1.21.1 after a forge token
+// printed in a run. No step prints the credential file or the job
+// environment, and nothing traces the shell.
+func TestNoStepPrintsTheCredentials(t *testing.T) {
+	ci := readFile(t, ".github/workflows/ci.yml")
+	for _, ban := range []*regexp.Regexp{
+		regexp.MustCompile(`(?m)^\s*(printenv|env)\s*($|[|>])`),
+		regexp.MustCompile(`(?m)\bset -[a-z]*x`),
+		regexp.MustCompile(`(cat|less|head|tail)\s+"?\$RUNNER_TEMP/gomodauth\.env`),
+	} {
+		if m := ban.FindString(ci); m != "" {
+			t.Errorf("ci.yml prints what it must not: %q", m)
+		}
+	}
+}
+
+// runnerJobs are exempt from the rule below. Since ci-template v1.21 only CI
+// Gate is: it reads `needs` and runs no stage. Lint is an image-job step, and
+// Race, FIPS and Merged Tree run in the toolchain image like the stages.
+var runnerJobs = []string{"ci-gate"}
 
 // runnerTargets are the make targets any other job may run on the runner: they
 // build the images, run a command in the toolchain image, run the integration
@@ -213,7 +261,7 @@ var runnerJobs = []string{"lint", "test-race", "fips", "merge-check", "gate"}
 // Everything else -- every stage, and every check beside one -- is a CMD for
 // ci-toolchain-run.
 var runnerTargets = []string{
-	"ci-toolchain-run", "ci-reap-stacks", "docker-build-toolchain",
+	"ci-toolchain-run", "ci-reap-stacks", "docker-build", "docker-build-toolchain",
 	"docker-build-integration", "toolchain-image", "integration-test",
 }
 

@@ -124,15 +124,16 @@ func TestBatchIsNeverInAMergeGate(t *testing.T) {
 	}
 }
 
-// TestBatchGoVersionIsCIs: the batch suites test the toolchain CI tests.
+// TestBatchGoVersionIsCIs: the batch suites test the toolchain CI tests,
+// which is the devcontainer image's Go (ci.yml pins none since v1.21).
 func TestBatchGoVersionIsCIs(t *testing.T) {
-	ci := goVersion.FindStringSubmatch(readFile(t, ".github/workflows/ci.yml"))
+	ci := regexp.MustCompile(`(?m)^ARG GO_IMAGE=golang:([0-9.]+)@`).FindStringSubmatch(readFile(t, "build/docker/devcontainer/Dockerfile"))
 	batch := goVersion.FindStringSubmatch(readFile(t, batchWorkflow))
 	if ci == nil || batch == nil {
-		t.Fatalf("GO_VERSION not found: ci.yml %v, batch.yml %v", ci, batch)
+		t.Fatalf("Go version not found: devcontainer Dockerfile %v, batch.yml %v", ci, batch)
 	}
 	if ci[1] != batch[1] {
-		t.Errorf("batch.yml GO_VERSION %s, ci.yml %s; keep them in lockstep", batch[1], ci[1])
+		t.Errorf("batch.yml GO_VERSION %s, the devcontainer image's Go %s; keep them in lockstep", batch[1], ci[1])
 	}
 }
 
@@ -158,7 +159,8 @@ func TestBatchSoakRunsTheContainerisedSuite(t *testing.T) {
 	}
 }
 
-// cryptsetupStep is ci.yml's install step for the unit and race jobs.
+// cryptsetupStep is the batch jobs' install step. ci.yml has none: its
+// stages run in the toolchain image, which carries cryptsetup.
 const cryptsetupStep = "Install cryptsetup (a test dependency of ./pkg/luks2)"
 
 var (
@@ -179,10 +181,6 @@ func TestBatchJobsReachingPkgLuks2InstallCryptsetup(t *testing.T) {
 	for _, m := range envVar.FindAllStringSubmatch(block(t, wf, "env"), -1) {
 		env[m[1]] = m[2]
 	}
-	want := step(readFile(t, ".github/workflows/ci.yml"), cryptsetupStep)
-	if want == "" || !strings.Contains(want, "::error::") {
-		t.Fatalf("ci.yml has no %q step that fails when cryptsetup is absent", cryptsetupStep)
-	}
 	var reaching []string
 	for _, m := range topKey.FindAllStringSubmatch(block(t, wf, "jobs"), -1) {
 		body := job(t, wf, m[1])
@@ -195,8 +193,8 @@ func TestBatchJobsReachingPkgLuks2InstallCryptsetup(t *testing.T) {
 		switch {
 		case got == "":
 			t.Errorf("batch job %s tests ./pkg/luks2 and has no %q step", m[1], cryptsetupStep)
-		case got != want:
-			t.Errorf("batch job %s's %q step differs from ci.yml's:\n%s\nwant:\n%s", m[1], cryptsetupStep, got, want)
+		case !strings.Contains(got, "::error::"):
+			t.Errorf("batch job %s's %q step does not fail when cryptsetup is absent:\n%s", m[1], cryptsetupStep, got)
 		case strings.Index(body, got) > at:
 			t.Errorf("batch job %s installs cryptsetup after its go test", m[1])
 		}

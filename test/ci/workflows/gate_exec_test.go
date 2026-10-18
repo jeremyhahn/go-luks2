@@ -24,7 +24,7 @@ var needsResult = regexp.MustCompile(`\$\{\{ needs\.([A-Za-z0-9_-]+)\.result \}\
 // in full is a gate the test cannot fail.
 func gateScript(t *testing.T, results map[string]string) string {
 	t.Helper()
-	lines := strings.Split(job(t, readFile(t, ".github/workflows/ci.yml"), "gate"), "\n")
+	lines := strings.Split(job(t, readFile(t, ".github/workflows/ci.yml"), "ci-gate"), "\n")
 	start, indent := -1, 0
 	for i, l := range lines {
 		if strings.TrimSpace(l) == "run: |" {

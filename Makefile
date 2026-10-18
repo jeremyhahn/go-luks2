@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build build-linux vet-32bit install test test-verbose test-coverage test-integration coverage coverage-report clean fmt vet lint gosec govulncheck vuln trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration test-unit-norace seccomp-diff proto test-pkg docker-build docker-run deps-check toolchain-image docker-build-toolchain toolchain-run ci-toolchain-run ci-reap-stacks
+.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build build-linux vet-32bit install test test-verbose test-coverage test-integration coverage coverage-report clean fmt vet lint gosec govulncheck vuln trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration test-unit-norace seccomp-diff proto test-pkg docker-build docker-build-cli docker-run deps-check test-fips-mode assert-build-tags toolchain-image docker-build-toolchain toolchain-run ci-toolchain-run ci-reap-stacks
 
 # Default target
 .DEFAULT_GOAL := help
@@ -12,7 +12,7 @@ BUILD_DIR=build
 CMD_DIR=cmd/luks2
 COVERAGE_FILE=coverage.out
 COVERAGE_HTML=coverage.html
-# The image `docker-build`/`docker-run` build and run: the CLI alone, from
+# The image `docker-build-cli`/`docker-run` build and run: the CLI alone, from
 # build/docker/cli, for someone who wants the tool without a devcontainer or
 # the integration suite's test dependencies.
 CLI_IMAGE ?= go-luks2-cli
@@ -88,6 +88,15 @@ UNIT_TEST_MODE = $(if $(strip $(UNIT_TEST_RACE)),under -race,without -race)
 GO := $(shell which go 2>/dev/null || echo /usr/local/go/bin/go)
 GOPATH := $(if $(wildcard $(GO)),$(shell $(GO) env GOPATH))
 GOBIN=$(GOPATH)/bin
+# GO_BUILD_TAGS (devcontainer.md §6): the space-separated build tags lint and
+# gosec analyse with; ci.yml sets it once and assert-build-tags proves each one
+# selects code. vet already covers both sides of the `integration` tag. build,
+# the unit run and its coverage never take it: `integration` swaps in the
+# integration seams and pulls in the integration suites, and integration-test
+# builds its image with the tag regardless.
+GO_BUILD_TAGS ?=
+comma := ,
+space := $(subst ,, )
 # Version stamped into the binary, read from the VERSION file.
 #
 # Named BUILD_VERSION, not VERSION, and that is not cosmetic (#19). The release
@@ -310,6 +319,52 @@ test-calibration: ## Run the PBKDF2 calibration tests without -race (the mode th
 	@$(GO) test -count=1 -timeout 10m -run '$(CALIBRATION_TESTS)' ./internal/kdf
 	@echo "$(COLOR_GREEN)✓ Calibration tests passed$(COLOR_RESET)"
 
+# The FIPS 140-3 gate, CI's fips job (full tier), run in the toolchain image.
+# GOFIPS140=latest builds against the Go Cryptographic Module and
+# GODEBUG=fips140=only makes every non-approved algorithm fail at its call, so
+# a path that reaches one cannot pass by accident. The named imports run
+# verbosely first, then the whole module under the same mode.
+test-fips-mode: export GOFIPS140 := latest
+test-fips-mode: export GODEBUG := fips140=only
+test-fips-mode: ## Build and test the module in FIPS 140-3 only mode (GOFIPS140=latest, GODEBUG=fips140=only)
+	go build ./...
+	go test -count=1 -timeout=900s -v -run '^TestFIPSImportOf(ACryptsetupArgon2idVolume|ACryptsetupVolumeWithShortSalts|ACryptsetupVolumeWithAnUnboundKey|SHA1AFVolumes)$$' ./pkg/luks2
+	go test -count=1 -timeout=900s ./...
+
+# assert-build-tags: the declared GO_BUILD_TAGS must select code (ci-template
+# v1.9.2, a make recipe here because this repository ships no shell scripts).
+# A misspelled tag is invisible: the analysers all run, report clean, and skip
+# the code the tag was meant to reach. It compares FILES, test files included,
+# because a tag very often adds a file to a package that already exists. Each
+# tag is then checked by REMOVAL: dropping it must CHANGE the selected set,
+# since the `//go:build !integration` stubs pair with the tagged bodies.
+BUILD_TAG_FILES = {{$$p := .ImportPath}}{{range .GoFiles}}{{$$p}}/{{.}}{{"\n"}}{{end}}{{range .CgoFiles}}{{$$p}}/{{.}}{{"\n"}}{{end}}{{range .TestGoFiles}}{{$$p}}/{{.}}{{"\n"}}{{end}}{{range .XTestGoFiles}}{{$$p}}/{{.}}{{"\n"}}{{end}}
+
+assert-build-tags: ## Fail when a GO_BUILD_TAGS tag selects no code
+	@set -eu; \
+	tags='$(strip $(GO_BUILD_TAGS))'; \
+	[ -n "$$tags" ] || { echo "GO_BUILD_TAGS is empty: nothing to assert"; exit 0; }; \
+	files_for() { csv=$$(echo $$1 | tr ' ' ','); $(GO) list -tags="$$csv" -f '$(BUILD_TAG_FILES)' ./... 2>/dev/null | sort -u; }; \
+	bare=$$(files_for ''); \
+	full=$$(files_for "$$tags"); \
+	nb=$$(printf '%s\n' "$$bare" | grep -c . || true); \
+	nf=$$(printf '%s\n' "$$full" | grep -c . || true); \
+	echo "files selected: untagged=$$nb tagged=$$nf (tags: $$tags)"; \
+	rc=0; \
+	if [ "$$full" = "$$bare" ]; then \
+		echo "::error::-tags '$$tags' changed nothing: the same files are selected with and without it. Either it names tags no file declares, or GO_BUILD_TAGS should be empty."; \
+		rc=1; \
+	fi; \
+	for t in $$tags; do \
+		rest=$$(printf '%s\n' $$tags | grep -vx -- "$$t" | tr '\n' ' '); \
+		if [ "$$(files_for "$$rest")" = "$$full" ]; then \
+			echo "::error::build tag '$$t' selects nothing: removing it from GO_BUILD_TAGS changes no file. Misspelled, or it should be removed."; \
+			rc=1; \
+		fi; \
+	done; \
+	[ "$$rc" -ne 0 ] || echo "OK: every declared tag selects code"; \
+	exit "$$rc"
+
 test-cli: ## Run CLI unit tests only
 	@echo "$(COLOR_BOLD)Running unit tests for ./internal/cli ./cmd/luks2 (cli)...$(COLOR_RESET)"
 	@$(GO) test -v -race -count=1 ./internal/cli ./cmd/luks2
@@ -368,6 +423,12 @@ test-coverage: ## Run tests with coverage report
 # The *_ORIGIN captures must come BEFORE the assignments. The flattening `:=`
 # rewrites a variable's origin to "file", which destroys the only answer to
 # "did anyone outside this make name this image?" -- see ITEST_BUILD_IS_GOAL.
+# IT_IMAGE is devcontainer.md §6's name for the integration image, the one
+# ci.yml passes; ITEST_IMAGE stays this Makefile's own. The alias is set before
+# the origin capture, so an image named either way counts as named outside.
+ifneq ($(IT_IMAGE),)
+ITEST_IMAGE := $(IT_IMAGE)
+endif
 ITEST_ID_ORIGIN := $(origin ITEST_ID)
 ITEST_IMAGE_ORIGIN := $(origin ITEST_IMAGE)
 ITEST_ID ?= $(shell date +%s)-$(shell od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
@@ -768,7 +829,7 @@ docker-run-bin: ## Build the integration container launcher (build/docker-run)
 # like docker-build-integration/$(INTEGRATION_DOCKER_RUN) do, because the
 # library needs the same device-mapper and loop access either way; see
 # test/integration/cmd/docker-run for what that privilege set is and why.
-docker-build: ## Build the CLI image from build/docker/cli
+docker-build-cli: ## Build the CLI image from build/docker/cli
 	@echo "$(COLOR_BOLD)Building $(CLI_IMAGE)...$(COLOR_RESET)"
 	@set -eu; \
 	umask 077; \
@@ -788,7 +849,7 @@ docker-build: ## Build the CLI image from build/docker/cli
 		-t $(CLI_IMAGE) .
 	@echo "$(COLOR_GREEN)✓ CLI image built: $(CLI_IMAGE)$(COLOR_RESET)"
 
-docker-run: docker-build docker-run-bin ## Run the CLI image, with the integration seccomp profile and device scoping (ARGS="..." passes CLI args)
+docker-run: docker-build-cli docker-run-bin ## Run the CLI image, with the integration seccomp profile and device scoping (ARGS="..." passes CLI args)
 	@IMAGE=$(CLI_IMAGE) $(INTEGRATION_DOCKER_RUN) --rm -it -- $(ARGS)
 
 # ---- the per-package quartet ----
@@ -1013,17 +1074,32 @@ vet: ## Run go vet, including the integration build tag
 # ACTIONLINT_VERSION is in the tool-pin file (TOOL PINS, below).
 ACTIONLINT_CONFIG   = .github/actionlint.yaml
 
+# CUSTOMIZE (ci-template v1.21.1, which lints once with the tags): golangci-
+# lint runs twice when GO_BUILD_TAGS is set. The untagged pass runs every
+# linter, as main's lint always did; the tagged pass adds the tag set's files
+# and disables only `unused`, which reads the helpers the untagged unit tests
+# use as dead once they are out of the build. The untagged pass covers unused.
+LINT_TAGGED_PASS = $$LINTER run --output.text.print-issued-lines=false --build-tags=$(subst $(space),$(comma),$(strip $(GO_BUILD_TAGS))) --disable=unused ./... || exit 1;
+
 lint: export AL_CONFIG := $(ACTIONLINT_CONFIG)
-lint: ## Run golangci-lint (if installed) and actionlint over .github/workflows
+lint: ## Run gofmt, golangci-lint and actionlint over .github/workflows (all required)
+	@echo "$(COLOR_BOLD)Checking gofmt...$(COLOR_RESET)"
+	@UNFORMATTED=$$(gofmt -l .); \
+	if [ -n "$$UNFORMATTED" ]; then \
+		echo "$(COLOR_RED)✗ not gofmt-formatted (run 'make fmt'):$(COLOR_RESET)"; \
+		echo "$$UNFORMATTED"; \
+		exit 1; \
+	fi
 	@echo "$(COLOR_BOLD)Running golangci-lint...$(COLOR_RESET)"
 	@LINTER=$$(command -v golangci-lint 2>/dev/null || echo "$(GOBIN)/golangci-lint"); \
-	if [ -x "$$LINTER" ]; then \
-		$$LINTER run ./... || exit 1; \
-		echo "$(COLOR_GREEN)✓ Lint passed$(COLOR_RESET)"; \
-	else \
-		echo "$(COLOR_YELLOW)⚠ golangci-lint not installed, skipping...$(COLOR_RESET)"; \
+	if [ ! -x "$$LINTER" ]; then \
+		echo "$(COLOR_RED)✗ golangci-lint is not installed; the code was not linted$(COLOR_RESET)"; \
 		echo "  Install: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)"; \
-	fi
+		exit 1; \
+	fi; \
+	$$LINTER run --output.text.print-issued-lines=false ./... || exit 1; \
+	$(if $(strip $(GO_BUILD_TAGS)),$(LINT_TAGGED_PASS)) \
+	echo "$(COLOR_GREEN)✓ Lint passed$(COLOR_RESET)"
 	@echo "$(COLOR_BOLD)Running actionlint...$(COLOR_RESET)"
 	@AL=$$(command -v actionlint 2>/dev/null || echo "$(GOBIN)/actionlint"); \
 	if [ ! -x "$$AL" ]; then \
@@ -1075,9 +1151,8 @@ lint: ## Run golangci-lint (if installed) and actionlint over .github/workflows
 TOOLS_REQUIRED ?= 0
 export TOOLS_REQUIRED
 
-# CI passes GOSEC_EXTRA="-fmt=sarif -out=gosec.sarif" so the SARIF it uploads
-# to code scanning comes from the same flags a developer runs, not a second
-# set that can drift.
+# GOSEC_EXTRA appends flags for a one-off run, e.g. "-fmt=sarif -out=gosec.sarif"
+# for a local SARIF report; CI passes none (ci-template v1.21 uploads no SARIF).
 GOSEC_EXTRA ?=
 
 # THE WORKER-POOL BOUND, and why it is not noise (#22).
@@ -1106,7 +1181,7 @@ gosec: ## Run gosec security scanner
 	@echo "$(COLOR_BOLD)Running gosec security scanner...$(COLOR_RESET)"
 	@GOSEC=$$(command -v gosec 2>/dev/null || echo "$(GOBIN)/gosec"); \
 	if [ -x "$$GOSEC" ]; then \
-		$$GOSEC -concurrency $(GOSEC_CONCURRENCY) -exclude-generated -severity medium -confidence medium $(GOSEC_EXTRA) ./... || exit 1; \
+		$$GOSEC -concurrency $(GOSEC_CONCURRENCY) -exclude-generated -severity medium -confidence medium $(if $(GO_BUILD_TAGS),-tags=$(subst $(space),$(comma),$(strip $(GO_BUILD_TAGS)))) $(GOSEC_EXTRA) ./... || exit 1; \
 		echo "$(COLOR_GREEN)✓ Security scan passed$(COLOR_RESET)"; \
 	else \
 		if [ "$$TOOLS_REQUIRED" = 1 ]; then echo "$(COLOR_RED)✗ gosec is not installed and TOOLS_REQUIRED=1$(COLOR_RESET)"; exit 1; fi; \
@@ -1427,6 +1502,13 @@ docker-build-toolchain: ## Build the toolchain image (the devcontainer's toolcha
 		--build-arg GO_BUILD_PROXY \
 		-f $(DEVCONTAINER_DOCKERFILE) --target toolchain \
 		-t $(TOOLCHAIN_IMAGE) .
+
+# devcontainer.md §6: both devcontainer images, the toolchain image under its
+# content-hashed tag and the integration image under IT_IMAGE. CI's image job
+# builds them once; MODULE_ENV_FILE reaches both builds.
+docker-build: ## Build both devcontainer images: the toolchain image and the integration image (IT_IMAGE)
+	@$(MAKE) --no-print-directory docker-build-toolchain
+	@$(MAKE) --no-print-directory docker-build-integration
 
 # Runs CMD in the toolchain image over this checkout, as the uid that owns it
 # and with HOME=/tmp (devcontainer.md §5), so files it writes stay the

@@ -664,7 +664,7 @@ var lockCompatScenarios = []struct {
 }
 
 // TestCompatMetadataLockDirectoryStates is Part 1: for each state of
-// cryptsetup's lock directory, cryptsetup's measured behaviour beside
+// cryptsetup's lock directory, cryptsetup's measured behavior beside
 // go-luks2's, on one volume. go-luks2's steps go through Open and the public
 // Volume methods (lockCompatOps), so what is measured is the lock a caller's
 // call takes.

@@ -2,7 +2,7 @@
 #
 # The production CLI image: the luks2 binary plus the cryptsetup userspace
 # tools it shells out to (CLAUDE.md: "must interface correctly with the
-# cryptsetup userspace tools"), nothing else. Built with `make docker-build`,
+# cryptsetup userspace tools"), nothing else. Built with `make docker-build-cli`,
 # run with `make docker-run`, which goes through the same launcher and
 # privilege set as the integration suite (test/integration/cmd/docker-run) --
 # this binary needs the same device-mapper and loop access either way.

@@ -28,8 +28,10 @@ FROM ${GO_IMAGE} AS base
 
 # The system tools the library drives and the suite inspects: cryptsetup for
 # the cryptsetup-compatibility tests, the mkfs tools, dmsetup (lvm2) and
-# losetup (util-linux).
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# losetup (util-linux). The digest pins Go, not the Debian packages under it:
+# the upgrade takes the Debian security fixes that trivy image gates on
+# (fixable HIGH and CRITICAL findings).
+RUN apt-get update && apt-get upgrade -y --no-install-recommends && apt-get install -y --no-install-recommends \
     util-linux \
     e2fsprogs \
     xfsprogs \

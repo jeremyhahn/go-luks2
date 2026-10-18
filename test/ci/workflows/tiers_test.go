@@ -15,8 +15,8 @@ import (
 // edited on one job and not its siblings, changes what gates a merge without
 // failing anything else; these tests are what fails.
 var (
-	prTier   = []string{"lint", "image", "merge-check"}
-	fullTier = []string{"fips", "test-integration", "test-race"}
+	prTier   = []string{"image", "merge-check", "arch-gates"}
+	fullTier = []string{"fips", "integration", "test-race"}
 )
 
 var (
@@ -27,7 +27,7 @@ var (
 	scheduleOn = regexp.MustCompile(`(?m)^\s*schedule:`)
 	// jobRunsOn is declared here, not shared with batch_test.go, which is
 	// export-ignore: the published tree has no batch_test.go to borrow from.
-	jobRunsOn = regexp.MustCompile(`(?m)^    runs-on: (\S+)`)
+	jobRunsOn = regexp.MustCompile(`(?m)^    runs-on: (.+)$`)
 )
 
 func jobIfOf(t *testing.T, jobText string) string {
@@ -76,7 +76,7 @@ func TestJobNamesAreLiteral(t *testing.T) {
 		}
 	}
 	ci := readFile(t, ".github/workflows/ci.yml")
-	if m := jobName.FindStringSubmatch(job(t, ci, "gate")); m == nil || m[1] != "CI Gate" {
+	if m := jobName.FindStringSubmatch(job(t, ci, "ci-gate")); m == nil || m[1] != "CI Gate" {
 		t.Error(`job gate is not literally named "CI Gate"`)
 	}
 }
@@ -85,8 +85,8 @@ func TestJobNamesAreLiteral(t *testing.T) {
 // 1-CPU gate slots, so it never queues behind the jobs it waits for. A slot
 // that small takes no checkout and no action: the gate is one run step.
 func TestCIGateRunsOnTheGateRunners(t *testing.T) {
-	gate := job(t, readFile(t, ".github/workflows/ci.yml"), "gate")
-	if got := jobRunsOn.FindAllStringSubmatch(gate, -1); len(got) != 1 || got[0][1] != "ci-gate" {
+	gate := job(t, readFile(t, ".github/workflows/ci.yml"), "ci-gate")
+	if got := jobRunsOn.FindAllStringSubmatch(gate, -1); len(got) != 1 || got[0][1] != hostRunner("ci-gate") {
 		t.Errorf("CI Gate runs on %v, want ci-gate", got)
 	}
 	if strings.Contains(gate, "actions/checkout") {
@@ -105,13 +105,21 @@ func TestCIGateRunsOnTheGateRunners(t *testing.T) {
 // integration images it builds; on the smaller runners those images filled
 // the disk.
 func TestImageJobRunsOnTheBigdiskRunners(t *testing.T) {
-	image := job(t, readFile(t, ".github/workflows/ci.yml"), "image")
-	if got := jobRunsOn.FindAllStringSubmatch(image, -1); len(got) != 1 || got[0][1] != "bigdisk" {
-		t.Errorf("Devcontainer image job runs on %v, want bigdisk", got)
+	ci := readFile(t, ".github/workflows/ci.yml")
+	for _, id := range toolchainJobs {
+		if got := jobRunsOn.FindAllStringSubmatch(job(t, ci, id), -1); len(got) != 1 || got[0][1] != hostRunner("bigdisk") {
+			t.Errorf("job %s runs on %v, want %s", id, got, hostRunner("bigdisk"))
+		}
 	}
 	if !regexp.MustCompile(`(?m)^    - bigdisk$`).MatchString(readFile(t, ".github/actionlint.yaml")) {
 		t.Error(".github/actionlint.yaml does not list the bigdisk label; Lint reports it as unknown")
 	}
+}
+
+// hostRunner is the template's runs-on for a self-hosted label: the label on
+// the forge, ubuntu-latest on the github.com mirror, which has neither pool.
+func hostRunner(label string) string {
+	return "${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || '" + label + "' }}"
 }
 
 // TestNoLabelTrigger: ci.yml does not fire on `labeled`. Gitea sends every
@@ -179,7 +187,7 @@ func jobIDs(t *testing.T, workflow string) []string {
 // job through, so the tags are derived from the jobs, never listed by hand.
 func TestCIGateTiersMatchTheJobs(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
-	gate := job(t, ci, "gate")
+	gate := job(t, ci, "ci-gate")
 	if got := jobIfOf(t, gate); got != "always()" {
 		t.Errorf("CI Gate has if %q, want always()", got)
 	}
@@ -199,7 +207,7 @@ func TestCIGateTiersMatchTheJobs(t *testing.T) {
 	var pr, full []string
 	for _, id := range jobIDs(t, ci) {
 		text := job(t, ci, id)
-		if id == "gate" {
+		if id == "ci-gate" {
 			continue
 		}
 		if m := jobName.FindStringSubmatch(text); m != nil && (m[1] == "CI Gate" || m[1] == "Full Gate") {
@@ -268,8 +276,8 @@ func TestUnitTiers(t *testing.T) {
 		}
 	}
 	race := job(t, ci, "test-race")
-	if !strings.Contains(race, "run: make test-unit UNIT_TEST_FLAGS=-v\n") {
-		t.Error("Race does not run make test-unit")
+	if !strings.Contains(race, `run: make ci-toolchain-run CMD="make test-unit UNIT_TEST_FLAGS=-v"`+"\n") {
+		t.Error("Race does not run make test-unit in the toolchain image")
 	}
 	mk := readFile(t, "Makefile")
 	for _, want := range []string{
@@ -289,17 +297,81 @@ func TestFIPSGateIsStrictAndInCI(t *testing.T) {
 	fips := job(t, readFile(t, ".github/workflows/ci.yml"), "fips")
 	for _, want := range []string{
 		"name: FIPS\n",
-		"GOFIPS140: latest",
-		"GODEBUG: fips140=only",
-		"go build ./...",
-		"TestFIPSImportOf(ACryptsetupArgon2idVolume|ACryptsetupVolumeWithShortSalts|ACryptsetupVolumeWithAnUnboundKey|SHA1AFVolumes)",
-		"run: go test -count=1 -timeout=900s ./...",
+		`run: make ci-toolchain-run CMD="make ` + fipsModeTarget + `"` + "\n",
 	} {
 		if !strings.Contains(fips, want) {
 			t.Errorf("the FIPS job lacks %q", want)
 		}
 	}
+	// The gate's mode, packages and timeouts live in the target the job runs
+	// in the toolchain image, in this order: a failure stops the ones after.
+	mk := readFile(t, "Makefile")
+	at := strings.Index(mk, "\n"+fipsModeTarget+":")
+	if at < 0 {
+		t.Fatalf("the Makefile has no %s target", fipsModeTarget)
+	}
+	recipe := mk[at:]
+	if end := strings.Index(recipe[1:], "\n\n"); end >= 0 {
+		recipe = recipe[:end+1]
+	}
+	last := -1
+	for _, want := range []string{
+		fipsModeTarget + ": export GOFIPS140 := latest",
+		fipsModeTarget + ": export GODEBUG := fips140=only",
+		"go build ./...",
+		"go test -count=1 -timeout=900s -v -run '^TestFIPSImportOf(ACryptsetupArgon2idVolume|ACryptsetupVolumeWithShortSalts|ACryptsetupVolumeWithAnUnboundKey|SHA1AFVolumes)$$' ./pkg/luks2",
+		"go test -count=1 -timeout=900s ./...",
+	} {
+		i := strings.Index(recipe, want)
+		if i < 0 {
+			t.Errorf("%s lacks %q", fipsModeTarget, want)
+			continue
+		}
+		if i < last {
+			t.Errorf("%s runs %q out of order", fipsModeTarget, want)
+		}
+		last = i
+	}
+	if !regexp.MustCompile(`(?m)^\.PHONY:.* ` + regexp.QuoteMeta(fipsModeTarget) + `( |$)`).MatchString(mk) {
+		t.Errorf("%s is not .PHONY", fipsModeTarget)
+	}
 	if strings.Contains(readFile(t, ".github/workflows/nightly.yml"), "fips140") {
 		t.Error("nightly.yml still carries a FIPS job; it runs in ci.yml's full tier")
+	}
+}
+
+// fipsModeTarget is the Makefile target the FIPS job runs.
+const fipsModeTarget = "test-fips-mode"
+
+// The FIPS-mode target must not be a name a per-package pattern rule answers
+// to: an explicit `test-fips` shadowed `test-%` for ./internal/fips, so
+// `make test-fips` ran the whole module in FIPS mode instead of that package.
+func TestFIPSModeTargetShadowsNoPerPackageTarget(t *testing.T) {
+	mk := readFile(t, "Makefile")
+	m := regexp.MustCompile(`(?m)^([^\s:#]+): export GODEBUG := fips140=only$`).FindStringSubmatch(mk)
+	if m == nil {
+		t.Fatal("the Makefile has no target that exports GODEBUG=fips140=only")
+	}
+	target := m[1]
+	if target != fipsModeTarget {
+		t.Errorf("the Makefile's FIPS-mode target is %s, want %s", target, fipsModeTarget)
+	}
+	var pkgs []string
+	for _, m := range regexp.MustCompile(`(?m)^PKG_([A-Za-z0-9_]+)\s*:=`).FindAllStringSubmatch(mk, -1) {
+		pkgs = append(pkgs, m[1])
+	}
+	if !contains(pkgs, "fips") {
+		t.Fatal("the Makefile has no PKG_fips; this check has gone dark")
+	}
+	patterns := regexp.MustCompile(`(?m)^([A-Za-z0-9_.-]*)%:`).FindAllStringSubmatch(mk, -1)
+	if len(patterns) == 0 {
+		t.Fatal("the Makefile has no pattern rule; this check has gone dark")
+	}
+	for _, p := range patterns {
+		for _, pkg := range pkgs {
+			if target == p[1]+pkg {
+				t.Errorf("%s is the per-package target %s%% for PKG_%s, which it shadows", target, p[1], pkg)
+			}
+		}
 	}
 }

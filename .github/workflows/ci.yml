@@ -1,54 +1,53 @@
-# ci-template: v1.19 (customized)
+# ci-template: v1.21.1 (customized)
 
 name: CI
 
 # ONE workflow file, run by two different Actions hosts: github.com and a
 # self-hosted forge. Steps that only work on github.com are guarded on
-# github.server_url; everything that gates a merge runs on both.
+# github.server_url; everything that gates a merge runs on both, and every
+# runner choice is the template's `github.server_url` expression.
 #
-# ci-template v1.15 (automatethethings#209): every job starts at once, so a run
-# takes as long as its slowest job, and `push` runs on main only (merge trains
-# are PRs and get CI from `pull_request`). The CI Gate, the one required check,
-# needs every job and fails closed on any result but success. This replaces
-# v1.9's staged ordering, where lint, build and unit tests gated security and
-# integration.
+# ci-template v1.21 (ci-standard.md §2, devcontainer.md §7): every stage runs in
+# this repository's own devcontainer image and no other. No job sets up Go or
+# installs a tool on the runner; the image's pin file decides every version
+# and the Makefile carries every flag set. Each stage is one `make` target run
+# in the toolchain image through `make ci-toolchain-run`, which copies the
+# checkout into the container: a runner reaches its daemon through a socket,
+# so a bind mount would resolve on the daemon's host. The canonical scripts
+# are Makefile recipes here (ci-toolchain-run, ci-reap-stacks,
+# assert-build-tags) because the public release ships no shell scripts.
+#
+# The forge credentials are masked first in every job that has them, and
+# reach an image build only as the gomodauth BuildKit secret, from a file
+# outside the context that the job removes. No step prints that file, the job
+# environment or a matched line; test/ci/workflows asserts it.
 #
 # ACROSS runs, supersession (#136): the self-hosted host exposes no REST route
 # to cancel a run, so the `concurrency` block below cancels a run the moment a
-# newer head lands on the same ref. It is a property of the workflow the
-# scheduler reads, not an API call — which is exactly why it works on a host
-# where no cancel route exists. "No cancel API" was long read here as
-# "cancellation is impossible"; the narrow claim is true and the conclusion was
-# not.
+# newer head lands on the same ref.
 #
-# TWO TIERS, ONE GATE (#341, #343, sdlc §5a). DEVIATION from the template,
-# which has one tier.
+# TWO TIERS, ONE GATE (#341, #343, sdlc §5a). CUSTOMIZE: the template's
+# integration job is the only one it lets a repo move to the full tier.
 #
-#   PR tier    every event: Lint, Devcontainer image and Merged Tree. The
-#              image job runs every stage but integration in the toolchain
-#              image built at this commit -- make build, test, security
-#              (gosec, govulncheck, go mod verify, trivy's filesystem scan)
-#              and deps-check, and with them the linux binaries, the 32-bit
-#              vet, the unit legs (no -race) and their coverage gate, the
+#   PR tier    every event: Devcontainer image, Merged Tree and Architecture
+#              Gates. The image job runs lint, the build-tag assertion, build,
+#              test, security (gosec, govulncheck, go mod verify, trivy's
+#              filesystem scan) and deps-check in the toolchain image built at
+#              this commit, and with them the linux binaries, the 32-bit vet,
+#              the unit legs (no -race) and their coverage gate, the
 #              calibration tests and the releasability and API gates -- and
-#              trivy image on the integration image. No PR-tier stage runs on
-#              the runner; Lint and Merged Tree set up Go there. DEVIATION
-#              from the template, whose Security Scan, Build and Unit Tests
-#              jobs still set up Go on the runner (ci-standard §2).
+#              trivy image on the integration image.
 #   Full tier  push to main, workflow_dispatch, and a pull_request labelled
-#              `ci:full`: FIPS, Integration Tests and Race (the -race unit run
-#              with its pkg/luks2 budget).
+#              `ci:full`: Integration, Race (the -race unit run with its
+#              pkg/luks2 budget) and FIPS, each its own job in the image.
 #
 # CI Gate, the single required check, needs EVERY job and reads each by name,
 # tagged `pr` or `full`. A `full` job may be skipped only while the full tier
 # is not selected; any other skip, and every failure or cancellation, fails it.
 #
-# No CI workflow is scheduled: the nightly full run is a workflow_dispatch from
-# the coordinator's loop, which this file treats exactly like a push to main.
-# FIPS moved back here from nightly.yml, so it now runs on every push to main
-# rather than once a night. trivy's filesystem scan (through make security)
-# and trivy image gate here, in the image job, on every event; nightly.yml,
-# dispatch-only, still runs the filesystem scan, uploads its SARIF to code
+# No CI workflow is scheduled: the nightly full run is a workflow_dispatch,
+# which this file treats exactly like a push to main. nightly.yml,
+# dispatch-only, still runs trivy's filesystem scan, uploads its SARIF to code
 # scanning on github.com, and runs the advisory misconfiguration scan.
 #
 # Every full-tier job, and CI Gate's FULL_TIER, carries the SAME condition,
@@ -61,13 +60,10 @@ name: CI
 # every label add and remove arrives as `labeled`, so each review or task
 # label started a run that cancelled the PR's run in progress. A label is read
 # when a run starts, so ci:full selects the full tier for any run that begins
-# with the label on the PR. The cost: ci:full added to an open PR takes effect
-# on its next push or update-branch, or through workflow_dispatch. Nothing
-# here branches on the label event itself, and the gate is never skipped by an
-# event condition: a job skipped by `if:` still posts a status under its name,
-# and both hosts count a skipped required check as passing. Renaming the gate
-# per event is no way out either: Gitea does not evaluate expressions in a
-# job's `name:` and posts the expression verbatim.
+# with the label on the PR. The gate is never skipped by an event condition: a
+# job skipped by `if:` still posts a status under its name, and both hosts
+# count a skipped required check as passing. Gitea does not evaluate
+# expressions in a job's `name:`, so every name is literal.
 # test/ci/workflows asserts the types below and the literal gate name.
 on:
   push:
@@ -76,11 +72,7 @@ on:
     branches: [main]
     # No `labeled`. Gitea 1.27.1 sends every label add AND remove as
     # `label_updated`, and its matcher maps that to `labeled` whichever label
-    # moved, with no `github.event.label` in the payload. Each `task:*` or
-    # `code-review` change then started a run that the `concurrency` block let
-    # cancel the PR's run in progress, and a run whose jobs an `if:` skips
-    # would post `skipped` over the real run's `CI / *` contexts, CI Gate
-    # included. An action outside `types` matches nothing: no run, no status.
+    # moved. An action outside `types` matches nothing: no run, no status.
     # The cost: adding `ci:full` waits for the PR's next push or update-branch,
     # or a workflow_dispatch run.
     types: [opened, synchronize, reopened]
@@ -88,78 +80,33 @@ on:
   # failure is the runner's rather than the code's.
   workflow_dispatch:
 
-# Supersede an in-flight run when a newer head lands on the same ref: the older
-# run is cancelled and the newest survives. Measured across this portfolio, 73%
-# of runs were already superseded yet ran to completion, on a runner pool every
-# repository shares — so the wasted slots were other projects' queue latency,
-# not only this one's.
-#
-# `${{ github.workflow }}` LEADS the key deliberately. It scopes the group to
-# this workflow alone, so a cancellation here can never reach the separate
-# review workflow that also gates a merge; that one carries its own group.
-#
-# `cancel-in-progress` is the literal `true` and must stay literal. This host
-# does not evaluate expressions in that field — any non-empty value is truthy —
-# so a `${{ ... }}` guard meant to narrow it would read as always-on instead.
-#
-# MAIN PUSHES ARE IN SCOPE, and that is the cost of the line above rather than
-# an oversight. `push` fires only on `main`, so every trunk commit shares the
-# one group `CI-refs/heads/main`: merge two pull requests a few minutes apart
-# and the FIRST merge commit's run is cancelled by the second. `main` then
-# carries a commit whose CI never completed, reported `cancelled`.
-#
-# The usual narrowing — `cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}`
-# — is exactly what the paragraph above says this host cannot do: the
-# expression is not evaluated, the value is non-empty, and it reads as `true`.
-# So the choice here is between per-push supersession everywhere and none at
-# all, and it is taken deliberately: a superseded trunk run is re-runnable from
-# the forge, the tags a release is verified against are cut from a commit that
-# has been through a completed run, and 73% waste on a shared pool is a cost
-# every other project in it pays. Recorded rather than fixed, because the fix
-# is a host capability this host does not have.
-#
-# `github.ref` rather than `github.head_ref || github.ref` is safe ONLY while
-# `push` is restricted to `main`: for a pull_request the ref is already
-# `refs/pull/<n>/merge`, so supersession works. Add a push trigger for
-# `issue/*` and the same commit lands in two groups, and the figure above
-# regresses without anything failing.
+# Supersede an in-flight run when a newer head lands on the same ref.
+# `${{ github.workflow }}` LEADS the key so a cancellation never reaches the
+# review workflow. `cancel-in-progress` is the literal `true` and must stay
+# literal: this host does not evaluate expressions in that field. Main pushes
+# share one group, so a trunk run can be superseded by the next merge; it is
+# re-runnable, and a release is cut from a commit with a completed run.
+# `github.ref` is safe only while `push` is restricted to `main`.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
-  security-events: write
 
 env:
-  # 1.27.1 is the module floor (#282): the upstream latest Go, per the owner
-  # ruling of 2026-10-07 that nothing is pinned below its latest release.
-  # go-enclave v0.5.0-alpha requires `go 1.27.0` (#201), which 1.27.1
-  # satisfies. The 2026-08-20 block on 1.27 named a transitive dependency
-  # that failed to compile under it (undefined fastrand64); measured on
-  # adoption, nothing in THIS module's graph does, so the block's reason no
-  # longer applies here. Never `stable`: a floating version flipped to 1.27
-  # mid-campaign and broke every repo riding it — that lesson is about the
-  # float, not the number.
-  GO_VERSION: "1.27.2"
+  COVERAGE_THRESHOLD: 90      # CUSTOMIZE: per testing-guidelines.md
+  # CUSTOMIZE (v1.9.2): the repo's full build-tag set, SPACE separated. The
+  # integration suites and their `!integration` stubs sit behind
+  # `integration`; lint, gosec and the assertion below read it, never the
+  # unit run (the Makefile's GO_BUILD_TAGS block says why).
+  GO_BUILD_TAGS: "integration"
 
-  # ANALYSIS TOOL PINS (#21, #44). golangci-lint is BAKED into the self-hosted
-  # runner image, for Lint; gosec and govulncheck are built into the
-  # devcontainer image from build/docker/devcontainer/tool-pins.env, for make
-  # security. The steps below assert the binary each job got matches, and
-  # refuse to run otherwise.
-  #
-  # Pinned because an unpinned scanner self-updates underneath you. When it
-  # does, a new rule fires on code untouched for months and reddens whichever
-  # pull request happens to run next: the error accuses innocent work, `main`
-  # is latently red, and nobody can reproduce the previous green. gosec was
-  # exactly this — `make security` reported `Gosec : dev`, meaning a binary
-  # built from source at an unknown revision, so two runs of the same commit
-  # could disagree and neither was reproducible.
-  #
-  # Bumping one of these is a DELIBERATE change, one issue per bump, and the
-  # image that carries it is bumped in the same breath — a version skew between
-  # the two fails the job rather than silently scanning with something else.
+  # ANALYSIS TOOL PINS (#21, #44). CUSTOMIZE: the image builds golangci-lint,
+  # gosec and govulncheck from build/docker/devcontainer/tool-pins.env; the
+  # image job asserts the binaries in it against these, so a skew between the
+  # two fails the job rather than scanning with something else. Bumping one is
+  # a DELIBERATE change, and the pin file is bumped in the same breath.
   GOLANGCI_LINT_VERSION: "v2.14.0"
   GOSEC_VERSION: "v2.29.0"
   GOVULNCHECK_VERSION: "v1.8.0"
@@ -167,107 +114,84 @@ env:
 jobs:
   # ---- PR tier ----
   #
-  # Every PR-tier job runs on every event this workflow fires on.
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-
-      - name: Check formatting
-        run: |
-          unformatted=$(gofmt -l .)
-          if [ -n "$unformatted" ]; then
-            echo "Files not formatted:"
-            echo "$unformatted"
-            exit 1
-          fi
-      - name: Require golangci-lint at the pinned version
-        run: |
-          set -eu
-          go run ./test/tools/require-tool \
-            golangci-lint "$GOLANGCI_LINT_VERSION" \
-            "github.com/golangci/golangci-lint/v2/cmd/golangci-lint"
-
-      # .golangci.yml enables the security linters (staticcheck, errcheck,
-      # unused, ineffassign, misspell, gocritic). The umbrella linter with
-      # those switched off looks like a lint gate and catches none of what one
-      # is for.
-      - name: Run golangci-lint
-        run: golangci-lint run --timeout=10m ./...
-
-  # CUSTOMIZE (ci-template v1.18, image job): builds the devcontainer images
-  # from build/docker/devcontainer/Dockerfile at this commit, runs every
-  # toolchain stage in the toolchain image (handbook ci-standard.md §1-§2),
-  # and gates the integration image with trivy image. The checkout is copied
-  # into each toolchain container (`make ci-toolchain-run`; the public release
-  # ships no shell scripts, so the canonical scripts are Makefile recipes
-  # here): the daemon is reached through a socket, so a bind mount would
-  # resolve on its host. make security and make deps-check get a network, for
-  # the vulnerability databases and the module proxy; everything else runs
-  # without one.
-  #
-  # NOTHING RUNS ON THE RUNNER BUT DOCKER. The checks the PR tier used to run
-  # on it with actions/setup-go -- the scanner pin assertion and the gosec
-  # SARIF, the unit legs with their coverage gate, the calibration tests, the
-  # releasability and API gates, the 64-bit binaries and the 32-bit vet -- run
-  # here, each through ci-toolchain-run, and the files their uploads need come
-  # back through CI_OUT. test/ci/workflows fails any job but Lint, Race, FIPS,
-  # Merged Tree and CI Gate that sets up Go or runs go or a stage target on
-  # the runner. The image scan is a gate only; the one code-scanning upload is
-  # gosec's SARIF, on github.com.
+  # The image job builds both devcontainer images once (`make docker-build`)
+  # and runs each stage as its own step; `if: !cancelled()` runs every stage
+  # after a failed one, so one run reports them all. make security and make
+  # deps-check (and trivy) get a network, for the vulnerability databases and
+  # the module proxy; everything else runs without one.
   image:
-    name: Devcontainer image [build, test, security, deps-check, trivy image]
-    # bigdisk: the runners whose disks are large enough to hold the toolchain and
-    # integration images this job builds.
-    runs-on: bigdisk
+    name: Devcontainer image [lint, build, test, security, deps-check, trivy image]
+    # bigdisk: the runners whose disks hold the toolchain and integration
+    # images this job builds.
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
     timeout-minutes: 120
     env:
-      # ITEST_IMAGE is the Makefile's name for the integration image; set from
-      # the job, the image is kept for the scan below and removed at teardown.
-      ITEST_IMAGE: go-luks2-ci-it:${{ github.run_id }}-${{ github.run_attempt }}-image
+      # Set from the job, the integration image is kept for the scan below
+      # and removed at teardown.
+      IT_IMAGE: go-luks2-ci-it:${{ github.run_id }}-${{ github.run_attempt }}-image
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # v1.21.1: mask the forge credentials before any other step. The runner
+      # injects them as plain environment (dependency-resolution.md §6), which
+      # the log does not mask by itself, and the token sits inside
+      # GIT_CONFIG_KEY_0's URL, so it is masked alone as well.
+      - name: Mask the forge credentials
+        run: |
+          for v in GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+            val=${!v:-}
+            [ -n "$val" ] || continue
+            echo "::add-mask::$val"
+            case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
+          done
 
       - name: Reap stale CI stacks
         run: make ci-reap-stacks
 
-      # As in the integration job: the forge credentials reach the build only
-      # as the gomodauth BuildKit secret, from a file outside the context.
-      - name: Write the module credential file
+      - name: Build the devcontainer images
         run: |
-          umask 077
-          : > "$RUNNER_TEMP/gomodauth.env"
-          for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
-            if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
-          done
-
-      - name: Build the toolchain and integration images
-        run: |
-          make docker-build-toolchain docker-build-integration MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env"
+          ( umask 077; : > "$RUNNER_TEMP/gomodauth.env"
+            for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+              if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
+            done )
+          make docker-build MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE"
+          rm -f "$RUNNER_TEMP/gomodauth.env"
           echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
 
+      # CUSTOMIZE: the analysers must SAY they are the pinned versions (#21):
+      # gosec takes its version from ldflags, so a pinned install alone still
+      # self-reports `dev`, and a scan by an unknown version is no gate.
+      - name: Require the analysis tools at their pins (toolchain image)
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        run: make ci-toolchain-run CMD="go run ./test/tools/require-tool golangci-lint $GOLANGCI_LINT_VERSION github.com/golangci/golangci-lint/v2/cmd/golangci-lint && go run ./test/tools/require-tool gosec $GOSEC_VERSION github.com/securego/gosec/v2/cmd/gosec && go run ./test/tools/require-tool govulncheck $GOVULNCHECK_VERSION golang.org/x/vuln/cmd/govulncheck"
+
+      # make lint: gofmt, golangci-lint and actionlint, each required, golangci-
+      # lint printing path and line only. .golangci.yml enables staticcheck,
+      # errcheck, unused, ineffassign, misspell and gocritic.
+      - name: make lint (toolchain image)
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        run: make ci-toolchain-run CMD="make lint GO_BUILD_TAGS='$GO_BUILD_TAGS'"
+
+      # v1.9.2: the declared tag set must select code. Each tag is checked by
+      # removal: if dropping it changes no selected file (tests included), it
+      # is misspelled or dead.
+      - name: Assert every build tag selects code (toolchain image)
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        run: make ci-toolchain-run CMD="make assert-build-tags GO_BUILD_TAGS='$GO_BUILD_TAGS'"
+
       - name: make build (toolchain image)
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         run: make ci-toolchain-run CMD="make build"
 
       # The linux/amd64 and linux/arm64 CLI, -trimpath, as the binaries
-      # artifact; and the 32-bit compile-only leg. Every other build is 64-bit,
-      # and integer-width defects that built fine on amd64 failed on 386 and
-      # arm, four of them in test files only `go vet` compiles: the reasoning
-      # is at vet-32bit in the Makefile.
+      # artifact; and the 32-bit compile-only leg (the reasoning is at
+      # vet-32bit in the Makefile).
       - name: Linux binaries and 32-bit vet (toolchain image)
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         run: make ci-toolchain-run CMD="make build-linux vet-32bit" CI_OUT="luks-linux-amd64 luks-linux-arm64"
 
-      # upload-artifact v4+ refuses to run against any server that is not
-      # github.com — it detects one and reports "not currently supported on
-      # GHES", and the self-hosted forge presents as such. The build above has
-      # already run and already gated; only the artifact is skipped.
+      # upload-artifact v4+ refuses any server that is not github.com. The
+      # build above has already gated; only the artifact is skipped.
       - name: Upload binaries
         if: github.server_url == 'https://github.com'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -276,36 +200,24 @@ jobs:
           path: luks-linux-*
 
       - name: make test (toolchain image)
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         run: make ci-toolchain-run CMD="make test"
 
-      # THE UNIT LEGS, UNINSTRUMENTED (#341), and the gate over their profiles.
-      # make test above is the stage; this is the same default tag set measured
-      # per package -- ./pkg/luks2, then every other package `go list ./...`
-      # reports, so a package added later is gated without being listed -- with
-      # only -race removed (UNIT_TEST_RACE in the Makefile). The raced run, with
-      # its pkg/luks2 budget, is the full tier's Race job. The integration-
-      # tagged suites drive loop devices, device-mapper and mounts, and are
-      # measured in the integration image instead (make coverage-combined).
-      #
-      # The legs and the gate share ONE container: the gate reads the profiles
-      # the legs write, and a container is the run's whole filesystem.
-      # `make coverage-gate` (#141) compares every package against its own
-      # floor in coverage-floors.txt, exactly, and fails on a missing profile,
-      # an unmeasured package or a floor that holds a package to 90% in no
-      # tier.
+      # CUSTOMIZE, in place of the template's `make coverage`: the unit legs
+      # run uninstrumented on the PR tier and their per-package gate reads
+      # coverage-floors.txt, because the raced run's pkg/luks2 budget is the
+      # full tier's Race job (#341). The legs and the gate share ONE container:
+      # the gate reads the profiles the legs write.
       - name: Unit legs and coverage gate, no -race (toolchain image)
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         run: make ci-toolchain-run CMD="make test-unit-norace UNIT_TEST_FLAGS=-v && make coverage-gate" CI_OUT=coverage.out
 
-      # RLIMIT_MEMLOCK is the one that turns a correct design into a red suite:
-      # measured on a workstation, the suite passes down to 512 KiB and fails
-      # comprehensively at 64 KiB with "could not allocate locked memory ...
-      # limit reached?". Read in the image, under the limits ci-toolchain-run
-      # sets, because those are the ones the tests ran under.
+      # RLIMIT_MEMLOCK turns a correct design into a red suite below 512 KiB.
+      # Read in the image, under the limits ci-toolchain-run sets.
       - name: Record the resource limits these tests ran under (toolchain image)
-        if: always() && env.TOOLCHAIN_IMAGE != ''
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         run: make ci-toolchain-run CMD="echo 'RLIMIT_MEMLOCK (KiB), nproc, /tmp:' && ulimit -l && nproc && df -h /tmp"
 
-      # As for the binaries: github.com only, and the gate has already run.
       - name: Upload coverage
         if: github.server_url == 'https://github.com'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -313,128 +225,197 @@ jobs:
           name: coverage-unit
           path: coverage.out
 
-      # WITHOUT -race, deliberately, and with the calibration BENCHMARKS, which
-      # the ordinary unit run never executes.
-      #
-      # The PBKDF2 calibration defect (#52) is invisible under -race. Measured:
-      # the old implementation gated its extrapolation on
-      # `elapsed.Milliseconds() > 0`, race instrumentation slows the probe past
-      # 1ms, the gate passes, and the broken code returns a plausible,
-      # correctly-scaling count. Uninstrumented, the same code returns a
-      # hardcoded 100000 on every pbkdf2 volume it formats -- 25-100x under the
-      # requested work factor. Every calibration test passes against the
-      # restored defect under -race and fails against it without. It stays its
-      # own step so these assertions keep running if the unit legs are ever
-      # raced again.
+      # WITHOUT -race, deliberately, and with the calibration BENCHMARKS: the
+      # PBKDF2 calibration defect (#52) is invisible under -race.
       - name: PBKDF2 calibration tests, no -race (toolchain image)
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         run: make ci-toolchain-run CMD="make test-calibration"
 
-      # The gate itself, over this checkout's git index (ci-toolchain-run
-      # copies .git in): a fleet address, hostname or owner path in any tracked
-      # file, or any tracked file the public release must not carry (a shell
-      # script, agent instructions, an internal workflow), fails the job.
+      # Over this checkout's git index: a fleet address, hostname or owner
+      # path in any tracked file, or a tracked file the public release must
+      # not carry, fails the job.
       - name: Public-releasability gate (toolchain image)
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         run: make ci-toolchain-run CMD="make releasability"
 
-      # The current pkg/luks2 API must honor every disposition in
-      # test/tools/apidump/baseline/disposition-luks2.tsv exactly, so a KEEP
-      # identifier that regressed and a DELETE/RENAME/MOVE/UNEXPORT identifier
-      # that lingers under its old name both fail the build.
+      # The pkg/luks2 API must honor every disposition in
+      # test/tools/apidump/baseline/disposition-luks2.tsv exactly.
       - name: API-diff gate (toolchain image)
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         run: make ci-toolchain-run CMD="make api-diff"
 
-      # The scanners make security runs must SAY they are the pinned versions
-      # (#21): gosec takes its version from ldflags, so a pinned install alone
-      # still self-reports `dev`, and a scan by an unknown version is no gate.
-      # The image builds both from tool-pins.env; this asserts the binaries in
-      # it against the pins at the top of this file, so a skew between the two
-      # fails here rather than scanning with something else.
-      - name: Require gosec and govulncheck at the pinned versions (toolchain image)
-        run: make ci-toolchain-run CMD="go run ./test/tools/require-tool gosec $GOSEC_VERSION github.com/securego/gosec/v2/cmd/gosec && go run ./test/tools/require-tool govulncheck $GOVULNCHECK_VERSION golang.org/x/vuln/cmd/govulncheck"
-
-      # GOSEC_EXTRA only adds the SARIF for the upload below; gosec still exits
-      # non-zero on a finding and gates here. CI_OUT copies the report out
-      # whatever the scan's result, so a failing scan still uploads it.
+      # gosec, govulncheck, go mod verify and trivy's filesystem scan; the target owns gosec's
+      # flags and its worker bound. Nothing is uploaded to code scanning.
       - name: make security (toolchain image)
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         env:
           IN_IMAGE_NETWORK: bridge
-        run: make ci-toolchain-run CMD="make security GOSEC_EXTRA='-fmt=sarif -out=gosec.sarif'" CI_OUT=gosec.sarif
-
-      # The code scanning API is github.com-only; anywhere else this 404s. The
-      # scan itself has already run and already failed the job on a finding.
-      - name: Upload gosec SARIF
-        if: always() && github.server_url == 'https://github.com'
-        uses: github/codeql-action/upload-sarif@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3
-        with:
-          sarif_file: gosec.sarif
-          category: gosec
+        run: make ci-toolchain-run CMD="make security GO_BUILD_TAGS='$GO_BUILD_TAGS'"
 
       - name: make deps-check (toolchain image)
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         env:
           IN_IMAGE_NETWORK: bridge
         run: make ci-toolchain-run CMD="make deps-check"
 
-      # The image gate fails on CRITICAL and HIGH findings that have a fix
-      # (devops.md §8, the trivy image row): the base image's
-      # OS layer carries hundreds of advisories its distribution has not fixed,
-      # which no change here can clear, so --ignore-unfixed drops those and
-      # nothing else. A fixable finding still fails the job. The filesystem scan in
-      # make security never takes --ignore-unfixed.
+      # Fails on CRITICAL and HIGH findings that have a fix: --ignore-unfixed
+      # (v1.19) and --skip-dirs /opt/go/mod (v1.20). trivy's filesystem scan and make
+      # security never take --ignore-unfixed.
       - name: trivy image (integration image)
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         env:
           IN_IMAGE_NETWORK: bridge
         run: |
-          docker save -o it-image.tar "$ITEST_IMAGE"
+          docker save -o it-image.tar "$IT_IMAGE"
           make ci-toolchain-run \
-            CMD="trivy image --input it-image.tar --ignore-unfixed --severity CRITICAL,HIGH --exit-code 1"
+            CMD="trivy image --input it-image.tar --ignore-unfixed --skip-dirs /opt/go/mod --severity CRITICAL,HIGH --exit-code 1"
 
       - name: Tear down
         if: always()
         run: |
           rm -f "$RUNNER_TEMP/gomodauth.env" it-image.tar
-          docker image rm "$ITEST_IMAGE" || true
+          docker image rm "$IT_IMAGE" || true
+
+  # THE MERGE RESULT, which nothing else in this pipeline looks at. CUSTOMIZE:
+  # a job of the integration job's shape. Every other check reads the BRANCH
+  # HEAD, Gitea publishes no /merge ref, and `git merge-tree` answers "do
+  # these conflict?", never "is the result correct?" -- so branch green, main
+  # green and the merge of the two red was invisible (measured twice on
+  # 2026-09-13). `go vet ./...` compiles the test files, where both breakages
+  # were. The tree is constructed on the runner with git and run in the
+  # toolchain image; the network is for a merged go.mod that names modules
+  # the image's cache lacks.
+  merge-check:
+    name: Merged Tree
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    timeout-minutes: 60
+    steps:
+      # Full history: merge-tree needs the base branch.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Mask the forge credentials
+        run: |
+          for v in GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+            val=${!v:-}
+            [ -n "$val" ] || continue
+            echo "::add-mask::$val"
+            case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
+          done
+
+      - name: Reap stale CI stacks
+        run: make ci-reap-stacks
+
+      # Runs on push too, reporting success, rather than carrying an `if:` that
+      # skips it: the gate counts a SKIPPED pr job as a failure on purpose.
+      - name: Construct the merge
+        run: |
+          set -eu
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "not a pull request: the merge result IS this commit, already checked by the other jobs"
+            exit 0
+          fi
+          base="${{ github.event.pull_request.base.ref }}"
+          git fetch --no-tags --quiet origin "$base"
+          # A conflict is an earlier and different answer from a broken merge.
+          if ! tree=$(git merge-tree --write-tree "origin/$base" HEAD 2>/dev/null); then
+            echo "::error::This branch conflicts with $base. Rebase it; the merge result cannot be evaluated until it applies."
+            exit 1
+          fi
+          mkdir .merged
+          git archive "$tree" | tar -x -C .merged
+          # `go vet` over no packages exits 0, so an empty tree must not pass.
+          if [ ! -f .merged/go.mod ]; then
+            echo "::error::The extracted merge tree has no go.mod, so nothing was checked."
+            exit 1
+          fi
+          echo "MERGED_TREE=.merged" >> "$GITHUB_ENV"
+
+      - name: Build the toolchain image
+        if: env.MERGED_TREE != ''
+        run: |
+          ( umask 077; : > "$RUNNER_TEMP/gomodauth.env"
+            for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+              if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
+            done )
+          make docker-build-toolchain MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env"
+          rm -f "$RUNNER_TEMP/gomodauth.env"
+
+      - name: Compile the merged tree (toolchain image)
+        if: env.MERGED_TREE != ''
+        env:
+          IN_IMAGE_NETWORK: bridge
+        run: make ci-toolchain-run CMD="cd .merged && go build ./... && go vet ./... && go vet -tags=integration ./... && echo 'the merge of this branch with its base compiles'"
+
+      - name: Tear down
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/gomodauth.env" .merged
+
+  # Architecture gate (v1.20). go-objstore owns every blob backend, and a repo
+  # reaches it only through the packages that are its storage seam; this
+  # library has none, so no package may import it. Test files are exempt. A
+  # source check with grep, not a stage: it runs on the runner's shell.
+  arch-gates:
+    name: Architecture Gates
+    runs-on: ubuntu-latest
+    env:
+      OBJSTORE_SEAMS: ''      # CUSTOMIZE
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: No direct go-objstore import outside the storage seam
+        run: |
+          if [ "$(sed -n 's/^module //p' go.mod)" = github.com/jeremyhahn/go-objstore ]; then
+            echo "OK: this is go-objstore"; exit 0
+          fi
+          hits=$(grep -rln --include='*.go' '"github.com/jeremyhahn/go-objstore' . \
+                 | grep -v '_test\.go$' \
+                 | { if [ -n "$OBJSTORE_SEAMS" ]; then grep -vE "$OBJSTORE_SEAMS"; else cat; fi; } || true)
+          if [ -n "$hits" ]; then
+            echo "go-objstore may be imported only in the storage seam (OBJSTORE_SEAMS='$OBJSTORE_SEAMS'):"
+            echo "$hits"; exit 1
+          fi
+          echo "OK: no go-objstore import outside the storage seam"
 
   # ---- Full tier ----
   #
   # The condition is the same on every full-tier job and on CI Gate's
   # FULL_TIER; the table at the top of this file reads it out.
-  test-integration:
-    name: Integration Tests
-    runs-on: ubuntu-latest
+
+  # CUSTOMIZE (ci-template v1.18): the suite runs in the devcontainer
+  # `integration` image built at this commit, as the compose service in
+  # build/docker/devcontainer/compose.yaml. That service carries
+  # test/tools/docker-run's privilege set and no more -- a test pins the two
+  # equal -- because the suite drives host device-mapper and loop devices. The
+  # compose project is go-luks2-ci-<run>-<attempt>, the reaper runs first, and
+  # the teardown runs last under if: always(). Every name is unique to the job
+  # attempt (#105). The ledger directory (TEST_STATE_DIR) is bind-mounted from
+  # the runner host and deliberately persists between jobs (#96).
+  integration:
+    name: Integration [integration image]
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:full')
-    # No `needs` (ci-template v1.14): starts at once; CI Gate fails closed on
-    # it whenever the full tier is selected.
-    #
-    # CUSTOMIZE (ci-template v1.18, integration job that starts containers):
-    # the suite runs in the devcontainer `integration` image built at this
-    # commit, as the compose service in build/docker/devcontainer/compose.yaml
-    # (handbook ci-standard.md §2). That service carries test/tools/docker-run's
-    # privilege set and no more -- a test pins the two equal -- because the
-    # suite drives host device-mapper and loop devices; it is not the
-    # canonical hardened posture, which the suite cannot run under. The
-    # compose project is go-luks2-ci-<run>-<attempt>, the reaper runs first,
-    # and the teardown runs last under if: always().
-    #
-    # Every name here is unique to the job attempt (#105): Docker names are per
-    # HOST, and two jobs on one runner sharing one used to kill each other's
-    # container or test each other's tree. The ledger directory
-    # (TEST_STATE_DIR, /var/tmp/go-luks2-test-state) is bind-mounted from the
-    # runner host and deliberately persists between jobs (#96); the Makefile
-    # neither creates nor cleans it.
+    timeout-minutes: 120
     env:
       IT_PROJECT: go-luks2-ci-${{ github.run_id }}-${{ github.run_attempt }}
-      ITEST_IMAGE: go-luks2-ci-it:${{ github.run_id }}-${{ github.run_attempt }}
+      IT_IMAGE: go-luks2-ci-it:${{ github.run_id }}-${{ github.run_attempt }}
       ITEST_CONTAINER: go-luks2-ci-${{ github.run_id }}-${{ github.run_attempt }}-itest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
+      - name: Mask the forge credentials
+        run: |
+          for v in GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+            val=${!v:-}
+            [ -n "$val" ] || continue
+            echo "::add-mask::$val"
+            case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
+          done
+
       - name: Reap stale CI stacks
         run: make ci-reap-stacks
 
-      # The forge credentials the runner injects (dependency-resolution.md §6)
-      # reach the image build only as the gomodauth BuildKit secret, from a
-      # file outside the build context: the Dockerfile ends with `COPY . .`.
-      # `docker build` does not inherit the job's environment.
       - name: Write the module credential file
         run: |
           umask 077
@@ -446,8 +427,8 @@ jobs:
       # The container's default command is `make coverage-combined`, so its
       # exit status carries the combined coverage gate; the target copies the
       # profile out and fails a container that passed without leaving one.
-      - name: Run integration suite in the integration image
-        run: make integration-test MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_PROJECT="$IT_PROJECT"
+      - name: make integration-test (integration image)
+        run: make integration-test MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_PROJECT="$IT_PROJECT" IT_IMAGE="$IT_IMAGE" GO_BUILD_TAGS="$GO_BUILD_TAGS"
 
       # compose interpolates the whole file even to take it down, and its
       # required values are set only inside the make recipe; placeholders
@@ -457,9 +438,9 @@ jobs:
         run: |
           rm -f "$RUNNER_TEMP/gomodauth.env"
           docker rm -f "$ITEST_CONTAINER" >/dev/null 2>&1 || true
-          GO_LUKS2_IT_IMAGE="$ITEST_IMAGE" GO_LUKS2_SECCOMP_PROFILE=unused GO_LUKS2_DM_MAJOR=0 GO_LUKS2_TEST_STATE_DIR=/unused \
+          GO_LUKS2_IT_IMAGE="$IT_IMAGE" GO_LUKS2_SECCOMP_PROFILE=unused GO_LUKS2_DM_MAJOR=0 GO_LUKS2_TEST_STATE_DIR=/unused \
             docker compose -f build/docker/devcontainer/compose.yaml -p "$IT_PROJECT" down --volumes || true
-          docker image rm "$ITEST_IMAGE" || true
+          docker image rm "$IT_IMAGE" || true
 
       - name: Upload integration coverage
         if: always() && github.server_url == 'https://github.com'
@@ -469,223 +450,95 @@ jobs:
           path: coverage-integration.out
           if-no-files-found: error
 
+  # CUSTOMIZE: THE RACE LEGS (#341), a job of the integration job's shape in
+  # the toolchain image, through the Makefile so that this job and a
+  # developer's `make test-unit` run the same commands under the same two
+  # numbers (#92): UNIT_TEST_TIMEOUT, the ceiling that fails the run, and
+  # UNIT_TEST_TARGET, the budget for ./pkg/luks2 under -race. What is raced is
+  # the DEFAULT tag set; coverage is GATED on the PR tier's uninstrumented run.
   test-race:
     name: Race
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-      - name: Install cryptsetup (a test dependency of ./pkg/luks2)
+      - name: Mask the forge credentials
         run: |
-          set -eu
-          if ! command -v cryptsetup >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq cryptsetup-bin
-          fi
-          cryptsetup --version
-          command -v cryptsetup >/dev/null 2>&1 || {
-            echo "::error::cryptsetup is still absent after install; the conformance suite would skip and report green."
-            exit 1
-          }
+          for v in GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+            val=${!v:-}
+            [ -n "$val" ] || continue
+            echo "::add-mask::$val"
+            case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
+          done
 
-      # THE RACE LEGS, moved here from Unit Tests unchanged (#341), through the
-      # Makefile so that this job and a developer's `make test-unit` run the
-      # same commands under the same two numbers (#92): UNIT_TEST_TIMEOUT, the
-      # ceiling that fails the run, and UNIT_TEST_TARGET, the budget for
-      # ./pkg/luks2 under -race, printed with the measured time on every run
-      # and flagged with a ::warning:: past it. Neither is restated here;
-      # change them in the Makefile.
-      #
-      # The second leg is every package `go list ./...` reports besides
-      # ./pkg/luks2 -- cmd/luks2, test/internal/harness and its reaper, the coverage gate,
-      # the Makefile's own regression tests -- so a package added later is raced
-      # and gated without being listed here.
-      #
-      # What is raced is the DEFAULT tag set. The integration-tagged suites run
-      # in the devcontainer without -race: they drive loop devices,
-      # device-mapper and mounts, which are host-global, and are measured there
-      # for coverage instead (make coverage-combined). Coverage is GATED on the
-      # PR tier's uninstrumented run, not here; this job gates the race
-      # detector's findings and the ceiling.
-      - name: Run unit tests (-race, per-package coverage)
-        run: make test-unit UNIT_TEST_FLAGS=-v
+      - name: Reap stale CI stacks
+        run: make ci-reap-stacks
 
-      - name: Record the resource limits these tests ran under
+      - name: Build the toolchain image
+        run: |
+          ( umask 077; : > "$RUNNER_TEMP/gomodauth.env"
+            for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+              if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
+            done )
+          make docker-build-toolchain MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env"
+          rm -f "$RUNNER_TEMP/gomodauth.env"
+
+      - name: Unit tests, -race (toolchain image)
+        run: make ci-toolchain-run CMD="make test-unit UNIT_TEST_FLAGS=-v"
+
+      - name: Tear down
         if: always()
-        run: |
-          echo "RLIMIT_MEMLOCK (KiB): $(ulimit -l)"
-          echo "nproc: $(nproc)"
-          df -h /tmp | tail -1
+        run: rm -f "$RUNNER_TEMP/gomodauth.env"
 
-  # Moved from nightly.yml (#341) with its steps UNCHANGED, the duplicated
-  # cryptsetup step included: it ran nightly and now runs on every push to main,
-  # every dispatch and every ci:full PR -- more often, never less.
+  # CUSTOMIZE: THE FIPS 140-3 GATE, a job of the integration job's shape in
+  # the toolchain image; `make test-fips-mode` holds its mode, packages and
+  # timeouts. STRICT mode, not `on` (ratified 2026-08-17): `fips140=on` still
+  # PERMITS non-approved algorithms, so a path using SHA-1 would report green.
+  # If this job fails, that failure IS the finding. Do not weaken it back to
+  # `on` to make it pass -- fix the call site, or document a deliberate
+  # exemption with the owner's approval.
+  #
+  # The FIPS import proof (#84, owner ruling 2026-09-25) runs first and
+  # verbosely: a cryptsetup Argon2id volume is migrated with MigrateToFIPS in
+  # a child run with GODEBUG=fips140=off and opened by a child with
+  # fips140=only; the test fails if either child did not run in its mode.
   fips:
     name: FIPS
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     timeout-minutes: 30
-    env:
-      GOFIPS140: latest
-      # STRICT mode, not `on` (ratified 2026-08-17). `fips140=on` loads the Go
-      # Cryptographic Module but still PERMITS non-approved algorithms, so a
-      # path using SHA-1 succeeds and the gate reports green — a gate that
-      # cannot fail on the thing it exists to catch is decoration.
-      # `fips140=only` makes non-approved operations error or panic, which is
-      # what a FedRAMP / PCI DSS / HIPAA compliance gate has to do.
-      #
-      # If this job fails, that failure IS the finding. Do not weaken it back
-      # to `on` to make it pass — fix the call site, or document a deliberate
-      # exemption with the owner's approval.
-      GODEBUG: fips140=only
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version: ${{ env.GO_VERSION }}
-
-      # The same provisioning as the unit job: ./pkg/luks2's conformance
-      # tests drive the real cryptsetup and fail -- never skip -- without it, so
-      # a runner image lacking it would turn this lane red for a reason that is
-      # not FIPS (#235).
-      - name: Install cryptsetup (a test dependency of ./pkg/luks2)
+      - name: Mask the forge credentials
         run: |
-          set -eu
-          if ! command -v cryptsetup >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq cryptsetup-bin
-          fi
-          cryptsetup --version
+          for v in GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+            val=${!v:-}
+            [ -n "$val" ] || continue
+            echo "::add-mask::$val"
+            case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
+          done
 
-      - name: Build all packages (FIPS mode)
-        run: go build ./...
+      - name: Reap stale CI stacks
+        run: make ci-reap-stacks
 
-      # ./pkg/luks2's unit tests call the real cryptsetup (the conformance
-      # suite, and the FIPS import proof below), and fail rather than skip
-      # when it is absent. Same step as the unit job.
-      - name: Install cryptsetup (a test dependency of ./pkg/luks2)
+      - name: Build the toolchain image
         run: |
-          set -eu
-          if ! command -v cryptsetup >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq cryptsetup-bin
-          fi
-          cryptsetup --version
+          ( umask 077; : > "$RUNNER_TEMP/gomodauth.env"
+            for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+              if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
+            done )
+          make docker-build-toolchain MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env"
+          rm -f "$RUNNER_TEMP/gomodauth.env"
 
-      # THE FIPS IMPORT PROOF (#84, owner ruling 2026-09-25), named on its own
-      # so its result is visible rather than one line inside the suite below.
-      #
-      # A `cryptsetup luksFormat` Argon2id volume (cryptsetup's minimum Argon2
-      # cost; the default-cost volume is proved on the real kernel by the
-      # integration suite) is migrated with
-      # MigrateToFIPS in a NON-FIPS step, then opened by a FIPS step. FIPS mode
-      # is fixed at process start, so each step is its own re-execution of the
-      # test binary: the migration runs with GODEBUG=fips140=off, the opens with
-      # GODEBUG=fips140=only, and the test fails if either child did not run in
-      # the mode it was given. This job's GODEBUG applies to the parent, which
-      # only formats, inspects headers and judges the children -- so it proves
-      # the same thing here as in the ordinary unit run.
-      - name: FIPS import (non-FIPS migrate, then FIPS open)
-        run: go test -count=1 -timeout=900s -v -run '^TestFIPSImportOf(ACryptsetupArgon2idVolume|ACryptsetupVolumeWithShortSalts|ACryptsetupVolumeWithAnUnboundKey|SHA1AFVolumes)$' ./pkg/luks2
+      - name: FIPS build, import proof and unit tests (toolchain image)
+        run: make ci-toolchain-run CMD="make test-fips-mode"
 
-      # Mirrors the repo's own unit-test scope with ONLY the FIPS env changed.
-      # `./...` is the right scope here because the integration suites sit
-      # behind `//go:build integration` and so are already excluded; the race
-      # detector is omitted, as in the PR tier's unit legs.
-      - name: Unit tests (FIPS mode)
-        run: go test -count=1 -timeout=900s ./...
-
-  # ---- PR tier, continued ----
-  # The single required check. Branch protection requires THIS job and nothing
-  # else, so adding a job above means adding it to `needs` AND a `check` line
-  # below; a job left out of both runs and gates nothing.
-  # THE MERGE RESULT, which nothing else in this pipeline looks at.
-  #
-  # Every other check reads the BRANCH HEAD. actions/checkout takes the PR head,
-  # Gitea publishes only refs/pull/N/head -- there is no /merge ref to check out
-  # -- and `git merge-tree` answers "do these conflict?", never "is the result
-  # correct?". So this state is invisible to the whole board:
-  #
-  #     branch green | main green | the merge of the two red
-  #
-  # Measured twice in one day (2026-09-13): #173 removed the exported DeriveKey
-  # while #158 still called it from a test, and #180 added four marshalers while
-  # #158 changed the encoder they use. Both branches were green, main was green,
-  # and each merge produced a tree that did not compile. Both were found by hand.
-  #
-  # WHAT IT RUNS, and why not the suite: `go vet ./...` compiles the test files,
-  # which is where both real breakages were -- a `go build` alone would have
-  # missed the DeriveKey one. The unit suite would catch them too and costs 90s
-  # plus the race legs, and a gate that slow is a gate someone turns off. This
-  # one takes about as long as a compile.
-  merge-check:
-    name: Merged Tree
-    runs-on: ubuntu-latest
-    steps:
-      # Full history: merge-tree needs the base branch, and the default shallow
-      # fetch does not have it.
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-
-      # Runs on push too, reporting success, rather than carrying an `if:` that
-      # skips it. The gate below counts a SKIPPED job as a failure on purpose --
-      # a job that never ran proved nothing -- so a job that skips itself on
-      # main would turn main red, and the fix for that must not be to weaken
-      # the rule.
-      - name: Construct the merge and compile it
-        run: |
-          set -eu
-
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            echo "not a pull request: the merge result IS this commit, already checked by the other jobs"
-            exit 0
-          fi
-
-          base="${{ github.event.pull_request.base.ref }}"
-          git fetch --no-tags --quiet origin "$base"
-
-          # A conflict is an earlier and different answer from a broken merge,
-          # and is reported as such rather than being allowed to masquerade as a
-          # compile failure.
-          if ! tree=$(git merge-tree --write-tree "origin/$base" HEAD 2>/dev/null); then
-            echo "::error::This branch conflicts with $base. Rebase it; the merge result cannot be evaluated until it applies."
-            exit 1
-          fi
-
-          work=$(mktemp -d)
-          git archive "$tree" | tar -x -C "$work"
-
-          # Proof the extraction produced a module, not an empty directory. An
-          # instrument is loudest when it sees least: `go vet` over no packages
-          # exits 0, so a silently empty tree would report the merge as clean.
-          if [ ! -f "$work/go.mod" ]; then
-            echo "::error::The extracted merge tree has no go.mod, so nothing was checked."
-            exit 1
-          fi
-
-          cd "$work"
-          echo "==> go build ./...            (merged tree)"
-          go build ./...
-          echo "==> go vet ./...              (merged tree, compiles tests)"
-          go vet ./...
-          echo "==> go vet -tags=integration  (merged tree)"
-          go vet -tags=integration ./...
-          echo "the merge of this branch with $base compiles"
+      - name: Tear down
+        if: always()
+        run: rm -f "$RUNNER_TEMP/gomodauth.env"
 
   # THE ONE GATE, and the single required check (#343). It needs EVERY job
   # above, in both tiers, and reads each by name on a `check` line tagged `pr`
@@ -697,29 +550,16 @@ jobs:
   #   skipped, anything else          fails: a job that never ran proved nothing
   #   failure, cancelled, unreadable  fails
   #
-  # FULL_TIER is the full-tier jobs' condition, verbatim. A value other than
-  # `true` or `false` fails the gate: an unevaluated expression is not a "no".
-  #
-  # `if: always()` and nothing else: the gate is never skipped by an event
-  # condition, so every run posts a real result.
-  #
-  # It runs on `ci-gate`, the reserved gate slots, so it never queues behind
-  # the jobs it waits for. Those slots have one CPU each, so the gate takes no
-  # checkout and no action: one run step, reading `needs` only.
-  #
-  # The name is literal and must stay so: Gitea does not evaluate expressions
-  # in a job's `name:`, and would post the expression itself as the status
-  # context, so the required `CI Gate` would never be reported.
-  gate:
+  # CUSTOMIZE: FULL_TIER is validated, so an unevaluated expression is not a
+  # "no", and an empty result reads `<unreadable>`. Do not use
+  # join(needs.*.result); it evaluates empty on Gitea. It runs on the ci-gate
+  # runners, one CPU each, so it takes no checkout: one run step.
+  ci-gate:
     name: CI Gate
-    runs-on: ci-gate
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ci-gate' }}
     if: always()
-    needs: [lint, image, test-integration, test-race, fips, merge-check]
+    needs: [image, integration, arch-gates, merge-check, test-race, fips]
     steps:
-      # join(needs.*.result) is a GitHub extension that evaluates to an empty
-      # string on the self-hosted host, so a gate built on it reports success
-      # while jobs are failing. Every job is listed by name, and a result that
-      # cannot be read at all is treated as a failure rather than a pass.
       - name: Fail closed on any non-success
         env:
           FULL_TIER: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
@@ -742,12 +582,12 @@ jobs:
               *) echo "FAIL $1 (${2:-<unreadable>})"; BAD=1;;
             esac
           }
-          check lint             "${{ needs.lint.result }}" pr
-          check image            "${{ needs.image.result }}" pr
-          check merge-check      "${{ needs.merge-check.result }}" pr
-          check test-integration "${{ needs.test-integration.result }}" full
-          check test-race        "${{ needs.test-race.result }}" full
-          check fips             "${{ needs.fips.result }}" full
+          check image       "${{ needs.image.result }}" pr
+          check arch-gates  "${{ needs.arch-gates.result }}" pr
+          check merge-check "${{ needs.merge-check.result }}" pr
+          check integration "${{ needs.integration.result }}" full
+          check test-race   "${{ needs.test-race.result }}" full
+          check fips        "${{ needs.fips.result }}" full
           if [ "$BAD" -ne 0 ]; then
             echo "CI gate failed: not every job reported success."
           else

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -934,9 +935,93 @@ func TestCoverageReportWritesTheHTMLFromAnExistingProfile(t *testing.T) {
 // builds build/docker/cli's Dockerfile, not build/docker/devcontainer's
 // toolchain or integration stage.
 func TestDockerBuildUsesTheCLIDockerfile(t *testing.T) {
-	stdout, stderr := runMake(t, environ(nil, nil), "-n", "docker-build")
+	stdout, stderr := runMake(t, environ(nil, nil), "-n", "docker-build-cli")
 	if !strings.Contains(stdout, "build/docker/cli/Dockerfile") {
-		t.Errorf("docker-build does not reference build/docker/cli/Dockerfile:\n%s%s", stdout, stderr)
+		t.Errorf("docker-build-cli does not reference build/docker/cli/Dockerfile:\n%s%s", stdout, stderr)
+	}
+}
+
+// TestDockerBuildBuildsBothDevcontainerImages: devcontainer.md §6, the make
+// contract ci-template v1.21 calls. docker-build builds the toolchain and
+// integration images, and IT_IMAGE names the integration image.
+func TestDockerBuildBuildsBothDevcontainerImages(t *testing.T) {
+	stdout, stderr := runMake(t, environ(nil, nil), "-n", "docker-build", "IT_IMAGE=go-luks2-ci-it:t")
+	for _, want := range []string{"--target toolchain", "--target integration", "go-luks2-ci-it:t"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("make -n docker-build lacks %q:\n%s%s", want, stdout, stderr)
+		}
+	}
+	if strings.Contains(stdout, "build/docker/cli/Dockerfile") {
+		t.Error("docker-build builds the CLI image; that is docker-build-cli")
+	}
+}
+
+// `make lint` is a gate in CI's image job, so a lint that passes without its
+// linter is the vacuous gate the testing convention forbids: golangci-lint
+// absent FAILS the target, exactly as actionlint absent already does.
+func TestLintFailsWithoutGolangciLint(t *testing.T) {
+	env := environ([]string{"GOBIN"}, map[string]string{"PATH": systemPathWithout(t, "golangci-lint")})
+	out, errOut, err := runMakeErr(t, env, "--no-print-directory", "lint", "GOBIN="+t.TempDir())
+	if err == nil {
+		t.Fatalf("make lint passed with golangci-lint absent\n%s%s", out, errOut)
+	}
+	if msg := out + errOut; !strings.Contains(msg, "golangci-lint is not installed") || strings.Contains(msg, "skipping") {
+		t.Errorf("the failure does not say golangci-lint is missing, or it skipped:\n%s", msg)
+	}
+}
+
+// TestLintRunsTheUntaggedAndTheTaggedPass: with GO_BUILD_TAGS set, make lint
+// runs golangci-lint twice. The untagged pass runs every linter, as a lint
+// without tags does; the tagged pass adds the tag set and disables only
+// unused, which reads helpers kept for the untagged tests as dead.
+func TestLintRunsTheUntaggedAndTheTaggedPass(t *testing.T) {
+	stdout, stderr := runMake(t, environ(nil, nil), "--no-print-directory", "-n", "lint", "GO_BUILD_TAGS=integration")
+	var runs []string
+	for _, line := range strings.Split(stdout, "\n") {
+		if i := strings.Index(line, "$LINTER run "); i >= 0 {
+			runs = append(runs, line[i:])
+		}
+	}
+	if len(runs) != 2 {
+		t.Fatalf("make -n lint GO_BUILD_TAGS=integration shows %d golangci-lint runs, want 2:\n%s%s", len(runs), stdout, stderr)
+	}
+	untagged, tagged := runs[0], runs[1]
+	if strings.Contains(untagged, "--build-tags") || strings.Contains(untagged, "--disable") || strings.Contains(untagged, "--enable") {
+		t.Errorf("the first pass is not the untagged run of every linter: %q", untagged)
+	}
+	if !strings.Contains(tagged, "--build-tags=integration") {
+		t.Errorf("the second pass does not lint the tagged build: %q", tagged)
+	}
+	if got := regexp.MustCompile(`--(?:disable|enable)\S*|\s-[DE](?:\s|=)\S*`).FindAllString(tagged, -1); len(got) != 1 || got[0] != "--disable=unused" {
+		t.Errorf("the tagged pass must disable unused and nothing else; it carries %q: %q", got, tagged)
+	}
+
+	// Without tags there is one pass, the untagged one.
+	stdout, stderr = runMake(t, environ(nil, nil), "--no-print-directory", "-n", "lint", "GO_BUILD_TAGS=")
+	if n := strings.Count(stdout, "$LINTER run "); n != 1 {
+		t.Errorf("make -n lint with no tags shows %d golangci-lint runs, want 1:\n%s%s", n, stdout, stderr)
+	}
+}
+
+// assert-build-tags turns a misspelled GO_BUILD_TAGS into a red: a tag that
+// changes no selected file fails, the repository's real tag passes, and an
+// empty set has nothing to assert.
+func TestAssertBuildTags(t *testing.T) {
+	env := environ(nil, nil)
+	for _, tc := range []struct {
+		tags string
+		ok   bool
+		want string
+	}{
+		{"integration", true, "OK: every declared tag selects code"},
+		{"integration intgration", false, "build tag 'intgration' selects nothing"},
+		{"intgration", false, "changed nothing"},
+		{"", true, "nothing to assert"},
+	} {
+		out, errOut, err := runMakeErr(t, env, "--no-print-directory", "assert-build-tags", "GO_BUILD_TAGS="+tc.tags)
+		if (err == nil) != tc.ok || !strings.Contains(out+errOut, tc.want) {
+			t.Errorf("GO_BUILD_TAGS=%q: err=%v, want ok=%v and %q:\n%s%s", tc.tags, err, tc.ok, tc.want, out, errOut)
+		}
 	}
 }
 

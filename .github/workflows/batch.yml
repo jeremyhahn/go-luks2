@@ -139,7 +139,7 @@ jobs:
           FUZZTIME: ${{ inputs.fuzztime }}
         run: |
           mkdir -p fuzz-logs
-          # shellcheck disable=SC2329 # xargs calls it through bash -c
+          # shellcheck disable=SC2317,SC2329 # xargs calls it through bash -c
           fuzz_one() {
             pkg=$1 target=$2 log="fuzz-logs/$(echo "$pkg" | tr / _).$target.log"
             if go test -tags="$FUZZ_TAGS" -run='^$' -fuzz="^${target}\$" \
