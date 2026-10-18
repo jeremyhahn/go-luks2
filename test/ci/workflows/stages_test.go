@@ -230,6 +230,74 @@ func TestImageAndIntegrationJobsUseNoRunnerToolchain(t *testing.T) {
 	}
 }
 
+// cacheClass is ci-template v1.22's trust class for the cache volumes: only a
+// push to main writes the caches main's build reads (ci-standard.md §6).
+const cacheClass = `CI_CACHE_CLASS: ${{ github.event_name == 'push' && 'main' || 'pr' }}`
+
+// TestToolchainStagesCacheByTrustClass: ci-template v1.22. Every job that runs
+// a stage through ci-toolchain-run -- the image job as the template has it,
+// and the race, FIPS and merged-tree jobs, which run in the same image the
+// same way -- names the cache class the recipe mounts its volumes under.
+func TestToolchainStagesCacheByTrustClass(t *testing.T) {
+	ci := readFile(t, ".github/workflows/ci.yml")
+	if !strings.HasPrefix(ci, "# ci-template: v1.22.1 (customized)\n") {
+		t.Errorf("ci.yml does not declare ci-template v1.22.1: %.60q", ci)
+	}
+	for _, name := range []string{"image", "merge-check", "test-race", "fips"} {
+		j := job(t, ci, name)
+		if !strings.Contains(j, "make ci-toolchain-run ") {
+			t.Errorf("%s runs no stage in the toolchain image", name)
+		}
+		if !regexp.MustCompile(`(?m)^      ` + regexp.QuoteMeta(cacheClass) + `$`).MatchString(j) {
+			t.Errorf("%s's env does not set %s", name, cacheClass)
+		}
+	}
+	for _, name := range toolchainJobs {
+		j := job(t, ci, name)
+		if strings.Contains(j, "make ci-toolchain-run ") && !strings.Contains(j, cacheClass) {
+			t.Errorf("%s runs ci-toolchain-run without a cache class", name)
+		}
+	}
+}
+
+// TestImageJobTrimsTheCachesBeforeTheStages: ci-template v1.22's `Trim the CI
+// caches` step, as `make ci-trim-caches`, comes right after the image build
+// and before any stage adds to the volumes.
+func TestImageJobTrimsTheCachesBeforeTheStages(t *testing.T) {
+	j := job(t, readFile(t, ".github/workflows/ci.yml"), "image")
+	var names []string
+	for _, m := range regexp.MustCompile(`(?m)^      - name: (.+)$`).FindAllStringSubmatch(j, -1) {
+		names = append(names, m[1])
+	}
+	steps := stepRun(t, j)
+	trim, firstStage := -1, -1
+	for i, n := range names {
+		if n == "Trim the CI caches" {
+			trim = i
+		}
+		if firstStage < 0 && strings.Contains(steps[n], "make ci-toolchain-run ") {
+			firstStage = i
+		}
+	}
+	if trim < 1 || names[trim-1] != "Build the devcontainer images" {
+		t.Fatalf("Trim the CI caches does not follow the image build: %v", names)
+	}
+	if firstStage < 0 || trim > firstStage {
+		t.Errorf("Trim the CI caches (step %d) is not before the first stage (step %d): %v", trim, firstStage, names)
+	}
+	if got := strings.TrimSpace(steps["Trim the CI caches"]); got != "make ci-trim-caches" {
+		t.Errorf("Trim the CI caches runs %q, want make ci-trim-caches", got)
+	}
+	block := j[strings.Index(j, "- name: Trim the CI caches"):]
+	block, _, _ = strings.Cut(block, "\n\n")
+	if !strings.Contains(block, "\n        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}\n") { //nolint:misspell // the Actions function's spelling, not prose
+		t.Errorf("Trim the CI caches is not conditioned as the template's:\n%s", block)
+	}
+	if strings.Contains(block, "continue-on-error") {
+		t.Error("Trim the CI caches hides a failure; the recipe itself never fails")
+	}
+}
+
 // toolchainJobs are the jobs that build the devcontainer images on bigdisk
 // and run their stages in them.
 var toolchainJobs = []string{"image", "integration", "test-race", "fips", "merge-check"}
@@ -257,11 +325,11 @@ var runnerJobs = []string{"ci-gate"}
 
 // runnerTargets are the make targets any other job may run on the runner: they
 // build the images, run a command in the toolchain image, run the integration
-// suite under compose, print the image's tag, or reap what a dead job left.
-// Everything else -- every stage, and every check beside one -- is a CMD for
-// ci-toolchain-run.
+// suite under compose, print the image's tag, reap what a dead job left, or
+// trim the cache volumes (ci-template v1.22). Everything else -- every stage,
+// and every check beside one -- is a CMD for ci-toolchain-run.
 var runnerTargets = []string{
-	"ci-toolchain-run", "ci-reap-stacks", "docker-build", "docker-build-toolchain",
+	"ci-toolchain-run", "ci-reap-stacks", "ci-trim-caches", "docker-build", "docker-build-toolchain",
 	"docker-build-integration", "toolchain-image", "integration-test",
 }
 

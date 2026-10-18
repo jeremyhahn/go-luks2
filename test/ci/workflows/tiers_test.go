@@ -58,6 +58,22 @@ func TestNoCIWorkflowIsScheduled(t *testing.T) {
 	}
 }
 
+// TestConcurrencyNeverCancelsAMainRun: ci-template v1.22.1's canonical block.
+// One group per ref; a newer run on a PR ref cancels the older, but a push to
+// main never cancels an in-flight main run, so every main commit keeps its run.
+func TestConcurrencyNeverCancelsAMainRun(t *testing.T) {
+	ci := readFile(t, ".github/workflows/ci.yml")
+	m := regexp.MustCompile(`(?m)^concurrency:\n((?:  .*\n)+)`).FindStringSubmatch(ci)
+	if m == nil {
+		t.Fatal("ci.yml has no workflow-level concurrency block")
+	}
+	want := "  group: ${{ github.workflow }}-${{ github.ref }}\n" +
+		"  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}\n"
+	if m[1] != want {
+		t.Errorf("ci.yml's concurrency block is\n%s\nwant ci-template v1.22.1's\n%s", m[1], want)
+	}
+}
+
 // TestJobNamesAreLiteral: Gitea does not evaluate expressions in a job's
 // `name:`; it posts the expression verbatim as the status context, so a gate
 // named by one is never reported under the name branch protection requires.

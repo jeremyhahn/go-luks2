@@ -1,4 +1,4 @@
-# ci-template: v1.21.1 (customized)
+# ci-template: v1.22.1 (customized)
 
 name: CI
 
@@ -15,7 +15,23 @@ name: CI
 # checkout into the container: a runner reaches its daemon through a socket,
 # so a bind mount would resolve on the daemon's host. The canonical scripts
 # are Makefile recipes here (ci-toolchain-run, ci-reap-stacks,
-# assert-build-tags) because the public release ships no shell scripts.
+# ci-trim-caches, assert-build-tags) because the public release ships no
+# shell scripts.
+#
+# ci-template v1.22 (ci-standard.md §6): the stages keep the Go build,
+# golangci-lint and module caches in named volumes on the runner's Docker
+# host, kept across jobs and split by trust class (CI_CACHE_CLASS: `main` for
+# a push to main, `pr` otherwise), never in a job container's writable layer
+# or its /tmp. `make ci-trim-caches` bounds the repository's cache volumes on
+# the host (CI_CACHE_MAX_GIB, default 32). CUSTOMIZE: the race, FIPS and
+# merged-tree jobs run their stages through the same recipe, so they take the
+# same CI_CACHE_CLASS.
+#
+# ci-template v1.22.1: the concurrency block is canonical. A newer push to a
+# PR ref still cancels that ref's older run, but a push to main never cancels
+# an in-flight main run: each main commit keeps its run, so every merge is
+# validated. The CUSTOMIZE copy with `cancel-in-progress: true` on every ref,
+# main included, is gone.
 #
 # The forge credentials are masked first in every job that has them, and
 # reach an image build only as the gomodauth BuildKit secret, from a file
@@ -23,8 +39,8 @@ name: CI
 # environment or a matched line; test/ci/workflows asserts it.
 #
 # ACROSS runs, supersession (#136): the self-hosted host exposes no REST route
-# to cancel a run, so the `concurrency` block below cancels a run the moment a
-# newer head lands on the same ref.
+# to cancel a run, so the `concurrency` block below cancels a PR ref's run the
+# moment a newer head lands on it; a main run is never cancelled.
 #
 # TWO TIERS, ONE GATE (#341, #343, sdlc §5a). CUSTOMIZE: the template's
 # integration job is the only one it lets a repo move to the full tier.
@@ -80,16 +96,12 @@ on:
   # failure is the runner's rather than the code's.
   workflow_dispatch:
 
-# Supersede an in-flight run when a newer head lands on the same ref.
-# `${{ github.workflow }}` LEADS the key so a cancellation never reaches the
-# review workflow. `cancel-in-progress` is the literal `true` and must stay
-# literal: this host does not evaluate expressions in that field. Main pushes
-# share one group, so a trunk run can be superseded by the next merge; it is
-# re-runnable, and a release is cut from a commit with a completed run.
-# `github.ref` is safe only while `push` is restricted to `main`.
+# One group per ref (v1.22.1). On a PR ref the newer run cancels the older; on
+# main nothing is cancelled, and a newer main run waits for the older one, so
+# no main commit loses its run. Never set `cancel-in-progress: true` on main.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -119,6 +131,11 @@ jobs:
   # after a failed one, so one run reports them all. make security and make
   # deps-check (and trivy) get a network, for the vulnerability databases and
   # the module proxy; everything else runs without one.
+  #
+  # v1.22: every stage mounts the build and golangci-lint cache volumes, and a
+  # bridge stage the module cache volume, from the runner's Docker host
+  # (ci-toolchain-run, ci-standard.md §6), so a stage writes its caches there
+  # and not into its container's layer.
   image:
     name: Devcontainer image [lint, build, test, security, deps-check, trivy image]
     # bigdisk: the runners whose disks hold the toolchain and integration
@@ -126,6 +143,10 @@ jobs:
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
     timeout-minutes: 120
     env:
+      # v1.22: the cache volumes' trust class. Only a push to main writes the
+      # caches main's build reads; every other event, pull requests included,
+      # gets the `pr` set (ci-standard.md §6).
+      CI_CACHE_CLASS: ${{ github.event_name == 'push' && 'main' || 'pr' }}
       # Set from the job, the integration image is kept for the scan below
       # and removed at teardown.
       IT_IMAGE: go-luks2-ci-it:${{ github.run_id }}-${{ github.run_attempt }}-image
@@ -157,6 +178,13 @@ jobs:
           make docker-build MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE"
           rm -f "$RUNNER_TEMP/gomodauth.env"
           echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
+
+      # v1.22: bound this repo's cache volumes on the host before the stages
+      # add to them (ci-standard.md §6). It never fails the job. CUSTOMIZE:
+      # the template's trim-ci-caches.sh, as a recipe.
+      - name: Trim the CI caches
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        run: make ci-trim-caches
 
       # CUSTOMIZE: the analysers must SAY they are the pinned versions (#21):
       # gosec takes its version from ldflags, so a pinned install alone still
@@ -289,6 +317,9 @@ jobs:
     name: Merged Tree
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
     timeout-minutes: 60
+    env:
+      # CUSTOMIZE (v1.22): the image job's cache class, for its stage.
+      CI_CACHE_CLASS: ${{ github.event_name == 'push' && 'main' || 'pr' }}
     steps:
       # Full history: merge-tree needs the base branch.
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -461,6 +492,9 @@ jobs:
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     timeout-minutes: 60
+    env:
+      # CUSTOMIZE (v1.22): the image job's cache class, for its stage.
+      CI_CACHE_CLASS: ${{ github.event_name == 'push' && 'main' || 'pr' }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -509,6 +543,9 @@ jobs:
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     timeout-minutes: 30
+    env:
+      # CUSTOMIZE (v1.22): the image job's cache class, for its stage.
+      CI_CACHE_CLASS: ${{ github.event_name == 'push' && 'main' || 'pr' }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 

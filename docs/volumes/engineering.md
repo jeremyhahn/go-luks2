@@ -501,7 +501,12 @@ are older than `ITEST_PRUNE_AGE` (default `2h`). That catches what a `kill -9`
 leaves. CI names its containers and compose projects under the prefix
 `go-luks2-ci-`, and each job that starts containers first runs
 `make ci-reap-stacks`, which removes only stopped or never-started stacks under that prefix,
-and only once they are older than the runners' job timeout.
+and only once they are older than the runners' job timeout. The CI stages keep
+their Go build, golangci-lint and module caches in named volumes under the same
+prefix, one set for pushes to `main` and another for every other event, never
+in a job container's own layer; `make ci-trim-caches` keeps their total on a
+host under `CI_CACHE_MAX_GIB` (default 32 GiB) by removing the largest unused
+volume.
 
 To keep an image, name it: `ITEST_ID=debug make docker-build-integration`. It
 is still pruned once older than `ITEST_PRUNE_AGE`.

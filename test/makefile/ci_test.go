@@ -26,6 +26,7 @@ import (
 const ciDocker = `#!/bin/sh
 log="$FAKE_DOCKER_LOG"
 printf '%s\n' "$*" >> "$log"
+[ -z "${FAKE_DOCKER_FAIL:-}" ] || { echo "Cannot connect to the Docker daemon" >&2; exit 1; }
 old=2000-01-01T00:00:00Z
 new=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 never=0001-01-01T00:00:00Z
@@ -45,7 +46,24 @@ compose)
 network|volume)
 	case "$2" in
 	rm) exit "${FAKE_RM_RC:-0}" ;;
-	ls) echo "$1-${5#label=com.docker.compose.project=}" ;;
+	ls)
+		case "$5" in
+		name=*) printf '%s\n' go-luks2-ci-cache-pr-gomod go-luks2-ci-cache-pr-gobuild \
+			go-luks2-ci-cache-main-gobuild go-luks2-ci-cache-main-golangci notours-go-luks2-ci-cache-pr-gobuild ;;
+		*) echo "$1-${5#label=com.docker.compose.project=}" ;;
+		esac ;;
+	esac ;;
+run)
+	case "$*" in *"--entrypoint du "*)
+		[ -z "${FAKE_DU_FAIL:-}" ] || exit 1
+		case "$*" in
+		*cache-pr-gomod:*) kib=20971520 ;;
+		*cache-pr-gobuild:*) kib=15728640 ;;
+		*cache-main-gobuild:*) kib=10485760 ;;
+		*cache-main-golangci:*) kib=1048576 ;;
+		*) exit 1 ;;
+		esac
+		printf '%s\t/c\n' "$kib" ;;
 	esac ;;
 inspect)
 	case "$4" in
@@ -63,6 +81,7 @@ ps)
 		*=go-luks2-ci-live) echo c3; echo c4 ;;
 		*=go-luks2-ci-fresh) echo c5 ;;
 		*=other-old) echo c6 ;;
+		*volume=go-luks2-ci-cache-pr-gomod) echo c11 ;;
 		esac ;;
 	*name=*)
 		echo "c7 go-luks2-ci-tc-1 "
@@ -93,7 +112,8 @@ func ciDockerEnv(t *testing.T, set map[string]string) (env []string, log string)
 		all[k] = v
 	}
 	drop := []string{"GOPRIVATE", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
-		"IN_IMAGE_NETWORK", "REAP_MIN_AGE", "REAP_DRY_RUN", "MODULE_ENV_FILE", "CI_OUT", "CI_OUT_DIR"}
+		"IN_IMAGE_NETWORK", "REAP_MIN_AGE", "REAP_DRY_RUN", "MODULE_ENV_FILE", "CI_OUT", "CI_OUT_DIR",
+		"CI_CACHE", "CI_CACHE_CLASS", "CI_CACHE_MAX_GIB"}
 	return environ(drop, all), log
 }
 
@@ -145,7 +165,7 @@ func TestCIToolchainRunCopiesTheCheckoutInAndRunsCMDWithNoNetwork(t *testing.T) 
 
 	name := strings.Fields(create[strings.Index(create, "--name ")+len("--name "):])[0]
 	var order []string
-	for _, prefix := range []string{"create ", "cp -a - " + name + ":/src", "start -a " + name, "rm -f -v " + name} {
+	for _, prefix := range []string{"run --rm --network none --cap-drop ALL --cap-add CHOWN ", "create ", "cp -a - " + name + ":/src", "start -a " + name, "rm -f -v " + name} {
 		if _, ok := called(lines, prefix); !ok {
 			t.Errorf("no %q in the run:\n%s", prefix, strings.Join(lines, "\n"))
 		}
@@ -193,7 +213,7 @@ func TestCIToolchainRunBridgePassesCredentialsByName(t *testing.T) {
 		// modules the image was built with; deps-check asks the network.
 		"--env GOPROXY=file:///go/pkg/mod/cache/download,https://proxy.golang.org,direct ",
 		"--env DEPS_CHECK_GOPROXY=https://proxy.golang.org,direct ",
-		"--env GOMODCACHE=/tmp/gomodcache", "--env GOPRIVATE ", "--env GIT_CONFIG_COUNT ",
+		"--env GOMODCACHE=/cache/gomod", "--env GOPRIVATE ", "--env GIT_CONFIG_COUNT ",
 		"--env GIT_CONFIG_KEY_0 ", "--env GIT_CONFIG_VALUE_0 ",
 	} {
 		if !strings.Contains(create, want) {
@@ -236,8 +256,8 @@ func TestCIToolchainRunBridgeKeepsTheSumDBCacheWritable(t *testing.T) {
 		t.Errorf("a bridge run leaves GOPATH, and with it the checksum database cache, on the image's root-owned /go (unset means /go): GOPATH=%q\n%s",
 			gopath, create)
 	}
-	if mc := vars["GOMODCACHE"]; !strings.HasPrefix(mc, "/tmp/") {
-		t.Errorf("a bridge run does not name a writable module cache: GOMODCACHE=%q", mc)
+	if mc := vars["GOMODCACHE"]; mc != "/cache/gomod" {
+		t.Errorf("a bridge run does not name the writable module cache volume: GOMODCACHE=%q", mc)
 	}
 	for _, never := range []string{"GOSUMDB", "GONOSUMDB=", "GONOSUMCHECK", "GOINSECURE", "-insecure"} {
 		if strings.Contains(create, never) {
@@ -319,6 +339,229 @@ func TestCIToolchainRunCopiesCIOutBack(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// envVars is every --env K=V a docker call passes.
+func envVars(call string) map[string]string {
+	vars := map[string]string{}
+	fields := strings.Fields(call)
+	for i, f := range fields {
+		if f == "--env" && i+1 < len(fields) {
+			if k, v, ok := strings.Cut(fields[i+1], "="); ok {
+				vars[k] = v
+			}
+		}
+	}
+	return vars
+}
+
+// ci-template v1.22 (in-toolchain-image.sh v2, ci-standard.md §6): every
+// stage keeps its build and golangci-lint caches in this repository's named
+// volumes of its trust class, a bridge stage its module cache too, and a
+// helper holding CHOWN alone gives a new volume to the run's uid first.
+func TestCIToolchainRunMountsTheCacheVolumesOfItsTrustClass(t *testing.T) {
+	for _, tc := range []struct {
+		name, network, class, want string
+	}{
+		{"pull request, no network", "none", "", "pr"},
+		{"push to main, no network", "none", "main", "main"},
+		{"pull request, bridge", "bridge", "pr", "pr"},
+		{"push to main, bridge", "bridge", "main", "main"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			set := map[string]string{}
+			if tc.class != "" {
+				set["CI_CACHE_CLASS"] = tc.class
+			}
+			env, log := ciDockerEnv(t, set)
+			runMake(t, env, "-s", "ci-toolchain-run", "CMD=make build",
+				"TOOLCHAIN_IMAGE=example/toolchain:t", "IN_IMAGE_NETWORK="+tc.network)
+			lines := logLines(t, log)
+			vols := "go-luks2-ci-cache-" + tc.want
+
+			helper, ok := called(lines, "run ")
+			if !ok {
+				t.Fatalf("no helper gives the volumes to the uid:\n%s", strings.Join(lines, "\n"))
+			}
+			for _, want := range []string{
+				"--rm --network none --cap-drop ALL --cap-add CHOWN --security-opt no-new-privileges:true --user 0:0",
+				"-v " + vols + "-gobuild:/c/gobuild", "-v " + vols + "-golangci:/c/golangci", "-v " + vols + "-gomod:/c/gomod",
+				"example/toolchain:t sh -c ", "chown 10001:10001",
+			} {
+				if !strings.Contains(helper, want) {
+					t.Errorf("the helper lacks %q:\n%s", want, helper)
+				}
+			}
+
+			create, ok := called(lines, "create ")
+			if !ok {
+				t.Fatal("no docker create")
+			}
+			for _, want := range []string{
+				"-v " + vols + "-gobuild:/cache/gobuild --env GOCACHE=/cache/gobuild",
+				"-v " + vols + "-golangci:/cache/golangci --env GOLANGCI_LINT_CACHE=/cache/golangci",
+			} {
+				if !strings.Contains(create, want) {
+					t.Errorf("docker create lacks %q:\n%s", want, create)
+				}
+			}
+			gomod := "-v " + vols + "-gomod:/cache/gomod"
+			mc := envVars(create)["GOMODCACHE"]
+			if tc.network == "bridge" {
+				if !strings.Contains(create, gomod) || mc != "/cache/gomod" {
+					t.Errorf("a bridge stage does not use the module cache volume (GOMODCACHE=%q):\n%s", mc, create)
+				}
+			} else if strings.Contains(create, "-gomod:") || mc != "" {
+				t.Errorf("a no-network stage leaves the image's read-only module cache:\n%s", create)
+			}
+			other := map[string]string{"pr": "main", "main": "pr"}[tc.want]
+			if strings.Contains(helper+create, "cache-"+other+"-") {
+				t.Errorf("a %s run mounts the %s caches:\n%s\n%s", tc.want, other, helper, create)
+			}
+		})
+	}
+}
+
+func TestCIToolchainRunCacheOffMountsNone(t *testing.T) {
+	env, log := ciDockerEnv(t, map[string]string{"CI_CACHE": "off"})
+	runMake(t, env, "-s", "ci-toolchain-run", "CMD=make deps-check",
+		"TOOLCHAIN_IMAGE=example/toolchain:t", "IN_IMAGE_NETWORK=bridge")
+	lines := logLines(t, log)
+	if _, ok := called(lines, "run "); ok {
+		t.Errorf("CI_CACHE=off still runs the volume helper:\n%s", strings.Join(lines, "\n"))
+	}
+	create, _ := called(lines, "create ")
+	if strings.Contains(create, " -v ") || strings.Contains(create, "CACHE=/cache/") {
+		t.Errorf("CI_CACHE=off still mounts a cache:\n%s", create)
+	}
+	if mc := envVars(create)["GOMODCACHE"]; mc != "/tmp/gomodcache" {
+		t.Errorf("CI_CACHE=off bridge module cache is %q, want /tmp/gomodcache", mc)
+	}
+}
+
+func TestCIToolchainRunRefusesABadCacheSetting(t *testing.T) {
+	for _, set := range []map[string]string{
+		{"CI_CACHE_CLASS": "release"},
+		{"CI_CACHE_CLASS": "pr main"},
+		{"CI_CACHE": "yes"},
+	} {
+		env, log := ciDockerEnv(t, set)
+		if stdout, stderr, err := runMakeErr(t, env, "-s", "ci-toolchain-run", "CMD=make test",
+			"TOOLCHAIN_IMAGE=example/toolchain:t"); err == nil {
+			t.Errorf("%v was accepted:\n%s%s", set, stdout, stderr)
+		}
+		if lines := logLines(t, log); len(lines) != 0 {
+			t.Errorf("%v: docker was called:\n%s", set, strings.Join(lines, "\n"))
+		}
+	}
+}
+
+// volumeRemovals is every volume `docker volume rm` was asked to remove.
+func volumeRemovals(lines []string) []string {
+	var out []string
+	for _, l := range lines {
+		if v, ok := strings.CutPrefix(l, "volume rm "); ok {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// trim-ci-caches.sh v1 (ci-template v1.22): the fake host holds 46 GiB of
+// this repository's cache volumes, the 20 GiB module cache in use. Over the
+// 32 GiB default the largest unused volume goes whole, and that is enough.
+func TestCITrimCachesRemovesTheLargestUnusedVolumeUnderTheBound(t *testing.T) {
+	env, log := ciDockerEnv(t, nil)
+	stdout, _ := runMake(t, env, "-s", "ci-trim-caches", "TOOLCHAIN_IMAGE=example/toolchain:t")
+	lines := logLines(t, log)
+	if got := volumeRemovals(lines); len(got) != 1 || got[0] != "go-luks2-ci-cache-pr-gobuild" {
+		t.Errorf("removed %v, want only go-luks2-ci-cache-pr-gobuild", got)
+	}
+	for _, want := range []string{
+		"caches: 46 GiB of 32 GiB for prefix 'go-luks2-ci-'",
+		"keep  go-luks2-ci-cache-pr-gomod (20480 MiB, in use)",
+		"trim  go-luks2-ci-cache-pr-gobuild (15360 MiB)",
+		"trim: 1 volume(s), 31 GiB left for prefix 'go-luks2-ci-'",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("the trim does not report %q:\n%s", want, stdout)
+		}
+	}
+	du, ok := called(lines, "run ")
+	if !ok {
+		t.Fatal("no volume was measured")
+	}
+	for _, want := range []string{
+		"--rm --network none --cap-drop ALL --security-opt no-new-privileges:true --user 10001:10001",
+		":/c:ro --entrypoint du example/toolchain:t -sk /c",
+	} {
+		if !strings.Contains(du, want) {
+			t.Errorf("the measurement lacks %q:\n%s", want, du)
+		}
+	}
+	for _, l := range lines {
+		if strings.Contains(l, "--cap-add") || strings.Contains(l, "notours-") {
+			t.Errorf("the trim made a call it must not: %s", l)
+		}
+	}
+}
+
+func TestCITrimCachesBound(t *testing.T) {
+	for _, tc := range []struct {
+		max  string
+		want []string
+	}{
+		{"64", nil},
+		{"8", []string{"go-luks2-ci-cache-pr-gobuild", "go-luks2-ci-cache-main-gobuild", "go-luks2-ci-cache-main-golangci"}},
+	} {
+		env, log := ciDockerEnv(t, map[string]string{"CI_CACHE_MAX_GIB": tc.max})
+		runMake(t, env, "-s", "ci-trim-caches", "TOOLCHAIN_IMAGE=example/toolchain:t")
+		if got := volumeRemovals(logLines(t, log)); strings.Join(got, " ") != strings.Join(tc.want, " ") {
+			t.Errorf("CI_CACHE_MAX_GIB=%s removed %v, want %v", tc.max, got, tc.want)
+		}
+	}
+}
+
+func TestCITrimCachesDryRunRemovesNothing(t *testing.T) {
+	env, log := ciDockerEnv(t, nil)
+	stdout, _ := runMake(t, env, "-s", "ci-trim-caches", "TOOLCHAIN_IMAGE=example/toolchain:t", "REAP_DRY_RUN=1")
+	if got := volumeRemovals(logLines(t, log)); len(got) != 0 {
+		t.Errorf("a dry run removed %v", got)
+	}
+	if !strings.Contains(stdout, "dry   docker volume rm go-luks2-ci-cache-pr-gobuild (15360 MiB)") {
+		t.Errorf("a dry run does not say what it would remove:\n%s", stdout)
+	}
+}
+
+func TestCITrimCachesNeverFailsTheJob(t *testing.T) {
+	for _, tc := range []struct {
+		set  map[string]string
+		want string
+	}{
+		{map[string]string{"FAKE_RM_RC": "1"}, "warn  go-luks2-ci-cache-pr-gobuild not removed"},
+		{map[string]string{"FAKE_DU_FAIL": "1"}, "warn  go-luks2-ci-cache-pr-gomod: size not read"},
+		{map[string]string{"FAKE_DOCKER_FAIL": "1"}, "trim: 0 volume(s)"},
+	} {
+		env, _ := ciDockerEnv(t, tc.set)
+		stdout, stderr, err := runMakeErr(t, env, "-s", "ci-trim-caches", "TOOLCHAIN_IMAGE=example/toolchain:t")
+		if err != nil {
+			t.Errorf("%v failed the job: %v\n%s%s", tc.set, err, stdout, stderr)
+		}
+		if !strings.Contains(stdout, tc.want) {
+			t.Errorf("%v: no %q:\n%s", tc.set, tc.want, stdout)
+		}
+	}
+
+	for _, bad := range []string{"32G", "-1", "1 2"} {
+		env, log := ciDockerEnv(t, nil)
+		if stdout, stderr, err := runMakeErr(t, env, "-s", "ci-trim-caches",
+			"TOOLCHAIN_IMAGE=example/toolchain:t", "CI_CACHE_MAX_GIB="+bad); err == nil {
+			t.Errorf("CI_CACHE_MAX_GIB=%q was accepted:\n%s%s", bad, stdout, stderr)
+		}
+		if lines := logLines(t, log); len(lines) != 0 {
+			t.Errorf("docker was called with CI_CACHE_MAX_GIB=%q:\n%s", bad, strings.Join(lines, "\n"))
+		}
 	}
 }
 

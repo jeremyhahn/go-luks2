@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build build-linux vet-32bit install test test-verbose test-coverage test-integration coverage coverage-report clean fmt vet lint gosec govulncheck vuln trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration test-unit-norace seccomp-diff proto test-pkg docker-build docker-build-cli docker-run deps-check test-fips-mode assert-build-tags toolchain-image docker-build-toolchain toolchain-run ci-toolchain-run ci-reap-stacks
+.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build build-linux vet-32bit install test test-verbose test-coverage test-integration coverage coverage-report clean fmt vet lint gosec govulncheck vuln trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration test-unit-norace seccomp-diff proto test-pkg docker-build docker-build-cli docker-run deps-check test-fips-mode assert-build-tags toolchain-image docker-build-toolchain toolchain-run ci-toolchain-run ci-reap-stacks ci-trim-caches
 
 # Default target
 .DEFAULT_GOAL := help
@@ -1553,8 +1553,8 @@ override CI_STACK_PREFIX := go-luks2-ci-
 # and ulimits (memlock leaves go-enclave its locked pages), and has no network.
 # IN_IMAGE_NETWORK=bridge gives it one for the stages that must reach one --
 # deps-check asks for the newest releases, security fetches the vulnerability
-# databases -- and only then reopens GOPROXY, moves the module cache to a
-# writable /tmp, and passes the module credentials by NAME, so no token is on a
+# databases -- and only then reopens GOPROXY, mounts a writable module cache
+# (below), and passes the module credentials by NAME, so no token is on a
 # command line. CMD reaches docker as one argument, never spliced into this
 # recipe's source. The container is removed on every exit.
 #
@@ -1573,6 +1573,19 @@ override CI_STACK_PREFIX := go-luks2-ci-
 # database is still consulted and its answers still checked; only where they
 # are cached moves. A run without a network keeps /go: it makes no lookup, and
 # its module cache is the baked one under it.
+#
+# The caches live in named volumes on the daemon's host (ci-template v1.22,
+# in-toolchain-image.sh v2, ci-standard.md §6), never in the container's
+# writable layer or its /tmp: GOCACHE at /cache/gobuild and
+# GOLANGCI_LINT_CACHE at /cache/golangci for every stage, and, for a bridge
+# stage, GOMODCACHE at /cache/gomod (a no-network stage keeps the image's own
+# read-only module cache, so it still proves the image works offline). The
+# volumes are <CI_STACK_PREFIX>cache-<class>-{gobuild,golangci,gomod}, one set
+# per trust class and daemon host, kept across jobs. CI_CACHE_CLASS (default
+# pr) is `main` only for a push to main, so a pull request never writes a
+# cache that main's build reads. A new volume's root is given to the run's uid
+# by a helper container holding CHOWN and nothing else. ci-trim-caches bounds
+# their size. CI_CACHE=off mounts none, and the module cache is /tmp's again.
 #
 #   make ci-toolchain-run CMD="make deps-check" IN_IMAGE_NETWORK=bridge
 #
@@ -1605,6 +1618,16 @@ ci-toolchain-run: ## Run CMD in the toolchain image over a copy of the checkout 
 		none|bridge) ;; \
 		*) echo "$(COLOR_RED)IN_IMAGE_NETWORK must be none or bridge: $$TR_NETWORK$(COLOR_RESET)" >&2; exit 2 ;; \
 	esac; \
+	cache="$${CI_CACHE:-on}"; \
+	case "$$cache" in \
+		on|off) ;; \
+		*) echo "$(COLOR_RED)CI_CACHE must be on or off: $$cache$(COLOR_RESET)" >&2; exit 2 ;; \
+	esac; \
+	class="$${CI_CACHE_CLASS:-pr}"; \
+	case "$$class" in \
+		pr|main) ;; \
+		*) echo "$(COLOR_RED)CI_CACHE_CLASS must be pr or main: $$class$(COLOR_RESET)" >&2; exit 2 ;; \
+	esac; \
 	for f in $$TR_OUT; do \
 		case "$$f" in \
 			/*|..|../*|*/..|*/../*) echo "$(COLOR_RED)CI_OUT names a file under the checkout: $$f$(COLOR_RESET)" >&2; exit 2 ;; \
@@ -1619,9 +1642,24 @@ ci-toolchain-run: ## Run CMD in the toolchain image over a copy of the checkout 
 		--tmpfs /tmp:rw,exec,nosuid,nodev,size=3g,mode=1777 \
 		--network "$$TR_NETWORK" --user "$$uid:$$uid" --workdir /src \
 		--env HOME=/tmp --env CI="$${CI:-}"; \
+	modcache=/tmp/gomodcache; \
+	if [ "$$cache" = on ]; then \
+		vols="$(CI_STACK_PREFIX)cache-$$class"; \
+		docker run --rm --network none --cap-drop ALL --cap-add CHOWN \
+			--security-opt no-new-privileges:true --user 0:0 \
+			-v "$$vols-gobuild:/c/gobuild" -v "$$vols-golangci:/c/golangci" -v "$$vols-gomod:/c/gomod" \
+			"$$TR_IMAGE" sh -c "for d in /c/*; do [ \"\$$(stat -c %u:%g \"\$$d\")\" = $$uid:$$uid ] || chown $$uid:$$uid \"\$$d\"; done" >/dev/null; \
+		set -- "$$@" \
+			-v "$$vols-gobuild:/cache/gobuild" --env GOCACHE=/cache/gobuild \
+			-v "$$vols-golangci:/cache/golangci" --env GOLANGCI_LINT_CACHE=/cache/golangci; \
+		if [ "$$TR_NETWORK" = bridge ]; then \
+			set -- "$$@" -v "$$vols-gomod:/cache/gomod"; \
+			modcache=/cache/gomod; \
+		fi; \
+	fi; \
 	if [ "$$TR_NETWORK" = bridge ]; then \
 		set -- "$$@" --env "GOPROXY=file://$(IMAGE_GOMODCACHE)/cache/download,$(CI_NETWORK_GOPROXY)" \
-			--env "DEPS_CHECK_GOPROXY=$(CI_NETWORK_GOPROXY)" --env GOMODCACHE=/tmp/gomodcache \
+			--env "DEPS_CHECK_GOPROXY=$(CI_NETWORK_GOPROXY)" --env "GOMODCACHE=$$modcache" \
 			--env GOPATH=/tmp/gopath; \
 		for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do \
 			eval "val=\$${$$v:-}"; \
@@ -1716,6 +1754,81 @@ ci-reap-stacks: ## Remove this repository's stale CI containers and compose stac
 	done; \
 	if [ "$$RP_DRY" = 1 ]; then done_as="would be removed"; else done_as=removed; fi; \
 	echo "reaper: $$reaped compose project(s) $$done_as for prefix '$$prefix'"; \
+	exit 0
+
+# The canonical workflow's trim-ci-caches script (ci-template v1.22), as a
+# recipe for the same reason. ci-toolchain-run keeps the build, golangci-lint
+# and module caches in named volumes, <CI_STACK_PREFIX>cache-<class>-{gobuild,
+# golangci,gomod}, on the Docker host the job talks to (ci-standard.md §6). Go
+# trims its build cache of entries unused for five days, but nothing trims the
+# module cache, so the volumes would grow without bound. This measures them
+# and, while their total is over CI_CACHE_MAX_GIB, removes the largest one no
+# container is using. A removed volume comes back empty at the next stage,
+# which costs one cold build, never a wrong one.
+#
+# Sizes are measured by `du` in TOOLCHAIN_IMAGE (the image the job just built:
+# it has du, and it is already on the host), run as the CI uid (the volumes'
+# owner) with no network, no capability and the volume read-only. A volume any
+# container (running or stopped) mounts is never removed; `docker volume rm`
+# refuses one in use in any case.
+#
+# CI_CACHE_MAX_GIB is the bound for this repository's volumes, both trust
+# classes together, on one host. A failed measurement or removal is reported
+# and skipped: this never fails the job. REAP_DRY_RUN=1 prints what would be
+# removed and removes nothing.
+CI_CACHE_MAX_GIB ?= 32
+
+ci-trim-caches: export TM_IMAGE := $(TOOLCHAIN_IMAGE)
+ci-trim-caches: export TM_MAX_GIB := $(CI_CACHE_MAX_GIB)
+ci-trim-caches: export RP_DRY := $(REAP_DRY_RUN)
+ci-trim-caches: ## Keep this repository's CI cache volumes under CI_CACHE_MAX_GIB
+	@set -u; \
+	prefix="$(CI_STACK_PREFIX)"; \
+	max_gib="$${TM_MAX_GIB:-32}"; \
+	case "$$max_gib" in \
+		''|*[!0-9]*) echo "CI_CACHE_MAX_GIB must be a number: $$max_gib" >&2; exit 2 ;; \
+	esac; \
+	if [ -z "$$TM_IMAGE" ]; then echo "state the image: make ci-trim-caches TOOLCHAIN_IMAGE=..." >&2; exit 2; fi; \
+	max_kib=$$((max_gib * 1024 * 1024)); \
+	uid=$(CI_TOOLCHAIN_UID); \
+	size() { \
+		docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges:true \
+			--user "$$uid:$$uid" -v "$$1:/c:ro" --entrypoint du "$$TM_IMAGE" -sk /c 2>/dev/null | awk '{print $$1}'; \
+	}; \
+	list=$$(mktemp) || { echo "warn  no list file; nothing trimmed"; exit 0; }; \
+	trap 'rm -f "$$list"' EXIT; \
+	total=0; \
+	for vol in $$(docker volume ls -q --filter "name=$${prefix}cache-"); do \
+		case "$$vol" in "$${prefix}cache-"*) ;; *) continue ;; esac; \
+		kib=$$(size "$$vol"); \
+		case "$$kib" in \
+			''|*[!0-9]*) echo "warn  $$vol: size not read"; continue ;; \
+		esac; \
+		echo "$$kib $$vol" >> "$$list"; \
+		total=$$((total + kib)); \
+	done; \
+	echo "caches: $$((total / 1024 / 1024)) GiB of $${max_gib} GiB for prefix '$$prefix'"; \
+	sort -rn "$$list" | { \
+		removed=0; \
+		while read -r kib vol; do \
+			[ "$$total" -gt "$$max_kib" ] || break; \
+			if [ -n "$$(docker ps -aq --filter "volume=$$vol")" ]; then \
+				echo "keep  $$vol ($$((kib / 1024)) MiB, in use)"; \
+				continue; \
+			fi; \
+			if [ "$$RP_DRY" = 1 ]; then \
+				echo "dry   docker volume rm $$vol ($$((kib / 1024)) MiB)"; \
+			elif docker volume rm "$$vol" >/dev/null 2>&1; then \
+				echo "trim  $$vol ($$((kib / 1024)) MiB)"; \
+			else \
+				echo "warn  $$vol not removed"; \
+				continue; \
+			fi; \
+			total=$$((total - kib)); \
+			removed=$$((removed + 1)); \
+		done; \
+		echo "trim: $$removed volume(s), $$((total / 1024 / 1024)) GiB left for prefix '$$prefix'"; \
+	}; \
 	exit 0
 
 # Builds never resolve through a workspace: cross-repository modules come from
