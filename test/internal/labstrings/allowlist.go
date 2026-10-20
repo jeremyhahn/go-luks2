@@ -42,6 +42,13 @@ type AllowRule struct {
 // accepted. Nothing else in the tree needed an entry when the gate was added
 // (#211): the scrub had already removed the values themselves, which is always
 // preferred to listing them here.
+//
+// The third entry is the internal review workflow code-review.yml, also
+// stripped at publish. From template v5.2.1 its shared body names the review
+// host and the Ollama address, in comments and as the OLLAMA_URL default, and
+// the template is adopted verbatim, so those lines cannot be scrubbed here
+// without diverging from it. The entry goes when the template stops naming
+// them.
 var DefaultAllowList = []AllowRule{
 	{
 		Path:    fleetPatterns,
@@ -52,6 +59,11 @@ var DefaultAllowList = []AllowRule{
 		Path:    fleetTests,
 		Classes: classes,
 		Reason:  "the fleet pattern set's tests: they plant the values to prove each is reported, and are stripped at publish",
+	},
+	{
+		Path:    workflowDir + "code-review.yml",
+		Classes: []Class{ClassLabAddress, ClassLabHost},
+		Reason:  "the internal review workflow, adopted verbatim from the code-review template, whose shared body names the review host and Ollama address; stripped at publish",
 	},
 }
 

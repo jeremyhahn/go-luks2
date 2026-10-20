@@ -45,6 +45,9 @@
 #     "$GITEA/api/v1/admin/actions/runners" \
 #     | jq -r '.runners[] | select(.status=="online")
 #              | "\(.name)\t\(.labels|map(.name)|join(","))"'
+# v7 (2026-10-20): add `qwen`, the label of the runner code-review.yml's
+# opencode review job runs on (code-review template v5.2.1 and later, a
+# CUSTOMIZE line). Added in the same change as the workflow, per v2.
 self-hosted-runner:
   labels:
     - ubuntu-latest
@@ -56,3 +59,4 @@ self-hosted-runner:
     - batch
     - ci-gate
     - bigdisk
+    - qwen
