@@ -373,16 +373,21 @@ for a package that no longer exists, and a package held to 90% in no tier.
 `go test -race ./pkg/luks2` has a budget of 240 s on the CI runner
 (`UNIT_TEST_TARGET`, printed against the measured time) and a hard ceiling of
 10 minutes (`UNIT_TEST_TIMEOUT`). Both are Makefile variables CI reads through
-`make test-unit`, in the full tier's `Race` job.
+`make test-unit`, in the PR tier's `Race` job.
 
-The race detector covers the default-tag build of every package, in the full
-tier only: push to `main`, `workflow_dispatch`, and a pull request labelled
-`ci:full`. CI does not run on label events: the label is read when a run
-starts, so a `ci:full` added to an open pull request takes effect on its next
-push or update-branch, or through `workflow_dispatch`. `CI Gate`, the one required check, gates both tiers: a
-full-tier job may be skipped only when the full tier was not selected. An ordinary pull
-request runs the same unit legs without `-race`, in the devcontainer's
-toolchain image, as CI's image job runs every PR-tier stage. The
+The race detector covers the default-tag build of every package on every
+event, in the PR tier's `Race` job; CI's image job runs the same unit legs
+without `-race`, with their coverage gate, in the devcontainer's toolchain
+image. A pull request that changes only Markdown or `docs/` skips both. The
+full tier (FIPS, integration, and the image job's security, deps-check and
+`trivy image` steps) runs on push to `main`, on the nightly schedule, on
+`workflow_dispatch`, and on a pull request labelled `ci:full`; the nightly
+tier (Soak, the integration suite looped) runs on the schedule and on
+`workflow_dispatch` only. CI does not run on label events: the label is read
+when a run starts, so a `ci:full` added to an open pull request takes effect
+on its next push or update-branch, or through `workflow_dispatch`. `CI Gate`,
+the one required check, gates all three tiers: a full-tier or nightly job may
+be skipped only when its tier was not selected. The
 `integration`-tagged tests run in the container without `-race`. `make vet`
 vets both the default and `integration` configurations; a new build tag needs
 its own vet leg.
@@ -507,6 +512,15 @@ prefix, one set for pushes to `main` and another for every other event, never
 in a job container's own layer; `make ci-trim-caches` keeps their total on a
 host under `CI_CACHE_MAX_GIB` (default 32 GiB) by removing the largest unused
 volume.
+
+CI's integration image is named by its content instead: `make -s it-image`
+prints `go-luks2-ci-it:` and 16 hex digits of a hash over the tree, the
+uncommitted and untracked changes, the build proxy and the image label. A run
+that finds that image already on the host skips the build, and holds it with a
+created, never-started lease container while the job runs, so the image survives the
+run and the next run of the same tree reuses it. `make ci-reap-stacks` removes
+such an image once neither a lease nor any other container uses it and it was
+neither built nor tagged within `REAP_IMAGE_MIN_AGE` seconds (default 7200).
 
 To keep an image, name it: `ITEST_ID=debug make docker-build-integration`. It
 is still pruned once older than `ITEST_PRUNE_AGE`.

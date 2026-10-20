@@ -84,7 +84,7 @@ func gateScript(t *testing.T, results map[string]string) string {
 
 // runGate executes the gate script the way the runner does (bash -e with
 // pipefail) and returns its exit status and output.
-func runGate(t *testing.T, script, fullTier string) (int, string) {
+func runGate(t *testing.T, script, fullTier, nightly string) (int, string) {
 	t.Helper()
 	bash, err := exec.LookPath("bash")
 	if err != nil {
@@ -95,7 +95,7 @@ func runGate(t *testing.T, script, fullTier string) (int, string) {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(bash, "--noprofile", "--norc", "-eo", "pipefail", path) // #nosec G204 -- bash from PATH on a script this test wrote
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "FULL_TIER=" + fullTier}
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "FULL_TIER=" + fullTier, "NIGHTLY=" + nightly}
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	err = cmd.Run()
@@ -118,6 +118,7 @@ func TestCIGateScriptDecides(t *testing.T) {
 	type gateCase struct {
 		name     string
 		fullTier string
+		nightly  string            // "" means false: every case but the NIGHTLY validation sets it
 		results  map[string]string // overrides; every other job is success
 		wantExit int
 		wantLine string
@@ -126,8 +127,9 @@ func TestCIGateScriptDecides(t *testing.T) {
 	for _, ft := range []string{"true", "false"} {
 		cases = append(cases, gateCase{name: "all success/FULL_TIER=" + ft, fullTier: ft, wantLine: "CI gate passed."})
 	}
+	cases = append(cases, gateCase{name: "all success/NIGHTLY=true", fullTier: "true", nightly: "true", wantLine: "CI gate passed."})
 	allFullSkipped := map[string]string{}
-	for _, j := range fullTier {
+	for _, j := range append(append([]string{}, fullTier...), nightlyTier...) {
 		allFullSkipped[j] = "skipped"
 	}
 	cases = append(cases,
@@ -140,11 +142,17 @@ func TestCIGateScriptDecides(t *testing.T) {
 			gateCase{name: j + "=skipped/FULL_TIER=true", fullTier: "true", results: map[string]string{j: "skipped"}, wantExit: 1, wantLine: "FAIL " + j + " (skipped)"},
 		)
 	}
+	for _, j := range nightlyTier {
+		for _, ft := range []string{"true", "false"} {
+			cases = append(cases, gateCase{name: j + "=skipped/NIGHTLY=false/FULL_TIER=" + ft, fullTier: ft, results: map[string]string{j: "skipped"}, wantLine: "SKIP " + j + " (nightly and dispatch only)"})
+		}
+		cases = append(cases, gateCase{name: j + "=skipped/NIGHTLY=true", fullTier: "true", nightly: "true", results: map[string]string{j: "skipped"}, wantExit: 1, wantLine: "FAIL " + j + " (skipped)"})
+	}
 	for _, ft := range []string{"true", "false"} {
 		for _, j := range prTier {
 			cases = append(cases, gateCase{name: j + "=skipped/FULL_TIER=" + ft, fullTier: ft, results: map[string]string{j: "skipped"}, wantExit: 1, wantLine: "FAIL " + j + " (skipped)"})
 		}
-		for _, j := range append(append([]string{}, prTier...), fullTier...) {
+		for _, j := range allJobs() {
 			for _, r := range []string{"failure", "cancelled", ""} { //nolint:misspell // the runner's spelling, not prose
 				shown := r
 				if r == "" {
@@ -157,17 +165,24 @@ func TestCIGateScriptDecides(t *testing.T) {
 	for _, ft := range []string{"", "TRUE", "1", "yes"} {
 		cases = append(cases, gateCase{name: "FULL_TIER=" + ft, fullTier: ft, wantExit: 1, wantLine: "FAIL FULL_TIER is '" + ft + "', neither true nor false"})
 	}
+	for _, n := range []string{"TRUE", "1", "yes"} {
+		cases = append(cases, gateCase{name: "NIGHTLY=" + n, fullTier: "true", nightly: n, wantExit: 1, wantLine: "FAIL NIGHTLY is '" + n + "', neither true nor false"})
+	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			results := map[string]string{}
-			for _, j := range append(append([]string{}, prTier...), fullTier...) {
+			for _, j := range allJobs() {
 				results[j] = "success"
 			}
 			for j, r := range c.results {
 				results[j] = r
 			}
-			code, out := runGate(t, gateScript(t, results), c.fullTier)
+			nightly := c.nightly
+			if nightly == "" {
+				nightly = "false"
+			}
+			code, out := runGate(t, gateScript(t, results), c.fullTier, nightly)
 			if code != c.wantExit {
 				t.Errorf("exit %d, want %d; output:\n%s", code, c.wantExit, out)
 			}
@@ -176,6 +191,11 @@ func TestCIGateScriptDecides(t *testing.T) {
 			}
 		})
 	}
+}
+
+// allJobs is every job CI Gate needs, over the three tiers.
+func allJobs() []string {
+	return append(append(append([]string{}, prTier...), fullTier...), nightlyTier...)
 }
 
 func containsLine(out, want string) bool {

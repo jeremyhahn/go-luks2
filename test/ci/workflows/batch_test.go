@@ -111,10 +111,19 @@ func TestBatchIsNeverInAMergeGate(t *testing.T) {
 			continue
 		}
 		text := readFile(t, rel(t, f))
-		if strings.Contains(text, "batch.yml") || regexp.MustCompile(`needs\.(fuzz|race-full|soak|bench)\b`).MatchString(text) {
+		// Comments may name batch.yml; ci-template v1.24's own soak job (a
+		// job of this file, not batch.yml's) may be needed.
+		code := regexp.MustCompile(`(?m)^\s*#.*$`).ReplaceAllString(text, "")
+		if strings.Contains(code, "batch.yml") {
 			t.Errorf("%s refers to the batch workflow", rel(t, f))
 		}
 		for _, n := range []string{"fuzz", "race-full", "soak", "bench"} {
+			if strings.Contains(text, "\n  "+n+":\n") {
+				continue
+			}
+			if regexp.MustCompile(`needs\.` + n + `\b`).MatchString(code) {
+				t.Errorf("%s refers to the batch workflow's %s", rel(t, f), n)
+			}
 			for _, g := range []string{"gate", "full-gate", "publish", "ci-gate"} {
 				if strings.Contains(text, "\n  "+g+":\n") && contains(needs(t, job(t, text, g)), n) {
 					t.Errorf("%s: %s needs batch job %s", rel(t, f), g, n)

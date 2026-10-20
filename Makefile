@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build build-linux vet-32bit install test test-verbose test-coverage test-integration coverage coverage-report clean fmt vet lint gosec govulncheck vuln trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration test-unit-norace seccomp-diff proto test-pkg docker-build docker-build-cli docker-run deps-check test-fips-mode assert-build-tags toolchain-image docker-build-toolchain toolchain-run ci-toolchain-run ci-reap-stacks ci-trim-caches
+.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build build-linux vet-32bit install test test-verbose test-coverage test-integration coverage coverage-report clean fmt vet lint gosec govulncheck vuln trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration test-unit-norace seccomp-diff proto test-pkg docker-build docker-build-cli docker-run deps-check test-fips-mode assert-build-tags toolchain-image it-image docker-build-toolchain toolchain-run ci-toolchain-run ci-reap-stacks ci-trim-caches
 
 # Default target
 .DEFAULT_GOAL := help
@@ -558,6 +558,12 @@ docker-build-integration:
 	@set -eu; \
 	out="$$($(ITEST_PRUNE) 2>/dev/null || true)"; \
 	case "$$out" in *Deleted*) printf '%s\n' "$$out";; esac; \
+	case "$(ITEST_IMAGE)" in $(CI_STACK_PREFIX)it:*) \
+		if docker image inspect $(ITEST_IMAGE) >/dev/null 2>&1; then \
+			echo "$(ITEST_IMAGE) is held: the tag is the content (make it-image), so it is not rebuilt."; \
+			exit 0; \
+		fi;; \
+	esac; \
 	$(GOMODAUTH_STAGE); \
 	DOCKER_BUILDKIT=1 docker build \
 		--secret id=gomodauth,src="$$stage" \
@@ -616,8 +622,9 @@ print-itest-label:
 # the prefix ci-reap-stacks reaps). The container is kept until the coverage
 # profile is copied out, with the same pass/fail rule as
 # docker-integration-test: a container that passed without leaving a profile
-# fails. The trap removes the container, the project and the image on every
-# exit path.
+# fails. The trap removes the container and the project on every exit path,
+# and the image too unless it is the content-addressed one (make it-image),
+# which other runs of the tree reuse and ci-reap-stacks ages out.
 #
 # docker-integration-test, the launcher path, stays for the soak workflow.
 DEVCONTAINER_COMPOSE := build/docker/devcontainer/compose.yaml
@@ -634,7 +641,7 @@ integration-test: ## Run all integration tests in the devcontainer's integration
 	@set -eu; \
 	trap 'docker rm -f $(ITEST_CONTAINER) >/dev/null 2>&1 || true; \
 	      docker compose -f $(DEVCONTAINER_COMPOSE) -p $(IT_PROJECT) down --volumes >/dev/null 2>&1 || true; \
-	      docker image rm -f $(ITEST_IMAGE) >/dev/null 2>&1 || true' EXIT INT TERM; \
+	      $(if $(filter $(CI_STACK_PREFIX)it:%,$(ITEST_IMAGE)),:,docker image rm -f $(ITEST_IMAGE) >/dev/null 2>&1 || true)' EXIT INT TERM; \
 	GO_LUKS2_DM_MAJOR="$$(awk '$$2 == "device-mapper" { print $$1 }' $(PROC_DEVICES))"; \
 	if [ -z "$$GO_LUKS2_DM_MAJOR" ]; then \
 		echo "$(COLOR_RED)no device-mapper line in $(PROC_DEVICES): load dm_mod on this host$(COLOR_RESET)" >&2; \
@@ -1495,6 +1502,31 @@ TOOLCHAIN_IMAGE ?= go-luks2-toolchain:$(shell cat $(TOOLCHAIN_INPUTS) 2>/dev/nul
 toolchain-image: ## Print the content-hashed tag of the toolchain image
 	@echo $(TOOLCHAIN_IMAGE)
 
+# ci-standard.md §9 (ci-template v1.23): the integration image is named by its
+# content, <CI_STACK_PREFIX>it:<hash>, never by its run, so every job and run
+# of one tree on a runner builds it once and reuses it. The hash covers the
+# build arguments that change the image (GO_BUILD_PROXY, the label, the
+# target) and the whole build context: the commit's tree and, on a dirty
+# checkout, the diff and every untracked file .gitignore keeps. No job removes
+# the image; ci-reap-stacks ages it out. It fails closed: when git cannot
+# read the tree (no .git, as in a published export, or a checkout git calls
+# of dubious ownership) it prints git's reason on stderr, no name, and exits
+# nonzero, since a name hashed from empty or partial input would be the same
+# name for every tree. Each input is collected and checked before any is
+# hashed.
+it-image: ## Print the content-addressed tag of the integration image
+	@set -eu; \
+	d=$$(mktemp -d); trap 'rm -rf "$$d"' EXIT; \
+	fail() { echo "it-image: $$1 failed, so this tree has no integration image name" >&2; exit 1; }; \
+	git rev-parse 'HEAD^{tree}' > "$$d/in" || fail "git rev-parse 'HEAD^{tree}'"; \
+	git diff HEAD --binary >> "$$d/in" || fail 'git diff HEAD --binary'; \
+	git ls-files -z --others --exclude-standard > "$$d/untracked" || fail 'git ls-files --others'; \
+	xargs -0r sha256sum -- < "$$d/untracked" >> "$$d/in" || fail 'hashing the untracked files'; \
+	printf 'GO_BUILD_PROXY=%s\nlabel=%s\ntarget=integration\n' "$${GO_BUILD_PROXY:-}" '$(ITEST_LABEL)' >> "$$d/in"; \
+	h=$$(sha256sum < "$$d/in" | cut -c1-16); \
+	case "$$h" in *[!0-9a-f]*|'') fail 'sha256sum' ;; esac; \
+	echo "$(CI_STACK_PREFIX)it:$$h"
+
 docker-build-toolchain: ## Build the toolchain image (the devcontainer's toolchain stage)
 	@set -eu; \
 	$(GOMODAUTH_STAGE); \
@@ -1583,10 +1615,21 @@ override CI_STACK_PREFIX := go-luks2-ci-
 # read-only module cache, so it still proves the image works offline). The
 # volumes are <CI_STACK_PREFIX>cache-<class>-{gobuild,golangci,gomod}, one set
 # per trust class and daemon host, kept across jobs. CI_CACHE_CLASS (default
-# pr) is `main` only for a push to main, so a pull request never writes a
-# cache that main's build reads. A new volume's root is given to the run's uid
-# by a helper container holding CHOWN and nothing else. ci-trim-caches bounds
-# their size. CI_CACHE=off mounts none, and the module cache is /tmp's again.
+# pr) is `main` only for main's own runs, a push to it or its schedule, so a
+# pull request never writes a cache that main's build reads. A new volume's
+# root is given to the run's uid by a helper container holding CHOWN and
+# nothing else. ci-trim-caches bounds their size. CI_CACHE=off mounts none,
+# and the module cache is /tmp's again.
+#
+# The stage runs at its job slot's CPU bound (in-toolchain-image.sh v3,
+# ci-template v1.22.2, ci-standard.md §7). It runs in a sibling container,
+# outside the job container's cgroup, so the bound moves to the sibling:
+# --cpus N and GOMAXPROCS=N, with N the job container's cgroup cpu.max
+# (CGROUP_CPU_MAX) rounded up, nproc when the job has no quota, and
+# IN_IMAGE_CPUS over both. golangci-lint's default concurrency follows the
+# quota. CUSTOMIZE: no GOFLAGS=-p=N, which the template passes. The image's
+# own GOFLAGS (-mod=readonly -buildvcs=false) would be replaced by it, and
+# go's -p already defaults to GOMAXPROCS.
 #
 #   make ci-toolchain-run CMD="make deps-check" IN_IMAGE_NETWORK=bridge
 #
@@ -1606,6 +1649,7 @@ CI_OUT_DIR ?= $(CURDIR)
 CI_TOOLCHAIN_UID := 10001
 IMAGE_GOMODCACHE := /go/pkg/mod
 CI_NETWORK_GOPROXY := https://proxy.golang.org,direct
+CGROUP_CPU_MAX ?= /sys/fs/cgroup/cpu.max
 
 ci-toolchain-run: export TR_CMD := $(CMD)
 ci-toolchain-run: export TR_IMAGE := $(TOOLCHAIN_IMAGE)
@@ -1629,6 +1673,18 @@ ci-toolchain-run: ## Run CMD in the toolchain image over a copy of the checkout 
 		pr|main) ;; \
 		*) echo "$(COLOR_RED)CI_CACHE_CLASS must be pr or main: $$class$(COLOR_RESET)" >&2; exit 2 ;; \
 	esac; \
+	cpus="$${IN_IMAGE_CPUS:-}"; \
+	if [ -z "$$cpus" ]; then \
+		quota=max; period=100000; \
+		if [ -r "$(CGROUP_CPU_MAX)" ]; then read -r quota period < "$(CGROUP_CPU_MAX)"; fi; \
+		case "$$quota" in \
+			max|""|*[!0-9]*) cpus=$$(nproc) ;; \
+			*) cpus=$$(( (quota + period - 1) / period )) ;; \
+		esac; \
+	fi; \
+	case "$$cpus" in \
+		""|0|*[!0-9]*) echo "$(COLOR_RED)IN_IMAGE_CPUS must be a positive integer: $$cpus$(COLOR_RESET)" >&2; exit 2 ;; \
+	esac; \
 	for f in $$TR_OUT; do \
 		case "$$f" in \
 			/*|..|../*|*/..|*/../*) echo "$(COLOR_RED)CI_OUT names a file under the checkout: $$f$(COLOR_RESET)" >&2; exit 2 ;; \
@@ -1636,7 +1692,7 @@ ci-toolchain-run: ## Run CMD in the toolchain image over a copy of the checkout 
 	done; \
 	uid=$(CI_TOOLCHAIN_UID); \
 	name="$(CI_STACK_PREFIX)tc-$$$$-$$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"; \
-	set -- --name "$$name" --init --cap-drop ALL \
+	set -- --name "$$name" --cpus "$$cpus" --env GOMAXPROCS="$$cpus" --init --cap-drop ALL \
 		--security-opt no-new-privileges:true --pids-limit 4096 \
 		--ulimit memlock=67108864:67108864 --ulimit core=1048576:1048576 \
 		--ulimit nofile=65536:65536 \
@@ -1698,16 +1754,33 @@ ci-toolchain-run: ## Run CMD in the toolchain image over a copy of the checkout 
 # runners' 3 h job timeout plus 5 min, so no job that could own the stack is
 # alive. A failed removal is reported and skipped: the reaper never fails the
 # job. REAP_DRY_RUN=1 prints what would be removed and removes nothing.
+#
+# v2 (ci-template v1.23, ci-standard.md §9): images too. The integration image
+# is named by its content, <CI_STACK_PREFIX>it:<hash> (make it-image), and
+# every job and run of that tree on the runner reuses it, so no job removes it.
+# This removes one created at least REAP_IMAGE_MIN_AGE seconds ago (default
+# 7200: the longest full-tier run plus headroom). `docker image rm` without
+# force refuses an image a container uses, and every job that needs the image
+# holds a lease on it (a created, never started <prefix>lease-<run>-...
+# container, removed at its teardown; a dead job's lease goes stale like any
+# container outside compose). v3 (ci-template v1.23.1): the age runs from the
+# later of the image's creation and its last tag, since a rebuild from a full
+# cache keeps the old creation time but re-tags the image.
 REAP_MIN_AGE ?= 11100
+REAP_IMAGE_MIN_AGE ?= 7200
 REAP_DRY_RUN ?= 0
 
 ci-reap-stacks: export RP_MIN_AGE := $(REAP_MIN_AGE)
 ci-reap-stacks: export RP_DRY := $(REAP_DRY_RUN)
-ci-reap-stacks: ## Remove this repository's stale CI containers and compose stacks
+ci-reap-stacks: export RP_IMAGE_MIN_AGE := $(REAP_IMAGE_MIN_AGE)
+ci-reap-stacks: ## Remove this repository's stale CI containers, compose stacks and integration images
 	@set -u; \
 	prefix="$(CI_STACK_PREFIX)"; \
 	case "$$RP_MIN_AGE" in \
 		''|*[!0-9]*) echo "REAP_MIN_AGE must be a number of seconds: $$RP_MIN_AGE" >&2; exit 2 ;; \
+	esac; \
+	case "$$RP_IMAGE_MIN_AGE" in \
+		''|*[!0-9]*) echo "REAP_IMAGE_MIN_AGE must be a number of seconds: $$RP_IMAGE_MIN_AGE" >&2; exit 2 ;; \
 	esac; \
 	now=$$(date +%s); \
 	run() { if [ "$$RP_DRY" = 1 ]; then echo "dry   $$*"; else "$$@" >/dev/null; fi; }; \
@@ -1753,8 +1826,22 @@ ci-reap-stacks: ## Remove this repository's stale CI containers and compose stac
 			run docker rm -v "$$id" || echo "warn  container $$cname not removed"; \
 		fi; \
 	done; \
+	images=0; \
+	for ref in $$(docker images --filter "reference=$${prefix}it" --format '{{.Repository}}:{{.Tag}}'); do \
+		case "$$ref" in "$${prefix}it:"*) ;; *) continue ;; esac; \
+		set -- $$(docker image inspect -f '{{.Created}} {{.Metadata.LastTagTime.Unix}}' "$$ref" 2>/dev/null); \
+		[ "$$#" -ge 1 ] || continue; \
+		t=$$(date -d "$$1" +%s 2>/dev/null) || continue; \
+		case "$${2:-}" in ''|*[!0-9]*) ;; *) [ "$$2" -le "$$t" ] || t=$$2 ;; esac; \
+		if [ $$((now - t)) -lt "$$RP_IMAGE_MIN_AGE" ]; then \
+			echo "keep  image $$ref (created or tagged within $${RP_IMAGE_MIN_AGE}s)"; \
+			continue; \
+		fi; \
+		echo "reap  image $$ref"; \
+		if run docker image rm "$$ref"; then images=$$((images + 1)); else echo "warn  image $$ref not removed (in use?)"; fi; \
+	done; \
 	if [ "$$RP_DRY" = 1 ]; then done_as="would be removed"; else done_as=removed; fi; \
-	echo "reaper: $$reaped compose project(s) $$done_as for prefix '$$prefix'"; \
+	echo "reaper: $$reaped compose project(s) and $$images image(s) $$done_as for prefix '$$prefix'"; \
 	exit 0
 
 # The canonical workflow's trim-ci-caches script (ci-template v1.22), as a

@@ -5,6 +5,9 @@
 package workflows
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -15,8 +18,9 @@ import (
 // edited on one job and not its siblings, changes what gates a merge without
 // failing anything else; these tests are what fails.
 var (
-	prTier   = []string{"image", "merge-check", "arch-gates"}
-	fullTier = []string{"fips", "integration", "test-race"}
+	prTier      = []string{"changes", "image", "merge-check", "arch-gates", "test-race"}
+	fullTier    = []string{"fips", "integration"}
+	nightlyTier = []string{"soak"}
 )
 
 var (
@@ -46,31 +50,49 @@ func sameSet(a, b []string) bool {
 	return strings.Join(a, ",") == strings.Join(b, ",")
 }
 
-// TestNoCIWorkflowIsScheduled: the full tier is dispatched by the
-// coordinator's loop; a schedule would run it a second time, unowned (sdlc
-// §5a). The CI workflows only: automerge.yml's poll is held for the owner and
-// is not part of this change.
-func TestNoCIWorkflowIsScheduled(t *testing.T) {
-	for _, f := range []string{".github/workflows/ci.yml", ".github/workflows/nightly.yml"} {
-		if scheduleOn.MatchString(readFile(t, f)) {
-			t.Errorf("%s has a schedule: trigger", f)
+// TestExactlyOneScheduleTriggerInCI: ci-template v1.23 runs main's full tier
+// and Soak nightly through ci.yml's own `schedule:` trigger, and that is the
+// only scheduled workflow: nightly.yml and batch.yml stay dispatch-only, so
+// nothing is run twice on a timer, unowned (sdlc §5a). automerge.yml is not
+// CI: its timer merges green PRs and runs no stage.
+func TestExactlyOneScheduleTriggerInCI(t *testing.T) {
+	entries, err := os.ReadDir(filepath.Join(repoRoot(t), ".github", "workflows"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var scheduled []string
+	for _, e := range entries {
+		if e.Name() == "automerge.yml" {
+			continue
 		}
+		f := ".github/workflows/" + e.Name()
+		if n := len(scheduleOn.FindAllString(readFile(t, f), -1)); n > 0 {
+			scheduled = append(scheduled, fmt.Sprintf("%s:%d", e.Name(), n))
+		}
+	}
+	if want := []string{"ci.yml:1"}; !sameSet(scheduled, want) {
+		t.Errorf("schedule: triggers %v, want %v", scheduled, want)
+	}
+	ci := readFile(t, ".github/workflows/ci.yml")
+	if !regexp.MustCompile(`(?m)^on:\n(?:  .*\n|\n)*?  schedule:\n    - cron: '[^']+'\n`).MatchString(ci) {
+		t.Error("ci.yml's schedule: is not one cron under on:")
 	}
 }
 
-// TestConcurrencyNeverCancelsAMainRun: ci-template v1.22.1's canonical block.
-// One group per ref; a newer run on a PR ref cancels the older, but a push to
-// main never cancels an in-flight main run, so every main commit keeps its run.
-func TestConcurrencyNeverCancelsAMainRun(t *testing.T) {
+// TestConcurrencyIsCanonical: ci-template v1.25's canonical block.
+// On main one group per event, so a newer push cancels an older main push
+// run and a schedule or dispatch run never cancels a push run; every other
+// ref is one group. cancel-in-progress is a literal true, never an expression.
+func TestConcurrencyIsCanonical(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
 	m := regexp.MustCompile(`(?m)^concurrency:\n((?:  .*\n)+)`).FindStringSubmatch(ci)
 	if m == nil {
 		t.Fatal("ci.yml has no workflow-level concurrency block")
 	}
-	want := "  group: ${{ github.workflow }}-${{ github.ref }}\n" +
-		"  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}\n"
+	want := "  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}\n" +
+		"  cancel-in-progress: true\n"
 	if m[1] != want {
-		t.Errorf("ci.yml's concurrency block is\n%s\nwant ci-template v1.22.1's\n%s", m[1], want)
+		t.Errorf("ci.yml's concurrency block is\n%s\nwant ci-template v1.25's\n%s", m[1], want)
 	}
 }
 
@@ -161,8 +183,12 @@ func TestNoLabelTrigger(t *testing.T) {
 }
 
 // fullTierIf is the one condition every full-tier job carries, written out on
-// each, and the expression CI Gate's FULL_TIER evaluates.
-const fullTierIf = "github.event_name == 'push' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:full')"
+// each, and ci.yml's CI_FULL_TIER, which CI Gate's FULL_TIER reads.
+// nightlyIf is the nightly tier's: the schedule and dispatch only.
+const (
+	fullTierIf = "${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}"
+	nightlyIf  = "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}"
+)
 
 var (
 	jobKey    = regexp.MustCompile(`^  ([A-Za-z0-9_-]+):$`)
@@ -207,8 +233,14 @@ func TestCIGateTiersMatchTheJobs(t *testing.T) {
 	if got := jobIfOf(t, gate); got != "always()" {
 		t.Errorf("CI Gate has if %q, want always()", got)
 	}
-	if m := fullTierEn.FindStringSubmatch(gate); m == nil || m[1] != fullTierIf {
-		t.Errorf("CI Gate's FULL_TIER is not the full-tier condition %q", fullTierIf)
+	if m := fullTierEn.FindStringSubmatch(gate); m == nil || m[1] != "env.CI_FULL_TIER" {
+		t.Error("CI Gate's FULL_TIER is not ${{ env.CI_FULL_TIER }}")
+	}
+	if m := regexp.MustCompile(`(?m)^  CI_FULL_TIER: (.*)$`).FindStringSubmatch(ci); m == nil || m[1] != fullTierIf {
+		t.Errorf("ci.yml's CI_FULL_TIER is not the full-tier condition %q", fullTierIf)
+	}
+	if m := regexp.MustCompile(`(?m)^          NIGHTLY: (.*)$`).FindStringSubmatch(gate); m == nil || m[1] != nightlyIf {
+		t.Errorf("CI Gate's NIGHTLY is not the nightly condition %q", nightlyIf)
 	}
 
 	checks := map[string][]string{}
@@ -220,7 +252,7 @@ func TestCIGateTiersMatchTheJobs(t *testing.T) {
 	}
 	gateNeeds := needs(t, gate)
 
-	var pr, full []string
+	var pr, full, nightly []string
 	for _, id := range jobIDs(t, ci) {
 		text := job(t, ci, id)
 		if id == "ci-gate" {
@@ -234,10 +266,13 @@ func TestCIGateTiersMatchTheJobs(t *testing.T) {
 		case fullTierIf:
 			want = "full"
 			full = append(full, id)
+		case nightlyIf:
+			want = "nightly"
+			nightly = append(nightly, id)
 		case "":
 			pr = append(pr, id)
 		default:
-			t.Errorf("job %s has if %q; a job is either unconditional (pr) or carries the full-tier condition", id, cond)
+			t.Errorf("job %s has if %q; a job is unconditional (pr) or carries the full-tier or nightly condition", id, cond)
 		}
 		if !contains(gateNeeds, id) {
 			t.Errorf("CI Gate does not need %s", id)
@@ -262,10 +297,13 @@ func TestCIGateTiersMatchTheJobs(t *testing.T) {
 	if !sameSet(full, fullTier) {
 		t.Errorf("the full tier is %v, want %v", full, fullTier)
 	}
+	if !sameSet(nightly, nightlyTier) {
+		t.Errorf("the nightly tier is %v, want %v", nightly, nightlyTier)
+	}
 	// A full-tier job may need a PR-tier job; never the other way round.
 	for _, j := range prTier {
 		for _, n := range needs(t, job(t, ci, j)) {
-			if contains(fullTier, n) {
+			if contains(fullTier, n) || contains(nightlyTier, n) {
 				t.Errorf("PR-tier job %s needs full-tier job %s", j, n)
 			}
 		}
@@ -274,8 +312,9 @@ func TestCIGateTiersMatchTheJobs(t *testing.T) {
 	// TestCIGateScriptDecides.
 }
 
-// TestUnitTiers: the PR tier's unit run is uninstrumented and keeps every gate
-// that rode on it; the -race run with its budget is the full tier's.
+// TestUnitTiers: the image job's unit run is uninstrumented and keeps every
+// gate that rode on it; the -race run with its budget is Race's, which v1.23
+// puts on the PR tier.
 func TestUnitTiers(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
 	// The PR tier's unit legs, their coverage gate and the checks beside them

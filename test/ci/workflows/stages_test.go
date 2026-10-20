@@ -68,14 +68,17 @@ func TestImageJobRunsEveryToolchainStageInTheImage(t *testing.T) {
 
 	// Every step after the image build runs in the toolchain image and runs
 	// after a failed one, so one run reports every stage (ci-template v1.21).
+	// v1.24 may narrow a step further: off on a docs-only change, or on the
+	// full tier only; never wider.
+	keepsRunning := regexp.MustCompile(`\n        if: \$\{\{ !cancelled\(\) && env\.TOOLCHAIN_IMAGE != ''( && [^\n]*)? \}\}\n`) //nolint:misspell // the Actions function's spelling, not prose
 	built := false
 	for _, block := range strings.Split(image, "\n      - ")[1:] {
 		name, _, _ := strings.Cut(strings.TrimPrefix(block, "name: "), "\n")
 		switch {
 		case name == "Build the devcontainer images":
 			built = true
-		case !built, name == "Tear down", strings.HasPrefix(name, "Upload "):
-		case !strings.Contains(block, "if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}"): //nolint:misspell // the Actions function's spelling, not prose
+		case !built, name == "Tear down", name == "Lease the integration image", strings.HasPrefix(name, "Upload "):
+		case !keepsRunning.MatchString("\n" + block): //nolint:misspell // the Actions function's spelling, not prose
 			t.Errorf("step %q does not keep running after a failed step once the toolchain image exists", name)
 		}
 	}
@@ -90,8 +93,36 @@ func TestImageJobRunsEveryToolchainStageInTheImage(t *testing.T) {
 			t.Errorf("the image build step lacks %q", want)
 		}
 	}
-	if !strings.Contains(image, "IT_IMAGE: go-luks2-ci-") {
-		t.Error("the image job's integration image is not named under the CI prefix")
+	itImageNamedAndLeased(t, "image", image)
+}
+
+// itImageNamedAndLeased: ci-template v1.23 (ci-standard.md §9). A job takes
+// the integration image's content-addressed name from `make -s it-image`,
+// holds a lease on it, and its teardown removes the lease, never the image.
+func itImageNamedAndLeased(t *testing.T, name, j string) {
+	t.Helper()
+	steps := stepRun(t, j)
+	if got := strings.TrimSpace(steps["Name the integration image"]); got != `echo "IT_IMAGE=$(make -s it-image)" >> "$GITHUB_ENV"` {
+		t.Errorf("%s does not name the integration image by make -s it-image: %q", name, got)
+	}
+	for _, want := range []string{
+		`lease="go-luks2-ci-lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-`,
+		`docker create --name "$lease" "$IT_IMAGE" true`,
+		`echo "IT_LEASE=$lease" >> "$GITHUB_ENV"`,
+	} {
+		if !strings.Contains(steps["Lease the integration image"], want) {
+			t.Errorf("%s's lease step lacks %q", name, want)
+		}
+	}
+	if strings.Contains(j, "IT_IMAGE: ") {
+		t.Errorf("%s still names the integration image by its run", name)
+	}
+	teardown := steps["Tear down"]
+	if !strings.Contains(teardown, `docker rm "$IT_LEASE"`) {
+		t.Errorf("%s's teardown does not remove its lease", name)
+	}
+	if strings.Contains(teardown, "docker image rm") || strings.Contains(teardown, "docker rmi") {
+		t.Errorf("%s's teardown removes the shared integration image", name)
 	}
 }
 
@@ -188,17 +219,41 @@ func TestIntegrationJobRunsUnderCompose(t *testing.T) {
 	}
 	for _, want := range []string{
 		"IT_PROJECT: go-luks2-ci-${{ github.run_id }}-${{ github.run_attempt }}",
-		"IT_IMAGE: go-luks2-ci-",
 		"ITEST_CONTAINER: go-luks2-ci-",
 	} {
 		if !strings.Contains(it, want) {
 			t.Errorf("the integration job lacks %q", want)
 		}
 	}
+	itImageNamedAndLeased(t, "integration", it)
 	teardown := it[strings.Index(it, "name: Tear down"):]
 	if !strings.Contains(teardown, "if: always()") ||
 		!strings.Contains(teardown, `-p "$IT_PROJECT" down --volumes`) {
 		t.Error("the integration job's teardown does not take the compose project down under always()")
+	}
+}
+
+// TestSoakLoopsTheIntegrationSuite: ci-template v1.24's Soak loops the
+// integration suite in the integration image for SOAK_MINUTES, each iteration
+// its own compose project, and holds a lease on the image like the jobs that
+// share it.
+func TestSoakLoopsTheIntegrationSuite(t *testing.T) {
+	soak := job(t, readFile(t, ".github/workflows/ci.yml"), "soak")
+	for _, want := range []string{
+		"SOAK_MINUTES: 30",
+		"SOAK_TARGET: integration-test",
+		"IT_PROJECT: go-luks2-ci-${{ github.run_id }}-${{ github.run_attempt }}-soak",
+	} {
+		if !regexp.MustCompile(`(?m)^      ` + regexp.QuoteMeta(want) + `(\s+#.*)?$`).MatchString(soak) {
+			t.Errorf("the soak job's env lacks %q", want)
+		}
+	}
+	itImageNamedAndLeased(t, "soak", soak)
+	run := stepRun(t, soak)["Soak (integration suite, looped)"]
+	for _, want := range []string{`make "$SOAK_TARGET"`, `IT_IMAGE="$IT_IMAGE"`, `IT_PROJECT="$p"`, `-p "$p" down --volumes`} {
+		if !strings.Contains(run, want) {
+			t.Errorf("the soak loop lacks %q", want)
+		}
 	}
 }
 
@@ -230,9 +285,10 @@ func TestImageAndIntegrationJobsUseNoRunnerToolchain(t *testing.T) {
 	}
 }
 
-// cacheClass is ci-template v1.22's trust class for the cache volumes: only a
-// push to main writes the caches main's build reads (ci-standard.md §6).
-const cacheClass = `CI_CACHE_CLASS: ${{ github.event_name == 'push' && 'main' || 'pr' }}`
+// cacheClass is ci-template v1.22's trust class for the cache volumes: only
+// main's own runs, a push to it or (v1.23) its schedule, write the caches
+// main's build reads (ci-standard.md §6).
+const cacheClass = `CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'main' || 'pr' }}`
 
 // TestToolchainStagesCacheByTrustClass: ci-template v1.22. Every job that runs
 // a stage through ci-toolchain-run -- the image job as the template has it,
@@ -240,8 +296,8 @@ const cacheClass = `CI_CACHE_CLASS: ${{ github.event_name == 'push' && 'main' ||
 // same way -- names the cache class the recipe mounts its volumes under.
 func TestToolchainStagesCacheByTrustClass(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
-	if !strings.HasPrefix(ci, "# ci-template: v1.22.1 (customized)\n") {
-		t.Errorf("ci.yml does not declare ci-template v1.22.1: %.60q", ci)
+	if !strings.HasPrefix(ci, "# ci-template: v1.25 (customized)\n") {
+		t.Errorf("ci.yml does not declare ci-template v1.25: %.60q", ci)
 	}
 	for _, name := range []string{"image", "merge-check", "test-race", "fips"} {
 		j := job(t, ci, name)
@@ -279,7 +335,8 @@ func TestImageJobTrimsTheCachesBeforeTheStages(t *testing.T) {
 			firstStage = i
 		}
 	}
-	if trim < 1 || names[trim-1] != "Build the devcontainer images" {
+	// v1.23: the lease is taken between the build and the trim.
+	if trim < 2 || names[trim-1] != "Lease the integration image" || names[trim-2] != "Build the devcontainer images" {
 		t.Fatalf("Trim the CI caches does not follow the image build: %v", names)
 	}
 	if firstStage < 0 || trim > firstStage {
@@ -300,7 +357,7 @@ func TestImageJobTrimsTheCachesBeforeTheStages(t *testing.T) {
 
 // toolchainJobs are the jobs that build the devcontainer images on bigdisk
 // and run their stages in them.
-var toolchainJobs = []string{"image", "integration", "test-race", "fips", "merge-check"}
+var toolchainJobs = []string{"image", "integration", "soak", "test-race", "fips", "merge-check"}
 
 // TestNoStepPrintsTheCredentials: ci-template v1.21.1 after a forge token
 // printed in a run. No step prints the credential file or the job
@@ -325,12 +382,13 @@ var runnerJobs = []string{"ci-gate"}
 
 // runnerTargets are the make targets any other job may run on the runner: they
 // build the images, run a command in the toolchain image, run the integration
-// suite under compose, print the image's tag, reap what a dead job left, or
-// trim the cache volumes (ci-template v1.22). Everything else -- every stage,
-// and every check beside one -- is a CMD for ci-toolchain-run.
+// suite under compose, print an image's tag (it-image: ci-template v1.23),
+// reap what a dead job left, or trim the cache volumes (ci-template v1.22).
+// Everything else -- every stage, and every check beside one -- is a CMD for
+// ci-toolchain-run. Soak's "$SOAK_TARGET" is read from its job's env.
 var runnerTargets = []string{
 	"ci-toolchain-run", "ci-reap-stacks", "ci-trim-caches", "docker-build", "docker-build-toolchain",
-	"docker-build-integration", "toolchain-image", "integration-test",
+	"docker-build-integration", "toolchain-image", "it-image", "integration-test",
 }
 
 var (
@@ -383,6 +441,12 @@ func runnerViolations(t *testing.T, jobText string) []string {
 			for _, word := range strings.Fields(m[1]) {
 				if strings.HasPrefix(word, "-") || strings.Contains(word, "=") {
 					continue
+				}
+				if v := regexp.MustCompile(`^"?\$\{?([A-Z_][A-Z0-9_]*)\}?"?$`).FindStringSubmatch(word); v != nil {
+					// A target named by a variable of the job's env.
+					if e := regexp.MustCompile(`(?m)^      ` + v[1] + `: (\S+)(?:\s+#.*)?$`).FindStringSubmatch(jobText); e != nil {
+						word = e[1]
+					}
 				}
 				if !contains(runnerTargets, word) {
 					bad = append(bad, fmt.Sprintf("step %q runs make %s on the runner", name, word))

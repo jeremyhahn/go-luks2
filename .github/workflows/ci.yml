@@ -1,4 +1,4 @@
-# ci-template: v1.22.1 (customized)
+# ci-template: v1.25 (customized)
 
 name: CI
 
@@ -21,55 +21,76 @@ name: CI
 # ci-template v1.22 (ci-standard.md §6): the stages keep the Go build,
 # golangci-lint and module caches in named volumes on the runner's Docker
 # host, kept across jobs and split by trust class (CI_CACHE_CLASS: `main` for
-# a push to main, `pr` otherwise), never in a job container's writable layer
+# a push to main or the schedule, `pr` otherwise), never in a job container's writable layer
 # or its /tmp. `make ci-trim-caches` bounds the repository's cache volumes on
 # the host (CI_CACHE_MAX_GIB, default 32). CUSTOMIZE: the race, FIPS and
 # merged-tree jobs run their stages through the same recipe, so they take the
 # same CI_CACHE_CLASS.
 #
-# ci-template v1.22.1: the concurrency block is canonical. A newer push to a
-# PR ref still cancels that ref's older run, but a push to main never cancels
-# an in-flight main run: each main commit keeps its run, so every merge is
-# validated. The CUSTOMIZE copy with `cancel-in-progress: true` on every ref,
-# main included, is gone.
+# ci-template v1.22.2 (ci-standard.md §7): each stage runs at the job slot's
+# CPU bound. ci-toolchain-run reads the job container's cgroup cpu.max and
+# gives the stage container that --cpus, with GOMAXPROCS from it; no number is
+# hardcoded here or in the Makefile.
+#
+# ci-template v1.23 (ci-standard.md §9): the integration image is named by its
+# content, go-luks2-ci-it:<hash> (`make -s it-image`), built once per runner
+# and reused by every job and run of that tree. No job removes it: each job
+# holds a lease on it (a created, never started container), and
+# `make ci-reap-stacks` removes an image older than REAP_IMAGE_MIN_AGE that no
+# container uses.
+#
+# ci-template v1.25: the concurrency block is canonical. On main the group is
+# the workflow and the event, so a push to main cancels the in-progress main
+# push run of an older commit, and the newest run validates every merge under
+# it; a schedule or workflow_dispatch run cancels only an older run of its own
+# event. Every other ref is one group, so a PR's newer run cancels the older.
 #
 # The forge credentials are masked first in every job that has them, and
 # reach an image build only as the gomodauth BuildKit secret, from a file
 # outside the context that the job removes. No step prints that file, the job
 # environment or a matched line; test/ci/workflows asserts it.
 #
-# ACROSS runs, supersession (#136): the self-hosted host exposes no REST route
-# to cancel a run, so the `concurrency` block below cancels a PR ref's run the
-# moment a newer head lands on it; a main run is never cancelled.
+# ACROSS runs, supersession: the self-hosted host exposes no REST route to
+# cancel a run, so the `concurrency` block below is what sheds a superseded
+# run.
 #
-# TWO TIERS, ONE GATE (#341, #343, sdlc §5a). CUSTOMIZE: the template's
-# integration job is the only one it lets a repo move to the full tier.
+# THREE TIERS, ONE GATE (ci-standard.md §8, sdlc §5a).
 #
-#   PR tier    every event: Devcontainer image, Merged Tree and Architecture
-#              Gates. The image job runs lint, the build-tag assertion, build,
-#              test, security (gosec, govulncheck, go mod verify, trivy's
-#              filesystem scan) and deps-check in the toolchain image built at
-#              this commit, and with them the linux binaries, the 32-bit vet,
-#              the unit legs (no -race) and their coverage gate, the
-#              calibration tests and the releasability and API gates -- and
-#              trivy image on the integration image.
-#   Full tier  push to main, workflow_dispatch, and a pull_request labelled
-#              `ci:full`: Integration, Race (the -race unit run with its
-#              pkg/luks2 budget) and FIPS, each its own job in the image.
+#   PR tier    every event: Changed files, Devcontainer image, Merged Tree,
+#              Architecture Gates and Race. The image job runs lint, the
+#              build-tag assertion, build and test in the toolchain image
+#              built at this commit, and with them the linux binaries, the
+#              32-bit vet, the unit legs (no -race) and their coverage gate,
+#              the calibration tests and the releasability and API gates.
+#              Race is the -race unit run with its pkg/luks2 budget. A PR
+#              whose every changed file matches DOCS_ONLY_PATTERN skips the
+#              build, the tag assertion and the unit runs; lint and the gates
+#              that read the docs still run.
+#   Full tier  push to main, the nightly schedule, workflow_dispatch, and a
+#              pull_request labelled `ci:full`: the PR tier plus Integration
+#              and FIPS, each its own job in the image, and the image job's
+#              security (gosec, govulncheck, go mod verify, trivy's filesystem
+#              scan), deps-check and trivy image steps.
+#   Nightly    the schedule and workflow_dispatch only: the full tier plus
+#              Soak, the integration suite looped in the integration image
+#              for SOAK_MINUTES.
 #
 # CI Gate, the single required check, needs EVERY job and reads each by name,
-# tagged `pr` or `full`. A `full` job may be skipped only while the full tier
-# is not selected; any other skip, and every failure or cancellation, fails it.
+# tagged `pr`, `full` or `nightly`. A `full` job may be skipped only while the
+# full tier is not selected, a `nightly` job only off the schedule and
+# dispatch; any other skip, and every failure or cancellation, fails it.
 #
-# No CI workflow is scheduled: the nightly full run is a workflow_dispatch,
-# which this file treats exactly like a push to main. nightly.yml,
-# dispatch-only, still runs trivy's filesystem scan, uploads its SARIF to code
-# scanning on github.com, and runs the advisory misconfiguration scan.
+# Exactly one CI workflow is scheduled, this one: main's full tier and Soak
+# run nightly as well as after every merge. nightly.yml and batch.yml stay
+# dispatch-only; nightly.yml still runs trivy's filesystem scan, uploads its
+# SARIF to code scanning on github.com, and runs the advisory
+# misconfiguration scan.
 #
-# Every full-tier job, and CI Gate's FULL_TIER, carries the SAME condition,
-# written out on each, and test/ci/workflows asserts they stay identical:
+# The full tier is CI_FULL_TIER below. A job-level `if:` cannot read env, so
+# every full-tier job repeats its expression, and test/ci/workflows asserts
+# they stay identical:
 #
-#   push or workflow_dispatch                  -> full tier
+#   push, schedule or workflow_dispatch        -> full tier
 #   pull_request labelled ci:full              -> full tier
 #
 # LABEL EVENTS DO NOT RUN CI. ci.yml does not fire on `labeled`: on this host
@@ -95,13 +116,20 @@ on:
   # Lets a run be repeated without inventing a commit, which matters when a
   # failure is the runner's rather than the code's.
   workflow_dispatch:
+  # v1.23: main's full tier nightly as well as after every merge. Scheduled
+  # runs are on the default branch. CUSTOMIZE: the hour, off nightly.yml's.
+  schedule:
+    - cron: '0 4 * * *'
 
-# One group per ref (v1.22.1). On a PR ref the newer run cancels the older; on
-# main nothing is cancelled, and a newer main run waits for the older one, so
-# no main commit loses its run. Never set `cancel-in-progress: true` on main.
+# v1.25: on main the group is the workflow and the event, so a push to main
+# cancels the in-progress main push run of an older commit, and a schedule or
+# workflow_dispatch run cancels only an older run of its own event. Every
+# other ref is one group, so a PR's newer run cancels the older. No expression
+# reaches cancel-in-progress: the self-hosted host never released a main run
+# queued behind one that set it to an expression.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -113,6 +141,14 @@ env:
   # `integration`; lint, gosec and the assertion below read it, never the
   # unit run (the Makefile's GO_BUILD_TAGS block says why).
   GO_BUILD_TAGS: "integration"
+  # v1.23: the full tier (ci-standard.md §8). Every event but pull_request
+  # (push to main, schedule, workflow_dispatch), and a PR labelled ci:full.
+  # Steps read it as env.CI_FULL_TIER; a job-level `if:` cannot read env, so
+  # the integration job repeats this expression. Keep them equal.
+  CI_FULL_TIER: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
+  # v1.24: the files a docs-only PR may touch. CUSTOMIZE: narrow it
+  # in a repo that embeds or generates from docs/ (go:embed, OpenAPI, protos).
+  DOCS_ONLY_PATTERN: '(\.md$|^docs/)'
 
   # ANALYSIS TOOL PINS (#21, #44). CUSTOMIZE: the image builds golangci-lint,
   # gosec and govulncheck from build/docker/devcontainer/tool-pins.env; the
@@ -126,6 +162,37 @@ env:
 jobs:
   # ---- PR tier ----
   #
+  # v1.24: is every file this PR changes markdown or under docs/? Off a PR,
+  # and on a PR in the full tier, the answer is no without a diff.
+  changes:
+    name: Changed files
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.diff.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: ${{ github.event_name == 'pull_request' && env.CI_FULL_TIER != 'true' }}
+        with:
+          fetch-depth: 0
+      - name: Is every changed file docs or markdown?
+        id: diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          docs_only=false
+          if [ "$EVENT" = pull_request ] && [ "$CI_FULL_TIER" != true ]; then
+            if files=$(git diff --name-only --no-renames "$BASE...$HEAD") && [ -n "$files" ]; then
+              if ! printf '%s\n' "$files" | grep -qvE "$DOCS_ONLY_PATTERN"; then
+                docs_only=true
+              fi
+              printf '%s\n' "$files"
+            fi
+          fi
+          echo "docs only: $docs_only"
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+
   # The image job builds both devcontainer images once (`make docker-build`)
   # and runs each stage as its own step; `if: !cancelled()` runs every stage
   # after a failed one, so one run reports them all. make security and make
@@ -136,20 +203,25 @@ jobs:
   # bridge stage the module cache volume, from the runner's Docker host
   # (ci-toolchain-run, ci-standard.md §6), so a stage writes its caches there
   # and not into its container's layer.
+  #
+  # v1.23: lint, assert-build-tags, build and the unit runs are the PR tier and
+  # run on every event. security, deps-check and trivy image are full tier only
+  # (env.CI_FULL_TIER): main after every merge, nightly, dispatch, ci:full.
+  # v1.24: on a docs-only PR the build, the tag assertion and the unit runs
+  # skip.
   image:
     name: Devcontainer image [lint, build, test, security, deps-check, trivy image]
     # bigdisk: the runners whose disks hold the toolchain and integration
     # images this job builds.
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    needs: changes             # v1.24
     timeout-minutes: 120
     env:
       # v1.22: the cache volumes' trust class. Only a push to main writes the
       # caches main's build reads; every other event, pull requests included,
-      # gets the `pr` set (ci-standard.md §6).
-      CI_CACHE_CLASS: ${{ github.event_name == 'push' && 'main' || 'pr' }}
-      # Set from the job, the integration image is kept for the scan below
-      # and removed at teardown.
-      IT_IMAGE: go-luks2-ci-it:${{ github.run_id }}-${{ github.run_attempt }}-image
+      # gets the `pr` set (ci-standard.md §6). v1.23: the nightly schedule runs
+      # on main, so it writes main's set too.
+      CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'main' || 'pr' }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -169,6 +241,13 @@ jobs:
       - name: Reap stale CI stacks
         run: make ci-reap-stacks
 
+      # v1.23: the integration image is named by its content,
+      # go-luks2-ci-it:<hash> (`make -s it-image`, ci-standard.md §9), so every
+      # job of every run on this runner names the same image for the same
+      # tree, builds it once and reuses it. No job removes it; the reap step does.
+      - name: Name the integration image
+        run: echo "IT_IMAGE=$(make -s it-image)" >> "$GITHUB_ENV"
+
       - name: Build the devcontainer images
         run: |
           ( umask 077; : > "$RUNNER_TEMP/gomodauth.env"
@@ -178,6 +257,20 @@ jobs:
           make docker-build MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE"
           rm -f "$RUNNER_TEMP/gomodauth.env"
           echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
+
+      # v1.23: a lease on the integration image. A reused image can be older
+      # than REAP_IMAGE_MIN_AGE, so its age alone does not keep another run's
+      # reap step off it while this job needs it. A created, never-started
+      # container that names the image holds it, because `docker image rm`
+      # refuses an image a container uses. Tear down removes the lease; one a
+      # dead job leaves behind is a stale container, which the reap step
+      # removes after the job timeout like any other.
+      - name: Lease the integration image
+        run: |
+          if docker image inspect "$IT_IMAGE" >/dev/null 2>&1; then
+            lease="go-luks2-ci-lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+            docker create --name "$lease" "$IT_IMAGE" true >/dev/null && echo "IT_LEASE=$lease" >> "$GITHUB_ENV"
+          fi
 
       # v1.22: bound this repo's cache volumes on the host before the stages
       # add to them (ci-standard.md §6). It never fails the job. CUSTOMIZE:
@@ -204,18 +297,18 @@ jobs:
       # removal: if dropping it changes no selected file (tests included), it
       # is misspelled or dead.
       - name: Assert every build tag selects code (toolchain image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.GO_BUILD_TAGS != '' && needs.changes.outputs.docs_only != 'true' }}
         run: make ci-toolchain-run CMD="make assert-build-tags GO_BUILD_TAGS='$GO_BUILD_TAGS'"
 
       - name: make build (toolchain image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.changes.outputs.docs_only != 'true' }}
         run: make ci-toolchain-run CMD="make build"
 
       # The linux/amd64 and linux/arm64 CLI, -trimpath, as the binaries
       # artifact; and the 32-bit compile-only leg (the reasoning is at
       # vet-32bit in the Makefile).
       - name: Linux binaries and 32-bit vet (toolchain image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.changes.outputs.docs_only != 'true' }}
         run: make ci-toolchain-run CMD="make build-linux vet-32bit" CI_OUT="luks-linux-amd64 luks-linux-arm64"
 
       # upload-artifact v4+ refuses any server that is not github.com. The
@@ -228,22 +321,22 @@ jobs:
           path: luks-linux-*
 
       - name: make test (toolchain image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.changes.outputs.docs_only != 'true' }}
         run: make ci-toolchain-run CMD="make test"
 
       # CUSTOMIZE, in place of the template's `make coverage`: the unit legs
-      # run uninstrumented on the PR tier and their per-package gate reads
-      # coverage-floors.txt, because the raced run's pkg/luks2 budget is the
-      # full tier's Race job (#341). The legs and the gate share ONE container:
+      # run uninstrumented here and their per-package gate reads
+      # coverage-floors.txt, because the raced run, with its pkg/luks2 budget,
+      # is the Race job. The legs and the gate share ONE container:
       # the gate reads the profiles the legs write.
       - name: Unit legs and coverage gate, no -race (toolchain image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.changes.outputs.docs_only != 'true' }}
         run: make ci-toolchain-run CMD="make test-unit-norace UNIT_TEST_FLAGS=-v && make coverage-gate" CI_OUT=coverage.out
 
       # RLIMIT_MEMLOCK turns a correct design into a red suite below 512 KiB.
       # Read in the image, under the limits ci-toolchain-run sets.
       - name: Record the resource limits these tests ran under (toolchain image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.changes.outputs.docs_only != 'true' }}
         run: make ci-toolchain-run CMD="echo 'RLIMIT_MEMLOCK (KiB), nproc, /tmp:' && ulimit -l && nproc && df -h /tmp"
 
       - name: Upload coverage
@@ -256,7 +349,7 @@ jobs:
       # WITHOUT -race, deliberately, and with the calibration BENCHMARKS: the
       # PBKDF2 calibration defect (#52) is invisible under -race.
       - name: PBKDF2 calibration tests, no -race (toolchain image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.changes.outputs.docs_only != 'true' }}
         run: make ci-toolchain-run CMD="make test-calibration"
 
       # Over this checkout's git index: a fleet address, hostname or owner
@@ -269,19 +362,19 @@ jobs:
       # The pkg/luks2 API must honor every disposition in
       # test/tools/apidump/baseline/disposition-luks2.tsv exactly.
       - name: API-diff gate (toolchain image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.changes.outputs.docs_only != 'true' }}
         run: make ci-toolchain-run CMD="make api-diff"
 
       # gosec, govulncheck, go mod verify and trivy's filesystem scan; the target owns gosec's
       # flags and its worker bound. Nothing is uploaded to code scanning.
       - name: make security (toolchain image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER == 'true' }}
         env:
           IN_IMAGE_NETWORK: bridge
         run: make ci-toolchain-run CMD="make security GO_BUILD_TAGS='$GO_BUILD_TAGS'"
 
       - name: make deps-check (toolchain image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER == 'true' }}
         env:
           IN_IMAGE_NETWORK: bridge
         run: make ci-toolchain-run CMD="make deps-check"
@@ -290,7 +383,7 @@ jobs:
       # (v1.19) and --skip-dirs /opt/go/mod (v1.20). trivy's filesystem scan and make
       # security never take --ignore-unfixed.
       - name: trivy image (integration image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER == 'true' }}
         env:
           IN_IMAGE_NETWORK: bridge
         run: |
@@ -302,7 +395,7 @@ jobs:
         if: always()
         run: |
           rm -f "$RUNNER_TEMP/gomodauth.env" it-image.tar
-          docker image rm "$IT_IMAGE" || true
+          [ -z "${IT_LEASE:-}" ] || docker rm "$IT_LEASE" >/dev/null || true
 
   # THE MERGE RESULT, which nothing else in this pipeline looks at. CUSTOMIZE:
   # a job of the integration job's shape. Every other check reads the BRANCH
@@ -319,7 +412,7 @@ jobs:
     timeout-minutes: 60
     env:
       # CUSTOMIZE (v1.22): the image job's cache class, for its stage.
-      CI_CACHE_CLASS: ${{ github.event_name == 'push' && 'main' || 'pr' }}
+      CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'main' || 'pr' }}
     steps:
       # Full history: merge-tree needs the base branch.
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -411,8 +504,8 @@ jobs:
 
   # ---- Full tier ----
   #
-  # The condition is the same on every full-tier job and on CI Gate's
-  # FULL_TIER; the table at the top of this file reads it out.
+  # Every full-tier job's `if:` is CI_FULL_TIER's expression, and CI Gate
+  # reads env.CI_FULL_TIER; the table at the top of this file reads it out.
 
   # CUSTOMIZE (ci-template v1.18): the suite runs in the devcontainer
   # `integration` image built at this commit, as the compose service in
@@ -420,17 +513,18 @@ jobs:
   # test/tools/docker-run's privilege set and no more -- a test pins the two
   # equal -- because the suite drives host device-mapper and loop devices. The
   # compose project is go-luks2-ci-<run>-<attempt>, the reaper runs first, and
-  # the teardown runs last under if: always(). Every name is unique to the job
-  # attempt (#105). The ledger directory (TEST_STATE_DIR) is bind-mounted from
-  # the runner host and deliberately persists between jobs (#96).
+  # the teardown runs last under if: always(). Every project and container
+  # name is unique to the job attempt; the integration image is the run's
+  # content-addressed one, leased and never removed here. The ledger directory
+  # (TEST_STATE_DIR) is bind-mounted from the runner host and deliberately
+  # persists between jobs.
   integration:
     name: Integration [integration image]
+    if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     timeout-minutes: 120
     env:
       IT_PROJECT: go-luks2-ci-${{ github.run_id }}-${{ github.run_attempt }}
-      IT_IMAGE: go-luks2-ci-it:${{ github.run_id }}-${{ github.run_attempt }}
       ITEST_CONTAINER: go-luks2-ci-${{ github.run_id }}-${{ github.run_attempt }}-itest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -446,6 +540,18 @@ jobs:
 
       - name: Reap stale CI stacks
         run: make ci-reap-stacks
+
+      # v1.23: the content-addressed integration image (as in the image job).
+      - name: Name the integration image
+        run: echo "IT_IMAGE=$(make -s it-image)" >> "$GITHUB_ENV"
+
+      # v1.23: a lease on the integration image (as in the image job).
+      - name: Lease the integration image
+        run: |
+          if docker image inspect "$IT_IMAGE" >/dev/null 2>&1; then
+            lease="go-luks2-ci-lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+            docker create --name "$lease" "$IT_IMAGE" true >/dev/null && echo "IT_LEASE=$lease" >> "$GITHUB_ENV"
+          fi
 
       - name: Write the module credential file
         run: |
@@ -471,7 +577,7 @@ jobs:
           docker rm -f "$ITEST_CONTAINER" >/dev/null 2>&1 || true
           GO_LUKS2_IT_IMAGE="$IT_IMAGE" GO_LUKS2_SECCOMP_PROFILE=unused GO_LUKS2_DM_MAJOR=0 GO_LUKS2_TEST_STATE_DIR=/unused \
             docker compose -f build/docker/devcontainer/compose.yaml -p "$IT_PROJECT" down --volumes || true
-          docker image rm "$IT_IMAGE" || true
+          [ -z "${IT_LEASE:-}" ] || docker rm "$IT_LEASE" >/dev/null || true
 
       - name: Upload integration coverage
         if: always() && github.server_url == 'https://github.com'
@@ -481,20 +587,112 @@ jobs:
           path: coverage-integration.out
           if-no-files-found: error
 
-  # CUSTOMIZE: THE RACE LEGS (#341), a job of the integration job's shape in
+  # Soak (v1.23): the integration suite looped in the integration image until
+  # SOAK_MINUTES have passed, each iteration its own compose stack, torn down
+  # before the next; the first red iteration fails the job. v1.24: nightly
+  # and workflow_dispatch only, off main pushes and off ci:full; the Gate marks
+  # it `nightly`. It replaces nothing in batch.yml, whose soak stays a dispatch.
+  # CUSTOMIZE: each iteration's container is named under the project, as in
+  # the integration job, and removed with it.
+  soak:
+    name: Soak [integration image]
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    timeout-minutes: 90       # CUSTOMIZE: SOAK_MINUTES plus one iteration
+    env:
+      SOAK_MINUTES: 30        # CUSTOMIZE
+      SOAK_TARGET: integration-test   # CUSTOMIZE: a make target of the integration image
+      IT_PROJECT: go-luks2-ci-${{ github.run_id }}-${{ github.run_attempt }}-soak
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Mask the forge credentials
+        run: |
+          for v in GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+            val=${!v:-}
+            [ -n "$val" ] || continue
+            echo "::add-mask::$val"
+            case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
+          done
+
+      - name: Reap stale CI stacks
+        run: make ci-reap-stacks
+
+      # v1.23: the content-addressed integration image (as in the image job).
+      - name: Name the integration image
+        run: echo "IT_IMAGE=$(make -s it-image)" >> "$GITHUB_ENV"
+
+      # v1.23: a lease on the integration image (as in the image job).
+      - name: Lease the integration image
+        run: |
+          if docker image inspect "$IT_IMAGE" >/dev/null 2>&1; then
+            lease="go-luks2-ci-lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+            docker create --name "$lease" "$IT_IMAGE" true >/dev/null && echo "IT_LEASE=$lease" >> "$GITHUB_ENV"
+          fi
+
+      - name: Write the module credential file
+        run: |
+          umask 077
+          : > "$RUNNER_TEMP/gomodauth.env"
+          for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+            if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
+          done
+
+      # compose interpolates the whole file even to take it down; the
+      # placeholders are the integration job's.
+      - name: Soak (integration suite, looped)
+        run: |
+          deadline=$(( $(date +%s) + SOAK_MINUTES * 60 ))
+          i=0
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            i=$((i + 1))
+            p="$IT_PROJECT-$i"
+            echo "$p" > "$RUNNER_TEMP/soak-project"
+            echo "soak iteration $i"
+            rc=0
+            make "$SOAK_TARGET" MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_PROJECT="$p" ITEST_CONTAINER="$p-itest" IT_IMAGE="$IT_IMAGE" GO_BUILD_TAGS="$GO_BUILD_TAGS" || rc=$?
+            docker rm -f "$p-itest" >/dev/null 2>&1 || true
+            GO_LUKS2_IT_IMAGE="$IT_IMAGE" GO_LUKS2_SECCOMP_PROFILE=unused GO_LUKS2_DM_MAJOR=0 GO_LUKS2_TEST_STATE_DIR=/unused \
+              docker compose -f build/docker/devcontainer/compose.yaml -p "$p" down --volumes || true
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::soak iteration $i failed (exit $rc)"
+              exit "$rc"
+            fi
+          done
+          echo "soak: $i iterations in $SOAK_MINUTES min, all green"
+
+      - name: Tear down
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/gomodauth.env"
+          if [ -s "$RUNNER_TEMP/soak-project" ]; then
+            p=$(cat "$RUNNER_TEMP/soak-project")
+            docker rm -f "$p-itest" >/dev/null 2>&1 || true
+            GO_LUKS2_IT_IMAGE="$IT_IMAGE" GO_LUKS2_SECCOMP_PROFILE=unused GO_LUKS2_DM_MAJOR=0 GO_LUKS2_TEST_STATE_DIR=/unused \
+              docker compose -f build/docker/devcontainer/compose.yaml -p "$p" down --volumes || true
+          fi
+          rm -f "$RUNNER_TEMP/soak-project"
+          [ -z "${IT_LEASE:-}" ] || docker rm "$IT_LEASE" >/dev/null || true
+
+  # ---- PR tier, continued ----
+  #
+  # CUSTOMIZE: THE RACE LEGS, a job of the integration job's shape in
   # the toolchain image, through the Makefile so that this job and a
   # developer's `make test-unit` run the same commands under the same two
   # numbers (#92): UNIT_TEST_TIMEOUT, the ceiling that fails the run, and
   # UNIT_TEST_TARGET, the budget for ./pkg/luks2 under -race. What is raced is
-  # the DEFAULT tag set; coverage is GATED on the PR tier's uninstrumented run.
+  # the DEFAULT tag set; coverage is GATED on the image job's uninstrumented
+  # run. v1.23: a repo's race job is the PR tier (`pr` in CI Gate, no tier
+  # `if:`); v1.24: on a docs-only PR its steps skip, as the image job's unit
+  # runs do.
   test-race:
     name: Race
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    needs: changes
     timeout-minutes: 60
     env:
       # CUSTOMIZE (v1.22): the image job's cache class, for its stage.
-      CI_CACHE_CLASS: ${{ github.event_name == 'push' && 'main' || 'pr' }}
+      CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'main' || 'pr' }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -511,6 +709,7 @@ jobs:
         run: make ci-reap-stacks
 
       - name: Build the toolchain image
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           ( umask 077; : > "$RUNNER_TEMP/gomodauth.env"
             for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
@@ -520,6 +719,7 @@ jobs:
           rm -f "$RUNNER_TEMP/gomodauth.env"
 
       - name: Unit tests, -race (toolchain image)
+        if: needs.changes.outputs.docs_only != 'true'
         run: make ci-toolchain-run CMD="make test-unit UNIT_TEST_FLAGS=-v"
 
       - name: Tear down
@@ -541,11 +741,11 @@ jobs:
   fips:
     name: FIPS
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
     timeout-minutes: 30
     env:
       # CUSTOMIZE (v1.22): the image job's cache class, for its stage.
-      CI_CACHE_CLASS: ${{ github.event_name == 'push' && 'main' || 'pr' }}
+      CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'main' || 'pr' }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -577,54 +777,64 @@ jobs:
         if: always()
         run: rm -f "$RUNNER_TEMP/gomodauth.env"
 
-  # THE ONE GATE, and the single required check (#343). It needs EVERY job
-  # above, in both tiers, and reads each by name on a `check` line tagged `pr`
-  # or `full`; test/ci/workflows derives the tags from the jobs' `if:` and
+  # THE ONE GATE, and the single required check. It needs EVERY job above, in
+  # every tier, and reads each by name on a `check` line tagged `pr`, `full`
+  # or `nightly`; test/ci/workflows derives the tags from the jobs' `if:` and
   # fails on a job left out or mis-tagged.
   #
-  #   success                         passes
-  #   skipped, `full`, tier not run   passes: the full tier was not selected
-  #   skipped, anything else          fails: a job that never ran proved nothing
-  #   failure, cancelled, unreadable  fails
+  #   success                              passes
+  #   skipped, `full`, tier not run        passes: the full tier was not selected
+  #   skipped, `nightly`, not nightly      passes: neither schedule nor dispatch
+  #   skipped, anything else               fails: a job that never ran proved nothing
+  #   failure, cancelled, unreadable       fails
   #
-  # CUSTOMIZE: FULL_TIER is validated, so an unevaluated expression is not a
-  # "no", and an empty result reads `<unreadable>`. Do not use
-  # join(needs.*.result); it evaluates empty on Gitea. It runs on the ci-gate
-  # runners, one CPU each, so it takes no checkout: one run step.
+  # CUSTOMIZE: FULL_TIER and NIGHTLY are validated, so an unevaluated
+  # expression is not a "no", and an empty result reads `<unreadable>`. Do not
+  # use join(needs.*.result); it evaluates empty on Gitea. It runs on the
+  # ci-gate runners, one CPU each, so it takes no checkout: one run step.
   ci-gate:
     name: CI Gate
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ci-gate' }}
     if: always()
-    needs: [image, integration, arch-gates, merge-check, test-race, fips]
+    needs: [changes, image, integration, soak, arch-gates, merge-check, test-race, fips]
     steps:
       - name: Fail closed on any non-success
         env:
-          FULL_TIER: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
+          FULL_TIER: ${{ env.CI_FULL_TIER }}
+          NIGHTLY: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         run: |
           BAD=0
-          echo "full tier selected: ${FULL_TIER}"
+          echo "full tier selected: ${FULL_TIER}; nightly: ${NIGHTLY}"
           case "${FULL_TIER}" in
             true|false) ;;
             *) echo "FAIL FULL_TIER is '${FULL_TIER}', neither true nor false"; exit 1;;
           esac
-          check() { # <job> <result> <pr|full>
+          case "${NIGHTLY}" in
+            true|false) ;;
+            *) echo "FAIL NIGHTLY is '${NIGHTLY}', neither true nor false"; exit 1;;
+          esac
+          check() { # <job> <result> <pr|full|nightly>
             case "$2" in
               success) echo "OK   $1";;
               skipped)
                 if [ "$3" = full ] && [ "${FULL_TIER}" != true ]; then
                   echo "SKIP $1 (full tier not selected)"
+                elif [ "$3" = nightly ] && [ "${NIGHTLY}" != true ]; then
+                  echo "SKIP $1 (nightly and dispatch only)"
                 else
                   echo "FAIL $1 (skipped)"; BAD=1
                 fi;;
               *) echo "FAIL $1 (${2:-<unreadable>})"; BAD=1;;
             esac
           }
+          check changes     "${{ needs.changes.result }}" pr
           check image       "${{ needs.image.result }}" pr
           check arch-gates  "${{ needs.arch-gates.result }}" pr
           check merge-check "${{ needs.merge-check.result }}" pr
+          check test-race   "${{ needs.test-race.result }}" pr
           check integration "${{ needs.integration.result }}" full
-          check test-race   "${{ needs.test-race.result }}" full
           check fips        "${{ needs.fips.result }}" full
+          check soak        "${{ needs.soak.result }}" nightly
           if [ "$BAD" -ne 0 ]; then
             echo "CI gate failed: not every job reported success."
           else

@@ -2,9 +2,13 @@ package makefile
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The CI recipes -- ci-toolchain-run, ci-reap-stacks and the compose
@@ -22,13 +26,22 @@ import (
 //     records the GO_LUKS2_* values it was started with;
 //   - `rm`, `network rm` and `volume rm` exit FAKE_RM_RC;
 //   - `ps`, `inspect`, `network ls` and `volume ls` answer from the reaper
-//     fixture: see TestCIReapStacks.
+//     fixture: see TestCIReapStacks;
+//   - `images` lists the reaper's image fixture and `image inspect` dates it
+//     (created, then last tagged); go-luks2-ci-it:held is a held image, every
+//     other name absent; `image rm` exits FAKE_RM_RC.
+//
+// Its "now" is FAKE_NOW (Unix seconds), which ciDockerEnv reads before make
+// starts, never the clock at the call: the recipe reads its own clock first,
+// and a stand-in clock that has since crossed a second would date a fresh
+// container or image after the recipe's now, so a zero minimum age keeps it.
 const ciDocker = `#!/bin/sh
 log="$FAKE_DOCKER_LOG"
 printf '%s\n' "$*" >> "$log"
 [ -z "${FAKE_DOCKER_FAIL:-}" ] || { echo "Cannot connect to the Docker daemon" >&2; exit 1; }
 old=2000-01-01T00:00:00Z
-new=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+now=${FAKE_NOW:?FAKE_NOW unset}
+new=$(date -u -d "@$now" +%Y-%m-%dT%H:%M:%SZ)
 never=0001-01-01T00:00:00Z
 case "$1" in
 cp)
@@ -37,6 +50,23 @@ cp)
 	printf 'mode: atomic\nexample.com/fake/f.go:1.1,2.2 1 1\n' > "$3" ;;
 start) exit "${FAKE_START_RC:-0}" ;;
 rm) exit "${FAKE_RM_RC:-0}" ;;
+images) printf '%s\n' go-luks2-ci-it:old go-luks2-ci-it:retagged go-luks2-ci-it:fresh go-luks2-ci-itx:old ;;
+image)
+	case "$2" in
+	rm) exit "${FAKE_RM_RC:-0}" ;;
+	inspect)
+		case "$*" in
+		*"{{.Created}}"*)
+			case "$5" in
+			*:old) echo "$old -62135596800" ;;
+			*:retagged) echo "$old $now" ;;
+			*:fresh) echo "$new -62135596800" ;;
+			*) exit 1 ;;
+			esac ;;
+		*" go-luks2-ci-it:held") exit 0 ;;
+		*) exit 1 ;;
+		esac ;;
+	esac ;;
 compose)
 	case " $* " in *" run "*)
 		printf 'env image=%s seccomp=%s major=%s state=%s\n' "$GO_LUKS2_IT_IMAGE" \
@@ -107,13 +137,14 @@ func ciDockerEnv(t *testing.T, set map[string]string) (env []string, log string)
 	all := map[string]string{
 		"PATH":            bin + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"FAKE_DOCKER_LOG": log,
+		"FAKE_NOW":        strconv.FormatInt(time.Now().Unix(), 10),
 	}
 	for k, v := range set {
 		all[k] = v
 	}
 	drop := []string{"GOPRIVATE", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
 		"IN_IMAGE_NETWORK", "REAP_MIN_AGE", "REAP_DRY_RUN", "MODULE_ENV_FILE", "CI_OUT", "CI_OUT_DIR",
-		"CI_CACHE", "CI_CACHE_CLASS", "CI_CACHE_MAX_GIB"}
+		"CI_CACHE", "CI_CACHE_CLASS", "CI_CACHE_MAX_GIB", "REAP_IMAGE_MIN_AGE", "IN_IMAGE_CPUS"}
 	return environ(drop, all), log
 }
 
@@ -457,6 +488,187 @@ func TestCIToolchainRunRefusesABadCacheSetting(t *testing.T) {
 	}
 }
 
+// ci-template v1.22.2 (in-toolchain-image.sh v3, ci-standard.md §7): the stage
+// container takes the job container's CPU bound from its cgroup's cpu.max,
+// rounded up, or nproc when the job has no quota; IN_IMAGE_CPUS overrides.
+// GOMAXPROCS follows it. CUSTOMIZE: no GOFLAGS=-p=N -- the image's GOFLAGS
+// carries -mod=readonly, which a GOFLAGS env would replace, and go's -p
+// defaults to GOMAXPROCS.
+func TestCIToolchainRunTakesTheJobsCPUBound(t *testing.T) {
+	out, err := exec.Command("nproc").Output()
+	if err != nil {
+		t.Fatalf("nproc: %v", err)
+	}
+	nproc := strings.TrimSpace(string(out))
+	for _, tc := range []struct {
+		name, cpuMax, override, want string
+	}{
+		{"quota rounded up", "250000 100000\n", "", "3"},
+		{"whole quota", "400000 100000\n", "", "4"},
+		{"no quota", "max 100000\n", "", nproc},
+		{"no cgroup file", "", "", nproc},
+		{"override", "250000 100000\n", "2", "2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cpuMax := filepath.Join(t.TempDir(), "cpu.max")
+			if tc.cpuMax != "" {
+				if err := os.WriteFile(cpuMax, []byte(tc.cpuMax), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			set := map[string]string{}
+			if tc.override != "" {
+				set["IN_IMAGE_CPUS"] = tc.override
+			}
+			env, log := ciDockerEnv(t, set)
+			runMake(t, env, "-s", "ci-toolchain-run", "CMD=make build",
+				"TOOLCHAIN_IMAGE=example/toolchain:t", "CGROUP_CPU_MAX="+cpuMax)
+			create, ok := called(logLines(t, log), "create ")
+			if !ok {
+				t.Fatal("no docker create")
+			}
+			if !strings.Contains(create, " --cpus "+tc.want+" ") {
+				t.Errorf("docker create lacks --cpus %s:\n%s", tc.want, create)
+			}
+			vars := envVars(create)
+			if vars["GOMAXPROCS"] != tc.want {
+				t.Errorf("GOMAXPROCS=%q, want %s", vars["GOMAXPROCS"], tc.want)
+			}
+			if _, ok := vars["GOFLAGS"]; ok {
+				t.Errorf("the stage's GOFLAGS replaces the image's:\n%s", create)
+			}
+		})
+	}
+	for _, bad := range []string{"0", "abc", "1.5"} {
+		env, log := ciDockerEnv(t, map[string]string{"IN_IMAGE_CPUS": bad})
+		stdout, stderr, err := runMakeErr(t, env, "-s", "ci-toolchain-run", "CMD=make test", "TOOLCHAIN_IMAGE=example/toolchain:t")
+		if err == nil {
+			t.Errorf("IN_IMAGE_CPUS=%s was accepted:\n%s%s", bad, stdout, stderr)
+		}
+		if !strings.Contains(stderr, "IN_IMAGE_CPUS must be a positive integer: "+bad) {
+			t.Errorf("IN_IMAGE_CPUS=%s: the refusal does not say why:\n%s", bad, stderr)
+		}
+		if lines := logLines(t, log); len(lines) != 0 {
+			t.Errorf("IN_IMAGE_CPUS=%s: docker was called:\n%s", bad, strings.Join(lines, "\n"))
+		}
+	}
+}
+
+// ci-standard.md §9: `make -s it-image` prints the integration image's
+// content-addressed name, the same for the same tree and another for another.
+func TestITImageNamesTheTreesContent(t *testing.T) {
+	env := environ([]string{"GO_BUILD_PROXY", "ITEST_IMAGE", "GIT_DIR", "GIT_WORK_TREE"}, map[string]string{
+		"PATH": os.Getenv("PATH"), "GIT_CONFIG_GLOBAL": os.DevNull, "GIT_CONFIG_NOSYSTEM": "1",
+	})
+	repo := itImageTree(t, env, true)
+	name := func() string {
+		t.Helper()
+		stdout, _ := runMakeIn(t, repo, env, "-s", "it-image")
+		return strings.TrimSpace(stdout)
+	}
+	first := name()
+	if !regexp.MustCompile(`^go-luks2-ci-it:[0-9a-f]{16}$`).MatchString(first) {
+		t.Fatalf("it-image printed %q, want go-luks2-ci-it:<16 hex>", first)
+	}
+	if again := name(); again != first {
+		t.Errorf("the same tree is named %s, then %s", first, again)
+	}
+	untracked := filepath.Join(repo, "it-image-probe.txt")
+	if err := os.WriteFile(untracked, []byte("probe\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if dirty := name(); dirty == first {
+		t.Errorf("an untracked file leaves the name at %s", first)
+	}
+	if err := os.WriteFile(untracked, []byte("probe 2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed := name()
+	if err := os.Remove(untracked); err != nil {
+		t.Fatal(err)
+	}
+	if back := name(); back != first {
+		t.Errorf("the tree back as it was is named %s, want %s", back, first)
+	}
+	if changed == first {
+		t.Error("a changed untracked file leaves the name unchanged")
+	}
+
+	// Not a git work tree, as in a published export: no name, git's reason.
+	bare := itImageTree(t, env, false)
+	stdout, stderr, err := runMakeErrIn(t, bare, env, "-s", "it-image")
+	if err == nil {
+		t.Errorf("it-image outside a git work tree succeeded, printing %q", stdout)
+	}
+	if strings.TrimSpace(stdout) != "" {
+		t.Errorf("it-image outside a git work tree printed the name %q", stdout)
+	}
+	if !strings.Contains(stderr, "has no integration image name") || !strings.Contains(stderr, "not a git repository") {
+		t.Errorf("it-image outside a git work tree gave the reason %q, want git's and its own", stderr)
+	}
+}
+
+// itImageTree is a directory under t.TempDir() holding a copy of the Makefile
+// and the files it reads as it parses. With git, it is a repository the test owns, with
+// those files committed: whoever owns repoRoot, and whether it has a .git at
+// all, the test names a tree it can read.
+func itImageTree(t *testing.T, env []string, withGit bool) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, f := range []string{"Makefile", "go.mod", filepath.Join("build", "docker", "devcontainer", "tool-pins.env")} {
+		b, err := os.ReadFile(filepath.Join(repoRoot(t), f)) // #nosec G304 -- a fixed file of this repository
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, f)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, f), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !withGit {
+		return dir
+	}
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"add", "."},
+		{"-c", "user.name=it-image", "-c", "user.email=it-image@example.invalid", "-c", "commit.gpgsign=false",
+			"commit", "-q", "-m", "fixture"},
+	} {
+		cmd := exec.Command(lookPath(t, "git"), args...) // #nosec G204 -- git is resolved from PATH; arguments are test constants
+		cmd.Dir = dir
+		cmd.Env = env
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	return dir
+}
+
+// runMakeIn is runMake with dir as the working directory.
+func runMakeIn(t *testing.T, dir string, env []string, args ...string) (stdout, stderr string) {
+	t.Helper()
+	stdout, stderr, err := runMakeErrIn(t, dir, env, args...)
+	if err != nil {
+		t.Fatalf("make %s in %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), dir, err, stdout, stderr)
+	}
+	return stdout, stderr
+}
+
+// runMakeErrIn is runMakeErr with dir as the working directory.
+func runMakeErrIn(t *testing.T, dir string, env []string, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	cmd := exec.Command(lookPath(t, "make"), args...) // #nosec G204 -- make is resolved from PATH; arguments are test-built
+	cmd.Dir = dir
+	cmd.Env = env
+	var out, errOut strings.Builder
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+	err = cmd.Run()
+	return out.String(), errOut.String(), err
+}
+
 // volumeRemovals is every volume `docker volume rm` was asked to remove.
 func volumeRemovals(lines []string) []string {
 	var out []string
@@ -569,7 +781,7 @@ func TestCITrimCachesNeverFailsTheJob(t *testing.T) {
 func removals(lines []string) []string {
 	var out []string
 	for _, l := range lines {
-		if strings.HasPrefix(l, "rm ") || strings.HasPrefix(l, "network rm ") || strings.HasPrefix(l, "volume rm ") {
+		if strings.HasPrefix(l, "rm ") || strings.HasPrefix(l, "network rm ") || strings.HasPrefix(l, "volume rm ") || strings.HasPrefix(l, "image rm ") {
 			out = append(out, l)
 		}
 	}
@@ -581,7 +793,10 @@ func removals(lines []string) []string {
 // go-luks2-ci-fresh stopped a moment ago; other-old is stale but another
 // project's. Outside compose, c7 is ours and stale, c8 ours and running, c9 a
 // compose container the project pass owns, and c10 a name that merely contains
-// the prefix.
+// the prefix. Of the images (reap-stale-ci-stacks.sh v3, ci-template v1.23.1),
+// go-luks2-ci-it:old was built and tagged long ago, :retagged built long ago
+// but tagged now (a rebuild from a full cache), :fresh built now, and
+// go-luks2-ci-itx:old is another family's.
 func TestCIReapStacksRemovesOnlyThisRepositorysStaleStacks(t *testing.T) {
 	env, log := ciDockerEnv(t, nil)
 	stdout, _ := runMake(t, env, "-s", "ci-reap-stacks")
@@ -591,14 +806,19 @@ func TestCIReapStacksRemovesOnlyThisRepositorysStaleStacks(t *testing.T) {
 		"network rm network-go-luks2-ci-old",
 		"volume rm volume-go-luks2-ci-old",
 		"rm -v c7",
+		"image rm go-luks2-ci-it:old",
 	}, "\n")
 	if got != want {
 		t.Errorf("removed:\n%s\nwant:\n%s\noutput:\n%s", got, want, stdout)
 	}
-	if !strings.Contains(stdout, "reaper: 1 compose project(s) removed for prefix 'go-luks2-ci-'") {
+	if !strings.Contains(stdout, "reaper: 1 compose project(s) and 1 image(s) removed for prefix 'go-luks2-ci-'") {
 		t.Errorf("no summary:\n%s", stdout)
 	}
-	for _, kept := range []string{"keep  go-luks2-ci-live", "keep  go-luks2-ci-fresh"} {
+	if images, ok := called(logLines(t, log), "images "); !ok || !strings.Contains(images, "--filter reference=go-luks2-ci-it ") {
+		t.Errorf("the reaper does not list the integration image family: %q", images)
+	}
+	for _, kept := range []string{"keep  go-luks2-ci-live", "keep  go-luks2-ci-fresh",
+		"keep  image go-luks2-ci-it:retagged", "keep  image go-luks2-ci-it:fresh"} {
 		if !strings.Contains(stdout, kept) {
 			t.Errorf("the output does not say %q:\n%s", kept, stdout)
 		}
@@ -627,16 +847,35 @@ func TestCIReapStacksNeverFailsTheJob(t *testing.T) {
 	env, _ := ciDockerEnv(t, map[string]string{"FAKE_RM_RC": "1"})
 	stdout, _ := runMake(t, env, "-s", "ci-reap-stacks")
 	if !strings.Contains(stdout, "warn  go-luks2-ci-old: container removal failed") ||
-		!strings.Contains(stdout, "warn  container go-luks2-ci-tc-1 not removed") {
+		!strings.Contains(stdout, "warn  container go-luks2-ci-tc-1 not removed") ||
+		!strings.Contains(stdout, "warn  image go-luks2-ci-it:old not removed (in use?)") {
 		t.Errorf("failed removals were not reported:\n%s", stdout)
 	}
 
-	env, log := ciDockerEnv(t, nil)
-	if stdout, stderr, err := runMakeErr(t, env, "-s", "ci-reap-stacks", "REAP_MIN_AGE=3h"); err == nil {
-		t.Errorf("REAP_MIN_AGE=3h was accepted:\n%s%s", stdout, stderr)
+	for _, bad := range []string{"REAP_MIN_AGE=3h", "REAP_IMAGE_MIN_AGE=2h", "REAP_IMAGE_MIN_AGE="} {
+		env, log := ciDockerEnv(t, nil)
+		if stdout, stderr, err := runMakeErr(t, env, "-s", "ci-reap-stacks", bad); err == nil {
+			t.Errorf("%s was accepted:\n%s%s", bad, stdout, stderr)
+		}
+		if lines := logLines(t, log); len(lines) != 0 {
+			t.Errorf("docker was called with %s:\n%s", bad, strings.Join(lines, "\n"))
+		}
 	}
-	if lines := logLines(t, log); len(lines) != 0 {
-		t.Errorf("docker was called with a malformed age:\n%s", strings.Join(lines, "\n"))
+}
+
+// An image younger than REAP_IMAGE_MIN_AGE stays; 0 takes every image no
+// container uses.
+func TestCIReapStacksImageAge(t *testing.T) {
+	env, log := ciDockerEnv(t, nil)
+	runMake(t, env, "-s", "ci-reap-stacks", "REAP_IMAGE_MIN_AGE=0")
+	var images []string
+	for _, l := range removals(logLines(t, log)) {
+		if r, ok := strings.CutPrefix(l, "image rm "); ok {
+			images = append(images, r)
+		}
+	}
+	if want := "go-luks2-ci-it:old go-luks2-ci-it:retagged go-luks2-ci-it:fresh"; strings.Join(images, " ") != want {
+		t.Errorf("REAP_IMAGE_MIN_AGE=0 removed %v, want %s", images, want)
 	}
 }
 
@@ -660,28 +899,67 @@ func integrationRun(t *testing.T, devices string, set map[string]string) (out, l
 	if werr := os.Mkdir(state, 0o700); werr != nil {
 		t.Fatal(werr)
 	}
+	image := "go-luks2-ci-it:t"
+	if v, ok := set["ITEST_IMAGE"]; ok {
+		image = v
+	}
 	env, log := ciDockerEnv(t, set)
 	stdout, stderr, err := runMakeErr(t, env, "-s", "integration-test", "GO="+fakeGo,
 		"PROC_DEVICES="+write("devices", devices),
 		"MODULE_ENV_FILE="+write("gomodauth.env", "GOPRIVATE=example.com/private\n"),
 		"COVERAGE_INTEGRATION="+filepath.Join(dir, "integration.out"),
 		"TEST_STATE_DIR="+state,
-		"IT_PROJECT=go-luks2-ci-t", "ITEST_CONTAINER=go-luks2-ci-t-itest", "ITEST_IMAGE=go-luks2-ci-it:t")
+		"IT_PROJECT=go-luks2-ci-t", "ITEST_CONTAINER=go-luks2-ci-t-itest", "ITEST_IMAGE="+image)
 	return stdout + stderr, log, dir, err
 }
 
 const procDevices = "Character devices:\n  1 mem\n\nBlock devices:\n  7 loop\n253 device-mapper\n"
 
-// teardown checks the trap removed the container, the project and the image.
+// teardown checks the trap removed the container and the project, and kept
+// the content-addressed image every run of this tree reuses (ci-standard.md
+// §9: the reaper ages it out).
 func teardown(t *testing.T, lines []string) {
 	t.Helper()
 	for _, want := range []string{
 		"rm -f go-luks2-ci-t-itest",
 		"compose -f build/docker/devcontainer/compose.yaml -p go-luks2-ci-t down --volumes",
-		"image rm -f go-luks2-ci-it:t",
 	} {
 		if _, ok := called(lines, want); !ok {
 			t.Errorf("no teardown call %q:\n%s", want, strings.Join(lines, "\n"))
+		}
+	}
+	if l, ok := called(lines, "image rm "); ok {
+		t.Errorf("the teardown removed the shared integration image: %s", l)
+	}
+}
+
+// A run-named image is the run's own, and its teardown still removes it.
+func TestIntegrationTestRemovesARunNamedImage(t *testing.T) {
+	out, log, _, err := integrationRun(t, procDevices, map[string]string{"ITEST_IMAGE": "go-luks2-itest:local"})
+	if err != nil {
+		t.Fatalf("make integration-test failed: %v\n%s", err, out)
+	}
+	if _, ok := called(logLines(t, log), "image rm -f go-luks2-itest:local"); !ok {
+		t.Errorf("the run-named image was not removed:\n%s", readLog(t, log))
+	}
+}
+
+// ci-standard.md §9: the build skips when the daemon already holds the
+// content-addressed tag; a missing one, or a run-named image, is built.
+func TestDockerBuildIntegrationSkipsAHeldContentImage(t *testing.T) {
+	mef := filepath.Join(t.TempDir(), "gomodauth.env")
+	if err := os.WriteFile(mef, []byte("GOPRIVATE=example.com/private\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for image, wantBuild := range map[string]bool{
+		"go-luks2-ci-it:held":    false,
+		"go-luks2-ci-it:missing": true,
+		"go-luks2-itest:held":    true,
+	} {
+		env, log := ciDockerEnv(t, nil)
+		runMake(t, env, "-s", "docker-build-integration", "MODULE_ENV_FILE="+mef, "ITEST_IMAGE="+image)
+		if _, built := called(logLines(t, log), "build "); built != wantBuild {
+			t.Errorf("%s: built = %v, want %v:\n%s", image, built, wantBuild, readLog(t, log))
 		}
 	}
 }
