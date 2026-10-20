@@ -1405,8 +1405,9 @@ verify: ## Verify dependencies
 # or third-party, direct or indirect, is behind its latest release with no
 # reason written beside its require or replace line. A held-back module is a
 # decision with its reason in go.mod, printed with the result; anything else
-# is drift. test/tools/depscheck documents what "latest" means and why the
-# check fails closed.
+# is drift. A lag behind a release under 7 days old is reported and does not
+# fail. test/tools/depscheck documents what "latest" means and why the check
+# fails closed.
 #
 # It is the one target that must ask a module host, so it takes its proxy
 # from DEPS_CHECK_GOPROXY when that is set (the toolchain image and the lane
@@ -1415,7 +1416,7 @@ verify: ## Verify dependencies
 # git's GIT_CONFIG_* rewrite to the internal module host. It installs nothing.
 DEPS_CHECK_GOPROXY ?=
 deps-check: export DC_GOPROXY := $(DEPS_CHECK_GOPROXY)
-deps-check: ## Fail when a go.mod module is behind its latest release with no reason written beside it
+deps-check: ## Fail when a go.mod module is behind a latest release 7+ days old with no reason written beside it
 	@echo "$(COLOR_BOLD)Checking every go.mod module against its latest release...$(COLOR_RESET)"
 	@if [ -n "$$DC_GOPROXY" ]; then GOPROXY="$$DC_GOPROXY"; export GOPROXY; fi; \
 	$(GO) run ./test/tools/depscheck || exit 1; \

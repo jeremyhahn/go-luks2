@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeHost serves one go.mod and a fixed answer per module.
@@ -22,18 +23,32 @@ func fakeHost(gomod string, answers map[string]listing, fails map[string]error) 
 			}
 			return []byte(gomod), nil
 		},
-		list: func(module string) (listing, error) {
-			if err, ok := fails[module]; ok {
+		// The `@latest` answer is keyed by the module path, a tag lookup by
+		// "module@tag".
+		list: func(module, query string) (listing, error) {
+			key := module
+			if query != "latest" {
+				key = module + "@" + query
+			}
+			if err, ok := fails[key]; ok {
 				return listing{}, err
 			}
-			l, ok := answers[module]
+			l, ok := answers[key]
 			if !ok {
 				return listing{}, &QueryError{Module: module, Err: errors.New("no answer")}
 			}
 			return l, nil
 		},
+		now: func() time.Time { return testNow },
 	}
 }
+
+// testNow is the fake host's clock; oldRelease is well outside the
+// young-release window.
+var (
+	testNow    = time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	oldRelease = testNow.Add(-30 * 24 * time.Hour)
+)
 
 func runCLI(t *testing.T, h host, args ...string) (int, string, string) {
 	t.Helper()
@@ -104,7 +119,7 @@ func TestDocumentedLagPassesAndPrintsTheReason(t *testing.T) {
 
 func TestUndocumentedLagFails(t *testing.T) {
 	h := fakeHost("module m\n\nrequire (\n\texample.com/a v1.2.0 // indirect\n)\n", map[string]listing{
-		"example.com/a": {Version: "v1.3.0"},
+		"example.com/a": {Version: "v1.3.0", Time: oldRelease},
 	}, nil)
 	code, out, errOut := runCLI(t, h)
 	if code != 1 {
@@ -123,7 +138,8 @@ func TestUndocumentedLagFails(t *testing.T) {
 func TestFirstPartyComparesAgainstEveryTag(t *testing.T) {
 	gomod := "module m\n\nrequire github.com/jeremyhahn/x v0.8.0-rc.2\n"
 	answer := map[string]listing{
-		"github.com/jeremyhahn/x": {Version: "v0.7.0", Versions: []string{"v0.7.0", "v0.8.0-rc.2", "v0.8.0-alpha.1", "v0.9.0-alpha.1"}},
+		"github.com/jeremyhahn/x":                {Version: "v0.7.0", Versions: []string{"v0.7.0", "v0.8.0-rc.2", "v0.8.0-alpha.1", "v0.9.0-alpha.1"}},
+		"github.com/jeremyhahn/x@v0.9.0-alpha.1": {Version: "v0.9.0-alpha.1", Time: oldRelease},
 	}
 	code, out, _ := runCLI(t, fakeHost(gomod, answer, nil))
 	if code != 1 || !strings.Contains(out, "v0.9.0-alpha.1") {
@@ -133,6 +149,113 @@ func TestFirstPartyComparesAgainstEveryTag(t *testing.T) {
 	code, out, _ = runCLI(t, fakeHost(gomod, answer, nil), "-first-party", "example.org/")
 	if code != 0 {
 		t.Fatalf("exit %d, output %q: a third-party prerelease tag must not count", code, out)
+	}
+}
+
+// youngLag is one undocumented module behind a release made at released.
+func youngLag(t *testing.T, released time.Time) (int, string, string) {
+	t.Helper()
+	return runCLI(t, fakeHost("module m\n\nrequire example.com/a v1.2.0\n", map[string]listing{
+		"example.com/a": {Version: "v1.3.0", Time: released},
+	}, nil))
+}
+
+// TestYoungReleaseIsReported: an undocumented lag behind a release under
+// seven days old is reported, not failed.
+func TestYoungReleaseIsReported(t *testing.T) {
+	released := testNow.Add(-(6*24 + 23) * time.Hour)
+	code, out, errOut := youngLag(t, released)
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q: a release under 7 days old must not fail", code, errOut)
+	}
+	if want := "behind, released " + released.Format(time.RFC3339) + " (under 7 days): reported"; !strings.Contains(out, want) {
+		t.Errorf("output %q does not contain %q", out, want)
+	}
+	h := fakeHost("module m\n\nrequire example.com/a v1.2.0\n", map[string]listing{
+		"example.com/a": {Version: "v1.3.0", Time: released},
+	}, nil)
+	if err := run(nil, &bytes.Buffer{}, h); err != nil {
+		t.Errorf("run: %v, want nil", err)
+	}
+}
+
+// TestFutureReleaseIsReported: a release time after the clock counts as young.
+func TestFutureReleaseIsReported(t *testing.T) {
+	if code, out, _ := youngLag(t, testNow.Add(time.Hour)); code != 0 || !strings.Contains(out, "(under 7 days): reported") {
+		t.Fatalf("exit %d, output %q: a future release time must count as young", code, out)
+	}
+}
+
+// TestOldOrUndatedReleaseFails: exactly seven days, older, and a missing
+// release time all fail with a BehindError naming the module.
+func TestOldOrUndatedReleaseFails(t *testing.T) {
+	for name, released := range map[string]time.Time{
+		"exactly 7d": testNow.Add(-youngRelease),
+		"old":        oldRelease,
+		"zero time":  {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			code, out, errOut := youngLag(t, released)
+			if code != 1 || !strings.Contains(out, "BEHIND, UNDOCUMENTED (go.mod:3)") {
+				t.Fatalf("exit %d, output %q: want the lag to fail", code, out)
+			}
+			if !strings.Contains(errOut, "example.com/a v1.2.0 < v1.3.0") {
+				t.Errorf("stderr %q does not name the lag", errOut)
+			}
+			h := fakeHost("module m\n\nrequire example.com/a v1.2.0\n", map[string]listing{
+				"example.com/a": {Version: "v1.3.0", Time: released},
+			}, nil)
+			var be *BehindError
+			if err := run(nil, &bytes.Buffer{}, h); !errors.As(err, &be) {
+				t.Errorf("run: %v, want a BehindError", err)
+			}
+		})
+	}
+}
+
+// TestFirstPartyPrereleaseUsesItsOwnTime: the age of a first-party tag
+// newer than `@latest` is that tag's release time, looked up separately.
+func TestFirstPartyPrereleaseUsesItsOwnTime(t *testing.T) {
+	gomod := "module m\n\nrequire github.com/jeremyhahn/x v0.8.0\n"
+	young := testNow.Add(-time.Hour)
+	listings := func(tagTime time.Time) map[string]listing {
+		return map[string]listing{
+			"github.com/jeremyhahn/x":                {Version: "v0.8.0", Time: oldRelease, Versions: []string{"v0.8.0", "v0.9.0-alpha.1"}},
+			"github.com/jeremyhahn/x@v0.9.0-alpha.1": {Version: "v0.9.0-alpha.1", Time: tagTime},
+		}
+	}
+	if code, out, _ := runCLI(t, fakeHost(gomod, listings(young), nil)); code != 0 || !strings.Contains(out, "(under 7 days): reported") {
+		t.Fatalf("exit %d, output %q: a young prerelease tag must be reported", code, out)
+	}
+	// @latest is young but the newer tag is old: the tag's time decides.
+	old := listings(oldRelease)
+	l := old["github.com/jeremyhahn/x"]
+	l.Version, l.Time = "v0.7.0", young
+	old["github.com/jeremyhahn/x"] = l
+	gomod = "module m\n\nrequire github.com/jeremyhahn/x v0.7.0\n"
+	if code, out, _ := runCLI(t, fakeHost(gomod, old, nil)); code != 1 {
+		t.Fatalf("exit %d, output %q: an old prerelease tag must fail", code, out)
+	}
+	// The tag lookup failing fails closed.
+	fails := map[string]error{"github.com/jeremyhahn/x@v0.9.0-alpha.1": &QueryError{Module: "github.com/jeremyhahn/x", Err: errors.New("down")}}
+	if code, out, _ := runCLI(t, fakeHost(gomod, old, fails)); code != 1 || !strings.Contains(out, "ERROR") {
+		t.Fatalf("exit %d, output %q: a failed tag lookup must fail", code, out)
+	}
+}
+
+// TestYoungAlongsideOldStillFails: a young lag does not mask an old one, and
+// only the old one is named in the failure.
+func TestYoungAlongsideOldStillFails(t *testing.T) {
+	h := fakeHost("module m\n\nrequire (\n\texample.com/young v1.0.0\n\texample.com/old v1.0.0\n)\n", map[string]listing{
+		"example.com/young": {Version: "v1.1.0", Time: testNow.Add(-time.Hour)},
+		"example.com/old":   {Version: "v1.1.0", Time: oldRelease},
+	}, nil)
+	code, out, errOut := runCLI(t, h)
+	if code != 1 {
+		t.Fatalf("exit %d, output %q: want the old lag to fail", code, out)
+	}
+	if !strings.Contains(errOut, "example.com/old v1.0.0 < v1.1.0") || strings.Contains(errOut, "example.com/young") {
+		t.Errorf("stderr %q: want only the old module named", errOut)
 	}
 }
 
@@ -319,7 +442,7 @@ func TestGoListRunsOutsideTheModuleWithAPrivateCache(t *testing.T) {
 		gotDir, gotEnv, gotArgs = dir, env, args
 		return []byte(`{"Path":"example.com/a","Version":"v1.2.0","Versions":["v1.0.0","v1.2.0"]}`), nil
 	}
-	l, err := goList("example.com/a", fake)
+	l, err := goList("example.com/a", "latest", fake)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,16 +458,26 @@ func TestGoListRunsOutsideTheModuleWithAPrivateCache(t *testing.T) {
 	if _, err := os.Stat(gotDir); !os.IsNotExist(err) {
 		t.Errorf("temp dir %s was not removed: %v", gotDir, err)
 	}
+	// A tag lookup asks for that version alone, through the same private cache.
+	if _, err := goList("example.com/a", "v1.0.0", fake); err != nil {
+		t.Fatal(err)
+	}
+	if want := "list -m -json example.com/a@v1.0.0"; strings.Join(gotArgs, " ") != want {
+		t.Errorf("args %q, want %q", gotArgs, want)
+	}
+	if !strings.Contains(strings.Join(gotEnv, " "), "GOMODCACHE="+filepath.Join(gotDir, "modcache")) {
+		t.Errorf("env %q does not use a private module cache under %s", gotEnv, gotDir)
+	}
 
 	failing := func(string, []string, ...string) ([]byte, error) {
 		return []byte("go: lookup failed"), errors.New("exit status 1")
 	}
 	var qe *QueryError
-	if _, err := goList("example.com/a", failing); !errors.As(err, &qe) || !strings.Contains(err.Error(), "lookup failed") {
+	if _, err := goList("example.com/a", "latest", failing); !errors.As(err, &qe) || !strings.Contains(err.Error(), "lookup failed") {
 		t.Errorf("failed lookup: %v", err)
 	}
 	garbled := func(string, []string, ...string) ([]byte, error) { return []byte("not json"), nil }
-	if _, err := goList("example.com/a", garbled); !errors.As(err, &qe) {
+	if _, err := goList("example.com/a", "latest", garbled); !errors.As(err, &qe) {
 		t.Errorf("garbled output: %v", err)
 	}
 	if qe.Unwrap() == nil {
