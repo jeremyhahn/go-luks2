@@ -193,6 +193,21 @@ func contains(list []string, want string) bool {
 	return false
 }
 
+// TestReleaseGoVersionIsCIs: the release builds the published binaries with
+// the toolchain CI tests, the devcontainer image's Go. A release on an older
+// Go ships the standard-library fixes CI already has without them. The
+// pattern is its own: batch_test.go's is stripped from the public tree.
+func TestReleaseGoVersionIsCIs(t *testing.T) {
+	ci := regexp.MustCompile(`(?m)^ARG GO_IMAGE=golang:([0-9.]+)@`).FindStringSubmatch(readFile(t, "build/docker/devcontainer/Dockerfile"))
+	release := regexp.MustCompile(`(?m)^  GO_VERSION: ['"]?([0-9.]+)['"]?`).FindStringSubmatch(readFile(t, ".github/workflows/release.yml"))
+	if ci == nil || release == nil {
+		t.Fatalf("Go version not found: devcontainer Dockerfile %v, release.yml %v", ci, release)
+	}
+	if ci[1] != release[1] {
+		t.Errorf("release.yml GO_VERSION %s, the devcontainer image's Go %s; keep them in lockstep", release[1], ci[1])
+	}
+}
+
 // TestReleaseRequiresMainAndCIsGate: the release used to publish on any v* tag
 // with no dependency on CI (#247). The publishing job must need every stage,
 // check each by name, and the CI stage must be the release gate itself.

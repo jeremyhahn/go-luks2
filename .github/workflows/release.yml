@@ -32,10 +32,11 @@ permissions:
   contents: read
 
 env:
-  # Kept in lockstep with ci.yml (issue #14). This was pinned at 1.25.5 while
+  # Kept in lockstep with the devcontainer image's Go, the toolchain CI tests
+  # (TestReleaseGoVersionIsCIs; issue #14). This was pinned at 1.25.5 while
   # the rest of the repo had moved on — a release built on a stale
   # toolchain is a supply-chain problem, not a cosmetic one.
-  GO_VERSION: "1.27.2"
+  GO_VERSION: "1.27.3"
   # The same scanner pins as ci.yml, asserted the same way.
   GOSEC_VERSION: "v2.29.0"
   GOVULNCHECK_VERSION: "v1.8.0"
