@@ -71,7 +71,7 @@ permissions:
 
 env:
   # In lockstep with ci-template's GO_VERSION.
-  GO_VERSION: '1.27.2'   # ci.yml's GO_VERSION; the template's 1.27.1 is older
+  GO_VERSION: '1.27.3'   # ci.yml's GO_VERSION; the template's 1.27.1 is older
   FUZZ_TAGS: ''          # CUSTOMIZE: no Fuzz* targets in this repo yet; the fuzz job finds none and passes
   RACE_TAGS: ''          # CUSTOMIZE: make test-unit uses the default tag set; integration-tagged code runs in the container
   RACE_PKGS: './...'     # CUSTOMIZE: make test-unit's scope, ./pkg/luks2 plus every other package in `go list ./...` (one module, no dark suites)

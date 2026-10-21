@@ -19,9 +19,9 @@
 # Tool versions come from tool-pins.env next to this file, which the Makefile
 # includes too: one pin, read by both (devcontainer.md §2).
 
-# golang:1.27.2, by digest: a tag can be re-pointed, a digest cannot. Raise the
+# golang:1.27.3, by digest: a tag can be re-pointed, a digest cannot. Raise the
 # version and the digest together, with go.mod's go directive.
-ARG GO_IMAGE=golang:1.27.2@sha256:820153096fda4de6ac1b7194d12e416b7dd8f4e9a33d17e0345b111b945162d8
+ARG GO_IMAGE=golang:1.27.3@sha256:957861185dbf29d93668ace41e011d091c6e779953d47f0316ef2cc58e28fe2b
 
 # ---- base ----
 FROM ${GO_IMAGE} AS base
