@@ -79,20 +79,20 @@ func TestExactlyOneScheduleTriggerInCI(t *testing.T) {
 	}
 }
 
-// TestConcurrencyIsCanonical: ci-template v1.25's canonical block.
-// On main one group per event, so a newer push cancels an older main push
-// run and a schedule or dispatch run never cancels a push run; every other
+// TestMainRunsNeverCancel: on main one group per event and commit, so no
+// main run cancels another (a newer push no longer cancels an older commit's
+// run, and a schedule or dispatch run never cancels a push run); every other
 // ref is one group. cancel-in-progress is a literal true, never an expression.
-func TestConcurrencyIsCanonical(t *testing.T) {
+func TestMainRunsNeverCancel(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
 	m := regexp.MustCompile(`(?m)^concurrency:\n((?:  .*\n)+)`).FindStringSubmatch(ci)
 	if m == nil {
 		t.Fatal("ci.yml has no workflow-level concurrency block")
 	}
-	want := "  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}\n" +
+	want := "  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}\n" +
 		"  cancel-in-progress: true\n"
 	if m[1] != want {
-		t.Errorf("ci.yml's concurrency block is\n%s\nwant ci-template v1.25's\n%s", m[1], want)
+		t.Errorf("ci.yml's concurrency block is\n%s\nwant main runs that never cancel\n%s", m[1], want)
 	}
 }
 

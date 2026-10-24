@@ -39,11 +39,11 @@ name: CI
 # `make ci-reap-stacks` removes an image older than REAP_IMAGE_MIN_AGE that no
 # container uses.
 #
-# ci-template v1.25: the concurrency block is canonical. On main the group is
-# the workflow and the event, so a push to main cancels the in-progress main
-# push run of an older commit, and the newest run validates every merge under
-# it; a schedule or workflow_dispatch run cancels only an older run of its own
-# event. Every other ref is one group, so a PR's newer run cancels the older.
+# Concurrency (customized from ci-template v1.25): on main the group is the
+# workflow, the event and the commit, so no main run cancels another and every
+# merge keeps a completed run; back-to-back merges otherwise left main with no
+# completed run at all. Every other ref is one group, so a PR's newer run
+# cancels the older.
 #
 # The forge credentials are masked first in every job that has them, and
 # reach an image build only as the gomodauth BuildKit secret, from a file
@@ -121,14 +121,14 @@ on:
   schedule:
     - cron: '0 4 * * *'
 
-# v1.25: on main the group is the workflow and the event, so a push to main
-# cancels the in-progress main push run of an older commit, and a schedule or
-# workflow_dispatch run cancels only an older run of its own event. Every
-# other ref is one group, so a PR's newer run cancels the older. No expression
-# reaches cancel-in-progress: the self-hosted host never released a main run
-# queued behind one that set it to an expression.
+# On main the group is the workflow, the event and the commit (ci-template
+# v1.23's shape), so a push to main never cancels the in-progress run of an
+# older commit and a schedule or workflow_dispatch run never cancels a push
+# run. Every other ref is one group, so a PR's newer run cancels the older.
+# No expression reaches cancel-in-progress: the self-hosted host never
+# released a main run queued behind one that set it to an expression.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}
   cancel-in-progress: true
 
 permissions:
