@@ -91,6 +91,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against this module. Consumers building with an older Go release should move
   to 1.27.3 to get the same fix in their binaries.
 - **golang.org/x/crypto is v0.58.0, golang.org/x/sys v0.49.0 and golang.org/x/term v0.47.0, so every direct dependency is at its latest release again.** Nothing this module uses changes behaviour: argon2 and blake2b gain only a loong64 vector implementation, and xts, x/term and the x/sys/unix calls used here are unchanged.
+- **github.com/jeremyhahn/go-enclave is v0.10.0-alpha, its latest release.** Callers now resolve at least v0.10.0-alpha. Its API and behaviour are unchanged from v0.9.0-alpha: the release moves its toolchain to Go 1.27.3, which this module already requires, and changes only its own build, CI and test tooling. Key custody here is unchanged.
 
 ## [1.0.0-rc.4] - 2026-10-09
 
