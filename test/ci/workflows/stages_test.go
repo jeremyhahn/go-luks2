@@ -105,17 +105,70 @@ func itImageNamedAndLeased(t *testing.T, name, j string) {
 	if got := strings.TrimSpace(steps["Name the integration image"]); got != `echo "IT_IMAGE=$(make -s it-image)" >> "$GITHUB_ENV"` {
 		t.Errorf("%s does not name the integration image by make -s it-image: %q", name, got)
 	}
+	lease := steps["Lease the integration image"]
 	for _, want := range []string{
-		`lease="go-luks2-ci-lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-`,
-		`docker create --name "$lease" "$IT_IMAGE" true`,
+		// v1.25.1: the lease is bounded, taken by id with --pull never, and
+		// the tag is inspected again for the same id.
+		`lease="${CI_STACK_PREFIX}lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-`,
+		`docker create --pull never --name "$lease" "$id" true`,
+		`[ "$(docker image inspect -f '{{.Id}}' "$IT_IMAGE" 2>/dev/null)" = "$id" ]`,
+		`the integration image $IT_IMAGE is missing after one rebuild`,
+		// v1.25.2: the lease holds the id, and later steps re-tag from it.
 		`echo "IT_LEASE=$lease" >> "$GITHUB_ENV"`,
+		`echo "IT_LEASE_ID=$id" >> "$GITHUB_ENV"`,
+		// v1.25.3: the inspect, lease and second inspect run under the image
+		// lock, a created container named <prefix>image-lock, bounded at 660 s,
+		// with a lock older than 600 s removed by its id; the functions go to
+		// image-lock.sh for the re-tags.
+		`image_lock() {`,
+		`image_unlock() {`,
+		`local lock="${CI_STACK_PREFIX}image-lock"`,
+		`docker create --pull never --name "$lock" "$lock:base" true`,
+		`i < 660`,
+		`-ge 600 ]`,
+		`declare -f image_lock image_unlock > "$RUNNER_TEMP/image-lock.sh"`,
 	} {
-		if !strings.Contains(steps["Lease the integration image"], want) {
+		if !strings.Contains(lease, want) {
 			t.Errorf("%s's lease step lacks %q", name, want)
 		}
 	}
+	// The lock is taken before the first lease and dropped before the rebuild
+	// (which runs without it), and taken again after it.
+	if got := strings.Count(lease, "image_lock || exit 1"); got != 2 {
+		t.Errorf("%s's lease step takes the image lock %d times, want 2 (before the lease and after the rebuild)", name, got)
+	}
+	if first, rebuild := strings.Index(lease, "image_lock || exit 1"), strings.Index(lease, "make docker-build"); first < 0 || rebuild < first {
+		t.Errorf("%s's lease step rebuilds before it takes the image lock", name)
+	}
 	if strings.Contains(j, "IT_IMAGE: ") {
 		t.Errorf("%s still names the integration image by its run", name)
+	}
+	// Every re-tag of the leased id runs under the image lock.
+	const retag = `docker tag "$IT_LEASE_ID" "$IT_IMAGE"`
+	var scripts strings.Builder // the run blocks, without the comments about them
+	for _, run := range steps {
+		for _, l := range strings.Split(run, "\n") {
+			if !strings.HasPrefix(strings.TrimSpace(l), "#") {
+				scripts.WriteString(l + "\n")
+			}
+		}
+	}
+	if !strings.Contains(scripts.String(), retag) {
+		t.Errorf("%s never re-tags the leased id as IT_IMAGE", name)
+	}
+	for rest := scripts.String(); ; {
+		at := strings.Index(rest, retag)
+		if at < 0 {
+			break
+		}
+		window := rest[max(0, at-450):at]
+		if !strings.Contains(window, `. "$RUNNER_TEMP/image-lock.sh"`) || !strings.HasSuffix(strings.TrimSpace(window), "image_lock || exit 1") {
+			t.Errorf("%s re-tags without sourcing image-lock.sh and taking the lock first", name)
+		}
+		if after := rest[at+len(retag):]; !strings.HasPrefix(strings.TrimSpace(after), "image_unlock") {
+			t.Errorf("%s does not drop the image lock right after the re-tag", name)
+		}
+		rest = rest[at+len(retag):]
 	}
 	teardown := steps["Tear down"]
 	if !strings.Contains(teardown, `docker rm "$IT_LEASE"`) {
@@ -213,8 +266,10 @@ func TestTrivyFSNeverIgnoresUnfixed(t *testing.T) {
 func TestIntegrationJobRunsUnderCompose(t *testing.T) {
 	it := job(t, readFile(t, ".github/workflows/ci.yml"), "integration")
 	steps := stepRun(t, it)
-	if strings.TrimSpace(steps["make integration-test (integration image)"]) !=
-		`make integration-test MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_PROJECT="$IT_PROJECT" IT_IMAGE="$IT_IMAGE" GO_BUILD_TAGS="$GO_BUILD_TAGS"` {
+	// v1.25.2: the step re-tags the leased id under the image lock, then runs.
+	run := steps["make integration-test (integration image)"]
+	runAt := strings.Index(run, "\n          "+`make integration-test MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_PROJECT="$IT_PROJECT" IT_IMAGE="$IT_IMAGE" GO_BUILD_TAGS="$GO_BUILD_TAGS"`)
+	if tagAt := strings.Index(run, `docker tag "$IT_LEASE_ID" "$IT_IMAGE"`); runAt < 0 || tagAt < 0 || tagAt > runAt {
 		t.Error("the integration job does not run make integration-test with the job's project and image")
 	}
 	for _, want := range []string{
@@ -272,7 +327,13 @@ func TestImageAndIntegrationJobsUseNoRunnerToolchain(t *testing.T) {
 		// ci-template v1.21.1: the forge credentials are masked before any
 		// other step, then stale stacks are reaped.
 		named := regexp.MustCompile(`(?m)^      - name: (.+)$`).FindAllStringSubmatch(j, 2)
-		if len(named) < 2 || named[0][1] != "Mask the forge credentials" || named[1][1] != "Reap stale CI stacks" {
+		second := "Reap stale CI stacks"
+		if name == "lint-gates" {
+			// v1.27: the job probes for the target first, and reaps only when
+			// there is one to run.
+			second = "Does the Makefile define lint-gates?"
+		}
+		if len(named) < 2 || named[0][1] != "Mask the forge credentials" || named[1][1] != second {
 			t.Errorf("%s does not start by masking the credentials, then reaping: %v", name, named)
 		}
 		steps := stepRun(t, j)
@@ -296,10 +357,10 @@ const cacheClass = `CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.e
 // same way -- names the cache class the recipe mounts its volumes under.
 func TestToolchainStagesCacheByTrustClass(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
-	if !strings.HasPrefix(ci, "# ci-template: v1.25 (customized)\n") {
-		t.Errorf("ci.yml does not declare ci-template v1.25: %.60q", ci)
+	if !strings.HasPrefix(ci, "# ci-template: v1.27.0 (customized)\n") {
+		t.Errorf("ci.yml does not declare ci-template v1.27.0: %.60q", ci)
 	}
-	for _, name := range []string{"image", "merge-check", "test-race", "fips"} {
+	for _, name := range []string{"image", "lint-gates", "merge-check", "test-race", "fips"} {
 		j := job(t, ci, name)
 		if !strings.Contains(j, "make ci-toolchain-run ") {
 			t.Errorf("%s runs no stage in the toolchain image", name)
@@ -357,7 +418,7 @@ func TestImageJobTrimsTheCachesBeforeTheStages(t *testing.T) {
 
 // toolchainJobs are the jobs that build the devcontainer images on bigdisk
 // and run their stages in them.
-var toolchainJobs = []string{"image", "integration", "soak", "test-race", "fips", "merge-check"}
+var toolchainJobs = []string{"image", "lint-gates", "integration", "soak", "test-race", "fips", "merge-check"}
 
 // TestNoStepPrintsTheCredentials: ci-template v1.21.1 after a forge token
 // printed in a run. No step prints the credential file or the job

@@ -1766,13 +1766,32 @@ ci-toolchain-run: ## Run CMD in the toolchain image over a copy of the checkout 
 # container outside compose). v3 (ci-template v1.23.1): the age runs from the
 # later of the image's creation and its last tag, since a rebuild from a full
 # cache keeps the old creation time but re-tags the image.
+#
+# v4 (ci-template v1.25.2): a tag is kept while any container, running or
+# created, uses its image id (`docker ps -a --filter ancestor=<id>`), because
+# two trees that differ only in a file the build ignores share one id under two
+# tags and `docker image rm <tag>` untags such an image even while a lease holds
+# it. A failed lookup also keeps the tag.
+#
+# v5 (ci-template v1.25.3): the image loop runs under the daemon's image lock, a
+# created, never-started container named <CI_STACK_PREFIX>image-lock made from
+# <prefix>image-lock:base (an empty image imported when missing), so the in-use
+# check and the removal cannot straddle a job's lease and re-tag. The lease
+# step and every re-tag take the same lock (ci.yml). A lock created more than
+# 600 s ago is a dead holder's and is removed by its id. The reaper waits up to
+# REAP_LOCK_WAIT seconds for it and removes no image that run without it. The
+# tag time is read as a string (`{{.Metadata.LastTagTime}}`): the `.Unix`
+# form is a template error on Docker 29, and an image the inspect gives no id
+# for is kept.
 REAP_MIN_AGE ?= 11100
 REAP_IMAGE_MIN_AGE ?= 7200
+REAP_LOCK_WAIT ?= 60
 REAP_DRY_RUN ?= 0
 
 ci-reap-stacks: export RP_MIN_AGE := $(REAP_MIN_AGE)
 ci-reap-stacks: export RP_DRY := $(REAP_DRY_RUN)
 ci-reap-stacks: export RP_IMAGE_MIN_AGE := $(REAP_IMAGE_MIN_AGE)
+ci-reap-stacks: export RP_LOCK_WAIT := $(REAP_LOCK_WAIT)
 ci-reap-stacks: ## Remove this repository's stale CI containers, compose stacks and integration images
 	@set -u; \
 	prefix="$(CI_STACK_PREFIX)"; \
@@ -1782,7 +1801,31 @@ ci-reap-stacks: ## Remove this repository's stale CI containers, compose stacks 
 	case "$$RP_IMAGE_MIN_AGE" in \
 		''|*[!0-9]*) echo "REAP_IMAGE_MIN_AGE must be a number of seconds: $$RP_IMAGE_MIN_AGE" >&2; exit 2 ;; \
 	esac; \
+	case "$$RP_LOCK_WAIT" in \
+			''|*[!0-9]*) echo "REAP_LOCK_WAIT must be a number of seconds: $$RP_LOCK_WAIT" >&2; exit 2 ;; \
+		esac; \
 	now=$$(date +%s); \
+		lock="$${prefix}image-lock"; \
+		lock_id=; \
+		image_lock() { \
+			base="$$lock:base"; i=0; \
+			while [ "$$i" -lt "$$RP_LOCK_WAIT" ]; do \
+				docker image inspect "$$base" >/dev/null 2>&1 || \
+					head -c 1024 /dev/zero | docker import - "$$base" >/dev/null 2>&1; \
+				lock_id=$$(docker create --pull never --name "$$lock" "$$base" true 2>/dev/null) && return 0; \
+				lock_id=; \
+				set -- $$(docker inspect -f '{{.Id}} {{.Created}}' "$$lock" 2>/dev/null); \
+				if [ "$$#" -eq 2 ] && at=$$(date -d "$$2" +%s 2>/dev/null) && [ $$(($$(date +%s) - at)) -ge 600 ]; then \
+					echo "lock  removing the stale $$lock (created $$2)"; \
+					docker rm "$$1" >/dev/null 2>&1; \
+					i=$$((i + 1)); continue; \
+				fi; \
+				sleep 1; i=$$((i + 1)); \
+			done; \
+			return 1; \
+		}; \
+		image_unlock() { [ -z "$$lock_id" ] || docker rm "$$lock_id" >/dev/null 2>&1; lock_id=; }; \
+		trap image_unlock EXIT; \
 	run() { if [ "$$RP_DRY" = 1 ]; then echo "dry   $$*"; else "$$@" >/dev/null; fi; }; \
 	stale() { \
 		set -- $$(docker inspect -f '{{.State.Status}} {{.State.FinishedAt}} {{.Created}}' "$$1" 2>/dev/null); \
@@ -1827,19 +1870,40 @@ ci-reap-stacks: ## Remove this repository's stale CI containers, compose stacks 
 		fi; \
 	done; \
 	images=0; \
-	for ref in $$(docker images --filter "reference=$${prefix}it" --format '{{.Repository}}:{{.Tag}}'); do \
-		case "$$ref" in "$${prefix}it:"*) ;; *) continue ;; esac; \
-		set -- $$(docker image inspect -f '{{.Created}} {{.Metadata.LastTagTime.Unix}}' "$$ref" 2>/dev/null); \
-		[ "$$#" -ge 1 ] || continue; \
-		t=$$(date -d "$$1" +%s 2>/dev/null) || continue; \
-		case "$${2:-}" in ''|*[!0-9]*) ;; *) [ "$$2" -le "$$t" ] || t=$$2 ;; esac; \
-		if [ $$((now - t)) -lt "$$RP_IMAGE_MIN_AGE" ]; then \
-			echo "keep  image $$ref (created or tagged within $${RP_IMAGE_MIN_AGE}s)"; \
-			continue; \
+		refs=; \
+		if [ "$$RP_DRY" = 1 ] || image_lock; then \
+			refs=$$(docker images --filter "reference=$${prefix}it" --format '{{.Repository}}:{{.Tag}}'); \
+		else \
+			echo "keep  every $${prefix}it image (the image lock was not free within $${RP_LOCK_WAIT}s)"; \
 		fi; \
-		echo "reap  image $$ref"; \
-		if run docker image rm "$$ref"; then images=$$((images + 1)); else echo "warn  image $$ref not removed (in use?)"; fi; \
-	done; \
+		for ref in $$refs; do \
+			case "$$ref" in "$${prefix}it:"*) ;; *) continue ;; esac; \
+			set -- $$(docker image inspect -f '{{.Id}} {{.Created}}' "$$ref" 2>/dev/null); \
+			if [ "$$#" -ne 2 ]; then \
+				echo "keep  image $$ref (docker image inspect gave no id)"; \
+				continue; \
+			fi; \
+			id=$$1; \
+			t=$$(date -d "$$2" +%s 2>/dev/null) || continue; \
+			tagged=$$(docker image inspect -f '{{.Metadata.LastTagTime}}' "$$ref" 2>/dev/null | sed -E 's/\.[0-9]+//; s/ [A-Z]+$$//'); \
+			tagged=$$(date -d "$$tagged" +%s 2>/dev/null) || tagged=; \
+			case "$$tagged" in ''|*[!0-9]*) ;; *) [ "$$tagged" -le "$$t" ] || t=$$tagged ;; esac; \
+			if [ $$((now - t)) -lt "$$RP_IMAGE_MIN_AGE" ]; then \
+				echo "keep  image $$ref (created or tagged within $${RP_IMAGE_MIN_AGE}s)"; \
+				continue; \
+			fi; \
+			if ! users=$$(docker ps -a -q --filter "ancestor=$$id" 2>/dev/null); then \
+				echo "keep  image $$ref (could not list the containers on $$id)"; \
+				continue; \
+			fi; \
+			if [ -n "$$users" ]; then \
+				echo "keep  image $$ref (in use: $$(echo "$$users" | wc -l) container(s) on $$id)"; \
+				continue; \
+			fi; \
+			echo "reap  image $$ref"; \
+			if run docker image rm "$$ref"; then images=$$((images + 1)); else echo "warn  image $$ref not removed (in use?)"; fi; \
+		done; \
+		image_unlock; \
 	if [ "$$RP_DRY" = 1 ]; then done_as="would be removed"; else done_as=removed; fi; \
 	echo "reaper: $$reaped compose project(s) and $$images image(s) $$done_as for prefix '$$prefix'"; \
 	exit 0

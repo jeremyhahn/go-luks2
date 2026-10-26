@@ -169,7 +169,7 @@ func job(t *testing.T, workflow, name string) string {
 	return strings.Join(lines[start:end], "\n")
 }
 
-var needsLine = regexp.MustCompile(`(?m)^    needs:\s*\[([^\]]*)\]`)
+var needsLine = regexp.MustCompile(`(?m)^    needs:\s*(?:\[([^\]]*)\]|([A-Za-z0-9_-]+))`)
 
 func needs(t *testing.T, jobText string) []string {
 	t.Helper()
@@ -178,7 +178,11 @@ func needs(t *testing.T, jobText string) []string {
 		return nil
 	}
 	var out []string
-	for _, n := range strings.Split(m[1], ",") {
+	list := m[1]
+	if list == "" {
+		list = m[2] // a single job: `needs: changes`
+	}
+	for _, n := range strings.Split(list, ",") {
 		out = append(out, strings.TrimSpace(n))
 	}
 	return out

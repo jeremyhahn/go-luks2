@@ -18,17 +18,19 @@ import (
 // edited on one job and not its siblings, changes what gates a merge without
 // failing anything else; these tests are what fails.
 var (
-	prTier      = []string{"changes", "image", "merge-check", "arch-gates", "test-race"}
+	prTier      = []string{"changes", "image", "lint-gates", "merge-check", "arch-gates", "test-race"}
 	fullTier    = []string{"fips", "integration"}
 	nightlyTier = []string{"soak"}
 )
 
 var (
-	jobIf      = regexp.MustCompile(`(?m)^    if: (.*)$`)
-	jobName    = regexp.MustCompile(`(?m)^    name: (.*)$`)
-	prTypes    = regexp.MustCompile(`(?m)^  pull_request:\n    branches: \[main\]\n(?:    #.*\n)*    types: \[(.*)\]$`)
-	fullTierEn = regexp.MustCompile(`(?m)^          FULL_TIER: \$\{\{ (.*) \}\}$`)
-	scheduleOn = regexp.MustCompile(`(?m)^\s*schedule:`)
+	jobIf = regexp.MustCompile(`(?m)^    if: (.*)$`)
+	// trailingComment is a YAML comment after a job's `if:` value.
+	trailingComment = regexp.MustCompile(`\s+#.*$`)
+	jobName         = regexp.MustCompile(`(?m)^    name: (.*)$`)
+	prTypes         = regexp.MustCompile(`(?m)^  pull_request:\n    branches: \[main\]\n(?:    #.*\n)*    types: \[(.*)\]$`)
+	fullTierEn      = regexp.MustCompile(`(?m)^          FULL_TIER: \$\{\{ (.*) \}\}$`)
+	scheduleOn      = regexp.MustCompile(`(?m)^\s*schedule:`)
 	// jobRunsOn is declared here, not shared with batch_test.go, which is
 	// export-ignore: the published tree has no batch_test.go to borrow from.
 	jobRunsOn = regexp.MustCompile(`(?m)^    runs-on: (.+)$`)
@@ -40,7 +42,7 @@ func jobIfOf(t *testing.T, jobText string) string {
 	if m == nil {
 		return ""
 	}
-	return m[1]
+	return trailingComment.ReplaceAllString(m[1], "")
 }
 
 func sameSet(a, b []string) bool {
@@ -263,16 +265,22 @@ func TestCIGateTiersMatchTheJobs(t *testing.T) {
 		}
 		want := "pr"
 		switch cond := jobIfOf(t, text); cond {
-		case fullTierIf:
+		case fullJobIf:
 			want = "full"
 			full = append(full, id)
 		case nightlyIf:
 			want = "nightly"
 			nightly = append(nightly, id)
+		case draftIf:
+			pr = append(pr, id)
 		case "":
+			// Skipped with the job it needs: the image job needs `changes`.
+			if !contains(needs(t, text), "changes") {
+				t.Errorf("job %s has no if and does not need changes, so it runs on a draft", id)
+			}
 			pr = append(pr, id)
 		default:
-			t.Errorf("job %s has if %q; a job is unconditional (pr) or carries the full-tier or nightly condition", id, cond)
+			t.Errorf("job %s has if %q; a job carries the draft condition (pr), the full-tier condition with it, or the nightly condition", id, cond)
 		}
 		if !contains(gateNeeds, id) {
 			t.Errorf("CI Gate does not need %s", id)

@@ -86,6 +86,12 @@ func gateScript(t *testing.T, results map[string]string) string {
 // pipefail) and returns its exit status and output.
 func runGate(t *testing.T, script, fullTier, nightly string) (int, string) {
 	t.Helper()
+	return runGateDraft(t, script, fullTier, nightly, "false")
+}
+
+// runGateDraft is runGate with the DRAFT the gate reads (ci-template v1.26).
+func runGateDraft(t *testing.T, script, fullTier, nightly, draft string) (int, string) {
+	t.Helper()
 	bash, err := exec.LookPath("bash")
 	if err != nil {
 		t.Fatalf("bash is required to run the CI Gate: %v", err)
@@ -95,7 +101,7 @@ func runGate(t *testing.T, script, fullTier, nightly string) (int, string) {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(bash, "--noprofile", "--norc", "-eo", "pipefail", path) // #nosec G204 -- bash from PATH on a script this test wrote
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "FULL_TIER=" + fullTier, "NIGHTLY=" + nightly}
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "FULL_TIER=" + fullTier, "NIGHTLY=" + nightly, "DRAFT=" + draft}
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	err = cmd.Run()

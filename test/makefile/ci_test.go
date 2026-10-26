@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -49,18 +50,31 @@ cp)
 	[ "${FAKE_CP:-ok}" = ok ] || { echo "Error response from daemon: No such container" >&2; exit 1; }
 	printf 'mode: atomic\nexample.com/fake/f.go:1.1,2.2 1 1\n' > "$3" ;;
 start) exit "${FAKE_START_RC:-0}" ;;
-rm) exit "${FAKE_RM_RC:-0}" ;;
-images) printf '%s\n' go-luks2-ci-it:old go-luks2-ci-it:retagged go-luks2-ci-it:fresh go-luks2-ci-itx:old ;;
+rm) [ "$2" != held0 ] || touch "$log.unheld"; exit "${FAKE_RM_RC:-0}" ;;
+create)
+	case "$*" in *image-lock*)
+		[ -z "${FAKE_LOCK_HELD:-}" ] || [ -e "$log.unheld" ] || exit 1
+		echo lock0 ;;
+	esac ;;
+import) cat > /dev/null; echo sha256:base ;;
+images) printf '%s\n' go-luks2-ci-it:old go-luks2-ci-it:retagged go-luks2-ci-it:fresh go-luks2-ci-it:leased go-luks2-ci-it:sibling go-luks2-ci-it:noid go-luks2-ci-itx:old ;;
 image)
 	case "$2" in
 	rm) exit "${FAKE_RM_RC:-0}" ;;
 	inspect)
 		case "$*" in
-		*"{{.Created}}"*)
+		*"{{.Metadata.LastTagTime}}"*)
 			case "$5" in
-			*:old) echo "$old -62135596800" ;;
-			*:retagged) echo "$old $now" ;;
-			*:fresh) echo "$new -62135596800" ;;
+			*:retagged) date -u -d "@$now" "+%Y-%m-%d %H:%M:%S.26 +0000 UTC" ;;
+			*) echo "0001-01-01 00:00:00 +0000 UTC" ;;
+			esac ;;
+		*"{{.Id}} {{.Created}}"*)
+			case "$5" in
+			*:old) echo "sha256:old $old" ;;
+			*:retagged) echo "sha256:retagged $old" ;;
+			*:fresh) echo "sha256:fresh $new" ;;
+			*:leased|*:sibling) echo "sha256:leased $old" ;;
+			*:noid) echo "sha256:noid" ;;
 			*) exit 1 ;;
 			esac ;;
 		*" go-luks2-ci-it:held") exit 0 ;;
@@ -101,10 +115,13 @@ inspect)
 	c2) echo "created $never $old" ;;
 	c4|c8) echo "running $never $old" ;;
 	c5) echo "exited $new $old" ;;
+	go-luks2-ci-image-lock) if [ "${FAKE_LOCK_HELD:-}" = stale ]; then echo "held0 $old"; else echo "held0 $new"; fi ;;
 	*) exit 1 ;;
 	esac ;;
 ps)
 	case "$*" in
+	*ancestor=sha256:leased) echo c12 ;;
+	*ancestor=*) ;;
 	*-aq*)
 		case "$*" in
 		*=go-luks2-ci-old) echo c1; echo c2 ;;
@@ -144,7 +161,7 @@ func ciDockerEnv(t *testing.T, set map[string]string) (env []string, log string)
 	}
 	drop := []string{"GOPRIVATE", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
 		"IN_IMAGE_NETWORK", "REAP_MIN_AGE", "REAP_DRY_RUN", "MODULE_ENV_FILE", "CI_OUT", "CI_OUT_DIR",
-		"CI_CACHE", "CI_CACHE_CLASS", "CI_CACHE_MAX_GIB", "REAP_IMAGE_MIN_AGE", "IN_IMAGE_CPUS"}
+		"CI_CACHE", "CI_CACHE_CLASS", "CI_CACHE_MAX_GIB", "REAP_IMAGE_MIN_AGE", "REAP_LOCK_WAIT", "IN_IMAGE_CPUS"}
 	return environ(drop, all), log
 }
 
@@ -781,6 +798,9 @@ func TestCITrimCachesNeverFailsTheJob(t *testing.T) {
 func removals(lines []string) []string {
 	var out []string
 	for _, l := range lines {
+		if l == "rm lock0" || l == "rm held0" {
+			continue // the image lock's own release, not a removal of this repository's leftovers
+		}
 		if strings.HasPrefix(l, "rm ") || strings.HasPrefix(l, "network rm ") || strings.HasPrefix(l, "volume rm ") || strings.HasPrefix(l, "image rm ") {
 			out = append(out, l)
 		}
@@ -852,7 +872,7 @@ func TestCIReapStacksNeverFailsTheJob(t *testing.T) {
 		t.Errorf("failed removals were not reported:\n%s", stdout)
 	}
 
-	for _, bad := range []string{"REAP_MIN_AGE=3h", "REAP_IMAGE_MIN_AGE=2h", "REAP_IMAGE_MIN_AGE="} {
+	for _, bad := range []string{"REAP_MIN_AGE=3h", "REAP_IMAGE_MIN_AGE=2h", "REAP_IMAGE_MIN_AGE=", "REAP_LOCK_WAIT=soon"} {
 		env, log := ciDockerEnv(t, nil)
 		if stdout, stderr, err := runMakeErr(t, env, "-s", "ci-reap-stacks", bad); err == nil {
 			t.Errorf("%s was accepted:\n%s%s", bad, stdout, stderr)
@@ -876,6 +896,74 @@ func TestCIReapStacksImageAge(t *testing.T) {
 	}
 	if want := "go-luks2-ci-it:old go-luks2-ci-it:retagged go-luks2-ci-it:fresh"; strings.Join(images, " ") != want {
 		t.Errorf("REAP_IMAGE_MIN_AGE=0 removed %v, want %s", images, want)
+	}
+}
+
+// reaper v4: a container on an image id keeps every tag of that id (here the
+// leased tag and its sibling), and an image the inspect gives no id for is
+// kept, whatever its age.
+func TestCIReapStacksKeepsEveryTagOfAnImageAContainerUses(t *testing.T) {
+	env, log := ciDockerEnv(t, nil)
+	stdout, _ := runMake(t, env, "-s", "ci-reap-stacks", "REAP_IMAGE_MIN_AGE=0")
+	lines := logLines(t, log)
+	for _, kept := range []string{"go-luks2-ci-it:leased", "go-luks2-ci-it:sibling", "go-luks2-ci-it:noid"} {
+		if slices.Contains(lines, "image rm "+kept) {
+			t.Errorf("the reaper removed %s", kept)
+		}
+		if !strings.Contains(stdout, "keep  image "+kept) {
+			t.Errorf("the reaper does not say it kept %s:\n%s", kept, stdout)
+		}
+	}
+	if !slices.Contains(lines, "ps -a -q --filter ancestor=sha256:leased") {
+		t.Errorf("the reaper never asked which containers use the leased id:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// reaper v5: the image loop runs under the daemon's image lock, a created
+// container named <prefix>image-lock, taken before the images are listed and
+// released after the last one is removed.
+func TestCIReapStacksTakesTheImageLockAroundTheImageLoop(t *testing.T) {
+	env, log := ciDockerEnv(t, nil)
+	runMake(t, env, "-s", "ci-reap-stacks", "REAP_IMAGE_MIN_AGE=0")
+	lines := logLines(t, log)
+	at := func(want string) int {
+		i := slices.Index(lines, want)
+		if i < 0 {
+			t.Fatalf("the docker log has no %q:\n%s", want, strings.Join(lines, "\n"))
+		}
+		return i
+	}
+	create := at("create --pull never --name go-luks2-ci-image-lock go-luks2-ci-image-lock:base true")
+	list := at("images --filter reference=go-luks2-ci-it --format {{.Repository}}:{{.Tag}}")
+	lastRm := at("image rm go-luks2-ci-it:fresh")
+	release := at("rm lock0")
+	if create >= list || list >= lastRm || lastRm >= release {
+		t.Errorf("lock create %d, image list %d, last image rm %d, lock release %d: want that order", create, list, lastRm, release)
+	}
+}
+
+func TestCIReapStacksRemovesNoImageWhileTheImageLockIsHeld(t *testing.T) {
+	env, log := ciDockerEnv(t, map[string]string{"FAKE_LOCK_HELD": "live"})
+	stdout, _ := runMake(t, env, "-s", "ci-reap-stacks", "REAP_IMAGE_MIN_AGE=0", "REAP_LOCK_WAIT=2")
+	for _, l := range logLines(t, log) {
+		if strings.HasPrefix(l, "image rm ") || strings.HasPrefix(l, "images ") {
+			t.Errorf("the reaper touched an image without the lock: %q", l)
+		}
+	}
+	if !strings.Contains(stdout, "the image lock was not free within 2s") {
+		t.Errorf("the reaper does not say the lock was busy:\n%s", stdout)
+	}
+}
+
+func TestCIReapStacksRemovesAStaleImageLockByItsID(t *testing.T) {
+	env, log := ciDockerEnv(t, map[string]string{"FAKE_LOCK_HELD": "stale"})
+	runMake(t, env, "-s", "ci-reap-stacks", "REAP_IMAGE_MIN_AGE=0", "REAP_LOCK_WAIT=5")
+	lines := logLines(t, log)
+	if !slices.Contains(lines, "rm held0") {
+		t.Errorf("the stale lock was not removed by its id:\n%s", strings.Join(lines, "\n"))
+	}
+	if !slices.Contains(lines, "image rm go-luks2-ci-it:old") {
+		t.Errorf("the images were not reaped after the stale lock went:\n%s", strings.Join(lines, "\n"))
 	}
 }
 
