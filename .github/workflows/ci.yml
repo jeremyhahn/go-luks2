@@ -1,4 +1,13 @@
-# ci-template: v1.27.0 (customized)
+# ci-template: v1.28.0 (customized)
+# v1.28.0 (Company Agent ruling 219(3), 2026-10-26): `make deps-check` joins
+# the PR tier as a lint-class gate. Its step in the image job drops the
+# CI_FULL_TIER condition and runs on every event, as `make lint` does, so a
+# module behind its dependency floor fails the PR, not main after the merge
+# (another repository's main went red on its push run for exactly this). The
+# step keeps IN_IMAGE_NETWORK=bridge for the module proxy and runs in seconds;
+# it stays on the full tier too. The image job is already `pr` in CI Gate, so
+# no needs or results line changes. A repository adopts v1.28 as a CI-file PR;
+# none hand-patches its ci.yml ahead of it.
 
 name: CI
 
@@ -81,7 +90,8 @@ name: CI
 #              pull_request labelled `ci:full`: the PR tier plus Integration
 #              and FIPS, each its own job in the image, and the image job's
 #              security (gosec, govulncheck, go mod verify, trivy's filesystem
-#              scan), deps-check and trivy image steps.
+#              scan), deps-check and trivy image steps (v1.28 puts
+#              deps-check on the PR tier).
 #   Nightly    the schedule and workflow_dispatch only: the full tier plus
 #              Soak, the integration suite looped in the integration image
 #              for SOAK_MINUTES.
@@ -231,8 +241,10 @@ jobs:
   # and not into its container's layer.
   #
   # v1.23: lint, assert-build-tags, build and the unit runs are the PR tier and
-  # run on every event. security, deps-check and trivy image are full tier only
+  # run on every event. security and trivy image are full tier only
   # (env.CI_FULL_TIER): main after every merge, nightly, dispatch, ci:full.
+  # v1.28: deps-check is a lint-class gate on the PR tier and runs on every
+  # event (ruling 219(3)).
   # v1.24: on a docs-only PR the build, the tag assertion and the unit runs
   # skip.
   image:
@@ -482,8 +494,10 @@ jobs:
           IN_IMAGE_NETWORK: bridge
         run: make ci-toolchain-run CMD="make security GO_BUILD_TAGS='$GO_BUILD_TAGS'"
 
+      # v1.28: a lint-class gate of seconds on the PR tier, every event, a
+      # docs-only PR included (ruling 219(3)); it was full tier only from v1.23.
       - name: make deps-check (toolchain image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER == 'true' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         env:
           IN_IMAGE_NETWORK: bridge
         run: make ci-toolchain-run CMD="make deps-check"

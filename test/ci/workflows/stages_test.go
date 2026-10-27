@@ -96,6 +96,42 @@ func TestImageJobRunsEveryToolchainStageInTheImage(t *testing.T) {
 	itImageNamedAndLeased(t, "image", image)
 }
 
+// TestDepsCheckRunsOnEveryEvent: ci-template v1.28 puts deps-check on the PR
+// tier as a lint-class gate. Its step runs on every event, a docs-only PR
+// included, under the condition `make lint` carries, and keeps the bridge
+// network for the module proxy.
+func TestDepsCheckRunsOnEveryEvent(t *testing.T) {
+	image := job(t, readFile(t, ".github/workflows/ci.yml"), "image")
+	stepIf := func(name string) string {
+		t.Helper()
+		i := strings.Index(image, "\n      - name: "+name+"\n")
+		if i < 0 {
+			t.Fatalf("the image job has no step %q", name)
+		}
+		block := image[i+1:]
+		if j := strings.Index(block[1:], "\n      - "); j >= 0 {
+			block = block[:j+1]
+		}
+		m := regexp.MustCompile(`(?m)^        if: (.*)$`).FindStringSubmatch(block)
+		if m == nil {
+			t.Fatalf("step %q has no if", name)
+		}
+		if name == "make deps-check (toolchain image)" && !strings.Contains(block, "\n          IN_IMAGE_NETWORK: bridge\n") {
+			t.Errorf("step %q does not keep IN_IMAGE_NETWORK: bridge", name)
+		}
+		return m[1]
+	}
+	deps := stepIf("make deps-check (toolchain image)")
+	for _, narrower := range []string{"CI_FULL_TIER", "docs_only"} {
+		if strings.Contains(deps, narrower) {
+			t.Errorf("deps-check's if %q carries %s; it runs on every event", deps, narrower)
+		}
+	}
+	if lint := stepIf("make lint (toolchain image)"); deps != lint {
+		t.Errorf("deps-check's if is %q, want make lint's %q", deps, lint)
+	}
+}
+
 // itImageNamedAndLeased: ci-template v1.23 (ci-standard.md §9). A job takes
 // the integration image's content-addressed name from `make -s it-image`,
 // holds a lease on it, and its teardown removes the lease, never the image.
@@ -357,8 +393,8 @@ const cacheClass = `CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.e
 // same way -- names the cache class the recipe mounts its volumes under.
 func TestToolchainStagesCacheByTrustClass(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
-	if !strings.HasPrefix(ci, "# ci-template: v1.27.0 (customized)\n") {
-		t.Errorf("ci.yml does not declare ci-template v1.27.0: %.60q", ci)
+	if !strings.HasPrefix(ci, "# ci-template: v1.28.0 (customized)\n") {
+		t.Errorf("ci.yml does not declare ci-template v1.28.0: %.60q", ci)
 	}
 	for _, name := range []string{"image", "lint-gates", "merge-check", "test-race", "fips"} {
 		j := job(t, ci, name)

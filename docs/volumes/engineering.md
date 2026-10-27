@@ -382,9 +382,10 @@ image. A pull request that changes only Markdown or `docs/` skips both. The
 `Lint Gates` job (PR tier) runs `make -k lint-gates` when the Makefile defines
 that target. A draft pull request runs no CI at all, and `CI Gate` fails on it
 until it is marked ready. The workflow is an instance of the shared CI template
-at v1.27.0. The
-full tier (FIPS, integration, and the image job's security, deps-check and
-`trivy image` steps) runs on push to `main`, on the nightly schedule, on
+at v1.28.0, which puts `make deps-check` on the PR tier: the image job runs it
+on every event, a docs-only pull request included, as it runs `make lint`. The
+full tier (FIPS, integration, and the image job's security and `trivy image`
+steps) runs on push to `main`, on the nightly schedule, on
 `workflow_dispatch`, and on a pull request labelled `ci:full`; the nightly
 tier (Soak, the integration suite looped) runs on the schedule and on
 `workflow_dispatch` only. CI does not run on label events: the label is read
