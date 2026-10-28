@@ -555,6 +555,14 @@ docker-build-integration:
 	@# orphan means a run died here and that is worth reading, while "0B
 	@# reclaimed" on every build is noise. If docker ever reworded that output
 	@# the reap still happens and only the report goes quiet.
+	@#
+	@# A content tag is checked before the build and again after a failed one.
+	@# Concurrent jobs on one daemon can build one content tag at once: each
+	@# finds it not held, and BuildKit refuses the slower export because the
+	@# tag "already exists". The tag is the content, so the image the faster
+	@# job left under it is the image this build would have made. Only that
+	@# exact tag, and only a content tag, turns a failed build into success;
+	@# anything else fails with the build's own status.
 	@set -eu; \
 	out="$$($(ITEST_PRUNE) 2>/dev/null || true)"; \
 	case "$$out" in *Deleted*) printf '%s\n' "$$out";; esac; \
@@ -570,7 +578,16 @@ docker-build-integration:
 		--build-arg GO_BUILD_PROXY \
 		--label $(ITEST_LABEL) \
 		-f $(DEVCONTAINER_DOCKERFILE) --target integration \
-		-t $(ITEST_IMAGE) .; \
+		-t $(ITEST_IMAGE) . || { \
+		rc=$$?; \
+		case "$(ITEST_IMAGE)" in $(CI_STACK_PREFIX)it:*) \
+			if docker image inspect $(ITEST_IMAGE) >/dev/null 2>&1; then \
+				echo "$(ITEST_IMAGE) exists after all: another job built the same content (make it-image) under this tag while this build ran."; \
+				rc=0; \
+			fi;; \
+		esac; \
+		[ "$$rc" -eq 0 ] || exit "$$rc"; \
+	}; \
 	if [ -n "$(ITEST_BUILD_IS_GOAL)" ]; then \
 		docker image rm -f $(ITEST_IMAGE) >/dev/null 2>&1 || true; \
 		echo "$(COLOR_BOLD)Removed $(ITEST_IMAGE): a tag this invocation invented, which no later run can name.$(COLOR_RESET)"; \

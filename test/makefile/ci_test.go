@@ -57,6 +57,9 @@ create)
 		echo lock0 ;;
 	esac ;;
 import) cat > /dev/null; echo sha256:base ;;
+build)
+	[ -z "${FAKE_BUILD_RACED:-}" ] || touch "$log.raced"
+	exit "${FAKE_BUILD_RC:-0}" ;;
 images) printf '%s\n' go-luks2-ci-it:old go-luks2-ci-it:retagged go-luks2-ci-it:fresh go-luks2-ci-it:leased go-luks2-ci-it:sibling go-luks2-ci-it:noid go-luks2-ci-itx:old ;;
 image)
 	case "$2" in
@@ -78,6 +81,7 @@ image)
 			*) exit 1 ;;
 			esac ;;
 		*" go-luks2-ci-it:held") exit 0 ;;
+		*:raced) [ -e "$log.raced" ] || exit 1 ;;
 		*) exit 1 ;;
 		esac ;;
 	esac ;;
@@ -1048,6 +1052,50 @@ func TestDockerBuildIntegrationSkipsAHeldContentImage(t *testing.T) {
 		runMake(t, env, "-s", "docker-build-integration", "MODULE_ENV_FILE="+mef, "ITEST_IMAGE="+image)
 		if _, built := called(logLines(t, log), "build "); built != wantBuild {
 			t.Errorf("%s: built = %v, want %v:\n%s", image, built, wantBuild, readLog(t, log))
+		}
+	}
+}
+
+// Concurrent jobs on one daemon can build one content tag at once: each finds
+// it not held, and the slower build's export is refused because the tag
+// already exists. The tag is the content, so the image the faster job left is
+// the image this build would have made. A failed build of a content tag
+// therefore re-checks that exact tag and succeeds only if it now exists; an
+// invented tag, or a content tag still missing, fails with the build's status.
+func TestDockerBuildIntegrationToleratesAConcurrentBuildOfItsContentTag(t *testing.T) {
+	mef := filepath.Join(t.TempDir(), "gomodauth.env")
+	if err := os.WriteFile(mef, []byte("GOPRIVATE=example.com/private\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		image  string
+		raced  bool
+		wantOK bool
+	}{
+		{"go-luks2-ci-it:raced", true, true},
+		{"go-luks2-ci-it:raced", false, false},
+		{"go-luks2-integration-test:raced", true, false},
+	} {
+		set := map[string]string{"FAKE_BUILD_RC": "3"}
+		if tc.raced {
+			set["FAKE_BUILD_RACED"] = "1"
+		}
+		env, log := ciDockerEnv(t, set)
+		stdout, stderr, err := runMakeErr(t, env, "-s", "docker-build-integration",
+			"MODULE_ENV_FILE="+mef, "ITEST_IMAGE="+tc.image)
+		if _, built := called(logLines(t, log), "build "); !built {
+			t.Fatalf("%s: docker build never ran:\n%s", tc.image, readLog(t, log))
+		}
+		switch {
+		case tc.wantOK && err != nil:
+			t.Errorf("%s raced=%v: failed although another job built the same content: %v\n%s%s",
+				tc.image, tc.raced, err, stdout, stderr)
+		case tc.wantOK && !strings.Contains(stdout, "another job built the same content"):
+			t.Errorf("%s raced=%v: the success does not say why:\n%s", tc.image, tc.raced, stdout)
+		case !tc.wantOK && err == nil:
+			t.Errorf("%s raced=%v: a failed build passed:\n%s%s", tc.image, tc.raced, stdout, stderr)
+		case !tc.wantOK && !strings.Contains(stderr, "Error 3"):
+			t.Errorf("%s raced=%v: the failure is not the build's exit status:\n%s", tc.image, tc.raced, stderr)
 		}
 	}
 }
