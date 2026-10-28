@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1-alpha] - 2026-10-28
+
+### Fixed
+
+- **A nil Volume or Key is refused with `ErrInvalidArgument` instead of
+  panicking (#211).** `dmcrypt.Activate` checks both before it consults the
+  device-mapper or the kernel keyring, so the refusal is the same as root and
+  as an unprivileged user; before, root reached the nil Volume and the process
+  died. `Volume.AddKeyslot`, `Volume.ChangeKeyslot` and `Volume.Enroll` refuse
+  a nil Key, and a zero `Key{}` that holds no key, the same way. A caller
+  that passes a value it got from `Open` and `Unlock` sees no change.
+
 ### Changed — BREAKING: credentials and keys are `enclave.ByteAccess`, from go-enclave v0.9.0-alpha
 
 - **Credentials and keys are `enclave.ByteAccess`, and callers require go-enclave v0.9.0-alpha.** Every export that took or returned an `*enclave.MemoryEnclave` (`Format`, `Unlock`, `UnlockKeyslot`, `UnlockWithVolumeKey`, `AddKeyslot`, `ChangeKeyslot`, `MigrateToFIPS`, `ParseRecoveryKey`, `ValidatePassphrase`, `KeyProvider.Passphrase` and the `pkg/keyprovider` providers) now takes or returns go-enclave's `enclave.ByteAccess` interface. go-enclave moves from v0.8.0-rc.2 to v0.9.0-alpha. On the way, v0.8.0-rc.1 renamed `MemoryEnclave` to `Memory` with no deprecated aliases, and v0.9.0-alpha replaced `Memory` with interfaces: `NewMemory`, `NewMemoryCopy`, `NewMemorySized`, `Allocator.New`, `Allocator.NewSized` and `Sealed.Open` return `enclave.ByteAccess`, and `NewAllocator`, `NewAllocatorWithinRLimit` and `ProcessAllocator` return the `enclave.Allocator` interface. Callers must require go-enclave v0.9.0-alpha and follow its upgrading guide. Every handle that crosses the API, or that this library creates, is go-enclave locked memory: a handle that reports any other backend is now refused with `ErrNotLockedMemory`, whose chain carries a `*NotLockedMemoryError` naming the reported backend, before it is read, and the handle is not destroyed. The check reads the backend the handle reports; go-enclave has no unforgeable provenance check, so a handle that misreports its backend is outside the guarantee, like any caller that already holds the key. Key material is still borrowed only through `WithBytes`, and a refused allocation still fails the operation. A read-only copy is frozen through go-enclave's `Freezer` capability, and a handle without it fails the operation and is destroyed rather than being used writable.
