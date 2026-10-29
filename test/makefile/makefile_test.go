@@ -956,6 +956,31 @@ func TestDockerBuildBuildsBothDevcontainerImages(t *testing.T) {
 	}
 }
 
+// ci-template v1.29: the integration image's build takes APK_INDEX_SUM as a
+// build argument and the Dockerfile's integration stage alone declares it, so
+// the toolchain image's cache is not keyed by it.
+func TestDockerBuildPassesTheApkIndexSum(t *testing.T) {
+	stdout, stderr := runMake(t, environ(nil, nil), "-n", "docker-build-integration", "IT_IMAGE=go-luks2-ci-it:t")
+	if !strings.Contains(stdout, "--build-arg APK_INDEX_SUM ") {
+		t.Errorf("make -n docker-build-integration lacks --build-arg APK_INDEX_SUM:\n%s%s", stdout, stderr)
+	}
+	stdout, stderr = runMake(t, environ(nil, nil), "-n", "docker-build-toolchain")
+	if strings.Contains(stdout, "APK_INDEX_SUM") {
+		t.Errorf("make -n docker-build-toolchain passes APK_INDEX_SUM:\n%s%s", stdout, stderr)
+	}
+	b, err := os.ReadFile(filepath.Join(repoRoot(t), "build/docker/devcontainer/Dockerfile")) // #nosec G304 -- a fixed file of this repository
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stage := range strings.Split(string(b), "\nFROM ")[1:] {
+		head, _, _ := strings.Cut(stage, "\n")
+		declares := strings.Contains(stage, "\nARG APK_INDEX_SUM\n")
+		if integration := strings.HasSuffix(head, " AS integration"); declares != integration {
+			t.Errorf("Dockerfile stage %q: declares ARG APK_INDEX_SUM = %v, want %v", head, declares, integration)
+		}
+	}
+}
+
 // `make lint` is a gate in CI's image job, so a lint that passes without its
 // linter is the vacuous gate the testing convention forbids: golangci-lint
 // absent FAILS the target, exactly as actionlint absent already does.

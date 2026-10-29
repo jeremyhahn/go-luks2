@@ -379,7 +379,7 @@ The race detector covers the default-tag build of every package on every
 event, in the PR tier's `Race` job; CI's image job runs the same unit legs
 without `-race`, with their coverage gate, in the devcontainer's toolchain
 image. A pull request that changes only Markdown or `docs/` skips both. The
-`Lint Gates` job (PR tier) runs `make -k lint-gates` when the Makefile defines
+`Lint Gates` job (PR tier) runs `make lint-gates` when the Makefile defines
 that target. A draft pull request runs no CI at all, and `CI Gate` fails on it
 until it is marked ready. The workflow is an instance of the shared CI template
 at v1.28.0, which puts `make deps-check` on the PR tier: the image job runs it

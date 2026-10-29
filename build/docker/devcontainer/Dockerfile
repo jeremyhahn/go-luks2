@@ -281,6 +281,12 @@ USER $USERNAME
 # ---- integration ----
 FROM base AS integration
 
+# The Alpine package index checksum (ci-template v1.29, make -s apk-index-sum),
+# which the image's content tag hashes. This stage alone declares it. The base
+# is Debian, with no apk, so CI passes the constant `none` and the tag changes
+# only with the tree; the base stage's apt-get upgrade takes Debian's fixes.
+ARG APK_INDEX_SUM
+
 # strace is a test instrument, not a dependency of the library: it delays one
 # of cryptsetup's own syscalls so a test can make real cryptsetup hold its
 # metadata lock on cue (pkg/luks2/unlockreadlock_integration_test.go).

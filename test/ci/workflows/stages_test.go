@@ -1,7 +1,11 @@
 package workflows
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -129,6 +133,42 @@ func TestDepsCheckRunsOnEveryEvent(t *testing.T) {
 	}
 	if lint := stepIf("make lint (toolchain image)"); deps != lint {
 		t.Errorf("deps-check's if is %q, want make lint's %q", deps, lint)
+	}
+}
+
+// TestApkIndexSumBeforeTheImageName: ci-template v1.29. Every job that names
+// the integration image first reads the Alpine package index checksum into
+// APK_INDEX_SUM, which `make -s it-image` hashes, in the step right before
+// "Name the integration image". The script ships beside the template, v1.
+func TestApkIndexSumBeforeTheImageName(t *testing.T) {
+	ci := readFile(t, ".github/workflows/ci.yml")
+	for _, name := range []string{"image", "lint-gates", "integration", "soak"} {
+		j := job(t, ci, name)
+		var names []string
+		for _, m := range regexp.MustCompile(`(?m)^      - name: (.+)$`).FindAllStringSubmatch(j, -1) {
+			names = append(names, m[1])
+		}
+		at := -1
+		for i, n := range names {
+			if n == "Name the integration image" {
+				at = i
+			}
+		}
+		if at < 1 || names[at-1] != "Read the Alpine package index" {
+			t.Errorf("%s does not read the Alpine package index right before naming the integration image: %v", name, names)
+			continue
+		}
+		run := stepRun(t, j)["Read the Alpine package index"]
+		for _, want := range []string{"sum=$(make -s apk-index-sum)\n", `echo "APK_INDEX_SUM=$sum" >> "$GITHUB_ENV"`} {
+			if !strings.Contains(run, want) {
+				t.Errorf("%s's Read the Alpine package index step lacks %q: %q", name, want, run)
+			}
+		}
+	}
+	// The public release ships no shell scripts (the releasability gate), so
+	// the template's scripts/apk-index-sum.sh is the Makefile's apk-index-sum.
+	if _, err := os.Stat(filepath.Join(repoRoot(t), "scripts")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the repository has a scripts/ directory (stat: %v); the public release ships no shell scripts", err)
 	}
 }
 
@@ -393,8 +433,8 @@ const cacheClass = `CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.e
 // same way -- names the cache class the recipe mounts its volumes under.
 func TestToolchainStagesCacheByTrustClass(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
-	if !strings.HasPrefix(ci, "# ci-template: v1.28.0 (customized)\n") {
-		t.Errorf("ci.yml does not declare ci-template v1.28.0: %.60q", ci)
+	if !strings.HasPrefix(ci, "# ci-template: v1.29.2 (customized)\n") {
+		t.Errorf("ci.yml does not declare ci-template v1.29.2: %.60q", ci)
 	}
 	for _, name := range []string{"image", "lint-gates", "merge-check", "test-race", "fips"} {
 		j := job(t, ci, name)
@@ -480,12 +520,13 @@ var runnerJobs = []string{"ci-gate"}
 // runnerTargets are the make targets any other job may run on the runner: they
 // build the images, run a command in the toolchain image, run the integration
 // suite under compose, print an image's tag (it-image: ci-template v1.23),
-// reap what a dead job left, or trim the cache volumes (ci-template v1.22).
-// Everything else -- every stage, and every check beside one -- is a CMD for
+// reap what a dead job left, trim the cache volumes (ci-template v1.22), or
+// read the base images' Alpine package index with docker (apk-index-sum:
+// ci-template v1.29's script as a recipe). Everything else -- every stage, and every check beside one -- is a CMD for
 // ci-toolchain-run. Soak's "$SOAK_TARGET" is read from its job's env.
 var runnerTargets = []string{
 	"ci-toolchain-run", "ci-reap-stacks", "ci-trim-caches", "docker-build", "docker-build-toolchain",
-	"docker-build-integration", "toolchain-image", "it-image", "integration-test",
+	"docker-build-integration", "toolchain-image", "it-image", "apk-index-sum", "integration-test",
 }
 
 var (

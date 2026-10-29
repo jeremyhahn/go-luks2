@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build build-linux vet-32bit install test test-verbose test-coverage test-integration coverage coverage-report clean fmt vet lint gosec govulncheck vuln trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration test-unit-norace seccomp-diff proto test-pkg docker-build docker-build-cli docker-run deps-check test-fips-mode assert-build-tags toolchain-image it-image docker-build-toolchain toolchain-run ci-toolchain-run ci-reap-stacks ci-trim-caches
+.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build build-linux vet-32bit install test test-verbose test-coverage test-integration coverage coverage-report clean fmt vet lint gosec govulncheck vuln trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration test-unit-norace seccomp-diff proto test-pkg docker-build docker-build-cli docker-run deps-check test-fips-mode assert-build-tags toolchain-image it-image apk-index-sum docker-build-toolchain toolchain-run ci-toolchain-run ci-reap-stacks ci-trim-caches
 
 # Default target
 .DEFAULT_GOAL := help
@@ -576,6 +576,7 @@ docker-build-integration:
 	DOCKER_BUILDKIT=1 docker build \
 		--secret id=gomodauth,src="$$stage" \
 		--build-arg GO_BUILD_PROXY \
+		--build-arg APK_INDEX_SUM \
 		--label $(ITEST_LABEL) \
 		-f $(DEVCONTAINER_DOCKERFILE) --target integration \
 		-t $(ITEST_IMAGE) . || { \
@@ -1519,11 +1520,122 @@ TOOLCHAIN_IMAGE ?= go-luks2-toolchain:$(shell cat $(TOOLCHAIN_INPUTS) 2>/dev/nul
 toolchain-image: ## Print the content-hashed tag of the toolchain image
 	@echo $(TOOLCHAIN_IMAGE)
 
+# ci-template v1.29: one checksum of the Alpine package indexes the
+# devcontainer build resolves against, which each ci.yml job that names the
+# integration image puts in APK_INDEX_SUM before `make -s it-image`.
+# CUSTOMIZE (ci-template v1.29, which ships scripts/apk-index-sum.sh): a
+# Makefile recipe, because the public release ships no shell scripts (the
+# releasability gate) and the runner has make and docker but no Go. It carries
+# the template's apk-index-sum.sh v1 logic and output contract unchanged; the
+# Dockerfile is APK_DOCKERFILE, the script's argument. Each external base image
+# the Dockerfile's FROM lines name (a global ARG default is substituted;
+# `scratch` and earlier stages are skipped) is run once, as root with every
+# capability dropped but the ones apk needs, to read its /etc/apk/repositories
+# and fetch their APKINDEX files with `apk update`. APK_BASE_IMAGES, space
+# separated, replaces the FROM parse. It prints a sha256 over each base image's
+# name, repository list and index checksums, or `none` when no base image has
+# apk (this repository's Debian base), and fails when a base image cannot be
+# resolved, run or updated: a missing index is never a pass.
+define APK_INDEX_SUM_RECIPE
+dockerfile=${APK_DOCKERFILE:-build/docker/devcontainer/Dockerfile}
+
+fail() {
+  echo "::error::apk-index-sum: $*" >&2
+  exit 1
+}
+
+bases=()
+if [ -n "${APK_BASE_IMAGES:-}" ]; then
+  read -r -a bases <<< "$APK_BASE_IMAGES"
+else
+  [ -f "$dockerfile" ] || fail "no Dockerfile at $dockerfile"
+  declare -A arg=() stage=() seen=()
+  # shellcheck disable=SC2016 # a regex, not an expansion
+  ref='\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}|\$([A-Za-z_][A-Za-z0-9_]*)'
+  from=0
+  # Join continuation lines, drop comments, then read one instruction a line.
+  while read -r kw rest; do
+    case ${kw^^} in
+      ARG)
+        # Only a global ARG (before the first FROM) can name a base image.
+        [ "$from" = 0 ] || continue
+        read -r -a kvs <<< "$rest"
+        for kv in "${kvs[@]}"; do
+          case $kv in
+            *=*) v=${kv#*=}; v=${v#\"}; v=${v%\"}; arg[${kv%%=*}]=$v ;;
+          esac
+        done
+        ;;
+      FROM)
+        from=1
+        read -r -a w <<< "$rest"
+        i=0
+        while [ "$i" -lt "${#w[@]}" ] && [ "${w[$i]#--}" != "${w[$i]}" ]; do i=$((i + 1)); done
+        img=${w[$i]:-}
+        [ -n "$img" ] || fail "a FROM line in $dockerfile names no image"
+        # ${NAME}, ${NAME:-default} and $NAME from the global ARG defaults.
+        while [[ $img =~ $ref ]]; do
+          n=${BASH_REMATCH[1]:-${BASH_REMATCH[4]}}
+          v=${arg[$n]:-${BASH_REMATCH[3]}}
+          [ -n "$v" ] || fail "FROM $img in $dockerfile names \$$n, which has no global ARG default; set APK_BASE_IMAGES"
+          img=${img/"${BASH_REMATCH[0]}"/$v}
+        done
+        if [ "${w[$((i + 1))]:-}" != "" ] && [ "${w[$((i + 1))],,}" = as ]; then
+          stage[${w[$((i + 2))],,}]=1
+        fi
+        [ "${img,,}" = scratch ] && continue
+        [ -n "${stage[${img,,}]:-}" ] && continue
+        [ -n "${seen[$img]:-}" ] && continue
+        seen[$img]=1
+        bases+=("$img")
+        ;;
+    esac
+  done < <(sed -e ':a' -e '/\\$/N; s/\\\n/ /; ta' -e 's/^[[:space:]]*#.*//' "$dockerfile")
+fi
+
+[ "${#bases[@]}" -gt 0 ] || fail "no base image found in $dockerfile"
+
+# Runs in the base image. A base without apk contributes `none`.
+# shellcheck disable=SC2016 # expanded by the container's shell
+probe='command -v apk >/dev/null 2>&1 || { echo none; exit 0; }
+apk update --quiet >/dev/null || exit 3
+set -- /var/cache/apk/APKINDEX.*.tar.gz
+[ -f "$1" ] || exit 4
+sed "s/[[:space:]]*$//" /etc/apk/repositories | grep -v "^#" | grep . | sort
+sha256sum "$@" | sed "s|  .*/| |" | sort'
+
+sum_input=
+alpine=0
+for img in "${bases[@]}"; do
+  out=$(docker run --rm --pull missing --network bridge --user 0 \
+          --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
+          --security-opt no-new-privileges --entrypoint /bin/sh "$img" -c "$probe") ||
+    fail "reading the Alpine package index of $img failed (exit $?)"
+  [ "$out" = none ] || alpine=1
+  echo "apk-index-sum: $img: $(printf '%s\n' "$out" | grep -c 'APKINDEX' || true) index file(s)" >&2
+  sum_input+="$img"$'\n'"$out"$'\n'
+done
+
+if [ "$alpine" = 0 ]; then
+  echo none
+else
+  printf '%s' "$sum_input" | sha256sum | cut -d' ' -f1
+fi
+endef
+
+# The recipe runs as the script did, under bash -euo pipefail, from the
+# environment, so make expands none of it; no other recipe changes shell.
+apk-index-sum: SHELL := /bin/bash
+apk-index-sum: .SHELLFLAGS := -euo pipefail -c
+apk-index-sum: export APK_INDEX_SUM_SH := $(value APK_INDEX_SUM_RECIPE)
+apk-index-sum: ## Print the Alpine package index checksum of the devcontainer's base images (none without apk)
+	@eval "$$APK_INDEX_SUM_SH"
+
 # ci-standard.md §9 (ci-template v1.23): the integration image is named by its
 # content, <CI_STACK_PREFIX>it:<hash>, never by its run, so every job and run
 # of one tree on a runner builds it once and reuses it. The hash covers the
-# build arguments that change the image (GO_BUILD_PROXY, the label, the
-# target) and the whole build context: the commit's tree and, on a dirty
+# build arguments that change the image (GO_BUILD_PROXY, APK_INDEX_SUM, the
+# label, the target) and the whole build context: the commit's tree and, on a dirty
 # checkout, the diff and every untracked file .gitignore keeps. No job removes
 # the image; ci-reap-stacks ages it out. It fails closed: when git cannot
 # read the tree (no .git, as in a published export, or a checkout git calls
@@ -1540,6 +1652,7 @@ it-image: ## Print the content-addressed tag of the integration image
 	git ls-files -z --others --exclude-standard > "$$d/untracked" || fail 'git ls-files --others'; \
 	xargs -0r sha256sum -- < "$$d/untracked" >> "$$d/in" || fail 'hashing the untracked files'; \
 	printf 'GO_BUILD_PROXY=%s\nlabel=%s\ntarget=integration\n' "$${GO_BUILD_PROXY:-}" '$(ITEST_LABEL)' >> "$$d/in"; \
+	printf 'APK_INDEX_SUM=%s\n' "$${APK_INDEX_SUM:-}" >> "$$d/in"; \
 	h=$$(sha256sum < "$$d/in" | cut -c1-16); \
 	case "$$h" in *[!0-9a-f]*|'') fail 'sha256sum' ;; esac; \
 	echo "$(CI_STACK_PREFIX)it:$$h"

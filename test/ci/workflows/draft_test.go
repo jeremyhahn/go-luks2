@@ -84,9 +84,10 @@ func TestCIGateFailsOnADraft(t *testing.T) {
 	}
 }
 
-// TestLintGatesJob (ci-template v1.27): a repository's `make -k lint-gates`
+// TestLintGatesJob (ci-template v1.27): a repository's `make lint-gates`
 // runs in its own job in parallel with the image job's lint, on the PR tier,
-// and only when the Makefile or a tracked *.mk defines the target.
+// and only when the Makefile or a tracked *.mk defines the target. v1.29.1
+// drops -k, so the first failing gate ends the step.
 func TestLintGatesJob(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
 	lg := job(t, ci, "lint-gates")
@@ -116,8 +117,9 @@ func TestLintGatesJob(t *testing.T) {
 		t.Errorf("the probe does not look for the target in the Makefile and tracked *.mk: %q", probe)
 	}
 	run := steps["make lint-gates"]
-	if !strings.Contains(run, `make ci-toolchain-run CMD="make -k lint-gates `) {
-		t.Errorf("lint-gates does not run make -k lint-gates in the toolchain image: %q", run)
+	// v1.29.1: no -k; the first failing gate ends the step.
+	if !strings.Contains(run, `make ci-toolchain-run CMD="make lint-gates `) {
+		t.Errorf("lint-gates does not run make lint-gates, without -k, in the toolchain image: %q", run)
 	}
 	const defined = "steps.probe.outputs.has_target == 'true'"
 	for _, block := range strings.Split(lg, "\n      - ")[1:] {
@@ -135,7 +137,7 @@ func TestLintGatesJob(t *testing.T) {
 // workflow is an instance of.
 func TestCIHeaderNamesTheTemplateVersion(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
-	if first, _, _ := strings.Cut(ci, "\n"); first != "# ci-template: v1.28.0 (customized)" {
-		t.Errorf("ci.yml's first line is %q, want the v1.28.0 header", first)
+	if first, _, _ := strings.Cut(ci, "\n"); first != "# ci-template: v1.29.2 (customized)" {
+		t.Errorf("ci.yml's first line is %q, want the v1.29.2 header", first)
 	}
 }

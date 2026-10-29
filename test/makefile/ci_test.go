@@ -1,6 +1,8 @@
 package makefile
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -627,6 +629,188 @@ func TestITImageNamesTheTreesContent(t *testing.T) {
 	if !strings.Contains(stderr, "has no integration image name") || !strings.Contains(stderr, "not a git repository") {
 		t.Errorf("it-image outside a git work tree gave the reason %q, want git's and its own", stderr)
 	}
+}
+
+// ci-template v1.29: `make -s it-image` hashes APK_INDEX_SUM, the Alpine
+// package index checksum, so a new value renames the integration image and
+// the same value names it the same. This repository's base has no apk, so CI
+// passes the constant `none` and its name changes only with its tree.
+func TestITImageHashesTheApkIndexSum(t *testing.T) {
+	envWith := func(sum string) []string {
+		return environ([]string{"GO_BUILD_PROXY", "ITEST_IMAGE", "GIT_DIR", "GIT_WORK_TREE", "APK_INDEX_SUM"}, map[string]string{
+			"PATH": os.Getenv("PATH"), "GIT_CONFIG_GLOBAL": os.DevNull, "GIT_CONFIG_NOSYSTEM": "1", "APK_INDEX_SUM": sum,
+		})
+	}
+	repo := itImageTree(t, envWith(""), true)
+	name := func(sum string) string {
+		t.Helper()
+		stdout, _ := runMakeIn(t, repo, envWith(sum), "-s", "it-image")
+		return strings.TrimSpace(stdout)
+	}
+	x, y := name("x"), name("y")
+	if x == y {
+		t.Errorf("APK_INDEX_SUM x and y name the same image %s", x)
+	}
+	if again := name("x"); again != x {
+		t.Errorf("APK_INDEX_SUM x names %s, then %s", x, again)
+	}
+	if none := name("none"); none == x || none != name("none") {
+		t.Errorf("APK_INDEX_SUM none names %s, which is x's or unstable", none)
+	}
+}
+
+// apkDocker is a docker stand-in for `make -s apk-index-sum`. Each `docker
+// run` appends its image, the argument after `--entrypoint /bin/sh`, to the
+// returned log, prints the returned output file and exits with exit.
+func apkDocker(t *testing.T, exit int) (path, log, out string) {
+	t.Helper()
+	bin := t.TempDir()
+	log, out = filepath.Join(bin, "images"), filepath.Join(bin, "out")
+	script := fmt.Sprintf(`#!/bin/sh
+prev= next=
+for a do
+  if [ -n "$next" ]; then echo "$a" >> %q; break; fi
+  [ "$prev" = --entrypoint ] && next=1
+  prev=$a
+done
+cat %q
+exit %d
+`, log, out, exit)
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(script), 0o700); err != nil { // #nosec G306 -- an executable test fixture under t.TempDir()
+		t.Fatalf("writing the docker stand-in: %v", err)
+	}
+	if err := os.WriteFile(out, []byte("none\n"), 0o600); err != nil {
+		t.Fatalf("writing the stand-in's output: %v", err)
+	}
+	return bin + string(os.PathListSeparator) + os.Getenv("PATH"), log, out
+}
+
+// apkIndexSum runs `make -s apk-index-sum` with docker on path and the given
+// APK_BASE_IMAGES and APK_DOCKERFILE (unset when empty).
+func apkIndexSum(t *testing.T, path, bases, dockerfile string) (stdout, stderr string, err error) {
+	t.Helper()
+	set := map[string]string{"PATH": path}
+	if bases != "" {
+		set["APK_BASE_IMAGES"] = bases
+	}
+	if dockerfile != "" {
+		set["APK_DOCKERFILE"] = dockerfile
+	}
+	return runMakeErr(t, environ([]string{"APK_BASE_IMAGES", "APK_DOCKERFILE"}, set), "-s", "apk-index-sum")
+}
+
+func readImages(t *testing.T, log string) []string {
+	t.Helper()
+	b, err := os.ReadFile(log) // #nosec G304 -- a path under t.TempDir()
+	if err != nil {
+		t.Fatalf("reading the images docker ran: %v", err)
+	}
+	return strings.Fields(string(b))
+}
+
+// ci-template v1.29: apk-index-sum (the template's scripts/apk-index-sum.sh
+// v1, a Makefile recipe here) prints `none` when no base image has apk, which
+// is this repository's Debian base.
+func TestApkIndexSumPrintsNoneWithoutApk(t *testing.T) {
+	path, log, _ := apkDocker(t, 0)
+	stdout, stderr, err := apkIndexSum(t, path, "", "")
+	if err != nil || stdout != "none\n" {
+		t.Fatalf("make -s apk-index-sum = %q, %v; want none\n%s", stdout, err, stderr)
+	}
+	if images := readImages(t, log); len(images) == 0 {
+		t.Errorf("apk-index-sum ran no base image of the devcontainer Dockerfile")
+	}
+}
+
+// The sum is a sha256 over each base image's name and its probe output, so a
+// new Alpine package index changes it and an unchanged one does not.
+func TestApkIndexSumHashesTheIndex(t *testing.T) {
+	path, _, out := apkDocker(t, 0)
+	index := func(sum string) string {
+		return "https://dl-cdn.alpinelinux.org/alpine/v3.22/community\nhttps://dl-cdn.alpinelinux.org/alpine/v3.22/main\n" +
+			sum + " APKINDEX.0a1b2c3d.tar.gz\n"
+	}
+	sum := func(probe string) string {
+		t.Helper()
+		if err := os.WriteFile(out, []byte(probe), 0o600); err != nil {
+			t.Fatalf("writing the stand-in's output: %v", err)
+		}
+		stdout, stderr, err := apkIndexSum(t, path, "alpine:3.22", "")
+		if err != nil {
+			t.Fatalf("make -s apk-index-sum: %v\n%s", err, stderr)
+		}
+		return stdout
+	}
+	a := index(strings.Repeat("a", 64))
+	got := sum(a)
+	if !regexp.MustCompile(`^[0-9a-f]{64}\n$`).MatchString(got) {
+		t.Fatalf("make -s apk-index-sum = %q, not one sha256", got)
+	}
+	if want := fmt.Sprintf("%x\n", sha256.Sum256([]byte("alpine:3.22\n"+a))); got != want {
+		t.Errorf("make -s apk-index-sum = %q, want the v1 contract's %q", got, want)
+	}
+	if again := sum(a); again != got {
+		t.Errorf("the same index summed to %q, then %q", got, again)
+	}
+	if moved := sum(index(strings.Repeat("b", 64))); moved == got {
+		t.Errorf("a new APKINDEX left the sum at %q", got)
+	}
+}
+
+// A base image whose index cannot be read fails the target: a missing index
+// is never a pass.
+func TestApkIndexSumFailsWhenTheIndexCannotBeRead(t *testing.T) {
+	path, _, _ := apkDocker(t, 3)
+	stdout, stderr, err := apkIndexSum(t, path, "alpine:3.22", "")
+	if err == nil {
+		t.Fatalf("make -s apk-index-sum passed with docker exiting 3: %q", stdout)
+	}
+	if strings.Contains(stdout, "none") || !strings.Contains(stderr, "::error::apk-index-sum: ") {
+		t.Errorf("a failed read printed %q and %q; want no sum and an ::error:: line", stdout, stderr)
+	}
+}
+
+// APK_BASE_IMAGES replaces the Dockerfile parse; the parse reads each external
+// base image once, substituting global ARG defaults and skipping scratch,
+// earlier stages, flags and comments.
+func TestApkIndexSumReadsTheBaseImages(t *testing.T) {
+	t.Run("APK_BASE_IMAGES overrides the Dockerfile", func(t *testing.T) {
+		path, log, _ := apkDocker(t, 0)
+		missing := filepath.Join(t.TempDir(), "Dockerfile")
+		if stdout, stderr, err := apkIndexSum(t, path, "a:1 b:2", missing); err != nil || stdout != "none\n" {
+			t.Fatalf("make -s apk-index-sum = %q, %v\n%s", stdout, err, stderr)
+		}
+		if got := readImages(t, log); !slices.Equal(got, []string{"a:1", "b:2"}) {
+			t.Errorf("docker ran %v, want [a:1 b:2]", got)
+		}
+	})
+	t.Run("the Dockerfile parse", func(t *testing.T) {
+		path, log, _ := apkDocker(t, 0)
+		dockerfile := filepath.Join(t.TempDir(), "Dockerfile")
+		content := `ARG BASE=alpine:3.22
+ARG GO_IMAGE="golang:1.25-alpine"
+# FROM commented:1
+FROM ${BASE} AS base
+FROM base AS integration
+from --platform=$BUILDPLATFORM $GO_IMAGE as Tool
+FROM tool AS again
+FROM scratch AS out
+FROM ${OTHER:-debian:13} AS d
+FROM \
+  busybox:1 AS bb
+FROM alpine:3.22
+`
+		if err := os.WriteFile(dockerfile, []byte(content), 0o600); err != nil {
+			t.Fatalf("writing the Dockerfile: %v", err)
+		}
+		if stdout, stderr, err := apkIndexSum(t, path, "", dockerfile); err != nil || stdout != "none\n" {
+			t.Fatalf("make -s apk-index-sum = %q, %v\n%s", stdout, err, stderr)
+		}
+		want := []string{"alpine:3.22", "golang:1.25-alpine", "debian:13", "busybox:1"}
+		if got := readImages(t, log); !slices.Equal(got, want) {
+			t.Errorf("docker ran %v, want %v", got, want)
+		}
+	})
 }
 
 // itImageTree is a directory under t.TempDir() holding a copy of the Makefile
