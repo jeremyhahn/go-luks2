@@ -30,6 +30,7 @@ func TestMissingArgsAcrossCommands(t *testing.T) {
 		{"recovery add", runRecoveryAdd, nil},
 		{"recovery verify", runRecoveryVerify, nil},
 		{"token list", runTokenList, nil},
+		{"token show", runTokenShow, nil},
 		{"token export", runTokenExport, []string{"/dev/sdb1"}},
 		{"token import", runTokenImport, []string{"/dev/sdb1"}},
 		{"token remove", runTokenRemove, []string{"/dev/sdb1"}},

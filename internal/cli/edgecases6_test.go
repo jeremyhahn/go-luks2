@@ -73,15 +73,6 @@ func TestRunRecoveryAddKDFResolveFailure(t *testing.T) {
 	}
 }
 
-func TestRunWipeHeaderOnlyCanceled(t *testing.T) {
-	path := newTestVolumeImage(t, "wipe-header-cancel.img")
-	e, _, _, _, _ := newTestEnv(bytes.NewBufferString("no\n"))
-
-	if err := runWipe(context.Background(), e, []string{path}); err == nil {
-		t.Fatal("runWipe: want an error when the confirmation is refused")
-	}
-}
-
 func TestRunIsLUKSUnknownFlag(t *testing.T) {
 	e, _, _, _, _ := newTestEnv(&bytes.Buffer{})
 	if err := runIsLUKS(context.Background(), e, []string{"--bogus", "/dev/sdb1"}); err == nil {

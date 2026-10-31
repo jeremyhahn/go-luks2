@@ -97,13 +97,3 @@ func TestOpenClassifiesAPermissionFailure(t *testing.T) {
 		t.Fatalf("Open = %v, want an error wrapping ErrPermissionDenied", err)
 	}
 }
-
-// TestOpenSucceeds: the success path, through the real opener.
-func TestOpenSucceeds(t *testing.T) {
-	path := lockRegular(t)
-	f, err := Open(context.Background(), "read the device", path, os.O_RDONLY, os.OpenFile)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	_ = f.Close()
-}

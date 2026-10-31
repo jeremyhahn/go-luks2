@@ -352,10 +352,3 @@ func TestRunTokenExportAndImportThroughFiles(t *testing.T) {
 		t.Errorf("exported file should exist: %v", err)
 	}
 }
-
-func TestRunTokenShowMissingArgs(t *testing.T) {
-	e, _, _, _, _ := newTestEnv(&bytes.Buffer{})
-	if err := runTokenShow(context.Background(), e, nil); err == nil {
-		t.Fatal("runTokenShow: want a usage error with no arguments")
-	}
-}

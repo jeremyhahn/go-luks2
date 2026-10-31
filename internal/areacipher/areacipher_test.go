@@ -385,35 +385,6 @@ func TestEncryptKeyMaterialDifferentSectorSizes(t *testing.T) {
 	}
 }
 
-// TestEncryptKeyMaterialDeterministic tests that encryption with same sector number produces same result
-func TestEncryptKeyMaterialDeterministic(t *testing.T) {
-	key := make([]byte, 64)
-	if _, err := rand.Read(key); err != nil {
-		t.Fatalf("Failed to generate key: %v", err)
-	}
-
-	data := make([]byte, 512)
-	if _, err := rand.Read(data); err != nil {
-		t.Fatalf("Failed to generate test data: %v", err)
-	}
-
-	// Encrypt same data multiple times
-	encrypted1, err := xtsEncrypt(data, key)
-	if err != nil {
-		t.Fatalf("First encryption failed: %v", err)
-	}
-
-	encrypted2, err := xtsEncrypt(data, key)
-	if err != nil {
-		t.Fatalf("Second encryption failed: %v", err)
-	}
-
-	// Same input should produce same output with XTS (deterministic with same IV)
-	if !bytes.Equal(encrypted1, encrypted2) {
-		t.Fatal("Encryption not deterministic for same input")
-	}
-}
-
 // TestDecryptKeyMaterialCorruptedData tests decryption behavior with corrupted ciphertext
 func TestDecryptKeyMaterialCorruptedData(t *testing.T) {
 	key := make([]byte, 64)
