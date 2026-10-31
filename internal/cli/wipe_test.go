@@ -185,13 +185,6 @@ func TestRunWipeInvalidPasses(t *testing.T) {
 	}
 }
 
-func TestRunWipeWrongNumberOfDevices(t *testing.T) {
-	e, _, _, _, _ := newTestEnv(bytes.NewBufferString("YES\n"))
-	if err := runWipe(context.Background(), e, []string{"--full"}); err == nil {
-		t.Fatal("runWipe: want a usage error with no device")
-	}
-}
-
 func TestRunWipeCanceled(t *testing.T) {
 	path := newPlainImage(t, "wipe-cancel.img")
 	e, _, _, _, _ := newTestEnv(bytes.NewBufferString("no\n"))

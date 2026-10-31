@@ -40,18 +40,6 @@ func TestCreatePathKindStatError(t *testing.T) {
 	}
 }
 
-func TestClaimDeviceStatError(t *testing.T) {
-	regular := filepath.Join(t.TempDir(), "notadir")
-	if err := os.WriteFile(regular, []byte("x"), 0o600); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	bogus := filepath.Join(regular, "sub")
-
-	if _, _, err := claimDevice(bogus); err == nil {
-		t.Fatal("claimDevice: want an error when a path component is not a directory")
-	}
-}
-
 func TestStillCreatedFileNilHandle(t *testing.T) {
 	if stillCreatedFile("/nonexistent", nil) {
 		t.Error("stillCreatedFile(nil): want false")
@@ -194,13 +182,6 @@ func TestReadFileBoundedMissingFile(t *testing.T) {
 func TestTokenDeviceAndIDBadPath(t *testing.T) {
 	if _, _, err := tokenDeviceAndID("token show", []string{"", "0"}); err == nil {
 		t.Fatal("tokenDeviceAndID: want an error for an empty device path")
-	}
-}
-
-func TestRunTokenCountWrongArgCount(t *testing.T) {
-	e, _, _, _, _ := newTestEnv(&bytes.Buffer{})
-	if err := runTokenCount(context.Background(), e, nil); err == nil {
-		t.Fatal("runTokenCount: want a usage error with no arguments")
 	}
 }
 

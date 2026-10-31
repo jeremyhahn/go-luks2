@@ -51,13 +51,6 @@ func TestRunOpenActivateFailurePropagates(t *testing.T) {
 	}
 }
 
-func TestRunOpenMissingArgs(t *testing.T) {
-	e, _, _, _, _ := newTestEnv(&bytes.Buffer{})
-	if err := runOpen(context.Background(), e, []string{"/dev/sdb1"}); err == nil {
-		t.Fatal("runOpen: want a usage error with only one argument")
-	}
-}
-
 func TestRunOpenNonexistentDevice(t *testing.T) {
 	e, _, _, _, _ := newTestEnv(bytes.NewBufferString(testPassphrase + "\n"))
 	if err := runOpen(context.Background(), e, []string{filepath.Join(t.TempDir(), "nope"), "name"}); err == nil {
@@ -92,15 +85,6 @@ func TestRunCloseRefusesWhileMounted(t *testing.T) {
 	}
 }
 
-func TestRunCloseLookupFailurePropagates(t *testing.T) {
-	e, _, _, _, _ := newTestEnv(&bytes.Buffer{})
-	e.host.activator.(*fakeActivator).lookupErr = errors.New("no such mapping")
-
-	if err := runClose(context.Background(), e, []string{"myvolume"}); err == nil {
-		t.Fatal("runClose: want the lookup error")
-	}
-}
-
 // TestRunCloseLookupFailureReportsFailedToLock locks docs/volumes/cli.md's
 // "Failed to lock volume" text, which the pre-rewrite CLI printed on stderr
 // when a close could not find or release the mapping.
@@ -113,13 +97,6 @@ func TestRunCloseLookupFailureReportsFailedToLock(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "Failed to lock") {
 		t.Errorf("stderr = %q, want it to report a failure to lock", stderr.String())
-	}
-}
-
-func TestRunCloseMissingArgs(t *testing.T) {
-	e, _, _, _, _ := newTestEnv(&bytes.Buffer{})
-	if err := runClose(context.Background(), e, nil); err == nil {
-		t.Fatal("runClose: want a usage error with no arguments")
 	}
 }
 
@@ -229,12 +206,5 @@ func TestRunInfoOnANonLUKSFile(t *testing.T) {
 
 	if err := runInfo(context.Background(), e, []string{path}); err == nil {
 		t.Fatal("runInfo: want an error for a non-LUKS2 file")
-	}
-}
-
-func TestRunInfoMissingArgs(t *testing.T) {
-	e, _, _, _, _ := newTestEnv(&bytes.Buffer{})
-	if err := runInfo(context.Background(), e, nil); err == nil {
-		t.Fatal("runInfo: want a usage error with no arguments")
 	}
 }

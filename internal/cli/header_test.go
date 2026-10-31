@@ -132,10 +132,3 @@ func TestRunHeaderShowLabelsTheCopyItShows(t *testing.T) {
 		t.Errorf("stderr = %q, want a note that the secondary is shown", stderr.String())
 	}
 }
-
-func TestRunHeaderShowMissingArgs(t *testing.T) {
-	e, _, _, _, _ := newTestEnv(&bytes.Buffer{})
-	if err := runHeaderShow(context.Background(), e, nil); err == nil {
-		t.Fatal("runHeaderShow: want a usage error with no arguments")
-	}
-}

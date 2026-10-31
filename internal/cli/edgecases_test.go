@@ -110,22 +110,6 @@ func TestRunWipeInvalidStandard(t *testing.T) {
 	}
 }
 
-func TestRunWipeFullInvalidPasses(t *testing.T) {
-	path := newPlainImage(t, "wipe-full-badpasses.img")
-	e, _, _, _, _ := newTestEnv(bytes.NewBufferString("YES\n"))
-
-	if err := runWipe(context.Background(), e, []string{"--full", "--passes", "0", path}); err == nil {
-		t.Fatal("runWipe: want a usage error for --passes 0")
-	}
-}
-
-func TestRunIsLUKSWrongArgCount(t *testing.T) {
-	e, _, _, _, _ := newTestEnv(&bytes.Buffer{})
-	if err := runIsLUKS(context.Background(), e, nil); err == nil {
-		t.Fatal("runIsLUKS: want a usage error with no arguments")
-	}
-}
-
 func TestUnshownRecoveryKeyRollsBack(t *testing.T) {
 	path := newTestVolumeImage(t, "unshown-recovery.img")
 

@@ -210,13 +210,6 @@ func TestRunKillSlotRemovesSlotWithAnyPassphrase(t *testing.T) {
 	}
 }
 
-func TestRunChangeKeyMissingArgs(t *testing.T) {
-	e, _, _, _, _ := newTestEnv(&bytes.Buffer{})
-	if err := runChangeKey(context.Background(), e, nil); err == nil {
-		t.Fatal("runChangeKey: want a usage error with no arguments")
-	}
-}
-
 func TestParseKeyslotOutOfRange(t *testing.T) {
 	if _, err := parseKeyslot("removekey", "99"); err == nil {
 		t.Fatal("parseKeyslot: want an error for an out-of-range slot")

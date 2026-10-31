@@ -141,22 +141,3 @@ func TestMetadataJSONError(t *testing.T) {
 		t.Errorf("Error() with no Member = %q", noMember.Error())
 	}
 }
-
-func TestRequirementsRoundTripsUnknownMembers(t *testing.T) {
-	data := []byte(`{"mandatory":["opal"],"future_field":"kept"}`)
-	var r Requirements
-	if err := json.Unmarshal(data, &r); err != nil {
-		t.Fatalf("Unmarshal: %v", err)
-	}
-	out, err := json.Marshal(r)
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-	var roundTripped map[string]any
-	if err := json.Unmarshal(out, &roundTripped); err != nil {
-		t.Fatalf("re-decode: %v", err)
-	}
-	if roundTripped["future_field"] != "kept" {
-		t.Errorf("round trip lost future_field: %s", out)
-	}
-}

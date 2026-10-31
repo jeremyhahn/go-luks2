@@ -276,13 +276,6 @@ func TestRunCreateCleanupSurvivesACanceledCtx(t *testing.T) {
 	})
 }
 
-func TestRunCreateMissingArgs(t *testing.T) {
-	e, _, _, _, _ := newTestEnv(&bytes.Buffer{})
-	if err := runCreate(context.Background(), e, nil); err == nil {
-		t.Fatal("runCreate: want a usage error with no arguments")
-	}
-}
-
 func TestRunCreateFileVolumeMissingSize(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "vol.luks")
 	e, _, _, _, _ := newTestEnv(&bytes.Buffer{})

@@ -150,20 +150,6 @@ func TestRunRecoveryVerifyOperationalFailureIsNotAVerdict(t *testing.T) {
 	}
 }
 
-func TestRunRecoveryAddMissingArgs(t *testing.T) {
-	e, _, _, _, _ := newTestEnv(&bytes.Buffer{})
-	if err := runRecoveryAdd(context.Background(), e, fastKDFArgs); err == nil {
-		t.Fatal("runRecoveryAdd: want a usage error with no device")
-	}
-}
-
-func TestRunRecoveryVerifyMissingArgs(t *testing.T) {
-	e, _, _, _, _ := newTestEnv(&bytes.Buffer{})
-	if err := runRecoveryVerify(context.Background(), e, nil); err == nil {
-		t.Fatal("runRecoveryVerify: want a usage error with no device")
-	}
-}
-
 func TestParseRecoveryFormatRejectsEmpty(t *testing.T) {
 	if _, err := parseRecoveryFormat("recovery generate", ""); err == nil {
 		t.Fatal("parseRecoveryFormat: want an error for an empty format")

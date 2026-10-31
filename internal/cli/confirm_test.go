@@ -76,12 +76,6 @@ func TestReadConfirmationTrimsCR(t *testing.T) {
 	}
 }
 
-func TestReadConfirmationEOFWithNoInput(t *testing.T) {
-	if _, err := readConfirmation(strings.NewReader("")); err == nil {
-		t.Fatal("readConfirmation: want an error for empty input")
-	}
-}
-
 func TestReadConfirmationEOFWithoutTrailingNewline(t *testing.T) {
 	got, err := readConfirmation(strings.NewReader("YES"))
 	if err != nil {

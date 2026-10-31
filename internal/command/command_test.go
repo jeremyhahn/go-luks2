@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -36,6 +37,40 @@ func writeScript(t *testing.T, path, body string) {
 	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0o700); err != nil { // #nosec G306 -- an executable test fixture under t.TempDir()
 		t.Fatalf("writing %s failed: %v", path, err)
 	}
+}
+
+// childPIDFIFO makes a FIFO the script under test writes its backgrounded
+// child's PID into. Opening a FIFO blocks until the other end opens it, so
+// the read in readChildPID is the handshake itself: no polling for a file.
+func childPIDFIFO(t *testing.T, dir string) string {
+	t.Helper()
+	path := filepath.Join(dir, "child.pid")
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatalf("mkfifo %s failed: %v", path, err)
+	}
+	return path
+}
+
+// readChildPID blocks until the script has written the PID into fifo and
+// closed it, and fails the test if that does not happen within 5 s.
+func readChildPID(t *testing.T, fifo string) int {
+	t.Helper()
+	got := make(chan []byte, 1)
+	go func() {
+		b, _ := os.ReadFile(fifo) // #nosec G304 -- path built from t.TempDir()
+		got <- b
+	}()
+	select {
+	case b := <-got:
+		pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+		if err != nil {
+			t.Fatalf("the recorded PID %q does not parse: %v", b, err)
+		}
+		return pid
+	case <-time.After(5 * time.Second):
+		t.Fatal("the backgrounded child never recorded its PID")
+	}
+	return 0
 }
 
 func TestSystemLooksOnlyInSystemDirectoriesWithTheCLocale(t *testing.T) {
@@ -200,7 +235,7 @@ func TestCommandWithAnAlreadyCancelledCtxNeverStartsTheProgram(t *testing.T) {
 // of their own, and a cancellation that left those running would not be one.
 func TestRunKillsTheWholeProcessGroupOnCancel(t *testing.T) {
 	bin := trustedDir(t)
-	pidFile := filepath.Join(bin, "child.pid")
+	pidFile := childPIDFIFO(t, bin)
 	writeScript(t, filepath.Join(bin, "longrun"), "sleep 30 &\necho $! > "+pidFile+"\nwait\n")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -210,18 +245,7 @@ func TestRunKillsTheWholeProcessGroupOnCancel(t *testing.T) {
 		done <- err
 	}()
 
-	var childPID string
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if b, err := os.ReadFile(pidFile); err == nil && len(b) > 0 { // #nosec G304 -- path built from t.TempDir() above
-			childPID = strings.TrimSpace(string(b))
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the backgrounded child never recorded its PID")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	pid := readChildPID(t, pidFile)
 
 	cancel()
 	select {
@@ -233,10 +257,6 @@ func TestRunKillsTheWholeProcessGroupOnCancel(t *testing.T) {
 		t.Fatal("Run did not return within the wait-delay budget after cancellation")
 	}
 
-	pid, err := strconv.Atoi(childPID)
-	if err != nil {
-		t.Fatalf("the recorded PID %q does not parse: %v", childPID, err)
-	}
 	// Not a liveness check by kill(pid, 0): a terminated child is reparented
 	// to PID 1, and a container's PID 1 is not guaranteed to reap it, so it
 	// can sit as a zombie -- still "alive" by that signal -- indefinitely.
@@ -260,7 +280,7 @@ func TestRunKillsTheWholeProcessGroupOnCancel(t *testing.T) {
 // takes the process group (-pgid), not only the leader.
 func TestRunKillsTheWholeGroupWhenTermIsIgnored(t *testing.T) {
 	bin := trustedDir(t)
-	pidFile := filepath.Join(bin, "child.pid")
+	pidFile := childPIDFIFO(t, bin)
 	writeScript(t, filepath.Join(bin, "stubborn"),
 		"trap '' TERM\n(trap '' TERM; exec sleep 30) &\necho $! > "+pidFile+"\nwait\n")
 
@@ -271,18 +291,7 @@ func TestRunKillsTheWholeGroupWhenTermIsIgnored(t *testing.T) {
 		done <- err
 	}()
 
-	var childPID string
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if b, err := os.ReadFile(pidFile); err == nil && len(b) > 0 { // #nosec G304 -- path built from t.TempDir() above
-			childPID = strings.TrimSpace(string(b))
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the backgrounded child never recorded its PID")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	pid := readChildPID(t, pidFile)
 
 	cancel()
 	select {
@@ -294,10 +303,6 @@ func TestRunKillsTheWholeGroupWhenTermIsIgnored(t *testing.T) {
 		t.Fatal("Run did not return after the grace expired")
 	}
 
-	pid, err := strconv.Atoi(childPID)
-	if err != nil {
-		t.Fatalf("the recorded PID %q does not parse: %v", childPID, err)
-	}
 	// The SIGKILL of the group is sent as the grace expires; give the kernel a
 	// moment to deliver it. A zombie or an absent entry is a dead process.
 	for end := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {

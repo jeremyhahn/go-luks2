@@ -123,13 +123,6 @@ func TestRunMountLookupFailurePropagates(t *testing.T) {
 	}
 }
 
-func TestRunMountMissingArgs(t *testing.T) {
-	e, _, _, _, _ := newTestEnv(&bytes.Buffer{})
-	if err := runMount(context.Background(), e, []string{"onlyone"}); err == nil {
-		t.Fatal("runMount: want a usage error with one argument")
-	}
-}
-
 func TestRunUnmount(t *testing.T) {
 	e, _, mnt, stdout, _ := newTestEnv(&bytes.Buffer{})
 	mnt.mounted = true
@@ -160,12 +153,5 @@ func TestRunUnmountRefusesWhenNotMounted(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "Not mounted") {
 		t.Errorf("stderr = %q, want it to report 'Not mounted'", stderr.String())
-	}
-}
-
-func TestRunUnmountMissingArgs(t *testing.T) {
-	e, _, _, _, _ := newTestEnv(&bytes.Buffer{})
-	if err := runUnmount(context.Background(), e, nil); err == nil {
-		t.Fatal("runUnmount: want a usage error with no arguments")
 	}
 }

@@ -38,17 +38,6 @@ func TestRunHelp(t *testing.T) {
 	}
 }
 
-func TestRunVersion(t *testing.T) {
-	stdout := &bytes.Buffer{}
-	code := Run(context.Background(), []string{"luks2", "version"}, &bytes.Buffer{}, stdout, &bytes.Buffer{})
-	if code != 0 {
-		t.Errorf("code = %d, want 0", code)
-	}
-	if !strings.Contains(stdout.String(), "luks2") {
-		t.Errorf("stdout = %q, want it to name luks2", stdout.String())
-	}
-}
-
 // TestRunVersionFlags locks the existing CLI's documented compat surface
 // (docs/volumes/cli.md): --version, -v and version all print "luks2
 // version <X>", not just "luks2 <X>".
