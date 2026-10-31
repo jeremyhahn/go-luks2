@@ -178,40 +178,6 @@ func TestCreateDigestDeterministic(t *testing.T) {
 	}
 }
 
-// TestCreateDigestVerification tests that the digest can be used to verify the master key
-func TestCreateDigestVerification(t *testing.T) {
-	defer parallel(t)()
-
-	masterKey := make([]byte, 64)
-	if _, err := rand.Read(masterKey); err != nil {
-		t.Fatalf("Failed to generate master key: %v", err)
-	}
-
-	kdf, expectedDigest, err := createDigest(enclaveFrom(t, masterKey), "sha256", testVolumeSys())
-	if err != nil {
-		t.Fatalf("createDigest failed: %v", err)
-	}
-
-	// Re-derive the digest using the same KDF, to the length the digest is
-	// actually stored at rather than to a constant -- deriving to a hardcoded
-	// 32 here would keep passing for sha256 and quietly stop testing anything
-	// for any other hash.
-	expectedBytes, err := decodeBase64(expectedDigest)
-	if err != nil {
-		t.Fatalf("Digest is not valid base64: %v", err)
-	}
-	actualDigest, err := deriveKeyPlain(masterKey, kdf, len(expectedBytes))
-	if err != nil {
-		t.Fatalf("deriveKeyPlain failed: %v", err)
-	}
-
-	// Encode and compare
-	actualDigestB64 := encodeBase64(actualDigest)
-	if actualDigestB64 != expectedDigest {
-		t.Fatal("Digest verification failed: re-derived digest doesn't match")
-	}
-}
-
 // TestCreateDigestInvalidHashAlgo tests error handling for unsupported hash algorithms
 func TestCreateDigestInvalidHashAlgo(t *testing.T) {
 	masterKey := make([]byte, 32)

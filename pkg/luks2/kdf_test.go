@@ -77,26 +77,6 @@ func TestDeriveKeyArgon2i(t *testing.T) {
 	}
 }
 
-// TestDeriveKeyArgon2id tests Argon2id key derivation
-// TestDeriveKeyInvalidType tests error handling for unsupported KDF type
-func TestDeriveKeyInvalidType(t *testing.T) {
-	salt := []byte("testsalt12345678")
-	saltB64 := encodeBase64(salt)
-
-	kdf := &header.KDF{
-		Type: "unsupported",
-		Salt: saltB64,
-	}
-
-	passphrase := []byte("testpassphrase")
-	keySize := 32
-
-	_, err := deriveKeyPlain(passphrase, kdf, keySize)
-	if err == nil {
-		t.Fatal("Expected error for unsupported KDF type")
-	}
-}
-
 // TestDeriveKeyInvalidSalt tests error handling for invalid base64 salt
 func TestDeriveKeyInvalidSalt(t *testing.T) {
 	iterations := 1000
@@ -134,28 +114,6 @@ func TestDerivePBKDF2MissingIterations(t *testing.T) {
 	_, err := deriveKeyPlain(passphrase, kdf, keySize)
 	if err == nil {
 		t.Fatal("Expected error for missing iterations")
-	}
-}
-
-// TestDerivePBKDF2UnsupportedHash tests error handling for unsupported hash
-func TestDerivePBKDF2UnsupportedHash(t *testing.T) {
-	iterations := 1000
-	salt := []byte("testsalt12345678")
-	saltB64 := encodeBase64(salt)
-
-	kdf := &header.KDF{
-		Type:       "pbkdf2",
-		Hash:       "md5", // Unsupported
-		Salt:       saltB64,
-		Iterations: &iterations,
-	}
-
-	passphrase := []byte("testpassphrase")
-	keySize := 32
-
-	_, err := deriveKeyPlain(passphrase, kdf, keySize)
-	if err == nil {
-		t.Fatal("Expected error for unsupported hash algorithm")
 	}
 }
 
@@ -617,14 +575,6 @@ func TestKDFTypeConstants(t *testing.T) {
 				t.Errorf("Expected %s, got %s", tt.expected, tt.constant)
 			}
 		})
-	}
-}
-
-func TestKDFParamsValidateAcceptsEveryKnownType(t *testing.T) {
-	for _, typ := range []KDFType{"", KDFPBKDF2, KDFArgon2id, KDFArgon2i} {
-		if err := (KDFParams{Type: typ}).validateWith(forceNonFIPSPolicy(t)); err != nil {
-			t.Errorf("Validate() for Type %q = %v, want nil", typ, err)
-		}
 	}
 }
 

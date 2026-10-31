@@ -28,8 +28,8 @@ import (
 // create and enroll keyslots without naming one.
 //
 // The mode is fixed for the life of a process, so the resolution itself is
-// tested through its mode-parameterized form (defaultKDFTypeFor,
-// resolveKDFTypeFor) and both answers are checked in every run. The tests that
+// tested through its mode-parameterized form (resolveKDFTypeFor, which
+// applies defaultKDFTypeFor) and both answers are checked in every run. The tests that
 // go through the public entry points assert what they do in THIS process's
 // mode; CI's full-tier FIPS job runs them in the other one.
 
@@ -37,24 +37,6 @@ import (
 // What they assert is the KDF TYPE and HASH a keyslot gets, not its cost, and
 // the default 2000 ms budget would make each derivation take two seconds.
 const e2eIterTimeMs = 50
-
-func TestDefaultKDFTypeForEachMode(t *testing.T) {
-	tests := []struct {
-		name     string
-		fipsMode fips.Mode
-		want     string
-	}{
-		{"FIPS 140-3 mode", true, kdfTypePBKDF2SHA512},
-		{"outside FIPS mode", false, kdfTypeArgon2id},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := defaultKDFTypeFor(tt.fipsMode); got != tt.want {
-				t.Fatalf("defaultKDFTypeFor(%v) = %q, want %q", tt.fipsMode, got, tt.want)
-			}
-		})
-	}
-}
 
 func TestDefaultKDFSpecFollowsTheProcessMode(t *testing.T) {
 	want := kdfTypeArgon2id

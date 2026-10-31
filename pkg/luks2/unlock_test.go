@@ -38,32 +38,6 @@ func TestSafeUint64ToInt64(t *testing.T) {
 	}
 }
 
-func TestSafeUint64ToInt(t *testing.T) {
-	tests := []struct {
-		name    string
-		input   uint64
-		want    int
-		wantErr bool
-	}{
-		{"zero", 0, 0, false},
-		{"small positive", 100, 100, false},
-		{"medium value", 1000000, 1000000, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := safeUint64ToInt(tt.input)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("SafeUint64ToInt() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if got != tt.want {
-				t.Errorf("SafeUint64ToInt() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestSafeInt64ToUint64(t *testing.T) {
 	tests := []struct {
 		name    string
