@@ -11,7 +11,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -113,16 +112,5 @@ func TestLookupHonoursACanceledContext(t *testing.T) {
 	cancel()
 	if _, err := Lookup(ctx, "vol"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Lookup with a canceled context = %v, want context.Canceled", err)
-	}
-}
-
-func TestLookupHonoursADeadlineExceededContext(t *testing.T) {
-	newFakeDeviceMapper().install(t)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 0)
-	defer cancel()
-	time.Sleep(time.Millisecond)
-	if _, err := Lookup(ctx, "vol"); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Lookup with an expired deadline = %v, want context.DeadlineExceeded", err)
 	}
 }

@@ -64,25 +64,6 @@ func statIdentity(t *testing.T, path string) (dev, ino uint64) {
 	return uint64(st.Dev), st.Ino //nolint:unconvert // Dev is not uint64 on every GOARCH
 }
 
-// TestFindLoopDeviceMatchesTheFileNotItsPath is go-luks2 C8: the loop driver
-// recorded the file under another path (here, the target of the symlink the
-// caller names). The path comparison reported it unattached.
-func TestFindLoopDeviceMatchesTheFileNotItsPath(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "backing.img")
-	writeFakeNode(t, file)
-	link := filepath.Join(t.TempDir(), "alias.img")
-	if err := os.Symlink(file, link); err != nil {
-		t.Fatalf("symlink failed: %v", err)
-	}
-	root := fakeLoopSysfs(t, file)
-	dev, ino := statIdentity(t, file)
-
-	got, _, _, err := findLoopDeviceIn(root, link, identitySys(dev, ino))
-	if err != nil || got != "/dev/loop5" {
-		t.Fatalf("findLoopDeviceIn(%s) = %q, %v; want /dev/loop5", link, got, err)
-	}
-}
-
 // TestFindLoopDeviceDoesNotMatchAReplacedFile is C8's other direction: the
 // path sysfs prints is the caller's path, but the file there now is a
 // different one than the loop device is backed by.

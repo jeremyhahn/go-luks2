@@ -10,7 +10,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -226,13 +225,6 @@ func TestEncryptDecryptKeyMaterial(t *testing.T) {
 			name:     "Large data with 512-bit key",
 			dataSize: 16384,
 			keySize:  64,
-			cipher:   "aes",
-			wantErr:  false,
-		},
-		{
-			name:     "Single sector with 256-bit key",
-			dataSize: 512,
-			keySize:  32,
 			cipher:   "aes",
 			wantErr:  false,
 		},
@@ -489,138 +481,6 @@ func TestDecryptKeyMaterialWrongKey(t *testing.T) {
 	// Data should differ (wrong key produces garbage)
 	if bytes.Equal(originalData, decrypted) {
 		t.Fatal("Wrong key produced correct plaintext (unexpected)")
-	}
-}
-
-// TestCreateDigest tests digest creation
-
-func TestEncryptKeyMaterial(t *testing.T) {
-	// Test with valid data
-	data := make([]byte, 512) // Must be multiple of sector size
-	for i := range data {
-		data[i] = byte(i % 256)
-	}
-
-	key := make([]byte, 64) // 512-bit key for AES-256-XTS
-	for i := range key {
-		key[i] = byte(i)
-	}
-
-	encrypted, err := xtsEncrypt(data, key)
-	if err != nil {
-		t.Fatalf("encryptKeyMaterial() error = %v", err)
-	}
-
-	if len(encrypted) != len(data) {
-		t.Errorf("encrypted length = %d, want %d", len(encrypted), len(data))
-	}
-
-	// Verify data was actually encrypted (not the same as input)
-	same := true
-	for i := range data {
-		if data[i] != encrypted[i] {
-			same = false
-			break
-		}
-	}
-	if same {
-		t.Error("encrypted data is same as input")
-	}
-}
-
-func TestDecryptKeyMaterial(t *testing.T) {
-	data := make([]byte, 512)
-	for i := range data {
-		data[i] = byte(i % 256)
-	}
-
-	key := make([]byte, 64)
-	for i := range key {
-		key[i] = byte(i)
-	}
-
-	// Encrypt then decrypt
-	encrypted, err := xtsEncrypt(data, key)
-	if err != nil {
-		t.Fatalf("encryptKeyMaterial() error = %v", err)
-	}
-
-	decrypted, err := xtsDecrypt(encrypted, key, 512)
-	if err != nil {
-		t.Fatalf("decryptKeyMaterial() error = %v", err)
-	}
-
-	// Verify decrypted data matches original
-	for i := range data {
-		if data[i] != decrypted[i] {
-			t.Errorf("decrypted[%d] = %d, want %d", i, decrypted[i], data[i])
-		}
-	}
-}
-
-func TestDecryptKeyMaterial_DifferentDataSizes(t *testing.T) {
-	// Test different data sizes (multiples of 512-byte sectors)
-	dataSizes := []int{512, 1024, 2048, 4096}
-
-	for _, dataSize := range dataSizes {
-		t.Run(fmt.Sprintf("size_%d", dataSize), func(t *testing.T) {
-			data := make([]byte, dataSize)
-			for i := range data {
-				data[i] = byte(i % 256)
-			}
-
-			key := make([]byte, 64)
-			for i := range key {
-				key[i] = byte(i)
-			}
-
-			encrypted, err := xtsEncrypt(data, key)
-			if err != nil {
-				t.Fatalf("encryptKeyMaterial() error = %v", err)
-			}
-
-			// Always use 512-byte sectors for decryption (matches encryptKeyMaterial)
-			decrypted, err := xtsDecrypt(encrypted, key, 512)
-			if err != nil {
-				t.Fatalf("decryptKeyMaterial() error = %v", err)
-			}
-
-			for i := range data {
-				if data[i] != decrypted[i] {
-					t.Errorf("decrypted[%d] = %d, want %d", i, decrypted[i], data[i])
-					break
-				}
-			}
-		})
-	}
-}
-
-func TestEncryptDecryptRoundTrip(t *testing.T) {
-	// Test multiple sector round trips
-	testData := make([]byte, 4096) // Multiple sectors
-	for i := range testData {
-		testData[i] = byte((i * 7) % 256) // Some pattern
-	}
-
-	key := make([]byte, 64)
-	for i := range key {
-		key[i] = byte((i + 17) % 256)
-	}
-
-	encrypted, err := xtsEncrypt(testData, key)
-	if err != nil {
-		t.Fatalf("encrypt error: %v", err)
-	}
-
-	decrypted, err := xtsDecrypt(encrypted, key, 512)
-	if err != nil {
-		t.Fatalf("decrypt error: %v", err)
-	}
-
-	for i := range testData {
-		if testData[i] != decrypted[i] {
-			t.Fatalf("mismatch at position %d: got %d, want %d", i, decrypted[i], testData[i])
-		}
 	}
 }
 

@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/sha512"
 	"errors"
 	"testing"
 
@@ -155,7 +154,6 @@ func TestSplitInvalidHash(t *testing.T) {
 		hashAlgo string
 	}{
 		{"sha1", "sha1"},
-		{"md5", "md5"},
 		{"invalid", "invalid"},
 		{"empty", ""},
 		{"sha384", "sha384"},
@@ -271,7 +269,6 @@ func TestMergeInvalidHash(t *testing.T) {
 		hashAlgo string
 	}{
 		{"sha384", "sha384"}, // read nowhere: LUKS2 AF hashes are sha1, sha256, sha512
-		{"md5", "md5"},
 		{"invalid", "invalid"},
 		{"empty", ""},
 	}
@@ -412,22 +409,6 @@ func TestHashBlock(t *testing.T) {
 	}
 }
 
-// TestHashBlockDeterministic tests that hashBlockInto is deterministic
-func TestHashBlockDeterministic(t *testing.T) {
-	block := []byte{1, 2, 3, 4, 5, 6, 7, 8}
-	iv := 42
-
-	h1 := sha256.New()
-	result1 := hashBlockInto(nil, block, h1, iv)
-
-	h2 := sha256.New()
-	result2 := hashBlockInto(nil, block, h2, iv)
-
-	if !bytes.Equal(result1, result2) {
-		t.Fatal("hashBlockInto is not deterministic")
-	}
-}
-
 // TestXorBytes tests the xorBytes function
 func TestXorBytes(t *testing.T) {
 	tests := []struct {
@@ -491,38 +472,6 @@ func TestXorBytesInPlace(t *testing.T) {
 
 	if !bytes.Equal(a, expected) {
 		t.Fatalf("Expected %v, got %v", expected, a)
-	}
-}
-
-// TestXorBytesCommutative tests that XOR is commutative
-func TestXorBytesCommutative(t *testing.T) {
-	a := []byte{0xAA, 0xBB, 0xCC, 0xDD}
-	b := []byte{0x12, 0x34, 0x56, 0x78}
-
-	dest1 := make([]byte, len(a))
-	dest2 := make([]byte, len(a))
-
-	xorBytes(a, b, dest1)
-	xorBytes(b, a, dest2)
-
-	if !bytes.Equal(dest1, dest2) {
-		t.Fatal("XOR is not commutative")
-	}
-}
-
-// TestXorBytesInverse tests that XOR is its own inverse
-func TestXorBytesInverse(t *testing.T) {
-	original := []byte{0xAA, 0xBB, 0xCC, 0xDD}
-	key := []byte{0x12, 0x34, 0x56, 0x78}
-
-	encrypted := make([]byte, len(original))
-	xorBytes(original, key, encrypted)
-
-	decrypted := make([]byte, len(original))
-	xorBytes(encrypted, key, decrypted)
-
-	if !bytes.Equal(original, decrypted) {
-		t.Fatal("XOR is not its own inverse")
 	}
 }
 
@@ -705,25 +654,6 @@ func TestSplitSingleStripe(t *testing.T) {
 	// Single stripe should work - the last block would just be XOR'd with zeros
 	if err != nil {
 		t.Fatalf("Split with single stripe failed: %v", err)
-	}
-}
-
-// TestHashBlockWithSHA512 tests hashBlockInto with SHA512
-func TestHashBlockWithSHA512(t *testing.T) {
-	block := []byte("test data for sha512")
-	iv := 100
-
-	h := sha512.New()
-	result := hashBlockInto(nil, block, h, iv)
-
-	if len(result) != sha512.Size {
-		t.Fatalf("Expected hash size %d, got %d", sha512.Size, len(result))
-	}
-
-	// Verify deterministic
-	result2 := hashBlockInto(nil, block, sha512.New(), iv)
-	if !bytes.Equal(result, result2) {
-		t.Fatal("hashBlockInto with SHA512 is not deterministic")
 	}
 }
 

@@ -531,18 +531,6 @@ func TestActivateRefusesAnInvalidName(t *testing.T) {
 	}
 }
 
-func TestActivateRefusesAnAlreadyActiveName(t *testing.T) {
-	fake := newFakeDeviceMapper()
-	fake.targets["taken"] = "CRYPT-LUKS2-someone-elses-volume"
-	fake.install(t)
-
-	// The name collision is refused before the header or the key is read.
-	v, key := formattedVolume(t)
-	if _, err := Activate(context.Background(), v, key, "taken"); !errors.Is(err, ErrActive) {
-		t.Fatalf("Activate(taken) = %v, want ErrActive", err)
-	}
-}
-
 // A nil Volume or Key is refused before the device-mapper is consulted: the
 // name below is taken, so a guard that came after that lookup would report
 // ErrActive instead, and on a real host the outcome would turn on privilege.

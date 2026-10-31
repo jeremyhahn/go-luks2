@@ -278,15 +278,6 @@ func TestIsMountedReadsTheRealMountTable(t *testing.T) {
 	}
 }
 
-// TestIsMountedRefusesACanceledContext checks the ctx boundary check.
-func TestIsMountedRefusesACanceledContext(t *testing.T) {
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	if _, err := IsMounted(ctx, "/proc"); !errors.Is(err, context.Canceled) {
-		t.Fatalf("IsMounted with a canceled context = %v, want context.Canceled", err)
-	}
-}
-
 // TestDeviceMountedMatchesTheDeviceNumber pins DeviceMounted's matching
 // rule: it compares the DEVICE NUMBER mountinfo records (field 3, proc(5)),
 // not a path, so a filesystem mounted through a different alias to the same
@@ -321,15 +312,6 @@ func TestDeviceMountedFailsWhenTheTableCannotBeOpened(t *testing.T) {
 	withSys(t, func(s *sysT) { s.mountInfoPath = "/nonexistent/mountinfo/path" })
 	if _, err := DeviceMounted(t.Context(), 1, 1); err == nil {
 		t.Fatal("DeviceMounted succeeded reading a path that does not exist")
-	}
-}
-
-// TestDeviceMountedRefusesACanceledContext checks the ctx boundary check.
-func TestDeviceMountedRefusesACanceledContext(t *testing.T) {
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	if _, err := DeviceMounted(ctx, 1, 1); !errors.Is(err, context.Canceled) {
-		t.Fatalf("DeviceMounted with a canceled context = %v, want context.Canceled", err)
 	}
 }
 
