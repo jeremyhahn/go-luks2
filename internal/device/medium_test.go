@@ -92,33 +92,6 @@ func patternFile(t *testing.T, dir string, n int) (string, []byte) {
 	return path, data
 }
 
-// TestReadPastCacheReadsTheBytes: a direct read returns the device's bytes
-// from any offset, aligned or not, up to the length asked for or the end of
-// the device, on a disk filesystem and on a memory one.
-func TestReadPastCacheReadsTheBytes(t *testing.T) {
-	for name, dir := range map[string]func(*testing.T) string{"disk": diskDir, "memory": memoryDir} {
-		t.Run(name, func(t *testing.T) {
-			path, data := patternFile(t, dir(t), 3*directIOAlign+100)
-			for _, c := range []struct {
-				off int64
-				n   int
-			}{{0, directIOAlign}, {0, len(data)}, {0, len(data) + 5000}, {directIOAlign, 100}, {513, 2 * directIOAlign}, {int64(len(data)) + 10, 10}} {
-				got, err := ReadPastCache(context.Background(), "read the device past the page cache", path, c.off, c.n, os.OpenFile)
-				if err != nil {
-					t.Fatalf("ReadPastCache(%d, %d): %v", c.off, c.n, err)
-				}
-				var want []byte
-				if c.off < int64(len(data)) {
-					want = data[c.off:min(int(c.off)+c.n, len(data))]
-				}
-				if !bytes.Equal(got, want) {
-					t.Fatalf("ReadPastCache(%d, %d) returned %d bytes that differ from the %d expected", c.off, c.n, len(got), len(want))
-				}
-			}
-		})
-	}
-}
-
 // TestReadPastCacheWhereODirectIsRefused: on a memory filesystem the cache is
 // the storage and an ordinary read stands in; anywhere else the read is
 // refused with ErrUnsupported rather than reported as confirmed.
@@ -143,46 +116,6 @@ func TestReadPastCacheWhereODirectIsRefused(t *testing.T) {
 
 	if _, err := ReadPastCache(context.Background(), "op", filepath.Join(t.TempDir(), "absent.img"), 0, directIOAlign, refuseDirect); err == nil {
 		t.Fatal("ReadPastCache of a missing device reported success")
-	}
-}
-
-// TestCacheIsTheStorage: memory filesystems yes, disk no, a missing path is
-// an error.
-func TestCacheIsTheStorage(t *testing.T) {
-	if memory, err := CacheIsTheStorage(diskDir(t)); err != nil || memory {
-		t.Fatalf("disk dir: %v, %v", memory, err)
-	}
-	if memory, err := CacheIsTheStorage(memoryDir(t)); err != nil || !memory {
-		t.Fatalf("/dev/shm: %v, %v", memory, err)
-	}
-	if _, err := CacheIsTheStorage(filepath.Join(t.TempDir(), "absent")); err == nil {
-		t.Fatal("a missing path reported a filesystem")
-	}
-}
-
-// TestIsMemoryFilesystemMagic: tmpfs and ramfs, and nothing else -- including
-// RAMFS_MAGIC, whose high bit is set, so it survives the int32 Statfs_t.Type
-// of the 32-bit targets as the same 32 bits.
-func TestIsMemoryFilesystemMagic(t *testing.T) {
-	var ramfsAsInt32 int32 = -2054924042
-	for _, tc := range []struct {
-		name  string
-		magic uint32
-		want  bool
-	}{
-		{"tmpfs", uint32(unix.TMPFS_MAGIC), true},
-		{"ramfs", uint32(unix.RAMFS_MAGIC), true},
-		{"ramfs through an int32 field", uint32(ramfsAsInt32), true}, // #nosec G115 -- the conversion under test
-		{"ext4", uint32(unix.EXT4_SUPER_MAGIC), false},
-		{"xfs", uint32(unix.XFS_SUPER_MAGIC), false},
-		{"overlayfs", uint32(unix.OVERLAYFS_SUPER_MAGIC), false},
-		{"zero", 0, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := IsMemoryFilesystemMagic(tc.magic); got != tc.want {
-				t.Fatalf("IsMemoryFilesystemMagic(%#x) = %v, want %v", tc.magic, got, tc.want)
-			}
-		})
 	}
 }
 

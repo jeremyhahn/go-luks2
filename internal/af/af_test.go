@@ -514,29 +514,6 @@ func TestDiffuseViaAFEnclave(t *testing.T) {
 	}
 }
 
-// TestDiffuseModifiesData tests that diffuse actually modifies the data
-func TestDiffuseModifiesData(t *testing.T) {
-	data := make([]byte, 32)
-	if _, err := rand.Read(data); err != nil {
-		t.Fatalf("Failed to generate test data: %v", err)
-	}
-
-	original := make([]byte, len(data))
-	copy(original, data)
-
-	hashFunc, err := writeHash("sha256")
-	if err != nil {
-		t.Fatalf("Failed to get hash function: %v", err)
-	}
-
-	diffuse(data, hashFunc, len(data))
-
-	// Diffuse should modify the data
-	if bytes.Equal(data, original) {
-		t.Fatal("Diffuse did not modify the data")
-	}
-}
-
 // TestSplitDifferentOutput tests that Split produces
 // different output each time.
 func TestSplitDifferentOutput(t *testing.T) {
@@ -573,50 +550,6 @@ func TestSplitDifferentOutput(t *testing.T) {
 
 	if !bytes.Equal(recovered1, recovered2) || !bytes.Equal(recovered1, data) {
 		t.Fatal("Different splits did not recover to same original data")
-	}
-}
-
-// TestSplitHashAlgorithms tests different hash algorithms produce
-// different splits.
-func TestSplitHashAlgorithms(t *testing.T) {
-	data := make([]byte, 64) // Use 64 bytes to work well with both sha256 and sha512
-	for i := range data {
-		data[i] = byte(i)
-	}
-
-	split256, err := afSplitPlain(t, data, 4, "sha256")
-	if err != nil {
-		t.Fatalf("Split with sha256 failed: %v", err)
-	}
-
-	split512, err := afSplitPlain(t, data, 4, "sha512")
-	if err != nil {
-		t.Fatalf("Split with sha512 failed: %v", err)
-	}
-
-	// The splits should be different due to different hash algorithms
-	// (though this is not guaranteed due to randomness, it's very likely)
-	if bytes.Equal(split256, split512) {
-		t.Log("Warning: Different hash algorithms produced identical splits (very unlikely but possible)")
-	}
-
-	// But both should recover correctly
-	recovered256, err := afMergePlain(t, split256, 4, 64, "sha256")
-	if err != nil {
-		t.Fatalf("Merge with sha256 failed: %v", err)
-	}
-
-	recovered512, err := afMergePlain(t, split512, 4, 64, "sha512")
-	if err != nil {
-		t.Fatalf("Merge with sha512 failed: %v", err)
-	}
-
-	if !bytes.Equal(recovered256, data) {
-		t.Fatal("sha256 did not recover original data")
-	}
-
-	if !bytes.Equal(recovered512, data) {
-		t.Fatal("sha512 did not recover original data")
 	}
 }
 

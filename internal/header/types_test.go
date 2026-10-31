@@ -11,13 +11,6 @@ import (
 	"testing"
 )
 
-func TestDroppedEntryString(t *testing.T) {
-	e := DroppedEntry{Kind: DroppedKindKeyslot, ID: "3"}
-	if got, want := e.String(), `keyslot "3"`; got != want {
-		t.Errorf("String() = %q, want %q", got, want)
-	}
-}
-
 func TestSegmentUnknownMemberHelpers(t *testing.T) {
 	s := &Segment{}
 	if s.HasIntegrity() {

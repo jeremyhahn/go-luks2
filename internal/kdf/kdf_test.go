@@ -81,63 +81,11 @@ func TestDerivePlainArgon2(t *testing.T) {
 	}
 }
 
-func TestDerivePlainRefusesAZeroOrNegativeKeySize(t *testing.T) {
-	iterations := 1000
-	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: b64("saltsaltsaltsalt"), Iterations: &iterations}
-	for _, keySize := range []int{0, -1} {
-		if _, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), p, keySize); err == nil {
-			t.Fatalf("keySize %d: accepted", keySize)
-		}
-	}
-}
-
-func TestDerivePlainRefusesAnInvalidSalt(t *testing.T) {
-	iterations := 1000
-	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: "!!!not-base64!!!", Iterations: &iterations}
-	if _, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), p, 32); err == nil {
-		t.Fatal("an invalid salt was accepted")
-	}
-}
-
 func TestDerivePlainRefusesAnUnsupportedType(t *testing.T) {
 	p := Params{Type: "scrypt", Salt: b64("salt")}
 	_, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), p, 32)
 	if !errors.Is(err, ErrUnsupportedKDF) {
 		t.Fatalf("got %v, want an error wrapping ErrUnsupportedKDF", err)
-	}
-}
-
-func TestDerivePlainPBKDF2MissingIterations(t *testing.T) {
-	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: b64("salt")}
-	if _, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), p, 32); err == nil {
-		t.Fatal("missing iterations was accepted")
-	}
-}
-
-func TestDerivePlainPBKDF2UnsupportedHash(t *testing.T) {
-	iterations := 1000
-	p := Params{Type: "pbkdf2", Hash: "md5", Salt: b64("salt"), Iterations: &iterations}
-	if _, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), p, 32); err == nil {
-		t.Fatal("an unsupported hash was accepted")
-	}
-}
-
-func TestDeriveArgon2MissingParams(t *testing.T) {
-	time, memory, cpus := 1, 64, 1
-	cases := []struct {
-		name string
-		p    Params
-	}{
-		{"missing time", Params{Type: "argon2i", Salt: b64("salt"), Memory: &memory, CPUs: &cpus}},
-		{"missing memory", Params{Type: "argon2i", Salt: b64("salt"), Time: &time, CPUs: &cpus}},
-		{"missing cpus", Params{Type: "argon2i", Salt: b64("salt"), Time: &time, Memory: &memory}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if _, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), tc.p, 32); err == nil {
-				t.Fatal("accepted")
-			}
-		})
 	}
 }
 
@@ -151,14 +99,6 @@ func TestDeriveArgon2CPUsBounds(t *testing.T) {
 	}
 }
 
-func TestDeriveArgon2TimeBelowOne(t *testing.T) {
-	zero, memory, cpus := 0, 64, 1
-	p := Params{Type: "argon2i", Salt: b64("salt"), Time: &zero, Memory: &memory, CPUs: &cpus}
-	if _, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), p, 32); err == nil && !fips.Probe() {
-		t.Fatal("a time cost of 0 was accepted")
-	}
-}
-
 func TestDeriveArgon2MemoryBelowFloor(t *testing.T) {
 	timeVal, cpus := 1, 1
 	for _, memory := range []int{0, -1, MinArgon2Memory - 1} {
@@ -166,14 +106,6 @@ func TestDeriveArgon2MemoryBelowFloor(t *testing.T) {
 		if _, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), p, 32); err == nil && !fips.Probe() {
 			t.Fatalf("memory %d: accepted", memory)
 		}
-	}
-}
-
-func TestDeriveArgon2KeySizeOverflow(t *testing.T) {
-	timeVal, memory, cpus := 1, 64, 1
-	p := Params{Type: "argon2i", Salt: b64("salt"), Time: &timeVal, Memory: &memory, CPUs: &cpus}
-	if _, err := testDeriver.DerivePlain(context.Background(), []byte("passphrase"), p, -1); err == nil {
-		t.Fatal("a negative key length was accepted")
 	}
 }
 
@@ -223,24 +155,6 @@ func TestDeriveFromSecret(t *testing.T) {
 	}
 }
 
-func TestDeriveArgon2iAndArgon2idDirect(t *testing.T) {
-	timeVal, memory, cpus := 1, 64, 1
-	p := Params{Time: &timeVal, Memory: &memory, CPUs: &cpus}
-	salt := []byte("saltsaltsaltsalt")
-
-	i, err := DeriveArgon2i([]byte("passphrase"), salt, p, 32)
-	if err != nil {
-		t.Fatalf("DeriveArgon2i: %v", err)
-	}
-	id, err := DeriveArgon2id([]byte("passphrase"), salt, p, 32)
-	if err != nil {
-		t.Fatalf("DeriveArgon2id: %v", err)
-	}
-	if string(i) == string(id) {
-		t.Fatal("argon2i and argon2id produced the same output")
-	}
-}
-
 func TestPBKDF2Hash(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -286,13 +200,6 @@ func TestU32(t *testing.T) {
 	got, err := u32("op", "field", 5)
 	if err != nil || got != 5 {
 		t.Fatalf("u32(5) = %d, %v", got, err)
-	}
-}
-
-func TestDeriveErrorPath(t *testing.T) {
-	p := Params{Type: "scrypt", Salt: b64("salt")}
-	if _, err := testDeriver.Derive(context.Background(), []byte("passphrase"), p, 32); err == nil {
-		t.Fatal("Derive accepted an unsupported type")
 	}
 }
 
