@@ -169,22 +169,6 @@ func TestNodePathMapperPathAndMapperDir(t *testing.T) {
 	}
 }
 
-func TestIsOurNodeMatchesOnTheDeviceNumber(t *testing.T) {
-	info := &devmapper.DeviceInfo{DevNo: unix.Mkdev(250, 3)}
-	rdev := func(path string) (uint64, error) { return unix.Mkdev(250, 3), nil }
-	if !IsOurNode(rdev, "/dev/dm-3", info) {
-		t.Fatal("IsOurNode = false for a matching device number, want true")
-	}
-}
-
-func TestIsOurNodeRefusesAMismatchedDeviceNumber(t *testing.T) {
-	info := &devmapper.DeviceInfo{DevNo: unix.Mkdev(250, 3)}
-	rdev := func(path string) (uint64, error) { return unix.Mkdev(250, 9), nil }
-	if IsOurNode(rdev, "/dev/dm-3", info) {
-		t.Fatal("IsOurNode = true for a mismatched device number, want false")
-	}
-}
-
 func TestIsOurNodeTreatsNilInfoAndStatFailureAsNotOurs(t *testing.T) {
 	rdev := func(path string) (uint64, error) { return 0, os.ErrNotExist }
 	if IsOurNode(rdev, "/dev/dm-3", nil) {

@@ -74,38 +74,6 @@ func TestRunHelp(t *testing.T) {
 	}
 }
 
-func TestRunUnknownCommand(t *testing.T) {
-	if !inCLIChild(t) {
-		return
-	}
-	stderr := &bytes.Buffer{}
-	code := run([]string{"luks2", "frobnicate"}, &bytes.Buffer{}, &bytes.Buffer{}, stderr)
-	if code != 1 {
-		t.Errorf("code = %d, want 1", code)
-	}
-	if stderr.Len() == 0 {
-		t.Error("stderr should report the unknown command")
-	}
-}
-
-func TestRunSetsVersion(t *testing.T) {
-	if !inCLIChild(t) {
-		return
-	}
-	old := version
-	version = "test-version-marker"
-	defer func() { version = old }()
-
-	stdout := &bytes.Buffer{}
-	code := run([]string{"luks2", "version"}, &bytes.Buffer{}, stdout, &bytes.Buffer{})
-	if code != 0 {
-		t.Errorf("code = %d, want 0", code)
-	}
-	if !bytes.Contains(stdout.Bytes(), []byte("test-version-marker")) {
-		t.Errorf("stdout = %q, want it to carry Version", stdout.String())
-	}
-}
-
 // TestRunHandsOffToCLI checks run's own wiring against a fake CLI: Version
 // set first, the arguments and streams passed through unchanged, a live
 // context that is canceled once run returns, and the CLI's exit code.
