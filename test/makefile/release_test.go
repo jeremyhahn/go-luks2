@@ -159,7 +159,9 @@ func runRelease(t *testing.T, work, agentGit, version string) (string, bool) {
 // TestReleaseAcceptsAlphaRCAndFinalVersions: the recipe was alpha-only, so the
 // 1.0.0-rc.1 release could not be cut at all.
 func TestReleaseAcceptsAlphaRCAndFinalVersions(t *testing.T) {
-	for _, v := range []string{"v0.3.2-alpha", "v1.0.0-rc.1", "v1.0.0-rc.12", "v1.0.0", "v1.2.3"} {
+	// v0.3.2-alpha, v1.0.0-rc.4 and v1.0.0 are cut, one per target, by
+	// TestEachReleaseTargetCutsOnlyItsOwnKind; these are the other shapes.
+	for _, v := range []string{"v1.0.0-rc.12", "v1.2.3"} {
 		t.Run(v, func(t *testing.T) {
 			work, remote, agentGit := releaseFixture(t, "0.0.0", strings.TrimPrefix(v, "v"))
 			if out, ok := runRelease(t, work, agentGit, v); !ok {

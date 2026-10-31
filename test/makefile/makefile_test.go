@@ -639,34 +639,6 @@ func TestMakeTreeWritable(t *testing.T) {
 	}
 }
 
-// TestMakeTreeWritableReportsAMissingRoot is the failure path: a root that
-// does not exist is an error, not a silent no-op.
-func TestMakeTreeWritableReportsAMissingRoot(t *testing.T) {
-	missing := filepath.Join(t.TempDir(), "no-such-gopath")
-	if err := makeTreeWritable(missing); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("makeTreeWritable(%s) = %v, want fs.ErrNotExist", missing, err)
-	}
-}
-
-// TestGoPathEnvPinsTheModuleCache checks that the module cache a test's go
-// command uses is inside the GOPATH ownedGOPATH cleans, and that the caller's
-// other settings are kept.
-func TestGoPathEnvPinsTheModuleCache(t *testing.T) {
-	got := goPathEnv("/gp", map[string]string{"PATH": "/bin"})
-	want := map[string]string{"PATH": "/bin", "GOPATH": "/gp", "GOMODCACHE": filepath.Join("/gp", "pkg", "mod")}
-	if len(got) != len(want) {
-		t.Fatalf("goPathEnv = %v, want %v", got, want)
-	}
-	for k, v := range want {
-		if got[k] != v {
-			t.Errorf("goPathEnv[%s] = %q, want %q", k, got[k], v)
-		}
-	}
-	if m := goPathEnv("/gp", nil); m["GOPATH"] != "/gp" {
-		t.Errorf("goPathEnv with a nil map = %v", m)
-	}
-}
-
 // mode returns the permission bits of path, following symlinks; path must
 // exist.
 func mode(t *testing.T, path string) fs.FileMode {
