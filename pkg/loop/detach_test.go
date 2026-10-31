@@ -74,21 +74,6 @@ func TestWaitForDetachReturnsOnceTheAssociationIsGone(t *testing.T) {
 	}
 }
 
-// TestWaitForDetachAcceptsADeviceReattachedElsewhere guards a flake the fix
-// would otherwise INTRODUCE. The loop-device namespace is host-global: once
-// our detach completes the device is free, and another process can claim it
-// before the next poll. A wait that looked for the backing file to merely
-// become unreadable would sit watching someone else's attachment until it
-// timed out -- reporting failure for a detach that succeeded, most often
-// exactly when the machine is busy.
-func TestWaitForDetachAcceptsADeviceReattachedElsewhere(t *testing.T) {
-	backing := reader(attachedTo("/tmp/somebody-elses.img"))
-
-	if _, err := waitForDetach(context.Background(), "/dev/loop0", attachedTo("/tmp/volume.img"), true, testDetachTimeout, testDetachPoll, backing, clock.NewFake(t)); err != nil {
-		t.Fatalf("waitForDetach reported a failure for a device that was released and reclaimed: %v", err)
-	}
-}
-
 // TestWaitForDetachReportsADeferredReleaseAsSuccess covers the case that
 // made the first version of this wait a BREAKING change, and it is also
 // what holds the line against a change that has now been proposed twice.

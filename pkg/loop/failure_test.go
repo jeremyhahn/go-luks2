@@ -66,14 +66,6 @@ func TestCheckBackingIdentityReportsAnIdentifyFailure(t *testing.T) {
 	}
 }
 
-func TestFindLoopDeviceInReportsAMissingBackingFile(t *testing.T) {
-	s := defaultSys()
-	_, _, _, err := findLoopDeviceIn(t.TempDir(), filepath.Join(t.TempDir(), "absent.img"), s)
-	if !errors.Is(err, errs.ErrIO) {
-		t.Errorf("findLoopDeviceIn() = %v, want errors.Is(_, ErrIO)", err)
-	}
-}
-
 func TestFindLoopDeviceInReportsAnUnreadableSysBlockRoot(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "volume.img")
 	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {

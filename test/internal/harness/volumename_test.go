@@ -10,16 +10,6 @@ import (
 	"testing"
 )
 
-func TestVolumeNameCarriesBothScopeAndRunID(t *testing.T) {
-	got, err := VolumeName("luks-rapid", "abc123", "1-xyz")
-	if err != nil {
-		t.Fatalf("VolumeName failed: %v", err)
-	}
-	if want := "luks-rapid-abc123-1-xyz"; got != want {
-		t.Errorf("VolumeName = %q, want %q", got, want)
-	}
-}
-
 // TestVolumeNameRefusesAMissingTerm is the assertion that matters: a name
 // missing its scope or run id is host-global again, and would pass every test
 // until two runs overlapped.

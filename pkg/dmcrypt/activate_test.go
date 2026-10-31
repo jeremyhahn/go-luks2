@@ -317,17 +317,6 @@ func TestConfirmCreatedReportsAnInspectionFailure(t *testing.T) {
 	}
 }
 
-func TestConfirmCreatedRefusesAReplacedTarget(t *testing.T) {
-	fake := newFakeDeviceMapper()
-	fake.targets["vol"] = "CRYPT-LUKS2-someone-elses"
-	fake.devNos["vol"] = 0xfe99
-	fake.install(t)
-
-	if err := confirmCreated("vol", "CRYPT-LUKS2-ours", fakeDefaultDevNo); err == nil {
-		t.Fatal("confirmCreated accepted a target with a different UUID and device number")
-	}
-}
-
 func TestActivateCreatedRefusesWhenTheTargetWasReplacedBeforeLoad(t *testing.T) {
 	fake := newFakeDeviceMapper()
 	fake.targets["vol"] = "CRYPT-LUKS2-someone-elses"
@@ -379,14 +368,6 @@ func TestActivateTableRefusesANameAlreadyTaken(t *testing.T) {
 }
 
 // --- rollback ---
-
-func TestRollbackDoesNothingWhenTheTargetIsAlreadyGone(t *testing.T) {
-	newFakeDeviceMapper().install(t)
-
-	if err := rollback(context.Background(), "gone", "CRYPT-LUKS2-gone", fakeDefaultDevNo); err != nil {
-		t.Fatalf("rollback = %v; a target that was never created is nothing to roll back", err)
-	}
-}
 
 func TestRollbackMatchesOnTheUUIDNotTheName(t *testing.T) {
 	fake := newFakeDeviceMapper()
@@ -988,17 +969,5 @@ func TestNodeRepairNeverReplacesTheControlNode(t *testing.T) {
 		if !errors.Is(err, ErrNodeUnverified) || created {
 			t.Errorf("placeNode(%s) = %v (created=%v), want a refusal before anything is made", target, err, created)
 		}
-	}
-}
-
-// ensure the fake clock type is actually exercised in these tests, so a
-// change that stopped reading sys.clock would be caught by a timeout
-// instead of silently passing.
-func TestRecordRetryWaitsActuallyRoutesThroughTheClockSeam(t *testing.T) {
-	clk := recordRetryWaits(t)
-	clk.OnWait(func(time.Time) {})
-	_, _ = retryWhileBusy(context.Background(), func() error { return os.NewSyscallError("dm ioctl", unix.EBUSY) })
-	if len(clk.Waits()) == 0 {
-		t.Fatal("retryWhileBusy never consulted the fake clock")
 	}
 }

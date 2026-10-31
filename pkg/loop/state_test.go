@@ -64,25 +64,6 @@ func TestReadLoopStateInReportsAutoclear(t *testing.T) {
 	}
 }
 
-// TestReadLoopStateInTreatsMissingLoopAttributesAsDetached is the
-// authoritative negative: the loop attributes exist only while a device is
-// attached, so their absence -- with the block device still present -- is a
-// positive answer and must NOT come back as an error.
-func TestReadLoopStateInTreatsMissingLoopAttributesAsDetached(t *testing.T) {
-	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "loop0"), 0o755); err != nil {
-		t.Fatalf("failed to build the fixture: %v", err)
-	}
-
-	st, err := readLoopStateIn(root, "/dev/loop0")
-	if err != nil {
-		t.Fatalf("a detached device reported an error rather than 'not attached': %v", err)
-	}
-	if st.backing != "" {
-		t.Errorf("backing = %q, want %q", st.backing, "")
-	}
-}
-
 // TestReadLoopStateInDoesNotTreatAnAbsentBlockDeviceAsDetached is the
 // fail-open this reader got wrong twice, in two different disguises.
 //

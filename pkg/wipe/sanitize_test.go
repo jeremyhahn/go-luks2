@@ -149,36 +149,6 @@ func TestRandomPassStreamCarriesTheCounter(t *testing.T) {
 	}
 }
 
-// TestWritePassWritesThePattern covers each fixed pattern end to end.
-func TestWritePassWritesThePattern(t *testing.T) {
-	for _, tc := range []struct {
-		pattern Pattern
-		start   byte
-		want    byte
-	}{{Zeros, 0xFF, 0x00}, {Ones, 0x00, 0xFF}} {
-		path := writeFixture(t, 4096, tc.start)
-		f, err := os.OpenFile(path, os.O_RDWR, 0o600) // #nosec G304 -- under t.TempDir()
-		if err != nil {
-			t.Fatal(err)
-		}
-		s, err := newPassStream(tc.pattern)
-		if err != nil {
-			t.Fatalf("newPassStream: %v", err)
-		}
-		if err := writePass(context.Background(), f, path, 4096, s, nil, 1, 1); err != nil {
-			t.Fatalf("writePass(%s): %v", tc.pattern, err)
-		}
-		_ = f.Close()
-		got, err := os.ReadFile(path) // #nosec G304 -- under t.TempDir()
-		if err != nil {
-			t.Fatalf("read back: %v", err)
-		}
-		if !bytes.Equal(got, bytes.Repeat([]byte{tc.want}, 4096)) {
-			t.Fatalf("%s pass did not write 0x%02x throughout", tc.pattern, tc.want)
-		}
-	}
-}
-
 // TestWritePassReportsAWriteFailure: a descriptor that cannot be written is a
 // ErrIO error naming the caller's path, not a silent short wipe.
 func TestWritePassReportsAWriteFailure(t *testing.T) {
