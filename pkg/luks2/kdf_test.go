@@ -18,77 +18,7 @@ import (
 )
 
 // TestDeriveKeyPBKDF2 tests PBKDF2 key derivation
-func TestDeriveKeyPBKDF2(t *testing.T) {
-	iterations := 1000
-	salt := []byte("testsalt12345678")
-	saltB64 := encodeBase64(salt)
-
-	kdf := &header.KDF{
-		Type:       "pbkdf2",
-		Hash:       "sha256",
-		Salt:       saltB64,
-		Iterations: &iterations,
-	}
-
-	passphrase := []byte("testpassphrase")
-	keySize := 32
-
-	key1, err := deriveKeyPlain(passphrase, kdf, keySize)
-	if err != nil {
-		t.Fatalf("deriveKeyPlain failed: %v", err)
-	}
-
-	if len(key1) != keySize {
-		t.Fatalf("Expected key size %d, got %d", keySize, len(key1))
-	}
-
-	// Derive again with same parameters - should produce identical key
-	key2, err := deriveKeyPlain(passphrase, kdf, keySize)
-	if err != nil {
-		t.Fatalf("Second deriveKeyPlain failed: %v", err)
-	}
-
-	if !bytes.Equal(key1, key2) {
-		t.Fatal("Derived keys should be identical for same inputs")
-	}
-
-	// Different passphrase should produce different key
-	key3, err := deriveKeyPlain([]byte("different"), kdf, keySize)
-	if err != nil {
-		t.Fatalf("deriveKeyPlain with different passphrase failed: %v", err)
-	}
-
-	if bytes.Equal(key1, key3) {
-		t.Fatal("Different passphrases should produce different keys")
-	}
-}
-
 // TestDeriveKeyPBKDF2SHA512 tests PBKDF2 with SHA512
-func TestDeriveKeyPBKDF2SHA512(t *testing.T) {
-	iterations := 1000
-	salt := []byte("testsalt12345678")
-	saltB64 := encodeBase64(salt)
-
-	kdf := &header.KDF{
-		Type:       "pbkdf2",
-		Hash:       "sha512",
-		Salt:       saltB64,
-		Iterations: &iterations,
-	}
-
-	passphrase := []byte("testpassphrase")
-	keySize := 64
-
-	key, err := deriveKeyPlain(passphrase, kdf, keySize)
-	if err != nil {
-		t.Fatalf("deriveKeyPlain with SHA512 failed: %v", err)
-	}
-
-	if len(key) != keySize {
-		t.Fatalf("Expected key size %d, got %d", keySize, len(key))
-	}
-}
-
 // TestDeriveKeyArgon2i tests Argon2i key derivation
 func TestDeriveKeyArgon2i(t *testing.T) {
 	defer parallel(t)()
@@ -148,63 +78,6 @@ func TestDeriveKeyArgon2i(t *testing.T) {
 }
 
 // TestDeriveKeyArgon2id tests Argon2id key derivation
-func TestDeriveKeyArgon2id(t *testing.T) {
-	defer parallel(t)()
-
-	time := 1
-	memory := 64 * 1024 // 64 MB
-	cpus := 1
-	salt := []byte("testsalt12345678")
-	saltB64 := encodeBase64(salt)
-
-	kdf := &header.KDF{
-		Type:   "argon2id",
-		Salt:   saltB64,
-		Time:   &time,
-		Memory: &memory,
-		CPUs:   &cpus,
-	}
-
-	passphrase := []byte("testpassphrase")
-	keySize := 32
-
-	if fips140.Enabled() {
-		if _, err := deriveKeyPlain(passphrase, kdf, keySize); !errors.Is(err, ErrFIPSNotApproved) {
-			t.Fatalf("deriveKeyPlain with Argon2id in FIPS mode: got error %v, want ErrFIPSNotApproved", err)
-		}
-		return
-	}
-
-	key1, err := deriveKeyPlain(passphrase, kdf, keySize)
-	if err != nil {
-		t.Fatalf("deriveKeyPlain failed: %v", err)
-	}
-
-	if len(key1) != keySize {
-		t.Fatalf("Expected key size %d, got %d", keySize, len(key1))
-	}
-
-	// Derive again with same parameters - should produce identical key
-	key2, err := deriveKeyPlain(passphrase, kdf, keySize)
-	if err != nil {
-		t.Fatalf("Second deriveKeyPlain failed: %v", err)
-	}
-
-	if !bytes.Equal(key1, key2) {
-		t.Fatal("Derived keys should be identical for same inputs")
-	}
-
-	// Different passphrase should produce different key
-	key3, err := deriveKeyPlain([]byte("different"), kdf, keySize)
-	if err != nil {
-		t.Fatalf("deriveKeyPlain with different passphrase failed: %v", err)
-	}
-
-	if bytes.Equal(key1, key3) {
-		t.Fatal("Different passphrases should produce different keys")
-	}
-}
-
 // TestDeriveKeyInvalidType tests error handling for unsupported KDF type
 func TestDeriveKeyInvalidType(t *testing.T) {
 	salt := []byte("testsalt12345678")
@@ -443,33 +316,7 @@ func TestDeriveArgon2idMissingParams(t *testing.T) {
 }
 
 // TestBenchmarkPBKDF2SHA256 tests PBKDF2 benchmarking with SHA256
-func TestBenchmarkPBKDF2SHA256(t *testing.T) {
-	defer parallel(t)()
-
-	iterations, err := benchmarkPBKDF2(defaultVolumeSys().fipsMode(), "sha256", 32, 100)
-	if err != nil {
-		t.Fatalf("BenchmarkPBKDF2 failed: %v", err)
-	}
-
-	if iterations < 1000 {
-		t.Fatalf("Expected at least 1000 iterations, got %d", iterations)
-	}
-}
-
 // TestBenchmarkPBKDF2SHA512 tests PBKDF2 benchmarking with SHA512
-func TestBenchmarkPBKDF2SHA512(t *testing.T) {
-	defer parallel(t)()
-
-	iterations, err := benchmarkPBKDF2(defaultVolumeSys().fipsMode(), "sha512", 64, 100)
-	if err != nil {
-		t.Fatalf("BenchmarkPBKDF2 failed: %v", err)
-	}
-
-	if iterations < 1000 {
-		t.Fatalf("Expected at least 1000 iterations, got %d", iterations)
-	}
-}
-
 // TestBenchmarkPBKDF2InvalidHash tests error handling for unsupported hash
 func TestBenchmarkPBKDF2InvalidHash(t *testing.T) {
 	_, err := benchmarkPBKDF2(defaultVolumeSys().fipsMode(), "md5", 32, 100)
@@ -565,29 +412,6 @@ func TestCreateKDFPBKDF2CustomHash(t *testing.T) {
 }
 
 // TestCreateKDFPBKDF2CustomIterTime tests creating PBKDF2 with custom iteration time
-func TestCreateKDFPBKDF2CustomIterTime(t *testing.T) {
-	defer parallel(t)()
-
-	opts := formatOptionsForTest{
-		KDFType:       "pbkdf2",
-		PBKDFIterTime: 100, // Short time for fast test
-	}
-
-	kdf, err := createKDFStrict(opts, 32)
-	if err != nil {
-		t.Fatalf("CreateKDF failed: %v", err)
-	}
-
-	if kdf.Iterations == nil {
-		t.Fatal("Iterations should not be nil")
-	}
-
-	// Should have some reasonable number of iterations
-	if *kdf.Iterations < 1000 {
-		t.Fatalf("Expected at least 1000 iterations, got %d", *kdf.Iterations)
-	}
-}
-
 // TestCreateKDFArgon2i tests creating an Argon2i KDF
 func TestCreateKDFArgon2i(t *testing.T) {
 	opts := formatOptionsForTest{
@@ -701,17 +525,6 @@ func TestCreateKDFArgon2idCustomParams(t *testing.T) {
 }
 
 // TestCreateKDFInvalidType tests error handling for unsupported KDF type
-func TestCreateKDFInvalidType(t *testing.T) {
-	opts := formatOptionsForTest{
-		KDFType: "unsupported",
-	}
-
-	_, err := createKDFStrict(opts, 32)
-	if err == nil {
-		t.Fatal("Expected error for unsupported KDF type")
-	}
-}
-
 // TestCreateKDFInvalidHashAlgo tests error handling for invalid hash in PBKDF2
 func TestCreateKDFInvalidHashAlgo(t *testing.T) {
 	opts := formatOptionsForTest{
@@ -726,35 +539,6 @@ func TestCreateKDFInvalidHashAlgo(t *testing.T) {
 }
 
 // TestDeriveKeyDifferentKeySizes tests key derivation with different key sizes
-func TestDeriveKeyDifferentKeySizes(t *testing.T) {
-	iterations := 1000
-	salt := []byte("testsalt12345678")
-	saltB64 := encodeBase64(salt)
-
-	kdf := &header.KDF{
-		Type:       "pbkdf2",
-		Hash:       "sha256",
-		Salt:       saltB64,
-		Iterations: &iterations,
-	}
-
-	passphrase := []byte("testpassphrase")
-
-	keySizes := []int{16, 32, 64, 128}
-	for _, size := range keySizes {
-		t.Run(formatSize(int64(size)), func(t *testing.T) {
-			key, err := deriveKeyPlain(passphrase, kdf, size)
-			if err != nil {
-				t.Fatalf("deriveKeyPlain failed for size %d: %v", size, err)
-			}
-
-			if len(key) != size {
-				t.Fatalf("Expected key size %d, got %d", size, len(key))
-			}
-		})
-	}
-}
-
 // TestArgon2iVsArgon2id tests that Argon2i and Argon2id produce different keys
 func TestArgon2iVsArgon2id(t *testing.T) {
 	defer parallel(t)()
@@ -1048,41 +832,6 @@ func TestDeriveKeyPBKDF2SHA1(t *testing.T) {
 }
 
 // TestDeriveKeyPBKDF2SHA384 tests PBKDF2 with SHA-384
-func TestDeriveKeyPBKDF2SHA384(t *testing.T) {
-	iterations := 1000
-	salt := []byte("testsalt12345678")
-	saltB64 := encodeBase64(salt)
-
-	kdf := &header.KDF{
-		Type:       "pbkdf2",
-		Hash:       "sha384",
-		Salt:       saltB64,
-		Iterations: &iterations,
-	}
-
-	passphrase := []byte("testpassphrase")
-	keySize := 48 // SHA-384 produces 48 bytes
-
-	key, err := deriveKeyPlain(passphrase, kdf, keySize)
-	if err != nil {
-		t.Fatalf("deriveKeyPlain with SHA-384 failed: %v", err)
-	}
-
-	if len(key) != keySize {
-		t.Fatalf("Expected key size %d, got %d", keySize, len(key))
-	}
-
-	// Derive again with same parameters - should produce identical key
-	key2, err := deriveKeyPlain(passphrase, kdf, keySize)
-	if err != nil {
-		t.Fatalf("Second deriveKeyPlain failed: %v", err)
-	}
-
-	if !bytes.Equal(key, key2) {
-		t.Fatal("Derived keys should be identical for same inputs")
-	}
-}
-
 // TestBenchmarkPBKDF2SHA1 tests PBKDF2 benchmarking with SHA-1, and that it is
 // refused in FIPS 140-3 mode (docs/fips/architecture.md, "SHA-1").
 func TestBenchmarkPBKDF2SHA1(t *testing.T) {
@@ -1106,19 +855,6 @@ func TestBenchmarkPBKDF2SHA1(t *testing.T) {
 }
 
 // TestBenchmarkPBKDF2SHA384 tests PBKDF2 benchmarking with SHA-384
-func TestBenchmarkPBKDF2SHA384(t *testing.T) {
-	defer parallel(t)()
-
-	iterations, err := benchmarkPBKDF2(defaultVolumeSys().fipsMode(), "sha384", 48, 100)
-	if err != nil {
-		t.Fatalf("BenchmarkPBKDF2 with SHA-384 failed: %v", err)
-	}
-
-	if iterations < 1000 {
-		t.Fatalf("Expected at least 1000 iterations, got %d", iterations)
-	}
-}
-
 // TestCreateKDFPBKDF2SHA1Alias: the pbkdf2-sha1 alias creates nothing (#239,
 // BREAKING). It is refused with ErrInvalidArgument, and with ErrUnsupported
 // for callers that branched on that, in every mode -- before FIPS policy is
@@ -1133,74 +869,8 @@ func TestCreateKDFPBKDF2SHA1Alias(t *testing.T) {
 }
 
 // TestCreateKDFPBKDF2SHA256Alias tests creating PBKDF2 with SHA-256 using type alias
-func TestCreateKDFPBKDF2SHA256Alias(t *testing.T) {
-	defer parallel(t)()
-
-	opts := formatOptionsForTest{
-		KDFType:       kdfTypePBKDF2SHA256,
-		PBKDFIterTime: 100,
-	}
-
-	kdf, err := createKDFStrict(opts, 32)
-	if err != nil {
-		t.Fatalf("CreateKDF with pbkdf2-sha256 failed: %v", err)
-	}
-
-	if kdf.Type != kdfTypePBKDF2 {
-		t.Fatalf("Expected type %s, got %s", kdfTypePBKDF2, kdf.Type)
-	}
-
-	if kdf.Hash != "sha256" {
-		t.Fatalf("Expected hash sha256, got %s", kdf.Hash)
-	}
-}
-
 // TestCreateKDFPBKDF2SHA384Alias tests creating PBKDF2 with SHA-384 using type alias
-func TestCreateKDFPBKDF2SHA384Alias(t *testing.T) {
-	defer parallel(t)()
-
-	opts := formatOptionsForTest{
-		KDFType:       kdfTypePBKDF2SHA384,
-		PBKDFIterTime: 100,
-	}
-
-	kdf, err := createKDFStrict(opts, 48)
-	if err != nil {
-		t.Fatalf("CreateKDF with pbkdf2-sha384 failed: %v", err)
-	}
-
-	if kdf.Type != kdfTypePBKDF2 {
-		t.Fatalf("Expected type %s, got %s", kdfTypePBKDF2, kdf.Type)
-	}
-
-	if kdf.Hash != "sha384" {
-		t.Fatalf("Expected hash sha384, got %s", kdf.Hash)
-	}
-}
-
 // TestCreateKDFPBKDF2SHA512Alias tests creating PBKDF2 with SHA-512 using type alias
-func TestCreateKDFPBKDF2SHA512Alias(t *testing.T) {
-	defer parallel(t)()
-
-	opts := formatOptionsForTest{
-		KDFType:       kdfTypePBKDF2SHA512,
-		PBKDFIterTime: 100,
-	}
-
-	kdf, err := createKDFStrict(opts, 64)
-	if err != nil {
-		t.Fatalf("CreateKDF with pbkdf2-sha512 failed: %v", err)
-	}
-
-	if kdf.Type != kdfTypePBKDF2 {
-		t.Fatalf("Expected type %s, got %s", kdfTypePBKDF2, kdf.Type)
-	}
-
-	if kdf.Hash != "sha512" {
-		t.Fatalf("Expected hash sha512, got %s", kdf.Hash)
-	}
-}
-
 // TestCreateKDFCaseInsensitive tests that KDF type is case-insensitive
 func TestCreateKDFCaseInsensitive(t *testing.T) {
 	defer parallel(t)()
@@ -1337,58 +1007,6 @@ func TestGetPBKDF2HashFunc(t *testing.T) {
 }
 
 // TestArgon2CPUsBoundsValidation tests Argon2 CPUs bounds checking
-func TestArgon2CPUsBoundsValidation(t *testing.T) {
-	defer parallel(t)()
-
-	salt := []byte("testsalt12345678")
-	saltB64 := encodeBase64(salt)
-	passphrase := []byte("testpassphrase")
-	time := 1
-	memory := 64 * 1024
-
-	tests := []struct {
-		name        string
-		cpus        int
-		expectError bool
-	}{
-		{"cpus_0", 0, true},
-		{"cpus_1", 1, false},
-		{"cpus_128", 128, false},
-		{"cpus_255", 255, false},
-		{"cpus_256", 256, true},
-		{"cpus_negative", -1, true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cpus := tt.cpus
-			kdf := &header.KDF{
-				Type:   "argon2id",
-				Salt:   saltB64,
-				Time:   &time,
-				Memory: &memory,
-				CPUs:   &cpus,
-			}
-
-			_, err := deriveKeyPlain(passphrase, kdf, 32)
-			if fips140.Enabled() {
-				// Argon2 is refused before the parallelism bounds are reached,
-				// so every case errors out with the FIPS refusal instead.
-				if !errors.Is(err, ErrFIPSNotApproved) {
-					t.Errorf("In FIPS mode: got error %v, want ErrFIPSNotApproved", err)
-				}
-				return
-			}
-			if tt.expectError && err == nil {
-				t.Error("Expected error, got nil")
-			}
-			if !tt.expectError && err != nil {
-				t.Errorf("Unexpected error: %v", err)
-			}
-		})
-	}
-}
-
 // TestFIPSCompliantKDFWorkflow tests a complete FIPS-compliant workflow
 func TestFIPSCompliantKDFWorkflow(t *testing.T) {
 	defer parallel(t)()

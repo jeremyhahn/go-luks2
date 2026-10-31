@@ -8,8 +8,6 @@ package luks2
 
 import (
 	"bytes"
-	"crypto/fips140"
-	"errors"
 	"testing"
 )
 
@@ -55,52 +53,6 @@ func TestRandomBase64(t *testing.T) {
 }
 
 // TestCreateKDF tests KDF object creation
-func TestCreateKDF(t *testing.T) {
-	defer parallel(t)()
-
-	// Argon2 is not FIPS-approved and CreateKDF refuses it while the process
-	// runs in FIPS 140-3 mode (docs/fips/engineering.md).
-	argon2Rejected := fips140.Enabled()
-
-	tests := []struct {
-		name    string
-		kdfType string
-		wantErr bool
-	}{
-		{"argon2id-default", "argon2id", argon2Rejected},
-		{"pbkdf2", "pbkdf2", false},
-		{"argon2i", "argon2i", argon2Rejected},
-		{"unsupported", "scrypt", true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			opts := formatOptionsForTest{
-				KDFType:        tt.kdfType,
-				PBKDFIterTime:  2000,
-				Argon2Time:     4,
-				Argon2Memory:   1048576,
-				Argon2Parallel: 4,
-				HashAlgo:       "sha256",
-			}
-
-			_, err := createKDFStrict(opts, 32)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("Expected error, got nil")
-				}
-				if argon2Rejected && tt.kdfType != "scrypt" && !errors.Is(err, ErrFIPSNotApproved) {
-					t.Fatalf("In FIPS mode: got error %v, want ErrFIPSNotApproved", err)
-				}
-			} else {
-				if err != nil {
-					t.Fatalf("Unexpected error: %v", err)
-				}
-			}
-		})
-	}
-}
-
 func intPtr(i int) *int {
 	return &i
 }

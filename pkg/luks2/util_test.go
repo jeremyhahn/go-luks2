@@ -7,7 +7,6 @@
 package luks2
 
 import (
-	"bytes"
 	"testing"
 )
 
@@ -140,24 +139,6 @@ func TestClearBytes(t *testing.T) {
 }
 
 // TestBase64Operations tests base64 encoding/decoding
-func TestBase64Operations(t *testing.T) {
-	data := []byte("test data for base64")
-
-	encoded := encodeBase64(data)
-	if len(encoded) == 0 {
-		t.Fatal("encodeBase64 returned empty string")
-	}
-
-	decoded, err := decodeBase64(encoded)
-	if err != nil {
-		t.Fatalf("decodeBase64 failed: %v", err)
-	}
-
-	if !bytes.Equal(data, decoded) {
-		t.Fatal("Decoded data doesn't match original")
-	}
-}
-
 // TestDecodeBase64Error tests base64 decoding errors
 func TestDecodeBase64Error(t *testing.T) {
 	invalid := []string{

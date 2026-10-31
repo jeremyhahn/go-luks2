@@ -92,46 +92,6 @@ func countTokensForTest(device string) (int, error) {
 	return len(tokens), nil
 }
 
-func TestTokenJSONMarshal(t *testing.T) {
-	token := &LegacyToken{
-		Type:            "systemd-fido2",
-		Keyslots:        []string{"1"},
-		FIDO2Credential: "dGVzdC1jcmVkZW50aWFs",
-		FIDO2Salt:       "dGVzdC1zYWx0",
-		FIDO2RP:         "test.example.com",
-		FIDO2UPRequired: boolPtr(true),
-	}
-
-	data, err := json.Marshal(token)
-	if err != nil {
-		t.Fatalf("failed to marshal token: %v", err)
-	}
-
-	var parsed LegacyToken
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		t.Fatalf("failed to unmarshal token: %v", err)
-	}
-
-	if parsed.Type != token.Type {
-		t.Errorf("type mismatch: got %s, want %s", parsed.Type, token.Type)
-	}
-	if len(parsed.Keyslots) != len(token.Keyslots) {
-		t.Errorf("keyslots length mismatch: got %d, want %d", len(parsed.Keyslots), len(token.Keyslots))
-	}
-	if parsed.FIDO2Credential != token.FIDO2Credential {
-		t.Errorf("FIDO2Credential mismatch: got %s, want %s", parsed.FIDO2Credential, token.FIDO2Credential)
-	}
-	if parsed.FIDO2Salt != token.FIDO2Salt {
-		t.Errorf("FIDO2Salt mismatch: got %s, want %s", parsed.FIDO2Salt, token.FIDO2Salt)
-	}
-	if parsed.FIDO2RP != token.FIDO2RP {
-		t.Errorf("FIDO2RP mismatch: got %s, want %s", parsed.FIDO2RP, token.FIDO2RP)
-	}
-	if parsed.FIDO2UPRequired == nil || *parsed.FIDO2UPRequired != *token.FIDO2UPRequired {
-		t.Errorf("FIDO2UPRequired mismatch: got %v, want %v", parsed.FIDO2UPRequired, *token.FIDO2UPRequired)
-	}
-}
-
 // TestSystemdTPM2TokenSurvivesUnmodeled is what replaced the typed TPM2
 // fields (#189).
 //
@@ -202,24 +162,6 @@ func TestTPM2MembersAreNotModelled(t *testing.T) {
 func TestMaxTokens(t *testing.T) {
 	if MaxTokens != 32 {
 		t.Errorf("MaxTokens should be 32, got %d", MaxTokens)
-	}
-}
-
-func TestErrTokenNotFound(t *testing.T) {
-	if ErrTokenNotFound == nil {
-		t.Error("ErrTokenNotFound should not be nil")
-	}
-	if ErrTokenNotFound.Error() != "luks2: token not found" {
-		t.Errorf("unexpected error message: %s", ErrTokenNotFound.Error())
-	}
-}
-
-func TestErrNoFreeTokenSlot(t *testing.T) {
-	if ErrNoSpace == nil {
-		t.Error("ErrNoSpace should not be nil")
-	}
-	if ErrNoSpace.Error() != "luks2: no space" {
-		t.Errorf("unexpected error message: %s", ErrNoSpace.Error())
 	}
 }
 

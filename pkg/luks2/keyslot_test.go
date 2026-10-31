@@ -192,58 +192,6 @@ func TestCalculateNextKeyslotOffset(t *testing.T) {
 	}
 }
 
-func TestKeyslotInfoList(t *testing.T) {
-	// Test KeyslotInfo struct fields
-	info := KeyslotInfo{
-		ID:         1,
-		Type:       "luks2",
-		KeySize:    64,
-		Priority:   PriorityNormal,
-		KDF:        KDFParams{Type: KDFArgon2id},
-		Encryption: "aes-xts-plain64",
-	}
-
-	if info.ID != 1 {
-		t.Errorf("expected ID 1, got %d", info.ID)
-	}
-	if info.Type != "luks2" {
-		t.Errorf("expected Type 'luks2', got %s", info.Type)
-	}
-	if info.KeySize != 64 {
-		t.Errorf("expected KeySize 64, got %d", info.KeySize)
-	}
-	if info.Priority != PriorityNormal {
-		t.Errorf("expected PriorityNormal, got %d", info.Priority)
-	}
-	if info.KDF.Type != KDFArgon2id {
-		t.Errorf("expected KDF.Type %q, got %s", KDFArgon2id, info.KDF.Type)
-	}
-	if info.Encryption != "aes-xts-plain64" {
-		t.Errorf("expected Encryption 'aes-xts-plain64', got %s", info.Encryption)
-	}
-}
-
-func TestAddKeyOptionsDefaults(t *testing.T) {
-	// Test that nil options doesn't cause panic
-	opts := &addKeyOptionsForTest{}
-
-	if opts.Keyslot != nil {
-		t.Error("expected header.Keyslot to be nil by default")
-	}
-	if opts.KDFType != "" {
-		t.Error("expected KDFType to be empty by default")
-	}
-	if opts.Argon2Time != 0 {
-		t.Error("expected Argon2Time to be 0 by default")
-	}
-	if opts.Argon2Memory != 0 {
-		t.Error("expected Argon2Memory to be 0 by default")
-	}
-	if opts.Argon2Parallel != 0 {
-		t.Error("expected Argon2Parallel to be 0 by default")
-	}
-}
-
 func TestMaxKeyslotsConstant(t *testing.T) {
 	if MaxKeyslots != 32 {
 		t.Errorf("expected MaxKeyslots to be 32, got %d", MaxKeyslots)

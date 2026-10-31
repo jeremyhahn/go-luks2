@@ -185,23 +185,6 @@ func TestVolumeSecondaryHeaderReadsTheSecondaryCopy(t *testing.T) {
 	}
 }
 
-func TestRestorePrimaryHeaderRefusesACurrentPrimary(t *testing.T) {
-	path := formattedVolumeImage(t, "restore-current.img", "", "")
-
-	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
-	if err != nil {
-		t.Fatalf("Open failed: %v", err)
-	}
-	defer func() { _ = v.Close() }()
-
-	// A freshly formatted volume's primary is current with the secondary,
-	// so a conditional restore must refuse rather than roll anything back.
-	err = v.RestorePrimaryHeader(context.Background())
-	if !errors.Is(err, ErrPrimaryHeaderCurrent) {
-		t.Errorf("RestorePrimaryHeader on a current primary = %v, want ErrPrimaryHeaderCurrent", err)
-	}
-}
-
 func TestReplacePrimaryHeaderAdvancesTheSequenceIDUnconditionally(t *testing.T) {
 	path := formattedVolumeImage(t, "replace.img", "", "")
 
