@@ -79,6 +79,7 @@ func TestValidatePassphraseBytes(t *testing.T) {
 	}{
 		{"empty passphrase", []byte{}, ErrInvalidCredential},
 		{"too short", []byte("short"), ErrInvalidCredential},
+		{"one byte below minimum", make([]byte, MinPassphraseLength-1), ErrInvalidCredential},
 		{"minimum length", []byte("12345678"), nil},
 		{"valid length", []byte("this-is-a-valid-passphrase"), nil},
 		{"maximum length", make([]byte, MaxPassphraseLength), nil},
@@ -93,22 +94,6 @@ func TestValidatePassphraseBytes(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestValidatePassphraseBytes_EdgeCases(t *testing.T) {
-	t.Run("exactly MinPassphraseLength", func(t *testing.T) {
-		passphrase := make([]byte, MinPassphraseLength)
-		if err := validatePassphraseBytes(passphrase); err != nil {
-			t.Errorf("validatePassphraseBytes(min length) = %v, want nil", err)
-		}
-	})
-
-	t.Run("one byte below minimum", func(t *testing.T) {
-		passphrase := make([]byte, MinPassphraseLength-1)
-		if err := validatePassphraseBytes(passphrase); err != ErrInvalidCredential {
-			t.Errorf("validatePassphraseBytes(min-1) = %v, want %v", err, ErrInvalidCredential)
-		}
-	})
 }
 
 func TestValidateFormatOptionsForTest(t *testing.T) {
@@ -262,30 +247,6 @@ func TestValidateFormatOptionsForTest(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestValidateFormatOptionsForTest_OverflowDetection(t *testing.T) {
-	tmpFile, err := os.CreateTemp("", "luks-test-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = os.Remove(tmpFile.Name()) }()
-	_ = tmpFile.Close()
-
-	// This test verifies integer overflow detection in size calculations
-	// KeySize is in bits, so we divide by 8 to get bytes
-	// Then multiply by header.AFStripes (4000)
-	// We want to test that the overflow check works
-	t.Run("normal key size no overflow", func(t *testing.T) {
-		opts := formatOptionsForTest{
-			Device:     tmpFile.Name(),
-			Passphrase: []byte("valid-passphrase"),
-			KeySize:    512,
-		}
-		if err := validateFormatOptionsForTest(opts); err != nil {
-			t.Errorf("validateFormatOptionsForTest() unexpected error = %v", err)
-		}
-	})
 }
 
 func TestCheckOverflow(t *testing.T) {

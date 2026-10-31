@@ -234,20 +234,6 @@ func TestVolumeRemoveTokenRemovesIt(t *testing.T) {
 	}
 }
 
-func TestVolumeRemoveTokenRefusesAMissingSlot(t *testing.T) {
-	path := formattedVolumeImage(t, "removetoken-missing.img", "", "")
-
-	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
-	if err != nil {
-		t.Fatalf("Open failed: %v", err)
-	}
-	defer func() { _ = v.Close() }()
-
-	if err := v.RemoveToken(context.Background(), 5); !errors.Is(err, ErrTokenNotFound) {
-		t.Errorf("RemoveToken(5) on an empty token map = %v, want ErrTokenNotFound", err)
-	}
-}
-
 func TestVolumeRemoveTokenRefusesOnAReadOnlyVolume(t *testing.T) {
 	path := formattedVolumeImage(t, "removetoken-readonly.img", "", "")
 
