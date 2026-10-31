@@ -100,8 +100,6 @@ func TestFullEndToEndWorkflow(t *testing.T) {
 	}
 	defer func() { exec.Command("umount", mountPoint).Run() }()
 
-	time.Sleep(500 * time.Millisecond)
-
 	testFile := filepath.Join(mountPoint, "test-data.txt")
 	testData := []byte("This is integration test data written to the LUKS encrypted volume!")
 	if err := os.WriteFile(testFile, testData, 0644); err != nil {
@@ -127,32 +125,5 @@ func TestFullEndToEndWorkflow(t *testing.T) {
 
 	if _, err := os.Stat(dmDevicePath); err == nil {
 		t.Errorf("Device-mapper device still exists after lock")
-	}
-}
-
-// TestFileVolumeOnly verifies we're testing file-based volumes, not block
-// devices.
-func TestFileVolumeOnly(t *testing.T) {
-	requireRoot(t)
-
-	tmpfile, err := os.CreateTemp("", "luks-file-test-*.img")
-	if err != nil {
-		t.Fatalf("Failed to create temp file: %v", err)
-	}
-	volumePath := tmpfile.Name()
-	defer os.Remove(volumePath)
-
-	if err := tmpfile.Truncate(50 * 1024 * 1024); err != nil {
-		t.Fatalf("Failed to truncate: %v", err)
-	}
-	tmpfile.Close()
-
-	stat, err := os.Stat(volumePath)
-	if err != nil {
-		t.Fatalf("Failed to stat: %v", err)
-	}
-
-	if stat.Mode()&os.ModeDevice != 0 {
-		t.Fatalf("Expected regular file, got block device")
 	}
 }

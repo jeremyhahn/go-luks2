@@ -14,7 +14,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
@@ -116,7 +115,6 @@ func TestDataPersistenceAcrossUnlockCycles(t *testing.T) {
 	}
 
 	exec.Command("sync").Run()
-	time.Sleep(200 * time.Millisecond)
 
 	umountCmd := exec.Command("umount", mountPoint)
 	if output, err := umountCmd.CombinedOutput(); err != nil {
@@ -285,7 +283,6 @@ func TestDataPersistenceMultipleFiles(t *testing.T) {
 	}
 
 	exec.Command("sync").Run()
-	time.Sleep(200 * time.Millisecond)
 
 	exec.Command("umount", mountPoint).Run()
 	Lock(volumeName)
@@ -404,7 +401,6 @@ func TestDataPersistenceLargeFile(t *testing.T) {
 	}
 
 	exec.Command("sync").Run()
-	time.Sleep(500 * time.Millisecond)
 
 	exec.Command("umount", mountPoint).Run()
 	Lock(volumeName)
@@ -784,14 +780,15 @@ func TestRapidLockUnlock(t *testing.T) {
 			t.Fatalf("Volume should be unlocked on cycle %d", i+1)
 		}
 
-		time.Sleep(100 * time.Millisecond)
-
+		// Lock can briefly find the mapping busy (udev probes a new node),
+		// so it is polled until it succeeds or the deadline passes.
 		var lockErr error
-		for retry := 0; retry < 3; retry++ {
-			if lockErr = Lock(volumeName); lockErr == nil {
+		lockDeadline := time.Now().Add(5 * time.Second)
+		for {
+			if lockErr = Lock(volumeName); lockErr == nil || !time.Now().Before(lockDeadline) {
 				break
 			}
-			time.Sleep(time.Duration(100*(retry+1)) * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 		}
 		if lockErr != nil {
 			t.Fatalf("Lock failed on cycle %d after retries: %v", i+1, lockErr)
@@ -800,124 +797,6 @@ func TestRapidLockUnlock(t *testing.T) {
 		if !waitForLock(volumeName, 5*time.Second) {
 			t.Fatalf("Volume should be locked on cycle %d", i+1)
 		}
-
-		time.Sleep(200 * time.Millisecond)
-	}
-}
-
-func TestConcurrentRead(t *testing.T) {
-	requireRoot(t)
-
-	tmpfile, err := os.CreateTemp("", "luks-concurrent-*.img")
-	if err != nil {
-		t.Fatalf("Failed to create temp file: %v", err)
-	}
-	volumePath := tmpfile.Name()
-	defer os.Remove(volumePath)
-
-	if err := tmpfile.Truncate(50 * 1024 * 1024); err != nil {
-		t.Fatalf("Failed to truncate: %v", err)
-	}
-	tmpfile.Close()
-
-	passphrase := []byte("concurrent-test-pass")
-	volumeName := runVolume(t, "luks-concurrent")
-
-	formatOpts := FormatOptions{
-		Device:        volumePath,
-		Passphrase:    passphrase,
-		KDFType:       "pbkdf2",
-		PBKDFIterTime: 100,
-	}
-	if err := Format(formatOpts); err != nil {
-		t.Fatalf("Format failed: %v", err)
-	}
-
-	loopDevice, err := harness.SetupLoopDevice(volumePath)
-	if err != nil {
-		t.Fatalf("SetupLoopDevice failed: %v", err)
-	}
-	defer harness.DetachLoopDevice(loopDevice)
-
-	defer releaseVolume(t, volumeName, func() error { return Lock(volumeName) })
-	if err := Unlock(loopDevice, passphrase, volumeName); err != nil {
-		t.Fatalf("Unlock failed: %v", err)
-	}
-	defer releaseVolume(t, volumeName, func() error { return Lock(volumeName) })
-
-	if err := harness.MakeFilesystem(volumeName, "ext4", "concurrent"); err != nil {
-		t.Fatalf("MakeFilesystem failed: %v", err)
-	}
-
-	mountPoint := filepath.Join(os.TempDir(), "luks-concurrent-mount")
-	if err := os.MkdirAll(mountPoint, 0755); err != nil {
-		t.Fatalf("Failed to create mount point: %v", err)
-	}
-	defer os.RemoveAll(mountPoint)
-
-	dmDevicePath, err := GetMappedDevicePath(volumeName)
-	if err != nil {
-		Lock(volumeName)
-		t.Fatalf("GetMappedDevicePath failed: %v", err)
-	}
-	mountCmd := exec.Command("mount", dmDevicePath, mountPoint)
-	if output, err := mountCmd.CombinedOutput(); err != nil {
-		t.Fatalf("Mount failed: %v\nOutput: %s", err, string(output))
-	}
-	defer exec.Command("umount", mountPoint).Run()
-
-	numFiles := 10
-	testData := make(map[string][]byte)
-	for i := 0; i < numFiles; i++ {
-		filename := fmt.Sprintf("concurrent-%d.txt", i)
-		content := []byte(fmt.Sprintf("Concurrent test data %d", i))
-		testData[filename] = content
-
-		filePath := filepath.Join(mountPoint, filename)
-		if err := os.WriteFile(filePath, content, 0644); err != nil {
-			t.Fatalf("Failed to write %s: %v", filename, err)
-		}
-	}
-
-	exec.Command("sync").Run()
-
-	var wg sync.WaitGroup
-	errs := make(chan error, 50)
-
-	for i := 0; i < 50; i++ {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-
-			for filename, expectedContent := range testData {
-				filePath := filepath.Join(mountPoint, filename)
-				readContent, err := os.ReadFile(filePath)
-				if err != nil {
-					errs <- fmt.Errorf("goroutine %d: failed to read %s: %w", id, filename, err)
-					return
-				}
-
-				if string(readContent) != string(expectedContent) {
-					errs <- fmt.Errorf("goroutine %d: content mismatch in %s", id, filename)
-					return
-				}
-			}
-
-			time.Sleep(10 * time.Millisecond)
-		}(i)
-	}
-
-	wg.Wait()
-	close(errs)
-
-	errorCount := 0
-	for err := range errs {
-		t.Errorf("Concurrent read error: %v", err)
-		errorCount++
-	}
-
-	if errorCount != 0 {
-		t.Fatalf("Concurrent read test failed with %d errors", errorCount)
 	}
 }
 

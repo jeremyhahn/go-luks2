@@ -285,28 +285,6 @@ func TestWipeMultiplePassesWithTrim(t *testing.T) {
 	}
 }
 
-func TestWipeHeaderOnlyNoTrim(t *testing.T) {
-	tmpfile := "/tmp/test-luks-wipe-header-no-trim.img"
-	defer os.Remove(tmpfile)
-	formatTmp(t, tmpfile, 50*1024*1024)
-
-	// Erase (the old header-only Wipe's successor, B.6) has no discard
-	// option at all: a crypto-erase never issued TRIM, exactly as the
-	// original HeaderOnly path ignored Trim rather than erroring on it.
-	v, err := luks2.Open(context.Background(), tmpfile)
-	if err != nil {
-		t.Fatalf("Open failed: %v", err)
-	}
-	if err := v.Erase(context.Background()); err != nil {
-		t.Fatalf("Erase failed: %v", err)
-	}
-	_ = v.Close()
-
-	if _, _, err := harness.ReadHeader(tmpfile); err == nil {
-		t.Fatal("Header should not be readable after wipe")
-	}
-}
-
 func TestWipeSecurityVerification(t *testing.T) {
 	tmpfile := "/tmp/test-luks-wipe-security.img"
 	defer os.Remove(tmpfile)

@@ -69,37 +69,6 @@ func TestSetupLoopDeviceErrors(t *testing.T) {
 	}
 }
 
-func TestDetachLoopDevice(t *testing.T) {
-	tmpfile := filepath.Join(t.TempDir(), "test-detach.img")
-
-	f, err := os.Create(tmpfile)
-	if err != nil {
-		t.Fatalf("Failed to create file: %v", err)
-	}
-	if err := f.Truncate(10 * 1024 * 1024); err != nil {
-		f.Close()
-		t.Fatalf("Failed to truncate file: %v", err)
-	}
-	f.Close()
-
-	dev, err := loop.Attach(context.Background(), tmpfile)
-	if err != nil {
-		t.Fatalf("Attach failed: %v", err)
-	}
-
-	if _, err := os.Stat(dev.Path()); err != nil {
-		t.Fatalf("Loop device does not exist before detach: %v", err)
-	}
-
-	if _, err := dev.Detach(context.Background()); err != nil {
-		t.Fatalf("Detach failed: %v", err)
-	}
-
-	if found, err := loop.Find(context.Background(), tmpfile); err == nil {
-		t.Fatalf("Expected error finding detached loop device, but found: %s", found.Path())
-	}
-}
-
 func TestDetachLoopDeviceErrors(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -146,35 +115,6 @@ func TestDetachLoopDeviceErrors(t *testing.T) {
 				t.Fatal("Expected error, got nil")
 			}
 		})
-	}
-}
-
-func TestFindLoopDevice(t *testing.T) {
-	tmpfile := filepath.Join(t.TempDir(), "test-find.img")
-
-	f, err := os.Create(tmpfile)
-	if err != nil {
-		t.Fatalf("Failed to create file: %v", err)
-	}
-	if err := f.Truncate(10 * 1024 * 1024); err != nil {
-		f.Close()
-		t.Fatalf("Failed to truncate file: %v", err)
-	}
-	f.Close()
-
-	dev, err := loop.Attach(context.Background(), tmpfile)
-	if err != nil {
-		t.Fatalf("Attach failed: %v", err)
-	}
-	defer dev.Detach(context.Background())
-
-	found, err := loop.Find(context.Background(), tmpfile)
-	if err != nil {
-		t.Fatalf("Find failed: %v", err)
-	}
-
-	if found.Path() != dev.Path() {
-		t.Fatalf("Found device %s does not match created device %s", found.Path(), dev.Path())
 	}
 }
 

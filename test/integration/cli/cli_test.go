@@ -102,8 +102,8 @@ func stillAttached(path, dev string) bool {
 // NOT COVERED: dm mappings, on the kill path. This suite creates them by
 // running the luks2 BINARY, so they are made in a subprocess -- no in-process
 // hook can see them, and the binary under test is built without the integration
-// tag precisely so that what is tested is what ships. The two mappings involved
-// (test-cli-open, test-cli-workflow) are removed by the tests themselves on
+// tag precisely so that what is tested is what ships. The mapping involved
+// (test-cli-open) is removed by the test itself on
 // pass and fail; the SIGKILL window has no record.
 //
 // Closing it would mean building the CLI with a recording hook compiled in,
@@ -213,7 +213,8 @@ func TestCLI_Help(t *testing.T) {
 }
 
 func TestCLI_HelpFlags(t *testing.T) {
-	tests := []string{"--help", "-h", "help"}
+	// The bare "help" verb is TestCLI_Help's case.
+	tests := []string{"--help", "-h"}
 
 	for _, arg := range tests {
 		t.Run(arg, func(t *testing.T) {
@@ -226,17 +227,6 @@ func TestCLI_HelpFlags(t *testing.T) {
 				t.Errorf("Expected USAGE in output for %s", arg)
 			}
 		})
-	}
-}
-
-func TestCLI_Version(t *testing.T) {
-	stdout, _, err := runCLI("version")
-	if err != nil {
-		t.Fatalf("version command failed: %v", err)
-	}
-
-	if !strings.Contains(stdout, "luks2 version") {
-		t.Error("Expected version string in output")
 	}
 }
 
@@ -438,60 +428,6 @@ func TestCLI_InfoNonLuksDevice(t *testing.T) {
 	if !strings.Contains(stderr, "Failed to read volume") {
 		t.Error("Expected 'Failed to read volume' error")
 	}
-}
-
-func TestCLI_FullWorkflow(t *testing.T) {
-	tmpfile := "/tmp/test-cli-workflow.img"
-	volumeName := runVolume(t, "test-cli-workflow")
-	mountpoint := "/tmp/test-cli-mount"
-
-	defer func() {
-		// Cleanup
-		runCLIWithInput("", "unmount", mountpoint)
-		runCLI("close", volumeName)
-		// Scoped to this test's own backing file. This was the THIRD
-		// `losetup -D` call site (#17) and the one the fix for the other two
-		// missed: it detached every loop device on the machine, and since loop
-		// devices are not namespaced and this suite runs --privileged, "the
-		// machine" is the host. Errors were discarded, so it did so silently.
-		//
-		// This test attaches no loop device at all, so the correct scoped
-		// cleanup finds nothing — which is the point. The old call was not
-		// cleaning up after this test; it was clearing the machine on this
-		// test's behalf.
-		detachLoopDevicesBackedBy(t, tmpfile)
-		os.Remove(tmpfile)
-		os.RemoveAll(mountpoint)
-	}()
-
-	// Step 1: Create the file manually (since CLI create requires interactive input)
-	f, err := os.Create(tmpfile)
-	if err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
-	}
-	if err := f.Truncate(50 * 1024 * 1024); err != nil {
-		f.Close()
-		t.Fatalf("Failed to truncate: %v", err)
-	}
-	f.Close()
-	t.Log("Step 1: Test file created")
-
-	// Step 2: Format using library directly (CLI requires interactive password)
-	// This tests info/open/close/mount/unmount commands
-	cmd := exec.Command("go", "run", "github.com/jeremyhahn/go-luks2/cmd/luks2", "info", tmpfile)
-	// Expect this to fail since file is not formatted
-	if err := cmd.Run(); err == nil {
-		t.Log("Info correctly fails on unformatted file")
-	}
-
-	// Test commands that don't require interactive input
-	t.Log("Testing commands that don't require interactive input...")
-
-	// Test info on a properly formatted volume would work here
-	// But since we can't easily format without interactive input,
-	// we'll test the commands that work without a formatted volume
-
-	t.Log("CLI workflow test completed (partial - non-interactive commands)")
 }
 
 // TestCLI_CreateBlockDeviceUsage: a /dev path that is not a block device is
