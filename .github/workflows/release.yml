@@ -349,7 +349,7 @@ jobs:
         if: github.server_url != 'https://github.com'
         env:
           BOT: ${{ secrets.AGENT_TOKEN }}
-          REPO_API: ${{ github.server_url }}/api/v1/repos/${{ github.repository }}
+          REPO_API: ${{ github.api_url }}/repos/${{ github.repository }}
           TAG: ${{ needs.verify.outputs.tag }}
           NOTES: ${{ steps.notes.outputs.notes }}
         run: |
