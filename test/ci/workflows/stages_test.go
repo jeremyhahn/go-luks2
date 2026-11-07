@@ -492,7 +492,8 @@ func TestImageJobTrimsTheCachesBeforeTheStages(t *testing.T) {
 	}
 }
 
-// toolchainJobs are the jobs that build the devcontainer images on bigdisk
+// toolchainJobs are the jobs that build the devcontainer images (each frees
+// the hosted runner's disk first: TestEveryCIJobRunsOnTheHostedRunner)
 // and run their stages in them.
 var toolchainJobs = []string{"image", "lint-gates", "integration", "soak", "test-race", "fips", "merge-check"}
 

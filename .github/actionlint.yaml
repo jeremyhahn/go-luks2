@@ -48,6 +48,11 @@
 # v7 (2026-10-20): add `qwen`, the label of the runner code-review.yml's
 # opencode review job runs on (code-review template v5.2.1 and later, a
 # CUSTOMIZE line). Added in the same change as the workflow, per v2.
+# v8 (2026-11-07, Company Agent m2077): remove `batch`, `ci-gate` and
+# `bigdisk`. ci.yml and batch.yml now run every job on GitHub-hosted
+# `ubuntu-latest`, so no workflow names those labels, and an allowlist that
+# still accepted them could not catch one as a typo (the v3 rule). The review
+# labels stay: code-review.yml keeps its dedicated review runners.
 self-hosted-runner:
   labels:
     - ubuntu-latest
@@ -56,7 +61,4 @@ self-hosted-runner:
     - codex-task
     - claude
     - code-review
-    - batch
-    - ci-gate
-    - bigdisk
     - qwen
