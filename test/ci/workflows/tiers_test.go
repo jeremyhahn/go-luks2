@@ -52,12 +52,12 @@ func sameSet(a, b []string) bool {
 	return strings.Join(a, ",") == strings.Join(b, ",")
 }
 
-// TestExactlyOneScheduleTriggerInCI: ci-template v1.23 runs main's full tier
-// and Soak nightly through ci.yml's own `schedule:` trigger, and that is the
-// only scheduled workflow: nightly.yml and batch.yml stay dispatch-only, so
-// nothing is run twice on a timer, unowned (sdlc §5a). automerge.yml is not
-// CI: its timer merges green PRs and runs no stage.
-func TestExactlyOneScheduleTriggerInCI(t *testing.T) {
+// TestNoScheduleTrigger: this repository's nightly run is suspended, so no
+// workflow is scheduled: main's full tier and Soak run on dispatch (the full
+// tier also on push to main and a `ci:full` PR), and nightly.yml and batch.yml
+// stay dispatch-only (sdlc §5a). automerge.yml is not CI: its timer merges
+// green PRs and runs no stage.
+func TestNoScheduleTrigger(t *testing.T) {
 	entries, err := os.ReadDir(filepath.Join(repoRoot(t), ".github", "workflows"))
 	if err != nil {
 		t.Fatal(err)
@@ -72,12 +72,8 @@ func TestExactlyOneScheduleTriggerInCI(t *testing.T) {
 			scheduled = append(scheduled, fmt.Sprintf("%s:%d", e.Name(), n))
 		}
 	}
-	if want := []string{"ci.yml:1"}; !sameSet(scheduled, want) {
-		t.Errorf("schedule: triggers %v, want %v", scheduled, want)
-	}
-	ci := readFile(t, ".github/workflows/ci.yml")
-	if !regexp.MustCompile(`(?m)^on:\n(?:  .*\n|\n)*?  schedule:\n    - cron: '[^']+'\n`).MatchString(ci) {
-		t.Error("ci.yml's schedule: is not one cron under on:")
+	if len(scheduled) > 0 {
+		t.Errorf("schedule: triggers %v, want none", scheduled)
 	}
 }
 
