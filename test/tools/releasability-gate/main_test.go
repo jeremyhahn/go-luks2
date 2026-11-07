@@ -27,9 +27,9 @@ import (
 var testPolicy = func() policy {
 	p := repositoryPolicy
 	p.patterns = []labstrings.Pattern{
-		{Class: labstrings.ClassLabAddress, Expr: regexp.MustCompile(`\b203\.0\.113\.\d{1,3}\b`), Needle: "203.0.113.", Guidance: "use 198.51.100.0/24"},
-		{Class: labstrings.ClassLabHost, Expr: regexp.MustCompile(`(?i)\bnode-\d{2}\.example\b`), Needle: "node-", Guidance: "name the role"},
-		{Class: labstrings.ClassOwnerAccount, Expr: regexp.MustCompile(`(?i)\bexample-owner\b`), Needle: "example-owner", Guidance: "name the role"},
+		{Class: labstrings.ClassLabAddress, Expr: regexp.MustCompile(`\b(203\.0\.113)\.\d{1,3}\b`), Digests: []string{labstrings.Digest("203.0.113")}, Guidance: "use 198.51.100.0/24"},
+		{Class: labstrings.ClassLabHost, Expr: regexp.MustCompile(`(?i)\b(node)-\d{2}\.example\b`), Digests: []string{labstrings.Digest("node")}, Guidance: "name the role"},
+		{Class: labstrings.ClassOwnerAccount, Expr: regexp.MustCompile(`(?i)\b(example-owner)\b`), Digests: []string{labstrings.Digest("example-owner")}, Guidance: "name the role"},
 	}
 	return p
 }()
@@ -408,6 +408,10 @@ func TestRun_TrackedAgentFilesPassARealIndex(t *testing.T) {
 		"AGENTS.md":                  "# agent notes\n",
 		"test/integration/AGENTS.md": "# agent notes\n",
 		".claude/settings.json":      "{}\n",
+		// .serena/ is gitignored whole; its project.yml, once tracked as an
+		// exception, has no standing of its own if it is committed again.
+		".serena/project.yml":          "languages: [go]\n",
+		".serena/memories/overview.md": "# notes\n",
 	}
 	files := map[string]string{"go.mod": "module example.com/x\n", labstrings.GitAttributes: string(attributes)}
 	for name, content := range agentFiles {

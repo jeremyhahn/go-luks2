@@ -35,31 +35,20 @@ type AllowRule struct {
 // DefaultAllowList is the accepted set for THIS repository. Every entry is a
 // deliberate decision, and the list is meant to shrink.
 //
-// The entries are the two files that must spell the fleet's values: fleet.go,
-// which defines the patterns, and fleet_test.go, which proves they match. Both
-// are stripped at publish, and TestDefaultAllowList_AcceptsOnlyStrippedFiles
-// keeps every entry on a strip-at-publish file, so nothing published is ever
-// accepted. Nothing else in the tree needed an entry when the gate was added
-// (#211): the scrub had already removed the values themselves, which is always
-// preferred to listing them here.
+// TestDefaultAllowList_AcceptsOnlyStrippedFiles keeps every entry on a
+// strip-at-publish file, so nothing published is ever accepted. Nothing in the
+// tree needed an entry when the gate was added: the scrub had already
+// removed the values themselves, which is always preferred to listing them
+// here. The fleet pattern set needs none either: it carries digests, not
+// values (fleet.go).
 //
-// The third entry is the internal review workflow code-review.yml, also
-// stripped at publish. From template v5.2.1 its shared body names the review
+// The one entry is the internal review workflow code-review.yml, stripped at
+// publish. From template v5.2.1 its shared body names the review
 // host and the Ollama address, in comments and as the OLLAMA_URL default, and
 // the template is adopted verbatim, so those lines cannot be scrubbed here
 // without diverging from it. The entry goes when the template stops naming
 // them.
 var DefaultAllowList = []AllowRule{
-	{
-		Path:    fleetPatterns,
-		Classes: classes,
-		Reason:  "the fleet pattern set: it names the values the gate hunts, and it is stripped at publish",
-	},
-	{
-		Path:    fleetTests,
-		Classes: classes,
-		Reason:  "the fleet pattern set's tests: they plant the values to prove each is reported, and are stripped at publish",
-	},
 	{
 		Path:    workflowDir + "code-review.yml",
 		Classes: []Class{ClassLabAddress, ClassLabHost},

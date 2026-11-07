@@ -108,7 +108,7 @@ func TestDeriveKeySecretKeepsTheInputInsideItsEnclave(t *testing.T) {
 		Iterations: &iterations,
 	}
 
-	secret := []byte("a master key that never leaves protected memory!")
+	secret := mustRandom(t, 48)
 	source := enclaveFrom(t, secret)
 
 	derived, err := deriveKeySecret(context.Background(), source, kdf, 32, testVolumeSys())

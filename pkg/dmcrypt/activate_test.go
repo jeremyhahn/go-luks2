@@ -8,6 +8,7 @@ package dmcrypt
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"os"
@@ -151,7 +152,7 @@ func TestActivateTableCarriesNoKeyOnlyAKeyringReference(t *testing.T) {
 	fake := newFakeDeviceMapper()
 	fake.install(t)
 
-	key := []byte("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd")
+	key := randomKey(t, 62)
 	devNo, created, err := activateTable(context.Background(), "by-reference", "CRYPT-LUKS2-abc-by-reference", "7:3", testTarget(), testKey(t, key))
 	if err != nil {
 		t.Fatalf("activateTable failed: %v", err)
@@ -177,6 +178,16 @@ func TestActivateTableCarriesNoKeyOnlyAKeyringReference(t *testing.T) {
 	if !strings.HasPrefix(table.KeyID, want) {
 		t.Errorf("the reference %q does not describe a %d-byte logon key", table.KeyID, len(key))
 	}
+}
+
+func randomKey(t *testing.T, n int) []byte {
+	t.Helper()
+
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		t.Fatalf("failed to generate %d random bytes: %v", n, err)
+	}
+	return b
 }
 
 // TestActivateTableRoundsTheLengthDownToTheSectorSize is S11: a dynamic

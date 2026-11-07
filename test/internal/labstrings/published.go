@@ -73,8 +73,8 @@ var DefaultStripAtPublish = []Unpublishable{
 	{Path: "**/CLAUDE.md", Reason: agentInstructions},
 	{Path: "**/AGENTS.md", Reason: agentInstructions},
 	{Path: "**/.claude/**", Reason: agentInstructions},
-	{Path: "**/.serena/**", Reason: "code-analysis tool configuration for the agents (#66, claude-agents#46): " +
-		"tracked on main, stripped from the public release (#211)"},
+	{Path: "**/.serena/**", Reason: "code-analysis tool state for the agents: gitignored whole, and " +
+		"stripped from the public release should any of it be committed"},
 	{Path: workflowDir + "automerge.yml", Reason: "Gitea-only automerge workflow (owner ruling 2026-10-02, " +
 		"automatethethings#200): tracked on main, stripped from the public release (#211, #252)"},
 	{Path: workflowDir + "code-review.yml", Reason: internalReviewWorkflow},
@@ -82,9 +82,9 @@ var DefaultStripAtPublish = []Unpublishable{
 	{Path: workflowDir + "batch.yml", Reason: internalBatchWorkflow},
 	{Path: "test/ci/workflows/batch_test.go", Reason: "tests only " + workflowDir + "batch.yml " +
 		"and reads it, so it is stripped with it: the published tree's go test must pass without the workflow (#211)"},
-	{Path: fleetPatterns, Reason: "the fleet pattern set: it names the fleet's values, so the gate's " +
-		"published source spells none of them (#211)"},
-	{Path: fleetTests, Reason: "the fleet pattern set's tests, which plant the fleet's values; stripped " +
+	{Path: fleetPatterns, Reason: "the fleet pattern set: shapes and digests of the fleet's values, " +
+		"which a short value's digest does not keep secret (#211)"},
+	{Path: fleetTests, Reason: "the fleet pattern set's tests, which pin its digest table; stripped " +
 		"with the set they test (#211)"},
 }
 

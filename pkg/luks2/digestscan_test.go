@@ -159,7 +159,7 @@ func unusableDigests(t *testing.T) map[string]*header.Digest {
 func TestVerifyMasterKeySkipsUnusableDigests(t *testing.T) {
 	defer parallel(t)()
 
-	masterKey := []byte("digest-scan-master-key-32-bytes!")
+	masterKey := mustRandom(t, 32)
 
 	for name, bad := range unusableDigests(t) {
 		t.Run(name, func(t *testing.T) {
@@ -185,7 +185,7 @@ func TestVerifyMasterKeySkipsUnusableDigests(t *testing.T) {
 func TestVerifyMasterKeySkipsEveryUnusableDigestAtOnce(t *testing.T) {
 	defer parallel(t)()
 
-	masterKey := []byte("digest-scan-master-key-32-bytes!")
+	masterKey := mustRandom(t, 32)
 
 	// Built once and re-keyed into a fresh map per repeat. What the repeats
 	// vary is the map's iteration order, which Go randomizes per range; the
@@ -217,7 +217,8 @@ func TestVerifyMasterKeySkipsEveryUnusableDigestAtOnce(t *testing.T) {
 func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
 	defer parallel(t)()
 
-	masterKey := []byte("digest-scan-master-key-32-bytes!")
+	masterKey := mustRandom(t, 32)
+	otherKey := mustRandom(t, 32)
 
 	t.Run("every digest unusable is a HEADER fault, because nothing was compared", func(t *testing.T) {
 		// This subtest asserted ErrWrongKey until #41, and it was
@@ -257,7 +258,7 @@ func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				digests := map[string]*header.Digest{
 					"0": bad,
-					"1": usableDigest(t, []byte("some-other-master-key-32-bytes!!"), 32),
+					"1": usableDigest(t, otherKey, 32),
 				}
 
 				err := verifyMasterKey(context.Background(), enclaveFrom(t, masterKey), "0", boundTo("0", digests))
@@ -273,7 +274,7 @@ func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
 
 	t.Run("a usable digest for a different key", func(t *testing.T) {
 		digests := map[string]*header.Digest{
-			"0": usableDigest(t, []byte("some-other-master-key-32-bytes!!"), 32),
+			"0": usableDigest(t, otherKey, 32),
 		}
 
 		err := verifyMasterKey(context.Background(), enclaveFrom(t, masterKey), "0", boundTo("0", digests))
@@ -298,11 +299,11 @@ func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
 		// that the ONLY difference between the two sets is the presence of a
 		// digest that could not be evaluated.
 		mismatch := verifyMasterKey(context.Background(), enclaveFrom(t, masterKey), "0", boundTo("0", map[string]*header.Digest{
-			"0": usableDigest(t, []byte("some-other-master-key-32-bytes!!"), 32),
+			"0": usableDigest(t, otherKey, 32),
 		}))
 		mixed := verifyMasterKey(context.Background(), enclaveFrom(t, masterKey), "0", boundTo("0", map[string]*header.Digest{
 			"0": unusableDigests(t)["unsupported kdf type"],
-			"1": usableDigest(t, []byte("some-other-master-key-32-bytes!!"), 32),
+			"1": usableDigest(t, otherKey, 32),
 		}))
 
 		if mismatch.Error() != mixed.Error() {
@@ -317,14 +318,15 @@ func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
 // builds really does verify on its own. Without it, "the scan reached the
 // usable digest" could be passing because verifyMasterKey accepts anything.
 func TestVerifyMasterKeyAcceptsTheUsableDigestAlone(t *testing.T) {
-	masterKey := []byte("digest-scan-master-key-32-bytes!")
+	masterKey := mustRandom(t, 32)
+	otherKey := mustRandom(t, 32)
 
 	digests := map[string]*header.Digest{"0": usableDigest(t, masterKey, 32)}
 	if err := verifyMasterKey(context.Background(), enclaveFrom(t, masterKey), "0", boundTo("0", digests)); err != nil {
 		t.Fatalf("the fixture's own usable digest does not verify: %v", err)
 	}
 
-	if err := verifyMasterKey(context.Background(), enclaveFrom(t, []byte("some-other-master-key-32-bytes!!")), "0", boundTo("0", digests)); err == nil {
+	if err := verifyMasterKey(context.Background(), enclaveFrom(t, otherKey), "0", boundTo("0", digests)); err == nil {
 		t.Fatal("the fixture's usable digest verified a DIFFERENT master key")
 	}
 }

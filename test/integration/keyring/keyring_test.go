@@ -8,6 +8,7 @@ package keyring_test
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"regexp"
@@ -31,7 +32,19 @@ import (
 // than through pkg/luks2's own unexported wrappers, since internal/keyring
 // is importable module-wide.
 
-var integrationTestKey = []byte("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+// integrationKeyLen is the length of the volume key each test places in the
+// kernel keyring; the bytes are drawn fresh by randomKey.
+const integrationKeyLen = 64
+
+func randomKey(t *testing.T, n int) []byte {
+	t.Helper()
+
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		t.Fatalf("failed to generate %d random bytes: %v", n, err)
+	}
+	return b
+}
 
 func integrationDMUUID(t *testing.T) string {
 	t.Helper()
@@ -46,7 +59,7 @@ func addRealKey(t *testing.T, description string) (id, ring int) {
 	if err != nil {
 		t.Fatalf("could not resolve the session keyring: %v", err)
 	}
-	id, err = sys.Add(keyring.KeyType, description, integrationTestKey, ring)
+	id, err = sys.Add(keyring.KeyType, description, randomKey(t, integrationKeyLen), ring)
 	if err != nil {
 		t.Fatalf("add_key failed: %v", err)
 	}
@@ -62,7 +75,7 @@ func TestKernelRefusesToReadBackALogonPayload(t *testing.T) {
 
 	id, _ := addRealKey(t, keyring.Description(integrationDMUUID(t)))
 
-	buf := make([]byte, 2*len(integrationTestKey))
+	buf := make([]byte, 2*integrationKeyLen)
 	n, err := unix.KeyctlBuffer(unix.KEYCTL_READ, id, buf, 0)
 	if err == nil {
 		t.Fatalf("the kernel handed back %d bytes of the volume key; the key type is not write-only", n)
@@ -97,7 +110,7 @@ func TestKernelUpdatesAKeyInPlaceRatherThanRefusing(t *testing.T) {
 	first, ring := addRealKey(t, description)
 
 	sys := keyring.Live()
-	second, err := sys.Add(keyring.KeyType, description, []byte("a completely different volume key"), ring)
+	second, err := sys.Add(keyring.KeyType, description, randomKey(t, 33), ring)
 	if err != nil {
 		t.Fatalf("a second add_key on the same description failed, which the collision guard does not expect: %v", err)
 	}
@@ -115,7 +128,7 @@ func TestKernelRefusesAnUnqualifiedLogonDescription(t *testing.T) {
 		t.Fatalf("could not resolve the session keyring: %v", err)
 	}
 
-	if _, err := sys.Add(keyring.KeyType, "unqualified", integrationTestKey, ring); err == nil {
+	if _, err := sys.Add(keyring.KeyType, "unqualified", randomKey(t, integrationKeyLen), ring); err == nil {
 		t.Fatal("the kernel accepted a logon key with no subsystem qualifier")
 	} else if !errors.Is(err, unix.EINVAL) {
 		t.Fatalf("the description was refused for an unexpected reason: %v", err)
@@ -128,7 +141,7 @@ func TestRealKeyringLifecycle(t *testing.T) {
 	defer keyring.PinOSThread()()
 
 	sys := keyring.Live()
-	entry, err := keyring.AddVolumeKey(context.Background(), sys, integrationDMUUID(t), integrationTestKey)
+	entry, err := keyring.AddVolumeKey(context.Background(), sys, integrationDMUUID(t), randomKey(t, integrationKeyLen))
 	if err != nil {
 		t.Fatalf("the volume key could not be placed in the kernel keyring: %v", err)
 	}

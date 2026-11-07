@@ -21,10 +21,10 @@ import (
 // against it, so the published tests never spell a fleet value; the fleet set
 // itself is proved in fleet_test.go, which is stripped at publish.
 var fixturePatterns = []Pattern{
-	{Class: ClassLabAddress, Expr: regexp.MustCompile(`\b203\.0\.113\.\d{1,3}\b`), Needle: "203.0.113.", Guidance: "use 198.51.100.0/24"},
-	{Class: ClassLabHost, Expr: regexp.MustCompile(`(?i)\bnode-\d{2}\.example\b`), Needle: "node-", Guidance: "name the role"},
-	{Class: ClassOwnerPath, Expr: regexp.MustCompile(`/home/example-owner\b`), Needle: "/home/example-owner", Guidance: "use a repository-relative path"},
-	{Class: ClassOwnerAccount, Expr: regexp.MustCompile(`(?i)\bexample-owner\b`), Needle: "example-owner", Guidance: "name the role", YieldsTo: ClassOwnerPath},
+	{Class: ClassLabAddress, Expr: regexp.MustCompile(`\b(203\.0\.113)\.\d{1,3}\b`), Digests: []string{Digest("203.0.113")}, Guidance: "use 198.51.100.0/24"},
+	{Class: ClassLabHost, Expr: regexp.MustCompile(`(?i)\b(node)-\d{2}\.example\b`), Digests: []string{Digest("node")}, Guidance: "name the role"},
+	{Class: ClassOwnerPath, Expr: regexp.MustCompile(`/Users/(example-owner)\b`), Digests: []string{Digest("example-owner")}, Guidance: "use a repository-relative path"},
+	{Class: ClassOwnerAccount, Expr: regexp.MustCompile(`(?i)\b(example-owner)\b`), Digests: []string{Digest("example-owner")}, Guidance: "name the role", YieldsTo: ClassOwnerPath},
 }
 
 // entriesOf turns a path-to-content map into regular-file index entries,
@@ -62,7 +62,7 @@ func TestScan_ReportsEveryClassWithItsLineAndMatch(t *testing.T) {
 	}{
 		{"address in help text", "package main\n\nconst help = \"dial 203.0.113.51:8443\"\n", ClassLabAddress, "203.0.113.51", 3},
 		{"host in a doc, mixed case", "# Runbook\n\nRun it on NODE-04.example first.\n", ClassLabHost, "NODE-04.example", 3},
-		{"owner home path in a doc", "See /home/example-owner/sources for the checkout.\n", ClassOwnerPath, "/home/example-owner", 1},
+		{"owner home path in a doc", "See /Users/example-owner/sources for the checkout.\n", ClassOwnerPath, "/Users/example-owner", 1},
 		{"owner account in an ssh command", "ssh example-owner@ci-runner-01 uptime\n", ClassOwnerAccount, "example-owner", 1},
 	}
 
@@ -161,7 +161,7 @@ func TestScan_AWaiverWithNoReasonIsNotAWaiver(t *testing.T) {
 }
 
 func TestScan_AnAllowRuleAcceptsOnlyTheClassesItNames(t *testing.T) {
-	content := "host node-04.example under /home/example-owner/sources\n"
+	content := "host node-04.example under /Users/example-owner/sources\n"
 	files := entriesOf(map[string]string{"pkg/thing_test.go": content})
 
 	rules := []AllowRule{{
@@ -185,7 +185,7 @@ func TestScan_AnAllowRuleAcceptsOnlyTheClassesItNames(t *testing.T) {
 // the same leak, reported once as the more specific owner-path, and an allow
 // rule that accepts the path accepts the account in it.
 func TestScan_AnOwnerPathIsOneFindingNotTwo(t *testing.T) {
-	content := "cd /home/example-owner/sources && ssh example-owner@ci-runner-01\n"
+	content := "cd /Users/example-owner/sources && ssh example-owner@ci-runner-01\n"
 	files := entriesOf(map[string]string{"notes.md": content})
 
 	findings, err := Scan(files, fixturePatterns, nil)
@@ -245,7 +245,7 @@ func TestScan_ScansASymlinkTarget(t *testing.T) {
 	entries := []Entry{{
 		Path:    "go-luks2",
 		Kind:    KindSymlink,
-		Content: []byte("/home/example-owner/go-luks2/"),
+		Content: []byte("/Users/example-owner/go-luks2/"),
 	}}
 
 	findings, err := Scan(entries, fixturePatterns, nil)
