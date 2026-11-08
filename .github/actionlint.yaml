@@ -65,9 +65,14 @@ self-hosted-runner:
 
 # code-review.yml is the handbook template verbatim. From v5.9.0 its GitHub
 # guard uses `A && B || die` checks, which shellcheck notes as SC2015 (info).
-# There `die` exits, so the note is no defect. It is ignored for that file and
-# that check only; every other shellcheck finding there still fails Lint.
+# There `die` exits, so the note is no defect. automerge.yml (template v13)
+# has the same shape: its fail-closed variable check ends in `|| { ...; exit 1; }`.
+# The note is ignored for those two files and that check only; every other
+# shellcheck finding there still fails Lint.
 paths:
+  .github/workflows/automerge.yml:
+    ignore:
+      - 'shellcheck reported issue in this script: SC2015:.+'
   .github/workflows/code-review.yml:
     ignore:
       - 'shellcheck reported issue in this script: SC2015:.+'

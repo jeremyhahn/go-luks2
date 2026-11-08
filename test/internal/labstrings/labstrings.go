@@ -84,8 +84,8 @@
 // `.claude/settings.local.json` is gitignored), the code-analysis tool
 // configuration `.serena/` at any depth, and
 // .github/workflows/automerge.yml, which the forge requires (that exact name; a
-// `.yaml` variant or nested copy fails), and the internal review workflows
-// .github/workflows/code-review.yml and qwen-review.yml (#336), and the
+// `.yaml` variant or nested copy fails), and the internal review workflow
+// .github/workflows/code-review.yml (#336), and the
 // internal batch-runner workflow .github/workflows/batch.yml (#350) with
 // test/ci/workflows/batch_test.go, which tests only that workflow, and the
 // fleet pattern set test/internal/labstrings/fleet.go with its tests

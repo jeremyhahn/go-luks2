@@ -25,7 +25,6 @@
 # Internal workflows. The public ones are ci.yml, nightly.yml and release.yml.
 .github/workflows/automerge.yml export-ignore
 .github/workflows/code-review.yml export-ignore
-.github/workflows/qwen-review.yml export-ignore
 .github/workflows/batch.yml export-ignore
 
 # Tests that read only an internal workflow, stripped with the file they test.

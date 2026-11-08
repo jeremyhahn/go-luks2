@@ -62,8 +62,7 @@ var PublishedWorkflows = []string{"ci.yml", "nightly.yml", "release.yml"}
 // content: a script or a binary under .claude/ still fails, and the lab-value
 // scan reads every stripped file like any other.
 //
-// So are the internal review workflows code-review.yml and qwen-review.yml
-// (#336), and the internal batch-runner workflow batch.yml (#350). The workflow rules are exact names: `automerge.yaml` or a nested
+// So are the internal review workflow code-review.yml (#336), and the internal batch-runner workflow batch.yml (#350). The workflow rules are exact names: `automerge.yaml` or a nested
 // copy is an unknown workflow and fails.
 //
 // A test file that reads only a stripped file is stripped with it (#211), so
@@ -78,7 +77,6 @@ var DefaultStripAtPublish = []Unpublishable{
 	{Path: workflowDir + "automerge.yml", Reason: "Gitea-only automerge workflow (owner ruling 2026-10-02, " +
 		"automatethethings#200): tracked on main, stripped from the public release (#211, #252)"},
 	{Path: workflowDir + "code-review.yml", Reason: internalReviewWorkflow},
-	{Path: workflowDir + "qwen-review.yml", Reason: internalReviewWorkflow},
 	{Path: workflowDir + "batch.yml", Reason: internalBatchWorkflow},
 	{Path: "test/ci/workflows/batch_test.go", Reason: "tests only " + workflowDir + "batch.yml " +
 		"and reads it, so it is stripped with it: the published tree's go test must pass without the workflow (#211)"},
