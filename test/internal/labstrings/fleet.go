@@ -23,7 +23,7 @@ var (
 
 	// shapeLetteredHost is a <word>-<letter> host name. The word folds case
 	// and the letter does not: such hosts are written in lower case, and
-	// "Control-C" is a key chord. The key is the word.
+	// "Alt-F" is a key chord. The key is the word.
 	shapeLetteredHost = regexp.MustCompile(`(?i:\b([a-z]+))-[a-z]\b`)
 
 	// shapeWord is a bare word, optionally under .internal: a host or login
