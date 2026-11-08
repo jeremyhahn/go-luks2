@@ -608,6 +608,39 @@ jobs:
           rm -f "$RUNNER_TEMP/gomodauth.env" it-image.tar
           [ -z "${IT_LEASE:-}" ] || docker rm "$IT_LEASE" >/dev/null || true
 
+      # v1.31 (Company Agent m2069 item 3): the internal-name gate. Its
+      # patterns are internal values, so they never live in this repository:
+      # the Actions secret RELEASABILITY_PATTERNS carries the private pattern
+      # file (one fixed string per line, `#` comments; the source is in
+      # platform-configs). The step prints path and line of a match, never
+      # the value. A run without the secret (a fork PR) skips with a notice;
+      # a push to main without it fails.
+      - name: Releasability (private patterns)
+        if: ${{ !cancelled() }}
+        env:
+          RELEASABILITY_PATTERNS: ${{ secrets.RELEASABILITY_PATTERNS }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ -z "$RELEASABILITY_PATTERNS" ]; then
+            if [ "$EVENT" = push ]; then
+              echo "::error::RELEASABILITY_PATTERNS is not set; the gate needs the private pattern file (public-hygiene.md)"
+              exit 1
+            fi
+            echo "::notice::RELEASABILITY_PATTERNS is not available to this run; pushes to main run the gate"
+            exit 0
+          fi
+          pf=$(mktemp)
+          chmod 600 "$pf"
+          trap 'rm -f "$pf"' EXIT
+          printf '%s\n' "$RELEASABILITY_PATTERNS" | sed -e '/^[[:space:]]*$/d' -e '/^#/d' > "$pf"
+          hits=$( (git grep -n -I -i -F -f "$pf" -- . || true) | cut -d: -f1,2)
+          if [ -n "$hits" ]; then
+            echo "::error::internal names in the tracked tree (path:line; the values are not shown):"
+            printf '%s\n' "$hits"
+            exit 1
+          fi
+          echo "releasability: $(wc -l < "$pf") private patterns, 0 matches"
+
   # v1.27: a repository's `make lint-gates` (its own gates beside `make lint`:
   # script, workflow, generated-code and module checks) runs in this job, in
   # parallel with the image job's `make lint`, not in series after it, so
