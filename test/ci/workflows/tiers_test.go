@@ -31,8 +31,7 @@ var (
 	prTypes         = regexp.MustCompile(`(?m)^  pull_request:\n    branches: \[main\]\n(?:    #.*\n)*    types: \[(.*)\]$`)
 	fullTierEn      = regexp.MustCompile(`(?m)^          FULL_TIER: \$\{\{ (.*) \}\}$`)
 	scheduleOn      = regexp.MustCompile(`(?m)^\s*schedule:`)
-	// jobRunsOn is declared here, not shared with batch_test.go, which is
-	// export-ignore: the published tree has no batch_test.go to borrow from.
+	// jobRunsOn matches a job's own runs-on line.
 	jobRunsOn = regexp.MustCompile(`(?m)^    runs-on: (.+)$`)
 )
 
@@ -54,9 +53,8 @@ func sameSet(a, b []string) bool {
 
 // TestNoScheduleTrigger: this repository's nightly run is suspended, so no
 // workflow is scheduled: main's full tier and Soak run on dispatch (the full
-// tier also on push to main and a `ci:full` PR), and nightly.yml and batch.yml
-// stay dispatch-only (sdlc §5a). automerge.yml is not CI: its timer merges
-// green PRs and runs no stage.
+// tier also on push to main and a `ci:full` PR), and nightly.yml stays
+// dispatch-only (sdlc §5a).
 func TestNoScheduleTrigger(t *testing.T) {
 	entries, err := os.ReadDir(filepath.Join(repoRoot(t), ".github", "workflows"))
 	if err != nil {
@@ -64,9 +62,6 @@ func TestNoScheduleTrigger(t *testing.T) {
 	}
 	var scheduled []string
 	for _, e := range entries {
-		if e.Name() == "automerge.yml" {
-			continue
-		}
 		f := ".github/workflows/" + e.Name()
 		if n := len(scheduleOn.FindAllString(readFile(t, f), -1)); n > 0 {
 			scheduled = append(scheduled, fmt.Sprintf("%s:%d", e.Name(), n))
@@ -97,14 +92,8 @@ func TestMainRunsNeverCancel(t *testing.T) {
 // TestJobNamesAreLiteral: Gitea does not evaluate expressions in a job's
 // `name:`; it posts the expression verbatim as the status context, so a gate
 // named by one is never reported under the name branch protection requires.
-// batch.yml is exempt: it is the handbook's batch template verbatim, its jobs
-// are in no gate (TestBatchIsNeverInAMergeGate), and a context nobody
-// requires cannot go missing.
 func TestJobNamesAreLiteral(t *testing.T) {
 	for _, f := range workflowFiles(t) {
-		if rel(t, f) == batchWorkflow {
-			continue
-		}
 		for _, m := range jobName.FindAllStringSubmatch(readFile(t, rel(t, f)), -1) {
 			if strings.Contains(m[1], "${{") {
 				t.Errorf("%s: job name %q is an expression", rel(t, f), m[1])
@@ -121,7 +110,7 @@ func TestJobNamesAreLiteral(t *testing.T) {
 // GitHub-hosted ubuntu-latest, so main's CI Gate can go green on GitHub.
 const hostedRunner = "ubuntu-latest"
 
-// retiredLabels are the self-hosted runner labels ci.yml and batch.yml ran on
+// retiredLabels are the self-hosted runner labels the workflows ran on
 // before m2077. No workflow names them, and .github/actionlint.yaml does not
 // list them, so a typo of one is still caught as an unknown runner.
 var retiredLabels = []string{"bigdisk", "ci-gate", "batch"}

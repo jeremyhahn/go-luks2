@@ -63,11 +63,6 @@ func workflowFiles(t *testing.T) []string {
 	return files
 }
 
-// batchWorkflow is the internal batch-runner workflow. It is stripped at
-// publish, so it is present in a checkout and absent from the published tree;
-// a test over workflowFiles that exempts it must hold either way.
-const batchWorkflow = ".github/workflows/batch.yml"
-
 var (
 	usesLine = regexp.MustCompile(`^\s*(?:-\s+)?uses:\s*(.*)$`)
 	// owner/repo[/path]@<40 hex> # <tag>. The tag in the comment is what a
@@ -199,8 +194,7 @@ func contains(list []string, want string) bool {
 
 // TestReleaseGoVersionIsCIs: the release builds the published binaries with
 // the toolchain CI tests, the devcontainer image's Go. A release on an older
-// Go ships the standard-library fixes CI already has without them. The
-// pattern is its own: batch_test.go's is stripped from the public tree.
+// Go ships the standard-library fixes CI already has without them.
 func TestReleaseGoVersionIsCIs(t *testing.T) {
 	ci := regexp.MustCompile(`(?m)^ARG GO_IMAGE=golang:([0-9.]+)@`).FindStringSubmatch(readFile(t, "build/docker/devcontainer/Dockerfile"))
 	release := regexp.MustCompile(`(?m)^  GO_VERSION: ['"]?([0-9.]+)['"]?`).FindStringSubmatch(readFile(t, ".github/workflows/release.yml"))

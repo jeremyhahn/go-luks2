@@ -195,49 +195,9 @@ func TestScanUnpublishable_OnlyThePublicWorkflowsShip(t *testing.T) {
 	}
 }
 
-// A strip-at-publish workflow is neither a finding nor publishable:
-// ScanUnpublishable passes it and StripAtPublish lists it. Its .yaml variant and
-// a nested copy are not stripped -- the rule is the exact name -- and fail
-// like any unknown workflow.
-func TestStripAtPublish_ListsTheAutomergeWorkflowAndNothingElse(t *testing.T) {
-	files := map[string]string{
-		".github/workflows/automerge.yml":     "on: push\n",
-		".github/workflows/automerge.yaml":    "on: push\n",
-		".github/workflows/sub/automerge.yml": "on: push\n",
-		".github/workflows/ci.yml":            "on: push\n",
-		"docs/automerge.yml":                  "not a workflow\n",
-	}
-	entries := entriesOf(files)
-
-	findings, err := ScanUnpublishable(entries, DefaultUnpublishable, DefaultStripAtPublish)
-	if err != nil {
-		t.Fatalf("ScanUnpublishable: %v", err)
-	}
-	failed := map[string]bool{}
-	for _, f := range findings {
-		failed[f.Path] = true
-	}
-	if failed[".github/workflows/automerge.yml"] {
-		t.Error("the automerge workflow failed the scan; it is stripped at publish, not failed")
-	}
-	for _, name := range []string{".github/workflows/automerge.yaml", ".github/workflows/sub/automerge.yml"} {
-		if !failed[name] {
-			t.Errorf("%s passed the scan; only the exact name is stripped", name)
-		}
-	}
-
-	stripped := StripAtPublish(entries, DefaultStripAtPublish)
-	if len(stripped) != 1 || stripped[0].Path != ".github/workflows/automerge.yml" {
-		t.Fatalf("StripAtPublish = %v, want exactly .github/workflows/automerge.yml", stripped)
-	}
-	if !strings.Contains(stripped[0].Reason, "#211") {
-		t.Errorf("the reason does not name the release issue: %q", stripped[0].Reason)
-	}
-}
-
-// The internal review workflow is tracked on main and stripped at publish
-// (#336), like automerge.yml: exact names only, so a `.yaml` variant or a
-// nested copy is still an unknown workflow and fails.
+// The internal review workflow is tracked on main and stripped at publish:
+// ScanUnpublishable passes it and StripAtPublish lists it. Exact names only,
+// so a `.yaml` variant or a nested copy is still an unknown workflow and fails.
 func TestStripAtPublish_ListsTheReviewWorkflows(t *testing.T) {
 	reviewWorkflows := []string{".github/workflows/code-review.yml"}
 	files := map[string]string{
@@ -282,50 +242,6 @@ func TestStripAtPublish_ListsTheReviewWorkflows(t *testing.T) {
 		}
 		if !strings.Contains(reason, "#211") {
 			t.Errorf("%s: the reason does not name the release issue: %q", name, reason)
-		}
-	}
-}
-
-// The internal batch-runner workflow batch.yml is tracked on main and stripped
-// at publish (#350), like code-review.yml: exact name only, so a `.yaml`
-// variant or a nested copy is still an unknown workflow and fails.
-func TestStripAtPublish_ListsTheBatchWorkflow(t *testing.T) {
-	const batch = ".github/workflows/batch.yml"
-	files := map[string]string{
-		batch:                             "on: workflow_dispatch\n",
-		".github/workflows/batch.yaml":    "on: workflow_dispatch\n",
-		".github/workflows/sub/batch.yml": "on: workflow_dispatch\n",
-		".github/workflows/ci.yml":        "on: push\n",
-	}
-	entries := entriesOf(files)
-
-	findings, err := ScanUnpublishable(entries, DefaultUnpublishable, DefaultStripAtPublish)
-	if err != nil {
-		t.Fatalf("ScanUnpublishable: %v", err)
-	}
-	failed := map[string]bool{}
-	for _, f := range findings {
-		failed[f.Path] = true
-	}
-	if failed[batch] {
-		t.Errorf("%s failed the scan; it is stripped at publish, not failed", batch)
-	}
-	for _, name := range []string{".github/workflows/batch.yaml", ".github/workflows/sub/batch.yml"} {
-		if !failed[name] {
-			t.Errorf("%s passed the scan; only the exact name is stripped", name)
-		}
-	}
-
-	stripped := StripAtPublish(entries, DefaultStripAtPublish)
-	if len(stripped) != 1 || stripped[0].Path != batch {
-		t.Fatalf("StripAtPublish = %v, want exactly %s", stripped, batch)
-	}
-	if stripped[0].Reason != internalBatchWorkflow {
-		t.Errorf("%s: reason = %q, want the batch-workflow reason", batch, stripped[0].Reason)
-	}
-	for _, issue := range []string{"#211", "#350"} {
-		if !strings.Contains(stripped[0].Reason, issue) {
-			t.Errorf("%s: the reason does not name %s: %q", batch, issue, stripped[0].Reason)
 		}
 	}
 }

@@ -115,7 +115,7 @@ jobs:
       # main directly. On Gitea that is the commit status context below; on
       # github.com it is ci.yml's push run for this commit and its CI Gate job,
       # through the Actions API. The token only reads; on Gitea it is the
-      # project agent's, the token automerge.yml reads the same API with.
+      # project agent's.
       - name: Tagged commit is on main and CI's gate passed for it
         env:
           SHA: ${{ needs.verify.outputs.sha }}
@@ -340,7 +340,7 @@ jobs:
       # reasons — so rather than gamble a second time on an undocumented
       # GitHub client against a non-GitHub server, this step instead calls
       # Gitea's own release API directly, the way every other forge-facing
-      # step in this repository already does (automerge.yml,
+      # step in this repository already did (the removed merge workflow,
       # opencode-review.yml): plain curl, AGENT_TOKEN, and
       # $GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY. That mechanism is
       # already proven in this repo's CI, so it does not introduce a second

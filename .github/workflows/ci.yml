@@ -158,7 +158,7 @@ name: CI
 #
 # No CI workflow in this repository is scheduled: its nightly run is suspended,
 # so the full tier runs on push to main, workflow_dispatch and a `ci:full` PR,
-# and Soak on workflow_dispatch only. nightly.yml and batch.yml stay
+# and Soak on workflow_dispatch only. nightly.yml stays
 # dispatch-only; nightly.yml still runs trivy's filesystem scan, uploads its
 # SARIF to code scanning on github.com, and runs the advisory
 # misconfiguration scan.
@@ -1110,7 +1110,7 @@ jobs:
   # SOAK_MINUTES have passed, each iteration its own compose stack, torn down
   # before the next; the first red iteration fails the job. v1.24:
   # workflow_dispatch only, off main pushes and off ci:full; the Gate marks
-  # it `nightly`. It replaces nothing in batch.yml, whose soak stays a dispatch.
+  # it `nightly`.
   # CUSTOMIZE: each iteration's container is named under the project, as in
   # the integration job, and removed with it.
   soak:
