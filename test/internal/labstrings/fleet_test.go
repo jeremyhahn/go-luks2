@@ -12,23 +12,63 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
 )
 
-// These are the tests of the fleet pattern set itself, against the real values
-// it was written for. Like fleet.go they are stripped at publish: the
-// published tests prove the scanner with documentation-value fixtures
-// (labstrings_test.go), and these prove that the set compiled into the
-// development tree finds the fleet.
+// These are the tests of the fleet pattern set itself. They spell no fleet
+// value: TestFleet_PinsTheDigestTable pins the digests Fleet carries, and every
+// other test scans with plantedFleet, a copy of Fleet in which each pattern
+// also carries the digest, computed here, of one synthetic value its shape
+// yields. A planted value then stands in for the fleet value in every sample.
 
-// archiveLeaks reads a tar stream and returns every place it spells a needle
-// of the given set, case-folded. Nothing exempts a place: no waiver, no allow
-// rule. The needle is the literal every match of its pattern contains, so this
-// is stricter than the gate: it also finds a needle the gate's own source
-// spells to define a pattern.
+// plant is one synthetic key per fleet pattern, in Fleet's order. None is a
+// fleet value; each is what the pattern's shape yields as the key of a sample.
+var plant = []string{
+	"198.18.0",   // the fleet subnet's /24
+	"4001",       // the forge's web and API port
+	"4022",       // the forge's ssh port
+	"rack",       // the agent workstations, rack-NN
+	"blade",      // the CI runners, blade-NN
+	"anvil",      // the GPU host
+	"zenith",     // the build host
+	"gate",       // the tunnel gateway, gate-NN
+	"pod",        // the mini nodes, pod-NN
+	"pilot",      // the coordinator hosts, pilot-<letter>
+	plantedLogin, // the owner's home directory
+	"labshare",   // the lab's NFS mount
+	plantedLogin, // the owner's login
+}
+
+// plantedLogin is the synthetic owner login, and plantedHome its home
+// directory.
+const (
+	plantedLogin = "jdoe"
+	plantedHome  = "/home/" + plantedLogin
+)
+
+// plantedFleet returns Fleet with each pattern's planted digest appended.
+func plantedFleet(t *testing.T) []Pattern {
+	t.Helper()
+	set := Fleet()
+	if len(plant) != len(set) {
+		t.Fatalf("plant has %d values for %d fleet patterns: add one per pattern", len(plant), len(set))
+	}
+	out := make([]Pattern, len(set))
+	for i, p := range set {
+		p.Digests = append(slices.Clone(p.Digests), Digest(plant[i]))
+		out[i] = p
+	}
+	return out
+}
+
+// archiveLeaks reads a tar stream and returns every place a pattern of the
+// given set matches. Nothing exempts a place: no waiver, no allow rule, no
+// yield to a more specific class, so this is stricter than the gate.
 //
 // It reads every text field the tar reader surfaces, because each is published
 // with the archive:
@@ -80,16 +120,18 @@ func archiveLeaks(archive io.Reader, set []Pattern) (files int, leaks []string, 
 				struct{ where, text string }{"pax key", key},
 				struct{ where, text string }{"pax " + key, hdr.PAXRecords[key]})
 		}
-		lines := bytes.Split(bytes.ToLower(content), []byte("\n"))
+		var lines [][]byte
+		if mayContainLabValue(set, content) {
+			lines = bytes.Split(content, []byte("\n"))
+		}
 		for _, p := range set {
-			needle := []byte(p.Needle)
 			for _, f := range fields {
-				if bytes.Contains(bytes.ToLower([]byte(f.text)), needle) {
+				if len(p.find(f.text)) > 0 {
 					leaks = append(leaks, fmt.Sprintf("%s (%s): %s", hdr.Name, f.where, p.Class))
 				}
 			}
 			for i, line := range lines {
-				if bytes.Contains(line, needle) {
+				if len(p.find(string(line))) > 0 {
 					leaks = append(leaks, fmt.Sprintf("%s:%d: %s", hdr.Name, i+1, p.Class))
 				}
 			}
@@ -103,12 +145,12 @@ func archiveLeaks(archive io.Reader, set []Pattern) (files int, leaks []string, 
 // archiveFleetLeaks archives HEAD of the repository at root as a clean
 // publishing checkout would (ArchiveHEAD) and scans the archive for fleet
 // values.
-func archiveFleetLeaks(root string) (files int, leaks []string, err error) {
+func archiveFleetLeaks(root string, set []Pattern) (files int, leaks []string, err error) {
 	out, err := ArchiveHEAD(root)
 	if err != nil {
 		return 0, nil, err
 	}
-	return archiveLeaks(bytes.NewReader(out), Fleet())
+	return archiveLeaks(bytes.NewReader(out), set)
 }
 
 func TestTheArchiveCarriesNoFleetValue(t *testing.T) {
@@ -126,7 +168,7 @@ func TestTheArchiveCarriesNoFleetValue(t *testing.T) {
 		}
 		root = parent
 	}
-	files, leaks, err := archiveFleetLeaks(root)
+	files, leaks, err := archiveFleetLeaks(root, Fleet())
 	if err != nil {
 		t.Fatalf("reading the archive: %v", err)
 	}
@@ -144,7 +186,7 @@ func committedGuide(t *testing.T, attributes string) string {
 	t.Helper()
 	root := t.TempDir()
 	writeFiles(t, root, map[string]string{
-		"docs/guide.md":  "Measured on gpu-host. <!-- lab-string-ok: provenance -->\n",
+		"docs/guide.md":  "Measured on anvil. <!-- lab-string-ok: provenance -->\n",
 		".gitattributes": attributes,
 	})
 	git(t, root, "", "init", "-q")
@@ -225,7 +267,7 @@ func TestArchiveFleetLeaks_HonorsOnlyCommittedAttributes(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			root := committedGuide(t, "*.sh text eol=lf\n")
 			hide(t, root)
-			files, leaks, err := archiveFleetLeaks(root)
+			files, leaks, err := archiveFleetLeaks(root, plantedFleet(t))
 			if err != nil {
 				t.Fatalf("archiveFleetLeaks: %v", err)
 			}
@@ -244,7 +286,7 @@ func TestArchiveFleetLeaks_HonorsOnlyCommittedAttributes(t *testing.T) {
 // committed .gitattributes does keep the document out of the archive.
 func TestArchiveFleetLeaks_HonorsTheCommittedAttributes(t *testing.T) {
 	root := committedGuide(t, "docs/guide.md export-ignore\n")
-	files, leaks, err := archiveFleetLeaks(root)
+	files, leaks, err := archiveFleetLeaks(root, plantedFleet(t))
 	if err != nil {
 		t.Fatalf("archiveFleetLeaks: %v", err)
 	}
@@ -263,9 +305,9 @@ func TestArchiveLeaks_FindsAFleetValueWhateverWaivesIt(t *testing.T) {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	for name, content := range map[string]string{
-		"docs/guide.md":        "Measured on gpu-host. <!-- lab-string-ok: provenance -->\n",
-		"logs/vm-host-4.log": "ordinary text\n",
-		"clean.txt":            "dial 198.51.100.7:8443\n",
+		"docs/guide.md":    "Measured on anvil. <!-- lab-string-ok: provenance -->\n",
+		"logs/rack-04.log": "ordinary text\n",
+		"clean.txt":        "dial 198.51.100.7:8443\n",
 	} {
 		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(content))}); err != nil {
 			t.Fatal(err)
@@ -277,7 +319,7 @@ func TestArchiveLeaks_FindsAFleetValueWhateverWaivesIt(t *testing.T) {
 	if err := tw.Close(); err != nil {
 		t.Fatal(err)
 	}
-	files, leaks, err := archiveLeaks(&buf, Fleet())
+	files, leaks, err := archiveLeaks(&buf, plantedFleet(t))
 	if err != nil {
 		t.Fatalf("archiveLeaks: %v", err)
 	}
@@ -285,7 +327,7 @@ func TestArchiveLeaks_FindsAFleetValueWhateverWaivesIt(t *testing.T) {
 		t.Errorf("files = %d, want 3", files)
 	}
 	sort.Strings(leaks)
-	want := []string{"docs/guide.md:1: " + string(ClassLabHost), "logs/vm-host-4.log (path): " + string(ClassLabHost)}
+	want := []string{"docs/guide.md:1: " + string(ClassLabHost), "logs/rack-04.log (path): " + string(ClassLabHost)}
 	if strings.Join(leaks, "\n") != strings.Join(want, "\n") {
 		t.Errorf("leaks = %q, want %q", leaks, want)
 	}
@@ -324,9 +366,9 @@ type archiveEntry struct {
 func TestArchiveLeaks_FindsAFleetValueInALinkTarget(t *testing.T) {
 	buf := writeArchive(t, []archiveEntry{
 		{hdr: tar.Header{Typeflag: tar.TypeReg, Name: "clean.txt", Mode: 0o644}, content: "nothing here\n"},
-		{hdr: tar.Header{Typeflag: tar.TypeSymlink, Name: "workspace", Linkname: "/home/jhahn/go-luks2", Mode: 0o777}},
+		{hdr: tar.Header{Typeflag: tar.TypeSymlink, Name: "workspace", Linkname: plantedHome + "/go-luks2", Mode: 0o777}},
 	})
-	_, leaks, err := archiveLeaks(buf, Fleet())
+	_, leaks, err := archiveLeaks(buf, plantedFleet(t))
 	if err != nil {
 		t.Fatalf("archiveLeaks: %v", err)
 	}
@@ -342,15 +384,15 @@ func TestArchiveLeaks_FindsAFleetValueInALinkTarget(t *testing.T) {
 // PAX records, a per-entry record and the global header git archive writes.
 func TestArchiveLeaks_FindsAFleetValueInEveryHeaderField(t *testing.T) {
 	buf := writeArchive(t, []archiveEntry{
-		{hdr: tar.Header{Typeflag: tar.TypeXGlobalHeader, Name: "pax_global_header", PAXRecords: map[string]string{"comment": "built on gpu-host"}}},
-		{hdr: tar.Header{Typeflag: tar.TypeReg, Name: "a.txt", Mode: 0o644, Uname: "vm-host-4", Gname: "dellemc-r730"}, content: "plain\n"},
-		{hdr: tar.Header{Typeflag: tar.TypeLink, Name: "b.txt", Linkname: "mini-1.txt", Mode: 0o644}},
+		{hdr: tar.Header{Typeflag: tar.TypeXGlobalHeader, Name: "pax_global_header", PAXRecords: map[string]string{"comment": "built on anvil"}}},
+		{hdr: tar.Header{Typeflag: tar.TypeReg, Name: "a.txt", Mode: 0o644, Uname: "rack-04", Gname: "blade-07"}, content: "plain\n"},
+		{hdr: tar.Header{Typeflag: tar.TypeLink, Name: "b.txt", Linkname: "pod-01.txt", Mode: 0o644}},
 		{hdr: tar.Header{Typeflag: tar.TypeReg, Name: "c.txt", Mode: 0o644, PAXRecords: map[string]string{
-			"SCHILY.xattr.user.origin": "198.51.100.7",
-			"SCHILY.xattr.user.omega":  "x",
+			"SCHILY.xattr.user.origin": "198.18.0.7",
+			"SCHILY.xattr.user.zenith": "x",
 		}}},
 	})
-	files, leaks, err := archiveLeaks(buf, Fleet())
+	files, leaks, err := archiveLeaks(buf, plantedFleet(t))
 	if err != nil {
 		t.Fatalf("archiveLeaks: %v", err)
 	}
@@ -405,31 +447,32 @@ func TestFleet_ReportsEveryClassWithItsLineAndMatch(t *testing.T) {
 		wantMatch string
 		wantLine  int
 	}{
-		{"fleet address in help text", "package main\n\nconst help = \"dial 198.51.100.51:8443\"\n", ClassLabAddress, "198.51.100.51", 3},
-		{"forge port in a URL", "forge: https://forge.example:3001/api/v1\n", ClassLabAddress, ":3001", 1},
-		{"forge ssh port in a remote", "remote: ssh://git@forge.example:2222/x.git\n", ClassLabAddress, ":2222", 1},
-		{"fleet hostname in a doc", "# Runbook\n\nRun it on GODLIKE first.\n", ClassLabHost, "GODLIKE", 3},
-		{"runner hostname in a captured log", "2026-09-12T00:00:00Z ci-node-2(version:v3.1.0)\n", ClassLabHost, "ci-node-2", 1},
-		{"fleet hostname quoted in a workflow comment", "jobs:\n# the fleet is idle: Omega is at 21%\n", ClassLabHost, "Omega", 2},
-		{"fleet hostname as an internal endpoint", "cfg.BaseURL = \"http://omega.internal:8077\"\n", ClassLabHost, "omega.internal", 1},
-		{"agent hostname in a comment", "// observed on vm-host-4\n", ClassLabHost, "vm-host-4", 1},
-		{"tunnel gateway in prose", "The tunnel comes up on tgw-01 before the runners.\n", ClassLabHost, "tgw-01", 1},
-		{"tunnel gateway in a URL, mixed case", "proxy: https://TGW-01:8443/v1\n", ClassLabHost, "TGW-01", 1},
-		{"mini node in YAML", "runners:\n  - host: lab-node-5\n", ClassLabHost, "lab-node-5", 2},
-		{"mini node in a URL, mixed case", "see http://Mini-02.internal:8077/status\n", ClassLabHost, "Mini-02", 1},
-		{"coordinator host in prose", "# Notes\nThe coordinator runs on control-b.\n", ClassLabHost, "control-b", 2},
-		{"coordinator host in YAML, mixed case", "coordinator: Control-b\n", ClassLabHost, "Control-b", 1},
-		{"coordinator host in a URL", "forge: http://git.example.internal:3001/api/v1\n", ClassLabHost, "control-b", 1},
-		{"owner home path in a doc", "See /home/jhahn/sources for the checkout.\n", ClassOwnerPath, "/home/jhahn", 1},
-		{"owner account in an ssh command", "ssh jhahn@ci-runner-01 uptime\n", ClassOwnerAccount, "jhahn", 1},
-		{"owner account as a mixed-case author, in YAML", "maintainers:\n  - JHahn\n", ClassOwnerAccount, "JHahn", 2},
-		{"lab NFS mount in a script default", "QRDB=${QRDB:-/mnt/vm-host-1/go-qrdb}\n", ClassOwnerPath, "/mnt/vstation", 1},
+		{"fleet address in help text", "package main\n\nconst help = \"dial 198.18.0.51:8443\"\n", ClassLabAddress, "198.18.0.51", 3},
+		{"forge port in a URL", "forge: https://forge.example:4001/api/v1\n", ClassLabAddress, ":4001", 1},
+		{"forge ssh port in a remote", "remote: ssh://git@forge.example:4022/x.git\n", ClassLabAddress, ":4022", 1},
+		{"fleet hostname in a doc", "# Runbook\n\nRun it on ANVIL first.\n", ClassLabHost, "ANVIL", 3},
+		{"runner hostname in a captured log", "2026-09-12T00:00:00Z blade-02(version:v3.1.0)\n", ClassLabHost, "blade-02", 1},
+		{"fleet hostname quoted in a workflow comment", "jobs:\n# the fleet is idle: Zenith is at 21%\n", ClassLabHost, "Zenith", 2},
+		{"fleet hostname as an internal endpoint", "cfg.BaseURL = \"http://zenith.internal:8077\"\n", ClassLabHost, "zenith.internal", 1},
+		{"agent hostname in a comment", "// observed on rack-04\n", ClassLabHost, "rack-04", 1},
+		{"tunnel gateway in prose", "The tunnel comes up on gate-01 before the runners.\n", ClassLabHost, "gate-01", 1},
+		{"tunnel gateway in a URL, mixed case", "proxy: https://GATE-01:8443/v1\n", ClassLabHost, "GATE-01", 1},
+		{"mini node in YAML", "runners:\n  - host: pod-05\n", ClassLabHost, "pod-05", 2},
+		{"mini node in a URL, mixed case", "see http://Pod-02.internal:8077/status\n", ClassLabHost, "Pod-02", 1},
+		{"coordinator host in prose", "# Notes\nThe coordinator runs on pilot-b.\n", ClassLabHost, "pilot-b", 2},
+		{"coordinator host in YAML, mixed case", "coordinator: Pilot-b\n", ClassLabHost, "Pilot-b", 1},
+		{"coordinator host in a URL", "forge: http://pilot-b:4001/api/v1\n", ClassLabHost, "pilot-b", 1},
+		{"owner home path in a doc", "See " + plantedHome + "/sources for the checkout.\n", ClassOwnerPath, plantedHome, 1},
+		{"owner account in an ssh command", "ssh jdoe@ci-runner-01 uptime\n", ClassOwnerAccount, "jdoe", 1},
+		{"owner account as a mixed-case author, in YAML", "maintainers:\n  - JDoe\n", ClassOwnerAccount, "JDoe", 2},
+		{"lab NFS mount in a script default", "QRDB=${QRDB:-/mnt/labshare/go-qrdb}\n", ClassOwnerPath, "/mnt/labshare", 1},
 	}
 
+	set := plantedFleet(t)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			files := entriesOf(map[string]string{"shipping/file.txt": tc.content})
-			findings, err := Scan(files, Fleet(), nil)
+			findings, err := Scan(files, set, nil)
 			if err != nil {
 				t.Fatalf("Scan: %v", err)
 			}
@@ -455,6 +498,16 @@ func TestFleet_ReportsEveryClassWithItsLineAndMatch(t *testing.T) {
 			if !strings.Contains(got.String(), "shipping/file.txt:"+strconv.Itoa(tc.wantLine)) {
 				t.Errorf("String() is not file:line clickable: %s", got.String())
 			}
+
+			// The shape alone is not a finding: without the planted digest
+			// the same line is clean.
+			unplanted, err := Scan(files, Fleet(), nil)
+			if err != nil {
+				t.Fatalf("Scan: %v", err)
+			}
+			if len(unplanted) != 0 {
+				t.Errorf("the fleet set reports a synthetic value: %v", unplanted)
+			}
 		})
 	}
 }
@@ -465,23 +518,24 @@ func TestFleet_AcceptsWhatItShould(t *testing.T) {
 		content string
 	}{
 		{"documentation addresses", "dial 198.51.100.7:8443 or 192.0.2.10 or 203.0.113.4\n"},
-		{"RFC 1918 literals that are not the fleet subnet", "peers: 192.168.1.10, 192.168.100.4, 10.0.0.1\n"},
+		{"addresses outside the fleet subnet", "peers: 198.18.1.10, 198.19.0.4, 10.0.0.1\n"},
 		{"the repository's own example names", "--keyserver https://luks.example.com:8443 --runner ci-runner-01\n"},
-		{"a port that merely starts like the forge's", "listen on :30011 and :22220\n"},
-		{"a waiver on the offending line", "Measured on gpu-host. <!-- lab-string-ok: measurement provenance -->\n"},
-		{"a hostname that merely contains a fleet name as a substring", "ungodlikeness is not a host, and vstation-0 has no second digit\n"},
-		{"a word that merely contains the fleet name omega", "megaomegalith and omegas are words, not hosts\n"},
-		{"words that merely start like a mini node", "a minimal minix build, one mini-batch at a time, mini-2026 and mini-5\n"},
-		{"words that merely start like a coordinator host", "the control-plane talks over the control-bus; control-b2 is not a host\n"},
-		{"a key chord is not a coordinator host", "press Control-C to abort, Control-D at the prompt\n"},
+		{"a port that merely starts like the forge's", "listen on :40011 and :40220\n"},
+		{"a waiver on the offending line", "Measured on anvil. <!-- lab-string-ok: measurement provenance -->\n"},
+		{"a hostname that merely contains a fleet name as a substring", "unanvillike is not a host, and rack-0 has no second digit\n"},
+		{"a word that merely contains a fleet name", "megazenithlith and zeniths are words, not hosts\n"},
+		{"words that merely start like a mini node", "a podcast, one pod-batch at a time, pod-2026 and pod-5\n"},
+		{"words that merely start like a coordinator host", "the pilot-plane talks over the pilot-bus; pilot-b2 is not a host\n"},
+		{"a key chord is not a coordinator host", "press Pilot-C to abort, Pilot-D at the prompt\n"},
 		{"the forge owner in a module path and a repository URL", "import \"github.com/jeremyhahn/go-enclave\"\nsee https://github.com/jeremyhahn/go-luks2\n"},
-		{"a word that merely contains the owner account", "xjhahn and jhahns and jhahn_x are not the account\n"},
-		{"a tunnel gateway without a number", "the tgw role, tgw-a, tgw-1 and tgw-001 are not hosts\n"},
+		{"a word that merely contains the owner account", "xjdoe and jdoes and jdoe_x are not the account\n"},
+		{"a tunnel gateway without a number", "the gate role, gate-a, gate-1 and gate-001 are not hosts\n"},
 	}
 
+	set := plantedFleet(t)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			findings, err := Scan(entriesOf(map[string]string{"clean.txt": tc.content}), Fleet(), nil)
+			findings, err := Scan(entriesOf(map[string]string{"clean.txt": tc.content}), set, nil)
 			if err != nil {
 				t.Fatalf("Scan: %v", err)
 			}
@@ -492,50 +546,76 @@ func TestFleet_AcceptsWhatItShould(t *testing.T) {
 	}
 }
 
-// TestFleet_EveryNeedleIsImpliedByItsExpr pins the sieve's invariant: a
-// pattern whose Needle its own matches do not contain would be skipped for every
-// file in the tree, and the gate would pass while seeing nothing.
-func TestFleet_EveryNeedleIsImpliedByItsExpr(t *testing.T) {
-	// One string per pattern that the pattern is known to match. They are the
-	// values the audit actually found, so this doubles as the record of what
-	// each rule was written for.
-	samples := map[string][]string{
-		`\b192\.168\.101\.\d{1,3}\b`:   {"198.51.100.91:3001", "at 198.51.100.51:8443"},
-		`:3001\b`:                      {"http://forge.example:3001/api/v1"},
-		`:2222\b`:                      {"ssh://git@forge.example:2222/x.git"},
-		`(?i)\bvstation-\d{2}\b`:       {"agent-vm-host-4", "VSTATION-01 rebooted"},
-		`(?i)\bdellemc-\d{2}\b`:        {"runner ci-node-2", "DELLEMC-01"},
-		`(?i)\bgodlike(\.internal)?\b`: {"on gpu-host", "http://GODLIKE.internal:8077"},
-		`(?i)\bomega(\.internal)?\b`:   {"omega is 21%", "http://OMEGA.internal:8077"},
-		`(?i)\btgw-\d{2}\b`:            {"tunnel up on tgw-01", "https://TGW-01:8443"},
-		`(?i)\bmini-\d{2}\b`:           {"host: lab-node-5", "Mini-02.internal"},
-		`(?i:\bcontrol)-[a-z]\b`:       {"runs on control-b", "http://git.example.internal:3001"},
-		`/home/jhahn\b`:                {"/home/jhahn/sources"},
-		`/mnt/vstation`:                {"/mnt/vm-host-1/go-qrdb"},
-		`(?i)\bjhahn\b`:                {"jhahn@ci-runner-01"},
+// TestFleet_PinsTheDigestTable pins the digests the fleet set carries, one per
+// pattern in order, so a digest cannot be dropped or changed unnoticed. The
+// values behind them are computed outside the tree and written nowhere in it.
+func TestFleet_PinsTheDigestTable(t *testing.T) {
+	want := []string{
+		"c3da830da769bd8f45c7203550255793e1bc9f0e921beeccd41017e87cac0f66",
+		"a20c25627ed7bbb6d2b999c589b698e6ecd84384e2e0e510d8869d79a5ad244c",
+		"edee29f882543b956620b26d0ee0e7e950399b1c4222f5de05e06425b4c995e9",
+		"d7509e2c30b4aa6e7950f93b176ce45cf749a1c5199db383648c2be7a6170a7b",
+		"c9f72ed606186d2cab997a7e41e44bd66bb7d8117cb13d2928906884e0090062",
+		"b2f896bb37f772a0dd0d4fdae6ec20020143f642ec30edd22c10a759f847bc9b",
+		"304b4a90a76a1cbe4c112e074b30e75181f54df43d60f883597457844293b341",
+		"471db7c8254c7b5fc929214cba734ac9f93f5198893686beb975c05f8e75e4d1",
+		"43385991f0be5fed6db7fb640c5f510d41bcaac6ecca6c842a0c2a2d2d2bf510",
+		"0fcd568a5cb9bdb4677b69354b11ee415af8f784519cff3da49a26f84eaee7f2",
+		"6c47ecac10bc97a16b8ef358127f8630bf8cda0db7213a792ace464465f47419",
+		"d7509e2c30b4aa6e7950f93b176ce45cf749a1c5199db383648c2be7a6170a7b",
+		"6c47ecac10bc97a16b8ef358127f8630bf8cda0db7213a792ace464465f47419",
 	}
+	set := Fleet()
+	if len(set) != len(want) {
+		t.Fatalf("the fleet set has %d patterns, the pinned table %d", len(set), len(want))
+	}
+	hexDigest := regexp.MustCompile(`^[0-9a-f]{64}$`)
+	for i, p := range set {
+		if len(p.Digests) != 1 || p.Digests[0] != want[i] {
+			t.Errorf("pattern %d (%s) carries %q, want [%s]", i, p.Class, p.Digests, want[i])
+		}
+		for _, d := range p.Digests {
+			if !hexDigest.MatchString(d) {
+				t.Errorf("pattern %d (%s): %q is not a lower-case hex SHA-256 digest", i, p.Class, d)
+			}
+		}
+	}
+}
 
-	for _, p := range Fleet() {
-		t.Run(p.Expr.String(), func(t *testing.T) {
-			if p.Needle == "" {
-				t.Fatal("pattern has no sieve needle")
-			}
-			if p.Needle != strings.ToLower(p.Needle) {
-				t.Errorf("needle %q is not lowercase; the sieve folds case before searching", p.Needle)
-			}
-			got, ok := samples[p.Expr.String()]
-			if !ok {
-				t.Fatalf("no sample for this pattern: add one so its needle stays honest")
-			}
-			for _, sample := range got {
-				if !p.Expr.MatchString(sample) {
-					t.Errorf("%q does not match its own sample %q", p.Expr, sample)
-				}
-				if !strings.Contains(strings.ToLower(sample), p.Needle) {
-					t.Errorf("sample %q matches but does not contain needle %q: the sieve would skip it", sample, p.Needle)
-				}
-			}
-		})
+// TestFleet_EveryShapeYieldsItsPlantedKey proves the matching rule each
+// pattern relies on: its shape yields the planted key from a sample, the
+// digest of that key is what Digest computes whatever the key's case, and a
+// pattern without that digest reports nothing.
+func TestFleet_EveryShapeYieldsItsPlantedKey(t *testing.T) {
+	samples := []string{
+		"at 198.18.0.51:8443",
+		"http://forge.example:4001/api/v1",
+		"ssh://git@forge.example:4022/x.git",
+		"RACK-01 rebooted",
+		"runner blade-02",
+		"http://ANVIL.internal:8077",
+		"zenith is 21%",
+		"tunnel up on gate-01",
+		"Pod-02.internal",
+		"runs on pilot-b",
+		plantedHome + "/sources",
+		"/mnt/labshare/go-qrdb",
+		"jdoe@ci-runner-01",
+	}
+	set := plantedFleet(t)
+	if len(samples) != len(set) {
+		t.Fatalf("%d samples for %d patterns: add one per pattern", len(samples), len(set))
+	}
+	if Digest("ANVIL") != Digest("anvil") {
+		t.Error("Digest does not fold case")
+	}
+	for i, p := range set {
+		if got := p.find(samples[i]); len(got) != 1 {
+			t.Errorf("pattern %d (%s): %d matches in %q, want 1", i, p.Class, len(got), samples[i])
+		}
+		if got := Fleet()[i].find(samples[i]); len(got) != 0 {
+			t.Errorf("pattern %d (%s) reports the synthetic sample %q without its digest", i, p.Class, samples[i])
+		}
 	}
 }
 
@@ -546,13 +626,14 @@ func TestFleet_ReportsAValueThatAppearsOnlyInThePath(t *testing.T) {
 		wantClass Class
 		wantMatch string
 	}{
-		{"logs/vm-host-4.log", ClassLabHost, "vm-host-4"},
-		{"testdata/198.51.100.7/capture.txt", ClassLabAddress, "198.51.100.7"},
-		{"docs/runs/DELLEMC-02-bench.md", ClassLabHost, "DELLEMC-02"},
+		{"logs/rack-04.log", ClassLabHost, "rack-04"},
+		{"testdata/198.18.0.7/capture.txt", ClassLabAddress, "198.18.0.7"},
+		{"docs/runs/BLADE-02-bench.md", ClassLabHost, "BLADE-02"},
 	}
+	set := plantedFleet(t)
 	for _, tc := range cases {
 		t.Run(tc.path, func(t *testing.T) {
-			findings, err := Scan(entriesOf(map[string]string{tc.path: "ordinary text\n"}), Fleet(), nil)
+			findings, err := Scan(entriesOf(map[string]string{tc.path: "ordinary text\n"}), set, nil)
 			if err != nil {
 				t.Fatalf("Scan: %v", err)
 			}
@@ -573,13 +654,14 @@ func TestFleet_ReportsAValueThatAppearsOnlyInThePath(t *testing.T) {
 // come back, then asserts the same values pass once waived.
 func TestThePlantedViolationIsCaught(t *testing.T) {
 	planted := map[string]string{
-		"cmd/luks2/help.go":         "const help = \"--keyserver https://198.51.100.51:8443\"\n",
-		"docs/cli/mount.md":         "Mount it on gpu-host, then check /home/jhahn/sources.\n",
-		"pkg/luks2/testdata/x.json": "{\"host\": \"vm-host-4\", \"user\": \"jhahn\"}\n",
+		"cmd/luks2/help.go":         "const help = \"--keyserver https://198.18.0.51:8443\"\n",
+		"docs/cli/mount.md":         "Mount it on anvil, then check " + plantedHome + "/sources.\n",
+		"pkg/luks2/testdata/x.json": "{\"host\": \"rack-04\", \"user\": \"jdoe\"}\n",
 	}
 	files := entriesOf(planted)
+	set := plantedFleet(t)
 
-	findings, err := Scan(files, Fleet(), DefaultAllowList)
+	findings, err := Scan(files, set, DefaultAllowList)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -611,9 +693,9 @@ func TestThePlantedViolationIsCaught(t *testing.T) {
 	// The same values, waived in place, are accepted -- which is what makes
 	// the gate usable for the cases where the value is the point.
 	waived := entriesOf(map[string]string{
-		"docs/guide.md": "Deploy it on gpu-host <!-- lab-string-ok: measurement provenance -->\n",
+		"docs/guide.md": "Deploy it on anvil <!-- lab-string-ok: measurement provenance -->\n",
 	})
-	rest, err := Scan(waived, Fleet(), DefaultAllowList)
+	rest, err := Scan(waived, set, DefaultAllowList)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -622,31 +704,33 @@ func TestThePlantedViolationIsCaught(t *testing.T) {
 	}
 }
 
-// TestTheGateWouldHaveCaughtIssue944 pins the specific values go-quicbaas#944
-// found, in the kind of file each was found in. That audit is what the rule set
+// TestTheGateWouldHaveCaughtTheFirstAudit pins the kinds of value the audit
+// of the sibling repository found, planted in the kind of file each was found
+// in. That audit is what the rule set
 // was written against, so it is the regression test for the rule set here too:
 // if a future change to the patterns stops matching any of these, the gate has
 // stopped doing the job it was written for.
-func TestTheGateWouldHaveCaughtIssue944(t *testing.T) {
+func TestTheGateWouldHaveCaughtTheFirstAudit(t *testing.T) {
 	cases := []struct {
 		name    string
 		file    string
 		content string
 		want    Class
 	}{
-		{"the repo-root symlink into the lab NFS mount", "note.txt", "/mnt/vm-host-1/go-quicbaas/\n", ClassOwnerPath},
-		{"the private registry in the release workflow", ".github/workflows/release.yml", "  REGISTRY: 198.51.100.91:3001\n", ClassLabAddress},
-		{"a forge issue link in a shipped doc", "docs/barrier/cli.md", "([#491](http://198.51.100.91:3001/jeremyhahn/go-quicbaas/issues/491))\n", ClassLabAddress},
-		{"the fleet host in --help text", "cmd/quicbaas/orchestrator.go", "\t\t\"Pin the session by Name or Host (e.g. 'gpu-host')\")\n", ClassLabHost},
-		{"the fleet address in exported godoc", "pkg/agent/config.go", "\t// (e.g., \"https://198.51.100.51:8443\"). Required.\n", ClassLabAddress},
-		{"a copy-pasteable endpoint in a doc", "docs/embeddings/npu.md", "cfg.BaseURL = \"http://gpu-host.internal:8077\"\n", ClassLabHost},
-		{"the private registry in a captured runner log", "pkg/cifault/testdata/registry-unreachable.log", "image: git.example.internal/jeremyhahn/ci-runner:latest\n", ClassLabAddress},
-		{"a session note full of owner paths", "SESSION_RESUME.md", "- `/home/jhahn/sources/...`\n", ClassOwnerPath},
+		{"the repo-root symlink into the lab NFS mount", "note.txt", "/mnt/labshare/go-quicbaas/\n", ClassOwnerPath},
+		{"the private registry in the release workflow", ".github/workflows/release.yml", "  REGISTRY: 198.18.0.91:4001\n", ClassLabAddress},
+		{"a forge issue link in a shipped doc", "docs/barrier/cli.md", "([#1](http://198.18.0.91:4001/example/go-quicbaas/issues/1))\n", ClassLabAddress},
+		{"the fleet host in --help text", "cmd/quicbaas/orchestrator.go", "\t\t\"Pin the session by Name or Host (e.g. 'anvil')\")\n", ClassLabHost},
+		{"the fleet address in exported godoc", "pkg/agent/config.go", "\t// (e.g., \"https://198.18.0.51:8443\"). Required.\n", ClassLabAddress},
+		{"a copy-pasteable endpoint in a doc", "docs/embeddings/npu.md", "cfg.BaseURL = \"http://anvil.internal:8077\"\n", ClassLabHost},
+		{"the private registry in a captured runner log", "pkg/cifault/testdata/registry-unreachable.log", "image: 198.18.0.91:4001/example/ci-runner:latest\n", ClassLabAddress},
+		{"a session note full of owner paths", "SESSION_RESUME.md", "- `" + plantedHome + "/sources/...`\n", ClassOwnerPath},
 	}
 
+	set := plantedFleet(t)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			findings, err := Scan(entriesOf(map[string]string{tc.file: tc.content}), Fleet(), DefaultAllowList)
+			findings, err := Scan(entriesOf(map[string]string{tc.file: tc.content}), set, DefaultAllowList)
 			if err != nil {
 				t.Fatalf("Scan: %v", err)
 			}

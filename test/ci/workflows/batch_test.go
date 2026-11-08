@@ -67,9 +67,11 @@ func TestBatchIsDispatchOnly(t *testing.T) {
 	}
 }
 
-// TestBatchRunsOnlyOnBatchRunners: every batch job on the `batch` label and
-// nothing else on it, so batch work never takes a CI slot from a pull request.
-func TestBatchRunsOnlyOnBatchRunners(t *testing.T) {
+// TestBatchRunsOnTheHostedRunner: every batch job runs on GitHub-hosted
+// ubuntu-latest (Company Agent m2077), the self-hosted `batch` label is gone,
+// and race-full runs as three one-pass shards, so no job carries the three
+// race passes on one 4-core runner.
+func TestBatchRunsOnTheHostedRunner(t *testing.T) {
 	wf := readFile(t, batchWorkflow)
 	var jobs []string
 	for _, m := range topKey.FindAllStringSubmatch(block(t, wf, "jobs"), -1) {
@@ -81,25 +83,19 @@ func TestBatchRunsOnlyOnBatchRunners(t *testing.T) {
 	for _, j := range jobs {
 		body := job(t, wf, j)
 		got := runsOnLine.FindAllStringSubmatch(body, -1)
-		if len(got) != 1 || got[0][1] != "batch" {
-			t.Errorf("batch job %s runs on %v, want batch", j, got)
+		if len(got) != 1 || got[0][1] != hostedRunner {
+			t.Errorf("batch job %s runs on %v, want %s", j, got, hostedRunner)
 		}
 		if n := needs(t, body); n != nil {
 			t.Errorf("batch job %s needs %v; batch jobs are independent", j, n)
 		}
 	}
-	for _, f := range workflowFiles(t) {
-		if rel(t, f) == batchWorkflow {
-			continue
-		}
-		for _, m := range runsOnLine.FindAllStringSubmatch(readFile(t, rel(t, f)), -1) {
-			if m[1] == "batch" {
-				t.Errorf("%s runs a job on the batch runners", rel(t, f))
-			}
-		}
+	race := job(t, wf, "race-full")
+	if !strings.Contains(race, "        pass: [1, 2, 3]\n") || !strings.Contains(race, "go test -race -count=1 ") {
+		t.Error("race-full is not three one-pass shards (matrix pass: [1, 2, 3], go test -race -count=1)")
 	}
-	if !regexp.MustCompile(`(?m)^    - batch$`).MatchString(readFile(t, ".github/actionlint.yaml")) {
-		t.Error(".github/actionlint.yaml does not list the batch label; Lint reports it as unknown")
+	if !strings.Contains(job(t, wf, "soak"), "- name: "+freeDiskStep+"\n") {
+		t.Errorf("batch soak builds the integration image and has no %q step", freeDiskStep)
 	}
 }
 

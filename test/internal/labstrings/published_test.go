@@ -235,16 +235,15 @@ func TestStripAtPublish_ListsTheAutomergeWorkflowAndNothingElse(t *testing.T) {
 	}
 }
 
-// The internal review workflows are tracked on main and stripped at publish
+// The internal review workflow is tracked on main and stripped at publish
 // (#336), like automerge.yml: exact names only, so a `.yaml` variant or a
 // nested copy is still an unknown workflow and fails.
 func TestStripAtPublish_ListsTheReviewWorkflows(t *testing.T) {
-	reviewWorkflows := []string{".github/workflows/code-review.yml", ".github/workflows/qwen-review.yml"}
+	reviewWorkflows := []string{".github/workflows/code-review.yml"}
 	files := map[string]string{
 		".github/workflows/code-review.yml":     "on: pull_request\n",
-		".github/workflows/qwen-review.yml":     "on: pull_request\n",
 		".github/workflows/code-review.yaml":    "on: pull_request\n",
-		".github/workflows/sub/qwen-review.yml": "on: pull_request\n",
+		".github/workflows/sub/code-review.yml": "on: pull_request\n",
 		".github/workflows/ci.yml":              "on: push\n",
 	}
 	entries := entriesOf(files)
@@ -262,7 +261,7 @@ func TestStripAtPublish_ListsTheReviewWorkflows(t *testing.T) {
 			t.Errorf("%s failed the scan; it is stripped at publish, not failed", name)
 		}
 	}
-	for _, name := range []string{".github/workflows/code-review.yaml", ".github/workflows/sub/qwen-review.yml"} {
+	for _, name := range []string{".github/workflows/code-review.yaml", ".github/workflows/sub/code-review.yml"} {
 		if !failed[name] {
 			t.Errorf("%s passed the scan; only the exact name is stripped", name)
 		}

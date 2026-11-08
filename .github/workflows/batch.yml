@@ -1,5 +1,5 @@
-# batch-template: v1.1 — token-free CPU work on the batch runners: fuzz,
-# race-full, soak, bench. Dispatch only; never in a merge gate.
+# batch-template: v1.1 — token-free CPU work: fuzz, race-full, soak,
+# bench. Dispatch only; never in a merge gate.
 #
 # Owner order 2026-10-12 10:43 EDT (relayed by the Company Agent 17:24Z):
 # the batch runners have idle CPU that no lane can use, because lanes are
@@ -21,9 +21,13 @@
 #              artifact on Gitea)
 # A finding that is already an open issue gets a comment, not a new issue.
 #
-# RUNNERS. `runs-on: batch`: Infrastructure registers "batch" runners on
-# three hosts, with capacity 8, 8 and 3. Nothing else uses that label, so
-# batch work never takes a CI slot from a pull request.
+# RUNNERS (Company Agent m2077). Every job runs on GitHub-hosted
+# `ubuntu-latest`; the self-hosted `batch` label is gone, and
+# .github/actionlint.yaml no longer lists it. A hosted runner has 4 cores,
+# about 14 GB of free disk and a 6 h job limit, so race-full runs as three
+# one-pass shards rather than one -count=3 job, and soak, which builds the
+# integration image, frees disk first. Batch work still never shares a job
+# with ci.yml, and no merge gate needs it.
 #
 # ARTIFACTS. actions/upload-artifact v4 and later refuse any server that is
 # not github.com ("not currently supported on GHES"; Gitea presents as one),
@@ -104,11 +108,12 @@ jobs:
   # The runner does not expand a matrix built from another job's output
   # (go-quicraft ci.yml), so the targets are split over a static matrix of
   # four shards, and each shard fuzzes two targets at a time with
-  # -parallel=4: 8 cores per shard, 20 minutes per pair of targets.
+  # -parallel=4, 20 minutes per pair of targets. On a 4-core hosted runner
+  # the two targets share the cores.
   fuzz:
     name: Fuzz (shard ${{ matrix.shard }}/4)
     if: inputs.jobs == 'all' || inputs.jobs == 'fuzz'
-    runs-on: batch
+    runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
       fail-fast: false
@@ -192,12 +197,20 @@ jobs:
             fuzz-logs/
           retention-days: 30
 
-  # The unit suite under the race detector, three times, on main.
+  # The unit suite under the race detector, three times, on main. Company
+  # Agent m2077: the three passes are three shards of one pass each, run in
+  # parallel on hosted runners, so no job carries three passes on 4 cores.
+  # A data race or a failure in any shard is a finding, as in any of the
+  # three runs before.
   race-full:
-    name: Race (full, -count=3)
+    name: Race (full, pass ${{ matrix.pass }}/3)
     if: inputs.jobs == 'all' || inputs.jobs == 'race-full'
-    runs-on: batch
+    runs-on: ubuntu-latest
     timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        pass: [1, 2, 3]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
@@ -214,7 +227,7 @@ jobs:
 
       # CUSTOMIZE: go-luks2 (#354). RACE_PKGS holds ./pkg/luks2, whose
       # conformance suite calls the real cryptsetup and fails rather than
-      # skips when it is absent, and the batch runners do not carry it. Same
+      # skips when it is absent, and the hosted runners do not carry it. Same
       # step as ci.yml's Unit Tests and Race jobs, word for word
       # (test/ci/workflows pins it). fuzz and bench run no tests (-run='^$')
       # and soak runs in the integration image, which installs it.
@@ -231,12 +244,12 @@ jobs:
             exit 1
           }
 
-      - name: go test -race -count=3
+      - name: go test -race -count=1 (pass ${{ matrix.pass }} of 3)
         run: |
           set -o pipefail
           rc=0
           # shellcheck disable=SC2086 # RACE_PKGS is a package list
-          go test -race -count=3 -timeout=170m -tags="$RACE_TAGS" $RACE_PKGS 2>&1 | tee race.log || rc=$?
+          go test -race -count=1 -timeout=170m -tags="$RACE_TAGS" $RACE_PKGS 2>&1 | tee race.log || rc=$?
           grep -n 'WARNING: DATA RACE' race.log | sed 's/^/BATCH-FINDING race /' || true
           grep -E '^(--- FAIL|FAIL)' race.log | sed 's/^/BATCH-FINDING race-fail /' || true
           exit "$rc"
@@ -247,7 +260,7 @@ jobs:
   soak:
     name: Soak (${{ inputs.soak_minutes }} min)
     if: inputs.jobs == 'all' || inputs.jobs == 'soak'
-    runs-on: batch  # CUSTOMIZE: batch; the raft-guest label is go-quicraft's and go-qrdb's, and this suite needs only docker
+    runs-on: ubuntu-latest  # CUSTOMIZE: the raft-guest label is go-quicraft's and go-qrdb's; this suite needs only docker
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -262,6 +275,18 @@ jobs:
         run: |
           sudo -n sysctl -w net.core.rmem_max=7340032 net.core.wmem_max=7340032 ||
             echo "batch: sysctl not permitted; UDP buffers left at the defaults"
+
+      # Company Agent m2077: SOAK_CMD builds the integration image, which a
+      # hosted runner's stock free disk (about 14 GB) does not hold beside the
+      # preinstalled SDKs. On github.com only; a runner elsewhere keeps its
+      # disk as it is.
+      - name: Free runner disk
+        if: github.server_url == 'https://github.com'
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
+          docker image prune --all --force >/dev/null || true
+          df -h /
 
       - name: Loop the integration suite
         env:
@@ -304,7 +329,7 @@ jobs:
   bench:
     name: Bench
     if: inputs.jobs == 'all' || inputs.jobs == 'bench'
-    runs-on: batch
+    runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0

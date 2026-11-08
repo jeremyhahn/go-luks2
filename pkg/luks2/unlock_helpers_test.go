@@ -30,7 +30,7 @@ func TestVerifyMasterKey(t *testing.T) {
 	defer parallel(t)()
 
 	// Create a known master key for testing
-	testMasterKey := []byte("test-master-key-32-bytes-long!!!")
+	testMasterKey := mustRandom(t, 32)
 
 	t.Run("valid master key with pbkdf2 digest", func(t *testing.T) {
 		// Derive the expected digest from the test master key
@@ -64,7 +64,8 @@ func TestVerifyMasterKey(t *testing.T) {
 	})
 
 	t.Run("invalid master key", func(t *testing.T) {
-		invalidKey := []byte("wrong-master-key-32-bytes-long!!")
+		invalidKey := bytes.Clone(testMasterKey)
+		invalidKey[0] ^= 0xff // differs from the valid key in every draw
 		iterations := 1000
 		kdf := &header.KDF{
 			Type:       "pbkdf2",
@@ -445,7 +446,7 @@ func TestVerifyMasterKey(t *testing.T) {
 
 // TestVerifyMasterKeyDoesNotModifyInput tests that verifyMasterKey doesn't modify the input
 func TestVerifyMasterKeyDoesNotModifyInput(t *testing.T) {
-	testMasterKey := []byte("test-master-key-32-bytes-long!!!")
+	testMasterKey := mustRandom(t, 32)
 	originalKey := make([]byte, len(testMasterKey))
 	copy(originalKey, testMasterKey)
 

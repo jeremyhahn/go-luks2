@@ -81,7 +81,8 @@ func TestImageJobRunsEveryToolchainStageInTheImage(t *testing.T) {
 		switch {
 		case name == "Build the devcontainer images":
 			built = true
-		case !built, name == "Tear down", name == "Lease the integration image", strings.HasPrefix(name, "Upload "):
+		case !built, name == "Tear down", name == "Lease the integration image", strings.HasPrefix(name, "Upload "),
+			name == "Releasability (private patterns)": // ci-template v1.31: needs only the checkout
 		case !keepsRunning.MatchString("\n" + block): //nolint:misspell // the Actions function's spelling, not prose
 			t.Errorf("step %q does not keep running after a failed step once the toolchain image exists", name)
 		}
@@ -492,7 +493,8 @@ func TestImageJobTrimsTheCachesBeforeTheStages(t *testing.T) {
 	}
 }
 
-// toolchainJobs are the jobs that build the devcontainer images on bigdisk
+// toolchainJobs are the jobs that build the devcontainer images (each frees
+// the hosted runner's disk first: TestEveryCIJobRunsOnTheHostedRunner)
 // and run their stages in them.
 var toolchainJobs = []string{"image", "lint-gates", "integration", "soak", "test-race", "fips", "merge-check"}
 
