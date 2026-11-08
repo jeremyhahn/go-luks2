@@ -26,7 +26,7 @@ func TestDraftPullRequestSkipsEveryJobButTheGate(t *testing.T) {
 		cond := jobIfOf(t, job(t, ci, id))
 		switch {
 		case contains(nightlyTier, id):
-			// Soak runs on the schedule and dispatch only: no pull request,
+			// Soak runs on dispatch only: no pull request,
 			// so no draft, and the template's Soak carries no draft clause.
 			if cond != nightlyIf {
 				t.Errorf("job %s has if %q, want the nightly condition %q", id, cond, nightlyIf)

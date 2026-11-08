@@ -84,7 +84,7 @@ name: CI
 # ci-template v1.22 (ci-standard.md §6): the stages keep the Go build,
 # golangci-lint and module caches in named volumes on the runner's Docker
 # host, kept across jobs and split by trust class (CI_CACHE_CLASS: `main` for
-# a push to main or the schedule, `pr` otherwise), never in a job container's writable layer
+# a push to main, `pr` otherwise), never in a job container's writable layer
 # or its /tmp. `make ci-trim-caches` bounds the repository's cache volumes on
 # the host (CI_CACHE_MAX_GIB, default 32). CUSTOMIZE: the race, FIPS and
 # merged-tree jobs run their stages through the same recipe, so they take the
@@ -140,24 +140,25 @@ name: CI
 #              whose every changed file matches DOCS_ONLY_PATTERN skips the
 #              build, the tag assertion and the unit runs; lint and the gates
 #              that read the docs still run.
-#   Full tier  push to main, the nightly schedule, workflow_dispatch, and a
+#   Full tier  push to main, workflow_dispatch, and a
 #              pull_request labelled `ci:full`: the PR tier plus Integration
 #              and FIPS, each its own job in the image, and the image job's
 #              security (gosec, govulncheck, go mod verify, trivy's filesystem
 #              scan), deps-check and trivy image steps (v1.28 puts
 #              deps-check on the PR tier).
-#   Nightly    the schedule and workflow_dispatch only: the full tier plus
+#   Nightly    workflow_dispatch only: the full tier plus
 #              Soak, the integration suite looped in the integration image
 #              for SOAK_MINUTES.
 #
 # CI Gate, the single required check, needs EVERY job and reads each by name,
 # tagged `pr`, `full` or `nightly`. A `full` job may be skipped only while the
-# full tier is not selected, a `nightly` job only off the schedule and
-# dispatch; any other skip, and every failure or cancellation, fails it. On a
+# full tier is not selected, a `nightly` job only off workflow_dispatch;
+# any other skip, and every failure or cancellation, fails it. On a
 # draft PR every job but CI Gate skips and CI Gate itself fails.
 #
-# Exactly one CI workflow is scheduled, this one: main's full tier and Soak
-# run nightly as well as after every merge. nightly.yml and batch.yml stay
+# No CI workflow in this repository is scheduled: its nightly run is suspended,
+# so the full tier runs on push to main, workflow_dispatch and a `ci:full` PR,
+# and Soak on workflow_dispatch only. nightly.yml and batch.yml stay
 # dispatch-only; nightly.yml still runs trivy's filesystem scan, uploads its
 # SARIF to code scanning on github.com, and runs the advisory
 # misconfiguration scan.
@@ -166,7 +167,7 @@ name: CI
 # every full-tier job repeats its expression, and test/ci/workflows asserts
 # they stay identical:
 #
-#   push, schedule or workflow_dispatch        -> full tier
+#   push or workflow_dispatch                  -> full tier
 #   pull_request labelled ci:full              -> full tier
 #
 # LABEL EVENTS DO NOT RUN CI. ci.yml does not fire on `labeled`: on this host
@@ -197,10 +198,6 @@ on:
   # Lets a run be repeated without inventing a commit, which matters when a
   # failure is the runner's rather than the code's.
   workflow_dispatch:
-  # v1.23: main's full tier nightly as well as after every merge. Scheduled
-  # runs are on the default branch. CUSTOMIZE: the hour, off nightly.yml's.
-  schedule:
-    - cron: '0 4 * * *'
 
 # v1.26.2: on main the group is the workflow, the event and the commit sha,
 # so each main run is its own group and a merge never cancels the main run in
@@ -224,7 +221,7 @@ env:
   # unit run (the Makefile's GO_BUILD_TAGS block says why).
   GO_BUILD_TAGS: "integration"
   # v1.23: the full tier (ci-standard.md §8). Every event but pull_request
-  # (push to main, schedule, workflow_dispatch), and a PR labelled ci:full.
+  # (push to main, workflow_dispatch), and a PR labelled ci:full.
   # Steps read it as env.CI_FULL_TIER; a job-level `if:` cannot read env, so
   # the integration job repeats this expression. Keep them equal.
   CI_FULL_TIER: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
@@ -296,7 +293,7 @@ jobs:
   #
   # v1.23: lint, assert-build-tags, build and the unit runs are the PR tier and
   # run on every event. security and trivy image are full tier only
-  # (env.CI_FULL_TIER): main after every merge, nightly, dispatch, ci:full.
+  # (env.CI_FULL_TIER): main after every merge, dispatch, ci:full.
   # v1.28: deps-check is a lint-class gate on the PR tier and runs on every
   # event (ruling 219(3)).
   # v1.24: on a docs-only PR the build, the tag assertion and the unit runs
@@ -320,8 +317,8 @@ jobs:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
       # v1.22: the cache volumes' trust class. Only a push to main writes the
       # caches main's build reads; every other event, pull requests included,
-      # gets the `pr` set (ci-standard.md §6). v1.23: the nightly schedule runs
-      # on main, so it writes main's set too.
+      # gets the `pr` set (ci-standard.md §6). v1.23: a scheduled run (none is
+      # scheduled here) is on main, so it would write main's set too.
       CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'main' || 'pr' }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -1111,8 +1108,8 @@ jobs:
 
   # Soak (v1.23): the integration suite looped in the integration image until
   # SOAK_MINUTES have passed, each iteration its own compose stack, torn down
-  # before the next; the first red iteration fails the job. v1.24: nightly
-  # and workflow_dispatch only, off main pushes and off ci:full; the Gate marks
+  # before the next; the first red iteration fails the job. v1.24:
+  # workflow_dispatch only, off main pushes and off ci:full; the Gate marks
   # it `nightly`. It replaces nothing in batch.yml, whose soak stays a dispatch.
   # CUSTOMIZE: each iteration's container is named under the project, as in
   # the integration job, and removed with it.
@@ -1425,7 +1422,7 @@ jobs:
   #
   #   success                              passes
   #   skipped, `full`, tier not run        passes: the full tier was not selected
-  #   skipped, `nightly`, not nightly      passes: neither schedule nor dispatch
+  #   skipped, `nightly`, not nightly      passes: not a dispatch
   #   skipped, anything else               fails: a job that never ran proved nothing
   #   failure, cancelled, unreadable       fails
   #
