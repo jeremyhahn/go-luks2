@@ -348,15 +348,15 @@ func TestRun_AReportThatCannotBeWrittenIsAFailure(t *testing.T) {
 // names each file .gitattributes keeps out of every archive of the tree.
 func TestRun_AStripAtPublishFileIsListedAsExportIgnored(t *testing.T) {
 	read := entriesOf(map[string]string{
-		".github/workflows/ci.yml":        "on: push\n",
-		".github/workflows/automerge.yml": "on: push\n",
-		"CLAUDE.md":                       "# agent notes\n",
+		".github/workflows/ci.yml":          "on: push\n",
+		".github/workflows/code-review.yml": "on: push\n",
+		"CLAUDE.md":                         "# agent notes\n",
 	})
 	code, stdout, stderr := runGate(".", read)
 	if code != exitClean {
 		t.Fatalf("exit = %d, want %d; stderr %q", code, exitClean, stderr)
 	}
-	for _, want := range []string{"excluded from every archive by .gitattributes", ".github/workflows/automerge.yml", "CLAUDE.md"} {
+	for _, want := range []string{"excluded from every archive by .gitattributes", ".github/workflows/code-review.yml", "CLAUDE.md"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("stdout lacks %q:\n%s", want, stdout)
 		}
@@ -468,8 +468,8 @@ func (w *failAfter) Write(p []byte) (int, error) {
 // at its header or at an item -- exits 2, as does losing the final verdict.
 func TestRun_AQualificationThatCannotBeWrittenIsAFailure(t *testing.T) {
 	stripped := entriesOf(map[string]string{
-		".github/workflows/ci.yml":        "on: push\n",
-		".github/workflows/automerge.yml": "on: push\n",
+		".github/workflows/ci.yml":          "on: push\n",
+		".github/workflows/code-review.yml": "on: push\n",
 	})
 	exempt := func(string) ([]labstrings.Entry, error) {
 		return []labstrings.Entry{

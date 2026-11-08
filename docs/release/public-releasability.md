@@ -52,10 +52,7 @@ The strip-at-publish set is:
 |---|---|
 | `**/CLAUDE.md`, `**/AGENTS.md`, `**/.claude/**` | Agent instructions and agent tool settings, at any depth |
 | `**/.serena/**` | Code-analysis tool state, at any depth; gitignored whole |
-| `.github/workflows/automerge.yml` | The internal forge's merge-on-green workflow |
 | `.github/workflows/code-review.yml`, `.github/workflows/qwen-review.yml` | Internal code-review workflows |
-| `.github/workflows/batch.yml` | The internal batch-runner workflow (fuzz, race, soak, benchmarks) |
-| `test/ci/workflows/batch_test.go` | The tests of the batch-runner workflow, which read only that file |
 | `test/internal/labstrings/fleet.go`, `test/internal/labstrings/fleet_test.go` | The fleet pattern set and its tests: generic shapes plus SHA-256 digests of the values the gate bans, never the values themselves. Digests of short values are hygiene, not secrecy, so the set stays out of the release |
 
 A test that reads only a strip-at-publish file is itself stripped at publish,

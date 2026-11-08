@@ -17,16 +17,16 @@ import (
 // depth its patterns say, and an unstaged edit to it changes nothing.
 func TestIndexEntries_MarksWhatTheStagedGitattributesExportIgnores(t *testing.T) {
 	root := gitIndexTree(t, map[string]string{
-		GitAttributes:                       "**/CLAUDE.md export-ignore\n**/.claude/** export-ignore\n.github/workflows/batch.yml export-ignore\n",
-		"CLAUDE.md":                         "# agent\n",
-		"cmd/x/CLAUDE.md":                   "# agent\n",
-		".claude/settings.json":             "{}\n",
-		".github/workflows/batch.yml":       "on: push\n",
-		".github/workflows/ci.yml":          "on: push\n",
-		"go.mod":                            "module example.com/x\n",
-		"docs/CLAUDE.md.txt":                "not an agent file\n",
-		"sub/.github/workflows/batch.yml":   "on: push\n",
-		"pkg/x/claude_settings_example.txt": "x\n",
+		GitAttributes:                           "**/CLAUDE.md export-ignore\n**/.claude/** export-ignore\n.github/workflows/code-review.yml export-ignore\n",
+		"CLAUDE.md":                             "# agent\n",
+		"cmd/x/CLAUDE.md":                       "# agent\n",
+		".claude/settings.json":                 "{}\n",
+		".github/workflows/code-review.yml":     "on: push\n",
+		".github/workflows/ci.yml":              "on: push\n",
+		"go.mod":                                "module example.com/x\n",
+		"docs/CLAUDE.md.txt":                    "not an agent file\n",
+		"sub/.github/workflows/code-review.yml": "on: push\n",
+		"pkg/x/claude_settings_example.txt":     "x\n",
 	})
 	// Unstaged: must not count.
 	if err := os.WriteFile(filepath.Join(root, GitAttributes), []byte("go.mod export-ignore\n"), 0o644); err != nil {
@@ -38,7 +38,7 @@ func TestIndexEntries_MarksWhatTheStagedGitattributesExportIgnores(t *testing.T)
 		t.Fatalf("IndexEntries: %v", err)
 	}
 	want := map[string]bool{
-		"CLAUDE.md": true, "cmd/x/CLAUDE.md": true, ".claude/settings.json": true, ".github/workflows/batch.yml": true,
+		"CLAUDE.md": true, "cmd/x/CLAUDE.md": true, ".claude/settings.json": true, ".github/workflows/code-review.yml": true,
 	}
 	for _, e := range entries {
 		if e.ExportIgnored != want[e.Path] {

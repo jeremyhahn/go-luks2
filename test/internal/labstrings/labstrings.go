@@ -82,13 +82,9 @@
 // DefaultStripAtPublish: the agent files CLAUDE.md, AGENTS.md and `.claude/` at
 // any depth (standards project-scaffold.md §7, #252; only the local tool state
 // `.claude/settings.local.json` is gitignored), the code-analysis tool
-// configuration `.serena/` at any depth, and
-// .github/workflows/automerge.yml, which the forge requires (that exact name; a
-// `.yaml` variant or nested copy fails), and the internal review workflow
-// .github/workflows/code-review.yml (#336), and the
-// internal batch-runner workflow .github/workflows/batch.yml (#350) with
-// test/ci/workflows/batch_test.go, which tests only that workflow, and the
-// fleet pattern set test/internal/labstrings/fleet.go with its tests
+// configuration `.serena/` at any depth, the internal review workflow
+// .github/workflows/code-review.yml (that exact name; a `.yaml` variant or
+// nested copy fails), and the fleet pattern set test/internal/labstrings/fleet.go with its tests
 // fleet_test.go. Each is
 // export-ignored by .gitattributes, so `git archive` and a forge's tag tarball
 // leave it out, and listed in .dockerignore. The gate passes them and lists

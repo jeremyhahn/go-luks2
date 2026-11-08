@@ -14,8 +14,7 @@
 #                            <!-- codex-review:error head=<sha> -->, no review,
 #                            and the job fails
 #
-# automerge.yml releases a `code-review` PR on a non-author `codex` approval of
-# the current head and holds it on any REQUEST_CHANGES; this workflow only
+# Landing is the forge's native auto-merge on green; this workflow only
 # produces the review. Design: dept-software#17, and Infrastructure's
 # interface, dept-infra `gitea/docs/codex-review-ci.md` (dept-infra#94).
 #

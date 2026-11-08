@@ -23,12 +23,7 @@
 **/.serena export-ignore
 
 # Internal workflows. The public ones are ci.yml, nightly.yml and release.yml.
-.github/workflows/automerge.yml export-ignore
 .github/workflows/code-review.yml export-ignore
-.github/workflows/batch.yml export-ignore
-
-# Tests that read only an internal workflow, stripped with the file they test.
-test/ci/workflows/batch_test.go export-ignore
 
 # The fleet pattern set and its tests: they name the values the gate bans.
 test/internal/labstrings/fleet.go export-ignore
