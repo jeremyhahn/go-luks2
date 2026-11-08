@@ -60,3 +60,12 @@ self-hosted-runner:
     - ci-gate
     - bigdisk
     - qwen
+
+# code-review.yml is the handbook template verbatim. From v5.9.0 its GitHub
+# guard uses `A && B || die` checks, which shellcheck notes as SC2015 (info).
+# There `die` exits, so the note is no defect. It is ignored for that file and
+# that check only; every other shellcheck finding there still fails Lint.
+paths:
+  .github/workflows/code-review.yml:
+    ignore:
+      - 'shellcheck reported issue in this script: SC2015:.+'
