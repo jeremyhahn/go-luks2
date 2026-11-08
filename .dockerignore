@@ -48,7 +48,6 @@ coverage.html
 **/.serena
 .github/workflows/automerge.yml
 .github/workflows/code-review.yml
-.github/workflows/qwen-review.yml
 .github/workflows/batch.yml
 test/ci/workflows/batch_test.go
 test/internal/labstrings/fleet.go

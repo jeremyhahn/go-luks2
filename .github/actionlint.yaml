@@ -48,6 +48,11 @@
 # v7 (2026-10-20): add `qwen`, the label of the runner code-review.yml's
 # opencode review job runs on (code-review template v5.2.1 and later, a
 # CUSTOMIZE line). Added in the same change as the workflow, per v2.
+# v8 (2026-11-07, Company Agent m2077): remove `batch`, `ci-gate` and
+# `bigdisk`. ci.yml and batch.yml now run every job on GitHub-hosted
+# `ubuntu-latest`, so no workflow names those labels, and an allowlist that
+# still accepted them could not catch one as a typo (the v3 rule). The review
+# labels stay: code-review.yml keeps its dedicated review runners.
 self-hosted-runner:
   labels:
     - ubuntu-latest
@@ -56,7 +61,18 @@ self-hosted-runner:
     - codex-task
     - claude
     - code-review
-    - batch
-    - ci-gate
-    - bigdisk
     - qwen
+
+# code-review.yml is the handbook template verbatim. From v5.9.0 its GitHub
+# guard uses `A && B || die` checks, which shellcheck notes as SC2015 (info).
+# There `die` exits, so the note is no defect. automerge.yml (template v13)
+# has the same shape: its fail-closed variable check ends in `|| { ...; exit 1; }`.
+# The note is ignored for those two files and that check only; every other
+# shellcheck finding there still fails Lint.
+paths:
+  .github/workflows/automerge.yml:
+    ignore:
+      - 'shellcheck reported issue in this script: SC2015:.+'
+  .github/workflows/code-review.yml:
+    ignore:
+      - 'shellcheck reported issue in this script: SC2015:.+'

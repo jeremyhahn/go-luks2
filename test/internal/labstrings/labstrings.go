@@ -84,12 +84,12 @@
 // `.claude/settings.local.json` is gitignored), the code-analysis tool
 // configuration `.serena/` at any depth, and
 // .github/workflows/automerge.yml, which the forge requires (that exact name; a
-// `.yaml` variant or nested copy fails), and the internal review workflows
-// .github/workflows/code-review.yml and qwen-review.yml (#336), and the
+// `.yaml` variant or nested copy fails), and the internal review workflow
+// .github/workflows/code-review.yml (#336), and the
 // internal batch-runner workflow .github/workflows/batch.yml (#350) with
 // test/ci/workflows/batch_test.go, which tests only that workflow, and the
 // fleet pattern set test/internal/labstrings/fleet.go with its tests
-// fleet_test.go, which name the values the gate bans. Each is
+// fleet_test.go. Each is
 // export-ignored by .gitattributes, so `git archive` and a forge's tag tarball
 // leave it out, and listed in .dockerignore. The gate passes them and lists
 // each on every run; one .gitattributes does not export-ignore is a finding.
@@ -114,14 +114,23 @@
 // behavior) and removed CLAUDE.md from the index; #252 tracks it again,
 // stripped at publish.
 //
-// Where the patterns live: fleet.go, returned by Fleet, which is stripped at
-// publish so the published gate spells no fleet value; its two files are the
-// only DefaultAllowList entries. The published scanner tests use documentation
-// values, and a test in fleet_test.go requires that `git archive HEAD` names no
-// value of the set anywhere, waiver or not. A tree with no pattern set refuses
-// to scan (NoPatternsError); the releasability gate then fails a development
-// tree -- one that tracks a strip-at-publish file -- and passes a published
-// tree only with the notice that its content was not scanned.
+// Where the patterns live: fleet.go, returned by Fleet. A pattern is a shape
+// and a set of digests: the shape is a generic regexp that names no fleet
+// value (any IPv4 address, a port after a colon, a /home/<name> path
+// component, a <word>-<2 digits> host name, a bare word), and the digests are
+// the hex SHA-256 of the fleet values that shape may match. A match of the
+// shape is a finding only when the digest of its key is in the set. The key
+// is the shape's first submatch -- for an address, its /24 prefix, the first
+// three octets -- folded to lower case (Digest). So the gate's source and its
+// tests spell no fleet value, and fleet_test.go proves each shape with
+// synthetic values whose digests it computes. This is hygiene, not secrecy:
+// a short value's digest is brute-forced in seconds. The published scanner
+// tests use documentation values, and a test in fleet_test.go requires that
+// `git archive HEAD` names no value of the set anywhere, waiver or not. A tree
+// with no pattern set refuses to scan (NoPatternsError); the releasability
+// gate then fails a development tree -- one that tracks a strip-at-publish
+// file -- and passes a published tree only with the notice that its content
+// was not scanned.
 //
 // This is the canonical statement of the public-releasability rule.
 //
@@ -132,10 +141,12 @@
 package labstrings
 
 import (
-	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -168,17 +179,16 @@ type Pattern struct {
 	// Class says what a match leaks.
 	Class Class
 
-	// Expr matches the offending text. It matches the value, not the whole
-	// line, so the report can quote exactly what has to change.
+	// Expr is the shape of the offending text: a generic regexp that names no
+	// value. It matches the value, not the whole line, so the report can quote
+	// exactly what has to change. Its first submatch, when it has one, is the
+	// key; otherwise the whole match is.
 	Expr *regexp.Regexp
 
-	// Needle is a lowercase literal that every string Expr can match must
-	// contain. It is the cheap precondition the sieve uses: a substring
-	// search runs at memory bandwidth where this regexp runs at a few
-	// megabytes a second, and the whole tree has to be read on every unit
-	// test pass. A Needle that is not implied by Expr would make the gate
-	// silently blind, so TestFleet_EveryNeedleIsImpliedByItsExpr pins it.
-	Needle string
+	// Digests are the hex SHA-256 digests (Digest) of the keys this pattern
+	// reports. A match of Expr whose key's digest is not listed is not a
+	// finding, so the values the gate hunts are never spelled in its source.
+	Digests []string
 
 	// Guidance is what the engineer who tripped this rule should do instead.
 	Guidance string
@@ -189,37 +199,66 @@ type Pattern struct {
 	YieldsTo Class
 }
 
-// fleet is this repository's pattern set. Its patterns name the fleet's own
-// values, so they cannot be published, and a gate that spelled them in its
-// source would be the leak it exists to stop. fleet.go assigns it; that file
-// is stripped at publish (DefaultStripAtPublish), so the values are written
-// down in exactly one place and that place never ships. In a build without
-// fleet.go -- the published tree -- the set is empty, and Scan refuses an
-// empty set rather than report clean.
+// fleet is this repository's pattern set. Its patterns carry digests of the
+// fleet's values, never the values: a gate that spelled them in its source
+// would be the leak it exists to stop. fleet.go assigns it. In a build without
+// fleet.go the set is empty, and Scan refuses an empty set rather than report
+// clean.
 var fleet []Pattern
 
-// Fleet returns the pattern set compiled into this build: the fleet's values
-// in the development tree, none in the published tree.
+// Fleet returns the pattern set compiled into this build: shapes and the
+// digests of the fleet's values.
 func Fleet() []Pattern { return fleet }
 
 // classes is every class a pattern or an allow rule may name.
 var classes = []Class{ClassLabAddress, ClassLabHost, ClassOwnerPath, ClassOwnerAccount}
 
-// mayContainLabValue reports whether any pattern of set could possibly match
-// inside content, by searching for each pattern's Needle. Almost no file in
-// this tree contains a lab value, and the whole tracked tree is read on every
-// unit-test pass: settling "there is nothing here" has to be cheap, and a
-// substring search is two orders of magnitude cheaper than the patterns
-// themselves. Case is folded because a hostname is as likely to appear shouted
-// in a log line as lowercased in a config file.
+// mayContainLabValue reports whether any pattern of set matches anywhere in
+// content. Almost no file in this tree contains a lab value, and the whole
+// tracked tree is read on every unit-test pass: settling "there is nothing
+// here" has to be cheap, so each distinct shape runs once over the whole
+// content, against the digests of every pattern that shares it, and the
+// line-by-line scan runs only on a file that has a hit. No shape matches
+// across a newline, so a hit in a line is a hit in the content.
 func mayContainLabValue(set []Pattern, content []byte) bool {
-	folded := bytes.ToLower(content)
+	text := string(content)
+	byShape := map[*regexp.Regexp][]string{}
+	var shapes []*regexp.Regexp
 	for _, p := range set {
-		if bytes.Contains(folded, []byte(p.Needle)) {
+		if _, ok := byShape[p.Expr]; !ok {
+			shapes = append(shapes, p.Expr)
+		}
+		byShape[p.Expr] = append(byShape[p.Expr], p.Digests...)
+	}
+	for _, shape := range shapes {
+		if len(Pattern{Expr: shape, Digests: byShape[shape]}.find(text)) > 0 {
 			return true
 		}
 	}
 	return false
+}
+
+// Digest returns the hex SHA-256 digest of key folded to lower case: the form
+// a Pattern's Digests are written in.
+func Digest(key string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(key)))
+	return hex.EncodeToString(sum[:])
+}
+
+// find returns the span of every match of p.Expr in s whose key's digest is
+// one of p.Digests.
+func (p Pattern) find(s string) [][]int {
+	var spans [][]int
+	for _, m := range p.Expr.FindAllStringSubmatchIndex(s, -1) {
+		key := s[m[0]:m[1]]
+		if len(m) >= 4 && m[2] >= 0 {
+			key = s[m[2]:m[3]]
+		}
+		if slices.Contains(p.Digests, Digest(key)) {
+			spans = append(spans, m[:2])
+		}
+	}
+	return spans
 }
 
 // Finding is one line that must change before this tree can be published.
@@ -330,7 +369,7 @@ func scanPath(name string, set []Pattern, accepted map[Class]bool) []Finding {
 		if accepted[p.Class] {
 			continue
 		}
-		for _, span := range p.Expr.FindAllStringIndex(name, -1) {
+		for _, span := range p.find(name) {
 			if p.YieldsTo != "" && insideClass(set, name, span, p.YieldsTo) {
 				continue
 			}
@@ -362,7 +401,7 @@ func scanContent(name string, content []byte, set []Pattern, accepted map[Class]
 			if accepted[p.Class] {
 				continue
 			}
-			for _, span := range p.Expr.FindAllStringIndex(line, -1) {
+			for _, span := range p.find(line) {
 				if p.YieldsTo != "" && insideClass(set, line, span, p.YieldsTo) {
 					continue
 				}
@@ -387,7 +426,7 @@ func insideClass(set []Pattern, line string, span []int, class Class) bool {
 		if p.Class != class {
 			continue
 		}
-		for _, outer := range p.Expr.FindAllStringIndex(line, -1) {
+		for _, outer := range p.find(line) {
 			if outer[0] <= span[0] && span[1] <= outer[1] {
 				return true
 			}

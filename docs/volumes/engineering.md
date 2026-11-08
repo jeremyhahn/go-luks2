@@ -385,9 +385,9 @@ until it is marked ready. The workflow is an instance of the shared CI template
 at v1.28.0, which puts `make deps-check` on the PR tier: the image job runs it
 on every event, a docs-only pull request included, as it runs `make lint`. The
 full tier (FIPS, integration, and the image job's security and `trivy image`
-steps) runs on push to `main`, on the nightly schedule, on
+steps) runs on push to `main`, on
 `workflow_dispatch`, and on a pull request labelled `ci:full`; the nightly
-tier (Soak, the integration suite looped) runs on the schedule and on
+tier (Soak, the integration suite looped) runs on
 `workflow_dispatch` only. CI does not run on label events: the label is read
 when a run starts, so a `ci:full` added to an open pull request takes effect
 on its next push or update-branch, or through `workflow_dispatch`. `CI Gate`,

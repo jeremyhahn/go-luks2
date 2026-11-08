@@ -59,8 +59,16 @@ name: CI
 
 # ONE workflow file, run by two different Actions hosts: github.com and a
 # self-hosted forge. Steps that only work on github.com are guarded on
-# github.server_url; everything that gates a merge runs on both, and every
-# runner choice is the template's `github.server_url` expression.
+# github.server_url; everything that gates a merge runs on both.
+#
+# RUNNERS (Company Agent m2077): every job runs on GitHub-hosted
+# `ubuntu-latest`, so main's CI Gate can go green on GitHub. The self-hosted
+# labels this file used (`bigdisk` for the image-building jobs, `ci-gate` for
+# the gate) are gone, and .github/actionlint.yaml no longer lists them. A
+# hosted runner has 4 cores, about 14 GB of free disk and a 6 h job limit:
+# every job that builds a devcontainer image runs "Free runner disk" before
+# its build (github.com only), and no job's timeout (120 min at most) comes
+# near the limit, so none is sharded.
 #
 # ci-template v1.21 (ci-standard.md §2, devcontainer.md §7): every stage runs in
 # this repository's own devcontainer image and no other. No job sets up Go or
@@ -76,7 +84,7 @@ name: CI
 # ci-template v1.22 (ci-standard.md §6): the stages keep the Go build,
 # golangci-lint and module caches in named volumes on the runner's Docker
 # host, kept across jobs and split by trust class (CI_CACHE_CLASS: `main` for
-# a push to main or the schedule, `pr` otherwise), never in a job container's writable layer
+# a push to main, `pr` otherwise), never in a job container's writable layer
 # or its /tmp. `make ci-trim-caches` bounds the repository's cache volumes on
 # the host (CI_CACHE_MAX_GIB, default 32). CUSTOMIZE: the race, FIPS and
 # merged-tree jobs run their stages through the same recipe, so they take the
@@ -132,24 +140,25 @@ name: CI
 #              whose every changed file matches DOCS_ONLY_PATTERN skips the
 #              build, the tag assertion and the unit runs; lint and the gates
 #              that read the docs still run.
-#   Full tier  push to main, the nightly schedule, workflow_dispatch, and a
+#   Full tier  push to main, workflow_dispatch, and a
 #              pull_request labelled `ci:full`: the PR tier plus Integration
 #              and FIPS, each its own job in the image, and the image job's
 #              security (gosec, govulncheck, go mod verify, trivy's filesystem
 #              scan), deps-check and trivy image steps (v1.28 puts
 #              deps-check on the PR tier).
-#   Nightly    the schedule and workflow_dispatch only: the full tier plus
+#   Nightly    workflow_dispatch only: the full tier plus
 #              Soak, the integration suite looped in the integration image
 #              for SOAK_MINUTES.
 #
 # CI Gate, the single required check, needs EVERY job and reads each by name,
 # tagged `pr`, `full` or `nightly`. A `full` job may be skipped only while the
-# full tier is not selected, a `nightly` job only off the schedule and
-# dispatch; any other skip, and every failure or cancellation, fails it. On a
+# full tier is not selected, a `nightly` job only off workflow_dispatch;
+# any other skip, and every failure or cancellation, fails it. On a
 # draft PR every job but CI Gate skips and CI Gate itself fails.
 #
-# Exactly one CI workflow is scheduled, this one: main's full tier and Soak
-# run nightly as well as after every merge. nightly.yml and batch.yml stay
+# No CI workflow in this repository is scheduled: its nightly run is suspended,
+# so the full tier runs on push to main, workflow_dispatch and a `ci:full` PR,
+# and Soak on workflow_dispatch only. nightly.yml and batch.yml stay
 # dispatch-only; nightly.yml still runs trivy's filesystem scan, uploads its
 # SARIF to code scanning on github.com, and runs the advisory
 # misconfiguration scan.
@@ -158,7 +167,7 @@ name: CI
 # every full-tier job repeats its expression, and test/ci/workflows asserts
 # they stay identical:
 #
-#   push, schedule or workflow_dispatch        -> full tier
+#   push or workflow_dispatch                  -> full tier
 #   pull_request labelled ci:full              -> full tier
 #
 # LABEL EVENTS DO NOT RUN CI. ci.yml does not fire on `labeled`: on this host
@@ -189,10 +198,6 @@ on:
   # Lets a run be repeated without inventing a commit, which matters when a
   # failure is the runner's rather than the code's.
   workflow_dispatch:
-  # v1.23: main's full tier nightly as well as after every merge. Scheduled
-  # runs are on the default branch. CUSTOMIZE: the hour, off nightly.yml's.
-  schedule:
-    - cron: '0 4 * * *'
 
 # v1.26.2: on main the group is the workflow, the event and the commit sha,
 # so each main run is its own group and a merge never cancels the main run in
@@ -216,7 +221,7 @@ env:
   # unit run (the Makefile's GO_BUILD_TAGS block says why).
   GO_BUILD_TAGS: "integration"
   # v1.23: the full tier (ci-standard.md §8). Every event but pull_request
-  # (push to main, schedule, workflow_dispatch), and a PR labelled ci:full.
+  # (push to main, workflow_dispatch), and a PR labelled ci:full.
   # Steps read it as env.CI_FULL_TIER; a job-level `if:` cannot read env, so
   # the integration job repeats this expression. Keep them equal.
   CI_FULL_TIER: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
@@ -288,7 +293,7 @@ jobs:
   #
   # v1.23: lint, assert-build-tags, build and the unit runs are the PR tier and
   # run on every event. security and trivy image are full tier only
-  # (env.CI_FULL_TIER): main after every merge, nightly, dispatch, ci:full.
+  # (env.CI_FULL_TIER): main after every merge, dispatch, ci:full.
   # v1.28: deps-check is a lint-class gate on the PR tier and runs on every
   # event (ruling 219(3)).
   # v1.24: on a docs-only PR the build, the tag assertion and the unit runs
@@ -303,17 +308,17 @@ jobs:
   # rather than reuse a cached one with the old package (CVE-2026-92392).
   image:
     name: Devcontainer image [lint, build, test, security, deps-check, trivy image]
-    # bigdisk: the runners whose disks hold the toolchain and integration
-    # images this job builds.
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    # ubuntu-latest, with "Free runner disk" before the build: the hosted
+    # runner's stock free disk does not hold both devcontainer images.
+    runs-on: ubuntu-latest
     needs: changes             # v1.24
     timeout-minutes: 120
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
       # v1.22: the cache volumes' trust class. Only a push to main writes the
       # caches main's build reads; every other event, pull requests included,
-      # gets the `pr` set (ci-standard.md §6). v1.23: the nightly schedule runs
-      # on main, so it writes main's set too.
+      # gets the `pr` set (ci-standard.md §6). v1.23: a scheduled run (none is
+      # scheduled here) is on main, so it would write main's set too.
       CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'main' || 'pr' }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -333,6 +338,19 @@ jobs:
 
       - name: Reap stale CI stacks
         run: make ci-reap-stacks
+
+      # Company Agent m2077: a GitHub-hosted runner starts with about 14 GB
+      # free, which the devcontainer images this job builds outgrow. On
+      # github.com only, remove the preinstalled SDKs and images this
+      # pipeline never uses before the build. A runner elsewhere keeps its
+      # disk as it is.
+      - name: Free runner disk
+        if: github.server_url == 'https://github.com'
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
+          docker image prune --all --force >/dev/null || true
+          df -h /
 
       # v1.23: the integration image is named by its content,
       # go-luks2-ci-it:<hash> (`make -s it-image`, ci-standard.md §9), so every
@@ -587,6 +605,86 @@ jobs:
           rm -f "$RUNNER_TEMP/gomodauth.env" it-image.tar
           [ -z "${IT_LEASE:-}" ] || docker rm "$IT_LEASE" >/dev/null || true
 
+      # v1.32 (2026-11-08, Company Agent m2098 item 2, InfoSec finding): the
+      # internal-name gate. Its patterns are internal values, so they never
+      # live in this repository: the Actions secret RELEASABILITY_PATTERNS
+      # carries the private pattern file (source in platform-configs). Blank
+      # and `#` lines are skipped; every other line is `class<TAB>regex`, a
+      # class of coord-host, internal-email, lab-address, lab-host or
+      # owner-path (v1.33; an `/i` suffix is allowed) and a POSIX extended regex. A malformed line, an unknown
+      # class or a regex grep -E refuses fails the step, which prints the line
+      # number only. v1.31 grepped whole lines with -F, so no line matched and
+      # the gate was green for a false reason. The step prints path and line
+      # of a match, never the value. A run without the secret (a fork PR)
+      # skips with a notice; a push to main without it fails.
+      - name: Releasability (private patterns)
+        if: ${{ !cancelled() }}
+        env:
+          RELEASABILITY_PATTERNS: ${{ secrets.RELEASABILITY_PATTERNS }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ -z "$RELEASABILITY_PATTERNS" ]; then
+            if [ "$EVENT" = push ]; then
+              echo "::error::RELEASABILITY_PATTERNS is not set; the gate needs the private pattern file (public-hygiene.md)"
+              exit 1
+            fi
+            echo "::notice::RELEASABILITY_PATTERNS is not available to this run; pushes to main run the gate"
+            exit 0
+          fi
+          pf=$(mktemp)
+          chmod 600 "$pf"
+          trap 'rm -f "$pf"' EXIT
+          tab=$(printf '\t')
+          n=0 bad=0 count=0
+          while IFS= read -r line || [ -n "$line" ]; do
+            n=$((n + 1))
+            line=${line%$'\r'}
+            trimmed=${line#"${line%%[![:space:]]*}"}
+            case $trimmed in ''|'#'*) continue ;; esac
+            case $line in
+              *"$tab"*) ;;
+              *) echo "::error::pattern line $n is not class<TAB>regex"; bad=1; continue ;;
+            esac
+            class=${line%%"$tab"*}
+            re=${line#*"$tab"}
+            case $class in
+              coord-host|internal-email|lab-address|lab-host|owner-path) ;;
+              coord-host/i|internal-email/i|lab-address/i|lab-host/i|owner-path/i) ;;
+              *) echo "::error::pattern line $n has an unknown class"; bad=1; continue ;;
+            esac
+            if [ -z "$re" ]; then
+              echo "::error::pattern line $n has an empty regex"; bad=1; continue
+            fi
+            rc=0
+            grep -E -e "$re" /dev/null > /dev/null 2>&1 || rc=$?
+            if [ "$rc" -ge 2 ]; then
+              echo "::error::pattern line $n has a regex grep -E refuses"; bad=1; continue
+            fi
+            printf '%s\n' "$re" >> "$pf"
+            count=$((count + 1))
+          done <<< "$RELEASABILITY_PATTERNS"
+          if [ "$bad" != 0 ]; then
+            echo "::error::the private pattern file is malformed (line numbers above; the values are not shown)"
+            exit 1
+          fi
+          if [ "$count" = 0 ]; then
+            echo "::error::RELEASABILITY_PATTERNS holds no class<TAB>regex line"
+            exit 1
+          fi
+          rc=0
+          hits=$(git grep -n -I -i -E -f "$pf" -- . | cut -d: -f1,2; exit "${PIPESTATUS[0]}") || rc=$?
+          case $rc in
+            0)
+              echo "::error::internal names in the tracked tree (path:line; the values are not shown):"
+              printf '%s\n' "$hits"
+              exit 1 ;;
+            1) ;;
+            *)
+              echo "::error::git grep failed (rc $rc)"
+              exit 1 ;;
+          esac
+          echo "releasability: $count private patterns, 0 matches"
+
   # v1.27: a repository's `make lint-gates` (its own gates beside `make lint`:
   # script, workflow, generated-code and module checks) runs in this job, in
   # parallel with the image job's `make lint`, not in series after it, so
@@ -607,7 +705,7 @@ jobs:
   # and the job; the gates after it run on the next push.
   lint-gates:
     name: Lint Gates [toolchain image]
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    runs-on: ubuntu-latest
     if: ${{ !github.event.pull_request.draft }}   # v1.26
     timeout-minutes: 45       # CUSTOMIZE: the repo's lint-gates time, with honest headroom
     env:
@@ -643,6 +741,19 @@ jobs:
       - name: Reap stale CI stacks
         if: ${{ steps.probe.outputs.has_target == 'true' }}
         run: make ci-reap-stacks
+
+      # Company Agent m2077: a GitHub-hosted runner starts with about 14 GB
+      # free, which the devcontainer images this job builds outgrow. On
+      # github.com only, remove the preinstalled SDKs and images this
+      # pipeline never uses before the build. A runner elsewhere keeps its
+      # disk as it is.
+      - name: Free runner disk
+        if: ${{ steps.probe.outputs.has_target == 'true' && github.server_url == 'https://github.com' }}
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
+          docker image prune --all --force >/dev/null || true
+          df -h /
 
       # make docker-build needs the integration image's name (as in the image
       # job); this job never runs or leases that image.
@@ -697,7 +808,7 @@ jobs:
   # the image's cache lacks.
   merge-check:
     name: Merged Tree
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    runs-on: ubuntu-latest
     if: ${{ !github.event.pull_request.draft }}   # v1.26
     timeout-minutes: 60
     env:
@@ -720,6 +831,19 @@ jobs:
 
       - name: Reap stale CI stacks
         run: make ci-reap-stacks
+
+      # Company Agent m2077: a GitHub-hosted runner starts with about 14 GB
+      # free, which the devcontainer images this job builds outgrow. On
+      # github.com only, remove the preinstalled SDKs and images this
+      # pipeline never uses before the build. A runner elsewhere keeps its
+      # disk as it is.
+      - name: Free runner disk
+        if: github.server_url == 'https://github.com'
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
+          docker image prune --all --force >/dev/null || true
+          df -h /
 
       # Runs on push too, reporting success, rather than carrying an `if:` that
       # skips it: the gate counts a SKIPPED pr job as a failure on purpose.
@@ -824,7 +948,7 @@ jobs:
     name: Integration [integration image]
     # v1.26: never on a draft PR, ci:full or not.
     if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
@@ -844,6 +968,19 @@ jobs:
 
       - name: Reap stale CI stacks
         run: make ci-reap-stacks
+
+      # Company Agent m2077: a GitHub-hosted runner starts with about 14 GB
+      # free, which the devcontainer images this job builds outgrow. On
+      # github.com only, remove the preinstalled SDKs and images this
+      # pipeline never uses before the build. A runner elsewhere keeps its
+      # disk as it is.
+      - name: Free runner disk
+        if: github.server_url == 'https://github.com'
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
+          docker image prune --all --force >/dev/null || true
+          df -h /
 
       # v1.29: the Alpine package index checksum (as in the image job).
       - name: Read the Alpine package index
@@ -971,15 +1108,15 @@ jobs:
 
   # Soak (v1.23): the integration suite looped in the integration image until
   # SOAK_MINUTES have passed, each iteration its own compose stack, torn down
-  # before the next; the first red iteration fails the job. v1.24: nightly
-  # and workflow_dispatch only, off main pushes and off ci:full; the Gate marks
+  # before the next; the first red iteration fails the job. v1.24:
+  # workflow_dispatch only, off main pushes and off ci:full; the Gate marks
   # it `nightly`. It replaces nothing in batch.yml, whose soak stays a dispatch.
   # CUSTOMIZE: each iteration's container is named under the project, as in
   # the integration job, and removed with it.
   soak:
     name: Soak [integration image]
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 90       # CUSTOMIZE: SOAK_MINUTES plus one iteration
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
@@ -1000,6 +1137,19 @@ jobs:
 
       - name: Reap stale CI stacks
         run: make ci-reap-stacks
+
+      # Company Agent m2077: a GitHub-hosted runner starts with about 14 GB
+      # free, which the devcontainer images this job builds outgrow. On
+      # github.com only, remove the preinstalled SDKs and images this
+      # pipeline never uses before the build. A runner elsewhere keeps its
+      # disk as it is.
+      - name: Free runner disk
+        if: github.server_url == 'https://github.com'
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
+          docker image prune --all --force >/dev/null || true
+          df -h /
 
       # v1.29: the Alpine package index checksum (as in the image job).
       - name: Read the Alpine package index
@@ -1147,7 +1297,7 @@ jobs:
   # runs do.
   test-race:
     name: Race
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    runs-on: ubuntu-latest
     needs: changes
     if: ${{ !github.event.pull_request.draft }}   # v1.26
     timeout-minutes: 60
@@ -1168,6 +1318,19 @@ jobs:
 
       - name: Reap stale CI stacks
         run: make ci-reap-stacks
+
+      # Company Agent m2077: a GitHub-hosted runner starts with about 14 GB
+      # free, which the devcontainer images this job builds outgrow. On
+      # github.com only, remove the preinstalled SDKs and images this
+      # pipeline never uses before the build. A runner elsewhere keeps its
+      # disk as it is.
+      - name: Free runner disk
+        if: github.server_url == 'https://github.com'
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
+          docker image prune --all --force >/dev/null || true
+          df -h /
 
       - name: Build the toolchain image
         if: needs.changes.outputs.docs_only != 'true'
@@ -1201,7 +1364,7 @@ jobs:
   # fips140=only; the test fails if either child did not run in its mode.
   fips:
     name: FIPS
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    runs-on: ubuntu-latest
     # v1.26: never on a draft PR, ci:full or not.
     if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}
     timeout-minutes: 30
@@ -1222,6 +1385,19 @@ jobs:
 
       - name: Reap stale CI stacks
         run: make ci-reap-stacks
+
+      # Company Agent m2077: a GitHub-hosted runner starts with about 14 GB
+      # free, which the devcontainer images this job builds outgrow. On
+      # github.com only, remove the preinstalled SDKs and images this
+      # pipeline never uses before the build. A runner elsewhere keeps its
+      # disk as it is.
+      - name: Free runner disk
+        if: github.server_url == 'https://github.com'
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
+          docker image prune --all --force >/dev/null || true
+          df -h /
 
       - name: Build the toolchain image
         run: |
@@ -1246,17 +1422,17 @@ jobs:
   #
   #   success                              passes
   #   skipped, `full`, tier not run        passes: the full tier was not selected
-  #   skipped, `nightly`, not nightly      passes: neither schedule nor dispatch
+  #   skipped, `nightly`, not nightly      passes: not a dispatch
   #   skipped, anything else               fails: a job that never ran proved nothing
   #   failure, cancelled, unreadable       fails
   #
   # CUSTOMIZE: FULL_TIER and NIGHTLY are validated, so an unevaluated
   # expression is not a "no", and an empty result reads `<unreadable>`. Do not
-  # use join(needs.*.result); it evaluates empty on Gitea. It runs on the
-  # ci-gate runners, one CPU each, so it takes no checkout: one run step.
+  # use join(needs.*.result); it evaluates empty on Gitea. It runs on
+  # ubuntu-latest and takes no checkout: one run step.
   ci-gate:
     name: CI Gate
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ci-gate' }}
+    runs-on: ubuntu-latest
     if: always()
     # CUSTOMIZE: the repo's job list. Add every CUSTOMIZE job here AND as a
     # check line below; remove none of the template's jobs.

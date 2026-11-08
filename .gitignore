@@ -30,18 +30,13 @@ go.work
 *.swo
 *~
 
-# Code-analysis tooling scratch state (#66). `.serena/` is tool config plus
-# machine-written codebase-analysis notes; it is recreated on every review round
-# and the tool reports it cannot remove what it made. It was TRACKED here, and
-# the public tree is the release commit's archive export, so whatever the
-# tooling drops in the working directory and gets committed is published unless
-# something stops it. This is one thing that does; .gitattributes export-ignore
-# is the other. A directory pattern, not a
-# file list: the contents are not ours to enumerate. The one exception is
-# project.yml, the committed language configuration (claude-agents#46); it holds
-# no host paths.
-.serena/*
-!.serena/project.yml
+# Code-analysis tool state. `.serena/` is tool configuration plus
+# machine-written codebase-analysis notes, recreated on every run. The public
+# tree is the release commit's archive export, so whatever the tooling drops in
+# the working directory and gets committed is published unless something stops
+# it. This is one thing that does; .gitattributes export-ignore is the other.
+# The whole directory is ignored: none of it belongs in the repository.
+.serena/
 
 # Test files
 *.img

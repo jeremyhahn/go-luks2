@@ -52,12 +52,12 @@ func sameSet(a, b []string) bool {
 	return strings.Join(a, ",") == strings.Join(b, ",")
 }
 
-// TestExactlyOneScheduleTriggerInCI: ci-template v1.23 runs main's full tier
-// and Soak nightly through ci.yml's own `schedule:` trigger, and that is the
-// only scheduled workflow: nightly.yml and batch.yml stay dispatch-only, so
-// nothing is run twice on a timer, unowned (sdlc §5a). automerge.yml is not
-// CI: its timer merges green PRs and runs no stage.
-func TestExactlyOneScheduleTriggerInCI(t *testing.T) {
+// TestNoScheduleTrigger: this repository's nightly run is suspended, so no
+// workflow is scheduled: main's full tier and Soak run on dispatch (the full
+// tier also on push to main and a `ci:full` PR), and nightly.yml and batch.yml
+// stay dispatch-only (sdlc §5a). automerge.yml is not CI: its timer merges
+// green PRs and runs no stage.
+func TestNoScheduleTrigger(t *testing.T) {
 	entries, err := os.ReadDir(filepath.Join(repoRoot(t), ".github", "workflows"))
 	if err != nil {
 		t.Fatal(err)
@@ -72,12 +72,8 @@ func TestExactlyOneScheduleTriggerInCI(t *testing.T) {
 			scheduled = append(scheduled, fmt.Sprintf("%s:%d", e.Name(), n))
 		}
 	}
-	if want := []string{"ci.yml:1"}; !sameSet(scheduled, want) {
-		t.Errorf("schedule: triggers %v, want %v", scheduled, want)
-	}
-	ci := readFile(t, ".github/workflows/ci.yml")
-	if !regexp.MustCompile(`(?m)^on:\n(?:  .*\n|\n)*?  schedule:\n    - cron: '[^']+'\n`).MatchString(ci) {
-		t.Error("ci.yml's schedule: is not one cron under on:")
+	if len(scheduled) > 0 {
+		t.Errorf("schedule: triggers %v, want none", scheduled)
 	}
 }
 
@@ -121,45 +117,80 @@ func TestJobNamesAreLiteral(t *testing.T) {
 	}
 }
 
-// TestCIGateRunsOnTheGateRunners: CI Gate runs on `ci-gate`, the reserved
-// 1-CPU gate slots, so it never queues behind the jobs it waits for. A slot
-// that small takes no checkout and no action: the gate is one run step.
-func TestCIGateRunsOnTheGateRunners(t *testing.T) {
+// hostedRunner is the runs-on of every ci.yml job (Company Agent m2077):
+// GitHub-hosted ubuntu-latest, so main's CI Gate can go green on GitHub.
+const hostedRunner = "ubuntu-latest"
+
+// retiredLabels are the self-hosted runner labels ci.yml and batch.yml ran on
+// before m2077. No workflow names them, and .github/actionlint.yaml does not
+// list them, so a typo of one is still caught as an unknown runner.
+var retiredLabels = []string{"bigdisk", "ci-gate", "batch"}
+
+// TestCIGateRunsOnTheHostedRunner: CI Gate runs on ubuntu-latest. It still
+// takes no checkout and no action: the gate is one run step that reads needs.
+func TestCIGateRunsOnTheHostedRunner(t *testing.T) {
 	gate := job(t, readFile(t, ".github/workflows/ci.yml"), "ci-gate")
-	if got := jobRunsOn.FindAllStringSubmatch(gate, -1); len(got) != 1 || got[0][1] != hostRunner("ci-gate") {
-		t.Errorf("CI Gate runs on %v, want ci-gate", got)
+	if got := jobRunsOn.FindAllStringSubmatch(gate, -1); len(got) != 1 || got[0][1] != hostedRunner {
+		t.Errorf("CI Gate runs on %v, want %s", got, hostedRunner)
 	}
 	if strings.Contains(gate, "actions/checkout") {
-		t.Error("CI Gate checks out the repository; the ci-gate slots take no checkout")
+		t.Error("CI Gate checks out the repository; the gate is one run step")
 	}
 	if regexp.MustCompile(`(?m)^\s*(-\s+)?uses:`).MatchString(gate) {
-		t.Error("CI Gate has a uses: step; the ci-gate slots take no action")
-	}
-	if !regexp.MustCompile(`(?m)^    - ci-gate$`).MatchString(readFile(t, ".github/actionlint.yaml")) {
-		t.Error(".github/actionlint.yaml does not list the ci-gate label; Lint reports it as unknown")
+		t.Error("CI Gate has a uses: step; the gate is one run step")
 	}
 }
 
-// TestImageJobRunsOnTheBigdiskRunners: the Devcontainer image job runs on
-// `bigdisk`, the runners whose disks are large enough to hold the toolchain and
-// integration images it builds; on the smaller runners those images filled
-// the disk.
-func TestImageJobRunsOnTheBigdiskRunners(t *testing.T) {
+// freeDiskStep is the step every image-building job runs before its build on
+// a hosted runner, whose stock free disk (about 14 GB) does not hold the
+// devcontainer images.
+const freeDiskStep = "Free runner disk"
+
+// TestEveryCIJobRunsOnTheHostedRunner: every ci.yml job runs on
+// ubuntu-latest, and every job that builds a devcontainer image frees the
+// runner's disk first, on github.com only, before any image build.
+func TestEveryCIJobRunsOnTheHostedRunner(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
-	for _, id := range toolchainJobs {
-		if got := jobRunsOn.FindAllStringSubmatch(job(t, ci, id), -1); len(got) != 1 || got[0][1] != hostRunner("bigdisk") {
-			t.Errorf("job %s runs on %v, want %s", id, got, hostRunner("bigdisk"))
+	for _, id := range jobIDs(t, ci) {
+		if got := jobRunsOn.FindAllStringSubmatch(job(t, ci, id), -1); len(got) != 1 || got[0][1] != hostedRunner {
+			t.Errorf("job %s runs on %v, want %s", id, got, hostedRunner)
 		}
 	}
-	if !regexp.MustCompile(`(?m)^    - bigdisk$`).MatchString(readFile(t, ".github/actionlint.yaml")) {
-		t.Error(".github/actionlint.yaml does not list the bigdisk label; Lint reports it as unknown")
+	for _, id := range toolchainJobs {
+		j := job(t, ci, id)
+		free := strings.Index(j, "- name: "+freeDiskStep+"\n")
+		if free < 0 {
+			t.Errorf("job %s builds a devcontainer image and has no %q step", id, freeDiskStep)
+			continue
+		}
+		if build := strings.Index(j, "make docker-build"); build >= 0 && build < free {
+			t.Errorf("job %s builds an image before %q", id, freeDiskStep)
+		}
+		block, _, _ := strings.Cut(j[free:], "\n\n")
+		if !strings.Contains(block, "github.server_url == 'https://github.com'") {
+			t.Errorf("job %s's %q step is not limited to github.com:\n%s", id, freeDiskStep, block)
+		}
 	}
 }
 
-// hostRunner is the template's runs-on for a self-hosted label: the label on
-// the forge, ubuntu-latest on the github.com mirror, which has neither pool.
-func hostRunner(label string) string {
-	return "${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || '" + label + "' }}"
+// TestNoRetiredRunnerLabel: no workflow runs a job on a retired self-hosted
+// label, and .github/actionlint.yaml no longer accepts one.
+func TestNoRetiredRunnerLabel(t *testing.T) {
+	for _, f := range workflowFiles(t) {
+		for _, m := range jobRunsOn.FindAllStringSubmatch(readFile(t, rel(t, f)), -1) {
+			for _, l := range retiredLabels {
+				if strings.Contains(m[1], "'"+l+"'") || strings.Fields(m[1])[0] == l {
+					t.Errorf("%s runs a job on the retired label %s: %s", rel(t, f), l, m[1])
+				}
+			}
+		}
+	}
+	al := readFile(t, ".github/actionlint.yaml")
+	for _, l := range retiredLabels {
+		if regexp.MustCompile(`(?m)^    - ` + regexp.QuoteMeta(l) + `$`).MatchString(al) {
+			t.Errorf(".github/actionlint.yaml still lists the retired label %s", l)
+		}
+	}
 }
 
 // TestNoLabelTrigger: ci.yml does not fire on `labeled`. Gitea sends every
