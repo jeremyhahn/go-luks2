@@ -1756,9 +1756,10 @@ override CI_STACK_PREFIX := go-luks2-ci-
 # outside the job container's cgroup, so the bound moves to the sibling:
 # --cpus N and GOMAXPROCS=N, with N the job container's cgroup cpu.max
 # (CGROUP_CPU_MAX) rounded up, nproc when the job has no quota, and
-# IN_IMAGE_CPUS over both. golangci-lint's default concurrency follows the
-# quota. CUSTOMIZE: no GOFLAGS=-p=N, which the template passes. The image's
-# own GOFLAGS (-mod=readonly -buildvcs=false) would be replaced by it, and
+# IN_IMAGE_CPUS over both, then clamped to the CPU count the docker daemon
+# reports (docker info's NCPU), as the daemon refuses a larger --cpus.
+# golangci-lint's default concurrency follows the quota. CUSTOMIZE: no
+# GOFLAGS=-p=N, which the template passes. The image's own GOFLAGS (-mod=readonly -buildvcs=false) would be replaced by it, and
 # go's -p already defaults to GOMAXPROCS.
 #
 #   make ci-toolchain-run CMD="make deps-check" IN_IMAGE_NETWORK=bridge
@@ -1820,6 +1821,11 @@ ci-toolchain-run: ## Run CMD in the toolchain image over a copy of the checkout 
 			/*|..|../*|*/..|*/../*) echo "$(COLOR_RED)CI_OUT names a file under the checkout: $$f$(COLOR_RESET)" >&2; exit 2 ;; \
 		esac; \
 	done; \
+	ncpu=$$(docker info --format '{{.NCPU}}' 2>/dev/null || true); \
+	case "$$ncpu" in \
+		""|0|*[!0-9]*) ;; \
+		*) if [ "$$ncpu" -lt "$$cpus" ]; then cpus=$$ncpu; fi ;; \
+	esac; \
 	uid=$(CI_TOOLCHAIN_UID); \
 	name="$(CI_STACK_PREFIX)tc-$$$$-$$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"; \
 	set -- --name "$$name" --cpus "$$cpus" --env GOMAXPROCS="$$cpus" --init --cap-drop ALL \
