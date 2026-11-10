@@ -1759,8 +1759,9 @@ override CI_STACK_PREFIX := go-luks2-ci-
 # IN_IMAGE_CPUS over both, then clamped to the CPU count the docker daemon
 # reports (docker info's NCPU), as the daemon refuses a larger --cpus.
 # golangci-lint's default concurrency follows the quota. CUSTOMIZE: no
-# GOFLAGS=-p=N, which the template passes. The image's own GOFLAGS (-mod=readonly -buildvcs=false) would be replaced by it, and
-# go's -p already defaults to GOMAXPROCS.
+# GOFLAGS=-p=N, which the template passes. The image's own GOFLAGS
+# (-mod=readonly -buildvcs=false) would be replaced by it, and go's -p
+# already defaults to GOMAXPROCS.
 #
 #   make ci-toolchain-run CMD="make deps-check" IN_IMAGE_NETWORK=bridge
 #
