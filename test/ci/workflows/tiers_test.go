@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -108,11 +109,20 @@ func TestJobNamesAreLiteral(t *testing.T) {
 
 // hostedRunner is the runs-on of every ci.yml job (Company Agent m2077):
 // GitHub-hosted ubuntu-latest, so main's CI Gate can go green on GitHub.
+// The one exception is dockerPoolRunner.
 const hostedRunner = "ubuntu-latest"
+
+// dockerPoolRunner is the runs-on a job in toolchainJobs may carry instead of
+// hostedRunner (ruling 442): the bigdisk-docker pool, a throwaway guest per
+// job with its own Docker daemon, for a push to main and a same-repository
+// pull request, and ubuntu-latest for every other event, a fork's pull
+// request among them.
+const dockerPoolRunner = `${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}`
 
 // retiredLabels are the self-hosted runner labels the workflows ran on
 // before m2077. No workflow names them, and .github/actionlint.yaml does not
 // list them, so a typo of one is still caught as an unknown runner.
+// bigdisk-docker (dockerPoolRunner) is a different label.
 var retiredLabels = []string{"bigdisk", "ci-gate", "batch"}
 
 // TestCIGateRunsOnTheHostedRunner: CI Gate runs on ubuntu-latest. It still
@@ -136,12 +146,21 @@ func TestCIGateRunsOnTheHostedRunner(t *testing.T) {
 const freeDiskStep = "Free runner disk"
 
 // TestEveryCIJobRunsOnTheHostedRunner: every ci.yml job runs on
-// ubuntu-latest, and every job that builds a devcontainer image frees the
-// runner's disk first, on github.com only, before any image build.
+// ubuntu-latest, except that a job that builds a devcontainer image may carry
+// exactly dockerPoolRunner (ruling 442). Every job that builds one frees the
+// runner's disk first, on github.com only, before any image build, and on the
+// hosted runner only when the job can run on the pool.
 func TestEveryCIJobRunsOnTheHostedRunner(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
 	for _, id := range jobIDs(t, ci) {
-		if got := jobRunsOn.FindAllStringSubmatch(job(t, ci, id), -1); len(got) != 1 || got[0][1] != hostedRunner {
+		got := jobRunsOn.FindAllStringSubmatch(job(t, ci, id), -1)
+		pool := slices.Contains(toolchainJobs, id)
+		switch {
+		case len(got) == 1 && got[0][1] == hostedRunner:
+		case len(got) == 1 && got[0][1] == dockerPoolRunner && pool:
+		case pool:
+			t.Errorf("job %s runs on %v, want %s or exactly dockerPoolRunner (ruling 442)", id, got, hostedRunner)
+		default:
 			t.Errorf("job %s runs on %v, want %s", id, got, hostedRunner)
 		}
 	}
@@ -158,6 +177,9 @@ func TestEveryCIJobRunsOnTheHostedRunner(t *testing.T) {
 		block, _, _ := strings.Cut(j[free:], "\n\n")
 		if !strings.Contains(block, "github.server_url == 'https://github.com'") {
 			t.Errorf("job %s's %q step is not limited to github.com:\n%s", id, freeDiskStep, block)
+		}
+		if strings.Contains(j, dockerPoolRunner) && !strings.Contains(block, "runner.environment == 'github-hosted'") {
+			t.Errorf("job %s can run on the bigdisk-docker pool and its %q step is not limited to the hosted runner:\n%s", id, freeDiskStep, block)
 		}
 	}
 }
