@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.3-alpha] - 2026-11-10
+
+### Changed
+
+- **go-luks2 requires go-enclave v0.11.1-alpha (#411).** The release adds the
+  linux-secretmem backend (`enclave.NewSecretMemory`), `Sealed.OpenIn` and an
+  arm-trustzone harness behind the `optee` tag, and changes no API go-luks2
+  calls. Nothing changes for go-luks2 callers.
+
+### Removed
+
+- **The merge-on-green and batch workflows are gone.** Landing is the forge's
+  native auto-merge on green, with the required checks set by a ruleset, so the
+  self-merging workflow and the dispatch-only batch-runner workflow (fuzz, race,
+  soak, benchmarks) are retired, with the strip-at-publish entries and tests
+  that named them.
+
+## [1.0.2-alpha] - 2026-11-07
+
+The `v1.0.2-alpha` tag names the same commit as `v1.0.1-alpha`: it carries the
+changes of the `[1.0.1-alpha]` section below and nothing else.
+
 ## [1.0.1-alpha] - 2026-10-28
 
 ### Fixed

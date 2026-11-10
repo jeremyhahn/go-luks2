@@ -6,7 +6,7 @@ cryptsetup. Volumes interoperate with cryptsetup in both directions.
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-The newest release is the alpha `v1.0.1-alpha`, which supersedes the release
+The newest release is the alpha `v1.0.3-alpha`, which supersedes the release
 candidate `v1.0.0-rc.4`. See
 [docs/README.md](docs/README.md#versioning-policy) for what a version number
 promises and the compatibility policy.
