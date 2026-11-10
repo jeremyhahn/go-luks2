@@ -58,7 +58,7 @@ or `-alpha` suffix is a prerelease (lower precedence than the version it
 precedes) and promises nothing outside this project: `-rc.N` says only "this
 is what `1.0.0` will be unless a defect is found".
 
-go-luks2 is at `1.0.1-alpha`, which supersedes the release candidate
+go-luks2 is at `1.0.3-alpha`, which supersedes the release candidate
 `1.0.0-rc.4`. From `1.0.0`:
 
 | Bump | Means |
