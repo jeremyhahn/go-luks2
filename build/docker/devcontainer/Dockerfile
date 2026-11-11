@@ -245,7 +245,13 @@ RUN printf '%s\n' \
 # Where CI copies the checkout (`make ci-toolchain-run`): a runner's daemon
 # cannot bind-mount it, so it is streamed in, owned by the uid the stage runs
 # as. The directory must already be that uid's for the stage to write in it.
-RUN install -d -m 0755 -o 10001 -g 10001 /src
+# The uid also needs a passwd and group entry: ssh-keygen, and so git's ssh
+# signing and verify-commit, exit on a uid getpwuid cannot name. No login
+# shell, no password, no sudo.
+RUN install -d -m 0755 -o 10001 -g 10001 /src && \
+    groupadd --gid 10001 ci && \
+    useradd --uid 10001 --gid 10001 --no-create-home --no-log-init \
+        --home-dir /src --shell /usr/sbin/nologin ci
 
 # Every fetch is done (devcontainer.md §4). A tool that reaches for the
 # network from here on fails instead of fetching something unpinned; make
