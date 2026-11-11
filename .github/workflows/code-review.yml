@@ -1,4 +1,4 @@
-# code-review-template: v5.10.10 -- the code review in Gitea or GitHub CI for a pull request
+# code-review-template: v5.10.11 -- the code review in Gitea or GitHub CI for a pull request
 # that carries `code-review` and `task:ready`, routed by its labels through
 # route-labels (labels.md §2). Codex on the `codex` runner reviews every such
 # PR; `agent:opencode` adds an advisory COMMENT review by the opencode job on
@@ -28,6 +28,15 @@
 #   COORDINATOR_TURNS         the codex rounds the project coordinator has
 #                             on a `needs-coordinator` PR after the two-round
 #                             stop (v5.9.8, Company Agent m2185); default 3
+#
+# v5.10.11 (2026-11-10, Software Department; go-qrdb #1368): `api_all` JOINS
+# ITS PAGES THROUGH STDIN. v5.10.10 passed the pages read so far to `jq` as
+# an `--argjson` argument, and one argument is at most 128 KiB on Linux: on
+# a pull request with a long review history the review job died with
+# "Argument list too long" before it read a verdict. Both copies of
+# `api_all` now print the two arrays to `jq -cs` (printf is a shell builtin,
+# so nothing passes through argv), and the first copy fails closed on a
+# failed join as the second already did. No other change.
 #
 # v5.10.10 (2026-11-10, Company Agent m2369, ruling 422; Codex's two P1s on
 # v5.10.9 at go-luks2 #436 and go-qrdb #1436): (a) TWINS ARE RUNS OF THE
@@ -1151,7 +1160,7 @@ jobs:
                 die "GET $1 did not answer a list"
               [[ $n =~ ^[0-9]+$ ]] || die "GET $1 page $page gave no count"
               [ "$n" -gt 0 ] || break
-              all=$(jq -c --argjson a "$all" '$a + .' <<<"$got")
+              all=$(printf '%s\n%s\n' "$all" "$got" | jq -cs '.[0] + .[1]') || exit 1
               page=$((page + 1))
             done
             printf '%s\n' "$all"
@@ -3289,7 +3298,7 @@ jobs:
                 die "GET $1 did not answer a list"
               [[ $n =~ ^[0-9]+$ ]] || die "GET $1 gave no count"
               [ "$n" -gt 0 ] || break
-              all=$(jq -c --argjson a "$all" '$a + .' <<<"$got") || exit 1
+              all=$(printf '%s\n%s\n' "$all" "$got" | jq -cs '.[0] + .[1]') || exit 1
               page=$((page + 1))
             done
             printf '%s\n' "$all"
