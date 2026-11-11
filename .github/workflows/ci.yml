@@ -1652,6 +1652,11 @@ jobs:
     env:
       # CUSTOMIZE (v1.22): the image job's cache class, for its stage.
       CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'main' || 'pr' }}
+      # CUSTOMIZE (v1.29.4's memory bound): the -race run of pkg/luks2 holds
+      # several Argon2id derivations at once, each up to its memory cost and
+      # multiplied by the race detector's shadow memory, and was OOM-killed
+      # under the 8g default. 14g fits a 16 GB hosted runner and a pool guest.
+      IN_IMAGE_MEMORY: 14g
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
