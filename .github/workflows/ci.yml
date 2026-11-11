@@ -1794,7 +1794,9 @@ jobs:
   # the handbook's software/templates/signing/<repo>.allowed_signers. The job
   # reads it from the BASE commit, so a pull request cannot add the key that
   # signs it; only the first adoption, with no registry at the base, reads it
-  # from the head, with a warning. It checks every commit in the range: base..head
+  # from the head, with a warning. A nonzero base it cannot read, even after
+  # fetching it, fails the job: the head's registry never stands in for it.
+  # It checks every commit in the range: base..head
   # on a pull request, before..after on a push to main, the one commit on a
   # schedule or dispatch run or a new branch. A commit passes when
   # `git verify-commit` (gpg.format=ssh, gpg.ssh.allowedSignersFile) accepts it
@@ -1836,7 +1838,16 @@ jobs:
           # reads it from the head.
           REG=""
           if [ "$EVENT" = pull_request ]; then REG="$BASE_SHA"; elif [ "$EVENT" = push ]; then REG="$BEFORE"; fi
-          if isrev "$REG" && git cat-file -e "$REG:.github/allowed_signers" 2>/dev/null; then
+          # A nonzero base that is not here (a force push can leave it unreachable)
+          # is fetched; if it still cannot be read the job fails closed.
+          if ! zero "$REG" && ! isrev "$REG"; then
+            git fetch --quiet --no-tags origin "$REG" >/dev/null 2>&1 \
+              || GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraheader \
+                GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" \
+                git fetch --quiet --no-tags origin "$REG" >/dev/null 2>&1 || true
+            isrev "$REG" || { echo "FAIL base ${REG:0:12} unavailable; refusing to read the registry from the head"; exit 1; }
+          fi
+          if ! zero "$REG" && git cat-file -e "$REG:.github/allowed_signers" 2>/dev/null; then
             git show "$REG:.github/allowed_signers" > "$ASF"
             echo "registry: .github/allowed_signers at ${REG:0:12}"
           elif git cat-file -e "$HEAD_SHA:.github/allowed_signers" 2>/dev/null; then
@@ -1847,9 +1858,8 @@ jobs:
           fi
           # The range: base..head on a pull request, before..after on a push to main,
           # and the one commit otherwise (a new branch, a schedule or dispatch run).
-          if [ "$EVENT" = pull_request ] && isrev "$BASE_SHA"; then RANGE="$BASE_SHA..$HEAD_SHA"
-          elif [ "$EVENT" = push ] && isrev "$BEFORE"; then RANGE="$BEFORE..$HEAD_SHA"
-          else RANGE="$HEAD_SHA -1"; fi
+          # REG is zero or a readable commit here: an unreadable base failed above.
+          if ! zero "$REG"; then RANGE="$REG..$HEAD_SHA"; else RANGE="$HEAD_SHA -1"; fi
           # shellcheck disable=SC2086 # RANGE is one or two words on purpose
           COMMITS=$(git rev-list --reverse $RANGE) || { echo "FAIL cannot list the range $RANGE"; exit 1; }
           N=$(printf '%s\n' "$COMMITS" | grep -c . || true)
