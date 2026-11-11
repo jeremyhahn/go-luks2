@@ -70,6 +70,13 @@ name: CI
 # its build (github.com only), and no job's timeout (120 min at most) comes
 # near the limit, so none is sharded.
 #
+# Ruling 442: the jobs that build a devcontainer image (image, lint-gates,
+# merge-check, integration, soak, test-race, fips) run on the bigdisk-docker
+# pool, a throwaway guest per job, for a push to main and a same-repository
+# pull request, and on ubuntu-latest for every other event. Their "Free
+# runner disk" step runs on the hosted runner only. bigdisk-docker is not the
+# retired bigdisk label.
+#
 # ci-template v1.21 (ci-standard.md §2, devcontainer.md §7): every stage runs in
 # this repository's own devcontainer image and no other. No job sets up Go or
 # installs a tool on the runner; the image's pin file decides every version
@@ -308,9 +315,10 @@ jobs:
   # rather than reuse a cached one with the old package (CVE-2026-92392).
   image:
     name: Devcontainer image [lint, build, test, security, deps-check, trivy image]
-    # ubuntu-latest, with "Free runner disk" before the build: the hosted
-    # runner's stock free disk does not hold both devcontainer images.
-    runs-on: ubuntu-latest
+    # The bigdisk-docker pool (ruling 442) or ubuntu-latest, with "Free
+    # runner disk" before the build on the latter: the hosted runner's stock
+    # free disk does not hold both devcontainer images.
+    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     needs: changes             # v1.24
     timeout-minutes: 120
     env:
@@ -345,7 +353,7 @@ jobs:
       # pipeline never uses before the build. A runner elsewhere keeps its
       # disk as it is.
       - name: Free runner disk
-        if: github.server_url == 'https://github.com'
+        if: github.server_url == 'https://github.com' && runner.environment == 'github-hosted'
         run: |
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
@@ -705,7 +713,7 @@ jobs:
   # and the job; the gates after it run on the next push.
   lint-gates:
     name: Lint Gates [toolchain image]
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     if: ${{ !github.event.pull_request.draft }}   # v1.26
     timeout-minutes: 45       # CUSTOMIZE: the repo's lint-gates time, with honest headroom
     env:
@@ -748,7 +756,7 @@ jobs:
       # pipeline never uses before the build. A runner elsewhere keeps its
       # disk as it is.
       - name: Free runner disk
-        if: ${{ steps.probe.outputs.has_target == 'true' && github.server_url == 'https://github.com' }}
+        if: ${{ steps.probe.outputs.has_target == 'true' && github.server_url == 'https://github.com' && runner.environment == 'github-hosted' }}
         run: |
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
@@ -808,7 +816,7 @@ jobs:
   # the image's cache lacks.
   merge-check:
     name: Merged Tree
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     if: ${{ !github.event.pull_request.draft }}   # v1.26
     timeout-minutes: 60
     env:
@@ -838,7 +846,7 @@ jobs:
       # pipeline never uses before the build. A runner elsewhere keeps its
       # disk as it is.
       - name: Free runner disk
-        if: github.server_url == 'https://github.com'
+        if: github.server_url == 'https://github.com' && runner.environment == 'github-hosted'
         run: |
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
@@ -948,7 +956,7 @@ jobs:
     name: Integration [integration image]
     # v1.26: never on a draft PR, ci:full or not.
     if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     timeout-minutes: 120
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
@@ -975,7 +983,7 @@ jobs:
       # pipeline never uses before the build. A runner elsewhere keeps its
       # disk as it is.
       - name: Free runner disk
-        if: github.server_url == 'https://github.com'
+        if: github.server_url == 'https://github.com' && runner.environment == 'github-hosted'
         run: |
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
@@ -1116,7 +1124,7 @@ jobs:
   soak:
     name: Soak [integration image]
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     timeout-minutes: 90       # CUSTOMIZE: SOAK_MINUTES plus one iteration
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
@@ -1144,7 +1152,7 @@ jobs:
       # pipeline never uses before the build. A runner elsewhere keeps its
       # disk as it is.
       - name: Free runner disk
-        if: github.server_url == 'https://github.com'
+        if: github.server_url == 'https://github.com' && runner.environment == 'github-hosted'
         run: |
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
@@ -1297,7 +1305,7 @@ jobs:
   # runs do.
   test-race:
     name: Race
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     needs: changes
     if: ${{ !github.event.pull_request.draft }}   # v1.26
     timeout-minutes: 60
@@ -1325,7 +1333,7 @@ jobs:
       # pipeline never uses before the build. A runner elsewhere keeps its
       # disk as it is.
       - name: Free runner disk
-        if: github.server_url == 'https://github.com'
+        if: github.server_url == 'https://github.com' && runner.environment == 'github-hosted'
         run: |
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
@@ -1364,7 +1372,7 @@ jobs:
   # fips140=only; the test fails if either child did not run in its mode.
   fips:
     name: FIPS
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     # v1.26: never on a draft PR, ci:full or not.
     if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}
     timeout-minutes: 30
@@ -1392,7 +1400,7 @@ jobs:
       # pipeline never uses before the build. A runner elsewhere keeps its
       # disk as it is.
       - name: Free runner disk
-        if: github.server_url == 'https://github.com'
+        if: github.server_url == 'https://github.com' && runner.environment == 'github-hosted'
         run: |
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL

@@ -52,6 +52,7 @@ cp)
 	[ "${FAKE_CP:-ok}" = ok ] || { echo "Error response from daemon: No such container" >&2; exit 1; }
 	printf 'mode: atomic\nexample.com/fake/f.go:1.1,2.2 1 1\n' > "$3" ;;
 start) exit "${FAKE_START_RC:-0}" ;;
+info) [ -n "${FAKE_NCPU:-}" ] || { echo "Cannot connect to the Docker daemon" >&2; exit 1; }; echo "$FAKE_NCPU" ;;
 rm) [ "$2" != held0 ] || touch "$log.unheld"; exit "${FAKE_RM_RC:-0}" ;;
 create)
 	case "$*" in *image-lock*)
@@ -219,7 +220,7 @@ func TestCIToolchainRunCopiesTheCheckoutInAndRunsCMDWithNoNetwork(t *testing.T) 
 
 	name := strings.Fields(create[strings.Index(create, "--name ")+len("--name "):])[0]
 	var order []string
-	for _, prefix := range []string{"run --rm --network none --cap-drop ALL --cap-add CHOWN ", "create ", "cp -a - " + name + ":/src", "start -a " + name, "rm -f -v " + name} {
+	for _, prefix := range []string{"info --format {{.NCPU}}", "run --rm --network none --cap-drop ALL --cap-add CHOWN ", "create ", "cp -a - " + name + ":/src", "start -a " + name, "rm -f -v " + name} {
 		if _, ok := called(lines, prefix); !ok {
 			t.Errorf("no %q in the run:\n%s", prefix, strings.Join(lines, "\n"))
 		}
@@ -514,6 +515,7 @@ func TestCIToolchainRunRefusesABadCacheSetting(t *testing.T) {
 // ci-template v1.22.2 (in-toolchain-image.sh v3, ci-standard.md §7): the stage
 // container takes the job container's CPU bound from its cgroup's cpu.max,
 // rounded up, or nproc when the job has no quota; IN_IMAGE_CPUS overrides.
+// Any of them is clamped to the docker daemon's CPU count when that reads.
 // GOMAXPROCS follows it. CUSTOMIZE: no GOFLAGS=-p=N -- the image's GOFLAGS
 // carries -mod=readonly, which a GOFLAGS env would replace, and go's -p
 // defaults to GOMAXPROCS.
@@ -524,13 +526,22 @@ func TestCIToolchainRunTakesTheJobsCPUBound(t *testing.T) {
 	}
 	nproc := strings.TrimSpace(string(out))
 	for _, tc := range []struct {
-		name, cpuMax, override, want string
+		name, cpuMax, override, ncpu, want string
 	}{
-		{"quota rounded up", "250000 100000\n", "", "3"},
-		{"whole quota", "400000 100000\n", "", "4"},
-		{"no quota", "max 100000\n", "", nproc},
-		{"no cgroup file", "", "", nproc},
-		{"override", "250000 100000\n", "2", "2"},
+		{"quota rounded up", "250000 100000\n", "", "", "3"},
+		{"whole quota", "400000 100000\n", "", "", "4"},
+		{"no quota", "max 100000\n", "", "", nproc},
+		{"no cgroup file", "", "", "", nproc},
+		{"override", "250000 100000\n", "2", "", "2"},
+		// The daemon refuses a --cpus above its own CPU count.
+		{"quota above the daemon's CPUs", "800000 100000\n", "", "4", "4"},
+		{"nproc above the daemon's CPUs", "max 100000\n", "", "1", "1"},
+		{"override above the daemon's CPUs", "250000 100000\n", "64", "8", "8"},
+		{"daemon's CPUs unreadable", "250000 100000\n", "", "", "3"},
+		{"daemon's CPUs not a number", "250000 100000\n", "", "abc", "3"},
+		{"daemon's CPUs zero", "250000 100000\n", "", "0", "3"},
+		{"quota below the daemon's CPUs", "250000 100000\n", "", "80", "3"},
+		{"quota at the daemon's CPUs", "400000 100000\n", "", "4", "4"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cpuMax := filepath.Join(t.TempDir(), "cpu.max")
@@ -543,10 +554,17 @@ func TestCIToolchainRunTakesTheJobsCPUBound(t *testing.T) {
 			if tc.override != "" {
 				set["IN_IMAGE_CPUS"] = tc.override
 			}
+			if tc.ncpu != "" {
+				set["FAKE_NCPU"] = tc.ncpu
+			}
 			env, log := ciDockerEnv(t, set)
 			runMake(t, env, "-s", "ci-toolchain-run", "CMD=make build",
 				"TOOLCHAIN_IMAGE=example/toolchain:t", "CGROUP_CPU_MAX="+cpuMax)
-			create, ok := called(logLines(t, log), "create ")
+			lines := logLines(t, log)
+			if _, ok := called(lines, "info --format {{.NCPU}}"); !ok {
+				t.Errorf("the daemon's CPU count was not read:\n%s", strings.Join(lines, "\n"))
+			}
+			create, ok := called(lines, "create ")
 			if !ok {
 				t.Fatal("no docker create")
 			}
