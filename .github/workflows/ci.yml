@@ -1,4 +1,9 @@
-# ci-template: v1.35 (customized)
+# ci-template: v1.35.1 (customized)
+# v1.35.1 (2026-11-11): the Signatures job fetches a named base that is not in
+# the clone and fails closed when it still cannot be read (it no longer falls
+# back to the head's registry and the head commit alone), and its
+# signature-presence check reads the whole commit object, so a long signed
+# message cannot fail under pipefail with SIGPIPE.
 # v1.35 (2026-11-11, Company Agent m2557, owner ruling on commit signing): a
 # `Signatures` job verifies every commit in the range against the
 # repository's .github/allowed_signers registry, read from the base commit,
@@ -1794,9 +1799,7 @@ jobs:
   # the handbook's software/templates/signing/<repo>.allowed_signers. The job
   # reads it from the BASE commit, so a pull request cannot add the key that
   # signs it; only the first adoption, with no registry at the base, reads it
-  # from the head, with a warning. A nonzero base it cannot read, even after
-  # fetching it, fails the job: the head's registry never stands in for it.
-  # It checks every commit in the range: base..head
+  # from the head, with a warning. It checks every commit in the range: base..head
   # on a pull request, before..after on a push to main, the one commit on a
   # schedule or dispatch run or a new branch. A commit passes when
   # `git verify-commit` (gpg.format=ssh, gpg.ssh.allowedSignersFile) accepts it
@@ -1838,16 +1841,18 @@ jobs:
           # reads it from the head.
           REG=""
           if [ "$EVENT" = pull_request ]; then REG="$BASE_SHA"; elif [ "$EVENT" = push ]; then REG="$BEFORE"; fi
-          # A nonzero base that is not here (a force push can leave it unreachable)
-          # is fetched; if it still cannot be read the job fails closed.
-          if ! zero "$REG" && ! isrev "$REG"; then
-            git fetch --quiet --no-tags origin "$REG" >/dev/null 2>&1 \
-              || GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraheader \
-                GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" \
-                git fetch --quiet --no-tags origin "$REG" >/dev/null 2>&1 || true
-            isrev "$REG" || { echo "FAIL base ${REG:0:12} unavailable; refusing to read the registry from the head"; exit 1; }
+          # v1.35.1: a named base that is not in the clone (a push after a force
+          # push, a base the checkout did not bring) is fetched; if it still cannot
+          # be read the job fails, never falling back to the head's registry or to
+          # the head commit alone.
+          if [ "$EVENT" = pull_request ] && [ -z "$REG" ]; then
+            echo "FAIL a pull_request run with no base SHA"; exit 1
           fi
-          if ! zero "$REG" && git cat-file -e "$REG:.github/allowed_signers" 2>/dev/null; then
+          if ! zero "$REG" && ! isrev "$REG"; then
+            git fetch -q --no-tags origin "$REG" 2>/dev/null || true
+            isrev "$REG" || { echo "FAIL the base ${REG:0:12} cannot be read, so neither the registry nor the range can be checked"; exit 1; }
+          fi
+          if isrev "$REG" && git cat-file -e "$REG:.github/allowed_signers" 2>/dev/null; then
             git show "$REG:.github/allowed_signers" > "$ASF"
             echo "registry: .github/allowed_signers at ${REG:0:12}"
           elif git cat-file -e "$HEAD_SHA:.github/allowed_signers" 2>/dev/null; then
@@ -1858,8 +1863,9 @@ jobs:
           fi
           # The range: base..head on a pull request, before..after on a push to main,
           # and the one commit otherwise (a new branch, a schedule or dispatch run).
-          # REG is zero or a readable commit here: an unreadable base failed above.
-          if ! zero "$REG"; then RANGE="$REG..$HEAD_SHA"; else RANGE="$HEAD_SHA -1"; fi
+          if [ "$EVENT" = pull_request ] && isrev "$BASE_SHA"; then RANGE="$BASE_SHA..$HEAD_SHA"
+          elif [ "$EVENT" = push ] && isrev "$BEFORE"; then RANGE="$BEFORE..$HEAD_SHA"
+          else RANGE="$HEAD_SHA -1"; fi
           # shellcheck disable=SC2086 # RANGE is one or two words on purpose
           COMMITS=$(git rev-list --reverse $RANGE) || { echo "FAIL cannot list the range $RANGE"; exit 1; }
           N=$(printf '%s\n' "$COMMITS" | grep -c . || true)
@@ -1887,7 +1893,9 @@ jobs:
               fi
               continue
             fi
-            if ! git cat-file commit "$c" | grep -q '^gpgsig'; then
+            # v1.35.1: grep reads the whole object (no -q), so under pipefail a
+            # long commit message never ends the pipeline with SIGPIPE.
+            if ! git cat-file commit "$c" | grep '^gpgsig' >/dev/null; then
               echo "FAIL ${c:0:12} unsigned, committer $(shown "$ce"): $s"; BAD=1; continue
             fi
             g() { git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile="$ASF" "$@"; }

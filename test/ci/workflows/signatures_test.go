@@ -317,7 +317,7 @@ func TestSignaturesUnreadableBaseFailsClosed(t *testing.T) {
 			r.commit("README", "x", alice, "")
 			c := r.commit(".github/allowed_signers", alice+" "+pub+"\n", alice, key)
 			out, code := r.verify(env(c)...)
-			expect(t, out, code, 1, "FAIL base "+short(missing)+" unavailable; refusing to read the registry from the head")
+			expect(t, out, code, 1, "FAIL the base "+short(missing)+" cannot be read, so neither the registry nor the range can be checked")
 			if strings.Contains(out, "OK   ") || strings.Contains(out, "::warning::") {
 				t.Errorf("an unreadable base fell back to the head's registry\n%s", out)
 			}
