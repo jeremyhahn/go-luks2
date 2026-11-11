@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Go toolchain 1.27.4 for GO-2026-6859, net/http (#441).** govulncheck
+  reports GO-2026-6859 in the go1.27.3 standard library, fixed in go1.27.4
+  (2026-11-02). Every Go version pin moves to 1.27.4: the `go` directive in
+  `go.mod`, `GO_VERSION` in the release workflow, the CLI image `golang:` tag,
+  the devcontainer `golang:` image tag and digest, and the README build
+  requirement.
+
 ## [1.0.3-alpha] - 2026-11-10
 
 ### Changed

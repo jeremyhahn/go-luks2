@@ -36,7 +36,7 @@ env:
   # (TestReleaseGoVersionIsCIs; issue #14). This was pinned at 1.25.5 while
   # the rest of the repo had moved on — a release built on a stale
   # toolchain is a supply-chain problem, not a cosmetic one.
-  GO_VERSION: "1.27.3"
+  GO_VERSION: "1.27.4"
   # The same scanner pins as ci.yml, asserted the same way.
   GOSEC_VERSION: "v2.29.0"
   GOVULNCHECK_VERSION: "v1.8.0"
