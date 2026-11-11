@@ -1991,7 +1991,8 @@ jobs:
           check integration "${{ needs.integration.result }}" full
           check fips        "${{ needs.fips.result }}" full
           check soak        "${{ needs.soak.result }}" nightly
-          check signatures  "${{ needs.signatures.result }}" pr   # v1.35
+          # v1.35: Signatures, a PR-tier job.
+          check signatures  "${{ needs.signatures.result }}" pr
           if [ "$BAD" -ne 0 ]; then
             echo "CI gate failed: not every job reported success."
           else
