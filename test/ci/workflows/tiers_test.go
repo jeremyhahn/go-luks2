@@ -15,11 +15,16 @@ import (
 	"testing"
 )
 
-// The two tiers of ci.yml (#341). A job moved between them, or a condition
+// The tiers of ci.yml (#341). A job moved between them, or a condition
 // edited on one job and not its siblings, changes what gates a merge without
-// failing anything else; these tests are what fails.
+// failing anything else; these tests are what fails. ci-template v1.30 adds
+// two PR-tier tags: `code`, a job a docs-only PR skips (the image job), and
+// `scoped`, lint-gates, which a PR skips when no changed file matches
+// LINT_GATES_PATTERN.
 var (
-	prTier      = []string{"changes", "image", "lint-gates", "merge-check", "arch-gates", "test-race"}
+	prTier      = []string{"preflight", "lint", "merge-check", "test-race"}
+	codeTier    = []string{"image"}
+	scopedTier  = []string{"lint-gates"}
 	fullTier    = []string{"fips", "integration"}
 	nightlyTier = []string{"soak"}
 )
@@ -83,7 +88,7 @@ func TestMainRunsNeverCancel(t *testing.T) {
 	if m == nil {
 		t.Fatal("ci.yml has no workflow-level concurrency block")
 	}
-	want := "  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}\n" +
+	want := "  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}\n" +
 		"  cancel-in-progress: true\n"
 	if m[1] != want {
 		t.Errorf("ci.yml's concurrency block is\n%s\nwant main runs that never cancel\n%s", m[1], want)
@@ -226,11 +231,12 @@ func TestNoLabelTrigger(t *testing.T) {
 	}
 }
 
-// fullTierIf is the one condition every full-tier job carries, written out on
-// each, and ci.yml's CI_FULL_TIER, which CI Gate's FULL_TIER reads.
-// nightlyIf is the nightly tier's: the schedule and dispatch only.
+// fullTierIf is ci.yml's CI_FULL_TIER, which CI Gate's FULL_TIER reads
+// (ci-template v1.30: a workflow_dispatch off main is not the full tier; the
+// guard refuses it). nightlyIf is CI Gate's NIGHTLY: the schedule and
+// dispatch only.
 const (
-	fullTierIf = "${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}"
+	fullTierIf = "${{ (github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')) || contains(github.event.pull_request.labels.*.name, 'ci:full') }}"
 	nightlyIf  = "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}"
 )
 
@@ -274,8 +280,8 @@ func jobIDs(t *testing.T, workflow string) []string {
 func TestCIGateTiersMatchTheJobs(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
 	gate := job(t, ci, "ci-gate")
-	if got := jobIfOf(t, gate); got != "always()" {
-		t.Errorf("CI Gate has if %q, want always()", got)
+	if got := jobIfOf(t, gate); got != gateIf {
+		t.Errorf("CI Gate has if %q, want %q", got, gateIf)
 	}
 	if m := fullTierEn.FindStringSubmatch(gate); m == nil || m[1] != "env.CI_FULL_TIER" {
 		t.Error("CI Gate's FULL_TIER is not ${{ env.CI_FULL_TIER }}")
@@ -296,7 +302,7 @@ func TestCIGateTiersMatchTheJobs(t *testing.T) {
 	}
 	gateNeeds := needs(t, gate)
 
-	var pr, full, nightly []string
+	var pr, code, scoped, full, nightly []string
 	for _, id := range jobIDs(t, ci) {
 		text := job(t, ci, id)
 		if id == "ci-gate" {
@@ -310,19 +316,19 @@ func TestCIGateTiersMatchTheJobs(t *testing.T) {
 		case fullJobIf:
 			want = "full"
 			full = append(full, id)
-		case nightlyIf:
+		case nightlyJobIf:
 			want = "nightly"
 			nightly = append(nightly, id)
-		case draftIf:
-			pr = append(pr, id)
-		case "":
-			// Skipped with the job it needs: the image job needs `changes`.
-			if !contains(needs(t, text), "changes") {
-				t.Errorf("job %s has no if and does not need changes, so it runs on a draft", id)
-			}
+		case codeJobIf:
+			want = "code"
+			code = append(code, id)
+		case scopedJobIf:
+			want = "scoped"
+			scoped = append(scoped, id)
+		case draftIf, prJobIf:
 			pr = append(pr, id)
 		default:
-			t.Errorf("job %s has if %q; a job carries the draft condition (pr), the full-tier condition with it, or the nightly condition", id, cond)
+			t.Errorf("job %s has if %q; a job carries the PR-tier, code, scoped, full-tier or nightly condition", id, cond)
 		}
 		if !contains(gateNeeds, id) {
 			t.Errorf("CI Gate does not need %s", id)
@@ -344,6 +350,12 @@ func TestCIGateTiersMatchTheJobs(t *testing.T) {
 	if !sameSet(pr, prTier) {
 		t.Errorf("the PR tier is %v, want %v", pr, prTier)
 	}
+	if !sameSet(code, codeTier) {
+		t.Errorf("the code tier is %v, want %v", code, codeTier)
+	}
+	if !sameSet(scoped, scopedTier) {
+		t.Errorf("the scoped tier is %v, want %v", scoped, scopedTier)
+	}
 	if !sameSet(full, fullTier) {
 		t.Errorf("the full tier is %v, want %v", full, fullTier)
 	}
@@ -351,7 +363,7 @@ func TestCIGateTiersMatchTheJobs(t *testing.T) {
 		t.Errorf("the nightly tier is %v, want %v", nightly, nightlyTier)
 	}
 	// A full-tier job may need a PR-tier job; never the other way round.
-	for _, j := range prTier {
+	for _, j := range append(append(append([]string{}, prTier...), codeTier...), scopedTier...) {
 		for _, n := range needs(t, job(t, ci, j)) {
 			if contains(fullTier, n) || contains(nightlyTier, n) {
 				t.Errorf("PR-tier job %s needs full-tier job %s", j, n)
@@ -368,17 +380,20 @@ func TestCIGateTiersMatchTheJobs(t *testing.T) {
 func TestUnitTiers(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
 	// The PR tier's unit legs, their coverage gate and the checks beside them
-	// run in the toolchain image, each through ci-toolchain-run.
+	// run in the toolchain image, each through ci-toolchain-run. The
+	// releasability gate is lint-class (ci-template v1.30: the lint job).
 	image := job(t, ci, "image")
 	for _, want := range []string{
 		`make ci-toolchain-run CMD="make test-unit-norace UNIT_TEST_FLAGS=-v && make coverage-gate" CI_OUT=coverage.out`,
 		`make ci-toolchain-run CMD="make test-calibration"`,
-		`make ci-toolchain-run CMD="make releasability"`,
 		`make ci-toolchain-run CMD="make api-diff"`,
 	} {
 		if !strings.Contains(image, want) {
 			t.Errorf("the image job lacks %q", want)
 		}
+	}
+	if want := `make ci-toolchain-run CMD="make releasability"`; !strings.Contains(job(t, ci, "lint"), want) {
+		t.Errorf("the lint job lacks %q", want)
 	}
 	race := job(t, ci, "test-race")
 	if !strings.Contains(race, `run: make ci-toolchain-run CMD="make test-unit UNIT_TEST_FLAGS=-v"`+"\n") {

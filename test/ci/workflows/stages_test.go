@@ -43,27 +43,36 @@ func stepRun(t *testing.T, jobText string) map[string]string {
 }
 
 func TestImageJobRunsEveryToolchainStageInTheImage(t *testing.T) {
-	image := job(t, readFile(t, ".github/workflows/ci.yml"), "image")
+	ci := readFile(t, ".github/workflows/ci.yml")
+	image := job(t, ci, "image")
 	steps := stepRun(t, image)
+	// ci-template v1.30: the lint-class stages are the lint job's.
+	lint := job(t, ci, "lint")
+	lintSteps := stepRun(t, lint)
 
-	for stage, network := range map[string]string{
-		"make lint":       "",
-		"make build":      "",
-		"make test":       "",
-		"make security":   "bridge",
-		"make deps-check": "bridge",
+	for stage, where := range map[string]struct{ job, network string }{
+		"make lint":       {"lint", ""},
+		"make build":      {"image", ""},
+		"make test":       {"image", ""},
+		"make security":   {"image", "bridge"},
+		"make deps-check": {"lint", "bridge"},
 	} {
+		network := where.network
 		name := stage + " (toolchain image)"
-		run, ok := steps[name]
+		jobText, jobSteps := image, steps
+		if where.job == "lint" {
+			jobText, jobSteps = lint, lintSteps
+		}
+		run, ok := jobSteps[name]
 		if !ok {
-			t.Errorf("the image job has no step %q", name)
+			t.Errorf("the %s job has no step %q", where.job, name)
 			continue
 		}
 		// The stage, with nothing before it in CMD; make variables may follow.
 		if want := regexp.MustCompile(`make ci-toolchain-run CMD="` + regexp.QuoteMeta(stage) + `[" ]`); !want.MatchString(run) {
 			t.Errorf("step %q does not run %s", name, want)
 		}
-		block := image[strings.Index(image, "name: "+name):]
+		block := jobText[strings.Index(jobText, "name: "+name):]
 		block = block[:strings.Index(block, "run: ")]
 		if got := strings.Contains(block, "IN_IMAGE_NETWORK: bridge"); got != (network == "bridge") {
 			t.Errorf("step %q: network bridge = %v, want %v", name, got, network == "bridge")
@@ -75,22 +84,24 @@ func TestImageJobRunsEveryToolchainStageInTheImage(t *testing.T) {
 	// v1.24 may narrow a step further: off on a docs-only change, or on the
 	// full tier only; never wider.
 	keepsRunning := regexp.MustCompile(`\n        if: \$\{\{ !cancelled\(\) && env\.TOOLCHAIN_IMAGE != ''( && [^\n]*)? \}\}\n`) //nolint:misspell // the Actions function's spelling, not prose
-	built := false
-	for _, block := range strings.Split(image, "\n      - ")[1:] {
-		name, _, _ := strings.Cut(strings.TrimPrefix(block, "name: "), "\n")
-		switch {
-		case name == "Build the devcontainer images":
-			built = true
-		case !built, name == "Tear down", name == "Lease the integration image", strings.HasPrefix(name, "Upload "),
-			name == "Releasability (private patterns)": // ci-template v1.31: needs only the checkout
-		case !keepsRunning.MatchString("\n" + block): //nolint:misspell // the Actions function's spelling, not prose
-			t.Errorf("step %q does not keep running after a failed step once the toolchain image exists", name)
+	for _, jobText := range []string{image, lint} {
+		built := false
+		for _, block := range strings.Split(jobText, "\n      - ")[1:] {
+			name, _, _ := strings.Cut(strings.TrimPrefix(block, "name: "), "\n")
+			switch {
+			case name == "Build the devcontainer images", name == "Build the toolchain image":
+				built = true
+			case !built, name == "Tear down", name == "Lease the integration image", strings.HasPrefix(name, "Upload "),
+				name == "Releasability (private patterns)": // ci-template v1.31: needs only the checkout
+			case !keepsRunning.MatchString("\n" + block): //nolint:misspell // the Actions function's spelling, not prose
+				t.Errorf("step %q does not keep running after a failed step once the toolchain image exists", name)
+			}
 		}
 	}
 
 	build := steps["Build the devcontainer images"]
 	for _, want := range []string{
-		`make docker-build MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE"`,
+		`make docker-build ${bp:+"$bp"} MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE"`,
 		`rm -f "$RUNNER_TEMP/gomodauth.env"`,
 		`TOOLCHAIN_IMAGE=$(make -s toolchain-image)`,
 	} {
@@ -102,16 +113,16 @@ func TestImageJobRunsEveryToolchainStageInTheImage(t *testing.T) {
 }
 
 // TestDepsCheckRunsOnEveryEvent: ci-template v1.28 puts deps-check on the PR
-// tier as a lint-class gate. Its step runs on every event, a docs-only PR
-// included, under the condition `make lint` carries, and keeps the bridge
-// network for the module proxy.
+// tier as a lint-class gate, and v1.30 in the lint job. Its step runs on every
+// event, a docs-only PR included, under the condition `make lint` carries, and
+// keeps the bridge network for the module proxy.
 func TestDepsCheckRunsOnEveryEvent(t *testing.T) {
-	image := job(t, readFile(t, ".github/workflows/ci.yml"), "image")
+	image := job(t, readFile(t, ".github/workflows/ci.yml"), "lint")
 	stepIf := func(name string) string {
 		t.Helper()
 		i := strings.Index(image, "\n      - name: "+name+"\n")
 		if i < 0 {
-			t.Fatalf("the image job has no step %q", name)
+			t.Fatalf("the lint job has no step %q", name)
 		}
 		block := image[i+1:]
 		if j := strings.Index(block[1:], "\n      - "); j >= 0 {
@@ -260,8 +271,14 @@ func itImageNamedAndLeased(t *testing.T, name, j string) {
 // image job, and what their uploads read comes back through CI_OUT. (The unit
 // legs and their gates: TestUnitTiers.)
 func TestImageJobCarriesTheChecksThatLeftTheRunner(t *testing.T) {
-	image := job(t, readFile(t, ".github/workflows/ci.yml"), "image")
+	ci := readFile(t, ".github/workflows/ci.yml")
+	image := job(t, ci, "image")
 	steps := stepRun(t, image)
+	// ci-template v1.30: the lint-class steps are the lint job's.
+	lint := job(t, ci, "lint")
+	for name, run := range stepRun(t, lint) {
+		steps[name] = run
+	}
 	for name, want := range map[string]string{
 		"make security (toolchain image)":                            `make ci-toolchain-run CMD="make security GO_BUILD_TAGS='$GO_BUILD_TAGS'"`,
 		"Require the analysis tools at their pins (toolchain image)": `make ci-toolchain-run CMD="go run ./test/tools/require-tool golangci-lint $GOLANGCI_LINT_VERSION github.com/golangci/golangci-lint/v2/cmd/golangci-lint && go run ./test/tools/require-tool gosec $GOSEC_VERSION github.com/securego/gosec/v2/cmd/gosec && go run ./test/tools/require-tool govulncheck $GOVULNCHECK_VERSION golang.org/x/vuln/cmd/govulncheck"`,
@@ -283,10 +300,12 @@ func TestImageJobCarriesTheChecksThatLeftTheRunner(t *testing.T) {
 			t.Errorf("ci.yml still carries %q", ban)
 		}
 	}
-	// The pin assertion runs before the lint and the scan it vouches for.
-	pins := strings.Index(image, "name: Require the analysis tools")
-	if pins < 0 || pins > strings.Index(image, "name: make lint") || pins > strings.Index(image, "name: make security") {
-		t.Error("the tool pins are not asserted before make lint and make security run")
+	// The pin assertion runs before the lint and gosec it vouches for. The
+	// image job's make security runs in its own toolchain image, whose pin
+	// file is the one the lint job asserted.
+	pins := strings.Index(lint, "name: Require the analysis tools")
+	if pins < 0 || pins > strings.Index(lint, "name: make lint") || pins > strings.Index(lint, "name: make gosec") {
+		t.Error("the tool pins are not asserted before make lint and make gosec run")
 	}
 	mk := readFile(t, "Makefile")
 	for _, want := range []string{"VET_32BIT_ARCHES := 386 arm", "GOOS=linux GOARCH=$$arch $(GO) vet ./...", "LINUX_ARCHES := amd64 arm64"} {
@@ -434,10 +453,10 @@ const cacheClass = `CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.e
 // same way -- names the cache class the recipe mounts its volumes under.
 func TestToolchainStagesCacheByTrustClass(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
-	if !strings.HasPrefix(ci, "# ci-template: v1.29.2 (customized)\n") {
-		t.Errorf("ci.yml does not declare ci-template v1.29.2: %.60q", ci)
+	if !strings.HasPrefix(ci, "# ci-template: v1.34.1 (customized)\n") {
+		t.Errorf("ci.yml does not declare ci-template v1.34.1: %.60q", ci)
 	}
-	for _, name := range []string{"image", "lint-gates", "merge-check", "test-race", "fips"} {
+	for _, name := range []string{"lint", "image", "lint-gates", "merge-check", "test-race", "fips"} {
 		j := job(t, ci, name)
 		if !strings.Contains(j, "make ci-toolchain-run ") {
 			t.Errorf("%s runs no stage in the toolchain image", name)
@@ -496,7 +515,7 @@ func TestImageJobTrimsTheCachesBeforeTheStages(t *testing.T) {
 // toolchainJobs are the jobs that build the devcontainer images (each frees
 // the hosted runner's disk first: TestEveryCIJobRunsOnTheHostedRunner)
 // and run their stages in them.
-var toolchainJobs = []string{"image", "lint-gates", "integration", "soak", "test-race", "fips", "merge-check"}
+var toolchainJobs = []string{"lint", "image", "lint-gates", "integration", "soak", "test-race", "fips", "merge-check"}
 
 // TestNoStepPrintsTheCredentials: ci-template v1.21.1 after a forge token
 // printed in a run. No step prints the credential file or the job
@@ -539,6 +558,10 @@ var (
 	quotedVar = regexp.MustCompile(`\b([A-Z_][A-Z0-9_]*)=("[^"]*"|'[^']*')`)
 	// makeCall is a make invocation up to the end of its shell command.
 	makeCall = regexp.MustCompile(`(?:^|[\s(])make\s+([^;&|)\n]*)`)
+	// optionalArg is a make argument held whole in a shell variable and
+	// passed only when set, as the image builds pass GO_BUILD_PROXY
+	// (ci-template v1.29.4): ${bp:+"$bp"}, where bp is VAR=value.
+	optionalArg = regexp.MustCompile(`^\$\{[a-z_]+:\+"\$[a-z_]+"\}$`)
 	// goTool is the go command running anything on the runner.
 	goTool = regexp.MustCompile(`(?:^|[\s(;&|])go\s+(build|test|vet|run|install|generate|mod|tool)\b`)
 )
@@ -579,7 +602,7 @@ func runnerViolations(t *testing.T, jobText string) []string {
 		}
 		for _, m := range makeCall.FindAllStringSubmatch(text, -1) {
 			for _, word := range strings.Fields(m[1]) {
-				if strings.HasPrefix(word, "-") || strings.Contains(word, "=") {
+				if strings.HasPrefix(word, "-") || strings.Contains(word, "=") || optionalArg.MatchString(word) {
 					continue
 				}
 				if v := regexp.MustCompile(`^"?\$\{?([A-Z_][A-Z0-9_]*)\}?"?$`).FindStringSubmatch(word); v != nil {
@@ -630,6 +653,8 @@ func TestRunnerViolationsReadsTheSteps(t *testing.T) {
 		{"go vet, continued", "  j:\n    steps:\n      - name: a\n        run: |\n          GOARCH=arm \\\n            go vet ./...\n", 1},
 		{"a stage target", "  j:\n    steps:\n      - name: a\n        run: make gosec GOSEC_EXTRA=\"-fmt=sarif\"\n", 1},
 		{"a second target", "  j:\n    steps:\n      - name: a\n        run: make ci-reap-stacks test\n", 1},
+		{"an optional proxy argument", "  j:\n    steps:\n      - name: a\n        run: make docker-build-toolchain ${bp:+\"$bp\"} X=\"$Y\"\n", 0},
+		{"a target in a variable that is not an argument", "  j:\n    steps:\n      - name: a\n        run: make ${bp} docker-build\n", 1},
 	} {
 		if got := runnerViolations(t, tc.job); len(got) != tc.bad {
 			t.Errorf("%s: %d violations %v, want %d", tc.name, len(got), got, tc.bad)

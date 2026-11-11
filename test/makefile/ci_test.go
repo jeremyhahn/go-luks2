@@ -168,7 +168,8 @@ func ciDockerEnv(t *testing.T, set map[string]string) (env []string, log string)
 	}
 	drop := []string{"GOPRIVATE", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
 		"IN_IMAGE_NETWORK", "REAP_MIN_AGE", "REAP_DRY_RUN", "MODULE_ENV_FILE", "CI_OUT", "CI_OUT_DIR",
-		"CI_CACHE", "CI_CACHE_CLASS", "CI_CACHE_MAX_GIB", "REAP_IMAGE_MIN_AGE", "REAP_LOCK_WAIT", "IN_IMAGE_CPUS"}
+		"CI_CACHE", "CI_CACHE_CLASS", "CI_CACHE_MAX_GIB", "REAP_IMAGE_MIN_AGE", "REAP_LOCK_WAIT", "IN_IMAGE_CPUS",
+		"IN_IMAGE_MEMORY", "IN_IMAGE_SCRATCH", "DEVCACHE_GOPROXY"}
 	return environ(drop, all), log
 }
 
@@ -206,11 +207,17 @@ func TestCIToolchainRunCopiesTheCheckoutInAndRunsCMDWithNoNetwork(t *testing.T) 
 		"--security-opt no-new-privileges:true", "--pids-limit 4096",
 		"--ulimit memlock=67108864:67108864", "--network none",
 		"--user 10001:10001", "--workdir /src", "--env HOME=/tmp",
-		"example/toolchain:t sh -c make build",
+		// ci-template v1.29.4: Go's scratch on an anonymous volume, not the
+		// tmpfs, checked before CMD runs.
+		"-v /var/tmp --env TMPDIR=/var/tmp --env GOTMPDIR=/var/tmp ",
+		`example/toolchain:t sh -c [ -d "$TMPDIR" ] && [ -w "$TMPDIR" ] || {`,
 	} {
 		if !strings.Contains(create, want) {
 			t.Errorf("docker create lacks %q:\n%s", want, create)
 		}
+	}
+	if !strings.HasSuffix(create, "; make build") {
+		t.Errorf("docker create does not end with the scratch check and CMD:\n%s", create)
 	}
 	for _, never := range []string{"GOPROXY", "GOMODCACHE", "GOPATH", "GIT_CONFIG", "secret-token-value"} {
 		if strings.Contains(create, never) {
@@ -266,8 +273,9 @@ func TestCIToolchainRunBridgePassesCredentialsByName(t *testing.T) {
 		"--network bridge",
 		// The baked module cache first, read-only, so verify checks the
 		// modules the image was built with; deps-check asks the network.
-		"--env GOPROXY=file:///go/pkg/mod/cache/download,https://proxy.golang.org,direct ",
-		"--env DEPS_CHECK_GOPROXY=https://proxy.golang.org,direct ",
+		// ci-template v1.34.1: no `direct` entry.
+		"--env GOPROXY=file:///go/pkg/mod/cache/download,https://proxy.golang.org ",
+		"--env DEPS_CHECK_GOPROXY=https://proxy.golang.org ",
 		"--env GOMODCACHE=/cache/gomod", "--env GOPRIVATE ", "--env GIT_CONFIG_COUNT ",
 		"--env GIT_CONFIG_KEY_0 ", "--env GIT_CONFIG_VALUE_0 ",
 	} {
@@ -277,6 +285,99 @@ func TestCIToolchainRunBridgePassesCredentialsByName(t *testing.T) {
 	}
 	if strings.Contains(create, "secret-token-value") || strings.Contains(create, "example.com/private") {
 		t.Errorf("a credential's value reached the command line:\n%s", create)
+	}
+	if strings.Contains(create, ",direct") || strings.Contains(create, "|direct") {
+		t.Errorf("a bridge run's proxy chain falls through to direct fetches (ci-template v1.34.1):\n%s", create)
+	}
+}
+
+// ci-template v1.29.4: a runner that sets DEVCACHE_GOPROXY puts its module
+// cache first, with `|` so any error falls through to the public proxy, and
+// never `direct` (v1.34.1).
+func TestCIToolchainRunBridgePutsTheDevcacheProxyFirst(t *testing.T) {
+	env, log := ciDockerEnv(t, map[string]string{"DEVCACHE_GOPROXY": "http://cache.example:3000"})
+	runMake(t, env, "-s", "ci-toolchain-run", "CMD=make deps-check",
+		"TOOLCHAIN_IMAGE=example/toolchain:t", "IN_IMAGE_NETWORK=bridge")
+	create, ok := called(logLines(t, log), "create ")
+	if !ok {
+		t.Fatal("no docker create")
+	}
+	for _, want := range []string{
+		"--env GOPROXY=file:///go/pkg/mod/cache/download,http://cache.example:3000|https://proxy.golang.org ",
+		"--env DEPS_CHECK_GOPROXY=http://cache.example:3000|https://proxy.golang.org ",
+	} {
+		if !strings.Contains(create, want) {
+			t.Errorf("a bridge run lacks %q:\n%s", want, create)
+		}
+	}
+	if strings.Contains(create, ",direct") || strings.Contains(create, "|direct") {
+		t.Errorf("a bridge run's proxy chain falls through to direct fetches:\n%s", create)
+	}
+}
+
+// ci-template v1.29.4 (in-toolchain-image.sh v4): the stage takes the job
+// slot's memory bound, the cgroup's memory.max or 8g without one, and
+// IN_IMAGE_MEMORY over both, with no swap beyond it; and its Go scratch is an
+// anonymous volume at IN_IMAGE_SCRATCH, /var/tmp by default.
+func TestCIToolchainRunTakesTheJobsMemoryBound(t *testing.T) {
+	for _, tc := range []struct {
+		name, memMax, override, scratch, want, wantScratch string
+	}{
+		{"cgroup limit", "17179869184\n", "", "", "17179869184", "/var/tmp"},
+		{"no limit", "max\n", "", "", "8g", "/var/tmp"},
+		{"no cgroup file", "", "", "", "8g", "/var/tmp"},
+		{"override", "17179869184\n", "24g", "", "24g", "/var/tmp"},
+		{"override in megabytes", "", "512m", "", "512m", "/var/tmp"},
+		{"scratch override", "", "", "/scratch", "8g", "/scratch"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			memMax := filepath.Join(t.TempDir(), "memory.max")
+			if tc.memMax != "" {
+				if err := os.WriteFile(memMax, []byte(tc.memMax), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			set := map[string]string{}
+			if tc.override != "" {
+				set["IN_IMAGE_MEMORY"] = tc.override
+			}
+			if tc.scratch != "" {
+				set["IN_IMAGE_SCRATCH"] = tc.scratch
+			}
+			env, log := ciDockerEnv(t, set)
+			runMake(t, env, "-s", "ci-toolchain-run", "CMD=make build",
+				"TOOLCHAIN_IMAGE=example/toolchain:t", "CGROUP_MEMORY_MAX="+memMax)
+			create, ok := called(logLines(t, log), "create ")
+			if !ok {
+				t.Fatal("no docker create")
+			}
+			if want := " --memory " + tc.want + " --memory-swap " + tc.want + " "; !strings.Contains(create, want) {
+				t.Errorf("docker create lacks %q:\n%s", want, create)
+			}
+			s := tc.wantScratch
+			if want := " -v " + s + " --env TMPDIR=" + s + " --env GOTMPDIR=" + s + " "; !strings.Contains(create, want) {
+				t.Errorf("docker create lacks %q:\n%s", want, create)
+			}
+		})
+	}
+	for _, bad := range []struct{ env, value, why string }{
+		{"IN_IMAGE_MEMORY", "0", "IN_IMAGE_MEMORY must be a size in bytes, m or g, e.g. 16g: 0"},
+		{"IN_IMAGE_MEMORY", "8gb", "IN_IMAGE_MEMORY must be a size in bytes, m or g, e.g. 16g: 8gb"},
+		{"IN_IMAGE_MEMORY", "1.5g", "IN_IMAGE_MEMORY must be a size in bytes, m or g, e.g. 16g: 1.5g"},
+		{"IN_IMAGE_MEMORY", "g", "IN_IMAGE_MEMORY must be a size in bytes, m or g, e.g. 16g: g"},
+		{"IN_IMAGE_SCRATCH", "var/tmp", "IN_IMAGE_SCRATCH must be an absolute path: var/tmp"},
+	} {
+		env, log := ciDockerEnv(t, map[string]string{bad.env: bad.value})
+		stdout, stderr, err := runMakeErr(t, env, "-s", "ci-toolchain-run", "CMD=make test", "TOOLCHAIN_IMAGE=example/toolchain:t")
+		if err == nil {
+			t.Errorf("%s=%s was accepted:\n%s%s", bad.env, bad.value, stdout, stderr)
+		}
+		if !strings.Contains(stderr, bad.why) {
+			t.Errorf("%s=%s: the refusal does not say why:\n%s", bad.env, bad.value, stderr)
+		}
+		if lines := logLines(t, log); len(lines) != 0 {
+			t.Errorf("%s=%s: docker was called:\n%s", bad.env, bad.value, strings.Join(lines, "\n"))
+		}
 	}
 }
 
@@ -487,7 +588,8 @@ func TestCIToolchainRunCacheOffMountsNone(t *testing.T) {
 		t.Errorf("CI_CACHE=off still runs the volume helper:\n%s", strings.Join(lines, "\n"))
 	}
 	create, _ := called(lines, "create ")
-	if strings.Contains(create, " -v ") || strings.Contains(create, "CACHE=/cache/") {
+	// The Go scratch volume (-v /var/tmp) is no cache.
+	if strings.Contains(create, ":/cache/") || strings.Contains(create, "CACHE=/cache/") {
 		t.Errorf("CI_CACHE=off still mounts a cache:\n%s", create)
 	}
 	if mc := envVars(create)["GOMODCACHE"]; mc != "/tmp/gomodcache" {
