@@ -1,4 +1,64 @@
-# ci-template: v1.29.2 (customized)
+# ci-template: v1.34.1 (customized)
+# v1.34.1 (ruling 377): GO_BUILD_PROXY is <DEVCACHE_GOPROXY>|https://proxy.golang.org,
+# with no trailing `direct`: no direct fetch, anywhere
+# (dependency-resolution.md). A GOPRIVATE path never uses GOPROXY. The
+# toolchain stage's network GOPROXY (ci-toolchain-run, the template's
+# in-toolchain-image.sh v5) loses its `direct` entry as well.
+# v1.34: the `changes`, `schedule-guard` and `arch-gates` jobs are one
+# `preflight` job: the schedule guard first, before anything is checked out,
+# then one checkout with persist-credentials false, the changed-files step and
+# the architecture gate. Its outputs are needs.preflight.outputs.*, and CI
+# Gate checks `preflight` in place of the three.
+# v1.33.2: the releasability step takes the InfoSec waiver. A matched line
+# that carries `lab-string-ok: <reason>` (colon and reason required) is listed
+# as waived, path and line only, and does not fail; a bare marker still fails.
+# v1.33.1 and v1.33: the pattern file has five classes, coord-host,
+# internal-email, lab-address, lab-host and owner-path (optional `/i`), and
+# the image namespace is the repository variable CI_IMAGE_NAMESPACE.
+# v1.32: the releasability step reads the private pattern file as
+# `class<TAB>regex` lines and greps the regex fields with -E.
+# v1.31: the internal-name gate reads its patterns from the Actions secret
+# RELEASABILITY_PATTERNS, never from this repository, and prints path and line
+# only.
+# v1.30: the five fixes of the 72-hour CI evaluation. (1) The lint-class
+# stages leave the image job for a `lint` job that builds the toolchain image
+# alone (`make docker-build-toolchain`) and runs beside build and test; the
+# registry cache of the toolchain image (publish-images,
+# scripts/ci-image-cache.sh) is not adopted here, see CUSTOMIZE below. (2) A
+# push to main whose tree already has a green full tier gets the guard's
+# `proven` verdict; on github.com the guard makes no API call, so `proven`
+# cannot occur here. (3) lint-gates is path-scoped on a PR
+# (LINT_GATES_PATTERN), and a PR from a checkpoint branch (lane-ckpt/*) is
+# refused. (4) Every job carries timeout-minutes. (5) `make gosec` runs on the
+# PR tier in the lint job (make security keeps it on the full tier), and a
+# workflow_dispatch off main is refused: no full tier on a PR branch.
+# v1.29.5 and v1.29.4: each image build passes
+# GO_BUILD_PROXY=<DEVCACHE_GOPROXY>|https://proxy.golang.org when the runner
+# sets DEVCACHE_GOPROXY and the cache answers a 5-second probe, as one quoted
+# make argument (the Makefile passes it to docker build by name, `--build-arg
+# GO_BUILD_PROXY`, so no shell sees the `|`); otherwise none, as before. The
+# guard reads `waiting` before `in_progress`. The toolchain stage takes the job
+# slot's memory bound (--memory and --memory-swap from the job's cgroup
+# memory.max, 8g with no limit, IN_IMAGE_MEMORY overrides) and keeps Go's
+# build scratch (TMPDIR, GOTMPDIR) on an anonymous volume on /var/tmp, not the
+# 3 GB /tmp tmpfs.
+# v1.29.3: a schedule run's concurrency group is `schedule-{repository}`, and
+# the schedule guard (now a preflight step) holds a schedule run's jobs while
+# a main push run is in flight. No workflow here is scheduled, so the guard
+# only refuses (v1.30).
+# CUSTOMIZE (go-luks2, the v1.29.3 to v1.34.1 adoption): the canonical
+# scripts stay Makefile recipes (ci-toolchain-run, ci-reap-stacks,
+# ci-trim-caches, apk-index-sum), because the public release ships no shell
+# scripts. publish-images and scripts/ci-image-cache.sh are not adopted: the
+# job skips on github.com, where this repository runs, and the script would be
+# a shipped shell script with no registry to talk to; every job builds its
+# toolchain image itself, as before. The lint job takes the image job's
+# lint-class steps: the tool pins, make lint, the releasability gates (make
+# releasability, this repository's RELEASABILITY_TEST, and the private
+# patterns), the build-tag assertion, make gosec (PR tier) and make
+# deps-check. The image job skips on a docs-only PR (`code` in CI Gate). The
+# runners are unchanged: the Docker jobs, lint included, take the
+# bigdisk-docker routing of ruling 442, the rest ubuntu-latest.
 # v1.29.2 (Company Agent ruling 239(8), 2026-10-28): comments only; no job,
 # gate or tier changes. A CUSTOMIZE job gated on a changes output (a path-gated
 # suite) needs the image job too and tests an output of the image job in its
@@ -70,8 +130,8 @@ name: CI
 # its build (github.com only), and no job's timeout (120 min at most) comes
 # near the limit, so none is sharded.
 #
-# Ruling 442: the jobs that build a devcontainer image (image, lint-gates,
-# merge-check, integration, soak, test-race, fips) run on the bigdisk-docker
+# Ruling 442: the jobs that build a devcontainer image (lint, image,
+# lint-gates, merge-check, integration, soak, test-race, fips) run on the bigdisk-docker
 # pool, a throwaway guest per job, for a push to main and a same-repository
 # pull request, and on ubuntu-latest for every other event. Their "Free
 # runner disk" step runs on the hosted runner only. bigdisk-docker is not the
@@ -134,33 +194,37 @@ name: CI
 #
 # THREE TIERS, ONE GATE (ci-standard.md §8, sdlc §5a).
 #
-#   PR tier    every event but a draft PR: Changed files, Devcontainer image,
-#              Lint Gates, Merged Tree, Architecture Gates and Race. Lint
-#              Gates (ci-template v1.27) runs `make lint-gates` in the
-#              toolchain image beside the image job's lint, only when the
-#              Makefile defines the target. The image job runs lint, the
-#              build-tag assertion, build and test in the toolchain image
-#              built at this commit, and with them the linux binaries, the
-#              32-bit vet, the unit legs (no -race) and their coverage gate,
-#              the calibration tests and the releasability and API gates.
-#              Race is the -race unit run with its pkg/luks2 budget. A PR
-#              whose every changed file matches DOCS_ONLY_PATTERN skips the
-#              build, the tag assertion and the unit runs; lint and the gates
-#              that read the docs still run.
+#   PR tier    every event but a draft PR: Preflight (changed files,
+#              schedule guard, architecture gate), Lint, Devcontainer image,
+#              Lint Gates, Merged Tree and Race. Lint (ci-template v1.30)
+#              runs the tool pins, lint, the releasability gates, the
+#              build-tag assertion, gosec and deps-check in the toolchain
+#              image. Lint Gates (v1.27) runs `make lint-gates` beside it,
+#              only when the Makefile defines the target. The image job runs
+#              build and test in the toolchain image built at this commit,
+#              and with them the linux binaries, the 32-bit vet, the unit
+#              legs (no -race) and their coverage gate, the calibration tests
+#              and the API gate. Race is the -race unit run with its
+#              pkg/luks2 budget. A PR whose every changed file matches
+#              DOCS_ONLY_PATTERN skips the image job, the tag assertion,
+#              gosec and the race run; lint and the gates that read the docs
+#              still run.
 #   Full tier  push to main, workflow_dispatch, and a
 #              pull_request labelled `ci:full`: the PR tier plus Integration
 #              and FIPS, each its own job in the image, and the image job's
 #              security (gosec, govulncheck, go mod verify, trivy's filesystem
-#              scan), deps-check and trivy image steps (v1.28 puts
-#              deps-check on the PR tier).
+#              scan) and trivy image steps. v1.30: a workflow_dispatch off
+#              main is refused, never the full tier.
 #   Nightly    workflow_dispatch only: the full tier plus
 #              Soak, the integration suite looped in the integration image
 #              for SOAK_MINUTES.
 #
 # CI Gate, the single required check, needs EVERY job and reads each by name,
-# tagged `pr`, `full` or `nightly`. A `full` job may be skipped only while the
-# full tier is not selected, a `nightly` job only off workflow_dispatch;
-# any other skip, and every failure or cancellation, fails it. On a
+# tagged `pr`, `code`, `scoped`, `full` or `nightly`. A `full` job may be
+# skipped only while the full tier is not selected, a `nightly` job only off
+# workflow_dispatch, a `code` job only on a docs-only PR and a `scoped` job
+# only when no changed file matches LINT_GATES_PATTERN; any other skip, and
+# every failure or cancellation, fails it. On a
 # draft PR every job but CI Gate skips and CI Gate itself fails.
 #
 # No CI workflow in this repository is scheduled: its nightly run is suspended,
@@ -174,7 +238,7 @@ name: CI
 # every full-tier job repeats its expression, and test/ci/workflows asserts
 # they stay identical:
 #
-#   push or workflow_dispatch                  -> full tier
+#   push, or workflow_dispatch on main         -> full tier
 #   pull_request labelled ci:full              -> full tier
 #
 # LABEL EVENTS DO NOT RUN CI. ci.yml does not fire on `labeled`: on this host
@@ -213,8 +277,10 @@ on:
 # group). Every other ref is one group, so a PR's newer run cancels the
 # older. No expression reaches cancel-in-progress: Gitea 1.27.1 never
 # released a main run queued behind one that set it to an expression.
+# v1.29.3: a schedule run's group is `schedule-{repository}`, with no sha, so a
+# repository has one schedule run at a time (none is scheduled here).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -231,13 +297,19 @@ env:
   # (push to main, workflow_dispatch), and a PR labelled ci:full.
   # Steps read it as env.CI_FULL_TIER; a job-level `if:` cannot read env, so
   # the integration job repeats this expression. Keep them equal.
-  CI_FULL_TIER: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
+  # v1.30 (fix 5): a workflow_dispatch off main is not the full tier (the
+  # schedule guard refuses it and CI Gate fails).
+  CI_FULL_TIER: ${{ (github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')) || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
   # v1.24: the files a docs-only PR may touch. CUSTOMIZE: narrow it
   # in a repo that embeds or generates from docs/ (go:embed, OpenAPI, protos).
   DOCS_ONLY_PATTERN: '(\.md$|^docs/)'
+  # v1.30 (fix 3): a PR runs the lint-gates job only when a changed file
+  # matches this extended regex. CUSTOMIZE: this repository defines no
+  # lint-gates target, so the default, every file, stands.
+  LINT_GATES_PATTERN: '.'
   # v1.26.1: the template's RELEASABILITY_TEST variable and its docs-only step
   # are not used here. CUSTOMIZE: this repository's releasability check is the
-  # gate `make releasability`, not a `go test`, and the image job's
+  # gate `make releasability`, not a `go test`, and the lint job's
   # "Public-releasability gate" step below runs it on every pull request,
   # docs-only ones included (it has no docs_only condition), so a private value
   # in README.md or docs/ fails the PR.
@@ -254,20 +326,162 @@ env:
 jobs:
   # ---- PR tier ----
   #
+  # v1.34: one preflight job, in place of the changes, schedule-guard and
+  # arch-gates jobs, in this order: the schedule guard, before anything is
+  # checked out, so AGENT_TOKEN (a schedule run and a push to main only)
+  # reaches a step beside no repository code; one checkout with
+  # persist-credentials false; the changed-files step; the architecture gate.
   # v1.24: is every file this PR changes markdown or under docs/? Off a PR,
-  # and on a PR in the full tier, the answer is no without a diff.
-  changes:
-    name: Changed files
+  # and on a PR in the full tier, the answer is no without a diff. Any doubt
+  # (a failed diff, an empty list) reads as false. v1.30: lint_gates is false
+  # only on a PR whose changed files all miss LINT_GATES_PATTERN.
+  # v1.29.3 and v1.30: the guard sets `verdict`. `refused`: a
+  # workflow_dispatch off main, or a pull request from a checkpoint branch
+  # (lane-ckpt/*); every job but CI Gate skips and CI Gate fails. Off
+  # github.com, on a schedule run, `busy` while a main push run is in flight
+  # and `unreadable` when the API gives no count; on a push to main, `proven`
+  # when a green full-tier run already proved this tree. On github.com, where
+  # this repository runs, the guard makes no API call, so only `run` and
+  # `refused` occur here. Every other job runs only on `run`.
+  # Architecture gate (v1.20): go-objstore owns every blob backend, and a repo
+  # reaches it only through the packages that are its storage seam; this
+  # library has none, so no package may import it. Test files are exempt. A
+  # source check with grep on the runner's shell, on the PR tier.
+  preflight:
+    name: Preflight [changed files, schedule guard, architecture gates]
     runs-on: ubuntu-latest
+    # v1.26: a draft PR runs no CI; every job that needs this one skips with it.
+    if: ${{ !github.event.pull_request.draft }}
+    timeout-minutes: 10       # v1.34: the three jobs had 5 each
+    permissions:
+      actions: read
+      contents: read
+    env:
+      OBJSTORE_SEAMS: ''      # CUSTOMIZE: this library has no storage seam, so no package may import go-objstore
     outputs:
       docs_only: ${{ steps.diff.outputs.docs_only }}
-    # v1.26: a draft PR runs no CI; the image job needs this one and skips with it.
-    if: ${{ !github.event.pull_request.draft }}
+      lint_gates: ${{ steps.diff.outputs.lint_gates }}   # v1.30
+      verdict: ${{ steps.guard.outputs.verdict }}
+      proof: ${{ steps.guard.outputs.proof }}   # v1.30
     steps:
+      - name: Is a main push run of this workflow in flight?
+        id: guard
+        env:
+          EVENT: ${{ github.event_name }}
+          SERVER: ${{ github.server_url }}
+          REF: ${{ github.ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          SHA: ${{ github.sha }}
+          # This workflow's own file: the route counts its runs only.
+          RUNS_API: ${{ github.server_url }}/api/v1/repos/${{ github.repository }}/actions/workflows/ci.yml/runs
+          REPO_API: ${{ github.server_url }}/api/v1/repos/${{ github.repository }}
+          JOB_TOKEN: ${{ github.token }}
+          # v1.30: a push to main reads the tree proof with it as well.
+          BOT: ${{ (github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && secrets.AGENT_TOKEN || '' }}
+        run: |
+          set -uo pipefail
+          # runs <token>: sets N to the number of this workflow's push runs
+          # on main in progress or waiting. It returns 1, with the answer in
+          # CODE, when a reply is not 200 with a count. The token reaches
+          # curl as a header from a file descriptor, never on its command line.
+          runs() {
+            local st n
+            N=0
+            # v1.29.4: waiting is read before in_progress. A run only moves
+            # waiting, then in_progress, then done, so one waiting at the
+            # first query is still waiting, in progress or done at the
+            # second, and counted or finished. The other order lets a run
+            # start between the two queries and be counted by neither.
+            for st in waiting in_progress; do
+              CODE=$(curl -sS --max-time 30 -o "$RUNNER_TEMP/runs.json" -w '%{http_code}' \
+                -H @<(printf 'Authorization: token %s\n' "$1") \
+                "$RUNS_API?event=push&branch=main&status=$st&limit=1") || CODE="curl exit $?"
+              [ "$CODE" = 200 ] || return 1
+              n=$(jq -er '.total_count | numbers' "$RUNNER_TEMP/runs.json") || { CODE="200 with no count"; return 1; }
+              echo "$st: $n"
+              N=$((N + n))
+            done
+          }
+          # get <token> <url> <file>: 0 on a 200 reply, saved in <file>.
+          get() {
+            [ "$(curl -sS --max-time 30 -o "$3" -w '%{http_code}' \
+              -H @<(printf 'Authorization: token %s\n' "$1") "$2")" = 200 ]
+          }
+          # v1.30: proof <token>: sets PROOF to the id of the newest of this
+          # workflow's last 20 successful runs whose head commit has this
+          # commit's tree and whose Integration jobs all succeeded (at least
+          # one). It returns 1 when a reply is not 200, and 0 with PROOF
+          # empty when no run proves the tree.
+          proof() {
+            local tree id sha t
+            PROOF=
+            get "$1" "$REPO_API/git/commits/$SHA" "$RUNNER_TEMP/c.json" || return 1
+            tree=$(jq -er '.commit.tree.sha' "$RUNNER_TEMP/c.json") || return 1
+            get "$1" "$RUNS_API?status=success&limit=20" "$RUNNER_TEMP/ok.json" || return 1
+            while read -r id sha; do
+              get "$1" "$REPO_API/git/commits/$sha" "$RUNNER_TEMP/c.json" || continue
+              t=$(jq -r '.commit.tree.sha' "$RUNNER_TEMP/c.json")
+              [ "$t" = "$tree" ] || continue
+              get "$1" "$REPO_API/actions/runs/$id/jobs?limit=100" "$RUNNER_TEMP/j.json" || continue
+              if jq -e '[.jobs[] | select(.name | startswith("Integration"))] | length > 0 and all(.conclusion == "success")' \
+                   "$RUNNER_TEMP/j.json" >/dev/null; then
+                PROOF=$id
+                echo "tree $tree: run $id (head $sha) has a green full tier"
+                return 0
+              fi
+            done < <(jq -r '.workflow_runs[]? | "\(.id) \(.head_sha)"' "$RUNNER_TEMP/ok.json")
+            echo "tree $tree: no green full-tier run among the last 20 successful runs"
+          }
+          verdict=run N=0 PROOF=
+          # v1.30 (fixes 3 and 5): the refusals come first.
+          if [ "$EVENT" = workflow_dispatch ] && [ "$REF" != refs/heads/main ]; then
+            verdict=refused
+            echo "::error::workflow_dispatch on $REF: the full tier runs on main only, never on a PR branch (ci-template v1.30); every job skips and CI Gate fails"
+          elif [ "$EVENT" = pull_request ] && [ "${HEAD_REF#lane-ckpt/}" != "$HEAD_REF" ]; then
+            verdict=refused
+            echo "::error::a pull request from checkpoint branch $HEAD_REF: a checkpoint branch never opens a PR (ci-template v1.30); every job skips and CI Gate fails"
+          fi
+          if [ "$verdict" != run ]; then
+            :
+          elif [ "$EVENT" != schedule ]; then
+            echo "not a schedule run: no check"
+          elif [ "$SERVER" = https://github.com ]; then
+            echo "on github.com the guard makes no API call: no check"
+          elif [ -n "$JOB_TOKEN" ] && runs "$JOB_TOKEN"; then
+            echo "read with the job token"
+          elif job="${CODE:-no job token}"; [ -n "$BOT" ] && runs "$BOT"; then
+            echo "read with AGENT_TOKEN; the job token got: $job"
+          else
+            bot="not set"; [ -z "$BOT" ] || bot="$CODE"
+            verdict=unreadable
+            echo "::error::the Actions API gave no count (job token: $job; AGENT_TOKEN: $bot), so every guarded job skips and CI Gate fails"
+          fi
+          if [ "$verdict" = run ] && [ "$N" -gt 0 ]; then
+            verdict=busy
+            echo "::notice::$N push run(s) of this workflow on main in flight: this schedule run skips its guarded jobs, and CI Gate posts skipped"
+          fi
+          # v1.30 (fix 2): the tree proof, on a push to main on the forge only.
+          if [ "$verdict" = run ] && [ "$EVENT" = push ] && [ "$REF" = refs/heads/main ] && [ "$SERVER" != https://github.com ]; then
+            if { [ -n "$JOB_TOKEN" ] && proof "$JOB_TOKEN"; } || { [ -n "$BOT" ] && proof "$BOT"; }; then
+              if [ -n "$PROOF" ]; then
+                verdict=proven
+                echo "::notice::this tree already has a green full tier in run $PROOF: the guarded jobs skip, and CI Gate passes on it"
+              fi
+            else
+              echo "::warning::the tree proof could not be read: the full tier runs"
+            fi
+          fi
+          echo "verdict: $verdict${PROOF:+ (proof: run $PROOF)}"
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+          echo "proof=$PROOF" >> "$GITHUB_OUTPUT"
+
+      # v1.34: the full history on a PR run for the changed-files diff, one
+      # commit otherwise. No credential is left in the checkout.
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        if: ${{ github.event_name == 'pull_request' && env.CI_FULL_TIER != 'true' }}
         with:
-          fetch-depth: 0
+          fetch-depth: ${{ (github.event_name == 'pull_request' && env.CI_FULL_TIER != 'true') && '0' || '1' }}
+          persist-credentials: false
+
       - name: Is every changed file docs or markdown?
         id: diff
         env:
@@ -275,20 +489,257 @@ jobs:
           HEAD: ${{ github.event.pull_request.head.sha }}
           EVENT: ${{ github.event_name }}
         run: |
-          docs_only=false
+          # v1.30: lint_gates is false only on a PR whose changed files all
+          # miss LINT_GATES_PATTERN; any doubt runs the job.
+          docs_only=false lint_gates=true
           if [ "$EVENT" = pull_request ] && [ "$CI_FULL_TIER" != true ]; then
             if files=$(git diff --name-only --no-renames "$BASE...$HEAD") && [ -n "$files" ]; then
               if ! printf '%s\n' "$files" | grep -qvE "$DOCS_ONLY_PATTERN"; then
                 docs_only=true
               fi
+              printf '%s\n' "$files" | grep -qE "$LINT_GATES_PATTERN" || lint_gates=false
               printf '%s\n' "$files"
             fi
           fi
-          echo "docs only: $docs_only"
+          echo "docs only: $docs_only; lint-gates: $lint_gates"
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          echo "lint_gates=$lint_gates" >> "$GITHUB_OUTPUT"
+
+      - name: No direct go-objstore import outside the storage seam
+        run: |
+          if [ "$(sed -n 's/^module //p' go.mod)" = github.com/jeremyhahn/go-objstore ]; then
+            echo "OK: this is go-objstore"; exit 0
+          fi
+          hits=$(grep -rln --include='*.go' '"github.com/jeremyhahn/go-objstore' . \
+                 | grep -v '_test\.go$' \
+                 | { if [ -n "$OBJSTORE_SEAMS" ]; then grep -vE "$OBJSTORE_SEAMS"; else cat; fi; } || true)
+          if [ -n "$hits" ]; then
+            echo "go-objstore may be imported only in the storage seam (OBJSTORE_SEAMS='$OBJSTORE_SEAMS'):"
+            echo "$hits"; exit 1
+          fi
+          echo "OK: no go-objstore import outside the storage seam"
+
+  # v1.30 (fix 1, parallel jobs; fix 5, gosec on the PR tier): the
+  # lint-class stages, moved from the image job, in a job of their own that
+  # needs the toolchain image alone, so they run beside build and test and not
+  # in series before them. The PR tier runs `make gosec` here; the full tier
+  # runs gosec in the image job's `make security`, so it runs once per event.
+  # It runs on a docs-only PR, with the releasability gates, as the image job
+  # did; the build-tag assertion and gosec skip there.
+  lint:
+    name: Lint [lint, gosec, deps-check, build tags, releasability]
+    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
+    needs: preflight   # v1.34
+    if: ${{ !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
+    timeout-minutes: 60       # CUSTOMIZE: a cold toolchain image build on a hosted runner, then the lint-class stages
+    env:
+      CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
+      # v1.22: the cache volumes' trust class (as in the image job).
+      CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'main' || 'pr' }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      # v1.21.1: mask the forge credentials before any other step. The runner
+      # injects them as plain environment (dependency-resolution.md §6), which
+      # the log does not mask by itself, and the token sits inside
+      # GIT_CONFIG_KEY_0's URL, so it is masked alone as well.
+      - name: Mask the forge credentials
+        run: |
+          for v in GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+            val=${!v:-}
+            [ -n "$val" ] || continue
+            echo "::add-mask::$val"
+            case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
+          done
+
+      - name: Reap stale CI stacks
+        run: make ci-reap-stacks
+
+      # Company Agent m2077: a GitHub-hosted runner starts with about 14 GB
+      # free, which the devcontainer images this job builds outgrow. On
+      # github.com only, remove the preinstalled SDKs and images this
+      # pipeline never uses before the build. A runner elsewhere keeps its
+      # disk as it is.
+      - name: Free runner disk
+        if: github.server_url == 'https://github.com' && runner.environment == 'github-hosted'
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
+          docker image prune --all --force >/dev/null || true
+          df -h /
+
+      # v1.30: the toolchain image alone (`make docker-build-toolchain`),
+      # which skips when the daemon holds its tag. v1.29.4, v1.29.5 and
+      # v1.34.1: the module fetches go through DEVCACHE_GOPROXY first when the
+      # runner sets it and the cache answers, then the public proxy, with no
+      # `direct` entry.
+      - name: Build the toolchain image
+        run: |
+          ( umask 077; : > "$RUNNER_TEMP/gomodauth.env"
+            for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+              if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
+            done )
+          bp=
+          if [ -n "${DEVCACHE_GOPROXY:-}" ] && curl -s -o /dev/null --max-time 5 "$DEVCACHE_GOPROXY/"; then
+            bp="GO_BUILD_PROXY=$DEVCACHE_GOPROXY|https://proxy.golang.org"
+          fi
+          make docker-build-toolchain ${bp:+"$bp"} MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env"
+          rm -f "$RUNNER_TEMP/gomodauth.env"
+          echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
+
+      # v1.22: bound this repo's cache volumes on the host before the stages
+      # add to them (ci-standard.md §6). It never fails the job.
+      - name: Trim the CI caches
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        run: make ci-trim-caches
+
+      # CUSTOMIZE: the analysers must SAY they are the pinned versions (#21):
+      # gosec takes its version from ldflags, so a pinned install alone still
+      # self-reports `dev`, and a scan by an unknown version is no gate.
+      - name: Require the analysis tools at their pins (toolchain image)
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        run: make ci-toolchain-run CMD="go run ./test/tools/require-tool golangci-lint $GOLANGCI_LINT_VERSION github.com/golangci/golangci-lint/v2/cmd/golangci-lint && go run ./test/tools/require-tool gosec $GOSEC_VERSION github.com/securego/gosec/v2/cmd/gosec && go run ./test/tools/require-tool govulncheck $GOVULNCHECK_VERSION golang.org/x/vuln/cmd/govulncheck"
+
+      # make lint: gofmt, golangci-lint and actionlint, each required, golangci-
+      # lint printing path and line only. .golangci.yml enables staticcheck,
+      # errcheck, unused, ineffassign, misspell and gocritic. v1.27: a repo's
+      # `make lint-gates` runs in the lint-gates job beside this one, never
+      # here and never as a prerequisite of lint.
+      - name: make lint (toolchain image)
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        run: make ci-toolchain-run CMD="make lint GO_BUILD_TAGS='$GO_BUILD_TAGS'"
+
+      # v1.32 (2026-11-08, Company Agent m2098 item 2, InfoSec finding): the
+      # internal-name gate. Its patterns are internal values, so they never
+      # live in this repository: the Actions secret RELEASABILITY_PATTERNS
+      # carries the private pattern file, whose source is kept outside this
+      # repository. Blank
+      # and `#` lines are skipped; every other line is `class<TAB>regex`, a
+      # class of coord-host, internal-email, lab-address, lab-host or
+      # owner-path (v1.33; an `/i` suffix is allowed) and a POSIX extended regex. A malformed line, an unknown
+      # class or a regex grep -E refuses fails the step, which prints the line
+      # number only. v1.31 grepped whole lines with -F, so no line matched and
+      # the gate was green for a false reason. The step prints path and line
+      # of a match, never the value. A run without the secret (a fork PR)
+      # skips with a notice; a push to main without it fails. v1.33.2: a
+      # matched line that carries the InfoSec waiver, `lab-string-ok: <reason>`
+      # (colon and reason required, public-hygiene.md), is listed as waived,
+      # path and line only, and does not fail; a bare marker still fails.
+      - name: Releasability (private patterns)
+        if: ${{ !cancelled() }}
+        env:
+          RELEASABILITY_PATTERNS: ${{ secrets.RELEASABILITY_PATTERNS }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ -z "$RELEASABILITY_PATTERNS" ]; then
+            if [ "$EVENT" = push ]; then
+              echo "::error::RELEASABILITY_PATTERNS is not set; the gate needs the private pattern file (public-hygiene.md)"
+              exit 1
+            fi
+            echo "::notice::RELEASABILITY_PATTERNS is not available to this run; pushes to main run the gate"
+            exit 0
+          fi
+          pf=$(mktemp)
+          chmod 600 "$pf"
+          trap 'rm -f "$pf"' EXIT
+          tab=$(printf '\t')
+          n=0 bad=0 count=0
+          while IFS= read -r line || [ -n "$line" ]; do
+            n=$((n + 1))
+            line=${line%$'\r'}
+            trimmed=${line#"${line%%[![:space:]]*}"}
+            case $trimmed in ''|'#'*) continue ;; esac
+            case $line in
+              *"$tab"*) ;;
+              *) echo "::error::pattern line $n is not class<TAB>regex"; bad=1; continue ;;
+            esac
+            class=${line%%"$tab"*}
+            re=${line#*"$tab"}
+            case $class in
+              coord-host|internal-email|lab-address|lab-host|owner-path) ;;
+              coord-host/i|internal-email/i|lab-address/i|lab-host/i|owner-path/i) ;;
+              *) echo "::error::pattern line $n has an unknown class"; bad=1; continue ;;
+            esac
+            if [ -z "$re" ]; then
+              echo "::error::pattern line $n has an empty regex"; bad=1; continue
+            fi
+            rc=0
+            grep -E -e "$re" /dev/null > /dev/null 2>&1 || rc=$?
+            if [ "$rc" -ge 2 ]; then
+              echo "::error::pattern line $n has a regex grep -E refuses"; bad=1; continue
+            fi
+            printf '%s\n' "$re" >> "$pf"
+            count=$((count + 1))
+          done <<< "$RELEASABILITY_PATTERNS"
+          if [ "$bad" != 0 ]; then
+            echo "::error::the private pattern file is malformed (line numbers above; the values are not shown)"
+            exit 1
+          fi
+          if [ "$count" = 0 ]; then
+            echo "::error::RELEASABILITY_PATTERNS holds no class<TAB>regex line"
+            exit 1
+          fi
+          rc=0
+          out=$(git grep -n -I -i -E -f "$pf" -- .) || rc=$?
+          case $rc in
+            0|1) ;;
+            *)
+              echo "::error::git grep failed (rc $rc)"
+              exit 1 ;;
+          esac
+          waiver='lab-string-ok:[[:space:]]*[[:alnum:]]'
+          waived=$(printf '%s\n' "$out" | grep -E -e "$waiver" | cut -d: -f1,2 || true)
+          hits=$(printf '%s\n' "$out" | grep -v -E -e "$waiver" | grep -v '^$' | cut -d: -f1,2 || true)
+          unset out
+          nw=0
+          if [ -n "$waived" ]; then
+            nw=$(printf '%s\n' "$waived" | wc -l)
+            echo "::notice::$nw matched lines carry the lab-string-ok waiver (path:line; the values are not shown):"
+            printf '%s\n' "$waived"
+          fi
+          if [ -n "$hits" ]; then
+            echo "::error::internal names in the tracked tree (path:line; the values are not shown):"
+            printf '%s\n' "$hits"
+            exit 1
+          fi
+          echo "releasability: $count private patterns, 0 matches, $nw waived"
+
+      # Over this checkout's git index: a fleet address, hostname or owner
+      # path in any tracked file, or a tracked file the public release must
+      # not carry, fails the job.
+      - name: Public-releasability gate (toolchain image)
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        run: make ci-toolchain-run CMD="make releasability"
+
+      # v1.9.2: the declared tag set must select code. Each tag is checked by
+      # removal: if dropping it changes no selected file (tests included), it
+      # is misspelled or dead.
+      - name: Assert every build tag selects code (toolchain image)
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.GO_BUILD_TAGS != '' && needs.preflight.outputs.docs_only != 'true' }}
+        run: make ci-toolchain-run CMD="make assert-build-tags GO_BUILD_TAGS='$GO_BUILD_TAGS'"
+
+      # v1.30 (fix 5): gosec on the PR tier, through the developers' target,
+      # with no network and the tool required. On the full tier make security
+      # runs it in the image job.
+      - name: make gosec (PR tier, toolchain image)
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER != 'true' && needs.preflight.outputs.docs_only != 'true' }}
+        run: make ci-toolchain-run CMD="make gosec TOOLS_REQUIRED=1 GO_BUILD_TAGS='$GO_BUILD_TAGS'"
+
+      # v1.28: a lint-class gate of seconds on the PR tier, every event, a
+      # docs-only PR included (ruling 219(3)); it was full tier only from v1.23.
+      - name: make deps-check (toolchain image)
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        env:
+          IN_IMAGE_NETWORK: bridge
+        run: make ci-toolchain-run CMD="make deps-check"
+
+      - name: Tear down
+        if: always()
+        run: rm -f "$RUNNER_TEMP/gomodauth.env"
 
   # The image job builds both devcontainer images once (`make docker-build`)
-  # and runs each stage as its own step; `if: !cancelled()` runs every stage
+  # and runs each stage as its own step (v1.30: the lint-class stages are the
+  # lint job's); `if: !cancelled()` runs every stage
   # after a failed one, so one run reports them all. make security and make
   # deps-check (and trivy) get a network, for the vulnerability databases and
   # the module proxy; everything else runs without one.
@@ -298,13 +749,11 @@ jobs:
   # (ci-toolchain-run, ci-standard.md §6), so a stage writes its caches there
   # and not into its container's layer.
   #
-  # v1.23: lint, assert-build-tags, build and the unit runs are the PR tier and
-  # run on every event. security and trivy image are full tier only
+  # v1.23: build and the unit runs are the PR tier and run on every event. security and trivy image are full tier only
   # (env.CI_FULL_TIER): main after every merge, dispatch, ci:full.
-  # v1.28: deps-check is a lint-class gate on the PR tier and runs on every
-  # event (ruling 219(3)).
-  # v1.24: on a docs-only PR the build, the tag assertion and the unit runs
-  # skip.
+  # v1.28: deps-check is a lint-class gate on the PR tier (ruling 219(3)); v1.30
+  # moves it to the lint job.
+  # v1.24, v1.30: on a docs-only PR the job skips.
   #
   # v1.29 (Company Agent ruling 220(5)): the job reads the Alpine package
   # indexes the build resolves against (`make -s apk-index-sum`, the template's
@@ -314,12 +763,15 @@ jobs:
   # CVE fix among them, changes the tag, so the next run rebuilds the image
   # rather than reuse a cached one with the old package (CVE-2026-92392).
   image:
-    name: Devcontainer image [lint, build, test, security, deps-check, trivy image]
+    name: Devcontainer image [build, test, security, trivy image]
     # The bigdisk-docker pool (ruling 442) or ubuntu-latest, with "Free
     # runner disk" before the build on the latter: the hosted runner's stock
     # free disk does not hold both devcontainer images.
     runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
-    needs: changes             # v1.24
+    needs: preflight           # v1.24; v1.34
+    # v1.30: only on the guard's `run` (not `refused`), and never on a
+    # docs-only PR (`code` in CI Gate).
+    if: ${{ needs.preflight.outputs.verdict == 'run' && needs.preflight.outputs.docs_only != 'true' }}
     timeout-minutes: 120
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
@@ -381,7 +833,11 @@ jobs:
             for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
               if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
             done )
-          make docker-build MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE"
+          bp=
+          if [ -n "${DEVCACHE_GOPROXY:-}" ] && curl -s -o /dev/null --max-time 5 "$DEVCACHE_GOPROXY/"; then
+            bp="GO_BUILD_PROXY=$DEVCACHE_GOPROXY|https://proxy.golang.org"
+          fi
+          make docker-build ${bp:+"$bp"} MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE"
           rm -f "$RUNNER_TEMP/gomodauth.env"
           echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
 
@@ -463,7 +919,11 @@ jobs:
                 if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
               done )
             rc=0
-            make docker-build MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE" || rc=$?
+            bp=
+            if [ -n "${DEVCACHE_GOPROXY:-}" ] && curl -s -o /dev/null --max-time 5 "$DEVCACHE_GOPROXY/"; then
+              bp="GO_BUILD_PROXY=$DEVCACHE_GOPROXY|https://proxy.golang.org"
+            fi
+            make docker-build ${bp:+"$bp"} MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE" || rc=$?
             rm -f "$RUNNER_TEMP/gomodauth.env"
             if [ "$rc" -ne 0 ]; then
               echo "::error::building the integration image $IT_IMAGE failed (exit $rc)"
@@ -486,38 +946,15 @@ jobs:
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         run: make ci-trim-caches
 
-      # CUSTOMIZE: the analysers must SAY they are the pinned versions (#21):
-      # gosec takes its version from ldflags, so a pinned install alone still
-      # self-reports `dev`, and a scan by an unknown version is no gate.
-      - name: Require the analysis tools at their pins (toolchain image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
-        run: make ci-toolchain-run CMD="go run ./test/tools/require-tool golangci-lint $GOLANGCI_LINT_VERSION github.com/golangci/golangci-lint/v2/cmd/golangci-lint && go run ./test/tools/require-tool gosec $GOSEC_VERSION github.com/securego/gosec/v2/cmd/gosec && go run ./test/tools/require-tool govulncheck $GOVULNCHECK_VERSION golang.org/x/vuln/cmd/govulncheck"
-
-      # make lint: gofmt, golangci-lint and actionlint, each required, golangci-
-      # lint printing path and line only. .golangci.yml enables staticcheck,
-      # errcheck, unused, ineffassign, misspell and gocritic. v1.27: a repo's
-      # `make lint-gates` runs in the lint-gates job beside this one, never
-      # here and never as a prerequisite of lint.
-      - name: make lint (toolchain image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
-        run: make ci-toolchain-run CMD="make lint GO_BUILD_TAGS='$GO_BUILD_TAGS'"
-
-      # v1.9.2: the declared tag set must select code. Each tag is checked by
-      # removal: if dropping it changes no selected file (tests included), it
-      # is misspelled or dead.
-      - name: Assert every build tag selects code (toolchain image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.GO_BUILD_TAGS != '' && needs.changes.outputs.docs_only != 'true' }}
-        run: make ci-toolchain-run CMD="make assert-build-tags GO_BUILD_TAGS='$GO_BUILD_TAGS'"
-
       - name: make build (toolchain image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.changes.outputs.docs_only != 'true' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.preflight.outputs.docs_only != 'true' }}
         run: make ci-toolchain-run CMD="make build"
 
       # The linux/amd64 and linux/arm64 CLI, -trimpath, as the binaries
       # artifact; and the 32-bit compile-only leg (the reasoning is at
       # vet-32bit in the Makefile).
       - name: Linux binaries and 32-bit vet (toolchain image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.changes.outputs.docs_only != 'true' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.preflight.outputs.docs_only != 'true' }}
         run: make ci-toolchain-run CMD="make build-linux vet-32bit" CI_OUT="luks-linux-amd64 luks-linux-arm64"
 
       # upload-artifact v4+ refuses any server that is not github.com. The
@@ -530,7 +967,7 @@ jobs:
           path: luks-linux-*
 
       - name: make test (toolchain image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.changes.outputs.docs_only != 'true' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.preflight.outputs.docs_only != 'true' }}
         run: make ci-toolchain-run CMD="make test"
 
       # CUSTOMIZE, in place of the template's `make coverage`: the unit legs
@@ -539,13 +976,13 @@ jobs:
       # is the Race job. The legs and the gate share ONE container:
       # the gate reads the profiles the legs write.
       - name: Unit legs and coverage gate, no -race (toolchain image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.changes.outputs.docs_only != 'true' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.preflight.outputs.docs_only != 'true' }}
         run: make ci-toolchain-run CMD="make test-unit-norace UNIT_TEST_FLAGS=-v && make coverage-gate" CI_OUT=coverage.out
 
       # RLIMIT_MEMLOCK turns a correct design into a red suite below 512 KiB.
       # Read in the image, under the limits ci-toolchain-run sets.
       - name: Record the resource limits these tests ran under (toolchain image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.changes.outputs.docs_only != 'true' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.preflight.outputs.docs_only != 'true' }}
         run: make ci-toolchain-run CMD="echo 'RLIMIT_MEMLOCK (KiB), nproc, /tmp:' && ulimit -l && nproc && df -h /tmp"
 
       - name: Upload coverage
@@ -558,20 +995,13 @@ jobs:
       # WITHOUT -race, deliberately, and with the calibration BENCHMARKS: the
       # PBKDF2 calibration defect (#52) is invisible under -race.
       - name: PBKDF2 calibration tests, no -race (toolchain image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.changes.outputs.docs_only != 'true' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.preflight.outputs.docs_only != 'true' }}
         run: make ci-toolchain-run CMD="make test-calibration"
-
-      # Over this checkout's git index: a fleet address, hostname or owner
-      # path in any tracked file, or a tracked file the public release must
-      # not carry, fails the job.
-      - name: Public-releasability gate (toolchain image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
-        run: make ci-toolchain-run CMD="make releasability"
 
       # The pkg/luks2 API must honor every disposition in
       # test/tools/apidump/baseline/disposition-luks2.tsv exactly.
       - name: API-diff gate (toolchain image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.changes.outputs.docs_only != 'true' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.preflight.outputs.docs_only != 'true' }}
         run: make ci-toolchain-run CMD="make api-diff"
 
       # gosec, govulncheck, go mod verify and trivy's filesystem scan; the target owns gosec's
@@ -581,14 +1011,6 @@ jobs:
         env:
           IN_IMAGE_NETWORK: bridge
         run: make ci-toolchain-run CMD="make security GO_BUILD_TAGS='$GO_BUILD_TAGS'"
-
-      # v1.28: a lint-class gate of seconds on the PR tier, every event, a
-      # docs-only PR included (ruling 219(3)); it was full tier only from v1.23.
-      - name: make deps-check (toolchain image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
-        env:
-          IN_IMAGE_NETWORK: bridge
-        run: make ci-toolchain-run CMD="make deps-check"
 
       # Fails on CRITICAL and HIGH findings that have a fix: --ignore-unfixed
       # (v1.19) and --skip-dirs /opt/go/mod (v1.20). trivy's filesystem scan and make
@@ -613,86 +1035,6 @@ jobs:
           rm -f "$RUNNER_TEMP/gomodauth.env" it-image.tar
           [ -z "${IT_LEASE:-}" ] || docker rm "$IT_LEASE" >/dev/null || true
 
-      # v1.32 (2026-11-08, Company Agent m2098 item 2, InfoSec finding): the
-      # internal-name gate. Its patterns are internal values, so they never
-      # live in this repository: the Actions secret RELEASABILITY_PATTERNS
-      # carries the private pattern file (source in platform-configs). Blank
-      # and `#` lines are skipped; every other line is `class<TAB>regex`, a
-      # class of coord-host, internal-email, lab-address, lab-host or
-      # owner-path (v1.33; an `/i` suffix is allowed) and a POSIX extended regex. A malformed line, an unknown
-      # class or a regex grep -E refuses fails the step, which prints the line
-      # number only. v1.31 grepped whole lines with -F, so no line matched and
-      # the gate was green for a false reason. The step prints path and line
-      # of a match, never the value. A run without the secret (a fork PR)
-      # skips with a notice; a push to main without it fails.
-      - name: Releasability (private patterns)
-        if: ${{ !cancelled() }}
-        env:
-          RELEASABILITY_PATTERNS: ${{ secrets.RELEASABILITY_PATTERNS }}
-          EVENT: ${{ github.event_name }}
-        run: |
-          if [ -z "$RELEASABILITY_PATTERNS" ]; then
-            if [ "$EVENT" = push ]; then
-              echo "::error::RELEASABILITY_PATTERNS is not set; the gate needs the private pattern file (public-hygiene.md)"
-              exit 1
-            fi
-            echo "::notice::RELEASABILITY_PATTERNS is not available to this run; pushes to main run the gate"
-            exit 0
-          fi
-          pf=$(mktemp)
-          chmod 600 "$pf"
-          trap 'rm -f "$pf"' EXIT
-          tab=$(printf '\t')
-          n=0 bad=0 count=0
-          while IFS= read -r line || [ -n "$line" ]; do
-            n=$((n + 1))
-            line=${line%$'\r'}
-            trimmed=${line#"${line%%[![:space:]]*}"}
-            case $trimmed in ''|'#'*) continue ;; esac
-            case $line in
-              *"$tab"*) ;;
-              *) echo "::error::pattern line $n is not class<TAB>regex"; bad=1; continue ;;
-            esac
-            class=${line%%"$tab"*}
-            re=${line#*"$tab"}
-            case $class in
-              coord-host|internal-email|lab-address|lab-host|owner-path) ;;
-              coord-host/i|internal-email/i|lab-address/i|lab-host/i|owner-path/i) ;;
-              *) echo "::error::pattern line $n has an unknown class"; bad=1; continue ;;
-            esac
-            if [ -z "$re" ]; then
-              echo "::error::pattern line $n has an empty regex"; bad=1; continue
-            fi
-            rc=0
-            grep -E -e "$re" /dev/null > /dev/null 2>&1 || rc=$?
-            if [ "$rc" -ge 2 ]; then
-              echo "::error::pattern line $n has a regex grep -E refuses"; bad=1; continue
-            fi
-            printf '%s\n' "$re" >> "$pf"
-            count=$((count + 1))
-          done <<< "$RELEASABILITY_PATTERNS"
-          if [ "$bad" != 0 ]; then
-            echo "::error::the private pattern file is malformed (line numbers above; the values are not shown)"
-            exit 1
-          fi
-          if [ "$count" = 0 ]; then
-            echo "::error::RELEASABILITY_PATTERNS holds no class<TAB>regex line"
-            exit 1
-          fi
-          rc=0
-          hits=$(git grep -n -I -i -E -f "$pf" -- . | cut -d: -f1,2; exit "${PIPESTATUS[0]}") || rc=$?
-          case $rc in
-            0)
-              echo "::error::internal names in the tracked tree (path:line; the values are not shown):"
-              printf '%s\n' "$hits"
-              exit 1 ;;
-            1) ;;
-            *)
-              echo "::error::git grep failed (rc $rc)"
-              exit 1 ;;
-          esac
-          echo "releasability: $count private patterns, 0 matches"
-
   # v1.27: a repository's `make lint-gates` (its own gates beside `make lint`:
   # script, workflow, generated-code and module checks) runs in this job, in
   # parallel with the image job's `make lint`, not in series after it, so
@@ -714,7 +1056,10 @@ jobs:
   lint-gates:
     name: Lint Gates [toolchain image]
     runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
-    if: ${{ !github.event.pull_request.draft }}   # v1.26
+    needs: preflight     # v1.34
+    # v1.26: never on a draft. v1.30: only on the guard's `run`, and on a PR
+    # only when a changed file matches LINT_GATES_PATTERN (fix 3).
+    if: ${{ !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' && needs.preflight.outputs.lint_gates != 'false' }}
     timeout-minutes: 45       # CUSTOMIZE: the repo's lint-gates time, with honest headroom
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
@@ -784,7 +1129,11 @@ jobs:
             for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
               if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
             done )
-          make docker-build MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE"
+          bp=
+          if [ -n "${DEVCACHE_GOPROXY:-}" ] && curl -s -o /dev/null --max-time 5 "$DEVCACHE_GOPROXY/"; then
+            bp="GO_BUILD_PROXY=$DEVCACHE_GOPROXY|https://proxy.golang.org"
+          fi
+          make docker-build ${bp:+"$bp"} MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE"
           rm -f "$RUNNER_TEMP/gomodauth.env"
           echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
 
@@ -817,7 +1166,9 @@ jobs:
   merge-check:
     name: Merged Tree
     runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
-    if: ${{ !github.event.pull_request.draft }}   # v1.26
+    needs: preflight   # v1.34
+    # v1.26: never on a draft. v1.30: only on the guard's `run`.
+    if: ${{ !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
     timeout-minutes: 60
     env:
       # CUSTOMIZE (v1.22): the image job's cache class, for its stage.
@@ -885,7 +1236,11 @@ jobs:
             for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
               if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
             done )
-          make docker-build-toolchain MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env"
+          bp=
+          if [ -n "${DEVCACHE_GOPROXY:-}" ] && curl -s -o /dev/null --max-time 5 "$DEVCACHE_GOPROXY/"; then
+            bp="GO_BUILD_PROXY=$DEVCACHE_GOPROXY|https://proxy.golang.org"
+          fi
+          make docker-build-toolchain ${bp:+"$bp"} MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env"
           rm -f "$RUNNER_TEMP/gomodauth.env"
 
       - name: Compile the merged tree (toolchain image)
@@ -899,42 +1254,14 @@ jobs:
         run: rm -rf "$RUNNER_TEMP/gomodauth.env" .merged
 
   # v1.29.2 (ruling 239(8)): a CUSTOMIZE job that runs only when certain
-  # paths change (the changes job gains an output for them, `optee` here)
+  # paths change (the preflight job gains an output for them, `optee` here)
   # needs the image job as well, and its `if:` tests an image job output
   # that its build step sets (here `built`, which the image job declares in
   # `outputs:` when a repository adds such a job), never `needs.<job>.result`
-  # and never the changes job's outputs alone. Reading `needs.changes.outputs.*`
-  # in the same `if:` is fine:
-  #   needs: [changes, image]
-  #   if: ${{ !cancelled() && needs.image.outputs.built == 'true' && !github.event.pull_request.draft && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'push' || (github.event_name == 'pull_request' && needs.changes.outputs.optee == 'true')) }}
-
-  # Architecture gate (v1.20). go-objstore owns every blob backend, and a repo
-  # reaches it only through the packages that are its storage seam; this
-  # library has none, so no package may import it. Test files are exempt. A
-  # source check with grep, not a stage: it runs on the runner's shell.
-  # v1.23: a lint-class check, so it stays on the PR tier.
-  arch-gates:
-    name: Architecture Gates
-    runs-on: ubuntu-latest
-    if: ${{ !github.event.pull_request.draft }}   # v1.26
-    env:
-      OBJSTORE_SEAMS: ''      # CUSTOMIZE
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-
-      - name: No direct go-objstore import outside the storage seam
-        run: |
-          if [ "$(sed -n 's/^module //p' go.mod)" = github.com/jeremyhahn/go-objstore ]; then
-            echo "OK: this is go-objstore"; exit 0
-          fi
-          hits=$(grep -rln --include='*.go' '"github.com/jeremyhahn/go-objstore' . \
-                 | grep -v '_test\.go$' \
-                 | { if [ -n "$OBJSTORE_SEAMS" ]; then grep -vE "$OBJSTORE_SEAMS"; else cat; fi; } || true)
-          if [ -n "$hits" ]; then
-            echo "go-objstore may be imported only in the storage seam (OBJSTORE_SEAMS='$OBJSTORE_SEAMS'):"
-            echo "$hits"; exit 1
-          fi
-          echo "OK: no go-objstore import outside the storage seam"
+  # and never the preflight job's outputs alone. Reading
+  # `needs.preflight.outputs.*` in the same `if:` is fine:
+  #   needs: [preflight, image]
+  #   if: ${{ !cancelled() && needs.image.outputs.built == 'true' && !github.event.pull_request.draft && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'push' || (github.event_name == 'pull_request' && needs.preflight.outputs.optee == 'true')) }}
 
   # ---- Full tier ----
   #
@@ -954,8 +1281,10 @@ jobs:
   # persists between jobs.
   integration:
     name: Integration [integration image]
-    # v1.26: never on a draft PR, ci:full or not.
-    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}
+    # v1.26: never on a draft PR, ci:full or not. v1.30: only on the guard's
+    # `run` (a dispatch off main is refused).
+    needs: preflight   # v1.34
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
     runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     timeout-minutes: 120
     env:
@@ -1058,7 +1387,11 @@ jobs:
                 if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
               done )
             rc=0
-            make docker-build MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE" || rc=$?
+            bp=
+            if [ -n "${DEVCACHE_GOPROXY:-}" ] && curl -s -o /dev/null --max-time 5 "$DEVCACHE_GOPROXY/"; then
+              bp="GO_BUILD_PROXY=$DEVCACHE_GOPROXY|https://proxy.golang.org"
+            fi
+            make docker-build ${bp:+"$bp"} MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE" || rc=$?
             rm -f "$RUNNER_TEMP/gomodauth.env"
             if [ "$rc" -ne 0 ]; then
               echo "::error::building the integration image $IT_IMAGE failed (exit $rc)"
@@ -1123,7 +1456,9 @@ jobs:
   # the integration job, and removed with it.
   soak:
     name: Soak [integration image]
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    # v1.30: a dispatch off main is refused, so soak runs only on `run`.
+    needs: preflight   # v1.34
+    if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && needs.preflight.outputs.verdict == 'run' }}
     runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     timeout-minutes: 90       # CUSTOMIZE: SOAK_MINUTES plus one iteration
     env:
@@ -1227,7 +1562,11 @@ jobs:
                 if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
               done )
             rc=0
-            make docker-build MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE" || rc=$?
+            bp=
+            if [ -n "${DEVCACHE_GOPROXY:-}" ] && curl -s -o /dev/null --max-time 5 "$DEVCACHE_GOPROXY/"; then
+              bp="GO_BUILD_PROXY=$DEVCACHE_GOPROXY|https://proxy.golang.org"
+            fi
+            make docker-build ${bp:+"$bp"} MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE" || rc=$?
             rm -f "$RUNNER_TEMP/gomodauth.env"
             if [ "$rc" -ne 0 ]; then
               echo "::error::building the integration image $IT_IMAGE failed (exit $rc)"
@@ -1306,8 +1645,9 @@ jobs:
   test-race:
     name: Race
     runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
-    needs: changes
-    if: ${{ !github.event.pull_request.draft }}   # v1.26
+    needs: preflight   # v1.34
+    # v1.26: never on a draft. v1.30: only on the guard's `run`.
+    if: ${{ !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
     timeout-minutes: 60
     env:
       # CUSTOMIZE (v1.22): the image job's cache class, for its stage.
@@ -1341,17 +1681,21 @@ jobs:
           df -h /
 
       - name: Build the toolchain image
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.preflight.outputs.docs_only != 'true'
         run: |
           ( umask 077; : > "$RUNNER_TEMP/gomodauth.env"
             for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
               if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
             done )
-          make docker-build-toolchain MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env"
+          bp=
+          if [ -n "${DEVCACHE_GOPROXY:-}" ] && curl -s -o /dev/null --max-time 5 "$DEVCACHE_GOPROXY/"; then
+            bp="GO_BUILD_PROXY=$DEVCACHE_GOPROXY|https://proxy.golang.org"
+          fi
+          make docker-build-toolchain ${bp:+"$bp"} MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env"
           rm -f "$RUNNER_TEMP/gomodauth.env"
 
       - name: Unit tests, -race (toolchain image)
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.preflight.outputs.docs_only != 'true'
         run: make ci-toolchain-run CMD="make test-unit UNIT_TEST_FLAGS=-v"
 
       - name: Tear down
@@ -1373,8 +1717,9 @@ jobs:
   fips:
     name: FIPS
     runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
-    # v1.26: never on a draft PR, ci:full or not.
-    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}
+    # v1.26: never on a draft PR, ci:full or not. v1.30: only on the guard's `run`.
+    needs: preflight   # v1.34
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
     timeout-minutes: 30
     env:
       # CUSTOMIZE (v1.22): the image job's cache class, for its stage.
@@ -1413,7 +1758,11 @@ jobs:
             for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
               if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
             done )
-          make docker-build-toolchain MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env"
+          bp=
+          if [ -n "${DEVCACHE_GOPROXY:-}" ] && curl -s -o /dev/null --max-time 5 "$DEVCACHE_GOPROXY/"; then
+            bp="GO_BUILD_PROXY=$DEVCACHE_GOPROXY|https://proxy.golang.org"
+          fi
+          make docker-build-toolchain ${bp:+"$bp"} MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env"
           rm -f "$RUNNER_TEMP/gomodauth.env"
 
       - name: FIPS build, import proof and unit tests (toolchain image)
@@ -1424,16 +1773,22 @@ jobs:
         run: rm -f "$RUNNER_TEMP/gomodauth.env"
 
   # THE ONE GATE, and the single required check. It needs EVERY job above, in
-  # every tier, and reads each by name on a `check` line tagged `pr`, `full`
-  # or `nightly`; test/ci/workflows derives the tags from the jobs' `if:` and
-  # fails on a job left out or mis-tagged.
+  # every tier, and reads each by name on a `check` line tagged `pr`, `code`,
+  # `scoped`, `full` or `nightly`; test/ci/workflows derives the tags from the
+  # jobs' `if:` and fails on a job left out or mis-tagged.
   #
   #   success                              passes
+  #   skipped, the guard's `proven` tree   passes: a green full tier proved it (not nightly)
+  #   skipped, `code`, docs-only PR        passes: no code changed (v1.30)
+  #   skipped, `scoped`, no file matched   passes: LINT_GATES_PATTERN missed (v1.30)
   #   skipped, `full`, tier not run        passes: the full tier was not selected
   #   skipped, `nightly`, not nightly      passes: not a dispatch
   #   skipped, anything else               fails: a job that never ran proved nothing
   #   failure, cancelled, unreadable       fails
+  #   the guard's `refused`                fails (v1.30)
   #
+  # v1.29.3: on a schedule run the guard decides; `busy` skips the gate, so it
+  # posts `skipped`, never a green nightly (no workflow here is scheduled).
   # CUSTOMIZE: FULL_TIER and NIGHTLY are validated, so an unevaluated
   # expression is not a "no", and an empty result reads `<unreadable>`. Do not
   # use join(needs.*.result); it evaluates empty on Gitea. It runs on
@@ -1441,10 +1796,11 @@ jobs:
   ci-gate:
     name: CI Gate
     runs-on: ubuntu-latest
-    if: always()
+    if: ${{ always() && (github.event_name != 'schedule' || needs.preflight.outputs.verdict != 'busy') }}
+    timeout-minutes: 5        # v1.30
     # CUSTOMIZE: the repo's job list. Add every CUSTOMIZE job here AND as a
     # check line below; remove none of the template's jobs.
-    needs: [changes, image, lint-gates, integration, soak, arch-gates, merge-check, test-race, fips]
+    needs: [preflight, lint, image, lint-gates, merge-check, test-race, integration, fips, soak]   # v1.34
     steps:
       - name: Fail closed on any non-success
         env:
@@ -1452,6 +1808,15 @@ jobs:
           NIGHTLY: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
           # v1.26: a draft PR runs no CI, so its gate fails rather than pass on skips.
           DRAFT: ${{ github.event.pull_request.draft == true }}
+          # v1.29.3: the schedule guard's verdict on a schedule run.
+          SCHEDULE: ${{ github.event_name == 'schedule' }}
+          SCHEDULE_GUARD: ${{ needs.preflight.outputs.verdict }}
+          # v1.30: the proving run of a proven main push, the docs-only PR
+          # flag (a `code` job skips on it) and the lint-gates path scope (a
+          # `scoped` job skips when no file matched).
+          PROOF: ${{ needs.preflight.outputs.proof }}
+          DOCS_ONLY: ${{ needs.preflight.outputs.docs_only == 'true' }}
+          LINT_GATES_SEL: ${{ needs.preflight.outputs.lint_gates != 'false' }}
         run: |
           if [ "${DRAFT}" = true ]; then
             echo "FAIL draft pull request: no CI runs on a draft. Mark it ready, then push an empty commit to start its run."
@@ -1467,11 +1832,17 @@ jobs:
             true|false) ;;
             *) echo "FAIL NIGHTLY is '${NIGHTLY}', neither true nor false"; exit 1;;
           esac
-          check() { # <job> <result> <pr|full|nightly>
+          check() { # <job> <result> <pr|code|scoped|full|nightly>
             case "$2" in
               success) echo "OK   $1";;
               skipped)
-                if [ "$3" = full ] && [ "${FULL_TIER}" != true ]; then
+                if [ "${SCHEDULE_GUARD}" = proven ] && [ -n "${PROOF}" ] && [ "$3" != nightly ]; then
+                  echo "SKIP $1 (tree proven by run ${PROOF})"
+                elif [ "$3" = code ] && [ "${DOCS_ONLY}" = true ]; then
+                  echo "SKIP $1 (docs-only pull request)"
+                elif [ "$3" = scoped ] && [ "${LINT_GATES_SEL}" != true ]; then
+                  echo "SKIP $1 (no changed file matches LINT_GATES_PATTERN)"
+                elif [ "$3" = full ] && [ "${FULL_TIER}" != true ]; then
                   echo "SKIP $1 (full tier not selected)"
                 elif [ "$3" = nightly ] && [ "${NIGHTLY}" != true ]; then
                   echo "SKIP $1 (nightly and dispatch only)"
@@ -1481,10 +1852,20 @@ jobs:
               *) echo "FAIL $1 (${2:-<unreadable>})"; BAD=1;;
             esac
           }
-          check changes     "${{ needs.changes.result }}" pr
-          check image       "${{ needs.image.result }}" pr
-          check lint-gates  "${{ needs.lint-gates.result }}" pr
-          check arch-gates  "${{ needs.arch-gates.result }}" pr
+          # v1.30: a refused run (a dispatch off main, a checkpoint-branch PR)
+          # fails. v1.29.3: a schedule run reaches this step on any verdict
+          # but `busy`; any verdict but `run` means its jobs skipped because
+          # the guard had no count: fail closed.
+          if [ "${SCHEDULE_GUARD}" = refused ]; then
+            echo "FAIL preflight (refused: a workflow_dispatch off main or a PR from lane-ckpt/*; see its log)"; BAD=1
+          fi
+          if [ "${SCHEDULE}" = true ] && [ "${SCHEDULE_GUARD}" != run ]; then
+            echo "FAIL preflight (verdict '${SCHEDULE_GUARD:-none}': the guarded jobs skipped because the guard could not read the API; see its log)"; BAD=1
+          fi
+          check preflight   "${{ needs.preflight.result }}" pr
+          check lint        "${{ needs.lint.result }}" pr
+          check image       "${{ needs.image.result }}" code
+          check lint-gates  "${{ needs.lint-gates.result }}" scoped
           check merge-check "${{ needs.merge-check.result }}" pr
           check test-race   "${{ needs.test-race.result }}" pr
           check integration "${{ needs.integration.result }}" full

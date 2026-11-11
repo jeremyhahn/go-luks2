@@ -1758,6 +1758,17 @@ override CI_STACK_PREFIX := go-luks2-ci-
 # (CGROUP_CPU_MAX) rounded up, nproc when the job has no quota, and
 # IN_IMAGE_CPUS over both, then clamped to the CPU count the docker daemon
 # reports (docker info's NCPU), as the daemon refuses a larger --cpus.
+#
+# The stage also takes the job slot's memory bound (in-toolchain-image.sh v4,
+# ci-template v1.29.4): the job container's cgroup memory.max
+# (CGROUP_MEMORY_MAX), 8g when the job has no limit, IN_IMAGE_MEMORY (a size
+# such as 12g) over both, becomes --memory, and --memory-swap is the same, so
+# the stage gets no swap: one that outgrows it is OOM-killed and fails rather
+# than swap the runner host. Go's build and link scratch (TMPDIR, GOTMPDIR) is
+# an anonymous volume on the image's /var/tmp (IN_IMAGE_SCRATCH overrides the
+# path), on the daemon's data disk rather than the 3 GB /tmp tmpfs, and the
+# container's `docker rm -v` removes it. A scratch directory the run's user
+# cannot write fails the stage by name.
 # golangci-lint's default concurrency follows the quota. CUSTOMIZE: no
 # GOFLAGS=-p=N, which the template passes. The image's own GOFLAGS
 # (-mod=readonly -buildvcs=false) would be replaced by it, and go's -p
@@ -1780,8 +1791,13 @@ CI_OUT ?=
 CI_OUT_DIR ?= $(CURDIR)
 CI_TOOLCHAIN_UID := 10001
 IMAGE_GOMODCACHE := /go/pkg/mod
-CI_NETWORK_GOPROXY := https://proxy.golang.org,direct
+# ci-template v1.29.4 and v1.34.1 (in-toolchain-image.sh v5): DEVCACHE_GOPROXY
+# first when the runner sets it, with `|` so any error falls through, then the
+# public proxy, and no `direct` entry (dependency-resolution.md, "No direct
+# fetch, anywhere"). A GOPRIVATE path never uses GOPROXY.
+CI_NETWORK_GOPROXY := $(if $(DEVCACHE_GOPROXY),$(DEVCACHE_GOPROXY)|)https://proxy.golang.org
 CGROUP_CPU_MAX ?= /sys/fs/cgroup/cpu.max
+CGROUP_MEMORY_MAX ?= /sys/fs/cgroup/memory.max
 
 ci-toolchain-run: export TR_CMD := $(CMD)
 ci-toolchain-run: export TR_IMAGE := $(TOOLCHAIN_IMAGE)
@@ -1822,6 +1838,23 @@ ci-toolchain-run: ## Run CMD in the toolchain image over a copy of the checkout 
 			/*|..|../*|*/..|*/../*) echo "$(COLOR_RED)CI_OUT names a file under the checkout: $$f$(COLOR_RESET)" >&2; exit 2 ;; \
 		esac; \
 	done; \
+	memory="$${IN_IMAGE_MEMORY:-}"; \
+	if [ -z "$$memory" ]; then \
+		limit=max; \
+		if [ -r "$(CGROUP_MEMORY_MAX)" ]; then read -r limit < "$(CGROUP_MEMORY_MAX)"; fi; \
+		case "$$limit" in \
+			max|""|*[!0-9]*) memory=8g ;; \
+			*) memory=$$limit ;; \
+		esac; \
+	fi; \
+	case "$${memory%[mg]}" in \
+		""|0*|*[!0-9]*) echo "$(COLOR_RED)IN_IMAGE_MEMORY must be a size in bytes, m or g, e.g. 16g: $$memory$(COLOR_RESET)" >&2; exit 2 ;; \
+	esac; \
+	scratch="$${IN_IMAGE_SCRATCH:-/var/tmp}"; \
+	case "$$scratch" in \
+		/*) ;; \
+		*) echo "$(COLOR_RED)IN_IMAGE_SCRATCH must be an absolute path: $$scratch$(COLOR_RESET)" >&2; exit 2 ;; \
+	esac; \
 	ncpu=$$(docker info --format '{{.NCPU}}' 2>/dev/null || true); \
 	case "$$ncpu" in \
 		""|0|*[!0-9]*) ;; \
@@ -1829,11 +1862,13 @@ ci-toolchain-run: ## Run CMD in the toolchain image over a copy of the checkout 
 	esac; \
 	uid=$(CI_TOOLCHAIN_UID); \
 	name="$(CI_STACK_PREFIX)tc-$$$$-$$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"; \
-	set -- --name "$$name" --cpus "$$cpus" --env GOMAXPROCS="$$cpus" --init --cap-drop ALL \
+	set -- --name "$$name" --cpus "$$cpus" --env GOMAXPROCS="$$cpus" \
+		--memory "$$memory" --memory-swap "$$memory" --init --cap-drop ALL \
 		--security-opt no-new-privileges:true --pids-limit 4096 \
 		--ulimit memlock=67108864:67108864 --ulimit core=1048576:1048576 \
 		--ulimit nofile=65536:65536 \
 		--tmpfs /tmp:rw,exec,nosuid,nodev,size=3g,mode=1777 \
+		-v "$$scratch" --env TMPDIR="$$scratch" --env GOTMPDIR="$$scratch" \
 		--network "$$TR_NETWORK" --user "$$uid:$$uid" --workdir /src \
 		--env HOME=/tmp --env CI="$${CI:-}"; \
 	modcache=/tmp/gomodcache; \
@@ -1861,7 +1896,8 @@ ci-toolchain-run: ## Run CMD in the toolchain image over a copy of the checkout 
 		done; \
 	fi; \
 	trap 'docker rm -f -v "$$name" >/dev/null 2>&1 || true' EXIT INT TERM; \
-	docker create "$$@" "$$TR_IMAGE" sh -c "$$TR_CMD" >/dev/null; \
+	guard='[ -d "$$TMPDIR" ] && [ -w "$$TMPDIR" ] || { echo "ci-toolchain-run: scratch directory $$TMPDIR is missing or not writable" >&2; exit 2; }'; \
+	docker create "$$@" "$$TR_IMAGE" sh -c "$$guard; $$TR_CMD" >/dev/null; \
 	tar -C "$(CURDIR)" --owner="$$uid" --group="$$uid" --numeric-owner -cf - . | \
 		docker cp -a - "$$name:/src"; \
 	rc=0; docker start -a "$$name" || rc=$$?; \
