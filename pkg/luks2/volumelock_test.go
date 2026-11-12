@@ -552,3 +552,130 @@ func TestWithLockWaitNegativeIsInvalid(t *testing.T) {
 		t.Fatalf("Open with WithLockWait(-1s) = %v, want ErrInvalidArgument", err)
 	}
 }
+
+// TestVolumeHoldsNoLockBetweenCalls pins the invariant that each method takes
+// its lock, does its I/O and releases it before returning: with the handle
+// still open, a foreign writer gets LOCK_EX after every read, every write
+// and every refused call.
+func TestVolumeHoldsNoLockBetweenCalls(t *testing.T) {
+	device, passphrase := unlockableVolume(t)
+	ctx := context.Background()
+	v, err := Open(ctx, device, withTestSys(testVolumeSys()), WithLockWait(0))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+	if err := foreignExclusiveProbe(device); err != nil {
+		t.Fatalf("a foreign LOCK_EX after Open = %v, want nil", err)
+	}
+	pass, err := enclave.NewMemoryCopy(passphrase)
+	if err != nil {
+		t.Fatalf("could not build the test passphrase enclave: %v", err)
+	}
+	defer func() { _ = pass.Destroy() }()
+	wrong, err := enclave.NewMemoryCopy([]byte("not-the-passphrase"))
+	if err != nil {
+		t.Fatalf("could not build the wrong passphrase enclave: %v", err)
+	}
+	defer func() { _ = wrong.Destroy() }()
+	key, err := v.Unlock(ctx, pass)
+	if err != nil {
+		t.Fatalf("Unlock failed: %v", err)
+	}
+	defer key.Destroy()
+	if err := foreignExclusiveProbe(device); err != nil {
+		t.Fatalf("a foreign LOCK_EX after Unlock = %v, want nil", err)
+	}
+
+	calls := []struct {
+		name    string
+		call    func() error
+		wantErr bool
+	}{
+		{"Header", func() error { _, err := v.Header(ctx); return err }, false},
+		{"UnlockKeyslot", func() error {
+			k, err := v.UnlockKeyslot(ctx, 0, pass)
+			if err == nil {
+				k.Destroy()
+			}
+			return err
+		}, false},
+		{"Unlock with the wrong passphrase", func() error {
+			k, err := v.Unlock(ctx, wrong)
+			if err == nil {
+				k.Destroy()
+			}
+			return err
+		}, true},
+		{"AddToken", func() error { _, err := v.AddToken(ctx, Token{Type: "x-test"}); return err }, false},
+		{"RemoveToken", func() error { return v.RemoveToken(ctx, 0) }, false},
+		{"RemoveToken of an absent token", func() error { return v.RemoveToken(ctx, 0) }, true},
+		{"AddKeyslot", func() error { _, err := v.AddKeyslot(ctx, key, pass, cheapKeyslotParams()); return err }, false},
+	}
+	for _, c := range calls {
+		err := c.call()
+		if (err != nil) != c.wantErr {
+			t.Fatalf("%s = %v, want error %v", c.name, err, c.wantErr)
+		}
+		if probe := foreignExclusiveProbe(device); probe != nil {
+			t.Errorf("a foreign LOCK_EX after %s returned = %v, want nil: the handle kept a lock between calls", c.name, probe)
+		}
+	}
+}
+
+// TestVolumeLockWaitEndsOnCancellationAsAnErrorOfKindCtxErr pins the lock row
+// of the cancellation table: a caller's cancellation during the lock wait
+// ends it at once, well inside the WithLockWait budget, as an *Error whose
+// Kind is ctx.Err(), not as a *LockTimeoutError.
+func TestVolumeLockWaitEndsOnCancellationAsAnErrorOfKindCtxErr(t *testing.T) {
+	path := formattedVolumeImage(t, "lockwait-cancel.img", "", "")
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()), WithLockWait(time.Hour))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+	holdForeignExclusive(t, path)
+
+	calls := []struct {
+		name string
+		call func(context.Context) error
+	}{
+		{"Header (shared)", func(ctx context.Context) error { _, err := v.Header(ctx); return err }},
+		{"AddToken (exclusive)", func(ctx context.Context) error { _, err := v.AddToken(ctx, Token{Type: "x-test"}); return err }},
+	}
+	ends := []struct {
+		name string
+		ctx  func() (context.Context, context.CancelFunc)
+		kind error
+	}{
+		{"canceled", func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			time.AfterFunc(20*time.Millisecond, cancel)
+			return ctx, cancel
+		}, context.Canceled},
+		{"deadline", func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 20*time.Millisecond)
+		}, context.DeadlineExceeded},
+	}
+	for _, c := range calls {
+		for _, e := range ends {
+			t.Run(c.name+"/"+e.name, func(t *testing.T) {
+				ctx, cancel := e.ctx()
+				defer cancel()
+				started := time.Now()
+				err := c.call(ctx)
+				if elapsed := time.Since(started); elapsed > 30*time.Second {
+					t.Fatalf("the lock wait ran %v past the caller's cancellation", elapsed)
+				}
+				var lte *LockTimeoutError
+				if errors.As(err, &lte) {
+					t.Fatalf("a cancelled lock wait = %v, reported as a LockTimeoutError", err)
+				}
+				var le *Error
+				if !errors.As(err, &le) || le.Kind != e.kind {
+					t.Fatalf("a cancelled lock wait = %v, want an *Error of Kind %v", err, e.kind)
+				}
+			})
+		}
+	}
+}
