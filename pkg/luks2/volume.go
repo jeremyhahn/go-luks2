@@ -258,9 +258,14 @@ func errAt(op, path string, err error) error {
 	// alone, and that is the one a caller's errors.As finds.
 	if _, ok := err.(*errs.Error); err != nil && !ok {
 		kind := unclassifiedKind(err)
-		if err == kind {
+		switch detail, isRequirement := unsupportedRequirementDetail(err); {
+		case isRequirement:
+			// The requirement's own type stays internal; the caller reads
+			// it from Kind and Detail.
+			err = &errs.Error{Kind: ErrUnsupportedRequirement, Detail: detail, Err: err}
+		case err == kind:
 			err = &errs.Error{Kind: kind}
-		} else {
+		default:
 			err = &errs.Error{Kind: kind, Err: err}
 		}
 	}
