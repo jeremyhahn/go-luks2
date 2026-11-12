@@ -177,8 +177,14 @@ func (r *sigRepo) commit(file, content, email, key string) string {
 // output and exit status.
 func (r *sigRepo) verify(env ...string) (string, int) {
 	r.t.Helper()
+	return r.verifyIn(r.work, env...)
+}
+
+// verifyIn runs the signatures script in the clone at dir.
+func (r *sigRepo) verifyIn(dir string, env ...string) (string, int) {
+	r.t.Helper()
 	cmd := exec.Command("bash", r.script)
-	cmd.Dir = r.work
+	cmd.Dir = dir
 	cmd.Env = append(append([]string{}, r.env...),
 		"REPO=example/repo", "API=https://api.github.invalid", "GH_TOKEN=test-token",
 		"RUNNER_TEMP="+r.t.TempDir())
@@ -251,6 +257,68 @@ func TestSignaturesUnsignedCommitInTheMiddleFails(t *testing.T) {
 		"OK   "+short(c1),
 		"FAIL "+short(mid)+" unsigned, committer "+alice,
 		"OK   "+short(c3))
+}
+
+// baseOnlyVerifier publishes the work clone's HEAD as the pull request's ref
+// on the origin and clones the origin, whose main is the base, into a fresh
+// verifier clone that holds none of the pull request's objects, as the
+// workflow's base-only checkout does.
+func baseOnlyVerifier(r *sigRepo, base, head string) string {
+	r.t.Helper()
+	r.git("push", "-q", "-f", "origin", "HEAD:refs/pull/"+prNumber+"/head")
+	dir := r.t.TempDir()
+	r.run(dir, "git", "clone", "-q", "--no-local", "-b", "main", filepath.Join(r.root, "origin.git"), "verifier")
+	v := filepath.Join(dir, "verifier")
+	if got := r.run(v, "git", "rev-parse", "HEAD"); got != base {
+		r.t.Fatalf("verifier clone HEAD %s, want the base %s", got, base)
+	}
+	cmd := exec.Command("git", "cat-file", "-e", head+"^{commit}")
+	cmd.Dir, cmd.Env = v, r.env
+	if cmd.Run() == nil {
+		r.t.Fatalf("verifier clone already holds the pull request head %s", short(head))
+	}
+	return v
+}
+
+// stayAtBase fails the test unless the verifier clone's HEAD is the base and
+// its worktree is clean: the gate fetches objects, it checks nothing out.
+func stayAtBase(r *sigRepo, v, base string) {
+	r.t.Helper()
+	if got := r.run(v, "git", "rev-parse", "HEAD"); got != base {
+		r.t.Errorf("verifier HEAD moved to %s, want the base %s", got, base)
+	}
+	if st := r.run(v, "git", "status", "--porcelain"); st != "" {
+		r.t.Errorf("verifier worktree changed:\n%s", st)
+	}
+}
+
+// TestSignaturesFetchesPullRequestCommitsIntoABaseOnlyClone runs the verifier
+// in a clone that holds only the base, so it passes only if the workflow
+// fetches the pull request's commits itself (refs/pull/N/head, or the head).
+func TestSignaturesFetchesPullRequestCommitsIntoABaseOnlyClone(t *testing.T) {
+	t.Run("signed commits pass", func(t *testing.T) {
+		r, key, base := registered(t)
+		c1 := r.commit("a", "1", alice, key)
+		c2 := r.commit("b", "2", alice, key)
+		v := baseOnlyVerifier(r, base, c2)
+		out, code := r.verifyIn(v, pr(base, c2)...)
+		expect(t, out, code, 0,
+			"checking 2 commit(s)",
+			"OK   "+short(c1)+" signed by "+alice,
+			"OK   "+short(c2)+" signed by "+alice)
+		stayAtBase(r, v, base)
+	})
+	t.Run("an unsigned commit fails", func(t *testing.T) {
+		r, key, base := registered(t)
+		c1 := r.commit("a", "1", alice, key)
+		c2 := r.commit("b", "2", alice, "")
+		v := baseOnlyVerifier(r, base, c2)
+		out, code := r.verifyIn(v, pr(base, c2)...)
+		expect(t, out, code, 1,
+			"OK   "+short(c1)+" signed by "+alice,
+			"FAIL "+short(c2)+" unsigned, committer "+alice)
+		stayAtBase(r, v, base)
+	})
 }
 
 func TestSignaturesUnregisteredKeyFails(t *testing.T) {
