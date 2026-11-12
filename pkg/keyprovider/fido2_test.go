@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -362,6 +363,31 @@ func TestFromTokenReadsAnAbsentRequirementAsFalse(t *testing.T) {
 			t.Errorf("a recorded false read back as true: %+v", round)
 		}
 	})
+}
+
+// A provider rebuilt from a header token names the keyslots that token
+// names: UnlockWithProvider tries only those, so a provider without them can
+// never unlock.
+func TestFromTokenKeepsTheTokensKeyslots(t *testing.T) {
+	token := fido2Token(fido2TestParams(t))
+	token.Keyslots = []int{3, 1}
+
+	p, err := FromToken(token, WithDevice("/dev/hidraw9"))
+	if err != nil {
+		t.Fatalf("FromToken() error = %v", err)
+	}
+	if got := p.Token().Keyslots; !slices.Equal(got, []int{3, 1}) {
+		t.Fatalf("provider token keyslots = %v, want [3 1]", got)
+	}
+	if got := p.Token().Type; got != TokenTypeFIDO2 {
+		t.Errorf("provider token type = %q, want %q", got, TokenTypeFIDO2)
+	}
+
+	// The provider holds its own copy: the caller's slice is the caller's.
+	token.Keyslots[0] = 7
+	if got := p.Token().Keyslots; !slices.Equal(got, []int{3, 1}) {
+		t.Errorf("after the caller changed its token, provider keyslots = %v, want [3 1]", got)
+	}
 }
 
 func TestFromTokenRefusesWhatItCannotDrive(t *testing.T) {

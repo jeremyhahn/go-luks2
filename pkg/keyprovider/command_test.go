@@ -12,9 +12,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
 func TestCommandTakesTheSelectedLine(t *testing.T) {
@@ -100,6 +103,20 @@ func TestNewCommandRefusesBadInput(t *testing.T) {
 				t.Errorf("NewCommand() error = %v, want errors.Is(_, ErrInvalidArgument)", err)
 			}
 		})
+	}
+}
+
+// A Command built with a token reports that token whole, its keyslots too:
+// UnlockWithProvider tries only the keyslots the provider's token names.
+func TestNewCommandKeepsTheTokensKeyslots(t *testing.T) {
+	token := luks2.Token{Type: "example-helper", Keyslots: []int{2, 0}}
+
+	p, err := NewCommand("/bin/true", WithToken(token))
+	if err != nil {
+		t.Fatalf("NewCommand() error = %v", err)
+	}
+	if got := p.Token(); got.Type != token.Type || !slices.Equal(got.Keyslots, []int{2, 0}) {
+		t.Errorf("provider token = %q for keyslots %v, want %q for [2 0]", got.Type, got.Keyslots, token.Type)
 	}
 }
 
