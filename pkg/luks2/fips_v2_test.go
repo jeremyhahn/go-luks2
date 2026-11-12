@@ -52,6 +52,7 @@ func argon2VolumeImage(t *testing.T, name string) string {
 }
 
 func TestVolumeMigrateToFIPSImportsAnArgon2Volume(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -95,6 +96,7 @@ func TestVolumeMigrateToFIPSImportsAnArgon2Volume(t *testing.T) {
 }
 
 func TestVolumeMigrateToFIPSKeepsNonApprovedWhenAsked(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -127,6 +129,7 @@ func TestVolumeMigrateToFIPSKeepsNonApprovedWhenAsked(t *testing.T) {
 }
 
 func TestVolumeMigrateToFIPSRefusesUnderFIPSMode(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -219,6 +222,7 @@ func TestVolumeMigrateToFIPSErrorSaysEachThingOnce(t *testing.T) {
 // with the cancellation reachable through errors.Is and the stage through
 // *FIPSMigrationError. The context kind must not win over the migration's.
 func TestVolumeMigrateToFIPSCanceledInAStageIsAMigrationFailure(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -313,6 +317,7 @@ func TestVolumeDerivationFollowsTheVolumeFIPSMode(t *testing.T) {
 }
 
 func TestVolumeMigrateToFIPSOnAReadOnlyVolumeFailsWithErrReadOnly(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return

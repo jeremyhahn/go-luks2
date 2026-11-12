@@ -470,6 +470,7 @@ func TestRequireCacheMatchesMedium(t *testing.T) {
 // legal header span. Every comparison read stays inside the two header
 // copies.
 func TestMigrateToFIPSNeverReadsTheDataSegmentToCompare(t *testing.T) {
+	defer parallel(t)()
 	if fips.Probe() {
 		assertMigrationRefusedUnderFIPS(t)
 		return

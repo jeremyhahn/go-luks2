@@ -143,6 +143,7 @@ func openUnlocked(t *testing.T, path string, sys volumeSys, opts ...Option) (*Vo
 // L2: Enroll asks the provider for its credential before taking either the
 // Volume's mutex or the device lock.
 func TestVolumeEnrollCallsTheProviderBeforeLocking(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "enroll-order.img", "", "")
 	v, key := openUnlocked(t, path, testVolumeSys())
 
@@ -164,6 +165,7 @@ func TestVolumeEnrollCallsTheProviderBeforeLocking(t *testing.T) {
 
 // L2: UnlockWithProvider likewise holds no lock while the provider runs.
 func TestVolumeUnlockWithProviderCallsTheProviderBeforeLocking(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "unlock-order.img", "", "")
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
 	if err != nil {
@@ -192,6 +194,7 @@ func TestVolumeUnlockWithProviderCallsTheProviderBeforeLocking(t *testing.T) {
 // L3: a context canceled during the token write must not also cancel the
 // rollback of the keyslot just added.
 func TestVolumeEnrollRollsBackUnderACanceledContext(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "enroll-cancel.img", "", "")
 	v, key := openUnlocked(t, path, testVolumeSys())
 
@@ -241,6 +244,7 @@ func refuseExclusiveOpens(sys volumeSys) volumeSys {
 // and cryptsetup token import do: the exclusive flock is what excludes
 // other writers, not an exclusive open.
 func TestVolumeTokenWritesWorkOnAVolumeInUse(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "in-use.img", "", "")
 	v, key := openUnlocked(t, path, refuseExclusiveOpens(testVolumeSys()))
 	ctx := context.Background()
@@ -264,6 +268,7 @@ func TestVolumeTokenWritesWorkOnAVolumeInUse(t *testing.T) {
 // L5: MigrateToFIPS works on the descriptor Open pinned, not on whatever the
 // path names by the time it runs.
 func TestVolumeMigrateToFIPSStaysOnThePinnedDevice(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return

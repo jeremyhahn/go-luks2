@@ -180,6 +180,7 @@ func TestDigestCalibrationRejectsAnUnsupportedHash(t *testing.T) {
 // substituted after a failed benchmark is the defect ErrKDFCalibration exists
 // to prevent, and the digest path must not reintroduce it.
 func TestFormatSurfacesADigestCalibrationFailure(t *testing.T) {
+	defer parallel(t)()
 	sentinel := errors.New("the digest benchmark could not run")
 	sys := testVolumeSys()
 	sys.digestIterationsFor = func(string) (int, error) { return 0, sentinel }

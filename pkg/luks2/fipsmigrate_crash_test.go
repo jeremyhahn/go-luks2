@@ -697,6 +697,7 @@ func TestWriteHeaderStopsBeforeTheSecondaryWhenThePrimarySyncFails(t *testing.T)
 // digest, as a default volume does, so no digest rewrite happens to reconcile
 // the copies by accident.
 func TestMigrateToFIPSResumedAfterACrashKeepsAWayIn(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -864,6 +865,7 @@ func TestMigrateToFIPSReportsADamagedPrimaryAfterAFailedHeaderWrite(t *testing.T
 // copy damaged after the keyslot was added -- by anything -- is caught by the
 // verification before a single keyslot is removed.
 func TestMigrateToFIPSStopsWhenTheHeaderCopiesDisagreeAfterItsWrites(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -903,6 +905,7 @@ func TestMigrateToFIPSStopsWhenTheHeaderCopiesDisagreeAfterItsWrites(t *testing.
 // writing anything -- the primary, the copy the volume opens through, and the
 // secondary are byte for byte what they were.
 func TestMigrateToFIPSReconcileFailureLeavesThePrimaryAlone(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -1108,6 +1111,7 @@ func TestStateAfterWriteFailureReadsTheDevice(t *testing.T) {
 // every legal offset -- ReadSecondaryHeader with no primary -- finds it; the
 // report must not, because on such a layout that offset can be encrypted data.
 func TestStateAfterWriteFailureReadsOnlyTheKnownSecondary(t *testing.T) {
+	defer parallel(t)()
 	small := newImage(t, "small-metadata.img")
 	if err := formatForTest(metadataSizeFormatOptions(small, 32<<10)); err != nil {
 		t.Fatalf("Format with 32 KiB metadata failed: %v", err)
@@ -1147,6 +1151,7 @@ func TestStateAfterWriteFailureReadsOnlyTheKnownSecondary(t *testing.T) {
 // any write, says the volume is untouched, and leaves the secondary for
 // RestorePrimaryHeader or cryptsetup to rebuild from.
 func TestMigrateToFIPSRefusesATornPrimaryBeforeWriting(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -1178,6 +1183,7 @@ func TestMigrateToFIPSRefusesATornPrimaryBeforeWriting(t *testing.T) {
 // run's durability barrier, and if that barrier fails nothing is written at
 // all.
 func TestMigrateToFIPSMakesAgreeingCopiesDurableBeforeWriting(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -1260,6 +1266,7 @@ func TestMigrateToFIPSMakesAgreeingCopiesDurableBeforeWriting(t *testing.T) {
 // cached view: the run under test drops it before reading anything, and a run
 // that read through it without dropping it fails this test either way.
 func TestMigrateToFIPSReadsTheMediumNotThePageCache(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -1301,6 +1308,7 @@ func TestMigrateToFIPSReadsTheMediumNotThePageCache(t *testing.T) {
 // still agree; the run must find that the cache is not the medium, and stop
 // having written nothing.
 func TestMigrateToFIPSRefusesWhenTheCacheOutlivesItsEviction(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -1411,6 +1419,7 @@ func newCacheModel(t *testing.T, evicts bool) *cacheModel {
 // cannot be shown to come from the medium, it reads nothing and writes
 // nothing.
 func TestMigrateToFIPSStopsWhenTheCacheCannotBeDropped(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -1457,6 +1466,7 @@ func TestDropDeviceCache(t *testing.T) {
 // reboot, or cryptsetup, will find -- and say so when the medium cannot be
 // read at all.
 func TestMigrateToFIPSReportsTheStateOnTheMediumNotInTheCache(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return

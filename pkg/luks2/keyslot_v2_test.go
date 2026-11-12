@@ -36,6 +36,7 @@ func newPassphraseEnclave(t *testing.T, text string) enclave.ByteAccess {
 }
 
 func TestVolumeAddKeyslotAddsAWorkingCredential(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "addkeyslot.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -92,6 +93,7 @@ func TestVolumeAddKeyslotAddsAWorkingCredential(t *testing.T) {
 }
 
 func TestVolumeAddKeyslotWithAnExplicitSlot(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "addkeyslot-explicit.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -125,6 +127,7 @@ func TestVolumeAddKeyslotWithAnExplicitSlot(t *testing.T) {
 }
 
 func TestVolumeAddKeyslotWithPriorityPreferWritesIt(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "addkeyslot-prefer.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -582,6 +585,7 @@ func TestVolumeChangeKeyslotOnAReadOnlyVolumeFails(t *testing.T) {
 }
 
 func TestVolumeRemoveKeyslotRemovesItWithoutDisturbingOthers(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "removekeyslot.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -671,6 +675,7 @@ func TestVolumeRemoveKeyslotOnAReadOnlyVolumeFails(t *testing.T) {
 // device; the kernel's own EBUSY is proved against a real device in
 // TestWipeKeyslotRefusesAnActiveDeviceDespiteARetarget (integration).
 func TestVolumeRemoveKeyslotRefusesAnInUseDevice(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "removekeyslot-inuse.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
