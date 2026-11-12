@@ -328,9 +328,6 @@ func TestVolumeChangeKeyslotPreservesTheExistingPBKDF2Cost(t *testing.T) {
 	}
 }
 
-// changeKeyslotOnDiskKDF formats a PBKDF2-SHA256 volume at iterations, changes
-// keyslot 0's passphrase with p, and returns the keyslot's KDF as re-read
-// from the device -- what a later open will use, not what the call reported.
 // pbkdf2CostImage is a fresh copy of a one-keyslot PBKDF2-SHA256 volume
 // whose keyslot 0 costs exactly iterations, opened by testPassphraseText.
 // The tests that use it are about ChangeKeyslot, not Format, so the
@@ -352,6 +349,9 @@ func pbkdf2CostImage(t *testing.T, name string, iterations int) string {
 	})
 }
 
+// changeKeyslotOnDiskKDF takes a PBKDF2-SHA256 volume at iterations, changes
+// keyslot 0's passphrase with p, and returns the keyslot's KDF as re-read
+// from the device -- what a later open will use, not what the call reported.
 func changeKeyslotOnDiskKDF(t *testing.T, iterations int, p KeyslotParams) *header.KDF {
 	t.Helper()
 	path := pbkdf2CostImage(t, "changekeyslot-recost.img", iterations)
