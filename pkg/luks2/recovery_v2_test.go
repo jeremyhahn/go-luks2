@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/fips140"
+	"crypto/rand"
 	"errors"
 	"testing"
 
@@ -59,6 +60,43 @@ func TestNewRecoveryKeyDefaultsToDashedAt32Bytes(t *testing.T) {
 	}
 	if n == 0 || int(n) != buf.Len() {
 		t.Errorf("WriteTo wrote %d, buffer holds %d", n, buf.Len())
+	}
+}
+
+// TestNewRecoveryKeyDrawsFromTheLibraryCSPRNG pins the recovery-keys
+// requirement that the credential comes from the library's own CSPRNG:
+// NewRecoveryKey has no injectable source, so the package default it reads
+// must be crypto/rand, and two keys drawn in a row must differ in both the
+// printed text and its digest.
+func TestNewRecoveryKeyDrawsFromTheLibraryCSPRNG(t *testing.T) {
+	if defaultVolumeSys().cryptoRand != rand.Reader {
+		t.Fatal("the package's default random source is not crypto/rand.Reader")
+	}
+
+	printed := func(rk *RecoveryKey) []byte {
+		t.Helper()
+		var buf bytes.Buffer
+		if _, err := rk.WriteTo(&buf); err != nil {
+			t.Fatalf("WriteTo failed: %v", err)
+		}
+		return buf.Bytes()
+	}
+	a, err := NewRecoveryKey()
+	if err != nil {
+		t.Fatalf("NewRecoveryKey failed: %v", err)
+	}
+	defer a.Destroy()
+	b, err := NewRecoveryKey()
+	if err != nil {
+		t.Fatalf("NewRecoveryKey failed: %v", err)
+	}
+	defer b.Destroy()
+
+	if bytes.Equal(printed(a), printed(b)) {
+		t.Fatal("two recovery keys drawn in a row printed the same text")
+	}
+	if a.Hash() == b.Hash() {
+		t.Fatal("two recovery keys drawn in a row have the same digest")
 	}
 }
 
