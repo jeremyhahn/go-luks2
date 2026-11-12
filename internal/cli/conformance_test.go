@@ -598,3 +598,53 @@ func TestRunCloseNeverDetachesALoopDevice(t *testing.T) {
 		t.Errorf("stdout = %q, want the close confirmation", stdout.String())
 	}
 }
+
+// writeAt overwrites path at off with b.
+func writeAt(t *testing.T, path string, off int64, b []byte) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.WriteAt(b, off); err != nil {
+		t.Fatalf("write at %d: %v", off, err)
+	}
+}
+
+// docs/header/cli.md, isluks: without --luks2 a LUKS1 header counts; with it,
+// only a LUKS2 header that passes validation does. A LUKS2 header whose
+// copies both fail validation is a no even though the magic is there, and a
+// no exits 1, never 2 to 5.
+func TestRunIsLUKSHeaderRows(t *testing.T) {
+	luks1 := newPlainImage(t, "luks1.img")
+	writeAt(t, luks1, 0, []byte{'L', 'U', 'K', 'S', 0xba, 0xbe, 0x00, 0x01})
+
+	damaged := newTestVolumeImage(t, "isluks-damaged.img")
+	garbage := bytes.Repeat([]byte{'#'}, 64)
+	writeAt(t, damaged, 4096, garbage)       // the primary's JSON area
+	writeAt(t, damaged, 16384+4096, garbage) // the secondary's
+
+	for _, c := range []struct {
+		name string
+		args []string
+		want int
+		out  string
+	}{
+		{"LUKS1 counts without --luks2", []string{luks1}, 0, luks1 + " is a LUKS device"},
+		{"LUKS1 is not LUKS2", []string{"--luks2", luks1}, 1, luks1 + " is not a LUKS2 device"},
+		{"a header failing validation is a no", []string{damaged}, 1, damaged + " is not a LUKS device"},
+		{"a header failing validation is not LUKS2", []string{"--luks2", damaged}, 1, damaged + " is not a LUKS2 device"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e, _, _, stdout, _ := newTestEnv(&bytes.Buffer{})
+			err := runIsLUKS(context.Background(), e, c.args)
+			if got := exitCode(err); got != c.want {
+				t.Fatalf("exit status = %d (%v), want %d", got, err, c.want)
+			}
+			if !strings.Contains(stdout.String(), c.out) {
+				t.Errorf("stdout = %q, want %q", stdout.String(), c.out)
+			}
+		})
+	}
+}
