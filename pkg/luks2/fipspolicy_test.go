@@ -430,3 +430,111 @@ func TestMalformedDigestBesideShortSaltKeepsTheHeaderError(t *testing.T) {
 		t.Fatal("MigrateToFIPS refused a damaged header and still changed the device")
 	}
 }
+
+// TestMalformedDigestBesideRefusedKeyslotKDFKeepsTheHeaderError pins the
+// classification of a keyslot the policy refuses at its OWN KDF -- Argon2 under
+// the FIPS policy, a PBKDF2 salt too short for strict mode -- while one of the
+// two digests attesting it is malformed. The keyslot refusal is not damage, but
+// the malformed digest is, and it is what unlock reports: ErrInvalidHeader, not
+// the policy's sentinel. MigrateToFIPS refuses the same volume at planning with
+// the same error and writes nothing.
+func TestMalformedDigestBesideRefusedKeyslotKDFKeepsTheHeaderError(t *testing.T) {
+	cases := []struct {
+		name string
+		kdf  func(m *header.Metadata) *header.KDF
+		// strictOnly: the keyslot KDF is refused only by strict mode, so
+		// outside it the forced FIPS policy opens the volume.
+		strictOnly bool
+	}{
+		{
+			name: "argon2 keyslot",
+			kdf: func(m *header.Metadata) *header.KDF {
+				cost, memory, cpus := header.MinArgon2Time, minArgon2MemoryKB, 1
+				return &header.KDF{Type: kdfTypeArgon2id, Salt: m.Keyslots["0"].KDF.Salt, Time: &cost, Memory: &memory, CPUs: &cpus}
+			},
+		},
+		{
+			name:       "short-salt keyslot",
+			kdf:        func(*header.Metadata) *header.KDF { return shortSaltKDF() },
+			strictOnly: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			device := newImage(t, "fips-refused-keyslot-malformed.img")
+			formatWithLibrary(t, device)
+			hdr, metadata, err := readHeaderForTest(device)
+			if err != nil {
+				t.Fatalf("ReadHeader failed: %v", err)
+			}
+			kdf := tc.kdf(metadata)
+			if fips140.Enabled() {
+				// Strict mode refuses the keyslot KDF before a byte of the
+				// area is decrypted, so the area need not match it.
+				metadata.Keyslots["0"].KDF = kdf
+			} else {
+				// Outside strict mode the keyslot is re-wrapped under the
+				// refused KDF, as a volume cryptsetup wrote would be, so the
+				// import path gets past unlock to its planning.
+				masterKey, err := getMasterKey(device, migrationPassphrase, metadata, testVolumeSys())
+				if err != nil {
+					t.Fatalf("opening the fixture failed: %v", err)
+				}
+				err = rewrapKeyslotInPlace(device, metadata.Keyslots["0"], masterKey, migrationPassphrase, kdf)
+				if destroyErr := masterKey.Destroy(); destroyErr != nil {
+					t.Fatalf("releasing the volume key failed: %v", destroyErr)
+				}
+				if err != nil {
+					t.Fatalf("re-wrapping the keyslot failed: %v", err)
+				}
+			}
+			// Keyslot 0 is now attested by a well-formed digest and a
+			// malformed copy of it.
+			malformedDigestCopy(metadata)
+			hdr.SequenceID++
+			if err := writeHeaderUnvalidated(device, hdr, metadata); err != nil {
+				t.Fatalf("writing the fixture failed: %v", err)
+			}
+
+			sys := testVolumeSys()
+			sys.fipsMode = forceFIPSPolicy(t)
+			err = testKeyForTestWithSys(device, migrationPassphrase, sys)
+			switch {
+			case tc.strictOnly && !fips140.Enabled():
+				// The salt is derived outside strict mode, and the
+				// well-formed digest attests the key.
+				if err != nil {
+					t.Fatalf("unlock outside strict mode through the short-salt keyslot: %v", err)
+				}
+			default:
+				var importRequired *FIPSImportRequiredError
+				if errors.Is(err, ErrFIPSImportRequired) || errors.As(err, &importRequired) {
+					t.Fatalf("a malformed digest beside a refused keyslot KDF was reported as a FIPS import: %v", err)
+				}
+				if !errors.Is(err, ErrInvalidHeader) {
+					t.Fatalf("unlock under the forced FIPS policy: got %v, want ErrInvalidHeader", err)
+				}
+			}
+
+			if fips140.Enabled() {
+				// The import it would have recommended cannot run in this
+				// process.
+				assertMigrationRefusedUnderFIPS(t)
+				return
+			}
+			// The import path refuses the same volume at planning with the
+			// header fault, and leaves it untouched.
+			before := fileDigest(t, device)
+			sys = testVolumeSys()
+			sys.fipsMode = forceNonFIPSPolicy(t)
+			_, err = migrateToFIPSAt(context.Background(), device, migrationPassphrase, cheapMigration(), sys)
+			if !errors.Is(err, ErrInvalidHeader) {
+				t.Fatalf("MigrateToFIPS on the same volume: got %v, want ErrInvalidHeader", err)
+			}
+			if after := fileDigest(t, device); after != before {
+				t.Fatal("MigrateToFIPS refused a damaged header and still changed the device")
+			}
+		})
+	}
+}

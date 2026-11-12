@@ -1662,6 +1662,15 @@ func getMasterKeySlot(ctx context.Context, dev io.ReaderAt, device string, passp
 		}
 
 		if untried == nil {
+			// A malformed digest attesting this keyslot is header damage, and
+			// it is what is reported even when the keyslot's own KDF is also
+			// refused (Argon2 under the FIPS policy, a salt strict mode
+			// rejects): the caller tells damage by ErrInvalidHeader alone.
+			if !errors.Is(err, errs.ErrInvalidHeader) {
+				if structural := coveringDigestStructureError(id, metadata.Digests); structural != nil {
+					err = structural
+				}
+			}
 			untried = &errs.Error{Kind: errs.KindOf(err, errs.ErrInvalidHeader), Detail: "keyslot " + id + " could not be tried", Err: err}
 		}
 	}

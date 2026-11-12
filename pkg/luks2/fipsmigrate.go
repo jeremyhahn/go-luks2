@@ -1062,17 +1062,28 @@ func coveringDigestsUnusable(id string, digests map[string]*header.Digest, failu
 // passes the structural digest screen, which runs no FIPS gate: what is left
 // to refuse it is policy, never damage.
 func coveringDigestsWellFormed(id string, digests map[string]*header.Digest) bool {
-	for _, digest := range digests {
+	return coveringDigestStructureError(id, digests) == nil
+}
+
+// coveringDigestStructureError returns, as ErrInvalidHeader, the structural
+// fault of the lowest-numbered digest attesting keyslot id that the header
+// screen rejects, or nil when every one of them is well formed. It is what a
+// keyslot that could not be tried reports in place of its own failure: a
+// malformed attesting digest is header damage, whatever policy refusal the
+// keyslot's KDF also carries.
+func coveringDigestStructureError(id string, digests map[string]*header.Digest) error {
+	for _, digestID := range sortedDigestIDs(digests) {
+		digest := digests[digestID]
 		if !digestCovers(digest, id) {
 			continue
 		}
 		expected, _, err := screenDigestStructure(digest)
 		clearBytes(expected)
 		if err != nil {
-			return false
+			return &errs.Error{Kind: ErrInvalidHeader, Detail: "digest " + digestID + " attesting keyslot " + id + " is malformed", Err: err}
 		}
 	}
-	return true
+	return nil
 }
 
 // malformedDigestError returns ErrInvalidHeader naming the first digest, in ID

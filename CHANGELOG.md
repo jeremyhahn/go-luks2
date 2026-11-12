@@ -39,7 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refused only by FIPS; the open is still refused, and `MigrateToFIPS` imports
   the volume. A keyslot one of whose attesting digests is malformed (a value
   that is not base64, a length no hash gives) still fails with
-  `ErrInvalidHeader`, beside a short-salt digest or not, and `MigrateToFIPS`
+  `ErrInvalidHeader`, beside a short-salt digest or not, and also when the
+  keyslot's own KDF is refused (Argon2 under the FIPS policy, a short PBKDF2
+  salt under strict mode), where it failed with `ErrFIPSNotApproved` or
+  `ErrInvalidArgument`; `MigrateToFIPS`
   refuses that volume at the plan stage with `ErrInvalidHeader`, where it
   returned the not-approved-digest refusal.
 - **`MigrateToFIPS` no longer keeps a malformed digest that looks approved.**
