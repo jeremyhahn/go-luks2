@@ -99,11 +99,15 @@ type crashFixtureEntry struct {
 	prefix     []byte
 	dataOffset int64
 	key        []byte
-	// The migration from prefix, recorded once by recordedMigration.
-	recorded bool
-	steps    []crashStep
-	result   *fipsMigrationResultForTest
-	final    []byte
+	// The migration from prefix, recorded once by recordedMigration under
+	// record: parallel tests share the entry, so the fields below are written
+	// only inside record.Do and read only after it returns. Callers treat
+	// them as read-only.
+	record    sync.Once
+	recordErr error
+	steps     []crashStep
+	result    *fipsMigrationResultForTest
+	final     []byte
 }
 
 // crashFixture is buildCrashFixture, built once per shape per process. Its
@@ -140,17 +144,20 @@ func recordedMigration(t *testing.T, sha1Digest bool) (*crashFixtureEntry, []cra
 	t.Helper()
 
 	e := crashFixtureFor(t, sha1Digest)
-	crashFixtureCache.Lock()
-	recorded := e.recorded
-	crashFixtureCache.Unlock()
-	if !recorded {
+	e.record.Do(func() {
+		// A Fatalf in here would leave the once done and the entry empty
+		// for every later caller, so the failure is kept and reported to
+		// each of them instead.
+		e.recordErr = fmt.Errorf("MigrateToFIPS did not record a migration")
 		r, result, err, final := migrateRecording(t, e.prefix, 0)
 		if err != nil {
-			t.Fatalf("MigrateToFIPS failed: %v", err)
+			e.recordErr = fmt.Errorf("MigrateToFIPS failed: %w", err)
+			return
 		}
-		crashFixtureCache.Lock()
-		e.steps, e.result, e.final, e.recorded = r.writeSteps(final), result, final, true
-		crashFixtureCache.Unlock()
+		e.steps, e.result, e.final, e.recordErr = r.writeSteps(final), result, final, nil
+	})
+	if e.recordErr != nil {
+		t.Fatal(e.recordErr)
 	}
 	return e, e.steps
 }
