@@ -1,4 +1,4 @@
-# signatures-template: v1 (ci-template v1.35.2) — the commit signature gate.
+# signatures-template: v1 (ci-template v1.35.2, customized) — the commit signature gate.
 #
 # v1 (2026-11-11, Company Agent m2577, Codex finding on xkey-android #129):
 # the verifier ci.yml v1.35/v1.35.1 ran as a job of the pull request's own
@@ -78,7 +78,10 @@ jobs:
           isrev() { ! zero "$1" && git cat-file -e "$1^{commit}" 2>/dev/null; }
           ASF="${RUNNER_TEMP:-/tmp}/allowed_signers"
           if [ "$EVENT" = pull_request_target ]; then
-            [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ] && [ -n "$PR" ] || { echo "FAIL a pull_request_target run without its base, head or number"; exit 1; }
+            # customized: if-then form for shellcheck SC2015
+            if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ] || [ -z "$PR" ]; then
+              echo "FAIL a pull_request_target run without its base, head or number"; exit 1
+            fi
             REG="$BASE_SHA"
             # The pull request's commits, as objects only: nothing is checked
             # out or run. refs/pull/N/head carries fork heads too.
