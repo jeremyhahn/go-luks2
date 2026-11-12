@@ -48,6 +48,8 @@ const (
 	seamRoleUnlock        = "unlock"
 	seamRoleMigrate       = "migrate"
 
+	seamRoleMigrateRequirement = "migrate-requirement"
+
 	seamChildOK     = 0
 	seamChildFailed = 1
 )
@@ -524,6 +526,9 @@ func seamChild(role, image string) error {
 			return fmt.Errorf("migration %+v, want complete with the one Argon2 keyslot replaced", *m)
 		}
 		return nil
+
+	case seamRoleMigrateRequirement:
+		return seamMigrateRequirement(ctx, image, pass)
 
 	default:
 		return fmt.Errorf("unknown role %q", role)

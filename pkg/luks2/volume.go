@@ -261,8 +261,14 @@ func errAt(op, path string, err error) error {
 		switch detail, isRequirement := unsupportedRequirementDetail(err); {
 		case isRequirement:
 			// The requirement's own type stays internal; the caller reads
-			// it from Kind and Detail.
-			err = &errs.Error{Kind: ErrUnsupportedRequirement, Detail: detail, Err: err}
+			// it from Kind and Detail. A requirement that stops a migration
+			// leaves the migration's kind: the failure is still a
+			// migration failure, and errors.Is finds the requirement
+			// through Err.
+			if kind != ErrFIPSMigration {
+				kind = ErrUnsupportedRequirement
+			}
+			err = &errs.Error{Kind: kind, Detail: detail, Err: err}
 		case err == kind:
 			err = &errs.Error{Kind: kind}
 		default:

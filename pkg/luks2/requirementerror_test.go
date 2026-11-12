@@ -9,10 +9,13 @@ package luks2_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-enclave"
 
 	"github.com/jeremyhahn/go-luks2/internal/header"
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
@@ -51,22 +54,34 @@ func stampMandatoryRequirement(t *testing.T, device, requirement string) {
 // requirement type is exported; Kind and Detail carry it.
 func assertRequirementInError(t *testing.T, op string, err error, requirement string) {
 	t.Helper()
+	for _, problem := range requirementErrorProblems(op, err, requirement, luks2.ErrUnsupportedRequirement) {
+		t.Error(problem)
+	}
+}
+
+// requirementErrorProblems lists how err falls short of a *luks2.Error of
+// kind wantKind whose Detail names the mandatory requirement and whose chain
+// errors.Is finds ErrUnsupportedRequirement in. It returns nothing when err
+// holds all of that.
+func requirementErrorProblems(op string, err error, requirement string, wantKind error) []string {
 	var lerr *luks2.Error
 	if !errors.As(err, &lerr) {
-		t.Fatalf("%s = %v (%T), want a *luks2.Error", op, err, err)
+		return []string{fmt.Sprintf("%s = %v (%T), want a *luks2.Error", op, err, err)}
 	}
-	if lerr.Kind != luks2.ErrUnsupportedRequirement {
-		t.Errorf("%s: Kind = %v, want ErrUnsupportedRequirement", op, lerr.Kind)
+	var problems []string
+	if lerr.Kind != wantKind {
+		problems = append(problems, fmt.Sprintf("%s: Kind = %v, want %v", op, lerr.Kind, wantKind))
 	}
 	if !strings.Contains(lerr.Detail, requirement) {
-		t.Errorf("%s: Detail = %q, want it to name %q", op, lerr.Detail, requirement)
+		problems = append(problems, fmt.Sprintf("%s: Detail = %q, want it to name %q", op, lerr.Detail, requirement))
 	}
 	if !strings.Contains(lerr.Detail, "mandatory") {
-		t.Errorf("%s: Detail = %q, want it to say the requirement is mandatory", op, lerr.Detail)
+		problems = append(problems, fmt.Sprintf("%s: Detail = %q, want it to say the requirement is mandatory", op, lerr.Detail))
 	}
 	if !errors.Is(err, luks2.ErrUnsupportedRequirement) {
-		t.Errorf("%s: errors.Is(err, ErrUnsupportedRequirement) = false for %v", op, err)
+		problems = append(problems, fmt.Sprintf("%s: errors.Is(err, ErrUnsupportedRequirement) = false for %v", op, err))
 	}
+	return problems
 }
 
 // TestUnsupportedRequirementIsReadableFromLuks2Error pins the caller's
@@ -113,4 +128,49 @@ func TestUnsupportedRequirementIsReadableFromLuks2Error(t *testing.T) {
 
 	err = v.RemoveKeyslot(context.Background(), spare.ID)
 	assertRequirementInError(t, "RemoveKeyslot", err, requirement)
+}
+
+// migrationRequirement is the mandatory requirement the migration case
+// stamps on its volume; the child reads the error for it.
+const migrationRequirement = "inline-hw-tags"
+
+// TestRequirementThatStopsMigrationKeepsTheMigrationKind: in a non-FIPS
+// process, MigrateToFIPS on an Argon2 volume that declares an unsupported
+// mandatory requirement fails as a migration. Kind stays ErrFIPSMigration,
+// Detail names the requirement, and both errors.Is for
+// ErrUnsupportedRequirement and errors.As to *FIPSMigrationError hold. The
+// Argon2 volume is made and migrated in a child with FIPS off, so the case
+// runs the same under the FIPS gate.
+func TestRequirementThatStopsMigrationKeepsTheMigrationKind(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "migration-requirement.img")
+	if err := createSeamImage(path); err != nil {
+		t.Fatal(err)
+	}
+	runSeamChildOK(t, seamRoleFormatArgon2, path, "fips140=off", false)
+
+	stampMandatoryRequirement(t, path, migrationRequirement)
+
+	if out := runSeamChildOK(t, seamRoleMigrateRequirement, path, "fips140=off", false); out != "" {
+		t.Fatalf("migration child: %s", out)
+	}
+}
+
+// seamMigrateRequirement is the migration case's child body: it migrates
+// the stamped Argon2 volume and reports every way the error falls short.
+func seamMigrateRequirement(ctx context.Context, image string, pass enclave.ByteAccess) error {
+	v, err := luks2.Open(ctx, image, luks2.WithTestSysForTest())
+	if err != nil {
+		return err
+	}
+	defer func() { _ = v.Close() }()
+	_, err = v.MigrateToFIPS(ctx, pass, luks2.MigrateParams{KDF: seamKDF()})
+	problems := requirementErrorProblems("MigrateToFIPS", err, migrationRequirement, luks2.ErrFIPSMigration)
+	var merr *luks2.FIPSMigrationError
+	if !errors.As(err, &merr) {
+		problems = append(problems, fmt.Sprintf("MigrateToFIPS: %v (%T) is not a *FIPSMigrationError", err, err))
+	}
+	if len(problems) > 0 {
+		return errors.New(strings.Join(problems, "\n"))
+	}
+	return nil
 }
