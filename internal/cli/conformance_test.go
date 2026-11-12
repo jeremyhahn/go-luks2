@@ -648,3 +648,71 @@ func TestRunIsLUKSHeaderRows(t *testing.T) {
 		})
 	}
 }
+
+// docs/header/cli.md, show and secondary: show prints every documented field
+// of the current copy; secondary's header offset equals the header size; and
+// when the primary is intact but older (a lower sequence ID), show prints the
+// secondary, labeled as such, and says so on stderr.
+func TestRunHeaderShowAndSecondaryRows(t *testing.T) {
+	const hdrSize = 16384
+	ctx := context.Background()
+
+	t.Run("show prints every documented field", func(t *testing.T) {
+		path := newTestVolumeImage(t, "show-fields.img")
+		e, _, _, stdout, stderr := newTestEnv(&bytes.Buffer{})
+		if err := runHeaderShow(ctx, e, []string{path}); err != nil {
+			t.Fatalf("runHeaderShow: %v", err)
+		}
+		for _, want := range []string{
+			"Primary header: " + path + "\n", "Version:        LUKS2\n", "UUID:           ", "Label:          ",
+			"Subsystem:      ", "Header size:    16384 bytes\n", "Header offset:  0\n",
+			"Checksum algo:  sha256\n", "Sequence ID:    ", "Keyslots:       1\n",
+			"Tokens:         0\n", "Segments:       1\n",
+		} {
+			if !strings.Contains(stdout.String(), want) {
+				t.Errorf("stdout = %q, want it to contain %q", stdout.String(), want)
+			}
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("stderr = %q, want nothing for an intact primary", stderr.String())
+		}
+	})
+
+	t.Run("secondary's offset is the header size", func(t *testing.T) {
+		path := newTestVolumeImage(t, "secondary-offset.img")
+		e, _, _, stdout, _ := newTestEnv(&bytes.Buffer{})
+		if err := runHeaderSecondary(ctx, e, []string{path}); err != nil {
+			t.Fatalf("runHeaderSecondary: %v", err)
+		}
+		for _, want := range []string{"Header size:    16384 bytes\n", "Header offset:  16384\n"} {
+			if !strings.Contains(stdout.String(), want) {
+				t.Errorf("stdout = %q, want it to contain %q", stdout.String(), want)
+			}
+		}
+	})
+
+	t.Run("show prints the secondary when the primary is older", func(t *testing.T) {
+		// The one-slot volume's primary is an intact copy of the same volume
+		// at a lower sequence ID than the two-slot volume's secondary.
+		old, err := os.ReadFile(newTestVolumeImage(t, "older.img"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := newTwoSlotVolumeImage(t, "stale-primary.img")
+		writeAt(t, path, 0, old[:hdrSize])
+
+		e, _, _, stdout, stderr := newTestEnv(&bytes.Buffer{})
+		if err := runHeaderShow(ctx, e, []string{path}); err != nil {
+			t.Fatalf("runHeaderShow: %v", err)
+		}
+		out := stdout.String()
+		for _, want := range []string{"Secondary header: " + path + "\n", "Header offset:  16384\n", "Keyslots:       2\n"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("stdout = %q, want it to contain %q", out, want)
+			}
+		}
+		if !strings.Contains(stderr.String(), "older than the secondary; showing the secondary") {
+			t.Errorf("stderr = %q, want a note that the secondary is shown", stderr.String())
+		}
+	})
+}
