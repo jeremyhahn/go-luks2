@@ -16,6 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the devcontainer `golang:` image tag and digest, and the README build
   requirement.
 
+### Fixed
+
+- **An unsupported mandatory requirement is readable from `luks2.Error`.**
+  Unlock, activation and every header write on a container declaring a
+  mandatory requirement this library does not implement (such as
+  `inline-hw-tags`) return a `*luks2.Error` whose `Kind` is
+  `ErrUnsupportedRequirement` and whose `Detail` names the requirement and the
+  container's mandatory set. A header write used to report it with Kind
+  `ErrIO` and no Detail, and unlock's Detail did not name it. No named
+  requirement type is exported.
+
 ## [1.0.3-alpha] - 2026-11-10
 
 ### Changed

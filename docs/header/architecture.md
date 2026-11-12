@@ -201,10 +201,15 @@ be read.
 That includes `inline-hw-tags` (LUKS2 On-Disk Format 1.1.4): the data
 segment uses only dm-crypt, with authentication tags kept inline by the
 hardware, and every dm-integrity option in the metadata is ignored. Unlock,
-activation and every header write refuse it with an error naming
-`inline-hw-tags` (`internal/header`'s `*UnsupportedRequirementError`, not
-exported from `pkg/luks2`), which unwraps to `ErrUnsupportedRequirement`, and
-leave the device unchanged. The flag is never
+activation and every header write refuse it and leave the device unchanged.
+The caller reads the refusal from `*luks2.Error`, not from a named type:
+`Kind` is `ErrUnsupportedRequirement`, `Detail` names the requirement
+(`inline-hw-tags`) and the container's mandatory set, and
+`errors.Is(err, luks2.ErrUnsupportedRequirement)` holds. The typed error that
+carries the requirement stays in `internal/header`; `pkg/luks2` exports no
+type for it. `TestUnsupportedRequirementIsReadableFromLuks2Error` pins this
+from outside the package for `Unlock`, `AddKeyslot`, `ChangeKeyslot` and
+`RemoveKeyslot`. The flag is never
 stripped: a read and a re-encode keep `config.requirements` byte for byte.
 
 A segment's `integrity` object may carry `key_size` (1.1.4, integer, optional):
