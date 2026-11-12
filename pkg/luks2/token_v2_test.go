@@ -199,11 +199,48 @@ func TestVolumeSetTokenRefusesAnOutOfRangeID(t *testing.T) {
 	}
 	defer func() { _ = v.Close() }()
 
-	if err := v.SetToken(context.Background(), MaxTokens, Token{Type: "x-test"}); err == nil {
-		t.Error("SetToken(MaxTokens) succeeded, want a range error")
+	for _, id := range []int{-1, MaxTokens} {
+		if err := v.SetToken(context.Background(), id, Token{Type: "x-test"}); !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("SetToken(%d) = %v, want ErrInvalidArgument", id, err)
+		}
+		if err := v.RemoveToken(context.Background(), id); !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("RemoveToken(%d) = %v, want ErrInvalidArgument", id, err)
+		}
 	}
-	if err := v.SetToken(context.Background(), -1, Token{Type: "x-test"}); err == nil {
-		t.Error("SetToken(-1) succeeded, want a range error")
+}
+
+// TestVolumeAddTokenRefusesWhenAllSlotsAreFull fills every token slot, 0
+// through MaxTokens-1, and checks that one more AddToken is refused with
+// ErrNoSpace and leaves the 32 tokens as they were.
+func TestVolumeAddTokenRefusesWhenAllSlotsAreFull(t *testing.T) {
+	path := formattedVolumeImage(t, "addtoken-full.img", "", "")
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
+	for i := 0; i < MaxTokens; i++ {
+		id, err := v.AddToken(context.Background(), Token{Type: "x-test", Keyslots: []int{0}})
+		if err != nil {
+			t.Fatalf("AddToken #%d failed: %v", i, err)
+		}
+		if id != i {
+			t.Fatalf("AddToken #%d id = %d, want %d", i, id, i)
+		}
+	}
+
+	if id, err := v.AddToken(context.Background(), Token{Type: "x-test", Keyslots: []int{0}}); !errors.Is(err, ErrNoSpace) {
+		t.Fatalf("AddToken with all %d slots in use = %d, %v, want ErrNoSpace", MaxTokens, id, err)
+	}
+
+	hdr, err := v.Header(context.Background())
+	if err != nil {
+		t.Fatalf("Header failed: %v", err)
+	}
+	if got := len(hdr.Tokens()); got != MaxTokens {
+		t.Errorf("token count after the refused AddToken = %d, want %d", got, MaxTokens)
 	}
 }
 
