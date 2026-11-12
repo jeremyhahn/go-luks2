@@ -162,3 +162,56 @@ func TestThisDockerignore_ListsEveryStripAtPublishPath(t *testing.T) {
 		}
 	}
 }
+
+// TestThisPage_ListsEveryStripAtPublishPattern holds the strip-at-publish
+// table of docs/release/public-releasability.md to DefaultStripAtPublish,
+// pattern for pattern: the page is what a reader trusts for what the release
+// leaves out, so a pattern it names that the list lacks (a file the reader
+// believes stripped ships) fails, and so does a pattern the list has that the
+// page leaves out.
+func TestThisPage_ListsEveryStripAtPublishPattern(t *testing.T) {
+	page := filepath.Join(moduleRoot(t), "docs", "release", "public-releasability.md")
+	content, err := os.ReadFile(page) // #nosec G304 -- this module's own documentation
+	if err != nil {
+		t.Fatalf("read the releasability page: %v", err)
+	}
+	documented := map[string]bool{}
+	inTable := false
+	for _, line := range strings.Split(string(content), "\n") {
+		switch {
+		case strings.HasPrefix(line, "| Pattern |"):
+			inTable = true
+			continue
+		case !inTable:
+			continue
+		case !strings.HasPrefix(line, "|"):
+			inTable = false
+			continue
+		case strings.HasPrefix(line, "|---"):
+			continue
+		}
+		cells := strings.Split(line, "|")
+		if len(cells) < 3 {
+			t.Fatalf("malformed table row: %q", line)
+		}
+		fields := strings.Split(cells[1], "`")
+		for i := 1; i < len(fields); i += 2 {
+			documented[fields[i]] = true
+		}
+	}
+	if len(documented) == 0 {
+		t.Fatalf("%s has no strip-at-publish table", page)
+	}
+	listed := map[string]bool{}
+	for _, rule := range labstrings.DefaultStripAtPublish {
+		listed[rule.Path] = true
+		if !documented[rule.Path] {
+			t.Errorf("the releasability page does not list %s, which DefaultStripAtPublish strips", rule.Path)
+		}
+	}
+	for pattern := range documented {
+		if !listed[pattern] {
+			t.Errorf("the releasability page lists %s, which DefaultStripAtPublish does not strip", pattern)
+		}
+	}
+}
