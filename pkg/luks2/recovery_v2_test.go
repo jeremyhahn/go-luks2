@@ -223,6 +223,46 @@ func TestNewRecoveryKeyRefusesATooShortLength(t *testing.T) {
 	}
 }
 
+// TestNewRecoveryKeyRefusesARenderingOverTheCredentialCeiling pins the
+// ErrInvalidArgument row of recovery-keys/engineering.md: a length whose
+// rendering would be over MaxPassphraseLength characters is refused, with
+// the refused value in Detail, and every length it accepts renders within
+// the ceiling, so an accepted key can always be enrolled.
+func TestNewRecoveryKeyRefusesARenderingOverTheCredentialCeiling(t *testing.T) {
+	for _, f := range []RecoveryKeyFormat{RecoveryDashed, RecoveryHex, RecoveryBase64} {
+		t.Run(f.String(), func(t *testing.T) {
+			longest := 0
+			for n := DefaultRecoveryKeyLength; n <= 2*MaxPassphraseLength; n++ {
+				rk, err := NewRecoveryKey(WithRecoveryFormat(f), WithRecoveryLength(n))
+				if err != nil {
+					var e *Error
+					if !errors.As(err, &e) || !errors.Is(err, ErrInvalidArgument) || e.Detail == "" {
+						t.Fatalf("NewRecoveryKey(%d bytes) = %v, want an *Error of ErrInvalidArgument with a Detail", n, err)
+					}
+					if longest == 0 {
+						t.Fatalf("NewRecoveryKey refused %d bytes, the minimum length", n)
+					}
+					if longest <= MaxPassphraseLength-8 {
+						t.Fatalf("refused %d bytes while the longest accepted rendering is %d characters, well under the %d ceiling", n, longest, MaxPassphraseLength)
+					}
+					return
+				}
+				var buf bytes.Buffer
+				_, err = rk.WriteTo(&buf)
+				rk.Destroy()
+				if err != nil {
+					t.Fatalf("WriteTo failed: %v", err)
+				}
+				if buf.Len() > MaxPassphraseLength {
+					t.Fatalf("NewRecoveryKey accepted %d bytes rendered as %d characters, over the %d ceiling", n, buf.Len(), MaxPassphraseLength)
+				}
+				longest = buf.Len()
+			}
+			t.Fatalf("NewRecoveryKey accepted every length up to %d bytes", 2*MaxPassphraseLength)
+		})
+	}
+}
+
 func TestRecoveryKeyDestroyIsIdempotentAndNilSafe(t *testing.T) {
 	var nilKey *RecoveryKey
 	nilKey.Destroy() // must not panic
