@@ -562,8 +562,6 @@ func TestRollbackStopsWhenTheTargetDisappearsMidRetry(t *testing.T) {
 	}
 }
 
-// assertRolledBack fails the test unless the target this activation created
-// under name was removed and nothing is left live under the name.
 // holdFirstRemove makes the first removal attempt fail as briefly held (a
 // udev rule), so a rollback has to retry, and a retry bound to a canceled
 // caller's context would give up and leave the plaintext target live. Call
@@ -581,6 +579,8 @@ func holdFirstRemove(t *testing.T) {
 	}
 }
 
+// assertRolledBack fails the test unless the target this activation created
+// under name was removed and nothing is left live under the name.
 func assertRolledBack(t *testing.T, fake *fakeDeviceMapper, name string, err error) {
 	t.Helper()
 	if err == nil {
@@ -753,6 +753,54 @@ func TestActivateTargetLoserOfTheCreateRaceRemovesNothing(t *testing.T) {
 	if len(fake.removed) != 0 || fake.targets["raced"] != theirs {
 		t.Fatalf("the loser of the create race touched the winner's target: removed=%v targets=%v", fake.removed, fake.targets)
 	}
+}
+
+// TestActivatePrivilegeRefusalsAreErrPermissionDenied: every device-mapper
+// and /dev node step of an activation that the kernel refuses for lack of
+// privilege is ErrPermissionDenied (engineering.md, error table), with the
+// errno still reachable: the name check, the create, the table load and the
+// node.
+func TestActivatePrivilegeRefusalsAreErrPermissionDenied(t *testing.T) {
+	want := func(t *testing.T, step string, err error, errno unix.Errno) {
+		t.Helper()
+		if !errors.Is(err, ErrPermissionDenied) || !errors.Is(err, errno) {
+			t.Errorf("%s refused with %v = %v, want ErrPermissionDenied wrapping the errno", step, errno, err)
+		}
+	}
+	t.Run("name check", func(t *testing.T) {
+		fake := newFakeDeviceMapper()
+		fake.infoErr = os.NewSyscallError("dm ioctl", unix.EACCES)
+		fake.install(t)
+		// The refusal comes before the volume is read: a zero one will do.
+		_, err := Activate(context.Background(), &luks2.Volume{}, testKey(t, make([]byte, 32)), "denied")
+		want(t, "the name check", err, unix.EACCES)
+	})
+	t.Run("create", func(t *testing.T) {
+		fake := newFakeDeviceMapper()
+		fake.createErr = os.NewSyscallError("dm ioctl DM_DEV_CREATE", unix.EPERM)
+		fake.install(t)
+		(&fakeKeyring{}).install(t)
+		_, err := activateTarget(context.Background(), "denied", "CRYPT-LUKS2-abc-denied", testTarget(), testKey(t, make([]byte, 32)))
+		want(t, "the create", err, unix.EPERM)
+	})
+	t.Run("load", func(t *testing.T) {
+		fake := newFakeDeviceMapper()
+		fake.loadErr = os.NewSyscallError("dm ioctl DM_TABLE_LOAD", unix.EACCES)
+		fake.install(t)
+		(&fakeKeyring{}).install(t)
+		recordRetryWaits(t)
+		_, err := activateTarget(context.Background(), "denied", "CRYPT-LUKS2-abc-denied", testTarget(), testKey(t, make([]byte, 32)))
+		want(t, "the table load", err, unix.EACCES)
+		assertRolledBack(t, fake, "denied", err)
+	})
+	t.Run("node", func(t *testing.T) {
+		withFakeNodes(t)
+		previous := sys.makeBlockNode
+		t.Cleanup(func() { sys.makeBlockNode = previous })
+		sys.makeBlockNode = func(string, uint64) error { return os.NewSyscallError("mknod", unix.EPERM) }
+		info := &devmapper.DeviceInfo{Name: "denied", DevNo: unix.Mkdev(253, 21)}
+		want(t, "the device node", ensureDeviceNode(context.Background(), "denied", info), unix.EPERM)
+	})
 }
 
 // --- Activate: branches reachable without a real Volume/Target ---
