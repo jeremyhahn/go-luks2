@@ -61,6 +61,10 @@ the pre-flight check is `(KDFParams).Validate()`.
   that could run Argon2 or SHA-1, not only at the public entry point, so a
   foreign header cannot make a FIPS process run either
   ([architecture.md](architecture.md#the-problem-and-the-shape-chosen)).
+- `MigrateToFIPS` refuses a `MigrateParams.KDF` naming Argon2 (`KDFArgon2id`,
+  `KDFArgon2i`, or a non-zero `Time`, `MemoryKiB` or `Parallel`) with
+  `ErrFIPSNotApproved`, naming the field, before anything is written; it
+  never drops it silently.
 - `MigrateToFIPS` removes nothing before its verify step (stage 5 in
   [architecture.md](architecture.md#data-flow-importing-a-volume-migratetofips))
   passes; every intermediate state still opens with the original passphrase.

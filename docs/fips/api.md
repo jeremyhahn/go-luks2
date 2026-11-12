@@ -16,7 +16,9 @@ library; it has no REST, gRPC, QUIC, MCP or Unix-socket transport.
 `MigrateParams.KeepNonApproved` keeps the original keyslots (a
 half-migration: `Migration.Complete` is then false and
 `Migration.RetainedNonApproved` lists them); `MigrateParams.KDF` sets the new
-PBKDF2 keyslot's cost and hash (`Hash`'s zero value is SHA-256). A failed
+PBKDF2 keyslot's cost and hash (`Hash`'s zero value is SHA-256); a `KDF`
+naming Argon2, by type or by an Argon2 cost field, is refused before anything
+is written with an error matching `ErrFIPSNotApproved` that names the field. A failed
 migration matches `ErrFIPSMigration` and unwraps to a `*FIPSMigrationError`
 whose `Stage` says where it stopped and whose `State` says what the volume
 was left as; called from a FIPS process it fails at `Stage` "precondition"

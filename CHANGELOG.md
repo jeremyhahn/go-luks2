@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ChangeKeyslot`, `Enroll`) return an error matching `ErrFIPSNotApproved` in
   FIPS mode, where they returned `ErrInvalidArgument`. Outside FIPS mode
   nothing changes: SHA-1 creation is still refused with `ErrInvalidArgument`.
+- **`MigrateToFIPS` refuses Argon2 parameters instead of dropping them.** A
+  `MigrateParams.KDF` naming Argon2 (`KDFArgon2id`, `KDFArgon2i`, or a
+  non-zero `Time`, `MemoryKiB` or `Parallel`) was silently ignored and a
+  PBKDF2 keyslot written. It is now refused before anything is written, with
+  an error matching `ErrFIPSNotApproved` that names the field, and the volume
+  is left unchanged. A PBKDF2 `KDF` migrates as before.
 
 ## [1.0.3-alpha] - 2026-11-10
 

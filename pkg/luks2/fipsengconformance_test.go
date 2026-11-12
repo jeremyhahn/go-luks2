@@ -201,29 +201,66 @@ func TestEngMigrateToFIPSRefusesASHA1TargetHash(t *testing.T) {
 }
 
 // Invariants and Approved KDFs: MigrateParams.KDF sets only the new PBKDF2
-// keyslot's cost and hash, so a caller naming an Argon2 type or cost still
-// gets a volume whose every keyslot and digest is approved: the import never
-// writes Argon2.
+// keyslot's cost and hash. A caller naming an Argon2 type or cost is refused
+// with ErrFIPSNotApproved, the field named and the volume unchanged; a PBKDF2
+// KDF migrates to a volume whose every keyslot and digest is approved: the
+// import never writes Argon2.
 func TestEngMigrateToFIPSWritesOnlyApprovedKDFs(t *testing.T) {
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
 	}
-	cases := []struct {
-		name string
-		kdf  KDFParams
+	// An Argon2 target KDF is refused before anything is written, with the
+	// field named: the import writes PBKDF2 only and does not drop what the
+	// caller asked for.
+	refused := []struct {
+		name, field string
+		kdf         KDFParams
 	}{
-		{"argon2id named", KDFParams{Type: KDFArgon2id, Time: 1, MemoryKiB: minArgon2MemoryKB, Parallel: 1}},
-		{"argon2i named", KDFParams{Type: KDFArgon2i, Time: 1, MemoryKiB: minArgon2MemoryKB, Parallel: 1}},
-		{"an argon2 cost and no type", KDFParams{MemoryKiB: minArgon2MemoryKB}},
+		{"argon2id named", "MigrateParams.KDF.Type", KDFParams{Type: KDFArgon2id, Time: 1, MemoryKiB: minArgon2MemoryKB, Parallel: 1}},
+		{"argon2i named", "MigrateParams.KDF.Type", KDFParams{Type: KDFArgon2i, Time: 1, MemoryKiB: minArgon2MemoryKB, Parallel: 1}},
+		{"an argon2 cost and no type", "MigrateParams.KDF.MemoryKiB", KDFParams{MemoryKiB: minArgon2MemoryKB}},
+		{"an argon2 time and no type", "MigrateParams.KDF.Time", KDFParams{Time: 1}},
+		{"an argon2 parallelism and no type", "MigrateParams.KDF.Parallel", KDFParams{Parallel: 1}},
 	}
-	for _, tc := range cases {
+	for _, tc := range refused {
 		t.Run(tc.name, func(t *testing.T) {
 			path, v := openEngVolume(t, "eng-target-kdf.img")
 			pass := newTestPassphrase(t)
 			defer func() { _ = pass.Destroy() }()
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("snapshot: %v", err)
+			}
 
 			m, err := v.MigrateToFIPS(context.Background(), pass, MigrateParams{KDF: tc.kdf})
+			if !errors.Is(err, ErrFIPSNotApproved) || m != nil {
+				t.Fatalf("MigrateToFIPS with %+v = %+v, %v; want ErrFIPSNotApproved", tc.kdf, m, err)
+			}
+			if !strings.Contains(err.Error(), tc.field) {
+				t.Errorf("MigrateToFIPS error %q does not name %s", err, tc.field)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("re-read: %v", err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Errorf("a refused MigrateToFIPS (%s) changed the image", tc.name)
+			}
+		})
+	}
+
+	// A PBKDF2 target KDF still migrates, and only approved KDFs are written.
+	for _, kdf := range []KDFParams{
+		cheapMigrationParams(),
+		{Type: KDFPBKDF2, Hash: crypto.SHA512, IterTime: time.Millisecond},
+	} {
+		t.Run(fmt.Sprintf("pbkdf2 %v", kdf.Hash), func(t *testing.T) {
+			path, v := openEngVolume(t, "eng-target-kdf.img")
+			pass := newTestPassphrase(t)
+			defer func() { _ = pass.Destroy() }()
+
+			m, err := v.MigrateToFIPS(context.Background(), pass, MigrateParams{KDF: kdf})
 			if err != nil {
 				t.Fatalf("MigrateToFIPS: %v", err)
 			}
