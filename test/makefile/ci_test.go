@@ -61,7 +61,12 @@ create)
 	esac ;;
 import) cat > /dev/null; echo sha256:base ;;
 build)
-	[ -z "${FAKE_BUILD_RACED:-}" ] || touch "$log.raced"
+	if [ -n "${FAKE_BUILD_RACED:-}" ]; then
+		touch "$log.raced"
+		tag=; prev=
+		for a in "$@"; do [ "$prev" != -t ] || tag="$a"; prev="$a"; done
+		echo "ERROR: failed to solve: image \"docker.io/library/$tag\": already exists" >&2
+	fi
 	exit "${FAKE_BUILD_RC:-0}" ;;
 images) printf '%s\n' go-luks2-ci-it:old go-luks2-ci-it:retagged go-luks2-ci-it:fresh go-luks2-ci-it:leased go-luks2-ci-it:sibling go-luks2-ci-it:noid go-luks2-ci-itx:old ;;
 image)
@@ -1394,7 +1399,7 @@ func TestDockerBuildIntegrationToleratesAConcurrentBuildOfItsContentTag(t *testi
 		case tc.wantOK && err != nil:
 			t.Errorf("%s raced=%v: failed although another job built the same content: %v\n%s%s",
 				tc.image, tc.raced, err, stdout, stderr)
-		case tc.wantOK && !strings.Contains(stdout, "another job built the same content"):
+		case tc.wantOK && !strings.Contains(stdout, "was built concurrently"):
 			t.Errorf("%s raced=%v: the success does not say why:\n%s", tc.image, tc.raced, stdout)
 		case !tc.wantOK && err == nil:
 			t.Errorf("%s raced=%v: a failed build passed:\n%s%s", tc.image, tc.raced, stdout, stderr)
