@@ -144,6 +144,10 @@ func TestRunTokenExportExistsAndRemoveRows(t *testing.T) {
 	if err := runTokenRemove(ctx, e, []string{path, "0"}); err != nil {
 		t.Fatalf("runTokenRemove: %v", err)
 	}
+	e, _, _, _, _ = newTestEnv(&bytes.Buffer{})
+	if got := exitCode(runTokenExists(ctx, e, []string{path, "0"})); got != 1 {
+		t.Errorf("exists after token remove: exit %d, want 1 (the token deleted)", got)
+	}
 	e, _, _, _, _ = newTestEnv(bytes.NewBufferString(testPassphrase + "\n"))
 	if err := runTestKey(ctx, e, []string{path}); err != nil {
 		t.Errorf("testkey after token remove: %v, want keyslot 0 still to open the volume", err)
