@@ -140,3 +140,41 @@ func TestImportingTheCoreChangesNoProcessState(t *testing.T) {
 		t.Fatal("parsed no source files; the check proves nothing")
 	}
 }
+
+// TestTheCoreDoesNotLog pins "No logging; errors are typed and returned":
+// no package in the core's closure imports a logger or prints to the
+// process's standard streams.
+func TestTheCoreDoesNotLog(t *testing.T) {
+	loggers := map[string]bool{"log": true, "log/slog": true, "log/syslog": true}
+	printers := map[string]bool{"Print": true, "Printf": true, "Println": true}
+	for _, goos := range []string{"linux", "darwin"} {
+		for pkg, bp := range coreClosure(t, goos) {
+			for _, imp := range bp.Imports {
+				if loggers[imp] {
+					t.Errorf("%s: %s imports %s; the core returns typed errors and does not log", goos, pkg, imp)
+				}
+			}
+			for _, name := range bp.GoFiles {
+				fset := token.NewFileSet()
+				f, err := parser.ParseFile(fset, filepath.Join(bp.Dir, name), nil, parser.SkipObjectResolution)
+				if err != nil {
+					t.Fatalf("%s: %v", pkg, err)
+				}
+				ast.Inspect(f, func(n ast.Node) bool {
+					sel, ok := n.(*ast.SelectorExpr)
+					if !ok {
+						return true
+					}
+					x, ok := sel.X.(*ast.Ident)
+					if !ok {
+						return true
+					}
+					if (x.Name == "fmt" && printers[sel.Sel.Name]) || (x.Name == "os" && (sel.Sel.Name == "Stdout" || sel.Sel.Name == "Stderr")) {
+						t.Errorf("%s: %s uses %s.%s", pkg, fset.Position(sel.Pos()), x.Name, sel.Sel.Name)
+					}
+					return true
+				})
+			}
+		}
+	}
+}
