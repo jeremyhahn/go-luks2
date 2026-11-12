@@ -170,7 +170,7 @@ func (v *Volume) MigrateToFIPS(ctx context.Context, pass enclave.ByteAccess, p M
 
 // refuseArgon2MigrateKDF refuses a MigrateParams.KDF that names Argon2 -- by
 // Type, or by any Argon2 cost field -- with ErrFIPSNotApproved, naming the
-// field. MigrateToFIPS writes PBKDF2 only, so such a KDF cannot be honoured.
+// field. MigrateToFIPS writes PBKDF2 only, so such a KDF cannot be honored.
 func refuseArgon2MigrateKDF(k KDFParams) error {
 	var field string
 	switch {
