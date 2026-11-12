@@ -524,8 +524,19 @@ func TestEveryVolumeWriteMethodTakesTheExclusiveLock(t *testing.T) {
 		{"MigrateToFIPS", func() error { _, err := v.MigrateToFIPS(ctx, pass, MigrateParams{}); return err }},
 	}
 	for _, w := range writes {
+		err := w.call()
+		if w.name == "MigrateToFIPS" && fips140.Enabled() {
+			// A FIPS process refuses the migration at its precondition,
+			// before the lock is ever asked for, and leaves the volume
+			// untouched.
+			var merr *FIPSMigrationError
+			if !errors.Is(err, errFIPSMigrationUnderFIPS) || !errors.As(err, &merr) || merr.State != fipsStateUntouched {
+				t.Errorf("%s in a FIPS process = %v, want the untouched FIPS-mode refusal", w.name, err)
+			}
+			continue
+		}
 		var lte *LockTimeoutError
-		if err := w.call(); !errors.As(err, &lte) {
+		if !errors.As(err, &lte) {
 			t.Errorf("%s beside a foreign shared lock = %v, want a LockTimeoutError", w.name, err)
 		}
 	}
