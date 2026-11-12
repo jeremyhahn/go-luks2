@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/fips140"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -226,6 +227,70 @@ func TestFIPSRefusalDoesNotCallAMalformedDigestAnImport(t *testing.T) {
 	}
 	if !errors.Is(err, ErrInvalidHeader) {
 		t.Fatalf("got %v, want ErrInvalidHeader: no digest can authenticate the keyslot", err)
+	}
+}
+
+// A digest whose name and parameters are approved -- PBKDF2-SHA256 over a
+// full-length salt -- but whose value is 48 bytes, a length SHA-256 never
+// produces, is damage the header screen rejects. The FIPS policy check alone
+// calls it approved, so the migration plan must screen its structure before
+// skipping it: the volume is refused at the plan stage as ErrInvalidHeader,
+// with nothing written, rather than migrated with the damage kept.
+func TestMigrateToFIPSRefusesAnApprovedLookingMalformedDigestAtPlan(t *testing.T) {
+	if fips140.Enabled() {
+		assertMigrationRefusedUnderFIPS(t)
+		return
+	}
+	path := argon2VolumeImage(t, "fips-approved-malformed-digest.img")
+	hdr, metadata, err := readHeaderForTest(path)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+	metadata.Digests["1"] = &header.Digest{
+		Type:       kdfTypePBKDF2,
+		Keyslots:   []string{},
+		Segments:   []string{"0"},
+		Hash:       "sha256",
+		Iterations: 1000,
+		Salt:       base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x5a}, 32)),
+		Digest:     base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0xa5}, 48)),
+	}
+	if _, ok := digestFIPSRefusal("1", metadata.Digests["1"]); !ok {
+		t.Fatal("fixture digest is not approved by the FIPS policy check; the case needs one it approves")
+	}
+	if _, _, err := screenDigestStructure(metadata.Digests["1"]); !errors.Is(err, ErrInvalidHeader) {
+		t.Fatalf("fixture digest passes the header screen (%v); the case needs one it rejects", err)
+	}
+	hdr.SequenceID++
+	if err := writeHeaderInternal(path, hdr, metadata); err != nil {
+		t.Fatalf("writing the fixture failed: %v", err)
+	}
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	t.Cleanup(func() { _ = v.Close() })
+	before := fileDigest(t, path)
+	pass := newTestPassphrase(t)
+	defer func() { _ = pass.Destroy() }()
+
+	m, err := v.MigrateToFIPS(context.Background(), pass, MigrateParams{})
+	if err == nil {
+		t.Fatalf("MigrateToFIPS of a volume with a malformed approved-looking digest succeeded (%+v), want ErrInvalidHeader", m)
+	}
+	if !errors.Is(err, ErrInvalidHeader) {
+		t.Fatalf("MigrateToFIPS: %v, want ErrInvalidHeader", err)
+	}
+	var migration *FIPSMigrationError
+	if !errors.As(err, &migration) {
+		t.Fatalf("MigrateToFIPS: %v is not a *FIPSMigrationError", err)
+	}
+	if migration.Stage != "plan" || migration.State != fipsStateUntouched {
+		t.Errorf("stage %q, state %q; want plan, %q", migration.Stage, migration.State, fipsStateUntouched)
+	}
+	if fileDigest(t, path) != before {
+		t.Fatal("a MigrateToFIPS refused at plan changed the device")
 	}
 }
 

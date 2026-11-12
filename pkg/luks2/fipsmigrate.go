@@ -429,16 +429,20 @@ func migrateToFIPS(ctx context.Context, device string, passphrase []byte, opts *
 		if digest == nil {
 			continue
 		}
-		refusal, approved := digestFIPSRefusal(id, digest)
-		if approved {
-			continue
-		}
 		// A digest the header screen rejects is damage, not a digest to
-		// migrate, and it is reported as the header fault unlock reports.
+		// migrate or to keep, and it is reported as the header fault unlock
+		// reports. Screened before the approval check: digestFIPSRefusal
+		// judges the algorithm, salt and output length, not structure, so a
+		// digest it approves -- a 48-byte PBKDF2-SHA256 value, say -- can
+		// still be one no hash produces.
 		expected, _, err := screenDigestStructure(digest)
 		clearBytes(expected)
 		if err != nil {
 			return fail("plan", fipsStateUntouched, &errs.Error{Kind: ErrInvalidHeader, Detail: "digest " + id + " is malformed", Err: err})
+		}
+		refusal, approved := digestFIPSRefusal(id, digest)
+		if approved {
+			continue
 		}
 		evaluated, matched := evaluateDigest(masterKey, digest, fips.Probe)
 		if !evaluated || !matched {

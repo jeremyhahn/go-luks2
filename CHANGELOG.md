@@ -42,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ErrInvalidHeader`, beside a short-salt digest or not, and `MigrateToFIPS`
   refuses that volume at the plan stage with `ErrInvalidHeader`, where it
   returned the not-approved-digest refusal.
+- **`MigrateToFIPS` no longer keeps a malformed digest that looks approved.**
+  A PBKDF2-SHA256 digest with a full-length salt but a value no hash gives
+  (48 bytes, say) passed the approval check, so planning skipped it and the
+  migration wrote, reported `Complete` and kept the damage. Planning now
+  screens every digest's structure first, and such a volume is refused at the
+  plan stage with `ErrInvalidHeader`, writing nothing.
 
 ## [1.0.3-alpha] - 2026-11-10
 
