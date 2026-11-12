@@ -199,11 +199,40 @@ func TestVolumeSetTokenRefusesAnOutOfRangeID(t *testing.T) {
 	}
 	defer func() { _ = v.Close() }()
 
-	if err := v.SetToken(context.Background(), MaxTokens, Token{Type: "x-test"}); err == nil {
-		t.Error("SetToken(MaxTokens) succeeded, want a range error")
+	for _, id := range []int{-1, MaxTokens, MaxTokens + 8} {
+		if err := v.SetToken(context.Background(), id, Token{Type: "x-test"}); !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("SetToken(%d) = %v, want ErrInvalidArgument", id, err)
+		}
 	}
-	if err := v.SetToken(context.Background(), -1, Token{Type: "x-test"}); err == nil {
-		t.Error("SetToken(-1) succeeded, want a range error")
+	hdr, err := v.Header(context.Background())
+	if err != nil {
+		t.Fatalf("Header: %v", err)
+	}
+	if n := len(hdr.Tokens()); n != 0 {
+		t.Errorf("a refused SetToken wrote a token: %d tokens", n)
+	}
+}
+
+// Token slots are 0-31: RemoveToken refuses an id outside that range with
+// ErrInvalidArgument before it reads or locks the header, and never reports
+// ErrTokenNotFound for it.
+func TestVolumeRemoveTokenRefusesAnOutOfRangeID(t *testing.T) {
+	path := formattedVolumeImage(t, "removetoken-range.img", "", "")
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
+	for _, id := range []int{-1, MaxTokens, MaxTokens + 8} {
+		err := v.RemoveToken(context.Background(), id)
+		if !errors.Is(err, ErrInvalidArgument) || errors.Is(err, ErrTokenNotFound) {
+			t.Errorf("RemoveToken(%d) = %v, want ErrInvalidArgument", id, err)
+		}
+	}
+	if err := v.RemoveToken(context.Background(), MaxTokens-1); !errors.Is(err, ErrTokenNotFound) {
+		t.Errorf("RemoveToken(%d) on an empty slot = %v, want ErrTokenNotFound", MaxTokens-1, err)
 	}
 }
 
