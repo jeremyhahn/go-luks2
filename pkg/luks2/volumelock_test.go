@@ -7,6 +7,7 @@
 package luks2
 
 import (
+	"bytes"
 	"context"
 	"crypto/fips140"
 	"errors"
@@ -401,6 +402,145 @@ func TestWithLockWaitZeroTriesOnce(t *testing.T) {
 	}
 	if lte.Attempts != 1 {
 		t.Errorf("attempts = %d, want exactly one", lte.Attempts)
+	}
+}
+
+// TestVolumeUnlockTakesTheSharedReadLock pins the Unlock data flow: Unlock
+// takes the read lock, so a writer holding the device exclusively is waited
+// for (and, with WithLockWait(0), refused before any derivation), while a
+// foreign shared holder does not block it.
+func TestVolumeUnlockTakesTheSharedReadLock(t *testing.T) {
+	device, passphrase := unlockableVolume(t)
+
+	unlock := func(sys volumeSys) (*Key, error) {
+		t.Helper()
+		v, err := Open(context.Background(), device, withTestSys(sys), WithLockWait(0))
+		if err != nil {
+			t.Fatalf("Open failed: %v", err)
+		}
+		defer func() { _ = v.Close() }()
+		pass, err := enclave.NewMemoryCopy(passphrase)
+		if err != nil {
+			t.Fatalf("could not build the test passphrase enclave: %v", err)
+		}
+		defer func() { _ = pass.Destroy() }()
+		return v.Unlock(context.Background(), pass)
+	}
+	foreign := func(how int) *os.File {
+		t.Helper()
+		f, err := os.OpenFile(device, os.O_RDONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := unix.Flock(int(f.Fd()), how|unix.LOCK_NB); err != nil {
+			_ = f.Close()
+			t.Fatal(err)
+		}
+		return f
+	}
+
+	writer := foreign(unix.LOCK_EX)
+	calls, sys := countKDFCalls(t)
+	k, err := unlock(sys)
+	if k != nil {
+		k.Destroy()
+	}
+	var lte *LockTimeoutError
+	if !errors.As(err, &lte) {
+		t.Fatalf("Unlock under a foreign exclusive lock = %v, want a LockTimeoutError", err)
+	}
+	if *calls != 0 {
+		t.Fatalf("Unlock reached %d derivation(s) without its read lock", *calls)
+	}
+	_ = writer.Close()
+
+	reader := foreign(unix.LOCK_SH)
+	defer func() { _ = reader.Close() }()
+	k, err = unlock(testVolumeSys())
+	if err != nil {
+		t.Fatalf("Unlock beside a foreign shared lock = %v, want success", err)
+	}
+	k.Destroy()
+}
+
+// TestEveryVolumeWriteMethodTakesTheExclusiveLock pins the write path: each
+// write method takes its lock exclusively, so a foreign shared holder (a
+// reader, as cryptsetup's own open takes) refuses it under WithLockWait(0),
+// and the device is left byte for byte as it was.
+func TestEveryVolumeWriteMethodTakesTheExclusiveLock(t *testing.T) {
+	device, passphrase := unlockableVolume(t)
+	v, err := Open(context.Background(), device, withTestSys(testVolumeSys()), WithLockWait(0))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+	pass, err := enclave.NewMemoryCopy(passphrase)
+	if err != nil {
+		t.Fatalf("could not build the test passphrase enclave: %v", err)
+	}
+	defer func() { _ = pass.Destroy() }()
+	key, err := v.Unlock(context.Background(), pass)
+	if err != nil {
+		t.Fatalf("Unlock failed: %v", err)
+	}
+	defer key.Destroy()
+	rk, err := NewRecoveryKey()
+	if err != nil {
+		t.Fatalf("NewRecoveryKey failed: %v", err)
+	}
+	defer rk.Destroy()
+	provider := &fakeKeyProvider{credential: []byte("a-provider-credential"), token: Token{Type: "x-provider", Keyslots: []int{0}}}
+
+	before, err := os.ReadFile(device)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := os.OpenFile(device, os.O_RDONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Close() }()
+	if err := unix.Flock(int(reader.Fd()), unix.LOCK_SH|unix.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	writes := []struct {
+		name string
+		call func() error
+	}{
+		{"Format", func() error { return v.Format(ctx, pass, FormatParams{}) }},
+		{"Erase", func() error { return v.Erase(ctx) }},
+		{"AddKeyslot", func() error { _, err := v.AddKeyslot(ctx, key, pass, KeyslotParams{}); return err }},
+		{"ChangeKeyslot", func() error { _, err := v.ChangeKeyslot(ctx, key, pass, KeyslotParams{}); return err }},
+		{"RemoveKeyslot", func() error { return v.RemoveKeyslot(ctx, 0) }},
+		{"AddToken", func() error { _, err := v.AddToken(ctx, Token{Type: "x-test"}); return err }},
+		{"SetToken", func() error { return v.SetToken(ctx, 0, Token{Type: "x-test"}) }},
+		{"RemoveToken", func() error { return v.RemoveToken(ctx, 0) }},
+		{"Enroll", func() error { _, err := v.Enroll(ctx, key, provider, KeyslotParams{}); return err }},
+		{"AddRecoveryKey", func() error { _, err := v.AddRecoveryKey(ctx, key, rk, KeyslotParams{}); return err }},
+		{"RestorePrimaryHeader", func() error { return v.RestorePrimaryHeader(ctx) }},
+		{"ReplacePrimaryHeader", func() error { return v.ReplacePrimaryHeader(ctx) }},
+		{"MigrateToFIPS", func() error { _, err := v.MigrateToFIPS(ctx, pass, MigrateParams{}); return err }},
+	}
+	for _, w := range writes {
+		var lte *LockTimeoutError
+		if err := w.call(); !errors.As(err, &lte) {
+			t.Errorf("%s beside a foreign shared lock = %v, want a LockTimeoutError", w.name, err)
+		}
+	}
+	after, err := os.ReadFile(device)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("a write method changed the device while a foreign reader held it")
+	}
+
+	// Control: the same handle still reads beside the shared holder, so the
+	// refusals above are the exclusive lock and not a broken handle.
+	if _, err := v.Header(ctx); err != nil {
+		t.Fatalf("Header beside a foreign shared lock = %v, want success", err)
 	}
 }
 
