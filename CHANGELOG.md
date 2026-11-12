@@ -31,6 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   PBKDF2 keyslot written. It is now refused before anything is written, with
   an error matching `ErrFIPSNotApproved` that names the field, and the volume
   is left unchanged. A PBKDF2 `KDF` migrates as before.
+- **A short PBKDF2 salt in strict FIPS mode asks for an import.** Under
+  `GODEBUG=fips140=only`, unlocking a volume whose PBKDF2 keyslot or digest has
+  a salt under 128 bits failed with `ErrInvalidHeader`, as if the header were
+  damaged. It now fails with `*FIPSImportRequiredError`, like any other keyslot
+  refused only by FIPS; the open is still refused, and `MigrateToFIPS` imports
+  the volume.
 
 ## [1.0.3-alpha] - 2026-11-10
 

@@ -957,9 +957,13 @@ func keyslotRefusedByFIPS(id string, keyslot *header.Keyslot, digests map[string
 		return false
 	}
 
-	// A keyslot the screen passes was refused later -- reading or decrypting
-	// its area -- and no FIPS gate runs there.
-	if _, err := screenKeyslot(id, keyslot, digests, fipsMode); err == nil {
+	// A keyslot the screen passes, whose KDF and covering digests are all
+	// approved, was refused later -- reading or decrypting its area -- and no
+	// FIPS gate runs there. One whose names pass but whose parameters do not
+	// (a PBKDF2 salt or output too short) is refused at derivation by strict
+	// mode instead, and the stand-ins below decide it like any other.
+	if _, err := screenKeyslot(id, keyslot, digests, fipsMode); err == nil &&
+		keyslotFIPSApproved(keyslot) && coveringDigestsFIPSApproved(id, digests) {
 		return false
 	}
 
@@ -984,6 +988,17 @@ func keyslotRefusedByFIPS(id string, keyslot *header.Keyslot, digests map[string
 
 	_, err := screenKeyslot(id, standIn, standInDigests, fipsMode)
 	return err == nil
+}
+
+// coveringDigestsFIPSApproved reports whether every digest that covers keyslot
+// id is one strict FIPS mode will evaluate.
+func coveringDigestsFIPSApproved(id string, digests map[string]*header.Digest) bool {
+	for _, digest := range digests {
+		if digestCovers(digest, id) && !digestFIPSApproved(digest) {
+			return false
+		}
+	}
+	return true
 }
 
 // fipsStandInKeyslot returns keyslot with its KDF replaced by an approved

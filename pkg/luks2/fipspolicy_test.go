@@ -259,6 +259,13 @@ func TestKeyslotRefusedByFIPSIsComputed(t *testing.T) {
 	badCipher.Area = &area
 	reencrypt := *approved
 	reencrypt.Type = "reencrypt"
+	// Eight bytes: the name is approved, the salt is under strict mode's
+	// 128-bit floor, so derivation is refused although the screen passes.
+	const shortSalt = "c2hvcnRzYWw="
+	shortSaltKeyslot := *approved
+	shortKDF := *approved.KDF
+	shortKDF.Salt = shortSalt
+	shortSaltKeyslot.KDF = &shortKDF
 
 	cases := []struct {
 		name    string
@@ -277,6 +284,8 @@ func TestKeyslotRefusedByFIPSIsComputed(t *testing.T) {
 			d.Digest = "!!! not base64 !!!"
 		}), false},
 		{"approved keyslot with a cipher nothing implements", &badCipher, digests, false},
+		{"pbkdf2 keyslot with a short salt", &shortSaltKeyslot, digests, true},
+		{"approved keyslot, pbkdf2 digest with a short salt", approved, withDigest(func(d *header.Digest) { d.Salt = shortSalt }), true},
 	}
 
 	forced := forceFIPSPolicy(t)

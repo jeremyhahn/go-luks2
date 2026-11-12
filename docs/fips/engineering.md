@@ -114,7 +114,10 @@ obstacle; a malformed SHA-1 digest is `ErrInvalidHeader`.
 Approved means what strict FIPS mode will run. Under `fips140=only`,
 `crypto/pbkdf2` also refuses a salt under 128 bits and an output under
 112 bits. A PBKDF2 keyslot or digest below either is treated like Argon2, and
-`NonApprovedKDF.Reason` names the parameter.
+`NonApprovedKDF.Reason` names the parameter. Such a keyslot or digest passes
+the pre-derivation screen, whose names are approved, and is refused at
+derivation; unlock still reports it as `*FIPSImportRequiredError`, not as
+`ErrInvalidHeader`.
 
 Argon2 digests from other writers (`time`, `memory`, `cpus` members, bounded
 like keyslot KDFs) are evaluated outside FIPS mode and rewritten as PBKDF2 by

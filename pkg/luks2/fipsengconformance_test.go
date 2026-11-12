@@ -325,10 +325,10 @@ func TestEngFIPSCodeDoesNotLog(t *testing.T) {
 // Without cryptsetup: the fixture is the library's own PBKDF2 format,
 // weakened in a fips140=off child.
 //
-// The open is refused as ErrInvalidHeader ("digests ... are unusable"), not
-// as the *FIPSImportRequiredError the Error semantics section names: the
-// unlock classifier re-screens only keyslots the pre-derivation screen
-// refused, and the policy screen does not judge salt or output length.
+// The open is refused as the *FIPSImportRequiredError the Error semantics
+// section names, not as a damaged header: the pre-derivation screen passes
+// the approved names, strict mode refuses the short salt at derivation, and
+// the unlock classifier counts that keyslot as refused only by FIPS.
 func TestEngAShortSaltPBKDF2VolumeIsNotOpenedInStrictMode(t *testing.T) {
 	image := newImage(t, "eng-short-salt.img")
 	if err := formatForTest(formatOptionsForTest{
@@ -363,8 +363,11 @@ func TestEngAShortSaltPBKDF2VolumeIsNotOpenedInStrictMode(t *testing.T) {
 	}
 
 	before := fileDigest(t, image)
-	if code, out := runChild(t, childRoleOpen, image, "fips140=only", true); code == childOK {
-		t.Fatalf("a strict FIPS process opened a volume whose only digest has a short salt\n%s", out)
+	// Not opened, and the caller is told to import: the short salt is a FIPS
+	// parameter refusal, so the open fails as *FIPSImportRequiredError, not as
+	// a damaged header.
+	if code, out := runChild(t, childRoleOpen, image, "fips140=only", true); code != childImportRequired {
+		t.Fatalf("a strict FIPS open of a volume whose only digest has a short salt exited %d, want %d (*FIPSImportRequiredError)\n%s", code, childImportRequired, out)
 	}
 	if fileDigest(t, image) != before {
 		t.Fatal("the refused open changed the device")
