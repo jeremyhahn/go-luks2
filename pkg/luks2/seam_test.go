@@ -246,15 +246,6 @@ func (p consumerProvider) Passphrase(context.Context) (enclave.ByteAccess, error
 
 func (p consumerProvider) Token() luks2.Token { return p.token }
 
-// boundProvider runs another provider for the credential and reports the
-// token recorded on the device, keyslots included.
-type boundProvider struct {
-	luks2.KeyProvider
-	token luks2.Token
-}
-
-func (p boundProvider) Token() luks2.Token { return p.token }
-
 // assertEnrollAndUnlock enrolls p and unlocks with it, and checks that the
 // provider's keyslot is the one that opened, and that a token was written
 // exactly when the provider names one.
@@ -374,17 +365,12 @@ func TestSeamEnrollAFIDO2KeyProvider(t *testing.T) {
 	if got := p.Token().Type; got != keyprovider.TokenTypeFIDO2 {
 		t.Fatalf("FIDO2 token type = %q, want %q", got, keyprovider.TokenTypeFIDO2)
 	}
-	// Unlock rebuilds the provider from the token on the device, as a boot
-	// path does, not from the enrollment options. FromToken's provider
-	// reports the binding without the token's keyslots, and
-	// UnlockWithProvider tries only the keyslots a provider's token names, so
-	// the caller binds them: boundProvider is that step.
+	// Unlock rebuilds the provider from the token read back from the header,
+	// as a boot path does, not from the enrollment options. The rebuilt
+	// provider names the token's keyslots, the only ones UnlockWithProvider
+	// tries, so the caller unlocks with it as it is.
 	assertEnrollAndUnlock(t, p, func(tok luks2.Token) (luks2.KeyProvider, error) {
-		rebuilt, err := keyprovider.FromToken(tok, tools, device)
-		if err != nil {
-			return nil, err
-		}
-		return boundProvider{KeyProvider: rebuilt, token: tok}, nil
+		return keyprovider.FromToken(tok, tools, device)
 	})
 }
 
