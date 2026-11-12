@@ -10,7 +10,13 @@ import (
 	"crypto"
 	"crypto/rand"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/jeremyhahn/go-enclave"
@@ -227,5 +233,112 @@ func TestRecoveryEngEnrollKeepsTheFullFloor(t *testing.T) {
 	}
 	if refusal.Min <= minPBKDF2Iterations {
 		t.Errorf("Enroll reports a floor of %d, want the passphrase floor above %d", refusal.Min, minPBKDF2Iterations)
+	}
+}
+
+// parseRecoverySources parses the non-test Go files of the recovery path:
+// pkg/luks2/recovery.go and internal/recoverykey.
+func parseRecoverySources(t *testing.T) map[string]*ast.File {
+	t.Helper()
+	paths := []string{"recovery.go"}
+	more, err := filepath.Glob(filepath.Join("..", "..", "internal", "recoverykey", "*.go"))
+	if err != nil {
+		t.Fatalf("Glob: %v", err)
+	}
+	for _, p := range more {
+		if !strings.HasSuffix(p, "_test.go") {
+			paths = append(paths, p)
+		}
+	}
+	if len(paths) < 2 {
+		t.Fatalf("found no internal/recoverykey sources beside recovery.go")
+	}
+	files := make(map[string]*ast.File, len(paths))
+	fset := token.NewFileSet()
+	for _, p := range paths {
+		f, err := parser.ParseFile(fset, p, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", p, err)
+		}
+		files[p] = f
+	}
+	return files
+}
+
+// Observability: "No logging." Exported surface: "the library itself has no
+// file I/O in this path." The recovery path imports neither a logger nor os,
+// and prints nothing.
+func TestRecoveryEngPathHasNoLoggingAndNoFileIO(t *testing.T) {
+	forbidden := map[string]bool{"log": true, "log/slog": true, "os": true}
+	for name, f := range parseRecoverySources(t) {
+		for _, imp := range f.Imports {
+			path, err := strconv.Unquote(imp.Path.Value)
+			if err != nil {
+				t.Fatalf("%s: import %s: %v", name, imp.Path.Value, err)
+			}
+			if forbidden[path] {
+				t.Errorf("%s imports %q", name, path)
+			}
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "fmt" &&
+				(strings.HasPrefix(sel.Sel.Name, "Print") || strings.HasPrefix(sel.Sel.Name, "Fprint")) {
+				t.Errorf("%s calls fmt.%s", name, sel.Sel.Name)
+			}
+			return true
+		})
+	}
+}
+
+// "No free function generates, saves, loads or verifies a recovery key."
+func TestRecoveryEngNoFreeRecoveryFunctions(t *testing.T) {
+	removed := map[string]bool{
+		"GenerateRecoveryKey":    true,
+		"SaveRecoveryKey":        true,
+		"LoadRecoveryKey":        true,
+		"LoadRecoveryCredential": true,
+		"RecoveryCredential":     true,
+		"VerifyRecoveryKey":      true,
+	}
+	sources, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("Glob: %v", err)
+	}
+	fset := token.NewFileSet()
+	for _, p := range sources {
+		if strings.HasSuffix(p, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, p, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", p, err)
+		}
+		for _, decl := range f.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if d.Recv == nil && removed[d.Name.Name] {
+					t.Errorf("%s declares func %s", p, d.Name.Name)
+				}
+			case *ast.GenDecl:
+				for _, spec := range d.Specs {
+					switch s := spec.(type) {
+					case *ast.TypeSpec:
+						if removed[s.Name.Name] {
+							t.Errorf("%s declares type %s", p, s.Name.Name)
+						}
+					case *ast.ValueSpec:
+						for _, n := range s.Names {
+							if removed[n.Name] {
+								t.Errorf("%s declares %s", p, n.Name)
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 }
