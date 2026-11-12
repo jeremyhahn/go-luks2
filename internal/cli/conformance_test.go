@@ -104,6 +104,48 @@ func TestRunWipeCanceledExitsOne(t *testing.T) {
 	}
 }
 
+// docs/tokens/cli.md: export --file - writes to standard output; exists
+// answers in its exit status (0 present, 1 absent) while other failures keep
+// their own; remove deletes the token only, so its keyslot still opens.
+func TestRunTokenExportExistsAndRemoveRows(t *testing.T) {
+	ctx := context.Background()
+	path := newTestVolumeImage(t, "token-rows.img")
+	e, _, _, _, _ := newTestEnv(bytes.NewBufferString(`{"type":"user-defined","keyslots":["0"]}`))
+	if err := runTokenImport(ctx, e, []string{"--file", "-", path, "0"}); err != nil {
+		t.Fatalf("runTokenImport: %v", err)
+	}
+
+	e, _, _, stdout, _ := newTestEnv(&bytes.Buffer{})
+	if err := runTokenExport(ctx, e, []string{path, "0", "--file", "-"}); err != nil {
+		t.Fatalf("runTokenExport --file -: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "user-defined") {
+		t.Errorf("export --file - stdout = %q, want the token JSON", stdout.String())
+	}
+
+	e, _, _, _, _ = newTestEnv(&bytes.Buffer{})
+	if got := exitCode(runTokenExists(ctx, e, []string{path, "0"})); got != 0 {
+		t.Errorf("exists on a present token: exit %d, want 0", got)
+	}
+	e, _, _, _, _ = newTestEnv(&bytes.Buffer{})
+	if got := exitCode(runTokenExists(ctx, e, []string{path, "5"})); got != 1 {
+		t.Errorf("exists on an absent token: exit %d, want 1", got)
+	}
+	e, _, _, _, _ = newTestEnv(&bytes.Buffer{})
+	if got := exitCode(runTokenExists(ctx, e, []string{newPlainImage(t, "not-luks.img"), "0"})); got != 4 {
+		t.Errorf("exists on a non-LUKS2 device: exit %d, want 4 (its own status, not absent)", got)
+	}
+
+	e, _, _, _, _ = newTestEnv(&bytes.Buffer{})
+	if err := runTokenRemove(ctx, e, []string{path, "0"}); err != nil {
+		t.Fatalf("runTokenRemove: %v", err)
+	}
+	e, _, _, _, _ = newTestEnv(bytes.NewBufferString(testPassphrase + "\n"))
+	if err := runTestKey(ctx, e, []string{path}); err != nil {
+		t.Errorf("testkey after token remove: %v, want keyslot 0 still to open the volume", err)
+	}
+}
+
 // docs/filesystems/cli.md: without -t, a mapping on which Detect finds no
 // filesystem, more than one signature or a non-filesystem is refused with
 // exit 1, and nothing is mounted.
