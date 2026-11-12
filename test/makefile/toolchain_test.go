@@ -5,7 +5,10 @@
 package makefile
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -505,22 +508,14 @@ func makeRecipe(t *testing.T, makefile, target string) string {
 // go.mod files it needs to load the graph and nothing else -- what an empty
 // cache holds after the graph loads through an open GOPROXY, as in CI's
 // security step -- it verified nothing and printed "all modules verified".
+//
+// The fixture is built from nothing the local module cache must hold, so it
+// runs the same with GOPROXY=off over an empty cache: a module file naming one
+// dependency whose go.mod, and only its go.mod, is in a new cache.
 func TestVerifyFailsOnAModuleCacheWithoutSources(t *testing.T) {
 	goBin := lookPath(t, "go")
-	out, err := exec.Command(goBin, "env", "GOMODCACHE").Output() // #nosec G204 -- the go tool on PATH
-	if err != nil {
-		t.Fatalf("go env GOMODCACHE: %v", err)
-	}
-	// A fresh module cache holds only what earlier builds fetched; loading the
-	// module graph fetches the go.mod file of every module in it, so the copy
-	// below holds all of them and bare `go mod verify` can load the graph.
-	graph := exec.Command(goBin, "list", "-mod=readonly", "-m", "all") // #nosec G204 -- the go tool on PATH
-	graph.Dir = repoRoot(t)
-	if got, err := graph.CombinedOutput(); err != nil {
-		t.Fatalf("loading the module graph: %v\n%s", err, got)
-	}
-	cache := modFilesOnly(t, filepath.Join(strings.TrimSpace(string(out)), "cache", "download"))
-	env := environ(nil, map[string]string{"GOMODCACHE": cache, "GOPROXY": "off", "GOFLAGS": "-mod=readonly"})
+	cache, modfile := sourcelessModule(t)
+	env := environ(nil, map[string]string{"GOMODCACHE": cache, "GOPROXY": "off", "GOFLAGS": "-mod=readonly -modfile=" + modfile})
 
 	// The fixture is the vacuous case: bare `go mod verify` passes on it.
 	bare := exec.Command(goBin, "mod", "verify") // #nosec G204 -- the go tool on PATH
@@ -538,41 +533,43 @@ func TestVerifyFailsOnAModuleCacheWithoutSources(t *testing.T) {
 	}
 }
 
-// modFilesOnly copies the go.mod files of the download cache at src into a new
-// module cache and returns it: enough to load the module graph, no sources.
-func modFilesOnly(t *testing.T, src string) string {
+// sourcelessModule writes a new module cache that holds the go.mod file of one
+// module and none of its sources, and a module file (with its go.sum) that
+// requires that module. It returns the cache and the module file, for -modfile.
+func sourcelessModule(t *testing.T) (cache, modfile string) {
 	t.Helper()
-	dst := t.TempDir()
+	const path, version = "example.com/sourceless", "v1.0.0"
+	cache = t.TempDir()
 	// The go tool extracts modules read-only into this cache when make verify
 	// runs over it; restore write bits before the TempDir cleanup (cleanups run
 	// last-in, first-out) so the cache stays removable.
 	t.Cleanup(func() {
-		if err := makeTreeWritable(dst); err != nil {
-			t.Errorf("making the test's module cache %s removable: %v", dst, err)
+		if err := makeTreeWritable(cache); err != nil {
+			t.Errorf("making the test's module cache %s removable: %v", cache, err)
 		}
 	})
-	copied := 0
-	err := filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() || filepath.Ext(path) != ".mod" || filepath.Base(filepath.Dir(path)) != "@v" {
-			return err
-		}
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		data, err := os.ReadFile(path) // #nosec G304 -- a go.mod file in the module cache
-		if err != nil {
-			return err
-		}
-		to := filepath.Join(dst, "cache", "download", rel)
-		if err := os.MkdirAll(filepath.Dir(to), 0o750); err != nil {
-			return err
-		}
-		copied++
-		return os.WriteFile(to, data, 0o600)
-	})
-	if err != nil || copied == 0 {
-		t.Fatalf("copying the go.mod files of %s: %d copied, %v", src, copied, err)
+	depMod := []byte("module " + path + "\n\ngo 1.21\n")
+	at := filepath.Join(cache, "cache", "download", path, "@v")
+	if err := os.MkdirAll(at, 0o750); err != nil {
+		t.Fatalf("making the module cache: %v", err)
 	}
-	return dst
+	if err := os.WriteFile(filepath.Join(at, version+".mod"), depMod, 0o600); err != nil {
+		t.Fatalf("writing the cached go.mod: %v", err)
+	}
+
+	// go.sum's go.mod hash: dirhash's h1 over the one file named go.mod.
+	file := sha256.Sum256(depMod)
+	summary := sha256.Sum256(fmt.Appendf(nil, "%x  go.mod\n", file))
+	sum := fmt.Sprintf("%s %s/go.mod h1:%s\n", path, version, base64.StdEncoding.EncodeToString(summary[:]))
+
+	dir := t.TempDir()
+	modfile = filepath.Join(dir, "go.mod")
+	fixture := "module github.com/jeremyhahn/go-luks2\n\ngo 1.21\n\nrequire " + path + " " + version + "\n"
+	if err := os.WriteFile(modfile, []byte(fixture), 0o600); err != nil {
+		t.Fatalf("writing the fixture's module file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.sum"), []byte(sum), 0o600); err != nil {
+		t.Fatalf("writing the fixture's go.sum: %v", err)
+	}
+	return cache, modfile
 }
