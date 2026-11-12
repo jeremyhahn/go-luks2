@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"go/parser"
+	"go/token"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -209,5 +212,35 @@ func TestEngUnknownMembersRoundTripThroughEveryNestedObject(t *testing.T) {
 			t.Fatalf("rewrite %d: read back: %v", rewrite, err)
 		}
 		hdr.SequenceID++
+	}
+}
+
+// engineering.md, Observability: no logging; every failure is a returned
+// error. No non-test file of this package imports a logger.
+func TestEngThePackageDoesNotLog(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	checked := 0
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, parser.ImportsOnly)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		checked++
+		for _, imp := range f.Imports {
+			switch path := strings.Trim(imp.Path.Value, `"`); path {
+			case "log", "log/slog", "log/syslog":
+				t.Errorf("%s imports %s", name, path)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no source files found")
 	}
 }

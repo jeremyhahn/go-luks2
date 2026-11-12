@@ -70,7 +70,7 @@ unexported into `internal/header`.
 | `ErrUnsupported` | The checksum algorithm field names anything but `sha256`; on unlock, more than one segment or a segment with an `integrity` member |
 | `ErrUnsupportedRequirement` | A write or unlock met a mandatory requirement this library does not implement |
 | `ErrPrimaryHeaderCurrent` | `RestorePrimaryHeader` would roll the volume back; use `ReplacePrimaryHeader` deliberately |
-| `ErrDeviceChanged` | An in-use claim's re-opened path no longer names the locked file |
+| `ErrDeviceChanged` | Not returned by the header operations: a claim re-opens the locked descriptor itself, not the path, so a re-pointed path cannot reach it; the sentinel stays exported for `errors.Is` |
 | `LockTimeoutError` | The device's lock was held in a conflicting mode (a writer against a read, or anyone against a write) for the lock wait, `DefaultLockWait` unless `WithLockWait` sets another |
 
 `ErrInvalidHeader`, `ErrInvalidArgument`, `ErrInvalidCredential` and `ErrIO`

@@ -135,3 +135,35 @@ func TestHeaderEngSecondaryAndRestoreNeverReadTheDataSegment(t *testing.T) {
 		t.Fatalf("after the restore: %v, %v; want the primary at sequence %d", p, err, want+1)
 	}
 }
+
+// engineering.md, Configuration: MetadataSize is the header-shape knob; the
+// header area both copies are written with is the size it names.
+func TestHeaderEngMetadataSizeSetsTheHeaderArea(t *testing.T) {
+	const size = 64 << 10
+	path := newImage(t, "metasize.img")
+	if err := formatForTest(formatOptionsForTest{
+		Device:        path,
+		Passphrase:    []byte("correct horse battery staple"),
+		KDFType:       kdfTypePBKDF2,
+		PBKDFIterTime: 1,
+		MetadataSize:  size,
+	}); err != nil {
+		t.Fatalf("Format: %v", err)
+	}
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+	p, err := v.Header(context.Background())
+	if err != nil {
+		t.Fatalf("Header: %v", err)
+	}
+	s, err := v.SecondaryHeader(context.Background())
+	if err != nil {
+		t.Fatalf("SecondaryHeader: %v", err)
+	}
+	if p.Size() != size || s.Size() != size || s.Offset() != size {
+		t.Fatalf("sizes %d/%d, secondary offset %d; want %d", p.Size(), s.Size(), s.Offset(), size)
+	}
+}
