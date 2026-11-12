@@ -52,6 +52,35 @@ func TestVolumeEraseIsACryptoErase(t *testing.T) {
 	}
 }
 
+// TestVolumeEraseLeavesTheDataSegment is the SPEC row of docs/wipe/cli.md
+// (header-only): nothing at or past the start of the data segment is
+// touched. It needs no cryptsetup, so it runs in every tier.
+func TestVolumeEraseLeavesTheDataSegment(t *testing.T) {
+	defer parallel(t)()
+
+	path := formattedVolumeImage(t, "volume-erase-data.img", "", "")
+	_, metadata, err := readHeaderForTest(path)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+	dataOffset := firstDataOffset(metadata)
+	payload := bytes.Repeat([]byte("payload!"), 512)
+	writeImageAt(t, path, dataOffset, payload)
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+	if err := v.Erase(context.Background()); err != nil {
+		t.Fatalf("Erase failed: %v", err)
+	}
+
+	if !bytes.Equal(readImageAt(t, path, dataOffset, len(payload)), payload) {
+		t.Fatal("Erase reached the data segment")
+	}
+}
+
 // TestHeaderOnlyWipeNeverReachesTheDataSegment: a header-only wipe zeroes
 // every keyslot area the header lists, but never at or past the start of the
 // data segment, even when a listed area claims to lie inside it.

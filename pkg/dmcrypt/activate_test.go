@@ -213,6 +213,30 @@ func TestActivateTableRoundsTheLengthDownToTheSectorSize(t *testing.T) {
 	}
 }
 
+// TestActivateTableRefusesAZeroOrNegativeSectorSize is the SPEC row of
+// docs/dm-crypt-activation/architecture.md: a table whose sector size is zero
+// or negative is refused, and no table reaches device-mapper.
+func TestActivateTableRefusesAZeroOrNegativeSectorSize(t *testing.T) {
+	for _, size := range []int{0, -512} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			fake := newFakeDeviceMapper()
+			fake.install(t)
+
+			target := testTarget()
+			target.SectorSize = size
+
+			_, _, err := activateTable(context.Background(), "bad-sector", "CRYPT-LUKS2-abc-bad-sector", "7:3", target,
+				testKey(t, make([]byte, 32)))
+			if !errors.Is(err, luks2.ErrInvalidArgument) {
+				t.Fatalf("activateTable(sector size %d) = %v, want ErrInvalidArgument", size, err)
+			}
+			if len(fake.loaded) != 0 {
+				t.Fatalf("a table with sector size %d was handed to device-mapper: %+v", size, fake.loaded)
+			}
+		})
+	}
+}
+
 func TestActivateTableFailsClosedWhenTheKeyringIsUnavailable(t *testing.T) {
 	fake := newFakeDeviceMapper()
 	fake.install(t)

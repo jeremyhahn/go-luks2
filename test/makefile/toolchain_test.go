@@ -535,6 +535,14 @@ func TestVerifyFailsOnAModuleCacheWithoutSources(t *testing.T) {
 func modFilesOnly(t *testing.T, src string) string {
 	t.Helper()
 	dst := t.TempDir()
+	// The go tool extracts modules read-only into this cache when make verify
+	// runs over it; restore write bits before the TempDir cleanup (cleanups run
+	// last-in, first-out) so the cache stays removable.
+	t.Cleanup(func() {
+		if err := makeTreeWritable(dst); err != nil {
+			t.Errorf("making the test's module cache %s removable: %v", dst, err)
+		}
+	})
 	copied := 0
 	err := filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() || filepath.Ext(path) != ".mod" || filepath.Base(filepath.Dir(path)) != "@v" {
