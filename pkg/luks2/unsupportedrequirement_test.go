@@ -1,3 +1,5 @@
+//go:build !integration
+
 // Copyright (c) 2025 Jeremy Hahn
 //
 // SPDX-License-Identifier: Apache-2.0

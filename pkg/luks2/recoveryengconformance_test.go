@@ -1,3 +1,5 @@
+//go:build !integration
+
 package luks2
 
 // Conformance tests for docs/recovery-keys/engineering.md: the requirements
