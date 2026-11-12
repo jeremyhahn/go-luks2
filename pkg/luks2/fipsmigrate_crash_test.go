@@ -99,11 +99,15 @@ type crashFixtureEntry struct {
 	prefix     []byte
 	dataOffset int64
 	key        []byte
-	// The migration from prefix, recorded once by recordedMigration.
-	recorded bool
-	steps    []crashStep
-	result   *fipsMigrationResultForTest
-	final    []byte
+	// The migration from prefix, recorded once by recordedMigration under
+	// record: parallel tests share the entry, so the fields below are written
+	// only inside record.Do and read only after it returns. Callers treat
+	// them as read-only.
+	record    sync.Once
+	recordErr error
+	steps     []crashStep
+	result    *fipsMigrationResultForTest
+	final     []byte
 }
 
 // crashFixture is buildCrashFixture, built once per shape per process. Its
@@ -140,17 +144,20 @@ func recordedMigration(t *testing.T, sha1Digest bool) (*crashFixtureEntry, []cra
 	t.Helper()
 
 	e := crashFixtureFor(t, sha1Digest)
-	crashFixtureCache.Lock()
-	recorded := e.recorded
-	crashFixtureCache.Unlock()
-	if !recorded {
+	e.record.Do(func() {
+		// A Fatalf in here would leave the once done and the entry empty
+		// for every later caller, so the failure is kept and reported to
+		// each of them instead.
+		e.recordErr = fmt.Errorf("MigrateToFIPS did not record a migration")
 		r, result, err, final := migrateRecording(t, e.prefix, 0)
 		if err != nil {
-			t.Fatalf("MigrateToFIPS failed: %v", err)
+			e.recordErr = fmt.Errorf("MigrateToFIPS failed: %w", err)
+			return
 		}
-		crashFixtureCache.Lock()
-		e.steps, e.result, e.final, e.recorded = r.writeSteps(final), result, final, true
-		crashFixtureCache.Unlock()
+		e.steps, e.result, e.final, e.recordErr = r.writeSteps(final), result, final, nil
+	})
+	if e.recordErr != nil {
+		t.Fatal(e.recordErr)
 	}
 	return e, e.steps
 }
@@ -697,6 +704,7 @@ func TestWriteHeaderStopsBeforeTheSecondaryWhenThePrimarySyncFails(t *testing.T)
 // digest, as a default volume does, so no digest rewrite happens to reconcile
 // the copies by accident.
 func TestMigrateToFIPSResumedAfterACrashKeepsAWayIn(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -719,6 +727,10 @@ func TestMigrateToFIPSResumedAfterACrashKeepsAWayIn(t *testing.T) {
 			continue
 		}
 		t.Run(start.class, func(t *testing.T) {
+			// Parallel as well, never a sequential middle level: its own
+			// subtests take slots, and a sequential level between them and a
+			// slot-holding parent is the shape parallel(t) warns deadlocks.
+			defer parallel(t)()
 			r, result, err, final := migrateRecording(t, start.image, 0)
 
 			if err != nil || !result.Complete {
@@ -864,6 +876,7 @@ func TestMigrateToFIPSReportsADamagedPrimaryAfterAFailedHeaderWrite(t *testing.T
 // copy damaged after the keyslot was added -- by anything -- is caught by the
 // verification before a single keyslot is removed.
 func TestMigrateToFIPSStopsWhenTheHeaderCopiesDisagreeAfterItsWrites(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -903,6 +916,7 @@ func TestMigrateToFIPSStopsWhenTheHeaderCopiesDisagreeAfterItsWrites(t *testing.
 // writing anything -- the primary, the copy the volume opens through, and the
 // secondary are byte for byte what they were.
 func TestMigrateToFIPSReconcileFailureLeavesThePrimaryAlone(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -1108,6 +1122,7 @@ func TestStateAfterWriteFailureReadsTheDevice(t *testing.T) {
 // every legal offset -- ReadSecondaryHeader with no primary -- finds it; the
 // report must not, because on such a layout that offset can be encrypted data.
 func TestStateAfterWriteFailureReadsOnlyTheKnownSecondary(t *testing.T) {
+	defer parallel(t)()
 	small := newImage(t, "small-metadata.img")
 	if err := formatForTest(metadataSizeFormatOptions(small, 32<<10)); err != nil {
 		t.Fatalf("Format with 32 KiB metadata failed: %v", err)
@@ -1147,6 +1162,7 @@ func TestStateAfterWriteFailureReadsOnlyTheKnownSecondary(t *testing.T) {
 // any write, says the volume is untouched, and leaves the secondary for
 // RestorePrimaryHeader or cryptsetup to rebuild from.
 func TestMigrateToFIPSRefusesATornPrimaryBeforeWriting(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -1178,6 +1194,7 @@ func TestMigrateToFIPSRefusesATornPrimaryBeforeWriting(t *testing.T) {
 // run's durability barrier, and if that barrier fails nothing is written at
 // all.
 func TestMigrateToFIPSMakesAgreeingCopiesDurableBeforeWriting(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -1260,6 +1277,7 @@ func TestMigrateToFIPSMakesAgreeingCopiesDurableBeforeWriting(t *testing.T) {
 // cached view: the run under test drops it before reading anything, and a run
 // that read through it without dropping it fails this test either way.
 func TestMigrateToFIPSReadsTheMediumNotThePageCache(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -1301,6 +1319,7 @@ func TestMigrateToFIPSReadsTheMediumNotThePageCache(t *testing.T) {
 // still agree; the run must find that the cache is not the medium, and stop
 // having written nothing.
 func TestMigrateToFIPSRefusesWhenTheCacheOutlivesItsEviction(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -1411,6 +1430,7 @@ func newCacheModel(t *testing.T, evicts bool) *cacheModel {
 // cannot be shown to come from the medium, it reads nothing and writes
 // nothing.
 func TestMigrateToFIPSStopsWhenTheCacheCannotBeDropped(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -1457,6 +1477,7 @@ func TestDropDeviceCache(t *testing.T) {
 // reboot, or cryptsetup, will find -- and say so when the medium cannot be
 // read at all.
 func TestMigrateToFIPSReportsTheStateOnTheMediumNotInTheCache(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return

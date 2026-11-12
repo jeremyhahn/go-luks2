@@ -95,6 +95,7 @@ func sha1AFVolume(t *testing.T, kind sha1AFKind) string {
 // byte compatibility of the SHA-1 merge -- and a wrong passphrase is a
 // credential verdict, not a header fault.
 func TestSHA1AFVolumesOpenWithCryptsetupsVolumeKey(t *testing.T) {
+	defer parallel(t)()
 	for _, kind := range sha1AFKinds {
 		t.Run(kind.name, func(t *testing.T) {
 			image := sha1AFVolume(t, kind)
@@ -196,6 +197,7 @@ func TestFIPSImportOfSHA1AFVolumes(t *testing.T) {
 // on a SHA-1 keyslot rewrites it with SHA-256, and cryptsetup opens both; and
 // Format refuses a SHA-1 hash before it touches the device.
 func TestNoKeyslotIsWrittenWithSHA1AF(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		// Every step below opens a SHA-1 keyslot first, which FIPS mode
 		// refuses; that refusal is TestSHA1AFVolumesOpenWithCryptsetupsVolumeKey's.

@@ -182,6 +182,7 @@ func TestHeaderWritersStayOnTheDeviceTheyLocked(t *testing.T) {
 // pin closes that off structurally rather than depending on this call site
 // reading the UUID under its own lock.
 func TestAddRecoveryKeyReportsTheVolumeItEnrolled(t *testing.T) {
+	defer parallel(t)()
 	locked := tokenParityFixture(t)
 	other := tokenParityFixture(t)
 	lockedHdr, _, err := readHeaderForTest(locked)

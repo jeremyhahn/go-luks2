@@ -113,6 +113,7 @@ func TestVolumeRequirementsIsNilWhenNoneAreDeclared(t *testing.T) {
 }
 
 func TestVolumeDroppedIsNilForAnIntactHeader(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "dropped.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
