@@ -1,3 +1,7 @@
+// Copyright (c) 2025 Jeremy Hahn
+//
+// SPDX-License-Identifier: Apache-2.0
+
 package filesystem
 
 import (
@@ -42,12 +46,21 @@ func importsOf(t *testing.T, dir string) map[string]string {
 	return imports
 }
 
-// The package is independent of LUKS2 both ways: it imports no LUKS2 or
-// device-mapper package, and pkg/luks2 does not import it.
+// The package is independent of LUKS2 both ways (architecture.md): it knows
+// nothing about headers, keys or mappings, so it imports no package of this
+// module that handles one, nor the protected-memory module keys live in, and
+// pkg/luks2 does not import it.
 func TestFilesystemIsIndependentOfLUKS2(t *testing.T) {
+	forbidden := []string{
+		modulePath + "pkg/luks2", modulePath + "pkg/dmcrypt", modulePath + "pkg/keyprovider",
+		modulePath + "internal/header", modulePath + "internal/dm", modulePath + "internal/keyring",
+		modulePath + "internal/volkey", modulePath + "internal/kdf", modulePath + "internal/af",
+		modulePath + "internal/areacipher", modulePath + "internal/recoverykey", modulePath + "internal/secret",
+		"github.com/jeremyhahn/go-enclave",
+	}
 	for path, file := range importsOf(t, ".") {
-		for _, forbidden := range []string{"pkg/luks2", "pkg/dmcrypt", "internal/header", "internal/dm"} {
-			if path == modulePath+forbidden || strings.HasPrefix(path, modulePath+forbidden+"/") {
+		for _, forbidden := range forbidden {
+			if path == forbidden || strings.HasPrefix(path, forbidden+"/") {
 				t.Errorf("%s imports %s; pkg/filesystem is independent of LUKS2", file, path)
 			}
 		}
