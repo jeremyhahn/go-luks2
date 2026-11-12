@@ -14,6 +14,11 @@ library; it has no REST, gRPC, QUIC, MCP or Unix-socket transport.
 | Unlock through a `KeyProvider` | `(*Volume).UnlockWithProvider(ctx, provider) (*Key, error)`, then `dmcrypt.Activate` |
 | Build a provider | `keyprovider.NewCommand`, `keyprovider.NewFIDO2` |
 | Rebuild a provider from a stored token | `keyprovider.FromToken(token, opts...)` |
+| Token model | `luks2.Token` (`MarshalJSON`, `UnmarshalJSON`), `luks2.MaxTokens`, `luks2.TokenTypeRecovery`, `luks2.LegacyToken`, `luks2.KeyProvider`, `luks2.Enrollment` |
+| Token errors (`pkg/luks2`) | `ErrTokenNotFound`, `ErrNoSpace`, `ErrKeyProvider`, `ErrOrphanedKeyslot`, `*OrphanedKeyslotError`, `ErrInvalidArgument`, `ErrKeyslotNotFound` |
+| Command provider | `keyprovider.Command` (`Passphrase`, `Token`), `CommandOption`, `WithArgs`, `WithStdin`, `WithLine`, `WithEnv`, `WithToken` |
+| FIDO2 provider | `keyprovider.FIDO2` (`Passphrase`, `Token`), `FIDO2Params`, `FIDO2Option`, `WithDevice`, `WithFIDO2Tools`, `FIDO2CredentialParams`, `NewFIDO2Credential`, `NewFIDO2Salt`, `TokenTypeFIDO2`, `DefaultRelyingParty`, `SaltLength`, `SecretLength` |
+| Provider errors (`pkg/keyprovider`) | `ErrInvalidArgument`, `ErrHelperFailed`, `ErrHelperOutput`, `ErrNoDevice`, `ErrInvalidBinding`, `ErrUnsupportedToken`, `*HelperError` (`Unwrap`), `Error` |
 
 ## Enroll a FIDO2 authenticator
 
