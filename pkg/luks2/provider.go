@@ -65,7 +65,7 @@ func (v *Volume) Enroll(ctx context.Context, key *Key, p KeyProvider, kp Keyslot
 		return Enrollment{}, errAt(op, v.path, err)
 	}
 	opts := addKeyOptionsFromKeyslotParams(kp)
-	if err := refuseSHA1ForCreation(opts.KDFType, opts.Hash); err != nil {
+	if err := refuseSHA1ForCreation(opts.KDFType, opts.Hash, v.sys.fipsMode()); err != nil {
 		return Enrollment{}, errAt(op, v.path, err)
 	}
 	if err := validateArgon2CreateCost(callerArgon2Options(opts)); err != nil {

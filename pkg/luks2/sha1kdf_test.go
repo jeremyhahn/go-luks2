@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-luks2/internal/fips"
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
@@ -130,9 +131,17 @@ func TestRefuseSHA1ForCreation(t *testing.T) {
 		{"", "", false},
 		{kdfTypePBKDF2, "sha512", false},
 	} {
-		err := refuseSHA1ForCreation(tc.kdfType, tc.hash)
-		if refused := errors.Is(err, ErrInvalidArgument); refused != tc.refused {
-			t.Fatalf("refuseSHA1ForCreation(%q, %q) = %v, want refused=%v", tc.kdfType, tc.hash, err, tc.refused)
+		// Outside FIPS mode a SHA-1 refusal is ErrInvalidArgument; in FIPS
+		// mode it is ErrFIPSNotApproved, and never the other kind.
+		for _, mode := range []fips.Mode{false, true} {
+			want, other := ErrInvalidArgument, ErrFIPSNotApproved
+			if mode {
+				want, other = ErrFIPSNotApproved, ErrInvalidArgument
+			}
+			err := refuseSHA1ForCreation(tc.kdfType, tc.hash, mode)
+			if refused := errors.Is(err, want); refused != tc.refused || errors.Is(err, other) {
+				t.Fatalf("refuseSHA1ForCreation(%q, %q, fips=%v) = %v, want refused=%v with %v", tc.kdfType, tc.hash, mode, err, tc.refused, want)
+			}
 		}
 	}
 }

@@ -157,8 +157,14 @@ func TestEngSHA1IsNeverWrittenInOrOutOfFIPSMode(t *testing.T) {
 
 				v.sys.fipsMode = func() fips.Mode { return fips.Mode(mode) }
 				err = w.write(v, key, pass)
-				if !errors.Is(err, ErrInvalidArgument) && !errors.Is(err, ErrFIPSNotApproved) {
-					t.Fatalf("%s with PBKDF2-SHA1 = %v, want a refusal", w.name, err)
+				// In FIPS mode the refusal is a FIPS one (SHA-1 is not an
+				// approved PRF); outside it, an invalid argument.
+				want, other := ErrInvalidArgument, ErrFIPSNotApproved
+				if mode {
+					want, other = ErrFIPSNotApproved, ErrInvalidArgument
+				}
+				if !errors.Is(err, want) || errors.Is(err, other) {
+					t.Fatalf("%s with PBKDF2-SHA1 fips=%v = %v, want %v", w.name, mode, err, want)
 				}
 				after, err := os.ReadFile(path)
 				if err != nil {

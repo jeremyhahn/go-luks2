@@ -194,7 +194,7 @@ func formatWithSys(opts formatOptionsForTest, sys volumeSys) error {
 	// so it must be one a keyslot may be WRITTEN with -- never SHA-1 (#236,
 	// #239), nor a pbkdf2-sha1 KDF -- and that is refused here, before the KDF
 	// is paid for and before the device is touched.
-	if err := refuseSHA1ForCreation(opts.KDFType, opts.HashAlgo); err != nil {
+	if err := refuseSHA1ForCreation(opts.KDFType, opts.HashAlgo, sys.fipsMode()); err != nil {
 		return err
 	}
 	if err := af.ValidateWriteHash(opts.HashAlgo); err != nil {
@@ -577,7 +577,7 @@ func (v *Volume) Format(ctx context.Context, pass enclave.ByteAccess, p FormatPa
 	// package-level Format refuses them before its own exclusive claim:
 	// never SHA-1 for the KDF (#239), and never an anti-forensic/digest hash
 	// af.ValidateWriteHash does not write.
-	if err := refuseSHA1ForCreation(kdfOpts.KDFType, kdfOpts.HashAlgo); err != nil {
+	if err := refuseSHA1ForCreation(kdfOpts.KDFType, kdfOpts.HashAlgo, v.sys.fipsMode()); err != nil {
 		return errAt(op, v.path, err)
 	}
 	if err := af.ValidateWriteHash(opts.HashAlgo); err != nil {
@@ -784,7 +784,7 @@ func digestIterationsTimedBy(hashAlgo string, timer pbkdf2Timer) (int, error) {
 // a candidate key against it.
 func createDigest(masterKey enclave.ByteAccess, hashAlgo string, sys volumeSys) (*header.KDF, string, error) {
 	// A digest is written, so it is never PBKDF2-SHA1 (#239).
-	if err := refuseSHA1ForCreation("", hashAlgo); err != nil {
+	if err := refuseSHA1ForCreation("", hashAlgo, sys.fipsMode()); err != nil {
 		return nil, "", err
 	}
 	// CALIBRATED, not a constant. See DigestIterationTargetMs (security.go) for

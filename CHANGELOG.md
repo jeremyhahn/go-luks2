@@ -16,6 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the devcontainer `golang:` image tag and digest, and the README build
   requirement.
 
+### Changed
+
+- **In FIPS mode a SHA-1 PBKDF2 is refused as not approved.**
+  `KDFParams.Validate` now judges the PBKDF2 hash: under FIPS 140-3 mode a
+  PBKDF2 KDF naming SHA-1 fails with an error matching `ErrFIPSNotApproved`.
+  The write paths that refuse a SHA-1 PBKDF2 (`Format`, `AddKeyslot`,
+  `ChangeKeyslot`, `Enroll`) return an error matching `ErrFIPSNotApproved` in
+  FIPS mode, where they returned `ErrInvalidArgument`. Outside FIPS mode
+  nothing changes: SHA-1 creation is still refused with `ErrInvalidArgument`.
+
 ## [1.0.3-alpha] - 2026-11-10
 
 ### Changed

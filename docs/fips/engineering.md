@@ -65,14 +65,16 @@ the pre-flight check is `(KDFParams).Validate()`.
   [architecture.md](architecture.md#data-flow-importing-a-volume-migratetofips))
   passes; every intermediate state still opens with the original passphrase.
 - SHA-1 is never written by any code path, in or out of FIPS mode
-  ([architecture.md](architecture.md#sha-1)).
+  ([architecture.md](architecture.md#sha-1)). In FIPS mode the refusal
+  matches `ErrFIPSNotApproved`, from `KDFParams.Validate` and from every write
+  path; outside it, `ErrInvalidArgument`.
 
 ## Approved KDFs
 
 | `KDFParams.Type` and `Hash` | FIPS-approved | Notes |
 |---|---|---|
 | `KDFPBKDF2` with `SHA256`, `SHA384` or `SHA512` | true | SHA-256 when `Hash` is zero; SHA-512 when the type was defaulted in FIPS mode |
-| `KDFPBKDF2` with SHA-1 | false | Never written; read from old headers outside FIPS mode only |
+| `KDFPBKDF2` with SHA-1 | false | Never written; `Validate` refuses it in FIPS mode with `ErrFIPSNotApproved`; read from old headers outside FIPS mode only |
 | `KDFArgon2i`, `KDFArgon2id` | false | Refused in FIPS mode; `KDFArgon2id` is the default otherwise |
 
 The combined `pbkdf2-sha*` spellings are internal aliases, not public types.
@@ -88,7 +90,7 @@ Argon2 cost gets `argon2id`, which FIPS mode refuses.
 
 | Error | Meaning |
 |---|---|
-| `ErrFIPSNotApproved` | A derivation would use Argon2 or SHA-1 in FIPS mode |
+| `ErrFIPSNotApproved` | A derivation would use Argon2 or SHA-1 in FIPS mode; `KDFParams.Validate` or a write path was given Argon2 or a SHA-1 PBKDF2 in FIPS mode |
 | `*FIPSImportRequiredError` / `ErrFIPSImportRequired` | Every keyslot that could not be tried was refused only for non-approval; the volume is intact and `MigrateToFIPS` would open it. `FIPSImportRequiredError.Unwrap` reports both `ErrFIPSImportRequired` and `ErrFIPSNotApproved` |
 | `*FIPSMigrationError` | A migration stage failed; names the stage and the state left behind. Calling `MigrateToFIPS` from a FIPS process, or with a passphrase whose key matches no digest binding every data segment, is reported this way, at the precondition and verify stages. `FIPSMigrationError.Unwrap` reports `ErrFIPSMigration` for every stage, and the stage's own cause |
 | `ErrDeviceCacheStale` | The page-cache and `O_DIRECT` reads of the header disagree at the start of a run |

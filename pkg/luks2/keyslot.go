@@ -495,7 +495,7 @@ func testKeyForTestWithSys(device string, passphrase []byte, sys volumeSys) erro
 // there. See keyslotCostPolicy (kdf.go) for what the exemption is, what it is
 // not, and why it is not a field on the add-key options.
 func addKeyWithPolicy(ctx context.Context, device string, existingPassphrase, newPassphrase []byte, opts *addKeyOptionsForTest, policy keyslotCostPolicy, sys volumeSys) (int, error) {
-	if err := addKeyPreflight(device, existingPassphrase, newPassphrase, opts); err != nil {
+	if err := addKeyPreflight(device, existingPassphrase, newPassphrase, opts, sys.fipsMode()); err != nil {
 		return -1, err
 	}
 
@@ -528,7 +528,7 @@ func addKeyWithPolicy(ctx context.Context, device string, existingPassphrase, ne
 // device lock. It is separate so that enrollWithToken (keyprovider.go), which
 // must hold ONE lock across the keyslot and the token it writes, makes exactly
 // the same checks rather than a copy of them.
-func addKeyPreflight(device string, existingPassphrase, newPassphrase []byte, opts *addKeyOptionsForTest) error {
+func addKeyPreflight(device string, existingPassphrase, newPassphrase []byte, opts *addKeyOptionsForTest, mode fips.Mode) error {
 	// Validate inputs. The existing credential is judged by what can open a
 	// keyslot -- a cryptsetup keyfile of up to 8 MiB, a short legacy
 	// passphrase -- and the NEW one by the policy for credentials this package
@@ -545,7 +545,7 @@ func addKeyPreflight(device string, existingPassphrase, newPassphrase []byte, op
 	// No SHA-1 keyslot, refused before the existing keyslot is unlocked --
 	// which costs a full KDF derivation -- and before anything is written.
 	if opts != nil {
-		if err := refuseSHA1ForCreation(opts.KDFType, opts.Hash); err != nil {
+		if err := refuseSHA1ForCreation(opts.KDFType, opts.Hash, mode); err != nil {
 			return err
 		}
 	}
