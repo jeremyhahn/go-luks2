@@ -372,6 +372,36 @@ func TestCommandRefusesAnUntrustedHelper(t *testing.T) {
 	}
 }
 
+// A trusted helper the kernel cannot start (its interpreter does not exist)
+// never ran, so its *HelperError records ExitCode -1 and no exit status.
+func TestCommandHelperThatNeverRanReportsExitCodeMinusOne(t *testing.T) {
+	helper := filepath.Join(privateDir(t), "helper")
+	script := "#!/nonexistent-interpreter/sh\nprintf secret\n"
+	if err := os.WriteFile(helper, []byte(script), 0o700); err != nil { // #nosec G306 -- an executable test fixture under t.TempDir()
+		t.Fatal(err)
+	}
+	p, err := NewCommand(helper)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := p.Passphrase(context.Background())
+	if err == nil {
+		mustDestroy(t, got)
+		t.Fatal("Passphrase() succeeded for a helper that cannot start")
+	}
+	if !errors.Is(err, ErrHelperFailed) {
+		t.Fatalf("Passphrase() error = %v, want errors.Is(_, ErrHelperFailed)", err)
+	}
+	var he *HelperError
+	if !errors.As(err, &he) {
+		t.Fatalf("Passphrase() error = %v, want a *HelperError", err)
+	}
+	if he.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1 for a helper that never ran", he.ExitCode)
+	}
+}
+
 // TestHelperFixturesHoldUnderAGroupWritableUmask runs a helper end to end
 // under the umask a stock Ubuntu login has (0002), where t.TempDir() is
 // group-writable: the fixtures must still be trusted, and the bare

@@ -318,6 +318,52 @@ func TestFromTokenBuildsTheBindingTheHeaderRecords(t *testing.T) {
 	}
 }
 
+// A systemd-fido2 token written by another tool may omit any of the three
+// requirement members. An absent member reads as false, never as true and
+// never as an error, and a present false stays false.
+func TestFromTokenReadsAnAbsentRequirementAsFalse(t *testing.T) {
+	params := fido2TestParams(t)
+	params.UserPresence, params.UserVerification, params.ClientPIN = true, true, true
+	members := []string{"fido2-up-required", "fido2-uv-required", "fido2-clientPin-required"}
+
+	for _, absent := range members {
+		t.Run(absent, func(t *testing.T) {
+			token := fido2Token(params)
+			if _, ok := token.Members[absent]; !ok {
+				t.Fatalf("fido2Token wrote no %s member", absent)
+			}
+			delete(token.Members, absent)
+
+			round, err := fido2ParamsFromToken(token)
+			if err != nil {
+				t.Fatalf("fido2ParamsFromToken() error = %v", err)
+			}
+			got := map[string]bool{
+				"fido2-up-required":        round.UserPresence,
+				"fido2-uv-required":        round.UserVerification,
+				"fido2-clientPin-required": round.ClientPIN,
+			}
+			for _, m := range members {
+				if want := m != absent; got[m] != want {
+					t.Errorf("%s = %v, want %v", m, got[m], want)
+				}
+			}
+		})
+	}
+
+	t.Run("present false", func(t *testing.T) {
+		p := params
+		p.UserPresence, p.UserVerification, p.ClientPIN = false, false, false
+		round, err := fido2ParamsFromToken(fido2Token(p))
+		if err != nil {
+			t.Fatalf("fido2ParamsFromToken() error = %v", err)
+		}
+		if round.UserPresence || round.UserVerification || round.ClientPIN {
+			t.Errorf("a recorded false read back as true: %+v", round)
+		}
+	})
+}
+
 func TestFromTokenRefusesWhatItCannotDrive(t *testing.T) {
 	tests := []struct {
 		name  string
