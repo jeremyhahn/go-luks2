@@ -236,6 +236,41 @@ func TestVolumeRemoveTokenRefusesAnOutOfRangeID(t *testing.T) {
 	}
 }
 
+// TestVolumeAddTokenRefusesWhenAllSlotsAreFull fills every token slot, 0
+// through MaxTokens-1, and checks that one more AddToken is refused with
+// ErrNoSpace and leaves the 32 tokens as they were.
+func TestVolumeAddTokenRefusesWhenAllSlotsAreFull(t *testing.T) {
+	path := formattedVolumeImage(t, "addtoken-full.img", "", "")
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
+	for i := 0; i < MaxTokens; i++ {
+		id, err := v.AddToken(context.Background(), Token{Type: "x-test", Keyslots: []int{0}})
+		if err != nil {
+			t.Fatalf("AddToken #%d failed: %v", i, err)
+		}
+		if id != i {
+			t.Fatalf("AddToken #%d id = %d, want %d", i, id, i)
+		}
+	}
+
+	if id, err := v.AddToken(context.Background(), Token{Type: "x-test", Keyslots: []int{0}}); !errors.Is(err, ErrNoSpace) {
+		t.Fatalf("AddToken with all %d slots in use = %d, %v, want ErrNoSpace", MaxTokens, id, err)
+	}
+
+	hdr, err := v.Header(context.Background())
+	if err != nil {
+		t.Fatalf("Header failed: %v", err)
+	}
+	if got := len(hdr.Tokens()); got != MaxTokens {
+		t.Errorf("token count after the refused AddToken = %d, want %d", got, MaxTokens)
+	}
+}
+
 func TestVolumeRemoveTokenRemovesIt(t *testing.T) {
 	path := formattedVolumeImage(t, "removetoken.img", "", "")
 
