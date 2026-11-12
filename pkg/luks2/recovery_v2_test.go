@@ -188,6 +188,7 @@ func recoveryKeyEnclave(t *testing.T, rk *RecoveryKey) enclave.ByteAccess {
 }
 
 func TestVolumeAddRecoveryKeyEnrollsAWorkingKeyslot(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "addrecoverykey.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -246,6 +247,7 @@ func TestVolumeAddRecoveryKeyEnrollsAWorkingKeyslot(t *testing.T) {
 }
 
 func TestVolumeAddRecoveryKeyHonorsPriorityPrefer(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "addrecoverykeypriority.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -349,6 +351,7 @@ func TestVolumeAddRecoveryKeyOnAReadOnlyVolumeFailsWithErrReadOnly(t *testing.T)
 }
 
 func TestVolumeAddRecoveryKeyRollsBackTheKeyslotIfTheTokenWriteFails(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "addrecoverykeyrollback.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))

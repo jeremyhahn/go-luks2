@@ -62,6 +62,7 @@ func unboundDataSegmentVolume(t *testing.T) string {
 // of an *errs.Error, that errAt did not recognize, so a refusal to run in a
 // FIPS process read as an I/O failure.
 func TestMigrateToFIPSRefusalsAreClassified(t *testing.T) {
+	defer parallel(t)()
 	for _, tc := range []struct {
 		name  string
 		image func(t *testing.T) string

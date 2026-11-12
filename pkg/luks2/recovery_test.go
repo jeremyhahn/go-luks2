@@ -490,6 +490,7 @@ func TestAddRecoveryKeyWritesTheSystemdRecoveryToken(t *testing.T) {
 // device says what opens it, and nobody inspecting the container later can tell
 // it from a credential still in use.
 func TestAddRecoveryKeyRollsBackAKeyslotItCannotIdentify(t *testing.T) {
+	defer parallel(t)()
 	device, primary, _ := volumeWithAKeyslotGap(t)
 
 	sys := testVolumeSys()
@@ -513,6 +514,7 @@ func TestAddRecoveryKeyRollsBackAKeyslotItCannotIdentify(t *testing.T) {
 // TestAddRecoveryKeyReportsAnOrphanItCannotRemove is the one outcome that needs
 // a human, and the slot number in the message is the only record of it.
 func TestAddRecoveryKeyReportsAnOrphanItCannotRemove(t *testing.T) {
+	defer parallel(t)()
 	device, primary, _ := volumeWithAKeyslotGap(t)
 
 	sys := testVolumeSys()
