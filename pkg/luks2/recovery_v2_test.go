@@ -11,7 +11,10 @@ import (
 	"context"
 	"crypto/fips140"
 	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/jeremyhahn/go-enclave"
@@ -144,6 +147,72 @@ func TestNewRecoveryKeyHonorsFormatAndLengthOptions(t *testing.T) {
 	}
 	if got, want := buf.Len(), 128; got != want {
 		t.Errorf("hex rendering of 64 bytes is %d chars, want %d", got, want)
+	}
+}
+
+// TestRecoveryKeyRenderingsMatchTheFormatTable pins the format table for the
+// default 32 random bytes: dashed is uppercase hex in groups of 6 (74
+// characters), hex is lowercase (64), base64 is padded standard encoding (44),
+// and each decodes back to 32 bytes.
+func TestRecoveryKeyRenderingsMatchTheFormatTable(t *testing.T) {
+	cases := []struct {
+		format RecoveryKeyFormat
+		chars  int
+		decode func(t *testing.T, text string) []byte
+	}{
+		{RecoveryDashed, 74, func(t *testing.T, text string) []byte {
+			groups := strings.Split(text, "-")
+			for i, g := range groups {
+				if len(g) != 6 && !(i == len(groups)-1 && len(g) > 0 && len(g) < 6) {
+					t.Errorf("dashed group %d is %q, want 6 characters (the last may be shorter)", i, g)
+				}
+			}
+			if text != strings.ToUpper(text) {
+				t.Errorf("dashed rendering %q is not uppercase", text)
+			}
+			raw, err := hex.DecodeString(strings.Join(groups, ""))
+			if err != nil {
+				t.Fatalf("dashed rendering is not hex: %v", err)
+			}
+			return raw
+		}},
+		{RecoveryHex, 64, func(t *testing.T, text string) []byte {
+			if text != strings.ToLower(text) {
+				t.Errorf("hex rendering %q is not lowercase", text)
+			}
+			raw, err := hex.DecodeString(text)
+			if err != nil {
+				t.Fatalf("hex rendering is not hex: %v", err)
+			}
+			return raw
+		}},
+		{RecoveryBase64, 44, func(t *testing.T, text string) []byte {
+			raw, err := base64.StdEncoding.DecodeString(text)
+			if err != nil {
+				t.Fatalf("base64 rendering is not standard base64: %v", err)
+			}
+			return raw
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.format.String(), func(t *testing.T) {
+			rk, err := NewRecoveryKey(WithRecoveryFormat(c.format))
+			if err != nil {
+				t.Fatalf("NewRecoveryKey failed: %v", err)
+			}
+			defer rk.Destroy()
+			var buf bytes.Buffer
+			if _, err := rk.WriteTo(&buf); err != nil {
+				t.Fatalf("WriteTo failed: %v", err)
+			}
+			text := strings.TrimSpace(buf.String())
+			if len(text) != c.chars {
+				t.Errorf("%s rendering %q is %d characters, want %d", c.format, text, len(text), c.chars)
+			}
+			if raw := c.decode(t, text); len(raw) != DefaultRecoveryKeyLength {
+				t.Errorf("%s rendering decodes to %d bytes, want %d", c.format, len(raw), DefaultRecoveryKeyLength)
+			}
+		})
 	}
 }
 
