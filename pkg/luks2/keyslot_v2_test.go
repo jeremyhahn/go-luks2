@@ -620,6 +620,78 @@ func TestVolumeRemoveKeyslotRemovesItWithoutDisturbingOthers(t *testing.T) {
 	}
 }
 
+// TestKeyslotChangesLeaveTheDataAreaUntouched pins the keyslots feature's
+// core promise: credentials are added, rotated and revoked without
+// re-encrypting data. AddKeyslot, ChangeKeyslot and RemoveKeyslot write only
+// the header and the keyslots area, so every byte of the data segment reads
+// back as it was, and the volume's original credential still opens it.
+func TestKeyslotChangesLeaveTheDataAreaUntouched(t *testing.T) {
+	ctx := context.Background()
+	path := formattedVolumeImage(t, "keyslot-data-untouched.img", "", "")
+
+	v := txnVolume(t, path)
+	h, err := v.Header(ctx)
+	if err != nil {
+		t.Fatalf("Header failed: %v", err)
+	}
+	segments := h.Segments()
+	if len(segments) != 1 {
+		t.Fatalf("the fixture has %d data segments, want 1", len(segments))
+	}
+	offset := segments[0].Offset
+
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("opening the image failed: %v", err)
+	}
+	st, err := f.Stat()
+	if err != nil {
+		t.Fatalf("stat failed: %v", err)
+	}
+	if st.Size() <= offset {
+		t.Fatalf("the image (%d bytes) has no data area past offset %d", st.Size(), offset)
+	}
+	// A recognisable pattern, so an unchanged all-zero area cannot pass by
+	// accident of a sparse file.
+	pattern := bytes.Repeat([]byte("ciphertext-stand-in."), int((st.Size()-offset)/20)+1)[:st.Size()-offset]
+	if _, err := f.WriteAt(pattern, offset); err != nil {
+		t.Fatalf("writing the data pattern failed: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("closing the image failed: %v", err)
+	}
+
+	kdf := KDFParams{Type: KDFPBKDF2, IterTime: time.Millisecond}
+	key := txnKey(t, v)
+	added, err := v.AddKeyslot(ctx, key, txnPassphrase(t, "an added credential"), KeyslotParams{KDF: kdf})
+	if err != nil {
+		t.Fatalf("AddKeyslot failed: %v", err)
+	}
+	rotated, err := v.UnlockKeyslot(ctx, added.ID, txnPassphrase(t, "an added credential"))
+	if err != nil {
+		t.Fatalf("UnlockKeyslot(%d) failed: %v", added.ID, err)
+	}
+	defer rotated.Destroy()
+	if _, err := v.ChangeKeyslot(ctx, rotated, txnPassphrase(t, "a rotated credential"), KeyslotParams{KDF: kdf}); err != nil {
+		t.Fatalf("ChangeKeyslot failed: %v", err)
+	}
+	if err := v.RemoveKeyslot(ctx, added.ID); err != nil {
+		t.Fatalf("RemoveKeyslot(%d) failed: %v", added.ID, err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the image back failed: %v", err)
+	}
+	if int64(len(raw)) != st.Size() {
+		t.Fatalf("the image is %d bytes after the keyslot changes, want %d", len(raw), st.Size())
+	}
+	if !bytes.Equal(raw[offset:], pattern) {
+		t.Fatal("a keyslot change wrote into the data segment")
+	}
+	txnKey(t, v) // the original credential still opens the volume
+}
+
 func TestVolumeRemoveKeyslotRefusesTheLastKeyslot(t *testing.T) {
 	path := formattedVolumeImage(t, "removekeyslot-last.img", "", "")
 

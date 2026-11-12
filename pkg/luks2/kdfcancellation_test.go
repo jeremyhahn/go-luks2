@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jeremyhahn/go-luks2/internal/fips"
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
@@ -96,5 +97,36 @@ func TestUnlockKeyslotCancelledDuringThePassphraseKDFDestroysTheOutput(t *testin
 	}
 	if key != nil {
 		t.Fatal("unlockKeyslot canceled mid-derivation returned a live enclave instead of destroying it")
+	}
+}
+
+// TestVerifyKeyAgainstDigestsObservesCancellationBetweenDigests pins the
+// keyslots architecture's third cancellation point: each digest check
+// derives a key, so a cancelled ctx stops the digest loop before the next
+// derivation and is returned as ctx.Err(), not as a credential verdict. The
+// control is the same key and header under a live ctx, which verifies.
+func TestVerifyKeyAgainstDigestsObservesCancellationBetweenDigests(t *testing.T) {
+	device, passphrase := unlockableVolume(t)
+	key := volumeKeyEnclave(t, masterKeyOf(t, device, passphrase))
+
+	_, metadata, err := readHeaderForTest(device)
+	if err != nil {
+		t.Fatalf("reading the header failed: %v", err)
+	}
+	covers := func(*header.Digest) bool { return true }
+	unverifiable := func(int) error { return ErrInvalidHeader }
+
+	if err := verifyKeyAgainstDigests(context.Background(), key, metadata.Digests, covers, unverifiable, fips.Probe); err != nil {
+		t.Fatalf("the premise does not hold -- the volume key failed its own digest: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = verifyKeyAgainstDigests(ctx, key, metadata.Digests, covers, unverifiable, fips.Probe)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("verifyKeyAgainstDigests under a cancelled ctx = %v, want context.Canceled", err)
+	}
+	if errors.Is(err, ErrWrongKey) {
+		t.Fatalf("a cancellation was reported as a credential verdict: %v", err)
 	}
 }
