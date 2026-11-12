@@ -8,11 +8,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"testing/iotest"
 
+	"github.com/jeremyhahn/go-luks2/internal/header"
 	"github.com/jeremyhahn/go-luks2/pkg/filesystem"
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
@@ -199,5 +201,41 @@ func TestRunMountRefusesAnEmptyOrConflictingType(t *testing.T) {
 	}
 	if len(mnt.mountCalls) != 1 || mnt.mountCalls[0].Type != filesystem.XFS {
 		t.Errorf("mountCalls = %v, want one xfs mount", mnt.mountCalls)
+	}
+}
+
+// docs/volumes/cli.md (info): keyslot or token entries written as JSON null
+// are listed on stderr, and info still succeeds.
+func TestRunInfoListsNullEntriesOnStderr(t *testing.T) {
+	path := newTestVolumeImage(t, "info-null.img")
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open the image: %v", err)
+	}
+	hdr, metadata, err := header.ReadHeaderCopyFrom(f, 0)
+	if err != nil {
+		t.Fatalf("ReadHeaderCopyFrom: %v", err)
+	}
+	metadata.Tokens = map[string]*header.Token{"3": nil}
+	jsonData, area, err := header.EncodeMetadata(hdr, metadata)
+	if err != nil {
+		t.Fatalf("EncodeMetadata: %v", err)
+	}
+	if err := header.WriteEncodedHeader(f, hdr, jsonData, area, (*os.File).Sync); err != nil {
+		t.Fatalf("WriteEncodedHeader: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close the image: %v", err)
+	}
+
+	e, _, _, stdout, stderr := newTestEnv(&bytes.Buffer{})
+	if err := runInfo(context.Background(), e, []string{path}); err != nil {
+		t.Fatalf("runInfo: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "JSON null") || !strings.Contains(stderr.String(), "3") {
+		t.Errorf("stderr = %q, want the null token 3 listed", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Volume is valid and accessible") {
+		t.Errorf("stdout = %q, want the summary", stdout.String())
 	}
 }
