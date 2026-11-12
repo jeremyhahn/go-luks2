@@ -433,6 +433,13 @@ func migrateToFIPS(ctx context.Context, device string, passphrase []byte, opts *
 		if approved {
 			continue
 		}
+		// A digest the header screen rejects is damage, not a digest to
+		// migrate, and it is reported as the header fault unlock reports.
+		expected, _, err := screenDigestStructure(digest)
+		clearBytes(expected)
+		if err != nil {
+			return fail("plan", fipsStateUntouched, &errs.Error{Kind: ErrInvalidHeader, Detail: "digest " + id + " is malformed", Err: err})
+		}
 		evaluated, matched := evaluateDigest(masterKey, digest, fips.Probe)
 		if !evaluated || !matched {
 			return fail("plan", fipsStateUntouched, fipsRefusal(errFIPSMigrationDigest, "digest "+id+" ("+refusal.String()+")", nil))
@@ -961,6 +968,13 @@ func keyslotRefusedByFIPS(id string, keyslot *header.Keyslot, digests map[string
 	if !fipsMode() || keyslot == nil || keyslot.Type != "luks2" {
 		return false
 	}
+	// A FIPS refusal is a well-formed header this process may not run. A
+	// covering digest the header screen rejects -- a value that is not
+	// base64, a length no hash gives -- is damage beside any refusal, and an
+	// import could not repair it: MigrateToFIPS refuses it at planning.
+	if !coveringDigestsWellFormed(id, digests) {
+		return false
+	}
 
 	// A keyslot the screen passes, whose KDF and covering digests are all
 	// approved, was refused later -- reading or decrypting its area -- and no
@@ -1039,6 +1053,23 @@ func coveringDigestsUnusable(id string, digests map[string]*header.Digest, failu
 	}
 	want, ok := unverifiableKeyslotError(id, applicable).(*errs.Error)
 	return ok && got.Kind == want.Kind && got.Detail == want.Detail && got.Err == nil
+}
+
+// coveringDigestsWellFormed reports whether every digest covering keyslot id
+// passes the structural digest screen, which runs no FIPS gate: what is left
+// to refuse it is policy, never damage.
+func coveringDigestsWellFormed(id string, digests map[string]*header.Digest) bool {
+	for _, digest := range digests {
+		if !digestCovers(digest, id) {
+			continue
+		}
+		expected, _, err := screenDigestStructure(digest)
+		clearBytes(expected)
+		if err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // fipsStandInKeyslot returns keyslot with its KDF replaced by an approved

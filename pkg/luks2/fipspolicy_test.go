@@ -9,6 +9,7 @@ package luks2
 import (
 	"bytes"
 	"context"
+	"crypto/fips140"
 	"errors"
 	"testing"
 
@@ -269,6 +270,9 @@ func TestKeyslotRefusedByFIPSIsComputed(t *testing.T) {
 	shortSaltKeyslot.KDF = &shortKDF
 
 	shortSaltDigests := withDigest(func(d *header.Digest) { d.Salt = shortSalt })
+	mixed := &header.Metadata{Digests: map[string]*header.Digest{"0": func() *header.Digest { d := *digests["0"]; return &d }()}}
+	mixedShortSaltAndMalformedDigests(mixed)
+	mixedDigests := mixed.Digests
 	// The failures strict mode raises for a short salt: the passphrase
 	// derivation's invalid argument, and the digest check finding nothing it
 	// could evaluate. errIO is a failure no FIPS gate raises.
@@ -299,6 +303,7 @@ func TestKeyslotRefusedByFIPSIsComputed(t *testing.T) {
 		{"approved keyslot, pbkdf2 digest with a short salt", approved, shortSaltDigests, digestsUnusable, true},
 		{"approved keyslot, pbkdf2 digest with a short salt, area read failed", approved, shortSaltDigests, errIO, false},
 		{"approved keyslot, pbkdf2 digest with a short salt, derivation-shaped failure", approved, shortSaltDigests, derivationRefused, false},
+		{"approved keyslot, short-salt digest beside a malformed one", approved, mixedDigests, unverifiableKeyslotError("0", 2), false},
 	}
 
 	forced := forceFIPSPolicy(t)
@@ -346,5 +351,82 @@ func TestShortSaltDigestKeepsTheAreaReadFailure(t *testing.T) {
 	var importRequired *FIPSImportRequiredError
 	if errors.Is(err, ErrFIPSImportRequired) || errors.As(err, &importRequired) {
 		t.Fatalf("a failed area read was reported as a FIPS import: %v", err)
+	}
+}
+
+// malformedDigestCopy adds digest 1: a copy of digest 0, covering the same
+// keyslots and segments, whose value is not base64.
+func malformedDigestCopy(m *header.Metadata) {
+	malformed := *m.Digests["0"]
+	malformed.Keyslots = append([]string(nil), m.Digests["0"].Keyslots...)
+	malformed.Segments = append([]string(nil), m.Digests["0"].Segments...)
+	malformed.Digest = "!!! not base64 !!!"
+	m.Digests["1"] = &malformed
+}
+
+// mixedShortSaltAndMalformedDigests gives keyslot 0 two covering digests: the
+// original with a salt under strict mode's 128-bit floor, which is well formed,
+// and a copy whose value is not base64, which is damage.
+func mixedShortSaltAndMalformedDigests(m *header.Metadata) {
+	malformedDigestCopy(m)
+	m.Digests["0"].Salt = "c2hvcnRzYWw="
+}
+
+// A short-salt digest is a FIPS refusal only while it is all that stands
+// between the keyslot and a verdict. Beside a covering digest that is
+// malformed, the header is damaged, and that is what unlock reports: an import
+// could not repair it, and the migration it would recommend refuses the volume.
+func TestMalformedDigestBesideShortSaltKeepsTheHeaderError(t *testing.T) {
+	device := newImage(t, "fips-short-salt-malformed.img")
+	formatWithLibrary(t, device)
+	if fips140.Enabled() {
+		// Strict mode refuses the short salt before any comparison, so the
+		// value digest 0 carries is never read.
+		writeFixture(t, device, mixedShortSaltAndMalformedDigests)
+	} else {
+		// A short-salt digest that attests the volume key, as a volume
+		// cryptsetup wrote would carry, so the import path gets past unlock.
+		if err := weakenForStrictFIPS(device, migrationPassphrase, ""); err != nil {
+			t.Fatalf("weakening the fixture failed: %v", err)
+		}
+		writeFixture(t, device, malformedDigestCopy)
+	}
+	if _, _, err := readHeaderForTest(device); err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+
+	sys := testVolumeSys()
+	sys.fipsMode = forceFIPSPolicy(t)
+	err := testKeyForTestWithSys(device, migrationPassphrase, sys)
+	if !fips140.Enabled() {
+		// Outside strict mode the short-salt digest is evaluated, and it
+		// attests the key.
+		if err != nil {
+			t.Fatalf("unlock outside strict mode through the short-salt digest: %v", err)
+		}
+	} else {
+		var importRequired *FIPSImportRequiredError
+		if errors.Is(err, ErrFIPSImportRequired) || errors.As(err, &importRequired) {
+			t.Fatalf("a malformed digest beside a short-salt one was reported as a FIPS import: %v", err)
+		}
+		if !errors.Is(err, ErrInvalidHeader) {
+			t.Fatalf("unlock under the forced FIPS policy: got %v, want ErrInvalidHeader", err)
+		}
+		// The import it would have recommended cannot run in this process.
+		assertMigrationRefusedUnderFIPS(t)
+		return
+	}
+
+	// The import path refuses the same volume with the header fault, and
+	// leaves it untouched.
+	before := fileDigest(t, device)
+	sys = testVolumeSys()
+	sys.fipsMode = forceNonFIPSPolicy(t)
+	_, err = migrateToFIPSAt(context.Background(), device, migrationPassphrase, cheapMigration(), sys)
+	if !errors.Is(err, ErrInvalidHeader) {
+		t.Fatalf("MigrateToFIPS on the same volume: got %v, want ErrInvalidHeader", err)
+	}
+	if after := fileDigest(t, device); after != before {
+		t.Fatal("MigrateToFIPS refused a damaged header and still changed the device")
 	}
 }

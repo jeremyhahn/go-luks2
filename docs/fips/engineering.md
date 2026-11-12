@@ -108,7 +108,10 @@ or the KDF of every digest attesting it, is not approved, unlock returns
 If any keyslot also failed for another reason, that failure is reported
 instead. Damage is not reported as a FIPS refusal: the refusal is returned
 only when re-screening with approved stand-ins shows the policy is the only
-obstacle; a malformed SHA-1 digest is `ErrInvalidHeader`.
+obstacle; a malformed SHA-1 digest is `ErrInvalidHeader`, and so is any
+keyslot one of whose attesting digests is malformed, even beside a short-salt
+digest strict mode refuses. `MigrateToFIPS` refuses such a volume at the plan
+stage with the same `ErrInvalidHeader`, writing nothing.
 
 ### Edge cases
 

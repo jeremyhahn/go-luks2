@@ -37,7 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a salt under 128 bits failed with `ErrInvalidHeader`, as if the header were
   damaged. It now fails with `*FIPSImportRequiredError`, like any other keyslot
   refused only by FIPS; the open is still refused, and `MigrateToFIPS` imports
-  the volume.
+  the volume. A keyslot one of whose attesting digests is malformed (a value
+  that is not base64, a length no hash gives) still fails with
+  `ErrInvalidHeader`, beside a short-salt digest or not, and `MigrateToFIPS`
+  refuses that volume at the plan stage with `ErrInvalidHeader`, where it
+  returned the not-approved-digest refusal.
 
 ## [1.0.3-alpha] - 2026-11-10
 
