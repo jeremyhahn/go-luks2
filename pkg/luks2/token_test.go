@@ -320,6 +320,32 @@ func TestCanonicalTokenIDRejectsEverySpellingThatIsNotItsOwn(t *testing.T) {
 	}
 }
 
+// A hostile header may carry token keys outside slots 0-31 or spelled in a
+// way no LUKS2 implementation addresses. (*Header).Tokens lists only the
+// canonical ids 0-31 and skips the rest, so neither a listing nor a count
+// ever reports a slot that SetToken or RemoveToken could not address.
+func TestHeaderTokensListsOnlySlotsZeroToThirtyOne(t *testing.T) {
+	tok := func() *header.Token { return &header.Token{Type: "x-test", Keyslots: []string{}} }
+	h := &Header{metadata: &header.Metadata{Tokens: map[string]*header.Token{
+		"0": tok(), "31": tok(),
+		"32": tok(), "40": tok(), "-1": tok(), "01": tok(), "99999999999999999999": tok(),
+	}}}
+	got := h.Tokens()
+	if len(got) != 2 {
+		t.Fatalf("Tokens() listed %d tokens, want 2 (ids 0 and 31): %v", len(got), got)
+	}
+	for _, id := range []int{0, MaxTokens - 1} {
+		if _, ok := got[id]; !ok {
+			t.Errorf("Tokens() is missing in-range token %d", id)
+		}
+	}
+	for id := range got {
+		if id < 0 || id >= MaxTokens {
+			t.Errorf("Tokens() listed out-of-range token %d", id)
+		}
+	}
+}
+
 // TestCountTokensCountsOnlyTheTokensAnyoneCanAddress keeps the count from
 // disagreeing with the listing on the same header. len() on the map counts an
 // entry no implementation can reach, so a container carrying "1" and "01"
