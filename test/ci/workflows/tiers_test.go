@@ -221,13 +221,28 @@ func TestNoLabelTrigger(t *testing.T) {
 	if m == nil {
 		t.Fatal("ci.yml's pull_request trigger lists no types")
 	}
-	if m[1] != "opened, synchronize, reopened" {
-		t.Errorf("ci.yml's pull_request types are [%s], want [opened, synchronize, reopened]", m[1])
+	if m[1] != "opened, synchronize, reopened, ready_for_review" {
+		t.Errorf("ci.yml's pull_request types are [%s], want [opened, synchronize, reopened, ready_for_review]", m[1])
 	}
 	for _, bad := range []string{"github.event.action", "github.event.label.name"} {
 		if strings.Contains(ci, bad) {
 			t.Errorf("ci.yml tests %s; the gate must never be skipped by an event condition", bad)
 		}
+	}
+}
+
+// TestReadyForReviewTriggers: marking a draft ready starts both CI and the
+// code review. CI Gate fails on a draft, so without `ready_for_review` a PR
+// marked ready keeps the draft's failed gate and gets no review until its
+// next push.
+func TestReadyForReviewTriggers(t *testing.T) {
+	cr := readFile(t, ".github/workflows/code-review.yml")
+	m := regexp.MustCompile(`(?m)^  pull_request_target:\n    types: \[(.*)\]$`).FindStringSubmatch(cr)
+	if m == nil {
+		t.Fatal("code-review.yml's pull_request_target trigger lists no types")
+	}
+	if !strings.Contains(", "+m[1]+",", " ready_for_review,") {
+		t.Errorf("code-review.yml's pull_request_target types are [%s], want ready_for_review among them", m[1])
 	}
 }
 
