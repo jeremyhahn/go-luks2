@@ -692,6 +692,73 @@ func TestKeyslotChangesLeaveTheDataAreaUntouched(t *testing.T) {
 	txnKey(t, v) // the original credential still opens the volume
 }
 
+// TestRemoveKeyslotDropsTheSlotFromEveryDigestAndTokenInOneWrite pins the
+// keyslot persistence rule: removing a keyslot drops its number from every
+// digest and token, and a token left naming no keyslot is kept. It also pins
+// that AddKeyslot reports the slot it wrote when the slots are not contiguous.
+func TestRemoveKeyslotDropsTheSlotFromEveryDigestAndTokenInOneWrite(t *testing.T) {
+	ctx := context.Background()
+	path := formattedVolumeImage(t, "keyslot-remove-references.img", "", "")
+	v := txnVolume(t, path)
+
+	slot := 5
+	added, err := v.AddKeyslot(ctx, txnKey(t, v), txnPassphrase(t, "an added credential"),
+		KeyslotParams{Slot: &slot, KDF: KDFParams{Type: KDFPBKDF2, IterTime: time.Millisecond}})
+	if err != nil {
+		t.Fatalf("AddKeyslot failed: %v", err)
+	}
+	if added.ID != slot {
+		t.Fatalf("AddKeyslot reported slot %d, want %d (the slots are 0 and %d)", added.ID, slot, slot)
+	}
+	only, err := v.AddToken(ctx, Token{Type: "x-only-the-removed-slot", Keyslots: []int{slot}})
+	if err != nil {
+		t.Fatalf("AddToken failed: %v", err)
+	}
+	both, err := v.AddToken(ctx, Token{Type: "x-both-slots", Keyslots: []int{0, slot}})
+	if err != nil {
+		t.Fatalf("AddToken failed: %v", err)
+	}
+
+	if err := v.RemoveKeyslot(ctx, slot); err != nil {
+		t.Fatalf("RemoveKeyslot(%d) failed: %v", slot, err)
+	}
+
+	_, metadata, err := readHeaderForTest(path)
+	if err != nil {
+		t.Fatalf("reading the header back failed: %v", err)
+	}
+	if len(metadata.Digests) == 0 {
+		t.Fatal("the header has no digests")
+	}
+	for id, d := range metadata.Digests {
+		for _, ks := range d.Keyslots {
+			if ks == "5" {
+				t.Errorf("digest %s still names the removed keyslot: %v", id, d.Keyslots)
+			}
+		}
+	}
+	h, err := v.Header(ctx)
+	if err != nil {
+		t.Fatalf("Header failed: %v", err)
+	}
+	for _, ks := range h.Keyslots() {
+		if ks.ID == slot {
+			t.Fatalf("keyslot %d is still in the header", slot)
+		}
+	}
+	tokens := h.Tokens()
+	kept, ok := tokens[only]
+	if !ok {
+		t.Fatalf("the token that named only the removed keyslot was dropped; tokens %v", tokens)
+	}
+	if len(kept.Keyslots) != 0 {
+		t.Errorf("token %d names keyslots %v after the removal, want none", only, kept.Keyslots)
+	}
+	if got := tokens[both].Keyslots; len(got) != 1 || got[0] != 0 {
+		t.Errorf("token %d names keyslots %v after the removal, want [0]", both, got)
+	}
+}
+
 func TestVolumeRemoveKeyslotRefusesTheLastKeyslot(t *testing.T) {
 	path := formattedVolumeImage(t, "removekeyslot-last.img", "", "")
 
