@@ -464,3 +464,73 @@ func TestRunRecoveryAddTokenOutputAndRecoveryFileRows(t *testing.T) {
 		t.Errorf("verify --recovery-file with comments, blanks and padding: %v", err)
 	}
 }
+
+// damagePrimary zeroes the start of the primary header copy.
+func damagePrimary(t *testing.T, path string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.WriteAt(make([]byte, 512), 0); err != nil {
+		t.Fatalf("zero the primary: %v", err)
+	}
+}
+
+// docs/header/cli.md (restore): a damaged primary is rebuilt from the
+// secondary without --force once YES is typed, or with --yes; any other
+// answer, end of input or a read error exits 1 and writes nothing.
+func TestRunHeaderRestoreRows(t *testing.T) {
+	ctx := context.Background()
+	for name, stdin := range map[string]*bytes.Buffer{"YES": bytes.NewBufferString("YES\n"), "--yes": {}} {
+		path := newTestVolumeImage(t, "restore-damaged.img")
+		damagePrimary(t, path)
+		args := []string{path}
+		if name == "--yes" {
+			args = []string{"--yes", path}
+		}
+		e, _, _, _, _ := newTestEnv(stdin)
+		if err := runHeaderRestore(ctx, e, args); err != nil {
+			t.Fatalf("%s: restore of a damaged primary: %v", name, err)
+		}
+		primary, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(primary[:6]) != "LUKS\xba\xbe" {
+			t.Errorf("%s: primary magic = %q, want it rebuilt", name, primary[:6])
+		}
+		e, _, _, _, _ = newTestEnv(bytes.NewBufferString(testPassphrase + "\n"))
+		if err := runTestKey(ctx, e, []string{path}); err != nil {
+			t.Errorf("%s: testkey after restore: %v", name, err)
+		}
+	}
+
+	for name, newEnv := range map[string]func() *env{
+		"end of input": func() *env { e, _, _, _, _ := newTestEnv(&bytes.Buffer{}); return e },
+		"read error": func() *env {
+			e, _, _, _, _ := newTestEnv(&bytes.Buffer{})
+			e.stdin = iotest.ErrReader(errors.New("stdin read failed"))
+			return e
+		},
+	} {
+		path := newTestVolumeImage(t, "restore-cancel.img")
+		damagePrimary(t, path)
+		err := runHeaderRestore(ctx, newEnv(), []string{path})
+		var ce *ConfirmationError
+		if !errors.As(err, &ce) {
+			t.Fatalf("%s: restore = %v, want *ConfirmationError", name, err)
+		}
+		if got := exitCode(err); got != 1 {
+			t.Errorf("%s: exit %d, want 1", name, got)
+		}
+		primary, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(primary[:512], make([]byte, 512)) {
+			t.Errorf("%s: the primary was written after a canceled restore", name)
+		}
+	}
+}
