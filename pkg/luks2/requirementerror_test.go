@@ -130,6 +130,109 @@ func TestUnsupportedRequirementIsReadableFromLuks2Error(t *testing.T) {
 	assertRequirementInError(t, "RemoveKeyslot", err, requirement)
 }
 
+// stampRequirementLeavingSecondaryStale declares requirement in the
+// primary header and puts the secondary copy back as it was before, so the
+// secondary is valid but older and the next locked read repairs it.
+func stampRequirementLeavingSecondaryStale(t *testing.T, device, requirement string) {
+	t.Helper()
+	hdr, _, err := readPrimaryForTest(device)
+	if err != nil {
+		t.Fatalf("reading the header failed: %v", err)
+	}
+	secondary := make([]byte, hdr.HeaderSize)
+	if err := readAtForTest(device, secondary, int64(hdr.HeaderSize)); err != nil {
+		t.Fatalf("reading the secondary header failed: %v", err)
+	}
+	stampMandatoryRequirement(t, device, requirement)
+	f, err := os.OpenFile(filepath.Clean(device), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("could not open the image: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.WriteAt(secondary, int64(hdr.HeaderSize)); err != nil {
+		t.Fatalf("restoring the older secondary header failed: %v", err)
+	}
+	if err := f.Sync(); err != nil {
+		t.Fatalf("syncing the image failed: %v", err)
+	}
+}
+
+func readPrimaryForTest(device string) (*header.BinaryHeader, *header.Metadata, error) {
+	f, err := os.Open(filepath.Clean(device))
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return header.ReadHeaderCopyFrom(f, header.PrimaryHeaderOffset)
+}
+
+func readAtForTest(device string, buf []byte, off int64) error {
+	f, err := os.Open(filepath.Clean(device))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	_, err = f.ReadAt(buf, off)
+	return err
+}
+
+// TestUnsupportedRequirementFoundWhileRepairingAStaleCopy covers a write
+// whose header read repairs an older copy and meets the requirement there:
+// the read failure is already a classified error, and the requirement must
+// still be what Kind and Detail report, with every sentinel underneath
+// reachable through errors.Is.
+func TestUnsupportedRequirementFoundWhileRepairingAStaleCopy(t *testing.T) {
+	const requirement = "inline-hw-tags"
+	path := filepath.Join(t.TempDir(), "stale-requirement.img")
+	if err := createSeamImage(path); err != nil {
+		t.Fatal(err)
+	}
+
+	v, err := luks2.Open(context.Background(), path, luks2.WithTestSysForTest())
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	t.Cleanup(func() { _ = v.Close() })
+	if err := v.Format(context.Background(), seamSecret(t, seamPassphrase), luks2.FormatParams{KDF: seamKDF()}); err != nil {
+		t.Fatalf("Format failed: %v", err)
+	}
+	key := seamUnlock(t, v, seamPassphrase)
+	spare, err := v.AddKeyslot(context.Background(), key, seamSecret(t, "seam-passphrase-spare"), luks2.KeyslotParams{KDF: seamKDF()})
+	if err != nil {
+		t.Fatalf("AddKeyslot before the requirement failed: %v", err)
+	}
+
+	// The repair fails before it writes, so the copies stay as stamped and
+	// every operation below meets the same stale secondary.
+	stampRequirementLeavingSecondaryStale(t, path, requirement)
+
+	ops := []struct {
+		name string
+		run  func() error
+	}{
+		{"AddKeyslot", func() error {
+			_, err := v.AddKeyslot(context.Background(), key, seamSecret(t, "seam-passphrase-two"), luks2.KeyslotParams{KDF: seamKDF()})
+			return err
+		}},
+		{"ChangeKeyslot", func() error {
+			_, err := v.ChangeKeyslot(context.Background(), key, seamSecret(t, "seam-passphrase-three"), luks2.KeyslotParams{KDF: seamKDF()})
+			return err
+		}},
+		{"RemoveKeyslot", func() error { return v.RemoveKeyslot(context.Background(), spare.ID) }},
+	}
+	for _, op := range ops {
+		t.Run(op.name, func(t *testing.T) {
+			err := op.run()
+			assertRequirementInError(t, op.name, err, requirement)
+			// The read failure's own kind stays reachable under the
+			// requirement.
+			if !errors.Is(err, luks2.ErrIO) {
+				t.Errorf("%s: errors.Is(err, ErrIO) = false for %v", op.name, err)
+			}
+		})
+	}
+}
+
 // migrationRequirement is the mandatory requirement the migration case
 // stamps on its volume; the child reads the error for it.
 const migrationRequirement = "inline-hw-tags"
