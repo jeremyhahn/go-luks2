@@ -716,3 +716,71 @@ func TestRunHeaderShowAndSecondaryRows(t *testing.T) {
 		}
 	})
 }
+
+// docs/dm-crypt-activation/cli.md and docs/kernel-keyring/cli.md: the
+// failures that come from activation and deactivation reach stderr with the
+// documented message, at the documented status. open passes the name to
+// Activate unchecked, after the volume is unlocked, so a bad name is refused
+// there.
+func TestActivationFailureMessageRows(t *testing.T) {
+	path := newTestVolumeImage(t, "activation-failures.img")
+	keyring := &dmcrypt.KeyringError{
+		Op:   "add the volume key to the session keyring",
+		Kind: dmcrypt.ErrKeyringBlocked,
+		Err:  errors.New("operation not permitted"),
+	}
+
+	open := []struct {
+		name    string
+		mapping string
+		err     error
+		message string
+		want    int
+	}{
+		{"bad name", "..", dmcrypt.ErrInvalidName, "invalid device-mapper mapping name", 1},
+		{"name in use", "data", dmcrypt.ErrActive, "mapping is already active", 5},
+		{"keyring", "data", keyring, "could not add the volume key to the session keyring", 1},
+		{"still live", "data", dmcrypt.ErrStillLive, "may still be live", 1},
+		{"node unverified", "data", dmcrypt.ErrNodeUnverified, "no device node verifiably names", 1},
+		{"wrong key", "data", luks2.ErrWrongKey, "master key verification failed", 2},
+	}
+	for _, c := range open {
+		t.Run("open "+c.name, func(t *testing.T) {
+			e, act, _, _, stderr := newTestEnv(bytes.NewBufferString(testPassphrase + "\n"))
+			act.activateErr = c.err
+			if got := dispatch(context.Background(), e, []string{"luks2", "open", path, c.mapping}); got != c.want {
+				t.Errorf("exit status = %d, want %d", got, c.want)
+			}
+			if !strings.Contains(stderr.String(), c.message) {
+				t.Errorf("stderr = %q, want it to contain %q", stderr.String(), c.message)
+			}
+			if len(act.activated) != 1 || act.activated[0] != c.mapping {
+				t.Errorf("activated = %v, want the name %q passed to Activate after the unlock", act.activated, c.mapping)
+			}
+		})
+	}
+
+	closeRows := []struct {
+		name      string
+		lookupErr error
+		deactErr  error
+		message   string
+		want      int
+	}{
+		{"not active", nil, dmcrypt.ErrNotActive, "mapping is not active", 1},
+		{"held open", nil, dmcrypt.ErrBusy, "device-mapper target is held open", 5},
+		{"bad name", dmcrypt.ErrInvalidName, nil, "invalid device-mapper mapping name", 1},
+	}
+	for _, c := range closeRows {
+		t.Run("close "+c.name, func(t *testing.T) {
+			e, act, _, _, stderr := newTestEnv(&bytes.Buffer{})
+			act.lookupErr, act.deactivateErr = c.lookupErr, c.deactErr
+			if got := dispatch(context.Background(), e, []string{"luks2", "close", "data"}); got != c.want {
+				t.Errorf("exit status = %d, want %d", got, c.want)
+			}
+			if !strings.Contains(stderr.String(), c.message) {
+				t.Errorf("stderr = %q, want it to contain %q", stderr.String(), c.message)
+			}
+		})
+	}
+}
