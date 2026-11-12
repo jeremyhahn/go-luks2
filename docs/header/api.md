@@ -12,6 +12,8 @@ library; it has no REST, gRPC, QUIC, MCP or Unix-socket transport.
 | Read the secondary header | `(*Volume).SecondaryHeader(ctx) (*Header, error)` |
 | Rebuild the primary from the secondary | `(*Volume).RestorePrimaryHeader(ctx) error` |
 | Rebuild the primary unconditionally | `(*Volume).ReplacePrimaryHeader(ctx) error` |
+| Read a header's fields | `*Header`: `UUID`, `Label`, `Subsystem`, `SequenceID`, `Size`, `Offset`, `Keyslots`, `Segments`, `Tokens`, `Requirements`, `Dropped`, `MarshalJSON`; `Segment` (`SizeDynamic` for a `dynamic` size); `DroppedEntry` and its `String` |
+| Errors | `ErrInvalidHeader`, `ErrNotLUKS2`, `ErrUnsupported`, `ErrUnsupportedRequirement`, `ErrPrimaryHeaderCurrent`, `ErrDeviceChanged`, `LockTimeoutError` ([engineering.md](engineering.md#error-semantics)) |
 | Probe for LUKS2 | `luks2.Open`, then `(*Volume).Header(ctx)`: `ErrNotLUKS2` for a LUKS1 header, `ErrInvalidHeader` when neither copy is a valid LUKS2 header |
 
 No request/response schema, status code mapping or `scp` permission applies.

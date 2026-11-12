@@ -201,14 +201,17 @@ be read.
 That includes `inline-hw-tags` (LUKS2 On-Disk Format 1.1.4): the data
 segment uses only dm-crypt, with authentication tags kept inline by the
 hardware, and every dm-integrity option in the metadata is ignored. Unlock,
-activation and every header write refuse it with an
-`*UnsupportedRequirementError` naming `inline-hw-tags`, which unwraps to
-`ErrUnsupportedRequirement`, and leave the device unchanged. The flag is never
+activation and every header write refuse it with an error naming
+`inline-hw-tags` (`internal/header`'s `*UnsupportedRequirementError`, not
+exported from `pkg/luks2`), which unwraps to `ErrUnsupportedRequirement`, and
+leave the device unchanged. The flag is never
 stripped: a read and a re-encode keep `config.requirements` byte for byte.
 
 A segment's `integrity` object may carry `key_size` (1.1.4, integer, optional):
 the integrity key size in bytes, set only when it differs from the integrity
-type's default. `Segment.IntegrityKeySize` reports it; absent reads as absent.
+type's default. `internal/header`'s `(*Segment).IntegrityKeySize` reports it;
+absent reads as absent. The public `luks2.Segment` does not carry it, because
+unlocking refuses a segment with an `integrity` member.
 A non-integer `key_size` fails with `ErrInvalidHeader`. The specification gives
 no range, so none is enforced. The member stays in the raw object and
 re-encodes exactly as read.
