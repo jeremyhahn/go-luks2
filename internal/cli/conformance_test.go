@@ -7,6 +7,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -293,5 +294,86 @@ func TestRunCreateRefusesASymlinkAtThePath(t *testing.T) {
 	}
 	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
 		t.Errorf("Lstat(link) = %v, %v, want the symlink left in place", fi, err)
+	}
+}
+
+// keyslotIDs returns the keyslot numbers in the header at path.
+func keyslotIDs(t *testing.T, path string) []int {
+	t.Helper()
+	v, err := luks2.Open(context.Background(), path, luks2.WithReadOnly())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+	hdr, err := v.Header(context.Background())
+	if err != nil {
+		t.Fatalf("Header: %v", err)
+	}
+	var ids []int
+	for _, s := range hdr.Keyslots() {
+		ids = append(ids, s.ID)
+	}
+	return ids
+}
+
+// docs/keyslots/cli.md (addkey): the new passphrase goes into --slot <n>.
+func TestRunAddKeyIntoTheNamedSlot(t *testing.T) {
+	path := newTestVolumeImage(t, "addkey-slot.img")
+	e, _, _, _, _ := newTestEnv(bytes.NewBufferString(testPassphrase + "\nsecond-pass\n"))
+	if err := runAddKey(context.Background(), e, append(append([]string{}, fastKDFArgs...), "--slot", "5", path)); err != nil {
+		t.Fatalf("runAddKey --slot 5: %v", err)
+	}
+	if got := keyslotIDs(t, path); len(got) != 2 || got[0] != 0 || got[1] != 5 {
+		t.Errorf("keyslots = %v, want [0 5]", got)
+	}
+}
+
+// docs/keyslots/cli.md (killslot): the slot number is printed before it
+// acts; the slot is removed from every token in the same write, and a token
+// left naming no slot stays.
+func TestRunKillSlotEchoesTheSlotAndDropsItFromTokens(t *testing.T) {
+	ctx := context.Background()
+	path := newTwoSlotVolumeImage(t, "killslot-token.img")
+	e, _, _, _, _ := newTestEnv(bytes.NewBufferString(`{"type":"user-defined","keyslots":["1"]}`))
+	if err := runTokenImport(ctx, e, []string{"--file", "-", path, "0"}); err != nil {
+		t.Fatalf("runTokenImport: %v", err)
+	}
+
+	e, _, _, stdout, _ := newTestEnv(bytes.NewBufferString(testPassphrase + "\n"))
+	if err := runKillSlot(ctx, e, []string{path, "1"}); err != nil {
+		t.Fatalf("runKillSlot: %v", err)
+	}
+	out := stdout.String()
+	before, after := strings.Index(out, "Removing keyslot 1"), strings.Index(out, "Keyslot 1 removed")
+	if before < 0 || after < 0 || before > after {
+		t.Errorf("stdout = %q, want the slot named before it is removed", out)
+	}
+
+	e, _, _, stdout, _ = newTestEnv(&bytes.Buffer{})
+	if err := runTokenExport(ctx, e, []string{path, "0"}); err != nil {
+		t.Fatalf("runTokenExport after killslot: %v, want the token kept", err)
+	}
+	var tok struct {
+		Keyslots []string `json:"keyslots"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &tok); err != nil {
+		t.Fatalf("token JSON %q: %v", stdout.String(), err)
+	}
+	if len(tok.Keyslots) != 0 {
+		t.Errorf("token keyslots = %v, want slot 1 dropped", tok.Keyslots)
+	}
+}
+
+// docs/keyslots/cli.md: removing the last slot that can open the volume is
+// refused, and the volume still opens.
+func TestRunKillSlotRefusesTheLastSlot(t *testing.T) {
+	path := newTestVolumeImage(t, "killslot-last.img")
+	e, _, _, _, _ := newTestEnv(bytes.NewBufferString(testPassphrase + "\n"))
+	if err := runKillSlot(context.Background(), e, []string{path, "0"}); err == nil {
+		t.Fatal("runKillSlot on the last slot: want a refusal")
+	}
+	e, _, _, _, _ = newTestEnv(bytes.NewBufferString(testPassphrase + "\n"))
+	if err := runTestKey(context.Background(), e, []string{path}); err != nil {
+		t.Errorf("testkey after the refused killslot: %v, want slot 0 to still open", err)
 	}
 }
