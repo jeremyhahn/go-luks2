@@ -98,7 +98,7 @@ func Activate(ctx context.Context, v *luks2.Volume, key *luks2.Key, name string)
 		return nil, errs.At(pkgName, op, "", &errs.Error{Kind: ErrActive,
 			Detail: fmt.Sprintf("the device-mapper name %q is already in use", name)})
 	} else if !dmpkg.IsNoSuchDevice(err) {
-		return nil, errs.At(pkgName, op, "", &errs.Error{Kind: errs.KindOf(err, errs.ErrIO), Detail: "inspect the device-mapper target of " + name, Err: err})
+		return nil, errs.At(pkgName, op, "", &errs.Error{Kind: dmKind(err, errs.ErrIO), Detail: "inspect the device-mapper target of " + name, Err: err})
 	}
 
 	header, err := v.Header(ctx)
@@ -175,7 +175,7 @@ func activateTable(ctx context.Context, name, uuid, backend string, target *luks
 				return &errs.Error{Kind: ErrActive,
 					Detail: fmt.Sprintf("the device-mapper name %q was taken by another activation (%v)", name, createErr)}
 			}
-			return &errs.Error{Kind: errs.KindOf(createErr, errs.ErrIO), Detail: "failed to create device-mapper", Err: createErr}
+			return &errs.Error{Kind: dmKind(createErr, errs.ErrIO), Detail: "failed to create device-mapper", Err: createErr}
 		}
 		created = true
 
@@ -238,7 +238,7 @@ func activateTable(ctx context.Context, name, uuid, backend string, target *luks
 			return releaseErr
 		}
 		if loadErr != nil {
-			return errors.Join(&errs.Error{Kind: errs.KindOf(loadErr, errs.ErrIO), Detail: "failed to create device-mapper", Err: loadErr}, releaseErr)
+			return errors.Join(&errs.Error{Kind: dmKind(loadErr, errs.ErrIO), Detail: "failed to create device-mapper", Err: loadErr}, releaseErr)
 		}
 		return errors.Join(borrowErr, releaseErr)
 	})
@@ -271,7 +271,7 @@ func activateCreated(name, uuid string, devNo uint64, table devmapper.Table) err
 func confirmCreated(name, uuid string, devNo uint64) error {
 	current, err := sys.infoByName(name)
 	if err != nil {
-		return &errs.Error{Kind: errs.KindOf(err, errs.ErrIO), Detail: "confirm the identity of the target created for " + name, Err: err}
+		return &errs.Error{Kind: dmKind(err, errs.ErrIO), Detail: "confirm the identity of the target created for " + name, Err: err}
 	}
 	if current.UUID != uuid || current.DevNo != devNo {
 		return &errs.Error{Kind: ErrDeviceChanged, Detail: "the device-mapper target this activate created was replaced before it was activated"}
@@ -370,7 +370,7 @@ func Deactivate(ctx context.Context, name string) error {
 				Detail: fmt.Sprintf("no device-mapper mapping named %q exists", name)})
 		}
 		return errs.At(pkgName, op, "", &errs.Error{
-			Kind:   errs.KindOf(err, errs.ErrIO),
+			Kind:   dmKind(err, errs.ErrIO),
 			Detail: fmt.Sprintf("cannot establish the identity of mapping %q, so it will not be removed", name),
 			Err:    err})
 	}
@@ -409,7 +409,7 @@ func Deactivate(ctx context.Context, name string) error {
 				Err: err,
 			})
 		}
-		return errs.At(pkgName, op, "", &errs.Error{Kind: errs.KindOf(err, errs.ErrIO), Detail: "failed to remove device-mapper", Err: err})
+		return errs.At(pkgName, op, "", &errs.Error{Kind: dmKind(err, errs.ErrIO), Detail: "failed to remove device-mapper", Err: err})
 	}
 
 	// Clean up device nodes that we may have created. This is the same
