@@ -28,9 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`MigrateToFIPS` refuses Argon2 parameters instead of dropping them.** A
   `MigrateParams.KDF` naming Argon2 (`KDFArgon2id`, `KDFArgon2i`, or a
   non-zero `Time`, `MemoryKiB` or `Parallel`) was silently ignored and a
-  PBKDF2 keyslot written. It is now refused before anything is written, with
-  an error matching `ErrFIPSNotApproved` that names the field, and the volume
-  is left unchanged. A PBKDF2 `KDF` migrates as before.
+  PBKDF2 keyslot written. It is now refused before anything is written, as a
+  `*FIPSMigrationError` at stage `precondition` matching both
+  `ErrFIPSMigration` and `ErrFIPSNotApproved` and naming the field, and the
+  volume is left unchanged. A PBKDF2 `KDF` migrates as before.
 - **A short PBKDF2 salt in strict FIPS mode asks for an import.** Under
   `GODEBUG=fips140=only`, unlocking a volume whose PBKDF2 keyslot or digest has
   a salt under 128 bits failed with `ErrInvalidHeader`, as if the header were

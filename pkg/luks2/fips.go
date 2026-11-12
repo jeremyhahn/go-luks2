@@ -124,9 +124,10 @@ func (v *Volume) MigrateToFIPS(ctx context.Context, pass enclave.ByteAccess, p M
 	const op = "Volume.MigrateToFIPS"
 	// An Argon2 KDF is refused, not dropped: the migration writes PBKDF2 only,
 	// and a caller who named Argon2 must hear that rather than get a PBKDF2
-	// keyslot it did not ask for. Refused here, before anything is written.
+	// keyslot it did not ask for. Refused here, before anything is written,
+	// as the precondition failure migrateToFIPS would report it as.
 	if err := refuseArgon2MigrateKDF(p.KDF); err != nil {
-		return nil, errAt(op, v.path, err)
+		return nil, errAt(op, v.path, &FIPSMigrationError{Device: v.path, Stage: "precondition", State: fipsStateUntouched, Err: err})
 	}
 	opts := &fipsMigrationOptionsForTest{
 		KeepNonApprovedKeyslots: p.KeepNonApproved,
