@@ -511,6 +511,14 @@ func TestVerifyFailsOnAModuleCacheWithoutSources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("go env GOMODCACHE: %v", err)
 	}
+	// A fresh module cache holds only what earlier builds fetched; loading the
+	// module graph fetches the go.mod file of every module in it, so the copy
+	// below holds all of them and bare `go mod verify` can load the graph.
+	graph := exec.Command(goBin, "list", "-mod=readonly", "-m", "all") // #nosec G204 -- the go tool on PATH
+	graph.Dir = repoRoot(t)
+	if got, err := graph.CombinedOutput(); err != nil {
+		t.Fatalf("loading the module graph: %v\n%s", err, got)
+	}
 	cache := modFilesOnly(t, filepath.Join(strings.TrimSpace(string(out)), "cache", "download"))
 	env := environ(nil, map[string]string{"GOMODCACHE": cache, "GOPROXY": "off", "GOFLAGS": "-mod=readonly"})
 
