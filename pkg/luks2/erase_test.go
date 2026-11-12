@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"testing"
 )
 
@@ -77,6 +78,55 @@ func TestVolumeEraseLeavesTheDataSegment(t *testing.T) {
 
 	if !bytes.Equal(readImageAt(t, path, dataOffset, len(payload)), payload) {
 		t.Fatal("Erase reached the data segment")
+	}
+}
+
+// TestHeaderOnlyWipeNeverReachesTheDataSegment: a header-only wipe zeroes
+// every keyslot area the header lists, but never at or past the start of the
+// data segment, even when a listed area claims to lie inside it.
+func TestHeaderOnlyWipeNeverReachesTheDataSegment(t *testing.T) {
+	defer parallel(t)()
+
+	device, target, _ := confinementFixture(t, func(data int64) int64 { return data + 4096 }, "reencrypt")
+	hdr, metadata, err := readHeaderForTest(device)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+	_, keyslotsEnd, err := keyslotsAreaBounds(hdr, metadata)
+	if err != nil {
+		t.Fatalf("keyslotsAreaBounds failed: %v", err)
+	}
+	dataOffset, err := parseSize(metadata.Segments["0"].Offset)
+	if err != nil {
+		t.Fatalf("segment offset: %v", err)
+	}
+	// The header is gone after the wipe, so the data segment is read by
+	// the offset taken here rather than through dataAreaDigest.
+	const payload = 64 << 10
+	data := readImageAt(t, device, dataOffset, payload)
+
+	f, err := os.OpenFile(device, os.O_RDWR, 0) // #nosec G304 -- under t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	for _, r := range wipeHeaderPlan(f) {
+		if r.offset+r.size > dataOffset {
+			t.Fatalf("the plan zeroes %d+%d, past the data segment's start", r.offset, r.size)
+		}
+	}
+	if err := wipeHeaders(context.Background(), f); err != nil {
+		t.Fatalf("wipeHeaders failed: %v", err)
+	}
+
+	if target <= dataOffset {
+		t.Fatalf("precondition: the listed area at %d is not inside the data segment at %d", target, dataOffset)
+	}
+	if !bytes.Equal(readImageAt(t, device, dataOffset, payload), data) {
+		t.Fatal("a header-only wipe changed the data segment")
+	}
+	if region := readImageAt(t, device, 0, int(keyslotsEnd)); !bytes.Equal(region, make([]byte, len(region))) {
+		t.Fatal("the header copies and keyslots area are not all zero after the wipe")
 	}
 }
 

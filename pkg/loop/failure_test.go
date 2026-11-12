@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/jeremyhahn/go-luks2/internal/device"
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
@@ -102,5 +103,13 @@ func TestLookupReportsAnUnidentifiableBackingFile(t *testing.T) {
 
 	if _, err := lookup(context.Background(), "/dev/loop0", s); !errors.Is(err, errs.ErrIO) {
 		t.Errorf("lookup() = %v, want errors.Is(_, ErrIO)", err)
+	}
+}
+
+// ErrPermissionDenied is internal/device's sentinel, the one value shared with
+// pkg/luks2 and pkg/dmcrypt, not a look-alike.
+func TestErrPermissionDeniedIsTheSharedDeviceSentinel(t *testing.T) {
+	if ErrPermissionDenied != device.ErrPermissionDenied {
+		t.Fatal("loop.ErrPermissionDenied is not internal/device's ErrPermissionDenied")
 	}
 }
