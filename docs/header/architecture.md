@@ -202,8 +202,8 @@ That includes `inline-hw-tags` (LUKS2 On-Disk Format 1.1.4): the data
 segment uses only dm-crypt, with authentication tags kept inline by the
 hardware, and every dm-integrity option in the metadata is ignored. Unlock,
 activation and every header write refuse it with an error naming
-`inline-hw-tags` (`internal/header`'s `*UnsupportedRequirementError`, not
-exported from `pkg/luks2`), which unwraps to `ErrUnsupportedRequirement`, and
+`inline-hw-tags` (`*luks2.UnsupportedRequirementError`, whose `Requirement`
+field names it), which unwraps to `ErrUnsupportedRequirement`, and
 leave the device unchanged. The flag is never
 stripped: a read and a re-encode keep `config.requirements` byte for byte.
 
