@@ -10,8 +10,12 @@ import (
 	"crypto/fips140"
 	"errors"
 	"fmt"
+	"go/parser"
+	"go/token"
 	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -242,6 +246,31 @@ func isApprovedEngHash(h string) bool {
 		return true
 	}
 	return false
+}
+
+// Observability: "No logging; every failure above is a typed, returned
+// error." Neither this package nor internal/fips imports a logger.
+func TestEngFIPSCodeDoesNotLog(t *testing.T) {
+	for _, dir := range []string{".", filepath.Join("..", "..", "internal", "fips")} {
+		files, err := filepath.Glob(filepath.Join(dir, "*.go"))
+		if err != nil || len(files) == 0 {
+			t.Fatalf("listing %s: %v (%d files)", dir, err, len(files))
+		}
+		for _, name := range files {
+			if strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			f, err := parser.ParseFile(token.NewFileSet(), name, nil, parser.ImportsOnly)
+			if err != nil {
+				t.Fatalf("parsing %s: %v", name, err)
+			}
+			for _, imp := range f.Imports {
+				if path := strings.Trim(imp.Path.Value, `"`); path == "log" || path == "log/slog" {
+					t.Errorf("%s imports %s; FIPS failures are returned, never logged", name, path)
+				}
+			}
+		}
+	}
 }
 
 // Edge cases: "Under fips140=only, crypto/pbkdf2 also refuses a salt under
