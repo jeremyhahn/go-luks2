@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -62,8 +63,33 @@ func findSeamVars(t *testing.T, dir string) []seamFinding {
 // or type-check is an error naming the package and every error the checker
 // reported, never a package with no seams. A package that type-checks only
 // in part has objects with no type, and its var list would be incomplete.
+// seamTypes holds the one source importer every seamVarsIn call shares, and
+// the file set it records positions in. The source importer caches each
+// package it type-checks, so one instance type-checks the standard library
+// and every dependency once per test binary instead of once per package
+// directory. The importer is not safe for concurrent use: mu serialises
+// seamVarsIn.
+var seamTypes struct {
+	once sync.Once
+	mu   sync.Mutex
+	fset *token.FileSet
+	imp  types.Importer
+}
+
+// sharedSeamImporter returns the shared file set and source importer,
+// creating them on first use, and locks seamTypes.mu; the caller unlocks it.
+func sharedSeamImporter() (*token.FileSet, types.Importer) {
+	seamTypes.once.Do(func() {
+		seamTypes.fset = token.NewFileSet()
+		seamTypes.imp = importer.ForCompiler(seamTypes.fset, "source", nil)
+	})
+	seamTypes.mu.Lock()
+	return seamTypes.fset, seamTypes.imp
+}
+
 func seamVarsIn(dir string) ([]seamFinding, error) {
-	fset := token.NewFileSet()
+	fset, imp := sharedSeamImporter()
+	defer seamTypes.mu.Unlock()
 	bctx := build.Default
 	pkgs, err := parser.ParseDir(fset, dir, func(fi os.FileInfo) bool {
 		if strings.HasSuffix(fi.Name(), "_test.go") {
@@ -85,7 +111,7 @@ func seamVarsIn(dir string) ([]seamFinding, error) {
 
 		var typeErrs []error
 		conf := types.Config{
-			Importer: importer.ForCompiler(fset, "source", nil),
+			Importer: imp,
 			Error:    func(err error) { typeErrs = append(typeErrs, err) },
 		}
 		tpkg, err := conf.Check(name, fset, files, nil)
