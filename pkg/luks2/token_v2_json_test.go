@@ -8,8 +8,12 @@ package luks2
 
 import (
 	"encoding/json"
+	"errors"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
 func TestTokenMarshalJSONWritesKeyslotsAsCanonicalStrings(t *testing.T) {
@@ -85,6 +89,83 @@ func TestTokenUnmarshalRefusesNonCanonicalKeyslots(t *testing.T) {
 	err := json.Unmarshal([]byte(`{"type":"x-test","keyslots":["not-a-number"]}`), &token)
 	if err == nil {
 		t.Fatal("Unmarshal accepted a non-numeric keyslot entry")
+	}
+}
+
+// TestTokenUnmarshalRefusesAMalformedTokenAsInvalidHeader pins tokens
+// engineering.md, Exported surface: UnmarshalJSON returns an *Error of kind
+// ErrInvalidHeader when the input is not a JSON object, when type is not a
+// string, or when keyslots is not an array of decimal strings. JSON null is
+// none of those, as cryptsetup's token validation also holds.
+func TestTokenUnmarshalRefusesAMalformedTokenAsInvalidHeader(t *testing.T) {
+	for name, input := range map[string]string{
+		"an array":              `["type","x-test"]`,
+		"a string":              `"x-test"`,
+		"type a number":         `{"type":1,"keyslots":[]}`,
+		"type null":             `{"type":null,"keyslots":[]}`,
+		"keyslots a string":     `{"type":"x-test","keyslots":"1"}`,
+		"keyslots of numbers":   `{"type":"x-test","keyslots":[1]}`,
+		"keyslots null":         `{"type":"x-test","keyslots":null}`,
+		"keyslots not decimal":  `{"type":"x-test","keyslots":["one"]}`,
+		"keyslots with a blank": `{"type":"x-test","keyslots":[""]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var token Token
+			err := token.UnmarshalJSON([]byte(input))
+			var e *errs.Error
+			if !errors.As(err, &e) || !errors.Is(err, ErrInvalidHeader) {
+				t.Fatalf("UnmarshalJSON(%s) = %v, want an *Error of kind ErrInvalidHeader", input, err)
+			}
+		})
+	}
+}
+
+// TestTokenUnmarshalLeavesMissingFieldsZero pins tokens engineering.md: a
+// missing type or keyslots is not an error, the field is left zero, Members
+// is nil when there is nothing else, and "01" reads as keyslot 1.
+func TestTokenUnmarshalLeavesMissingFieldsZero(t *testing.T) {
+	var token Token
+	if err := json.Unmarshal([]byte(`{}`), &token); err != nil {
+		t.Fatalf("Unmarshal({}) = %v, want no error", err)
+	}
+	if token.Type != "" || token.Keyslots != nil || token.Members != nil {
+		t.Errorf("Unmarshal({}) = %+v, want the zero Token", token)
+	}
+
+	token = Token{}
+	if err := json.Unmarshal([]byte(`{"type":"x-test","keyslots":["01","2"]}`), &token); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if token.Members != nil {
+		t.Errorf("Members = %v, want nil when the token has no other member", token.Members)
+	}
+	if !slices.Equal(token.Keyslots, []int{1, 2}) {
+		t.Errorf("Keyslots = %v, want [1 2] (\"01\" is keyslot 1)", token.Keyslots)
+	}
+}
+
+// TestTokenMarshalJSONWritesTypeAndKeyslotsOverMembers pins tokens
+// engineering.md: MarshalJSON writes Members, then type and keyslots over
+// them, so a Members entry named type or keyslots never reaches the disk.
+func TestTokenMarshalJSONWritesTypeAndKeyslotsOverMembers(t *testing.T) {
+	data, err := json.Marshal(Token{
+		Type:     "x-test",
+		Keyslots: []int{1},
+		Members: map[string]json.RawMessage{
+			"type":     json.RawMessage(`"x-shadow"`),
+			"keyslots": json.RawMessage(`["7"]`),
+			"other":    json.RawMessage(`true`),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("the output is not an object: %v", err)
+	}
+	if string(raw["type"]) != `"x-test"` || string(raw["keyslots"]) != `["1"]` || string(raw["other"]) != "true" {
+		t.Fatalf("Marshal wrote %s, want type x-test, keyslots [\"1\"] and other true", data)
 	}
 }
 

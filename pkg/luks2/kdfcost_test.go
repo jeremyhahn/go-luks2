@@ -354,6 +354,33 @@ func TestCreateArgon2KDFStillDefaultsAZeroCost(t *testing.T) {
 	assertCreateKDFInThisMode(t, formatOptionsForTest{KDFType: "argon2id"}, defaulted)
 }
 
+// TestCreateArgon2KDFDefaultsToTheDocumentedCost pins keyslots
+// engineering.md, KDF: an Argon2 keyslot with no cost set is written at
+// time 4, memory 1048576 KiB (1 GiB) and 4 threads, for argon2id and argon2i
+// alike, and a cost that is set is kept.
+func TestCreateArgon2KDFDefaultsToTheDocumentedCost(t *testing.T) {
+	for _, kdfType := range []string{kdfTypeArgon2id, kdfTypeArgon2i} {
+		kdf, err := createArgon2KDF(kdfType, formatOptionsForTest{}, "c2FsdA==")
+		if err != nil {
+			t.Fatalf("createArgon2KDF(%s) error = %v", kdfType, err)
+		}
+		if *kdf.Time != 4 || *kdf.Memory != 1048576 || *kdf.CPUs != 4 {
+			t.Errorf("%s default = time %d, memory %d KiB, %d threads; want 4, 1048576, 4",
+				kdfType, *kdf.Time, *kdf.Memory, *kdf.CPUs)
+		}
+	}
+
+	kdf, err := createArgon2KDF(kdfTypeArgon2id, formatOptionsForTest{
+		Argon2Time: 2, Argon2Memory: 524288, Argon2Parallel: 1,
+	}, "c2FsdA==")
+	if err != nil {
+		t.Fatalf("createArgon2KDF(set cost) error = %v", err)
+	}
+	if *kdf.Time != 2 || *kdf.Memory != 524288 || *kdf.CPUs != 1 {
+		t.Errorf("a set cost was not kept: time %d, memory %d KiB, %d threads", *kdf.Time, *kdf.Memory, *kdf.CPUs)
+	}
+}
+
 // assertCreateKDFInThisMode checks the public CreateKDF for Argon2 options in
 // the mode this process runs in. Without FIPS 140-3 mode it must build the KDF,
 // which check then inspects. Under FIPS mode Argon2 is not approved, and
