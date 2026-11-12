@@ -67,7 +67,7 @@ func findSeamVars(t *testing.T, dir string) []seamFinding {
 // the file set it records positions in. The source importer caches each
 // package it type-checks, so one instance type-checks the standard library
 // and every dependency once per test binary instead of once per package
-// directory. The importer is not safe for concurrent use: mu serialises
+// directory. The importer is not safe for concurrent use: mu serializes
 // seamVarsIn.
 var seamTypes struct {
 	once sync.Once
