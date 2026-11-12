@@ -61,6 +61,6 @@ No future feature. SPEC.md lists none.
 
 ## Dependencies
 
-- Up: `github.com/jeremyhahn/go-enclave` v0.10.0-alpha (locked-memory primitive, the only in-house module), for **volumes** key custody. It needs a final release before `v1.0.0` ([#211](../../issues/211)).
+- Up: `github.com/jeremyhahn/go-enclave` v0.11.1-alpha (locked-memory primitive, the only in-house module), for **volumes** key custody. It needs a final release before `v1.0.0` ([#211](../../issues/211)).
 - Down: go-trusted-platform (encrypted volume management), which uses **volumes**.
 - Standards watch: LUKS2 On-Disk Format Specification (work in progress), pinned at version 1.1.4 (LUKS2-docs commit `a81aa2fe`), implemented by `internal/header` and `pkg/luks2` ([docs/reference/](docs/reference/README.md)).
