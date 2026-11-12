@@ -165,3 +165,39 @@ func TestRunMountRefusesAnUndetectedFilesystem(t *testing.T) {
 		t.Errorf("mountCalls = %v, want none", mnt.mountCalls)
 	}
 }
+
+// docs/volumes/cli.md (mount): an empty --type, or --type and -t naming
+// different types, is a usage error, and nothing is mounted. Both naming the
+// same type is accepted.
+func TestRunMountRefusesAnEmptyOrConflictingType(t *testing.T) {
+	for _, args := range [][]string{
+		{"--type", ""},
+		{"--type="},
+		{"-t", ""},
+		{"--type", "xfs", "-t", "ext4"},
+	} {
+		e, act, mnt, _, _ := newTestEnv(&bytes.Buffer{})
+		act.mapping = mapping{name: "myvolume"}
+
+		err := runMount(context.Background(), e, append(append([]string{}, args...), "myvolume", filepath.Join(t.TempDir(), "mnt")))
+		var ue *UsageError
+		if !errors.As(err, &ue) {
+			t.Fatalf("runMount %q = %v, want a *UsageError", args, err)
+		}
+		if got := exitCode(err); got != 1 {
+			t.Errorf("runMount %q: exit %d, want 1", args, got)
+		}
+		if len(mnt.mountCalls) != 0 {
+			t.Errorf("runMount %q: mountCalls = %v, want none", args, mnt.mountCalls)
+		}
+	}
+
+	e, act, mnt, _, _ := newTestEnv(&bytes.Buffer{})
+	act.mapping = mapping{name: "myvolume"}
+	if err := runMount(context.Background(), e, []string{"--type", "xfs", "-t", "xfs", "myvolume", filepath.Join(t.TempDir(), "mnt")}); err != nil {
+		t.Fatalf("runMount --type xfs -t xfs: %v", err)
+	}
+	if len(mnt.mountCalls) != 1 || mnt.mountCalls[0].Type != filesystem.XFS {
+		t.Errorf("mountCalls = %v, want one xfs mount", mnt.mountCalls)
+	}
+}
