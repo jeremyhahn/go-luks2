@@ -25,7 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ErrUnsupportedRequirement` and whose `Detail` names the requirement and the
   container's mandatory set. A header write used to report it with Kind
   `ErrIO` and no Detail, and unlock's Detail did not name it. No named
-  requirement type is exported.
+  requirement type is exported. A requirement that stops `MigrateToFIPS`
+  keeps the migration's Kind `ErrFIPSMigration`, with the requirement in
+  `Detail` and `errors.Is(err, ErrUnsupportedRequirement)` still true.
 
 ## [1.0.3-alpha] - 2026-11-10
 

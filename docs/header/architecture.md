@@ -209,7 +209,11 @@ The caller reads the refusal from `*luks2.Error`, not from a named type:
 carries the requirement stays in `internal/header`; `pkg/luks2` exports no
 type for it. `TestUnsupportedRequirementIsReadableFromLuks2Error` pins this
 from outside the package for `Unlock`, `AddKeyslot`, `ChangeKeyslot` and
-`RemoveKeyslot`. The flag is never
+`RemoveKeyslot`. A requirement that stops `MigrateToFIPS` keeps the
+migration's `Kind`, `ErrFIPSMigration`: `Detail` names the requirement,
+`errors.Is(err, luks2.ErrUnsupportedRequirement)` holds and `errors.As` finds
+the `*luks2.FIPSMigrationError`
+(`TestRequirementThatStopsMigrationKeepsTheMigrationKind`). The flag is never
 stripped: a read and a re-encode keep `config.requirements` byte for byte.
 
 A segment's `integrity` object may carry `key_size` (1.1.4, integer, optional):
