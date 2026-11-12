@@ -620,6 +620,195 @@ func TestVolumeRemoveKeyslotRemovesItWithoutDisturbingOthers(t *testing.T) {
 	}
 }
 
+// TestKeyslotChangesLeaveTheDataAreaUntouched pins the keyslots feature's
+// core promise: credentials are added, rotated and revoked without
+// re-encrypting data. AddKeyslot, ChangeKeyslot and RemoveKeyslot write only
+// the header and the keyslots area, so every byte of the data segment reads
+// back as it was, and the volume's original credential still opens it.
+func TestKeyslotChangesLeaveTheDataAreaUntouched(t *testing.T) {
+	ctx := context.Background()
+	path := formattedVolumeImage(t, "keyslot-data-untouched.img", "", "")
+
+	v := txnVolume(t, path)
+	h, err := v.Header(ctx)
+	if err != nil {
+		t.Fatalf("Header failed: %v", err)
+	}
+	segments := h.Segments()
+	if len(segments) != 1 {
+		t.Fatalf("the fixture has %d data segments, want 1", len(segments))
+	}
+	offset := segments[0].Offset
+
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("opening the image failed: %v", err)
+	}
+	st, err := f.Stat()
+	if err != nil {
+		t.Fatalf("stat failed: %v", err)
+	}
+	if st.Size() <= offset {
+		t.Fatalf("the image (%d bytes) has no data area past offset %d", st.Size(), offset)
+	}
+	// A recognizable pattern, so an unchanged all-zero area cannot pass by
+	// accident of a sparse file.
+	pattern := bytes.Repeat([]byte("ciphertext-stand-in."), int((st.Size()-offset)/20)+1)[:st.Size()-offset]
+	if _, err := f.WriteAt(pattern, offset); err != nil {
+		t.Fatalf("writing the data pattern failed: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("closing the image failed: %v", err)
+	}
+
+	kdf := KDFParams{Type: KDFPBKDF2, IterTime: time.Millisecond}
+	key := txnKey(t, v)
+	added, err := v.AddKeyslot(ctx, key, txnPassphrase(t, "an added credential"), KeyslotParams{KDF: kdf})
+	if err != nil {
+		t.Fatalf("AddKeyslot failed: %v", err)
+	}
+	rotated, err := v.UnlockKeyslot(ctx, added.ID, txnPassphrase(t, "an added credential"))
+	if err != nil {
+		t.Fatalf("UnlockKeyslot(%d) failed: %v", added.ID, err)
+	}
+	defer rotated.Destroy()
+	if _, err := v.ChangeKeyslot(ctx, rotated, txnPassphrase(t, "a rotated credential"), KeyslotParams{KDF: kdf}); err != nil {
+		t.Fatalf("ChangeKeyslot failed: %v", err)
+	}
+	if err := v.RemoveKeyslot(ctx, added.ID); err != nil {
+		t.Fatalf("RemoveKeyslot(%d) failed: %v", added.ID, err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the image back failed: %v", err)
+	}
+	if int64(len(raw)) != st.Size() {
+		t.Fatalf("the image is %d bytes after the keyslot changes, want %d", len(raw), st.Size())
+	}
+	if !bytes.Equal(raw[offset:], pattern) {
+		t.Fatal("a keyslot change wrote into the data segment")
+	}
+	txnKey(t, v) // the original credential still opens the volume
+}
+
+// TestRemoveKeyslotDropsTheSlotFromEveryDigestAndTokenInOneWrite pins the
+// keyslot persistence rule: removing a keyslot drops its number from every
+// digest and token, and a token left naming no keyslot is kept. It also pins
+// that AddKeyslot reports the slot it wrote when the slots are not contiguous.
+func TestRemoveKeyslotDropsTheSlotFromEveryDigestAndTokenInOneWrite(t *testing.T) {
+	ctx := context.Background()
+	path := formattedVolumeImage(t, "keyslot-remove-references.img", "", "")
+	v := txnVolume(t, path)
+
+	slot := 5
+	added, err := v.AddKeyslot(ctx, txnKey(t, v), txnPassphrase(t, "an added credential"),
+		KeyslotParams{Slot: &slot, KDF: KDFParams{Type: KDFPBKDF2, IterTime: time.Millisecond}})
+	if err != nil {
+		t.Fatalf("AddKeyslot failed: %v", err)
+	}
+	if added.ID != slot {
+		t.Fatalf("AddKeyslot reported slot %d, want %d (the slots are 0 and %d)", added.ID, slot, slot)
+	}
+	only, err := v.AddToken(ctx, Token{Type: "x-only-the-removed-slot", Keyslots: []int{slot}})
+	if err != nil {
+		t.Fatalf("AddToken failed: %v", err)
+	}
+	both, err := v.AddToken(ctx, Token{Type: "x-both-slots", Keyslots: []int{0, slot}})
+	if err != nil {
+		t.Fatalf("AddToken failed: %v", err)
+	}
+
+	if err := v.RemoveKeyslot(ctx, slot); err != nil {
+		t.Fatalf("RemoveKeyslot(%d) failed: %v", slot, err)
+	}
+
+	_, metadata, err := readHeaderForTest(path)
+	if err != nil {
+		t.Fatalf("reading the header back failed: %v", err)
+	}
+	if len(metadata.Digests) == 0 {
+		t.Fatal("the header has no digests")
+	}
+	for id, d := range metadata.Digests {
+		for _, ks := range d.Keyslots {
+			if ks == "5" {
+				t.Errorf("digest %s still names the removed keyslot: %v", id, d.Keyslots)
+			}
+		}
+	}
+	h, err := v.Header(ctx)
+	if err != nil {
+		t.Fatalf("Header failed: %v", err)
+	}
+	for _, ks := range h.Keyslots() {
+		if ks.ID == slot {
+			t.Fatalf("keyslot %d is still in the header", slot)
+		}
+	}
+	tokens := h.Tokens()
+	kept, ok := tokens[only]
+	if !ok {
+		t.Fatalf("the token that named only the removed keyslot was dropped; tokens %v", tokens)
+	}
+	if len(kept.Keyslots) != 0 {
+		t.Errorf("token %d names keyslots %v after the removal, want none", only, kept.Keyslots)
+	}
+	if got := tokens[both].Keyslots; len(got) != 1 || got[0] != 0 {
+		t.Errorf("token %d names keyslots %v after the removal, want [0]", both, got)
+	}
+}
+
+// TestEveryWrittenKDFSaltIsThirtyTwoFreshRandomBytes pins "Salts are 32
+// random bytes": every keyslot Format and AddKeyslot write, and the digest,
+// carries a 32-byte salt, and no two of them share one.
+func TestEveryWrittenKDFSaltIsThirtyTwoFreshRandomBytes(t *testing.T) {
+	ctx := context.Background()
+	path := formattedVolumeImage(t, "keyslot-salts.img", "", "")
+	v := txnVolume(t, path)
+	for _, cred := range []string{"a second credential", "a third credential"} {
+		if _, err := v.AddKeyslot(ctx, txnKey(t, v), txnPassphrase(t, cred),
+			KeyslotParams{KDF: KDFParams{Type: KDFPBKDF2, IterTime: time.Millisecond}}); err != nil {
+			t.Fatalf("AddKeyslot failed: %v", err)
+		}
+	}
+
+	_, metadata, err := readHeaderForTest(path)
+	if err != nil {
+		t.Fatalf("reading the header back failed: %v", err)
+	}
+	if len(metadata.Keyslots) != 3 {
+		t.Fatalf("the fixture has %d keyslots, want 3", len(metadata.Keyslots))
+	}
+	seen := map[string]string{}
+	check := func(what, encoded string) {
+		t.Helper()
+		salt, err := decodeBase64(encoded)
+		if err != nil {
+			t.Fatalf("%s salt %q is not base64: %v", what, encoded, err)
+		}
+		if len(salt) != 32 {
+			t.Errorf("%s salt is %d bytes, want 32", what, len(salt))
+		}
+		if bytes.Equal(salt, make([]byte, len(salt))) {
+			t.Errorf("%s salt is all zero", what)
+		}
+		if prev, dup := seen[string(salt)]; dup {
+			t.Errorf("%s reuses the salt of %s", what, prev)
+		}
+		seen[string(salt)] = what
+	}
+	for id, ks := range metadata.Keyslots {
+		if ks.KDF == nil {
+			t.Fatalf("keyslot %s has no KDF", id)
+		}
+		check("keyslot "+id, ks.KDF.Salt)
+	}
+	for id, d := range metadata.Digests {
+		check("digest "+id, d.Salt)
+	}
+}
+
 func TestVolumeRemoveKeyslotRefusesTheLastKeyslot(t *testing.T) {
 	path := formattedVolumeImage(t, "removekeyslot-last.img", "", "")
 
