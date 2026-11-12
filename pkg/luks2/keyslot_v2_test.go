@@ -759,6 +759,56 @@ func TestRemoveKeyslotDropsTheSlotFromEveryDigestAndTokenInOneWrite(t *testing.T
 	}
 }
 
+// TestEveryWrittenKDFSaltIsThirtyTwoFreshRandomBytes pins "Salts are 32
+// random bytes": every keyslot Format and AddKeyslot write, and the digest,
+// carries a 32-byte salt, and no two of them share one.
+func TestEveryWrittenKDFSaltIsThirtyTwoFreshRandomBytes(t *testing.T) {
+	ctx := context.Background()
+	path := formattedVolumeImage(t, "keyslot-salts.img", "", "")
+	v := txnVolume(t, path)
+	for _, cred := range []string{"a second credential", "a third credential"} {
+		if _, err := v.AddKeyslot(ctx, txnKey(t, v), txnPassphrase(t, cred),
+			KeyslotParams{KDF: KDFParams{Type: KDFPBKDF2, IterTime: time.Millisecond}}); err != nil {
+			t.Fatalf("AddKeyslot failed: %v", err)
+		}
+	}
+
+	_, metadata, err := readHeaderForTest(path)
+	if err != nil {
+		t.Fatalf("reading the header back failed: %v", err)
+	}
+	if len(metadata.Keyslots) != 3 {
+		t.Fatalf("the fixture has %d keyslots, want 3", len(metadata.Keyslots))
+	}
+	seen := map[string]string{}
+	check := func(what, encoded string) {
+		t.Helper()
+		salt, err := decodeBase64(encoded)
+		if err != nil {
+			t.Fatalf("%s salt %q is not base64: %v", what, encoded, err)
+		}
+		if len(salt) != 32 {
+			t.Errorf("%s salt is %d bytes, want 32", what, len(salt))
+		}
+		if bytes.Equal(salt, make([]byte, len(salt))) {
+			t.Errorf("%s salt is all zero", what)
+		}
+		if prev, dup := seen[string(salt)]; dup {
+			t.Errorf("%s reuses the salt of %s", what, prev)
+		}
+		seen[string(salt)] = what
+	}
+	for id, ks := range metadata.Keyslots {
+		if ks.KDF == nil {
+			t.Fatalf("keyslot %s has no KDF", id)
+		}
+		check("keyslot "+id, ks.KDF.Salt)
+	}
+	for id, d := range metadata.Digests {
+		check("digest "+id, d.Salt)
+	}
+}
+
 func TestVolumeRemoveKeyslotRefusesTheLastKeyslot(t *testing.T) {
 	path := formattedVolumeImage(t, "removekeyslot-last.img", "", "")
 
