@@ -110,7 +110,16 @@ func Activate(ctx context.Context, v *luks2.Volume, key *luks2.Key, name string)
 		return nil, errs.At(pkgName, op, "", err)
 	}
 
-	uuid := mappingUUID(header.UUID(), name)
+	return activateTarget(ctx, name, mappingUUID(header.UUID(), name), target, key)
+}
+
+// activateTarget is the half of Activate that runs once the target is
+// described and the key re-verified: the create, the keyring handoff, the
+// load and resume, the node and the readiness wait. From the create on it is
+// a transaction: every failure rolls the created target back, under
+// context.WithoutCancel so a cancelled caller still gets the rollback.
+func activateTarget(ctx context.Context, name, uuid string, target *luks2.Target, key *luks2.Key) (*Mapping, error) {
+	const op = "Activate"
 	backend := fmt.Sprintf("%d:%d", target.Major, target.Minor)
 
 	devNo, created, err := activateTable(ctx, name, uuid, backend, target, key)

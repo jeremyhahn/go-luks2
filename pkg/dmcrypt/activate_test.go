@@ -513,6 +513,199 @@ func TestRollbackStopsWhenTheTargetDisappearsMidRetry(t *testing.T) {
 	}
 }
 
+// assertRolledBack fails the test unless the target this activation created
+// under name was removed and nothing is left live under the name.
+// holdFirstRemove makes the first removal attempt fail as briefly held (a
+// udev rule), so a rollback has to retry, and a retry bound to a canceled
+// caller's context would give up and leave the plaintext target live. Call
+// it after the fake device-mapper is installed.
+func holdFirstRemove(t *testing.T) {
+	t.Helper()
+	remove := sys.remove
+	held := true
+	sys.remove = func(name string) error {
+		if held {
+			held = false
+			return os.NewSyscallError("dm ioctl", unix.EBUSY)
+		}
+		return remove(name)
+	}
+}
+
+func assertRolledBack(t *testing.T, fake *fakeDeviceMapper, name string, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("activateTarget reported success for an activation that failed after its create")
+	}
+	if errors.Is(err, ErrStillLive) {
+		t.Fatalf("the rollback did not confirm the removal: %v", err)
+	}
+	if len(fake.created) != 1 || fake.created[0] != name {
+		t.Fatalf("created = %v, want exactly [%s]", fake.created, name)
+	}
+	if _, live := fake.targets[name]; live {
+		t.Fatalf("the target %q this activation created is still live after its failure", name)
+	}
+}
+
+func TestActivateTargetReturnsTheVerifiedMapping(t *testing.T) {
+	fake := newFakeDeviceMapper()
+	fake.install(t)
+	ring := &fakeKeyring{}
+	ring.install(t)
+
+	const name, uuid = "fresh", "CRYPT-LUKS2-abc-fresh"
+	m, err := activateTarget(context.Background(), name, uuid, testTarget(), testKey(t, make([]byte, 32)))
+	if err != nil {
+		t.Fatalf("activateTarget = %v", err)
+	}
+	devNo := fake.devNos[name]
+	if m.Name != name || m.UUID != uuid || m.Major != unix.Major(devNo) || m.Minor != unix.Minor(devNo) {
+		t.Fatalf("mapping = %+v, want %s %s %d:%d", m, name, uuid, unix.Major(devNo), unix.Minor(devNo))
+	}
+	if fake.readyInfo == nil || fake.readyInfo.UUID != uuid || fake.readyInfo.DevNo != devNo {
+		t.Fatalf("waitReady waited for %+v, not the created target", fake.readyInfo)
+	}
+	if n := ring.linkedKeys(memorySessionRing); n != 0 {
+		t.Fatalf("the session ring holds %d entries after a successful activation, want 0", n)
+	}
+	if len(fake.removed) != 0 {
+		t.Fatalf("a successful activation removed %v", fake.removed)
+	}
+}
+
+func TestActivateTargetRollsBackAFailureAfterCreateEvenWhenTheCallerCanceled(t *testing.T) {
+	fake := newFakeDeviceMapper()
+	fake.install(t)
+	fake.loadErr = os.NewSyscallError("dm ioctl DM_TABLE_LOAD", unix.EINVAL)
+	recordRetryWaits(t)
+
+	holdFirstRemove(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	fake.onLoad = func(string, string, []devmapper.Table) { cancel() }
+
+	ring := &fakeKeyring{}
+	ring.install(t)
+
+	_, err := activateTarget(ctx, "canceled", "CRYPT-LUKS2-abc-canceled", testTarget(), testKey(t, make([]byte, 32)))
+	assertRolledBack(t, fake, "canceled", err)
+	if n := ring.linkedKeys(memorySessionRing); n != 0 {
+		t.Fatalf("the caller's cancellation left %d keyring entries; the release must complete regardless", n)
+	}
+}
+
+func TestActivateTargetRollsBackWhenTheKeyringCannotHoldTheKey(t *testing.T) {
+	fake := newFakeDeviceMapper()
+	fake.install(t)
+	(&fakeKeyring{addErr: unix.EPERM}).install(t)
+
+	_, err := activateTarget(context.Background(), "blocked", "CRYPT-LUKS2-abc-blocked", testTarget(), testKey(t, make([]byte, 32)))
+	assertRolledBack(t, fake, "blocked", err)
+	if !errors.Is(err, ErrKeyringBlocked) || !errors.Is(err, ErrKeyringUnavailable) {
+		t.Fatalf("activateTarget = %v, want ErrKeyringBlocked under ErrKeyringUnavailable", err)
+	}
+	if len(fake.loaded) != 0 {
+		t.Fatalf("a table was loaded although the keyring could not hold the key: %d table(s)", len(fake.loaded))
+	}
+}
+
+func TestActivateTableReleasesTheKeyringEntryOnAPanic(t *testing.T) {
+	fake := newFakeDeviceMapper()
+	fake.install(t)
+	ring := &fakeKeyring{}
+	ring.install(t)
+	fake.onLoad = func(string, string, []devmapper.Table) { panic("load blew up") }
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("the panic inside the activation was swallowed, not re-raised")
+			}
+		}()
+		_, _, _ = activateTable(context.Background(), "panicked", "CRYPT-LUKS2-abc-panicked", "7:3", testTarget(), testKey(t, make([]byte, 32)))
+	}()
+	if len(ring.added) != 1 {
+		t.Fatalf("keyring adds = %v, want one", ring.added)
+	}
+	if n := ring.linkedKeys(memorySessionRing); n != 0 {
+		t.Fatalf("a panic during the load left %d keyring entries holding the volume key", n)
+	}
+}
+
+func TestActivateTargetRollsBackWhenTheKeyringEntryIsNotReleased(t *testing.T) {
+	fake := newFakeDeviceMapper()
+	fake.install(t)
+	stuck := &fakeKeyring{unlinkErr: unix.EACCES}
+	stuck.install(t)
+
+	_, err := activateTarget(context.Background(), "unreleased", "CRYPT-LUKS2-abc-unreleased", testTarget(), testKey(t, make([]byte, 32)))
+	assertRolledBack(t, fake, "unreleased", err)
+	if !errors.Is(err, ErrKeyringKeyNotReleased) {
+		t.Fatalf("activateTarget = %v, want ErrKeyringKeyNotReleased", err)
+	}
+}
+
+func TestActivateTargetRollsBackWhenTheNodeNeverVerifies(t *testing.T) {
+	fake := newFakeDeviceMapper()
+	fake.install(t)
+	fake.nodeErr = errors.New("mknod refused")
+	fake.readyErr = &Error{Kind: ErrNodeUnverified, Detail: "no node verified"}
+	recordRetryWaits(t)
+	holdFirstRemove(t)
+
+	// The caller gives up while the node is awaited; the rollback still runs.
+	ctx, cancel := context.WithCancel(context.Background())
+	waitReady := sys.waitReady
+	sys.waitReady = func(ctx context.Context, name string, info *devmapper.DeviceInfo) error {
+		cancel()
+		return waitReady(ctx, name, info)
+	}
+
+	_, err := activateTarget(ctx, "unverified", "CRYPT-LUKS2-abc-unverified", testTarget(), testKey(t, make([]byte, 32)))
+	assertRolledBack(t, fake, "unverified", err)
+	if !errors.Is(err, ErrNodeUnverified) {
+		t.Fatalf("activateTarget = %v, want ErrNodeUnverified", err)
+	}
+	if !strings.Contains(err.Error(), "mknod refused") {
+		t.Errorf("the node failure that explains the readiness failure is not reported: %v", err)
+	}
+}
+
+func TestActivateTargetJoinsTheCauseWithAFailedRollback(t *testing.T) {
+	fake := newFakeDeviceMapper()
+	fake.install(t)
+	(&fakeKeyring{addErr: unix.EDQUOT}).install(t)
+	fake.removeErr = os.NewSyscallError("dm ioctl", unix.EBUSY)
+	recordRetryWaits(t)
+
+	_, err := activateTarget(context.Background(), "stuck", "CRYPT-LUKS2-abc-stuck", testTarget(), testKey(t, make([]byte, 32)))
+	if !errors.Is(err, ErrStillLive) {
+		t.Fatalf("activateTarget = %v, want ErrStillLive for a rollback that could not remove the target", err)
+	}
+	if !errors.Is(err, ErrKeyringUnavailable) {
+		t.Fatalf("activateTarget = %v, the keyring cause is lost from the joined error", err)
+	}
+	if !strings.Contains(err.Error(), "Deactivate") {
+		t.Errorf("ErrStillLive does not name the Deactivate call that closes the target: %v", err)
+	}
+}
+
+func TestActivateTargetLoserOfTheCreateRaceRemovesNothing(t *testing.T) {
+	fake := newFakeDeviceMapper()
+	const theirs = "CRYPT-LUKS2-winner-raced"
+	fake.targets["raced"] = theirs
+	fake.install(t)
+
+	_, err := activateTarget(context.Background(), "raced", "CRYPT-LUKS2-loser-raced", testTarget(), testKey(t, make([]byte, 32)))
+	if !errors.Is(err, ErrActive) {
+		t.Fatalf("activateTarget = %v, want ErrActive for the loser of the create race", err)
+	}
+	if len(fake.removed) != 0 || fake.targets["raced"] != theirs {
+		t.Fatalf("the loser of the create race touched the winner's target: removed=%v targets=%v", fake.removed, fake.targets)
+	}
+}
+
 // --- Activate: branches reachable without a real Volume/Target ---
 
 func TestActivateRefusesAnInvalidName(t *testing.T) {
@@ -742,6 +935,60 @@ func TestDeactivateRidesOutATransientIdentityLookupFailure(t *testing.T) {
 	}
 	if _, live := fake.targets[name]; live {
 		t.Fatalf("Deactivate returned success but %q is still live", name)
+	}
+}
+
+func TestDeactivateReturnsNilWhenTheTargetVanishesDuringTheWait(t *testing.T) {
+	fake := newFakeDeviceMapper()
+	fake.targets["vanishing"] = "CRYPT-LUKS2-vanishing"
+	fake.install(t)
+	recordRetryWaits(t)
+
+	// Held on the first attempt, and closed by another actor during the
+	// backoff.
+	sys.remove = func(name string) error {
+		fake.removed = append(fake.removed, name)
+		delete(fake.targets, name)
+		return os.NewSyscallError("dm ioctl", unix.EBUSY)
+	}
+
+	if err := Deactivate(context.Background(), "vanishing"); err != nil {
+		t.Fatalf("Deactivate = %v, want nil for a target removed during the wait", err)
+	}
+	if len(fake.removed) != 1 {
+		t.Fatalf("Deactivate tried to remove %d times, want 1: the name was gone after the first", len(fake.removed))
+	}
+}
+
+func TestDeactivateTouchesNoKeyringState(t *testing.T) {
+	fake := newFakeDeviceMapper()
+	fake.targets["closing"] = "CRYPT-LUKS2-closing"
+	fake.install(t)
+	ring := &fakeKeyring{ringErr: unix.ENOSYS, addErr: unix.ENOSYS, searchErr: unix.ENOSYS, revokeErr: unix.ENOSYS, unlinkErr: unix.ENOSYS}
+	ring.install(t)
+
+	if err := Deactivate(context.Background(), "closing"); err != nil {
+		t.Fatalf("Deactivate = %v: it reached a keyring that refuses every call", err)
+	}
+	if len(ring.added) != 0 || len(ring.revoked) != 0 {
+		t.Fatalf("Deactivate touched the keyring: added=%v revoked=%v", ring.added, ring.revoked)
+	}
+}
+
+func TestActivateRefusesANameInUseBeforeTouchingTheKey(t *testing.T) {
+	fake := newFakeDeviceMapper()
+	fake.targets["in-use"] = "CRYPT-LUKS2-someone-elses"
+	fake.install(t)
+	ring := &fakeKeyring{}
+	ring.install(t)
+	v, key := formattedVolume(t)
+
+	_, err := Activate(context.Background(), v, key, "in-use")
+	if !errors.Is(err, ErrActive) {
+		t.Fatalf("Activate = %v, want ErrActive for a name already in use", err)
+	}
+	if len(fake.created) != 0 || len(fake.removed) != 0 || len(ring.added) != 0 {
+		t.Fatalf("Activate acted on a name in use: created=%v removed=%v keyring adds=%v", fake.created, fake.removed, ring.added)
 	}
 }
 
