@@ -33,6 +33,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   report Kind `ErrIO` with Detail "failed to read header", and now reports
   the requirement, with `errors.Is(err, ErrIO)` still true underneath.
 
+- **A concurrent build of the same toolchain image tag no longer fails the
+  job.** Two jobs on one Docker daemon could build the content-addressed
+  toolchain tag at once, and BuildKit refused the slower export with `image
+  "…": already exists`. The tag is a hash of the image's inputs, so the image
+  the faster job left is the one the slower job would have built.
+  `make docker-build-toolchain` and `make docker-build-integration` now pass
+  when the build fails with exactly that refusal of their own content tag and
+  the tag resolves, and they print a line saying so. Every other build failure
+  still fails, with the build's output and exit status. Before this change,
+  `docker-build-integration` accepted any failed build whose tag resolved
+  afterwards; it now needs the refusal too.
+
 ## [1.0.3-alpha] - 2026-11-10
 
 ### Changed
