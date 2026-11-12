@@ -8,7 +8,10 @@ package luks2
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -104,7 +107,10 @@ func TestUnlockKeyslotCancelledDuringThePassphraseKDFDestroysTheOutput(t *testin
 // keyslots architecture's third cancellation point: each digest check
 // derives a key, so a canceled ctx stops the digest loop before the next
 // derivation and is returned as ctx.Err(), not as a credential verdict. The
-// control is the same key and header under a live ctx, which verifies.
+// context is canceled during the first of several digest evaluations, so a
+// single check on entry would not catch it and the remaining digests would
+// run. The control is the same key and header under a live ctx, which
+// verifies.
 func TestVerifyKeyAgainstDigestsObservesCancellationBetweenDigests(t *testing.T) {
 	device, passphrase := unlockableVolume(t)
 	key := volumeKeyEnclave(t, masterKeyOf(t, device, passphrase))
@@ -120,13 +126,59 @@ func TestVerifyKeyAgainstDigestsObservesCancellationBetweenDigests(t *testing.T)
 		t.Fatalf("the premise does not hold -- the volume key failed its own digest: %v", err)
 	}
 
+	// Several applicable digests, none of which the key matches, so every one
+	// would be evaluated if nothing stopped the loop. Each is the volume's own
+	// digest with its stored value altered.
+	var original *header.Digest
+	for _, d := range metadata.Digests {
+		original = d
+	}
+	stored, err := base64.StdEncoding.DecodeString(original.Digest)
+	if err != nil || len(stored) == 0 {
+		t.Fatalf("the volume's digest value does not decode: %v", err)
+	}
+	const digestCount = 4
+	digests := make(map[string]*header.Digest, digestCount)
+	for i := range digestCount {
+		altered := slices.Clone(stored)
+		altered[0] ^= byte(i + 1)
+		d := *original
+		d.Digest = base64.StdEncoding.EncodeToString(altered)
+		digests[strconv.Itoa(i)] = &d
+	}
+
+	// fipsMode is consulted while a digest is evaluated and never before the
+	// loop, so its calls count evaluation work. The calibration counts what
+	// one digest costs.
+	perDigest := 0
+	single := map[string]*header.Digest{"0": digests["0"]}
+	counting := func() fips.Mode { perDigest++; return fips.Probe() }
+	if err := verifyKeyAgainstDigests(context.Background(), key, single, covers, unverifiable, counting); !errors.Is(err, ErrWrongKey) {
+		t.Fatalf("the premise does not hold -- an altered digest = %v, want ErrWrongKey", err)
+	}
+	if perDigest == 0 {
+		t.Fatal("the premise does not hold -- evaluating a digest never consulted fipsMode")
+	}
+
+	// The context is canceled from inside the first evaluation: a check made
+	// once on entry has already passed by then, and only a check before each
+	// digest stops the next one from running.
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	err = verifyKeyAgainstDigests(ctx, key, metadata.Digests, covers, unverifiable, fips.Probe)
+	defer cancel()
+	calls := 0
+	cancelling := func() fips.Mode {
+		calls++
+		cancel()
+		return fips.Probe()
+	}
+	err = verifyKeyAgainstDigests(ctx, key, digests, covers, unverifiable, cancelling)
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("verifyKeyAgainstDigests under a canceled ctx = %v, want context.Canceled", err)
+		t.Fatalf("verifyKeyAgainstDigests canceled during the first digest = %v, want context.Canceled", err)
 	}
 	if errors.Is(err, ErrWrongKey) {
 		t.Fatalf("a cancellation was reported as a credential verdict: %v", err)
+	}
+	if calls != perDigest {
+		t.Fatalf("evaluation consulted fipsMode %d time(s), want %d (one digest): the digests after the cancellation ran", calls, perDigest)
 	}
 }
