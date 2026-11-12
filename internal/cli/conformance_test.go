@@ -16,6 +16,7 @@ import (
 	"testing/iotest"
 
 	"github.com/jeremyhahn/go-luks2/internal/header"
+	"github.com/jeremyhahn/go-luks2/pkg/dmcrypt"
 	"github.com/jeremyhahn/go-luks2/pkg/filesystem"
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
@@ -531,6 +532,28 @@ func TestRunHeaderRestoreRows(t *testing.T) {
 		}
 		if !bytes.Equal(primary[:512], make([]byte, 512)) {
 			t.Errorf("%s: the primary was written after a canceled restore", name)
+		}
+	}
+}
+
+// docs/volumes/cli.md (exit status) and docs/dm-crypt-activation/cli.md: the
+// rows TestExitCodeTable does not name. ErrInvalidCredential is 2; an invalid
+// mapping name, an unverified node, a keyring failure, a canceled
+// confirmation and a FIPS refusal have no row of their own and exit 1.
+func TestExitCodeRowsFromActivationAndKeyInput(t *testing.T) {
+	for name, c := range map[string]struct {
+		err  error
+		want int
+	}{
+		"invalid credential":    {luks2.ErrInvalidCredential, 2},
+		"invalid mapping name":  {dmcrypt.ErrInvalidName, 1},
+		"node unverified":       {dmcrypt.ErrNodeUnverified, 1},
+		"keyring unavailable":   {dmcrypt.ErrKeyringUnavailable, 1},
+		"canceled confirmation": {&ConfirmationError{}, 1},
+		"FIPS refuses the KDF":  {luks2.ErrFIPSNotApproved, 1},
+	} {
+		if got := exitCode(c.err); got != c.want {
+			t.Errorf("%s: exitCode(%v) = %d, want %d", name, c.err, got, c.want)
 		}
 	}
 }
