@@ -239,3 +239,59 @@ func TestRunInfoListsNullEntriesOnStderr(t *testing.T) {
 		t.Errorf("stdout = %q, want the summary", stdout.String())
 	}
 }
+
+// docs/volumes/cli.md (create, key input limits): a new passphrase must be 8
+// to 512 bytes. Outside that, create exits 2 (ErrInvalidCredential) and the
+// file it made is deleted.
+func TestRunCreateRefusesANewPassphraseOutsideEightTo512Bytes(t *testing.T) {
+	for _, n := range []int{7, 513} {
+		dir := t.TempDir()
+		keyFile := filepath.Join(dir, "new.key")
+		if err := os.WriteFile(keyFile, bytes.Repeat([]byte("k"), n), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		path := filepath.Join(dir, "vol.luks")
+		e, act, _, _, _ := newTestEnv(&bytes.Buffer{})
+
+		args := append(append([]string{}, fastKDFArgs...), "--key-file", keyFile, path, "24M")
+		err := runCreate(context.Background(), e, args)
+		if !errors.Is(err, luks2.ErrInvalidCredential) {
+			t.Fatalf("%d-byte passphrase: runCreate = %v, want ErrInvalidCredential", n, err)
+		}
+		if got := exitCode(err); got != 2 {
+			t.Errorf("%d-byte passphrase: exit %d, want 2", n, got)
+		}
+		if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+			t.Errorf("%d-byte passphrase: Lstat(%s) = %v, want the file deleted", n, path, statErr)
+		}
+		if len(act.deactivated) != 0 {
+			t.Errorf("%d-byte passphrase: deactivated = %v, want nothing activated", n, act.deactivated)
+		}
+	}
+}
+
+// docs/volumes/cli.md (create, step 2): a symlink at the path is refused and
+// the file it points at is left alone.
+func TestRunCreateRefusesASymlinkAtThePath(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("keep"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	link := filepath.Join(dir, "vol.luks")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	e, _, _, _, _ := newTestEnv(bytes.NewBufferString(testPassphrase + "\n"))
+
+	args := append(append([]string{}, fastKDFArgs...), link, "24M")
+	if err := runCreate(context.Background(), e, args); err == nil {
+		t.Fatal("runCreate on a symlink: want an error")
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "keep" {
+		t.Errorf("symlink target = %q, %v, want it unchanged", got, err)
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("Lstat(link) = %v, %v, want the symlink left in place", fi, err)
+	}
+}
