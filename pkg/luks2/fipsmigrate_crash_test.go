@@ -720,6 +720,10 @@ func TestMigrateToFIPSResumedAfterACrashKeepsAWayIn(t *testing.T) {
 			continue
 		}
 		t.Run(start.class, func(t *testing.T) {
+			// Parallel as well, never a sequential middle level: its own
+			// subtests take slots, and a sequential level between them and a
+			// slot-holding parent is the shape parallel(t) warns deadlocks.
+			defer parallel(t)()
 			r, result, err, final := migrateRecording(t, start.image, 0)
 
 			if err != nil || !result.Complete {

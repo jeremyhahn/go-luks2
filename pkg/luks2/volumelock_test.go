@@ -275,7 +275,7 @@ func TestVolumeMigrateToFIPSStaysOnThePinnedDevice(t *testing.T) {
 	}
 
 	pinned := argon2VolumeImage(t, "pinned.img")
-	other := argon2VolumeImage(t, "other.img")
+	other := argon2VolumeImageFrom(t, "argon2VolumeOther", "other.img")
 	otherBefore := fileDigest(t, other)
 
 	link := filepath.Join(t.TempDir(), "device")

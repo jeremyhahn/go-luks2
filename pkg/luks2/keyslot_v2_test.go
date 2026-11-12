@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"strings"
@@ -299,20 +300,7 @@ func TestVolumeChangeKeyslotPreservesTheExistingPBKDF2Cost(t *testing.T) {
 	defer parallel(t)()
 	const iterations = 700_000
 
-	path := newImage(t, "changekeyslot-cost.img")
-	if err := formatForTest(formatOptionsForTest{
-		Device:          path,
-		Passphrase:      []byte(testPassphraseText),
-		Cipher:          "aes",
-		CipherMode:      "xts-plain64",
-		KeySize:         512,
-		HashAlgo:        "sha256",
-		SectorSize:      512,
-		KDFType:         kdfTypePBKDF2,
-		PBKDFIterations: iterations,
-	}); err != nil {
-		t.Fatalf("Format failed: %v", err)
-	}
+	path := pbkdf2CostImage(t, "changekeyslot-cost.img", iterations)
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
 	if err != nil {
@@ -343,22 +331,30 @@ func TestVolumeChangeKeyslotPreservesTheExistingPBKDF2Cost(t *testing.T) {
 // changeKeyslotOnDiskKDF formats a PBKDF2-SHA256 volume at iterations, changes
 // keyslot 0's passphrase with p, and returns the keyslot's KDF as re-read
 // from the device -- what a later open will use, not what the call reported.
+// pbkdf2CostImage is a fresh copy of a one-keyslot PBKDF2-SHA256 volume
+// whose keyslot 0 costs exactly iterations, opened by testPassphraseText.
+// The tests that use it are about ChangeKeyslot, not Format, so the
+// container is formatted once per cost (formattedImage) rather than paying
+// a derive at the production floor for every test.
+func pbkdf2CostImage(t *testing.T, name string, iterations int) string {
+	t.Helper()
+	return formattedImage(t, fmt.Sprintf("pbkdf2CostVolume/%d", iterations), name, conformanceImageSize, func() formatOptionsForTest {
+		return formatOptionsForTest{
+			Passphrase:      []byte(testPassphraseText),
+			Cipher:          "aes",
+			CipherMode:      "xts-plain64",
+			KeySize:         512,
+			HashAlgo:        "sha256",
+			SectorSize:      512,
+			KDFType:         kdfTypePBKDF2,
+			PBKDFIterations: iterations,
+		}
+	})
+}
+
 func changeKeyslotOnDiskKDF(t *testing.T, iterations int, p KeyslotParams) *header.KDF {
 	t.Helper()
-	path := newImage(t, "changekeyslot-recost.img")
-	if err := formatForTest(formatOptionsForTest{
-		Device:          path,
-		Passphrase:      []byte(testPassphraseText),
-		Cipher:          "aes",
-		CipherMode:      "xts-plain64",
-		KeySize:         512,
-		HashAlgo:        "sha256",
-		SectorSize:      512,
-		KDFType:         kdfTypePBKDF2,
-		PBKDFIterations: iterations,
-	}); err != nil {
-		t.Fatalf("Format failed: %v", err)
-	}
+	path := pbkdf2CostImage(t, "changekeyslot-recost.img", iterations)
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
 	if err != nil {
