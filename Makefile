@@ -531,6 +531,37 @@ GOMODAUTH_STAGE = umask 077; \
 		fi; \
 	fi
 
+# $(call CONTENT_IMAGE_BUILD,<tag>,<docker build arguments>,<content tag pattern>)
+# builds the current directory as <tag>, tolerating one failure: a concurrent
+# build of the same content tag. Jobs on one daemon can build one content tag
+# at once; each starts while the tag is not there, and BuildKit refuses the
+# slower export because the tag "already exists". The tag is a hash of the
+# build's inputs, so the image the faster job left under it is the image this
+# build would have made. A failed build therefore passes only when <tag>
+# matches the shell case pattern <content tag pattern> (a tag known to be
+# content-addressed), the build's output refuses exactly that tag as already
+# existing, and the tag now resolves. Any other failure fails with the build's
+# own output and exit status. The output is streamed as the build runs.
+#
+# One logical shell line, like GOMODAUTH_STAGE, which it must follow: the EXIT
+# trap it sets replaces GOMODAUTH_STAGE's, so it removes the staged credentials
+# file too, unless MODULE_ENV_FILE named it (that file is its writer's).
+CONTENT_IMAGE_BUILD = imgtmp="$$(mktemp -d -t imagebuild.XXXXXX)"; \
+	[ -n "$(MODULE_ENV_FILE)" ] || trap 'rm -f "$$stage"; rm -rf "$$imgtmp"' EXIT INT TERM; \
+	[ -z "$(MODULE_ENV_FILE)" ] || trap 'rm -rf "$$imgtmp"' EXIT INT TERM; \
+	{ rc=0; DOCKER_BUILDKIT=1 docker build $(2) -t $(1) . 2>&1 || rc=$$?; echo "$$rc" > "$$imgtmp/rc"; } | tee "$$imgtmp/log"; \
+	rc="$$(cat "$$imgtmp/rc")"; \
+	if [ "$$rc" -ne 0 ]; then \
+		case "$(1)" in $(3)) \
+			if grep -qF -e '"$(1)": already exists' -e '"docker.io/library/$(1)": already exists' "$$imgtmp/log" \
+				&& docker image inspect $(1) >/dev/null 2>&1; then \
+				echo "$(1) was built concurrently: another job built the same content under this tag while this build ran, so this build is not a failure."; \
+				rc=0; \
+			fi;; \
+		esac; \
+		[ "$$rc" -eq 0 ] || exit "$$rc"; \
+	fi
+
 # Builds the integration image -- the integration stage of the devcontainer
 # Dockerfile -- handing the private-module credentials over as a BuildKit
 # secret.
@@ -549,6 +580,10 @@ GOMODAUTH_STAGE = umask 077; \
 # whatever proxy this machine can reach. That is the same shape CI uses on
 # github.com. The four variables are git's standard GIT_CONFIG_* override set
 # plus GOPRIVATE; export them to build against a private module host.
+ITEST_BUILD_ARGS = --secret id=gomodauth$(comma)src="$$stage" \
+	--build-arg GO_BUILD_PROXY --build-arg APK_INDEX_SUM --label $(ITEST_LABEL) \
+	-f $(DEVCONTAINER_DOCKERFILE) --target integration
+
 docker-build-integration:
 	@# Reap first, so a build that later fails has still bounded the host. The
 	@# reap's output is shown only when something was actually removed: an
@@ -556,13 +591,10 @@ docker-build-integration:
 	@# reclaimed" on every build is noise. If docker ever reworded that output
 	@# the reap still happens and only the report goes quiet.
 	@#
-	@# A content tag is checked before the build and again after a failed one.
-	@# Concurrent jobs on one daemon can build one content tag at once: each
-	@# finds it not held, and BuildKit refuses the slower export because the
-	@# tag "already exists". The tag is the content, so the image the faster
-	@# job left under it is the image this build would have made. Only that
-	@# exact tag, and only a content tag, turns a failed build into success;
-	@# anything else fails with the build's own status.
+	@# A content tag is checked before the build, and a failed build of one
+	@# is a concurrent build of the same content only when BuildKit refused
+	@# that exact tag as already existing and it now resolves
+	@# (CONTENT_IMAGE_BUILD); anything else fails with the build's own status.
 	@set -eu; \
 	out="$$($(ITEST_PRUNE) 2>/dev/null || true)"; \
 	case "$$out" in *Deleted*) printf '%s\n' "$$out";; esac; \
@@ -573,22 +605,7 @@ docker-build-integration:
 		fi;; \
 	esac; \
 	$(GOMODAUTH_STAGE); \
-	DOCKER_BUILDKIT=1 docker build \
-		--secret id=gomodauth,src="$$stage" \
-		--build-arg GO_BUILD_PROXY \
-		--build-arg APK_INDEX_SUM \
-		--label $(ITEST_LABEL) \
-		-f $(DEVCONTAINER_DOCKERFILE) --target integration \
-		-t $(ITEST_IMAGE) . || { \
-		rc=$$?; \
-		case "$(ITEST_IMAGE)" in $(CI_STACK_PREFIX)it:*) \
-			if docker image inspect $(ITEST_IMAGE) >/dev/null 2>&1; then \
-				echo "$(ITEST_IMAGE) exists after all: another job built the same content (make it-image) under this tag while this build ran."; \
-				rc=0; \
-			fi;; \
-		esac; \
-		[ "$$rc" -eq 0 ] || exit "$$rc"; \
-	}; \
+	$(call CONTENT_IMAGE_BUILD,$(ITEST_IMAGE),$(ITEST_BUILD_ARGS),$(CI_STACK_PREFIX)it:*); \
 	if [ -n "$(ITEST_BUILD_IS_GOAL)" ]; then \
 		docker image rm -f $(ITEST_IMAGE) >/dev/null 2>&1 || true; \
 		echo "$(COLOR_BOLD)Removed $(ITEST_IMAGE): a tag this invocation invented, which no later run can name.$(COLOR_RESET)"; \
@@ -1515,7 +1532,14 @@ devcontainer: ## Build and run the devcontainer
 # a changed pin, Dockerfile or go.sum names a new one. `make toolchain-image`
 # prints the tag; CI uses it to build once and run every stage in it.
 TOOLCHAIN_INPUTS := $(DEVCONTAINER_DOCKERFILE) $(TOOL_PINS) go.mod go.sum
-TOOLCHAIN_IMAGE ?= go-luks2-toolchain:$(shell cat $(TOOLCHAIN_INPUTS) 2>/dev/null | sha256sum | cut -c1-16)
+TOOLCHAIN_CONTENT_TAG = go-luks2-toolchain:$(shell cat $(TOOLCHAIN_INPUTS) 2>/dev/null | sha256sum | cut -c1-16)
+TOOLCHAIN_IMAGE ?= $(TOOLCHAIN_CONTENT_TAG)
+
+# docker-build-toolchain's arguments. Its concurrent-build tolerance
+# (CONTENT_IMAGE_BUILD) covers only the tag computed from TOOLCHAIN_INPUTS: a
+# TOOLCHAIN_IMAGE set by name is not known to be a hash of the inputs.
+TOOLCHAIN_BUILD_ARGS = --secret id=gomodauth$(comma)src="$$stage" \
+	--build-arg GO_BUILD_PROXY -f $(DEVCONTAINER_DOCKERFILE) --target toolchain
 
 toolchain-image: ## Print the content-hashed tag of the toolchain image
 	@echo $(TOOLCHAIN_IMAGE)
@@ -1660,11 +1684,7 @@ it-image: ## Print the content-addressed tag of the integration image
 docker-build-toolchain: ## Build the toolchain image (the devcontainer's toolchain stage)
 	@set -eu; \
 	$(GOMODAUTH_STAGE); \
-	DOCKER_BUILDKIT=1 docker build \
-		--secret id=gomodauth,src="$$stage" \
-		--build-arg GO_BUILD_PROXY \
-		-f $(DEVCONTAINER_DOCKERFILE) --target toolchain \
-		-t $(TOOLCHAIN_IMAGE) .
+	$(call CONTENT_IMAGE_BUILD,$(TOOLCHAIN_IMAGE),$(TOOLCHAIN_BUILD_ARGS),$(TOOLCHAIN_CONTENT_TAG))
 
 # devcontainer.md §6: both devcontainer images, the toolchain image under its
 # content-hashed tag and the integration image under IT_IMAGE. CI's image job
