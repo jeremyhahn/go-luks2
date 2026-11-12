@@ -332,3 +332,19 @@ func TestOpenWithoutWithLockWaitUsesTheDefault(t *testing.T) {
 		t.Errorf("lockWait = %v, want the default %v", v.sys.lockWait, DefaultLockWait)
 	}
 }
+
+// TestTheDefaultLockIsCryptsetups pins what the cryptsetup-interop metadata
+// lock table measures: a Volume locks in cryptsetup's directory,
+// /run/cryptsetup, and waits DefaultLockWait, 30 s, before ErrLockContended.
+func TestTheDefaultLockIsCryptsetups(t *testing.T) {
+	if DefaultLockWait != 30*time.Second {
+		t.Errorf("DefaultLockWait = %v, want 30s", DefaultLockWait)
+	}
+	s := defaultVolumeSys()
+	if s.lockDir != "/run/cryptsetup" {
+		t.Errorf("lockDir = %q, want cryptsetup's /run/cryptsetup", s.lockDir)
+	}
+	if s.lockWait != DefaultLockWait {
+		t.Errorf("lockWait = %v, want DefaultLockWait", s.lockWait)
+	}
+}

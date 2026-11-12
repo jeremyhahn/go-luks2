@@ -6,6 +6,7 @@ package dmcrypt
 
 import (
 	"errors"
+	"os"
 
 	"github.com/jeremyhahn/go-luks2/internal/device"
 	"github.com/jeremyhahn/go-luks2/internal/errs"
@@ -110,6 +111,20 @@ func errString(err error) string {
 		return "<nil>"
 	}
 	return err.Error()
+}
+
+// dmKind is errs.KindOf for a device-mapper or /dev node step, with one
+// addition: a refusal for lack of privilege (EPERM, EACCES) is
+// ErrPermissionDenied rather than the fallback. A kind already classified
+// further down, and cancellation, keep precedence.
+func dmKind(err, fallback error) error {
+	if kind := errs.KindOf(err, nil); kind != nil {
+		return kind
+	}
+	if errors.Is(err, os.ErrPermission) {
+		return ErrPermissionDenied
+	}
+	return fallback
 }
 
 // Unwrap keeps the specific cause and the underlying errno reachable, and
