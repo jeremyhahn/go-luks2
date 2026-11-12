@@ -237,6 +237,21 @@ func TestEngMigrateToFIPSWritesOnlyApprovedKDFs(t *testing.T) {
 			if !errors.Is(err, ErrFIPSNotApproved) || m != nil {
 				t.Fatalf("MigrateToFIPS with %+v = %+v, %v; want ErrFIPSNotApproved", tc.kdf, m, err)
 			}
+			// A migration failure like any other: ErrFIPSMigration, typed,
+			// at the precondition stage, with the volume untouched.
+			if !errors.Is(err, ErrFIPSMigration) {
+				t.Errorf("MigrateToFIPS with %+v: %v is not ErrFIPSMigration", tc.kdf, err)
+			}
+			var migration *FIPSMigrationError
+			if !errors.As(err, &migration) {
+				t.Fatalf("MigrateToFIPS with %+v: %v is not a *FIPSMigrationError", tc.kdf, err)
+			}
+			if migration.Stage != "precondition" || migration.State != fipsStateUntouched {
+				t.Errorf("MigrateToFIPS with %+v: stage %q, state %q; want precondition, %q", tc.kdf, migration.Stage, migration.State, fipsStateUntouched)
+			}
+			if !errors.Is(migration.Err, ErrFIPSNotApproved) {
+				t.Errorf("MigrateToFIPS with %+v: cause %v is not ErrFIPSNotApproved", tc.kdf, migration.Err)
+			}
 			if !strings.Contains(err.Error(), tc.field) {
 				t.Errorf("MigrateToFIPS error %q does not name %s", err, tc.field)
 			}
