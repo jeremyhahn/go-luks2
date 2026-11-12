@@ -289,7 +289,10 @@ on:
     # nothing: no run, no status. The cost: adding `ci:full` waits for the
     # PR's next push or update-branch, or takes effect through
     # `workflow_dispatch`.
-    types: [opened, synchronize, reopened]
+    # v1.35.3: `ready_for_review`. CI Gate fails on a draft, so a PR marked
+    # ready with no new push needs its own run, or its head keeps the draft's
+    # failed gate until the next push.
+    types: [opened, synchronize, reopened, ready_for_review]
   # Lets a run be repeated without inventing a commit, which matters when a
   # failure is the runner's rather than the code's.
   workflow_dispatch:
