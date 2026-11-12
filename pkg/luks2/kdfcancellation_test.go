@@ -102,7 +102,7 @@ func TestUnlockKeyslotCancelledDuringThePassphraseKDFDestroysTheOutput(t *testin
 
 // TestVerifyKeyAgainstDigestsObservesCancellationBetweenDigests pins the
 // keyslots architecture's third cancellation point: each digest check
-// derives a key, so a cancelled ctx stops the digest loop before the next
+// derives a key, so a canceled ctx stops the digest loop before the next
 // derivation and is returned as ctx.Err(), not as a credential verdict. The
 // control is the same key and header under a live ctx, which verifies.
 func TestVerifyKeyAgainstDigestsObservesCancellationBetweenDigests(t *testing.T) {
@@ -124,7 +124,7 @@ func TestVerifyKeyAgainstDigestsObservesCancellationBetweenDigests(t *testing.T)
 	cancel()
 	err = verifyKeyAgainstDigests(ctx, key, metadata.Digests, covers, unverifiable, fips.Probe)
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("verifyKeyAgainstDigests under a cancelled ctx = %v, want context.Canceled", err)
+		t.Fatalf("verifyKeyAgainstDigests under a canceled ctx = %v, want context.Canceled", err)
 	}
 	if errors.Is(err, ErrWrongKey) {
 		t.Fatalf("a cancellation was reported as a credential verdict: %v", err)

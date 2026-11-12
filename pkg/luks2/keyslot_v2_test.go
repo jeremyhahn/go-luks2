@@ -651,7 +651,7 @@ func TestKeyslotChangesLeaveTheDataAreaUntouched(t *testing.T) {
 	if st.Size() <= offset {
 		t.Fatalf("the image (%d bytes) has no data area past offset %d", st.Size(), offset)
 	}
-	// A recognisable pattern, so an unchanged all-zero area cannot pass by
+	// A recognizable pattern, so an unchanged all-zero area cannot pass by
 	// accident of a sparse file.
 	pattern := bytes.Repeat([]byte("ciphertext-stand-in."), int((st.Size()-offset)/20)+1)[:st.Size()-offset]
 	if _, err := f.WriteAt(pattern, offset); err != nil {
