@@ -235,6 +235,7 @@ func TestVolumeRemoveTokenRemovesIt(t *testing.T) {
 }
 
 func TestVolumeRemoveTokenRefusesOnAReadOnlyVolume(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "removetoken-readonly.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()), WithReadOnly())

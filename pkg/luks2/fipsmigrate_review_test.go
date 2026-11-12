@@ -235,6 +235,7 @@ func TestFIPSRefusalDoesNotCallAMalformedDigestAnImport(t *testing.T) {
 // before anything is written -- the volume already opens through an approved
 // keyslot, so nothing downstream would notice the damage.
 func TestMigrateToFIPSRefusesToWipeOutsideTheKeyslotsArea(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -292,6 +293,7 @@ func TestMigrateToFIPSRefusesToWipeOutsideTheKeyslotsArea(t *testing.T) {
 // keyslot: no keyslot key is ever derived, and the unlock derives before it
 // reads the area. Whether the non-approved keyslots are to be kept or not.
 func TestMigrateToFIPSReadsNoKeyslotOutsideKeyslotSpace(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
