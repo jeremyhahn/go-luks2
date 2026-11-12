@@ -12,6 +12,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/jeremyhahn/go-luks2/internal/errs"
 	"github.com/jeremyhahn/go-luks2/internal/fips"
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
@@ -267,31 +268,43 @@ func TestKeyslotRefusedByFIPSIsComputed(t *testing.T) {
 	shortKDF.Salt = shortSalt
 	shortSaltKeyslot.KDF = &shortKDF
 
+	shortSaltDigests := withDigest(func(d *header.Digest) { d.Salt = shortSalt })
+	// The failures strict mode raises for a short salt: the passphrase
+	// derivation's invalid argument, and the digest check finding nothing it
+	// could evaluate. errIO is a failure no FIPS gate raises.
+	derivationRefused := &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "crypto pbkdf2", Err: errors.New("salt shorter than 128 bits")}
+	digestsUnusable := unverifiableKeyslotError("0", 1)
+	errIO := errors.New("injected: input/output error")
+
 	cases := []struct {
 		name    string
 		keyslot *header.Keyslot
 		digests map[string]*header.Digest
+		failure error
 		want    bool
 	}{
-		{"nil keyslot", nil, digests, false},
-		{"not a luks2 keyslot", &reencrypt, digests, false},
-		{"approved and well formed: refused later, not by FIPS", approved, digests, false},
-		{"argon2 keyslot", argon2(approved.KDF.Salt), digests, true},
-		{"argon2 keyslot with a malformed salt", argon2("!!! not base64 !!!"), digests, false},
-		{"approved keyslot, sha1 digest", approved, withDigest(func(d *header.Digest) { sha1Digest(&header.Metadata{Digests: map[string]*header.Digest{"0": d}}) }), true},
+		{"nil keyslot", nil, digests, errIO, false},
+		{"not a luks2 keyslot", &reencrypt, digests, errIO, false},
+		{"approved and well formed: refused later, not by FIPS", approved, digests, errIO, false},
+		{"argon2 keyslot", argon2(approved.KDF.Salt), digests, nil, true},
+		{"argon2 keyslot with a malformed salt", argon2("!!! not base64 !!!"), digests, nil, false},
+		{"approved keyslot, sha1 digest", approved, withDigest(func(d *header.Digest) { sha1Digest(&header.Metadata{Digests: map[string]*header.Digest{"0": d}}) }), nil, true},
 		{"approved keyslot, sha1 digest not base64", approved, withDigest(func(d *header.Digest) {
 			sha1Digest(&header.Metadata{Digests: map[string]*header.Digest{"0": d}})
 			d.Digest = "!!! not base64 !!!"
-		}), false},
-		{"approved keyslot with a cipher nothing implements", &badCipher, digests, false},
-		{"pbkdf2 keyslot with a short salt", &shortSaltKeyslot, digests, true},
-		{"approved keyslot, pbkdf2 digest with a short salt", approved, withDigest(func(d *header.Digest) { d.Salt = shortSalt }), true},
+		}), nil, false},
+		{"approved keyslot with a cipher nothing implements", &badCipher, digests, nil, false},
+		{"pbkdf2 keyslot with a short salt", &shortSaltKeyslot, digests, derivationRefused, true},
+		{"pbkdf2 keyslot with a short salt, failed for another reason", &shortSaltKeyslot, digests, errIO, false},
+		{"approved keyslot, pbkdf2 digest with a short salt", approved, shortSaltDigests, digestsUnusable, true},
+		{"approved keyslot, pbkdf2 digest with a short salt, area read failed", approved, shortSaltDigests, errIO, false},
+		{"approved keyslot, pbkdf2 digest with a short salt, derivation-shaped failure", approved, shortSaltDigests, derivationRefused, false},
 	}
 
 	forced := forceFIPSPolicy(t)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := keyslotRefusedByFIPS("0", tc.keyslot, tc.digests, forced); got != tc.want {
+			if got := keyslotRefusedByFIPS("0", tc.keyslot, tc.digests, forced, tc.failure); got != tc.want {
 				t.Fatalf("keyslotRefusedByFIPS = %v, want %v", got, tc.want)
 			}
 		})
@@ -299,7 +312,39 @@ func TestKeyslotRefusedByFIPSIsComputed(t *testing.T) {
 
 	// Outside the policy nothing is a FIPS refusal.
 	notFIPS := func() fips.Mode { return false }
-	if keyslotRefusedByFIPS("0", argon2(approved.KDF.Salt), digests, notFIPS) {
+	if keyslotRefusedByFIPS("0", argon2(approved.KDF.Salt), digests, notFIPS, nil) {
 		t.Fatal("outside FIPS mode an Argon2 keyslot was classified as a FIPS refusal")
+	}
+}
+
+// areaReadFailure is a device whose every read fails: the header is already
+// parsed, so the first read it sees is the keyslot area's.
+type areaReadFailure struct{ err error }
+
+func (r areaReadFailure) ReadAt([]byte, int64) (int, error) { return 0, r.err }
+
+// A keyslot whose only FIPS shortfall is a short-salt digest, and whose area
+// cannot be read, failed on the read: strict mode never reached the digest.
+// The read failure is what the caller gets, not an import request that says
+// the volume is intact.
+func TestShortSaltDigestKeepsTheAreaReadFailure(t *testing.T) {
+	device := newImage(t, "fips-short-salt-eio.img")
+	formatWithLibrary(t, device)
+	writeFixture(t, device, func(m *header.Metadata) { m.Digests["0"].Salt = "c2hvcnRzYWw=" })
+	_, metadata, err := readHeaderForTest(device)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+
+	sys := testVolumeSys()
+	sys.fipsMode = forceFIPSPolicy(t)
+	errInjected := errors.New("injected: the keyslot area read failed")
+	_, _, err = getMasterKeySlot(context.Background(), areaReadFailure{errInjected}, device, migrationPassphrase, metadata, []string{"0"}, sys)
+	if !errors.Is(err, errInjected) {
+		t.Fatalf("a failed area read behind a short-salt digest: got %v, want the read failure", err)
+	}
+	var importRequired *FIPSImportRequiredError
+	if errors.Is(err, ErrFIPSImportRequired) || errors.As(err, &importRequired) {
+		t.Fatalf("a failed area read was reported as a FIPS import: %v", err)
 	}
 }

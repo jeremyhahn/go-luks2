@@ -299,13 +299,13 @@ func TestSHA1AFKeyslotFIPSClassification(t *testing.T) {
 	}
 
 	forced := forceFIPSPolicy(t)
-	if !keyslotRefusedByFIPS("0", withAF(approved, "sha1"), metadata.Digests, forced) {
+	if !keyslotRefusedByFIPS("0", withAF(approved, "sha1"), metadata.Digests, forced, nil) {
 		t.Fatal("a keyslot refused only for its SHA-1 AF hash was not classified as a FIPS refusal")
 	}
-	if !keyslotRefusedByFIPS("0", withAF(&argon2, "sha1"), metadata.Digests, forced) {
+	if !keyslotRefusedByFIPS("0", withAF(&argon2, "sha1"), metadata.Digests, forced, nil) {
 		t.Fatal("an Argon2 keyslot with a SHA-1 AF hash was not classified as a FIPS refusal")
 	}
-	if keyslotRefusedByFIPS("0", withAF(&argon2, "md5"), metadata.Digests, forced) {
+	if keyslotRefusedByFIPS("0", withAF(&argon2, "md5"), metadata.Digests, forced, nil) {
 		t.Fatal("an unknown AF hash was classified as a FIPS refusal; it is damage")
 	}
 	if approved.AF.Hash != original {

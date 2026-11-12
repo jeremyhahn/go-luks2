@@ -7,6 +7,7 @@ package luks2
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -952,7 +953,11 @@ func sortedDigestIDs(digests map[string]*header.Digest) []string {
 // refusal. If it fails, something else is wrong with the keyslot or its
 // digests, and the caller reports that instead: a SHA-1 digest whose value is
 // not base64 is a damaged header whatever mode reads it.
-func keyslotRefusedByFIPS(id string, keyslot *header.Keyslot, digests map[string]*header.Digest, fipsMode func() fips.Mode) bool {
+//
+// failure is the error the keyslot failed with. A keyslot the pre-derivation
+// screen passes is counted as refused by FIPS only when failure is the one
+// strict mode's derivation raised; any other failure is kept as it is.
+func keyslotRefusedByFIPS(id string, keyslot *header.Keyslot, digests map[string]*header.Digest, fipsMode func() fips.Mode, failure error) bool {
 	if !fipsMode() || keyslot == nil || keyslot.Type != "luks2" {
 		return false
 	}
@@ -961,10 +966,27 @@ func keyslotRefusedByFIPS(id string, keyslot *header.Keyslot, digests map[string
 	// approved, was refused later -- reading or decrypting its area -- and no
 	// FIPS gate runs there. One whose names pass but whose parameters do not
 	// (a PBKDF2 salt or output too short) is refused at derivation by strict
-	// mode instead, and the stand-ins below decide it like any other.
-	if _, err := screenKeyslot(id, keyslot, digests, fipsMode); err == nil &&
-		keyslotFIPSApproved(keyslot) && coveringDigestsFIPSApproved(id, digests) {
-		return false
+	// mode instead, and the stand-ins below decide it like any other -- but
+	// only when failure is what that derivation raises. A read, decrypt or
+	// merge failure on the way there is the failure, and the caller keeps it.
+	if _, err := screenKeyslot(id, keyslot, digests, fipsMode); err == nil {
+		switch {
+		case !keyslotFIPSApproved(keyslot):
+			// The passphrase derivation runs first and is what strict mode
+			// refuses; it fails as an invalid argument.
+			if !errors.Is(failure, errs.ErrInvalidArgument) {
+				return false
+			}
+		case !coveringDigestsFIPSApproved(id, digests):
+			// The digest derivations run last, after the area was read,
+			// decrypted and merged; strict mode refusing every one of them
+			// leaves no digest evaluated.
+			if !coveringDigestsUnusable(id, digests, failure) {
+				return false
+			}
+		default:
+			return false
+		}
 	}
 
 	standIn, substituted, ok := fipsStandInKeyslot(keyslot)
@@ -999,6 +1021,24 @@ func coveringDigestsFIPSApproved(id string, digests map[string]*header.Digest) b
 		}
 	}
 	return true
+}
+
+// coveringDigestsUnusable reports whether failure is the verdict the digest
+// check gives keyslot id when not one of its covering digests could be
+// evaluated: the outcome of strict mode refusing all of their derivations.
+func coveringDigestsUnusable(id string, digests map[string]*header.Digest, failure error) bool {
+	applicable := 0
+	for _, digest := range digests {
+		if digestCovers(digest, id) {
+			applicable++
+		}
+	}
+	var got *errs.Error
+	if applicable == 0 || !errors.As(failure, &got) {
+		return false
+	}
+	want, ok := unverifiableKeyslotError(id, applicable).(*errs.Error)
+	return ok && got.Kind == want.Kind && got.Detail == want.Detail && got.Err == nil
 }
 
 // fipsStandInKeyslot returns keyslot with its KDF replaced by an approved

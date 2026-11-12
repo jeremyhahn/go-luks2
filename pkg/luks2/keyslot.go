@@ -1646,7 +1646,7 @@ func getMasterKeySlot(ctx context.Context, dev io.ReaderAt, device string, passp
 			continue
 		}
 
-		if keyslotRefusedByFIPS(id, keyslot, metadata.Digests, sys.fipsMode) {
+		if keyslotRefusedByFIPS(id, keyslot, metadata.Digests, sys.fipsMode, err) {
 			fipsBlocked = append(fipsBlocked, id)
 		} else {
 			otherBlocked = true
