@@ -13,6 +13,8 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -121,6 +123,227 @@ func TestVolumeAddKeyslotWithAnExplicitSlot(t *testing.T) {
 	}
 	if info.ID != 5 {
 		t.Errorf("AddKeyslot returned slot %d, want the requested 5", info.ID)
+	}
+}
+
+// TestVolumeAddKeyslotReportsTheSlotItWroteAcrossAGap pins keyslots
+// engineering.md, Invariants: AddKeyslot returns the slot it wrote, and slots
+// need not be contiguous. With slots 0 and 5 in use the next automatic slot is
+// 1, not one past the highest, and the returned ID is the one that opens.
+func TestVolumeAddKeyslotReportsTheSlotItWroteAcrossAGap(t *testing.T) {
+	path := formattedVolumeImage(t, "addkeyslot-gap.img", "", "")
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
+	pass := newTestPassphrase(t)
+	defer func() { _ = pass.Destroy() }()
+	key, err := v.Unlock(context.Background(), pass)
+	if err != nil {
+		t.Fatalf("Unlock failed: %v", err)
+	}
+	defer key.Destroy()
+
+	fast := KDFParams{Type: KDFPBKDF2, IterTime: time.Millisecond}
+	fivePass := newPassphraseEnclave(t, "slot five's credential")
+	defer func() { _ = fivePass.Destroy() }()
+	five := 5
+	if _, err := v.AddKeyslot(context.Background(), key, fivePass, KeyslotParams{Slot: &five, KDF: fast}); err != nil {
+		t.Fatalf("AddKeyslot(slot 5) failed: %v", err)
+	}
+
+	gapPass := newPassphraseEnclave(t, "the gap's credential")
+	defer func() { _ = gapPass.Destroy() }()
+	info, err := v.AddKeyslot(context.Background(), key, gapPass, KeyslotParams{KDF: fast})
+	if err != nil {
+		t.Fatalf("AddKeyslot failed: %v", err)
+	}
+	if info.ID != 1 {
+		t.Fatalf("AddKeyslot returned slot %d, want 1 (the lowest free slot, below slot 5)", info.ID)
+	}
+	recovered, err := v.UnlockKeyslot(context.Background(), info.ID, gapPass)
+	if err != nil {
+		t.Fatalf("the returned slot %d does not open with the new passphrase: %v", info.ID, err)
+	}
+	recovered.Destroy()
+	if _, err := v.UnlockKeyslot(context.Background(), 6, gapPass); !errors.Is(err, ErrKeyslotNotFound) {
+		t.Fatalf("slot 6 (one past the highest) answered %v, want ErrKeyslotNotFound", err)
+	}
+}
+
+// TestVolumeKeyslotSaltsAre32RandomBytes pins keyslots engineering.md, KDF:
+// "Salts are 32 random bytes". Each keyslot written, by Format and by
+// AddKeyslot, carries a KDF salt that decodes to 32 bytes, and no two are
+// alike.
+func TestVolumeKeyslotSaltsAre32RandomBytes(t *testing.T) {
+	path := formattedVolumeImage(t, "keyslot-salts.img", "", "")
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
+	pass := newTestPassphrase(t)
+	defer func() { _ = pass.Destroy() }()
+	key, err := v.Unlock(context.Background(), pass)
+	if err != nil {
+		t.Fatalf("Unlock failed: %v", err)
+	}
+	defer key.Destroy()
+
+	for _, credential := range []string{"a second credential", "a third credential"} {
+		newPass := newPassphraseEnclave(t, credential)
+		defer func() { _ = newPass.Destroy() }()
+		kdf := KDFParams{Type: KDFPBKDF2, IterTime: time.Millisecond}
+		if _, err := v.AddKeyslot(context.Background(), key, newPass, KeyslotParams{KDF: kdf}); err != nil {
+			t.Fatalf("AddKeyslot(%q) failed: %v", credential, err)
+		}
+	}
+
+	_, metadata, err := readHeaderForTest(path)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+	if len(metadata.Keyslots) != 3 {
+		t.Fatalf("the header holds %d keyslots, want 3", len(metadata.Keyslots))
+	}
+	seen := map[string]string{}
+	for id, ks := range metadata.Keyslots {
+		salt, err := decodeBase64(ks.KDF.Salt)
+		if err != nil {
+			t.Fatalf("keyslot %s salt does not decode: %v", id, err)
+		}
+		if len(salt) != 32 {
+			t.Errorf("keyslot %s salt is %d bytes, want 32", id, len(salt))
+		}
+		if other, dup := seen[string(salt)]; dup {
+			t.Errorf("keyslots %s and %s share a salt", other, id)
+		}
+		seen[string(salt)] = id
+	}
+}
+
+// TestVolumeAddKeyslotDefaultsThePBKDF2PRF pins keyslots engineering.md, KDF:
+// the PBKDF2 PRF is SHA-256 when KDFParams.Hash is zero, and SHA-512 when the
+// type was left empty and FIPS mode defaulted it to PBKDF2.
+func TestVolumeAddKeyslotDefaultsThePBKDF2PRF(t *testing.T) {
+	cases := []struct {
+		name     string
+		fips     bool
+		kdf      KDFParams
+		wantHash string
+	}{
+		{"named pbkdf2, zero hash", false, KDFParams{Type: KDFPBKDF2, IterTime: time.Millisecond}, "sha256"},
+		{"named pbkdf2, zero hash, FIPS policy", true, KDFParams{Type: KDFPBKDF2, IterTime: time.Millisecond}, "sha256"},
+		{"empty type, FIPS policy", true, KDFParams{IterTime: time.Millisecond}, "sha512"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := formattedVolumeImage(t, "addkeyslot-prf.img", "", "")
+			v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+			if err != nil {
+				t.Fatalf("Open failed: %v", err)
+			}
+			defer func() { _ = v.Close() }()
+
+			pass := newTestPassphrase(t)
+			defer func() { _ = pass.Destroy() }()
+			key, err := v.Unlock(context.Background(), pass)
+			if err != nil {
+				t.Fatalf("Unlock failed: %v", err)
+			}
+			defer key.Destroy()
+
+			if tc.fips {
+				v.sys.fipsMode = forceFIPSPolicy(t)
+			} else {
+				v.sys.fipsMode = forceNonFIPSPolicy(t)
+			}
+			newPass := newPassphraseEnclave(t, "a PRF-defaulted credential")
+			defer func() { _ = newPass.Destroy() }()
+			info, err := v.AddKeyslot(context.Background(), key, newPass, KeyslotParams{KDF: tc.kdf})
+			if err != nil {
+				t.Fatalf("AddKeyslot failed: %v", err)
+			}
+
+			_, metadata, err := readHeaderForTest(path)
+			if err != nil {
+				t.Fatalf("ReadHeader failed: %v", err)
+			}
+			kdf := metadata.Keyslots[strconv.Itoa(info.ID)].KDF
+			if kdf.Type != kdfTypePBKDF2 || kdf.Hash != tc.wantHash {
+				t.Fatalf("keyslot %d written as %s/%s, want %s/%s", info.ID, kdf.Type, kdf.Hash, kdfTypePBKDF2, tc.wantHash)
+			}
+		})
+	}
+}
+
+// TestVolumeRemoveKeyslotForgetsItInEveryDigestAndToken pins keyslots
+// engineering.md, Persistence: removing a keyslot drops its number from every
+// digest and token in the same write, and a token left naming no keyslot is
+// kept.
+func TestVolumeRemoveKeyslotForgetsItInEveryDigestAndToken(t *testing.T) {
+	path := formattedVolumeImage(t, "removekeyslot-refs.img", "", "")
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
+	pass := newTestPassphrase(t)
+	defer func() { _ = pass.Destroy() }()
+	key, err := v.Unlock(context.Background(), pass)
+	if err != nil {
+		t.Fatalf("Unlock failed: %v", err)
+	}
+	defer key.Destroy()
+
+	newPass := newPassphraseEnclave(t, "a credential to remove")
+	defer func() { _ = newPass.Destroy() }()
+	info, err := v.AddKeyslot(context.Background(), key, newPass, KeyslotParams{
+		KDF: KDFParams{Type: KDFPBKDF2, IterTime: time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("AddKeyslot failed: %v", err)
+	}
+	only, err := v.AddToken(context.Background(), Token{Type: "x-only", Keyslots: []int{info.ID}})
+	if err != nil {
+		t.Fatalf("AddToken(only) failed: %v", err)
+	}
+	shared, err := v.AddToken(context.Background(), Token{Type: "x-shared", Keyslots: []int{0, info.ID}})
+	if err != nil {
+		t.Fatalf("AddToken(shared) failed: %v", err)
+	}
+
+	if err := v.RemoveKeyslot(context.Background(), info.ID); err != nil {
+		t.Fatalf("RemoveKeyslot failed: %v", err)
+	}
+
+	_, metadata, err := readHeaderForTest(path)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+	removed := strconv.Itoa(info.ID)
+	for id, digest := range metadata.Digests {
+		if slices.Contains(digest.Keyslots, removed) {
+			t.Errorf("digest %s still names removed keyslot %s: %v", id, removed, digest.Keyslots)
+		}
+	}
+	onlyToken, ok := metadata.Tokens[strconv.Itoa(only)]
+	if !ok {
+		t.Fatalf("token %d, left naming no keyslot, was deleted; it must be kept", only)
+	}
+	if len(onlyToken.Keyslots) != 0 {
+		t.Errorf("token %d still names keyslots %v", only, onlyToken.Keyslots)
+	}
+	sharedToken, ok := metadata.Tokens[strconv.Itoa(shared)]
+	if !ok || !slices.Equal(sharedToken.Keyslots, []string{"0"}) {
+		t.Errorf("token %d keyslots = %v (present %v), want [0]", shared, sharedToken, ok)
 	}
 }
 

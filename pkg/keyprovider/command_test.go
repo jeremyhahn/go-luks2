@@ -240,6 +240,33 @@ func TestHelperErrorCarriesWhatTheHelperSaid(t *testing.T) {
 	}
 }
 
+// TestHelperErrorExitCodeIsMinusOneWhenTheHelperNeverRan pins tokens
+// engineering.md, Exported surface: HelperError.ExitCode is -1 when the
+// helper never ran. A trusted, executable file the kernel cannot execute (no
+// interpreter line, not a binary) fails at start, before any exit status.
+func TestHelperErrorExitCodeIsMinusOneWhenTheHelperNeverRan(t *testing.T) {
+	path := filepath.Join(privateDir(t), "not-a-program")
+	if err := os.WriteFile(path, []byte("\x00\x01 this is not an executable format\n"), 0o700); err != nil { // #nosec G306 -- an executable test fixture under t.TempDir()
+		t.Fatal(err)
+	}
+	p, err := NewCommand(path)
+	if err != nil {
+		t.Fatalf("NewCommand failed: %v", err)
+	}
+
+	_, err = p.Passphrase(context.Background())
+	var helperErr *HelperError
+	if !errors.As(err, &helperErr) {
+		t.Fatalf("error = %v, want a *HelperError", err)
+	}
+	if helperErr.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1 for a helper that never ran", helperErr.ExitCode)
+	}
+	if !errors.Is(err, ErrHelperFailed) {
+		t.Errorf("error = %v, want ErrHelperFailed", err)
+	}
+}
+
 // TestCommandRefusesAnUntrustedHelper pins that a helper is held to the checks
 // a system tool is (internal/command): one that someone other than root or
 // this user could have replaced is refused, and is NOT run.

@@ -390,6 +390,37 @@ func TestFromTokenKeepsTheTokensKeyslots(t *testing.T) {
 	}
 }
 
+// TestFIDO2TokenWritesFalseRequirementsAndReadsAbsentOnesAsFalse pins the
+// requirement members: a requirement that is off is written as an explicit
+// false, as systemd-cryptenroll writes it, and a token that lacks a member
+// reads it back as false.
+func TestFIDO2TokenWritesFalseRequirementsAndReadsAbsentOnesAsFalse(t *testing.T) {
+	members := []string{"fido2-up-required", "fido2-clientPin-required", "fido2-uv-required"}
+
+	token := fido2Token(FIDO2Params{CredentialID: []byte("c"), Salt: []byte("s")})
+	for _, name := range members {
+		if got := string(token.Members[name]); got != "false" {
+			t.Errorf("member %s = %q, want false", name, got)
+		}
+	}
+
+	absent := fido2Token(FIDO2Params{CredentialID: []byte("c"), Salt: []byte("s"), UserPresence: true, ClientPIN: true, UserVerification: true})
+	stripped := luks2.Token{Type: absent.Type, Keyslots: absent.Keyslots, Members: map[string]json.RawMessage{}}
+	for name, value := range absent.Members {
+		stripped.Members[name] = value
+	}
+	for _, name := range members {
+		delete(stripped.Members, name)
+	}
+	round, err := fido2ParamsFromToken(stripped)
+	if err != nil {
+		t.Fatalf("fido2ParamsFromToken() error = %v", err)
+	}
+	if round.UserPresence || round.ClientPIN || round.UserVerification {
+		t.Fatalf("a token without requirement members read as %+v, want every requirement false", round)
+	}
+}
+
 func TestFromTokenRefusesWhatItCannotDrive(t *testing.T) {
 	tests := []struct {
 		name  string
