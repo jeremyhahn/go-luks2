@@ -514,23 +514,70 @@ func makeRecipe(t *testing.T, makefile, target string) string {
 // dependency whose go.mod, and only its go.mod, is in a new cache.
 func TestVerifyFailsOnAModuleCacheWithoutSources(t *testing.T) {
 	goBin := lookPath(t, "go")
-	cache, modfile := sourcelessModule(t)
-	env := environ(nil, map[string]string{"GOMODCACHE": cache, "GOPROXY": "off", "GOFLAGS": "-mod=readonly -modfile=" + modfile})
+	conf := t.TempDir()
+	goenv, gowork := filepath.Join(conf, "go.env"), filepath.Join(conf, "go.work")
+	if err := os.WriteFile(goenv, []byte("GOPRIVATE=*\n"), 0o600); err != nil {
+		t.Fatalf("writing the caller's go env file: %v", err)
+	}
+	if err := os.WriteFile(gowork, []byte("go 1.21\n"), 0o600); err != nil {
+		t.Fatalf("writing the caller's workspace file: %v", err)
+	}
+	// The go settings a caller may carry. None may send the fixture to the
+	// network or load anything the fixture's cache lacks.
+	callers := []struct {
+		name string
+		env  map[string]string
+	}{
+		{"a clean environment", nil},
+		{"private module patterns", map[string]string{"GOPRIVATE": "*", "GONOPROXY": "*", "GONOSUMDB": "*"}},
+		{"a go env file naming private modules", map[string]string{"GOENV": goenv}},
+		{"a workspace", map[string]string{"GOWORK": gowork}},
+		{"a toolchain choice", map[string]string{"GOTOOLCHAIN": "go1.99.0"}},
+	}
+	for _, caller := range callers {
+		t.Run(caller.name, func(t *testing.T) {
+			cache, modfile := sourcelessModule(t)
+			env := verifyFixtureEnv(caller.env, cache, modfile)
 
-	// The fixture is the vacuous case: bare `go mod verify` passes on it.
-	bare := exec.Command(goBin, "mod", "verify") // #nosec G204 -- the go tool on PATH
-	bare.Dir, bare.Env = repoRoot(t), env
-	if got, err := bare.CombinedOutput(); err != nil || !strings.Contains(string(got), "all modules verified") {
-		t.Fatalf("the fixture does not reproduce the vacuous pass: %v\n%s", err, got)
-	}
+			// The fixture is the vacuous case: bare `go mod verify` passes on it.
+			bare := exec.Command(goBin, "mod", "verify") // #nosec G204 -- the go tool on PATH
+			bare.Dir, bare.Env = repoRoot(t), env
+			if got, err := bare.CombinedOutput(); err != nil || !strings.Contains(string(got), "all modules verified") {
+				t.Fatalf("the fixture does not reproduce the vacuous pass: %v\n%s", err, got)
+			}
 
-	stdout, stderr, err := runMakeErr(t, env, "-s", "verify")
-	if err == nil {
-		t.Fatalf("make verify passed over a cache without module sources:\n%s%s", stdout, stderr)
+			// TOOLCHAIN_PIN=0: the pin names the repository's go directive, a
+			// toolchain the fixture's cache does not hold; make verify must fail
+			// on the module sources it lacks, not on a toolchain it cannot fetch.
+			stdout, stderr, err := runMakeErr(t, env, "-s", "verify", "TOOLCHAIN_PIN=0")
+			if err == nil {
+				t.Fatalf("make verify passed over a cache without module sources:\n%s%s", stdout, stderr)
+			}
+			if strings.Contains(stdout, "all modules verified") {
+				t.Errorf("go mod verify ran over the cache without sources:\n%s", stdout)
+			}
+			if !strings.Contains(stderr, "module lookup disabled by GOPROXY=off") {
+				t.Errorf("make verify did not fail on the offline lookup of the missing sources:\n%s", stderr)
+			}
+		})
 	}
-	if strings.Contains(stdout, "all modules verified") {
-		t.Errorf("go mod verify ran over the cache without sources:\n%s", stdout)
-	}
+}
+
+// verifyFixtureEnv is the environment the verify fixture runs in: the caller's
+// environment with caller set on top, then the fixture's cache and module file.
+// The go settings a caller can carry are pinned: no go env file, no private
+// module patterns (a match goes direct, past GOPROXY=off, to the network), no
+// workspace (which refuses -modfile) and the go on PATH (any other toolchain is
+// a module the cache lacks). Every proxy names a closed port, so a lookup that
+// still escapes GOPROXY=off fails at once instead of reaching a module host.
+func verifyFixtureEnv(caller map[string]string, cache, modfile string) []string {
+	const closed = "http://127.0.0.1:1"
+	base := environFrom(os.Environ(), nil, caller)
+	return environFrom(base, []string{"http_proxy", "https_proxy", "no_proxy"}, map[string]string{
+		"GOMODCACHE": cache, "GOPROXY": "off", "GOFLAGS": "-mod=readonly -modfile=" + modfile,
+		"GOENV": "off", "GOPRIVATE": "", "GONOPROXY": "", "GONOSUMDB": "", "GOWORK": "off", "GOTOOLCHAIN": "local",
+		"HTTP_PROXY": closed, "HTTPS_PROXY": closed, "NO_PROXY": "",
+	})
 }
 
 // sourcelessModule writes a new module cache that holds the go.mod file of one
