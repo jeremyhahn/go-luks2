@@ -37,8 +37,8 @@ contain:
 - **Unpublishable files** (`DefaultUnpublishable` in
   `test/internal/labstrings/published.go`): shell scripts, by extension or by
   a leading `#!`, and binary files the exemption list does not name. Any
-  workflow under `.github/workflows/` other than `ci.yml`, `nightly.yml` and
-  `release.yml` is refused too. A file in this class must leave the index.
+  workflow under `.github/workflows/` other than `ci.yml`, `nightly.yml`,
+  `release.yml` and `signatures.yml` is refused too. A file in this class must leave the index.
 - **Strip-at-publish files** (`DefaultStripAtPublish`, same file): files that
   belong on the development trunk and never in the release. They are tracked,
   their content is still scanned like any other file, and they are excluded
