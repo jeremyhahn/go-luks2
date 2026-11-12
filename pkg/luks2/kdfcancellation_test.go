@@ -166,12 +166,12 @@ func TestVerifyKeyAgainstDigestsObservesCancellationBetweenDigests(t *testing.T)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	calls := 0
-	cancelling := func() fips.Mode {
+	canceling := func() fips.Mode {
 		calls++
 		cancel()
 		return fips.Probe()
 	}
-	err = verifyKeyAgainstDigests(ctx, key, digests, covers, unverifiable, cancelling)
+	err = verifyKeyAgainstDigests(ctx, key, digests, covers, unverifiable, canceling)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("verifyKeyAgainstDigests canceled during the first digest = %v, want context.Canceled", err)
 	}
