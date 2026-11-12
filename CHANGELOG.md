@@ -27,7 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ErrIO` and no Detail, and unlock's Detail did not name it. No named
   requirement type is exported. A requirement that stops `MigrateToFIPS`
   keeps the migration's Kind `ErrFIPSMigration`, with the requirement in
-  `Detail` and `errors.Is(err, ErrUnsupportedRequirement)` still true.
+  `Detail` and `errors.Is(err, ErrUnsupportedRequirement)` still true. The
+  same holds when `AddKeyslot`, `ChangeKeyslot` or `RemoveKeyslot` meets the
+  requirement while repairing a damaged or older header copy: that used to
+  report Kind `ErrIO` with Detail "failed to read header", and now reports
+  the requirement, with `errors.Is(err, ErrIO)` still true underneath.
 
 ## [1.0.3-alpha] - 2026-11-10
 
