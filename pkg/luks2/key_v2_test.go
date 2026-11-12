@@ -119,6 +119,55 @@ func TestVolumeUnlockKeyslotRefusesAKeyslotThatDoesNotExist(t *testing.T) {
 	}
 }
 
+// TestVolumeUnlockKeyslotRefusesAnUnboundKeyslotBeforeDeriving pins the
+// keyslots architecture's UnlockKeyslot rule: a slot that does not exist, or
+// that exists but is not bound to the data segment, is refused with
+// ErrKeyslotNotFound before any derivation, even with the credential that
+// opens that slot. The bound slot 0 is the control that the counting seam
+// does see a derivation.
+func TestVolumeUnlockKeyslotRefusesAnUnboundKeyslotBeforeDeriving(t *testing.T) {
+	device, _ := unlockableVolume(t)
+	unboundKeyslot(t, device, otherPassphrase)
+
+	calls, sys := countKDFCalls(t)
+	v, err := Open(context.Background(), device, withTestSys(sys))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
+	for _, slot := range []int{1, 7, 32, -1} {
+		pass, err := enclave.NewMemoryCopy(otherPassphrase)
+		if err != nil {
+			t.Fatalf("could not build the test passphrase enclave: %v", err)
+		}
+		k, err := v.UnlockKeyslot(context.Background(), slot, pass)
+		_ = pass.Destroy()
+		if k != nil {
+			k.Destroy()
+		}
+		if !errors.Is(err, ErrKeyslotNotFound) {
+			t.Errorf("UnlockKeyslot(%d) = %v, want ErrKeyslotNotFound", slot, err)
+		}
+		if *calls != 0 {
+			t.Fatalf("UnlockKeyslot(%d) reached %d derivation(s) before refusing", slot, *calls)
+		}
+	}
+
+	pass, err := enclave.NewMemoryCopy(otherPassphrase)
+	if err != nil {
+		t.Fatalf("could not build the test passphrase enclave: %v", err)
+	}
+	defer func() { _ = pass.Destroy() }()
+	if k, err := v.UnlockKeyslot(context.Background(), 0, pass); err == nil {
+		k.Destroy()
+		t.Fatal("UnlockKeyslot(0) opened through a seam that refuses every derivation")
+	}
+	if *calls == 0 {
+		t.Fatal("the bound keyslot 0 reached no derivation; the counter proves nothing")
+	}
+}
+
 func TestVolumeUnlockWithVolumeKeyAcceptsTheRecoveredKey(t *testing.T) {
 	path := formattedVolumeImage(t, "unlockwithvolumekey.img", "", "")
 

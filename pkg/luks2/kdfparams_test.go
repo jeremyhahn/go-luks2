@@ -87,6 +87,12 @@ func TestKDFParamsValidate(t *testing.T) {
 		{"named argon2id", KDFParams{Type: KDFArgon2id}, nil},
 		{"named argon2i", KDFParams{Type: KDFArgon2i}, nil},
 		{"an unknown type", KDFParams{Type: "scrypt"}, ErrUnsupported},
+		// The combined spellings are internal aliases, never a public type
+		// (keyslots engineering.md, KDF): the hash is not part of the type.
+		{"internal alias pbkdf2-sha256", KDFParams{Type: "pbkdf2-sha256"}, ErrUnsupported},
+		{"internal alias pbkdf2-sha384", KDFParams{Type: "pbkdf2-sha384"}, ErrUnsupported},
+		{"internal alias pbkdf2-sha512", KDFParams{Type: "pbkdf2-sha512"}, ErrUnsupported},
+		{"internal alias pbkdf2-sha1", KDFParams{Type: "pbkdf2-sha1"}, ErrUnsupported},
 		{"argon2 cost at the floor", KDFParams{Time: 1, MemoryKiB: minArgon2MemoryKB, Parallel: 1}, nil},
 		{"argon2 memory below the floor", KDFParams{MemoryKiB: minArgon2MemoryKB - 1}, ErrInvalidArgument},
 	}

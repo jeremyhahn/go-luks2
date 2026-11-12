@@ -9,6 +9,7 @@ package luks2
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"errors"
 	"testing"
 	"time"
@@ -142,6 +143,19 @@ func TestVolumeFormatAppliesItsDefaults(t *testing.T) {
 	}
 	if got := metadata.Keyslots["0"].KeySize * 8; got != DefaultKeySize {
 		t.Errorf("key size = %d bits, want the default %d", got, DefaultKeySize)
+	}
+	// A zero MetadataSize is the 16 KiB header area.
+	h, err := v.Header(context.Background())
+	if err != nil {
+		t.Fatalf("Header failed: %v", err)
+	}
+	if got := h.Size(); got != 16*1024 {
+		t.Errorf("header size = %d, want the default 16 KiB", got)
+	}
+	// The defaults are the values the configuration table names.
+	if DefaultCipher != "aes-xts-plain64" || DefaultKeySize != 512 || DefaultHash != crypto.SHA256 || DefaultSectorSize != 512 {
+		t.Errorf("defaults = %q, %d bits, %v, %d; want aes-xts-plain64, 512 bits, SHA-256, 512",
+			DefaultCipher, DefaultKeySize, DefaultHash, DefaultSectorSize)
 	}
 }
 

@@ -18,6 +18,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An unsupported mandatory requirement is readable from `luks2.Error`.**
+  Unlock, activation and every header write on a container declaring a
+  mandatory requirement this library does not implement (such as
+  `inline-hw-tags`) return a `*luks2.Error` whose `Kind` is
+  `ErrUnsupportedRequirement` and whose `Detail` names the requirement and the
+  container's mandatory set. A header write used to report it with Kind
+  `ErrIO` and no Detail, and unlock's Detail did not name it. No named
+  requirement type is exported. A requirement that stops `MigrateToFIPS`
+  keeps the migration's Kind `ErrFIPSMigration`, with the requirement in
+  `Detail` and `errors.Is(err, ErrUnsupportedRequirement)` still true. The
+  same holds when `AddKeyslot`, `ChangeKeyslot` or `RemoveKeyslot` meets the
+  requirement while repairing a damaged or older header copy: that used to
+  report Kind `ErrIO` with Detail "failed to read header", and now reports
+  the requirement, with `errors.Is(err, ErrIO)` still true underneath.
+
 - **A concurrent build of the same toolchain image tag no longer fails the
   job.** Two jobs on one Docker daemon could build the content-addressed
   toolchain tag at once, and BuildKit refused the slower export with `image

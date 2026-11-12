@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 
 	"github.com/jeremyhahn/go-enclave"
 
@@ -507,6 +508,11 @@ func FromToken(t luks2.Token, opts ...FIDO2Option) (luks2.KeyProvider, error) {
 		if err != nil {
 			return nil, errAt(op, "", err)
 		}
+		// The parameters carry the binding, not the keyslots it is bound
+		// to, and UnlockWithProvider tries only the keyslots the provider's
+		// token names: the rebuilt provider names the source token's own,
+		// in a copy the caller cannot change under it.
+		p.cmd.token.Keyslots = slices.Clone(t.Keyslots)
 		return p, nil
 	default:
 		return nil, errAt(op, "", &errs.Error{Kind: ErrUnsupportedToken, Detail: fmt.Sprintf("%q", t.Type)})

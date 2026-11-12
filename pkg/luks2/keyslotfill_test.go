@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -200,6 +201,77 @@ func TestWriteRandomCancelledBeforeTheFirstChunkWritesNothing(t *testing.T) {
 	if !bytes.Equal(got, original) {
 		t.Fatal("writeRandom with an already-canceled ctx modified the file")
 	}
+}
+
+// cancelAfterChecks is a context whose Err reports context.Canceled from its
+// (n+1)th call on, so a loop that checks ctx once per chunk is canceled
+// after exactly n chunks.
+type cancelAfterChecks struct {
+	context.Context
+	n, calls int
+}
+
+func (c *cancelAfterChecks) Err() error {
+	c.calls++
+	if c.calls > c.n {
+		return context.Canceled
+	}
+	return nil
+}
+
+// TestFormatFillAndHeaderWipeObserveCancellationPerChunk pins the last row of
+// the cancellation table: the random fill and the header wipe check ctx per
+// 64 KiB chunk, so a cancellation after the first chunk stops both with one
+// chunk written and the rest untouched, and the canceled fill names the
+// bytes it wrote in Detail.
+func TestFormatFillAndHeaderWipeObserveCancellationPerChunk(t *testing.T) {
+	const size = 4 * keyslotWipeChunk
+	open := func(t *testing.T) *os.File {
+		path := filepath.Join(t.TempDir(), "chunks.img")
+		if err := os.WriteFile(path, bytes.Repeat([]byte{0x5a}, size), 0600); err != nil {
+			t.Fatalf("failed to create the image: %v", err)
+		}
+		f, err := os.OpenFile(path, os.O_RDWR, 0600) // #nosec G304 -- path is under t.TempDir()
+		if err != nil {
+			t.Fatalf("failed to open the image: %v", err)
+		}
+		t.Cleanup(func() { _ = f.Close() })
+		return f
+	}
+	untouchedFrom := func(t *testing.T, f *os.File, from int) {
+		got, err := os.ReadFile(f.Name())
+		if err != nil {
+			t.Fatalf("failed to read the image back: %v", err)
+		}
+		if !bytes.Equal(got[from:], bytes.Repeat([]byte{0x5a}, size-from)) {
+			t.Fatalf("the canceled write went past byte %d", from)
+		}
+		if bytes.Equal(got[:from], bytes.Repeat([]byte{0x5a}, from)) {
+			t.Fatal("the first chunk was not written before the cancellation")
+		}
+	}
+
+	t.Run("writeRandom", func(t *testing.T) {
+		f := open(t)
+		ctx := &cancelAfterChecks{Context: context.Background(), n: 1}
+		err := writeRandom(ctx, f, size, testVolumeSys().cryptoRand)
+		var e *Error
+		if !errors.As(err, &e) || e.Kind != context.Canceled {
+			t.Fatalf("writeRandom canceled after one chunk = %v, want an *Error of Kind context.Canceled", err)
+		}
+		if want := fmt.Sprintf("canceled after writing %d of %d bytes", keyslotWipeChunk, size); e.Detail != want {
+			t.Errorf("Detail = %q, want %q", e.Detail, want)
+		}
+		untouchedFrom(t, f, keyslotWipeChunk)
+	})
+	t.Run("zeroRange", func(t *testing.T) {
+		f := open(t)
+		ctx := &cancelAfterChecks{Context: context.Background(), n: 1}
+		if err := zeroRange(ctx, f, 0, size); !errors.Is(err, context.Canceled) {
+			t.Fatalf("zeroRange canceled after one chunk = %v, want context.Canceled", err)
+		}
+		untouchedFrom(t, f, keyslotWipeChunk)
+	})
 }
 
 // TestWriteRandomReportsAWriteFailure covers the error path. A fill that
