@@ -93,8 +93,8 @@ func TestNoCreationPathWritesASHA1KDF(t *testing.T) {
 			derivations, sys := countDerivations(t)
 
 			err := tc.run(device, sys)
-			if !errors.Is(err, ErrInvalidArgument) || !errors.Is(err, tc.also) {
-				t.Fatalf("got %v, want ErrInvalidArgument and %v", err, tc.also)
+			if want := sha1RefusalKind(sys.fipsMode()); !errors.Is(err, want) || !errors.Is(err, tc.also) {
+				t.Fatalf("got %v, want %v and %v", err, want, tc.also)
 			}
 			if *derivations != 0 {
 				t.Fatalf("%d keyslot key(s) were derived before the refusal; want none", *derivations)
@@ -107,10 +107,21 @@ func TestNoCreationPathWritesASHA1KDF(t *testing.T) {
 
 	t.Run("createDigest", func(t *testing.T) {
 		mk := secretOf(t, make([]byte, 64))
-		if kdf, value, err := createDigest(mk, "sha1", testVolumeSys()); kdf != nil || value != "" || !errors.Is(err, ErrInvalidArgument) {
-			t.Fatalf("createDigest sha1: got %+v, %q, %v; want ErrInvalidArgument", kdf, value, err)
+		sys := testVolumeSys()
+		want := sha1RefusalKind(sys.fipsMode())
+		if kdf, value, err := createDigest(mk, "sha1", sys); kdf != nil || value != "" || !errors.Is(err, want) {
+			t.Fatalf("createDigest sha1: got %+v, %q, %v; want %v", kdf, value, err, want)
 		}
 	})
+}
+
+// sha1RefusalKind is the kind a SHA-1 creation request is refused with: the
+// FIPS refusal when the policy is on, the argument error when it is not.
+func sha1RefusalKind(mode fips.Mode) error {
+	if mode {
+		return ErrFIPSNotApproved
+	}
+	return ErrInvalidArgument
 }
 
 // TestRefuseSHA1ForCreation pins the predicate: SHA-1 by type or by hash, in
