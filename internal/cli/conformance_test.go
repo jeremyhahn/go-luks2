@@ -377,3 +377,90 @@ func TestRunKillSlotRefusesTheLastSlot(t *testing.T) {
 		t.Errorf("testkey after the refused killslot: %v, want slot 0 to still open", err)
 	}
 }
+
+// recoveryKeyLine returns the line between the RECOVERY KEY banners.
+func recoveryKeyLine(t *testing.T, out string) string {
+	t.Helper()
+	lines := strings.Split(out, "\n")
+	for i, l := range lines {
+		if strings.Contains(l, "RECOVERY KEY") && i+1 < len(lines) {
+			return lines[i+1]
+		}
+	}
+	t.Fatalf("no recovery key in %q", out)
+	return ""
+}
+
+// docs/recovery-keys/cli.md: dashed, hex and base64 render 32 bytes as 74,
+// 64 and 44 characters.
+func TestRunRecoveryGenerateFormatLengths(t *testing.T) {
+	for format, want := range map[string]int{"dashed": 74, "hex": 64, "base64": 44} {
+		e, _, _, stdout, _ := newTestEnv(&bytes.Buffer{})
+		if err := runRecoveryGenerate(context.Background(), e, []string{"--format", format}); err != nil {
+			t.Fatalf("generate --format %s: %v", format, err)
+		}
+		if got := len(recoveryKeyLine(t, stdout.String())); got != want {
+			t.Errorf("--format %s: %d characters, want %d", format, got, want)
+		}
+	}
+}
+
+// docs/recovery-keys/cli.md: any other --format, an empty one included, is a
+// usage error raised before the passphrase is read.
+func TestRunRecoveryAddRefusesABadFormatBeforeThePassphrase(t *testing.T) {
+	path := newTestVolumeImage(t, "recovery-format.img")
+	for _, format := range []string{"nope", ""} {
+		stdin := bytes.NewBufferString(testPassphrase + "\n")
+		e, _, _, _, _ := newTestEnv(stdin)
+		err := runRecoveryAdd(context.Background(), e, append(append([]string{}, fastKDFArgs...), "--format", format, path))
+		var ue *UsageError
+		if !errors.As(err, &ue) {
+			t.Fatalf("add --format %q = %v, want a *UsageError", format, err)
+		}
+		if stdin.Len() != len(testPassphrase)+1 {
+			t.Errorf("add --format %q: the passphrase was read before the refusal", format)
+		}
+	}
+	if got := keyslotIDs(t, path); len(got) != 1 {
+		t.Errorf("keyslots = %v, want only slot 0", got)
+	}
+}
+
+// docs/recovery-keys/cli.md (add): a systemd-recovery token names the slot,
+// --output refuses an existing path, and verify --recovery-file takes the
+// first line that is not blank or a comment, whitespace stripped.
+func TestRunRecoveryAddTokenOutputAndRecoveryFileRows(t *testing.T) {
+	ctx := context.Background()
+	path := newTestVolumeImage(t, "recovery-rows.img")
+
+	existing := filepath.Join(t.TempDir(), "exists.txt")
+	if err := os.WriteFile(existing, []byte("keep"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	e, _, _, stdout, _ := newTestEnv(bytes.NewBufferString(testPassphrase + "\n"))
+	err := runRecoveryAdd(ctx, e, append(append([]string{}, fastKDFArgs...), "--output", existing, path))
+	if err == nil {
+		t.Fatal("recovery add --output <existing>: want a failure")
+	}
+	if got, _ := os.ReadFile(existing); string(got) != "keep" {
+		t.Errorf("existing output = %q, want it not overwritten", got)
+	}
+	key := recoveryKeyLine(t, stdout.String())
+
+	e, _, _, stdout, _ = newTestEnv(&bytes.Buffer{})
+	if err := runTokenList(ctx, e, []string{path}); err != nil {
+		t.Fatalf("token list: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "systemd-recovery") {
+		t.Errorf("token list = %q, want a systemd-recovery token", stdout.String())
+	}
+
+	recoveryFile := filepath.Join(t.TempDir(), "key.txt")
+	if err := os.WriteFile(recoveryFile, []byte("# a comment\n\n   \n  "+key+"  \n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	e, _, _, _, _ = newTestEnv(&bytes.Buffer{})
+	if err := runRecoveryVerify(ctx, e, []string{"--recovery-file", recoveryFile, path}); err != nil {
+		t.Errorf("verify --recovery-file with comments, blanks and padding: %v", err)
+	}
+}
