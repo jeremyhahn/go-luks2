@@ -329,6 +329,7 @@ func (f *fakeMounter) make(_ context.Context, _ string, _ filesystem.Type, p fil
 // real loop device.
 type fakeLooper struct {
 	attachErr error
+	attached  []string
 	device    loopDevice
 	detachErr error
 	detached  []loopDevice
@@ -338,6 +339,7 @@ type fakeLooper struct {
 }
 
 func (f *fakeLooper) attach(_ context.Context, file string) (loopDevice, error) {
+	f.attached = append(f.attached, file)
 	if f.attachErr != nil {
 		return loopDevice{}, f.attachErr
 	}

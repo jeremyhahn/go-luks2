@@ -557,3 +557,44 @@ func TestExitCodeRowsFromActivationAndKeyInput(t *testing.T) {
 		}
 	}
 }
+
+// docs/loop-devices/cli.md, open: open takes a device and never attaches a
+// loop device for it; an image file is refused by activation with "not a
+// block device", which has no exit row of its own, so it exits 1.
+func TestRunOpenNeverAttachesALoopDevice(t *testing.T) {
+	path := newTestVolumeImage(t, "open-no-loop.img")
+	e, act, _, _, _ := newTestEnv(bytes.NewBufferString(testPassphrase + "\n"))
+	looper := e.host.looper.(*fakeLooper)
+	act.activateErr = errors.Join(luks2.ErrInvalidArgument, errors.New("not a block device: "+path))
+
+	err := runOpen(context.Background(), e, []string{path, "data"})
+	if err == nil || !strings.Contains(err.Error(), "not a block device") {
+		t.Fatalf("runOpen = %v, want the not-a-block-device refusal", err)
+	}
+	if got := exitCode(err); got != 1 {
+		t.Errorf("exit status = %d, want 1", got)
+	}
+	if len(looper.attached) != 0 {
+		t.Errorf("attached = %v, want no loop device attached by open", looper.attached)
+	}
+}
+
+// docs/loop-devices/cli.md, close: close removes the mapping only; a loop
+// device under it stays attached.
+func TestRunCloseNeverDetachesALoopDevice(t *testing.T) {
+	e, act, _, stdout, _ := newTestEnv(&bytes.Buffer{})
+	looper := e.host.looper.(*fakeLooper)
+
+	if err := runClose(context.Background(), e, []string{"luks-auto"}); err != nil {
+		t.Fatalf("runClose: %v", err)
+	}
+	if len(act.deactivated) != 1 || act.deactivated[0] != "luks-auto" {
+		t.Errorf("deactivated = %v, want [luks-auto]", act.deactivated)
+	}
+	if len(looper.detached) != 0 || len(looper.attached) != 0 {
+		t.Errorf("looper attached %v, detached %v; want close to leave loop devices alone", looper.attached, looper.detached)
+	}
+	if !strings.Contains(stdout.String(), "Volume locked successfully: luks-auto") {
+		t.Errorf("stdout = %q, want the close confirmation", stdout.String())
+	}
+}
