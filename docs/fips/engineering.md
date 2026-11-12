@@ -110,8 +110,10 @@ instead. Damage is not reported as a FIPS refusal: the refusal is returned
 only when re-screening with approved stand-ins shows the policy is the only
 obstacle; a malformed SHA-1 digest is `ErrInvalidHeader`, and so is any
 keyslot one of whose attesting digests is malformed, even beside a short-salt
-digest strict mode refuses. `MigrateToFIPS` refuses such a volume at the plan
-stage with the same `ErrInvalidHeader`, writing nothing.
+digest strict mode refuses. A malformed digest no tried keyslot consults --
+one covering no keyslot, or binding no data segment -- is `ErrInvalidHeader`
+too. `MigrateToFIPS` refuses such a volume at the plan stage with the same
+`ErrInvalidHeader`, writing nothing.
 
 ### Edge cases
 

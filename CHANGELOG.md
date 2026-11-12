@@ -48,6 +48,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   migration wrote, reported `Complete` and kept the damage. Planning now
   screens every digest's structure first, and such a volume is refused at the
   plan stage with `ErrInvalidHeader`, writing nothing.
+- **A malformed digest no keyslot consults is no longer called an import.**
+  In FIPS mode, a volume refused only for non-approval but carrying a
+  malformed digest that covers no tried keyslot, or binds no data segment,
+  failed unlock with `*FIPSImportRequiredError`, though `MigrateToFIPS`
+  refuses that volume at the plan stage. Unlock now fails with
+  `ErrInvalidHeader`, as the import does.
 
 ## [1.0.3-alpha] - 2026-11-10
 

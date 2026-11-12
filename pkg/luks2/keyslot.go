@@ -1541,7 +1541,16 @@ func getVolumeKey(ctx context.Context, f io.ReaderAt, device string, passphrase 
 			"none of the header's %d keyslot(s) is attested by a digest binding every data segment (%s), so none holds the volume key",
 			len(metadata.Keyslots), strings.Join(dataSegmentIDs(metadata), ", "))}
 	}
-	return getMasterKeySlot(ctx, f, device, passphrase, header.VolumeKeyDigestsView(metadata), order, sys)
+	masterKey, id, err := getMasterKeySlot(ctx, f, device, passphrase, header.VolumeKeyDigestsView(metadata), order, sys)
+	// The scan sees only the digests binding every data segment. An import
+	// request is judged against the whole header, as MigrateToFIPS judges
+	// it: a malformed digest the view leaves out is still damage.
+	if errors.Is(err, ErrFIPSImportRequired) {
+		if herr := malformedDigestError(metadata.Digests); herr != nil {
+			return nil, "", herr
+		}
+	}
+	return masterKey, id, err
 }
 
 // keyslotsByPriority splits ids into metadata's prefer, normal and ignore
@@ -1658,6 +1667,13 @@ func getMasterKeySlot(ctx context.Context, dev io.ReaderAt, device string, passp
 	}
 
 	if len(fipsBlocked) > 0 && !otherBlocked {
+		// An import request says the volume is intact and MigrateToFIPS
+		// would open it. A malformed digest anywhere in the header -- one no
+		// keyslot tried here consults included -- is damage MigrateToFIPS
+		// refuses, so it is what is reported.
+		if err := malformedDigestError(metadata.Digests); err != nil {
+			return nil, "", err
+		}
 		return nil, "", newFIPSImportRequiredError(device, metadata, fipsBlocked)
 	}
 

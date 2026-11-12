@@ -423,22 +423,21 @@ func migrateToFIPS(ctx context.Context, device string, passphrase []byte, opts *
 	// 2. PLAN. Every non-approved digest must attest the key just recovered.
 	// Checked before anything is written, so a digest that cannot be migrated
 	// costs a refusal and not a half-done import.
+	//
+	// A digest the header screen rejects is damage, not a digest to migrate
+	// or to keep, and it is reported as the header fault unlock reports
+	// (malformedDigestError). Screened first, and for every digest:
+	// digestFIPSRefusal judges the algorithm, salt and output length, not
+	// structure, so a digest it approves -- a 48-byte PBKDF2-SHA256 value,
+	// say -- can still be one no hash produces.
+	if err := malformedDigestError(metadata.Digests); err != nil {
+		return fail("plan", fipsStateUntouched, err)
+	}
 	var digestsToMigrate []string
 	for _, id := range sortedDigestIDs(metadata.Digests) {
 		digest := metadata.Digests[id]
 		if digest == nil {
 			continue
-		}
-		// A digest the header screen rejects is damage, not a digest to
-		// migrate or to keep, and it is reported as the header fault unlock
-		// reports. Screened before the approval check: digestFIPSRefusal
-		// judges the algorithm, salt and output length, not structure, so a
-		// digest it approves -- a 48-byte PBKDF2-SHA256 value, say -- can
-		// still be one no hash produces.
-		expected, _, err := screenDigestStructure(digest)
-		clearBytes(expected)
-		if err != nil {
-			return fail("plan", fipsStateUntouched, &errs.Error{Kind: ErrInvalidHeader, Detail: "digest " + id + " is malformed", Err: err})
 		}
 		refusal, approved := digestFIPSRefusal(id, digest)
 		if approved {
@@ -1074,6 +1073,27 @@ func coveringDigestsWellFormed(id string, digests map[string]*header.Digest) boo
 		}
 	}
 	return true
+}
+
+// malformedDigestError returns ErrInvalidHeader naming the first digest, in ID
+// order, that the structural digest screen rejects, or nil when there is none.
+// It judges every digest, whichever keyslots and segments it names: it is the
+// screen MigrateToFIPS's plan applies, so unlock consults it before it calls a
+// volume an import -- FIPSImportRequiredError says MigrateToFIPS would open
+// it, and a header this rejects it refuses.
+func malformedDigestError(digests map[string]*header.Digest) error {
+	for _, id := range sortedDigestIDs(digests) {
+		digest := digests[id]
+		if digest == nil {
+			continue
+		}
+		expected, _, err := screenDigestStructure(digest)
+		clearBytes(expected)
+		if err != nil {
+			return &errs.Error{Kind: ErrInvalidHeader, Detail: "digest " + id + " is malformed", Err: err}
+		}
+	}
+	return nil
 }
 
 // fipsStandInKeyslot returns keyslot with its KDF replaced by an approved
