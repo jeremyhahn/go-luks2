@@ -59,10 +59,6 @@ func findSeamVars(t *testing.T, dir string) []seamFinding {
 	return findings
 }
 
-// seamVarsIn is findSeamVars without the test: a package that does not parse
-// or type-check is an error naming the package and every error the checker
-// reported, never a package with no seams. A package that type-checks only
-// in part has objects with no type, and its var list would be incomplete.
 // seamTypes holds the one source importer every seamVarsIn call shares, and
 // the file set it records positions in. The source importer caches each
 // package it type-checks, so one instance type-checks the standard library
@@ -87,6 +83,10 @@ func sharedSeamImporter() (*token.FileSet, types.Importer) {
 	return seamTypes.fset, seamTypes.imp
 }
 
+// seamVarsIn is findSeamVars without the test: a package that does not parse
+// or type-check is an error naming the package and every error the checker
+// reported, never a package with no seams. A package that type-checks only
+// in part has objects with no type, and its var list would be incomplete.
 func seamVarsIn(dir string) ([]seamFinding, error) {
 	fset, imp := sharedSeamImporter()
 	defer seamTypes.mu.Unlock()
