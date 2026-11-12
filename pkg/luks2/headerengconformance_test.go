@@ -2,7 +2,10 @@ package luks2
 
 import (
 	"context"
+	"os"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
 // openHeaderEngVolume formats a fresh image and opens it with the test
@@ -83,5 +86,52 @@ func TestHeaderEngSequenceIDAdvancesOnEveryTokenChange(t *testing.T) {
 	}
 	if afterRemove := seq("RemoveToken"); afterRemove <= afterSet {
 		t.Fatalf("RemoveToken: sequence_id %d, was %d", afterRemove, afterSet)
+	}
+}
+
+// engineering.md, Invariants: SecondaryHeader and RestorePrimaryHeader never
+// read or derive against the data segment. The image is cut off where the
+// data segment starts, so any read there fails.
+func TestHeaderEngSecondaryAndRestoreNeverReadTheDataSegment(t *testing.T) {
+	path := formattedVolumeImage(t, "nodata.img", "", "")
+	ctx := context.Background()
+
+	v, err := Open(ctx, path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	h, err := v.Header(ctx)
+	if err != nil {
+		t.Fatalf("Header: %v", err)
+	}
+	segs := h.Segments()
+	if len(segs) != 1 || segs[0].Offset <= 2*h.Size() {
+		t.Fatalf("fixture: segments %+v", segs)
+	}
+	want := h.SequenceID()
+	_ = v.Close()
+
+	if err := os.Truncate(path, segs[0].Offset); err != nil {
+		t.Fatal(err)
+	}
+	writeBytesAt(t, path, header.HeaderSize, []byte("torn"))
+
+	v, err = Open(ctx, path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open without a data segment: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+	s, err := v.SecondaryHeader(ctx)
+	if err != nil {
+		t.Fatalf("SecondaryHeader without a data segment: %v", err)
+	}
+	if s.SequenceID() != want {
+		t.Fatalf("SecondaryHeader sequence %d, want %d", s.SequenceID(), want)
+	}
+	if err := v.RestorePrimaryHeader(ctx); err != nil {
+		t.Fatalf("RestorePrimaryHeader without a data segment: %v", err)
+	}
+	if p, err := v.Header(ctx); err != nil || p.Offset() != 0 || p.SequenceID() != want+1 {
+		t.Fatalf("after the restore: %v, %v; want the primary at sequence %d", p, err, want+1)
 	}
 }
