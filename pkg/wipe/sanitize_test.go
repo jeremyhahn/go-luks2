@@ -344,6 +344,37 @@ func TestSanitizeOpensTheDeviceExclusively(t *testing.T) {
 	}
 }
 
+// TestSanitizeRefusesAContendedLock: another holder of the device's lock for
+// the whole wait budget is ErrLockContended (a LockTimeoutError), and nothing
+// is written.
+func TestSanitizeRefusesAContendedLock(t *testing.T) {
+	path := writeFixture(t, 64*1024, 0xAA)
+	holder, err := os.OpenFile(path, os.O_RDWR, 0) // #nosec G304 -- under t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Close() }()
+	if err := unix.Flock(int(holder.Fd()), unix.LOCK_SH); err != nil {
+		t.Fatal(err)
+	}
+
+	s := baseSys()
+	s.lockWait = 0
+	err = sanitize(context.Background(), path, Params{}, s)
+	var timeout *LockTimeoutError
+	if !errors.Is(err, ErrLockContended) || !errors.As(err, &timeout) {
+		t.Fatalf("Sanitize of a locked device = %v, want ErrLockContended as a LockTimeoutError", err)
+	}
+
+	got, err := os.ReadFile(path) // #nosec G304 -- under t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, bytes.Repeat([]byte{0xAA}, 64*1024)) {
+		t.Fatal("Sanitize wrote to a device whose lock it did not get")
+	}
+}
+
 // TestSanitizeChecksCtxBeforeLocking: a caller that canceled before calling
 // Sanitize does not spend the lock-wait budget, and nothing is written.
 func TestSanitizeChecksCtxBeforeLocking(t *testing.T) {

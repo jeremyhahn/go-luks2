@@ -116,6 +116,37 @@ func TestFindLoopDeviceReportsErrNotFoundWhenEveryCandidateIsAnotherFile(t *test
 	}
 }
 
+// TestFindLoopDeviceReturnsTheFirstOfSeveral: with several loop devices
+// backed by the same file, the first in /sys/block directory order wins.
+func TestFindLoopDeviceReturnsTheFirstOfSeveral(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "backing.img")
+	writeFakeNode(t, file)
+	root := t.TempDir()
+	for _, name := range []string{"loop7", "loop2", "loop11"} {
+		dir := filepath.Join(root, name, "loop")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "backing_file"), []byte(file+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dev, ino := statIdentity(t, file)
+	s := identitySys(dev, ino)
+	entries, err := s.readDir(root)
+	if err != nil || len(entries) != 3 {
+		t.Fatalf("readDir = %d entries, %v", len(entries), err)
+	}
+
+	path, _, _, err := findLoopDeviceIn(root, file, s)
+	if err != nil {
+		t.Fatalf("findLoopDeviceIn = %v", err)
+	}
+	if want := filepath.Join(s.devDir, entries[0].Name()); path != want {
+		t.Fatalf("findLoopDeviceIn = %q, want the first in directory order, %q", path, want)
+	}
+}
+
 // TestFindLoopDeviceCountsAnUnidentifiableDevice: a bound device whose
 // backing file cannot be identified is not evidence of absence.
 func TestFindLoopDeviceCountsAnUnidentifiableDevice(t *testing.T) {
