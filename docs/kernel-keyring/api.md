@@ -9,7 +9,7 @@ library; it has no REST, gRPC, QUIC, MCP or Unix-socket transport.
 | Capability | Embedded Go call |
 |---|---|
 | Startup preflight | `dmcrypt.CheckKeyring(ctx context.Context) error` |
-| Inspect a failure | `*dmcrypt.KeyringError` (`Op`, `Kind`, `Err`), `(*KeyringError).Remedy() string` |
+| Inspect a failure | `*dmcrypt.KeyringError` (`Op`, `Kind`, `Err`), `(*KeyringError).Remedy() string`, `(*KeyringError).Error() string`, `(*KeyringError).Unwrap() []error` |
 | Match a failure | `errors.Is` against `dmcrypt.ErrKeyring`, `ErrKeyringUnavailable`, `ErrKeyringBlocked`, `ErrKeyringUnsupported`, `ErrKeyringQuotaExhausted`, `ErrKeyringFailed`, `ErrKeyringEntryExists`, `ErrKeyringKeyNotReleased` |
 
 The import path is `github.com/jeremyhahn/go-luks2/pkg/dmcrypt`. The keyring

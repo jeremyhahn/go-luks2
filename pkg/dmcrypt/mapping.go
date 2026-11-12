@@ -120,7 +120,7 @@ func Lookup(ctx context.Context, name string) (*Mapping, error) {
 			return nil, errs.At(pkgName, op, "", &errs.Error{Kind: ErrNotActive,
 				Detail: fmt.Sprintf("no device-mapper mapping named %q exists", name)})
 		}
-		return nil, errs.At(pkgName, op, "", &errs.Error{Kind: errs.KindOf(err, errs.ErrIO), Detail: "inspect the device-mapper target of " + name, Err: err})
+		return nil, errs.At(pkgName, op, "", &errs.Error{Kind: dmKind(err, errs.ErrIO), Detail: "inspect the device-mapper target of " + name, Err: err})
 	}
 
 	major, minor := unix.Major(info.DevNo), unix.Minor(info.DevNo)

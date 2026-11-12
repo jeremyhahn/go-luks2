@@ -9,10 +9,14 @@ package dmcrypt
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/jeremyhahn/go-luks2/internal/device"
+	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
 func TestValidateNameAcceptsOrdinaryNames(t *testing.T) {
@@ -94,6 +98,48 @@ func TestLookupPropagatesAnInspectionFailure(t *testing.T) {
 
 	if _, err := Lookup(context.Background(), "vol"); !errors.Is(err, unix.EACCES) {
 		t.Fatalf("Lookup = %v, want the inspection failure reachable", err)
+	}
+}
+
+// A device-mapper step refused for lack of privilege is ErrPermissionDenied,
+// with the errno still reachable.
+func TestADeviceMapperPrivilegeRefusalIsErrPermissionDenied(t *testing.T) {
+	for _, errno := range []unix.Errno{unix.EACCES, unix.EPERM} {
+		fake := newFakeDeviceMapper()
+		fake.infoErr = os.NewSyscallError("dm ioctl", errno)
+		fake.install(t)
+
+		_, lookupErr := Lookup(context.Background(), "vol")
+		deactivateErr := Deactivate(context.Background(), "vol")
+		for op, err := range map[string]error{"Lookup": lookupErr, "Deactivate": deactivateErr} {
+			if !errors.Is(err, ErrPermissionDenied) || !errors.Is(err, errno) {
+				t.Errorf("%s with %v = %v, want ErrPermissionDenied wrapping the errno", op, errno, err)
+			}
+		}
+	}
+}
+
+func TestDMKindKeepsAnEarlierClassificationAndCancellation(t *testing.T) {
+	denied := os.NewSyscallError("dm ioctl", unix.EACCES)
+	for _, tc := range []struct {
+		name string
+		err  error
+		want error
+	}{
+		{"privilege", denied, ErrPermissionDenied},
+		{"other errno", os.NewSyscallError("dm ioctl", unix.EINVAL), errs.ErrIO},
+		{"classified", &Error{Kind: ErrNodeUnverified, Err: denied}, ErrNodeUnverified},
+		{"canceled", errors.Join(context.Canceled, denied), context.Canceled},
+	} {
+		if got := dmKind(tc.err, errs.ErrIO); got != tc.want {
+			t.Errorf("%s: dmKind = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestErrPermissionDeniedIsTheSharedDeviceSentinel(t *testing.T) {
+	if ErrPermissionDenied != device.ErrPermissionDenied {
+		t.Fatal("dmcrypt.ErrPermissionDenied is not internal/device's ErrPermissionDenied")
 	}
 }
 
