@@ -187,6 +187,7 @@ func TestFIPSPolicyClassifiesWhatItRefuses(t *testing.T) {
 // TestFIPSPolicyRefusesTheMigration: MigrateToFIPS refuses under the FIPS
 // policy before touching the device.
 func TestFIPSPolicyRefusesTheMigration(t *testing.T) {
+	defer parallel(t)()
 	device := newImage(t, "fips-refusal-forced.img")
 	formatWithLibrary(t, device)
 	before := fileDigest(t, device)

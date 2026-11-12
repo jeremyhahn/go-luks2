@@ -77,6 +77,7 @@ func nullKeyslotVolume(t *testing.T, name string) string {
 // a consumer. So the null is removed where the metadata is parsed, and there is
 // nothing left downstream to enumerate.
 func TestNullKeyslotDoesNotSurviveTheHeaderRead(t *testing.T) {
+	defer parallel(t)()
 	path := nullKeyslotVolume(t, "null-keyslot.img")
 
 	_, metadata, err := readHeaderForTest(path)
