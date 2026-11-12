@@ -311,6 +311,14 @@ func TestWithLockWaitOverridesTheDefault(t *testing.T) {
 	}
 }
 
+// WithTestSysForTest hands the external luks2_test package the Option the
+// in-package tests get from cheapOpts: Open with testVolumeSys, whose KDF and
+// digest floors are the minimum, not the production calibration. It exists
+// only in the test build, so it is no part of the package API.
+func WithTestSysForTest() Option {
+	return withTestSys(testVolumeSys())
+}
+
 func TestOpenWithoutWithLockWaitUsesTheDefault(t *testing.T) {
 	path := newImage(t, "defaultlockwait.img")
 

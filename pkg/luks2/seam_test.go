@@ -102,7 +102,7 @@ func createSeamImage(path string) error {
 // it open.
 func seamVolume(t *testing.T) *luks2.Volume {
 	t.Helper()
-	v, err := luks2.Open(context.Background(), seamImage(t))
+	v, err := luks2.Open(context.Background(), seamImage(t), luks2.WithTestSysForTest())
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -474,7 +474,7 @@ func seamChild(role, image string) error {
 
 	switch role {
 	case seamRoleFormatArgon2:
-		v, err := luks2.Open(ctx, image)
+		v, err := luks2.Open(ctx, image, luks2.WithTestSysForTest())
 		if err != nil {
 			return err
 		}
@@ -490,7 +490,7 @@ func seamChild(role, image string) error {
 		return seamArgon2Refused(ctx, filepath.Join(dir, "argon2.img"), pass)
 
 	case seamRoleUnlock:
-		v, err := luks2.Open(ctx, image)
+		v, err := luks2.Open(ctx, image, luks2.WithTestSysForTest())
 		if err != nil {
 			return err
 		}
@@ -507,7 +507,7 @@ func seamChild(role, image string) error {
 		return fmt.Errorf("unlock failed (key returned: %v): %w", key != nil, err)
 
 	case seamRoleMigrate:
-		v, err := luks2.Open(ctx, image)
+		v, err := luks2.Open(ctx, image, luks2.WithTestSysForTest())
 		if err != nil {
 			return err
 		}
@@ -544,7 +544,7 @@ func seamArgon2Refused(ctx context.Context, image string, pass enclave.ByteAcces
 	if err := createSeamImage(image); err != nil {
 		return err
 	}
-	v, err := luks2.Open(ctx, image)
+	v, err := luks2.Open(ctx, image, luks2.WithTestSysForTest())
 	if err != nil {
 		return err
 	}
