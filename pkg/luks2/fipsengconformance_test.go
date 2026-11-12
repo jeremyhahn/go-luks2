@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -242,3 +243,62 @@ func isApprovedEngHash(h string) bool {
 	}
 	return false
 }
+
+// Edge cases: "Under fips140=only, crypto/pbkdf2 also refuses a salt under
+// 128 bits": a volume with no Argon2 at all, every way in through a
+// short-salt PBKDF2-SHA256 digest, is classified with the salt as the reason
+// and is not opened by a strict FIPS process, which leaves it as it was.
+// Without cryptsetup: the fixture is the library's own PBKDF2 format,
+// weakened in a fips140=off child.
+//
+// The open is refused as ErrInvalidHeader ("digests ... are unusable"), not
+// as the *FIPSImportRequiredError the Error semantics section names: the
+// unlock classifier re-screens only keyslots the pre-derivation screen
+// refused, and the policy screen does not judge salt or output length.
+func TestEngAShortSaltPBKDF2VolumeIsNotOpenedInStrictMode(t *testing.T) {
+	image := newImage(t, "eng-short-salt.img")
+	if err := formatForTest(formatOptionsForTest{
+		Device:        image,
+		Passphrase:    []byte(conformancePassphrase),
+		Cipher:        "aes",
+		CipherMode:    "xts-plain64",
+		KeySize:       512,
+		HashAlgo:      "sha256",
+		SectorSize:    512,
+		KDFType:       kdfTypePBKDF2,
+		PBKDFIterTime: 1,
+	}); err != nil {
+		t.Fatalf("Format failed: %v", err)
+	}
+	if code, out := runChild(t, childRoleWeaken, image, "fips140=off", false); code != childOK {
+		t.Fatalf("weakening the fixture exited %d\n%s", code, out)
+	}
+
+	_, metadata, err := readHeaderForTest(image)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+	keyslots, digests := nonApprovedKDFs(metadata)
+	for _, k := range slices.Concat(keyslots, digests) {
+		if k.Type != kdfTypePBKDF2 || k.Reason != "salt shorter than 128 bits" {
+			t.Fatalf("fixture names %s, want only short-salt PBKDF2 with the salt as the reason", k)
+		}
+	}
+	if len(digests) != 1 {
+		t.Fatalf("fixture digests %v, want the one digest weakened", digests)
+	}
+
+	before := fileDigest(t, image)
+	if code, out := runChild(t, childRoleOpen, image, "fips140=only", true); code == childOK {
+		t.Fatalf("a strict FIPS process opened a volume whose only digest has a short salt\n%s", out)
+	}
+	if fileDigest(t, image) != before {
+		t.Fatal("the refused open changed the device")
+	}
+}
+
+// Edge cases: "A PBKDF2 keyslot or digest below either [a 128-bit salt or a
+// 112-bit output] is treated like Argon2, and NonApprovedKDF.Reason names
+// the parameter"; and Error semantics: the refusal is a
+// *FIPSImportRequiredError that unwraps to both ErrFIPSImportRequired and
+// ErrFIPSNotApproved, with the volume intact.
