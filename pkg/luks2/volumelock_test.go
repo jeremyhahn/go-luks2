@@ -669,11 +669,11 @@ func TestVolumeLockWaitEndsOnCancellationAsAnErrorOfKindCtxErr(t *testing.T) {
 				}
 				var lte *LockTimeoutError
 				if errors.As(err, &lte) {
-					t.Fatalf("a cancelled lock wait = %v, reported as a LockTimeoutError", err)
+					t.Fatalf("a canceled lock wait = %v, reported as a LockTimeoutError", err)
 				}
 				var le *Error
 				if !errors.As(err, &le) || le.Kind != e.kind {
-					t.Fatalf("a cancelled lock wait = %v, want an *Error of Kind %v", err, e.kind)
+					t.Fatalf("a canceled lock wait = %v, want an *Error of Kind %v", err, e.kind)
 				}
 			})
 		}

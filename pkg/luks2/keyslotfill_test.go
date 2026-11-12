@@ -204,7 +204,7 @@ func TestWriteRandomCancelledBeforeTheFirstChunkWritesNothing(t *testing.T) {
 }
 
 // cancelAfterChecks is a context whose Err reports context.Canceled from its
-// (n+1)th call on, so a loop that checks ctx once per chunk is cancelled
+// (n+1)th call on, so a loop that checks ctx once per chunk is canceled
 // after exactly n chunks.
 type cancelAfterChecks struct {
 	context.Context
@@ -222,7 +222,7 @@ func (c *cancelAfterChecks) Err() error {
 // TestFormatFillAndHeaderWipeObserveCancellationPerChunk pins the last row of
 // the cancellation table: the random fill and the header wipe check ctx per
 // 64 KiB chunk, so a cancellation after the first chunk stops both with one
-// chunk written and the rest untouched, and the cancelled fill names the
+// chunk written and the rest untouched, and the canceled fill names the
 // bytes it wrote in Detail.
 func TestFormatFillAndHeaderWipeObserveCancellationPerChunk(t *testing.T) {
 	const size = 4 * keyslotWipeChunk
@@ -244,7 +244,7 @@ func TestFormatFillAndHeaderWipeObserveCancellationPerChunk(t *testing.T) {
 			t.Fatalf("failed to read the image back: %v", err)
 		}
 		if !bytes.Equal(got[from:], bytes.Repeat([]byte{0x5a}, size-from)) {
-			t.Fatalf("the cancelled write went past byte %d", from)
+			t.Fatalf("the canceled write went past byte %d", from)
 		}
 		if bytes.Equal(got[:from], bytes.Repeat([]byte{0x5a}, from)) {
 			t.Fatal("the first chunk was not written before the cancellation")
@@ -257,7 +257,7 @@ func TestFormatFillAndHeaderWipeObserveCancellationPerChunk(t *testing.T) {
 		err := writeRandom(ctx, f, size, testVolumeSys().cryptoRand)
 		var e *Error
 		if !errors.As(err, &e) || e.Kind != context.Canceled {
-			t.Fatalf("writeRandom cancelled after one chunk = %v, want an *Error of Kind context.Canceled", err)
+			t.Fatalf("writeRandom canceled after one chunk = %v, want an *Error of Kind context.Canceled", err)
 		}
 		if want := fmt.Sprintf("canceled after writing %d of %d bytes", keyslotWipeChunk, size); e.Detail != want {
 			t.Errorf("Detail = %q, want %q", e.Detail, want)
@@ -268,7 +268,7 @@ func TestFormatFillAndHeaderWipeObserveCancellationPerChunk(t *testing.T) {
 		f := open(t)
 		ctx := &cancelAfterChecks{Context: context.Background(), n: 1}
 		if err := zeroRange(ctx, f, 0, size); !errors.Is(err, context.Canceled) {
-			t.Fatalf("zeroRange cancelled after one chunk = %v, want context.Canceled", err)
+			t.Fatalf("zeroRange canceled after one chunk = %v, want context.Canceled", err)
 		}
 		untouchedFrom(t, f, keyslotWipeChunk)
 	})
