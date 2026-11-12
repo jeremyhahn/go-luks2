@@ -5,7 +5,9 @@
 package workflows
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,6 +15,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/test/internal/labstrings"
 )
 
 // The tiers of ci.yml (#341). A job moved between them, or a condition
@@ -236,13 +240,69 @@ func TestNoLabelTrigger(t *testing.T) {
 // marked ready keeps the draft's failed gate and gets no review until its
 // next push.
 func TestReadyForReviewTriggers(t *testing.T) {
-	cr := readFile(t, ".github/workflows/code-review.yml")
+	cr, ok := readUnlessStripped(t, ".github/workflows/code-review.yml")
+	if !ok {
+		return
+	}
 	m := regexp.MustCompile(`(?m)^  pull_request_target:\n    types: \[(.*)\]$`).FindStringSubmatch(cr)
 	if m == nil {
 		t.Fatal("code-review.yml's pull_request_target trigger lists no types")
 	}
 	if !strings.Contains(", "+m[1]+",", " ready_for_review,") {
 		t.Errorf("code-review.yml's pull_request_target types are [%s], want ready_for_review among them", m[1])
+	}
+}
+
+// readUnlessStripped reads a repository file the published tree may not
+// carry. It reports false only when the file is absent and a rule of
+// labstrings.DefaultStripAtPublish names it: the exported tree drops it, so
+// there is nothing to check. A file absent that no strip rule names, or any
+// other read error, fails the test.
+func readUnlessStripped(t *testing.T, rel string) (string, bool) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(repoRoot(t), rel)) // #nosec G304 -- a fixed path in this repository
+	if err == nil {
+		return string(b), true
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("reading %s: %v", rel, err)
+	}
+	stripped, matchErr := strippedAtPublish(rel)
+	if matchErr != nil {
+		t.Fatalf("matching %s against the strip-at-publish rules: %v", rel, matchErr)
+	}
+	if !stripped {
+		t.Fatalf("reading %s: %v (no strip-at-publish rule names it, so every tree must carry it)", rel, err)
+	}
+	return "", false
+}
+
+// strippedAtPublish reports whether a rule of labstrings.DefaultStripAtPublish
+// names the slash-separated repository path rel.
+func strippedAtPublish(rel string) (bool, error) {
+	for _, rule := range labstrings.DefaultStripAtPublish {
+		ok, err := labstrings.MatchPath(rule.Path, rel)
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// TestStrippedAtPublish pins the rule readUnlessStripped relies on: the
+// internal review workflow is stripped at publish, the public workflows are
+// not, so an absent public workflow still fails.
+func TestStrippedAtPublish(t *testing.T) {
+	if ok, err := strippedAtPublish(".github/workflows/code-review.yml"); err != nil || !ok {
+		t.Errorf("strippedAtPublish(code-review.yml) = %v, %v; want true, nil", ok, err)
+	}
+	for _, name := range labstrings.PublishedWorkflows {
+		if ok, err := strippedAtPublish(".github/workflows/" + name); err != nil || ok {
+			t.Errorf("strippedAtPublish(%s) = %v, %v; want false, nil", name, ok, err)
+		}
 	}
 }
 
