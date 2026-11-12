@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -23,6 +24,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/jeremyhahn/go-luks2/internal/clock"
+	dmpkg "github.com/jeremyhahn/go-luks2/internal/dm"
 	keyringpkg "github.com/jeremyhahn/go-luks2/internal/keyring"
 	"github.com/jeremyhahn/go-luks2/internal/volkey"
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
@@ -437,6 +439,53 @@ func TestRollbackStillFailsClosedWhenTheDeviceIsNeverReleased(t *testing.T) {
 	}
 }
 
+// TestRollbackStillLiveMessagesNameTheTargetAndRemedy pins the detail text of
+// both fail-closed rollback outcomes: a target held past the budget and a
+// target that cannot be inspected. Each names the target and what to run.
+func TestRollbackStillLiveMessagesNameTheTargetAndRemedy(t *testing.T) {
+	t.Run("held", func(t *testing.T) {
+		fake := newFakeDeviceMapper()
+		fake.targets["held-msg"] = "CRYPT-LUKS2-held-msg"
+		fake.install(t)
+		fake.removeErr = os.NewSyscallError("dm ioctl", unix.EBUSY)
+		recordRetryWaits(t)
+
+		err := rollback(context.Background(), "held-msg", "CRYPT-LUKS2-held-msg", fakeDefaultDevNo)
+		if !errors.Is(err, ErrStillLive) {
+			t.Fatalf("rollback = %v, want ErrStillLive", err)
+		}
+		for _, want := range []string{
+			`"held-msg"`, "STILL LIVE", "over " + dmpkg.RemoveRetryBudget.String(),
+			`dmcrypt.Deactivate(ctx, "held-msg")`,
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("message lacks %q:\n%v", want, err)
+			}
+		}
+	})
+	t.Run("uninspectable", func(t *testing.T) {
+		fake := newFakeDeviceMapper()
+		fake.targets["blind-msg"] = "CRYPT-LUKS2-blind-msg"
+		fake.install(t)
+		previous := sys.infoByName
+		t.Cleanup(func() { sys.infoByName = previous })
+		sys.infoByName = func(string) (*devmapper.DeviceInfo, error) {
+			return nil, os.NewSyscallError("dm ioctl", unix.EIO)
+		}
+		recordRetryWaits(t)
+
+		err := rollback(context.Background(), "blind-msg", "CRYPT-LUKS2-blind-msg", fakeDefaultDevNo)
+		if !errors.Is(err, ErrStillLive) {
+			t.Fatalf("rollback = %v, want ErrStillLive", err)
+		}
+		for _, want := range []string{`"blind-msg"`, "cannot be confirmed removed", "dmsetup info blind-msg"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("message lacks %q:\n%v", want, err)
+			}
+		}
+	})
+}
+
 func TestRollbackRidesOutATransientBusy(t *testing.T) {
 	fake := newFakeDeviceMapper()
 	fake.targets["transient"] = "CRYPT-LUKS2-transient"
@@ -843,6 +892,45 @@ func TestDeactivateGivesUpBoundedWhenSomethingGenuinelyHoldsTheDevice(t *testing
 	}
 	if len(waits.Waits()) == 0 {
 		t.Fatal("no backoff was recorded, so nothing was actually retried")
+	}
+}
+
+// TestDeactivateBusyMessageNamesTheHolderHints pins the ErrBusy message the
+// user sees on close: the target, the attempt count and budget, the commands
+// that find the holder and the deferred removal (user.md and cli.md, close).
+func TestDeactivateBusyMessageNamesTheHolderHints(t *testing.T) {
+	const name = "held-hint"
+	fake := newFakeDeviceMapper()
+	fake.targets[name] = "CRYPT-LUKS2-hint"
+	fake.install(t)
+	removeCalls := 0
+	previous := sys.remove
+	t.Cleanup(func() { sys.remove = previous })
+	sys.remove = func(string) error {
+		removeCalls++
+		return os.NewSyscallError("dm ioctl", unix.EBUSY)
+	}
+	recordRetryWaits(t)
+
+	err := Deactivate(context.Background(), name)
+	if !errors.Is(err, ErrBusy) {
+		t.Fatalf("Deactivate = %v, want ErrBusy", err)
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"device-mapper target is held open",
+		fmt.Sprintf("after %d attempts over %v", removeCalls, dmpkg.RemoveRetryBudget),
+		"lsof /dev/mapper/" + name,
+		"mount | grep " + name,
+		"dmsetup info -c " + name,
+		"dmsetup remove --deferred " + name,
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("ErrBusy message lacks %q:\n%s", want, msg)
+		}
+	}
+	if removeCalls < 2 {
+		t.Fatalf("remove was issued %d times; a held target must be retried", removeCalls)
 	}
 }
 
