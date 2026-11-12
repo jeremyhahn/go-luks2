@@ -34,6 +34,7 @@ func TestDefaultKDFTypeFollowsTheProcessMode(t *testing.T) {
 // forced-policy tests cover the same gates through the injectable cores; this
 // is the test that fails if a public wrapper stops reading the process mode.
 func TestProductionEntryPointsRefuseArgon2InTheProcessFIPSMode(t *testing.T) {
+	defer parallel(t)()
 	inFIPS := fips140.Enabled()
 	argon2 := KDFParams{Type: KDFArgon2id, Time: 1, MemoryKiB: minArgon2MemoryKB, Parallel: 1}
 

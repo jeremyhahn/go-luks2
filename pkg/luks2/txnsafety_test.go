@@ -130,6 +130,7 @@ func TestVolumeFormatMakesKeyslotZeroDurableBeforeTheHeaderNamesIt(t *testing.T)
 // T2: a context canceled between the keyslot-area write and the header write
 // does not strand the new material; AddKeyslot runs to its commit.
 func TestVolumeAddKeyslotRunsToItsCommitWhenCanceledAfterTheAreaWrite(t *testing.T) {
+	defer parallel(t)()
 	v := txnVolume(t, formattedVolumeImage(t, "addkeyslot-cancel.img", "", ""))
 	key := txnKey(t, v)
 
@@ -181,6 +182,7 @@ func TestVolumeChangeKeyslotRunsToItsCommitWhenCanceledAfterTheAreaWrite(t *test
 // T3: ChangeKeyslot refuses a key the volume's digests do not attest before
 // anything is derived or written.
 func TestVolumeChangeKeyslotRefusesAKeyFromAnotherVolumeBeforeWriting(t *testing.T) {
+	defer parallel(t)()
 	a := txnVolume(t, formattedVolumeImage(t, "changekeyslot-volume-a.img", "", ""))
 	b := txnVolume(t, formattedVolumeImage(t, "changekeyslot-volume-b.img", "", ""))
 	keyA := txnKey(t, a)
@@ -263,6 +265,7 @@ func TestVolumeKeyMutationsRefuseAKeyFromAnotherVolumeBeforeWriting(t *testing.T
 // T4: the keyslot AddRecoveryKey takes back out when its token cannot be
 // recorded is taken out even if the caller's context is gone by then.
 func TestVolumeAddRecoveryKeyRollsBackEvenWhenCanceledDuringTheTokenWrite(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "addrecoverykey-cancel.img", "", "")
 	v := txnVolume(t, path)
 	key := txnKey(t, v)
@@ -336,6 +339,7 @@ func TestVolumeChangeKeyslotKeepsThePriorityUnlessOneIsGiven(t *testing.T) {
 
 // T6: AddRecoveryKey validates its KDF parameters before it takes the lock.
 func TestVolumeAddRecoveryKeyValidatesTheKDFBeforeTakingTheLock(t *testing.T) {
+	defer parallel(t)()
 	v := txnVolume(t, formattedVolumeImage(t, "addrecoverykey-badkdf.img", "", ""))
 	key := txnKey(t, v)
 

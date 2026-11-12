@@ -59,6 +59,7 @@ func TestVolumeUnlockRecoversTheVolumeKey(t *testing.T) {
 }
 
 func TestVolumeUnlockWithTheWrongPassphraseFails(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "unlock-wrong.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -218,6 +219,7 @@ func TestVolumeUnlockWithVolumeKeyAcceptsTheRecoveredKey(t *testing.T) {
 }
 
 func TestVolumeUnlockWithVolumeKeyRefusesAWrongSizeKey(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "unlockwithvolumekey-wrongsize.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -285,6 +287,7 @@ func TestVolumeTargetReportsTheSegmentGeometry(t *testing.T) {
 // between Unlock and activation -- here, the volume re-formatted in place
 // with a new volume key -- must not be mapped with the old key.
 func TestVolumeTargetRefusesAKeyTheCurrentHeaderDoesNotVerify(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "target-rewritten.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))

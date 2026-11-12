@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"slices"
@@ -38,6 +39,7 @@ func newPassphraseEnclave(t *testing.T, text string) enclave.ByteAccess {
 }
 
 func TestVolumeAddKeyslotAddsAWorkingCredential(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "addkeyslot.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -94,6 +96,7 @@ func TestVolumeAddKeyslotAddsAWorkingCredential(t *testing.T) {
 }
 
 func TestVolumeAddKeyslotWithAnExplicitSlot(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "addkeyslot-explicit.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -348,6 +351,7 @@ func TestVolumeRemoveKeyslotForgetsItInEveryDigestAndToken(t *testing.T) {
 }
 
 func TestVolumeAddKeyslotWithPriorityPreferWritesIt(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "addkeyslot-prefer.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -519,20 +523,7 @@ func TestVolumeChangeKeyslotPreservesTheExistingPBKDF2Cost(t *testing.T) {
 	defer parallel(t)()
 	const iterations = 700_000
 
-	path := newImage(t, "changekeyslot-cost.img")
-	if err := formatForTest(formatOptionsForTest{
-		Device:          path,
-		Passphrase:      []byte(testPassphraseText),
-		Cipher:          "aes",
-		CipherMode:      "xts-plain64",
-		KeySize:         512,
-		HashAlgo:        "sha256",
-		SectorSize:      512,
-		KDFType:         kdfTypePBKDF2,
-		PBKDFIterations: iterations,
-	}); err != nil {
-		t.Fatalf("Format failed: %v", err)
-	}
+	path := pbkdf2CostImage(t, "changekeyslot-cost.img", iterations)
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
 	if err != nil {
@@ -560,25 +551,33 @@ func TestVolumeChangeKeyslotPreservesTheExistingPBKDF2Cost(t *testing.T) {
 	}
 }
 
-// changeKeyslotOnDiskKDF formats a PBKDF2-SHA256 volume at iterations, changes
+// pbkdf2CostImage is a fresh copy of a one-keyslot PBKDF2-SHA256 volume
+// whose keyslot 0 costs exactly iterations, opened by testPassphraseText.
+// The tests that use it are about ChangeKeyslot, not Format, so the
+// container is formatted once per cost (formattedImage) rather than paying
+// a derive at the production floor for every test.
+func pbkdf2CostImage(t *testing.T, name string, iterations int) string {
+	t.Helper()
+	return formattedImage(t, fmt.Sprintf("pbkdf2CostVolume/%d", iterations), name, conformanceImageSize, func() formatOptionsForTest {
+		return formatOptionsForTest{
+			Passphrase:      []byte(testPassphraseText),
+			Cipher:          "aes",
+			CipherMode:      "xts-plain64",
+			KeySize:         512,
+			HashAlgo:        "sha256",
+			SectorSize:      512,
+			KDFType:         kdfTypePBKDF2,
+			PBKDFIterations: iterations,
+		}
+	})
+}
+
+// changeKeyslotOnDiskKDF takes a PBKDF2-SHA256 volume at iterations, changes
 // keyslot 0's passphrase with p, and returns the keyslot's KDF as re-read
 // from the device -- what a later open will use, not what the call reported.
 func changeKeyslotOnDiskKDF(t *testing.T, iterations int, p KeyslotParams) *header.KDF {
 	t.Helper()
-	path := newImage(t, "changekeyslot-recost.img")
-	if err := formatForTest(formatOptionsForTest{
-		Device:          path,
-		Passphrase:      []byte(testPassphraseText),
-		Cipher:          "aes",
-		CipherMode:      "xts-plain64",
-		KeySize:         512,
-		HashAlgo:        "sha256",
-		SectorSize:      512,
-		KDFType:         kdfTypePBKDF2,
-		PBKDFIterations: iterations,
-	}); err != nil {
-		t.Fatalf("Format failed: %v", err)
-	}
+	path := pbkdf2CostImage(t, "changekeyslot-recost.img", iterations)
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
 	if err != nil {
@@ -805,6 +804,7 @@ func TestVolumeChangeKeyslotOnAReadOnlyVolumeFails(t *testing.T) {
 }
 
 func TestVolumeRemoveKeyslotRemovesItWithoutDisturbingOthers(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "removekeyslot.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -1083,6 +1083,7 @@ func TestVolumeRemoveKeyslotOnAReadOnlyVolumeFails(t *testing.T) {
 // device; the kernel's own EBUSY is proved against a real device in
 // TestWipeKeyslotRefusesAnActiveDeviceDespiteARetarget (integration).
 func TestVolumeRemoveKeyslotRefusesAnInUseDevice(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "removekeyslot-inuse.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))

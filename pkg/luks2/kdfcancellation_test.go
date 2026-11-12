@@ -75,6 +75,7 @@ func TestDeriveKeySecretCancelledDuringDerivationDestroysOutput(t *testing.T) {
 // asks for, proven here with the real deriver instead of a fake one so the
 // seam itself, not a stand-in for it, is what gets exercised.
 func TestUnlockKeyslotCancelledDuringThePassphraseKDFDestroysTheOutput(t *testing.T) {
+	defer parallel(t)()
 	path := newImage(t, "kdfcancel.img")
 	passphrase := []byte(conformancePassphrase)
 	iterations := 300_000 // above the SHA-512 floor (210000) standardFormatOptions' hash requires
