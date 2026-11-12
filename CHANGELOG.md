@@ -7,17 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- **`luks2.UnsupportedRequirementError` (#446).** A container whose
-  `config.requirements.mandatory` lists a requirement this library does not
-  implement (for example `inline-hw-tags`) is refused for unlock, activation
-  and every header write with an error that unwraps to
-  `ErrUnsupportedRequirement`. Its type is now exported from `pkg/luks2` as an
-  alias, so a caller can match it with `errors.As` and read the refused
-  `Requirement` and the whole `Mandatory` list. The type and its behavior are
-  unchanged.
-
 ### Security
 
 - **Go toolchain 1.27.4 for GO-2026-6859, net/http (#441).** govulncheck

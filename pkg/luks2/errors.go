@@ -404,16 +404,6 @@ type LockTimeoutError = device.LockTimeoutError
 // aliased here so a caller can match it with errors.As.
 type NotLockedMemoryError = secret.NotLockedMemoryError
 
-// UnsupportedRequirementError is the reason behind ErrUnsupportedRequirement:
-// Requirement is the first mandatory entry of config.requirements this
-// package does not implement (for example "inline-hw-tags") and Mandatory is
-// the whole list the container declares. Unlock, activation and every header
-// write return it for such a container, and it unwraps to
-// ErrUnsupportedRequirement. Defined in internal/header, where the
-// requirement check sits, and aliased here so a caller can match it with
-// errors.As and learn which requirement was refused.
-type UnsupportedRequirementError = header.UnsupportedRequirementError
-
 // An unlock refusal is an *errs.Error: Kind is the classifying cause when
 // the keyslot scan has one -- ErrInvalidCredential, ErrWrongKey,
 // ErrInvalidHeader -- and nil when the refusal has none; Detail names the
