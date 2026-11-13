@@ -33,6 +33,10 @@ func TestProbeFilesystemReportsWhatBlkidFound(t *testing.T) {
 		{name: "two signatures", err: exitCode(blkidAmbivalent), wantErr: ErrNotDetected},
 		{name: "another LUKS container", output: "TYPE=crypto_LUKS\nUSAGE=crypto\n", wantErr: ErrNotDetected},
 		{name: "swap", output: "TYPE=swap\nUSAGE=other\n", wantErr: ErrNotDetected},
+		{name: "a RAID member", output: "TYPE=linux_raid_member\nUSAGE=raid\n", wantErr: ErrNotDetected},
+		{name: "an LVM member", output: "TYPE=LVM2_member\nUSAGE=raid\n", wantErr: ErrNotDetected},
+		{name: "ext2 is reported raw, though unsupported", output: "TYPE=ext2\nUSAGE=filesystem\n", want: Type("ext2")},
+		{name: "ext3 is reported raw, though unsupported", output: "TYPE=ext3\nUSAGE=filesystem\n", want: Type("ext3")},
 		{name: "a TYPE with no USAGE", output: "TYPE=ext4\n", wantErr: ErrNotDetected},
 		{name: "no TYPE at all", output: "USAGE=filesystem\n", wantErr: ErrNotDetected},
 	}

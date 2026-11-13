@@ -532,6 +532,7 @@ func corruptTheNextWrittenArea(t *testing.T) volumeSys {
 //
 // Not parallel: it substitutes the package's keyslot-area sync seam.
 func TestAKeyslotThatDoesNotOpenOnceWrittenIsRolledBack(t *testing.T) {
+	defer parallel(t)()
 	passphrase := []byte(conformancePassphrase)
 	rotated := []byte(rotatedPassphrase)
 
@@ -1006,6 +1007,7 @@ func TestANewKeyslotJoinsTheDigestBindingEverySegment(t *testing.T) {
 // predicate, so the import refuses it as a source rather than carrying it
 // across (Codex round 1 on #249).
 func TestMigrateToFIPSHoldsItsSourceToTheStrictBinding(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return

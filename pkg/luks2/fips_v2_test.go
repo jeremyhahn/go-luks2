@@ -33,25 +33,33 @@ func cheapMigrationParams() KDFParams {
 // MigrateToFIPS exists to import away from.
 func argon2VolumeImage(t *testing.T, name string) string {
 	t.Helper()
-	path := newImage(t, name)
-	if err := formatForTest(formatOptionsForTest{
-		Device:       path,
-		Passphrase:   []byte(testPassphraseText),
-		Cipher:       "aes",
-		CipherMode:   "xts-plain64",
-		KeySize:      512,
-		HashAlgo:     "sha256",
-		SectorSize:   512,
-		KDFType:      kdfTypeArgon2id,
-		Argon2Time:   1,
-		Argon2Memory: 64 * 1024,
-	}); err != nil {
-		t.Fatalf("Format failed: %v", err)
-	}
-	return path
+	return argon2VolumeImageFrom(t, "argon2Volume", name)
+}
+
+// argon2VolumeImageFrom is argon2VolumeImage from the shared container
+// cached under key: the Argon2id derive at the legal minimum memory is
+// paid once per key, not once per test, and every caller gets its own
+// copy to migrate. A test that needs two DIFFERENT volumes (distinct UUIDs,
+// salts and volume keys) asks for two keys.
+func argon2VolumeImageFrom(t *testing.T, key, name string) string {
+	t.Helper()
+	return formattedImage(t, key, name, conformanceImageSize, func() formatOptionsForTest {
+		return formatOptionsForTest{
+			Passphrase:   []byte(testPassphraseText),
+			Cipher:       "aes",
+			CipherMode:   "xts-plain64",
+			KeySize:      512,
+			HashAlgo:     "sha256",
+			SectorSize:   512,
+			KDFType:      kdfTypeArgon2id,
+			Argon2Time:   1,
+			Argon2Memory: 64 * 1024,
+		}
+	})
 }
 
 func TestVolumeMigrateToFIPSImportsAnArgon2Volume(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -95,6 +103,7 @@ func TestVolumeMigrateToFIPSImportsAnArgon2Volume(t *testing.T) {
 }
 
 func TestVolumeMigrateToFIPSKeepsNonApprovedWhenAsked(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -127,6 +136,7 @@ func TestVolumeMigrateToFIPSKeepsNonApprovedWhenAsked(t *testing.T) {
 }
 
 func TestVolumeMigrateToFIPSRefusesUnderFIPSMode(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -219,6 +229,7 @@ func TestVolumeMigrateToFIPSErrorSaysEachThingOnce(t *testing.T) {
 // with the cancellation reachable through errors.Is and the stage through
 // *FIPSMigrationError. The context kind must not win over the migration's.
 func TestVolumeMigrateToFIPSCanceledInAStageIsAMigrationFailure(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -313,6 +324,7 @@ func TestVolumeDerivationFollowsTheVolumeFIPSMode(t *testing.T) {
 }
 
 func TestVolumeMigrateToFIPSOnAReadOnlyVolumeFailsWithErrReadOnly(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return

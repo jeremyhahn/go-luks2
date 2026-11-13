@@ -101,6 +101,7 @@ func countKDFCalls(t *testing.T) (*int, volumeSys) {
 // such a header outright (a keyslot named by more than one digest); this
 // package refuses the operation, typed, before the first derivation.
 func TestAHeaderAskingForMoreDerivationThanCryptsetupCanIsRefusedBeforeDeriving(t *testing.T) {
+	defer parallel(t)()
 	device := budgetFixture(t)
 	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {

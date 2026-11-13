@@ -43,9 +43,21 @@ res, err := v.MigrateToFIPS(ctx, pass, luks2.MigrateParams{})
 // res.Complete: no keyslot or digest FIPS mode cannot run remains
 ```
 
-`Migration.Keyslot` is the approved keyslot the passphrase now opens,
+`Migration.Keyslot` is the approved keyslot the passphrase now opens
+(`KeyslotAdded` is false when an existing approved keyslot already did),
 `MigratedDigests` the digests rewritten to PBKDF2, and `RemovedKeyslots` the
 non-approved keyslots removed.
+
+## Other identifiers of this feature
+
+| Identifier | Meaning |
+|---|---|
+| `ErrFIPSNotApproved` | A derivation would use Argon2 or SHA-1 in FIPS mode |
+| `ErrFIPSImportRequired`, `*FIPSImportRequiredError` (`Device`, `Keyslots`, `Digests`) | The refusal of a volume that needs `MigrateToFIPS`; `Keyslots` and `Digests` are `[]NonApprovedKDF` |
+| `NonApprovedKDF` (`ID`, `Type`, `Hash`, `Reason`), `(NonApprovedKDF).String()` | One keyslot or digest the policy does not approve, and why |
+| `ErrFIPSMigration`, `*FIPSMigrationError` (`Device`, `Stage`, `State`, `Err`) | A failed `MigrateToFIPS` |
+| `FIPSMigrationStage`, `StagePreflight`, `StageVerify`, `StageWrite`, `StageRemove`, `StageVerifyWritten`, `(*FIPSMigrationError).MigrationStage()` | The coarse phase a migration stopped in ([engineering.md](engineering.md#exported-surface)) |
+| `DefaultKDFSpec() string` | The internal combined spelling of the default (`pbkdf2-sha512` in FIPS mode, `argon2id` otherwise) |
 
 **No CLI verb**: `MigrateToFIPS` is library-only (see [cli.md](cli.md)). No
 request/response schema, status code mapping or `scp` permission applies at

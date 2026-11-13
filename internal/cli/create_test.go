@@ -276,6 +276,72 @@ func TestRunCreateCleanupSurvivesACanceledCtx(t *testing.T) {
 	})
 }
 
+// TestRunCreateFileVolumeDetachesOnEveryLaterFailure is the SPEC row of
+// docs/loop-devices/architecture.md: on a failure after the attach, the
+// device Attach returned is detached again. Each step after the attach
+// (re-open on the device, unlock, activate, mkfs) is made to fail in turn.
+func TestRunCreateFileVolumeDetachesOnEveryLaterFailure(t *testing.T) {
+	cases := []struct {
+		name   string
+		stdin  string
+		script func(t *testing.T, lp *fakeLooper, act *fakeActivator, mnt *fakeMounter)
+	}{
+		{
+			name:  "re-open on the loop device",
+			stdin: testPassphrase,
+			script: func(t *testing.T, lp *fakeLooper, _ *fakeActivator, _ *fakeMounter) {
+				lp.device.devPath = filepath.Join(t.TempDir(), "nonexistent-loop-target")
+			},
+		},
+		{
+			// The "loop device" holds a volume the new passphrase does not
+			// open, so Unlock on it fails.
+			name:  "unlock on the loop device",
+			stdin: "a-different-passphrase",
+			script: func(t *testing.T, lp *fakeLooper, _ *fakeActivator, _ *fakeMounter) {
+				lp.device.devPath = newTestVolumeImage(t, "other.img")
+			},
+		},
+		{
+			name:  "activate",
+			stdin: testPassphrase,
+			script: func(_ *testing.T, _ *fakeLooper, act *fakeActivator, _ *fakeMounter) {
+				act.activateErr = errors.New("activate failed")
+			},
+		},
+		{
+			name:  "mkfs",
+			stdin: testPassphrase,
+			script: func(_ *testing.T, _ *fakeLooper, _ *fakeActivator, mnt *fakeMounter) {
+				mnt.makeErr = errMkfsFailed
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "vol.luks")
+			e, act, mnt, _, _ := newTestEnv(bytes.NewBufferString(tc.stdin + "\n"))
+			lp := e.host.looper.(*fakeLooper)
+			tc.script(t, lp, act, mnt)
+			want := lp.device.devPath
+			if want == "" {
+				want = path
+			}
+
+			args := append(append([]string{}, fastKDFArgs...), path, "24M")
+			if err := runCreate(context.Background(), e, args); err == nil {
+				t.Fatalf("runCreate: want an error when %s fails", tc.name)
+			}
+			if len(lp.detached) != 1 {
+				t.Fatalf("detached = %v, want exactly one call", lp.detached)
+			}
+			if got := lp.detached[0].devPath; got != want {
+				t.Errorf("detached %q, want the device attach returned (%q)", got, want)
+			}
+		})
+	}
+}
+
 func TestRunCreateFileVolumeMissingSize(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "vol.luks")
 	e, _, _, _, _ := newTestEnv(&bytes.Buffer{})

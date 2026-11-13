@@ -190,6 +190,7 @@ func assertStrictRefusal(t *testing.T, device string, wantKeyslots, wantDigests 
 // GODEBUG=fips140=only then cannot open. It must be migrated like any other
 // digest FIPS mode cannot run.
 func TestMigrateToFIPSMigratesAShortSaltDigest(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -235,6 +236,7 @@ func TestMigrateToFIPSMigratesAShortSaltDigest(t *testing.T) {
 // derive through. It must be treated as non-approved: a fresh keyslot added,
 // and it removed.
 func TestMigrateToFIPSDoesNotReuseAShortSaltKeyslot(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -318,6 +320,7 @@ func unboundKeyslot(t *testing.T, device string, passphrase []byte) {
 // it was written with" -- and erases the only way to the data. The migration
 // must carry the key bound to the data segment.
 func TestMigrateToFIPSCarriesTheVolumeKeyNotAnUnboundKey(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -469,6 +472,7 @@ func TestFIPSParameterRefusal(t *testing.T) {
 // migration adds its keyslot through the same path, so every import of such a
 // volume left it unreadable to cryptsetup.
 func TestAddKeyJoinsOnlyTheDigestOfTheKeyItWraps(t *testing.T) {
+	defer parallel(t)()
 	device := newImage(t, "addkey-digest.img")
 	if err := formatForTest(standardFormatOptions(device)); err != nil {
 		t.Fatalf("Format failed: %v", err)

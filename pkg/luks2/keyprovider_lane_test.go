@@ -81,6 +81,7 @@ func enrollRecoveryKeyForTest(t *testing.T, image string, existing []byte, opts 
 // second waits there for the first; without it, it has already chosen the
 // first's token slot.
 func TestConcurrentEnrollmentsKeepBothTokens(t *testing.T) {
+	defer parallel(t)()
 	image := newImage(t, "concurrent-enroll.img")
 	formatWithLibrary(t, image)
 
@@ -213,6 +214,7 @@ func TestEnrollmentRefusesATokenSlotTakenUnderItsLock(t *testing.T) {
 // token write fails; a rollback that reopened the path would act on the
 // replacement and leave the new credential live, orphaned, on the original.
 func TestEnrollmentRollbackStaysOnTheEnrolledDevice(t *testing.T) {
+	defer parallel(t)()
 	dir := t.TempDir()
 	image := filepath.Join(dir, "enrolled.img")
 	if err := os.WriteFile(image, nil, 0o600); err != nil {

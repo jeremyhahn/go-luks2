@@ -89,10 +89,6 @@ const fixtureArgon2MemoryKB = 32
 func readJSONArea(t *testing.T, device string) []byte {
 	t.Helper()
 
-	b, err := os.ReadFile(device) // #nosec G304 -- path is under t.TempDir()
-	if err != nil {
-		t.Fatalf("read %s: %v", device, err)
-	}
 	hdr, _, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
@@ -101,7 +97,17 @@ func readJSONArea(t *testing.T, device string) []byte {
 	if err != nil {
 		t.Fatalf("header area size: %v", err)
 	}
-	return bytes.TrimRight(b[header.HeaderSize:area], "\x00")
+	// The JSON area alone, not the 64 MiB image it sits in.
+	f, err := os.Open(device) // #nosec G304 -- path is under t.TempDir()
+	if err != nil {
+		t.Fatalf("read %s: %v", device, err)
+	}
+	defer func() { _ = f.Close() }()
+	b := make([]byte, area-header.HeaderSize)
+	if _, err := f.ReadAt(b, header.HeaderSize); err != nil {
+		t.Fatalf("read %s: %v", device, err)
+	}
+	return bytes.TrimRight(b, "\x00")
 }
 
 // TestMigrateToFIPSMigratesAnArgon2Digest is the digest trap in its sharpest
@@ -396,6 +402,7 @@ func TestMalformedUnconsultedDigestIsAHeaderFaultAtUnlockAndImport(t *testing.T)
 // before anything is written -- the volume already opens through an approved
 // keyslot, so nothing downstream would notice the damage.
 func TestMigrateToFIPSRefusesToWipeOutsideTheKeyslotsArea(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -453,6 +460,7 @@ func TestMigrateToFIPSRefusesToWipeOutsideTheKeyslotsArea(t *testing.T) {
 // keyslot: no keyslot key is ever derived, and the unlock derives before it
 // reads the area. Whether the non-approved keyslots are to be kept or not.
 func TestMigrateToFIPSReadsNoKeyslotOutsideKeyslotSpace(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return

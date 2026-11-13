@@ -58,6 +58,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refuses that volume at the plan stage. Unlock now fails with
   `ErrInvalidHeader`, as the import does.
 
+### Fixed
+
+- **The `pkg/luks2` race run stays well inside its memory bound.** The
+  migration crash-matrix tests built every torn 16 MiB header image up front
+  and held it in each queued subtest, and their helpers read whole 64 MiB
+  images to compare or hash them; under `-race` the peak crossed the Race
+  job's container bound and the test binary was killed. Torn states are now
+  built by the subtest that checks them, the helpers stream, and the
+  whole-image tests share a fixed four-slot semaphore. No test, subtest or
+  assertion changed.
+- **An unsupported mandatory requirement is readable from `luks2.Error`.**
+  Unlock, activation and every header write on a container declaring a
+  mandatory requirement this library does not implement (such as
+  `inline-hw-tags`) return a `*luks2.Error` whose `Kind` is
+  `ErrUnsupportedRequirement` and whose `Detail` names the requirement and the
+  container's mandatory set. A header write used to report it with Kind
+  `ErrIO` and no Detail, and unlock's Detail did not name it. No named
+  requirement type is exported. A requirement that stops `MigrateToFIPS`
+  keeps the migration's Kind `ErrFIPSMigration`, with the requirement in
+  `Detail` and `errors.Is(err, ErrUnsupportedRequirement)` still true. The
+  same holds when `AddKeyslot`, `ChangeKeyslot` or `RemoveKeyslot` meets the
+  requirement while repairing a damaged or older header copy: that used to
+  report Kind `ErrIO` with Detail "failed to read header", and now reports
+  the requirement, with `errors.Is(err, ErrIO)` still true underneath.
+
+- **A concurrent build of the same toolchain image tag no longer fails the
+  job.** Two jobs on one Docker daemon could build the content-addressed
+  toolchain tag at once, and BuildKit refused the slower export with `image
+  "…": already exists`. The tag is a hash of the image's inputs, so the image
+  the faster job left is the one the slower job would have built.
+  `make docker-build-toolchain` and `make docker-build-integration` now pass
+  when the build fails with exactly that refusal of their own content tag and
+  the tag resolves, and they print a line saying so. Every other build failure
+  still fails, with the build's output and exit status. Before this change,
+  `docker-build-integration` accepted any failed build whose tag resolved
+  afterwards; it now needs the refusal too.
+
 ## [1.0.3-alpha] - 2026-11-10
 
 ### Changed

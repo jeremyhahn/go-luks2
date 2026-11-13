@@ -67,3 +67,43 @@ func TestRequireHashRefusesSHA1OnlyInFIPSMode(t *testing.T) {
 		}
 	}
 }
+
+// The approval is a positive list: the SHA-2 and SHA-3 families and nothing
+// else, so a hash added to crypto later is refused until it is listed.
+func TestApprovedHashIsExactlyTheSHA2AndSHA3Families(t *testing.T) {
+	approved := map[crypto.Hash]bool{
+		crypto.SHA224: true, crypto.SHA256: true, crypto.SHA384: true, crypto.SHA512: true,
+		crypto.SHA512_224: true, crypto.SHA512_256: true,
+		crypto.SHA3_224: true, crypto.SHA3_256: true, crypto.SHA3_384: true, crypto.SHA3_512: true,
+	}
+	for h := crypto.Hash(0); h <= crypto.BLAKE2b_512+1; h++ {
+		if got := ApprovedHash(h); got != approved[h] {
+			t.Errorf("ApprovedHash(%v) = %v, want %v", h, got, approved[h])
+		}
+		if err := Mode(true).RequireHash("use", h); (err == nil) != approved[h] {
+			t.Errorf("Mode(true).RequireHash(%v) = %v, approved %v", h, err, approved[h])
+		}
+	}
+}
+
+// Under make test-fips-mode the process itself is in FIPS mode: the probed
+// mode refuses Argon2 and SHA-1 there and allows them everywhere else.
+func TestProcessModeRefusesArgon2AndSHA1ExactlyInFIPSMode(t *testing.T) {
+	inFIPS := fips140.Enabled()
+	for _, kdf := range []string{"argon2i", "argon2id", " Argon2ID "} {
+		err := Probe().RequireKDF(kdf)
+		if (err != nil) != inFIPS || (err != nil && !errors.Is(err, ErrNotApproved)) {
+			t.Errorf("Probe().RequireKDF(%q) = %v with fips140.Enabled() = %v", kdf, err, inFIPS)
+		}
+	}
+	if err := Probe().RequireKDF("pbkdf2"); err != nil {
+		t.Errorf("Probe().RequireKDF(pbkdf2) = %v, want nil", err)
+	}
+	err := Probe().RequireHash("af-split", crypto.SHA1)
+	if (err != nil) != inFIPS || (err != nil && !errors.Is(err, ErrNotApproved)) {
+		t.Errorf("Probe().RequireHash(SHA1) = %v with fips140.Enabled() = %v", err, inFIPS)
+	}
+	if err := Probe().RequireHash("af-split", crypto.SHA256); err != nil {
+		t.Errorf("Probe().RequireHash(SHA256) = %v, want nil", err)
+	}
+}

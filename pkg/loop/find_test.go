@@ -78,6 +78,75 @@ func TestFindLoopDeviceDoesNotMatchAReplacedFile(t *testing.T) {
 	}
 }
 
+func TestFindLoopDeviceMatchesByIdentityNotByThePrintedPath(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "backing.img")
+	writeFakeNode(t, file)
+	link := filepath.Join(dir, "through-a-symlink.img")
+	if err := os.Symlink(file, link); err != nil {
+		t.Fatalf("making the symlink failed: %v", err)
+	}
+	// sysfs prints a path the caller never used, as it does across a bind
+	// mount or another mount namespace.
+	root := fakeLoopSysfs(t, "/elsewhere/another-name.img")
+	dev, ino := statIdentity(t, file)
+	s := identitySys(dev, ino)
+
+	got, backing, ident, err := findLoopDeviceIn(root, link, s)
+	if err != nil {
+		t.Fatalf("findLoopDeviceIn = %v; the device backed by this file's inode was not found", err)
+	}
+	if got != filepath.Join(s.devDir, "loop5") || backing != "/elsewhere/another-name.img" {
+		t.Fatalf("findLoopDeviceIn = %q backed by %q, want loop5 as sysfs reports it", got, backing)
+	}
+	if !ident.known || ident.dev != dev || ident.ino != ino {
+		t.Fatalf("recorded identity = %+v, want dev %d ino %d", ident, dev, ino)
+	}
+}
+
+func TestFindLoopDeviceReportsErrNotFoundWhenEveryCandidateIsAnotherFile(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "backing.img")
+	writeFakeNode(t, file)
+	root := fakeLoopSysfs(t, file)
+	dev, ino := statIdentity(t, file)
+
+	_, _, _, err := findLoopDeviceIn(root, file, identitySys(dev, ino+1))
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("findLoopDeviceIn = %v, want ErrNotFound when every candidate was read and none matched", err)
+	}
+}
+
+// TestFindLoopDeviceReturnsTheFirstOfSeveral: with several loop devices
+// backed by the same file, the first in /sys/block directory order wins.
+func TestFindLoopDeviceReturnsTheFirstOfSeveral(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "backing.img")
+	writeFakeNode(t, file)
+	root := t.TempDir()
+	for _, name := range []string{"loop7", "loop2", "loop11"} {
+		dir := filepath.Join(root, name, "loop")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "backing_file"), []byte(file+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dev, ino := statIdentity(t, file)
+	s := identitySys(dev, ino)
+	entries, err := s.readDir(root)
+	if err != nil || len(entries) != 3 {
+		t.Fatalf("readDir = %d entries, %v", len(entries), err)
+	}
+
+	path, _, _, err := findLoopDeviceIn(root, file, s)
+	if err != nil {
+		t.Fatalf("findLoopDeviceIn = %v", err)
+	}
+	if want := filepath.Join(s.devDir, entries[0].Name()); path != want {
+		t.Fatalf("findLoopDeviceIn = %q, want the first in directory order, %q", path, want)
+	}
+}
+
 // TestFindLoopDeviceCountsAnUnidentifiableDevice: a bound device whose
 // backing file cannot be identified is not evidence of absence.
 func TestFindLoopDeviceCountsAnUnidentifiableDevice(t *testing.T) {

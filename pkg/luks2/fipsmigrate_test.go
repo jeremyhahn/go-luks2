@@ -158,11 +158,21 @@ func cryptsetupArgon2Prefix(t *testing.T, withSecond bool) []byte {
 func fileDigest(t *testing.T, path string) [32]byte {
 	t.Helper()
 
-	b, err := os.ReadFile(path) // #nosec G304 -- path is under t.TempDir()
+	// Streamed, not read whole: the image is 64 MiB, and a test digests it
+	// before and after, so a whole-file read held 128 MiB (more under -race's
+	// shadow) per test for a 32-byte answer.
+	f, err := os.Open(path) // #nosec G304 -- path is under t.TempDir()
 	if err != nil {
 		t.Fatalf("failed to read %s: %v", path, err)
 	}
-	return sha256.Sum256(b)
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		t.Fatalf("failed to read %s: %v", path, err)
+	}
+	var sum [32]byte
+	h.Sum(sum[:0])
+	return sum
 }
 
 // dataAreaDigest hashes everything from the data segment's offset to the end of
@@ -264,6 +274,7 @@ func assertFIPSReady(t *testing.T, device string) {
 // key, and the data area byte-for-byte untouched -- a keyslot migration, not a
 // re-encryption.
 func TestMigrateToFIPSRewrapsTheVolumeKeyAndRemovesArgon2Keyslots(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -310,6 +321,7 @@ func TestMigrateToFIPSRewrapsTheVolumeKeyAndRemovesArgon2Keyslots(t *testing.T) 
 // half-migration: kept Argon2 keyslots are reported, and the result is NOT
 // complete.
 func TestMigrateToFIPSKeepsNonApprovedKeyslotsOnlyWhenAskedAndSaysSo(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -361,6 +373,7 @@ func TestMigrateToFIPSKeepsNonApprovedKeyslotsOnlyWhenAskedAndSaysSo(t *testing.
 // TestMigrateToFIPSOnAMigratedVolumeChangesNothing: re-running a completed
 // import must not stack up keyslots, and must not run Argon2 -- there is none.
 func TestMigrateToFIPSOnAMigratedVolumeChangesNothing(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -439,6 +452,7 @@ func sha1DigestVolume(t *testing.T, name string) string {
 // the DIGEST's KDF runs on every unlock too. It gets its own test rather than
 // being assumed to be what this library writes.
 func TestMigrateToFIPSMigratesANonApprovedDigest(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -482,6 +496,7 @@ func TestMigrateToFIPSMigratesANonApprovedDigest(t *testing.T) {
 // that does not verify the recovered key is not rewritten into one that does.
 // The refusal comes before any write.
 func TestMigrateToFIPSRefusesADigestThatDoesNotAttestTheKey(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -520,6 +535,7 @@ func TestMigrateToFIPSRefusesADigestThatDoesNotAttestTheKey(t *testing.T) {
 // TestMigrateToFIPSRemovesNothingWhenTheKeyslotCannotBeAdded is the ordering
 // guard: if the PBKDF2 keyslot cannot be added, no Argon2 keyslot is removed.
 func TestMigrateToFIPSRemovesNothingWhenTheKeyslotCannotBeAdded(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -549,6 +565,7 @@ func TestMigrateToFIPSRemovesNothingWhenTheKeyslotCannotBeAdded(t *testing.T) {
 // TestMigrateToFIPSRefusesAHashFIPSModeCannotRun: the new keyslot must itself
 // be approved, so sha1 is refused before the device is touched.
 func TestMigrateToFIPSRefusesAHashFIPSModeCannotRun(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -598,6 +615,7 @@ func fakeArgon2KeyslotVolume(t *testing.T, name string) string {
 // Outside FIPS mode the same header is judged normally and must NOT claim a
 // FIPS refusal.
 func TestFIPSRefusalOfAnArgon2VolumeNamesTheImport(t *testing.T) {
+	defer parallel(t)()
 	device := fakeArgon2KeyslotVolume(t, "fips-refusal-message.img")
 	err := testKeyForTest(device, migrationPassphrase)
 

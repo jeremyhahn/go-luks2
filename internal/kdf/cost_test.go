@@ -116,3 +116,66 @@ func TestCostPolicyZeroValueIsCallerSupplied(t *testing.T) {
 		t.Fatal("the zero CostPolicy is not CallerSuppliedCredential; a forgotten argument would grant the exemption")
 	}
 }
+
+// TestArgon2BoundsMatchTheKeyslotsCostTable pins the Cost inheritance table of
+// keyslots engineering.md: a create floor of 64 MiB, a create ceiling of
+// 4 GiB memory, time 10000 and 255 threads, and an accept floor of 8 KiB. The
+// read-side check accepts the accept floor and both ceilings and refuses one
+// past each.
+func TestArgon2BoundsMatchTheKeyslotsCostTable(t *testing.T) {
+	if MinArgon2MemoryKB != 65536 {
+		t.Errorf("create floor MinArgon2MemoryKB = %d, want 65536", MinArgon2MemoryKB)
+	}
+	if MaxArgon2Memory != 4*1024*1024 || MaxArgon2Time != 10000 || MaxArgon2Parallel != 255 {
+		t.Errorf("create ceiling = memory %d KiB, time %d, %d threads; want 4194304, 10000, 255",
+			MaxArgon2Memory, MaxArgon2Time, MaxArgon2Parallel)
+	}
+	if MinArgon2Memory != 8 {
+		t.Errorf("accept floor MinArgon2Memory = %d KiB, want 8", MinArgon2Memory)
+	}
+
+	params := func(time, memory, cpus int) Params {
+		return Params{Type: "argon2id", Time: &time, Memory: &memory, CPUs: &cpus}
+	}
+	for _, ok := range []Params{
+		params(MinArgon2Time, MinArgon2Memory, MinArgon2Parallel),
+		params(MaxArgon2Time, MaxArgon2Memory, MaxArgon2Parallel),
+	} {
+		if err := ValidateCost(ok); err != nil {
+			t.Errorf("ValidateCost(time %d, memory %d, cpus %d) = %v, want accepted", *ok.Time, *ok.Memory, *ok.CPUs, err)
+		}
+	}
+	for name, bad := range map[string]Params{
+		"memory below the accept floor": params(1, MinArgon2Memory-1, 1),
+		"memory above the ceiling":      params(1, MaxArgon2Memory+1, 1),
+		"time above the ceiling":        params(MaxArgon2Time+1, MinArgon2Memory, 1),
+		"threads above the ceiling":     params(1, MinArgon2Memory, MaxArgon2Parallel+1),
+	} {
+		if err := ValidateCost(bad); err == nil {
+			t.Errorf("%s: ValidateCost accepted it", name)
+		}
+	}
+}
+
+// TestPBKDF2CeilingIsTheReadersBound pins keyslots engineering.md, PBKDF2
+// calibration and Fixed iteration counts: the write ceiling is 100,000,000,
+// the same bound the read check applies, so a keyslot written at the ceiling
+// reopens and one past it is refused on both sides.
+func TestPBKDF2CeilingIsTheReadersBound(t *testing.T) {
+	if MaxKDFIterations != 100_000_000 {
+		t.Fatalf("MaxKDFIterations = %d, want 100000000", MaxKDFIterations)
+	}
+	at, past := MaxKDFIterations, MaxKDFIterations+1
+	if err := ValidateCost(Params{Type: "pbkdf2", Hash: "sha256", Iterations: &at}); err != nil {
+		t.Errorf("the read check refuses a count at the ceiling: %v", err)
+	}
+	if err := ValidateCost(Params{Type: "pbkdf2", Hash: "sha256", Iterations: &past}); err == nil {
+		t.Error("the read check accepts a count past the ceiling")
+	}
+	if got, err := ForcedPBKDF2Iterations("sha256", at, CallerSuppliedCredential); err != nil || got != at {
+		t.Errorf("ForcedPBKDF2Iterations at the ceiling = %d, %v; want %d", got, err, at)
+	}
+	if _, err := ForcedPBKDF2Iterations("sha256", past, CallerSuppliedCredential); err == nil {
+		t.Error("ForcedPBKDF2Iterations accepts a count past the ceiling")
+	}
+}

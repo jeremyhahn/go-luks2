@@ -315,6 +315,57 @@ func TestMakeZFSRefusesWhatItCannotCreate(t *testing.T) {
 	}
 }
 
+// ZFS pool, dataset, feature and property names are validated before any
+// tool runs, and a name that could be read as an option or breaks the
+// tool's naming rules is refused with ErrInvalidArgument.
+func TestZFSNamesAreValidatedBeforeAnyToolRuns(t *testing.T) {
+	refused := map[string]ZFSParams{
+		"option-like pool":         {PoolName: "-f"},
+		"pool starting with digit": {PoolName: "1tank"},
+		"pool with a slash":        {PoolName: "tank/data"},
+		"reserved pool name":       {PoolName: "mirror"},
+		"device-like pool name":    {PoolName: "c0t0d0"},
+		"overlong pool name":       {PoolName: "t" + strings.Repeat("a", 255)},
+		"option-like dataset":      {PoolName: "tank", DatasetName: "-o"},
+		"dot-dot dataset":          {PoolName: "tank", DatasetName: "a/../b"},
+		"empty dataset component":  {PoolName: "tank", DatasetName: "a//b"},
+		"ashift out of range":      {PoolName: "tank", Ashift: 17},
+		"relative mount point":     {PoolName: "tank", MountPoint: "mnt"},
+		"option-like compression":  {PoolName: "tank", Compression: "-lz4"},
+		"option-like feature":      {PoolName: "tank", Features: []string{"-o"}},
+		"feature with a space":     {PoolName: "tank", Features: []string{"a b"}},
+		"option-like property":     {PoolName: "tank", Properties: map[string]string{"-o": "x"}},
+		"property value newline":   {PoolName: "tank", Properties: map[string]string{"comment": "a\nb"}},
+	}
+	for name, zfs := range refused {
+		record := fakeTools(t, map[string]fakeTool{"zpool": {}, "zfs": {}})
+		err := makeZFS(context.Background(), "/dev/mapper/vol", MakeParams{ZFS: &zfs})
+		if !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("%s: makeZFS = %v, want ErrInvalidArgument", name, err)
+		}
+		if got := record("zpool"); got != nil {
+			t.Errorf("%s: zpool ran with %q", name, got)
+		}
+		if got := record("zfs"); got != nil {
+			t.Errorf("%s: zfs ran with %q", name, got)
+		}
+	}
+
+	for _, pool := range []string{"-f", "1tank", "mirror", ""} {
+		r := &scriptedRunner{}
+		if _, err := checkZFS(context.Background(), r.run, pool, false); !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("checkZFS(%q) = %v, want ErrInvalidArgument", pool, err)
+		}
+		if r.calls != nil {
+			t.Errorf("checkZFS(%q) ran %v", pool, r.calls)
+		}
+	}
+	r := &scriptedRunner{}
+	if _, err := checkZFS(context.Background(), r.run, "tank_1.a:b-c", false); err != nil {
+		t.Errorf("checkZFS of a legal pool name = %v", err)
+	}
+}
+
 // TestMakeRefusesACanceledContext checks the ctx boundary check: Make does
 // not run a tool once its context is already done.
 func TestMakeRefusesACanceledContext(t *testing.T) {

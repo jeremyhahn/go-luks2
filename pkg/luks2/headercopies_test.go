@@ -197,6 +197,7 @@ func TestKeyslotWriteRepairsTheStaleHeaderCopy(t *testing.T) {
 // TestKeyslotDeviceReadRepairsOnlyAStaleCopy: when the copies agree, the
 // read writes nothing at all.
 func TestKeyslotDeviceReadRepairsOnlyAStaleCopy(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "repair-none.img", "", "")
 	before, err := os.ReadFile(path)
 	if err != nil {

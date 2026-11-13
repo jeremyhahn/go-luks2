@@ -130,6 +130,7 @@ func TestVolumeFormatMakesKeyslotZeroDurableBeforeTheHeaderNamesIt(t *testing.T)
 // T2: a context canceled between the keyslot-area write and the header write
 // does not strand the new material; AddKeyslot runs to its commit.
 func TestVolumeAddKeyslotRunsToItsCommitWhenCanceledAfterTheAreaWrite(t *testing.T) {
+	defer parallel(t)()
 	v := txnVolume(t, formattedVolumeImage(t, "addkeyslot-cancel.img", "", ""))
 	key := txnKey(t, v)
 
@@ -181,6 +182,7 @@ func TestVolumeChangeKeyslotRunsToItsCommitWhenCanceledAfterTheAreaWrite(t *test
 // T3: ChangeKeyslot refuses a key the volume's digests do not attest before
 // anything is derived or written.
 func TestVolumeChangeKeyslotRefusesAKeyFromAnotherVolumeBeforeWriting(t *testing.T) {
+	defer parallel(t)()
 	a := txnVolume(t, formattedVolumeImage(t, "changekeyslot-volume-a.img", "", ""))
 	b := txnVolume(t, formattedVolumeImage(t, "changekeyslot-volume-b.img", "", ""))
 	keyA := txnKey(t, a)
@@ -202,9 +204,68 @@ func TestVolumeChangeKeyslotRefusesAKeyFromAnotherVolumeBeforeWriting(t *testing
 	txnKey(t, b) // b still opens with its own passphrase
 }
 
+// TestVolumeKeyMutationsRefuseAKeyFromAnotherVolumeBeforeWriting covers the
+// other mutations that take a *Key: each re-verifies it against this
+// volume's digest under the exclusive lock, so a key unlocked elsewhere is
+// refused as ErrWrongKey with no write step and no change to the device.
+func TestVolumeKeyMutationsRefuseAKeyFromAnotherVolumeBeforeWriting(t *testing.T) {
+	a := txnVolume(t, formattedVolumeImage(t, "keymutations-volume-a.img", "", ""))
+	pathB := formattedVolumeImage(t, "keymutations-volume-b.img", "", "")
+	b := txnVolume(t, pathB)
+	keyA := txnKey(t, a)
+
+	steps := 0
+	b.sys.keyslotWriteStep = func(ctx context.Context, _ *keyslotDevice, _ string) error {
+		steps++
+		return ctx.Err()
+	}
+	rk, err := NewRecoveryKey()
+	if err != nil {
+		t.Fatalf("NewRecoveryKey failed: %v", err)
+	}
+	defer rk.Destroy()
+	ctx := context.Background()
+	mutations := []struct {
+		name string
+		call func() error
+	}{
+		{"AddKeyslot", func() error {
+			_, err := b.AddKeyslot(ctx, keyA, txnPassphrase(t, "a credential for the wrong volume"), cheapKeyslotParams())
+			return err
+		}},
+		{"AddRecoveryKey", func() error { _, err := b.AddRecoveryKey(ctx, keyA, rk, cheapKeyslotParams()); return err }},
+		{"Enroll", func() error {
+			provider := &fakeKeyProvider{credential: []byte("a-provider-credential"), token: Token{Type: "x-provider"}}
+			_, err := b.Enroll(ctx, keyA, provider, cheapKeyslotParams())
+			return err
+		}},
+	}
+	before, err := os.ReadFile(pathB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range mutations {
+		steps = 0
+		if err := m.call(); !errors.Is(err, ErrWrongKey) {
+			t.Errorf("%s with another volume's key = %v, want ErrWrongKey", m.name, err)
+		}
+		if steps != 0 {
+			t.Errorf("%s with another volume's key took %d write steps, want none", m.name, steps)
+		}
+	}
+	after, err := os.ReadFile(pathB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("a mutation with another volume's key changed the device")
+	}
+}
+
 // T4: the keyslot AddRecoveryKey takes back out when its token cannot be
 // recorded is taken out even if the caller's context is gone by then.
 func TestVolumeAddRecoveryKeyRollsBackEvenWhenCanceledDuringTheTokenWrite(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "addrecoverykey-cancel.img", "", "")
 	v := txnVolume(t, path)
 	key := txnKey(t, v)
@@ -278,6 +339,7 @@ func TestVolumeChangeKeyslotKeepsThePriorityUnlessOneIsGiven(t *testing.T) {
 
 // T6: AddRecoveryKey validates its KDF parameters before it takes the lock.
 func TestVolumeAddRecoveryKeyValidatesTheKDFBeforeTakingTheLock(t *testing.T) {
+	defer parallel(t)()
 	v := txnVolume(t, formattedVolumeImage(t, "addrecoverykey-badkdf.img", "", ""))
 	key := txnKey(t, v)
 

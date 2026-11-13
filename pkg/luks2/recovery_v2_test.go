@@ -10,7 +10,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/fips140"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/jeremyhahn/go-enclave"
@@ -62,6 +66,43 @@ func TestNewRecoveryKeyDefaultsToDashedAt32Bytes(t *testing.T) {
 	}
 }
 
+// TestNewRecoveryKeyDrawsFromTheLibraryCSPRNG pins the recovery-keys
+// requirement that the credential comes from the library's own CSPRNG:
+// NewRecoveryKey has no injectable source, so the package default it reads
+// must be crypto/rand, and two keys drawn in a row must differ in both the
+// printed text and its digest.
+func TestNewRecoveryKeyDrawsFromTheLibraryCSPRNG(t *testing.T) {
+	if defaultVolumeSys().cryptoRand != rand.Reader {
+		t.Fatal("the package's default random source is not crypto/rand.Reader")
+	}
+
+	printed := func(rk *RecoveryKey) []byte {
+		t.Helper()
+		var buf bytes.Buffer
+		if _, err := rk.WriteTo(&buf); err != nil {
+			t.Fatalf("WriteTo failed: %v", err)
+		}
+		return buf.Bytes()
+	}
+	a, err := NewRecoveryKey()
+	if err != nil {
+		t.Fatalf("NewRecoveryKey failed: %v", err)
+	}
+	defer a.Destroy()
+	b, err := NewRecoveryKey()
+	if err != nil {
+		t.Fatalf("NewRecoveryKey failed: %v", err)
+	}
+	defer b.Destroy()
+
+	if bytes.Equal(printed(a), printed(b)) {
+		t.Fatal("two recovery keys drawn in a row printed the same text")
+	}
+	if a.Hash() == b.Hash() {
+		t.Fatal("two recovery keys drawn in a row have the same digest")
+	}
+}
+
 // failingWriter accepts nothing and fails every Write with err.
 type failingWriter struct{ err error }
 
@@ -109,10 +150,116 @@ func TestNewRecoveryKeyHonorsFormatAndLengthOptions(t *testing.T) {
 	}
 }
 
+// TestRecoveryKeyRenderingsMatchTheFormatTable pins the format table for the
+// default 32 random bytes: dashed is uppercase hex in groups of 6 (74
+// characters), hex is lowercase (64), base64 is padded standard encoding (44),
+// and each decodes back to 32 bytes.
+func TestRecoveryKeyRenderingsMatchTheFormatTable(t *testing.T) {
+	cases := []struct {
+		format RecoveryKeyFormat
+		chars  int
+		decode func(t *testing.T, text string) []byte
+	}{
+		{RecoveryDashed, 74, func(t *testing.T, text string) []byte {
+			groups := strings.Split(text, "-")
+			for i, g := range groups {
+				if len(g) != 6 && !(i == len(groups)-1 && len(g) > 0 && len(g) < 6) {
+					t.Errorf("dashed group %d is %q, want 6 characters (the last may be shorter)", i, g)
+				}
+			}
+			if text != strings.ToUpper(text) {
+				t.Errorf("dashed rendering %q is not uppercase", text)
+			}
+			raw, err := hex.DecodeString(strings.Join(groups, ""))
+			if err != nil {
+				t.Fatalf("dashed rendering is not hex: %v", err)
+			}
+			return raw
+		}},
+		{RecoveryHex, 64, func(t *testing.T, text string) []byte {
+			if text != strings.ToLower(text) {
+				t.Errorf("hex rendering %q is not lowercase", text)
+			}
+			raw, err := hex.DecodeString(text)
+			if err != nil {
+				t.Fatalf("hex rendering is not hex: %v", err)
+			}
+			return raw
+		}},
+		{RecoveryBase64, 44, func(t *testing.T, text string) []byte {
+			raw, err := base64.StdEncoding.DecodeString(text)
+			if err != nil {
+				t.Fatalf("base64 rendering is not standard base64: %v", err)
+			}
+			return raw
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.format.String(), func(t *testing.T) {
+			rk, err := NewRecoveryKey(WithRecoveryFormat(c.format))
+			if err != nil {
+				t.Fatalf("NewRecoveryKey failed: %v", err)
+			}
+			defer rk.Destroy()
+			var buf bytes.Buffer
+			if _, err := rk.WriteTo(&buf); err != nil {
+				t.Fatalf("WriteTo failed: %v", err)
+			}
+			text := strings.TrimSpace(buf.String())
+			if len(text) != c.chars {
+				t.Errorf("%s rendering %q is %d characters, want %d", c.format, text, len(text), c.chars)
+			}
+			if raw := c.decode(t, text); len(raw) != DefaultRecoveryKeyLength {
+				t.Errorf("%s rendering decodes to %d bytes, want %d", c.format, len(raw), DefaultRecoveryKeyLength)
+			}
+		})
+	}
+}
+
 func TestNewRecoveryKeyRefusesATooShortLength(t *testing.T) {
 	_, err := NewRecoveryKey(WithRecoveryLength(16))
 	if !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("NewRecoveryKey(16 bytes) = %v, want ErrInvalidArgument", err)
+	}
+}
+
+// TestNewRecoveryKeyRefusesARenderingOverTheCredentialCeiling pins the
+// ErrInvalidArgument row of recovery-keys/engineering.md: a length whose
+// rendering would be over MaxPassphraseLength characters is refused, with
+// the refused value in Detail, and every length it accepts renders within
+// the ceiling, so an accepted key can always be enrolled.
+func TestNewRecoveryKeyRefusesARenderingOverTheCredentialCeiling(t *testing.T) {
+	for _, f := range []RecoveryKeyFormat{RecoveryDashed, RecoveryHex, RecoveryBase64} {
+		t.Run(f.String(), func(t *testing.T) {
+			longest := 0
+			for n := DefaultRecoveryKeyLength; n <= 2*MaxPassphraseLength; n++ {
+				rk, err := NewRecoveryKey(WithRecoveryFormat(f), WithRecoveryLength(n))
+				if err != nil {
+					var e *Error
+					if !errors.As(err, &e) || !errors.Is(err, ErrInvalidArgument) || e.Detail == "" {
+						t.Fatalf("NewRecoveryKey(%d bytes) = %v, want an *Error of ErrInvalidArgument with a Detail", n, err)
+					}
+					if longest == 0 {
+						t.Fatalf("NewRecoveryKey refused %d bytes, the minimum length", n)
+					}
+					if longest <= MaxPassphraseLength-8 {
+						t.Fatalf("refused %d bytes while the longest accepted rendering is %d characters, well under the %d ceiling", n, longest, MaxPassphraseLength)
+					}
+					return
+				}
+				var buf bytes.Buffer
+				_, err = rk.WriteTo(&buf)
+				rk.Destroy()
+				if err != nil {
+					t.Fatalf("WriteTo failed: %v", err)
+				}
+				if buf.Len() > MaxPassphraseLength {
+					t.Fatalf("NewRecoveryKey accepted %d bytes rendered as %d characters, over the %d ceiling", n, buf.Len(), MaxPassphraseLength)
+				}
+				longest = buf.Len()
+			}
+			t.Fatalf("NewRecoveryKey accepted every length up to %d bytes", 2*MaxPassphraseLength)
+		})
 	}
 }
 
@@ -188,6 +335,7 @@ func recoveryKeyEnclave(t *testing.T, rk *RecoveryKey) enclave.ByteAccess {
 }
 
 func TestVolumeAddRecoveryKeyEnrollsAWorkingKeyslot(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "addrecoverykey.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -246,6 +394,7 @@ func TestVolumeAddRecoveryKeyEnrollsAWorkingKeyslot(t *testing.T) {
 }
 
 func TestVolumeAddRecoveryKeyHonorsPriorityPrefer(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "addrecoverykeypriority.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -349,6 +498,7 @@ func TestVolumeAddRecoveryKeyOnAReadOnlyVolumeFailsWithErrReadOnly(t *testing.T)
 }
 
 func TestVolumeAddRecoveryKeyRollsBackTheKeyslotIfTheTokenWriteFails(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "addrecoverykeyrollback.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
