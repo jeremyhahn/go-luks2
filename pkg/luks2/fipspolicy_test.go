@@ -539,3 +539,94 @@ func TestMalformedDigestBesideRefusedKeyslotKDFKeepsTheHeaderError(t *testing.T)
 		})
 	}
 }
+
+// TestMalformedKeyslotKDFIsHeaderDamageUnderFIPS pins that a keyslot KDF
+// whose salt is not base64 is reported as the header damage it is under the
+// FIPS policy, as outside it, whichever KDF it names: an Argon2 KDF the policy
+// refuses is screened for structure before the policy judges it, so the
+// unlock error is ErrInvalidHeader and never ErrFIPSNotApproved.
+func TestMalformedKeyslotKDFIsHeaderDamageUnderFIPS(t *testing.T) {
+	cases := []struct {
+		name string
+		kdf  func(m *header.Metadata) *header.KDF
+	}{
+		{
+			name: "argon2id keyslot",
+			kdf: func(*header.Metadata) *header.KDF {
+				cost, memory, cpus := header.MinArgon2Time, minArgon2MemoryKB, 1
+				return &header.KDF{Type: kdfTypeArgon2id, Salt: "!!! not base64 !!!", Time: &cost, Memory: &memory, CPUs: &cpus}
+			},
+		},
+		{
+			name: "argon2i keyslot",
+			kdf: func(*header.Metadata) *header.KDF {
+				cost, memory, cpus := header.MinArgon2Time, minArgon2MemoryKB, 1
+				return &header.KDF{Type: kdfTypeArgon2i, Salt: "!!! not base64 !!!", Time: &cost, Memory: &memory, CPUs: &cpus}
+			},
+		},
+		{
+			name: "sha1 pbkdf2 keyslot",
+			kdf: func(m *header.Metadata) *header.KDF {
+				kdf := *m.Keyslots["0"].KDF
+				kdf.Hash, kdf.Salt = "sha1", "!!! not base64 !!!"
+				return &kdf
+			},
+		},
+		{
+			name: "approved pbkdf2 keyslot",
+			kdf: func(m *header.Metadata) *header.KDF {
+				kdf := *m.Keyslots["0"].KDF
+				kdf.Salt = "!!! not base64 !!!"
+				return &kdf
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			device := newImage(t, "fips-malformed-keyslot-kdf.img")
+			formatWithLibrary(t, device)
+			hdr, metadata, err := readHeaderForTest(device)
+			if err != nil {
+				t.Fatalf("ReadHeader failed: %v", err)
+			}
+			// The screen refuses the KDF before any derivation, so the area
+			// need not match it.
+			metadata.Keyslots["0"].KDF = tc.kdf(metadata)
+			hdr.SequenceID++
+			if err := writeHeaderUnvalidated(device, hdr, metadata); err != nil {
+				t.Fatalf("writing the fixture failed: %v", err)
+			}
+
+			sys := testVolumeSys()
+			sys.fipsMode = forceFIPSPolicy(t)
+			err = testKeyForTestWithSys(device, migrationPassphrase, sys)
+			if errors.Is(err, ErrFIPSNotApproved) || errors.Is(err, ErrFIPSImportRequired) {
+				t.Fatalf("a malformed keyslot KDF was reported as a FIPS refusal: %v", err)
+			}
+			if !errors.Is(err, ErrInvalidHeader) {
+				t.Fatalf("unlock under the forced FIPS policy: got %v, want ErrInvalidHeader", err)
+			}
+
+			if fips140.Enabled() {
+				assertMigrationRefusedUnderFIPS(t)
+				return
+			}
+			// Outside the policy it is the same damage, and the import path
+			// refuses it without writing.
+			sys = testVolumeSys()
+			sys.fipsMode = forceNonFIPSPolicy(t)
+			if err := testKeyForTestWithSys(device, migrationPassphrase, sys); !errors.Is(err, ErrInvalidHeader) {
+				t.Fatalf("unlock outside the FIPS policy: got %v, want ErrInvalidHeader", err)
+			}
+			before := fileDigest(t, device)
+			_, err = migrateToFIPSAt(context.Background(), device, migrationPassphrase, cheapMigration(), sys)
+			if !errors.Is(err, ErrInvalidHeader) {
+				t.Fatalf("MigrateToFIPS on the same volume: got %v, want ErrInvalidHeader", err)
+			}
+			if after := fileDigest(t, device); after != before {
+				t.Fatal("MigrateToFIPS refused a damaged header and still changed the device")
+			}
+		})
+	}
+}

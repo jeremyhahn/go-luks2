@@ -317,13 +317,20 @@ func screenKeyslot(id string, keyslot *header.Keyslot, digests map[string]*heade
 // screenKDFParameters rejects a KDF that deriveKeyEnclave would refuse, without
 // running it and without a passphrase.
 //
-// It mirrors deriveKeyEnclave's prefix in order and delegates to the same helpers,
-// so the two cannot disagree about which KDF is usable:
+// It delegates to the helpers deriveKeyEnclave uses, so the two cannot disagree
+// about which KDF is usable:
 //
-//	fips.Mode.RequireKDF     Argon2 in a FIPS 140-3 process
-//	decodeBase64             a salt that is not base64
-//	the type switch          a KDF type nothing implements
-//	getPBKDF2HashFunc        a PBKDF2 hash nothing implements, and SHA-1 in FIPS mode
+// \tdecodeBase64             a salt that is not base64
+// \tthe type switch          a KDF type nothing implements
+// \tfips.Mode.RequireKDF     Argon2 in a FIPS 140-3 process
+// \tgetPBKDF2HashFunc        a PBKDF2 hash nothing implements, and SHA-1 in FIPS mode
+//
+// The structural checks run BEFORE the FIPS gates, as screenDigest's do, so a
+// refusal by a gate is a well-formed KDF this process may not run, never a
+// damaged one: an Argon2 KDF whose salt is not base64 is ErrInvalidHeader
+// under FIPS as outside it. keyslotRefusedByFIPS and the unlock error depend
+// on that. Which of two refusals is named is all the order decides; a KDF
+// either one rejects is rejected.
 //
 // The type switch is deliberately over kdf.Type RAW, not normalized. That is
 // what deriveKeyEnclave switches on, and this function exists to predict
@@ -340,11 +347,11 @@ func screenKDFParameters(kdf *header.KDF, fipsMode func() fips.Mode) error {
 		return &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "no KDF object"}
 	}
 
-	if err := fipsMode().RequireKDF(kdf.Type); err != nil {
+	if err := screenKDFStructure(kdf); err != nil {
 		return err
 	}
 
-	if err := screenKDFStructure(kdf); err != nil {
+	if err := fipsMode().RequireKDF(kdf.Type); err != nil {
 		return err
 	}
 

@@ -57,6 +57,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed unlock with `*FIPSImportRequiredError`, though `MigrateToFIPS`
   refuses that volume at the plan stage. Unlock now fails with
   `ErrInvalidHeader`, as the import does.
+- **A damaged Argon2 keyslot KDF is header damage under FIPS too.** In FIPS
+  mode, unlocking a volume whose Argon2 keyslot declares a salt that is not
+  base64 failed with an error matching `ErrFIPSNotApproved` and not
+  `ErrInvalidHeader`, so the damage read as a policy refusal. The keyslot
+  KDF's structure is now screened before the FIPS policy judges it, and unlock
+  fails with `ErrInvalidHeader` in FIPS mode as outside it.
 
 ### Fixed
 
