@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The `pkg/luks2` race run stays well inside its memory bound.** The
+  migration crash-matrix tests built every torn 16 MiB header image up front
+  and held it in each queued subtest, and their helpers read whole 64 MiB
+  images to compare or hash them; under `-race` the peak crossed the Race
+  job's container bound and the test binary was killed. Torn states are now
+  built by the subtest that checks them, the helpers stream, and the
+  whole-image tests share a fixed four-slot semaphore. No test, subtest or
+  assertion changed.
 - **An unsupported mandatory requirement is readable from `luks2.Error`.**
   Unlock, activation and every header write on a container declaring a
   mandatory requirement this library does not implement (such as

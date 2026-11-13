@@ -158,11 +158,21 @@ func cryptsetupArgon2Prefix(t *testing.T, withSecond bool) []byte {
 func fileDigest(t *testing.T, path string) [32]byte {
 	t.Helper()
 
-	b, err := os.ReadFile(path) // #nosec G304 -- path is under t.TempDir()
+	// Streamed, not read whole: the image is 64 MiB, and a test digests it
+	// before and after, so a whole-file read held 128 MiB (more under -race's
+	// shadow) per test for a 32-byte answer.
+	f, err := os.Open(path) // #nosec G304 -- path is under t.TempDir()
 	if err != nil {
 		t.Fatalf("failed to read %s: %v", path, err)
 	}
-	return sha256.Sum256(b)
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		t.Fatalf("failed to read %s: %v", path, err)
+	}
+	var sum [32]byte
+	h.Sum(sum[:0])
+	return sum
 }
 
 // dataAreaDigest hashes everything from the data segment's offset to the end of
