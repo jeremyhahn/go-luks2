@@ -22,7 +22,8 @@
 **/.serena/** export-ignore
 **/.serena export-ignore
 
-# Internal workflows. The public ones are ci.yml, nightly.yml and release.yml.
+# Internal workflows. The public ones are ci.yml, nightly.yml, release.yml and
+# signatures.yml.
 .github/workflows/code-review.yml export-ignore
 
 # The fleet pattern set and its tests: they name the values the gate bans.

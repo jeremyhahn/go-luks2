@@ -47,7 +47,10 @@ const workflowDir = ".github/workflows/"
 // deny-list of the internal factory workflows is defeated by a `.yaml`
 // extension or a rename, and anything the factory adds later would ship by
 // default. Everything else under workflowDir fails the gate.
-var PublishedWorkflows = []string{"ci.yml", "nightly.yml", "release.yml"}
+// signatures.yml is the commit signature gate: it runs on
+// pull_request_target from the base branch, so the public repository's
+// pull requests are judged by the base's verifier and registry.
+var PublishedWorkflows = []string{"ci.yml", "nightly.yml", "release.yml", "signatures.yml"}
 
 // DefaultStripAtPublish is the list of tracked files Gitea main carries and
 // the public release does not (#211). The gate does not fail on them -- they
@@ -94,7 +97,7 @@ const internalReviewWorkflow = "internal Gitea code-review workflow: tracked on 
 
 // internalWorkflow is the reason given for any file under workflowDir that
 // PublishedWorkflows does not name.
-const internalWorkflow = "only the public workflows ship (#211): ci.yml, nightly.yml and release.yml; " +
+const internalWorkflow = "only the public workflows ship (#211): ci.yml, nightly.yml, release.yml and signatures.yml; " +
 	"anything else under .github/workflows/ -- an internal factory workflow, a renamed one, a .yaml " +
 	"variant -- stays out of the published tree"
 

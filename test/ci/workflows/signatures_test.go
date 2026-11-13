@@ -9,18 +9,26 @@ import (
 	"testing"
 )
 
-// The Signatures job's verifier is a bash script in ci.yml. These tests run
-// that script, extracted from the workflow, against throwaway repositories
+// The Signatures gate is its own workflow, signatures.yml, triggered by
+// pull_request_target so GitHub runs it from the base branch: the pull
+// request's tree never holds the script that judges it. Its verifier is a
+// bash script in the Signatures job. These tests run that script, extracted
+// from the workflow, against throwaway repositories
 // whose commits are signed with throwaway SSH keys, with a fake curl standing
 // in for the GitHub API. They need bash, git, ssh-keygen and jq, which the CI
 // toolchain image has; a missing tool fails the test, it never skips.
 
-const signaturesStep = "- name: Verify commit signatures against .github/allowed_signers"
+const (
+	signaturesWorkflow = ".github/workflows/signatures.yml"
+	signaturesStep     = "- name: Verify commit signatures against .github/allowed_signers"
+	// prNumber is the pull request number the pull_request_target runs carry.
+	prNumber = "7"
+)
 
 // signaturesScript returns the step's `run: |` block, dedented.
 func signaturesScript(t *testing.T) string {
 	t.Helper()
-	text := job(t, readFile(t, ".github/workflows/ci.yml"), "signatures")
+	text := job(t, readFile(t, signaturesWorkflow), "signatures")
 	lines := strings.Split(text, "\n")
 	i := 0
 	for i < len(lines) && strings.TrimSpace(lines[i]) != signaturesStep {
@@ -169,8 +177,14 @@ func (r *sigRepo) commit(file, content, email, key string) string {
 // output and exit status.
 func (r *sigRepo) verify(env ...string) (string, int) {
 	r.t.Helper()
+	return r.verifyIn(r.work, env...)
+}
+
+// verifyIn runs the signatures script in the clone at dir.
+func (r *sigRepo) verifyIn(dir string, env ...string) (string, int) {
+	r.t.Helper()
 	cmd := exec.Command("bash", r.script)
-	cmd.Dir = r.work
+	cmd.Dir = dir
 	cmd.Env = append(append([]string{}, r.env...),
 		"REPO=example/repo", "API=https://api.github.invalid", "GH_TOKEN=test-token",
 		"RUNNER_TEMP="+r.t.TempDir())
@@ -188,7 +202,7 @@ func (r *sigRepo) verify(env ...string) (string, int) {
 }
 
 func pr(base, head string) []string {
-	return []string{"EVENT=pull_request", "BASE_SHA=" + base, "HEAD_SHA=" + head, "BEFORE="}
+	return []string{"EVENT=pull_request_target", "PR=" + prNumber, "BASE_SHA=" + base, "HEAD_SHA=" + head, "BEFORE="}
 }
 
 func push(before, head string) []string {
@@ -243,6 +257,68 @@ func TestSignaturesUnsignedCommitInTheMiddleFails(t *testing.T) {
 		"OK   "+short(c1),
 		"FAIL "+short(mid)+" unsigned, committer "+alice,
 		"OK   "+short(c3))
+}
+
+// baseOnlyVerifier publishes the work clone's HEAD as the pull request's ref
+// on the origin and clones the origin, whose main is the base, into a fresh
+// verifier clone that holds none of the pull request's objects, as the
+// workflow's base-only checkout does.
+func baseOnlyVerifier(r *sigRepo, base, head string) string {
+	r.t.Helper()
+	r.git("push", "-q", "-f", "origin", "HEAD:refs/pull/"+prNumber+"/head")
+	dir := r.t.TempDir()
+	r.run(dir, "git", "clone", "-q", "--no-local", "-b", "main", filepath.Join(r.root, "origin.git"), "verifier")
+	v := filepath.Join(dir, "verifier")
+	if got := r.run(v, "git", "rev-parse", "HEAD"); got != base {
+		r.t.Fatalf("verifier clone HEAD %s, want the base %s", got, base)
+	}
+	cmd := exec.Command("git", "cat-file", "-e", head+"^{commit}")
+	cmd.Dir, cmd.Env = v, r.env
+	if cmd.Run() == nil {
+		r.t.Fatalf("verifier clone already holds the pull request head %s", short(head))
+	}
+	return v
+}
+
+// stayAtBase fails the test unless the verifier clone's HEAD is the base and
+// its worktree is clean: the gate fetches objects, it checks nothing out.
+func stayAtBase(r *sigRepo, v, base string) {
+	r.t.Helper()
+	if got := r.run(v, "git", "rev-parse", "HEAD"); got != base {
+		r.t.Errorf("verifier HEAD moved to %s, want the base %s", got, base)
+	}
+	if st := r.run(v, "git", "status", "--porcelain"); st != "" {
+		r.t.Errorf("verifier worktree changed:\n%s", st)
+	}
+}
+
+// TestSignaturesFetchesPullRequestCommitsIntoABaseOnlyClone runs the verifier
+// in a clone that holds only the base, so it passes only if the workflow
+// fetches the pull request's commits itself (refs/pull/N/head, or the head).
+func TestSignaturesFetchesPullRequestCommitsIntoABaseOnlyClone(t *testing.T) {
+	t.Run("signed commits pass", func(t *testing.T) {
+		r, key, base := registered(t)
+		c1 := r.commit("a", "1", alice, key)
+		c2 := r.commit("b", "2", alice, key)
+		v := baseOnlyVerifier(r, base, c2)
+		out, code := r.verifyIn(v, pr(base, c2)...)
+		expect(t, out, code, 0,
+			"checking 2 commit(s)",
+			"OK   "+short(c1)+" signed by "+alice,
+			"OK   "+short(c2)+" signed by "+alice)
+		stayAtBase(r, v, base)
+	})
+	t.Run("an unsigned commit fails", func(t *testing.T) {
+		r, key, base := registered(t)
+		c1 := r.commit("a", "1", alice, key)
+		c2 := r.commit("b", "2", alice, "")
+		v := baseOnlyVerifier(r, base, c2)
+		out, code := r.verifyIn(v, pr(base, c2)...)
+		expect(t, out, code, 1,
+			"OK   "+short(c1)+" signed by "+alice,
+			"FAIL "+short(c2)+" unsigned, committer "+alice)
+		stayAtBase(r, v, base)
+	})
 }
 
 func TestSignaturesUnregisteredKeyFails(t *testing.T) {
@@ -307,8 +383,8 @@ func TestSignaturesRegistryIsReadFromTheBase(t *testing.T) {
 func TestSignaturesUnreadableBaseFailsClosed(t *testing.T) {
 	const missing = "1234567890abcdef1234567890abcdef12345678"
 	for name, env := range map[string]func(string) []string{
-		"pull_request": func(head string) []string { return pr(missing, head) },
-		"push":         func(head string) []string { return push(missing, head) },
+		"pull_request_target": func(head string) []string { return pr(missing, head) },
+		"push":                func(head string) []string { return push(missing, head) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			// The head brings its own registry and key: it must not be read.
@@ -325,17 +401,144 @@ func TestSignaturesUnreadableBaseFailsClosed(t *testing.T) {
 	}
 }
 
-func TestSignaturesFirstAdoptionReadsTheHead(t *testing.T) {
+func TestSignaturesNoRegistryAtTheBaseFails(t *testing.T) {
+	// The head brings a registry with a key that signs it. Under
+	// pull_request_target the head is untrusted input, so there is no head
+	// fallback: a base without a registry fails.
 	r := newSigRepo(t)
 	key, pub := r.key("alice")
 	base := r.commit("README", "x", alice, key)
 	r.git("push", "-q", "origin", "main")
 	c := r.commit(".github/allowed_signers", alice+" "+pub+"\n", alice, key)
 	out, code := r.verify(pr(base, c)...)
-	expect(t, out, code, 0,
-		"::warning::no registry at the base: .github/allowed_signers read from the head (first adoption only)",
-		"checking 1 commit(s)",
-		"OK   "+short(c)+" signed by "+alice)
+	expect(t, out, code, 1, "FAIL no .github/allowed_signers at the base "+short(base))
+	if strings.Contains(out, "OK   ") || strings.Contains(out, "registry: ") || strings.Contains(out, "::warning::") {
+		t.Errorf("a base without a registry fell back to the head's registry\n%s", out)
+	}
+}
+
+func TestSignaturesPullRequestRunNeedsBaseHeadAndNumber(t *testing.T) {
+	r, key, base := registered(t)
+	c := r.commit("a", "1", alice, key)
+	for name, drop := range map[string]string{"base": "BASE_SHA=", "head": "HEAD_SHA=", "number": "PR="} {
+		t.Run(name, func(t *testing.T) {
+			var env []string
+			for _, kv := range pr(base, c) {
+				if strings.HasPrefix(kv, drop) {
+					kv = drop
+				}
+				env = append(env, kv)
+			}
+			out, code := r.verify(env...)
+			expect(t, out, code, 1, "FAIL a pull_request_target run without its base, head or number")
+			if strings.Contains(out, "OK   ") {
+				t.Errorf("a run without its %s checked commits\n%s", name, out)
+			}
+		})
+	}
+}
+
+func TestSignaturesUnreadableHeadFailsClosed(t *testing.T) {
+	const missing = "fedcba0987654321fedcba0987654321fedcba09"
+	r, _, base := registered(t)
+	out, code := r.verify(pr(base, missing)...)
+	expect(t, out, code, 1, "FAIL the head "+short(missing)+" cannot be read")
+	if strings.Contains(out, "OK   ") {
+		t.Errorf("an unreadable head passed\n%s", out)
+	}
+}
+
+func TestSignaturesPushWithZeroBeforeAndNoRegistryFails(t *testing.T) {
+	r := newSigRepo(t)
+	key, _ := r.key("alice")
+	c := r.commit("README", "x", alice, key)
+	out, code := r.verify(push(strings.Repeat("0", 40), c)...)
+	expect(t, out, code, 1, "FAIL no .github/allowed_signers at the base")
+	if strings.Contains(out, "OK   ") {
+		t.Errorf("a push with no registry anywhere passed\n%s", out)
+	}
+}
+
+// TestSignaturesWorkflowRunsFromTheBase pins how signatures.yml is triggered
+// and what it checks out: GitHub reads a pull_request_target workflow from
+// the base branch, the job checks out the base only, with a read-only token
+// that is not persisted, and it has no draft skip (a skipped required check
+// reads as passed).
+func TestSignaturesWorkflowRunsFromTheBase(t *testing.T) {
+	wf := readFile(t, signaturesWorkflow)
+	for _, want := range []string{
+		"\nname: Signatures\n",
+		"\non:\n  pull_request_target:\n    branches: [main]\n",
+		"\n  push:\n    branches: [main]\n",
+		"\npermissions:\n  contents: read\n",
+	} {
+		if !strings.Contains(wf, want) {
+			t.Errorf("signatures.yml lacks %q", want)
+		}
+	}
+	if strings.Contains(wf, "\n  pull_request:") {
+		t.Error("signatures.yml runs on pull_request, so the pull request's tree would hold its verifier")
+	}
+	if ids := jobIDs(t, wf); len(ids) != 1 || ids[0] != "signatures" {
+		t.Errorf("signatures.yml has jobs %v, want [signatures]", ids)
+	}
+	types := ""
+	for _, l := range strings.Split(wf, "\n") {
+		if s := strings.TrimSpace(l); strings.HasPrefix(s, "types: [") {
+			types = s
+		}
+	}
+	for _, ty := range []string{"opened", "synchronize", "reopened", "edited", "ready_for_review"} {
+		if !strings.Contains(types, ty) {
+			t.Errorf("signatures.yml's pull_request_target types %q lack %s", types, ty)
+		}
+	}
+	text := job(t, wf, "signatures")
+	if cond := jobIfOf(t, text); cond != "" {
+		t.Errorf("the Signatures job has if %q: a skipped required check reads as passed", cond)
+	}
+	if n := needs(t, text); len(n) != 0 {
+		t.Errorf("the Signatures job needs %v, want nothing", n)
+	}
+	for _, want := range []string{
+		"    name: Signatures\n",
+		"    runs-on: ubuntu-latest\n",
+		"    permissions:\n      contents: read\n",
+		"          ref: ${{ github.event_name == 'push' && github.sha || github.event.pull_request.base.ref }}\n",
+		"          fetch-depth: 0\n",
+		"          persist-credentials: false\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the Signatures job lacks %q", want)
+		}
+	}
+	if n := strings.Count(text, "actions/checkout@"); n != 1 {
+		t.Errorf("the Signatures job has %d checkouts, want the base checkout only", n)
+	}
+	if strings.Contains(text, "head.ref") || strings.Contains(text, "head_ref") {
+		t.Error("the Signatures job names the pull request's head ref, so it could check out the head")
+	}
+	script := signaturesScript(t)
+	if strings.Contains(script, "first adoption") || strings.Contains(script, "read from the head") {
+		t.Error("the verifier keeps a head fallback for the registry")
+	}
+}
+
+// TestCIHasNoSignaturesJob: ci-template v1.35.2 moved the gate out of ci.yml,
+// whose jobs run from the pull request's tree. A signatures job there, or CI
+// Gate needing one, would bring the self-judging verifier back.
+func TestCIHasNoSignaturesJob(t *testing.T) {
+	ci := readFile(t, ".github/workflows/ci.yml")
+	if contains(jobIDs(t, ci), "signatures") {
+		t.Error("ci.yml has a signatures job; the gate lives in signatures.yml")
+	}
+	gate := job(t, ci, "ci-gate")
+	if contains(needs(t, gate), "signatures") {
+		t.Error("CI Gate needs signatures")
+	}
+	if strings.Contains(gate, "needs.signatures") {
+		t.Error("CI Gate reads needs.signatures")
+	}
 }
 
 func TestSignaturesPushWithZeroBeforeChecksTheHeadOnly(t *testing.T) {
@@ -344,6 +547,7 @@ func TestSignaturesPushWithZeroBeforeChecksTheHeadOnly(t *testing.T) {
 	c := r.commit("b", "2", alice, key)
 	out, code := r.verify(push(strings.Repeat("0", 40), c)...)
 	expect(t, out, code, 0,
+		"registry: .github/allowed_signers at "+short(c)+" (no before)",
 		"checking 1 commit(s) in "+c+" -1",
 		"OK   "+short(c)+" signed by "+alice)
 	if strings.Contains(out, "unsigned") {

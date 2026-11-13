@@ -453,8 +453,8 @@ const cacheClass = `CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.e
 // same way -- names the cache class the recipe mounts its volumes under.
 func TestToolchainStagesCacheByTrustClass(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
-	if !strings.HasPrefix(ci, "# ci-template: v1.35.1 (customized)\n") {
-		t.Errorf("ci.yml does not declare ci-template v1.35.1: %.60q", ci)
+	if !strings.HasPrefix(ci, "# ci-template: v1.35.2 (customized)\n") {
+		t.Errorf("ci.yml does not declare ci-template v1.35.2: %.60q", ci)
 	}
 	for _, name := range []string{"lint", "image", "lint-gates", "merge-check", "test-race", "fips"} {
 		j := job(t, ci, name)

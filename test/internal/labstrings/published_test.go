@@ -6,6 +6,7 @@ package labstrings
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -79,15 +80,16 @@ func TestScanUnpublishable_CatchesAScriptWhateverItCarries(t *testing.T) {
 
 func TestScanUnpublishable_AcceptsWhatShips(t *testing.T) {
 	files := entriesOf(map[string]string{
-		"README.md":                      "# go-luks2\n",
-		"docs/cli/key-input.md":          "Example:\n\n```\n#!/bin/sh\n```\n",
-		".github/workflows/ci.yml":       "on: push\n",
-		".github/workflows/release.yml":  "on: push\n",
-		"test/integration/Dockerfile":    "FROM golang\n",
-		"test/integration/seccomp.json":  "{}\n",
-		"test/ci/cmd/require-tool/x.go":  "package main\n",
-		"docs/CLAUDE.md.txt":             "not the file\n",
-		"pkg/luks2/claude_test_names.go": "package luks2\n",
+		"README.md":                        "# go-luks2\n",
+		"docs/cli/key-input.md":            "Example:\n\n```\n#!/bin/sh\n```\n",
+		".github/workflows/ci.yml":         "on: push\n",
+		".github/workflows/release.yml":    "on: push\n",
+		".github/workflows/signatures.yml": "on: pull_request_target\n",
+		"test/integration/Dockerfile":      "FROM golang\n",
+		"test/integration/seccomp.json":    "{}\n",
+		"test/ci/cmd/require-tool/x.go":    "package main\n",
+		"docs/CLAUDE.md.txt":               "not the file\n",
+		"pkg/luks2/claude_test_names.go":   "package luks2\n",
 	})
 	findings, err := ScanUnpublishable(files, DefaultUnpublishable, DefaultStripAtPublish)
 	if err != nil {
@@ -160,6 +162,8 @@ func TestScanUnpublishable_OnlyThePublicWorkflowsShip(t *testing.T) {
 		".github/workflows/task-worker.yaml",
 		".github/workflows/ci.yaml",
 		".github/workflows/Release.yml",
+		".github/workflows/signatures.yaml",
+		".github/workflows/sub/signatures.yml",
 		".github/workflows/factory-dispatch.yml",
 		".github/workflows/sub/ci.yml",
 		".github/workflows/README.md",
@@ -186,12 +190,34 @@ func TestScanUnpublishable_OnlyThePublicWorkflowsShip(t *testing.T) {
 			t.Errorf("%s was not reported: %v", name, findings)
 			continue
 		}
-		if !strings.Contains(reason, "ci.yml, nightly.yml and release.yml") {
+		if !strings.Contains(reason, "ci.yml, nightly.yml, release.yml and signatures.yml") {
 			t.Errorf("%s: reason does not name the public workflows: %q", name, reason)
 		}
 	}
 	if len(findings) != len(rejected) {
 		t.Errorf("findings = %v, want exactly the %d rejected workflows", findings, len(rejected))
+	}
+}
+
+// TestPublishedWorkflows_CarriesTheSignatureGate: the public repository's
+// required Signatures check comes from signatures.yml, so the release must
+// ship it, by that exact name, and must not strip it.
+func TestPublishedWorkflows_CarriesTheSignatureGate(t *testing.T) {
+	want := []string{"ci.yml", "nightly.yml", "release.yml", "signatures.yml"}
+	if !slices.Equal(PublishedWorkflows, want) {
+		t.Fatalf("PublishedWorkflows = %v, want %v", PublishedWorkflows, want)
+	}
+	path := ".github/workflows/signatures.yml"
+	files := entriesOf(map[string]string{path: "on: pull_request_target\n"})
+	findings, err := ScanUnpublishable(files, DefaultUnpublishable, DefaultStripAtPublish)
+	if err != nil {
+		t.Fatalf("ScanUnpublishable: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("%s is refused: %v", path, findings)
+	}
+	if listed := StripAtPublish(files, DefaultStripAtPublish); len(listed) != 0 {
+		t.Errorf("%s is stripped at publish: %v", path, listed)
 	}
 }
 
