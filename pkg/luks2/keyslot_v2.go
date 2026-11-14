@@ -103,7 +103,7 @@ func (v *Volume) AddKeyslot(ctx context.Context, key *Key, pass enclave.ByteAcce
 
 	opts := p.toAddKeyOptions()
 	opts.Keyslot = p.Slot
-	if err := refuseSHA1ForCreation(opts.KDFType, opts.Hash); err != nil {
+	if err := refuseSHA1ForCreation(opts.KDFType, opts.Hash, v.sys.fipsMode()); err != nil {
 		return KeyslotInfo{}, errAt(op, v.path, err)
 	}
 	if err := validateArgon2CreateCost(callerArgon2Options(opts)); err != nil {
@@ -185,7 +185,7 @@ func (v *Volume) ChangeKeyslot(ctx context.Context, key *Key, pass enclave.ByteA
 			return KeyslotInfo{}, errAt(op, v.path, err)
 		}
 		recost = p.toAddKeyOptions()
-		if err := refuseSHA1ForCreation(recost.KDFType, recost.Hash); err != nil {
+		if err := refuseSHA1ForCreation(recost.KDFType, recost.Hash, v.sys.fipsMode()); err != nil {
 			return KeyslotInfo{}, errAt(op, v.path, err)
 		}
 		if err := validateArgon2CreateCost(callerArgon2Options(recost)); err != nil {

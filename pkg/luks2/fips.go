@@ -12,6 +12,7 @@ import (
 	"github.com/jeremyhahn/go-enclave"
 
 	"github.com/jeremyhahn/go-luks2/internal/device"
+	"github.com/jeremyhahn/go-luks2/internal/errs"
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
@@ -28,7 +29,9 @@ type MigrateParams struct {
 
 	// KDF is the new PBKDF2 keyslot's cost, and the cost any migrated
 	// digest is rewritten at. Only KDFPBKDF2 and its Hash are consulted;
-	// Hash's zero value is SHA-256.
+	// Hash's zero value is SHA-256. A KDF naming Argon2 -- KDFArgon2id or
+	// KDFArgon2i, or any of Time, MemoryKiB or Parallel non-zero -- is refused
+	// with ErrFIPSNotApproved before anything is written.
 	KDF KDFParams
 }
 
@@ -119,6 +122,13 @@ func (v *Volume) MigrateToFIPS(ctx context.Context, pass enclave.ByteAccess, p M
 	}
 
 	const op = "Volume.MigrateToFIPS"
+	// An Argon2 KDF is refused, not dropped: the migration writes PBKDF2 only,
+	// and a caller who named Argon2 must hear that rather than get a PBKDF2
+	// keyslot it did not ask for. Refused here, before anything is written,
+	// as the precondition failure migrateToFIPS would report it as.
+	if err := refuseArgon2MigrateKDF(p.KDF); err != nil {
+		return nil, errAt(op, v.path, &FIPSMigrationError{Device: v.path, Stage: "precondition", State: fipsStateUntouched, Err: err})
+	}
 	opts := &fipsMigrationOptionsForTest{
 		KeepNonApprovedKeyslots: p.KeepNonApproved,
 		Hash:                    hashAlgoName(p.KDF.Hash),
@@ -157,4 +167,25 @@ func (v *Volume) MigrateToFIPS(ctx context.Context, pass enclave.ByteAccess, p M
 		RetainedNonApproved: atoiIDs(result.RetainedNonApprovedKeyslots),
 		Complete:            result.Complete,
 	}, nil
+}
+
+// refuseArgon2MigrateKDF refuses a MigrateParams.KDF that names Argon2 -- by
+// Type, or by any Argon2 cost field -- with ErrFIPSNotApproved, naming the
+// field. MigrateToFIPS writes PBKDF2 only, so such a KDF cannot be honored.
+func refuseArgon2MigrateKDF(k KDFParams) error {
+	var field string
+	switch {
+	case k.Type == KDFArgon2id || k.Type == KDFArgon2i:
+		field = "MigrateParams.KDF.Type " + string(k.Type)
+	case k.Time != 0:
+		field = "MigrateParams.KDF.Time"
+	case k.MemoryKiB != 0:
+		field = "MigrateParams.KDF.MemoryKiB"
+	case k.Parallel != 0:
+		field = "MigrateParams.KDF.Parallel"
+	default:
+		return nil
+	}
+	return &errs.Error{Kind: ErrFIPSNotApproved,
+		Detail: field + ": MigrateToFIPS writes PBKDF2 keyslots only; Argon2 is not FIPS-approved"}
 }

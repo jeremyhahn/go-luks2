@@ -145,6 +145,13 @@ func (p KDFParams) validateWith(fipsMode func() fips.Mode) error {
 	if err := fipsMode().RequireKDF(resolved); err != nil {
 		return err
 	}
+	// The PBKDF2 PRF is judged too: SHA-1 is not FIPS-approved, so in FIPS
+	// mode a PBKDF2 KDF naming it is refused here, not later at creation.
+	if isPBKDF2Type(resolved) && p.Hash != 0 {
+		if err := fipsMode().RequireHash("pbkdf2 hash "+p.Hash.String(), p.Hash); err != nil {
+			return err
+		}
+	}
 
 	return validateArgon2CreateCost(formatOptionsForTest{
 		KDFType:        resolved,
@@ -740,7 +747,7 @@ func forcedPBKDF2Iterations(hashAlgo string, iterations int, policy keyslotCostP
 // createKDF creates a KDF structure based on options and the keyslot's cost
 // policy. Supported KDF types:
 //   - "pbkdf2" - PBKDF2 with hash from HashAlgo option (default: sha256) [FIPS-approved]
-//   - "pbkdf2-sha1" - REFUSED with ErrInvalidArgument: SHA-1 is never written (#239)
+//   - "pbkdf2-sha1" - REFUSED: SHA-1 is never written (#239); ErrFIPSNotApproved in FIPS mode, ErrInvalidArgument otherwise
 //   - "pbkdf2-sha256" - PBKDF2 with SHA-256 [FIPS-approved, recommended]
 //   - "pbkdf2-sha384" - PBKDF2 with SHA-384 [FIPS-approved]
 //   - "pbkdf2-sha512" - PBKDF2 with SHA-512 [FIPS-approved]
@@ -754,7 +761,7 @@ func createKDF(opts formatOptionsForTest, keySize int, policy keyslotCostPolicy,
 	kdfType := resolveKDFTypeFor(normalizeKDFType(opts.KDFType), formatArgon2CostGiven(opts), fipsMode())
 
 	// No keyslot is created with SHA-1, before any other choice is judged.
-	if err := refuseSHA1ForCreation(kdfType, opts.HashAlgo); err != nil {
+	if err := refuseSHA1ForCreation(kdfType, opts.HashAlgo, fipsMode()); err != nil {
 		return nil, err
 	}
 
@@ -792,13 +799,20 @@ func createKDF(opts formatOptionsForTest, keySize int, policy keyslotCostPolicy,
 // any KDF -- a format's hash is also its digest's and its anti-forensic
 // split's, and an AddKey hash names the new keyslot's. Reading is unaffected:
 // existing PBKDF2-SHA1 keyslots and digests open outside FIPS mode (#239).
-func refuseSHA1ForCreation(kdfType, hashAlgo string) error {
+func refuseSHA1ForCreation(kdfType, hashAlgo string, mode fips.Mode) error {
+	// In FIPS mode the refusal is a FIPS one: SHA-1 is not an approved PBKDF2
+	// PRF, so the error matches ErrFIPSNotApproved, as KDFParams.Validate's
+	// does. Outside FIPS mode it is a plain invalid argument.
+	kind := ErrInvalidArgument
+	if mode {
+		kind = ErrFIPSNotApproved
+	}
 	if normalizeKDFType(kdfType) == kdfTypePBKDF2SHA1 {
-		return &errs.Error{Kind: ErrInvalidArgument, Err: ErrUnsupported,
+		return &errs.Error{Kind: kind, Err: ErrUnsupported,
 			Detail: "pbkdf2-sha1: new keyslots use pbkdf2 with sha256, sha384 or sha512, or argon2"}
 	}
 	if strings.EqualFold(strings.TrimSpace(hashAlgo), "sha1") {
-		return &errs.Error{Kind: ErrInvalidArgument, Err: ErrUnsupported,
+		return &errs.Error{Kind: kind, Err: ErrUnsupported,
 			Detail: "sha1: new keyslots and digests use sha256, sha384 or sha512"}
 	}
 	return nil

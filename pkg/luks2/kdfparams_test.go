@@ -12,6 +12,8 @@ import (
 	"crypto/fips140"
 	"errors"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/internal/fips"
 )
 
 // TestDefaultKDFTypeFollowsTheProcessMode holds the new, typed
@@ -130,6 +132,33 @@ func TestKDFParamsValidateRefusesArgon2UnderFIPS(t *testing.T) {
 	// The default (no type, no cost) still resolves to PBKDF2 and is approved.
 	if err := (KDFParams{}).validateWith(forced); err != nil {
 		t.Fatalf("Validate() on the zero value under the FIPS policy = %v, want nil", err)
+	}
+}
+
+// TestKDFParamsValidateJudgesThePBKDF2HashUnderFIPS: under the FIPS policy a
+// PBKDF2 KDF naming a non-approved PRF (SHA-1) is refused with
+// ErrFIPSNotApproved by Validate itself, not left for a write path to catch.
+// Outside FIPS mode Validate does not judge the hash: SHA-1 creation is refused
+// later, by the write paths, with ErrInvalidArgument.
+func TestKDFParamsValidateJudgesThePBKDF2HashUnderFIPS(t *testing.T) {
+	forced := forceFIPSPolicy(t)
+	off := func() fips.Mode { return false }
+
+	for _, p := range []KDFParams{
+		{Type: KDFPBKDF2, Hash: crypto.SHA1},
+		{Hash: crypto.SHA1}, // no type: the FIPS default is PBKDF2
+	} {
+		if err := p.validateWith(forced); !errors.Is(err, ErrFIPSNotApproved) {
+			t.Fatalf("validateWith(FIPS) on %+v = %v, want ErrFIPSNotApproved", p, err)
+		}
+		if err := p.validateWith(off); err != nil {
+			t.Fatalf("validateWith(non-FIPS) on %+v = %v, want nil", p, err)
+		}
+	}
+	for _, h := range []crypto.Hash{0, crypto.SHA256, crypto.SHA384, crypto.SHA512} {
+		if err := (KDFParams{Type: KDFPBKDF2, Hash: h}).validateWith(forced); err != nil {
+			t.Fatalf("validateWith(FIPS) on PBKDF2 %v = %v, want nil", h, err)
+		}
 	}
 }
 

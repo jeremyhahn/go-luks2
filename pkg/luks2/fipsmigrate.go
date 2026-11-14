@@ -7,6 +7,7 @@ package luks2
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -422,6 +423,16 @@ func migrateToFIPS(ctx context.Context, device string, passphrase []byte, opts *
 	// 2. PLAN. Every non-approved digest must attest the key just recovered.
 	// Checked before anything is written, so a digest that cannot be migrated
 	// costs a refusal and not a half-done import.
+	//
+	// A digest the header screen rejects is damage, not a digest to migrate
+	// or to keep, and it is reported as the header fault unlock reports
+	// (malformedDigestError). Screened first, and for every digest:
+	// digestFIPSRefusal judges the algorithm, salt and output length, not
+	// structure, so a digest it approves -- a 48-byte PBKDF2-SHA256 value,
+	// say -- can still be one no hash produces.
+	if err := malformedDigestError(metadata.Digests); err != nil {
+		return fail("plan", fipsStateUntouched, err)
+	}
 	var digestsToMigrate []string
 	for _, id := range sortedDigestIDs(metadata.Digests) {
 		digest := metadata.Digests[id]
@@ -952,15 +963,47 @@ func sortedDigestIDs(digests map[string]*header.Digest) []string {
 // refusal. If it fails, something else is wrong with the keyslot or its
 // digests, and the caller reports that instead: a SHA-1 digest whose value is
 // not base64 is a damaged header whatever mode reads it.
-func keyslotRefusedByFIPS(id string, keyslot *header.Keyslot, digests map[string]*header.Digest, fipsMode func() fips.Mode) bool {
+//
+// failure is the error the keyslot failed with. A keyslot the pre-derivation
+// screen passes is counted as refused by FIPS only when failure is the one
+// strict mode's derivation raised; any other failure is kept as it is.
+func keyslotRefusedByFIPS(id string, keyslot *header.Keyslot, digests map[string]*header.Digest, fipsMode func() fips.Mode, failure error) bool {
 	if !fipsMode() || keyslot == nil || keyslot.Type != "luks2" {
 		return false
 	}
-
-	// A keyslot the screen passes was refused later -- reading or decrypting
-	// its area -- and no FIPS gate runs there.
-	if _, err := screenKeyslot(id, keyslot, digests, fipsMode); err == nil {
+	// A FIPS refusal is a well-formed header this process may not run. A
+	// covering digest the header screen rejects -- a value that is not
+	// base64, a length no hash gives -- is damage beside any refusal, and an
+	// import could not repair it: MigrateToFIPS refuses it at planning.
+	if !coveringDigestsWellFormed(id, digests) {
 		return false
+	}
+
+	// A keyslot the screen passes, whose KDF and covering digests are all
+	// approved, was refused later -- reading or decrypting its area -- and no
+	// FIPS gate runs there. One whose names pass but whose parameters do not
+	// (a PBKDF2 salt or output too short) is refused at derivation by strict
+	// mode instead, and the stand-ins below decide it like any other -- but
+	// only when failure is what that derivation raises. A read, decrypt or
+	// merge failure on the way there is the failure, and the caller keeps it.
+	if _, err := screenKeyslot(id, keyslot, digests, fipsMode); err == nil {
+		switch {
+		case !keyslotFIPSApproved(keyslot):
+			// The passphrase derivation runs first and is what strict mode
+			// refuses; it fails as an invalid argument.
+			if !errors.Is(failure, errs.ErrInvalidArgument) {
+				return false
+			}
+		case !coveringDigestsFIPSApproved(id, digests):
+			// The digest derivations run last, after the area was read,
+			// decrypted and merged; strict mode refusing every one of them
+			// leaves no digest evaluated.
+			if !coveringDigestsUnusable(id, digests, failure) {
+				return false
+			}
+		default:
+			return false
+		}
 	}
 
 	standIn, substituted, ok := fipsStandInKeyslot(keyslot)
@@ -984,6 +1027,84 @@ func keyslotRefusedByFIPS(id string, keyslot *header.Keyslot, digests map[string
 
 	_, err := screenKeyslot(id, standIn, standInDigests, fipsMode)
 	return err == nil
+}
+
+// coveringDigestsFIPSApproved reports whether every digest that covers keyslot
+// id is one strict FIPS mode will evaluate.
+func coveringDigestsFIPSApproved(id string, digests map[string]*header.Digest) bool {
+	for _, digest := range digests {
+		if digestCovers(digest, id) && !digestFIPSApproved(digest) {
+			return false
+		}
+	}
+	return true
+}
+
+// coveringDigestsUnusable reports whether failure is the verdict the digest
+// check gives keyslot id when not one of its covering digests could be
+// evaluated: the outcome of strict mode refusing all of their derivations.
+func coveringDigestsUnusable(id string, digests map[string]*header.Digest, failure error) bool {
+	applicable := 0
+	for _, digest := range digests {
+		if digestCovers(digest, id) {
+			applicable++
+		}
+	}
+	var got *errs.Error
+	if applicable == 0 || !errors.As(failure, &got) {
+		return false
+	}
+	want, ok := unverifiableKeyslotError(id, applicable).(*errs.Error)
+	return ok && got.Kind == want.Kind && got.Detail == want.Detail && got.Err == nil
+}
+
+// coveringDigestsWellFormed reports whether every digest covering keyslot id
+// passes the structural digest screen, which runs no FIPS gate: what is left
+// to refuse it is policy, never damage.
+func coveringDigestsWellFormed(id string, digests map[string]*header.Digest) bool {
+	return coveringDigestStructureError(id, digests) == nil
+}
+
+// coveringDigestStructureError returns, as ErrInvalidHeader, the structural
+// fault of the lowest-numbered digest attesting keyslot id that the header
+// screen rejects, or nil when every one of them is well formed. It is what a
+// keyslot that could not be tried reports in place of its own failure: a
+// malformed attesting digest is header damage, whatever policy refusal the
+// keyslot's KDF also carries.
+func coveringDigestStructureError(id string, digests map[string]*header.Digest) error {
+	for _, digestID := range sortedDigestIDs(digests) {
+		digest := digests[digestID]
+		if !digestCovers(digest, id) {
+			continue
+		}
+		expected, _, err := screenDigestStructure(digest)
+		clearBytes(expected)
+		if err != nil {
+			return &errs.Error{Kind: ErrInvalidHeader, Detail: "digest " + digestID + " attesting keyslot " + id + " is malformed", Err: err}
+		}
+	}
+	return nil
+}
+
+// malformedDigestError returns ErrInvalidHeader naming the first digest, in ID
+// order, that the structural digest screen rejects, or nil when there is none.
+// It judges every digest, whichever keyslots and segments it names: it is the
+// screen MigrateToFIPS's plan applies, so unlock consults it before it calls a
+// volume an import -- FIPSImportRequiredError says MigrateToFIPS would open
+// it, and a header this rejects it refuses.
+func malformedDigestError(digests map[string]*header.Digest) error {
+	for _, id := range sortedDigestIDs(digests) {
+		digest := digests[id]
+		if digest == nil {
+			continue
+		}
+		expected, _, err := screenDigestStructure(digest)
+		clearBytes(expected)
+		if err != nil {
+			return &errs.Error{Kind: ErrInvalidHeader, Detail: "digest " + id + " is malformed", Err: err}
+		}
+	}
+	return nil
 }
 
 // fipsStandInKeyslot returns keyslot with its KDF replaced by an approved

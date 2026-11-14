@@ -96,7 +96,8 @@ func runFIPSImportChild(role, image string) int {
 			return childOK
 		}
 		fmt.Println(err)
-		if errors.Is(err, ErrFIPSImportRequired) {
+		var importRequired *FIPSImportRequiredError
+		if errors.Is(err, ErrFIPSImportRequired) && errors.As(err, &importRequired) {
 			return childImportRequired
 		}
 		return childFailed

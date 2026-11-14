@@ -16,6 +16,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the devcontainer `golang:` image tag and digest, and the README build
   requirement.
 
+### Changed
+
+- **In FIPS mode a SHA-1 PBKDF2 is refused as not approved.**
+  `KDFParams.Validate` now judges the PBKDF2 hash: under FIPS 140-3 mode a
+  PBKDF2 KDF naming SHA-1 fails with an error matching `ErrFIPSNotApproved`.
+  The write paths that refuse a SHA-1 PBKDF2 (`Format`, `AddKeyslot`,
+  `ChangeKeyslot`, `Enroll`) return an error matching `ErrFIPSNotApproved` in
+  FIPS mode, where they returned `ErrInvalidArgument`. Outside FIPS mode
+  nothing changes: SHA-1 creation is still refused with `ErrInvalidArgument`.
+- **`MigrateToFIPS` refuses Argon2 parameters instead of dropping them.** A
+  `MigrateParams.KDF` naming Argon2 (`KDFArgon2id`, `KDFArgon2i`, or a
+  non-zero `Time`, `MemoryKiB` or `Parallel`) was silently ignored and a
+  PBKDF2 keyslot written. It is now refused before anything is written, as a
+  `*FIPSMigrationError` at stage `precondition` matching both
+  `ErrFIPSMigration` and `ErrFIPSNotApproved` and naming the field, and the
+  volume is left unchanged. A PBKDF2 `KDF` migrates as before.
+- **A short PBKDF2 salt in strict FIPS mode asks for an import.** Under
+  `GODEBUG=fips140=only`, unlocking a volume whose PBKDF2 keyslot or digest has
+  a salt under 128 bits failed with `ErrInvalidHeader`, as if the header were
+  damaged. It now fails with `*FIPSImportRequiredError`, like any other keyslot
+  refused only by FIPS; the open is still refused, and `MigrateToFIPS` imports
+  the volume. A keyslot one of whose attesting digests is malformed (a value
+  that is not base64, a length no hash gives) still fails with
+  `ErrInvalidHeader`, beside a short-salt digest or not, and also when the
+  keyslot's own KDF is refused (Argon2 under the FIPS policy, a short PBKDF2
+  salt under strict mode), where it failed with `ErrFIPSNotApproved` or
+  `ErrInvalidArgument`; `MigrateToFIPS`
+  refuses that volume at the plan stage with `ErrInvalidHeader`, where it
+  returned the not-approved-digest refusal.
+- **`MigrateToFIPS` no longer keeps a malformed digest that looks approved.**
+  A PBKDF2-SHA256 digest with a full-length salt but a value no hash gives
+  (48 bytes, say) passed the approval check, so planning skipped it and the
+  migration wrote, reported `Complete` and kept the damage. Planning now
+  screens every digest's structure first, and such a volume is refused at the
+  plan stage with `ErrInvalidHeader`, writing nothing.
+- **A malformed digest no keyslot consults is no longer called an import.**
+  In FIPS mode, a volume refused only for non-approval but carrying a
+  malformed digest that covers no tried keyslot, or binds no data segment,
+  failed unlock with `*FIPSImportRequiredError`, though `MigrateToFIPS`
+  refuses that volume at the plan stage. Unlock now fails with
+  `ErrInvalidHeader`, as the import does.
+- **A damaged Argon2 keyslot KDF is header damage under FIPS too.** In FIPS
+  mode, unlocking a volume whose Argon2 keyslot declares a salt that is not
+  base64 failed with an error matching `ErrFIPSNotApproved` and not
+  `ErrInvalidHeader`, so the damage read as a policy refusal. The keyslot
+  KDF's structure is now screened before the FIPS policy judges it, and unlock
+  fails with `ErrInvalidHeader` in FIPS mode as outside it.
+
 ### Fixed
 
 - **The `pkg/luks2` race run stays well inside its memory bound.** The
