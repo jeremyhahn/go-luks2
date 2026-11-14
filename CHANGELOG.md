@@ -53,6 +53,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docker-build-integration` accepted any failed build whose tag resolved
   afterwards; it now needs the refusal too.
 
+### Changed
+
+- **golang.org/x/sys is v0.50.0, so every direct dependency is at its latest
+  release again.** `make deps-check` reported v0.49.0 as behind the latest
+  release. golang.org/x/crypto and golang.org/x/term still require v0.49.0;
+  the module now selects v0.50.0 for all three.
+
 ## [1.0.3-alpha] - 2026-11-10
 
 ### Changed
