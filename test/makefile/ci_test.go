@@ -1616,3 +1616,62 @@ func TestAptIndexSumReadsTheBaseImages(t *testing.T) {
 		t.Errorf("docker ran %v, want [a:1 b:2]", got)
 	}
 }
+
+// aptProbeDocker is a docker stand-in for `make -s apt-index-sum` that runs the
+// recipe's real probe: it takes the script after `-c`, points its
+// /var/lib/apt/lists at lists, puts a stub apt-get that succeeds first on PATH,
+// and runs it under /bin/sh as the base image would.
+func aptProbeDocker(t *testing.T, lists string) (path string) {
+	t.Helper()
+	bin := t.TempDir()
+	stub := filepath.Join(bin, "stub")
+	if err := os.Mkdir(stub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stub, "apt-get"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil { // #nosec G306 -- an executable test fixture under t.TempDir()
+		t.Fatal(err)
+	}
+	script := fmt.Sprintf(`#!/bin/sh
+probe=
+while [ "$#" -gt 0 ]; do
+  [ "$1" = -c ] && { probe=$2; break; }
+  shift
+done
+[ -n "$probe" ] || { echo "docker stand-in: no -c probe" >&2; exit 125; }
+probe=$(printf '%%s' "$probe" | sed "s#/var/lib/apt/lists#%s#g")
+PATH=%s:$PATH exec /bin/sh -c "$probe"
+`, lists, stub)
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(script), 0o700); err != nil { // #nosec G306 -- an executable test fixture under t.TempDir()
+		t.Fatal(err)
+	}
+	return bin + string(os.PathListSeparator) + os.Getenv("PATH")
+}
+
+// The real probe: readable indexes sum; one unreadable index among several
+// fails the target instead of summing the rest. The unreadable one sorts after
+// the readable one (C locale: '-' before '_'), so the probe's first-file check
+// passes and only sha256sum's status can catch it. A directory named like an
+// index cannot be read by sha256sum even as root, so the fixture holds for
+// any test user.
+func TestAptIndexSumProbeFailsOnAPartialRead(t *testing.T) {
+	lists := t.TempDir()
+	good := filepath.Join(lists, "deb.debian.org_debian_dists_trixie-updates_main_binary-amd64_Packages.lz4")
+	if err := os.WriteFile(good, []byte("Package: base-files\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := aptProbeDocker(t, lists)
+	stdout, stderr, err := aptIndexSum(t, path, "golang:1.27.4", "")
+	if err != nil || !regexp.MustCompile(`^[0-9a-f]{64}\n$`).MatchString(stdout) {
+		t.Fatalf("the real probe over one readable index gave %q, %v\n%s", stdout, err, stderr)
+	}
+	if err := os.Mkdir(filepath.Join(lists, "deb.debian.org_debian_dists_trixie_main_binary-amd64_Packages.lz4"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, err = aptIndexSum(t, path, "golang:1.27.4", "")
+	if err == nil {
+		t.Fatalf("the real probe passed with one of two indexes unreadable: %q", stdout)
+	}
+	if stdout != "" || !strings.Contains(stderr, "::error::apt-index-sum: ") || !strings.Contains(stderr, "(exit 5)") {
+		t.Errorf("a partial read gave %q and %q; want no sum and the probe's exit 5", stdout, stderr)
+	}
+}

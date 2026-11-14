@@ -1695,7 +1695,10 @@ devcontainer_bases "$dockerfile" "${APT_BASE_IMAGES:-}" APT_BASE_IMAGES
 
 [ "${#bases[@]}" -gt 0 ] || fail "no base image found in $dockerfile"
 
-# Runs in the base image. A base without apt contributes `none`.
+# Runs in the base image, under its /bin/sh, where the host's pipefail does not
+# reach: sha256sum's status is taken before the sort, so one unreadable index
+# fails the probe (exit 5) instead of yielding the others' checksums. A base
+# without apt contributes `none`.
 # shellcheck disable=SC2016 # expanded by the container's shell
 probe='export LC_ALL=C
 command -v apt-get >/dev/null 2>&1 || { echo none; exit 0; }
@@ -1703,7 +1706,8 @@ apt-get update -qq -o APT::Update::Error-Mode=any >/dev/null || exit 3
 cd /var/lib/apt/lists || exit 4
 set -- *_Packages*
 [ -f "$1" ] || exit 4
-sha256sum "$@" | sort -k2'
+sums=$(sha256sum "$@") || exit 5
+printf "%s\n" "$sums" | sort -k2'
 
 sum_input=
 debian=0
