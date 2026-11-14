@@ -115,9 +115,13 @@
 # apk-index-sum`, the Makefile recipe of scripts/apk-index-sum.sh v1, because
 # the public release ships no shell scripts; so no script joins a shellcheck
 # list. This repository's integration image builds on the Debian Go image,
-# which has no apk, so the recipe prints `none`, the image's tag changes only
-# with the tree, and the Dockerfile declares the ARG with no apk upgrade (the
-# base stage's apt-get upgrade takes Debian's fixes).
+# which has no apk, so the recipe prints `none` and the Dockerfile declares the
+# ARG with no apk upgrade. CUSTOMIZE (main-fix, after main 9ab065b04 shipped
+# linux-libc-dev 6.12.116-1 from a cached base upgrade layer): the same step
+# also runs `make -s apt-index-sum`, the Debian counterpart, into
+# APT_INDEX_SUM, which `make -s it-image` hashes and the integration stage
+# declares before its own apt-get upgrade, so a Debian security fix renames
+# the image and re-runs that upgrade.
 # v1.28.0 (Company Agent ruling 219(3), 2026-10-26): `make deps-check` joins
 # the PR tier as a lint-class gate. Its step in the image job drops the
 # CI_FULL_TIER condition and runs on every event, as `make lint` does, so a
@@ -839,6 +843,8 @@ jobs:
         run: |
           sum=$(make -s apk-index-sum)
           echo "APK_INDEX_SUM=$sum" >> "$GITHUB_ENV"
+          sum=$(make -s apt-index-sum)
+          echo "APT_INDEX_SUM=$sum" >> "$GITHUB_ENV"
 
       - name: Name the integration image
         run: echo "IT_IMAGE=$(make -s it-image)" >> "$GITHUB_ENV"
@@ -1133,6 +1139,8 @@ jobs:
         run: |
           sum=$(make -s apk-index-sum)
           echo "APK_INDEX_SUM=$sum" >> "$GITHUB_ENV"
+          sum=$(make -s apt-index-sum)
+          echo "APT_INDEX_SUM=$sum" >> "$GITHUB_ENV"
 
       - name: Name the integration image
         if: ${{ steps.probe.outputs.has_target == 'true' }}
@@ -1340,6 +1348,8 @@ jobs:
         run: |
           sum=$(make -s apk-index-sum)
           echo "APK_INDEX_SUM=$sum" >> "$GITHUB_ENV"
+          sum=$(make -s apt-index-sum)
+          echo "APT_INDEX_SUM=$sum" >> "$GITHUB_ENV"
 
       # v1.23: the content-addressed integration image (as in the image job).
       - name: Name the integration image
@@ -1515,6 +1525,8 @@ jobs:
         run: |
           sum=$(make -s apk-index-sum)
           echo "APK_INDEX_SUM=$sum" >> "$GITHUB_ENV"
+          sum=$(make -s apt-index-sum)
+          echo "APT_INDEX_SUM=$sum" >> "$GITHUB_ENV"
 
       # v1.23: the content-addressed integration image (as in the image job).
       - name: Name the integration image

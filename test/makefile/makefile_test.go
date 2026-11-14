@@ -953,6 +953,43 @@ func TestDockerBuildPassesTheApkIndexSum(t *testing.T) {
 	}
 }
 
+// The integration image's build takes APT_INDEX_SUM as a build argument and
+// the Dockerfile's integration stage alone declares it, before that stage's
+// apt-get upgrade, so a new Debian index misses the cache from there on and
+// the toolchain image's cache is not keyed by it.
+func TestDockerBuildPassesTheAptIndexSum(t *testing.T) {
+	stdout, stderr := runMake(t, environ(nil, nil), "-n", "docker-build-integration", "IT_IMAGE=go-luks2-ci-it:t")
+	if !strings.Contains(stdout, "--build-arg APT_INDEX_SUM ") {
+		t.Errorf("make -n docker-build-integration lacks --build-arg APT_INDEX_SUM:\n%s%s", stdout, stderr)
+	}
+	stdout, stderr = runMake(t, environ(nil, nil), "-n", "docker-build-toolchain")
+	if strings.Contains(stdout, "APT_INDEX_SUM") {
+		t.Errorf("make -n docker-build-toolchain passes APT_INDEX_SUM:\n%s%s", stdout, stderr)
+	}
+	b, err := os.ReadFile(filepath.Join(repoRoot(t), "build/docker/devcontainer/Dockerfile")) // #nosec G304 -- a fixed file of this repository
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stage := range strings.Split(string(b), "\nFROM ")[1:] {
+		head, _, _ := strings.Cut(stage, "\n")
+		arg := strings.Index(stage, "\nARG APT_INDEX_SUM\n")
+		integration := strings.HasSuffix(head, " AS integration")
+		if (arg >= 0) != integration {
+			t.Errorf("Dockerfile stage %q: declares ARG APT_INDEX_SUM = %v, want %v", head, arg >= 0, integration)
+			continue
+		}
+		if !integration {
+			continue
+		}
+		if !strings.Contains(stage[arg:], "apt-get upgrade -y") {
+			t.Errorf("the integration stage runs no apt-get upgrade after ARG APT_INDEX_SUM, so a new index takes no fixes")
+		}
+		if !strings.Contains(stage[arg:], "apt-get -o APT::Update::Error-Mode=any update") {
+			t.Errorf("the integration stage's apt-get update lacks APT::Update::Error-Mode=any, so a stale index could cache under a new tag")
+		}
+	}
+}
+
 // `make lint` is a gate in CI's image job, so a lint that passes without its
 // linter is the vacuous gate the testing convention forbids: golangci-lint
 // absent FAILS the target, exactly as actionlint absent already does.
