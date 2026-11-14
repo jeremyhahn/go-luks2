@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build build-linux vet-32bit install test test-verbose test-coverage test-integration coverage coverage-report clean fmt vet lint gosec govulncheck vuln trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration test-unit-norace seccomp-diff proto test-pkg docker-build docker-build-cli docker-run deps-check test-fips-mode assert-build-tags toolchain-image it-image apk-index-sum docker-build-toolchain toolchain-run ci-toolchain-run ci-reap-stacks ci-trim-caches
+.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build build-linux vet-32bit install test test-verbose test-coverage test-integration coverage coverage-report clean fmt vet lint gosec govulncheck vuln trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration test-unit-norace seccomp-diff proto test-pkg docker-build docker-build-cli docker-run deps-check test-fips-mode assert-build-tags toolchain-image it-image apk-index-sum apt-index-sum docker-build-toolchain toolchain-run ci-toolchain-run ci-reap-stacks ci-trim-caches
 
 # Default target
 .DEFAULT_GOAL := help
@@ -581,7 +581,7 @@ CONTENT_IMAGE_BUILD = imgtmp="$$(mktemp -d -t imagebuild.XXXXXX)"; \
 # github.com. The four variables are git's standard GIT_CONFIG_* override set
 # plus GOPRIVATE; export them to build against a private module host.
 ITEST_BUILD_ARGS = --secret id=gomodauth$(comma)src="$$stage" \
-	--build-arg GO_BUILD_PROXY --build-arg APK_INDEX_SUM --label $(ITEST_LABEL) \
+	--build-arg GO_BUILD_PROXY --build-arg APK_INDEX_SUM --build-arg APT_INDEX_SUM --label $(ITEST_LABEL) \
 	-f $(DEVCONTAINER_DOCKERFILE) --target integration
 
 docker-build-integration:
@@ -1544,36 +1544,19 @@ TOOLCHAIN_BUILD_ARGS = --secret id=gomodauth$(comma)src="$$stage" \
 toolchain-image: ## Print the content-hashed tag of the toolchain image
 	@echo $(TOOLCHAIN_IMAGE)
 
-# ci-template v1.29: one checksum of the Alpine package indexes the
-# devcontainer build resolves against, which each ci.yml job that names the
-# integration image puts in APK_INDEX_SUM before `make -s it-image`.
-# CUSTOMIZE (ci-template v1.29, which ships scripts/apk-index-sum.sh): a
-# Makefile recipe, because the public release ships no shell scripts (the
-# releasability gate) and the runner has make and docker but no Go. It carries
-# the template's apk-index-sum.sh v1 logic and output contract unchanged; the
-# Dockerfile is APK_DOCKERFILE, the script's argument. Each external base image
-# the Dockerfile's FROM lines name (a global ARG default is substituted;
-# `scratch` and earlier stages are skipped) is run once, as root with every
-# capability dropped but the ones apk needs, to read its /etc/apk/repositories
-# and fetch their APKINDEX files with `apk update`. APK_BASE_IMAGES, space
-# separated, replaces the FROM parse. It prints a sha256 over each base image's
-# name, repository list and index checksums, or `none` when no base image has
-# apk (this repository's Debian base), and fails when a base image cannot be
-# resolved, run or updated: a missing index is never a pass.
-define APK_INDEX_SUM_RECIPE
-dockerfile=${APK_DOCKERFILE:-build/docker/devcontainer/Dockerfile}
-
-fail() {
-  echo "::error::apk-index-sum: $*" >&2
-  exit 1
-}
-
+# devcontainer_bases DOCKERFILE OVERRIDE OVERRIDE_VAR: sets bases to each
+# external base image the Dockerfile's FROM lines name (a global ARG default is
+# substituted; `scratch` and earlier stages are skipped), or to OVERRIDE's
+# space-separated words when OVERRIDE is set. The caller defines fail().
+define DEVCONTAINER_BASES_FN
+devcontainer_bases() {
+local dockerfile=$1 override=$2 override_var=$3
 bases=()
-if [ -n "${APK_BASE_IMAGES:-}" ]; then
-  read -r -a bases <<< "$APK_BASE_IMAGES"
+if [ -n "$override" ]; then
+  read -r -a bases <<< "$override"
 else
   [ -f "$dockerfile" ] || fail "no Dockerfile at $dockerfile"
-  declare -A arg=() stage=() seen=()
+  local -A arg=() stage=() seen=()
   # shellcheck disable=SC2016 # a regex, not an expansion
   ref='\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}|\$([A-Za-z_][A-Za-z0-9_]*)'
   from=0
@@ -1601,7 +1584,7 @@ else
         while [[ $img =~ $ref ]]; do
           n=${BASH_REMATCH[1]:-${BASH_REMATCH[4]}}
           v=${arg[$n]:-${BASH_REMATCH[3]}}
-          [ -n "$v" ] || fail "FROM $img in $dockerfile names \$$n, which has no global ARG default; set APK_BASE_IMAGES"
+          [ -n "$v" ] || fail "FROM $img in $dockerfile names \$$n, which has no global ARG default; set $override_var"
           img=${img/"${BASH_REMATCH[0]}"/$v}
         done
         if [ "${w[$((i + 1))]:-}" != "" ] && [ "${w[$((i + 1))],,}" = as ]; then
@@ -1616,6 +1599,35 @@ else
     esac
   done < <(sed -e ':a' -e '/\\$/N; s/\\\n/ /; ta' -e 's/^[[:space:]]*#.*//' "$dockerfile")
 fi
+
+}
+endef
+
+# ci-template v1.29: one checksum of the Alpine package indexes the
+# devcontainer build resolves against, which each ci.yml job that names the
+# integration image puts in APK_INDEX_SUM before `make -s it-image`.
+# CUSTOMIZE (ci-template v1.29, which ships scripts/apk-index-sum.sh): a
+# Makefile recipe, because the public release ships no shell scripts (the
+# releasability gate) and the runner has make and docker but no Go. It carries
+# the template's apk-index-sum.sh v1 logic and output contract unchanged; the
+# Dockerfile is APK_DOCKERFILE, the script's argument. Each external base image
+# the Dockerfile's FROM lines name (a global ARG default is substituted;
+# `scratch` and earlier stages are skipped) is run once, as root with every
+# capability dropped but the ones apk needs, to read its /etc/apk/repositories
+# and fetch their APKINDEX files with `apk update`. APK_BASE_IMAGES, space
+# separated, replaces the FROM parse. It prints a sha256 over each base image's
+# name, repository list and index checksums, or `none` when no base image has
+# apk (this repository's Debian base), and fails when a base image cannot be
+# resolved, run or updated: a missing index is never a pass.
+define APK_INDEX_SUM_RECIPE
+dockerfile=${APK_DOCKERFILE:-build/docker/devcontainer/Dockerfile}
+
+fail() {
+  echo "::error::apk-index-sum: $*" >&2
+  exit 1
+}
+
+devcontainer_bases "$dockerfile" "${APK_BASE_IMAGES:-}" APK_BASE_IMAGES
 
 [ "${#bases[@]}" -gt 0 ] || fail "no base image found in $dockerfile"
 
@@ -1651,14 +1663,88 @@ endef
 # environment, so make expands none of it; no other recipe changes shell.
 apk-index-sum: SHELL := /bin/bash
 apk-index-sum: .SHELLFLAGS := -euo pipefail -c
+apk-index-sum: export DEVCONTAINER_BASES_SH := $(value DEVCONTAINER_BASES_FN)
 apk-index-sum: export APK_INDEX_SUM_SH := $(value APK_INDEX_SUM_RECIPE)
 apk-index-sum: ## Print the Alpine package index checksum of the devcontainer's base images (none without apk)
-	@eval "$$APK_INDEX_SUM_SH"
+	@eval "$$DEVCONTAINER_BASES_SH"; eval "$$APK_INDEX_SUM_SH"
+
+# The Debian counterpart of apk-index-sum (xkey-android's apt-index-sum.sh, as a
+# recipe for the same releasability reason): one checksum of the Debian package
+# indexes the devcontainer build resolves against. Each ci.yml job that names
+# the integration image puts it in APT_INDEX_SUM before `make -s it-image`; the
+# tag hashes it and the build takes it as a build argument, so a Debian security
+# fix changes the tag and the integration stage's `apt-get upgrade` runs again
+# instead of reusing a cached layer (main 9ab065b04 shipped linux-libc-dev
+# 6.12.116-1 from such a layer under a new base digest). Each base image the
+# Dockerfile's FROM lines name (APT_DOCKERFILE; APT_BASE_IMAGES replaces the
+# parse) is run once, as root with every capability dropped but the ones apt
+# needs, to fetch its own sources' indexes with `apt-get update` under
+# APT::Update::Error-Mode=any. It prints a sha256 over each base image's name
+# and the sha256 of each /var/lib/apt/lists *_Packages* file, sorted by name, or
+# `none` when no base image has apt, and fails when a base image cannot be
+# resolved, run or updated: a missing index is never a pass.
+define APT_INDEX_SUM_RECIPE
+dockerfile=${APT_DOCKERFILE:-build/docker/devcontainer/Dockerfile}
+
+fail() {
+  echo "::error::apt-index-sum: $*" >&2
+  exit 1
+}
+
+devcontainer_bases "$dockerfile" "${APT_BASE_IMAGES:-}" APT_BASE_IMAGES
+
+[ "${#bases[@]}" -gt 0 ] || fail "no base image found in $dockerfile"
+
+# Runs in the base image, under its /bin/sh, where the host's pipefail does not
+# reach: sha256sum's status is taken before the sort, so one unreadable index
+# fails the probe (exit 5) instead of yielding the others' checksums. A base
+# without apt contributes `none`.
+# shellcheck disable=SC2016 # expanded by the container's shell
+probe='export LC_ALL=C
+command -v apt-get >/dev/null 2>&1 || { echo none; exit 0; }
+apt-get update -qq -o APT::Update::Error-Mode=any >/dev/null || exit 3
+cd /var/lib/apt/lists || exit 4
+set -- *_Packages*
+[ -f "$1" ] || exit 4
+sums=$(sha256sum "$@") || exit 5
+printf "%s\n" "$sums" | sort -k2'
+
+sum_input=
+debian=0
+for img in "${bases[@]}"; do
+  out=$(docker run --rm --pull missing --network bridge --user 0 \
+          --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
+          --cap-add SETUID --cap-add SETGID \
+          --security-opt no-new-privileges --entrypoint /bin/sh "$img" -c "$probe") ||
+    fail "reading the Debian package index of $img failed (exit $?)"
+  if [ "$out" != none ]; then
+    debian=1
+    while read -r sum file; do
+      [[ $sum =~ ^[0-9a-f]{64}$ && $file == *_Packages* ]] || fail "$img printed '$sum $file', not a _Packages checksum"
+    done <<< "$out"
+  fi
+  echo "apt-index-sum: $img: $(printf '%s\n' "$out" | grep -c '_Packages' || true) index file(s)" >&2
+  sum_input+="$img"$'\n'"$out"$'\n'
+done
+
+if [ "$debian" = 0 ]; then
+  echo none
+else
+  printf '%s' "$sum_input" | sha256sum | cut -d' ' -f1
+fi
+endef
+
+apt-index-sum: SHELL := /bin/bash
+apt-index-sum: .SHELLFLAGS := -euo pipefail -c
+apt-index-sum: export DEVCONTAINER_BASES_SH := $(value DEVCONTAINER_BASES_FN)
+apt-index-sum: export APT_INDEX_SUM_SH := $(value APT_INDEX_SUM_RECIPE)
+apt-index-sum: ## Print the Debian package index checksum of the devcontainer's base images (none without apt)
+	@eval "$$DEVCONTAINER_BASES_SH"; eval "$$APT_INDEX_SUM_SH"
 
 # ci-standard.md §9 (ci-template v1.23): the integration image is named by its
 # content, <CI_STACK_PREFIX>it:<hash>, never by its run, so every job and run
 # of one tree on a runner builds it once and reuses it. The hash covers the
-# build arguments that change the image (GO_BUILD_PROXY, APK_INDEX_SUM, the
+# build arguments that change the image (GO_BUILD_PROXY, APK_INDEX_SUM, APT_INDEX_SUM, the
 # label, the target) and the whole build context: the commit's tree and, on a dirty
 # checkout, the diff and every untracked file .gitignore keeps. No job removes
 # the image; ci-reap-stacks ages it out. It fails closed: when git cannot
@@ -1677,6 +1763,7 @@ it-image: ## Print the content-addressed tag of the integration image
 	xargs -0r sha256sum -- < "$$d/untracked" >> "$$d/in" || fail 'hashing the untracked files'; \
 	printf 'GO_BUILD_PROXY=%s\nlabel=%s\ntarget=integration\n' "$${GO_BUILD_PROXY:-}" '$(ITEST_LABEL)' >> "$$d/in"; \
 	printf 'APK_INDEX_SUM=%s\n' "$${APK_INDEX_SUM:-}" >> "$$d/in"; \
+	printf 'APT_INDEX_SUM=%s\n' "$${APT_INDEX_SUM:-}" >> "$$d/in"; \
 	h=$$(sha256sum < "$$d/in" | cut -c1-16); \
 	case "$$h" in *[!0-9a-f]*|'') fail 'sha256sum' ;; esac; \
 	echo "$(CI_STACK_PREFIX)it:$$h"

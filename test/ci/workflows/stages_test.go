@@ -152,6 +152,8 @@ func TestDepsCheckRunsOnEveryEvent(t *testing.T) {
 // the integration image first reads the Alpine package index checksum into
 // APK_INDEX_SUM, which `make -s it-image` hashes, in the step right before
 // "Name the integration image". The script ships beside the template, v1.
+// The same step reads the Debian package index checksum into APT_INDEX_SUM
+// (make -s apt-index-sum), which the tag hashes too.
 func TestApkIndexSumBeforeTheImageName(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
 	for _, name := range []string{"image", "lint-gates", "integration", "soak"} {
@@ -171,7 +173,8 @@ func TestApkIndexSumBeforeTheImageName(t *testing.T) {
 			continue
 		}
 		run := stepRun(t, j)["Read the Alpine package index"]
-		for _, want := range []string{"sum=$(make -s apk-index-sum)\n", `echo "APK_INDEX_SUM=$sum" >> "$GITHUB_ENV"`} {
+		for _, want := range []string{"sum=$(make -s apk-index-sum)\n", `echo "APK_INDEX_SUM=$sum" >> "$GITHUB_ENV"`,
+			"sum=$(make -s apt-index-sum)\n", `echo "APT_INDEX_SUM=$sum" >> "$GITHUB_ENV"`} {
 			if !strings.Contains(run, want) {
 				t.Errorf("%s's Read the Alpine package index step lacks %q: %q", name, want, run)
 			}
@@ -543,11 +546,12 @@ var runnerJobs = []string{"ci-gate"}
 // suite under compose, print an image's tag (it-image: ci-template v1.23),
 // reap what a dead job left, trim the cache volumes (ci-template v1.22), or
 // read the base images' Alpine package index with docker (apk-index-sum:
-// ci-template v1.29's script as a recipe). Everything else -- every stage, and every check beside one -- is a CMD for
+// ci-template v1.29's script as a recipe) or their Debian package index
+// (apt-index-sum). Everything else -- every stage, and every check beside one -- is a CMD for
 // ci-toolchain-run. Soak's "$SOAK_TARGET" is read from its job's env.
 var runnerTargets = []string{
 	"ci-toolchain-run", "ci-reap-stacks", "ci-trim-caches", "docker-build", "docker-build-toolchain",
-	"docker-build-integration", "toolchain-image", "it-image", "apk-index-sum", "integration-test",
+	"docker-build-integration", "toolchain-image", "it-image", "apk-index-sum", "apt-index-sum", "integration-test",
 }
 
 var (
