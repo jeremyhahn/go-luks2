@@ -784,6 +784,30 @@ func TestITImageHashesTheApkIndexSum(t *testing.T) {
 	}
 }
 
+// `make -s it-image` hashes APT_INDEX_SUM, the Debian package index checksum,
+// so a Debian security fix renames the integration image and the "tag is the
+// content" reuse cannot keep an image built from a stale index.
+func TestITImageHashesTheAptIndexSum(t *testing.T) {
+	envWith := func(sum string) []string {
+		return environ([]string{"GO_BUILD_PROXY", "ITEST_IMAGE", "GIT_DIR", "GIT_WORK_TREE", "APK_INDEX_SUM", "APT_INDEX_SUM"}, map[string]string{
+			"PATH": os.Getenv("PATH"), "GIT_CONFIG_GLOBAL": os.DevNull, "GIT_CONFIG_NOSYSTEM": "1", "APK_INDEX_SUM": "none", "APT_INDEX_SUM": sum,
+		})
+	}
+	repo := itImageTree(t, envWith(""), true)
+	name := func(sum string) string {
+		t.Helper()
+		stdout, _ := runMakeIn(t, repo, envWith(sum), "-s", "it-image")
+		return strings.TrimSpace(stdout)
+	}
+	x, y := name("x"), name("y")
+	if x == y {
+		t.Errorf("APT_INDEX_SUM x and y name the same image %s", x)
+	}
+	if again := name("x"); again != x {
+		t.Errorf("APT_INDEX_SUM x names %s, then %s", x, again)
+	}
+}
+
 // apkDocker is a docker stand-in for `make -s apk-index-sum`. Each `docker
 // run` appends its image, the argument after `--entrypoint /bin/sh`, to the
 // returned log, prints the returned output file and exits with exit.
@@ -822,6 +846,20 @@ func apkIndexSum(t *testing.T, path, bases, dockerfile string) (stdout, stderr s
 		set["APK_DOCKERFILE"] = dockerfile
 	}
 	return runMakeErr(t, environ([]string{"APK_BASE_IMAGES", "APK_DOCKERFILE"}, set), "-s", "apk-index-sum")
+}
+
+// aptIndexSum runs `make -s apt-index-sum` with docker on path and the given
+// APT_BASE_IMAGES and APT_DOCKERFILE (unset when empty).
+func aptIndexSum(t *testing.T, path, bases, dockerfile string) (stdout, stderr string, err error) {
+	t.Helper()
+	set := map[string]string{"PATH": path}
+	if bases != "" {
+		set["APT_BASE_IMAGES"] = bases
+	}
+	if dockerfile != "" {
+		set["APT_DOCKERFILE"] = dockerfile
+	}
+	return runMakeErr(t, environ([]string{"APT_BASE_IMAGES", "APT_DOCKERFILE"}, set), "-s", "apt-index-sum")
 }
 
 func readImages(t *testing.T, log string) []string {
@@ -1494,5 +1532,87 @@ func TestModuleEnvFileThatIsNotAFileFailsTheBuild(t *testing.T) {
 	}
 	if _, ok := called(logLines(t, log), "build "); ok {
 		t.Error("docker build ran without the credentials file")
+	}
+}
+
+// apt-index-sum prints `none` when no base image has apt, and reads every base
+// image of the devcontainer Dockerfile through the shared FROM parse.
+func TestAptIndexSumPrintsNoneWithoutApt(t *testing.T) {
+	path, log, _ := apkDocker(t, 0)
+	stdout, stderr, err := aptIndexSum(t, path, "", "")
+	if err != nil || stdout != "none\n" {
+		t.Fatalf("make -s apt-index-sum = %q, %v; want none\n%s", stdout, err, stderr)
+	}
+	if images := readImages(t, log); len(images) == 0 || !strings.HasPrefix(images[0], "golang:") {
+		t.Errorf("apt-index-sum ran %v, want the devcontainer's golang base image", images)
+	}
+}
+
+// The sum is a sha256 over each base image's name and its _Packages checksums,
+// so a new Debian index changes it and an unchanged one does not.
+func TestAptIndexSumHashesTheIndex(t *testing.T) {
+	path, _, out := apkDocker(t, 0)
+	index := func(sum string) string {
+		return sum + " deb.debian.org_debian_dists_trixie-updates_main_binary-amd64_Packages.lz4\n" +
+			strings.Repeat("c", 64) + " deb.debian.org_debian_dists_trixie_main_binary-amd64_Packages.lz4\n"
+	}
+	sum := func(probe string) string {
+		t.Helper()
+		if err := os.WriteFile(out, []byte(probe), 0o600); err != nil {
+			t.Fatalf("writing the stand-in's output: %v", err)
+		}
+		stdout, stderr, err := aptIndexSum(t, path, "golang:1.27.4", "")
+		if err != nil {
+			t.Fatalf("make -s apt-index-sum: %v\n%s", err, stderr)
+		}
+		return stdout
+	}
+	a := index(strings.Repeat("a", 64))
+	got := sum(a)
+	if want := fmt.Sprintf("%x\n", sha256.Sum256([]byte("golang:1.27.4\n"+a))); got != want {
+		t.Errorf("make -s apt-index-sum = %q, want %q", got, want)
+	}
+	if again := sum(a); again != got {
+		t.Errorf("the same index summed to %q, then %q", got, again)
+	}
+	if moved := sum(index(strings.Repeat("b", 64))); moved == got {
+		t.Errorf("a new _Packages index left the sum at %q", got)
+	}
+}
+
+// A base image whose index cannot be refreshed fails the target, and so does a
+// probe line that is not a _Packages checksum: a missing index is never a pass.
+func TestAptIndexSumFailsWhenTheIndexCannotBeRead(t *testing.T) {
+	t.Run("apt-get update fails", func(t *testing.T) {
+		path, _, _ := apkDocker(t, 3)
+		stdout, stderr, err := aptIndexSum(t, path, "golang:1.27.4", "")
+		if err == nil {
+			t.Fatalf("make -s apt-index-sum passed with docker exiting 3: %q", stdout)
+		}
+		if stdout != "" || !strings.Contains(stderr, "::error::apt-index-sum: ") {
+			t.Errorf("a failed read printed %q and %q; want no sum and an ::error:: line", stdout, stderr)
+		}
+	})
+	t.Run("a malformed probe line", func(t *testing.T) {
+		path, _, out := apkDocker(t, 0)
+		if err := os.WriteFile(out, []byte("not-a-sum Release\n"), 0o600); err != nil {
+			t.Fatalf("writing the stand-in's output: %v", err)
+		}
+		stdout, stderr, err := aptIndexSum(t, path, "golang:1.27.4", "")
+		if err == nil || stdout != "" || !strings.Contains(stderr, "not a _Packages checksum") {
+			t.Errorf("a malformed probe gave %q, %v, %q; want a failure naming it", stdout, err, stderr)
+		}
+	})
+}
+
+// APT_BASE_IMAGES replaces the Dockerfile parse, as APK_BASE_IMAGES does.
+func TestAptIndexSumReadsTheBaseImages(t *testing.T) {
+	path, log, _ := apkDocker(t, 0)
+	missing := filepath.Join(t.TempDir(), "Dockerfile")
+	if stdout, stderr, err := aptIndexSum(t, path, "a:1 b:2", missing); err != nil || stdout != "none\n" {
+		t.Fatalf("make -s apt-index-sum = %q, %v\n%s", stdout, err, stderr)
+	}
+	if got := readImages(t, log); !slices.Equal(got, []string{"a:1", "b:2"}) {
+		t.Errorf("docker ran %v, want [a:1 b:2]", got)
 	}
 }
