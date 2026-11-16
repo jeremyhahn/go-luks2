@@ -3000,6 +3000,32 @@ jobs:
               failure|cancelled) fail "the Codex review job ended $REVIEW_RESULT; an earlier approval is not accepted in its place" ;;
             esac
           }
+          # CUSTOMIZE: local fix pending upstream (template v5.11.3)
+          # Codex P1: a requested re-review (an effort: label; an agent: or
+          # model: label too unless agent:opencode routes it, as the review
+          # job's again=1) voids every approval older than it, in every later
+          # run: one whose review job is skipped (an unrelated label) does not
+          # accept the approval the re-review was asked to replace. Gitea's
+          # timeline marks a label added or removed alike; both count. Times
+          # to epoch seconds, Z or an offset; anything else fails.
+          jq_epoch='def epoch: capture("^(?<d>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(\\.[0-9]+)?(?<z>Z|[+-][0-9]{2}:?[0-9]{2})$")
+            | (.d + "Z" | fromdateiso8601) - (if .z == "Z" then 0 else (.z[0:1] + "1" | tonumber) * ((.z[1:3] | tonumber) * 3600 + (.z[-2:] | tonumber) * 60) end);'
+          rereview_since() { # -> epoch of the latest re-review request, or null
+            local opencode events
+            opencode=$(get_all "/issues/$PR_NUM/labels?" | jq 'any(.[]; .name == "agent:opencode")') ||
+              fail "cannot read the labels of PR $PR_NUM"
+            if [ "$FORGE" = github ]; then
+              events=$(get_all "/issues/$PR_NUM/events?") || fail "cannot read the label events of PR $PR_NUM"
+            else
+              events=$(get_all "/issues/$PR_NUM/timeline?") || fail "cannot read the timeline of PR $PR_NUM"
+            fi
+            jq --argjson oc "$opencode" "$jq_epoch"'
+              [ .[] | select(.event == "labeled" or .type == "label")
+                    | (.label.name // "") as $l
+                    | select(($l | startswith("effort:")) or (($oc | not) and ($l | test("^(agent|model):"))))
+                    | .created_at | epoch ] | max' <<<"$events" ||
+              fail "cannot read the label events of PR $PR_NUM"
+          }
 
           # (a) The no-review list. The change is pinned to the event: on
           # GitHub the compare of $BASE_SHA...$EVENT_SHA (merge base to head);
@@ -3064,21 +3090,29 @@ jobs:
           # CUSTOMIZE: local fix pending upstream (template v5.11.3)
           check_base
           check_review_result
+          since=$(rereview_since) || fail "cannot read the re-review requests of PR $PR_NUM"
 
           # (b) The reviewer's latest standing verdict on this head. PENDING,
           # COMMENTED and dismissed reviews are no verdict.
           # CUSTOMIZE: local fix pending upstream (template v5.11.3)
           # Codex P1: any undismissed REQUEST_CHANGES on the head stands, as
           # the review job's guards hold it; a later APPROVED does not hide it.
-          verdict=$(get_all "/pulls/$PR_NUM/reviews?" | jq -r --arg u "$REVIEWER" --arg s "$EVENT_SHA" '
+          # CUSTOMIZE: local fix pending upstream (template v5.11.3)
+          # Codex P1: an approval no newer than $since is STALE.
+          verdict=$(get_all "/pulls/$PR_NUM/reviews?" | jq -r --arg u "$REVIEWER" --arg s "$EVENT_SHA" --argjson since "$since" "$jq_epoch"'
               [ .[] | (if .state == "CHANGES_REQUESTED" then .state = "REQUEST_CHANGES" else . end)
                     | select(.user.login == $u and .commit_id == $s and (.dismissed | not)
                              and (.state == "APPROVED" or .state == "REQUEST_CHANGES")) ]
               | if any(.[]; .state == "REQUEST_CHANGES") then "REQUEST_CHANGES"
-                else (sort_by(.submitted_at // "", .id) | last | .state // "NONE") end') ||
+                else (sort_by(.submitted_at // "", .id) | last
+                      | if . == null then "NONE"
+                        elif .state == "APPROVED" and $since != null and (.submitted_at | epoch) <= $since then "STALE"
+                        else .state // "NONE" end) end') ||
             fail "cannot read the reviews of PR $PR_NUM"
           case "$verdict" in
             APPROVED) echo "$REVIEWER approved $EVENT_SHA." ;;
+            # CUSTOMIZE: local fix pending upstream (template v5.11.3)
+            STALE) fail "a requested re-review has not approved head $EVENT_SHA: the $REVIEWER approval predates the latest effort:, agent: or model: label. Wait for that review, or add the label again to request one" ;;
             REQUEST_CHANGES) fail "$REVIEWER requested changes on $EVENT_SHA" ;;
             *) fail "no $REVIEWER approval of $EVENT_SHA. A code change needs a Codex review: label the PR code-review and task:ready (ruling 589)" ;;
           esac

@@ -167,12 +167,17 @@ func gateVerdict(t *testing.T, reviews string) string {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not installed")
 	}
-	m := regexp.MustCompile(`(?s)verdict=\$\(get_all "/pulls/\$PR_NUM/reviews\?" \| jq -r --arg u "\$REVIEWER" --arg s "\$EVENT_SHA" '(.*?)'\)`).
-		FindStringSubmatch(gateStep(t))
+	g := gateStep(t)
+	m := regexp.MustCompile(`(?s)verdict=\$\(get_all "/pulls/\$PR_NUM/reviews\?" \| jq -r --arg u "\$REVIEWER" --arg s "\$EVENT_SHA" --argjson since "\$since" "\$jq_epoch"'(.*?)'\)`).
+		FindStringSubmatch(g)
 	if m == nil {
 		t.Fatalf("gate: no verdict jq program")
 	}
-	cmd := exec.Command("jq", "-r", "--arg", "u", "codex", "--arg", "s", "abc", m[1])
+	e := regexp.MustCompile(`(?s)\n *jq_epoch='(.*?)'\n`).FindStringSubmatch(g)
+	if e == nil {
+		t.Fatalf("gate: no jq_epoch")
+	}
+	cmd := exec.Command("jq", "-r", "--arg", "u", "codex", "--arg", "s", "abc", "--argjson", "since", "null", e[1]+m[1])
 	cmd.Stdin = strings.NewReader(reviews)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -235,6 +240,136 @@ func TestGateRefusesAFailedReviewJob(t *testing.T) {
 		out, _ := cmd.CombinedOutput()
 		if passed := cmd.ProcessState.ExitCode() == 0 && strings.Contains(string(out), "passed"); passed != c.ok {
 			t.Errorf("review job %s: passed=%v, want %v (%s)", c.result, passed, c.ok, out)
+		}
+	}
+}
+
+// fakeCurl answers the gate's curl from $FIX: the API path, query cut and
+// each / made _, names the fixture; a missing one answers 404. A page past
+// the first of a paged list is empty.
+const fakeCurl = `#!/usr/bin/env bash
+out= url=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift 2 ;;
+    -w|-H|--proto|--max-time|--retry) shift 2 ;;
+    http*) url=$1; shift ;;
+    *) shift ;;
+  esac
+done
+p=${url#"$REPO_API"}
+case "$p" in *[?\&]page=[2-9]*|*[?\&]page=[1-9][0-9]*) echo '[]' > "$out"; printf 200; exit 0 ;; esac
+f="$FIX/$(printf '%s' "${p%%\?*}" | tr / _)"
+if [ -f "$f" ]; then cp "$f" "$out"; printf 200; else echo '{}' > "$out"; printf 404; fi
+`
+
+// runGate runs the gate step's script against fixtures (API path, with /
+// made _, to body) for a code change on PR 1 at head h into main.
+func runGate(t *testing.T, fix map[string]string) (int, string) {
+	t.Helper()
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not installed")
+	}
+	g := gateStep(t)
+	i := strings.Index(g, "run: |\n")
+	if i < 0 {
+		t.Fatalf("gate: no run script")
+	}
+	var script strings.Builder
+	for _, l := range strings.Split(g[i+len("run: |\n"):], "\n") {
+		script.WriteString(strings.TrimPrefix(l, "          ") + "\n")
+	}
+	m := regexp.MustCompile(`(?m)^\s+NO_REVIEW_PATHS: '([^']*)'\s*$`).FindStringSubmatch(codeReview(t))
+	if m == nil {
+		t.Fatalf("gate: no NO_REVIEW_PATHS")
+	}
+	dir := t.TempDir()
+	bin, fixDir, work := filepath.Join(dir, "bin"), filepath.Join(dir, "fix"), filepath.Join(dir, "work")
+	for _, d := range []string{bin, fixDir, work} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(bin, "curl"), []byte(fakeCurl), 0o700); err != nil { //nolint:gosec // a test stub on PATH
+		t.Fatal(err)
+	}
+	base, head := strings.Repeat("b", 40), strings.Repeat("a", 40)
+	all := map[string]string{
+		"_actions_runs_42":                `{"workflow_id":7}`,
+		"_actions_workflows_7_runs":       `{"workflow_runs":[]}`,
+		"_compare_" + base + "..." + head: `{"files":[{"filename":"main.go"}]}`,
+		"_pulls_1":                        `{"base":{"ref":"main"},"head":{"sha":"` + head + `"}}`,
+	}
+	for k, v := range fix {
+		all[k] = v
+	}
+	for k, v := range all {
+		if err := os.WriteFile(filepath.Join(fixDir, k), []byte(v), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join(dir, "gate.sh")
+	if err := os.WriteFile(path, []byte(script.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", path)
+	cmd.Dir = work
+	cmd.Env = append(os.Environ(),
+		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"FIX="+fixDir, "GITHUB_RUN_ID=42", "GH_API_TOKEN=x", "FORGE=github", "REVIEWER=codex",
+		"REPO_API=https://api.example/repos/o/r", "PR_NUM=1", "EVENT_SHA="+head,
+		"BASE_SHA="+base, "BASE_REF=main", "REVIEW_RESULT=skipped", "NO_REVIEW_PATHS="+m[1])
+	out, _ := cmd.CombinedOutput()
+	return cmd.ProcessState.ExitCode(), string(out)
+}
+
+// Codex P1: a requested re-review (an effort: label, or under codex an
+// agent: or model: label) voids every approval of the head older than it,
+// across runs: a later run whose review job is skipped (an unrelated label)
+// does not accept the old approval. A failed read of the events fails.
+func TestGateVoidsAnApprovalOlderThanAReReviewRequest(t *testing.T) {
+	head := strings.Repeat("a", 40)
+	approval := func(id int, at string) string {
+		return fmt.Sprintf(`{"id":%d,"user":{"login":"codex"},"commit_id":%q,"state":"APPROVED","submitted_at":%q}`, id, head, at)
+	}
+	labeled := func(name, at string) string {
+		return fmt.Sprintf(`{"event":"labeled","label":{"name":%q},"created_at":%q}`, name, at)
+	}
+	labels := `[{"name":"code-review"},{"name":"task:ready"}]`
+	for _, c := range []struct {
+		name     string
+		fix      map[string]string
+		pass     bool
+		mentions string
+	}{
+		{"approval, then effort:high, no newer approval", map[string]string{
+			"_pulls_1_reviews": "[" + approval(1, "2026-11-16T01:00:00Z") + "]",
+			"_issues_1_labels": labels,
+			"_issues_1_events": "[" + labeled("code-review", "2026-11-16T00:00:00Z") + "," + labeled("effort:high", "2026-11-16T02:00:00Z") + "," + labeled("priority:low", "2026-11-16T03:00:00Z") + "]",
+		}, false, "a requested re-review has not approved head " + head},
+		{"approval after effort:high", map[string]string{
+			"_pulls_1_reviews": "[" + approval(1, "2026-11-16T01:00:00Z") + "," + approval(2, "2026-11-16T04:00:00Z") + "]",
+			"_issues_1_labels": labels,
+			"_issues_1_events": "[" + labeled("effort:high", "2026-11-16T02:00:00Z") + "]",
+		}, true, "codex approved " + head},
+		{"no re-review label", map[string]string{
+			"_pulls_1_reviews": "[" + approval(1, "2026-11-16T01:00:00Z") + "]",
+			"_issues_1_labels": labels,
+			"_issues_1_events": "[" + labeled("code-review", "2026-11-16T00:00:00Z") + "," + labeled("priority:low", "2026-11-16T03:00:00Z") + "]",
+		}, true, "codex approved " + head},
+		{"events read fails", map[string]string{
+			"_pulls_1_reviews": "[" + approval(1, "2026-11-16T01:00:00Z") + "]",
+			"_issues_1_labels": labels,
+		}, false, "HTTP 404"},
+		{"model: under agent:opencode routes opencode, not codex", map[string]string{
+			"_pulls_1_reviews": "[" + approval(1, "2026-11-16T01:00:00Z") + "]",
+			"_issues_1_labels": `[{"name":"code-review"},{"name":"agent:opencode"}]`,
+			"_issues_1_events": "[" + labeled("agent:opencode", "2026-11-16T02:00:00Z") + "," + labeled("model:qwen", "2026-11-16T03:00:00Z") + "]",
+		}, true, "codex approved " + head},
+	} {
+		code, out := runGate(t, c.fix)
+		if (code == 0) != c.pass || !strings.Contains(out, c.mentions) {
+			t.Errorf("%s: exit %d, want pass=%v and %q in:\n%s", c.name, code, c.pass, c.mentions, out)
 		}
 	}
 }
