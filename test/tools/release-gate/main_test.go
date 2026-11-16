@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -76,18 +77,36 @@ type ghRun struct {
 
 // fakeGitHub serves the Actions API for ci.yml's runs and their jobs.
 type fakeGitHub struct {
-	runs  []*ghRun
+	runs  []*ghRun // ci.yml
+	sig   []*ghRun // signatures.yml
 	paths []string
 	auth  []string
+}
+
+// sigFile and sigJob are the separate signatures workflow and its job the
+// gate requires besides CI Gate.
+const (
+	sigFile = "signatures.yml"
+	sigJob  = "Signatures"
+)
+
+// signaturesRun is the push-to-main signatures.yml run on sha that ended
+// with its Signatures job in conclusion.
+func signaturesRun(conclusion string) []*ghRun {
+	return []*ghRun{{id: 900, sha: sha, event: "push", branch: "main", status: "completed",
+		conclusion: conclusion, jobs: [][][3]string{{{sigJob, "completed", conclusion}}}}}
 }
 
 func (g *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	g.paths = append(g.paths, r.URL.RequestURI())
 	g.auth = append(g.auth, r.Header.Get("Authorization"))
-	runsPath := "/repos/owner/repo/actions/workflows/" + ciFile + "/runs"
-	if r.URL.Path == runsPath {
+	byWorkflow := map[string][]*ghRun{
+		"/repos/owner/repo/actions/workflows/" + ciFile + "/runs":  g.runs,
+		"/repos/owner/repo/actions/workflows/" + sigFile + "/runs": g.sig,
+	}
+	if runs, ok := byWorkflow[r.URL.Path]; ok {
 		var out githubRuns
-		for _, run := range g.runs {
+		for _, run := range runs {
 			out.WorkflowRuns = append(out.WorkflowRuns, struct {
 				ID         int64  `json:"id"`
 				HeadSHA    string `json:"head_sha"`
@@ -100,7 +119,7 @@ func (g *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(out)
 		return
 	}
-	for _, run := range g.runs {
+	for _, run := range append(append([]*ghRun{}, g.runs...), g.sig...) {
 		if r.URL.Path != fmt.Sprintf("/repos/owner/repo/actions/runs/%d/jobs", run.id) {
 			continue
 		}
@@ -425,7 +444,7 @@ func TestGitHubGatePassed(t *testing.T) {
 			{{"Lint", "completed", "success"}, {gateJob, "in_progress", ""}},
 			{{"Lint", "completed", "success"}, {gateJob, "completed", "success"}},
 		}}
-	g := &fakeGitHub{runs: []*ghRun{push}}
+	g := &fakeGitHub{runs: []*ghRun{push}, sig: signaturesRun("success")}
 	srv := httptest.NewServer(g)
 	defer srv.Close()
 	clk := clock.NewFake(t)
@@ -446,6 +465,69 @@ func TestGitHubGatePassed(t *testing.T) {
 	}
 	if len(clk.Waits()) != 2 {
 		t.Errorf("sleeps = %d, want 2 (gate job not created, then running)", len(clk.Waits()))
+	}
+}
+
+// greenCI is a finished push-to-main ci.yml run on sha whose CI Gate passed.
+func greenCI() []*ghRun {
+	return []*ghRun{{id: 7, sha: sha, event: "push", branch: "main", status: "completed",
+		conclusion: "success", jobs: [][][3]string{{{gateJob, "completed", "success"}}}}}
+}
+
+// Signatures runs in its own workflow, outside CI Gate: a release needs both.
+func TestGitHubGateAndSignaturesPassed(t *testing.T) {
+	g := &fakeGitHub{runs: greenCI(), sig: signaturesRun("success")}
+	srv := httptest.NewServer(g)
+	defer srv.Close()
+	clk := clock.NewFake(t)
+	h, _ := testHost(t, srv, githubServer, 0, clk)
+
+	code, out, stderr := run(t, h, args())
+	if code != 0 {
+		t.Fatalf("exit %d\n%s%s", code, out, stderr)
+	}
+	want := "/repos/owner/repo/actions/workflows/" + sigFile + "/runs?head_sha=" + sha + "&event=push&branch=main&per_page=100"
+	if !slices.Contains(g.paths, want) {
+		t.Errorf("paths = %v, want one reading %s", g.paths, want)
+	}
+	if !strings.Contains(out, sigFile+" / "+sigJob) {
+		t.Errorf("output does not report the Signatures gate:\n%s", out)
+	}
+}
+
+func TestGitHubSignaturesFailedRefuses(t *testing.T) {
+	for _, conclusion := range []string{"failure", ghCanceled} {
+		t.Run(conclusion, func(t *testing.T) {
+			g := &fakeGitHub{runs: greenCI(), sig: signaturesRun(conclusion)}
+			srv := httptest.NewServer(g)
+			defer srv.Close()
+			clk := clock.NewFake(t)
+			h, _ := testHost(t, srv, githubServer, 0, clk)
+
+			var out, errb bytes.Buffer
+			req, _ := parseArgs(args(), &errb)
+			err := gate(&out, h, req)
+			var failed *GateFailedError
+			if !errors.As(err, &failed) || failed.State != conclusion || !strings.Contains(failed.Gate, sigJob) {
+				t.Fatalf("err = %v, want *GateFailedError(%s) naming %s", err, conclusion, sigJob)
+			}
+		})
+	}
+}
+
+func TestGitHubSignaturesMissingRefuses(t *testing.T) {
+	g := &fakeGitHub{runs: greenCI()}
+	srv := httptest.NewServer(g)
+	defer srv.Close()
+	clk := clock.NewFake(t)
+	h, _ := testHost(t, srv, githubServer, 0, clk)
+
+	var out, errb bytes.Buffer
+	req, _ := parseArgs(args(), &errb)
+	err := gate(&out, h, req)
+	var timeout *GateTimeoutError
+	if !errors.As(err, &timeout) || !strings.Contains(timeout.Gate, sigJob) {
+		t.Fatalf("err = %v, want *GateTimeoutError naming %s", err, sigJob)
 	}
 }
 
@@ -488,7 +570,7 @@ func TestGitHubGateUsesTheLatestRun(t *testing.T) {
 			jobs: [][][3]string{{{gateJob, "completed", ghCanceled}}}},
 		{id: 4, sha: sha, event: "push", branch: "main", status: "completed",
 			jobs: [][][3]string{{{gateJob, "completed", "success"}}}},
-	}}
+	}, sig: signaturesRun("success")}
 	srv := httptest.NewServer(g)
 	defer srv.Close()
 	clk := clock.NewFake(t)
