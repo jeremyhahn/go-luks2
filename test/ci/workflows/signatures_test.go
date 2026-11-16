@@ -524,6 +524,58 @@ func TestSignaturesWorkflowRunsFromTheBase(t *testing.T) {
 	}
 }
 
+// The checkout keeps persist-credentials false, so git in the verifier holds
+// no credential: a fetch of the pull request's objects would run anonymously
+// and fail on a private repository. Each fetch goes through authgit, which
+// hands git the job token as an http.extraheader through the environment of
+// that one command, never argv, .git/config or the log.
+func TestSignaturesPullRequestFetchesCarryScopedAuth(t *testing.T) {
+	text := job(t, readFile(t, signaturesWorkflow), "signatures")
+	if !strings.Contains(text, "          persist-credentials: false\n") {
+		t.Error("the Signatures checkout no longer sets persist-credentials: false")
+	}
+	if !strings.Contains(text, "          GH_TOKEN: ${{ github.token }}\n") {
+		t.Error("the signatures step's GH_TOKEN is not the job token")
+	}
+	script := signaturesScript(t)
+	const helper = `authgit() { GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraheader ` +
+		`GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" git "$@"; }`
+	if !strings.Contains(script, helper+"\n") {
+		t.Errorf("the verifier lacks the scoped-auth helper\n%s", helper)
+	}
+	fetches, headers := 0, 0
+	for _, l := range strings.Split(script, "\n") {
+		s := strings.TrimSpace(l)
+		if strings.HasPrefix(s, "#") {
+			continue
+		}
+		if strings.Contains(s, "extraheader") {
+			headers++
+		}
+		if !strings.Contains(s, " fetch ") {
+			continue
+		}
+		fetches++
+		for _, part := range strings.Split(s, "||") {
+			p := strings.TrimSpace(part)
+			if strings.Contains(p, " fetch ") && !strings.HasPrefix(p, "authgit ") {
+				t.Errorf("a fetch runs without the scoped auth: %q", p)
+			}
+		}
+	}
+	if fetches == 0 {
+		t.Error("the verifier fetches nothing; the pull request's objects are never read")
+	}
+	if headers != 1 {
+		t.Error("http.extraheader is set outside the authgit helper")
+	}
+	for _, leak := range []string{"echo \"$GH_TOKEN", "echo $GH_TOKEN", "set -x", "git config http"} {
+		if strings.Contains(script, leak) {
+			t.Errorf("the verifier could expose the token: %q", leak)
+		}
+	}
+}
+
 // TestCIHasNoSignaturesJob: ci-template v1.35.2 moved the gate out of ci.yml,
 // whose jobs run from the pull request's tree. A signatures job there, or CI
 // Gate needing one, would bring the self-judging verifier back.

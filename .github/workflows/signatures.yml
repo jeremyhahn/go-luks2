@@ -76,6 +76,11 @@ jobs:
           set -uo pipefail
           zero() { [ -z "$1" ] || printf '%s' "$1" | grep -qE '^0+$'; }
           isrev() { ! zero "$1" && git cat-file -e "$1^{commit}" 2>/dev/null; }
+          # The checkout keeps persist-credentials false, so git holds no
+          # credential. authgit hands one git command the job token as an
+          # http.extraheader through its environment: not argv, not
+          # .git/config, never printed. Every object fetch goes through it.
+          authgit() { GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraheader GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" git "$@"; }
           ASF="${RUNNER_TEMP:-/tmp}/allowed_signers"
           if [ "$EVENT" = pull_request_target ]; then
             # customized: if-then form for shellcheck SC2015
@@ -85,14 +90,14 @@ jobs:
             REG="$BASE_SHA"
             # The pull request's commits, as objects only: nothing is checked
             # out or run. refs/pull/N/head carries fork heads too.
-            git -c protocol.version=2 fetch -q --no-tags origin "+refs/pull/${PR}/head:refs/remotes/pr/head" 2>/dev/null || true
-            isrev "$HEAD_SHA" || git fetch -q --no-tags origin "$HEAD_SHA" 2>/dev/null || true
+            authgit -c protocol.version=2 fetch -q --no-tags origin "+refs/pull/${PR}/head:refs/remotes/pr/head" 2>/dev/null || true
+            isrev "$HEAD_SHA" || authgit fetch -q --no-tags origin "$HEAD_SHA" 2>/dev/null || true
             isrev "$HEAD_SHA" || { echo "FAIL the head ${HEAD_SHA:0:12} cannot be read (moved on: the next synchronize run checks the new head)"; exit 1; }
           else
             REG="$BEFORE"
           fi
           if ! zero "$REG" && ! isrev "$REG"; then
-            git fetch -q --no-tags origin "$REG" 2>/dev/null || true
+            authgit fetch -q --no-tags origin "$REG" 2>/dev/null || true
             isrev "$REG" || { echo "FAIL the base ${REG:0:12} cannot be read, so neither the registry nor the range can be checked"; exit 1; }
           fi
           # The registry comes from the base, so a pull request cannot add the
