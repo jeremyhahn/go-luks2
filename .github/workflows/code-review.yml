@@ -2932,11 +2932,17 @@ jobs:
       EVENT_SHA: ${{ github.event.pull_request.head.sha }}
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
       BASE_REF: ${{ github.event.pull_request.base.ref }}
+      # CUSTOMIZE: local fix pending upstream (template v5.11.3)
+      REVIEW_RESULT: ${{ needs.review.result }}
       # CUSTOMIZE only to narrow it (ruling 589: docs/, *.md, .github/ or
       # .gitea/, changelog.d/ and nothing else). An extended regex over the whole path;
       # a rename must match on both its old and its new path.
       # CUSTOMIZE (go-luks2): workflows are never review-exempt (Codex P1)
-      NO_REVIEW_PATHS: '^(docs/.+|(.+/)?[^/]+\.md|\.github/[^/]+|\.github/[^w/][^/]*/.+|\.gitea/.+|(.+/)?changelog\.d/.+)$'
+      # CUSTOMIZE: local fix pending upstream (template v5.11.3)
+      # Codex P1: of the files directly under .github/ only actionlint.yaml
+      # is exempt; allowed_signers (the Signatures job's key registry) and
+      # any other trust or policy file there needs the review.
+      NO_REVIEW_PATHS: '^(docs/.+|(.+/)?[^/]+\.md|\.github/actionlint\.yaml|\.github/[^w/][^/]*/.+|\.gitea/.+|(.+/)?changelog\.d/.+)$'
     steps:
       - name: Require a Codex approval of the head, or a no-review change
         run: |
@@ -2983,6 +2989,16 @@ jobs:
               fail "cannot read the base branch of PR $PR_NUM"
             [ -n "$BASE_REF" ] && [ "$base_live" = "$BASE_REF" ] ||
               fail "PR $PR_NUM was retargeted to ${base_live:-unknown} since this run was created for $BASE_REF. Push a new head, or take code-review off and add it again, to review against the new base."
+          }
+          # CUSTOMIZE: local fix pending upstream (template v5.11.3)
+          # Codex P1: a review job that failed or was cancelled (a requested
+          # re-review, effort:high, that did not finish) leaves no verdict on
+          # this run: an older approval is not accepted in its place. A
+          # skipped review job (no labels) leaves the gate as it was.
+          check_review_result() {
+            case "$REVIEW_RESULT" in
+              failure|cancelled) fail "the Codex review job ended $REVIEW_RESULT; an earlier approval is not accepted in its place" ;;
+            esac
           }
 
           # (a) The no-review list. The change is pinned to the event: on
@@ -3047,6 +3063,7 @@ jobs:
           fi
           # CUSTOMIZE: local fix pending upstream (template v5.11.3)
           check_base
+          check_review_result
 
           # (b) The reviewer's latest standing verdict on this head. PENDING,
           # COMMENTED and dismissed reviews are no verdict.

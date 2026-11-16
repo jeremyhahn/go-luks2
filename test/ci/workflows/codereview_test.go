@@ -51,6 +51,8 @@ func TestNoReviewPathsNeverExemptAWorkflow(t *testing.T) {
 		".github/workflows/signatures.yml",
 		".github/workflows/new.yaml",
 		".github/workflows/sub/dir.yml",
+		// Codex P1: the Signatures job's key registry (ci.yml) is trust.
+		".github/allowed_signers",
 	}
 	for _, f := range workflowFiles(t) {
 		paths = append(paths, rel(t, f))
@@ -199,6 +201,40 @@ func TestGateKeepsAStandingChangeRequest(t *testing.T) {
 	} {
 		if got := gateVerdict(t, c.reviews); got != c.want {
 			t.Errorf("%s: verdict %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// Codex P1: a failed or cancelled review job (a requested re-review that
+// did not finish) fails the gate before it accepts an older approval; a
+// skipped review job (no labels) leaves the gate as it was.
+func TestGateRefusesAFailedReviewJob(t *testing.T) {
+	cr := codeReview(t)
+	gate := cr[strings.Index(cr, "\n  gate:\n"):]
+	if !regexp.MustCompile(`(?m)^      REVIEW_RESULT: \$\{\{ needs\.review\.result \}\}$`).MatchString(gate) {
+		t.Fatalf("gate: no REVIEW_RESULT from needs.review.result in its env")
+	}
+	g := gateStep(t)
+	def := regexp.MustCompile(`(?ms)^ +check_review_result\(\) \{\n.*?^ +\}$`).FindString(g)
+	if def == "" {
+		t.Fatalf("gate: no check_review_result")
+	}
+	exempt := strings.Index(g, `if [ "$exempt" = 1 ]; then`)
+	verdict := strings.Index(g, "verdict=$(")
+	call := regexp.MustCompile(`(?m)^ +check_review_result$`).FindStringIndex(g)
+	if call == nil || call[0] < exempt || call[0] > verdict {
+		t.Errorf("gate: check_review_result is not called after the no-review exit and before the verdict")
+	}
+	for _, c := range []struct {
+		result string
+		ok     bool
+	}{{"failure", false}, {"cancelled", false}, {"skipped", true}, {"success", true}} {
+		script := "set -euo pipefail\nfail() { echo \"fail: $*\" >&2; exit 3; }\n" + def + "\ncheck_review_result\necho passed\n"
+		cmd := exec.Command("bash", "-c", script)
+		cmd.Env = append(os.Environ(), "REVIEW_RESULT="+c.result)
+		out, _ := cmd.CombinedOutput()
+		if passed := cmd.ProcessState.ExitCode() == 0 && strings.Contains(string(out), "passed"); passed != c.ok {
+			t.Errorf("review job %s: passed=%v, want %v (%s)", c.result, passed, c.ok, out)
 		}
 	}
 }
