@@ -205,7 +205,7 @@ func TestGateKeepsAStandingChangeRequest(t *testing.T) {
 	}
 }
 
-// Codex P1: a failed or cancelled review job (a requested re-review that
+// Codex P1: a failed or canceled review job (a requested re-review that
 // did not finish) fails the gate before it accepts an older approval; a
 // skipped review job (no labels) leaves the gate as it was.
 func TestGateRefusesAFailedReviewJob(t *testing.T) {
@@ -228,7 +228,7 @@ func TestGateRefusesAFailedReviewJob(t *testing.T) {
 	for _, c := range []struct {
 		result string
 		ok     bool
-	}{{"failure", false}, {"cancelled", false}, {"skipped", true}, {"success", true}} {
+	}{{"failure", false}, {"cancelled", false}, {"skipped", true}, {"success", true}} { //nolint:misspell // the runner's spelling, not prose
 		script := "set -euo pipefail\nfail() { echo \"fail: $*\" >&2; exit 3; }\n" + def + "\ncheck_review_result\necho passed\n"
 		cmd := exec.Command("bash", "-c", script)
 		cmd.Env = append(os.Environ(), "REVIEW_RESULT="+c.result)
