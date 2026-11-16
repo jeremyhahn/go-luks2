@@ -107,6 +107,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   release again.** `make deps-check` reported v0.49.0 as behind the latest
   release. golang.org/x/crypto and golang.org/x/term still require v0.49.0;
   the module now selects v0.50.0 for all three.
+- **golang.org/x/term is v0.48.0, so every direct dependency is at its latest
+  release again.** The release only raises its golang.org/x/sys requirement
+  to v0.50.0, which this module already selects; `term.ReadPassword` and
+  `term.IsTerminal`, the calls the CLI prompt uses, are unchanged. `go.sum`
+  drops checksums no module in the graph needs any more.
 
 ## [1.0.3-alpha] - 2026-11-10
 
