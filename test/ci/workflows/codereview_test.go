@@ -11,12 +11,23 @@ import (
 
 const codeReviewWorkflow = ".github/workflows/code-review.yml"
 
+// codeReview is code-review.yml, or a skip in a tree that strips it at
+// publish (readUnlessStripped: a tree that must carry it still fails).
+func codeReview(t *testing.T) string {
+	t.Helper()
+	cr, ok := readUnlessStripped(t, codeReviewWorkflow)
+	if !ok {
+		t.Skipf("%s is stripped at publish", codeReviewWorkflow)
+	}
+	return cr
+}
+
 // noReviewPaths is the gate's NO_REVIEW_PATHS, compiled as the extended
 // regex `grep -E` reads it.
 func noReviewPaths(t *testing.T) *regexp.Regexp {
 	t.Helper()
 	m := regexp.MustCompile(`(?m)^\s+NO_REVIEW_PATHS: '([^']*)'\s*$`).
-		FindAllStringSubmatch(readFile(t, codeReviewWorkflow), -1)
+		FindAllStringSubmatch(codeReview(t), -1)
 	if len(m) != 1 {
 		t.Fatalf("%s: want one NO_REVIEW_PATHS, found %d", codeReviewWorkflow, len(m))
 	}
@@ -60,7 +71,7 @@ func TestNoReviewPathsNeverExemptAWorkflow(t *testing.T) {
 func gateGetAll(t *testing.T) string {
 	t.Helper()
 	m := regexp.MustCompile(`(?ms)^( +)get_all\(\) \{.*?^( +)\}$`).
-		FindString(readFile(t, codeReviewWorkflow))
+		FindString(codeReview(t))
 	if m == "" {
 		t.Fatalf("%s: no get_all function", codeReviewWorkflow)
 	}
