@@ -29,10 +29,11 @@
 // the CI workflow FILE for this commit with event=push on main, and that
 // run's gate job. Not a check run looked up by name: a check run of the same
 // name from a pull_request run, an older run or another app would otherwise
-// count. On github.com it then reads the Signatures job of signatures.yml's
-// latest push-to-main run on the same commit the same way: commit signatures
-// are checked there, outside CI Gate, so a green CI Gate alone does not let a
-// release through. Either way only "passed" lets the release through. A gate that failed, errored, was canceled or reported
+// count. On either forge it then reads signatures.yml's result for the same
+// commit the same way (the "Signatures / Signatures (push)" status on Gitea,
+// the Signatures job of the latest push-to-main run on github.com): commit
+// signatures are checked there, outside CI Gate, so a green CI Gate alone
+// does not let a release through. Either way only "passed" lets the release through. A gate that failed, errored, was canceled or reported
 // anything this command does not recognize stops it at once. A gate that
 // reports nothing before the deadline also stops it.
 //
@@ -158,15 +159,15 @@ func parseArgs(args []string, stderr io.Writer) (request, error) {
 	return req, nil
 }
 
-// gate is the decision: on main, then CI's gate passed, then (on GitHub)
-// the separate Signatures workflow passed.
+// gate is the decision: on main, then CI's gate passed, then the separate
+// Signatures workflow passed.
 func gate(out io.Writer, h host, req request) error {
 	if err := onMain(h, req); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "ok  %s is on main (%s)\n", req.sha, req.mainRef)
 
-	for _, r := range gateRequests(h, req) {
+	for _, r := range gateRequests(req) {
 		read, name, err := gateReader(h, r)
 		if err != nil {
 			return err
@@ -181,22 +182,25 @@ func gate(out io.Writer, h host, req request) error {
 
 // signaturesWorkflow and signaturesJob name the commit-signature check.
 // ci-template v1.35.2 moved it out of CI Gate into its own workflow, so a
-// green CI Gate no longer says the commits are signed: on GitHub a release
-// also needs that workflow's push-to-main run on the same sha to pass. The
+// green CI Gate no longer says the commits are signed, on any forge: a
+// release also needs that workflow's push-to-main result on the same sha to
+// pass -- on GitHub its run's Signatures job, on Gitea its push status
+// signaturesContext (workflow name / job name (event), as CI's gate). The
 // requirement is fixed here, not a flag, so release.yml need not change.
 const (
 	signaturesWorkflow = "signatures.yml"
 	signaturesJob      = "Signatures"
+	signaturesContext  = "Signatures / Signatures (push)"
 )
 
 // gateRequests lists the gates a release waits on, in order: the one the
-// flags name, then on GitHub the Signatures job of signaturesWorkflow.
-func gateRequests(h host, req request) []request {
+// flags name, then the Signatures workflow's result on the same forge.
+func gateRequests(req request) []request {
 	gates := []request{req}
-	onGitHub := strings.TrimSuffix(h.getenv("GITHUB_SERVER_URL"), "/") == githubServer
-	if onGitHub && req.workflow != signaturesWorkflow {
+	if req.workflow != signaturesWorkflow && req.statusContext != signaturesContext {
 		sig := req
 		sig.workflow, sig.jobName = signaturesWorkflow, signaturesJob
+		sig.statusContext = signaturesContext
 		gates = append(gates, sig)
 	}
 	return gates

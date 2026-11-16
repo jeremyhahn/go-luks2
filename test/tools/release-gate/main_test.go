@@ -186,7 +186,7 @@ func run(t *testing.T, h host, argv []string) (int, string, string) {
 
 func TestGiteaGatePassedReleases(t *testing.T) {
 	f := &forge{answers: []func(http.ResponseWriter, *http.Request){
-		giteaJSON(2, "CI / Lint (push)", "success", gateCtx, "success"),
+		giteaJSON(3, "CI / Lint (push)", "success", gateCtx, "success", sigCtx, "success"),
 	}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
@@ -212,6 +212,70 @@ func TestGiteaGatePassedReleases(t *testing.T) {
 	}
 }
 
+// sigCtx is the push status the separate signatures.yml workflow (name
+// Signatures, job Signatures) reports on Gitea.
+const sigCtx = "Signatures / Signatures (push)"
+
+// Signatures runs in its own workflow, outside CI Gate, on every forge: a
+// Gitea release needs its push status too.
+func TestGiteaGateAndSignaturesPassed(t *testing.T) {
+	f := &forge{answers: []func(http.ResponseWriter, *http.Request){
+		giteaJSON(2, gateCtx, "success", sigCtx, "success"),
+	}}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	clk := clock.NewFake(t)
+	h, _ := testHost(t, srv, srv.URL, 0, clk)
+
+	code, out, stderr := run(t, h, args())
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %s", code, stderr)
+	}
+	if !strings.Contains(out, sigCtx) {
+		t.Errorf("stdout does not report the Signatures gate:\n%s", out)
+	}
+}
+
+func TestGiteaSignaturesFailedRefuses(t *testing.T) {
+	for _, state := range []string{"failure", "error"} {
+		t.Run(state, func(t *testing.T) {
+			f := &forge{answers: []func(http.ResponseWriter, *http.Request){
+				giteaJSON(2, gateCtx, "success", sigCtx, state),
+			}}
+			srv := httptest.NewServer(f)
+			defer srv.Close()
+			clk := clock.NewFake(t)
+			h, _ := testHost(t, srv, srv.URL, 0, clk)
+
+			var out, errb bytes.Buffer
+			req, _ := parseArgs(args(), &errb)
+			err := gate(&out, h, req)
+			var failed *GateFailedError
+			if !errors.As(err, &failed) || failed.State != state || failed.Gate != sigCtx {
+				t.Fatalf("err = %v, want *GateFailedError(%s) naming %s", err, state, sigCtx)
+			}
+		})
+	}
+}
+
+func TestGiteaSignaturesMissingRefuses(t *testing.T) {
+	f := &forge{answers: []func(http.ResponseWriter, *http.Request){
+		giteaJSON(1, gateCtx, "success"),
+	}}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	clk := clock.NewFake(t)
+	h, _ := testHost(t, srv, srv.URL, 0, clk)
+
+	var out, errb bytes.Buffer
+	req, _ := parseArgs(args(), &errb)
+	err := gate(&out, h, req)
+	var timeout *GateTimeoutError
+	if !errors.As(err, &timeout) || timeout.Gate != sigCtx {
+		t.Fatalf("err = %v, want *GateTimeoutError naming %s", err, sigCtx)
+	}
+}
+
 // The release commit and its tag land together, so CI is normally still
 // running: the gate must wait for it rather than read it once.
 func TestGiteaGateWaitsForAPendingGate(t *testing.T) {
@@ -219,7 +283,7 @@ func TestGiteaGateWaitsForAPendingGate(t *testing.T) {
 		giteaJSON(1, "CI / Lint (push)", "pending"),
 		giteaJSON(2, "CI / Lint (push)", "success", gateCtx, "pending"),
 		httpStatus(http.StatusBadGateway),
-		giteaJSON(2, "CI / Lint (push)", "success", gateCtx, "success"),
+		giteaJSON(3, "CI / Lint (push)", "success", gateCtx, "success", sigCtx, "success"),
 	}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
@@ -284,8 +348,8 @@ func TestGiteaGateIgnoresOtherContexts(t *testing.T) {
 
 func TestGiteaGatePagesToFindTheContext(t *testing.T) {
 	f := &forge{answers: []func(http.ResponseWriter, *http.Request){
-		giteaJSON(3, "a", "success", "b", "success"),
-		giteaJSON(3, gateCtx, "success"),
+		giteaJSON(4, "a", "success", "b", "success"),
+		giteaJSON(4, gateCtx, "success", sigCtx, "success"),
 	}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
@@ -295,8 +359,9 @@ func TestGiteaGatePagesToFindTheContext(t *testing.T) {
 	if code, _, stderr := run(t, h, args()); code != 0 {
 		t.Fatalf("exit %d, stderr %s", code, stderr)
 	}
-	if len(f.paths) != 2 || !strings.HasSuffix(f.paths[1], "page=2") {
-		t.Errorf("paths = %v, want a second page", f.paths)
+	// CI's gate is on page 2; the Signatures reading then starts again at page 1.
+	if len(f.paths) != 3 || !strings.HasSuffix(f.paths[1], "page=2") {
+		t.Errorf("paths = %v, want a second page, then the Signatures reading", f.paths)
 	}
 	if len(clk.Waits()) != 0 {
 		t.Errorf("slept %d times", len(clk.Waits()))
