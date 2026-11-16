@@ -596,6 +596,63 @@ func TestGitHubSignaturesMissingRefuses(t *testing.T) {
 	}
 }
 
+// No flag drops the Signatures requirement: on GitHub a -status-context that
+// names the Signatures status (which GitHub never reads) and on Gitea a
+// -workflow/-job-name naming signatures.yml (which Gitea never reads) still
+// leave CI Gate as the flagged gate, and Signatures is still required.
+func TestFlagsNamingSignaturesDoNotDropIt(t *testing.T) {
+	ghArgs := args("-status-context", sigCtx)
+	giteaArgs := args("-workflow", sigFile, "-job-name", sigJob)
+	for _, tc := range []struct {
+		name    string
+		handler func() http.Handler
+		github  bool
+		argv    []string
+		missing bool
+	}{
+		{"github/failed", func() http.Handler {
+			return &fakeGitHub{runs: greenCI(), sig: signaturesRun("failure")}
+		}, true, ghArgs, false},
+		{"github/missing", func() http.Handler {
+			return &fakeGitHub{runs: greenCI()}
+		}, true, ghArgs, true},
+		{"gitea/failed", func() http.Handler {
+			return &forge{answers: []func(http.ResponseWriter, *http.Request){
+				giteaJSON(2, gateCtx, "success", sigCtx, "failure")}}
+		}, false, giteaArgs, false},
+		{"gitea/missing", func() http.Handler {
+			return &forge{answers: []func(http.ResponseWriter, *http.Request){
+				giteaJSON(1, gateCtx, "success")}}
+		}, false, giteaArgs, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(tc.handler())
+			defer srv.Close()
+			server := srv.URL
+			if tc.github {
+				server = githubServer
+			}
+			clk := clock.NewFake(t)
+			h, _ := testHost(t, srv, server, 0, clk)
+
+			var out, errb bytes.Buffer
+			req, err := parseArgs(tc.argv, &errb)
+			if err != nil {
+				t.Fatalf("parseArgs: %v", err)
+			}
+			err = gate(&out, h, req)
+			var failed *GateFailedError
+			var timeout *GateTimeoutError
+			switch {
+			case tc.missing && !errors.As(err, &timeout):
+				t.Fatalf("err = %v, want *GateTimeoutError for the missing Signatures", err)
+			case !tc.missing && !errors.As(err, &failed):
+				t.Fatalf("err = %v, want *GateFailedError for the failed Signatures", err)
+			}
+		})
+	}
+}
+
 // Codex review round 2: a check run named "CI Gate" that passed is not
 // evidence. Here the pull_request run of the SAME commit passed (and has the
 // higher id), another commit's push run passed, and a run on another branch

@@ -196,14 +196,15 @@ const (
 // gateRequests lists the gates a release waits on, in order: the one the
 // flags name, then the Signatures workflow's result on the same forge.
 func gateRequests(req request) []request {
-	gates := []request{req}
-	if req.workflow != signaturesWorkflow && req.statusContext != signaturesContext {
-		sig := req
-		sig.workflow, sig.jobName = signaturesWorkflow, signaturesJob
-		sig.statusContext = signaturesContext
-		gates = append(gates, sig)
-	}
-	return gates
+	// Always appended, never deduplicated against the flags: each forge
+	// reads only some of them (GitHub the workflow and job, Gitea the status
+	// context), so a flag naming Signatures could match a field the active
+	// forge ignores and drop the requirement. When the flags do name the
+	// Signatures gate itself, it is read twice, which costs one request.
+	sig := req
+	sig.workflow, sig.jobName = signaturesWorkflow, signaturesJob
+	sig.statusContext = signaturesContext
+	return []request{req, sig}
 }
 
 // onMain asks git whether sha is an ancestor of mainRef. Exit 0 is yes, 1 is
