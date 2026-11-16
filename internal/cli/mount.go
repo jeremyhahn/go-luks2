@@ -47,6 +47,14 @@ func runMount(ctx context.Context, e *env, args []string) error {
 		_, _ = fmt.Fprint(e.stdout, mountUsage)
 		return &UsageError{Command: "mount", Detail: "want <name> <mountpoint>"}
 	}
+	if (f.Given("type") && *longType == "") || (f.Given("t") && *shortType == "") {
+		_, _ = fmt.Fprint(e.stdout, mountUsage)
+		return &UsageError{Command: "mount", Detail: "--type needs a filesystem type"}
+	}
+	if f.Given("type") && f.Given("t") && *longType != *shortType {
+		_, _ = fmt.Fprint(e.stdout, mountUsage)
+		return &UsageError{Command: "mount", Detail: "--type and -t name different types"}
+	}
 	fstype := *longType
 	if fstype == "" {
 		fstype = *shortType

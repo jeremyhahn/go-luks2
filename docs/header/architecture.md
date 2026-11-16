@@ -201,14 +201,26 @@ be read.
 That includes `inline-hw-tags` (LUKS2 On-Disk Format 1.1.4): the data
 segment uses only dm-crypt, with authentication tags kept inline by the
 hardware, and every dm-integrity option in the metadata is ignored. Unlock,
-activation and every header write refuse it with an
-`*UnsupportedRequirementError` naming `inline-hw-tags`, which unwraps to
-`ErrUnsupportedRequirement`, and leave the device unchanged. The flag is never
+activation and every header write refuse it and leave the device unchanged.
+The caller reads the refusal from `*luks2.Error`, not from a named type:
+`Kind` is `ErrUnsupportedRequirement`, `Detail` names the requirement
+(`inline-hw-tags`) and the container's mandatory set, and
+`errors.Is(err, luks2.ErrUnsupportedRequirement)` holds. The typed error that
+carries the requirement stays in `internal/header`; `pkg/luks2` exports no
+type for it. `TestUnsupportedRequirementIsReadableFromLuks2Error` pins this
+from outside the package for `Unlock`, `AddKeyslot`, `ChangeKeyslot` and
+`RemoveKeyslot`. A requirement that stops `MigrateToFIPS` keeps the
+migration's `Kind`, `ErrFIPSMigration`: `Detail` names the requirement,
+`errors.Is(err, luks2.ErrUnsupportedRequirement)` holds and `errors.As` finds
+the `*luks2.FIPSMigrationError`
+(`TestRequirementThatStopsMigrationKeepsTheMigrationKind`). The flag is never
 stripped: a read and a re-encode keep `config.requirements` byte for byte.
 
 A segment's `integrity` object may carry `key_size` (1.1.4, integer, optional):
 the integrity key size in bytes, set only when it differs from the integrity
-type's default. `Segment.IntegrityKeySize` reports it; absent reads as absent.
+type's default. `internal/header`'s `(*Segment).IntegrityKeySize` reports it;
+absent reads as absent. The public `luks2.Segment` does not carry it, because
+unlocking refuses a segment with an `integrity` member.
 A non-integer `key_size` fails with `ErrInvalidHeader`. The specification gives
 no range, so none is enforced. The member stays in the raw object and
 re-encodes exactly as read.

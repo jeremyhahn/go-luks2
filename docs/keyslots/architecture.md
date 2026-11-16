@@ -181,7 +181,10 @@ abandon. `ctx` is observed at the boundaries around derivations instead:
 
 The latency of a cancellation is therefore at most one derivation, which the
 per-keyslot cost ceilings and the per-operation budget above bound.
-`kdfcancellation_test.go` pins the destroyed-output behaviour.
+`kdfcancellation_test.go` pins the destroyed-output behaviour, and
+`TestVerifyKeyAgainstDigestsObservesCancellationBetweenDigests` pins the
+digest checks: a cancellation during the first of several digests stops the
+next one from running.
 
 ## What this feature deliberately does not do
 

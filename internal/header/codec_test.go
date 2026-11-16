@@ -376,6 +376,34 @@ func TestReadJSONMetadataRefusesATooSmallHeaderSize(t *testing.T) {
 	}
 }
 
+// A hostile JSON area can nest arrays and objects far deeper than any LUKS2
+// header does. Parsing must refuse it with ErrInvalidHeader (never a panic or
+// a stack overflow), wherever in the metadata the nesting sits: in an
+// unmodeled config member, in a token member kept raw, or at the top level.
+func TestParseJSONMetadataRefusesHostileNesting(t *testing.T) {
+	const depth = 100000
+	deep := strings.Repeat("[", depth) + strings.Repeat("]", depth)
+	deepObj := strings.Repeat(`{"a":`, depth) + "0" + strings.Repeat("}", depth)
+	cases := map[string]string{
+		"config member": `{"keyslots":{},"tokens":{},"segments":{},"digests":{},"config":{"json_size":"12288","keyslots_size":"16744448","x":` + deep + `}}`,
+		"token member":  `{"keyslots":{},"tokens":{"0":{"type":"x","keyslots":[],"m":` + deepObj + `}},"segments":{},"digests":{},"config":{"json_size":"12288","keyslots_size":"16744448"}}`,
+		"top level":     `{"keyslots":{},"tokens":{},"segments":{},"digests":{},"config":{},"x":` + deep + `}`,
+	}
+	for name, doc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := ParseJSONMetadata([]byte(doc), HeaderMinSize)
+			if !errors.Is(err, errs.ErrInvalidHeader) {
+				t.Fatalf("ParseJSONMetadata(%d-deep nesting) = %v, want ErrInvalidHeader", depth, err)
+			}
+			// The refusal is the nesting itself, not a structural rule
+			// reached afterwards.
+			if !strings.Contains(err.Error(), "depth") {
+				t.Fatalf("ParseJSONMetadata(%d-deep nesting) = %v, want a nesting-depth refusal", depth, err)
+			}
+		})
+	}
+}
+
 // TestParseJSONMetadataDropsNullKeyslotsAndTokens exercises
 // normalizeMetadataNulls, ForgetKeyslotID, WithoutID and sortDroppedEntries
 // together: a header naming a null keyslot that a digest and a token both

@@ -162,6 +162,7 @@ func TestClassifyDeviceOpenReportsABusyDeviceAsInUse(t *testing.T) {
 // retargeting it guarded against is now impossible by construction rather
 // than caught after the fact.
 func TestFormatClaimsTheLockedDescriptorRegardlessOfASymlinkRetarget(t *testing.T) {
+	defer parallel(t)()
 	// Not parallel: it substitutes the package's lock-held hook.
 	dir := t.TempDir()
 	pattern := bytes.Repeat([]byte{0xA5}, 4096)

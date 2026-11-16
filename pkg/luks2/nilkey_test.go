@@ -102,6 +102,7 @@ func TestVolumeEnrollRefusesANilKeyBeforeConsultingTheProvider(t *testing.T) {
 // than dereferencing it. Every other argument is valid and the context is
 // live, so the borrow is the only thing that can refuse these calls.
 func TestVolumeKeyTakingMethodsRefuseAKeyWithNoEnclave(t *testing.T) {
+	defer parallel(t)()
 	v := openNilKeyVolume(t, "emptykey.img")
 	pass := newTestPassphrase(t)
 	defer func() { _ = pass.Destroy() }()

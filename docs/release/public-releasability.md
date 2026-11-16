@@ -1,6 +1,6 @@
 # Public releasability
 
-> **Status: REFERENCE** · Last verified: 2026-10-13
+> **Status: REFERENCE** · Last verified: 2026-11-12
 > The rule itself is the package documentation of `test/internal/labstrings`
 > (`go doc ./test/internal/labstrings`). Where this page and that package
 > disagree, the package wins and this page is the defect.
@@ -52,7 +52,7 @@ The strip-at-publish set is:
 |---|---|
 | `**/CLAUDE.md`, `**/AGENTS.md`, `**/.claude/**` | Agent instructions and agent tool settings, at any depth |
 | `**/.serena/**` | Code-analysis tool state, at any depth; gitignored whole |
-| `.github/workflows/code-review.yml`, `.github/workflows/qwen-review.yml` | Internal code-review workflows |
+| `.github/workflows/code-review.yml` | The internal code-review workflow |
 | `test/internal/labstrings/fleet.go`, `test/internal/labstrings/fleet_test.go` | The fleet pattern set and its tests: generic shapes plus SHA-256 digests of the values the gate bans, never the values themselves. Digests of short values are hygiene, not secrecy, so the set stays out of the release |
 
 A test that reads only a strip-at-publish file is itself stripped at publish,
@@ -119,7 +119,9 @@ The exclusion itself is tested in `test/tools/releasability-gate/export_test.go`
   entry, file or directory, names or lies under a strip-at-publish path, while
   the published files are kept;
 - `.dockerignore` lists every strip-at-publish pattern, and the directory of
-  every directory pattern.
+  every directory pattern;
+- the table above lists every pattern of `DefaultStripAtPublish` and no
+  other.
 
 The labstrings package tests cover the false clean: an export-ignore rule
 placed only in `.git/info/attributes`, a global or repository

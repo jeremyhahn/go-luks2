@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -315,6 +316,108 @@ func TestFromTokenBuildsTheBindingTheHeaderRecords(t *testing.T) {
 
 	if _, err := FromToken(token, WithDevice("/dev/hidraw9")); err != nil {
 		t.Errorf("FromToken() error = %v", err)
+	}
+}
+
+// A systemd-fido2 token written by another tool may omit any of the three
+// requirement members. An absent member reads as false, never as true and
+// never as an error, and a present false stays false.
+func TestFromTokenReadsAnAbsentRequirementAsFalse(t *testing.T) {
+	params := fido2TestParams(t)
+	params.UserPresence, params.UserVerification, params.ClientPIN = true, true, true
+	members := []string{"fido2-up-required", "fido2-uv-required", "fido2-clientPin-required"}
+
+	for _, absent := range members {
+		t.Run(absent, func(t *testing.T) {
+			token := fido2Token(params)
+			if _, ok := token.Members[absent]; !ok {
+				t.Fatalf("fido2Token wrote no %s member", absent)
+			}
+			delete(token.Members, absent)
+
+			round, err := fido2ParamsFromToken(token)
+			if err != nil {
+				t.Fatalf("fido2ParamsFromToken() error = %v", err)
+			}
+			got := map[string]bool{
+				"fido2-up-required":        round.UserPresence,
+				"fido2-uv-required":        round.UserVerification,
+				"fido2-clientPin-required": round.ClientPIN,
+			}
+			for _, m := range members {
+				if want := m != absent; got[m] != want {
+					t.Errorf("%s = %v, want %v", m, got[m], want)
+				}
+			}
+		})
+	}
+
+	t.Run("present false", func(t *testing.T) {
+		p := params
+		p.UserPresence, p.UserVerification, p.ClientPIN = false, false, false
+		round, err := fido2ParamsFromToken(fido2Token(p))
+		if err != nil {
+			t.Fatalf("fido2ParamsFromToken() error = %v", err)
+		}
+		if round.UserPresence || round.UserVerification || round.ClientPIN {
+			t.Errorf("a recorded false read back as true: %+v", round)
+		}
+	})
+}
+
+// A provider rebuilt from a header token names the keyslots that token
+// names: UnlockWithProvider tries only those, so a provider without them can
+// never unlock.
+func TestFromTokenKeepsTheTokensKeyslots(t *testing.T) {
+	token := fido2Token(fido2TestParams(t))
+	token.Keyslots = []int{3, 1}
+
+	p, err := FromToken(token, WithDevice("/dev/hidraw9"))
+	if err != nil {
+		t.Fatalf("FromToken() error = %v", err)
+	}
+	if got := p.Token().Keyslots; !slices.Equal(got, []int{3, 1}) {
+		t.Fatalf("provider token keyslots = %v, want [3 1]", got)
+	}
+	if got := p.Token().Type; got != TokenTypeFIDO2 {
+		t.Errorf("provider token type = %q, want %q", got, TokenTypeFIDO2)
+	}
+
+	// The provider holds its own copy: the caller's slice is the caller's.
+	token.Keyslots[0] = 7
+	if got := p.Token().Keyslots; !slices.Equal(got, []int{3, 1}) {
+		t.Errorf("after the caller changed its token, provider keyslots = %v, want [3 1]", got)
+	}
+}
+
+// TestFIDO2TokenWritesFalseRequirementsAndReadsAbsentOnesAsFalse pins the
+// requirement members: a requirement that is off is written as an explicit
+// false, as systemd-cryptenroll writes it, and a token that lacks a member
+// reads it back as false.
+func TestFIDO2TokenWritesFalseRequirementsAndReadsAbsentOnesAsFalse(t *testing.T) {
+	members := []string{"fido2-up-required", "fido2-clientPin-required", "fido2-uv-required"}
+
+	token := fido2Token(FIDO2Params{CredentialID: []byte("c"), Salt: []byte("s")})
+	for _, name := range members {
+		if got := string(token.Members[name]); got != "false" {
+			t.Errorf("member %s = %q, want false", name, got)
+		}
+	}
+
+	absent := fido2Token(FIDO2Params{CredentialID: []byte("c"), Salt: []byte("s"), UserPresence: true, ClientPIN: true, UserVerification: true})
+	stripped := luks2.Token{Type: absent.Type, Keyslots: absent.Keyslots, Members: map[string]json.RawMessage{}}
+	for name, value := range absent.Members {
+		stripped.Members[name] = value
+	}
+	for _, name := range members {
+		delete(stripped.Members, name)
+	}
+	round, err := fido2ParamsFromToken(stripped)
+	if err != nil {
+		t.Fatalf("fido2ParamsFromToken() error = %v", err)
+	}
+	if round.UserPresence || round.ClientPIN || round.UserVerification {
+		t.Fatalf("a token without requirement members read as %+v, want every requirement false", round)
 	}
 }
 

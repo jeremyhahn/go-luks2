@@ -70,8 +70,9 @@ func (v *Volume) unlockHeader(ctx context.Context, op string) (*device.Locked, s
 	// refused for activation, the same as for a write (#250, C2).
 	if err := metadata.CheckRequirementsImplemented(); err != nil {
 		_ = locked.Unlock()
+		detail, _ := unsupportedRequirementDetail(err)
 		return nil, "", nil, errAt(op, v.path, &errs.Error{Kind: ErrUnsupportedRequirement, Err: err,
-			Detail: "activate the volume: the container must be finished or recovered with the tool that set the requirement (for an interrupted reencryption: cryptsetup reencrypt --resume-only) before it can be activated"})
+			Detail: "activate the volume: " + detail + "; the container must be finished or recovered with the tool that set the requirement (for an interrupted reencryption: cryptsetup reencrypt --resume-only) before it can be activated"})
 	}
 
 	segmentID, _, err := activationSegment(metadata)

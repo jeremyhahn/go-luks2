@@ -175,7 +175,7 @@ func ensureDeviceNode(ctx context.Context, _ string, info *devmapper.DeviceInfo)
 		return nil
 	}
 	if err := placeNode(ctx, dmPath, func(tmp string) error { return sys.makeBlockNode(tmp, info.DevNo) }); err != nil {
-		return &errs.Error{Kind: errs.KindOf(err, errs.ErrIO), Detail: "create the device node " + dmPath, Err: err}
+		return &errs.Error{Kind: dmKind(err, errs.ErrIO), Detail: "create the device node " + dmPath, Err: err}
 	}
 	return nil
 }
@@ -203,10 +203,10 @@ func waitForDeviceReady(ctx context.Context, name string, info *devmapper.Device
 	_, minor := unix.Major(info.DevNo), unix.Minor(info.DevNo)
 	dmPath := dmNodePath(minor)
 	if err := os.MkdirAll(mapperDir(), 0o750); err != nil {
-		return &errs.Error{Kind: errs.KindOf(err, errs.ErrIO), Detail: "create the directory " + mapperDir(), Err: err}
+		return &errs.Error{Kind: dmKind(err, errs.ErrIO), Detail: "create the directory " + mapperDir(), Err: err}
 	}
 	if err := placeNode(ctx, mapperPath, func(tmp string) error { return os.Symlink(dmPath, tmp) }); err != nil {
-		return &errs.Error{Kind: errs.KindOf(err, errs.ErrIO), Detail: "create the device-mapper symlink " + mapperPath, Err: err}
+		return &errs.Error{Kind: dmKind(err, errs.ErrIO), Detail: "create the device-mapper symlink " + mapperPath, Err: err}
 	}
 	if !isOurNode(mapperPath, info) {
 		return &errs.Error{Kind: ErrNodeUnverified, Detail: "verify the device-mapper symlink " + mapperPath}

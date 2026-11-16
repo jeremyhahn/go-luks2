@@ -256,13 +256,32 @@ func errAt(op, path string, err error) error {
 	// that, the kind errors.Is reports for it. A typed error that only holds
 	// a classified cause is wrapped too: At stamps the outermost *errs.Error
 	// alone, and that is the one a caller's errors.As finds.
-	if _, ok := err.(*errs.Error); err != nil && !ok {
-		kind := unclassifiedKind(err)
-		if err == kind {
-			err = &errs.Error{Kind: kind}
-		} else {
-			err = &errs.Error{Kind: kind, Err: err}
+	if err == nil {
+		return errs.At("luks2", op, path, err)
+	}
+	outer, classified := err.(*errs.Error)
+	kind := unclassifiedKind(err)
+	switch detail, isRequirement := unsupportedRequirementDetail(err); {
+	case isRequirement:
+		// The requirement's own type stays internal; the caller reads it
+		// from Kind and Detail, and that holds wherever in the chain it
+		// sits: a wrapper that classified the failure first (a header read
+		// that met the requirement while repairing a stale copy reports
+		// ErrIO) is wrapped in turn, and errors.Is still finds every
+		// sentinel underneath. A requirement that stops a migration leaves
+		// the migration's kind: the failure is still a migration failure,
+		// and errors.Is finds the requirement through Err.
+		if kind != ErrFIPSMigration {
+			kind = ErrUnsupportedRequirement
 		}
+		if !classified || outer.Kind != kind {
+			err = &errs.Error{Kind: kind, Detail: detail, Err: err}
+		}
+	case classified:
+	case err == kind:
+		err = &errs.Error{Kind: kind}
+	default:
+		err = &errs.Error{Kind: kind, Err: err}
 	}
 	return errs.At("luks2", op, path, err)
 }

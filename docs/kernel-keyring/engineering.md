@@ -48,10 +48,13 @@ foreign type, and `Remedy` is a method callers need. `Activate` and
   payload.
 - **Collision guard.** Before the add, the ring is searched for the description.
   An existing entry returns `ErrKeyringEntryExists` and nothing is added.
-- **Verified release.** `Release` revokes, unlinks, and searches again; the
-  search must answer "not there". `ENOKEY`/`ENOENT` (already gone) and
-  `EKEYREVOKED` (payload already freed) are success. Any other outcome returns
-  `ErrKeyringKeyNotReleased`, with the `keyctl show` and `keyctl unlink`
+- **Verified release.** `Release` revokes, unlinks, and searches again. On
+  the revoke and the unlink, `ENOKEY`/`ENOENT` (already gone) and
+  `EKEYREVOKED` (payload already freed) are success. The search must answer
+  "not there" (`ENOKEY` or `ENOENT`); an entry that still resolves, even as
+  `EKEYREVOKED`, or a ring that cannot be searched, is not confirmed gone. Any
+  other outcome returns `ErrKeyringKeyNotReleased`, naming the key type and
+  description, with the `keyctl show <ring>` and `keyctl unlink <key> <ring>`
   commands that remove the entry.
 - **Release always completes.** It runs regardless of context cancellation: a
   key already in the kernel must not stay there because its caller was

@@ -61,18 +61,25 @@ the pre-flight check is `(KDFParams).Validate()`.
   that could run Argon2 or SHA-1, not only at the public entry point, so a
   foreign header cannot make a FIPS process run either
   ([architecture.md](architecture.md#the-problem-and-the-shape-chosen)).
+- `MigrateToFIPS` refuses a `MigrateParams.KDF` naming Argon2 (`KDFArgon2id`,
+  `KDFArgon2i`, or a non-zero `Time`, `MemoryKiB` or `Parallel`) before
+  anything is written, as a `*FIPSMigrationError` at stage `precondition`
+  wrapping `ErrFIPSNotApproved` and naming the field; it never drops it
+  silently.
 - `MigrateToFIPS` removes nothing before its verify step (stage 5 in
   [architecture.md](architecture.md#data-flow-importing-a-volume-migratetofips))
   passes; every intermediate state still opens with the original passphrase.
 - SHA-1 is never written by any code path, in or out of FIPS mode
-  ([architecture.md](architecture.md#sha-1)).
+  ([architecture.md](architecture.md#sha-1)). In FIPS mode the refusal
+  matches `ErrFIPSNotApproved`, from `KDFParams.Validate` and from every write
+  path; outside it, `ErrInvalidArgument`.
 
 ## Approved KDFs
 
 | `KDFParams.Type` and `Hash` | FIPS-approved | Notes |
 |---|---|---|
 | `KDFPBKDF2` with `SHA256`, `SHA384` or `SHA512` | true | SHA-256 when `Hash` is zero; SHA-512 when the type was defaulted in FIPS mode |
-| `KDFPBKDF2` with SHA-1 | false | Never written; read from old headers outside FIPS mode only |
+| `KDFPBKDF2` with SHA-1 | false | Never written; `Validate` refuses it in FIPS mode with `ErrFIPSNotApproved`; read from old headers outside FIPS mode only |
 | `KDFArgon2i`, `KDFArgon2id` | false | Refused in FIPS mode; `KDFArgon2id` is the default otherwise |
 
 The combined `pbkdf2-sha*` spellings are internal aliases, not public types.
@@ -88,7 +95,7 @@ Argon2 cost gets `argon2id`, which FIPS mode refuses.
 
 | Error | Meaning |
 |---|---|
-| `ErrFIPSNotApproved` | A derivation would use Argon2 or SHA-1 in FIPS mode |
+| `ErrFIPSNotApproved` | A derivation would use Argon2 or SHA-1 in FIPS mode; `KDFParams.Validate` or a write path was given Argon2 or a SHA-1 PBKDF2 in FIPS mode |
 | `*FIPSImportRequiredError` / `ErrFIPSImportRequired` | Every keyslot that could not be tried was refused only for non-approval; the volume is intact and `MigrateToFIPS` would open it. `FIPSImportRequiredError.Unwrap` reports both `ErrFIPSImportRequired` and `ErrFIPSNotApproved` |
 | `*FIPSMigrationError` | A migration stage failed; names the stage and the state left behind. Calling `MigrateToFIPS` from a FIPS process, or with a passphrase whose key matches no digest binding every data segment, is reported this way, at the precondition and verify stages. `FIPSMigrationError.Unwrap` reports `ErrFIPSMigration` for every stage, and the stage's own cause |
 | `ErrDeviceCacheStale` | The page-cache and `O_DIRECT` reads of the header disagree at the start of a run |
@@ -101,14 +108,22 @@ or the KDF of every digest attesting it, is not approved, unlock returns
 If any keyslot also failed for another reason, that failure is reported
 instead. Damage is not reported as a FIPS refusal: the refusal is returned
 only when re-screening with approved stand-ins shows the policy is the only
-obstacle; a malformed SHA-1 digest is `ErrInvalidHeader`.
+obstacle; a malformed SHA-1 digest is `ErrInvalidHeader`, and so is any
+keyslot one of whose attesting digests is malformed, even beside a short-salt
+digest strict mode refuses. A malformed digest no tried keyslot consults --
+one covering no keyslot, or binding no data segment -- is `ErrInvalidHeader`
+too. `MigrateToFIPS` refuses such a volume at the plan stage with the same
+`ErrInvalidHeader`, writing nothing.
 
 ### Edge cases
 
 Approved means what strict FIPS mode will run. Under `fips140=only`,
 `crypto/pbkdf2` also refuses a salt under 128 bits and an output under
 112 bits. A PBKDF2 keyslot or digest below either is treated like Argon2, and
-`NonApprovedKDF.Reason` names the parameter.
+`NonApprovedKDF.Reason` names the parameter. Such a keyslot or digest passes
+the pre-derivation screen, whose names are approved, and is refused at
+derivation; unlock still reports it as `*FIPSImportRequiredError`, not as
+`ErrInvalidHeader`.
 
 Argon2 digests from other writers (`time`, `memory`, `cpus` members, bounded
 like keyslot KDFs) are evaluated outside FIPS mode and rewritten as PBKDF2 by

@@ -14,6 +14,9 @@ library; it has no REST, gRPC, QUIC, MCP or Unix-socket transport.
 | Device node | `(*loop.Device).Path() string` |
 | Backing file | `(*loop.Device).BackingFile() string` |
 | Detach and wait | `(*loop.Device).Detach(ctx) (loop.DetachState, error)` |
+| How the release completed | `loop.DetachState`: `loop.Released`, or `loop.Deferred` (a success: the kernel defers the release while the device is held open) |
+| Inspect a failure | `*loop.Error` (alias of the module error shape) |
+| Match a failure | `errors.Is` against `loop.ErrNotFound`, `ErrNodeAbsent`, `ErrDetachIncomplete`, `ErrDeviceReassigned`, `ErrPermissionDenied` |
 
 No request/response schema, status code mapping or `scp` permission applies.
 Errors and their meaning are in [engineering.md](engineering.md#error-semantics).

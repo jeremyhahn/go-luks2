@@ -412,3 +412,78 @@ func TestDetachRefusesADeviceNoLongerBackedByItsFile(t *testing.T) {
 		t.Errorf("LOOP_CLR_FD sent %d time(s), want 1", cleared)
 	}
 }
+
+// TestDetachClosesItsDescriptorBeforeTheWait: the release cannot complete
+// while our descriptor is held, so it is closed before the first poll of the
+// wait.
+func TestDetachClosesItsDescriptorBeforeTheWait(t *testing.T) {
+	ours := backingIdentity{dev: 1, ino: 2, known: true}
+	cleared := 0
+	s := detachSys(t, func(*os.File) (uint64, uint64, error) { return ours.dev, ours.ino, nil }, &cleared)
+	open := s.openFile
+	var held *os.File
+	s.openFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
+		f, err := open(name, flag, perm)
+		held = f
+		return f, err
+	}
+	reads := 0
+	read := func(string) (loopState, error) {
+		reads++
+		if reads == 1 {
+			return attachedTo("/img"), nil
+		}
+		if held == nil {
+			t.Error("the wait began before the device was opened")
+		} else if _, err := held.Stat(); !errors.Is(err, os.ErrClosed) {
+			t.Errorf("the wait polled while our descriptor was still open (Stat = %v)", err)
+		}
+		return loopState{}, nil
+	}
+
+	state, err := detachDevice(context.Background(), "/dev/loop0", ours, s, read)
+	if err != nil || state != Released {
+		t.Fatalf("detachDevice() = %v, %v; want Released, nil", state, err)
+	}
+	if cleared != 1 || reads < 2 {
+		t.Fatalf("LOOP_CLR_FD sent %d time(s) and %d read(s), want 1 and a wait", cleared, reads)
+	}
+}
+
+// TestDetachCanceledAfterTheClearHasStillCleared: a context that ends after
+// LOOP_CLR_FD returns its error, and the clear has been sent.
+func TestDetachCanceledAfterTheClearHasStillCleared(t *testing.T) {
+	ours := backingIdentity{dev: 1, ino: 2, known: true}
+	cleared := 0
+	s := detachSys(t, func(*os.File) (uint64, uint64, error) { return ours.dev, ours.ino, nil }, &cleared)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.clearFD = func(*os.File) error {
+		cleared++
+		cancel()
+		return nil
+	}
+
+	_, err := detachDevice(ctx, "/dev/loop0", ours, s, reader(attachedTo("/img")))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("detachDevice() canceled after the clear = %v, want context.Canceled", err)
+	}
+	if cleared != 1 {
+		t.Fatalf("LOOP_CLR_FD sent %d time(s), want 1", cleared)
+	}
+}
+
+// TestDefaultSysHasTheDocumentedBounds pins the attempts, bounds and polls
+// engineering.md states, so a change to one is a change to the document.
+func TestDefaultSysHasTheDocumentedBounds(t *testing.T) {
+	s := defaultSys()
+	if s.attachAttempts != 16 {
+		t.Errorf("attach attempts = %d, want 16", s.attachAttempts)
+	}
+	if s.nodeTimeout != 2*time.Second || s.nodePoll != 500*time.Microsecond {
+		t.Errorf("node wait = %v polled every %v, want 2s every 500µs", s.nodeTimeout, s.nodePoll)
+	}
+	if s.detachTimeout != 2*time.Second || s.detachPoll != 500*time.Microsecond {
+		t.Errorf("detach wait = %v polled every %v, want 2s every 500µs", s.detachTimeout, s.detachPoll)
+	}
+}

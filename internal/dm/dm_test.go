@@ -34,6 +34,14 @@ func TestCreateTargetRefusesANameTheIoctlWouldCut(t *testing.T) {
 	}
 }
 
+func TestCreateTargetHonoursACanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := CreateTarget(ctx, "name", "uuid"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("CreateTarget on a canceled context = %v, want context.Canceled", err)
+	}
+}
+
 func TestRetryWhileBusySucceedsOnTheFirstAttemptWithoutWaiting(t *testing.T) {
 	clk := clock.NewFake(t)
 	calls := 0
@@ -77,6 +85,37 @@ func TestRetryWhileBusyGivesUpAtTheBudget(t *testing.T) {
 	}
 	if attempts < 2 {
 		t.Fatalf("RetryWhileBusy attempts = %d, want more than one attempt before giving up", attempts)
+	}
+}
+
+// The documented budget for a transient hold: 3 seconds in total, starting at
+// a 20 ms wait and doubling, with the last wait clipped to what is left.
+func TestRetryWhileBusyBacksOffFromTwentyMillisecondsWithinThreeSeconds(t *testing.T) {
+	if RemoveRetryBudget != 3*time.Second || RemoveRetryInitialDelay != 20*time.Millisecond {
+		t.Fatalf("retry budget = %v from %v, want 3s from 20ms", RemoveRetryBudget, RemoveRetryInitialDelay)
+	}
+	clk := clock.NewFake(t)
+	attempts, _ := RetryWhileBusy(context.Background(), clk, func() error {
+		return os.NewSyscallError("dm ioctl", unix.EBUSY)
+	})
+	waits := clk.Waits()
+	if len(waits) != attempts-1 {
+		t.Fatalf("waits = %d for %d attempts, want one wait between each pair", len(waits), attempts)
+	}
+	want := RemoveRetryInitialDelay
+	var total time.Duration
+	for i, w := range waits {
+		if i < len(waits)-1 && w != want {
+			t.Fatalf("wait %d = %v, want %v (doubling from %v)", i, w, want, RemoveRetryInitialDelay)
+		}
+		if i == len(waits)-1 && (w <= 0 || w > want) {
+			t.Fatalf("last wait = %v, want the remainder, at most %v", w, want)
+		}
+		total += w
+		want *= 2
+	}
+	if total != RemoveRetryBudget || clk.Elapsed() != RemoveRetryBudget {
+		t.Fatalf("waited %v (elapsed %v), want exactly the %v budget", total, clk.Elapsed(), RemoveRetryBudget)
 	}
 }
 
@@ -181,6 +220,26 @@ func TestIsOurNodeTreatsNilInfoAndStatFailureAsNotOurs(t *testing.T) {
 	info := &devmapper.DeviceInfo{DevNo: unix.Mkdev(250, 3)}
 	if IsOurNode(rdev, "/dev/dm-3", info) {
 		t.Fatal("IsOurNode = true when the node cannot be stat'd, want false")
+	}
+}
+
+// A node is this mapping's only when its device number is the one
+// device-mapper reports for the target, including a minor above 255.
+func TestIsOurNodeMatchesOnlyTheTargetsDeviceNumber(t *testing.T) {
+	info := &devmapper.DeviceInfo{DevNo: unix.Mkdev(253, 300)}
+	for _, tc := range []struct {
+		name string
+		rdev uint64
+		want bool
+	}{
+		{"same device", unix.Mkdev(253, 300), true},
+		{"another minor", unix.Mkdev(253, 44), false},
+		{"another major", unix.Mkdev(254, 300), false},
+	} {
+		got := IsOurNode(func(string) (uint64, error) { return tc.rdev, nil }, "/dev/dm-300", info)
+		if got != tc.want {
+			t.Errorf("%s: IsOurNode = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 

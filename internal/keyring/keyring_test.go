@@ -217,6 +217,55 @@ func TestReleaseReportsAnEntryItCannotRevoke(t *testing.T) {
 	}
 }
 
+// TestReleaseFailureMessageNamesTheEntryAndTheKeyctlCommands pins the detail
+// of ErrKeyNotReleased: the key type and description, and the `keyctl show`
+// and `keyctl unlink` commands that remove the entry by its ring and ID.
+func TestReleaseFailureMessageNamesTheEntryAndTheKeyctlCommands(t *testing.T) {
+	fake := newFakeSyscalls()
+	fake.stillThere = true
+	s := fake.seam()
+
+	entry, err := AddVolumeKey(context.Background(), s, "uuid-message", []byte("key"))
+	if err != nil {
+		t.Fatalf("AddVolumeKey: %v", err)
+	}
+	err = entry.Release(s)
+	if !errors.Is(err, ErrKeyNotReleased) {
+		t.Fatalf("Release = %v, want ErrKeyNotReleased", err)
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		KeyType + ` "` + entry.Description + `"`,
+		fmt.Sprintf("`keyctl show %d`", entry.Ring),
+		fmt.Sprintf("`keyctl unlink %d %d`", entry.ID, entry.Ring),
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("ErrKeyNotReleased message lacks %q:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "key\x00") || strings.Contains(msg, `"key"`) {
+		t.Errorf("message carries key content: %s", msg)
+	}
+}
+
+// TestReleaseTreatsARevokedButResolvableEntryAsNotReleased pins the
+// fail-closed reading of the verification search: only ENOKEY or ENOENT
+// confirm the entry is gone. An entry that still resolves, even as
+// EKEYREVOKED, is reported.
+func TestReleaseTreatsARevokedButResolvableEntryAsNotReleased(t *testing.T) {
+	fake := newFakeSyscalls()
+	s := fake.seam()
+
+	entry, err := AddVolumeKey(context.Background(), s, "uuid-revoked", []byte("key"))
+	if err != nil {
+		t.Fatalf("AddVolumeKey: %v", err)
+	}
+	fake.searchErr = unix.EKEYREVOKED
+	if err := entry.Release(s); !errors.Is(err, ErrKeyNotReleased) {
+		t.Fatalf("Release when the search answers EKEYREVOKED = %v, want ErrKeyNotReleased", err)
+	}
+}
+
 func TestAddVolumeKeySearchFailureIsClassified(t *testing.T) {
 	fake := newFakeSyscalls()
 	fake.searchErr = unix.EACCES

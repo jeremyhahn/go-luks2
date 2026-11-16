@@ -82,6 +82,34 @@ func TestSetTokenRefusesAKeyslotTheHeaderDoesNotHave(t *testing.T) {
 	}
 }
 
+func TestAddTokenRefusesAKeyslotTheHeaderDoesNotHave(t *testing.T) {
+	defer parallel(t)()
+
+	path := newImage(t, "addtoken-dangling.img")
+	formatWithLibrary(t, path)
+	before := readAreaBytes(t, path, 0, 2*header.HeaderMinSize)
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer func() { _ = v.Close() }()
+
+	for _, refs := range [][]int{{7}, {0, 31}} {
+		_, err := v.AddToken(context.Background(), Token{Type: TokenTypeRecovery, Keyslots: refs})
+		if !errors.Is(err, ErrInvalidHeader) {
+			t.Errorf("AddToken naming keyslots %v: got %v, want ErrInvalidHeader", refs, err)
+		}
+	}
+	if !bytes.Equal(before, readAreaBytes(t, path, 0, 2*header.HeaderMinSize)) {
+		t.Fatal("a refused AddToken changed the header")
+	}
+
+	if _, err := v.AddToken(context.Background(), Token{Type: TokenTypeRecovery, Keyslots: []int{0}}); err != nil {
+		t.Fatalf("AddToken naming the keyslot the header has: %v", err)
+	}
+}
+
 // TestAddKeyWritesNoMaterialItsHeaderCannotName: when the header carries damage
 // the write-time validator refuses -- here a token naming a missing keyslot --
 // AddKey is refused BEFORE the new keyslot's material is written, so no

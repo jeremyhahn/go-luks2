@@ -142,4 +142,38 @@ func TestHandlesNotInLockedMemoryAreRefusedUnread(t *testing.T) {
 		_, err := ParseRecoveryKey(h)
 		assertRefusedUnread(t, err, h, true)
 	})
+
+	unlocked := func(t *testing.T, name string) (*Volume, *Key) {
+		t.Helper()
+		v := open(t, formattedVolumeImage(t, name, "", ""))
+		good := newTestPassphrase(t)
+		defer func() { _ = good.Destroy() }()
+		key, err := v.Unlock(ctx, good)
+		if err != nil {
+			t.Fatalf("Unlock with the real passphrase: %v", err)
+		}
+		t.Cleanup(key.Destroy)
+		return v, key
+	}
+
+	t.Run("AddKeyslot", func(t *testing.T) {
+		v, key := unlocked(t, "foreign-addkeyslot.img")
+		h := newForeignHandle(t, pass)
+		_, err := v.AddKeyslot(ctx, key, h, KeyslotParams{})
+		assertRefusedUnread(t, err, h, true)
+	})
+
+	t.Run("ChangeKeyslot", func(t *testing.T) {
+		v, key := unlocked(t, "foreign-changekeyslot.img")
+		h := newForeignHandle(t, pass)
+		_, err := v.ChangeKeyslot(ctx, key, h, KeyslotParams{})
+		assertRefusedUnread(t, err, h, true)
+	})
+
+	t.Run("MigrateToFIPS", func(t *testing.T) {
+		v := open(t, formattedVolumeImage(t, "foreign-migrate.img", "", ""))
+		h := newForeignHandle(t, pass)
+		_, err := v.MigrateToFIPS(ctx, h, MigrateParams{})
+		assertRefusedUnread(t, err, h, true)
+	})
 }

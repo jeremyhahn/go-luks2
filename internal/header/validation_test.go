@@ -119,6 +119,11 @@ func TestValidateHeaderStructureFollowsCryptsetup(t *testing.T) {
 			m.Digests["0"].Keyslots = []string{"00"}
 			m.Tokens["0"].Keyslots = []string{"00"}
 		}, wantErr: "not a canonical keyslot id"},
+		{name: "token naming a keyslot past 31", mutate: func(m *Metadata) {
+			m.Keyslots["32"] = m.Keyslots["0"]
+			m.Tokens["0"].Keyslots = []string{"32"}
+		}, wantErr: "not a canonical keyslot id (0..31)"},
+		{name: "token naming a negative keyslot", mutate: func(m *Metadata) { m.Tokens["0"].Keyslots = []string{"-1"} }, wantErr: "not a canonical keyslot id"},
 
 		// hdr_validate_digests
 		{name: "digest id not a number", mutate: func(m *Metadata) { m.Digests["d"] = m.Digests["0"] }, wantErr: `digest id "d"`},

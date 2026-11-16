@@ -12,9 +12,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
 func TestCommandTakesTheSelectedLine(t *testing.T) {
@@ -100,6 +103,20 @@ func TestNewCommandRefusesBadInput(t *testing.T) {
 				t.Errorf("NewCommand() error = %v, want errors.Is(_, ErrInvalidArgument)", err)
 			}
 		})
+	}
+}
+
+// A Command built with a token reports that token whole, its keyslots too:
+// UnlockWithProvider tries only the keyslots the provider's token names.
+func TestNewCommandKeepsTheTokensKeyslots(t *testing.T) {
+	token := luks2.Token{Type: "example-helper", Keyslots: []int{2, 0}}
+
+	p, err := NewCommand("/bin/true", WithToken(token))
+	if err != nil {
+		t.Fatalf("NewCommand() error = %v", err)
+	}
+	if got := p.Token(); got.Type != token.Type || !slices.Equal(got.Keyslots, []int{2, 0}) {
+		t.Errorf("provider token = %q for keyslots %v, want %q for [2 0]", got.Type, got.Keyslots, token.Type)
 	}
 }
 
@@ -220,6 +237,33 @@ func TestHelperErrorCarriesWhatTheHelperSaid(t *testing.T) {
 	}
 	if !strings.Contains(helperErr.Error(), "FIDO_ERR_PIN_INVALID") {
 		t.Errorf("Error() = %q, want it to carry the helper's diagnostic", helperErr.Error())
+	}
+}
+
+// TestHelperErrorExitCodeIsMinusOneWhenTheHelperNeverRan pins tokens
+// engineering.md, Exported surface: HelperError.ExitCode is -1 when the
+// helper never ran. A trusted, executable file the kernel cannot execute (no
+// interpreter line, not a binary) fails at start, before any exit status.
+func TestHelperErrorExitCodeIsMinusOneWhenTheHelperNeverRan(t *testing.T) {
+	path := filepath.Join(privateDir(t), "not-a-program")
+	if err := os.WriteFile(path, []byte("\x00\x01 this is not an executable format\n"), 0o700); err != nil { // #nosec G306 -- an executable test fixture under t.TempDir()
+		t.Fatal(err)
+	}
+	p, err := NewCommand(path)
+	if err != nil {
+		t.Fatalf("NewCommand failed: %v", err)
+	}
+
+	_, err = p.Passphrase(context.Background())
+	var helperErr *HelperError
+	if !errors.As(err, &helperErr) {
+		t.Fatalf("error = %v, want a *HelperError", err)
+	}
+	if helperErr.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1 for a helper that never ran", helperErr.ExitCode)
+	}
+	if !errors.Is(err, ErrHelperFailed) {
+		t.Errorf("error = %v, want ErrHelperFailed", err)
 	}
 }
 
@@ -369,6 +413,36 @@ func TestCommandRefusesAnUntrustedHelper(t *testing.T) {
 				t.Errorf("the untrusted helper ran (stat error %v)", statErr)
 			}
 		})
+	}
+}
+
+// A trusted helper the kernel cannot start (its interpreter does not exist)
+// never ran, so its *HelperError records ExitCode -1 and no exit status.
+func TestCommandHelperThatNeverRanReportsExitCodeMinusOne(t *testing.T) {
+	helper := filepath.Join(privateDir(t), "helper")
+	script := "#!/nonexistent-interpreter/sh\nprintf secret\n"
+	if err := os.WriteFile(helper, []byte(script), 0o700); err != nil { // #nosec G306 -- an executable test fixture under t.TempDir()
+		t.Fatal(err)
+	}
+	p, err := NewCommand(helper)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := p.Passphrase(context.Background())
+	if err == nil {
+		mustDestroy(t, got)
+		t.Fatal("Passphrase() succeeded for a helper that cannot start")
+	}
+	if !errors.Is(err, ErrHelperFailed) {
+		t.Fatalf("Passphrase() error = %v, want errors.Is(_, ErrHelperFailed)", err)
+	}
+	var he *HelperError
+	if !errors.As(err, &he) {
+		t.Fatalf("Passphrase() error = %v, want a *HelperError", err)
+	}
+	if he.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1 for a helper that never ran", he.ExitCode)
 	}
 }
 

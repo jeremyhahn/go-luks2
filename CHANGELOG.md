@@ -16,6 +16,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the devcontainer `golang:` image tag and digest, and the README build
   requirement.
 
+### Changed
+
+- **In FIPS mode a SHA-1 PBKDF2 is refused as not approved.**
+  `KDFParams.Validate` now judges the PBKDF2 hash: under FIPS 140-3 mode a
+  PBKDF2 KDF naming SHA-1 fails with an error matching `ErrFIPSNotApproved`.
+  The write paths that refuse a SHA-1 PBKDF2 (`Format`, `AddKeyslot`,
+  `ChangeKeyslot`, `Enroll`) return an error matching `ErrFIPSNotApproved` in
+  FIPS mode, where they returned `ErrInvalidArgument`. Outside FIPS mode
+  nothing changes: SHA-1 creation is still refused with `ErrInvalidArgument`.
+- **`MigrateToFIPS` refuses Argon2 parameters instead of dropping them.** A
+  `MigrateParams.KDF` naming Argon2 (`KDFArgon2id`, `KDFArgon2i`, or a
+  non-zero `Time`, `MemoryKiB` or `Parallel`) was silently ignored and a
+  PBKDF2 keyslot written. It is now refused before anything is written, as a
+  `*FIPSMigrationError` at stage `precondition` matching both
+  `ErrFIPSMigration` and `ErrFIPSNotApproved` and naming the field, and the
+  volume is left unchanged. A PBKDF2 `KDF` migrates as before.
+- **A short PBKDF2 salt in strict FIPS mode asks for an import.** Under
+  `GODEBUG=fips140=only`, unlocking a volume whose PBKDF2 keyslot or digest has
+  a salt under 128 bits failed with `ErrInvalidHeader`, as if the header were
+  damaged. It now fails with `*FIPSImportRequiredError`, like any other keyslot
+  refused only by FIPS; the open is still refused, and `MigrateToFIPS` imports
+  the volume. A keyslot one of whose attesting digests is malformed (a value
+  that is not base64, a length no hash gives) still fails with
+  `ErrInvalidHeader`, beside a short-salt digest or not, and also when the
+  keyslot's own KDF is refused (Argon2 under the FIPS policy, a short PBKDF2
+  salt under strict mode), where it failed with `ErrFIPSNotApproved` or
+  `ErrInvalidArgument`; `MigrateToFIPS`
+  refuses that volume at the plan stage with `ErrInvalidHeader`, where it
+  returned the not-approved-digest refusal.
+- **`MigrateToFIPS` no longer keeps a malformed digest that looks approved.**
+  A PBKDF2-SHA256 digest with a full-length salt but a value no hash gives
+  (48 bytes, say) passed the approval check, so planning skipped it and the
+  migration wrote, reported `Complete` and kept the damage. Planning now
+  screens every digest's structure first, and such a volume is refused at the
+  plan stage with `ErrInvalidHeader`, writing nothing.
+- **A malformed digest no keyslot consults is no longer called an import.**
+  In FIPS mode, a volume refused only for non-approval but carrying a
+  malformed digest that covers no tried keyslot, or binds no data segment,
+  failed unlock with `*FIPSImportRequiredError`, though `MigrateToFIPS`
+  refuses that volume at the plan stage. Unlock now fails with
+  `ErrInvalidHeader`, as the import does.
+- **A damaged Argon2 keyslot KDF is header damage under FIPS too.** In FIPS
+  mode, unlocking a volume whose Argon2 keyslot declares a salt that is not
+  base64 failed with an error matching `ErrFIPSNotApproved` and not
+  `ErrInvalidHeader`, so the damage read as a policy refusal. The keyslot
+  KDF's structure is now screened before the FIPS policy judges it, and unlock
+  fails with `ErrInvalidHeader` in FIPS mode as outside it.
+
+### Fixed
+
+- **The `pkg/luks2` race run stays well inside its memory bound.** The
+  migration crash-matrix tests built every torn 16 MiB header image up front
+  and held it in each queued subtest, and their helpers read whole 64 MiB
+  images to compare or hash them; under `-race` the peak crossed the Race
+  job's container bound and the test binary was killed. Torn states are now
+  built by the subtest that checks them, the helpers stream, and the
+  whole-image tests share a fixed four-slot semaphore. No test, subtest or
+  assertion changed.
+- **An unsupported mandatory requirement is readable from `luks2.Error`.**
+  Unlock, activation and every header write on a container declaring a
+  mandatory requirement this library does not implement (such as
+  `inline-hw-tags`) return a `*luks2.Error` whose `Kind` is
+  `ErrUnsupportedRequirement` and whose `Detail` names the requirement and the
+  container's mandatory set. A header write used to report it with Kind
+  `ErrIO` and no Detail, and unlock's Detail did not name it. No named
+  requirement type is exported. A requirement that stops `MigrateToFIPS`
+  keeps the migration's Kind `ErrFIPSMigration`, with the requirement in
+  `Detail` and `errors.Is(err, ErrUnsupportedRequirement)` still true. The
+  same holds when `AddKeyslot`, `ChangeKeyslot` or `RemoveKeyslot` meets the
+  requirement while repairing a damaged or older header copy: that used to
+  report Kind `ErrIO` with Detail "failed to read header", and now reports
+  the requirement, with `errors.Is(err, ErrIO)` still true underneath.
+
+- **A concurrent build of the same toolchain image tag no longer fails the
+  job.** Two jobs on one Docker daemon could build the content-addressed
+  toolchain tag at once, and BuildKit refused the slower export with `image
+  "…": already exists`. The tag is a hash of the image's inputs, so the image
+  the faster job left is the one the slower job would have built.
+  `make docker-build-toolchain` and `make docker-build-integration` now pass
+  when the build fails with exactly that refusal of their own content tag and
+  the tag resolves, and they print a line saying so. Every other build failure
+  still fails, with the build's output and exit status. Before this change,
+  `docker-build-integration` accepted any failed build whose tag resolved
+  afterwards; it now needs the refusal too.
+
+### Changed
+
+- **golang.org/x/sys is v0.50.0, so every direct dependency is at its latest
+  release again.** `make deps-check` reported v0.49.0 as behind the latest
+  release. golang.org/x/crypto and golang.org/x/term still require v0.49.0;
+  the module now selects v0.50.0 for all three.
+
 ## [1.0.3-alpha] - 2026-11-10
 
 ### Changed

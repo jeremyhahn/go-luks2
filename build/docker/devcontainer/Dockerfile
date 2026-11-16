@@ -21,7 +21,7 @@
 
 # golang:1.27.4, by digest: a tag can be re-pointed, a digest cannot. Raise the
 # version and the digest together, with go.mod's go directive.
-ARG GO_IMAGE=golang:1.27.4@sha256:08bcb99a38f85a265f9a93d1d3323e2440eec333380f3ea26ee0dec9264bb41c
+ARG GO_IMAGE=golang:1.27.4@sha256:5e8afd493a7124a8586e134d9b532731161d4b9becf9dee5a5956b107426f93d
 
 # ---- base ----
 FROM ${GO_IMAGE} AS base
@@ -290,8 +290,17 @@ FROM base AS integration
 # The Alpine package index checksum (ci-template v1.29, make -s apk-index-sum),
 # which the image's content tag hashes. This stage alone declares it. The base
 # is Debian, with no apk, so CI passes the constant `none` and the tag changes
-# only with the tree; the base stage's apt-get upgrade takes Debian's fixes.
+# only with the tree.
 ARG APK_INDEX_SUM
+
+# The Debian package index checksum (make -s apt-index-sum), which the image's
+# content tag hashes too. This stage alone declares it: a new index misses the
+# cache from here on, so this stage's apt-get upgrade takes the fixes a cached
+# base upgrade layer does not have (main 9ab065b04 kept linux-libc-dev
+# 6.12.116-1 from one). APT::Update::Error-Mode=any, as apt-index-sum's probe:
+# an index that cannot be refreshed fails the build, so a stale upgrade never
+# caches under the new tag.
+ARG APT_INDEX_SUM
 
 # strace is a test instrument, not a dependency of the library: it delays one
 # of cryptsetup's own syscalls so a test can make real cryptsetup hold its
@@ -306,7 +315,8 @@ ARG APK_INDEX_SUM
 # fails if any of them is still installed, or if the purge took a tool the
 # suite drives.
 RUN set -eu; \
-    apt-get update; \
+    apt-get -o APT::Update::Error-Mode=any update; \
+    apt-get upgrade -y --no-install-recommends; \
     apt-get install -y --no-install-recommends strace; \
     apt-get purge -y --auto-remove curl libcurl4t64 libcurl3t64-gnutls; \
     rm -rf /var/lib/apt/lists/*; \

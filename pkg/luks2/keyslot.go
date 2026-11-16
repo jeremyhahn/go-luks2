@@ -495,7 +495,7 @@ func testKeyForTestWithSys(device string, passphrase []byte, sys volumeSys) erro
 // there. See keyslotCostPolicy (kdf.go) for what the exemption is, what it is
 // not, and why it is not a field on the add-key options.
 func addKeyWithPolicy(ctx context.Context, device string, existingPassphrase, newPassphrase []byte, opts *addKeyOptionsForTest, policy keyslotCostPolicy, sys volumeSys) (int, error) {
-	if err := addKeyPreflight(device, existingPassphrase, newPassphrase, opts); err != nil {
+	if err := addKeyPreflight(device, existingPassphrase, newPassphrase, opts, sys.fipsMode()); err != nil {
 		return -1, err
 	}
 
@@ -528,7 +528,7 @@ func addKeyWithPolicy(ctx context.Context, device string, existingPassphrase, ne
 // device lock. It is separate so that enrollWithToken (keyprovider.go), which
 // must hold ONE lock across the keyslot and the token it writes, makes exactly
 // the same checks rather than a copy of them.
-func addKeyPreflight(device string, existingPassphrase, newPassphrase []byte, opts *addKeyOptionsForTest) error {
+func addKeyPreflight(device string, existingPassphrase, newPassphrase []byte, opts *addKeyOptionsForTest, mode fips.Mode) error {
 	// Validate inputs. The existing credential is judged by what can open a
 	// keyslot -- a cryptsetup keyfile of up to 8 MiB, a short legacy
 	// passphrase -- and the NEW one by the policy for credentials this package
@@ -545,7 +545,7 @@ func addKeyPreflight(device string, existingPassphrase, newPassphrase []byte, op
 	// No SHA-1 keyslot, refused before the existing keyslot is unlocked --
 	// which costs a full KDF derivation -- and before anything is written.
 	if opts != nil {
-		if err := refuseSHA1ForCreation(opts.KDFType, opts.Hash); err != nil {
+		if err := refuseSHA1ForCreation(opts.KDFType, opts.Hash, mode); err != nil {
 			return err
 		}
 	}
@@ -1541,7 +1541,16 @@ func getVolumeKey(ctx context.Context, f io.ReaderAt, device string, passphrase 
 			"none of the header's %d keyslot(s) is attested by a digest binding every data segment (%s), so none holds the volume key",
 			len(metadata.Keyslots), strings.Join(dataSegmentIDs(metadata), ", "))}
 	}
-	return getMasterKeySlot(ctx, f, device, passphrase, header.VolumeKeyDigestsView(metadata), order, sys)
+	masterKey, id, err := getMasterKeySlot(ctx, f, device, passphrase, header.VolumeKeyDigestsView(metadata), order, sys)
+	// The scan sees only the digests binding every data segment. An import
+	// request is judged against the whole header, as MigrateToFIPS judges
+	// it: a malformed digest the view leaves out is still damage.
+	if errors.Is(err, ErrFIPSImportRequired) {
+		if herr := malformedDigestError(metadata.Digests); herr != nil {
+			return nil, "", herr
+		}
+	}
+	return masterKey, id, err
 }
 
 // keyslotsByPriority splits ids into metadata's prefer, normal and ignore
@@ -1646,18 +1655,34 @@ func getMasterKeySlot(ctx context.Context, dev io.ReaderAt, device string, passp
 			continue
 		}
 
-		if keyslotRefusedByFIPS(id, keyslot, metadata.Digests, sys.fipsMode) {
+		if keyslotRefusedByFIPS(id, keyslot, metadata.Digests, sys.fipsMode, err) {
 			fipsBlocked = append(fipsBlocked, id)
 		} else {
 			otherBlocked = true
 		}
 
 		if untried == nil {
+			// A malformed digest attesting this keyslot is header damage, and
+			// it is what is reported even when the keyslot's own KDF is also
+			// refused (Argon2 under the FIPS policy, a salt strict mode
+			// rejects): the caller tells damage by ErrInvalidHeader alone.
+			if !errors.Is(err, errs.ErrInvalidHeader) {
+				if structural := coveringDigestStructureError(id, metadata.Digests); structural != nil {
+					err = structural
+				}
+			}
 			untried = &errs.Error{Kind: errs.KindOf(err, errs.ErrInvalidHeader), Detail: "keyslot " + id + " could not be tried", Err: err}
 		}
 	}
 
 	if len(fipsBlocked) > 0 && !otherBlocked {
+		// An import request says the volume is intact and MigrateToFIPS
+		// would open it. A malformed digest anywhere in the header -- one no
+		// keyslot tried here consults included -- is damage MigrateToFIPS
+		// refuses, so it is what is reported.
+		if err := malformedDigestError(metadata.Digests); err != nil {
+			return nil, "", err
+		}
 		return nil, "", newFIPSImportRequiredError(device, metadata, fipsBlocked)
 	}
 

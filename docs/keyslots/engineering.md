@@ -42,7 +42,7 @@ separate read-only probe method: checking that a passphrase opens a volume is
   require it to open to the volume key; one that does not is rolled back and
   the call fails with `ErrWrongKey`. Every keyslot operation
   reads and writes through the one descriptor it locked (device-lock
-  invariant: [volumes/engineering.md](../volumes/architecture.md#volume-target-and-activation)).
+  invariant: [volumes/architecture.md](../volumes/architecture.md#volume-target-and-activation)).
 - `AddKeyslot` returns the slot it wrote (`KeyslotInfo.ID`), chosen under the device lock. Never
   infer the slot from the header afterwards: slots need not be contiguous.
 

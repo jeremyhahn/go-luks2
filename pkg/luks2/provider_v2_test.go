@@ -23,6 +23,7 @@ func cheapKeyslotParams() KeyslotParams {
 }
 
 func TestVolumeEnrollAddsAKeyslotAndWritesTheToken(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "enroll.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -100,6 +101,7 @@ func TestVolumeEnrollAddsAKeyslotAndWritesTheToken(t *testing.T) {
 // kp.Priority reaches the keyslot Enroll writes (onDiskPriority), not just
 // the KDF cost cheapKeyslotParams names.
 func TestVolumeEnrollWithPriorityPreferWritesIt(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "enroll-prefer.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -144,6 +146,7 @@ func TestVolumeEnrollWithPriorityPreferWritesIt(t *testing.T) {
 }
 
 func TestVolumeEnrollAnonymousProviderWritesNoToken(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "enroll-anonymous.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -180,6 +183,7 @@ func TestVolumeEnrollAnonymousProviderWritesNoToken(t *testing.T) {
 }
 
 func TestVolumeEnrollRollsBackTheKeyslotIfTheTokenWriteFails(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "enroll-rollback.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -258,6 +262,7 @@ func TestVolumeEnrollRefusesOnAReadOnlyVolume(t *testing.T) {
 }
 
 func TestVolumeUnlockWithProviderOpensTheNamedKeyslot(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "unlockwithprovider.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
@@ -303,6 +308,7 @@ func TestVolumeUnlockWithProviderOpensTheNamedKeyslot(t *testing.T) {
 // prefer keyslot opens before the normal one, the normal one before the ignore
 // one, and the ignore one still opens when it is all the token names.
 func TestVolumeUnlockWithProviderTriesTheTokensKeyslotsByPriority(t *testing.T) {
+	defer parallel(t)()
 	path := formattedVolumeImage(t, "unlockwithprovider-priority.img", "", "")
 
 	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))

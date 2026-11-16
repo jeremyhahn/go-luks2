@@ -24,6 +24,7 @@ import (
 // format had already overwritten with random data. cryptsetup zeroes the
 // header areas before it writes either copy (LUKS2_wipe_header_areas).
 func TestFormatCrashAfterThePrimaryLeavesNoOldHeader(t *testing.T) {
+	defer parallel(t)()
 	errCrash := errors.New("the machine went down")
 	for _, tc := range []struct {
 		name string

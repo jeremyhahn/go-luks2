@@ -5,6 +5,7 @@
 package luks2
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -141,8 +142,14 @@ func (t *Token) UnmarshalJSON(data []byte) error {
 		return &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "token is not a JSON object", Err: err}
 	}
 
+	// JSON null decodes into a string or a slice without complaint, but it is
+	// neither: cryptsetup's token validation requires type to be a string and
+	// keyslots an array, so null is refused here as the wrong type it is.
 	var typ string
 	if v, ok := raw["type"]; ok {
+		if isJSONNull(v) {
+			return &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "token type is not a string"}
+		}
 		if err := json.Unmarshal(v, &typ); err != nil {
 			return &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "token type is not a string", Err: err}
 		}
@@ -151,6 +158,9 @@ func (t *Token) UnmarshalJSON(data []byte) error {
 
 	var keyslots []int
 	if v, ok := raw["keyslots"]; ok {
+		if isJSONNull(v) {
+			return &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "token keyslots is not an array of strings"}
+		}
 		var ids []string
 		if err := json.Unmarshal(v, &ids); err != nil {
 			return &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "token keyslots is not an array of strings", Err: err}
@@ -173,6 +183,11 @@ func (t *Token) UnmarshalJSON(data []byte) error {
 	t.Keyslots = keyslots
 	t.Members = raw
 	return nil
+}
+
+// isJSONNull reports whether a raw JSON member is the literal null.
+func isJSONNull(v json.RawMessage) bool {
+	return string(bytes.TrimSpace(v)) == "null"
 }
 
 // toLegacyToken converts t to the on-disk LegacyToken shape, through

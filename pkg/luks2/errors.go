@@ -610,6 +610,20 @@ func (e *FIPSMigrationError) MigrationStage() FIPSMigrationStage {
 	}
 }
 
+// unsupportedRequirementDetail is the Detail of a luks2.Error whose Kind is
+// ErrUnsupportedRequirement: internal/header's typed error is not exported
+// (no named type leaves this package for it), so the requirement it names and
+// the container's mandatory set travel in words. ok is false when err holds
+// no such requirement.
+func unsupportedRequirementDetail(err error) (detail string, ok bool) {
+	var req *header.UnsupportedRequirementError
+	if !errors.As(err, &req) {
+		return "", false
+	}
+	return fmt.Sprintf("the container declares the mandatory requirement %q, which this package does not implement (mandatory: %s)",
+		req.Requirement, strings.Join(req.Mandatory, ", ")), true
+}
+
 // Out-of-range input has no sentinel of its own. A caller-supplied device
 // path, size or count outside the accepted range is
 // *errs.Error{Kind: ErrInvalidArgument} (or *KDFCostError, which Is it); a

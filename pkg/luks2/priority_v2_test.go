@@ -54,6 +54,19 @@ func TestPriorityDiskMapping(t *testing.T) {
 	if got := priorityFromDisk(intPtr(keyslotPriorityNormal)); got != PriorityNormal {
 		t.Errorf("an explicit on-disk 1 reads as %d, want PriorityNormal", got)
 	}
+
+	// cryptsetup's own numbers (keyslots engineering.md, Configuration):
+	// ignore is 0 and prefer is 2 on disk, and each Priority is the on-disk
+	// number plus one.
+	if keyslotPriorityIgnore != 0 || keyslotPriorityNormal != 1 || keyslotPriorityPrefer != 2 {
+		t.Errorf("on-disk priorities = %d/%d/%d, want cryptsetup's 0/1/2",
+			keyslotPriorityIgnore, keyslotPriorityNormal, keyslotPriorityPrefer)
+	}
+	for v := 0; v <= 2; v++ {
+		if got := priorityFromDisk(intPtr(v)); got != Priority(v+1) {
+			t.Errorf("on-disk %d reads as %d, want Priority(%d)", v, got, v+1)
+		}
+	}
 }
 
 // TestVolumeAddKeyslotPriorityRoundTrips: every value a caller can name

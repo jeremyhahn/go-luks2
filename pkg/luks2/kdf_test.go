@@ -806,15 +806,15 @@ func TestBenchmarkPBKDF2SHA1(t *testing.T) {
 
 // TestBenchmarkPBKDF2SHA384 tests PBKDF2 benchmarking with SHA-384
 // TestCreateKDFPBKDF2SHA1Alias: the pbkdf2-sha1 alias creates nothing (#239,
-// BREAKING). It is refused with ErrInvalidArgument, and with ErrUnsupported
-// for callers that branched on that, in every mode -- before FIPS policy is
-// consulted, because no process may write it.
+// BREAKING). It is refused in every mode, with ErrUnsupported for callers
+// that branched on that, because no process may write it: as ErrFIPSNotApproved
+// in FIPS mode and as ErrInvalidArgument outside it.
 func TestCreateKDFPBKDF2SHA1Alias(t *testing.T) {
 	defer parallel(t)()
 
 	kdf, err := createKDFStrict(formatOptionsForTest{KDFType: kdfTypePBKDF2SHA1, PBKDFIterTime: 100}, 20)
-	if kdf != nil || !errors.Is(err, ErrInvalidArgument) || !errors.Is(err, ErrUnsupported) {
-		t.Fatalf("CreateKDF with pbkdf2-sha1: got %+v, %v; want ErrInvalidArgument and ErrUnsupported", kdf, err)
+	if want := sha1RefusalKind(defaultVolumeSys().fipsMode()); kdf != nil || !errors.Is(err, want) || !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("CreateKDF with pbkdf2-sha1: got %+v, %v; want %v and ErrUnsupported", kdf, err, want)
 	}
 }
 
@@ -1018,8 +1018,8 @@ func TestCreateKDFPBKDF2SHA1HashAlgoOverride(t *testing.T) {
 	for _, kdfType := range []string{kdfTypePBKDF2, kdfTypeArgon2id} {
 		for _, hash := range []string{"sha1", "SHA1", " sha1 "} {
 			kdf, err := createKDFStrict(formatOptionsForTest{KDFType: kdfType, HashAlgo: hash, PBKDFIterTime: 100}, 20)
-			if kdf != nil || !errors.Is(err, ErrInvalidArgument) || !errors.Is(err, ErrUnsupported) {
-				t.Fatalf("CreateKDF %s with HashAlgo %q: got %+v, %v; want ErrInvalidArgument and ErrUnsupported", kdfType, hash, kdf, err)
+			if want := sha1RefusalKind(defaultVolumeSys().fipsMode()); kdf != nil || !errors.Is(err, want) || !errors.Is(err, ErrUnsupported) {
+				t.Fatalf("CreateKDF %s with HashAlgo %q: got %+v, %v; want %v and ErrUnsupported", kdfType, hash, kdf, err, want)
 			}
 		}
 	}

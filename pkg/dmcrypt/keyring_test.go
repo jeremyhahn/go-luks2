@@ -33,6 +33,36 @@ func TestCheckKeyringLeavesNothingBehind(t *testing.T) {
 	}
 }
 
+func TestCheckKeyringIsRepeatableWithAFreshVolumeSizedLogonProbe(t *testing.T) {
+	fake := &fakeKeyring{}
+	fake.install(t)
+	add := sys.keyring.Add
+	var types []string
+	var sizes []int
+	sys.keyring.Add = func(keyType, description string, payload []byte, ring int) (int, error) {
+		types = append(types, keyType)
+		sizes = append(sizes, len(payload))
+		return add(keyType, description, payload, ring)
+	}
+
+	for i := 0; i < 2; i++ {
+		if err := CheckKeyring(context.Background()); err != nil {
+			t.Fatalf("preflight %d failed against a working keyring: %v", i+1, err)
+		}
+	}
+	if n := fake.linkedKeys(memorySessionRing); n != 0 {
+		t.Fatalf("two preflights left %d key(s) in the ring", n)
+	}
+	if len(fake.added) != 2 || fake.added[0] == fake.added[1] {
+		t.Fatalf("probe descriptions = %v, want two distinct ones", fake.added)
+	}
+	for i := range types {
+		if types[i] != keyringpkg.KeyType || sizes[i] != 64 {
+			t.Fatalf("probe %d was a %d-byte %q key, want a 64-byte %q key", i+1, sizes[i], types[i], keyringpkg.KeyType)
+		}
+	}
+}
+
 // TestCheckKeyringReportsTheSameTypedFailureAnActivateWould is the point of
 // the preflight: a daemon that calls it at startup must get exactly the
 // diagnosis it would have got at the first activation.

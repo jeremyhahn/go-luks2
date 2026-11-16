@@ -23,6 +23,7 @@ import (
 //
 // Not parallel: it substitutes the package's derivation seam.
 func TestMigrateToFIPSWritesOnlyTheDeviceItLocked(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return

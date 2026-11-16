@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/fips140"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -88,10 +89,6 @@ const fixtureArgon2MemoryKB = 32
 func readJSONArea(t *testing.T, device string) []byte {
 	t.Helper()
 
-	b, err := os.ReadFile(device) // #nosec G304 -- path is under t.TempDir()
-	if err != nil {
-		t.Fatalf("read %s: %v", device, err)
-	}
 	hdr, _, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
@@ -100,7 +97,17 @@ func readJSONArea(t *testing.T, device string) []byte {
 	if err != nil {
 		t.Fatalf("header area size: %v", err)
 	}
-	return bytes.TrimRight(b[header.HeaderSize:area], "\x00")
+	// The JSON area alone, not the 64 MiB image it sits in.
+	f, err := os.Open(device) // #nosec G304 -- path is under t.TempDir()
+	if err != nil {
+		t.Fatalf("read %s: %v", device, err)
+	}
+	defer func() { _ = f.Close() }()
+	b := make([]byte, area-header.HeaderSize)
+	if _, err := f.ReadAt(b, header.HeaderSize); err != nil {
+		t.Fatalf("read %s: %v", device, err)
+	}
+	return bytes.TrimRight(b, "\x00")
 }
 
 // TestMigrateToFIPSMigratesAnArgon2Digest is the digest trap in its sharpest
@@ -229,12 +236,173 @@ func TestFIPSRefusalDoesNotCallAMalformedDigestAnImport(t *testing.T) {
 	}
 }
 
+// A digest whose name and parameters are approved -- PBKDF2-SHA256 over a
+// full-length salt -- but whose value is 48 bytes, a length SHA-256 never
+// produces, is damage the header screen rejects. The FIPS policy check alone
+// calls it approved, so the migration plan must screen its structure before
+// skipping it: the volume is refused at the plan stage as ErrInvalidHeader,
+// with nothing written, rather than migrated with the damage kept.
+func TestMigrateToFIPSRefusesAnApprovedLookingMalformedDigestAtPlan(t *testing.T) {
+	if fips140.Enabled() {
+		assertMigrationRefusedUnderFIPS(t)
+		return
+	}
+	path := argon2VolumeImage(t, "fips-approved-malformed-digest.img")
+	hdr, metadata, err := readHeaderForTest(path)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+	metadata.Digests["1"] = &header.Digest{
+		Type:       kdfTypePBKDF2,
+		Keyslots:   []string{},
+		Segments:   []string{"0"},
+		Hash:       "sha256",
+		Iterations: 1000,
+		Salt:       base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x5a}, 32)),
+		Digest:     base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0xa5}, 48)),
+	}
+	if _, ok := digestFIPSRefusal("1", metadata.Digests["1"]); !ok {
+		t.Fatal("fixture digest is not approved by the FIPS policy check; the case needs one it approves")
+	}
+	if _, _, err := screenDigestStructure(metadata.Digests["1"]); !errors.Is(err, ErrInvalidHeader) {
+		t.Fatalf("fixture digest passes the header screen (%v); the case needs one it rejects", err)
+	}
+	hdr.SequenceID++
+	if err := writeHeaderInternal(path, hdr, metadata); err != nil {
+		t.Fatalf("writing the fixture failed: %v", err)
+	}
+
+	v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	t.Cleanup(func() { _ = v.Close() })
+	before := fileDigest(t, path)
+	pass := newTestPassphrase(t)
+	defer func() { _ = pass.Destroy() }()
+
+	m, err := v.MigrateToFIPS(context.Background(), pass, MigrateParams{})
+	if err == nil {
+		t.Fatalf("MigrateToFIPS of a volume with a malformed approved-looking digest succeeded (%+v), want ErrInvalidHeader", m)
+	}
+	if !errors.Is(err, ErrInvalidHeader) {
+		t.Fatalf("MigrateToFIPS: %v, want ErrInvalidHeader", err)
+	}
+	var migration *FIPSMigrationError
+	if !errors.As(err, &migration) {
+		t.Fatalf("MigrateToFIPS: %v is not a *FIPSMigrationError", err)
+	}
+	if migration.Stage != "plan" || migration.State != fipsStateUntouched {
+		t.Errorf("stage %q, state %q; want plan, %q", migration.Stage, migration.State, fipsStateUntouched)
+	}
+	if fileDigest(t, path) != before {
+		t.Fatal("a MigrateToFIPS refused at plan changed the device")
+	}
+}
+
+// A volume with a valid migration source -- an Argon2 keyslot whose digest is
+// well formed -- and one more digest that is malformed, which no keyslot the
+// unlock tries consults: one covering no keyslot, bound to the data segment,
+// and one bound to nothing. FIPS-mode unlock must not answer
+// FIPSImportRequiredError, which says MigrateToFIPS would open the volume:
+// MigrateToFIPS refuses it at the plan stage with ErrInvalidHeader, writing
+// nothing. Damage is reported as damage, by unlock and import alike.
+func TestMalformedUnconsultedDigestIsAHeaderFaultAtUnlockAndImport(t *testing.T) {
+	if fips140.Enabled() {
+		assertMigrationRefusedUnderFIPS(t)
+		return
+	}
+	salt := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x5a}, 32))
+	cases := []struct {
+		name     string
+		segments []string
+		value    string
+	}{
+		{"bound, covering no keyslot, 48-byte sha256 value", []string{"0"}, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0xa5}, 48))},
+		{"bound to no segment, value not base64", []string{}, "!!! not base64 !!!"},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := argon2VolumeImage(t, fmt.Sprintf("fips-unconsulted-malformed-digest-%d.img", i))
+			hdr, metadata, err := readHeaderForTest(path)
+			if err != nil {
+				t.Fatalf("ReadHeader failed: %v", err)
+			}
+			metadata.Digests["1"] = &header.Digest{
+				Type:       kdfTypePBKDF2,
+				Keyslots:   []string{},
+				Segments:   tc.segments,
+				Hash:       "sha256",
+				Iterations: 1000,
+				Salt:       salt,
+				Digest:     tc.value,
+			}
+			if _, _, err := screenDigestStructure(metadata.Digests["1"]); !errors.Is(err, ErrInvalidHeader) {
+				t.Fatalf("fixture digest passes the header screen (%v); the case needs one it rejects", err)
+			}
+			hdr.SequenceID++
+			if err := writeHeaderInternal(path, hdr, metadata); err != nil {
+				t.Fatalf("writing the fixture failed: %v", err)
+			}
+			pass := newTestPassphrase(t)
+			defer func() { _ = pass.Destroy() }()
+
+			sys := testVolumeSys()
+			sys.fipsMode = forceFIPSPolicy(t)
+			fipsVolume, err := Open(context.Background(), path, withTestSys(sys))
+			if err != nil {
+				t.Fatalf("Open failed: %v", err)
+			}
+			t.Cleanup(func() { _ = fipsVolume.Close() })
+			unlocks := map[string]func() error{
+				"Unlock": func() error {
+					_, err := fipsVolume.Unlock(context.Background(), pass)
+					return err
+				},
+				"UnlockKeyslot": func() error {
+					_, err := fipsVolume.UnlockKeyslot(context.Background(), 0, pass)
+					return err
+				},
+			}
+			for name, unlock := range unlocks {
+				err := unlock()
+				var importRequired *FIPSImportRequiredError
+				if errors.Is(err, ErrFIPSImportRequired) || errors.As(err, &importRequired) {
+					t.Fatalf("%s under the FIPS policy reported a malformed digest as a FIPS import: %v", name, err)
+				}
+				if !errors.Is(err, ErrInvalidHeader) {
+					t.Fatalf("%s under the FIPS policy: got %v, want ErrInvalidHeader", name, err)
+				}
+			}
+
+			v, err := Open(context.Background(), path, withTestSys(testVolumeSys()))
+			if err != nil {
+				t.Fatalf("Open failed: %v", err)
+			}
+			t.Cleanup(func() { _ = v.Close() })
+			before := fileDigest(t, path)
+			_, err = v.MigrateToFIPS(context.Background(), pass, MigrateParams{})
+			if !errors.Is(err, ErrInvalidHeader) {
+				t.Fatalf("MigrateToFIPS: %v, want ErrInvalidHeader", err)
+			}
+			var migration *FIPSMigrationError
+			if !errors.As(err, &migration) || migration.Stage != "plan" || migration.State != fipsStateUntouched {
+				t.Fatalf("MigrateToFIPS: %v; want a plan-stage FIPSMigrationError leaving the volume %q", err, fipsStateUntouched)
+			}
+			if fileDigest(t, path) != before {
+				t.Fatal("a MigrateToFIPS refused at plan changed the device")
+			}
+		})
+	}
+}
+
 // TestMigrateToFIPSRefusesToWipeOutsideTheKeyslotsArea: a non-approved keyslot
 // is removed by randomizing its declared area, and that area comes off the
 // device. One pointing into the data segment or the header must be refused
 // before anything is written -- the volume already opens through an approved
 // keyslot, so nothing downstream would notice the damage.
 func TestMigrateToFIPSRefusesToWipeOutsideTheKeyslotsArea(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return
@@ -292,6 +460,7 @@ func TestMigrateToFIPSRefusesToWipeOutsideTheKeyslotsArea(t *testing.T) {
 // keyslot: no keyslot key is ever derived, and the unlock derives before it
 // reads the area. Whether the non-approved keyslots are to be kept or not.
 func TestMigrateToFIPSReadsNoKeyslotOutsideKeyslotSpace(t *testing.T) {
+	defer parallel(t)()
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
 		return

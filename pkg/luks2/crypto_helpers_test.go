@@ -15,6 +15,7 @@ import (
 
 // TestCreateDigest tests digest creation
 func TestCreateDigest(t *testing.T) {
+	defer parallel(t)()
 	tests := []struct {
 		name      string
 		masterKey []byte

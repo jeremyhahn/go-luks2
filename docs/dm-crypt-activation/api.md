@@ -14,6 +14,10 @@ library; it has no REST, gRPC, QUIC, MCP or Unix-socket transport.
 | Preflight the kernel keyring | `dmcrypt.CheckKeyring(ctx) error` |
 | Validate a mapping name | `dmcrypt.ValidateName(name string) error` |
 | The `/dev/mapper` path of a mapping | `(*dmcrypt.Mapping).Path() string` |
+| A live mapping's identity | `dmcrypt.Mapping{Name, UUID string; Major, Minor uint32}` |
+| The longest mapping name | `dmcrypt.MaxNameLength` (127) |
+| Inspect a failure | `*dmcrypt.Error` (alias of the module error shape); keyring failures are `*dmcrypt.KeyringError`, see [kernel-keyring/api.md](../kernel-keyring/api.md) |
+| Match a failure | `errors.Is` against `dmcrypt.ErrInvalidName`, `ErrActive`, `ErrNotActive`, `ErrBusy`, `ErrStillLive`, `ErrNodeUnverified`, `ErrDeviceChanged`, `ErrPermissionDenied`, `ErrIntegerOverflow`, and the keyring sentinels named in [kernel-keyring/api.md](../kernel-keyring/api.md) |
 
 No request/response schema, status code mapping or `scp` permission applies.
 The signatures, invariants and error table are in
