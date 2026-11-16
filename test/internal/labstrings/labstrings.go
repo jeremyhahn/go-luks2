@@ -75,8 +75,8 @@
 //   - Shell scripts: `*.sh`, `*.bash`, or anything starting with `#!`. Tools are
 //     Go commands (test/tools/require-tool, test/tools/docker-run) or Makefile
 //     recipes.
-//   - Workflows other than ci.yml, nightly.yml and release.yml
-//     (PublishedWorkflows), including `.yaml` variants and subdirectories.
+//   - Workflows other than ci.yml, nightly.yml, release.yml and
+//     signatures.yml (PublishedWorkflows), including `.yaml` variants and subdirectories.
 //
 // FILES TRACKED ON main AND STRIPPED AT PUBLISH (#211), listed by
 // DefaultStripAtPublish: the agent files CLAUDE.md, AGENTS.md and `.claude/` at

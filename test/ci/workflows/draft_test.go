@@ -47,9 +47,7 @@ func TestDraftPullRequestSkipsEveryJobButTheGate(t *testing.T) {
 		cond := jobIfOf(t, text)
 		want := prJobIf
 		switch {
-		case id == "preflight", id == "signatures":
-			// ci-template v1.35: Signatures, like preflight, runs on every
-			// non-draft event and needs nothing.
+		case id == "preflight":
 			want = draftIf
 		case contains(nightlyTier, id):
 			// Soak runs on dispatch only: no pull request, so no draft.
@@ -64,7 +62,7 @@ func TestDraftPullRequestSkipsEveryJobButTheGate(t *testing.T) {
 		if cond != want {
 			t.Errorf("job %s has if %q, want %q: a draft PR runs no CI, and nothing runs without the guard's run", id, cond, want)
 		}
-		if id != "preflight" && id != "signatures" && !contains(needs(t, text), "preflight") {
+		if id != "preflight" && !contains(needs(t, text), "preflight") {
 			t.Errorf("job %s does not need preflight, so neither a draft nor a refused run skips it", id)
 		}
 	}
@@ -159,7 +157,7 @@ func TestLintGatesJob(t *testing.T) {
 // workflow is an instance of.
 func TestCIHeaderNamesTheTemplateVersion(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
-	if first, _, _ := strings.Cut(ci, "\n"); first != "# ci-template: v1.35.1 (customized)" {
-		t.Errorf("ci.yml's first line is %q, want the v1.35.1 header", first)
+	if first, _, _ := strings.Cut(ci, "\n"); first != "# ci-template: v1.35.2 (customized)" {
+		t.Errorf("ci.yml's first line is %q, want the v1.35.2 header", first)
 	}
 }

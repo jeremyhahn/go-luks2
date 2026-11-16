@@ -26,7 +26,7 @@ import (
 // `scoped`, lint-gates, which a PR skips when no changed file matches
 // LINT_GATES_PATTERN.
 var (
-	prTier      = []string{"preflight", "lint", "merge-check", "test-race", "signatures"}
+	prTier      = []string{"preflight", "lint", "merge-check", "test-race"}
 	codeTier    = []string{"image"}
 	scopedTier  = []string{"lint-gates"}
 	fullTier    = []string{"fips", "integration"}
