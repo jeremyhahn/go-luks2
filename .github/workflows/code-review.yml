@@ -2973,6 +2973,17 @@ jobs:
             done
             printf '%s\n' "$all"
           }
+          # CUSTOMIZE: local fix pending upstream (template v5.11.3)
+          # Codex P1: the base is pinned to the event's, as the review job's
+          # live guards pin it (skip=retargeted): a PR retargeted since this
+          # run was created passes nothing.
+          check_base() {
+            local base_live
+            base_live=$(get "/pulls/$PR_NUM" | jq -r '.base.ref // empty') ||
+              fail "cannot read the base branch of PR $PR_NUM"
+            [ -n "$BASE_REF" ] && [ "$base_live" = "$BASE_REF" ] ||
+              fail "PR $PR_NUM was retargeted to ${base_live:-unknown} since this run was created for $BASE_REF. Push a new head, or take code-review off and add it again, to review against the new base."
+          }
 
           # (a) The no-review list. The change is pinned to the event: on
           # GitHub the compare of $BASE_SHA...$EVENT_SHA (merge base to head);
@@ -2997,6 +3008,8 @@ jobs:
             [ "$outside" = 0 ] && exempt=1
           fi
           if [ "$exempt" = 1 ]; then
+            # CUSTOMIZE: local fix pending upstream (template v5.11.3)
+            check_base
             echo "All $n changed files are on the no-review list (docs and CI config); no review is required."
             exit 0
           fi
@@ -3032,14 +3045,20 @@ jobs:
               waited=$((waited + 30))
             done
           fi
+          # CUSTOMIZE: local fix pending upstream (template v5.11.3)
+          check_base
 
           # (b) The reviewer's latest standing verdict on this head. PENDING,
           # COMMENTED and dismissed reviews are no verdict.
+          # CUSTOMIZE: local fix pending upstream (template v5.11.3)
+          # Codex P1: any undismissed REQUEST_CHANGES on the head stands, as
+          # the review job's guards hold it; a later APPROVED does not hide it.
           verdict=$(get_all "/pulls/$PR_NUM/reviews?" | jq -r --arg u "$REVIEWER" --arg s "$EVENT_SHA" '
               [ .[] | (if .state == "CHANGES_REQUESTED" then .state = "REQUEST_CHANGES" else . end)
                     | select(.user.login == $u and .commit_id == $s and (.dismissed | not)
                              and (.state == "APPROVED" or .state == "REQUEST_CHANGES")) ]
-              | sort_by(.submitted_at // "", .id) | last | .state // "NONE"') ||
+              | if any(.[]; .state == "REQUEST_CHANGES") then "REQUEST_CHANGES"
+                else (sort_by(.submitted_at // "", .id) | last | .state // "NONE") end') ||
             fail "cannot read the reviews of PR $PR_NUM"
           case "$verdict" in
             APPROVED) echo "$REVIEWER approved $EVENT_SHA." ;;

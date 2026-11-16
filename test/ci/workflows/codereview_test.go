@@ -1,6 +1,7 @@
 package workflows
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -122,6 +123,82 @@ func TestGateGetAllPropagatesAFailedPage(t *testing.T) {
 		code, out := runGetAll(t, mode)
 		if code == 0 || strings.Contains(out, "all=") {
 			t.Errorf("page 2 %s: exit %d, output %q; want a failure and no pages", mode, code, out)
+		}
+	}
+}
+
+// gateStep is the gate's one step, the last in code-review.yml.
+func gateStep(t *testing.T) string {
+	t.Helper()
+	cr := codeReview(t)
+	i := strings.Index(cr, "- name: Require a Codex approval of the head, or a no-review change")
+	if i < 0 {
+		t.Fatalf("%s: no gate step", codeReviewWorkflow)
+	}
+	return cr[i:]
+}
+
+// Codex P1: a PR retargeted since the event passes nothing. The gate reads
+// the live base, as the review job's skip=retargeted guards do, before the
+// no-review exit and again after the wait for in-flight reviews.
+func TestGateRefusesARetargetedPullRequest(t *testing.T) {
+	g := gateStep(t)
+	def := regexp.MustCompile(`(?ms)^ +check_base\(\) \{\n.*?^ +\}$`).FindString(g)
+	if def == "" || !strings.Contains(def, `"/pulls/$PR_NUM"`) || !strings.Contains(def, ".base.ref") ||
+		!strings.Contains(def, `"$BASE_REF"`) || !strings.Contains(def, "fail ") {
+		t.Fatalf("gate: no check_base reading the live base.ref against $BASE_REF:\n%s", def)
+	}
+	exempt := regexp.MustCompile(`(?ms)^ +if \[ "\$exempt" = 1 \]; then\n.*?^ +fi$`).FindString(g)
+	if !regexp.MustCompile(`(?m)^ +check_base$[\s\S]*exit 0`).MatchString(exempt) {
+		t.Errorf("gate: the no-review exit does not check the live base first:\n%s", exempt)
+	}
+	wait := strings.Index(g, "waited=$((waited + 30))")
+	verdict := strings.Index(g, "verdict=$(")
+	if wait < 0 || verdict < wait || !regexp.MustCompile(`(?m)^ +check_base$`).MatchString(g[wait:verdict]) {
+		t.Errorf("gate: no live base check between the review wait and the verdict")
+	}
+}
+
+// gateVerdict runs the gate's verdict jq program on reviews.
+func gateVerdict(t *testing.T, reviews string) string {
+	t.Helper()
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not installed")
+	}
+	m := regexp.MustCompile(`(?s)verdict=\$\(get_all "/pulls/\$PR_NUM/reviews\?" \| jq -r --arg u "\$REVIEWER" --arg s "\$EVENT_SHA" '(.*?)'\)`).
+		FindStringSubmatch(gateStep(t))
+	if m == nil {
+		t.Fatalf("gate: no verdict jq program")
+	}
+	cmd := exec.Command("jq", "-r", "--arg", "u", "codex", "--arg", "s", "abc", m[1])
+	cmd.Stdin = strings.NewReader(reviews)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("jq: %v: %s", err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// Codex P1: a standing CHANGES_REQUESTED on the head blocks the gate even
+// when a later APPROVED exists; only a dismissal lifts it.
+func TestGateKeepsAStandingChangeRequest(t *testing.T) {
+	rv := func(id int, state, at string, dismissed bool) string {
+		d := ""
+		if dismissed {
+			d = `,"dismissed":true`
+		}
+		return fmt.Sprintf(`{"id":%d,"user":{"login":"codex"},"commit_id":"abc","state":%q,"submitted_at":%q%s}`, id, state, at, d)
+	}
+	for _, c := range []struct {
+		name, reviews, want string
+	}{
+		{"approval after a change request", "[" + rv(1, "CHANGES_REQUESTED", "2026-11-16T01:00:00Z", false) + "," + rv(2, "APPROVED", "2026-11-16T02:00:00Z", false) + "]", "REQUEST_CHANGES"},
+		{"approval after a dismissed change request", "[" + rv(1, "CHANGES_REQUESTED", "2026-11-16T01:00:00Z", true) + "," + rv(2, "APPROVED", "2026-11-16T02:00:00Z", false) + "]", "APPROVED"},
+		{"approval alone", "[" + rv(2, "APPROVED", "2026-11-16T02:00:00Z", false) + "]", "APPROVED"},
+		{"no review", "[]", "NONE"},
+	} {
+		if got := gateVerdict(t, c.reviews); got != c.want {
+			t.Errorf("%s: verdict %q, want %q", c.name, got, c.want)
 		}
 	}
 }
