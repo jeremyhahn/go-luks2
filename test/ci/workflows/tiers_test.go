@@ -198,10 +198,8 @@ func TestEveryCIJobRunsOnTheHostedRunner(t *testing.T) {
 func TestNoRetiredRunnerLabel(t *testing.T) {
 	for _, f := range workflowFiles(t) {
 		for _, m := range jobRunsOn.FindAllStringSubmatch(readFile(t, rel(t, f)), -1) {
-			for _, l := range retiredLabels {
-				if strings.Contains(m[1], "'"+l+"'") || strings.Fields(m[1])[0] == l {
-					t.Errorf("%s runs a job on the retired label %s: %s", rel(t, f), l, m[1])
-				}
+			if l, ok := retiredRunsOnLabel(m[1]); ok {
+				t.Errorf("%s runs a job on the retired label %s: %s", rel(t, f), l, m[1])
 			}
 		}
 	}
@@ -209,6 +207,42 @@ func TestNoRetiredRunnerLabel(t *testing.T) {
 	for _, l := range retiredLabels {
 		if regexp.MustCompile(`(?m)^    - ` + regexp.QuoteMeta(l) + `$`).MatchString(al) {
 			t.Errorf(".github/actionlint.yaml still lists the retired label %s", l)
+		}
+	}
+}
+
+// serverURLArms matches a runs-on value that picks its label by forge:
+// the first arm runs on github.com, the second only on Gitea (retired).
+var serverURLArms = regexp.MustCompile(`^\$\{\{ github\.server_url == 'https://github\.com' && '([^']*)' \|\| '([^']*)' \}\}$`)
+
+// retiredRunsOnLabel reports the retired label a runs-on value would run
+// on. For a server_url conditional only the github.com arm is checked;
+// every other value is checked whole.
+func retiredRunsOnLabel(v string) (string, bool) {
+	v = strings.TrimSpace(v)
+	if m := serverURLArms.FindStringSubmatch(v); m != nil {
+		v = m[1]
+	}
+	fields := strings.Fields(v)
+	for _, l := range retiredLabels {
+		if strings.Contains(v, "'"+l+"'") || (len(fields) > 0 && fields[0] == l) {
+			return l, true
+		}
+	}
+	return "", false
+}
+
+func TestRetiredRunsOnLabel(t *testing.T) {
+	for _, c := range []struct {
+		v       string
+		retired bool
+	}{
+		{`${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}`, false},
+		{`${{ github.server_url == 'https://github.com' && 'bigdisk' || 'ubuntu-latest' }}`, true},
+		{`bigdisk`, true},
+	} {
+		if _, got := retiredRunsOnLabel(c.v); got != c.retired {
+			t.Errorf("retiredRunsOnLabel(%q) = %v, want %v", c.v, got, c.retired)
 		}
 	}
 }
