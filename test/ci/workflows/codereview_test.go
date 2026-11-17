@@ -327,9 +327,15 @@ func runGate(t *testing.T, head string, fix map[string]string) (int, string) {
 func reviewRuns(fix map[string]string, head string, runs [][3]string) {
 	var list []string
 	for _, r := range runs {
-		list = append(list, fmt.Sprintf(`{"id":%s,"display_title":"Code Review: PR #1 into main at %s"}`, r[0], head))
-		job := fmt.Sprintf(`{"name":"Codex review","status":"completed","conclusion":%q,"steps":[{"name":"Review the head with codex as uid 1000","conclusion":%q}]}`, r[1], r[2])
-		fix["_actions_runs_"+r[0]+"_jobs"] = `{"jobs":[` + job + `]}`
+		// r[0] is "id" (started at second id, first attempt) or
+		// "id@time" (a re-run: second attempt, started at time).
+		id, started, attempt := r[0], "2026-11-16T00:00:"+r[0]+"Z", 1
+		if k := strings.Index(r[0], "@"); k >= 0 {
+			id, started, attempt = r[0][:k], r[0][k+1:], 2
+		}
+		list = append(list, fmt.Sprintf(`{"id":%s,"run_started_at":%q,"display_title":"Code Review: PR #1 into main at %s"}`, id, started, head))
+		job := fmt.Sprintf(`{"id":%s0,"name":"Codex review","run_attempt":%d,"started_at":%q,"status":"completed","conclusion":%q,"steps":[{"name":"Review the head with codex as uid 1000","conclusion":%q}]}`, id, attempt, started, r[1], r[2])
+		fix["_actions_runs_"+id+"_jobs"] = `{"jobs":[` + job + `]}`
 	}
 	fix["_actions_workflows_7_runs_"+head] = fmt.Sprintf(`{"total_count":%d,"workflow_runs":[%s]}`, len(list), strings.Join(list, ","))
 }
@@ -368,6 +374,12 @@ func TestGateRefusesAfterAFailedReviewAttempt(t *testing.T) {
 		}, true, "codex approved " + a},
 		{"no re-review", a, map[string][][3]string{
 			a: {id("10", ok), id("12", skip), id("13", ranNot)},
+		}, true, "codex approved " + a},
+		{"a lower-ID run re-run after a later approval fails", a, map[string][][3]string{
+			a: {id("10@2026-11-16T09:00:00Z", failed), id("11", ok)},
+		}, false, "a requested re-review has not approved head " + a},
+		{"a lower-ID run re-run after a failure approves", a, map[string][][3]string{
+			a: {id("10@2026-11-16T09:00:00Z", ok), id("11", failed)},
 		}, true, "codex approved " + a},
 		{"the runs cannot be read", a, map[string][][3]string{}, false, "HTTP 404"},
 	} {
@@ -418,6 +430,8 @@ func TestCarryRefusesAHeadWhoseLatestAttemptFailed(t *testing.T) {
 	}{
 		{"failed last", [][3]string{{"10", "success", "success"}, {"11", "failure", "skipped"}, {"12", "skipped", "skipped"}}, "failed"},
 		{"succeeded last", [][3]string{{"11", "cancelled", "success"}, {"14", "success", "success"}}, "success"}, //nolint:misspell // the runner's spelling, not prose
+		{"lower-ID re-run failed last", [][3]string{{"10@2026-11-16T09:00:00Z", "failure", "success"}, {"11", "success", "success"}}, "failed"},
+		{"lower-ID re-run succeeded last", [][3]string{{"10@2026-11-16T09:00:00Z", "success", "success"}, {"11", "failure", "success"}}, "success"},
 		{"no attempt", [][3]string{{"12", "success", "skipped"}}, "none"},
 	} {
 		fix := map[string]string{}
