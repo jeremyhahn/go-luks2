@@ -1310,8 +1310,10 @@ jobs:
           jq_runs='if (.workflow_runs | type) != "array" or .total_count > (.workflow_runs | length) then error("not one page of runs") else .workflow_runs[] | select(.display_title == $t) | [.id, (.run_started_at // "")] | @tsv end'
           # Re-runs keep the run ID: rank by the job's start (else the run's;
           # unknown = newest), then run_attempt, then job id. Row: key3 state run.
+          # filter=all: every attempt of a run, one row each; an attempt that
+          # ran no codex (none) never hides an earlier real one.
           # shellcheck disable=SC2016 # $rs and $id are jq's
-          jq_attempt='[.jobs[]? | select(.name == "Codex review")][0] | [(.started_at // (if $rs == "" then "9999" else $rs end)), (.run_attempt // 0), (.id // 0), (if . == null or .conclusion == "skipped" then "none" elif .status != "completed" or .conclusion != "success" then "failed" elif any(.steps[]?; .name == "Review the head with codex as uid 1000" and .conclusion == "success") then "success" else "none" end), $id] | @tsv'
+          jq_attempt='.jobs[]? | select(.name == "Codex review") | [(.started_at // (if $rs == "" then "9999" else $rs end)), (.run_attempt // 0), (.id // 0), (if . == null or .conclusion == "skipped" then "none" elif .status != "completed" or .conclusion != "success" then "failed" elif any(.steps[]?; .name == "Review the head with codex as uid 1000" and .conclusion == "success") then "success" else "none" end), $id] | @tsv'
           latest_attempt() { # head -> success, failed or none
             local runs id rs rows="" st
             runs=$(api GET "/actions/workflows/$wf/runs?head_sha=$1&per_page=100" |
@@ -1319,12 +1321,12 @@ jobs:
               die "cannot list the review runs on $1"
             while IFS=$'\t' read -r id rs; do
               [ -n "$id" ] || continue
-              st=$(api GET "/actions/runs/$id/jobs?per_page=100" | jq -r --arg rs "$rs" --arg id "$id" "$jq_attempt") ||
+              st=$(api GET "/actions/runs/$id/jobs?filter=all&per_page=100" | jq -r --arg rs "$rs" --arg id "$id" "$jq_attempt") ||
                 die "cannot read the jobs of run $id"
               rows+="$st"$'\n'
             done <<< "$runs"
             st=$(printf '%s' "$rows" | LC_ALL=C sort -t $'\t' -k1,1r -k2,2nr -k3,3nr |
-                 awk -F '\t' '$4 != "none" { print $4; exit }')
+                 awk -F '\t' '$4 == "success" || $4 == "failed" { print $4; exit }')
             echo "${st:-none}"
           }
 
@@ -1525,9 +1527,18 @@ jobs:
           # fails before that (the checkout, the login, codex, the post)
           # leaves the evidence for the next run. v5.10.10: only a fresh
           # label is evidence (above), and its marker records resume=.
+          # CUSTOMIZE: local fix pending upstream (template v5.11.3)
+          # Codex P1: an exhausted review keeps `needs-coordinator`, so a
+          # fresh owner-resume restarts the count with it on, and takes it off.
           if [ "$done_rounds" -ge "$last_round" ] && [ "$latest" != APPROVED ] &&
-             ! jq -e 'index("needs-coordinator") != null' <<<"$labels" >/dev/null; then
+             { [ -n "$resume_id" ] || ! jq -e 'index("needs-coordinator") != null' <<<"$labels" >/dev/null; }; then
             resumed=""
+            if [ -n "$resume_id" ] && jq -e 'index("needs-coordinator") != null' <<<"$labels" >/dev/null; then
+              relabel "" needs-coordinator
+              labels=$(jq -c 'map(select(. != "needs-coordinator"))' <<<"$labels")
+              limit=2
+              echo "Took needs-coordinator off PR $PR_NUM: a fresh owner-resume restarts the count."
+            fi
             # v5.10.10: only a fresh label (above); its addition's id goes
             # into this round's marker as resume=.
             if [ -n "$resume_id" ]; then
@@ -3053,8 +3064,10 @@ jobs:
           jq_runs='if (.workflow_runs | type) != "array" or .total_count > (.workflow_runs | length) then error("not one page of runs") else .workflow_runs[] | select(.display_title == $t) | [.id, (.run_started_at // "")] | @tsv end'
           # Re-runs keep the run ID: rank by the job's start (else the run's;
           # unknown = newest), then run_attempt, then job id. Row: key3 state run.
+          # filter=all: every attempt of a run, one row each; an attempt that
+          # ran no codex (none) never hides an earlier real one.
           # shellcheck disable=SC2016 # $rs and $id are jq's
-          jq_attempt='[.jobs[]? | select(.name == "Codex review")][0] | [(.started_at // (if $rs == "" then "9999" else $rs end)), (.run_attempt // 0), (.id // 0), (if . == null or .conclusion == "skipped" then "none" elif .status != "completed" or .conclusion != "success" then "failed" elif any(.steps[]?; .name == "Review the head with codex as uid 1000" and .conclusion == "success") then "success" else "none" end), $id] | @tsv'
+          jq_attempt='.jobs[]? | select(.name == "Codex review") | [(.started_at // (if $rs == "" then "9999" else $rs end)), (.run_attempt // 0), (.id // 0), (if . == null or .conclusion == "skipped" then "none" elif .status != "completed" or .conclusion != "success" then "failed" elif any(.steps[]?; .name == "Review the head with codex as uid 1000" and .conclusion == "success") then "success" else "none" end), $id] | @tsv'
           check_attempts() { # head... -> fails if the latest attempt on them failed
             local h runs id rs rows="" st
             runs=$(for h in "$@"; do
@@ -3063,12 +3076,12 @@ jobs:
                   done) || fail "cannot list the review runs on $*"
             while IFS=$'\t' read -r id rs; do
               [ -n "$id" ] || continue
-              st=$(get "/actions/runs/$id/jobs?per_page=100" | jq -r --arg rs "$rs" --arg id "$id" "$jq_attempt") ||
+              st=$(get "/actions/runs/$id/jobs?filter=all&per_page=100" | jq -r --arg rs "$rs" --arg id "$id" "$jq_attempt") ||
                 fail "cannot read the jobs of run $id"
               rows+="$st"$'\n'
             done <<< "$runs"
             st=$(printf '%s' "$rows" | LC_ALL=C sort -t $'\t' -k1,1r -k2,2nr -k3,3nr |
-                 awk -F '\t' '$4 != "none" { print $4, $5; exit }')
+                 awk -F '\t' '$4 == "success" || $4 == "failed" { print $4, $5; exit }')
             case "$st" in
               success\ *) return 0 ;;
               failed\ *) fail "a requested re-review has not approved head $EVENT_SHA: the latest codex review attempt (run ${st#* }) failed or was cancelled, so no earlier approval stands. Request the review again (an effort: label) for a new attempt" ;;

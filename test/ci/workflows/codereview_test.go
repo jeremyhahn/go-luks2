@@ -258,6 +258,7 @@ case "$p" in *[?\&]page=[2-9]*|*[?\&]page=[1-9][0-9]*) echo '[]' > "$out"; print
 case "$p" in *[?\&]status=*) echo '{"total_count":0,"workflow_runs":[]}' > "$out"; printf 200; exit 0 ;; esac
 f="$FIX/$(printf '%s' "${p%%\?*}" | tr / _)"
 case "$p" in *head_sha=*) h=${p#*head_sha=}; f=${f}_${h%%&*} ;; esac
+case "$p" in *filter=all*) ;; *) [ ! -f "${f}_latest" ] || f=${f}_latest ;; esac
 if [ -f "$f" ]; then cp "$f" "$out"; printf 200; else echo '{}' > "$out"; printf 404; fi
 `
 
@@ -328,13 +329,24 @@ func reviewRuns(fix map[string]string, head string, runs [][3]string) {
 	var list []string
 	for _, r := range runs {
 		// r[0] is "id" (started at second id, first attempt) or
-		// "id@time" (a re-run: second attempt, started at time).
+		// "id@time" (a re-run: second attempt, started at time), or
+		// "id+guard" (then a later guard-only re-run that ran no codex).
 		id, started, attempt := r[0], "2026-11-16T00:00:"+r[0]+"Z", 1
+		guard := strings.HasSuffix(id, "+guard")
+		if guard {
+			id = strings.TrimSuffix(id, "+guard")
+			started = "2026-11-16T00:00:" + id + "Z"
+		}
 		if k := strings.Index(r[0], "@"); k >= 0 {
 			id, started, attempt = r[0][:k], r[0][k+1:], 2
 		}
 		list = append(list, fmt.Sprintf(`{"id":%s,"run_started_at":%q,"display_title":"Code Review: PR #1 into main at %s"}`, id, started, head))
 		job := fmt.Sprintf(`{"id":%s0,"name":"Codex review","run_attempt":%d,"started_at":%q,"status":"completed","conclusion":%q,"steps":[{"name":"Review the head with codex as uid 1000","conclusion":%q}]}`, id, attempt, started, r[1], r[2])
+		if guard { // the jobs endpoint without filter=all lists only the re-run
+			rerun := fmt.Sprintf(`{"id":%s1,"name":"Codex review","run_attempt":2,"started_at":"2026-11-16T09:00:00Z","status":"completed","conclusion":"success","steps":[{"name":"Review the head with codex as uid 1000","conclusion":"skipped"}]}`, id)
+			fix["_actions_runs_"+id+"_jobs_latest"] = `{"jobs":[` + rerun + `]}`
+			job += "," + rerun
+		}
 		fix["_actions_runs_"+id+"_jobs"] = `{"jobs":[` + job + `]}`
 	}
 	fix["_actions_workflows_7_runs_"+head] = fmt.Sprintf(`{"total_count":%d,"workflow_runs":[%s]}`, len(list), strings.Join(list, ","))
@@ -381,6 +393,9 @@ func TestGateRefusesAfterAFailedReviewAttempt(t *testing.T) {
 		{"a lower-ID run re-run after a failure approves", a, map[string][][3]string{
 			a: {id("10@2026-11-16T09:00:00Z", ok), id("11", failed)},
 		}, true, "codex approved " + a},
+		{"a failed attempt, then a guard-only re-run of the same run", a, map[string][][3]string{
+			a: {id("10", ok), id("11+guard", failed)},
+		}, false, "a requested re-review has not approved head " + a},
 		{"the runs cannot be read", a, map[string][][3]string{}, false, "HTTP 404"},
 	} {
 		fix := map[string]string{}
@@ -432,6 +447,7 @@ func TestCarryRefusesAHeadWhoseLatestAttemptFailed(t *testing.T) {
 		{"succeeded last", [][3]string{{"11", "cancelled", "success"}, {"14", "success", "success"}}, "success"}, //nolint:misspell // the runner's spelling, not prose
 		{"lower-ID re-run failed last", [][3]string{{"10@2026-11-16T09:00:00Z", "failure", "success"}, {"11", "success", "success"}}, "failed"},
 		{"lower-ID re-run succeeded last", [][3]string{{"10@2026-11-16T09:00:00Z", "success", "success"}, {"11", "failure", "success"}}, "success"},
+		{"failed, then a guard-only re-run", [][3]string{{"10", "success", "success"}, {"11+guard", "failure", "success"}}, "failed"},
 		{"no attempt", [][3]string{{"12", "success", "skipped"}}, "none"},
 	} {
 		fix := map[string]string{}
@@ -443,13 +459,44 @@ func TestCarryRefusesAHeadWhoseLatestAttemptFailed(t *testing.T) {
 			}
 		}
 		script := "set -euo pipefail\nshopt -s inherit_errexit\ndie() { echo \"die: $*\" >&2; exit 1; }\n" +
-			"api() { local p=$2 f; f=$(printf '%s' \"${p%%\\?*}\" | tr / _); case \"$p\" in *head_sha=*) p=${p#*head_sha=}; f=${f}_${p%%&*} ;; esac; cat \"$FIX/$f\"; }\n" +
+			"api() { local p=$2 f; f=$(printf '%s' \"${p%%\\?*}\" | tr / _); case \"$p\" in *head_sha=*) p=${p#*head_sha=}; f=${f}_${p%%&*} ;; esac; case \"$2\" in *filter=all*) ;; *) [ ! -f \"$FIX/${f}_latest\" ] || f=${f}_latest ;; esac; cat \"$FIX/$f\"; }\n" +
 			strings.Join(vars, "\n") + "\n" + def + "\nwf=7 PR_NUM=1 BASE_REF=main\nlatest_attempt " + a + "\n"
 		cmd := exec.Command("bash", "-c", script)
 		cmd.Env = append(os.Environ(), "FIX="+dir)
 		out, err := cmd.CombinedOutput()
 		if got := strings.TrimSpace(string(out)); err != nil || got != c.want {
 			t.Errorf("%s: latest_attempt %q (%v), want %q", c.name, got, err, c.want)
+		}
+	}
+}
+
+// TestFreshOwnerResumeResetsAnExhaustedCount: an exhausted review keeps
+// needs-coordinator, so a fresh owner-resume must restart the count with
+// that label still on (and take it off), or the new head hits round-limit.
+func TestFreshOwnerResumeResetsAnExhaustedCount(t *testing.T) {
+	cr := codeReview(t)
+	i := strings.Index(cr, "          # v5.10.7: THE OWNER RESUMES.")
+	j := strings.Index(cr, `          if [ "$done_rounds" -ge "$limit" ] && [ "$latest" != APPROVED ]; then`)
+	if i < 0 || j < i {
+		t.Fatalf("%s: no owner-resume block before the round limit", codeReviewWorkflow)
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not installed")
+	}
+	for _, c := range []struct {
+		name, labels, resumeID, want string
+	}{
+		{"fresh owner-resume with needs-coordinator on", `["code-review","needs-coordinator","owner-resume"]`, "77", "rounds=0 limit=2 relabel= needs-coordinator"},
+		{"no owner-resume with needs-coordinator on", `["code-review","needs-coordinator"]`, "", "rounds=5 limit=5 relabel="},
+	} {
+		script := "set -euo pipefail\nshopt -s inherit_errexit\ndie() { echo \"die: $*\" >&2; exit 1; }\n" +
+			"rel=''; relabel() { rel=\"$rel$1 $2\"; }\napi_all() { die \"unexpected api_all $*\"; }\n" +
+			"FORGE=github PR_NUM=1 hist='[]' latest=CHANGES_REQUESTED done_rounds=5 last_round=5 limit=5 GITHUB_OUTPUT=/dev/null\n" +
+			"labels='" + c.labels + "' resume_id='" + c.resumeID + "'\n" +
+			cr[i:j] + "echo \"rounds=$done_rounds limit=$limit relabel=$rel\"\n"
+		out, err := exec.Command("bash", "-c", script).CombinedOutput()
+		if lines := strings.Split(strings.TrimSpace(string(out)), "\n"); err != nil || lines[len(lines)-1] != c.want {
+			t.Errorf("%s: got %q (%v), want last line %q", c.name, out, err, c.want)
 		}
 	}
 }
