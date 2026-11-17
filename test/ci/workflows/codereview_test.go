@@ -423,6 +423,16 @@ func reviewRuns(fix map[string]string, head string, runs [][3]string) {
 		// r[0] is "id" (started at second id, first attempt) or
 		// "id@time" (a re-run: second attempt, started at time), or
 		// "id+guard" (then a later guard-only re-run that ran no codex).
+		// A "~review" or "~re-review" suffix names the run's request kind
+		// in its run-name (an ordinary trigger, or an explicit re-review
+		// label); without one the run-name is the old one, kind unknown.
+		r0, title := r[0], "Code Review: PR #1 into main at "+head
+		if k := strings.Index(r0, "~"); k >= 0 {
+			kind := r0[k+1:]
+			r0 = r0[:k]
+			title += map[string]string{"review": " (review: synchronize)", "re-review": " (re-review: labeled effort:high)"}[kind]
+		}
+		r[0] = r0
 		id, started, attempt := r[0], "2026-11-16T00:00:"+r[0]+"Z", 1
 		guard := strings.HasSuffix(id, "+guard")
 		if guard {
@@ -432,7 +442,7 @@ func reviewRuns(fix map[string]string, head string, runs [][3]string) {
 		if k := strings.Index(r[0], "@"); k >= 0 {
 			id, started, attempt = r[0][:k], r[0][k+1:], 2
 		}
-		list = append(list, fmt.Sprintf(`{"id":%s,"run_started_at":%q,"display_title":"Code Review: PR #1 into main at %s"}`, id, started, head))
+		list = append(list, fmt.Sprintf(`{"id":%s,"run_started_at":%q,"display_title":%q}`, id, started, title))
 		// r[2] "absent": the job lists no review step (stopped before it).
 		steps := fmt.Sprintf(`[{"name":"Review the head with codex as uid 1000","conclusion":%q}]`, r[2])
 		if r[2] == "absent" {
@@ -524,6 +534,29 @@ func TestGateRefusesAfterAFailedReviewAttempt(t *testing.T) {
 		}, false, "a requested re-review has not approved head " + a},
 		{"approved, then a canceled re-review alone", a, map[string][][3]string{
 			a: {id("10", ok), id("11", [3]string{"", "cancelled", "skipped"})}, //nolint:misspell // the runner's spelling, not prose
+		}, false, "a requested re-review has not approved head " + a},
+		// Codex P1 (#490, round 5): the run-name carries the request kind. A
+		// canceled job of an ordinary run (a duplicate the shared group
+		// replaced) is no attempt whatever follows; one of an explicit
+		// re-review, or of a run whose kind cannot be read, blocks until a
+		// later real review succeeds.
+		{"round 5: approved, an ordinary duplicate canceled, an ordinary guard-only run", a, map[string][][3]string{
+			a: {id("10~review", ok), id("11~review", [3]string{"", "cancelled", "skipped"}), id("12~review", ranNot)}, //nolint:misspell // the runner's spelling, not prose
+		}, true, "codex approved " + a},
+		{"round 5: approved, an ordinary duplicate canceled before any step, a guard-only run", a, map[string][][3]string{
+			a: {id("10~review", ok), id("11~review", [3]string{"", "cancelled", "absent"}), id("12~review", ranNot)}, //nolint:misspell // the runner's spelling, not prose
+		}, true, "codex approved " + a},
+		{"round 4: approved, an effort:high re-review canceled before codex, a guard-only run", a, map[string][][3]string{
+			a: {id("10~review", ok), id("11~re-review", [3]string{"", "cancelled", "skipped"}), id("12~review", ranNot)}, //nolint:misspell // the runner's spelling, not prose
+		}, false, "a requested re-review has not approved head " + a},
+		{"an explicit re-review canceled, then a real review succeeds", a, map[string][][3]string{
+			a: {id("10~review", ok), id("11~re-review", [3]string{"", "cancelled", "skipped"}), id("12~review", ok)}, //nolint:misspell // the runner's spelling, not prose
+		}, true, "codex approved " + a},
+		{"a canceled run of unknown kind, then a guard-only run", a, map[string][][3]string{
+			a: {id("10~review", ok), id("11", [3]string{"", "cancelled", "skipped"}), id("12~review", ranNot)}, //nolint:misspell // the runner's spelling, not prose
+		}, false, "a requested re-review has not approved head " + a},
+		{"an ordinary run canceled while codex ran", a, map[string][][3]string{
+			a: {id("10~review", ok), id("11~review", [3]string{"", "cancelled", "cancelled"}), id("12~review", ranNot)}, //nolint:misspell // the runner's spelling, not prose
 		}, false, "a requested re-review has not approved head " + a},
 		{"a later attempt succeeds", a, map[string][][3]string{
 			a: {id("10", ok), id("11", failed), id("14", ok)},
@@ -625,6 +658,12 @@ func TestCarryRefusesAHeadWhoseLatestAttemptFailed(t *testing.T) {
 		{"re-review cancelled before any step, nothing later", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "absent"}}, "failed"},                                                          //nolint:misspell // the runner's spelling, not prose
 		{"cancelled while codex ran", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "cancelled"}}, "failed"},                                                                                //nolint:misspell // the runner's spelling, not prose
 		{"failed before the review step", [][3]string{{"10", "success", "success"}, {"11", "failure", "absent"}}, "failed"},
+		// Round 5: the run-name's request kind decides a canceled job.
+		{"round 5: ordinary duplicate cancelled, ordinary guard-only job", [][3]string{{"10~review", "success", "success"}, {"11~review", "cancelled", "skipped"}, {"12~review", "success", "skipped"}}, "success"}, //nolint:misspell // the runner's spelling, not prose
+		{"round 4: effort:high re-review cancelled, guard-only job", [][3]string{{"10~review", "success", "success"}, {"11~re-review", "cancelled", "skipped"}, {"12~review", "success", "skipped"}}, "failed"},     //nolint:misspell // the runner's spelling, not prose
+		{"explicit re-review cancelled, then a real review", [][3]string{{"10~review", "success", "success"}, {"11~re-review", "cancelled", "absent"}, {"12~review", "success", "success"}}, "success"},             //nolint:misspell // the runner's spelling, not prose
+		{"unknown-kind run cancelled, guard-only job", [][3]string{{"10~review", "success", "success"}, {"11", "cancelled", "skipped"}, {"12~review", "success", "skipped"}}, "failed"},                             //nolint:misspell // the runner's spelling, not prose
+		{"ordinary duplicate cancelled, nothing later", [][3]string{{"10~review", "success", "success"}, {"11~review", "cancelled", "absent"}}, "success"},                                                          //nolint:misspell // the runner's spelling, not prose
 	} {
 		fix := map[string]string{}
 		reviewRuns(fix, a, c.runs)
@@ -677,6 +716,42 @@ func TestCarryRefusesAHeadWhoseLatestAttemptFailed(t *testing.T) {
 		if got := strings.TrimSpace(string(out)); err != nil || got != c.want {
 			t.Errorf("%s: check_lineage %q (%v), want %q", c.name, got, err, c.want)
 		}
+	}
+}
+
+// Codex P1 (#490, round 5): each run's run-name (display_title) names its
+// request kind, an explicit re-review (an agent:, model: or effort: label)
+// or an ordinary trigger, so the reducers can tell a replaced duplicate
+// from a canceled re-review; every reader of the run-name accepts it.
+func TestRunNameCarriesTheRequestKind(t *testing.T) {
+	cr := codeReview(t)
+	m := regexp.MustCompile(`(?m)^run-name: (.*)$`).FindStringSubmatch(cr)
+	if m == nil {
+		t.Fatalf("%s: no run-name", codeReviewWorkflow)
+	}
+	base := `"Code Review: PR #${{ github.event.pull_request.number }} into ${{ github.event.pull_request.base.ref }} at ${{ github.event.pull_request.head.sha }} (`
+	if !strings.HasPrefix(m[1], base) {
+		t.Errorf("the run-name does not start with the PR, base and head, then the kind: %s", m[1])
+	}
+	for _, want := range []string{
+		"github.event.action", "github.event.label.name", "'re-review'", "'review'",
+		"startsWith(github.event.label.name, 'agent:')", "startsWith(github.event.label.name, 'model:')", "startsWith(github.event.label.name, 'effort:')",
+	} {
+		if !strings.Contains(m[1], want) {
+			t.Errorf("the run-name lacks %s: %s", want, m[1])
+		}
+	}
+	if n := strings.Count(cr, `+ " (review: ")`); n < 4 {
+		t.Errorf("want the guard's twins and runs and the gate's runs and wait to accept a run-name with its kind, found %d", n)
+	}
+	if n := strings.Count(cr, `+ " (re-review: ")`); n < 4 {
+		t.Errorf("want every run-name reader to accept an explicit re-review's run-name, found %d", n)
+	}
+	if strings.Contains(cr, `.display_title == $t)`) || strings.Contains(cr, `.display_title == $mine)`) {
+		t.Errorf("a run-name reader still matches only the run-name without its kind")
+	}
+	if !strings.Contains(cr, `"$my_base (review: "*")"`) || !strings.Contains(cr, `"$my_base (re-review: "*")"`) {
+		t.Errorf("the guard refuses its own run-name with the kind")
 	}
 }
 

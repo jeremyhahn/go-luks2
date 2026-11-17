@@ -676,7 +676,13 @@ name: Code Review
 # whose display_title is its own, so a PR from the same branch into another
 # base (the same head sha) is never one. Keep it verbatim: the guard refuses
 # a run whose display_title is not this text.
-run-name: "Code Review: PR #${{ github.event.pull_request.number }} into ${{ github.event.pull_request.base.ref }} at ${{ github.event.pull_request.head.sha }}"
+# CUSTOMIZE: local fix pending upstream (template v5.12.3, Codex P1 on #490): the
+# run-name ends with the request kind, " (re-review: <action> <label>)" for an
+# explicit re-review (an agent:, model: or effort: label) or " (review: <action>
+# [label])" for an ordinary trigger, so the reducers can tell a duplicate the
+# shared group replaced from a cancelled re-review. Readers accept the PR, base
+# and head text alone (an older run, kind unknown, read as a re-review).
+run-name: "Code Review: PR #${{ github.event.pull_request.number }} into ${{ github.event.pull_request.base.ref }} at ${{ github.event.pull_request.head.sha }} (${{ (github.event.action == 'labeled' && (startsWith(github.event.label.name, 'agent:') || startsWith(github.event.label.name, 'model:') || startsWith(github.event.label.name, 'effort:'))) && 're-review' || 'review' }}: ${{ github.event.action }}${{ github.event.label.name && format(' {0}', github.event.label.name) || '' }})"
 
 on:
   # The definition always comes from the base branch, never the PR head.
@@ -1591,8 +1597,14 @@ jobs:
             my_title=$(jq -r '.display_title // empty' <<<"$me_run") ||
               die "could not read the run-name of run $GITHUB_RUN_ID"
             [ -n "$my_title" ] || die "could not read the run-name of run $GITHUB_RUN_ID"
-            [ "$my_title" = "Code Review: PR #$PR_NUM into $BASE_REF at $EVENT_SHA" ] ||
-              die "run $GITHUB_RUN_ID is named '$my_title', not the workflow's run-name for PR $PR_NUM into $BASE_REF at $EVENT_SHA (code-review.yml v5.10.10: keep the run-name verbatim)"
+            # CUSTOMIZE: local fix pending upstream (template v5.12.3, Codex P1 on #490): the
+            # run-name is the PR, base and head, then the request kind; a twin is any run
+            # with the same PR, base and head ($my_base), whatever its kind.
+            my_base="Code Review: PR #$PR_NUM into $BASE_REF at $EVENT_SHA"
+            case "$my_title" in
+              "$my_base (review: "*")" | "$my_base (re-review: "*")") ;;
+              *) die "run $GITHUB_RUN_ID is named '$my_title', not the workflow's run-name for PR $PR_NUM into $BASE_REF at $EVENT_SHA (code-review.yml v5.10.10: keep the run-name verbatim)" ;;
+            esac
             # This run's own key: when its codex job (this job) started.
             jobs=$(gha "/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100") ||
               die "could not read the jobs of run $GITHUB_RUN_ID"
@@ -1611,9 +1623,12 @@ jobs:
                 die "could not list the in-progress runs on $EVENT_SHA"
               # v5.10.10: only runs of this PR (the same run-name) are twins;
               # a body with no list of runs is unreadable, not "no twins".
-              twins=$(jq -r --argjson me "$GITHUB_RUN_ID" --arg mine "$my_title" '
+              # CUSTOMIZE: local fix pending upstream (template v5.12.3, Codex P1 on #490): a
+              # twin's run-name is $my_base alone (an older run) or with any request kind.
+              twins=$(jq -r --argjson me "$GITHUB_RUN_ID" --arg mine "$my_base" '
                   if (.workflow_runs | type) == "array" then .workflow_runs[] else error("no workflow_runs") end
-                  | select(.id != $me and .display_title == $mine) | .id' <<<"$runs") ||
+                  | (.display_title // "") as $d
+                  | select(.id != $me and ($d == $mine or ($d | startswith($mine + " (review: ")) or ($d | startswith($mine + " (re-review: ")))) | .id' <<<"$runs") ||
                 die "could not read the in-progress runs on $EVENT_SHA"
               busy=0
               for id in $twins; do
@@ -1837,7 +1852,10 @@ jobs:
           # reads it (keep jq_runs and jq_attempt equal to the gate's): a
           # failed or cancelled one leaves no approval to carry from it.
           # shellcheck disable=SC2016 # $t is jq's
-          jq_runs='if (.workflow_runs | type) != "array" or .total_count > (.workflow_runs | length) then error("not one page of runs") else .workflow_runs[] | select(.display_title == $t) | [.id, (.run_started_at // "")] | @tsv end'
+          # CUSTOMIZE: local fix pending upstream (template v5.12.3, Codex P1 on #490): a run of
+          # this PR and head is named $t alone (older, kind unknown: re-review) or $t plus its
+          # request kind; row: id kind start (the kind first, so an empty start stays last).
+          jq_runs='if (.workflow_runs | type) != "array" or .total_count > (.workflow_runs | length) then error("not one page of runs") else .workflow_runs[] | (.display_title // "") as $d | select($d == $t or ($d | startswith($t + " (review: ")) or ($d | startswith($t + " (re-review: "))) | [.id, (if ($d | startswith($t + " (review: ")) then "review" else "re-review" end), (.run_started_at // "")] | @tsv end'
           # Re-runs keep the run ID: rank by the job's start (else the run's;
           # unknown = newest), then run_attempt, then job id. Row: key3 state run.
           # filter=all: every attempt of a run, one row each; an attempt that
@@ -1848,24 +1866,27 @@ jobs:
           # cancelled before its review step started (the shared concurrency group drops
           # an older pending duplicate) is no attempt; one cancelled mid-review failed.
           # CUSTOMIZE: local fix pending upstream (template v5.12.3, Codex P1 on #490): the
-          # run carries no request kind, so a job cancelled before its step (cancelled) is
-          # no attempt only when a newer same-head review job ran codex to success (success,
-          # the run that replaced it); otherwise, an explicit re-review cancelled while
-          # queued, it failed. A skipped job (an unrelated label) is none and replaces nothing.
-          jq_attempt='if (.jobs | type) != "array" or (.total_count // 0) > (.jobs | length) then error("more jobs than one page") else .jobs[] | select(.name == "Codex review") | [(.started_at // (if $rs == "" then "9999" else $rs end)), (.run_attempt // 0), (.id // 0), (if . == null or .conclusion == "skipped" then "none" elif .status == "completed" and .conclusion == "cancelled" and (any(.steps[]?; .name == "Review the head with codex as uid 1000" and (.conclusion // "skipped") != "skipped") | not) then "cancelled" elif .status != "completed" or .conclusion != "success" then "failed" elif any(.steps[]?; .name == "Review the head with codex as uid 1000" and .conclusion == "success") then "success" else "done" end), $id] | @tsv end'
+          # run-name carries the request kind ($kind): a job of an ordinary run (review)
+          # cancelled before its step is a duplicate the group replaced, no attempt (none);
+          # one of an explicit or unknown-kind re-review (cancelled) failed unless a newer
+          # same-head job ran codex to success. A skipped job (an unrelated label) is none.
+          jq_attempt='if (.jobs | type) != "array" or (.total_count // 0) > (.jobs | length) then error("more jobs than one page") else .jobs[] | select(.name == "Codex review") | [(.started_at // (if $rs == "" then "9999" else $rs end)), (.run_attempt // 0), (.id // 0), (if . == null or .conclusion == "skipped" then "none" elif .status == "completed" and .conclusion == "cancelled" and (any(.steps[]?; .name == "Review the head with codex as uid 1000" and (.conclusion // "skipped") != "skipped") | not) then (if $kind == "review" then "none" else "cancelled" end) elif .status != "completed" or .conclusion != "success" then "failed" elif any(.steps[]?; .name == "Review the head with codex as uid 1000" and .conclusion == "success") then "success" else "done" end), $id] | @tsv end'
           # CUSTOMIZE: local fix pending upstream (template v5.11.3)
           # Codex P1: the heads an approval of $s was carried from, followed
           # through carried= to the root (20 heads at most; a cycle fails).
           # shellcheck disable=SC2016 # $r, $s, $u, $h are jq's
           jq_chain='. as $r | def src($h): [ $r[] | select(.user.login == $u and .commit_id == $h and .state == "APPROVED") | (.body // "") | capture("carried=(?<o>[0-9a-f]{40})").o ] | unique; {seen: [$s], todo: [$s], n: 0} | until(.todo == []; if .n >= 20 then error("a carry chain longer than 20 heads") else ([ .todo[] | src(.) ] | add // [] | unique) as $next | ($next - .seen) as $new | if ($new | length) < ($next | length) then error("a carry chain with a cycle") else {seen: (.seen + $new), todo: $new, n: (.n + 1)} end end) | .seen[1:] | .[]'
           latest_attempt() { # head -> success, failed or none
-            local runs id rs rows="" st
+            # CUSTOMIZE: local fix pending upstream (template v5.12.3, Codex P1 on #490): + kind.
+            local runs id kind rs rows="" st
             runs=$(api GET "/actions/workflows/$wf/runs?head_sha=$1&per_page=100" |
                    jq -r --arg t "Code Review: PR #$PR_NUM into $BASE_REF at $1" "$jq_runs") ||
               die "cannot list the review runs on $1"
-            while IFS=$'\t' read -r id rs; do
+            # CUSTOMIZE: local fix pending upstream (template v5.12.3, Codex P1 on #490): each
+            # run's request kind (jq_runs) goes to jq_attempt.
+            while IFS=$'\t' read -r id kind rs; do
               [ -n "$id" ] || continue
-              st=$(api GET "/actions/runs/$id/jobs?filter=all&per_page=100" | jq -r --arg rs "$rs" --arg id "$id" "$jq_attempt") ||
+              st=$(api GET "/actions/runs/$id/jobs?filter=all&per_page=100" | jq -r --arg rs "$rs" --arg id "$id" --arg kind "$kind" "$jq_attempt") ||
                 die "cannot read the jobs of run $id"
               rows+="$st"$'\n'
             done <<< "$runs"
@@ -3711,7 +3732,10 @@ jobs:
           # step (skip=reviewed, a carry), is none. Keep jq_runs and
           # jq_attempt equal to the guard's. More than one page fails.
           # shellcheck disable=SC2016 # $t is jq's
-          jq_runs='if (.workflow_runs | type) != "array" or .total_count > (.workflow_runs | length) then error("not one page of runs") else .workflow_runs[] | select(.display_title == $t) | [.id, (.run_started_at // "")] | @tsv end'
+          # CUSTOMIZE: local fix pending upstream (template v5.12.3, Codex P1 on #490): a run of
+          # this PR and head is named $t alone (older, kind unknown: re-review) or $t plus its
+          # request kind; row: id kind start (the kind first, so an empty start stays last).
+          jq_runs='if (.workflow_runs | type) != "array" or .total_count > (.workflow_runs | length) then error("not one page of runs") else .workflow_runs[] | (.display_title // "") as $d | select($d == $t or ($d | startswith($t + " (review: ")) or ($d | startswith($t + " (re-review: "))) | [.id, (if ($d | startswith($t + " (review: ")) then "review" else "re-review" end), (.run_started_at // "")] | @tsv end'
           # Re-runs keep the run ID: rank by the job's start (else the run's;
           # unknown = newest), then run_attempt, then job id. Row: key3 state run.
           # filter=all: every attempt of a run, one row each; an attempt that
@@ -3722,25 +3746,28 @@ jobs:
           # cancelled before its review step started (the shared concurrency group drops
           # an older pending duplicate) is no attempt; one cancelled mid-review failed.
           # CUSTOMIZE: local fix pending upstream (template v5.12.3, Codex P1 on #490): the
-          # run carries no request kind, so a job cancelled before its step (cancelled) is
-          # no attempt only when a newer same-head review job ran codex to success (success,
-          # the run that replaced it); otherwise, an explicit re-review cancelled while
-          # queued, it failed. A skipped job (an unrelated label) is none and replaces nothing.
-          jq_attempt='if (.jobs | type) != "array" or (.total_count // 0) > (.jobs | length) then error("more jobs than one page") else .jobs[] | select(.name == "Codex review") | [(.started_at // (if $rs == "" then "9999" else $rs end)), (.run_attempt // 0), (.id // 0), (if . == null or .conclusion == "skipped" then "none" elif .status == "completed" and .conclusion == "cancelled" and (any(.steps[]?; .name == "Review the head with codex as uid 1000" and (.conclusion // "skipped") != "skipped") | not) then "cancelled" elif .status != "completed" or .conclusion != "success" then "failed" elif any(.steps[]?; .name == "Review the head with codex as uid 1000" and .conclusion == "success") then "success" else "done" end), $id] | @tsv end'
+          # run-name carries the request kind ($kind): a job of an ordinary run (review)
+          # cancelled before its step is a duplicate the group replaced, no attempt (none);
+          # one of an explicit or unknown-kind re-review (cancelled) failed unless a newer
+          # same-head job ran codex to success. A skipped job (an unrelated label) is none.
+          jq_attempt='if (.jobs | type) != "array" or (.total_count // 0) > (.jobs | length) then error("more jobs than one page") else .jobs[] | select(.name == "Codex review") | [(.started_at // (if $rs == "" then "9999" else $rs end)), (.run_attempt // 0), (.id // 0), (if . == null or .conclusion == "skipped" then "none" elif .status == "completed" and .conclusion == "cancelled" and (any(.steps[]?; .name == "Review the head with codex as uid 1000" and (.conclusion // "skipped") != "skipped") | not) then (if $kind == "review" then "none" else "cancelled" end) elif .status != "completed" or .conclusion != "success" then "failed" elif any(.steps[]?; .name == "Review the head with codex as uid 1000" and .conclusion == "success") then "success" else "done" end), $id] | @tsv end'
           # CUSTOMIZE: local fix pending upstream (template v5.11.3)
           # Codex P1: the heads an approval of $s was carried from, followed
           # through carried= to the root (20 heads at most; a cycle fails).
           # shellcheck disable=SC2016 # $r, $s, $u, $h are jq's
           jq_chain='. as $r | def src($h): [ $r[] | select(.user.login == $u and .commit_id == $h and .state == "APPROVED") | (.body // "") | capture("carried=(?<o>[0-9a-f]{40})").o ] | unique; {seen: [$s], todo: [$s], n: 0} | until(.todo == []; if .n >= 20 then error("a carry chain longer than 20 heads") else ([ .todo[] | src(.) ] | add // [] | unique) as $next | ($next - .seen) as $new | if ($new | length) < ($next | length) then error("a carry chain with a cycle") else {seen: (.seen + $new), todo: $new, n: (.n + 1)} end end) | .seen[1:] | .[]'
           check_attempts() { # head... -> fails if the latest attempt on them failed
-            local h runs id rs rows="" st
+            # CUSTOMIZE: local fix pending upstream (template v5.12.3, Codex P1 on #490): + kind.
+            local h runs id kind rs rows="" st
             runs=$(for h in "$@"; do
                     get "/actions/workflows/$wf/runs?head_sha=$h&per_page=100" |
                       jq -r --arg t "Code Review: PR #$PR_NUM into $BASE_REF at $h" "$jq_runs" || exit 3
                   done) || fail "cannot list the review runs on $*"
-            while IFS=$'\t' read -r id rs; do
+            # CUSTOMIZE: local fix pending upstream (template v5.12.3, Codex P1 on #490): each
+            # run's request kind (jq_runs) goes to jq_attempt.
+            while IFS=$'\t' read -r id kind rs; do
               [ -n "$id" ] || continue
-              st=$(get "/actions/runs/$id/jobs?filter=all&per_page=100" | jq -r --arg rs "$rs" --arg id "$id" "$jq_attempt") ||
+              st=$(get "/actions/runs/$id/jobs?filter=all&per_page=100" | jq -r --arg rs "$rs" --arg id "$id" --arg kind "$kind" "$jq_attempt") ||
                 fail "cannot read the jobs of run $id"
               rows+="$st"$'\n'
             done <<< "$runs"
@@ -3805,9 +3832,11 @@ jobs:
             while :; do
               busy=0
               for st in queued in_progress; do
+                # CUSTOMIZE: local fix pending upstream (template v5.12.3, Codex P1 on #490): a
+                # run of this PR and head is named $title alone or with its request kind.
                 ids=$(get "/actions/workflows/$wf/runs?head_sha=$EVENT_SHA&status=$st&per_page=100" |
                       jq -r --argjson me "$GITHUB_RUN_ID" --arg t "$title" \
-                        '.workflow_runs[] | select(.id != $me and .display_title == $t) | .id') ||
+                        '.workflow_runs[] | (.display_title // "") as $d | select(.id != $me and ($d == $t or ($d | startswith($t + " (review: ")) or ($d | startswith($t + " (re-review: ")))) | .id') ||
                   fail "cannot list the $st runs on $EVENT_SHA"
                 for id in $ids; do
                   rc=0
