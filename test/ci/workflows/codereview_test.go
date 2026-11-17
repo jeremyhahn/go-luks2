@@ -279,6 +279,10 @@ func runGate(t *testing.T, head string, fix map[string]string) (int, string) {
 		script.WriteString(strings.TrimPrefix(l, "          ") + "\n")
 	}
 	m := regexp.MustCompile(`(?m)^\s+NO_REVIEW_PATHS: '([^']*)'\s*$`).FindStringSubmatch(codeReview(t))
+	docs := regexp.MustCompile(`(?m)^\s+DOCS_PATHS: '([^']*)'\s*$`).FindStringSubmatch(codeReview(t))
+	if docs == nil {
+		t.Fatal("gate: no DOCS_PATHS")
+	}
 	if m == nil {
 		t.Fatalf("gate: no NO_REVIEW_PATHS")
 	}
@@ -316,7 +320,9 @@ func runGate(t *testing.T, head string, fix map[string]string) (int, string) {
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"FIX="+fixDir, "GITHUB_RUN_ID=42", "GH_API_TOKEN=x", "FORGE=github", "REVIEWER=codex",
 		"REPO_API=https://api.example/repos/o/r", "PR_NUM=1", "EVENT_SHA="+head,
-		"BASE_SHA="+base, "BASE_REF=main", "REVIEW_RESULT=skipped", "NO_REVIEW_PATHS="+m[1])
+		"BASE_SHA="+base, "BASE_REF=main", "REVIEW_RESULT=skipped", "NO_REVIEW_PATHS="+m[1],
+		// v5.12.1/v5.12.2: the gate also reads the docs list and the scope job.
+		"DOCS_PATHS="+docs[1], "SCOPE_SKIP=", "SCOPE_RESULT=success")
 	out, _ := cmd.CombinedOutput()
 	return cmd.ProcessState.ExitCode(), string(out)
 }
