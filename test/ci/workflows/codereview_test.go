@@ -360,8 +360,20 @@ func reviewRuns(fix map[string]string, head string, runs [][3]string) {
 // requested re-review that did not finish) keeps the gate red, whatever
 // label or same-patch push follows, until a later attempt succeeds. A run
 // whose review job was skipped, or that ran no codex step, is no attempt.
+// carryChain: codex approved root, carried it to mid, and mid's to head.
+func carryChain(root, mid, head string) string {
+	review := func(n int, h, from string) string {
+		body := ""
+		if from != "" {
+			body = "<!-- codex-review:verdict head=" + h + " patch=" + strings.Repeat("d", 40) + " carried=" + from + " -->\nCarried"
+		}
+		return fmt.Sprintf(`{"id":%d,"user":{"login":"codex"},"commit_id":%q,"state":"APPROVED","submitted_at":"2026-11-16T0%d:00:00Z","body":%q}`, n, h, n, body)
+	}
+	return "[" + review(1, root, "") + "," + review(2, mid, root) + "," + review(3, head, mid) + "]"
+}
+
 func TestGateRefusesAfterAFailedReviewAttempt(t *testing.T) {
-	a, b := strings.Repeat("a", 40), strings.Repeat("c", 40)
+	a, b, e := strings.Repeat("a", 40), strings.Repeat("c", 40), strings.Repeat("e", 40)
 	approval := func(head, body string) string {
 		return fmt.Sprintf(`[{"id":1,"user":{"login":"codex"},"commit_id":%q,"state":"APPROVED","submitted_at":"2026-11-16T01:00:00Z","body":%q}]`, head, body)
 	}
@@ -402,6 +414,12 @@ func TestGateRefusesAfterAFailedReviewAttempt(t *testing.T) {
 		{"more jobs than one page", a, map[string][][3]string{
 			a: {id("10", ok), id("11", [3]string{"", "page2", "success"})},
 		}, false, "cannot read the jobs of run 11"},
+		{"a failed re-review on the root of a two-hop carry", e, map[string][][3]string{
+			e: {id("30", ranNot)}, b: {id("20", ranNot)}, a: {id("10", ok), id("11", failed)},
+		}, false, "a requested re-review has not approved head " + e},
+		{"a clean two-hop carry", e, map[string][][3]string{
+			e: {id("30", ranNot)}, b: {id("20", ranNot)}, a: {id("10", ok)},
+		}, true, "codex approved " + e},
 		{"the runs cannot be read", a, map[string][][3]string{}, false, "HTTP 404"},
 	} {
 		fix := map[string]string{}
@@ -413,6 +431,9 @@ func TestGateRefusesAfterAFailedReviewAttempt(t *testing.T) {
 			body = "<!-- codex-review:verdict head=" + b + " patch=" + strings.Repeat("d", 40) + " carried=" + a + " -->\nCarried"
 		}
 		fix["_pulls_1_reviews"] = approval(c.head, body)
+		if c.head == e { // e carried from b, b carried from a
+			fix["_pulls_1_reviews"] = carryChain(a, b, e)
+		}
 		code, out := runGate(t, c.head, fix)
 		if (code == 0) != c.pass || !strings.Contains(out, c.mentions) {
 			t.Errorf("%s: exit %d, want pass=%v and %q in:\n%s", c.name, code, c.pass, c.mentions, out)
@@ -429,16 +450,20 @@ func TestCarryRefusesAHeadWhoseLatestAttemptFailed(t *testing.T) {
 	if i < 0 || j < i {
 		t.Fatalf("%s: no same-patch carry", codeReviewWorkflow)
 	}
-	if !regexp.MustCompile(`latest_attempt "\$psha"`).MatchString(cr[i:j]) {
+	if !regexp.MustCompile(`check_lineage "\$psha"`).MatchString(cr[i:j]) {
 		t.Errorf("the carry posts without reading the latest attempt on its source head")
 	}
 	def := regexp.MustCompile(`(?ms)^ +latest_attempt\(\) \{[^\n]*\n.*?^ +\}$`).FindString(cr[:i])
 	if def == "" {
 		t.Fatalf("guard: no latest_attempt")
 	}
-	vars := regexp.MustCompile(`(?ms)^ +jq_(runs|attempt)='.*?'$`).FindAllString(cr[:i], -1)
-	if len(vars) != 2 {
-		t.Fatalf("guard: want jq_runs and jq_attempt, found %d", len(vars))
+	lineage := regexp.MustCompile(`(?ms)^ +check_lineage\(\) \{[^\n]*\n.*?^ +\}$`).FindString(cr[:i])
+	if lineage == "" {
+		t.Fatalf("guard: no check_lineage")
+	}
+	vars := regexp.MustCompile(`(?ms)^ +jq_(runs|attempt|chain)='.*?'$`).FindAllString(cr[:i], -1)
+	if len(vars) != 3 {
+		t.Fatalf("guard: want jq_runs, jq_attempt and jq_chain, found %d", len(vars))
 	}
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not installed")
@@ -477,6 +502,36 @@ func TestCarryRefusesAHeadWhoseLatestAttemptFailed(t *testing.T) {
 			}
 		} else if err != nil || got != c.want {
 			t.Errorf("%s: latest_attempt %q (%v), want %q", c.name, got, err, c.want)
+		}
+	}
+	// The A->B->C carry: B only carried A's approval; C is about to carry B's.
+	b := strings.Repeat("c", 40)
+	for _, c := range []struct {
+		name  string
+		aRuns [][3]string
+		want  string
+	}{
+		{"a failed re-review on the root A", [][3]string{{"10", "success", "success"}, {"11", "failure", "success"}}, "failed"},
+		{"a clean chain", [][3]string{{"10", "success", "success"}}, "success"},
+	} {
+		fix := map[string]string{"_pulls_1_reviews": carryChain(a, b, strings.Repeat("e", 40))}
+		reviewRuns(fix, a, c.aRuns)
+		reviewRuns(fix, b, [][3]string{{"20", "success", "skipped"}})
+		dir := t.TempDir()
+		for k, v := range fix {
+			if err := os.WriteFile(filepath.Join(dir, k), []byte(v), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		script := "set -euo pipefail\nshopt -s inherit_errexit\ndie() { echo \"die: $*\" >&2; exit 1; }\n" +
+			"api() { local p=$2 f; f=$(printf '%s' \"${p%%\\?*}\" | tr / _); case \"$p\" in *head_sha=*) p=${p#*head_sha=}; f=${f}_${p%%&*} ;; esac; cat \"$FIX/$f\"; }\n" +
+			"api_all() { api GET \"$1\"; }\n" +
+			strings.Join(vars, "\n") + "\n" + def + "\n" + lineage + "\nwf=7 PR_NUM=1 BASE_REF=main REVIEWER=codex\ncheck_lineage " + b + "\n"
+		cmd := exec.Command("bash", "-c", script)
+		cmd.Env = append(os.Environ(), "FIX="+dir)
+		out, err := cmd.CombinedOutput()
+		if got := strings.TrimSpace(string(out)); err != nil || got != c.want {
+			t.Errorf("%s: check_lineage %q (%v), want %q", c.name, got, err, c.want)
 		}
 	}
 }

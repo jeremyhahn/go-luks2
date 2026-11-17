@@ -1315,6 +1315,11 @@ jobs:
           # longer than one page (total_count) fails closed.
           # shellcheck disable=SC2016 # $rs and $id are jq's
           jq_attempt='if (.jobs | type) != "array" or (.total_count // 0) > (.jobs | length) then error("more jobs than one page") else .jobs[] | select(.name == "Codex review") | [(.started_at // (if $rs == "" then "9999" else $rs end)), (.run_attempt // 0), (.id // 0), (if . == null or .conclusion == "skipped" then "none" elif .status != "completed" or .conclusion != "success" then "failed" elif any(.steps[]?; .name == "Review the head with codex as uid 1000" and .conclusion == "success") then "success" else "none" end), $id] | @tsv end'
+          # CUSTOMIZE: local fix pending upstream (template v5.11.3)
+          # Codex P1: the heads an approval of $s was carried from, followed
+          # through carried= to the root (20 heads at most; a cycle fails).
+          # shellcheck disable=SC2016 # $r, $s, $u, $h are jq's
+          jq_chain='. as $r | def src($h): [ $r[] | select(.user.login == $u and .commit_id == $h and .state == "APPROVED") | (.body // "") | capture("carried=(?<o>[0-9a-f]{40})").o ] | unique; {seen: [$s], todo: [$s], n: 0} | until(.todo == []; if .n >= 20 then error("a carry chain longer than 20 heads") else ([ .todo[] | src(.) ] | add // [] | unique) as $next | ($next - .seen) as $new | if ($new | length) < ($next | length) then error("a carry chain with a cycle") else {seen: (.seen + $new), todo: $new, n: (.n + 1)} end end) | .seen[1:] | .[]'
           latest_attempt() { # head -> success, failed or none
             local runs id rs rows="" st
             runs=$(api GET "/actions/workflows/$wf/runs?head_sha=$1&per_page=100" |
@@ -1329,6 +1334,16 @@ jobs:
             st=$(printf '%s' "$rows" | LC_ALL=C sort -t $'\t' -k1,1r -k2,2nr -k3,3nr |
                  awk -F '\t' '$4 == "success" || $4 == "failed" { print $4; exit }')
             echo "${st:-none}"
+          }
+          check_lineage() { # head -> failed if it or a head it was carried from failed last, else success
+            local chain h last
+            chain=$(api_all "/pulls/$PR_NUM/reviews?" | jq -r --arg u "$REVIEWER" --arg s "$1" "$jq_chain") ||
+              die "cannot follow the carried approvals of $1"
+            for h in "$1" $chain; do
+              last=$(latest_attempt "$h") || die "cannot read the review attempts on $h"
+              [ "$last" = success ] || [ "$last" = none ] || { echo failed; return 0; }
+            done
+            echo success
           }
 
           # SAME PATCH: the latest standing verdict on another head with this
@@ -1360,10 +1375,10 @@ jobs:
               if [ "$FORGE" = github ]; then
                 wf=$(api GET "/actions/runs/$GITHUB_RUN_ID" | jq -r '.workflow_id // empty')
                 [[ $wf =~ ^[0-9]+$ ]] || die "cannot read this run's workflow"
-                last=$(latest_attempt "$psha") || die "cannot read the review attempts on $psha"
-                if [ "$last" != success ] && [ "$last" != none ]; then
+                last=$(check_lineage "$psha") || die "cannot read the review attempts on $psha and the heads it was carried from"
+                if [ "$last" != success ]; then
                   touch "$WORK/verdict"
-                  echo "::error::The latest codex review attempt on $psha failed or was cancelled; its approval is not carried to $EVENT_SHA. Request the review again (an effort: label)."
+                  echo "::error::The latest codex review attempt on $psha, or on a head its approval was carried from, failed or was cancelled; its approval is not carried to $EVENT_SHA. Request the review again (an effort: label)."
                   exit 1
                 fi
               fi
@@ -3070,6 +3085,11 @@ jobs:
           # longer than one page (total_count) fails closed.
           # shellcheck disable=SC2016 # $rs and $id are jq's
           jq_attempt='if (.jobs | type) != "array" or (.total_count // 0) > (.jobs | length) then error("more jobs than one page") else .jobs[] | select(.name == "Codex review") | [(.started_at // (if $rs == "" then "9999" else $rs end)), (.run_attempt // 0), (.id // 0), (if . == null or .conclusion == "skipped" then "none" elif .status != "completed" or .conclusion != "success" then "failed" elif any(.steps[]?; .name == "Review the head with codex as uid 1000" and .conclusion == "success") then "success" else "none" end), $id] | @tsv end'
+          # CUSTOMIZE: local fix pending upstream (template v5.11.3)
+          # Codex P1: the heads an approval of $s was carried from, followed
+          # through carried= to the root (20 heads at most; a cycle fails).
+          # shellcheck disable=SC2016 # $r, $s, $u, $h are jq's
+          jq_chain='. as $r | def src($h): [ $r[] | select(.user.login == $u and .commit_id == $h and .state == "APPROVED") | (.body // "") | capture("carried=(?<o>[0-9a-f]{40})").o ] | unique; {seen: [$s], todo: [$s], n: 0} | until(.todo == []; if .n >= 20 then error("a carry chain longer than 20 heads") else ([ .todo[] | src(.) ] | add // [] | unique) as $next | ($next - .seen) as $new | if ($new | length) < ($next | length) then error("a carry chain with a cycle") else {seen: (.seen + $new), todo: $new, n: (.n + 1)} end end) | .seen[1:] | .[]'
           check_attempts() { # head... -> fails if the latest attempt on them failed
             local h runs id rs rows="" st
             runs=$(for h in "$@"; do
@@ -3154,10 +3174,8 @@ jobs:
           check_base
           check_review_result
           if [ "$FORGE" = github ]; then
-            src=$(get_all "/pulls/$PR_NUM/reviews?" | jq -r --arg u "$REVIEWER" --arg s "$EVENT_SHA" '
-                [ .[] | select(.user.login == $u and .commit_id == $s and .state == "APPROVED")
-                      | (.body // "") | capture("carried=(?<o>[0-9a-f]{40})").o ] | unique | .[]') ||
-              fail "cannot read the reviews of PR $PR_NUM"
+            src=$(get_all "/pulls/$PR_NUM/reviews?" | jq -r --arg u "$REVIEWER" --arg s "$EVENT_SHA" "$jq_chain") ||
+              fail "cannot follow the carried approvals of $EVENT_SHA in the reviews of PR $PR_NUM"
             # shellcheck disable=SC2086 # $src: shas, one per word
             check_attempts "$EVENT_SHA" $src
           fi
