@@ -433,7 +433,12 @@ func reviewRuns(fix map[string]string, head string, runs [][3]string) {
 			id, started, attempt = r[0][:k], r[0][k+1:], 2
 		}
 		list = append(list, fmt.Sprintf(`{"id":%s,"run_started_at":%q,"display_title":"Code Review: PR #1 into main at %s"}`, id, started, head))
-		job := fmt.Sprintf(`{"id":%s0,"name":"Codex review","run_attempt":%d,"started_at":%q,"status":"completed","conclusion":%q,"steps":[{"name":"Review the head with codex as uid 1000","conclusion":%q}]}`, id, attempt, started, r[1], r[2])
+		// r[2] "absent": the job lists no review step (cancelled before it).
+		steps := fmt.Sprintf(`[{"name":"Review the head with codex as uid 1000","conclusion":%q}]`, r[2])
+		if r[2] == "absent" {
+			steps = `[]`
+		}
+		job := fmt.Sprintf(`{"id":%s0,"name":"Codex review","run_attempt":%d,"started_at":%q,"status":"completed","conclusion":%q,"steps":%s}`, id, attempt, started, r[1], steps)
 		if guard { // the jobs endpoint without filter=all lists only the re-run
 			rerun := fmt.Sprintf(`{"id":%s1,"name":"Codex review","run_attempt":2,"started_at":"2026-11-16T09:00:00Z","status":"completed","conclusion":"success","steps":[{"name":"Review the head with codex as uid 1000","conclusion":"skipped"}]}`, id)
 			fix["_actions_runs_"+id+"_jobs_latest"] = `{"jobs":[` + rerun + `]}`
@@ -486,7 +491,18 @@ func TestGateRefusesAfterAFailedReviewAttempt(t *testing.T) {
 			a: {id("10", ok), id("11", failed)},
 		}, false, "a requested re-review has not approved head " + b},
 		{"failed codex request, then agent:opencode and an unrelated label", a, map[string][][3]string{
-			a: {id("10", ok), id("11", [3]string{"", "cancelled", "skipped"}), id("12", ranNot), id("13", skip)}, //nolint:misspell // the runner's spelling, not prose
+			a: {id("10", ok), id("11", [3]string{"", "failure", "skipped"}), id("12", ranNot), id("13", skip)},
+		}, false, "a requested re-review has not approved head " + a},
+		// Codex P1 (#490): the shared concurrency group cancels an older
+		// pending duplicate before its review step starts; that is no attempt.
+		{"approved, then a dedup-cancelled duplicate and a guard-only run", a, map[string][][3]string{
+			a: {id("10", ok), id("11", [3]string{"", "cancelled", "skipped"}), id("12", ranNot)}, //nolint:misspell // the runner's spelling, not prose
+		}, true, "codex approved " + a},
+		{"approved, then a duplicate cancelled before it listed a review step", a, map[string][][3]string{
+			a: {id("10", ok), id("11", [3]string{"", "cancelled", "absent"}), id("12", ranNot)}, //nolint:misspell // the runner's spelling, not prose
+		}, true, "codex approved " + a},
+		{"approved, then a re-review cancelled while codex ran", a, map[string][][3]string{
+			a: {id("10", ok), id("11", [3]string{"", "cancelled", "cancelled"}), id("12", ranNot)}, //nolint:misspell // the runner's spelling, not prose
 		}, false, "a requested re-review has not approved head " + a},
 		{"a later attempt succeeds", a, map[string][][3]string{
 			a: {id("10", ok), id("11", failed), id("14", ok)},
@@ -573,6 +589,12 @@ func TestCarryRefusesAHeadWhoseLatestAttemptFailed(t *testing.T) {
 		{"failed, then a guard-only re-run", [][3]string{{"10", "success", "success"}, {"11+guard", "failure", "success"}}, "failed"},
 		{"more jobs than one page", [][3]string{{"10", "success", "success"}, {"11", "page2", "success"}}, "die: cannot read the jobs of run 11"},
 		{"no attempt", [][3]string{{"12", "success", "skipped"}}, "none"},
+		// Codex P1 (#490): a duplicate the concurrency group cancelled before
+		// its review step started is no attempt; one cancelled mid-review is.
+		{"dedup-cancelled after an approval", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "skipped"}}, "success"},          //nolint:misspell // the runner's spelling, not prose
+		{"cancelled before any step after an approval", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "absent"}}, "success"}, //nolint:misspell // the runner's spelling, not prose
+		{"cancelled while codex ran", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "cancelled"}}, "failed"},                 //nolint:misspell // the runner's spelling, not prose
+		{"failed before the review step", [][3]string{{"10", "success", "success"}, {"11", "failure", "absent"}}, "failed"},
 	} {
 		fix := map[string]string{}
 		reviewRuns(fix, a, c.runs)

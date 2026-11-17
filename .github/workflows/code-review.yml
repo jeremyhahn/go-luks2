@@ -1834,7 +1834,10 @@ jobs:
           # ran no codex (none) never hides an earlier real one. A jobs list
           # longer than one page (total_count) fails closed.
           # shellcheck disable=SC2016 # $rs and $id are jq's
-          jq_attempt='if (.jobs | type) != "array" or (.total_count // 0) > (.jobs | length) then error("more jobs than one page") else .jobs[] | select(.name == "Codex review") | [(.started_at // (if $rs == "" then "9999" else $rs end)), (.run_attempt // 0), (.id // 0), (if . == null or .conclusion == "skipped" then "none" elif .status != "completed" or .conclusion != "success" then "failed" elif any(.steps[]?; .name == "Review the head with codex as uid 1000" and .conclusion == "success") then "success" else "none" end), $id] | @tsv end'
+          # CUSTOMIZE: local fix pending upstream (template v5.12.2, Codex P1 on #490): a job
+          # cancelled before its review step started (the shared concurrency group drops
+          # an older pending duplicate) is no attempt; one cancelled mid-review failed.
+          jq_attempt='if (.jobs | type) != "array" or (.total_count // 0) > (.jobs | length) then error("more jobs than one page") else .jobs[] | select(.name == "Codex review") | [(.started_at // (if $rs == "" then "9999" else $rs end)), (.run_attempt // 0), (.id // 0), (if . == null or .conclusion == "skipped" then "none" elif .status == "completed" and .conclusion == "cancelled" and (any(.steps[]?; .name == "Review the head with codex as uid 1000" and (.conclusion // "skipped") != "skipped") | not) then "none" elif .status != "completed" or .conclusion != "success" then "failed" elif any(.steps[]?; .name == "Review the head with codex as uid 1000" and .conclusion == "success") then "success" else "none" end), $id] | @tsv end'
           # CUSTOMIZE: local fix pending upstream (template v5.11.3)
           # Codex P1: the heads an approval of $s was carried from, followed
           # through carried= to the root (20 heads at most; a cycle fails).
@@ -3692,7 +3695,10 @@ jobs:
           # ran no codex (none) never hides an earlier real one. A jobs list
           # longer than one page (total_count) fails closed.
           # shellcheck disable=SC2016 # $rs and $id are jq's
-          jq_attempt='if (.jobs | type) != "array" or (.total_count // 0) > (.jobs | length) then error("more jobs than one page") else .jobs[] | select(.name == "Codex review") | [(.started_at // (if $rs == "" then "9999" else $rs end)), (.run_attempt // 0), (.id // 0), (if . == null or .conclusion == "skipped" then "none" elif .status != "completed" or .conclusion != "success" then "failed" elif any(.steps[]?; .name == "Review the head with codex as uid 1000" and .conclusion == "success") then "success" else "none" end), $id] | @tsv end'
+          # CUSTOMIZE: local fix pending upstream (template v5.12.2, Codex P1 on #490): a job
+          # cancelled before its review step started (the shared concurrency group drops
+          # an older pending duplicate) is no attempt; one cancelled mid-review failed.
+          jq_attempt='if (.jobs | type) != "array" or (.total_count // 0) > (.jobs | length) then error("more jobs than one page") else .jobs[] | select(.name == "Codex review") | [(.started_at // (if $rs == "" then "9999" else $rs end)), (.run_attempt // 0), (.id // 0), (if . == null or .conclusion == "skipped" then "none" elif .status == "completed" and .conclusion == "cancelled" and (any(.steps[]?; .name == "Review the head with codex as uid 1000" and (.conclusion // "skipped") != "skipped") | not) then "none" elif .status != "completed" or .conclusion != "success" then "failed" elif any(.steps[]?; .name == "Review the head with codex as uid 1000" and .conclusion == "success") then "success" else "none" end), $id] | @tsv end'
           # CUSTOMIZE: local fix pending upstream (template v5.11.3)
           # Codex P1: the heads an approval of $s was carried from, followed
           # through carried= to the root (20 heads at most; a cycle fails).
