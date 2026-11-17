@@ -3009,13 +3009,18 @@ jobs:
           fi
           node=$(jq -r '.node_id // empty' <<<"$pr")
           [ -n "$node" ] || skip "its node id cannot be read"
+          # CUSTOMIZE: local fix pending upstream (template v5.12.3, Codex P1 on #490): select
+          # the auto-merge request and read it back; an answer with no error and no request
+          # armed nothing. expectedHeadOid stays (GitHub's live schema lists it, 11-17).
           jq -n --arg id "$node" --arg h "$EVENT_SHA" \
-            --arg q 'mutation($id:ID!,$h:GitObjectID!){enablePullRequestAutoMerge(input:{pullRequestId:$id,expectedHeadOid:$h,mergeMethod:SQUASH}){pullRequest{number}}}' \
+            --arg q 'mutation($id:ID!,$h:GitObjectID!){enablePullRequestAutoMerge(input:{pullRequestId:$id,expectedHeadOid:$h,mergeMethod:SQUASH}){pullRequest{number autoMergeRequest{enabledAt}}}}' \
             '{query: $q, variables: {id: $id, h: $h}}' > "$WORK/arm-query.json"
           out=$(gh_call POST "$FORGE_API/graphql" "$WORK/arm-query.json") ||
             skip "GitHub gave no answer to arming auto-merge: $(head -c 300 <<<"$out")"
           why=$(jq -r '[.errors[]? | .message // "?"] | join("; ")' <<<"$out" 2>/dev/null) || why="an unreadable answer"
           if [ -z "$why" ]; then
+            [ -n "$(jq -r '.data.enablePullRequestAutoMerge.pullRequest.autoMergeRequest.enabledAt // empty' <<<"$out" 2>/dev/null)" ] ||
+              skip "GitHub answered the arm call without an auto-merge request on PR $PR_NUM: $(head -c 300 <<<"$out")"
             echo "PR $PR_NUM armed to auto-merge (squash) at $EVENT_SHA; GitHub merges it once its required checks pass (ruling 742 (3))."
             exit 0
           fi
