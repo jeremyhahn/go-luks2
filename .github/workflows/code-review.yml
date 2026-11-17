@@ -1302,6 +1302,26 @@ jobs:
                         resume: (($m.a | capture("\\bresume=(?<i>[0-9]+)\\b") | .i) // "") } ]
               | sort_by(.id)' <<<"$all")
 
+          # CUSTOMIZE: local fix pending upstream (template v5.11.3)
+          # Codex P1: the latest codex review attempt on a head, as the gate
+          # reads it (keep jq_runs and jq_attempt equal to the gate's): a
+          # failed or cancelled one leaves no approval to carry from it.
+          # shellcheck disable=SC2016 # $t is jq's
+          jq_runs='if (.workflow_runs | type) != "array" or .total_count > (.workflow_runs | length) then error("not one page of runs") else .workflow_runs[] | select(.display_title == $t) | .id end'
+          jq_attempt='[.jobs[]? | select(.name == "Codex review")][0] | if . == null or .conclusion == "skipped" then "none" elif .status != "completed" or .conclusion != "success" then "failed" elif any(.steps[]?; .name == "Review the head with codex as uid 1000" and .conclusion == "success") then "success" else "none" end'
+          latest_attempt() { # head -> success, failed or none
+            local ids id st
+            ids=$(api GET "/actions/workflows/$wf/runs?head_sha=$1&per_page=100" |
+                  jq -r --arg t "Code Review: PR #$PR_NUM into $BASE_REF at $1" "$jq_runs" | sort -rn) ||
+              die "cannot list the review runs on $1"
+            for id in $ids; do
+              st=$(api GET "/actions/runs/$id/jobs?per_page=100" | jq -r "$jq_attempt") ||
+                die "cannot read the jobs of run $id"
+              [ "$st" = none ] || { echo "$st"; return 0; }
+            done
+            echo none
+          }
+
           # SAME PATCH: the latest standing verdict on another head with this
           # patch at these hunk lines (v5.10.2; the whole `@@` line since
           # v5.10.4) carries to this head
@@ -1324,6 +1344,19 @@ jobs:
                 touch "$WORK/verdict"
                 echo "::error::$REVIEWER requested changes on $psha, the same patch ($patch_id) as $EVENT_SHA. Push a change that addresses them."
                 exit 1
+              fi
+              # CUSTOMIZE: local fix pending upstream (template v5.11.3)
+              # Codex P1: nothing is carried from a head whose latest codex
+              # review attempt failed or was cancelled.
+              if [ "$FORGE" = github ]; then
+                wf=$(api GET "/actions/runs/$GITHUB_RUN_ID" | jq -r '.workflow_id // empty')
+                [[ $wf =~ ^[0-9]+$ ]] || die "cannot read this run's workflow"
+                last=$(latest_attempt "$psha") || die "cannot read the review attempts on $psha"
+                if [ "$last" != success ] && [ "$last" != none ]; then
+                  touch "$WORK/verdict"
+                  echo "::error::The latest codex review attempt on $psha failed or was cancelled; its approval is not carried to $EVENT_SHA. Request the review again (an effort: label)."
+                  exit 1
+                fi
               fi
               # v5.10.6 (Tenant Agent m2331 (2)): the LIVE pull request again,
               # immediately before the carried post. The key is $EVENT_SHA's,
@@ -3001,30 +3034,32 @@ jobs:
             esac
           }
           # CUSTOMIZE: local fix pending upstream (template v5.11.3)
-          # Codex P1: a requested re-review (an effort: label; an agent: or
-          # model: label too unless agent:opencode routes it, as the review
-          # job's again=1) voids every approval older than it, in every later
-          # run: one whose review job is skipped (an unrelated label) does not
-          # accept the approval the re-review was asked to replace. Gitea's
-          # timeline marks a label added or removed alike; both count. Times
-          # to epoch seconds, Z or an offset; anything else fails.
-          jq_epoch='def epoch: capture("^(?<d>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(\\.[0-9]+)?(?<z>Z|[+-][0-9]{2}:?[0-9]{2})$")
-            | (.d + "Z" | fromdateiso8601) - (if .z == "Z" then 0 else (.z[0:1] + "1" | tonumber) * ((.z[1:3] | tonumber) * 3600 + (.z[-2:] | tonumber) * 60) end);'
-          rereview_since() { # -> epoch of the latest re-review request, or null
-            local opencode events
-            opencode=$(get_all "/issues/$PR_NUM/labels?" | jq 'any(.[]; .name == "agent:opencode")') ||
-              fail "cannot read the labels of PR $PR_NUM"
-            if [ "$FORGE" = github ]; then
-              events=$(get_all "/issues/$PR_NUM/events?") || fail "cannot read the label events of PR $PR_NUM"
-            else
-              events=$(get_all "/issues/$PR_NUM/timeline?") || fail "cannot read the timeline of PR $PR_NUM"
-            fi
-            jq --argjson oc "$opencode" "$jq_epoch"'
-              [ .[] | select(.event == "labeled" or .type == "label")
-                    | (.label.name // "") as $l
-                    | select(($l | startswith("effort:")) or (($oc | not) and ($l | test("^(agent|model):"))))
-                    | .created_at | epoch ] | max' <<<"$events" ||
-              fail "cannot read the label events of PR $PR_NUM"
+          # Codex P1: the LATEST codex review attempt across this PR's runs
+          # on the head, and on any head its approval was carried from,
+          # decides: a failed or cancelled one (a requested re-review that
+          # did not finish) keeps the gate red whatever label or same-patch
+          # push follows, until a later attempt succeeds. An attempt is a
+          # Codex review job that ran the codex step, or that ended other
+          # than success or skipped; a skipped job, or one that ran no codex
+          # step (skip=reviewed, a carry), is none. Keep jq_runs and
+          # jq_attempt equal to the guard's. More than one page fails.
+          # shellcheck disable=SC2016 # $t is jq's
+          jq_runs='if (.workflow_runs | type) != "array" or .total_count > (.workflow_runs | length) then error("not one page of runs") else .workflow_runs[] | select(.display_title == $t) | .id end'
+          jq_attempt='[.jobs[]? | select(.name == "Codex review")][0] | if . == null or .conclusion == "skipped" then "none" elif .status != "completed" or .conclusion != "success" then "failed" elif any(.steps[]?; .name == "Review the head with codex as uid 1000" and .conclusion == "success") then "success" else "none" end'
+          check_attempts() { # head... -> fails if the latest attempt on them failed
+            local h ids id st
+            ids=$(for h in "$@"; do
+                    get "/actions/workflows/$wf/runs?head_sha=$h&per_page=100" |
+                      jq -r --arg t "Code Review: PR #$PR_NUM into $BASE_REF at $h" "$jq_runs" || exit 3
+                  done | sort -rn) || fail "cannot list the review runs on $*"
+            for id in $ids; do
+              st=$(get "/actions/runs/$id/jobs?per_page=100" | jq -r "$jq_attempt") ||
+                fail "cannot read the jobs of run $id"
+              case "$st" in
+                success) return 0 ;;
+                failed) fail "a requested re-review has not approved head $EVENT_SHA: the latest codex review attempt (run $id) failed or was cancelled, so no earlier approval stands. Request the review again (an effort: label) for a new attempt" ;;
+              esac
+            done
           }
 
           # (a) The no-review list. The change is pinned to the event: on
@@ -3090,29 +3125,29 @@ jobs:
           # CUSTOMIZE: local fix pending upstream (template v5.11.3)
           check_base
           check_review_result
-          since=$(rereview_since) || fail "cannot read the re-review requests of PR $PR_NUM"
+          if [ "$FORGE" = github ]; then
+            src=$(get_all "/pulls/$PR_NUM/reviews?" | jq -r --arg u "$REVIEWER" --arg s "$EVENT_SHA" '
+                [ .[] | select(.user.login == $u and .commit_id == $s and .state == "APPROVED")
+                      | (.body // "") | capture("carried=(?<o>[0-9a-f]{40})").o ] | unique | .[]') ||
+              fail "cannot read the reviews of PR $PR_NUM"
+            # shellcheck disable=SC2086 # $src: shas, one per word
+            check_attempts "$EVENT_SHA" $src
+          fi
 
           # (b) The reviewer's latest standing verdict on this head. PENDING,
           # COMMENTED and dismissed reviews are no verdict.
           # CUSTOMIZE: local fix pending upstream (template v5.11.3)
           # Codex P1: any undismissed REQUEST_CHANGES on the head stands, as
           # the review job's guards hold it; a later APPROVED does not hide it.
-          # CUSTOMIZE: local fix pending upstream (template v5.11.3)
-          # Codex P1: an approval no newer than $since is STALE.
-          verdict=$(get_all "/pulls/$PR_NUM/reviews?" | jq -r --arg u "$REVIEWER" --arg s "$EVENT_SHA" --argjson since "$since" "$jq_epoch"'
+          verdict=$(get_all "/pulls/$PR_NUM/reviews?" | jq -r --arg u "$REVIEWER" --arg s "$EVENT_SHA" '
               [ .[] | (if .state == "CHANGES_REQUESTED" then .state = "REQUEST_CHANGES" else . end)
                     | select(.user.login == $u and .commit_id == $s and (.dismissed | not)
                              and (.state == "APPROVED" or .state == "REQUEST_CHANGES")) ]
               | if any(.[]; .state == "REQUEST_CHANGES") then "REQUEST_CHANGES"
-                else (sort_by(.submitted_at // "", .id) | last
-                      | if . == null then "NONE"
-                        elif .state == "APPROVED" and $since != null and (.submitted_at | epoch) <= $since then "STALE"
-                        else .state // "NONE" end) end') ||
+                else (sort_by(.submitted_at // "", .id) | last | .state // "NONE") end') ||
             fail "cannot read the reviews of PR $PR_NUM"
           case "$verdict" in
             APPROVED) echo "$REVIEWER approved $EVENT_SHA." ;;
-            # CUSTOMIZE: local fix pending upstream (template v5.11.3)
-            STALE) fail "a requested re-review has not approved head $EVENT_SHA: the $REVIEWER approval predates the latest effort:, agent: or model: label. Wait for that review, or add the label again to request one" ;;
             REQUEST_CHANGES) fail "$REVIEWER requested changes on $EVENT_SHA" ;;
             *) fail "no $REVIEWER approval of $EVENT_SHA. A code change needs a Codex review: label the PR code-review and task:ready (ruling 589)" ;;
           esac

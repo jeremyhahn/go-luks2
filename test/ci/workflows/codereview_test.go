@@ -167,17 +167,12 @@ func gateVerdict(t *testing.T, reviews string) string {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not installed")
 	}
-	g := gateStep(t)
-	m := regexp.MustCompile(`(?s)verdict=\$\(get_all "/pulls/\$PR_NUM/reviews\?" \| jq -r --arg u "\$REVIEWER" --arg s "\$EVENT_SHA" --argjson since "\$since" "\$jq_epoch"'(.*?)'\)`).
-		FindStringSubmatch(g)
+	m := regexp.MustCompile(`(?s)verdict=\$\(get_all "/pulls/\$PR_NUM/reviews\?" \| jq -r --arg u "\$REVIEWER" --arg s "\$EVENT_SHA" '(.*?)'\)`).
+		FindStringSubmatch(gateStep(t))
 	if m == nil {
 		t.Fatalf("gate: no verdict jq program")
 	}
-	e := regexp.MustCompile(`(?s)\n *jq_epoch='(.*?)'\n`).FindStringSubmatch(g)
-	if e == nil {
-		t.Fatalf("gate: no jq_epoch")
-	}
-	cmd := exec.Command("jq", "-r", "--arg", "u", "codex", "--arg", "s", "abc", "--argjson", "since", "null", e[1]+m[1])
+	cmd := exec.Command("jq", "-r", "--arg", "u", "codex", "--arg", "s", "abc", m[1])
 	cmd.Stdin = strings.NewReader(reviews)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -245,8 +240,9 @@ func TestGateRefusesAFailedReviewJob(t *testing.T) {
 }
 
 // fakeCurl answers the gate's curl from $FIX: the API path, query cut and
-// each / made _, names the fixture; a missing one answers 404. A page past
-// the first of a paged list is empty.
+// each / made _, then _<sha> for a head_sha query, names the fixture; a
+// missing one answers 404. A page past the first of a paged list, and a
+// list of the queued or in-progress runs, is empty.
 const fakeCurl = `#!/usr/bin/env bash
 out= url=
 while [ $# -gt 0 ]; do
@@ -259,13 +255,15 @@ while [ $# -gt 0 ]; do
 done
 p=${url#"$REPO_API"}
 case "$p" in *[?\&]page=[2-9]*|*[?\&]page=[1-9][0-9]*) echo '[]' > "$out"; printf 200; exit 0 ;; esac
+case "$p" in *[?\&]status=*) echo '{"total_count":0,"workflow_runs":[]}' > "$out"; printf 200; exit 0 ;; esac
 f="$FIX/$(printf '%s' "${p%%\?*}" | tr / _)"
+case "$p" in *head_sha=*) h=${p#*head_sha=}; f=${f}_${h%%&*} ;; esac
 if [ -f "$f" ]; then cp "$f" "$out"; printf 200; else echo '{}' > "$out"; printf 404; fi
 `
 
 // runGate runs the gate step's script against fixtures (API path, with /
-// made _, to body) for a code change on PR 1 at head h into main.
-func runGate(t *testing.T, fix map[string]string) (int, string) {
+// made _, to body) for a code change on PR 1 at head into main.
+func runGate(t *testing.T, head string, fix map[string]string) (int, string) {
 	t.Helper()
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not installed")
@@ -293,10 +291,9 @@ func runGate(t *testing.T, fix map[string]string) (int, string) {
 	if err := os.WriteFile(filepath.Join(bin, "curl"), []byte(fakeCurl), 0o700); err != nil { //nolint:gosec // a test stub on PATH
 		t.Fatal(err)
 	}
-	base, head := strings.Repeat("b", 40), strings.Repeat("a", 40)
+	base := strings.Repeat("b", 40)
 	all := map[string]string{
 		"_actions_runs_42":                `{"workflow_id":7}`,
-		"_actions_workflows_7_runs":       `{"workflow_runs":[]}`,
 		"_compare_" + base + "..." + head: `{"files":[{"filename":"main.go"}]}`,
 		"_pulls_1":                        `{"base":{"ref":"main"},"head":{"sha":"` + head + `"}}`,
 	}
@@ -323,53 +320,122 @@ func runGate(t *testing.T, fix map[string]string) (int, string) {
 	return cmd.ProcessState.ExitCode(), string(out)
 }
 
-// Codex P1: a requested re-review (an effort: label, or under codex an
-// agent: or model: label) voids every approval of the head older than it,
-// across runs: a later run whose review job is skipped (an unrelated label)
-// does not accept the old approval. A failed read of the events fails.
-func TestGateVoidsAnApprovalOlderThanAReReviewRequest(t *testing.T) {
-	head := strings.Repeat("a", 40)
-	approval := func(id int, at string) string {
-		return fmt.Sprintf(`{"id":%d,"user":{"login":"codex"},"commit_id":%q,"state":"APPROVED","submitted_at":%q}`, id, head, at)
+// reviewRuns are fixtures for review runs on PR 1 into main at head: each
+// run id to its Codex review job, "skipped" for a job that did not run, or
+// a job conclusion (success, failure, ...) with the codex step "success" or
+// "skipped". A missing head lists no fixture (HTTP 404).
+func reviewRuns(fix map[string]string, head string, runs [][3]string) {
+	var list []string
+	for _, r := range runs {
+		list = append(list, fmt.Sprintf(`{"id":%s,"display_title":"Code Review: PR #1 into main at %s"}`, r[0], head))
+		job := fmt.Sprintf(`{"name":"Codex review","status":"completed","conclusion":%q,"steps":[{"name":"Review the head with codex as uid 1000","conclusion":%q}]}`, r[1], r[2])
+		fix["_actions_runs_"+r[0]+"_jobs"] = `{"jobs":[` + job + `]}`
 	}
-	labeled := func(name, at string) string {
-		return fmt.Sprintf(`{"event":"labeled","label":{"name":%q},"created_at":%q}`, name, at)
+	fix["_actions_workflows_7_runs_"+head] = fmt.Sprintf(`{"total_count":%d,"workflow_runs":[%s]}`, len(list), strings.Join(list, ","))
+}
+
+// Codex P1: the latest codex review attempt on the head, or on the head
+// its approval was carried from, decides: a failed or canceled one (a
+// requested re-review that did not finish) keeps the gate red, whatever
+// label or same-patch push follows, until a later attempt succeeds. A run
+// whose review job was skipped, or that ran no codex step, is no attempt.
+func TestGateRefusesAfterAFailedReviewAttempt(t *testing.T) {
+	a, b := strings.Repeat("a", 40), strings.Repeat("c", 40)
+	approval := func(head, body string) string {
+		return fmt.Sprintf(`[{"id":1,"user":{"login":"codex"},"commit_id":%q,"state":"APPROVED","submitted_at":"2026-11-16T01:00:00Z","body":%q}]`, head, body)
 	}
-	labels := `[{"name":"code-review"},{"name":"task:ready"}]`
+	ok, failed, ranNot, skip := [3]string{"", "success", "success"}, [3]string{"", "failure", "success"}, [3]string{"", "success", "skipped"}, [3]string{"", "skipped", "skipped"}
+	id := func(n string, r [3]string) [3]string { r[0] = n; return r }
 	for _, c := range []struct {
 		name     string
-		fix      map[string]string
+		head     string
+		runs     map[string][][3]string
 		pass     bool
 		mentions string
 	}{
-		{"approval, then effort:high, no newer approval", map[string]string{
-			"_pulls_1_reviews": "[" + approval(1, "2026-11-16T01:00:00Z") + "]",
-			"_issues_1_labels": labels,
-			"_issues_1_events": "[" + labeled("code-review", "2026-11-16T00:00:00Z") + "," + labeled("effort:high", "2026-11-16T02:00:00Z") + "," + labeled("priority:low", "2026-11-16T03:00:00Z") + "]",
-		}, false, "a requested re-review has not approved head " + head},
-		{"approval after effort:high", map[string]string{
-			"_pulls_1_reviews": "[" + approval(1, "2026-11-16T01:00:00Z") + "," + approval(2, "2026-11-16T04:00:00Z") + "]",
-			"_issues_1_labels": labels,
-			"_issues_1_events": "[" + labeled("effort:high", "2026-11-16T02:00:00Z") + "]",
-		}, true, "codex approved " + head},
-		{"no re-review label", map[string]string{
-			"_pulls_1_reviews": "[" + approval(1, "2026-11-16T01:00:00Z") + "]",
-			"_issues_1_labels": labels,
-			"_issues_1_events": "[" + labeled("code-review", "2026-11-16T00:00:00Z") + "," + labeled("priority:low", "2026-11-16T03:00:00Z") + "]",
-		}, true, "codex approved " + head},
-		{"events read fails", map[string]string{
-			"_pulls_1_reviews": "[" + approval(1, "2026-11-16T01:00:00Z") + "]",
-			"_issues_1_labels": labels,
-		}, false, "HTTP 404"},
-		{"model: under agent:opencode routes opencode, not codex", map[string]string{
-			"_pulls_1_reviews": "[" + approval(1, "2026-11-16T01:00:00Z") + "]",
-			"_issues_1_labels": `[{"name":"code-review"},{"name":"agent:opencode"}]`,
-			"_issues_1_events": "[" + labeled("agent:opencode", "2026-11-16T02:00:00Z") + "," + labeled("model:qwen", "2026-11-16T03:00:00Z") + "]",
-		}, true, "codex approved " + head},
+		{"failed re-review, then an unrelated label", a, map[string][][3]string{
+			a: {id("10", ok), id("11", failed), id("12", skip)},
+		}, false, "a requested re-review has not approved head " + a},
+		{"failed re-review, then an empty commit carries the approval", b, map[string][][3]string{
+			b: {id("20", ranNot)},
+			a: {id("10", ok), id("11", failed)},
+		}, false, "a requested re-review has not approved head " + b},
+		{"failed codex request, then agent:opencode and an unrelated label", a, map[string][][3]string{
+			a: {id("10", ok), id("11", [3]string{"", "cancelled", "skipped"}), id("12", ranNot), id("13", skip)}, //nolint:misspell // the runner's spelling, not prose
+		}, false, "a requested re-review has not approved head " + a},
+		{"a later attempt succeeds", a, map[string][][3]string{
+			a: {id("10", ok), id("11", failed), id("14", ok)},
+		}, true, "codex approved " + a},
+		{"no re-review", a, map[string][][3]string{
+			a: {id("10", ok), id("12", skip), id("13", ranNot)},
+		}, true, "codex approved " + a},
+		{"the runs cannot be read", a, map[string][][3]string{}, false, "HTTP 404"},
 	} {
-		code, out := runGate(t, c.fix)
+		fix := map[string]string{}
+		for h, r := range c.runs {
+			reviewRuns(fix, h, r)
+		}
+		body := ""
+		if c.head == b {
+			body = "<!-- codex-review:verdict head=" + b + " patch=" + strings.Repeat("d", 40) + " carried=" + a + " -->\nCarried"
+		}
+		fix["_pulls_1_reviews"] = approval(c.head, body)
+		code, out := runGate(t, c.head, fix)
 		if (code == 0) != c.pass || !strings.Contains(out, c.mentions) {
 			t.Errorf("%s: exit %d, want pass=%v and %q in:\n%s", c.name, code, c.pass, c.mentions, out)
+		}
+	}
+}
+
+// Codex P1: the same-patch carry reads the source head's latest codex
+// review attempt before it posts, and carries nothing from a failed one.
+func TestCarryRefusesAHeadWhoseLatestAttemptFailed(t *testing.T) {
+	cr := codeReview(t)
+	i := strings.Index(cr, "\n          # SAME PATCH:")
+	j := strings.Index(cr, `posted=$(api POST "/pulls/$PR_NUM/reviews" "$WORK/review.json")`)
+	if i < 0 || j < i {
+		t.Fatalf("%s: no same-patch carry", codeReviewWorkflow)
+	}
+	if !regexp.MustCompile(`latest_attempt "\$psha"`).MatchString(cr[i:j]) {
+		t.Errorf("the carry posts without reading the latest attempt on its source head")
+	}
+	def := regexp.MustCompile(`(?ms)^ +latest_attempt\(\) \{[^\n]*\n.*?^ +\}$`).FindString(cr[:i])
+	if def == "" {
+		t.Fatalf("guard: no latest_attempt")
+	}
+	vars := regexp.MustCompile(`(?ms)^ +jq_(runs|attempt)='.*?'$`).FindAllString(cr[:i], -1)
+	if len(vars) != 2 {
+		t.Fatalf("guard: want jq_runs and jq_attempt, found %d", len(vars))
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not installed")
+	}
+	a := strings.Repeat("a", 40)
+	for _, c := range []struct {
+		name string
+		runs [][3]string
+		want string
+	}{
+		{"failed last", [][3]string{{"10", "success", "success"}, {"11", "failure", "skipped"}, {"12", "skipped", "skipped"}}, "failed"},
+		{"succeeded last", [][3]string{{"11", "cancelled", "success"}, {"14", "success", "success"}}, "success"}, //nolint:misspell // the runner's spelling, not prose
+		{"no attempt", [][3]string{{"12", "success", "skipped"}}, "none"},
+	} {
+		fix := map[string]string{}
+		reviewRuns(fix, a, c.runs)
+		dir := t.TempDir()
+		for k, v := range fix {
+			if err := os.WriteFile(filepath.Join(dir, k), []byte(v), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		script := "set -euo pipefail\nshopt -s inherit_errexit\ndie() { echo \"die: $*\" >&2; exit 1; }\n" +
+			"api() { local p=$2 f; f=$(printf '%s' \"${p%%\\?*}\" | tr / _); case \"$p\" in *head_sha=*) p=${p#*head_sha=}; f=${f}_${p%%&*} ;; esac; cat \"$FIX/$f\"; }\n" +
+			strings.Join(vars, "\n") + "\n" + def + "\nwf=7 PR_NUM=1 BASE_REF=main\nlatest_attempt " + a + "\n"
+		cmd := exec.Command("bash", "-c", script)
+		cmd.Env = append(os.Environ(), "FIX="+dir)
+		out, err := cmd.CombinedOutput()
+		if got := strings.TrimSpace(string(out)); err != nil || got != c.want {
+			t.Errorf("%s: latest_attempt %q (%v), want %q", c.name, got, err, c.want)
 		}
 	}
 }
