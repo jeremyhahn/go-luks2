@@ -1849,7 +1849,7 @@ jobs:
           # an older pending duplicate) is no attempt; one cancelled mid-review failed.
           # CUSTOMIZE: local fix pending upstream (template v5.12.3, Codex P1 on #490): the
           # run carries no request kind, so a job cancelled before its step (cancelled) is
-          # no attempt only when a newer same-head review job ended success (done/success,
+          # no attempt only when a newer same-head review job ran codex to success (success,
           # the run that replaced it); otherwise, an explicit re-review cancelled while
           # queued, it failed. A skipped job (an unrelated label) is none and replaces nothing.
           jq_attempt='if (.jobs | type) != "array" or (.total_count // 0) > (.jobs | length) then error("more jobs than one page") else .jobs[] | select(.name == "Codex review") | [(.started_at // (if $rs == "" then "9999" else $rs end)), (.run_attempt // 0), (.id // 0), (if . == null or .conclusion == "skipped" then "none" elif .status == "completed" and .conclusion == "cancelled" and (any(.steps[]?; .name == "Review the head with codex as uid 1000" and (.conclusion // "skipped") != "skipped") | not) then "cancelled" elif .status != "completed" or .conclusion != "success" then "failed" elif any(.steps[]?; .name == "Review the head with codex as uid 1000" and .conclusion == "success") then "success" else "done" end), $id] | @tsv end'
@@ -1869,8 +1869,11 @@ jobs:
                 die "cannot read the jobs of run $id"
               rows+="$st"$'\n'
             done <<< "$runs"
+            # CUSTOMIZE: local fix pending upstream (template v5.12.3, Codex P1 on #490): a done
+            # job (guard only, e.g. skip=reviewed; codex did not run) replaces nothing, so a
+            # cancelled job not passed by a newer success (a real review) failed.
             st=$(printf '%s' "$rows" | LC_ALL=C sort -t $'\t' -k1,1r -k2,2nr -k3,3nr |
-                 awk -F '\t' '$4 == "done" { ok = 1; next } $4 == "cancelled" { if (ok) next; $4 = "failed" } $4 == "success" || $4 == "failed" { print $4; exit }')
+                 awk -F '\t' '$4 == "done" { next } $4 == "cancelled" { $4 = "failed" } $4 == "success" || $4 == "failed" { print $4; exit }')
             echo "${st:-none}"
           }
           check_lineage() { # head -> failed if it or a head it was carried from failed last, else success
@@ -3720,7 +3723,7 @@ jobs:
           # an older pending duplicate) is no attempt; one cancelled mid-review failed.
           # CUSTOMIZE: local fix pending upstream (template v5.12.3, Codex P1 on #490): the
           # run carries no request kind, so a job cancelled before its step (cancelled) is
-          # no attempt only when a newer same-head review job ended success (done/success,
+          # no attempt only when a newer same-head review job ran codex to success (success,
           # the run that replaced it); otherwise, an explicit re-review cancelled while
           # queued, it failed. A skipped job (an unrelated label) is none and replaces nothing.
           jq_attempt='if (.jobs | type) != "array" or (.total_count // 0) > (.jobs | length) then error("more jobs than one page") else .jobs[] | select(.name == "Codex review") | [(.started_at // (if $rs == "" then "9999" else $rs end)), (.run_attempt // 0), (.id // 0), (if . == null or .conclusion == "skipped" then "none" elif .status == "completed" and .conclusion == "cancelled" and (any(.steps[]?; .name == "Review the head with codex as uid 1000" and (.conclusion // "skipped") != "skipped") | not) then "cancelled" elif .status != "completed" or .conclusion != "success" then "failed" elif any(.steps[]?; .name == "Review the head with codex as uid 1000" and .conclusion == "success") then "success" else "done" end), $id] | @tsv end'
@@ -3741,8 +3744,11 @@ jobs:
                 fail "cannot read the jobs of run $id"
               rows+="$st"$'\n'
             done <<< "$runs"
+            # CUSTOMIZE: local fix pending upstream (template v5.12.3, Codex P1 on #490): a done
+            # job (guard only, e.g. skip=reviewed; codex did not run) replaces nothing, so a
+            # cancelled job not passed by a newer success (a real review) failed.
             st=$(printf '%s' "$rows" | LC_ALL=C sort -t $'\t' -k1,1r -k2,2nr -k3,3nr |
-                 awk -F '\t' '$4 == "done" { ok = 1; next } $4 == "cancelled" { if (ok) next; $4 = "failed" } $4 == "success" || $4 == "failed" { print $4, $5; exit }')
+                 awk -F '\t' '$4 == "done" { next } $4 == "cancelled" { $4 = "failed" } $4 == "success" || $4 == "failed" { print $4, $5; exit }')
             case "$st" in
               success\ *) return 0 ;;
               failed\ *) fail "a requested re-review has not approved head $EVENT_SHA: the latest codex review attempt (run ${st#* }) failed or was cancelled, so no earlier approval stands. Request the review again (an effort: label) for a new attempt" ;;

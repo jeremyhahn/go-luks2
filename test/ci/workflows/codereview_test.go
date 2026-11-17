@@ -495,12 +495,21 @@ func TestGateRefusesAfterAFailedReviewAttempt(t *testing.T) {
 		}, false, "a requested re-review has not approved head " + a},
 		// Codex P1 (#490): the shared concurrency group cancels an older
 		// pending duplicate before its review step starts; that is no attempt.
-		{"approved, then a dedup-canceled duplicate and a guard-only run", a, map[string][][3]string{
+		// Round 4: only a later job whose codex step ran and succeeded (a
+		// real replacement review) clears it; a guard-only skip=reviewed
+		// job ran no review and replaces nothing.
+		{"approved, then a dedup-canceled duplicate and a real replacement review", a, map[string][][3]string{
+			a: {id("10", ok), id("11", [3]string{"", "cancelled", "skipped"}), id("12", ok)}, //nolint:misspell // the runner's spelling, not prose
+		}, true, "codex approved " + a},
+		{"approved, then a duplicate canceled before it listed a review step and a real review", a, map[string][][3]string{
+			a: {id("10", ok), id("11", [3]string{"", "cancelled", "absent"}), id("12", ok)}, //nolint:misspell // the runner's spelling, not prose
+		}, true, "codex approved " + a},
+		{"approved, then an effort re-review canceled before codex and a guard-only skip=reviewed run", a, map[string][][3]string{
 			a: {id("10", ok), id("11", [3]string{"", "cancelled", "skipped"}), id("12", ranNot)}, //nolint:misspell // the runner's spelling, not prose
-		}, true, "codex approved " + a},
-		{"approved, then a duplicate canceled before it listed a review step", a, map[string][][3]string{
+		}, false, "a requested re-review has not approved head " + a},
+		{"approved, then a re-review canceled before any step and a guard-only run", a, map[string][][3]string{
 			a: {id("10", ok), id("11", [3]string{"", "cancelled", "absent"}), id("12", ranNot)}, //nolint:misspell // the runner's spelling, not prose
-		}, true, "codex approved " + a},
+		}, false, "a requested re-review has not approved head " + a},
 		{"approved, then a re-review canceled while codex ran", a, map[string][][3]string{
 			a: {id("10", ok), id("11", [3]string{"", "cancelled", "cancelled"}), id("12", ranNot)}, //nolint:misspell // the runner's spelling, not prose
 		}, false, "a requested re-review has not approved head " + a},
@@ -606,11 +615,15 @@ func TestCarryRefusesAHeadWhoseLatestAttemptFailed(t *testing.T) {
 		// with success, is no attempt; one canceled mid-review is. Round 3: a
 		// re-review canceled before its step with no later successful review
 		// run (only an unrelated label run, or none) still failed.
-		{"dedup-cancelled after an approval", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "skipped"}, {"12", "success", "skipped"}}, "success"},                        //nolint:misspell // the runner's spelling, not prose
-		{"cancelled before any step after an approval", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "absent"}, {"12", "success", "skipped"}}, "success"},               //nolint:misspell // the runner's spelling, not prose
-		{"re-review cancelled while queued, then an unrelated label", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "skipped"}, {"12", "skipped", "skipped"}}, "failed"}, //nolint:misspell // the runner's spelling, not prose
-		{"re-review cancelled before any step, nothing later", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "absent"}}, "failed"},                                       //nolint:misspell // the runner's spelling, not prose
-		{"cancelled while codex ran", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "cancelled"}}, "failed"},                                                             //nolint:misspell // the runner's spelling, not prose
+		// Round 4: only a later real review (codex step success) replaces
+		// it; a guard-only skip=reviewed job does not.
+		{"dedup-cancelled after an approval, then a real review", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "skipped"}, {"12", "success", "success"}}, "success"},                       //nolint:misspell // the runner's spelling, not prose
+		{"cancelled before any step after an approval, then a real review", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "absent"}, {"12", "success", "success"}}, "success"},              //nolint:misspell // the runner's spelling, not prose
+		{"effort re-review cancelled before codex, then a guard-only skip=reviewed job", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "skipped"}, {"12", "success", "skipped"}}, "failed"}, //nolint:misspell // the runner's spelling, not prose
+		{"cancelled before any step after an approval, then a guard-only job", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "absent"}, {"12", "success", "skipped"}}, "failed"},            //nolint:misspell // the runner's spelling, not prose
+		{"re-review cancelled while queued, then an unrelated label", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "skipped"}, {"12", "skipped", "skipped"}}, "failed"},                    //nolint:misspell // the runner's spelling, not prose
+		{"re-review cancelled before any step, nothing later", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "absent"}}, "failed"},                                                          //nolint:misspell // the runner's spelling, not prose
+		{"cancelled while codex ran", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "cancelled"}}, "failed"},                                                                                //nolint:misspell // the runner's spelling, not prose
 		{"failed before the review step", [][3]string{{"10", "success", "success"}, {"11", "failure", "absent"}}, "failed"},
 	} {
 		fix := map[string]string{}
