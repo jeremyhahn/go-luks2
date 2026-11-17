@@ -77,6 +77,8 @@ var DefaultStripAtPublish = []Unpublishable{
 	{Path: "**/.serena/**", Reason: "code-analysis tool state for the agents: gitignored whole, and " +
 		"stripped from the public release should any of it be committed"},
 	{Path: workflowDir + "code-review.yml", Reason: internalReviewWorkflow},
+	{Path: workflowDir + "scans.yml", Reason: "internal scans workflow: runs on a workflow_dispatch " +
+		"of main only; tracked on main, stripped from the public release (#211)"},
 	{Path: fleetPatterns, Reason: "the fleet pattern set: shapes and digests of the fleet's values, " +
 		"which a short value's digest does not keep secret (#211)"},
 	{Path: fleetTests, Reason: "the fleet pattern set's tests, which pin its digest table; stripped " +

@@ -47,6 +47,7 @@ coverage.html
 **/.serena/**
 **/.serena
 .github/workflows/code-review.yml
+.github/workflows/scans.yml
 test/internal/labstrings/fleet.go
 test/internal/labstrings/fleet_test.go
 

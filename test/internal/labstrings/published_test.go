@@ -348,3 +348,22 @@ func TestDefaultStripAtPublish_IsUsableAndStripsNothingPublished(t *testing.T) {
 		}
 	}
 }
+
+// TestDefaultStripAtPublish_StripsTheInternalScansWorkflow: scans.yml runs
+// the internal scans on a workflow_dispatch of main only, so the public
+// release does not carry it; the strip list must name it, or the
+// releasability gate reports it as an unknown workflow (Codex P1, #490).
+func TestDefaultStripAtPublish_StripsTheInternalScansWorkflow(t *testing.T) {
+	path := workflowDir + "scans.yml"
+	entries := entriesOf(map[string]string{path: "on: workflow_dispatch\n"})
+	if listed := StripAtPublish(entries, DefaultStripAtPublish); len(listed) != 1 {
+		t.Errorf("StripAtPublish(%s) = %v, want it stripped", path, listed)
+	}
+	findings, err := ScanUnpublishable(entries, DefaultUnpublishable, DefaultStripAtPublish)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("%s is reported as unpublishable: %v", path, findings)
+	}
+}

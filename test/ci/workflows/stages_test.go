@@ -128,7 +128,7 @@ func TestCIGateIsHermetic(t *testing.T) {
 	if strings.Contains(gosec, "CI_FULL_TIER") {
 		t.Errorf("the gosec step depends on the tier; v1.42 runs it on every tier:\n%s", gosec)
 	}
-	scans := readFile(t, ".github/workflows/scans.yml")
+	scans := scansWorkflow(t)
 	if regexp.MustCompile(`(?m)^  (pull_request|pull_request_target|push):`).MatchString(scans) {
 		t.Error("scans.yml runs on a pull request or a push; its findings must never gate a change")
 	}
@@ -346,7 +346,7 @@ func TestImageJobCarriesTheChecksThatLeftTheRunner(t *testing.T) {
 // fails.
 func TestImageJobGatesFixableFindings(t *testing.T) {
 	// ci-template v1.42: the scan runs in scans.yml, on main.
-	run := stepRun(t, job(t, readFile(t, ".github/workflows/scans.yml"), "scans"))["trivy image (integration image)"]
+	run := stepRun(t, job(t, scansWorkflow(t), "scans"))["trivy image (integration image)"]
 	cmd := ""
 	for _, line := range strings.Split(run, "\n") {
 		if i := strings.Index(line, "trivy image "); i >= 0 {
@@ -378,7 +378,7 @@ func TestTrivyFSNeverIgnoresUnfixed(t *testing.T) {
 	if fs == 0 {
 		t.Fatal("the Makefile has no trivy fs invocation")
 	}
-	security := stepRun(t, job(t, readFile(t, ".github/workflows/scans.yml"), "scans"))["make security (toolchain image)"]
+	security := stepRun(t, job(t, scansWorkflow(t), "scans"))["make security (toolchain image)"]
 	if strings.Contains(security, "--ignore-unfixed") || strings.Contains(security, "TRIVY") {
 		t.Errorf("the make security step passes trivy options: %q", security)
 	}

@@ -332,7 +332,7 @@ func TestMakefileSaysWhereTrivyGates(t *testing.T) {
 	// target, trivy fs included, in scans.yml (ci-template v1.42, ruling 742
 	// (1)), and no trivy run in ci.yml.
 	ci := readFile(t, ".github/workflows/ci.yml")
-	if !strings.Contains(job(t, readFile(t, ".github/workflows/scans.yml"), "scans"), `make ci-toolchain-run CMD="make security `) {
+	if scans, ok := readUnlessStripped(t, ".github/workflows/scans.yml"); ok && !strings.Contains(job(t, scans, "scans"), `make ci-toolchain-run CMD="make security `) {
 		t.Error("scans.yml no longer runs make security in the toolchain image; update the Makefile's account of where trivy gates")
 	}
 	if regexp.MustCompile(`make trivy|trivy fs|trivy-action`).MatchString(ci) {
