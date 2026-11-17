@@ -1153,6 +1153,16 @@ jobs:
             echo "no skip: python3, timeout or a temporary file is missing"
           fi
           [ -z "$res" ] || rm -f "$res"
+          # CUSTOMIZE: local fix pending upstream (template v5.12.2, Codex P1 on #490).
+          # The guard clears only a change of .github/workflows/ files (Y-2), and
+          # this repository's NO_REVIEW_PATHS keeps .github/workflows/ under review,
+          # so the gate needs a Codex approval of every such change: a skip here
+          # would suppress the review the gate waits for. A workflow change never
+          # skips the review.
+          if [ "$skip" = true ]; then
+            echo "no skip: the change touches .github/workflows/, which NO_REVIEW_PATHS keeps under review"
+            skip=false
+          fi
           if [ "$skip" = true ]; then
             msg="CI/SDLC-only change: no review (owner 2026-11-10; InfoSec guard passed)"
             echo "$msg"

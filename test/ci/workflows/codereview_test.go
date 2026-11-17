@@ -70,6 +70,84 @@ func TestNoReviewPathsNeverExemptAWorkflow(t *testing.T) {
 	}
 }
 
+// runScope runs the scope job's step with InfoSec's guard stubbed to pass
+// (python3 on PATH writes true to GUARD_RESULT) and returns its skip output.
+func runScope(t *testing.T) string {
+	t.Helper()
+	cr := codeReview(t)
+	i := strings.Index(cr, "        id: scope\n")
+	if i < 0 {
+		t.Fatalf("%s: no scope step", codeReviewWorkflow)
+	}
+	step := cr[i:]
+	j := strings.Index(step, "run: |\n")
+	k := strings.Index(step, "\n  review:\n")
+	if j < 0 || k < j {
+		t.Fatalf("%s: no scope run script", codeReviewWorkflow)
+	}
+	var script strings.Builder
+	for _, l := range strings.Split(step[j+len("run: |\n"):k], "\n") {
+		script.WriteString(strings.TrimPrefix(l, "          ") + "\n")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stub := "#!/usr/bin/env bash\ncat >/dev/null\nprintf true > \"$GUARD_RESULT\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "python3"), []byte(stub), 0o700); err != nil { //nolint:gosec // a test stub on PATH
+		t.Fatal(err)
+	}
+	path, output := filepath.Join(dir, "scope.sh"), filepath.Join(dir, "output")
+	if err := os.WriteFile(path, []byte(script.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", path)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"GITHUB_OUTPUT="+output, "GITHUB_STEP_SUMMARY=")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("scope step: %v\n%s", err, out)
+	}
+	b, err := os.ReadFile(output) // #nosec G304 -- the test's own temporary file
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^skip=(.*)$`).FindSubmatch(b)
+	if m == nil {
+		t.Fatalf("scope step wrote no skip output: %q", b)
+	}
+	return string(m[1])
+}
+
+// TestScopeSkipNeverSuppressesAWorkflowReview: InfoSec's guard clears only a
+// change of workflow files (Y-2), and this repository's NO_REVIEW_PATHS keeps
+// .github/workflows/ under review, so the gate needs a Codex approval of such
+// a change. A scope skip there would suppress the review job the gate waits
+// for (Codex P1, #490): a workflow change never skips the review, and the
+// gate still asks for the approval the review gives.
+func TestScopeSkipNeverSuppressesAWorkflowReview(t *testing.T) {
+	if _, err := exec.LookPath("timeout"); err != nil {
+		t.Skip("timeout not installed")
+	}
+	skip := runScope(t)
+	if skip == "true" {
+		t.Errorf("the scope job skips the review of a workflow change the guard cleared; the gate still needs a Codex approval of it")
+	}
+	head, base := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	fix := map[string]string{
+		"_compare_" + base + "..." + head: `{"files":[{"filename":".github/workflows/ci.yml"}]}`,
+		"_pulls_1_reviews":                `[]`,
+	}
+	code, out := runGateWith(t, head, fix, "SCOPE_SKIP="+skip)
+	if code == 0 {
+		t.Errorf("the gate passes a workflow change with no review (scope skip=%s):\n%s", skip, out)
+	}
+	if !strings.Contains(out, "at least one is code") && !strings.Contains(out, "needs a Codex approval") {
+		t.Errorf("the gate does not ask for a Codex approval of a workflow change:\n%s", out)
+	}
+}
+
 // gateGetAll is the gate step's get_all function, as the workflow has it.
 func gateGetAll(t *testing.T) string {
 	t.Helper()
@@ -266,6 +344,13 @@ if [ -f "$f" ]; then cp "$f" "$out"; printf 200; else echo '{}' > "$out"; printf
 // made _, to body) for a code change on PR 1 at head into main.
 func runGate(t *testing.T, head string, fix map[string]string) (int, string) {
 	t.Helper()
+	return runGateWith(t, head, fix)
+}
+
+// runGateWith is runGate with extra NAME=value environment entries, which
+// override the defaults (the last entry of a name wins).
+func runGateWith(t *testing.T, head string, fix map[string]string, extra ...string) (int, string) {
+	t.Helper()
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not installed")
 	}
@@ -323,6 +408,7 @@ func runGate(t *testing.T, head string, fix map[string]string) (int, string) {
 		"BASE_SHA="+base, "BASE_REF=main", "REVIEW_RESULT=skipped", "NO_REVIEW_PATHS="+m[1],
 		// v5.12.1/v5.12.2: the gate also reads the docs list and the scope job.
 		"DOCS_PATHS="+docs[1], "SCOPE_SKIP=", "SCOPE_RESULT=success")
+	cmd.Env = append(cmd.Env, extra...)
 	out, _ := cmd.CombinedOutput()
 	return cmd.ProcessState.ExitCode(), string(out)
 }
