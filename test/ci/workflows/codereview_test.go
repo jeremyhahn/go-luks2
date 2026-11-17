@@ -504,9 +504,9 @@ func TestGateRefusesAfterAFailedReviewAttempt(t *testing.T) {
 		{"approved, then a re-review canceled while codex ran", a, map[string][][3]string{
 			a: {id("10", ok), id("11", [3]string{"", "cancelled", "cancelled"}), id("12", ranNot)}, //nolint:misspell // the runner's spelling, not prose
 		}, false, "a requested re-review has not approved head " + a},
-		// Codex P1 (#490, round 3): an explicit re-review cancelled while it
+		// Codex P1 (#490, round 3): an explicit re-review canceled while it
 		// waited still blocks; only a later same-head review run that ended
-		// success (a replacing duplicate) makes the cancelled one no attempt.
+		// success (a replacing duplicate) makes the canceled one no attempt.
 		{"approved, then an effort re-review canceled while queued and an unrelated label", a, map[string][][3]string{
 			a: {id("10", ok), id("11", [3]string{"", "cancelled", "skipped"}), id("12", skip)}, //nolint:misspell // the runner's spelling, not prose
 		}, false, "a requested re-review has not approved head " + a},
@@ -664,6 +664,41 @@ func TestCarryRefusesAHeadWhoseLatestAttemptFailed(t *testing.T) {
 		if got := strings.TrimSpace(string(out)); err != nil || got != c.want {
 			t.Errorf("%s: check_lineage %q (%v), want %q", c.name, got, err, c.want)
 		}
+	}
+}
+
+// Codex P1 (#490, round 3): enablePullRequestAutoMerge can answer with no
+// error and no auto-merge request; the step reads the request it selected
+// and reports such an answer not armed. expectedHeadOid stays: GitHub's live
+// schema (introspection 2026-11-17) lists it on EnablePullRequestAutoMergeInput.
+func TestRearmChecksTheAutoMergeRequest(t *testing.T) {
+	cr := codeReview(t)
+	i := strings.Index(cr, "- name: Re-arm auto-merge on the approved head")
+	if i < 0 {
+		t.Fatalf("%s: no re-arm step", codeReviewWorkflow)
+	}
+	j := strings.Index(cr[i:], `gh_call PUT "$REPO_API/pulls/$PR_NUM/merge"`)
+	if j < 0 {
+		t.Fatalf("%s: the re-arm step has no clean-status merge", codeReviewWorkflow)
+	}
+	step := cr[i : i+j]
+	m := regexp.MustCompile(`mutation\([^']*enablePullRequestAutoMerge\(input:\{([^}]*)\}\)\{([^']*)\}'`).FindStringSubmatch(step)
+	if m == nil {
+		t.Fatalf("the re-arm step has no enablePullRequestAutoMerge mutation")
+	}
+	if !strings.Contains(m[1], "expectedHeadOid:$h") {
+		t.Errorf("the mutation is not pinned to the approved head (expectedHeadOid): %s", m[1])
+	}
+	if !regexp.MustCompile(`pullRequest\{[^']*autoMergeRequest\{enabledAt\}`).MatchString(m[2]) {
+		t.Errorf("the mutation does not select pullRequest.autoMergeRequest.enabledAt: %s", m[2])
+	}
+	check := regexp.MustCompile(`\.data\.enablePullRequestAutoMerge\.pullRequest\.autoMergeRequest\.enabledAt`).FindStringIndex(step)
+	armed := strings.Index(step, "armed to auto-merge (squash)")
+	if check == nil || armed < 0 || check[0] > armed {
+		t.Errorf("the step reports armed without reading the auto-merge request it got back")
+	}
+	if !strings.Contains(step, "# CUSTOMIZE: local fix pending upstream (template v5.12.3, Codex P1 on #490)") {
+		t.Errorf("the auto-merge request check carries no CUSTOMIZE marker")
 	}
 }
 
