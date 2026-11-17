@@ -1311,9 +1311,10 @@ jobs:
           # Re-runs keep the run ID: rank by the job's start (else the run's;
           # unknown = newest), then run_attempt, then job id. Row: key3 state run.
           # filter=all: every attempt of a run, one row each; an attempt that
-          # ran no codex (none) never hides an earlier real one.
+          # ran no codex (none) never hides an earlier real one. A jobs list
+          # longer than one page (total_count) fails closed.
           # shellcheck disable=SC2016 # $rs and $id are jq's
-          jq_attempt='.jobs[]? | select(.name == "Codex review") | [(.started_at // (if $rs == "" then "9999" else $rs end)), (.run_attempt // 0), (.id // 0), (if . == null or .conclusion == "skipped" then "none" elif .status != "completed" or .conclusion != "success" then "failed" elif any(.steps[]?; .name == "Review the head with codex as uid 1000" and .conclusion == "success") then "success" else "none" end), $id] | @tsv'
+          jq_attempt='if (.jobs | type) != "array" or (.total_count // 0) > (.jobs | length) then error("more jobs than one page") else .jobs[] | select(.name == "Codex review") | [(.started_at // (if $rs == "" then "9999" else $rs end)), (.run_attempt // 0), (.id // 0), (if . == null or .conclusion == "skipped" then "none" elif .status != "completed" or .conclusion != "success" then "failed" elif any(.steps[]?; .name == "Review the head with codex as uid 1000" and .conclusion == "success") then "success" else "none" end), $id] | @tsv end'
           latest_attempt() { # head -> success, failed or none
             local runs id rs rows="" st
             runs=$(api GET "/actions/workflows/$wf/runs?head_sha=$1&per_page=100" |
@@ -3065,9 +3066,10 @@ jobs:
           # Re-runs keep the run ID: rank by the job's start (else the run's;
           # unknown = newest), then run_attempt, then job id. Row: key3 state run.
           # filter=all: every attempt of a run, one row each; an attempt that
-          # ran no codex (none) never hides an earlier real one.
+          # ran no codex (none) never hides an earlier real one. A jobs list
+          # longer than one page (total_count) fails closed.
           # shellcheck disable=SC2016 # $rs and $id are jq's
-          jq_attempt='.jobs[]? | select(.name == "Codex review") | [(.started_at // (if $rs == "" then "9999" else $rs end)), (.run_attempt // 0), (.id // 0), (if . == null or .conclusion == "skipped" then "none" elif .status != "completed" or .conclusion != "success" then "failed" elif any(.steps[]?; .name == "Review the head with codex as uid 1000" and .conclusion == "success") then "success" else "none" end), $id] | @tsv'
+          jq_attempt='if (.jobs | type) != "array" or (.total_count // 0) > (.jobs | length) then error("more jobs than one page") else .jobs[] | select(.name == "Codex review") | [(.started_at // (if $rs == "" then "9999" else $rs end)), (.run_attempt // 0), (.id // 0), (if . == null or .conclusion == "skipped" then "none" elif .status != "completed" or .conclusion != "success" then "failed" elif any(.steps[]?; .name == "Review the head with codex as uid 1000" and .conclusion == "success") then "success" else "none" end), $id] | @tsv end'
           check_attempts() { # head... -> fails if the latest attempt on them failed
             local h runs id rs rows="" st
             runs=$(for h in "$@"; do

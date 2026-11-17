@@ -348,6 +348,9 @@ func reviewRuns(fix map[string]string, head string, runs [][3]string) {
 			job += "," + rerun
 		}
 		fix["_actions_runs_"+id+"_jobs"] = `{"jobs":[` + job + `]}`
+		if r[1] == "page2" { // a successful page one; a blocking attempt on page two
+			fix["_actions_runs_"+id+"_jobs"] = `{"total_count":101,"jobs":[` + strings.Replace(job, `"conclusion":"page2"`, `"conclusion":"success"`, 1) + `]}`
+		}
 	}
 	fix["_actions_workflows_7_runs_"+head] = fmt.Sprintf(`{"total_count":%d,"workflow_runs":[%s]}`, len(list), strings.Join(list, ","))
 }
@@ -396,6 +399,9 @@ func TestGateRefusesAfterAFailedReviewAttempt(t *testing.T) {
 		{"a failed attempt, then a guard-only re-run of the same run", a, map[string][][3]string{
 			a: {id("10", ok), id("11+guard", failed)},
 		}, false, "a requested re-review has not approved head " + a},
+		{"more jobs than one page", a, map[string][][3]string{
+			a: {id("10", ok), id("11", [3]string{"", "page2", "success"})},
+		}, false, "cannot read the jobs of run 11"},
 		{"the runs cannot be read", a, map[string][][3]string{}, false, "HTTP 404"},
 	} {
 		fix := map[string]string{}
@@ -448,6 +454,7 @@ func TestCarryRefusesAHeadWhoseLatestAttemptFailed(t *testing.T) {
 		{"lower-ID re-run failed last", [][3]string{{"10@2026-11-16T09:00:00Z", "failure", "success"}, {"11", "success", "success"}}, "failed"},
 		{"lower-ID re-run succeeded last", [][3]string{{"10@2026-11-16T09:00:00Z", "success", "success"}, {"11", "failure", "success"}}, "success"},
 		{"failed, then a guard-only re-run", [][3]string{{"10", "success", "success"}, {"11+guard", "failure", "success"}}, "failed"},
+		{"more jobs than one page", [][3]string{{"10", "success", "success"}, {"11", "page2", "success"}}, "die: cannot read the jobs of run 11"},
 		{"no attempt", [][3]string{{"12", "success", "skipped"}}, "none"},
 	} {
 		fix := map[string]string{}
@@ -464,7 +471,11 @@ func TestCarryRefusesAHeadWhoseLatestAttemptFailed(t *testing.T) {
 		cmd := exec.Command("bash", "-c", script)
 		cmd.Env = append(os.Environ(), "FIX="+dir)
 		out, err := cmd.CombinedOutput()
-		if got := strings.TrimSpace(string(out)); err != nil || got != c.want {
+		if got := strings.TrimSpace(string(out)); strings.HasPrefix(c.want, "die: ") {
+			if err == nil || !strings.Contains(got, c.want) {
+				t.Errorf("%s: latest_attempt %q (%v), want it to fail with %q", c.name, got, err, c.want)
+			}
+		} else if err != nil || got != c.want {
 			t.Errorf("%s: latest_attempt %q (%v), want %q", c.name, got, err, c.want)
 		}
 	}
