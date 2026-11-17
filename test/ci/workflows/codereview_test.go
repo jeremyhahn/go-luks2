@@ -433,7 +433,7 @@ func reviewRuns(fix map[string]string, head string, runs [][3]string) {
 			id, started, attempt = r[0][:k], r[0][k+1:], 2
 		}
 		list = append(list, fmt.Sprintf(`{"id":%s,"run_started_at":%q,"display_title":"Code Review: PR #1 into main at %s"}`, id, started, head))
-		// r[2] "absent": the job lists no review step (cancelled before it).
+		// r[2] "absent": the job lists no review step (stopped before it).
 		steps := fmt.Sprintf(`[{"name":"Review the head with codex as uid 1000","conclusion":%q}]`, r[2])
 		if r[2] == "absent" {
 			steps = `[]`
@@ -495,13 +495,13 @@ func TestGateRefusesAfterAFailedReviewAttempt(t *testing.T) {
 		}, false, "a requested re-review has not approved head " + a},
 		// Codex P1 (#490): the shared concurrency group cancels an older
 		// pending duplicate before its review step starts; that is no attempt.
-		{"approved, then a dedup-cancelled duplicate and a guard-only run", a, map[string][][3]string{
+		{"approved, then a dedup-canceled duplicate and a guard-only run", a, map[string][][3]string{
 			a: {id("10", ok), id("11", [3]string{"", "cancelled", "skipped"}), id("12", ranNot)}, //nolint:misspell // the runner's spelling, not prose
 		}, true, "codex approved " + a},
-		{"approved, then a duplicate cancelled before it listed a review step", a, map[string][][3]string{
+		{"approved, then a duplicate canceled before it listed a review step", a, map[string][][3]string{
 			a: {id("10", ok), id("11", [3]string{"", "cancelled", "absent"}), id("12", ranNot)}, //nolint:misspell // the runner's spelling, not prose
 		}, true, "codex approved " + a},
-		{"approved, then a re-review cancelled while codex ran", a, map[string][][3]string{
+		{"approved, then a re-review canceled while codex ran", a, map[string][][3]string{
 			a: {id("10", ok), id("11", [3]string{"", "cancelled", "cancelled"}), id("12", ranNot)}, //nolint:misspell // the runner's spelling, not prose
 		}, false, "a requested re-review has not approved head " + a},
 		{"a later attempt succeeds", a, map[string][][3]string{
@@ -589,8 +589,8 @@ func TestCarryRefusesAHeadWhoseLatestAttemptFailed(t *testing.T) {
 		{"failed, then a guard-only re-run", [][3]string{{"10", "success", "success"}, {"11+guard", "failure", "success"}}, "failed"},
 		{"more jobs than one page", [][3]string{{"10", "success", "success"}, {"11", "page2", "success"}}, "die: cannot read the jobs of run 11"},
 		{"no attempt", [][3]string{{"12", "success", "skipped"}}, "none"},
-		// Codex P1 (#490): a duplicate the concurrency group cancelled before
-		// its review step started is no attempt; one cancelled mid-review is.
+		// Codex P1 (#490): a duplicate the concurrency group canceled before
+		// its review step started is no attempt; one canceled mid-review is.
 		{"dedup-cancelled after an approval", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "skipped"}}, "success"},          //nolint:misspell // the runner's spelling, not prose
 		{"cancelled before any step after an approval", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "absent"}}, "success"}, //nolint:misspell // the runner's spelling, not prose
 		{"cancelled while codex ran", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "cancelled"}}, "failed"},                 //nolint:misspell // the runner's spelling, not prose
