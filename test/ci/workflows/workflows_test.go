@@ -324,15 +324,16 @@ func TestMakefileSaysWhereTrivyGates(t *testing.T) {
 	if strings.Contains(mk, "gates every push") {
 		t.Error("the Makefile still claims trivy gates every push")
 	}
-	if !strings.Contains(mk, "the whole target, trivy fs included CI's image job") ||
+	if !strings.Contains(mk, "the whole target, trivy fs included scans.yml on main") ||
 		!strings.Contains(mk, "the NIGHTLY") {
 		t.Error("the Makefile does not say where trivy gates")
 	}
-	// What the Makefile says, ci.yml must do: the full security target, trivy
-	// fs included, in the image job and nowhere else in the workflow.
+	// What the Makefile says, the workflows must do: the full security
+	// target, trivy fs included, in scans.yml (ci-template v1.42, ruling 742
+	// (1)), and no trivy run in ci.yml.
 	ci := readFile(t, ".github/workflows/ci.yml")
-	if !strings.Contains(job(t, ci, "image"), `make ci-toolchain-run CMD="make security `) {
-		t.Error("ci.yml's image job no longer runs make security in the toolchain image; update the Makefile's account of where trivy gates")
+	if scans, ok := readUnlessStripped(t, ".github/workflows/scans.yml"); ok && !strings.Contains(job(t, scans, "scans"), `make ci-toolchain-run CMD="make security `) {
+		t.Error("scans.yml no longer runs make security in the toolchain image; update the Makefile's account of where trivy gates")
 	}
 	if regexp.MustCompile(`make trivy|trivy fs|trivy-action`).MatchString(ci) {
 		t.Error("ci.yml runs trivy outside make security; update the Makefile's account of where it gates")

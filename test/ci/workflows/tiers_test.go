@@ -311,6 +311,18 @@ func readUnlessStripped(t *testing.T, rel string) (string, bool) {
 	return "", false
 }
 
+// scansWorkflow reads scans.yml, the internal scans workflow that the
+// published tree does not carry (stripped at publish): there, with nothing
+// to check, it skips the rest of the test.
+func scansWorkflow(t *testing.T) string {
+	t.Helper()
+	s, ok := readUnlessStripped(t, ".github/workflows/scans.yml")
+	if !ok {
+		t.Skip("scans.yml is stripped at publish")
+	}
+	return s
+}
+
 // strippedAtPublish reports whether a rule of labstrings.DefaultStripAtPublish
 // names the slash-separated repository path rel.
 func strippedAtPublish(rel string) (bool, error) {

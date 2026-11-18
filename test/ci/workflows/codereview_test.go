@@ -1,6 +1,7 @@
 package workflows
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -67,6 +68,84 @@ func TestNoReviewPathsNeverExemptAWorkflow(t *testing.T) {
 		if !re.MatchString(p) {
 			t.Errorf("NO_REVIEW_PATHS no longer exempts %s", p)
 		}
+	}
+}
+
+// runScope runs the scope job's step with InfoSec's guard stubbed to pass
+// (python3 on PATH writes true to GUARD_RESULT) and returns its skip output.
+func runScope(t *testing.T) string {
+	t.Helper()
+	cr := codeReview(t)
+	i := strings.Index(cr, "        id: scope\n")
+	if i < 0 {
+		t.Fatalf("%s: no scope step", codeReviewWorkflow)
+	}
+	step := cr[i:]
+	j := strings.Index(step, "run: |\n")
+	k := strings.Index(step, "\n  review:\n")
+	if j < 0 || k < j {
+		t.Fatalf("%s: no scope run script", codeReviewWorkflow)
+	}
+	var script strings.Builder
+	for _, l := range strings.Split(step[j+len("run: |\n"):k], "\n") {
+		script.WriteString(strings.TrimPrefix(l, "          ") + "\n")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stub := "#!/usr/bin/env bash\ncat >/dev/null\nprintf true > \"$GUARD_RESULT\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "python3"), []byte(stub), 0o700); err != nil { //nolint:gosec // a test stub on PATH
+		t.Fatal(err)
+	}
+	path, output := filepath.Join(dir, "scope.sh"), filepath.Join(dir, "output")
+	if err := os.WriteFile(path, []byte(script.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", path)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"GITHUB_OUTPUT="+output, "GITHUB_STEP_SUMMARY=")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("scope step: %v\n%s", err, out)
+	}
+	b, err := os.ReadFile(output) // #nosec G304 -- the test's own temporary file
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^skip=(.*)$`).FindSubmatch(b)
+	if m == nil {
+		t.Fatalf("scope step wrote no skip output: %q", b)
+	}
+	return string(m[1])
+}
+
+// TestScopeSkipNeverSuppressesAWorkflowReview: InfoSec's guard clears only a
+// change of workflow files (Y-2), and this repository's NO_REVIEW_PATHS keeps
+// .github/workflows/ under review, so the gate needs a Codex approval of such
+// a change. A scope skip there would suppress the review job the gate waits
+// for (Codex P1, #490): a workflow change never skips the review, and the
+// gate still asks for the approval the review gives.
+func TestScopeSkipNeverSuppressesAWorkflowReview(t *testing.T) {
+	if _, err := exec.LookPath("timeout"); err != nil {
+		t.Skip("timeout not installed")
+	}
+	skip := runScope(t)
+	if skip == "true" {
+		t.Errorf("the scope job skips the review of a workflow change the guard cleared; the gate still needs a Codex approval of it")
+	}
+	head, base := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	fix := map[string]string{
+		"_compare_" + base + "..." + head: `{"files":[{"filename":".github/workflows/ci.yml"}]}`,
+		"_pulls_1_reviews":                `[]`,
+	}
+	code, out := runGateWith(t, head, fix, "SCOPE_SKIP="+skip)
+	if code == 0 {
+		t.Errorf("the gate passes a workflow change with no review (scope skip=%s):\n%s", skip, out)
+	}
+	if !strings.Contains(out, "at least one is code") && !strings.Contains(out, "needs a Codex approval") {
+		t.Errorf("the gate does not ask for a Codex approval of a workflow change:\n%s", out)
 	}
 }
 
@@ -266,6 +345,13 @@ if [ -f "$f" ]; then cp "$f" "$out"; printf 200; else echo '{}' > "$out"; printf
 // made _, to body) for a code change on PR 1 at head into main.
 func runGate(t *testing.T, head string, fix map[string]string) (int, string) {
 	t.Helper()
+	return runGateWith(t, head, fix)
+}
+
+// runGateWith is runGate with extra NAME=value environment entries, which
+// override the defaults (the last entry of a name wins).
+func runGateWith(t *testing.T, head string, fix map[string]string, extra ...string) (int, string) {
+	t.Helper()
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not installed")
 	}
@@ -279,6 +365,10 @@ func runGate(t *testing.T, head string, fix map[string]string) (int, string) {
 		script.WriteString(strings.TrimPrefix(l, "          ") + "\n")
 	}
 	m := regexp.MustCompile(`(?m)^\s+NO_REVIEW_PATHS: '([^']*)'\s*$`).FindStringSubmatch(codeReview(t))
+	docs := regexp.MustCompile(`(?m)^\s+DOCS_PATHS: '([^']*)'\s*$`).FindStringSubmatch(codeReview(t))
+	if docs == nil {
+		t.Fatal("gate: no DOCS_PATHS")
+	}
 	if m == nil {
 		t.Fatalf("gate: no NO_REVIEW_PATHS")
 	}
@@ -316,7 +406,10 @@ func runGate(t *testing.T, head string, fix map[string]string) (int, string) {
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"FIX="+fixDir, "GITHUB_RUN_ID=42", "GH_API_TOKEN=x", "FORGE=github", "REVIEWER=codex",
 		"REPO_API=https://api.example/repos/o/r", "PR_NUM=1", "EVENT_SHA="+head,
-		"BASE_SHA="+base, "BASE_REF=main", "REVIEW_RESULT=skipped", "NO_REVIEW_PATHS="+m[1])
+		"BASE_SHA="+base, "BASE_REF=main", "REVIEW_RESULT=skipped", "NO_REVIEW_PATHS="+m[1],
+		// v5.12.1/v5.12.2: the gate also reads the docs list and the scope job.
+		"DOCS_PATHS="+docs[1], "SCOPE_SKIP=", "SCOPE_RESULT=success")
+	cmd.Env = append(cmd.Env, extra...)
 	out, _ := cmd.CombinedOutput()
 	return cmd.ProcessState.ExitCode(), string(out)
 }
@@ -331,6 +424,16 @@ func reviewRuns(fix map[string]string, head string, runs [][3]string) {
 		// r[0] is "id" (started at second id, first attempt) or
 		// "id@time" (a re-run: second attempt, started at time), or
 		// "id+guard" (then a later guard-only re-run that ran no codex).
+		// A "~review" or "~re-review" suffix names the run's request kind
+		// in its run-name (an ordinary trigger, or an explicit re-review
+		// label); without one the run-name is the old one, kind unknown.
+		r0, title := r[0], "Code Review: PR #1 into main at "+head
+		if k := strings.Index(r0, "~"); k >= 0 {
+			kind := r0[k+1:]
+			r0 = r0[:k]
+			title += map[string]string{"review": " (review: synchronize)", "re-review": " (re-review: labeled effort:high)"}[kind]
+		}
+		r[0] = r0
 		id, started, attempt := r[0], "2026-11-16T00:00:"+r[0]+"Z", 1
 		guard := strings.HasSuffix(id, "+guard")
 		if guard {
@@ -340,8 +443,21 @@ func reviewRuns(fix map[string]string, head string, runs [][3]string) {
 		if k := strings.Index(r[0], "@"); k >= 0 {
 			id, started, attempt = r[0][:k], r[0][k+1:], 2
 		}
-		list = append(list, fmt.Sprintf(`{"id":%s,"run_started_at":%q,"display_title":"Code Review: PR #1 into main at %s"}`, id, started, head))
-		job := fmt.Sprintf(`{"id":%s0,"name":"Codex review","run_attempt":%d,"started_at":%q,"status":"completed","conclusion":%q,"steps":[{"name":"Review the head with codex as uid 1000","conclusion":%q}]}`, id, attempt, started, r[1], r[2])
+		list = append(list, fmt.Sprintf(`{"id":%s,"run_started_at":%q,"display_title":%q}`, id, started, title))
+		// r[2] "absent": the job lists no review step (stopped before it).
+		steps := fmt.Sprintf(`[{"name":"Review the head with codex as uid 1000","conclusion":%q}]`, r[2])
+		if r[2] == "absent" {
+			steps = `[]`
+		}
+		// r[1] "scope:<conclusion>": the run's scope job ended so (failure or
+		// canceled) and its review job was skipped (needs: scope); else the
+		// scope job succeeded.
+		scope := "success"
+		if c, found := strings.CutPrefix(r[1], "scope:"); found {
+			scope, r[1], steps = c, "skipped", `[]`
+		}
+		job := fmt.Sprintf(`{"id":%s9,"name":"Review scope (InfoSec guard)","run_attempt":%d,"started_at":%q,"status":"completed","conclusion":%q,"steps":[]},`, id, attempt, started, scope)
+		job += fmt.Sprintf(`{"id":%s0,"name":"Codex review","run_attempt":%d,"started_at":%q,"status":"completed","conclusion":%q,"steps":%s}`, id, attempt, started, r[1], steps)
 		if guard { // the jobs endpoint without filter=all lists only the re-run
 			rerun := fmt.Sprintf(`{"id":%s1,"name":"Codex review","run_attempt":2,"started_at":"2026-11-16T09:00:00Z","status":"completed","conclusion":"success","steps":[{"name":"Review the head with codex as uid 1000","conclusion":"skipped"}]}`, id)
 			fix["_actions_runs_"+id+"_jobs_latest"] = `{"jobs":[` + rerun + `]}`
@@ -394,8 +510,79 @@ func TestGateRefusesAfterAFailedReviewAttempt(t *testing.T) {
 			a: {id("10", ok), id("11", failed)},
 		}, false, "a requested re-review has not approved head " + b},
 		{"failed codex request, then agent:opencode and an unrelated label", a, map[string][][3]string{
-			a: {id("10", ok), id("11", [3]string{"", "cancelled", "skipped"}), id("12", ranNot), id("13", skip)}, //nolint:misspell // the runner's spelling, not prose
+			a: {id("10", ok), id("11", [3]string{"", "failure", "skipped"}), id("12", ranNot), id("13", skip)},
 		}, false, "a requested re-review has not approved head " + a},
+		// Codex P1 (#490): the shared concurrency group cancels an older
+		// pending duplicate before its review step starts; that is no attempt.
+		// Round 4: only a later job whose codex step ran and succeeded (a
+		// real replacement review) clears it; a guard-only skip=reviewed
+		// job ran no review and replaces nothing.
+		{"approved, then a dedup-canceled duplicate and a real replacement review", a, map[string][][3]string{
+			a: {id("10", ok), id("11", [3]string{"", "cancelled", "skipped"}), id("12", ok)}, //nolint:misspell // the runner's spelling, not prose
+		}, true, "codex approved " + a},
+		{"approved, then a duplicate canceled before it listed a review step and a real review", a, map[string][][3]string{
+			a: {id("10", ok), id("11", [3]string{"", "cancelled", "absent"}), id("12", ok)}, //nolint:misspell // the runner's spelling, not prose
+		}, true, "codex approved " + a},
+		{"approved, then an effort re-review canceled before codex and a guard-only skip=reviewed run", a, map[string][][3]string{
+			a: {id("10", ok), id("11", [3]string{"", "cancelled", "skipped"}), id("12", ranNot)}, //nolint:misspell // the runner's spelling, not prose
+		}, false, "a requested re-review has not approved head " + a},
+		{"approved, then a re-review canceled before any step and a guard-only run", a, map[string][][3]string{
+			a: {id("10", ok), id("11", [3]string{"", "cancelled", "absent"}), id("12", ranNot)}, //nolint:misspell // the runner's spelling, not prose
+		}, false, "a requested re-review has not approved head " + a},
+		{"approved, then a re-review canceled while codex ran", a, map[string][][3]string{
+			a: {id("10", ok), id("11", [3]string{"", "cancelled", "cancelled"}), id("12", ranNot)}, //nolint:misspell // the runner's spelling, not prose
+		}, false, "a requested re-review has not approved head " + a},
+		// Codex P1 (#490, round 3): an explicit re-review canceled while it
+		// waited still blocks; only a later same-head review run that ended
+		// success (a replacing duplicate) makes the canceled one no attempt.
+		{"approved, then an effort re-review canceled while queued and an unrelated label", a, map[string][][3]string{
+			a: {id("10", ok), id("11", [3]string{"", "cancelled", "skipped"}), id("12", skip)}, //nolint:misspell // the runner's spelling, not prose
+		}, false, "a requested re-review has not approved head " + a},
+		{"approved, then a re-review canceled before any step and an unrelated label", a, map[string][][3]string{
+			a: {id("10", ok), id("11", [3]string{"", "cancelled", "absent"}), id("12", skip)}, //nolint:misspell // the runner's spelling, not prose
+		}, false, "a requested re-review has not approved head " + a},
+		{"approved, then a canceled re-review alone", a, map[string][][3]string{
+			a: {id("10", ok), id("11", [3]string{"", "cancelled", "skipped"})}, //nolint:misspell // the runner's spelling, not prose
+		}, false, "a requested re-review has not approved head " + a},
+		// Codex P1 (#490, round 5): the run-name carries the request kind. A
+		// canceled job of an ordinary run (a duplicate the shared group
+		// replaced) is no attempt whatever follows; one of an explicit
+		// re-review, or of a run whose kind cannot be read, blocks until a
+		// later real review succeeds.
+		{"round 5: approved, an ordinary duplicate canceled, an ordinary guard-only run", a, map[string][][3]string{
+			a: {id("10~review", ok), id("11~review", [3]string{"", "cancelled", "skipped"}), id("12~review", ranNot)}, //nolint:misspell // the runner's spelling, not prose
+		}, true, "codex approved " + a},
+		{"round 5: approved, an ordinary duplicate canceled before any step, a guard-only run", a, map[string][][3]string{
+			a: {id("10~review", ok), id("11~review", [3]string{"", "cancelled", "absent"}), id("12~review", ranNot)}, //nolint:misspell // the runner's spelling, not prose
+		}, true, "codex approved " + a},
+		{"round 4: approved, an effort:high re-review canceled before codex, a guard-only run", a, map[string][][3]string{
+			a: {id("10~review", ok), id("11~re-review", [3]string{"", "cancelled", "skipped"}), id("12~review", ranNot)}, //nolint:misspell // the runner's spelling, not prose
+		}, false, "a requested re-review has not approved head " + a},
+		{"an explicit re-review canceled, then a real review succeeds", a, map[string][][3]string{
+			a: {id("10~review", ok), id("11~re-review", [3]string{"", "cancelled", "skipped"}), id("12~review", ok)}, //nolint:misspell // the runner's spelling, not prose
+		}, true, "codex approved " + a},
+		{"a canceled run of unknown kind, then a guard-only run", a, map[string][][3]string{
+			a: {id("10~review", ok), id("11", [3]string{"", "cancelled", "skipped"}), id("12~review", ranNot)}, //nolint:misspell // the runner's spelling, not prose
+		}, false, "a requested re-review has not approved head " + a},
+		{"an ordinary run canceled while codex ran", a, map[string][][3]string{
+			a: {id("10~review", ok), id("11~review", [3]string{"", "cancelled", "cancelled"}), id("12~review", ranNot)}, //nolint:misspell // the runner's spelling, not prose
+		}, false, "a requested re-review has not approved head " + a},
+		// Codex P1 (#490, round 6): the scope job of an explicit re-review
+		// failed or was canceled, so its review was skipped (needs: scope);
+		// a later ordinary run's skipped or guard-only review passes no
+		// approval until a real review succeeds.
+		{"round 6: approved, an explicit re-review's scope failed, an ordinary guard-only run", a, map[string][][3]string{
+			a: {id("10~review", ok), id("11~re-review", [3]string{"", "scope:failure", ""}), id("12~review", ranNot)},
+		}, false, "a requested re-review has not approved head " + a},
+		{"round 6: an explicit re-review's scope failed, then a real review succeeds", a, map[string][][3]string{
+			a: {id("10~review", ok), id("11~re-review", [3]string{"", "scope:failure", ""}), id("12~review", ranNot), id("13~review", ok)},
+		}, true, "codex approved " + a},
+		{"round 6: approved, an explicit re-review's scope canceled, an ordinary guard-only run", a, map[string][][3]string{
+			a: {id("10~review", ok), id("11~re-review", [3]string{"", "scope:cancelled", ""}), id("12~review", ranNot)}, //nolint:misspell // the runner's spelling, not prose
+		}, false, "a requested re-review has not approved head " + a},
+		{"round 6: approved, an ordinary duplicate's scope canceled, an ordinary guard-only run", a, map[string][][3]string{
+			a: {id("10~review", ok), id("11~review", [3]string{"", "scope:cancelled", ""}), id("12~review", ranNot)}, //nolint:misspell // the runner's spelling, not prose
+		}, true, "codex approved " + a},
 		{"a later attempt succeeds", a, map[string][][3]string{
 			a: {id("10", ok), id("11", failed), id("14", ok)},
 		}, true, "codex approved " + a},
@@ -481,6 +668,32 @@ func TestCarryRefusesAHeadWhoseLatestAttemptFailed(t *testing.T) {
 		{"failed, then a guard-only re-run", [][3]string{{"10", "success", "success"}, {"11+guard", "failure", "success"}}, "failed"},
 		{"more jobs than one page", [][3]string{{"10", "success", "success"}, {"11", "page2", "success"}}, "die: cannot read the jobs of run 11"},
 		{"no attempt", [][3]string{{"12", "success", "skipped"}}, "none"},
+		// Codex P1 (#490): a duplicate the concurrency group canceled before
+		// its review step started, and a later same-head review run replaced
+		// with success, is no attempt; one canceled mid-review is. Round 3: a
+		// re-review canceled before its step with no later successful review
+		// run (only an unrelated label run, or none) still failed.
+		// Round 4: only a later real review (codex step success) replaces
+		// it; a guard-only skip=reviewed job does not.
+		{"dedup-cancelled after an approval, then a real review", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "skipped"}, {"12", "success", "success"}}, "success"},                       //nolint:misspell // the runner's spelling, not prose
+		{"cancelled before any step after an approval, then a real review", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "absent"}, {"12", "success", "success"}}, "success"},              //nolint:misspell // the runner's spelling, not prose
+		{"effort re-review cancelled before codex, then a guard-only skip=reviewed job", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "skipped"}, {"12", "success", "skipped"}}, "failed"}, //nolint:misspell // the runner's spelling, not prose
+		{"cancelled before any step after an approval, then a guard-only job", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "absent"}, {"12", "success", "skipped"}}, "failed"},            //nolint:misspell // the runner's spelling, not prose
+		{"re-review cancelled while queued, then an unrelated label", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "skipped"}, {"12", "skipped", "skipped"}}, "failed"},                    //nolint:misspell // the runner's spelling, not prose
+		{"re-review cancelled before any step, nothing later", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "absent"}}, "failed"},                                                          //nolint:misspell // the runner's spelling, not prose
+		{"cancelled while codex ran", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "cancelled"}}, "failed"},                                                                                //nolint:misspell // the runner's spelling, not prose
+		{"failed before the review step", [][3]string{{"10", "success", "success"}, {"11", "failure", "absent"}}, "failed"},
+		// Round 5: the run-name's request kind decides a canceled job.
+		{"round 5: ordinary duplicate cancelled, ordinary guard-only job", [][3]string{{"10~review", "success", "success"}, {"11~review", "cancelled", "skipped"}, {"12~review", "success", "skipped"}}, "success"}, //nolint:misspell // the runner's spelling, not prose
+		{"round 4: effort:high re-review cancelled, guard-only job", [][3]string{{"10~review", "success", "success"}, {"11~re-review", "cancelled", "skipped"}, {"12~review", "success", "skipped"}}, "failed"},     //nolint:misspell // the runner's spelling, not prose
+		{"explicit re-review cancelled, then a real review", [][3]string{{"10~review", "success", "success"}, {"11~re-review", "cancelled", "absent"}, {"12~review", "success", "success"}}, "success"},             //nolint:misspell // the runner's spelling, not prose
+		{"unknown-kind run cancelled, guard-only job", [][3]string{{"10~review", "success", "success"}, {"11", "cancelled", "skipped"}, {"12~review", "success", "skipped"}}, "failed"},                             //nolint:misspell // the runner's spelling, not prose
+		{"ordinary duplicate cancelled, nothing later", [][3]string{{"10~review", "success", "success"}, {"11~review", "cancelled", "absent"}}, "success"},                                                          //nolint:misspell // the runner's spelling, not prose
+		// Round 6: a failed or canceled scope job of an explicit re-review skipped its review.
+		{"round 6: explicit re-review's scope failed, ordinary guard-only job", [][3]string{{"10~review", "success", "success"}, {"11~re-review", "scope:failure", ""}, {"12~review", "success", "skipped"}}, "failed"},
+		{"round 6: explicit re-review's scope failed, then a real review", [][3]string{{"10~review", "success", "success"}, {"11~re-review", "scope:failure", ""}, {"12~review", "success", "skipped"}, {"13~review", "success", "success"}}, "success"},
+		{"round 6: explicit re-review's scope cancelled, ordinary guard-only job", [][3]string{{"10~review", "success", "success"}, {"11~re-review", "scope:cancelled", ""}, {"12~review", "success", "skipped"}}, "failed"}, //nolint:misspell // the runner's spelling, not prose
+		{"round 6: ordinary duplicate's scope cancelled, ordinary guard-only job", [][3]string{{"10~review", "success", "success"}, {"11~review", "scope:cancelled", ""}, {"12~review", "success", "skipped"}}, "success"},   //nolint:misspell // the runner's spelling, not prose
 	} {
 		fix := map[string]string{}
 		reviewRuns(fix, a, c.runs)
@@ -533,6 +746,178 @@ func TestCarryRefusesAHeadWhoseLatestAttemptFailed(t *testing.T) {
 		if got := strings.TrimSpace(string(out)); err != nil || got != c.want {
 			t.Errorf("%s: check_lineage %q (%v), want %q", c.name, got, err, c.want)
 		}
+	}
+}
+
+// Codex P1 (#490, round 5): each run's run-name (display_title) names its
+// request kind, an explicit re-review (an agent:, model: or effort: label)
+// or an ordinary trigger, so the reducers can tell a replaced duplicate
+// from a canceled re-review; every reader of the run-name accepts it.
+func TestRunNameCarriesTheRequestKind(t *testing.T) {
+	cr := codeReview(t)
+	m := regexp.MustCompile(`(?m)^run-name: (.*)$`).FindStringSubmatch(cr)
+	if m == nil {
+		t.Fatalf("%s: no run-name", codeReviewWorkflow)
+	}
+	base := `"Code Review: PR #${{ github.event.pull_request.number }} into ${{ github.event.pull_request.base.ref }} at ${{ github.event.pull_request.head.sha }} (`
+	if !strings.HasPrefix(m[1], base) {
+		t.Errorf("the run-name does not start with the PR, base and head, then the kind: %s", m[1])
+	}
+	for _, want := range []string{
+		"github.event.action", "github.event.label.name", "'re-review'", "'review'",
+		"startsWith(github.event.label.name, 'agent:')", "startsWith(github.event.label.name, 'model:')", "startsWith(github.event.label.name, 'effort:')",
+	} {
+		if !strings.Contains(m[1], want) {
+			t.Errorf("the run-name lacks %s: %s", want, m[1])
+		}
+	}
+	if n := strings.Count(cr, `+ " (review: ")`); n < 4 {
+		t.Errorf("want the guard's twins and runs and the gate's runs and wait to accept a run-name with its kind, found %d", n)
+	}
+	if n := strings.Count(cr, `+ " (re-review: ")`); n < 4 {
+		t.Errorf("want every run-name reader to accept an explicit re-review's run-name, found %d", n)
+	}
+	if strings.Contains(cr, `.display_title == $t)`) || strings.Contains(cr, `.display_title == $mine)`) {
+		t.Errorf("a run-name reader still matches only the run-name without its kind")
+	}
+	if !strings.Contains(cr, `"$my_base (review: "*")"`) || !strings.Contains(cr, `"$my_base (re-review: "*")"`) {
+		t.Errorf("the guard refuses its own run-name with the kind")
+	}
+}
+
+// Codex P1 (#490, round 3): enablePullRequestAutoMerge can answer with no
+// error and no auto-merge request; the step reads the request it selected
+// and reports such an answer not armed. expectedHeadOid stays: GitHub's live
+// schema (introspection 2026-11-17) lists it on EnablePullRequestAutoMergeInput.
+func TestRearmChecksTheAutoMergeRequest(t *testing.T) {
+	cr := codeReview(t)
+	i := strings.Index(cr, "- name: Re-arm auto-merge on the approved head")
+	if i < 0 {
+		t.Fatalf("%s: no re-arm step", codeReviewWorkflow)
+	}
+	j := strings.Index(cr[i:], `gh_call PUT "$REPO_API/pulls/$PR_NUM/merge"`)
+	if j < 0 {
+		t.Fatalf("%s: the re-arm step has no clean-status merge", codeReviewWorkflow)
+	}
+	step := cr[i : i+j]
+	m := regexp.MustCompile(`mutation\([^']*enablePullRequestAutoMerge\(input:\{([^}]*)\}\)\{([^']*)\}'`).FindStringSubmatch(step)
+	if m == nil {
+		t.Fatalf("the re-arm step has no enablePullRequestAutoMerge mutation")
+	}
+	if !strings.Contains(m[1], "expectedHeadOid:$h") {
+		t.Errorf("the mutation is not pinned to the approved head (expectedHeadOid): %s", m[1])
+	}
+	if !regexp.MustCompile(`pullRequest\{[^']*autoMergeRequest\{enabledAt\}`).MatchString(m[2]) {
+		t.Errorf("the mutation does not select pullRequest.autoMergeRequest.enabledAt: %s", m[2])
+	}
+	check := regexp.MustCompile(`\.data\.enablePullRequestAutoMerge\.pullRequest\.autoMergeRequest\.enabledAt`).FindStringIndex(step)
+	armed := strings.Index(step, "armed to auto-merge (squash)")
+	if check == nil || armed < 0 || check[0] > armed {
+		t.Errorf("the step reports armed without reading the auto-merge request it got back")
+	}
+	if !strings.Contains(step, "# CUSTOMIZE: local fix pending upstream (template v5.12.3, Codex P1 on #490)") {
+		t.Errorf("the auto-merge request check carries no CUSTOMIZE marker")
+	}
+}
+
+// rearmCurl stands in for curl in the re-arm step: it records each call as
+// "METHOD URL" in $STUB_DIR/calls and answers from the fixture files.
+const rearmCurl = `#!/usr/bin/env bash
+out= method=GET url=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift 2 ;;
+    -X) method=$2; shift 2 ;;
+    -w|-H|--proto|--max-time|--data-binary) shift 2 ;;
+    -*) shift ;;
+    *) url=$1; shift ;;
+  esac
+done
+echo "$method $url" >> "$STUB_DIR/calls"
+case "$method $url" in
+  "GET "*/pulls/*) f=pr.json ;;
+  "POST "*/graphql) f=arm.json ;;
+  "PUT "*/merge) f=merge.json ;;
+  *) f=none ;;
+esac
+if [ -f "$STUB_DIR/$f" ]; then cp "$STUB_DIR/$f" "$out"; printf 200; else echo '{}' > "$out"; printf 404; fi
+`
+
+// runRearm runs the re-arm step's script against a PR whose live base is
+// liveBase, for a run reviewed against main, and returns its exit status,
+// output and the API calls it made.
+func runRearm(t *testing.T, liveBase string) (int, string, []string) {
+	t.Helper()
+	for _, tool := range []string{"bash", "jq"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not found: %v", tool, err)
+		}
+	}
+	script := runScript(t, stepBlock(t, codeReview(t), "Re-arm auto-merge on the approved head"))
+	dir := t.TempDir()
+	work := filepath.Join(dir, "work")
+	bin := filepath.Join(dir, "bin")
+	for _, d := range []string{work, bin} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const head = "1111111111111111111111111111111111111111"
+	files := map[string]string{
+		filepath.Join(bin, "curl"):       rearmCurl,
+		filepath.Join(work, "lib.sh"):    "load_token() { :; }\nHDR=\"$WORK/hdr\"\n",
+		filepath.Join(work, "hdr"):       "Authorization: token x\n",
+		filepath.Join(dir, "pr.json"):    fmt.Sprintf(`{"state":"open","draft":false,"auto_merge":null,"node_id":"PR_1","head":{"sha":%q},"base":{"ref":%q}}`, head, liveBase),
+		filepath.Join(dir, "arm.json"):   `{"errors":[{"message":"Pull request is in clean status"}]}`,
+		filepath.Join(dir, "merge.json"): `{"sha":"2222222222222222222222222222222222222222","merged":true}`,
+		filepath.Join(dir, "step.sh"):    script,
+	}
+	for p, body := range files {
+		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd := exec.Command("bash", filepath.Join(dir, "step.sh"))
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"STUB_DIR="+dir, "WORK="+work, "PR_NUM=7", "EVENT_SHA="+head, "BASE_REF=main",
+		"REPO_API=https://api.example/repos/o/r", "FORGE_API=https://api.example")
+	out, err := cmd.CombinedOutput()
+	code := 0
+	if err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("re-arm step did not run: %v", err)
+		}
+		code = ee.ExitCode()
+	}
+	calls, _ := os.ReadFile(filepath.Join(dir, "calls"))
+	return code, string(out), strings.Fields(strings.ReplaceAll(string(calls), " ", "_"))
+}
+
+// TestRearmRefusesARetargetedPullRequest: a PR retargeted after the confirm
+// step is neither armed nor merged; on the reviewed base the step goes on
+// (here GitHub reads it clean, so it squash-merges at the approved head).
+func TestRearmRefusesARetargetedPullRequest(t *testing.T) {
+	code, out, calls := runRearm(t, "release")
+	for _, c := range calls {
+		if !strings.HasPrefix(c, "GET_") {
+			t.Errorf("retargeted PR: the step made a write call %s\n%s", c, out)
+		}
+	}
+	if code == 0 || !strings.Contains(out, "retargeted") {
+		t.Errorf("retargeted PR: want a red step naming the retarget, got exit %d:\n%s", code, out)
+	}
+
+	code, out, calls = runRearm(t, "main")
+	want := []string{
+		"GET_https://api.example/repos/o/r/pulls/7",
+		"POST_https://api.example/graphql",
+		"PUT_https://api.example/repos/o/r/pulls/7/merge",
+	}
+	if code != 0 || strings.Join(calls, " ") != strings.Join(want, " ") || !strings.Contains(out, "squash-merged") {
+		t.Errorf("same base: want exit 0, calls %v and a squash merge; got exit %d, calls %v:\n%s", want, code, calls, out)
 	}
 }
 

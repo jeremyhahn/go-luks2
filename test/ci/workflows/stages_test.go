@@ -51,11 +51,9 @@ func TestImageJobRunsEveryToolchainStageInTheImage(t *testing.T) {
 	lintSteps := stepRun(t, lint)
 
 	for stage, where := range map[string]struct{ job, network string }{
-		"make lint":       {"lint", ""},
-		"make build":      {"image", ""},
-		"make test":       {"image", ""},
-		"make security":   {"image", "bridge"},
-		"make deps-check": {"lint", "bridge"},
+		"make lint":  {"lint", ""},
+		"make build": {"image", ""},
+		"make test":  {"image", ""},
 	} {
 		network := where.network
 		name := stage + " (toolchain image)"
@@ -109,43 +107,110 @@ func TestImageJobRunsEveryToolchainStageInTheImage(t *testing.T) {
 			t.Errorf("the image build step lacks %q", want)
 		}
 	}
-	itImageNamedAndLeased(t, "image", image)
+	// v1.42: the image job's trivy image scan, the step that re-tagged the
+	// leased id, moved to scans.yml; the job still names and leases the image.
+	itImageNamedAndLeased(t, "image", image, false)
 }
 
-// TestDepsCheckRunsOnEveryEvent: ci-template v1.28 puts deps-check on the PR
-// tier as a lint-class gate, and v1.30 in the lint job. Its step runs on every
-// event, a docs-only PR included, under the condition `make lint` carries, and
-// keeps the bridge network for the module proxy.
-func TestDepsCheckRunsOnEveryEvent(t *testing.T) {
-	image := job(t, readFile(t, ".github/workflows/ci.yml"), "lint")
-	stepIf := func(name string) string {
-		t.Helper()
-		i := strings.Index(image, "\n      - name: "+name+"\n")
-		if i < 0 {
-			t.Fatalf("the lint job has no step %q", name)
-		}
-		block := image[i+1:]
-		if j := strings.Index(block[1:], "\n      - "); j >= 0 {
-			block = block[:j+1]
-		}
-		m := regexp.MustCompile(`(?m)^        if: (.*)$`).FindStringSubmatch(block)
-		if m == nil {
-			t.Fatalf("step %q has no if", name)
-		}
-		if name == "make deps-check (toolchain image)" && !strings.Contains(block, "\n          IN_IMAGE_NETWORK: bridge\n") {
-			t.Errorf("step %q does not keep IN_IMAGE_NETWORK: bridge", name)
-		}
-		return m[1]
-	}
-	deps := stepIf("make deps-check (toolchain image)")
-	for _, narrower := range []string{"CI_FULL_TIER", "docs_only"} {
-		if strings.Contains(deps, narrower) {
-			t.Errorf("deps-check's if %q carries %s; it runs on every event", deps, narrower)
+// TestCIGateIsHermetic: ci-template v1.42 (owner ruling 742 (1)). No ci.yml
+// step runs a check whose answer changes with no change to the tree
+// (deps-check, make security, trivy image); scans.yml runs each in the
+// toolchain image on the bridge network, never on a pull request or a push.
+// gosec reads only the tree and runs in the lint job on every tier.
+func TestCIGateIsHermetic(t *testing.T) {
+	ci := readFile(t, ".github/workflows/ci.yml")
+	for _, advisory := range []string{"make deps-check", "make security", "trivy image"} {
+		if strings.Contains(stripComments(ci), advisory) {
+			t.Errorf("ci.yml runs %q; ci-template v1.42 runs it in scans.yml only", advisory)
 		}
 	}
-	if lint := stepIf("make lint (toolchain image)"); deps != lint {
-		t.Errorf("deps-check's if is %q, want make lint's %q", deps, lint)
+	gosec := stepBlock(t, job(t, ci, "lint"), "make gosec (toolchain image)")
+	if strings.Contains(gosec, "CI_FULL_TIER") {
+		t.Errorf("the gosec step depends on the tier; v1.42 runs it on every tier:\n%s", gosec)
 	}
+	scans := scansWorkflow(t)
+	if regexp.MustCompile(`(?m)^  (pull_request|pull_request_target|push):`).MatchString(scans) {
+		t.Error("scans.yml runs on a pull request or a push; its findings must never gate a change")
+	}
+	steps := job(t, scans, "scans")
+	for name, cmd := range map[string]string{
+		"make deps-check (toolchain image)": `make ci-toolchain-run CMD="make deps-check"`,
+		"make security (toolchain image)":   `make ci-toolchain-run CMD="make security GO_BUILD_TAGS='$GO_BUILD_TAGS'"`,
+	} {
+		block := stepBlock(t, steps, name)
+		if !strings.Contains(block, cmd) || !strings.Contains(block, "IN_IMAGE_NETWORK: bridge") {
+			t.Errorf("scans.yml step %q does not run %s on the bridge network:\n%s", name, cmd, block)
+		}
+	}
+}
+
+// stepBlock is the text of the step named name in jobText, up to the next step.
+func stepBlock(t *testing.T, jobText, name string) string {
+	t.Helper()
+	i := strings.Index(jobText, "\n      - name: "+name+"\n")
+	if i < 0 {
+		t.Fatalf("no step %q", name)
+	}
+	block := jobText[i+1:]
+	if j := strings.Index(block[1:], "\n      - "); j >= 0 {
+		block = block[:j+1]
+	}
+	return block
+}
+
+// runScript returns the `run: |` block scalar of one step block (as
+// stepBlock returns it), dedented, so bash can run it as the runner would.
+func runScript(t *testing.T, step string) string {
+	t.Helper()
+	lines := strings.Split(step, "\n")
+	start, indent := -1, 0
+	for i, l := range lines {
+		if strings.TrimSpace(l) == "run: |" {
+			start, indent = i+1, len(l)-len(strings.TrimLeft(l, " "))
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatalf("the step has no `run: |` block:\n%s", step)
+	}
+	var body []string
+	strip := -1
+	for _, l := range lines[start:] {
+		if strings.TrimSpace(l) == "" {
+			body = append(body, "")
+			continue
+		}
+		in := len(l) - len(strings.TrimLeft(l, " "))
+		if in <= indent {
+			break
+		}
+		if strip < 0 {
+			strip = in
+		}
+		if in < strip {
+			t.Fatalf("run line %q is indented less than the first", l)
+		}
+		body = append(body, l[strip:])
+	}
+	script := strings.TrimSpace(strings.Join(body, "\n"))
+	if script == "" {
+		t.Fatal("the step's run block is empty")
+	}
+	if strings.Contains(script, "${{") {
+		t.Fatalf("the step's script keeps an expression; pass it through env:\n%s", script)
+	}
+	return script + "\n"
+}
+
+// stripComments drops YAML comment lines, which may name a check that left.
+func stripComments(s string) string {
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "#") {
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // TestApkIndexSumBeforeTheImageName: ci-template v1.29. Every job that names
@@ -190,7 +255,8 @@ func TestApkIndexSumBeforeTheImageName(t *testing.T) {
 // itImageNamedAndLeased: ci-template v1.23 (ci-standard.md §9). A job takes
 // the integration image's content-addressed name from `make -s it-image`,
 // holds a lease on it, and its teardown removes the lease, never the image.
-func itImageNamedAndLeased(t *testing.T, name, j string) {
+// retags says whether a step of the job re-tags the leased id as IT_IMAGE.
+func itImageNamedAndLeased(t *testing.T, name, j string, retags bool) {
 	t.Helper()
 	steps := stepRun(t, j)
 	if got := strings.TrimSpace(steps["Name the integration image"]); got != `echo "IT_IMAGE=$(make -s it-image)" >> "$GITHUB_ENV"` {
@@ -244,7 +310,7 @@ func itImageNamedAndLeased(t *testing.T, name, j string) {
 			}
 		}
 	}
-	if !strings.Contains(scripts.String(), retag) {
+	if retags && !strings.Contains(scripts.String(), retag) {
 		t.Errorf("%s never re-tags the leased id as IT_IMAGE", name)
 	}
 	for rest := scripts.String(); ; {
@@ -283,7 +349,6 @@ func TestImageJobCarriesTheChecksThatLeftTheRunner(t *testing.T) {
 		steps[name] = run
 	}
 	for name, want := range map[string]string{
-		"make security (toolchain image)":                            `make ci-toolchain-run CMD="make security GO_BUILD_TAGS='$GO_BUILD_TAGS'"`,
 		"Require the analysis tools at their pins (toolchain image)": `make ci-toolchain-run CMD="go run ./test/tools/require-tool golangci-lint $GOLANGCI_LINT_VERSION github.com/golangci/golangci-lint/v2/cmd/golangci-lint && go run ./test/tools/require-tool gosec $GOSEC_VERSION github.com/securego/gosec/v2/cmd/gosec && go run ./test/tools/require-tool govulncheck $GOVULNCHECK_VERSION golang.org/x/vuln/cmd/govulncheck"`,
 		"Linux binaries and 32-bit vet (toolchain image)":            `make ci-toolchain-run CMD="make build-linux vet-32bit" CI_OUT="luks-linux-amd64 luks-linux-arm64"`,
 		"Assert every build tag selects code (toolchain image)":      `make ci-toolchain-run CMD="make assert-build-tags GO_BUILD_TAGS='$GO_BUILD_TAGS'"`,
@@ -303,9 +368,9 @@ func TestImageJobCarriesTheChecksThatLeftTheRunner(t *testing.T) {
 			t.Errorf("ci.yml still carries %q", ban)
 		}
 	}
-	// The pin assertion runs before the lint and gosec it vouches for. The
-	// image job's make security runs in its own toolchain image, whose pin
-	// file is the one the lint job asserted.
+	// The pin assertion runs before the lint and gosec it vouches for. From
+	// v1.42 make security runs in scans.yml, in a toolchain image built from
+	// the same pin file.
 	pins := strings.Index(lint, "name: Require the analysis tools")
 	if pins < 0 || pins > strings.Index(lint, "name: make lint") || pins > strings.Index(lint, "name: make gosec") {
 		t.Error("the tool pins are not asserted before make lint and make gosec run")
@@ -324,7 +389,8 @@ func TestImageJobCarriesTheChecksThatLeftTheRunner(t *testing.T) {
 // never takes --ignore-unfixed: a vulnerable dependency of this module always
 // fails.
 func TestImageJobGatesFixableFindings(t *testing.T) {
-	run := stepRun(t, job(t, readFile(t, ".github/workflows/ci.yml"), "image"))["trivy image (integration image)"]
+	// ci-template v1.42: the scan runs in scans.yml, on main.
+	run := stepRun(t, job(t, scansWorkflow(t), "scans"))["trivy image (integration image)"]
 	cmd := ""
 	for _, line := range strings.Split(run, "\n") {
 		if i := strings.Index(line, "trivy image "); i >= 0 {
@@ -332,7 +398,7 @@ func TestImageJobGatesFixableFindings(t *testing.T) {
 		}
 	}
 	if !strings.HasPrefix(cmd, "trivy image --input it-image.tar") {
-		t.Fatalf("the image job does not gate the integration image with trivy image: %q", run)
+		t.Fatalf("scans.yml does not scan the integration image with trivy image: %q", run)
 	}
 	for _, flag := range []string{"--ignore-unfixed", "--severity CRITICAL,HIGH", "--exit-code 1"} {
 		if !regexp.MustCompile(`(^|\s)` + regexp.QuoteMeta(flag) + `(\s|"|$)`).MatchString(cmd) {
@@ -356,7 +422,7 @@ func TestTrivyFSNeverIgnoresUnfixed(t *testing.T) {
 	if fs == 0 {
 		t.Fatal("the Makefile has no trivy fs invocation")
 	}
-	security := stepRun(t, job(t, readFile(t, ".github/workflows/ci.yml"), "image"))["make security (toolchain image)"]
+	security := stepRun(t, job(t, scansWorkflow(t), "scans"))["make security (toolchain image)"]
 	if strings.Contains(security, "--ignore-unfixed") || strings.Contains(security, "TRIVY") {
 		t.Errorf("the make security step passes trivy options: %q", security)
 	}
@@ -379,7 +445,7 @@ func TestIntegrationJobRunsUnderCompose(t *testing.T) {
 			t.Errorf("the integration job lacks %q", want)
 		}
 	}
-	itImageNamedAndLeased(t, "integration", it)
+	itImageNamedAndLeased(t, "integration", it, true)
 	teardown := it[strings.Index(it, "name: Tear down"):]
 	if !strings.Contains(teardown, "if: always()") ||
 		!strings.Contains(teardown, `-p "$IT_PROJECT" down --volumes`) {
@@ -402,7 +468,7 @@ func TestSoakLoopsTheIntegrationSuite(t *testing.T) {
 			t.Errorf("the soak job's env lacks %q", want)
 		}
 	}
-	itImageNamedAndLeased(t, "soak", soak)
+	itImageNamedAndLeased(t, "soak", soak, true)
 	run := stepRun(t, soak)["Soak (integration suite, looped)"]
 	for _, want := range []string{`make "$SOAK_TARGET"`, `IT_IMAGE="$IT_IMAGE"`, `IT_PROJECT="$p"`, `-p "$p" down --volumes`} {
 		if !strings.Contains(run, want) {
@@ -456,8 +522,8 @@ const cacheClass = `CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.e
 // same way -- names the cache class the recipe mounts its volumes under.
 func TestToolchainStagesCacheByTrustClass(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
-	if !strings.HasPrefix(ci, "# ci-template: v1.35.2 (customized)\n") {
-		t.Errorf("ci.yml does not declare ci-template v1.35.2: %.60q", ci)
+	if !strings.HasPrefix(ci, "# ci-template: v1.35.2 + v1.42 hermetic gate (customized)\n") {
+		t.Errorf("ci.yml does not declare ci-template v1.35.2 + v1.42 hermetic gate: %.60q", ci)
 	}
 	for _, name := range []string{"lint", "image", "lint-gates", "merge-check", "test-race", "fips"} {
 		j := job(t, ci, name)

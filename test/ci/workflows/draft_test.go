@@ -157,7 +157,7 @@ func TestLintGatesJob(t *testing.T) {
 // workflow is an instance of.
 func TestCIHeaderNamesTheTemplateVersion(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
-	if first, _, _ := strings.Cut(ci, "\n"); first != "# ci-template: v1.35.2 (customized)" {
-		t.Errorf("ci.yml's first line is %q, want the v1.35.2 header", first)
+	if first, _, _ := strings.Cut(ci, "\n"); first != "# ci-template: v1.35.2 + v1.42 hermetic gate (customized)" {
+		t.Errorf("ci.yml's first line is %q, want the v1.35.2 + v1.42 hermetic gate header", first)
 	}
 }

@@ -1180,11 +1180,12 @@ lint: ## Run gofmt, golangci-lint and actionlint over .github/workflows (all req
 # trivy skip would read as a pass.
 # Where each tool gates (#247):
 #
-#   the whole target, trivy fs included CI's image job, every push and pull
-#                                       request: `make security` in the
-#                                       toolchain image, which sets
-#                                       TOOLS_REQUIRED=1, after ci.yml asserts
-#                                       the image's gosec and govulncheck pins;
+#   the whole target, trivy fs included scans.yml on main, on dispatch
+#                                       (ci-template v1.42, ruling 742 (1):
+#                                       no advisory scan gates a PR): `make
+#                                       security` in the toolchain image, which
+#                                       sets TOOLS_REQUIRED=1, built from the
+#                                       pin file ci.yml's lint job asserts;
 #                                       also every RELEASE
 #   trivy fs alone                      the NIGHTLY workflow, dispatch-only
 #
