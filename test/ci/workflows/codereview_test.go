@@ -1,6 +1,7 @@
 package workflows
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -816,6 +817,107 @@ func TestRearmChecksTheAutoMergeRequest(t *testing.T) {
 	}
 	if !strings.Contains(step, "# CUSTOMIZE: local fix pending upstream (template v5.12.3, Codex P1 on #490)") {
 		t.Errorf("the auto-merge request check carries no CUSTOMIZE marker")
+	}
+}
+
+// rearmCurl stands in for curl in the re-arm step: it records each call as
+// "METHOD URL" in $STUB_DIR/calls and answers from the fixture files.
+const rearmCurl = `#!/usr/bin/env bash
+out= method=GET url=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift 2 ;;
+    -X) method=$2; shift 2 ;;
+    -w|-H|--proto|--max-time|--data-binary) shift 2 ;;
+    -*) shift ;;
+    *) url=$1; shift ;;
+  esac
+done
+echo "$method $url" >> "$STUB_DIR/calls"
+case "$method $url" in
+  "GET "*/pulls/*) f=pr.json ;;
+  "POST "*/graphql) f=arm.json ;;
+  "PUT "*/merge) f=merge.json ;;
+  *) f=none ;;
+esac
+if [ -f "$STUB_DIR/$f" ]; then cp "$STUB_DIR/$f" "$out"; printf 200; else echo '{}' > "$out"; printf 404; fi
+`
+
+// runRearm runs the re-arm step's script against a PR whose live base is
+// liveBase, for a run reviewed against main, and returns its exit status,
+// output and the API calls it made.
+func runRearm(t *testing.T, liveBase string) (int, string, []string) {
+	t.Helper()
+	for _, tool := range []string{"bash", "jq"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not found: %v", tool, err)
+		}
+	}
+	script := runScript(t, stepBlock(t, codeReview(t), "Re-arm auto-merge on the approved head"))
+	dir := t.TempDir()
+	work := filepath.Join(dir, "work")
+	bin := filepath.Join(dir, "bin")
+	for _, d := range []string{work, bin} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const head = "1111111111111111111111111111111111111111"
+	files := map[string]string{
+		filepath.Join(bin, "curl"):       rearmCurl,
+		filepath.Join(work, "lib.sh"):    "load_token() { :; }\nHDR=\"$WORK/hdr\"\n",
+		filepath.Join(work, "hdr"):       "Authorization: token x\n",
+		filepath.Join(dir, "pr.json"):    fmt.Sprintf(`{"state":"open","draft":false,"auto_merge":null,"node_id":"PR_1","head":{"sha":%q},"base":{"ref":%q}}`, head, liveBase),
+		filepath.Join(dir, "arm.json"):   `{"errors":[{"message":"Pull request is in clean status"}]}`,
+		filepath.Join(dir, "merge.json"): `{"sha":"2222222222222222222222222222222222222222","merged":true}`,
+		filepath.Join(dir, "step.sh"):    script,
+	}
+	for p, body := range files {
+		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd := exec.Command("bash", filepath.Join(dir, "step.sh"))
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"STUB_DIR="+dir, "WORK="+work, "PR_NUM=7", "EVENT_SHA="+head, "BASE_REF=main",
+		"REPO_API=https://api.example/repos/o/r", "FORGE_API=https://api.example")
+	out, err := cmd.CombinedOutput()
+	code := 0
+	if err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("re-arm step did not run: %v", err)
+		}
+		code = ee.ExitCode()
+	}
+	calls, _ := os.ReadFile(filepath.Join(dir, "calls"))
+	return code, string(out), strings.Fields(strings.ReplaceAll(string(calls), " ", "_"))
+}
+
+// TestRearmRefusesARetargetedPullRequest: a PR retargeted after the confirm
+// step is neither armed nor merged; on the reviewed base the step goes on
+// (here GitHub reads it clean, so it squash-merges at the approved head).
+func TestRearmRefusesARetargetedPullRequest(t *testing.T) {
+	code, out, calls := runRearm(t, "release")
+	for _, c := range calls {
+		if !strings.HasPrefix(c, "GET_") {
+			t.Errorf("retargeted PR: the step made a write call %s\n%s", c, out)
+		}
+	}
+	if code == 0 || !strings.Contains(out, "retargeted") {
+		t.Errorf("retargeted PR: want a red step naming the retarget, got exit %d:\n%s", code, out)
+	}
+
+	code, out, calls = runRearm(t, "main")
+	want := []string{
+		"GET_https://api.example/repos/o/r/pulls/7",
+		"POST_https://api.example/graphql",
+		"PUT_https://api.example/repos/o/r/pulls/7/merge",
+	}
+	if code != 0 || strings.Join(calls, " ") != strings.Join(want, " ") || !strings.Contains(out, "squash-merged") {
+		t.Errorf("same base: want exit 0, calls %v and a squash merge; got exit %d, calls %v:\n%s", want, code, calls, out)
 	}
 }
 

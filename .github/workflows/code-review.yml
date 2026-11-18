@@ -3028,6 +3028,13 @@ jobs:
             echo "PR $PR_NUM was closed or moved off $EVENT_SHA; nothing to arm from this run."
             exit 0
           fi
+          # CUSTOMIZE: local fix pending upstream (template v5.12.3, Codex P1 on #490): a PR
+          # retargeted since the confirm step is neither armed nor merged (fails closed).
+          base_live=$(jq -r '.base.ref // empty' <<<"$pr")
+          if [ -z "$BASE_REF" ] || [ "$base_live" != "$BASE_REF" ]; then
+            echo "::error::PR $PR_NUM was retargeted to ${base_live:-unknown} since it was reviewed against ${BASE_REF:-unknown}; not arming or merging it. Push a new head, or take code-review off and add it again, to review against the new base."
+            exit 1
+          fi
           if [ "$(jq -r '.draft // false' <<<"$pr")" = true ]; then
             echo "PR $PR_NUM is a draft; the factory arms it when it is marked ready."
             exit 0

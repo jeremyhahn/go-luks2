@@ -158,6 +158,50 @@ func stepBlock(t *testing.T, jobText, name string) string {
 	return block
 }
 
+// runScript returns the `run: |` block scalar of one step block (as
+// stepBlock returns it), dedented, so bash can run it as the runner would.
+func runScript(t *testing.T, step string) string {
+	t.Helper()
+	lines := strings.Split(step, "\n")
+	start, indent := -1, 0
+	for i, l := range lines {
+		if strings.TrimSpace(l) == "run: |" {
+			start, indent = i+1, len(l)-len(strings.TrimLeft(l, " "))
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatalf("the step has no `run: |` block:\n%s", step)
+	}
+	var body []string
+	strip := -1
+	for _, l := range lines[start:] {
+		if strings.TrimSpace(l) == "" {
+			body = append(body, "")
+			continue
+		}
+		in := len(l) - len(strings.TrimLeft(l, " "))
+		if in <= indent {
+			break
+		}
+		if strip < 0 {
+			strip = in
+		}
+		if in < strip {
+			t.Fatalf("run line %q is indented less than the first", l)
+		}
+		body = append(body, l[strip:])
+	}
+	script := strings.TrimSpace(strings.Join(body, "\n"))
+	if script == "" {
+		t.Fatal("the step's run block is empty")
+	}
+	if strings.Contains(script, "${{") {
+		t.Fatalf("the step's script keeps an expression; pass it through env:\n%s", script)
+	}
+	return script + "\n"
+}
+
 // stripComments drops YAML comment lines, which may name a check that left.
 func stripComments(s string) string {
 	var out []string
