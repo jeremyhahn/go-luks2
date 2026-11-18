@@ -448,7 +448,15 @@ func reviewRuns(fix map[string]string, head string, runs [][3]string) {
 		if r[2] == "absent" {
 			steps = `[]`
 		}
-		job := fmt.Sprintf(`{"id":%s0,"name":"Codex review","run_attempt":%d,"started_at":%q,"status":"completed","conclusion":%q,"steps":%s}`, id, attempt, started, r[1], steps)
+		// r[1] "scope:<conclusion>": the run's scope job ended so (failure or
+		// canceled) and its review job was skipped (needs: scope); else the
+		// scope job succeeded.
+		scope := "success"
+		if c, found := strings.CutPrefix(r[1], "scope:"); found {
+			scope, r[1], steps = c, "skipped", `[]`
+		}
+		job := fmt.Sprintf(`{"id":%s9,"name":"Review scope (InfoSec guard)","run_attempt":%d,"started_at":%q,"status":"completed","conclusion":%q,"steps":[]},`, id, attempt, started, scope)
+		job += fmt.Sprintf(`{"id":%s0,"name":"Codex review","run_attempt":%d,"started_at":%q,"status":"completed","conclusion":%q,"steps":%s}`, id, attempt, started, r[1], steps)
 		if guard { // the jobs endpoint without filter=all lists only the re-run
 			rerun := fmt.Sprintf(`{"id":%s1,"name":"Codex review","run_attempt":2,"started_at":"2026-11-16T09:00:00Z","status":"completed","conclusion":"success","steps":[{"name":"Review the head with codex as uid 1000","conclusion":"skipped"}]}`, id)
 			fix["_actions_runs_"+id+"_jobs_latest"] = `{"jobs":[` + rerun + `]}`
@@ -558,6 +566,22 @@ func TestGateRefusesAfterAFailedReviewAttempt(t *testing.T) {
 		{"an ordinary run canceled while codex ran", a, map[string][][3]string{
 			a: {id("10~review", ok), id("11~review", [3]string{"", "cancelled", "cancelled"}), id("12~review", ranNot)}, //nolint:misspell // the runner's spelling, not prose
 		}, false, "a requested re-review has not approved head " + a},
+		// Codex P1 (#490, round 6): the scope job of an explicit re-review
+		// failed or was canceled, so its review was skipped (needs: scope);
+		// a later ordinary run's skipped or guard-only review passes no
+		// approval until a real review succeeds.
+		{"round 6: approved, an explicit re-review's scope failed, an ordinary guard-only run", a, map[string][][3]string{
+			a: {id("10~review", ok), id("11~re-review", [3]string{"", "scope:failure", ""}), id("12~review", ranNot)},
+		}, false, "a requested re-review has not approved head " + a},
+		{"round 6: an explicit re-review's scope failed, then a real review succeeds", a, map[string][][3]string{
+			a: {id("10~review", ok), id("11~re-review", [3]string{"", "scope:failure", ""}), id("12~review", ranNot), id("13~review", ok)},
+		}, true, "codex approved " + a},
+		{"round 6: approved, an explicit re-review's scope canceled, an ordinary guard-only run", a, map[string][][3]string{
+			a: {id("10~review", ok), id("11~re-review", [3]string{"", "scope:cancelled", ""}), id("12~review", ranNot)}, //nolint:misspell // the runner's spelling, not prose
+		}, false, "a requested re-review has not approved head " + a},
+		{"round 6: approved, an ordinary duplicate's scope canceled, an ordinary guard-only run", a, map[string][][3]string{
+			a: {id("10~review", ok), id("11~review", [3]string{"", "scope:cancelled", ""}), id("12~review", ranNot)}, //nolint:misspell // the runner's spelling, not prose
+		}, true, "codex approved " + a},
 		{"a later attempt succeeds", a, map[string][][3]string{
 			a: {id("10", ok), id("11", failed), id("14", ok)},
 		}, true, "codex approved " + a},
@@ -664,6 +688,11 @@ func TestCarryRefusesAHeadWhoseLatestAttemptFailed(t *testing.T) {
 		{"explicit re-review cancelled, then a real review", [][3]string{{"10~review", "success", "success"}, {"11~re-review", "cancelled", "absent"}, {"12~review", "success", "success"}}, "success"},             //nolint:misspell // the runner's spelling, not prose
 		{"unknown-kind run cancelled, guard-only job", [][3]string{{"10~review", "success", "success"}, {"11", "cancelled", "skipped"}, {"12~review", "success", "skipped"}}, "failed"},                             //nolint:misspell // the runner's spelling, not prose
 		{"ordinary duplicate cancelled, nothing later", [][3]string{{"10~review", "success", "success"}, {"11~review", "cancelled", "absent"}}, "success"},                                                          //nolint:misspell // the runner's spelling, not prose
+		// Round 6: a failed or canceled scope job of an explicit re-review skipped its review.
+		{"round 6: explicit re-review's scope failed, ordinary guard-only job", [][3]string{{"10~review", "success", "success"}, {"11~re-review", "scope:failure", ""}, {"12~review", "success", "skipped"}}, "failed"},
+		{"round 6: explicit re-review's scope failed, then a real review", [][3]string{{"10~review", "success", "success"}, {"11~re-review", "scope:failure", ""}, {"12~review", "success", "skipped"}, {"13~review", "success", "success"}}, "success"},
+		{"round 6: explicit re-review's scope cancelled, ordinary guard-only job", [][3]string{{"10~review", "success", "success"}, {"11~re-review", "scope:cancelled", ""}, {"12~review", "success", "skipped"}}, "failed"}, //nolint:misspell // the runner's spelling, not prose
+		{"round 6: ordinary duplicate's scope cancelled, ordinary guard-only job", [][3]string{{"10~review", "success", "success"}, {"11~review", "scope:cancelled", ""}, {"12~review", "success", "skipped"}}, "success"},   //nolint:misspell // the runner's spelling, not prose
 	} {
 		fix := map[string]string{}
 		reviewRuns(fix, a, c.runs)
