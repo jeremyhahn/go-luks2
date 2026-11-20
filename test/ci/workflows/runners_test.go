@@ -8,12 +8,13 @@ import (
 	"testing"
 )
 
-// runsOnLine is a job's runs-on key at job level; the capture is everything
-// after the colon, trailing comments included.
-var runsOnLine = regexp.MustCompile(`(?m)^    runs-on:(.*)$`)
+// runsOnLine is a job's runs-on key at job-property indentation, bare,
+// single- or double-quoted; the capture is everything after the colon,
+// trailing comments included.
+var runsOnLine = regexp.MustCompile(`^    (?:runs-on|'runs-on'|"runs-on")[ \t]*:(.*)$`)
 
 // reusableUses is a job that calls a reusable workflow: it has no runs-on.
-var reusableUses = regexp.MustCompile(`(?m)^    uses: `)
+var reusableUses = regexp.MustCompile(`(?m)^    (?:uses|'uses'|"uses")[ \t]*: `)
 
 // runnerLabel is one literal runner label: no quotes, no expression, no list.
 var runnerLabel = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
@@ -32,26 +33,29 @@ var waiverCategories = map[string]bool{"hardware": true, "oversize": true, "cred
 // credential waiver is valid on.
 var credentialJobs = map[string]bool{"code-review.yml/review": true}
 
-// runsOnViolation applies ruling 999's runner rule to one job's runs-on value
-// (the text after `runs-on:`, comments included). It returns "" when the line
-// is allowed and the reason otherwise.
+// runsOnViolation applies ruling 999's runner rule to one job's runs-on key
+// line (the text after `runs-on:`, comments included). It returns "" when the
+// line is allowed and the reason otherwise. It fails closed: only one plain or
+// quoted label on the key line itself is read, so a value that needs a YAML
+// decoder (block or flow collection, block scalar, anchor, alias or tag) is a
+// violation; waiverViolations rejects a value continued on a later line.
 func runsOnViolation(file, jobID, line string) string {
-	value, comment, _ := strings.Cut(line, "#")
-	if comment != "" {
-		comment = "#" + comment
+	if line != "" && line[0] != ' ' && line[0] != '\t' {
+		return "runs-on key is not followed by a space"
 	}
-	value = strings.TrimSpace(value)
+	value, comment := line, ""
+	for i := 1; i < len(line); i++ {
+		if line[i] == '#' && (line[i-1] == ' ' || line[i-1] == '\t') {
+			value, comment = line[:i], line[i:]
+			break
+		}
+	}
+	value, why := runsOnLabel(strings.TrimSpace(value))
 	switch {
+	case why != "":
+		return why
 	case value == hostedRunner:
 		return ""
-	case value == "":
-		return "runs-on has no inline label (a list or a mapping)"
-	case strings.Contains(value, "${{"):
-		return "runs-on is an expression"
-	case strings.HasPrefix(value, "[") || strings.Contains(value, ","):
-		return "runs-on is a label list"
-	case !runnerLabel.MatchString(value):
-		return "runs-on is not one literal label"
 	}
 	m := waiverComment.FindStringSubmatch(comment)
 	if m == nil {
@@ -72,6 +76,71 @@ func runsOnViolation(file, jobID, line string) string {
 	return ""
 }
 
+// runsOnLabel reads a runs-on value, comment removed, as one runner label: a
+// plain scalar or one single- or double-quoted scalar around a literal label.
+// It returns the label, or "" and the reason it is not one.
+func runsOnLabel(value string) (string, string) {
+	switch {
+	case value == "":
+		return "", "runs-on has no value on its key line (a list, a mapping or a block scalar below it)"
+	case strings.Contains(value, "${{"):
+		return "", "runs-on is an expression"
+	case strings.HasPrefix(value, "|") || strings.HasPrefix(value, ">"):
+		return "", "runs-on is a block scalar"
+	case strings.HasPrefix(value, "{"):
+		return "", "runs-on is a flow mapping"
+	case strings.HasPrefix(value, "[") || strings.Contains(value, ","):
+		return "", "runs-on is a label list"
+	case strings.ContainsAny(value[:1], "&*!"):
+		return "", "runs-on carries a YAML anchor, alias or tag"
+	}
+	if q := value[0]; q == '\'' || q == '"' {
+		if len(value) < 2 || value[len(value)-1] != q {
+			return "", "runs-on is not one quoted label"
+		}
+		value = value[1 : len(value)-1]
+	}
+	if !runnerLabel.MatchString(value) {
+		return "", "runs-on is not one literal label"
+	}
+	return value, ""
+}
+
+// runsOnLines returns the text after the colon of every runs-on key line of
+// one job body, and a problem for each line that continues a runs-on value
+// (any non-blank line indented deeper than the key before the next line at
+// or above the key's indentation that is not a comment) and for each explicit
+// (`? `) key at job-property indentation, which the scan cannot read.
+func runsOnLines(body string) (values, problems []string) {
+	lines := strings.Split(body, "\n")
+	for i, l := range lines {
+		if strings.HasPrefix(l, "    ? ") || l == "    ?" {
+			problems = append(problems, fmt.Sprintf("explicit key %q cannot be read", l))
+			continue
+		}
+		m := runsOnLine.FindStringSubmatch(l)
+		if m == nil {
+			continue
+		}
+		values = append(values, m[1])
+	scan:
+		for _, next := range lines[i+1:] {
+			trimmed := strings.TrimLeft(next, " ")
+			switch {
+			case strings.TrimSpace(next) == "":
+				continue
+			case len(next)-len(trimmed) > 4:
+				problems = append(problems, fmt.Sprintf("runs-on value continues on a later line: %q", next))
+				continue
+			case strings.HasPrefix(trimmed, "#"):
+				continue
+			}
+			break scan
+		}
+	}
+	return values, problems
+}
+
 func TestRunsOnViolation(t *testing.T) {
 	for _, c := range []struct {
 		name, file, job, line string
@@ -86,7 +155,29 @@ func TestRunsOnViolation(t *testing.T) {
 		{"no inline label", "ci.yml", "lint", "", false},
 		{"expression", "ci.yml", "lint", ` ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}`, false},
 		{"expression waived", "ci.yml", "lint", ` ${{ inputs.runner }}  # self-hosted: hardware: the GPU`, false},
-		{"quoted label", "ci.yml", "lint", ` 'ubuntu-latest'`, false},
+		{"single-quoted hosted", "ci.yml", "lint", ` 'ubuntu-latest'`, true},
+		{"double-quoted hosted", "ci.yml", "lint", ` "ubuntu-latest"  # a note`, true},
+		{"quoted self-hosted, waived", "ci.yml", "lint", ` 'qwen'  # self-hosted: hardware: the GPU`, true},
+		{"quoted self-hosted, unwaived", "ci.yml", "lint", ` "qwen"`, false},
+		{"quoted, trailing text", "ci.yml", "lint", ` 'ubuntu-latest' x`, false},
+		{"unterminated quote", "ci.yml", "lint", ` 'ubuntu-latest`, false},
+		{"mismatched quotes", "ci.yml", "lint", ` 'ubuntu-latest"`, false},
+		{"quoted expression", "ci.yml", "lint", ` '${{ inputs.runner }}'`, false},
+		{"empty", "ci.yml", "lint", " ", false},
+		{"comment only", "ci.yml", "lint", "  # self-hosted: hardware: the GPU", false},
+		{"literal block scalar", "ci.yml", "lint", " |", false},
+		{"stripped literal block scalar", "ci.yml", "lint", " |-", false},
+		{"folded block scalar", "ci.yml", "lint", " >", false},
+		{"indented kept block scalar", "ci.yml", "lint", " >+2", false},
+		{"block scalar waived", "ci.yml", "lint", " |  # self-hosted: hardware: the GPU", false},
+		{"flow mapping", "ci.yml", "lint", " {group: big}", false},
+		{"flow mapping waived", "ci.yml", "lint", " {group: big}  # self-hosted: hardware: the GPU", false},
+		{"anchor", "ci.yml", "lint", " &r ubuntu-latest", false},
+		{"alias", "ci.yml", "lint", " *r", false},
+		{"core tag", "ci.yml", "lint", " !!str ubuntu-latest", false},
+		{"local tag waived", "ci.yml", "lint", " !x qwen  # self-hosted: hardware: the GPU", false},
+		{"hash inside the scalar", "ci.yml", "lint", " ubuntu-latest#x", false},
+		{"no space after the colon", "ci.yml", "lint", "ubuntu-latest", false},
 		{"bare waiver, no category", "ci.yml", "lint", " qwen  # self-hosted:", false},
 		{"waiver with reason, no category", "ci.yml", "lint", " qwen  # self-hosted: the GPU host", false},
 		{"empty category", "ci.yml", "lint", " qwen  # self-hosted: : the GPU host", false},
@@ -130,7 +221,10 @@ func waiverViolations(t *testing.T, name, src string) []string {
 		out[i] = name + ": " + out[i]
 	}
 	for _, j := range jobs {
-		lines := runsOnLine.FindAllStringSubmatch(j.body, -1)
+		lines, problems := runsOnLines(j.body)
+		for _, p := range problems {
+			out = append(out, fmt.Sprintf("%s job %s: %s", name, j.id, p))
+		}
 		if len(lines) == 0 && reusableUses.MatchString(j.body) {
 			continue
 		}
@@ -138,7 +232,7 @@ func waiverViolations(t *testing.T, name, src string) []string {
 			out = append(out, fmt.Sprintf("%s job %s has %d runs-on lines, want 1", name, j.id, len(lines)))
 			continue
 		}
-		if why := runsOnViolation(name, j.id, lines[0][1]); why != "" {
+		if why := runsOnViolation(name, j.id, lines[0]); why != "" {
 			out = append(out, fmt.Sprintf("%s job %s: %s", name, j.id, why))
 		}
 	}
@@ -218,6 +312,25 @@ func TestWaiverViolationsFindEveryJob(t *testing.T) {
 		name, jobs string
 		bad        bool
 	}{
+		{"runs-on continued on a deeper line", hosted + "  extra:\n    runs-on: ubuntu-latest\n      ${{ inputs.suffix }}\n", true},
+		{"runs-on continued after a blank line", hosted + "  extra:\n    runs-on: ubuntu-latest\n\n      -gpu\n", true},
+		{"runs-on continued after a comment line", hosted + "  extra:\n    runs-on: ubuntu-latest\n    # a note\n      -gpu\n", true},
+		{"waived label continued", hosted + "  extra:\n    runs-on: qwen  # self-hosted: hardware: the GPU\n      ${{ inputs.suffix }}\n", true},
+		{"deeper comment under runs-on", hosted + "  extra:\n    runs-on: ubuntu-latest\n      # a note\n", true},
+		{"literal block runs-on", hosted + "  extra:\n    runs-on: |\n      ubuntu-latest\n", true},
+		{"folded block runs-on", hosted + "  extra:\n    runs-on: >-\n      ubuntu-latest\n", true},
+		{"flow mapping runs-on", hosted + "  extra:\n    runs-on: {group: big}\n", true},
+		{"group mapping runs-on", hosted + "  extra:\n    runs-on:\n      group: big\n", true},
+		{"group and labels runs-on", hosted + "  extra:\n    runs-on:\n      group: big\n      labels: ubuntu-latest\n", true},
+		{"block list runs-on", hosted + "  extra:\n    runs-on:\n      - ubuntu-latest\n", true},
+		{"anchored runs-on", hosted + "  extra:\n    runs-on: &r ubuntu-latest\n", true},
+		{"aliased runs-on", hosted + "  extra:\n    runs-on: *r\n", true},
+		{"tagged runs-on", hosted + "  extra:\n    runs-on: !!str ubuntu-latest\n", true},
+		{"explicit runs-on key", hosted + "  extra:\n    ? runs-on\n    : ubuntu-latest\n", true},
+		{"double-quoted runs-on key, hosted", hosted + "  extra:\n    \"runs-on\": ubuntu-latest\n", false},
+		{"single-quoted runs-on key, waived", hosted + "  extra:\n    'runs-on': qwen  # self-hosted: hardware: the GPU\n", false},
+		{"quoted uses key", hosted + "  call:\n    \"uses\": ./.github/workflows/x.yml\n", false},
+		{"next property after runs-on", hosted + "  extra:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n", false},
 		{"hosted only", hosted, false},
 		{"waived", hosted + "  gpu:\n    runs-on: qwen  # self-hosted: hardware: the GPU\n", false},
 		{"commented key between jobs", hosted + "  # a note\n  gpu:\n    runs-on: ubuntu-latest\n", false},
