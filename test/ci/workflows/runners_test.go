@@ -107,7 +107,7 @@ func TestRunsOnViolation(t *testing.T) {
 
 // TestEveryJobRunsOnHostedOrWaived: ruling 999's runner rule holds for every
 // job of every workflow. A job runs on ubuntu-latest, or on one self-hosted
-// label whose runs-on line carries a categorised waiver.
+// label whose runs-on line carries a waiver that names its category.
 func TestEveryJobRunsOnHostedOrWaived(t *testing.T) {
 	for _, f := range workflowFiles(t) {
 		src, present := readUnlessStripped(t, rel(t, f))
