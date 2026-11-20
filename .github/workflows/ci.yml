@@ -2372,20 +2372,14 @@ jobs:
           echo "IT_LEASE=$lease" >> "$GITHUB_ENV"
           echo "IT_LEASE_ID=$id" >> "$GITHUB_ENV"
 
-<<<<<<< ours.yml
-||||||| base.yml
-      # CUSTOMIZE: host tuning the suite needs goes here, as in the test job.
-
-=======
-      # CUSTOMIZE: host tuning the suite needs goes here, as in the test job.
-
-      # Ruling 901: the integration image the job leased carry no private address in their history or
-      # config, checked after the build and before any use, on a pool runner.
+      # Ruling 901: the integration image the job leased carries no private
+      # address in its history or config, checked after the build and before
+      # any use, on a pool runner.
+      # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211).
       - name: Check the images carry no private address
         if: ${{ !cancelled() && env.IT_LEASE_ID != '' && runner.environment != 'github-hosted' }}
-        run: scripts/ci-image-history.sh "$IT_LEASE_ID"
+        run: make ci-image-history IMAGES="$IT_LEASE_ID"
 
->>>>>>> theirs.yml
       - name: Write the module credential file
         run: |
           umask 077
@@ -2418,7 +2412,6 @@ jobs:
             docker compose -f build/docker/devcontainer/compose.yaml -p "$IT_PROJECT" down --volumes || true
           [ -z "${IT_LEASE:-}" ] || docker rm "$IT_LEASE" >/dev/null || true
 
-<<<<<<< ours.yml
       - name: Upload integration coverage
         if: always() && github.server_url == 'https://github.com'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -2434,36 +2427,13 @@ jobs:
   # it `nightly`.
   # CUSTOMIZE: each iteration's container is named under the project, as in
   # the integration job, and removed with it.
-||||||| base.yml
-  # Soak (v1.23, owner item 101): the integration suite looped in the
-  # integration image until SOAK_MINUTES have passed, each iteration its own
-  # compose stack, torn down before the next; the first red iteration fails
-  # the job. v1.24 (owner ruling 2026-10-19, Company Agent m751 (e)): nightly
-  # and workflow_dispatch only, off main pushes and off ci:full; the Gate marks
-  # it `nightly`. It replaces nothing in batch.yml, whose soak stays a dispatch.
-=======
-  # Soak (v1.23, owner item 101): the integration suite looped in the
-  # integration image until SOAK_MINUTES have passed, each iteration its own
-  # compose stack, torn down before the next; the first red iteration fails
-  # the job. v1.24 (owner ruling 2026-10-19, Tenant Agent m751 (e)): nightly
-  # and workflow_dispatch only, off main pushes and off ci:full; the Gate marks
-  # it `nightly`. It replaces nothing in batch.yml, whose soak stays a dispatch.
->>>>>>> theirs.yml
   soak:
     name: Soak [integration image]
     # v1.30: a dispatch off main is refused, so soak runs only on `run`.
     needs: preflight   # v1.34
     if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && needs.preflight.outputs.verdict == 'run' }}
-<<<<<<< ours.yml
     runs-on: ubuntu-latest
     timeout-minutes: 90       # CUSTOMIZE: SOAK_MINUTES plus one iteration
-||||||| base.yml
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
-    timeout-minutes: 90       # CUSTOMIZE: SOAK_MINUTES plus one iteration, at least ceil(1.5 x the 72-hour p95)
-=======
-    runs-on: ${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner_docker) || 'bigdisk' }}   # v1.48
-    timeout-minutes: 90       # CUSTOMIZE: SOAK_MINUTES plus one iteration, at least ceil(1.5 x the 72-hour p95)
->>>>>>> theirs.yml
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
       SOAK_MINUTES: 30        # CUSTOMIZE
@@ -2592,20 +2562,14 @@ jobs:
           echo "IT_LEASE=$lease" >> "$GITHUB_ENV"
           echo "IT_LEASE_ID=$id" >> "$GITHUB_ENV"
 
-<<<<<<< ours.yml
-||||||| base.yml
-      # CUSTOMIZE: host tuning the suite needs goes here, as in the test job.
-
-=======
-      # CUSTOMIZE: host tuning the suite needs goes here, as in the test job.
-
-      # Ruling 901: the integration image the job leased carry no private address in their history or
-      # config, checked after the build and before any use, on a pool runner.
+      # Ruling 901: the integration image the job leased carries no private
+      # address in its history or config, checked after the build and before
+      # any use, on a pool runner.
+      # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211).
       - name: Check the images carry no private address
         if: ${{ !cancelled() && env.IT_LEASE_ID != '' && runner.environment != 'github-hosted' }}
-        run: scripts/ci-image-history.sh "$IT_LEASE_ID"
+        run: make ci-image-history IMAGES="$IT_LEASE_ID"
 
->>>>>>> theirs.yml
       - name: Write the module credential file
         run: |
           umask 077
@@ -2807,7 +2771,6 @@ jobs:
   # judges it. Its `Signatures / Signatures` check is required by the ruleset
   # beside CI Gate. v1.35 and v1.35.1 ran it here as `signatures`.
 
-<<<<<<< ours.yml
   # THE ONE GATE, and the single required check. It needs EVERY job above, in
   # every tier, and reads each by name on a `check` line tagged `pr`, `code`,
   # `scoped`, `full` or `nightly`; test/ci/workflows derives the tags from the
@@ -2829,40 +2792,9 @@ jobs:
   # expression is not a "no", and an empty result reads `<unreadable>`. Do not
   # use join(needs.*.result); it evaluates empty on Gitea. It runs on
   # ubuntu-latest and takes no checkout: one run step.
-||||||| base.yml
-  # The single required check (devops.md §1). Every job above must appear in
-  # BOTH the needs list and the results check — a gate that can pass vacuously
-  # is worse than no gate. Do not use join(needs.*.result); it evaluates empty
-  # on Gitea and reports success while jobs fail.
-  # v1.21: on the ci-gate runners (Company Agent m386: only CI Gate runs there;
-  # a 1-CPU gate runner cannot hold a stage). trivy and fips are in nightly.yml
-  # (v1.9, devops.md §8a: the alpha regime).
-=======
-  # The single required check (devops.md §1). Every job above must appear in
-  # BOTH the needs list and the results check — a gate that can pass vacuously
-  # is worse than no gate. Do not use join(needs.*.result); it evaluates empty
-  # on Gitea and reports success while jobs fail.
-  # v1.21: on the ci-gate runners (Tenant Agent m386: only CI Gate runs there;
-  # a 1-CPU gate runner cannot hold a stage). trivy and fips are in nightly.yml
-  # (v1.9, devops.md §8a: the alpha regime).
->>>>>>> theirs.yml
   ci-gate:
     name: CI Gate
-<<<<<<< ours.yml
     runs-on: ubuntu-latest
-||||||| base.yml
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ci-gate' }}
-    # v1.29.3: on a schedule run the schedule guard decides. `busy` skips the
-    # gate, so `CI / CI Gate (schedule)` posts `skipped` (Gitea 1.27.1 posts a
-    # skipped job as `skipped`, not `success`), never a green nightly. Every
-    # other verdict, an empty one included, runs it.
-=======
-    runs-on: ${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner || '"ubuntu-latest"') || 'ci-gate' }}   # v1.48
-    # v1.29.3: on a schedule run the schedule guard decides. `busy` skips the
-    # gate, so `CI / CI Gate (schedule)` posts `skipped` (Gitea 1.27.1 posts a
-    # skipped job as `skipped`, not `success`), never a green nightly. Every
-    # other verdict, an empty one included, runs it.
->>>>>>> theirs.yml
     if: ${{ always() && (github.event_name != 'schedule' || needs.preflight.outputs.verdict != 'busy') }}
     timeout-minutes: 5        # v1.30
     # CUSTOMIZE: the repo's job list. Add every CUSTOMIZE job here AND as a
@@ -2871,16 +2803,6 @@ jobs:
     steps:
       - name: Fail closed on any non-success
         env:
-<<<<<<< ours.yml
-||||||| base.yml
-          # The full tier is CI_FULL_TIER (v1.23): every event but a PR, and a
-          # PR labelled ci:full. A job marked `full` may be skipped below only
-          # when it is not selected; a `pr` job may never be skipped.
-=======
-          # The full tier is CI_FULL_TIER (v1.23); v1.41: every event, a PR
-          # included, but a refused dispatch. A job marked `full` may be skipped below only
-          # when it is not selected; a `pr` job may never be skipped.
->>>>>>> theirs.yml
           FULL_TIER: ${{ env.CI_FULL_TIER }}
           NIGHTLY: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
           # v1.26: a draft PR runs no CI, so its gate fails rather than pass on skips.
@@ -2943,16 +2865,10 @@ jobs:
           check lint        "${{ needs.lint.result }}" pr
           check image       "${{ needs.image.result }}" code
           check lint-gates  "${{ needs.lint-gates.result }}" scoped
-<<<<<<< ours.yml
           check merge-check "${{ needs.merge-check.result }}" pr
           check test-race   "${{ needs.test-race.result }}" pr
-          check integration "${{ needs.integration.result }}" full
-          check fips        "${{ needs.fips.result }}" full
-||||||| base.yml
-          check integration "${{ needs.integration.result }}" full
-=======
           check integration "${{ needs.integration.result }}" code
->>>>>>> theirs.yml
+          check fips        "${{ needs.fips.result }}" full
           check soak        "${{ needs.soak.result }}" nightly
           if [ "$BAD" -ne 0 ]; then
             echo "CI gate failed: not every job reported success."
