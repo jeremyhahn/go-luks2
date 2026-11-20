@@ -257,12 +257,16 @@ var jobKeyLine = regexp.MustCompile(`^  (?:([A-Za-z0-9_-]+)|'([A-Za-z0-9_-]+)'|"
 // decoder, and fails closed: any line under `jobs:` it cannot read as
 // a comment, a job key at two-space indentation or a line of a job's body is
 // returned as a problem, so a job the scan cannot see is never let through.
+// Every line under `jobs:` must also fit the strict YAML subset of
+// subsetScanner, so a quoted or escaped key, an unclosed quote or a plain
+// multi-line scalar cannot make GitHub read a job differently from the scan.
 func workflowJobs(src string) ([]workflowJob, []string) {
 	var (
 		jobs     []workflowJob
 		problems []string
 		body     []string
 		in, seen bool
+		subset   *subsetScanner
 	)
 	flush := func() {
 		if len(jobs) > 0 {
@@ -280,9 +284,14 @@ func workflowJobs(src string) ([]workflowJob, []string) {
 				} else if !jobsKeyLine.MatchString(l) {
 					problems = append(problems, fmt.Sprintf("line %d: jobs is not a block mapping: %q", n+1, l))
 				}
-				in, seen = true, true
+				in, seen, subset = true, true, newSubsetScanner()
 			}
 			continue
+		}
+		if indent > 0 || strings.HasPrefix(l, "\t") || strings.TrimSpace(l) == "" || strings.HasPrefix(l, "#") {
+			if why := subset.line(l); why != "" {
+				problems = append(problems, fmt.Sprintf("line %d: %s: %q", n+1, why, l))
+			}
 		}
 		switch {
 		case strings.TrimSpace(l) == "" || strings.HasPrefix(trimmed, "#"):
@@ -306,6 +315,163 @@ func workflowJobs(src string) ([]workflowJob, []string) {
 	return jobs, problems
 }
 
+// subsetKey matches a mapping key line of the strict YAML subset: an unquoted
+// key of [A-Za-z0-9_.-], a colon, then whitespace and the value or the end of
+// the line. A quoted key, or one written with an escape, does not match, so
+// it is rejected rather than decoded.
+var subsetKey = regexp.MustCompile(`^([A-Za-z0-9_.-]+):(?:[ \t]+|$)(.*)$`)
+
+// blockIndicators are the block scalar headers the subset reads: no explicit
+// indentation indicator.
+var blockIndicators = map[string]bool{"|": true, ">": true, "|-": true, ">-": true, "|+": true, ">+": true}
+
+// subsetScanner is an allowlist of a strict YAML subset, fed the lines under
+// `jobs:` one at a time. Each line must be blank, a full-line comment, a
+// `key: value` or `key:` line, or a `- ` sequence item holding one of those
+// or a scalar. A quoted scalar or a flow collection must close on its line.
+// A line deeper than the last one is allowed only after an empty value (a
+// nested mapping or sequence) or inside a block scalar; deeper after a
+// non-empty value is a plain multi-line scalar and fails. What the subset
+// does not cover fails closed: the runs-on reader never meets YAML it would
+// read differently from GitHub.
+type subsetScanner struct {
+	col    int  // column of the last content line's innermost node
+	deeper bool // the last content line opened a nested block
+	block  int  // parent column of the open block scalar, or -1
+}
+
+func newSubsetScanner() *subsetScanner { return &subsetScanner{deeper: true, block: -1} }
+
+// line checks one line and returns why it is outside the subset, or "".
+func (s *subsetScanner) line(l string) string {
+	trimmed := strings.TrimLeft(l, " ")
+	indent := len(l) - len(trimmed)
+	if s.block >= 0 {
+		if strings.TrimSpace(l) == "" || indent > s.block {
+			return ""
+		}
+		s.block = -1
+	}
+	switch {
+	case strings.TrimSpace(l) == "":
+		return ""
+	case strings.HasPrefix(trimmed, "\t"):
+		return "a tab in the indentation"
+	case strings.HasPrefix(trimmed, "#"):
+		return ""
+	case indent > s.col && !s.deeper:
+		return "a deeper line after a non-empty value (a multi-line scalar)"
+	}
+	col, rest, parent, item := indent, trimmed, indent, false
+	for rest == "-" || strings.HasPrefix(rest, "- ") {
+		after := strings.TrimLeft(rest[1:], " ")
+		parent, col, rest, item = col, col+len(rest)-len(after), after, true
+	}
+	if strings.HasPrefix(rest, "\t") {
+		return "a tab after a sequence indicator"
+	}
+	value := rest
+	if m := subsetKey.FindStringSubmatch(rest); m != nil {
+		parent, value = col, m[2]
+	} else if !item {
+		return "not an unquoted `key: value` line (a quoted or escaped key, or a multi-line scalar)"
+	}
+	empty, block, why := subsetValue(value)
+	if why != "" {
+		return why
+	}
+	s.col, s.deeper = col, empty
+	if block {
+		s.block = parent
+	}
+	return ""
+}
+
+// subsetValue reads the value after a key or a sequence indicator: empty (a
+// nested block follows), a block scalar header, or a scalar that ends on
+// this line.
+func subsetValue(v string) (empty, block bool, why string) {
+	v = strings.TrimLeft(v, " \t")
+	switch {
+	case v == "" || v[0] == '#':
+		return true, false, ""
+	case v[0] == '|' || v[0] == '>':
+		header, rest := v, ""
+		if i := strings.IndexAny(v, " \t"); i >= 0 {
+			header, rest = v[:i], v[i:]
+		}
+		if !blockIndicators[header] || !commentOrBlank(rest) {
+			return false, false, "a block scalar header outside the subset"
+		}
+		return false, true, ""
+	case v[0] == '\'' || v[0] == '"':
+		end := quotedEnd(v, 0)
+		if end < 0 {
+			return false, false, "a quoted scalar does not close on its line"
+		}
+		if !commentOrBlank(v[end+1:]) {
+			return false, false, "text after a quoted scalar"
+		}
+	case v[0] == '[' || v[0] == '{':
+		if !flowClosed(v) {
+			return false, false, "a flow collection does not close on its line"
+		}
+	}
+	return false, false, ""
+}
+
+// commentOrBlank reports whether s is empty, blank, or whitespace and then a
+// comment.
+func commentOrBlank(s string) bool {
+	t := strings.TrimLeft(s, " \t")
+	return t == "" || (t[0] == '#' && len(t) < len(s))
+}
+
+// quotedEnd returns the index of the quote closing the scalar opened at
+// v[i], or -1 when it does not close on this line.
+func quotedEnd(v string, i int) int {
+	q := v[i]
+	for j := i + 1; j < len(v); j++ {
+		switch {
+		case q == '"' && v[j] == '\\':
+			j++
+		case v[j] == q && q == '\'' && j+1 < len(v) && v[j+1] == '\'':
+			j++
+		case v[j] == q:
+			return j
+		}
+	}
+	return -1
+}
+
+// flowClosed reports whether the flow collection opening v closes on this
+// line, with only a comment after it.
+func flowClosed(v string) bool {
+	depth := 0
+	for i := 0; i < len(v); i++ {
+		switch c := v[i]; c {
+		case '\'', '"':
+			if i > 0 && !strings.ContainsRune("[{,: \t", rune(v[i-1])) {
+				continue
+			}
+			if i = quotedEnd(v, i); i < 0 {
+				return false
+			}
+		case '[', '{':
+			depth++
+		case ']', '}':
+			if depth--; depth == 0 {
+				return commentOrBlank(v[i+1:])
+			}
+		case '#':
+			if v[i-1] == ' ' || v[i-1] == '\t' {
+				return false
+			}
+		}
+	}
+	return false
+}
+
 func TestWaiverViolationsFindEveryJob(t *testing.T) {
 	const hosted = "  ok:\n    runs-on: ubuntu-latest\n"
 	for _, c := range []struct {
@@ -327,9 +493,17 @@ func TestWaiverViolationsFindEveryJob(t *testing.T) {
 		{"aliased runs-on", hosted + "  extra:\n    runs-on: *r\n", true},
 		{"tagged runs-on", hosted + "  extra:\n    runs-on: !!str ubuntu-latest\n", true},
 		{"explicit runs-on key", hosted + "  extra:\n    ? runs-on\n    : ubuntu-latest\n", true},
-		{"double-quoted runs-on key, hosted", hosted + "  extra:\n    \"runs-on\": ubuntu-latest\n", false},
-		{"single-quoted runs-on key, waived", hosted + "  extra:\n    'runs-on': qwen  # self-hosted: hardware: the GPU\n", false},
-		{"quoted uses key", hosted + "  call:\n    \"uses\": ./.github/workflows/x.yml\n", false},
+		{"double-quoted runs-on key, hosted", hosted + "  extra:\n    \"runs-on\": ubuntu-latest\n", true},
+		{"single-quoted runs-on key, waived", hosted + "  extra:\n    'runs-on': qwen  # self-hosted: hardware: the GPU\n", true},
+		{"quoted uses key", hosted + "  call:\n    \"uses\": ./.github/workflows/x.yml\n", true},
+		{"codex: multi-line name hides an escaped runs-on key", hosted + "  extra:\n    name: 'decoy\n    runs-on: ubuntu-latest\n    end'\n    \"runs\\u002don\": qwen\n    steps:\n      - run: echo ok\n", true},
+		{"quoted key in a step", hosted + "  extra:\n    runs-on: ubuntu-latest\n    steps:\n      - 'run': echo ok\n", true},
+		{"escaped key", hosted + "  extra:\n    runs-on: ubuntu-latest\n    \"tim\\x65out-minutes\": 5\n", true},
+		{"unclosed double quote", hosted + "  extra:\n    runs-on: ubuntu-latest\n    env:\n      A: \"open\n      B: x\"\n", true},
+		{"plain multi-line value", hosted + "  extra:\n    runs-on: ubuntu-latest\n    name: a\n      b\n", true},
+		{"flow list not closed on its line", hosted + "  extra:\n    runs-on: ubuntu-latest\n    needs: [ok,\n      ok]\n", true},
+		{"tab-indented line", hosted + "  extra:\n    runs-on: ubuntu-latest\n\tname: x\n", true},
+		{"subset forms", hosted + "  extra:\n    runs-on: ubuntu-latest  # note\n    needs: [ok]\n    env: {A: 'x', B: \"y # z\"}\n    if: \"github.event_name == 'push'\"\n    strategy:\n      matrix:\n        os:\n          - a\n          - 'b'\n    steps:\n      -\n        name: it's plain\n      - uses: x/y@v1\n        with:\n          script: >-\n            one\n\n            two\n      - run: |\n          echo 'unclosed\n", false},
 		{"next property after runs-on", hosted + "  extra:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n", false},
 		{"hosted only", hosted, false},
 		{"waived", hosted + "  gpu:\n    runs-on: qwen  # self-hosted: hardware: the GPU\n", false},
