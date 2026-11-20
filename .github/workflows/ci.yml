@@ -1454,161 +1454,18 @@ jobs:
           fi
           echo "OK: no go-objstore import outside the storage seam"
 
-<<<<<<< ours.yml
-||||||| base.yml
-  # v1.30 (fix 1): the toolchain image is built once per content hash, here,
-  # and every other job pulls it (scripts/ci-image-cache.sh v1, ships beside
-  # this file). On a push to main only, on the release runner, which alone
-  # holds the registry credential (rulings 169 and 173): when the registry
-  # lacks `<repo>-toolchain:<hash>-main` under CI_IMAGE_NAMESPACE, it builds
-  # the image and pushes it; otherwise it does nothing. The integration image
-  # stays keyed by the tree (ruling 220(5)) and is built where it runs.
-  # This job is not in CI Gate's needs: a registry fault must not turn main
-  # red, and every consumer falls back to a local build. CUSTOMIZE: a
-  # repository whose forge has no `release` runner sets `if: false` and says
-  # so in its adoption PR, because a job no runner takes keeps the run in
-  # progress and the schedule guard reads main as busy.
-  publish-images:
-    name: Publish CI images
-    runs-on: release
-    if: ${{ github.server_url != 'https://github.com' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    timeout-minutes: 60       # CUSTOMIZE: ceil(1.5 x a cold toolchain build's p95)
-    env:
-      CI_IMAGE_NAMESPACE: ${{ vars.CI_IMAGE_NAMESPACE }}   # m2101: a repository variable; ci-standard.md §9 (ruling 217(4))
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-
-      # v1.21.1: mask the forge credentials before any other step (as above).
-      - name: Mask the forge credentials
-        run: |
-          for v in GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
-            val=${!v:-}
-            [ -n "$val" ] || continue
-            echo "::add-mask::$val"
-            case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
-          done
-
-      - name: Publish the toolchain image when the registry lacks its hash
-        run: |
-          ( umask 077; : > "$RUNNER_TEMP/gomodauth.env"
-            for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
-              if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
-            done )
-          bp=
-          if [ -n "${DEVCACHE_GOPROXY:-}" ] && curl -s -o /dev/null --max-time 5 "$DEVCACHE_GOPROXY/"; then
-            bp="GO_BUILD_PROXY=$DEVCACHE_GOPROXY|https://proxy.golang.org"
-          fi
-          scripts/ci-image-cache.sh publish ${bp:+"$bp"} MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env"
-
-      - name: Tear down
-        if: always()
-        run: rm -f "$RUNNER_TEMP/gomodauth.env"
-
-=======
-  # v1.38 (owner ruling 633, decision 219(d)): `[self-hosted, linux, x64,
-  # release]`, the only label a publish job takes, and never a pull request
-  # (the preflight step `Runner labels (ruling 633)` fails CI otherwise). On
-  # GitHub the job runs only when the repository variable RELEASE_RUNNER is
-  # `true`, which a repository sets once Infrastructure reports the release
-  # pools live; until then it skips, and no run waits on a label with no
-  # runner. On Gitea it runs on every push to main, as in v1.37.
-  # v1.30 (fix 1): the toolchain image is built once per content hash, here,
-  # and every other job pulls it (scripts/ci-image-cache.sh v1, ships beside
-  # this file). On a push to main only, on the release runner, which alone
-  # holds the registry credential (rulings 169 and 173): when the registry
-  # lacks `<repo>-toolchain:<hash>-main` under CI_IMAGE_NAMESPACE, it builds
-  # the image and pushes it; otherwise it does nothing. The integration image
-  # stays keyed by the tree (ruling 220(5)) and is built where it runs.
-  # This job is not in CI Gate's needs: a registry fault must not turn main
-  # red, and every consumer falls back to a local build. CUSTOMIZE: a Gitea
-  # repository whose forge has no `release` runner sets `if: false` and says
-  # so in its adoption PR, because a job no runner takes keeps the run in
-  # progress and the schedule guard reads main as busy (on GitHub, leave
-  # RELEASE_RUNNER unset instead).
-  publish-images:
-    name: Publish CI images
-    runs-on: [self-hosted, linux, x64, release]
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (github.server_url != 'https://github.com' || vars.RELEASE_RUNNER == 'true') }}
-    timeout-minutes: 60       # CUSTOMIZE: ceil(1.5 x a cold toolchain build's p95)
-    env:
-      CI_IMAGE_NAMESPACE: ${{ vars.CI_IMAGE_NAMESPACE }}   # m2101: a repository variable; ci-standard.md §9 (ruling 217(4))
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-
-      # v1.21.1: mask the forge credentials before any other step (as above).
-      - name: Mask the forge credentials
-        run: |
-          for v in GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
-            val=${!v:-}
-            [ -n "$val" ] || continue
-            echo "::add-mask::$val"
-            case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
-          done
-
-      # Ruling 887: the release runner is a pool host; the LAN addresses are
-      # masked before ci-image-cache.sh publish builds and prints.
-      - name: Mask the LAN addresses
-        run: scripts/ci-mask-lan.sh
-
-      # v1.42 (ruling 742 (1)): ci-image-cache.sh v3 scans the toolchain
-      # image it built with `trivy image` (--ignore-unfixed, --skip-dirs
-      # /opt/go/mod, CRITICAL and HIGH) before it pushes it, and refuses the
-      # push on a finding (devops.md §8: trivy image blocks before any push).
-      # This job runs on a push to main on the release runner, never on a PR,
-      # and is not in CI Gate's needs, so the PR gate stays hermetic.
-      - name: Publish the toolchain image when the registry lacks its hash
-        env:
-          IN_IMAGE_NETWORK: bridge   # v1.42: the scan reads the trivy database
-        run: |
-          ( umask 077; : > "$RUNNER_TEMP/gomodauth.env"
-            for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
-              if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
-            done )
-          bp=
-          if [ -n "${DEVCACHE_GOPROXY:-}" ] && curl -s -o /dev/null --max-time 5 "$DEVCACHE_GOPROXY/"; then
-            bp="GO_BUILD_PROXY=$DEVCACHE_GOPROXY|https://proxy.golang.org"
-          fi
-          scripts/ci-image-cache.sh publish ${bp:+"$bp"} MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env"
-
-      - name: Tear down
-        if: always()
-        run: rm -f "$RUNNER_TEMP/gomodauth.env"
-
->>>>>>> theirs.yml
   # v1.30 (fix 1, parallel jobs; fix 5, gosec on the PR tier): the
   # lint-class stages, moved from the image job, in a job of their own that
-<<<<<<< ours.yml
   # needs the toolchain image alone, so they run beside build and test and not
   # in series before them. The PR tier runs `make gosec` here; the full tier
   # runs gosec in the image job's `make security`, so it runs once per event.
   # It runs on a docs-only PR, with the releasability gates, as the image job
-  # did; the build-tag assertion and gosec skip there.
-||||||| base.yml
-  # needs the toolchain image alone, so they run beside build and make
-  # coverage and not in series before them. The PR tier runs `make gosec`
-  # here; the full tier runs gosec in the image job's `make security`, so it
-  # runs once per event. It runs on a docs-only PR, as lint did.
-=======
-  # needs the toolchain image alone, so they run beside build and make
-  # coverage and not in series before them. The PR tier runs `make gosec`
-  # here; the full tier runs gosec in the image job's `make security`, so it
-  # runs once per event. It runs on a docs-only PR, as lint did. v1.41: every
-  # PR is the full tier, so gosec runs only in `make security`; the job keeps
-  # its name so no check context changes. v1.42 (ruling 742 (1)): `make gosec`
-  # runs here again, on every event, and deps-check leaves this job for
-  # scans.yml, so every step reads only the tree.
->>>>>>> theirs.yml
+  # did; the build-tag assertion skips there. v1.42 (ruling 742 (1)):
+  # `make gosec` runs here on every event, and deps-check is in scans.yml,
+  # so every step reads only the tree.
   lint:
-<<<<<<< ours.yml
     name: Lint [lint, gosec, build tags, releasability]
     runs-on: ubuntu-latest
-||||||| base.yml
-    name: Lint [lint, gosec, deps-check, build tags]
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
-=======
-    name: Lint [lint, gosec, build tags]
-    runs-on: ${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner_docker) || 'bigdisk' }}   # v1.48
->>>>>>> theirs.yml
     needs: preflight   # v1.34
     if: ${{ !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
     timeout-minutes: 60       # CUSTOMIZE: a cold toolchain image build on a hosted runner, then the lint-class stages
@@ -1632,7 +1489,12 @@ jobs:
             case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
           done
 
-<<<<<<< ours.yml
+      # Ruling 887: the LAN addresses this runner's environment names, masked
+      # before any step that builds can print one.
+      # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211).
+      - name: Mask the LAN addresses
+        run: make ci-mask-lan
+
       - name: Reap stale CI stacks
         run: make ci-reap-stacks
 
@@ -1654,28 +1516,6 @@ jobs:
       # v1.34.1: the module fetches go through DEVCACHE_GOPROXY first when the
       # runner sets it and the cache answers, then the public proxy, with no
       # `direct` entry.
-||||||| base.yml
-      # v1.30 (fix 1): the registry cache first. A miss, or an unreachable
-      # registry, falls through to the local build below.
-      - name: Pull the toolchain image from the registry cache
-        run: scripts/ci-image-cache.sh pull || true
-
-      # v1.30: the toolchain image alone (`make docker-build-toolchain`,
-      # devcontainer.md §6), which skips when the daemon holds its tag.
-=======
-      # Ruling 887: the LAN addresses this runner's environment names, masked
-      # before any step that builds can print one.
-      - name: Mask the LAN addresses
-        run: scripts/ci-mask-lan.sh
-
-      # v1.30 (fix 1): the registry cache first. A miss, or an unreachable
-      # registry, falls through to the local build below.
-      - name: Pull the toolchain image from the registry cache
-        run: scripts/ci-image-cache.sh pull || true
-
-      # v1.30: the toolchain image alone (`make docker-build-toolchain`,
-      # devcontainer.md §6), which skips when the daemon holds its tag.
->>>>>>> theirs.yml
       - name: Build the toolchain image
         run: |
           ( umask 077; : > "$RUNNER_TEMP/gomodauth.env"
@@ -1690,22 +1530,15 @@ jobs:
           rm -f "$RUNNER_TEMP/gomodauth.env"
           echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
 
-<<<<<<< ours.yml
-      # v1.22: bound this repo's cache volumes on the host before the stages
-      # add to them (ci-standard.md §6). It never fails the job.
-||||||| base.yml
-      # v1.22: bound this repo's cache volumes (as in the image job). It never
-      # fails the job and keeps every volume a container mounts.
-=======
       # Ruling 901: the images the job built or pulled carry no private address in their history or
       # config, checked after the build and before any use, on a pool runner.
+      # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211).
       - name: Check the images carry no private address
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && runner.environment != 'github-hosted' }}
-        run: scripts/ci-image-history.sh "$TOOLCHAIN_IMAGE"
+        run: make ci-image-history IMAGES="$TOOLCHAIN_IMAGE"
 
-      # v1.22: bound this repo's cache volumes (as in the image job). It never
-      # fails the job and keeps every volume a container mounts.
->>>>>>> theirs.yml
+      # v1.22: bound this repo's cache volumes on the host before the stages
+      # add to them (ci-standard.md §6). It never fails the job.
       - name: Trim the CI caches
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         run: make ci-trim-caches
@@ -1821,7 +1654,6 @@ jobs:
           fi
           echo "releasability: $count private patterns, 0 matches, $nw waived"
 
-<<<<<<< ours.yml
       # Over this checkout's git index: a fleet address, hostname or owner
       # path in any tracked file, or a tracked file the public release must
       # not carry, fails the job.
@@ -1833,33 +1665,6 @@ jobs:
       # removal: if dropping it changes no selected file (tests included), it
       # is misspelled or dead.
       - name: Assert every build tag selects code (toolchain image)
-||||||| base.yml
-      # v1.26.1 (Company Agent m1128 (9)): a docs-only PR skips make coverage, so
-      # it runs the releasability test alone; any other run gets it from make
-      # coverage.
-      - name: Releasability test (docs-only PR)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.RELEASABILITY_TEST != '' && needs.preflight.outputs.docs_only == 'true' }}
-        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "go test -count=1 -tags '$GO_BUILD_TAGS' $RELEASABILITY_TEST"
-
-      # v1.9.2, now in the image: the declared tag set must select code. Each
-      # tag is checked by removal: if dropping it changes no selected file
-      # (tests included), it is misspelled or dead. Compares files, not
-      # packages, and a tag may swap files (a `!foo` stub for a `foo` body).
-      - name: Assert every build tag selects code
-=======
-      # v1.26.1 (Tenant Agent m1128 (9)): a docs-only PR skips make coverage, so
-      # it runs the releasability test alone; any other run gets it from make
-      # coverage.
-      - name: Releasability test (docs-only PR)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.RELEASABILITY_TEST != '' && needs.preflight.outputs.docs_only == 'true' }}
-        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "go test -count=1 -tags '$GO_BUILD_TAGS' $RELEASABILITY_TEST"
-
-      # v1.9.2, now in the image: the declared tag set must select code. Each
-      # tag is checked by removal: if dropping it changes no selected file
-      # (tests included), it is misspelled or dead. Compares files, not
-      # packages, and a tag may swap files (a `!foo` stub for a `foo` body).
-      - name: Assert every build tag selects code
->>>>>>> theirs.yml
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.GO_BUILD_TAGS != '' && needs.preflight.outputs.docs_only != 'true' }}
         run: make ci-toolchain-run CMD="make assert-build-tags GO_BUILD_TAGS='$GO_BUILD_TAGS'"
 
