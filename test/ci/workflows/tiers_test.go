@@ -25,11 +25,15 @@ import (
 // `scoped`, lint-gates, which a PR skips when no changed file matches
 // LINT_GATES_PATTERN.
 var (
-	prTier      = []string{"preflight", "lint", "merge-check", "test-race"}
-	codeTier    = []string{"image"}
-	scopedTier  = []string{"lint-gates"}
-	fullTier    = []string{"fips", "integration"}
-	nightlyTier = []string{"soak"}
+	prTier     = []string{"preflight", "lint", "merge-check", "test-race"}
+	codeTier   = []string{"image", "fips", "integration"}
+	scopedTier = []string{"lint-gates"}
+	fullTier   = []string{}
+	// codeFullTier is the part of codeTier that carries CI_FULL_TIER's
+	// condition in its `if:` (codeFullJobIf): ci-template v1.41 (ruling
+	// 742 (2)) moved integration and FIPS from the full tier to every PR.
+	codeFullTier = []string{"fips", "integration"}
+	nightlyTier  = []string{"soak"}
 )
 
 var (
@@ -343,10 +347,11 @@ func TestStrippedAtPublish(t *testing.T) {
 
 // fullTierIf is ci.yml's CI_FULL_TIER, which CI Gate's FULL_TIER reads
 // (ci-template v1.30: a workflow_dispatch off main is not the full tier; the
-// guard refuses it). nightlyIf is CI Gate's NIGHTLY: the schedule and
+// guard refuses it; v1.41: every other event, every PR too, and ci/deps-bump's
+// dispatch). nightlyIf is CI Gate's NIGHTLY: the schedule and
 // dispatch only.
 const (
-	fullTierIf = "${{ (github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')) || contains(github.event.pull_request.labels.*.name, 'ci:full') }}"
+	fullTierIf = "${{ " + fullTierCond + " }}"
 	nightlyIf  = "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}"
 )
 
@@ -429,7 +434,7 @@ func TestCIGateTiersMatchTheJobs(t *testing.T) {
 		case nightlyJobIf:
 			want = "nightly"
 			nightly = append(nightly, id)
-		case codeJobIf:
+		case codeJobIf, codeFullJobIf:
 			want = "code"
 			code = append(code, id)
 		case scopedJobIf:

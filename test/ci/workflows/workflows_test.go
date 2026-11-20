@@ -335,8 +335,16 @@ func TestMakefileSaysWhereTrivyGates(t *testing.T) {
 	if scans, ok := readUnlessStripped(t, ".github/workflows/scans.yml"); ok && !strings.Contains(job(t, scans, "scans"), `make ci-toolchain-run CMD="make security `) {
 		t.Error("scans.yml no longer runs make security in the toolchain image; update the Makefile's account of where trivy gates")
 	}
-	if regexp.MustCompile(`make trivy|trivy fs|trivy-action`).MatchString(ci) {
-		t.Error("ci.yml runs trivy outside make security; update the Makefile's account of where it gates")
+	// A comment may name trivy (v1.48's header explains where the advisory
+	// half of make security runs); only a line that is not one may not.
+	runsTrivy := regexp.MustCompile(`make trivy|trivy fs|trivy-action`)
+	for i, line := range strings.Split(ci, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		if runsTrivy.MatchString(line) {
+			t.Errorf("ci.yml:%d runs trivy outside make security; update the Makefile's account of where it gates", i+1)
+		}
 	}
 	nightly := job(t, readFile(t, ".github/workflows/nightly.yml"), "trivy")
 	for _, want := range []string{"make trivy-install", "make trivy-fs TOOLS_REQUIRED=1"} {
