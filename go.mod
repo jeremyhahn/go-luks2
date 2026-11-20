@@ -5,7 +5,7 @@ go 1.27.4
 require (
 	github.com/anatol/devmapper.go v0.0.0-20260315162726-c47dfb6cf674
 	github.com/google/uuid v1.6.0
-	github.com/jeremyhahn/go-enclave v0.11.1-alpha
+	github.com/jeremyhahn/go-enclave v0.12.0-alpha
 	golang.org/x/crypto v0.58.0
 	golang.org/x/sys v0.50.0
 	golang.org/x/term v0.48.0
