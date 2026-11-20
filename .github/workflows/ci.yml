@@ -1688,9 +1688,8 @@ jobs:
   # and runs each stage as its own step (v1.30: the lint-class stages are the
   # lint job's); `if: !cancelled()` runs every stage
   # after a failed one, so one run reports them all. v1.42 (ruling 742 (1)):
-  # make security and make deps-check run in scans.yml, so no ci.yml stage
-  # needs the network for an advisory or a version lookup; trivy gets one for
-  # its database, everything else runs without one.
+  # make security, trivy and make deps-check run in scans.yml, so no ci.yml
+  # stage needs the network for an advisory or a version lookup.
   # v1.41: the full tier (env.CI_FULL_TIER) is every event, every PR too.
   #
   # v1.22: every stage mounts the build and golangci-lint cache volumes, and a
@@ -1917,7 +1916,6 @@ jobs:
       # vet-32bit in the Makefile).
       - name: Linux binaries and 32-bit vet (toolchain image)
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.preflight.outputs.docs_only != 'true' }}
-<<<<<<< ours.yml
         run: make ci-toolchain-run CMD="make build-linux vet-32bit" CI_OUT="luks-linux-amd64 luks-linux-arm64"
 
       # upload-artifact v4+ refuses any server that is not github.com. The
@@ -1972,47 +1970,6 @@ jobs:
       # image)` left this job. Both read an advisory database that changes
       # with no change to the tree. scans.yml runs them on main with the same
       # commands; gosec runs in the lint job on every event.
-||||||| base.yml
-        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make coverage GO_BUILD_TAGS='$GO_BUILD_TAGS' COVERAGE_THRESHOLD=$COVERAGE_THRESHOLD"
-
-      # make security: gosec, govulncheck, go mod verify (devops.md §8), with
-      # trivy fs per the phase (§8a). The target owns gosec's flags and its
-      # memory bounds (GOMEMLIMIT, GOMAXPROCS, -concurrency; v1.6 to v1.8) and
-      # reports a kill by signal as a kill, not a finding. Nothing is uploaded
-      # to code scanning (m601 (d): CI runs on Gitea).
-      - name: make security
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER == 'true' }}
-        env:
-          IN_IMAGE_NETWORK: bridge
-        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make security GO_BUILD_TAGS='$GO_BUILD_TAGS'"
-
-      # The integration image is gated before any push to either registry
-      # (devops.md §8): --ignore-unfixed (v1.19) and --skip-dirs /opt/go/mod
-      # (v1.20). trivy fs and make security never take --ignore-unfixed.
-      # A PR builds no image for a registry, so the scan is full tier (v1.23).
-      - name: trivy image (integration image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER == 'true' }}
-        env:
-          IN_IMAGE_NETWORK: bridge
-        run: |
-          . "$RUNNER_TEMP/image-lock.sh"
-          trap image_unlock EXIT
-          image_lock || exit 1
-          docker tag "$IT_LEASE_ID" "$IT_IMAGE"
-          image_unlock
-          docker save -o it-image.tar "$IT_IMAGE"
-          scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" \
-            trivy image --input it-image.tar --ignore-unfixed --skip-dirs /opt/go/mod --severity CRITICAL,HIGH --exit-code 1
-=======
-        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make coverage GO_BUILD_TAGS='$GO_BUILD_TAGS' COVERAGE_THRESHOLD=$COVERAGE_THRESHOLD"
-
-      # v1.42 (ruling 742 (1)): `make security` (gosec, govulncheck, go mod
-      # verify, trivy fs) and `trivy image (integration image)` left this job.
-      # Both read an advisory database that changes with no change to the
-      # tree. scans.yml runs them on a schedule and on dispatch on main, on
-      # the same images, and opens the one fix PR or issue; gosec runs in the
-      # lint job on every event.
->>>>>>> theirs.yml
 
       - name: Tear down
         if: always()
@@ -2020,7 +1977,6 @@ jobs:
           rm -f "$RUNNER_TEMP/gomodauth.env"
           [ -z "${IT_LEASE:-}" ] || docker rm "$IT_LEASE" >/dev/null || true
 
-<<<<<<< ours.yml
   # v1.27: a repository's `make lint-gates` (its own gates beside `make lint`:
   # script, workflow, generated-code and module checks) runs in this job, in
   # parallel with the image job's `make lint`, not in series after it, so
@@ -2036,53 +1992,14 @@ jobs:
   # repository defines no lint-gates target, so the job prints OK and passes;
   # the stage recipes are Makefile targets (ci-reap-stacks, ci-trim-caches,
   # ci-toolchain-run), as in the image job.
-||||||| base.yml
-  # v1.27 (Company Agent m1192 (6), item 27): a repository's `make lint-gates`
-  # (its own gates beside `make lint`: script, workflow, generated-code and
-  # module checks) runs in this job, in parallel with the image job's
-  # `make lint`, not in series after it, so Lint's wall time is the longer of
-  # the two and not their sum. It runs only when the Makefile (or a tracked
-  # *.mk) defines a lint-gates target; a repository without one gets an OK and
-  # a green job, with no image built. `make lint` and `go vet` stay where they
-  # are. A repository whose `make lint` lists lint-gates as a prerequisite
-  # removes it from lint in the PR that adopts v1.27, or the gates run twice.
-  # The toolchain image comes from `make docker-build`, as in the image job,
-  # which builds only a tag the daemon does not already hold (devcontainer.md
-  # §6). A lint-class check, so it is on the PR tier and runs on a docs-only PR.
-=======
-  # v1.27 (Tenant Agent m1192 (6), item 27): a repository's `make lint-gates`
-  # (its own gates beside `make lint`: script, workflow, generated-code and
-  # module checks) runs in this job, in parallel with the image job's
-  # `make lint`, not in series after it, so Lint's wall time is the longer of
-  # the two and not their sum. It runs only when the Makefile (or a tracked
-  # *.mk) defines a lint-gates target; a repository without one gets an OK and
-  # a green job, with no image built. `make lint` and `go vet` stay where they
-  # are. A repository whose `make lint` lists lint-gates as a prerequisite
-  # removes it from lint in the PR that adopts v1.27, or the gates run twice.
-  # The toolchain image comes from `make docker-build`, as in the image job,
-  # which builds only a tag the daemon does not already hold (devcontainer.md
-  # §6). A lint-class check, so it is on the PR tier and runs on a docs-only PR.
->>>>>>> theirs.yml
   # v1.29.1 (ruling 226(15), 108 repair): the step fails fast. `make
   # lint-gates` runs without `-k`, so the first failing gate ends the step
   # and the job; the gates after it run on the next push.
   lint-gates:
     name: Lint Gates [toolchain image]
-<<<<<<< ours.yml
     runs-on: ubuntu-latest
     needs: preflight     # v1.34
     # v1.26: never on a draft. v1.30: only on the guard's `run`, and on a PR
-||||||| base.yml
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
-    needs: preflight     # v1.29.3; v1.30; v1.34
-    # v1.26: never on a draft. v1.29.3: on a schedule run, only on the
-    # schedule guard's `run`. v1.30: only on `run` on every event, and on a PR
-=======
-    runs-on: ${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner_docker) || 'bigdisk' }}   # v1.48
-    needs: preflight     # v1.29.3; v1.30; v1.34
-    # v1.26: never on a draft. v1.29.3: on a schedule run, only on the
-    # schedule guard's `run`. v1.30: only on `run` on every event, and on a PR
->>>>>>> theirs.yml
     # only when a changed file matches LINT_GATES_PATTERN (fix 3).
     if: ${{ !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' && needs.preflight.outputs.lint_gates != 'false' }}
     timeout-minutes: 45       # CUSTOMIZE: the repo's lint-gates time, with honest headroom
@@ -2192,7 +2109,6 @@ jobs:
         if: always()
         run: rm -f "$RUNNER_TEMP/gomodauth.env"
 
-<<<<<<< ours.yml
   # THE MERGE RESULT, which nothing else in this pipeline looks at. CUSTOMIZE:
   # a job of the integration job's shape. Every other check reads the BRANCH
   # HEAD, Gitea publishes no /merge ref, and `git merge-tree` answers "do
@@ -2318,39 +2234,17 @@ jobs:
   # content-addressed one, leased and never removed here. The ledger directory
   # (TEST_STATE_DIR) is bind-mounted from the runner host and deliberately
   # persists between jobs.
-||||||| base.yml
-  # Integration tests run in the integration image (ci-standard.md §2), as a
-  # compose stack on the runner host started by `make integration-test`. The
-  # stack is named per run under the repo's prefix, the job reaps stale stacks
-  # first (v1.18) and keeps its own teardown last under `if: always()`.
-  # v1.23: full tier only (CI_FULL_TIER's expression); never on a plain PR.
-=======
-  # Integration tests run in the integration image (ci-standard.md §2), as a
-  # compose stack on the runner host started by `make integration-test`. The
-  # stack is named per run under the repo's prefix, the job reaps stale stacks
-  # first (v1.18) and keeps its own teardown last under `if: always()`.
   # v1.23: full tier only (CI_FULL_TIER's expression). v1.41: every PR.
->>>>>>> theirs.yml
   integration:
     name: Integration [integration image]
     # v1.26: never on a draft PR, ci:full or not. v1.30: only on the guard's
     # `run` (a dispatch off main is refused).
     needs: preflight   # v1.34
-<<<<<<< ours.yml
-    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-||||||| base.yml
-    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
-    timeout-minutes: 60       # CUSTOMIZE: ceil(1.5 x this job's 72-hour p95), ci-standard.md §12
-=======
     # v1.41 (ruling 742 (2)): every PR, as main; a docs-only PR skips it, as
     # it skips build and make coverage, and CI Gate reads it as `code`.
     if: ${{ (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ci/deps-bump') && !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' && needs.preflight.outputs.docs_only != 'true' }}
-    runs-on: ${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner_docker) || 'bigdisk' }}   # v1.48
-    timeout-minutes: 60       # CUSTOMIZE: ceil(1.5 x this job's 72-hour p95), ci-standard.md §12
->>>>>>> theirs.yml
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
       IT_PROJECT: go-luks2-ci-${{ github.run_id }}-${{ github.run_attempt }}
@@ -2358,20 +2252,6 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
-<<<<<<< ours.yml
-||||||| base.yml
-      # v1.21.1 (Company Agent m605 item 8): mask the forge credentials before
-      # any other step. The runner injects them as plain environment
-      # (dependency-resolution.md §6), which the log does not mask by itself,
-      # and the token sits inside GIT_CONFIG_KEY_0's URL, so it is masked alone
-      # as well.
-=======
-      # v1.21.1 (Tenant Agent m605 item 8): mask the forge credentials before
-      # any other step. The runner injects them as plain environment
-      # (dependency-resolution.md §6), which the log does not mask by itself,
-      # and the token sits inside GIT_CONFIG_KEY_0's URL, so it is masked alone
-      # as well.
->>>>>>> theirs.yml
       - name: Mask the forge credentials
         run: |
           for v in GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
