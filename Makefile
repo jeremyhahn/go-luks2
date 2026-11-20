@@ -2264,60 +2264,86 @@ ci-trim-caches: ## Keep this repository's CI cache volumes under CI_CACHE_MAX_GI
 	}; \
 	exit 0
 
-# ci-template v1.44 (ruling 887) and v1.45 (ruling 901): the template's
+# ci-template v1.44 (ruling 887) and v1.45 (ruling 888): the template's
 # scripts/ci-mask-lan.sh and scripts/ci-image-history.sh as Makefile recipes
-# (go-luks2 ships no shell scripts, #211). A private address is an RFC 1918
-# IPv4 address (10/8, 172.16/12, 192.168/16).
-PRIVATE_ADDR_ERE = (^|[^0-9.])(10(\.[0-9]{1,3}){3}|172\.(1[6-9]|2[0-9]|3[01])(\.[0-9]{1,3}){2}|192\.168(\.[0-9]{1,3}){2})([^0-9]|$$)
+# (go-luks2 ships no shell scripts, #211), line for line: same variables,
+# same tests, same messages. test/makefile holds them to it.
 
-# ci-mask-lan prints `::add-mask::` for each private-address entry the job
-# environment names (the DEVCACHE_* package caches, GOPROXY's module proxy, a
-# LAN registry; an entry is a value split on `,`, `|`, `;` and blanks), for its
-# host:port and for its host, so the runner masks them in every later line. On
-# a GitHub-hosted runner no variable names one and it prints nothing. It never
-# fails the job.
-ci-mask-lan: ## Mask the private addresses the job environment names (CI, ruling 887)
-	@set -uf; \
-	env | while IFS= read -r line; do \
-		case "$$line" in *=*) ;; *) continue ;; esac; \
-		val=$${line#*=}; \
-		printf '%s\n' "$$val" | grep -Eq '$(PRIVATE_ADDR_ERE)' || continue; \
-		for e in $$(printf '%s\n' "$$val" | tr ',|;' '   '); do \
-			printf '%s\n' "$$e" | grep -Eq '$(PRIVATE_ADDR_ERE)' || continue; \
-			hp=$${e#*://}; hp=$${hp#*@}; hp=$${hp%%/*}; \
-			printf '::add-mask::%s\n' "$$e" "$$hp" "$${hp%:*}"; \
+# ci-mask-lan masks the LAN addresses a pool runner's environment names
+# (Tenant Agent ruling 887: internal addresses stay out of public
+# repositories, and their CI logs count). The pool sets the DEVCACHE_*
+# package caches, GOPROXY's LAN module proxy and the LAN CI registry; on a
+# forge, the release registry (RELEASE_REGISTRY) and the forge's own host
+# (GITHUB_SERVER_URL), which the image publishing and resolving name. A
+# BuildKit build echoes its build arguments and `go env` prints GOPROXY.
+# Run before any step that builds: for each entry of those variables whose
+# host is a private IPv4 address, it prints ::add-mask:: for the entry, its
+# host:port and its host, so the runner masks the address in every later
+# line. Public hosts and keywords (proxy.golang.org, direct, off) are left.
+ci-mask-lan: SHELL := /bin/bash
+ci-mask-lan: .SHELLFLAGS := -euo pipefail -c
+ci-mask-lan: ## Mask the LAN addresses the runner's environment names (CI, ruling 887)
+	@private() { \
+		case $$1 in \
+		10.* | 192.168.* | 172.1[6-9].* | 172.2[0-9].* | 172.3[01].*) return 0 ;; \
+		esac; \
+		return 1; \
+	}; \
+	for v in $$(compgen -e); do \
+		case $$v in \
+		DEVCACHE_* | GOPROXY | CI_REGISTRY | CI_IMAGE_REGISTRY | RELEASE_REGISTRY | GITHUB_SERVER_URL) ;; \
+		*) continue ;; \
+		esac; \
+		IFS='|, ' read -ra entries <<<"$${!v}"; \
+		for entry in "$${entries[@]}"; do \
+			hostport=$${entry#*://}; \
+			hostport=$${hostport%%/*}; \
+			host=$${hostport%%:*}; \
+			private "$$host" || continue; \
+			echo "::add-mask::$$entry"; \
+			[ "$$hostport" = "$$entry" ] || echo "::add-mask::$$hostport"; \
+			[ "$$host" = "$$hostport" ] || echo "::add-mask::$$host"; \
 		done; \
-	done | sort -u; \
-	exit 0
+	done
 
-# ci-image-history fails when an image in IMAGES (space separated) carries a
-# private address in its history (`docker history --no-trunc`) or its config
-# (`docker image inspect`). A pool build passes the LAN caches as BuildKit
-# secrets, which no history entry keeps; a build argument or ENV would. An
-# image it cannot read fails too. The address itself is never printed.
+# ci-image-history fails when an image carries a private address (Tenant
+# Agent ruling 888). A pool build takes the LAN caches as BuildKit secrets,
+# which no layer and no history entry keeps; a build argument's value, by
+# contrast, is recorded in every RUN of the history. A pool-built image may
+# one day be pushed beyond the LAN, and ruling 887 keeps internal addresses
+# out of everything public, metadata included. For each image in IMAGES
+# (blank separated) it reads the history (every entry's command and comment)
+# and the config (env, labels, command) and fails on any RFC 1918 address.
+# It names the image and the history entry, never the address.
 IMAGES ?=
 ci-image-history: export IH_IMAGES := $(IMAGES)
-ci-image-history: ## Fail when an image's history or config carries a private address (CI, ruling 901)
-	@set -uf; \
-	if [ -z "$$(printf '%s' "$$IH_IMAGES" | tr -d ' \t')" ]; then echo "state the images: make ci-image-history IMAGES='...'" >&2; exit 2; fi; \
-	rc=0; \
-	for img in $$IH_IMAGES; do \
-		if ! hist=$$(docker history --no-trunc --format '{{.CreatedBy}}' "$$img" 2>/dev/null); then \
-			echo "::error::ci-image-history: $$img: history not read"; rc=1; continue; \
+ci-image-history: SHELL := /bin/bash
+ci-image-history: .SHELLFLAGS := -euo pipefail -c
+ci-image-history: ## Fail when an image's history or config carries a private address (CI, ruling 888)
+	@set -f; set -- $$IH_IMAGES; set +f; \
+	if [ $$# -eq 0 ]; then \
+		echo "usage: make ci-image-history IMAGES='<image>...'" >&2; \
+		exit 2; \
+	fi; \
+	octet='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'; \
+	private="(^|[^0-9.])(10\.$$octet|172\.(1[6-9]|2[0-9]|3[01])|192\.168)\.$$octet\.$$octet([^0-9]|\$$)"; \
+	status=0; \
+	for image in "$$@"; do \
+		if ! history=$$(docker history --no-trunc --format '{{.CreatedBy}} {{.Comment}}' "$$image") || \
+			! config=$$(docker image inspect --format '{{json .Config}}' "$$image"); then \
+			echo "ci-image-history: cannot read $$image" >&2; \
+			exit 1; \
 		fi; \
-		if ! cfg=$$(docker image inspect --format '{{json .Config}}' "$$img" 2>/dev/null); then \
-			echo "::error::ci-image-history: $$img: config not read"; rc=1; continue; \
-		fi; \
-		bad=; \
-		if printf '%s\n' "$$hist" | grep -Eq '$(PRIVATE_ADDR_ERE)'; then bad=history; fi; \
-		if printf '%s\n' "$$cfg" | grep -Eq '$(PRIVATE_ADDR_ERE)'; then bad="$${bad:+$$bad and }config"; fi; \
-		if [ -n "$$bad" ]; then \
-			echo "::error::ci-image-history: $$img carries a private address in its $$bad"; rc=1; \
-		else \
-			echo "ok    $$img: no private address in its history or config"; \
+		while IFS=: read -r entry _; do \
+			echo "ci-image-history: $$image: history entry $$entry carries a private address" >&2; \
+			status=1; \
+		done < <(grep -En "$$private" <<<"$$history" || :); \
+		if grep -Eq "$$private" <<<"$$config"; then \
+			echo "ci-image-history: $$image: its config (env, labels, command) carries a private address" >&2; \
+			status=1; \
 		fi; \
 	done; \
-	exit $$rc
+	exit "$$status"
 
 # Builds never resolve through a workspace: cross-repository modules come from
 # published TAGS, never from wherever a sibling repo happens to be checked out.
