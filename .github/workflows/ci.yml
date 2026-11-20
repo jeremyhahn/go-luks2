@@ -94,8 +94,8 @@
 # releasability, this repository's RELEASABILITY_TEST, and the private
 # patterns), the build-tag assertion, make gosec (PR tier) and make
 # deps-check. The image job skips on a docs-only PR (`code` in CI Gate). The
-# runners are unchanged: the Docker jobs, lint included, take the
-# bigdisk-docker routing of ruling 442, the rest ubuntu-latest.
+# runners were unchanged by v1.35; ruling 999 since puts every job on
+# ubuntu-latest.
 # v1.29.2 (Company Agent ruling 239(8), 2026-10-28): comments only; no job,
 # gate or tier changes. A CUSTOMIZE job gated on a changes output (a path-gated
 # suite) needs the image job too and tests an output of the image job in its
@@ -171,12 +171,11 @@ name: CI
 # its build (github.com only), and no job's timeout (120 min at most) comes
 # near the limit, so none is sharded.
 #
-# Ruling 442: the jobs that build a devcontainer image (lint, image,
-# lint-gates, merge-check, integration, soak, test-race, fips) run on the bigdisk-docker
-# pool, a throwaway guest per job, for a push to main and a same-repository
-# pull request, and on ubuntu-latest for every other event. Their "Free
-# runner disk" step runs on the hosted runner only. bigdisk-docker is not the
-# retired bigdisk label.
+# Ruling 999: every job runs on GitHub-hosted ubuntu-latest. A self-hosted
+# runner is only for a hardware-specific job or one that exceeds a measured
+# hosted limit (disk, memory, or 6 h); no job in this workflow qualifies. The
+# jobs that build a devcontainer image (lint, image, lint-gates, merge-check,
+# integration, soak, test-race, fips) free the runner's disk first.
 #
 # ci-template v1.21 (ci-standard.md §2, devcontainer.md §7): every stage runs in
 # this repository's own devcontainer image and no other. No job sets up Go or
@@ -572,7 +571,7 @@ jobs:
   # did; the build-tag assertion and gosec skip there.
   lint:
     name: Lint [lint, gosec, build tags, releasability]
-    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     needs: preflight   # v1.34
     if: ${{ !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
     timeout-minutes: 60       # CUSTOMIZE: a cold toolchain image build on a hosted runner, then the lint-class stages
@@ -805,10 +804,10 @@ jobs:
   # rather than reuse a cached one with the old package (CVE-2026-92392).
   image:
     name: Devcontainer image [build, test]
-    # The bigdisk-docker pool (ruling 442) or ubuntu-latest, with "Free
-    # runner disk" before the build on the latter: the hosted runner's stock
+    # ubuntu-latest (ruling 999), with "Free runner disk" before the
+    # build: the hosted runner's stock
     # free disk does not hold both devcontainer images.
-    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     needs: preflight           # v1.24; v1.34
     # v1.30: only on the guard's `run` (not `refused`), and never on a
     # docs-only PR (`code` in CI Gate).
@@ -1079,7 +1078,7 @@ jobs:
   # and the job; the gates after it run on the next push.
   lint-gates:
     name: Lint Gates [toolchain image]
-    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     needs: preflight     # v1.34
     # v1.26: never on a draft. v1.30: only on the guard's `run`, and on a PR
     # only when a changed file matches LINT_GATES_PATTERN (fix 3).
@@ -1191,7 +1190,7 @@ jobs:
   # the image's cache lacks.
   merge-check:
     name: Merged Tree
-    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     needs: preflight   # v1.34
     # v1.26: never on a draft. v1.30: only on the guard's `run`.
     if: ${{ !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
@@ -1311,7 +1310,7 @@ jobs:
     # `run` (a dispatch off main is refused).
     needs: preflight   # v1.34
     if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
-    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
@@ -1487,7 +1486,7 @@ jobs:
     # v1.30: a dispatch off main is refused, so soak runs only on `run`.
     needs: preflight   # v1.34
     if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && needs.preflight.outputs.verdict == 'run' }}
-    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 90       # CUSTOMIZE: SOAK_MINUTES plus one iteration
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
@@ -1674,7 +1673,7 @@ jobs:
   # runs do.
   test-race:
     name: Race
-    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     needs: preflight   # v1.34
     # v1.26: never on a draft. v1.30: only on the guard's `run`.
     if: ${{ !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
@@ -1685,7 +1684,7 @@ jobs:
       # CUSTOMIZE (v1.29.4's memory bound): the -race run of pkg/luks2 holds
       # several Argon2id derivations at once, each up to its memory cost and
       # multiplied by the race detector's shadow memory, and was OOM-killed
-      # under the 8g default. 14g fits a 16 GB hosted runner and a pool guest.
+      # under the 8g default. 14g fits a 16 GB hosted runner.
       IN_IMAGE_MEMORY: 14g
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -1751,7 +1750,7 @@ jobs:
   # fips140=only; the test fails if either child did not run in its mode.
   fips:
     name: FIPS
-    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     # v1.26: never on a draft PR, ci:full or not. v1.30: only on the guard's `run`.
     needs: preflight   # v1.34
     if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
