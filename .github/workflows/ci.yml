@@ -1668,7 +1668,6 @@ jobs:
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.GO_BUILD_TAGS != '' && needs.preflight.outputs.docs_only != 'true' }}
         run: make ci-toolchain-run CMD="make assert-build-tags GO_BUILD_TAGS='$GO_BUILD_TAGS'"
 
-<<<<<<< ours.yml
       # v1.30 (fix 5): gosec on the PR tier, through the developers' target,
       # with no network and the tool required. v1.42 (ruling 742 (1)): make
       # security left the image job, so gosec runs here on every event but a
@@ -1680,148 +1679,24 @@ jobs:
       # v1.42 (ruling 742 (1)): `make deps-check` left this job. It reads the
       # module proxy, so its answer changes with no change to the tree;
       # scans.yml runs it on main. The Makefile keeps the target.
-||||||| base.yml
-      # v1.30 (fix 5): gosec on the PR tier, through the developers' target,
-      # with no network. On the full tier make security runs it in the image job.
-      - name: make gosec (PR tier)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER != 'true' && needs.preflight.outputs.docs_only != 'true' }}
-        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make gosec GO_BUILD_TAGS='$GO_BUILD_TAGS'"
-
-      # Fails when a library, first-party or third-party, is behind its latest
-      # release without devops.md §9's documented reason (ci-standard.md §1).
-      # v1.28: a lint-class gate of seconds on the PR tier, every event, a
-      # docs-only PR included (ruling 219(3)); it was full tier only from v1.23.
-      - name: make deps-check
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
-        env:
-          IN_IMAGE_NETWORK: bridge
-        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" make deps-check
-=======
-      # v1.30 (fix 5) ran `make gosec` here on the PR tier. v1.41 (ruling 742
-      # (2)): every PR is the full tier, so make security ran gosec in the
-      # image job on every event and the step went. v1.42 (ruling 742 (1)):
-      # make security left the image job, so gosec is back here, on every
-      # event but a docs-only PR, through the developers' target, with no
-      # network. It reads only the tree, so the gate stays hermetic.
-      - name: make gosec
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.preflight.outputs.docs_only != 'true' }}
-        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make gosec GO_BUILD_TAGS='$GO_BUILD_TAGS'"
-
-      # v1.42 (ruling 742 (1)): `Base commit for deps-check (ruling 640)` and
-      # `make deps-check` left this job. deps-check reads the module proxy and
-      # the vulnerability database, so its answer changes with no change to
-      # the tree; scans.yml runs it, the full gate with -vuln, on a schedule
-      # and opens the one fix PR. A repository keeps its Makefile targets.
-      # The reason-comment check on a touched fork replace or pseudo-version
-      # (ruling 640) reads only the tree but runs inside deps-check, so it
-      # runs on the schedule too until depscheck offers it alone (follow-up).
->>>>>>> theirs.yml
 
       - name: Tear down
         if: always()
         run: rm -f "$RUNNER_TEMP/gomodauth.env"
 
-<<<<<<< ours.yml
   # The image job builds both devcontainer images once (`make docker-build`)
   # and runs each stage as its own step (v1.30: the lint-class stages are the
   # lint job's); `if: !cancelled()` runs every stage
-  # after a failed one, so one run reports them all. make security and make
-  # deps-check (and trivy) get a network, for the vulnerability databases and
-  # the module proxy; everything else runs without one.
-||||||| base.yml
-  # v1.21: every stage runs in the project's own devcontainer image and no
-  # other (ci-standard.md §2, devcontainer.md §7). One image job (Company Agent
-  # m601 (a)) builds the images once from build/docker/devcontainer/Dockerfile
-  # at this commit (`make docker-build`) and runs each stage's `make` target in
-  # the toolchain image as its own step, through scripts/in-toolchain-image.sh
-  # (ships beside this file), which copies the checkout into the container: a
-  # runner reaches its daemon through a socket, so a bind mount would resolve
-  # on the daemon's host. A failed step names its stage; `if: !cancelled()`
-  # runs every stage after a failed one, so one run reports them all.
-  #
-  # No job installs a Go toolchain or a tool on the runner: the image's pin file
-  # (devcontainer.md §2) decides every version, and the Makefile carries every
-  # flag set (devops.md §4; §8: CI runs gosec through the developers' target).
-  # GO_BUILD_TAGS reaches every target as a make variable, so the tag set is
-  # still written once. build, test and lint run with no network, on the
-  # image's module cache; security and deps-check get one (IN_IMAGE_NETWORK=
-  # bridge) for the vulnerability databases and the module proxy.
-  #
-  # v1.23: lint, assert-build-tags, build and coverage are the PR tier and run
-  # on every event. security and trivy image are full tier only
-  # (env.CI_FULL_TIER): main after every merge, nightly, dispatch, ci:full.
-  # v1.28: deps-check is a lint-class gate on the PR tier and runs on every
-  # event (ruling 219(3)).
-=======
-  # v1.21: every stage runs in the project's own devcontainer image and no
-  # other (ci-standard.md §2, devcontainer.md §7). One image job (Tenant Agent
-  # m601 (a)) builds the images once from build/docker/devcontainer/Dockerfile
-  # at this commit (`make docker-build`) and runs each stage's `make` target in
-  # the toolchain image as its own step, through scripts/in-toolchain-image.sh
-  # (ships beside this file), which copies the checkout into the container: a
-  # runner reaches its daemon through a socket, so a bind mount would resolve
-  # on the daemon's host. A failed step names its stage; `if: !cancelled()`
-  # runs every stage after a failed one, so one run reports them all.
-  #
-  # No job installs a Go toolchain or a tool on the runner: the image's pin file
-  # (devcontainer.md §2) decides every version, and the Makefile carries every
-  # flag set (devops.md §4; §8: CI runs gosec through the developers' target).
-  # GO_BUILD_TAGS reaches every target as a make variable, so the tag set is
-  # still written once. build, test and lint run with no network, on the
-  # image's module cache; security and deps-check get one (IN_IMAGE_NETWORK=
-  # bridge) for the vulnerability databases and the module proxy. v1.42
-  # (ruling 742 (1)): security and deps-check run in scans.yml, so no ci.yml
-  # stage needs the network for an advisory or a version lookup.
-  #
-  # v1.23: lint, assert-build-tags, build and coverage are the PR tier and run
-  # on every event. security and trivy image are full tier only
-  # (env.CI_FULL_TIER); v1.41: the full tier is every event, every PR too.
-  # v1.28: deps-check is a lint-class gate on the PR tier and runs on every
-  # event (ruling 219(3)).
->>>>>>> theirs.yml
+  # after a failed one, so one run reports them all. v1.42 (ruling 742 (1)):
+  # make security and make deps-check run in scans.yml, so no ci.yml stage
+  # needs the network for an advisory or a version lookup; trivy gets one for
+  # its database, everything else runs without one.
+  # v1.41: the full tier (env.CI_FULL_TIER) is every event, every PR too.
   #
   # v1.22: every stage mounts the build and golangci-lint cache volumes, and a
   # bridge stage the module cache volume, from the runner's Docker host
-<<<<<<< ours.yml
   # (ci-toolchain-run, ci-standard.md §6), so a stage writes its caches there
   # and not into its container's layer.
-||||||| base.yml
-  # (in-toolchain-image.sh v2, ci-standard.md §6), so a stage writes its
-  # caches there and not into its container's layer.
-  #
-  # v1.29 (Company Agent ruling 220(5)): the job reads the Alpine package
-  # indexes the build resolves against (scripts/apk-index-sum.sh, ships beside
-  # this file) into APK_INDEX_SUM, which the integration image's tag hashes and
-  # its build takes as a build argument (ci-standard.md §9, devcontainer.md
-  # §6). A new Alpine package release, a CVE fix among them, changes the tag,
-  # so the next run rebuilds the image rather than reuse a cached one with the
-  # old package (go-enclave main fd83b79ce, CVE-2026-92392).
-  #
-  # The forge credentials reach the image build only as the gomodauth BuildKit
-  # secret, from a file outside the context that the job removes.
-  # No step and no make target prints that file, the job environment (`env`,
-  # `printenv`, `set -x`) or a matched line: `make stage-gomodauth` and the
-  # file writes run silent, and lint steps and `make check-public-literals`
-  # report path and line only (ci-standard.md §5, Company Agent m605 item 8).
-=======
-  # (in-toolchain-image.sh v2, ci-standard.md §6), so a stage writes its
-  # caches there and not into its container's layer.
-  #
-  # v1.29 (ruling 220(5)): the job reads the Alpine package
-  # indexes the build resolves against (scripts/apk-index-sum.sh, ships beside
-  # this file) into APK_INDEX_SUM, which the integration image's tag hashes and
-  # its build takes as a build argument (ci-standard.md §9, devcontainer.md
-  # §6). A new Alpine package release, a CVE fix among them, changes the tag,
-  # so the next run rebuilds the image rather than reuse a cached one with the
-  # old package (go-enclave main fd83b79ce, CVE-2026-92392).
-  #
-  # The forge credentials reach the image build only as the gomodauth BuildKit
-  # secret, from a file outside the context that the job removes.
-  # No step and no make target prints that file, the job environment (`env`,
-  # `printenv`, `set -x`) or a matched line: `make stage-gomodauth` and the
-  # file writes run silent, and lint steps and `make check-public-literals`
-  # report path and line only (ci-standard.md §5, Tenant Agent m605 item 8).
->>>>>>> theirs.yml
   #
   # v1.23: build and the unit runs are the PR tier and run on every event. security and trivy image are full tier only
   # (env.CI_FULL_TIER): main after every merge, dispatch, ci:full.
@@ -1829,7 +1704,6 @@ jobs:
   # moves it to the lint job.
   # v1.24, v1.30: on a docs-only PR the job skips.
   #
-<<<<<<< ours.yml
   # v1.29 (Company Agent ruling 220(5)): the job reads the Alpine package
   # indexes the build resolves against (`make -s apk-index-sum`, the template's
   # scripts/apk-index-sum.sh as a Makefile recipe) into APK_INDEX_SUM, which
@@ -1837,22 +1711,8 @@ jobs:
   # (ci-standard.md §9, devcontainer.md §6). A new Alpine package release, a
   # CVE fix among them, changes the tag, so the next run rebuilds the image
   # rather than reuse a cached one with the old package (CVE-2026-92392).
-||||||| base.yml
-  # v1.30: lint, the build-tag assertion, the releasability test and
-  # deps-check moved to the lint job. This job runs build, make coverage and,
-  # on the full tier, make security and trivy image; it skips on a docs-only
-  # PR, which runs none of them, and CI Gate reads that skip as passed.
-=======
-  # v1.30: lint, the build-tag assertion, the releasability test and
-  # deps-check moved to the lint job. This job runs build, make coverage and,
-  # on the full tier, make security and trivy image; it skips on a docs-only
-  # PR, which runs none of them, and CI Gate reads that skip as passed.
-  # v1.42 (ruling 742 (1)): build and make coverage only; make security and
-  # trivy image run in scans.yml, gosec in the lint job.
->>>>>>> theirs.yml
   image:
     name: Devcontainer image [build, test]
-<<<<<<< ours.yml
     # ubuntu-latest (ruling 999), with "Free runner disk" before the
     # build: the hosted runner's stock
     # free disk does not hold both devcontainer images.
@@ -1860,20 +1720,6 @@ jobs:
     needs: preflight           # v1.24; v1.34
     # v1.30: only on the guard's `run` (not `refused`), and never on a
     # docs-only PR (`code` in CI Gate).
-||||||| base.yml
-    name: Devcontainer image [build, test, security, trivy image]
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
-    needs: preflight   # v1.24 (CA m749, m751 (a)); v1.29.3; v1.34
-    # v1.29.3: on a schedule run, only on the schedule guard's `run`. v1.30:
-    # on every event only on `run` (not `refused`, not `proven`), and never
-    # on a docs-only PR.
-=======
-    runs-on: ${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner_docker) || 'bigdisk' }}   # v1.48
-    needs: preflight   # v1.24 (Tenant Agent m749, m751 (a)); v1.29.3; v1.34
-    # v1.29.3: on a schedule run, only on the schedule guard's `run`. v1.30:
-    # on every event only on `run` (not `refused`, not `proven`), and never
-    # on a docs-only PR.
->>>>>>> theirs.yml
     if: ${{ needs.preflight.outputs.verdict == 'run' && needs.preflight.outputs.docs_only != 'true' }}
     timeout-minutes: 120
     env:
@@ -1886,24 +1732,10 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
-<<<<<<< ours.yml
       # v1.21.1: mask the forge credentials before any other step. The runner
       # injects them as plain environment (dependency-resolution.md §6), which
       # the log does not mask by itself, and the token sits inside
       # GIT_CONFIG_KEY_0's URL, so it is masked alone as well.
-||||||| base.yml
-      # v1.21.1 (Company Agent m605 item 8): mask the forge credentials before
-      # any other step. The runner injects them as plain environment
-      # (dependency-resolution.md §6), which the log does not mask by itself,
-      # and the token sits inside GIT_CONFIG_KEY_0's URL, so it is masked alone
-      # as well.
-=======
-      # v1.21.1 (Tenant Agent m605 item 8): mask the forge credentials before
-      # any other step. The runner injects them as plain environment
-      # (dependency-resolution.md §6), which the log does not mask by itself,
-      # and the token sits inside GIT_CONFIG_KEY_0's URL, so it is masked alone
-      # as well.
->>>>>>> theirs.yml
       - name: Mask the forge credentials
         run: |
           for v in GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
@@ -1934,16 +1766,8 @@ jobs:
           docker image prune --all --force >/dev/null || true
           df -h /
 
-<<<<<<< ours.yml
       # v1.23: the integration image is named by its content,
       # go-luks2-ci-it:<hash> (`make -s it-image`, ci-standard.md §9), so every
-||||||| base.yml
-      # v1.23 (Company Agent m674 item 3, 2026-10-18): the integration image is named by its content,
-      # <repo>-ci-it:<hash> (`make -s it-image`, ci-standard.md §9), so every
-=======
-      # v1.23 (Tenant Agent m674 item 3, 2026-10-18): the integration image is named by its content,
-      # <repo>-ci-it:<hash> (`make -s it-image`, ci-standard.md §9), so every
->>>>>>> theirs.yml
       # job of every run on this runner names the same image for the same
       # tree, builds it once and reuses it. No job removes it; the reap step does.
       # v1.29 (ruling 220(5)): the Alpine package index checksum joins the
