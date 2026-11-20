@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build build-linux vet-32bit install test test-verbose test-coverage test-integration coverage coverage-report clean fmt vet lint gosec govulncheck vuln trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration test-unit-norace seccomp-diff proto test-pkg docker-build docker-build-cli docker-run deps-check test-fips-mode assert-build-tags toolchain-image it-image apk-index-sum apt-index-sum docker-build-toolchain toolchain-run ci-toolchain-run ci-reap-stacks ci-trim-caches
+.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build build-linux vet-32bit install test test-verbose test-coverage test-integration coverage coverage-report clean fmt vet lint gosec govulncheck vuln trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration test-unit-norace seccomp-diff proto test-pkg docker-build docker-build-cli docker-run deps-check test-fips-mode assert-build-tags toolchain-image it-image apk-index-sum apt-index-sum docker-build-toolchain toolchain-run ci-toolchain-run ci-reap-stacks ci-trim-caches ci-mask-lan ci-image-history
 
 # Default target
 .DEFAULT_GOAL := help
@@ -2263,6 +2263,61 @@ ci-trim-caches: ## Keep this repository's CI cache volumes under CI_CACHE_MAX_GI
 		echo "trim: $$removed volume(s), $$((total / 1024 / 1024)) GiB left for prefix '$$prefix'"; \
 	}; \
 	exit 0
+
+# ci-template v1.44 (ruling 887) and v1.45 (ruling 901): the template's
+# scripts/ci-mask-lan.sh and scripts/ci-image-history.sh as Makefile recipes
+# (go-luks2 ships no shell scripts, #211). A private address is an RFC 1918
+# IPv4 address (10/8, 172.16/12, 192.168/16).
+PRIVATE_ADDR_ERE = (^|[^0-9.])(10(\.[0-9]{1,3}){3}|172\.(1[6-9]|2[0-9]|3[01])(\.[0-9]{1,3}){2}|192\.168(\.[0-9]{1,3}){2})([^0-9]|$$)
+
+# ci-mask-lan prints `::add-mask::` for each private-address entry the job
+# environment names (the DEVCACHE_* package caches, GOPROXY's module proxy, a
+# LAN registry; an entry is a value split on `,`, `|`, `;` and blanks), for its
+# host:port and for its host, so the runner masks them in every later line. On
+# a GitHub-hosted runner no variable names one and it prints nothing. It never
+# fails the job.
+ci-mask-lan: ## Mask the private addresses the job environment names (CI, ruling 887)
+	@set -uf; \
+	env | while IFS= read -r line; do \
+		case "$$line" in *=*) ;; *) continue ;; esac; \
+		val=$${line#*=}; \
+		printf '%s\n' "$$val" | grep -Eq '$(PRIVATE_ADDR_ERE)' || continue; \
+		for e in $$(printf '%s\n' "$$val" | tr ',|;' '   '); do \
+			printf '%s\n' "$$e" | grep -Eq '$(PRIVATE_ADDR_ERE)' || continue; \
+			hp=$${e#*://}; hp=$${hp#*@}; hp=$${hp%%/*}; \
+			printf '::add-mask::%s\n' "$$e" "$$hp" "$${hp%:*}"; \
+		done; \
+	done | sort -u; \
+	exit 0
+
+# ci-image-history fails when an image in IMAGES (space separated) carries a
+# private address in its history (`docker history --no-trunc`) or its config
+# (`docker image inspect`). A pool build passes the LAN caches as BuildKit
+# secrets, which no history entry keeps; a build argument or ENV would. An
+# image it cannot read fails too. The address itself is never printed.
+IMAGES ?=
+ci-image-history: export IH_IMAGES := $(IMAGES)
+ci-image-history: ## Fail when an image's history or config carries a private address (CI, ruling 901)
+	@set -uf; \
+	if [ -z "$$(printf '%s' "$$IH_IMAGES" | tr -d ' \t')" ]; then echo "state the images: make ci-image-history IMAGES='...'" >&2; exit 2; fi; \
+	rc=0; \
+	for img in $$IH_IMAGES; do \
+		if ! hist=$$(docker history --no-trunc --format '{{.CreatedBy}}' "$$img" 2>/dev/null); then \
+			echo "::error::ci-image-history: $$img: history not read"; rc=1; continue; \
+		fi; \
+		if ! cfg=$$(docker image inspect --format '{{json .Config}}' "$$img" 2>/dev/null); then \
+			echo "::error::ci-image-history: $$img: config not read"; rc=1; continue; \
+		fi; \
+		bad=; \
+		if printf '%s\n' "$$hist" | grep -Eq '$(PRIVATE_ADDR_ERE)'; then bad=history; fi; \
+		if printf '%s\n' "$$cfg" | grep -Eq '$(PRIVATE_ADDR_ERE)'; then bad="$${bad:+$$bad and }config"; fi; \
+		if [ -n "$$bad" ]; then \
+			echo "::error::ci-image-history: $$img carries a private address in its $$bad"; rc=1; \
+		else \
+			echo "ok    $$img: no private address in its history or config"; \
+		fi; \
+	done; \
+	exit $$rc
 
 # Builds never resolve through a workspace: cross-repository modules come from
 # published TAGS, never from wherever a sibling repo happens to be checked out.

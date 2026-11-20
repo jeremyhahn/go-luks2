@@ -2035,6 +2035,13 @@ jobs:
             case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
           done
 
+      # Ruling 887: the LAN addresses this runner's environment names, masked
+      # before any step that builds can print one.
+      # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211); this
+      # go-luks2 job builds an image too, so it masks as the template's do.
+      - name: Mask the LAN addresses
+        run: make ci-mask-lan
+
       - name: Reap stale CI stacks
         run: make ci-reap-stacks
 
@@ -2551,6 +2558,13 @@ jobs:
             case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
           done
 
+      # Ruling 887: the LAN addresses this runner's environment names, masked
+      # before any step that builds can print one.
+      # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211); this
+      # go-luks2 job builds an image too, so it masks as the template's do.
+      - name: Mask the LAN addresses
+        run: make ci-mask-lan
+
       - name: Reap stale CI stacks
         run: make ci-reap-stacks
 
@@ -2623,6 +2637,13 @@ jobs:
             echo "::add-mask::$val"
             case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
           done
+
+      # Ruling 887: the LAN addresses this runner's environment names, masked
+      # before any step that builds can print one.
+      # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211); this
+      # go-luks2 job builds an image too, so it masks as the template's do.
+      - name: Mask the LAN addresses
+        run: make ci-mask-lan
 
       - name: Reap stale CI stacks
         run: make ci-reap-stacks
