@@ -123,7 +123,11 @@ jobs:
           conclusion=$(jq -r '.conclusion // ""' /tmp/api.json)
           sha=$(jq -r '.head_sha // ""' /tmp/api.json)
           run_url=$(jq -r '.html_url // ""' /tmp/api.json)
-          [ "$event" = push ] && [ "$branch" = main ] || leave "run $RED_RUN is $event on $branch, not a push to main"
+          # CUSTOMIZE (go-luks2): if/then/fi, not A && B || C, which CI's
+          # actionlint refuses (shellcheck SC2015); template defect fixed here.
+          if [ "$event" != push ] || [ "$branch" != main ]; then
+            leave "run $RED_RUN is $event on $branch, not a push to main"
+          fi
           [ "$conclusion" = failure ] || leave "run $RED_RUN concluded $conclusion"
           [[ $sha =~ ^[0-9a-f]{40}$ ]] || die "run $RED_RUN has no head sha"
           short=${sha:0:12}
