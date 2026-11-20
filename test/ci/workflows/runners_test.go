@@ -8,13 +8,13 @@ import (
 	"testing"
 )
 
-// runsOnLine is a job's runs-on key at job-property indentation, bare,
-// single- or double-quoted; the capture is everything after the colon,
-// trailing comments included.
-var runsOnLine = regexp.MustCompile(`^    (?:runs-on|'runs-on'|"runs-on")[ \t]*:(.*)$`)
+// runsOnLine is a job's unquoted runs-on key at job-property indentation (the
+// strict subset rejects a quoted one); the capture is everything after the
+// colon, trailing comments included.
+var runsOnLine = regexp.MustCompile(`^    runs-on[ \t]*:(.*)$`)
 
 // reusableUses is a job that calls a reusable workflow: it has no runs-on.
-var reusableUses = regexp.MustCompile(`(?m)^    (?:uses|'uses'|"uses")[ \t]*: `)
+var reusableUses = regexp.MustCompile(`(?m)^    uses[ \t]*: `)
 
 // runnerLabel is one literal runner label: no quotes, no expression, no list.
 var runnerLabel = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
@@ -249,9 +249,17 @@ type workflowJob struct {
 // the colon but a comment.
 var jobsKeyLine = regexp.MustCompile(`^jobs:\s*(#.*)?$`)
 
-// jobKeyLine is one job key at job indentation: bare, single- or
-// double-quoted, with nothing after the colon but a comment.
-var jobKeyLine = regexp.MustCompile(`^  (?:([A-Za-z0-9_-]+)|'([A-Za-z0-9_-]+)'|"([A-Za-z0-9_-]+)")\s*:\s*(#.*)?$`)
+// jobKeyLine is one job key at job indentation, unquoted, with nothing after
+// the colon but a comment.
+var jobKeyLine = regexp.MustCompile(`^  ([A-Za-z0-9_-]+):\s*(#.*)?$`)
+
+// documentMarker is a YAML document start or end marker. A workflow is one
+// document: a marker anywhere fails, so a second document is never skipped.
+var documentMarker = regexp.MustCompile(`^(?:---|\.\.\.)(?:[ \t]|$)`)
+
+// topKeyLine is a plain top-level key: the only column-0 line allowed after
+// `jobs:` besides blanks and comments.
+var topKeyLine = regexp.MustCompile(`^[A-Za-z0-9_.-]+:(?:[ \t]|$)`)
 
 // workflowJobs enumerates the jobs mapping of a workflow without a YAML
 // decoder, and fails closed: any line under `jobs:` it cannot read as
@@ -277,6 +285,12 @@ func workflowJobs(src string) ([]workflowJob, []string) {
 	for n, l := range strings.Split(src, "\n") {
 		trimmed := strings.TrimLeft(l, " ")
 		indent := len(l) - len(trimmed)
+		switch {
+		case documentMarker.MatchString(l):
+			problems = append(problems, fmt.Sprintf("line %d: a YAML document marker: %q", n+1, l))
+		case seen && l != "" && l[0] != ' ' && l[0] != '#' && strings.TrimSpace(l) != "" && !topKeyLine.MatchString(l):
+			problems = append(problems, fmt.Sprintf("line %d: a column-0 line after jobs that is not a plain top-level key: %q", n+1, l))
+		}
 		if !in {
 			if strings.HasPrefix(l, "jobs:") {
 				if seen {
@@ -303,7 +317,7 @@ func workflowJobs(src string) ([]workflowJob, []string) {
 		case indent == 2 && jobKeyLine.MatchString(l):
 			flush()
 			m := jobKeyLine.FindStringSubmatch(l)
-			jobs = append(jobs, workflowJob{id: m[1] + m[2] + m[3]})
+			jobs = append(jobs, workflowJob{id: m[1]})
 		default:
 			problems = append(problems, fmt.Sprintf("line %d: not a job key or a job's line: %q", n+1, l))
 		}
@@ -328,7 +342,8 @@ var blockIndicators = map[string]bool{"|": true, ">": true, "|-": true, ">-": tr
 // subsetScanner is an allowlist of a strict YAML subset, fed the lines under
 // `jobs:` one at a time. Each line must be blank, a full-line comment, a
 // `key: value` or `key:` line, or a `- ` sequence item holding one of those
-// or a scalar. A quoted scalar or a flow collection must close on its line.
+// or a scalar. A quoted scalar or a flow collection must close on its line;
+// no value carries an anchor, alias or tag.
 // A line deeper than the last one is allowed only after an empty value (a
 // nested mapping or sequence) or inside a block scalar; deeper after a
 // non-empty value is a plain multi-line scalar and fails. What the subset
@@ -395,6 +410,8 @@ func subsetValue(v string) (empty, block bool, why string) {
 	switch {
 	case v == "" || v[0] == '#':
 		return true, false, ""
+	case v[0] == '&' || v[0] == '*' || v[0] == '!':
+		return false, false, "a YAML anchor, alias or tag"
 	case v[0] == '|' || v[0] == '>':
 		header, rest := v, ""
 		if i := strings.IndexAny(v, " \t"); i >= 0 {
@@ -413,8 +430,8 @@ func subsetValue(v string) (empty, block bool, why string) {
 			return false, false, "text after a quoted scalar"
 		}
 	case v[0] == '[' || v[0] == '{':
-		if !flowClosed(v) {
-			return false, false, "a flow collection does not close on its line"
+		if why := flowClosed(v); why != "" {
+			return false, false, why
 		}
 	}
 	return false, false, ""
@@ -444,9 +461,11 @@ func quotedEnd(v string, i int) int {
 	return -1
 }
 
-// flowClosed reports whether the flow collection opening v closes on this
-// line, with only a comment after it.
-func flowClosed(v string) bool {
+// flowClosed returns "" when the flow collection opening v closes on this
+// line, with only a comment after it and no anchor, alias or tag inside it,
+// and the reason otherwise.
+func flowClosed(v string) string {
+	const open = "a flow collection does not close on its line"
 	depth := 0
 	for i := 0; i < len(v); i++ {
 		switch c := v[i]; c {
@@ -455,21 +474,28 @@ func flowClosed(v string) bool {
 				continue
 			}
 			if i = quotedEnd(v, i); i < 0 {
-				return false
+				return open
+			}
+		case '&', '*', '!':
+			if strings.ContainsRune("[{, \t", rune(v[i-1])) {
+				return "a YAML anchor, alias or tag in a flow collection"
 			}
 		case '[', '{':
 			depth++
 		case ']', '}':
 			if depth--; depth == 0 {
-				return commentOrBlank(v[i+1:])
+				if !commentOrBlank(v[i+1:]) {
+					return "text after a flow collection"
+				}
+				return ""
 			}
 		case '#':
 			if v[i-1] == ' ' || v[i-1] == '\t' {
-				return false
+				return open
 			}
 		}
 	}
-	return false
+	return open
 }
 
 func TestWaiverViolationsFindEveryJob(t *testing.T) {
@@ -502,6 +528,14 @@ func TestWaiverViolationsFindEveryJob(t *testing.T) {
 		{"unclosed double quote", hosted + "  extra:\n    runs-on: ubuntu-latest\n    env:\n      A: \"open\n      B: x\"\n", true},
 		{"plain multi-line value", hosted + "  extra:\n    runs-on: ubuntu-latest\n    name: a\n      b\n", true},
 		{"flow list not closed on its line", hosted + "  extra:\n    runs-on: ubuntu-latest\n    needs: [ok,\n      ok]\n", true},
+		{"second document holds an unwaived job", hosted + "--- \n  extra:\n    runs-on: qwen\n", true},
+		{"document end marker, then an unwaived job", hosted + "...\n  extra:\n    runs-on: qwen\n", true},
+		{"stray column-0 line", hosted + "extra\n  gpu:\n    runs-on: qwen\n", true},
+		{"top-level key after jobs", hosted + "env:\n  A: b\n", false},
+		{"anchor on a value", hosted + "  extra:\n    runs-on: ubuntu-latest\n    timeout-minutes: &t 5\n", true},
+		{"alias value", hosted + "  extra:\n    runs-on: ubuntu-latest\n    timeout-minutes: *t\n", true},
+		{"tagged value", hosted + "  extra:\n    runs-on: ubuntu-latest\n    timeout-minutes: !!int 5\n", true},
+		{"alias in a flow list", hosted + "  extra:\n    runs-on: ubuntu-latest\n    needs: [ok, *j]\n", true},
 		{"tab-indented line", hosted + "  extra:\n    runs-on: ubuntu-latest\n\tname: x\n", true},
 		{"subset forms", hosted + "  extra:\n    runs-on: ubuntu-latest  # note\n    needs: [ok]\n    env: {A: 'x', B: \"y # z\"}\n    if: \"github.event_name == 'push'\"\n    strategy:\n      matrix:\n        os:\n          - a\n          - 'b'\n    steps:\n      -\n        name: it's plain\n      - uses: x/y@v1\n        with:\n          script: >-\n            one\n\n            two\n      - run: |\n          echo 'unclosed\n", false},
 		{"next property after runs-on", hosted + "  extra:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n", false},
