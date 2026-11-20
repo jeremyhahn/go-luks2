@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -118,21 +117,17 @@ func TestJobNamesAreLiteral(t *testing.T) {
 
 // hostedRunner is the runs-on of every ci.yml job (Company Agent m2077):
 // GitHub-hosted ubuntu-latest, so main's CI Gate can go green on GitHub.
-// The one exception is dockerPoolRunner.
+// Ruling 999: there is no exception. Self-hosted runners are only for a
+// hardware-specific job or one that exceeds a measured hosted limit (disk,
+// memory, or 6 h), and no ci.yml job does.
 const hostedRunner = "ubuntu-latest"
 
-// dockerPoolRunner is the runs-on a job in toolchainJobs may carry instead of
-// hostedRunner (ruling 442): the bigdisk-docker pool, a throwaway guest per
-// job with its own Docker daemon, for a push to main and a same-repository
-// pull request, and ubuntu-latest for every other event, a fork's pull
-// request among them.
-const dockerPoolRunner = `${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}`
-
 // retiredLabels are the self-hosted runner labels the workflows ran on
-// before m2077. No workflow names them, and .github/actionlint.yaml does not
-// list them, so a typo of one is still caught as an unknown runner.
-// bigdisk-docker (dockerPoolRunner) is a different label.
-var retiredLabels = []string{"bigdisk", "ci-gate", "batch"}
+// before m2077 (bigdisk, ci-gate, batch) and before ruling 999
+// (bigdisk-docker, the pool ruling 442 routed main pushes and same-repository
+// pull requests to). No workflow names them, and .github/actionlint.yaml does
+// not list them, so a typo of one is still caught as an unknown runner.
+var retiredLabels = []string{"bigdisk", "ci-gate", "batch", "bigdisk-docker"}
 
 // TestCIGateRunsOnTheHostedRunner: CI Gate runs on ubuntu-latest. It still
 // takes no checkout and no action: the gate is one run step that reads needs.
@@ -155,22 +150,15 @@ func TestCIGateRunsOnTheHostedRunner(t *testing.T) {
 const freeDiskStep = "Free runner disk"
 
 // TestEveryCIJobRunsOnTheHostedRunner: every ci.yml job runs on
-// ubuntu-latest, except that a job that builds a devcontainer image may carry
-// exactly dockerPoolRunner (ruling 442). Every job that builds one frees the
-// runner's disk first, on github.com only, before any image build, and on the
-// hosted runner only when the job can run on the pool.
+// a literal ubuntu-latest (ruling 999): no routing expression, no self-hosted
+// label. Every job that builds a devcontainer image frees the runner's disk
+// first, on github.com only, before any image build.
 func TestEveryCIJobRunsOnTheHostedRunner(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
 	for _, id := range jobIDs(t, ci) {
 		got := jobRunsOn.FindAllStringSubmatch(job(t, ci, id), -1)
-		pool := slices.Contains(toolchainJobs, id)
-		switch {
-		case len(got) == 1 && got[0][1] == hostedRunner:
-		case len(got) == 1 && got[0][1] == dockerPoolRunner && pool:
-		case pool:
-			t.Errorf("job %s runs on %v, want %s or exactly dockerPoolRunner (ruling 442)", id, got, hostedRunner)
-		default:
-			t.Errorf("job %s runs on %v, want %s", id, got, hostedRunner)
+		if len(got) != 1 || got[0][1] != hostedRunner {
+			t.Errorf("job %s runs on %v, want %s (ruling 999)", id, got, hostedRunner)
 		}
 	}
 	for _, id := range toolchainJobs {
@@ -186,9 +174,6 @@ func TestEveryCIJobRunsOnTheHostedRunner(t *testing.T) {
 		block, _, _ := strings.Cut(j[free:], "\n\n")
 		if !strings.Contains(block, "github.server_url == 'https://github.com'") {
 			t.Errorf("job %s's %q step is not limited to github.com:\n%s", id, freeDiskStep, block)
-		}
-		if strings.Contains(j, dockerPoolRunner) && !strings.Contains(block, "runner.environment == 'github-hosted'") {
-			t.Errorf("job %s can run on the bigdisk-docker pool and its %q step is not limited to the hosted runner:\n%s", id, freeDiskStep, block)
 		}
 	}
 }
@@ -217,7 +202,8 @@ var serverURLArms = regexp.MustCompile(`^\$\{\{ github\.server_url == 'https://g
 
 // retiredRunsOnLabel reports the retired label a runs-on value would run
 // on. For a server_url conditional only the github.com arm is checked;
-// every other value is checked whole.
+// every other value is checked whole: a label counts as the bare value, in single
+// quotes, or in double quotes (an element of a fromJSON array).
 func retiredRunsOnLabel(v string) (string, bool) {
 	v = strings.TrimSpace(v)
 	if m := serverURLArms.FindStringSubmatch(v); m != nil {
@@ -225,7 +211,7 @@ func retiredRunsOnLabel(v string) (string, bool) {
 	}
 	fields := strings.Fields(v)
 	for _, l := range retiredLabels {
-		if strings.Contains(v, "'"+l+"'") || (len(fields) > 0 && fields[0] == l) {
+		if strings.Contains(v, "'"+l+"'") || strings.Contains(v, `"`+l+`"`) || (len(fields) > 0 && fields[0] == l) {
 			return l, true
 		}
 	}
@@ -240,6 +226,9 @@ func TestRetiredRunsOnLabel(t *testing.T) {
 		{`${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}`, false},
 		{`${{ github.server_url == 'https://github.com' && 'bigdisk' || 'ubuntu-latest' }}`, true},
 		{`bigdisk`, true},
+		{`bigdisk-docker`, true},
+		{`${{ github.event_name == 'push' && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}`, true},
+		{`ubuntu-latest`, false},
 	} {
 		if _, got := retiredRunsOnLabel(c.v); got != c.retired {
 			t.Errorf("retiredRunsOnLabel(%q) = %v, want %v", c.v, got, c.retired)
