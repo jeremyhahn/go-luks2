@@ -27,6 +27,7 @@
 .github/workflows/code-review.yml export-ignore
 .github/workflows/scans.yml export-ignore
 .github/workflows/revert-red-main.yml export-ignore
+test/ci/workflows/revert_steps_test.go export-ignore
 
 # The fleet pattern set and its tests: they name the values the gate bans.
 test/internal/labstrings/fleet.go export-ignore

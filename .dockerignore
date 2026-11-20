@@ -49,6 +49,7 @@ coverage.html
 .github/workflows/code-review.yml
 .github/workflows/scans.yml
 .github/workflows/revert-red-main.yml
+test/ci/workflows/revert_steps_test.go
 test/internal/labstrings/fleet.go
 test/internal/labstrings/fleet_test.go
 
