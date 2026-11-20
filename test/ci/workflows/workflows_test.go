@@ -345,3 +345,23 @@ func TestMakefileSaysWhereTrivyGates(t *testing.T) {
 		}
 	}
 }
+
+// TestTrivyVersionFileMatchesThePin: ci-template v1.48's companions put a
+// .trivy-version file at the root, read by the template's install-trivy.sh.
+// go-luks2 installs trivy through `make trivy-install` from the tool pin
+// file, so .trivy-version must name that same release: a second pin that
+// drifts below the real one would quietly downgrade any tool that reads it.
+// The root .trivyignore ships with it (trivy treats a missing ignore file as
+// a fatal flag error).
+func TestTrivyVersionFileMatchesThePin(t *testing.T) {
+	m := regexp.MustCompile(`(?m)^TRIVY_VERSION=v?(\S+)$`).FindStringSubmatch(readFile(t, "build/docker/devcontainer/tool-pins.env"))
+	if m == nil {
+		t.Fatal("tool-pins.env pins no TRIVY_VERSION")
+	}
+	if got := strings.TrimSpace(readFile(t, ".trivy-version")); strings.TrimPrefix(got, "v") != m[1] {
+		t.Errorf(".trivy-version = %q, want %q (tool-pins.env's TRIVY_VERSION)", got, m[1])
+	}
+	if _, err := os.Stat(filepath.Join(repoRoot(t), ".trivyignore")); err != nil {
+		t.Errorf("no root .trivyignore: %v", err)
+	}
+}
