@@ -1,6 +1,7 @@
 package workflows
 
 import (
+	"fmt"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -114,20 +115,129 @@ func TestEveryJobRunsOnHostedOrWaived(t *testing.T) {
 		if !present {
 			continue
 		}
-		name := filepath.Base(f)
-		for _, id := range jobIDs(t, src) {
-			j := job(t, src, id)
-			lines := runsOnLine.FindAllStringSubmatch(j, -1)
-			if len(lines) == 0 && reusableUses.MatchString(j) {
-				continue
+		for _, why := range waiverViolations(t, filepath.Base(f), src) {
+			t.Errorf("%s (ruling 999)", why)
+		}
+	}
+}
+
+// waiverViolations applies ruling 999's runner rule to every job of one
+// workflow and returns one line per violation.
+func waiverViolations(t *testing.T, name, src string) []string {
+	t.Helper()
+	jobs, out := workflowJobs(src)
+	for i := range out {
+		out[i] = name + ": " + out[i]
+	}
+	for _, j := range jobs {
+		lines := runsOnLine.FindAllStringSubmatch(j.body, -1)
+		if len(lines) == 0 && reusableUses.MatchString(j.body) {
+			continue
+		}
+		if len(lines) != 1 {
+			out = append(out, fmt.Sprintf("%s job %s has %d runs-on lines, want 1", name, j.id, len(lines)))
+			continue
+		}
+		if why := runsOnViolation(name, j.id, lines[0][1]); why != "" {
+			out = append(out, fmt.Sprintf("%s job %s: %s", name, j.id, why))
+		}
+	}
+	return out
+}
+
+// workflowJob is one entry of a workflow's jobs mapping: its id, unquoted,
+// and the lines under its key.
+type workflowJob struct {
+	id, body string
+}
+
+// jobsKeyLine is the top-level jobs key, a block mapping with nothing after
+// the colon but a comment.
+var jobsKeyLine = regexp.MustCompile(`^jobs:\s*(#.*)?$`)
+
+// jobKeyLine is one job key at job indentation: bare, single- or
+// double-quoted, with nothing after the colon but a comment.
+var jobKeyLine = regexp.MustCompile(`^  (?:([A-Za-z0-9_-]+)|'([A-Za-z0-9_-]+)'|"([A-Za-z0-9_-]+)")\s*:\s*(#.*)?$`)
+
+// workflowJobs enumerates the jobs mapping of a workflow without a YAML
+// decoder, and fails closed: any line under `jobs:` it cannot read as
+// a comment, a job key at two-space indentation or a line of a job's body is
+// returned as a problem, so a job the scan cannot see is never let through.
+func workflowJobs(src string) ([]workflowJob, []string) {
+	var (
+		jobs     []workflowJob
+		problems []string
+		body     []string
+		in, seen bool
+	)
+	flush := func() {
+		if len(jobs) > 0 {
+			jobs[len(jobs)-1].body = strings.Join(body, "\n")
+		}
+		body = nil
+	}
+	for n, l := range strings.Split(src, "\n") {
+		trimmed := strings.TrimLeft(l, " ")
+		indent := len(l) - len(trimmed)
+		if !in {
+			if strings.HasPrefix(l, "jobs:") {
+				if seen {
+					problems = append(problems, fmt.Sprintf("line %d: a second jobs key", n+1))
+				} else if !jobsKeyLine.MatchString(l) {
+					problems = append(problems, fmt.Sprintf("line %d: jobs is not a block mapping: %q", n+1, l))
+				}
+				in, seen = true, true
 			}
-			if len(lines) != 1 {
-				t.Errorf("%s job %s has %d runs-on lines, want 1", name, id, len(lines))
-				continue
-			}
-			if why := runsOnViolation(name, id, lines[0][1]); why != "" {
-				t.Errorf("%s job %s: %s (ruling 999)", name, id, why)
-			}
+			continue
+		}
+		switch {
+		case strings.TrimSpace(l) == "" || strings.HasPrefix(trimmed, "#"):
+			body = append(body, l)
+		case indent == 0:
+			in = false
+		case indent >= 4 && len(jobs) > 0:
+			body = append(body, l)
+		case indent == 2 && jobKeyLine.MatchString(l):
+			flush()
+			m := jobKeyLine.FindStringSubmatch(l)
+			jobs = append(jobs, workflowJob{id: m[1] + m[2] + m[3]})
+		default:
+			problems = append(problems, fmt.Sprintf("line %d: not a job key or a job's line: %q", n+1, l))
+		}
+	}
+	flush()
+	if !seen || len(jobs) == 0 {
+		problems = append(problems, "no jobs found")
+	}
+	return jobs, problems
+}
+
+func TestWaiverViolationsFindEveryJob(t *testing.T) {
+	const hosted = "  ok:\n    runs-on: ubuntu-latest\n"
+	for _, c := range []struct {
+		name, jobs string
+		bad        bool
+	}{
+		{"hosted only", hosted, false},
+		{"waived", hosted + "  gpu:\n    runs-on: qwen  # self-hosted: hardware: the GPU\n", false},
+		{"commented key between jobs", hosted + "  # a note\n  gpu:\n    runs-on: ubuntu-latest\n", false},
+		{"plain key, unwaived", hosted + "  extra:\n    runs-on: qwen\n", true},
+		{"inline-commented key, unwaived", hosted + "  extra: # GPU work\n    runs-on: qwen\n", true},
+		{"single-quoted key, unwaived", hosted + "  'extra':\n    runs-on: qwen\n", true},
+		{"double-quoted key, unwaived", hosted + "  \"extra\":\n    runs-on: qwen\n", true},
+		{"quoted, commented key, unwaived", hosted + "  \"extra\":   # GPU work\n    runs-on: qwen\n", true},
+		{"flow-mapping job", hosted + "  extra: {runs-on: qwen}\n", true},
+		{"unknown line at job indentation", hosted + "  ? extra\n  : {runs-on: qwen}\n", true},
+		{"deeper job indentation", "   extra:\n     runs-on: qwen\n", true},
+		{"quoted runs-on key", hosted + "  extra:\n    \"runs-on\": qwen\n", true},
+		{"no jobs", "", true},
+		{"second jobs key", hosted + "env: {}\njobs:\n  extra:\n    runs-on: qwen\n", true},
+		{"block scalar in a step", "  ok:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          echo hi\n\n          echo there\n", false},
+	} {
+		src := "name: x\non: push\njobs:\n" + c.jobs
+		got := waiverViolations(t, "x.yml", src)
+		if (len(got) > 0) != c.bad {
+			t.Errorf("%s: waiverViolations = %q, want violation=%v", c.name, got, c.bad)
 		}
 	}
 }
