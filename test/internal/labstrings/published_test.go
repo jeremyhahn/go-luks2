@@ -367,21 +367,3 @@ func TestDefaultStripAtPublish_StripsTheInternalScansWorkflow(t *testing.T) {
 		t.Errorf("%s is reported as unpublishable: %v", path, findings)
 	}
 }
-
-// TestDefaultStripAtPublish_StripsTheRevertWorkflow: revert-red-main.yml
-// (ci-template v1.48's companion, #494) is a factory workflow, tracked on main
-// and stripped from the public release like scans.yml.
-func TestDefaultStripAtPublish_StripsTheRevertWorkflow(t *testing.T) {
-	path := workflowDir + "revert-red-main.yml"
-	entries := entriesOf(map[string]string{path: "on: workflow_run\n"})
-	if listed := StripAtPublish(entries, DefaultStripAtPublish); len(listed) != 1 {
-		t.Errorf("StripAtPublish(%s) = %v, want it stripped", path, listed)
-	}
-	findings, err := ScanUnpublishable(entries, DefaultUnpublishable, DefaultStripAtPublish)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(findings) != 0 {
-		t.Errorf("%s is reported as unpublishable: %v", path, findings)
-	}
-}

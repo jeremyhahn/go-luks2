@@ -79,10 +79,6 @@ var DefaultStripAtPublish = []Unpublishable{
 	{Path: workflowDir + "code-review.yml", Reason: internalReviewWorkflow},
 	{Path: workflowDir + "scans.yml", Reason: "internal scans workflow: runs on a workflow_dispatch " +
 		"of main only; tracked on main, stripped from the public release (#211)"},
-	{Path: workflowDir + "revert-red-main.yml", Reason: "internal factory workflow (ci-template v1.48's " +
-		"companion): reverts a red main push; tracked on main, stripped from the public release (#211, #494)"},
-	{Path: "test/ci/workflows/revert_steps_test.go", Reason: "the tests of revert-red-main.yml, which read " +
-		"only that workflow; stripped with the workflow they test (#494)"},
 	{Path: fleetPatterns, Reason: "the fleet pattern set: shapes and digests of the fleet's values, " +
 		"which a short value's digest does not keep secret (#211)"},
 	{Path: fleetTests, Reason: "the fleet pattern set's tests, which pin its digest table; stripped " +

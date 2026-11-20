@@ -54,7 +54,6 @@ The strip-at-publish set is:
 | `**/.serena/**` | Code-analysis tool state, at any depth; gitignored whole |
 | `.github/workflows/code-review.yml` | The internal code-review workflow |
 | `.github/workflows/scans.yml` | The internal scans workflow (a workflow_dispatch of main only) |
-| `.github/workflows/revert-red-main.yml`, `test/ci/workflows/revert_steps_test.go` | The internal factory workflow that reverts a red main push (ci-template v1.48's companion), and its tests, which read only that workflow |
 | `test/internal/labstrings/fleet.go`, `test/internal/labstrings/fleet_test.go` | The fleet pattern set and its tests: generic shapes plus SHA-256 digests of the values the gate bans, never the values themselves. Digests of short values are hygiene, not secrecy, so the set stays out of the release |
 
 A test that reads only a strip-at-publish file is itself stripped at publish,
