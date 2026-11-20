@@ -41,7 +41,7 @@ func maskLines(t *testing.T, set map[string]string) []string {
 func TestCIMaskLANMasksThePrivateEntries(t *testing.T) {
 	got := maskLines(t, map[string]string{
 		"DEVCACHE_APK":      "http://10.0.0.5:3142/alpine",
-		"GOPROXY":           "http://192.168.1.9:3000|https://proxy.golang.org,direct",
+		"GOPROXY":           "http://192.168.254.254:8080|https://proxy.golang.org,direct",
 		"CI_REGISTRY":       "172.20.0.1:5000",
 		"CI_IMAGE_REGISTRY": "172.31.255.1",
 		"RELEASE_REGISTRY":  "ghcr.io/owner",
@@ -56,10 +56,10 @@ func TestCIMaskLANMasksThePrivateEntries(t *testing.T) {
 		"::add-mask::172.20.0.1",
 		"::add-mask::172.20.0.1:5000",
 		"::add-mask::172.31.255.1",
-		"::add-mask::192.168.1.9",
-		"::add-mask::192.168.1.9:3000",
+		"::add-mask::192.168.254.254",
+		"::add-mask::192.168.254.254:8080",
 		"::add-mask::http://10.0.0.5:3142/alpine",
-		"::add-mask::http://192.168.1.9:3000",
+		"::add-mask::http://192.168.254.254:8080",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("make -s ci-mask-lan printed\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
