@@ -265,16 +265,19 @@ var topKeyLine = regexp.MustCompile(`^[A-Za-z0-9_.-]+:(?:[ \t]|$)`)
 // decoder, and fails closed: any line under `jobs:` it cannot read as
 // a comment, a job key at two-space indentation or a line of a job's body is
 // returned as a problem, so a job the scan cannot see is never let through.
-// Every line under `jobs:` must also fit the strict YAML subset of
-// subsetScanner, so a quoted or escaped key, an unclosed quote or a plain
-// multi-line scalar cannot make GitHub read a job differently from the scan.
+// Every line of the file, from line 1 and top level included, must also fit
+// the strict YAML subset of subsetScanner, and the file must hold exactly one
+// top-level `jobs:` key, so a quoted or escaped key, an unclosed quote or a
+// plain multi-line scalar anywhere cannot make GitHub read a job differently
+// from the scan.
 func workflowJobs(src string) ([]workflowJob, []string) {
 	var (
 		jobs     []workflowJob
 		problems []string
 		body     []string
-		in, seen bool
-		subset   *subsetScanner
+		in       bool
+		jobsKeys int
+		subset   = newSubsetScanner(false)
 	)
 	flush := func() {
 		if len(jobs) > 0 {
@@ -283,29 +286,33 @@ func workflowJobs(src string) ([]workflowJob, []string) {
 		body = nil
 	}
 	for n, l := range strings.Split(src, "\n") {
-		trimmed := strings.TrimLeft(l, " ")
-		indent := len(l) - len(trimmed)
-		switch {
-		case documentMarker.MatchString(l):
+		if documentMarker.MatchString(l) {
 			problems = append(problems, fmt.Sprintf("line %d: a YAML document marker: %q", n+1, l))
-		case seen && l != "" && l[0] != ' ' && l[0] != '#' && strings.TrimSpace(l) != "" && !topKeyLine.MatchString(l):
-			problems = append(problems, fmt.Sprintf("line %d: a column-0 line after jobs that is not a plain top-level key: %q", n+1, l))
-		}
-		if !in {
-			if strings.HasPrefix(l, "jobs:") {
-				if seen {
-					problems = append(problems, fmt.Sprintf("line %d: a second jobs key", n+1))
-				} else if !jobsKeyLine.MatchString(l) {
-					problems = append(problems, fmt.Sprintf("line %d: jobs is not a block mapping: %q", n+1, l))
-				}
-				in, seen, subset = true, true, newSubsetScanner()
-			}
 			continue
 		}
-		if indent > 0 || strings.HasPrefix(l, "\t") || strings.TrimSpace(l) == "" || strings.HasPrefix(l, "#") {
-			if why := subset.line(l); why != "" {
-				problems = append(problems, fmt.Sprintf("line %d: %s: %q", n+1, why, l))
+		if why := subset.line(l); why != "" {
+			problems = append(problems, fmt.Sprintf("line %d: %s: %q", n+1, why, l))
+		}
+		trimmed := strings.TrimLeft(l, " ")
+		indent := len(l) - len(trimmed)
+		if jobsKeys > 0 && l != "" && l[0] != ' ' && l[0] != '#' && strings.TrimSpace(l) != "" && !topKeyLine.MatchString(l) {
+			problems = append(problems, fmt.Sprintf("line %d: a column-0 line after jobs that is not a plain top-level key: %q", n+1, l))
+		}
+		if strings.HasPrefix(l, "jobs:") {
+			jobsKeys++
+			switch {
+			case jobsKeys > 1:
+				problems = append(problems, fmt.Sprintf("line %d: a second top-level jobs key", n+1))
+				in = false
+				continue
+			case !jobsKeyLine.MatchString(l):
+				problems = append(problems, fmt.Sprintf("line %d: jobs is not a block mapping: %q", n+1, l))
 			}
+			in = true
+			continue
+		}
+		if !in {
+			continue
 		}
 		switch {
 		case strings.TrimSpace(l) == "" || strings.HasPrefix(trimmed, "#"):
@@ -323,7 +330,7 @@ func workflowJobs(src string) ([]workflowJob, []string) {
 		}
 	}
 	flush()
-	if !seen || len(jobs) == 0 {
+	if jobsKeys == 0 || len(jobs) == 0 {
 		problems = append(problems, "no jobs found")
 	}
 	return jobs, problems
@@ -339,8 +346,8 @@ var subsetKey = regexp.MustCompile(`^([A-Za-z0-9_.-]+):(?:[ \t]+|$)(.*)$`)
 // indentation indicator.
 var blockIndicators = map[string]bool{"|": true, ">": true, "|-": true, ">-": true, "|+": true, ">+": true}
 
-// subsetScanner is an allowlist of a strict YAML subset, fed the lines under
-// `jobs:` one at a time. Each line must be blank, a full-line comment, a
+// subsetScanner is an allowlist of a strict YAML subset, fed every line of a
+// workflow file, from line 1, one at a time. Each line must be blank, a full-line comment, a
 // `key: value` or `key:` line, or a `- ` sequence item holding one of those
 // or a scalar. A quoted scalar or a flow collection must close on its line;
 // no value carries an anchor, alias or tag.
@@ -355,7 +362,12 @@ type subsetScanner struct {
 	block  int  // parent column of the open block scalar, or -1
 }
 
-func newSubsetScanner() *subsetScanner { return &subsetScanner{deeper: true, block: -1} }
+// newSubsetScanner starts a scan at column 0. With nested false the first
+// content line must be at column 0 (a whole file); with nested true it may
+// be deeper (the lines under a key).
+func newSubsetScanner(nested bool) *subsetScanner {
+	return &subsetScanner{deeper: nested, block: -1}
+}
 
 // line checks one line and returns why it is outside the subset, or "".
 func (s *subsetScanner) line(l string) string {
@@ -557,6 +569,32 @@ func TestWaiverViolationsFindEveryJob(t *testing.T) {
 	} {
 		src := "name: x\non: push\njobs:\n" + c.jobs
 		got := waiverViolations(t, "x.yml", src)
+		if (len(got) > 0) != c.bad {
+			t.Errorf("%s: waiverViolations = %q, want violation=%v", c.name, got, c.bad)
+		}
+	}
+}
+
+// TestWaiverViolationsWholeFile: the strict subset holds from line 1, top
+// level included, and the file has exactly one top-level jobs key.
+func TestWaiverViolationsWholeFile(t *testing.T) {
+	const job = "  ok:\n    runs-on: ubuntu-latest\n"
+	for _, c := range []struct {
+		name, src string
+		bad       bool
+	}{
+		{"codex: quoted jobs key, decoy jobs inside a multi-line name", "\"jobs\":\n  real:\n    runs-on: qwen\n    steps:\n      - run: echo hi\nname: \"decoy\njobs:\n  fake:\n    runs-on: ubuntu-latest\n    x: end\"\non: push\n", true},
+		{"two top-level jobs keys", "name: x\non: push\njobs:\n" + job + "jobs:\n" + job, true},
+		{"no jobs key", "name: x\non: push\n", true},
+		{"plain multi-line top-level value", "name: a\n  jobs\non: push\njobs:\n" + job, true},
+		{"quoted top-level key", "'name': x\non: push\njobs:\n" + job, true},
+		{"anchor at the top level", "name: x\non: &o push\njobs:\n" + job, true},
+		{"leading document marker", "---\nname: x\non: push\njobs:\n" + job, true},
+		{"indented first line", "  name: x\non: push\njobs:\n" + job, true},
+		{"block scalar at the top level", "name: x\nrun-name: |\n  jobs:\n    evil:\njobs:\n" + job, false},
+		{"one jobs key with top-level context", "# c\nname: x\non:\n  push:\n    branches: [main]\n  schedule:\n    - cron: '0 3 * * *'\npermissions: {}\njobs:\n" + job + "env:\n  A: b\n", false},
+	} {
+		got := waiverViolations(t, "x.yml", c.src)
 		if (len(got) > 0) != c.bad {
 			t.Errorf("%s: waiverViolations = %q, want violation=%v", c.name, got, c.bad)
 		}
