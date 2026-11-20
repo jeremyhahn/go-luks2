@@ -526,7 +526,6 @@ on:
     # nothing: no run, no status. The cost: adding `ci:full` waits for the
     # PR's next push or update-branch, or takes effect through
     # `workflow_dispatch`.
-<<<<<<< ours.yml
     # v1.35.3: `ready_for_review`. CI Gate fails on a draft, so a PR marked
     # ready with no new push needs its own run, or its head keeps the draft's
     # failed gate until the next push.
@@ -534,66 +533,19 @@ on:
   # Lets a run be repeated without inventing a commit, which matters when a
   # failure is the runner's rather than the code's.
   workflow_dispatch:
-||||||| base.yml
-    types: [opened, synchronize, reopened]
-  workflow_dispatch:                    # re-fire a whole workflow; also the
-                                        # only retry when a run was never
-                                        # created (see v1.3 correction above)
-  # v1.23: main's full tier nightly as well as after every merge. Scheduled
-  # runs are on the default branch. CUSTOMIZE: the hour, off nightly.yml's.
-  # v1.29.3: one schedule run per repository (the concurrency group below),
-  # and its bigdisk jobs skip while a main push run is in flight (the
-  # schedule-guard job).
-  schedule:
-    - cron: '0 4 * * *'
-=======
-    # v1.35.3: `ready_for_review`, so a draft marked ready gets its run.
-    types: [opened, synchronize, reopened, ready_for_review]
-  workflow_dispatch:                    # re-fire a whole workflow; also the
-                                        # only retry when a run was never
-                                        # created (see v1.3 correction above)
-  # v1.23: main's full tier nightly as well as after every merge. Scheduled
-  # runs are on the default branch. CUSTOMIZE: the hour, off nightly.yml's.
-  # v1.29.3: one schedule run per repository (the concurrency group below),
-  # and its bigdisk jobs skip while a main push run is in flight (the
-  # schedule-guard job).
-  schedule:
-    - cron: '0 4 * * *'
->>>>>>> theirs.yml
+  # CUSTOMIZE (go-luks2): no schedule trigger (#341, sdlc §5a,
+  # TestNoScheduleTrigger); main's full tier runs after every merge and on
+  # workflow_dispatch, never on a cron.
 
 # v1.26.2: on main the group is the workflow, the event and the commit sha,
 # so each main run is its own group and a merge never cancels the main run in
 # progress; a schedule or workflow_dispatch run is in its own event's group
-<<<<<<< ours.yml
 # and never shares one with a push run (superseding v1.25's `main-{event}`
 # group). Every other ref is one group, so a PR's newer run cancels the
 # older. No expression reaches cancel-in-progress: Gitea 1.27.1 never
 # released a main run queued behind one that set it to an expression.
 # v1.29.3: a schedule run's group is `schedule-{repository}`, with no sha, so a
 # repository has one schedule run at a time (none is scheduled here).
-||||||| base.yml
-# and never shares one with a push run (Company Agent m1167 (5), ruling 145,
-# superseding v1.25's `main-{event}` group, m857 and m774 option (i)). Every
-# other ref is one group, so a PR's newer run cancels the older. No
-# expression reaches cancel-in-progress: Gitea 1.27.1 never released go-qrdb
-# main run 57063, the first run after v1.22.1 set it to an expression
-# (Company Agent m695).
-# v1.29.3 (ruling 255(10)/(11)(c)): a schedule run's group is
-# `schedule-{repository}`, with no sha, so a repository has one schedule run
-# at a time. It is tested first, so a schedule run never takes a main group.
-# The push, pull_request and workflow_dispatch groups do not change.
-=======
-# and never shares one with a push run (Tenant Agent m1167 (5), ruling 145,
-# superseding v1.25's `main-{event}` group, m857 and m774 option (i)). Every
-# other ref is one group, so a PR's newer run cancels the older. No
-# expression reaches cancel-in-progress: Gitea 1.27.1 never released go-qrdb
-# main run 57063, the first run after v1.22.1 set it to an expression
-# (Tenant Agent m695).
-# v1.29.3 (ruling 255(10)/(11)(c)): a schedule run's group is
-# `schedule-{repository}`, with no sha, so a repository has one schedule run
-# at a time. It is tested first, so a schedule run never takes a main group.
-# The push, pull_request and workflow_dispatch groups do not change.
->>>>>>> theirs.yml
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}
   cancel-in-progress: true
@@ -603,65 +555,30 @@ permissions:
 
 env:
   COVERAGE_THRESHOLD: 90      # CUSTOMIZE: per testing-guidelines.md
-<<<<<<< ours.yml
   # CUSTOMIZE (v1.9.2): the repo's full build-tag set, SPACE separated. The
   # integration suites and their `!integration` stubs sit behind
   # `integration`; lint, gosec and the assertion below read it, never the
   # unit run (the Makefile's GO_BUILD_TAGS block says why).
   GO_BUILD_TAGS: "integration"
-  # v1.23: the full tier (ci-standard.md §8). Every event but pull_request
-  # (push to main, workflow_dispatch), and a PR labelled ci:full.
-||||||| base.yml
-  # CUSTOMIZE (v1.9.2): the repo's full build-tag set, SPACE separated — the go
-  # tool's own form. Leave EMPTY if no package is tag-gated. Every analysis step
-  # below derives its own form from this ONE value; never write the tag list
-  # twice. A tag-gated package that is not named here is analysed by NOTHING
-  # while the gate still reports green (one repository had eight
-  # such packages, including its whole WebAuthn implementation).
-  GO_BUILD_TAGS: ""
-  # v1.23: the full tier (ci-standard.md §8). Every event but pull_request
-  # (push to main, schedule, workflow_dispatch), and a PR labelled ci:full.
-=======
-  # CUSTOMIZE (v1.9.2): the repo's full build-tag set, SPACE separated — the go
-  # tool's own form. Leave EMPTY if no package is tag-gated. Every analysis step
-  # below derives its own form from this ONE value; never write the tag list
-  # twice. A tag-gated package that is not named here is analysed by NOTHING
-  # while the gate still reports green (one repository had eight
-  # such packages, including its whole WebAuthn implementation).
-  GO_BUILD_TAGS: ""
   # v1.23: the full tier (ci-standard.md §8). v1.41 (ruling 742 (2)): every
   # event, a pull_request included, so a PR runs every stage main runs.
   # v1.30 (fix 5): a workflow_dispatch off main is not the full tier (the
   # schedule guard refuses it and CI Gate fails); v1.41: ci/deps-bump, which
   # deps-bump.yml (v1.42: scans.yml) dispatches because its PR starts no
   # pull_request run, is.
->>>>>>> theirs.yml
   # Steps read it as env.CI_FULL_TIER; a job-level `if:` cannot read env, so
   # the integration job repeats this expression. Keep them equal.
-<<<<<<< ours.yml
-  # v1.30 (fix 5): a workflow_dispatch off main is not the full tier (the
-  # schedule guard refuses it and CI Gate fails).
-  CI_FULL_TIER: ${{ (github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')) || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
-  # v1.24: the files a docs-only PR may touch. CUSTOMIZE: narrow it
-||||||| base.yml
-  # v1.30 (fix 5): a workflow_dispatch off main is not the full tier (the
-  # schedule guard refuses it and CI Gate fails).
-  CI_FULL_TIER: ${{ (github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')) || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
-  # v1.24 (CA m749, m751 (a)): the files a docs-only PR may touch. CUSTOMIZE: narrow it
-=======
   CI_FULL_TIER: ${{ github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ci/deps-bump' }}
   # v1.41: `ci:full` on a PR turns off the docs-only and lint-gates path
   # scopes; it selects no tier.
   CI_FULL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci:full') }}
   # v1.24 (Tenant Agent m749, m751 (a)): the files a docs-only PR may touch. CUSTOMIZE: narrow it
->>>>>>> theirs.yml
   # in a repo that embeds or generates from docs/ (go:embed, OpenAPI, protos).
   DOCS_ONLY_PATTERN: '(\.md$|^docs/)'
   # v1.30 (fix 3): a PR runs the lint-gates job only when a changed file
   # matches this extended regex. CUSTOMIZE: this repository defines no
   # lint-gates target, so the default, every file, stands.
   LINT_GATES_PATTERN: '.'
-<<<<<<< ours.yml
   # v1.26.1: the template's RELEASABILITY_TEST variable and its docs-only step
   # are not used here. CUSTOMIZE: this repository's releasability check is the
   # gate `make releasability`, not a `go test`, and the lint job's
@@ -677,37 +594,12 @@ env:
   GOLANGCI_LINT_VERSION: "v2.14.0"
   GOSEC_VERSION: "v2.29.0"
   GOVULNCHECK_VERSION: "v1.8.0"
-||||||| base.yml
-  # v1.26.1 (Company Agent m1128 (9)): the repository's releasability test, which
-  # a docs-only PR still runs because make coverage skips on it. CUSTOMIZE: the
-  # `go test` arguments, package and -run pattern (for example
-  # `./pkg/labstrings -run '^TestTheTrackedTreeIsPubliclyReleasable$'`).
-  # Empty means the repository has none. v1.31: this test names no internal
-  # host, device, address or account; the internal names are checked by the
-  # `Releasability (private patterns)` step from the private pattern file.
-  RELEASABILITY_TEST: ""
-=======
-  # v1.26.1 (Tenant Agent m1128 (9)): the repository's releasability test, which
-  # a docs-only PR still runs because make coverage skips on it. CUSTOMIZE: the
-  # `go test` arguments, package and -run pattern (for example
-  # `./pkg/labstrings -run '^TestTheTrackedTreeIsPubliclyReleasable$'`).
-  # Empty means the repository has none. v1.31: this test names no internal
-  # host, device, address or account; the internal names are checked by the
-  # `Releasability (private patterns)` step from the private pattern file.
-  RELEASABILITY_TEST: ""
-  # v1.48 (Tenant Agent ruling 1024 item 1, queue 250 (a)): the most jobs of
-  # this repository that run on GitHub-hosted runners at once. The preflight
-  # step `Hosted or overflow runner (ruling 1024)` sends the run's jobs to the
-  # Dells' bigdisk pools when this many hosted jobs of the repository are
-  # already in progress, or when one of its hosted jobs has waited in the
-  # queue for HOSTED_QUEUE_GRACE_SECONDS (the hosted pool is full). The
-  # owner's number, not a CUSTOMIZE value.
-  HOSTED_JOBS_PER_REPO: 12
-  HOSTED_QUEUE_GRACE_SECONDS: 60
->>>>>>> theirs.yml
+  # CUSTOMIZE (go-luks2): v1.48's HOSTED_JOBS_PER_REPO and
+  # HOSTED_QUEUE_GRACE_SECONDS are not taken. Every job's runs-on is a literal
+  # ubuntu-latest (owner ruling 999) and bigdisk is retired here, so the
+  # preflight overflow step that reads them is not taken either.
 
 jobs:
-<<<<<<< ours.yml
   # ---- PR tier ----
   #
   # v1.34: one preflight job, in place of the changes, schedule-guard and
@@ -731,103 +623,6 @@ jobs:
   # reaches it only through the packages that are its storage seam; this
   # library has none, so no package may import it. Test files are exempt. A
   # source check with grep on the runner's shell, on the PR tier.
-||||||| base.yml
-  # v1.34 (Company Agent m2211 item 2(b)): one preflight job instead of three.
-  # `Changed files`, `Schedule guard` and `Architecture Gates` were three jobs,
-  # each a hosted runner of its own on every run, in a saturated hosted queue.
-  # They are steps of this one job now, in this order: the schedule guard
-  # first, before anything is checked out, so AGENT_TOKEN (a schedule run and
-  # a push to main only) still reaches a step beside no repository code; then
-  # one checkout with persist-credentials false; then the changed-files step;
-  # then the architecture gates. The four outputs are the same, read as
-  # needs.preflight.outputs.*. A repository adopts v1.34 in one CI-file PR:
-  # its CUSTOMIZE jobs read needs.preflight where they read needs.changes or
-  # needs.schedule-guard, its own architecture steps move into this job, and
-  # CI Gate checks `preflight` in place of the three. The comments of the
-  # three former jobs follow.
-  # v1.24 (CA m749, m751 (a)): a PR whose every changed file matches DOCS_ONLY_PATTERN
-  # runs lint only; build and make coverage are skipped. Off pull_request, or
-  # on a ci:full PR, docs_only is always false. Any doubt (a failed diff, an
-  # empty list) reads as false, so the tier fails toward running the tests.
-  # v1.29.3 (Company Agent ruling 255(10)/(11)(c)): one nightly per
-  # repository, and none while main is busy. On a schedule run only, this job
-  # asks the API whether this workflow has a push run on main in progress or
-  # waiting, and sets `verdict`: `run` (none, or not a schedule run), `busy`
-  # (one is) or `unreadable` (no count came back). On a schedule run every
-  # bigdisk job runs only on `run`; CI Gate skips on `busy` and fails on
-  # `unreadable`. The job runs on every event, not on schedule alone, so no
-  # bigdisk job's `needs` meets a skipped job off schedule; off schedule it
-  # makes no call. It checks nothing out, so no repository code runs beside
-  # the tokens.
-  # v1.30 (fixes 2, 3 and 5): two more verdicts. `refused`: a
-  # workflow_dispatch off main (no full tier on a PR branch, ever) or a pull
-  # request from a checkpoint branch (lane-ckpt/*); every job but the gate
-  # skips and CI Gate fails. `proven`: on a push to main, the newest of this
-  # workflow's last 20 successful runs whose head commit has this commit's tree
-  # and whose Integration job succeeded (a ci:full PR run, a dispatch on main,
-  # an earlier main run); the guard records its id as `proof`, every bigdisk
-  # job skips and CI Gate reads the skips as passed. A proof it cannot read
-  # leaves `run`: the full tier runs. A schedule run never gets `proven`,
-  # because its security stages read fresh vulnerability databases.
-  # Architecture gate (v1.20, Company Agent m270 item 9; go-xkms arch-gates).
-  # go-objstore owns every blob backend (docs/00), and a repo reaches it only
-  # through the packages that are its storage seam. Test files are exempt, and
-  # go-objstore itself passes. CUSTOMIZE: OBJSTORE_SEAMS, an extended regex of
-  # the paths that may import go-objstore (go-xkms: 'pkg/ca/|pkg/storage/');
-  # empty means none may. CUSTOMIZE: the repo's own layering rules (go-xkms:
-  # xkmsctl and xkey depend only on sdk/go) are further steps in this job.
-  # A source check with grep, not a stage: it runs on the runner's shell.
-  # v1.23: a lint-class check, so it stays on the PR tier.
-=======
-  # v1.34 (Tenant Agent m2211 item 2(b)): one preflight job instead of three.
-  # `Changed files`, `Schedule guard` and `Architecture Gates` were three jobs,
-  # each a hosted runner of its own on every run, in a saturated hosted queue.
-  # They are steps of this one job now, in this order: the schedule guard
-  # first, before anything is checked out, so AGENT_TOKEN (a schedule run and
-  # a push to main only) still reaches a step beside no repository code; then
-  # one checkout with persist-credentials false; then the changed-files step;
-  # then the architecture gates. The four outputs are the same, read as
-  # needs.preflight.outputs.*. A repository adopts v1.34 in one CI-file PR:
-  # its CUSTOMIZE jobs read needs.preflight where they read needs.changes or
-  # needs.schedule-guard, its own architecture steps move into this job, and
-  # CI Gate checks `preflight` in place of the three. The comments of the
-  # three former jobs follow.
-  # v1.24 (Tenant Agent m749, m751 (a)): a PR whose every changed file matches DOCS_ONLY_PATTERN
-  # runs lint only; build and make coverage are skipped. Off pull_request, or
-  # on a ci:full PR, docs_only is always false. Any doubt (a failed diff, an
-  # empty list) reads as false, so the tier fails toward running the tests.
-  # v1.29.3 (ruling 255(10)/(11)(c)): one nightly per
-  # repository, and none while main is busy. On a schedule run only, this job
-  # asks the API whether this workflow has a push run on main in progress or
-  # waiting, and sets `verdict`: `run` (none, or not a schedule run), `busy`
-  # (one is) or `unreadable` (no count came back). On a schedule run every
-  # bigdisk job runs only on `run`; CI Gate skips on `busy` and fails on
-  # `unreadable`. The job runs on every event, not on schedule alone, so no
-  # bigdisk job's `needs` meets a skipped job off schedule; off schedule it
-  # makes no call. It checks nothing out, so no repository code runs beside
-  # the tokens.
-  # v1.30 (fixes 2, 3 and 5): two more verdicts. `refused`: a
-  # workflow_dispatch off main (no full tier on a PR branch, ever) or a pull
-  # request from a checkpoint branch (lane-ckpt/*); every job but the gate
-  # skips and CI Gate fails. `proven`: on a push to main, the newest of this
-  # workflow's last 20 successful runs whose head commit has this commit's tree
-  # and whose Integration job succeeded (a ci:full PR run, a dispatch on main,
-  # an earlier main run); the guard records its id as `proof`, every bigdisk
-  # job skips and CI Gate reads the skips as passed. A proof it cannot read
-  # leaves `run`: the full tier runs. A schedule run never gets `proven`,
-  # because its security stages read fresh vulnerability databases. (v1.42:
-  # those stages are in scans.yml; the rule is kept so a schedule run still
-  # re-runs the whole tree.)
-  # Architecture gate (v1.20, Tenant Agent m270 item 9; go-xkms arch-gates).
-  # go-objstore owns every blob backend (docs/00), and a repo reaches it only
-  # through the packages that are its storage seam. Test files are exempt, and
-  # go-objstore itself passes. CUSTOMIZE: OBJSTORE_SEAMS, an extended regex of
-  # the paths that may import go-objstore (go-xkms: 'pkg/ca/|pkg/storage/');
-  # empty means none may. CUSTOMIZE: the repo's own layering rules (go-xkms:
-  # xkmsctl and xkey depend only on sdk/go) are further steps in this job.
-  # A source check with grep, not a stage: it runs on the runner's shell.
-  # v1.23: a lint-class check, so it stays on the PR tier.
->>>>>>> theirs.yml
   preflight:
     name: Preflight [changed files, schedule guard, architecture gates]
     runs-on: ubuntu-latest
