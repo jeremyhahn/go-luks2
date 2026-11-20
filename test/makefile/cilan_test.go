@@ -41,7 +41,7 @@ func maskLines(t *testing.T, set map[string]string) []string {
 func TestCIMaskLANMasksThePrivateEntries(t *testing.T) {
 	got := maskLines(t, map[string]string{
 		"DEVCACHE_APK":      "http://10.0.0.5:3142/alpine",
-		"GOPROXY":           "http://192.168.254.254:8080|https://proxy.golang.org,direct",
+		"GOPROXY":           "http://192.168.254.254:8080|https://proxy.golang.org,direct", // lab-string-ok: RFC 1918 masking fixture
 		"CI_REGISTRY":       "172.20.0.1:5000",
 		"CI_IMAGE_REGISTRY": "172.31.255.1",
 		"RELEASE_REGISTRY":  "ghcr.io/owner",
@@ -56,10 +56,10 @@ func TestCIMaskLANMasksThePrivateEntries(t *testing.T) {
 		"::add-mask::172.20.0.1",
 		"::add-mask::172.20.0.1:5000",
 		"::add-mask::172.31.255.1",
-		"::add-mask::192.168.254.254",
-		"::add-mask::192.168.254.254:8080",
+		"::add-mask::192.168.254.254",      // lab-string-ok: RFC 1918 masking fixture
+		"::add-mask::192.168.254.254:8080", // lab-string-ok: RFC 1918 masking fixture
 		"::add-mask::http://10.0.0.5:3142/alpine",
-		"::add-mask::http://192.168.254.254:8080",
+		"::add-mask::http://192.168.254.254:8080", // lab-string-ok: RFC 1918 masking fixture
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("make -s ci-mask-lan printed\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
@@ -143,7 +143,7 @@ func TestCIImageHistoryPassesAnImageWithNoPrivateAddress(t *testing.T) {
 func TestCIImageHistoryNamesTheImageAndEntryNeverTheAddress(t *testing.T) {
 	_, stderr, _, err := imageHistory(t, map[string][2]string{
 		"good": {"RUN true\n", `{"Env":[]}`},
-		"bad": {"RUN true\nRUN wget http://10.1.2.3:3142/x\nRUN true\n|1 P=192.168.0.7 /bin/sh\n",
+		"bad": {"RUN true\nRUN wget http://10.1.2.3:3142/x\nRUN true\n|1 P=192.168.0.7 /bin/sh\n", // lab-string-ok: RFC 1918 masking fixture
 			`{"Env":["GOPROXY=http://172.16.0.1:3000"]}`},
 	}, "good bad")
 	if err == nil {
@@ -156,7 +156,7 @@ func TestCIImageHistoryNamesTheImageAndEntryNeverTheAddress(t *testing.T) {
 	if !strings.HasPrefix(stderr, want) {
 		t.Errorf("stderr\n%s\nwant\n%s", stderr, want)
 	}
-	for _, addr := range []string{"10.1.2.3", "192.168.0.7", "172.16.0.1"} {
+	for _, addr := range []string{"10.1.2.3", "192.168.0.7", "172.16.0.1"} { // lab-string-ok: RFC 1918 masking fixture
 		if strings.Contains(stderr, addr) {
 			t.Errorf("the message names the address %s", addr)
 		}
