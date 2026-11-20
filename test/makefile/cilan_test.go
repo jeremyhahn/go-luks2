@@ -12,7 +12,7 @@ import (
 // ci-template v1.44 (ruling 887) and v1.45 (ruling 888): ci-mask-lan and
 // ci-image-history are the template's scripts/ci-mask-lan.sh and
 // scripts/ci-image-history.sh as Makefile recipes (#211: no shell scripts).
-// These tests hold the recipes to the scripts' behaviour and messages.
+// These tests hold the recipes to the scripts' behavior and messages.
 
 // bareEnv is a job environment holding only PATH, HOME and set, so no
 // variable of the host running the tests reaches the recipe.
