@@ -48,6 +48,7 @@ coverage.html
 **/.serena
 .github/workflows/code-review.yml
 .github/workflows/scans.yml
+.github/workflows/revert-red-main.yml
 test/internal/labstrings/fleet.go
 test/internal/labstrings/fleet_test.go
 
