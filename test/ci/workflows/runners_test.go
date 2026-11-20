@@ -76,13 +76,22 @@ func runsOnViolation(file, jobID, line string) string {
 	return ""
 }
 
+// templateRoutingExpression is the handbook code-review.yml template's
+// runs-on for its scope and gate jobs (v5.12.5, owner ruling 1012). On
+// GitHub it resolves to ubuntu-latest. Only this exact string is accepted;
+// any other expression is still refused.
+const templateRoutingExpression = "${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}"
+
 // runsOnLabel reads a runs-on value, comment removed, as one runner label: a
 // plain scalar or one single- or double-quoted scalar around a literal label.
 // It returns the label, or "" and the reason it is not one.
+// The template routing expression reads as ubuntu-latest.
 func runsOnLabel(value string) (string, string) {
 	switch {
 	case value == "":
 		return "", "runs-on has no value on its key line (a list, a mapping or a block scalar below it)"
+	case value == templateRoutingExpression:
+		return hostedRunner, ""
 	case strings.Contains(value, "${{"):
 		return "", "runs-on is an expression"
 	case strings.HasPrefix(value, "|") || strings.HasPrefix(value, ">"):
@@ -153,7 +162,13 @@ func TestRunsOnViolation(t *testing.T) {
 		{"label list", "ci.yml", "lint", " [self-hosted, linux]", false},
 		{"label list waived", "ci.yml", "lint", " [self-hosted, gpu]  # self-hosted: hardware: the GPU", false},
 		{"no inline label", "ci.yml", "lint", "", false},
-		{"expression", "ci.yml", "lint", ` ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}`, false},
+		{"template routing expression", "code-review.yml", "gate", ` ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}`, true},
+		{"template routing expression with comment", "code-review.yml", "scope", ` ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}  # a note`, true},
+		{"routing expression, labels swapped", "code-review.yml", "gate", ` ${{ github.server_url == 'https://github.com' && 'bigdisk' || 'ubuntu-latest' }}`, false},
+		{"routing expression, other label", "code-review.yml", "gate", ` ${{ github.server_url == 'https://github.com' && 'qwen' || 'bigdisk' }}`, false},
+		{"routing expression, other spacing", "code-review.yml", "gate", ` ${{github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk'}}`, false},
+		{"routing expression quoted", "code-review.yml", "gate", ` '${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}'`, false},
+		{"other expression", "ci.yml", "lint", ` ${{ inputs.runner }}`, false},
 		{"expression waived", "ci.yml", "lint", ` ${{ inputs.runner }}  # self-hosted: hardware: the GPU`, false},
 		{"single-quoted hosted", "ci.yml", "lint", ` 'ubuntu-latest'`, true},
 		{"double-quoted hosted", "ci.yml", "lint", ` "ubuntu-latest"  # a note`, true},
