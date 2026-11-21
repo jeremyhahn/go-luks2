@@ -4048,7 +4048,7 @@ jobs:
           jq_chain='. as $r | def src($h): [ $r[] | select(.user.login == $u and .commit_id == $h and .state == "APPROVED") | (.body // "") | capture("carried=(?<o>[0-9a-f]{40})").o ] | unique; {seen: [$s], todo: [$s], n: 0} | until(.todo == []; if .n >= 20 then error("a carry chain longer than 20 heads") else ([ .todo[] | src(.) ] | add // [] | unique) as $next | ($next - .seen) as $new | if ($new | length) < ($next | length) then error("a carry chain with a cycle") else {seen: (.seen + $new), todo: $new, n: (.n + 1)} end end) | .seen[1:] | .[]'
           check_attempts() { # head... -> fails if the latest attempt on them failed
             # CUSTOMIZE: local fix pending upstream (template v5.12.3, Codex P1 on #490): + kind.
-            local h runs id kind rs rows="" st
+            local h runs id kind rs rows="" st j skip=""
             runs=$(for h in "$@"; do
                     get "/actions/workflows/$wf/runs?head_sha=$h&per_page=100" |
                       jq -r --arg t "Code Review: PR #$PR_NUM into $BASE_REF at $h" "$jq_runs" || exit 3
@@ -4057,15 +4057,29 @@ jobs:
             # run's request kind (jq_runs) goes to jq_attempt.
             while IFS=$'\t' read -r id kind rs; do
               [ -n "$id" ] || continue
-              st=$(get "/actions/runs/$id/jobs?filter=all&per_page=100" | jq -r --arg rs "$rs" --arg id "$id" --arg kind "$kind" "$jq_attempt") ||
+              j=$(get "/actions/runs/$id/jobs?filter=all&per_page=100") || fail "cannot read the jobs of run $id"
+              st=$(jq -r --arg rs "$rs" --arg id "$id" --arg kind "$kind" "$jq_attempt" <<<"$j") ||
                 fail "cannot read the jobs of run $id"
               rows+="$st"$'\n'
+              # CUSTOMIZE: local fix pending upstream (template v5.12.6, Codex P1): an active
+              # twin's jobs still unfinished in this read, by job id.
+              case " $twins " in
+                *" $id "*) skip+=" $(jq -r '[.jobs[]? | select(.status != "completed") | .id | numbers] | map(tostring) | join(" ")' <<<"$j")" ||
+                  fail "cannot read the jobs of run $id" ;;
+              esac
             done <<< "$runs"
             # CUSTOMIZE: local fix pending upstream (template v5.12.3, Codex P1 on #490): a done
             # job (guard only, e.g. skip=reviewed; codex did not run) replaces nothing, so a
             # cancelled job not passed by a newer success (a real review) failed.
+            # CUSTOMIZE: local fix pending upstream (template v5.12.6, Codex P1): a job of an
+            # active twin ($twins, read before this) that is still unfinished in the
+            # filter=all read above is no attempt: jq_attempt counts it failed, and the
+            # twin's own gate posts the head's check. Every completed attempt (failed,
+            # cancelled, success or done) is ranked as before, a twin's run ID included:
+            # an earlier failed attempt of a rerun twin, or a twin that finished failed
+            # after the twin read, still fails when it is the latest.
             st=$(printf '%s' "$rows" | LC_ALL=C sort -t $'\t' -k1,1r -k2,2nr -k3,3nr |
-                 awk -F '\t' '$4 == "done" { next } $4 == "cancelled" { $4 = "failed" } $4 == "success" || $4 == "failed" { print $4, $5; exit }')
+                 awk -F '\t' -v sk="$skip" 'BEGIN { n = split(sk, a, " "); for (i = 1; i <= n; i++) skip[a[i]] = 1 } ($3 in skip) { next } $4 == "done" { next } $4 == "cancelled" { $4 = "failed" } $4 == "success" || $4 == "failed" { print $4, $5; exit }')
             case "$st" in
               success\ *) return 0 ;;
               failed\ *) fail "a requested re-review has not approved head $EVENT_SHA: the latest codex review attempt (run ${st#* }) failed or was cancelled, so no earlier approval stands. Request the review again (an effort: label) for a new attempt" ;;
@@ -4121,7 +4135,12 @@ jobs:
           # standing verdict below: an APPROVED head passes as before; anything
           # else fails at once, naming the twin, and never holds a hosted
           # runner for the codex runner's queue. No wait is left.
-          twin=
+          # CUSTOMIZE: local fix pending upstream (template v5.12.6, Codex P1): every active
+          # twin's run ID goes in $twins (the first in $twin, for the message). This read
+          # sees each twin's latest attempt only; the attempt check re-reads every
+          # attempt of a twin's run and passes over only the jobs still unfinished
+          # there, so its completed attempts are ranked like any other run's.
+          twin='' twins=''
           if [ "$FORGE" = github ]; then
             title="Code Review: PR #$PR_NUM into $BASE_REF at $EVENT_SHA"
             wf=$(get "/actions/runs/$GITHUB_RUN_ID" | jq -r '.workflow_id // empty')
@@ -4138,7 +4157,7 @@ jobs:
                 get "/actions/runs/$id/jobs?per_page=100" |
                   jq -e 'any(.jobs[]?; .name == "Codex review" and (.status == "queued" or .status == "in_progress"))' >/dev/null || rc=$?
                 [ "$rc" -le 1 ] || fail "cannot read the jobs of run $id"
-                [ "$rc" = 1 ] || twin=${twin:-$id}
+                [ "$rc" = 1 ] || { twin=${twin:-$id}; twins+=" $id"; }
               done
             done
           fi
