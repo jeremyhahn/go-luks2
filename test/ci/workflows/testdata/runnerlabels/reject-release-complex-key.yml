@@ -1,0 +1,8 @@
+name: t
+on: [push]
+jobs:
+  lint:
+    ? runs-on
+    : release
+    steps:
+      - run: true

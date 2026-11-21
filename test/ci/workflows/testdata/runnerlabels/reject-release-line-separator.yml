@@ -1,0 +1,8 @@
+name: t
+on: [push]
+jobs:
+  lint:
+    runs-on: release  # self-hosted: hardware: the host
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}   x
+    steps:
+      - run: true

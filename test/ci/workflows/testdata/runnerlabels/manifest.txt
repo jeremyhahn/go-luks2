@@ -43,6 +43,21 @@ reject|x.yml|reject-release-job-flow-mapping.yml|x.yml:lint: (c) is not a block 
 reject|x.yml|reject-release-jobs-flow-mapping.yml|x.yml:jobs: (c) is not a block mapping
 reject|x.yml|reject-release-jobs-quoted-key.yml|x.yml:lint: (a) names `release`
 reject|x.yml|reject-release-merge-key.yml|x.yml:lint: (c) has a `<<` merge key
+reject|x.yml|reject-release-bom-jobs-first.yml|x.yml:lint: (b) names `release`
+reject|x.yml|reject-release-indented-document.yml|x.yml: (c) its top level is not a block mapping
+reject|x.yml|reject-release-flow-document.yml|x.yml: (c) its top level is not a block mapping
+reject|x.yml|reject-release-document-start-flow.yml|x.yml: (c) its top level is not a block mapping
+reject|x.yml|reject-release-line-separator.yml|x.yml: (c) holds a byte-order mark or a line break
+reject|x.yml|reject-release-complex-key.yml|x.yml:lint: (c) has a key the check cannot read
+reject|x.yml|reject-release-tagged-key.yml|x.yml:lint: (c) has a key the check cannot read
+reject|x.yml|reject-release-escaped-key.yml|x.yml:lint: (c) has a key the check cannot read
+reject|x.yml|reject-release-duplicate-runs-on.yml|x.yml:lint: (c) has a duplicate `runs-on` key
+reject|x.yml|reject-release-duplicate-if.yml|x.yml:lint: (c) has a duplicate `if` key
+reject|x.yml|reject-release-remote-reusable.yml|x.yml:lint: (c) calls a reusable workflow outside this repository
+reject|x.yml|reject-release-runs-on-group.yml|x.yml:lint: (c) its runs-on names a runner group
+reject|x.yml|reject-release-waived-matrix.yml|x.yml:lint: (c) its waived runs-on may name `release`|an unknown label
+reject|x.yml|reject-release-waived-generic-labels.yml|x.yml:lint: (c) its waived runs-on may name `release`|only generic labels
+reject|x.yml|reject-release-waived-escaped-label.yml|x.yml:lint: (c) its waived runs-on may name `release`|cannot be read
 reject|x.yml|reject-hosted-ref-self-hosted.yml|x.yml:lint: (c)|push (refs/heads/topic): self-hosted
 reject|x.yml|reject-hosted-head-ref-case.yml|x.yml:lint: (c)|pull_request (refs/pull/1/merge): self-hosted
 accept|x.yml|accept-hosted-ref-routing.yml|OK:

@@ -1,0 +1,9 @@
+name: t
+on: [push]
+jobs:
+  lint:
+    runs-on:
+      group: release-runners
+      labels: ubuntu-latest
+    steps:
+      - run: true

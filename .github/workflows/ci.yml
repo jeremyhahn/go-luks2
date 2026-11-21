@@ -1467,8 +1467,78 @@ jobs:
               return t
 
 
+          # Resume 13: forms YAML reads that the line reader above would not see,
+          # each refused (fails closed). ODD_TEXT: a BOM past the start, and line
+          # breaks other than LF and CR, which YAML 1.1 and 1.2 parsers split differently.
+          ODD_TEXT = "".join(map(chr, (0xFEFF, 0x0B, 0x0C, 0x1C, 0x1D, 0x1E, 0x85, 0x2028, 0x2029)))
+          TOP_KEY = re.compile(r"""(?:[A-Za-z_][\w-]*|'[A-Za-z_][\w-]*'|"[A-Za-z_][\w-]*")[ \t]*:(?:[ \t]|$)""")
+          # A job's key: plain, or quoted with no escape; or a block sequence item.
+          JOB_KEY = re.compile(r"""[ ]*(?:(?:<<|[A-Za-z0-9_][\w.-]*|'[\w.-]+'|"[\w.-]+")[ \t]*:(?:[ \t]|$)|-(?:[ \t]|$))""")
+          GROUP = re.compile(r"""(?:^|[{,\s])['"]?group['"]?\s*:""")
+          # Labels every self-hosted runner carries, the release runner too.
+          GENERIC = {"self-hosted", "linux", "windows", "macos", "x64", "x86", "arm", "arm64"}
+
+
+          def top_level(lines):
+              # Why the file is not one block mapping at column 0 (where the check
+              # finds `on:` and `jobs:`), or None. One `---` may open it.
+              first = True
+              for n, s in enumerate(lines, 1):
+                  if not s.strip() or s.lstrip().startswith("#"):
+                      continue
+                  if first and re.fullmatch(r"---[ \t]*(?:#.*)?", s):
+                      first = False
+                      continue
+                  if (first and ind(s)) or (not ind(s) and not TOP_KEY.match(s)):
+                      return f"line {n}: {s.strip()[:40]!r}"
+                  first = False
+              return None
+
+
+          def odd_key(lines, i):
+              # The first direct child line of the job on line i that is not a
+              # JOB_KEY (a `?` key, a tag, an anchor, an escape), or None: YAML may
+              # read it as a runs-on or if the check does not see.
+              base, child = ind(lines[i]), None
+              for j in range(i + 1, len(lines)):
+                  s = lines[j]
+                  if not s.strip() or s.lstrip().startswith("#"):
+                      continue
+                  if ind(s) <= base:
+                      break
+                  child = ind(s) if child is None else child
+                  if ind(s) < child or (ind(s) == child and not JOB_KEY.match(s)):
+                      return s.strip()[:40]
+              return None
+
+
+          def waived_unsafe(ro):
+              # Why a waived runs-on the text shows no `release` in may still reach
+              # the release runner, or None: a value the check cannot know (a matrix,
+              # input or variable, an escape), or only labels every runner carries.
+              for ev, ref, head, hr, br in hosted_cands(ro):
+                  try:
+                      got = runs_on_labels(ro, ev, ref, head, hr=hr, br=br)
+                  except ValueError as e:
+                      return f"{ev}: it cannot be read ({e})"
+                  if got is None:
+                      return f"{ev}: an unknown label"
+                  if all(g.lower() in GENERIC for g in got):
+                      return f"{ev}: only generic labels ({', '.join(got)})"
+              return None
+
+
           def check(path):
-              lines = open(path, encoding="utf-8").read().splitlines()
+              text = open(path, encoding="utf-8").read()
+              text = text[1:] if text[:1] == ODD_TEXT[0] else text  # a BOM at the start, as YAML reads it
+              if any(c in text for c in ODD_TEXT):
+                  return [f"{path}: (c) holds a byte-order mark or a line break other than LF or CR (U+000B, U+000C, "
+                          f"U+001C-U+001E, U+0085, U+2028, U+2029), which YAML parsers split differently, so the check fails closed"]
+              lines = text.splitlines()
+              top = top_level(lines)
+              if top:
+                  return [f"{path}: (c) its top level is not a block mapping at column 0 ({top}), so no job can be checked; "
+                          f"write the workflow as one block mapping"]
               on = triggers(lines)
               bad = []
               for i, s in enumerate(lines):
@@ -1483,22 +1553,33 @@ jobs:
                                          f"write the job as a block mapping")
                               continue
                           ro = cond = ro_line = None
-                          forms = []
+                          forms, seen = [], set()
+                          odd = odd_key(lines, j)
+                          if odd:
+                              forms.append(f"has a key the check cannot read ({odd!r}: a `?` key, a tag, an anchor or an escape)")
                           for k, key, inline in keys_under(lines, j):
+                              if not lines[k].lstrip().startswith("-"):  # a sequence item's key is not the job's
+                                  if key in seen:
+                                      forms.append(f"has a duplicate `{key}` key")
+                                  seen.add(key)
                               if key == "<<":
                                   forms.append("has a `<<` merge key, so its runs-on or `if:` may come from elsewhere")
+                              elif key == "uses" and not unquote(strip_comment(inline)).startswith("./"):
+                                  forms.append("calls a reusable workflow outside this repository, whose runs-on the check cannot see")
                               elif key == "runs-on":
                                   ro, ro_line = body(lines, k, inline), lines[k]
                                   f = runs_on_form(lines, k, inline, ro)
                                   forms += [f"its runs-on {f}"] if f else []
+                                  if GROUP.search(ro):
+                                      forms.append("its runs-on names a runner group, which may hold the release runner")
                               elif key == "if":
                                   try:
                                       cond = one_line(lines, k, inline)
                                   except ValueError as e:
                                       cond = e
                           if forms:
-                              bad.append(f"{where}: (c) {'; '.join(forms)}; the check cannot read it, so it fails closed: write runs-on on one line, "
-                                         f"or as a block list of one-line labels, and no merge key")
+                              bad.append(f"{where}: (c) {'; '.join(forms)}; the check cannot read it, so it fails closed: write the job as a block "
+                                         f"mapping of plain keys, each once, runs-on on one line or as a block list of one-line labels")
                               continue
                           if ro is not None and not names_release(ro):
                               # v1.43 (ruling 833): hosted first.
@@ -1510,6 +1591,10 @@ jobs:
                                   bad.append(rf)
                                   continue
                               if WAIVER.search(ro_line):
+                                  why = waived_unsafe(ro)
+                                  if why:
+                                      bad.append(f"{where}: (c) its waived runs-on may name `release` ({why}); write its labels out, "
+                                                 f"with one the release runner does not carry")
                                   continue
                               off = []
                               sels = ("default", "overflow") if path.replace("\\", "/").rsplit("/", 1)[-1] in SEL_FILES else (None,)

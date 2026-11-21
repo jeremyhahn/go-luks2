@@ -1,0 +1,7 @@
+name: t
+on: [push]
+jobs:
+  lint:
+    !!str runs-on: release  # self-hosted: hardware: the host
+    steps:
+      - run: true
