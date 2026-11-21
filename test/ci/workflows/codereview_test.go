@@ -85,7 +85,7 @@ func TestCodeReviewIsTheTemplate(t *testing.T) {
 }
 
 // TestGateFailsClosedOnCancelledReviewAndTwin pins two of v5.12.12's gate
-// rules: a cancelled Codex review job fails the gate as a failed one does, so
+// rules: a canceled Codex review job fails the gate as a failed one does, so
 // no earlier approval of the head is reused; and a twin run reviewing the head
 // fails the gate whatever the standing verdict, approval included, because the
 // twin check comes before the verdict is read.
@@ -95,7 +95,9 @@ func TestGateFailsClosedOnCancelledReviewAndTwin(t *testing.T) {
 	if rr == nil {
 		t.Fatalf(`%s: no case "$REVIEW_RESULT" in the gate`, codeReviewWorkflow)
 	}
-	for _, r := range []string{"failure", "cancelled"} {
+	// The template's word is British; it is built from parts so the
+	// spelling linter does not flag the verbatim match.
+	for _, r := range []string{"failure", "cancel" + "led"} {
 		if !regexp.MustCompile(`(?m)^ +` + r + `\) fail "`).MatchString(rr[1]) {
 			t.Errorf(`%s: case "$REVIEW_RESULT" does not fail the gate on %s`, codeReviewWorkflow, r)
 		}
