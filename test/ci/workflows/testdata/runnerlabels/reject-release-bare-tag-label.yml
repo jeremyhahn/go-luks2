@@ -1,0 +1,7 @@
+name: t
+on: [pull_request]
+jobs:
+  lint:
+    runs-on: ! "rel\x65ase" # self-hosted: hardware: x
+    steps:
+      - run: true

@@ -58,6 +58,10 @@ reject|x.yml|reject-release-runs-on-group.yml|x.yml:lint: (c) its runs-on names 
 reject|x.yml|reject-release-waived-matrix.yml|x.yml:lint: (c) its waived runs-on may name `release`|an unknown label
 reject|x.yml|reject-release-waived-generic-labels.yml|x.yml:lint: (c) its waived runs-on may name `release`|only generic labels
 reject|x.yml|reject-release-waived-escaped-label.yml|x.yml:lint: (c) its waived runs-on may name `release`|cannot be read
+reject|x.yml|reject-release-anchor-label.yml|x.yml:lint: (c) its runs-on starts a value or list item with a YAML anchor, tag or alias|x.yml:lint: (y) parsed as YAML, its runs-on names `release` in a workflow with a pull_request trigger
+reject|x.yml|reject-release-anchor-list-item.yml|x.yml:lint: (c) its runs-on starts a value or list item with a YAML anchor, tag or alias|x.yml:lint: (y) parsed as YAML, its runs-on names `release`
+reject|x.yml|reject-release-tag-label.yml|x.yml:lint: (c) its runs-on starts a value or list item with a YAML anchor, tag or alias|x.yml:lint: (y) parsed as YAML, its runs-on names `release`
+reject|x.yml|reject-release-bare-tag-label.yml|x.yml:lint: (c) its runs-on starts a value or list item with a YAML anchor, tag or alias|x.yml:lint: (y) parsed as YAML, its runs-on names `release`
 reject|x.yml|reject-hosted-ref-self-hosted.yml|x.yml:lint: (c)|push (refs/heads/topic): self-hosted
 reject|x.yml|reject-hosted-head-ref-case.yml|x.yml:lint: (c)|pull_request (refs/pull/1/merge): self-hosted
 accept|x.yml|accept-hosted-ref-routing.yml|OK:

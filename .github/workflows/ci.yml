@@ -1269,6 +1269,12 @@ jobs:
                       return "has a quoted string that spans lines"
               if re.search(r"(?:^|[\s\[,{:])\*[^\s,\]}]", ro):
                   return "is a YAML alias"
+              # Resume 14: an anchor, tag or alias at the start of the value or of
+              # a list item (`&a "rel\x65ase"`, `!!str ...`, `! ...`) hides the
+              # label from the text; refused here and read by the YAML layer below.
+              if (re.match(r"\s*[&!*]", ro) or re.search(r"(?:^|\s)-\s+[&!*]", ro)
+                      or (ro.lstrip()[:1] in ("[", "{") and re.search(r"[\[{,:]\s*[&!*]", ro))):
+                  return "starts a value or list item with a YAML anchor, tag or alias (`&`, `!`, `*`)"
               return None
 
 
@@ -1528,6 +1534,115 @@ jobs:
               return None
 
 
+          # Resume 14: a second layer. The workflow is loaded with PyYAML's safe
+          # loader (python3-yaml, which ubuntu-latest ships; nothing is installed),
+          # so anchors, tags, aliases, merge keys and escapes read as YAML reads
+          # them. Every job whose parsed runs-on is or may be `release` (a label
+          # that case-folds to it, only GENERIC labels, a value that is not a
+          # string, a group, or an expression that yields it, only GENERIC
+          # labels or an unknown on a github.com event) must
+          # have a parsed `if:` the allowlist above accepts. Both layers must
+          # accept; a file PyYAML cannot load, or no PyYAML, fails closed (y).
+          def yaml_loader(yaml):
+              class Loader(yaml.SafeLoader):  # `on`, `yes`, `no`, `off` stay strings, as in YAML 1.2
+                  pass
+              B = "tag:yaml.org,2002:bool"
+              Loader.yaml_implicit_resolvers = {k: [(t, r) for t, r in v if t != B]
+                                                for k, v in yaml.SafeLoader.yaml_implicit_resolvers.items()}
+              Loader.add_implicit_resolver(B, re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"), list("tTfF"))
+              return Loader
+
+
+          def yaml_reach(ro, sels):
+              # Why a parsed runs-on value is or may be `release`, or None.
+              if isinstance(ro, dict):
+                  if "group" in ro or set(ro) - {"labels"}:
+                      return "is a mapping with a runner group or keys other than labels"
+                  ro = ro.get("labels")
+              items = [ro] if isinstance(ro, str) else ro if isinstance(ro, list) else None
+              if items is None:
+                  return f"is a {type(ro).__name__}, not a string or list"
+              if not all(isinstance(x, str) for x in items):
+                  return "holds a value that is not a string"
+              lits = [x for x in items if OPEN not in x]
+              exprs = [x for x in items if OPEN in x]
+              generic = "has only labels every self-hosted runner carries, the release runner too"
+              if any(x.casefold() == "release" for x in lits):
+                  return "names `release`"
+              if not exprs and all(x.casefold() in GENERIC for x in lits):
+                  return generic
+              for x in exprs:
+                  m = re.fullmatch(r"\s*\$\{\{(.*)\}\}\s*", x, re.S)
+                  if not m or OPEN in m.group(1):
+                      return f"has text around an expression ({x[:40]!r})"
+                  for ev, ref, head, hr, br in hosted_cands(x):
+                      for sel in sels:
+                          try:
+                              got = labels(P(lex(m.group(1)), hosted_get(ev, ref, head, sel, hr, br)).parse())
+                          except ValueError as e:
+                              return f"has an expression that cannot be read ({e})"
+                          if got is None:
+                              return f"has an expression with an unknown value on {ev}"
+                          if any(str(g).casefold() == "release" for g in got):
+                              return f"has an expression that yields `release` on {ev}"
+                          if all(str(g).casefold() in GENERIC for g in lits + got):
+                              return f"{generic}, on {ev}"
+              return None
+
+
+          def yaml_allowed(cond):
+              # Whether a parsed `if:` is in the allow-listed form; ValueError if unreadable.
+              if not isinstance(cond, str):
+                  raise ValueError("there is none" if cond is None else f"it is a {type(cond).__name__}, not a string")
+              m = re.fullmatch(r"\s*\$\{\{(.*)\}\}\s*", cond, re.S)
+              if m and OPEN not in m.group(1):
+                  expr = m.group(1)
+              elif OPEN in cond:
+                  raise ValueError("text around the expression makes it a string, which is always true")
+              else:
+                  expr = cond
+              toks = lex(expr)
+              P(toks, lambda p: U).parse()
+              terms = release_terms(toks)
+              return ALLOW_EVENT in terms and any(t in terms for t in ALLOW_TAG)
+
+
+          def yaml_check(path, yaml):
+              try:
+                  data = yaml.load(open(path, encoding="utf-8").read(), Loader=yaml_loader(yaml))
+              except Exception as e:  # any parse failure fails closed
+                  return [f"{path}: (y) PyYAML cannot load it ({type(e).__name__}: {str(e)[:120]}), so no job can be checked"]
+              if not isinstance(data, dict) or not isinstance(data.get("jobs"), dict):
+                  return [f"{path}: (y) parsed as YAML, it is not a mapping with a `jobs:` mapping, so no job can be checked"]
+              on = data.get("on")
+              on = {on} if isinstance(on, str) else set(map(str, on)) if isinstance(on, (list, dict)) else set(PR)
+              base = path.replace("\\", "/").rsplit("/", 1)[-1]
+              bad = []
+              for job, j in data["jobs"].items():
+                  where = f"{path}:{job}"
+                  if not isinstance(j, dict):
+                      bad.append(f"{where}: (y) parsed as YAML, the job is not a mapping")
+                      continue
+                  if "runs-on" not in j:
+                      continue
+                  ro = j["runs-on"]
+                  sels = ("default", "overflow") if base in SEL_FILES else (None,)
+                  if sels[0] is not None and job == PRE_JOB and isinstance(ro, str) and PRE_READ.search(ro):
+                      sels = ("unset", "set")
+                  why = yaml_reach(ro, sels)
+                  if why is None:
+                      continue
+                  try:
+                      if yaml_allowed(j.get("if")):
+                          continue
+                      problem = "is not in the allow-listed form"
+                  except ValueError as e:
+                      problem = f"cannot be read ({e})"
+                  pr = " in a workflow with a " + " and ".join(sorted(on & PR)) + " trigger" if on & PR else ""
+                  bad.append(f"{where}: (y) parsed as YAML, its runs-on {why}{pr}, and its `if:` {problem}; it must be {ALLOWED}")
+              return bad
+
+
           def check(path):
               text = open(path, encoding="utf-8").read()
               text = text[1:] if text[:1] == ODD_TEXT[0] else text  # a BOM at the start, as YAML reads it
@@ -1658,9 +1773,15 @@ jobs:
 
           files = sorted(glob.glob(".github/workflows/*.yml") + glob.glob(".github/workflows/*.yaml"))
           bad = []
+          try:
+              import yaml
+          except ImportError as e:
+              yaml = None
+              bad.append(f"(y) PyYAML cannot be imported ({e}), so the YAML layer fails closed; run the check where python3-yaml is installed")
           for f in files:
               try:
                   bad += check(f)
+                  bad += yaml_check(f, yaml) if yaml else []
               except (OSError, UnicodeError) as e:
                   bad.append(f"{f}: cannot be read ({e})")
           for b in bad:
