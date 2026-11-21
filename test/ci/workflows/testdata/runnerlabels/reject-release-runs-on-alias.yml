@@ -1,0 +1,13 @@
+name: t
+on: [push, pull_request]
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    env:
+      R: &rel release
+    steps:
+      - run: true
+  lint:
+    runs-on: *rel  # self-hosted: hardware: the host
+    steps:
+      - run: true

@@ -1,0 +1,9 @@
+on: pull_request
+jobs:
+  a:
+    runs-on: # self-hosted: hardware: x
+      labels:
+      - self-hosted
+      - "Release"
+    steps:
+      - run: echo

@@ -1,18 +1,311 @@
-# ci-template: v1.35.2 + v1.42 hermetic gate (customized)
-# v1.42 hermetic gate only (owner ruling 742 (1), Tenant Agent rulings 754 and
-# the hermetic-gate rollout order): the CI Gate's outcome depends only on the
-# tree under test. `make deps-check` (lint job), `make security` (gosec,
-# govulncheck, go mod verify, trivy's filesystem scan) and `trivy image` of the integration
-# image (image job) read the module proxy and advisory databases, so they
-# could fail a PR or turn main red with no change to the tree. They leave
-# this workflow on every event and run in .github/workflows/scans.yml, on
-# workflow_dispatch on main (no schedule: TestNoScheduleTrigger). `make gosec`
-# reads only the tree and now runs in the lint job on every event but a
-# docs-only PR. Nothing else of v1.36 to v1.42 is taken yet: v1.36
-# host-local caches and in-toolchain-image.sh v6, v1.37 timeouts, v1.38
-# release label, v1.39/v1.40 scoped deps-check and deps-bump, and v1.41
-# PR/main parity are the full catch-up, still to come.
-# v1.35.2 (2026-11-11, Company Agent m2577, Codex finding on xkey-android
+# ci-template: v1.53 (customized)
+# go-luks2 keeps these deviations from v1.53, each marked
+# `# CUSTOMIZE (go-luks2):` where it lives: the merge-check, test-race and
+# fips jobs and their CI Gate lines; a literal `runs-on: ubuntu-latest` on
+# every job but preflight (owner ruling 999; v1.48's runner overflow is not
+# adopted, and bigdisk is named only in preflight's v1.49 runs-on); no
+# schedule trigger (#341, TestNoScheduleTrigger); no shell scripts (#211), so
+# each template script is a Makefile target; the `Runner labels (ruling 633)`
+# step is preceded by a self-test that runs the same Python on the fixtures
+# in test/ci/workflows/testdata/runnerlabels/.
+# v1.49 (2026-11-20): preflight runs on github.com on
+# `fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk"]')`,
+# the repository variable (runs-on JSON, `"ubuntu-latest"` with its quotes)
+# being the fallback switch while that pool is down; off github.com it keeps
+# `ubuntu-latest`. The schedule guard's AGENT_TOKEN is passed off github.com
+# only, where it is read. `Runner labels (ruling 633)` checks preflight's
+# runs-on, and only that job's, with the variable unset (exactly
+# [self-hosted, linux, x64, bigdisk] passes too) and set to the fallback.
+# The runner-label checker is .github/scripts/runner_labels.py: one file
+# the step and its self-test both run, so no run block holds a 54 KB
+# script. v1.50's overflow fix is to the
+# `Hosted or overflow runner (ruling 1024)` step, which go-luks2 does not
+# adopt (see above); only its changelog is carried. v1.51 and v1.52's
+# checker changes are in that file.
+# v1.53 (2026-11-21, Tenant Agent ruling 1087, owner order: remove the
+# bottlenecks): main has one concurrency group per event again, `main-{event}`,
+# so a newer push to main cancels the older main run still queued or in
+# progress, and the newest run validates every merge under it. This
+# supersedes v1.26.2's `main-{event}-{sha}` (ruling 145): with hosted
+# concurrency at 20 jobs on the Free plan, nothing cancelled a superseded
+# main run, and trusted-firmware had 40 main runs queued ahead of PR work.
+# A schedule run keeps `schedule-{repository}` and a workflow_dispatch run
+# keeps `main-workflow_dispatch`, so neither shares a group with a push run.
+# cancel-in-progress stays a literal `true`. Only the group changes. Adopt as
+# a ci.yml-only PR that keeps the CUSTOMIZE blocks, together with v1.52's
+# runner selection (internal pull requests run on our runners), separately
+# from code-review.yml.
+# v1.52 (2026-11-21, Tenant Agent order, defect fix): a fork's pull request
+# under pull_request reached a self-hosted runner. preflight's runs-on had
+# no fork check, so on github.com it took the Dells' bigdisk pool for a
+# fork's head, and `Hosted or overflow runner (ruling 1024)` could overflow
+# every other job of that run to the Dells. A pull request whose head
+# repository is not this repository, a deleted fork included, now runs
+# every job on ubuntu-latest: preflight's runs-on adds the clause
+# `(!startsWith(github.event_name, 'pull_request') ||
+# github.event.pull_request.head.repo.full_name == github.repository)`
+# before the variable, so a fork takes `ubuntu-latest` whatever
+# CI_PREFLIGHT_RUNS_ON holds, and the selection step outputs the hosted
+# default for a fork's head with a ::notice and no API call. `Runner labels
+# (ruling 633)` gives a fork's head under pull_request, as under
+# pull_request_target since v1.51, no unset-variable exemption, and reads
+# the selection outputs for it at their hosted default, as the step emits.
+# Same-repository pull requests, pushes and Gitea are unchanged.
+# testdata/runner-labels-tests.py part H and testdata/runner-select-tests.py
+# part E hold the cases. Adopt as a one-file bump that keeps the CUSTOMIZE
+# blocks.
+# v1.51 (2026-11-21, ruling 633 hardening): `Runner labels (ruling 633)`
+# also checks every runs-on under pull_request_target, same-repository and
+# fork. code-review.yml and signatures.yml run on that base-defined event, so
+# a runs-on that picks a self-hosted label only there was never read. In a
+# workflow with that trigger a fork's head gets no overflow and no
+# unset-variable exemption: a fork never reaches a self-hosted runner, and
+# its finding says so. testdata/runner-labels-tests.py part G holds the
+# cases. No other change.
+# v1.50 (2026-11-21, rulings 999/1024 "hosted first with overflow to the
+# Dells", defect fix): the overflow never fired under load. The Actions
+# API's runs?status=queued listing returns fewer items than its total_count
+# while runs change state (go-trusted-platform preflights 01:15Z-01:40Z on
+# 11-21: "61 of 62 entries", "57 of 59"; go-quicbaas 02:23Z: "30 of 31"),
+# and `Hosted or overflow runner (ruling 1024)` treated every short list as
+# an unread count and picked hosted, so the longer the hosted queue, the
+# surer the hosted pick. A short list is now a lower bound: the counts can
+# only be under, never over, so a lower bound at or past
+# HOSTED_JOBS_PER_REPO, or a hosted job of another run queued past the
+# grace in it, overflows as before. A short list that does not reach either
+# trigger still picks hosted with a ::warning naming the shortfall. A reply
+# that is not 200, a missing total_count or list, a threshold that is not a
+# number, and more than 1000 entries still pick hosted with a warning.
+# testdata/runner-select-tests.py C4 and B7 hold the cases. Adopt as a
+# one-file bump that keeps the CUSTOMIZE blocks.
+# v1.48 (2026-11-20, Tenant Agent ruling 1024 item 1, queue 250 (a), owner
+# decision: the Dells' self-hosted runners supplement the 40 GitHub-hosted
+# runners; hosted stays the default, and when the hosted pool is full a job
+# runs on the Dells instead of queueing): a new preflight step, `Hosted or
+# overflow runner (ruling 1024)`, counts this repository's jobs on
+# GitHub-hosted runners (labels ubuntu-*, not self-hosted) in every queued
+# and in-progress run, through the Actions API with the job token (actions:
+# read; no new permission). It outputs `runner` and `runner_docker` as
+# runs-on JSON: `"ubuntu-latest"` by default, and
+# `["self-hosted","linux","x64","bigdisk"]` and `[...,"bigdisk-docker"]`
+# when HOSTED_JOBS_PER_REPO (12, a new top-level env) or more hosted jobs of
+# the repository are in progress, or a hosted job of another run has been
+# queued HOSTED_QUEUE_GRACE_SECONDS (60) or more. The labels are the ones the
+# Dell pools already register per repository. lint, image, lint-gates,
+# integration and soak build or run images on a Docker daemon, so their
+# runs-on reads runner_docker; CI Gate needs no daemon and reads runner
+# (guarded with `|| '"ubuntu-latest"'`, since it also runs when preflight
+# was skipped or failed, and then fails on its own). Each of them already
+# needs preflight and keeps the self-hosted rules of v1.36, v1.44 and v1.45
+# (no Actions cache, the LAN mask, the image history check): they run on
+# bigdisk on the forge today. No fallback hides a failure, and the choice on
+# error is hosted with a visible warning: when the counts cannot be read (a
+# reply that is not 200, a list short of its total_count, a missing field,
+# a threshold that is not a number), the step picks the hosted default and
+# prints a ::warning that names why; it never sends a run to the Dells on
+# an unread count. Off github.com it makes no call and each job keeps its
+# forge label (bigdisk, ci-gate), as in v1.47. The preflight step `Runner
+# labels (ruling 633)` accepts, in ci.yml only, a runs-on that reads exactly
+# needs.preflight.outputs.runner or runner_docker: it evaluates the output at
+# its default, which must give a standard image as finding (c) asks, and at
+# its overflow, where exactly the matching bigdisk or bigdisk-docker list
+# passes too. A self-hosted label any other way still needs its waiver.
+# testdata/runner-select-tests.py runs the new step against a fake API, and
+# testdata/runner-labels-tests.py part E holds the lint's cases. A
+# repository adopts v1.48 as a one-file bump that keeps its CUSTOMIZE
+# blocks; a CUSTOMIZE job that builds images may read runner_docker the same
+# way, and one that adds `Free runner disk` runs it only when
+# `runner.environment == 'github-hosted'`.
+# v1.47 (2026-11-20, Tenant Agent ruling 1007; go-qrdb #1642's Codex review
+# found that the v1.46 gate let `runs-on: codex  # self-hosted: hardware: ...`
+# through on the waiver alone): the step `Runner labels (ruling 633)` checks
+# the label and the category together. The review-only labels, `codex` and
+# `qwen`, are reserved to code-review.yml whatever the waiver says: a job in
+# any other workflow that names one, in its runs-on text or in what an
+# expression there yields, is finding (f). In code-review.yml, `codex` takes
+# only `credential:` and `qwen` only `hardware:`, and `credential:` is
+# accepted only on the `codex` job; any other pairing is (f). Nothing else
+# changes, and a repository that copied v1.46 unchanged passes v1.47.
+# v1.46 (2026-11-20, Tenant Agent ruling 999, owner decision: GitHub-hosted
+# standard runners for every CI job possible; self-hosted only for
+# hardware-specific or oversize jobs, the reason recorded per job): the
+# preflight step `Runner labels (ruling 633)` accepts a self-hosted runs-on
+# on github.com only when its line names the category of its reason,
+# `# self-hosted: hardware: <reason>` (a device, a GPU, a dedicated host or
+# VM pool the job needs) or `# self-hosted: oversize: <reason>` (more than a
+# standard runner's 4 vCPU, 16 GB, about 45 GB of disk after `Free runner
+# disk`, or 6 hours). `# self-hosted: credential: <reason>` is accepted for
+# the one job that holds a credential kept on one host (code-review.yml's
+# Codex review), pending the Tenant Agent's answer on ruling 999. A v1.43
+# reason with no category is now finding (e). A `release` job is the release
+# rule's, unchanged. Every template job passes: batch.yml v1.3 and fuzz.yml
+# v2 move to ubuntu-latest, code-review.yml v5.12.4 names its categories. A
+# repository adopts v1.46 in ONE PR: each job that fits a standard runner
+# moves to `ubuntu-latest` (keeping `Free runner disk` before an image
+# build), and each job that stays self-hosted names its category and reason.
+# v1.45 (2026-11-18, Tenant Agent ruling 901): every job that builds an image
+# (lint, lint-gates, image, integration, soak) runs scripts/ci-image-history.sh
+# on the images it will use, after its last build step and before its first
+# use, on a pool runner: a pool build passes the LAN caches as BuildKit
+# secrets, which no history entry keeps, and the check fails on any private
+# address in an image's history or config. publish-images checks through
+# ci-image-cache.sh v4 before the push, and masks the LAN addresses (ruling
+# 887). Copy scripts/ci-image-history.sh (`chmod +x`); testdata/
+# ci-image-history-tests.py holds the steps' places and publish's order.
+# v1.44 (2026-11-18, Tenant Agent ruling 887; the owner's rule that internal
+# addresses stay out of public repositories, and their CI logs count): every
+# job that builds runs scripts/ci-mask-lan.sh right after the credential
+# mask. A pool runner's environment names LAN addresses (the DEVCACHE_*
+# package caches, GOPROXY's module proxy, the LAN CI registry); a BuildKit
+# build echoes its build arguments and `go env` prints GOPROXY. The script
+# prints ::add-mask:: for each private-address entry, its host:port and its
+# host, so the runner masks them in every later line; on a GitHub-hosted
+# runner the variables are unset and it prints nothing. A job a repository
+# routes to a pool is therefore masked from its first build on. Copy the
+# script to scripts/ci-mask-lan.sh (`chmod +x`); testdata/ci-mask-lan-tests.py
+# holds the script and the step's place.
+# v1.43 (2026-11-17, Tenant Agent ruling 833; the owner's 11-07 ruling that
+# GitHub-hosted runners are the default, ruling 834's hosted-first phase 1):
+# a job runs on a standard GitHub-hosted image unless it cannot fit one. The
+# P1 repositories routed nearly every job to self-hosted pools for a push to
+# main and a same-repository PR (go-qrdb 46 self-hosted references and no
+# hosted runs-on), and about 250 jobs queued on the fleet while the 40
+# hosted slots of a public repository's free standard runners sat idle. The
+# preflight step `Runner labels (ruling 633)` gains two findings on
+# github.com, for every job that does not name `release`: (c) its runs-on
+# resolves, on some event, to anything but a standard GitHub-hosted image
+# (ubuntu-latest, ubuntu-24.04, ubuntu-22.04, their -arm forms, ubuntu-slim),
+# unless the runs-on line carries `# self-hosted: <reason>` (CUSTOMIZE: the
+# jobs that cannot fit a standard runner, 4 vCPU, 16 GB, about 14 GB of disk
+# and about 45 GB after `Free runner disk`: very large images or memory,
+# privileged devices, hardware); (d) it names a larger runner (cores, large,
+# xlarge, gpu), refused even with a reason, since a larger runner bills on a
+# public repository. Every template job already passes; a repository adopts
+# v1.43 by moving each job that fits to `ubuntu-latest` (keeping `Free runner
+# disk` before an image build) and giving each job that stays a reason.
+# v1.42 (2026-11-16, owner ruling 742 (1)): the CI Gate is hermetic. Its
+# outcome depends only on the tree under test, on every event. The checks
+# that fail on the state of the world rather than on a change leave ci.yml
+# on every event: `make deps-check` (newer upstream releases and
+# govulncheck's vulnerable requirements, both read from the network), the
+# advisory half of `make security` (govulncheck and trivy fs against a fresh
+# database) and `trivy image` of the integration image. Before it they turned
+# mains red on their own, when an advisory or an upstream release appeared,
+# and every PR cut from that main inherited the failure; v1.41's parity put
+# them on every PR as well. They run only in scans.yml (scans v1.0.0, which
+# replaces deps-bump.yml), on a schedule and on workflow_dispatch on main,
+# never on a pull_request or a push. That workflow opens or updates ONE fix
+# PR on ci/deps-bump with the bumps, and ONE issue for a finding the bump
+# cannot clear. It is not the CI workflow, so a finding never reads as a red
+# main and never starts revert-red-main.yml. gosec reads only the tree and
+# stays on every event: the lint job runs `make gosec` again (v1.41 dropped
+# the step and ran gosec inside `make security`). The lint job drops the
+# deps-check steps and the image job drops `make security` and `trivy image`;
+# the jobs, the needs list and CI Gate's check lines are unchanged.
+# publish-images, on the release runner and never a PR gate, scans the
+# toolchain image before it pushes it (ci-image-cache.sh v3). A repository
+# adopts v1.42 in one CI-file PR that also takes ci-image-cache.sh v3,
+# deletes .github/workflows/deps-bump.yml and adds scans.yml v1.0.0.
+# Every other job, gate and tier is v1.41's.
+# v1.41 (2026-11-16, owner ruling 742 (2)): PR/main parity. Every job and
+# step that runs on a push to main also runs on a pull_request to main, with
+# the same steps, so a PR never merges a change that main then fails on.
+# CI_FULL_TIER is true on every event but a workflow_dispatch off main and
+# off ci/deps-bump (which the preflight refuses), so a PR runs integration,
+# make security and trivy image as main does; the integration job's `if:`
+# no longer skips a PR. The `make gosec (PR tier)` step goes: make security
+# runs gosec on every event. A PR run with a green Integration job proves its
+# tree, so the squash merge of an up-to-date PR is a proven push and main
+# skips its bigdisk jobs (v1.30 fix 2). `ci:full` no longer selects a tier;
+# it only turns off the two PR path scopes below. The exceptions, each a job
+# that cannot run on a PR by nature or a scope whose inputs a PR does not
+# change: publish-images (pushes images to the registry from the release
+# runner, ruling 633: no PR job may reach that runner); soak (schedule and
+# workflow_dispatch only, never on a push either, so no parity gap); the
+# docs-only scope (a PR whose every file matches DOCS_ONLY_PATTERN skips build
+# and make coverage, whose inputs it does not touch) and the lint-gates path
+# scope (LINT_GATES_PATTERN); a docs-only PR skips the image job (make security,
+# trivy image) as before and now integration too, so CI Gate checks integration
+# as `code`, not `full`. A repository adopts v1.41 in one CI-file PR and
+# sizes its PR runner capacity for the integration job on every PR.
+# Every other job, gate and tier is v1.40's.
+# v1.40 (2026-11-16, owner ruling 732): a library behind a newer upstream
+# release never fails CI. The deps-check step passes DEPS_CHECK_LAG=report on
+# every event, so depscheck v1.1.0 (`-lag report`) reports every lag and fails
+# only a vulnerable go.mod requirement, a lookup failure, and a fork replace or
+# pseudo-version with no reason comment on a line the change adds or bumps
+# (ruling 640). Before it, deps-check turned 11+ PRs red across three
+# repositories for upstream releases the PRs never touched. The daily
+# deps-bump.yml (deps-bump v1.1.0) keeps the full gate and carries every lag
+# as ONE PR on ci/deps-bump. A repository adopts v1.40 in one CI-file PR with
+# scripts/depscheck v1.1.0, the Makefile's `-lag $(DEPS_CHECK_LAG)` argument
+# and deps-bump.yml v1.1.0. Every other job, gate and tier is v1.39's.
+# v1.39 (2026-11-14, ruling 640, owner decision 222 (a)): deps-check fails a
+# library behind its latest release only when the change adds that go.mod
+# requirement or changes its version, or when govulncheck reports a version of
+# a go.mod requirement vulnerable (stdlib, toolchain and indirect-only findings
+# are reported); a lag the change did not touch is reported, not failed. A new
+# lint-job step, `Base commit for deps-check (ruling 640)`, fetches one
+# commit at depth 1 and exports DEPS_CHECK_BASE: the pull request's base sha
+# (the merge ref's first parent) or a push's `before`; a schedule or
+# workflow_dispatch run sets none and keeps the full gate. `make deps-check`
+# receives it as a make variable. The preflight refusal of a workflow_dispatch
+# off main exempts refs/heads/ci/deps-bump, which runs the PR tier: a PR that
+# GITHUB_TOKEN opens starts no pull_request run, so deps-bump.yml dispatches
+# this workflow there. The repository's deps-check is the shared
+# depscheck v1.0.0 (templates/deps/depscheck) with `-vuln`, and the daily
+# deps-bump.yml (deps-bump v1.0.0) opens the one PR on ci/deps-bump that
+# carries the bumps. A repository adopts v1.39 in one CI-file PR with
+# scripts/depscheck, its Makefile's deps-check and deps-bump targets, and
+# .github/workflows/deps-bump.yml. Every other job, gate and tier is v1.38's.
+# v1.38 (2026-11-14, owner ruling 633, decision 219(d)): release and publish
+# jobs run only on `[self-hosted, linux, x64, release]`, and no pull request
+# job ever does. A pull request's test code reached the Docker daemon that
+# main's image builds and the Trivy gate also used, so it could re-tag a base
+# or scan image they then trusted (go-xkms #1384). publish-images moves to
+# that label; on GitHub it runs only when the repository variable
+# RELEASE_RUNNER is `true`, so no run waits on a label with no runner, and on
+# Gitea it runs as before. A new preflight step, `Runner labels (ruling
+# 633)`, fails CI when a workflow of the repository has a job that names
+# `release` and that a pull request could run, or whose `if:` does not
+# restrict it to a push to main or a tag, or a workflow_dispatch on main.
+# The bigdisk-docker pools get a rootless Docker daemon of their own at the
+# same /var/run/docker.sock path (no workflow change; see ci-standard.md
+# §3a). A repository adopts v1.38 in one CI-file PR that also moves its
+# release.yml jobs to the release label, pins its build and scan images by
+# @sha256 digest and pulls them by digest before docker create or run, and
+# sets RELEASE_RUNNER only once Infrastructure reports the release pools
+# live. Every other job, gate and tier is v1.37's.
+# v1.37 (2026-11-13, ruling 580): every job in every template carries
+# timeout-minutes so a hung job ends itself. Ceilings by kind: unit, race,
+# lint and other test jobs 60; integration, image builds, soak and release
+# 120; gates and aggregators 10. A repository sets a job at or under its
+# ceiling, sized at 1.5 x the job's longest green run; a job whose green
+# runs need more keeps its measured value. automerge.yml, nightly.yml and
+# revert-red-main.yml gain the timeouts they lacked.
+# v1.36 (2026-11-13, Tenant Agent, owner approval 16:1xZ: keep CI caches
+# local): a self-hosted job never restores or saves the Actions cache, which
+# lives in Azure blob storage behind the office's internet line. The
+# self-hosted pools (dept-infra github/runner) give every job persistent
+# per-host caches: GOCACHE and GOMODCACHE, CI_HOST_CACHE for anything else a
+# repository caches (trusted-firmware's OP-TEE stack under
+# $CI_HOST_CACHE/optee/<pin>, renamed into place whole), GOPROXY and
+# DEVCACHE_GOPROXY through Athens, and TRIVY_DB_REPOSITORY and
+# TRIVY_JAVA_DB_REPOSITORY through the dev-cache ghcr mirror. So, in any job
+# that can run self-hosted: every actions/setup-go step takes
+# `cache: ${{ runner.environment != 'self-hosted' }}`, and an actions/cache
+# step runs only when a CI_HOST_CACHE lookup missed (once per host and key).
+# scripts/in-toolchain-image.sh v6 passes the TRIVY_* settings to a bridge
+# stage. GitHub-hosted jobs are unchanged. Every job, gate and tier is
+# v1.35.3's.
+# v1.35.3 (2026-11-12, Tenant Agent m2586 (1)): `pull_request` also fires on
+# `ready_for_review`. A draft runs no CI (v1.26), and marking it ready started
+# no run, so every draft converted to ready sat with no CI until someone
+# pushed or closed and reopened it (go-quicraft reopened 8 PRs by hand). The
+# ready_for_review run is the PR's first real run: the draft had none in
+# flight for it to cancel. This supersedes v1.26's "no ready_for_review
+# trigger" and its empty-commit step. Every job, gate and tier is v1.35.2's.
+# v1.35.2 (2026-11-11, Tenant Agent m2577, Codex finding on xkey-android
 # #129): the `Signatures` job leaves this workflow. It ran in the pull
 # request's own workflow, so the pull request's tree held the verifier that
 # judged it. It is now signatures.yml (signatures-template v1), on
@@ -22,13 +315,13 @@
 # its needs; the ruleset requires `Signatures / Signatures` beside it. A
 # repository adopts v1.35.2 in one CI-file PR: ci.yml, signatures.yml and
 # .github/allowed_signers. Every other job, gate and tier is v1.35.1's.
-# v1.35.1 (2026-11-11, CA m2557, Codex findings on go-luks2 #444 and
+# v1.35.1 (2026-11-11, Tenant Agent m2557, Codex findings on go-luks2 #444 and
 # xkey-android #129): the Signatures job fetches a named base that is not in
 # the clone and fails closed when it still cannot be read (it no longer falls
 # back to the head's registry and the head commit alone), and its
 # signature-presence check reads the whole commit object, so a long signed
 # message cannot fail under pipefail with SIGPIPE.
-# v1.35 (2026-11-11, Company Agent m2557, owner ruling on commit signing): a
+# v1.35 (2026-11-11, Tenant Agent m2557, owner ruling on commit signing): a
 # `Signatures` job verifies every commit in the range against the
 # repository's .github/allowed_signers registry, read from the base commit,
 # and accepts a GitHub-made commit only when the API reports it verified as
@@ -103,7 +396,7 @@
 # only `needs.changes.outputs.*` left such a job skipped unstarted (two runs
 # in a row); one that also tests the image job's output started it. A
 # repository needs no adoption PR.
-# v1.29.1 (Company Agent ruling 226(15), 108 repair, 2026-10-27): lint fails
+# v1.29.1 (ruling 226(15), 108 repair, 2026-10-27): lint fails
 # fast. The lint-gates job runs `make lint-gates` without `-k`, so the first
 # failing gate ends the step. Under `-k` make went on running the other gates
 # after one had failed: in another repository's run Lint took 51.5 min, 37 of
@@ -312,7 +605,12 @@ on:
   # Lets a run be repeated without inventing a commit, which matters when a
   # failure is the runner's rather than the code's.
   workflow_dispatch:
+  # CUSTOMIZE (go-luks2): no schedule trigger (#341, sdlc §5a,
+  # TestNoScheduleTrigger); main's full tier runs after every merge and on
+  # workflow_dispatch, never on a cron.
 
+# v1.53 (ruling 1087): on main the group is the workflow and the event,
+# `main-{event}`, so a newer main run cancels the older one. Before v1.53:
 # v1.26.2: on main the group is the workflow, the event and the commit sha,
 # so each main run is its own group and a merge never cancels the main run in
 # progress; a schedule or workflow_dispatch run is in its own event's group
@@ -323,7 +621,7 @@ on:
 # v1.29.3: a schedule run's group is `schedule-{repository}`, with no sha, so a
 # repository has one schedule run at a time (none is scheduled here).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -336,14 +634,19 @@ env:
   # `integration`; lint, gosec and the assertion below read it, never the
   # unit run (the Makefile's GO_BUILD_TAGS block says why).
   GO_BUILD_TAGS: "integration"
-  # v1.23: the full tier (ci-standard.md §8). Every event but pull_request
-  # (push to main, workflow_dispatch), and a PR labelled ci:full.
+  # v1.23: the full tier (ci-standard.md §8). v1.41 (ruling 742 (2)): every
+  # event, a pull_request included, so a PR runs every stage main runs.
+  # v1.30 (fix 5): a workflow_dispatch off main is not the full tier (the
+  # schedule guard refuses it and CI Gate fails); v1.41: ci/deps-bump, which
+  # deps-bump.yml (v1.42: scans.yml) dispatches because its PR starts no
+  # pull_request run, is.
   # Steps read it as env.CI_FULL_TIER; a job-level `if:` cannot read env, so
   # the integration job repeats this expression. Keep them equal.
-  # v1.30 (fix 5): a workflow_dispatch off main is not the full tier (the
-  # schedule guard refuses it and CI Gate fails).
-  CI_FULL_TIER: ${{ (github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')) || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
-  # v1.24: the files a docs-only PR may touch. CUSTOMIZE: narrow it
+  CI_FULL_TIER: ${{ github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ci/deps-bump' }}
+  # v1.41: `ci:full` on a PR turns off the docs-only and lint-gates path
+  # scopes; it selects no tier.
+  CI_FULL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci:full') }}
+  # v1.24 (Tenant Agent m749, m751 (a)): the files a docs-only PR may touch. CUSTOMIZE: narrow it
   # in a repo that embeds or generates from docs/ (go:embed, OpenAPI, protos).
   DOCS_ONLY_PATTERN: '(\.md$|^docs/)'
   # v1.30 (fix 3): a PR runs the lint-gates job only when a changed file
@@ -365,6 +668,10 @@ env:
   GOLANGCI_LINT_VERSION: "v2.14.0"
   GOSEC_VERSION: "v2.29.0"
   GOVULNCHECK_VERSION: "v1.8.0"
+  # CUSTOMIZE (go-luks2): v1.48's HOSTED_JOBS_PER_REPO and
+  # HOSTED_QUEUE_GRACE_SECONDS are not taken. Every job's runs-on is a literal
+  # ubuntu-latest (owner ruling 999) and bigdisk is retired here, so the
+  # preflight overflow step that reads them is not taken either.
 
 jobs:
   # ---- PR tier ----
@@ -392,7 +699,15 @@ jobs:
   # source check with grep on the runner's shell, on the PR tier.
   preflight:
     name: Preflight [changed files, schedule guard, architecture gates]
-    runs-on: ubuntu-latest
+    # v1.49: on github.com the bigdisk pool, so no run waits in the hosted
+    # queue for its first ten seconds of work; the repository variable
+    # CI_PREFLIGHT_RUNS_ON, runs-on JSON, overrides it (`"ubuntu-latest"`,
+    # quotes included, while that pool is down). Off github.com the forge
+    # label, as before.
+    # v1.52 (Tenant Agent order): a pull request from a fork (its head
+    # repository is not this one) takes ubuntu-latest whatever the variable
+    # holds; a fork never reaches a self-hosted runner.
+    runs-on: ${{ github.server_url == 'https://github.com' && (!startsWith(github.event_name, 'pull_request') || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk"]') || 'ubuntu-latest' }}   # v1.52
     # v1.26: a draft PR runs no CI; every job that needs this one skips with it.
     if: ${{ !github.event.pull_request.draft }}
     timeout-minutes: 10       # v1.34: the three jobs had 5 each
@@ -420,7 +735,10 @@ jobs:
           REPO_API: ${{ github.server_url }}/api/v1/repos/${{ github.repository }}
           JOB_TOKEN: ${{ github.token }}
           # v1.30: a push to main reads the tree proof with it as well.
-          BOT: ${{ (github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && secrets.AGENT_TOKEN || '' }}
+          # v1.49: off github.com only. On github.com the guard never reads it
+          # (no schedule check, no tree proof there), so the secret no longer
+          # reaches the step on the self-hosted runner.
+          BOT: ${{ github.server_url != 'https://github.com' && (github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && secrets.AGENT_TOKEN || '' }}
         run: |
           set -uo pipefail
           # runs <token>: sets N to the number of this workflow's push runs
@@ -477,9 +795,14 @@ jobs:
           }
           verdict=run N=0 PROOF=
           # v1.30 (fixes 3 and 5): the refusals come first.
-          if [ "$EVENT" = workflow_dispatch ] && [ "$REF" != refs/heads/main ]; then
+          # v1.39 (ruling 640): deps-bump.yml dispatches this workflow on
+          # ci/deps-bump, because the PR it opens with GITHUB_TOKEN starts no
+          # pull_request run. That dispatch is the full tier (v1.41,
+          # CI_FULL_TIER), so it is not refused. v1.42: scans.yml (which
+          # replaces deps-bump.yml, ruling 742 (1)) dispatches it the same way.
+          if [ "$EVENT" = workflow_dispatch ] && [ "$REF" != refs/heads/main ] && [ "$REF" != refs/heads/ci/deps-bump ]; then
             verdict=refused
-            echo "::error::workflow_dispatch on $REF: the full tier runs on main only, never on a PR branch (ci-template v1.30); every job skips and CI Gate fails"
+            echo "::error::workflow_dispatch on $REF: a dispatch runs on main and ci/deps-bump only (ci-template v1.30, v1.41); every job skips and CI Gate fails"
           elif [ "$EVENT" = pull_request ] && [ "${HEAD_REF#lane-ckpt/}" != "$HEAD_REF" ]; then
             verdict=refused
             echo "::error::a pull request from checkpoint branch $HEAD_REF: a checkpoint branch never opens a PR (ci-template v1.30); every job skips and CI Gate fails"
@@ -519,11 +842,103 @@ jobs:
           echo "proof=$PROOF" >> "$GITHUB_OUTPUT"
 
       # v1.34: the full history on a PR run for the changed-files diff, one
-      # commit otherwise. No credential is left in the checkout.
+      # commit otherwise. v1.41: every PR run, ci:full or not. No credential is left in the checkout.
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          fetch-depth: ${{ (github.event_name == 'pull_request' && env.CI_FULL_TIER != 'true') && '0' || '1' }}
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
           persist-credentials: false
+
+      # CUSTOMIZE (go-luks2): the next step's own Python,
+      # .github/scripts/runner_labels.py (one copy, no second script, outside
+      # the run block), runs first on every fixture workflow that
+      # test/ci/workflows/testdata/runnerlabels/manifest.txt lists, each alone
+      # in an empty directory; an exit or output that differs from the
+      # manifest's fails the job. The toolchain image has no python3, so the
+      # step's tests run here, on preflight's runner, and the Go tests check
+      # the manifest and this step.
+      - name: Runner labels self-test
+        run: |
+          set -euo pipefail
+          dir=test/ci/workflows/testdata/runnerlabels
+          py="$PWD/.github/scripts/runner_labels.py"
+          n=0 fail=0
+          while IFS='|' read -r -a f; do
+            case ${f[0]:-} in ''|'#'*) continue ;; accept) want=0 ;; reject) want=1 ;;
+              *) echo "::error::manifest: ${f[*]}"; fail=1; continue ;; esac
+            n=$((n + 1))
+            t=$(mktemp -d "$RUNNER_TEMP/runner-labels.XXXXXX")
+            mkdir -p "$t/.github/workflows"
+            cp "$dir/${f[2]}" "$t/.github/workflows/${f[1]}"
+            rc=0
+            out=$(cd "$t" && python3 -I "$py" 2>&1) || rc=$?
+            bad=""
+            [ "$rc" -eq "$want" ] || bad="exit $rc, want $want"
+            for text in "${f[@]:3}"; do
+              case $text in
+                '!'*) [[ "$out" != *"${text#!}"* ]] || bad="$bad; output has \"${text#!}\"" ;;
+                *) [[ "$out" == *"$text"* ]] || bad="$bad; output lacks \"$text\"" ;;
+              esac
+            done
+            if [ -n "$bad" ]; then
+              echo "::error::${f[2]} as ${f[1]} (${f[0]}): ${bad#; }"
+              printf '%s\n' "$out"
+              fail=1
+            else
+              echo "ok: ${f[2]} as ${f[1]} (${f[0]})"
+            fi
+          done < "$dir/manifest.txt"
+          [ "$n" -gt 0 ] || { echo "::error::$dir/manifest.txt lists no case"; exit 1; }
+          [ "$fail" -eq 0 ] || exit 1
+          echo "OK: $n runner-label case(s) give the manifest's result"
+
+      # v1.38 (owner ruling 633, decision 219(d)): a job that names the
+      # `release` label runs only on a push of a tag (refs/tags/*), never for a
+      # pull request. A branch or dispatch condition is refused: Actions `==`
+      # is case-insensitive, so a branch Main would match main. This step
+      # reads every file under .github/workflows (dotfiles too; a name not
+      # ending .yml or .yaml in any case fails) as text, takes each job whose
+      # runs-on names `release` (plain, in a list, or as a quoted string inside
+      # an expression) or holds an expression other than the ones this
+      # repository uses (RO_ALLOW), and checks its `if:`
+      # against an allowlist that fails closed: split at its top-level `&&`
+      # (not inside brackets or strings), the terms must include
+      # `github.event_name == 'push'` and one of
+      # `startsWith(github.ref, 'refs/tags/')` or `github.ref_type == 'tag'`,
+      # token for token (whitespace and quoting aside). Other terms are
+      # allowed: under `&&` they only narrow. A top-level `||` or `!`, an
+      # `if:` it cannot read, or no `if:` is refused: (a) in a workflow with
+      # a pull_request or pull_request_target trigger, and (b) always. It
+      # prints each file:job and the reason. A lint, not the gate: the runner
+      # side refuses such a job as well.
+      # v1.43 (ruling 833): on github.com every other job runs on a standard
+      # GitHub-hosted image on every event (c), or its runs-on line says why
+      # it cannot, `# self-hosted: <reason>`; a larger runner is refused (d).
+      # v1.46 (ruling 999): the reason names its category, hardware: or
+      # oversize: (credential: for the one Codex review job); a reason with
+      # no category is (e).
+      # v1.47 (ruling 1007): label and category are checked together. The
+      # review-only labels codex and qwen run only in code-review.yml, codex
+      # with credential: and qwen with hardware:, and credential: is only for
+      # codex; a waiver does not lift it (f).
+      # v1.48 (ruling 1024): in ci.yml, a runs-on that reads
+      # needs.preflight.outputs.runner or runner_docker is checked with the
+      # output at its default ("ubuntu-latest", which must give a standard
+      # image) and at its overflow, where exactly
+      # [self-hosted, linux, x64, bigdisk] or [..., bigdisk-docker] passes too.
+      # v1.49: the preflight job's own runs-on, which reads
+      # vars.CI_PREFLIGHT_RUNS_ON, is checked with the variable unset, where
+      # exactly [self-hosted, linux, x64, bigdisk] passes too, and set to
+      # `"ubuntu-latest"`, where it must give a standard image.
+      # v1.51: every runs-on is also checked under pull_request_target,
+      # where a fork's head gets no overflow and no unset-variable exemption.
+      # v1.52: a fork's head under pull_request, as under pull_request_target,
+      # gets no unset-variable exemption: preflight's runs-on must carry the
+      # head-repository clause before the variable.
+      # Its tests: the fixtures test/ci/workflows/testdata/runnerlabels/manifest.txt
+      # lists, which the step `Runner labels self-test` above runs.
+      - name: Runner labels (ruling 633)
+        run: |
+          python3 -I .github/scripts/runner_labels.py
 
       - name: Is every changed file docs or markdown?
         id: diff
@@ -533,9 +948,11 @@ jobs:
           EVENT: ${{ github.event_name }}
         run: |
           # v1.30: lint_gates is false only on a PR whose changed files all
-          # miss LINT_GATES_PATTERN; any doubt runs the job.
+          # miss LINT_GATES_PATTERN; any doubt runs the job. v1.41: a ci:full
+          # PR keeps both scopes off (CI_FULL_LABEL; CI_FULL_TIER is true on
+          # every PR now).
           docs_only=false lint_gates=true
-          if [ "$EVENT" = pull_request ] && [ "$CI_FULL_TIER" != true ]; then
+          if [ "$EVENT" = pull_request ] && [ "$CI_FULL_LABEL" != true ]; then
             if files=$(git diff --name-only --no-renames "$BASE...$HEAD") && [ -n "$files" ]; then
               if ! printf '%s\n' "$files" | grep -qvE "$DOCS_ONLY_PATTERN"; then
                 docs_only=true
@@ -568,7 +985,9 @@ jobs:
   # in series before them. The PR tier runs `make gosec` here; the full tier
   # runs gosec in the image job's `make security`, so it runs once per event.
   # It runs on a docs-only PR, with the releasability gates, as the image job
-  # did; the build-tag assertion and gosec skip there.
+  # did; the build-tag assertion skips there. v1.42 (ruling 742 (1)):
+  # `make gosec` runs here on every event, and deps-check is in scans.yml,
+  # so every step reads only the tree.
   lint:
     name: Lint [lint, gosec, build tags, releasability]
     runs-on: ubuntu-latest
@@ -594,6 +1013,12 @@ jobs:
             echo "::add-mask::$val"
             case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
           done
+
+      # Ruling 887: the LAN addresses this runner's environment names, masked
+      # before any step that builds can print one.
+      # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211).
+      - name: Mask the LAN addresses
+        run: make ci-mask-lan
 
       - name: Reap stale CI stacks
         run: make ci-reap-stacks
@@ -630,6 +1055,13 @@ jobs:
           rm -f "$RUNNER_TEMP/gomodauth.env"
           echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
 
+      # Ruling 901: the images the job built or pulled carry no private address in their history or
+      # config, checked after the build and before any use, on a pool runner.
+      # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211).
+      - name: Check the images carry no private address
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && runner.environment != 'github-hosted' }}
+        run: make ci-image-history IMAGES="$TOOLCHAIN_IMAGE"
+
       # v1.22: bound this repo's cache volumes on the host before the stages
       # add to them (ci-standard.md §6). It never fails the job.
       - name: Trim the CI caches
@@ -652,7 +1084,7 @@ jobs:
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         run: make ci-toolchain-run CMD="make lint GO_BUILD_TAGS='$GO_BUILD_TAGS'"
 
-      # v1.32 (2026-11-08, Company Agent m2098 item 2, InfoSec finding): the
+      # v1.32 (2026-11-08, Tenant Agent m2098 item 2, InfoSec finding): the
       # internal-name gate. Its patterns are internal values, so they never
       # live in this repository: the Actions secret RELEASABILITY_PATTERNS
       # carries the private pattern file, whose source is kept outside this
@@ -780,9 +1212,10 @@ jobs:
   # The image job builds both devcontainer images once (`make docker-build`)
   # and runs each stage as its own step (v1.30: the lint-class stages are the
   # lint job's); `if: !cancelled()` runs every stage
-  # after a failed one, so one run reports them all. make security and make
-  # deps-check (and trivy) get a network, for the vulnerability databases and
-  # the module proxy; everything else runs without one.
+  # after a failed one, so one run reports them all. v1.42 (ruling 742 (1)):
+  # make security, trivy and make deps-check run in scans.yml, so no ci.yml
+  # stage needs the network for an advisory or a version lookup.
+  # v1.41: the full tier (env.CI_FULL_TIER) is every event, every PR too.
   #
   # v1.22: every stage mounts the build and golangci-lint cache volumes, and a
   # bridge stage the module cache volume, from the runner's Docker host
@@ -835,6 +1268,12 @@ jobs:
             echo "::add-mask::$val"
             case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
           done
+
+      # Ruling 887: the LAN addresses this runner's environment names, masked
+      # before any step that builds can print one.
+      # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211).
+      - name: Mask the LAN addresses
+        run: make ci-mask-lan
 
       - name: Reap stale CI stacks
         run: make ci-reap-stacks
@@ -981,6 +1420,13 @@ jobs:
           echo "IT_LEASE=$lease" >> "$GITHUB_ENV"
           echo "IT_LEASE_ID=$id" >> "$GITHUB_ENV"
 
+      # Ruling 901: the images the job built or pulled carry no private address in their history or
+      # config, checked after the build and before any use, on a pool runner.
+      # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211).
+      - name: Check the images carry no private address
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.IT_LEASE_ID != '' && runner.environment != 'github-hosted' }}
+        run: make ci-image-history IMAGES="$TOOLCHAIN_IMAGE $IT_LEASE_ID"
+
       # v1.22: bound this repo's cache volumes on the host before the stages
       # add to them (ci-standard.md §6). It never fails the job. CUSTOMIZE:
       # the template's trim-ci-caches.sh, as a recipe.
@@ -1055,7 +1501,7 @@ jobs:
       - name: Tear down
         if: always()
         run: |
-          rm -f "$RUNNER_TEMP/gomodauth.env" it-image.tar
+          rm -f "$RUNNER_TEMP/gomodauth.env"
           [ -z "${IT_LEASE:-}" ] || docker rm "$IT_LEASE" >/dev/null || true
 
   # v1.27: a repository's `make lint-gates` (its own gates beside `make lint`:
@@ -1100,6 +1546,12 @@ jobs:
             echo "::add-mask::$val"
             case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
           done
+
+      # Ruling 887: the LAN addresses this runner's environment names, masked
+      # before any step that builds can print one.
+      # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211).
+      - name: Mask the LAN addresses
+        run: make ci-mask-lan
 
       # A source check on the runner's shell: no make recipe runs here.
       - name: Does the Makefile define lint-gates?
@@ -1162,6 +1614,13 @@ jobs:
           rm -f "$RUNNER_TEMP/gomodauth.env"
           echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
 
+      # Ruling 901: the images the job built or pulled carry no private address in their history or
+      # config, checked after the build and before any use, on a pool runner.
+      # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211).
+      - name: Check the images carry no private address
+        if: ${{ !cancelled() && steps.probe.outputs.has_target == 'true' && env.TOOLCHAIN_IMAGE != '' && runner.environment != 'github-hosted' }}
+        run: make ci-image-history IMAGES="$TOOLCHAIN_IMAGE"
+
       # v1.22: bound this repo's cache volumes (as in the image job). It never
       # fails the job and keeps every volume a container mounts.
       - name: Trim the CI caches
@@ -1212,6 +1671,13 @@ jobs:
             echo "::add-mask::$val"
             case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
           done
+
+      # Ruling 887: the LAN addresses this runner's environment names, masked
+      # before any step that builds can print one.
+      # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211); this
+      # go-luks2 job builds an image too, so it masks as the template's do.
+      - name: Mask the LAN addresses
+        run: make ci-mask-lan
 
       - name: Reap stale CI stacks
         run: make ci-reap-stacks
@@ -1304,12 +1770,15 @@ jobs:
   # content-addressed one, leased and never removed here. The ledger directory
   # (TEST_STATE_DIR) is bind-mounted from the runner host and deliberately
   # persists between jobs.
+  # v1.23: full tier only (CI_FULL_TIER's expression). v1.41: every PR.
   integration:
     name: Integration [integration image]
     # v1.26: never on a draft PR, ci:full or not. v1.30: only on the guard's
     # `run` (a dispatch off main is refused).
     needs: preflight   # v1.34
-    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
+    # v1.41 (ruling 742 (2)): every PR, as main; a docs-only PR skips it, as
+    # it skips build and make coverage, and CI Gate reads it as `code`.
+    if: ${{ (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ci/deps-bump') && !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' && needs.preflight.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -1327,6 +1796,12 @@ jobs:
             echo "::add-mask::$val"
             case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
           done
+
+      # Ruling 887: the LAN addresses this runner's environment names, masked
+      # before any step that builds can print one.
+      # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211).
+      - name: Mask the LAN addresses
+        run: make ci-mask-lan
 
       - name: Reap stale CI stacks
         run: make ci-reap-stacks
@@ -1433,6 +1908,14 @@ jobs:
           image_unlock
           echo "IT_LEASE=$lease" >> "$GITHUB_ENV"
           echo "IT_LEASE_ID=$id" >> "$GITHUB_ENV"
+
+      # Ruling 901: the integration image the job leased carries no private
+      # address in its history or config, checked after the build and before
+      # any use, on a pool runner.
+      # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211).
+      - name: Check the images carry no private address
+        if: ${{ !cancelled() && env.IT_LEASE_ID != '' && runner.environment != 'github-hosted' }}
+        run: make ci-image-history IMAGES="$IT_LEASE_ID"
 
       - name: Write the module credential file
         run: |
@@ -1505,6 +1988,12 @@ jobs:
             case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
           done
 
+      # Ruling 887: the LAN addresses this runner's environment names, masked
+      # before any step that builds can print one.
+      # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211).
+      - name: Mask the LAN addresses
+        run: make ci-mask-lan
+
       - name: Reap stale CI stacks
         run: make ci-reap-stacks
 
@@ -1610,6 +2099,14 @@ jobs:
           image_unlock
           echo "IT_LEASE=$lease" >> "$GITHUB_ENV"
           echo "IT_LEASE_ID=$id" >> "$GITHUB_ENV"
+
+      # Ruling 901: the integration image the job leased carries no private
+      # address in its history or config, checked after the build and before
+      # any use, on a pool runner.
+      # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211).
+      - name: Check the images carry no private address
+        if: ${{ !cancelled() && env.IT_LEASE_ID != '' && runner.environment != 'github-hosted' }}
+        run: make ci-image-history IMAGES="$IT_LEASE_ID"
 
       - name: Write the module credential file
         run: |
@@ -1698,6 +2195,13 @@ jobs:
             case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
           done
 
+      # Ruling 887: the LAN addresses this runner's environment names, masked
+      # before any step that builds can print one.
+      # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211); this
+      # go-luks2 job builds an image too, so it masks as the template's do.
+      - name: Mask the LAN addresses
+        run: make ci-mask-lan
+
       - name: Reap stale CI stacks
         run: make ci-reap-stacks
 
@@ -1751,9 +2255,10 @@ jobs:
   fips:
     name: FIPS
     runs-on: ubuntu-latest
-    # v1.26: never on a draft PR, ci:full or not. v1.30: only on the guard's `run`.
+    # v1.26: never on a draft PR. v1.30: only on the guard's `run`. v1.41
+    # (ruling 742 (2)): every PR, as main; a docs-only PR skips it (`code`).
     needs: preflight   # v1.34
-    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
+    if: ${{ (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ci/deps-bump') && !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' && needs.preflight.outputs.docs_only != 'true' }}
     timeout-minutes: 30
     env:
       # CUSTOMIZE (v1.22): the image job's cache class, for its stage.
@@ -1769,6 +2274,13 @@ jobs:
             echo "::add-mask::$val"
             case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
           done
+
+      # Ruling 887: the LAN addresses this runner's environment names, masked
+      # before any step that builds can print one.
+      # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211); this
+      # go-luks2 job builds an image too, so it masks as the template's do.
+      - name: Mask the LAN addresses
+        run: make ci-mask-lan
 
       - name: Reap stale CI stacks
         run: make ci-reap-stacks
@@ -1806,7 +2318,7 @@ jobs:
         if: always()
         run: rm -f "$RUNNER_TEMP/gomodauth.env"
 
-  # v1.35.2 (Company Agent m2577): the commit signature gate is not a job of
+  # v1.35.2 (Tenant Agent m2577): the commit signature gate is not a job of
   # this workflow. It is signatures.yml, on pull_request_target, so it runs
   # from the base branch and a pull request cannot edit the script that
   # judges it. Its `Signatures / Signatures` check is required by the ruleset
@@ -1908,8 +2420,8 @@ jobs:
           check lint-gates  "${{ needs.lint-gates.result }}" scoped
           check merge-check "${{ needs.merge-check.result }}" pr
           check test-race   "${{ needs.test-race.result }}" pr
-          check integration "${{ needs.integration.result }}" full
-          check fips        "${{ needs.fips.result }}" full
+          check integration "${{ needs.integration.result }}" code
+          check fips        "${{ needs.fips.result }}" code
           check soak        "${{ needs.soak.result }}" nightly
           if [ "$BAD" -ne 0 ]; then
             echo "CI gate failed: not every job reported success."

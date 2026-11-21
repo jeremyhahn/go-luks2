@@ -83,18 +83,20 @@ WORKDIR /workspace
 # or a developer building against the public proxy -- the file is simply absent
 # and the same Dockerfile still builds.
 #
-# GO_BUILD_PROXY is the module proxy for build-time fetches (devcontainer.md
-# §4): an ARG, so it applies to the fetch alone and is not baked into the
-# image. GOSUMDB is deliberately NOT changed, as ENV or otherwise: an image
+# The module proxy for build-time fetches (devcontainer.md §4) arrives as the
+# optional BuildKit secret `goproxy` (the Makefile passes GO_BUILD_PROXY as
+# `--secret id=goproxy,env=GO_BUILD_PROXY` only when it is set), read inside
+# each RUN alone. Not an ARG: BuildKit records an ARG's value in the image
+# history, and a LAN proxy address there fails the image-history gate. No
+# secret means the default GOPROXY. GOSUMDB is deliberately NOT changed, as ENV or otherwise: an image
 # that bakes GOSUMDB=off turns checksum verification off for every container
 # it spawns. The cache is made readable to every uid, because the image runs
 # as whatever uid owns the checkout (devcontainer.md §5).
 COPY go.mod go.sum ./
-ARG GO_BUILD_PROXY
-RUN --mount=type=secret,id=gomodauth \
+RUN --mount=type=secret,id=gomodauth --mount=type=secret,id=goproxy \
     set -eu; \
     if [ -f /run/secrets/gomodauth ]; then set -a; . /run/secrets/gomodauth; set +a; fi; \
-    if [ -n "${GO_BUILD_PROXY:-}" ]; then export GOPROXY="$GO_BUILD_PROXY"; fi; \
+    if [ -s /run/secrets/goproxy ]; then GOPROXY="$(cat /run/secrets/goproxy)"; export GOPROXY; fi; \
     go mod download; \
     chmod -R a+rX "$(go env GOMODCACHE)"
 
@@ -117,11 +119,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # archive and binary hashes the same way.
 COPY Makefile go.mod /src/
 COPY build/docker/devcontainer/tool-pins.env /src/build/docker/devcontainer/
-ARG GO_BUILD_PROXY
-RUN set -eu; \
+RUN --mount=type=secret,id=goproxy \
+    set -eu; \
     cd /src; \
     . build/docker/devcontainer/tool-pins.env; \
-    if [ -n "${GO_BUILD_PROXY:-}" ]; then export GOPROXY="$GO_BUILD_PROXY"; fi; \
+    if [ -s /run/secrets/goproxy ]; then GOPROXY="$(cat /run/secrets/goproxy)"; export GOPROXY; fi; \
     export GOBIN=/opt/tools/bin GOFLAGS=; \
     go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}"; \
     ( d="$(mktemp -d)"; cd "$d"; \

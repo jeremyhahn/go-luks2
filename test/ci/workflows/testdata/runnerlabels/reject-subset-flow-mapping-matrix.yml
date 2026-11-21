@@ -1,0 +1,8 @@
+name: t
+on: [push, pull_request]
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    strategy: {matrix: {os: [self-hosted, release]}}
+    steps:
+      - run: 'true'

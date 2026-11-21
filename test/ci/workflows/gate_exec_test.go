@@ -153,13 +153,17 @@ func TestCIGateScriptDecides(t *testing.T) {
 		cases = append(cases, gateCase{name: "all success/FULL_TIER=" + ft, fullTier: ft, wantLine: "CI gate passed."})
 	}
 	cases = append(cases, gateCase{name: "all success/NIGHTLY=true", fullTier: "true", nightly: "true", wantLine: "CI gate passed."})
-	allFullSkipped := map[string]string{}
-	for _, j := range append(append([]string{}, fullTier...), nightlyTier...) {
-		allFullSkipped[j] = "skipped"
+	// ci-template v1.41 (ruling 742 (2)): integration and FIPS run on every
+	// PR (`code`), so the full tier is empty and a FULL_TIER=false run no
+	// longer excuses their skip: only a docs-only PR does.
+	allCodeSkipped := map[string]string{}
+	for _, j := range append(append(append([]string{}, fullTier...), codeTier...), nightlyTier...) {
+		allCodeSkipped[j] = "skipped"
 	}
 	cases = append(cases,
-		gateCase{name: "full tier skipped/FULL_TIER=false", fullTier: "false", results: allFullSkipped, wantLine: "CI gate passed."},
-		gateCase{name: "full tier skipped/FULL_TIER=true", fullTier: "true", results: allFullSkipped, wantExit: 1, wantLine: "FAIL " + fullTier[0] + " (skipped)"},
+		gateCase{name: "code tier skipped/docs-only", fullTier: "true", results: allCodeSkipped, env: map[string]string{"DOCS_ONLY": "true"}, wantLine: "CI gate passed."},
+		gateCase{name: "code tier skipped/FULL_TIER=false", fullTier: "false", results: allCodeSkipped, wantExit: 1, wantLine: "FAIL " + codeTier[0] + " (skipped)"},
+		gateCase{name: "code tier skipped/FULL_TIER=true", fullTier: "true", results: allCodeSkipped, wantExit: 1, wantLine: "FAIL " + codeTier[0] + " (skipped)"},
 	)
 	for _, j := range fullTier {
 		cases = append(cases,

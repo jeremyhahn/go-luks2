@@ -1,0 +1,9 @@
+on: pull_request
+jobs:
+  a:
+    runs-on:
+      - ubuntu-latest
+    # note
+      - release
+    steps:
+      - run: echo hi

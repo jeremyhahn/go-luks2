@@ -28,6 +28,13 @@ const (
 	scopedJobIf  = "${{ !github.event.pull_request.draft && " + guardRun + " && needs.preflight.outputs.lint_gates != 'false' }}"
 	fullJobIf    = "${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft && " + guardRun + " }}"
 	nightlyJobIf = "${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && " + guardRun + " }}"
+	// fullTierCond is CI_FULL_TIER's condition (ci-template v1.41, ruling
+	// 742 (2)): every event but a dispatch off main and off ci/deps-bump,
+	// so every PR. codeFullJobIf is the integration and FIPS jobs' `if:`
+	// since v1.41: that condition, never a draft, the guard's run, and no
+	// docs-only PR; CI Gate tags them `code`.
+	fullTierCond  = "github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ci/deps-bump'"
+	codeFullJobIf = "${{ (" + fullTierCond + ") && !github.event.pull_request.draft && " + guardRun + " && needs.preflight.outputs.docs_only != 'true' }}"
 	// gateIf is CI Gate's: it always runs, but a schedule run whose guard
 	// reads main as busy skips it (no workflow here is scheduled).
 	gateIf = "${{ always() && (github.event_name != 'schedule' || needs.preflight.outputs.verdict != 'busy') }}"
@@ -54,6 +61,8 @@ func TestDraftPullRequestSkipsEveryJobButTheGate(t *testing.T) {
 			want = nightlyJobIf
 		case contains(fullTier, id):
 			want = fullJobIf
+		case contains(codeFullTier, id):
+			want = codeFullJobIf
 		case contains(codeTier, id):
 			want = codeJobIf
 		case contains(scopedTier, id):
@@ -145,7 +154,7 @@ func TestLintGatesJob(t *testing.T) {
 	for _, block := range strings.Split(lg, "\n      - ")[1:] {
 		name, _, _ := strings.Cut(strings.TrimPrefix(block, "name: "), "\n")
 		switch {
-		case strings.HasPrefix(block, "uses: "), name == "Mask the forge credentials",
+		case strings.HasPrefix(block, "uses: "), name == "Mask the forge credentials", name == "Mask the LAN addresses",
 			name == "Does the Makefile define lint-gates?", name == "Tear down":
 		case !strings.Contains(block, defined):
 			t.Errorf("lint-gates step %q runs whether or not the Makefile defines the target", name)
@@ -157,7 +166,7 @@ func TestLintGatesJob(t *testing.T) {
 // workflow is an instance of.
 func TestCIHeaderNamesTheTemplateVersion(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
-	if first, _, _ := strings.Cut(ci, "\n"); first != "# ci-template: v1.35.2 + v1.42 hermetic gate (customized)" {
-		t.Errorf("ci.yml's first line is %q, want the v1.35.2 + v1.42 hermetic gate header", first)
+	if first, _, _ := strings.Cut(ci, "\n"); first != "# ci-template: v1.53 (customized)" {
+		t.Errorf("ci.yml's first line is %q, want the v1.53 header", first)
 	}
 }
