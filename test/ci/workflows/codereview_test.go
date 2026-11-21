@@ -839,6 +839,37 @@ func TestGateNeverWaitsForATwinReview(t *testing.T) {
 	} {
 		try(c.twinCase, c.attempts)
 	}
+
+	// Only the unfinished jobs of an active twin are passed over: a twin's
+	// run ID keeps its completed attempts (filter=all lists every attempt),
+	// so an earlier failed attempt of a rerun twin, or a twin that finished
+	// failed after the twin read, is ranked like any other run and fails.
+	codex := func(id, attempt, status, conclusion, started string) string {
+		s := fmt.Sprintf(`{"id":%s,"name":"Codex review","run_attempt":%s,"status":%q,"conclusion":%s`, id, attempt, status, conclusion)
+		if started != "" {
+			s += fmt.Sprintf(`,"started_at":%q`, started)
+		}
+		if status == "completed" {
+			s += `,"steps":[{"name":"Review the head with codex as uid 1000","conclusion":` + conclusion + `}]`
+		}
+		return s + "}"
+	}
+	scope := `{"id":1,"name":"Review scope (InfoSec guard)","run_attempt":1,"status":"completed","conclusion":"success","started_at":"2026-11-16T00:00:11Z"}`
+	for _, c := range []twinCase{
+		{"an approval, a failed re-review, its rerun queued", approved, map[string]string{
+			"twins_queued": runs(run("11", title+" (re-review: labeled effort:high)")),
+			"_actions_runs_11_jobs": `{"jobs":[` + scope + "," + codex("110", "1", "completed", `"failure"`, "2026-11-16T00:00:11Z") + "," +
+				codex("111", "2", "queued", "null", "") + `]}`,
+			"_actions_runs_11_jobs_latest": `{"jobs":[` + codex("111", "2", "queued", "null", "") + `]}`,
+		}, false, "the latest codex review attempt (run 11) failed or was", "runs in run"},
+		{"a twin finished failed after the twin read", approved, map[string]string{
+			"twins_in_progress":            runs(run("12", title+" (review: labeled code-review)")),
+			"_actions_runs_12_jobs":        `{"jobs":[` + scope + "," + codex("120", "1", "completed", `"failure"`, "2026-11-16T00:00:12Z") + `]}`,
+			"_actions_runs_12_jobs_latest": `{"jobs":[` + codex("120", "1", "in_progress", "null", "2026-11-16T00:00:12Z") + `]}`,
+		}, false, "the latest codex review attempt (run 12) failed or was", "runs in run"},
+	} {
+		try(c, nil)
+	}
 }
 
 // listRuns adds the runs of the listing body to the unfiltered listing of
