@@ -213,15 +213,15 @@ type runExemption struct {
 }
 
 // runSizeExempt names the steps (file: step name) whose oversized run block
-// is a handbook template's step plus this repository's CUSTOMIZE additions,
-// each with a ceiling a little above its size now. Moving the template's
+// is a handbook template's step, carried verbatim, each with a ceiling of
+// the template step's size plus 2,000 characters. Moving the template's
 // part is the template's change to make: this repository's copy runs from
 // the trusted base, and a local fork of the script would drift from the next
 // template. Each entry must still exceed the limit, or the test fails; a
-// step past its ceiling fails too (the local additions belong in a file).
+// step past its ceiling fails too (a local addition belongs in a file).
 var runSizeExempt = map[string]runExemption{
 	"code-review.yml: Check the container, the request, the head and any standing verdict": {
-		"code-review-template's review gate script (about 47,000 characters) plus local CUSTOMIZE additions", 56000},
+		"code-review-template v5.12.11's step (46,999 characters) plus 2,000", 48999},
 }
 
 // stepNameAt returns the name of the step whose key is on line i (0-based):
