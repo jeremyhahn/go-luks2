@@ -2,6 +2,6 @@ name: t
 on: [push, pull_request]
 jobs:
   preflight:
-    runs-on: ${{ github.server_url == 'https://github.com' && fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
+    runs-on: ${{ github.server_url == 'https://github.com' && (!startsWith(github.event_name, 'pull_request') || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     steps:
       - run: true

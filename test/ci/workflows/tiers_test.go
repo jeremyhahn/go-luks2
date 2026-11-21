@@ -208,12 +208,12 @@ func TestNoRetiredRunnerLabel(t *testing.T) {
 }
 
 // isPreflightTemplateRunsOn reports whether a runs-on value is ci-template
-// v1.49's preflight form on ci.yml's preflight job, held once in the file:
+// v1.52's preflight form on ci.yml's preflight job, held once in the file:
 // the one place bigdisk may still be named (the github.com default, which
 // CI_PREFLIGHT_RUNS_ON overrides).
 func isPreflightTemplateRunsOn(t *testing.T, path, workflow, value string) bool {
 	t.Helper()
-	if path != ".github/workflows/ci.yml" || value != preflightRunsOn+"   # v1.49" {
+	if path != ".github/workflows/ci.yml" || value != preflightRunsOn+"   # v1.52" {
 		return false
 	}
 	line := "    runs-on: " + value + "\n"

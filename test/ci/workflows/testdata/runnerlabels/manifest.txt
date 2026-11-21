@@ -67,6 +67,10 @@ reject|x.yml|reject-hosted-ref-self-hosted.yml|x.yml:lint: (b) its runs-on expre
 reject|x.yml|reject-hosted-head-ref-case.yml|x.yml:lint: (a) its runs-on expression is not allow-listed
 reject|x.yml|reject-release-hosted-ref-routing.yml|x.yml:lint: (a) its runs-on expression is not allow-listed
 accept|ci.yml|accept-preflight.yml|OK:
+# Resume 23 (ci-template v1.51, v1.52): the form with the fork clause is read
+# under pull_request_target too; v1.49's form without it is no longer allowed.
+accept|ci.yml|accept-preflight-pr-target.yml|OK:
+reject|ci.yml|reject-preflight-v149-form.yml|ci.yml:preflight: (b) its runs-on expression is not allow-listed
 reject|ci.yml|reject-preflight-form-other-job.yml|ci.yml:lint: (c)|an unknown label|!CI_PREFLIGHT_RUNS_ON
 reject|batch.yml|reject-preflight-outside-ci.yml|batch.yml:preflight: (c)
 reject|ci.yml|reject-preflight-other-default.yml|ci.yml:preflight: (a) its runs-on expression is not allow-listed

@@ -14,12 +14,13 @@ const (
 	runnerLabelsStep     = "Runner labels (ruling 633)"
 	runnerLabelsSelfTest = "Runner labels self-test"
 	runnerLabelsDir      = "test/ci/workflows/testdata/runnerlabels"
+	runnerLabelsScript   = ".github/scripts/runner_labels.py"
 )
 
-// preflightRunsOn is ci-template v1.49's preflight runs-on: the bigdisk pool
+// preflightRunsOn is ci-template v1.52's preflight runs-on: the bigdisk pool
 // on github.com, the repository variable CI_PREFLIGHT_RUNS_ON (runs-on JSON)
 // its override, and ubuntu-latest off github.com.
-const preflightRunsOn = `${{ github.server_url == 'https://github.com' && fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk"]') || 'ubuntu-latest' }}`
+const preflightRunsOn = `${{ github.server_url == 'https://github.com' && (!startsWith(github.event_name, 'pull_request') || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk"]') || 'ubuntu-latest' }}`
 
 // releaseRunsOn is the runs-on line of the release-runner `if:` fixtures.
 const releaseRunsOn = "release  # self-hosted: hardware: the host"
@@ -195,15 +196,23 @@ func TestRunnerLabelsSelfTestStep(t *testing.T) {
 	if self < 0 || check < 0 || self > check {
 		t.Fatalf("preflight's %q step (at %d) does not come before %q (at %d)", runnerLabelsSelfTest, self, runnerLabelsStep, check)
 	}
-	if n := strings.Count(stepBody(t, runnerLabelsStep), "\n          python3 -I - <<'PY'\n"); n != 1 {
-		t.Errorf("%q runs %d `python3 -I - <<'PY'` heredocs, want 1", runnerLabelsStep, n)
+	// Resume 23 (Codex P1 on PR #495): the checker is a repository file,
+	// run as is, with no heredoc copy left in the step.
+	step := stepBody(t, runnerLabelsStep)
+	if n := strings.Count(step, "\n          python3 -I "+runnerLabelsScript+"\n"); n != 1 {
+		t.Errorf("%q runs `python3 -I %s` %d times, want 1", runnerLabelsStep, runnerLabelsScript, n)
+	}
+	if strings.Contains(step, "<<'PY'") {
+		t.Errorf("%q still holds a heredoc; the checker is %s", runnerLabelsStep, runnerLabelsScript)
+	}
+	if src := readFile(t, runnerLabelsScript); !strings.Contains(src, "\nimport json, os, re, sys\n") || !strings.Contains(src, `WF = ".github/workflows"`) {
+		t.Errorf("%s is not the runner-labels checker", runnerLabelsScript)
 	}
 	body := stepBody(t, runnerLabelsSelfTest)
 	for _, want := range []string{
 		"dir=" + runnerLabelsDir + "\n",
 		`done < "$dir/manifest.txt"`,
-		`lines.index("      - name: ` + runnerLabelsStep + `")`,
-		`lines[i].strip() == "python3 -I - <<'PY'"`,
+		`py="$PWD/` + runnerLabelsScript + `"`,
 		`python3 -I "$py"`,
 		`cp "$dir/${f[2]}" "$t/.github/workflows/${f[1]}"`,
 		"accept) want=0 ;; reject) want=1 ;;",
@@ -213,22 +222,22 @@ func TestRunnerLabelsSelfTestStep(t *testing.T) {
 			t.Errorf("%q lacks %q", runnerLabelsSelfTest, want)
 		}
 	}
-	if strings.Contains(body, "glob.glob(") {
-		t.Errorf("%q holds a copy of the runner-labels Python; it must cut it from %q", runnerLabelsSelfTest, runnerLabelsStep)
+	if strings.Contains(body, "glob.glob(") || strings.Contains(body, "<<'") {
+		t.Errorf("%q holds a script of its own; it must run %s", runnerLabelsSelfTest, runnerLabelsScript)
 	}
 }
 
-// TestPreflightRunsOnTemplateForm: ci-template v1.49's preflight runs-on,
+// TestPreflightRunsOnTemplateForm: ci-template v1.52's preflight runs-on,
 // exactly once and on preflight only, and the schedule guard's AGENT_TOKEN
 // passed off github.com only.
 func TestPreflightRunsOnTemplateForm(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
-	line := "    runs-on: " + preflightRunsOn + "   # v1.49\n"
+	line := "    runs-on: " + preflightRunsOn + "   # v1.52\n"
 	if n := strings.Count(ci, line); n != 1 {
-		t.Errorf("ci.yml holds v1.49's preflight runs-on %d times, want 1", n)
+		t.Errorf("ci.yml holds v1.52's preflight runs-on %d times, want 1", n)
 	}
 	if !strings.Contains(job(t, ci, "preflight"), line) {
-		t.Error("ci.yml's preflight job does not run on v1.49's preflight runs-on")
+		t.Error("ci.yml's preflight job does not run on v1.52's preflight runs-on")
 	}
 	bot := "          BOT: ${{ github.server_url != 'https://github.com' && (github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && secrets.AGENT_TOKEN || '' }}\n"
 	if !strings.Contains(job(t, ci, "preflight"), bot) {

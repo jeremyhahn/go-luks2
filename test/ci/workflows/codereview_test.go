@@ -216,7 +216,16 @@ func gateStep(t *testing.T) string {
 	if i < 0 {
 		t.Fatalf("%s: no gate step", codeReviewWorkflow)
 	}
-	return cr[i:]
+	// v5.12.7 puts a step after the gate: the step ends at the first
+	// line indented six spaces or less (the next step, its comment, or the
+	// next job).
+	step := cr[i:]
+	if nl := strings.Index(step, "\n"); nl >= 0 {
+		if j := regexp.MustCompile(`(?m)^ {0,6}\S`).FindStringIndex(step[nl+1:]); j != nil {
+			step = step[:nl+1+j[0]]
+		}
+	}
+	return step
 }
 
 // Codex P1: a PR retargeted since the event passes nothing. The gate reads
@@ -233,10 +242,12 @@ func TestGateRefusesARetargetedPullRequest(t *testing.T) {
 	if !regexp.MustCompile(`(?m)^ +check_base$[\s\S]*exit 0`).MatchString(exempt) {
 		t.Errorf("gate: the no-review exit does not check the live base first:\n%s", exempt)
 	}
-	wait := strings.Index(g, "waited=$((waited + 30))")
+	// v5.12.6: the gate never waits for a twin review; it reads the twin
+	// once, and the live base is checked after that read.
+	wait := strings.Index(g, "twin=${twin:-$id}")
 	verdict := strings.Index(g, "verdict=$(")
 	if wait < 0 || verdict < wait || !regexp.MustCompile(`(?m)^ +check_base$`).MatchString(g[wait:verdict]) {
-		t.Errorf("gate: no live base check between the review wait and the verdict")
+		t.Errorf("gate: no live base check between the twin read and the verdict")
 	}
 }
 
