@@ -85,20 +85,22 @@ func TestNoScheduleTrigger(t *testing.T) {
 	}
 }
 
-// TestMainRunsNeverCancel: on main one group per event and commit, so no
-// main run cancels another (a newer push no longer cancels an older commit's
-// run, and a schedule or dispatch run never cancels a push run); every other
-// ref is one group. cancel-in-progress is a literal true, never an expression.
-func TestMainRunsNeverCancel(t *testing.T) {
+// TestMainRunsCancelPerEvent: on main one group per event, so a newer main
+// run of the same event cancels the older one, queued or in progress, and
+// the newest run validates every merge under it. A schedule run keeps its
+// own schedule group and a workflow_dispatch run its own event's group, so
+// neither shares a group with a push run. Every other ref is one group.
+// cancel-in-progress is a literal true, never an expression.
+func TestMainRunsCancelPerEvent(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
 	m := regexp.MustCompile(`(?m)^concurrency:\n((?:  .*\n)+)`).FindStringSubmatch(ci)
 	if m == nil {
 		t.Fatal("ci.yml has no workflow-level concurrency block")
 	}
-	want := "  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}\n" +
+	want := "  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}\n" +
 		"  cancel-in-progress: true\n"
 	if m[1] != want {
-		t.Errorf("ci.yml's concurrency block is\n%s\nwant main runs that never cancel\n%s", m[1], want)
+		t.Errorf("ci.yml's concurrency block is\n%s\nwant one main group per event\n%s", m[1], want)
 	}
 }
 

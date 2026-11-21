@@ -3,8 +3,8 @@
 # `python3 -I .github/scripts/runner_labels.py` from the repository root. It
 # reads every file under .github/workflows; its rules are in that step's
 # comment. The step `Runner labels self-test` runs this file on every fixture
-# test/ci/workflows/testdata/runnerlabels/manifest.txt lists. Resume 23: moved
-# here out of ci.yml's run block (Codex P1, PR #495), plus the v1.51/v1.52
+# test/ci/workflows/testdata/runnerlabels/manifest.txt lists. It lives
+# here, out of ci.yml's run block, and carries the v1.51/v1.52
 # logic: the `pull_request_target` HOSTED_CTX entries, the preflight
 # `RO_ALLOW` fork clause, and the `not fork` guard on the overflow and unset
 # exemptions.

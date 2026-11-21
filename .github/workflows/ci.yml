@@ -1,5 +1,5 @@
-# ci-template: v1.52 (customized)
-# go-luks2 keeps these deviations from v1.52, each marked
+# ci-template: v1.53 (customized)
+# go-luks2 keeps these deviations from v1.53, each marked
 # `# CUSTOMIZE (go-luks2):` where it lives: the merge-check, test-race and
 # fips jobs and their CI Gate lines; a literal `runs-on: ubuntu-latest` on
 # every job but preflight (owner ruling 999; v1.48's runner overflow is not
@@ -16,12 +16,25 @@
 # only, where it is read. `Runner labels (ruling 633)` checks preflight's
 # runs-on, and only that job's, with the variable unset (exactly
 # [self-hosted, linux, x64, bigdisk] passes too) and set to the fallback.
-# The runner-label checker is .github/scripts/runner_labels.py (Resume 23,
-# Codex P1 on PR #495): one file the step and its self-test both run, so no
-# run block holds a 54 KB script. v1.50's overflow fix is to the
+# The runner-label checker is .github/scripts/runner_labels.py: one file
+# the step and its self-test both run, so no run block holds a 54 KB
+# script. v1.50's overflow fix is to the
 # `Hosted or overflow runner (ruling 1024)` step, which go-luks2 does not
 # adopt (see above); only its changelog is carried. v1.51 and v1.52's
-# checker changes are in that file (docs/plans/494.md, Resume 23).
+# checker changes are in that file.
+# v1.53 (2026-11-21, Tenant Agent ruling 1087, owner order: remove the
+# bottlenecks): main has one concurrency group per event again, `main-{event}`,
+# so a newer push to main cancels the older main run still queued or in
+# progress, and the newest run validates every merge under it. This
+# supersedes v1.26.2's `main-{event}-{sha}` (ruling 145): with hosted
+# concurrency at 20 jobs on the Free plan, nothing cancelled a superseded
+# main run, and trusted-firmware had 40 main runs queued ahead of PR work.
+# A schedule run keeps `schedule-{repository}` and a workflow_dispatch run
+# keeps `main-workflow_dispatch`, so neither shares a group with a push run.
+# cancel-in-progress stays a literal `true`. Only the group changes. Adopt as
+# a ci.yml-only PR that keeps the CUSTOMIZE blocks, together with v1.52's
+# runner selection (internal pull requests run on our runners), separately
+# from code-review.yml.
 # v1.52 (2026-11-21, Tenant Agent order, defect fix): a fork's pull request
 # under pull_request reached a self-hosted runner. preflight's runs-on had
 # no fork check, so on github.com it took the Dells' bigdisk pool for a
@@ -596,6 +609,8 @@ on:
   # TestNoScheduleTrigger); main's full tier runs after every merge and on
   # workflow_dispatch, never on a cron.
 
+# v1.53 (ruling 1087): on main the group is the workflow and the event,
+# `main-{event}`, so a newer main run cancels the older one. Before v1.53:
 # v1.26.2: on main the group is the workflow, the event and the commit sha,
 # so each main run is its own group and a merge never cancels the main run in
 # progress; a schedule or workflow_dispatch run is in its own event's group
@@ -606,7 +621,7 @@ on:
 # v1.29.3: a schedule run's group is `schedule-{repository}`, with no sha, so a
 # repository has one schedule run at a time (none is scheduled here).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -834,8 +849,8 @@ jobs:
           persist-credentials: false
 
       # CUSTOMIZE (go-luks2): the next step's own Python,
-      # .github/scripts/runner_labels.py (one copy, no second script; Resume
-      # 23 moved it out of the run block, Codex P1 on PR #495), runs first on every fixture workflow that
+      # .github/scripts/runner_labels.py (one copy, no second script, outside
+      # the run block), runs first on every fixture workflow that
       # test/ci/workflows/testdata/runnerlabels/manifest.txt lists, each alone
       # in an empty directory; an exit or output that differs from the
       # manifest's fails the job. The toolchain image has no python3, so the
@@ -884,7 +899,7 @@ jobs:
       # ending .yml or .yaml in any case fails) as text, takes each job whose
       # runs-on names `release` (plain, in a list, or as a quoted string inside
       # an expression) or holds an expression other than the ones this
-      # repository uses (Resume 15, RO_ALLOW), and checks its `if:`
+      # repository uses (RO_ALLOW), and checks its `if:`
       # against an allowlist that fails closed: split at its top-level `&&`
       # (not inside brackets or strings), the terms must include
       # `github.event_name == 'push'` and one of
