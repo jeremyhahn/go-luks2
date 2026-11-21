@@ -842,8 +842,9 @@ jobs:
           echo "OK: $n runner-label case(s) give the manifest's result"
 
       # v1.38 (owner ruling 633, decision 219(d)): a job that names the
-      # `release` label runs only on a push to refs/heads/main or a tag, or a
-      # workflow_dispatch on main, and never for a pull request. This step
+      # `release` label runs only on a push of a tag (refs/tags/*), never for a
+      # pull request. A branch or dispatch condition is refused: Actions `==`
+      # is case-insensitive, so a branch Main would match main. This step
       # reads every .github/workflows/*.yml and *.yaml of the repository as
       # text, takes each job whose runs-on names `release` (plain, in a list,
       # or as a quoted string inside an expression), and evaluates its `if:`
@@ -889,7 +890,7 @@ jobs:
           # the `if` is false in each of them whatever the unknowns hold.
           U = object()  # unknown value
           OPEN = "$" "{{"  # split, so the runner does not read it as an expression
-          ALLOWED = "push to refs/heads/main or refs/tags/*, or workflow_dispatch on main"
+          ALLOWED = "a push of refs/tags/* (branch and dispatch conditions are refused: Actions `==` is case-insensitive, so a branch differing only in case would match)"
           PR = {"pull_request", "pull_request_target"}
           CTX = [  # (event, ref) pairs a release job must never run on
               ("pull_request", "refs/pull/1/merge"), ("pull_request_target", "refs/heads/main"),
