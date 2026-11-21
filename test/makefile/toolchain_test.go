@@ -128,11 +128,44 @@ func TestImagesAreStagesOfTheDevcontainerDockerfile(t *testing.T) {
 func TestDevcontainerBuildGetsModuleCredentials(t *testing.T) {
 	for _, target := range []string{"devcontainer", "docker-build-toolchain"} {
 		stdout, stderr := runMake(t, environ(nil, nil), "-n", target)
-		for _, want := range []string{"--secret id=gomodauth,src=", "--build-arg GO_BUILD_PROXY", "gomodauth.XXXXXX"} {
+		for _, want := range []string{"--secret id=gomodauth,src=", "gomodauth.XXXXXX"} {
 			if !strings.Contains(stdout, want) {
 				t.Errorf("make -n %s does not contain %q:\n%s%s", target, want, stdout, stderr)
 			}
 		}
+	}
+}
+
+// The build-time proxy never reaches the image history: BuildKit records a
+// build arg's value there, so a LAN DEVCACHE_GOPROXY passed as
+// `--build-arg GO_BUILD_PROXY` failed ci.yml's image-history gate on the image
+// it had just built. It is the optional secret `goproxy`, passed only when
+// GO_BUILD_PROXY is set, and the Dockerfile declares no ARG for it.
+func TestBuildProxyIsASecretNotABuildArg(t *testing.T) {
+	const secret = "--secret id=goproxy,env=GO_BUILD_PROXY"
+	for _, target := range []string{"devcontainer", "docker-build-toolchain", "docker-build-integration"} {
+		for _, proxy := range []string{"", "https://proxy.example.test|https://proxy.golang.org"} {
+			stdout, stderr := runMake(t, environ([]string{"GO_BUILD_PROXY"}, map[string]string{"GO_BUILD_PROXY": proxy}), "-n", target)
+			if strings.Contains(stdout, "--build-arg GO_BUILD_PROXY") {
+				t.Errorf("make -n %s (GO_BUILD_PROXY=%q) passes the proxy as a build arg, which the image history records:\n%s%s", target, proxy, stdout, stderr)
+			}
+			if got := strings.Contains(stdout, secret); got != (proxy != "") {
+				t.Errorf("make -n %s (GO_BUILD_PROXY=%q): %q present = %v, want %v:\n%s%s", target, proxy, secret, got, proxy != "", stdout, stderr)
+			}
+		}
+	}
+	b, err := os.ReadFile(filepath.Join(repoRoot(t), "build/docker/devcontainer/Dockerfile")) // #nosec G304 -- a fixed file of this repository
+	if err != nil {
+		t.Fatal(err)
+	}
+	dockerfile := string(b)
+	for _, line := range strings.Split(dockerfile, "\n") {
+		if f := strings.Fields(line); len(f) >= 2 && f[0] == "ARG" && strings.HasPrefix(f[1], "GO_BUILD_PROXY") {
+			t.Errorf("the devcontainer Dockerfile declares %q; BuildKit records an ARG's value in the image history", line)
+		}
+	}
+	if !strings.Contains(dockerfile, "--mount=type=secret,id=goproxy") {
+		t.Error("the devcontainer Dockerfile does not read the build-time proxy from the `goproxy` secret")
 	}
 }
 

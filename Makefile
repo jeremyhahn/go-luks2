@@ -580,8 +580,15 @@ CONTENT_IMAGE_BUILD = imgtmp="$$(mktemp -d -t imagebuild.XXXXXX)"; \
 # whatever proxy this machine can reach. That is the same shape CI uses on
 # github.com. The four variables are git's standard GIT_CONFIG_* override set
 # plus GOPRIVATE; export them to build against a private module host.
+# GO_BUILD_PROXY, the build-time module proxy, reaches the Dockerfile as the
+# BuildKit secret `goproxy` and only when it is set; with none the build uses
+# the default GOPROXY, as on github.com. It is never a --build-arg: BuildKit
+# records a build arg's value in the image history, and a LAN proxy address
+# there fails ci.yml's image-history gate.
+GO_BUILD_PROXY_SECRET = $(if $(GO_BUILD_PROXY),--secret id=goproxy$(comma)env=GO_BUILD_PROXY)
+
 ITEST_BUILD_ARGS = --secret id=gomodauth$(comma)src="$$stage" \
-	--build-arg GO_BUILD_PROXY --build-arg APK_INDEX_SUM --build-arg APT_INDEX_SUM --label $(ITEST_LABEL) \
+	$(GO_BUILD_PROXY_SECRET) --build-arg APK_INDEX_SUM --build-arg APT_INDEX_SUM --label $(ITEST_LABEL) \
 	-f $(DEVCONTAINER_DOCKERFILE) --target integration
 
 docker-build-integration:
@@ -1506,7 +1513,7 @@ devcontainer: ## Build and run the devcontainer
 	$(GOMODAUTH_STAGE); \
 	DOCKER_BUILDKIT=1 docker build \
 		--secret id=gomodauth,src="$$stage" \
-		--build-arg GO_BUILD_PROXY \
+		$(GO_BUILD_PROXY_SECRET) \
 		-f $(DEVCONTAINER_DOCKERFILE) --target toolchain \
 		-t $(DEVCONTAINER_IMAGE) .
 	@echo "$(COLOR_GREEN)✓ Devcontainer built$(COLOR_RESET)"
@@ -1540,7 +1547,7 @@ TOOLCHAIN_IMAGE ?= $(TOOLCHAIN_CONTENT_TAG)
 # (CONTENT_IMAGE_BUILD) covers only the tag computed from TOOLCHAIN_INPUTS: a
 # TOOLCHAIN_IMAGE set by name is not known to be a hash of the inputs.
 TOOLCHAIN_BUILD_ARGS = --secret id=gomodauth$(comma)src="$$stage" \
-	--build-arg GO_BUILD_PROXY -f $(DEVCONTAINER_DOCKERFILE) --target toolchain
+	$(GO_BUILD_PROXY_SECRET) -f $(DEVCONTAINER_DOCKERFILE) --target toolchain
 
 toolchain-image: ## Print the content-hashed tag of the toolchain image
 	@echo $(TOOLCHAIN_IMAGE)

@@ -163,6 +163,32 @@ func TestCIImageHistoryNamesTheImageAndEntryNeverTheAddress(t *testing.T) {
 	}
 }
 
+// The build-to-history path for the build-time proxy: the devcontainer
+// Dockerfile reads it from the BuildKit secret `goproxy`, so BuildKit records
+// only the mount and the RUN text, which the gate passes; the ARG it replaced
+// recorded the value itself (`|1 GO_BUILD_PROXY=<proxy>`), which the gate
+// fails, so a LAN proxy failed the very image it had built.
+func TestCIImageHistoryPassesTheSecretProxyAndFailsTheBuildArg(t *testing.T) {
+	run := `RUN /bin/sh -c set -eu; if [ -s /run/secrets/goproxy ]; then GOPROXY="$(cat /run/secrets/goproxy)"; export GOPROXY; fi; go mod download # buildkit`
+	secret := "RUN --mount=type=secret,id=gomodauth --mount=type=secret,id=goproxy " + run[len("RUN "):]
+	_, stderr, _, err := imageHistory(t, map[string][2]string{
+		"secret": {"COPY go.mod go.sum ./ # buildkit\n" + secret + "\n", `{"Env":["GOPROXY=off"]}`},
+	}, "secret")
+	if err != nil {
+		t.Fatalf("make -s ci-image-history failed the image built with the proxy secret: %v\n%s", err, stderr)
+	}
+	_, stderr, _, err = imageHistory(t, map[string][2]string{
+		"buildarg": {"ARG GO_BUILD_PROXY\n|1 GO_BUILD_PROXY=http://10.20.30.40:3000|https://proxy.golang.org /bin/sh -c go mod download # buildkit\n", // lab-string-ok: RFC 1918 masking fixture
+			`{"Env":["GOPROXY=off"]}`},
+	}, "buildarg")
+	if err == nil {
+		t.Fatal("make -s ci-image-history passed an image whose history records a private proxy build arg")
+	}
+	if want := "ci-image-history: buildarg: history entry 2 carries a private address\n"; !strings.HasPrefix(stderr, want) {
+		t.Errorf("stderr\n%s\nwant\n%s", stderr, want)
+	}
+}
+
 func TestCIImageHistoryFailsOnAnImageItCannotRead(t *testing.T) {
 	for name, hc := range map[string][2]string{
 		"no history": {"-", `{"Env":[]}`},
