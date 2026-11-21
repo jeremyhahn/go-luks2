@@ -1,0 +1,7 @@
+name: t
+on: [push, pull_request]
+jobs:
+  lint:
+    runs-on: ${{ (github.ref == 'refs/heads/topic' || github.head_ref == 'topic') && 'ubuntu-22.04' || 'ubuntu-latest' }}
+    steps:
+      - run: true

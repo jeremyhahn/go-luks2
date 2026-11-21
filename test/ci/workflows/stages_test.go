@@ -490,18 +490,22 @@ func TestImageAndIntegrationJobsUseNoRunnerToolchain(t *testing.T) {
 			t.Errorf("%s installs a tool on the runner; the image carries it", name)
 		}
 		// ci-template v1.21.1: the forge credentials are masked before any
-		// other step, then stale stacks are reaped.
-		named := regexp.MustCompile(`(?m)^      - name: (.+)$`).FindAllStringSubmatch(j, 2)
-		second := "Reap stale CI stacks"
+		// other step, then (v1.44, ruling 887) the LAN addresses, before
+		// anything can echo them; then stale stacks are reaped.
+		named := regexp.MustCompile(`(?m)^      - name: (.+)$`).FindAllStringSubmatch(j, 3)
+		third := "Reap stale CI stacks"
 		if name == "lint-gates" {
 			// v1.27: the job probes for the target first, and reaps only when
 			// there is one to run.
-			second = "Does the Makefile define lint-gates?"
+			third = "Does the Makefile define lint-gates?"
 		}
-		if len(named) < 2 || named[0][1] != "Mask the forge credentials" || named[1][1] != second {
-			t.Errorf("%s does not start by masking the credentials, then reaping: %v", name, named)
+		if len(named) < 3 || named[0][1] != "Mask the forge credentials" || named[1][1] != "Mask the LAN addresses" || named[2][1] != third {
+			t.Errorf("%s does not start by masking the credentials and the LAN addresses, then reaping: %v", name, named)
 		}
 		steps := stepRun(t, j)
+		if strings.TrimSpace(steps["Mask the LAN addresses"]) != "make ci-mask-lan" {
+			t.Errorf("%s does not mask the LAN addresses with make ci-mask-lan", name)
+		}
 		if !strings.Contains(steps["Mask the forge credentials"], `echo "::add-mask::$val"`) {
 			t.Errorf("%s's first step does not mask the credentials", name)
 		}
@@ -522,8 +526,8 @@ const cacheClass = `CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.e
 // same way -- names the cache class the recipe mounts its volumes under.
 func TestToolchainStagesCacheByTrustClass(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
-	if !strings.HasPrefix(ci, "# ci-template: v1.35.2 + v1.42 hermetic gate (customized)\n") {
-		t.Errorf("ci.yml does not declare ci-template v1.35.2 + v1.42 hermetic gate: %.60q", ci)
+	if !strings.HasPrefix(ci, "# ci-template: v1.53 (customized)\n") {
+		t.Errorf("ci.yml does not declare ci-template v1.53: %.60q", ci)
 	}
 	for _, name := range []string{"lint", "image", "lint-gates", "merge-check", "test-race", "fips"} {
 		j := job(t, ci, name)
@@ -561,8 +565,10 @@ func TestImageJobTrimsTheCachesBeforeTheStages(t *testing.T) {
 			firstStage = i
 		}
 	}
-	// v1.23: the lease is taken between the build and the trim.
-	if trim < 2 || names[trim-1] != "Lease the integration image" || names[trim-2] != "Build the devcontainer images" {
+	// v1.23: the lease is taken between the build and the trim. v1.45
+	// (ruling 888): the built images' history is checked before the trim.
+	if trim < 3 || names[trim-1] != "Check the images carry no private address" ||
+		names[trim-2] != "Lease the integration image" || names[trim-3] != "Build the devcontainer images" {
 		t.Fatalf("Trim the CI caches does not follow the image build: %v", names)
 	}
 	if firstStage < 0 || trim > firstStage {
@@ -613,11 +619,16 @@ var runnerJobs = []string{"ci-gate"}
 // reap what a dead job left, trim the cache volumes (ci-template v1.22), or
 // read the base images' Alpine package index with docker (apk-index-sum:
 // ci-template v1.29's script as a recipe) or their Debian package index
-// (apt-index-sum). Everything else -- every stage, and every check beside one -- is a CMD for
-// ci-toolchain-run. Soak's "$SOAK_TARGET" is read from its job's env.
+// (apt-index-sum), mask the LAN addresses the runner's environment names
+// (ci-mask-lan: ci-template v1.44, ruling 887; the runner itself must print
+// the ::add-mask:: lines) or read a built image's history and config with
+// docker (ci-image-history: v1.45, ruling 888). Everything else -- every
+// stage, and every check beside one -- is a CMD for ci-toolchain-run. Soak's
+// "$SOAK_TARGET" is read from its job's env.
 var runnerTargets = []string{
 	"ci-toolchain-run", "ci-reap-stacks", "ci-trim-caches", "docker-build", "docker-build-toolchain",
 	"docker-build-integration", "toolchain-image", "it-image", "apk-index-sum", "apt-index-sum", "integration-test",
+	"ci-mask-lan", "ci-image-history",
 }
 
 var (

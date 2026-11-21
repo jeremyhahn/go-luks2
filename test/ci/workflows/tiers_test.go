@@ -25,11 +25,15 @@ import (
 // `scoped`, lint-gates, which a PR skips when no changed file matches
 // LINT_GATES_PATTERN.
 var (
-	prTier      = []string{"preflight", "lint", "merge-check", "test-race"}
-	codeTier    = []string{"image"}
-	scopedTier  = []string{"lint-gates"}
-	fullTier    = []string{"fips", "integration"}
-	nightlyTier = []string{"soak"}
+	prTier     = []string{"preflight", "lint", "merge-check", "test-race"}
+	codeTier   = []string{"image", "fips", "integration"}
+	scopedTier = []string{"lint-gates"}
+	fullTier   = []string{}
+	// codeFullTier is the part of codeTier that carries CI_FULL_TIER's
+	// condition in its `if:` (codeFullJobIf): ci-template v1.41 (ruling
+	// 742 (2)) moved integration and FIPS from the full tier to every PR.
+	codeFullTier = []string{"fips", "integration"}
+	nightlyTier  = []string{"soak"}
 )
 
 var (
@@ -81,20 +85,22 @@ func TestNoScheduleTrigger(t *testing.T) {
 	}
 }
 
-// TestMainRunsNeverCancel: on main one group per event and commit, so no
-// main run cancels another (a newer push no longer cancels an older commit's
-// run, and a schedule or dispatch run never cancels a push run); every other
-// ref is one group. cancel-in-progress is a literal true, never an expression.
-func TestMainRunsNeverCancel(t *testing.T) {
+// TestMainRunsCancelPerEvent: on main one group per event, so a newer main
+// run of the same event cancels the older one, queued or in progress, and
+// the newest run validates every merge under it. A schedule run keeps its
+// own schedule group and a workflow_dispatch run its own event's group, so
+// neither shares a group with a push run. Every other ref is one group.
+// cancel-in-progress is a literal true, never an expression.
+func TestMainRunsCancelPerEvent(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
 	m := regexp.MustCompile(`(?m)^concurrency:\n((?:  .*\n)+)`).FindStringSubmatch(ci)
 	if m == nil {
 		t.Fatal("ci.yml has no workflow-level concurrency block")
 	}
-	want := "  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}\n" +
+	want := "  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}\n" +
 		"  cancel-in-progress: true\n"
 	if m[1] != want {
-		t.Errorf("ci.yml's concurrency block is\n%s\nwant main runs that never cancel\n%s", m[1], want)
+		t.Errorf("ci.yml's concurrency block is\n%s\nwant one main group per event\n%s", m[1], want)
 	}
 }
 
@@ -157,6 +163,9 @@ func TestEveryCIJobRunsOnTheHostedRunner(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
 	for _, id := range jobIDs(t, ci) {
 		got := jobRunsOn.FindAllStringSubmatch(job(t, ci, id), -1)
+		if id == "preflight" && len(got) == 1 && isPreflightTemplateRunsOn(t, ".github/workflows/ci.yml", ci, got[0][1]) {
+			continue // ci-template v1.49: hosted off github.com and by CI_PREFLIGHT_RUNS_ON
+		}
 		if len(got) != 1 || got[0][1] != hostedRunner {
 			t.Errorf("job %s runs on %v, want %s (ruling 999)", id, got, hostedRunner)
 		}
@@ -182,7 +191,11 @@ func TestEveryCIJobRunsOnTheHostedRunner(t *testing.T) {
 // label, and .github/actionlint.yaml no longer accepts one.
 func TestNoRetiredRunnerLabel(t *testing.T) {
 	for _, f := range workflowFiles(t) {
-		for _, m := range jobRunsOn.FindAllStringSubmatch(readFile(t, rel(t, f)), -1) {
+		text := readFile(t, rel(t, f))
+		for _, m := range jobRunsOn.FindAllStringSubmatch(text, -1) {
+			if isPreflightTemplateRunsOn(t, rel(t, f), text, m[1]) {
+				continue
+			}
 			if l, ok := retiredRunsOnLabel(m[1]); ok {
 				t.Errorf("%s runs a job on the retired label %s: %s", rel(t, f), l, m[1])
 			}
@@ -194,6 +207,19 @@ func TestNoRetiredRunnerLabel(t *testing.T) {
 			t.Errorf(".github/actionlint.yaml still lists the retired label %s", l)
 		}
 	}
+}
+
+// isPreflightTemplateRunsOn reports whether a runs-on value is ci-template
+// v1.52's preflight form on ci.yml's preflight job, held once in the file:
+// the one place bigdisk may still be named (the github.com default, which
+// CI_PREFLIGHT_RUNS_ON overrides).
+func isPreflightTemplateRunsOn(t *testing.T, path, workflow, value string) bool {
+	t.Helper()
+	if path != ".github/workflows/ci.yml" || value != preflightRunsOn+"   # v1.52" {
+		return false
+	}
+	line := "    runs-on: " + value + "\n"
+	return strings.Count(workflow, line) == 1 && strings.Contains(job(t, workflow, "preflight"), line)
 }
 
 // serverURLArms matches a runs-on value that picks its label by forge:
@@ -343,10 +369,11 @@ func TestStrippedAtPublish(t *testing.T) {
 
 // fullTierIf is ci.yml's CI_FULL_TIER, which CI Gate's FULL_TIER reads
 // (ci-template v1.30: a workflow_dispatch off main is not the full tier; the
-// guard refuses it). nightlyIf is CI Gate's NIGHTLY: the schedule and
+// guard refuses it; v1.41: every other event, every PR too, and ci/deps-bump's
+// dispatch). nightlyIf is CI Gate's NIGHTLY: the schedule and
 // dispatch only.
 const (
-	fullTierIf = "${{ (github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')) || contains(github.event.pull_request.labels.*.name, 'ci:full') }}"
+	fullTierIf = "${{ " + fullTierCond + " }}"
 	nightlyIf  = "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}"
 )
 
@@ -429,7 +456,7 @@ func TestCIGateTiersMatchTheJobs(t *testing.T) {
 		case nightlyJobIf:
 			want = "nightly"
 			nightly = append(nightly, id)
-		case codeJobIf:
+		case codeJobIf, codeFullJobIf:
 			want = "code"
 			code = append(code, id)
 		case scopedJobIf:

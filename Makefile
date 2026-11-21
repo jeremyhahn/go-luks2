@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build build-linux vet-32bit install test test-verbose test-coverage test-integration coverage coverage-report clean fmt vet lint gosec govulncheck vuln trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration test-unit-norace seccomp-diff proto test-pkg docker-build docker-build-cli docker-run deps-check test-fips-mode assert-build-tags toolchain-image it-image apk-index-sum apt-index-sum docker-build-toolchain toolchain-run ci-toolchain-run ci-reap-stacks ci-trim-caches
+.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build build-linux vet-32bit install test test-verbose test-coverage test-integration coverage coverage-report clean fmt vet lint gosec govulncheck vuln trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration test-unit-norace seccomp-diff proto test-pkg docker-build docker-build-cli docker-run deps-check test-fips-mode assert-build-tags toolchain-image it-image apk-index-sum apt-index-sum docker-build-toolchain toolchain-run ci-toolchain-run ci-reap-stacks ci-trim-caches ci-mask-lan ci-image-history
 
 # Default target
 .DEFAULT_GOAL := help
@@ -580,8 +580,15 @@ CONTENT_IMAGE_BUILD = imgtmp="$$(mktemp -d -t imagebuild.XXXXXX)"; \
 # whatever proxy this machine can reach. That is the same shape CI uses on
 # github.com. The four variables are git's standard GIT_CONFIG_* override set
 # plus GOPRIVATE; export them to build against a private module host.
+# GO_BUILD_PROXY, the build-time module proxy, reaches the Dockerfile as the
+# BuildKit secret `goproxy` and only when it is set; with none the build uses
+# the default GOPROXY, as on github.com. It is never a --build-arg: BuildKit
+# records a build arg's value in the image history, and a LAN proxy address
+# there fails ci.yml's image-history gate.
+GO_BUILD_PROXY_SECRET = $(if $(GO_BUILD_PROXY),--secret id=goproxy$(comma)env=GO_BUILD_PROXY)
+
 ITEST_BUILD_ARGS = --secret id=gomodauth$(comma)src="$$stage" \
-	--build-arg GO_BUILD_PROXY --build-arg APK_INDEX_SUM --build-arg APT_INDEX_SUM --label $(ITEST_LABEL) \
+	$(GO_BUILD_PROXY_SECRET) --build-arg APK_INDEX_SUM --build-arg APT_INDEX_SUM --label $(ITEST_LABEL) \
 	-f $(DEVCONTAINER_DOCKERFILE) --target integration
 
 docker-build-integration:
@@ -1506,7 +1513,7 @@ devcontainer: ## Build and run the devcontainer
 	$(GOMODAUTH_STAGE); \
 	DOCKER_BUILDKIT=1 docker build \
 		--secret id=gomodauth,src="$$stage" \
-		--build-arg GO_BUILD_PROXY \
+		$(GO_BUILD_PROXY_SECRET) \
 		-f $(DEVCONTAINER_DOCKERFILE) --target toolchain \
 		-t $(DEVCONTAINER_IMAGE) .
 	@echo "$(COLOR_GREEN)✓ Devcontainer built$(COLOR_RESET)"
@@ -1540,7 +1547,7 @@ TOOLCHAIN_IMAGE ?= $(TOOLCHAIN_CONTENT_TAG)
 # (CONTENT_IMAGE_BUILD) covers only the tag computed from TOOLCHAIN_INPUTS: a
 # TOOLCHAIN_IMAGE set by name is not known to be a hash of the inputs.
 TOOLCHAIN_BUILD_ARGS = --secret id=gomodauth$(comma)src="$$stage" \
-	--build-arg GO_BUILD_PROXY -f $(DEVCONTAINER_DOCKERFILE) --target toolchain
+	$(GO_BUILD_PROXY_SECRET) -f $(DEVCONTAINER_DOCKERFILE) --target toolchain
 
 toolchain-image: ## Print the content-hashed tag of the toolchain image
 	@echo $(TOOLCHAIN_IMAGE)
@@ -2263,6 +2270,87 @@ ci-trim-caches: ## Keep this repository's CI cache volumes under CI_CACHE_MAX_GI
 		echo "trim: $$removed volume(s), $$((total / 1024 / 1024)) GiB left for prefix '$$prefix'"; \
 	}; \
 	exit 0
+
+# ci-template v1.44 (ruling 887) and v1.45 (ruling 888): the template's
+# scripts/ci-mask-lan.sh and scripts/ci-image-history.sh as Makefile recipes
+# (go-luks2 ships no shell scripts, #211), line for line: same variables,
+# same tests, same messages. test/makefile holds them to it.
+
+# ci-mask-lan masks the LAN addresses a pool runner's environment names
+# (Tenant Agent ruling 887: internal addresses stay out of public
+# repositories, and their CI logs count). The pool sets the DEVCACHE_*
+# package caches, GOPROXY's LAN module proxy and the LAN CI registry; on a
+# forge, the release registry (RELEASE_REGISTRY) and the forge's own host
+# (GITHUB_SERVER_URL), which the image publishing and resolving name. A
+# BuildKit build echoes its build arguments and `go env` prints GOPROXY.
+# Run before any step that builds: for each entry of those variables whose
+# host is a private IPv4 address, it prints ::add-mask:: for the entry, its
+# host:port and its host, so the runner masks the address in every later
+# line. Public hosts and keywords (proxy.golang.org, direct, off) are left.
+ci-mask-lan: SHELL := /bin/bash
+ci-mask-lan: .SHELLFLAGS := -euo pipefail -c
+ci-mask-lan: ## Mask the LAN addresses the runner's environment names (CI, ruling 887)
+	@private() { \
+		case $$1 in \
+		10.* | 192.168.* | 172.1[6-9].* | 172.2[0-9].* | 172.3[01].*) return 0 ;; \
+		esac; \
+		return 1; \
+	}; \
+	for v in $$(compgen -e); do \
+		case $$v in \
+		DEVCACHE_* | GOPROXY | CI_REGISTRY | CI_IMAGE_REGISTRY | RELEASE_REGISTRY | GITHUB_SERVER_URL) ;; \
+		*) continue ;; \
+		esac; \
+		IFS='|, ' read -ra entries <<<"$${!v}"; \
+		for entry in "$${entries[@]}"; do \
+			hostport=$${entry#*://}; \
+			hostport=$${hostport%%/*}; \
+			host=$${hostport%%:*}; \
+			private "$$host" || continue; \
+			echo "::add-mask::$$entry"; \
+			[ "$$hostport" = "$$entry" ] || echo "::add-mask::$$hostport"; \
+			[ "$$host" = "$$hostport" ] || echo "::add-mask::$$host"; \
+		done; \
+	done
+
+# ci-image-history fails when an image carries a private address (Tenant
+# Agent ruling 888). A pool build takes the LAN caches as BuildKit secrets,
+# which no layer and no history entry keeps; a build argument's value, by
+# contrast, is recorded in every RUN of the history. A pool-built image may
+# one day be pushed beyond the LAN, and ruling 887 keeps internal addresses
+# out of everything public, metadata included. For each image in IMAGES
+# (blank separated) it reads the history (every entry's command and comment)
+# and the config (env, labels, command) and fails on any RFC 1918 address.
+# It names the image and the history entry, never the address.
+IMAGES ?=
+ci-image-history: export IH_IMAGES := $(IMAGES)
+ci-image-history: SHELL := /bin/bash
+ci-image-history: .SHELLFLAGS := -euo pipefail -c
+ci-image-history: ## Fail when an image's history or config carries a private address (CI, ruling 888)
+	@set -f; set -- $$IH_IMAGES; set +f; \
+	if [ $$# -eq 0 ]; then \
+		echo "usage: make ci-image-history IMAGES='<image>...'" >&2; \
+		exit 2; \
+	fi; \
+	octet='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'; \
+	private="(^|[^0-9.])(10\.$$octet|172\.(1[6-9]|2[0-9]|3[01])|192\.168)\.$$octet\.$$octet([^0-9]|\$$)"; \
+	status=0; \
+	for image in "$$@"; do \
+		if ! history=$$(docker history --no-trunc --format '{{.CreatedBy}} {{.Comment}}' "$$image") || \
+			! config=$$(docker image inspect --format '{{json .Config}}' "$$image"); then \
+			echo "ci-image-history: cannot read $$image" >&2; \
+			exit 1; \
+		fi; \
+		while IFS=: read -r entry _; do \
+			echo "ci-image-history: $$image: history entry $$entry carries a private address" >&2; \
+			status=1; \
+		done < <(grep -En "$$private" <<<"$$history" || :); \
+		if grep -Eq "$$private" <<<"$$config"; then \
+			echo "ci-image-history: $$image: its config (env, labels, command) carries a private address" >&2; \
+			status=1; \
+		fi; \
+	done; \
+	exit "$$status"
 
 # Builds never resolve through a workspace: cross-repository modules come from
 # published TAGS, never from wherever a sibling repo happens to be checked out.

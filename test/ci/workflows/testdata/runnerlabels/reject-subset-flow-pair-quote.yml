@@ -1,0 +1,7 @@
+on: push
+jobs:
+  a:
+    runs-on: release
+    steps: [run: "echo]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    name: a"]

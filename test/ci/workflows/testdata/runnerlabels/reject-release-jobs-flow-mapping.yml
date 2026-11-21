@@ -1,0 +1,3 @@
+name: t
+on: [push, pull_request]
+jobs: {lint: {runs-on: [self-hosted, linux, x64, release], steps: [{run: 'true'}]}}

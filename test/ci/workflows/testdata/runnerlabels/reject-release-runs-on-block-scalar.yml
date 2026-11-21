@@ -1,0 +1,10 @@
+name: t
+on: [push, pull_request]
+jobs:
+  lint:
+    runs-on: >-  # self-hosted: hardware: the host
+      ${{ fromJSON(format('["self-hosted","{0}{2}"]', 'rel', '
+      #', 'ease')) }}
+    if: ${{ true }}
+    steps:
+      - run: true

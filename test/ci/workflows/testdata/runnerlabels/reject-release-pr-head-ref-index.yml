@@ -1,0 +1,7 @@
+name: t
+on: [push, pull_request]
+jobs:
+  lint:
+    runs-on: ${{ startsWith(github['head_ref'], 'rel') && github['head_ref'] || 'ubuntu-latest' }}
+    steps:
+      - run: true

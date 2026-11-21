@@ -50,6 +50,12 @@ func runsOnViolation(file, jobID, line string) string {
 			break
 		}
 	}
+	if file == "ci.yml" && jobID == "preflight" && strings.TrimSpace(value) == preflightRunsOn {
+		// ci-template v1.49: preflight alone may run on the bigdisk pool on
+		// github.com, by this exact form; the runner-labels step checks it
+		// with CI_PREFLIGHT_RUNS_ON unset and set to its fallback.
+		return ""
+	}
 	value, why := runsOnLabel(strings.TrimSpace(value))
 	switch {
 	case why != "":
@@ -158,6 +164,10 @@ func TestRunsOnViolation(t *testing.T) {
 		{"hosted", "ci.yml", "lint", " ubuntu-latest", true},
 		{"hosted with comment", "ci.yml", "lint", " ubuntu-latest  # plain note", true},
 		{"bare self-hosted label", "ci.yml", "lint", " bigdisk", false},
+		{"v1.52 preflight form", "ci.yml", "preflight", " " + preflightRunsOn + "   # v1.52", true},
+		{"v1.52 preflight form on another job", "ci.yml", "lint", " " + preflightRunsOn, false},
+		{"v1.52 preflight form outside ci.yml", "batch.yml", "preflight", " " + preflightRunsOn, false},
+		{"v1.52 preflight form, other default", "ci.yml", "preflight", " " + strings.Replace(preflightRunsOn, `"bigdisk"]`, `"bigdisk-docker"]`, 1), false},
 		{"self-hosted with unrelated comment", "ci.yml", "lint", " qwen  # CUSTOMIZE: the host", false},
 		{"label list", "ci.yml", "lint", " [self-hosted, linux]", false},
 		{"label list waived", "ci.yml", "lint", " [self-hosted, gpu]  # self-hosted: hardware: the GPU", false},

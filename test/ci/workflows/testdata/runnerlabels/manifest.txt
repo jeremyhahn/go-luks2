@@ -1,0 +1,133 @@
+# Fixtures for ci.yml's `Runner labels (ruling 633)` step, run by the
+# preflight step `Runner labels self-test` before the real check, and read by
+# runnerlabels_test.go. One case per line, fields split on `|`:
+#   accept|reject | workflow file name | fixture | text the output holds...
+# accept: the step exits 0; reject: it exits 1. Each fixture is copied alone
+# to .github/workflows/<workflow file name> of an empty directory. A text
+# starting with `!` must not appear in the output.
+accept|x.yml|accept-literal.yml|OK:
+reject|x.yml|reject-release-literal-expression.yml|x.yml:lint: (a) its runs-on expression is not allow-listed
+accept|x.yml|accept-server-url-routing.yml|OK:
+reject|x.yml|reject-release-known-or-operands.yml|x.yml:lint: (a) its runs-on expression is not allow-listed
+reject|x.yml|reject-vars-fallback.yml|x.yml:lint: (a) its runs-on expression is not allow-listed|x.yml:lint: (b) its runs-on expression is not allow-listed
+reject|x.yml|reject-needs-fallback.yml|x.yml:lint: (a) its runs-on expression is not allow-listed
+reject|x.yml|reject-inputs-fallback.yml|x.yml:lint: (a) its runs-on expression is not allow-listed
+reject|x.yml|reject-vars-fallback-behind-known-arm.yml|x.yml:lint: (a) its runs-on expression is not allow-listed
+reject|x.yml|reject-release-by-value.yml|x.yml:lint: (b) its runs-on expression is not allow-listed
+reject|x.yml|reject-release-by-name.yml|x.yml:lint: (b) names `release`
+reject|x.yml|reject-release-pr-head-ref.yml|x.yml:lint: (a) names `release`|pull_request event
+reject|x.yml|reject-release-pr-head-prefix.yml|x.yml:lint: (a) names `release`|pull_request event
+reject|x.yml|reject-release-prt-base-ref.yml|x.yml:lint: (a) names `release`|pull_request_target event
+reject|x.yml|reject-release-push-branch.yml|x.yml:lint: (b) names `release`|does not restrict it to a tag push
+reject|x.yml|reject-release-push-ref-name.yml|x.yml:lint: (b) names `release`|does not restrict it to a tag push
+reject|x.yml|reject-release-dispatch-branch.yml|x.yml:lint: (b) names `release`|does not restrict it to a tag push
+reject|x.yml|reject-release-other-tag.yml|x.yml:lint: (b) names `release`|does not restrict it to a tag push
+reject|x.yml|reject-release-push-main-case.yml|x.yml:lint: (b) names `release`|does not restrict it to a tag push
+reject|x.yml|reject-release-dispatch-main-case.yml|x.yml:lint: (b) names `release`|does not restrict it to a tag push
+reject|x.yml|reject-release-pr-head-ref-case.yml|x.yml:lint: (a) names `release`|pull_request event
+reject|x.yml|reject-release-schedule-other-default.yml|x.yml:lint: (b) names `release`|does not restrict it to a tag push
+reject|x.yml|reject-release-pr-head-format.yml|x.yml:lint: (a) names `release`|pull_request event
+reject|x.yml|reject-release-push-ref-format.yml|x.yml:lint: (b) names `release`
+reject|x.yml|reject-release-push-ref-name-format.yml|x.yml:lint: (b) names `release`
+reject|x.yml|reject-release-top-level-or.yml|x.yml:lint: (b) names `release`|top-level ||
+reject|x.yml|reject-release-top-level-not.yml|x.yml:lint: (b) names `release`|top-level !
+accept|x.yml|accept-release-push-tag.yml|OK:
+accept|x.yml|accept-release-tag-narrowed.yml|OK:
+reject|x.yml|reject-release-if-folded-comment.yml|x.yml:lint: (b) names `release`|write the release if: on one line
+reject|x.yml|reject-release-if-literal-comment.yml|x.yml:lint: (b) names `release`|write the release if: on one line
+reject|x.yml|reject-release-if-folded-midline-comment.yml|x.yml:lint: (b) names `release`|write the release if: on one line
+reject|x.yml|reject-release-runs-on-block-scalar.yml|x.yml:lint: (c) its runs-on is a block scalar
+reject|x.yml|reject-release-runs-on-quote-span.yml|x.yml:lint: (c) its runs-on has a quoted string that spans lines
+reject|x.yml|reject-release-runs-on-alias.yml|x.yml:lint: (c) its runs-on is a YAML alias
+reject|x.yml|reject-release-job-flow-mapping.yml|x.yml:lint: (c) is not a block mapping
+reject|x.yml|reject-release-jobs-flow-mapping.yml|x.yml:jobs: (c) is not a block mapping
+reject|x.yml|reject-release-jobs-quoted-key.yml|x.yml:lint: (a) names `release`
+reject|x.yml|reject-release-merge-key.yml|x.yml:lint: (c) has a `<<` merge key
+reject|x.yml|reject-release-bom-jobs-first.yml|x.yml:lint: (b) names `release`
+reject|x.yml|reject-release-indented-document.yml|x.yml: (c) its top level is not a block mapping
+reject|x.yml|reject-release-flow-document.yml|x.yml: (c) its top level is not a block mapping
+reject|x.yml|reject-release-document-start-flow.yml|x.yml: (c) its top level is not a block mapping
+reject|x.yml|reject-release-line-separator.yml|x.yml: (c) holds a byte-order mark or a line break
+reject|x.yml|reject-release-complex-key.yml|x.yml:lint: (c) has a key the check cannot read
+reject|x.yml|reject-release-tagged-key.yml|x.yml:lint: (c) has a key the check cannot read
+reject|x.yml|reject-release-escaped-key.yml|x.yml:lint: (c) has a key the check cannot read
+reject|x.yml|reject-release-duplicate-runs-on.yml|x.yml:lint: (c) has a duplicate `runs-on` key
+reject|x.yml|reject-release-duplicate-if.yml|x.yml:lint: (c) has a duplicate `if` key
+reject|x.yml|reject-release-remote-reusable.yml|x.yml:lint: (c) calls a reusable workflow outside this repository
+reject|x.yml|reject-release-runs-on-group.yml|x.yml:lint: (c) its runs-on names a runner group
+reject|x.yml|reject-release-waived-matrix.yml|x.yml:lint: (b) its runs-on expression is not allow-listed
+reject|x.yml|reject-release-waived-generic-labels.yml|x.yml:lint: (c) its waived runs-on may name `release`|only generic labels
+reject|x.yml|reject-release-waived-escaped-label.yml|x.yml:lint: (c) its waived runs-on may name `release`|cannot be read
+reject|x.yml|reject-release-anchor-label.yml|x.yml:lint: (c) its runs-on starts a value or list item with a YAML anchor, tag or alias|x.yml: (s) line 5: a 
+reject|x.yml|reject-release-anchor-list-item.yml|x.yml:lint: (c) its runs-on starts a value or list item with a YAML anchor, tag or alias|x.yml: (s) line 5: a 
+reject|x.yml|reject-release-tag-label.yml|x.yml:lint: (c) its runs-on starts a value or list item with a YAML anchor, tag or alias|x.yml: (s) line 5: a 
+reject|x.yml|reject-release-bare-tag-label.yml|x.yml:lint: (c) its runs-on starts a value or list item with a YAML anchor, tag or alias|x.yml: (s) line 5: a 
+reject|x.yml|reject-subset-flow-mapping-matrix.yml|x.yml: (s) line 6: a flow mapping|!x.yml:lint:
+reject|x.yml|reject-hosted-ref-self-hosted.yml|x.yml:lint: (b) its runs-on expression is not allow-listed
+reject|x.yml|reject-hosted-head-ref-case.yml|x.yml:lint: (a) its runs-on expression is not allow-listed
+reject|x.yml|reject-release-hosted-ref-routing.yml|x.yml:lint: (a) its runs-on expression is not allow-listed
+accept|ci.yml|accept-preflight.yml|OK:
+# Resume 23 (ci-template v1.51, v1.52): the form with the fork clause is read
+# under pull_request_target too; v1.49's form without it is no longer allowed.
+accept|ci.yml|accept-preflight-pr-target.yml|OK:
+reject|ci.yml|reject-preflight-v149-form.yml|ci.yml:preflight: (b) its runs-on expression is not allow-listed
+# A fork's head, under pull_request or pull_request_target, gets no overflow
+# exemption: its overflow sample is reported. The preflight form without the
+# fork clause (the unset exemption) is refused for every trigger.
+reject|ci.yml|reject-fork-overflow-pr.yml|ci.yml:lint: (c)|pull_request (refs/pull/1/merge, fork, runner selection overflow): self-hosted, linux, x64, bigdisk
+reject|ci.yml|reject-fork-overflow-prt.yml|ci.yml:lint: (c)|pull_request_target (refs/heads/main, fork, runner selection overflow): self-hosted, linux, x64, bigdisk
+reject|ci.yml|reject-fork-unset-pr.yml|ci.yml:preflight: (a) its runs-on expression is not allow-listed|ci.yml:preflight: (b) its runs-on expression is not allow-listed
+reject|ci.yml|reject-fork-unset-prt.yml|ci.yml:preflight: (a) its runs-on expression is not allow-listed|ci.yml:preflight: (b) its runs-on expression is not allow-listed
+reject|ci.yml|reject-preflight-form-other-job.yml|ci.yml:lint: (c)|an unknown label|!CI_PREFLIGHT_RUNS_ON
+reject|batch.yml|reject-preflight-outside-ci.yml|batch.yml:preflight: (c)
+reject|ci.yml|reject-preflight-other-default.yml|ci.yml:preflight: (a) its runs-on expression is not allow-listed
+reject|ci.yml|reject-preflight-self-hosted-on-push.yml|ci.yml:preflight: (a) its runs-on expression is not allow-listed
+reject|ci.yml|reject-preflight-without-fromjson.yml|ci.yml:preflight: (a) its runs-on expression is not allow-listed
+reject|ci.yml|reject-preflight-other-variable.yml|ci.yml:preflight: (a) its runs-on expression is not allow-listed
+reject|ci.yml|reject-preflight-off-github-label.yml|ci.yml:preflight: (a) its runs-on expression is not allow-listed
+reject|x.yml|reject-release-pr-head-ref-index.yml|x.yml:lint: (a) its runs-on expression is not allow-listed|has no `if:`
+reject|x.yml|reject-release-pr-head-ref-equals-format.yml|x.yml:lint: (a) its runs-on expression is not allow-listed|has no `if:`
+reject|x.yml|reject-release-pr-head-ref-index-format.yml|x.yml:lint: (a) its runs-on expression is not allow-listed|has no `if:`
+reject|x.yml|reject-release-pr-head-ref-spaced.yml|x.yml:lint: (a) its runs-on expression is not allow-listed|has no `if:`
+reject|x.yml|reject-release-if-space-in-quotes.yml|x.yml:lint: (a) names `release`|space before or after
+reject|.hidden.yml|reject-release-hidden-file.yml|.hidden.yml:lint: (a) names `release`
+reject|x.YML|reject-release-upper-extension.yml|x.YML:lint: (a) names `release`
+reject|notes.txt|reject-workflow-other-file.yml|notes.txt: (z) is not a .yml or .yaml file
+reject|x.yml|reject-release-runs-on-key-case.yml|x.yml:lint: (c)
+reject|x.yml|reject-subset-quote-span-if.yml|x.yml: (s) line 6: a quoted scalar left open at the end of its line
+reject|x.yml|reject-subset-under-indent-single-quote.yml|x.yml: (s) line 5: a quoted scalar left open at the end of its line
+reject|x.yml|reject-subset-under-indent-plain.yml|x.yml: (s) line 6: a line indented less than the mapping key it would continue
+reject|x.yml|reject-subset-under-indent-quote.yml|x.yml: (s) line 5: a quoted scalar left open at the end of its line
+reject|x.yml|reject-subset-flow-pair-quote.yml|x.yml: (s) line 5: a quoted scalar left open at the end of its line
+reject|x.yml|reject-subset-flow-pair-quoted-key.yml|x.yml: (s) line 5: a quoted scalar left open at the end of its line
+reject|x.yml|reject-subset-flow-pair-complex-key.yml|x.yml: (s) line 5: a quoted scalar left open at the end of its line
+reject|x.yml|reject-subset-flow-pair-anchor.yml|x.yml: (s) line 5: a quoted scalar left open at the end of its line
+reject|x.yml|reject-subset-flow-pair-tag.yml|x.yml: (s) line 5: a quoted scalar left open at the end of its line
+reject|x.yml|reject-subset-flow-pair-second-item.yml|x.yml: (s) line 5: a quoted scalar left open at the end of its line
+reject|x.yml|reject-subset-flow-pair-after-plain.yml|x.yml: (s) line 5: a quoted scalar left open at the end of its line
+reject|x.yml|reject-subset-flow-pair-closed.yml|x.yml: (s) line 5: a flow sequence holding a flow pair or a `?` item
+reject|x.yml|reject-subset-flow-question-item.yml|x.yml: (s) line 5: a flow sequence holding a flow pair or a `?` item
+reject|x.yml|reject-release-step-item-if.yml|x.yml:a: (b) names `release` and has no `if:`
+reject|x.yml|reject-release-step-item-runs-on.yml|x.yml:a: (b) names `release` and has no `if:`
+accept|x.yml|accept-release-step-item-if.yml|OK:
+reject|x.yml|reject-job-sequence.yml|x.yml:a: (c) is a sequence, not a block mapping|!x.yml:runs-on:|!x.yml:if:
+reject|x.yml|reject-jobs-sequence.yml|x.yml:jobs: (c) is a sequence, not a block mapping
+reject|x.yml|reject-release-labels-block-list.yml|x.yml:a: (a) names `release` in a workflow with a pull_request trigger
+reject|x.yml|reject-release-labels-block-list-title.yml|x.yml:a: (a) names `release` in a workflow with a pull_request trigger
+reject|x.yml|reject-release-labels-block-list-quoted.yml|x.yml:a: (a) names `release` in a workflow with a pull_request trigger
+reject|x.yml|reject-release-labels-block-list-generic.yml|x.yml:a: (c) its waived runs-on may name `release` (push: only generic labels (self-hosted, Linux))
+reject|x.yml|reject-release-key-column-list.yml|x.yml:a: (a) names `release` in a workflow with a pull_request trigger
+reject|x.yml|reject-release-key-column-list-second.yml|x.yml:a: (a) names `release` in a workflow with a pull_request trigger
+reject|x.yml|reject-release-comment-ends-list.yml|x.yml:a: (a) names `release` in a workflow with a pull_request trigger
+reject|x.yml|reject-release-comment-ends-list-unwaived.yml|x.yml:a: (a) names `release` in a workflow with a pull_request trigger
+reject|x.yml|reject-release-comment-hides-group.yml|x.yml:a: (c) its runs-on names a runner group
+reject|x.yml|reject-release-runs-on-group-case.yml|x.yml:a: (c)|differs from `group:` only in case
+reject|x.yml|reject-release-runs-on-labels-case.yml|x.yml:a: (c)|differs from `labels:` only in case
+reject|x.yml|reject-release-runs-on-empty.yml|x.yml:a: (c) its runs-on has no value
+reject|x.yml|reject-release-labels-folded.yml|x.yml:a: (c) its runs-on is a mapping that is not one `labels:` key
+reject|x.yml|reject-release-labels-literal.yml|x.yml:a: (c) its runs-on is a mapping that is not one `labels:` key
+reject|x.yml|reject-release-labels-long-s.yml|x.yml:a: (c) its runs-on has a character outside printable ASCII
+reject|x.yml|reject-release-label-padded-list.yml|x.yml:a: (c) its runs-on has a label that is empty, null or padded with whitespace
+reject|x.yml|reject-release-label-padded-bare.yml|x.yml:a: (c) its runs-on has a label that is empty, null or padded with whitespace
+reject|x.yml|reject-release-label-null-item.yml|x.yml:a: (c) its runs-on has a label that is empty, null or padded with whitespace
+reject|x.yml|reject-release-labels-block-list-padded.yml|x.yml:a: (c) its runs-on has a label that is empty, null or padded with whitespace

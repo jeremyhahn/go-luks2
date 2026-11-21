@@ -1,0 +1,5 @@
+name: t
+on: [push, pull_request]
+jobs:
+  lint:
+    uses: other-org/other-repo/.github/workflows/build.yml@main

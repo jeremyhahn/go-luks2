@@ -1,0 +1,8 @@
+name: t
+on: [push]
+jobs:
+  lint:
+    runs-on: release  # self-hosted: hardware: the host
+    if: ${{ github.event_name == 'push' && github.ref_name == format('{0}-{1}', 'rel', 'x') }}
+    steps:
+      - run: true

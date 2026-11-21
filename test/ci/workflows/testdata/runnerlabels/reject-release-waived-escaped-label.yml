@@ -1,0 +1,7 @@
+name: t
+on: [push]
+jobs:
+  lint:
+    runs-on: "rel\x65ase"  # self-hosted: hardware: the host
+    steps:
+      - run: true

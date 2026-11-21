@@ -1,0 +1,10 @@
+name: t
+on: [push]
+jobs:
+  lint:
+    strategy:
+      matrix:
+        runner: [release]
+    runs-on: ${{ matrix.runner }}  # self-hosted: hardware: the host
+    steps:
+      - run: true
