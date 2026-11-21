@@ -96,3 +96,8 @@ reject|x.yml|reject-subset-flow-pair-second-item.yml|x.yml: (s) line 5: a quoted
 reject|x.yml|reject-subset-flow-pair-after-plain.yml|x.yml: (s) line 5: a quoted scalar left open at the end of its line
 reject|x.yml|reject-subset-flow-pair-closed.yml|x.yml: (s) line 5: a flow sequence holding a flow pair or a `?` item
 reject|x.yml|reject-subset-flow-question-item.yml|x.yml: (s) line 5: a flow sequence holding a flow pair or a `?` item
+reject|x.yml|reject-release-step-item-if.yml|x.yml:a: (b) names `release` and has no `if:`
+reject|x.yml|reject-release-step-item-runs-on.yml|x.yml:a: (b) names `release` and has no `if:`
+accept|x.yml|accept-release-step-item-if.yml|OK:
+reject|x.yml|reject-job-sequence.yml|x.yml:a: (c) is a sequence, not a block mapping|!x.yml:runs-on:|!x.yml:if:
+reject|x.yml|reject-jobs-sequence.yml|x.yml:jobs: (c) is a sequence, not a block mapping

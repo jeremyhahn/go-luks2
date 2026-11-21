@@ -1815,7 +1815,17 @@ jobs:
                   if m and strip_comment(m.group(2)).strip():
                       bad.append(f"{path}:jobs: (c) is not a block mapping, so no job's runs-on can be checked; write jobs: as a block mapping")
                   elif m:
-                      for j, job, jinline in keys_under(lines, i):
+                      jobs = keys_under(lines, i)
+                      # Resume 19: a `- ` line at a block's child column is an item of
+                      # the previous key's compact sequence, never one of the block's
+                      # own keys; one that comes first makes the block a sequence.
+                      if jobs and lines[jobs[0][0]].lstrip().startswith("-"):
+                          bad.append(f"{path}:jobs: (c) is a sequence, not a block mapping, so no job's runs-on can be checked; "
+                                     f"write jobs: as a block mapping")
+                      item = [lines[j].lstrip().startswith("-") for j, _, _ in jobs]
+                      for n, (j, job, jinline) in enumerate(jobs):
+                          if item[n]:
+                              continue
                           where = f"{path}:{job}"
                           if strip_comment(jinline).strip():
                               bad.append(f"{where}: (c) is not a block mapping (a flow mapping or an alias), so its runs-on cannot be checked; "
@@ -1826,11 +1836,15 @@ jobs:
                           odd = odd_key(lines, j)
                           if odd:
                               forms.append(f"has a key the check cannot read ({odd!r}: a `?` key, a tag, an anchor or an escape)")
-                          for k, key, inline in keys_under(lines, j):
-                              if not lines[k].lstrip().startswith("-"):  # a sequence item's key is not the job's
-                                  if key in seen:
-                                      forms.append(f"has a duplicate `{key}` key")
-                                  seen.add(key)
+                          jkeys = keys_under(lines, j)
+                          if (jkeys and lines[jkeys[0][0]].lstrip().startswith("-")) or item[n + 1:n + 2] == [True]:
+                              forms.append("is a sequence, not a block mapping")
+                          for k, key, inline in jkeys:
+                              if lines[k].lstrip().startswith("-"):  # a sequence item's key is never the job's
+                                  continue
+                              if key in seen:
+                                  forms.append(f"has a duplicate `{key}` key")
+                              seen.add(key)
                               if key.lower() in CASED and key != key.lower():
                                   forms.append(f"has a `{key}` key, which differs from `{key.lower()}` only in case")
                               elif key == "<<":
