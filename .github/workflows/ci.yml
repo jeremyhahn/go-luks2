@@ -1245,12 +1245,42 @@ jobs:
               return v[:k + 1]
 
 
+          RO_MAP = re.compile(r"""['"]?(?:group|labels)['"]?[ \t]*:|.*?(?:^|[\s{,])['"]?labels['"]?[ \t]*:""")
+          RO_KEY = re.compile(r"""(?:^|[\s{,])['"]?[\w-]+['"]?[ \t]*:(?:[ \t]|$)""")
+
+
+          def ro_mapping(t):
+              # Resume 20: a mapping runs-on (the text body() joins, one line) is one
+              # `labels:` key; its value is read as a runs-on value is (a label, a flow
+              # list, or a block list, which body() joins to `- a - b`). A block scalar,
+              # `group:`, another key or no value raises (fails closed). No pattern
+              # here crosses a line or a list item. Any other text is returned as is.
+              if not RO_MAP.match(t):
+                  return t
+              m = re.fullmatch(r"labels:[ \t]+([^\n]+)", t)
+              v = m.group(1).strip() if m else ""
+              if not v or v[:1] in "|>" or (OPEN not in v and RO_KEY.search(v)):
+                  raise ValueError(f"is a mapping that is not one `labels:` key holding a label, a flow list or a block list of one-line "
+                                   f"labels (a block scalar, `group:`, another key or no value): {t[:60]!r}")
+              return v
+
+
           def runs_on_form(lines, i, inline, ro):
               # Why a runs-on value is not in a form the check reads, or None. Fails
               # closed: a block scalar, a quoted string that spans lines (its comment
               # lines would hide text), or a YAML alias (its value is elsewhere).
               if strip_comment(inline).strip()[:1] in ("|", ">"):
                   return "is a block scalar"
+              # Resume 20: a non-ASCII character (`ſ` case-folds to `s`) and a
+              # `labels:` value the reader cannot read exactly fail closed (a `group:`
+              # has its own finding below).
+              if any(ord(c) > 0x7E or (ord(c) < 0x20 and c not in "\t\n") for c in ro):
+                  return "has a character outside printable ASCII, which GitHub may case-fold to another label"
+              try:
+                  if not GROUP.search(ro):
+                      ro_mapping(ro.strip())
+              except ValueError as e:
+                  return str(e)
               for s in [inline] + [x for x in deeper(lines, i) if not x.lstrip().startswith("#")]:
                   if scan(s)[1]:
                       return "has a quoted string that spans lines"
@@ -1395,10 +1425,7 @@ jobs:
 
 
           def runs_on_labels(text, ev, ref, head, sel=None, hr="feature", br="main"):
-              t = text.strip()
-              if t.startswith("group:") or t.startswith("labels:") or " labels:" in t:
-                  m = re.search(r"labels:\s*(\[[^\]]*\]|\S+)", t)
-                  t = m.group(1) if m else ""
+              t = ro_mapping(text.strip())
               m = re.fullmatch(r"\$\{\{(.*)\}\}", unquote(t), re.S)
               if m:
                   return labels(P(lex(m.group(1)), hosted_get(ev, ref, head, sel, hr, br)).parse())
@@ -1447,7 +1474,8 @@ jobs:
               # Why a runs-on may name `release`, or None: the label in the text,
               # an expression not in RO_ALLOW, or an allow-listed one that yields it
               # on a github.com event (an unknown value is (c)'s).
-              if re.search(r"(?<![\w.-])['\"]?release['\"]?(?![\w-])", text):
+              # Resume 20: GitHub matches labels case-insensitively, so this does too.
+              if re.search(r"(?<![\w.-])['\"]?release['\"]?(?![\w-])", text, re.I):
                   return "names `release`"
               u = ro_unlisted(text)
               if u is not None:
@@ -1459,7 +1487,7 @@ jobs:
                           got = runs_on_labels(text, ev, ref, head, sel, hr=hr, br=br)
                       except ValueError:
                           continue
-                      if any(g.lower() == "release" for g in got or []):
+                      if any(g.casefold() == "release" for g in got or []):
                           return "names `release`"
               return None
 
@@ -1669,7 +1697,7 @@ jobs:
                       return f"{ev}: it cannot be read ({e})"
                   if got is None:
                       return f"{ev}: an unknown label"
-                  if all(g.lower() in GENERIC for g in got):
+                  if all(g.casefold() in GENERIC for g in got):
                       return f"{ev}: only generic labels ({', '.join(got)})"
               return None
 

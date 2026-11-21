@@ -101,3 +101,10 @@ reject|x.yml|reject-release-step-item-runs-on.yml|x.yml:a: (b) names `release` a
 accept|x.yml|accept-release-step-item-if.yml|OK:
 reject|x.yml|reject-job-sequence.yml|x.yml:a: (c) is a sequence, not a block mapping|!x.yml:runs-on:|!x.yml:if:
 reject|x.yml|reject-jobs-sequence.yml|x.yml:jobs: (c) is a sequence, not a block mapping
+reject|x.yml|reject-release-labels-block-list.yml|x.yml:a: (a) names `release` in a workflow with a pull_request trigger
+reject|x.yml|reject-release-labels-block-list-title.yml|x.yml:a: (a) names `release` in a workflow with a pull_request trigger
+reject|x.yml|reject-release-labels-block-list-quoted.yml|x.yml:a: (a) names `release` in a workflow with a pull_request trigger
+reject|x.yml|reject-release-labels-block-list-generic.yml|x.yml:a: (c) its waived runs-on may name `release` (push: only generic labels (self-hosted, Linux))
+reject|x.yml|reject-release-labels-folded.yml|x.yml:a: (c) its runs-on is a mapping that is not one `labels:` key
+reject|x.yml|reject-release-labels-literal.yml|x.yml:a: (c) its runs-on is a mapping that is not one `labels:` key
+reject|x.yml|reject-release-labels-long-s.yml|x.yml:a: (c) its runs-on has a character outside printable ASCII
