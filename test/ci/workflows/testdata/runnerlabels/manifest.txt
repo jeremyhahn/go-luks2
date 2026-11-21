@@ -87,3 +87,12 @@ reject|x.yml|reject-subset-quote-span-if.yml|x.yml: (s) line 6: a quoted scalar 
 reject|x.yml|reject-subset-under-indent-single-quote.yml|x.yml: (s) line 5: a quoted scalar left open at the end of its line
 reject|x.yml|reject-subset-under-indent-plain.yml|x.yml: (s) line 6: a line indented less than the mapping key it would continue
 reject|x.yml|reject-subset-under-indent-quote.yml|x.yml: (s) line 5: a quoted scalar left open at the end of its line
+reject|x.yml|reject-subset-flow-pair-quote.yml|x.yml: (s) line 5: a quoted scalar left open at the end of its line
+reject|x.yml|reject-subset-flow-pair-quoted-key.yml|x.yml: (s) line 5: a quoted scalar left open at the end of its line
+reject|x.yml|reject-subset-flow-pair-complex-key.yml|x.yml: (s) line 5: a quoted scalar left open at the end of its line
+reject|x.yml|reject-subset-flow-pair-anchor.yml|x.yml: (s) line 5: a quoted scalar left open at the end of its line
+reject|x.yml|reject-subset-flow-pair-tag.yml|x.yml: (s) line 5: a quoted scalar left open at the end of its line
+reject|x.yml|reject-subset-flow-pair-second-item.yml|x.yml: (s) line 5: a quoted scalar left open at the end of its line
+reject|x.yml|reject-subset-flow-pair-after-plain.yml|x.yml: (s) line 5: a quoted scalar left open at the end of its line
+reject|x.yml|reject-subset-flow-pair-closed.yml|x.yml: (s) line 5: a flow sequence holding a flow pair or a `?` item
+reject|x.yml|reject-subset-flow-question-item.yml|x.yml: (s) line 5: a flow sequence holding a flow pair or a `?` item

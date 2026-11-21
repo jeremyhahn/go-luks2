@@ -1519,18 +1519,52 @@ jobs:
               # Resume 17: whether a value (comment cut) leaves a quoted scalar open
               # at the end of its line. A quote starts one only at the start of the
               # value or of a flow list item (after `[` or `,`); elsewhere it is
-              # plain text (`it's`). '' escapes in '...', \ in "...".
-              k, starts = 0, (0,)
+              # plain text (`it's`). '' escapes in '...', \\ in "...".
+              # Resume 18: also after `: ` or `? ` (a flow pair's value or key; in
+              # block context a plain `: ` is not YAML), and after an anchor or tag
+              # that starts a value, so `[run: &x "echo]` is open too.
+              def after(j):
+                  return j + len(v[j:]) - len(v[j:].lstrip(" "))
+              k, starts = 0, {0}
               while k < len(v):
-                  if k in starts and v[k] in "'\"":
+                  if k in starts and v[k] in "&!":
+                      j = k
+                      while j < len(v) and v[j] != " ":
+                          j += 1
+                      starts.add(after(j))
+                  elif k in starts and v[k] in "'\"":
                       q, k = v[k], k + 1
                       while k < len(v) and v[k] != q or v[k:k + 2] == "''" and q == "'":
                           k += 2 if (q == '"' and v[k] == "\\") or v[k:k + 2] == "''" else 1
                       if k >= len(v):
                           return True
-                  elif v[0] == "[" and v[k] in "[,":
-                      starts = (k + 1 + len(v[k + 1:]) - len(v[k + 1:].lstrip(" ")),)
+                  elif v[0] == "[" and v[k] in "[," or v[k] in ":?" and v[k + 1:k + 2] == " ":
+                      starts.add(after(k + 1))
                   k += 1
+              return False
+
+
+          def flow_pair(v):
+              # Resume 18: whether a one-line flow list `[...]` holds a flow pair
+              # (`k: v`, `k:` at an item's end, `"k":v`) or an item starting `?`.
+              # Quoted scalars are skipped whole; `a:b` stays a plain scalar.
+              k, start, closed = 1, True, False
+              while k < len(v):
+                  c = v[k]
+                  if c == " ":
+                      k += 1
+                      continue
+                  if start and c == "?":
+                      return True
+                  if start and c in "'\"":
+                      k += 1
+                      while k < len(v) and v[k] != c or v[k:k + 2] == "''" and c == "'":
+                          k += 2 if (c == '"' and v[k] == "\\") or v[k:k + 2] == "''" else 1
+                      k, start, closed = k + 1, False, True
+                      continue
+                  if c == ":" and (closed or v[k + 1:k + 2] in ("", " ", ",", "]")):
+                      return True
+                  k, start, closed = k + 1, c in "[,", False
               return False
 
 
@@ -1594,6 +1628,8 @@ jobs:
                       return f"line {n}: a flow mapping"
                   if value[0] == "[" and (not value.endswith("]") or re.search(r"[\[,][ ]*[&*!{\[]", value)):
                       return f"line {n}: a flow sequence over more than one line or holding an anchor, alias, tag or collection"
+                  if value[0] == "[" and flow_pair(value):
+                      return f"line {n}: a flow sequence holding a flow pair or a `?` item"
                   if value[0] == '"' and "\\" in value:
                       return f"line {n}: an escape in a double-quoted scalar"
                   if value[0] in "|>":
