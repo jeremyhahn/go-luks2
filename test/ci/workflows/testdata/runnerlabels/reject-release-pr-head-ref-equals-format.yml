@@ -1,0 +1,7 @@
+name: t
+on: [push, pull_request]
+jobs:
+  lint:
+    runs-on: ${{ github.head_ref == format('{0}{1}', 'rele', 'ase') && github.head_ref || 'ubuntu-latest' }}
+    steps:
+      - run: true

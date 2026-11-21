@@ -845,9 +845,11 @@ jobs:
       # `release` label runs only on a push of a tag (refs/tags/*), never for a
       # pull request. A branch or dispatch condition is refused: Actions `==`
       # is case-insensitive, so a branch Main would match main. This step
-      # reads every .github/workflows/*.yml and *.yaml of the repository as
-      # text, takes each job whose runs-on names `release` (plain, in a list,
-      # or as a quoted string inside an expression), and checks its `if:`
+      # reads every file under .github/workflows (dotfiles too; a name not
+      # ending .yml or .yaml in any case fails) as text, takes each job whose
+      # runs-on names `release` (plain, in a list, or as a quoted string inside
+      # an expression) or holds an expression other than the ones this
+      # repository uses (Resume 15, RO_ALLOW), and checks its `if:`
       # against an allowlist that fails closed: split at its top-level `&&`
       # (not inside brackets or strings), the terms must include
       # `github.event_name == 'push'` and one of
@@ -881,9 +883,9 @@ jobs:
       - name: Runner labels (ruling 633)
         run: |
           python3 -I - <<'PY'
-          import glob, json, re, sys
+          import json, os, re, sys
 
-          # Reads .github/workflows/*.yml|yaml as text (no YAML library): the
+          # Reads each file under .github/workflows as text (no YAML library): the
           # top-level `on:` keys, and each job's `runs-on` and `if`. A job names
           # `release` when that label appears in its runs-on, plain, in a list or as a
           # quoted string in an expression. Its `if` passes only in the allow-listed
@@ -910,34 +912,6 @@ jobs:
               if ev not in PR and (p == "github.event.pull_request" or p.startswith("github.event.pull_request.")):
                   return None
               return U
-
-
-          def case_forms(s):
-              # GitHub compares strings case-insensitively, but git refs are not:
-              # a branch Main is not main, yet == 'refs/heads/main' holds on it.
-              return [s, s.lower(), s.upper(), s.swapcase(), s[:1].swapcase() + s[1:]]
-
-
-          def lit_values(lits):
-              # Names (branch, tag, head or base) and refs the string literals can
-              # make a context equal, start, end or contain: the literal, with a
-              # prefix or suffix, under refs/heads/ or refs/tags/, each in other case.
-              names = []
-              for s in lits:
-                  names += [s, s + "x", "x" + s]
-                  for pre in ("refs/heads/", "refs/tags/"):
-                      if s.lower().startswith(pre):
-                          names.append(s[len(pre):])
-              names = [c for n in dict.fromkeys(names) if n for c in case_forms(n)]
-              names = list(dict.fromkeys(names))
-              refs = []
-              for s in lits:
-                  for r in (s, s + "x"):
-                      part = r.split("/", 2)
-                      if len(part) == 3 and part[0].lower() == "refs" and part[2]:
-                          refs += ["refs/" + part[1].lower() + "/" + c for c in case_forms(part[2])]
-              refs += [pre + n for n in names for pre in ("refs/heads/", "refs/tags/")]
-              return names, list(dict.fromkeys(refs))
 
 
           def release_terms(toks):
@@ -1347,27 +1321,36 @@ jobs:
           ]
 
 
+          # Resume 15 (#494 round 4): a runs-on expression is evaluated only when its
+          # text, whitespace-normalised, is one this repository's workflows use
+          # (RO_ALLOW, with the jobs that use it); any other expression counts as
+          # reaching `release` and needs the tag-push `if:`. Nothing is sampled
+          # from its literals: head_ref, base_ref and event values are the
+          # attacker's, so no sample set of them is complete.
+          RO_ALLOW = {
+              "github.server_url == 'https://github.com' && fromJSON(vars.CI_PREFLIGHT_RUNS_ON || "
+              "'[\"self-hosted\",\"linux\",\"x64\",\"bigdisk\"]') || 'ubuntu-latest'": "ci.yml: preflight",
+              "github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk'": "code-review.yml: scope, gate",
+          }
+          RO_EXPR = re.compile(r"\$\{\{(.*?)\}\}", re.S)
+
+
+          def ro_unlisted(text):
+              # The first expression in a runs-on text that is not allow-listed, or None.
+              exprs = RO_EXPR.findall(text)
+              if text.count(OPEN) != len(exprs):
+                  return text[:60]
+              for e in exprs:
+                  if " ".join(e.split()) not in RO_ALLOW:
+                      return " ".join(e.split())[:60]
+              return None
+
+
           def hosted_cands(text):
-              # (event, ref, head repo, head_ref, base_ref) on github.com: each
-              # HOSTED_CTX sample and, when the text reads a ref context, every
-              # value lit_values makes of its string literals that the event carries.
-              lits = []
-              if re.search(r"(?i)\bgithub\.(event\.)?(ref|ref_name|ref_type|head_ref|base_ref)\b", text):
-                  lits = [s.replace("''", "'") for s in re.findall(r"'((?:[^']|'')*)'", text)]
-              names, refs = lit_values(lits) if lits else ([], [])
-              seen = set()
+              # (event, ref, head repo, head_ref, base_ref) on github.com: the
+              # HOSTED_CTX samples alone (Resume 15: none from the text's literals).
               for ev, ref, head in HOSTED_CTX:
-                  cands = [(ref, "feature", "main")]
-                  if lits and ev in PR:
-                      cands += [(r, h, b) for r in [ref] + [r for r in refs if r.startswith("refs/pull/")]
-                                for h in ["feature"] + names for b in ["main"] + names]
-                  elif lits:
-                      kinds = ("refs/heads/",) if ev == "schedule" else ("refs/heads/", "refs/tags/")
-                      cands += [(r, "feature", "main") for r in refs if r.startswith(kinds)]
-                  for c in cands:
-                      if (ev, head) + c not in seen:
-                          seen.add((ev, head) + c)
-                          yield (ev, c[0], head) + c[1:]
+                  yield ev, ref, head, "feature", "main"
 
 
           def hosted_get(ev, ref, head, sel=None, hr="feature", br="main"):
@@ -1447,11 +1430,16 @@ jobs:
               return None
 
 
-          def names_release(text, sels=(None,)):
-              # The label in the text, or in any value an expression there
-              # yields on a github.com event (an unknown one is (c)'s).
+          def release_reason(text, sels=(None,)):
+              # Why a runs-on may name `release`, or None: the label in the text,
+              # an expression not in RO_ALLOW, or an allow-listed one that yields it
+              # on a github.com event (an unknown value is (c)'s).
               if re.search(r"(?<![\w.-])['\"]?release['\"]?(?![\w-])", text):
-                  return True
+                  return "names `release`"
+              u = ro_unlisted(text)
+              if u is not None:
+                  return (f"its runs-on expression is not allow-listed ({u!r}; only {', '.join(RO_ALLOW.values())} "
+                          f"are), so it may name `release`,")
               for ev, ref, head, hr, br in hosted_cands(text):
                   for sel in sels:
                       try:
@@ -1459,13 +1447,20 @@ jobs:
                       except ValueError:
                           continue
                       if any(g.lower() == "release" for g in got or []):
-                          return True
-              return False
+                          return "names `release`"
+              return None
+
+
+          # Resume 15: the `if:` scalar is the bare expression or one expression
+          # filling it, nothing else: text or a space around it makes it a string.
+          EDGE = "it has a space before or after it inside its quotes, which makes it a string, always true"
 
 
           def condition(text):
               t = unquote(text) if text else ""
-              m = re.fullmatch(r"\s*\$\{\{(.*)\}\}\s*", t, re.S)
+              if t != t.strip():
+                  raise ValueError(EDGE)
+              m = re.fullmatch(r"\$\{\{(.*)\}\}", t, re.S)
               if m and OPEN not in m.group(1):
                   return m.group(1)
               if OPEN in t:
@@ -1482,6 +1477,7 @@ jobs:
           JOB_KEY = re.compile(r"""[ ]*(?:(?:<<|[A-Za-z0-9_][\w.-]*|'[\w.-]+'|"[\w.-]+")[ \t]*:(?:[ \t]|$)|-(?:[ \t]|$))""")
           GROUP = re.compile(r"""(?:^|[{,\s])['"]?group['"]?\s*:""")
           # Labels every self-hosted runner carries, the release runner too.
+          CASED = {"runs-on", "if", "uses"}  # Resume 15: a job key that differs from these only in case fails closed
           GENERIC = {"self-hosted", "linux", "windows", "macos", "x64", "x86", "arm", "arm64"}
 
 
@@ -1572,9 +1568,11 @@ jobs:
               if not exprs and all(x.casefold() in GENERIC for x in lits):
                   return generic
               for x in exprs:
-                  m = re.fullmatch(r"\s*\$\{\{(.*)\}\}\s*", x, re.S)
+                  m = re.fullmatch(r"\$\{\{(.*)\}\}", x, re.S)
                   if not m or OPEN in m.group(1):
                       return f"has text around an expression ({x[:40]!r})"
+                  if " ".join(m.group(1).split()) not in RO_ALLOW:
+                      return f"has an expression that is not allow-listed ({x[:60]!r}), so it may yield `release`"
                   for ev, ref, head, hr, br in hosted_cands(x):
                       for sel in sels:
                           try:
@@ -1594,7 +1592,9 @@ jobs:
               # Whether a parsed `if:` is in the allow-listed form; ValueError if unreadable.
               if not isinstance(cond, str):
                   raise ValueError("there is none" if cond is None else f"it is a {type(cond).__name__}, not a string")
-              m = re.fullmatch(r"\s*\$\{\{(.*)\}\}\s*", cond, re.S)
+              if cond != cond.strip():
+                  raise ValueError(EDGE)
+              m = re.fullmatch(r"\$\{\{(.*)\}\}", cond, re.S)
               if m and OPEN not in m.group(1):
                   expr = m.group(1)
               elif OPEN in cond:
@@ -1622,6 +1622,11 @@ jobs:
                   where = f"{path}:{job}"
                   if not isinstance(j, dict):
                       bad.append(f"{where}: (y) parsed as YAML, the job is not a mapping")
+                      continue
+                  cased = [k for k in j if isinstance(k, str) and k.lower() in CASED and k != k.lower()]
+                  if cased:
+                      bad.append(f"{where}: (y) parsed as YAML, the job has a key that differs from runs-on, if or uses "
+                                 f"only in case ({cased[0]!r}), so the check fails closed")
                       continue
                   if "runs-on" not in j:
                       continue
@@ -1677,7 +1682,9 @@ jobs:
                                   if key in seen:
                                       forms.append(f"has a duplicate `{key}` key")
                                   seen.add(key)
-                              if key == "<<":
+                              if key.lower() in CASED and key != key.lower():
+                                  forms.append(f"has a `{key}` key, which differs from `{key.lower()}` only in case")
+                              elif key == "<<":
                                   forms.append("has a `<<` merge key, so its runs-on or `if:` may come from elsewhere")
                               elif key == "uses" and not unquote(strip_comment(inline)).startswith("./"):
                                   forms.append("calls a reusable workflow outside this repository, whose runs-on the check cannot see")
@@ -1696,7 +1703,8 @@ jobs:
                               bad.append(f"{where}: (c) {'; '.join(forms)}; the check cannot read it, so it fails closed: write the job as a block "
                                          f"mapping of plain keys, each once, runs-on on one line or as a block list of one-line labels")
                               continue
-                          if ro is not None and not names_release(ro):
+                          rel = release_reason(ro) if ro is not None else None
+                          if ro is not None and not rel:
                               # v1.43 (ruling 833): hosted first.
                               if LARGER.search(ro) and re.search(r"ubuntu|windows|macos", ro):
                                   bad.append(f"{where}: (d) names a larger GitHub-hosted runner ({ro}); it bills on a public repository")
@@ -1743,8 +1751,8 @@ jobs:
                               continue
                           if cond is None:
                               if on & PR:
-                                  bad.append(f"{where}: (a) names `release` in a workflow with a pull_request trigger, and has no `if:`")
-                              bad.append(f"{where}: (b) names `release` and has no `if:` restricting it to {ALLOWED}")
+                                  bad.append(f"{where}: (a) {rel} in a workflow with a pull_request trigger, and has no `if:`")
+                              bad.append(f"{where}: (b) {rel} and has no `if:` restricting it to {ALLOWED}")
                               continue
                           try:
                               if cond is MULTI:
@@ -1757,22 +1765,37 @@ jobs:
                               terms = release_terms(toks)
                           except ValueError as e:
                               if on & PR:
-                                  bad.append(f"{where}: (a) names `release` in a workflow with a "
+                                  bad.append(f"{where}: (a) {rel} in a workflow with a "
                                              + " and ".join(sorted(on & PR)) + " trigger and its `if:` cannot be read, so a "
                                              + " or ".join(sorted(on & PR)) + " event may run it")
-                              bad.append(f"{where}: (b) names `release` and its `if:` cannot be read ({e}); it must be {ALLOWED}")
+                              bad.append(f"{where}: (b) {rel} and its `if:` cannot be read ({e}); it must be {ALLOWED}")
                               continue
                           if ALLOW_EVENT in terms and any(t in terms for t in ALLOW_TAG):
                               continue
                           if on & PR:
-                              bad.append(f"{where}: (a) names `release` and its `if:` is not in the allow-listed form, so a "
+                              bad.append(f"{where}: (a) {rel} and its `if:` is not in the allow-listed form, so a "
                                          + " or ".join(sorted(on & PR)) + " event may run it")
-                          bad.append(f"{where}: (b) names `release` and its `if:` does not restrict it to {ALLOWED}")
+                          bad.append(f"{where}: (b) {rel} and its `if:` does not restrict it to {ALLOWED}")
               return bad
 
 
-          files = sorted(glob.glob(".github/workflows/*.yml") + glob.glob(".github/workflows/*.yaml"))
-          bad = []
+          # Resume 15: every entry under the workflows directory, dotfiles too: a
+          # .yml or .yaml name in any case is checked, anything else fails (z).
+          WF = ".github/workflows"
+          files, bad = [], []
+          try:
+              entries = sorted(os.listdir(WF))
+          except OSError as e:
+              entries = []
+              bad.append(f"{WF}: (z) cannot be listed ({e})")
+          for n in entries:
+              p = f"{WF}/{n}"
+              if os.path.islink(p) or not os.path.isfile(p):
+                  bad.append(f"{p}: (z) is not a regular file; {WF} may hold only .yml or .yaml workflow files")
+              elif not n.lower().endswith((".yml", ".yaml")):
+                  bad.append(f"{p}: (z) is not a .yml or .yaml file; {WF} may hold only workflow files, so the check fails closed")
+              else:
+                  files.append(p)
           try:
               import yaml
           except ImportError as e:

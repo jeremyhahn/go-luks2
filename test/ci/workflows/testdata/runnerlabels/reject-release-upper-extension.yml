@@ -1,0 +1,7 @@
+name: t
+on: [push, pull_request]
+jobs:
+  lint:
+    runs-on: release  # self-hosted: hardware: the host
+    steps:
+      - run: true

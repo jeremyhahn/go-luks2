@@ -75,7 +75,10 @@ func TestRunnerLabelsManifest(t *testing.T) {
 		if !strings.HasPrefix(c.fixture, c.result+"-") {
 			t.Errorf("%s: its name does not start with its result %q", c.fixture, c.result+"-")
 		}
-		if c.file != filepath.Base(c.file) || (!strings.HasSuffix(c.file, ".yml") && !strings.HasSuffix(c.file, ".yaml")) {
+		// Any case of .yml or .yaml, dotfiles too; another name only for a
+		// reject-workflow- case (the check refuses any other file there).
+		ext := strings.ToLower(filepath.Ext(c.file))
+		if c.file != filepath.Base(c.file) || (ext != ".yml" && ext != ".yaml" && !strings.HasPrefix(c.fixture, "reject-workflow-")) {
 			t.Errorf("%s: workflow file %q is not a bare .yml or .yaml name", c.fixture, c.file)
 		}
 		if _, dup := byFixture[c.fixture]; dup {
@@ -143,10 +146,18 @@ func TestRunnerLabelsManifest(t *testing.T) {
 		{"reject-release-pr-head-ref-case.yml", "", "lint", releaseRunsOn},
 		{"reject-release-schedule-other-default.yml", "", "lint", releaseRunsOn},
 		{"accept-release-push-tag.yml", "", "lint", releaseRunsOn},
-		// A runs-on expression is tried with the same literal-derived refs.
+		// Resume 15: a runs-on expression the repository does not use (RO_ALLOW)
+		// counts as reaching `release`; nothing is sampled from its literals.
 		{"reject-hosted-ref-self-hosted.yml", "", "lint", "${{ github.ref == 'refs/heads/topic' && 'self-hosted' || 'ubuntu-latest' }}"},
 		{"reject-hosted-head-ref-case.yml", "", "lint", "${{ github.head_ref == 'Topic' && 'self-hosted' || 'ubuntu-latest' }}"},
-		{"accept-hosted-ref-routing.yml", "", "lint", "${{ (github.ref == 'refs/heads/topic' || github.head_ref == 'topic') && 'ubuntu-22.04' || 'ubuntu-latest' }}"},
+		{"reject-release-pr-head-ref-index.yml", "", "lint", "${{ startsWith(github['head_ref'], 'rel') && github['head_ref'] || 'ubuntu-latest' }}"},
+		{"reject-release-pr-head-ref-equals-format.yml", "", "lint", "${{ github.head_ref == format('{0}{1}', 'rele', 'ase') && github.head_ref || 'ubuntu-latest' }}"},
+		{"reject-release-pr-head-ref-index-format.yml", "", "lint", "${{ github['head_ref'] == format('{0}{1}', 'rele', 'ase') && format('{0}{1}', 'rele', 'ase') || 'ubuntu-latest' }}"},
+		{"reject-release-pr-head-ref-spaced.yml", "", "lint", "${{ startsWith(github . head_ref, 'rel') && github . head_ref || 'ubuntu-latest' }}"},
+		{"reject-release-hidden-file.yml", ".hidden.yml", "lint", releaseRunsOn},
+		{"reject-release-upper-extension.yml", "x.YML", "lint", releaseRunsOn},
+		{"reject-workflow-other-file.yml", "notes.txt", "lint", releaseRunsOn},
+		{"reject-release-hosted-ref-routing.yml", "", "lint", "${{ (github.ref == 'refs/heads/topic' || github.head_ref == 'topic') && 'ubuntu-22.04' || 'ubuntu-latest' }}"},
 		{"accept-server-url-routing.yml", "", "lint", templateRoutingExpression},
 		// ci-template v1.49 part F.
 		{"accept-preflight.yml", "ci.yml", "preflight", preflightRunsOn},
@@ -157,7 +168,7 @@ func TestRunnerLabelsManifest(t *testing.T) {
 			`${{ github.event_name == 'push' && fromJSON('["self-hosted","linux","x64","bigdisk"]') || fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '"ubuntu-latest"') }}`},
 		{"reject-preflight-without-fromjson.yml", "ci.yml", "preflight", "${{ vars.CI_PREFLIGHT_RUNS_ON || 'ubuntu-latest' }}"},
 		{"reject-preflight-other-variable.yml", "ci.yml", "preflight", strings.Replace(preflightRunsOn, "CI_PREFLIGHT_RUNS_ON", "CI_PREFLIGHT_RUNS_ON_X", 1)},
-		{"accept-preflight-off-github-label.yml", "ci.yml", "preflight", strings.Replace(preflightRunsOn, "|| 'ubuntu-latest' }}", "|| 'bigdisk' }}", 1)},
+		{"reject-preflight-off-github-label.yml", "ci.yml", "preflight", strings.Replace(preflightRunsOn, "|| 'ubuntu-latest' }}", "|| 'bigdisk' }}", 1)},
 	} {
 		c, ok := byFixture[w.fixture]
 		if !ok {
