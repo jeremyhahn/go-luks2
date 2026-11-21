@@ -71,6 +71,13 @@ accept|ci.yml|accept-preflight.yml|OK:
 # under pull_request_target too; v1.49's form without it is no longer allowed.
 accept|ci.yml|accept-preflight-pr-target.yml|OK:
 reject|ci.yml|reject-preflight-v149-form.yml|ci.yml:preflight: (b) its runs-on expression is not allow-listed
+# A fork's head, under pull_request or pull_request_target, gets no overflow
+# exemption: its overflow sample is reported. The preflight form without the
+# fork clause (the unset exemption) is refused for every trigger.
+reject|ci.yml|reject-fork-overflow-pr.yml|ci.yml:lint: (c)|pull_request (refs/pull/1/merge, fork, runner selection overflow): self-hosted, linux, x64, bigdisk
+reject|ci.yml|reject-fork-overflow-prt.yml|ci.yml:lint: (c)|pull_request_target (refs/heads/main, fork, runner selection overflow): self-hosted, linux, x64, bigdisk
+reject|ci.yml|reject-fork-unset-pr.yml|ci.yml:preflight: (a) its runs-on expression is not allow-listed|ci.yml:preflight: (b) its runs-on expression is not allow-listed
+reject|ci.yml|reject-fork-unset-prt.yml|ci.yml:preflight: (a) its runs-on expression is not allow-listed|ci.yml:preflight: (b) its runs-on expression is not allow-listed
 reject|ci.yml|reject-preflight-form-other-job.yml|ci.yml:lint: (c)|an unknown label|!CI_PREFLIGHT_RUNS_ON
 reject|batch.yml|reject-preflight-outside-ci.yml|batch.yml:preflight: (c)
 reject|ci.yml|reject-preflight-other-default.yml|ci.yml:preflight: (a) its runs-on expression is not allow-listed

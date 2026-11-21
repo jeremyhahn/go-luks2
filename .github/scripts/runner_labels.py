@@ -4,7 +4,10 @@
 # reads every file under .github/workflows; its rules are in that step's
 # comment. The step `Runner labels self-test` runs this file on every fixture
 # test/ci/workflows/testdata/runnerlabels/manifest.txt lists. Resume 23: moved
-# here out of ci.yml's run block (Codex P1, PR #495), logic unchanged.
+# here out of ci.yml's run block (Codex P1, PR #495), plus the v1.51/v1.52
+# logic: the `pull_request_target` HOSTED_CTX entries, the preflight
+# `RO_ALLOW` fork clause, and the `not fork` guard on the overflow and unset
+# exemptions.
 import json, os, re, sys
 
 # Resume 16: the line reader is the gate on its own. It reads a strict
@@ -1117,6 +1120,16 @@ def check(path):
                             # Resume 23 (ci-template v1.51, v1.52; the stricter
                             # kept): a fork's head, under pull_request or
                             # pull_request_target, gets neither exemption.
+                            # Deliberately stricter than the v1.52 template:
+                            # hosted_get has no `fork_pr` rule, and this
+                            # condition does not require the event to be one
+                            # of the workflow's triggers (the template's
+                            # `and ev in on`). Adopting the template's
+                            # overflow step needs both revisited. The unset
+                            # guard is unreachable while RO_ALLOW's only
+                            # CI_PREFLIGHT_RUNS_ON form carries the fork clause
+                            # (a fork gets ubuntu-latest first); it is kept so
+                            # a fork-less form added there is still refused.
                             fork = head == "fork/r"
                             if got is not None and sel == "overflow" and got in OVERFLOW and not fork:
                                 continue
