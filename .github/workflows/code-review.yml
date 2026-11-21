@@ -3849,8 +3849,13 @@ jobs:
             # CUSTOMIZE: local fix pending upstream (template v5.12.3, Codex P1 on #490): a done
             # job (guard only, e.g. skip=reviewed; codex did not run) replaces nothing, so a
             # cancelled job not passed by a newer success (a real review) failed.
+            # CUSTOMIZE: local fix pending upstream (template v5.12.6, Codex P1): the run of an
+            # active twin ($twins, read before this) is no attempt: jq_attempt counts its
+            # unfinished job failed, and its own gate posts the head's check. A completed
+            # attempt (failed, cancelled or success) on the head or a carried-from head is
+            # ranked as before, so a failed latest one still fails, twin or not.
             st=$(printf '%s' "$rows" | LC_ALL=C sort -t $'\t' -k1,1r -k2,2nr -k3,3nr |
-                 awk -F '\t' '$4 == "done" { next } $4 == "cancelled" { $4 = "failed" } $4 == "success" || $4 == "failed" { print $4, $5; exit }')
+                 awk -F '\t' -v tw="$twins" 'BEGIN { n = split(tw, a, " "); for (i = 1; i <= n; i++) twin[a[i]] = 1 } ($5 in twin) { next } $4 == "done" { next } $4 == "cancelled" { $4 = "failed" } $4 == "success" || $4 == "failed" { print $4, $5; exit }')
             case "$st" in
               success\ *) return 0 ;;
               failed\ *) fail "a requested re-review has not approved head $EVENT_SHA: the latest codex review attempt (run ${st#* }) failed or was cancelled, so no earlier approval stands. Request the review again (an effort: label) for a new attempt" ;;
@@ -3905,7 +3910,10 @@ jobs:
           # standing verdict below: an APPROVED head passes as before; anything
           # else fails at once, naming the twin, and never holds a hosted
           # runner for the codex runner's queue. No wait is left.
-          twin=
+          # CUSTOMIZE: local fix pending upstream (template v5.12.6, Codex P1): every active
+          # twin's run ID goes in $twins (the first in $twin, for the message), so the
+          # attempt check passes over their unfinished jobs.
+          twin='' twins=''
           if [ "$FORGE" = github ]; then
             title="Code Review: PR #$PR_NUM into $BASE_REF at $EVENT_SHA"
             wf=$(get "/actions/runs/$GITHUB_RUN_ID" | jq -r '.workflow_id // empty')
@@ -3922,7 +3930,7 @@ jobs:
                 get "/actions/runs/$id/jobs?per_page=100" |
                   jq -e 'any(.jobs[]?; .name == "Codex review" and (.status == "queued" or .status == "in_progress"))' >/dev/null || rc=$?
                 [ "$rc" -le 1 ] || fail "cannot read the jobs of run $id"
-                [ "$rc" = 1 ] || twin=${twin:-$id}
+                [ "$rc" = 1 ] || { twin=${twin:-$id}; twins+=" $id"; }
               done
             done
           fi
