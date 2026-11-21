@@ -193,7 +193,7 @@ func TestNoRetiredRunnerLabel(t *testing.T) {
 	for _, f := range workflowFiles(t) {
 		text := readFile(t, rel(t, f))
 		for _, m := range jobRunsOn.FindAllStringSubmatch(text, -1) {
-			if isPreflightTemplateRunsOn(t, rel(t, f), text, m[1]) {
+			if isPreflightTemplateRunsOn(t, rel(t, f), text, m[1]) || isReviewScopeTemplateRunsOn(t, rel(t, f), text, m[1]) {
 				continue
 			}
 			if l, ok := retiredRunsOnLabel(m[1]); ok {
@@ -220,6 +220,18 @@ func isPreflightTemplateRunsOn(t *testing.T, path, workflow, value string) bool 
 	}
 	line := "    runs-on: " + value + "\n"
 	return strings.Count(workflow, line) == 1 && strings.Contains(job(t, workflow, "preflight"), line)
+}
+
+// isReviewScopeTemplateRunsOn reports whether a runs-on value is
+// code-review.yml v5.12.12's Review scope form on its scope job, held once in
+// the file: bigdisk on github.com for a same-repository head only.
+func isReviewScopeTemplateRunsOn(t *testing.T, path, workflow, value string) bool {
+	t.Helper()
+	if path != ".github/workflows/code-review.yml" || value != reviewScopeRunsOn {
+		return false
+	}
+	line := "    runs-on: " + value + "\n"
+	return strings.Count(workflow, line) == 1 && strings.Contains(job(t, workflow, "scope"), line)
 }
 
 // serverURLArms matches a runs-on value that picks its label by forge:

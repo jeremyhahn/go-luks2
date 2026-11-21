@@ -43,7 +43,7 @@ func noReviewPaths(t *testing.T) *regexp.Regexp {
 // Codex P1: a workflow controls credentials and merge enforcement, so no
 // change under .github/workflows/ is ever review-exempt.
 func TestNoReviewPathsIsTheTemplateList(t *testing.T) {
-	// v5.12.11 exactly: the list is docs and CI config, .github/ included;
+	// v5.12.12 exactly: the list is docs and CI config, .github/ included;
 	// a workflow change is held by the guard before the exemption applies.
 	re := noReviewPaths(t)
 	for _, p := range []string{"docs/a.md", "docs/x/y.txt", "README.md", ".github/actionlint.yaml",
@@ -60,27 +60,57 @@ func TestNoReviewPathsIsTheTemplateList(t *testing.T) {
 }
 
 // codeReviewTemplateSHA256 is the sha256 of the handbook's code-review.yml
-// template v5.12.11, the file this repository carries byte for byte: its
+// template v5.12.12, the file this repository carries byte for byte: its
 // runner labels and PROTECTED list are the template's own, so no site is
 // re-applied (codeReviewCustomizeLines counts the template's markers).
 const (
-	codeReviewTemplateSHA256 = "0b10d5b4b90f4b110ed4b9c167e088cac81f2d1356968847102e8965cb17827c"
+	codeReviewTemplateSHA256 = "cdad823f79e5a648714e6142d133657e2bdb16fe35623ff1984d7a7f93110f08"
 	codeReviewCustomizeLines = 1
 )
 
 // TestCodeReviewIsTheTemplate fails when code-review.yml drifts from the
-// v5.12.11 template. CI cannot read the handbook, so the template is pinned
+// v5.12.12 template. CI cannot read the handbook, so the template is pinned
 // by its hash, its header and its count of `# CUSTOMIZE:` lines.
 func TestCodeReviewIsTheTemplate(t *testing.T) {
 	cr := codeReview(t)
-	if first, _, _ := strings.Cut(cr, "\n"); !strings.HasPrefix(first, "# code-review-template: v5.12.11 ") {
-		t.Errorf("%s: header %q is not template v5.12.11", codeReviewWorkflow, first)
+	if first, _, _ := strings.Cut(cr, "\n"); !strings.HasPrefix(first, "# code-review-template: v5.12.12 ") {
+		t.Errorf("%s: header %q is not template v5.12.12", codeReviewWorkflow, first)
 	}
 	if n := len(regexp.MustCompile(`(?m)# CUSTOMIZE:`).FindAllStringIndex(cr, -1)); n != codeReviewCustomizeLines {
 		t.Errorf("%s: %d `# CUSTOMIZE:` lines, want %d (one per re-applied site)", codeReviewWorkflow, n, codeReviewCustomizeLines)
 	}
 	if sum := fmt.Sprintf("%x", sha256.Sum256([]byte(cr))); sum != codeReviewTemplateSHA256 {
-		t.Errorf("%s: sha256 %s, want the v5.12.11 template's %s: only the runner labels and the PROTECTED list may differ, and they do not", codeReviewWorkflow, sum, codeReviewTemplateSHA256)
+		t.Errorf("%s: sha256 %s, want the v5.12.12 template's %s: only the runner labels and the PROTECTED list may differ, and they do not", codeReviewWorkflow, sum, codeReviewTemplateSHA256)
+	}
+}
+
+// TestGateFailsClosedOnCancelledReviewAndTwin pins two of v5.12.12's gate
+// rules: a cancelled Codex review job fails the gate as a failed one does, so
+// no earlier approval of the head is reused; and a twin run reviewing the head
+// fails the gate whatever the standing verdict, approval included, because the
+// twin check comes before the verdict is read.
+func TestGateFailsClosedOnCancelledReviewAndTwin(t *testing.T) {
+	cr := codeReview(t)
+	rr := regexp.MustCompile(`(?ms)^ +case "\$REVIEW_RESULT" in\n(.*?)^ +esac$`).FindStringSubmatch(cr)
+	if rr == nil {
+		t.Fatalf(`%s: no case "$REVIEW_RESULT" in the gate`, codeReviewWorkflow)
+	}
+	for _, r := range []string{"failure", "cancelled"} {
+		if !regexp.MustCompile(`(?m)^ +` + r + `\) fail "`).MatchString(rr[1]) {
+			t.Errorf(`%s: case "$REVIEW_RESULT" does not fail the gate on %s`, codeReviewWorkflow, r)
+		}
+	}
+	twin := regexp.MustCompile(`(?m)^ +\[ -z "\$twin" \] \|\|\n +fail "`).FindStringIndex(cr)
+	if twin == nil {
+		t.Fatalf(`%s: no unconditional "[ -z \"$twin\" ] || fail" in the gate`, codeReviewWorkflow)
+	}
+	set := regexp.MustCompile(`(?m)^ +verdict=\$\(`).FindAllStringIndex(cr[:twin[0]], -1)
+	verdictCase := regexp.MustCompile(`(?m)^ +case "\$verdict" in$`).FindStringIndex(cr[twin[1]:])
+	if len(set) == 0 || verdictCase == nil {
+		t.Fatalf("%s: the twin check is not between the verdict read and its case", codeReviewWorkflow)
+	}
+	if between := cr[set[len(set)-1][0]:twin[0]]; regexp.MustCompile(`(?m)^ +(if|case) `).MatchString(between) {
+		t.Errorf("%s: the twin check sits under a condition after the verdict read, so a verdict could skip it", codeReviewWorkflow)
 	}
 }
 

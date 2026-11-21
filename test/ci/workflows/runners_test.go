@@ -56,6 +56,12 @@ func runsOnViolation(file, jobID, line string) string {
 		// with CI_PREFLIGHT_RUNS_ON unset and set to its fallback.
 		return ""
 	}
+	if file == "code-review.yml" && jobID == "scope" && strings.TrimSpace(value) == reviewScopeRunsOn {
+		// code-review.yml v5.12.12 (ci-template v1.53): the Review scope job
+		// alone may run on the bigdisk pool, for a same-repository head, by
+		// this exact form; the runner-labels step checks a fork's head.
+		return ""
+	}
 	value, why := runsOnLabel(strings.TrimSpace(value))
 	switch {
 	case why != "":
@@ -168,6 +174,11 @@ func TestRunsOnViolation(t *testing.T) {
 		{"v1.52 preflight form on another job", "ci.yml", "lint", " " + preflightRunsOn, false},
 		{"v1.52 preflight form outside ci.yml", "batch.yml", "preflight", " " + preflightRunsOn, false},
 		{"v1.52 preflight form, other default", "ci.yml", "preflight", " " + strings.Replace(preflightRunsOn, `"bigdisk"]`, `"bigdisk-docker"]`, 1), false},
+		{"v5.12.12 review scope form", "code-review.yml", "scope", " " + reviewScopeRunsOn, true},
+		{"v5.12.12 review scope form on the gate", "code-review.yml", "gate", " " + reviewScopeRunsOn, false},
+		{"v5.12.12 review scope form outside code-review.yml", "signatures.yml", "scope", " " + reviewScopeRunsOn, false},
+		{"review scope form for any head", "code-review.yml", "scope", " " + strings.Replace(reviewScopeRunsOn, "github.event.pull_request.head.repo.full_name == github.repository", "github.event_name == 'pull_request_target'", 1), false},
+		{"review scope form, other label", "code-review.yml", "scope", " " + strings.Replace(reviewScopeRunsOn, `"bigdisk"]`, `"bigdisk-docker"]`, 1), false},
 		{"self-hosted with unrelated comment", "ci.yml", "lint", " qwen  # CUSTOMIZE: the host", false},
 		{"label list", "ci.yml", "lint", " [self-hosted, linux]", false},
 		{"label list waived", "ci.yml", "lint", " [self-hosted, gpu]  # self-hosted: hardware: the GPU", false},

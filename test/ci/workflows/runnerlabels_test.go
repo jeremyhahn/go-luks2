@@ -22,6 +22,11 @@ const (
 // its override, and ubuntu-latest off github.com.
 const preflightRunsOn = `${{ github.server_url == 'https://github.com' && (!startsWith(github.event_name, 'pull_request') || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk"]') || 'ubuntu-latest' }}`
 
+// reviewScopeRunsOn is code-review.yml v5.12.12's Review scope runs-on: the
+// bigdisk pool on github.com for a same-repository head, ubuntu-latest for a
+// fork's head and off a pull request event, and bigdisk off github.com.
+const reviewScopeRunsOn = `${{ github.server_url == 'https://github.com' && (github.event.pull_request.head.repo.full_name == github.repository && fromJSON('["self-hosted","linux","x64","bigdisk"]') || 'ubuntu-latest') || 'bigdisk' }}`
+
 // releaseRunsOn is the runs-on line of the release-runner `if:` fixtures.
 const releaseRunsOn = "release  # self-hosted: hardware: the host"
 
