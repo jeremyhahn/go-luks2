@@ -1,0 +1,8 @@
+name: t
+on: [schedule]
+jobs:
+  lint:
+    runs-on: release  # self-hosted: hardware: the host
+    if: ${{ github.event_name == 'schedule' && github.ref == 'refs/heads/trunk' }}
+    steps:
+      - run: true

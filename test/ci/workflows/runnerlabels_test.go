@@ -129,9 +129,18 @@ func TestRunnerLabelsManifest(t *testing.T) {
 		{"reject-release-push-ref-name.yml", "", "lint", releaseRunsOn},
 		{"reject-release-dispatch-branch.yml", "", "lint", releaseRunsOn},
 		{"reject-release-other-tag.yml", "", "lint", releaseRunsOn},
-		{"accept-release-push-main.yml", "", "lint", releaseRunsOn},
+		// GitHub compares strings case-insensitively and git refs are not:
+		// == 'refs/heads/main' also holds on a branch MAIN. A default branch
+		// (schedule) can have any name.
+		{"reject-release-push-main-case.yml", "", "lint", releaseRunsOn},
+		{"reject-release-dispatch-main-case.yml", "", "lint", releaseRunsOn},
+		{"reject-release-pr-head-ref-case.yml", "", "lint", releaseRunsOn},
+		{"reject-release-schedule-other-default.yml", "", "lint", releaseRunsOn},
 		{"accept-release-push-tag.yml", "", "lint", releaseRunsOn},
-		{"accept-release-dispatch-main.yml", "", "lint", releaseRunsOn},
+		// A runs-on expression is tried with the same literal-derived refs.
+		{"reject-hosted-ref-self-hosted.yml", "", "lint", "${{ github.ref == 'refs/heads/topic' && 'self-hosted' || 'ubuntu-latest' }}"},
+		{"reject-hosted-head-ref-case.yml", "", "lint", "${{ github.head_ref == 'Topic' && 'self-hosted' || 'ubuntu-latest' }}"},
+		{"accept-hosted-ref-routing.yml", "", "lint", "${{ (github.ref == 'refs/heads/topic' || github.head_ref == 'topic') && 'ubuntu-22.04' || 'ubuntu-latest' }}"},
 		{"accept-server-url-routing.yml", "", "lint", templateRoutingExpression},
 		// ci-template v1.49 part F.
 		{"accept-preflight.yml", "ci.yml", "preflight", preflightRunsOn},

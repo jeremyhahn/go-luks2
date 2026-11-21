@@ -924,26 +924,49 @@ jobs:
               "create": lambda r: r.startswith(("refs/heads/", "refs/tags/")),
               "release": lambda r: r.startswith("refs/tags/"),
               "merge_group": lambda r: r.startswith("refs/heads/"),
+              # The default branch's ref: a repository can name any branch so.
+              "schedule": lambda r: r.startswith("refs/heads/"),
+              "workflow_run": lambda r: r.startswith("refs/heads/"),
+              "issue_comment": lambda r: r.startswith("refs/heads/"),
+              "repository_dispatch": lambda r: r.startswith("refs/heads/"),
           }
 
 
-          def ctx_cands(ev, ref, lits):
-              # (ref, head_ref, base_ref) values for one CTX pair: its sample, then
-              # every value the condition's string literals can make these contexts
-              # equal, start, end or contain (the literal, with a prefix or suffix,
-              # under refs/heads/ or refs/tags/). ref, ref_name and ref_type follow
-              # from ref; no candidate is on the allow-list.
-              yield ref, "feature", "main"
+          def case_forms(s):
+              # GitHub compares strings case-insensitively, but git refs are not:
+              # a branch Main is not main, yet == 'refs/heads/main' holds on it.
+              return [s, s.lower(), s.upper(), s.swapcase(), s[:1].swapcase() + s[1:]]
+
+
+          def lit_values(lits):
+              # Names (branch, tag, head or base) and refs the string literals can
+              # make a context equal, start, end or contain: the literal, with a
+              # prefix or suffix, under refs/heads/ or refs/tags/, each in other case.
               names = []
               for s in lits:
                   names += [s, s + "x", "x" + s]
                   for pre in ("refs/heads/", "refs/tags/"):
-                      if s.startswith(pre):
+                      if s.lower().startswith(pre):
                           names.append(s[len(pre):])
-              names = [n for n in dict.fromkeys(names) if n]
-              refs = [r for s in lits if s.startswith("refs/") for r in (s, s + "x")]
+              names = [c for n in dict.fromkeys(names) if n for c in case_forms(n)]
+              names = list(dict.fromkeys(names))
+              refs = []
+              for s in lits:
+                  for r in (s, s + "x"):
+                      part = r.split("/", 2)
+                      if len(part) == 3 and part[0].lower() == "refs" and part[2]:
+                          refs += ["refs/" + part[1].lower() + "/" + c for c in case_forms(part[2])]
               refs += [pre + n for n in names for pre in ("refs/heads/", "refs/tags/")]
-              refs = [r for r in dict.fromkeys(refs) if len(r.split("/", 2)) == 3 and r.split("/", 2)[2]]
+              return names, list(dict.fromkeys(refs))
+
+
+          def ctx_cands(ev, ref, lits):
+              # (ref, head_ref, base_ref) values for one CTX pair: its sample, then
+              # every value lit_values makes of the condition's string literals.
+              # ref, ref_name and ref_type follow from ref; no candidate is on the
+              # allow-list.
+              yield ref, "feature", "main"
+              names, refs = lit_values(lits)
               heads, bases = ["feature"] + names, ["main"] + names
               if ev == "pull_request":
                   for r in [ref] + [r for r in refs if r.startswith("refs/pull/")]:
@@ -1262,7 +1285,30 @@ jobs:
           ]
 
 
-          def hosted_get(ev, ref, head, sel=None):
+          def hosted_cands(text):
+              # (event, ref, head repo, head_ref, base_ref) on github.com: each
+              # HOSTED_CTX sample and, when the text reads a ref context, every
+              # value lit_values makes of its string literals that the event carries.
+              lits = []
+              if re.search(r"(?i)\bgithub\.(event\.)?(ref|ref_name|ref_type|head_ref|base_ref)\b", text):
+                  lits = [s.replace("''", "'") for s in re.findall(r"'((?:[^']|'')*)'", text)]
+              names, refs = lit_values(lits) if lits else ([], [])
+              seen = set()
+              for ev, ref, head in HOSTED_CTX:
+                  cands = [(ref, "feature", "main")]
+                  if lits and ev in PR:
+                      cands += [(r, h, b) for r in [ref] + [r for r in refs if r.startswith("refs/pull/")]
+                                for h in ["feature"] + names for b in ["main"] + names]
+                  elif lits:
+                      kinds = ("refs/heads/",) if ev == "schedule" else ("refs/heads/", "refs/tags/")
+                      cands += [(r, "feature", "main") for r in refs if r.startswith(kinds)]
+                  for c in cands:
+                      if (ev, head) + c not in seen:
+                          seen.add((ev, head) + c)
+                          yield (ev, c[0], head) + c[1:]
+
+
+          def hosted_get(ev, ref, head, sel=None, hr="feature", br="main"):
               def get(path):
                   p = path.lower()
                   if sel and p in SEL_OUT:  # v1.48: the selection output, as JSON text
@@ -1277,7 +1323,7 @@ jobs:
                       return head if ev in PR else None
                   if p == "github.event.pull_request.draft":
                       return False if ev in PR else None
-                  return ctx_get(ev, ref, path)
+                  return ctx_get(ev, ref, path, hr, br)
               return get
 
 
@@ -1290,14 +1336,14 @@ jobs:
               return [str(value)]
 
 
-          def runs_on_labels(text, ev, ref, head, sel=None):
+          def runs_on_labels(text, ev, ref, head, sel=None, hr="feature", br="main"):
               t = text.strip()
               if t.startswith("group:") or t.startswith("labels:") or " labels:" in t:
                   m = re.search(r"labels:\s*(\[[^\]]*\]|\S+)", t)
                   t = m.group(1) if m else ""
               m = re.fullmatch(r"\$\{\{(.*)\}\}", unquote(t), re.S)
               if m:
-                  return labels(P(lex(m.group(1)), hosted_get(ev, ref, head, sel)).parse())
+                  return labels(P(lex(m.group(1)), hosted_get(ev, ref, head, sel, hr, br)).parse())
               if t.startswith("["):
                   return [unquote(x) for x in re.split(r"\s*,\s*", t.strip("[] ")) if x]
               if t.startswith("- "):
@@ -1309,9 +1355,9 @@ jobs:
               # The review-only labels a runs-on names, in its text or in what an
               # expression there yields on any github.com event.
               found = {m.lower() for m in REVIEW_TOKEN.findall(text)}
-              for ev, ref, head in HOSTED_CTX:
+              for ev, ref, head, hr, br in hosted_cands(text):
                   try:
-                      got = runs_on_labels(text, ev, ref, head)
+                      got = runs_on_labels(text, ev, ref, head, hr=hr, br=br)
                   except ValueError:
                       continue
                   found |= {g.lower() for g in got or [] if g.lower() in REVIEW}
@@ -1344,10 +1390,10 @@ jobs:
               # yields on a github.com event (an unknown one is (c)'s).
               if re.search(r"(?<![\w.-])['\"]?release['\"]?(?![\w-])", text):
                   return True
-              for ev, ref, head in HOSTED_CTX:
+              for ev, ref, head, hr, br in hosted_cands(text):
                   for sel in sels:
                       try:
-                          got = runs_on_labels(text, ev, ref, head, sel)
+                          got = runs_on_labels(text, ev, ref, head, sel, hr=hr, br=br)
                       except ValueError:
                           continue
                       if any(g.lower() == "release" for g in got or []):
@@ -1394,10 +1440,10 @@ jobs:
                               sels = ("default", "overflow") if path.replace("\\", "/").rsplit("/", 1)[-1] in SEL_FILES else (None,)
                               if sels[0] is not None and job == PRE_JOB and PRE_READ.search(ro):
                                   sels = ("unset", "set")  # v1.49: its own two states, no selection output
-                              for ev, ref, head in HOSTED_CTX:
+                              for ev, ref, head, hr, br in hosted_cands(ro):
                                   for sel in sels:
                                       try:
-                                          got = runs_on_labels(ro, ev, ref, head, sel)
+                                          got = runs_on_labels(ro, ev, ref, head, sel, hr=hr, br=br)
                                       except ValueError as e:
                                           off.append(f"{ev} ({ref}): cannot be read ({e})")
                                           continue

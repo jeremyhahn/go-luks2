@@ -22,9 +22,14 @@ reject|x.yml|reject-release-push-branch.yml|x.yml:lint: (b) names `release`|push
 reject|x.yml|reject-release-push-ref-name.yml|x.yml:lint: (b) names `release`|push (refs/heads/topic)
 reject|x.yml|reject-release-dispatch-branch.yml|x.yml:lint: (b) names `release`|workflow_dispatch (refs/heads/topic)
 reject|x.yml|reject-release-other-tag.yml|x.yml:lint: (b) names `release`|release (refs/tags/v2)
-accept|x.yml|accept-release-push-main.yml|OK:
+reject|x.yml|reject-release-push-main-case.yml|x.yml:lint: (b) names `release`|push (refs/heads/MAIN)
+reject|x.yml|reject-release-dispatch-main-case.yml|x.yml:lint: (b) names `release`|workflow_dispatch (refs/heads/MAIN)
+reject|x.yml|reject-release-pr-head-ref-case.yml|x.yml:lint: (a) names `release`|pull_request event
+reject|x.yml|reject-release-schedule-other-default.yml|x.yml:lint: (b) names `release`|schedule (refs/heads/trunk)
 accept|x.yml|accept-release-push-tag.yml|OK:
-accept|x.yml|accept-release-dispatch-main.yml|OK:
+reject|x.yml|reject-hosted-ref-self-hosted.yml|x.yml:lint: (c)|push (refs/heads/topic): self-hosted
+reject|x.yml|reject-hosted-head-ref-case.yml|x.yml:lint: (c)|pull_request (refs/pull/1/merge): self-hosted
+accept|x.yml|accept-hosted-ref-routing.yml|OK:
 accept|ci.yml|accept-preflight.yml|OK:
 reject|ci.yml|reject-preflight-form-other-job.yml|ci.yml:lint: (c)|an unknown label|!CI_PREFLIGHT_RUNS_ON
 reject|batch.yml|reject-preflight-outside-ci.yml|batch.yml:preflight: (c)
