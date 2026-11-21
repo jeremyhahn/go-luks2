@@ -1,0 +1,8 @@
+name: t
+on: [push]
+jobs:
+  lint:
+    runs-on: release  # self-hosted: hardware: the host
+    if: ${{ github.ref_type == 'tag' && (startsWith(github.ref_name, 'v') || github.ref_name == 'latest') && github.event_name=='push' }}
+    steps:
+      - run: true

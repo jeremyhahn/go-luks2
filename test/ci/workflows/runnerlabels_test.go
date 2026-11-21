@@ -120,8 +120,14 @@ func TestRunnerLabelsManifest(t *testing.T) {
 		{"reject-release-by-value.yml", "", "lint", "${{ format('{0}{1}', 'rel', 'ease') }}  # self-hosted: hardware: the host"},
 		{"reject-release-by-name.yml", "", "lint", "release  # self-hosted: hardware: the host"},
 		{"accept-literal.yml", "", "lint", "ubuntu-latest"},
-		// A release job's `if:` is tried with every ref, head_ref and base_ref its
-		// string literals can match, not one sample per context.
+		// A release job's `if:` passes only in the allow-listed form: its
+		// top-level && terms name a push and a tag ref; nothing is sampled.
+		{"reject-release-pr-head-format.yml", "", "lint", releaseRunsOn},
+		{"reject-release-push-ref-format.yml", "", "lint", releaseRunsOn},
+		{"reject-release-push-ref-name-format.yml", "", "lint", releaseRunsOn},
+		{"reject-release-top-level-or.yml", "", "lint", releaseRunsOn},
+		{"reject-release-top-level-not.yml", "", "lint", releaseRunsOn},
+		{"accept-release-tag-narrowed.yml", "", "lint", releaseRunsOn},
 		{"reject-release-pr-head-ref.yml", "", "lint", releaseRunsOn},
 		{"reject-release-pr-head-prefix.yml", "", "lint", releaseRunsOn},
 		{"reject-release-prt-base-ref.yml", "", "lint", releaseRunsOn},

@@ -18,15 +18,21 @@ reject|x.yml|reject-release-by-name.yml|x.yml:lint: (b) names `release`
 reject|x.yml|reject-release-pr-head-ref.yml|x.yml:lint: (a) names `release`|pull_request event
 reject|x.yml|reject-release-pr-head-prefix.yml|x.yml:lint: (a) names `release`|pull_request event
 reject|x.yml|reject-release-prt-base-ref.yml|x.yml:lint: (a) names `release`|pull_request_target event
-reject|x.yml|reject-release-push-branch.yml|x.yml:lint: (b) names `release`|push (refs/heads/topic)
-reject|x.yml|reject-release-push-ref-name.yml|x.yml:lint: (b) names `release`|push (refs/heads/topic)
-reject|x.yml|reject-release-dispatch-branch.yml|x.yml:lint: (b) names `release`|workflow_dispatch (refs/heads/topic)
-reject|x.yml|reject-release-other-tag.yml|x.yml:lint: (b) names `release`|release (refs/tags/v2)
-reject|x.yml|reject-release-push-main-case.yml|x.yml:lint: (b) names `release`|push (refs/heads/MAIN)
-reject|x.yml|reject-release-dispatch-main-case.yml|x.yml:lint: (b) names `release`|workflow_dispatch (refs/heads/MAIN)
+reject|x.yml|reject-release-push-branch.yml|x.yml:lint: (b) names `release`|does not restrict it to a tag push
+reject|x.yml|reject-release-push-ref-name.yml|x.yml:lint: (b) names `release`|does not restrict it to a tag push
+reject|x.yml|reject-release-dispatch-branch.yml|x.yml:lint: (b) names `release`|does not restrict it to a tag push
+reject|x.yml|reject-release-other-tag.yml|x.yml:lint: (b) names `release`|does not restrict it to a tag push
+reject|x.yml|reject-release-push-main-case.yml|x.yml:lint: (b) names `release`|does not restrict it to a tag push
+reject|x.yml|reject-release-dispatch-main-case.yml|x.yml:lint: (b) names `release`|does not restrict it to a tag push
 reject|x.yml|reject-release-pr-head-ref-case.yml|x.yml:lint: (a) names `release`|pull_request event
-reject|x.yml|reject-release-schedule-other-default.yml|x.yml:lint: (b) names `release`|schedule (refs/heads/trunk)
+reject|x.yml|reject-release-schedule-other-default.yml|x.yml:lint: (b) names `release`|does not restrict it to a tag push
+reject|x.yml|reject-release-pr-head-format.yml|x.yml:lint: (a) names `release`|pull_request event
+reject|x.yml|reject-release-push-ref-format.yml|x.yml:lint: (b) names `release`
+reject|x.yml|reject-release-push-ref-name-format.yml|x.yml:lint: (b) names `release`
+reject|x.yml|reject-release-top-level-or.yml|x.yml:lint: (b) names `release`|top-level ||
+reject|x.yml|reject-release-top-level-not.yml|x.yml:lint: (b) names `release`|top-level !
 accept|x.yml|accept-release-push-tag.yml|OK:
+accept|x.yml|accept-release-tag-narrowed.yml|OK:
 reject|x.yml|reject-hosted-ref-self-hosted.yml|x.yml:lint: (c)|push (refs/heads/topic): self-hosted
 reject|x.yml|reject-hosted-head-ref-case.yml|x.yml:lint: (c)|pull_request (refs/pull/1/merge): self-hosted
 accept|x.yml|accept-hosted-ref-routing.yml|OK:

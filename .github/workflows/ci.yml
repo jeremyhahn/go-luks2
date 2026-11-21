@@ -847,15 +847,17 @@ jobs:
       # is case-insensitive, so a branch Main would match main. This step
       # reads every .github/workflows/*.yml and *.yaml of the repository as
       # text, takes each job whose runs-on names `release` (plain, in a list,
-      # or as a quoted string inside an expression), and evaluates its `if:`
-      # under every other event: a pull_request or pull_request_target event
-      # in a workflow that has that trigger (a), and the push of another
-      # branch, a dispatch off main or on a tag, schedule, workflow_run,
-      # merge_group, release, create, issue_comment and repository_dispatch
-      # (b). A value it cannot know (vars, needs, secrets, the server) may
-      # hold anything, so the `if:` must be false whatever it holds; an `if:`
-      # it cannot read fails. It prints each file:job and the reason. A lint,
-      # not the gate: the runner side refuses such a job as well.
+      # or as a quoted string inside an expression), and checks its `if:`
+      # against an allowlist that fails closed: split at its top-level `&&`
+      # (not inside brackets or strings), the terms must include
+      # `github.event_name == 'push'` and one of
+      # `startsWith(github.ref, 'refs/tags/')` or `github.ref_type == 'tag'`,
+      # token for token (whitespace and quoting aside). Other terms are
+      # allowed: under `&&` they only narrow. A top-level `||` or `!`, an
+      # `if:` it cannot read, or no `if:` is refused: (a) in a workflow with
+      # a pull_request or pull_request_target trigger, and (b) always. It
+      # prints each file:job and the reason. A lint, not the gate: the runner
+      # side refuses such a job as well.
       # v1.43 (ruling 833): on github.com every other job runs on a standard
       # GitHub-hosted image on every event (c), or its runs-on line says why
       # it cannot, `# self-hosted: <reason>`; a larger runner is refused (d).
@@ -884,22 +886,15 @@ jobs:
           # Reads .github/workflows/*.yml|yaml as text (no YAML library): the
           # top-level `on:` keys, and each job's `runs-on` and `if`. A job names
           # `release` when that label appears in its runs-on, plain, in a list or as a
-          # quoted string in an expression. Its `if` is evaluated under every event
-          # outside the release allow-list, with every value this step cannot know
-          # (vars, needs, secrets, server_url, ...) unknown; the job passes only when
-          # the `if` is false in each of them whatever the unknowns hold.
+          # quoted string in an expression. Its `if` passes only in the allow-listed
+          # form (ALLOWED, release_terms): no value is sampled or evaluated, so a
+          # condition built any other way (format(), case, ||) fails closed.
           U = object()  # unknown value
           OPEN = "$" "{{"  # split, so the runner does not read it as an expression
-          ALLOWED = "a push of refs/tags/* (branch and dispatch conditions are refused: Actions `==` is case-insensitive, so a branch differing only in case would match)"
+          ALLOWED = ("a tag push: an `if:` whose top-level `&&` terms include `github.event_name == 'push'` and one of "
+                     "`startsWith(github.ref, 'refs/tags/')` or `github.ref_type == 'tag'`, with no top-level `||` or `!` "
+                     "(other terms only narrow it; branch and dispatch conditions are refused)")
           PR = {"pull_request", "pull_request_target"}
-          CTX = [  # (event, ref) pairs a release job must never run on
-              ("pull_request", "refs/pull/1/merge"), ("pull_request_target", "refs/heads/main"),
-              ("push", "refs/heads/feature"), ("workflow_dispatch", "refs/heads/feature"),
-              ("workflow_dispatch", "refs/tags/v1.0.0"), ("schedule", "refs/heads/main"),
-              ("workflow_run", "refs/heads/main"), ("merge_group", "refs/heads/gh-readonly-queue/main/pr-1"),
-              ("release", "refs/tags/v1.0.0"), ("create", "refs/tags/v1.0.0"),
-              ("issue_comment", "refs/heads/main"), ("repository_dispatch", "refs/heads/main"),
-          ]
 
 
           def ctx_get(ev, ref, path, head="feature", base="main"):
@@ -915,22 +910,6 @@ jobs:
               if ev not in PR and (p == "github.event.pull_request" or p.startswith("github.event.pull_request.")):
                   return None
               return U
-
-
-          # Where the event alone is off the allow-list, which refs it may carry.
-          FREE_REF = {
-              "push": lambda r: r.startswith("refs/heads/") and r != "refs/heads/main",
-              "workflow_dispatch": lambda r: (r.startswith("refs/heads/") and r != "refs/heads/main")
-                                             or r.startswith("refs/tags/"),
-              "create": lambda r: r.startswith(("refs/heads/", "refs/tags/")),
-              "release": lambda r: r.startswith("refs/tags/"),
-              "merge_group": lambda r: r.startswith("refs/heads/"),
-              # The default branch's ref: a repository can name any branch so.
-              "schedule": lambda r: r.startswith("refs/heads/"),
-              "workflow_run": lambda r: r.startswith("refs/heads/"),
-              "issue_comment": lambda r: r.startswith("refs/heads/"),
-              "repository_dispatch": lambda r: r.startswith("refs/heads/"),
-          }
 
 
           def case_forms(s):
@@ -961,27 +940,29 @@ jobs:
               return names, list(dict.fromkeys(refs))
 
 
-          def ctx_cands(ev, ref, lits):
-              # (ref, head_ref, base_ref) values for one CTX pair: its sample, then
-              # every value lit_values makes of the condition's string literals.
-              # ref, ref_name and ref_type follow from ref; no candidate is on the
-              # allow-list.
-              yield ref, "feature", "main"
-              names, refs = lit_values(lits)
-              heads, bases = ["feature"] + names, ["main"] + names
-              if ev == "pull_request":
-                  for r in [ref] + [r for r in refs if r.startswith("refs/pull/")]:
-                      for h in heads:
-                          for b in bases:
-                              yield r, h, b
-              elif ev == "pull_request_target":
-                  for b in bases:
-                      for h in heads:
-                          yield "refs/heads/" + b, h, b
-              elif ev in FREE_REF:
-                  for r in refs:
-                      if FREE_REF[ev](r):
-                          yield r, "feature", "main"
+          def release_terms(toks):
+              # The condition's top-level `&&` terms, each a token list (lex drops
+              # whitespace and unquotes strings). A top-level `||` or `!` can widen
+              # it, so it is refused, as are unbalanced brackets and empty terms.
+              terms, cur, depth = [], [], 0
+              for k, v in toks:
+                  if k == "op" and v in ("(", "["):
+                      depth += 1
+                  elif k == "op" and v in (")", "]"):
+                      depth -= 1
+                      if depth < 0:
+                          raise ValueError(f"an unbalanced {v!r}")
+                  elif k == "op" and depth == 0 and v in ("||", "!"):
+                      raise ValueError(f"a top-level {v}, which can widen it")
+                  elif k == "op" and depth == 0 and v == "&&":
+                      terms.append(cur)
+                      cur = []
+                      continue
+                  cur.append((k, v))
+              terms.append(cur)
+              if depth or not all(terms):
+                  raise ValueError("unbalanced brackets or an empty `&&` term")
+              return terms
 
 
           TOK = re.compile(r"\s*(?:(?P<s>'(?:[^']|'')*')|(?P<n>-?\d+(?:\.\d+)?)|(?P<op>&&|\|\||==|!=|<=|>=|[!<>()\[\],.])|(?P<id>[A-Za-z_][\w-]*|\*))")
@@ -1005,6 +986,12 @@ jobs:
                   else:
                       out.append(("id", m.group("id")))
               return out
+
+
+          # The allow-listed release terms, compared token by token (whitespace and
+          # quoting aside): the event, and a tag ref in one of two forms.
+          ALLOW_EVENT = lex("github.event_name == 'push'")
+          ALLOW_TAG = [lex("startsWith(github.ref, 'refs/tags/')"), lex("github.ref_type == 'tag'")]
 
 
           def truthy(v):
@@ -1475,24 +1462,21 @@ jobs:
                           try:
                               expr = condition(cond)
                               toks = lex(expr)
-                              runs = []
-                              lits = [v for k, v in toks if k == "s"]
-                              for ev, ref in CTX:
-                                  for cref, head, base in ctx_cands(ev, ref, lits):
-                                      r = truthy(P(toks, lambda p: ctx_get(ev, cref, p, head, base)).parse())
-                                      if r is not False:
-                                          runs.append((ev, cref))
-                                          break
+                              P(toks, lambda p: U).parse()  # it must be a readable expression
+                              terms = release_terms(toks)
                           except ValueError as e:
-                              bad.append(f"{where}: (b) names `release` and its `if:` cannot be read ({e})")
+                              if on & PR:
+                                  bad.append(f"{where}: (a) names `release` in a workflow with a "
+                                             + " and ".join(sorted(on & PR)) + " trigger and its `if:` cannot be read, so a "
+                                             + " or ".join(sorted(on & PR)) + " event may run it")
+                              bad.append(f"{where}: (b) names `release` and its `if:` cannot be read ({e}); it must be {ALLOWED}")
                               continue
-                          pr = [c for c in runs if c[0] in PR and c[0] in on]
-                          if pr:
-                              bad.append(f"{where}: (a) names `release` and a {pr[0][0]} event can run it")
-                          rest = [c for c in runs if c not in pr]
-                          if rest:
-                              bad.append(f"{where}: (b) names `release` and its `if:` does not restrict it to {ALLOWED}; it can run on "
-                                         + ", ".join(dict.fromkeys(f"{ev} ({ref})" for ev, ref in rest)))
+                          if ALLOW_EVENT in terms and any(t in terms for t in ALLOW_TAG):
+                              continue
+                          if on & PR:
+                              bad.append(f"{where}: (a) names `release` and its `if:` is not in the allow-listed form, so a "
+                                         + " or ".join(sorted(on & PR)) + " event may run it")
+                          bad.append(f"{where}: (b) names `release` and its `if:` does not restrict it to {ALLOWED}")
               return bad
 
 
