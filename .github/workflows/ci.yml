@@ -35,6 +35,12 @@
 # a ci.yml-only PR that keeps the CUSTOMIZE blocks, together with v1.52's
 # runner selection (internal pull requests run on our runners), separately
 # from code-review.yml.
+# v1.53 also: (0) `Runner labels (ruling 633)` lets code-review.yml's
+# API-only jobs take exactly [self-hosted, linux, x64, bigdisk] for a
+# same-repository head under a PR event, so the Review scope job no longer
+# waits behind the hosted queue (code-review.yml v5.12.12); a fork's head
+# still takes a standard image (testdata/runnerlabels, review-scope cases).
+# The check lives in .github/scripts/runner_labels.py.
 # v1.52 (2026-11-21, Tenant Agent order, defect fix): a fork's pull request
 # under pull_request reached a self-hosted runner. preflight's runs-on had
 # no fork check, so on github.com it took the Dells' bigdisk pool for a

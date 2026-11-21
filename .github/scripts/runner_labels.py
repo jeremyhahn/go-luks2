@@ -558,6 +558,11 @@ RO_ALLOW = {
     "github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_PREFLIGHT_RUNS_ON || "
     "'[\"self-hosted\",\"linux\",\"x64\",\"bigdisk\"]') || 'ubuntu-latest'": "ci.yml: preflight",
     "github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk'": "code-review.yml: scope, gate",
+    # code-review.yml v5.12.12 (ci-template v1.53): the Review scope job
+    # takes the Dells' list for a same-repository head, ubuntu-latest for a
+    # fork's head and off a pull request event.
+    "github.server_url == 'https://github.com' && (github.event.pull_request.head.repo.full_name == github.repository && "
+    "fromJSON('[\"self-hosted\",\"linux\",\"x64\",\"bigdisk\"]') || 'ubuntu-latest') || 'bigdisk'": "code-review.yml: scope (same-repository head)",
 }
 RO_EXPR = re.compile(r"\$\{\{(.*?)\}\}", re.S)
 
@@ -1135,6 +1140,14 @@ def check(path):
                                 continue
                             if sel == "unset" and got == OVERFLOW[0] and not fork:
                                 continue
+                            # ci-template v1.53: code-review.yml's API-only guard
+                            # jobs may take exactly [self-hosted, linux, x64,
+                            # bigdisk] for a same-repository head under a PR
+                            # event; a fork's head and other files still need a
+                            # standard image.
+                            if (sel is None and got == OVERFLOW[0] and ev in PR and head == "o/r"
+                                    and path.replace("\\", "/").rsplit("/", 1)[-1] in REVIEW_FILES):
+                                continue  # a same-repository head's review guard
                             if got is None or len(got) != 1 or not STANDARD.fullmatch(got[0]):
                                 what = "an unknown label" if got is None else ", ".join(got)
                                 note = ", runner selection overflow" if sel == "overflow" else ""

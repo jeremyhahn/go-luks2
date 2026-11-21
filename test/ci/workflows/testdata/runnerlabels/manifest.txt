@@ -131,3 +131,7 @@ reject|x.yml|reject-release-label-padded-list.yml|x.yml:a: (c) its runs-on has a
 reject|x.yml|reject-release-label-padded-bare.yml|x.yml:a: (c) its runs-on has a label that is empty, null or padded with whitespace
 reject|x.yml|reject-release-label-null-item.yml|x.yml:a: (c) its runs-on has a label that is empty, null or padded with whitespace
 reject|x.yml|reject-release-labels-block-list-padded.yml|x.yml:a: (c) its runs-on has a label that is empty, null or padded with whitespace
+accept|code-review.yml|accept-review-scope-same-repo.yml|OK:
+reject|code-review.yml|reject-review-scope-any-head.yml|code-review.yml:scope: (c)|pull_request_target (refs/heads/main, fork): self-hosted, linux, x64, bigdisk|!pull_request_target (refs/heads/main): self-hosted
+reject|signatures.yml|reject-review-scope-other-file.yml|signatures.yml:scope: (c)|pull_request_target (refs/heads/main): self-hosted, linux, x64, bigdisk
+reject|code-review.yml|reject-review-scope-docker.yml|code-review.yml:scope: (c)|pull_request_target (refs/heads/main): self-hosted, linux, x64, bigdisk-docker
