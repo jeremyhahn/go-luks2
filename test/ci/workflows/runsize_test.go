@@ -69,7 +69,9 @@ func TestRunValuesMeasureTheDedentedScript(t *testing.T) {
 func TestNoRunBlockOverTheLimit(t *testing.T) {
 	seen := 0
 	exempted := map[string]bool{}
+	present := map[string]bool{}
 	for _, path := range workflowFiles(t) {
+		present[filepath.Base(path)] = true
 		text := readFile(t, rel(t, path))
 		lines := strings.Split(text, "\n")
 		for line, v := range runValues(text) {
@@ -90,6 +92,12 @@ func TestNoRunBlockOverTheLimit(t *testing.T) {
 		t.Fatal("no run: value found in any workflow; the check checked nothing")
 	}
 	for key := range runSizeExempt {
+		// The published tree leaves out export-ignore workflows (code-review.yml);
+		// an exemption for a workflow that is not there is not stale.
+		file, _, _ := strings.Cut(key, ": ")
+		if !present[file] {
+			continue
+		}
 		if !exempted[key] {
 			t.Errorf("%q is exempt from the run-size limit but no longer exceeds it (or was renamed); drop the exemption", key)
 		}
