@@ -1,6 +1,18 @@
 name: Nightly
 
-# nightly-template v1.0 — the known-red and long-horizon jobs, off the push path.
+# nightly-template v1.12 — the known-red and long-horizon jobs, off the push path.
+#
+# CUSTOMIZE (go-luks2, the v1.12 adoption for #494): of the template's three
+# jobs only trivy runs here, and it keeps go-luks2's shape. (1) No `schedule`
+# (#341 below; TestNoScheduleTrigger). (2) The template's FIPS job sets up Go
+# on the runner; go-luks2's FIPS gate is ci.yml's `fips` job in the toolchain
+# image (TestFIPSGateIsStrictAndInCI). (3) The lint-sweeps job is not taken:
+# the Makefile has no lint-sweeps target. (4) trivy installs through `make
+# trivy-install` (the pin in tool-pins.env, SHA-256 verified, #247), not
+# trivy-action or scripts/install-trivy.sh: the public release ships no shell
+# scripts (#211). The root .trivy-version names the same release and
+# .trivyignore sits beside it. v1.12's timeout-minutes on the trivy job was
+# already here.
 #
 # Owner ruling 2026-08-20 (fail-fast pipeline for iteration speed; issue #14):
 # jobs that are known-red with tracked issues, or that verify a slow-moving

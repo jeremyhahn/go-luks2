@@ -221,7 +221,7 @@ type runExemption struct {
 // step past its ceiling fails too (a local addition belongs in a file).
 var runSizeExempt = map[string]runExemption{
 	"code-review.yml: Check the container, the request, the head and any standing verdict": {
-		"code-review-template v5.12.6's step (54,725 characters) plus 2,000", 56725},
+		"code-review-template v5.12.11's step (46,999 characters) plus 2,000", 48999},
 }
 
 // stepNameAt returns the name of the step whose key is on line i (0-based):
