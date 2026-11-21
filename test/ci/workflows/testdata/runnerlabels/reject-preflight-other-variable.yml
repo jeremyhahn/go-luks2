@@ -1,0 +1,7 @@
+name: t
+on: [push, pull_request]
+jobs:
+  preflight:
+    runs-on: ${{ github.server_url == 'https://github.com' && fromJSON(vars.CI_PREFLIGHT_RUNS_ON_X || '["self-hosted","linux","x64","bigdisk"]') || 'ubuntu-latest' }}
+    steps:
+      - run: true

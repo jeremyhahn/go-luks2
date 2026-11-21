@@ -1,0 +1,25 @@
+# Fixtures for ci.yml's `Runner labels (ruling 633)` step, run by the
+# preflight step `Runner labels self-test` before the real check, and read by
+# runnerlabels_test.go. One case per line, fields split on `|`:
+#   accept|reject | workflow file name | fixture | text the output holds...
+# accept: the step exits 0; reject: it exits 1. Each fixture is copied alone
+# to .github/workflows/<workflow file name> of an empty directory. A text
+# starting with `!` must not appear in the output.
+accept|x.yml|accept-literal.yml|OK:
+accept|x.yml|accept-literal-expression.yml|OK:
+accept|x.yml|accept-server-url-routing.yml|OK:
+accept|x.yml|accept-known-or-operands.yml|OK:
+reject|x.yml|reject-vars-fallback.yml|x.yml:lint: (c)|an unknown label
+reject|x.yml|reject-needs-fallback.yml|x.yml:lint: (c)|an unknown label
+reject|x.yml|reject-inputs-fallback.yml|x.yml:lint: (c)|an unknown label
+reject|x.yml|reject-vars-fallback-behind-known-arm.yml|x.yml:lint: (c)|an unknown label
+reject|x.yml|reject-release-by-value.yml|x.yml:lint: (b) names `release`
+reject|x.yml|reject-release-by-name.yml|x.yml:lint: (b) names `release`
+accept|ci.yml|accept-preflight.yml|OK:
+reject|ci.yml|reject-preflight-form-other-job.yml|ci.yml:lint: (c)|an unknown label|!CI_PREFLIGHT_RUNS_ON
+reject|batch.yml|reject-preflight-outside-ci.yml|batch.yml:preflight: (c)
+reject|ci.yml|reject-preflight-other-default.yml|ci.yml:preflight: (c)|bigdisk-docker|CI_PREFLIGHT_RUNS_ON unset
+reject|ci.yml|reject-preflight-self-hosted-on-push.yml|ci.yml:preflight: (c)|CI_PREFLIGHT_RUNS_ON set to "ubuntu-latest"|push (refs/heads/main
+reject|ci.yml|reject-preflight-without-fromjson.yml|ci.yml:preflight: (c)|CI_PREFLIGHT_RUNS_ON set to "ubuntu-latest"
+reject|ci.yml|reject-preflight-other-variable.yml|ci.yml:preflight: (c)
+accept|ci.yml|accept-preflight-off-github-label.yml|OK:

@@ -1,0 +1,7 @@
+name: t
+on: [push, pull_request]
+jobs:
+  lint:
+    runs-on: ${{ format('{0}{1}', 'rel', 'ease') }}  # self-hosted: hardware: the host
+    steps:
+      - run: true

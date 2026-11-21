@@ -1,0 +1,7 @@
+name: t
+on: [push, pull_request]
+jobs:
+  preflight:
+    runs-on: ${{ github.server_url == 'https://github.com' && fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk"]') || 'bigdisk' }}
+    steps:
+      - run: true

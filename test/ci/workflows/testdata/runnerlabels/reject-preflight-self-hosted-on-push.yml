@@ -1,0 +1,7 @@
+name: t
+on: [push, pull_request]
+jobs:
+  preflight:
+    runs-on: ${{ github.event_name == 'push' && fromJSON('["self-hosted","linux","x64","bigdisk"]') || fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '"ubuntu-latest"') }}
+    steps:
+      - run: true

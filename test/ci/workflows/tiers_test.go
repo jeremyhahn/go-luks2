@@ -161,6 +161,9 @@ func TestEveryCIJobRunsOnTheHostedRunner(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
 	for _, id := range jobIDs(t, ci) {
 		got := jobRunsOn.FindAllStringSubmatch(job(t, ci, id), -1)
+		if id == "preflight" && len(got) == 1 && isPreflightTemplateRunsOn(t, ".github/workflows/ci.yml", ci, got[0][1]) {
+			continue // ci-template v1.49: hosted off github.com and by CI_PREFLIGHT_RUNS_ON
+		}
 		if len(got) != 1 || got[0][1] != hostedRunner {
 			t.Errorf("job %s runs on %v, want %s (ruling 999)", id, got, hostedRunner)
 		}
@@ -186,7 +189,11 @@ func TestEveryCIJobRunsOnTheHostedRunner(t *testing.T) {
 // label, and .github/actionlint.yaml no longer accepts one.
 func TestNoRetiredRunnerLabel(t *testing.T) {
 	for _, f := range workflowFiles(t) {
-		for _, m := range jobRunsOn.FindAllStringSubmatch(readFile(t, rel(t, f)), -1) {
+		text := readFile(t, rel(t, f))
+		for _, m := range jobRunsOn.FindAllStringSubmatch(text, -1) {
+			if isPreflightTemplateRunsOn(t, rel(t, f), text, m[1]) {
+				continue
+			}
 			if l, ok := retiredRunsOnLabel(m[1]); ok {
 				t.Errorf("%s runs a job on the retired label %s: %s", rel(t, f), l, m[1])
 			}
@@ -198,6 +205,19 @@ func TestNoRetiredRunnerLabel(t *testing.T) {
 			t.Errorf(".github/actionlint.yaml still lists the retired label %s", l)
 		}
 	}
+}
+
+// isPreflightTemplateRunsOn reports whether a runs-on value is ci-template
+// v1.49's preflight form on ci.yml's preflight job, held once in the file:
+// the one place bigdisk may still be named (the github.com default, which
+// CI_PREFLIGHT_RUNS_ON overrides).
+func isPreflightTemplateRunsOn(t *testing.T, path, workflow, value string) bool {
+	t.Helper()
+	if path != ".github/workflows/ci.yml" || value != preflightRunsOn+"   # v1.49" {
+		return false
+	}
+	line := "    runs-on: " + value + "\n"
+	return strings.Count(workflow, line) == 1 && strings.Contains(job(t, workflow, "preflight"), line)
 }
 
 // serverURLArms matches a runs-on value that picks its label by forge:

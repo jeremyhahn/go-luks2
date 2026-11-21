@@ -1,11 +1,21 @@
-# ci-template: v1.48 (customized)
-# go-luks2 keeps these deviations from v1.48, each marked
+# ci-template: v1.49 (customized)
+# go-luks2 keeps these deviations from v1.49, each marked
 # `# CUSTOMIZE (go-luks2):` where it lives: the merge-check, test-race and
 # fips jobs and their CI Gate lines; a literal `runs-on: ubuntu-latest` on
-# every job (owner ruling 999; bigdisk is retired here, so v1.48's preflight
-# runner overflow is not adopted); no schedule trigger (#341,
-# TestNoScheduleTrigger); no shell scripts (#211), so each template script is
-# a Makefile target.
+# every job but preflight (owner ruling 999; v1.48's runner overflow is not
+# adopted, and bigdisk is named only in preflight's v1.49 runs-on); no
+# schedule trigger (#341, TestNoScheduleTrigger); no shell scripts (#211), so
+# each template script is a Makefile target; the `Runner labels (ruling 633)`
+# step is preceded by a self-test that runs the same Python on the fixtures
+# in test/ci/workflows/testdata/runnerlabels/.
+# v1.49 (2026-11-20): preflight runs on github.com on
+# `fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk"]')`,
+# the repository variable (runs-on JSON, `"ubuntu-latest"` with its quotes)
+# being the fallback switch while that pool is down; off github.com it keeps
+# `ubuntu-latest`. The schedule guard's AGENT_TOKEN is passed off github.com
+# only, where it is read. `Runner labels (ruling 633)` checks preflight's
+# runs-on, and only that job's, with the variable unset (exactly
+# [self-hosted, linux, x64, bigdisk] passes too) and set to the fallback.
 # v1.48 (2026-11-20, Tenant Agent ruling 1024 item 1, queue 250 (a), owner
 # decision: the Dells' self-hosted runners supplement the 40 GitHub-hosted
 # runners; hosted stays the default, and when the hosted pool is full a job
@@ -625,7 +635,12 @@ jobs:
   # source check with grep on the runner's shell, on the PR tier.
   preflight:
     name: Preflight [changed files, schedule guard, architecture gates]
-    runs-on: ubuntu-latest
+    # v1.49: on github.com the bigdisk pool, so no run waits in the hosted
+    # queue for its first ten seconds of work; the repository variable
+    # CI_PREFLIGHT_RUNS_ON, runs-on JSON, overrides it (`"ubuntu-latest"`,
+    # quotes included, while that pool is down). Off github.com the forge
+    # label, as before.
+    runs-on: ${{ github.server_url == 'https://github.com' && fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk"]') || 'ubuntu-latest' }}   # v1.49
     # v1.26: a draft PR runs no CI; every job that needs this one skips with it.
     if: ${{ !github.event.pull_request.draft }}
     timeout-minutes: 10       # v1.34: the three jobs had 5 each
@@ -653,7 +668,10 @@ jobs:
           REPO_API: ${{ github.server_url }}/api/v1/repos/${{ github.repository }}
           JOB_TOKEN: ${{ github.token }}
           # v1.30: a push to main reads the tree proof with it as well.
-          BOT: ${{ (github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && secrets.AGENT_TOKEN || '' }}
+          # v1.49: off github.com only. On github.com the guard never reads it
+          # (no schedule check, no tree proof there), so the secret no longer
+          # reaches the step on the self-hosted runner.
+          BOT: ${{ github.server_url != 'https://github.com' && (github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && secrets.AGENT_TOKEN || '' }}
         run: |
           set -uo pipefail
           # runs <token>: sets N to the number of this workflow's push runs
@@ -763,6 +781,66 @@ jobs:
           fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
           persist-credentials: false
 
+      # CUSTOMIZE (go-luks2): the next step's own Python, cut from this file
+      # at its `python3 -I - <<'PY'` heredoc (one copy, no second script),
+      # runs first on every fixture workflow that
+      # test/ci/workflows/testdata/runnerlabels/manifest.txt lists, each alone
+      # in an empty directory; an exit or output that differs from the
+      # manifest's fails the job. The toolchain image has no python3, so the
+      # step's tests run here, on preflight's runner, and the Go tests check
+      # the manifest and this step.
+      - name: Runner labels self-test
+        run: |
+          set -euo pipefail
+          dir=test/ci/workflows/testdata/runnerlabels
+          py="$RUNNER_TEMP/runner-labels.py"
+          python3 -I - .github/workflows/ci.yml "$py" <<'CUT'
+          import sys
+          lines = open(sys.argv[1], encoding="utf-8").read().split("\n")
+          start = lines.index("      - name: Runner labels (ruling 633)")
+          opening = next(i for i in range(start, len(lines)) if lines[i].strip() == "python3 -I - <<'PY'")
+          indent = len(lines[opening]) - len(lines[opening].lstrip(" "))
+          body = []
+          for line in lines[opening + 1:]:
+              if line.strip() == "PY":
+                  break
+              if line.strip() and not line.startswith(" " * indent):
+                  sys.exit(f"heredoc line indented less than its opening: {line!r}")
+              body.append(line[indent:])
+          else:
+              sys.exit("the heredoc has no closing PY line")
+          open(sys.argv[2], "w", encoding="utf-8").write("\n".join(body) + "\n")
+          CUT
+          n=0 fail=0
+          while IFS='|' read -r -a f; do
+            case ${f[0]:-} in ''|'#'*) continue ;; accept) want=0 ;; reject) want=1 ;;
+              *) echo "::error::manifest: ${f[*]}"; fail=1; continue ;; esac
+            n=$((n + 1))
+            t=$(mktemp -d "$RUNNER_TEMP/runner-labels.XXXXXX")
+            mkdir -p "$t/.github/workflows"
+            cp "$dir/${f[2]}" "$t/.github/workflows/${f[1]}"
+            rc=0
+            out=$(cd "$t" && python3 -I "$py" 2>&1) || rc=$?
+            bad=""
+            [ "$rc" -eq "$want" ] || bad="exit $rc, want $want"
+            for text in "${f[@]:3}"; do
+              case $text in
+                '!'*) [[ "$out" != *"${text#!}"* ]] || bad="$bad; output has \"${text#!}\"" ;;
+                *) [[ "$out" == *"$text"* ]] || bad="$bad; output lacks \"$text\"" ;;
+              esac
+            done
+            if [ -n "$bad" ]; then
+              echo "::error::${f[2]} as ${f[1]} (${f[0]}): ${bad#; }"
+              printf '%s\n' "$out"
+              fail=1
+            else
+              echo "ok: ${f[2]} as ${f[1]} (${f[0]})"
+            fi
+          done < "$dir/manifest.txt"
+          [ "$n" -gt 0 ] || { echo "::error::$dir/manifest.txt lists no case"; exit 1; }
+          [ "$fail" -eq 0 ] || exit 1
+          echo "OK: $n runner-label case(s) give the manifest's result"
+
       # v1.38 (owner ruling 633, decision 219(d)): a job that names the
       # `release` label runs only on a push to refs/heads/main or a tag, or a
       # workflow_dispatch on main, and never for a pull request. This step
@@ -792,6 +870,10 @@ jobs:
       # output at its default ("ubuntu-latest", which must give a standard
       # image) and at its overflow, where exactly
       # [self-hosted, linux, x64, bigdisk] or [..., bigdisk-docker] passes too.
+      # v1.49: the preflight job's own runs-on, which reads
+      # vars.CI_PREFLIGHT_RUNS_ON, is checked with the variable unset, where
+      # exactly [self-hosted, linux, x64, bigdisk] passes too, and set to
+      # `"ubuntu-latest"`, where it must give a standard image.
       # Its tests: testdata/runner-labels-tests.py.
       - name: Runner labels (ruling 633)
         run: |
@@ -1120,6 +1202,15 @@ jobs:
           SEL_OUT = {"needs.preflight.outputs.runner": "bigdisk",
                      "needs.preflight.outputs.runner_docker": "bigdisk-docker"}
           OVERFLOW = [["self-hosted", "linux", "x64", v] for v in SEL_OUT.values()]
+          # v1.49: ci.yml's preflight job alone may read the
+          # repository variable CI_PREFLIGHT_RUNS_ON. Its runs-on is checked in
+          # two states of its own, in place of the selection's: unset, where
+          # exactly [self-hosted, linux, x64, bigdisk] passes too, and set to the
+          # fallback `"ubuntu-latest"`, where it must give a standard image on
+          # every event. Another job that reads the variable reads an unknown.
+          PRE_JOB = "preflight"
+          PRE_VAR = "vars.ci_preflight_runs_on"
+          PRE_READ = re.compile(r"(?<![\w.])vars\.CI_PREFLIGHT_RUNS_ON(?![\w-])", re.I)
           HOSTED_CTX = [  # (event, ref, head repo) on github.com; o/r is this repository
               ("push", "refs/heads/main", None), ("push", "refs/heads/feature", None),
               ("pull_request", "refs/pull/1/merge", "o/r"), ("pull_request", "refs/pull/1/merge", "fork/r"),
@@ -1132,6 +1223,8 @@ jobs:
                   p = path.lower()
                   if sel and p in SEL_OUT:  # v1.48: the selection output, as JSON text
                       return json.dumps("ubuntu-latest" if sel == "default" else ["self-hosted", "linux", "x64", SEL_OUT[p]])
+                  if sel in ("unset", "set") and p == PRE_VAR:  # v1.49: unset, or the fallback switch
+                      return None if sel == "unset" else json.dumps("ubuntu-latest")
                   if p == "github.server_url":
                       return GH
                   if p == "github.repository":
@@ -1255,6 +1348,8 @@ jobs:
                                   continue
                               off = []
                               sels = ("default", "overflow") if path.replace("\\", "/").rsplit("/", 1)[-1] in SEL_FILES else (None,)
+                              if sels[0] is not None and job == PRE_JOB and PRE_READ.search(ro):
+                                  sels = ("unset", "set")  # v1.49: its own two states, no selection output
                               for ev, ref, head in HOSTED_CTX:
                                   for sel in sels:
                                       try:
@@ -1264,9 +1359,13 @@ jobs:
                                           continue
                                       if got is not None and sel == "overflow" and got in OVERFLOW:
                                           continue
+                                      if sel == "unset" and got == OVERFLOW[0]:
+                                          continue
                                       if got is None or len(got) != 1 or not STANDARD.fullmatch(got[0]):
                                           what = "an unknown label" if got is None else ", ".join(got)
                                           note = ", runner selection overflow" if sel == "overflow" else ""
+                                          if sel in ("unset", "set"):
+                                              note = ", CI_PREFLIGHT_RUNS_ON " + ("unset" if sel == "unset" else 'set to "ubuntu-latest"')
                                           off.append(f"{ev} ({ref}{', fork' if head == 'fork/r' else ''}{note}): {what}")
                               if off and BARE.search(ro_line):
                                   bad.append(f"{where}: (e) its `# self-hosted:` reason names no category; ruling 999 allows a self-hosted job "

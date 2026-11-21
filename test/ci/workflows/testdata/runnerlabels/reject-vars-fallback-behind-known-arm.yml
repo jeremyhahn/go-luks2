@@ -1,0 +1,7 @@
+name: t
+on: [push, pull_request]
+jobs:
+  lint:
+    runs-on: ${{ github.server_url == 'https://github.com' && (vars.RUNNER || 'ubuntu-latest') || 'bigdisk' }}
+    steps:
+      - run: true
