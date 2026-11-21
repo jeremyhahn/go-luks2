@@ -1,0 +1,6 @@
+on: pull_request
+jobs:
+  a:
+    runs-on: ' self-hosted' # self-hosted: hardware: x
+    steps:
+      - run: echo

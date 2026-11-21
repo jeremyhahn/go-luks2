@@ -1282,6 +1282,32 @@ jobs:
               return v
 
 
+          def bad_label(t):
+              # Resume 22: the first label item of a literal runs-on (no expression)
+              # that is empty (a null `-` item, `''`, `[a, , b]`) or has leading or
+              # trailing whitespace inside its quotes, or None. Nothing is trimmed.
+              if OPEN in t:
+                  return None
+              if t.startswith("["):
+                  items = re.split(r"\s*,\s*", t.strip("[] "))
+                  if items and not items[-1].strip() and len(items) > 1:
+                      items.pop()  # `[a, b,]`: YAML's trailing comma
+                  if items == [""]:
+                      return None  # `[]`: no item (the waiver refuses it)
+              elif t == "-" or t[:2] in ("- ", "-\t"):
+                  items = re.split(r"\s*-\s+", " " + t + " ")[1:]
+              else:
+                  items = [t]
+              for x in items:
+                  try:
+                      u = unquote(x)
+                  except ValueError:
+                      continue  # an escape it cannot read: the waiver check refuses it
+                  if not u or u != u.strip():
+                      return x
+              return None
+
+
           def runs_on_form(lines, i, inline, ro):
               # Why a runs-on value is not in a form the check reads, or None. Fails
               # closed: a block scalar, a quoted string that spans lines (its comment
@@ -1303,7 +1329,10 @@ jobs:
                       return f"has a `{m.group(1)}:` key, which differs from `{m.group(1).lower()}:` only in case"
               try:
                   if not GROUP.search(ro):
-                      ro_mapping(ro.strip())
+                      x = bad_label(ro_mapping(ro.strip()))
+                      if x is not None:
+                          return (f"has a label that is empty, null or padded with whitespace ({x!r}); GitHub may trim "
+                                  f"or drop it, so the label read is not the label run, and the check fails closed")
               except ValueError as e:
                   return str(e)
               for s in [inline] + [x for x in deeper(lines, i) if not x.lstrip().startswith("#")]:
@@ -1832,6 +1861,15 @@ jobs:
                   if "runs-on" not in j:
                       continue
                   ro = j["runs-on"]
+                  # Resume 22: as the line reader, a label that is empty, null, not a
+                  # string or padded with whitespace is (c) whatever the `if:` says.
+                  items = ro.get("labels") if isinstance(ro, dict) else ro
+                  items = items if isinstance(items, list) else [items]
+                  odd = [x for x in items if not isinstance(x, str) or not x or x != x.strip()]
+                  if odd:
+                      bad.append(f"{where}: (c) parsed as YAML, its runs-on has a label that is empty, null or padded with "
+                                 f"whitespace, or is not a string ({odd[0]!r}); the check fails closed")
+                      continue
                   sels = ("default", "overflow") if base in SEL_FILES else (None,)
                   if sels[0] is not None and job == PRE_JOB and isinstance(ro, str) and PRE_READ.search(ro):
                       sels = ("unset", "set")

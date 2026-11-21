@@ -116,3 +116,7 @@ reject|x.yml|reject-release-runs-on-empty.yml|x.yml:a: (c) its runs-on has no va
 reject|x.yml|reject-release-labels-folded.yml|x.yml:a: (c) its runs-on is a mapping that is not one `labels:` key
 reject|x.yml|reject-release-labels-literal.yml|x.yml:a: (c) its runs-on is a mapping that is not one `labels:` key
 reject|x.yml|reject-release-labels-long-s.yml|x.yml:a: (c) its runs-on has a character outside printable ASCII
+reject|x.yml|reject-release-label-padded-list.yml|x.yml:a: (c) its runs-on has a label that is empty, null or padded with whitespace
+reject|x.yml|reject-release-label-padded-bare.yml|x.yml:a: (c) its runs-on has a label that is empty, null or padded with whitespace
+reject|x.yml|reject-release-label-null-item.yml|x.yml:a: (c) its runs-on has a label that is empty, null or padded with whitespace
+reject|x.yml|reject-release-labels-block-list-padded.yml|x.yml:a: (c) its runs-on has a label that is empty, null or padded with whitespace
