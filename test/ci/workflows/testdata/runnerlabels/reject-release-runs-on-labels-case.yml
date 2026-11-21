@@ -1,0 +1,7 @@
+on: pull_request
+jobs:
+  a:
+    runs-on: # self-hosted: hardware: gpu box
+      Labels: gpu
+    steps:
+      - run: echo hi

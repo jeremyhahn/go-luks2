@@ -879,7 +879,8 @@ jobs:
       # vars.CI_PREFLIGHT_RUNS_ON, is checked with the variable unset, where
       # exactly [self-hosted, linux, x64, bigdisk] passes too, and set to
       # `"ubuntu-latest"`, where it must give a standard image.
-      # Its tests: testdata/runner-labels-tests.py.
+      # Its tests: the fixtures test/ci/workflows/testdata/runnerlabels/manifest.txt
+      # lists, which the step `Runner labels self-test` above runs.
       - name: Runner labels (ruling 633)
         run: |
           python3 -I - <<'PY'
@@ -1188,14 +1189,36 @@ jobs:
               return len(line) - len(line.lstrip(" "))
 
 
+          def value_lines(lines, i):
+              # Resume 21: the indices of the non-blank lines in the value of the key on
+              # line i, comment lines too. Blank and comment lines are skipped before
+              # the indentation test, so a comment never ends a value: a comment at or
+              # left of the key's column belongs to it only when a value line follows
+              # (a trailing one does not). After a plain key with no inline value, `- `
+              # lines at the key's own column are its block list (YAML's compact
+              # sequence), read as if indented.
+              base, out, low = ind(lines[i]), [], []
+              head = strip_comment(lines[i]).strip()
+              compact = head.endswith(":") and not head.startswith("-")
+              for j in range(i + 1, len(lines)):
+                  s = lines[j]
+                  if not s.strip():
+                      continue
+                  if s.lstrip().startswith("#"):
+                      (out if ind(s) > base else low).append(j)
+                      continue
+                  if ind(s) > base or (compact and ind(s) == base and re.match(r"-(?:[ \t]|$)", s.lstrip(" "))):
+                      out += low + [j]
+                      low = []
+                      continue
+                  break
+              return sorted(out)
+
+
           def body(lines, i, inline):
-              """The value text of the key on line i: the inline part plus every deeper line."""
-              base, parts = ind(lines[i]), []
-              j = i + 1
-              while j < len(lines) and (not lines[j].strip() or ind(lines[j]) > base):
-                  if lines[j].strip() and not lines[j].lstrip().startswith("#"):
-                      parts.append(strip_comment(lines[j]).strip())
-                  j += 1
+              """The value text of the key on line i: the inline part plus every value line (value_lines)."""
+              parts = [strip_comment(lines[j]).strip() for j in value_lines(lines, i)
+                       if not lines[j].lstrip().startswith("#")]
               inline = strip_comment(inline).strip()
               if inline[:1] in ("|", ">"):
                   return (" " if inline[0] == ">" else "\n").join(parts)
@@ -1203,14 +1226,8 @@ jobs:
 
 
           def deeper(lines, i):
-              """The non-blank lines under line i, comment lines too."""
-              out = []
-              for j in range(i + 1, len(lines)):
-                  if lines[j].strip() and ind(lines[j]) <= ind(lines[i]):
-                      break
-                  if lines[j].strip():
-                      out.append(lines[j])
-              return out
+              """The non-blank lines in the value of line i (value_lines), comment lines too."""
+              return [lines[j] for j in value_lines(lines, i)]
 
 
           MULTI = object()  # a value that is a block scalar or spans lines
@@ -1276,6 +1293,14 @@ jobs:
               # has its own finding below).
               if any(ord(c) > 0x7E or (ord(c) < 0x20 and c not in "\t\n") for c in ro):
                   return "has a character outside printable ASCII, which GitHub may case-fold to another label"
+              # Resume 21: no value (YAML reads null) is no label to check or waive,
+              # and a `Labels:`/`Group:` key, which YAML reads as another key, fails
+              # as the runs-on/if/uses case variants do.
+              if not ro.strip():
+                  return "has no value (YAML reads null), so it names no label the check can read"
+              for m in re.finditer(r"""(?:^|[\s{,])['"]?(group|labels)['"]?[ \t]*:""", ro, re.I):
+                  if m.group(1) != m.group(1).lower():
+                      return f"has a `{m.group(1)}:` key, which differs from `{m.group(1).lower()}:` only in case"
               try:
                   if not GROUP.search(ro):
                       ro_mapping(ro.strip())
@@ -1697,6 +1722,9 @@ jobs:
                       return f"{ev}: it cannot be read ({e})"
                   if got is None:
                       return f"{ev}: an unknown label"
+                  # Resume 21: the waiver needs a label it read; an empty one is none.
+                  if not got or any(not g.strip() for g in got):
+                      return f"{ev}: no label, or an empty one ({', '.join(map(repr, got))})"
                   if all(g.casefold() in GENERIC for g in got):
                       return f"{ev}: only generic labels ({', '.join(got)})"
               return None

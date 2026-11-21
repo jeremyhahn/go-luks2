@@ -105,6 +105,14 @@ reject|x.yml|reject-release-labels-block-list.yml|x.yml:a: (a) names `release` i
 reject|x.yml|reject-release-labels-block-list-title.yml|x.yml:a: (a) names `release` in a workflow with a pull_request trigger
 reject|x.yml|reject-release-labels-block-list-quoted.yml|x.yml:a: (a) names `release` in a workflow with a pull_request trigger
 reject|x.yml|reject-release-labels-block-list-generic.yml|x.yml:a: (c) its waived runs-on may name `release` (push: only generic labels (self-hosted, Linux))
+reject|x.yml|reject-release-key-column-list.yml|x.yml:a: (a) names `release` in a workflow with a pull_request trigger
+reject|x.yml|reject-release-key-column-list-second.yml|x.yml:a: (a) names `release` in a workflow with a pull_request trigger
+reject|x.yml|reject-release-comment-ends-list.yml|x.yml:a: (a) names `release` in a workflow with a pull_request trigger
+reject|x.yml|reject-release-comment-ends-list-unwaived.yml|x.yml:a: (a) names `release` in a workflow with a pull_request trigger
+reject|x.yml|reject-release-comment-hides-group.yml|x.yml:a: (c) its runs-on names a runner group
+reject|x.yml|reject-release-runs-on-group-case.yml|x.yml:a: (c)|differs from `group:` only in case
+reject|x.yml|reject-release-runs-on-labels-case.yml|x.yml:a: (c)|differs from `labels:` only in case
+reject|x.yml|reject-release-runs-on-empty.yml|x.yml:a: (c) its runs-on has no value
 reject|x.yml|reject-release-labels-folded.yml|x.yml:a: (c) its runs-on is a mapping that is not one `labels:` key
 reject|x.yml|reject-release-labels-literal.yml|x.yml:a: (c) its runs-on is a mapping that is not one `labels:` key
 reject|x.yml|reject-release-labels-long-s.yml|x.yml:a: (c) its runs-on has a character outside printable ASCII
