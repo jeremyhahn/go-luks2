@@ -9,7 +9,7 @@ accept|x.yml|accept-literal.yml|OK:
 reject|x.yml|reject-release-literal-expression.yml|x.yml:lint: (a) its runs-on expression is not allow-listed
 accept|x.yml|accept-server-url-routing.yml|OK:
 reject|x.yml|reject-release-known-or-operands.yml|x.yml:lint: (a) its runs-on expression is not allow-listed
-reject|x.yml|reject-vars-fallback.yml|x.yml:lint: (a) its runs-on expression is not allow-listed|(y) parsed as YAML
+reject|x.yml|reject-vars-fallback.yml|x.yml:lint: (a) its runs-on expression is not allow-listed|x.yml:lint: (b) its runs-on expression is not allow-listed
 reject|x.yml|reject-needs-fallback.yml|x.yml:lint: (a) its runs-on expression is not allow-listed
 reject|x.yml|reject-inputs-fallback.yml|x.yml:lint: (a) its runs-on expression is not allow-listed
 reject|x.yml|reject-vars-fallback-behind-known-arm.yml|x.yml:lint: (a) its runs-on expression is not allow-listed
@@ -58,10 +58,11 @@ reject|x.yml|reject-release-runs-on-group.yml|x.yml:lint: (c) its runs-on names 
 reject|x.yml|reject-release-waived-matrix.yml|x.yml:lint: (b) its runs-on expression is not allow-listed
 reject|x.yml|reject-release-waived-generic-labels.yml|x.yml:lint: (c) its waived runs-on may name `release`|only generic labels
 reject|x.yml|reject-release-waived-escaped-label.yml|x.yml:lint: (c) its waived runs-on may name `release`|cannot be read
-reject|x.yml|reject-release-anchor-label.yml|x.yml:lint: (c) its runs-on starts a value or list item with a YAML anchor, tag or alias|x.yml:lint: (y) parsed as YAML, its runs-on names `release` in a workflow with a pull_request trigger
-reject|x.yml|reject-release-anchor-list-item.yml|x.yml:lint: (c) its runs-on starts a value or list item with a YAML anchor, tag or alias|x.yml:lint: (y) parsed as YAML, its runs-on names `release`
-reject|x.yml|reject-release-tag-label.yml|x.yml:lint: (c) its runs-on starts a value or list item with a YAML anchor, tag or alias|x.yml:lint: (y) parsed as YAML, its runs-on names `release`
-reject|x.yml|reject-release-bare-tag-label.yml|x.yml:lint: (c) its runs-on starts a value or list item with a YAML anchor, tag or alias|x.yml:lint: (y) parsed as YAML, its runs-on names `release`
+reject|x.yml|reject-release-anchor-label.yml|x.yml:lint: (c) its runs-on starts a value or list item with a YAML anchor, tag or alias|x.yml: (s) line 5: a 
+reject|x.yml|reject-release-anchor-list-item.yml|x.yml:lint: (c) its runs-on starts a value or list item with a YAML anchor, tag or alias|x.yml: (s) line 5: a 
+reject|x.yml|reject-release-tag-label.yml|x.yml:lint: (c) its runs-on starts a value or list item with a YAML anchor, tag or alias|x.yml: (s) line 5: a 
+reject|x.yml|reject-release-bare-tag-label.yml|x.yml:lint: (c) its runs-on starts a value or list item with a YAML anchor, tag or alias|x.yml: (s) line 5: a 
+reject|x.yml|reject-subset-flow-mapping-matrix.yml|x.yml: (s) line 6: a flow mapping|!x.yml:lint:
 reject|x.yml|reject-hosted-ref-self-hosted.yml|x.yml:lint: (b) its runs-on expression is not allow-listed
 reject|x.yml|reject-hosted-head-ref-case.yml|x.yml:lint: (a) its runs-on expression is not allow-listed
 reject|x.yml|reject-release-hosted-ref-routing.yml|x.yml:lint: (a) its runs-on expression is not allow-listed

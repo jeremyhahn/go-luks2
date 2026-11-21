@@ -885,6 +885,19 @@ jobs:
           python3 -I - <<'PY'
           import json, os, re, sys
 
+          # Resume 16: the line reader is the gate on its own. It reads a strict
+          # subset of YAML, the forms this repository's workflows use: one
+          # document (one optional opening `---`), a block mapping at column 0,
+          # block mappings and block sequences indented with spaces, plain,
+          # single-quoted or escape-free double-quoted scalars, one-line flow
+          # sequences of scalars, and `|`/`>` block scalars (no indentation
+          # indicator) except for runs-on. Anything else anywhere in the file
+          # fails closed (s): a tab, a `?` key, an anchor, alias or tag, a `<<`
+          # merge key, a flow mapping, a nested or multi-line flow sequence, a
+          # `\` in a double-quoted scalar, a key outside printable ASCII, a
+          # block-scalar runs-on, a second document. PyYAML, where installed,
+          # cross-checks (y); both must accept.
+
           # Reads each file under .github/workflows as text (no YAML library): the
           # top-level `on:` keys, and each job's `runs-on` and `if`. A job names
           # `release` when that label appears in its runs-on, plain, in a list or as a
@@ -1497,6 +1510,67 @@ jobs:
               return None
 
 
+          BLOCK_IND = re.compile(r"[|>][+-]?")  # no indentation indicator
+          PLAIN_KEY = re.compile(r"([^\s#'\"?&*!{}\[\]|>%@`,].*?)[ \t]*:(?=[ \t]|$)")
+          QUOTED_KEY = re.compile(r"('(?:[^']|'')*'|\"(?:[^\"\\\\]|\\\\.)*\")[ \t]*:(?=[ \t]|$)")
+
+
+          def subset(lines):
+              # Resume 16: the first line outside the strict subset (see the top),
+              # as "line n: reason", or None. Lines inside a block scalar are text.
+              # The whole file is read, so `on:` and `jobs:` are both covered.
+              scalar = None  # column a block scalar's text lines must exceed
+              for n, s in enumerate(lines, 1):
+                  if scalar is not None:
+                      if not s.strip() or ind(s) > scalar:
+                          continue
+                      scalar = None
+                  if not s.strip() or s.lstrip().startswith("#"):
+                      continue
+                  if "\t" in s:
+                      return f"line {n}: a tab"
+                  col, rest = ind(s), s.lstrip(" ")
+                  while re.match(r"-(?:[ ]|$)", rest):  # block sequence items
+                      col += 1 + len(rest[1:]) - len(rest[1:].lstrip(" "))
+                      rest = rest[1:].lstrip(" ")
+                  rest = strip_comment(rest)
+                  if not rest:
+                      continue
+                  if re.fullmatch(r"---|\.\.\.", rest) and col == 0:
+                      continue  # top_level allows one opening `---` and refuses the rest
+                  if rest[0] == "?":
+                      return f"line {n}: a complex `?` key"
+                  m = QUOTED_KEY.match(rest) or PLAIN_KEY.match(rest)
+                  if m:
+                      key = m.group(1)
+                      if any(ord(c) > 126 or ord(c) < 32 for c in key):
+                          return f"line {n}: a key with a character outside printable ASCII"
+                      if key[0] == '"' and "\\" in key:
+                          return f"line {n}: an escape in a double-quoted key"
+                      if unquote(key) == "<<":
+                          return f"line {n}: a `<<` merge key"
+                      value, keycol, name = rest[m.end():].strip(), col, unquote(key)
+                  else:
+                      value, keycol, name = rest, col - 1, None  # a sequence item's scalar
+                  if not value:
+                      continue
+                  if value[0] in "&*!":
+                      return f"line {n}: a YAML anchor, alias or tag (`{value[0]}`)"
+                  if value[0] == "{":
+                      return f"line {n}: a flow mapping"
+                  if value[0] == "[" and (not value.endswith("]") or re.search(r"[\[,][ ]*[&*!{\[]", value)):
+                      return f"line {n}: a flow sequence over more than one line or holding an anchor, alias, tag or collection"
+                  if value[0] == '"' and "\\" in value:
+                      return f"line {n}: an escape in a double-quoted scalar"
+                  if value[0] in "|>":
+                      if not BLOCK_IND.fullmatch(value):
+                          return f"line {n}: a block scalar header the check cannot read"
+                      if name == "runs-on":
+                          return f"line {n}: a block scalar runs-on"
+                      scalar = keycol
+              return None
+
+
           def odd_key(lines, i):
               # The first direct child line of the job on line i that is not a
               # JOB_KEY (a `?` key, a tag, an anchor, an escape), or None: YAML may
@@ -1538,7 +1612,8 @@ jobs:
           # string, a group, or an expression that yields it, only GENERIC
           # labels or an unknown on a github.com event) must
           # have a parsed `if:` the allowlist above accepts. Both layers must
-          # accept; a file PyYAML cannot load, or no PyYAML, fails closed (y).
+          # accept; a file PyYAML cannot load fails closed (y). Resume 16: with
+          # no PyYAML (the bigdisk runner) the strict line reader decides alone.
           def yaml_loader(yaml):
               class Loader(yaml.SafeLoader):  # `on`, `yes`, `no`, `off` stay strings, as in YAML 1.2
                   pass
@@ -1659,8 +1734,12 @@ jobs:
               if top:
                   return [f"{path}: (c) its top level is not a block mapping at column 0 ({top}), so no job can be checked; "
                           f"write the workflow as one block mapping"]
+              out = subset(lines)
               on = triggers(lines)
-              bad = []
+              # (s) fails the file on its own; the job checks below still run, for
+              # their more precise findings.
+              bad = [f"{path}: (s) {out} is outside the YAML subset the check reads (see the step's top), so it fails "
+                     f"closed; write it in that subset"] if out else []
               for i, s in enumerate(lines):
                   m = re.match(r"(['\"]?)jobs\1\s*:(.*)$", s)
                   if m and strip_comment(m.group(2)).strip():
@@ -1798,9 +1877,11 @@ jobs:
                   files.append(p)
           try:
               import yaml
-          except ImportError as e:
+          except ImportError:
+              # Not a skip: the line reader is a strict-subset reader and is
+              # the gate on its own; PyYAML, where present, only cross-checks.
               yaml = None
-              bad.append(f"(y) PyYAML cannot be imported ({e}), so the YAML layer fails closed; run the check where python3-yaml is installed")
+              print("NOTE: PyYAML not available; line reader only (strict subset)")
           for f in files:
               try:
                   bad += check(f)
