@@ -1,6 +1,7 @@
 package workflows
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -233,10 +234,10 @@ func TestGateRefusesARetargetedPullRequest(t *testing.T) {
 	if !regexp.MustCompile(`(?m)^ +check_base$[\s\S]*exit 0`).MatchString(exempt) {
 		t.Errorf("gate: the no-review exit does not check the live base first:\n%s", exempt)
 	}
-	wait := strings.Index(g, "waited=$((waited + 30))")
+	twin := strings.Index(g, "twin=${twin:-$id}")
 	verdict := strings.Index(g, "verdict=$(")
-	if wait < 0 || verdict < wait || !regexp.MustCompile(`(?m)^ +check_base$`).MatchString(g[wait:verdict]) {
-		t.Errorf("gate: no live base check between the review wait and the verdict")
+	if twin < 0 || verdict < twin || !regexp.MustCompile(`(?m)^ +check_base$`).MatchString(g[twin:verdict]) {
+		t.Errorf("gate: no live base check between the twin read and the verdict")
 	}
 }
 
@@ -333,8 +334,15 @@ while [ $# -gt 0 ]; do
   esac
 done
 p=${url#"$REPO_API"}
+[ -z "${CALLS:-}" ] || printf '%s\n' "$p" >> "$CALLS"
 case "$p" in *[?\&]page=[2-9]*|*[?\&]page=[1-9][0-9]*) echo '[]' > "$out"; printf 200; exit 0 ;; esac
-case "$p" in *[?\&]status=*) echo '{"total_count":0,"workflow_runs":[]}' > "$out"; printf 200; exit 0 ;; esac
+case "$p" in *[?\&]status=*)
+  st=${p#*status=}; st=${st%%&*}
+  if [ -f "$FIX/twins_$st" ]; then cp "$FIX/twins_$st" "$out"; printf 200
+  elif [ -f "$FIX/twins_unreadable" ]; then echo '{}' > "$out"; printf 500
+  else echo '{"total_count":0,"workflow_runs":[]}' > "$out"; printf 200; fi
+  exit 0 ;;
+esac
 f="$FIX/$(printf '%s' "${p%%\?*}" | tr / _)"
 case "$p" in *head_sha=*) h=${p#*head_sha=}; f=${f}_${h%%&*} ;; esac
 case "$p" in *filter=all*) ;; *) [ ! -f "${f}_latest" ] || f=${f}_latest ;; esac
@@ -380,6 +388,10 @@ func runGateWith(t *testing.T, head string, fix map[string]string, extra ...stri
 		}
 	}
 	if err := os.WriteFile(filepath.Join(bin, "curl"), []byte(fakeCurl), 0o700); err != nil { //nolint:gosec // a test stub on PATH
+		t.Fatal(err)
+	}
+	// The gate never sleeps (v5.12.6): a sleep it calls fails the run loudly.
+	if err := os.WriteFile(filepath.Join(bin, "sleep"), []byte("#!/bin/sh\necho \"gate called sleep $*\" >&2\nexit 97\n"), 0o700); err != nil { //nolint:gosec // a test stub on PATH
 		t.Fatal(err)
 	}
 	base := strings.Repeat("b", 40)
@@ -628,6 +640,277 @@ func TestGateRefusesAfterAFailedReviewAttempt(t *testing.T) {
 	}
 }
 
+// The gate never waits for a twin review (template v5.12.6). It reads the
+// queued and in-progress runs of the same PR, base and head once, with or
+// without the run-name's request kind; an APPROVED head passes as before,
+// and otherwise a twin whose "Codex review" job is queued or in progress
+// fails the gate at once, naming that run, whose own gate posts the head's
+// check. It never sleeps, and an API error still fails closed. Its timeout
+// is 10 minutes, since no wait is left to budget for.
+func TestGateNeverWaitsForATwinReview(t *testing.T) {
+	cr := codeReview(t)
+	if !strings.Contains(cr, "# code-review-template: v5.12.6 ") {
+		t.Errorf("%s: not template v5.12.6", codeReviewWorkflow)
+	}
+	gate := regexp.MustCompile(`(?ms)^  gate:\n.*?(?:^  [a-z]|\z)`).FindString(cr)
+	if gate == "" {
+		t.Fatalf("%s: no gate job", codeReviewWorkflow)
+	}
+	if !regexp.MustCompile(`(?m)^    timeout-minutes: 10$`).MatchString(gate) {
+		t.Errorf("gate: timeout-minutes is not 10")
+	}
+	g := gateStep(t)
+	if strings.Contains(g, "sleep") {
+		t.Errorf("gate: the gate sleeps")
+	}
+	start, end := regexp.MustCompile(`(?m)^ +twin='' twins=''$`).FindStringIndex(g), strings.Index(g, "verdict=$(")
+	if start == nil || end < start[1] {
+		t.Fatalf("gate: no twin read before the verdict")
+	}
+	for _, gone := range []string{"waited", "4500", "busy="} {
+		if strings.Contains(g[start[0]:end], gone) {
+			t.Errorf("gate: the twin wait is back (%q)", gone)
+		}
+	}
+	if loop := regexp.MustCompile(`(?m)^ +(?:while|until) `).FindString(g[start[0]:end]); loop != "" {
+		t.Errorf("gate: the twin read loops (%q)", loop)
+	}
+	// The go-luks2 twin selector: the run-name alone or with either kind.
+	sel := `select(.id != $me and ($d == $t or ($d | startswith($t + " (review: ")) or ($d | startswith($t + " (re-review: ")))) | .id`
+	if strings.Count(g, sel) != 1 || strings.Contains(g, ".display_title == $t") {
+		t.Errorf("gate: the twin read does not match the PR, base and head with any request kind")
+	}
+	failNow := regexp.MustCompile(`(?m)^ +\[ "\$verdict" = APPROVED \] \|\| \[ -z "\$twin" \] \|\|\n +fail "the Codex review of \$EVENT_SHA runs in run \$twin; that run's gate posts this head's check`)
+	if !failNow.MatchString(g) {
+		t.Errorf("gate: no fail-at-once branch for an unapproved head with a twin review")
+	}
+	if fn, v := failNow.FindStringIndex(g), strings.Index(g, "verdict=$("); fn != nil && fn[0] < v {
+		t.Errorf("gate: the twin branch runs before the verdict is read")
+	}
+
+	a := strings.Repeat("a", 40)
+	title := "Code Review: PR #1 into main at " + a
+	approved := `[{"id":1,"user":{"login":"codex"},"commit_id":"` + a + `","state":"APPROVED","submitted_at":"2026-11-16T01:00:00Z","body":""}]`
+	changes := `[{"id":1,"user":{"login":"codex"},"commit_id":"` + a + `","state":"REQUEST_CHANGES","submitted_at":"2026-11-16T01:00:00Z","body":""}]`
+	runs := func(rs ...string) string {
+		return `{"total_count":` + fmt.Sprint(len(rs)) + `,"workflow_runs":[` + strings.Join(rs, ",") + `]}`
+	}
+	run := func(id, name string) string { return fmt.Sprintf(`{"id":%s,"display_title":%q}`, id, name) }
+	jobs := func(status string) string {
+		conclusion := "null" // queued or in progress: no conclusion yet
+		if status == "completed" {
+			conclusion = `"success"`
+		}
+		return `{"jobs":[{"id":1,"name":"Review scope (InfoSec guard)","status":"completed","conclusion":"success"},` +
+			`{"id":2,"name":"Codex review","status":"` + status + `","conclusion":` + conclusion + `}]}`
+	}
+	type twinCase struct {
+		name     string
+		reviews  string
+		twins    map[string]string // fixture name -> body
+		pass     bool
+		mentions string
+		absent   string
+	}
+	// try runs the gate on head a. attempts: the review runs per head (nil:
+	// one ordinary approving run on a). A twin listed queued or in progress
+	// is listed in the unfiltered listing of a's runs too, as GitHub does;
+	// "listed_<head>" adds runs to that head's unfiltered listing only.
+	try := func(c twinCase, attempts map[string][][3]string) {
+		t.Helper()
+		if attempts == nil {
+			attempts = map[string][][3]string{a: {{"10~review", "success", "success"}}}
+		}
+		fix := map[string]string{"_pulls_1_reviews": c.reviews}
+		for h, r := range attempts {
+			reviewRuns(fix, h, r)
+		}
+		for k, v := range c.twins {
+			switch {
+			case k == "twins_queued" || k == "twins_in_progress":
+				fix[k] = v
+				listRuns(t, fix, a, v)
+			case strings.HasPrefix(k, "listed_"):
+				listRuns(t, fix, strings.TrimPrefix(k, "listed_"), v)
+			default:
+				fix[k] = v
+			}
+		}
+		calls := filepath.Join(t.TempDir(), "calls")
+		code, out := runGateWith(t, a, fix, "CALLS="+calls)
+		if (code == 0) != c.pass || !strings.Contains(out, c.mentions) || strings.Contains(out, c.absent) {
+			t.Errorf("%s: exit %d, want pass=%v, %q and not %q in:\n%s", c.name, code, c.pass, c.mentions, c.absent, out)
+		}
+		if !c.pass && code != 3 {
+			t.Errorf("%s: exit %d, want the gate's fail (3)", c.name, code)
+		}
+		if strings.Contains(out, "gate called sleep") {
+			t.Errorf("%s: the gate slept:\n%s", c.name, out)
+		}
+		log, err := os.ReadFile(calls) //nolint:gosec // the test's own temp file
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		for _, st := range []string{"queued", "in_progress"} {
+			if n := strings.Count(string(log), "&status="+st+"&"); n > 1 {
+				t.Errorf("%s: the gate listed the %s runs %d times, want one read", c.name, st, n)
+			}
+		}
+	}
+	for _, c := range []twinCase{
+		{"no twin, approved", approved, nil, true, "codex approved " + a, "runs in run"},
+		{"no twin, not approved", "[]", nil, false, "no codex approval of " + a, "runs in run"},
+		{"no twin, changes requested", changes, nil, false, "codex requested changes on " + a, "runs in run"},
+		{"a queued twin of an ordinary push, not approved", "[]", map[string]string{
+			"twins_queued": runs(run("50", title+" (review: synchronize)")), "_actions_runs_50_jobs": jobs("queued"),
+		}, false, "the Codex review of " + a + " runs in run 50; that run's gate posts this head's check (verdict here: NONE", "no codex approval"},
+		{"an in-progress twin of an explicit re-review, changes requested", changes, map[string]string{
+			"twins_in_progress": runs(run("51", title+" (re-review: labeled effort:high)")), "_actions_runs_51_jobs": jobs("in_progress"),
+		}, false, "runs in run 51; that run's gate posts this head's check (verdict here: REQUEST_CHANGES", "requested changes on"},
+		{"a twin with the run-name of no kind", "[]", map[string]string{
+			"twins_queued": runs(run("52", title)), "_actions_runs_52_jobs": jobs("queued"),
+		}, false, "runs in run 52;", "no codex approval"},
+		{"a twin reviews, the head is already approved", approved, map[string]string{
+			"twins_in_progress": runs(run("53", title+" (review: labeled code-review)")), "_actions_runs_53_jobs": jobs("in_progress"),
+		}, true, "codex approved " + a, "runs in run"},
+		{"the first twin is named", "[]", map[string]string{
+			"twins_queued":          runs(run("54", title+" (review: synchronize)")),
+			"twins_in_progress":     runs(run("55", title+" (review: labeled code-review)")),
+			"_actions_runs_54_jobs": jobs("queued"), "_actions_runs_55_jobs": jobs("in_progress"),
+		}, false, "runs in run 54;", "run 55"},
+		{"a twin whose review has ended is no twin", "[]", map[string]string{
+			"twins_in_progress": runs(run("56", title+" (review: synchronize)")), "_actions_runs_56_jobs": jobs("completed"),
+		}, false, "no codex approval of " + a, "runs in run"},
+		{"this run itself is no twin", "[]", map[string]string{
+			"twins_in_progress": runs(run("42", title+" (review: synchronize)")), "_actions_runs_42_jobs": jobs("in_progress"),
+		}, false, "no codex approval of " + a, "runs in run"},
+		{"a run into another base is no twin", "[]", map[string]string{
+			"twins_queued": runs(run("57", "Code Review: PR #1 into dev at "+a+" (review: synchronize)")), "_actions_runs_57_jobs": jobs("queued"),
+		}, false, "no codex approval of " + a, "runs in run"},
+		{"a run of another PR is no twin", "[]", map[string]string{
+			"twins_queued": runs(run("58", "Code Review: PR #10 into main at "+a+" (review: synchronize)")), "_actions_runs_58_jobs": jobs("queued"),
+		}, false, "no codex approval of " + a, "runs in run"},
+		{"a run-name with another suffix is no twin", "[]", map[string]string{
+			"twins_queued": runs(run("59", title+" (other: x)")), "_actions_runs_59_jobs": jobs("queued"),
+		}, false, "no codex approval of " + a, "runs in run"},
+		{"the twin listing cannot be read", approved, map[string]string{"twins_unreadable": ""},
+			false, "cannot list the queued runs on " + a, "codex approved"},
+		{"a twin's jobs cannot be read", approved, map[string]string{
+			"twins_queued": runs(run("60", title+" (review: synchronize)")),
+		}, false, "cannot read the jobs of run 60", "codex approved"},
+	} {
+		try(c, nil)
+	}
+
+	// The twin's own run is no attempt: check_attempts passes over every
+	// active twin, so a completed attempt alone decides. A completed failed
+	// attempt still fails closed with the failed-attempt message, twin or
+	// not; an unfinished run on a carried-from head is no twin of this head
+	// (the twins are read on the head alone) and fails closed as a failed
+	// attempt.
+	root, mid := strings.Repeat("c", 40), strings.Repeat("e", 40)
+	carried := carryChain(root, mid, a)
+	ok, failed, ranNot := [3]string{"", "success", "success"}, [3]string{"", "failure", "success"}, [3]string{"", "success", "skipped"}
+	id := func(n string, r [3]string) [3]string { r[0] = n; return r }
+	for _, c := range []struct {
+		twinCase
+		attempts map[string][][3]string
+	}{
+		{twinCase{"a failed attempt, then a twin reviews the approved head", approved, map[string]string{
+			"twins_in_progress": runs(run("61", title+" (re-review: labeled effort:high)")), "_actions_runs_61_jobs": jobs("in_progress"),
+		}, false, "the latest codex review attempt (run 11) failed or was", "runs in run"},
+			map[string][][3]string{a: {id("10~review", ok), id("11~re-review", failed)}}},
+		{twinCase{"a failed attempt, then a twin reviews the unapproved head", "[]", map[string]string{
+			"twins_queued": runs(run("62", title+" (review: synchronize)")), "_actions_runs_62_jobs": jobs("queued"),
+		}, false, "the latest codex review attempt (run 11) failed or was", "runs in run"},
+			map[string][][3]string{a: {id("10~review", ok), id("11~re-review", failed)}}},
+		{twinCase{"a twin reviews a head whose approval was carried", carried, map[string]string{
+			"twins_in_progress": runs(run("63", title+" (review: synchronize)")), "_actions_runs_63_jobs": jobs("in_progress"),
+		}, true, "codex approved " + a, "latest codex review attempt"},
+			map[string][][3]string{a: {id("10~review", ranNot)}, mid: {id("20~review", ranNot)}, root: {id("30~review", ok)}}},
+		{twinCase{"a twin reviews the head, a failed attempt on a carried-from head", carried, map[string]string{
+			"twins_queued": runs(run("64", title+" (review: synchronize)")), "_actions_runs_64_jobs": jobs("queued"),
+		}, false, "the latest codex review attempt (run 31) failed or was", "codex approved"},
+			map[string][][3]string{a: {id("10~review", ranNot)}, mid: {id("20~review", ranNot)}, root: {id("30~review", ok), id("31~re-review", failed)}}},
+		{twinCase{"an unfinished run on a carried-from head is no twin of the head", carried, map[string]string{
+			"listed_" + root: runs(run("65", "Code Review: PR #1 into main at "+root+" (review: synchronize)")), "_actions_runs_65_jobs": jobs("in_progress"),
+		}, false, "the latest codex review attempt (run 65) failed or was", "codex approved"},
+			map[string][][3]string{a: {id("10~review", ranNot)}, mid: {id("20~review", ranNot)}, root: {id("30~review", ok)}}},
+	} {
+		try(c.twinCase, c.attempts)
+	}
+
+	// Only the unfinished jobs of an active twin are passed over: a twin's
+	// run ID keeps its completed attempts (filter=all lists every attempt),
+	// so an earlier failed attempt of a rerun twin, or a twin that finished
+	// failed after the twin read, is ranked like any other run and fails.
+	codex := func(id, attempt, status, conclusion, started string) string {
+		s := fmt.Sprintf(`{"id":%s,"name":"Codex review","run_attempt":%s,"status":%q,"conclusion":%s`, id, attempt, status, conclusion)
+		if started != "" {
+			s += fmt.Sprintf(`,"started_at":%q`, started)
+		}
+		if status == "completed" {
+			s += `,"steps":[{"name":"Review the head with codex as uid 1000","conclusion":` + conclusion + `}]`
+		}
+		return s + "}"
+	}
+	scope := `{"id":1,"name":"Review scope (InfoSec guard)","run_attempt":1,"status":"completed","conclusion":"success","started_at":"2026-11-16T00:00:11Z"}`
+	for _, c := range []twinCase{
+		{"an approval, a failed re-review, its rerun queued", approved, map[string]string{
+			"twins_queued": runs(run("11", title+" (re-review: labeled effort:high)")),
+			"_actions_runs_11_jobs": `{"jobs":[` + scope + "," + codex("110", "1", "completed", `"failure"`, "2026-11-16T00:00:11Z") + "," +
+				codex("111", "2", "queued", "null", "") + `]}`,
+			"_actions_runs_11_jobs_latest": `{"jobs":[` + codex("111", "2", "queued", "null", "") + `]}`,
+		}, false, "the latest codex review attempt (run 11) failed or was", "runs in run"},
+		{"a twin finished failed after the twin read", approved, map[string]string{
+			"twins_in_progress":            runs(run("12", title+" (review: labeled code-review)")),
+			"_actions_runs_12_jobs":        `{"jobs":[` + scope + "," + codex("120", "1", "completed", `"failure"`, "2026-11-16T00:00:12Z") + `]}`,
+			"_actions_runs_12_jobs_latest": `{"jobs":[` + codex("120", "1", "in_progress", "null", "2026-11-16T00:00:12Z") + `]}`,
+		}, false, "the latest codex review attempt (run 12) failed or was", "runs in run"},
+	} {
+		try(c, nil)
+	}
+}
+
+// listRuns adds the runs of the listing body to the unfiltered listing of
+// head's runs, as GitHub lists a queued or in-progress run under every
+// status. The gate's own run (42) is left out: its review ended before its
+// gate started.
+func listRuns(t *testing.T, fix map[string]string, head, body string) {
+	t.Helper()
+	type listing struct {
+		TotalCount   int               `json:"total_count"`
+		WorkflowRuns []json.RawMessage `json:"workflow_runs"`
+	}
+	var all, add listing
+	key := "_actions_workflows_7_runs_" + head
+	if s, found := fix[key]; found {
+		if err := json.Unmarshal([]byte(s), &all); err != nil {
+			t.Fatalf("listing of %s: %v", head, err)
+		}
+	}
+	if err := json.Unmarshal([]byte(body), &add); err != nil {
+		t.Fatalf("listing %q: %v", body, err)
+	}
+	for _, r := range add.WorkflowRuns {
+		var run struct {
+			ID int64 `json:"id"`
+		}
+		if err := json.Unmarshal(r, &run); err != nil {
+			t.Fatalf("run %s: %v", r, err)
+		}
+		if run.ID != 42 {
+			all.WorkflowRuns = append(all.WorkflowRuns, r)
+		}
+	}
+	all.TotalCount = len(all.WorkflowRuns)
+	out, err := json.Marshal(all)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fix[key] = string(out)
+}
+
 // Codex P1: the same-patch carry reads the source head's latest codex
 // review attempt before it posts, and carries nothing from a failed one.
 func TestCarryRefusesAHeadWhoseLatestAttemptFailed(t *testing.T) {
@@ -772,7 +1055,7 @@ func TestRunNameCarriesTheRequestKind(t *testing.T) {
 		}
 	}
 	if n := strings.Count(cr, `+ " (review: ")`); n < 4 {
-		t.Errorf("want the guard's twins and runs and the gate's runs and wait to accept a run-name with its kind, found %d", n)
+		t.Errorf("want the guard's twins and runs and the gate's runs and twin read to accept a run-name with its kind, found %d", n)
 	}
 	if n := strings.Count(cr, `+ " (re-review: ")`); n < 4 {
 		t.Errorf("want every run-name reader to accept an explicit re-review's run-name, found %d", n)
