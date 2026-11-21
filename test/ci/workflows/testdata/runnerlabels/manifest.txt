@@ -83,3 +83,7 @@ reject|.hidden.yml|reject-release-hidden-file.yml|.hidden.yml:lint: (a) names `r
 reject|x.YML|reject-release-upper-extension.yml|x.YML:lint: (a) names `release`
 reject|notes.txt|reject-workflow-other-file.yml|notes.txt: (z) is not a .yml or .yaml file
 reject|x.yml|reject-release-runs-on-key-case.yml|x.yml:lint: (c)
+reject|x.yml|reject-subset-quote-span-if.yml|x.yml: (s) line 6: a quoted scalar left open at the end of its line
+reject|x.yml|reject-subset-under-indent-single-quote.yml|x.yml: (s) line 5: a quoted scalar left open at the end of its line
+reject|x.yml|reject-subset-under-indent-plain.yml|x.yml: (s) line 6: a line indented less than the mapping key it would continue
+reject|x.yml|reject-subset-under-indent-quote.yml|x.yml: (s) line 5: a quoted scalar left open at the end of its line

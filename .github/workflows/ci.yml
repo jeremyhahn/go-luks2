@@ -1515,11 +1515,34 @@ jobs:
           QUOTED_KEY = re.compile(r"('(?:[^']|'')*'|\"(?:[^\"\\\\]|\\\\.)*\")[ \t]*:(?=[ \t]|$)")
 
 
+          def quote_open(v):
+              # Resume 17: whether a value (comment cut) leaves a quoted scalar open
+              # at the end of its line. A quote starts one only at the start of the
+              # value or of a flow list item (after `[` or `,`); elsewhere it is
+              # plain text (`it's`). '' escapes in '...', \ in "...".
+              k, starts = 0, (0,)
+              while k < len(v):
+                  if k in starts and v[k] in "'\"":
+                      q, k = v[k], k + 1
+                      while k < len(v) and v[k] != q or v[k:k + 2] == "''" and q == "'":
+                          k += 2 if (q == '"' and v[k] == "\\") or v[k:k + 2] == "''" else 1
+                      if k >= len(v):
+                          return True
+                  elif v[0] == "[" and v[k] in "[,":
+                      starts = (k + 1 + len(v[k + 1:]) - len(v[k + 1:].lstrip(" ")),)
+                  k += 1
+              return False
+
+
           def subset(lines):
               # Resume 16: the first line outside the strict subset (see the top),
               # as "line n: reason", or None. Lines inside a block scalar are text.
               # The whole file is read, so `on:` and `jobs:` are both covered.
+              # Resume 17: a quoted scalar left open at the end of a line, and a
+              # line indented between the columns of the nodes it would continue
+              # (a column-0/1 line inside a quoted scalar), fail.
               scalar = None  # column a block scalar's text lines must exceed
+              cols = []  # columns of the open nodes, increasing
               for n, s in enumerate(lines, 1):
                   if scalar is not None:
                       if not s.strip() or ind(s) > scalar:
@@ -1530,9 +1553,18 @@ jobs:
                   if "\t" in s:
                       return f"line {n}: a tab"
                   col, rest = ind(s), s.lstrip(" ")
+                  if cols and col <= cols[-1]:
+                      while cols and cols[-1] > col:
+                          cols.pop()
+                      if not cols or cols[-1] != col:
+                          return f"line {n}: a line indented less than the mapping key it would continue"
+                  else:
+                      cols.append(col)
                   while re.match(r"-(?:[ ]|$)", rest):  # block sequence items
                       col += 1 + len(rest[1:]) - len(rest[1:].lstrip(" "))
                       rest = rest[1:].lstrip(" ")
+                      if rest:
+                          cols.append(col)
                   rest = strip_comment(rest)
                   if not rest:
                       continue
@@ -1554,6 +1586,8 @@ jobs:
                       value, keycol, name = rest, col - 1, None  # a sequence item's scalar
                   if not value:
                       continue
+                  if quote_open(value):
+                      return f"line {n}: a quoted scalar left open at the end of its line"
                   if value[0] in "&*!":
                       return f"line {n}: a YAML anchor, alias or tag (`{value[0]}`)"
                   if value[0] == "{":

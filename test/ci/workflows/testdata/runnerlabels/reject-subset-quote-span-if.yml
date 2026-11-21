@@ -1,0 +1,10 @@
+name: t
+on: pull_request
+jobs:
+  lint:
+    runs-on: release
+    name: "x
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    z: 1"
+    steps:
+      - run: 'true'

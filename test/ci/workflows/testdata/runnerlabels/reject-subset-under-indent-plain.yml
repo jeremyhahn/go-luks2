@@ -1,0 +1,9 @@
+name: t
+on: pull_request
+jobs:
+  lint:
+    name: x
+ z: |
+    runs-on: release
+    steps:
+      - run: 'true'
