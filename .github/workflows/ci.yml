@@ -901,19 +901,63 @@ jobs:
           ]
 
 
-          def ctx_get(ev, ref, path):
+          def ctx_get(ev, ref, path, head="feature", base="main"):
               p = path.lower()
               name = ref.split("/", 2)[-1]
               known = {"github.event_name": ev, "github.ref": ref, "github.event.ref": ref,
                        "github.ref_name": name,
                        "github.ref_type": "tag" if ref.startswith("refs/tags/") else "branch",
-                       "github.head_ref": "feature" if ev in PR else "",
-                       "github.base_ref": "main" if ev in PR else ""}
+                       "github.head_ref": head if ev in PR else "",
+                       "github.base_ref": base if ev in PR else ""}
               if p in known:
                   return known[p]
               if ev not in PR and (p == "github.event.pull_request" or p.startswith("github.event.pull_request.")):
                   return None
               return U
+
+
+          # Where the event alone is off the allow-list, which refs it may carry.
+          FREE_REF = {
+              "push": lambda r: r.startswith("refs/heads/") and r != "refs/heads/main",
+              "workflow_dispatch": lambda r: (r.startswith("refs/heads/") and r != "refs/heads/main")
+                                             or r.startswith("refs/tags/"),
+              "create": lambda r: r.startswith(("refs/heads/", "refs/tags/")),
+              "release": lambda r: r.startswith("refs/tags/"),
+              "merge_group": lambda r: r.startswith("refs/heads/"),
+          }
+
+
+          def ctx_cands(ev, ref, lits):
+              # (ref, head_ref, base_ref) values for one CTX pair: its sample, then
+              # every value the condition's string literals can make these contexts
+              # equal, start, end or contain (the literal, with a prefix or suffix,
+              # under refs/heads/ or refs/tags/). ref, ref_name and ref_type follow
+              # from ref; no candidate is on the allow-list.
+              yield ref, "feature", "main"
+              names = []
+              for s in lits:
+                  names += [s, s + "x", "x" + s]
+                  for pre in ("refs/heads/", "refs/tags/"):
+                      if s.startswith(pre):
+                          names.append(s[len(pre):])
+              names = [n for n in dict.fromkeys(names) if n]
+              refs = [r for s in lits if s.startswith("refs/") for r in (s, s + "x")]
+              refs += [pre + n for n in names for pre in ("refs/heads/", "refs/tags/")]
+              refs = [r for r in dict.fromkeys(refs) if len(r.split("/", 2)) == 3 and r.split("/", 2)[2]]
+              heads, bases = ["feature"] + names, ["main"] + names
+              if ev == "pull_request":
+                  for r in [ref] + [r for r in refs if r.startswith("refs/pull/")]:
+                      for h in heads:
+                          for b in bases:
+                              yield r, h, b
+              elif ev == "pull_request_target":
+                  for b in bases:
+                      for h in heads:
+                          yield "refs/heads/" + b, h, b
+              elif ev in FREE_REF:
+                  for r in refs:
+                      if FREE_REF[ev](r):
+                          yield r, "feature", "main"
 
 
           TOK = re.compile(r"\s*(?:(?P<s>'(?:[^']|'')*')|(?P<n>-?\d+(?:\.\d+)?)|(?P<op>&&|\|\||==|!=|<=|>=|[!<>()\[\],.])|(?P<id>[A-Za-z_][\w-]*|\*))")
@@ -1385,10 +1429,13 @@ jobs:
                               expr = condition(cond)
                               toks = lex(expr)
                               runs = []
+                              lits = [v for k, v in toks if k == "s"]
                               for ev, ref in CTX:
-                                  r = truthy(P(toks, lambda p: ctx_get(ev, ref, p)).parse())
-                                  if r is not False:
-                                      runs.append((ev, ref))
+                                  for cref, head, base in ctx_cands(ev, ref, lits):
+                                      r = truthy(P(toks, lambda p: ctx_get(ev, cref, p, head, base)).parse())
+                                      if r is not False:
+                                          runs.append((ev, cref))
+                                          break
                           except ValueError as e:
                               bad.append(f"{where}: (b) names `release` and its `if:` cannot be read ({e})")
                               continue

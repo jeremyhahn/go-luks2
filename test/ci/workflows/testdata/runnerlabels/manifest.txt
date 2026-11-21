@@ -15,6 +15,16 @@ reject|x.yml|reject-inputs-fallback.yml|x.yml:lint: (c)|an unknown label
 reject|x.yml|reject-vars-fallback-behind-known-arm.yml|x.yml:lint: (c)|an unknown label
 reject|x.yml|reject-release-by-value.yml|x.yml:lint: (b) names `release`
 reject|x.yml|reject-release-by-name.yml|x.yml:lint: (b) names `release`
+reject|x.yml|reject-release-pr-head-ref.yml|x.yml:lint: (a) names `release`|pull_request event
+reject|x.yml|reject-release-pr-head-prefix.yml|x.yml:lint: (a) names `release`|pull_request event
+reject|x.yml|reject-release-prt-base-ref.yml|x.yml:lint: (a) names `release`|pull_request_target event
+reject|x.yml|reject-release-push-branch.yml|x.yml:lint: (b) names `release`|push (refs/heads/topic)
+reject|x.yml|reject-release-push-ref-name.yml|x.yml:lint: (b) names `release`|push (refs/heads/topic)
+reject|x.yml|reject-release-dispatch-branch.yml|x.yml:lint: (b) names `release`|workflow_dispatch (refs/heads/topic)
+reject|x.yml|reject-release-other-tag.yml|x.yml:lint: (b) names `release`|release (refs/tags/v2)
+accept|x.yml|accept-release-push-main.yml|OK:
+accept|x.yml|accept-release-push-tag.yml|OK:
+accept|x.yml|accept-release-dispatch-main.yml|OK:
 accept|ci.yml|accept-preflight.yml|OK:
 reject|ci.yml|reject-preflight-form-other-job.yml|ci.yml:lint: (c)|an unknown label|!CI_PREFLIGHT_RUNS_ON
 reject|batch.yml|reject-preflight-outside-ci.yml|batch.yml:preflight: (c)

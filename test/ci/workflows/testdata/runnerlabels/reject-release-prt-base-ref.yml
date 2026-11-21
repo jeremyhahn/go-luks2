@@ -1,0 +1,8 @@
+name: t
+on: [push, pull_request_target]
+jobs:
+  lint:
+    runs-on: release  # self-hosted: hardware: the host
+    if: ${{ github.event_name == 'pull_request_target' && github.base_ref == 'dev' }}
+    steps:
+      - run: true

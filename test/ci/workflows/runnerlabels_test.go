@@ -21,6 +21,9 @@ const (
 // its override, and ubuntu-latest off github.com.
 const preflightRunsOn = `${{ github.server_url == 'https://github.com' && fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk"]') || 'ubuntu-latest' }}`
 
+// releaseRunsOn is the runs-on line of the release-runner `if:` fixtures.
+const releaseRunsOn = "release  # self-hosted: hardware: the host"
+
 // labelsCase is one manifest.txt line: the expected result, the workflow
 // file name the fixture is copied to, the fixture and the output texts.
 type labelsCase struct {
@@ -117,6 +120,18 @@ func TestRunnerLabelsManifest(t *testing.T) {
 		{"reject-release-by-value.yml", "", "lint", "${{ format('{0}{1}', 'rel', 'ease') }}  # self-hosted: hardware: the host"},
 		{"reject-release-by-name.yml", "", "lint", "release  # self-hosted: hardware: the host"},
 		{"accept-literal.yml", "", "lint", "ubuntu-latest"},
+		// A release job's `if:` is tried with every ref, head_ref and base_ref its
+		// string literals can match, not one sample per context.
+		{"reject-release-pr-head-ref.yml", "", "lint", releaseRunsOn},
+		{"reject-release-pr-head-prefix.yml", "", "lint", releaseRunsOn},
+		{"reject-release-prt-base-ref.yml", "", "lint", releaseRunsOn},
+		{"reject-release-push-branch.yml", "", "lint", releaseRunsOn},
+		{"reject-release-push-ref-name.yml", "", "lint", releaseRunsOn},
+		{"reject-release-dispatch-branch.yml", "", "lint", releaseRunsOn},
+		{"reject-release-other-tag.yml", "", "lint", releaseRunsOn},
+		{"accept-release-push-main.yml", "", "lint", releaseRunsOn},
+		{"accept-release-push-tag.yml", "", "lint", releaseRunsOn},
+		{"accept-release-dispatch-main.yml", "", "lint", releaseRunsOn},
 		{"accept-server-url-routing.yml", "", "lint", templateRoutingExpression},
 		// ci-template v1.49 part F.
 		{"accept-preflight.yml", "ci.yml", "preflight", preflightRunsOn},
