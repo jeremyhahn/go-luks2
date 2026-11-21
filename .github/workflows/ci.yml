@@ -921,7 +921,10 @@ jobs:
                       elif ta is False:
                           a = b
                       else:
-                          a = b if truthy(b) is True else U
+                          # GitHub returns the left operand whenever it is
+                          # truthy: an unknown one may be the value, so the
+                          # result is {unknown, b}, which is unknown.
+                          a = U
                   return a
 
               def andx(self):
@@ -1199,8 +1202,20 @@ jobs:
               return None
 
 
-          def names_release(text):
-              return re.search(r"(?<![\w.-])['\"]?release['\"]?(?![\w-])", text) is not None
+          def names_release(text, sels=(None,)):
+              # The label in the text, or in any value an expression there
+              # yields on a github.com event (an unknown one is (c)'s).
+              if re.search(r"(?<![\w.-])['\"]?release['\"]?(?![\w-])", text):
+                  return True
+              for ev, ref, head in HOSTED_CTX:
+                  for sel in sels:
+                      try:
+                          got = runs_on_labels(text, ev, ref, head, sel)
+                      except ValueError:
+                          continue
+                      if any(g.lower() == "release" for g in got or []):
+                          return True
+              return False
 
 
           def condition(text):
