@@ -1173,17 +1173,28 @@ jobs:
               return s
 
 
-          def strip_comment(s):
-              q = None
-              for i, c in enumerate(s):
+          def scan(s):
+              # (s before a ` #` outside quotes, the quote still open at its end or None).
+              # A '' escape closes and reopens a '...'; a \ escapes in a "...".
+              q, i = None, 0
+              while i < len(s):
+                  c = s[i]
+                  if q == '"' and c == "\\":
+                      i += 2
+                      continue
                   if q:
                       if c == q:
                           q = None
                   elif c in "'\"":
                       q = c
                   elif c == "#" and (i == 0 or s[i - 1] in " \t"):
-                      return s[:i].rstrip()
-              return s.rstrip()
+                      return s[:i].rstrip(), None
+                  i += 1
+              return s.rstrip(), q
+
+
+          def strip_comment(s):
+              return scan(s)[0]
 
 
           def ind(line):
@@ -1202,6 +1213,63 @@ jobs:
               if inline[:1] in ("|", ">"):
                   return (" " if inline[0] == ">" else "\n").join(parts)
               return " ".join([inline] + parts).strip()
+
+
+          def deeper(lines, i):
+              """The non-blank lines under line i, comment lines too."""
+              out = []
+              for j in range(i + 1, len(lines)):
+                  if lines[j].strip() and ind(lines[j]) <= ind(lines[i]):
+                      break
+                  if lines[j].strip():
+                      out.append(lines[j])
+              return out
+
+
+          MULTI = object()  # a value that is a block scalar or spans lines
+
+
+          def one_line(lines, i, inline):
+              # A release job's `if:` (fails closed): the YAML scalar on line i alone,
+              # its comment cut as YAML cuts it, or MULTI. A quoted scalar ends at its
+              # closing quote ('' or \ escapes); a plain one at its first ` #`.
+              v = inline.strip()
+              if deeper(lines, i) or not v or v[0] in "|>":
+                  return MULTI
+              if v[0] in "*&!":
+                  raise ValueError("it starts with a YAML alias, anchor or tag")
+              if v[0] not in "'\"":
+                  m = re.search(r"(?:^|[ \t])#", v)
+                  return v[:m.start()].rstrip() if m else v
+              k = 1
+              while k < len(v):
+                  if v[0] == '"' and v[k] == "\\":
+                      k += 2
+                  elif v[k] == v[0] and v[0] == "'" and v[k + 1:k + 2] == "'":
+                      k += 2
+                  elif v[k] == v[0]:
+                      break
+                  else:
+                      k += 1
+              if k >= len(v):
+                  raise ValueError("its quoted string is not closed on its line")
+              if v[k + 1:].strip() and not re.match(r"[ \t]+#", v[k + 1:]):
+                  raise ValueError("text follows its quoted string")
+              return v[:k + 1]
+
+
+          def runs_on_form(lines, i, inline, ro):
+              # Why a runs-on value is not in a form the check reads, or None. Fails
+              # closed: a block scalar, a quoted string that spans lines (its comment
+              # lines would hide text), or a YAML alias (its value is elsewhere).
+              if strip_comment(inline).strip()[:1] in ("|", ">"):
+                  return "is a block scalar"
+              for s in [inline] + [x for x in deeper(lines, i) if not x.lstrip().startswith("#")]:
+                  if scan(s)[1]:
+                      return "has a quoted string that spans lines"
+              if re.search(r"(?:^|[\s\[,{:])\*[^\s,\]}]", ro):
+                  return "is a YAML alias"
+              return None
 
 
           def keys_under(lines, i):
@@ -1404,15 +1472,34 @@ jobs:
               on = triggers(lines)
               bad = []
               for i, s in enumerate(lines):
-                  if re.match(r"jobs\s*:\s*(#.*)?$", s):
-                      for j, job, _ in keys_under(lines, i):
-                          ro = cond = ro_line = None
-                          for k, key, inline in keys_under(lines, j):
-                              if key == "runs-on":
-                                  ro, ro_line = body(lines, k, inline), lines[k]
-                              elif key == "if":
-                                  cond = body(lines, k, inline)
+                  m = re.match(r"(['\"]?)jobs\1\s*:(.*)$", s)
+                  if m and strip_comment(m.group(2)).strip():
+                      bad.append(f"{path}:jobs: (c) is not a block mapping, so no job's runs-on can be checked; write jobs: as a block mapping")
+                  elif m:
+                      for j, job, jinline in keys_under(lines, i):
                           where = f"{path}:{job}"
+                          if strip_comment(jinline).strip():
+                              bad.append(f"{where}: (c) is not a block mapping (a flow mapping or an alias), so its runs-on cannot be checked; "
+                                         f"write the job as a block mapping")
+                              continue
+                          ro = cond = ro_line = None
+                          forms = []
+                          for k, key, inline in keys_under(lines, j):
+                              if key == "<<":
+                                  forms.append("has a `<<` merge key, so its runs-on or `if:` may come from elsewhere")
+                              elif key == "runs-on":
+                                  ro, ro_line = body(lines, k, inline), lines[k]
+                                  f = runs_on_form(lines, k, inline, ro)
+                                  forms += [f"its runs-on {f}"] if f else []
+                              elif key == "if":
+                                  try:
+                                      cond = one_line(lines, k, inline)
+                                  except ValueError as e:
+                                      cond = e
+                          if forms:
+                              bad.append(f"{where}: (c) {'; '.join(forms)}; the check cannot read it, so it fails closed: write runs-on on one line, "
+                                         f"or as a block list of one-line labels, and no merge key")
+                              continue
                           if ro is not None and not names_release(ro):
                               # v1.43 (ruling 833): hosted first.
                               if LARGER.search(ro) and re.search(r"ubuntu|windows|macos", ro):
@@ -1460,6 +1547,10 @@ jobs:
                               bad.append(f"{where}: (b) names `release` and has no `if:` restricting it to {ALLOWED}")
                               continue
                           try:
+                              if cond is MULTI:
+                                  raise ValueError("it is a block scalar or spans lines; write the release if: on one line")
+                              if isinstance(cond, ValueError):
+                                  raise cond
                               expr = condition(cond)
                               toks = lex(expr)
                               P(toks, lambda p: U).parse()  # it must be a readable expression

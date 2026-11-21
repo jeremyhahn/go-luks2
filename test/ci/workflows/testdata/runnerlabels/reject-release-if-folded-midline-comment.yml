@@ -1,0 +1,11 @@
+name: t
+on: [push, pull_request]
+jobs:
+  lint:
+    runs-on: [self-hosted, linux, x64, release]
+    if: >-
+      github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && contains('a
+      b #', 'z') || true || contains('q
+      c', 'd')
+    steps:
+      - run: true

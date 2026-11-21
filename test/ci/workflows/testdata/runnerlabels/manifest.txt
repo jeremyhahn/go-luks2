@@ -33,6 +33,16 @@ reject|x.yml|reject-release-top-level-or.yml|x.yml:lint: (b) names `release`|top
 reject|x.yml|reject-release-top-level-not.yml|x.yml:lint: (b) names `release`|top-level !
 accept|x.yml|accept-release-push-tag.yml|OK:
 accept|x.yml|accept-release-tag-narrowed.yml|OK:
+reject|x.yml|reject-release-if-folded-comment.yml|x.yml:lint: (b) names `release`|write the release if: on one line
+reject|x.yml|reject-release-if-literal-comment.yml|x.yml:lint: (b) names `release`|write the release if: on one line
+reject|x.yml|reject-release-if-folded-midline-comment.yml|x.yml:lint: (b) names `release`|write the release if: on one line
+reject|x.yml|reject-release-runs-on-block-scalar.yml|x.yml:lint: (c) its runs-on is a block scalar
+reject|x.yml|reject-release-runs-on-quote-span.yml|x.yml:lint: (c) its runs-on has a quoted string that spans lines
+reject|x.yml|reject-release-runs-on-alias.yml|x.yml:lint: (c) its runs-on is a YAML alias
+reject|x.yml|reject-release-job-flow-mapping.yml|x.yml:lint: (c) is not a block mapping
+reject|x.yml|reject-release-jobs-flow-mapping.yml|x.yml:jobs: (c) is not a block mapping
+reject|x.yml|reject-release-jobs-quoted-key.yml|x.yml:lint: (a) names `release`
+reject|x.yml|reject-release-merge-key.yml|x.yml:lint: (c) has a `<<` merge key
 reject|x.yml|reject-hosted-ref-self-hosted.yml|x.yml:lint: (c)|push (refs/heads/topic): self-hosted
 reject|x.yml|reject-hosted-head-ref-case.yml|x.yml:lint: (c)|pull_request (refs/pull/1/merge): self-hosted
 accept|x.yml|accept-hosted-ref-routing.yml|OK:
