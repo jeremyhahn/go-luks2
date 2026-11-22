@@ -516,7 +516,7 @@ REVIEW_FILES = {"code-review.yml", "code-review.yaml"}
 REVIEW_TOKEN = re.compile(r"(?<![\w.-])['\"]?(codex|qwen)['\"]?(?![\w-])", re.I)
 GH = "https://github.com"
 # v1.48 (ruling 1024): ci.yml's preflight runner selection (v1.54:
-# `Balanced runner pool (ruling 1137)`) outputs runs-on JSON,
+# the Balanced runner pool step) outputs runs-on JSON,
 # "ubuntu-latest" or the Dells' self-hosted list ("overflow" below). In ci.yml only, a
 # runs-on that reads exactly these outputs is checked under both: the
 # default must be a standard image, as (c) asks of every job, and the
@@ -559,7 +559,7 @@ RO_ALLOW = {
     "'[\"self-hosted\",\"linux\",\"x64\",\"bigdisk\"]') || 'ubuntu-latest'": "ci.yml: preflight",
     "github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk'": "code-review.yml: scope, gate",
     # ci-template v1.54: every other ci.yml job reads the pool that
-    # preflight's `Balanced runner pool (ruling 1137)` step picks.
+    # preflight's Balanced runner pool step picks.
     "github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner_docker) || 'bigdisk'":
         "ci.yml: every job but preflight and CI Gate",
     "github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner || '\"ubuntu-latest\"') || 'ci-gate'":

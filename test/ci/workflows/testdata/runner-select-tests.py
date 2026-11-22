@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """runner-select-tests.py -- runs ci.yml's preflight step `Balanced runner
 pool (ruling 1137)` (ci-template v1.54, Tenant Agent ruling 1137, which
 replaces the hosted first rule of rulings 999 and 1024) against a fake

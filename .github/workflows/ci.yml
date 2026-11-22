@@ -6,8 +6,8 @@
 # a Makefile target; the `Runner labels (ruling 633)` step is preceded by a
 # self-test that runs the same Python on the fixtures in
 # test/ci/workflows/testdata/runnerlabels/.
-# v1.54's runner selection is taken: preflight's `Balanced runner pool
-# (ruling 1137)` step picks the pool, and every other job's runs-on reads its
+# v1.54's runner selection is taken: preflight's Balanced runner pool
+# step picks the pool, and every other job's runs-on reads its
 # `runner_docker` output (CI Gate its `runner` output), as the template has
 # them; the merge-check, test-race and fips jobs build or run images, so
 # they read `runner_docker` too.

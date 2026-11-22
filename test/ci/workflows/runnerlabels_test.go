@@ -258,10 +258,12 @@ const balancedPoolStep = "Balanced runner pool (ruling 1137)"
 const balancedPoolSHA256 = "82eeb1dfddc72f27b053e94529ff41f33b7701acbbb213ee5b2355bd5d79e49c"
 
 // runnerSelectTests is the template's testdata/runner-select-tests.py,
-// carried verbatim (runnerSelectTestsSHA256). It reads the step out of the
+// carried verbatim but for its #! line, runnerSelectShebang
+// (runnerSelectTestsSHA256 pins the whole file). It reads the step out of the
 // ci.yml in its parent directory and runs it against a fake Actions API.
 const (
 	runnerSelectTests       = "test/ci/workflows/testdata/runner-select-tests.py"
+	runnerSelectShebang     = "#!/usr/bin/env python3\n"
 	runnerSelectTestsSHA256 = "b53de0fa0282b1825d60f259680b293a259ef62398c31312daf2c15e311b346f"
 )
 
@@ -307,7 +309,10 @@ func TestBalancedRunnerPoolStepIsTheTemplates(t *testing.T) {
 // needs python3 and bash; without them it skips, and
 // TestBalancedRunnerPoolStepIsTheTemplates still pins the step.
 func TestRunnerSelectTestsPassOnTheStep(t *testing.T) {
-	data := readFile(t, runnerSelectTests)
+	// The repository ships no file that opens with #!, so the template's
+	// first line is carried here and the rest in testdata; together they
+	// are the template file byte for byte.
+	data := runnerSelectShebang + readFile(t, runnerSelectTests)
 	if got := sha256Hex(data); got != runnerSelectTestsSHA256 {
 		t.Fatalf("%s is not ci-template v1.54's runner-select-tests.py: sha256 %s, want %s", runnerSelectTests, got, runnerSelectTestsSHA256)
 	}
