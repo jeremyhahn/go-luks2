@@ -115,21 +115,21 @@ func TestCIMaskLANMasksHostNamesAndEveryRegistry(t *testing.T) {
 // variable has. A public name with a final dot is still left.
 func TestCIMaskLANMasksHostNamesInAnyCaseAndFullyQualified(t *testing.T) {
 	got := maskLines(t, map[string]string{
-		"DEVCACHE_GOPROXY": "http://mirror.INTERNAL:3000",
-		"GOPROXY":          "http://mirror.internal.:3000|https://proxy.golang.org.,DIRECT",
-		"LAN_REGISTRY":     "Registry.Lan.:5005",
+		"DEVCACHE_GOPROXY": "http://mirror.INTERNAL:3000",                                   // lab-string-ok: masking fixture
+		"GOPROXY":          "http://mirror.internal.:3000|https://proxy.golang.org.,DIRECT", // lab-string-ok: masking fixture
+		"LAN_REGISTRY":     "Registry.Lan.:5005",                                            // lab-string-ok: masking fixture
 		"IT_REGISTRY":      "CACHEHOST.",
 	})
 	want := []string{
 		"::add-mask::CACHEHOST.",
-		"::add-mask::Registry.Lan.",
-		"::add-mask::Registry.Lan.:5005",
-		"::add-mask::http://mirror.INTERNAL:3000",
-		"::add-mask::http://mirror.internal.:3000",
-		"::add-mask::mirror.INTERNAL",
-		"::add-mask::mirror.INTERNAL:3000",
-		"::add-mask::mirror.internal.",
-		"::add-mask::mirror.internal.:3000",
+		"::add-mask::Registry.Lan.",                // lab-string-ok: masking fixture
+		"::add-mask::Registry.Lan.:5005",           // lab-string-ok: masking fixture
+		"::add-mask::http://mirror.INTERNAL:3000",  // lab-string-ok: masking fixture
+		"::add-mask::http://mirror.internal.:3000", // lab-string-ok: masking fixture
+		"::add-mask::mirror.INTERNAL",              // lab-string-ok: masking fixture
+		"::add-mask::mirror.INTERNAL:3000",         // lab-string-ok: masking fixture
+		"::add-mask::mirror.internal.",             // lab-string-ok: masking fixture
+		"::add-mask::mirror.internal.:3000",        // lab-string-ok: masking fixture
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("make -s ci-mask-lan printed\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))

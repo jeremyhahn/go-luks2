@@ -83,11 +83,11 @@ def script_cases():
               f"the script masks {l}: a public host or a keyword")
     # An internal suffix in any case, and a fully qualified name's final dot,
     # are masked in the spelling the variable has.
-    fq = dict(PATH=env["PATH"], DEVCACHE_GOPROXY="http://mirror.INTERNAL:3000",
-              GOPROXY="http://mirror.internal.:3000|https://proxy.golang.org.,DIRECT")
+    fq = dict(PATH=env["PATH"], DEVCACHE_GOPROXY="http://mirror.INTERNAL:3000",  # lab-string-ok: masking fixture
+              GOPROXY="http://mirror.internal.:3000|https://proxy.golang.org.,DIRECT")  # lab-string-ok: masking fixture
     got = subprocess.run(["bash", SCRIPT], env=fq, capture_output=True, text=True).stdout.split()
-    for want in ["::add-mask::http://mirror.INTERNAL:3000", "::add-mask::mirror.INTERNAL:3000", "::add-mask::mirror.INTERNAL",
-                 "::add-mask::http://mirror.internal.:3000", "::add-mask::mirror.internal.:3000", "::add-mask::mirror.internal."]:
+    for want in ["::add-mask::http://mirror.INTERNAL:3000", "::add-mask::mirror.INTERNAL:3000", "::add-mask::mirror.INTERNAL",  # lab-string-ok: masking fixture
+                 "::add-mask::http://mirror.internal.:3000", "::add-mask::mirror.internal.:3000", "::add-mask::mirror.internal."]:  # lab-string-ok: masking fixture
         check(want in got, f"the script does not mask the internal host name: {want}")
     for l in got:
         check("proxy.golang.org" not in l and "DIRECT" not in l, f"the script masks {l}: a public host or a keyword")
