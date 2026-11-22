@@ -515,9 +515,9 @@ REVIEW = {"codex": "credential", "qwen": "hardware"}
 REVIEW_FILES = {"code-review.yml", "code-review.yaml"}
 REVIEW_TOKEN = re.compile(r"(?<![\w.-])['\"]?(codex|qwen)['\"]?(?![\w-])", re.I)
 GH = "https://github.com"
-# v1.48 (ruling 1024): ci.yml's preflight step `Hosted or overflow runner
-# (ruling 1024)` outputs runs-on JSON, "ubuntu-latest" by default and the
-# Dells' overflow list when the hosted pool is full. In ci.yml only, a
+# v1.48: ci.yml's preflight runner selection (v1.54:
+# the Balanced runner pool step) outputs runs-on JSON,
+# "ubuntu-latest" or the Dells' self-hosted list ("overflow" below). In ci.yml only, a
 # runs-on that reads exactly these outputs is checked under both: the
 # default must be a standard image, as (c) asks of every job, and the
 # overflow may also be exactly the list its output names. Any other
@@ -558,6 +558,12 @@ RO_ALLOW = {
     "github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_PREFLIGHT_RUNS_ON || "
     "'[\"self-hosted\",\"linux\",\"x64\",\"bigdisk\"]') || 'ubuntu-latest'": "ci.yml: preflight",
     "github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk'": "code-review.yml: scope, gate",
+    # ci-template v1.54: every other ci.yml job reads the pool that
+    # preflight's Balanced runner pool step picks.
+    "github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner_docker) || 'bigdisk'":
+        "ci.yml: every job but preflight and CI Gate",
+    "github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner || '\"ubuntu-latest\"') || 'ci-gate'":
+        "ci.yml: ci-gate",
 }
 RO_EXPR = re.compile(r"\$\{\{(.*?)\}\}", re.S)
 
@@ -584,7 +590,11 @@ def hosted_get(ev, ref, head, sel=None, hr="feature", br="main"):
     def get(path):
         p = path.lower()
         if sel and p in SEL_OUT:  # v1.48: the selection output, as JSON text
-            return json.dumps("ubuntu-latest" if sel == "default" else ["self-hosted", "linux", "x64", SEL_OUT[p]])
+            # v1.52: the step outputs the hosted default for a fork's head.
+            # Its case statement covers pull_request and pull_request_target,
+            # so both are modelled here (the template models pull_request).
+            fork_pr = ev in ("pull_request", "pull_request_target") and head == "fork/r"
+            return json.dumps("ubuntu-latest" if sel == "default" or fork_pr else ["self-hosted", "linux", "x64", SEL_OUT[p]])
         if sel in ("unset", "set") and p == PRE_VAR:  # v1.49: unset, or the fallback switch
             return None if sel == "unset" else json.dumps("ubuntu-latest")
         if p == "github.server_url":
@@ -1120,12 +1130,14 @@ def check(path):
                             # Resume 23 (ci-template v1.51, v1.52; the stricter
                             # kept): a fork's head, under pull_request or
                             # pull_request_target, gets neither exemption.
-                            # Deliberately stricter than the v1.52 template:
-                            # hosted_get has no `fork_pr` rule, and this
+                            # Deliberately stricter than the template: this
                             # condition does not require the event to be one
                             # of the workflow's triggers (the template's
-                            # `and ev in on`). Adopting the template's
-                            # overflow step needs both revisited. The unset
+                            # `and ev in on`). With v1.54's selection step
+                            # taken, hosted_get's `fork_pr` rule gives a
+                            # fork's head the hosted default the step
+                            # outputs, so an overflow for a fork is still
+                            # refused here. The unset
                             # guard is unreachable while RO_ALLOW's only
                             # CI_PREFLIGHT_RUNS_ON form carries the fork clause
                             # (a fork gets ubuntu-latest first); it is kept so
