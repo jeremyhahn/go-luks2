@@ -109,6 +109,33 @@ func TestCIMaskLANMasksHostNamesAndEveryRegistry(t *testing.T) {
 	}
 }
 
+// TestCIMaskLANMasksHostNamesInAnyCaseAndFullyQualified holds that an
+// internal name's suffix is matched in any case and with the fully
+// qualified name's final dot, and that the masks keep the spelling the
+// variable has. A public name with a final dot is still left.
+func TestCIMaskLANMasksHostNamesInAnyCaseAndFullyQualified(t *testing.T) {
+	got := maskLines(t, map[string]string{
+		"DEVCACHE_GOPROXY": "http://mirror.INTERNAL:3000",
+		"GOPROXY":          "http://mirror.internal.:3000|https://proxy.golang.org.,DIRECT",
+		"LAN_REGISTRY":     "Registry.Lan.:5005",
+		"IT_REGISTRY":      "CACHEHOST.",
+	})
+	want := []string{
+		"::add-mask::CACHEHOST.",
+		"::add-mask::Registry.Lan.",
+		"::add-mask::Registry.Lan.:5005",
+		"::add-mask::http://mirror.INTERNAL:3000",
+		"::add-mask::http://mirror.internal.:3000",
+		"::add-mask::mirror.INTERNAL",
+		"::add-mask::mirror.INTERNAL:3000",
+		"::add-mask::mirror.internal.",
+		"::add-mask::mirror.internal.:3000",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("make -s ci-mask-lan printed\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
 // historyDocker is a docker stand-in for ci-image-history: `docker history`
 // prints <dir>/history-<image>, `docker image inspect` <dir>/config-<image>,
 // and either fails when its file is missing. Every call is logged.

@@ -1,7 +1,7 @@
 # Makefile for go-luks2
 # LUKS2 encryption library and tools in pure Go
 
-.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build build-linux vet-32bit install test test-verbose test-coverage test-integration coverage coverage-report clean fmt vet lint gosec govulncheck vuln trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration test-unit-norace seccomp-diff proto test-pkg docker-build docker-build-cli docker-run deps-check test-fips-mode assert-build-tags toolchain-image it-image apk-index-sum apt-index-sum docker-build-toolchain toolchain-run ci-toolchain-run ci-reap-stacks ci-trim-caches ci-mask-lan ci-image-history
+.PHONY: api-dump api-diff coverage-gate coverage-combined changelog-assemble help build build-linux vet-32bit install test test-verbose test-coverage test-integration coverage coverage-report clean fmt vet lint gosec govulncheck vuln trivy-fs trivy-install trivy-sarif trivy-misconfig security ci ci-full fmt-check all check test-cli docker-run-bin releasability integration-test-cli docker-build-integration docker-prune-itest print-itest-label test-calibration test-unit-norace seccomp-diff proto test-pkg docker-build docker-build-cli docker-run deps-check test-fips-mode assert-build-tags toolchain-image it-image apk-index-sum apt-index-sum docker-build-toolchain toolchain-run ci-toolchain-run ci-reap-stacks ci-trim-caches ci-mask-lan ci-carrier-tests ci-image-history
 
 # Default target
 .DEFAULT_GOAL := help
@@ -2288,8 +2288,10 @@ ci-trim-caches: ## Keep this repository's CI cache volumes under CI_CACHE_MAX_GI
 # its host, so the runner masks the address in every later line. A host is
 # internal when it is a private IPv4 address, or (ci-template v1.53) a host
 # name: a single label with no dot (a LAN host name) or a name under
-# .internal, .lan, .local, .localdomain, .home.arpa or .corp. Public hosts
-# and keywords (proxy.golang.org, direct, off) are left.
+# .internal, .lan, .local, .localdomain, .home.arpa or .corp, in any case
+# and with or without the fully qualified name's final dot (the masks keep
+# the spelling the variable has). Public hosts and keywords
+# (proxy.golang.org, direct, off) are left.
 # v1.53: every variable whose name ends in _REGISTRY is scanned (CI_REGISTRY,
 # CI_IMAGE_REGISTRY, RELEASE_REGISTRY, a copy's IT_REGISTRY). The workflow's
 # mask step sets CI_IMAGE_REGISTRY from the Actions secret of that name,
@@ -2301,7 +2303,9 @@ ci-mask-lan: SHELL := /bin/bash
 ci-mask-lan: .SHELLFLAGS := -euo pipefail -c
 ci-mask-lan: ## Mask the LAN addresses the runner's environment names (CI, ruling 887)
 	@private() { \
-		case $$1 in \
+		local h=$${1,,}; \
+		h=$${h%.}; \
+		case $$h in \
 		10.* | 192.168.* | 172.1[6-9].* | 172.2[0-9].* | 172.3[01].*) return 0 ;; \
 		'' | direct | off) return 1 ;; \
 		*.internal | *.lan | *.local | *.localdomain | *.home.arpa | *.corp) return 0 ;; \
@@ -2324,6 +2328,42 @@ ci-mask-lan: ## Mask the LAN addresses the runner's environment names (CI, rulin
 			[ "$$hostport" = "$$entry" ] || echo "::add-mask::$$hostport"; \
 			[ "$$host" = "$$hostport" ] || echo "::add-mask::$$host"; \
 		done; \
+	done
+
+# ci-carrier-tests runs the carried template tests,
+# test/ci/workflows/testdata/carrier/*.py, on this repository's ci.yml and
+# make ci-mask-lan: in a scratch carrier, ci.yml's mask steps call the
+# template's scripts/ci-mask-lan.sh, which runs make ci-mask-lan here. The
+# toolchain image has no python3, so ci.yml's lint job runs this target on
+# its runner; without python3 it fails, never skips.
+CI_CARRIER_TESTS := ci-mask-lan-tests.py job-output-handoff-tests.py
+CI_MASK_STEPS := 8
+ci-carrier-tests: SHELL := /bin/bash
+ci-carrier-tests: .SHELLFLAGS := -euo pipefail -c
+ci-carrier-tests: ## Run the carried template tests on ci.yml and make ci-mask-lan (CI lint job)
+	@command -v python3 >/dev/null || { echo "ci-carrier-tests: python3 is required" >&2; exit 1; }; \
+	t=$$(mktemp -d); \
+	trap 'rm -rf "$$t"' EXIT; \
+	mkdir -p "$$t/.github/workflows" "$$t/scripts" "$$t/testdata"; \
+	n=0; \
+	while IFS= read -r l || [ -n "$$l" ]; do \
+		case $$l in \
+		*'run: make ci-mask-lan') n=$$((n + 1)); l="$${l%make ci-mask-lan}scripts/ci-mask-lan.sh" ;; \
+		esac; \
+		printf '%s\n' "$$l"; \
+	done <.github/workflows/ci.yml >"$$t/.github/workflows/ci.yml"; \
+	[ "$$n" = "$(CI_MASK_STEPS)" ] || { echo "ci-carrier-tests: ci.yml has $$n make ci-mask-lan steps, want $(CI_MASK_STEPS)" >&2; exit 1; }; \
+	printf '%s\n' 'unset MAKEFLAGS MFLAGS MAKELEVEL' "exec make -s --no-print-directory -C '$(CURDIR)' ci-mask-lan" >"$$t/scripts/ci-mask-lan.sh"; \
+	for f in $(CI_CARRIER_TESTS); do \
+		cp "test/ci/workflows/testdata/carrier/$$f" "$$t/testdata/$$f"; \
+		rc=0; \
+		out=$$(cd "$$t" && python3 -I "testdata/$$f" 2>&1) || rc=$$?; \
+		if [ "$$rc" -ne 0 ]; then \
+			printf '%s\n' "$$out"; \
+			echo "ci-carrier-tests: $$f exited $$rc" >&2; \
+			exit 1; \
+		fi; \
+		echo "$$f: $${out##*$$'\n'}"; \
 	done
 
 # ci-image-history fails when an image carries a private address (Tenant

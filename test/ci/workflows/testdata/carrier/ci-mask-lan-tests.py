@@ -46,7 +46,7 @@ def script_cases():
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "DEVCACHE_APT_PROXY": "http://192.168.77.7:3142",
         "DEVCACHE_APK_MIRROR": "http://192.168.77.7:3143/alpine",
-        "GOPROXY": "http://10.1.2.3:8081|https://proxy.golang.org,direct",
+        "GOPROXY": "http://10.1.2.3:8081|https://proxy.golang.org,direct",  # lab-string-ok: RFC 1918 masking fixture
         "CI_REGISTRY": "172.20.0.5:5005",
         # the forge's release registry and its own host, which image
         # publishing and resolving name (a Codex P1 review finding)
@@ -81,6 +81,16 @@ def script_cases():
     for l in got:
         check(not any(k in l for k in ("proxy.golang.org", "direct", "::add-mask::off", "ghcr.io", "github.com")),
               f"the script masks {l}: a public host or a keyword")
+    # An internal suffix in any case, and a fully qualified name's final dot,
+    # are masked in the spelling the variable has.
+    fq = dict(PATH=env["PATH"], DEVCACHE_GOPROXY="http://mirror.INTERNAL:3000",
+              GOPROXY="http://mirror.internal.:3000|https://proxy.golang.org.,DIRECT")
+    got = subprocess.run(["bash", SCRIPT], env=fq, capture_output=True, text=True).stdout.split()
+    for want in ["::add-mask::http://mirror.INTERNAL:3000", "::add-mask::mirror.INTERNAL:3000", "::add-mask::mirror.INTERNAL",
+                 "::add-mask::http://mirror.internal.:3000", "::add-mask::mirror.internal.:3000", "::add-mask::mirror.internal."]:
+        check(want in got, f"the script does not mask the internal host name: {want}")
+    for l in got:
+        check("proxy.golang.org" not in l and "DIRECT" not in l, f"the script masks {l}: a public host or a keyword")
     # v1.53: every *_REGISTRY variable,
     # a secret's copy in the mask step's env included.
     regs = dict(PATH=env["PATH"], LAN_REGISTRY="registry.lan:5005", IT_REGISTRY="10.4.4.4:5000",

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -16,72 +15,40 @@ import (
 // ci-mask-lan; the carrier is built in a temporary directory, with the
 // template's step text in its ci.yml and a wrapper that runs the real recipe.
 
-// carrierTests are the carried template tests, in testdata/carrier.
-var carrierTests = []string{"ci-mask-lan-tests.py", "job-output-handoff-tests.py"}
-
-const (
-	maskStepRun     = "run: make ci-mask-lan"
-	templateStepRun = "run: scripts/ci-mask-lan.sh"
-	maskSteps       = 8
-)
-
-// buildCarrier lays out the carrier the template tests expect and returns
-// its root.
-func buildCarrier(t *testing.T) string {
-	t.Helper()
-	root := repoRoot(t)
-	ci := readFile(t, ".github/workflows/ci.yml")
-	if n := strings.Count(ci, maskStepRun+"\n"); n != maskSteps {
-		t.Fatalf("ci.yml has %d %q steps, want %d", n, maskStepRun, maskSteps)
-	}
-	dir := t.TempDir()
-	write := func(rel, body string, mode os.FileMode) {
-		t.Helper()
-		p := filepath.Join(dir, filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte(body), mode); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write(".github/workflows/ci.yml", strings.ReplaceAll(ci, maskStepRun+"\n", templateStepRun+"\n"), 0o600)
-	wrapper := "#!/usr/bin/env bash\n" +
-		"# The carrier's ci-mask-lan.sh: the repository's make ci-mask-lan.\n" +
-		"unset MAKEFLAGS MFLAGS MAKELEVEL\n" +
-		"exec make -s --no-print-directory -C '" + root + "' ci-mask-lan\n"
-	write("scripts/ci-mask-lan.sh", wrapper, 0o700)
-	for _, name := range carrierTests {
-		write("testdata/"+name, readFile(t, "test/ci/workflows/testdata/carrier/"+name), 0o600)
-	}
-	return dir
-}
-
-// TestCarrierRunsTheTemplateMaskTests runs the carried ci-mask-lan-tests.py
-// (M1 to M5 and the script cases) and job-output-handoff-tests.py (H1 to H5)
-// on this repository's ci.yml and make ci-mask-lan.
+// TestCarrierRunsTheTemplateMaskTests holds the carried ci-mask-lan-tests.py
+// (M1 to M5 and the script cases) and job-output-handoff-tests.py (H1 to
+// H5) on this repository's ci.yml and make ci-mask-lan, through make
+// ci-carrier-tests. The toolchain image, where CI runs the Go tests, ships
+// python3 for them: in CI (CI=true) a missing python3 fails the test, and
+// only a workstation without it skips.
 func TestCarrierRunsTheTemplateMaskTests(t *testing.T) {
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Skip("python3 is not on PATH")
+	if _, err := exec.LookPath("python3"); err != nil {
+		if os.Getenv("CI") == "true" {
+			t.Fatalf("python3 is not on PATH in CI: the carried template tests cannot run: %v", err)
+		}
+		t.Skip("python3 is not on PATH (CI fails here, it never skips)")
 	}
 	if _, err := exec.LookPath("make"); err != nil {
-		t.Fatalf("make is required to run make ci-mask-lan: %v", err)
+		t.Fatalf("make is required to run make ci-carrier-tests: %v", err)
 	}
-	dir := buildCarrier(t)
-	for _, name := range carrierTests {
-		t.Run(name, func(t *testing.T) {
-			cmd := exec.Command(python, "-I", filepath.Join("testdata", name)) // #nosec G204 -- python3 from PATH on a carried test file
-			cmd.Dir = dir
-			var out bytes.Buffer
-			cmd.Stdout, cmd.Stderr = &out, &out
-			if err := cmd.Run(); err != nil {
-				t.Fatalf("python3 -I testdata/%s: %v\n%s", name, err, out.String())
-			}
-			lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-			t.Logf("%s: %s", name, lines[len(lines)-1])
-		})
+	cmd := exec.Command("make", "-s", "--no-print-directory", "ci-carrier-tests")
+	cmd.Dir = repoRoot(t)
+	for _, kv := range os.Environ() {
+		if k, _, _ := strings.Cut(kv, "="); k != "MAKEFLAGS" && k != "MFLAGS" && k != "MAKELEVEL" {
+			cmd.Env = append(cmd.Env, kv)
+		}
 	}
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("make ci-carrier-tests: %v\n%s", err, out.String())
+	}
+	for _, name := range []string{"ci-mask-lan-tests.py", "job-output-handoff-tests.py"} {
+		if !strings.Contains(out.String(), name+": ") {
+			t.Errorf("make ci-carrier-tests did not run %s:\n%s", name, out.String())
+		}
+	}
+	t.Log(strings.TrimSpace(out.String()))
 }
 
 // cancelWord is the runner's spelling of a stopped run's status.
