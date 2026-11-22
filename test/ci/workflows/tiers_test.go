@@ -64,24 +64,52 @@ func sameSet(a, b []string) bool {
 	return strings.Join(a, ",") == strings.Join(b, ",")
 }
 
-// TestNoScheduleTrigger: this repository's nightly run is suspended, so no
-// workflow is scheduled: main's full tier and Soak run on dispatch (the full
-// tier also on push to main and a `ci:full` PR), and nightly.yml stays
-// dispatch-only (sdlc §5a).
-func TestNoScheduleTrigger(t *testing.T) {
+// TestOnlyNightlyIsScheduled: the nightlies run without manual execution
+// (owner order, 2026-11-22), so nightly.yml, and only nightly.yml, carries a
+// schedule: exactly one cron, exactly `45 5 * * *` (05:45 UTC), and it keeps
+// workflow_dispatch for a run on demand. Every other workflow has no schedule:
+// main's full tier and Soak run on dispatch (the full tier also on push to
+// main and a `ci:full` PR).
+func TestOnlyNightlyIsScheduled(t *testing.T) {
+	const nightly, wantCron = "nightly.yml", "45 5 * * *"
+	cronLine := regexp.MustCompile(`(?m)^\s*-\s*cron:\s*['"]?([^'"\n]*?)['"]?\s*$`)
+	dispatchOn := regexp.MustCompile(`(?m)^  workflow_dispatch:`)
 	entries, err := os.ReadDir(filepath.Join(repoRoot(t), ".github", "workflows"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var scheduled []string
+	sawNightly := false
 	for _, e := range entries {
 		f := ".github/workflows/" + e.Name()
-		if n := len(scheduleOn.FindAllString(readFile(t, f), -1)); n > 0 {
+		body := readFile(t, f)
+		if e.Name() == nightly {
+			sawNightly = true
+			if n := len(scheduleOn.FindAllString(body, -1)); n != 1 {
+				t.Errorf("%s: %d schedule: triggers, want 1", nightly, n)
+			}
+			crons := cronLine.FindAllStringSubmatch(body, -1)
+			if len(crons) != 1 || crons[0][1] != wantCron {
+				var got []string
+				for _, c := range crons {
+					got = append(got, c[1])
+				}
+				t.Errorf("%s: cron %q, want exactly [%q]", nightly, got, wantCron)
+			}
+			if !dispatchOn.MatchString(body) {
+				t.Errorf("%s: no workflow_dispatch trigger, want it kept", nightly)
+			}
+			continue
+		}
+		if n := len(scheduleOn.FindAllString(body, -1)); n > 0 {
 			scheduled = append(scheduled, fmt.Sprintf("%s:%d", e.Name(), n))
 		}
 	}
+	if !sawNightly {
+		t.Errorf("%s not found", nightly)
+	}
 	if len(scheduled) > 0 {
-		t.Errorf("schedule: triggers %v, want none", scheduled)
+		t.Errorf("schedule: triggers %v outside %s, want none", scheduled, nightly)
 	}
 }
 
