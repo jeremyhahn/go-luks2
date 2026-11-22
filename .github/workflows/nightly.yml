@@ -10,12 +10,16 @@ name: Nightly
 # tracked issues land, a job may move back to ci.yml — that move is deliberate,
 # not automatic.
 #
-# DEVIATION (#341, sdlc §5a): NO `schedule` trigger. No CI workflow is scheduled;
-# the coordinator's loop dispatches this file nightly, together with ci.yml,
-# whose workflow_dispatch runs the full tier. FIPS moved to ci.yml's full tier
-# then, which runs it on every push to main as well. What remains is trivy.
+# SCHEDULED at `45 5 * * *` (05:45 UTC daily). Owner order, 2026-11-22: "the
+# nightlys shouldnt require any manual executiion, it should be getting run
+# automatically!" It supersedes the 2026-10-11 no-schedule rule, for this
+# workflow only: no other workflow is scheduled, and workflow_dispatch stays
+# for a run on demand. FIPS moved to ci.yml's full tier, which runs it on
+# every push to main as well. What remains is trivy.
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '45 5 * * *'
 
 permissions:
   contents: read
