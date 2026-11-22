@@ -135,12 +135,13 @@ const hostedRunner = "ubuntu-latest"
 // not list them, so a typo of one is still caught as an unknown runner.
 var retiredLabels = []string{"bigdisk", "ci-gate", "batch", "bigdisk-docker"}
 
-// TestCIGateRunsOnTheHostedRunner: CI Gate runs on ubuntu-latest. It still
-// takes no checkout and no action: the gate is one run step that reads needs.
-func TestCIGateRunsOnTheHostedRunner(t *testing.T) {
+// TestCIGateRunsOnTheSelectedRunner: CI Gate runs on ci-template v1.54's
+// `runner` output form. It still takes no checkout and no action: the gate is
+// one run step that reads needs.
+func TestCIGateRunsOnTheSelectedRunner(t *testing.T) {
 	gate := job(t, readFile(t, ".github/workflows/ci.yml"), "ci-gate")
-	if got := jobRunsOn.FindAllStringSubmatch(gate, -1); len(got) != 1 || got[0][1] != hostedRunner {
-		t.Errorf("CI Gate runs on %v, want %s", got, hostedRunner)
+	if got := jobRunsOn.FindAllStringSubmatch(gate, -1); len(got) != 1 || got[0][1] != selectRunsOnGate+selectRunsOnNote {
+		t.Errorf("CI Gate runs on %v, want %s", got, selectRunsOnGate+selectRunsOnNote)
 	}
 	if strings.Contains(gate, "actions/checkout") {
 		t.Error("CI Gate checks out the repository; the gate is one run step")
@@ -155,19 +156,19 @@ func TestCIGateRunsOnTheHostedRunner(t *testing.T) {
 // devcontainer images.
 const freeDiskStep = "Free runner disk"
 
-// TestEveryCIJobRunsOnTheHostedRunner: every ci.yml job runs on
-// a literal ubuntu-latest (ruling 999): no routing expression, no self-hosted
-// label. Every job that builds a devcontainer image frees the runner's disk
-// first, on github.com only, before any image build.
-func TestEveryCIJobRunsOnTheHostedRunner(t *testing.T) {
+// TestEveryCIJobRunsOnTheSelectedPool: every ci.yml job runs on its
+// ci-template v1.54 runs-on line (TestCIJobsRunOnTheV154Selection pins each).
+// Every job that builds a devcontainer image frees the runner's disk first,
+// on github.com and a GitHub-hosted runner only, before any image build.
+func TestEveryCIJobRunsOnTheSelectedPool(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
 	for _, id := range jobIDs(t, ci) {
 		got := jobRunsOn.FindAllStringSubmatch(job(t, ci, id), -1)
 		if id == "preflight" && len(got) == 1 && isPreflightTemplateRunsOn(t, ".github/workflows/ci.yml", ci, got[0][1]) {
 			continue // ci-template v1.49: hosted off github.com and by CI_PREFLIGHT_RUNS_ON
 		}
-		if len(got) != 1 || got[0][1] != hostedRunner {
-			t.Errorf("job %s runs on %v, want %s (ruling 999)", id, got, hostedRunner)
+		if len(got) != 1 || got[0][1] != selectRunsOn(id)+selectRunsOnNote {
+			t.Errorf("job %s runs on %v, want %s (ci-template v1.54)", id, got, selectRunsOn(id)+selectRunsOnNote)
 		}
 	}
 	for _, id := range toolchainJobs {
@@ -184,6 +185,9 @@ func TestEveryCIJobRunsOnTheHostedRunner(t *testing.T) {
 		if !strings.Contains(block, "github.server_url == 'https://github.com'") {
 			t.Errorf("job %s's %q step is not limited to github.com:\n%s", id, freeDiskStep, block)
 		}
+		if !strings.Contains(block, "runner.environment == 'github-hosted'") {
+			t.Errorf("job %s's %q step is not limited to a GitHub-hosted runner:\n%s", id, freeDiskStep, block)
+		}
 	}
 }
 
@@ -195,6 +199,9 @@ func TestNoRetiredRunnerLabel(t *testing.T) {
 		for _, m := range jobRunsOn.FindAllStringSubmatch(text, -1) {
 			if isPreflightTemplateRunsOn(t, rel(t, f), text, m[1]) {
 				continue
+			}
+			if rel(t, f) == ".github/workflows/ci.yml" && (m[1] == selectRunsOnDocker+selectRunsOnNote || m[1] == selectRunsOnGate+selectRunsOnNote) {
+				continue // ci-template v1.54's selection; each job's form is pinned by TestCIJobsRunOnTheV154Selection
 			}
 			if l, ok := retiredRunsOnLabel(m[1]); ok {
 				t.Errorf("%s runs a job on the retired label %s: %s", rel(t, f), l, m[1])
@@ -210,9 +217,9 @@ func TestNoRetiredRunnerLabel(t *testing.T) {
 }
 
 // isPreflightTemplateRunsOn reports whether a runs-on value is ci-template
-// v1.52's preflight form on ci.yml's preflight job, held once in the file:
-// the one place bigdisk may still be named (the github.com default, which
-// CI_PREFLIGHT_RUNS_ON overrides).
+// v1.52's preflight form on ci.yml's preflight job, held once in the file
+// (the github.com default, which CI_PREFLIGHT_RUNS_ON overrides). The other
+// place bigdisk is named is v1.54's selection forms on every other job.
 func isPreflightTemplateRunsOn(t *testing.T, path, workflow, value string) bool {
 	t.Helper()
 	if path != ".github/workflows/ci.yml" || value != preflightRunsOn+"   # v1.52" {

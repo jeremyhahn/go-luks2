@@ -56,6 +56,12 @@ func runsOnViolation(file, jobID, line string) string {
 		// with CI_PREFLIGHT_RUNS_ON unset and set to its fallback.
 		return ""
 	}
+	if file == "ci.yml" && jobID != "preflight" && strings.TrimSpace(value) == selectRunsOn(jobID) {
+		// ci-template v1.54: every other ci.yml job runs on the pool
+		// preflight's balanced runner pool step picks, by this exact form;
+		// the runner-labels step checks both pools.
+		return ""
+	}
 	value, why := runsOnLabel(strings.TrimSpace(value))
 	switch {
 	case why != "":
@@ -80,6 +86,45 @@ func runsOnViolation(file, jobID, line string) string {
 		return "credential waiver is allowed only on the Codex review job, not " + file + "/" + jobID
 	}
 	return ""
+}
+
+// selectRunsOnDocker and selectRunsOnGate are ci-template v1.54's runs-on
+// values, byte for byte: CI Gate reads preflight's `runner` output and every
+// other ci.yml job but preflight its `runner_docker` output. On github.com
+// each is ubuntu-latest or the self-hosted list the balanced runner pool step
+// picks; off github.com the forge label. selectRunsOnNote is the template's
+// trailing comment on both.
+const (
+	selectRunsOnDocker = "${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner_docker) || 'bigdisk' }}"
+	selectRunsOnGate   = "${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner || '\"ubuntu-latest\"') || 'ci-gate' }}"
+	selectRunsOnNote   = "   # v1.48"
+)
+
+// selectRunsOn is the v1.54 runs-on value of one ci.yml job other than
+// preflight: the gate's form for ci-gate, the image form for every other job.
+func selectRunsOn(jobID string) string {
+	if jobID == "ci-gate" {
+		return selectRunsOnGate
+	}
+	return selectRunsOnDocker
+}
+
+// TestCIJobsRunOnTheV154Selection: every ci.yml job runs on exactly the
+// ci-template v1.54 runs-on line for its kind, trailing comment included:
+// preflight on the template's own form, CI Gate on the `runner` output and
+// every other job on the `runner_docker` output.
+func TestCIJobsRunOnTheV154Selection(t *testing.T) {
+	ci := readFile(t, ".github/workflows/ci.yml")
+	for _, id := range jobIDs(t, ci) {
+		want := selectRunsOn(id) + selectRunsOnNote
+		if id == "preflight" {
+			want = preflightRunsOn + "   # v1.52"
+		}
+		got := jobRunsOn.FindAllStringSubmatch(job(t, ci, id), -1)
+		if len(got) != 1 || got[0][1] != want {
+			t.Errorf("job %s runs on %v, want exactly %q (ci-template v1.54)", id, got, want)
+		}
+	}
 }
 
 // templateRoutingExpression is the handbook code-review.yml template's
@@ -168,6 +213,18 @@ func TestRunsOnViolation(t *testing.T) {
 		{"v1.52 preflight form on another job", "ci.yml", "lint", " " + preflightRunsOn, false},
 		{"v1.52 preflight form outside ci.yml", "batch.yml", "preflight", " " + preflightRunsOn, false},
 		{"v1.52 preflight form, other default", "ci.yml", "preflight", " " + strings.Replace(preflightRunsOn, `"bigdisk"]`, `"bigdisk-docker"]`, 1), false},
+		{"v1.54 image form", "ci.yml", "lint", " " + selectRunsOnDocker + selectRunsOnNote, true},
+		{"v1.54 image form on a repository job", "ci.yml", "test-race", " " + selectRunsOnDocker, true},
+		{"v1.54 gate form", "ci.yml", "ci-gate", " " + selectRunsOnGate + selectRunsOnNote, true},
+		{"v1.54 image form on CI Gate", "ci.yml", "ci-gate", " " + selectRunsOnDocker, false},
+		{"v1.54 gate form on another job", "ci.yml", "lint", " " + selectRunsOnGate, false},
+		{"v1.54 image form on preflight", "ci.yml", "preflight", " " + selectRunsOnDocker, false},
+		{"v1.54 image form outside ci.yml", "batch.yml", "lint", " " + selectRunsOnDocker, false},
+		{"v1.54 gate form outside ci.yml", "code-review.yml", "ci-gate", " " + selectRunsOnGate, false},
+		{"v1.54 image form, other output", "ci.yml", "lint", " " + strings.Replace(selectRunsOnDocker, "runner_docker", "runner", 1), false},
+		{"v1.54 image form, other fallback", "ci.yml", "lint", " " + strings.Replace(selectRunsOnDocker, "'bigdisk'", "'qwen'", 1), false},
+		{"v1.54 image form, other spacing", "ci.yml", "lint", " " + strings.Replace(selectRunsOnDocker, "${{ ", "${{", 1), false},
+		{"v1.54 image form quoted", "ci.yml", "lint", " '" + selectRunsOnDocker + "'", false},
 		{"self-hosted with unrelated comment", "ci.yml", "lint", " qwen  # CUSTOMIZE: the host", false},
 		{"label list", "ci.yml", "lint", " [self-hosted, linux]", false},
 		{"label list waived", "ci.yml", "lint", " [self-hosted, gpu]  # self-hosted: hardware: the GPU", false},

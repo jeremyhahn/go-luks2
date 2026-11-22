@@ -1,7 +1,10 @@
 package workflows
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -242,5 +245,92 @@ func TestPreflightRunsOnTemplateForm(t *testing.T) {
 	bot := "          BOT: ${{ github.server_url != 'https://github.com' && (github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && secrets.AGENT_TOKEN || '' }}\n"
 	if !strings.Contains(job(t, ci, "preflight"), bot) {
 		t.Error("the schedule guard's BOT is not v1.49's off-github.com-only form")
+	}
+}
+
+// balancedPoolStep is ci-template v1.54's runner selection step in preflight;
+// its outputs `runner` and `runner_docker` are every other job's runs-on.
+const balancedPoolStep = "Balanced runner pool (ruling 1137)"
+
+// balancedPoolSHA256 is the SHA-256 of the v1.54 template's step body (the
+// text after its `- name:` line up to the next step), byte for byte. A change
+// to the step is a template bump, made with this pin.
+const balancedPoolSHA256 = "82eeb1dfddc72f27b053e94529ff41f33b7701acbbb213ee5b2355bd5d79e49c"
+
+// runnerSelectTests is the template's testdata/runner-select-tests.py,
+// carried verbatim (runnerSelectTestsSHA256). It reads the step out of the
+// ci.yml in its parent directory and runs it against a fake Actions API.
+const (
+	runnerSelectTests       = "test/ci/workflows/testdata/runner-select-tests.py"
+	runnerSelectTestsSHA256 = "b53de0fa0282b1825d60f259680b293a259ef62398c31312daf2c15e311b346f"
+)
+
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+// TestBalancedRunnerPoolStepIsTheTemplates: preflight holds v1.54's
+// `Balanced runner pool` step once, its body the template's byte for byte,
+// and outputs what it picks as `runner` and `runner_docker`; v1.48's
+// overflow step and its env limits are gone.
+func TestBalancedRunnerPoolStepIsTheTemplates(t *testing.T) {
+	ci := readFile(t, ".github/workflows/ci.yml")
+	if n := strings.Count(ci, "      - name: "+balancedPoolStep+"\n"); n != 1 {
+		t.Fatalf("ci.yml holds the %q step %d times, want 1", balancedPoolStep, n)
+	}
+	body := stepBody(t, balancedPoolStep)
+	if got := sha256Hex(body); got != balancedPoolSHA256 {
+		t.Errorf("the %q step body drifted from ci-template v1.54: sha256 %s, want %s", balancedPoolStep, got, balancedPoolSHA256)
+	}
+	if !strings.HasPrefix(body, "        id: runner\n") {
+		t.Errorf("the %q step's id is not `runner`", balancedPoolStep)
+	}
+	pre := job(t, ci, "preflight")
+	for _, out := range []string{
+		"      runner: ${{ steps.runner.outputs.runner }}\n",
+		"      runner_docker: ${{ steps.runner.outputs.runner_docker }}\n",
+	} {
+		if !strings.Contains(pre, out) {
+			t.Errorf("preflight does not output %q", strings.TrimSpace(out))
+		}
+	}
+	for _, gone := range []string{"HOSTED_JOBS_PER_REPO:", "HOSTED_QUEUE_GRACE_SECONDS:", "      - name: Hosted or overflow runner"} {
+		if strings.Contains(ci, gone) {
+			t.Errorf("ci.yml still holds %q, which ci-template v1.54 removes", gone)
+		}
+	}
+}
+
+// TestRunnerSelectTestsPassOnTheStep: the carried template test data is the
+// template's, and every case passes against the step as ci.yml holds it. It
+// needs python3 and bash; without them it skips, and
+// TestBalancedRunnerPoolStepIsTheTemplates still pins the step.
+func TestRunnerSelectTestsPassOnTheStep(t *testing.T) {
+	data := readFile(t, runnerSelectTests)
+	if got := sha256Hex(data); got != runnerSelectTestsSHA256 {
+		t.Fatalf("%s is not ci-template v1.54's runner-select-tests.py: sha256 %s, want %s", runnerSelectTests, got, runnerSelectTestsSHA256)
+	}
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is not installed; the step body is pinned by TestBalancedRunnerPoolStepIsTheTemplates")
+	}
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is not installed; the step body is pinned by TestBalancedRunnerPoolStepIsTheTemplates")
+	}
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "testdata"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ci.yml"), []byte(readFile(t, ".github/workflows/ci.yml")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(dir, "testdata", "runner-select-tests.py")
+	if err := os.WriteFile(script, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(python, "-I", script).CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "ALL PASS") {
+		t.Fatalf("runner-select-tests.py against ci.yml: %v\n%s", err, out)
 	}
 }
