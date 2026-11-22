@@ -1121,7 +1121,7 @@ jobs:
           # PROTECTED: the workflow file names (stems) that always take a review round
           # (InfoSec Y-3): the review workflow(s), the automerge workflow and every
           # release, publish or nightly workflow in .github/workflows/.
-          PROTECTED = ["code-review", "qwen-review", "automerge", "release", "nightly"]
+          PROTECTED = ["code-review", "qwen-review", "automerge", "release", "nightly", "ci", "scans", "signatures"]
           # CI_FILE and GATE_JOB: the CI workflow and its gate job, whose `needs` list
           # on main must still name jobs that exist at the head (InfoSec Y-4).
           CI_FILE = ".github/workflows/ci.yml"
@@ -3923,7 +3923,7 @@ jobs:
       # CUSTOMIZE only to narrow it (ruling 589: docs/, *.md, .github/ or
       # .gitea/, changelog.d/ and nothing else). An extended regex over the whole path;
       # a rename must match on both its old and its new path.
-      NO_REVIEW_PATHS: '^(docs/.+|(.+/)?[^/]+\.md|\.github/.+|\.gitea/.+|(.+/)?changelog\.d/.+)$'
+      NO_REVIEW_PATHS: '^(docs/.+|(.+/)?[^/]+\.md|(.+/)?changelog\.d/.+)$'
       # v5.12.1: the docs half of NO_REVIEW_PATHS, exempt on its own; the CI
       # config half (.github/, .gitea/) is exempt only when SCOPE_SKIP is true.
       DOCS_PATHS: '^(docs/.+|(.+/)?[^/]+\.md|(.+/)?changelog\.d/.+)$'
