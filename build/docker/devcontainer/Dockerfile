@@ -142,7 +142,9 @@ FROM base AS toolchain
 
 # make ships in the Go image already; jq, git and bash are asserted here
 # rather than assumed. shellcheck is what actionlint runs over the workflows'
-# shell steps: without it actionlint skips them silently. sudo is for the VS
+# shell steps: without it actionlint skips them silently. python3 runs the
+# carried ci-template tests (make ci-carrier-tests), which CI's Go tests run
+# here and which fail, never skip, in CI without it. sudo is for the VS
 # Code devcontainer's integration-test-setup guard below.
 #
 # curl, libcurl4t64 and libcurl3t64-gnutls come with the Go base image, and this
@@ -161,6 +163,7 @@ RUN set -eu; \
       bash \
       git \
       jq \
+      python3 \
       shellcheck \
       sudo \
       curl \
@@ -171,7 +174,7 @@ RUN set -eu; \
       v="$(dpkg-query -W -f '${Version}' "$p")" || { echo "$p is not installed" >&2; exit 1; }; \
       dpkg --compare-versions "$v" ge 8.14.1-2+deb13u7 || { echo "$p $v predates the curl security fixes" >&2; exit 1; }; \
     done; \
-    for c in make bash git jq shellcheck sudo curl; do \
+    for c in make bash git jq python3 shellcheck sudo curl; do \
       command -v "$c" >/dev/null || { echo "$c is not installed" >&2; exit 1; }; \
     done
 

@@ -31,6 +31,24 @@
 # main run, and trusted-firmware had 40 main runs queued ahead of PR work.
 # A schedule run keeps `schedule-{repository}` and a workflow_dispatch run
 # keeps `main-workflow_dispatch`, so neither shares a group with a push run.
+# v1.53 also (the superseded main runs' red gates): (1) CI Gate runs on
+# !cancelled() off pull_request, so a main run cancelled by a newer push
+# posts a skipped gate, not a failed one; a pull request keeps always(), as
+# a skipped required check counts as passed (testdata/ci-gate-cancel-tests.py).
+# (2) main-green for a release or an alpha tag is a ci.yml run for the exact
+# commit to be tagged, completed with conclusion success: a push run, or,
+# when the newest push runs were cancelled by later pushes, a
+# workflow_dispatch run on main (group main-workflow_dispatch, which no push
+# cancels); the tag goes on that run's head_sha. A red, cancelled or missing
+# main run never stops a pull request's merge (local-software-factory.md
+# steps 11 and 12). (3) preflight takes the Dells' bigdisk pool while
+# CI_PREFLIGHT_RUNS_ON is unset; the Infra Department sets it to
+# `"ubuntu-latest"` on every repository when that pool has no online runner
+# for 10 minutes, and unsets it when the pool is back (devops.md). (4)
+# make ci-mask-lan (CUSTOMIZE (go-luks2): the Makefile target, not
+# ci-mask-lan.sh) masks internal host names as well as private addresses, and
+# no comment names an internal repository. test/ci/workflows/carrier_test.go
+# runs the template's two mask tests and the gate-cancel cases on this file.
 # cancel-in-progress stays a literal `true`. Only the group changes. Adopt as
 # a ci.yml-only PR that keeps the CUSTOMIZE blocks, together with v1.52's
 # runner selection (internal pull requests run on our runners), separately
@@ -292,7 +310,7 @@
 # v1.36 (2026-11-13, Tenant Agent, owner approval 16:1xZ: keep CI caches
 # local): a self-hosted job never restores or saves the Actions cache, which
 # lives in Azure blob storage behind the office's internet line. The
-# self-hosted pools (dept-infra github/runner) give every job persistent
+# self-hosted pools (the Infra Department's runner configuration) give every job persistent
 # per-host caches: GOCACHE and GOMODCACHE, CI_HOST_CACHE for anything else a
 # repository caches (trusted-firmware's OP-TEE stack under
 # $CI_HOST_CACHE/optee/<pin>, renamed into place whole), GOPROXY and
@@ -1024,6 +1042,15 @@ jobs:
       # before any step that builds can print one.
       # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211).
       - name: Mask the LAN addresses
+        env:
+          # v1.53: the internal registry is the Actions secret CI_IMAGE_REGISTRY,
+          # never a `vars` value. Actions prints a step's env in its log header
+          # before the run body, so an add-mask comes too late for a variable;
+          # the runner masks a secret from its first byte. A GitHub-hosted run
+          # receives none. make ci-mask-lan also masks the bare host name.
+          # CUSTOMIZE: one such line per other *_REGISTRY secret this job reads
+          # (test/ci/workflows/testdata/carrier/ci-mask-lan-tests.py M1 to M5).
+          CI_IMAGE_REGISTRY: ${{ runner.environment != 'github-hosted' && secrets.CI_IMAGE_REGISTRY || '' }}
         run: make ci-mask-lan
 
       - name: Reap stale CI stacks
@@ -1279,6 +1306,15 @@ jobs:
       # before any step that builds can print one.
       # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211).
       - name: Mask the LAN addresses
+        env:
+          # v1.53: the internal registry is the Actions secret CI_IMAGE_REGISTRY,
+          # never a `vars` value. Actions prints a step's env in its log header
+          # before the run body, so an add-mask comes too late for a variable;
+          # the runner masks a secret from its first byte. A GitHub-hosted run
+          # receives none. make ci-mask-lan also masks the bare host name.
+          # CUSTOMIZE: one such line per other *_REGISTRY secret this job reads
+          # (test/ci/workflows/testdata/carrier/ci-mask-lan-tests.py M1 to M5).
+          CI_IMAGE_REGISTRY: ${{ runner.environment != 'github-hosted' && secrets.CI_IMAGE_REGISTRY || '' }}
         run: make ci-mask-lan
 
       - name: Reap stale CI stacks
@@ -1557,6 +1593,15 @@ jobs:
       # before any step that builds can print one.
       # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211).
       - name: Mask the LAN addresses
+        env:
+          # v1.53: the internal registry is the Actions secret CI_IMAGE_REGISTRY,
+          # never a `vars` value. Actions prints a step's env in its log header
+          # before the run body, so an add-mask comes too late for a variable;
+          # the runner masks a secret from its first byte. A GitHub-hosted run
+          # receives none. make ci-mask-lan also masks the bare host name.
+          # CUSTOMIZE: one such line per other *_REGISTRY secret this job reads
+          # (test/ci/workflows/testdata/carrier/ci-mask-lan-tests.py M1 to M5).
+          CI_IMAGE_REGISTRY: ${{ runner.environment != 'github-hosted' && secrets.CI_IMAGE_REGISTRY || '' }}
         run: make ci-mask-lan
 
       # A source check on the runner's shell: no make recipe runs here.
@@ -1683,6 +1728,15 @@ jobs:
       # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211); this
       # go-luks2 job builds an image too, so it masks as the template's do.
       - name: Mask the LAN addresses
+        env:
+          # v1.53: the internal registry is the Actions secret CI_IMAGE_REGISTRY,
+          # never a `vars` value. Actions prints a step's env in its log header
+          # before the run body, so an add-mask comes too late for a variable;
+          # the runner masks a secret from its first byte. A GitHub-hosted run
+          # receives none. make ci-mask-lan also masks the bare host name.
+          # CUSTOMIZE: one such line per other *_REGISTRY secret this job reads
+          # (test/ci/workflows/testdata/carrier/ci-mask-lan-tests.py M1 to M5).
+          CI_IMAGE_REGISTRY: ${{ runner.environment != 'github-hosted' && secrets.CI_IMAGE_REGISTRY || '' }}
         run: make ci-mask-lan
 
       - name: Reap stale CI stacks
@@ -1807,6 +1861,15 @@ jobs:
       # before any step that builds can print one.
       # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211).
       - name: Mask the LAN addresses
+        env:
+          # v1.53: the internal registry is the Actions secret CI_IMAGE_REGISTRY,
+          # never a `vars` value. Actions prints a step's env in its log header
+          # before the run body, so an add-mask comes too late for a variable;
+          # the runner masks a secret from its first byte. A GitHub-hosted run
+          # receives none. make ci-mask-lan also masks the bare host name.
+          # CUSTOMIZE: one such line per other *_REGISTRY secret this job reads
+          # (test/ci/workflows/testdata/carrier/ci-mask-lan-tests.py M1 to M5).
+          CI_IMAGE_REGISTRY: ${{ runner.environment != 'github-hosted' && secrets.CI_IMAGE_REGISTRY || '' }}
         run: make ci-mask-lan
 
       - name: Reap stale CI stacks
@@ -1998,6 +2061,15 @@ jobs:
       # before any step that builds can print one.
       # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211).
       - name: Mask the LAN addresses
+        env:
+          # v1.53: the internal registry is the Actions secret CI_IMAGE_REGISTRY,
+          # never a `vars` value. Actions prints a step's env in its log header
+          # before the run body, so an add-mask comes too late for a variable;
+          # the runner masks a secret from its first byte. A GitHub-hosted run
+          # receives none. make ci-mask-lan also masks the bare host name.
+          # CUSTOMIZE: one such line per other *_REGISTRY secret this job reads
+          # (test/ci/workflows/testdata/carrier/ci-mask-lan-tests.py M1 to M5).
+          CI_IMAGE_REGISTRY: ${{ runner.environment != 'github-hosted' && secrets.CI_IMAGE_REGISTRY || '' }}
         run: make ci-mask-lan
 
       - name: Reap stale CI stacks
@@ -2206,6 +2278,15 @@ jobs:
       # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211); this
       # go-luks2 job builds an image too, so it masks as the template's do.
       - name: Mask the LAN addresses
+        env:
+          # v1.53: the internal registry is the Actions secret CI_IMAGE_REGISTRY,
+          # never a `vars` value. Actions prints a step's env in its log header
+          # before the run body, so an add-mask comes too late for a variable;
+          # the runner masks a secret from its first byte. A GitHub-hosted run
+          # receives none. make ci-mask-lan also masks the bare host name.
+          # CUSTOMIZE: one such line per other *_REGISTRY secret this job reads
+          # (test/ci/workflows/testdata/carrier/ci-mask-lan-tests.py M1 to M5).
+          CI_IMAGE_REGISTRY: ${{ runner.environment != 'github-hosted' && secrets.CI_IMAGE_REGISTRY || '' }}
         run: make ci-mask-lan
 
       - name: Reap stale CI stacks
@@ -2286,6 +2367,15 @@ jobs:
       # CUSTOMIZE (go-luks2): Makefile target, no shell scripts (#211); this
       # go-luks2 job builds an image too, so it masks as the template's do.
       - name: Mask the LAN addresses
+        env:
+          # v1.53: the internal registry is the Actions secret CI_IMAGE_REGISTRY,
+          # never a `vars` value. Actions prints a step's env in its log header
+          # before the run body, so an add-mask comes too late for a variable;
+          # the runner masks a secret from its first byte. A GitHub-hosted run
+          # receives none. make ci-mask-lan also masks the bare host name.
+          # CUSTOMIZE: one such line per other *_REGISTRY secret this job reads
+          # (test/ci/workflows/testdata/carrier/ci-mask-lan-tests.py M1 to M5).
+          CI_IMAGE_REGISTRY: ${{ runner.environment != 'github-hosted' && secrets.CI_IMAGE_REGISTRY || '' }}
         run: make ci-mask-lan
 
       - name: Reap stale CI stacks
@@ -2324,6 +2414,24 @@ jobs:
         if: always()
         run: rm -f "$RUNNER_TEMP/gomodauth.env"
 
+  # v1.53 (from a Codex P1 review finding on an image handoff): a job
+  # output never carries a registry address. The LAN mask
+  # registers each internal registry as a secret, and GitHub drops a job
+  # output that contains a masked value, so a consumer would read an empty
+  # reference. A CUSTOMIZE job that hands an image to another job exports
+  # only an unmasked identifier (the tag, the digest or its hex suffix), and
+  # each consumer rebuilds the reference from the secret CI_IMAGE_REGISTRY
+  # after its own mask step. The registry is never read from `vars`: a step's
+  # env is printed in its log header before the run body, and only a secret
+  # is masked from the first byte. A GitHub-hosted run receives none, so it
+  # takes the artifact path as before:
+  #   producer:  echo "image_tag=$tag" >> "$GITHUB_OUTPUT"
+  #   consumer:  env: { IT_REGISTRY: ${{ runner.environment != 'github-hosted' && secrets.CI_IMAGE_REGISTRY || '' }},
+  #                     IT_IMAGE_TAG: ${{ needs.<producer>.outputs.image_tag }} }
+  #              run: ref="$IT_REGISTRY/<repo>/it-image:$IT_IMAGE_TAG"
+  # test/ci/workflows/testdata/carrier/job-output-handoff-tests.py H1 to H5
+  # holds the rule; run it with a copy's path to check that copy.
+
   # v1.35.2 (Tenant Agent m2577): the commit signature gate is not a job of
   # this workflow. It is signatures.yml, on pull_request_target, so it runs
   # from the base branch and a pull request cannot edit the script that
@@ -2354,7 +2462,16 @@ jobs:
   ci-gate:
     name: CI Gate
     runs-on: ubuntu-latest
-    if: ${{ always() && (github.event_name != 'schedule' || needs.preflight.outputs.verdict != 'busy') }}
+    # v1.53 (the superseded main runs' red gates): with main-{event} a newer
+    # push cancels the older main run, and an always() gate then read the
+    # cancelled needs and failed, so every superseded main commit showed a red
+    # gate. Off pull_request the gate runs on !cancelled(): a cancelled run
+    # posts no gate result (skipped), and a run that is not cancelled still
+    # fails closed on any need that failed. A pull request keeps always(): a
+    # skipped required check counts as passed, so a cancelled PR run must post
+    # a failing gate, never a skip; only an older head of the PR is cancelled
+    # by its group, and the head that merges has its own run.
+    if: ${{ (startsWith(github.event_name, 'pull_request') && always() || !cancelled()) && (github.event_name != 'schedule' || needs.preflight.outputs.verdict != 'busy') }}
     timeout-minutes: 5        # v1.30
     # CUSTOMIZE: the repo's job list. Add every CUSTOMIZE job here AND as a
     # check line below; remove none of the template's jobs.
