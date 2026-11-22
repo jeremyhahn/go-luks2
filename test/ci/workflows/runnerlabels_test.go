@@ -306,8 +306,10 @@ func TestBalancedRunnerPoolStepIsTheTemplates(t *testing.T) {
 
 // TestRunnerSelectTestsPassOnTheStep: the carried template test data is the
 // template's, and every case passes against the step as ci.yml holds it. It
-// needs python3 and bash; without them it skips, and
-// TestBalancedRunnerPoolStepIsTheTemplates still pins the step.
+// needs python3 and bash; without them (the toolchain image has no python3)
+// it skips, TestBalancedRunnerPoolStepIsTheTemplates still pins the step, and
+// ci.yml's preflight step "Runner select self-test" runs the harness in CI
+// (TestRunnerSelectSelfTestStep pins that step).
 func TestRunnerSelectTestsPassOnTheStep(t *testing.T) {
 	// The repository ships no file that opens with #!, so the template's
 	// first line is carried here and the rest in testdata; together they
@@ -337,5 +339,51 @@ func TestRunnerSelectTestsPassOnTheStep(t *testing.T) {
 	out, err := exec.Command(python, "-I", script).CombinedOutput()
 	if err != nil || !strings.Contains(string(out), "ALL PASS") {
 		t.Fatalf("runner-select-tests.py against ci.yml: %v\n%s", err, out)
+	}
+}
+
+// runnerSelectSelfTest is the preflight step that runs runnerSelectTests in
+// CI, where the toolchain image that runs the Go tests has no python3.
+const runnerSelectSelfTest = "Runner select self-test"
+
+// TestRunnerSelectSelfTestStep: preflight, which CI Gate needs, runs the
+// carried harness against ci.yml the way TestRunnerSelectTestsPassOnTheStep
+// does, and fails on a failing case.
+func TestRunnerSelectSelfTestStep(t *testing.T) {
+	wf := readFile(t, ".github/workflows/ci.yml")
+	pre := job(t, wf, "preflight")
+	if !strings.Contains(pre, "      - name: "+runnerSelectSelfTest+"\n") {
+		t.Fatalf("preflight has no %q step", runnerSelectSelfTest)
+	}
+	gate := job(t, wf, "ci-gate")
+	needs := ""
+	for _, line := range strings.Split(gate, "\n") {
+		if strings.HasPrefix(line, "    needs: ") {
+			needs = line
+			break
+		}
+	}
+	if !strings.Contains(needs, "[preflight,") && !strings.Contains(needs, "needs: preflight") {
+		t.Errorf("ci-gate does not need preflight: %q", needs)
+	}
+	body := stepBody(t, runnerSelectSelfTest)
+	for _, want := range []string{
+		"set -euo pipefail\n",
+		`mkdir -p "$t/testdata"`,
+		`cp .github/workflows/ci.yml "$t/ci.yml"`,
+		`cp ` + runnerSelectTests + ` "$t/testdata/runner-select-tests.py"`,
+		`out=$(python3 -I "$t/testdata/runner-select-tests.py" 2>&1) || rc=$?`,
+		`[ "$rc" -eq 0 ] || {`,
+		`grep -q 'ALL PASS' <<<"$out" || {`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("%q lacks %q", runnerSelectSelfTest, want)
+		}
+	}
+	if strings.Contains(body, "continue-on-error") || strings.Contains(body, "|| true") {
+		t.Errorf("%q must fail the job on a failing case", runnerSelectSelfTest)
+	}
+	if strings.Contains(pre, "continue-on-error") {
+		t.Errorf("preflight carries continue-on-error; a failing %q must fail it", runnerSelectSelfTest)
 	}
 }

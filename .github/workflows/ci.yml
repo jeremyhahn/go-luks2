@@ -1151,6 +1151,26 @@ jobs:
         run: |
           python3 -I .github/scripts/runner_labels.py
 
+      # CUSTOMIZE (go-luks2): the toolchain image has no python3, so the Go
+      # test that runs the carried runner-select harness skips there. This
+      # step runs it here, on preflight's runner, the way that Go test does:
+      # ci.yml beside a testdata directory holding
+      # test/ci/workflows/testdata/runner-select-tests.py, run with
+      # `python3 -I`. A failing case, or no ALL PASS line, fails the job.
+      - name: Runner select self-test
+        run: |
+          set -euo pipefail
+          t=$(mktemp -d)
+          mkdir -p "$t/testdata"
+          cp .github/workflows/ci.yml "$t/ci.yml"
+          cp test/ci/workflows/testdata/runner-select-tests.py "$t/testdata/runner-select-tests.py"
+          rc=0
+          out=$(python3 -I "$t/testdata/runner-select-tests.py" 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          rm -rf "$t"
+          [ "$rc" -eq 0 ] || { echo "::error::runner-select-tests.py exited $rc"; exit 1; }
+          grep -q 'ALL PASS' <<<"$out" || { echo "::error::runner-select-tests.py printed no ALL PASS"; exit 1; }
+
       - name: Is every changed file docs or markdown?
         id: diff
         env:
