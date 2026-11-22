@@ -1,5 +1,5 @@
-# ci-template: v1.53 (customized)
-# go-luks2 keeps these deviations from v1.53, each marked
+# ci-template: v1.54 (customized)
+# go-luks2 keeps these deviations from v1.54, each marked
 # `# CUSTOMIZE (go-luks2):` where it lives: the merge-check, test-race and
 # fips jobs and their CI Gate lines; a literal `runs-on: ubuntu-latest` on
 # every job but preflight (owner ruling 999; v1.48's runner overflow is not
@@ -22,6 +22,40 @@
 # `Hosted or overflow runner (ruling 1024)` step, which go-luks2 does not
 # adopt (see above); only its changelog is carried. v1.51 and v1.52's
 # checker changes are in that file.
+# v1.54's balanced runner pool step replaces the overflow step above, and
+# go-luks2 does not adopt it either: every job but preflight keeps its
+# literal ubuntu-latest, so only the v1.54 changelog is carried.
+# v1.54 (2026-11-22, Tenant Agent ruling 1137, owner order: the Dells and
+# the AMD SEV host are always used for CI, and nothing sits idle): the
+# preflight step `Balanced runner pool (ruling 1137)` replaces the hosted
+# first rule of rulings 999 and 1024 (v1.46 to v1.53, `Hosted or overflow
+# runner (ruling 1024)`) with balancing. It counts this repository's jobs,
+# in progress plus queued, from one listing: H on hosted runners, S1 on
+# bigdisk (not bigdisk-docker) and S2 on bigdisk-docker. The limits are
+# repository variables set by the Infra Department, each a plain decimal
+# integer: CI_HOSTED_SHARE (HS, its share of the account's 40 hosted
+# runners; unset, 0 or not a number gives a ::warning and 12),
+# CI_SELF_HOSTED_BIGDISK (C1) and CI_SELF_HOSTED_BIGDISK_DOCKER (C2), the
+# self-hosted units of each label (either unset, 0 or not a number sends
+# the run hosted with a ::warning: both are needed to place a run on the
+# Dells). Hosted use is H/HS; self-hosted use is the larger of S1/C1 and
+# S2/C2. The pool with the lower use wins, compared by cross-multiplication
+# in whole numbers, and a tie goes hosted; a full pool (H >= HS, or
+# S1 >= C1 or S2 >= C2) sends the run to the other; with both full, the run
+# takes the pool with fewer queued jobs (bigdisk and bigdisk-docker
+# together), and a tie goes hosted. The self-hosted units are shared across
+# repositories, so C1 and C2 can overstate this repository's free room;
+# counting its queued self-hosted jobs corrects for that: when the units
+# are busy elsewhere its jobs queue, its self-hosted use rises, and its
+# runs go hosted. The grace period, HOSTED_JOBS_PER_REPO and
+# HOSTED_QUEUE_GRACE_SECONDS are removed. Unchanged: a fork's head takes the
+# hosted default with a ::notice and no call (v1.52), off github.com there
+# is no selection, the token reaches curl from a file descriptor, and a
+# reply that is not 200 or a listing short of its total sends the run
+# hosted with a ::warning. Every workflow that reads the outputs `runner`
+# and `runner_docker` takes the same decision. testdata/runner-select-tests.py
+# holds the cases. Adopt as a ci.yml-only bump that keeps the CUSTOMIZE
+# blocks; CI configuration rolls out at once (ruling 443).
 # v1.53 (2026-11-21, Tenant Agent ruling 1087, owner order: remove the
 # bottlenecks): main has one concurrency group per event again, `main-{event}`,
 # so a newer push to main cancels the older main run still queued or in
