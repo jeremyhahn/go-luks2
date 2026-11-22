@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Tests for ci-template v1.53: no registry address in a job output.
 
 From a Codex P1 review finding on an image handoff. v1.53's
