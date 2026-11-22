@@ -75,6 +75,40 @@ func TestCIMaskLANPrintsNothingOnAPublicEnvironment(t *testing.T) {
 	}
 }
 
+// v1.53: a host name is internal when it is a single label or sits under an
+// internal suffix, and every *_REGISTRY variable is scanned.
+func TestCIMaskLANMasksHostNamesAndEveryRegistry(t *testing.T) {
+	got := maskLines(t, map[string]string{
+		"DEVCACHE_APK":      "http://cachehost:3142/alpine",
+		"GOPROXY":           "http://athens.example.corp:3000|https://proxy.golang.org,direct",
+		"LAN_REGISTRY":      "registry.lan:5005",
+		"IT_REGISTRY":       "10.1.2.3:5000/it",
+		"CI_IMAGE_REGISTRY": "ghcr.io/owner",
+		"RELEASE_REGISTRY":  "build.internal",
+		"GITHUB_SERVER_URL": "https://github.com",
+		// Not a host variable: never scanned, even with a private host.
+		"CI_REGISTRY_OWNER": "lanowner",
+		"DEVCACHE_GOPROXY":  "off direct https://proxy.golang.org 192.0.2.1",
+	})
+	want := []string{
+		"::add-mask::10.1.2.3",
+		"::add-mask::10.1.2.3:5000",
+		"::add-mask::10.1.2.3:5000/it",
+		"::add-mask::athens.example.corp",
+		"::add-mask::athens.example.corp:3000",
+		"::add-mask::build.internal",
+		"::add-mask::cachehost",
+		"::add-mask::cachehost:3142",
+		"::add-mask::http://athens.example.corp:3000",
+		"::add-mask::http://cachehost:3142/alpine",
+		"::add-mask::registry.lan",
+		"::add-mask::registry.lan:5005",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("make -s ci-mask-lan printed\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
 // historyDocker is a docker stand-in for ci-image-history: `docker history`
 // prints <dir>/history-<image>, `docker image inspect` <dir>/config-<image>,
 // and either fails when its file is missing. Every call is logged.

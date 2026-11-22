@@ -35,9 +35,10 @@ const (
 	// docs-only PR; CI Gate tags them `code`.
 	fullTierCond  = "github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ci/deps-bump'"
 	codeFullJobIf = "${{ (" + fullTierCond + ") && !github.event.pull_request.draft && " + guardRun + " && needs.preflight.outputs.docs_only != 'true' }}"
-	// gateIf is CI Gate's: it always runs, but a schedule run whose guard
-	// reads main as busy skips it (no workflow here is scheduled).
-	gateIf = "${{ always() && (github.event_name != 'schedule' || needs.preflight.outputs.verdict != 'busy') }}"
+	// gateIf is CI Gate's (v1.53): a pull request run always runs it, any
+	// other run unless the run itself was stopped, and a schedule run whose
+	// guard reads main as busy skips it (no workflow here is scheduled).
+	gateIf = "${{ (startsWith(github.event_name, 'pull_request') && always() || !cancelled()) && (github.event_name != 'schedule' || needs.preflight.outputs.verdict != 'busy') }}" //nolint:misspell // the runner's spelling
 )
 
 // TestDraftPullRequestSkipsEveryJobButTheGate: every job but CI Gate skips on
