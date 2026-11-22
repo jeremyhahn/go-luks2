@@ -515,7 +515,7 @@ REVIEW = {"codex": "credential", "qwen": "hardware"}
 REVIEW_FILES = {"code-review.yml", "code-review.yaml"}
 REVIEW_TOKEN = re.compile(r"(?<![\w.-])['\"]?(codex|qwen)['\"]?(?![\w-])", re.I)
 GH = "https://github.com"
-# v1.48 (ruling 1024): ci.yml's preflight runner selection (v1.54:
+# v1.48: ci.yml's preflight runner selection (v1.54:
 # the Balanced runner pool step) outputs runs-on JSON,
 # "ubuntu-latest" or the Dells' self-hosted list ("overflow" below). In ci.yml only, a
 # runs-on that reads exactly these outputs is checked under both: the

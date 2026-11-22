@@ -3,7 +3,7 @@
 # `# CUSTOMIZE (go-luks2):` where it lives: the merge-check, test-race and
 # fips jobs and their CI Gate lines; no schedule trigger (#341,
 # TestNoScheduleTrigger); no shell scripts (#211), so each template script is
-# a Makefile target; the `Runner labels (ruling 633)` step is preceded by a
+# a Makefile target; the Runner labels step is preceded by a
 # self-test that runs the same Python on the fixtures in
 # test/ci/workflows/testdata/runnerlabels/.
 # v1.54's runner selection is taken: preflight's Balanced runner pool
@@ -16,7 +16,7 @@
 # the repository variable (runs-on JSON, `"ubuntu-latest"` with its quotes)
 # being the fallback switch while that pool is down; off github.com it keeps
 # `ubuntu-latest`. The schedule guard's AGENT_TOKEN is passed off github.com
-# only, where it is read. `Runner labels (ruling 633)` checks every runs-on,
+# only, where it is read. The Runner labels step checks every runs-on,
 # preflight's with the variable unset (exactly
 # [self-hosted, linux, x64, bigdisk] passes too) and set to the fallback.
 # The runner-label checker is .github/scripts/runner_labels.py: one file
