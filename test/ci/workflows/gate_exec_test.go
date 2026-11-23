@@ -97,7 +97,6 @@ var gateEnvDefaults = map[string]string{
 	"PROOF":          "",
 	"DOCS_ONLY":      "false",
 	"LINT_GATES_SEL": "true",
-	"PULL":           "true",
 }
 
 // runGateEnv executes the gate script the way the runner does (bash -e with
@@ -234,13 +233,6 @@ func TestCIGateScriptDecides(t *testing.T) {
 		cases = append(cases, gateCase{name: "NIGHTLY=" + n, fullTier: "true", nightly: n, wantExit: 1, wantLine: "FAIL NIGHTLY is '" + n + "', neither true nor false"})
 	}
 
-	// v1.55: a pull-tier job (row) skips off pull_request only.
-	for _, j := range pullTier {
-		cases = append(cases,
-			gateCase{name: j + "=skipped/PULL=false", fullTier: "true", results: map[string]string{j: "skipped"}, env: map[string]string{"PULL": "false"}, wantLine: "SKIP " + j + " (pull request only)"},
-			gateCase{name: j + "=skipped/PULL=true", fullTier: "false", results: map[string]string{j: "skipped"}, env: map[string]string{"PULL": "true"}, wantExit: 1, wantLine: "FAIL " + j + " (skipped)"},
-		)
-	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			results := map[string]string{}
@@ -268,7 +260,7 @@ func TestCIGateScriptDecides(t *testing.T) {
 // allJobs is every job CI Gate needs, over every tier.
 func allJobs() []string {
 	var all []string
-	for _, tier := range [][]string{prTier, codeTier, scopedTier, pullTier, fullTier, nightlyTier} {
+	for _, tier := range [][]string{prTier, codeTier, scopedTier, fullTier, nightlyTier} {
 		all = append(all, tier...)
 	}
 	return all

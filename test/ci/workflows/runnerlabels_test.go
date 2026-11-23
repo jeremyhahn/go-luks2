@@ -252,10 +252,10 @@ func TestPreflightRunsOnTemplateForm(t *testing.T) {
 // its outputs `runner` and `runner_docker` are every other job's runs-on.
 const balancedPoolStep = "Balanced runner pool (ruling 1137)"
 
-// balancedPoolSHA256 is the SHA-256 of the v1.59 template's step body (the
+// balancedPoolSHA256 is the SHA-256 of the v1.54 template's step body (the
 // text after its `- name:` line up to the next step), byte for byte. A change
 // to the step is a template bump, made with this pin.
-const balancedPoolSHA256 = "048737cfe9e2b4b22aab6acdc722a3038aeb2d9856edc699a5b73451ecf7800d"
+const balancedPoolSHA256 = "82eeb1dfddc72f27b053e94529ff41f33b7701acbbb213ee5b2355bd5d79e49c"
 
 // runnerSelectTests is the template's testdata/runner-select-tests.py,
 // carried verbatim but for its #! line, runnerSelectShebang
@@ -264,7 +264,7 @@ const balancedPoolSHA256 = "048737cfe9e2b4b22aab6acdc722a3038aeb2d9856edc699a5b7
 const (
 	runnerSelectTests       = "test/ci/workflows/testdata/runner-select-tests.py"
 	runnerSelectShebang     = "#!/usr/bin/env python3\n"
-	runnerSelectTestsSHA256 = "caddc6882cb606bcb7f32cd496a34f238ce637ee73f87eb32ae441f0a6e8f2a6"
+	runnerSelectTestsSHA256 = "b53de0fa0282b1825d60f259680b293a259ef62398c31312daf2c15e311b346f"
 )
 
 func sha256Hex(s string) string {
@@ -283,7 +283,7 @@ func TestBalancedRunnerPoolStepIsTheTemplates(t *testing.T) {
 	}
 	body := stepBody(t, balancedPoolStep)
 	if got := sha256Hex(body); got != balancedPoolSHA256 {
-		t.Errorf("the %q step body drifted from ci-template v1.59: sha256 %s, want %s", balancedPoolStep, got, balancedPoolSHA256)
+		t.Errorf("the %q step body drifted from ci-template v1.54: sha256 %s, want %s", balancedPoolStep, got, balancedPoolSHA256)
 	}
 	if !strings.HasPrefix(body, "        id: runner\n") {
 		t.Errorf("the %q step's id is not `runner`", balancedPoolStep)
@@ -316,7 +316,7 @@ func TestRunnerSelectTestsPassOnTheStep(t *testing.T) {
 	// are the template file byte for byte.
 	data := runnerSelectShebang + readFile(t, runnerSelectTests)
 	if got := sha256Hex(data); got != runnerSelectTestsSHA256 {
-		t.Fatalf("%s is not ci-template v1.59's runner-select-tests.py: sha256 %s, want %s", runnerSelectTests, got, runnerSelectTestsSHA256)
+		t.Fatalf("%s is not ci-template v1.54's runner-select-tests.py: sha256 %s, want %s", runnerSelectTests, got, runnerSelectTestsSHA256)
 	}
 	python, err := exec.LookPath("python3")
 	if err != nil {

@@ -247,16 +247,8 @@ func TestApkIndexSumBeforeTheImageName(t *testing.T) {
 	}
 	// The public release ships no shell scripts (the releasability gate), so
 	// the template's scripts/apk-index-sum.sh is the Makefile's apk-index-sum.
-	// ci-template v1.56's scripts/spec-roadmap-check.py, a Python check the
-	// lint job runs, is the one file scripts/ may hold.
-	entries, err := os.ReadDir(filepath.Join(repoRoot(t), "scripts"))
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("read scripts/: %v", err)
-	}
-	for _, e := range entries {
-		if e.Name() != "spec-roadmap-check.py" {
-			t.Errorf("scripts/ holds %s; it may hold only spec-roadmap-check.py, and the public release ships no shell scripts", e.Name())
-		}
+	if _, err := os.Stat(filepath.Join(repoRoot(t), "scripts")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the repository has a scripts/ directory (stat: %v); the public release ships no shell scripts", err)
 	}
 }
 
@@ -507,11 +499,6 @@ func TestImageAndIntegrationJobsUseNoRunnerToolchain(t *testing.T) {
 			// there is one to run.
 			third = "Does the Makefile define lint-gates?"
 		}
-		if name == "lint" {
-			// v1.56: the SPEC/ROADMAP agreement check, no token and no
-			// network, comes right after the masks, as the template has it.
-			third = "SPEC and ROADMAP agree (roadmap.md §2a)"
-		}
 		if len(named) < 3 || named[0][1] != "Mask the forge credentials" || named[1][1] != "Mask the LAN addresses" || named[2][1] != third {
 			t.Errorf("%s does not start by masking the credentials and the LAN addresses, then reaping: %v", name, named)
 		}
@@ -539,8 +526,8 @@ const cacheClass = `CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.e
 // same way -- names the cache class the recipe mounts its volumes under.
 func TestToolchainStagesCacheByTrustClass(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
-	if !strings.HasPrefix(ci, "# ci-template: v1.59 (customized)\n") {
-		t.Errorf("ci.yml does not declare ci-template v1.59: %.60q", ci)
+	if !strings.HasPrefix(ci, "# ci-template: v1.54 (customized)\n") {
+		t.Errorf("ci.yml does not declare ci-template v1.54: %.60q", ci)
 	}
 	for _, name := range []string{"lint", "image", "lint-gates", "merge-check", "test-race", "fips"} {
 		j := job(t, ci, name)
