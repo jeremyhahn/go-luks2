@@ -81,6 +81,7 @@ Status is one of shipped, in progress, planned or future.
 | fips | shipped | Run under the Go Cryptographic Module in FIPS 140-3 mode; refuse Argon2 and SHA-1 keyslots in FIPS mode and never write SHA-1; import an existing volume onto approved KDFs with `MigrateToFIPS`. See [architecture](fips/architecture.md). | [docs/fips/](fips/) |
 | cryptsetup-interop | shipped | The format is cryptsetup's, and interop runs both ways; a stricter check never stops a cryptsetup-written volume from opening; the measured two-way interop matrix. See [architecture](cryptsetup-interop/architecture.md). | [docs/cryptsetup-interop/](cryptsetup-interop/) |
 | release | in progress | Publish the project to its public mirror as the archive export of a signed, annotated release tag; the published tree carries no fleet value and no internal-only file; versions follow the [versioning policy](README.md#versioning-policy). See [Release criteria](#release-criteria). | [docs/release/](release/) |
+| maintenance | standing | Dependency updates (Dependabot and manual) and CI-configuration changes (`ci.yml` template adoptions, workflow fixes) are worked on `row/503-maintenance` and land as pull requests from that branch, so no such change sits on a branch outside a row. The row stays open and carries no dev-complete milestone, so it never gates a release. Owner ruling 1234; [#503](../../issues/503). | none |
 
 ## Interfaces
 
@@ -105,7 +106,8 @@ the release candidate, once every item in both lists is true.
 Dev complete:
 
 - Every feature row in [Features](#features) is shipped, apart from release,
-  whose publish steps are the second list. Done.
+  whose publish steps are the second list, and the standing maintenance row,
+  which never gates a release. Done.
 - Every seam row that go-trusted-platform's SPEC names on go-luks2 is
   shipped on go-luks2's side: the API, named here, and its tests. Today that
   is its `luks` feature row and its release criterion "a real backend on
