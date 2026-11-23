@@ -28,6 +28,9 @@ const (
 	scopedJobIf  = "${{ !github.event.pull_request.draft && " + guardRun + " && needs.preflight.outputs.lint_gates != 'false' }}"
 	fullJobIf    = "${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft && " + guardRun + " }}"
 	nightlyJobIf = "${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && " + guardRun + " }}"
+	// pullJobIf is ci-template v1.55's row job condition: pull requests only,
+	// no draft; it reads the base and runs no code, so it needs no guard run.
+	pullJobIf = "${{ github.event_name == 'pull_request' && !github.event.pull_request.draft }}"
 	// fullTierCond is CI_FULL_TIER's condition (ci-template v1.41, ruling
 	// 742 (2)): every event but a dispatch off main and off ci/deps-bump,
 	// so every PR. codeFullJobIf is the integration and FIPS jobs' `if:`
@@ -59,6 +62,8 @@ func TestDraftPullRequestSkipsEveryJobButTheGate(t *testing.T) {
 		case contains(nightlyTier, id):
 			// Soak runs on dispatch only: no pull request, so no draft.
 			want = nightlyJobIf
+		case contains(pullTier, id):
+			want = pullJobIf
 		case contains(fullTier, id):
 			want = fullJobIf
 		case contains(codeFullTier, id):
@@ -166,7 +171,7 @@ func TestLintGatesJob(t *testing.T) {
 // workflow is an instance of.
 func TestCIHeaderNamesTheTemplateVersion(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
-	if first, _, _ := strings.Cut(ci, "\n"); first != "# ci-template: v1.54 (customized)" {
-		t.Errorf("ci.yml's first line is %q, want the v1.54 header", first)
+	if first, _, _ := strings.Cut(ci, "\n"); first != "# ci-template: v1.59 (customized)" {
+		t.Errorf("ci.yml's first line is %q, want the v1.59 header", first)
 	}
 }

@@ -98,12 +98,14 @@ const (
 	selectRunsOnDocker = "${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner_docker) || 'bigdisk' }}"
 	selectRunsOnGate   = "${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner || '\"ubuntu-latest\"') || 'ci-gate' }}"
 	selectRunsOnNote   = "   # v1.48"
+	rowRunsOnNote      = "   # v1.55: CI Gate's runner"
 )
 
 // selectRunsOn is the v1.54 runs-on value of one ci.yml job other than
 // preflight: the gate's form for ci-gate, the image form for every other job.
 func selectRunsOn(jobID string) string {
-	if jobID == "ci-gate" {
+	// ci-template v1.55: the row job runs on CI Gate's runner.
+	if jobID == "ci-gate" || jobID == "row" {
 		return selectRunsOnGate
 	}
 	return selectRunsOnDocker
@@ -117,8 +119,11 @@ func TestCIJobsRunOnTheV154Selection(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
 	for _, id := range jobIDs(t, ci) {
 		want := selectRunsOn(id) + selectRunsOnNote
-		if id == "preflight" {
+		switch id {
+		case "preflight":
 			want = preflightRunsOn + "   # v1.52"
+		case "row":
+			want = selectRunsOn(id) + rowRunsOnNote
 		}
 		got := jobRunsOn.FindAllStringSubmatch(job(t, ci, id), -1)
 		if len(got) != 1 || got[0][1] != want {
