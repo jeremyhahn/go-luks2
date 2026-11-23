@@ -34,6 +34,9 @@ var (
 	// 742 (2)) moved integration and FIPS from the full tier to every PR.
 	codeFullTier = []string{"fips", "integration"}
 	nightlyTier  = []string{"soak"}
+	// pullTier: ci-template v1.55's row job runs on pull_request only, and
+	// CI Gate tags it pull.
+	pullTier = []string{"row"}
 )
 
 var (
@@ -195,8 +198,12 @@ func TestEveryCIJobRunsOnTheSelectedPool(t *testing.T) {
 		if id == "preflight" && len(got) == 1 && isPreflightTemplateRunsOn(t, ".github/workflows/ci.yml", ci, got[0][1]) {
 			continue // ci-template v1.49: hosted off github.com and by CI_PREFLIGHT_RUNS_ON
 		}
-		if len(got) != 1 || got[0][1] != selectRunsOn(id)+selectRunsOnNote {
-			t.Errorf("job %s runs on %v, want %s (ci-template v1.54)", id, got, selectRunsOn(id)+selectRunsOnNote)
+		want := selectRunsOn(id) + selectRunsOnNote
+		if id == "row" {
+			want = selectRunsOn(id) + rowRunsOnNote // ci-template v1.55: CI Gate's runner
+		}
+		if len(got) != 1 || got[0][1] != want {
+			t.Errorf("job %s runs on %v, want %s (ci-template v1.54)", id, got, want)
 		}
 	}
 	for _, id := range toolchainJobs {
@@ -228,7 +235,7 @@ func TestNoRetiredRunnerLabel(t *testing.T) {
 			if isPreflightTemplateRunsOn(t, rel(t, f), text, m[1]) {
 				continue
 			}
-			if rel(t, f) == ".github/workflows/ci.yml" && (m[1] == selectRunsOnDocker+selectRunsOnNote || m[1] == selectRunsOnGate+selectRunsOnNote) {
+			if rel(t, f) == ".github/workflows/ci.yml" && (m[1] == selectRunsOnDocker+selectRunsOnNote || m[1] == selectRunsOnGate+selectRunsOnNote || m[1] == selectRunsOnGate+rowRunsOnNote) {
 				continue // ci-template v1.54's selection; each job's form is pinned by TestCIJobsRunOnTheV154Selection
 			}
 			if l, ok := retiredRunsOnLabel(m[1]); ok {
@@ -474,7 +481,7 @@ func TestCIGateTiersMatchTheJobs(t *testing.T) {
 	}
 	gateNeeds := needs(t, gate)
 
-	var pr, code, scoped, full, nightly []string
+	var pr, code, scoped, pull, full, nightly []string
 	for _, id := range jobIDs(t, ci) {
 		text := job(t, ci, id)
 		if id == "ci-gate" {
@@ -497,10 +504,13 @@ func TestCIGateTiersMatchTheJobs(t *testing.T) {
 		case scopedJobIf:
 			want = "scoped"
 			scoped = append(scoped, id)
+		case pullJobIf:
+			want = "pull"
+			pull = append(pull, id)
 		case draftIf, prJobIf:
 			pr = append(pr, id)
 		default:
-			t.Errorf("job %s has if %q; a job carries the PR-tier, code, scoped, full-tier or nightly condition", id, cond)
+			t.Errorf("job %s has if %q; a job carries the PR-tier, code, scoped, pull, full-tier or nightly condition", id, cond)
 		}
 		if !contains(gateNeeds, id) {
 			t.Errorf("CI Gate does not need %s", id)
@@ -527,6 +537,9 @@ func TestCIGateTiersMatchTheJobs(t *testing.T) {
 	}
 	if !sameSet(scoped, scopedTier) {
 		t.Errorf("the scoped tier is %v, want %v", scoped, scopedTier)
+	}
+	if !sameSet(pull, pullTier) {
+		t.Errorf("the pull tier is %v, want %v", pull, pullTier)
 	}
 	if !sameSet(full, fullTier) {
 		t.Errorf("the full tier is %v, want %v", full, fullTier)
