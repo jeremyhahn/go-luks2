@@ -49,21 +49,14 @@ func CheckKeyring(ctx context.Context) error {
 		return errs.At(pkgName, op, "", err)
 	}
 
-	// The probe description is randomized precisely because volume
-	// descriptions are not: a preflight must not fail because a previous
-	// probe left something behind, and it must never collide with a real
-	// volume's entry.
+	// Random probe description: never collides with a volume or a leftover probe.
 	nonce := make([]byte, 8)
 	if _, err := rand.Read(nonce); err != nil {
 		return errs.At(pkgName, op, "", keyringFailure("draw randomness for the keyring preflight", err))
 	}
 	probe := fmt.Sprintf("preflight-%d-%s", os.Getpid(), hex.EncodeToString(nonce))
 
-	// A throwaway probe of the length a LUKS2 aes-xts-plain64 volume key
-	// has, so the preflight also exercises the size the real path uses
-	// against any payload-length limit the kernel imposes. It is filled
-	// with randomness INSIDE the enclave's own locked region, so the bytes
-	// never exist in an ordinary, unwipeable Go buffer at all.
+	// A probe of a real volume key's length, filled with randomness inside the enclave.
 	material, err := secret.System().Sized(64)
 	if err != nil {
 		return errs.At(pkgName, op, "", keyringFailure("hold the keyring preflight probe in protected memory", err))
@@ -76,10 +69,7 @@ func CheckKeyring(ctx context.Context) error {
 		return errs.At(pkgName, op, "", keyringFailure("draw randomness for the keyring preflight", err))
 	}
 
-	// On a discarded thread for the same reason Activate's keyring step is:
-	// the ring belongs to the task, so the add and the release have to
-	// happen on the same one, and resolving the ring may change that
-	// thread's credentials.
+	// Add and release on one discarded thread, as Activate does.
 	err = keyringpkg.RunOnDiscardedThread(func() error {
 		var entry *keyringpkg.VolumeKey
 		if err := material.WithBytes(func(b []byte) error {
@@ -100,12 +90,7 @@ func keyringFailure(op string, err error) *KeyringError {
 	return &KeyringError{Op: op, Kind: keyringpkg.Classify(err), Err: err}
 }
 
-// classifyKeyringErr turns an *internal/keyring.UnavailableError into this
-// package's own *KeyringError at the boundary, so a caller branches on a
-// type this package owns rather than one two layers down. Every other
-// keyring error (ErrEntryExists, ErrKeyNotReleased) is already a plain
-// *errs.Error classified with one of this package's own re-exported
-// sentinels, and passes through unchanged.
+// classifyKeyringErr converts an internal/keyring.UnavailableError into *KeyringError; other errors pass through.
 func classifyKeyringErr(err error) error {
 	if err == nil {
 		return nil

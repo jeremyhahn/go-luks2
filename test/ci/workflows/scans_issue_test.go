@@ -12,11 +12,7 @@ import (
 	"testing"
 )
 
-// scanGh stands in for `gh api` in the scan issue step. It records each call
-// as "METHOD PATH" in $STUB_DIR/calls and its request body (the --input on
-// stdin, or the -f fields joined by &) in $STUB_DIR/body.<n>, answers a GET
-// with $STUB_DIR/issues.json, applies --jq with the real jq as gh does, and
-// fails a call whose "METHOD PATH" matches the glob in $GH_FAIL.
+// scanGh stands in for gh api in the scan issue step: it records calls and bodies under $STUB_DIR, answers GETs from issues.json, applies --jq, and fails calls matching $GH_FAIL.
 const scanGh = `#!/usr/bin/env bash
 [ "$1" = api ] || { echo "stub gh: only 'gh api' is stubbed, got: $*" >&2; exit 2; }
 shift
@@ -124,9 +120,7 @@ func collectFindings(t *testing.T, deps, security, trivy string) string {
 
 type ghCall struct{ req, body string }
 
-// runScanIssue runs "Open, update or close the scan issue" with FIRED set to
-// fired, the open issues (and pull requests) GitHub lists, and gh failing
-// the calls matching ghFail. It returns the exit status, output and calls.
+// runScanIssue runs the scan issue step with FIRED, the listed open issues and failing gh calls, returning status, output and calls.
 func runScanIssue(t *testing.T, fired string, open []map[string]any, ghFail string) (int, string, []ghCall) {
 	t.Helper()
 	dir := t.TempDir()

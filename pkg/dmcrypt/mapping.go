@@ -66,9 +66,7 @@ func ValidateName(name string) error {
 			Detail: fmt.Sprintf("%q is a directory entry, not a name", name),
 		}
 	}
-	// /dev/mapper/control is device-mapper's own control node. A mapping
-	// called "control" would make /dev/mapper/<name> that node, and the node
-	// repair after an unlock would replace it (#250).
+	// "control" would name /dev/mapper/control.
 	if name == "control" {
 		return &errs.Error{Kind: ErrInvalidName, Detail: `"control" names the device-mapper control node`}
 	}

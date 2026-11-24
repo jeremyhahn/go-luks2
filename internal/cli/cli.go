@@ -111,10 +111,7 @@ NON-INTERACTIVE USE:
 // no command reads a credential in a process that could dump core; a
 // hardening failure is a *HardeningError and a non-zero exit.
 func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	// First, before any command can read a credential: Run is the binary's
-	// only entry point (cmd/luks2 main → run → Run), and go-enclave leaves
-	// process hardening to the binary. Failing to harden fails the command,
-	// unsupported platform included; there is no unhardened fallback.
+	// Harden before any command can read a credential; failure fails the command, with no unhardened fallback.
 	if err := harden(); err != nil {
 		_, _ = fmt.Fprintf(stderr, "%v\n", err)
 		return exitCode(err)
@@ -181,11 +178,7 @@ func dispatch(ctx context.Context, e *env, args []string) int {
 	return exitCode(err)
 }
 
-// registry builds the command dispatch table. It is rebuilt on every call
-// rather than held in a package variable: nothing in it is a seam (every
-// run func takes its env as a parameter, never a closure over one), so
-// nothing is gained by keeping it alive between calls, and a fresh map
-// cannot carry state from one Run to the next by accident.
+// registry builds the command dispatch table fresh on every call, so no state carries between runs.
 func registry() map[string]*command {
 	return map[string]*command{
 		"create":    createCommand(),

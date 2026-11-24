@@ -15,29 +15,9 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/kdf"
 )
 
-// The aggregate key-derivation budget of one operation (#26).
-//
-// Every derivation is bounded on its own (header.ValidateKDFCost), but an unlock
-// derives once per keyslot it tries and once per digest attesting that
-// keyslot, and the header chooses how many of those there are. A header that
-// declares each of them at the per-derivation ceiling makes one unlock attempt
-// do that ceiling's work many times over before it refuses the passphrase.
-//
-// The budget is the work of the most expensive header cryptsetup can write:
-// MaxKeyslots keyslots (cryptsetup creates no more, and the scan tries
-// no other ids), each attested by exactly one digest (cryptsetup refuses any
-// other header, measured), every derivation at the per-derivation ceiling.
-// So no container cryptsetup can produce is ever refused by it, and a crafted
-// one that asks for more is refused before the first derivation.
-//
-// Work is counted in two units, because the two KDFs spend different things:
-// PBKDF2 in PRF blocks (iterations times output blocks), Argon2 in KiB-passes
-// (time cost times memory). Neither is converted into the other.
+// One operation's aggregate KDF budget: the most expensive header cryptsetup can write, counted in PBKDF2 PRF blocks and Argon2 KiB-passes.
 
-// kdfWork is an amount of key-derivation work. Add is a saturating sum, so a
-// crafted header cannot wrap the total, and Exceeds reports whether one
-// amount is more than a budget in either unit; both live on kdf.Work, which
-// this is an alias of.
+// kdfWork is an amount of key-derivation work (alias of kdf.Work) with a saturating Add and Exceeds.
 type kdfWork = kdf.Work
 
 // derivationWork is what one derivation of k to outLen bytes costs. The KDF
@@ -62,10 +42,7 @@ type scanPlan struct {
 	peakLocked int64
 }
 
-// planKeyslotScan prices the scan getMasterKeySlot would make over order. It
-// counts only what the scan would derive -- keyslots it would try, which the
-// screen passes, and the digests that attest each of them and pass theirs --
-// so a damaged entry costs nothing here, as it costs nothing there.
+// planKeyslotScan prices only what getMasterKeySlot's scan over order would derive.
 func planKeyslotScan(metadata *header.Metadata, order []string) scanPlan {
 	var plan scanPlan
 	for _, id := range order {
@@ -88,19 +65,7 @@ func planKeyslotScan(metadata *header.Metadata, order []string) scanPlan {
 	return plan
 }
 
-// keyslotOpenPeakLocked is the most locked memory opening one keyslot holds at
-// once: unlockKeyslotFrom and recoverKeyslotKey, allocation by allocation.
-//
-//	area key            passphraseKDF -> custody.Adopt          areaKeySize   held to the end
-//	decrypted stripes   areacipher DecryptEnclave             decryptLen    held to the end
-//	merged key          af.Codec.Merge, result                keySize       held to the end
-//	diffusion state     af.Codec.Merge, buffer                keySize       freed after the merge
-//	derived digest      evaluateDigest -> deriveKeySecret     digest length one at a time, after the merge
-//
-// decryptLen is whole sectors, so the transform needs no partial-sector
-// scratch (xtsPartialSector). TestKeyslotOpenPeakIsWhatTheUnlockAllocates
-// measures the real sequence against this for each keyslot geometry, so the
-// two cannot drift apart silently.
+// keyslotOpenPeakLocked is the most locked memory opening one keyslot holds at once; TestKeyslotOpenPeakIsWhatTheUnlockAllocates checks it.
 func keyslotOpenPeakLocked(kp keyslotPlan, keySize, longestDigest int) int64 {
 	held := enclave.LockedSize(kp.areaKeySize) + enclave.LockedSize(int(kp.decryptLen)) + enclave.LockedSize(keySize) // #nosec G115 -- decryptLen is bounded by header.ValidateKeyslot
 	merge := enclave.LockedSize(keySize)
@@ -146,7 +111,4 @@ func checkKDFBudget(op string, plan scanPlan) error {
 	return nil
 }
 
-// An operation refused because the header would have it derive more than
-// operationKDFBudget allows -- nothing was derived -- is an *errs.Error
-// with Kind ErrInvalidHeader: no header cryptsetup can write asks for this
-// much, so the header is the defect.
+// An operation over operationKDFBudget is refused before deriving, as ErrInvalidHeader.

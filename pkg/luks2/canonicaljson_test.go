@@ -17,67 +17,9 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// Tests for the on-disk JSON ENCODING itself: the LUKS2 metadata area holds
-// compact, unescaped JSON terminated by a single NUL, and every property that
-// makes that sentence true is asserted here.
-//
-// These are deliberately separate from the cryptsetup conformance tests. What
-// the encoder does is decidable without a third party -- compactness, escaping
-// and the terminator are properties of the bytes -- and a test that needs no
-// external binary should not be made to depend on one.
+// On-disk JSON encoding tests: compact, unescaped JSON terminated by a single NUL.
 
-// TestCanonicalJSONIsCompact pins the property the 12288-byte metadata area
-// actually depends on.
-//
-// json.MarshalIndent was producing 1193 bytes for the metadata json-c writes in
-// 775. That is not a cosmetic difference: encodeMetadataForHeader REFUSES
-// metadata that does not fit and cannot enlarge the area (the keyslots and the
-// data segment are already placed), so 54% of the area was being spent on
-// whitespace and the refusal fired at a keyslot count well below cryptsetup's.
-// TestCanonicalJSONHasNoTrailingNewline covers the one hazard of reaching for
-// json.Encoder: Encode appends a newline that json.Marshal does not, and it
-// would land between the closing brace and the NUL terminator -- one byte of
-// divergence at a position every LUKS2 implementation reads.
-// TestCanonicalJSONDoesNotEscapeHTML asserts the divergence that is latent
-// today and would be silent tomorrow.
-//
-// encoding/json escapes <, > and & as \u003c, \u003e and \u0026 by default;
-// json-c does not. Nothing this package writes carries one of those characters
-// right now -- the label and subsystem label are BINARY header fields, not JSON
-// -- so this is asserted through a token, which is where a caller-supplied
-// string first reaches the metadata.
-// TestCanonicalJSONPreservesLUKS2Typing guards the properties the LUKS2 spec
-// fixes and that a re-encoding is the natural place to break: the byte offsets
-// and sizes are JSON STRINGS, the key sizes and iteration counts are JSON
-// NUMBERS, and neither may drift into the other.
-//
-// The spec (LUKS2 On-Disk Format, "keyslots object" and "segments object")
-// requires string encoding for the 64-bit byte values precisely because JSON
-// numbers are doubles; an implementation that emits them bare loses precision
-// above 2^53 and produces a header others parse differently.
-// TestNoObjectWithACustomMarshalerEscapesHTML covers EVERY object that
-// implements MarshalJSON, not just the one that was broken when this was
-// written.
-//
-// The drift this prevents has already happened once. header.MarshalCanonicalJSON turns
-// escaping off on the outer encoder, but a type implementing Marshaler is
-// encoded by the bytes it RETURNS -- the outer encoder compacts them and, with
-// escaping off, neither adds escapes nor removes ones already there. So any of
-// these methods that reaches for json.Marshal internally reintroduces exactly
-// the escapes this package turned off, and does it on the members most likely to
-// carry those characters: a foreign object's strings and the names of members
-// this package does not model.
-//
-// #153 added five such methods and #180 added four more. A test naming one
-// object is a test that passes while the next object added is wrong, which is
-// what happened: the four from #180 shipped with json.Marshal and nothing
-// failed. Enumerate the objects instead.
-// TestEveryMarshalerIsCovered keeps the table above honest: a new object with a
-// custom MarshalJSON must be added to it rather than silently not being tested.
-// TestEncodeMetadataForHeaderEmitsCompactJSON checks the WRITE PATH rather than
-// the helper, because encodeMetadataForHeader is what the header write calls
-// and a future edit could reintroduce indentation there without touching
-// header.MarshalCanonicalJSON.
+// TestEncodeMetadataForHeaderEmitsCompactJSON checks the header write path emits compact JSON.
 func TestEncodeMetadataForHeaderEmitsCompactJSON(t *testing.T) {
 	hdr, err := createBinaryHeader(formatOptionsForTest{}, testVolumeSys())
 	if err != nil {
@@ -99,13 +41,7 @@ func TestEncodeMetadataForHeaderEmitsCompactJSON(t *testing.T) {
 	}
 }
 
-// TestCompactJSONRaisesTheKeyslotCeiling is the consequence that motivated the
-// change, measured rather than asserted from the byte counts.
-//
-// encodeMetadataForHeader refuses metadata that does not fit the 12288-byte
-// area. Under MarshalIndent that refusal fired far below the 32 keyslots LUKS2
-// allows; the test walks the keyslot count up until the refusal appears and
-// requires that the full complement now fits.
+// TestCompactJSONRaisesTheKeyslotCeiling: all 32 keyslots fit the 12288-byte area.
 func TestCompactJSONRaisesTheKeyslotCeiling(t *testing.T) {
 	hdr, err := createBinaryHeader(formatOptionsForTest{}, testVolumeSys())
 	if err != nil {
@@ -117,7 +53,7 @@ func TestCompactJSONRaisesTheKeyslotCeiling(t *testing.T) {
 		metadata := sampleMetadata()
 		for i := 1; i < n; i++ {
 			metadata.Keyslots[fmt.Sprint(i)] = sampleKeyslot(i)
-			// Named by the digest, as every luks2 keyslot must be (#248).
+			// Named by the digest, as every luks2 keyslot must be.
 			metadata.Digests["0"].Keyslots = append(metadata.Digests["0"].Keyslots, fmt.Sprint(i))
 		}
 		if _, _, err := encodeMetadataForHeader(hdr, metadata); err != nil {
@@ -210,12 +146,7 @@ func TestHeaderIsReproducibleUnderPinnedInputs(t *testing.T) {
 	}
 }
 
-// TestMarshalCanonicalJSONReportsAnUnencodableValue covers the error path: the
-// helper must surface a marshal failure rather than returning half an object.
-// sampleMetadata is the metadata shape Format writes for the default geometry,
-// with every value fixed. The numbers are the ones a 64 MiB container carries:
-// keyslot 0 at 0x8000 for 258048 bytes, data at 16777216, keyslots area
-// 16744448.
+// sampleMetadata is Format's metadata for a 64 MiB container with every value fixed.
 func sampleMetadata() *header.Metadata {
 	return &header.Metadata{
 		Keyslots: map[string]*header.Keyslot{"0": sampleKeyslot(0)},

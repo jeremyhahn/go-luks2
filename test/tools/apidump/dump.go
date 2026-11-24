@@ -173,13 +173,7 @@ func typeEntries(s *ast.TypeSpec, base string) []Entry {
 	default:
 		out := []Entry{{Kind: "type", Name: s.Name.Name, File: base}}
 		if s.Assign.IsValid() {
-			// A type alias (type X = Y) has no method set of its own: every
-			// method Y declares is X's too, through Go's alias semantics,
-			// even though no FuncDecl with receiver X exists in this
-			// package's source for this AST-only dump to find. The "alias"
-			// marker lets CheckHonored trust the compiler here instead of
-			// requiring a syntactic method declaration that an alias is
-			// specifically written to avoid needing.
+			// An alias has no method set of its own; the alias marker lets CheckHonored trust Y's methods.
 			out = append(out, Entry{Kind: "alias", Name: s.Name.Name, File: base})
 		}
 		return out

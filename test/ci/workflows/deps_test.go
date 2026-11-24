@@ -11,22 +11,18 @@ import (
 	"testing"
 )
 
-// vulnerableBelow is the first fixed version of each dependency that carried an
-// advisory while this module required it. CI's govulncheck fails only on
-// vulnerabilities the code can REACH, so a module-level advisory -- reported to
-// every consumer's own govulncheck -- would never fail this repository's
-// build. This floor does.
+// vulnerableBelow is the first fixed version of each dependency that had an advisory, enforced because govulncheck fails only on reachable code.
 var vulnerableBelow = map[string]struct {
 	fixed    string
 	advisory string
 }{
-	// GO-2026-6355, GO-2026-6354: x/crypto/ssh channel deadlocks (#247).
+	// GO-2026-6355, GO-2026-6354: x/crypto/ssh channel deadlocks.
 	"golang.org/x/crypto": {"v0.56.0", "GO-2026-6355, GO-2026-6354"},
 }
 
 var requireLine = regexp.MustCompile(`(?m)^\s*(?:require\s+)?(\S+)\s+(v\d+\.\d+\.\d+\S*)`)
 
-// TestDependenciesAreAtOrAboveTheirFixedVersions (#247).
+// TestDependenciesAreAtOrAboveTheirFixedVersions checks go.mod against vulnerableBelow.
 func TestDependenciesAreAtOrAboveTheirFixedVersions(t *testing.T) {
 	mod := readFile(t, "go.mod")
 	found := map[string]string{}

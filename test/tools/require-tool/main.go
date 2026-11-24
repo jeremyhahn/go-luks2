@@ -9,11 +9,11 @@
 //	go run ./test/tools/require-tool <binary> <pin> <module-path> [go-install args...]
 //
 // It replaces .github/require-tool.sh, because the public release ships no
-// shell scripts (owner ruling on #211). Its behavior is the script's, unchanged.
+// shell scripts. Its behavior is the script's.
 //
-// # WHY THIS EXISTS
+// # Why this exists
 //
-// (#44) CI used to `go install tool@version` at job time. Runner job containers
+// Installing tools at job time is unreliable: runner job containers
 // use host networking, and on hosts that resolve an AAAA record for
 // sum.golang.org with no default IPv6 route, Go's v6-to-v4 fallback sometimes
 // does not complete — more often on a loaded runner. Every Lint and Security
@@ -21,7 +21,7 @@
 // image at pinned versions, so on that host this command performs no network
 // access at all.
 //
-// (#21) Pinning alone was never enough for gosec: it takes its version string
+// Pinning alone was never enough for gosec: it takes its version string
 // from ldflags rather than from the module path, so `go install ...@v2.29.0`
 // still self-reports `dev` — which is how `make security` came to print
 // `Gosec : dev`, meaning results could not be attributed to a scanner version
@@ -71,24 +71,7 @@ const githubServer = "https://github.com"
 // relative to the repository root, where CI runs this command.
 const pinFile = "build/docker/devcontainer/tool-pins.env"
 
-// knownTools maps each tool to the line its self-report documents its version
-// on, anchored at the start of that line.
-//
-// A GENERIC "find something version-shaped" regex is not safe, and govulncheck
-// shows why: its output's FIRST version-shaped token is the Go toolchain's.
-//
-//	Go: go1.27.1
-//	Scanner: govulncheck@v1.8.0
-//
-// A loose extractor pins the wrong number. So each tool is parsed by its own
-// documented line:
-//
-//	golangci-lint   golangci-lint has version 2.14.0 built with go1.27.1 ...
-//	gosec           Version: v2.29.0
-//	govulncheck     Scanner: govulncheck@v1.8.0
-//
-// An UNRECOGNIZED tool is a hard failure rather than a fallback to something
-// looser. A version format nobody has read is a version that cannot be verified.
+// knownTools maps each tool to the anchored line its self-report gives its version on; an unrecognized tool fails.
 var knownTools = map[string]*regexp.Regexp{
 	"golangci-lint": regexp.MustCompile(`(?m)^golangci-lint has version (\S+)`),
 	"gosec":         regexp.MustCompile(`(?m)^Version:[ \t]+(\S+)[ \t]*$`),
@@ -283,11 +266,7 @@ func extractVersion(bin, report string) (string, error) {
 	return m[1], nil
 }
 
-// sameVersion compares EXACTLY, with the `v` prefix optional on either side:
-// golangci-lint reports bare (2.14.0) while gosec and govulncheck report
-// prefixed (v2.29.0), and the pins are written prefixed. Nothing else is
-// normalised away. The substring test this replaced FAILED OPEN: a v1.8.0 pin
-// accepted a report of v11.8.0.
+// sameVersion compares exactly, with the `v` prefix optional on either side.
 func sameVersion(got, pin string) bool {
 	return strings.TrimPrefix(got, "v") == strings.TrimPrefix(pin, "v")
 }

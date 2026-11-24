@@ -17,7 +17,7 @@ import (
 // this only ever borrows it, for exactly the length check, and never copies
 // it to a plain []byte or string that outlives the call.
 //
-// Every failure is an *Error stamped with this operation (#334): a length
+// Every failure is an *Error stamped with this operation: a length
 // outside the policy is of kind ErrInvalidCredential, a destroyed enclave of
 // kind ErrProtectedMemory.
 func ValidatePassphrase(pass enclave.ByteAccess) error {

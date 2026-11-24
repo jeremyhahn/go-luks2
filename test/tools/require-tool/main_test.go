@@ -31,8 +31,7 @@ func TestExtractVersion_ReadsEachToolsDocumentedLine(t *testing.T) {
 	}{
 		{"golangci-lint", golangciReport, "2.14.0"},
 		{"gosec", gosecReport, "v2.29.0"},
-		// The FIRST version-shaped token in govulncheck's output is the Go
-		// toolchain's. A generic extractor pins go1.27.1; this must not.
+		// The first version-shaped token is the Go toolchain's.
 		{"govulncheck", govulncheckReport, "v1.8.0"},
 		{"gosec", "Version:   v2.29.0   \n", "v2.29.0"},
 	}
@@ -65,7 +64,7 @@ func TestExtractVersion_RefusesAReportItCannotParse(t *testing.T) {
 		bin    string
 		report string
 	}{
-		// gosec built without -X main.Version (#21).
+		// gosec built without -X main.Version.
 		{"gosec", "Version: dev\nGit tag: \n"},
 		{"gosec", "gosec v2.29.0\n"},
 		{"govulncheck", "Go: go1.27.1\n"},
@@ -456,8 +455,7 @@ func TestErrors_NameTheirSubject(t *testing.T) {
 	}
 }
 
-// TestCLI_ExitStatusFollowsTheOutcome: 0 for a tool at its pin, 1 with a FAIL
-// line for a bad invocation or a mismatch.
+// TestCLI_ExitStatusFollowsTheOutcome: 0 at the pin, 1 with a FAIL line otherwise.
 func TestCLI_ExitStatusFollowsTheOutcome(t *testing.T) {
 	good := func() host {
 		return (&fakeHost{

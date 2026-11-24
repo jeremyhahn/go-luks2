@@ -25,18 +25,9 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
-// Regressions for the second review of #84.
-//
-// The migration used to decide what to carry across, and what it could leave
-// alone, from two things that are not enough on their own: the KDF's NAME, and
-// "the passphrase opened this keyslot". A PBKDF2-SHA256 KDF with an eight-byte
-// salt has an approved name and is refused by crypto/pbkdf2 under
-// GODEBUG=fips140=only. And a keyslot the passphrase opens may hold an UNBOUND
-// key -- one no digest binds to the data segment -- beside the keyslot holding
-// the key the data is encrypted with.
+// Migration must judge KDFs by what strict FIPS accepts, not by name, and carry the key bound to the data segment.
 
-// shortFIPSSalt is a salt strict FIPS mode refuses: 64 bits, where
-// crypto/pbkdf2 requires at least 128 under GODEBUG=fips140=only.
+// shortFIPSSalt is a 64-bit salt strict FIPS refuses (minimum 128).
 var shortFIPSSalt = []byte("8-bytes!")
 
 // shortSaltKDF is PBKDF2-SHA256 -- an approved name -- over shortFIPSSalt.
@@ -45,16 +36,7 @@ func shortSaltKDF() *header.KDF {
 	return &header.KDF{Type: kdfTypePBKDF2, Hash: "sha256", Salt: encodeBase64(shortFIPSSalt), Iterations: &iterations}
 }
 
-// weakenForStrictFIPS rewrites device so every KDF the migration might be
-// tempted to keep has an approved name and a salt strict FIPS refuses: digest
-// "0" is recomputed over shortFIPSSalt, and, when keyslotID is not empty, that
-// keyslot is re-wrapped in place under shortSaltKDF. Both still attest and
-// hold the same volume key, so the volume opens outside FIPS mode exactly as
-// before.
-//
-// It returns an error rather than taking a *testing.T because the cross-process
-// test runs it in a non-FIPS child (fipsimport_cryptsetup_test.go): a FIPS
-// parent cannot derive through the salt it writes.
+// weakenForStrictFIPS recomputes digest "0" and optionally keyslotID over shortFIPSSalt; returns an error so a non-FIPS child can run it.
 func weakenForStrictFIPS(device string, passphrase []byte, keyslotID string) (err error) {
 	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
@@ -184,11 +166,7 @@ func assertStrictRefusal(t *testing.T, device string, wantKeyslots, wantDigests 
 	}
 }
 
-// TestMigrateToFIPSMigratesAShortSaltDigest: a PBKDF2-SHA256 digest over an
-// eight-byte salt has an approved name, so a check of names alone keeps it,
-// passes both verification opens, and reports a complete import that
-// GODEBUG=fips140=only then cannot open. It must be migrated like any other
-// digest FIPS mode cannot run.
+// TestMigrateToFIPSMigratesAShortSaltDigest: an approved-name digest over a short salt must be migrated.
 func TestMigrateToFIPSMigratesAShortSaltDigest(t *testing.T) {
 	defer parallel(t)()
 	if fips140.Enabled() {
@@ -313,12 +291,7 @@ func unboundKeyslot(t *testing.T, device string, passphrase []byte) {
 	}
 }
 
-// TestMigrateToFIPSCarriesTheVolumeKeyNotAnUnboundKey: the passphrase opens an
-// approved keyslot holding an unbound key AND the Argon2 keyslot holding the
-// volume key. Carrying the unbound key across and removing the Argon2 keyslot
-// passes every check that asks only "does the migrated keyslot open to the key
-// it was written with" -- and erases the only way to the data. The migration
-// must carry the key bound to the data segment.
+// TestMigrateToFIPSCarriesTheVolumeKeyNotAnUnboundKey: the migration carries the key bound to the data segment.
 func TestMigrateToFIPSCarriesTheVolumeKeyNotAnUnboundKey(t *testing.T) {
 	defer parallel(t)()
 	if fips140.Enabled() {
@@ -343,8 +316,7 @@ func TestMigrateToFIPSCarriesTheVolumeKeyNotAnUnboundKey(t *testing.T) {
 		t.Fatalf("result %+v: want the Argon2 keyslot removed and a complete import", result)
 	}
 
-	// The migrated keyslot holds the VOLUME key, and a digest binds it to the
-	// data segment.
+	// The migrated keyslot holds the volume key, bound by a digest to the data segment.
 	_, metadata, err := readHeaderForTest(device)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
@@ -364,11 +336,7 @@ func TestMigrateToFIPSCarriesTheVolumeKeyNotAnUnboundKey(t *testing.T) {
 		t.Fatal("the data area changed")
 	}
 
-	// Opening keyslot 2 directly proves nothing about what Unlock maps: the
-	// retained approved keyslot 1 holds the unbound key under the SAME
-	// passphrase and sorts first. The normal scan -- the one Unlock hands to
-	// dm-crypt -- must recover the volume key, both as this process runs it
-	// and as a FIPS process would (approved keyslots and digests only).
+	// The normal scan must recover the volume key, in this process and as a FIPS process would.
 	normal, err := getMasterKey(device, migrationPassphrase, metadata, testVolumeSys())
 	if err != nil {
 		t.Fatalf("the normal unlock scan failed: %v", err)
@@ -442,8 +410,7 @@ func TestMigrateToFIPSRefusesWhenNoKeyslotHoldsTheVolumeKey(t *testing.T) {
 	})
 }
 
-// TestFIPSParameterRefusal pins the floors crypto/pbkdf2 enforces under
-// GODEBUG=fips140=only, at their boundaries.
+// TestFIPSParameterRefusal pins crypto/pbkdf2's fips140=only floors at their boundaries.
 func TestFIPSParameterRefusal(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -465,12 +432,7 @@ func TestFIPSParameterRefusal(t *testing.T) {
 	}
 }
 
-// TestAddKeyJoinsOnlyTheDigestOfTheKeyItWraps: on a header carrying an unbound
-// key beside the volume key, a new keyslot must be assigned to the volume key's
-// digest alone. It used to be appended to every digest, which cryptsetup
-// refuses outright ("header.Keyslot N is not assigned to exactly 1 digest") -- the
-// migration adds its keyslot through the same path, so every import of such a
-// volume left it unreadable to cryptsetup.
+// TestAddKeyJoinsOnlyTheDigestOfTheKeyItWraps: a new keyslot joins only the volume key's digest.
 func TestAddKeyJoinsOnlyTheDigestOfTheKeyItWraps(t *testing.T) {
 	defer parallel(t)()
 	device := newImage(t, "addkey-digest.img")

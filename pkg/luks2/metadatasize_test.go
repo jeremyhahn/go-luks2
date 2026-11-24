@@ -21,22 +21,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// FormatOptions.MetadataSize (#47).
-//
-// The owner ruled on 2026-09-25 that callers may choose any metadata area size
-// LUKS2 allows, 16 KiB to 4 MiB, rather than always getting 16 KiB. The
-// reference is cryptsetup's --luks2-metadata-size, measured against cryptsetup
-// 2.7.0 and recorded on #47:
-//
-//	--luks2-metadata-size  hdr_size  json_size  keyslots_size  data offset
-//	16k                    16384     12288      16744448       16777216
-//	32k                    32768     28672      16711680       16777216
-//	4m                     4194304   4190208    8388608        16777216
-//
-// so json_size = area - 4096, the keyslots area starts at 2 * area, and
-// keyslots_size = 16 MiB - 2 * area, which keeps the data segment at 16 MiB.
-// Every legal size is formatted here and handed to cryptsetup, because a
-// geometry only this package agrees with proves nothing.
+// FormatOptions.MetadataSize takes 16 KiB to 4 MiB as cryptsetup --luks2-metadata-size does: json_size = area - 4096, keyslots at 2*area, data at 16 MiB; every size is checked with cryptsetup.
 
 // metadataSizeFormatOptions formats a cheap container with a chosen metadata
 // area size.
@@ -247,15 +232,7 @@ func TestFormatMetadataSizeHoldsMetadataTheDefaultRefuses(t *testing.T) {
 	})
 }
 
-// TestWipeHeaderOnlyDestroysBothCopiesOfALargerArea is the wipe consequence of
-// the knob. A header-only wipe zeroed a fixed 32 KiB, which covers both copies
-// only of a 16 KiB area. On a 32 KiB-area container -- which Format can now
-// write, and which cryptsetup always could -- the second copy starts at 32 KiB
-// and survived the wipe intact, so the "wiped" volume was still recoverable.
-//
-// Since #246 (D3) the wipe also zeroes the whole keyslots area, so the region
-// checked runs to the end of it -- and stops there: the data segment is not
-// touched.
+// TestWipeHeaderOnlyDestroysBothCopiesOfALargerArea: the wipe covers both copies and the keyslots area of a larger metadata area, and not the data segment.
 func TestWipeHeaderOnlyDestroysBothCopiesOfALargerArea(t *testing.T) {
 	defer parallel(t)()
 
@@ -322,12 +299,7 @@ func writeImageAt(t *testing.T, path string, offset int64, data []byte) {
 	}
 }
 
-// TestWipeHeaderOnlyDoesNotTrustADamagedPrimarysSize pins the review finding
-// on #47: the primary's declared size is not checksum-verified before a wipe
-// sizes itself by it. A 64 KiB-area container whose damaged primary declares
-// a smaller LEGAL size (16 KiB) had only 32 KiB zeroed, and the intact
-// secondary at 64 KiB survived a "successful" header-only wipe -- so the
-// volume was still recoverable from its second copy.
+// TestWipeHeaderOnlyDoesNotTrustADamagedPrimarysSize: an understated primary size does not leave the secondary intact.
 func TestWipeHeaderOnlyDoesNotTrustADamagedPrimarysSize(t *testing.T) {
 	defer parallel(t)()
 
@@ -421,11 +393,7 @@ func readImageAt(t *testing.T, path string, offset int64, size int) []byte {
 	return buf
 }
 
-// TestWipeHeaderOnlyDoesNotTrustAnOverstatedPrimarySize pins the second review
-// finding on #47: sizing the wipe by the LARGEST declared area let a damaged
-// primary that overstates its size to 4 MiB zero 8 MiB -- on a cryptsetup
-// container with 32 KiB headers and its data segment at 4 MiB, that is 4 MiB
-// of payload destroyed, although the intact secondary stated the real geometry.
+// TestWipeHeaderOnlyDoesNotTrustAnOverstatedPrimarySize: an overstated primary size does not destroy payload.
 func TestWipeHeaderOnlyDoesNotTrustAnOverstatedPrimarySize(t *testing.T) {
 	defer parallel(t)()
 
@@ -482,13 +450,7 @@ func TestWipeHeaderOnlyDoesNotTrustAnOverstatedPrimarySize(t *testing.T) {
 	}
 }
 
-// TestWipeHeaderOnlyWithNoValidCopy covers the ambiguous case: every copy is
-// damaged, so no geometry can be trusted. The wipe zeroes the default 32 KiB
-// front and, of each copy still recognizable as a LUKS2 header -- here the
-// damaged secondary of a 64 KiB container -- its binary header and its JSON
-// up to the terminating NUL (#246 D3: the JSON carries the keyslot salts, and
-// a binary header is cheap to rebuild in front of it). No payload-sized span
-// is guessed at: the keyslots area is left alone.
+// TestWipeHeaderOnlyWithNoValidCopy: with every copy damaged, the default 32 KiB front and each recognizable copy's header and JSON are zeroed; the keyslots area is left.
 func TestWipeHeaderOnlyWithNoValidCopy(t *testing.T) {
 	defer parallel(t)()
 

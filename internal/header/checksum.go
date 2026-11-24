@@ -22,14 +22,7 @@ import (
 // verified against a hash it did not ask for.
 const HeaderChecksumAlgorithm = "sha256"
 
-// checkHeaderChecksumAlgorithm refuses a header whose csum_alg field names
-// anything but sha256.
-//
-// The field used to be ignored and sha256 computed regardless, so a header
-// declaring sha1 over a sha256 checksum was accepted here and refused by
-// cryptsetup, which verifies with the algorithm the header names. The field is
-// a NUL-padded C string; what precedes the first NUL is the name, as
-// cryptsetup reads it.
+// checkHeaderChecksumAlgorithm refuses a header whose NUL-padded csum_alg names anything but sha256.
 func checkHeaderChecksumAlgorithm(hdr *BinaryHeader) error {
 	name, _, _ := bytes.Cut(hdr.ChecksumAlgorithm[:], []byte{0})
 	if string(name) == HeaderChecksumAlgorithm {

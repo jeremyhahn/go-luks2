@@ -21,14 +21,7 @@ type block struct {
 	covered    bool
 }
 
-// profile is the union of one or more coverage profiles, keyed by block
-// position (`<import path>/<file>.go:<line>.<col>,<line>.<col>`).
-//
-// Merging is by position, not by concatenation. The same block appears once
-// per test binary that compiled its package -- a unit profile and an
-// integration profile both carry every block of pkg/luks2 -- so summing lines
-// would count those statements twice and inflate the denominator and numerator
-// alike. A block is covered if ANY profile executed it.
+// profile is the union of coverage profiles keyed by block position; a block is covered if any profile executed it.
 type profile struct {
 	blocks map[string]block
 }
@@ -42,15 +35,7 @@ func newProfile() *profile {
 // it was produced, can push the tallies or the floor comparison into overflow.
 const maxBlockStatements = 1 << 20
 
-// add merges one profile, as written by `go test -coverprofile`, into p, and
-// returns how many blocks it held.
-//
-// The FIRST non-blank line must be a valid `mode:` header -- it is what makes
-// the file a coverage profile at all. Further `mode:` lines may follow,
-// because concatenating profiles is how legs used to be merged and a
-// concatenation is still a valid input, but each must name a real mode too.
-// Any other line that is not a well-formed block is an error: a profile the
-// gate cannot read in full is a profile whose coverage it does not know.
+// add merges one go test -coverprofile file into p and returns its block count; it must start with a valid mode: line, and any malformed line is an error.
 func (p *profile) add(name string, r io.Reader) (int, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)

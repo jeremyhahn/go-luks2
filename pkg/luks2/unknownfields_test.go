@@ -22,15 +22,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// realReencryptKeyslot is the shape cryptsetup gives the keyslot it allocates
-// for an online reencryption. `mode`, `direction`, and the area's `hash`,
-// `sector_size` and `shift_size` are all members this package does not model;
-// every one of them is named in libcryptsetup's string table and in the LUKS2
-// on-disk format specification's reencryption section.
-//
-// The pure, in-memory passthrough tests for this fixture now live in
-// internal/header's own test suite; what remains here is the half that
-// needs a real device and the cryptsetup binary.
+// realReencryptKeyslot is cryptsetup's online-reencryption keyslot shape, with members this package does not model.
 const realReencryptKeyslot = `{
 	"type": "reencrypt",
 	"key_size": 1,
@@ -46,9 +38,7 @@ const realReencryptKeyslot = `{
 	}
 }`
 
-// asObject parses JSON into a generic map so two encodings can be compared by
-// VALUE rather than by bytes. Member order and insignificant whitespace are
-// not part of what a passthrough promises to preserve; the members are.
+// asObject parses JSON into a generic map so encodings compare by value.
 func asObject(t *testing.T, data []byte) map[string]any {
 	t.Helper()
 
@@ -93,14 +83,7 @@ func memberOrder(t *testing.T, data []byte) []string {
 	return names
 }
 
-// Conformance checks for the passthrough, asserted against cryptsetup 2.7.0.
-//
-// A round trip through this package alone cannot show that a token survives,
-// because this package's reader and writer share every assumption they make
-// about what a token contains. So cryptsetup writes the token, this package
-// performs an UNRELATED mutation, and cryptsetup reads the token back. See the
-// header of conformance_test.go for the rest of the rationale, and
-// requireCryptsetup for what happens on a host without the third party.
+// Passthrough conformance against cryptsetup 2.7.0: cryptsetup writes the token, this package makes an unrelated change, cryptsetup reads it back.
 
 // systemdFIDO2TokenOnKeyslot0 is the systemd-fido2 token, bound to the
 // keyslot a standard conformance container actually has. `cryptsetup token
@@ -127,13 +110,7 @@ func writeTokenFile(t *testing.T, contents string) string {
 // token_integration_test.go's copy for the integration build.
 func boolPtr(b bool) *bool { return &b }
 
-// readHeaderJSONArea returns the JSON metadata of a container's primary header
-// as it is ON DISK, up to its null terminator.
-//
-// It reads the bytes rather than asking cryptsetup to print them, because the
-// question here is what this package WROTE -- member order included -- and
-// anything that parses and re-prints the object first is answering a different
-// question.
+// readHeaderJSONArea returns the primary header's JSON as on disk, up to its null terminator.
 func readHeaderJSONArea(t *testing.T, path string) []byte {
 	t.Helper()
 
@@ -168,12 +145,7 @@ func binaryRead(r io.Reader, hdr *header.BinaryHeader) error {
 	return binary.Read(r, binary.BigEndian, hdr)
 }
 
-// TestConformance_TokenSurvivesAnUnrelatedKeyslotChange is the measured bug,
-// end to end, with cryptsetup on both sides of the token.
-//
-// Before the passthrough this failed with six members where eight went in:
-// fido2-clientPin-required and fido2-uv-required were gone, deleted by a
-// header rewrite performed for a keyslot the token has nothing to do with.
+// TestConformance_TokenSurvivesAnUnrelatedKeyslotChange: every fido2 token member survives a keyslot rewrite.
 func TestConformance_TokenSurvivesAnUnrelatedKeyslotChange(t *testing.T) {
 	defer parallel(t)()
 
@@ -243,13 +215,7 @@ func TestConformance_TokenSurvivesAnUnrelatedKeyslotChange(t *testing.T) {
 	}
 }
 
-// TestConformance_UnmodeledTokenMembersSurviveOurRewrite covers the general
-// case rather than the one token type this package happens to model.
-//
-// The token types that matter are defined outside this repository -- systemd
-// adds members between releases, and a vendor may define its own type
-// entirely. A passthrough that only preserved members this package already
-// knows about would preserve nothing that was actually at risk.
+// TestConformance_UnmodeledTokenMembersSurviveOurRewrite covers arbitrary token types.
 func TestConformance_UnmodeledTokenMembersSurviveOurRewrite(t *testing.T) {
 	defer parallel(t)()
 
@@ -288,25 +254,13 @@ func TestConformance_UnmodeledTokenMembersSurviveOurRewrite(t *testing.T) {
 		t.Errorf("a vendor token did not survive an unrelated AddKey\n want %v\n  got %v", want, got)
 	}
 
-	// The 64-bit handle is the case a map[string]interface{} passthrough gets
-	// wrong: decoded as a float64 it comes back as 18446744073709552000. The
-	// comparison above cannot catch that, because BOTH sides went through the
-	// same float64. So the raw bytes are checked too.
+	// A 64-bit handle would lose precision as float64, so the raw bytes are checked too.
 	if !strings.Contains(out, "18446744073709551615") {
 		t.Errorf("the 64-bit member was rounded: %s", out)
 	}
 }
 
-// TestConformance_HeaderMemberOrderMatchesCryptsetup asserts the order this
-// package WRITES against the order cryptsetup writes, both read straight off
-// the disk.
-//
-// Member order is not a compatibility requirement -- JSON objects are
-// unordered and cryptsetup parses ours either way, which the passphrase check
-// at the end confirms. What it buys is that two headers can be diffed. The
-// eight-member token that came back with six was found by diffing; matching
-// the order is what makes that a usable technique instead of a wall of
-// reordering noise.
+// TestConformance_HeaderMemberOrderMatchesCryptsetup: written member order matches cryptsetup's, so headers can be diffed.
 func TestConformance_HeaderMemberOrderMatchesCryptsetup(t *testing.T) {
 	defer parallel(t)()
 
@@ -367,13 +321,7 @@ func TestConformance_HeaderMemberOrderMatchesCryptsetup(t *testing.T) {
 		})
 	}
 
-	// Whether a priority member is emitted at all is decided in
-	// createMetadata, not here, so the comparison above is made without it --
-	// otherwise this test fails on a defect it does not own and cannot fix.
-	// What this file IS responsible for is where the member goes when there is
-	// one, so that is asserted directly: cryptsetup emits priority last, after
-	// kdf, and the declaration order in internal/header's types.go is the only
-	// thing holding it.
+	// Compared without priority; cryptsetup emits priority last, after kdf, as internal/header's types.go declares.
 	if order := memberOrder(t, keyslot(t, ourArea)); slices.Contains(order, "priority") && order[len(order)-1] != "priority" {
 		t.Errorf("priority is emitted, but not last as cryptsetup emits it: %v", order)
 	}
@@ -413,38 +361,7 @@ func withoutPriority(order []string) []string {
 	return filtered
 }
 
-// TestConformance_ReencryptKeyslotSurvivesOnDisk takes the reencrypt keyslot
-// all the way through the real write path and reads it back off the platter.
-//
-// The in-memory test proves the marshaler; this proves the thing that
-// actually happens: cryptsetup leaves a reencrypt keyslot in a header, an
-// unrelated operation rewrites the whole metadata blob, and the keyslot has
-// to be on disk afterwards exactly as it was. Nothing dropped by the
-// passthrough, and nothing invented by the typed half.
-//
-// WHAT THIS TEST CANNOT DO, and why it is not cryptsetup that reads the
-// result: #152. LUKS2 spells config.requirements as an OBJECT with a
-// mandatory array and Config models it as []string, so ReadHeader fails
-// outright on any container that is mid-reencryption -- measured against a
-// GENUINE one, produced unprivileged with `cryptsetup reencrypt --init-only`:
-//
-//	json: cannot unmarshal object into Go struct field
-//	Config.config.requirements of type []string
-//
-// and a reencrypt keyslot written without that flag is refused from the other
-// side too, `luksDump --debug` reporting "Missing reencryption requirement
-// flag". So the third-party reader is unavailable for this one case until
-// #152 lands, and the assertion is made against the bytes instead. The
-// fixture here is hand-built for that reason; a real cryptsetup reencrypt
-// keyslot is trivial to produce and the conformance test belongs on #152, not
-// a synthesized one here. The container WITHOUT the reencrypt keyslot is
-// still checked with cryptsetup, so the write path itself is not taken on
-// trust.
-//
-// #152 also carries the second half a resume actually depends on: cryptsetup
-// flags the backup segments `backup-previous` and `backup-final`, Segment has
-// no Flags field and no passthrough, and those flags are dropped on any
-// rewrite.
+// TestConformance_ReencryptKeyslotSurvivesOnDisk: a hand-built reencrypt keyslot survives the real write path, checked against the bytes.
 func TestConformance_ReencryptKeyslotSurvivesOnDisk(t *testing.T) {
 	requireCryptsetup(t)
 
@@ -475,11 +392,7 @@ func TestConformance_ReencryptKeyslotSurvivesOnDisk(t *testing.T) {
 
 	want := asObject(t, readHeaderJSONArea(t, path))["keyslots"].(map[string]any)["1"]
 
-	// An unrelated write is REFUSED now (#248): a reencrypt keyslot with no
-	// reencryption requirement flag is a header cryptsetup refuses ("Missing
-	// reencryption requirement flag"), and with the flag the requirements
-	// guard refuses every write. So no write of this package carries such a
-	// keyslot -- and the refusal must leave it on disk untouched.
+	// A write is refused with such a keyslot, and the refusal leaves it on disk untouched.
 	if err := setTokenForTest(path, 2, Token{Type: TokenTypeRecovery, Keyslots: []int{0}}); !errors.Is(err, ErrInvalidHeader) {
 		t.Fatalf("ImportToken beside an orphan reencrypt keyslot: got %v, want ErrInvalidHeader", err)
 	}
@@ -487,10 +400,7 @@ func TestConformance_ReencryptKeyslotSurvivesOnDisk(t *testing.T) {
 		t.Fatalf("a refused write changed the reencrypt keyslot\n want %v\n  got %v", want, got)
 	}
 
-	// What remains to pin is the ENCODER every write uses: read the header
-	// back and re-encode it with an unrelated change, exactly as a write
-	// would, and the reencrypt keyslot it never touched must come out the
-	// same, member for member.
+	// Re-encoding with an unrelated change must reproduce the reencrypt keyslot member for member.
 	hdr, metadata, err = readHeaderForTest(path)
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
@@ -521,14 +431,7 @@ func TestConformance_ReencryptKeyslotSurvivesOnDisk(t *testing.T) {
 	}
 }
 
-// TestConformance_CryptsetupKeyslotRoundTripsUnchanged reads a container
-// cryptsetup made, writes it back with this package, and requires the keyslot
-// object to be byte-identical.
-//
-// It is the check that the member reordering above is a reordering and not a
-// rewrite: a keyslot cryptsetup wrote must come back out exactly as it went
-// in, or something in this package is inventing or dropping a member on a
-// container it did not create.
+// TestConformance_CryptsetupKeyslotRoundTripsUnchanged: a cryptsetup keyslot is written back byte-identical.
 func TestConformance_CryptsetupKeyslotRoundTripsUnchanged(t *testing.T) {
 	defer parallel(t)()
 

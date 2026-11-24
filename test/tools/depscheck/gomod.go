@@ -19,15 +19,7 @@ type requirement struct {
 	Reason   string
 }
 
-// parseGoMod reads the require and replace directives of a go.mod. A reason
-// is a comment on the require or replace line, or comment lines directly
-// above it. The `indirect` marker the go command writes is not a reason, so
-// an indirect requirement documents its pin as `// indirect; <reason>`.
-//
-// It is deliberately small rather than golang.org/x/mod/modfile: this
-// repository takes no dependency for a CI check (CLAUDE.md, one local
-// dependency), and the go command has already validated the file by the time
-// this runs, because the build reads it first.
+// parseGoMod reads a go.mod's require and replace directives with their reasons (comments on or directly above the line; `// indirect; <reason>` for indirect).
 func parseGoMod(name string, data []byte) ([]requirement, error) {
 	var (
 		reqs     []requirement

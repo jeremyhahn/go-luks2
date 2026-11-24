@@ -147,9 +147,7 @@ func TestLockZeroBudgetTriesOnce(t *testing.T) {
 	}
 }
 
-// TestPollFlockClassifiesANonContentionFailure: an error other than
-// EWOULDBLOCK (a closed descriptor) is reported as an Error, not retried as
-// contention.
+// TestPollFlockClassifiesANonContentionFailure: a non-EWOULDBLOCK error is an Error, not retried.
 func TestPollFlockClassifiesANonContentionFailure(t *testing.T) {
 	f, err := os.CreateTemp("", "luks-device-pollflock-*")
 	if err != nil {
@@ -167,9 +165,7 @@ func TestPollFlockClassifiesANonContentionFailure(t *testing.T) {
 	}
 }
 
-// TestClaimReopensTheLockedInode: Claim targets the same file the lock is
-// held on, and an exclusive claim of a REGULAR file succeeds even though the
-// node is already open, because O_EXCL without O_CREAT has no effect on one.
+// TestClaimReopensTheLockedInode: Claim targets the locked file, and an exclusive claim of a regular file succeeds.
 func TestClaimReopensTheLockedInode(t *testing.T) {
 	path := lockRegular(t)
 	pinned, locked, err := openAndLock(t, context.Background(), path, DefaultLockWait, clock.System{})
@@ -355,12 +351,7 @@ func TestLockCancelledDuringNodeFlockWaitReturnsCtxErr(t *testing.T) {
 	_ = freePinned.Close()
 }
 
-// Two shared holders on ONE pinned descriptor share one open file
-// description, and flock does not count holders on it: the first LOCK_UN
-// would drop the lock the second still believes it holds. For a file image
-// the node flock is cryptsetup's only lock, so a foreign writer
-// (luksKillSlot) could then write under the second reader. The lock must stay
-// until the last shared holder releases it.
+// Two shared holders on one descriptor: the lock must stay until the last releases it.
 func TestPinnedSharedLockHeldUntilTheLastReaderReleases(t *testing.T) {
 	ctx := context.Background()
 	path := lockRegular(t)

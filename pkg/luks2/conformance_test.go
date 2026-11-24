@@ -22,28 +22,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
-// LUKS2 conformance tests, asserted against the cryptsetup userspace tools.
-//
-// WHY THESE TESTS EXIST AND WHY THEY LOOK LIKE THIS
-//
-// A round trip through this package alone is not evidence of conformance.
-// Format and Unlock share every assumption they make about the on-disk format,
-// so they agree with each other whether or not either agrees with LUKS2. That
-// is exactly how #28 and #73 survived a green suite: a container this library
-// wrote could not be read by cryptsetup at all -- `cryptsetup isLuks` exited 1
-// and luksDump reported "is not a valid LUKS device", so luksDump,
-// luksHeaderBackup, luksChangeKey and luksOpen were all unavailable and a
-// volume had no recovery path -- while every self-round-trip test passed.
-//
-// So these tests assert against a THIRD PARTY. cryptsetup writes the container
-// and this package reads it, or this package writes and cryptsetup reads.
-// Nothing here is allowed to be verified only by this package's own output.
-//
-// All of this runs UNPRIVILEGED: LUKS2 header handling on a file image needs no
-// root. Only dm activation does, which is why the "we -> them" direction stops
-// at `luksOpen --test-passphrase` -- that verifies the passphrase against the
-// keyslot and the master key against the digest without asking the kernel for a
-// device-mapper target.
+// LUKS2 conformance against the cryptsetup userspace tools, in both directions, unprivileged on file images.
 
 const (
 	// conformancePassphrase is the passphrase used on both sides of every
@@ -58,34 +37,13 @@ const (
 	conformanceImageSize = 64 << 20
 )
 
-// requireCryptsetup skips the calling test when the cryptsetup binary is not
-// installed, and does so LOUDLY: a conformance suite that silently reports
-// success on a machine with no third party to check against is worse than no
-// suite, because it converts "unverified" into "verified".
+// requireCryptsetup fails the calling test when the cryptsetup binary is not installed.
 func requireCryptsetup(t *testing.T) string {
 	t.Helper()
 
 	path, err := exec.LookPath("cryptsetup")
 	if err != nil {
-		// FAILS, DOES NOT SKIP. A skip converts a missing dependency into a
-		// green result, and this is the suite that must not do that: it holds
-		// the bidirectional interoperability property -- cryptsetup opens what
-		// this library writes, and the reverse -- which took seven review
-		// rounds to earn, after a period when cryptsetup refused every
-		// container this library produced and an encrypted volume had NO
-		// recovery path.
-		//
-		// While this was a t.Skipf, a runner without cryptsetup ran every
-		// TestConformance_* to a PASS having executed nothing. Measured on the
-		// CI unit leg: nine such messages across this file and geometry_test.go,
-		// job green (#90).
-		//
-		// The remedy ranking is in
-		// ../handbook/software/conventions/testing-guidelines.md; fixing the
-		// environment is the first of them. The devcontainer and the integration
-		// image install cryptsetup-bin, and ci.yml now installs it for the unit
-		// job too. So this branch means the environment is wrong, and it should
-		// say so loudly rather than quietly exempting itself.
+		// Fail, do not skip: a skip would turn a missing cryptsetup into a green result; the test images install cryptsetup-bin.
 		t.Fatalf("LUKS2 CONFORMANCE CHECK CANNOT RUN -- cryptsetup is NOT INSTALLED on this host (%v). "+
 			"This test verifies interoperability with a third-party LUKS2 implementation and there is "+
 			"nothing it can verify without one. Install cryptsetup (Debian/Ubuntu: cryptsetup-bin); the "+
@@ -152,24 +110,7 @@ func standardFormatOptions(path string) formatOptionsForTest {
 	}
 }
 
-// formatWithLibrary gives a test a container formatted with the parameters the
-// consuming project pins.
-//
-// It FORMATS ONCE PER PROCESS and stamps the resulting bytes thereafter. Every
-// one of the 51 call sites asks for the identical configuration, and Format
-// costs ~440ms, so the package was paying that repeatedly -- several call sites
-// are inside table loops, which is how two tests reached 25-29s each.
-//
-// The bytes are produced by a REAL Format, so what is stamped is a genuine
-// container and not a hand-built approximation. What each caller loses is that
-// Format does not RUN for them: they no longer get a fresh random UUID and
-// salts. Nothing in the package depends on two fixtures differing -- checked
-// before making this change, not assumed -- and a test that needs Format's own
-// behavior calls Format directly rather than coming through here.
-//
-// The failure is carried out of the sync.Once rather than reported inside it: a
-// t.Fatalf in there would abort whichever test happened to be first, which is
-// not necessarily the test that would have failed.
+// formatWithLibrary formats the pinned configuration once per process and stamps the bytes for each caller; the error is carried out of the sync.Once.
 func formatWithLibrary(t *testing.T, path string) {
 	t.Helper()
 
@@ -219,23 +160,7 @@ var (
 	goldenStandardErr   error
 )
 
-// goldenPrefixBytes is how much of a formatted image is captured and stamped.
-//
-// Format writes the two header copies and keyslot 0's area, all inside the
-// first ~550 KiB. 2 MiB covers that with room for the multi-keyslot fixtures
-// built on top, and copying the full 64 MiB image instead would reintroduce as
-// cost what the memoization just removed.
-//
-// A STAMPED FIXTURE IS NOT BYTE-FOR-BYTE A FORMATTED CONTAINER PAST THIS
-// POINT, and since the keyslots-area fill it no longer can be cheaply. Format
-// now writes CSPRNG data over the whole keyslots area out to the data segment
-// at 16 MiB (format.go), so a stamped image carries that fill for its first 2
-// MiB and zeroes for the remaining ~14 MiB of keyslots area. Nothing here
-// depends on the difference -- cryptsetup does not read unallocated keyslot
-// space, and AddKey places new slots immediately after keyslot 0, well inside
-// the prefix -- and a test that needs the real fill calls Format directly, as
-// TestFormatFillsTheWholeKeyslotsAreaWithRandom does. Raising this to 16 MiB
-// would put a 16 MiB copy on all 51 call sites to fix nothing.
+// goldenPrefixBytes is how much of a formatted image is stamped: the header copies and keyslot 0, not the full keyslots-area fill.
 const goldenPrefixBytes = 2 << 20
 
 func readImagePrefix(path string) ([]byte, error) {
@@ -264,24 +189,13 @@ func stampImagePrefix(t *testing.T, path string, golden []byte) {
 	if _, err := f.WriteAt(golden, 0); err != nil {
 		t.Fatalf("failed to stamp the golden container onto %s: %v", path, err)
 	}
-	// CLOSED, NOT FSYNCED (#92). fsync buys durability across a power loss,
-	// which a fixture under t.TempDir() does not need: the page cache is
-	// coherent for every reader of the file -- this process, a cryptsetup
-	// child, and O_DIRECT, which writes dirty pages back before it reads. It
-	// was not free: on a loaded runner each fsync of a fixture this size took
-	// ~330ms (measured: 45 fixture fsyncs, 14.8s, across three tests), paid by
-	// every caller of every stamping helper for nothing it asserts.
+	// Closed, not fsynced: the page cache is coherent for every reader of a temp fixture.
 	if err := f.Close(); err != nil {
 		t.Fatalf("failed to close %s: %v", path, err)
 	}
 }
 
-// TestConformance_WeWrite_CryptsetupReads is direction A of #28: a container
-// this library writes must be a valid LUKS2 device to cryptsetup.
-//
-// Before the fix, all of these failed at the first step -- isLuks exited 1 --
-// which took luksDump, luksHeaderBackup, luksChangeKey and luksOpen with it and
-// left a volume written by this library with no recovery path.
+// TestConformance_WeWrite_CryptsetupReads: a container this library writes must be a valid LUKS2 device to cryptsetup.
 func TestConformance_WeWrite_CryptsetupReads(t *testing.T) {
 	defer parallel(t)()
 
@@ -303,11 +217,7 @@ func TestConformance_WeWrite_CryptsetupReads(t *testing.T) {
 			t.Fatalf("cryptsetup luksDump exited %d, want 0\n%s", code, out)
 		}
 
-		// Assert on what cryptsetup PARSED, not merely that it exited 0.
-		// "Keyslots area" is cryptsetup's reading of config.keyslots_size: the
-		// defect it caught was storing the area's end offset (16777216) where
-		// the spec wants the area's size (16744448), and cryptsetup rejected
-		// the header with "keyslots_size is too large".
+		// Assert on what cryptsetup parsed: keyslots_size is the area's size, not its end offset.
 		for _, want := range []string{
 			"Version:       \t2",
 			"Keyslots area: \t16744448 [bytes]",
@@ -347,16 +257,7 @@ func TestConformance_WeWrite_CryptsetupReads(t *testing.T) {
 	})
 }
 
-// TestConformance_SecondaryHeaderMagic is #64: the second header copy must
-// carry the SKUL magic, and the point of it is recovery.
-//
-// The primary-magic-on-the-secondary defect does NOT by itself stop cryptsetup
-// from opening a container whose primary header is intact -- measured, and
-// worth stating plainly, because it means the defect is invisible until the day
-// it matters. What it does is destroy the backup: with the primary header
-// destroyed, a container whose secondary carries the correct magic still opens,
-// and one whose secondary carries the primary magic is "not a valid LUKS
-// device".
+// TestConformance_SecondaryHeaderMagic: with the primary destroyed, a secondary with the SKUL magic still opens.
 func TestConformance_SecondaryHeaderMagic(t *testing.T) {
 	requireCryptsetup(t)
 
@@ -421,13 +322,7 @@ func TestConformance_SecondaryHeaderMagic(t *testing.T) {
 	})
 }
 
-// TestConformance_CryptsetupWrites_WeRead is direction B of #73: a container
-// cryptsetup writes with the consuming project's pinned parameters must open
-// with this library.
-//
-// The parameters are pinned deliberately: --hash sha512 stores a 64-byte
-// digest, and the hardcoded 32-byte derivation in verifyMasterKey could never
-// reproduce it, so the CORRECT passphrase returned "incorrect passphrase".
+// TestConformance_CryptsetupWrites_WeRead: a cryptsetup container with the pinned parameters (sha512 digest) opens with this library.
 func TestConformance_CryptsetupWrites_WeRead(t *testing.T) {
 	defer parallel(t)()
 
@@ -484,22 +379,7 @@ func TestConformance_CryptsetupWrites_WeRead(t *testing.T) {
 	})
 }
 
-// TestConformance_CryptsetupMultiKeyslotDigestAssociation is the compatibility
-// guard on the digest-to-keyslot rule.
-//
-// verifyMasterKey consults only the digests whose "keyslots" array names the
-// keyslot being opened. That is what the LUKS2 format says the array is for,
-// but reading a header field STRICTLY is exactly the change that can lock an
-// operator out of a container some other implementation wrote -- and the
-// implementation that matters is cryptsetup, which is what is in the field.
-//
-// So the association is checked against a container cryptsetup itself built and
-// then added a second keyslot to, rather than against one this library wrote:
-// a library that maintained the association wrongly and read it back the same
-// wrong way would agree with itself and pass every self-round-trip.
-//
-// Measured against cryptsetup 2.7.0: it registers BOTH keyslots on the single
-// digest ("keyslots": ["0", "1"]), and both passphrases open the container.
+// TestConformance_CryptsetupMultiKeyslotDigestAssociation: cryptsetup registers both keyslots on one digest, and both passphrases open.
 func TestConformance_CryptsetupMultiKeyslotDigestAssociation(t *testing.T) {
 	defer parallel(t)()
 
@@ -518,7 +398,7 @@ func TestConformance_CryptsetupMultiKeyslotDigestAssociation(t *testing.T) {
 		t.Fatalf("cryptsetup luksFormat exited %d, want 0\n%s", code, out)
 	}
 
-	// luksAddKey reads the EXISTING passphrase then the new one, both on stdin.
+	// luksAddKey reads the existing passphrase then the new one, both on stdin.
 	code, out = runCryptsetup(t, conformancePassphrase+"\n"+second+"\n",
 		"luksAddKey", "--pbkdf", "pbkdf2",
 		"--pbkdf-force-iterations", "1000",
@@ -563,15 +443,7 @@ func TestConformance_CryptsetupMultiKeyslotDigestAssociation(t *testing.T) {
 	}
 }
 
-// TestConformance_StaysValidAfterMutation checks that the operations which
-// REWRITE a header leave a container cryptsetup still accepts.
-//
-// A format-time-only conformance test would have passed while AddKey wrote an
-// absolute end offset into config.keyslots_size -- the same defect Format
-// carried, and one that additionally SHRANK the reserved area -- and while
-// RemoveToken nilled the tokens map so the last removal dropped the mandatory
-// object. Both would have turned a conformant container into a rejected one on
-// the second operation, not the first.
+// TestConformance_StaysValidAfterMutation checks header-rewriting operations leave a container cryptsetup accepts.
 func TestConformance_StaysValidAfterMutation(t *testing.T) {
 	defer parallel(t)()
 
@@ -590,12 +462,7 @@ func TestConformance_StaysValidAfterMutation(t *testing.T) {
 			t.Fatalf("after %s, cryptsetup luksDump exited %d, want 0\n%s", stage, code, out)
 		}
 
-		// The RESERVED keyslots area must not move. cryptsetup accepts a
-		// keyslots_size that is merely too SMALL, so "isLuks still exits 0" does
-		// not catch an operation that rewrites the field to the end of the slot
-		// it just added -- the container stays readable while quietly declaring
-		// a fraction of the space it actually reserved, and the next AddKey is
-		// then sized against a boundary that no longer describes the device.
+		// The reserved keyslots area must not move; cryptsetup accepts a keyslots_size that is merely too small.
 		const wantKeyslotsArea = "Keyslots area: \t16744448 [bytes]"
 		if !strings.Contains(out, wantKeyslotsArea) {
 			t.Fatalf("after %s, luksDump no longer reports %q\n%s", stage, wantKeyslotsArea, out)
@@ -632,13 +499,7 @@ func TestConformance_StaysValidAfterMutation(t *testing.T) {
 		}
 	})
 
-	// ChangeKey RELOCATES the keyslot: it writes the new material into a free
-	// area of the keyslots region, re-points area.offset, and only then wipes the
-	// area it left (#39). Nothing in LUKS2 requires keyslot areas to be
-	// contiguous or to sit where a first format put them -- but "nothing
-	// requires it" is a reading of the spec, and this is the check that the
-	// reading is right. A relocated keyslot cryptsetup refuses to open would be
-	// a volume this library can open and no other implementation can.
+	// ChangeKey relocates the keyslot; cryptsetup must still open it.
 	t.Run("after ChangeKey relocates a keyslot", func(t *testing.T) {
 		path := newImage(t, "after-changekey.img")
 		formatWithLibrary(t, path)
@@ -673,13 +534,7 @@ func TestConformance_StaysValidAfterMutation(t *testing.T) {
 		}
 	})
 
-	// A removal now clears the removed keyslot's id out of the tokens as well as
-	// the digests -- previously a token could outlive the keyslot it named, on
-	// every route. That rewrite touches the tokens object of a container
-	// cryptsetup has to keep reading, and a token's "keyslots" array is where
-	// LUKS2 and this library's own digest handling differ (cryptsetup rejects an
-	// empty keyslots list on a DIGEST and accepts one on a TOKEN), so it is
-	// checked against cryptsetup rather than reasoned about.
+	// A removal clears the keyslot id from tokens too; cryptsetup accepts an empty keyslots list on a token.
 	t.Run("after removing a keyslot a token names", func(t *testing.T) {
 		path := newImage(t, "after-keyslot-with-token.img")
 		formatWithLibrary(t, path)
@@ -730,20 +585,7 @@ func TestConformance_StaysValidAfterMutation(t *testing.T) {
 	})
 }
 
-// TestConformance_LargeHeaderStaysValid is the cryptsetup half of the
-// header-area regression.
-//
-// The unit tests in headerarea_test.go check that this package can still read
-// back a header whose JSON exceeds the 8192 bytes at which the old sizing
-// overflowed. That is necessary and not sufficient: the old code produced
-// HeaderSize 20480, which is not a power of two and therefore not a legal LUKS2
-// metadata size, and a self-consistent reader would have accepted it happily.
-// Only cryptsetup can say whether the result is a LUKS2 container.
-//
-// The keyslots are synthetic rather than added with AddKey -- 15 real AddKey
-// calls would cost a KDF derivation and a 256 KiB write each, and none of that
-// changes the header layout under test. They are tiled at distinct,
-// non-overlapping areas, which is what cryptsetup validates about them.
+// TestConformance_LargeHeaderStaysValid: a header whose JSON exceeds 8192 bytes must still be a LUKS2 container to cryptsetup; keyslots are synthetic and non-overlapping.
 func TestConformance_LargeHeaderStaysValid(t *testing.T) {
 	defer parallel(t)()
 
@@ -789,21 +631,7 @@ func TestConformance_LargeHeaderStaysValid(t *testing.T) {
 	}
 }
 
-// TestConformance_LegacyDigestLengthStillOpens is the backward-compatibility
-// half of #73, and it needs no cryptsetup.
-//
-// Containers already written by this library store a 32-byte digest under a
-// "sha512" label. The write path now emits the spec-correct 64 bytes, but the
-// read path derives to the length STORED IN THE HEADER rather than to the
-// hash's natural length, precisely so those containers keep opening. Deriving
-// to the hash length on read would have bricked every volume this library has
-// ever written.
-//
-// The fixture is built rather than checked in: format normally, recover the
-// master key through the package's own unlock path, and rewrite the digest to
-// the 32 bytes the old code would have produced. Everything else -- keyslot,
-// AF material, salts, iteration count -- is byte-for-byte what the old code
-// wrote, because it IS what the current code wrote.
+// TestConformance_LegacyDigestLengthStillOpens: a 32-byte digest under a sha512 label still opens, since the read derives to the stored length.
 func TestConformance_LegacyDigestLengthStillOpens(t *testing.T) {
 	defer parallel(t)()
 
@@ -873,13 +701,7 @@ func TestConformance_LegacyDigestLengthStillOpens(t *testing.T) {
 	}
 }
 
-// TestConformance_MandatoryJSONObjectsArePresent checks the JSON this library
-// writes for the mandatory LUKS2 objects directly, without cryptsetup.
-//
-// It is a cheaper and more specific check than the cryptsetup one and it runs
-// everywhere, but it is NOT a substitute: it asserts against the spec's list of
-// mandatory objects, which is still this package's own reading of the spec.
-// The cryptsetup tests above are the ones that hold the format honest.
+// TestConformance_MandatoryJSONObjectsArePresent checks the mandatory LUKS2 objects directly, without cryptsetup.
 func TestConformance_MandatoryJSONObjectsArePresent(t *testing.T) {
 	path := newImage(t, "mandatory-objects.img")
 	formatWithLibrary(t, path)
@@ -899,10 +721,7 @@ func TestConformance_MandatoryJSONObjectsArePresent(t *testing.T) {
 			raw = raw[:i]
 		}
 
-		// Every one of these is mandatory in LUKS2 and must be an OBJECT.
-		// `"tokens": {}` is what a container with no tokens carries; omitting
-		// the key made cryptsetup report `JSON area "" is missing "tokens"
-		// (object) specification` and fail the whole header (#28).
+		// Each is mandatory in LUKS2 and must be an object; an empty one is {}.
 		for _, key := range []string{"keyslots", "tokens", "segments", "digests", "config"} {
 			if !bytes.Contains(raw, []byte(`"`+key+`":`)) {
 				t.Errorf("header at offset %d omits the mandatory %q object:\n%s", hdrOffset, key, raw)
@@ -914,30 +733,8 @@ func TestConformance_MandatoryJSONObjectsArePresent(t *testing.T) {
 	}
 }
 
-// TestEnsureRequiredObjects checks the normalization that keeps a nil Go map
-// from reaching the disk as `null`.
-// cheapenGoldenDigests rewrites the shared golden's digests to a low iteration
-// count, re-derived from its own master key so they still verify.
-//
-// This is the OTHER half of the fixture cost and it is larger than Format.
-// createDigest hardcodes DigestIterations -- 600,000 rounds of PBKDF2-SHA512 --
-// and verifyMasterKey pays it on EVERY unlock, so every test that opens a
-// fixture paid ~295ms that has nothing to do with what it asserts. Format is
-// paid once per fixture; the digest is paid once per unlock, and unlocks
-// outnumber fixtures across this package.
-//
-// It runs ONCE, inside the same sync.Once that builds the golden, so the single
-// expensive unlock it needs is amortized over every test in the package.
-//
-// Cheapening is safe here and would not be everywhere. Nothing in the package
-// asserts a FIXTURE's digest iteration count -- checked, not assumed:
-// TestSecurityConstants asserts the CONSTANT DigestIterations, which this does
-// not touch, and crypto_helpers_test compares a digest to its own KDF within one
-// createDigest call. A test whose subject IS the digest cost builds its own
-// digest (kdfcost_test.go) and is unaffected.
-//
-// The digest value is a public header field, not a secret. The master key it is
-// derived from is borrowed in place and never copied out.
+// TestEnsureRequiredObjects checks the normalization that keeps a nil Go map from reaching the disk as `null`.
+// cheapenGoldenDigests rewrites the shared golden's digests to a low iteration count, re-derived from its own master key so they still verify.
 func cheapenGoldenDigests(device string) (err error) {
 	hdr, metadata, err := readHeaderForTest(device)
 	if err != nil {
@@ -989,9 +786,7 @@ func cheapenGoldenDigests(device string) (err error) {
 		return err
 	}
 
-	// The golden must still OPEN. Without this, a mistake here would hand every
-	// test in the package a container that fails for a reason unrelated to what
-	// it asserts, and the whole suite would go red for the wrong cause.
+	// The golden must still open.
 	if err := testKeyForTest(device, []byte(conformancePassphrase)); err != nil {
 		return fmt.Errorf("the golden container stopped opening after its digests were cheapened: %w", err)
 	}

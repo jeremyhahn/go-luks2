@@ -93,9 +93,7 @@ func runClose(ctx context.Context, e *env, args []string) error {
 	}
 	name := args[0]
 
-	// Mount state is checked by the mapping's DEVICE, not a guessed path:
-	// a name that resolves through the mapper is trusted only once Lookup
-	// confirms the mapping exists (#250, C10).
+	// Mount state is checked by the mapping's device, trusted only once Lookup confirms the mapping exists.
 	m, err := e.host.activator.lookup(ctx, name)
 	if err != nil {
 		_, _ = fmt.Fprintf(e.stderr, "Failed to lock volume: %v\n", err)
@@ -171,10 +169,7 @@ func runIsLUKS(ctx context.Context, e *env, args []string) error {
 	}
 	defer func() { _ = v.Close() }()
 
-	// Without --luks2, a header this package cannot fully parse because
-	// it is LUKS1 still answers "yes, it is LUKS": the question asked was
-	// about the magic, not the version. --luks2 requires Header to
-	// succeed outright.
+	// Without --luks2 a LUKS1 header still answers yes; --luks2 requires Header to succeed.
 	_, herr := v.Header(ctx)
 	is := herr == nil || (!*luks2Only && errors.Is(herr, luks2.ErrNotLUKS2))
 	if !is {

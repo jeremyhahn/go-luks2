@@ -19,10 +19,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/test/internal/harness"
 )
 
-// Interop against an Argon2 container formatted BELOW this package's create
-// floor -- the container a low-memory or embedded device produces, and the
-// one cryptsetup makes without complaint. See pkg/luks2's own (now-moved)
-// argon2interop_integration_test.go for the full reasoning.
+// Interop with an Argon2 container formatted below this package's create floor, as cryptsetup and low-memory devices make.
 
 // lowMemoryArgon2KB is below MinArgon2MemoryKB and well above the accept
 // floor. cryptsetup formats at this happily.

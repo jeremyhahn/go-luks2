@@ -21,12 +21,7 @@ var version = "dev"
 // directly, in-process, without ending the test binary.
 var osExit = os.Exit
 
-// cliRun is the CLI run hands off to, and main's other seam. cli.Run hardens
-// the process it runs in, and an unprivileged process cannot raise the core
-// limit again afterwards, so a test that only checks main's wiring swaps it
-// and leaves the test binary unhardened; tests that need the real CLI run it
-// in a re-executed child. Nothing outside this package's tests assigns it,
-// and package main cannot be imported.
+// cliRun is the CLI run hands off to; tests swap it so the test binary stays unhardened.
 var cliRun = cli.Run
 
 func main() {

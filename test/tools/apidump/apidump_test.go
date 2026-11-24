@@ -190,12 +190,7 @@ func TestCheckHonouredNamesEveryViolation(t *testing.T) {
 	}
 }
 
-// TestCheckHonouredTrustsAnAliasedTypesMethodSet covers DroppedEntry.String,
-// KDFCalibrationError.Error/Unwrap and LockTimeoutError.Error/Unwrap: a KEEP
-// method whose receiver type became `type X = some.ForeignType` has no
-// FuncDecl with receiver X for an AST-only dump to find (a method cannot be
-// added to an alias of a foreign type), so CheckHonored must trust the
-// "alias" marker Dump emits for X rather than require the method directly.
+// TestCheckHonouredTrustsAnAliasedTypesMethodSet: a KEEP method on an alias of a foreign type is trusted through Dump's alias marker.
 func TestCheckHonouredTrustsAnAliasedTypesMethodSet(t *testing.T) {
 	base := []Entry{
 		{"type", "LockTimeoutError", "errors.go"},
@@ -226,12 +221,7 @@ func TestCheckHonouredTrustsAnAliasedTypesMethodSet(t *testing.T) {
 	}
 }
 
-// TestCheckHonouredTreatsARenameInPlaceAsHonored covers Segment: a
-// RENAME whose target text keeps naming the identifier itself, because the
-// type was redefined in place rather than moved to a new name. CheckHonored
-// has no structural comparison (Fields ride with their type, see
-// Entry.Identifier), so it cannot tell a genuine in-place redefinition from
-// a no-op any other way; it trusts the disposition's own words instead.
+// TestCheckHonouredTreatsARenameInPlaceAsHonored: a RENAME whose target still names the identifier is honored.
 func TestCheckHonouredTreatsARenameInPlaceAsHonored(t *testing.T) {
 	base := []Entry{{"type", "Segment", "types.go"}}
 	dispositions := []Disposition{
@@ -243,8 +233,7 @@ func TestCheckHonouredTreatsARenameInPlaceAsHonored(t *testing.T) {
 		t.Fatalf("a rename-in-place under the target's own name was wrongly flagged: %v", err)
 	}
 
-	// A target that merely CONTAINS the name as part of a longer word must
-	// not count: "SegmentGroup" is not "Segment" renamed in place.
+	// A longer word containing the name does not count.
 	wordBoundary := []Disposition{{"Segment", Rename, "luks2.SegmentGroup"}}
 	err := CheckHonored(base, current, wordBoundary)
 	if !errors.Is(err, ErrDishonored) || !strings.Contains(err.Error(), "Segment") {

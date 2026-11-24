@@ -15,14 +15,7 @@ import (
 	"testing"
 )
 
-// TestVerifyVolumeKeyConsultsOnlyTheSegmentsDigests pins which attestation
-// an injected key is checked against. There is no keyslot on this path, so
-// the digest that matters is the one naming the SEGMENT being mapped --
-// what cryptsetup checks when it activates a volume by volume key. A
-// header whose digests attest some other segment offers no attestation
-// for this one at all, and that is a header fault rather than a credential
-// verdict. UnlockWithVolumeKey (both the free function pkg/dmcrypt now
-// activates through and (*Volume).UnlockWithVolumeKey) shares this check.
+// TestVerifyVolumeKeyConsultsOnlyTheSegmentsDigests: an injected key is checked only against digests naming the mapped segment.
 func TestVerifyVolumeKeyConsultsOnlyTheSegmentsDigests(t *testing.T) {
 	defer parallel(t)()
 
@@ -47,12 +40,7 @@ func TestVerifyVolumeKeyConsultsOnlyTheSegmentsDigests(t *testing.T) {
 	}
 }
 
-// TestVerifyVolumeKeyBindsTheKeyLength is the regression test for the hole
-// the digest leaves open. HMAC zero-pads a short key, so the volume key
-// with a zero byte appended produces the SAME digest -- and without a
-// length check it would be accepted and handed to dm-crypt as a key of the
-// wrong size. The length is bound to the keyslots' key_size, and a header
-// that records none is refused.
+// TestVerifyVolumeKeyBindsTheKeyLength: a zero-extended key passes HMAC, so the length is bound to key_size.
 func TestVerifyVolumeKeyBindsTheKeyLength(t *testing.T) {
 	defer parallel(t)()
 
@@ -64,9 +52,7 @@ func TestVerifyVolumeKeyBindsTheKeyLength(t *testing.T) {
 		t.Fatalf("reading the header failed: %v", err)
 	}
 
-	// The premise, checked rather than assumed: the zero-extended key DOES
-	// pass the digest comparison on its own, so the length check is the
-	// only thing refusing it.
+	// The zero-extended key does pass the digest comparison.
 	padded := volumeKeyEnclave(t, append(bytes.Clone(key), 0))
 	if err := verifyKeyAgainstDigests(context.Background(), padded, metadata.Digests,
 		func(*header.Digest) bool { return true },

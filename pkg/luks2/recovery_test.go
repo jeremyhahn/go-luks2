@@ -77,8 +77,7 @@ func TestParseRecoveryKey(t *testing.T) {
 
 			defer mustDestroy(t, key)
 
-			// ParseRecoveryKey hands back an ENCLAVE, so the decoded key is
-			// never a slice the caller has to remember to wipe.
+			// ParseRecoveryKey returns an enclave.
 			if key.Size() != tt.expectLen {
 				t.Errorf("expected length %d, got %d", tt.expectLen, key.Size())
 			}
@@ -105,20 +104,13 @@ func TestRecoveryKeyRoundTrip(t *testing.T) {
 	}
 	defer mustDestroy(t, parsed)
 
-	// The decode still yields the 32 bytes behind the rendering, which is what
-	// parseLegacyRecoveryKey is for. It is no longer the credential: see
-	// TestTheCredentialIsThePrintedText below.
+	// The decode still yields the 32 bytes behind the rendering; the credential is the printed text.
 	if parsed.Size() != 32 {
 		t.Errorf("round-trip failed: decoded %d bytes, want 32", parsed.Size())
 	}
 }
 
-// TestTheCredentialIsThePrintedText is the property the whole design rests on:
-// the string an operator writes down is the passphrase, so it must come back
-// out of the enclave and out of RecoveryCredential unchanged.
-//
-// The cross-check against cryptsetup lives in the CLI tests, where a real
-// container can be opened with it.
+// TestTheCredentialIsThePrintedText: the printed string is the passphrase and round-trips through the enclave and RecoveryCredential.
 func TestTheCredentialIsThePrintedText(t *testing.T) {
 	for _, format := range []RecoveryKeyFormat{RecoveryDashed, RecoveryHex, RecoveryBase64} {
 		t.Run(format.String(), func(t *testing.T) {
@@ -134,8 +126,7 @@ func TestTheCredentialIsThePrintedText(t *testing.T) {
 			}
 			printed := buf.String()
 
-			// The hash published alongside the key identifies THAT string, so
-			// a transcription can be checked without touching the volume.
+			// The published hash identifies that string.
 			sum := sha256.Sum256([]byte(printed))
 			if key.Hash() != hex.EncodeToString(sum[:]) {
 				t.Error("Hash() is not the hash of the printed text")
@@ -144,45 +135,14 @@ func TestTheCredentialIsThePrintedText(t *testing.T) {
 	}
 }
 
-// AddRecoveryKey used to REPORT a keyslot it had not used (#42).
-//
-// AddKey chooses a slot and does not report which, so AddRecoveryKey inferred
-// it afterwards as the HIGHEST-numbered slot in the header. AddKey fills the
-// FIRST FREE slot, so the inference is wrong on any volume with a gap -- which
-// is the ordinary state of one where a credential has ever been revoked.
-//
-// The number is written into the saved recovery-key file. An operator revoking
-// "the recovery key" months later therefore destroys a different, live
-// credential AND leaves the recovery key working: data loss and a failed
-// revocation from one wrong integer.
+// AddRecoveryKey must report the keyslot it actually used.
 
-// fipsSafeAddKeyOptions selects PBKDF2 explicitly.
-//
-// AddKey with nil options defaults to argon2id, which the Go Cryptographic
-// Module refuses under GODEBUG=fips140=on -- so a fixture that passed nil built
-// its volume fine in the default build and failed the FIPS leg with
-// "algorithm not approved in FIPS 140-3 mode". Measured: the race leg and
-// govulncheck were both green while all four of these tests were broken under
-// FIPS. formatWithLibrary makes the same choice for the same reason.
-//
-// The iteration time is the minimum, because these fixtures add several
-// credentials each and the KDF cost is not what any of them is about.
+// fipsSafeAddKeyOptions selects PBKDF2 at the minimum iteration time, so fixtures build under FIPS.
 func fipsSafeAddKeyOptions() *addKeyOptionsForTest {
 	return &addKeyOptionsForTest{KDFType: kdfTypePBKDF2, PBKDFIterTime: 1}
 }
 
-// recoveryTestIterations is the explicit PBKDF2 count the AddRecoveryKey tests
-// enroll with, where the subject is which keyslot and token get written, not
-// what the keyslot costs.
-//
-// Left to calibrate, every one of those keyslots was stretched to the default
-// iteration time, and each test then pays that derivation again for every
-// probe that opens it -- keyslotOpenedBy tries every slot. That was the single
-// largest cost in the package (#92). The floor is minPBKDF2Iterations because
-// a recovery key is library-generated and RecoveryKeyOptions.PBKDFIterations
-// admits exactly that. Calibration itself is exercised by the Format and AddKey
-// tests and the exemption by keyslotcostpolicy_test.go; per-function coverage
-// of the package was identical before and after this switch.
+// recoveryTestIterations is the explicit PBKDF2 count these tests enroll with: minPBKDF2Iterations, allowed for library-generated keys.
 const recoveryTestIterations = minPBKDF2Iterations
 
 // volumeWithAKeyslotGap returns a container holding keyslots {0, 2} -- the
@@ -347,13 +307,7 @@ func TestAddRecoveryKeyHonoursAnExplicitKeyslot(t *testing.T) {
 	}
 }
 
-// TestAddRecoveryKeyPicksTheFreeSlotEvenWhenTheGapIsFilledFirst pins that the
-// answer comes from the CHOICE and not from the shape of the header.
-//
-// The gap at slot 1 is occupied before the call, so the recovery key must land
-// somewhere else -- and the report must follow it there. A rule that
-// reconstructed the slot from the header would have to get this right by a
-// second piece of reasoning; reading the choice gets it right by construction.
+// TestAddRecoveryKeyPicksTheFreeSlotEvenWhenTheGapIsFilledFirst: the reported slot follows the actual choice.
 func TestAddRecoveryKeyPicksTheFreeSlotEvenWhenTheGapIsFilledFirst(t *testing.T) {
 	defer parallel(t)()
 
@@ -385,8 +339,7 @@ func TestAddRecoveryKeyPicksTheFreeSlotEvenWhenTheGapIsFilledFirst(t *testing.T)
 	}
 }
 
-// TestAddKeyReportsTheSlotItChose covers the seam directly: AddKey returns the
-// slot it used (#101), read from where it was chosen rather than inferred.
+// TestAddKeyReportsTheSlotItChose: AddKey returns the slot it used.
 func TestAddKeyReportsTheSlotItChose(t *testing.T) {
 	defer parallel(t)()
 
@@ -396,8 +349,7 @@ func TestAddKeyReportsTheSlotItChose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddKey: %v", err)
 	}
-	// The FIRST FREE slot, which is the gap -- not the highest, which is what
-	// the deleted inference would have said.
+	// The first free slot, the gap.
 	if assigned != 1 {
 		t.Fatalf("AddKey reported slot %d, want the first free slot 1", assigned)
 	}
@@ -462,15 +414,12 @@ func TestAddRecoveryKeyWritesTheSystemdRecoveryToken(t *testing.T) {
 	if token.Type != recoveryTokenType {
 		t.Errorf("token type is %q, want %q", token.Type, recoveryTokenType)
 	}
-	// It names the slot the library CHOSE, on a container whose slots are not
-	// contiguous -- which is the case an inferred number gets wrong (#42).
+	// It names the slot the library chose, on non-contiguous slots.
 	if len(token.Keyslots) != 1 || token.Keyslots[0] != keyslot {
 		t.Errorf("token names keyslots %v, want [%d]", token.Keyslots, keyslot)
 	}
 
-	// systemd's recovery token carries NOTHING ELSE. There is no material to
-	// record, and a member of our own invention here would be a token systemd
-	// reads differently from the way it was written.
+	// systemd's recovery token carries nothing else.
 	encoded, err := json.Marshal(token)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
@@ -544,9 +493,7 @@ func TestAddRecoveryKeyReportsAnOrphanItCannotRemove(t *testing.T) {
 	}
 }
 
-// TestAddRecoveryKeyRefusesWhenNoTokenSlotIsFree checks the cheap order: the
-// token slot is claimed BEFORE key material is written, so running out costs
-// nothing rather than costing a rollback.
+// TestAddRecoveryKeyRefusesWhenNoTokenSlotIsFree: the token slot is claimed before key material is written.
 func TestAddRecoveryKeyRefusesWhenNoTokenSlotIsFree(t *testing.T) {
 	defer parallel(t)()
 
@@ -639,13 +586,7 @@ func TestRecoveryCredentialRefusesWhatCannotBeOne(t *testing.T) {
 	}
 }
 
-// TestTheTwoParsersDecodeDifferently pins the difference between
-// ParseRecoveryKey and parseLegacyRecoveryKey, which is the whole reason
-// both exist: a keyslot this package enrolls holds the printed TEXT, and one
-// enrolled before that change holds the DECODED bytes behind it. B.6 moved
-// the two loaders' file I/O to internal/cli (LoadRecoveryCredential,
-// LoadRecoveryKey), but the parsing distinction itself is still the
-// library's to keep.
+// TestTheTwoParsersDecodeDifferently: ParseRecoveryKey keeps the printed text, parseLegacyRecoveryKey the decoded bytes.
 func TestTheTwoParsersDecodeDifferently(t *testing.T) {
 	key, err := NewRecoveryKey(WithRecoveryFormat(RecoveryDashed))
 	if err != nil {

@@ -7,13 +7,7 @@ import (
 	"testing"
 )
 
-// raceDocker stands in for docker in the image build targets. Its build prints
-// one progress line and then does what FAKE_BUILD says: "ok" succeeds,
-// "exists" fails the way BuildKit refuses the slower of two exports of one tag,
-// and anything else fails the way an ordinary build error does. Every failed
-// build leaves the tag behind ($log.built), so `docker image inspect` finds it
-// afterwards when FAKE_INSPECT=after; before any build it finds nothing, so a
-// target that checks for a held tag first still builds.
+// raceDocker stands in for docker in the image build targets; FAKE_BUILD picks success, an "already exists" export refusal or an ordinary failure.
 const raceDocker = `#!/bin/sh
 log="$FAKE_DOCKER_LOG"
 printf '%s\n' "$*" >> "$log"
@@ -55,13 +49,7 @@ func raceDockerEnv(t *testing.T, set map[string]string) (env []string, log strin
 	return environ(drop, all), log
 }
 
-// Two jobs of one run can build the same content-addressed image tag at once
-// on one daemon. Each starts while the tag is not there, and BuildKit refuses
-// the slower export because the tag "already exists". The tag is a hash of the
-// inputs, so the image the faster job left under it is the image the slower
-// one would have made: the target passes, and says so. It passes only when the
-// failure is that exact refusal AND the tag now resolves; every other failure
-// fails the target, with the build's own output.
+// Two jobs building one content-addressed tag at once: the target passes only on BuildKit's "already exists" refusal when the tag then resolves.
 func TestImageBuildToleratesAConcurrentBuildOfItsContentTag(t *testing.T) {
 	mef := filepath.Join(t.TempDir(), "gomodauth.env")
 	if err := os.WriteFile(mef, []byte("GOPRIVATE=example.com/private\n"), 0o600); err != nil {

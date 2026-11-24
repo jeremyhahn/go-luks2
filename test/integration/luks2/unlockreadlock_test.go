@@ -29,12 +29,7 @@ import (
 // to pkg/luks2's unexported copy.
 const cryptsetupLockDir = "/run/cryptsetup"
 
-// cryptsetupWriteLockFlock is which flock(2) call of `cryptsetup token import`
-// takes the WRITE lock. Measured with strace against cryptsetup 2.7.5: the
-// read lock is LOCK_SH, its release LOCK_UN then LOCK_EX|LOCK_NB (to unlink);
-// the fourth call is the blocking LOCK_EX of the write. The test checks the
-// trace afterwards, so a cryptsetup that orders them differently fails it
-// loudly rather than passing on a delay that landed somewhere else.
+// cryptsetupWriteLockFlock is which flock call of `cryptsetup token import` (2.7.5) takes the write lock; the trace is checked afterwards.
 const cryptsetupWriteLockFlock = 4
 
 // cryptsetupWriteHold is how long strace keeps cryptsetup holding its write
@@ -53,24 +48,7 @@ func lockFileFor(t *testing.T, path string) string {
 	return filepath.Join(cryptsetupLockDir, "L_"+strconv.FormatUint(uint64(unix.Major(rdev)), 10)+":"+strconv.FormatUint(uint64(unix.Minor(rdev)), 10))
 }
 
-// TestUnlockWaitsForCryptsetupsWriteLock: real cryptsetup holding its write
-// lock on the device holds Volume.Unlock's metadata read off until it has
-// written, moved from pkg/luks2/unlockreadlock_integration_test.go (#274).
-//
-// `cryptsetup token import` runs under strace, which delays the return of
-// the flock that takes its write lock: cryptsetup then HOLDS the lock and has
-// not yet written token 7. Unlock is started inside that window.
-//
-// The original asserted this by substituting pkg/luks2's own unexported
-// readUnlockHeader seam to see whether the header it read carried token 7 --
-// a seam that no longer exists after the Volume rewrite folded that read into
-// header.ReadHeaderCopyFrom with no package-level var left to intercept, and
-// that this black-box package could not reach even if it did. What the seam
-// proved is instead proven by TIMING: Volume.Unlock's first step is an
-// flock(2) that must itself block behind cryptsetup's held LOCK_EX. A read
-// that raced ahead would return in microseconds; one that genuinely waited
-// returns only once cryptsetup's hold -- still writeHoldSeen away from being
-// released when Unlock starts -- ends.
+// TestUnlockWaitsForCryptsetupsWriteLock: with cryptsetup holding its write lock under strace, Unlock's flock blocks until the hold ends, shown by timing.
 func TestUnlockWaitsForCryptsetupsWriteLock(t *testing.T) {
 	requireCryptsetupDeclared(t)
 	stracePath, err := exec.LookPath("strace")
@@ -100,11 +78,7 @@ func TestUnlockWaitsForCryptsetupsWriteLock(t *testing.T) {
 	// Whatever ends this test, the child does not outlive it.
 	defer func() { _ = cmd.Process.Kill() }()
 
-	// Polled, re-checking the real condition each pass: cryptsetup holds the
-	// file exclusively when a shared, non-blocking flock of it is refused.
-	// It is the WRITE lock once that has stayed true, on one inode, for
-	// writeHoldSeen: cryptsetup's only other exclusive hold -- the try-lock
-	// its read-lock release makes before unlinking -- lasts microseconds.
+	// cryptsetup holds the write lock once a shared non-blocking flock has been refused on one inode for writeHoldSeen.
 	const writeHoldSeen = 200 * time.Millisecond
 	var heldIno uint64
 	var heldSince time.Time
@@ -155,12 +129,7 @@ func TestUnlockWaitsForCryptsetupsWriteLock(t *testing.T) {
 		t.Fatalf("strace did not delay cryptsetup's blocking LOCK_EX -- its lock sequence is not the one measured:\n%s", trace)
 	}
 
-	// writeHoldSeen (200ms) is how long cryptsetup had ALREADY held its
-	// write lock by the time Unlock started; the threshold here is far
-	// below the remaining hold (cryptsetupWriteHold, 5s) and far above
-	// what an unblocked flock(2)+read takes, so it separates "waited" from
-	// "raced ahead" without being sensitive to exactly how much of the
-	// hold was left.
+	// The threshold sits far below the remaining hold and far above an unblocked flock and read.
 	if unlockWait < writeHoldSeen {
 		t.Fatalf("Unlock returned after %s, before cryptsetup's write lock was seen held for %s: the read did not wait for cryptsetup's write lock", unlockWait, writeHoldSeen)
 	}

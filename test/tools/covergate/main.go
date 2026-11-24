@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Command covergate is the repository's coverage gate (#141). It refuses
+// Command covergate is the repository's coverage gate. It refuses
 // coverage below the per-package floors in coverage-floors.txt.
 //
 //	covergate -floors coverage-floors.txt -tier unit -profile coverage.out $(go list ./...)

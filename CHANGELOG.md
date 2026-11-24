@@ -1165,8 +1165,7 @@ This is the first published release of the `0.3.0-alpha` code: `v0.3.0-alpha` wa
   host's whole `/dev` bind-mounted in, which on the machine this was measured on
   meant the test container could open the root NVMe, an unrelated RAID array and
   every dm mapping on the box. This library holds volume keys for a trusted computing
-  platform, and a test rig is not where that gets handed away for convenience
-  (owner direction, 2026-08-31).
+  platform, and a test rig is not where that gets handed away for convenience.
 
   What replaces it: `--cap-drop ALL` plus `CAP_SYS_ADMIN` and `CAP_MKNOD`;
   a seccomp profile; `apparmor=unconfined`; `--device /dev/mapper/control` and
@@ -1206,7 +1205,7 @@ This is the first published release of the `0.3.0-alpha` code: `v0.3.0-alpha` wa
 
   These concerns move to **development and review time**, as part of the SDLC
   process and conventions. A code-based scanning solution is planned separately;
-  until it lands this repository implements none (owner ruling 2026-09-13). The
+  until it lands this repository implements none. The
   guards were deliberately NOT ported to Go tests, which was the obvious move and
   is not what is wanted.
 
@@ -1237,8 +1236,7 @@ This is the first published release of the `0.3.0-alpha` code: `v0.3.0-alpha` wa
   superseded by `DeriveKeyEnclave`, which returns the derived key held in an
   enclave rather than as a plain `[]byte`. Callers that still reference any of
   the three get a compile error, which is the point: this is pre-1.0 alpha
-  software, and there is no compatibility shim to remove them into (owner
-  ruling, 2026-09-11).
+  software, and there is no compatibility shim to remove them into.
 
 ### Changed
 
@@ -1263,7 +1261,7 @@ This is the first published release of the `0.3.0-alpha` code: `v0.3.0-alpha` wa
   can have depended on the old shape.
 
 - **A mandatory requirement this package does not implement refuses WRITES and
-  permits READS (#152, owner ruling 2026-09-13).** `ReadHeader` parses the
+  permits READS (#152).** `ReadHeader` parses the
   container and exposes the requirement, because a flag whose purpose is to warn
   is useless if reading it is what fails, and an operator diagnosing an
   interrupted reencryption needs to see it. Every mutation refuses with an
@@ -1347,7 +1345,7 @@ This is the first published release of the `0.3.0-alpha` code: `v0.3.0-alpha` wa
 - **The policy for a loop device no ledger recorded is written down: an
   operator clears it, not this repository (#114).** The reaper handles recorded
   state completely and unrecorded state not at all, by design. `docs/TESTING.md`
-  now carries the owner's 2026-09-22 ruling — such a device is attributed and
+  now states the policy — such a device is attributed and
   detached by hand with stock `losetup -a` / `losetup -d`, per device, and no
   command for it ships here.
 
@@ -1359,9 +1357,8 @@ This is the first published release of the `0.3.0-alpha` code: `v0.3.0-alpha` wa
   matched none of them.
 
   The doc comments on `test/harness/system.go` and
-  `test/harness/cmd/luks2-testreap` now say that their missing sweep is ruled
-  policy rather than an omission, so removing it is an owner decision and not a
-  cleanup. No behaviour changes.
+  `test/harness/cmd/luks2-testreap` now say that their missing sweep is
+  policy rather than an omission. No behaviour changes.
 
 ### Added
 
@@ -1549,8 +1546,7 @@ This is the first published release of the `0.3.0-alpha` code: `v0.3.0-alpha` wa
 - **`MakeFilesystem` and `MakeFilesystemWithOptions` refuse ext2 and ext3
   (#195).** They now return `ErrUnsupportedFilesystem` where they used to run
   `mkfs.ext2` / `mkfs.ext3`. ext2 has no journal, and this library does not
-  offer either filesystem on an encrypted volume. The owner ruled on this in
-  #195. Use ext4 instead. The `FilesystemExt2` and `FilesystemExt3` constants
+  offer either filesystem on an encrypted volume. Use ext4 instead. The `FilesystemExt2` and `FilesystemExt3` constants
   remain so that callers can name the types being refused, and their comments
   say why. The `luks2 create` CLI no longer offers them, and the README and
   `docs/cli` no longer list them.
@@ -1734,7 +1730,7 @@ This is the first published release of the `0.3.0-alpha` code: `v0.3.0-alpha` wa
   `ci.yml`, `nightly.yml` and `release.yml`. Each half has a test that plants
   a violation and checks that it is caught. The gate's package tests need no
   checkout, so `go test ./...` still passes in the integration image, which
-  carries no `.git`. One workflow, `automerge.yml`, is pending a ruling: the
+  carries no `.git`. One workflow, `automerge.yml`, is pending a decision: the
   gate lists it as an open item on every run and does not call the tree
   publishable while it is tracked, but does not fail on it. See
   `docs/RELEASABILITY.md`.
@@ -1898,7 +1894,7 @@ This is the first published release of the `0.3.0-alpha` code: `v0.3.0-alpha` wa
   whose memlock limit is Docker's default 8 MiB, and `go test` ran up to
   GOMAXPROCS parallel tests at once. On a 112-core runner that was enough
   concurrent keyslot operations to exhaust the limit: twenty tests failed with
-  `mlock: cannot allocate memory` (Gitea run 22601). Parallel tests now call
+  `mlock: cannot allocate memory`. Parallel tests now call
   `defer parallel(t)()`, which holds one of a number of slots sized from the
   process's actual RLIMIT_MEMLOCK (1 MiB a test, after a 1 MiB reserve, at most
   GOMAXPROCS) for the test's body. Reproduced in the container with
@@ -2049,7 +2045,7 @@ This is the first published release of the `0.3.0-alpha` code: `v0.3.0-alpha` wa
   (#79).** The caller passes the volume key as an `*enclave.MemoryEnclave`
   instead of a passphrase. No keyslot is scanned and the keyslot KDF never
   runs, so the passphrase derivation and its unwipeable copies are not on the
-  path. This is the unlock half of the owner's ruling on #79. The format half,
+  path. This is the unlock half of #79. The format half,
   with its mandatory recovery keyslot, follows as a separate change. The
   library still has no hardware code and no policy about where a key comes
   from.
@@ -2158,7 +2154,7 @@ This is the first published release of the `0.3.0-alpha` code: `v0.3.0-alpha` wa
 - **The unit suite has a runtime budget and a separate ceiling, and runs well
   inside both (#92).** `go test -race ./pkg/luks2` had a hard `-timeout 300s`
   that was also its budget, and a loaded runner killed healthy runs at exactly
-  5m0s. Per the owner's amended ruling the two are now separate Makefile
+  5m0s. The two are now separate Makefile
   variables that CI reads through `make test-unit`: `UNIT_TEST_TIMEOUT=10m`, the
   ceiling, which fails the run, and `UNIT_TEST_TARGET=240` (seconds), the budget,
   which `make test-unit` prints beside the measured time on every run and flags
@@ -2467,7 +2463,7 @@ one has to change to adopt the release.
   through it — so no FIPS-mode process can enroll a non-approved keyslot.
   `requireFIPSApprovedKDF` is renamed `requireFIPSApprovedKDFForNewKeyslot` so
   that re-introducing it on a derivation path reads as wrong at the call site.
-  Owner ruling 2026-08-20: in FIPS mode a non-approved KDF may not be
+  In FIPS mode a non-approved KDF may not be
   ENROLLED, and enrollment is the operation that gets refused.
 
   PBKDF2-HMAC-SHA1 remains refused **while deriving**, and that is a different
@@ -2580,8 +2576,7 @@ one has to change to adopt the release.
 ### Changed
 
 - **`Unlock` now FAILS CLOSED when the kernel keyring is unavailable**, with no
-  fallback and no opt-out (owner ruling 2026-08-31: *"we should fail closed, we
-  dont support legacy kernels that are insecure"*). The alternative is the
+  fallback and no opt-out: insecure legacy kernels are not supported. The alternative is the
   volume master key in memory this library cannot wipe, for an unbounded time,
   while the caller believes a guarantee that did not hold.
 

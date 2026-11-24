@@ -16,13 +16,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/test/internal/harness"
 )
 
-// LUKS2 On-Disk Format 1.1.4 added two things: the optional integrity.key_size
-// of a crypt segment and the inline-hw-tags requirement flag. cryptsetup
-// gained both in 2.8.0; the integration image ships 2.7.5, which can write
-// neither. So each fixture here is a cryptsetup-formatted volume whose header
-// this test rewrites by hand to what the 1.1.4 text specifies, and the
-// interop checked is the one 2.7.5 can show: it reads our header, it
-// rewrites it, and we read its rewrite.
+// LUKS2 1.1.4 fields (integrity.key_size, inline-hw-tags) are hand-written into cryptsetup 2.7.5 headers, since 2.7.5 cannot write them.
 
 // TestCompatIntegrityKeySizeSurvivesBothTools: a crypt segment carrying
 // integrity.key_size is read by both tools, cryptsetup's rewrite keeps the
@@ -80,12 +74,7 @@ func TestCompatIntegrityKeySizeSurvivesBothTools(t *testing.T) {
 	csClose(t, csMapping(t, loop, []byte(matrixPassphrase)))
 }
 
-// TestCompatInlineHWTagsIsKeptAndRefusedByBothTools: a header declaring the
-// inline-hw-tags requirement (1.1.4 section 3.5) reads in both tools with the
-// requirement intact. This library implements no inline hardware tags, so it
-// refuses unlock and every write naming the requirement and leaves the device
-// untouched; cryptsetup 2.7.5 does not know the flag and refuses activation
-// and header writes as an unmet requirement.
+// TestCompatInlineHWTagsIsKeptAndRefusedByBothTools: the requirement is kept; both tools refuse unlock and writes.
 func TestCompatInlineHWTagsIsKeptAndRefusedByBothTools(t *testing.T) {
 	requireCryptsetupDeclared(t)
 	defer parallel(t)()

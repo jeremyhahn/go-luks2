@@ -110,12 +110,7 @@ func readJSONArea(t *testing.T, device string) []byte {
 	return bytes.TrimRight(b, "\x00")
 }
 
-// TestMigrateToFIPSMigratesAnArgon2Digest is the digest trap in its sharpest
-// form, which #84 names explicitly: a foreign volume whose Argon2 reaches past
-// its keyslots into the digest. Both have to be migrated -- a volume whose
-// keyslots are PBKDF2 and whose digest is Argon2 fails under FIPS exactly as an
-// unmigrated one does -- and the digest must come out PBKDF2 with no Argon2
-// cost left declared on it.
+// TestMigrateToFIPSMigratesAnArgon2Digest: an Argon2 digest is migrated to PBKDF2 along with the keyslots.
 func TestMigrateToFIPSMigratesAnArgon2Digest(t *testing.T) {
 	defer parallel(t)()
 	if fips140.Enabled() {
@@ -236,12 +231,7 @@ func TestFIPSRefusalDoesNotCallAMalformedDigestAnImport(t *testing.T) {
 	}
 }
 
-// A digest whose name and parameters are approved -- PBKDF2-SHA256 over a
-// full-length salt -- but whose value is 48 bytes, a length SHA-256 never
-// produces, is damage the header screen rejects. The FIPS policy check alone
-// calls it approved, so the migration plan must screen its structure before
-// skipping it: the volume is refused at the plan stage as ErrInvalidHeader,
-// with nothing written, rather than migrated with the damage kept.
+// An approved digest of a length SHA-256 never produces is refused at the plan stage as ErrInvalidHeader.
 func TestMigrateToFIPSRefusesAnApprovedLookingMalformedDigestAtPlan(t *testing.T) {
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
@@ -300,13 +290,7 @@ func TestMigrateToFIPSRefusesAnApprovedLookingMalformedDigestAtPlan(t *testing.T
 	}
 }
 
-// A volume with a valid migration source -- an Argon2 keyslot whose digest is
-// well formed -- and one more digest that is malformed, which no keyslot the
-// unlock tries consults: one covering no keyslot, bound to the data segment,
-// and one bound to nothing. FIPS-mode unlock must not answer
-// FIPSImportRequiredError, which says MigrateToFIPS would open the volume:
-// MigrateToFIPS refuses it at the plan stage with ErrInvalidHeader, writing
-// nothing. Damage is reported as damage, by unlock and import alike.
+// A malformed digest no tried keyslot consults: FIPS unlock must not answer FIPSImportRequiredError, and MigrateToFIPS refuses with ErrInvalidHeader.
 func TestMalformedUnconsultedDigestIsAHeaderFaultAtUnlockAndImport(t *testing.T) {
 	if fips140.Enabled() {
 		assertMigrationRefusedUnderFIPS(t)
@@ -453,12 +437,7 @@ func TestMigrateToFIPSRefusesToWipeOutsideTheKeyslotsArea(t *testing.T) {
 	}
 }
 
-// TestMigrateToFIPSReadsNoKeyslotOutsideKeyslotSpace: the keyslot that opens
-// the volume declares an area running past the keyslots area into the data
-// segment -- its material, at the start, intact, so an unlock would succeed
-// after reading every declared byte. The import refuses before reading any
-// keyslot: no keyslot key is ever derived, and the unlock derives before it
-// reads the area. Whether the non-approved keyslots are to be kept or not.
+// TestMigrateToFIPSReadsNoKeyslotOutsideKeyslotSpace: the import refuses before reading or deriving any keyslot.
 func TestMigrateToFIPSReadsNoKeyslotOutsideKeyslotSpace(t *testing.T) {
 	defer parallel(t)()
 	if fips140.Enabled() {

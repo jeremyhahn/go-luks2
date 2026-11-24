@@ -22,8 +22,8 @@ func (e *UsageError) Error() string {
 
 // MissingToolError reports a tool absent from a self-hosted runner. That is an
 // IMAGE defect, and it is not papered over with a network install: doing so
-// would restore precisely the intermittent failure baking the tools in removed
-// (#44), while reporting success.
+// would restore precisely the intermittent failure baking the tools in removed,
+// while reporting success.
 type MissingToolError struct {
 	Bin string
 	Pin string

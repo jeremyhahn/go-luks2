@@ -120,15 +120,7 @@ func addKeyForTest(path, existing, newPassphrase string) error {
 	return err
 }
 
-// #246 against the real kernel and real cryptsetup: wipe verified on the
-// medium past the page cache (D1-D3), wipe refusing a device in use (D4),
-// and the device lock excluding cryptsetup (D19). See
-// laned_integration_test.go (now moved, from pkg/luks2).
-//
-// readDirectAt and keyslotsAreaBounds reach internal/device.ReadPastCache
-// and internal/header.HeaderAreaSize directly -- both already exported and
-// importable module-wide -- in place of pkg/luks2's own unexported
-// wrappers of the same name.
+// Wipe verification past the page cache, wipe refusal on a device in use, and the lock excluding cryptsetup, on the real kernel.
 
 const laneDPassphrase = "lane-d-passphrase"
 

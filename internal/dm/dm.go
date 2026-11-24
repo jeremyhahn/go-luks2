@@ -35,10 +35,7 @@ import (
 // ControlPath is the device-mapper control node every dm ioctl is issued on.
 const ControlPath = "/dev/mapper/control"
 
-// RemoveRetryBudget and RemoveRetryInitialDelay bound RetryWhileBusy's
-// backoff: a hold on a dm target clears within a few seconds or it does not
-// clear, and retrying past that budget would turn a genuine failure into a
-// hang (#122 -- see RetryWhileBusy).
+// RemoveRetryBudget and RemoveRetryInitialDelay bound RetryWhileBusy's backoff.
 const (
 	RemoveRetryBudget       = 3 * time.Second
 	RemoveRetryInitialDelay = 20 * time.Millisecond
@@ -102,7 +99,7 @@ func CreateTarget(ctx context.Context, name, uuid string) (uint64, error) {
 // That is the point of the signature: whatever a caller must be sure of
 // before removing has to be inside the thing being retried, so that a
 // concurrent actor recreating the target mid-backoff is caught by every
-// attempt rather than only the first (#122).
+// attempt rather than only the first.
 //
 // It reports the LAST error and leaves the meaning to the caller, because
 // different callers face the same errno and owe the operator different
@@ -121,8 +118,7 @@ func RetryWhileBusy(ctx context.Context, clk clock.Clock, attempt func() error) 
 		if remaining <= 0 {
 			return attempts, err
 		}
-		// The LAST wait is clipped to whatever is left, rather than the loop
-		// giving up as soon as the next doubling would overshoot (#122).
+		// Clip the last wait to the remaining budget.
 		t := clk.NewTimer(min(delay, remaining))
 		select {
 		case <-ctx.Done():
@@ -245,9 +241,7 @@ func RemoveMappingNodes(ctx context.Context, devDir string, blockNodeRdev func(p
 	if ctx.Err() != nil {
 		return
 	}
-	// The mapper entry goes FIRST, while its target still resolves. Removing
-	// the dm node first would turn this symlink into a dangling one and force
-	// it down the exception path for no reason.
+	// Remove the mapper entry first, while its target still resolves.
 	mapperPath := MapperPath(devDir, name)
 	if IsOurNode(blockNodeRdev, mapperPath, info) || IsDanglingSymlink(mapperPath) {
 		_ = os.Remove(mapperPath)
@@ -271,15 +265,12 @@ func RemoveMappingNodes(ctx context.Context, devDir string, blockNodeRdev func(p
 // It replaces rather than refuses because the only callers reach here after
 // confirming the existing entry does NOT name the device dm reports: it is
 // stale, and leaving it is how a mapping name comes to resolve to some other
-// device (#250, C5).
+// device.
 func PlaceNode(ctx context.Context, path string, create func(tmp string) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	// Only an entry that could be a stale device-mapper node is replaced: a
-	// symlink, or a block device. A character device -- /dev/mapper/control
-	// above all -- a directory, a regular file or anything else is somebody
-	// else's, and is refused rather than renamed over.
+	// Replace only a symlink or block device; anything else is refused.
 	if fi, err := os.Lstat(path); err == nil {
 		mode := fi.Mode()
 		staleCandidate := mode&os.ModeSymlink != 0 || (mode&os.ModeDevice != 0 && mode&os.ModeCharDevice == 0)
@@ -302,10 +293,7 @@ func PlaceNode(ctx context.Context, path string, create func(tmp string) error) 
 	return nil
 }
 
-// randomSuffix returns n random bytes hex-encoded, for PlaceNode's temporary
-// name. It is not a secret -- it only has to be unique for the instant the
-// rename needs -- so it draws directly on crypto/rand rather than through any
-// caller-supplied seam.
+// randomSuffix returns n random bytes hex-encoded for PlaceNode's temporary name.
 func randomSuffix(n int) (string, error) {
 	b := make([]byte, n)
 	if _, err := io.ReadFull(rand.Reader, b); err != nil {

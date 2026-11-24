@@ -28,10 +28,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// Regression tests for #249 (Lane A, keyslot safety). Where a finding is about
-// interoperability, the fixture is written by cryptsetup itself, so what is
-// proved is agreement with a third party and not with this package's own
-// writer.
+// Keyslot safety tests; interoperability fixtures are written by cryptsetup.
 
 const (
 	// unboundPassphrase opens the `cryptsetup luksAddKey --unbound` keyslot.
@@ -77,9 +74,7 @@ func cryptsetupOpensSlot(t *testing.T, image, passphrase string, slot int) bool 
 	return code == 0
 }
 
-// unboundFixture is a cryptsetup volume whose keyslot 0 holds the volume key
-// under conformancePassphrase and whose keyslot 1 holds an UNBOUND key under
-// unboundPassphrase -- the header `cryptsetup luksAddKey --unbound` writes.
+// unboundFixture is a cryptsetup volume with the volume key in keyslot 0 and an unbound key in keyslot 1.
 func unboundFixture(t *testing.T) string {
 	t.Helper()
 
@@ -151,8 +146,7 @@ func TestTheRemovalGuardDoesNotCountAnUnboundKeyslot(t *testing.T) {
 		})
 	}
 
-	// The control: a second BOUND keyslot is a survivor, so the same removal
-	// is permitted. Without it a guard refusing everything passes the above.
+	// Control: with a second bound keyslot the same removal is permitted.
 	t.Run("a bound survivor permits it", func(t *testing.T) {
 		device := restoreVolume(t, "bound-survivor.img", golden)
 		args := append([]string{"luksAddKey"}, cheapCryptsetupArgs...)
@@ -220,8 +214,7 @@ func TestAnUnboundCredentialProvesNothingAboutTheVolume(t *testing.T) {
 func TestAnUnboundKeyslotSharingThePassphraseDoesNotHijackAddKey(t *testing.T) {
 	defer parallel(t)()
 
-	// The unbound keyslot is slot 0 and the bound one slot 1, so a scan that
-	// ignored binding would reach the unbound key FIRST.
+	// The unbound keyslot sorts first.
 	image := newImage(t, "unbound-first.img")
 	requireCryptsetup(t)
 	args := append([]string{"luksFormat", "--type", "luks2", "--key-slot", "1"}, cheapCryptsetupArgs...)
@@ -278,8 +271,7 @@ func confinementFixture(t *testing.T, at func(dataOffset int64) int64, keyslotTy
 	digest.Keyslots = append(digest.Keyslots, "1")
 
 	if keyslotType == "luks2" {
-		// Real key material, so the passphrase OPENS the keyslot and a removal
-		// gets past its own authentication to the wipe.
+		// Real key material, so the removal reaches the wipe.
 		material := readAreaBytes(t, device, offset, size)
 		f, err := os.OpenFile(device, os.O_WRONLY, 0)
 		if err != nil {
@@ -439,11 +431,7 @@ func writeHandKeyslot(t *testing.T, device, id string, passphrase []byte, stripe
 	}
 }
 
-// TestChangeKeyRewritesAForeignStripeCount is A3: a keyslot with 2000 stripes
-// is rewritten with the 4000 stripes ChangeKey splits into, and DECLARES 4000,
-// so the new passphrase opens it -- here and in cryptsetup. Both the area the
-// finding describes (large enough for 4000 stripes) and an exactly-sized one
-// (which must grow) are covered.
+// TestChangeKeyRewritesAForeignStripeCount: a 2000-stripe keyslot is rewritten declaring 4000, and opens here and in cryptsetup.
 func TestChangeKeyRewritesAForeignStripeCount(t *testing.T) {
 	defer parallel(t)()
 
@@ -459,11 +447,7 @@ func TestChangeKeyRewritesAForeignStripeCount(t *testing.T) {
 			device := newImage(t, "stripes.img")
 			formatWithLibrary(t, device)
 			writeHandKeyslot(t, device, "1", []byte(handPassphrase), 2000, tc.area)
-			// This package opens it, merging the 2000 stripes it declares.
-			// cryptsetup 2.7.0 does NOT: measured, it merges LUKS_STRIPES
-			// (4000) whatever af.stripes says, and the digest then fails --
-			// so a rewrite that leaves 4000 stripes of material DECLARING 4000
-			// is also the one that makes the keyslot cryptsetup's again.
+			// This package merges the declared 2000 stripes; cryptsetup 2.7.0 always merges 4000.
 			if err := testKeyForTest(device, []byte(handPassphrase)); err != nil {
 				t.Fatalf("the fixture is wrong: the 2000-stripe keyslot does not open here: %v", err)
 			}
@@ -494,11 +478,7 @@ func TestChangeKeyRewritesAForeignStripeCount(t *testing.T) {
 	}
 }
 
-// corruptTheNextWrittenArea makes the medium keep something other than the next
-// keyslot area written: when that area is synced, 32 KiB of the material just
-// written -- it ends where the descriptor's position is -- is overwritten with
-// random. The keyslot is written correctly and READ BACK wrong, which is
-// exactly the failure the read-back exists to catch.
+// corruptTheNextWrittenArea overwrites 32 KiB of the next synced keyslot area with random, so it reads back wrong.
 func corruptTheNextWrittenArea(t *testing.T) volumeSys {
 	t.Helper()
 
@@ -525,12 +505,7 @@ func corruptTheNextWrittenArea(t *testing.T) volumeSys {
 	return sys
 }
 
-// TestAKeyslotThatDoesNotOpenOnceWrittenIsRolledBack is A3's second half: the
-// keyslot ChangeKey or AddKey writes is read back through the committed header
-// and must open to the volume key before anything old is destroyed. One that
-// does not is rolled back, and the volume still opens as it did.
-//
-// Not parallel: it substitutes the package's keyslot-area sync seam.
+// TestAKeyslotThatDoesNotOpenOnceWrittenIsRolledBack. Not parallel: it substitutes the keyslot-area sync seam.
 func TestAKeyslotThatDoesNotOpenOnceWrittenIsRolledBack(t *testing.T) {
 	defer parallel(t)()
 	passphrase := []byte(conformancePassphrase)
@@ -808,11 +783,7 @@ func TestExistingCredentialsAreNotHeldToTheNewPassphrasePolicy(t *testing.T) {
 	})
 }
 
-// TestACalibratedCountIsHeldToTheCallerFloor is A8, on the REAL floor: TestMain
-// lowers calibratedCountFloor for the keyslots the rest of the suite writes,
-// and this test puts it back for itself.
-//
-// Not parallel: it substitutes a package variable.
+// TestACalibratedCountIsHeldToTheCallerFloor restores the real calibratedCountFloor. Not parallel.
 func TestACalibratedCountIsHeldToTheCallerFloor(t *testing.T) {
 	opts := formatOptionsForTest{KDFType: kdfTypePBKDF2, HashAlgo: "sha256", PBKDFIterTime: 1}
 	kdf, err := createKDF(opts, 64, callerSuppliedCredential, defaultVolumeSys().fipsMode, defaultVolumeSys().calibratedCountFloor, defaultVolumeSys().cryptoRand)
@@ -900,10 +871,7 @@ func relinkDuring(t *testing.T, link, to string) volumeSys {
 	return sys
 }
 
-// TestAKeyslotOperationStaysOnTheDeviceItLocked is A10: the path is resolved
-// ONCE. A link re-pointed mid-operation must not receive a single byte.
-//
-// Not parallel: it substitutes the package's derivation seam.
+// TestAKeyslotOperationStaysOnTheDeviceItLocked: a link re-pointed mid-operation receives nothing. Not parallel.
 func TestAKeyslotOperationStaysOnTheDeviceItLocked(t *testing.T) {
 	defer parallel(t)()
 	passphrase := []byte(conformancePassphrase)
@@ -945,8 +913,7 @@ func TestAKeyslotOperationStaysOnTheDeviceItLocked(t *testing.T) {
 	}
 }
 
-// TestADevicePathMayContainTwoDots is A10's path half: ".." as a path ELEMENT
-// is resolved by Clean, and two dots inside a name are just a name.
+// TestADevicePathMayContainTwoDots: ".." inside a name is just a name.
 func TestADevicePathMayContainTwoDots(t *testing.T) {
 	defer parallel(t)()
 
@@ -962,8 +929,7 @@ func TestADevicePathMayContainTwoDots(t *testing.T) {
 	}
 }
 
-// TestTheLockedDescriptorMustBeAFileOrABlockDevice: what is checked is what was
-// OPENED, not what the path named when it was validated.
+// TestTheLockedDescriptorMustBeAFileOrABlockDevice checks what was opened.
 func TestTheLockedDescriptorMustBeAFileOrABlockDevice(t *testing.T) {
 	defer parallel(t)()
 
@@ -982,10 +948,7 @@ func TestTheLockedDescriptorMustBeAFileOrABlockDevice(t *testing.T) {
 	}
 }
 
-// TestANewKeyslotJoinsTheDigestBindingEverySegment: when the volume key matches
-// a digest binding only some data segments AND one binding all of them, the
-// keyslot AddKey writes joins the latter, whichever sorts first (Codex round 1
-// on #249).
+// TestANewKeyslotJoinsTheDigestBindingEverySegment: AddKey joins the digest binding all segments over a partial one.
 func TestANewKeyslotJoinsTheDigestBindingEverySegment(t *testing.T) {
 	defer parallel(t)()
 
@@ -1002,10 +965,7 @@ func TestANewKeyslotJoinsTheDigestBindingEverySegment(t *testing.T) {
 	}
 }
 
-// TestMigrateToFIPSHoldsItsSourceToTheStrictBinding: a keyslot attested by a
-// bound digest AND an unbound one is not a volume-key keyslot by the strict
-// predicate, so the import refuses it as a source rather than carrying it
-// across (Codex round 1 on #249).
+// TestMigrateToFIPSHoldsItsSourceToTheStrictBinding: a keyslot attested by bound and unbound digests is not a source.
 func TestMigrateToFIPSHoldsItsSourceToTheStrictBinding(t *testing.T) {
 	defer parallel(t)()
 	if fips140.Enabled() {

@@ -15,15 +15,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/test/internal/harness"
 )
 
-// SHA-1 anti-forensic volumes on the real kernel (#236).
-//
-// pkg/luks2 proves, on file images, that this library recovers the same
-// volume key as cryptsetup from a SHA-1 AF keyslot. This tier proves the
-// DATA: plaintext written through cryptsetup's own mapping of such a volume is
-// read back through a mapping luks2.Unlock made, before and after the volume
-// is imported for FIPS mode; a process under GODEBUG=fips140=only refuses the
-// volume naming SHA-1 until it is imported, and maps it after; cryptsetup maps
-// it throughout; and the ciphertext never changes.
+// SHA-1 AF volumes on the real kernel: data reads back the same through cryptsetup and this library before and after FIPS import, and the ciphertext never changes.
 
 // TestSHA1AFVolumesMapTheSameDataOnTheKernel runs that sequence for both
 // shapes #236 names: a LUKS2 volume formatted with --hash sha1 at cryptsetup's

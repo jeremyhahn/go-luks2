@@ -52,9 +52,7 @@ func openUnlockedLibraryVolume(t *testing.T, name string) (string, *Volume, *Key
 	return path, v, key
 }
 
-// "Recovery keys are random bytes drawn by the library": the reader
-// NewRecoveryKey draws from is the operating system's CSPRNG, and no
-// exported option can hand it another source.
+// Recovery keys come from the OS CSPRNG, and no exported option supplies another source.
 func TestRecoveryEngCredentialComesOnlyFromTheLibraryCSPRNG(t *testing.T) {
 	if got := defaultVolumeSys().cryptoRand; got != rand.Reader {
 		t.Fatalf("the production random source is %T, want crypto/rand.Reader", got)

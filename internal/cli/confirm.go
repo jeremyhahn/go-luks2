@@ -77,10 +77,7 @@ func readConfirmation(r io.Reader) (string, error) {
 	return string(line), nil
 }
 
-// refuseUnconfirmed reports a canceled confirmation to stderr and returns
-// the exit code for it.
-// refuseUnconfirmed reports a canceled confirmation to stderr and returns
-// err unchanged, so the caller can propagate it as its own result.
+// refuseUnconfirmed reports a canceled confirmation to stderr and returns err unchanged.
 func refuseUnconfirmed(e *env, what string, err error) error {
 	_, _ = fmt.Fprintf(e.stderr, "%s canceled: %v\n", what, err)
 	return err

@@ -33,8 +33,7 @@ func blankLoop(t *testing.T) (string, string) {
 	if err := os.WriteFile(image, make([]byte, 32<<20), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Through the harness, which refuses a backing file outside the recorded
-	// run root, so the next run's reaper can detach it if this one dies (#348).
+	// Through the harness, so the next run's reaper can detach it if this run dies.
 	loop, err := harness.SetupLoopDevice(image)
 	if err != nil {
 		t.Fatalf("attaching %s: %v", image, err)

@@ -22,26 +22,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// BYTE-FOR-BYTE conformance against cryptsetup 2.7.0.
-//
-// The conformance tests in conformance_test.go establish that cryptsetup
-// ACCEPTS what this library writes and vice versa. Acceptance is a weak
-// property: a header can be accepted by every implementation and still be
-// encoded differently by all of them, and a difference that is tolerated today
-// is a difference that has to be defended forever. These tests assert the
-// stronger thing -- that the bytes are the SAME bytes -- and enumerate, with a
-// reason for each, the handful of places where they legitimately are not.
-//
-// # Why this is in the INTEGRATION tier
-//
-// It shells out to cryptsetup and HARD-FAILS when the binary is absent, the
-// same decision and for the same reason as TestCryptsetupCannotReachAn-
-// UnaddressableTokenID: a conformance measurement that reports success on a
-// host with no third party to check against converts "unverified" into
-// "verified" (#90). A hard failure is only correct where the binary is a
-// DECLARED dependency, and in this tier it is -- the integration stage of build/docker/devcontainer/Dockerfile
-// installs cryptsetup-bin. The unit tier's conformance_test.go skips instead,
-// because there the binary is not declared.
+// Byte-for-byte conformance against cryptsetup 2.7.0; integration tier, so a missing cryptsetup fails.
 
 const (
 	// conformanceUUID is stamped into both containers so the 40 UUID bytes of
@@ -59,50 +40,14 @@ const (
 	// keyslots area both implementations lay out.
 	canonicalImageSize = 64 << 20
 
-	// canonicalArgon2MemoryKB caps the Argon2 memory cost ON BOTH SIDES.
-	//
-	// It is the ONLY cost pinned from outside, and it is a limit rather than a
-	// bypass: cryptsetup still CALIBRATES the time cost against it, exactly as
-	// it does whenever an operator's memory limit binds. Left to itself
-	// cryptsetup would pick up to 1 GiB, which is slow and hostile to a CI
-	// container; 64 MiB is also this package's enforced minimum
-	// (validateFormatOptionsForTest), so it is the smallest value both sides accept.
+	// canonicalArgon2MemoryKB caps Argon2 memory on both sides at this package's 64 MiB minimum; cryptsetup still calibrates time.
 	canonicalArgon2MemoryKB = 65536
 
-	// canonicalCheapIterations is for containers this package formats FOR
-	// ITSELF -- the ones a test then mutates, whose bytes are never compared
-	// against cryptsetup's. It is the sha512 floor, the cheapest keyslot
-	// forcedPBKDF2Iterations will write, because the cost is pure test latency
-	// here and buys nothing.
-	//
-	// It is deliberately NOT used for the conformance pair: those costs come
-	// from cryptsetup's own calibration. See canonicalKDF.
+	// canonicalCheapIterations is the cheapest keyslot cost, for containers that are mutated and never byte-compared.
 	canonicalCheapIterations = 210_000
 )
 
-// canonicalKDF is one keyslot header.KDF shape, expressed for both implementations.
-//
-// BOTH SHAPES ARE COVERED BECAUSE ONE DECLARATION SERVES BOTH. The header.KDF struct
-// carries the pbkdf2 members and the argon2 members together, each set
-// omitempty, so which members appear is decided by which are populated -- and a
-// key order that is right for one shape can be wrong for the other. A
-// conformance claim measured only on pbkdf2 says nothing about the argon2id
-// containers this stack actually formats.
-//
-// # CRYPTSETUP FORMATS FIRST AND THIS PACKAGE MIRRORS IT
-//
-// Not the other way round, and NOT with --pbkdf-force-iterations on the
-// cryptsetup side. That flag looks like a way to make the comparison
-// deterministic and is a trap: it pins the DIGEST cost as well as the keyslot
-// cost, so a suite built on it compares a container no operator ever creates,
-// and reports agreement about a code path real usage does not take. Measured on
-// this host -- default pbkdf2 gives a keyslot at 6017652 iterations and a
-// digest at 304464, default argon2id gives time 218 and a digest at 381577,
-// while --pbkdf-force-iterations 1000 gives 1000 for BOTH in either shape.
-//
-// So cryptsetup calibrates, freely, the way it would on an operator's machine;
-// this package is then told the numbers it chose. mirror is what does the
-// telling.
+// canonicalKDF is one keyslot KDF shape for both implementations; cryptsetup calibrates freely and this package mirrors its costs.
 type canonicalKDF struct {
 	name string
 
@@ -110,8 +55,7 @@ type canonicalKDF struct {
 	// the Argon2 memory; nothing here pins a calibrated cost.
 	cryptsetupArgs []string
 
-	// mirror copies the costs cryptsetup CHOSE into this package's options, so
-	// the two containers differ in nothing that either side got to decide.
+	// mirror copies the costs cryptsetup chose into this package's options.
 	mirror func(t *testing.T, opts *formatOptionsForTest, theirs *header.KDF)
 }
 
@@ -227,26 +171,13 @@ func formatWithCryptsetup(t *testing.T, path string, kdf canonicalKDF) {
 	}
 }
 
-// formatWithCryptsetupCheap formats a cryptsetup container for a test that does
-// NOT compare bytes.
-//
-// It uses --pbkdf-force-iterations, which buildCanonicalPair must never do. The
-// distinction is the whole lesson of this file: that flag pins the DIGEST cost
-// as well as the keyslot cost, so a container made with it is not the container
-// an operator's machine produces, and a byte baseline taken from one measures
-// the wrong thing. It is harmless where the header.KDF cost is irrelevant to the
-// assertion -- the priority tests are about a member no cost touches -- and it
-// removes cryptsetup's ~2s calibration from each fixture.
+// formatWithCryptsetupCheap formats a container with --pbkdf-force-iterations for a test that does not compare bytes.
 func formatWithCryptsetupCheap(t *testing.T, path string) {
 	t.Helper()
 	formatWithCryptsetupForced(t, path, canonicalCheapIterations)
 }
 
-// formatWithCryptsetupForced formats with an exact pbkdf2 iteration count.
-//
-// It is also the only way to produce a container carrying a count BELOW this
-// package's floor, which no caller of this package can create and which an
-// imported container legitimately has.
+// formatWithCryptsetupForced formats with an exact pbkdf2 iteration count, including one below this package's floor.
 func formatWithCryptsetupForced(t *testing.T, path string, iterations int) {
 	t.Helper()
 
@@ -279,8 +210,7 @@ func formatWithCryptsetupForced(t *testing.T, path string, iterations int) {
 type canonicalPair struct {
 	oursJSON, theirsJSON     []byte
 	oursHeader, theirsHeader []byte
-	// oursSecondary and theirsSecondary are the 4096-byte binary header of
-	// the SECOND copy, read from the offset each primary records.
+	// oursSecondary and theirsSecondary are the second copy's 4096-byte binary header.
 	oursSecondary, theirsSecondary []byte
 	oursKDF, theirsKDF             *header.KDF
 	oursKeyslot                    *header.Keyslot
@@ -288,18 +218,7 @@ type canonicalPair struct {
 	oursDigest, theirsDigest       *header.Digest
 }
 
-// buildCanonicalPair formats both containers and returns their bytes.
-//
-// The ORDER is the point: cryptsetup goes first and freely, then its chosen
-// costs are read out of its header and handed to this package's Format. Doing
-// it the other way -- formatting ours and forcing cryptsetup to match -- is
-// what --pbkdf-force-iterations invites, and it changes cryptsetup's behavior
-// (it pins the digest too), so the reference side would no longer be the
-// reference.
-//
-// It is memoized per header.KDF shape. A calibrated format is ~2s on each side and
-// three tests want the same pair; the bytes are immutable, so building them
-// once per process is the whole saving with none of the risk.
+// buildCanonicalPair formats cryptsetup's container first, mirrors its costs into Format, and memoizes the pair per KDF shape.
 func buildCanonicalPair(t *testing.T, kdf canonicalKDF) *canonicalPair {
 	t.Helper()
 
@@ -339,14 +258,7 @@ func buildCanonicalPair(t *testing.T, kdf canonicalKDF) *canonicalPair {
 	}
 	kdf.mirror(t, &opts, theirKeyslot.KDF)
 
-	// The DIGEST cost is mirrored too, through the digestIterationsFor seam --
-	// formatOptionsForTest deliberately has no knob for it. cryptsetup still
-	// calibrates freely; this package is told the count it chose, exactly as
-	// it is told the keyslot costs. Letting this package run a second
-	// calibration of its own would put two wall-clock measurements, taken
-	// moments apart on a host that is also running a test suite, into a
-	// comparison about ENCODING -- and under load they land 2x apart and fail
-	// a correct tree (#209).
+	// The digest cost is mirrored too, through the digestIterationsFor seam.
 	sys := defaultVolumeSys()
 	sys.digestIterationsFor = pinDigestIterations(theirDigest.Iterations)
 	sys.cryptoRand = pinCryptoRand(0x9c)
@@ -401,12 +313,7 @@ var (
 	canonicalPairs    map[string]*canonicalPair
 )
 
-// formatWithLibraryCheap formats a container for a test that will MUTATE it.
-//
-// It is deliberately separate from buildCanonicalPair: that one is memoized and
-// its bytes are compared against cryptsetup's, so handing it to a test that
-// adds a keyslot would corrupt every later comparison. Nothing formatted here
-// is byte-compared, so the keyslot cost is pinned at the floor.
+// formatWithLibraryCheap formats a container a test will mutate; never byte-compared.
 func formatWithLibraryCheap(t *testing.T, path string) {
 	t.Helper()
 
@@ -494,14 +401,7 @@ func readBinaryHeader(t *testing.T, path string) []byte {
 	return buf
 }
 
-// readSecondaryBinaryHeader returns the 4096-byte binary header of the second
-// header copy.
-//
-// It is located from the hdr_size the PRIMARY records rather than from a
-// constant, because that is how every reader finds it, and it is then checked
-// to BE a secondary header: the secondary magic, and a hdr_offset naming the
-// offset it was read from. Without that check a wrong offset would read two
-// runs of zeroes -- or two copies of keyslot area -- and compare them equal.
+// readSecondaryBinaryHeader returns the second copy's binary header, located from the primary's hdr_size and checked to be a secondary.
 func readSecondaryBinaryHeader(t *testing.T, path string) []byte {
 	t.Helper()
 
@@ -530,30 +430,7 @@ func readSecondaryBinaryHeader(t *testing.T, path string) []byte {
 	return buf
 }
 
-// TestCanonicalJSONReencodesCryptsetupsHeaderByteForByte is the encoder claim in
-// its purest form, and the one that depends on nothing random.
-//
-// cryptsetup's own JSON goes in, this package's decoder and encoder run over it,
-// and the bytes that come out must be identical. Nothing is excluded and
-// nothing is normalized: every salt, digest and count in the comparison is
-// cryptsetup's own, so a single difference is a difference in HOW this package
-// encodes, not in what it chose to encode.
-//
-// This is what makes the exclusions in the format-to-format tests below
-// defensible. Those must exclude the values two independent RNGs cannot agree
-// on; this one has no such values and therefore no such excuse.
-//
-// # THE CAP ON THIS CLAIM
-//
-// Byte-identity holds for UP TO TEN entries in any of keyslots, tokens,
-// segments or digests, and the fixtures here have one. Go's encoding/json sorts
-// object keys as strings while json-c preserves insertion order, so at eleven
-// keyslots cryptsetup writes 0,1,...,9,10 and this package writes
-// 0,1,10,2,...,9 -- measured, not projected. A second difference in the same
-// class: encoding/json escapes U+2028 and U+2029 even with SetEscapeHTML off,
-// which json-c does not, and which no field written today can carry. Both are
-// spec-conformant on either side, since JSON objects are unordered and both
-// escapings parse to the same string. See header.MarshalCanonicalJSON.
+// TestCanonicalJSONReencodesCryptsetupsHeaderByteForByte re-encodes cryptsetup's JSON and expects identical bytes (up to ten entries per object).
 func TestCanonicalJSONReencodesCryptsetupsHeaderByteForByte(t *testing.T) {
 	requireCryptsetupDeclared(t)
 
@@ -582,50 +459,7 @@ func TestCanonicalJSONReencodesCryptsetupsHeaderByteForByte(t *testing.T) {
 	}
 }
 
-// TestFormattedJSONMatchesCryptsetupByteForByte compares two containers
-// FORMATTED INDEPENDENTLY, which is the claim an operator cares about.
-//
-// ONE class of value is substituted, and it is not a divergence this package
-// chose: the salts and the digest value. Two separate processes' CSPRNG draws,
-// and the digest is a one-way function of a master key that is itself an
-// independent draw. Making them agree would mean the two containers shared key
-// material.
-//
-// The DIGEST iteration count is NOT substituted, and no longer compared as two
-// calibrations either. It used to be: both sides calibrated it independently
-// and a 0.5x-2x band guarded the substitution. That band compared two
-// wall-clock measurements taken moments apart on a loaded CI host, so it
-// measured the scheduler rather than this code, and failed a correct tree at
-// 0.48x (#209). buildCanonicalPair now reads cryptsetup's calibrated count out
-// of its header and pins this package's digest to it -- cryptsetup itself
-// still calibrates freely; see canonicalKDF for why --pbkdf-force-iterations
-// is not the way to make the counts agree -- so the count is compared byte for
-// byte like everything else.
-//
-// What the band was really guarding -- that this package's calibration TARGET
-// has not drifted from cryptsetup's -- is a property of two constants, and is
-// asserted on those constants, deterministically, by
-// assertDigestCalibrationTargetIsCryptsetups. That the real calibration meets
-// its target on this machine is TestDigestCalibrationTargetsItsBudget's job.
-//
-// A keyslot's `priority` used to be substituted here as well and is not any
-// more: neither side writes the member now, which is asserted rather than
-// worked around.
-//
-// Everything else -- every offset, size, cipher string, hash name, stripe
-// count, sector size, keyslot cost, object key and cross-reference, and the
-// ORDER they are written in -- is compared byte for byte.
-//
-// # WHAT THIS DOES NOT CLAIM
-//
-// Byte-identity holds for UP TO TEN entries in any of keyslots, tokens,
-// segments or digests. Go's encoding/json sorts object keys as strings while
-// json-c preserves insertion order, so at eleven keyslots cryptsetup writes
-// 0,1,...,9,10 and this package writes 0,1,10,2,...,9. Both are conformant --
-// JSON objects are unordered -- and both parse identically; only a byte
-// comparison sees it. The fixtures here have one keyslot, so the cap is stated
-// rather than exercised. See header.MarshalCanonicalJSON for this and for the
-// U+2028/U+2029 escaping difference in the same class.
+// TestFormattedJSONMatchesCryptsetupByteForByte compares independently formatted JSON, substituting only salts and the digest value.
 func TestFormattedJSONMatchesCryptsetupByteForByte(t *testing.T) {
 	requireCryptsetupDeclared(t)
 
@@ -659,10 +493,7 @@ func formattedJSONMatchesCryptsetup(t *testing.T, kdf canonicalKDF) {
 	ourDigest.Salt = theirDigest.Salt
 	ourDigest.Digest = theirDigest.Digest
 
-	// (2) the digest iteration count is NOT substituted: buildCanonicalPair
-	// pinned it to cryptsetup's, so it is compared in the bytes below. The
-	// guard against a drifted calibration target is a check of the constants
-	// that define the target, not a comparison of two timings (#209).
+	// The digest iteration count is compared: buildCanonicalPair pinned it to cryptsetup's.
 	assertDigestCalibrationTargetIsCryptsetups(t)
 	if theirDigest.Iterations < minPBKDF2Iterations {
 		t.Fatalf("cryptsetup wrote its digest with %d iterations, below the LUKS2 minimum of %d",
@@ -707,15 +538,7 @@ const (
 	cryptsetupDigestKeyLen   = 64
 )
 
-// assertDigestCalibrationTargetIsCryptsetups is the drift guard for the digest
-// cost, stated on the CONSTANTS that define the calibration rather than on two
-// calibrations' results.
-//
-// The failure it exists to catch is the one the old 0.5x-2x band caught when
-// the host was quiet: a target changed by a factor of ten, a derivation length
-// that doubles the sha256 cost, a floor that silently binds. Each of those is a
-// change to a constant, so comparing the constants catches it every time and
-// cannot be failed by a busy scheduler (#209).
+// assertDigestCalibrationTargetIsCryptsetups checks the digest calibration constants match cryptsetup's.
 func assertDigestCalibrationTargetIsCryptsetups(t *testing.T) {
 	t.Helper()
 
@@ -734,35 +557,7 @@ func assertDigestCalibrationTargetIsCryptsetups(t *testing.T) {
 	}
 }
 
-// TestFormattedBinaryHeaderMatchesCryptsetup compares the 4096-byte binary
-// header of two independently formatted containers.
-//
-// Three ranges are excluded, and all three for reasons that are properties of
-// the format rather than of this implementation:
-//
-//   - THE CHECKSUM (448..512) is derived. It is sha256 over the header and the
-//     whole JSON area, both of which contain the salts and digest that cannot
-//     agree, so it cannot agree either. Comparing it would restate the
-//     exclusions below rather than add anything.
-//
-//   - THE HEADER SALT (104..168) is 64 bytes of CSPRNG output that feeds the
-//     checksum. The spec fixes no value for it and two independent formats draw
-//     independently.
-//
-//   - THE SEQUENCE ID (16..24, bytes 0x10..0x17) is a MONOTONIC COUNTER, not a
-//     format constant. The spec says it is increased on update, so its value
-//     records a container's write history and nothing else. cryptsetup writes 3
-//     after luksFormat -- its format is internally three header writes -- and
-//     this package writes 1. Two volumes with different write histories
-//     legitimately hold different values here, so faking a 3 would be
-//     fabricating a history rather than conforming to anything. What the field
-//     must actually do is asserted in
-//     TestSequenceIDRecordsTheContainersWriteHistory.
-//
-// Everything else is compared: both magics, the version, the header size, the
-// label and subsystem fields, the checksum algorithm name, the UUID (pinned to
-// the same value on both sides), the recorded header offset, and all 3768 bytes
-// of reserved space and padding.
+// TestFormattedBinaryHeaderMatchesCryptsetup compares the binary headers, excluding the checksum, salt and sequence id.
 func TestFormattedBinaryHeaderMatchesCryptsetup(t *testing.T) {
 	requireCryptsetupDeclared(t)
 
@@ -840,7 +635,7 @@ func assertBinaryHeaderMatches(t *testing.T, copyName string, got, want []byte) 
 			differing[:limit], differing[0], got[differing[0]], differing[0], want[differing[0]])
 	}
 
-	// The excluded ranges must not be excluded because they are EMPTY.
+	// The excluded ranges must not be empty.
 	for _, name := range allZeroExcludedRanges(got) {
 		t.Errorf("this package wrote an all-zero %s %s", copyName, name)
 	}
@@ -868,15 +663,7 @@ func allZeroExcludedRanges(hdr []byte) []string {
 	return zero
 }
 
-// TestSecondaryHeaderMatchesCryptsetup holds the SECOND header copy to the
-// same byte comparison as the primary (#167).
-//
-// The secondary is not a restatement of the primary. Its magic is different
-// ("SKUL\xba\xbe"), its hdr_offset names its own position, and its salt and
-// checksum are its own -- so a primary that matches cryptsetup says nothing
-// about whether the copy a reader falls back to does. The exclusions are the
-// primary's, for the primary's reasons: sequence_id records write history,
-// and the salt and checksum are random and derived respectively.
+// TestSecondaryHeaderMatchesCryptsetup holds the second copy to the primary's comparison and exclusions.
 func TestSecondaryHeaderMatchesCryptsetup(t *testing.T) {
 	requireCryptsetupDeclared(t)
 
@@ -887,10 +674,7 @@ func TestSecondaryHeaderMatchesCryptsetup(t *testing.T) {
 		})
 	}
 
-	// The comparison must be able to FAIL. A test that reads the wrong
-	// region, or excludes more than it says, passes against any container;
-	// corrupting one byte of cryptsetup's own secondary header and requiring
-	// the diff to name that byte and only that byte rules both out.
+	// The comparison must be able to fail: one corrupted byte of cryptsetup's secondary header is named, and only that byte.
 	t.Run("detects-one-corrupted-byte", func(t *testing.T) {
 		pair := buildCanonicalPair(t, canonicalKDFs()[0])
 		for _, offset := range []int{
@@ -935,14 +719,7 @@ func TestSecondaryHeaderMatchesCryptsetup(t *testing.T) {
 	})
 }
 
-// TestSequenceIDRecordsTheContainersWriteHistory is the semantic assertion the
-// byte comparison above deliberately does not make.
-//
-// The LUKS2 specification describes sequence_id as increased on update, and the
-// higher of the two copies is the current header. That is a statement about
-// BEHAVIOR, and it is the only thing about the field a conformance test can
-// legitimately require -- the absolute value after a format is an artifact of
-// how many times that implementation happened to write the header.
+// TestSequenceIDRecordsTheContainersWriteHistory checks sequence_id increases on update.
 func TestSequenceIDRecordsTheContainersWriteHistory(t *testing.T) {
 	requireCryptsetupDeclared(t)
 

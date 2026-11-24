@@ -251,12 +251,7 @@ func TestDeriveCancelledBeforeDerivationReturnsNoEnclave(t *testing.T) {
 	}
 }
 
-// TestDerivePlainCancelledDuringDerivationDestroysOutput is D.2's KDF row's
-// other half: a derivation already in flight when its ctx is canceled is
-// NOT interrupted (crypto/pbkdf2.Key has no interruption point), but once it
-// finishes, the output is destroyed rather than handed back, and ctx.Err()'s
-// kind is returned. The iteration count is large enough, against the 1ms
-// deadline, that the derivation is still running when the deadline fires.
+// TestDerivePlainCancelledDuringDerivationDestroysOutput: a derivation canceled in flight finishes, then its output is destroyed and ctx.Err()'s kind returned.
 func TestDerivePlainCancelledDuringDerivationDestroysOutput(t *testing.T) {
 	iterations := 100_000
 	p := Params{Type: "pbkdf2", Hash: "sha256", Salt: b64("saltsaltsaltsalt"), Iterations: &iterations}

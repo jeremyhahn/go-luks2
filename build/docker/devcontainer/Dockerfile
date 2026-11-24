@@ -1,23 +1,6 @@
 # syntax=docker/dockerfile:1.7
-#
-# The devcontainer image: the ONE image every CI stage runs in (devcontainer.md
-# §1). There is no other CI image.
-#
-#   base         the Go toolchain pinned by digest, the system tools the suite
-#                drives, a non-root user and the module cache.
-#   tools        build-only: fetches the pinned tools. Nothing from it ships
-#                except the binaries the toolchain stage copies out.
-#   toolchain    base + the pinned tools + make, bash, git, jq. build, test,
-#                lint, security and deps-check run here
-#                (`make toolchain-run CMD=...`), and it is the VS Code
-#                devcontainer (.devcontainer/devcontainer.json).
-#   integration  base + the source: the privileged integration suite
-#                (`make integration-test`). Built FROM base, never from
-#                toolchain, so no dev tool ships into the image that runs with
-#                device access.
-#
-# Tool versions come from tool-pins.env next to this file, which the Makefile
-# includes too: one pin, read by both (devcontainer.md §2).
+# The devcontainer image, the one image every CI stage runs in: base, tools (build-only), toolchain (build, test, lint, security, deps-check; the VS Code devcontainer) and integration (base plus source, no dev tools).
+# Tool versions come from tool-pins.env, which the Makefile includes too.
 
 # golang:1.27.4, by digest: a tag can be re-pointed, a digest cannot. Raise the
 # version and the digest together, with go.mod's go directive.
@@ -26,11 +9,7 @@ ARG GO_IMAGE=golang:1.27.4@sha256:5e8afd493a7124a8586e134d9b532731161d4b9becf9de
 # ---- base ----
 FROM ${GO_IMAGE} AS base
 
-# The system tools the library drives and the suite inspects: cryptsetup for
-# the cryptsetup-compatibility tests, the mkfs tools, dmsetup (lvm2) and
-# losetup (util-linux). The digest pins Go, not the Debian packages under it:
-# the upgrade takes the Debian security fixes that trivy image gates on
-# (fixable HIGH and CRITICAL findings).
+# Tools the library drives and the suite inspects; apt upgrade takes the Debian security fixes trivy gates on.
 RUN apt-get update && apt-get upgrade -y --no-install-recommends && apt-get install -y --no-install-recommends \
     util-linux \
     e2fsprogs \
@@ -47,51 +26,14 @@ ARG USER_GID=$USER_UID
 RUN groupadd --gid $USER_GID $USERNAME && \
     useradd --uid $USER_UID --gid $USER_GID -m $USERNAME
 
-# GOWORK=off so a stray go.work cannot change what is built; GOFLAGS so
-# nothing run in the image rewrites go.mod. -buildvcs=false because stamping
-# the main module's version from its git tags writes a stat cache into the
-# module cache, which is root's and only readable to the uid a stage runs as;
-# the binary's version comes from -X main.version, not from the stamp.
+# No go.work, no go.mod rewrites, no VCS stamping (the version comes from -X main.version).
 ENV GOWORK=off \
     GOFLAGS="-mod=readonly -buildvcs=false" \
     GOTOOLCHAIN=local
 
 WORKDIR /workspace
 
-# The module cache, filled once at build time so nothing run in the image
-# needs the network to build or test.
-#
-# go.mod pins a first-party module -- github.com/jeremyhahn/go-enclave, the
-# portfolio locked-memory primitive -- whose module PATH says github.com while
-# it is in fact served from a private module host. Resolving it needs GOPRIVATE
-# plus git's insteadOf rewrite carrying a read-only token. Without that, this
-# build dies on
-#
-#	fatal: could not read Username for 'https://github.com'
-#
-# because the module path says github.com and nothing here says otherwise.
-#
-# The token arrives as a BuildKit SECRET, not a build arg and not an ENV: an arg
-# is recorded in image metadata and readable with `docker history`, while a
-# secret is mounted on tmpfs for this RUN alone and never becomes a layer. It is
-# `source`d rather than exported, so the value never reaches a command line
-# either -- `ps` on the build host would show that. `set -a` exports what it
-# assigns, so the file may hold plain KEY=value lines (the CI workflow's
-# MODULE_ENV_FILE) or `export` lines (the Makefile's own staging).
-#
-# The mount is OPTIONAL by design. Where no secret is supplied -- GitHub Actions,
-# or a developer building against the public proxy -- the file is simply absent
-# and the same Dockerfile still builds.
-#
-# The module proxy for build-time fetches (devcontainer.md §4) arrives as the
-# optional BuildKit secret `goproxy` (the Makefile passes GO_BUILD_PROXY as
-# `--secret id=goproxy,env=GO_BUILD_PROXY` only when it is set), read inside
-# each RUN alone. Not an ARG: BuildKit records an ARG's value in the image
-# history, and a LAN proxy address there fails the image-history gate. No
-# secret means the default GOPROXY. GOSUMDB is deliberately NOT changed, as ENV or otherwise: an image
-# that bakes GOSUMDB=off turns checksum verification off for every container
-# it spawns. The cache is made readable to every uid, because the image runs
-# as whatever uid owns the checkout (devcontainer.md §5).
+# Fill the module cache at build time; private-module credentials and the build proxy arrive as optional BuildKit secrets, never ARG or ENV. GOSUMDB is never changed.
 COPY go.mod go.sum ./
 RUN --mount=type=secret,id=gomodauth --mount=type=secret,id=goproxy \
     set -eu; \
@@ -108,15 +50,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Every version is the pin file's. gosec takes its version string from
-# ldflags, not from the module path, so the -X flag is what makes it
-# self-report the pin that ci.yml asserts (#21). gosec builds in a throwaway
-# module so x/tools can be raised to XTOOLS_VERSION (see tool-pins.env); the
-# others build with the x/tools their go.mod names. gopls is the language server
-# devcontainer.json enables; the toolchain stage sets GOPROXY=off, so an
-# editor could not fetch it later. trivy is installed by the
-# Makefile's own trivy-install, so the image and a developer verify the same
-# archive and binary hashes the same way.
+# Every version is the pin file's; gosec gets its version through -X and builds in a throwaway module against XTOOLS_VERSION; trivy comes from make trivy-install.
 COPY Makefile go.mod /src/
 COPY build/docker/devcontainer/tool-pins.env /src/build/docker/devcontainer/
 RUN --mount=type=secret,id=goproxy \
@@ -140,20 +74,7 @@ RUN --mount=type=secret,id=goproxy \
 # ---- toolchain ----
 FROM base AS toolchain
 
-# make ships in the Go image already; jq, git and bash are asserted here
-# rather than assumed. shellcheck is what actionlint runs over the workflows'
-# shell steps: without it actionlint skips them silently. sudo is for the VS
-# Code devcontainer's integration-test-setup guard below.
-#
-# curl, libcurl4t64 and libcurl3t64-gnutls come with the Go base image, and this
-# image keeps all three: it is also the devcontainer, where `make trivy-install`
-# downloads the pinned trivy with curl, and git fetches the first-party module
-# over https through libcurl3t64-gnutls. They are taken at Debian's current
-# security update in this layer, and the build fails if any of them is missing
-# or older than 8.14.1-2+deb13u7, the first release that fixes CVE-2026-8286
-# and CVE-2026-8927. The base image is pinned by digest; the packages, like
-# every apt install here, are Debian's at build time, and the floor keeps a
-# rebuild from shipping an older curl.
+# make, jq, git, bash and shellcheck for the toolchain; curl and libcurl must be at least 8.14.1-2+deb13u7.
 RUN set -eu; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -180,32 +101,7 @@ COPY --from=tools /opt/tools/bin/ /usr/local/bin/
 RUN echo "$USERNAME ALL=(root) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME && \
     chmod 0440 /etc/sudoers.d/$USERNAME
 
-# Entrypoint wrapper for running the integration suite in this devcontainer.
-#
-# This block used to end with `dmsetup remove_all` and `losetup -D`, both with
-# their errors discarded, under the heading "Clean up any leftover state". It
-# was the FOURTH call site of that pattern in this repository (#17) and the one
-# the fix for the other three did not reach — this file is not part of the CI
-# image, so nothing that looked at CI saw it.
-#
-# Neither device-mapper nor loop devices are namespaced. A devcontainer running
-# this suite is privileged, so both commands operated on the HOST: every dm
-# mapping and every loop device on the developer's own machine, including the
-# mapping under their root filesystem. It survived only because those devices
-# were busy — DM_DEV_REMOVE returned EBUSY and `|| true` ate it. A machine
-# where they are not busy loses them, silently, and it is the developer's
-# machine rather than a runner.
-#
-# Tests own their own teardown and remove only what they created. What replaces
-# the cleanup is the same refusal the CI integration image uses, so a developer
-# and a runner behave identically: if the host device-mapper is visible with
-# mappings this suite did not create, running here risks the host, and the
-# right answer is to stop rather than to tidy.
-#
-# The guard FAILS CLOSED. An inventory it cannot take is not evidence of an
-# empty host — defaulting an unreadable `dmsetup ls` to "no mappings" would
-# proceed exactly when the guard could not confirm it was safe, which is the
-# same swallow-the-error defect this change removes.
+# Integration entrypoint: no dmsetup remove_all or losetup -D, since dm and loop are host-global; the guard refuses, fail closed, when the host has mappings this suite did not create.
 RUN printf '%s\n' \
     '#!/bin/bash' \
     'set -e' \
@@ -244,35 +140,18 @@ RUN printf '%s\n' \
     > /usr/local/bin/integration-test-setup && \
     chmod +x /usr/local/bin/integration-test-setup
 
-# Where CI copies the checkout (`make ci-toolchain-run`): a runner's daemon
-# cannot bind-mount it, so it is streamed in, owned by the uid the stage runs
-# as. The directory must already be that uid's for the stage to write in it.
-# The uid also needs a passwd and group entry: ssh-keygen, and so git's ssh
-# signing and verify-commit, exit on a uid getpwuid cannot name. No login
-# shell, no password, no sudo.
+# Where CI streams the checkout in, owned by the stage's uid, which needs a passwd entry for ssh signing.
 RUN install -d -m 0755 -o 10001 -g 10001 /src && \
     groupadd --gid 10001 ci && \
     useradd --uid 10001 --gid 10001 --no-create-home --no-log-init \
         --home-dir /src --shell /usr/sbin/nologin ci
 
-# Every fetch is done (devcontainer.md §4). A tool that reaches for the
-# network from here on fails instead of fetching something unpinned; make
-# deps-check, the one target that must ask a module host, is handed a proxy
-# explicitly (DEPS_CHECK_GOPROXY). The image runs as any uid with HOME=/tmp
-# (§5); the named user is the VS Code devcontainer's.
-#
-# GOCACHE is keyed by the Go version. The build cache holds export data in the
-# format of the Go that wrote it, and a reader older than that format fails on
-# every import, so a cache directory is never shared between two Gos. Go
-# creates it on first use, owned by the uid that runs and not world-writable.
+# No network from here on; deps-check gets DEPS_CHECK_GOPROXY explicitly. GOCACHE is keyed by the Go version.
 ENV GOPROXY=off \
     TOOLS_REQUIRED=1 \
     GOCACHE=/tmp/.cache/go-build-go${GOLANG_VERSION}
 
-# Prove the image is what the Makefile and CI assume, or fail the build:
-# GOLANG_VERSION is the Go that runs, GOCACHE is keyed by it, the module cache
-# is where ci-toolchain-run reads it from, and gosec was built by this Go
-# against XTOOLS_VERSION, so it reads the export data this Go writes.
+# Fail the build unless Go, GOCACHE, the module cache and gosec are what the Makefile and CI assume.
 RUN --mount=type=bind,source=build/docker/devcontainer/tool-pins.env,target=/tmp/tool-pins.env \
     set -eu; \
     . /tmp/tool-pins.env; \
@@ -289,33 +168,13 @@ USER $USERNAME
 # ---- integration ----
 FROM base AS integration
 
-# The Alpine package index checksum (ci-template v1.29, make -s apk-index-sum),
-# which the image's content tag hashes. This stage alone declares it. The base
-# is Debian, with no apk, so CI passes the constant `none` and the tag changes
-# only with the tree.
+# Alpine index checksum for the content tag; this Debian base takes `none`.
 ARG APK_INDEX_SUM
 
-# The Debian package index checksum (make -s apt-index-sum), which the image's
-# content tag hashes too. This stage alone declares it: a new index misses the
-# cache from here on, so this stage's apt-get upgrade takes the fixes a cached
-# base upgrade layer does not have (main 9ab065b04 kept linux-libc-dev
-# 6.12.116-1 from one). APT::Update::Error-Mode=any, as apt-index-sum's probe:
-# an index that cannot be refreshed fails the build, so a stale upgrade never
-# caches under the new tag.
+# Debian index checksum for the content tag, so a new index reruns this stage's apt-get upgrade; a stale index fails.
 ARG APT_INDEX_SUM
 
-# strace is a test instrument, not a dependency of the library: it delays one
-# of cryptsetup's own syscalls so a test can make real cryptsetup hold its
-# metadata lock on cue (pkg/luks2/unlockreadlock_integration_test.go).
-#
-# curl, libcurl and git come with the Go base image, which ships them to fetch
-# modules, and nothing in this image uses them: the modules are baked into the
-# cache, GOPROXY is off and -buildvcs=false, so the go command never calls git
-# and the suite never fetches. They are purged in this layer, so the image that
-# runs with device access carries no HTTP client and none of its advisories.
-# Purging libcurl3t64-gnutls takes git with it, which depends on it. The build
-# fails if any of them is still installed, or if the purge took a tool the
-# suite drives.
+# strace lets a test hold cryptsetup's metadata lock on cue; curl, libcurl and git are purged so the privileged image has no HTTP client.
 RUN set -eu; \
     apt-get -o APT::Update::Error-Mode=any update; \
     apt-get upgrade -y --no-install-recommends; \
@@ -329,52 +188,24 @@ RUN set -eu; \
       command -v "$c" >/dev/null || { echo "purging curl removed $c" >&2; exit 1; }; \
     done
 
-# Where the run ledgers live.
-#
-# This path must be BIND-MOUNTED from the host for the mechanism to work at
-# all: a record that lives inside the container dies with the run it describes,
-# which is the one thing it may not do. The CI invocation and the Makefile
-# mount it; without a mount the image still builds and runs, and simply offers
-# no protection -- which is the pre-existing behaviour, not a regression.
+# Run ledgers; must be bind-mounted from the host to survive the run.
 ENV LUKS2_TEST_STATE_DIR=/var/lib/go-luks2-test-state
 
-# The marker declares that THIS directory -- the image's own -- does not
-# outlive the container. A bind mount shadows it, so the file is visible
-# exactly when the mount is absent, and the harness refuses to run.
-#
-# Running without persistence is worse than not running: every mapping and loop
-# device the suite creates would be recorded into a file that vanishes with the
-# container, while the host devices it records do not, so the host accumulates
-# debris nothing can attribute and the #85 guard blocks the next run with no
-# record to reap. That is the defect this image exists to prevent, reached by
-# omitting a flag -- which is exactly how it was reached: two `make` targets
-# ran privileged without the mount.
+# This marker is visible only when the ledger mount is absent, and then the harness refuses to run.
 RUN mkdir -p /var/lib/go-luks2-test-state \
     && touch /var/lib/go-luks2-test-state/.ephemeral-not-a-persistent-mount
 
 # The suite runs as root: it creates loop nodes, dm mappings and filesystems.
 WORKDIR /app
 
-# The modules are already in the cache (base). `go mod tidy` used to run here,
-# after the copy, "to handle version differences". It is gone for two reasons.
-# It needs the network -- so it would have to carry the credentials too,
-# defeating the point of pre-fetching every module so the finished image needs
-# none at run time. And it REWRITES go.mod inside the image, which means the
-# artifact under test is built against a dependency set the repository never
-# committed. What go.mod and go.sum say is what gets built.
+# No go mod tidy: what go.mod and go.sum say is what gets built.
 COPY . .
 ENV GOPROXY=off
 
 # Build the CLI for integration tests
 RUN go build -o /app/build/luks2 ./cmd/luks2
 
-# Build the reaper the entrypoint runs BEFORE the device-mapper guard.
-#
-# It removes the host state a PREVIOUS run recorded and did not clean up (#96).
-# The order matters and is not negotiable: the guard below refuses on any
-# mapping it cannot attribute, so a reap placed after it would never execute on
-# exactly the hosts that need one -- which is the deadlock #96 describes, where
-# one failed run poisons a runner until a human clears it by hand.
+# Build the reaper, which runs before the device-mapper guard so a previous run's recorded state is removed first.
 RUN go build -o /usr/local/bin/luks2-testreap ./test/tools/luks2-testreap
 
 # Create entrypoint script for flexible test execution

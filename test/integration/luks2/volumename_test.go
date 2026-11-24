@@ -17,18 +17,9 @@ import (
 	"testing"
 )
 
-// This is pkg/luks2/volumename_integration_test.go's mapping-name gate,
-// ported to this package: every device-mapper name a call here creates or
-// removes must be run-scoped (runVolume), never a literal or constant,
-// because device-mapper names are a flat, host-wide namespace a concurrent
-// run collides on (#109). See the original for the full history; the
-// predicate and the AST walk are unchanged -- calleeName resolves a
-// qualified call such as luks2.Unlock(...) to its selector name "Unlock",
-// so mappingCalls keys on the same bare names whether the call is qualified
-// or not.
+// Every device-mapper name a call here creates or removes must come from runVolume; calleeName resolves qualified calls to their selector name.
 
-// THE PREDICATE: every call that CREATES OR REMOVES a host-global
-// device-mapper mapping. The int is which argument carries the name.
+// Every call that creates or removes a host-global mapping, and which argument carries the name.
 var mappingCalls = map[string]int{
 	"Unlock":        2, // luks2.Unlock(device, passphrase, name) -- creates
 	"Lock":          0, // luks2.Lock(name)                       -- REMOVES

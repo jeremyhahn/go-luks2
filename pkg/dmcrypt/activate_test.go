@@ -78,13 +78,7 @@ func formattedVolume(t *testing.T) (*luks2.Volume, *luks2.Key) {
 	return v, key
 }
 
-// TestActivateReachesTargetThenFailsOnARegularFile pins the boundary this
-// package's own tests cannot cross without root: dm-crypt maps a block
-// device, and a regular-file-backed volume -- which is all an unprivileged
-// test can format -- must be refused by (*luks2.Volume).Target before any
-// dm-crypt state is created. The refusal reaching Activate's caller intact
-// proves this package's wiring to the real Volume API, not merely to its
-// own fakes.
+// TestActivateReachesTargetThenFailsOnARegularFile: a file-backed volume is refused by Target before any dm-crypt state exists.
 func TestActivateReachesTargetThenFailsOnARegularFile(t *testing.T) {
 	newFakeDeviceMapper().install(t)
 	v, key := formattedVolume(t)
@@ -213,9 +207,7 @@ func TestActivateTableRoundsTheLengthDownToTheSectorSize(t *testing.T) {
 	}
 }
 
-// TestActivateTableRefusesAZeroOrNegativeSectorSize is the SPEC row of
-// docs/dm-crypt-activation/architecture.md: a table whose sector size is zero
-// or negative is refused, and no table reaches device-mapper.
+// TestActivateTableRefusesAZeroOrNegativeSectorSize: no such table reaches device-mapper.
 func TestActivateTableRefusesAZeroOrNegativeSectorSize(t *testing.T) {
 	for _, size := range []int{0, -512} {
 		t.Run(strconv.Itoa(size), func(t *testing.T) {
@@ -268,8 +260,7 @@ func TestActivateTableRefusesWhenAKeyringEntryAlreadyExists(t *testing.T) {
 	fk := &fakeKeyring{}
 	fk.install(t)
 
-	// Occupy the description THIS activation's AddVolumeKey will compute,
-	// exactly as a leftover from a crashed process would.
+	// Occupy the description this activation will compute, as a crashed process's leftover would.
 	uuid := "CRYPT-LUKS2-abc-occupied"
 	description := keyringpkg.Description(uuid)
 	ring, err := fk.sessionRing()
@@ -603,8 +594,7 @@ func holdFirstRemove(t *testing.T) {
 	}
 }
 
-// assertRolledBack fails the test unless the target this activation created
-// under name was removed and nothing is left live under the name.
+// assertRolledBack fails unless the created target under name was removed and nothing is live under it.
 func assertRolledBack(t *testing.T, fake *fakeDeviceMapper, name string, err error) {
 	t.Helper()
 	if err == nil {
@@ -1312,12 +1302,7 @@ func TestWaitForDeviceReadyReturnsImmediatelyWhenAlreadyReady(t *testing.T) {
 	}
 }
 
-// TestWaitForDeviceReadyReportsErrNodeUnverifiedWhenNothingEverVerifies is
-// the case pkg/luks2's devicemapper.go used to cover before activation
-// moved to this package: when blockNodeRdev never reports the mapping's device
-// number -- for the mapper symlink, the dm-N node, or the one this repairs
-// into place -- waitForDeviceReady gives up with ErrNodeUnverified rather
-// than succeeding on an unverifiable node.
+// TestWaitForDeviceReadyReportsErrNodeUnverifiedWhenNothingEverVerifies: an unverifiable node gives ErrNodeUnverified.
 func TestWaitForDeviceReadyReportsErrNodeUnverifiedWhenNothingEverVerifies(t *testing.T) {
 	dir := t.TempDir()
 	previousDir := sys.devDir

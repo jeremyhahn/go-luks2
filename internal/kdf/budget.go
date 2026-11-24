@@ -56,10 +56,7 @@ func SaturatingMul(a, b uint64) uint64 {
 	return a * b
 }
 
-// ceilingWork is the most a single derivation can cost at the ceiling
-// ValidateCost accepts: MaxKDFIterations PBKDF2 blocks sized for the longest
-// output this package derives, or MaxArgon2Time*MaxArgon2Memory Argon2
-// KiB-passes.
+// ceilingWork is the most a single derivation can cost at the ValidateCost ceiling.
 var ceilingWork = Work{
 	PBKDF2Blocks:    uint64(MaxKDFIterations) * uint64((maxDerivedKeyLen+minPRFOutputLen-1)/minPRFOutputLen),
 	Argon2KiBPasses: uint64(MaxArgon2Time) * uint64(MaxArgon2Memory),

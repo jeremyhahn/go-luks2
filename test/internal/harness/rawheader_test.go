@@ -221,12 +221,7 @@ func TestGetVolumeInfoOnAMissingFileFails(t *testing.T) {
 	}
 }
 
-// TestSetupLoopDeviceOnAMissingFileFails, TestDetachLoopDeviceOnAMissingDeviceFails
-// and TestFindLoopDeviceForAFileNothingBacksFails are the only branches of
-// their functions reachable without root: pkg/loop fails each of them before
-// it ever reaches a privileged ioctl -- Attach at the backing file's os.Open,
-// Lookup/Detach and Find at a plain sysfs read that finds nothing. The
-// success paths need a real loop device and stay for the integration tier.
+// TestSetupLoopDeviceOnAMissingFileFails and its siblings cover the failure branches reachable without root.
 func TestSetupLoopDeviceOnAMissingFileFails(t *testing.T) {
 	if _, err := SetupLoopDevice(filepath.Join(t.TempDir(), "absent.img")); err == nil {
 		t.Fatal("SetupLoopDevice on a missing backing file = nil, want the open error")

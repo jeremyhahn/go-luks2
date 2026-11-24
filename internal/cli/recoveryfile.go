@@ -17,11 +17,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
-// readRecoveryCredential obtains a recovery credential either from a file
-// (the first line that is not blank or a # comment) or from wherever a
-// passphrase would come from -- the terminal or a pipe. Either way,
-// surrounding whitespace is stripped and nothing else is changed: the
-// dashes and letter case in a recovery key's rendering are part of it.
+// readRecoveryCredential reads a recovery credential from a file or like a passphrase, stripping only surrounding whitespace.
 func readRecoveryCredential(e *env, path string) (enclave.ByteAccess, error) {
 	if path != "" {
 		f, err := os.Open(path) // #nosec G304 -- the operator's own --recovery-file argument
@@ -69,10 +65,7 @@ func readRecoveryKeyFile(custody secret.Custody, r io.Reader, source string, lim
 	return out, nil
 }
 
-// trimEnclave returns a new enclave holding e's content with leading and
-// trailing whitespace removed, without ever copying it outside protected
-// memory: the trim happens on a borrowed view, and the result is cloned
-// straight from that view.
+// trimEnclave returns a new enclave with e's content trimmed of whitespace, never copied outside protected memory.
 func trimEnclave(custody secret.Custody, op string, e enclave.ByteAccess) (enclave.ByteAccess, error) {
 	var out enclave.ByteAccess
 	err := secret.Borrow(op, e, func(b []byte) error {
@@ -86,9 +79,7 @@ func trimEnclave(custody secret.Custody, op string, e enclave.ByteAccess) (encla
 	return out, nil
 }
 
-// showRecoveryKey displays a recovery key ONCE, exactly as it will open the
-// volume: dashes and letter case included. The credential is materialized
-// here, at the point of display, and nowhere else.
+// showRecoveryKey displays a recovery key once, exactly as it opens the volume.
 func showRecoveryKey(e *env, rk *luks2.RecoveryKey) error {
 	_, _ = fmt.Fprintln(e.stdout, "")
 	_, _ = fmt.Fprintln(e.stdout, "=================== RECOVERY KEY ===================")
@@ -120,11 +111,7 @@ type recoveryFileMeta struct {
 	Token   int
 }
 
-// saveRecoveryKey writes rk to path as a comment preamble (the volume UUID,
-// keyslot and token when known, and the checksum) followed by the
-// credential text. The file is created exclusively at mode 0400: it is
-// refused rather than silently overwritten if path already exists, and is
-// never briefly readable at a wider mode.
+// saveRecoveryKey writes rk to path with a comment preamble, created exclusively at mode 0400.
 func saveRecoveryKey(path string, rk *luks2.RecoveryKey, meta recoveryFileMeta) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o400) // #nosec G304 -- the operator's own --output argument
 	if err != nil {

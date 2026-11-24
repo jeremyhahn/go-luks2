@@ -49,9 +49,7 @@ func BeginSuite(w io.Writer) (*Suite, error) {
 	stateDir := StateDir()
 	runID := NewRunID(os.Getpid(), time.Now().UnixNano())
 
-	// Before the ledger: a suite that cannot name its volumes uniquely must not
-	// start, and failing here costs nothing. Proceeding would hand every test a
-	// host-global name under a guard that no longer refuses them.
+	// Refuse to start if volumes cannot be named uniquely.
 	scope, err := NewScope()
 	if err != nil {
 		return nil, err
@@ -62,9 +60,7 @@ func BeginSuite(w io.Writer) (*Suite, error) {
 		return nil, err
 	}
 
-	// The run id is IN the name (#247): a run root is told apart from another
-	// container's by name alone, and the reaper detaches under a root only for
-	// the run whose ledger carries that id. See reapLoopRoot.
+	// The run id is in the name, so the reaper detaches under a root only for its own run (reapLoopRoot).
 	tmpRoot, err := os.MkdirTemp("", runRootPrefix+runID+"-")
 	if err != nil {
 		_ = ledger.Close()
@@ -79,34 +75,14 @@ func BeginSuite(w io.Writer) (*Suite, error) {
 		return nil, fmt.Errorf("pointing TMPDIR at the run temp root: %w", err)
 	}
 
-	// PROVE THE REDIRECTION TOOK EFFECT. Do not assume it.
-	//
-	// The loop-device half of the ledger rests entirely on this: the recorded
-	// root is worth something only if the suite's backing files actually land
-	// underneath it. os.TempDir() reads $TMPDIR on every call and t.TempDir()
-	// allocates through it, so the redirection holds -- but "holds, as
-	// documented" is an assumption about the environment, and an assumption the
-	// mechanism's correctness depends on is one the mechanism should check.
-	//
-	// Checked here rather than only in a test, because a test asserts it where
-	// the test runs while this asserts it where the SUITE runs. If some future
-	// toolchain, sandbox or wrapper ever breaks the redirection, this fails the
-	// run at startup with a diagnosis -- instead of every run quietly recording
-	// a root that covers nothing and leaking every loop device it attaches.
+	// Prove allocations land under the recorded root; otherwise the ledger covers nothing.
 	if err := verifyAllocationsLandUnder(tmpRoot); err != nil {
 		_ = ledger.Close()
 		return nil, err
 	}
 	recordedRunRoot = tmpRoot
 
-	// In the container this has already run in the entrypoint, before the #85
-	// guard, and finds nothing. It runs here too for the host path
-	// (`make host-integration-test`), which has no entrypoint.
-	//
-	// The three suites run SEQUENTIALLY from the entrypoint, and each discards
-	// its ledger on a clean exit, so what is left for this to reap is only ever
-	// a run that is already dead. They must not be made concurrent without
-	// revisiting this: a live sibling's ledger would look stale.
+	// The suites run sequentially, so only dead runs' ledgers remain; do not make them concurrent without revisiting this.
 	if _, err := Reap(stateDir, runID, SystemRemover{}, w); err != nil {
 		_ = ledger.Close()
 		return nil, err
@@ -115,14 +91,7 @@ func BeginSuite(w io.Writer) (*Suite, error) {
 	return &Suite{Ledger: ledger, TempDir: tmpRoot, RunID: runID, Scope: scope, Remover: SystemRemover{}}, nil
 }
 
-// verifyAllocationsLandUnder confirms that a temp allocation made the way the
-// suite makes them ends up under root.
-//
-// It probes os.CreateTemp("") rather than t.TempDir() because there is no
-// *testing.T here, and because both resolve through os.TempDir() -- the probe
-// therefore exercises the same lookup the suite's own allocations use, which is
-// the property in question. TestSuiteTempRootIsRecordedBeforeAnyTestRuns covers
-// t.TempDir() specifically, from inside a test.
+// verifyAllocationsLandUnder confirms an os.CreateTemp allocation lands under root.
 func verifyAllocationsLandUnder(root string) error {
 	f, err := os.CreateTemp("", "ledger-probe-*")
 	if err != nil {
@@ -149,9 +118,7 @@ func verifyAllocationsLandUnder(root string) error {
 // # A passing run is not evidence of a clean host
 //
 // An earlier version discarded the ledger whenever the tests passed. That is
-// wrong, and it was wrong in the most expensive way -- MEASURED on a privileged
-// CI runner,
-// 2026-09-01: pkg/luks2 reported `ok` in 87.6s while TestLoopDeviceCleanup left
+// wrong in the most expensive way: on a privileged CI runner pkg/luks2 reported `ok` in 87.6s while TestLoopDeviceCleanup left
 // /dev/loop1 attached. Finish saw exit 0, discarded the ledger and deleted the
 // temp root, destroying the only record of the device the run had just leaked.
 // The next run then reaped a ledger describing nothing and honestly reported
@@ -201,15 +168,7 @@ func (s *Suite) Finish(code int, w io.Writer) int {
 			len(report.Removed), code)
 	}
 
-	// THE DIRECTORY GOES BEFORE THE RECORD OF IT DOES, and its failure is
-	// reported.
-	//
-	// The previous order discarded the ledger and then ignored os.RemoveAll:
-	// a removal that failed left tens of megabytes of disk images behind, with
-	// the run exiting 0 and the only record of where they were already
-	// destroyed. Repeated, that exhausts the runner's filesystem -- and my own
-	// sweep classified this as cosmetic because it looked only at host DEVICE
-	// state and never asked what else the ledger was the record of.
+	// Remove the directory before discarding its record, and report the failure.
 	if err := s.Remover.RemoveDir(s.TempDir); err != nil {
 		_ = s.Ledger.Close()
 		fmt.Fprintf(w, "suite: could not remove the run temp root %s: %v\n", s.TempDir, err)

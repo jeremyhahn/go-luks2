@@ -16,15 +16,6 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// TestParseIVTweak is GONE, with parseIVTweak itself (#40).
-//
-// It was a bug-defender: it asserted that "invalid", "-1" and "0x100" all
-// produced 0 and that a value past 64 bits produced 18446744073709551615 --
-// which is exactly the silent mapping of a malformed header field onto a
-// valid-looking IV offset that the fix removes. A header's iv_tweak is now
-// parsed by header.CryptTableParams, which refuses what does not parse; the refusals
-// are pinned in segmentvalidation_test.go.
-
 // TestVerifyMasterKey tests master key verification against digests
 func TestVerifyMasterKey(t *testing.T) {
 	defer parallel(t)()
@@ -99,11 +90,7 @@ func TestVerifyMasterKey(t *testing.T) {
 		}
 	})
 
-	// An EMPTY master key can no longer be constructed to test with: an enclave
-	// over zero bytes is refused at the constructor (enclave.ErrEmptyEnclave),
-	// so the case this subtest used to cover is now unrepresentable rather than
-	// merely rejected. That is a stronger guarantee, and it is asserted at the
-	// constructor instead.
+	// An empty master key cannot be constructed (enclave.ErrEmptyEnclave).
 	t.Run("empty master key cannot be held at all", func(t *testing.T) {
 		e, err := custody.New("master key", 0)
 		if err == nil {
@@ -330,19 +317,7 @@ func TestVerifyMasterKey(t *testing.T) {
 		}
 	})
 
-	// The verifier derives to the length of the digest STORED IN THE HEADER,
-	// so a header is verified at whatever length its author chose -- 32 bytes
-	// from an old go-luks2, 64 from cryptsetup with sha512 -- rather than at
-	// one length this package happens to prefer.
-	//
-	// This subtest previously asserted the opposite: that a 64-byte digest must
-	// FAIL because the verifier derived a hardcoded 32. That assertion is the
-	// read half of #73 written down as a test, and it is what made
-	// cryptsetup-written sha512 volumes report "incorrect passphrase" for the
-	// correct passphrase.
-	// The accepted lengths are a whitelist: what the declared hash implies, plus
-	// the 32-byte legacy carve-out for containers earlier versions of this
-	// package wrote.
+	// The verifier derives to the stored digest's length, from a whitelist: the declared hash's, plus the 32-byte legacy length.
 	for _, tc := range []struct {
 		hash      string
 		digestLen int
@@ -385,13 +360,7 @@ func TestVerifyMasterKey(t *testing.T) {
 		})
 	}
 
-	// Every other length is refused BEFORE any derivation is attempted. PBKDF2
-	// will produce whatever length it is asked for, and a zero-length digest
-	// would make the constant-time comparison succeed against every key.
-	//
-	// 16 is the interesting entry: it was accepted by the earlier 16..64
-	// range, and nothing legitimate writes it under a sha512 label. 20 is
-	// accepted, above: it is what every converted LUKS1 container carries.
+	// Every other length is refused before deriving; a zero length would match any key. 20 is accepted for converted LUKS1.
 	for _, tc := range []struct {
 		hash      string
 		digestLen int
@@ -408,10 +377,7 @@ func TestVerifyMasterKey(t *testing.T) {
 	} {
 		t.Run(fmt.Sprintf("%s digest stored at %d bytes is refused as a header fault", tc.hash, tc.digestLen), func(t *testing.T) {
 			iterations := 1000
-			// The stored bytes are arbitrary: what is under test is that the
-			// LENGTH is refused before any derivation is attempted, so the
-			// value must not come from deriveKeyPlain (which panics on a zero
-			// length -- see the out-of-scope note in the report).
+			// Arbitrary stored bytes: the length is refused before any derivation.
 			stored := bytes.Repeat([]byte{0xA5}, tc.digestLen)
 
 			digests := map[string]*header.Digest{
@@ -424,13 +390,7 @@ func TestVerifyMasterKey(t *testing.T) {
 				},
 			}
 
-			// ErrInvalidHeader, NOT ErrWrongKey (#41). This
-			// assertion demanded the verification verdict until the boundary
-			// was drawn, and it was DEFENDING the defect: the only digest that
-			// attests this keyslot is unusable, so nothing was ever compared,
-			// and a verification verdict claims a judgement that never
-			// happened. The operator it misdirects is the one whose header is
-			// damaged and whose passphrase is perfectly good.
+			// ErrInvalidHeader, not ErrWrongKey: the only attesting digest is unusable, so nothing was compared.
 			err := verifyMasterKey(context.Background(), enclaveFrom(t, testMasterKey), "0", boundTo("0", digests))
 			if !errors.Is(err, ErrInvalidHeader) {
 				t.Errorf("verifyMasterKey(%d-byte %s digest) = %v, want ErrInvalidHeader",

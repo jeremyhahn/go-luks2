@@ -24,10 +24,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
-// Regression tests for #246 D5-D7 and D9, carried over from pkg/luks2 with
-// the code they pin (#271): how a helper is found and what it inherits, a
-// helper whose output outlives it, and the FIDO2 device argument and
-// requirement round trip.
+// Tests for helper lookup and environment, helpers whose output outlives them, and the FIDO2 device and requirement round trip.
 
 // TestCommandRefusesAPathItWouldHaveToSearchFor is #246 D5. The doc said the
 // helper is not searched for on PATH, and exec.CommandContext searches for
@@ -46,12 +43,7 @@ func TestCommandRefusesAPathItWouldHaveToSearchFor(t *testing.T) {
 	}
 }
 
-// TestCommandGivesTheHelperAMinimalEnvironment is #246 D5's second half: the
-// helper inherited this process's whole environment, so anything the
-// invoking user exported -- LD_PRELOAD, a library's debug hook -- reached
-// the program that produces the credential. It gets the fixed system
-// environment (internal/command.System) and what the caller passes in
-// WithEnv, and nothing else.
+// TestCommandGivesTheHelperAMinimalEnvironment: the helper gets internal/command.System plus WithEnv, nothing else.
 func TestCommandGivesTheHelperAMinimalEnvironment(t *testing.T) {
 	t.Setenv("LUKS2_TEST_INHERITED", "inherited")
 
@@ -77,8 +69,7 @@ func TestCommandGivesTheHelperAMinimalEnvironment(t *testing.T) {
 	for _, e := range command.System().Env {
 		want[e] = true
 	}
-	// sh may export PWD, SHLVL and _ on its own; those are the shell's, not
-	// this process's.
+	// sh may export PWD, SHLVL and _ itself.
 	for line := range got {
 		name, _, _ := strings.Cut(line, "=")
 		if want[line] || name == "PWD" || name == "SHLVL" || name == "_" || name == "OLDPWD" {
@@ -93,12 +84,7 @@ func TestCommandGivesTheHelperAMinimalEnvironment(t *testing.T) {
 	}
 }
 
-// lingeringHelper writes a helper that leaves a grandchild holding its
-// stdout and stderr, writes its credential, says so on the returned FIFO,
-// and then either exits or -- block -- waits as a helper waiting for a
-// touch does. The grandchild lives for seconds, not forever, so a
-// regression ends instead of hanging; it is killed when the test ends
-// either way.
+// lingeringHelper writes a helper whose grandchild holds its stdout and stderr for a few seconds, signaling on the returned FIFO.
 func lingeringHelper(t *testing.T, seconds int, block bool) (path, fifo string) {
 	t.Helper()
 	dir := privateDir(t)
@@ -129,9 +115,7 @@ func lingeringHelper(t *testing.T, seconds int, block bool) (path, fifo string) 
 // awaitStarted blocks until the helper has written its credential.
 func awaitStarted(t *testing.T, fifo string) {
 	t.Helper()
-	// Opening the FIFO read-write never blocks, and a FIFO is pollable, so
-	// the read below honors a deadline: a helper that never starts (one
-	// Command refused, say) fails the test here instead of at -timeout.
+	// Opening the FIFO read-write never blocks, so the read below honors a deadline.
 	f, err := os.OpenFile(fifo, os.O_RDWR, 0) // #nosec G304 -- under t.TempDir()
 	if err != nil {
 		t.Fatal(err)
@@ -157,12 +141,7 @@ func awaitStarted(t *testing.T, fifo string) {
 // helperStartBound is how long awaitStarted waits for a helper to start.
 const helperStartBound = 30 * time.Second
 
-// TestCommandEndsWhenItsContextDoes is #246 D6: the stdout read ignored ctx,
-// so a helper whose grandchild kept stdout open held Passphrase past
-// cancellation until the grandchild exited -- for ever, for a daemon. Here
-// the helper is still waiting (for a touch, say) when ctx ends; the call
-// returns the context's error. (A regression returns a helper failure once
-// the grandchild exits, and fails.)
+// TestCommandEndsWhenItsContextDoes: a helper still waiting when ctx ends returns the context's error.
 func TestCommandEndsWhenItsContextDoes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

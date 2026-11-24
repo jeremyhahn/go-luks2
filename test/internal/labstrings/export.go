@@ -26,16 +26,7 @@ const notExportIgnored = "listed as stripped at publish, but " + GitAttributes +
 	"export-ignore it, so an archive of the tree would ship it: add its DefaultStripAtPublish " +
 	"pattern to " + GitAttributes + " (and to .dockerignore)"
 
-// exportIgnored reports which of paths the staged GitAttributes files mark
-// export-ignore. attributes maps each staged GitAttributes path to its staged
-// content, so an unstaged edit changes nothing, like the content the gate
-// scans.
-//
-// Only those files decide. `git check-attr --cached` in the scanned repository
-// would also read its .git/info/attributes and every core.attributesFile, none
-// of which travel with the tree: a rule in one of them would make a file look
-// excluded that a forge's archive of the commit ships. So the files are
-// written into a hermeticRepo of their own.
+// exportIgnored reports which of paths the staged GitAttributes files (attributes: path to staged content) mark export-ignore, evaluated in a hermeticRepo.
 func exportIgnored(root string, attributes map[string][]byte, paths []string) (map[string]bool, error) {
 	if len(paths) == 0 {
 		return map[string]bool{}, nil
@@ -113,12 +104,7 @@ func ArchiveHEAD(root string) ([]byte, error) {
 	return runGit(repo, env, nil, fail, "archive", "--format=tar", strings.TrimSpace(string(commit)))
 }
 
-// hermeticRepo creates an empty repository in a new scratch directory and
-// returns it with the environment that confines git to it, and a function that
-// removes the scratch directory. The repository is created without templates
-// (no info/attributes), and git runs there with no system, global or XDG
-// configuration or attributes file and no GIT_ variable inherited from the
-// caller. fail types the error of any step.
+// hermeticRepo creates an empty template-free repository in a new scratch directory and returns it, the confining environment, and a cleanup; fail types each step's error.
 func hermeticRepo(fail func(stderr string, err error) error) (repo string, env []string, cleanup func(), err error) {
 	scratch, err := os.MkdirTemp("", "labstrings-git-")
 	if err != nil {

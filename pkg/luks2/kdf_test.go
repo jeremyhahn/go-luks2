@@ -283,15 +283,7 @@ func TestBenchmarkPBKDF2InvalidHash(t *testing.T) {
 	}
 }
 
-// TestBenchmarkPBKDF2MinimumIterations tests minimum iteration enforcement.
-//
-// The bound asserted is the one that actually applies at this budget rather
-// than a flat 1000. An earlier version of this test asked for 1ms, said in a
-// comment that it was triggering the minimum, and asserted `>= 1000` -- which
-// on any modern machine is not the minimum path at all: 1ms buys a few thousand
-// iterations, so the assertion passed without the floor ever being reached. An
-// assertion that is satisfied by a value the code did not choose is how issue
-// #52 stayed green through five merges.
+// TestBenchmarkPBKDF2MinimumIterations tests minimum iteration enforcement at the floor that applies for the budget.
 func TestBenchmarkPBKDF2MinimumIterations(t *testing.T) {
 	defer parallel(t)()
 
@@ -733,12 +725,7 @@ func TestGetHashAlgoForKDFType(t *testing.T) {
 	}
 }
 
-// TestDeriveKeyPBKDF2SHA1 tests PBKDF2 with SHA-1, which opens LUKS headers
-// written by cryptsetup releases that defaulted to SHA-1. In FIPS 140-3 mode
-// the derivation must be refused with ErrFIPSNotApproved instead of reaching
-// the Go Cryptographic Module, which panics on PBKDF2-HMAC-SHA1 under
-// GODEBUG=fips140=only. See docs/fips/architecture.md, "The PBKDF2-HMAC-SHA1
-// exemption".
+// TestDeriveKeyPBKDF2SHA1 tests PBKDF2-SHA1 derivation, refused with ErrFIPSNotApproved in FIPS 140-3 mode.
 func TestDeriveKeyPBKDF2SHA1(t *testing.T) {
 	iterations := 1000
 	salt := []byte("testsalt12345678")
@@ -804,11 +791,7 @@ func TestBenchmarkPBKDF2SHA1(t *testing.T) {
 	}
 }
 
-// TestBenchmarkPBKDF2SHA384 tests PBKDF2 benchmarking with SHA-384
-// TestCreateKDFPBKDF2SHA1Alias: the pbkdf2-sha1 alias creates nothing (#239,
-// BREAKING). It is refused in every mode, with ErrUnsupported for callers
-// that branched on that, because no process may write it: as ErrFIPSNotApproved
-// in FIPS mode and as ErrInvalidArgument outside it.
+// TestCreateKDFPBKDF2SHA1Alias: the pbkdf2-sha1 alias is refused in every mode, matching ErrUnsupported and ErrFIPSNotApproved or ErrInvalidArgument.
 func TestCreateKDFPBKDF2SHA1Alias(t *testing.T) {
 	defer parallel(t)()
 
@@ -1009,9 +992,7 @@ func TestFIPSCompliantKDFWorkflow(t *testing.T) {
 	}
 }
 
-// TestCreateKDFPBKDF2SHA1HashAlgoOverride: a "sha1" hash with the plain
-// pbkdf2 type -- or with any type, since the hash also names a format's digest
-// and split -- is refused the same way (#239), in every mode.
+// TestCreateKDFPBKDF2SHA1HashAlgoOverride: a "sha1" hash is refused with any KDF type, in every mode.
 func TestCreateKDFPBKDF2SHA1HashAlgoOverride(t *testing.T) {
 	defer parallel(t)()
 
@@ -1025,13 +1006,7 @@ func TestCreateKDFPBKDF2SHA1HashAlgoOverride(t *testing.T) {
 	}
 }
 
-// TestArgon2RefusedInFIPSMode pins the FIPS 140-3 boundary for Argon2 in one
-// place: golang.org/x/crypto/argon2 is pure Go and never enters the Go
-// Cryptographic Module, so GODEBUG=fips140=only cannot reject it and this
-// library has to. Every entry point is covered — an externally supplied header
-// reaching deriveKeyPlain, an explicit CreateKDF request, and CreateKDF's empty
-// default — so a FIPS-mode process can neither unlock nor write a non-approved
-// keyslot. Outside FIPS mode all three must keep working. See docs/fips/engineering.md, "Invariants".
+// TestArgon2RefusedInFIPSMode: FIPS mode refuses Argon2 for unlock, explicit creation and the empty default; outside FIPS all three work.
 func TestArgon2RefusedInFIPSMode(t *testing.T) {
 	defer parallel(t)()
 
@@ -1080,8 +1055,7 @@ func TestArgon2RefusedInFIPSMode(t *testing.T) {
 		})
 	}
 
-	// The default is not refused in FIPS mode: it is PBKDF2-SHA512 there
-	// (#237), so a caller that names no KDF is never given Argon2.
+	// The FIPS-mode default is PBKDF2-SHA512, so it is not refused.
 	t.Run("create/default", func(t *testing.T) {
 		kdf, err := createKDFStrict(formatOptionsForTest{}, 32)
 		if err != nil {
@@ -1111,10 +1085,7 @@ func TestArgon2RefusedInFIPSMode(t *testing.T) {
 	})
 }
 
-// ErrUnsupported and ErrUnsupported were declared and returned by
-// nothing (#70): both conditions were reported with fmt.Errorf, so a caller
-// could not tell "this header names an algorithm we do not implement" from any
-// other derivation failure.
+// Unsupported algorithms and KDF types are reported as ErrUnsupported.
 
 // TestDeriveKeyReportsAnUnsupportedKDFType covers the dispatch a header reaches.
 func TestDeriveKeyReportsAnUnsupportedKDFType(t *testing.T) {
@@ -1138,12 +1109,7 @@ func TestDeriveKeyReportsAnUnsupportedKDFType(t *testing.T) {
 	}
 }
 
-// TestDeriveKeyReportsAnUnsupportedHash covers the hash dispatch underneath it.
-//
-// A FIPS-refused algorithm must NOT land here: sha1 is implemented and the mode
-// refuses it, which is ErrFIPSNotApproved and a different thing to tell an
-// operator. That distinction is asserted in the FIPS tests; this one asserts an
-// algorithm the package genuinely does not have.
+// TestDeriveKeyReportsAnUnsupportedHash: an unimplemented hash is ErrUnsupported, unlike a FIPS-refused one.
 func TestDeriveKeyReportsAnUnsupportedHash(t *testing.T) {
 	iterations := 1000
 	kdf := &header.KDF{
@@ -1165,8 +1131,7 @@ func TestDeriveKeyReportsAnUnsupportedHash(t *testing.T) {
 	}
 }
 
-// TestCreateKDFReportsAnUnsupportedKDFType covers the WRITE side, where the
-// unsupported type comes from a caller's options rather than from a header.
+// TestCreateKDFReportsAnUnsupportedKDFType covers an unsupported type from a caller's options.
 func TestCreateKDFReportsAnUnsupportedKDFType(t *testing.T) {
 	_, err := createKDFStrict(formatOptionsForTest{KDFType: "bcrypt"}, 32)
 	if err == nil {

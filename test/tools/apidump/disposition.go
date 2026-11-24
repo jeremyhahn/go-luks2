@@ -15,9 +15,7 @@ import (
 // recorded in baseline/disposition-luks2.tsv.
 type Action string
 
-// The five actions. KEEP keeps the name in its package; RENAME gives it a new
-// name or shape; MOVE puts it in another public package; UNEXPORT takes it out
-// of the public API; DELETE removes it, with Target naming the replacement.
+// The five actions: KEEP, RENAME, MOVE, UNEXPORT and DELETE (Target names the replacement).
 const (
 	Keep     Action = "KEEP"
 	Rename   Action = "RENAME"
@@ -126,12 +124,7 @@ func CheckHonored(base, current []Entry, dispositions []Disposition) error {
 			continue
 		}
 		present := inCurrent[e.Kind+"\t"+e.Name]
-		// A KEEP method whose receiver type is now a type alias (type X =
-		// some.ForeignType) is honored without being found directly: Go
-		// gives X every method the foreign type declares, but no FuncDecl
-		// with receiver X exists in this package's source for an AST-only
-		// dump to see (a method cannot be added to an alias of a foreign
-		// type, so the design never writes one).
+		// A KEEP method on a type now aliased to a foreign type is honored without a FuncDecl.
 		if e.Kind == "method" && action == Keep && !present && aliasedType[receiverOf(e.Name)] {
 			continue
 		}
@@ -139,15 +132,7 @@ func CheckHonored(base, current []Entry, dispositions []Disposition) error {
 		case action == Keep && !present:
 			problems = append(problems, "KEEP but gone from the current API: "+e.Name)
 		case action != Keep && present:
-			// A RENAME whose target text names the identifier itself
-			// (Segment: redefined in place rather than renamed away)
-			// can never read as honored by the Kind+Name comparison above,
-			// because the "new" name is the old one. CheckHonored has no
-			// structural comparison to fall back on -- Fields/ifacemethods
-			// are not Identifiers (see Entry.Identifier) -- so it trusts
-			// the disposition's own words instead: if the row that disposed
-			// of this identifier chose to keep naming it, its continued
-			// presence is what that row asked for, not a dishonored rename.
+			// A RENAME whose target names the identifier itself is honored by its continued presence.
 			if action == Rename && renameKeepsName(e.Name, targetByName[e.Name]) {
 				continue
 			}
@@ -161,11 +146,7 @@ func CheckHonored(base, current []Entry, dispositions []Disposition) error {
 	return nil
 }
 
-// renameKeepsName reports whether a RENAME disposition's target text names
-// the identifier itself: the row describes a type redefined in place
-// (Segment) rather than a move to a different name. Matched on
-// identifier boundaries, so a target mentioning the name only as part of a
-// longer word ("SegmentGroup") does not count.
+// renameKeepsName reports whether a RENAME target names the identifier itself, matched on identifier boundaries.
 func renameKeepsName(name, target string) bool {
 	for i := 0; i+len(name) <= len(target); i++ {
 		if target[i:i+len(name)] != name {

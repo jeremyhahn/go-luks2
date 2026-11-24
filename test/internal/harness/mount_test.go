@@ -14,10 +14,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/pkg/dmcrypt"
 )
 
-// nonexistentMapping names a device-mapper mapping this process never
-// created. It is a VALID name (ValidateName accepts it), so dmcrypt.Lookup
-// reaches the real kernel query and comes back ErrNotActive without needing
-// root -- the same property pkg/dmcrypt's own unit tests rely on.
+// nonexistentMapping is a valid mapping name never created, so dmcrypt.Lookup returns ErrNotActive without root.
 const nonexistentMapping = "harness-unit-test-no-such-mapping"
 
 func TestMountOnAnUnmappedDeviceFails(t *testing.T) {

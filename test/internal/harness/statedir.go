@@ -11,43 +11,9 @@ import (
 	"syscall"
 )
 
-// The state directory is part of the TRUST BOUNDARY, and this file is what
-// makes that explicit.
-//
-// # Why a directory needs validating at all
-//
-// The entrypoint runs the reaper as root, before the #85 guard, and the reaper
-// does exactly what a ledger tells it: remove a device-mapper target, or detach
-// every loop device backed under a recorded path. That is a host-wide device
-// removal primitive, and its only input is a file in a directory.
-//
-// /var/tmp is world-writable with the sticky bit, so on a shared runner an
-// unprivileged local user can create the state directory FIRST, with whatever
-// mode they like, and drop *.ledger files into it. A forged KindLoopRoot of
-// "/home" would then have a privileged container detach every loop device under
-// /home; a forged KindMapping with a known UUID would remove that mapping.
-//
-// The dm half has some protection -- removal requires the live mapping to still
-// carry the recorded UUID -- but the loop half has none and cannot: for loop
-// devices the recorded path IS the identity, so a ledger that can be forged is
-// a detach that can be aimed.
-//
-// This is the same class of hazard PR #85 removed from this repository, moved
-// behind the ledger parser rather than eliminated. So the directory is checked
-// before anything in it is read or written, by both the writer and the reaper,
-// and an untrusted one fails the run rather than being repaired -- silently
-// widening someone else's directory is not this code's business.
+// The state directory is a trust boundary: the root reaper acts on its ledgers, so it is validated before any read or write and an untrusted one fails the run.
 
-// trustedDir is the state directory, opened ONCE and validated through that
-// handle. Every ledger read, lock, create and delete goes through the handle
-// too, never through the path again (#247).
-//
-// Validating a path and then re-resolving it for each later operation is a
-// check on one directory followed by use of whatever the name points at by
-// then. With LUKS2_TEST_STATE_DIR under a parent another user can write to,
-// that user could swap a forged directory in after the check, and the
-// privileged reaper would act on its ledgers. A handle cannot be swapped: what
-// was validated is what is read.
+// trustedDir is the state directory, opened once and validated and used through that handle, never the path.
 type trustedDir struct {
 	path string
 	root *os.Root
@@ -56,12 +22,7 @@ type trustedDir struct {
 // Close releases the handle.
 func (d *trustedDir) Close() error { return d.root.Close() }
 
-// openTrustedStateDir creates the state directory if it is absent, opens it,
-// and refuses it unless the OPENED directory is trustworthy.
-//
-// It is called from BOTH the writer (OpenLedger) and the reaper (lockReaper),
-// deliberately: a check on one path only is a check an attacker routes around
-// by racing the other.
+// openTrustedStateDir creates the state directory if absent, opens it and refuses it unless the opened directory is trustworthy; used by writer and reaper.
 func openTrustedStateDir(dir string) (*trustedDir, error) {
 	if dir == "" {
 		return nil, &StateDirError{Problem: "no state directory was configured"}
@@ -73,10 +34,7 @@ func openTrustedStateDir(dir string) (*trustedDir, error) {
 		return nil, &StateDirError{Dir: dir, Problem: "creating it", Err: err}
 	}
 
-	// Lstat, not Stat: a symlink must be REJECTED rather than followed. Stat
-	// would resolve it and validate the target, which is precisely the check an
-	// attacker wants -- point the name at a directory that passes and swap it
-	// afterwards.
+	// Lstat, so a symlink is rejected rather than followed.
 	named, err := os.Lstat(dir)
 	if err != nil {
 		return nil, &StateDirError{Dir: dir, Problem: "inspecting it", Err: err}
@@ -92,9 +50,7 @@ func openTrustedStateDir(dir string) (*trustedDir, error) {
 	}
 	d := &trustedDir{path: dir, root: root}
 
-	// The decision is made on the OPENED directory (fstat of the handle), and
-	// it must be the same directory the name showed a moment ago: a swap
-	// between the two is refused rather than raced.
+	// Decide on the opened directory (fstat), refusing if it differs from the one Lstat saw.
 	opened, err := root.Stat(".")
 	if err != nil {
 		_ = d.Close()
@@ -149,14 +105,7 @@ var stateDirHook = func(stage, dir string) {}
 // the image says so.
 const EphemeralMarker = ".ephemeral-not-a-persistent-mount"
 
-// refuseEphemeralStateDir fails when the state directory is known not to
-// outlive its writer.
-//
-// Running without persistence is worse than not running: every mapping and
-// loop device the suite creates is recorded into a file that vanishes with the
-// container, so the host accumulates devices nothing can attribute and the #85
-// guard blocks the next run with no record to reap. That is the exact defect
-// #96 exists to close, reached by omitting a flag.
+// refuseEphemeralStateDir fails when the state directory is known not to outlive its writer.
 func refuseEphemeralStateDir(d *trustedDir) error {
 	dir := d.path
 	marker := filepath.Join(dir, EphemeralMarker)
@@ -175,14 +124,7 @@ func refuseEphemeralStateDir(d *trustedDir) error {
 	return nil
 }
 
-// validateStateDir is the decision, separated from the syscalls so every branch
-// is reachable in a test without root and without chown.
-//
-// NOTE ON THE FIXTURES: the tests drive this with constructed modes and uids
-// rather than by chmod'ing a real directory, which also sidesteps the
-// root-bypasses-permission-bits trap -- this code READS mode bits and decides,
-// it does not rely on the kernel to deny access, so a test must exercise the
-// decision rather than the enforcement.
+// validateStateDir is the decision, separated from the syscalls so tests reach every branch without root.
 func validateStateDir(dir string, mode os.FileMode, owner uint32, euid int) error {
 	if mode&os.ModeSymlink != 0 {
 		return fmt.Errorf("%w: %s is a symlink; the state directory must be a real directory, "+

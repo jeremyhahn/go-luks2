@@ -19,20 +19,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// These three tests pin how a KDF observes cancellation: a derivation in flight when ctx is canceled is not interruptible
-// and is not abandoned either -- it runs to completion, its output is
-// destroyed, and the call reports ctx.Err()'s kind. internal/kdf.Deriver
-// already proves this at the primitive (see internal/kdf/kdf_test.go); these
-// prove the pkg/luks2 entry points -- deriveKeyEnclave, deriveKeySecret, and
-// the passphraseKDF seam a real unlock reaches through -- carry the caller's
-// ctx there rather than silently deriving against context.Background().
-//
-// A PBKDF2 iteration count well past each hash's floor, raced against a
-// 1ms timeout, is the same technique internal/kdf's own
-// TestDerivePlainCancelledDuringDerivationDestroysOutput uses: the timeout
-// fires while the derivation is still running, not before it starts, so
-// what is exercised is mid-flight cancellation, not an already-canceled ctx
-// (covered elsewhere, e.g. TestVolumeFormatRefusesAnAlreadyCanceledContext).
+// A derivation in flight when ctx is canceled runs to completion, its output is destroyed, and the call reports ctx.Err()'s kind; a high count raced against 1ms exercises mid-flight cancellation.
 
 func TestDerivedEnclaveCancelledDuringDerivationDestroysOutput(t *testing.T) {
 	iterations := 100_000
@@ -65,15 +52,7 @@ func TestDeriveKeySecretCancelledDuringDerivationDestroysOutput(t *testing.T) {
 	}
 }
 
-// TestUnlockKeyslotCancelledDuringThePassphraseKDFDestroysTheOutput is the
-// wiring proof: a real keyslot, unlocked through the production
-// sys.passphraseKDF seam (not a direct deriveKeyEnclave call), still
-// observes the caller's ctx rather than one of its own. The keyslot's own
-// PBKDF2 cost is set high enough that the 1ms timeout below fires while
-// unlockKeyslot is still inside the derivation it reaches through
-// sys.passphraseKDF -- the same substituted-deriver spirit the lane brief
-// asks for, proven here with the real deriver instead of a fake one so the
-// seam itself, not a stand-in for it, is what gets exercised.
+// TestUnlockKeyslotCancelledDuringThePassphraseKDFDestroysTheOutput: unlocking through sys.passphraseKDF observes the caller's ctx.
 func TestUnlockKeyslotCancelledDuringThePassphraseKDFDestroysTheOutput(t *testing.T) {
 	defer parallel(t)()
 	path := newImage(t, "kdfcancel.img")
@@ -104,14 +83,7 @@ func TestUnlockKeyslotCancelledDuringThePassphraseKDFDestroysTheOutput(t *testin
 	}
 }
 
-// TestVerifyKeyAgainstDigestsObservesCancellationBetweenDigests pins the
-// keyslots architecture's third cancellation point: each digest check
-// derives a key, so a canceled ctx stops the digest loop before the next
-// derivation and is returned as ctx.Err(), not as a credential verdict. The
-// context is canceled during the first of several digest evaluations, so a
-// single check on entry would not catch it and the remaining digests would
-// run. The control is the same key and header under a live ctx, which
-// verifies.
+// TestVerifyKeyAgainstDigestsObservesCancellationBetweenDigests: a canceled ctx stops the digest loop and returns ctx.Err(), not a credential verdict.
 func TestVerifyKeyAgainstDigestsObservesCancellationBetweenDigests(t *testing.T) {
 	device, passphrase := unlockableVolume(t)
 	key := volumeKeyEnclave(t, masterKeyOf(t, device, passphrase))

@@ -64,19 +64,7 @@ func recordUnmounts(t *testing.T, result error) *[]string {
 	return &calls
 }
 
-// TestUnmountAsksTheKernelAboutAMountPointWhoseNameHasASpace is the
-// regression test for the defect review found in #87, in the #70 change
-// that introduced it.
-//
-// Unmount used to consult IsMounted before calling the syscall. /proc/mounts
-// ESCAPES its fields -- a real mount at "/mnt/my disk" is written there as
-// "/mnt/my\040disk" -- so the string comparison missed it and Unmount
-// returned ErrNotMounted WITHOUT ASKING THE KERNEL, for a mount the kernel
-// would have unmounted quite happily.
-//
-// The assertion is on WHERE IT STOPPED, not on the error: "not a mount
-// point" and "refused before asking" are the same value to a caller, and
-// only the syscall's absence distinguishes them.
+// TestUnmountAsksTheKernelAboutAMountPointWhoseNameHasASpace checks Unmount reaches the syscall for an escaped mount point.
 func TestUnmountAsksTheKernelAboutAMountPointWhoseNameHasASpace(t *testing.T) {
 	for _, mountPoint := range []string{
 		"/mnt/my disk",  // \040, the case review named
@@ -139,14 +127,7 @@ func TestUnmountDoesNotClaimNotMountedForAnyOtherFailure(t *testing.T) {
 	}
 }
 
-// TestUnmountRefusesFlagsTheKernelWouldAlsoCallEINVAL is what makes the
-// classification above sound rather than lucky.
-//
-// umount2(2) has exactly three causes for EINVAL: the target is not a mount
-// point, Expire combined with Force or Detach, and an undefined flag value.
-// The last two are the caller's own argument, so refusing them here --
-// before the syscall, where no drift is possible -- leaves the first as the
-// only reading of an EINVAL that comes back.
+// TestUnmountRefusesFlagsTheKernelWouldAlsoCallEINVAL: the caller-argument EINVAL causes are refused before the syscall.
 func TestUnmountRefusesFlagsTheKernelWouldAlsoCallEINVAL(t *testing.T) {
 	refused := []struct {
 		name  string
@@ -211,13 +192,7 @@ func TestUnmountRefusesACanceledContext(t *testing.T) {
 	}
 }
 
-// TestMountPointListedDecodesTheEscapesTheKernelWrites is the parsing half
-// of the same defect, and it matters beyond Unmount: IsMounted is EXPORTED,
-// and callers use it to ask whether a path is already mounted.
-//
-// The table is written by the test rather than read from the host, because
-// there is no way to make the host mount something at a path with a newline
-// in it -- and that is precisely the case the escaping exists for.
+// TestMountPointListedDecodesTheEscapesTheKernelWrites, against a table the test writes.
 func TestMountPointListedDecodesTheEscapesTheKernelWrites(t *testing.T) {
 	// Exactly the four bytes fs/proc_namespace.c mangles.
 	const table = "sysfs /sys sysfs rw,nosuid 0 0\n" +
@@ -278,11 +253,7 @@ func TestIsMountedReadsTheRealMountTable(t *testing.T) {
 	}
 }
 
-// TestDeviceMountedMatchesTheDeviceNumber pins DeviceMounted's matching
-// rule: it compares the DEVICE NUMBER mountinfo records (field 3, proc(5)),
-// not a path, so a filesystem mounted through a different alias to the same
-// device is still seen, and a different device at the same-looking number is
-// not confused with it.
+// TestDeviceMountedMatchesTheDeviceNumber pins matching on mountinfo's device number (field 3).
 func TestDeviceMountedMatchesTheDeviceNumber(t *testing.T) {
 	const table = "1 2 253:7 / /mnt/a rw - ext4 /dev/dm-7 rw\n" +
 		"3 4 253:70 / /mnt/b rw - ext4 /dev/dm-70 rw\n"

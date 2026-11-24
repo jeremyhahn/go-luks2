@@ -37,16 +37,7 @@ func runVolume(t *testing.T, base string) string {
 	return name
 }
 
-// TestMain records the host state this suite is about to create (#96).
-//
-// # What it covers
-//
-// Loop devices, through the recorded temp root (below), and dm mappings:
-// Unlock records each mapping it activates in the run ledger right after
-// dmcrypt.Activate (activation is public in pkg/dmcrypt), and every test still
-// removes its mapping on pass, fail and panic through releaseVolume. The
-// cross-run reaper (test/internal/harness's reap.go) removes what a killed run
-// left behind.
+// TestMain records the loop devices and dm mappings this suite creates; the cross-run reaper removes what a killed run left.
 func TestMain(m *testing.M) {
 	suite, err := harness.BeginSuite(os.Stderr)
 	if err != nil {

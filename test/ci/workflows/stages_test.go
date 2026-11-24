@@ -46,7 +46,7 @@ func TestImageJobRunsEveryToolchainStageInTheImage(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
 	image := job(t, ci, "image")
 	steps := stepRun(t, image)
-	// ci-template v1.30: the lint-class stages are the lint job's.
+	// The lint-class stages are the lint job's.
 	lint := job(t, ci, "lint")
 	lintSteps := stepRun(t, lint)
 
@@ -90,7 +90,7 @@ func TestImageJobRunsEveryToolchainStageInTheImage(t *testing.T) {
 			case name == "Build the devcontainer images", name == "Build the toolchain image":
 				built = true
 			case !built, name == "Tear down", name == "Lease the integration image", strings.HasPrefix(name, "Upload "),
-				name == "Releasability (private patterns)": // ci-template v1.31: needs only the checkout
+				name == "Releasability (private patterns)": // needs only the checkout
 			case !keepsRunning.MatchString("\n" + block): //nolint:misspell // the Actions function's spelling, not prose
 				t.Errorf("step %q does not keep running after a failed step once the toolchain image exists", name)
 			}
@@ -107,16 +107,11 @@ func TestImageJobRunsEveryToolchainStageInTheImage(t *testing.T) {
 			t.Errorf("the image build step lacks %q", want)
 		}
 	}
-	// v1.42: the image job's trivy image scan, the step that re-tagged the
-	// leased id, moved to scans.yml; the job still names and leases the image.
+	// The trivy image scan is in scans.yml; the job still names and leases the image.
 	itImageNamedAndLeased(t, "image", image, false)
 }
 
-// TestCIGateIsHermetic: ci-template v1.42 (owner ruling 742 (1)). No ci.yml
-// step runs a check whose answer changes with no change to the tree
-// (deps-check, make security, trivy image); scans.yml runs each in the
-// toolchain image on the bridge network, never on a pull request or a push.
-// gosec reads only the tree and runs in the lint job on every tier.
+// TestCIGateIsHermetic: no ci.yml step runs a tree-independent check; scans.yml runs those, never on a PR or push. gosec runs in the lint job.
 func TestCIGateIsHermetic(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
 	for _, advisory := range []string{"make deps-check", "make security", "trivy image"} {
@@ -213,12 +208,7 @@ func stripComments(s string) string {
 	return strings.Join(out, "\n")
 }
 
-// TestApkIndexSumBeforeTheImageName: ci-template v1.29. Every job that names
-// the integration image first reads the Alpine package index checksum into
-// APK_INDEX_SUM, which `make -s it-image` hashes, in the step right before
-// "Name the integration image". The script ships beside the template, v1.
-// The same step reads the Debian package index checksum into APT_INDEX_SUM
-// (make -s apt-index-sum), which the tag hashes too.
+// TestApkIndexSumBeforeTheImageName: jobs naming the integration image first read APK_INDEX_SUM and APT_INDEX_SUM in the step before.
 func TestApkIndexSumBeforeTheImageName(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
 	for _, name := range []string{"image", "lint-gates", "integration", "soak"} {
@@ -264,19 +254,15 @@ func itImageNamedAndLeased(t *testing.T, name, j string, retags bool) {
 	}
 	lease := steps["Lease the integration image"]
 	for _, want := range []string{
-		// v1.25.1: the lease is bounded, taken by id with --pull never, and
-		// the tag is inspected again for the same id.
+		// The lease is bounded, taken by id with --pull never, and the tag is re-inspected for the same id.
 		`lease="${CI_STACK_PREFIX}lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-`,
 		`docker create --pull never --name "$lease" "$id" true`,
 		`[ "$(docker image inspect -f '{{.Id}}' "$IT_IMAGE" 2>/dev/null)" = "$id" ]`,
 		`the integration image $IT_IMAGE is missing after one rebuild`,
-		// v1.25.2: the lease holds the id, and later steps re-tag from it.
+		// The lease holds the id; later steps re-tag from it.
 		`echo "IT_LEASE=$lease" >> "$GITHUB_ENV"`,
 		`echo "IT_LEASE_ID=$id" >> "$GITHUB_ENV"`,
-		// v1.25.3: the inspect, lease and second inspect run under the image
-		// lock, a created container named <prefix>image-lock, bounded at 660 s,
-		// with a lock older than 600 s removed by its id; the functions go to
-		// image-lock.sh for the re-tags.
+		// Inspect, lease and re-inspect run under the <prefix>image-lock container lock, bounded at 660 s, removing a lock older than 600 s.
 		`image_lock() {`,
 		`image_unlock() {`,
 		`local lock="${CI_STACK_PREFIX}image-lock"`,
@@ -343,7 +329,7 @@ func TestImageJobCarriesTheChecksThatLeftTheRunner(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
 	image := job(t, ci, "image")
 	steps := stepRun(t, image)
-	// ci-template v1.30: the lint-class steps are the lint job's.
+	// The lint-class steps are the lint job's.
 	lint := job(t, ci, "lint")
 	for name, run := range stepRun(t, lint) {
 		steps[name] = run
@@ -362,7 +348,7 @@ func TestImageJobCarriesTheChecksThatLeftTheRunner(t *testing.T) {
 			t.Errorf("the image job's uploads lack %q", want)
 		}
 	}
-	// Nothing goes to code scanning (ci-template v1.21: CI runs on the forge).
+	// Nothing goes to code scanning.
 	for _, ban := range []string{"upload-sarif", "security-events", "GOSEC_EXTRA", "GO_VERSION"} {
 		if strings.Contains(readFile(t, ".github/workflows/ci.yml"), ban) {
 			t.Errorf("ci.yml still carries %q", ban)
@@ -383,13 +369,9 @@ func TestImageJobCarriesTheChecksThatLeftTheRunner(t *testing.T) {
 	}
 }
 
-// The DevOps standard, security scanning: trivy image fails on CRITICAL and
-// HIGH findings that have a fix, with --ignore-unfixed on the OS layer, since
-// a base image carries advisories its distribution has not fixed. trivy fs
-// never takes --ignore-unfixed: a vulnerable dependency of this module always
-// fails.
+// trivy image fails on fixable CRITICAL and HIGH with --ignore-unfixed on the OS layer; trivy fs never takes --ignore-unfixed.
 func TestImageJobGatesFixableFindings(t *testing.T) {
-	// ci-template v1.42: the scan runs in scans.yml, on main.
+	// The scan runs in scans.yml, on main.
 	run := stepRun(t, job(t, scansWorkflow(t), "scans"))["trivy image (integration image)"]
 	cmd := ""
 	for _, line := range strings.Split(run, "\n") {
@@ -431,7 +413,7 @@ func TestTrivyFSNeverIgnoresUnfixed(t *testing.T) {
 func TestIntegrationJobRunsUnderCompose(t *testing.T) {
 	it := job(t, readFile(t, ".github/workflows/ci.yml"), "integration")
 	steps := stepRun(t, it)
-	// v1.25.2: the step re-tags the leased id under the image lock, then runs.
+	// The step re-tags the leased id under the image lock, then runs.
 	run := steps["make integration-test (integration image)"]
 	runAt := strings.Index(run, "\n          "+`make integration-test MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_PROJECT="$IT_PROJECT" IT_IMAGE="$IT_IMAGE" GO_BUILD_TAGS="$GO_BUILD_TAGS"`)
 	if tagAt := strings.Index(run, `docker tag "$IT_LEASE_ID" "$IT_IMAGE"`); runAt < 0 || tagAt < 0 || tagAt > runAt {
@@ -489,14 +471,11 @@ func TestImageAndIntegrationJobsUseNoRunnerToolchain(t *testing.T) {
 		if strings.Contains(j, "apt-get") {
 			t.Errorf("%s installs a tool on the runner; the image carries it", name)
 		}
-		// ci-template v1.21.1: the forge credentials are masked before any
-		// other step, then (v1.44, ruling 887) the LAN addresses, before
-		// anything can echo them; then stale stacks are reaped.
+		// Forge credentials, then LAN addresses, are masked before any other step; then stale stacks are reaped.
 		named := regexp.MustCompile(`(?m)^      - name: (.+)$`).FindAllStringSubmatch(j, 3)
 		third := "Reap stale CI stacks"
 		if name == "lint-gates" {
-			// v1.27: the job probes for the target first, and reaps only when
-			// there is one to run.
+			// The job probes for the target first and reaps only when there is one.
 			third = "Does the Makefile define lint-gates?"
 		}
 		if len(named) < 3 || named[0][1] != "Mask the forge credentials" || named[1][1] != "Mask the LAN addresses" || named[2][1] != third {
@@ -565,8 +544,7 @@ func TestImageJobTrimsTheCachesBeforeTheStages(t *testing.T) {
 			firstStage = i
 		}
 	}
-	// v1.23: the lease is taken between the build and the trim. v1.45
-	// (ruling 888): the built images' history is checked before the trim.
+	// The lease is taken between build and trim, and image history is checked before the trim.
 	if trim < 3 || names[trim-1] != "Check the images carry no private address" ||
 		names[trim-2] != "Lease the integration image" || names[trim-3] != "Build the devcontainer images" {
 		t.Fatalf("Trim the CI caches does not follow the image build: %v", names)
@@ -613,18 +591,7 @@ func TestNoStepPrintsTheCredentials(t *testing.T) {
 // Race, FIPS and Merged Tree run in the toolchain image like the stages.
 var runnerJobs = []string{"ci-gate"}
 
-// runnerTargets are the make targets any other job may run on the runner: they
-// build the images, run a command in the toolchain image, run the integration
-// suite under compose, print an image's tag (it-image: ci-template v1.23),
-// reap what a dead job left, trim the cache volumes (ci-template v1.22), or
-// read the base images' Alpine package index with docker (apk-index-sum:
-// ci-template v1.29's script as a recipe) or their Debian package index
-// (apt-index-sum), mask the LAN addresses the runner's environment names
-// (ci-mask-lan: ci-template v1.44, ruling 887; the runner itself must print
-// the ::add-mask:: lines) or read a built image's history and config with
-// docker (ci-image-history: v1.45, ruling 888). Everything else -- every
-// stage, and every check beside one -- is a CMD for ci-toolchain-run. Soak's
-// "$SOAK_TARGET" is read from its job's env.
+// runnerTargets are the make targets other jobs may run on the runner directly; everything else is a CMD for ci-toolchain-run, and Soak's $SOAK_TARGET comes from its env.
 var runnerTargets = []string{
 	"ci-toolchain-run", "ci-reap-stacks", "ci-trim-caches", "docker-build", "docker-build-toolchain",
 	"docker-build-integration", "toolchain-image", "it-image", "apk-index-sum", "apt-index-sum", "integration-test",

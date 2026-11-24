@@ -18,20 +18,13 @@ import (
 	"github.com/jeremyhahn/go-luks2/test/internal/labstrings"
 )
 
-// The tiers of ci.yml (#341). A job moved between them, or a condition
-// edited on one job and not its siblings, changes what gates a merge without
-// failing anything else; these tests are what fails. ci-template v1.30 adds
-// two PR-tier tags: `code`, a job a docs-only PR skips (the image job), and
-// `scoped`, lint-gates, which a PR skips when no changed file matches
-// LINT_GATES_PATTERN.
+// Tests for ci.yml's tiers, including the `code` (skipped on docs-only PRs) and `scoped` (lint-gates, skipped outside LINT_GATES_PATTERN) PR-tier tags.
 var (
 	prTier     = []string{"preflight", "lint", "merge-check", "test-race"}
 	codeTier   = []string{"image", "fips", "integration"}
 	scopedTier = []string{"lint-gates"}
 	fullTier   = []string{}
-	// codeFullTier is the part of codeTier that carries CI_FULL_TIER's
-	// condition in its `if:` (codeFullJobIf): ci-template v1.41 (ruling
-	// 742 (2)) moved integration and FIPS from the full tier to every PR.
+	// codeFullTier is the part of codeTier whose `if:` carries CI_FULL_TIER's condition (codeFullJobIf): integration and FIPS on every PR.
 	codeFullTier = []string{"fips", "integration"}
 	nightlyTier  = []string{"soak"}
 )
@@ -64,12 +57,7 @@ func sameSet(a, b []string) bool {
 	return strings.Join(a, ",") == strings.Join(b, ",")
 }
 
-// TestOnlyNightlyIsScheduled: the nightlies run without manual execution
-// (owner order, 2026-11-22), so nightly.yml, and only nightly.yml, carries a
-// schedule: exactly one cron, exactly `45 5 * * *` (05:45 UTC), and it keeps
-// workflow_dispatch for a run on demand. Every other workflow has no schedule:
-// main's full tier and Soak run on dispatch (the full tier also on push to
-// main and a `ci:full` PR).
+// TestOnlyNightlyIsScheduled: only nightly.yml has a schedule, exactly `45 5 * * *`, plus workflow_dispatch.
 func TestOnlyNightlyIsScheduled(t *testing.T) {
 	const nightly, wantCron = "nightly.yml", "45 5 * * *"
 	cronLine := regexp.MustCompile(`(?m)^\s*-\s*cron:\s*['"]?([^'"\n]*?)['"]?\s*$`)
@@ -113,12 +101,7 @@ func TestOnlyNightlyIsScheduled(t *testing.T) {
 	}
 }
 
-// TestMainRunsCancelPerEvent: on main one group per event, so a newer main
-// run of the same event cancels the older one, queued or in progress, and
-// the newest run validates every merge under it. A schedule run keeps its
-// own schedule group and a workflow_dispatch run its own event's group, so
-// neither shares a group with a push run. Every other ref is one group.
-// cancel-in-progress is a literal true, never an expression.
+// TestMainRunsCancelPerEvent: on main one concurrency group per event, elsewhere one per ref; cancel-in-progress is literal true.
 func TestMainRunsCancelPerEvent(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
 	m := regexp.MustCompile(`(?m)^concurrency:\n((?:  .*\n)+)`).FindStringSubmatch(ci)
@@ -132,9 +115,7 @@ func TestMainRunsCancelPerEvent(t *testing.T) {
 	}
 }
 
-// TestJobNamesAreLiteral: Gitea does not evaluate expressions in a job's
-// `name:`; it posts the expression verbatim as the status context, so a gate
-// named by one is never reported under the name branch protection requires.
+// TestJobNamesAreLiteral: job names contain no expressions, since Gitea posts them verbatim as status contexts.
 func TestJobNamesAreLiteral(t *testing.T) {
 	for _, f := range workflowFiles(t) {
 		for _, m := range jobName.FindAllStringSubmatch(readFile(t, rel(t, f)), -1) {
@@ -149,18 +130,10 @@ func TestJobNamesAreLiteral(t *testing.T) {
 	}
 }
 
-// hostedRunner is the runs-on of every ci.yml job (Company Agent m2077):
-// GitHub-hosted ubuntu-latest, so main's CI Gate can go green on GitHub.
-// Ruling 999: there is no exception. Self-hosted runners are only for a
-// hardware-specific job or one that exceeds a measured hosted limit (disk,
-// memory, or 6 h), and no ci.yml job does.
+// hostedRunner is the runs-on of every ci.yml job: GitHub-hosted ubuntu-latest.
 const hostedRunner = "ubuntu-latest"
 
-// retiredLabels are the self-hosted runner labels the workflows ran on
-// before m2077 (bigdisk, ci-gate, batch) and before ruling 999
-// (bigdisk-docker, the pool ruling 442 routed main pushes and same-repository
-// pull requests to). No workflow names them, and .github/actionlint.yaml does
-// not list them, so a typo of one is still caught as an unknown runner.
+// retiredLabels are self-hosted runner labels no longer in use; neither workflows nor .github/actionlint.yaml name them.
 var retiredLabels = []string{"bigdisk", "ci-gate", "batch", "bigdisk-docker"}
 
 // TestCIGateRunsOnTheSelectedRunner: CI Gate runs on ci-template v1.54's
@@ -193,7 +166,7 @@ func TestEveryCIJobRunsOnTheSelectedPool(t *testing.T) {
 	for _, id := range jobIDs(t, ci) {
 		got := jobRunsOn.FindAllStringSubmatch(job(t, ci, id), -1)
 		if id == "preflight" && len(got) == 1 && isPreflightTemplateRunsOn(t, ".github/workflows/ci.yml", ci, got[0][1]) {
-			continue // ci-template v1.49: hosted off github.com and by CI_PREFLIGHT_RUNS_ON
+			continue // hosted off github.com and by CI_PREFLIGHT_RUNS_ON
 		}
 		if len(got) != 1 || got[0][1] != selectRunsOn(id)+selectRunsOnNote {
 			t.Errorf("job %s runs on %v, want %s (ci-template v1.54)", id, got, selectRunsOn(id)+selectRunsOnNote)
@@ -219,8 +192,7 @@ func TestEveryCIJobRunsOnTheSelectedPool(t *testing.T) {
 	}
 }
 
-// TestNoRetiredRunnerLabel: no workflow runs a job on a retired self-hosted
-// label, and .github/actionlint.yaml no longer accepts one.
+// TestNoRetiredRunnerLabel: no workflow uses a retired label, and actionlint.yaml does not accept one.
 func TestNoRetiredRunnerLabel(t *testing.T) {
 	for _, f := range workflowFiles(t) {
 		text := readFile(t, rel(t, f))
@@ -257,8 +229,7 @@ func isPreflightTemplateRunsOn(t *testing.T, path, workflow, value string) bool 
 	return strings.Count(workflow, line) == 1 && strings.Contains(job(t, workflow, "preflight"), line)
 }
 
-// serverURLArms matches a runs-on value that picks its label by forge:
-// the first arm runs on github.com, the second only on Gitea (retired).
+// serverURLArms matches a runs-on value choosing its label by forge: github.com first, Gitea second.
 var serverURLArms = regexp.MustCompile(`^\$\{\{ github\.server_url == 'https://github\.com' && '([^']*)' \|\| '([^']*)' \}\}$`)
 
 // retiredRunsOnLabel reports the retired label a runs-on value would run
@@ -297,12 +268,7 @@ func TestRetiredRunsOnLabel(t *testing.T) {
 	}
 }
 
-// TestNoLabelTrigger: ci.yml does not fire on `labeled`. Gitea sends every
-// label add and remove as `labeled`, so each review or task label started a
-// run that canceled the PR's run in progress. A `ci:full` added later is read
-// when the next run starts. Nothing in ci.yml may branch on the label event
-// either: a job skipped by such a condition still posts a status under its
-// name, and a skipped CI Gate would overwrite the head's real one.
+// TestNoLabelTrigger: ci.yml neither fires on nor branches on `labeled`, which would cancel runs and overwrite CI Gate.
 func TestNoLabelTrigger(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
 	m := prTypes.FindStringSubmatch(ci)
@@ -402,11 +368,7 @@ func TestStrippedAtPublish(t *testing.T) {
 	}
 }
 
-// fullTierIf is ci.yml's CI_FULL_TIER, which CI Gate's FULL_TIER reads
-// (ci-template v1.30: a workflow_dispatch off main is not the full tier; the
-// guard refuses it; v1.41: every other event, every PR too, and ci/deps-bump's
-// dispatch). nightlyIf is CI Gate's NIGHTLY: the schedule and
-// dispatch only.
+// fullTierIf is ci.yml's CI_FULL_TIER, read by CI Gate's FULL_TIER; nightlyIf is CI Gate's NIGHTLY (schedule and dispatch).
 const (
 	fullTierIf = "${{ " + fullTierCond + " }}"
 	nightlyIf  = "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}"
@@ -443,12 +405,7 @@ func jobIDs(t *testing.T, workflow string) []string {
 	return ids
 }
 
-// TestCIGateTiersMatchTheJobs: CI Gate is the one required check and the only
-// gate. It needs every job, reads each by name with one `check` line, and the
-// tag on that line is what lets a job skip: `full` exactly for the jobs whose
-// `if:` is the full-tier condition, and only while FULL_TIER is not true.
-// A mis-tagged line either fails every ordinary PR or lets a skipped PR-tier
-// job through, so the tags are derived from the jobs, never listed by hand.
+// TestCIGateTiersMatchTheJobs: CI Gate needs every job, and each check line's tag is derived from the job's `if:`.
 func TestCIGateTiersMatchTheJobs(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
 	gate := job(t, ci, "ci-gate")
@@ -551,9 +508,7 @@ func TestCIGateTiersMatchTheJobs(t *testing.T) {
 // puts on the PR tier.
 func TestUnitTiers(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
-	// The PR tier's unit legs, their coverage gate and the checks beside them
-	// run in the toolchain image, each through ci-toolchain-run. The
-	// releasability gate is lint-class (ci-template v1.30: the lint job).
+	// PR-tier unit legs, coverage and adjacent checks run through ci-toolchain-run; the releasability gate is in the lint job.
 	image := job(t, ci, "image")
 	for _, want := range []string{
 		`make ci-toolchain-run CMD="make test-unit-norace UNIT_TEST_FLAGS=-v && make coverage-gate" CI_OUT=coverage.out`,

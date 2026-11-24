@@ -365,12 +365,7 @@ func makeZFS(ctx context.Context, devicePath string, p MakeParams) error {
 	return nil
 }
 
-// ZFS names and option values reach zpool and zfs as separate arguments, so
-// there is no shell to inject into -- but an argument that starts with "-" is
-// an OPTION to those programs, and a pool name like "-f" or a dataset like
-// "tank/-o" changes what the command does rather than what it names (#250,
-// C7). Each value is therefore held to the naming rules zpool(8) and zfs(8)
-// document, which no option can satisfy.
+// ZFS names and values follow zpool(8) and zfs(8) naming rules, so none can be read as an option.
 
 // zfsReservedPoolPrefixes are the vdev keywords zpool(8) reserves: a pool may
 // not be named, or begin with, any of them.
@@ -444,10 +439,7 @@ func validateZFSDatasetName(name string) error {
 	return nil
 }
 
-// validateZFSToken checks a value that becomes part of a key=value argument --
-// a property name, a feature, a compression or record size: it must be
-// non-empty and drawn from letters, digits, "_", "-", ":", "." and "@", and
-// must not start with "-".
+// validateZFSToken checks a key=value token: non-empty, letters, digits and _-:.@, not starting with "-".
 func validateZFSToken(what, value string) error {
 	if value == "" || value[0] == '-' {
 		return invalidZFSOption(what, value, "must be non-empty and must not start with -")

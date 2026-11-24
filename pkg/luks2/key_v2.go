@@ -45,11 +45,7 @@ type Target struct {
 	Flags          []string
 }
 
-// unlockHeader takes the shared lock, reads the primary header, checks that
-// every requirement it declares is implemented, and selects the one crypt
-// segment activation maps. It is the common prefix every Unlock* method and
-// Target need before they can derive or verify a key; the caller must
-// unlock() the returned *device.Locked when done with it.
+// unlockHeader takes the shared lock, reads the primary header, checks requirements and selects the crypt segment; the caller unlocks the result.
 func (v *Volume) unlockHeader(ctx context.Context, op string) (*device.Locked, string, *header.Metadata, error) {
 	locked, err := v.lockFor(ctx, device.LockShared)
 	if err != nil {
@@ -67,7 +63,7 @@ func (v *Volume) unlockHeader(ctx context.Context, op string) (*device.Locked, s
 
 	// A container mid an operation this package does not implement (an
 	// interrupted cryptsetup reencrypt is the case that matters) must be
-	// refused for activation, the same as for a write (#250, C2).
+	// refused for activation, the same as for a write.
 	if err := metadata.CheckRequirementsImplemented(); err != nil {
 		_ = locked.Unlock()
 		detail, _ := unsupportedRequirementDetail(err)
@@ -121,8 +117,7 @@ func (v *Volume) Unlock(ctx context.Context, pass enclave.ByteAccess) (*Key, err
 // UnlockKeyslot recovers the volume key from exactly keyslot, whatever its
 // priority, refusing with ErrKeyslotNotFound if it does not exist or is not
 // bound to the volume's data segment -- trying it anyway would risk
-// recovering a key this volume's data segment was never encrypted with
-// (#250).
+// recovering a key this volume's data segment was never encrypted with.
 func (v *Volume) UnlockKeyslot(ctx context.Context, keyslot int, pass enclave.ByteAccess) (*Key, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()

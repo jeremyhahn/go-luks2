@@ -16,17 +16,7 @@ import (
 	"github.com/jeremyhahn/go-enclave"
 )
 
-// NOTHING HERE TOUCHES A PHYSICAL AUTHENTICATOR, and that is a hard
-// constraint rather than a convenience: a production security key may be
-// attached to the machine these run on, and enrolling against it is
-// forbidden. Every helper is a script written into t.TempDir that emits
-// fixture lines in the documented format.
-//
-// That is not a mock of the system under test. The system under test is the
-// EXEC SEAM -- run a program, take a line of its output, decode it, refuse
-// it when it is wrong -- and a script is the honest way to drive it. What is
-// not covered by it is whether a real authenticator emits those exact lines,
-// which is recorded at fido2AssertSecretLine and cannot be settled here.
+// No test here touches a physical authenticator: every helper is a script in t.TempDir emitting fixture lines in the documented format.
 
 // mustDestroy destroys e now and fails the test if go-enclave reports the
 // release as anything but clean.
@@ -53,12 +43,7 @@ func openSecret(t *testing.T, e enclave.ByteAccess) []byte {
 	return out
 }
 
-// helperScript writes an executable shell script that prints body verbatim
-// on stdout and returns it.
-// privateDir returns a fresh t.TempDir() that only this user can write.
-// t.TempDir creates its directory with mode 0777 less the umask, so under a
-// umask of 0002 it is group-writable and Command rightly refuses a helper in
-// it; every trusted helper location in this package comes from here.
+// privateDir returns a fresh t.TempDir() only this user can write, so Command accepts helpers in it.
 func privateDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -68,6 +53,7 @@ func privateDir(t *testing.T) string {
 	return dir
 }
 
+// helperScript writes an executable shell script that prints body verbatim on stdout and returns its path.
 func helperScript(t *testing.T, name, body string) string {
 	t.Helper()
 	return helperScriptWith(t, name, body, "", 0)

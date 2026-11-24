@@ -65,7 +65,3 @@ func TestSafeInt64ToUint64(t *testing.T) {
 		})
 	}
 }
-
-// ErrVolumeAlreadyUnlocked (Unlock adopting an in-use mapping name) and the
-// Lock-side refusals moved to pkg/dmcrypt as ErrActive/ErrNotActive with
-// the activation code they guarded (#268); see pkg/dmcrypt's own tests.

@@ -16,11 +16,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// RestorePrimaryHeader used to copy the secondary over the primary whatever
-// either held (#248, B3). Header writes put the primary on the medium first, so
-// an interrupted ChangeKey or RemoveKey can leave a NEWER primary -- the
-// passphrase already revoked -- over an OLDER secondary that still lists it,
-// and "restoring" that secondary brought the revoked passphrase back.
+// RestorePrimaryHeader must not restore an older secondary over a newer primary.
 
 // writeBytesAt overwrites len(data) bytes of path at offset.
 func writeBytesAt(t *testing.T, path string, offset int64, data []byte) {

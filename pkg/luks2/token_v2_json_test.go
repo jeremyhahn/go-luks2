@@ -32,9 +32,7 @@ func TestTokenMarshalJSONWritesKeyslotsAsCanonicalStrings(t *testing.T) {
 }
 
 func TestTokenMarshalJSONWritesAnEmptyKeyslotsArrayNeverNull(t *testing.T) {
-	// LUKS2 requires a token's keyslots member to be an ARRAY: a nil slice
-	// encoding as "keyslots":null is a header cryptsetup refuses (token.go's
-	// ImportToken documents the same rule for the old path).
+	// keyslots must be an array; null is refused by cryptsetup.
 	data, err := json.Marshal(Token{Type: "x-test"})
 	if err != nil {
 		t.Fatalf("Marshal failed: %v", err)

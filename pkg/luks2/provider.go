@@ -112,10 +112,7 @@ func (v *Volume) Enroll(ctx context.Context, key *Key, p KeyProvider, kp Keyslot
 		}
 	}
 
-	// addKeyslotWithMasterKey only derives from and verifies against the
-	// master key; it does not take ownership of it. A clone is handed in, the
-	// same pattern UnlockWithVolumeKey uses for the opposite direction, so
-	// the caller's key is untouched by this call.
+	// Hand in a clone so the caller's key is untouched.
 	var masterKey enclave.ByteAccess
 	if err := volkey.Borrow(op, key, func(b []byte) error {
 		var cerr error

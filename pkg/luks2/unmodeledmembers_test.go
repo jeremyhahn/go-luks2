@@ -14,13 +14,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// Unknown-member passthrough for the three objects #143 did not reach:
-// Segment, Digest and Config (#151).
-//
-// A closed struct DELETES what it does not model. The consequence is not a
-// cosmetic diff: this package reads a header another implementation wrote,
-// mutates one keyslot, and writes the whole thing back, so every member it
-// cannot name is dropped from a container it does not own.
+// Unknown-member passthrough for Segment, Digest and Config.
 
 // segmentWithExtras is the shape cryptsetup writes for a reencryption segment:
 // the modeled members plus ones this package has no field for.
@@ -117,10 +111,7 @@ func TestUnmodeledMembersSurviveARoundTrip(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// VALUE, not pointer. This is the hazard #143 measured and #151
-			// asked to be pinned per type: a pointer-receiver MarshalJSON is
-			// not in the method set json.Marshal reaches for a bare value, so
-			// it silently stops firing while every pointer-holding test passes.
+			// By value: a pointer-receiver MarshalJSON would not fire for a bare value.
 			value := tt.decode(t, []byte(tt.in))
 
 			out, err := json.Marshal(value)
@@ -141,8 +132,7 @@ func TestUnmodeledMembersSurviveARoundTrip(t *testing.T) {
 	}
 }
 
-// TestUnmodeledMembersSurviveAMutation is the defect's real shape: read a
-// foreign object, change a member this package DOES model, write it back.
+// TestUnmodeledMembersSurviveAMutation reads a foreign object, changes a modeled member and writes it back.
 func TestUnmodeledMembersSurviveAMutation(t *testing.T) {
 	var segment header.Segment
 	if err := json.Unmarshal([]byte(segmentWithExtras), &segment); err != nil {

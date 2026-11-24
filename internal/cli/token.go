@@ -17,17 +17,9 @@ import (
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
-// Tokens are header metadata that say WHAT opens a keyslot -- a hardware
-// authenticator, a TPM, an external agent. A token holds no key material,
-// so none of this handles a secret. pkg/luks2 exposes AddToken, SetToken
-// and RemoveToken on *Volume, plus (*Header).Tokens() for reading; "free",
-// "exists" and "count" are computed from that map here, since the library
-// has no dedicated calls for them.
+// Tokens are header metadata naming what opens a keyslot; they hold no key material.
 
-// maxTokenJSONSize bounds a token document this tool will read: the whole
-// LUKS2 JSON metadata area is at most a few MiB, and one token is a small
-// part of it, so this is generous while still refusing an unbounded read
-// of an arbitrary file on a typo.
+// maxTokenJSONSize bounds a token document read from a file.
 const maxTokenJSONSize = 64 << 10
 
 func tokenCommand() *command {
@@ -280,8 +272,7 @@ func runTokenFree(ctx context.Context, e *env, args []string) error {
 	return nil
 }
 
-// runTokenExists answers with its EXIT CODE as well as its output, so a
-// script can branch on it without parsing anything.
+// runTokenExists answers with its exit code as well as its output.
 func runTokenExists(ctx context.Context, e *env, args []string) error {
 	device, id, err := tokenDeviceAndID("token exists", args)
 	if err != nil {

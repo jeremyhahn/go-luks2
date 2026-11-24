@@ -21,11 +21,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/test/internal/harness"
 )
 
-// #249 (Lane A) against the real kernel: a volume cryptsetup wrote with
-// every shape the unit tier proves on file images -- a 4 KiB key file, a
-// keyslot key size that differs from the volume key's, and an unbound
-// keyslot beside the one holding the volume key -- driven on a LOOP
-// DEVICE, and opened through device-mapper.
+// Keyslot safety on a loop device: a cryptsetup volume with a 4 KiB key file, a differing keyslot key size and an unbound keyslot.
 
 func cryptsetupRun(t *testing.T, stdin string, args ...string) {
 	t.Helper()
@@ -98,7 +94,7 @@ func TestCryptsetupKeyfileVolumeWithAnUnboundKeyOnARealDevice(t *testing.T) {
 
 	theirs := runVolume(t, "lane-a-theirs")
 	defer releaseVolume(t, theirs, func() error { return Lock(theirs) })
-	// Recorded before cryptsetup creates it (#348), as Unlock's are after.
+	// Recorded before cryptsetup creates it.
 	theirsUUID, err := runSuite.Ledger.RecordMappingAhead(loop, theirs)
 	if err != nil {
 		t.Fatalf("recording dm %q ahead of its activation: %v", theirs, err)

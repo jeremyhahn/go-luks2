@@ -14,22 +14,9 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// Tests for the LUKS2 keyslot priority member, whose two failure modes were
-// present at once and pull in opposite directions.
-//
-// The member is OPTIONAL and its default is NORMAL. Everything else follows:
-// a writer that emits the default is writing noise, and a reader that treats
-// the absent member as the zero value is reading "ignore" where the format says
-// "normal". This package did both. The numbers do not help -- 0 ignore,
-// 1 normal, 2 prefer -- because the larger value means "try this FIRST", which
-// is how `priority := 2` came to sit under the comment "Lower priority".
+// Keyslot priority tests: the member is optional, absent means normal (0 ignore, 1 normal, 2 prefer).
 
-// TestAbsentKeyslotPriorityIsNormal is the read half.
-//
-// It matters far beyond this package's own containers: cryptsetup DELETES the
-// member for a normal keyslot, so essentially every keyslot in every
-// cryptsetup-created container arrives with no priority at all. Reading those
-// as 0 reported every one of them as a slot to skip.
+// TestAbsentKeyslotPriorityIsNormal: an absent priority, as cryptsetup writes for normal, reads as normal.
 func TestAbsentKeyslotPriorityIsNormal(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -76,10 +63,7 @@ func TestKeyslotPriorityConstantsMatchTheFormat(t *testing.T) {
 	}
 }
 
-// TestCreateMetadataWritesNoPriorityMember is the write half on the format
-// path, asserted on the ENCODED BYTES rather than on the struct: what matters
-// is that the member is absent from the JSON, which is a fact about the tags
-// and the nil pointer together.
+// TestCreateMetadataWritesNoPriorityMember: the encoded JSON has no priority member.
 func TestCreateMetadataWritesNoPriorityMember(t *testing.T) {
 	metadata := createMetadata(
 		&header.KDF{Type: "pbkdf2", Hash: "sha512", Salt: "AAAA", Iterations: intPtr(210000)},

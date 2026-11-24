@@ -73,12 +73,7 @@ func cryptsetupTokens(t *testing.T, image string) map[string]json.RawMessage {
 	return metadata.Tokens
 }
 
-// TestKeyslotRemovalUpdatesTokensAsCryptsetupDoes: removing a keyslot removes
-// it from every token that names it and KEEPS the token, with an empty
-// keyslots array where it named nothing else. That is what cryptsetup 2.7.5's
-// luksKillSlot does (LUKS2_keyslot_wipe unassigns the keyslot from every
-// token; measured in the integration devcontainer), so every removal path is
-// held to cryptsetup's own result on the same header, as cryptsetup prints it.
+// TestKeyslotRemovalUpdatesTokensAsCryptsetupDoes: removing a keyslot unassigns it from every token and keeps the token, as cryptsetup 2.7.5 luksKillSlot does.
 func TestKeyslotRemovalUpdatesTokensAsCryptsetupDoes(t *testing.T) {
 	defer parallel(t)()
 

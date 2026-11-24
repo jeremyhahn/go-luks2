@@ -18,27 +18,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
-// VerifyRecoveryKey must not report "this key does not work" for reasons that
-// have nothing to do with the key.
-//
-// The harm is specific and is what issue #72 was filed for: someone verifying a
-// recovery key against a CORRUPTED volume is told the key is wrong, and they
-// will discard a working recovery key. This function is where an operator turns
-// when they are already worried about losing access, so it is the worst place
-// in the package to flatten a cause.
-//
-// It also contradicted the fail-closed contract the enclave work introduced: a
-// failure to obtain locked memory -- an operator-fixable RLIMIT_MEMLOCK
-// condition -- surfaced as a bad credential.
-//
-// # What (false, nil) is still allowed to mean
-//
-// Only that no keyslot verified this key. NOT that the key is wrong. Per issue
-// #68 three causes reach the digest comparison indistinguishably -- a wrong
-// credential, the RIGHT credential over damaged key material, and a
-// semantically wrong digest -- and naming that outcome is an open design
-// question (#68) which #30 deliberately left untyped rather than guess. These
-// tests fix the unambiguous half and do not guess at the rest.
+// VerifyRecoveryKey must not report a key as wrong for reasons unrelated to the key; (false, nil) means only that no keyslot verified it.
 
 func TestVerifyRecoveryKeyReportsAnUnreadableDevice(t *testing.T) {
 	// A path that is not a LUKS container at all: the failure is the device,
@@ -70,8 +50,7 @@ func TestVerifyRecoveryKeyReportsAnUnusableKeyslot(t *testing.T) {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 
-	// The container's ONLY keyslot is damaged, so nothing can be tried. That is
-	// not evidence about the key.
+	// The only keyslot is damaged, so nothing can be tried.
 	damaged := cloneKeyslot(metadata.Keyslots["0"])
 	damaged.KeySize = 1 << 20
 	metadata.Keyslots["0"] = damaged
@@ -136,8 +115,7 @@ func TestVerifyRecoveryKeyStillReportsAKeyThatDoesNotOpenTheVolume(t *testing.T)
 		t.Fatal("VerifyRecoveryKey accepted a key that does not open the volume")
 	}
 
-	// And the credential that DOES open it still verifies, or the above would
-	// pass against a function that always says no.
+	// The credential that opens it still verifies.
 	right := enclaveFrom(t, []byte(conformancePassphrase))
 	ok, err = verifyRecoveryKeyForTest(path, right)
 	if err != nil {
@@ -148,12 +126,7 @@ func TestVerifyRecoveryKeyStillReportsAKeyThatDoesNotOpenTheVolume(t *testing.T)
 	}
 }
 
-// TestGetMasterKeyDistinguishesFailureToTryFromFailureToVerify pins the
-// classification one level down, where VerifyRecoveryKey gets it from.
-//
-// A keyslot that could not be TRIED and a keyslot that was tried and did not
-// verify are different facts about a volume, and collapsing them is what made
-// every caller above wrong.
+// TestGetMasterKeyDistinguishesFailureToTryFromFailureToVerify.
 func TestGetMasterKeyDistinguishesFailureToTryFromFailureToVerify(t *testing.T) {
 	defer parallel(t)()
 
@@ -174,17 +147,11 @@ func TestGetMasterKeyDistinguishesFailureToTryFromFailureToVerify(t *testing.T) 
 		if !errors.Is(err, ErrWrongKey) {
 			t.Fatalf("a credential that reached the digest and failed it is not reported as such: %v", err)
 		}
-		// It must NOT claim the passphrase is wrong. Per #68 a digest mismatch
-		// cannot honestly say that: the same comparison fails for the correct
-		// credential over damaged key material. The explicit assertion is gone
-		// with ErrInvalidPassphrase itself (#70) -- the claim is no longer
-		// expressible, which is a stronger guarantee than a test for it.
+		// It must not claim the passphrase is wrong.
 	})
 
 	t.Run("could not be tried", func(t *testing.T) {
-		// Config and segments come along: the scan confines every keyslot area
-		// to keyslot space before reading it (#249), and the header it reads
-		// that from is part of the fixture.
+		// Config and segments too: the scan confines keyslot areas before reading.
 		damaged := &header.Metadata{
 			Keyslots: map[string]*header.Keyslot{"0": cloneKeyslot(metadata.Keyslots["0"])},
 			Digests:  metadata.Digests,
@@ -207,12 +174,7 @@ func TestGetMasterKeyDistinguishesFailureToTryFromFailureToVerify(t *testing.T) 
 	})
 
 	t.Run("a usable keyslot still opens the volume alongside an unusable one", func(t *testing.T) {
-		// The invented keyslot 7 is REGISTERED with the digest, exactly as
-		// AddKey does when it writes a real one. verifyMasterKey consults only
-		// the digests that name the keyslot being opened, so a slot the header
-		// never associated with a digest authenticates nothing -- and this
-		// fixture would then be measuring that omission rather than the
-		// scan-past-a-damaged-slot property it exists for.
+		// Keyslot 7 is registered with the digest, as AddKey does.
 		digests := cloneDigests(metadata.Digests)
 		for _, d := range digests {
 			d.Keyslots = append(d.Keyslots, "7")

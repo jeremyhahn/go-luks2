@@ -15,25 +15,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// Foreign-geometry tests.
-//
-// This branch taught the reader to accept containers whose metadata area is
-// larger than the 16 KiB this library formats with. Two places still assumed
-// the default geometry as a constant, which is the same mistake as the
-// hardcoded 0x4000 secondary header offset, and both only misbehave on exactly
-// the containers the new support was for:
-//
-//   - ReadSecondaryHeader fell back to 0x4000 when the primary was unreadable,
-//     so recovery -- the only reason that API exists -- was impossible for a
-//     container with a larger metadata area.
-//   - AddKey placed new keyslots from a hardcoded 0x8000 and bounded them only
-//     against the data segment, never against config.keyslots_size, so on a
-//     container whose data offset sits past its keyslots area a keyslot could
-//     be written into the gap between the two.
-//
-// The fixtures are written by cryptsetup rather than constructed here, for the
-// same reason the conformance suite exists: a container this package builds
-// agrees with this package's assumptions by construction.
+// Foreign-geometry tests on cryptsetup-written containers with metadata areas larger than 16 KiB.
 
 // foreignGeometry describes a cryptsetup-formatted fixture.
 type foreignGeometry struct {
@@ -93,15 +75,7 @@ func newForeignContainer(t *testing.T, name string, geo foreignGeometry) string 
 	return path
 }
 
-// TestForeignGeometry_RecoverSecondaryHeaderWithoutThePrimary is the regression
-// test for the 0x4000 fallback.
-//
-// The container has a 32 KiB metadata area -- cryptsetup's
-// --luks2-metadata-size is the size of ONE copy -- so its second header copy is
-// at 0x8000 and nothing at 0x4000 is a header at all. With the primary destroyed
-// there is no way to be told the area size, which is exactly the situation the
-// second copy exists for: the offset has to be found, and the old fallback
-// looked in one place and gave up.
+// TestForeignGeometry_RecoverSecondaryHeaderWithoutThePrimary: a 32 KiB-metadata container's secondary at 0x8000 is found by probing.
 func TestForeignGeometry_RecoverSecondaryHeaderWithoutThePrimary(t *testing.T) {
 	defer parallel(t)()
 
@@ -155,12 +129,7 @@ func TestForeignGeometry_RecoverSecondaryHeaderWithoutThePrimary(t *testing.T) {
 	mustDestroy(t, key)
 }
 
-// TestForeignGeometry_ProbeRejectsEveryWrongOffset is the control on the probe.
-//
-// Searching a set of offsets is only safe if a candidate that is not really a
-// header is refused. With every header copy destroyed, the probe must report
-// failure rather than accepting whatever happens to sit at one of the nine
-// legal offsets.
+// TestForeignGeometry_ProbeRejectsEveryWrongOffset: with every copy destroyed the probe fails.
 func TestForeignGeometry_ProbeRejectsEveryWrongOffset(t *testing.T) {
 	defer parallel(t)()
 
@@ -225,19 +194,7 @@ func TestLegalHeaderAreaSizes(t *testing.T) {
 	}
 }
 
-// TestForeignGeometry_AddKeyStaysInsideTheDeclaredKeyslotsArea is the
-// regression test for the unbounded keyslot placement.
-//
-// The fixture is deliberately shaped so the two boundaries disagree: a 1 MiB
-// keyslots area starting at 0x10000 ends at 1114112, while the data segment is
-// pushed out to 4 MiB. Everything between is space the container has not
-// reserved for keyslots. Bounding only against the data segment -- which is all
-// AddKey used to do -- lets keyslots be placed there.
-//
-// MEASURED for this geometry: a keyslot area costs 258048 bytes, so slots land
-// at 65536, 323584, 581632 and 839680; the fifth would start at 1097728 and end
-// at 1355776, past the 1114112 the container declares and far short of the
-// 4194304 where the data begins.
+// TestForeignGeometry_AddKeyStaysInsideTheDeclaredKeyslotsArea: keyslots stay inside config.keyslots_size even when data starts later.
 func TestForeignGeometry_AddKeyStaysInsideTheDeclaredKeyslotsArea(t *testing.T) {
 	defer parallel(t)()
 

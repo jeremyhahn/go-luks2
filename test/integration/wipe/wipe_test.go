@@ -167,7 +167,7 @@ func TestWipeKeyslot(t *testing.T) {
 	formatTmp(t, tmpfile, 50*1024*1024)
 
 	// See wipe_integration_test.go (now moved): WipeKeyslot must refuse to
-	// destroy a volume's only keyslot (#37, #71), the same last-keyslot
+	// destroy a volume's only keyslot, the same last-keyslot
 	// guard KillKeyslot already has.
 	if err := harness.WipeKeyslot(tmpfile, 0); err == nil {
 		t.Fatal("WipeKeyslot destroyed the only keyslot that can open this volume, and reported success")
@@ -264,8 +264,7 @@ func TestWipeWithTrimOnBlockDevice(t *testing.T) {
 		t.Fatalf("Format failed: %v", err)
 	}
 
-	// TRIM might fail on loop device (depends on backing store) but the
-	// wipe passes themselves must still succeed.
+	// TRIM may fail on a loop device; the wipe passes must still succeed.
 	if err := wipe.Sanitize(context.Background(), loopDev, wipe.Params{Patterns: patternsOf(1, false), Discard: true}); err != nil {
 		t.Fatalf("Sanitize with discard failed: %v", err)
 	}
