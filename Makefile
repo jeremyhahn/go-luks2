@@ -17,100 +17,40 @@ COVERAGE_HTML=coverage.html
 # the integration suite's test dependencies.
 CLI_IMAGE ?= go-luks2-cli
 
-# ---- the coverage gate (#141) ----
-#
-# COVERAGE_THRESHOLD is the bar testing-guidelines.md sets for EVERY package
-# (project-scaffold.md 6). COVERAGE_FLOORS holds one floor per package per
-# tier, and test/tools/covergate compares each package against its own floor in
-# integer arithmetic -- never the aggregate, and never a rounded percentage.
-# The gate also refuses a floors file that leaves a package unmeasured, names
-# one that no longer exists, or holds a package to the target in no tier, so a
-# floor cannot be lowered past the target without the gate saying so.
+# Coverage gate: test/tools/covergate checks each package against its own floor in COVERAGE_FLOORS.
 COVERAGE_THRESHOLD=90
 COVERAGE_FLOORS=coverage-floors.txt
 COVERAGE_GATE=$(GO) run ./test/tools/covergate -floors $(COVERAGE_FLOORS) -target $(COVERAGE_THRESHOLD)
 
-# The unit tier's profiles, one per leg of test-unit. They are handed to the
-# gate SEPARATELY rather than concatenated first: a leg that wrote no profile
-# is an unreadable input and fails the gate, where the old `grep ... || true`
-# merge dropped it and the total went UP. coverage.out is the merged copy kept
-# for the HTML report and the CI artifact; nothing gates on it.
+# Unit-tier profiles, one per test-unit leg, gated separately; coverage.out is only for the report.
 COVERAGE_LEG_PKG=coverage-pkg.out
 COVERAGE_LEG_REST=coverage-rest.out
 COVERAGE_UNIT_LEGS=$(COVERAGE_LEG_PKG) $(COVERAGE_LEG_REST)
 
-# The combined tier, measured INSIDE the devcontainer (coverage-combined). The
-# packages listed here have statements that only a real kernel executes --
-# loop devices, device-mapper, mount(2), mkfs on a mapped device, dmsetup and
-# losetup -- so their floor of record is the union of their unit profile and
-# the integration suite's, which instruments them through -coverpkg.
+# Combined tier, measured inside the devcontainer: unit plus integration profiles for kernel-only code.
 COVERAGE_COMBINED_PKGS=./pkg/luks2 ./pkg/dmcrypt ./pkg/loop ./pkg/filesystem ./test/internal/harness ./internal/dm ./internal/keyring
 COVERAGE_COMBINED_COVERPKG=./pkg/luks2,./pkg/dmcrypt,./pkg/loop,./pkg/filesystem,./test/internal/harness,./internal/dm,./internal/keyring
 COVERAGE_COMBINED_UNIT=coverage-combined-unit.out
 COVERAGE_INTEGRATION=coverage-integration.out
 
-# ---- the unit-suite runtime budget (#92) ----
-#
-# Two numbers, and ci.yml reads both through `make test-unit` rather than
-# restating them, so the workflow and a developer's run cannot drift apart:
-#
-#   UNIT_TEST_TIMEOUT  the CEILING: `go test -timeout`. A hang guard with
-#                      headroom, and the only one of the two that fails a run.
-#                      It used to be 300s, and a loaded runner killed healthy
-#                      runs at exactly 5m0s (owner ruling on #92, 2026-09-28).
-#   UNIT_TEST_TARGET   the BUDGET, in seconds, for `go test -race ./pkg/luks2`
-#                      on the CI runner (p95 <= 240s). test-unit prints the
-#                      measured time against it on every run, so drift is
-#                      visible long before the ceiling is.
+# UNIT_TEST_TIMEOUT is the go test ceiling; UNIT_TEST_TARGET is the reported budget for ./pkg/luks2 under -race.
 UNIT_TEST_TIMEOUT ?= 10m
 UNIT_TEST_TARGET ?= 240
 # Extra `go test` flags for the unit legs; CI passes -v.
 UNIT_TEST_FLAGS ?=
-# The race detector for the unit legs (#341). `-race` by default, which is the
-# full tier's Race job and the run UNIT_TEST_TARGET budgets; test-unit-norace
-# empties it for the PR tier's unit legs in CI's image job. Same legs, same
-# profiles, same coverage gate -- only the instrumentation differs.
+# Race detector for the unit legs; test-unit-norace empties it.
 UNIT_TEST_RACE ?= -race
 UNIT_TEST_MODE = $(if $(strip $(UNIT_TEST_RACE)),under -race,without -race)
 
-# Simple expansion (:=), not recursive (=), and that is load-bearing (#205).
-# GNU make 4.4 exports environment-origin variables into $(shell ...). GOPATH is
-# in the environment on the build workers, so a recursive GO had to expand the
-# redefined GOPATH first, whose own $(GO) was still empty there: the command
-# became `env GOPATH`, and env printed "can't execute 'GOPATH'" to stderr on
-# every make invocation. Harmless to the build, but it landed as the first line
-# of every failing verification's output and got diagnosed as the failure twice.
-# Evaluating both once, in order, keeps the `which` fallback that `sudo make`
-# relies on while leaving nothing for a later GOPATH expansion to re-enter.
-# GOPATH is asked only of a go that exists: a CI job container that only hands
-# a target to the toolchain image has none, and make printed "No such file or
-# directory" for the fallback on every such step.
+# Simple expansion keeps GOPATH from re-expanding an empty GO; GOPATH is asked only of a go that exists.
 GO := $(shell which go 2>/dev/null || echo /usr/local/go/bin/go)
 GOPATH := $(if $(wildcard $(GO)),$(shell $(GO) env GOPATH))
 GOBIN=$(GOPATH)/bin
-# GO_BUILD_TAGS (devcontainer.md §6): the space-separated build tags lint and
-# gosec analyse with; ci.yml sets it once and assert-build-tags proves each one
-# selects code. vet already covers both sides of the `integration` tag. build,
-# the unit run and its coverage never take it: `integration` swaps in the
-# integration seams and pulls in the integration suites, and integration-test
-# builds its image with the tag regardless.
+# Build tags lint and gosec analyse with; build and unit tests never take integration.
 GO_BUILD_TAGS ?=
 comma := ,
 space := $(subst ,, )
-# Version stamped into the binary, read from the VERSION file.
-#
-# Named BUILD_VERSION, not VERSION, and that is not cosmetic (#19). The release
-# targets take the version as `make release-candidate VERSION=vX.Y.Z-rc.N` or
-# `make release VERSION=vX.Y.Z` and refuse to guess; `make release-alpha` derives
-# it when VERSION is omitted and accepts `VERSION=vX.Y.Z-alpha` as an override.
-# A make variable also called VERSION SHADOWS that argument: measured on
-# adoption, `make release-alpha` with no argument sailed past the "state the
-# version explicitly" guard — REL_VERSION was never empty, it held this line's
-# text — and died one guard later on a grammar error naming
-# `$(shell cat VERSION ...)`. The guard written to give the clearest message
-# was unreachable, which is the failure mode a fail-closed recipe is supposed
-# not to have. Renaming the build variable frees the argument name, and it is
-# what lets release-alpha tell "VERSION omitted" from "VERSION set" at all.
+# Version stamped into the binary; named BUILD_VERSION so it does not shadow the VERSION= argument of the release targets.
 BUILD_VERSION=$(shell cat VERSION 2>/dev/null | tr -d 'v' || echo "dev")
 LDFLAGS=-ldflags "-X main.version=$(BUILD_VERSION)"
 
@@ -167,20 +107,7 @@ build-linux: ## Build the CLI for linux/amd64 and linux/arm64 (luks-linux-<arch>
 	done
 	@echo "$(COLOR_GREEN)✓ luks-linux-amd64 and luks-linux-arm64 built$(COLOR_RESET)"
 
-# 32-BIT TARGETS, COMPILE ONLY. Every other build here is 64-bit, so nothing
-# compiled for a platform where `int` is 32 bits -- and a guard added in #112
-# to bound a uint32 conversion did not build on 386 or arm, while building fine
-# on amd64. The PACKAGES are what matter, not just the CLI: the defect was in
-# pkg/luks2.
-#
-# `go vet`, NOT `go build`, and that distinction is the target. go build does
-# not compile TEST files, so the first version of this check was structurally
-# unable to see the next four defects of the class, all in tests. vet
-# type-checks them without running them; the suite cannot run on a foreign
-# architecture anyway, and running it under emulation would test qemu as much
-# as the code. vet reports ONE error per package, so fixing a site reveals the
-# next: re-run after each fix rather than assuming the first message is the
-# whole list.
+# Compile-only 32-bit check: go vet type-checks packages and tests for 386 and arm.
 VET_32BIT_ARCHES := 386 arm
 
 vet-32bit: ## go vet every package for linux/386 and linux/arm (32-bit int; compiles the tests)
@@ -195,51 +122,13 @@ install: ## Install the CLI binary to $GOPATH/bin
 	@$(GO) install $(LDFLAGS) ./$(CMD_DIR)
 	@echo "$(COLOR_GREEN)✓ Installed to $(GOBIN)/$(BINARY_NAME) (v$(BUILD_VERSION))$(COLOR_RESET)"
 
-# WHICH `|| true` IS A DEFECT, AND WHICH IS NOT (#97).
-#
-# `|| true` is not the defect by itself. The defect is `|| true` on a command
-# WHOSE FAILURE IS THE SIGNAL YOU CAME FOR. Apply it per site rather than
-# sweeping, because a sweep produces a rule nobody can apply to the next case:
-#
-#   go test          the failure IS the result           -> never suppress
-#   a repo guard     the failure IS the result           -> never suppress
-#   grep on an       exit 1 means "no lines matched",
-#   optional file    which is not an error               -> suppressing is fine
-#   docker rm -f     removing something already absent
-#   of a container   is the goal state, not a failure    -> suppressing is fine
-#
-# So `|| true` survives deliberately below on the docker container teardown, and
-# it is gone from every `go test`. It is gone from the coverage-profile merges
-# too, which this table once listed as safe: a missing profile there is not "no
-# lines matched", it is a package whose coverage nobody measured, and dropping
-# it made the reported total go UP (#141). If you
-# are adding one, the question is not "is this noisy" but "would I want to know
-# if this failed".
-#
-# The `2>&1 | grep -v "no test files" || true` this used to end in made the
-# target INCAPABLE OF FAILING, twice over: in a pipeline the exit status is
-# grep's, so go test's failure was already lost, and `|| true` then discarded
-# whatever was left. `make check` depends on this target, so a red suite
-# reported green. The filter was also filtering nothing — every package `./...`
-# returns under the default tag set has test files.
+# Never suppress a failure that is the result (go test, guards); || true is only for absent-is-fine cases like docker rm -f.
 test: ## Run unit tests only (no I/O, no root required)
 	@echo "$(COLOR_BOLD)Running unit tests only...$(COLOR_RESET)"
 	@$(GO) test -v ./...
 	@echo "$(COLOR_GREEN)✓ Unit tests complete$(COLOR_RESET)"
 
-# THE UNIT TIER, raced, in two legs: ./pkg/luks2 on its own, because its
-# runtime is the one #92 budgets and it is timed here, then every other package
-# `go list ./...` reports -- so a package added later is raced and measured
-# without anyone remembering to list it (#34). What this covers is the DEFAULT
-# tag set only; integration-tagged code runs in the devcontainer, without -race,
-# and the reasoning is recorded at the race legs in .github/workflows/ci.yml (the Race job).
-#
-# -count=1, because a cached result would report a runtime of zero against the
-# budget and a profile from some earlier tree.
-#
-# Raced by default; UNIT_TEST_RACE= (test-unit-norace) runs the same two legs
-# uninstrumented. CI's PR tier runs that, and its full tier runs this one
-# raced, against UNIT_TEST_TARGET (#341).
+# Unit tier, raced, in two legs: ./pkg/luks2 timed alone, then every other package; -count=1 so nothing is cached.
 test-unit: ## Run only unit tests with coverage and the race detector (fast, no I/O, no root required)
 	@echo "$(COLOR_BOLD)Running unit tests with coverage $(UNIT_TEST_MODE)...$(COLOR_RESET)"
 	@rm -f $(COVERAGE_UNIT_LEGS) $(COVERAGE_FILE)
@@ -269,47 +158,15 @@ test-unit: ## Run only unit tests with coverage and the race detector (fast, no 
 	@echo "$(COLOR_BOLD)Coverage from unit tests (gated per package by coverage-gate):$(COLOR_RESET)"
 	@$(GO) tool cover -func=$(COVERAGE_FILE) | tail -1
 
-# The PR tier's unit run (#341): test-unit's legs, profiles and coverage report,
-# without the race detector. Not a second command line -- the knob above is the
-# only difference, so the two cannot drift. The race run is the full tier's.
+# The PR tier's unit run: test-unit without the race detector.
 test-unit-norace: ## Run the unit tests with coverage but without -race (CI's PR tier)
 	@$(MAKE) --no-print-directory test-unit UNIT_TEST_RACE=
 
-# The public-releasability gate (#211) over THIS checkout's git index: no fleet
-# address, hostname or owner path in a tracked file, and no tracked file the
-# public release must not carry. It is a command rather than a test because it
-# needs the git index, and the package tests also run where there is none --
-# the integration image excludes .git/ and runs `go test ./...`. Without a
-# checkout it fails; it never reports a tree it could not list as clean.
+# Releasability gate over the git index: no internal address, hostname or owner path in a tracked file.
 releasability: ## Run the public-releasability gate over the tracked tree (needs a git checkout)
 	@$(GO) run ./test/tools/releasability-gate .
 
-# The PBKDF2 calibration tests, deliberately WITHOUT -race.
-#
-# This is not a duplicate of test-unit and must not be folded into it. The
-# defect these tests exist for (#52) is INVISIBLE under -race, and that is
-# measured, not assumed: the old implementation gated its extrapolation on
-# `elapsed.Milliseconds() > 0`, and race instrumentation slows the probe past
-# 1ms, so the gate passes, the extrapolation runs, and the broken code returns a
-# plausible, correctly-scaling iteration count. In an ordinary build the same
-# code returns a hardcoded 100000 -- 25-100x under the requested work factor --
-# on every pbkdf2 volume it formats.
-#
-# CI runs ./pkg/luks2 under -race only, which is how a critical weakening of
-# every pbkdf2 keyslot survived five merges and three releases of green suites.
-# The uninstrumented build is the one that ships; something has to run these
-# assertions in it.
-#
-# No `|| true`: a calibration failure must fail the build. That used to be a
-# distinction from test-unit; #86 removed the swallow there, so it is now simply
-# the house rule rather than an exception to one.
-#
-# The real-time checks live here too (#233). The calibration arithmetic, the
-# waits and their bounds are unit-tested on injected rates and clocks, which no
-# host load can move; what only the real machine can answer -- that a real
-# calibration costs about its budget, that the system clock is the time
-# package's -- is in BENCHMARKS, which the ordinary unit suite never runs.
-# This target runs each once, and a failure fails the build.
+# PBKDF2 calibration tests without -race: the uninstrumented build ships, and -race hides calibration defects.
 CALIBRATION_TESTS := TestBenchmarkPBKDF2|TestCalibratePBKDF2|TestPBKDF2IterationFloor|TestScalePBKDF2Iterations|TestCreateKDFPBKDF2|TestDigestCalibration
 CALIBRATION_BENCHMARKS := BenchmarkDigestCalibrationCostsItsBudget|BenchmarkPBKDF2CalibrationCostsItsBudget
 
@@ -319,11 +176,7 @@ test-calibration: ## Run the PBKDF2 calibration tests without -race (the mode th
 	@$(GO) test -count=1 -timeout 10m -run '$(CALIBRATION_TESTS)' ./internal/kdf
 	@echo "$(COLOR_GREEN)✓ Calibration tests passed$(COLOR_RESET)"
 
-# The FIPS 140-3 gate, CI's fips job (full tier), run in the toolchain image.
-# GOFIPS140=latest builds against the Go Cryptographic Module and
-# GODEBUG=fips140=only makes every non-approved algorithm fail at its call, so
-# a path that reaches one cannot pass by accident. The named imports run
-# verbosely first, then the whole module under the same mode.
+# FIPS 140-3 gate: GOFIPS140=latest and GODEBUG=fips140=only make any non-approved algorithm fail at its call.
 test-fips-mode: export GOFIPS140 := latest
 test-fips-mode: export GODEBUG := fips140=only
 test-fips-mode: ## Build and test the module in FIPS 140-3 only mode (GOFIPS140=latest, GODEBUG=fips140=only)
@@ -331,13 +184,7 @@ test-fips-mode: ## Build and test the module in FIPS 140-3 only mode (GOFIPS140=
 	go test -count=1 -timeout=900s -v -run '^TestFIPSImportOf(ACryptsetupArgon2idVolume|ACryptsetupVolumeWithShortSalts|ACryptsetupVolumeWithAnUnboundKey|SHA1AFVolumes)$$' ./pkg/luks2
 	go test -count=1 -timeout=900s ./...
 
-# assert-build-tags: the declared GO_BUILD_TAGS must select code (ci-template
-# v1.9.2, a make recipe here because this repository ships no shell scripts).
-# A misspelled tag is invisible: the analysers all run, report clean, and skip
-# the code the tag was meant to reach. It compares FILES, test files included,
-# because a tag very often adds a file to a package that already exists. Each
-# tag is then checked by REMOVAL: dropping it must CHANGE the selected set,
-# since the `//go:build !integration` stubs pair with the tagged bodies.
+# assert-build-tags: each declared GO_BUILD_TAGS tag must change the selected file set, test files included.
 BUILD_TAG_FILES = {{$$p := .ImportPath}}{{range .GoFiles}}{{$$p}}/{{.}}{{"\n"}}{{end}}{{range .CgoFiles}}{{$$p}}/{{.}}{{"\n"}}{{end}}{{range .TestGoFiles}}{{$$p}}/{{.}}{{"\n"}}{{end}}{{range .XTestGoFiles}}{{$$p}}/{{.}}{{"\n"}}{{end}}
 
 assert-build-tags: ## Fail when a GO_BUILD_TAGS tag selects no code
@@ -389,43 +236,7 @@ test-coverage: ## Run tests with coverage report
 	@$(GO) tool cover -func=$(COVERAGE_FILE)
 	@echo "$(COLOR_GREEN)✓ Coverage report: $(COVERAGE_HTML)$(COLOR_RESET)"
 
-# ---- per-invocation docker names (#105) ----
-#
-# Docker names and image tags are unique PER HOST, not per invocation. Two
-# concurrent `make integration-test` runs -- or one alongside a CI job, which
-# shares the same daemon -- used the constant name `go-luks2-test-runner` and
-# the constant tag `go-luks2-integration-test`, and collided two ways:
-#
-#   `docker rm -f` sends SIGKILL, so the second invocation's pre-run cleanup
-#   killed the first one's RUNNING container mid-suite, exit 137. Reproduced
-#   deterministically on one host with the old sequence: job A exit=137, job B
-#   exit=0. The killed container took every loop device and device-mapper
-#   mapping it held with it, because SIGKILL cannot be caught.
-#
-#   A shared image TAG is resolved at `docker run` time, so the second
-#   invocation's build moved the tag between the first's build and its run --
-#   and the first tested the second's tree. Measured. That failure is GREEN.
-#
-# ITEST_ID is computed ONCE (`?=` then flattened with `:=`) and exported, so
-# every target in one invocation, including recursive `$(MAKE)` calls, agrees
-# on the name while two invocations never do.
-#
-# The two derived names use the SAME shape, and that is the point (#146). They
-# were `:=`, which OVERRIDES the environment instead of deferring to it. CI
-# sets ITEST_IMAGE and ITEST_CONTAINER as job-level env and its `if: always()`
-# cleanup removes exactly those two names; the moment a CI step calls a `make`
-# integration target -- a change that looks safe -- make would ignore the job's
-# values, build and run under names of its own, and the cleanup would delete
-# names that were never created. Both halves succeed, nothing fails, and the
-# real container keeps running on the host. That is #105's defect in a new
-# place: cleanup keyed on a name that does not match the thing that exists.
-#
-# The *_ORIGIN captures must come BEFORE the assignments. The flattening `:=`
-# rewrites a variable's origin to "file", which destroys the only answer to
-# "did anyone outside this make name this image?" -- see ITEST_BUILD_IS_GOAL.
-# IT_IMAGE is devcontainer.md §6's name for the integration image, the one
-# ci.yml passes; ITEST_IMAGE stays this Makefile's own. The alias is set before
-# the origin capture, so an image named either way counts as named outside.
+# Per-invocation docker names: ITEST_ID is computed once and exported; ITEST_IMAGE and ITEST_CONTAINER defer to the environment so CI cleanup matches.
 ifneq ($(IT_IMAGE),)
 ITEST_IMAGE := $(IT_IMAGE)
 endif
@@ -441,54 +252,15 @@ ITEST_CONTAINER ?= go-luks2-test-runner-$(ITEST_ID)
 ITEST_CONTAINER := $(ITEST_CONTAINER)
 export ITEST_CONTAINER
 
-# ---- bounding what the per-invocation tags leave behind (#146) ----
-#
-# Every image this repository builds for the integration suite carries this
-# label. The label is the only handle that survives a kill -9: a trap runs on
-# INT and TERM, SIGKILL cannot be caught, and an image orphaned that way is
-# otherwise indistinguishable from any other image on the host.
+# Every integration image carries this label so the reaper can find orphans a SIGKILL left.
 ITEST_LABEL := go-luks2-itest=1
 
-# The reap is scoped three ways and every one of them is load-bearing:
-#
-#   --filter label=   only images this repository built.
-#   --all             our tags are unique per invocation, so an orphan is never
-#                     dangling; without --all, prune skips every one of them.
-#   --filter until=   an age floor. prune already skips an image that any
-#                     container references, which covers a run whose suite is
-#                     executing, but NOT the seconds between another run's
-#                     `docker build` and its `docker run`. Deleting an image in
-#                     that window fails that run with "Unable to find image
-#                     locally", which is #105's race wearing a new hat. An
-#                     hours-wide floor cannot land inside a seconds-wide
-#                     window, and a labelled image built two hours ago that no
-#                     container references is not a live run.
+# Reap only this repository's labelled images (--all), and only those older than ITEST_PRUNE_AGE so a live build-to-run window is never hit.
 ITEST_PRUNE_AGE ?= 2h
 ITEST_PRUNE := docker image prune --force --all \
   --filter label=$(ITEST_LABEL) --filter until=$(ITEST_PRUNE_AGE)
 
-# `make docker-build-integration` with nothing after it builds an image NOTHING
-# can consume: the next invocation computes a different ITEST_ID, so the tag it
-# looks for is not this one. Before #105 the tag was constant and a rebuild
-# replaced its predecessor, bounding the cost at one image; unique tags turned
-# every standalone build into hundreds of MB kept forever. So a standalone
-# build removes what it built. The BuildKit layer cache -- the only reason to
-# pre-build at all -- is stored separately and survives that removal.
-#
-# "Standalone" is two conditions, and the second is the escape hatch: you name
-# it, you own it.
-#
-#   MAKELEVEL 0     no consuming target delegated here. Their
-#                   `$(MAKE) docker-build-integration` runs at level 1 and must
-#                   leave the image for the run on the following line.
-#   both undefined  make invented both names, so nothing outside this
-#                   invocation can even spell them. Set ITEST_ID or ITEST_IMAGE
-#                   in the environment and the image is yours: it is kept, and
-#                   the same value makes it findable again. It still carries the
-#                   label -- everything built here does, or the reaper would
-#                   have holes exactly where the orphans are -- so an image kept
-#                   this way and then left unused is collected once it passes
-#                   ITEST_PRUNE_AGE. Raise that if you need it for longer.
+# A standalone build (MAKELEVEL 0, ITEST_ID and ITEST_IMAGE unset) removes the image it built; set either to keep it.
 ITEST_NAMES_ARE_OURS := $(if $(filter-out undefined,$(ITEST_ID_ORIGIN) $(ITEST_IMAGE_ORIGIN)),,yes)
 ITEST_BUILD_IS_GOAL := $(if $(filter 0,$(MAKELEVEL)),$(ITEST_NAMES_ARE_OURS))
 
@@ -497,15 +269,7 @@ ITEST_BUILD_IS_GOAL := $(if $(filter 0,$(MAKELEVEL)),$(ITEST_NAMES_ARE_OURS))
 # runs the integration suite. There is no other CI image.
 DEVCONTAINER_DOCKERFILE := build/docker/devcontainer/Dockerfile
 
-# Stages the private-module credentials for an image build into "$$stage", a
-# mktemp file the calling recipe hands to `docker build --secret`. One logical
-# shell line (make joins the continuations), so it shares the recipe's shell
-# and its EXIT trap; see docker-build-integration for why it is shaped so.
-#
-# MODULE_ENV_FILE names a credentials file the caller already wrote -- CI does,
-# as KEY=value lines outside the checkout (ci.yml's image and integration
-# jobs). It is used as it is and left for its writer to remove; a name that is
-# not a file fails the build rather than quietly building without credentials.
+# Stages private-module credentials into "$$stage" for docker build --secret; MODULE_ENV_FILE names a caller-written file used as is.
 MODULE_ENV_FILE ?=
 GOMODAUTH_STAGE = umask 077; \
 	if [ -n "$(MODULE_ENV_FILE)" ]; then \
@@ -531,21 +295,7 @@ GOMODAUTH_STAGE = umask 077; \
 		fi; \
 	fi
 
-# $(call CONTENT_IMAGE_BUILD,<tag>,<docker build arguments>,<content tag pattern>)
-# builds the current directory as <tag>, tolerating one failure: a concurrent
-# build of the same content tag. Jobs on one daemon can build one content tag
-# at once; each starts while the tag is not there, and BuildKit refuses the
-# slower export because the tag "already exists". The tag is a hash of the
-# build's inputs, so the image the faster job left under it is the image this
-# build would have made. A failed build therefore passes only when <tag>
-# matches the shell case pattern <content tag pattern> (a tag known to be
-# content-addressed), the build's output refuses exactly that tag as already
-# existing, and the tag now resolves. Any other failure fails with the build's
-# own output and exit status. The output is streamed as the build runs.
-#
-# One logical shell line, like GOMODAUTH_STAGE, which it must follow: the EXIT
-# trap it sets replaces GOMODAUTH_STAGE's, so it removes the staged credentials
-# file too, unless MODULE_ENV_FILE named it (that file is its writer's).
+# $(call CONTENT_IMAGE_BUILD,<tag>,<args>,<pattern>): builds <tag>, passing only when a concurrent build already exported the same content tag.
 CONTENT_IMAGE_BUILD = imgtmp="$$(mktemp -d -t imagebuild.XXXXXX)"; \
 	[ -n "$(MODULE_ENV_FILE)" ] || trap 'rm -f "$$stage"; rm -rf "$$imgtmp"' EXIT INT TERM; \
 	[ -z "$(MODULE_ENV_FILE)" ] || trap 'rm -rf "$$imgtmp"' EXIT INT TERM; \
@@ -562,29 +312,7 @@ CONTENT_IMAGE_BUILD = imgtmp="$$(mktemp -d -t imagebuild.XXXXXX)"; \
 		[ "$$rc" -eq 0 ] || exit "$$rc"; \
 	fi
 
-# Builds the integration image -- the integration stage of the devcontainer
-# Dockerfile -- handing the private-module credentials over as a BuildKit
-# secret.
-#
-# go.mod pins github.com/jeremyhahn/go-enclave, whose module PATH says
-# github.com while it is served from a private module host, so a bare
-# `docker build` cannot resolve it: the container inherits none of this shell's
-# git configuration.
-#
-# The staging file is written to a mktemp path OUTSIDE the build context, mode
-# 0600, and removed on every exit path -- the Dockerfile ends with `COPY . .`,
-# so a credentials file inside the tree would be baked into a layer.
-#
-# With no credentials in the environment the file is left empty and the build
-# still runs: the Dockerfile's mount is optional, and modules then resolve from
-# whatever proxy this machine can reach. That is the same shape CI uses on
-# github.com. The four variables are git's standard GIT_CONFIG_* override set
-# plus GOPRIVATE; export them to build against a private module host.
-# GO_BUILD_PROXY, the build-time module proxy, reaches the Dockerfile as the
-# BuildKit secret `goproxy` and only when it is set; with none the build uses
-# the default GOPROXY, as on github.com. It is never a --build-arg: BuildKit
-# records a build arg's value in the image history, and a LAN proxy address
-# there fails ci.yml's image-history gate.
+# Builds the integration image with module credentials and GO_BUILD_PROXY as BuildKit secrets, staged outside the build context; never build args.
 GO_BUILD_PROXY_SECRET = $(if $(GO_BUILD_PROXY),--secret id=goproxy$(comma)env=GO_BUILD_PROXY)
 
 ITEST_BUILD_ARGS = --secret id=gomodauth$(comma)src="$$stage" \
@@ -619,56 +347,15 @@ docker-build-integration:
 		echo "$(COLOR_BOLD)The build cache is kept. Export ITEST_ID or ITEST_IMAGE to keep the image itself.$(COLOR_RESET)"; \
 	fi
 
-# The reaper on its own, for an operator who wants to run it directly. It is
-# also the first thing every integration build does, so on any host that builds
-# this suite at all, orphans are bounded whether or not anyone remembers this
-# target exists.
-#
-# Reaping by label is what covers the cases no trap can: a run killed with
-# SIGKILL, a runner that died with the job, and the window between a consuming
-# target's build line and the next line that arms its trap. That window cannot
-# be closed by moving the build into the trapped shell -- each recipe line is
-# its own shell, and folding `$(MAKE) docker-build-integration` in was measured
-# to break `make -n`, because make EXECUTES a recipe line containing $(MAKE)
-# under -n and the dry run then started containers (#146). The label needs no
-# window closed: it outlives the process that created the image.
+# The label reaper on its own; every integration build also runs it first.
 docker-prune-itest: ## Remove orphaned integration images (label-scoped, age-bounded)
 	@$(ITEST_PRUNE)
 
-# The label, for the one other place that builds this image: ci.yml. Both the
-# build that applies it and the prune that reaps by it have to spell it the
-# same way or the reaper silently matches nothing -- cleanup keyed on a name
-# that does not match the thing that exists, which is the defect this whole
-# section descends from. So the workflow reads it from here rather than
-# repeating the literal, the same reason the privilege flags live in
-# test/tools/docker-run and not in five call sites. Deliberately
-# undocumented in help: it is a seam for the workflow, not a target anyone runs.
+# The image label, read by ci.yml so build and prune spell it the same way.
 print-itest-label:
 	@echo $(ITEST_LABEL)
 
-# THE INTEGRATION STAGE (ci-standard.md): the devcontainer's integration stage
-# run as compose.yaml's `integration` service, here and in CI alike. The
-# service carries test/tools/docker-run's privilege set and nothing more; the
-# three values that set cannot spell statically are computed here:
-#
-#   GO_LUKS2_SECCOMP_PROFILE  the profile's absolute path. docker reads it on
-#                             the client side, so it is this checkout's file.
-#   GO_LUKS2_DM_MAJOR         device-mapper's major, from /proc/devices. It
-#                             differs between machines; with none found the
-#                             target fails rather than write an empty rule.
-#   GO_LUKS2_TEST_STATE_DIR   TEST_STATE_DIR, or its root-ledger subdirectory
-#                             when an ordinary user owns it -- the launcher's
-#                             rule, see TEST_STATE_DIR below.
-#
-# The compose project is named per invocation (IT_PROJECT; CI passes one under
-# the prefix ci-reap-stacks reaps). The container is kept until the coverage
-# profile is copied out, with the same pass/fail rule as
-# docker-integration-test: a container that passed without leaving a profile
-# fails. The trap removes the container and the project on every exit path,
-# and the image too unless it is the content-addressed one (make it-image),
-# which other runs of the tree reuse and ci-reap-stacks ages out.
-#
-# docker-integration-test, the launcher path, stays for the soak workflow.
+# Integration stage as compose.yaml's integration service, with the seccomp path, device-mapper major and state dir computed here; cleaned up on every exit.
 DEVCONTAINER_COMPOSE := build/docker/devcontainer/compose.yaml
 IT_PROJECT ?= go-luks2-it-$(ITEST_ID)
 PROC_DEVICES ?= /proc/devices
@@ -720,21 +407,7 @@ integration-test-cli: build docker-run-bin ## Run CLI integration tests in Docke
 	    $(INTEGRATION_DOCKER_RUN) --rm -- \
 		go test -v -tags=integration ./test/integration/cli/...
 
-# THE COVERAGE GATE (#141). project-scaffold.md 6: "The `coverage` target
-# enforces a hard threshold that fails the build, never a warning."
-#
-# It did not. COVERAGE_THRESHOLD was compared in exactly one target -- ci-full
-# -- that ci.yml never invokes, while the workflow step that looked like the
-# gate printed a number and exited 0; the merges ended in `|| true`, so a leg
-# with no profile made the total go UP; and the one comparison there was
-# truncated the percentage to an integer, so 89.9% passed a 90% bar.
-#
-# test/tools/covergate is the gate, and every caller reaches it through these
-# targets: ci.yml's unit job runs `make coverage-gate`, the devcontainer's
-# entrypoint runs `make coverage-combined`, so a developer's number is the
-# number that blocks the merge. It is a Go program with its own tests rather
-# than an awk pipeline, because a gate is only known to be a gate once it has
-# been seen to fail, and its tests are where that is seen.
+# Coverage gate: test/tools/covergate, reached through these targets by CI and the devcontainer alike.
 
 coverage-gate: ## Refuse unit coverage below any package's floor (reads test-unit's profiles)
 	@$(COVERAGE_GATE) -tier unit $(foreach leg,$(COVERAGE_UNIT_LEGS),-profile $(leg)) $$($(GO) list ./...)
@@ -743,32 +416,14 @@ coverage: test-unit ## Measure unit coverage, gate it per package, and write the
 	@$(MAKE) --no-print-directory coverage-gate
 	@$(MAKE) --no-print-directory coverage-report
 
-# coverage-report is coverage's own last two lines, split out so the report
-# can be regenerated from an already-gated $(COVERAGE_FILE) -- e.g. right
-# after `make coverage-gate` in CI -- without paying for `test-unit` again.
-# It never gates: coverage-gate already did, over the SEPARATE per-leg
-# profiles (#141); this only reads the merged copy test-unit leaves behind.
+# Regenerates the report from an already-gated $(COVERAGE_FILE); never gates.
 coverage-report: ## Print the func summary and write the HTML report from the already-gated profile
 	@test -s $(COVERAGE_FILE) || { echo "$(COLOR_RED)✗ $(COVERAGE_FILE) is missing or empty; run 'make coverage-gate' (or 'make coverage') first$(COLOR_RESET)"; exit 1; }
 	@$(GO) tool cover -html=$(COVERAGE_FILE) -o $(COVERAGE_HTML)
 	@$(GO) tool cover -func=$(COVERAGE_FILE) | tail -1
 	@echo "$(COLOR_GREEN)✓ Coverage report: $(COVERAGE_HTML)$(COLOR_RESET)"
 
-# The COMBINED tier: unit plus integration, for the packages whose remaining
-# statements need a real kernel. It runs INSIDE the devcontainer -- it is the
-# entrypoint's default command -- and never on a host (testing-guidelines.md).
-# `make integration-test` / `make ci-full` / ci.yml's integration job all reach
-# it through that entrypoint.
-#
-# Both suites are measured in the same container so the union is of two
-# profiles of the same tree. The integration leg instruments the combined
-# packages through -coverpkg, so each test/integration/<pkg> suite's calls
-# into the library count toward its package, and dm/keyring's ledger and
-# reaper use counts toward test/internal/harness -- whose own integration
-# tests drive the reaper's removals against the real kernel. -p 1 keeps the
-# integration packages from contending for loop devices at once. The unit
-# leg is not raced: -race is the Race job's business, and this leg is here
-# for its profile.
+# Combined tier, inside the devcontainer: unit plus integration profiles of the same tree, integration with -coverpkg and -p 1.
 coverage-combined: ## (devcontainer only) Run the integration suite and gate unit+integration coverage
 	@rm -f $(COVERAGE_INTEGRATION) $(COVERAGE_COMBINED_UNIT)
 	@echo "$(COLOR_BOLD)Integration suite, instrumenting $(COVERAGE_COMBINED_COVERPKG)...$(COLOR_RESET)"
@@ -823,44 +478,10 @@ docker-integration-test: docker-run-bin ## Run integration tests in Docker (isol
 	@echo "$(COLOR_GREEN)✓ Integration coverage report: coverage-integration.html$(COLOR_RESET)"
 	@echo "$(COLOR_GREEN)✓ Docker integration tests complete$(COLOR_RESET)"
 
-# TEST_STATE_DIR holds the run ledgers and is bind-mounted into the integration
-# container. It lives on the HOST on purpose: the suite writes host dm mappings
-# and loop devices, records each before creating it, and the next run removes
-# what was recorded (#96). A record kept inside the container dies with the run
-# whose state needs removing.
-#
-# Never clean this directory as a matter of routine. A ledger left behind means
-# a run died, and deleting it discards the only record of what that run put on
-# this machine.
-#
-# It is deliberately NOT created here. The reaper runs as root and acts on
-# whatever the ledgers name, so the directory is part of the trust boundary and
-# the harness refuses one owned by another user or writable by group or other.
-# Docker creates a missing bind-mount source as root:root, which is what the
-# harness accepts; `make host-integration-test` runs under sudo, so the harness
-# creates it as root itself.
-#
-# If the directory already exists and an ordinary user owns it -- because
-# something ran as that user first -- the launcher (test/integration/cmd/
-# docker-run) mounts its root-ledger subdirectory instead, which Docker creates
-# as root. The harness still refuses a ledger directory a non-root user owns.
+# TEST_STATE_DIR holds the run ledgers on the host; never clean it routinely, and it is not created here because it is part of the root reaper's trust boundary.
 TEST_STATE_DIR ?= /var/tmp/go-luks2-test-state
 
-# Every target that starts the integration container goes through this command,
-# and none of them spells out a privilege flag. There used to be four `docker
-# run --privileged` lines here and a fifth in the CI workflow; five copies of a
-# security-critical invocation is how one of them quietly grows a flag the
-# others do not have. The command carries the capabilities, the seccomp profile
-# and the device scoping, with the measurement behind each one written beside
-# it (#80), and a unit test pins the set flag by flag.
-#
-# It is Go rather than the shell script it replaces because the public release
-# ships no shell scripts (#211). It execs docker in place, so docker's exit
-# status and an interactive -it terminal reach the caller unchanged -- which
-# holds only because the targets run the BUILT binary. Under `go run` the go
-# tool stays as the parent process and reports any nonzero child status as 1,
-# so docker's 125/126/127 would be lost. test/tools/docker-run's
-# TestBinary_PropagatesDockersExitStatus pins this.
+# Every integration container starts through test/tools/docker-run, which holds the privilege set; the built binary keeps docker's exit status.
 DOCKER_RUN_BIN := $(BUILD_DIR)/docker-run
 INTEGRATION_DOCKER_RUN := $(DOCKER_RUN_BIN)
 
@@ -870,14 +491,7 @@ docker-run-bin: ## Build the integration container launcher (build/docker-run)
 	@mkdir -p $(BUILD_DIR)
 	@$(GO) build -o $(DOCKER_RUN_BIN) ./test/tools/docker-run
 
-# ---- the CLI image ----
-#
-# build/docker/cli is the production image: the luks2 binary and the
-# cryptsetup userspace tools it shells out to, nothing a developer or CI
-# needs (no go toolchain, no lint/scan tools). It is built and run exactly
-# like docker-build-integration/$(INTEGRATION_DOCKER_RUN) do, because the
-# library needs the same device-mapper and loop access either way; see
-# test/integration/cmd/docker-run for what that privilege set is and why.
+# build/docker/cli is the production image: the luks2 binary and the cryptsetup tools it calls.
 docker-build-cli: ## Build the CLI image from build/docker/cli
 	@echo "$(COLOR_BOLD)Building $(CLI_IMAGE)...$(COLOR_RESET)"
 	@set -eu; \
@@ -901,14 +515,7 @@ docker-build-cli: ## Build the CLI image from build/docker/cli
 docker-run: docker-build-cli docker-run-bin ## Run the CLI image, with the integration seccomp profile and device scoping (ARGS="..." passes CLI args)
 	@IMAGE=$(CLI_IMAGE) $(INTEGRATION_DOCKER_RUN) --rm -it -- $(ARGS)
 
-# ---- the per-package quartet ----
-#
-# PKG_<name> maps a short name to its import path, one entry per pkg/ and
-# internal/ package: every package `go list` finds there has a line, and a new
-# package adds its own. PKG_NAMES lists every key so test-%,
-# coverage-%, bench-% and integration-test-% below can resolve PKG_$* for
-# ANY name without a second edit anywhere else: adding a package is exactly
-# the two lines below, nothing in the pattern rules changes.
+# PKG_<name> maps a short name to its import path; adding a package adds one PKG_ line and its PKG_NAMES entry.
 PKG_af          := ./internal/af
 PKG_areacipher  := ./internal/areacipher
 PKG_cli         := ./internal/cli
@@ -937,10 +544,7 @@ test-%: ## Unit tests for one package by name, e.g. `make test-kdf` (see PKG_NAM
 	echo "$(COLOR_BOLD)Running unit tests for $$pkg ($*)...$(COLOR_RESET)"; \
 	$(GO) test -v -race -count=1 "$$pkg"
 
-# Named coverage-<name>.out rather than a shared file: running two of these
-# back to back must not clobber each other's profile, unlike test-unit's
-# fixed legs, which only ever run as a pair. `make clean` already removes
-# every *.out file.
+# Per-package profiles, so back-to-back runs do not clobber each other.
 coverage-%: ## Coverage for one package by name, e.g. `make coverage-kdf` (writes coverage-<name>.out)
 	@pkg="$(PKG_$*)"; test -n "$$pkg" || { echo "$(COLOR_RED)✗ no package mapped to '$*'; add PKG_$* to the Makefile$(COLOR_RESET)"; exit 1; }; \
 	echo "$(COLOR_BOLD)Running coverage for $$pkg ($*)...$(COLOR_RESET)"; \
@@ -952,25 +556,9 @@ bench-%: ## Benchmarks for one package by name, e.g. `make bench-kdf` (a package
 	echo "$(COLOR_BOLD)Running benchmarks for $$pkg ($*)...$(COLOR_RESET)"; \
 	$(GO) test -run='^$$' -bench=. -benchmem "$$pkg"
 
-# integration-test-% runs the per-package suite in test/integration/<name>/.
-# A name with no directory yet exits clean rather than claiming a pass for a suite that does not exist: a
-# silent no-op here is indistinguishable from "nothing to test" only if it
-# is the TRUTH, not an assumption. No ITEST_DIR_<name> overrides remain --
-# every mapped name's test directory now matches its own.
+# integration-test-% runs test/integration/<name>/; a name with no directory exits clean.
 
-# ITEST_BUILD_IMAGE holds the recursive call, so the pattern rule below can
-# reference it WITHOUT the literal text "$(MAKE)" appearing in its own
-# recipe. That literal text is what GNU make scans a recipe line for to mark
-# it "always run, even under -n" (the docker-prune-itest comment above
-# explains why that exception exists and the #146 container it once started
-# during a dry run). The whole point here is the OPPOSITE: the skip branch
-# below must stay inert under -n, and it shares a shell with the build/run
-# steps so an absent integration directory can `exit 0` before either of
-# them -- which only works if they are ONE recipe line. Indirecting through
-# this variable keeps that one line a plain command as far as the scan is
-# concerned, confirmed by a throwaway Makefile: a recipe referencing a
-# variable whose VALUE contains $(MAKE) is not force-run under -n; one that
-# spells $(MAKE) directly, is.
+# Indirect through a variable so make -n does not force-run this recipe line.
 ITEST_BUILD_IMAGE := $(MAKE) --no-print-directory docker-build-integration
 
 integration-test-%: docker-run-bin ## Integration tests for one package by name, in the devcontainer (see ITEST_DIR_<name>)
@@ -993,16 +581,7 @@ test-pkg: ## Unit tests for one package by import path (make test-pkg PKG=./inte
 	@echo "$(COLOR_BOLD)Running unit tests for $(PKG)...$(COLOR_RESET)"
 	@$(GO) test -v -race -count=1 $(PKG)
 
-# test/integration/seccomp.json is Docker's own default profile with one block
-# appended, and the value of that arrangement is entirely in being able to
-# prove it. This target fetches the upstream profile through the Go module
-# proxy -- so the checksum database vouches for it -- and prints the
-# difference, which should be the two _comment blocks and the three syscall
-# names and nothing else.
-#
-# The version is the one the LOCAL dockerd links, which the recipe reads out of
-# the binary rather than trusting this variable; a mismatch is reported, not
-# silently diffed against the wrong upstream.
+# Diffs test/integration/seccomp.json against Docker's default profile for the local dockerd version, fetched through the module proxy.
 SECCOMP_PROFILE := test/integration/seccomp.json
 SECCOMP_UPSTREAM := github.com/moby/profiles/seccomp
 SECCOMP_UPSTREAM_VERSION := v0.1.0
@@ -1030,13 +609,7 @@ seccomp-diff: ## Diff the integration seccomp profile against Docker's default
 	echo ""; \
 	diff -u "$$dir/default.json" $(SECCOMP_PROFILE) || true
 
-# No host lock. Every device-mapper name the suite creates carries the
-# container's scope and the process's run id (test/internal/harness VolumeName), so
-# concurrent runs cannot collide and nothing needs serializing (#178).
-#
-# The lock that used to live here was also inert in CI: the runner executes job
-# steps inside a container, so a flock on a job-local path is private per job,
-# while the loop pool and device-mapper namespace it protected are host-global.
+# No host lock: every device-mapper name carries the container scope and run id.
 
 
 docker-test-specific: docker-run-bin ## Run specific integration test in Docker (use TEST=TestName)
@@ -1067,14 +640,7 @@ host-integration-test: build ## Run integration tests on host (requires sudo, NO
 
 test-integration: integration-test ## Alias for integration-test
 
-# ---- the exported-API record ----
-#
-# test/tools/apidump/baseline holds the API as released in 0.5.0-alpha and the
-# redesign's disposition of every pkg/luks2 identifier. That the dispositions
-# cover the baseline exactly is a unit test of the tool, so test-unit gates
-# it. api-diff is the gate that every disposition is HONOURED: a KEEP
-# identifier is still there, and every RENAME/MOVE/UNEXPORT/DELETE identifier
-# is gone from the current API.
+# api-diff checks every disposition in test/tools/apidump/baseline is honoured by the current API.
 API_BASELINE=test/tools/apidump/baseline
 
 api-dump: ## Print the exported API of pkg/luks2 and cmd/luks2
@@ -1114,20 +680,11 @@ vet: ## Run go vet, including the integration build tag
 	@$(GO) vet -tags=integration ./...
 	@echo "$(COLOR_GREEN)✓ Vet passed$(COLOR_RESET)"
 
-# actionlint validates workflow syntax, expressions, shell steps and runner
-# labels before CI parses them (devops.md, the `make lint` row). It is
-# required, not skipped when absent: a lint that passes without running is the
-# vacuous gate the testing convention forbids. Self-hosted runner labels go in
-# .github/actionlint.yaml, read when the file exists; none of the workflows
-# uses one today. A finding is fixed in the workflow, never silenced here.
+# actionlint validates workflows and is required; self-hosted labels go in .github/actionlint.yaml.
 # ACTIONLINT_VERSION is in the tool-pin file (TOOL PINS, below).
 ACTIONLINT_CONFIG   = .github/actionlint.yaml
 
-# CUSTOMIZE (ci-template v1.21.1, which lints once with the tags): golangci-
-# lint runs twice when GO_BUILD_TAGS is set. The untagged pass runs every
-# linter, as main's lint always did; the tagged pass adds the tag set's files
-# and disables only `unused`, which reads the helpers the untagged unit tests
-# use as dead once they are out of the build. The untagged pass covers unused.
+# With GO_BUILD_TAGS set, golangci-lint runs untagged with every linter, then tagged without unused.
 LINT_TAGGED_PASS = $$LINTER run --output.text.print-issued-lines=false --build-tags=$(subst $(space),$(comma),$(strip $(GO_BUILD_TAGS))) --disable=unused ./... || exit 1;
 
 lint: export AL_CONFIG := $(ACTIONLINT_CONFIG)
@@ -1166,65 +723,15 @@ lint: ## Run gofmt, golangci-lint and actionlint over .github/workflows (all req
 	fi; \
 	echo "$(COLOR_GREEN)✓ actionlint passed$(COLOR_RESET)"
 
-# ---- the mandatory security-analysis suite ----
-#
-# `make security` IS the contract: CI runs this same target, so a finding here
-# is the finding that blocks a merge, and there is no second set of flags in a
-# workflow file that can drift away from this one. The suite is gosec,
-# govulncheck, `go mod verify` and `trivy fs`, all blocking.
-#
-# gosec deliberately runs with NO -exclude rules. The findings this repository
-# carries are suppressed at the exact line that produces them, each with a
-# written reason (`#nosec G115 - max 4095` on the dev_t masks in unlock.go,
-# `#nosec G204` on the fixed-argv blkid call in filesystem.go). A blanket
-# -exclude would hide the next occurrence of the same rule somewhere it is not
-# justified; a line annotation cannot.
-#
-# The tools are not installed by these targets: a make target must not mutate
-# the developer's machine. A missing gosec or govulncheck prints how to get it
-# and the target skips -- unless TOOLS_REQUIRED=1, which turns every skip into
-# a failure. A missing trivy always fails, with the same hint (#296): a local
-# trivy skip would read as a pass.
-# Where each tool gates (#247):
-#
-#   the whole target, trivy fs included scans.yml on main, on dispatch
-#                                       (ci-template v1.42, ruling 742 (1):
-#                                       no advisory scan gates a PR): `make
-#                                       security` in the toolchain image, which
-#                                       sets TOOLS_REQUIRED=1, built from the
-#                                       pin file ci.yml's lint job asserts;
-#                                       also every RELEASE
-#   trivy fs alone                      the NIGHTLY workflow, dispatch-only
-#
-# The release runs this whole target with TOOLS_REQUIRED=1, so a release never
-# publishes on a scan that skipped.
+# make security is the CI contract: gosec (line-level #nosec only), govulncheck, go mod verify and trivy fs; missing tools skip unless TOOLS_REQUIRED=1, and a missing trivy always fails.
+# scans.yml on main and every release run this target with TOOLS_REQUIRED=1; nightly runs trivy fs alone.
 TOOLS_REQUIRED ?= 0
 export TOOLS_REQUIRED
 
-# GOSEC_EXTRA appends flags for a one-off run, e.g. "-fmt=sarif -out=gosec.sarif"
-# for a local SARIF report; CI passes none (ci-template v1.21 uploads no SARIF).
+# GOSEC_EXTRA appends flags for a one-off run, e.g. a local SARIF report.
 GOSEC_EXTRA ?=
 
-# THE WORKER-POOL BOUND, and why it is not noise (#22).
-#
-# gosec sizes its worker pool from runtime.NumCPU(). It ignores GOMAXPROCS and
-# it ignores cgroup CPU limits, so inside a container capped at a fraction of
-# the machine it still spawns one worker per HOST core and grows the heap until
-# the cgroup kills it.
-#
-# An OOM kill exits 137, and a non-zero exit from gosec READS AS A SECURITY
-# FINDING. Unbounded, a memory failure therefore presents as the security gate
-# failing, and the next person spends their afternoon auditing code that was
-# never the problem. That misreading — not the memory itself — is what this
-# bound is defending against.
-#
-# The reason lives HERE, at the definition, because it previously lived only in
-# the commit message that added the flag, which is not a place anyone opens
-# while editing a Makefile. A constraint whose rationale is invisible reads as
-# noise, and noise gets tidied away: removal of this exact flag has been
-# proposed or staged three times across sibling repositories. Stating the
-# mechanism rather than "do not remove" is deliberate — a bare prohibition
-# invites someone to test it, and the mechanism is what survives.
+# Bound gosec's worker pool: it sizes from host cores, and an OOM kill would read as a security finding.
 GOSEC_CONCURRENCY ?= 4
 
 gosec: ## Run gosec security scanner
@@ -1246,22 +753,7 @@ gosec: ## Run gosec security scanner
 		echo "   them it self-reports 'dev' and its findings cannot be attributed — #21)"; \
 	fi
 
-# TOOL PINS, shared with .github/workflows/ci.yml, which asserts that the
-# binary it got self-reports these exact versions and refuses to scan otherwise
-# (#21). An unpinned scanner self-updates underneath you: a new rule fires on
-# code untouched for months, reddens whichever pull request runs next, accuses
-# innocent work, and leaves nobody able to reproduce the previous green.
-#
-# gosec is the reason the pin alone is not the fix. It reads its version string
-# from ldflags rather than from the module path, so `go install ...@v2.29.0`
-# still produces a binary that says `dev` — which is exactly what `make
-# security` used to print, and why its results could not be attributed to any
-# scanner version. The install hints below carry the -X flag for that reason.
-#
-# The pins live in ONE file that the devcontainer image reads too
-# (devcontainer.md §2), so the tools in the image are the tools named here and
-# a bump is one edit, one issue per bump. It carries every tool pin: the three
-# Go scanners, actionlint and trivy with its four SHA-256s.
+# Tool pins, shared with ci.yml and the devcontainer image; gosec needs -X to report its version.
 TOOL_PINS := build/docker/devcontainer/tool-pins.env
 include $(TOOL_PINS)
 
@@ -1279,25 +771,7 @@ govulncheck: ## Run govulncheck (known vulns in stdlib and the dependency call g
 
 vuln: govulncheck ## Alias for govulncheck (scaffold §4 contract names it `vuln`)
 
-# ---- trivy: a pinned release archive, verified before it is unpacked (#247) ----
-#
-# trivy is not in the runner image, so the nightly workflow and the release
-# install it with `make trivy-install`; the devcontainer's toolchain image runs
-# the same target at build time, which is the trivy CI's image job uses. That
-# replaced `curl .../contrib/install.sh
-# from main | sh`: an unreviewed script from a moving branch, run as the build
-# user, which then fetched whatever trivy was newest.
-#
-# Four SHA-256s, raised together or not at all: the archive per architecture,
-# checked BEFORE anything is unpacked, and the binary inside it, checked after
-# unpacking and again before an installed copy is reused. The archive hashes
-# match upstream's trivy_0.75.0_checksums.txt; the binary hashes are go-enclave's
-# pins for the same release. Never a checksum file fetched next to the archive:
-# whoever can replace the archive can replace that file too.
-#
-# The binary lands in build/tools, inside the checkout, so the target does not
-# touch anything outside the repository. TRIVY_VERSION and the four hashes are
-# in the tool-pin file (TOOL PINS, above).
+# trivy: a pinned release archive, verified against the pinned SHA-256s before and after unpacking, installed under build/tools.
 TRIVY_DOWNLOAD_BASE          ?= https://github.com/aquasecurity/trivy/releases/download
 TOOLS_DIR                    ?= $(CURDIR)/$(BUILD_DIR)/tools
 TRIVY_BIN                     = $(TOOLS_DIR)/trivy-$(TRIVY_VERSION)/trivy
@@ -1333,10 +807,7 @@ trivy-install: ## Install the pinned trivy into build/tools, verified by SHA-256
 	install -m 0755 "$$tmp/trivy" "$$TI_DEST"; \
 	echo "$(COLOR_GREEN)✓ trivy $$TI_VERSION installed: $$TI_DEST$(COLOR_RESET)"
 
-# The pinned binary from trivy-install when it is there, else a trivy on PATH.
-# With neither, every trivy target FAILS with the install hint: a scan that
-# skips is a gate that cannot fail, and `make security` passing without trivy
-# would claim a scan that never ran (#296). TOOLS_REQUIRED does not soften it.
+# Pinned trivy, else one on PATH; with neither, trivy targets fail.
 TRIVY_RESOLVE = TRIVY=$$TI_DEST; [ -x "$$TRIVY" ] || TRIVY=$$(command -v trivy 2>/dev/null || true); \
 	if [ -z "$$TRIVY" ]; then \
 		echo "$(COLOR_RED)✗ trivy is not installed; nothing was scanned$(COLOR_RESET)"; \
@@ -1360,7 +831,7 @@ trivy-sarif:
 	@$(TRIVY_RESOLVE); \
 	"$$TRIVY" fs --scanners vuln,secret --exit-code 0 --format sarif --output trivy-results.sarif --skip-dirs build .
 
-# Misconfiguration scanning, ADVISORY: it reports and never fails on a finding.
+# Misconfiguration scan, advisory: never fails on a finding.
 trivy-misconfig: export TI_DEST := $(TRIVY_BIN)
 trivy-misconfig:
 	@$(TRIVY_RESOLVE); \
@@ -1369,11 +840,7 @@ trivy-misconfig:
 security: gosec govulncheck verify trivy-fs ## Run the full §8 security suite (gosec, govulncheck, go mod verify, trivy fs)
 	@echo "$(COLOR_GREEN)✓ Security suite complete$(COLOR_RESET)"
 
-# The tests, the gate and the rest run IN ORDER, from the recipe, not as
-# sibling prerequisites. Under `make -j` -- or a MAKEFLAGS a parent passes down
-# -- siblings run concurrently, so the gate could read the profiles while
-# test-unit was still deleting and rewriting them: a missing-input failure on a
-# clean tree, or a pass on the previous run's profiles (#141 review).
+# Run in order from the recipe so make -j cannot gate on half-written profiles.
 ci: fmt-check vet lint security ## Run CI pipeline locally (format, lint, security suite, releasability gate, unit tests + coverage gate, build)
 	@$(MAKE) --no-print-directory releasability
 	@$(MAKE) --no-print-directory api-diff
@@ -1399,11 +866,7 @@ ci: fmt-check vet lint security ## Run CI pipeline locally (format, lint, securi
 	@echo "$(COLOR_GREEN)All CI checks passed! Ready to push.$(COLOR_RESET)"
 	@echo ""
 
-# The full pipeline: everything `ci` runs, then the devcontainer, whose default
-# command is coverage-combined -- so the combined floors are enforced by the
-# container's own exit status. There is no coverage summary after it any more.
-# The one that was here compared a truncated integer and, when the profile was
-# missing, printed a warning and reported success (#141).
+# Everything ci runs, then the devcontainer, whose exit status enforces the combined floors.
 ci-full: ## Run the full CI pipeline, including the devcontainer integration suite and the combined coverage gate
 	@echo "$(COLOR_BOLD)Running full CI pipeline with integration tests...$(COLOR_RESET)"
 	@echo ""
@@ -1440,30 +903,14 @@ deps: ## Download dependencies
 	@$(GO) mod tidy
 	@echo "$(COLOR_GREEN)✓ Dependencies updated$(COLOR_RESET)"
 
-# `go mod verify` checks only the modules already in the module cache, so on an
-# empty cache it verifies nothing and passes. The download first fills the cache
-# with every module the build needs, each checked against go.sum as it lands,
-# or fails: where nothing can be fetched (GOPROXY=off) an empty cache is an
-# error, never a pass.
+# Download first so go mod verify checks every module the build needs.
 verify: ## Verify dependencies
 	@echo "$(COLOR_BOLD)Verifying dependencies...$(COLOR_RESET)"
 	@$(GO) mod download
 	@$(GO) mod verify
 	@echo "$(COLOR_GREEN)✓ Dependencies verified$(COLOR_RESET)"
 
-# deps-check (devops.md §4, §9): fails when any module go.mod requires, first-
-# or third-party, direct or indirect, is behind its latest release with no
-# reason written beside its require or replace line. A held-back module is a
-# decision with its reason in go.mod, printed with the result; anything else
-# is drift. A lag behind a release under 7 days old is reported and does not
-# fail. test/tools/depscheck documents what "latest" means and why the check
-# fails closed.
-#
-# It is the one target that must ask a module host, so it takes its proxy
-# from DEPS_CHECK_GOPROXY when that is set (the toolchain image and the lane
-# sandboxes run with GOPROXY=off) and otherwise from the environment.
-# First-party modules resolve the way the build resolves them: GOPRIVATE and
-# git's GIT_CONFIG_* rewrite to the internal module host. It installs nothing.
+# deps-check fails when a required module lags its latest release without a reason beside it in go.mod; uses DEPS_CHECK_GOPROXY when set.
 DEPS_CHECK_GOPROXY ?=
 deps-check: export DC_GOPROXY := $(DEPS_CHECK_GOPROXY)
 deps-check: ## Fail when a go.mod module is behind a latest release 7+ days old with no reason written beside it
@@ -1500,11 +947,7 @@ info: ## Show project information
 	@echo "Coverage file: $(COVERAGE_FILE)"
 	@echo "Coverage threshold: $(COVERAGE_THRESHOLD)%"
 
-# The devcontainer image: the toolchain stage under a fixed tag, which
-# .devcontainer/devcontainer.json opens after running this target as its
-# initializeCommand. The base stage's `go mod download` resolves the private
-# module, so the build gets the same credentials staging and module proxy as
-# docker-build-toolchain; a bare `docker build` dies on go-enclave.
+# The devcontainer image: the toolchain stage under a fixed tag, built with the same credentials staging.
 DEVCONTAINER_IMAGE ?= go-luks2-devcontainer
 
 devcontainer: ## Build and run the devcontainer
@@ -1533,12 +976,7 @@ devcontainer: ## Build and run the devcontainer
 	@echo "$(COLOR_YELLOW)  devcontainer.json cannot read the dm major out of /proc/devices, and$(COLOR_RESET)"
 	@echo "$(COLOR_YELLOW)  a hard-coded one is wrong on the next machine.$(COLOR_RESET)"
 
-# ---- the toolchain image: where build, test, lint, security and deps-check run ----
-#
-# The devcontainer's toolchain stage, tagged by the hash of everything it is
-# built from (devcontainer.md §6), so the same inputs name the same image and
-# a changed pin, Dockerfile or go.sum names a new one. `make toolchain-image`
-# prints the tag; CI uses it to build once and run every stage in it.
+# The toolchain image, tagged by a hash of its inputs; make toolchain-image prints the tag.
 TOOLCHAIN_INPUTS := $(DEVCONTAINER_DOCKERFILE) $(TOOL_PINS) go.mod go.sum
 TOOLCHAIN_CONTENT_TAG = go-luks2-toolchain:$(shell cat $(TOOLCHAIN_INPUTS) 2>/dev/null | sha256sum | cut -c1-16)
 TOOLCHAIN_IMAGE ?= $(TOOLCHAIN_CONTENT_TAG)
@@ -1552,10 +990,7 @@ TOOLCHAIN_BUILD_ARGS = --secret id=gomodauth$(comma)src="$$stage" \
 toolchain-image: ## Print the content-hashed tag of the toolchain image
 	@echo $(TOOLCHAIN_IMAGE)
 
-# devcontainer_bases DOCKERFILE OVERRIDE OVERRIDE_VAR: sets bases to each
-# external base image the Dockerfile's FROM lines name (a global ARG default is
-# substituted; `scratch` and earlier stages are skipped), or to OVERRIDE's
-# space-separated words when OVERRIDE is set. The caller defines fail().
+# devcontainer_bases DOCKERFILE OVERRIDE OVERRIDE_VAR: sets bases to the external FROM images, or OVERRIDE's words; caller defines fail().
 define DEVCONTAINER_BASES_FN
 devcontainer_bases() {
 local dockerfile=$1 override=$2 override_var=$3
@@ -1611,22 +1046,7 @@ fi
 }
 endef
 
-# ci-template v1.29: one checksum of the Alpine package indexes the
-# devcontainer build resolves against, which each ci.yml job that names the
-# integration image puts in APK_INDEX_SUM before `make -s it-image`.
-# CUSTOMIZE (ci-template v1.29, which ships scripts/apk-index-sum.sh): a
-# Makefile recipe, because the public release ships no shell scripts (the
-# releasability gate) and the runner has make and docker but no Go. It carries
-# the template's apk-index-sum.sh v1 logic and output contract unchanged; the
-# Dockerfile is APK_DOCKERFILE, the script's argument. Each external base image
-# the Dockerfile's FROM lines name (a global ARG default is substituted;
-# `scratch` and earlier stages are skipped) is run once, as root with every
-# capability dropped but the ones apk needs, to read its /etc/apk/repositories
-# and fetch their APKINDEX files with `apk update`. APK_BASE_IMAGES, space
-# separated, replaces the FROM parse. It prints a sha256 over each base image's
-# name, repository list and index checksums, or `none` when no base image has
-# apk (this repository's Debian base), and fails when a base image cannot be
-# resolved, run or updated: a missing index is never a pass.
+# apk-index-sum: one sha256 over each base image's apk repositories and index checksums, or none; fails when a base cannot be read.
 define APK_INDEX_SUM_RECIPE
 dockerfile=${APK_DOCKERFILE:-build/docker/devcontainer/Dockerfile}
 
@@ -1676,21 +1096,7 @@ apk-index-sum: export APK_INDEX_SUM_SH := $(value APK_INDEX_SUM_RECIPE)
 apk-index-sum: ## Print the Alpine package index checksum of the devcontainer's base images (none without apk)
 	@eval "$$DEVCONTAINER_BASES_SH"; eval "$$APK_INDEX_SUM_SH"
 
-# The Debian counterpart of apk-index-sum (xkey-android's apt-index-sum.sh, as a
-# recipe for the same releasability reason): one checksum of the Debian package
-# indexes the devcontainer build resolves against. Each ci.yml job that names
-# the integration image puts it in APT_INDEX_SUM before `make -s it-image`; the
-# tag hashes it and the build takes it as a build argument, so a Debian security
-# fix changes the tag and the integration stage's `apt-get upgrade` runs again
-# instead of reusing a cached layer (main 9ab065b04 shipped linux-libc-dev
-# 6.12.116-1 from such a layer under a new base digest). Each base image the
-# Dockerfile's FROM lines name (APT_DOCKERFILE; APT_BASE_IMAGES replaces the
-# parse) is run once, as root with every capability dropped but the ones apt
-# needs, to fetch its own sources' indexes with `apt-get update` under
-# APT::Update::Error-Mode=any. It prints a sha256 over each base image's name
-# and the sha256 of each /var/lib/apt/lists *_Packages* file, sorted by name, or
-# `none` when no base image has apt, and fails when a base image cannot be
-# resolved, run or updated: a missing index is never a pass.
+# apt-index-sum: one sha256 over each base image's apt Packages indexes, or none, so a Debian security fix changes the image tag.
 define APT_INDEX_SUM_RECIPE
 dockerfile=${APT_DOCKERFILE:-build/docker/devcontainer/Dockerfile}
 
@@ -1703,10 +1109,7 @@ devcontainer_bases "$dockerfile" "${APT_BASE_IMAGES:-}" APT_BASE_IMAGES
 
 [ "${#bases[@]}" -gt 0 ] || fail "no base image found in $dockerfile"
 
-# Runs in the base image, under its /bin/sh, where the host's pipefail does not
-# reach: sha256sum's status is taken before the sort, so one unreadable index
-# fails the probe (exit 5) instead of yielding the others' checksums. A base
-# without apt contributes `none`.
+# Runs under the base image's /bin/sh; one unreadable index fails the probe (exit 5).
 # shellcheck disable=SC2016 # expanded by the container's shell
 probe='export LC_ALL=C
 command -v apt-get >/dev/null 2>&1 || { echo none; exit 0; }
@@ -1749,18 +1152,7 @@ apt-index-sum: export APT_INDEX_SUM_SH := $(value APT_INDEX_SUM_RECIPE)
 apt-index-sum: ## Print the Debian package index checksum of the devcontainer's base images (none without apt)
 	@eval "$$DEVCONTAINER_BASES_SH"; eval "$$APT_INDEX_SUM_SH"
 
-# ci-standard.md §9 (ci-template v1.23): the integration image is named by its
-# content, <CI_STACK_PREFIX>it:<hash>, never by its run, so every job and run
-# of one tree on a runner builds it once and reuses it. The hash covers the
-# build arguments that change the image (GO_BUILD_PROXY, APK_INDEX_SUM, APT_INDEX_SUM, the
-# label, the target) and the whole build context: the commit's tree and, on a dirty
-# checkout, the diff and every untracked file .gitignore keeps. No job removes
-# the image; ci-reap-stacks ages it out. It fails closed: when git cannot
-# read the tree (no .git, as in a published export, or a checkout git calls
-# of dubious ownership) it prints git's reason on stderr, no name, and exits
-# nonzero, since a name hashed from empty or partial input would be the same
-# name for every tree. Each input is collected and checked before any is
-# hashed.
+# Integration image named by content (<CI_STACK_PREFIX>it:<hash>) over build args and the whole build context; fails closed when git cannot read the tree.
 it-image: ## Print the content-addressed tag of the integration image
 	@set -eu; \
 	d=$$(mktemp -d); trap 'rm -rf "$$d"' EXIT; \
@@ -1788,14 +1180,7 @@ docker-build: ## Build both devcontainer images: the toolchain image and the int
 	@$(MAKE) --no-print-directory docker-build-toolchain
 	@$(MAKE) --no-print-directory docker-build-integration
 
-# Runs CMD in the toolchain image over this checkout, as the uid that owns it
-# and with HOME=/tmp (devcontainer.md §5), so files it writes stay the
-# developer's. CMD reaches the container through the environment, never
-# spliced into this recipe's shell source. The proxy and credential variables
-# are forwarded by NAME only (`-e VAR`): docker reads their values from this
-# environment, so a token never appears on a command line. They matter only to
-# deps-check; the image itself has GOPROXY=off. An empty CMD is refused before
-# anything is built.
+# Runs CMD in the toolchain image as the checkout's owner; credentials are forwarded by name only.
 #
 #   make toolchain-run CMD="make build test security deps-check releasability"
 toolchain-run: export TR_CMD := $(CMD)
@@ -1812,104 +1197,19 @@ toolchain-run: ## Run CMD in the toolchain image (make toolchain-run CMD="make t
 		-v "$(CURDIR):/workspace" -w /workspace \
 		"$$TR_IMAGE" bash -c "$$TR_CMD"
 
-# ---- CI: the stages in the toolchain image, and what a dead job leaves ----
-#
-# Every name CI gives a container or a compose project starts with this prefix
-# and nothing else this repository starts does, so ci-reap-stacks can never
-# touch another project's stack. `override`: it is not a knob.
+# Prefix for every CI container and compose project name, so ci-reap-stacks touches only ours.
 override CI_STACK_PREFIX := go-luks2-ci-
 
-# How CI runs a stage in the toolchain image (ci-standard.md §2): the canonical
-# workflow's in-toolchain-image script, as a recipe because the public release
-# ships no shell scripts (#211). A runner reaches its daemon through a socket,
-# so a bind mount -- toolchain-run's way -- would resolve on the daemon's host,
-# where this checkout does not exist. This creates the container, streams the
-# checkout in (.git included: the releasability tests read it) owned by the
-# image's CI uid, starts it and returns CMD's exit status.
-#
-# The container drops every capability, sets no-new-privileges, bounds pids
-# and ulimits (memlock leaves go-enclave its locked pages), and has no network.
-# IN_IMAGE_NETWORK=bridge gives it one for the stages that must reach one --
-# deps-check asks for the newest releases, security fetches the vulnerability
-# databases -- and only then reopens GOPROXY, mounts a writable module cache
-# (below), and passes the module credentials by NAME, so no token is on a
-# command line. CMD reaches docker as one argument, never spliced into this
-# recipe's source. The container is removed on every exit.
-#
-# The reopened GOPROXY reads the image's own module cache first, as a file://
-# proxy, so the modules a stage fetches are the ones baked and verified at
-# build time, and `make verify` checks every one of them rather than an empty
-# /tmp cache. The baked cache stays root's and read-only; the image build
-# asserts its path. A module not baked falls through to the network. deps-check
-# asks for the newest releases, which the baked cache cannot answer, so it is
-# given the network proxy alone.
-#
-# GOPATH moves to /tmp too. The go command keeps the checksum database's cache
-# in $GOPATH/pkg/sumdb, not in the module cache, and the image's GOPATH is
-# root's /go, so every lookup a networked stage makes -- deps-check resolving
-# the newest release of a public module -- failed to open it. The checksum
-# database is still consulted and its answers still checked; only where they
-# are cached moves. A run without a network keeps /go: it makes no lookup, and
-# its module cache is the baked one under it.
-#
-# The caches live in named volumes on the daemon's host (ci-template v1.22,
-# in-toolchain-image.sh v2, ci-standard.md §6), never in the container's
-# writable layer or its /tmp: GOCACHE at /cache/gobuild and
-# GOLANGCI_LINT_CACHE at /cache/golangci for every stage, and, for a bridge
-# stage, GOMODCACHE at /cache/gomod (a no-network stage keeps the image's own
-# read-only module cache, so it still proves the image works offline). The
-# volumes are <CI_STACK_PREFIX>cache-<class>-{gobuild,golangci,gomod}, one set
-# per trust class and daemon host, kept across jobs. CI_CACHE_CLASS (default
-# pr) is `main` only for main's own runs, a push to it or its schedule, so a
-# pull request never writes a cache that main's build reads. A new volume's
-# root is given to the run's uid by a helper container holding CHOWN and
-# nothing else. ci-trim-caches bounds their size. CI_CACHE=off mounts none,
-# and the module cache is /tmp's again.
-#
-# The stage runs at its job slot's CPU bound (in-toolchain-image.sh v3,
-# ci-template v1.22.2, ci-standard.md §7). It runs in a sibling container,
-# outside the job container's cgroup, so the bound moves to the sibling:
-# --cpus N and GOMAXPROCS=N, with N the job container's cgroup cpu.max
-# (CGROUP_CPU_MAX) rounded up, nproc when the job has no quota, and
-# IN_IMAGE_CPUS over both, then clamped to the CPU count the docker daemon
-# reports (docker info's NCPU), as the daemon refuses a larger --cpus.
-#
-# The stage also takes the job slot's memory bound (in-toolchain-image.sh v4,
-# ci-template v1.29.4): the job container's cgroup memory.max
-# (CGROUP_MEMORY_MAX), 8g when the job has no limit, IN_IMAGE_MEMORY (a size
-# such as 12g) over both, becomes --memory, and --memory-swap is the same, so
-# the stage gets no swap: one that outgrows it is OOM-killed and fails rather
-# than swap the runner host. Go's build and link scratch (TMPDIR, GOTMPDIR) is
-# an anonymous volume on the image's /var/tmp (IN_IMAGE_SCRATCH overrides the
-# path), on the daemon's data disk rather than the 3 GB /tmp tmpfs, and the
-# container's `docker rm -v` removes it. A scratch directory the run's user
-# cannot write fails the stage by name.
-# golangci-lint's default concurrency follows the quota. CUSTOMIZE: no
-# GOFLAGS=-p=N, which the template passes. The image's own GOFLAGS
-# (-mod=readonly -buildvcs=false) would be replaced by it, and go's -p
-# already defaults to GOMAXPROCS.
+# Runs CMD in the toolchain image for CI: checkout streamed in, no capabilities, no network unless IN_IMAGE_NETWORK=bridge, CPU and memory bounded to the job slot, caches in named volumes, CI_OUT files copied back.
 #
 #   make ci-toolchain-run CMD="make deps-check" IN_IMAGE_NETWORK=bridge
-#
-# CI_OUT names the files CMD writes under the checkout that the job needs back
-# on the runner -- the gosec SARIF, the coverage profile, the release binaries
-# -- relative to the checkout. Each is copied out after CMD exits, whatever its
-# status, before the container is removed, so a failed scan still leaves its
-# report for the upload. A file a passing CMD did not write fails the run: an
-# artifact step that uploads nothing would read as one that uploaded it. They
-# land at the same path under CI_OUT_DIR, the checkout unless a test says
-# otherwise.
-#
 #   make ci-toolchain-run CMD="make build-linux" CI_OUT="luks-linux-amd64 luks-linux-arm64"
 IN_IMAGE_NETWORK ?= none
 CI_OUT ?=
 CI_OUT_DIR ?= $(CURDIR)
 CI_TOOLCHAIN_UID := 10001
 IMAGE_GOMODCACHE := /go/pkg/mod
-# ci-template v1.29.4 and v1.34.1 (in-toolchain-image.sh v5): DEVCACHE_GOPROXY
-# first when the runner sets it, with `|` so any error falls through, then the
-# public proxy, and no `direct` entry (dependency-resolution.md, "No direct
-# fetch, anywhere"). A GOPRIVATE path never uses GOPROXY.
+# DEVCACHE_GOPROXY first when set, then the public proxy, never direct.
 CI_NETWORK_GOPROXY := $(if $(DEVCACHE_GOPROXY),$(DEVCACHE_GOPROXY)|)https://proxy.golang.org
 CGROUP_CPU_MAX ?= /sys/fs/cgroup/cpu.max
 CGROUP_MEMORY_MAX ?= /sys/fs/cgroup/memory.max
@@ -2025,52 +1325,7 @@ ci-toolchain-run: ## Run CMD in the toolchain image over a copy of the checkout 
 	done; \
 	exit "$$rc"
 
-# The canonical workflow's stale-stack reaper (ci-template v1.18), as a recipe
-# for the same reason. A job's `if: always()` teardown runs only while the job
-# lives; when the runner or its daemon dies mid-job the stack stays behind,
-# stopped, and nothing else removes it. So the first step of every CI job that
-# starts containers runs this. On the daemon the job talks to it removes:
-#
-#   - a compose project whose name starts with CI_STACK_PREFIX, when EVERY
-#     container in it is stale, then the project's networks and volumes;
-#   - a container outside compose whose name starts with the prefix, when
-#     stale, with its anonymous volumes.
-#
-# Stale: exited or dead and finished at least REAP_MIN_AGE seconds ago, or
-# created and never started that long ago. A project with any container
-# running, paused, restarting or removing is never touched. 11100 s is the
-# runners' 3 h job timeout plus 5 min, so no job that could own the stack is
-# alive. A failed removal is reported and skipped: the reaper never fails the
-# job. REAP_DRY_RUN=1 prints what would be removed and removes nothing.
-#
-# v2 (ci-template v1.23, ci-standard.md §9): images too. The integration image
-# is named by its content, <CI_STACK_PREFIX>it:<hash> (make it-image), and
-# every job and run of that tree on the runner reuses it, so no job removes it.
-# This removes one created at least REAP_IMAGE_MIN_AGE seconds ago (default
-# 7200: the longest full-tier run plus headroom). `docker image rm` without
-# force refuses an image a container uses, and every job that needs the image
-# holds a lease on it (a created, never started <prefix>lease-<run>-...
-# container, removed at its teardown; a dead job's lease goes stale like any
-# container outside compose). v3 (ci-template v1.23.1): the age runs from the
-# later of the image's creation and its last tag, since a rebuild from a full
-# cache keeps the old creation time but re-tags the image.
-#
-# v4 (ci-template v1.25.2): a tag is kept while any container, running or
-# created, uses its image id (`docker ps -a --filter ancestor=<id>`), because
-# two trees that differ only in a file the build ignores share one id under two
-# tags and `docker image rm <tag>` untags such an image even while a lease holds
-# it. A failed lookup also keeps the tag.
-#
-# v5 (ci-template v1.25.3): the image loop runs under the daemon's image lock, a
-# created, never-started container named <CI_STACK_PREFIX>image-lock made from
-# <prefix>image-lock:base (an empty image imported when missing), so the in-use
-# check and the removal cannot straddle a job's lease and re-tag. The lease
-# step and every re-tag take the same lock (ci.yml). A lock created more than
-# 600 s ago is a dead holder's and is removed by its id. The reaper waits up to
-# REAP_LOCK_WAIT seconds for it and removes no image that run without it. The
-# tag time is read as a string (`{{.Metadata.LastTagTime}}`): the `.Unix`
-# form is a template error on Docker 29, and an image the inspect gives no id
-# for is kept.
+# Reaps stale CI stacks, containers and integration images under CI_STACK_PREFIX older than REAP_MIN_AGE, holding the image lock; never fails the job. REAP_DRY_RUN=1 only prints.
 REAP_MIN_AGE ?= 11100
 REAP_IMAGE_MIN_AGE ?= 7200
 REAP_LOCK_WAIT ?= 60
@@ -2196,26 +1451,7 @@ ci-reap-stacks: ## Remove this repository's stale CI containers, compose stacks 
 	echo "reaper: $$reaped compose project(s) and $$images image(s) $$done_as for prefix '$$prefix'"; \
 	exit 0
 
-# The canonical workflow's trim-ci-caches script (ci-template v1.22), as a
-# recipe for the same reason. ci-toolchain-run keeps the build, golangci-lint
-# and module caches in named volumes, <CI_STACK_PREFIX>cache-<class>-{gobuild,
-# golangci,gomod}, on the Docker host the job talks to (ci-standard.md §6). Go
-# trims its build cache of entries unused for five days, but nothing trims the
-# module cache, so the volumes would grow without bound. This measures them
-# and, while their total is over CI_CACHE_MAX_GIB, removes the largest one no
-# container is using. A removed volume comes back empty at the next stage,
-# which costs one cold build, never a wrong one.
-#
-# Sizes are measured by `du` in TOOLCHAIN_IMAGE (the image the job just built:
-# it has du, and it is already on the host), run as the CI uid (the volumes'
-# owner) with no network, no capability and the volume read-only. A volume any
-# container (running or stopped) mounts is never removed; `docker volume rm`
-# refuses one in use in any case.
-#
-# CI_CACHE_MAX_GIB is the bound for this repository's volumes, both trust
-# classes together, on one host. A failed measurement or removal is reported
-# and skipped: this never fails the job. REAP_DRY_RUN=1 prints what would be
-# removed and removes nothing.
+# Trims the CI cache volumes while their total exceeds CI_CACHE_MAX_GIB, largest unused first; never fails the job. REAP_DRY_RUN=1 only prints.
 CI_CACHE_MAX_GIB ?= 32
 
 ci-trim-caches: export TM_IMAGE := $(TOOLCHAIN_IMAGE)
@@ -2271,22 +1507,9 @@ ci-trim-caches: ## Keep this repository's CI cache volumes under CI_CACHE_MAX_GI
 	}; \
 	exit 0
 
-# ci-template v1.44 (ruling 887) and v1.45 (ruling 888): the template's
-# scripts/ci-mask-lan.sh and scripts/ci-image-history.sh as Makefile recipes
-# (go-luks2 ships no shell scripts, #211), line for line: same variables,
-# same tests, same messages. test/makefile holds them to it.
+# ci-mask-lan and ci-image-history as Makefile recipes; test/makefile holds them to the template.
 
-# ci-mask-lan masks the LAN addresses a pool runner's environment names
-# (Tenant Agent ruling 887: internal addresses stay out of public
-# repositories, and their CI logs count). The pool sets the DEVCACHE_*
-# package caches, GOPROXY's LAN module proxy and the LAN CI registry; on a
-# forge, the release registry (RELEASE_REGISTRY) and the forge's own host
-# (GITHUB_SERVER_URL), which the image publishing and resolving name. A
-# BuildKit build echoes its build arguments and `go env` prints GOPROXY.
-# Run before any step that builds: for each entry of those variables whose
-# host is a private IPv4 address, it prints ::add-mask:: for the entry, its
-# host:port and its host, so the runner masks the address in every later
-# line. Public hosts and keywords (proxy.golang.org, direct, off) are left.
+# ci-mask-lan prints ::add-mask:: for every private-IPv4 host in the runner's proxy, cache and registry variables.
 ci-mask-lan: SHELL := /bin/bash
 ci-mask-lan: .SHELLFLAGS := -euo pipefail -c
 ci-mask-lan: ## Mask the LAN addresses the runner's environment names (CI, ruling 887)
@@ -2313,15 +1536,7 @@ ci-mask-lan: ## Mask the LAN addresses the runner's environment names (CI, rulin
 		done; \
 	done
 
-# ci-image-history fails when an image carries a private address (Tenant
-# Agent ruling 888). A pool build takes the LAN caches as BuildKit secrets,
-# which no layer and no history entry keeps; a build argument's value, by
-# contrast, is recorded in every RUN of the history. A pool-built image may
-# one day be pushed beyond the LAN, and ruling 887 keeps internal addresses
-# out of everything public, metadata included. For each image in IMAGES
-# (blank separated) it reads the history (every entry's command and comment)
-# and the config (env, labels, command) and fails on any RFC 1918 address.
-# It names the image and the history entry, never the address.
+# ci-image-history fails when an image's history or config carries an RFC 1918 address; it names the entry, never the address.
 IMAGES ?=
 ci-image-history: export IH_IMAGES := $(IMAGES)
 ci-image-history: SHELL := /bin/bash
@@ -2352,59 +1567,10 @@ ci-image-history: ## Fail when an image's history or config carries a private ad
 	done; \
 	exit "$$status"
 
-# Builds never resolve through a workspace: cross-repository modules come from
-# published TAGS, never from wherever a sibling repo happens to be checked out.
-# Immunizes against a stray go.work file changing what gets built.
+# Never build through a go.work workspace.
 export GOWORK=off
 
-# ---- toolchain binding (#201) ----
-#
-# Every target runs on EXACTLY the toolchain go.mod's `go` directive names,
-# derived from the file so the two cannot drift. Go's own resolution is
-# GOTOOLCHAIN=auto: a host whose installed go is older than the directive
-# fetches the named version through GOPROXY, cached once under GOMODCACHE.
-# Hosts that set GOTOOLCHAIN=local opt out of that, and on such a host a
-# module whose floor has moved past the installed go does not build at all:
-#
-#   go: go.mod requires go >= 1.27.0 (running go 1.26.7; GOTOOLCHAIN=local)
-#
-# Measured on #201, adopting go-enclave v0.5.0-alpha (floor `go 1.27.0`):
-# the review harness carried 1.26.7 with GOTOOLCHAIN=local and could neither
-# build nor test the change it was asked to verify -- the same failure the
-# handbook recorded on 2026-08-27, when thirteen repos moved to 1.26.7 ahead
-# of the shared image. A gate that READS instead of BUILDS and still votes is
-# the thing to close, and pinning the exact directive is the remedy the
-# handbook names (OWNER-QUEUE-2026-08-28 item 26) and the mechanism the dev
-# hosts already use by hand (`GOTOOLCHAIN=go1.27.1`).
-#
-# Why the exact version and not `auto`: `auto` may pick a NEWER toolchain
-# than the directive when one is installed, so two hosts build one commit on
-# two compilers. The pin is the Makefile counterpart of the workflows'
-# GO_VERSION (devops.md: bind the toolchain to the pinned version wherever
-# the file supports it) and of the Dockerfiles' `golang:<pinned>` tags. It is
-# derived, never typed here, so there is one place the floor is written.
-#
-# HOW it is derived, and why it is `override`, are both about not depending
-# on the host the binding exists to rescue. The directive is read with make's
-# own `$(file <)` and text functions -- no sed, no awk, no `go` (which is the
-# very command that refuses to run) -- so a stripped PATH cannot silently
-# leave GO_FLOOR empty and the export unset. `override` makes the pin win
-# over `make -e` and over a GOTOOLCHAIN=... on make's command line, either of
-# which a harness may set for hermeticity: an environment that pins the
-# toolchain to "whatever is installed" is precisely the environment that
-# cannot build this module, and a binding that yields to it is no binding.
-#
-# The opt-out is explicit and named: `make TOOLCHAIN_PIN=0 <target>` leaves
-# GOTOOLCHAIN exactly as the environment has it, so a host that must not
-# fetch gets go's clear refusal above rather than a download it did not
-# want. A silent knob (an empty GO_FLOOR, a missing tool) is not an opt-out,
-# it is the failure mode this block was written against.
-#
-# The pairing trick below reads as: list every word of go.mod suffixed with
-# `@`, zip it against the word list shifted by one, and keep the pair whose
-# left half is the bare token `go` and whose right half starts with a digit
-# -- i.e. `go@1.27.1` from the directive, never `toolchain go1.27.1` (its
-# token is `go1.27.1`, not `go`) and never a module path containing `go`.
+# Every target runs on exactly the toolchain go.mod's go directive names, read with make's own functions; override wins over make -e. TOOLCHAIN_PIN=0 opts out.
 TOOLCHAIN_PIN ?= 1
 GO_MOD_WORDS := $(file < go.mod)
 GO_FLOOR := $(firstword $(patsubst go@%,%,$(filter go@0% go@1% go@2% go@3% go@4% go@5% go@6% go@7% go@8% go@9%,$(join $(addsuffix @,$(GO_MOD_WORDS)),$(wordlist 2,$(words $(GO_MOD_WORDS)),$(GO_MOD_WORDS)) end-of-go-mod))))
@@ -2415,128 +1581,23 @@ endif
 override export GOTOOLCHAIN := go$(GO_FLOOR)
 endif
 
-# ---- dependency-resolution targets (2026-08-13 cutover) ----
-# deps-latest runs before compiling in a consumer repo; release-alpha,
-# release-candidate and release each publish one kind of tag (-alpha, -rc.N and
-# final) for this repo.
-#
-# SUBMODULE_TAGS is GONE with the old recipe (#19). It existed to tag nested
-# modules in lockstep with the root, and it was always empty here: `find . -name
-# go.mod` returns exactly one file, the root. An empty knob for a case this
-# repository does not have is a thing to maintain and to misread, not a
-# feature. A repo that grows a nested module adds its lockstep check back as a
-# PREREQUISITE of each release target, where a failure aborts before the tag exists.
-# deps-latest picks the highest tag INCLUDING -alpha prereleases — bare
-# 'go get @latest' ignores prereleases and would downgrade to legacy v0.0.0.
+# deps-latest picks the highest tag including -alpha prereleases; release-alpha, release-candidate and release each publish one tag kind.
 
-# ---- release identity (#19) ----
-#
-# AGENT_GIT is the signing/identity wrapper every git WRITE below goes through.
-# NO DEFAULT PATH IS BAKED IN, deliberately, and this is the one place this
-# recipe diverges from the shared template: a hardcoded path publishes a login
-# name, a private repository's name and a machine's directory layout from a
-# repository that is mirrored publicly (#20). It resolves from PATH, or you set
-# it; either way the guard below fails CLOSED before VERSION is written, so an
-# unset AGENT_GIT can never produce an unsigned release.
+# AGENT_GIT is the signing wrapper every git write goes through; no default path, and the guard fails closed when it is unset.
 AGENT_GIT ?= $(shell command -v agent-git.sh 2>/dev/null)
 
-# The LITERAL repo name — never $(notdir $(CURDIR)). Deriving it from the
-# directory derives the signing IDENTITY from the checkout, so a worktree or a
-# CI workspace named anything else signs the release as the wrong agent
-# (measured 2026-08-26: a directory named `mk` signed as `agent-mk`). Releases
-# here are cut from git worktrees, whose directory names are chosen for the task
-# rather than to match the repo, so that failure is not hypothetical.
+# The literal repository name: the signing identity must not follow the checkout's directory name.
 REPO_NAME ?= go-luks2
 
-# MEASURED for this repository on 2026-08-31: `git remote -v` shows exactly one
-# remote, named `dev`. The shared template defaults this to `origin` on the
-# grounds that no fleet repo has a `dev` remote — that claim does not hold
-# here, which is precisely why it is a VARIABLE and not a constant. Overridable
-# for a checkout that names its remote differently.
+# The release remote; override for a checkout that names it differently.
 RELEASE_REMOTE ?= dev
 
-# ---- release-alpha, release-candidate, release: one target per kind (template v2.3.5) ----
-#
-# Replaces a recipe that failed only when you looked at it. The old one:
-#   1. auto-incremented PATCH only, so an API addition shipped labeled a bugfix
-#      — and the version is the only signal a pinning consumer gets;
-#   2. created LIGHTWEIGHT, UNSIGNED tags as whatever local git identity
-#      happened to be configured, rather than this repo's agent principal;
-#   3. `git push dev HEAD --tags` pushed EVERY local tag, not the one just cut;
-#   4. `|| true` swallowed a failed VERSION commit and tagged anyway, producing
-#      a tag whose VERSION file disagreed with its own name;
-#   5. stamped no CHANGELOG.
-# Failure 2 is the one that bites immediately: `main` requires signed commits,
-# so the unsigned commit is REJECTED at push — after the tag already exists
-# locally. Two releases had to be cut by hand because of it.
-#
-# The contract now:
-#   - There is ONE TARGET PER KIND (release-versioning.md 1a), each refusing
-#     the other two BEFORE anything is written, and naming the right target in the refusal:
-#       make release-alpha    [VERSION=vX.Y.Z-alpha]  an alpha (derived if omitted)
-#       make release-candidate VERSION=vX.Y.Z-rc.N    a release candidate
-#       make release           VERSION=vX.Y.Z         a final release
-#     All three expand the same RELEASE_RECIPE (below), so the guards cannot
-#     drift apart; a target adds only the kind it exports.
-#   - The version is EXPLICIT for release-candidate and release: whoever cuts
-#     one decides patch/minor/major and says so, and the recipe refuses to guess.
-#     release-alpha alone derives it (release-versioning.md 1a and 2): with no VERSION it takes the highest vX.Y.Z-alpha tag, local and
-#     on the release remote, adds 1 to PATCH, prints the result and then runs the
-#     same RELEASE_RECIPE on it through a nested make, so every guard below still
-#     runs on the derived version. It refuses, and prints the explicit form, when
-#     there is no alpha tag to count from, when the remote cannot be listed, or
-#     when any existing tag (an rc or a final release of the same or a higher
-#     X.Y.Z outranks the alpha) is at or above the result. An explicit
-#     VERSION=vX.Y.Z-alpha is still valid and is how a MINOR bump is cut by hand;
-#     derivation is skipped for it.
-#   - Every git write goes through AGENT_GIT (identity + SSH signing); the tag
-#     is ANNOTATED and signed, not lightweight.
-#   - Pushes ONLY the release commit and the named tag, atomically. Never --tags.
-#   - Cut from `main` ONLY — `push <remote> HEAD` publishes whatever branch is
-#     checked out, and this repo is developed on issue branches.
-#   - Fail-closed end to end: no `|| true`. Every guard aborts BEFORE the tag
-#     exists, because a published tag is immutable and cannot be retracted.
-#   - The remote duplicate-tag check reads the EXIT CODE rather than negating
-#     the command. `git ls-remote --exit-code` answers three things: 0 = the tag
-#     exists, 2 = it does not, anything else (128 on an unreachable or
-#     unauthenticated remote) = THE QUESTION WAS NEVER ANSWERED. Under `!` that
-#     third case reads as "tag absent" and the check fails OPEN.
-#   - The CHANGELOG guard matches the UNPREFIXED heading LITERALLY, anchored at
-#     column 1, via an index-based awk predicate. A regex would treat the dots
-#     of a version as wildcards and admit headings the release workflow does
-#     not; a pre-flight check that is not identical to the thing it clears for
-#     is not a check.
-#   - Error messages are SINGLE-quoted where they carry no variable.
-#     A double-quoted `echo` is a live command-substitution context, and error
-#     strings are exactly what people edit casually — a backtick added there
-#     runs at the moment a release is already failing.
-#
-# v2.3.3 SECURITY: every settable Make variable crosses into the recipe ONCE,
-# via a target-specific export, and the body references only shell parameters
-# ($$REL_*). Before that, $(VERSION) was expanded into recipe TEXT before the
-# grammar guard ran, so `make release 'VERSION=v0.0.0-alpha`cmd`'`
-# executed the backtick at the first guard line. Quoting is no boundary against
-# a value that becomes recipe source. `$(value VERSION)` also stops the double
-# evaluation the export would otherwise add.
-# ADOPTER CHECK: `grep -P '(?<!\$)\$\((?!\()'` over the recipe BODY must be
-# empty — no $(...) carrying a settable value below the export lines.
-# KNOWN LIMIT, stated so nobody over-trusts this: a $(shell ...) FUNCTION typed
-# into a `make VAR=...` command line runs during make's own variable expansion
-# whether or not any rule names the variable. That is a property of invoking
-# make, not of this recipe, and this recipe cannot close it.
+# release-alpha [VERSION=vX.Y.Z-alpha], release-candidate VERSION=vX.Y.Z-rc.N, release VERSION=vX.Y.Z: one RELEASE_RECIPE, from main only, signed annotated tag, commit and tag pushed atomically, fail closed before the tag exists.
+# Settable variables reach the recipe only through target-specific exports ($$REL_*), never as recipe text.
 
 .PHONY: release release-alpha release-candidate deps-latest
 
-# changelog-assemble folds changelog.d fragments into a new CHANGELOG.md section.
-#
-# A COMMITTED STEP PERFORMED BEFORE TAGGING, not something release.yml does --
-# the workflow only overwrites the runner-workspace copy, so a fragment folded in
-# there would never reach the repository (release-versioning.md 5).
-#
-# Run it, read the diff, commit it, then the release target for the kind
-# (release-alpha, release-candidate or release) with the same VERSION. It
-# does not commit for you: the changelog is the one artefact of a release a human
-# should look at before it is published.
+# changelog-assemble folds changelog.d fragments into a new CHANGELOG.md section; review and commit it before the release target.
 changelog-assemble: export ASM_VERSION := $(value VERSION)
 changelog-assemble: ## Fold changelog.d fragments into a CHANGELOG.md section (VERSION=vX.Y.Z-alpha or vX.Y.Z-rc.N)
 	@test -n "$$ASM_VERSION" || { echo 'ERROR: state the version explicitly: make changelog-assemble VERSION=vX.Y.Z[-alpha|-rc.N] (the same VERSION the release target will take)'; exit 1; }
@@ -2559,17 +1620,7 @@ changelog-assemble: ## Fold changelog.d fragments into a CHANGELOG.md section (V
 	echo "Assembled $$(echo "$$frags" | wc -w) fragment(s) into CHANGELOG.md as [$$ver]."; \
 	echo "Review the diff, then commit CHANGELOG.md and the fragment deletions together."
 
-# ONE RECIPE, THREE TARGETS. RELEASE_RECIPE holds every guard and every write;
-# release-alpha, release-candidate and release each expand it and differ only in
-# the kind they export as REL_TARGET, which the first guard after the grammar
-# check compares with the kind the VERSION argument is. The recipe is a variable
-# rather than a shared prerequisite on purpose: a prerequisite runs once per
-# invocation, so `make release-candidate release VERSION=...` would run it once
-# under whichever kind make visited first and clear the other target's check.
-# Expanded per target, each gets its own kind check and its own run.
-#
-# The body references only shell parameters ($$REL_*), as v2.3.3 requires: the
-# one $(RELEASE_RECIPE) reference in each target below carries no settable value.
+# RELEASE_RECIPE holds every guard and write; each release target expands it with its own REL_TARGET kind.
 define RELEASE_RECIPE
 	@test -n "$$REL_VERSION" || { echo "ERROR: state the version explicitly: make $$REL_TARGET VERSION=$$REL_SHAPE (you decide patch/minor/major — the recipe refuses to guess)"; exit 1; }
 	@printf '%s' "$$REL_VERSION" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-alpha|-rc\.[1-9][0-9]*)?$$' || { echo "ERROR: VERSION is not of the form vX.Y.Z, vX.Y.Z-alpha or vX.Y.Z-rc.N (no leading zeroes): $$REL_VERSION"; exit 1; }
@@ -2616,25 +1667,7 @@ define RELEASE_RECIPE
 	@echo "Released $$REL_VERSION (signed, annotated, single tag pushed)"
 endef
 
-# release-alpha with no VERSION: derive the next alpha, print it, and hand it to
-# a nested make that runs RELEASE_RECIPE on it, so every guard (main only, the
-# remote, the duplicate tag, a clean tree, the changelog checks) sees the derived
-# version exactly as it would see a typed one. Nothing here writes.
-#
-# The derivation reads the tags of BOTH the checkout and the release remote: a
-# tag cut from another checkout is as real as a local one, and a published tag
-# is immutable. An unreachable remote refuses rather than deriving from local
-# tags alone, the same fail-closed reading as the duplicate-tag guard.
-#
-# Semver order decides what the result may be. The alpha of an X.Y.Z sorts below
-# its rc and its final release, so the result is refused unless its X.Y.Z is
-# strictly above the X.Y.Z of EVERY tag (alpha, rc or final): anything else
-# would be a version at or below an existing tag.
-#
-# The nested make receives the version as a command-line VERSION, which also
-# wins over any VERSION= the caller passed empty. The leading + keeps the make
-# jobserver and lets the line run under -n, as a line naming a recursive make
-# does.
+# release-alpha with no VERSION derives the next alpha from local and remote tags, refusing when it would not be above every existing tag, then runs RELEASE_RECIPE in a nested make.
 define ALPHA_DERIVE
 	@test -n "$$REL_REMOTE" || { echo 'ERROR: RELEASE_REMOTE is empty — set it to the git remote that serves this module'; exit 1; }
 	@git remote get-url "$$REL_REMOTE" >/dev/null 2>&1 || { echo "ERROR: no git remote named $$REL_REMOTE. Set RELEASE_REMOTE; the next alpha cannot be derived without its tags"; exit 1; }

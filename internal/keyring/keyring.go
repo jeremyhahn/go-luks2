@@ -267,7 +267,7 @@ func PinOSThread() func() {
 // calling thread and no other. A goroutine that pinned, did that, and called
 // UnlockOSThread would return a thread with diverged credentials to the Go
 // scheduler, and whatever goroutine ran there next would inherit a keyring
-// the rest of the process does not have (#250, C9).
+// the rest of the process does not have.
 //
 // The Go runtime terminates a thread whose goroutine exits while still locked
 // to it, so the work runs on a goroutine that locks and never unlocks, and

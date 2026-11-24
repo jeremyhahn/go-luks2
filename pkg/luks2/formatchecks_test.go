@@ -17,7 +17,7 @@ import (
 	"testing"
 )
 
-// Format used to write first and find out later (#248, B4): a cipher mode
+// Format used to write first and find out later (B4): a cipher mode
 // dm-crypt cannot parse, aes-cbc with a key it cannot take, a label with no
 // room for its NUL, and a device too small for the layout all produced a
 // header on the device -- and an in-use block device was formatted anyway.
@@ -151,16 +151,7 @@ func TestClassifyDeviceOpenReportsABusyDeviceAsInUse(t *testing.T) {
 	}
 }
 
-// TestFormatClaimsTheLockedDescriptorRegardlessOfASymlinkRetarget: the locks
-// are taken on one open of the path and the format writes through a second,
-// exclusive one -- the claim -- which reopens the FIRST descriptor's own
-// /proc/self/fd entry rather than resolving the path again (Locked.Claim).
-// So a symlink retargeted between the lock and the claim cannot move the
-// write to a different file: the format still lands on the file that was
-// locked, and the file the symlink now names is untouched. This replaces an
-// older test of requireSameDevice, which this design deletes -- the
-// retargeting it guarded against is now impossible by construction rather
-// than caught after the fact.
+// TestFormatClaimsTheLockedDescriptorRegardlessOfASymlinkRetarget: the format lands on the locked file, not the symlink's new target.
 func TestFormatClaimsTheLockedDescriptorRegardlessOfASymlinkRetarget(t *testing.T) {
 	defer parallel(t)()
 	// Not parallel: it substitutes the package's lock-held hook.

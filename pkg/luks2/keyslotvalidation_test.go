@@ -17,25 +17,9 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// A keyslot's declared fields come off an UNTRUSTED device and they size work.
-//
-// key_size decides how many bytes the KDF is asked to produce and therefore how
-// much CPU PBKDF2 burns (its cost scales with the requested output length) and
-// how much of the process's RLIMIT_MEMLOCK the derived key consumes. stripes and
-// area.size decide how much is read, decrypted and merged.
-//
-// Bounding them at the point where the anti-forensic area is computed is too
-// late: the passphrase derivation runs first. These tests pin the bounds ahead
-// of that derivation, at every entry point that acts on a keyslot, and pin them
-// as PER-KEYSLOT failures -- see keyslotpanic_test.go for why a header-wide
-// refusal is the wrong shape.
+// A keyslot's declared fields size work, so they are bounded before the derivation, per keyslot (see keyslotpanic_test.go).
 
-// craftKeyslot writes a container and then rewrites keyslot 0's declared fields
-// to whatever the caller wants, leaving everything else exactly as this library
-// wrote it.
-//
-// The header is written through writeHeaderInternal, which does not validate
-// keyslots, so the fixture really is a container an attacker could hand us.
+// craftKeyslot writes a container and rewrites keyslot 0's fields through writeHeaderInternal, which does not validate keyslots.
 func craftKeyslot(t *testing.T, name string, mutate func(*header.Keyslot)) string {
 	t.Helper()
 
@@ -60,20 +44,9 @@ func craftKeyslot(t *testing.T, name string, mutate func(*header.Keyslot)) strin
 	return path
 }
 
-// TestCraftedKeySizeIsRefusedBeforeAnyDerivation is the regression test for the
-// cost half.
-//
-// It asserts the refusal AND that the work never happened, because "returns an
-// error eventually" is what the unfixed code already did -- it derived the whole
-// oversized key first and only then failed on the cipher's key length. The
-// allocation delta is what separates the two: runtime.MemStats.TotalAlloc is
-// CUMULATIVE, so a derivation that has since been freed still shows up, which
-// makes this a deterministic measurement rather than a timing one.
+// TestCraftedKeySizeIsRefusedBeforeAnyDerivation asserts the refusal and, by TotalAlloc, that no derivation ran.
 func TestCraftedKeySizeIsRefusedBeforeAnyDerivation(t *testing.T) {
-	// 1 MiB: sixteen thousand times the largest key cryptsetup will format,
-	// and small enough that a REGRESSION shows up as a slow failing test rather
-	// than a hung one. Measured before the bound existed, 8 MiB here did not
-	// finish inside the test binary's 480-second timeout.
+	// 1 MiB: far above any real key, small enough to fail fast on regression.
 	const craftedKeySize = 1 << 20
 
 	device := craftKeyslot(t, "crafted-keysize.img", func(ks *header.Keyslot) {
@@ -93,12 +66,7 @@ func TestCraftedKeySizeIsRefusedBeforeAnyDerivation(t *testing.T) {
 		t.Fatalf("a keyslot declaring a %d-byte volume key was accepted", craftedKeySize)
 	}
 
-	// The error TestKey reports is deliberately not asserted on here. The scan
-	// skips an unusable keyslot and, having skipped every one, reports that the
-	// passphrase opened nothing -- which is the right thing for the scan to do
-	// and the wrong thing to hang this measurement on. The keyslot-level error
-	// is pinned directly in TestCraftedKeyslotFieldsAreRefused; what is
-	// measured HERE is the cost, which is the half a type assertion cannot see.
+	// The error is pinned in TestCraftedKeyslotFieldsAreRefused; this measures cost.
 	allocated := after.TotalAlloc - before.TotalAlloc
 	if allocated >= craftedKeySize {
 		t.Fatalf("the attempt allocated %d bytes for a keyslot declaring a %d-byte key: the derivation ran before the bound was applied",
@@ -107,14 +75,7 @@ func TestCraftedKeySizeIsRefusedBeforeAnyDerivation(t *testing.T) {
 	t.Logf("refused after allocating %d bytes for a header declaring a %d-byte key", allocated, craftedKeySize)
 }
 
-// TestCraftedKeySizeStillReadsButDoesNotOpen is the counterpart, and it pins the
-// boundary between the two halves of this design.
-//
-// The header must still READ -- an operator has to be able to inspect a
-// container whose keyslot is damaged, and that is exactly when they need to --
-// while the keyslot must not OPEN. Asserting only the refusal would be
-// satisfied by refusing the header outright, which is the shape this package
-// deliberately does not have.
+// TestCraftedKeySizeStillReadsButDoesNotOpen: the header reads, the keyslot does not open.
 func TestCraftedKeySizeStillReadsButDoesNotOpen(t *testing.T) {
 	device := craftKeyslot(t, "crafted-read.img", func(ks *header.Keyslot) {
 		ks.KeySize = 1 << 24
@@ -129,18 +90,9 @@ func TestCraftedKeySizeStillReadsButDoesNotOpen(t *testing.T) {
 	}
 }
 
-// TestCraftedKeyslotFieldsAreRefused covers the rest of the declared geometry
-// through the real unlock path, including the shapes that made this library
-// PANIC rather than merely work too hard.
+// TestCraftedKeyslotFieldsAreRefused covers the declared geometry through the real unlock path.
 func TestCraftedKeyslotFieldsAreRefused(t *testing.T) {
-	// ONE container, reused by every case.
-	//
-	// Each case used to format its own, which is 16 formats -- and a format is
-	// dominated by a 600000-iteration digest derivation, so on a CI runner
-	// roughly fourteen times slower than a workstation this single test cost 72
-	// seconds and helped push the package past the 10-minute go test timeout.
-	// The mutation only has to reach unlockKeyslot, which takes a *header.Keyslot, so
-	// it is applied to an in-memory clone and nothing is rewritten to disk.
+	// One container for every case; mutations apply to an in-memory clone.
 	path := newImage(t, "crafted.img")
 	formatWithLibrary(t, path)
 
@@ -171,12 +123,7 @@ func TestCraftedKeyslotFieldsAreRefused(t *testing.T) {
 			ks.Area.Size = formatSize(header.MaxKeyslotAreaSize + 1)
 		}},
 		{"overflowing key size and stripe count", func(ks *header.Keyslot) {
-			// math.MaxInt/4, not 1<<62. The property under test is that
-			// KeySize * Stripes OVERFLOWS, and no single constant expresses
-			// that on every width: 1<<62 overflows an int on a 32-bit target
-			// at COMPILE time, so this file did not build for GOARCH=386 or
-			// arm. Derived from the platform's own int width, the case means
-			// the same thing everywhere it runs.
+			// math.MaxInt/4 so KeySize*Stripes overflows on every int width.
 			ks.KeySize = math.MaxInt / 4
 			ks.AF.Stripes = 8
 		}},
@@ -252,14 +199,7 @@ func TestValidKeyslotGeometryIsAccepted(t *testing.T) {
 	}
 }
 
-// TestKeyslotValidationLeavesOtherKeyslotTypesAlone protects containers this
-// package does not open but should still be able to READ.
-//
-// LUKS2 defines a "reencrypt" keyslot alongside "luks2". It carries no
-// anti-forensic object and its area is a checksum region rather than raw key
-// material, so applying the luks2 rules to it would make a container in the
-// middle of a reencryption unreadable -- including by GetVolumeInfo, which is
-// exactly what an operator reaches for when something is wrong.
+// TestKeyslotValidationLeavesOtherKeyslotTypesAlone: a reencrypt keyslot does not make the container unreadable.
 func TestKeyslotValidationLeavesOtherKeyslotTypesAlone(t *testing.T) {
 	reencrypt := &header.Keyslot{
 		Type:    "reencrypt",
@@ -283,12 +223,7 @@ func TestKeyslotValidationLeavesOtherKeyslotTypesAlone(t *testing.T) {
 	}
 }
 
-// TestUnlockKeyslotRefusesAKeyslotTypeItCannotOpen covers the direct callers.
-//
-// RemoveKey, ChangeKey and KillSlot pass a NAMED keyslot to unlockKeyslot
-// without consulting its type, unlike the scan in getMasterKey. A reencrypt
-// keyslot has no kdf object, so reaching the derivation with one dereferences
-// nil.
+// TestUnlockKeyslotRefusesAKeyslotTypeItCannotOpen: a named reencrypt keyslot has no kdf and is refused.
 func TestUnlockKeyslotRefusesAKeyslotTypeItCannotOpen(t *testing.T) {
 	defer parallel(t)()
 

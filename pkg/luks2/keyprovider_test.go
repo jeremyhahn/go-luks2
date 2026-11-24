@@ -20,11 +20,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// Tests for (*Volume).Enroll and UnlockWithProvider's own bookkeeping: the
-// keyslot/token sequencing, the rollback on an unwritable token, and the
-// error vocabulary. The exec mechanics -- a real helper, FIDO2, the base64
-// round trip -- moved to pkg/keyprovider with the code that implements them
-// (#271), along with their own tests.
+// Tests for (*Volume).Enroll and UnlockWithProvider bookkeeping: keyslot and token sequencing, rollback and errors.
 
 // fakeKeyProvider is a minimal KeyProvider test double: it hands back a
 // fixed credential (or a fixed failure) and a fixed token, with none of the
@@ -44,10 +40,7 @@ func (p *fakeKeyProvider) Passphrase(context.Context) (enclave.ByteAccess, error
 	return custody.Clone("fake provider credential", p.credential)
 }
 
-// shellQuote renders s as a single-quoted shell word. Used by this package's
-// other fixture-building tests (filesystem_test.go, activation_test.go) that
-// write their own throwaway shell scripts; the FIDO2/helper fixture builders
-// that used to live here moved to pkg/keyprovider's own tests (#271).
+// shellQuote renders s as a single-quoted shell word.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
@@ -85,12 +78,7 @@ func enrollForTest(t *testing.T, image string, existing []byte, provider KeyProv
 	return enrollment.Keyslot.ID, enrollment.Token, nil
 }
 
-// TestVolumeEnrollWritesTheKeyslotAndTheTokenThatNamesIt is the
-// end-to-end statement, against a real container and checked with cryptsetup.
-//
-// The credential the provider hands back must open the volume for the THIRD
-// PARTY, not merely for this package: a keyslot only this library can use is
-// exactly the failure the conformance suite exists to catch.
+// TestVolumeEnrollWritesTheKeyslotAndTheTokenThatNamesIt: the enrolled credential opens the volume in cryptsetup too.
 func TestVolumeEnrollWritesTheKeyslotAndTheTokenThatNamesIt(t *testing.T) {
 	defer parallel(t)()
 
@@ -116,8 +104,7 @@ func TestVolumeEnrollWritesTheKeyslotAndTheTokenThatNamesIt(t *testing.T) {
 		t.Fatalf("keyslot = %d, want a real slot", slot)
 	}
 
-	// The token names the slot that was actually used -- read from where addKey
-	// chose it, not inferred from the header afterwards (#42).
+	// The token names the slot addKey actually chose.
 	token, ok, err := getTokenForTest(image, tokenID)
 	if err != nil {
 		t.Fatalf("getTokenForTest(%d) error = %v", tokenID, err)
@@ -144,12 +131,7 @@ func TestVolumeEnrollWritesTheKeyslotAndTheTokenThatNamesIt(t *testing.T) {
 	}
 }
 
-// TestVolumeEnrollRollsBackAKeyslotItCannotIdentify is the orphan
-// guarantee, checked against a REAL THIRD PARTY: a keyslot whose token could
-// not be written must not survive, and cryptsetup -- not just this
-// package's own Unlock -- must agree the rolled-back credential is gone.
-// TestVolumeEnrollRollsBackTheKeyslotIfTheTokenWriteFails covers the same
-// property without cryptsetup.
+// TestVolumeEnrollRollsBackAKeyslotItCannotIdentify: cryptsetup agrees the rolled-back credential is gone.
 func TestVolumeEnrollRollsBackAKeyslotItCannotIdentify(t *testing.T) {
 	// Not parallel: it overwrites the package-level importToken seam, which a
 	// parallel sibling (e.g. TestVolumeEnrollWritesTheKeyslotAndTheTokenThatNamesIt)
@@ -166,12 +148,7 @@ func TestVolumeEnrollRollsBackAKeyslotItCannotIdentify(t *testing.T) {
 		token:      Token{Type: TokenTypeRecovery},
 	}
 
-	// importToken is forced to fail, which is the failure this arranges: the
-	// keyslot is already written by then. A real token write has nothing
-	// left to refuse once it has a type (Token has no members this
-	// package validates), so the old "a token with no type"
-	// trigger is no longer reachable here -- the seam importToken exists
-	// for exactly this, per its own doc comment.
+	// importToken is forced to fail after the keyslot is written.
 	sys := testVolumeSys()
 	sys.importToken = func(context.Context, *keyslotDevice, int, *LegacyToken) error {
 		return errors.New("token slot unwritable")
@@ -274,9 +251,7 @@ func TestVolumeEnrollRefusesBadInput(t *testing.T) {
 	})
 }
 
-// TestKeyProviderErrorVocabulary covers what a CALLER does with these errors:
-// match a sentinel without knowing the type, reach the cause through Unwrap,
-// and read a message that says which step failed.
+// TestKeyProviderErrorVocabulary: sentinels match, Unwrap reaches the cause, and the message names the failed step.
 func TestKeyProviderErrorVocabulary(t *testing.T) {
 	cause := errors.New("the underlying reason")
 

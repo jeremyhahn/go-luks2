@@ -55,15 +55,7 @@ func exitCodeOf(err error) int {
 	return -1
 }
 
-// TestCommandParityRefusesMissingArgumentsIdentically is the parity runner, crossed over the {CLI binary, embedded} columns commands.Commands
-// enumerates: every registered verb, called with none of its required
-// positional arguments, is refused with the same cryptsetup(8)-compatible
-// exit code (1, "wrong parameters") whether dispatched through the built
-// CLI binary (cmd/luks2, exec'd as a subprocess) or embedded
-// (internal/cli.Run, called in-process). Neither column touches a device:
-// every command here returns its UsageError during flag/argument parsing,
-// before any I/O, so this runs without root and is the parity case every new
-// verb extends rather than replaces.
+// TestCommandParityRefusesMissingArgumentsIdentically: every verb without its required arguments exits 1 both from the CLI binary and embedded, without I/O.
 func TestCommandParityRefusesMissingArgumentsIdentically(t *testing.T) {
 	for _, c := range commands.Commands {
 		if c.RequiredArgCount() == 0 {

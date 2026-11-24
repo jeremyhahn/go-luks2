@@ -57,11 +57,7 @@ func restampHeaderChecksum(t *testing.T, path string, claimed []byte, sum func()
 	}
 }
 
-// TestReadHeaderRefusesAChecksumAlgorithmOtherThanSHA256: the binary header's
-// csum_alg field is honored. It used to be ignored and sha256 computed
-// regardless, so a header CLAIMING sha1 over a sha256 checksum read cleanly
-// here while cryptsetup, which verifies with the named algorithm, refused it.
-// sha256 is the only algorithm cryptsetup writes, and the only one accepted.
+// TestReadHeaderRefusesAChecksumAlgorithmOtherThanSHA256: csum_alg is honored and only sha256 is accepted.
 func TestReadHeaderRefusesAChecksumAlgorithmOtherThanSHA256(t *testing.T) {
 	defer parallel(t)()
 

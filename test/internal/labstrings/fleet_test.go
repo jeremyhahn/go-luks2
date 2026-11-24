@@ -38,7 +38,7 @@ var plant = []string{
 	"zenith",     // the build host
 	"gate",       // the tunnel gateway, gate-NN
 	"pod",        // the mini nodes, pod-NN
-	"pilot",      // the coordinator hosts, pilot-<letter>
+	"pilot",      // the control hosts, pilot-<letter>
 	plantedLogin, // the owner's home directory
 	"labshare",   // the lab's NFS mount
 	plantedLogin, // the owner's login
@@ -66,23 +66,7 @@ func plantedFleet(t *testing.T) []Pattern {
 	return out
 }
 
-// archiveLeaks reads a tar stream and returns every place a pattern of the
-// given set matches. Nothing exempts a place: no waiver, no allow rule, no
-// yield to a more specific class, so this is stricter than the gate.
-//
-// It reads every text field the tar reader surfaces, because each is published
-// with the archive:
-//   - the entry name;
-//   - the link target of a symbolic or hard link, which git archive stores in
-//     the header with no payload;
-//   - the owner and group names;
-//   - every PAX record, key and value, the global header git archive writes
-//     (the commit id) included; extended attributes arrive here too;
-//   - the payload, line by line.
-//
-// The numeric fields (mode, ids, sizes, times, device numbers) carry no text.
-// An entry type other than a regular file, directory, link or PAX global
-// header is an error: the check cannot vouch for what it does not read.
+// archiveLeaks returns every place in a tar stream a pattern matches, across names, link targets, owner and group names, PAX records and payloads; unknown entry types are errors.
 func archiveLeaks(archive io.Reader, set []Pattern) (files int, leaks []string, err error) {
 	tr := tar.NewReader(archive)
 	for {
@@ -139,12 +123,7 @@ func archiveLeaks(archive io.Reader, set []Pattern) (files int, leaks []string, 
 	}
 }
 
-// TestTheArchiveCarriesNoFleetValue archives HEAD exactly as the public tree
-// is produced and requires that no published file, the gate's own sources
-// and tests included, names a value of the fleet pattern set.
-// archiveFleetLeaks archives HEAD of the repository at root as a clean
-// publishing checkout would (ArchiveHEAD) and scans the archive for fleet
-// values.
+// archiveFleetLeaks archives HEAD of the repository at root as a clean publishing checkout would (ArchiveHEAD) and scans it for fleet values.
 func archiveFleetLeaks(root string, set []Pattern) (files int, leaks []string, err error) {
 	out, err := ArchiveHEAD(root)
 	if err != nil {
@@ -153,6 +132,7 @@ func archiveFleetLeaks(root string, set []Pattern) (files int, leaks []string, e
 	return archiveLeaks(bytes.NewReader(out), set)
 }
 
+// TestTheArchiveCarriesNoFleetValue archives HEAD as the public tree is produced and requires that no published file names a fleet value.
 func TestTheArchiveCarriesNoFleetValue(t *testing.T) {
 	root, err := os.Getwd()
 	if err != nil {
@@ -379,9 +359,7 @@ func TestArchiveLeaks_FindsAFleetValueInALinkTarget(t *testing.T) {
 	}
 }
 
-// TestArchiveLeaks_FindsAFleetValueInEveryHeaderField covers the header's
-// other text fields: a hard link's target, the owner and group names, and the
-// PAX records, a per-entry record and the global header git archive writes.
+// TestArchiveLeaks_FindsAFleetValueInEveryHeaderField covers link targets, owner and group names, and PAX records.
 func TestArchiveLeaks_FindsAFleetValueInEveryHeaderField(t *testing.T) {
 	buf := writeArchive(t, []archiveEntry{
 		{hdr: tar.Header{Typeflag: tar.TypeXGlobalHeader, Name: "pax_global_header", PAXRecords: map[string]string{"comment": "built on anvil"}}},
@@ -704,12 +682,7 @@ func TestThePlantedViolationIsCaught(t *testing.T) {
 	}
 }
 
-// TestTheGateWouldHaveCaughtTheFirstAudit pins the kinds of value the audit
-// of the sibling repository found, planted in the kind of file each was found
-// in. That audit is what the rule set
-// was written against, so it is the regression test for the rule set here too:
-// if a future change to the patterns stops matching any of these, the gate has
-// stopped doing the job it was written for.
+// TestTheGateWouldHaveCaughtTheFirstAudit plants each kind of value the original audit found, in the kind of file it was found in.
 func TestTheGateWouldHaveCaughtTheFirstAudit(t *testing.T) {
 	cases := []struct {
 		name    string

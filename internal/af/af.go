@@ -151,12 +151,7 @@ func (c Codec) Merge(split enclave.ByteAccess, keySize int, p Params) (enclave.B
 	return result, nil
 }
 
-// splitInto is the split itself, writing into caller-provided storage so
-// that every split runs the SAME code regardless of where dst and buffer
-// live.
-//
-// dst must be len(data)*stripes bytes and buffer must be len(data) bytes; both
-// are the caller's to protect and to clear.
+// splitInto splits into caller-provided dst (len(data)*stripes) and buffer (len(data)), which the caller protects and clears.
 func splitInto(dst, data, buffer []byte, stripes int, hashFunc func() hash.Hash, rand io.Reader) error {
 	blockSize := len(data)
 
@@ -197,21 +192,7 @@ func mergeInto(dst, splitData, buffer []byte, stripes, blockSize int, hashFunc f
 // bounds the one stack scratch buffer diffuse still needs.
 const maxDigestSize = sha512.Size
 
-// diffuse performs diffusion using the hash function, IN PLACE.
-//
-// In place is not a micro-optimization here, it is custody. The previous form
-// accumulated the result in a fresh heap slice and copied it back, so every
-// call left a heap copy of the diffusion state -- which is master key material,
-// see the file comment -- for the collector to move around and eventually
-// release unzeroed. diffuse is called stripes-1 times per split or merge, which
-// is 3999 times for a default container, so that was ~4000 unreachable copies
-// of key-derived state per operation, on memory this package had already gone
-// to some trouble to lock.
-//
-// Rewriting in place is exactly equivalent because output block i depends only
-// on input block i: the blocks are disjoint, each is fully consumed by h.Write
-// before h.Sum writes the digest back over it, and the remainder block is the
-// tail past the last whole block, so it overlaps none of them.
+// diffuse performs diffusion in place so no heap copy of the key-derived state is made; blocks are disjoint, so this is exact.
 func diffuse(data []byte, hashFunc func() hash.Hash, blockSize int) {
 	h := hashFunc()
 	digestSize := h.Size()
@@ -225,10 +206,7 @@ func diffuse(data []byte, hashFunc func() hash.Hash, blockSize int) {
 		hashBlockInto(block[:0:digestSize], block, h, i)
 	}
 
-	// Handle remaining bytes if blockSize isn't a multiple of digestSize. This
-	// does not arise for any LUKS2 key size in practice -- 32 and 64 are both
-	// multiples of both digest sizes -- but a header names its own hash and its
-	// own key size, so the case is handled rather than assumed away.
+	// Handle a block size that is not a multiple of the digest size; no LUKS2 key size produces one, but a header may.
 	if remainder := blockSize % digestSize; remainder != 0 {
 		lastBlock := data[blockSize-remainder:]
 		// The destination cannot be the block itself here: it is shorter than
@@ -241,10 +219,7 @@ func diffuse(data []byte, hashFunc func() hash.Hash, blockSize int) {
 	}
 }
 
-// hashBlockInto hashes block with an IV and APPENDS the digest to dst,
-// returning the extended slice. Appending into caller-provided storage is what
-// lets diffuse keep the diffusion state in the memory it already owns; the
-// digest is never returned on a fresh heap allocation.
+// hashBlockInto hashes block with an IV and appends the digest to dst.
 func hashBlockInto(dst, block []byte, h hash.Hash, iv int) []byte {
 	h.Reset()
 
@@ -260,20 +235,13 @@ func hashBlockInto(dst, block []byte, h hash.Hash, iv int) []byte {
 	return h.Sum(dst)
 }
 
-// xorBytes XORs the first len(dest) bytes of a and b into dest.
-//
-// crypto/subtle's word-at-a-time XOR rather than a byte loop: an AF split or
-// merge calls this 3999 times per keyslot, and a byte loop in this package is
-// also a coverage counter per byte under the instrumented test build (#92).
+// xorBytes XORs the first len(dest) bytes of a and b into dest, word at a time.
 func xorBytes(a, b, dest []byte) {
 	n := len(dest)
 	subtle.XORBytes(dest, a[:n], b[:n])
 }
 
-// writeHash returns the anti-forensic hash a NEW keyslot may be written with:
-// sha256 or sha512. It is the split's table, and SHA-1 is deliberately absent
-// from it -- this module reads SHA-1 keyslots (Merge) and never creates one
-// (#236).
+// writeHash returns the anti-forensic hash a new keyslot may be written with: sha256 or sha512, never SHA-1.
 func writeHash(name string) (func() hash.Hash, error) {
 	switch name {
 	case "sha256":
@@ -294,13 +262,7 @@ func ValidateWriteHash(name string) error {
 	return err
 }
 
-// mergeHash returns the anti-forensic hash an EXISTING keyslot is read with:
-// writeHash's, plus SHA-1.
-//
-// SHA-1 is what LUKS1 used for the AF split by default, so every LUKS1 volume
-// converted to LUKS2 carries it, as does any `cryptsetup luksFormat --hash
-// sha1`; cryptsetup opens them and so must this module (#236). In FIPS 140-3
-// mode it is refused before any hashing runs; see RequireApprovedHash.
+// mergeHash returns the anti-forensic hash an existing keyslot is read with: writeHash's plus SHA-1, which FIPS mode refuses.
 func (c Codec) mergeHash(name string) (func() hash.Hash, error) {
 	if err := RequireApprovedHash(c.FIPS, name); err != nil {
 		return nil, err

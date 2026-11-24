@@ -16,11 +16,7 @@ import (
 	"time"
 )
 
-// Sentinels shared by every package that opens, locks or reads a device.
-// Defined once here (owner ruling, 2026-10-05: ErrMetadataLockUnavailable
-// was already settled this way; the rest follow the same reasoning) and
-// re-exported by value from pkg/luks2, so errors.Is holds regardless of
-// which package's name a caller matches against.
+// Sentinels shared by every package that opens, locks or reads a device, re-exported by value from pkg/luks2.
 var (
 	// ErrNotFound indicates the device path doesn't exist.
 	ErrNotFound = errors.New("luks2: device not found")

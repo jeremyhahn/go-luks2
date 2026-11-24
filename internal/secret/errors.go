@@ -49,7 +49,7 @@ import (
 // headers are not yours. 8 MiB is a typical host default exactly, and well
 // above the 64 KiB some container runtimes still impose.
 //
-// # The aggregate bounds (#26)
+// # The aggregate bounds
 //
 // Every enclave is admitted against go-enclave's process Allocator before its
 // pages are mapped (Admitted). A keyslot scan whose largest keyslot could never

@@ -61,12 +61,7 @@ func TestHardenProbeChild(t *testing.T) {
 		return
 	}
 
-	// Start from a process that WOULD dump core: a nonzero RLIMIT_CORE,
-	// soft and hard, and the dumpable flag set. A hard limit of zero is
-	// raised (CI runs as root, so it can be); failing to set either
-	// precondition fails the test rather than proving nothing. The limit is
-	// inherited from the test binary, which no other test in this package
-	// hardens: each real CLI call runs in its own child (main_test.go).
+	// Start from a process that would dump core: nonzero RLIMIT_CORE and the dumpable flag set.
 	var lim unix.Rlimit
 	if err := unix.Getrlimit(unix.RLIMIT_CORE, &lim); err != nil {
 		t.Fatalf("getrlimit(RLIMIT_CORE): %v", err)

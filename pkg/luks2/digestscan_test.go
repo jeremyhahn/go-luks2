@@ -15,21 +15,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// Regression tests for #58: verifyMasterKey aborted on the FIRST digest whose
-// derivation or base64 decode errored, instead of moving on to the next one.
-//
-// The mismatch path already continued, so the bug was invisible whenever every
-// digest in a header was well-formed. It surfaced under GODEBUG=fips140=only,
-// where deriveKeyPlain refuses an argon2 KDF: a header carrying one argon2 digest
-// and one usable digest opened or did not open depending on which one Go's
-// randomized map iteration happened to visit first. The same header, the same
-// passphrase, a different answer from run to run.
-//
-// These tests do not need FIPS mode to reproduce it. Any digest that cannot be
-// derived or decoded exercises the same two return paths, and Go randomizes map
-// iteration order on every range, so a suite that ran the mixed-digest cases
-// enough times would have caught it -- which is why each of them is run
-// repeatedly here rather than once.
+// verifyMasterKey must move past a digest whose derivation or decode errors; each mixed case repeats because map order is random.
 
 // digestScanRepeats is how many times an order-dependent case is run. Go's map
 // iteration order is randomized per range statement, so a single execution of a
@@ -38,16 +24,6 @@ import (
 const digestScanRepeats = 64
 
 // boundTo declares every digest in the map as authenticating keyslot id.
-//
-// A spec-legal LUKS2 header always states that association -- "keyslots" is a
-// mandatory member of a digest object -- and these fixtures used to omit it,
-// which was harmless only while verifyMasterKey ignored it. It does not any
-// more: a digest that names no keyslot authenticates no keyslot. Setting it
-// here keeps the fixtures about what they were always about (the digest SCAN)
-// instead of turning every one of them into a test of the association.
-//
-// The association rule itself is tested where it belongs, on its own fixtures,
-// in digestbinding_test.go.
 func boundTo(id string, digests map[string]*header.Digest) map[string]*header.Digest {
 	for _, d := range digests {
 		if d != nil {
@@ -57,13 +33,7 @@ func boundTo(id string, digests map[string]*header.Digest) map[string]*header.Di
 	return digests
 }
 
-// usableDigest builds a digest that the given master key verifies against.
-//
-// One iteration, the least a header may declare (header.MinKDFIterations): the subject
-// here is the ORDER of the scan, which every case repeats digestScanRepeats
-// times, and at the 1000 iterations this used to carry each repeat paid two
-// full derivations for nothing it asserts -- these were among the slowest
-// tests in the package under -race (#92).
+// usableDigest builds a digest the given master key verifies against, at the minimum iteration count.
 func usableDigest(t *testing.T, masterKey []byte, length int) *header.Digest {
 	t.Helper()
 
@@ -128,8 +98,7 @@ func unusableDigests(t *testing.T) map[string]*header.Digest {
 			Digest:     encodeBase64(make([]byte, 32)),
 		},
 		"argon2 digest with no parameters": {
-			// The stand-in for GODEBUG=fips140=only refusing argon2: same
-			// return path out of deriveKeyPlain, reachable without FIPS mode.
+			// Stands in for fips140=only refusing argon2: the same return path out of deriveKeyPlain.
 			Type:       "argon2id",
 			Salt:       encodeBase64([]byte("digest-scan-salt")),
 			Iterations: iterations,
@@ -187,11 +156,7 @@ func TestVerifyMasterKeySkipsEveryUnusableDigestAtOnce(t *testing.T) {
 
 	masterKey := mustRandom(t, 32)
 
-	// Built once and re-keyed into a fresh map per repeat. What the repeats
-	// vary is the map's iteration order, which Go randomizes per range; the
-	// digests themselves are the same every time, and rebuilding them per
-	// repeat base64-encoded the 1 MiB "absurd length" digest 64 times over for
-	// nothing (#92).
+	// Built once and re-keyed into a fresh map per repeat, so only iteration order varies.
 	unusable := unusableDigests(t)
 	usable := usableDigest(t, masterKey, 32)
 
@@ -221,16 +186,7 @@ func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
 	otherKey := mustRandom(t, 32)
 
 	t.Run("every digest unusable is a HEADER fault, because nothing was compared", func(t *testing.T) {
-		// This subtest asserted ErrWrongKey until #41, and it was
-		// DEFENDING the defect rather than guarding against one: not one of
-		// these digests reaches EqualTo, so no key was ever judged, and a
-		// verification verdict claims a judgement that did not happen.
-		//
-		// It now pins one side of the boundary drawn in verifyMasterKey. The
-		// other side -- a set where at least one digest WAS compared -- is the
-		// subtest below, and the two must not be collapsed: the whole reason
-		// this case may be distinguished at all is that no comparison outcome
-		// exists to leak.
+		// No digest reaches a comparison, so this is a header fault, not ErrWrongKey.
 		digests := map[string]*header.Digest{}
 		id := 0
 		for _, bad := range unusableDigests(t) {
@@ -248,12 +204,7 @@ func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
 	})
 
 	t.Run("one usable digest among unusable ones is still a CREDENTIAL verdict", func(t *testing.T) {
-		// The other side of the boundary, and the constraint #41 named
-		// explicitly: a header carrying one wrong-length digest and one good
-		// digest must still tell an operator with a genuinely wrong passphrase
-		// that the credential failed. A comparison ran here, so the verdict is
-		// a verdict -- and every unusable digest beside it must not upgrade it
-		// into a header fault.
+		// A comparison ran, so a wrong passphrase stays a credential failure despite an unusable digest beside it.
 		for name, bad := range unusableDigests(t) {
 			t.Run(name, func(t *testing.T) {
 				digests := map[string]*header.Digest{
@@ -284,20 +235,7 @@ func TestVerifyMasterKeyFailsOnlyAfterExhaustingTheSet(t *testing.T) {
 	})
 
 	t.Run("the failure names no digest and no cause", func(t *testing.T) {
-		// Deliberately asserting on the message: an error that distinguished
-		// "digest 2 uses a KDF I refuse" from "digest 2 did not match" would
-		// tell an attacker holding the device which keyslot to work on and how
-		// the header is being interpreted. That property is UNCHANGED by #41
-		// and must stay unchanged.
-		//
-		// Both sets here reach a comparison, which is what makes them
-		// comparable at all. Before #41 the second set was a lone unusable
-		// digest; that set now lands on ErrInvalidHeader, and pairing it
-		// against a mismatch would have turned this test into an assertion
-		// about the new boundary instead of about the indistinguishability it
-		// exists to pin. It carries a usable digest beside the unusable one so
-		// that the ONLY difference between the two sets is the presence of a
-		// digest that could not be evaluated.
+		// The message must not tell a refused KDF from a mismatch; both sets reach a comparison and differ only by an unevaluable digest.
 		mismatch := verifyMasterKey(context.Background(), enclaveFrom(t, masterKey), "0", boundTo("0", map[string]*header.Digest{
 			"0": usableDigest(t, otherKey, 32),
 		}))
@@ -331,15 +269,7 @@ func TestVerifyMasterKeyAcceptsTheUsableDigestAlone(t *testing.T) {
 	}
 }
 
-// TestAWrongLengthDigestIsAHeaderFaultEndToEnd is #41's own acceptance case,
-// driven through the exported API on a real container rather than through
-// verifyMasterKey directly.
-//
-// The passphrase is CORRECT. That is the whole point: the operator this defect
-// misdirects is the one holding a good credential over a damaged header, and
-// before the boundary was drawn they were told their master key failed
-// verification -- a judgement that never happened, because the only digest
-// attesting the keyslot decodes to a length nothing can compare against.
+// TestAWrongLengthDigestIsAHeaderFaultEndToEnd: a correct passphrase over a wrong-length digest is reported as a header fault.
 func TestAWrongLengthDigestIsAHeaderFaultEndToEnd(t *testing.T) {
 	defer parallel(t)()
 

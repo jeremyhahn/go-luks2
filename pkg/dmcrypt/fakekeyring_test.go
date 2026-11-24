@@ -16,14 +16,7 @@ import (
 	keyringpkg "github.com/jeremyhahn/go-luks2/internal/keyring"
 )
 
-// The unit suite talks to an IN-MEMORY keyring and never to the kernel.
-//
-// Docker's default seccomp profile denies add_key, keyctl and request_key,
-// so a CI runner cannot exercise the real syscalls at all (pkg/luks2's
-// pre-split keyringfake_test.go found this the hard way). internal/keyring
-// has its own suite proving the real syscall mechanics against its own
-// fake; this one exists only so Activate, Deactivate's neighbors and
-// CheckKeyring can be driven deterministically in this package's tests.
+// An in-memory keyring for the unit suite; Docker's default seccomp denies the keyring syscalls.
 
 // memorySessionRing is the serial the fake reports for the session keyring.
 const memorySessionRing = 0x5e5510

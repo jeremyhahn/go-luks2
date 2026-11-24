@@ -106,12 +106,11 @@ var transforms = map[string]Transform{
 // "<algorithm>-<mode>-<iv>" -- and reports the transform it names, and
 // whether this module can run it.
 //
-// # The mode is consumed, not discarded (#106)
+// # The mode is consumed, not discarded
 //
-// This used to be a split that kept the algorithm and threw the rest away, and
-// the transform then ran AES-XTS whatever the header said. A keyslot declaring
-// "aes-cbc-essiv:sha256" over XTS material therefore opened perfectly here and
-// in no conforming implementation. Honoring the mode on read is what makes a
+// Running AES-XTS whatever the header said would let a keyslot declaring
+// "aes-cbc-essiv:sha256" over XTS material open here and in no conforming
+// implementation. Honoring the mode on read is what makes a
 // wrong declaration a test failure instead of a container only this library
 // can open: such a keyslot is now decrypted as the CBC it claims, fails its
 // digest as it does in cryptsetup, and a genuine CBC keyslot opens.
@@ -224,12 +223,7 @@ func (t Transform) EncryptEnclave(c secret.Custody, data, key enclave.ByteAccess
 		paddedLen += SectorSize - rem
 	}
 
-	// cryptsetup processes a keyslot area in whole SectorSize sectors: a
-	// final sector that is not itself a sector multiple is padded with zero
-	// before it is encrypted, and the ciphertext written covers the WHOLE
-	// padded sector. Returning only plainLen bytes left that trailing
-	// ciphertext off the device, with on-disk zero padding standing in its
-	// place instead -- not what cryptsetup writes for the same bytes.
+	// Encrypt whole zero-padded sectors and return all of the ciphertext, as cryptsetup writes it.
 	plainSrc := data
 	if paddedLen != plainLen {
 		// The padding sits beside key material in the same buffer, so it is
@@ -348,23 +342,9 @@ func WritableAreaKeySize(n int) int {
 	return 64
 }
 
-// xtsSectors runs AES-XTS over src into dst, one sector at a time, with the
-// sector index as the tweak. It is the single implementation behind both
-// directions and both the enclave and the plain wrappers, so the two can never
-// drift into producing containers this library can write but not read.
-//
-// dst and src must be the same length. Whole sectors are transformed IN PLACE
-// between the two buffers: a previous form copied every sector through two
-// freshly allocated 512-byte scratch buffers, which for a default keyslot meant
-// ~1000 heap allocations holding AF-split master key material per operation --
-// on exactly the material the enclave work exists to keep off the heap. Only a
-// trailing PARTIAL sector still needs scratch, because XTS is run over a
-// zero-padded full sector there, and that scratch is locked.
+// xtsSectors runs AES-XTS sector by sector in place between src and dst (same length); only a trailing partial sector uses locked scratch.
 func xtsSectors(c secret.Custody, dst, src, key []byte, sectorSize int, dir direction) error {
-	// A callable validator rather than an inline literal: the keyslot screen
-	// has to be able to ask the same question off metadata alone, before a
-	// derivation is paid for and before a removal guard counts the keyslot as
-	// a survivor (#45).
+	// A callable validator so the keyslot screen can ask the same question from metadata alone.
 	if err := ValidateXTSKeySize(len(key)); err != nil {
 		return err
 	}
@@ -409,15 +389,7 @@ func xtsSector(c *xts.Cipher, dst, src []byte, index uint64, dir direction) {
 	c.Encrypt(dst, src, index)
 }
 
-// xtsPartialSector transforms a final sector shorter than sectorSize by padding
-// it out to a whole sector, which is what the on-disk format requires and what
-// this module has always done.
-//
-// The two scratch buffers are LOCKED even for the encrypt direction, because
-// one of them holds plaintext key material in both directions -- the padded
-// input when encrypting, the padded output when decrypting -- and this path
-// runs at most once per operation, so the cost is one page pair rather than one
-// per sector.
+// xtsPartialSector transforms a short final sector padded to a whole sector, using locked scratch in both directions.
 func xtsPartialSector(c secret.Custody, dst, src []byte, xtsCipher *xts.Cipher, sectorSize, index int, dir direction) error {
 	scratch, err := c.New("key material sector", 2*sectorSize)
 	if err != nil {
@@ -434,10 +406,7 @@ func xtsPartialSector(c secret.Custody, dst, src []byte, xtsCipher *xts.Cipher, 
 	})
 }
 
-// cbcSectors runs AES-CBC over whole sectors with the IV generator iv, as
-// dm-crypt and cryptsetup's userspace keyslot path do: each sector is chained
-// on its own, from its own IV. The ESSIV salt is cleared as soon as its key
-// schedule exists.
+// cbcSectors runs AES-CBC over whole sectors, each chained from its own IV; the ESSIV salt is cleared once its schedule exists.
 func cbcSectors(iv ivGen, dst, src, key []byte, sectorSize int, dir direction) error {
 	if err := (Transform{mode: modeCBC}).ValidateKeySize(len(key)); err != nil {
 		return err

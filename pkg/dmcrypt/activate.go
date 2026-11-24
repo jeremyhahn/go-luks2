@@ -35,14 +35,7 @@ import (
 // (129) less its terminating NUL.
 const dmUUIDMaxLength = 128
 
-// mappingUUID is the dm UUID of the mapping name of a volume whose header
-// UUID is headerUUID: "CRYPT-LUKS2-<header uuid without dashes>-<name>",
-// cryptsetup's form, cut to what the kernel stores.
-//
-// It is cut HERE, once, because the kernel cuts it anyway and every later
-// identity check compares against what it stored. headerUUID is already
-// NUL-trimmed by (*luks2.Header).UUID, so there is no C-string truncation
-// to repeat here the way the pre-split code had to.
+// mappingUUID is cryptsetup's dm UUID for mapping name of headerUUID, cut to what the kernel stores.
 func mappingUUID(headerUUID, name string) string {
 	uuid := "CRYPT-LUKS2-" + strings.ReplaceAll(headerUUID, "-", "") + "-" + name
 	if len(uuid) > dmUUIDMaxLength {
@@ -51,21 +44,7 @@ func mappingUUID(headerUUID, name string) string {
 	return uuid
 }
 
-// Activate maps key as a dm-crypt target over v's backing device, naming it
-// name.
-//
-// THE KEY DOES NOT GO IN THE TABLE. dm-crypt accepts its volume key two
-// ways: inline in the table it is handed, or as a REFERENCE into the
-// calling task's kernel keyrings. This package only ever uses the
-// reference; see internal/keyring's package documentation for why. There
-// is no fallback: a keyring that cannot hold the key fails the activation
-// with an error matching ErrKeyringUnavailable, by owner ruling
-// (2026-08-31).
-// safeInt64ToUint64 converts int64 to uint64 safely, returning an error on
-// overflow. Private copy of pkg/luks2/security.go's unexported helper of
-// the same name: dmcrypt must not import luks2's internal narrowing
-// helpers (clean-code 4.3), so each package owning a checked conversion
-// keeps its own.
+// safeInt64ToUint64 converts int64 to uint64, returning an error on overflow.
 func safeInt64ToUint64(v int64) (uint64, error) {
 	if v < 0 {
 		return 0, ErrIntegerOverflow
@@ -73,6 +52,7 @@ func safeInt64ToUint64(v int64) (uint64, error) {
 	return uint64(v), nil
 }
 
+// Activate maps v's data segment as name with key, passing the key to dm-crypt as a kernel-keyring reference.
 func Activate(ctx context.Context, v *luks2.Volume, key *luks2.Key, name string) (*Mapping, error) {
 	const op = "Activate"
 	if err := ctxErr(ctx); err != nil {
@@ -90,10 +70,7 @@ func Activate(ctx context.Context, v *luks2.Volume, key *luks2.Key, name string)
 		return nil, errs.At(pkgName, op, "", &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "key is required"})
 	}
 
-	// An early, cheap refusal before any key material is touched. It is
-	// NOT what keeps two activations of one name apart -- the create
-	// ioctl is, see activateTable -- because this check and the create are
-	// not atomic.
+	// An early, cheap refusal; the create ioctl is what keeps two activations apart.
 	if _, err := sys.infoByName(name); err == nil {
 		return nil, errs.At(pkgName, op, "", &errs.Error{Kind: ErrActive,
 			Detail: fmt.Sprintf("the device-mapper name %q is already in use", name)})
@@ -113,11 +90,7 @@ func Activate(ctx context.Context, v *luks2.Volume, key *luks2.Key, name string)
 	return activateTarget(ctx, name, mappingUUID(header.UUID(), name), target, key)
 }
 
-// activateTarget is the half of Activate that runs once the target is
-// described and the key re-verified: the create, the keyring handoff, the
-// load and resume, the node and the readiness wait. From the create on it is
-// a transaction: every failure rolls the created target back, under
-// context.WithoutCancel so a canceled caller still gets the rollback.
+// activateTarget creates, keys, loads, resumes and verifies the target, rolling it back uncancellably on any failure after the create.
 func activateTarget(ctx context.Context, name, uuid string, target *luks2.Target, key *luks2.Key) (*Mapping, error) {
 	const op = "Activate"
 	backend := fmt.Sprintf("%d:%d", target.Major, target.Minor)
@@ -132,13 +105,10 @@ func activateTarget(ctx context.Context, name, uuid string, target *luks2.Target
 
 	info := &devmapper.DeviceInfo{Name: name, UUID: uuid, DevNo: devNo}
 
-	// Ensure /dev/dm-N names this device (containers without udev need
-	// it). Still NON-FATAL on its own -- the device may be reachable
-	// through /dev/mapper/<name> without it -- but carried and reported
-	// alongside the readiness failure it usually explains.
+	// Ensure /dev/dm-N names this device; non-fatal, but reported with any readiness failure.
 	nodeErr := sys.ensureNode(ctx, name, info)
 
-	// Wait until /dev/mapper/<name> is verifiably THIS device.
+	// Wait until /dev/mapper/<name> is verifiably this device.
 	if err := sys.waitReady(ctx, name, info); err != nil {
 		readiness := &errs.Error{Kind: errs.KindOf(err, errs.ErrIO), Detail: "device not ready after activation", Err: err}
 		if nodeErr != nil {
@@ -151,18 +121,7 @@ func activateTarget(ctx context.Context, name, uuid string, target *luks2.Target
 	return &Mapping{Name: name, UUID: uuid, Major: major, Minor: minor}, nil
 }
 
-// activateTable runs the whole activation -- create, keyring add, load,
-// resume, keyring release -- with the volume key borrowed from its enclave
-// for the keyring add and the load, and reports the device number of the
-// target it created and whether it created one at all.
-//
-// created is the line Activate's rollback is drawn on. It is false when
-// the call failed before its own create succeeded, which is the case the
-// rollback must NOT touch: a create refused because the name is taken
-// leaves the name to its owner.
-//
-// It runs on a thread of its own that is discarded afterwards: see
-// internal/keyring.RunOnDiscardedThread.
+// activateTable runs the whole activation on a discarded thread and reports the target's device number and whether it created one.
 func activateTable(ctx context.Context, name, uuid, backend string, target *luks2.Target, key *luks2.Key) (devNo uint64, created bool, err error) {
 	err = keyringpkg.RunOnDiscardedThread(func() error {
 		var createErr error
@@ -179,11 +138,7 @@ func activateTable(ctx context.Context, name, uuid, backend string, target *luks
 		}
 		created = true
 
-		// target.SectorSize came from luks2.Target as a validated int; the
-		// checked conversion (the same one Target itself uses) is kept
-		// here too rather than a bare uint64(...), so a future caller that
-		// builds a Target by hand cannot smuggle a negative value into the
-		// dm-crypt table.
+		// Checked conversion, so a hand-built Target cannot carry a negative sector size.
 		sectorSize, sizeErr := safeInt64ToUint64(int64(target.SectorSize))
 		if sizeErr != nil {
 			return &errs.Error{Kind: errs.KindOf(sizeErr, errs.ErrInvalidArgument), Detail: "invalid segment sector size", Err: sizeErr}
@@ -195,8 +150,7 @@ func activateTable(ctx context.Context, name, uuid, backend string, target *luks
 
 		var loadErr, releaseErr error
 		borrowErr := volkey.Borrow("Activate", key, func(b []byte) error {
-			// The devmapper library expects Length and BackendOffset in
-			// BYTES (it converts them to sectors internally).
+			// devmapper takes Length and BackendOffset in bytes.
 			table := devmapper.CryptTable{
 				Start:         0,
 				Length:        target.Length - target.Length%sectorSize, // rounded down: dm-crypt refuses a length that is not a sector multiple
@@ -208,12 +162,7 @@ func activateTable(ctx context.Context, name, uuid, backend string, target *luks
 				Flags:         target.Flags,
 			}
 
-			// Key is deliberately NOT set, here or anywhere else in this
-			// package: devmapper's buildSpec takes KeyID when it is
-			// non-empty and only falls back to hex.EncodeToString(Key)
-			// when it is empty, so an unassigned Key makes the hex
-			// encoding structurally unreachable rather than merely
-			// unused.
+			// Key is never set: KeyID is used, so the hex encoding is unreachable.
 			keyEntry, keyringErr := keyringpkg.AddVolumeKey(ctx, sys.keyring, uuid, b)
 			if keyringErr != nil {
 				return classifyKeyringErr(keyringErr)
@@ -229,11 +178,7 @@ func activateTable(ctx context.Context, name, uuid, backend string, target *luks
 			return loadErr
 		})
 
-		// The release is checked whatever the activation did. A keyring
-		// entry left holding the volume key is a custody failure in its
-		// own right, and one that a successful activation would
-		// otherwise hide completely -- so it fails the activation, and
-		// Activate rolls the mapping back.
+		// A keyring entry left holding the key fails the activation, which then rolls back.
 		if borrowErr == nil {
 			return releaseErr
 		}
@@ -245,14 +190,7 @@ func activateTable(ctx context.Context, name, uuid, backend string, target *luks
 	return devNo, created, err
 }
 
-// activateCreated loads table into the target this call created and
-// resumes it, confirming before each step that the name still names that
-// target.
-//
-// devmapper addresses load and resume by NAME, so between this call's
-// create and either step another process could remove the target and
-// create its own under the same name; loading our table into it would make
-// it our plaintext mapping under someone else's control.
+// activateCreated loads and resumes the target this call created, confirming before each step that the name still names it.
 func activateCreated(name, uuid string, devNo uint64, table devmapper.Table) error {
 	if err := confirmCreated(name, uuid, devNo); err != nil {
 		return err
@@ -279,21 +217,7 @@ func confirmCreated(name, uuid string, devNo uint64) error {
 	return nil
 }
 
-// rollback tears down a dm target that THIS Activate created, and refuses
-// to touch anything else.
-//
-// rollback is never cancellable: Activate derives ctx with
-// context.WithoutCancel before calling in, so a canceled caller still gets
-// a clean rollback rather than an abandoned plaintext device. ctx is still
-// threaded through to retryWhileBusy and removeMappingNodes -- it bounds
-// internal/dm's own retry budget the same way everywhere else -- it is
-// simply never the caller's cancellable one.
-//
-// The target is identified by the dm UUID this activation generated AND by
-// the device number its own create returned, so a concurrent activation of
-// the same volume under the same name -- which carries an identical UUID
-// -- is never mistaken for this one. See the pre-split
-// pkg/luks2.removeCreatedMapping, whose reasoning this reproduces exactly.
+// rollback removes only the target this Activate created, matched by dm UUID and device number; ctx is never cancellable.
 func rollback(ctx context.Context, name, uuid string, devNo uint64) error {
 	var (
 		info        *devmapper.DeviceInfo
@@ -352,13 +276,7 @@ func Deactivate(ctx context.Context, name string) error {
 		return errs.At(pkgName, op, "", err)
 	}
 
-	// The identity MUST be established before anything is removed, and
-	// device-mapper is the only authority on it. No-such-device is the
-	// typed not-active case, not a device-mapper failure.
-	//
-	// The capture is RETRIED on EBUSY like everything else on this path:
-	// the lookup goes through the same device-mapper control path as the
-	// close, so it is subject to the same transient hold (#122).
+	// Establish identity before removing anything, retrying on EBUSY; no such device is ErrNotActive.
 	var info *devmapper.DeviceInfo
 	if _, err := retryWhileBusy(ctx, func() error {
 		var err error
@@ -375,11 +293,7 @@ func Deactivate(ctx context.Context, name string) error {
 			Err:    err})
 	}
 
-	// A close rides out a transient hold rather than failing on it
-	// (#122). The identity is re-confirmed before EVERY attempt: during a
-	// backoff another actor can remove this target and create a
-	// DIFFERENT mapping under the same name, and removing that one would
-	// destroy a plaintext device this caller never opened.
+	// Retry a transient hold, re-confirming identity before every attempt.
 	replaced := false
 	attempts, err := retryWhileBusy(ctx, func() error {
 		current, err := sys.infoByName(name)

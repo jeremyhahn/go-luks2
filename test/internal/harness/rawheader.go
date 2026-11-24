@@ -205,7 +205,7 @@ func GetVolumeInfo(device string) (*VolumeInfo, error) {
 // library's luks2.SetupLoopDevice did before B.6 renamed it away in favor of
 // pkg/loop.Attach, which returns a *loop.Device rather than a bare path.
 //
-// It refuses a file that is not below the run root BeginSuite recorded (#348):
+// It refuses a file that is not below the run root BeginSuite recorded:
 // that record, made before any test runs, is what lets a later run's reaper
 // find and detach the device by its backing file if this run dies first.
 func SetupLoopDevice(file string) (string, error) {

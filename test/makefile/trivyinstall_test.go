@@ -21,11 +21,7 @@ import (
 	"testing"
 )
 
-// `make trivy-install` replaced `curl .../contrib/install.sh | sh` (#247). What
-// makes it safe is that nothing is unpacked, installed or reused unless it
-// matches a pinned SHA-256. These tests run the real target against a local
-// HTTPS server serving a stand-in archive, with the pins overridden on the
-// command line to that archive's hashes, and prove each check REFUSES.
+// `make trivy-install` installs nothing that does not match a pinned SHA-256; these tests prove each check refuses, against a local HTTPS server.
 
 // trivyArchive builds a release-shaped .tar.gz holding one file, trivy.
 func trivyArchive(t *testing.T, binary []byte) []byte {
@@ -151,8 +147,7 @@ func TestTrivyInstallVerifiesThenInstalls(t *testing.T) {
 	}
 }
 
-// The archive's hash is checked BEFORE it is unpacked: a substituted archive
-// installs nothing.
+// TestTrivyInstallRefusesAnArchiveThatDoesNotMatchItsPin: the hash is checked before unpacking.
 func TestTrivyInstallRefusesAnArchiveThatDoesNotMatchItsPin(t *testing.T) {
 	binary := []byte("#!/bin/sh\necho 'Version: 0.75.0'\n")
 	f := newTrivyFixture(t, trivyArchive(t, binary), binary)
@@ -211,23 +206,13 @@ func TestTrivyPinsAreFullHashes(t *testing.T) {
 	}
 }
 
-// TOOLS_REQUIRED=1 is what the release and the nightly gate run under: a
-// scanner that is absent FAILS the target instead of skipping with a warning,
-// so a release cannot publish on a scan that never ran (#247). Without it the
-// developer default still skips.
+// TestToolsRequiredTurnsAMissingScannerIntoAFailure: with TOOLS_REQUIRED=1 an absent scanner fails; without it the target skips.
 func TestToolsRequiredTurnsAMissingScannerIntoAFailure(t *testing.T) {
-	// No scanner on PATH, and the Makefile's GOBIN fallback pointed at an empty
-	// directory (a command-line override, so go's own GOPATH and its module
-	// cache are untouched). PATH is a directory of links to the system's
-	// executables minus the scanners, so the test does not depend on whether
-	// the host happens to have them installed (CI runners do). TOOLS_REQUIRED is
-	// dropped too: the toolchain image exports it, and inherited it would turn
-	// the run without it into a second run with it.
+	// No scanner on PATH or under GOBIN, and TOOLS_REQUIRED dropped, so the host's tools do not matter.
 	scanners := []string{"gosec", "govulncheck", "trivy"}
 	env := environ([]string{"GOBIN", "TOOLS_REQUIRED"}, map[string]string{"PATH": systemPathWithout(t, scanners...)})
 	emptyBin := t.TempDir()
-	// trivy is not part of this contract: its targets fail closed with or
-	// without TOOLS_REQUIRED (#296), asserted in the trivy-fs case below.
+	// trivy's targets fail closed either way; see the trivy-fs case.
 	t.Run("trivy-fs", func(t *testing.T) {
 		args := []string{"--no-print-directory", "trivy-fs", "TOOLS_DIR=" + t.TempDir(), "GOBIN=" + emptyBin}
 		for _, extra := range [][]string{nil, {"TOOLS_REQUIRED=1"}} {

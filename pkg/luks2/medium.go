@@ -16,15 +16,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// Confirming that what is read through the page cache is what is on the
-// medium.
-//
-// An operation that destroys key material on the strength of what it READ --
-// MigrateToFIPS removing Argon2 keyslots once both header copies agree -- is
-// only as safe as that read. The actual O_DIRECT reads, the loop-device stack
-// walk and the byte comparison live in internal/device; this file keeps only
-// the part that knows the LUKS2 header's own size fields, which internal/device
-// cannot: it sits below internal/header in the import DAG.
+// Confirming that what is read through the page cache is on the medium; the I/O is in internal/device, the header size fields here.
 
 // directIOAlign is the buffer, offset and length alignment O_DIRECT reads
 // use: the largest logical block size a device this library opens presents.
@@ -41,9 +33,7 @@ func readDirectAt(ctx context.Context, path string, off int64, n int, openFile d
 	return device.ReadPastCache(ctx, "read the device past the page cache", path, off, n, openFile)
 }
 
-// statRdev stats path and returns its raw device number. It FOLLOWS
-// symlinks, because /dev/mapper/<name> is one and what matters is the
-// device it names.
+// statRdev stats path, following symlinks, and returns its raw device number.
 func statRdev(path string) (uint64, error) {
 	var st unix.Stat_t
 	if err := unix.Stat(path, &st); err != nil {
@@ -59,10 +49,7 @@ type mediumSource struct {
 	offset int64
 }
 
-// mediumSources returns every place device's bytes must be read past a cache
-// for the read to be the medium's. The stack walk itself is
-// internal/device.MediumSources; this converts its result to and from this
-// package's own type.
+// mediumSources returns every place device's bytes must be read past a cache (internal/device.MediumSources).
 func mediumSources(path string, nodeRdev func(string) (uint64, error)) ([]mediumSource, error) {
 	srcs, err := device.MediumSources(path, sysDevBlockRoot, nodeRdev)
 	if err != nil {
@@ -75,15 +62,7 @@ func mediumSources(path string, nodeRdev func(string) (uint64, error)) ([]medium
 	return out, nil
 }
 
-// requireCacheMatchesMedium refuses with ErrDeviceCacheStale if the header
-// copies of device, read through the page cache, differ from the same bytes
-// read past every cache to the medium (mediumSources).
-//
-// The region compared is the two header copies and nothing after them: the
-// primary binary header is compared first, and its hdr_size then bounds the
-// rest, so not a byte of the keyslots area or of the encrypted data is read.
-// A primary whose size is not a legal header size is left for the header
-// reader to refuse.
+// requireCacheMatchesMedium refuses with ErrDeviceCacheStale if the header copies read through the cache differ from the medium.
 func requireCacheMatchesMedium(path string, sys volumeSys) error {
 	f, err := openDevice("read the device", path, os.O_RDONLY, sys)
 	if err != nil {
@@ -93,11 +72,7 @@ func requireCacheMatchesMedium(path string, sys volumeSys) error {
 	return requireCacheMatchesMediumOf(context.Background(), f, path, sys)
 }
 
-// requireCacheMatchesMediumOf is requireCacheMatchesMedium for an operation
-// that already holds the device: cached is what it reads through -- its pinned
-// descriptor (#255) -- and path names the same file for the reads past the
-// cache (keyslotDevice.mediumPath), so no step resolves the operator's path
-// again.
+// requireCacheMatchesMediumOf is requireCacheMatchesMedium through an already-held descriptor, with path for the reads past the cache.
 func requireCacheMatchesMediumOf(ctx context.Context, cached io.ReaderAt, path string, sys volumeSys) error {
 	sources, err := device.MediumSources(path, sysDevBlockRoot, sys.nodeRdev)
 	if err != nil {

@@ -60,12 +60,6 @@ func refusing() secret.Custody {
 }
 
 // TestFormatDashedKey pins the dashed rendering byte for byte.
-//
-// It matters more than it looks: the rendering is now built IN PLACE inside
-// locked memory, by encoding the hex right-aligned in the destination and
-// expanding it leftward around the separators, rather than by joining strings.
-// These fixtures are what stands between that rewrite and a recovery key that
-// prints differently from the one that was stored.
 func TestFormatDashedKey(t *testing.T) {
 	tests := []struct {
 		name     string

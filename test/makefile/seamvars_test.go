@@ -20,16 +20,7 @@ import (
 	"testing"
 )
 
-// seamAllowlist names pkg/luks2's package-level vars of func or interface
-// type that are still real test seams, not yet folded into Volume.sys.
-// Every pkg/luks2 seam now lives in Volume.sys or in a per-call sys a free
-// function builds, so this list is empty; it stays here, with TestSeamAllowlistNamesOnlyRealSeams, so
-// a future seam that cannot yet be migrated has somewhere sanctioned to go
-// rather than being quietly left unmigrated.
-//
-// This list is an upper bound, not a target: entries are removed as seams
-// are migrated, but nothing here requires the list to be updated when that
-// happens. Anything NOT on this list, in ANY package, fails the test.
+// seamAllowlist names pkg/luks2's package-level func or interface vars still allowed as test seams; it is empty, and anything not on it fails.
 var seamAllowlist = map[string]bool{}
 
 // seamFinding is one package-level var of func or interface type found
@@ -40,16 +31,7 @@ type seamFinding struct {
 	pos  string
 }
 
-// findSeamVars type-checks every non-test, build-tag-applicable .go file in
-// dir as a single package and reports every package-level *types.Var whose
-// underlying type is a function signature or an interface, skipping
-// errors.go (sentinel declarations there are typed *errs.Error, not
-// func/interface, but the file is excluded on principle: it is the one file
-// that holds sentinel declarations, never seams).
-//
-// It uses go/build.Context.MatchFile, not a filename-suffix guess, so
-// build-tag pairs like a _linux.go/_other.go split on the same function name
-// are not mistaken for a redeclaration.
+// findSeamVars type-checks dir's applicable non-test files (go/build.Context.MatchFile) and reports every package-level func or interface var outside errors.go.
 func findSeamVars(t *testing.T, dir string) []seamFinding {
 	t.Helper()
 	findings, err := seamVarsIn(dir)
@@ -59,12 +41,7 @@ func findSeamVars(t *testing.T, dir string) []seamFinding {
 	return findings
 }
 
-// seamTypes holds the one source importer every seamVarsIn call shares, and
-// the file set it records positions in. The source importer caches each
-// package it type-checks, so one instance type-checks the standard library
-// and every dependency once per test binary instead of once per package
-// directory. The importer is not safe for concurrent use: mu serializes
-// seamVarsIn.
+// seamTypes holds the source importer and file set every seamVarsIn call shares; mu serializes it.
 var seamTypes struct {
 	once sync.Once
 	mu   sync.Mutex
@@ -163,12 +140,7 @@ func seamDirs(t *testing.T, root string) []string {
 	return dirs
 }
 
-// TestNoNewSeamVars enforces "no package-level mutable seams": a package-level var of func or
-// interface type, outside errors.go, is a test seam. Every package except
-// pkg/luks2 has already folded its seams into an unexported sys struct (or
-// has none); pkg/luks2's remaining seams are named in seamAllowlist. Nothing
-// outside that allowlist, in any package, is permitted -- a new seam var
-// must be a struct field, not a bare package-level var.
+// TestNoNewSeamVars fails on any package-level func or interface var outside errors.go and seamAllowlist.
 func TestNoNewSeamVars(t *testing.T) {
 	root := repoRoot(t)
 

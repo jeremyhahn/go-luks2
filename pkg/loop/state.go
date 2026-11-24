@@ -19,12 +19,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// defaultSysBlockRoot is where the kernel exposes block-device attributes.
-// It is a [sys] field rather than a constant used directly so a reader's own
-// failure branches can be exercised: every path under the real /sys/block
-// either exists or does not, so an error that is NOT "absent" -- the one
-// [readLoopStateIn] must never mistake for "detached" -- is unreachable from
-// a real device name and would otherwise go untested.
+// defaultSysBlockRoot is the sysfs block root; a [sys] field so tests can reach readLoopStateIn's non-absent error branches.
 const defaultSysBlockRoot = "/sys/block"
 
 // loopState is one observation of a loop device's attributes.
@@ -43,21 +38,7 @@ type loopState struct {
 // difference is the whole contract of the wait in detach.go.
 type loopStateReader func(device string) (loopState, error)
 
-// readLoopStateIn observes a loop device against a given sysfs root.
-//
-// The distinction it exists to make is between two ways of finding nothing:
-//
-//   - the BLOCK DEVICE is there and its loop attributes are gone -- the
-//     device exists and is attached to nothing, which is a positive answer;
-//   - the block device is not there at all -- which says nothing about any
-//     loop association, because we are not looking at a loop device we can
-//     observe.
-//
-// Collapsing the second into the first is a fail-open, and a subtle one: a
-// device whose basename is not a top-level /sys/block entry -- a udev
-// symlink, /dev/block/7:0, or a PARTITION such as /dev/loop0p1, which lives
-// at /sys/block/loop0/loop0p1 -- would otherwise report "not attached" and
-// let a caller conclude a release it never observed.
+// readLoopStateIn observes a loop device under a sysfs root; a missing block device is an error, never "detached".
 func readLoopStateIn(root, device string) (loopState, error) {
 	name := filepath.Base(device)
 	blockDir := filepath.Join(root, name)
@@ -93,23 +74,12 @@ func readLoopStateIn(root, device string) (loopState, error) {
 	return loopState{backing: abs, autoclear: readLoopFlag(blockDir, "autoclear")}, nil
 }
 
-// loopAttributeSaysUnbound reports whether a failed read of a loop device's
-// sysfs backing_file means the device is attached to nothing.
-//
-// Kernels say it differently: some remove the loop attributes (ENOENT),
-// others keep them and fail the read with ENODEV once the device is
-// released -- measured on a CI runner, where the test harness's own release
-// confirmation failed on exactly that (go-luks2 #141). ENXIO is the loop
-// driver's "not bound" answer. Every other failure means the state could not
-// be read, and stays an error.
+// loopAttributeSaysUnbound reports whether a failed backing_file read (ENOENT, ENODEV, ENXIO) means the device is attached to nothing.
 func loopAttributeSaysUnbound(err error) bool {
 	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ENODEV) || errors.Is(err, unix.ENXIO)
 }
 
-// readLoopFlag reads a boolean loop attribute. It is best-effort by design:
-// the flags are diagnostic, and a missing or unreadable one must not turn
-// into a claim about the association itself -- that is what
-// [readLoopStateIn]'s error is for.
+// readLoopFlag reads a diagnostic boolean loop attribute, best-effort.
 func readLoopFlag(blockDir, name string) bool {
 	data, err := os.ReadFile(filepath.Join(blockDir, "loop", name)) // #nosec G304 -- sysfs path built from the device's base name
 	if err != nil {

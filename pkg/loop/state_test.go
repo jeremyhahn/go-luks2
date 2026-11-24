@@ -64,15 +64,7 @@ func TestReadLoopStateInReportsAutoclear(t *testing.T) {
 	}
 }
 
-// TestReadLoopStateInDoesNotTreatAnAbsentBlockDeviceAsDetached is the
-// fail-open this reader got wrong twice, in two different disguises.
-//
-// A name that is not a top-level /sys/block entry -- a udev symlink,
-// /dev/block/7:0, or a PARTITION like /dev/loop0p1, which lives at
-// /sys/block/loop0/loop0p1 -- makes the whole path absent. Reading that as
-// "not attached" would let the wait conclude a release it never observed,
-// for a device it was never able to look at. Absence of the BLOCK DEVICE and
-// absence of its LOOP ATTRIBUTES are different facts.
+// TestReadLoopStateInDoesNotTreatAnAbsentBlockDeviceAsDetached: a symlink, /dev/block/7:0 or partition path is not "detached".
 func TestReadLoopStateInDoesNotTreatAnAbsentBlockDeviceAsDetached(t *testing.T) {
 	root := t.TempDir()
 

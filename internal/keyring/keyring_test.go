@@ -248,10 +248,7 @@ func TestReleaseFailureMessageNamesTheEntryAndTheKeyctlCommands(t *testing.T) {
 	}
 }
 
-// TestReleaseTreatsARevokedButResolvableEntryAsNotReleased pins the
-// fail-closed reading of the verification search: only ENOKEY or ENOENT
-// confirm the entry is gone. An entry that still resolves, even as
-// EKEYREVOKED, is reported.
+// TestReleaseTreatsARevokedButResolvableEntryAsNotReleased: only ENOKEY or ENOENT confirm the entry is gone.
 func TestReleaseTreatsARevokedButResolvableEntryAsNotReleased(t *testing.T) {
 	fake := newFakeSyscalls()
 	s := fake.seam()
@@ -387,9 +384,7 @@ func TestClassifyAndRemedy(t *testing.T) {
 	}
 }
 
-// TestBlockedRemedyNamesThePublicPreflight pins the preflight the blocked
-// remedy points at to the one the library exports (#324):
-// CheckKeyringAvailable went with the old activation API (#268).
+// TestBlockedRemedyNamesThePublicPreflight pins the remedy to the exported preflight.
 func TestBlockedRemedyNamesThePublicPreflight(t *testing.T) {
 	got := Remedy(ErrBlocked)
 	if !strings.Contains(got, "dmcrypt.CheckKeyring") {

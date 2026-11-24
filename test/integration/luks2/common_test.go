@@ -27,14 +27,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/test/internal/harness"
 )
 
-// Unlock, Lock, IsUnlocked and GetMappedDevicePath are the old
-// luks2.Unlock/Lock/IsUnlocked/GetMappedDevicePath free functions, forwarded
-// across the two packages they collapsed into (#268): pkg/luks2 derives the
-// key and pkg/dmcrypt activates it. See cmd/luks2/cli.go's
-// DefaultLuksOperations for the same forward. volumename_test.go's
-// mapping-name audit keys on the bare selector names "Unlock" and "Lock",
-// which is why these keep the old capitalization despite being
-// package-local.
+// Unlock, Lock, IsUnlocked and GetMappedDevicePath forward to pkg/luks2 and pkg/dmcrypt; volumename_test.go keys on the names Unlock and Lock.
 func Unlock(device string, passphrase []byte, name string) error {
 	ctx := context.Background()
 	v, err := luks2.Open(ctx, device)
@@ -55,12 +48,7 @@ func Unlock(device string, passphrase []byte, name string) error {
 	}
 	defer key.Destroy()
 
-	// Write-ahead (#96, #348): the mapping is in the run ledger before
-	// Activate creates it, so a run that dies at any point after -- a
-	// timeout, a kill, a container torn down mid-test -- leaves an entry a
-	// later run's reaper can attribute and remove. A record failure refuses
-	// the activation. A live mapping that does not carry its recorded
-	// identity is removed here, because the reaper would leave it.
+	// Record the mapping in the run ledger before Activate creates it; a record failure refuses the activation, and a mapping without its recorded identity is removed.
 	var mapping *dmcrypt.Mapping
 	err = runSuite.Ledger.ActivateRecordedAhead(runSuite.Remover, device, name, func() error {
 		var err error
@@ -73,14 +61,7 @@ func Unlock(device string, passphrase []byte, name string) error {
 	return err
 }
 
-// FormatOptions and Format are the old FormatOptions/luks2.Format
-// free-function shape, forwarded onto (*luks2.Volume).Format the same way
-// Unlock above forwards onto (*luks2.Volume).Unlock plus dmcrypt.Activate:
-// B.6 moved Format behind the Volume, and the on-disk container it writes
-// is the same regardless of which shape chose it. Only the KDF spellings
-// and cipher fields this package's own fixtures actually pass are
-// supported; it is a test fixture builder, not a second implementation of
-// the option-resolution rules (*luks2.Volume).Format itself applies.
+// FormatOptions and Format forward to (*luks2.Volume).Format, supporting only the options these fixtures pass.
 type FormatOptions struct {
 	Device          string
 	Passphrase      []byte
@@ -184,13 +165,7 @@ func GetMappedDevicePath(name string) (string, error) {
 	return m.Path(), nil
 }
 
-// AddKeyOptions and AddKey are the old free-function shape, forwarded onto
-// (*luks2.Volume).AddKeyslot the same way Format above forwards onto
-// (*luks2.Volume).Format: B.6 moved AddKey behind the Volume and the Key
-// type. Every caller here discards the old int-slot return, so AddKey
-// returns the new KeyslotInfo instead -- the one caller that used to read
-// AddKeyOptions.InheritedArgon2Cost reads KeyslotInfo.KDF directly now; see
-// argon2interop_test.go.
+// AddKeyOptions and AddKey forward to (*luks2.Volume).AddKeyslot and return its KeyslotInfo.
 type AddKeyOptions struct {
 	Keyslot         *int
 	KDFType         string
@@ -351,11 +326,7 @@ func keyslotParamsForTest(opts *AddKeyOptions) luks2.KeyslotParams {
 	return luks2.KeyslotParams{Slot: opts.Keyslot, Priority: luks2.PriorityNormal, KDF: kdf}
 }
 
-// requireRoot fails the calling test when it is not running as uid 0, and
-// does so LOUDLY: this tier exists to exercise the device-mapper, loop and
-// mount syscalls a non-root process cannot reach, so a bare uid check that
-// quietly skips converts "root was not available" into a pass, and the
-// whole reason this tier is privileged is so that is never true.
+// requireRoot fails the calling test when not running as uid 0, never skips.
 func requireRoot(t *testing.T) {
 	t.Helper()
 
@@ -367,25 +338,7 @@ func requireRoot(t *testing.T) {
 	}
 }
 
-// releaseVolume retries lock (expected to be func() error { return
-// Lock(volumeName) }, written out at the call site rather than closed over
-// here) until volumeName's mapping is gone, and FAILS THE TEST if one is
-// left behind on the host (#100).
-//
-// lock is a parameter, not a direct call to Lock, so that the actual
-// Lock(volumeName) call -- the one the device-mapper-name safety gate
-// (volumename_test.go) must see traced to runVolume -- is written at each
-// call site, where volumeName really is a local assigned from runVolume.
-// This function only ever sees volumeName as an opaque parameter, which the
-// gate's single-file AST walk cannot trace back across a call boundary; a
-// Lock(volumeName) written here would be flagged as unprovably scoped even
-// though it is safe, because every call site is independently checked.
-//
-// Same helper and reasoning as the other integration suites': this package cannot
-// reach pkg/luks2's own unexported releaseVolumeErr (which additionally
-// unmounts whatever is mounted from the volume's own device), so a caller
-// that mounted a filesystem on the mapping must unmount it itself before
-// relying on this to close cleanly.
+// releaseVolume retries lock until volumeName's mapping is gone and fails the test if it remains; lock is written at the call site for volumename_test.go's audit.
 func releaseVolume(t *testing.T, volumeName string, lock func() error) {
 	t.Helper()
 
@@ -410,10 +363,7 @@ func releaseVolume(t *testing.T, volumeName string, lock func() error) {
 		"start. Last error from Lock: %v", volumeName, timeout, last)
 }
 
-// mappingConfirmedGone reports whether the mapping is CONFIRMED absent, by
-// asking dmsetup directly rather than trusting luks2.IsUnlocked -- see
-// the measured "Device does not exist." string below, and why "unknown" must
-// be treated as present.
+// mappingConfirmedGone reports whether dmsetup confirms the mapping absent; unknown counts as present.
 func mappingConfirmedGone(volumeName string) bool {
 	out, err := exec.Command("dmsetup", "info", volumeName).CombinedOutput()
 	if err == nil {
@@ -561,16 +511,7 @@ func laneDLoop(t *testing.T) (loop, image string) {
 	return loopDev, image
 }
 
-// stampTokens replaces a container's token map with exactly the map given,
-// bypassing ImportToken's canonicalization, so entries the exported token
-// API cannot create -- a non-canonical id, in particular -- reach the disk.
-//
-// It is pkg/luks2's own craftedheader_test.go's writeHeaderUnvalidated,
-// reimplemented here with internal/header's exported codec (EncodeMetadata,
-// WriteEncodedHeader, WriteSecondaryCopy): LUKS2BinaryHeader and
-// LUKS2Metadata are type aliases of header.BinaryHeader/header.Metadata
-// (pkg/luks2/types.go), so this package needs no access to pkg/luks2's own
-// unexported helper.
+// stampTokens replaces a container's token map verbatim through internal/header's codec, bypassing ImportToken's canonicalization.
 func stampTokens(t *testing.T, path string, tokens map[string]*luks2.LegacyToken) {
 	t.Helper()
 
@@ -594,8 +535,7 @@ func stampTokens(t *testing.T, path string, tokens map[string]*luks2.LegacyToken
 	}
 }
 
-// tokenIDVolume writes a container whose token map carries the given keys
-// VERBATIM, so a non-canonical spelling reaches the disk.
+// tokenIDVolume writes a container whose token map carries the given keys verbatim.
 func tokenIDVolume(t *testing.T, name string, keys ...string) string {
 	t.Helper()
 

@@ -10,12 +10,7 @@ import (
 	"strings"
 )
 
-// flags is a minimal, interspersed command-line flag parser: --name value,
-// --name=value, and bare booleans, in any order relative to the positional
-// arguments it returns. It exists because the standard flag package stops
-// parsing at the first positional argument, and this CLI's commands put
-// positionals before, after and between flags (`luks2 open --key-file f
-// /dev/sdb1 name`).
+// flags parses --name value, --name=value and booleans interspersed with positional arguments.
 type flags struct {
 	command string
 	strings map[string]*string

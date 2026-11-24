@@ -239,12 +239,7 @@ func TestCryptsetupLockIsNotTakenForARegularFile(t *testing.T) {
 	}
 }
 
-// TestASharedReleaseLeavesTheFileToTheLastHolder: readers share cryptsetup's
-// lock file, and a reader leaving while another still holds it must not
-// unlink it -- the next writer would lock a fresh file the remaining reader
-// is not on, and the two would no longer exclude each other. Release unlinks
-// only when it can take the file exclusively, as cryptsetup's
-// release_lock_handle does; the last holder out removes it.
+// TestASharedReleaseLeavesTheFileToTheLastHolder: a reader leaving while another holds the lock file must not unlink it.
 func TestASharedReleaseLeavesTheFileToTheLastHolder(t *testing.T) {
 	t.Parallel()
 

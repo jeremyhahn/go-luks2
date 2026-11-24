@@ -19,25 +19,7 @@ import (
 // the daemon to do is the behavior, and a real daemon would only add a way
 // for these tests to touch the machine.
 
-// ciDocker is a docker stand-in that appends each invocation to
-// $FAKE_DOCKER_LOG and answers the calls the CI recipes make:
-//
-//   - `cp -a - NAME:/src` lists the tar stream it is handed into
-//     $FAKE_DOCKER_LOG.tar, numeric owners included;
-//   - `cp SRC DST` writes a profile to DST unless FAKE_CP=fail;
-//   - `start` exits FAKE_START_RC, `compose ... run` exits FAKE_RUN_RC and
-//     records the GO_LUKS2_* values it was started with;
-//   - `rm`, `network rm` and `volume rm` exit FAKE_RM_RC;
-//   - `ps`, `inspect`, `network ls` and `volume ls` answer from the reaper
-//     fixture: see TestCIReapStacks;
-//   - `images` lists the reaper's image fixture and `image inspect` dates it
-//     (created, then last tagged); go-luks2-ci-it:held is a held image, every
-//     other name absent; `image rm` exits FAKE_RM_RC.
-//
-// Its "now" is FAKE_NOW (Unix seconds), which ciDockerEnv reads before make
-// starts, never the clock at the call: the recipe reads its own clock first,
-// and a stand-in clock that has since crossed a second would date a fresh
-// container or image after the recipe's now, so a zero minimum age keeps it.
+// ciDocker is a docker stand-in that logs each invocation to $FAKE_DOCKER_LOG and answers the CI recipes' calls from fixtures; its now is FAKE_NOW.
 const ciDocker = `#!/bin/sh
 log="$FAKE_DOCKER_LOG"
 printf '%s\n' "$*" >> "$log"
@@ -212,8 +194,7 @@ func TestCIToolchainRunCopiesTheCheckoutInAndRunsCMDWithNoNetwork(t *testing.T) 
 		"--security-opt no-new-privileges:true", "--pids-limit 4096",
 		"--ulimit memlock=67108864:67108864", "--network none",
 		"--user 10001:10001", "--workdir /src", "--env HOME=/tmp",
-		// ci-template v1.29.4: Go's scratch on an anonymous volume, not the
-		// tmpfs, checked before CMD runs.
+		// Go's scratch is on an anonymous volume, not the tmpfs, checked before CMD runs.
 		"-v /var/tmp --env TMPDIR=/var/tmp --env GOTMPDIR=/var/tmp ",
 		`example/toolchain:t sh -c [ -d "$TMPDIR" ] && [ -w "$TMPDIR" ] || {`,
 	} {
@@ -276,9 +257,7 @@ func TestCIToolchainRunBridgePassesCredentialsByName(t *testing.T) {
 	}
 	for _, want := range []string{
 		"--network bridge",
-		// The baked module cache first, read-only, so verify checks the
-		// modules the image was built with; deps-check asks the network.
-		// ci-template v1.34.1: no `direct` entry.
+		// The baked module cache first, read-only; no `direct` entry.
 		"--env GOPROXY=file:///go/pkg/mod/cache/download,https://proxy.golang.org ",
 		"--env DEPS_CHECK_GOPROXY=https://proxy.golang.org ",
 		"--env GOMODCACHE=/cache/gomod", "--env GOPRIVATE ", "--env GIT_CONFIG_COUNT ",
@@ -296,9 +275,7 @@ func TestCIToolchainRunBridgePassesCredentialsByName(t *testing.T) {
 	}
 }
 
-// ci-template v1.29.4: a runner that sets DEVCACHE_GOPROXY puts its module
-// cache first, with `|` so any error falls through to the public proxy, and
-// never `direct` (v1.34.1).
+// TestCIToolchainRunBridgePutsTheDevcacheProxyFirst: DEVCACHE_GOPROXY comes first with `|` fallthrough, never `direct`.
 func TestCIToolchainRunBridgePutsTheDevcacheProxyFirst(t *testing.T) {
 	env, log := ciDockerEnv(t, map[string]string{"DEVCACHE_GOPROXY": "http://cache.example:3000"})
 	runMake(t, env, "-s", "ci-toolchain-run", "CMD=make deps-check",
@@ -386,12 +363,7 @@ func TestCIToolchainRunTakesTheJobsMemoryBound(t *testing.T) {
 	}
 }
 
-// The go command caches the checksum database under $GOPATH/pkg/sumdb, not in
-// the module cache. The image's GOPATH is root's /go and a stage runs as the CI
-// uid, so a networked stage that leaves GOPATH there cannot open that cache and
-// every public module's lookup fails. Bridge mode must put GOPATH on the
-// writable tmpfs, name the module cache explicitly, and never switch the
-// checksum database off to get past it.
+// TestCIToolchainRunBridgeKeepsTheSumDBCacheWritable: bridge mode puts GOPATH on the writable tmpfs and never disables the checksum database.
 func TestCIToolchainRunBridgeKeepsTheSumDBCacheWritable(t *testing.T) {
 	env, log := ciDockerEnv(t, nil)
 	runMake(t, env, "-s", "ci-toolchain-run", "CMD=make deps-check",
@@ -517,10 +489,7 @@ func envVars(call string) map[string]string {
 	return vars
 }
 
-// ci-template v1.22 (in-toolchain-image.sh v2, ci-standard.md §6): every
-// stage keeps its build and golangci-lint caches in this repository's named
-// volumes of its trust class, a bridge stage its module cache too, and a
-// helper holding CHOWN alone gives a new volume to the run's uid first.
+// TestCIToolchainRunMountsTheCacheVolumesOfItsTrustClass: each stage keeps its caches in its trust class's named volumes.
 func TestCIToolchainRunMountsTheCacheVolumesOfItsTrustClass(t *testing.T) {
 	for _, tc := range []struct {
 		name, network, class, want string
@@ -619,13 +588,7 @@ func TestCIToolchainRunRefusesABadCacheSetting(t *testing.T) {
 	}
 }
 
-// ci-template v1.22.2 (in-toolchain-image.sh v3, ci-standard.md §7): the stage
-// container takes the job container's CPU bound from its cgroup's cpu.max,
-// rounded up, or nproc when the job has no quota; IN_IMAGE_CPUS overrides.
-// Any of them is clamped to the docker daemon's CPU count when that reads.
-// GOMAXPROCS follows it. CUSTOMIZE: no GOFLAGS=-p=N -- the image's GOFLAGS
-// carries -mod=readonly, which a GOFLAGS env would replace, and go's -p
-// defaults to GOMAXPROCS.
+// TestCIToolchainRunTakesTheJobsCPUBound: CPUs from cpu.max or nproc, IN_IMAGE_CPUS overriding, clamped to the daemon; GOMAXPROCS follows.
 func TestCIToolchainRunTakesTheJobsCPUBound(t *testing.T) {
 	out, err := exec.Command("nproc").Output()
 	if err != nil {
@@ -756,10 +719,7 @@ func TestITImageNamesTheTreesContent(t *testing.T) {
 	}
 }
 
-// ci-template v1.29: `make -s it-image` hashes APK_INDEX_SUM, the Alpine
-// package index checksum, so a new value renames the integration image and
-// the same value names it the same. This repository's base has no apk, so CI
-// passes the constant `none` and its name changes only with its tree.
+// TestITImageHashesTheApkIndexSum: APK_INDEX_SUM names the integration image; this repository passes `none`.
 func TestITImageHashesTheApkIndexSum(t *testing.T) {
 	envWith := func(sum string) []string {
 		return environ([]string{"GO_BUILD_PROXY", "ITEST_IMAGE", "GIT_DIR", "GIT_WORK_TREE", "APK_INDEX_SUM"}, map[string]string{
@@ -871,9 +831,7 @@ func readImages(t *testing.T, log string) []string {
 	return strings.Fields(string(b))
 }
 
-// ci-template v1.29: apk-index-sum (the template's scripts/apk-index-sum.sh
-// v1, a Makefile recipe here) prints `none` when no base image has apk, which
-// is this repository's Debian base.
+// TestApkIndexSumPrintsNoneWithoutApk.
 func TestApkIndexSumPrintsNoneWithoutApk(t *testing.T) {
 	path, log, _ := apkDocker(t, 0)
 	stdout, stderr, err := apkIndexSum(t, path, "", "")
@@ -1159,15 +1117,7 @@ func removals(lines []string) []string {
 	return out
 }
 
-// The fixture in ciDocker: go-luks2-ci-old is all stale (c1 exited, c2 created
-// and never started, both long ago); go-luks2-ci-live has a running container;
-// go-luks2-ci-fresh stopped a moment ago; other-old is stale but another
-// project's. Outside compose, c7 is ours and stale, c8 ours and running, c9 a
-// compose container the project pass owns, and c10 a name that merely contains
-// the prefix. Of the images (reap-stale-ci-stacks.sh v3, ci-template v1.23.1),
-// go-luks2-ci-it:old was built and tagged long ago, :retagged built long ago
-// but tagged now (a rebuild from a full cache), :fresh built now, and
-// go-luks2-ci-itx:old is another family's.
+// TestCIReapStacksRemovesOnlyThisRepositorysStaleStacks, against ciDocker's fixture of stale, live, fresh and foreign stacks and images.
 func TestCIReapStacksRemovesOnlyThisRepositorysStaleStacks(t *testing.T) {
 	env, log := ciDockerEnv(t, nil)
 	stdout, _ := runMake(t, env, "-s", "ci-reap-stacks")
@@ -1403,12 +1353,7 @@ func TestDockerBuildIntegrationSkipsAHeldContentImage(t *testing.T) {
 	}
 }
 
-// Concurrent jobs on one daemon can build one content tag at once: each finds
-// it not held, and the slower build's export is refused because the tag
-// already exists. The tag is the content, so the image the faster job left is
-// the image this build would have made. A failed build of a content tag
-// therefore re-checks that exact tag and succeeds only if it now exists; an
-// invented tag, or a content tag still missing, fails with the build's status.
+// TestDockerBuildIntegrationToleratesAConcurrentBuildOfItsContentTag: a failed build succeeds only if its content tag now exists.
 func TestDockerBuildIntegrationToleratesAConcurrentBuildOfItsContentTag(t *testing.T) {
 	mef := filepath.Join(t.TempDir(), "gomodauth.env")
 	if err := os.WriteFile(mef, []byte("GOPRIVATE=example.com/private\n"), 0o600); err != nil {
@@ -1647,12 +1592,7 @@ PATH=%s:$PATH exec /bin/sh -c "$probe"
 	return bin + string(os.PathListSeparator) + os.Getenv("PATH")
 }
 
-// The real probe: readable indexes sum; one unreadable index among several
-// fails the target instead of summing the rest. The unreadable one sorts after
-// the readable one (C locale: '-' before '_'), so the probe's first-file check
-// passes and only sha256sum's status can catch it. A directory named like an
-// index cannot be read by sha256sum even as root, so the fixture holds for
-// any test user.
+// TestAptIndexSumProbeFailsOnAPartialRead: one unreadable index fails the target.
 func TestAptIndexSumProbeFailsOnAPartialRead(t *testing.T) {
 	lists := t.TempDir()
 	good := filepath.Join(lists, "deb.debian.org_debian_dists_trixie-updates_main_binary-amd64_Packages.lz4")

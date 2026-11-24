@@ -66,11 +66,7 @@ func TestNewRecoveryKeyDefaultsToDashedAt32Bytes(t *testing.T) {
 	}
 }
 
-// TestNewRecoveryKeyDrawsFromTheLibraryCSPRNG pins the recovery-keys
-// requirement that the credential comes from the library's own CSPRNG:
-// NewRecoveryKey has no injectable source, so the package default it reads
-// must be crypto/rand, and two keys drawn in a row must differ in both the
-// printed text and its digest.
+// TestNewRecoveryKeyDrawsFromTheLibraryCSPRNG: the source is crypto/rand and two keys differ in text and digest.
 func TestNewRecoveryKeyDrawsFromTheLibraryCSPRNG(t *testing.T) {
 	if defaultVolumeSys().cryptoRand != rand.Reader {
 		t.Fatal("the package's default random source is not crypto/rand.Reader")

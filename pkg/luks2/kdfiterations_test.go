@@ -18,14 +18,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// Tests for the explicit PBKDF2 iteration count -- the option that bypasses
-// calibration so that a container can be provisioned reproducibly.
-//
-// The interesting assertions here are the REFUSALS. Calibration is where the
-// iteration floor was enforced, so an option that skips calibration skips the
-// floor unless something else applies it, and the whole security value of the
-// feature rests on that something else existing. cryptsetup's
-// --pbkdf-force-iterations does not have it; this does.
+// Explicit PBKDF2 iteration count tests: skipping calibration must not skip the iteration floor.
 
 func TestForcedPBKDF2IterationsAcceptsACountAtOrAboveTheFloor(t *testing.T) {
 	tests := []struct {
@@ -256,9 +249,7 @@ func TestFormatWritesAnExplicitIterationCount(t *testing.T) {
 	}
 }
 
-// TestFormatRefusesAnExplicitCountBelowTheFloor is the property that makes the
-// option safe to expose at all: the refusal must happen BEFORE anything is
-// written, because a weak keyslot cannot be strengthened afterwards.
+// TestFormatRefusesAnExplicitCountBelowTheFloor: refused before anything is written.
 func TestFormatRefusesAnExplicitCountBelowTheFloor(t *testing.T) {
 	defer parallel(t)()
 
@@ -370,23 +361,11 @@ func TestAddKeyRefusesAnExplicitCountBelowTheFloor(t *testing.T) {
 	}
 }
 
-// TestChangeKeyPreservesTheKeyslotsPBKDF2Cost is the pbkdf2 half of a property
-// the argon2 path already had.
-//
-// A passphrase change is not a request to re-cost the keyslot. ChangeKey copied
-// the argon2 costs forward and left pbkdf2 to be recalibrated against the
-// default budget, so an operator who had deliberately chosen a cost lost it to
-// an unrelated operation -- and the volume still opened, which is why it went
-// unnoticed. The hash went the same way, replaced with DefaultHashAlgo.
+// TestChangeKeyPreservesTheKeyslotsPBKDF2Cost: ChangeKey keeps the PBKDF2 count and hash.
 func TestChangeKeyPreservesTheKeyslotsPBKDF2Cost(t *testing.T) {
 	defer parallel(t)()
 
-	// An explicit count neither a recalibration nor its floor would produce:
-	// one above sha512's recommended minimum (pbkdf2RecommendedIterations),
-	// where calibration lands in the millions on current hardware. It was
-	// 640_000, which bought no extra discrimination and was paid in full by
-	// every one of the five derivations below -- the slowest test in the
-	// package under -race (#92).
+	// An explicit count above sha512's recommended minimum, below what calibration produces.
 	const iterations = 210_001
 
 	path := newImage(t, "changekey-cost.img")

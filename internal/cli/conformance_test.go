@@ -21,8 +21,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
-// The tests in this file pin rows of the CLI SPEC (docs/*/cli.md) that no
-// other test in the package names.
+// Tests for CLI spec rows (docs/*/cli.md) no other test names.
 
 // assertHeaderIntact fails t unless the LUKS2 header at path still parses:
 // a refusal must come before anything is destroyed.

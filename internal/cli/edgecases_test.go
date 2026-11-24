@@ -149,8 +149,7 @@ func TestUnshownRecoveryKeyRollsBack(t *testing.T) {
 		t.Error("stderr should explain the rollback")
 	}
 
-	// The keyslot should no longer open the volume, and the token should
-	// be gone too.
+	// The keyslot must not open the volume, and the token must be gone.
 	hdr, err := v.Header(ctx)
 	if err != nil {
 		t.Fatalf("Header: %v", err)

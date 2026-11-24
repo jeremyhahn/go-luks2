@@ -115,10 +115,7 @@ func checkDetailed(ctx context.Context, device string, t Type, repair bool) (Che
 	return to.check(ctx, defaultRunner, device, repair)
 }
 
-// e2fsck exit status bits, from e2fsck(8). The status is a bitmask: several
-// bits can be set at once, and any bit from e2fsckUncorrected upward is a
-// failure (uncorrected errors, an operational error, a usage error, a
-// canceled check or a shared-library error).
+// e2fsck exit status bits (e2fsck(8)); any bit from e2fsckUncorrected up is a failure.
 const (
 	// e2fsckCorrected: filesystem errors were corrected.
 	e2fsckCorrected = 1
@@ -132,13 +129,7 @@ const (
 	e2fsckUncorrected = 4
 )
 
-// checkExt4 checks an ext4 filesystem with e2fsck.
-//
-// Read-only (-n), any nonzero exit is a failure: e2fsck could not certify the
-// filesystem clean, and -n wrote nothing. Repairing (-p), the exit status is
-// read as e2fsck's bitmask: 0 is clean, 1 and 2 (and 3) are success with the
-// repair -- and for bit 2 the reboot request -- reported in the result, and
-// any status with bit 4 or higher set is a failure.
+// checkExt4 runs e2fsck: with -n any nonzero exit fails; with -p exits 0-3 succeed and bit 4 or higher fails.
 func checkExt4(ctx context.Context, run commandRunner, devicePath string, repair bool) (CheckResult, error) {
 	if !repair {
 		return CheckResult{}, runCheck(ctx, run, "e2fsck", "-n", "--", devicePath) // Read-only
@@ -176,20 +167,10 @@ func checkZFS(ctx context.Context, run commandRunner, devicePath string, _ bool)
 	return CheckResult{}, runCheck(ctx, run, "zpool", "scrub", "--", devicePath)
 }
 
-// fatRepairedOrInconsistent is the fsck.fat exit status that means either
-// "changes were written" or "stopped on an internal inconsistency". dosfstools
-// exits 1 in both cases, so with -a it does not by itself say whether the
-// repair worked.
+// fatRepairedOrInconsistent is fsck.fat's ambiguous exit 1: changes written, or stopped on an inconsistency.
 const fatRepairedOrInconsistent = 1
 
-// checkFAT32 checks a FAT filesystem with fsck.fat, from the same dosfstools
-// package as the mkfs.fat that makeFAT32 runs.
-//
-// Read-only (-n), any nonzero exit is a failure: exit 1 means problems were
-// found. Repairing (-a), exit 1 is ambiguous (see fatRepairedOrInconsistent),
-// so it is followed by a read-only recheck: a clean recheck means the repair
-// worked, and anything else returns the repair run's error, whose output says
-// what fsck.fat found.
+// checkFAT32 runs fsck.fat; with -n any nonzero exit fails, and with -a exit 1 is confirmed by a read-only recheck.
 func checkFAT32(ctx context.Context, run commandRunner, devicePath string, repair bool) (CheckResult, error) {
 	if !repair {
 		return CheckResult{}, runCheck(ctx, run, "fsck.fat", "-n", "--", devicePath) // Read-only

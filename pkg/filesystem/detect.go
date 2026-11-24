@@ -21,11 +21,7 @@ const (
 	blkidAmbivalent   = 8
 )
 
-// probeOutputRunner runs a probe program and returns its STANDARD OUTPUT
-// only.
-//
-// Not the combined output the checkers use: the probe's stdout is parsed as
-// KEY=VALUE lines, and a warning on stderr is not part of that grammar.
+// probeOutputRunner runs a probe program and returns its standard output only.
 func probeOutputRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
 	return sys.tools.Output(ctx, name, args...)
 }

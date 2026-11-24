@@ -34,7 +34,7 @@ import (
 //	run id  identifies the PROCESS, and is the same id the ledger records, so
 //	        a name and its cleanup record agree.
 //
-// The ledger (#96) does not make this unnecessary. It governs CLEANUP -- what a
+// The ledger does not make this unnecessary. It governs CLEANUP -- what a
 // run created, so a later run can remove exactly that. It says nothing about
 // ALLOCATION, and nothing in it stops two runs choosing the same name.
 

@@ -15,33 +15,9 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// A keyslot written as JSON `null` is neither malformed enough to be refused
-// nor populated enough to be used, and it does not vanish.
-//
-// A null in a map[string]*T unmarshals to a PRESENT key holding a nil pointer.
-// So len() counts it, range yields it, and -- the part that has caught this
-// package repeatedly -- the comma-ok idiom reports it as FOUND:
-//
-//	targetKeyslot, exists := metadata.Keyslots[slotIDStr]
-//	if !exists { ... }
-//
-// `exists` is true. The map has the key. That check reads like a nil guard and
-// is not one, and five sites lean on it as if it were.
-//
-// This is issue #67, and it is the same defect class as the four before it: a
-// guarantee that exists at one call site and not at an earlier one on the same
-// untrusted input. The difference here is that the guarantee lives in a CALLEE
-// -- most of the sites survive only because they hand the keyslot to
-// unlockKeyslot, which validates -- so they are one refactor away from
-// panicking.
+// A JSON null keyslot unmarshals to a present key with a nil pointer, so comma-ok reports it found; the header read must drop it.
 
-// nullKeyslotVolume writes a container carrying a healthy keyslot and a JSON
-// null one, through the exported write path, and returns its path.
-//
-// The null is placed at "0" so the scan reaches it FIRST: whether a credential
-// loop meets a null otherwise depends on scan order and on whether an earlier
-// slot succeeds, which is exactly the kind of "passes by luck" this test must
-// not rely on.
+// nullKeyslotVolume writes a container with a null keyslot at "0" (scanned first) and a healthy one, and returns its path.
 func nullKeyslotVolume(t *testing.T, name string) string {
 	t.Helper()
 
@@ -69,13 +45,7 @@ func nullKeyslotVolume(t *testing.T, name string) string {
 	return path
 }
 
-// TestNullKeyslotDoesNotSurviveTheHeaderRead is the fix at the boundary.
-//
-// Guarding the dereferencing sites individually does not hold: on the
-// issue/3-secure-buffer branch a review sweeping for exactly this enumerated
-// seven sites and missed an eighth. An enumeration rots the moment anyone adds
-// a consumer. So the null is removed where the metadata is parsed, and there is
-// nothing left downstream to enumerate.
+// TestNullKeyslotDoesNotSurviveTheHeaderRead: the null is removed where metadata is parsed.
 func TestNullKeyslotDoesNotSurviveTheHeaderRead(t *testing.T) {
 	defer parallel(t)()
 	path := nullKeyslotVolume(t, "null-keyslot.img")
@@ -106,13 +76,7 @@ func TestNullKeyslotDoesNotSurviveTheHeaderRead(t *testing.T) {
 	}
 }
 
-// TestWipeKeyslotDoesNotPanicOnANullKeyslot is the first of the two sites that
-// were not saved by a callee.
-//
-// (*Volume).RemoveKeyslot used to be WipeKeyslot, EXPORTED and reaching
-// parseSize(ks.Area.Offset) with ks nil. There is no header.ValidateKeyslot call
-// and no nil check anywhere in the old wipe.go, so a crafted header panicked
-// a public API.
+// TestWipeKeyslotDoesNotPanicOnANullKeyslot: (*Volume).RemoveKeyslot tolerates a null keyslot.
 func TestRemoveKeyslotDoesNotPanicOnANullKeyslot(t *testing.T) {
 	defer parallel(t)()
 
@@ -164,13 +128,7 @@ func TestGetMasterKeyDoesNotPanicOnANullKeyslot(t *testing.T) {
 	mustDestroy(t, key)
 }
 
-// TestEveryExportedPathToleratesANullKeyslot sweeps the exported surface rather
-// than the two sites that happen to panic today.
-//
-// The sites that survive do so because they hand the keyslot to unlockKeyslot,
-// which validates -- a guarantee living in a callee, one refactor from being
-// gone. Asserting the whole surface is what makes the boundary fix the thing
-// being tested, rather than the two patches it would otherwise be.
+// TestEveryExportedPathToleratesANullKeyslot sweeps the exported surface.
 func TestEveryExportedPathToleratesANullKeyslot(t *testing.T) {
 	defer parallel(t)()
 
@@ -252,14 +210,7 @@ func TestEveryExportedPathToleratesANullKeyslot(t *testing.T) {
 	})
 }
 
-// TestNullsAreRefusedWhereTheyCannotBeDropped pins the other half of the rule.
-//
-// Dropping is right where a caller can do something USEFUL with the absence: a
-// volume survives one damaged keyslot because it has others, and an auxiliary
-// token is not the only way in. It is wrong where nothing useful remains --
-// a segment whose location is unknown cannot be proved clear of, and a digest
-// that cannot be evaluated must not be silently skipped, because skipping it
-// weakens verification rather than degrading it.
+// TestNullsAreRefusedWhereTheyCannotBeDropped: null segments and digests are refused rather than dropped.
 func TestNullsAreRefusedWhereTheyCannotBeDropped(t *testing.T) {
 	defer parallel(t)()
 

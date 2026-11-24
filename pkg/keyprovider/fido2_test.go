@@ -35,8 +35,7 @@ func TestNormalizeFIDO2SecretIsCanonicalBase64(t *testing.T) {
 		t.Errorf("enrolled credential = %q, want %q", s, encoded)
 	}
 
-	// It is TEXT that is enrolled, not the raw bytes. Getting this backwards
-	// produces a keyslot systemd-cryptsetup can never open.
+	// The base64 text is enrolled, not the raw bytes.
 	if s := string(openSecret(t, got)); s == string(secret) {
 		t.Error("the raw secret was enrolled; systemd enrolls its base64 text")
 	}
@@ -111,12 +110,7 @@ func TestChangingTheEncodingChangesWhatIsEnrolled(t *testing.T) {
 	}
 }
 
-// assertOutput renders the stdout of a non-resident `fido2-assert -G -h`
-// run, with secret as the hmac-secret field.
-//
-// The field ORDER is the assumption under test everywhere below; it is
-// written once, here, so there is one place to change if hardware disproves
-// it.
+// assertOutput renders non-resident `fido2-assert -G -h` stdout with secret as the hmac-secret field.
 func assertOutput(secret string) string {
 	return strings.Join([]string{
 		base64.StdEncoding.EncodeToString([]byte("client data hash")), // 1
@@ -197,14 +191,7 @@ func TestFIDO2EnrollsTheBase64OfTheSecret(t *testing.T) {
 	}
 }
 
-// TestFIDO2RefusesAFieldThatIsNotTheSecret is the backstop for
-// fido2AssertSecretLine.
-//
-// If an authenticator ever emits a user id for a single-entry allow list,
-// the package reads the signature instead of the secret. That field decodes
-// as base64 perfectly well, so only its LENGTH distinguishes it -- and
-// enrolling it would produce a keyslot that opens nothing, discovered months
-// later.
+// TestFIDO2RefusesAFieldThatIsNotTheSecret: a field of the wrong length is refused.
 func TestFIDO2RefusesAFieldThatIsNotTheSecret(t *testing.T) {
 	signature := base64.StdEncoding.EncodeToString(make([]byte, 71))
 
@@ -265,9 +252,7 @@ func TestNewFIDO2CredentialReadsTheCredentialID(t *testing.T) {
 		t.Errorf("credential id = %q, want %q", got, credID)
 	}
 
-	// -h at CREATION is what gives the credential an hmac-secret at all. A
-	// credential made without it can never produce a secret, however the
-	// assertion is phrased.
+	// -h at creation gives the credential an hmac-secret.
 	args := readFixture(t, argsFile)
 	for _, want := range []string{"-M\n", "-h\n", "es256\n", "/dev/hidraw9\n"} {
 		if !strings.Contains(args, want) {
@@ -467,9 +452,7 @@ func TestFromTokenRefusesWhatItCannotDrive(t *testing.T) {
 	}
 }
 
-// TestVolumeEnrollWritesTheKeyslotAndTheTokenThatNamesIt-equivalent
-// coverage for FIDO2's own Token wiring lives in pkg/luks2 no longer -- this
-// is the provider-side half: FIDO2.Token must carry what FromToken rebuilds.
+// FIDO2.Token must carry what FromToken rebuilds.
 func TestFIDO2CarriesItsToken(t *testing.T) {
 	params := fido2TestParams(t)
 
@@ -491,10 +474,7 @@ func TestFIDO2CarriesItsToken(t *testing.T) {
 	}
 }
 
-// TestFIDO2OptionsDefaultToTheInstalledHelpers: no FIDO2Option naming a
-// helper must still reach the libfido2 tools, and must do so by ABSOLUTE
-// PATH -- a PATH lookup would let whoever controls the environment decide
-// what produces the credential.
+// TestFIDO2OptionsDefaultToTheInstalledHelpers: defaults are absolute paths.
 func TestFIDO2OptionsDefaultToTheInstalledHelpers(t *testing.T) {
 	var o fido2Options
 
@@ -523,15 +503,7 @@ func TestFIDO2OptionsDefaultToTheInstalledHelpers(t *testing.T) {
 	}
 }
 
-// TestFIDO2ArgumentsFollowTheRequirementFlags: what the authenticator
-// demands of the user is expressed in argv, and each flag has its own
-// branch.
-//
-// These are not cosmetic. `-t pin=true` makes the helper prompt on its own
-// controlling terminal, which is precisely what an unattended unlock must
-// not do, and `-v` asks the authenticator for user verification. A provider
-// built from a token that requires them and invoked without them gets a
-// DIFFERENT assertion -- or none.
+// TestFIDO2ArgumentsFollowTheRequirementFlags: -t pin=true and -v follow the binding's requirements.
 func TestFIDO2ArgumentsFollowTheRequirementFlags(t *testing.T) {
 	tests := []struct {
 		name    string

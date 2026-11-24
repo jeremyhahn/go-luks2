@@ -410,11 +410,7 @@ func TestSecurityConstants(t *testing.T) {
 		{"MaxKeySize", maxKeySize, 512},
 		{"MinSectorSize", minSectorSize, 512},
 		{"MaxSectorSize", maxSectorSize, 4096},
-		// The digest cost is CALIBRATED now, so there is no constant here to
-		// bound. What is bounded is its target: see
-		// TestDigestCalibrationTargetsItsBudget, and DigestIterationTargetMs
-		// for why this parameter defends nothing and 100ms is cryptsetup's own
-		// measured target.
+		// The digest cost is calibrated; see TestDigestCalibrationTargetsItsBudget and DigestIterationTargetMs.
 		{"DigestIterationTargetMs", digestIterationTargetMs, 1},
 		{"DigestCalibrationKeyLen", digestCalibrationKeyLen, 32},
 	}
@@ -428,22 +424,7 @@ func TestSecurityConstants(t *testing.T) {
 	}
 }
 
-// A permission failure has to be TYPED, not merely accurate (#31).
-//
-// # Why these tests inject at a seam instead of using permission bits
-//
-// They cannot use permission bits. CI job containers run as ROOT and root
-// bypasses discretionary access checks, so an os.Chmod-based negative test
-// passes on a workstation and fails on the runner -- the exact trap this
-// project's testing rules forbid: a fault must be injected through a means
-// that holds for every uid, never through permission bits.
-//
-// Nor is there a real open that fails with EACCES for every uid. Four
-// candidates were measured on a dev host, as uid 1000 and again as uid 0:
-// /proc/version and /proc/self/cmdline opened O_RDWR, /sys/kernel/vmcoreinfo,
-// and /proc/1/mem. All four refused uid 1000 with "permission denied" and ALL
-// FOUR opened successfully for root. So the fault is injected at
-// openFileFunc, which holds identically for both.
+// A permission failure must be typed; faults are injected at openFileFunc because root bypasses permission bits.
 
 // failOpensWith makes every openDevice call fail with err wrapped in the
 // *fs.PathError shape the kernel produces, and restores the seam afterwards.
@@ -531,16 +512,9 @@ func TestOpenDeviceClassifiesAPermissionFailure(t *testing.T) {
 	}
 }
 
-// TestTheExportedPathsReportAPermissionFailureAsOne is the assertion that makes
-// the sentinel true rather than merely declared.
-//
-// Every one of these is an entry point a consumer calls, and each reaches a
-// classified open: the header readers open the device themselves, and Format
-// opens it before it writes anything. Testing the classifier alone would prove
-// only that a function nobody calls works.
+// TestTheExportedPathsReportAPermissionFailureAsOne: every exported entry point reports a classified open failure.
 func TestTheExportedPathsReportAPermissionFailureAsOne(t *testing.T) {
-	// A real, readable file, so ValidateDevicePath passes and the failure under
-	// test is the OPEN and not the path check.
+	// A real readable file, so the failure is the open, not the path check.
 	device := newImage(t, "permission.img")
 
 	tests := []struct {
@@ -582,15 +556,7 @@ func TestTheExportedPathsReportAPermissionFailureAsOne(t *testing.T) {
 	}
 }
 
-// TestAcquireFileLockWaitsForARelease is the test the old implementation could
-// not pass, and it is the whole point of #107.
-//
-// The lock is held, then released while a second acquire is already waiting.
-// With LOCK_NB and no retry the second call returned "resource temporarily
-// unavailable" instantly and the caller failed; with a bounded wait it queues
-// and succeeds. Asserting only that the second call eventually succeeds would
-// be satisfied by a version that slept for the whole budget, so this also
-// asserts it returned close to the release rather than close to the deadline.
+// TestAcquireFileLockWaitsForARelease: a waiting acquire succeeds soon after the release, not at the deadline.
 func TestAcquireFileLockWaitsForARelease(t *testing.T) {
 	tmpFile, err := os.CreateTemp("", "luks-lock-wait-*")
 	if err != nil {
@@ -604,8 +570,7 @@ func TestAcquireFileLockWaitsForARelease(t *testing.T) {
 		t.Fatalf("first acquireDeviceLock() error = %v", err)
 	}
 
-	// The holder lets go 150ms into the wait, on a clock only the wait moves
-	// (#233): the release happens at a controlled moment, not a scheduled one.
+	// The holder lets go 150ms into the wait, on a clock only the wait moves.
 	const holdFor = 150 * time.Millisecond
 	clk := clock.NewFake(t)
 	released := false
@@ -677,9 +642,7 @@ func TestAcquireFileLockTimesOutWithATypedError(t *testing.T) {
 	if lockErr.Path != tmpFile.Name() {
 		t.Errorf("LockTimeoutError.Path = %q, want %q", lockErr.Path, tmpFile.Name())
 	}
-	// The budget is a bound, honored EXACTLY on a controlled clock: the last
-	// sleep is cut to what remains, so the wait ends on the deadline and the
-	// error reports the wait that happened.
+	// The budget is honored exactly: the last sleep is cut to what remains.
 	if clk.Elapsed() != budget || lockErr.Waited != budget {
 		t.Errorf("waited %v and reported %v against a %v budget", clk.Elapsed(), lockErr.Waited, budget)
 	}
@@ -704,8 +667,7 @@ func TestAcquireFileLockZeroBudgetTriesOnce(t *testing.T) {
 	defer func() { _ = os.Remove(tmpFile.Name()) }()
 	_ = tmpFile.Close()
 
-	// Free: one attempt is enough, so a zero budget must still SUCCEED. A
-	// version that checked the deadline before attempting would fail here.
+	// Free: one attempt suffices, so a zero budget still succeeds.
 	free, err := acquireDeviceLockTimeout(tmpFile.Name(), 0)
 	if err != nil {
 		t.Fatalf("acquireDeviceLockTimeout(free, 0) error = %v, want success on the first attempt", err)

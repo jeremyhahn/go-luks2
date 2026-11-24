@@ -24,11 +24,7 @@ func readHeaderCopyFrom(f io.ReaderAt, offset int64) (*header.BinaryHeader, *hea
 	return hdr, metadata, reclassifyUnsupportedChecksum(err)
 }
 
-// reclassifyUnsupportedChecksum is header.ErrUnsupportedHeaderChecksum:
-// internal/header's own sentinel, folded into the
-// public ErrUnsupported at every place a header read crosses the package
-// boundary, without internal/header changing what it already matches
-// (ErrInvalidHeader, via its own Is).
+// reclassifyUnsupportedChecksum maps header.ErrUnsupportedHeaderChecksum to the public ErrUnsupported.
 func reclassifyUnsupportedChecksum(err error) error {
 	if err != nil && errors.Is(err, header.ErrUnsupportedHeaderChecksum) {
 		return &errs.Error{Kind: ErrUnsupported, Err: err}
@@ -42,10 +38,7 @@ func checkHeaderWritable(hdr *header.BinaryHeader, metadata *header.Metadata) er
 	return reclassifyMetadataTooLarge(header.CheckHeaderWritable(hdr, metadata))
 }
 
-// reclassifyMetadataTooLarge is header.ErrMetadataTooLarge:
-// internal/header's own sentinel, folded into the public ErrNoSpace at
-// every place this package's metadata encoding crosses the package
-// boundary.
+// reclassifyMetadataTooLarge maps header.ErrMetadataTooLarge to the public ErrNoSpace.
 func reclassifyMetadataTooLarge(err error) error {
 	if err != nil && errors.Is(err, header.ErrMetadataTooLarge) {
 		return &errs.Error{Kind: ErrNoSpace, Err: err}
@@ -73,17 +66,7 @@ func writeHeaderTo(f *os.File, hdr *header.BinaryHeader, metadata *header.Metada
 	return reclassifyMetadataTooLarge(header.WriteHeaderTo(f, hdr, metadata, sync))
 }
 
-// readHeaderForTest reads and validates the PRIMARY LUKS2 header from a device.
-// For the second copy -- which carries a different magic -- see
-// ReadSecondaryHeader.
-//
-// A keyslot or token the header spells as JSON null is REMOVED from the
-// returned metadata rather than handed back as a nil map entry -- see
-// internal/header for why, and for why segments, digests and config are
-// refused instead. The removed entries are reported on
-// header.Metadata.DroppedNullEntries, so a caller can tell that a
-// readHeaderForTest -> mutate -> writeHeaderForTest cycle is about to drop
-// them from the header on disk.
+// readHeaderForTest reads and validates the primary header; JSON-null keyslots and tokens are removed and reported in DroppedNullEntries.
 func readHeaderForTest(device string) (*header.BinaryHeader, *header.Metadata, error) {
 	return readHeaderCopy(device, header.PrimaryHeaderOffset)
 }
@@ -95,20 +78,7 @@ func readHeaderForTestWithSys(device string, sys volumeSys) (*header.BinaryHeade
 	return readHeaderCopyWithSys(device, header.PrimaryHeaderOffset, sys)
 }
 
-// readSecondaryHeaderForTest reads and validates the SECOND LUKS2 header copy, the one
-// carrying the SKUL magic.
-//
-// It exists because writing a spec-correct backup header is only half of a
-// recovery path: without a reader that knows the secondary magic, this library
-// would produce a copy it could not itself open, which is the state #64
-// describes.
-//
-// The header it returns is a SECONDARY header: its magic is header.SecondaryMagic
-// and its hdr_offset is the copy's own offset, because that is what is on disk.
-// Callers repairing a damaged primary should use (*Volume).RestorePrimaryHeader rather
-// than assembling the sequence themselves; writing this header back is safe --
-// WriteHeaderTo stamps each copy's identity -- but the named operation
-// takes the lock for the whole read-and-write.
+// readSecondaryHeaderForTest reads and validates the second header copy, which carries the SKUL magic.
 func readSecondaryHeaderForTest(device string) (*header.BinaryHeader, *header.Metadata, error) {
 	if err := validateDevicePath(device); err != nil {
 		return nil, nil, err
@@ -122,40 +92,7 @@ func readSecondaryHeaderForTest(device string) (*header.BinaryHeader, *header.Me
 	return hdr, metadata, reclassifyUnsupportedChecksum(err)
 }
 
-// restorePrimaryHeaderCore rewrites the primary header from the secondary
-// copy read through f, refusing with ErrPrimaryHeaderCurrent when the
-// primary is intact and at least as new, unless force is set. It is the
-// core (*Volume).RestorePrimaryHeader and (*Volume).ReplacePrimaryHeader
-// share: every read and the write go through f, so the copies compared, the
-// copy restored and the device written are all the one descriptor the
-// caller locked (and, for the new API, claimed) -- nothing here resolves
-// path again.
-//
-// It exists because "read the secondary and write it back" is a sequence a
-// caller should not have to get right. The header ReadSecondaryHeaderFrom
-// returns is a SECONDARY header -- that is what it was asked for -- and what
-// makes writing it back safe is that WriteHeaderTo stamps each copy's
-// identity itself. Naming the operation puts that guarantee behind an API
-// instead of behind a comment, and makes it one locked step rather than a
-// read and a write with a window between them.
-//
-// The secondary copy is validated in full before anything is written: magic,
-// version, recorded offset, header size, checksum and JSON body. A container
-// whose second copy is also damaged is left exactly as it was.
-//
-// # It repairs; it does not roll back
-//
-// It refuses with ErrPrimaryHeaderCurrent when the primary is intact and its
-// sequence id is not lower than the secondary's (#248), unless force is set.
-// Header writes put the primary on the medium first, so an interrupted
-// ChangeKey or RemoveKey can leave a NEWER primary -- the passphrase already
-// revoked -- over an OLDER secondary that still lists it. Restoring that
-// secondary would bring the revoked passphrase back. cryptsetup resolves the
-// same state the other way, keeping the higher sequence id.
-// (*Volume).ReplacePrimaryHeader sets force to restore anyway.
-//
-// The restored header is written at a sequence id one above both copies', so
-// no reader can mistake the restored state for either earlier one.
+// restorePrimaryHeaderCore rewrites the primary from the fully validated secondary read through f, refusing an intact, newer primary unless force; sequence id goes one above both.
 func restorePrimaryHeaderCore(f *os.File, path string, force bool, sync func(*os.File) error) error {
 	if err := requireLockableDevice(f, path); err != nil {
 		return err
@@ -181,13 +118,7 @@ func restorePrimaryHeaderCore(f *os.File, path string, force bool, sync func(*os
 	}
 	hdr.SequenceID = sequence + 1
 
-	// The restore REPRODUCES a copy already on the medium; it authors nothing.
-	// So it is held to the header-wide rules the secondary already passed when
-	// it was read, not to the per-entry ones every other write applies. A
-	// damaged keyslot or token in the secondary is the state the volume was in
-	// before the primary tore, and refusing to restore it would leave the
-	// volume with no readable primary at all. Remove the damaged entry once
-	// the primary is back.
+	// The restore reproduces a copy already on the medium, so only header-wide rules apply.
 	jsonData, area, err := header.EncodeMetadata(hdr, metadata)
 	if err != nil {
 		return err
@@ -327,21 +258,7 @@ func createBinaryHeader(opts formatOptionsForTest, sys volumeSys) (*header.Binar
 	})
 }
 
-// repairSecondaryHeader rewrites ONLY the secondary header copy from the
-// primary's header and metadata, at the primary's sequence id, and syncs it.
-// Caller must hold the lock.
-//
-// It exists for an operation that is about to destroy something and must
-// first know that EITHER copy, alone, opens the volume afterwards: a secondary
-// left stale or torn by an earlier interrupted write would otherwise be the
-// only copy a later interruption leaves, describing a volume that no longer
-// exists (MigrateToFIPS). The primary is not written, and is made durable
-// before the secondary is touched, so an interruption here leaves the copy
-// the volume already opens through exactly as it was -- WriteHeaderTo,
-// which writes the primary first, would put the one good copy at risk to
-// repair the bad one.
-//
-// It writes through the caller's pinned descriptor (#255), as one write step.
+// repairSecondaryHeader rewrites only the secondary from the primary at its sequence id, through the pinned descriptor; the caller holds the lock.
 func repairSecondaryHeader(ctx context.Context, dev *keyslotDevice, hdr *header.BinaryHeader, metadata *header.Metadata) error {
 	if err := dev.sys.keyslotWriteStep(ctx, dev, "repair the secondary LUKS2 header"); err != nil {
 		return err
@@ -353,7 +270,7 @@ func repairSecondaryHeader(ctx context.Context, dev *keyslotDevice, hdr *header.
 		return reclassifyMetadataTooLarge(err)
 	}
 
-	// THE PRIMARY IS MADE DURABLE BEFORE A SINGLE SECONDARY BYTE IS WRITTEN.
+	// The primary is durable before any secondary byte is written.
 	if err := dev.sys.syncDevice(f); err != nil {
 		return &errs.Error{Kind: errs.ErrIO, Detail: "failed to make the primary header durable before repairing the secondary", Err: err}
 	}
@@ -383,10 +300,7 @@ func getVolumeInfoForTest(device string) (*volumeInfoForTest, error) {
 		Metadata: metadata,
 	}
 
-	// The lowest-id crypt segment, in sorted order rather than whichever one
-	// map iteration yielded first. It is the segment Unlock maps whenever
-	// Unlock maps one (activationSegment), and unlike Unlock this reports on a
-	// multi-segment container too, which is when an operator needs to look.
+	// The lowest-id crypt segment in sorted order: the one Unlock maps.
 	for _, segmentID := range header.SortedIDs(metadata.Segments) {
 		if segment := metadata.Segments[segmentID]; segment != nil && segment.Type == "crypt" {
 			info.Cipher = segment.Encryption
@@ -396,8 +310,7 @@ func getVolumeInfoForTest(device string) (*volumeInfoForTest, error) {
 		}
 	}
 
-	// Find active keyslots, in the order unlock attempts them rather than in
-	// Go map order (#57).
+	// Active keyslots, in the order unlock attempts them.
 	for _, id := range header.KeyslotIDsInScanOrder(metadata.Keyslots) {
 		var slotNum int
 		if _, err := fmt.Sscanf(id, "%d", &slotNum); err == nil {

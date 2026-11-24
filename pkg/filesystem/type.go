@@ -24,11 +24,7 @@ const (
 	FAT32 Type = "vfat"
 )
 
-// supported is the single source of truth for the supported set (#195).
-// Supported reads it, and Make and Check/Repair refuse anything not in it.
-// Every entry must have a dispatch entry with both a make and a check
-// implementation; TestSupportedFilesystemsCanBeCreatedAndChecked enforces
-// that in both directions.
+// supported is the single source of the supported set; TestSupportedFilesystemsCanBeCreatedAndChecked keeps it matched to the dispatch table.
 var supported = []Type{Ext4, XFS, ZFS, FAT32}
 
 // Supported returns the filesystem types this package can create and check.

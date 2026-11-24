@@ -29,18 +29,14 @@ import (
 	"github.com/jeremyhahn/go-luks2/test/internal/harness"
 )
 
-// Unlock, Lock, IsUnlocked and GetMappedDevicePath are the old
-// luks2.Unlock/Lock/IsUnlocked/GetMappedDevicePath free functions, forwarded
-// across the two packages they collapsed into (#268): pkg/luks2 derives the
-// key and pkg/dmcrypt activates it. See cmd/luks2/cli.go's
-// DefaultLuksOperations for the same forward.
+// Unlock, Lock, IsUnlocked and GetMappedDevicePath forward to pkg/luks2 for the key and pkg/dmcrypt for activation.
 func Unlock(device string, passphrase []byte, name string) error {
 	ctx := context.Background()
 	if runSuite == nil {
 		return fmt.Errorf("recording dm %q: TestMain did not register the suite in this process", name)
 	}
 
-	// Write-ahead (#96, #348): the mapping is in the run ledger before
+	// Write-ahead: the mapping is in the run ledger before
 	// Activate creates it, so a run that dies at any point after leaves an
 	// entry a later run's reaper can remove. A record failure refuses the
 	// activation. A live mapping that does not carry its recorded identity is
@@ -61,13 +57,7 @@ func Unlock(device string, passphrase []byte, name string) error {
 	return err
 }
 
-// activateRecordedAhead runs activate, which maps device as name in ANOTHER
-// process -- a FIPS child, cryptsetup -- with the mapping recorded before it
-// starts (#348). Recording what that process left once it has exited is too
-// late: a run canceled while it runs, or in the moment after, leaves a
-// mapping no ledger attributes, and the next run's reaper refuses the host.
-// The live mapping is then checked against the identity recorded for it, which
-// keeps the derivation honest.
+// activateRecordedAhead runs activate in another process with the mapping recorded first, then checks the live mapping against the record.
 func activateRecordedAhead(t *testing.T, device, name string, activate func()) {
 	t.Helper()
 	if runSuite == nil {
@@ -140,11 +130,7 @@ func run(t *testing.T, name string, args ...string) string {
 	return string(out)
 }
 
-// lockWithRetry rides out the transient EBUSY the host's own udev produces
-// right after a write to a mapped device (moved here in #274,
-// when test/integration/pkg was removed): the suite shares the HOST's
-// device-mapper, and closing a device just written to can lose the race
-// against udev's blkid probe.
+// lockWithRetry rides out the transient EBUSY udev's probe causes after a write to a mapped device.
 func lockWithRetry(t *testing.T, volumeName string) {
 	t.Helper()
 
@@ -173,14 +159,7 @@ func createTestFile(path string, sizeMB int) error {
 	return f.Truncate(int64(sizeMB * 1024 * 1024))
 }
 
-// This package is test/integration/interop/: cryptsetup and systemd are the
-// real peer (testing-guidelines), checked in both directions. The two
-// pkg/luks2 tests that re-exec their own test binary (see
-// pkg/luks2/lockcompat_integration_test.go and lockwait_integration_test.go:
-// TestCompatMetadataLockDirectoryStates and TestCryptsetupWaitsForEveryWritePath)
-// stay in pkg/luks2, because they set unexported seams (volumeSys.lockHeld and
-// volumeSys.calibratedCountFloor, and the package var keyslotLockWait) that
-// have no external setter.
+// Interop tests check cryptsetup and systemd as the real peer, in both directions.
 
 var runSuite *harness.Suite
 
@@ -233,10 +212,7 @@ func requireCryptsetupDeclared(t *testing.T) {
 	}
 }
 
-// parallel marks t parallel and holds a locked-memory slot until the
-// returned function is called, the same throttle pkg/luks2's own
-// lockedmemorybudget_test.go uses (#233) -- reimplemented here since this
-// is a separate test binary with its own mlock budget to share.
+// parallel marks t parallel and holds a locked-memory slot until the returned function is called, for this binary's own mlock budget.
 var (
 	parallelSlotsOnce sync.Once
 	parallelSlots     chan struct{}

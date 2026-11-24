@@ -29,45 +29,19 @@ import (
 // after losing one to a concurrent attach.
 const loopAttachAttempts = 16
 
-// defaultNodeTimeout bounds the wait for a newly allocated loop device's node
-// to appear under /dev.
-//
-// Read it as a ceiling on how long we are willing to wait on a THIRD PARTY --
-// here udev or devtmpfs. Two seconds is long enough to absorb a loaded
-// machine's udev queue, short enough that a host where nothing will ever
-// create the node fails with a diagnosis instead of hanging.
+// defaultNodeTimeout bounds the wait for udev or devtmpfs to create a new loop node.
 const defaultNodeTimeout = 2 * time.Second
 
-// defaultNodePoll is how often the node is re-checked while waiting.
-//
-// A BACKOFF, not synchronization: there is no readiness signal to select on,
-// so a shorter interval only spends more CPU reaching the same answer and a
-// longer one only reaches it later. The bound above is what makes the
-// failure case terminate.
+// defaultNodePoll is the re-check interval while waiting for the node.
 const defaultNodePoll = 500 * time.Microsecond
 
-// defaultDetachTimeout bounds how long [Device.Detach] waits for the kernel
-// to finish releasing a device. Release happens in microseconds on an idle
-// host; the bound is generous because CI runners are not idle. Reaching it
-// therefore means the device is still held by something, not that the host
-// is slow.
-//
-// Measured on a loaded CI runner (go-luks2 #24), the kernel completes the
-// release ~0.5ms after the last holder closes. The only thing that can
-// exhaust this bound is a HOLDER'S LIFETIME, and no value here shortens
-// that: raising it just makes a caller wait longer for someone else before
-// getting the same deferred answer.
+// defaultDetachTimeout bounds [Device.Detach]'s wait; reaching it means something still holds the device.
 const defaultDetachTimeout = 2 * time.Second
 
-// defaultDetachPoll is how often the release is re-checked while waiting. A
-// BACKOFF, for the same reason as defaultNodePoll.
+// defaultDetachPoll is the re-check interval while waiting for release.
 const defaultDetachPoll = 500 * time.Microsecond
 
-// sys holds loop's seams: the clock, the sysfs root, the device directory
-// and the OS-facing functions a test substitutes. Every field is set once,
-// in [defaultSys], and read -- never reassigned -- by [Attach], [Find] and
-// [Lookup], which hand it to the [Device] they return. There is no
-// package-level mutable var of func or interface type.
+// sys holds loop's seams, set once in [defaultSys] and never reassigned.
 type sys struct {
 	clk clock.Clock
 
@@ -146,15 +120,7 @@ type Device struct {
 	sys     sys
 }
 
-// backingIdentity is the device and inode of the file a [Device] was backed
-// by when it was obtained, as LOOP_GET_STATUS64 reports them. known is false
-// for a [Device] that [Lookup] found with nothing attached.
-//
-// It is what [Device.Detach] checks before LOOP_CLR_FD. The loop-device
-// namespace is host-global and a device number is reused as soon as it is
-// free, so the node this Device names may since have been released and
-// attached to someone else's file; detaching that would pull a device out
-// from under a caller that never handed it to us.
+// backingIdentity is the device and inode a [Device] was backed by when obtained; known is false when nothing was attached.
 type backingIdentity struct {
 	dev, ino uint64
 	known    bool
@@ -207,10 +173,7 @@ func attach(ctx context.Context, file string, s sys) (*Device, error) {
 	}
 	ident := backingIdentity{dev: uint64(st.Dev), ino: st.Ino, known: true} //nolint:unconvert // Dev is not uint64 on every GOARCH
 
-	// LOOP_CTL_GET_FREE names a free device without reserving it, so two
-	// callers can be handed the same one and the second LOOP_SET_FD fails
-	// with EBUSY. That is not a failure of this call, and losetup's answer
-	// is the one taken here: ask again for another free device.
+	// LOOP_CTL_GET_FREE does not reserve the device, so EBUSY means ask for another, as losetup does.
 	var lastErr error
 	for range s.attachAttempts {
 		path, err := attachFreeLoopDevice(ctx, loopControl, backingFile, s)
@@ -236,20 +199,7 @@ func attachFreeLoopDevice(ctx context.Context, loopControl, backingFile *os.File
 
 	loopDevice := fmt.Sprintf("%s/loop%d", s.devDir, devNum)
 
-	// THE NUMBER IS NOT THE NODE. LOOP_CTL_GET_FREE allocated the minor
-	// above and returned it; it does NOT create /dev/loop<N>. Creating the
-	// node belongs to devtmpfs or to udev, and this code has no ordering
-	// guarantee against either -- in a container the node appears only if
-	// devtmpfs propagates it, or if udev is running and wins the race.
-	//
-	// The assumption held for the PRE-CREATED range, typically loop0-loop7,
-	// which exists from boot. Past it the open failed outright, which is
-	// why this presented as "works for the first N, fails past them" with N
-	// set by how many loop devices the host was already using -- and why
-	// nothing exercised it until something else consumed the low minors.
-	//
-	// Measured, go-luks2 PR #89 job 34083: four devices created fine and the
-	// fifth died on `open /dev/loop8: no such file or directory`.
+	// LOOP_CTL_GET_FREE does not create /dev/loop<N>; wait for udev or devtmpfs to make it.
 	if err := waitForLoopNode(ctx, loopDevice, s.nodeTimeout, s.nodePoll, s.clk); err != nil {
 		return "", err
 	}
@@ -286,14 +236,7 @@ func setFDIoctl(loopFile, backing *os.File) error {
 	return nil
 }
 
-// waitForLoopNode waits for the device node of a freshly allocated loop
-// device to appear, and reports a TYPED refusal if it does not.
-//
-// The node is stat'ed rather than opened. An open can fail for reasons that
-// have nothing to do with the node existing -- EACCES, EBUSY -- and
-// retrying those for the whole budget would report a permission problem as
-// a missing node. Existence is the one question this answers; the open that
-// follows keeps its own error.
+// waitForLoopNode waits for a new loop device's node to exist (stat, not open), returning ErrNodeAbsent if it does not.
 func waitForLoopNode(ctx context.Context, nodePath string, timeout, poll time.Duration, clk clock.Clock) error {
 	deadline := clk.Now().Add(timeout)
 	for {

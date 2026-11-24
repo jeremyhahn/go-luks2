@@ -30,11 +30,7 @@ func TestDefaultKDFTypeFollowsTheProcessMode(t *testing.T) {
 	}
 }
 
-// TestProductionEntryPointsRefuseArgon2InTheProcessFIPSMode proves the public
-// entry points, with no injected policy, consult the real probe: under
-// GODEBUG=fips140=on they refuse Argon2; otherwise they accept it. The
-// forced-policy tests cover the same gates through the injectable cores; this
-// is the test that fails if a public wrapper stops reading the process mode.
+// TestProductionEntryPointsRefuseArgon2InTheProcessFIPSMode: the public entry points read the real FIPS probe.
 func TestProductionEntryPointsRefuseArgon2InTheProcessFIPSMode(t *testing.T) {
 	defer parallel(t)()
 	inFIPS := fips140.Enabled()

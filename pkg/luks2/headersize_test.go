@@ -17,18 +17,11 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// headerSizeVolume formats a genuine volume, so magic, version, checksum
-// algorithm and salt are all authentic. Only HeaderSize is altered afterwards,
-// which is what anyone holding the device can do with eight bytes.
-//
-// The Format runs once per process and each call gets a byte-for-byte copy
-// (formattedImage), because a dozen tests and a table loop were each paying
-// for a real Format -- digest calibration included -- to alter one field (#92).
+// headerSizeVolume returns a copy of a genuine formatted volume, formatted once per process, for altering HeaderSize.
 func headerSizeVolume(t *testing.T) (device string, passphrase []byte) {
 	t.Helper()
 
-	// 17 MiB: the data segment starts at 16 MiB, and Format refuses a device
-	// with no room for data after it (#248).
+	// 17 MiB: data starts at 16 MiB and Format needs room for data after it.
 	device = formattedImage(t, "headerSizeVolume", "volume.img", 17<<20, func() formatOptionsForTest {
 		return formatOptionsForTest{
 			Passphrase:    []byte(headerSizeVolumePassphrase),
@@ -59,19 +52,7 @@ func setHeaderSize(t *testing.T, device string, size uint64) {
 	}
 }
 
-// TestReadHeaderRefusesAHeaderSizeTheLayoutCannotHold is the regression test for
-// two reproduced panics.
-//
-// hdr.HeaderSize is a uint64 read straight off the device. Only magic and
-// version stand in front of it, and both are trivially satisfiable by anyone who
-// controls the device, so a crafted value reaches an allocation and a fixed-
-// index write with nothing having authenticated it.
-//
-// The assertion that matters is NOT that an error comes back. It is that the
-// call RETURNS AT ALL. Before the bound this panicked, and a panic is the one
-// failure a caller cannot handle: ReadHeader's contract offers an error, so a
-// caller that dutifully checks it never gets one and the process dies instead.
-// Every case below therefore runs under a recover that fails the test.
+// TestReadHeaderRefusesAHeaderSizeTheLayoutCannotHold: a crafted HeaderSize returns an error instead of panicking; each case runs under recover.
 func TestReadHeaderRefusesAHeaderSizeTheLayoutCannotHold(t *testing.T) {
 	defer parallel(t)()
 
@@ -121,14 +102,7 @@ func TestReadHeaderRefusesAHeaderSizeTheLayoutCannotHold(t *testing.T) {
 	}
 }
 
-// TestReadHeaderStillOpensAnUntamperedVolume is the control that keeps the fix
-// from being a prohibition.
-//
-// A bound on a size read from disk is one careless comparison away from
-// rejecting every real volume, and a test suite that only asserts refusals
-// passes against exactly that mistake. This asserts the volumes the library
-// itself writes are still readable, and that the passphrase still recovers the
-// master key afterwards.
+// TestReadHeaderStillOpensAnUntamperedVolume: volumes this library writes still read and unlock.
 func TestReadHeaderStillOpensAnUntamperedVolume(t *testing.T) {
 	defer parallel(t)()
 
@@ -154,13 +128,7 @@ func TestReadHeaderStillOpensAnUntamperedVolume(t *testing.T) {
 	mustDestroy(t, key)
 }
 
-// TestHeaderAreaSizeAcceptsTheWholeAcceptedBand pins the boundaries directly, so
-// an off-by-one in either comparison is caught at the value rather than only
-// through a volume that happens to sit in the middle.
-//
-// "Accepted" rather than "legal": header.HeaderSize+1 is allocation-safe but is not
-// a documented legal LUKS2 metadata size -- real volumes start at 16 KiB. This
-// bound exists to stop panics, not to enforce the format.
+// TestHeaderAreaSizeAcceptsTheWholeAcceptedBand pins both boundaries of the accepted HeaderSize band, which prevents panics rather than enforcing the format.
 func TestHeaderAreaSizeAcceptsTheWholeAcceptedBand(t *testing.T) {
 	for _, tc := range []struct {
 		size   uint64

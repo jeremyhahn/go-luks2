@@ -9,10 +9,7 @@ import (
 	"testing"
 )
 
-// maxRunChars bounds a step's `run:` script. GitHub refuses a run value over
-// 21,000 characters in some contexts; a script that long belongs in a file
-// under .github/scripts, where it can be read, linted and tested (Codex P1 on
-// PR #495, Resume 23).
+// maxRunChars bounds a step's run: script; longer scripts belong in .github/scripts.
 const maxRunChars = 20000
 
 var runKey = regexp.MustCompile(`^( *)(?:- +)?run: *(.*)$`)
@@ -212,13 +209,7 @@ type runExemption struct {
 	ceiling int // the most characters the step may hold
 }
 
-// runSizeExempt names the steps (file: step name) whose oversized run block
-// is a handbook template's step, carried verbatim, each with a ceiling of
-// the template step's size plus 2,000 characters. Moving the template's
-// part is the template's change to make: this repository's copy runs from
-// the trusted base, and a local fork of the script would drift from the next
-// template. Each entry must still exceed the limit, or the test fails; a
-// step past its ceiling fails too (a local addition belongs in a file).
+// runSizeExempt names template steps (file: step name) carried verbatim, each capped at the template size plus 2,000; each must still exceed the limit.
 var runSizeExempt = map[string]runExemption{
 	"code-review.yml: Check the container, the request, the head and any standing verdict": {
 		"code-review-template v5.12.6's step (54,725 characters) plus 2,000", 56725},

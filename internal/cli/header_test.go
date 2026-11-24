@@ -103,8 +103,7 @@ func TestRunHeaderSecondary(t *testing.T) {
 func TestRunHeaderShowLabelsTheCopyItShows(t *testing.T) {
 	path := newTestVolumeImage(t, "header-show-secondary.img")
 
-	// Byte 24 is inside the primary's label field, which its checksum
-	// covers, so the primary no longer verifies and the secondary is current.
+	// Byte 24 is in the primary's checksummed label, so the secondary becomes current.
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		t.Fatalf("open image: %v", err)

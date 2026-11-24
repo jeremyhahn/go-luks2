@@ -36,11 +36,7 @@ func argon2VolumeImage(t *testing.T, name string) string {
 	return argon2VolumeImageFrom(t, "argon2Volume", name)
 }
 
-// argon2VolumeImageFrom is argon2VolumeImage from the shared container
-// cached under key: the Argon2id derive at the legal minimum memory is
-// paid once per key, not once per test, and every caller gets its own
-// copy to migrate. A test that needs two DIFFERENT volumes (distinct UUIDs,
-// salts and volume keys) asks for two keys.
+// argon2VolumeImageFrom returns a copy of the Argon2id volume cached under key.
 func argon2VolumeImageFrom(t *testing.T, key, name string) string {
 	t.Helper()
 	return formattedImage(t, key, name, conformanceImageSize, func() formatOptionsForTest {

@@ -6,15 +6,7 @@
 
 package luks2_test
 
-// The seam APIs the Release criteria in docs/SPEC.md name for
-// go-trusted-platform, driven the way that consumer drives them: exported
-// API only, a volume file under t.TempDir(), no root. Each test is one
-// contract a downstream caller relies on; the package's own tests pin the
-// internals behind it.
-//
-// The FIPS cases run in child processes of this test binary with GODEBUG
-// set to the mode each step needs, so every one of them runs, and is judged,
-// in both a plain `go test` and `make test-fips-mode`.
+// Tests for the seam APIs go-trusted-platform uses (docs/SPEC.md), through the exported API without root; FIPS cases run in child processes.
 
 import (
 	"bytes"

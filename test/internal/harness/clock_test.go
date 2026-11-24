@@ -20,10 +20,7 @@ func useFakeClock(t *testing.T) *clock.Fake {
 	return c
 }
 
-// TestWaitClockDefaultsToTheSystemClock: outside a test that substitutes it,
-// every wait in the package runs on the system clock, which the integration
-// tier's real waits exercise. Nothing here reads the real clock: a unit
-// verdict must not depend on it (#233).
+// TestWaitClockDefaultsToTheSystemClock, without reading the real clock.
 func TestWaitClockDefaultsToTheSystemClock(t *testing.T) {
 	if _, ok := waitClock.(clock.System); !ok {
 		t.Fatalf("waitClock is %T, want the system clock outside a test that substitutes it", waitClock)

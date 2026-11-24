@@ -23,26 +23,11 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// Tests for the PBKDF2 floor exemption granted to credentials THIS LIBRARY
-// GENERATED.
-//
-// The tests that matter here are the ones that fail if the exemption becomes
-// reachable from outside. A test showing that the exempt path can write 1000
-// proves the feature works; it does not prove it is safe, and safety is the
-// entire question. So the first three below are boundary tests and the happy
-// path comes last.
+// Tests for the PBKDF2 floor exemption for library-generated credentials, boundary tests first.
 
-// TestTheExemptionIsUnreachableFromOutsideThePackage is the structural
-// assertion, and it is deliberately about the TYPE SYSTEM rather than about
-// behavior.
-//
-// keyslotCostPolicy is unexported and its zero value is the strict policy, so a
-// caller cannot select the exemption, cannot construct the value, and cannot
-// reach it by leaving a field unset. If someone later adds a Force or SkipFloor
-// bool to AddKeyOptions, this test is what notices.
+// TestTheExemptionIsUnreachableFromOutsideThePackage: keyslotCostPolicy is unexported and its zero value is strict.
 func TestTheExemptionIsUnreachableFromOutsideThePackage(t *testing.T) {
-	// The zero value must be the STRICT policy. Everything downstream relies on
-	// a forgotten argument failing closed.
+	// The zero value must be the strict policy.
 	var unset keyslotCostPolicy
 	if unset != callerSuppliedCredential {
 		t.Fatal("the zero keyslotCostPolicy is not callerSuppliedCredential; a forgotten argument would grant the exemption")
@@ -188,9 +173,7 @@ func TestTheInternalSeamWritesSystemdsCountToTheHeader(t *testing.T) {
 	path := newImage(t, "generated-credential.img")
 	formatWithLibrary(t, path)
 
-	// A credential this package generated: 256 CSPRNG bits, which is what makes
-	// the iteration count irrelevant. Nothing about the mechanism depends on
-	// that being true, which is exactly why the seam is unexported.
+	// A library-generated credential: 256 CSPRNG bits.
 	generated, err := randomBase64(32, testVolumeSys().cryptoRand)
 	if err != nil {
 		t.Fatalf("randomBase64 failed: %v", err)
@@ -227,21 +210,7 @@ func TestTheInternalSeamWritesSystemdsCountToTheHeader(t *testing.T) {
 	}
 }
 
-// TestAddRecoveryKeyReachesTheExemption is the PRODUCTION form of the
-// exemption, and the one the seam test above cannot stand in for.
-//
-// The seam test calls addKeyWithPolicy directly, so it proves the mechanism
-// works when something selects it. It says nothing about whether anything in
-// the shipped API ever does -- and for a while nothing did: AddRecoveryKey
-// called AddKey, which hardcoded callerSuppliedCredential, so the relaxed branch
-// was reachable only from that test. A policy no exported path can select is
-// indistinguishable from one that does not exist.
-//
-// This test goes through (*Volume).AddRecoveryKey, the way a consumer does,
-// and asserts the systemd-compatible count lands in the header. It fails if
-// the wiring is removed, if KeyslotParams stops forwarding the count, or if
-// the policy reverts to strict -- each of which returns
-// ErrPBKDFIterationsTooLow here.
+// TestAddRecoveryKeyReachesTheExemption: AddRecoveryKey writes the systemd-compatible count.
 func TestAddRecoveryKeyReachesTheExemption(t *testing.T) {
 	defer parallel(t)()
 
@@ -310,9 +279,7 @@ func TestAddRecoveryKeyReachesTheExemption(t *testing.T) {
 	}
 }
 
-// TestAddKeyKeepsTheFullFloorForTheSameCount is the other half of the pair: the
-// exemption belongs to the credential's ORIGIN, not to the number. The exact
-// count AddRecoveryKey just wrote is refused when a caller supplies the bytes.
+// TestAddKeyKeepsTheFullFloorForTheSameCount: the same count is refused for caller-supplied bytes.
 func TestAddKeyKeepsTheFullFloorForTheSameCount(t *testing.T) {
 	defer parallel(t)()
 
@@ -329,11 +296,7 @@ func TestAddKeyKeepsTheFullFloorForTheSameCount(t *testing.T) {
 	}
 }
 
-// TestAddKeyInheritsTheContainersArgon2Cost is the owner-facing defect: a
-// volume deliberately formatted at 512 MiB -- chosen so it stays openable from
-// a rescue USB or a small recovery box -- used to gain keyslots at this
-// package's hardcoded 1 GiB default, inconsistently with every neighbor and
-// precisely on the credential added for a recovery scenario.
+// TestAddKeyInheritsTheContainersArgon2Cost: a 512 MiB volume gains 512 MiB keyslots.
 func TestAddKeyInheritsTheContainersArgon2Cost(t *testing.T) {
 	const containerMemory = 512_000
 
@@ -361,15 +324,7 @@ func TestAddKeyInheritsTheContainersArgon2Cost(t *testing.T) {
 	}
 }
 
-// TestAddKeyInheritsABelowFloorArgon2CostExactly encodes the invariant: every
-// keyslot in a volume should be derivable by the hardware that owns the volume.
-//
-// The inherited cost is NOT clamped up to MinArgon2MemoryKB. The machine adding
-// a key need not be the machine using the volume, so a clamp succeeds on a
-// roomy workstation and writes a keyslot the 32 MiB target cannot derive at
-// all -- a lockout discovered later, by whoever needed that credential. And it
-// buys nothing: a volume's resistance is bounded by its weakest slot, which on
-// this container is already 32 MiB.
+// TestAddKeyInheritsABelowFloorArgon2CostExactly: the inherited cost is not clamped to MinArgon2MemoryKB.
 func TestAddKeyInheritsABelowFloorArgon2CostExactly(t *testing.T) {
 	const containerMemory = 32768
 
@@ -445,16 +400,7 @@ func TestAddKeyFallsBackToDefaultsForANonArgon2Container(t *testing.T) {
 	}
 }
 
-// TestAddKeyReportsTheInheritedCostToTheCaller is the visibility requirement.
-// The value must reach the caller at the point of decision rather than be left
-// to be inferred from the header afterwards.
-//
-// The container is written by cryptsetup, so the cost being inherited is one
-// this package did not choose -- the case the visibility requirement exists
-// for -- and so the fixture can exist in a FIPS 140-3 mode process, which
-// refuses to create Argon2 keyslots itself (#235). In FIPS mode the inheriting
-// AddKey must be refused with the typed error and leave the container exactly
-// as it was; without FIPS it must inherit the cost and report it.
+// TestAddKeyReportsTheInheritedCostToTheCaller, on a cryptsetup container; under FIPS the add is refused and nothing changes.
 func TestAddKeyReportsTheInheritedCostToTheCaller(t *testing.T) {
 	defer parallel(t)()
 
@@ -509,14 +455,7 @@ func TestAddKeyReportsTheInheritedCostToTheCaller(t *testing.T) {
 	}
 }
 
-// TestListKeyslotsReportsTheKDFCost is the visibility requirement for a cost
-// that was PRESERVED rather than inherited.
-//
-// ChangeKey has no options struct, so there is no call-site field to write the
-// preserved value back to the way AddKey reports InheritedArgon2Cost. The
-// listing is the surface an operator would look at instead, and until now it
-// did not carry costs at all -- so a slot deliberately left below
-// MinArgon2MemoryKB was invisible without parsing the header by hand.
+// TestListKeyslotsReportsTheKDFCost: a preserved cost is visible in the listing.
 func TestListKeyslotsReportsTheKDFCost(t *testing.T) {
 	metadata := &header.Metadata{Keyslots: map[string]*header.Keyslot{
 		"0": {Type: "luks2", KeySize: 64, KDF: &header.KDF{
@@ -538,8 +477,7 @@ func TestListKeyslotsReportsTheKDFCost(t *testing.T) {
 
 	argon2, pbkdf2 := slots[0], slots[1]
 
-	// The argon2 slot reports its costs, INCLUDING a memory cost below the
-	// create floor -- which is exactly the case that has to be observable.
+	// The argon2 slot reports its costs, including memory below the create floor.
 	if argon2.KDF.MemoryKiB != 32768 || argon2.KDF.Time != 4 || argon2.KDF.Parallel != 1 {
 		t.Fatalf("argon2 slot reports time/memory/parallel %d/%d/%d, want 4/32768/1",
 			argon2.KDF.Time, argon2.KDF.MemoryKiB, argon2.KDF.Parallel)

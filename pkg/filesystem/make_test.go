@@ -57,8 +57,7 @@ func TestSupportedCanBeCreatedAndChecked(t *testing.T) {
 	}
 }
 
-// TestSupportedExactSet pins the owner's ruling on #195: ext4, xfs, zfs and
-// vfat, and not ext2 or ext3.
+// TestSupportedExactSet: ext4, xfs, zfs and vfat, not ext2 or ext3.
 func TestSupportedExactSet(t *testing.T) {
 	var got []string
 	for _, fs := range Supported() {
@@ -110,13 +109,7 @@ func TestUnsupportedTypesAreRefused(t *testing.T) {
 	}
 }
 
-// fakeTools puts stand-ins for external programs in the ONLY directory the
-// creators resolve programs from (sys.tools.Dirs), so their real lookups
-// reach them. Each records the argv it was run with, one argument per line,
-// prints stdout and exits with code; record returns what a tool was run
-// with, or nil if it never ran.
-//
-// sys is package state, so every caller is sequential.
+// fakeTools installs recording stand-ins in sys.tools.Dirs; record returns a tool's argv or nil. Callers are sequential.
 func fakeTools(t *testing.T, fakes map[string]fakeTool) (record func(name string) []string) {
 	t.Helper()
 	bin := t.TempDir()

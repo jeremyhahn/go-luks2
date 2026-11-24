@@ -106,10 +106,7 @@ func runHeaderSecondary(ctx context.Context, e *env, args []string) error {
 	})
 }
 
-// showHeader reads one header copy and prints it, labeled by the copy it
-// is. `header show` prints the current copy, which is the secondary when the
-// primary is damaged or older, so the label and offset come from the copy
-// read (Header.Offset), never from the command that asked for it.
+// showHeader prints one header copy, labeled by the copy actually read (Header.Offset).
 func showHeader(ctx context.Context, e *env, args []string, command string, read func(context.Context, *luks2.Volume) (*luks2.Header, error)) error {
 	if len(args) < 1 {
 		return &UsageError{Command: command, Detail: "want <device>"}
@@ -157,11 +154,7 @@ func showHeader(ctx context.Context, e *env, args []string, command string, read
 	return nil
 }
 
-// warnAboutDroppedEntries tells the operator when the header on disk
-// carried keyslot or token entries written as JSON null, which the library
-// removed while reading it. It goes to stderr because the report on stdout
-// is something people pipe, and a warning that a container is damaged does
-// not belong in the middle of it.
+// warnAboutDroppedEntries warns on stderr when the header carried JSON-null keyslot or token entries the library removed.
 func warnAboutDroppedEntries(e *env, device string, hdr *luks2.Header) {
 	dropped := hdr.Dropped()
 	if len(dropped) == 0 {

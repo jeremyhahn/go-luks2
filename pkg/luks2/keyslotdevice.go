@@ -16,35 +16,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// keyslotDevice is how a keyslot operation reaches the device it is changing.
-//
-// # One descriptor for the whole operation (#249, A10)
-//
-// Every keyslot operation used to resolve the device PATH again at each step:
-// once to lock it, once to read the header, once to measure it, once to write
-// the key material, once to write the header and once more to wipe. ChangeKey's
-// material write did not even go through openDevice. A path is a name, not a
-// device: between two of those steps a udev rule, an attacker who controls a
-// parent directory, or an operator re-pointing a /dev/disk/by-* link can make it
-// name something else, and the lock -- taken on the FIRST descriptor -- protects
-// nothing the later ones reach. Authentication and the header read then happen
-// against volume A while the new key material, the header and the wipe land on
-// device B.
-//
-// A pinned keyslotDevice holds the descriptor the lock was taken on and does
-// every read, size measurement, write, sync and wipe through it, so the
-// operation acts on exactly the inode it locked. What that descriptor IS is
-// checked on the descriptor itself (requireLockableDevice), not on the path.
-//
-// O_NOFOLLOW is deliberately not used. The paths operators pass are very often
-// symlinks -- /dev/disk/by-uuid, /dev/mapper -- and refusing them would refuse
-// the ordinary case. Following the link ONCE is safe; following it six times
-// was the defect.
-//
-// MigrateToFIPS is pinned the same way (#255): it was the last keyslot writer
-// that reached the device by path, kept so because its crash suite counted
-// path opens as write steps. That suite now observes the steps on the pinned
-// descriptor itself, through keyslotWriteStep.
+// keyslotDevice is how a keyslot operation reaches its device: pinned, every read, write, sync and wipe goes through the locked descriptor.
 type keyslotDevice struct {
 	path   string
 	file   *os.File       // the locked descriptor; the lock owns it
@@ -67,10 +39,7 @@ func pinnedKeyslotDevice(lock *deviceLock, path string, sys volumeSys) (*keyslot
 	return &keyslotDevice{path: path, file: file, locked: lock.locked, sys: sys}, nil
 }
 
-// keyslotLockWait is how long a keyslot operation waits for the device's
-// locks: DefaultLockWait, as acquireDeviceLock waits. A variable so a test
-// process can observe the bounded refusal without spending the whole budget;
-// nothing else changes it.
+// keyslotLockWait is how long a keyslot operation waits for the device locks; a variable for tests.
 var keyslotLockWait = DefaultLockWait
 
 // lockKeyslotDevice validates the path, opens and locks it once, and returns the
@@ -89,10 +58,7 @@ func lockKeyslotDevice(ctx context.Context, device string, sys volumeSys) (*devi
 	return lock, dev, nil
 }
 
-// requireLockableDevice checks, on the DESCRIPTOR, what ValidateDevicePath
-// checked on the path: a regular file or a block device. The path check came
-// first and is a different moment; this is the one that describes what the
-// operation will actually write to.
+// requireLockableDevice checks the descriptor is a regular file or block device.
 func requireLockableDevice(f *os.File, path string) error {
 	info, err := f.Stat()
 	if err != nil {
@@ -111,21 +77,12 @@ func (d *keyslotDevice) reader() io.ReaderAt {
 	return d.sys.pinnedDeviceReader(d.file)
 }
 
-// mediumPath names the pinned descriptor's file for an operation that must
-// open it again with other flags -- an O_DIRECT read past the page cache. It is
-// the descriptor's /proc/self/fd entry, which reopens the inode the lock was
-// taken on rather than resolving the operator's path a second time.
+// mediumPath is the pinned descriptor's /proc/self/fd entry, for reopening the same inode with other flags.
 func (d *keyslotDevice) mediumPath() string {
 	return "/proc/self/fd/" + strconv.Itoa(int(d.file.Fd())) // #nosec G115 -- a descriptor number fits an int
 }
 
-// readHeader reads the current header copy (readCurrentHeader). The first read
-// of an operation -- the one its read-modify-write starts from, under the
-// exclusive lock -- also rewrites the other copy from it when that copy is
-// invalid or older (repairHeaderCopies), so the write starts from the copy
-// cryptsetup would use with both copies level. Later reads, such as the
-// verification after the operation's own writes, report what is on the medium
-// and repair nothing: rewriting there would hide a copy damaged by the write.
+// readHeader reads the current header copy; the first read of an operation also repairs the other copy (repairHeaderCopies).
 func (d *keyslotDevice) readHeader() (*header.BinaryHeader, *header.Metadata, error) {
 	cur, err := readCurrentHeader(d.reader())
 	if err != nil {
@@ -140,12 +97,7 @@ func (d *keyslotDevice) readHeader() (*header.BinaryHeader, *header.Metadata, er
 	return cur.Header, cur.Metadata, nil
 }
 
-// readPrimaryHeader reads and validates the primary header copy alone, and
-// repairs nothing. MigrateToFIPS alone uses it: its design ("Both header
-// copies", fipsmigrate.go) holds the primary authoritative, reconciles the
-// secondary to it as a reported stage of its own, refuses a torn primary
-// before writing, and re-reads after its writes to catch a copy damaged since
-// -- which a read that repaired would hide.
+// readPrimaryHeader reads and validates the primary copy alone and repairs nothing; MigrateToFIPS uses it.
 func (d *keyslotDevice) readPrimaryHeader() (*header.BinaryHeader, *header.Metadata, error) {
 	return readHeaderCopyFrom(d.reader(), header.PrimaryHeaderOffset)
 }
@@ -158,9 +110,7 @@ func (d *keyslotDevice) writeHeader(ctx context.Context, hdr *header.BinaryHeade
 	return writeHeaderTo(d.file, hdr, metadata, d.sys.syncDevice)
 }
 
-// writeArea writes data at offset, fills the rest of an area of size bytes with
-// zeros, and makes it durable. Nothing here decides WHERE: the caller has
-// already placed the area inside the keyslots area.
+// writeArea writes data at offset, zero-fills the rest of a size-byte area, and syncs it.
 func (d *keyslotDevice) writeArea(ctx context.Context, op string, offset int64, data []byte, size int64) error {
 	if err := d.sys.keyslotWriteStep(ctx, d, op); err != nil {
 		return err

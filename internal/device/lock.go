@@ -39,12 +39,7 @@ func (m LockMode) flockOp() int {
 	return unix.LOCK_EX | unix.LOCK_NB
 }
 
-// Lock wait budget and backoff schedule.
-//
-// DefaultLockWait is what Lock spends before giving up. It is a BOUND, not a
-// target: an uncontended lock is taken on the first attempt and costs
-// nothing, and the budget is consumed only when another holder has the
-// device.
+// DefaultLockWait bounds how long Lock waits for another holder; an uncontended lock costs nothing.
 const (
 	DefaultLockWait = 30 * time.Second
 
@@ -122,10 +117,7 @@ func (p *Pinned) Lock(ctx context.Context, mode LockMode, wait time.Duration, cl
 	return &Locked{path: p.path, file: p.file, cryptsetup: cs, pinned: p, mode: mode}, nil
 }
 
-// acquire makes one non-blocking attempt at the node flock in mode, counting
-// holders on this descriptor. A shared holder joins one already held; any
-// other combination with a holder present is contention, reported as
-// EWOULDBLOCK so pollLock waits for it like a foreign holder.
+// acquire makes one non-blocking node-flock attempt, joining a shared holder and reporting any other conflict as EWOULDBLOCK.
 func (p *Pinned) acquire(mode LockMode) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -197,16 +189,12 @@ func pollLock(ctx context.Context, path string, started, deadline time.Time, clk
 			return nil
 		}
 
-		// CLASSIFY, do not assume contention. EWOULDBLOCK means someone else
-		// holds it and waiting is the right answer. Anything else -- EBADF,
-		// a descriptor closed underneath us -- will not improve by being
-		// retried, and retrying it for the whole budget would report a real
-		// fault as a timeout.
+		// Only EWOULDBLOCK is contention; any other error is a fault, not retried.
 		if !errors.Is(err, unix.EWOULDBLOCK) {
 			return &errs.Error{Kind: errs.ErrIO, Detail: "could not lock " + path, Err: err}
 		}
 
-		// Checked AFTER an attempt, so a zero budget still tries once.
+		// Checked after an attempt, so a zero budget still tries once.
 		remaining := deadline.Sub(clk.Now())
 		if remaining <= 0 {
 			return &LockTimeoutError{Path: path, Waited: clk.Now().Sub(started), Attempts: attempt, Err: err}

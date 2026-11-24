@@ -73,8 +73,7 @@ func TestCheckFailureIsTyped(t *testing.T) {
 // TestCheckCommands pins the argv each checker runs on a clean filesystem,
 // read-only and repairing, including the vfat arm #195 added.
 func TestCheckCommands(t *testing.T) {
-	// "--" ends the options on every command (#250, C7), so the operand can
-	// never be read as one. For ZFS the operand is a pool NAME, not a device.
+	// "--" ends the options on every command; for ZFS the operand is a pool name.
 	const dev = "/dev/mapper/vol"
 	const pool = "tank"
 	tests := []struct {
@@ -173,13 +172,7 @@ func TestCheckFAT32Outcomes(t *testing.T) {
 	}
 }
 
-// TestCheckExt4Outcomes pins how e2fsck's exit status is read (#228). The
-// status is a bitmask (e2fsck(8)): 1 = errors corrected, 2 = corrected and a
-// reboot is requested, 4 = errors left uncorrected, 8 = operational error,
-// 16 = usage error, 32 = canceled, 128 = shared-library error. Repairing,
-// 0-3 is success with the repair and reboot request reported, and any
-// status with a bit of 4 or above is a failure. Read-only, every nonzero
-// status is a failure: -n writes nothing, so nothing was corrected.
+// TestCheckExt4Outcomes pins how e2fsck's exit bitmask is read, repairing and read-only.
 func TestCheckExt4Outcomes(t *testing.T) {
 	const dev = "/dev/mapper/vol"
 	repairArgv := [][]string{{"e2fsck", "-p", "--", dev}}

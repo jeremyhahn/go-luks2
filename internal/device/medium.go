@@ -140,10 +140,7 @@ func loopAttributes(dir string) (backing string, offset int64, buffered, isLoop 
 	return backing, offset, buffered, true, nil
 }
 
-// bufferedLoopBelow returns the name of a loop device without direct I/O
-// anywhere below the sysfs block directory dir -- through its slaves and the
-// whole disk a partition belongs to, each examined in full by bufferedLoopAt
-// -- or "" if there is none.
+// bufferedLoopBelow returns the name of a loop device without direct I/O anywhere below the sysfs block directory dir, or "".
 func bufferedLoopBelow(dir, sysDevBlockRoot string, statRdev func(string) (uint64, error)) (string, error) {
 	resolved, err := filepath.EvalSymlinks(dir)
 	if err != nil {
@@ -168,11 +165,7 @@ func bufferedLoopBelow(dir, sysDevBlockRoot string, statRdev func(string) (uint6
 	return "", nil
 }
 
-// bufferedLoopAt examines the sysfs block directory dir and everything below
-// it: a buffered loop device is the answer; a direct-I/O loop device is
-// followed through its backing (bufferedLoopBehind), however many of them
-// are stacked; and every device's slaves and partition parent are walked
-// (bufferedLoopBelow). One walk, so no kind of device is a place it stops.
+// bufferedLoopAt walks dir and everything below it, following direct-I/O loop backings, and returns the first buffered loop device.
 func bufferedLoopAt(dir, sysDevBlockRoot string, statRdev func(string) (uint64, error)) (string, error) {
 	backing, _, buffered, isLoop, err := loopAttributes(dir)
 	if err != nil {

@@ -26,9 +26,7 @@ func Failure(op string, err error) error {
 func Classify(err error) error {
 	switch {
 	case errors.Is(err, unix.EPERM), errors.Is(err, unix.EACCES):
-		// MEASURED 2026-08-31 across container configurations: Docker's
-		// default seccomp profile denies add_key, keyctl and request_key, and
-		// --cap-add SYS_ADMIN does NOT lift it -- only relaxing seccomp does.
+		// Docker's default seccomp profile denies add_key, keyctl and request_key; SYS_ADMIN does not lift it.
 		return ErrBlocked
 	case errors.Is(err, unix.ENOSYS):
 		return ErrUnsupported
@@ -120,8 +118,7 @@ var (
 //
 // It is fatal and never a degradation: the alternative is the volume master
 // key in memory this library cannot wipe, for an unbounded time, and a caller
-// that got a successful return would believe a guarantee that did not hold
-// (owner ruling, 2026-08-31).
+// that got a successful return would believe a guarantee that did not hold.
 type UnavailableError struct {
 	// Op names the keyring step that failed. It never carries key content.
 	Op string

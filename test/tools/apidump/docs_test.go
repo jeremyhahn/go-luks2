@@ -169,8 +169,7 @@ func TestReadFeatureDocsRefusesATreeWithoutFeatures(t *testing.T) {
 	}
 }
 
-// TestEveryPkgExportIsNamedInAFeatureDoc is the gate (#335): every exported identifier of every package under pkg/ is named
-// in a feature doc under docs/, or listed with a reason in doc-exceptions.tsv.
+// TestEveryPkgExportIsNamedInAFeatureDoc: every exported pkg/ identifier is named in a docs/ feature doc or listed in doc-exceptions.tsv.
 func TestEveryPkgExportIsNamedInAFeatureDoc(t *testing.T) {
 	var out bytes.Buffer
 	if code := run([]string{"documented", "doc-exceptions.tsv", "../../../docs", "../../../pkg"}, &out, &out); code != 0 {

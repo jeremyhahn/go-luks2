@@ -98,9 +98,7 @@ func TestHeaderCopyChoiceMatchesCryptsetup(t *testing.T) {
 		})
 	}
 
-	// The reverse: the library repairs the torn copy before its own write, and
-	// each copy it leaves is, ALONE, one cryptsetup opens -- the other is torn
-	// before cryptsetup reads, so its own repair cannot stand in for ours.
+	// The library repairs the torn copy before writing, and each copy it leaves opens in cryptsetup alone.
 	for _, torn := range copies {
 		for _, kept := range copies {
 			t.Run("cryptsetup opens the "+kept.name+" the library wrote after the "+torn.name+" tore", func(t *testing.T) {

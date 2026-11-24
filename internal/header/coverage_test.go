@@ -128,8 +128,7 @@ func TestHeaderCopiesAgreeDetectsADifferentSequenceID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Rewrite ONLY the secondary copy, at a different sequence id, so the
-	// two copies disagree.
+	// Rewrite only the secondary copy, at a different sequence id.
 	desynced := *hdr
 	desynced.SequenceID = 99
 	if err := WriteSecondaryCopy(f, &desynced, jsonData, area-HeaderSize, int64(area)); err != nil {

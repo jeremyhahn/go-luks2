@@ -169,17 +169,7 @@ func goEnvGOPATH(t *testing.T, env []string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// ownedGOPATH returns an empty GOPATH that belongs to this test and is removed
-// with it, whatever the go command leaves inside.
-//
-// The Makefile runs `$(GO) env GOPATH` at parse time. When that go is older
-// than go.mod's go line -- as the goFallback install can be on a host whose
-// PATH carries a newer one -- GOTOOLCHAIN=auto downloads the required
-// toolchain into the module cache under this GOPATH, and the go command
-// writes the module cache read-only. t.TempDir's own RemoveAll then fails
-// with "permission denied" and fails the test for something it did not test
-// (#230). So the tree is made writable first: t.Cleanup runs cleanups last
-// registered first, and this one is registered after t.TempDir's.
+// ownedGOPATH returns an empty GOPATH removed with the test, made writable first since the go command writes the module cache read-only.
 func ownedGOPATH(t *testing.T) string {
 	t.Helper()
 	gopath := t.TempDir()
@@ -191,10 +181,7 @@ func ownedGOPATH(t *testing.T) string {
 	return gopath
 }
 
-// goPathEnv returns set (a new map when nil) with GOPATH set to gopath and
-// GOMODCACHE pinned to gopath/pkg/mod. Pinning GOMODCACHE keeps a host's own
-// GOMODCACHE, from the environment or `go env -w`, from sending a toolchain
-// download outside the directory ownedGOPATH cleans.
+// goPathEnv returns set (new when nil) with GOPATH set to gopath and GOMODCACHE pinned to gopath/pkg/mod.
 func goPathEnv(gopath string, set map[string]string) map[string]string {
 	if set == nil {
 		set = map[string]string{}
@@ -370,8 +357,7 @@ func parentMakeEnviron(t *testing.T, overrides ...string) []string {
 	return env
 }
 
-// runMakeErr is runMake for a target that is EXPECTED to be able to fail: it
-// returns the error instead of failing the test on it.
+// runMakeErr is runMake for a target expected to be able to fail: it returns the error.
 func runMakeErr(t *testing.T, env []string, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
 	cmd := exec.Command(lookPath(t, "make"), args...) // #nosec G204 -- make is resolved from PATH; arguments are test-built
@@ -685,13 +671,7 @@ func currentPkgAndInternalPackages(t *testing.T) []string {
 	return rel
 }
 
-// TestPerPackageQuartetCoversEveryCurrentPackage is the "adding a package is
-// one line" contract: every package `go list` finds
-// under pkg/ and internal/ must resolve through PKG_<name> for test-%,
-// coverage-% and bench-%, named for its last path element. A package added
-// without its PKG_<name> line fails here instead of silently having no
-// per-package target -- `make -n` is enough to prove the map resolves,
-// without paying for a real build or test run per package.
+// TestPerPackageQuartetCoversEveryCurrentPackage: every package under pkg/ and internal/ resolves through PKG_<name> for test-%, coverage-% and bench-%.
 func TestPerPackageQuartetCoversEveryCurrentPackage(t *testing.T) {
 	for _, rel := range currentPkgAndInternalPackages(t) {
 		name := rel[strings.LastIndex(rel, "/")+1:]
@@ -735,16 +715,7 @@ func dockerInvocationMarker(t *testing.T) (binDir, marker string) {
 	return bin, marker
 }
 
-// TestIntegrationTestPatternRuleDryRunNeverInvokesDocker pins the #146
-// hazard integration-test-% is deliberately built to avoid: GNU make
-// executes a recipe line for real, even under `-n`, when the line's own
-// text contains the literal "$(MAKE)" (see the ITEST_BUILD_IMAGE comment in
-// the Makefile) -- and #146 was exactly a container `make -n` started by
-// accident through that exception. The pattern rule hides its recursive
-// call behind a variable so its one shared shell -- needed so an absent
-// integration directory can skip the rest of it -- never contains that
-// literal text. This proves a dry run never reaches the real `docker` on
-// PATH at all.
+// TestIntegrationTestPatternRuleDryRunNeverInvokesDocker: integration-test-% hides its recursive $(MAKE), so `make -n` never runs docker.
 func TestIntegrationTestPatternRuleDryRunNeverInvokesDocker(t *testing.T) {
 	bin, marker := dockerInvocationMarker(t)
 	env := environ(nil, map[string]string{"PATH": bin + string(os.PathListSeparator) + os.Getenv("PATH")})
@@ -881,9 +852,7 @@ func TestCoverageReportWritesTheHTMLFromAnExistingProfile(t *testing.T) {
 	profile := filepath.Join(dir, "coverage.out")
 	html := filepath.Join(dir, "coverage.html")
 
-	// `go tool cover -html` reads the SOURCE each profile line names, unlike
-	// -func, so the fixture has to be a profile over a real package rather
-	// than a hand-written line naming a file that does not exist.
+	// `go tool cover -html` reads each profile line's source, so the fixture covers a real package.
 	cmd := exec.Command(resolveGo(t), "test", "-count=1", "-covermode=atomic", "-coverprofile="+profile, "./internal/errs") // #nosec G204 -- go is resolved as the Makefile resolves it; arguments are constants
 	cmd.Dir = repoRoot(t)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -928,9 +897,7 @@ func TestDockerBuildBuildsBothDevcontainerImages(t *testing.T) {
 	}
 }
 
-// ci-template v1.29: the integration image's build takes APK_INDEX_SUM as a
-// build argument and the Dockerfile's integration stage alone declares it, so
-// the toolchain image's cache is not keyed by it.
+// TestDockerBuildPassesTheApkIndexSum: only the integration stage declares APK_INDEX_SUM.
 func TestDockerBuildPassesTheApkIndexSum(t *testing.T) {
 	stdout, stderr := runMake(t, environ(nil, nil), "-n", "docker-build-integration", "IT_IMAGE=go-luks2-ci-it:t")
 	if !strings.Contains(stdout, "--build-arg APK_INDEX_SUM ") {
@@ -990,9 +957,7 @@ func TestDockerBuildPassesTheAptIndexSum(t *testing.T) {
 	}
 }
 
-// `make lint` is a gate in CI's image job, so a lint that passes without its
-// linter is the vacuous gate the testing convention forbids: golangci-lint
-// absent FAILS the target, exactly as actionlint absent already does.
+// TestLintFailsWithoutGolangciLint: an absent linter fails the target.
 func TestLintFailsWithoutGolangciLint(t *testing.T) {
 	env := environ([]string{"GOBIN"}, map[string]string{"PATH": systemPathWithout(t, "golangci-lint")})
 	out, errOut, err := runMakeErr(t, env, "--no-print-directory", "lint", "GOBIN="+t.TempDir())
@@ -1073,24 +1038,9 @@ func TestDockerRunUsesTheCLIImageAndTheIntegrationLauncher(t *testing.T) {
 	}
 }
 
-// TestCleanPreservesTrackedDockerfilesButRemovesEverythingElseUnderBuildDir
-// is the companion to the .gitignore fix ("build/*" / "!build/docker/"):
-// build/docker holds Dockerfiles tracked as source, not build
-// output, and clean's old `rm -rf $(BUILD_DIR)` would delete them from the
-// working tree on every run -- recoverable only via `git checkout`, and a
-// surprising thing for a "clean" target to do to committed source. This
-// proves a tracked Dockerfile survives while an ordinary build artifact,
-// anywhere under BUILD_DIR including a nested one, does not.
+// TestCleanPreservesTrackedDockerfilesButRemovesEverythingElseUnderBuildDir: build/docker survives clean, other artifacts do not.
 func TestCleanPreservesTrackedDockerfilesButRemovesEverythingElseUnderBuildDir(t *testing.T) {
-	// clean's recipe reaches past BUILD_DIR into bare, CWD-relative globs --
-	// *.log, *.test, gosec-report.json, coverage-cli.out, and a recursive
-	// `find . -name "*.out" -type f -delete` -- that no Makefile variable
-	// can redirect. runMake/runMakeErr always set cmd.Dir to the real
-	// repository root, so running a real (non "-n") `clean` through them
-	// would delete real files a concurrent `make test-unit` leg left there
-	// (coverage-pkg.out, coverage-rest.out: the defect this test exists to
-	// catch). So this test runs make, for real, against a copy of the
-	// Makefile in its own temporary directory instead.
+	// clean deletes CWD-relative globs, so this runs a copy of the Makefile in a temporary directory.
 	dir := t.TempDir()
 	// The Makefile's toolchain-pin block reads go.mod, unconditionally, from
 	// make's own working directory -- so the copy needs it alongside, and the
@@ -1160,17 +1110,7 @@ func gitStatus(root string) (string, error) {
 	return string(out), nil
 }
 
-// TestMain is this package's own guard against the defect its tests exist to
-// catch: a test that runs a real make target must sandbox every path the
-// target can touch, because this suite runs inside the actual repository
-// checkout, alongside -- not inside -- whatever invoked it. A test that
-// forgets, the way TestCleanPreservesTrackedDockerfilesButRemovesEverythingElseUnderBuildDir
-// once did, deletes real files a concurrent `make test-unit` leg left at the
-// repository root, such as coverage-pkg.out. TestMain snapshots `git status
-// --porcelain` at the repository root before and after the suite and fails
-// if a single byte differs. A tree with no .git, such as the published
-// archive, gets the same snapshot from a scratch repository (treeState); the
-// guard never stands down.
+// TestMain fails the suite if `git status --porcelain` at the repository root changes (treeState for a tree with no .git).
 func TestMain(m *testing.M) {
 	os.Exit(guardedRun(m))
 }

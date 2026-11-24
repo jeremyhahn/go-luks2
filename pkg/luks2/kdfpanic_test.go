@@ -15,21 +15,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// The derivation must not panic on any parameter a header can carry.
-//
-// header.ValidateKeyslot now screens a keyslot before its KDF is run, and that is the
-// primary guard. It is not the only one that should exist. A single guard means
-// every future caller of the derivation -- and every path that reaches it other
-// than through a keyslot -- is one oversight away from crashing the process,
-// which is exactly how the keyslot panics arrived. These tests pin the
-// derivation itself.
-//
-// Two libraries panic here for parameters a LUKS2 header may legally contain:
-//
-//	golang.org/x/crypto/pbkdf2.Key   panics on any error from crypto/pbkdf2,
-//	                                 and the stdlib errors on keyLength <= 0
-//	golang.org/x/crypto/argon2       panics directly on time < 1
-//	                                 ("argon2: number of rounds too small")
+// The derivation must not panic on any header parameter, even though x/crypto pbkdf2 and argon2 panic on some legal values.
 func TestDeriveKeyDoesNotPanicOnHeaderControlledParameters(t *testing.T) {
 	iterations := 1000
 	zero := 0
@@ -88,20 +74,6 @@ func TestDeriveKeyDoesNotPanicOnHeaderControlledParameters(t *testing.T) {
 		})
 	}
 }
-
-// The property this file used to guard here -- that a refusal must not name the
-// requested key length -- moved out with the bound that produced it.
-//
-// deriveKeyPlain no longer has an upper bound to violate (see kdf.go: it serves
-// two trust domains and an untrusted-input ceiling there rejected a caller's own
-// hardening), so the test could only skip, and a skipping test is a test nobody
-// reads. Where the property still matters it is asserted directly:
-// internal/secret's TestARefusalNamesTheMaterialAndNotItsSize, on the one
-// refusal that must stay silent about sizes.
-//
-// A keyslot refusal DOES name the size it rejected, deliberately -- key_size is
-// a cleartext LUKS2 header field, and an operator diagnosing a bad container
-// needs the number.
 
 func contains(haystack, needle string) bool {
 	return len(haystack) >= len(needle) && func() bool {

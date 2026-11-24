@@ -49,7 +49,7 @@ func System() Custody {
 }
 
 // Admitted is a Custody whose constructors ADMIT through the allocator
-// returns before anything is mapped (#26): the module allocates against the
+// returns before anything is mapped: the module allocates against the
 // one budget the binary sized (enclave.SetAllocator), or against
 // RLIMIT_MEMLOCK by default, and never installs or builds an allocator of its
 // own. A refusal is the allocator's typed enclave.ErrBudgetExhausted rather
@@ -78,11 +78,7 @@ func Admitted(allocator func() (enclave.Allocator, error)) Custody {
 	}
 }
 
-// copiedInto builds Custody.Copied over sized: the copy is made into a fresh
-// enclave, which is then frozen read-only. Freeze is a capability reached
-// through enclave.As; a handle that is not a Freezer fails the copy with a
-// *enclave.CapabilityError and is destroyed -- the material is never handed
-// out in writable pages.
+// copiedInto copies into a fresh enclave and freezes it read-only; a non-Freezer handle fails and is destroyed.
 func copiedInto(sized func(n int) (enclave.ByteAccess, error)) func([]byte) (enclave.ByteAccess, error) {
 	return func(src []byte) (enclave.ByteAccess, error) {
 		if len(src) == 0 {

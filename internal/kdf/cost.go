@@ -12,11 +12,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// Cost floors and ceilings a header's KDF object is held to on read. The
-// ceiling is what WHAT IS WRITTEN MUST BE WHAT THE READER ACCEPTS (#249, A5)
-// requires every creation path to stay under; the floor is this package's own
-// minimum, which a foreign (cryptsetup-written) header is not held to beyond
-// MinKDFIterations / MinArgon2Time / MinArgon2Parallel.
+// Cost floors and ceilings a header's KDF object is held to on read; the ceiling bounds every creation path.
 const (
 	MinKDFIterations = 1
 	MaxKDFIterations = 100_000_000
@@ -63,12 +59,7 @@ func ValidateCost(p Params) error {
 
 	switch {
 	case kdfType == "argon2i" || kdfType == "argon2id":
-		// Negative values are the sharpest form of this. Time, Memory and
-		// CPUs are signed ints out of JSON and are converted with
-		// uint32/uint8 at the derive call site, so -1 does not fail -- it
-		// wraps to 4294967295, and Argon2 is then asked for a
-		// four-terabyte matrix. Checking against a positive minimum is what
-		// catches that; checking only the ceiling would not.
+		// A positive minimum catches negative values that would wrap to huge unsigned costs.
 		if p.Time == nil || p.Memory == nil || p.CPUs == nil {
 			return &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "argon2 KDF is missing its time, memory or cpus cost"}
 		}
@@ -109,10 +100,7 @@ func ValidateCost(p Params) error {
 		}
 
 	default:
-		// An unsupported type must SAY unsupported type. Treating everything
-		// non-argon2 as pbkdf2 reports a header claiming type "sha256-crypt"
-		// as "missing its iteration count", naming a field that type never
-		// claimed to have.
+		// An unsupported type is reported as such.
 		return &errs.Error{Kind: ErrUnsupportedKDF, Detail: fmt.Sprintf("unsupported KDF type %q", p.Type)}
 	}
 

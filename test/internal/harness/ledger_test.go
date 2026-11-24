@@ -25,11 +25,7 @@ func TestLedgerRecordIsDurableBeforeItReturns(t *testing.T) {
 		t.Fatalf("Record: %v", err)
 	}
 
-	// Read it back through a SEPARATE file handle, which is what a reaper in
-	// another process does. The record must already be there: the guarantee is
-	// that nothing is created before it is durable, so a Record that returns
-	// with the line still buffered would leave the exact unattributable state
-	// this package exists to prevent.
+	// Read it back through a separate handle, as another process's reaper would: the record is already durable.
 	entries, err := ReadLedger(filepath.Join(dir, "run-1.ledger"))
 	if err != nil {
 		t.Fatalf("ReadLedger: %v", err)
@@ -117,8 +113,7 @@ func TestLedgerSurvivesCloseAndIsDeletedOnlyByDiscard(t *testing.T) {
 	}
 	path := ledger.Path()
 
-	// Close is what a run that ENDED does, cleanly or otherwise. The file must
-	// remain: its presence is the signal that this run may have left state.
+	// Close is what a run that ended does; the file must remain.
 	if err := ledger.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}

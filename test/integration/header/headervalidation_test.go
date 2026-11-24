@@ -23,17 +23,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/test/internal/harness"
 )
 
-// The structural validator is a reproduction of cryptsetup's
-// LUKS2_hdr_validate, and a reproduction is only as good as its agreement
-// with the original. These tests hold it to the cryptsetup binary in both
-// directions (#248). See headervalidation_integration_test.go (now moved,
-// from pkg/luks2) for the full history.
-//
-// internal/header.ValidateHeaderStructure, MarshalCanonicalJSON and
-// WriteEncodedHeader are this package's exported-within-internal
-// replacements for pkg/luks2's own unexported validateHeaderStructure,
-// marshalCanonicalJSON and writeEncodedHeader -- internal/header is
-// importable module-wide, so no new surface was needed.
+// Holds the structural validator (cryptsetup's LUKS2_hdr_validate) to the cryptsetup binary in both directions.
 
 const agreementPassphrase = "agreement-passphrase"
 

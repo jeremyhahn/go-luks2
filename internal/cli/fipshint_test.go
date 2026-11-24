@@ -24,12 +24,7 @@ const fipsHintChildEnv = "LUKS2_CLI_FIPS_HINT_CHILD"
 
 const fipsHint = "In FIPS 140-3 mode use --pbkdf pbkdf2"
 
-// TestKDFChoiceRefusedInFIPSModeCarriesTheHint proves every command that takes
-// the shared KDF options refuses an Argon2 choice under FIPS 140-3 policy with
-// ErrFIPSNotApproved and prints the hint that names the approved choice. FIPS
-// mode is fixed at process start, so a non-FIPS run re-executes this test
-// binary under GODEBUG=fips140=only and judges the child; a FIPS run (the
-// full tier's FIPS job) asserts directly.
+// TestKDFChoiceRefusedInFIPSModeCarriesTheHint checks every KDF-taking command refuses Argon2 under FIPS with the hint, re-executing under fips140=only if needed.
 func TestKDFChoiceRefusedInFIPSModeCarriesTheHint(t *testing.T) {
 	if fipsProcess {
 		assertFIPSKDFHint(t)

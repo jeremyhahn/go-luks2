@@ -97,13 +97,7 @@ func findLoopDeviceIn(root, file string, s sys) (path, backing string, ident bac
 		}
 	}
 
-	// "NOT ATTACHED" AND "COULD NOT TELL" ARE DIFFERENT ANSWERS, and only
-	// the first may be acted on. The caller this misleads is the one asking
-	// whether a file is ALREADY attached before attaching it: told "no"
-	// when the truth was "the one device backing it could not be
-	// inspected", it creates a SECOND loop device for the same backing
-	// file, giving the kernel two independent writers of one LUKS
-	// container.
+	// "Not attached" and "could not tell" are different answers; only the first may be acted on.
 	if unreadable > 0 {
 		return "", "", backingIdentity{}, &errs.Error{
 			Kind: errs.ErrIO,

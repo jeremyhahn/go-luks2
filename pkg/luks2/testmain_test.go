@@ -11,12 +11,7 @@ import (
 	"testing"
 )
 
-// TestMain used to also install an in-memory kernel keyring for the whole
-// unit suite (#78, #268): every test that called Unlock reached the real
-// keyring otherwise, which a default-seccomp CI container refuses. Unlock
-// and the keyring are pkg/dmcrypt's now, and that package carries its own
-// fake and its own TestMain. What stays here is the unrelated half this
-// file always also did.
+// TestMain runs the package's tests.
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }

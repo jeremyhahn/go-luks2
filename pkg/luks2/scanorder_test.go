@@ -29,12 +29,7 @@ func keyslotMap(ids ...string) map[string]*header.Keyslot {
 	return m
 }
 
-// TestKeyslotScanOrderIsAscendingNumeric pins the ordering itself.
-//
-// The discriminating case is two-digit IDs: LUKS2 keyslot IDs are decimal
-// strings, so a lexical sort puts "10" before "9" and a volume's tenth keyslot
-// would be tried before its ninth. Sorting the strings is the obvious wrong
-// implementation and it passes every single-digit fixture.
+// TestKeyslotScanOrderIsAscendingNumeric: "9" is tried before "10".
 func TestKeyslotScanOrderIsAscendingNumeric(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -76,13 +71,7 @@ func TestKeyslotScanOrderIsAscendingNumeric(t *testing.T) {
 	}
 }
 
-// TestKeyslotScanOrderVisitsEveryKeyslot is the data-loss guard on the ordering.
-//
-// The natural implementation parses each ID with strconv.Atoi to sort it. The
-// natural mistake is to drop the ones that fail to parse. A keyslot that the
-// scan never visits is a credential that can no longer open the volume, and the
-// operator sees "incorrect passphrase" for a passphrase that is correct — so an
-// ID this function does not understand must still be returned, not discarded.
+// TestKeyslotScanOrderVisitsEveryKeyslot: IDs that do not parse are still returned.
 func TestKeyslotScanOrderVisitsEveryKeyslot(t *testing.T) {
 	// "99999999999999999999" is a decimal number that strconv.Atoi still rejects,
 	// because it does not fit an int. It takes the same tail path as a
@@ -129,17 +118,7 @@ func TestKeyslotScanOrderIsStableAcrossCalls(t *testing.T) {
 	}
 }
 
-// TestAKeyslotAfterTheFirstStillOpensTheVolume is the negative control for the
-// whole change, and it guards the regression the change invites.
-//
-// Making the scan deterministic and starting it at the lowest slot is one edit
-// away from making it stop at the lowest slot. If that happened, only the
-// Format-created credential would ever work: every passphrase added afterwards
-// would be reported as incorrect, which is silent, total lockout for every
-// operator who rotated a passphrase.
-//
-// So this asserts the property the cost fix must not buy: a credential held in
-// a slot that is NOT visited first still opens the volume.
+// TestAKeyslotAfterTheFirstStillOpensTheVolume: a credential in a slot not visited first still opens the volume.
 func TestAKeyslotAfterTheFirstStillOpensTheVolume(t *testing.T) {
 	defer parallel(t)()
 
@@ -232,15 +211,7 @@ func (c cancelAfterNErrChecks) Err() error {
 	return nil
 }
 
-// TestGetMasterKeySlotCancelledBetweenKeyslotsReturnsCtxErr pins that ctx is
-// checked between keyslots in a scan: a ctx canceled after
-// the first keyslot in scan order is skipped stops the scan before the
-// second keyslot is even looked at, and reports ctx.Err()'s kind.
-//
-// The first entry in order names no keyslot at all, so reaching it costs
-// nothing beyond the loop's own ctx check -- this isolates the "between
-// keyslots" boundary from the KDF/digest cost a real keyslot would add,
-// which internal/kdf's own cancellation tests already cover.
+// TestGetMasterKeySlotCancelledBetweenKeyslotsReturnsCtxErr: ctx is checked between keyslots and the scan reports ctx.Err()'s kind.
 func TestGetMasterKeySlotCancelledBetweenKeyslotsReturnsCtxErr(t *testing.T) {
 	metadata := &header.Metadata{Keyslots: map[string]*header.Keyslot{}}
 	order := []string{"absent-0", "absent-1"}
@@ -307,20 +278,7 @@ func multiKeyslotVolume(t *testing.T, ids ...string) string {
 	return device
 }
 
-// TestKeyslotInspectionOrderIsDeterministic is the fix for #57.
-//
-// GetVolumeInfo and ListKeyslots both built their result by ranging
-// metadata.Keyslots, so `luks2 info` printed "Active Keyslots: [2 0 1]" on one
-// invocation and "[1 2 0]" on the next with nothing changed. Measured before
-// the fix on an eight-slot container: 7 distinct orders across 25 reads, from
-// each of the two functions.
-//
-// Both are asserted in one test because they are one defect at two sites and a
-// fix applied to only one of them is the outcome worth catching.
-//
-// The repetition is not decoration: a single read passes against the unfixed
-// code whenever map iteration happens to start at slot 0, which is roughly one
-// read in n.
+// TestKeyslotInspectionOrderIsDeterministic: GetVolumeInfo and ListKeyslots return keyslots in a stable order across repeated reads.
 func TestKeyslotInspectionOrderIsDeterministic(t *testing.T) {
 	defer parallel(t)()
 
@@ -353,18 +311,7 @@ func TestKeyslotInspectionOrderIsDeterministic(t *testing.T) {
 	}
 }
 
-// TestKeyslotInspectionOrderMatchesUnlockOrder pins the ordering to the ONE
-// the package already has, rather than to ascending order as such.
-//
-// #57 could have been closed with a sort at each site. Reusing
-// header.KeyslotIDsInScanOrder is what keeps the order an operator reads identical to
-// the order unlock tries the slots in; two independent orderings that happen to
-// agree today are two things that can drift.
-//
-// A keyslot id that is not a number is the case that tells them apart: scan
-// order puts it at the tail rather than dropping it, and both listings drop it
-// because their result types are keyed by int. So the assertion is that the
-// listings are the numeric PREFIX of the scan order -- not merely sorted.
+// TestKeyslotInspectionOrderMatchesUnlockOrder: the listings are the numeric prefix of header.KeyslotIDsInScanOrder.
 func TestKeyslotInspectionOrderMatchesUnlockOrder(t *testing.T) {
 	defer parallel(t)()
 

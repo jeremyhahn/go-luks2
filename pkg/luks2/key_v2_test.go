@@ -119,12 +119,7 @@ func TestVolumeUnlockKeyslotRefusesAKeyslotThatDoesNotExist(t *testing.T) {
 	}
 }
 
-// TestVolumeUnlockKeyslotRefusesAnUnboundKeyslotBeforeDeriving pins the
-// keyslots architecture's UnlockKeyslot rule: a slot that does not exist, or
-// that exists but is not bound to the data segment, is refused with
-// ErrKeyslotNotFound before any derivation, even with the credential that
-// opens that slot. The bound slot 0 is the control that the counting seam
-// does see a derivation.
+// TestVolumeUnlockKeyslotRefusesAnUnboundKeyslotBeforeDeriving: a missing or unbound slot is ErrKeyslotNotFound before any derivation.
 func TestVolumeUnlockKeyslotRefusesAnUnboundKeyslotBeforeDeriving(t *testing.T) {
 	device, _ := unlockableVolume(t)
 	unboundKeyslot(t, device, otherPassphrase)
@@ -324,11 +319,7 @@ func TestVolumeTargetRefusesAKeyTheCurrentHeaderDoesNotVerify(t *testing.T) {
 	}
 }
 
-// TestVolumeTargetRefusesAnythingButABlockDevice is Target's half of C6
-// (#250): dm-crypt maps a block device, and a regular file -- all an
-// unprivileged test can format -- is refused rather than silently treated
-// as one. pkg/dmcrypt.Activate relies on this to fail before any
-// device-mapper state exists.
+// TestVolumeTargetRefusesAnythingButABlockDevice: Target refuses a regular file.
 func TestVolumeTargetRefusesAnythingButABlockDevice(t *testing.T) {
 	path := formattedVolumeImage(t, "target-not-block.img", "", "")
 
@@ -351,17 +342,9 @@ func TestVolumeTargetRefusesAnythingButABlockDevice(t *testing.T) {
 	}
 }
 
-// --- C1 (#250): the key handed to a mapping must be bound to the mapped
-// segment. These used to be driven through the old free Unlock/dm pair;
-// the dm half moved to pkg/dmcrypt (#268), and what is pinned here is the
-// key-recovery half, which (*Volume).Unlock still performs. ---
+// The key handed to a mapping must be bound to the mapped segment.
 
-// TestVolumeUnlockRefusesAPassphraseThatOpensOnlyAnUnboundKey is C1. The
-// passphrase opens keyslot 1, whose digest binds NO segment: a LUKS2
-// unbound key. getMasterKey only reordered such keyslots, so the scan
-// reached keyslot 1, the key verified against its own digest, and the old
-// Unlock handed it to dm-crypt. cryptsetup refuses the same passphrase
-// with "No usable keyslot".
+// TestVolumeUnlockRefusesAPassphraseThatOpensOnlyAnUnboundKey: a passphrase opening only an unbound key is refused, as cryptsetup does.
 func TestVolumeUnlockRefusesAPassphraseThatOpensOnlyAnUnboundKey(t *testing.T) {
 	device, _ := unlockableVolume(t)
 	unboundKeyslot(t, device, otherPassphrase)
@@ -408,12 +391,7 @@ func TestVolumeUnlockStillOpensWithTheBoundPassphrase(t *testing.T) {
 	key.Destroy()
 }
 
-// TestVolumeUnlockVerifiesTheKeyAgainstTheSegmentsDigest pins the second
-// half of C1: a keyslot that a segment digest names is not enough when the
-// key it holds verifies only against ANOTHER digest. header.Keyslot 1 holds an
-// unbound key and is named both by its own unbound digest and by the data
-// segment's digest; verifyMasterKey accepts it on the unbound digest, and
-// only the segment check refuses it.
+// TestVolumeUnlockVerifiesTheKeyAgainstTheSegmentsDigest: the key must verify against the segment's digest, not another.
 func TestVolumeUnlockVerifiesTheKeyAgainstTheSegmentsDigest(t *testing.T) {
 	device, _ := unlockableVolume(t)
 	unboundKeyslot(t, device, otherPassphrase)
@@ -445,9 +423,7 @@ func TestVolumeUnlockVerifiesTheKeyAgainstTheSegmentsDigest(t *testing.T) {
 	}
 }
 
-// --- C2 (#250): requirements and multi-segment headers are refused for
-// activation. unlockHeader -- shared by Unlock, UnlockKeyslot,
-// UnlockWithVolumeKey and Target -- runs this check now. ---
+// Requirements and multi-segment headers are refused for activation by unlockHeader.
 
 // writeRequirement stamps config.requirements onto device, going around
 // the write path's own guard (which correctly refuses a requirement it
@@ -461,10 +437,7 @@ func writeRequirement(t *testing.T, device, requirement string) {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 	metadata.Config.Requirements = &header.Requirements{Mandatory: []string{requirement}}
-	// An online reencryption carries its backup-previous and backup-final
-	// segments, attested by the digest, as cryptsetup writes them; without
-	// them the header is one cryptsetup and this package's reader refuse
-	// before activation is ever asked (#248).
+	// An online reencryption carries its backup segments, attested by the digest, as cryptsetup writes them.
 	if slices.Contains(header.OnlineReencryptRequirements, requirement) {
 		for id, flag := range map[string]string{"1": "backup-previous", "2": "backup-final"} {
 			backup := *metadata.Segments["0"]
@@ -588,8 +561,7 @@ func TestVolumeUnlockRefusesAHeaderWithMoreThanOneSegment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
-	// Two regular segments in a layout cryptsetup accepts: the first a
-	// fixed 1 MiB, the second dynamic after it, both attested (#248).
+	// Two regular segments cryptsetup accepts: a fixed 1 MiB, then a dynamic one, both attested.
 	second := *metadata.Segments["0"]
 	metadata.Segments["0"].Size = "1048576"
 	second.Offset = "17825792"
@@ -617,12 +589,7 @@ func TestVolumeUnlockRefusesAHeaderWithMoreThanOneSegment(t *testing.T) {
 	}
 }
 
-// TestVolumeUnlockRefusesAnIntegritySegment: a cryptsetup --integrity
-// container's data sits on dm-integrity, and dm-crypt mapped straight over
-// the device reads garbage and destroys the integrity tags on every write.
-// Its keyslots can be opened -- with an XTS-sized volume key
-// (--key-size 256 with hmac-sha256) they pass every keyslot check -- so
-// the refusal has to come from the segment, before any key is derived.
+// TestVolumeUnlockRefusesAnIntegritySegment: an --integrity container is refused at the segment, before any derivation.
 func TestVolumeUnlockRefusesAnIntegritySegment(t *testing.T) {
 	device, passphrase := unlockableVolume(t)
 
@@ -666,12 +633,7 @@ func TestVolumeUnlockRefusesAnIntegritySegment(t *testing.T) {
 	}
 }
 
-// TestVolumeTargetPassesThePersistentPerformanceFlags: `cryptsetup open
-// --perf-* --persistent` stores flags in config.flags, and every later
-// activation puts them in the dm-crypt table; Target does too, in
-// cryptsetup's order. allow-discards is stored the same way and is NOT
-// passed (see persistentCryptFlags), and a flag nothing knows is ignored,
-// as cryptsetup ignores it.
+// TestVolumeTargetPassesThePersistentPerformanceFlags: stored perf flags go in the table in cryptsetup's order; allow-discards and unknown flags do not.
 func TestVolumeTargetPassesThePersistentPerformanceFlags(t *testing.T) {
 	device, passphrase := unlockableVolume(t)
 
@@ -714,15 +676,9 @@ func TestVolumeTargetPassesThePersistentPerformanceFlags(t *testing.T) {
 	}
 }
 
-// --- C6 (#250): one open; the table names the device by number ---
+// One open; the table names the device by number.
 
-// TestVolumeUnlockReadsTheKeyslotsThroughThePinnedDescriptor is C6 end to
-// end. The caller's path is a symlink, and it is re-pointed at a
-// DIFFERENT container after the header has been read and before the
-// keyslot area is: the moment passphraseKDF runs. Reading the keyslot by
-// path then reads the other container's keyslot, and the key does not
-// verify; reading it through the descriptor whose header was read opens
-// the volume.
+// TestVolumeUnlockReadsTheKeyslotsThroughThePinnedDescriptor: retargeting the path symlink mid-unlock does not change what is read.
 func TestVolumeUnlockReadsTheKeyslotsThroughThePinnedDescriptor(t *testing.T) {
 	device, passphrase := unlockableVolume(t)
 
@@ -779,16 +735,3 @@ func TestVolumeUnlockReadsTheKeyslotsThroughThePinnedDescriptor(t *testing.T) {
 	}
 	key.Destroy()
 }
-
-// mappingNameTraversalCases is shared by the entries that must refuse a
-// path-traversal mapping name before anything is resolved, run or removed
-// (#250, C3).
-// TestMappingNameEntriesRefuseTraversal is C3. "/dev/mapper/../sdb" is
-// /dev/sdb: every entry that builds that path from a caller's name must
-// refuse the name before anything is resolved, run or removed.
-//
-// MakeFilesystem, Mount and IsMappingMounted still live here; Lock's half
-// of this guard is dmcrypt.ValidateName's own test now, and so is
-// IsUnlocked's and GetMappedDevicePath's -- both moved to dmcrypt.Lookup
-// (#268). MakeFilesystem's own "nothing ran" half is pkg/filesystem's test
-// now (fakeTools moved there with it); this only pins the refusal itself.

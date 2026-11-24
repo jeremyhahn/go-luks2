@@ -180,13 +180,7 @@ func gate(out io.Writer, h host, req request) error {
 	return nil
 }
 
-// signaturesWorkflow and signaturesJob name the commit-signature check.
-// ci-template v1.35.2 moved it out of CI Gate into its own workflow, so a
-// green CI Gate no longer says the commits are signed, on any forge: a
-// release also needs that workflow's push-to-main result on the same sha to
-// pass -- on GitHub its run's Signatures job, on Gitea its push status
-// signaturesContext (workflow name / job name (event), as CI's gate). The
-// requirement is fixed here, not a flag, so release.yml need not change.
+// signaturesWorkflow and signaturesJob name the commit-signature check a release also requires: the Signatures job on GitHub, signaturesContext on Gitea.
 const (
 	signaturesWorkflow = "signatures.yml"
 	signaturesJob      = "Signatures"
@@ -196,11 +190,7 @@ const (
 // gateRequests lists the gates a release waits on, in order: the one the
 // flags name, then the Signatures workflow's result on the same forge.
 func gateRequests(req request) []request {
-	// Always appended, never deduplicated against the flags: each forge
-	// reads only some of them (GitHub the workflow and job, Gitea the status
-	// context), so a flag naming Signatures could match a field the active
-	// forge ignores and drop the requirement. When the flags do name the
-	// Signatures gate itself, it is read twice, which costs one request.
+	// Always appended, since each forge reads only some of the flags.
 	sig := req
 	sig.workflow, sig.jobName = signaturesWorkflow, signaturesJob
 	sig.statusContext = signaturesContext
@@ -324,9 +314,7 @@ func fetch(h host, u, auth string, v any) error {
 	return nil
 }
 
-// giteaStatus is the part of Gitea's combined status this reads. Gitea reports
-// the LATEST status per context, so a re-run that passed replaces the failure
-// it re-ran.
+// giteaStatus is the part of Gitea's combined status this reads; the latest status per context wins.
 type giteaStatus struct {
 	TotalCount int `json:"total_count"`
 	Statuses   []struct {
@@ -412,8 +400,7 @@ func readWorkflowJob(h host, api, repo, auth string, req request) (gateState, st
 		return gatePending, "", nil
 	}
 
-	// filter=latest: the jobs of the run's latest ATTEMPT, so a re-run that
-	// passed replaces the attempt it re-ran.
+	// filter=latest: the jobs of the run's latest attempt.
 	var jobs githubJobs
 	u = fmt.Sprintf("%s/repos/%s/actions/runs/%d/jobs?filter=latest&per_page=100", api, repo, latest)
 	if err := fetch(h, u, auth, &jobs); err != nil {

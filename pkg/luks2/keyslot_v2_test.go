@@ -27,8 +27,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// newPassphraseEnclave is newTestPassphrase, parameterized on the text: used
-// here for the SECOND credential a keyslot test enrolls or rotates to.
+// newPassphraseEnclave is newTestPassphrase with the given text.
 func newPassphraseEnclave(t *testing.T, text string) enclave.ByteAccess {
 	t.Helper()
 	e, err := enclave.NewMemoryCopy([]byte(text))
@@ -513,12 +512,7 @@ func TestVolumeChangeKeyslotWithPriorityPreferWritesIt(t *testing.T) {
 	}
 }
 
-// TestVolumeChangeKeyslotPreservesTheExistingPBKDF2Cost is changeKeyslotCore's
-// "a passphrase rotation is not a request to re-cost the keyslot" contract,
-// the same one the old ChangeKey keeps. iterations sits above the sha256
-// caller-credential floor (600,000) on purpose: ChangeKeyslot must carry it
-// through UNCHANGED rather than recalibrate, and a recalibration would almost
-// certainly not land on this exact number.
+// TestVolumeChangeKeyslotPreservesTheExistingPBKDF2Cost: a count above the floor is carried through unchanged.
 func TestVolumeChangeKeyslotPreservesTheExistingPBKDF2Cost(t *testing.T) {
 	defer parallel(t)()
 	const iterations = 700_000
@@ -1074,14 +1068,7 @@ func TestVolumeRemoveKeyslotOnAReadOnlyVolumeFails(t *testing.T) {
 	}
 }
 
-// TestVolumeRemoveKeyslotRefusesAnInUseDevice is #246 D4 for the no-credential
-// removal path: RemoveKeyslot takes no passphrase, so the exclusive claim
-// (locked.Claim, the same call Format and Erase already make) is the only
-// thing refusing it on a volume that is open, or a device something else
-// holds. This substitutes the openFile seam the claim's O_EXCL reopen goes
-// through, rather than a real mapping, so it needs no root and no loop
-// device; the kernel's own EBUSY is proved against a real device in
-// TestWipeKeyslotRefusesAnActiveDeviceDespiteARetarget (integration).
+// TestVolumeRemoveKeyslotRefusesAnInUseDevice: the exclusive claim refuses a held device, via the openFile seam.
 func TestVolumeRemoveKeyslotRefusesAnInUseDevice(t *testing.T) {
 	defer parallel(t)()
 	path := formattedVolumeImage(t, "removekeyslot-inuse.img", "", "")

@@ -84,52 +84,12 @@ func ParseRecoveryKeyFormat(name string) (RecoveryKeyFormat, error) {
 // generated recovery key -- and the shortest NewRecoveryKey will draw.
 const DefaultRecoveryKeyLength = 32
 
-// recoveryToken builds the token that identifies a recovery keyslot.
-//
-// It is systemd's, and it is the WHOLE token: type and keyslots, nothing else.
-// systemd-cryptenroll --recovery-key writes no format member and no algorithm
-// member, because there is no material to describe -- the credential is the
-// printed text. Adding fields of our own here would produce a token systemd
-// reads differently from the way we wrote it.
-//
-// Keyslots is filled in by AddRecoveryKey once it knows which slot the
-// credential landed in.
+// recoveryToken builds systemd's recovery token: type and keyslots only.
 func recoveryToken() *LegacyToken {
 	return &LegacyToken{Type: recoveryTokenType}
 }
 
-// parseLegacyRecoveryKey decodes a formatted recovery key into the KEY MATERIAL
-// BEHIND it and returns that in protected memory.
-//
-// # This is probably not the function you want
-//
-// Its behavior is unchanged, and so is its meaning: it turns "9F3A2C-4B81DE-..."
-// into the bytes that rendering encodes. What changed around it is which of the
-// two is the credential. A keyslot enrolled by the current code holds the TEXT,
-// so ParseRecoveryKey is what produces something that opens such a volume;
-// this function is for a volume enrolled before that change, whose keyslot holds
-// the decoded bytes.
-//
-// It is tolerant in a way ParseRecoveryKey is deliberately not -- it accepts
-// either case, with or without dashes, hex or base64 -- because it is decoding a
-// rendering rather than reproducing a credential.
-//
-// # What is exposed, precisely
-//
-// formatted is a Go string and Go strings are immutable, so the CALLER'S copy
-// of the key cannot be wiped by anyone. That is unavoidable at this boundary: a
-// recovery key reaches a program by being typed, pasted or read out of a file,
-// all of which are string-shaped.
-//
-// What is avoidable is this package making more of them, and it used to make
-// about four -- ReplaceAll and ToLower each yield a new string when they change
-// anything, and both decoders took []byte(s) of the result. An earlier version
-// of this comment described only the caller's copy, which understated the
-// exposure by that factor. The string is now copied ONCE, into locked memory,
-// and every normalisation and decode happens there.
-//
-// Callers that already hold the key in an enclave should not come through
-// here at all.
+// parseLegacyRecoveryKey decodes a formatted recovery key into its key material in protected memory, for volumes whose keyslot holds the decoded bytes; use ParseRecoveryKey otherwise.
 func parseLegacyRecoveryKey(formatted string) (enclave.ByteAccess, error) {
 	if len(formatted) == 0 {
 		return nil, &errs.Error{Kind: errs.ErrInvalidCredential, Detail: "recovery key is empty"}
@@ -209,8 +169,7 @@ func NewRecoveryKey(opts ...RecoveryKeyOption) (*RecoveryKey, error) {
 		return nil, &errs.Error{Kind: ErrInvalidArgument, Detail: fmt.Sprintf("%v", o.format)}
 	}
 
-	// AT LEAST 256 BITS: that is what the recovery key's cost model assumes,
-	// and AddRecoveryKey's library-generated exemption is sound only above it.
+	// At least 256 bits, which the library-generated exemption requires.
 	if o.length < DefaultRecoveryKeyLength || recoverykey.Len(o.length, rendering) > MaxPassphraseLength {
 		return nil, &errs.Error{Kind: ErrInvalidArgument, Detail: fmt.Sprintf("%d random bytes rendered %s", o.length, o.format)}
 	}

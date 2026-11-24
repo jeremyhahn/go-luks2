@@ -16,63 +16,8 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// The structural validator: the checks cryptsetup applies to every LUKS2
-// header, in one place, run when a header is read and again before every header
-// write (#248).
-//
-// Before this file the package checked fields one at a time, where each was
-// used, and never the header as a whole. A segment at offset 0, a token naming
-// a keyslot that does not exist, or a config whose keyslots area runs into the
-// data were each accepted here and refused by cryptsetup -- so this library
-// could open, and worse, WRITE, headers that cryptsetup and systemd-cryptsetup
-// then would not read.
-//
-// ValidateHeaderStructure follows cryptsetup 2.7.0's LUKS2_hdr_validate
-// (lib/luks2/luks2_json_metadata.c) check by check and in the same order:
-// hdr_validate_requirements, _tokens, _digests, _segments, _keyslots, _config,
-// _areas, then the json_size check. The integration suite proves the agreement
-// against the real binary: every header cryptsetup writes passes, and each
-// header it refuses is refused here too.
-//
-// # Where it runs, and the one difference between reading and writing
-//
-// EVERY RULE runs before every header write (EncodeMetadataForHeader): this
-// package never writes a header cryptsetup would refuse to read. The one
-// exception is RestorePrimaryHeader, which copies a secondary already on the
-// medium and applies only the header-wide rules (see its comment).
-//
-// On READ, the rules about the header as a whole run -- requirements, digests,
-// segments, config, json_size -- and a header that breaks one is refused,
-// because nothing in it is redundant: there is one segment table and one
-// config. The rules about one keyslot or one token (hdr_validate_keyslots,
-// hdr_validate_areas, hdr_validate_tokens) do not refuse the header on read.
-// That is this package's recorded policy for those two kinds of entry, not an
-// omission: a container keeps up to 32 keyslots so that damage to one is
-// survivable, and refusing the header over one damaged slot would make the
-// volume unreadable through its intact ones (keyslot.go); a token is an
-// auxiliary unlock path that must not stop a passphrase unlock
-// (normalizeMetadataNulls, canonicalTokenID). Each such entry is refused where
-// it is used instead, and because the write rules are complete, the damaged
-// entry has to be removed before the header can be written again.
-//
-// # What is deliberately not here
-//
-// The per-keyslot-type contents LUKS2_keyslots_validate checks after these
-// (KDF, AF and area contents) belong to ValidateKeyslot (keyslot.go), which
-// refuses a damaged keyslot rather than the whole header. Its structural
-// rules -- digest assignment and the reencrypt keyslot -- are here
-// (validateKeyslotAssignmentStructure).
-//
-// Two rules here are STRICTER than cryptsetup, and each is a spelling
-// cryptsetup itself never writes:
-//
-//   - config.json_size and config.keyslots_size must be decimal digits.
-//     cryptsetup parses them with strtoull, which also takes a sign or leading
-//     space ("-1" wraps to 2^64-1).
-//   - a token's keyslot references must be canonical keyslot ids. cryptsetup
-//     requires only that the referenced key exists, but it resolves a token's
-//     keyslots with atoi, so a reference spelled "01" names keyslot 1 when the
-//     token is used, not the keyslot "01" that was validated.
+// Structural validator following cryptsetup 2.7.0's LUKS2_hdr_validate in order; every rule runs before a write, header-wide rules on read (per-keyslot and per-token damage is refused where used).
+// Stricter than cryptsetup: json_size and keyslots_size must be decimal digits, and token keyslot references must be canonical ids.
 
 // headerStructureError reports a header that breaks a LUKS2 structural rule.
 // It is ErrInvalidHeader, so every caller that already classifies a malformed
@@ -157,10 +102,7 @@ func SortedIDs[V any](m map[string]V) []string {
 	return slices.Sorted(maps.Keys(m))
 }
 
-// validateRequirementsStructure is hdr_validate_requirements. The typed decode
-// has already required config.requirements to be an object and mandatory to be
-// an array of strings; what is left is that at most one entry names an online
-// reencryption.
+// validateRequirementsStructure is hdr_validate_requirements: at most one entry names an online reencryption.
 func validateRequirementsStructure(metadata *Metadata) error {
 	if metadata.Config == nil || metadata.Config.Requirements == nil {
 		return nil
@@ -215,15 +157,7 @@ func validateTokensStructure(metadata *Metadata) error {
 	return nil
 }
 
-// validateDigestsStructure is hdr_validate_digests: every digest has a type and
-// a keyslots and a segments array, and names only keyslots and segments that
-// exist.
-// validateObjectCounts holds the keyslots and digests objects to MaxKeyslots
-// entries each (#26). cryptsetup itself parses more -- it read headers with
-// 200 keyslots and 40 digests, measured with 2.7.5 -- but it creates no
-// keyslot above 31 and one digest per keyslot, so no header it writes has
-// more, and every entry past that is work a crafted header adds to each
-// unlock. Stricter than cryptsetup, and refused on read.
+// validateObjectCounts holds keyslots and digests to MaxKeyslots entries each, refused on read.
 func validateObjectCounts(metadata *Metadata) error {
 	if n := len(metadata.Keyslots); n > MaxKeyslots {
 		return headerStructureError("the header declares %d keyslots; cryptsetup creates at most %d", n, MaxKeyslots)
@@ -234,6 +168,7 @@ func validateObjectCounts(metadata *Metadata) error {
 	return nil
 }
 
+// validateDigestsStructure is hdr_validate_digests: every digest has a type, keyslots and segments arrays, and names only existing keyslots and segments.
 func validateDigestsStructure(metadata *Metadata) error {
 	for _, id := range SortedIDs(metadata.Digests) {
 		if !numbered(id) {
@@ -450,10 +385,7 @@ func isJSONInteger(raw json.RawMessage) bool {
 	return err == nil
 }
 
-// validateSegmentLayout is the second half of hdr_validate_segments: regular
-// segments numbered 0..n-1 with no gap, followed by the backups, also without
-// a gap; no two regular segments overlap; only the last may be dynamic; and an
-// online reencryption carries the backup segments it needs.
+// validateSegmentLayout: regular segments 0..n-1 then backups, gap-free, non-overlapping, only the last dynamic, and reencryption backups present.
 func validateSegmentLayout(metadata *Metadata, geometry map[int]segmentGeometry, firstBackup int) error {
 	count := len(geometry) // every id is canonical and below the count, so none collided
 	if firstBackup == 0 {
@@ -555,11 +487,7 @@ func validateKeyslotsStructure(metadata *Metadata) error {
 		if !numbered(id) {
 			return headerStructureError("keyslot id %q is not a number", id)
 		}
-		// cryptsetup's numbered() admits "007", but LUKS2_keyslots_validate
-		// then resolves the id with atoi and requires exactly one digest to name
-		// the canonical "7", so a non-canonical id refuses the header (measured:
-		// keyslots {"007": k} is "not a valid LUKS device"; see ListKeyslots).
-		// "32" and above are canonical and read, so no range is imposed here.
+		// A non-canonical keyslot id refuses the header; ids 32 and above are read.
 		if n, err := strconv.ParseUint(id, 10, 64); err != nil || strconv.FormatUint(n, 10) != id {
 			return headerStructureError("keyslot id %q is not the canonical spelling of a number", id)
 		}
@@ -623,9 +551,7 @@ func validateConfigStructure(metadata *Metadata) error {
 	if geometry.keyslotsSize%4096 != 0 || geometry.keyslotsSize > MaxKeyslotsSize {
 		return headerStructureError("config.keyslots_size %d is not a multiple of 4096 no larger than %d", geometry.keyslotsSize, MaxKeyslotsSize)
 	}
-	// Offset 0 is a DETACHED header -- the data lives on another device -- and
-	// cryptsetup exempts it here. The activation path refuses it on its own
-	// terms; see CryptTableParams.
+	// Offset 0 is a detached header, exempt here; activation refuses it (CryptTableParams).
 	dataOffset := minimalSegmentOffset(metadata)
 	if dataOffset != 0 && (dataOffset < geometry.keyslotsSize || dataOffset-geometry.keyslotsSize < 2*geometry.metadataSize) {
 		return headerStructureError("config.keyslots_size %d does not fit between the header copies (ending at %d) and the data at %d",
@@ -707,12 +633,7 @@ func validateKeyslotAreasStructure(metadata *Metadata) error {
 	return nil
 }
 
-// validateKeyslotAssignmentStructure is the structural part of
-// LUKS2_keyslots_validate, which cryptsetup runs after the hdr_validate_*
-// checks: every luks2 keyslot is named by exactly one digest, a reencrypt
-// keyslot comes with a reencryption requirement flag, at most one reencrypt
-// keyslot exists, and an online reencryption has one. The per-type contents
-// of a keyslot (KDF, AF, area cipher) stay with ValidateKeyslot.
+// validateKeyslotAssignmentStructure is LUKS2_keyslots_validate's structural part: one digest per luks2 keyslot, and reencrypt keyslot rules.
 func validateKeyslotAssignmentStructure(metadata *Metadata) error {
 	reencrypt := 0
 	for _, id := range SortedIDs(metadata.Keyslots) {

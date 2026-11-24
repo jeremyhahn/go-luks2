@@ -13,7 +13,7 @@ import (
 // binary and oversize files the public release may carry. The gate fails
 // closed on both kinds -- binary content is not reviewable as text, and an
 // oversize blob is not read at all -- so each one that is meant to ship is
-// named there with the reason a person accepted it (owner ruling on #211).
+// named there with the reason a person accepted it.
 //
 // The format is one file per line: its exact repository-relative path, then
 // whitespace, then the reason. `#` starts a comment line; blank lines are

@@ -19,13 +19,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// Every writer locks one open of the device path and must then do all its I/O
-// through that descriptor, or through a second open PROVEN to be the same file.
-// These tests re-point the device symlink the moment the lock's open has
-// happened, so any later open of the path reaches a different device -- and
-// require that the different device is never touched.
-//
-// None is parallel: they substitute the package's open seam.
+// Writers must do all I/O through the locked descriptor; these tests re-point the symlink after the lock's open. None is parallel: they substitute the open seam.
 
 // retargetedPair is two copies of the token parity fixture -- a cryptsetup
 // volume with keyslots 0 and 1 and tokens 0 and 1 -- and a symlink naming the
@@ -50,14 +44,7 @@ func retargetedPair(t *testing.T) (link, locked, other string, otherBefore [32]b
 	return link, locked, other, fileDigest(t, other), sys
 }
 
-// TestTheExclusiveClaimTargetsTheLockedDescriptorDespiteARetarget: Erase and
-// RemoveKeyslot (WipeKeyslot's successor, B.6) used to take their O_EXCL
-// claim by reopening the path after the lock, so a path re-pointed in
-// between claimed, wiped -- and for RemoveKeyslot, vetted -- a device that
-// was never locked. The claim now reopens the LOCKED descriptor's own
-// /proc/self/fd entry (Locked.Claim) rather than resolving the path again,
-// so it cannot be retargeted: the operation lands on the file that was
-// locked, and the device the path was re-pointed at is never touched.
+// TestTheExclusiveClaimTargetsTheLockedDescriptorDespiteARetarget: Erase and RemoveKeyslot claim the locked descriptor, not the re-pointed path.
 func TestTheExclusiveClaimTargetsTheLockedDescriptorDespiteARetarget(t *testing.T) {
 	defer parallel(t)()
 	for _, op := range []struct {
@@ -98,12 +85,7 @@ func TestTheExclusiveClaimTargetsTheLockedDescriptorDespiteARetarget(t *testing.
 	}
 }
 
-// TestHeaderWritersStayOnTheDeviceTheyLocked: SetToken, RemoveToken and
-// WriteHeader read and wrote the header by reopening the path after taking
-// the lock, so a re-pointed link had one device's header -- or a header read
-// from it -- written onto another. They now read and write through the locked
-// descriptor: the change lands on the device that was locked, and the other
-// is not touched.
+// TestHeaderWritersStayOnTheDeviceTheyLocked: SetToken, RemoveToken and WriteHeader write only the locked device.
 func TestHeaderWritersStayOnTheDeviceTheyLocked(t *testing.T) {
 	defer parallel(t)()
 	for _, op := range []struct {
@@ -174,13 +156,7 @@ func TestHeaderWritersStayOnTheDeviceTheyLocked(t *testing.T) {
 	}
 }
 
-// TestAddRecoveryKeyReportsTheVolumeItEnrolled: the volume a recovery key was
-// enrolled on is the one Open pinned, not whatever the path names afterward.
-// Reading it by reopening the path after the enrollment -- as the
-// pre-redesign free AddRecoveryKey did -- let a link re-pointed after the
-// lock name a different volume than the one holding the credential; Open's
-// pin closes that off structurally rather than depending on this call site
-// reading the UUID under its own lock.
+// TestAddRecoveryKeyReportsTheVolumeItEnrolled: the reported volume is the one Open pinned.
 func TestAddRecoveryKeyReportsTheVolumeItEnrolled(t *testing.T) {
 	defer parallel(t)()
 	locked := tokenParityFixture(t)

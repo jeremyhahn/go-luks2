@@ -10,12 +10,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
-// enclaveBuffer grows a credential directly in locked memory, one byte at a
-// time, so a key file or a piped passphrase of unknown length is never held
-// anywhere else: credential input is read straight into an enclave.
-// It doubles capacity by allocating a new, larger enclave and copying the
-// old one's content across under a borrow of both, which is the only way to
-// grow without a plain-heap intermediate.
+// enclaveBuffer grows a credential in locked memory, reallocating enclave to enclave, never through the plain heap.
 type enclaveBuffer struct {
 	custody secret.Custody
 	op      string

@@ -14,8 +14,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// maxSymlinks bounds the symlinks one Open follows, as the kernel's own
-// MAXSYMLINKS does, so a loop is refused rather than walked for ever.
+// maxSymlinks bounds the symlinks one Open follows, like the kernel's MAXSYMLINKS.
 const maxSymlinks = 40
 
 // Open checks the program at path, an absolute path, and returns it pinned

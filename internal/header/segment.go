@@ -14,68 +14,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// Validation of the crypt segment a device declares about itself.
-//
-// # What an unvalidated segment does
-//
-// Three of a segment's declared fields are handed STRAIGHT to a device-mapper
-// ioctl, and none of them was checked before this file existed (#40). Measured
-// against this package on main, by crafting a segment through the library's own
-// writer and driving the real unlock path:
-//
-//	sector_size = -1                ReadHeader accepted it, and the dm-crypt
-//	                                table received 18446744073709551615.
-//	                                devmapper then renders that with
-//	                                strconv.Itoa(int(...)), so the target flag
-//	                                reads "sector_size:-1"
-//	iv_tweak = "not-a-number"       ReadHeader accepted it, and the table
-//	                                received 0 -- a VALID-LOOKING tweak. The
-//	                                mapping is created at the wrong IV offset
-//	                                rather than refused
-//	encryption = "aes-xts-plain64 " ReadHeader accepted it, the table received
-//	  ":32:logon:attacker 0 ..."    it verbatim, and the unlock SUCCEEDED
-//
-// The last one is the sharpest, and the issue did not name it. devmapper builds
-// the crypt target specification by joining
-//
-//	<cipher> <key> <iv_offset> <device> <start>
-//
-// with SPACES (devmapper.go crypt.go, CryptTable.buildSpec). The cipher is field
-// zero, so a space inside it shifts every field after it: a header can nominate
-// the key reference the kernel resolves and the block device the target is
-// backed by. That is the same positional-grammar hazard dmcrypt.ValidateName
-// exists for, on an input the caller does not choose.
-//
-// # Why the sector-size suppression was worse than no comment
-//
-// The conversion carried a G115 suppression justified as "sector size is
-// validated (512 or 4096)". The only sector-size validation in the package is
-// in ValidateFormatOptions, which checks the value a CALLER passes to Format.
-// It has never applied to a segment read off a device. So a gosec finding was
-// silenced by a justification that was not true of the code it annotated --
-// and an annotation is precisely what stops the next reader checking. There is
-// no suppression here now, and none is needed: the conversion is gone, replaced
-// by a lookup in a whitelist whose values are already uint64.
-//
-// # Why this is a header refusal and keyslot validation is not
-//
-// ValidateKeyslot refuses a keyslot rather than a header, because a LUKS2
-// container carries up to 32 keyslots so that damage to one is survivable, and
-// converting a damaged unused slot into an unopenable volume is data loss
-// manufactured by a safety check.
-//
-// A segment has no such redundancy. It IS the volume's data, and a segment
-// whose geometry is wrong cannot be worked around by trying another one -- the
-// same reasoning by which the JSON parse already REJECTS a null segment while
-// merely dropping a null keyslot. So these failures are ErrInvalidHeader, they
-// are raised where the metadata is parsed, and every consumer inherits them
-// rather than restating a bound.
-//
-// # Where the limits come from
-//
-// Measured against cryptsetup 2.7.0, not invented, and not copied from this
-// package's own writer -- a bound that refuses a container another
-// implementation can create is its own kind of defect.
+// Crypt segment validation: sector_size, iv_tweak and encryption go straight to a device-mapper ioctl, so they are checked when the header is read (limits per cryptsetup 2.7.0).
 
 const (
 	// MaxSegmentEncryptionLength bounds the cipher specification a header may
@@ -132,18 +71,7 @@ type CryptSegmentParams struct {
 	Flags []string
 }
 
-// persistentCryptFlags are the LUKS2 config.flags this package passes to
-// dm-crypt, in the order cryptsetup puts them in the table, each with its
-// dm-crypt option name. They are the performance flags `cryptsetup open
-// --perf-* --persistent` stores; they change how dm-crypt schedules its work
-// and nothing about the bytes on the medium.
-//
-// allow-discards is deliberately NOT here. cryptsetup honors it; this package
-// does not, because the header is untrusted input and the flag is a
-// disclosure: with it, TRIM through the mapping reveals which blocks are free
-// to anyone who can read the medium, and a header edit -- by anyone who has
-// had the disk -- is all it takes to switch it on. The volume opens and reads
-// and writes the same bytes either way (docs/cryptsetup-interop/architecture.md).
+// persistentCryptFlags are the config.flags passed to dm-crypt, in cryptsetup's order; allow-discards is deliberately not honored.
 var persistentCryptFlags = []struct{ luks2, dm string }{
 	{"same-cpu-crypt", "same_cpu_crypt"},
 	{"submit-from-crypt-cpus", "submit_from_crypt_cpus"},
@@ -167,13 +95,7 @@ func cryptTableFlags(config *Config) []string {
 	return flags
 }
 
-// validateMetadataSegments validates every segment in parsed metadata, and is
-// called once where the header is read.
-//
-// Segments are visited in sorted id order so that a container with more than
-// one bad segment reports the same one every time. Go randomizes map iteration,
-// and an error message that changes between runs on identical input is the
-// shape that made #54 and #57 hard to see.
+// validateMetadataSegments validates every segment in sorted id order, so the error is stable.
 func validateMetadataSegments(metadata *Metadata) error {
 	for _, id := range slices.Sorted(maps.Keys(metadata.Segments)) {
 		if err := validateSegment(id, metadata.Segments[id]); err != nil {
@@ -183,15 +105,7 @@ func validateMetadataSegments(metadata *Metadata) error {
 	return nil
 }
 
-// validateSegment checks one segment's declared geometry.
-//
-// A segment whose type is not "crypt" is checked only for presence. LUKS2 uses
-// a "linear" segment to describe the untouched half of a container being
-// reencrypted; it declares no cipher, no IV tweak and no sector size, so
-// imposing the crypt rules on it would make a container mid-reencryption
-// unreadable -- including by GetVolumeInfo, which is what an operator reaches
-// for when something is wrong. Same reasoning as ValidateKeyslot's treatment of
-// a "reencrypt" keyslot.
+// validateSegment checks one segment's geometry; non-crypt segments (reencryption's linear) are checked only for presence.
 func validateSegment(id string, segment *Segment) error {
 	if segment == nil {
 		return &errs.Error{Kind: errs.ErrInvalidHeader, Detail: fmt.Sprintf("%s is null", segmentLabel(id))}
@@ -212,7 +126,7 @@ func validateSegment(id string, segment *Segment) error {
 // through here whether the caller remembered or not.
 //
 // On top of what the read path checks, it refuses a segment that starts before
-// the end of the keyslots area (#248). A plaintext mapping over the header
+// the end of the keyslots area. A plaintext mapping over the header
 // copies or the keyslots would hand them to whatever is written to the volume:
 // the first filesystem write destroys every keyslot. cryptsetup reads such a
 // header only as a DETACHED one, at offset 0, whose data lives on another
@@ -254,11 +168,7 @@ func cryptSegmentChecks(id string, segment *Segment) (CryptSegmentParams, error)
 		}
 	}
 
-	// The error was DISCARDED here before #40, which mapped every malformed
-	// value to 0 -- an IV offset that looks entirely legitimate, so the mapping
-	// was created at the wrong offset rather than refused. A wrong IV offset
-	// decrypts to garbage, and a caller that was told the unlock succeeded has
-	// no reason to suspect the header.
+	// A malformed iv_tweak is refused, never mapped to 0.
 	ivTweak, err := strconv.ParseUint(segment.IVTweak, 10, 64)
 	if err != nil {
 		return CryptSegmentParams{}, &errs.Error{
@@ -279,28 +189,7 @@ func cryptSegmentChecks(id string, segment *Segment) (CryptSegmentParams, error)
 	}, nil
 }
 
-// validateSegmentEncryption checks the cipher specification a segment declares.
-//
-// The charset is a WHITELIST for the same reason dmcrypt.ValidateName's is: the
-// value becomes field zero of a space-delimited positional target
-// specification, and enumerating which bytes such a grammar considers harmless
-// is the kind of list that is always one character short.
-//
-// The permitted set is what a cipher specification contains: alphanumerics for
-// the algorithm and mode names, "-" between them, ":" before an IV hash or a
-// capi prefix, "()" and "," for the kernel-crypto-API form, and "_" and "."
-// which appear in kernel algorithm names.
-//
-// Two of those are measured and the rest are read from the grammar, which is
-// worth stating rather than blurring. "aes-xts-plain64" and
-// "aes-cbc-essiv:sha256" were formatted with cryptsetup 2.7.0 on this host and
-// read back out of the header it wrote. The capi form could NOT be measured
-// here: cryptsetup probes the kernel crypto API for it and so demands a real
-// loop device, which needs root, and it refuses to format a plain file. It is
-// admitted from the documented cipher-specification grammar in cryptsetup(8)
-// -- capi:cipher_api_spec-ivmode -- because a whitelist that refuses a legal
-// container is the defect this package keeps measuring, and a comma inside
-// parentheses cannot separate anything in a space-delimited target spec.
+// validateSegmentEncryption checks the cipher spec against a whitelist charset, since it becomes field zero of a space-delimited target spec.
 func validateSegmentEncryption(label, encryption string) error {
 	if encryption == "" {
 		return &errs.Error{
@@ -343,10 +232,7 @@ func segmentLabel(id string) string {
 	return fmt.Sprintf("segment %q", id)
 }
 
-// acceptedSectorSizes renders the whitelist for an error message, in ascending
-// order, so the refusal carries the remedy and not only the verdict. It is
-// derived from the map rather than written out, so the message cannot drift
-// from what the code accepts.
+// acceptedSectorSizes renders the whitelist in ascending order for error messages.
 func acceptedSectorSizes() string {
 	sizes := slices.Sorted(maps.Keys(SegmentSectorSizes))
 	rendered := make([]string, 0, len(sizes))

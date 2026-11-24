@@ -9,11 +9,7 @@ import (
 	"strings"
 )
 
-// version is a parsed semantic version as the go command writes it: a
-// leading "v", MAJOR.MINOR.PATCH, an optional prerelease and an optional
-// build suffix ("+incompatible"). A pseudo-version is a prerelease of the
-// version after the last tag, so it orders correctly with no special case:
-// v1.1.2-0.20180830191138-d8f796af33cc is newer than v1.1.1.
+// version is a parsed semantic version as the go command writes it; pseudo-versions order correctly as prereleases.
 type version struct {
 	core [3]int
 	pre  []string

@@ -48,12 +48,7 @@ func TestDetectFilesystemOnAnUnmappedDeviceFails(t *testing.T) {
 	}
 }
 
-// TestCheckFilesystemRefusesAnUnsupportedType and its Detailed sibling drive
-// CheckFilesystem/CheckFilesystemDetailed through pkg/filesystem's own type
-// dispatch, which refuses an unrecognized FilesystemType before running any
-// external tool -- so both the repair and the read-only path are reachable
-// without e2fsprogs or root, unlike the happy path the integration tier
-// covers against a real filesystem.
+// TestCheckFilesystemRefusesAnUnsupportedType and its Detailed sibling reach pkg/filesystem's type refusal without e2fsprogs or root.
 func TestCheckFilesystemRefusesAnUnsupportedType(t *testing.T) {
 	device := filepath.Join(t.TempDir(), "whatever.img")
 	const bogus FilesystemType = "not-a-real-filesystem"

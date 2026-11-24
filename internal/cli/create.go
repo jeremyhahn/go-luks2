@@ -19,10 +19,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
-// create formats a new LUKS2 volume: a block device in place, or a new
-// sparse file that is then attached, unlocked and given a filesystem
-// (docs/volumes/cli.md#create). What is at the path decides the flow, not
-// its spelling.
+// create formats a new LUKS2 volume on a block device in place, or on a new sparse file that is attached, unlocked and given a filesystem.
 
 // createUsage is also printed directly to stdout by runCreate when <path>
 // is missing, matching the pre-rewrite CLI (docs/volumes/cli.md#create).
@@ -175,10 +172,7 @@ func createFile(ctx context.Context, e *env, path string, rest []string, key key
 
 	_, _ = fmt.Fprintf(e.stdout, "Creating a LUKS2 encrypted file: %s (%s)\n", path, rest[0])
 
-	// Created EXCLUSIVELY, in one step: a symlink planted at the path is
-	// refused rather than followed, and only the owner can read it. What
-	// was created is remembered, so a cleanup removes this run's file and
-	// never one that took its place.
+	// Created exclusively: a planted symlink is refused, only the owner can read it, and cleanup removes only this run's file.
 	fh, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL|unix.O_NOFOLLOW, 0o600) // #nosec G304 -- the operator's own <path> argument
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
@@ -265,10 +259,7 @@ func createFile(ctx context.Context, e *env, path string, rest []string, key key
 	return nil
 }
 
-// detachAndReport reports that the file volume could not be unlocked or
-// activated, detaches the loop device create's own attach step left
-// behind, and leaves the formatted container in place for the operator to
-// finish by hand.
+// detachAndReport reports the failed unlock or activation, detaches create's loop device, and leaves the container for the operator.
 // cleanupTimeout bounds the teardown create runs after a failure.
 const cleanupTimeout = 30 * time.Second
 

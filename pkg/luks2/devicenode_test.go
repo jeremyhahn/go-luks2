@@ -12,15 +12,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// TestDevNoDecodingMatchesTheKernelEncoding pins the decoder against
-// unix.Mkdev, which is what device nodes are made with. The two must be
-// exact inverses or a node is made under one name and looked for under
-// another.
-//
-// The write-side node-placement tests that used to sit beside this one
-// moved to pkg/dmcrypt with the code they tested (#268): removeMappingNodes,
-// ensureDeviceNode and the rest are activation's now. decodeDevNo itself
-// stays, because (*Volume).Target still needs it.
+// TestDevNoDecodingMatchesTheKernelEncoding checks decodeDevNo inverts unix.Mkdev exactly.
 func TestDevNoDecodingMatchesTheKernelEncoding(t *testing.T) {
 	cases := []struct {
 		major uint32

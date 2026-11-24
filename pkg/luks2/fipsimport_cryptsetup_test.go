@@ -24,28 +24,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
-// The end-to-end proof for #84, against a volume this package did not write.
-//
-// A default `cryptsetup luksFormat` -- Argon2id, whatever cost cryptsetup
-// calibrates -- is migrated in a process that is NOT in FIPS mode and then
-// opened in one that IS, under GODEBUG=fips140=only. cryptsetup must still open
-// the migrated volume, so the migration does not buy FIPS at the price of
-// interoperability.
-//
-// # Why child processes
-//
-// FIPS mode is fixed when a process starts: crypto/fips140.Enabled() reports
-// what GODEBUG said at startup and nothing can change it afterwards. The two
-// halves of this test need OPPOSITE modes, so each runs in its own re-execution
-// of this test binary with GODEBUG set for it. The parent never derives
-// anything; it formats with cryptsetup, inspects headers, and judges exit codes
-// -- so the test behaves identically whether the parent is the ordinary unit
-// run or the full tier's FIPS job, which runs this package with
-// GODEBUG=fips140=only (.github/workflows/ci.yml).
-//
-// This is a TEST seam, and deliberately only that. The owner ruling of
-// 2026-09-25 rejected a re-exec seam in the library; the library's own
-// verification is the static check and the real open in MigrateToFIPS.
+// End to end: a cryptsetup Argon2id volume is migrated in a non-FIPS child and opened in a fips140=only child, and cryptsetup still opens it.
 
 // fipsImportRoleEnv selects the child's role; fipsImportImageEnv names the
 // image it acts on. A test binary started without the role runs as normal.
@@ -83,9 +62,7 @@ func init() {
 	}
 }
 
-// runFIPSImportChild performs one role and reports its outcome on stdout and in
-// the exit code. The FIPS mode it ran in is printed first, so the parent can
-// require that GODEBUG actually took effect instead of trusting it did.
+// runFIPSImportChild performs one role and reports its FIPS mode and outcome on stdout and in the exit code.
 func runFIPSImportChild(role, image string) int {
 	fmt.Printf("fips140.Enabled=%v\n", fips140.Enabled())
 
@@ -149,11 +126,7 @@ func runFIPSImportChild(role, image string) int {
 		return childOK
 
 	case childRoleWeaken:
-		// A second keyslot for the SAME passphrase, PBKDF2 so the migration's
-		// approved-first scan reaches it before the Argon2 one, then that
-		// keyslot and digest 0 re-written over a salt strict FIPS refuses.
-		// Derivations through that salt are what a FIPS parent cannot do,
-		// which is why this is a child.
+		// A second PBKDF2 keyslot for the same passphrase, rewritten with a salt strict FIPS refuses.
 		passphrase := []byte(conformancePassphrase)
 		slot, err := addKeyForTest(image, passphrase, passphrase, &addKeyOptionsForTest{KDFType: kdfTypePBKDF2, PBKDFIterTime: 1})
 		if err != nil {
@@ -172,10 +145,7 @@ func runFIPSImportChild(role, image string) int {
 	}
 }
 
-// runChild re-executes this test binary as a child in the given role, with
-// GODEBUG set to godebug and nothing else inherited for it, and returns the
-// exit code and stdout. It fails the test if the child did not run in the FIPS
-// mode asked for.
+// runChild re-executes this test binary in role with GODEBUG=godebug and returns its exit code and stdout.
 func runChild(t *testing.T, role, image, godebug string, wantFIPS bool) (int, string) {
 	t.Helper()
 
@@ -212,21 +182,7 @@ func runChild(t *testing.T, role, image, godebug string, wantFIPS bool) (int, st
 	return code, strings.TrimPrefix(stdout, wantMode)
 }
 
-// TestFIPSImportOfACryptsetupArgon2idVolume: a cryptsetup Argon2id volume is
-// refused by a FIPS process with the remedy named, cannot be migrated FROM a
-// FIPS process, is migrated by a non-FIPS one without its data being touched,
-// still opens in cryptsetup, and then opens in a FIPS process.
-//
-// cryptsetup's defaults in everything but the Argon2 cost, which is its
-// minimum. At the default cost -- about a gibibyte, calibrated to two seconds
-// of cryptsetup's own time -- the Argon2 unlock runs in a race-instrumented
-// child of this binary, and that alone spent a tenth of the package's -race
-// budget (ci.yml) on a parameter nothing here is about. The DEFAULT volume is
-// proved end to end where that cost is not charged to the budget and where
-// more can be checked: the integration suite's
-// TestFIPSImportOfADefaultCryptsetupVolumeMapsTheSameData formats with
-// cryptsetup's defaults, imports, and reads plaintext back through a mapping a
-// GODEBUG=fips140=only process made.
+// TestFIPSImportOfACryptsetupArgon2idVolume: refused under FIPS with the remedy, migrated outside FIPS without touching data, then opens in cryptsetup and under FIPS (minimum Argon2 cost).
 func TestFIPSImportOfACryptsetupArgon2idVolume(t *testing.T) {
 	defer parallel(t)()
 	requireCryptsetup(t)
@@ -307,21 +263,7 @@ func TestFIPSImportOfACryptsetupArgon2idVolume(t *testing.T) {
 	}
 }
 
-// TestFIPSImportOfACryptsetupVolumeWithShortSalts is the cross-process proof
-// that the migration judges what strict FIPS mode will actually RUN, not what
-// the header names. A cryptsetup Argon2id volume is given a second keyslot for
-// the same passphrase -- PBKDF2-SHA256, so the approved-first scan reaches it
-// first -- and that keyslot and digest 0 are rewritten over an eight-byte
-// salt. Every name is approved; crypto/pbkdf2 refuses both derivations under
-// GODEBUG=fips140=only. The migration must add a fresh keyslot rather than
-// reuse that one, migrate the digest, and leave a volume a strict FIPS process
-// opens.
-//
-// This fixture and the unbound-key one are formatted by cryptsetup with an
-// explicit, cheap Argon2id cost. Cryptsetup's DEFAULT volume is the headline
-// test's job; here what is under test is the salts and the segment binding,
-// and a calibrated Argon2 cost would only spend the package's -race budget
-// (ci.yml) unlocking it in the children.
+// TestFIPSImportOfACryptsetupVolumeWithShortSalts: a keyslot with approved names but an eight-byte salt is not reused; strict FIPS opens the result.
 func TestFIPSImportOfACryptsetupVolumeWithShortSalts(t *testing.T) {
 	defer parallel(t)()
 	requireCryptsetup(t)
@@ -385,15 +327,7 @@ func TestFIPSImportOfACryptsetupVolumeWithShortSalts(t *testing.T) {
 	}
 }
 
-// TestFIPSImportOfACryptsetupVolumeWithAnUnboundKey is the cross-process proof
-// that the migrated volume maps with the VOLUME key under FIPS, not merely that
-// some keyslot opens. cryptsetup adds an unbound PBKDF2-SHA256 keyslot under the
-// same passphrase as the Argon2 one; it is approved, so the migration keeps it,
-// and it sorts before the keyslot the migration adds. A scan that ignored
-// segment binding would find it first and Unlock would hand dm-crypt the wrong
-// key -- which TestKey, and opening the migrated keyslot directly, cannot see.
-// The key a strict FIPS process's normal scan recovers must be the one
-// cryptsetup itself reports as the volume key.
+// TestFIPSImportOfACryptsetupVolumeWithAnUnboundKey: under FIPS the scan recovers the volume key cryptsetup reports, not an unbound key.
 func TestFIPSImportOfACryptsetupVolumeWithAnUnboundKey(t *testing.T) {
 	defer parallel(t)()
 	requireCryptsetup(t)

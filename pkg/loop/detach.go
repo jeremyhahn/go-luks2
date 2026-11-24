@@ -72,21 +72,13 @@ func (d *Device) Detach(ctx context.Context) (DetachState, error) {
 	return state, errs.At("loop", "Device.Detach", d.path, err)
 }
 
-// detachDevice carries the seams and the reader as parameters so the
-// identity check and the waiting logic can be exercised without a loop
-// device and without waiting out a real timeout. The kernel-facing path is
-// covered separately, by the integration tests that drive a real device.
+// detachDevice takes its seams and reader as parameters so the identity check and wait are testable without a loop device.
 func detachDevice(ctx context.Context, path string, want backingIdentity, s sys, read loopStateReader) (DetachState, error) {
 	if err := ctx.Err(); err != nil {
 		return Released, &errs.Error{Kind: err}
 	}
 
-	// Recorded BEFORE the detach so the wait can tell "our association is
-	// gone" apart from "this device has since been attached to something
-	// else". The loop-device namespace is host-global, so a freed device
-	// can be claimed by another process between the ioctl and the first
-	// poll; waiting for the backing file to merely become unreadable would
-	// then time out on a detach that had in fact succeeded.
+	// Record the state before the detach, so the wait can tell our release from a reattachment by someone else.
 	before, beforeErr := read(path)
 
 	loopFile, err := s.openFile(path, os.O_RDWR, 0) // #nosec G304 -- loop device path from Attach or Lookup
@@ -101,22 +93,14 @@ func detachDevice(ctx context.Context, path string, want backingIdentity, s sys,
 
 	clearErr := s.clearFD(loopFile)
 
-	// Closed explicitly rather than deferred, because the close has to
-	// happen BEFORE the wait below rather than after the function returns:
-	// this descriptor is a reference, and the release cannot complete
-	// while it is held. A deferred close would make the wait wait for
-	// itself.
+	// Close before the wait: this descriptor would hold the release.
 	closeErr := loopFile.Close()
 
 	if clearErr != nil {
 		return Released, &errs.Error{Kind: errs.ErrIO, Detail: fmt.Sprintf("LOOP_CLR_FD failed: %v", clearErr)}
 	}
 
-	// A failed close does NOT skip the wait. The detach itself succeeded,
-	// the descriptor is out of our hands either way, and returning here
-	// would both abandon the observation this function exists to make and
-	// hand back an error a caller cannot classify. It is reported alongside
-	// whatever the wait concludes.
+	// A failed close still waits; it is reported with the wait's result.
 	state, waitErr := waitForDetach(ctx, path, before, beforeErr == nil, s.detachTimeout, s.detachPoll, read, s.clk)
 	if closeErr != nil {
 		closeFailed := errs.At("loop", "Device.Detach", path,
@@ -126,10 +110,7 @@ func detachDevice(ctx context.Context, path string, want backingIdentity, s sys,
 	return state, waitErr
 }
 
-// checkBackingIdentity reports an error unless the loop device open as f is
-// still backed by the file want records. It reads the identity from f
-// itself, the descriptor LOOP_CLR_FD is sent on, so the device checked is the
-// device cleared.
+// checkBackingIdentity errors unless the device open as f is still backed by the file want records.
 func checkBackingIdentity(path string, f *os.File, want backingIdentity, s sys) error {
 	dev, ino, err := s.fdBackingIdentity(f)
 	switch {
@@ -157,37 +138,16 @@ func clearFDIoctl(f *os.File) error {
 	return nil
 }
 
-// waitForDetach blocks until the device is released, until the kernel says
-// the release is deferred, or until timeout expires.
-//
-// before is the state observed before the detach; knownBefore says whether
-// that observation succeeded. Without it there is no baseline to compare
-// against, so the wait requires the authoritative not-attached state
-// instead -- a stronger condition, which is the right trade when already
-// operating blind.
-//
-// The contract, and it is one sentence: NO PATH RETURNS SUCCESS WITHOUT AN
-// AUTHORITATIVE OBSERVATION. An unreadable state is retried, never
-// concluded from; if it never clears, the bound reports that the state
-// could not be read.
+// waitForDetach blocks until release, a deferred release at the bound, or timeout; success always needs an authoritative observation.
 func waitForDetach(ctx context.Context, path string, before loopState, knownBefore bool, timeout, poll time.Duration, read loopStateReader, clk clock.Clock) (DetachState, error) {
-	// Nothing was attached, and we KNOW that -- the only case that needs no
-	// wait. An unreadable pre-detach observation is not this case,
-	// however similar an empty backing file looks.
+	// Known to be attached to nothing: no wait needed.
 	if knownBefore && before.backing == "" {
 		return Released, nil
 	}
 
 	deadline := clk.Now().Add(timeout)
 
-	// Counted rather than remembered. Classifying on the LAST reading
-	// inverts the report in both directions: a wait that was blind almost
-	// throughout but read cleanly on its final poll would blame a holder
-	// that does not exist, and a genuinely held device whose last poll
-	// happened to error would send an operator to fix a healthy host. The
-	// two causes exist precisely to route an operator differently, so the
-	// classification uses what dominated the wait rather than what
-	// happened to come last.
+	// Classify a timeout by the dominant observation, not the last one.
 	var unreadable, held int
 	var lastErr error
 	sawAutoclear := false
@@ -207,11 +167,7 @@ func waitForDetach(ctx context.Context, path string, before loopState, knownBefo
 			return Released, nil
 
 		case current.autoclear:
-			// The kernel took the request and postponed it. That is an
-			// authoritative observation, and it is remembered -- but it
-			// is NOT an exit. A holder is very often momentary, so
-			// waiting usually turns the deferred case into an observed
-			// release, at no cost beyond a few more polls.
+			// Deferred is remembered but not an exit: keep waiting for an observed release.
 			sawAutoclear = true
 			held++
 
@@ -221,12 +177,7 @@ func waitForDetach(ctx context.Context, path string, before loopState, knownBefo
 
 		if clk.Now().After(deadline) {
 			if sawAutoclear {
-				// Still held at the bound, but the kernel has accepted
-				// the request and will complete it when the last user
-				// goes away. That is a success: a persistently-held
-				// device is exactly what `losetup -d` reports success
-				// for, and failing here would break callers that detach
-				// a device something else is legitimately still using.
+				// Still held at the bound, but accepted: deferred success.
 				return Deferred, nil
 			}
 
@@ -249,8 +200,7 @@ func waitForDetach(ctx context.Context, path string, before loopState, knownBefo
 // released reports whether an observation shows our association gone.
 func released(current, before loopState, knownBefore bool) bool {
 	if knownBefore {
-		// Gone, or claimed by someone else: either way it is no longer
-		// ours.
+		// Gone or reattached: either way no longer ours.
 		return current.backing != before.backing
 	}
 	// No baseline, so only the authoritative not-attached state will do.

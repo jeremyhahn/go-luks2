@@ -44,8 +44,7 @@ func tearSecondary(t *testing.T, path string, area int64) {
 	writeBytesAt(t, path, area+header.HeaderSize, []byte("torn"))
 }
 
-// staleCopyAt leaves the copy at staleOffset one header write behind the
-// other: a token was added after it was saved.
+// staleCopyAt leaves the copy at staleOffset one write behind: a token was added after it.
 func staleCopyAt(staleOffset func(area int64) int64) func(t *testing.T, path string, area int64) {
 	return func(t *testing.T, path string, area int64) {
 		at := staleOffset(area)

@@ -27,7 +27,7 @@ type Unpublishable struct {
 
 	// Reason says why the file cannot ship and what to do instead. It is
 	// printed with every finding, so the engineer who trips it does not have
-	// to come looking for the ruling.
+	// to come looking for the reason.
 	Reason string
 }
 
@@ -39,7 +39,7 @@ const noShellScripts = "the public release ships no shell scripts (owner ruling 
 const agentInstructions = "agent instructions: tracked in every repository and stripped at publish " +
 	"(standards project-scaffold.md §7, #252); the public release removes them (#211)"
 
-// workflowDir is where GitHub and Gitea Actions look for workflows.
+// workflowDir is where Actions look for workflows.
 const workflowDir = ".github/workflows/"
 
 // PublishedWorkflows is every workflow file the public release carries, by
@@ -52,8 +52,8 @@ const workflowDir = ".github/workflows/"
 // pull requests are judged by the base's verifier and registry.
 var PublishedWorkflows = []string{"ci.yml", "nightly.yml", "release.yml", "signatures.yml"}
 
-// DefaultStripAtPublish is the list of tracked files Gitea main carries and
-// the public release does not (#211). The gate does not fail on them -- they
+// DefaultStripAtPublish is the list of tracked files main carries and
+// the public release does not. The gate does not fail on them -- they
 // belong on main -- but each must be export-ignored by GitAttributes, which
 // keeps it out of `git archive` and a forge's tag tarball; the public tree is
 // produced as such an export. A listed file GitAttributes does not exclude is
@@ -68,7 +68,7 @@ var PublishedWorkflows = []string{"ci.yml", "nightly.yml", "release.yml", "signa
 // So is the internal review workflow code-review.yml. The workflow rule is an exact name: `code-review.yaml` or a nested
 // copy is an unknown workflow and fails.
 //
-// A test file that reads only a stripped file is stripped with it (#211), so
+// A test file that reads only a stripped file is stripped with it, so
 // `go test ./...` passes on the published tree.
 var DefaultStripAtPublish = []Unpublishable{
 	{Path: "**/CLAUDE.md", Reason: agentInstructions},
@@ -92,8 +92,7 @@ const (
 	fleetTests    = "test/internal/labstrings/fleet_test.go"
 )
 
-// internalReviewWorkflow is the reason given for the internal code-review
-// workflows (#336).
+// internalReviewWorkflow is the reason given for the internal code-review workflows.
 const internalReviewWorkflow = "internal Gitea code-review workflow: tracked on main, " +
 	"stripped from the public release (#211, #336)"
 
@@ -184,11 +183,7 @@ func ScanUnpublishable(entries []Entry, rules, strip []Unpublishable) ([]FileFin
 			findings = append(findings, FileFinding{Path: e.Path, Reason: "an executable script (it opens with #!): " + noShellScripts})
 			continue
 		}
-		// A binary file fails unless ExemptFile lists it: its content is
-		// scanned for lab values like any other, but a person has to have
-		// accepted shipping bytes nobody can read as text (owner ruling on
-		// #211). An oversize exempt file arrives Unread and is exempt by the
-		// same line.
+		// A binary fails unless ExemptFile lists it.
 		if e.Kind == KindFile && e.Exemption == "" && IsBinary(e.Content) {
 			findings = append(findings, FileFinding{Path: e.Path, Reason: binaryFile})
 		}

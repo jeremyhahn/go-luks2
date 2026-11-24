@@ -9,14 +9,7 @@ import (
 	"testing"
 )
 
-// The Signatures gate is its own workflow, signatures.yml, triggered by
-// pull_request_target so GitHub runs it from the base branch: the pull
-// request's tree never holds the script that judges it. Its verifier is a
-// bash script in the Signatures job. These tests run that script, extracted
-// from the workflow, against throwaway repositories
-// whose commits are signed with throwaway SSH keys, with a fake curl standing
-// in for the GitHub API. They need bash, git, ssh-keygen and jq, which the CI
-// toolchain image has; a missing tool fails the test, it never skips.
+// These tests run signatures.yml's verifier script against throwaway repositories signed with throwaway SSH keys, with a fake curl; they need bash, git, ssh-keygen and jq.
 
 const (
 	signaturesWorkflow = ".github/workflows/signatures.yml"

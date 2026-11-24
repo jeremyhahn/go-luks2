@@ -52,9 +52,7 @@ func TestVolumeEraseIsACryptoErase(t *testing.T) {
 	}
 }
 
-// TestVolumeEraseLeavesTheDataSegment is the SPEC row of docs/wipe/cli.md
-// (header-only): nothing at or past the start of the data segment is
-// touched. It needs no cryptsetup, so it runs in every tier.
+// TestVolumeEraseLeavesTheDataSegment: nothing at or past the data segment is touched.
 func TestVolumeEraseLeavesTheDataSegment(t *testing.T) {
 	defer parallel(t)()
 

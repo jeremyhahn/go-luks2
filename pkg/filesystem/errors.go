@@ -22,7 +22,7 @@ var (
 
 	// ErrUnsupported indicates a filesystem type that is not in Supported().
 	// Make and Check/Repair raise it before touching a device. ext2 and
-	// ext3 are deliberately in this category (#195); Detect can still
+	// ext3 are deliberately in this category; Detect can still
 	// report them, as the raw strings "ext2" and "ext3", since that is what
 	// blkid found on the device.
 	ErrUnsupported = errors.New("unsupported filesystem type")
