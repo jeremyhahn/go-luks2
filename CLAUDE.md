@@ -27,7 +27,6 @@ interoperate with cryptsetup in both directions. Module
   the build and CI plumbing.
 - `docs/<area>/` — api, architecture and engineering notes per feature area.
   `docs/SPEC.md` is the feature spec; `ROADMAP.md` tracks rows.
-- `pm/rows.md` — the SPEC row ledger.
 
 ## Work rules
 
