@@ -41,7 +41,8 @@ func noReviewPaths(t *testing.T) *regexp.Regexp {
 	return re
 }
 
-// No change under .github/workflows/ is review-exempt.
+// Codex P1: a workflow controls credentials and merge enforcement, so no
+// change under .github/workflows/ is ever review-exempt.
 func TestNoReviewPathsNeverExemptAWorkflow(t *testing.T) {
 	re := noReviewPaths(t)
 	paths := []string{
@@ -52,7 +53,7 @@ func TestNoReviewPathsNeverExemptAWorkflow(t *testing.T) {
 		".github/workflows/signatures.yml",
 		".github/workflows/new.yaml",
 		".github/workflows/sub/dir.yml",
-		// The Signatures job's key registry is trust.
+		// Codex P1: the Signatures job's key registry (ci.yml) is trust.
 		".github/allowed_signers",
 	}
 	for _, f := range workflowFiles(t) {
@@ -121,7 +122,12 @@ func runScope(t *testing.T) string {
 	return string(m[1])
 }
 
-// TestScopeSkipNeverSuppressesAWorkflowReview: a workflow change never skips the review job the gate waits for.
+// TestScopeSkipNeverSuppressesAWorkflowReview: InfoSec's guard clears only a
+// change of workflow files (Y-2), and this repository's NO_REVIEW_PATHS keeps
+// .github/workflows/ under review, so the gate needs a Codex approval of such
+// a change. A scope skip there would suppress the review job the gate waits
+// for (Codex P1, #490): a workflow change never skips the review, and the
+// gate still asks for the approval the review gives.
 func TestScopeSkipNeverSuppressesAWorkflowReview(t *testing.T) {
 	if _, err := exec.LookPath("timeout"); err != nil {
 		t.Skip("timeout not installed")
@@ -189,7 +195,8 @@ echo "all=$all"
 	return cmd.ProcessState.ExitCode(), string(out)
 }
 
-// A failed page read stops get_all instead of returning partial pages.
+// Codex P1: a failed page read stops get_all; it never returns the
+// earlier pages as if they were all.
 func TestGateGetAllPropagatesAFailedPage(t *testing.T) {
 	if code, out := runGetAll(t, "ok"); code != 0 || !strings.Contains(out, "all=[1,2]") {
 		t.Errorf("two pages: exit %d, output %q; want 0 and all=[1,2]", code, out)
@@ -213,7 +220,9 @@ func gateStep(t *testing.T) string {
 	return cr[i:]
 }
 
-// A retargeted PR fails: the gate reads the live base before the no-review exit and after the wait.
+// Codex P1: a PR retargeted since the event passes nothing. The gate reads
+// the live base, as the review job's skip=retargeted guards do, before the
+// no-review exit and again after the wait for in-flight reviews.
 func TestGateRefusesARetargetedPullRequest(t *testing.T) {
 	g := gateStep(t)
 	def := regexp.MustCompile(`(?ms)^ +check_base\(\) \{\n.*?^ +\}$`).FindString(g)
@@ -252,7 +261,8 @@ func gateVerdict(t *testing.T, reviews string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// A standing CHANGES_REQUESTED on the head blocks the gate until dismissed.
+// Codex P1: a standing CHANGES_REQUESTED on the head blocks the gate even
+// when a later APPROVED exists; only a dismissal lifts it.
 func TestGateKeepsAStandingChangeRequest(t *testing.T) {
 	rv := func(id int, state, at string, dismissed bool) string {
 		d := ""
@@ -275,7 +285,9 @@ func TestGateKeepsAStandingChangeRequest(t *testing.T) {
 	}
 }
 
-// A failed or canceled review job fails the gate before an older approval is accepted; a skipped one changes nothing.
+// Codex P1: a failed or canceled review job (a requested re-review that
+// did not finish) fails the gate before it accepts an older approval; a
+// skipped review job (no labels) leaves the gate as it was.
 func TestGateRefusesAFailedReviewJob(t *testing.T) {
 	cr := codeReview(t)
 	gate := cr[strings.Index(cr, "\n  gate:\n"):]
@@ -407,18 +419,26 @@ func runGateWith(t *testing.T, head string, fix map[string]string, extra ...stri
 		"FIX="+fixDir, "GITHUB_RUN_ID=42", "GH_API_TOKEN=x", "FORGE=github", "REVIEWER=codex",
 		"REPO_API=https://api.example/repos/o/r", "PR_NUM=1", "EVENT_SHA="+head,
 		"BASE_SHA="+base, "BASE_REF=main", "REVIEW_RESULT=skipped", "NO_REVIEW_PATHS="+m[1],
-		// The gate also reads the docs list and the scope job.
+		// v5.12.1/v5.12.2: the gate also reads the docs list and the scope job.
 		"DOCS_PATHS="+docs[1], "SCOPE_SKIP=", "SCOPE_RESULT=success")
 	cmd.Env = append(cmd.Env, extra...)
 	out, _ := cmd.CombinedOutput()
 	return cmd.ProcessState.ExitCode(), string(out)
 }
 
-// reviewRuns are review-run fixtures for PR 1 into main at head; a missing head lists none (HTTP 404).
+// reviewRuns are fixtures for review runs on PR 1 into main at head: each
+// run id to its Codex review job, "skipped" for a job that did not run, or
+// a job conclusion (success, failure, ...) with the codex step "success" or
+// "skipped". A missing head lists no fixture (HTTP 404).
 func reviewRuns(fix map[string]string, head string, runs [][3]string) {
 	var list []string
 	for _, r := range runs {
-		// r[0] is "id", "id@time" (a re-run) or "id+guard" (a later guard-only re-run); a "~review" or "~re-review" suffix sets the run-name's request kind.
+		// r[0] is "id" (started at second id, first attempt) or
+		// "id@time" (a re-run: second attempt, started at time), or
+		// "id+guard" (then a later guard-only re-run that ran no codex).
+		// A "~review" or "~re-review" suffix names the run's request kind
+		// in its run-name (an ordinary trigger, or an explicit re-review
+		// label); without one the run-name is the old one, kind unknown.
 		r0, title := r[0], "Code Review: PR #1 into main at "+head
 		if k := strings.Index(r0, "~"); k >= 0 {
 			kind := r0[k+1:]
@@ -463,7 +483,12 @@ func reviewRuns(fix map[string]string, head string, runs [][3]string) {
 	fix["_actions_workflows_7_runs_"+head] = fmt.Sprintf(`{"total_count":%d,"workflow_runs":[%s]}`, len(list), strings.Join(list, ","))
 }
 
-// carryChain returns approvals carried from root to mid and from mid to head.
+// Codex P1: the latest codex review attempt on the head, or on the head
+// its approval was carried from, decides: a failed or canceled one (a
+// requested re-review that did not finish) keeps the gate red, whatever
+// label or same-patch push follows, until a later attempt succeeds. A run
+// whose review job was skipped, or that ran no codex step, is no attempt.
+// carryChain: codex approved root, carried it to mid, and mid's to head.
 func carryChain(root, mid, head string) string {
 	review := func(n int, h, from string) string {
 		body := ""
@@ -475,7 +500,6 @@ func carryChain(root, mid, head string) string {
 	return "[" + review(1, root, "") + "," + review(2, mid, root) + "," + review(3, head, mid) + "]"
 }
 
-// TestGateRefusesAfterAFailedReviewAttempt: the latest review attempt on the head, or on the head its approval was carried from, decides; a failed or canceled one keeps the gate red until a later attempt succeeds.
 func TestGateRefusesAfterAFailedReviewAttempt(t *testing.T) {
 	a, b, e := strings.Repeat("a", 40), strings.Repeat("c", 40), strings.Repeat("e", 40)
 	approval := func(head, body string) string {
@@ -500,7 +524,11 @@ func TestGateRefusesAfterAFailedReviewAttempt(t *testing.T) {
 		{"failed codex request, then agent:opencode and an unrelated label", a, map[string][][3]string{
 			a: {id("10", ok), id("11", [3]string{"", "failure", "skipped"}), id("12", ranNot), id("13", skip)},
 		}, false, "a requested re-review has not approved head " + a},
-		// A pending duplicate canceled before its review step is no attempt; only a later successful review clears it.
+		// Codex P1 (#490): the shared concurrency group cancels an older
+		// pending duplicate before its review step starts; that is no attempt.
+		// Round 4: only a later job whose codex step ran and succeeded (a
+		// real replacement review) clears it; a guard-only skip=reviewed
+		// job ran no review and replaces nothing.
 		{"approved, then a dedup-canceled duplicate and a real replacement review", a, map[string][][3]string{
 			a: {id("10", ok), id("11", [3]string{"", "cancelled", "skipped"}), id("12", ok)}, //nolint:misspell // the runner's spelling, not prose
 		}, true, "codex approved " + a},
@@ -516,7 +544,9 @@ func TestGateRefusesAfterAFailedReviewAttempt(t *testing.T) {
 		{"approved, then a re-review canceled while codex ran", a, map[string][][3]string{
 			a: {id("10", ok), id("11", [3]string{"", "cancelled", "cancelled"}), id("12", ranNot)}, //nolint:misspell // the runner's spelling, not prose
 		}, false, "a requested re-review has not approved head " + a},
-		// A re-review canceled while waiting blocks until a later same-head review succeeds.
+		// Codex P1 (#490, round 3): an explicit re-review canceled while it
+		// waited still blocks; only a later same-head review run that ended
+		// success (a replacing duplicate) makes the canceled one no attempt.
 		{"approved, then an effort re-review canceled while queued and an unrelated label", a, map[string][][3]string{
 			a: {id("10", ok), id("11", [3]string{"", "cancelled", "skipped"}), id("12", skip)}, //nolint:misspell // the runner's spelling, not prose
 		}, false, "a requested re-review has not approved head " + a},
@@ -526,7 +556,11 @@ func TestGateRefusesAfterAFailedReviewAttempt(t *testing.T) {
 		{"approved, then a canceled re-review alone", a, map[string][][3]string{
 			a: {id("10", ok), id("11", [3]string{"", "cancelled", "skipped"})}, //nolint:misspell // the runner's spelling, not prose
 		}, false, "a requested re-review has not approved head " + a},
-		// The run-name's request kind decides: a canceled ordinary run is no attempt; a canceled re-review or unknown kind blocks until a real review succeeds.
+		// Codex P1 (#490, round 5): the run-name carries the request kind. A
+		// canceled job of an ordinary run (a duplicate the shared group
+		// replaced) is no attempt whatever follows; one of an explicit
+		// re-review, or of a run whose kind cannot be read, blocks until a
+		// later real review succeeds.
 		{"round 5: approved, an ordinary duplicate canceled, an ordinary guard-only run", a, map[string][][3]string{
 			a: {id("10~review", ok), id("11~review", [3]string{"", "cancelled", "skipped"}), id("12~review", ranNot)}, //nolint:misspell // the runner's spelling, not prose
 		}, true, "codex approved " + a},
@@ -545,7 +579,10 @@ func TestGateRefusesAfterAFailedReviewAttempt(t *testing.T) {
 		{"an ordinary run canceled while codex ran", a, map[string][][3]string{
 			a: {id("10~review", ok), id("11~review", [3]string{"", "cancelled", "cancelled"}), id("12~review", ranNot)}, //nolint:misspell // the runner's spelling, not prose
 		}, false, "a requested re-review has not approved head " + a},
-		// A failed or canceled scope job of a re-review blocks until a real review succeeds.
+		// Codex P1 (#490, round 6): the scope job of an explicit re-review
+		// failed or was canceled, so its review was skipped (needs: scope);
+		// a later ordinary run's skipped or guard-only review passes no
+		// approval until a real review succeeds.
 		{"round 6: approved, an explicit re-review's scope failed, an ordinary guard-only run", a, map[string][][3]string{
 			a: {id("10~review", ok), id("11~re-review", [3]string{"", "scope:failure", ""}), id("12~review", ranNot)},
 		}, false, "a requested re-review has not approved head " + a},
@@ -603,7 +640,13 @@ func TestGateRefusesAfterAFailedReviewAttempt(t *testing.T) {
 	}
 }
 
-// TestGateNeverWaitsForATwinReview: the gate reads queued and in-progress twins once and fails at once on an active twin; API errors fail closed.
+// The gate never waits for a twin review (template v5.12.6). It reads the
+// queued and in-progress runs of the same PR, base and head once, with or
+// without the run-name's request kind; an APPROVED head passes as before,
+// and otherwise a twin whose "Codex review" job is queued or in progress
+// fails the gate at once, naming that run, whose own gate posts the head's
+// check. It never sleeps, and an API error still fails closed. Its timeout
+// is 10 minutes, since no wait is left to budget for.
 func TestGateNeverWaitsForATwinReview(t *testing.T) {
 	cr := codeReview(t)
 	if !strings.Contains(cr, "# code-review-template: v5.12.6 ") {
@@ -759,7 +802,12 @@ func TestGateNeverWaitsForATwinReview(t *testing.T) {
 		try(c, nil)
 	}
 
-	// A twin's own run is no attempt; a completed failed attempt still fails closed.
+	// The twin's own run is no attempt: check_attempts passes over every
+	// active twin, so a completed attempt alone decides. A completed failed
+	// attempt still fails closed with the failed-attempt message, twin or
+	// not; an unfinished run on a carried-from head is no twin of this head
+	// (the twins are read on the head alone) and fails closed as a failed
+	// attempt.
 	root, mid := strings.Repeat("c", 40), strings.Repeat("e", 40)
 	carried := carryChain(root, mid, a)
 	ok, failed, ranNot := [3]string{"", "success", "success"}, [3]string{"", "failure", "success"}, [3]string{"", "success", "skipped"}
@@ -863,7 +911,8 @@ func listRuns(t *testing.T, fix map[string]string, head, body string) {
 	fix[key] = string(out)
 }
 
-// The same-patch carry carries nothing from a failed latest attempt.
+// Codex P1: the same-patch carry reads the source head's latest codex
+// review attempt before it posts, and carries nothing from a failed one.
 func TestCarryRefusesAHeadWhoseLatestAttemptFailed(t *testing.T) {
 	cr := codeReview(t)
 	i := strings.Index(cr, "\n          # SAME PATCH:")
@@ -902,7 +951,13 @@ func TestCarryRefusesAHeadWhoseLatestAttemptFailed(t *testing.T) {
 		{"failed, then a guard-only re-run", [][3]string{{"10", "success", "success"}, {"11+guard", "failure", "success"}}, "failed"},
 		{"more jobs than one page", [][3]string{{"10", "success", "success"}, {"11", "page2", "success"}}, "die: cannot read the jobs of run 11"},
 		{"no attempt", [][3]string{{"12", "success", "skipped"}}, "none"},
-		// A duplicate canceled before its review step and replaced by a successful review is no attempt; one canceled mid-review, or not replaced, is.
+		// Codex P1 (#490): a duplicate the concurrency group canceled before
+		// its review step started, and a later same-head review run replaced
+		// with success, is no attempt; one canceled mid-review is. Round 3: a
+		// re-review canceled before its step with no later successful review
+		// run (only an unrelated label run, or none) still failed.
+		// Round 4: only a later real review (codex step success) replaces
+		// it; a guard-only skip=reviewed job does not.
 		{"dedup-cancelled after an approval, then a real review", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "skipped"}, {"12", "success", "success"}}, "success"},                       //nolint:misspell // the runner's spelling, not prose
 		{"cancelled before any step after an approval, then a real review", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "absent"}, {"12", "success", "success"}}, "success"},              //nolint:misspell // the runner's spelling, not prose
 		{"effort re-review cancelled before codex, then a guard-only skip=reviewed job", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "skipped"}, {"12", "success", "skipped"}}, "failed"}, //nolint:misspell // the runner's spelling, not prose
@@ -911,13 +966,13 @@ func TestCarryRefusesAHeadWhoseLatestAttemptFailed(t *testing.T) {
 		{"re-review cancelled before any step, nothing later", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "absent"}}, "failed"},                                                          //nolint:misspell // the runner's spelling, not prose
 		{"cancelled while codex ran", [][3]string{{"10", "success", "success"}, {"11", "cancelled", "cancelled"}}, "failed"},                                                                                //nolint:misspell // the runner's spelling, not prose
 		{"failed before the review step", [][3]string{{"10", "success", "success"}, {"11", "failure", "absent"}}, "failed"},
-		// The run-name's request kind decides a canceled job.
+		// Round 5: the run-name's request kind decides a canceled job.
 		{"round 5: ordinary duplicate cancelled, ordinary guard-only job", [][3]string{{"10~review", "success", "success"}, {"11~review", "cancelled", "skipped"}, {"12~review", "success", "skipped"}}, "success"}, //nolint:misspell // the runner's spelling, not prose
 		{"round 4: effort:high re-review cancelled, guard-only job", [][3]string{{"10~review", "success", "success"}, {"11~re-review", "cancelled", "skipped"}, {"12~review", "success", "skipped"}}, "failed"},     //nolint:misspell // the runner's spelling, not prose
 		{"explicit re-review cancelled, then a real review", [][3]string{{"10~review", "success", "success"}, {"11~re-review", "cancelled", "absent"}, {"12~review", "success", "success"}}, "success"},             //nolint:misspell // the runner's spelling, not prose
 		{"unknown-kind run cancelled, guard-only job", [][3]string{{"10~review", "success", "success"}, {"11", "cancelled", "skipped"}, {"12~review", "success", "skipped"}}, "failed"},                             //nolint:misspell // the runner's spelling, not prose
 		{"ordinary duplicate cancelled, nothing later", [][3]string{{"10~review", "success", "success"}, {"11~review", "cancelled", "absent"}}, "success"},                                                          //nolint:misspell // the runner's spelling, not prose
-		// A failed or canceled scope job of an explicit re-review skipped its review.
+		// Round 6: a failed or canceled scope job of an explicit re-review skipped its review.
 		{"round 6: explicit re-review's scope failed, ordinary guard-only job", [][3]string{{"10~review", "success", "success"}, {"11~re-review", "scope:failure", ""}, {"12~review", "success", "skipped"}}, "failed"},
 		{"round 6: explicit re-review's scope failed, then a real review", [][3]string{{"10~review", "success", "success"}, {"11~re-review", "scope:failure", ""}, {"12~review", "success", "skipped"}, {"13~review", "success", "success"}}, "success"},
 		{"round 6: explicit re-review's scope cancelled, ordinary guard-only job", [][3]string{{"10~review", "success", "success"}, {"11~re-review", "scope:cancelled", ""}, {"12~review", "success", "skipped"}}, "failed"}, //nolint:misspell // the runner's spelling, not prose
@@ -977,7 +1032,10 @@ func TestCarryRefusesAHeadWhoseLatestAttemptFailed(t *testing.T) {
 	}
 }
 
-// TestRunNameCarriesTheRequestKind: each run-name names its request kind, and every reader accepts it.
+// Codex P1 (#490, round 5): each run's run-name (display_title) names its
+// request kind, an explicit re-review (an agent:, model: or effort: label)
+// or an ordinary trigger, so the reducers can tell a replaced duplicate
+// from a canceled re-review; every reader of the run-name accepts it.
 func TestRunNameCarriesTheRequestKind(t *testing.T) {
 	cr := codeReview(t)
 	m := regexp.MustCompile(`(?m)^run-name: (.*)$`).FindStringSubmatch(cr)
@@ -1010,7 +1068,10 @@ func TestRunNameCarriesTheRequestKind(t *testing.T) {
 	}
 }
 
-// TestRearmChecksTheAutoMergeRequest: an answer with no auto-merge request is reported not armed; expectedHeadOid is part of EnablePullRequestAutoMergeInput.
+// Codex P1 (#490, round 3): enablePullRequestAutoMerge can answer with no
+// error and no auto-merge request; the step reads the request it selected
+// and reports such an answer not armed. expectedHeadOid stays: GitHub's live
+// schema (introspection 2026-11-17) lists it on EnablePullRequestAutoMergeInput.
 func TestRearmChecksTheAutoMergeRequest(t *testing.T) {
 	cr := codeReview(t)
 	i := strings.Index(cr, "- name: Re-arm auto-merge on the approved head")
@@ -1143,7 +1204,9 @@ func TestRearmRefusesARetargetedPullRequest(t *testing.T) {
 	}
 }
 
-// TestFreshOwnerResumeResetsAnExhaustedCount: a fresh owner-resume restarts the count and removes needs-coordinator.
+// TestFreshOwnerResumeResetsAnExhaustedCount: an exhausted review keeps
+// needs-coordinator, so a fresh owner-resume must restart the count with
+// that label still on (and take it off), or the new head hits round-limit.
 func TestFreshOwnerResumeResetsAnExhaustedCount(t *testing.T) {
 	cr := codeReview(t)
 	i := strings.Index(cr, "          # v5.10.7: THE OWNER RESUMES.")
