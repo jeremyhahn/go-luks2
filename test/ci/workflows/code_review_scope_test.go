@@ -19,13 +19,13 @@ func reviewJobIf(t *testing.T, workflow string) string {
 
 // reviewSkipProblem: code-review.yml v5.12.1's review job skips a change
 // InfoSec's guard (the scope job) clears, which is a workflow-only change;
-// this repository's gate never exempts a workflow (NO_REVIEW_PATHS), so such
-// a change would get no review and could never pass the gate.
+// if NON_CODE_PATHS called a workflow code, such a change would get no
+// review and could never pass the gate.
 func reviewSkipProblem(t *testing.T, workflow string) string {
 	t.Helper()
-	m := regexp.MustCompile(`(?m)^\s+NO_REVIEW_PATHS: '([^']*)'\s*$`).FindStringSubmatch(workflow)
+	m := regexp.MustCompile(`(?m)^\s+NON_CODE_PATHS: '([^']*)'\s*$`).FindStringSubmatch(workflow)
 	if m == nil {
-		t.Fatal("gate: no NO_REVIEW_PATHS")
+		t.Fatal("no NON_CODE_PATHS")
 	}
 	exempt := regexp.MustCompile(m[1]).MatchString(".github/workflows/ci.yml")
 	if !exempt && strings.Contains(reviewJobIf(t, workflow), "needs.scope.outputs.skip") {
@@ -34,8 +34,8 @@ func reviewSkipProblem(t *testing.T, workflow string) string {
 	return ""
 }
 
-// TestReviewRunsWhereTheGateNeedsIt: a workflow change always takes a round
-// here (Codex P1 on go-quicraft #1170, the same template change).
+// TestReviewRunsWhereTheGateNeedsIt: a change the gate needs reviewed is
+// never skipped on the scope verdict (Codex P1 on go-quicraft #1170).
 func TestReviewRunsWhereTheGateNeedsIt(t *testing.T) {
 	if p := reviewSkipProblem(t, codeReview(t)); p != "" {
 		t.Error(p)
@@ -43,7 +43,7 @@ func TestReviewRunsWhereTheGateNeedsIt(t *testing.T) {
 }
 
 func TestReviewRunsWhereTheGateNeedsIt_CanFail(t *testing.T) {
-	const fixture = "jobs:\n  review:\n    name: Codex review\n    if: >-\n      github.event.pull_request.state == 'open'\n      && needs.scope.outputs.skip != 'true'\n    runs-on: codex\n  gate:\n    env:\n      NO_REVIEW_PATHS: '^(docs/.+|\\.github/actionlint\\.yaml)$'\n"
+	const fixture = "jobs:\n  review:\n    name: Codex review\n    if: >-\n      github.event.pull_request.state == 'open'\n      && needs.scope.outputs.skip != 'true'\n    runs-on: codex\n  gate:\n    env:\n      NON_CODE_PATHS: '^(docs/.+|\\.github/actionlint\\.yaml)$'\n"
 	if reviewSkipProblem(t, fixture) == "" {
 		t.Fatal("a review skipped on the scope verdict while the gate never exempts a workflow: no problem reported")
 	}
