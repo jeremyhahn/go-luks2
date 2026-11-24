@@ -23,7 +23,7 @@ const (
 // preflightRunsOn is ci-template v1.52's preflight runs-on: the bigdisk pool
 // on github.com, the repository variable CI_PREFLIGHT_RUNS_ON (runs-on JSON)
 // its override, and ubuntu-latest off github.com.
-const preflightRunsOn = `${{ github.server_url == 'https://github.com' && (!startsWith(github.event_name, 'pull_request') || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk"]') || 'ubuntu-latest' }}`
+const preflightRunsOn = `${{ github.server_url == 'https://github.com' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk"]') || 'ubuntu-latest' }}`
 
 // releaseRunsOn is the runs-on line of the release-runner `if:` fixtures.
 const releaseRunsOn = "release  # self-hosted: hardware: the host"
@@ -255,7 +255,7 @@ const balancedPoolStep = "Balanced runner pool (ruling 1137)"
 // balancedPoolSHA256 is the SHA-256 of the v1.54 template's step body (the
 // text after its `- name:` line up to the next step), byte for byte. A change
 // to the step is a template bump, made with this pin.
-const balancedPoolSHA256 = "82eeb1dfddc72f27b053e94529ff41f33b7701acbbb213ee5b2355bd5d79e49c"
+const balancedPoolSHA256 = "b12f261ad74d54597c01d9a5caf6f6ddc30ef9352d813fe89537798497353d2e"
 
 // runnerSelectTests is the template's testdata/runner-select-tests.py,
 // carried verbatim but for its #! line, runnerSelectShebang
@@ -264,7 +264,7 @@ const balancedPoolSHA256 = "82eeb1dfddc72f27b053e94529ff41f33b7701acbbb213ee5b23
 const (
 	runnerSelectTests       = "test/ci/workflows/testdata/runner-select-tests.py"
 	runnerSelectShebang     = "#!/usr/bin/env python3\n"
-	runnerSelectTestsSHA256 = "b53de0fa0282b1825d60f259680b293a259ef62398c31312daf2c15e311b346f"
+	runnerSelectTestsSHA256 = "7d61a8b27dd25b8ac94e1f8dc23031a30f4b7f135b09e86b455cd8c7501a0151"
 )
 
 func sha256Hex(s string) string {
