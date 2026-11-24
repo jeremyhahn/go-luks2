@@ -552,10 +552,10 @@ HOSTED_CTX = [  # (event, ref, head repo) on github.com; o/r is this repository
 # from its literals: head_ref, base_ref and event values are the
 # attacker's, so no sample set of them is complete.
 RO_ALLOW = {
-    # Resume 23 (ci-template v1.52): a fork's pull request takes
-    # ubuntu-latest before the variable is read.
-    "github.server_url == 'https://github.com' && (!startsWith(github.event_name, 'pull_request') || "
-    "github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_PREFLIGHT_RUNS_ON || "
+    # Only a push to main and a same-repository pull request read the variable.
+    "github.server_url == 'https://github.com' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || "
+    "(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) "
+    "&& fromJSON(vars.CI_PREFLIGHT_RUNS_ON || "
     "'[\"self-hosted\",\"linux\",\"x64\",\"bigdisk\"]') || 'ubuntu-latest'": "ci.yml: preflight",
     "github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk'": "code-review.yml: scope, gate",
     # ci-template v1.54: every other ci.yml job reads the pool that
