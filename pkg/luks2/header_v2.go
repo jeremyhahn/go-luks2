@@ -71,30 +71,16 @@ func (h *Header) Dropped() []DroppedEntry { return h.metadata.DroppedNullEntries
 // its JSON metadata area, in bytes.
 func (h *Header) Size() int64 { return int64(h.hdr.HeaderSize) } // #nosec G115 -- bounded by header.HeaderMaxSize (4 MiB), far under int64's range
 
-// Offset is where this header copy was read: 0 for the primary, the header
-// area size for the secondary. (*Volume).Header returns the current copy,
-// which is the secondary when the primary is damaged or older, so Offset is
-// how a caller tells which one it has.
+// Offset is where this copy was read: 0 for the primary, the header area size for the secondary.
 func (h *Header) Offset() int64 { return int64(h.hdr.HeaderOffset) } // #nosec G115 -- the read refuses an hdr_offset other than the copy's own location, at most header.HeaderMaxOffset
 
-// Keyslots lists the volume's keyslots in ascending id order, each with its
-// Priority; Unlock tries them by priority within that order (see Priority).
-// It shares listKeyslotsFrom with the old ListKeyslots, so the two
-// never report a different shape for one container.
+// Keyslots lists the volume's keyslots in ascending id order, each with its Priority.
 func (h *Header) Keyslots() []KeyslotInfo {
 	slots, _ := listKeyslotsFrom(h.metadata)
 	return slots
 }
 
-// Segments lists the volume's data segments, in ascending id order. A
-// segment whose id does not parse as a decimal integer is omitted: the same
-// tolerance (*Header).Keyslots already applies to a keyslot cryptsetup
-// itself could never address (see listKeyslotsFrom) -- no LUKS2
-// implementation reaches such a segment either, so reporting nothing about
-// it is more honest than inventing an id. A segment field that fails to
-// parse (a malformed offset, size or iv_tweak) reads back as its zero value
-// rather than failing the whole listing: Segments, like Keyslots, is an
-// inspection operation and must report what is there.
+// Segments lists the data segments in ascending id order; a non-decimal id is omitted and an unparseable field reads as zero.
 func (h *Header) Segments() []Segment {
 	var out []Segment
 	for _, idStr := range header.SortedIDs(h.metadata.Segments) {
@@ -129,12 +115,7 @@ func (h *Header) Segments() []Segment {
 	return out
 }
 
-// Tokens returns every token the header carries, converted to the Token
-// value shape, keyed by its canonical slot id. A map key that is not the
-// canonical spelling of a slot 0..MaxTokens-1 -- "01", "-1", "999" --
-// addresses no token in any LUKS2 implementation (cryptsetup included) and is omitted rather than reported, the same tolerance
-// Keyslots and Segments already give a malformed entry: a listing is an
-// inspection operation.
+// Tokens returns every token keyed by its canonical slot id; a non-canonical key is omitted.
 func (h *Header) Tokens() map[int]Token {
 	out := make(map[int]Token, len(h.metadata.Tokens))
 	for idStr, lt := range h.metadata.Tokens {
@@ -166,11 +147,7 @@ func trimmedField(b []byte) string {
 	return string(bytes.TrimRight(b, "\x00"))
 }
 
-// Header reads the current header copy -- the valid one with the higher
-// sequence id, as cryptsetup chooses (readCurrentHeader) -- under the shared
-// lock. It does not require a valid header to have been written yet by
-// anything other than Format -- with no valid copy it fails with ErrNotLUKS2
-// or ErrInvalidHeader, same as the old ReadHeader.
+// Header reads the current header copy (valid, higher sequence id) under the shared lock; with none it fails with ErrNotLUKS2 or ErrInvalidHeader.
 func (v *Volume) Header(ctx context.Context) (*Header, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
@@ -212,11 +189,7 @@ func (v *Volume) SecondaryHeader(ctx context.Context) (*Header, error) {
 	return &Header{hdr: hdr, metadata: metadata}, nil
 }
 
-// RestorePrimaryHeader rewrites the primary header copy from the secondary
-// one, under the exclusive lock, refusing with ErrPrimaryHeaderCurrent when
-// the primary is intact and at least as new -- restoring it would roll the
-// volume back rather than repair it. ReplacePrimaryHeader skips that
-// refusal.
+// RestorePrimaryHeader rewrites the primary from the secondary under the exclusive lock, refusing with ErrPrimaryHeaderCurrent when the primary is intact and at least as new.
 func (v *Volume) RestorePrimaryHeader(ctx context.Context) error {
 	return v.restorePrimaryHeader(ctx, "Volume.RestorePrimaryHeader", false)
 }
@@ -255,17 +228,7 @@ func (v *Volume) restorePrimaryHeader(ctx context.Context, op string, force bool
 	return nil
 }
 
-// readCurrentHeader reads the header copy cryptsetup would use -- the valid
-// one with the higher sequence id, the primary at a tie (header.ReadCurrentHeader)
-// -- with the checksum-algorithm reclassification every header read applies.
-//
-// Every reader goes through it. A reader under the shared lock (Unlock,
-// Header) uses the chosen copy and leaves the medium alone; here this package
-// DEVIATES from cryptsetup, whose LUKS2_hdr_read, finding a stale copy, takes
-// the write lock and rewrites it as part of the read. A shared lock does not
-// permit a write, and promoting it would let a read block on, or race, a
-// writer. The stale copy is rewritten by the next operation that holds the
-// exclusive lock (keyslotDevice.readHeader), or by RestorePrimaryHeader.
+// readCurrentHeader reads the copy cryptsetup would use; unlike cryptsetup, a shared-lock read never rewrites a stale copy.
 func readCurrentHeader(r io.ReaderAt) (*header.CurrentHeader, error) {
 	cur, err := header.ReadCurrentHeader(r)
 	if err != nil {
@@ -274,33 +237,13 @@ func readCurrentHeader(r io.ReaderAt) (*header.CurrentHeader, error) {
 	return cur, nil
 }
 
-// repairHeaderCopies rewrites the stale header copy from the current one,
-// under the exclusive lock the caller holds, before the caller's own
-// read-modify-write: the repair cryptsetup's LUKS2_hdr_read makes.
-//
-// As in cryptsetup the sequence id is not advanced: the repaired copy becomes
-// the current one again, at the same generation. A stale secondary is
-// rewritten alone, after the primary is made durable. A stale primary is
-// rewritten through the ordinary two-copy writer, which puts the primary on
-// the medium first and then rewrites the secondary from the same metadata;
-// cryptsetup writes the primary alone, but at every instant of either order
-// one copy is complete and current, so a crash part way loses nothing.
-//
-// The repair reproduces a copy already on the medium and authors nothing, so,
-// like restorePrimaryHeaderCore, it is held to the header-wide rules the copy
-// passed when it was read and not to the per-entry ones a write applies: a
-// damaged entry must not stop the repair that precedes its removal.
-//
-// It is one write step (keyslotWriteStep), uncancellable as a rollback is:
-// readHeader has no context, and a repair left half-done by a cancellation
-// would be the state it exists to remove.
+// repairHeaderCopies rewrites the stale copy from the current one at the same sequence id under the caller's exclusive lock, as one uncancellable write step.
 func repairHeaderCopies(d *keyslotDevice, cur *header.CurrentHeader) error {
 	op := "repair the secondary LUKS2 header"
 	if cur.Offset != header.PrimaryHeaderOffset {
 		op = "repair the primary LUKS2 header"
 	}
-	// The reader accepts header areas the writer refuses (#50); a copy written
-	// at such an area would land inside the primary's own JSON area.
+	// The reader accepts header areas the writer refuses; such a copy would land inside the primary's JSON area.
 	if _, err := header.HeaderAreaSizeForWrite(cur.Header); err != nil {
 		return err
 	}

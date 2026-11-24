@@ -16,22 +16,12 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
-// MigrateParams configures MigrateToFIPS. Its zero value is the library's
-// policy: remove every non-approved keyslot, and migrate the new PBKDF2
-// keyslot and every rewritten digest at KDFParams{}'s own policy (SHA-256,
-// calibrated).
+// MigrateParams configures MigrateToFIPS; its zero value removes every non-approved keyslot and migrates at KDFParams{}'s policy.
 type MigrateParams struct {
-	// KeepNonApproved keeps the original Argon2 (or PBKDF2-SHA1) keyslots
-	// instead of removing them. Keeping them is a HALF-MIGRATION -- the
-	// volume still opens in a non-FIPS process through a KDF FIPS mode
-	// cannot execute -- and Migration.Complete says so.
+	// KeepNonApproved keeps the original non-approved keyslots, a half-migration Migration.Complete reports.
 	KeepNonApproved bool
 
-	// KDF is the new PBKDF2 keyslot's cost, and the cost any migrated
-	// digest is rewritten at. Only KDFPBKDF2 and its Hash are consulted;
-	// Hash's zero value is SHA-256. A KDF naming Argon2 -- KDFArgon2id or
-	// KDFArgon2i, or any of Time, MemoryKiB or Parallel non-zero -- is refused
-	// with ErrFIPSNotApproved before anything is written.
+	// KDF is the new PBKDF2 keyslot's and migrated digests' cost; an Argon2 KDF is refused with ErrFIPSNotApproved before anything is written.
 	KDF KDFParams
 }
 
@@ -60,10 +50,7 @@ type Migration struct {
 	Complete bool
 }
 
-// FIPSMigrationStage names where in a MigrateToFIPS run a failure happened,
-// coarser than FIPSMigrationError's own Stage string (fipsmigrate.go has
-// ten; this groups them into five phases -- see
-// FIPSMigrationError.MigrationStage for the mapping).
+// FIPSMigrationStage names the phase of MigrateToFIPS a failure happened in; see FIPSMigrationError.MigrationStage.
 type FIPSMigrationStage uint8
 
 const (
@@ -97,20 +84,7 @@ func atoiIDs(ids []string) []int {
 	return out
 }
 
-// MigrateToFIPS imports the volume into a FIPS 140-3 deployment: it adds a
-// PBKDF2 keyslot for pass holding the same volume key, migrates every digest
-// whose KDF is not approved, verifies the volume opens through approved
-// KDFs alone, and then removes the keyslots FIPS mode cannot execute (or
-// keeps them, per p.KeepNonApproved). No data is re-encrypted.
-//
-// It must be called from a process that is NOT in FIPS mode, because
-// unlocking the volume may need to execute its Argon2 keyslot; from a FIPS
-// process it returns an error matching ErrFIPSMigration, a
-// *FIPSMigrationError at Stage "precondition", without touching the device.
-//
-// The migration runs on the descriptor Open pinned, under this Volume's own
-// exclusive lock -- its lock wait, clock and lock directory -- as AddKeyslot
-// does: a path re-pointed since Open cannot send it to another device.
+// MigrateToFIPS adds a PBKDF2 keyslot for pass, migrates non-approved digests, verifies, then removes non-approved keyslots; call it from a non-FIPS process.
 func (v *Volume) MigrateToFIPS(ctx context.Context, pass enclave.ByteAccess, p MigrateParams) (*Migration, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -122,10 +96,7 @@ func (v *Volume) MigrateToFIPS(ctx context.Context, pass enclave.ByteAccess, p M
 	}
 
 	const op = "Volume.MigrateToFIPS"
-	// An Argon2 KDF is refused, not dropped: the migration writes PBKDF2 only,
-	// and a caller who named Argon2 must hear that rather than get a PBKDF2
-	// keyslot it did not ask for. Refused here, before anything is written,
-	// as the precondition failure migrateToFIPS would report it as.
+	// An Argon2 KDF is refused before anything is written.
 	if err := refuseArgon2MigrateKDF(p.KDF); err != nil {
 		return nil, errAt(op, v.path, &FIPSMigrationError{Device: v.path, Stage: "precondition", State: fipsStateUntouched, Err: err})
 	}

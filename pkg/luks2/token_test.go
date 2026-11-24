@@ -2,12 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// No build constraint. Everything here runs in memory or on a file under
-// t.TempDir() and needs no system binary, so it belongs in both tiers -- and
-// tokenIDVolume/stampTokens below are the fixture the integration tier's
-// cryptsetup measurement builds on (token_integration_test.go). The ForTest
-// helpers below are needed by both tiers too, which is why they live in this
-// untagged file rather than in token_v2_test.go (!integration).
+// No build constraint: these fixtures are shared with the integration tier.
 
 package luks2
 
@@ -92,20 +87,7 @@ func countTokensForTest(device string) (int, error) {
 	return len(tokens), nil
 }
 
-// TestSystemdTPM2TokenSurvivesUnmodeled is what replaced the typed TPM2
-// fields (#189).
-//
-// go-xkms owns TPM2, so this package models none of that token's members. The
-// property that matters is therefore not "we parse it" but "we do not damage
-// it": a systemd-tpm2 token read from a foreign header and written back must
-// come out byte-identical, because this package reads a whole header, changes
-// one keyslot, and writes the lot back.
-//
-// The member shapes below are the ones libsystemd-shared-255.so actually
-// contains -- tpm2-blob, tpm2-pcrs, tpm2-pcr-bank, tpm2-primary-alg,
-// tpm2-policy-hash, tpm2-pin -- read out of the library that holds
-// tpm2_make_luks2_json rather than taken from the spec or from memory. Their
-// meaning is go-xkms's business; their survival is this package's.
+// TestSystemdTPM2TokenSurvivesUnmodeled: a systemd-tpm2 token round-trips byte-identical; TPM2 members belong to go-xkms.
 func TestSystemdTPM2TokenSurvivesUnmodeled(t *testing.T) {
 	const real = `{"type":"systemd-tpm2","keyslots":["2"],` +
 		`"tpm2-blob":"dGVzdC1ibG9i","tpm2-pcrs":[0,1,2,3,7],` +
@@ -146,9 +128,7 @@ func TestSystemdTPM2TokenSurvivesUnmodeled(t *testing.T) {
 	}
 }
 
-// TestTPM2MembersAreNotModelled pins the boundary itself: if someone adds a
-// typed TPM2 field back, this fails and points at the ruling rather than at a
-// style preference.
+// TestTPM2MembersAreNotModelled fails if a typed TPM2 field is added.
 func TestTPM2MembersAreNotModelled(t *testing.T) {
 	for _, name := range header.JSONMemberNames(reflect.TypeOf(LegacyToken{})) {
 		if strings.HasPrefix(name, "tpm2-") {
@@ -165,18 +145,7 @@ func TestMaxTokens(t *testing.T) {
 	}
 }
 
-// tokenIDVolume writes a container whose token map carries the given keys
-// VERBATIM, so a non-canonical spelling reaches the disk. SetToken cannot
-// produce one -- it keys by strconv.Itoa -- which is exactly why the fixture
-// goes through the header writer instead.
-//
-// Each token's Type names the key it was written under, so a listing that
-// returns the wrong one of two colliding entries is caught by identity rather
-// than by count.
-//
-// The Format underneath runs once per process and each call gets a copy
-// (formattedImage): the tokens are the subject, the container is setup, and
-// the table-driven callers were paying a full Format per row (#92).
+// tokenIDVolume writes a container whose token keys are taken verbatim, each Type naming its key; the base container is formatted once per process.
 func tokenIDVolume(t *testing.T, name string, keys ...string) string {
 	t.Helper()
 
@@ -217,16 +186,7 @@ func stampTokens(t *testing.T, path string, tokens map[string]*LegacyToken) {
 	}
 }
 
-// TestListTokensDoesNotCollapseTwoSpellingsOfOneTokenID is the fix for #35.
-//
-// strconv.Atoi accepts "01" and returns 1, so a header carrying both "1" and
-// "01" produced ONE entry in the returned map[int]Token -- whichever spelling
-// Go's randomized map iteration reached last silently overwrote the other. The
-// damage is not that "01" is invisible; it is that the WORKING token at "1"
-// could disappear from inspection, on a different read each time.
-//
-// The assertion is on WHICH token came back, not on the count: a fix that
-// returned one entry by keeping the wrong one would satisfy a count check.
+// TestListTokensDoesNotCollapseTwoSpellingsOfOneTokenID: "1" and "01" do not collapse, and the right token is returned.
 func TestListTokensDoesNotCollapseTwoSpellingsOfOneTokenID(t *testing.T) {
 	defer parallel(t)()
 
@@ -271,8 +231,7 @@ func TestListTokensSkipsANonCanonicalTokenIDOnItsOwn(t *testing.T) {
 		t.Fatalf("Tokens() = %v, want no tokens: %q is not a token id any implementation can reach", tokens, "01")
 	}
 
-	// The header is still readable and still opens. Refusing it would be the
-	// bricking direction the tokens-are-tolerated ruling exists to avoid.
+	// The header still reads and opens.
 	if _, _, err := readHeaderForTest(path); err != nil {
 		t.Fatalf("the header no longer reads: %v", err)
 	}
@@ -291,8 +250,7 @@ func TestCanonicalTokenIDRejectsEverySpellingThatIsNotItsOwn(t *testing.T) {
 		{"1", 1, true},
 		{"31", 31, true},
 
-		// Canonical spelling, OUT OF RANGE. These are the ones the spelling
-		// check alone admits, and every other token entry point rejects them.
+		// Canonical but out of range, rejected by every other token entry point.
 		{"-1", 0, false},
 		{"32", 0, false},
 		{"999", 0, false},
@@ -387,19 +345,7 @@ func TestListTokensIsUnaffectedByKeysThatAreNotNumbersAtAll(t *testing.T) {
 	}
 }
 
-// TestTokensNormalizesTheNullSlotAsAbsent is the standing guard for #69.
-//
-// #69 was measured on dev/main at 1cef774, BEFORE null entries were normalized
-// at the parse. Then, a token written as JSON null survived the round trip as
-// a present key holding a nil pointer, and the old GetToken's `token, exists :=`
-// check reported it as FOUND -- so it returned (nil, nil) and a caller
-// following the documented contract dereferenced nil. The parse-time
-// normalization closed it: the entry is removed before any token lookup ever
-// sees the map, so "present and null" no longer exists as a state.
-//
-// This test is what stops that from being re-opened silently: it fails if the
-// normalization is removed, if a second read path skips it, or if Tokens is
-// ever handed metadata from somewhere that does not normalize.
+// TestTokensNormalizesTheNullSlotAsAbsent: a JSON null token is removed at parse, so no lookup sees it.
 func TestTokensNormalizesTheNullSlotAsAbsent(t *testing.T) {
 	defer parallel(t)()
 
@@ -464,18 +410,7 @@ func TestTokensNormalizesTheNullSlotAsAbsent(t *testing.T) {
 	})
 }
 
-// TestListTokensSkipsAnIDNoOtherEntryPointAccepts is the second half of #35,
-// and it is a different defect from the spelling collision.
-//
-// "-1", "32" and "999" are canonical spellings of numbers, so the round-trip
-// check admits them on its own. Every other token entry point rejects them --
-// AddToken, SetToken and RemoveToken all bound the id to 0..MaxTokens-1 -- so
-// listing them produced exactly the state #35 exists to remove: a listing
-// naming a token no caller can retrieve.
-//
-// The assertion is the AGREEMENT, not the count. It retrieves every id the
-// listing reports and requires the retrieval to succeed, so a listing and a
-// getter that disagree fail here however they came to disagree.
+// TestListTokensSkipsAnIDNoOtherEntryPointAccepts: every listed id can be retrieved.
 func TestListTokensSkipsAnIDNoOtherEntryPointAccepts(t *testing.T) {
 	defer parallel(t)()
 

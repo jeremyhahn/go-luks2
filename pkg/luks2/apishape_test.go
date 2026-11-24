@@ -178,12 +178,7 @@ func TestNoExportedFunctionTakesABool(t *testing.T) {
 	}
 }
 
-// TestNoPkgPackageHardensTheProcess pins the core-dump rule of
-// docs/volumes/engineering.md: process hardening is the binary's decision,
-// so no non-test file of any package under pkg/ calls HardenProcess. The
-// core closure's wider no-process-state check is
-// TestImportingTheCoreChangesNoProcessState; this one covers the packages
-// outside that closure too.
+// TestNoPkgPackageHardensTheProcess: no non-test file under pkg/ calls HardenProcess.
 func TestNoPkgPackageHardensTheProcess(t *testing.T) {
 	var found []string
 	err := filepath.WalkDir("../../pkg", func(path string, d fs.DirEntry, err error) error {

@@ -11,13 +11,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
-// exitCode maps an error to a cryptsetup(8)-compatible exit status. The table is tried in order and the first match wins; an
-// unmatched non-nil error exits 1, the same status usage errors use.
-//
-// Status 5 ("exists or busy") covers pkg/dmcrypt's ErrActive and ErrBusy as
-// well as pkg/luks2's. dmcrypt.ErrStillLive and dmcrypt.ErrNotActive have no
-// cryptsetup status of their own, so they fall through to 1. Add a sentinel here in the
-// same change that adds or renames it.
+// exitCode maps an error to a cryptsetup(8)-compatible exit status; first match wins and anything unmatched exits 1.
 func exitCode(err error) int {
 	if err == nil {
 		return 0

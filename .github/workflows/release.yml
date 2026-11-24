@@ -1,27 +1,6 @@
 name: Release
 
-# A `v*` tag publishes a release only after four stages, every one on the
-# TAGGED commit (#247):
-#
-#   1. Verify   the tag is a plain version string and agrees with VERSION.
-#   2. CI gate  the tagged commit is on main, and CI's gate job passed for that
-#               exact commit (test/tools/release-gate). `make release-alpha`
-#               pushes the release commit and its tag together, so CI is
-#               normally still running when this starts: the gate WAITS for
-#               its result, and anything but a pass stops the release.
-#   3. Test     ./pkg/luks2 AND ./cmd/luks2 -- the CLI is what ships.
-#      Security `make security` with TOOLS_REQUIRED=1: gosec, govulncheck,
-#               go mod verify and trivy fs, none of which may skip.
-#   4. Publish  checks every stage by name, then builds with -trimpath, stamps
-#               and checks the version, writes checksums, and publishes.
-#
-# Before this, a tag published on its own: no dependency on CI, only
-# ./pkg/luks2's tests, no security scan, and no -trimpath, so the binaries
-# carried the build host's paths.
-#
-# Every action is pinned to a full commit SHA, with its tag in a comment. A tag
-# can be moved to new code after it is reviewed; a commit cannot. The test in
-# test/ci/workflows refuses an action reference that is not a full SHA.
+# A v* tag publishes only after verify, CI gate on the tagged commit, test and security, then publish; actions are pinned to full SHAs.
 
 on:
   push:
@@ -32,10 +11,7 @@ permissions:
   contents: read
 
 env:
-  # Kept in lockstep with the devcontainer image's Go, the toolchain CI tests
-  # (TestReleaseGoVersionIsCIs; issue #14). This was pinned at 1.25.5 while
-  # the rest of the repo had moved on — a release built on a stale
-  # toolchain is a supply-chain problem, not a cosmetic one.
+  # Kept in lockstep with the devcontainer Go (TestReleaseGoVersionIsCIs).
   GO_VERSION: "1.27.4"
   # The same scanner pins as ci.yml, asserted the same way.
   GOSEC_VERSION: "v2.29.0"
@@ -52,10 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      # Git accepts tag names such as v`id` and v$(id), and `v*` matches them.
-      # From here on the tag is DATA: every later step receives it through
-      # `env:`, never through an expression spliced into a script. It is also
-      # refused here unless it is a plain version string.
+      # The tag is data: later steps get it through env, and it must be a plain version string.
       - name: Identify the tag
         id: tag
         run: |
@@ -74,13 +47,7 @@ jobs:
             echo "sha=$sha"
           } >> "$GITHUB_OUTPUT"
 
-      # PERMANENT GUARD (issue #13). Tag v0.1.7-alpha shipped a tree whose
-      # VERSION file still read 0.1.6-alpha: the release commit bumped the
-      # CHANGELOG but not VERSION, and tags are additive and never rewritten,
-      # so the only fix available is to stop the NEXT one. This is the second
-      # confirmed instance of the defect across sibling repositories, which is
-      # why the assertion is the deliverable rather than the one-off
-      # correction.
+      # The tag must match the VERSION file.
       - name: Verify VERSION matches the tag
         env:
           TAG: ${{ steps.tag.outputs.tag }}
@@ -111,11 +78,7 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      # The gate job of ci.yml on a PUSH to main: the release commit lands on
-      # main directly. On Gitea that is the commit status context below; on
-      # github.com it is ci.yml's push run for this commit and its CI Gate job,
-      # through the Actions API. The token only reads; on Gitea it is the
-      # project agent's.
+      # ci.yml's gate job for the push of this commit to main; the token only reads.
       - name: Tagged commit is on main and CI's gate passed for it
         env:
           SHA: ${{ needs.verify.outputs.sha }}
@@ -207,9 +170,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      # Gitea combines a skipped job as success and does not implement
-      # join(needs.*.result), so every stage is checked by name and anything
-      # but success refuses to publish.
+      # Every stage is checked by name; anything but success refuses to publish.
       - name: Every stage passed
         env:
           VERIFY: ${{ needs.verify.result }}
@@ -265,10 +226,7 @@ jobs:
               -o "luks-${TAG}-linux-${arch}" ./cmd/luks2
           done
 
-      # The linker ignores -X for a symbol that does not exist, so a misspelt
-      # variable ships binaries that call themselves "dev". The amd64 binary
-      # runs on this runner: it must report exactly this tag before anything
-      # is published.
+      # -X ignores a missing symbol, so the amd64 binary must report exactly this tag.
       - name: Verify the binary reports this version
         env:
           TAG: ${{ needs.verify.outputs.tag }}
@@ -288,10 +246,7 @@ jobs:
           sha256sum "luks-${TAG}-linux-"* > checksums.txt
           cat checksums.txt
 
-      # This tag's own CHANGELOG section, from its heading up to the next
-      # top-level heading. Used as the release body on both paths below
-      # instead of generate_release_notes, which is what actually breaks the
-      # Gitea path — see the comment on the Gitea step.
+      # This tag's CHANGELOG section, used as the release body.
       - name: Extract changelog section
         id: notes
         env:
@@ -323,28 +278,7 @@ jobs:
             luks-${{ needs.verify.outputs.tag }}-linux-arm64
             checksums.txt
 
-      # softprops/action-gh-release is a GitHub-API client: it never publishes
-      # against this forge (issue #134). `GET /releases` returned `[]` across
-      # 11 tags despite every tag being signed and pushed — the create step
-      # aborted every time with "GitHub release failed with status: 405", and
-      # nothing read that result, so the failure was invisible.
-      #
-      # Measured cause: this step ran with generate_release_notes: true, which
-      # makes the action call GitHub's generate-release-notes endpoint —
-      # a GitHub-only API with no Gitea equivalent, and 405 is exactly what an
-      # unimplemented method returns. Sibling repos that set it false publish
-      # fine through this same action against this same forge. But an
-      # action-level flag flip is not verifiable here without cutting a real
-      # tag through a second workflow revision, and the action still performs
-      # a release-lookup-then-PATCH sequence this API may not accept for other
-      # reasons — so rather than gamble a second time on an undocumented
-      # GitHub client against a non-GitHub server, this step instead calls
-      # Gitea's own release API directly, the way every other forge-facing
-      # step in this repository already did (the removed merge workflow,
-      # opencode-review.yml): plain curl, AGENT_TOKEN, and
-      # $GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY. That mechanism is
-      # already proven in this repo's CI, so it does not introduce a second
-      # one for release day alone.
+      # Publishes through the forge's release API with curl and AGENT_TOKEN.
       - name: Create Gitea Release
         if: github.server_url != 'https://github.com'
         env:

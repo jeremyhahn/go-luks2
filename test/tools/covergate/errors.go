@@ -6,8 +6,7 @@ package main
 
 import "errors"
 
-// Sentinels for the ways the gate's INPUTS can be unusable. Each one fails the
-// gate: an input the gate cannot read is not evidence that coverage is fine.
+// Sentinels for unusable gate inputs; each fails the gate.
 var (
 	// ErrProfileMalformed indicates a coverage profile line that is not in the
 	// format `go test -coverprofile` writes.

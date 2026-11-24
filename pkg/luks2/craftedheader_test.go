@@ -11,14 +11,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// writeHeaderUnvalidated writes hdr and metadata exactly as writeHeaderInternal
-// does -- both copies, checksummed, primary first -- but WITHOUT the
-// structural validation every write by this package passes (#248).
-//
-// It exists for fixtures that model a header this package did not write: a
-// damaged one, a hostile one, or one cryptsetup itself would refuse. Those are
-// exactly the headers the reader has to cope with, and since #248 the package
-// can no longer produce them through its own writer.
+// writeHeaderUnvalidated writes hdr and metadata like writeHeaderInternal but without structural validation, for fixtures of foreign or damaged headers.
 func writeHeaderUnvalidated(device string, hdr *header.BinaryHeader, metadata *header.Metadata) error {
 	f, err := os.OpenFile(filepath.Clean(device), os.O_RDWR, 0)
 	if err != nil {
@@ -33,10 +26,7 @@ func writeHeaderUnvalidated(device string, hdr *header.BinaryHeader, metadata *h
 	return header.WriteEncodedHeader(f, hdr, jsonData, area, (*os.File).Sync)
 }
 
-// writeHeaderIgnoringRequirements is writeHeaderUnvalidated without the
-// requirements guard either, for a fixture that models a container declaring
-// a requirement this package does not implement -- an online reencryption,
-// above all -- which the normal write path refuses to produce (#248).
+// writeHeaderIgnoringRequirements is writeHeaderUnvalidated without the requirements guard.
 func writeHeaderIgnoringRequirements(device string, hdr *header.BinaryHeader, metadata *header.Metadata) error {
 	f, err := os.OpenFile(filepath.Clean(device), os.O_RDWR, 0)
 	if err != nil {

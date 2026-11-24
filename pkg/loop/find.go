@@ -19,14 +19,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// Find finds the loop device backing file.
-//
-// A device matches when the loop driver's record of its backing file -- the
-// device and inode LOOP_GET_STATUS64 reports -- is the file's own, not when
-// the path sysfs prints matches the argument string. A path string is not an
-// identity; a device and inode are, and the two differ for the same file
-// whenever the path runs through a symlink, a bind mount or another mount
-// namespace (go-luks2 #250, C8).
+// Find finds the loop device backing file, matched by device and inode from LOOP_GET_STATUS64, not by path.
 func Find(ctx context.Context, file string) (*Device, error) {
 	d, err := find(ctx, file, defaultSys())
 	return d, errs.At("loop", "Find", file, err)
@@ -97,13 +90,7 @@ func findLoopDeviceIn(root, file string, s sys) (path, backing string, ident bac
 		}
 	}
 
-	// "NOT ATTACHED" AND "COULD NOT TELL" ARE DIFFERENT ANSWERS, and only
-	// the first may be acted on. The caller this misleads is the one asking
-	// whether a file is ALREADY attached before attaching it: told "no"
-	// when the truth was "the one device backing it could not be
-	// inspected", it creates a SECOND loop device for the same backing
-	// file, giving the kernel two independent writers of one LUKS
-	// container.
+	// "Not attached" and "could not tell" are different answers; only the first may be acted on.
 	if unreadable > 0 {
 		return "", "", backingIdentity{}, &errs.Error{
 			Kind: errs.ErrIO,
@@ -138,11 +125,7 @@ func fdBackingIdentityIoctl(f *os.File) (dev, ino uint64, err error) {
 	return info.Device, info.Inode, nil
 }
 
-// Lookup returns a [Device] for an already-named loop device node, such as
-// "/dev/loop3". Unlike [Attach] and [Find], it does not require the device
-// to be currently attached to a file: [Device.BackingFile] reports "" for
-// one that is not. The identity of the file attached now, or the absence of
-// one, is what [Device.Detach] later holds the device to.
+// Lookup returns a [Device] for a named loop node, attached or not; [Device.Detach] later holds it to the file attached now.
 func Lookup(ctx context.Context, path string) (*Device, error) {
 	d, err := lookup(ctx, path, defaultSys())
 	return d, errs.At("loop", "Lookup", path, err)

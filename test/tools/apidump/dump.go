@@ -15,16 +15,7 @@ import (
 	"strings"
 )
 
-// Entry is one line of an API dump: what kind of declaration it is, its
-// exported name, and the file that declares it.
-//
-// Kind is one of func, method, type, iface, var, const, fields (the exported
-// fields of a struct type, as Name{A,B}), ifacemethods (the methods of an
-// interface type, as Name{A,B}) and alias (a type declared with `type X =
-// Y`, alongside its own "type" entry). Fields, interface methods and the
-// alias marker are recorded so a dump shows a struct gaining or losing a
-// field or a type becoming an alias, but they are not identifiers of their
-// own: a disposition covers them through their type.
+// Entry is one API-dump line: kind (func, method, type, iface, var, const, fields, ifacemethods, alias), exported name and declaring file.
 type Entry struct {
 	Kind string
 	Name string
@@ -173,13 +164,7 @@ func typeEntries(s *ast.TypeSpec, base string) []Entry {
 	default:
 		out := []Entry{{Kind: "type", Name: s.Name.Name, File: base}}
 		if s.Assign.IsValid() {
-			// A type alias (type X = Y) has no method set of its own: every
-			// method Y declares is X's too, through Go's alias semantics,
-			// even though no FuncDecl with receiver X exists in this
-			// package's source for this AST-only dump to find. The "alias"
-			// marker lets CheckHonored trust the compiler here instead of
-			// requiring a syntactic method declaration that an alias is
-			// specifically written to avoid needing.
+			// An alias has no method set of its own; the alias marker lets CheckHonored trust Y's methods.
 			out = append(out, Entry{Kind: "alias", Name: s.Name.Name, File: base})
 		}
 		return out

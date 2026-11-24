@@ -84,12 +84,7 @@ func requirementErrorProblems(op string, err error, requirement string, wantKind
 	return problems
 }
 
-// TestUnsupportedRequirementIsReadableFromLuks2Error pins the caller's
-// contract for a container declaring a mandatory requirement this library
-// does not implement (here inline-hw-tags, LUKS2 On-Disk Format 1.1.4): Unlock
-// and the header writes (AddKeyslot, ChangeKeyslot, RemoveKeyslot) all refuse
-// with a *luks2.Error carrying the requirement in Kind and Detail, from
-// outside the package.
+// TestUnsupportedRequirementIsReadableFromLuks2Error: Unlock and the header writes refuse an unsupported mandatory requirement with a *luks2.Error naming it.
 func TestUnsupportedRequirementIsReadableFromLuks2Error(t *testing.T) {
 	const requirement = "inline-hw-tags"
 	path := filepath.Join(t.TempDir(), "requirement.img")
@@ -237,13 +232,7 @@ func TestUnsupportedRequirementFoundWhileRepairingAStaleCopy(t *testing.T) {
 // stamps on its volume; the child reads the error for it.
 const migrationRequirement = "inline-hw-tags"
 
-// TestRequirementThatStopsMigrationKeepsTheMigrationKind: in a non-FIPS
-// process, MigrateToFIPS on an Argon2 volume that declares an unsupported
-// mandatory requirement fails as a migration. Kind stays ErrFIPSMigration,
-// Detail names the requirement, and both errors.Is for
-// ErrUnsupportedRequirement and errors.As to *FIPSMigrationError hold. The
-// Argon2 volume is made and migrated in a child with FIPS off, so the case
-// runs the same under the FIPS gate.
+// TestRequirementThatStopsMigrationKeepsTheMigrationKind: MigrateToFIPS fails as ErrFIPSMigration, naming the requirement and matching ErrUnsupportedRequirement.
 func TestRequirementThatStopsMigrationKeepsTheMigrationKind(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "migration-requirement.img")
 	if err := createSeamImage(path); err != nil {

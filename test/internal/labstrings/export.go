@@ -26,16 +26,7 @@ const notExportIgnored = "listed as stripped at publish, but " + GitAttributes +
 	"export-ignore it, so an archive of the tree would ship it: add its DefaultStripAtPublish " +
 	"pattern to " + GitAttributes + " (and to .dockerignore)"
 
-// exportIgnored reports which of paths the staged GitAttributes files mark
-// export-ignore. attributes maps each staged GitAttributes path to its staged
-// content, so an unstaged edit changes nothing, like the content the gate
-// scans.
-//
-// Only those files decide. `git check-attr --cached` in the scanned repository
-// would also read its .git/info/attributes and every core.attributesFile, none
-// of which travel with the tree: a rule in one of them would make a file look
-// excluded that a forge's archive of the commit ships. So the files are
-// written into a hermeticRepo of their own.
+// exportIgnored reports which of paths the staged GitAttributes files (attributes: path to staged content) mark export-ignore, evaluated in a hermeticRepo.
 func exportIgnored(root string, attributes map[string][]byte, paths []string) (map[string]bool, error) {
 	if len(paths) == 0 {
 		return map[string]bool{}, nil
@@ -66,20 +57,7 @@ func exportIgnored(root string, attributes map[string][]byte, paths []string) (m
 	return parseExportIgnored(root, out, len(paths))
 }
 
-// ArchiveHEAD returns `git archive --format=tar` of the commit HEAD names in
-// the repository at root, as a clean publishing checkout of that commit
-// produces it. Only the commit's own GitAttributes files decide what is
-// export-ignored or converted.
-//
-// Running `git archive` in root would also honor its .git/info/attributes, its
-// configuration (a core.attributesFile, tar.umask, tar.<format>.command,
-// core.autocrlf, a filter driver) and the caller's system, global and XDG
-// configuration and GIT_ variables, none of which travel with the commit: an
-// export-ignore rule in any of them would hide a published file from a check
-// of the archive. So root is asked only for the commit and its object store,
-// and the archive is written in a hermeticRepo that borrows those objects as an
-// alternate. It has no work tree content and no index, and `git archive` reads
-// attributes from the archived tree, not from either.
+// ArchiveHEAD returns `git archive --format=tar` of HEAD at root, built in a hermeticRepo so only the commit's own GitAttributes decide what is exported.
 func ArchiveHEAD(root string) ([]byte, error) {
 	fail := func(stderr string, err error) error { return &ArchiveError{Root: root, Stderr: stderr, Err: err} }
 	repo, env, cleanup, err := hermeticRepo(fail)
@@ -113,12 +91,7 @@ func ArchiveHEAD(root string) ([]byte, error) {
 	return runGit(repo, env, nil, fail, "archive", "--format=tar", strings.TrimSpace(string(commit)))
 }
 
-// hermeticRepo creates an empty repository in a new scratch directory and
-// returns it with the environment that confines git to it, and a function that
-// removes the scratch directory. The repository is created without templates
-// (no info/attributes), and git runs there with no system, global or XDG
-// configuration or attributes file and no GIT_ variable inherited from the
-// caller. fail types the error of any step.
+// hermeticRepo creates an empty template-free repository in a new scratch directory and returns it, the confining environment, and a cleanup; fail types each step's error.
 func hermeticRepo(fail func(stderr string, err error) error) (repo string, env []string, cleanup func(), err error) {
 	scratch, err := os.MkdirTemp("", "labstrings-git-")
 	if err != nil {
@@ -141,12 +114,7 @@ func hermeticRepo(fail func(stderr string, err error) error) (repo string, env [
 	return repo, env, cleanup, nil
 }
 
-// HermeticGitEnv is the caller's environment without anything that points git
-// at configuration or attributes outside the repository it runs in: every GIT_
-// variable (GIT_DIR, GIT_CONFIG_PARAMETERS, GIT_ATTR_SOURCE, ...), HOME and
-// XDG_CONFIG_HOME, with the latter two pointed at home, which should be an
-// empty directory. The system configuration and attributes file are off, and
-// the global configuration is empty.
+// HermeticGitEnv is the caller's environment minus every GIT_ variable, with HOME and XDG_CONFIG_HOME pointed at home and system and global configuration off.
 func HermeticGitEnv(home string) []string {
 	var env []string
 	for _, kv := range os.Environ() {

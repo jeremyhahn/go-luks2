@@ -2,22 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Command covergate is the repository's coverage gate (#141). It refuses
-// coverage below the per-package floors in coverage-floors.txt.
-//
-//	covergate -floors coverage-floors.txt -tier unit -profile coverage.out $(go list ./...)
-//	covergate -floors coverage-floors.txt -tier combined \
-//	    -profile coverage-unit.out -profile coverage-integration.out $(go list ./...)
-//
-// It exists because the gate it replaces could not fail in the ways that
-// mattered. The total was printed and never compared; the merge swallowed a
-// missing leg, so losing a package made the total go UP; and the one
-// comparison anywhere truncated the percentage to an integer. Here every
-// package is compared on its own, in integer arithmetic, against floors that
-// must name every package `go list` reports.
-//
-// Exit codes: 0 every check passed, 1 a check failed, 2 the inputs were
-// unusable. Both non-zero codes fail the build.
+// Command covergate fails when any package's coverage is below its floor in coverage-floors.txt; exit 1 on a failed check, 2 on unusable inputs.
 package main
 
 import (

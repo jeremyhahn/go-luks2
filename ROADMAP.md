@@ -44,7 +44,7 @@ Shipped features, with the release or closing issues that shipped them.
 
 ## Now
 
-- **maintenance** — standing maintenance row (owner ruling 1234): dependency updates and CI configuration land as pull requests from `row/503-maintenance` — [#503](../../issues/503) — standing; no milestone, never gates a release
+- **maintenance** — standing maintenance row: dependency updates and CI configuration land as pull requests from `row/503-maintenance` — [#503](../../issues/503) — standing; no milestone, never gates a release
 - **release** — public release readiness — [#211](../../issues/211) — blocked: owner publish approval and choice of public version; go-enclave final release and the owner-run joint staging run
 - **release** — signed releases; banners and stamps on every doc; the roadmap names the feature folder behind every item; the monolithic design record migrated into the feature folders and retired — [#290](../../issues/290), [#294](../../issues/294), [#330](../../issues/330), [#331](../../issues/331) — done
 

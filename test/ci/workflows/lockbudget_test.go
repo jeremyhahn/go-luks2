@@ -11,11 +11,7 @@ import (
 	"testing"
 )
 
-// The review lock waits in the job's budget (code-review.yml v5.12.5, owner
-// ruling 1012): lock_wait NEED prints what is left of JOB_BUDGET since
-// $WORK/job-start, less NEED, and dies when nothing is left. These tests
-// extract lock_wait, JOB_BUDGET and the two flock callers from the workflow
-// text and run them under bash with a stub clock, die and flock.
+// lock_wait NEED prints what is left of JOB_BUDGET since $WORK/job-start, less NEED, and dies at zero; tested under bash with stubs.
 
 const lockBudgetStart = 1_000_000
 
@@ -143,7 +139,7 @@ func TestLockWaitSpendsTheJobBudget(t *testing.T) {
 		t.Fatalf("JOB_BUDGET is %d s, want the review job's 75 minutes", budget)
 	}
 
-	// 1. The wait is no longer a fixed 600 s: with budget left it is more.
+	// 1. With budget left, the wait exceeds 600 s.
 	if got := lockWaitSeconds(t, lib, 60, 100); got <= 600 {
 		t.Fatalf("lock_wait 100 after 60 s = %d s, want more than the old fixed 600 s", got)
 	}

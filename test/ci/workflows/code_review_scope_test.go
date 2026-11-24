@@ -34,8 +34,7 @@ func reviewSkipProblem(t *testing.T, workflow string) string {
 	return ""
 }
 
-// TestReviewRunsWhereTheGateNeedsIt: a workflow change always takes a round
-// here (Codex P1 on go-quicraft #1170, the same template change).
+// TestReviewRunsWhereTheGateNeedsIt: a workflow change always gets a review round.
 func TestReviewRunsWhereTheGateNeedsIt(t *testing.T) {
 	if p := reviewSkipProblem(t, codeReview(t)); p != "" {
 		t.Error(p)

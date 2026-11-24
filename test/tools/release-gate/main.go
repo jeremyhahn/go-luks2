@@ -2,43 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Command release-gate refuses a release unless the tagged commit is on main
-// and CI's gate passed for that exact commit. .github/workflows/release.yml
-// runs it before anything is built or published:
-//
-//	go run ./test/tools/release-gate -sha <commit> -main-ref <ref> \
-//	    -status-context 'CI / CI Gate (push)' -workflow ci.yml -job-name 'CI Gate'
-//
-// # Why
-//
-// A `v*` tag used to publish on its own: the release workflow ran on the tag
-// push with no dependency on CI, so a tag on a commit whose CI was red, still
-// running, canceled or never run published binaries all the same. The release
-// commit and its tag are pushed together (`make release-alpha`, which derives the
-// next alpha or takes `VERSION=vX.Y.Z-alpha`, `make release-candidate VERSION=…` or
-// `make release VERSION=…`), so CI for the commit is normally still running when
-// this starts. This command therefore
-// WAITS for the gate's result rather than reading it once, and refuses on
-// anything but a pass.
-//
-// # What it reads
-//
-// On a self-hosted (Gitea) forge, the commit's combined status, for the
-// context CI's gate job reports on a push to main -- the same signal the
-// merge automation trusts. On github.com, the Actions API: the latest run of
-// the CI workflow FILE for this commit with event=push on main, and that
-// run's gate job. Not a check run looked up by name: a check run of the same
-// name from a pull_request run, an older run or another app would otherwise
-// count. On either forge it then reads signatures.yml's result for the same
-// commit the same way (the "Signatures / Signatures (push)" status on Gitea,
-// the Signatures job of the latest push-to-main run on github.com): commit
-// signatures are checked there, outside CI Gate, so a green CI Gate alone
-// does not let a release through. Either way only "passed" lets the release through. A gate that failed, errored, was canceled or reported
-// anything this command does not recognize stops it at once. A gate that
-// reports nothing before the deadline also stops it.
-//
-// The token comes from FORGE_TOKEN in the environment, never from a flag, so
-// it does not appear in a process listing.
+// Command release-gate refuses a release unless the tagged commit is on main and both CI Gate and Signatures passed for it on push, waiting for their results; the token comes from FORGE_TOKEN.
 package main
 
 import (
@@ -180,13 +144,7 @@ func gate(out io.Writer, h host, req request) error {
 	return nil
 }
 
-// signaturesWorkflow and signaturesJob name the commit-signature check.
-// ci-template v1.35.2 moved it out of CI Gate into its own workflow, so a
-// green CI Gate no longer says the commits are signed, on any forge: a
-// release also needs that workflow's push-to-main result on the same sha to
-// pass -- on GitHub its run's Signatures job, on Gitea its push status
-// signaturesContext (workflow name / job name (event), as CI's gate). The
-// requirement is fixed here, not a flag, so release.yml need not change.
+// signaturesWorkflow and signaturesJob name the commit-signature check a release also requires: the Signatures job on GitHub, signaturesContext on Gitea.
 const (
 	signaturesWorkflow = "signatures.yml"
 	signaturesJob      = "Signatures"
@@ -196,11 +154,7 @@ const (
 // gateRequests lists the gates a release waits on, in order: the one the
 // flags name, then the Signatures workflow's result on the same forge.
 func gateRequests(req request) []request {
-	// Always appended, never deduplicated against the flags: each forge
-	// reads only some of them (GitHub the workflow and job, Gitea the status
-	// context), so a flag naming Signatures could match a field the active
-	// forge ignores and drop the requirement. When the flags do name the
-	// Signatures gate itself, it is read twice, which costs one request.
+	// Always appended, since each forge reads only some of the flags.
 	sig := req
 	sig.workflow, sig.jobName = signaturesWorkflow, signaturesJob
 	sig.statusContext = signaturesContext
@@ -324,9 +278,7 @@ func fetch(h host, u, auth string, v any) error {
 	return nil
 }
 
-// giteaStatus is the part of Gitea's combined status this reads. Gitea reports
-// the LATEST status per context, so a re-run that passed replaces the failure
-// it re-ran.
+// giteaStatus is the part of Gitea's combined status this reads; the latest status per context wins.
 type giteaStatus struct {
 	TotalCount int `json:"total_count"`
 	Statuses   []struct {
@@ -412,8 +364,7 @@ func readWorkflowJob(h host, api, repo, auth string, req request) (gateState, st
 		return gatePending, "", nil
 	}
 
-	// filter=latest: the jobs of the run's latest ATTEMPT, so a re-run that
-	// passed replaces the attempt it re-ran.
+	// filter=latest: the jobs of the run's latest attempt.
 	var jobs githubJobs
 	u = fmt.Sprintf("%s/repos/%s/actions/runs/%d/jobs?filter=latest&per_page=100", api, repo, latest)
 	if err := fetch(h, u, auth, &jobs); err != nil {

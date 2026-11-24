@@ -36,9 +36,7 @@ type Params struct {
 	// Verify overrides whatever Standard would otherwise decide.
 	Verify VerifyMode
 
-	// Discard issues TRIM/DISCARD for the whole device once every pass (and
-	// any verification) has completed. Best effort: a device that does not
-	// support it has already been overwritten.
+	// Discard issues a best-effort TRIM/DISCARD of the whole device after every pass and verification.
 	Discard bool
 
 	// Progress, if not nil, is called after every chunk a pass or a

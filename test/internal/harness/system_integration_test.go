@@ -16,16 +16,7 @@ import (
 	"github.com/anatol/devmapper.go"
 )
 
-// The reaper's host primitives against the REAL kernel, in the devcontainer.
-//
-// Every other test of SystemRemover runs without privilege and so can only
-// reach its refusals. These are the calls that actually remove host state --
-// and the reaper is the one component whose failure is silent: a mapping it
-// cannot identify is "already gone", a removal it cannot confirm is a clean
-// host. So the identity reads and the removals are exercised on a mapping and
-// a loop device this test creates, by the same suite discipline the rest of
-// the integration tier follows: each is RECORDED before it exists, so a run
-// that dies mid-test leaves a ledger the next run's reaper acts on.
+// SystemRemover's host primitives against the real kernel, each target recorded before it exists.
 
 var integrationSuite *Suite
 
@@ -79,16 +70,7 @@ func detachOnCleanup(t *testing.T, backing string) {
 	})
 }
 
-// TestSystemRemoverIdentifiesAndRemovesALiveMapping walks one dm target
-// through every answer MappingIdentity and RemoveMapping give: present with
-// its UUID, removed, then absent -- and a second removal of the absent name is
-// an error, not a quiet success.
-//
-// The target is linear, over a loop device, because linear is part of
-// device-mapper itself and needs no target module the runner's kernel might
-// lack. devmapper takes table lengths in BYTES and loads sectors, so the
-// length is the whole backing file -- a length under one sector is a zero-length
-// table, which the kernel refuses with EINVAL.
+// TestSystemRemoverIdentifiesAndRemovesALiveMapping walks a linear dm target through present, removed and absent; a second removal is an error.
 func TestSystemRemoverIdentifiesAndRemovesALiveMapping(t *testing.T) {
 	backing, loop := attachRecordedLoop(t, "harness-dm.img")
 	detachOnCleanup(t, backing)

@@ -15,26 +15,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// End-to-end tests for the documented recovery flow.
-//
-// The defect these exist for was not in what ReadSecondaryHeader RETURNS -- the
-// returned values were correct and the tests that inspected them passed -- but
-// in what happens when a caller does the thing the documentation tells them to
-// do with those values. Writing the returned header back put SKUL and
-// hdr_offset 0x4000 at offset ZERO, leaving a container with two secondary
-// copies, no primary, and no way to open it:
-//
-//	bytes now at offset 0:      "SKUL\xba\xbe"
-//	bytes now at offset 0x4000: "SKUL\xba\xbe"
-//	primary still unreadable after recovery: invalid LUKS magic at offset 0
-//	volume does not open: failed to read header: invalid LUKS magic at offset 0
-//
-// Recovery made the container worse than the damage it was repairing.
-//
-// So these tests DRIVE THE FLOW and assert on the end state: the container
-// afterwards, opened by this package and validated by cryptsetup. Inspecting
-// the intermediate header is exactly the check that already passed while the
-// flow was broken.
+// End-to-end recovery-flow tests asserting the repaired container opens here and in cryptsetup.
 
 // destroyPrimaryHeader zeroes the primary header copy of a container whose
 // header area is areaSize bytes.
@@ -207,20 +188,7 @@ func TestRecoveryFlow_RefusesWhenBothCopiesAreGone(t *testing.T) {
 	}
 }
 
-// TestConformance_RecoveredContainerIsAcceptedByCryptsetup checks that the
-// repair produces a container other implementations accept.
-//
-// IT DOES NOT, ON ITS OWN, CATCH THE DEFECT THIS FILE EXISTS FOR, and saying so
-// is the point. MEASURED against the broken flow: with SKUL written at offset 0
-// and at 0x4000, `cryptsetup isLuks` still exits 0 and --debug reports neither
-// copy as requiring recovery. cryptsetup finds the primary unreadable, silently
-// falls back to the intact secondary, and never complains.
-//
-// So the corruption was ASYMMETRIC. cryptsetup shrugged it off; this package,
-// whose ReadHeader looks only at offset 0, could not open the volume at all.
-// The assertions that catch it are the raw magic bytes and this package's own
-// read path, which is why they are made here too rather than trusting the
-// third party to notice.
+// TestConformance_RecoveredContainerIsAcceptedByCryptsetup; cryptsetup alone would not notice a bad primary, so raw magic is checked too.
 func TestConformance_RecoveredContainerIsAcceptedByCryptsetup(t *testing.T) {
 	defer parallel(t)()
 

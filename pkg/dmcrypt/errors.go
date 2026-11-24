@@ -32,9 +32,7 @@ var (
 	// hold a udev rule leaves behind.
 	ErrBusy = errors.New("dmcrypt: device-mapper target is held open and could not be removed")
 
-	// ErrStillLive indicates that Activate failed AFTER its own create
-	// succeeded and could not confirm the target was removed again: a
-	// plaintext mapping may still exist.
+	// ErrStillLive indicates Activate failed after creating the target and could not confirm its removal.
 	ErrStillLive = errors.New("dmcrypt: plaintext device-mapper target may still be live after a failed activate")
 
 	// ErrInvalidName indicates a device-mapper mapping name this package
@@ -46,10 +44,7 @@ var (
 	// created.
 	ErrNodeUnverified = errors.New("dmcrypt: no device node verifiably names the device-mapper target")
 
-	// ErrIntegerOverflow indicates a value this package narrows to a
-	// smaller or differently-signed integer type cannot fit: a negative
-	// size or offset read from a segment that should never carry one. See
-	// safeInt64ToUint64 (activate.go).
+	// ErrIntegerOverflow indicates a value that does not fit its narrower integer type.
 	ErrIntegerOverflow = errors.New("dmcrypt: integer overflow")
 
 	// ErrPermissionDenied is internal/device's sentinel, re-exported by
@@ -57,10 +52,7 @@ var (
 	// matches against.
 	ErrPermissionDenied = device.ErrPermissionDenied
 
-	// ErrDeviceChanged indicates the device-mapper target this package
-	// just created was replaced or removed before it could be confirmed.
-	// internal/device's sentinel, re-exported by value so errors.Is holds
-	// under either package's name.
+	// ErrDeviceChanged indicates the new target was replaced or removed before confirmation; internal/device's sentinel.
 	ErrDeviceChanged = device.ErrChanged
 
 	// The keyring family is internal/keyring's, re-exported by value for
@@ -76,16 +68,7 @@ var (
 	ErrKeyringKeyNotReleased = keyringpkg.ErrKeyNotReleased
 )
 
-// KeyringError reports that the kernel keyring could not hold or release a
-// volume key, names the step that failed, and carries the remedy for the
-// specific cause.
-//
-// It is a new type, not an alias of internal/keyring.UnavailableError: a
-// method cannot be added to an alias of a foreign type, and Remedy is a
-// method this package's callers need (the H4 precedent for every error type
-// this module moves across a layering boundary). classifyKeyringErr, in
-// keyring.go, is what converts one into the other at the call sites that
-// reach internal/keyring directly.
+// KeyringError reports that the kernel keyring could not hold or release a volume key, the failed step and its remedy.
 type KeyringError struct {
 	// Op names the keyring step that failed. It never carries key content.
 	Op string
@@ -94,8 +77,7 @@ type KeyringError struct {
 	// ErrKeyringUnsupported, ErrKeyringQuotaExhausted or ErrKeyringFailed.
 	Kind error
 
-	// Err is the underlying errno, kept reachable through Unwrap so a
-	// caller can match unix.EPERM, unix.EDQUOT or unix.ENOSYS directly.
+	// Err is the underlying errno, reachable through Unwrap.
 	Err error
 }
 
@@ -113,10 +95,7 @@ func errString(err error) string {
 	return err.Error()
 }
 
-// dmKind is errs.KindOf for a device-mapper or /dev node step, with one
-// addition: a refusal for lack of privilege (EPERM, EACCES) is
-// ErrPermissionDenied rather than the fallback. A kind already classified
-// further down, and cancellation, keep precedence.
+// dmKind is errs.KindOf for a dm or /dev step, mapping EPERM and EACCES to ErrPermissionDenied.
 func dmKind(err, fallback error) error {
 	if kind := errs.KindOf(err, nil); kind != nil {
 		return kind
@@ -127,10 +106,7 @@ func dmKind(err, fallback error) error {
 	return fallback
 }
 
-// Unwrap keeps the specific cause and the underlying errno reachable, and
-// also reports every KeyringError as the ErrKeyringUnavailable umbrella and
-// as the ErrKeyring root, so a caller can branch on the cause it can do
-// something about and fall back to either umbrella for the rest.
+// Unwrap exposes the cause and errno and reports as ErrKeyringUnavailable and ErrKeyring.
 func (e *KeyringError) Unwrap() []error {
 	return []error{ErrKeyring, ErrKeyringUnavailable, e.Kind, e.Err}
 }

@@ -17,8 +17,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/test/internal/harness"
 )
 
-// The keyslot priority tests that need a REAL cryptsetup container; see
-// pkg/luks2's own (now-moved) keyslotpriority_integration_test.go for why.
+// Keyslot priority tests that need a real cryptsetup container.
 
 func runCryptsetupConfig(t *testing.T, path, priority string, slot int) {
 	t.Helper()

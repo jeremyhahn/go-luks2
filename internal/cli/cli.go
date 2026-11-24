@@ -2,11 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package cli is the luks2 command-line tool, built on
-// pkg/luks2's Volume API, pkg/dmcrypt, pkg/loop, pkg/filesystem,
-// pkg/keyprovider and pkg/wipe only -- never on the old free-function
-// pkg/luks2 API cmd/luks2 used before this package existed. cmd/luks2 is
-// now just main.go: signal context in, Run, os.Exit.
+// Package cli is the luks2 command-line tool, built on the pkg/luks2 Volume API and its sibling packages.
 package cli
 
 import (
@@ -60,10 +56,7 @@ type env struct {
 	getStdinFd func() int
 }
 
-// Version is the version string "version"/"--version"/"-v" prints. main.go
-// sets it from its own version, which -ldflags -X main.version=... sets at
-// build time: the linker flag names main's variable, not this package's, so
-// this one exists to receive the value rather than to be set directly.
+// Version is the string "version" prints; main.go sets it from its linker-set main.version.
 var Version = "dev"
 
 const topUsage = `
@@ -103,18 +96,9 @@ NON-INTERACTIVE USE:
     echo 'my passphrase' | luks2 open /dev/sdb1 backup
 `
 
-// Run dispatches args[1] (and, for a command group, args[2]) to its
-// handler and returns a cryptsetup(8)-compatible exit code. args follows
-// os.Args's own shape: args[0] is the program name.
-//
-// Run hardens the process (enclave.HardenProcess) before it dispatches, so
-// no command reads a credential in a process that could dump core; a
-// hardening failure is a *HardeningError and a non-zero exit.
+// Run hardens the process, dispatches args[1] (and a group's args[2]) and returns a cryptsetup(8)-compatible exit code.
 func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	// First, before any command can read a credential: Run is the binary's
-	// only entry point (cmd/luks2 main → run → Run), and go-enclave leaves
-	// process hardening to the binary. Failing to harden fails the command,
-	// unsupported platform included; there is no unhardened fallback.
+	// Harden before any command can read a credential; failure fails the command, with no unhardened fallback.
 	if err := harden(); err != nil {
 		_, _ = fmt.Fprintf(stderr, "%v\n", err)
 		return exitCode(err)
@@ -181,11 +165,7 @@ func dispatch(ctx context.Context, e *env, args []string) int {
 	return exitCode(err)
 }
 
-// registry builds the command dispatch table. It is rebuilt on every call
-// rather than held in a package variable: nothing in it is a seam (every
-// run func takes its env as a parameter, never a closure over one), so
-// nothing is gained by keeping it alive between calls, and a fresh map
-// cannot carry state from one Run to the next by accident.
+// registry builds the command dispatch table fresh on every call, so no state carries between runs.
 func registry() map[string]*command {
 	return map[string]*command{
 		"create":    createCommand(),
@@ -208,13 +188,7 @@ func registry() map[string]*command {
 	}
 }
 
-// RegisteredVerbs returns every verb this package's dispatch table answers
-// to -- "<verb>" for a bare command, "<verb> <sub>" for each entry of a
-// command group -- for test/integration/cli/commands's enumerating parity
-// check: the table there must have a CommandDefinition for
-// every name this returns, or the check fails. This is the minimum this
-// package exports toward that: the registry's keys, nothing of the
-// unexported command type itself.
+// RegisteredVerbs returns every verb and "verb sub" the dispatch table answers to, for the CLI parity check.
 func RegisteredVerbs() []string {
 	reg := registry()
 	verbs := make([]string, 0, len(reg))

@@ -47,23 +47,18 @@ type fakeRemover struct {
 	detachVisibleAfterQueries int
 	pendingDetach             map[string]int
 
-	// failVerificationAfterRemoval models the kernel becoming unreadable at the
-	// worst moment: the removal succeeds and the CONFIRMATION errors, so the
-	// reaper knows it acted and does not know whether it worked.
+	// failVerificationAfterRemoval: the removal succeeds and the confirmation errors.
 	failVerificationAfterRemoval bool
 	loopQueryErr                 error
 
-	// loopLookupErr fails the FIRST enumeration, modeling a sysfs read that
-	// cannot be completed at all.
+	// loopLookupErr fails the first enumeration.
 	loopLookupErr error
 
 	// reassignBeforeDetach models the loop number being released and reused
 	// between enumeration and detach: device -> its new backing file.
 	reassignBeforeDetach map[string]string
 
-	// releaseBeforeDetach models the device being released -- bound to nothing
-	// -- between enumeration and detach, which is what a test's own cleanup
-	// does and what the kernel reports as ENXIO.
+	// releaseBeforeDetach releases the device between enumeration and detach (ENXIO).
 	releaseBeforeDetach map[string]bool
 
 	// identityUnknown models the enumeration failing to capture a device's
@@ -154,12 +149,7 @@ func (f *fakeRemover) LoopDevicesUnder(dir string) ([]LoopDevice, error) {
 	return f.visible(out), nil
 }
 
-// enumerate builds the LoopDevice the real enumeration would build: the device,
-// what it is backed by, and the kernel identity of that binding.
-//
-// identityUnknown models the capture FAILING -- the ioctl returning something
-// other than ENXIO -- which the real enumeration carries through rather than
-// dropping, so the detach can refuse it by name.
+// enumerate builds the LoopDevice the real enumeration would; identityUnknown models a failed identity capture.
 func (f *fakeRemover) enumerate(device, backing string) LoopDevice {
 	if f.identityUnknown[device] {
 		return LoopDevice{
@@ -176,18 +166,14 @@ func (f *fakeRemover) enumerate(device, backing string) LoopDevice {
 	}
 }
 
-// fakeIdentityOf stands in for lo_device/lo_inode. The property that matters is
-// the one the kernel has: the identity follows the BOUND FILE, so re-binding a
-// device to something else changes it, and nothing about the device NUMBER
-// appears in it.
+// fakeIdentityOf stands in for lo_device/lo_inode: the identity follows the bound file, not the device number.
 func fakeIdentityOf(backing string) loopIdentity {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(backing))
 	return loopIdentity{dev: 66307, inode: h.Sum64()}
 }
 
-// currentBacking is what the fake KERNEL would report for a device now --
-// which is what DetachLoop checks against, and what a reassignment changes.
+// currentBacking is what the fake kernel reports for a device now.
 func (f *fakeRemover) currentBacking(device string) string {
 	if backing, reused := f.reassignBeforeDetach[device]; reused {
 		f.loops[backing] = []string{device}
@@ -223,8 +209,7 @@ func (f *fakeRemover) DetachLoop(dev LoopDevice) error {
 		return err
 	}
 	if f.releaseBeforeDetach[device] {
-		// Already free: nothing to detach, and not an error. ENXIO from
-		// LOOP_GET_STATUS64 is the only way the real remover reaches this.
+		// Already free: not an error (ENXIO from LOOP_GET_STATUS64).
 		for backing, devices := range f.loops {
 			if i := slices.Index(devices, device); i >= 0 {
 				f.loops[backing] = slices.Delete(devices, i, i+1)
@@ -265,8 +250,7 @@ func (f *fakeRemover) DetachLoop(dev LoopDevice) error {
 	return nil
 }
 
-// loopPaths reduces enumerated devices to their paths, for assertions that are
-// about WHICH devices were found rather than what they were backed by.
+// loopPaths reduces enumerated devices to their paths.
 func loopPaths(devices []LoopDevice) []string {
 	out := make([]string, 0, len(devices))
 	for _, d := range devices {
@@ -275,12 +259,7 @@ func loopPaths(devices []LoopDevice) []string {
 	return out
 }
 
-// unremoved reports whether the reap recorded a failure to remove `value`.
-//
-// The tests below assert BOTH halves: the reap refuses (a device left on the
-// host is not a host to run on), and the specific resource is named in the
-// report. Asserting only the error would not distinguish "refused for this
-// reason" from "refused for any reason", which is the shutdown-assertion trap.
+// unremoved reports whether the reap recorded a failure to remove value.
 func unremoved(r Report, value string) bool {
 	for _, f := range r.Unremoved {
 		if f.Entry.Value == value {
@@ -290,18 +269,7 @@ func unremoved(r Report, value string) bool {
 	return false
 }
 
-// stateDir returns a directory suitable to be a LEDGER STATE DIRECTORY.
-//
-// t.TempDir() cannot be used directly: it creates its per-test leaf with
-// os.Mkdir(dir, 0777), so under a umask of 002 the result is 0775 --
-// group-writable, which ensureTrustedStateDir refuses. The refusal is correct
-// (a group-writable directory lets anyone in that group aim the privileged
-// reaper); it is the FIXTURE that has to meet the requirement, not the
-// requirement that has to bend for the fixture.
-//
-// The real deployments already comply: Docker creates a missing bind-mount
-// source as root:root 0755, and `make host-integration-test` runs under sudo so
-// the harness creates it 0700 itself.
+// stateDir returns a 0700 directory, since t.TempDir() may be group-writable and ensureTrustedStateDir refuses that.
 func stateDir(t *testing.T) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "state")
@@ -329,9 +297,7 @@ func writeLedger(t *testing.T, dir, runID string, entries ...Entry) string {
 	return ledger.Path()
 }
 
-// TestReapRemovesTheStateAKilledRunLeftBehind is the core of #96: a run dies
-// with mappings live on the host, and the NEXT run removes them before the #85
-// guard looks.
+// TestReapRemovesTheStateAKilledRunLeftBehind: the next run removes a dead run's live mappings.
 func TestReapRemovesTheStateAKilledRunLeftBehind(t *testing.T) {
 	dir := stateDir(t)
 	path := writeLedger(t, dir, "dead-run",
@@ -367,13 +333,7 @@ func TestReapRemovesTheStateAKilledRunLeftBehind(t *testing.T) {
 	}
 }
 
-// TestReapLeavesAReusedNameAlone is the property that makes this safe to run on
-// a machine that is not a disposable runner.
-//
-// dm names are a flat host-wide namespace. Between the record and the reap,
-// something else can create a mapping under a name the suite also uses. A
-// cleanup keyed to the NAME removes a stranger's device; keyed to the recorded
-// identity, it does not.
+// TestReapLeavesAReusedNameAlone: a mapping that reused a recorded name is not removed.
 func TestReapLeavesAReusedNameAlone(t *testing.T) {
 	dir := stateDir(t)
 	path := writeLedger(t, dir, "dead-run",
@@ -694,12 +654,7 @@ func TestReapProcessesEveryStaleLedger(t *testing.T) {
 	}
 }
 
-// TestReapDetachesLoopDevicesUnderARecordedRoot is the loop half of #96.
-//
-// A loop device cannot be recorded before it exists -- the kernel picks the
-// minor in LOOP_CTL_GET_FREE -- so what is recorded write-ahead is the
-// DIRECTORY the run created and pointed TMPDIR at. Every backing file the suite
-// allocates, through t.TempDir() or os.CreateTemp(""), lands underneath it.
+// TestReapDetachesLoopDevicesUnderARecordedRoot: loop devices backed under the recorded TMPDIR root are detached.
 func TestReapDetachesLoopDevicesUnderARecordedRoot(t *testing.T) {
 	dir := stateDir(t)
 	writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-dead-run-1"})
@@ -762,20 +717,7 @@ func TestLoopDevicesUnderDoesNotMatchASiblingWithASharedPrefix(t *testing.T) {
 	}
 }
 
-// TestReapLeavesALiveRunsLedgerCompletelyAlone is the property that makes this
-// safe on a shared runner, and it is the one snapshot-and-diff could not have.
-//
-// Several jobs run concurrently on one host. A ledger sitting in the state
-// directory may belong to a suite that is running RIGHT NOW, whose mappings and
-// loop devices are in use. Removing them fails a different run in a way that
-// reads as a flaky test on a host that looks clean -- strictly worse than the
-// leak, which fails loudly and a human can fix.
-//
-// Nothing about the device itself can tell the two apart. Measured 2026-09-01
-// on a shared CI runner: a live job's loop device showed empty `holders` and empty
-// `fuser`, identical to the orphans swept minutes earlier. The only difference
-// was that a job owned it. So ownership is asserted with a lock the owner holds
-// for its lifetime, which the kernel releases on death and not before.
+// TestReapLeavesALiveRunsLedgerCompletelyAlone: a ledger whose owner still holds its lock is not touched.
 func TestReapLeavesALiveRunsLedgerCompletelyAlone(t *testing.T) {
 	dir := stateDir(t)
 
@@ -813,10 +755,7 @@ func TestReapLeavesALiveRunsLedgerCompletelyAlone(t *testing.T) {
 	}
 }
 
-// TestReapConsumesALedgerOnceItsOwnerIsGone is the other half: the same ledger,
-// after the owner releases it, IS reaped. Without this the liveness check could
-// be permanently stuck and the leak would never be cleaned -- a guard that
-// always says "leave it" is not a guard.
+// TestReapConsumesALedgerOnceItsOwnerIsGone: once the lock is released the ledger is reaped.
 func TestReapConsumesALedgerOnceItsOwnerIsGone(t *testing.T) {
 	dir := stateDir(t)
 
@@ -869,7 +808,7 @@ func TestTwoConcurrentRunsGetSeparateLedgers(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = a.Close() })
 
-	// Same pid -- which is the NORM in containers, where everything is pid 1.
+	// Same pid, as is normal in containers.
 	b, err := OpenLedger(dir, NewRunID(1, 2000))
 	if err != nil {
 		t.Fatalf("OpenLedger(b): a second concurrent run could not open its own ledger: %v", err)
@@ -921,18 +860,7 @@ func TestOpenLedgerRefusesToShareARunID(t *testing.T) {
 	}
 }
 
-// TestReapOwnCleansWhatAPassingRunLeaked is the regression test for the defect
-// a privileged CI runner surfaced on 2026-09-01, which no local reasoning had
-// found.
-//
-// pkg/luks2 reported `ok` in 87.6s while TestLoopDeviceCleanup left /dev/loop1
-// attached. The suite then discarded its ledger on the strength of the exit
-// code, destroying the only record of the device it had just leaked, and the
-// NEXT run reaped a ledger describing nothing and honestly reported "already
-// gone" while the device sat on the host.
-//
-// A green suite and a leaked device are not mutually exclusive. The exit code
-// cannot tell them apart, so the record is checked against the host instead.
+// TestReapOwnCleansWhatAPassingRunLeaked: a passing run still removes what it leaked before discarding its ledger.
 func TestReapOwnCleansWhatAPassingRunLeaked(t *testing.T) {
 	dir := stateDir(t)
 	ledger, err := OpenLedger(dir, "passing-run")
@@ -997,13 +925,7 @@ func TestReapOwnDoesNotNeedTheLedgerUnlocked(t *testing.T) {
 	}
 }
 
-// TestSuiteFinishCleansUpEvenWhenTheTestsPassed is the Suite-level regression
-// test for that runner defect, and it exists because the first version of Finish
-// was wrong here and nothing could have caught it: Finish called the kernel
-// directly, so no test could reach the decision.
-//
-// The decision under test is the one that was wrong: whether a green suite is
-// evidence of a clean host. It is not.
+// TestSuiteFinishCleansUpEvenWhenTheTestsPassed: a green suite is not evidence of a clean host.
 func TestSuiteFinishCleansUpEvenWhenTheTestsPassed(t *testing.T) {
 	dir := stateDir(t)
 	ledger, err := OpenLedger(dir, "green-but-leaky")
@@ -1019,7 +941,7 @@ func TestSuiteFinishCleansUpEvenWhenTheTestsPassed(t *testing.T) {
 
 	suite := &Suite{Ledger: ledger, TempDir: t.TempDir(), RunID: "green-but-leaky", Remover: rm}
 
-	// code 0: the tests PASSED. The host is leaky anyway.
+	// Exit code 0, but the host still leaks.
 	if got := suite.Finish(0, io.Discard); got != 0 {
 		t.Fatalf("Finish returned %d after cleaning up successfully, want 0", got)
 	}
@@ -1061,19 +983,7 @@ func TestSuiteFinishKeepsTheLedgerWhenItCannotClean(t *testing.T) {
 	}
 }
 
-// TestReapersSerializeSoALockedLedgerAlwaysMeansALiveSuite is the fix for the
-// P2 finding on the local Codex review, and it is a correctness issue rather
-// than a tidiness one.
-//
-// Two reapers starting together were indistinguishable from a reaper and a live
-// suite: reaper A takes a stale ledger's lock, reaper B gets EWOULDBLOCK and
-// classifies the ledger as "the owner is still alive". B then returns SUCCESS
-// and proceeds -- even though A might still be working, or might have failed
-// and left the recorded state exactly where it was. A fail-closed path defeated
-// by a lock that was misread.
-//
-// Serializing the reapers removes the ambiguity at its source: while the host
-// reaper mutex is held, a locked ledger can only be a live SUITE.
+// TestReapersSerializeSoALockedLedgerAlwaysMeansALiveSuite: concurrent reapers serialize on the host mutex.
 func TestReapersSerializeSoALockedLedgerAlwaysMeansALiveSuite(t *testing.T) {
 	dir := stateDir(t)
 	writeLedger(t, dir, "dead-run", Entry{Kind: KindMapping, Value: "left", Identity: "uuid-left"})
@@ -1087,10 +997,7 @@ func TestReapersSerializeSoALockedLedgerAlwaysMeansALiveSuite(t *testing.T) {
 	rm := newFakeRemover()
 	rm.mappings["left"] = "uuid-left"
 
-	// Reaper B must WAIT rather than sail past. Its wait is held still at its
-	// first sleep -- on a clock only the wait moves (#233) -- so "B has not
-	// finished while A holds the mutex" is observed, not raced against a
-	// timer: B has tried the lock, been refused, and is waiting to retry.
+	// Reaper B waits, held at its first sleep on a clock only the wait moves.
 	clk := useFakeClock(t)
 	waiting := make(chan struct{})
 	proceed := make(chan struct{})
@@ -1147,8 +1054,7 @@ func TestReapTimesOutRatherThanRunningOnAnUnknownHost(t *testing.T) {
 	}
 	t.Cleanup(unlockA)
 
-	// The real bound and poll, on a controlled clock (#233): five minutes of
-	// waiting costs nothing, and how long it waited is exact.
+	// The real bound and poll on a controlled clock, so the wait is exact and free.
 	clk := useFakeClock(t)
 
 	rm := newFakeRemover()
@@ -1189,16 +1095,7 @@ func TestReaperLockFileIsNotMistakenForALedger(t *testing.T) {
 	}
 }
 
-// TestReapRemovesTheHolderBeforeTheDeviceItHolds is the first P2 from the local
-// Codex review, and the ordering is not cosmetic.
-//
-// The ledger's write order is the OPPOSITE of the removal order, and not by
-// accident: BeginSuite records the run's loop root before a single test runs --
-// that is what makes the record precede the resource -- while dm mappings are
-// recorded later, as tests create them. So a killed run that left a LUKS
-// mapping stacked on a loop device produces a ledger whose loop entry comes
-// first, and reaping in that order tries to detach a device the mapping is
-// still holding.
+// TestReapRemovesTheHolderBeforeTheDeviceItHolds: a mapping is removed before the loop device under it, though the ledger records the loop root first.
 func TestReapRemovesTheHolderBeforeTheDeviceItHolds(t *testing.T) {
 	dir := stateDir(t)
 	// Written in the order a real run produces: loop root first.
@@ -1247,11 +1144,7 @@ func TestInRemovalOrderPutsMappingsFirstAndIsStable(t *testing.T) {
 	}
 }
 
-// TestReapWaitsForADetachToBecomeObservable is the second P2. A successful
-// LOOP_CLR_FD is not necessarily visible in sysfs immediately -- loopdev.go
-// waits for this exact race, with a measurement behind it. Re-querying
-// instantly turns a successful cleanup into ErrReapIncomplete and fails the
-// NEXT run over a device that was already on its way out.
+// TestReapWaitsForADetachToBecomeObservable: the reap waits for a successful LOOP_CLR_FD to show in sysfs.
 func TestReapWaitsForADetachToBecomeObservable(t *testing.T) {
 	dir := stateDir(t)
 	writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-dead-run-1"})
@@ -1267,15 +1160,13 @@ func TestReapWaitsForADetachToBecomeObservable(t *testing.T) {
 	if _, err := Reap(dir, "next-run", rm, io.Discard); err != nil {
 		t.Fatalf("Reap: %v -- a detach that had not yet settled was reported as a failure", err)
 	}
-	// It waited for the two further queries and no longer: two polls.
+	// It waited for the two further queries: two polls.
 	if waited := clk.Elapsed(); waited != 2*detachSettlePoll {
 		t.Fatalf("waited %s for a release two queries away, want %s", waited, 2*detachSettlePoll)
 	}
 }
 
-// TestReapStillFailsOnADeviceThatNeverGoesAway is the control on that wait: the
-// bound must not turn a genuinely stuck device into a pass. Reaching it means
-// something still HOLDS the device, which is a real failure.
+// TestReapStillFailsOnADeviceThatNeverGoesAway: a device still held at the bound is a failure.
 func TestReapStillFailsOnADeviceThatNeverGoesAway(t *testing.T) {
 	dir := stateDir(t)
 	writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-dead-run-1"})
@@ -1298,14 +1189,7 @@ func TestReapStillFailsOnADeviceThatNeverGoesAway(t *testing.T) {
 	}
 }
 
-// TestFinishFailsTheRunWhenCleanupFails is the first blocking finding from the
-// hosted Codex review, and it is the fail-open path this whole harness exists
-// to close, reintroduced at its last step.
-//
-// Finish used to log a cleanup failure and return. The caller then exited with
-// m.Run()'s code, so a GREEN suite that could not remove its own dm mapping
-// still exited 0 -- CI reporting success while the host kept the state and the
-// ledger. The exit code has to come from the cleanup, not from the verdict.
+// TestFinishFailsTheRunWhenCleanupFails: the exit code comes from the cleanup, not the test verdict.
 func TestFinishFailsTheRunWhenCleanupFails(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -1359,14 +1243,7 @@ func TestFinishPassesThroughACleanRunAndAFailingOne(t *testing.T) {
 	}
 }
 
-// TestReapOwnRemovesTheHolderBeforeTheDeviceItHolds is the second blocking
-// finding: ReapOwn iterated the ledger directly while the cross-run Reap had
-// been fixed to order holders first. The same defect in the sibling function.
-//
-// A passing run that leaked BOTH a dm mapping and its loop backing would try to
-// detach the device its own mapping still held, get a busy error, and report an
-// incomplete cleanup -- now also failing the run, which makes the ordering bug
-// visible rather than merely wasteful.
+// TestReapOwnRemovesTheHolderBeforeTheDeviceItHolds: ReapOwn removes mappings before their loop devices too.
 func TestReapOwnRemovesTheHolderBeforeTheDeviceItHolds(t *testing.T) {
 	dir := stateDir(t)
 	ledger, err := OpenLedger(dir, "leaky-run")
@@ -1396,26 +1273,7 @@ func TestReapOwnRemovesTheHolderBeforeTheDeviceItHolds(t *testing.T) {
 	}
 }
 
-// TestUnconfirmedRemovalIsReportedAndTheRecordSurvives covers both P2 findings
-// from the local review, and they are one defect at two sites.
-//
-// THE EXIT CODE MOVED, THE PROPERTY DID NOT. This asserted a fatal reap when
-// removal could not be confirmed. It now asserts the two things that actually
-// protect the host: the failure is REPORTED, and the LEDGER SURVIVES so a later
-// run retries. "Fails closed" here means the record is not consumed on an
-// unconfirmed removal -- which was always the expensive half -- not that the
-// job dies. Making it fatal latched a runner twice (see Reap's exit-code
-// policy), and the safety it was supposed to buy is bought by the #85 guard,
-// which runs afterwards and refuses on any dm mapping still present.
-//
-// The verification was written `if err == nil && stillThere { fail }`, so an
-// ERROR from the confirming query fell through to "removed" -- a check that
-// reports clean precisely when it cannot see. The consequence is worse than a
-// wrong status: reporting success lets the ledger be DELETED, destroying the
-// only record of state nobody has confirmed is gone.
-//
-// "Present", "absent" and "unknown" are three answers. Only the second may
-// consume the record.
+// TestUnconfirmedRemovalIsReportedAndTheRecordSurvives: an unconfirmed removal is reported and the ledger kept; only a confirmed absence consumes the record.
 func TestReapFailsClosedWhenItCannotConfirmRemoval(t *testing.T) {
 	t.Run("dm removal that cannot be confirmed", func(t *testing.T) {
 		dir := stateDir(t)
@@ -1433,8 +1291,7 @@ func TestReapFailsClosedWhenItCannotConfirmRemoval(t *testing.T) {
 		if !unremoved(report, "gone-maybe") {
 			t.Fatal("a removal that could not be confirmed was not reported")
 		}
-		// The record must survive: it is the only description of state whose
-		// fate is unknown. THIS is the assertion that matters.
+		// The record must survive.
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("the ledger was consumed despite an unconfirmed removal: %v", err)
 		}
@@ -1461,23 +1318,9 @@ func TestReapFailsClosedWhenItCannotConfirmRemoval(t *testing.T) {
 	})
 }
 
-// TestBeginSuiteRefusesToRunIfTempAllocationsEscapeTheRecordedRoot is the
-// mechanism checking its own precondition.
-//
-// The loop half of the ledger is worth exactly nothing if the suite's backing
-// files do not land under the recorded root: every run would record a root
-// covering no devices, and every leaked loop device would be invisible to the
-// next reaper -- the fail-open path this exists to close, wearing the costume
-// of a working mechanism.
-//
-// os.TempDir() reads $TMPDIR on every call and t.TempDir() allocates through
-// it, so the redirection does hold. But that is an assumption about the
-// ENVIRONMENT, and the mechanism's correctness depends on it, so the mechanism
-// checks it rather than trusting the documentation. This test drives the check
-// directly with a root nothing allocates under.
+// TestBeginSuiteRefusesToRunIfTempAllocationsEscapeTheRecordedRoot: BeginSuite verifies temp allocations land under the recorded root.
 func TestBeginSuiteRefusesToRunIfTempAllocationsEscapeTheRecordedRoot(t *testing.T) {
-	// A directory that exists but that TMPDIR does not point at, so allocations
-	// demonstrably land elsewhere -- exactly the state the guard must catch.
+	// A directory TMPDIR does not point at, so allocations land elsewhere.
 	elsewhere := t.TempDir()
 
 	err := verifyAllocationsLandUnder(elsewhere)
@@ -1496,13 +1339,7 @@ func TestBeginSuiteRefusesToRunIfTempAllocationsEscapeTheRecordedRoot(t *testing
 	}
 }
 
-// TestVerifyAllocationsLandUnderAcceptsTheRealRedirection is the positive
-// control, and it is the one that would fail if TMPDIR ever stopped working:
-// it sets TMPDIR the way BeginSuite does and asserts the probe agrees.
-//
-// Without this the guard above could pass while rejecting everything,
-// including the correct configuration -- a check that always says no is not a
-// check either.
+// TestVerifyAllocationsLandUnderAcceptsTheRealRedirection is the positive control: TMPDIR set as BeginSuite sets it passes.
 func TestVerifyAllocationsLandUnderAcceptsTheRealRedirection(t *testing.T) {
 	root, err := os.MkdirTemp("", "verify-root-")
 	if err != nil {
@@ -1528,19 +1365,7 @@ func TestVerifyAllocationsLandUnderAcceptsTheRealRedirection(t *testing.T) {
 	}
 }
 
-// TestLoopDiscoveryDistinguishesAbsentFromUnreadable is the sixth instance in
-// this branch of the same idea, and it was in the code written to stop it.
-//
-// Both sysfs scans skipped a loop device whenever reading its backing_file
-// failed, for ANY reason. ENOENT genuinely means unused -- or detached while
-// the scan was running -- and skipping it is right. Every other failure means
-// the backing file COULD NOT BE VERIFIED, and treating that as "no backing
-// file" makes the scan return an empty list, which makes the reaper report
-// AlreadyGone and DELETE the ledger for a device that may still be attached.
-//
-// The fault is injected by filesystem SHAPE -- backing_file as a directory,
-// giving EISDIR -- not by permission bits, which root bypasses and which would
-// make this pass vacuously in the CI containers.
+// TestLoopDiscoveryDistinguishesAbsentFromUnreadable: an unreadable backing_file (EISDIR) is an error, ENOENT means unused.
 func TestLoopDiscoveryDistinguishesAbsentFromUnreadable(t *testing.T) {
 	root := t.TempDir()
 	mk := func(dev string) string {
@@ -1571,7 +1396,7 @@ func TestLoopDiscoveryDistinguishesAbsentFromUnreadable(t *testing.T) {
 		}
 	})
 
-	// loop2: backing_file exists but cannot be read. EISDIR for every uid.
+	// loop2: backing_file exists but cannot be read (EISDIR for every uid).
 	if err := os.Mkdir(mk("loop2"), 0o755); err != nil {
 		t.Fatalf("Mkdir: %v", err)
 	}
@@ -1624,20 +1449,7 @@ func TestReapKeepsTheLedgerWhenLoopDiscoveryFails(t *testing.T) {
 	}
 }
 
-// TestStaleLedgersPropagatesAReadErrorRatherThanReportingNoLedgers closes the
-// last place in the sweep where the recurring collapse could have hidden.
-//
-// staleLedgers returning (nil, nil) means "this host has no records", and Reap
-// then prints "nothing recorded to remove" and exits 0. If a directory it
-// cannot READ produced the same answer, a host full of ledgers would be
-// reported clean -- the sixth instance's shape, one function over.
-//
-// ENOENT is the one error that legitimately means no records: the state
-// directory does not exist, so nothing was ever written. Everything else must
-// propagate.
-//
-// The fault is a regular file used as a directory component (ENOTDIR), which
-// holds for every uid -- not a permission bit, which root bypasses.
+// TestStaleLedgersPropagatesAReadErrorRatherThanReportingNoLedgers: only ENOENT means no records; other errors (here ENOTDIR) propagate.
 func TestStaleLedgersPropagatesAReadErrorRatherThanReportingNoLedgers(t *testing.T) {
 	base := stateDir(t)
 
@@ -1676,12 +1488,7 @@ func TestStaleLedgersPropagatesAReadErrorRatherThanReportingNoLedgers(t *testing
 	})
 }
 
-// TestDetachRefusesAReusedLoopNumber is the TOCTOU the local reviewer found:
-// /dev/loopN is a REUSABLE name, and between enumerating a device by its
-// backing path and clearing it, the number can be released and reassigned. A
-// privileged reaper would then detach a stranger's device while believing it
-// was removing its own, and the post-detach query cannot reveal the mistake --
-// the device it looked for is gone either way.
+// TestDetachRefusesAReusedLoopNumber: a loop number reassigned between enumeration and detach is refused.
 func TestDetachRefusesAReusedLoopNumber(t *testing.T) {
 	dir := stateDir(t)
 	path := writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-dead-run-1"})
@@ -1708,43 +1515,9 @@ func TestDetachRefusesAReusedLoopNumber(t *testing.T) {
 	}
 }
 
-// TestTheLoopIdentityIsTheBackingInodeNotItsName pins WHY the detach
-// re-validates on lo_device/lo_inode, against what the kernel was MEASURED to
-// do rather than against what three previous versions of this code assumed.
-//
-// Measured on Linux 6.8.0-58-generic, 2026-09-02, with LOOP_GET_STATUS64
-// read directly:
-//
-//	bind a 21-byte path with losetup   name="/tmp/loopexp/dd/f.img"  len=21
-//	  then unlink the backing file     name="/tmp/loopexp/dd/f.img"  len=21
-//	bind a 91-byte path with losetup   name=<first 63 bytes>         len=63
-//	  then unlink the backing file     name=<first 63 bytes>         len=63
-//	bind with LOOP_SET_FD alone        name=""                       len=0
-//	  ...and lo_inode is the real inode of the file in every one of them
-//
-// Three beliefs died there, and each had been load-bearing in this file:
-//
-//  1. "an empty name means the backing file was unlinked" -- FALSE. Unlinking
-//     does not touch the name at all; sysfs gains " (deleted)" and the ioctl
-//     reports exactly what it did before.
-//  2. "an empty name means the path was too long for the 64-byte field" --
-//     FALSE. An over-long path is truncated to 63 bytes, never emptied.
-//  3. "an empty name is a rare corner" -- FALSE, and this is the one that
-//     mattered. lo_file_name is written by USERSPACE through LOOP_SET_STATUS64;
-//     pkg/luks2/loopdev.go binds with LOOP_SET_FD alone and never sets it, so
-//     an empty name is what EVERY loop device this library creates reports. The
-//     "unverifiable" branch was the normal path for our own devices, which is
-//     why refusing on it would have latched the runner and why proceeding on it
-//     was a blanket license to detach unidentified devices.
-//
-// The inode has none of those properties: the kernel maintains it, it is
-// populated for a LOOP_SET_FD-only binding, unlinking does not disturb it, and
-// a detach clears it -- re-binding a device reports the NEW inode, never a
-// stale one, so a match cannot be inherited from a previous tenant.
+// TestTheLoopIdentityIsTheBackingInodeNotItsName: the detach re-validates on lo_device/lo_inode, since lo_file_name is empty for LOOP_SET_FD bindings, truncated at 63 bytes and unchanged by unlink.
 func TestTheLoopIdentityIsTheBackingInodeNotItsName(t *testing.T) {
-	// The property under test is the one the kernel has: identity follows the
-	// bound FILE. Two devices carrying the same file are the same identity; the
-	// device number contributes nothing.
+	// Identity follows the bound file; the device number contributes nothing.
 	if fakeIdentityOf("/tmp/a.img") == fakeIdentityOf("/tmp/b.img") {
 		t.Fatal("two different backings share an identity; a reassignment would compare equal")
 	}
@@ -1753,18 +1526,7 @@ func TestTheLoopIdentityIsTheBackingInodeNotItsName(t *testing.T) {
 	}
 }
 
-// TestADeviceWhoseIdentityIsUnknownIsRefusedNotDetached is the finding from
-// Codex on 974bf2de, and the reason the identity moved off the name.
-//
-// The previous version reached LOOP_CLR_FD on a device it had just declared it
-// could not identify, on the strength of a sysfs scan taken earlier. That is
-// uncertainty converted into a destructive action against a device number that
-// the kernel is free to have reassigned in between.
-//
-// Refusing is only safe because of the measurement above: with the identity on
-// the inode, capture succeeds for every device this suite creates, so this
-// branch is a genuine anomaly rather than the everyday path. Refusing the
-// everyday path is what would latch the runner.
+// TestADeviceWhoseIdentityIsUnknownIsRefusedNotDetached: LOOP_CLR_FD is never reached for an unidentified device.
 func TestADeviceWhoseIdentityIsUnknownIsRefusedNotDetached(t *testing.T) {
 	dir := stateDir(t)
 	path := writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-dead-run-1"})
@@ -1791,13 +1553,7 @@ func TestADeviceWhoseIdentityIsUnknownIsRefusedNotDetached(t *testing.T) {
 	}
 }
 
-// TestAnUnidentifiableDeviceIsStillEnumerated is the other half, and it is the
-// half that is easy to get wrong in the safe-looking direction.
-//
-// Dropping the device from the scan would also avoid detaching it -- and would
-// report the ledger entry as AlreadyGone, delete the record, and leave the
-// device attached with nothing left that remembers it. Fail-closed means the
-// device survives to be REFUSED, not that it vanishes from the report.
+// TestAnUnidentifiableDeviceIsStillEnumerated: it stays in the scan so it is refused, not reported AlreadyGone.
 func TestAnUnidentifiableDeviceIsStillEnumerated(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "loop5", "loop")
@@ -1828,14 +1584,7 @@ func TestAnUnidentifiableDeviceIsStillEnumerated(t *testing.T) {
 	}
 }
 
-// TestADeviceReleasedBetweenScanAndCaptureIsDropped is the opposite answer to
-// the same question, and the two must not be collapsed.
-//
-// ENXIO is the kernel saying the device is bound to nothing. There is nothing
-// to detach and nothing wrong, so it leaves the list entirely -- unlike a
-// capture that FAILED, which stays and refuses. This is the same
-// absent-versus-unreadable distinction readBackingFile makes one layer up,
-// applied at the layer that was added after it.
+// TestADeviceReleasedBetweenScanAndCaptureIsDropped: ENXIO means bound to nothing, so the device leaves the list.
 func TestADeviceReleasedBetweenScanAndCaptureIsDropped(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "loop6", "loop")
@@ -1857,15 +1606,7 @@ func TestADeviceReleasedBetweenScanAndCaptureIsDropped(t *testing.T) {
 	}
 }
 
-// TestReapSucceedsWhenTheDeviceWasAlreadyReleased is the CI-measured case at
-// the level that matters: a run must not FAIL because something it was about
-// to clean up had already been cleaned up.
-//
-// This is instance seven of the same idea in this branch, and the first found
-// by the integration leg rather than by review: "not bound to anything" was
-// collapsed into "bound to something else". The guard script cannot see it --
-// it is semantic, not syntactic - which is worth knowing about the guard's
-// reach as well as about the bug.
+// TestReapSucceedsWhenTheDeviceWasAlreadyReleased: an already-released device is not a failure.
 func TestReapSucceedsWhenTheDeviceWasAlreadyReleased(t *testing.T) {
 	dir := stateDir(t)
 	path := writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-dead-run-1"})
@@ -1883,18 +1624,7 @@ func TestReapSucceedsWhenTheDeviceWasAlreadyReleased(t *testing.T) {
 	}
 }
 
-// TestTempRootIsRemovedAndItsFailureIsReported covers the blocking finding on
-// b4c3838, which my own sweep had classified as cosmetic.
-//
-// The run temp root holds the disk images the tests create -- tens of
-// megabytes each. Finish used to discard the ledger and THEN ignore
-// os.RemoveAll, so a removal that failed left the images behind, the run
-// exited 0, and the only record of where they were had already been destroyed.
-// Repeated, that exhausts the runner's filesystem.
-//
-// I classified it as cosmetic because I asked only what host DEVICE state was
-// behind it, and never asked what else the ledger was the record of. The
-// directory is the other half.
+// TestTempRootIsRemovedAndItsFailureIsReported: Finish removes the run temp root and reports a failure to.
 func TestTempRootIsRemovedAndItsFailureIsReported(t *testing.T) {
 	newSuite := func(t *testing.T, rm *fakeRemover) *Suite {
 		t.Helper()
@@ -1976,14 +1706,7 @@ func TestReapKeepsTheLedgerWhenTheTempRootCannotBeRemoved(t *testing.T) {
 	}
 }
 
-// TestRemoveDirRefusesAPathThatCouldNotBeOurs bounds the blast radius of the
-// one unbounded operation in this package.
-//
-// The path comes from a ledger, and the state directory is validated before
-// anything in it is read -- so a forged entry is not the expected case. But
-// os.RemoveAll aimed by a corrupt line is the worst thing here, and the check
-// is nearly free. It is NOT the ownership decision: ownership comes from the
-// record, as everywhere else.
+// TestRemoveDirRefusesAPathThatCouldNotBeOurs bounds what os.RemoveAll can be aimed at.
 func TestRemoveDirRefusesAPathThatCouldNotBeOurs(t *testing.T) {
 	for _, tc := range []struct{ name, path string }{
 		{"empty", ""},
@@ -2006,27 +1729,7 @@ func TestRemoveDirRefusesAPathThatCouldNotBeOurs(t *testing.T) {
 	}
 }
 
-// TestAnUnremovableDirectoryDoesNotLatchTheRunner keeps the latch guard where
-// the non-fatal policy actually lives now: directories.
-//
-// A directory that will not delete must not make every future run on that host
-// refuse. Trace what that would do: the reap fails, keeps the ledger "so the
-// next run can finish the job", and the next run meets the same permanent
-// condition and fails identically -- forever, on a condition that endangers
-// nothing. Disk is not a device: the #85 guard never looks at it and no run
-// trips over it.
-//
-// DEVICES ARE DELIBERATELY NOT IN THIS TEST. An earlier version of this file
-// asserted the same non-fatal outcome for a stuck loop device, on the evidence
-// that one had latched a runner permanently -- and that evidence turned out to
-// be my own defect (an empty lo_file_name read as "already free", so
-// LOOP_CLR_FD was never called). With that fixed, a retained device refuses the
-// run, because the #85 guard inventories dm only and a loop device sails past
-// it into the suite.
-//
-// The reap runs TWICE against an unchanged, permanently stuck directory and
-// both must succeed. One run proves the classification; two prove it does not
-// latch.
+// TestAnUnremovableDirectoryDoesNotLatchTheRunner: two reaps against a stuck directory both succeed.
 func TestAnUnremovableDirectoryDoesNotLatchTheRunner(t *testing.T) {
 	dir := stateDir(t)
 	path := writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-dead-run-1"})
@@ -2065,13 +1768,7 @@ func TestAnUnremovableDirectoryDoesNotLatchTheRunner(t *testing.T) {
 	}
 }
 
-// TestARetainedDeviceRefusesTheRun is the other side of that line, and it is
-// the finding this policy came from: the #85 guard inventories `dmsetup ls`
-// only, so a retained LOOP device passes it untouched and reaches the suite as
-// a minor the host quietly no longer has (#104's threshold is four).
-//
-// Continuing on that is running on a contaminated host, which is a different
-// thing from leaving some disk behind.
+// TestARetainedDeviceRefusesTheRun: a retained loop device fails the reap.
 func TestARetainedDeviceRefusesTheRun(t *testing.T) {
 	dir := stateDir(t)
 	path := writeLedger(t, dir, "dead-run", Entry{Kind: KindLoopRoot, Value: "/tmp/go-luks2-run-dead-run-1"})
@@ -2092,13 +1789,7 @@ func TestARetainedDeviceRefusesTheRun(t *testing.T) {
 	}
 }
 
-// TestUnknownStateStillFailsClosed is the boundary of the change above, and
-// without it the correction would be a license rather than a distinction.
-//
-// NOT KNOWING what is on the host is different from knowing and being unable to
-// remove it. The first must still stop the job, because no useful record can be
-// kept either: an untrusted state directory or an unreadable ledger means the
-// reaper cannot say what it is looking at.
+// TestUnknownStateStillFailsClosed: an untrusted state directory or unreadable ledger stops the job.
 func TestUnknownStateStillFailsClosed(t *testing.T) {
 	t.Run("an unreadable ledger", func(t *testing.T) {
 		dir := stateDir(t)
@@ -2190,8 +1881,7 @@ func TestFinishFailsTheRunWhenTheLedgerCannotBeDiscarded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenLedger: %v", err)
 	}
-	// Close the ledger's FILE only, so Discard's own close of it fails. The
-	// state directory's handle stays open: ReapOwn reads the ledger through it.
+	// Close the ledger file only, so Discard's close fails; the state directory handle stays open.
 	if err := ledger.f.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}

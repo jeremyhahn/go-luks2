@@ -100,10 +100,7 @@ func TestRunCommandUsageError(t *testing.T) {
 	}
 }
 
-// TestRunMissingArgumentUsagePrintsOnStdout locks the existing CLI's
-// documented compat surface: a missing-argument usage message for each of
-// these commands is printed on STDOUT (as the pre-rewrite CLI did), not only
-// folded into the generic stderr error line.
+// TestRunMissingArgumentUsagePrintsOnStdout checks that missing-argument usage for these commands goes to stdout.
 func TestRunMissingArgumentUsagePrintsOnStdout(t *testing.T) {
 	tests := []struct {
 		args []string

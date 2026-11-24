@@ -25,30 +25,13 @@ func errAt(op, path string, err error) error {
 
 // The sentinels every failure in this package matches.
 var (
-	// ErrInvalidArgument indicates a caller-supplied value this package
-	// cannot use: a helper path that is not absolute or not configured, a
-	// negative line number, or a token with nothing to build a provider
-	// from.
+	// ErrInvalidArgument indicates a caller value this package cannot use.
 	ErrInvalidArgument = errors.New("keyprovider: invalid argument")
 
-	// ErrHelperFailed indicates a helper could not be run, or ran and
-	// exited non-zero -- the authenticator refused, the touch timed out,
-	// the PIN was wrong. A helper that someone other than root or this
-	// process's user could have replaced -- the file, or a directory above
-	// it, is theirs or is group- or world-writable -- is not run, and
-	// matches this too.
+	// ErrHelperFailed indicates a helper could not run, exited non-zero, or was refused as replaceable by others.
 	ErrHelperFailed = errors.New("keyprovider: key helper failed")
 
-	// ErrHelperOutput indicates a helper SUCCEEDED and produced something
-	// this package cannot use: too few lines, an empty credential, output
-	// that is not the expected encoding, or output still held open by a
-	// process the helper started.
-	//
-	// It is deliberately separate from ErrHelperFailed. A helper that
-	// exits 0 and prints the wrong thing is a protocol mismatch -- a
-	// different helper version, a changed output order -- and telling an
-	// operator "the authenticator refused" would send them to look at the
-	// hardware.
+	// ErrHelperOutput indicates a helper succeeded but produced output this package cannot use.
 	ErrHelperOutput = errors.New("keyprovider: unusable key helper output")
 
 	// ErrNoDevice indicates a FIDO2 operation was given no authenticator
@@ -66,14 +49,7 @@ var (
 	ErrUnsupportedToken = errors.New("keyprovider: unsupported token type")
 )
 
-// HelperError reports that a helper binary could not be run, or ran and
-// refused.
-//
-// Stderr is included because it is where these helpers say what actually
-// happened -- "no device found", "PIN required", "operation denied" -- and
-// an operator holding a key that will not open a volume needs that sentence
-// rather than an exit code. It carries no credential material: the
-// credential is on stdout, which is never put in an error.
+// HelperError reports that a helper binary could not be run or refused, with its stderr (never the credential).
 type HelperError struct {
 	// Path is the binary that was run.
 	Path string

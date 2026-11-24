@@ -2,10 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package wipe destroys the data on a whole block device or file: a
-// sequence of overwrite passes, each in a chosen Pattern, with an optional
-// read-back verification of the last pass and an optional TRIM/DISCARD once
-// every pass has landed.
+// Package wipe destroys the data on a block device or file with overwrite passes, optional read-back verification and optional TRIM/DISCARD.
 package wipe
 
 // Pattern is the data written by one wipe pass.

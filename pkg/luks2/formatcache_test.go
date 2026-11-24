@@ -15,30 +15,7 @@ import (
 	"testing"
 )
 
-// formattedImage gives a test a fresh image, of size bytes, holding a
-// container Format produced from opts. It FORMATS ONCE PER PROCESS PER KEY and
-// copies the result thereafter (#92).
-//
-// This is formatWithLibrary's idea extended to the fixtures that format with a
-// configuration of their own and so could not share its golden image.
-// headerSizeVolume and tokenIDVolume ran a real Format per call -- several
-// from inside table loops -- and between them were ~22s of the package's CPU
-// time, most of it the digest calibration Format has to do and none of it
-// what those tests are about. Both only need a genuine container to alter.
-//
-// Unlike formatWithLibrary's 2 MiB prefix, the snapshot here is the WHOLE
-// image up to its last non-zero byte, so each copy is byte-for-byte what
-// Format wrote -- keyslots-area fill included -- apart from not being a
-// different random draw. What a caller loses is a fresh UUID and fresh salts;
-// no caller of either fixture compares two volumes.
-//
-// key names the configuration and MUST change whenever opts or size does: it
-// is what distinguishes one cached image from another. opts receives the path
-// to format and returns the options; its Device is overwritten with that path.
-//
-// The failure is carried out of the sync.Once rather than reported inside it,
-// for the reason formatWithLibrary gives: a t.Fatalf in there would abort
-// whichever test happened to be first.
+// formattedImage copies a container Format produced from opts once per process per key; key must change with opts or size.
 func formattedImage(t *testing.T, key, name string, size int64, opts func() formatOptionsForTest) string {
 	t.Helper()
 

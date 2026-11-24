@@ -22,10 +22,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
-// This file drives Activate, Deactivate and Lookup against a REAL
-// device-mapper target and a REAL kernel keyring, over a loop device. It
-// needs root (device-mapper and the loop-control ioctls both do) and runs
-// in the devcontainer only, with make integration-test.
+// Drives Activate, Deactivate and Lookup against real device-mapper and keyring over a loop device; root, devcontainer only.
 
 const integrationPassphrase = "dmcrypt-integration-test-passphrase"
 

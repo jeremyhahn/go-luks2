@@ -39,20 +39,11 @@ func (m LockMode) flockOp() int {
 	return unix.LOCK_EX | unix.LOCK_NB
 }
 
-// Lock wait budget and backoff schedule.
-//
-// DefaultLockWait is what Lock spends before giving up. It is a BOUND, not a
-// target: an uncontended lock is taken on the first attempt and costs
-// nothing, and the budget is consumed only when another holder has the
-// device.
+// DefaultLockWait bounds how long Lock waits for another holder; an uncontended lock costs nothing.
 const (
 	DefaultLockWait = 30 * time.Second
 
-	// The backoff runs from 1ms to 100ms. The floor keeps a lock released
-	// microseconds after the first attempt from costing a full sleep; the
-	// ceiling keeps a long wait from turning into a handful of samples that
-	// overshoot the budget. Doubling between them reaches the ceiling in
-	// seven steps, so a 30s wait is roughly 300 attempts rather than 30000.
+	// Backoff doubles from 1ms to 100ms.
 	LockBackoffMin = time.Millisecond
 	LockBackoffMax = 100 * time.Millisecond
 
@@ -60,15 +51,7 @@ const (
 	lockBackoffMax = LockBackoffMax
 )
 
-// Pinned is a descriptor opened on a device or file path, not yet locked.
-//
-// flock does not count holders within one open file description: two shared
-// holders on this descriptor hold ONE lock, and the first LOCK_UN would drop
-// it under the second -- for a file image, where the node flock is
-// cryptsetup's only lock, letting a foreign writer in mid-read. mu guards the
-// holder count, so the flock is taken by the first holder and released by
-// the last, and a writer on this same descriptor waits for the readers
-// rather than converting their lock.
+// Pinned is a descriptor opened on a device or file path, not yet locked; mu counts holders because flock does not count them per description.
 type Pinned struct {
 	path string
 	file *os.File
@@ -96,15 +79,7 @@ func (p *Pinned) File() *os.File { return p.file }
 // Close releases the descriptor without taking any lock.
 func (p *Pinned) Close() error { return p.file.Close() }
 
-// Lock takes the node flock on the pinned descriptor in mode, then
-// cryptsetup's lock for the same device in lockDir, waiting up to wait and
-// measuring the wait on clk. held, if non-nil, runs once both are held,
-// before the caller reads or writes anything under them -- a test hook with
-// no effect in production.
-//
-// IT WAITS, AND THAT IS THE POINT: a bare LOCK_NB with no retry turns
-// ordinary contention for a host-global device into an immediate failure.
-// See pollFlock.
+// Lock takes the node flock then cryptsetup's lock in mode, waiting up to wait on clk; held, if non-nil, is a test hook run once both are held.
 func (p *Pinned) Lock(ctx context.Context, mode LockMode, wait time.Duration, clk clock.Clock, lockDir string, openLockFile OpenLockFileFunc, held func(string)) (*Locked, error) {
 	started := clk.Now()
 	deadline := started.Add(wait)
@@ -122,10 +97,7 @@ func (p *Pinned) Lock(ctx context.Context, mode LockMode, wait time.Duration, cl
 	return &Locked{path: p.path, file: p.file, cryptsetup: cs, pinned: p, mode: mode}, nil
 }
 
-// acquire makes one non-blocking attempt at the node flock in mode, counting
-// holders on this descriptor. A shared holder joins one already held; any
-// other combination with a holder present is contention, reported as
-// EWOULDBLOCK so pollLock waits for it like a foreign holder.
+// acquire makes one non-blocking node-flock attempt, joining a shared holder and reporting any other conflict as EWOULDBLOCK.
 func (p *Pinned) acquire(mode LockMode) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -163,10 +135,7 @@ func (p *Pinned) release(mode LockMode) error {
 	return unix.Flock(int(p.file.Fd()), unix.LOCK_UN)
 }
 
-// LockExisting takes the node flock and cryptsetup's lock, in mode, on a
-// descriptor the caller already opened for its own reasons and whose device
-// number (rdev) it already knows -- the shape an activation's metadata read
-// lock needs, as opposed to Lock's, which opens the descriptor itself.
+// LockExisting takes both locks in mode on a descriptor the caller opened and whose rdev it knows.
 func LockExisting(ctx context.Context, f *os.File, path string, rdev uint64, mode LockMode, wait time.Duration, clk clock.Clock, lockDir string, openLockFile OpenLockFileFunc) (*Locked, error) {
 	started := clk.Now()
 	deadline := started.Add(wait)
@@ -197,16 +166,12 @@ func pollLock(ctx context.Context, path string, started, deadline time.Time, clk
 			return nil
 		}
 
-		// CLASSIFY, do not assume contention. EWOULDBLOCK means someone else
-		// holds it and waiting is the right answer. Anything else -- EBADF,
-		// a descriptor closed underneath us -- will not improve by being
-		// retried, and retrying it for the whole budget would report a real
-		// fault as a timeout.
+		// Only EWOULDBLOCK is contention; any other error is a fault, not retried.
 		if !errors.Is(err, unix.EWOULDBLOCK) {
 			return &errs.Error{Kind: errs.ErrIO, Detail: "could not lock " + path, Err: err}
 		}
 
-		// Checked AFTER an attempt, so a zero budget still tries once.
+		// Checked after an attempt, so a zero budget still tries once.
 		remaining := deadline.Sub(clk.Now())
 		if remaining <= 0 {
 			return &LockTimeoutError{Path: path, Waited: clk.Now().Sub(started), Attempts: attempt, Err: err}
@@ -248,10 +213,7 @@ func (l *Locked) File() *os.File { return l.file }
 // Path is the path the descriptor was opened on.
 func (l *Locked) Path() string { return l.path }
 
-// Unlock gives up both locks. It does not close the descriptor: ownership of
-// it stays with whoever opened it (Pinned.Close for Lock's own open, or the
-// caller itself for LockExisting). It is idempotent, so an early unlock on a
-// success path and a deferred one for every other path can both be written.
+// Unlock gives up both locks, idempotently; it does not close the descriptor.
 func (l *Locked) Unlock() error {
 	if l.released {
 		return nil
@@ -265,17 +227,7 @@ func (l *Locked) Unlock() error {
 	return unix.Flock(int(l.file.Fd()), unix.LOCK_UN)
 }
 
-// Claim reopens the locked descriptor's own inode -- via its /proc/self/fd
-// entry, so the claim targets by construction exactly the file that was
-// locked, never the operator's path again -- with flag (which must include
-// an exclusive-open intent; callers pass os.O_EXCL) added.
-//
-// The kernel grants an exclusive claim only on an open BY PATH: that is a
-// second descriptor beside the locked one, and resolving the operator's path
-// again for it would let a retargeted symlink put the lock on one device and
-// the claim on another. Reopening the locked descriptor's own fd entry closes
-// that window by construction rather than by comparing the two descriptors
-// after the fact.
+// Claim reopens the locked descriptor's own inode through /proc/self/fd with flag (which must include os.O_EXCL), so the claim targets exactly the locked file.
 func (l *Locked) Claim(ctx context.Context, op string, flag int, openFile OpenFunc) (*Claimed, error) {
 	fdPath := "/proc/self/fd/" + strconv.Itoa(int(l.file.Fd())) // #nosec G115 -- a descriptor number fits an int
 	f, err := Open(ctx, op, fdPath, flag, openFile)

@@ -6,14 +6,9 @@ package header
 
 import "errors"
 
-// Sentinels raised only by this package. Re-exported by value from
-// pkg/luks2 (errors.md §4): they read as the bare condition, not
-// "header: ...", because the calling package's errs.Error composes its own
-// prefix.
+// Sentinels raised only by this package, re-exported by value from pkg/luks2.
 var (
-	// ErrUnsupportedRequirement indicates the container declares a mandatory
-	// requirement this package does not implement, so it must not be
-	// modified. The container is still READABLE; see Requirements.
+	// ErrUnsupportedRequirement indicates the container declares an unimplemented mandatory requirement and must not be modified; it is still readable.
 	ErrUnsupportedRequirement = errors.New("luks2: container declares a mandatory requirement this package does not implement")
 
 	// ErrAmbiguousJSONMember indicates a LUKS2 metadata object that names one
@@ -41,9 +36,6 @@ var (
 	// algorithm field names anything but sha256.
 	ErrUnsupportedHeaderChecksum = errors.New("header checksum algorithm is not sha256")
 
-	// errOverflow is the cause reported by the Safe*ToInt* conversions in
-	// codec.go. It is never returned on its own: every caller wraps it in an
-	// *errs.Error with Kind ErrInvalidHeader, so a caller classifies the
-	// failure the same way regardless of which conversion produced it.
+	// errOverflow is the cause of a failed Safe*ToInt* conversion, always wrapped as ErrInvalidHeader.
 	errOverflow = errors.New("integer overflow detected")
 )

@@ -64,10 +64,7 @@ func TestVolumeFormatWritesAPBKDF2Container(t *testing.T) {
 	}
 }
 
-// TestVolumeFormatWritesAnArgon2idContainer: a zero KDFParams outside FIPS
-// mode is Argon2id, at the lane's floor cost (m=64MiB, t=1, p=1). The
-// Volume's sys is out of FIPS mode whatever the process is, so this runs in
-// a FIPS process too: Format and Unlock derive under the Volume's own mode.
+// TestVolumeFormatWritesAnArgon2idContainer: a zero KDFParams outside FIPS mode is Argon2id at m=64MiB, t=1, p=1.
 func TestVolumeFormatWritesAnArgon2idContainer(t *testing.T) {
 	defer parallel(t)()
 

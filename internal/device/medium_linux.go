@@ -20,12 +20,7 @@ import (
 // use: the largest logical block size a device this library opens presents.
 const directIOAlign = 4096
 
-// ReadPastCache reads up to n bytes of path from offset off past the page
-// cache: an O_DIRECT read. Where O_DIRECT is refused, it falls back to an
-// ordinary read only if the page cache IS the storage (CacheIsTheStorage) --
-// there is no other medium to disagree with -- and otherwise fails with
-// ErrUnsupported: a read that cannot be confirmed is not reported as
-// confirmed.
+// ReadPastCache reads up to n bytes of path at off with O_DIRECT; without O_DIRECT it falls back only on memory filesystems, else ErrUnsupported.
 func ReadPastCache(ctx context.Context, op, path string, off int64, n int, openFile OpenFunc) ([]byte, error) {
 	f, err := Open(ctx, op, path, os.O_RDONLY|unix.O_DIRECT, openFile)
 	if err != nil {
@@ -85,10 +80,7 @@ func readBufferedAt(ctx context.Context, path string, off int64, n int, openFile
 	return buf[:read], nil
 }
 
-// CacheIsTheStorage reports whether path lives on a memory filesystem
-// (tmpfs, ramfs), where the page cache is the only copy there is. A block
-// device never does, whatever filesystem its node sits on (devtmpfs is
-// tmpfs).
+// CacheIsTheStorage reports whether path lives on tmpfs or ramfs; a block device never does.
 func CacheIsTheStorage(path string) (bool, error) {
 	var st unix.Stat_t
 	if err := unix.Stat(path, &st); err != nil {
@@ -101,11 +93,7 @@ func CacheIsTheStorage(path string) (bool, error) {
 	if err := unix.Statfs(path, &fsStat); err != nil {
 		return false, &errs.Error{Kind: errs.ErrIO, Detail: "failed to statfs " + path, Err: err}
 	}
-	// Statfs_t.Type is int32 on 386 and arm and int64 on amd64 and arm64, and
-	// RAMFS_MAGIC (0x858458f6) does not fit an int32: compared as the
-	// constant, it does not compile on the 32-bit targets. Every filesystem
-	// magic compared here fits in 32 bits, and an int32 field holds those
-	// same 32 bits, so the field is compared as a uint32.
+	// Statfs_t.Type is int32 on 32-bit targets, so compare as uint32.
 	return IsMemoryFilesystemMagic(uint32(fsStat.Type)), nil // #nosec G115 -- the magics compared fit 32 bits; the conversion keeps them
 }
 

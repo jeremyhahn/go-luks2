@@ -17,10 +17,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
-// The KDF options create, recovery add, addkey and changekey share, named as
-// cryptsetup names them: --pbkdf, --hash, --iter-time,
-// --pbkdf-force-iterations, --pbkdf-memory and --pbkdf-parallel
-// (docs/volumes/cli.md#kdf-options).
+// KDF options shared by create, recovery add, addkey and changekey, named as cryptsetup names them (docs/volumes/cli.md#kdf-options).
 
 // pbkdf2Hashes are the hashes --hash accepts. SHA-1 is not among them: it is
 // accepted for reading legacy headers only, never for writing a new one.
@@ -39,10 +36,7 @@ const kdfFlagsHelp = `  --pbkdf <name>                  argon2id, argon2i or pbk
   --pbkdf-parallel <n>             Argon2 parallelism
 `
 
-// kdfFlags holds the KDF options as given. Every value is kept as text, and
-// whether it was given at all is asked of the parser, so "not given", "given
-// as 0" and "given empty" stay distinguishable: an explicit zero or an empty
-// value is refused rather than read as "use the default".
+// kdfFlags holds the KDF options as text, so an explicit zero or empty value is refused rather than read as the default.
 type kdfFlags struct {
 	command         string
 	given           func(name string) bool
@@ -68,11 +62,7 @@ func declareKDFFlags(f *flags) *kdfFlags {
 	}
 }
 
-// resolve validates the options and returns the KDFParams they resolve to,
-// plus a label for the operator ("Argon2id", "PBKDF2-SHA512"). Nothing has
-// been read, created or written when it returns an error, which is the
-// point of calling it before any device is touched or passphrase is asked
-// for.
+// resolve validates the options and returns their KDFParams and an operator label, before any device or passphrase is touched.
 func (f *kdfFlags) resolve() (luks2.KDFParams, string, error) {
 	for _, opt := range []struct {
 		name  string
@@ -206,10 +196,7 @@ func hashFromName(name string) (crypto.Hash, error) {
 	}
 }
 
-// resolveOptional is resolve for commands that may leave the KDF to the
-// library: with no KDF option given it returns a zero KDFParams, which
-// AddKeyslot and ChangeKeyslot read as "the library default, or the
-// container's inherited cost". Any option given resolves as in resolve.
+// resolveOptional is resolve, but returns a zero KDFParams when no KDF option was given.
 func (f *kdfFlags) resolveOptional() (luks2.KDFParams, error) {
 	any := false
 	for _, name := range []string{"pbkdf", "hash", "iter-time", "pbkdf-force-iterations", "pbkdf-memory", "pbkdf-parallel"} {

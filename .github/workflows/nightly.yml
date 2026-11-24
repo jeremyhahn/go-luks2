@@ -1,21 +1,6 @@
 name: Nightly
 
-# nightly-template v1.0 — the known-red and long-horizon jobs, off the push path.
-#
-# Owner ruling 2026-08-20 (fail-fast pipeline for iteration speed; issue #14):
-# jobs that are known-red with tracked issues, or that verify a slow-moving
-# property, do NOT run per push — a known-red job burning runner-minutes per
-# push produces information we already have. They run here nightly, plus on
-# demand via workflow_dispatch, and are NOT in any merge gate. When their
-# tracked issues land, a job may move back to ci.yml — that move is deliberate,
-# not automatic.
-#
-# SCHEDULED at `45 5 * * *` (05:45 UTC daily). Owner order, 2026-11-22: "the
-# nightlys shouldnt require any manual executiion, it should be getting run
-# automatically!" It supersedes the 2026-10-11 no-schedule rule, for this
-# workflow only: no other workflow is scheduled, and workflow_dispatch stays
-# for a run on demand. FIPS moved to ci.yml's full tier, which runs it on
-# every push to main as well. What remains is trivy.
+# Long-horizon jobs off the push path: scheduled daily at 05:45 UTC and on demand, in no merge gate.
 on:
   workflow_dispatch:
   schedule:
@@ -33,8 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      # The pinned trivy release archive on BOTH hosts, accepted only if it
-      # matches the SHA-256 pinned in the Makefile (#247). This replaced the
+      # The pinned trivy release archive, accepted only if it matches the SHA-256 pinned in the Makefile.
       # trivy action at its floating `master` branch on github.com, and a piped
       # install of trivy's contrib/install.sh from its main branch everywhere
       # else: an unreviewed script from a moving branch that then installed
@@ -42,7 +26,7 @@ jobs:
       - name: Install trivy (pinned, SHA-256 verified)
         run: make trivy-install
 
-      # Code scanning is github.com-only: Gitea has no code-scanning API.
+      # Code scanning is github.com-only.
       - name: Trivy scan (SARIF for code scanning)
         if: github.server_url == 'https://github.com'
         run: make trivy-sarif
@@ -54,16 +38,10 @@ jobs:
           sarif_file: trivy-results.sarif
           category: trivy-fs
 
-      # The gate: vulnerabilities and secrets, CRITICAL/HIGH fail the job. The
-      # same target the release runs as a blocking stage.
+      # The gate: critical and high vulnerabilities and secrets fail the job; the release runs the same target.
       - name: Trivy gate (fail on CRITICAL/HIGH)
         run: make trivy-fs TOOLS_REQUIRED=1
 
-      # Misconfiguration scanning (owner ruling 2026-08-20). It runs HERE, with
-      # an advisory exit code, so findings surface daily without a brand-new
-      # finding class blocking every merge on the day it is switched on.
-      # Promote it to the PR gate once its baseline is clean — and promote it,
-      # rather than leaving it advisory forever, which is how an advisory scan
-      # becomes decoration.
+      # Misconfiguration scanning, advisory until its baseline is clean.
       - name: Trivy misconfiguration scan (advisory)
         run: make trivy-misconfig

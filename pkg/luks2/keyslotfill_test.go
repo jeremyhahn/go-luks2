@@ -19,19 +19,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// Tests for what occupies the keyslots area where no key material does.
-//
-// The property under test is INDISTINGUISHABILITY, not secrecy. Encrypted
-// AF-split key material is indistinguishable from random; a zeroed region is
-// distinguishable from all of it at a glance. So a container whose unused and
-// freed keyslot ranges are zero publishes, to anyone holding the drive, how
-// many credentials it has, where they sit and which slots were destroyed --
-// none of which any keyslot's encryption was ever asked to hide. cryptsetup
-// fills both ranges with random; so does this package now.
-//
-// These tests measure the FILL, not the RNG. The population statistics they
-// assert on are the ones a zero fill, a constant fill or a truncated fill all
-// fail; they are not a randomness test and are not offered as one.
+// Unused and freed keyslot ranges must be random-filled, as cryptsetup does; these tests check the fill, not the RNG.
 
 // entropyOf reports the distinct-byte count and the longest run of zeroes in b.
 // Both are cheap and both separate "random" from every failure mode that
@@ -63,23 +51,10 @@ func entropyOf(b []byte) (distinct, longestZeroRun int) {
 // it the population statistics stop separating a real fill from an unlucky one.
 const minRandomFillBytes = 2048
 
-// minDistinctBytes is the alphabet a filled range must use.
-//
-// It is 200 and not 256 ON PURPOSE. Over n uniform bytes the expected number of
-// values NEVER drawn is 256*(255/256)^n -- 0.086 at n = 2048 -- so "all 256
-// appeared" is a coin flip at these sizes and a test asserting it is a flake
-// waiting to happen (it flaked on the 2048-byte keyslot tail the first time it
-// ran). 200 is far enough below the mean that a uniform source cannot reach it,
-// and far enough above the alphabets the real defects produce -- 1 for a zero
-// or constant fill, a handful for a pattern -- to catch every one of them.
+// minDistinctBytes is the alphabet a filled range must use; 200, not 256, so a uniform source never fails it.
 const minDistinctBytes = 200
 
-// requireRandomFill fails when b does not look like CSPRNG output.
-//
-// The zero-run bound is the load-bearing one. 4096 consecutive zeroes have
-// probability 256^-4096 under a uniform source, so the bound never fires by
-// chance, while it fires immediately on a region the fill never reached -- and
-// a short write is the realistic defect, not a weak RNG.
+// requireRandomFill fails when b does not look like CSPRNG output; the zero-run bound catches short writes.
 func requireRandomFill(t *testing.T, what string, b []byte) {
 	t.Helper()
 
@@ -400,15 +375,12 @@ func TestFormatFillsTheWholeKeyslotsAreaWithRandom(t *testing.T) {
 		t.Fatalf("segment 0 has an unparseable offset: %v", err)
 	}
 
-	// The material itself is keySize*header.AFStripes bytes; the rest of the declared
-	// area is padding, and it used to be zero.
+	// The material is keySize*header.AFStripes bytes; the rest of the area is padding.
 	material := int64(metadata.Keyslots["0"].KeySize) * header.AFStripes
 	requireRandomFill(t, "the tail of keyslot 0's declared area", image[areaOffset+material:areaOffset+areaSize])
 	requireRandomFill(t, "the unallocated keyslots region", image[areaOffset+areaSize:dataOffset])
 
-	// The DATA SEGMENT must not have been touched. Format encrypts nothing
-	// below dataOffset and filling past the keyslots area would be a
-	// catastrophic bug rather than a hardening measure.
+	// The data segment must not have been touched.
 	for i, b := range image[dataOffset:] {
 		if b != 0 {
 			t.Fatalf("Format wrote %q into the data segment at offset %d", b, dataOffset+int64(i))

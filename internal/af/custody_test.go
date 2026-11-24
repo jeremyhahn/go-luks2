@@ -55,13 +55,7 @@ func legacyHashBlock(block []byte, h hash.Hash, iv int) []byte {
 	return h.Sum(nil)
 }
 
-// TestDiffuseInPlaceMatchesTheAllocatingFormulation is the guard on the
-// rewrite that removed ~4000 heap copies of diffusion state per operation.
-//
-// Diffusion feeds every stripe of the AF split, so a single differing byte here
-// produces containers this library writes and cannot read -- and, worse,
-// containers cryptsetup cannot read either. Round-tripping through this package
-// would not catch it, because both directions would drift together.
+// TestDiffuseInPlaceMatchesTheAllocatingFormulation checks in-place diffusion against the allocating formulation byte for byte.
 func TestDiffuseInPlaceMatchesTheAllocatingFormulation(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -152,12 +146,7 @@ func TestSplitRoundTripsWithoutLeavingProtectedMemory(t *testing.T) {
 	}
 }
 
-// TestMergeAgreesWithTheUnprotectedMerge pins Merge against mergeInto -- the
-// same merge core, run directly over plain slices -- over the SAME stripes,
-// which is the only way to compare them: a split draws fresh randomness every
-// time, so two splits of one key never match. This proves the enclave
-// plumbing (secret.Borrow, the locked diffusion buffer) does not change the
-// answer relative to computing over ordinary memory.
+// TestMergeAgreesWithTheUnprotectedMerge pins Merge against mergeInto over the same stripes.
 func TestMergeAgreesWithTheUnprotectedMerge(t *testing.T) {
 	const (
 		stripes   = 32

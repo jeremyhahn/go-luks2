@@ -91,12 +91,7 @@ func CheckFilesystemDetailed(devicePath string, fstype FilesystemType, repair bo
 	return res, nil
 }
 
-// DetectFilesystem detects the filesystem on the unlocked device-mapper
-// mapping named by mappingName, the way the pre-redesign library's
-// luks2.DetectFilesystem did: mappingName is resolved to the mapping's device
-// node first (dmcrypt.Lookup, the same resolution MakeFilesystem and Mount
-// already do), since pkg/filesystem.Detect takes a device path, not a mapping
-// name.
+// DetectFilesystem detects the filesystem on the mapping mappingName, resolved to its device node through dmcrypt.Lookup.
 func DetectFilesystem(mappingName string) (FilesystemType, error) {
 	ctx := context.Background()
 	m, err := dmcrypt.Lookup(ctx, mappingName)

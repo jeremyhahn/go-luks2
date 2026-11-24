@@ -15,50 +15,9 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// JSON passthrough for the LUKS2 metadata objects.
-//
-// WHY THIS EXISTS
-//
-// Every mutation this package performs -- AddKey, RemoveKey, ChangeKey,
-// ImportToken, RemoveToken -- goes through writeHeaderTo, and
-// writeHeaderTo re-marshals the ENTIRE metadata blob. So the header that
-// lands on disk contains exactly what these Go structs managed to hold, and a
-// JSON member no field models is not left alone: it is deleted, from an object
-// the operation never meant to touch.
-//
-// MEASURED, against systemd 255 and cryptsetup 2.7.0: a complete eight-member
-// `systemd-fido2` token was imported with `cryptsetup token import`, an
-// unrelated key was added with AddKey, and the token came back with six --
-// `fido2-clientPin-required` and `fido2-uv-required` were gone. That token no
-// longer describes the credential it was enrolled from.
-//
-// So each object carries the members it does not model, verbatim, and writes
-// them back out. The typed half always wins: a member the struct produces is
-// never overwritten by a carried one, because the struct is what the rest of
-// this package actually reasons about.
-//
-// WHY json.RawMessage AND NOT interface{}
-//
-// A JSON number decoded into interface{} becomes a float64. 2^64-1 comes back
-// as 18446744073709552000 -- a different number, silently -- and `1e3` comes
-// back as `1000`. LUKS2 objects carry byte offsets, shift sizes and TPM key
-// handles that reach that far, and a passthrough that alters a value it was
-// asked to preserve is worse than one that admits it dropped it. RawMessage is
-// the original bytes and cannot lie about them.
-//
-// WHAT IT COVERS
-//
-// Every object the metadata models: keyslots and their area, kdf and af,
-// tokens, segments, digests, config and config.requirements (#152). Members
-// at the top level of the metadata are not carried. Before any of them is
-// decoded, decodeMembers refuses an object that names a member twice or names
-// a modeled member in another case (#248).
+// JSON passthrough: each metadata object keeps the members it does not model as json.RawMessage and writes them back, so a rewrite never drops them; the typed half wins.
 
-// unknownFields holds the members of one JSON object that the Go struct for
-// that object does not model, exactly as they were read.
-//
-// A nil map is the normal state: an object this package fully understands
-// carries no passthrough at all rather than an empty one.
+// unknownFields holds one object's unmodeled members as read; nil when there are none.
 type unknownFields map[string]json.RawMessage
 
 // The metadata objects that carry a passthrough, named for the errors they
@@ -83,16 +42,9 @@ const (
 	metadataJSONEncode = "encode"
 )
 
-// MetadataJSONError reports which metadata object failed to convert, in which
-// direction, and why.
-//
-// The encoding/json cause stays reachable through Unwrap, so a caller that
-// already matched on *json.SyntaxError or *json.UnmarshalTypeError keeps
-// working while gaining the object name it never had.
+// MetadataJSONError reports which metadata object failed to convert, in which direction, and why; the cause stays reachable through Unwrap.
 type MetadataJSONError struct {
-	// Object names the LUKS2 object -- "keyslot", "token", "kdf" and so on.
-	// It is the object's KIND and never its id: an id would have to be
-	// threaded through encoding/json, which does not carry one.
+	// Object names the LUKS2 object kind, never its id.
 	Object string
 
 	// Op is metadataJSONDecode or metadataJSONEncode.
@@ -122,15 +74,7 @@ func (e *MetadataJSONError) Is(target error) bool {
 	return target == ErrMetadataJSON
 }
 
-// splitKnown returns the members of raw that are NOT in known.
-//
-// Removing the modeled members is what keeps a value from being held twice --
-// once typed and once raw -- which is how the two halves would come to
-// disagree about what the object says. It does not modify raw: the caller's
-// map is its own.
-//
-// known has at most a handful of entries, so a linear scan beats building a
-// set, and the common case allocates nothing at all.
+// splitKnown returns the members of raw not in known, without modifying raw.
 func splitKnown(raw map[string]json.RawMessage, known []string) unknownFields {
 	var unknown unknownFields
 	for name, value := range raw {
@@ -145,12 +89,7 @@ func splitKnown(raw map[string]json.RawMessage, known []string) unknownFields {
 	return unknown
 }
 
-// containsMember reports whether names holds name, matching case-
-// INSENSITIVELY to agree with how encoding/json itself binds a decoded
-// member to a struct field. A case variant of a modeled member never gets
-// this far on a decode -- decodeMembers refuses it first -- so this is the
-// same answer an exact comparison would give, kept in encoding/json's terms
-// so the typed half and the carried half can never both claim one member.
+// containsMember reports whether names holds name, case-insensitively as encoding/json binds fields.
 func containsMember(names []string, name string) bool {
 	for _, candidate := range names {
 		if strings.EqualFold(candidate, name) {
@@ -160,14 +99,7 @@ func containsMember(names []string, name string) bool {
 	return false
 }
 
-// decodeMembers splits the JSON object data into its members, refusing an
-// object that names a member twice or names one of known in a different case.
-// See ErrAmbiguousJSONMember.
-//
-// It runs BEFORE the typed decode, because the typed decode is where the
-// ambiguity is resolved silently. A map loses duplicates, so the object is
-// read token by token. A value that is not an object is left to the typed
-// decode, which reports it with encoding/json's own error type.
+// decodeMembers splits object data into members before the typed decode, refusing duplicates or case variants of known (ErrAmbiguousJSONMember).
 func decodeMembers(object string, data []byte, known []string) (map[string]json.RawMessage, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
@@ -199,18 +131,7 @@ func decodeMembers(object string, data []byte, known []string) (map[string]json.
 	return members, nil
 }
 
-// mergeInto splices the carried members into typed -- the JSON object the
-// struct half produced -- and returns the combined object.
-//
-// It appends rather than re-encoding, so the struct's member ORDER survives:
-// cryptsetup emits a keyslot's members in a fixed order, this package matches
-// it through field declaration order, and decoding the typed half into a map
-// to merge would destroy that. A member the struct already produced is skipped,
-// which is what makes the typed half authoritative.
-//
-// Carried members are emitted in sorted order. Go randomizes map iteration, so
-// without the sort the same unchanged metadata would marshal to different
-// bytes on every write.
+// mergeInto appends the carried members to typed in sorted order, keeping the struct's member order and skipping members typed already produced.
 func (u unknownFields) mergeInto(typed []byte, object string) ([]byte, error) {
 	if len(u) == 0 {
 		return typed, nil
@@ -254,10 +175,7 @@ func (u unknownFields) mergeInto(typed []byte, object string) ([]byte, error) {
 		out.Write(quoted)
 		out.WriteByte(':')
 
-		// Compacting validates the member and strips the indentation it
-		// carried in from the header's JSON area, so MarshalJSON returns a
-		// well-formed compact object on its own rather than relying on the
-		// caller to normalize it.
+		// Compact the member so MarshalJSON returns a well-formed compact object.
 		if err := json.Compact(&out, u[name]); err != nil {
 			return nil, &MetadataJSONError{Object: object, Op: metadataJSONEncode, Member: name, Err: err}
 		}
@@ -267,13 +185,7 @@ func (u unknownFields) mergeInto(typed []byte, object string) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// JSONMemberNames returns the JSON member names the exported fields of a
-// struct type marshal to.
-//
-// The lists below are DERIVED rather than written out, because a hand-kept
-// list is one that goes stale: the first field added without touching it would
-// be modeled by the struct AND carried as unmodeled, and the object would
-// then hold the same member twice.
+// JSONMemberNames returns the JSON member names a struct type's exported fields marshal to.
 func JSONMemberNames(t reflect.Type) []string {
 	names := make([]string, 0, t.NumField())
 	for i := 0; i < t.NumField(); i++ {
@@ -327,32 +239,7 @@ func (k *Keyslot) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// MarshalJSON encodes a keyslot together with the members it carried in.
-//
-// The receiver is a VALUE so that it is in the method set reached wherever a
-// keyslot is encountered as one -- json.Marshal of a bare Keyslot does not
-// take its address, and a pointer-receiver marshaler is simply not called
-// there. See Token.MarshalJSON.
-//
-// It does NOT normalize priority. Whether a default priority is written is
-// decided where the keyslot is BUILT, in createMetadata; a serializer that
-// silently dropped a value the caller set would be deciding it twice, in the
-// one place a caller cannot see.
-// EVERY MarshalJSON BELOW ENCODES THROUGH marshalCanonicalJSON, NOT json.Marshal.
-//
-// encoding/json HTML-escapes <, > and & by default; json-c, which is what
-// cryptsetup writes the header with, emits them literally. The header's encoder
-// turns that off (marshalCanonicalJSON, codec.go), but a type implementing
-// Marshaler is encoded by the bytes it RETURNS: the outer encoder compacts them
-// into the output and, with escaping off, neither adds escapes nor removes ones
-// already there. So a json.Marshal inside one of these methods reintroduces the
-// exact escapes the canonical encoder exists to avoid, and does it on the
-// members most likely to carry those characters -- a foreign token's strings and
-// the names of members this package does not model.
-//
-// Measured before the fix: a fido2-rp of `a<b>c&d` round-tripped as
-// `a<b>c&d`, which is a different byte sequence for the same
-// string and breaks byte-for-byte conformance and the header digest with it.
+// MarshalJSON encodes a keyslot with its carried members; value receiver, and canonical encoding (no HTML escaping) like every marshaler here.
 func (k Keyslot) MarshalJSON() ([]byte, error) {
 	type alias Keyslot
 	typed, err := MarshalCanonicalJSON(alias(k))
@@ -362,13 +249,7 @@ func (k Keyslot) MarshalJSON() ([]byte, error) {
 	return k.unknown.mergeInto(typed, metadataObjectKeyslot)
 }
 
-// UnmarshalJSON decodes a keyslot area and carries any member this package
-// does not model.
-//
-// The nested objects need this as much as the keyslot around them does. A
-// reencryption keyslot's area is where cryptsetup keeps `hash`, `sector_size`
-// and `shift_size`, none of which this package models, and all of which it
-// needs to resume an interrupted reencryption.
+// UnmarshalJSON decodes a keyslot area and carries any member this package does not model.
 func (a *KeyslotArea) UnmarshalJSON(data []byte) error {
 	raw, err := decodeMembers(metadataObjectKeyslotArea, data, keyslotAreaKnownMembers)
 	if err != nil {
@@ -449,12 +330,7 @@ func (a AntiForensic) MarshalJSON() ([]byte, error) {
 	return a.unknown.mergeInto(typed, metadataObjectAntiForensic)
 }
 
-// UnmarshalJSON decodes a token and carries any member this package does not
-// model.
-//
-// Tokens are where the passthrough earns most of its keep: the token types
-// that matter are defined by systemd, not by this package, and a token is
-// written once by whatever enrolled it and then only ever read.
+// UnmarshalJSON decodes a token and carries any member this package does not model.
 func (t *Token) UnmarshalJSON(data []byte) error {
 	raw, err := decodeMembers(metadataObjectToken, data, tokenKnownMembers)
 	if err != nil {
@@ -470,12 +346,7 @@ func (t *Token) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// MarshalJSON encodes a token together with the members it carried in.
-//
-// The receiver is a VALUE so that it fires wherever a token is reached,
-// including through the map[string]*Token that Metadata holds. A marshaler
-// that is never called drops exactly what it was written to preserve, and
-// every direct test of it still passes.
+// MarshalJSON encodes a token with its carried members; value receiver so it fires through map[string]*Token too.
 func (t Token) MarshalJSON() ([]byte, error) {
 	type alias Token
 	typed, err := MarshalCanonicalJSON(alias(t))
@@ -502,13 +373,7 @@ func (x *Segment) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// MarshalJSON encodes a segment together with the members it carried in.
-//
-// VALUE receiver, like every other marshaler here. A pointer-receiver
-// MarshalJSON is simply not in the method set reached by json.Marshal of a bare
-// value, so it stops firing wherever the object is encountered as one -- while
-// every test that happens to hold a pointer keeps passing. That is the hazard
-// #143 measured and #151 was told to pin per type.
+// MarshalJSON encodes a segment with its carried members; value receiver.
 func (x Segment) MarshalJSON() ([]byte, error) {
 	type alias Segment
 	typed, err := MarshalCanonicalJSON(alias(x))
@@ -535,13 +400,7 @@ func (x *Digest) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// MarshalJSON encodes a digest together with the members it carried in.
-//
-// VALUE receiver, like every other marshaler here. A pointer-receiver
-// MarshalJSON is simply not in the method set reached by json.Marshal of a bare
-// value, so it stops firing wherever the object is encountered as one -- while
-// every test that happens to hold a pointer keeps passing. That is the hazard
-// #143 measured and #151 was told to pin per type.
+// MarshalJSON encodes a digest with its carried members; value receiver.
 func (x Digest) MarshalJSON() ([]byte, error) {
 	type alias Digest
 	typed, err := MarshalCanonicalJSON(alias(x))
@@ -568,13 +427,7 @@ func (x *Config) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// MarshalJSON encodes a config together with the members it carried in.
-//
-// VALUE receiver, like every other marshaler here. A pointer-receiver
-// MarshalJSON is simply not in the method set reached by json.Marshal of a bare
-// value, so it stops firing wherever the object is encountered as one -- while
-// every test that happens to hold a pointer keeps passing. That is the hazard
-// #143 measured and #151 was told to pin per type.
+// MarshalJSON encodes a config with its carried members; value receiver.
 func (x Config) MarshalJSON() ([]byte, error) {
 	type alias Config
 	typed, err := MarshalCanonicalJSON(alias(x))

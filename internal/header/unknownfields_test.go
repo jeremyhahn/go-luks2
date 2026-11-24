@@ -16,16 +16,7 @@ import (
 
 func intPtr(i int) *int { return &i }
 
-// realSystemdFIDO2Token is the token systemd-cryptenroll writes, member for
-// member, in the order it writes them.
-//
-// It is not a sketch of one. The eight member names were read out of the
-// systemd 255 binary's own string table (`fido2-clientPin-required` included,
-// with exactly that camelCase), the credential and salt are standard base64
-// with padding, the salt decodes to 32 raw bytes, and `fido2-rp` carries the
-// constant systemd hardcodes. The whole point of the passthrough is that a
-// token like this one comes back off the disk unchanged, so a fixture that is
-// only approximately a real token would prove approximately nothing.
+// realSystemdFIDO2Token is the token systemd-cryptenroll writes, member for member, in its order.
 const realSystemdFIDO2Token = `{
 	"type": "systemd-fido2",
 	"keyslots": ["1"],
@@ -37,15 +28,7 @@ const realSystemdFIDO2Token = `{
 	"fido2-uv-required": false
 }`
 
-// realReencryptKeyslot is the shape cryptsetup gives the keyslot it allocates
-// for an online reencryption. `mode`, `direction`, and the area's `hash`,
-// `sector_size` and `shift_size` are all members this package does not model;
-// every one of them is named in libcryptsetup's string table and in the LUKS2
-// on-disk format specification's reencryption section.
-//
-// It is here because a reencrypting container is the case where losing an
-// unmodeled member is not cosmetic: cryptsetup resumes an interrupted
-// reencryption from exactly these values.
+// realReencryptKeyslot is the keyslot cryptsetup allocates for an online reencryption, with members this package does not model.
 const realReencryptKeyslot = `{
 	"type": "reencrypt",
 	"key_size": 1,
@@ -63,9 +46,7 @@ const realReencryptKeyslot = `{
 
 func boolPtr(b bool) *bool { return &b }
 
-// asObject parses JSON into a generic map so two encodings can be compared by
-// VALUE rather than by bytes. Member order and insignificant whitespace are
-// not part of what a passthrough promises to preserve; the members are.
+// asObject parses JSON into a generic map so encodings are compared by value.
 func asObject(t *testing.T, data []byte) map[string]any {
 	t.Helper()
 
@@ -110,12 +91,7 @@ func memberOrder(t *testing.T, data []byte) []string {
 	return names
 }
 
-// TestTokenSurvivesAMetadataRewrite is the bug this mechanism exists for.
-//
-// WriteHeaderTo re-marshals the WHOLE metadata blob on every mutation, so a
-// token nobody touched is rewritten from whatever the Go struct managed to
-// hold. Before the passthrough, a complete systemd-fido2 token went in with
-// eight members and came back with six.
+// TestTokenSurvivesAMetadataRewrite checks an untouched token keeps all its members through a metadata rewrite.
 func TestTokenSurvivesAMetadataRewrite(t *testing.T) {
 	var token Token
 	if err := json.Unmarshal([]byte(realSystemdFIDO2Token), &token); err != nil {
@@ -149,14 +125,7 @@ func TestTokenSurvivesAMetadataRewrite(t *testing.T) {
 	}
 }
 
-// TestTokenMarshalJSONFiresThroughAMapOfPointers pins the failure mode that
-// makes a passthrough look like it works and silently do nothing.
-//
-// metadata.Tokens is map[string]*Token. A MarshalJSON declared so that it is
-// not in the method set reached at that site is never called, the unmodeled
-// members are dropped exactly as before, and every direct test of MarshalJSON
-// still passes. So the assertion is made at the site that matters, and at the
-// two others a caller can reach.
+// TestTokenMarshalJSONFiresThroughAMapOfPointers checks MarshalJSON is reached through map[string]*Token.
 func TestTokenMarshalJSONFiresThroughAMapOfPointers(t *testing.T) {
 	var token Token
 	if err := json.Unmarshal([]byte(`{"type":"acme-widget","keyslots":["0"],"widget-serial":"XJ-11"}`), &token); err != nil {
@@ -230,9 +199,7 @@ func TestKeyslotSurvivesAMetadataRewrite(t *testing.T) {
 		t.Fatalf("failed to marshal the rewritten keyslot: %v", err)
 	}
 
-	// The WHOLE object, not a chosen subset. A reencrypt keyslot must come
-	// back with the members it had and no others -- nothing dropped, and
-	// equally nothing invented.
+	// The whole object: nothing dropped, nothing invented.
 	want := asObject(t, []byte(realReencryptKeyslot))
 	got := asObject(t, rewritten)
 	if !reflect.DeepEqual(want, got) {
@@ -240,15 +207,7 @@ func TestKeyslotSurvivesAMetadataRewrite(t *testing.T) {
 	}
 }
 
-// TestLuks2KeyslotStillRequiresItsAfAndKdf is the other half of removing the
-// `"af": null` emission.
-//
-// The invariant it used to gesture at is real and is still enforced -- just
-// where invariants belong. ValidateKeyslot refuses a luks2 keyslot with no kdf
-// or no af as ErrInvalidKeyslot, which is the value the keyslot scan reads as
-// "this slot is unusable, try the next one"; a null member in the JSON never
-// refused anything. The exemption for other types is what makes a container
-// mid-reencryption still readable.
+// TestLuks2KeyslotStillRequiresItsAfAndKdf: ValidateKeyslot refuses a luks2 keyslot without kdf or af.
 func TestLuks2KeyslotStillRequiresItsAfAndKdf(t *testing.T) {
 	area := &KeyslotArea{Type: "raw", Offset: "32768", Size: "258048", Encryption: "aes-xts-plain64", KeySize: 64}
 
@@ -301,13 +260,7 @@ func TestLuks2KeyslotStillRequiresItsAfAndKdf(t *testing.T) {
 	}
 }
 
-// TestUnmodeledNumbersSurviveByteExact is why the unknown members are held as
-// json.RawMessage and not as interface{}.
-//
-// Decoded into interface{}, a JSON number becomes a float64. 2^64-1 is not
-// representable as a float64, so it comes back as 18446744073709552000 -- a
-// DIFFERENT number, silently. A TPM key handle, a byte offset and a shift size
-// are all values a LUKS2 object can carry that far up.
+// TestUnmodeledNumbersSurviveByteExact: unknown members are json.RawMessage so large numbers survive exactly.
 func TestUnmodeledNumbersSurviveByteExact(t *testing.T) {
 	const source = `{"type":"acme","keyslots":[],` +
 		`"big":18446744073709551615,` +
@@ -338,11 +291,6 @@ func TestUnmodeledNumbersSurviveByteExact(t *testing.T) {
 }
 
 // TestTypedFieldWinsOverAnUnmodeledMemberOfTheSameName pins the merge rule.
-//
-// splitKnown should make this unreachable by construction, so the check is
-// made against a hand-built unknownFields: if the two halves ever do disagree,
-// the value the package actually understands is the one that reaches the disk,
-// and the object is still a legal JSON object with no duplicate member.
 func TestTypedFieldWinsOverAnUnmodeledMemberOfTheSameName(t *testing.T) {
 	token := Token{
 		Type:    "systemd-recovery",
@@ -406,10 +354,7 @@ func TestSplitKnownReturnsNilWhenEverythingIsModelled(t *testing.T) {
 	}
 }
 
-// TestSplitKnownIsCaseInsensitive matches encoding/json's own decode rule:
-// json.Unmarshal binds a member to a struct field case-INSENSITIVELY when no
-// exact match exists, so "Type" decodes into Keyslot.Type exactly as "type"
-// does.
+// TestSplitKnownIsCaseInsensitive matches encoding/json's case-insensitive member binding.
 func TestSplitKnownIsCaseInsensitive(t *testing.T) {
 	raw := map[string]json.RawMessage{
 		"Type":     json.RawMessage(`"luks2"`),
@@ -423,13 +368,7 @@ func TestSplitKnownIsCaseInsensitive(t *testing.T) {
 	}
 }
 
-// TestKeyslotCaseVariantMemberIsRefused is the #153 finding 2 repro, with the
-// answer #248 changed. A keyslot spelling its type member "Type" used to be
-// bound to the typed field by encoding/json's case-insensitive match and
-// re-emitted as "type". cryptsetup's json-c is case-sensitive and sees no type
-// at all, so the two implementations read different keyslots out of the same
-// bytes, and this package's next write silently rewrote the member into the
-// one cryptsetup reads. Such an object is now refused, never interpreted.
+// TestKeyslotCaseVariantMemberIsRefused: a keyslot spelling "Type" is refused, since json-c is case-sensitive.
 func TestKeyslotCaseVariantMemberIsRefused(t *testing.T) {
 	const in = `{"Type":"luks2","key_size":64,"area":{"type":"raw","offset":"1","size":"2"}}`
 
@@ -595,9 +534,7 @@ func TestFIDO2BooleansCanSayFalse(t *testing.T) {
 	})
 }
 
-// TestEmptyTPM2PCRsSurvivesUnmodeled is the property the old typed TPM2PCRs
-// field existed to protect, carried over to the passthrough that replaced it
-// (#189).
+// TestEmptyTPM2PCRsSurvivesUnmodeled checks an empty tpm2-pcrs member round-trips.
 func TestEmptyTPM2PCRsSurvivesUnmodeled(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -858,10 +795,7 @@ func TestMergeIntoIsDeterministic(t *testing.T) {
 	}
 }
 
-// TestUnmodeledMembersAreDroppedWhenTheObjectIsReplaced states the boundary
-// of the promise. The passthrough carries what a DECODE put there; a keyslot a
-// caller constructs from scratch carries nothing, because there is nothing it
-// could truthfully carry.
+// TestUnmodeledMembersAreDroppedWhenTheObjectIsReplaced: a keyslot built from scratch carries no unmodeled members.
 func TestUnmodeledMembersAreDroppedWhenTheObjectIsReplaced(t *testing.T) {
 	var decoded Token
 	if err := json.Unmarshal([]byte(`{"type":"acme","keyslots":["0"],"vendor":"x"}`), &decoded); err != nil {

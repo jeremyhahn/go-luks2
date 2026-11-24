@@ -21,18 +21,7 @@ type gate struct {
 	profile  *profile
 }
 
-// evaluate prints one line per check and returns how many failed.
-//
-// Two kinds of check run, and both fail closed:
-//
-//   - The floors file against the package list, whatever the tier. Every
-//     package must have a unit floor, every floor must name a package that
-//     exists, and every package must be held to the target in at least one
-//     tier. A package added without a floor, or a floor quietly lowered below
-//     the target everywhere, is a gate switched off one package at a time.
-//   - Every floor of the requested tier against the profile. A package with no
-//     statements recorded fails: that is the missing leg the old merge
-//     swallowed, which made the reported total go UP.
+// evaluate checks the floors file against the package list and each floor of the tier against the profile, printing one line per check and returning the failure count.
 func (g gate) evaluate(w io.Writer) int {
 	failures := 0
 	fail := func(format string, args ...any) {
@@ -109,9 +98,7 @@ func (g gate) evaluate(w io.Writer) int {
 	return failures
 }
 
-// atLeast reports whether t's coverage is at or above min, EXACTLY: it
-// compares covered/total >= min/10000 as covered*10000 >= min*total, in
-// arbitrary precision so that no tally can overflow the comparison.
+// atLeast reports whether t's coverage is at least min (basis points), compared exactly in arbitrary precision.
 func atLeast(t tally, min percent) bool {
 	lhs := new(big.Int).Mul(big.NewInt(t.covered), big.NewInt(10000))
 	rhs := new(big.Int).Mul(big.NewInt(int64(min)), big.NewInt(t.total))

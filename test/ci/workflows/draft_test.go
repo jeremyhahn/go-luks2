@@ -15,24 +15,14 @@ const draftIf = "${{ !github.event.pull_request.draft }}"
 // nothing.
 const guardRun = "needs.preflight.outputs.verdict == 'run'"
 
-// The conditions each tier's jobs carry. A PR-tier job carries the draft rule
-// and the guard (prJobIf); the image job, which a docs-only PR skips, the
-// guard and the docs-only rule (codeJobIf), and skips on a draft with the
-// preflight job it needs; lint-gates the draft rule, the guard and its path
-// scope (scopedJobIf); a full-tier job the full-tier condition, the draft
-// rule and the guard (fullJobIf); the nightly Soak job the nightly condition
-// and the guard (nightlyJobIf), and runs on no pull request at all.
+// The `if:` conditions each tier's jobs carry: PR tier, image, lint-gates, full tier and nightly.
 const (
 	prJobIf      = "${{ !github.event.pull_request.draft && " + guardRun + " }}"
 	codeJobIf    = "${{ " + guardRun + " && needs.preflight.outputs.docs_only != 'true' }}"
 	scopedJobIf  = "${{ !github.event.pull_request.draft && " + guardRun + " && needs.preflight.outputs.lint_gates != 'false' }}"
 	fullJobIf    = "${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft && " + guardRun + " }}"
 	nightlyJobIf = "${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && " + guardRun + " }}"
-	// fullTierCond is CI_FULL_TIER's condition (ci-template v1.41, ruling
-	// 742 (2)): every event but a dispatch off main and off ci/deps-bump,
-	// so every PR. codeFullJobIf is the integration and FIPS jobs' `if:`
-	// since v1.41: that condition, never a draft, the guard's run, and no
-	// docs-only PR; CI Gate tags them `code`.
+	// fullTierCond is CI_FULL_TIER's condition (every PR); codeFullJobIf adds no draft, the guard and no docs-only PR.
 	fullTierCond  = "github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ci/deps-bump'"
 	codeFullJobIf = "${{ (" + fullTierCond + ") && !github.event.pull_request.draft && " + guardRun + " && needs.preflight.outputs.docs_only != 'true' }}"
 	// gateIf is CI Gate's: it always runs, but a schedule run whose guard
@@ -146,7 +136,7 @@ func TestLintGatesJob(t *testing.T) {
 		t.Errorf("the probe does not look for the target in the Makefile and tracked *.mk: %q", probe)
 	}
 	run := steps["make lint-gates"]
-	// v1.29.1: no -k; the first failing gate ends the step.
+	// No -k: the first failing gate ends the step.
 	if !strings.Contains(run, `make ci-toolchain-run CMD="make lint-gates `) {
 		t.Errorf("lint-gates does not run make lint-gates, without -k, in the toolchain image: %q", run)
 	}

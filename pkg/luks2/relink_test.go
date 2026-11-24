@@ -12,10 +12,7 @@ import (
 	"testing"
 )
 
-// relinkAfterFirstOpen re-points link at to as soon as the first WRITABLE open
-// of link has returned -- the lock's open, which every writer makes O_RDWR --
-// before anything else the operation does by path. A read-only preflight
-// before the lock does not trigger it.
+// relinkAfterFirstOpen re-points link at to once the first writable open of link returns; read-only opens do not trigger it.
 func relinkAfterFirstOpen(t *testing.T, link, to string) volumeSys {
 	t.Helper()
 	sys := testVolumeSys()

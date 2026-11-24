@@ -14,9 +14,7 @@ import (
 	"testing"
 )
 
-// fakeAgentGit stands in for the standards repository's agent-git.sh: it drops
-// the repository-name argument and runs git, so the recipe's signed writes land
-// in the fixture repository unsigned.
+// fakeAgentGit stands in for agent-git.sh: it drops the repository argument and runs git unsigned.
 const fakeAgentGit = `#!/bin/sh
 shift
 exec git "$@"
@@ -38,18 +36,7 @@ func gitIn(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// releaseFixture is a throwaway repository on main holding the real Makefile,
-// a VERSION file, a CHANGELOG with the section for each version in sections and
-// a bare remote named dev. It returns the work tree, the bare remote and the
-// agent-git stand-in.
-// noBackgroundMaintenance turns off the automatic maintenance git starts after
-// a commit, and after a push in the repository it pushed to. Since git 2.47
-// that run detaches (maintenance.autoDetach) and nothing waits for it, so it
-// can still be writing the fixture's objects/pack when t.TempDir removes the
-// directory. The settings go in the repository's own config rather than in
-// GIT_CONFIG_* because git drops those for the receive-pack a local push runs
-// in the remote. maintenance.auto alone stops the run; the rest keep any gc
-// that does start in the foreground, where its caller waits for it.
+// noBackgroundMaintenance turns off git's detached auto-maintenance in repo, so it cannot write after t.TempDir is removed.
 func noBackgroundMaintenance(t *testing.T, repo string) {
 	t.Helper()
 	for _, kv := range [][2]string{
@@ -62,6 +49,7 @@ func noBackgroundMaintenance(t *testing.T, repo string) {
 	}
 }
 
+// releaseFixture is a throwaway repository on main with the real Makefile, a VERSION file, a CHANGELOG with a section per version and a bare remote named dev; it returns the work tree, the remote and the agent-git stand-in.
 func releaseFixture(t *testing.T, version string, sections ...string) (work, remote, agentGit string) {
 	t.Helper()
 	root := repoRoot(t)
@@ -131,9 +119,7 @@ func targetFor(version string) string {
 	}
 }
 
-// runTarget runs `make <target> VERSION=<version>` in the fixture and returns
-// the combined output and whether it succeeded. An empty version passes no
-// VERSION argument at all.
+// runTarget runs make <target> VERSION=<version> in the fixture (no VERSION if empty), returning output and success.
 func runTarget(t *testing.T, target, work, agentGit, version string) (string, bool) {
 	t.Helper()
 	args := []string{target, "AGENT_GIT=" + agentGit}
@@ -181,8 +167,7 @@ func TestReleaseAcceptsAlphaRCAndFinalVersions(t *testing.T) {
 	}
 }
 
-// TestReleaseIsIdempotentWhenVERSIONAlreadyMatches: VERSION is bumped ahead of
-// the tag for rc.1, so the version commit would be empty and fail the recipe.
+// TestReleaseIsIdempotentWhenVERSIONAlreadyMatches: an already-matching VERSION does not make an empty commit fail.
 func TestReleaseIsIdempotentWhenVERSIONAlreadyMatches(t *testing.T) {
 	work, remote, agentGit := releaseFixture(t, "1.0.0-rc.1", "1.0.0-rc.1")
 	before := gitIn(t, work, "rev-parse", "HEAD")
@@ -303,8 +288,7 @@ func TestEachReleaseTargetCutsOnlyItsOwnKind(t *testing.T) {
 				if want := "Use: make " + v.target + " VERSION=" + v.version; !strings.Contains(out, want) {
 					t.Errorf("refusal does not name %q:\n%s", want, out)
 				}
-				// Refused before anything is written: no commit, no tag, no push, and
-				// the VERSION file as the fixture left it.
+				// Refused before anything is written.
 				if got := gitIn(t, work, "rev-parse", "HEAD"); got != head {
 					t.Errorf("HEAD moved from %s to %s on a refusal", head, got)
 				}
@@ -396,10 +380,7 @@ func remoteTags(t *testing.T, remote string) []string {
 	return strings.Split(out, "\n")
 }
 
-// TestReleaseAlphaDerivesTheNextPatchFromTheHighestAlphaTag: with no VERSION,
-// release-alpha counts PATCH + 1 from the highest alpha tag by number (not by
-// text, so .10 outranks .9), reading the tags of the checkout and of the remote,
-// prints the version before writing, and cuts it through the usual guards.
+// TestReleaseAlphaDerivesTheNextPatchFromTheHighestAlphaTag: without VERSION, release-alpha uses PATCH + 1 of the numerically highest local or remote alpha tag.
 func TestReleaseAlphaDerivesTheNextPatchFromTheHighestAlphaTag(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -444,9 +425,7 @@ func TestReleaseAlphaDerivesTheNextPatchFromTheHighestAlphaTag(t *testing.T) {
 	}
 }
 
-// TestReleaseAlphaPrefersAnExplicitVersion: the derived version is only the
-// default. An explicit VERSION cuts exactly what it says (the hand-tagged MINOR
-// bump), derives nothing, and still refuses any other kind.
+// TestReleaseAlphaPrefersAnExplicitVersion: an explicit VERSION is cut as given, and other kinds are refused.
 func TestReleaseAlphaPrefersAnExplicitVersion(t *testing.T) {
 	t.Run("explicit alpha wins", func(t *testing.T) {
 		work, remote, agentGit := releaseFixture(t, "0.0.0", "0.4.0-alpha", "0.3.2-alpha")

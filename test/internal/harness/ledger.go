@@ -2,55 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package harness records the host state the integration suite is about to
-// create, so a later run can remove exactly that state and nothing else.
-//
-// # The problem this exists for
-//
-// Neither device-mapper nor loop devices are namespaced, so every dm mapping
-// and every loop device the integration suite creates is HOST state. That is a
-// property of the kernel, not of how the container is confined: dropping
-// --privileged for a scoped capability and device set (#80) changed what the
-// container can reach and changed nothing here. When a run dies without cleaning up --
-// a failing test, a timeout, a container torn down mid-run -- that state
-// outlives it, and the #85 guard then correctly refuses every later run on that
-// host because it cannot attribute what it finds. One failed run poisons a
-// runner until a human clears it by hand (#96).
-//
-// # Why a write-ahead ledger, and not the obvious alternatives
-//
-// t.Cleanup, defer and signal handlers all run INSIDE the process. SIGKILL
-// cannot be caught, and the container teardown that produced the measured
-// debris used exactly that path, so every in-process mechanism loses. The
-// record therefore has to outlive the process, which means it has to be on
-// disk, on a path that outlives the container, written BEFORE the resource
-// exists.
-//
-// The ordering is the whole design. A crash between "mapping created" and
-// "ledger appended" leaks precisely the thing nothing knows about, so Record
-// fsyncs before it returns and its failure is fatal to the caller rather than
-// advisory -- see ErrLedgerUnavailable.
-//
-// # Why not a list of names
-//
-// Two rejected approaches, both of which read as reasonable:
-//
-//   - A hardcoded list of the names the suite uses. It is already wrong: the
-//     suite creates 28 distinct volume-name literals today, and the next test
-//     someone adds is the one that leaks. A cleanup keyed to an enumeration
-//     reproduces the bug on the first name outside it.
-//   - Matching the dm UUID SHAPE, "CRYPT-LUKS2-<hex>-<name>". That identifies a
-//     LUKS2 mapping, not OUR mapping: a developer's live encrypted root has the
-//     same shape, so a guard matching it would classify and remove a system
-//     volume. It reads as rigorous and is the name-prefix mistake one layer
-//     subtler.
-//
-// What this package does instead is record the EXACT identity before creating
-// it -- for a mapping, its name and the dm UUID the creating call is about to
-// pass -- and remove only where the live resource still carries that exact
-// recorded identity. Ownership is established by record and confirmed by
-// observation. A name that was reused between the record and the reap does not
-// match, and is left alone.
+// Package harness records, write-ahead and by exact identity, the host state the integration suite creates (dm mappings, loop devices), so a later run removes exactly that state and nothing else.
 package harness
 
 import (
@@ -67,20 +19,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// StateDirEnv names the environment variable holding the directory the ledgers
-// live in. It must be on a filesystem that OUTLIVES THE CONTAINER -- a bind
-// mount or a docker volume -- or the record dies with the run that wrote it and
-// this package guarantees nothing.
+// StateDirEnv names the environment variable holding the ledger directory, which must outlive the container.
 const StateDirEnv = "LUKS2_TEST_STATE_DIR"
 
-// StateDir returns the directory the ledgers live in.
-//
-// It comes from LUKS2_TEST_STATE_DIR, and the default is deliberately a fixed
-// path rather than a temp directory: a record that lives inside the run it
-// describes is a record that dies with it, which is the one thing this package
-// may not do. In the container the CI invocation bind-mounts a host path here,
-// so the ledger outlives the container; on a developer host the default already
-// outlives the process.
+// StateDir returns the ledger directory: LUKS2_TEST_STATE_DIR, or a fixed path that outlives the run.
 func StateDir() string {
 	if dir := os.Getenv(StateDirEnv); dir != "" {
 		return dir
@@ -101,34 +43,10 @@ const (
 	// against a name reused in between.
 	KindMapping Kind = "dm"
 
-	// KindLoopRoot is a DIRECTORY this run created and owns; any loop device
-	// whose backing file lives under it was attached by this run.
-	//
-	// It exists because the suite allocates its backing files through
-	// t.TempDir() and os.CreateTemp(""), both of which land under TMPDIR. The
-	// run sets TMPDIR to a directory it creates with os.MkdirTemp and records
-	// that directory here, write-ahead, before a single test runs -- so the
-	// record precedes every loop device by construction, which is the ordering
-	// no per-device record can achieve (see KindLoopBacking).
-	//
-	// This is a prefix match, and it is safe for one reason only: the value is
-	// a uniquely-named directory THIS run created, not a path pattern anyone
-	// else could occupy. It is emphatically not "anything under /tmp" -- that
-	// would be the global sweep this package exists to avoid, wearing a path
-	// instead of a name.
+	// KindLoopRoot is a uniquely named directory this run created and set TMPDIR to; any loop device backed by a file under it is this run's.
 	KindLoopRoot Kind = "loop-root"
 
-	// KindLoopBacking is a loop device, recorded by the path of the file it
-	// will back.
-	//
-	// It cannot be recorded by device node, because the kernel chooses the
-	// minor: LOOP_CTL_GET_FREE allocates and returns it, so the name does not
-	// exist until after the resource does -- which is exactly the ordering this
-	// package cannot accept. The backing path IS known beforehand, is unique
-	// per test (it lives under t.TempDir()), and the kernel keeps reporting it
-	// in /sys/block/loop<N>/loop/backing_file after the container that created
-	// it is gone, marked "(deleted)". So the reaper resolves path to device by
-	// observation, against a path it recorded first.
+	// KindLoopBacking is a loop device recorded by its backing file path, since the kernel picks the device minor.
 	KindLoopBacking Kind = "loop-backing"
 )
 
@@ -137,39 +55,24 @@ type Entry struct {
 	Kind  Kind
 	Value string
 
-	// Identity is the additional fact that distinguishes THIS resource from
-	// another that later takes the same Value. Empty where the kind has no such
-	// fact; a reaper must then rely on Value alone and is correspondingly
-	// weaker, which is why KindMapping always carries one.
+	// Identity distinguishes this resource from another that later takes the same Value; KindMapping always carries one.
 	Identity string
 }
 
-// Ledger is an append-only, fsync-on-write record of host state a run is about
-// to create. It is safe for concurrent use: the suite runs tests in one process
-// and nothing stops two of them creating a mapping at once.
-//
-// A ledger holds an exclusive advisory LOCK on its own file for the whole life
-// of the run, and that lock is what makes a later reap safe. See TryLock.
+// Ledger is an append-only, fsync-on-write record of host state a run is about to create, safe for concurrent use; it holds an exclusive lock on its file for the run's life.
 type Ledger struct {
 	mu    sync.Mutex
 	f     *os.File
 	path  string
 	name  string
 	runID string
-	// dir is the validated state directory's handle. The ledger is created,
-	// re-read and deleted through it, never by path (#247).
+	// dir is the validated state directory's handle; the ledger is used through it, never by path.
 	dir *trustedDir
 }
 
-// OpenLedger creates the ledger for one run.
-//
-// runID must be unique per run; the reaper processes every ledger in the
-// directory EXCEPT the one belonging to the run asking, so a collision would
-// have a live run reaping its own state out from under itself.
+// OpenLedger creates the ledger for one run; runID must be unique per run.
 func OpenLedger(dir, runID string) (*Ledger, error) {
-	// The directory is part of the trust boundary; see statedir.go. Checked on
-	// the WRITER path as well as the reaper's, because a check on one path only
-	// is one an attacker routes around by racing the other.
+	// The directory is part of the trust boundary (statedir.go), checked on both writer and reaper paths.
 	if runID == "" || strings.ContainsAny(runID, `/\`) || runID == "." || runID == ".." {
 		return nil, &StateDirError{Dir: dir, Problem: "run id " + strconv.Quote(runID) + " cannot name a ledger"}
 	}
@@ -186,13 +89,7 @@ func OpenLedger(dir, runID string) (*Ledger, error) {
 		return nil, &LockFileError{Action: "opening", Path: path, Err: err}
 	}
 
-	// Hold an exclusive advisory lock for the life of the run. This is what
-	// tells a later reaper that this run is ALIVE, and it is the only signal
-	// that is trustworthy: the kernel releases the lock when the holder dies,
-	// including on SIGKILL, and it does not release it while the holder runs.
-	//
-	// It works across containers because flock is a property of the INODE, and
-	// the state directory is a bind mount -- every container sees the same one.
+	// Hold an exclusive flock for the run's life; the kernel releases it only when the holder dies, which tells a reaper the run is gone.
 	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		_ = f.Close()
 		_ = sd.Close()
@@ -202,24 +99,7 @@ func OpenLedger(dir, runID string) (*Ledger, error) {
 	return &Ledger{f: f, path: path, name: name, runID: runID, dir: sd}, nil
 }
 
-// TryLock reports whether the run that owns the ledger at path is GONE.
-//
-// It is the answer to the one question a reaper must get right, and the reason
-// it is asked this way rather than any other: on a shared runner several jobs
-// run at once, and a live job's loop device is indistinguishable from an orphan
-// by every other signal. Measured 2026-09-01 on a shared CI runner -- a live job's
-// device showed empty `holders` and empty `fuser`, exactly like the orphans
-// swept minutes earlier. The ONLY thing separating them was that a job owned
-// it.
-//
-// So ownership is not inferred from the device at all. The run holds a lock for
-// its lifetime; a reaper that can TAKE that lock knows the holder is gone,
-// because the kernel would not have released it otherwise. A reaper that cannot
-// take it leaves the ledger completely alone.
-//
-// FAILING TO CLEAN IS RECOVERABLE. Removing a live job's device is not: it
-// fails a different run, in a way that reads as a flaky test, on a host that
-// looks clean. Every uncertain case therefore resolves to "leave it".
+// TryLock reports whether the run owning the ledger at path is gone, by taking its lock; if it cannot, the ledger is left alone.
 func TryLock(path string) (locked bool, release func(), err error) {
 	f, err := os.OpenFile(path, os.O_RDONLY, 0) // #nosec G304 -- path comes from a directory listing of the configured state dir
 	if err != nil {
@@ -269,12 +149,7 @@ func (l *Ledger) entries() ([]Entry, error) {
 	return readLedgerIn(l.dir, l.name)
 }
 
-// Record appends an entry and does not return until it is DURABLE.
-//
-// Call it before creating the resource, and treat a returned error as fatal to
-// the operation you were about to perform. Creating the resource anyway
-// produces host state nothing can attribute -- the exact condition this package
-// exists to prevent -- and it does so silently.
+// Record appends an entry and returns only once it is durable; call it before creating the resource and treat an error as fatal.
 func (l *Ledger) Record(kind Kind, value, identity string) error {
 	if strings.ContainsAny(value+identity, "\t\n") {
 		return &RecordError{Kind: kind, Value: value,
@@ -299,9 +174,7 @@ func (l *Ledger) Record(kind Kind, value, identity string) error {
 	return nil
 }
 
-// Close releases the file. The ledger REMAINS on disk: its presence is what
-// tells the next run that this one may have left state behind. Discard is what
-// removes it, and only a run that cleaned up after itself may call that.
+// Close releases the file but leaves the ledger on disk; Discard removes it.
 func (l *Ledger) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -312,19 +185,7 @@ func (l *Ledger) Close() error {
 	return err
 }
 
-// Discard closes the ledger and deletes it, declaring that this run removed
-// everything it created.
-//
-// It is deliberately separate from Close, and it is the only path that deletes
-// a ledger without reaping it. A run that ends any other way -- a panic, a
-// timeout, a SIGKILL -- leaves the file behind, which is precisely the signal
-// the next run needs.
-//
-// The ledger is unlinked BEFORE its file is closed. Closing releases the lock,
-// and a ledger that is visible and unlocked is a dead run's ledger to any
-// other run's reaper: closing first let a sibling consume this run's record in
-// the window before the unlink, and this run's own Remove then failed a clean
-// run with ENOENT (Codex review on #247).
+// Discard deletes the ledger, declaring this run removed everything it created; it unlinks before closing so no other reaper can claim it.
 func (l *Ledger) Discard() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -399,12 +260,7 @@ func parseLedger(r io.Reader, path string) ([]Entry, error) {
 	return entries, nil
 }
 
-// NewRunID returns an identifier unique to this process on this host.
-//
-// The pid alone is not enough: pids are reused, and a container's pid namespace
-// makes "1" overwhelmingly likely, so two runs would collide on the first
-// entry. The start time disambiguates without needing a random source, and
-// reads usefully in a directory listing.
+// NewRunID returns an identifier unique to this process on this host, from the pid and start time.
 func NewRunID(pid int, startNanos int64) string {
 	return strconv.Itoa(pid) + "-" + strconv.FormatInt(startNanos, 36)
 }

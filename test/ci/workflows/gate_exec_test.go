@@ -82,7 +82,7 @@ func gateScript(t *testing.T, results map[string]string) string {
 	return script + "\n"
 }
 
-// runGateDraft is runGate with the DRAFT the gate reads (ci-template v1.26).
+// runGateDraft is runGate with the draft flag the gate reads.
 func runGateDraft(t *testing.T, script, fullTier, nightly, draft string) (int, string) {
 	t.Helper()
 	return runGateEnv(t, script, fullTier, nightly, draft, nil)
@@ -153,9 +153,7 @@ func TestCIGateScriptDecides(t *testing.T) {
 		cases = append(cases, gateCase{name: "all success/FULL_TIER=" + ft, fullTier: ft, wantLine: "CI gate passed."})
 	}
 	cases = append(cases, gateCase{name: "all success/NIGHTLY=true", fullTier: "true", nightly: "true", wantLine: "CI gate passed."})
-	// ci-template v1.41 (ruling 742 (2)): integration and FIPS run on every
-	// PR (`code`), so the full tier is empty and a FULL_TIER=false run no
-	// longer excuses their skip: only a docs-only PR does.
+	// Integration and FIPS run on every code PR; only a docs-only PR excuses their skip.
 	allCodeSkipped := map[string]string{}
 	for _, j := range append(append(append([]string{}, fullTier...), codeTier...), nightlyTier...) {
 		allCodeSkipped[j] = "skipped"
@@ -191,10 +189,7 @@ func TestCIGateScriptDecides(t *testing.T) {
 			}
 		}
 	}
-	// ci-template v1.30: a `code` job may skip on a docs-only PR, a `scoped`
-	// job when no changed file matched, and every job but a nightly one on a
-	// tree the guard proved; nothing else widens. A refused run fails, and
-	// so does a schedule run whose guard did not read `run`.
+	// A code job may skip on a docs-only PR, a scoped job when nothing matched, and every non-nightly job on a proved tree; a refused run fails.
 	for _, j := range codeTier {
 		cases = append(cases,
 			gateCase{name: j + "=skipped/docs-only", fullTier: "false", results: map[string]string{j: "skipped"}, env: map[string]string{"DOCS_ONLY": "true"}, wantLine: "SKIP " + j + " (docs-only pull request)"},

@@ -19,36 +19,9 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// Interoperating with cryptsetup's metadata lock.
-//
-// The node flock excludes this module's own processes, and nothing else:
-// cryptsetup does not lock the node. MEASURED in the integration devcontainer
-// against cryptsetup 2.7.5 (`cryptsetup --debug` prints each step, and
-// /proc/locks shows the holder):
-//
-//   - For a BLOCK device it flocks /run/cryptsetup/L_<major>:<minor> (decimal
-//     device numbers), LOCK_SH to read the metadata and LOCK_EX to write it,
-//     creating the directory 0700 and the file if they are missing. A flock
-//     held on the device node does not delay it at all; a LOCK_EX held on
-//     that file delays every cryptsetup command on the device, and a
-//     LOCK_SH delays every write.
-//   - Before trusting a lock it compares the inode it locked with the inode
-//     the path names now ("Verifying lock handle"), because the holder that
-//     releases a lock unlinks the file: a waiter that wakes up holding the
-//     unlinked inode has locked nothing and starts again.
-//   - For a REGULAR FILE image it flocks the image itself -- which is
-//     exactly the node flock, so file containers need nothing more.
-//   - The lock is held only while the metadata is read or written.
-//
-// This is cryptsetup's documented locking (cryptsetup(8): --disable-locks;
-// the default locking directory /run/cryptsetup), so the same lock is taken
-// here, the same way.
+// cryptsetup's metadata lock (cryptsetup(8)): a flock on /run/cryptsetup/L_<major>:<minor> for block devices, inode-verified and unlinked by the last holder; a file image's lock is the node flock.
 
-// OpenLockFileFunc opens (creating) the cryptsetup lock file name inside the
-// open lock directory dir. A parameter rather than a package var: the window
-// in which another holder replaces the file between this open and the flock
-// that follows cannot be hit on purpose from a test any other way, and this
-// package holds no mutable state of its own for a caller to substitute.
+// OpenLockFileFunc opens (creating) the cryptsetup lock file name inside the open lock directory dir; a parameter so tests can hit the replace window.
 type OpenLockFileFunc func(dir *os.File, name string) (*os.File, error)
 
 // DefaultOpenLockFile is the production OpenLockFileFunc.
@@ -61,12 +34,7 @@ func DefaultOpenLockFile(dir *os.File, name string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), path), nil // #nosec G115 -- a descriptor the kernel just returned
 }
 
-// openCryptsetupLockDir opens cryptsetup's lock directory, creating it 0700
-// if it is missing, the way cryptsetup's open_lock_dir does: the last
-// component is opened O_NOFOLLOW|O_DIRECTORY, so a symlink or a file there is
-// refused rather than followed. Every lock file is then opened, checked and
-// unlinked relative to this descriptor, so the directory cannot be swapped
-// between those steps.
+// openCryptsetupLockDir opens cryptsetup's lock directory O_NOFOLLOW|O_DIRECTORY, creating it 0700, as cryptsetup's open_lock_dir does.
 func openCryptsetupLockDir(dir string) (*os.File, error) {
 	open := func() (int, error) {
 		return unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
@@ -99,10 +67,7 @@ type CryptsetupLock struct {
 	file *os.File
 }
 
-// acquireCryptsetupLockFor takes cryptsetup's lock, in mode, for the device
-// node open as node, if it is a block device, by the deadline. A regular
-// file returns nil: cryptsetup's lock for it is the flock the caller already
-// holds.
+// acquireCryptsetupLockFor takes cryptsetup's lock in mode for a block device node by the deadline; a regular file returns nil.
 func acquireCryptsetupLockFor(ctx context.Context, node *os.File, device, lockDir string, mode LockMode, started, deadline time.Time, clk clock.Clock, openLockFile OpenLockFileFunc) (*CryptsetupLock, error) {
 	var st unix.Stat_t
 	if err := unix.Fstat(int(node.Fd()), &st); err != nil {
@@ -183,11 +148,7 @@ func (l *CryptsetupLock) named() bool {
 	return held.Dev == named.Dev && held.Ino == named.Ino
 }
 
-// release gives the lock up the way cryptsetup's release_lock_handle does:
-// unlock, then try for the file EXCLUSIVELY without waiting, and unlink it
-// only if that succeeds and the directory still names it. The last holder
-// out removes the file; a holder that leaves while a reader still holds it --
-// or while a writer is queued -- leaves it for them.
+// release unlocks, then unlinks the file only if it can take it exclusively and the directory still names it, as cryptsetup's release_lock_handle does.
 func (l *CryptsetupLock) release() error {
 	if l == nil {
 		return nil

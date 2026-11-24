@@ -50,9 +50,7 @@ func TestCreateDigest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// The digest cost is CALIBRATED, and a calibration is a wall-clock
-			// measurement, so it is pinned here rather than measured a second
-			// time. See the iteration assertion below for why (#204).
+			// The digest cost is calibrated, so it is pinned here rather than measured twice.
 			const pinnedIterations = 123_457
 			askedFor, digestIterationsFor := recordDigestCalibration(t, pinnedIterations)
 			sys := testVolumeSys()
@@ -90,22 +88,7 @@ func TestCreateDigest(t *testing.T) {
 			if kdf.Iterations == nil {
 				t.Fatal("Iterations is nil")
 			}
-			// CALIBRATED, so there is no constant to compare against. This
-			// used to compare the recorded count against a SECOND, fresh
-			// calibration and accept anything within 2x -- which compares two
-			// wall-clock measurements taken moments apart. That is a property
-			// of how busy the host is, not of this code: under load the two
-			// measurements land five-fold apart and the test fails on a tree
-			// that is correct (#204).
-			//
-			// The property that actually belongs to createDigest is pinned
-			// instead: it records EXACTLY the count the calibration returned,
-			// for the hash the digest declares -- no rounding, no substituted
-			// default, no second call whose answer could differ from the one
-			// the digest was derived with. That the REAL calibration tracks
-			// its time target and clears the LUKS2 iteration floor is a
-			// property of the calibration, and is checked where it lives, in
-			// TestDigestCalibrationTargetsItsBudget.
+			// createDigest records exactly the count the calibration returned; TestDigestCalibrationTargetsItsBudget checks the calibration itself.
 			if *kdf.Iterations != pinnedIterations {
 				t.Fatalf("digest records %d iterations; the calibration returned %d",
 					*kdf.Iterations, pinnedIterations)
@@ -132,12 +115,7 @@ func TestCreateDigest(t *testing.T) {
 				t.Fatalf("Digest is not valid base64: %v", err)
 			}
 
-			// The digest must be as long as the OUTPUT OF THE HASH IT DECLARES
-			// -- 64 bytes for sha512, 32 for sha256 -- because that is what a
-			// LUKS2 digest is. This assertion used to demand a flat 32 bytes,
-			// which is the write half of #73: it locked in a digest that no
-			// other LUKS2 implementation derives the same way, so cryptsetup
-			// returned "incorrect passphrase" for the correct passphrase.
+			// The digest is as long as its declared hash's output: 64 bytes for sha512, 32 for sha256.
 			wantLen, err := hashOutputLen(tt.hashAlgo)
 			if err != nil {
 				t.Fatalf("hashOutputLen(%q) failed: %v", tt.hashAlgo, err)
@@ -344,8 +322,7 @@ func TestCreateMetadata(t *testing.T) {
 		t.Fatalf("Expected sector size %d, got %d", opts.SectorSize, segment.SectorSize)
 	}
 
-	// Verify tokens: mandatory LUKS2 object, empty but NOT nil, so it marshals
-	// as {} rather than being omitted or written as null (#28).
+	// tokens is mandatory: empty but not nil, so it marshals as {}.
 	if metadata.Tokens == nil {
 		t.Fatal("Tokens is nil: LUKS2 requires the object to be present, empty when there are none")
 	}
@@ -395,11 +372,7 @@ func TestCreateMetadata(t *testing.T) {
 	if metadata.Config.JSONSize != expectedJSONSize {
 		t.Fatalf("Expected JSON size %s, got %s", expectedJSONSize, metadata.Config.JSONSize)
 	}
-	// config.keyslots_size is the SIZE of the keyslots area, not the offset at
-	// which it ends. This assertion used to demand keyslotOffset +
-	// keyslotsAreaSize, which is the defect from #28 written down as a test:
-	// cryptsetup reads the field as a size and rejected the container with
-	// "keyslots_size is too large 16777216 (bytes)".
+	// config.keyslots_size is the size of the keyslots area, not its end offset.
 	expectedKeyslotsSize := formatSize(int64(keyslotsAreaSize))
 	if metadata.Config.KeyslotsSize != expectedKeyslotsSize {
 		t.Fatalf("Expected keyslots size %s, got %s", expectedKeyslotsSize, metadata.Config.KeyslotsSize)

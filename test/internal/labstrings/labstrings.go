@@ -2,138 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package labstrings is the release gate that keeps this repository publicly
-// releasable. It reports every tracked file that names a host, an address or a
-// filesystem path belonging to the private development fleet, and every
-// tracked file the public release must not carry at all (published.go).
-//
-// WHY THIS IS A GATE AND NOT A CONVENTION. go-luks2 is published, and the
-// internal release tag is not what is published. That tag names a commit on
-// main, which still tracks the internal-only files. The public tree is that
-// commit's `git archive` output: the paths .gitattributes marks export-ignore
-// (the strip-at-publish set, published.go) are removed, and every other
-// tracked file is published byte-for-byte, as it stands at the tag. Nothing
-// rewrites a file on the way out, so a lab value has to be scrubbed in the
-// source before tagging. Publishing that tree and tagging it on the public
-// side are separate steps, each taken by the owner. The model is go-quicbaas's gate of the same name,
-// written after go-quicbaas#944 found a symlink into the lab's NFS mount, the
-// private forge in a release workflow and in documentation links, the private
-// registry in captured CI logs, and lab hosts in `--help` text and godoc. None
-// of it was load-bearing and nothing prevented any of it. This is what
-// prevents it here.
-//
-// WHAT IS REPORTED, and why each class is a leak rather than a style problem:
-//
-//   - ClassLabAddress — an address on the fleet's subnet, or the private
-//     forge's web or ssh port. Unreachable for every
-//     public reader, so a copy-pasteable example containing one is broken
-//     documentation, and it publishes the operator's network layout.
-//   - ClassLabHost — a fleet hostname, of every host family the fleet runs:
-//     the agent workstations, the CI runners, the GPU and build hosts, the
-//     tunnel gateway, the mini nodes and the coordinator hosts. Same, plus it
-//     names the machines an attacker would go looking for.
-//   - ClassOwnerPath — a path under the owner's home directory or the lab's NFS
-//     mount. Meaningless off that one machine, and it leaks the account name.
-//   - ClassOwnerAccount — the owner's login on its own: an ssh target, an
-//     author line, a mail address. Inside an owner path it is the same leak
-//     and reported once, as owner-path. The forge owner in the module path is
-//     a different, public name and does not match.
-//
-// WHAT TO DO WITH A FINDING. In order of preference:
-//
-//   - Use a documentation value: RFC 5737 addresses (192.0.2.0/24,
-//     198.51.100.0/24, 203.0.113.0/24), RFC 2606 names (example.com,
-//     *.example, *.invalid), or a role rather than a machine — `ci-runner-01`,
-//     `*.internal` for an unrouted service.
-//   - Move the value out of the tree: a forge address belongs in a CI
-//     repository variable, a fleet address in the private infra repository.
-//   - If the value IS the point — provenance for a measurement, the host a
-//     captured log came from — waive the line in place (below).
-//
-// TWO WAYS TO ACCEPT A LINE, both explicit:
-//
-//   - An inline waiver: the text `lab-string-ok: <reason>` on the offending
-//     line or the line immediately above it, in whatever comment syntax the
-//     file uses. The justification then lives next to the value it explains,
-//     and it is preferred. An empty reason is not a waiver.
-//   - An entry in DefaultAllowList, for whole trees and for files that cannot
-//     carry a comment (captured logs, JSON). Each entry carries the classes it
-//     accepts and a reason; see allowlist.go.
-//
-// WHAT IS READ. The git index, blob by blob (index.go): the index is the ship
-// manifest, and its staged content -- not the working tree -- is what the next
-// commit carries. An entry the gate cannot read in full fails the gate.
-//
-// WHERE THIS LIVES. The command test/tools/releasability-gate runs it,
-// through `make releasability`, which `make ci` and the CI workflow call. It is
-// under test/internal rather than pkg/ because pkg/ is this library's public
-// API, and a release gate is not something a consumer imports; only test/ may
-// import this package.
-//
-// FILES THAT ARE NEVER PUBLISHED, whatever their content (published.go):
-//
-//   - Shell scripts: `*.sh`, `*.bash`, or anything starting with `#!`. Tools are
-//     Go commands (test/tools/require-tool, test/tools/docker-run) or Makefile
-//     recipes.
-//   - Workflows other than ci.yml, nightly.yml, release.yml and
-//     signatures.yml (PublishedWorkflows), including `.yaml` variants and subdirectories.
-//
-// FILES TRACKED ON main AND STRIPPED AT PUBLISH (#211), listed by
-// DefaultStripAtPublish: the agent files CLAUDE.md, AGENTS.md and `.claude/` at
-// any depth (standards project-scaffold.md §7, #252; only the local tool state
-// `.claude/settings.local.json` is gitignored), the code-analysis tool
-// configuration `.serena/` at any depth, the internal review workflow
-// .github/workflows/code-review.yml (that exact name; a `.yaml` variant or
-// nested copy fails), and the fleet pattern set test/internal/labstrings/fleet.go with its tests
-// fleet_test.go. Each is
-// export-ignored by .gitattributes, so `git archive` and a forge's tag tarball
-// leave it out, and listed in .dockerignore. The gate passes them and lists
-// each on every run; one .gitattributes does not export-ignore is a finding.
-// Their content is still scanned, and a script or binary among them still
-// fails.
-// There is no waiver for an unpublishable file: remove it from the index.
-//
-// FAILURES AND EXEMPTIONS. A failure names the file, line, class, matched text
-// and the replacement; a match in a path is reported as such. Without a git
-// checkout, or with an unreadable blob, the gate exits 2 rather than reporting
-// clean. A binary (a NUL byte) or an oversize blob (over 32 MiB, exit 2) fails
-// unless listed in releasability-exempt.txt with a reason. A listed binary is
-// still scanned; a listed oversize file is not, and the gate says so on every
-// run. The list is read from the index, and a stale entry, a missing reason or a
-// duplicate stops the gate. It is empty. The replacement values for each class
-// are the RFC 5737 / RFC 2606 / role names above and, for owner-path, a
-// repository-relative path or /var/lib, /srv, /var/tmp.
-//
-// THE FIRST-RELEASE SCRUB. When the gate was added the tree already held no lab
-// address, hostname or owner path. The scrub replaced .github/require-tool.sh
-// and test/integration/docker-run.sh with the Go commands above (same
-// behavior) and removed CLAUDE.md from the index; #252 tracks it again,
-// stripped at publish.
-//
-// Where the patterns live: fleet.go, returned by Fleet. A pattern is a shape
-// and a set of digests: the shape is a generic regexp that names no fleet
-// value (any IPv4 address, a port after a colon, a /home/<name> path
-// component, a <word>-<2 digits> host name, a bare word), and the digests are
-// the hex SHA-256 of the fleet values that shape may match. A match of the
-// shape is a finding only when the digest of its key is in the set. The key
-// is the shape's first submatch -- for an address, its /24 prefix, the first
-// three octets -- folded to lower case (Digest). So the gate's source and its
-// tests spell no fleet value, and fleet_test.go proves each shape with
-// synthetic values whose digests it computes. This is hygiene, not secrecy:
-// a short value's digest is brute-forced in seconds. The published scanner
-// tests use documentation values, and a test in fleet_test.go requires that
-// `git archive HEAD` names no value of the set anywhere, waiver or not. A tree
-// with no pattern set refuses to scan (NoPatternsError); the releasability
-// gate then fails a development tree -- one that tracks a strip-at-publish
-// file -- and passes a published tree only with the notice that its content
-// was not scanned.
-//
-// This is the canonical statement of the public-releasability rule.
-//
-// RESOLUTION is textual, deliberately: it needs no build tags, no module
-// loading and no parser, so it runs on every tree state including one that does
-// not compile, and it covers Markdown, YAML, Dockerfiles and JSON as readily as
-// Go.
+// Package labstrings is the release gate that reports every tracked file naming a private-fleet host, address or path, and every file the public release must not carry.
 package labstrings
 
 import (
@@ -157,12 +26,10 @@ const (
 	// ClassLabHost is a hostname belonging to the development fleet.
 	ClassLabHost Class = "lab-host"
 
-	// ClassOwnerPath is a filesystem path that exists only on the owner's
-	// machine or on the lab's network mount.
+	// ClassOwnerPath is a filesystem path that exists only on a private machine or network mount.
 	ClassOwnerPath Class = "owner-path"
 
-	// ClassOwnerAccount is the owner's login name on its own, outside a path:
-	// an ssh target, an author line, a mail address.
+	// ClassOwnerAccount is a private login name on its own, outside a path.
 	ClassOwnerAccount Class = "owner-account"
 )
 
@@ -209,13 +76,7 @@ func Fleet() []Pattern { return fleet }
 // classes is every class a pattern or an allow rule may name.
 var classes = []Class{ClassLabAddress, ClassLabHost, ClassOwnerPath, ClassOwnerAccount}
 
-// mayContainLabValue reports whether any pattern of set matches anywhere in
-// content. Almost no file in this tree contains a lab value, and the whole
-// tracked tree is read on every unit-test pass: settling "there is nothing
-// here" has to be cheap, so each distinct shape runs once over the whole
-// content, against the digests of every pattern that shares it, and the
-// line-by-line scan runs only on a file that has a hit. No shape matches
-// across a newline, so a hit in a line is a hit in the content.
+// mayContainLabValue reports whether any pattern of set matches anywhere in content, running each distinct shape once.
 func mayContainLabValue(set []Pattern, content []byte) bool {
 	text := string(content)
 	byShape := map[*regexp.Regexp][]string{}
@@ -310,18 +171,7 @@ func ScanRepo(root string) ([]Finding, error) {
 	return Scan(entries, Fleet(), DefaultAllowList)
 }
 
-// Scan reports the matches of set in entries. An empty set is refused with
-// NoPatternsError: it would find nothing and so report clean. Rules are
-// validated next: an allow-list that does not say why it allows something is
-// a defect in the gate, not a pass.
-//
-// Every entry's path is scanned, because a tracked filename ships as surely as
-// its content, and so is every entry's content, binary content included. Entries come from
-// IndexEntries, which reads the staged blobs and fails rather than return an
-// entry it did not read in full -- with one exception: an oversize file that
-// ExemptFile lists by exact path, with a reason, arrives Unread. Its path is
-// still scanned here, its content is not, and the gate prints it as NOT READ
-// on every run (Exempted).
+// Scan reports the matches of set in entries' paths and contents; an empty set is NoPatternsError and an invalid rule fails.
 func Scan(entries []Entry, set []Pattern, rules []AllowRule) ([]Finding, error) {
 	if len(set) == 0 {
 		return nil, &NoPatternsError{Tracked: len(entries)}

@@ -15,10 +15,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// writeHeaderInternal writes a validated LUKS2 header to the file at device,
-// opening it by path and taking no lock: a FIXTURE writer for tests that build
-// a header by hand. Production code writes through the descriptor its lock is
-// held on (keyslotDevice.writeHeader), never by reopening a path.
+// writeHeaderInternal writes a validated header to device by path without a lock; a test fixture writer only.
 func writeHeaderInternal(device string, hdr *header.BinaryHeader, metadata *header.Metadata) error {
 	return writeHeaderInternalWithSys(device, hdr, metadata, testVolumeSys())
 }
@@ -35,12 +32,7 @@ func writeHeaderInternalWithSys(device string, hdr *header.BinaryHeader, metadat
 	return writeHeaderTo(f, hdr, metadata, sys.syncDevice)
 }
 
-// restorePrimaryHeaderForTest and replacePrimaryHeaderForTest open device,
-// do the one call, and close it again -- the way the pre-redesign library's
-// luks2.RestorePrimaryHeader and luks2.RestorePrimaryHeaderWithOptions (with
-// Force) did before B.6 moved them onto (*luks2.Volume).RestorePrimaryHeader
-// and (*luks2.Volume).ReplacePrimaryHeader. No build constraint: both tiers
-// use them. The trailing options let a test open the Volume on its own sys.
+// restorePrimaryHeaderForTest and replacePrimaryHeaderForTest open device, call the Volume method once and close it; options apply to the Volume.
 func restorePrimaryHeaderForTest(device string, opts ...Option) error {
 	v, err := Open(context.Background(), device, cheapOpts(opts)...)
 	if err != nil {

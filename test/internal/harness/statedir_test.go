@@ -15,25 +15,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// The state directory is a host-wide device-removal primitive with a file for
-// an input: the reaper runs as root, before the #85 guard, and removes whatever
-// a ledger names. /var/tmp is world-writable and sticky, so on a shared runner
-// an unprivileged user can create that directory first and drop forged ledgers
-// into it.
-//
-// The dm half has partial cover -- removal needs the live mapping to still
-// carry the recorded UUID -- but the loop half has none and cannot: for a loop
-// device the recorded PATH is the identity, so a forgeable ledger is an
-// aimable detach. A KindLoopRoot of "/home" would have a privileged container
-// detach every loop device under /home.
-//
-// These drive validateStateDir with constructed modes and uids rather than by
-// chmod'ing a real directory. That is deliberate twice over: it makes the
-// owner branch reachable without root or chown, and it tests the DECISION
-// rather than the kernel's enforcement -- this code reads mode bits and
-// refuses, it never relies on the OS to deny access, so a fixture that leaned
-// on permission bits would be testing the wrong thing (and would behave
-// differently under the root CI containers, per the fault-injection rule).
+// The state directory feeds a root reaper, so forged ledgers must be refused; tests use constructed modes and uids rather than chmod.
 
 func TestValidateStateDirRejectsEveryUntrustworthyShape(t *testing.T) {
 	const euid = 0 // the reaper's case: running as root
@@ -186,12 +168,7 @@ func TestOpenLedgerAndReapBothValidateTheStateDirectory(t *testing.T) {
 	})
 }
 
-// TestPermissionFailuresNameThePrivilegeRequirement: the bare errno is accurate
-// and useless. "open /dev/mapper/control: permission denied" reads as a broken
-// installation rather than as the suite being run without the privileges its
-// tier requires -- and someone will meet it, because
-// `go test -tags=integration ./...` is the obvious thing to type and is not how
-// this tier runs.
+// TestPermissionFailuresNameThePrivilegeRequirement: a permission failure explains the privileges the tier needs.
 func TestPermissionFailuresNameThePrivilegeRequirement(t *testing.T) {
 	for _, cause := range []error{os.ErrPermission, unix.EACCES, unix.EPERM} {
 		if !isPermissionDenied(fmt.Errorf("opening /dev/mapper/control: %w", cause)) {
@@ -211,18 +188,7 @@ func TestPermissionFailuresNameThePrivilegeRequirement(t *testing.T) {
 	}
 }
 
-// TestEphemeralStateDirectoryIsRefused is the second half of the blocking
-// finding on ebeb2e0: two `make` targets ran the privileged container without
-// the state-directory mount, so the ledger lived in the container and died
-// with it while the host devices it recorded did not.
-//
-// Adding the mount to those targets fixes today. This makes the omission
-// IMPOSSIBLE TO REPEAT SILENTLY: the image declares its own directory
-// ephemeral, a bind mount shadows that declaration, and the harness refuses
-// when it can still see it.
-//
-// Running without persistence is worse than not running at all -- the suite
-// creates host devices and records them nowhere that survives.
+// TestEphemeralStateDirectoryIsRefused: a state directory without the bind mount is refused.
 func TestEphemeralStateDirectoryIsRefused(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "state")
 	if err := os.Mkdir(dir, 0o700); err != nil {
@@ -266,10 +232,7 @@ func TestEphemeralStateDirectoryIsRefused(t *testing.T) {
 	})
 }
 
-// TestEnsureTrustedStateDirRefusesWhatItCannotCreate: no directory configured
-// at all, and a directory that cannot be created because a FILE holds a
-// component of its path. Both refuse with ErrLedgerUnavailable, the sentinel
-// that stops a suite before it creates anything it could not record.
+// TestEnsureTrustedStateDirRefusesWhatItCannotCreate: no directory configured, or one a file blocks, is ErrLedgerUnavailable.
 func TestEnsureTrustedStateDirRefusesWhatItCannotCreate(t *testing.T) {
 	if err := ensureTrustedStateDir(""); !errors.Is(err, ErrLedgerUnavailable) {
 		t.Errorf("an unconfigured state dir: %v, want ErrLedgerUnavailable", err)

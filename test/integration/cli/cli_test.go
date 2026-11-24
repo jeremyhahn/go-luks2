@@ -20,31 +20,7 @@ import (
 
 var binaryPath string
 
-// detachLoopDevicesBackedBy detaches only the loop devices attached to path,
-// and fails the test if it cannot establish that it left none behind.
-//
-// It replaces `losetup -D` (#17), which detaches EVERY loop device on the
-// machine regardless of who created it. Loop devices are not namespaced and
-// this suite runs under `docker run --privileged`, so "the machine" is the
-// host: two concurrent containers share one global pool, and one container's
-// teardown destroyed the other's in-flight devices. That is not a defect in
-// the allocation path — SetupLoopDevice already asks the kernel for a free
-// device via LOOP_CTL_GET_FREE and touches only what it was given. No amount
-// of careful allocation defends against an ownership-blind, forcible detach.
-//
-// A test removes what it created. Nothing else.
-//
-// EVERY FAILURE HERE IS A TEST FAILURE, not a log line. Cleanup that cannot
-// fail is the same defect as the `losetup -D` it replaces, wearing better
-// manners: an earlier draft reported detach failures with t.Logf, so a test
-// could pass while leaving a host loop device attached — state the next run
-// inherits, reported as success. A lookup that fails is likewise a failure and
-// not an empty result: not knowing what is attached is not evidence that
-// nothing is.
-//
-// It lives here as one function rather than as a copied block because three
-// copies of a teardown is precisely how this repository ended up with three
-// `losetup -D` call sites, and how a fix for two of them left the third.
+// detachLoopDevicesBackedBy detaches only the loop devices attached to path, and fails the test if any lookup or detach fails.
 func detachLoopDevicesBackedBy(t *testing.T, path string) {
 	t.Helper()
 
@@ -92,32 +68,7 @@ func stillAttached(path, dev string) bool {
 	return true
 }
 
-// TestMain records the host state this suite is about to create (#96), then
-// builds the CLI under test.
-//
-// # What it covers, and what it does not
-//
-// COVERED: loop devices, through the recorded temp root that TMPDIR points at.
-//
-// NOT COVERED: dm mappings, on the kill path. This suite creates them by
-// running the luks2 BINARY, so they are made in a subprocess -- no in-process
-// hook can see them, and the binary under test is built without the integration
-// tag precisely so that what is tested is what ships. The mapping involved
-// (test-cli-open) is removed by the test itself on
-// pass and fail; the SIGKILL window has no record.
-//
-// Closing it would mean building the CLI with a recording hook compiled in,
-// which tests a different binary from the one released -- a worse trade than
-// the gap.
-//
-// Accepted rather than closed here (ruled 2026-09-01): #105, where concurrent
-// jobs docker-rm-f each other's containers through a fixed name, is the
-// dominant PRODUCER of the kills this window depends on and is dispatched;
-// #80's privilege scoping then removes the class entirely by denying the
-// container host device-mapper access in the first place. If #80 stalls, an
-// integration-build-tagged exported observer on the library goes back to the
-// OWNER as a proposal -- it is new exported surface on a Layer-0 library and
-// not a lane's call.
+// TestMain records the host state this suite will create, then builds the CLI; dm mappings made by the CLI subprocess are not recorded.
 func TestMain(m *testing.M) {
 	suite, err := harness.BeginSuite(os.Stderr)
 	if err != nil {
@@ -129,8 +80,7 @@ func TestMain(m *testing.M) {
 	// name this tier creates carries the container and process terms.
 	runSuite = suite
 
-	// Built AFTER BeginSuite so the binary lands under the recorded temp root
-	// like everything else this run creates.
+	// Built after BeginSuite so the binary lands under the recorded temp root.
 	tmpDir, err := os.MkdirTemp("", "luks2-cli-test")
 	if err != nil {
 		_ = suite.Finish(1, os.Stderr)
@@ -145,8 +95,7 @@ func TestMain(m *testing.M) {
 		panic("Failed to build CLI: " + err.Error() + "\nOutput: " + string(out))
 	}
 
-	// Exit with what the CLEANUP concluded: a green run that could not remove
-	// its own host state must not report success.
+	// Exit with the cleanup's result.
 	os.Exit(suite.Finish(m.Run(), os.Stderr))
 }
 
@@ -383,9 +332,7 @@ func TestCLI_WipeMissingArgs(t *testing.T) {
 	}
 }
 
-// TestCLI_WipeCancelled: an answer other than YES cancels the wipe, the device
-// is untouched, and the exit status is NON-ZERO (#246 D12) -- a script must not
-// read a wipe that did not happen as one that did.
+// TestCLI_WipeCancelled: an answer other than YES cancels the wipe, leaves the device untouched and exits non-zero.
 func TestCLI_WipeCancelled(t *testing.T) {
 	tmpfile := filepath.Join(t.TempDir(), "test-cli-wipe-cancel.img")
 	content := bytes.Repeat([]byte{0xAA}, 1024*1024)
@@ -626,9 +573,7 @@ func main() {
 		t.Fatalf("Failed to format: %v\nOutput: %s", err, out)
 	}
 
-	// Through the harness, which refuses a backing file outside the recorded
-	// run root: that record is what lets the next run's reaper detach this
-	// device if the run dies before the deferred cleanup (#348).
+	// Through the harness, so the next run's reaper can detach the device if this run dies.
 	loopDev, err := harness.SetupLoopDevice(tmpfile)
 	if err != nil {
 		t.Fatalf("Failed to setup loop device: %v", err)

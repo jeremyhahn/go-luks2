@@ -12,11 +12,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
-// Recovery keys: a full-strength credential, generated rather than chosen,
-// for the case where the passphrase is gone. The printed line IS the
-// passphrase -- see showRecoveryKey -- and recovery-key file I/O lives
-// here, not in pkg/luks2, which takes a recovery key only as an in-memory
-// *RecoveryKey.
+// Recovery keys: a generated full-strength credential whose printed line is the passphrase; file I/O lives here, not in pkg/luks2.
 
 func recoveryCommand() *command {
 	return &command{
@@ -190,11 +186,7 @@ func runRecoveryAdd(ctx context.Context, e *env, args []string) error {
 	return nil
 }
 
-// unshownRecoveryKey handles a recovery key that was enrolled and could not
-// be shown: a live credential nobody has seen. Its keyslot and token are
-// removed again -- the --output save, if any, only ever happens after a
-// successful show, so an unshown key was never saved either. What could
-// not be removed is named, with the command that removes it.
+// unshownRecoveryKey removes the keyslot and token of a recovery key that could not be shown, and names anything it could not remove.
 func unshownRecoveryKey(ctx context.Context, e *env, v *luks2.Volume, device string, enrollment luks2.Enrollment, cause error) error {
 	_, _ = fmt.Fprintf(e.stderr, "Error: the recovery key could not be shown: %v\n", cause)
 

@@ -15,16 +15,7 @@ import (
 	"github.com/jeremyhahn/go-enclave"
 )
 
-// enclaveFrom returns an enclave holding a COPY of b, registered for cleanup.
-//
-// It copies rather than adopting because enclave.NewMemory takes
-// ownership and wipes its argument, and a test that hands over a fixture and
-// then asserts against it would be asserting against zeros. That is exactly the
-// case enclave.NewMemoryCopy was added for (go-enclave v0.5.0-alpha),
-// replacing the Sized + WithBytes + Destroy-on-error composition this helper
-// used to carry. The result is FROZEN read-only, like every enclave built from
-// existing material: a test that needs to write into its fixture must build a
-// sized enclave itself.
+// enclaveFrom returns a frozen enclave holding a copy of b, registered for cleanup.
 func enclaveFrom(t *testing.T, b []byte) enclave.ByteAccess {
 	t.Helper()
 
@@ -37,12 +28,7 @@ func enclaveFrom(t *testing.T, b []byte) enclave.ByteAccess {
 	return e
 }
 
-// mustDestroy destroys e now and fails the test if go-enclave reports the
-// release as anything but clean. Every test-side Destroy goes through it, for
-// the reason destroyOnCleanup gives: on a healthy host every release is clean,
-// so a report means the suite ran somewhere that refuses part of the teardown
-// contract, and that is worth a red test rather than a silent drop. It uses
-// Errorf, not Fatalf, so it is safe from a deferred call and from a goroutine.
+// mustDestroy destroys e and fails the test (Errorf) unless the release is clean.
 func mustDestroy(tb testing.TB, e enclave.ByteAccess) {
 	tb.Helper()
 	if err := e.Destroy(); err != nil {
@@ -76,13 +62,7 @@ func openSecret(t *testing.T, e enclave.ByteAccess) []byte {
 	return out
 }
 
-// lockedKiB reports the process's currently mlock'd memory, in kibibytes, from
-// /proc/self/status.
-//
-// It is how the custody tests below assert that locked pages are RELEASED and
-// not merely dropped: a leak of enclave regions is invisible to any assertion
-// about return values, because the leaked handle is exactly the one nobody
-// holds any more.
+// lockedKiB reports the process's mlock'd memory in KiB from /proc/self/status.
 func lockedKiB(t *testing.T) int {
 	t.Helper()
 

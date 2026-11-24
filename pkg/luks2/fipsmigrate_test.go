@@ -24,14 +24,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
-// In-process tests for MigrateToFIPS (#84). The real-cryptsetup, real-FIPS
-// half is in fipsimport_cryptsetup_test.go; these pin the ordering guards, the
-// digest migration and the result, on containers built here.
-//
-// A FIPS 140-3 test process cannot build an Argon2 fixture -- CreateKDF refuses
-// it -- and cannot run the migration either, which is the point of the
-// refusal. So each test that needs one checks the mode first and, in FIPS mode,
-// asserts the refusal instead: nothing is skipped in either mode.
+// In-process MigrateToFIPS tests; in FIPS mode each asserts the refusal instead.
 
 // migrationPassphrase and otherPassphrase are the two credentials the fixtures
 // carry.
@@ -69,18 +62,7 @@ func assertMigrationRefusedUnderFIPS(t *testing.T) {
 	}
 }
 
-// argon2Volume is a cryptsetup-formatted container whose keyslot 0 is
-// Argon2id for migrationPassphrase and, when withSecond is set, whose keyslot 1
-// is Argon2id for otherPassphrase: what `cryptsetup luksFormat` followed by
-// `luksAddKey` produces -- the foreign volume the import exists for -- at the
-// lowest Argon2 cost the reader accepts.
-//
-// The container is formatted once per process and copied thereafter
-// (cryptsetupArgon2Prefix), and the digest cost of anything the migration
-// rewrites is pinned at the floor. Both keep these fixtures inside the
-// package's -race budget (ci.yml); no caller tests a KDF's cost, only its
-// type, hash, salt and what it attests. No caller compares two of these
-// volumes, so sharing salts and a UUID loses nothing.
+// argon2Volume is a cryptsetup container with Argon2id keyslot 0 (and keyslot 1 with withSecond) at the lowest accepted cost, formatted once per process.
 func argon2Volume(t *testing.T, name string, withSecond bool) string {
 	t.Helper()
 
@@ -230,8 +212,7 @@ func fillDataArea(t *testing.T, path string) {
 	}
 }
 
-// volumeKey recovers the volume key with passphrase and returns a copy for
-// comparison. Test-only: the point is to prove the migration kept the SAME key.
+// volumeKey recovers the volume key with passphrase and returns a copy for comparison.
 func volumeKey(t *testing.T, device string, passphrase []byte) []byte {
 	t.Helper()
 
@@ -269,10 +250,7 @@ func assertFIPSReady(t *testing.T, device string) {
 	}
 }
 
-// TestMigrateToFIPSRewrapsTheVolumeKeyAndRemovesArgon2Keyslots is the default
-// import: every Argon2 keyslot gone, one PBKDF2 keyslot holding the SAME volume
-// key, and the data area byte-for-byte untouched -- a keyslot migration, not a
-// re-encryption.
+// TestMigrateToFIPSRewrapsTheVolumeKeyAndRemovesArgon2Keyslots: one PBKDF2 keyslot holds the same key and the data area is untouched.
 func TestMigrateToFIPSRewrapsTheVolumeKeyAndRemovesArgon2Keyslots(t *testing.T) {
 	defer parallel(t)()
 	if fips140.Enabled() {
@@ -401,10 +379,7 @@ func TestMigrateToFIPSOnAMigratedVolumeChangesNothing(t *testing.T) {
 	}
 }
 
-// sha1DigestVolume is a container whose KEYSLOT is already approved and whose
-// DIGEST is PBKDF2-SHA1 -- the shape `cryptsetup convert` leaves on an old
-// LUKS1 volume. The digest is recomputed for real, over the real volume key, so
-// it verifies outside FIPS mode exactly as the original did.
+// sha1DigestVolume is a container with an approved keyslot and a real PBKDF2-SHA1 digest, as cryptsetup convert leaves.
 func sha1DigestVolume(t *testing.T, name string) string {
 	t.Helper()
 
@@ -447,10 +422,7 @@ func sha1DigestVolume(t *testing.T, name string) string {
 	return device
 }
 
-// TestMigrateToFIPSMigratesANonApprovedDigest is the trap the issue names: the
-// keyslots can all be PBKDF2 and the volume still not open under FIPS, because
-// the DIGEST's KDF runs on every unlock too. It gets its own test rather than
-// being assumed to be what this library writes.
+// TestMigrateToFIPSMigratesANonApprovedDigest: the digest's KDF runs on every unlock and must be migrated too.
 func TestMigrateToFIPSMigratesANonApprovedDigest(t *testing.T) {
 	defer parallel(t)()
 	if fips140.Enabled() {
@@ -584,11 +556,7 @@ func TestMigrateToFIPSRefusesAHashFIPSModeCannotRun(t *testing.T) {
 	}
 }
 
-// fakeArgon2KeyslotVolume relabels a PBKDF2 container's keyslot as Argon2id.
-// The material no longer matches -- nothing will ever derive it -- but the
-// header is well-formed, and under FIPS the refusal happens before any
-// derivation, which is exactly the path being pinned. It is buildable in a
-// FIPS process, which a real Argon2 container is not.
+// fakeArgon2KeyslotVolume relabels a PBKDF2 keyslot as Argon2id; buildable in a FIPS process.
 func fakeArgon2KeyslotVolume(t *testing.T, name string) string {
 	t.Helper()
 
@@ -661,9 +629,7 @@ func TestFIPSRefusalNamesANonApprovedDigest(t *testing.T) {
 	assertImportRequired(t, err, device, nil, []NonApprovedKDF{{ID: 0, Type: kdfTypePBKDF2, Hash: "sha1"}})
 }
 
-// TestFIPSRefusalDoesNotMaskDamage: when a keyslot could not be tried for a
-// reason OTHER than FIPS, the scan reports that, not the import remedy. A
-// migration would not fix a damaged keyslot, and saying "intact" would be false.
+// TestFIPSRefusalDoesNotMaskDamage: a keyslot that failed for a non-FIPS reason is reported as such.
 func TestFIPSRefusalDoesNotMaskDamage(t *testing.T) {
 	device := fakeArgon2KeyslotVolume(t, "fips-and-damage.img")
 	hdr, metadata, err := readHeaderForTest(device)

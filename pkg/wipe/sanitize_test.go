@@ -458,8 +458,7 @@ func TestSanitizeCustomPatternSequence(t *testing.T) {
 	}
 }
 
-// TestSanitizeDiscardIsBestEffort: BLKDISCARD on a regular file fails, and
-// Sanitize still reports success.
+// TestSanitizeDiscardIsBestEffort: BLKDISCARD fails on a regular file and Sanitize still succeeds.
 func TestSanitizeDiscardIsBestEffort(t *testing.T) {
 	path := writeFixture(t, 4096, 0xAA)
 	if err := sanitize(context.Background(), path, Params{Discard: true}, baseSys()); err != nil {
@@ -495,12 +494,7 @@ func TestSanitizeVerifyNeverSkipsAStandardsVerification(t *testing.T) {
 	}
 }
 
-// staleMediumOpenFile redirects every READ-ONLY open of a /proc/self/fd
-// entry -- what ReadPastCache resolves the locked descriptor to -- to a
-// fixed file holding stale contents, modeling a medium that still holds what
-// a wipe pass overwrote in the page cache. The claim's own O_EXCL open of
-// the same fd entry, and every open of the real device path, pass through
-// unchanged, so the passes themselves still land on the device.
+// staleMediumOpenFile redirects read-only opens of /proc/self/fd entries to a stale file, modeling a medium behind the page cache.
 func staleMediumOpenFile(t *testing.T, stale []byte) device.OpenFunc {
 	t.Helper()
 	stalePath := writeFixture(t, len(stale), 0)

@@ -140,10 +140,7 @@ func TestFindLoopDeviceNotFound(t *testing.T) {
 	}
 }
 
-// TestFindLoopDeviceFindsAFileNamedThroughASymlink moved from
-// pkg/luks2/activation_integration_test.go (#274): Find resolves the
-// backing file by its real path, so a symlink to the attached image must
-// still find the loop device.
+// TestFindLoopDeviceFindsAFileNamedThroughASymlink: Find resolves the backing file's real path.
 func TestFindLoopDeviceFindsAFileNamedThroughASymlink(t *testing.T) {
 	tmpfile := filepath.Join(t.TempDir(), "symlinked.img")
 	f, err := os.Create(tmpfile)
@@ -254,9 +251,7 @@ func TestLoopDeviceCleanup(t *testing.T) {
 			t.Fatalf("Attach failed: %v", err)
 		}
 
-		// Released HERE, immediately after the acquisition, so a t.Fatalf
-		// below cannot leak this device: see loopdev_integration_test.go
-		// (now moved) for why this matters on a busy host (#116).
+		// Released immediately, so a later t.Fatalf cannot leak the device.
 		firstReleased := false
 		t.Cleanup(func() {
 			if firstReleased {

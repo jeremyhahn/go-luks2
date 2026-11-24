@@ -12,12 +12,7 @@ import (
 	"strings"
 )
 
-// The second half of the gate. A lab value is a line that has to change; the
-// files below are files the public release must not carry at all, whatever is
-// in them. Both are enforced for the same reason: the published tree is an
-// archive export of the release commit, so the only place to keep something
-// out of it is the source -- the file itself, or its export-ignore entry in
-// GitAttributes -- before tagging.
+// Files the public release must not carry, whatever their content.
 
 // Unpublishable is one kind of tracked file the public release must not carry.
 type Unpublishable struct {
@@ -25,9 +20,7 @@ type Unpublishable struct {
 	// across any number of them.
 	Path string
 
-	// Reason says why the file cannot ship and what to do instead. It is
-	// printed with every finding, so the engineer who trips it does not have
-	// to come looking for the ruling.
+	// Reason says why the file cannot ship and what to do instead; it is printed with every finding.
 	Reason string
 }
 
@@ -39,37 +32,13 @@ const noShellScripts = "the public release ships no shell scripts (owner ruling 
 const agentInstructions = "agent instructions: tracked in every repository and stripped at publish " +
 	"(standards project-scaffold.md §7, #252); the public release removes them (#211)"
 
-// workflowDir is where GitHub and Gitea Actions look for workflows.
+// workflowDir is where Actions look for workflows.
 const workflowDir = ".github/workflows/"
 
-// PublishedWorkflows is every workflow file the public release carries, by
-// exact name under workflowDir. It is an allow-list, not a deny-list: a
-// deny-list of the internal factory workflows is defeated by a `.yaml`
-// extension or a rename, and anything the factory adds later would ship by
-// default. Everything else under workflowDir fails the gate.
-// signatures.yml is the commit signature gate: it runs on
-// pull_request_target from the base branch, so the public repository's
-// pull requests are judged by the base's verifier and registry.
+// PublishedWorkflows is the allow-list of workflow files the public release carries, by exact name under workflowDir.
 var PublishedWorkflows = []string{"ci.yml", "nightly.yml", "release.yml", "signatures.yml"}
 
-// DefaultStripAtPublish is the list of tracked files Gitea main carries and
-// the public release does not (#211). The gate does not fail on them -- they
-// belong on main -- but each must be export-ignored by GitAttributes, which
-// keeps it out of `git archive` and a forge's tag tarball; the public tree is
-// produced as such an export. A listed file GitAttributes does not exclude is
-// a finding (NotExportIgnored), and every run lists the rest, with its reason.
-// .gitattributes and .dockerignore carry each pattern here verbatim, and the
-// gate's tests fail when either misses one.
-//
-// A strip rule exempts a file from the file-class checks only, never from its
-// content: a script or a binary under .claude/ still fails, and the lab-value
-// scan reads every stripped file like any other.
-//
-// So is the internal review workflow code-review.yml. The workflow rule is an exact name: `code-review.yaml` or a nested
-// copy is an unknown workflow and fails.
-//
-// A test file that reads only a stripped file is stripped with it (#211), so
-// `go test ./...` passes on the published tree.
+// DefaultStripAtPublish lists tracked files the public release omits; each must be export-ignored in .gitattributes and listed in .dockerignore, and its content is still scanned.
 var DefaultStripAtPublish = []Unpublishable{
 	{Path: "**/CLAUDE.md", Reason: agentInstructions},
 	{Path: "**/AGENTS.md", Reason: agentInstructions},
@@ -92,8 +61,7 @@ const (
 	fleetTests    = "test/internal/labstrings/fleet_test.go"
 )
 
-// internalReviewWorkflow is the reason given for the internal code-review
-// workflows (#336).
+// internalReviewWorkflow is the reason given for the internal code-review workflows.
 const internalReviewWorkflow = "internal Gitea code-review workflow: tracked on main, " +
 	"stripped from the public release (#211, #336)"
 
@@ -103,7 +71,7 @@ const internalWorkflow = "only the public workflows ship (#211): ci.yml, nightly
 	"anything else under .github/workflows/ -- an internal factory workflow, a renamed one, a .yaml " +
 	"variant -- stays out of the published tree"
 
-// DefaultUnpublishable is the list for THIS repository.
+// DefaultUnpublishable is the list for this repository.
 var DefaultUnpublishable = []Unpublishable{
 	{Path: "**/*.sh", Reason: noShellScripts},
 	{Path: "**/*.bash", Reason: noShellScripts},
@@ -152,16 +120,7 @@ func ValidateUnpublishable(rules []Unpublishable) error {
 	return nil
 }
 
-// ScanUnpublishable reports every entry that matches a rule, every entry under
-// .github/workflows/ that neither PublishedWorkflows nor a strip rule names,
-// every regular
-// file whose staged content opens with a shebang, and every binary regular
-// file ExemptFile does not list. The content is the whole
-// staged blob (see IndexEntries), so neither a file's size nor what follows
-// the interpreter line can hide a script -- except for an oversize file
-// ExemptFile lists, whose content is not read (Unread) and which the gate
-// prints as NOT READ: its exemption is a person's statement that it ships. A symlink is not itself a script; a
-// tracked link target is checked under its own name.
+// ScanUnpublishable reports entries matching a rule, unlisted workflows, shebang files, and binaries ExemptFile does not list.
 func ScanUnpublishable(entries []Entry, rules, strip []Unpublishable) ([]FileFinding, error) {
 	if err := ValidateUnpublishable(rules); err != nil {
 		return nil, err
@@ -184,11 +143,7 @@ func ScanUnpublishable(entries []Entry, rules, strip []Unpublishable) ([]FileFin
 			findings = append(findings, FileFinding{Path: e.Path, Reason: "an executable script (it opens with #!): " + noShellScripts})
 			continue
 		}
-		// A binary file fails unless ExemptFile lists it: its content is
-		// scanned for lab values like any other, but a person has to have
-		// accepted shipping bytes nobody can read as text (owner ruling on
-		// #211). An oversize exempt file arrives Unread and is exempt by the
-		// same line.
+		// A binary fails unless ExemptFile lists it.
 		if e.Kind == KindFile && e.Exemption == "" && IsBinary(e.Content) {
 			findings = append(findings, FileFinding{Path: e.Path, Reason: binaryFile})
 		}

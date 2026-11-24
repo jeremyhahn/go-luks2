@@ -47,8 +47,7 @@ func copyRegion(t *testing.T, dst, src *os.File, offset int64, n int) {
 	}
 }
 
-// tear overwrites a byte inside the JSON area of the copy at offset, so its
-// checksum no longer matches: a header write interrupted part way.
+// tear corrupts a byte in the JSON area of the copy at offset, as an interrupted write would.
 func tear(t *testing.T, f *os.File, offset int64) {
 	t.Helper()
 	if _, err := f.WriteAt([]byte("torn"), offset+HeaderSize+10); err != nil {

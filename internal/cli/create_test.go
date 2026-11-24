@@ -276,10 +276,7 @@ func TestRunCreateCleanupSurvivesACanceledCtx(t *testing.T) {
 	})
 }
 
-// TestRunCreateFileVolumeDetachesOnEveryLaterFailure is the SPEC row of
-// docs/loop-devices/architecture.md: on a failure after the attach, the
-// device Attach returned is detached again. Each step after the attach
-// (re-open on the device, unlock, activate, mkfs) is made to fail in turn.
+// TestRunCreateFileVolumeDetachesOnEveryLaterFailure fails each step after the attach in turn and expects the device detached.
 func TestRunCreateFileVolumeDetachesOnEveryLaterFailure(t *testing.T) {
 	cases := []struct {
 		name   string

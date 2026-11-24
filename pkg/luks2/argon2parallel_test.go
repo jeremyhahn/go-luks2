@@ -11,19 +11,7 @@ import (
 	"testing"
 )
 
-// Argon2 parallelism is refused at the same layer, and in the same shape, as
-// Argon2 time and memory (#176).
-//
-// It was always refused -- deriveArgon2 rejects cpus outside 1..255 -- but one
-// layer later, after the caller's pre-check had already passed, and as a
-// CryptoError carrying a plain message rather than the Argon2CostError its two
-// siblings produce. The same mistake by the same caller got two different error
-// shapes at two different moments.
-//
-// That asymmetry nearly became a real defect once: callerChoseArgon2Cost had to
-// be changed from `> 0` to `!= 0` during the #144 rebase. Had it stayed `> 0`, a
-// negative Argon2Parallel would have read as "the caller chose nothing", fallen
-// through to container-cost inheritance, and never reached any refusal at all.
+// Argon2 parallelism is refused at the same layer and in the same shape as Argon2 time and memory.
 
 // TestAllThreeArgon2CostsAreRefusedAlike is the symmetry assertion. Each case
 // is the same shape of caller mistake and must produce the same shape of error.

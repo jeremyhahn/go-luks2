@@ -25,19 +25,10 @@ var (
 	// past every cache in front of it, is not what the last pass wrote.
 	ErrVerification = errors.New("wipe: the medium does not hold what the last pass wrote")
 
-	// ErrDeviceInUse indicates that Sanitize refused a device something
-	// else holds open: it is mounted, mapped, or held exclusively. Defined
-	// once in internal/device and re-exported by value,
-	// so errors.Is holds regardless of which package's name a caller
-	// matches against.
+	// ErrDeviceInUse indicates Sanitize refused a device that is mounted, mapped or held exclusively; it is internal/device's value.
 	ErrDeviceInUse = device.ErrInUse
 
-	// ErrDeviceChanged indicates that the device path resolved to a
-	// different file when it was reopened for the exclusive claim than when
-	// it was locked: a symlink re-pointed in between. Sanitize claims the
-	// locked descriptor's own inode (never the path again), so this is
-	// declared for API consistency with luks2 and dmcrypt rather than ever
-	// raised by this package's own code.
+	// ErrDeviceChanged indicates the device path resolved to a different file on reopen; declared for consistency with luks2 and dmcrypt, never raised here.
 	ErrDeviceChanged = device.ErrChanged
 
 	// ErrPermissionDenied indicates that Sanitize could not open the device

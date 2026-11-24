@@ -15,20 +15,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/test/internal/labstrings"
 )
 
-// publishedTree copies into a new directory, with no .git in or above it,
-// what an archive export of src carries: every file git would track there
-// (whatever .gitignore does not ignore), less every path the tree's
-// .gitattributes export-ignores. git answers both questions from a scratch
-// repository whose work tree is src, so this works the same in a checkout and
-// in a tree that is itself an archive export. The scratch repository is
-// created without templates and git runs in labstrings.HermeticGitEnv, with no
-// system, global or XDG configuration or attributes file and no GIT_ variable,
-// so only the tree's own .gitignore and .gitattributes files decide.
-//
-// It copies the work tree, not an archive of HEAD, so that it works where
-// there is no commit to archive: the published tree runs this test too. Which
-// files a commit publishes is the archive checks' question (ArchiveHEAD); this
-// one asks whether the packages' tests need a checkout.
+// publishedTree copies into a new directory, with no .git above it, the files an archive export of src carries, as decided by the tree's own .gitignore and .gitattributes.
 func publishedTree(t *testing.T, src string) string {
 	t.Helper()
 	scratch := t.TempDir()
@@ -103,15 +90,7 @@ func publishedTree(t *testing.T, src string) string {
 	return dst
 }
 
-// TestPublishedTreeTestsPass reproduces the published archive and the
-// integration image: this module's files as an archive export carries them,
-// with no .git anywhere above them, and `go test` over the packages that read
-// the tree itself: the gate's, the workflow tests and the Makefile tests. They
-// must pass there. The gate runs as `make releasability`, where a checkout is
-// guaranteed; the packages' own tests must need none, and a test that reads a
-// strip-at-publish file must be stripped with it.
-//
-// This test is excluded from the nested run by -skip, or it would recurse.
+// TestPublishedTreeTestsPass runs the tree-reading packages' tests in a reproduced published archive with no .git; excluded from the nested run by -skip.
 func TestPublishedTreeTestsPass(t *testing.T) {
 	goBin, err := exec.LookPath("go")
 	if err != nil {

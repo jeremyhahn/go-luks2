@@ -22,23 +22,13 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// NewHeaderParams is what CreateBinaryHeader needs from a caller's format
-// options: the fields that land in the binary header, narrowed to this
-// package's on-disk concerns. MetadataSize must already be validated -- zero
-// for the default, or a legal header area size -- because the bound it is
-// checked against (ErrInvalidMetadataSize) is a public pkg/luks2 sentinel
-// this package cannot return.
+// NewHeaderParams is what CreateBinaryHeader needs from format options; MetadataSize must already be validated.
 type NewHeaderParams struct {
 	Label, Subsystem string
 	MetadataSize     int
 }
 
-// CreateBinaryHeader creates a new LUKS2 binary header.
-//
-// rng is the entropy source for the checksum salt, and newUUID produces the
-// container's UUID; both are parameters rather than package seams, because
-// this package defines no package-level mutable state and the caller already
-// has a seam of its own to substitute in tests (determinism_test.go).
+// CreateBinaryHeader creates a new LUKS2 binary header, salting from rng and naming the container with newUUID.
 func CreateBinaryHeader(rng io.Reader, newUUID func() uuid.UUID, p NewHeaderParams) (*BinaryHeader, error) {
 	hdr := &BinaryHeader{
 		Version: Version,
@@ -95,8 +85,7 @@ func ReadHeaderCopyFrom(f io.ReaderAt, offset int64) (*BinaryHeader, *Metadata, 
 		return nil, nil, &errs.Error{Kind: ErrUnsupportedLUKSVersion, Detail: strconv.Itoa(int(hdr.Version))}
 	}
 
-	// BOUND THE DECLARED HEADER AREA SIZE HERE, ONCE, before anything allocates
-	// against it (#62).
+	// Bound the declared header area size once, before anything allocates against it.
 	area, err := HeaderAreaSize(&hdr)
 	if err != nil {
 		return nil, nil, err
@@ -119,8 +108,7 @@ func ReadHeaderCopyFrom(f io.ReaderAt, offset int64) (*BinaryHeader, *Metadata, 
 			"secondary header at offset %d records header size %d, want %d", offset, area, offset)}
 	}
 
-	// THE WHOLE AREA IS READ ONCE, and the checksum, the binary header and the
-	// JSON all come from that one buffer (#248).
+	// Read the whole area once; checksum, binary header and JSON all come from that buffer.
 	buf := make([]byte, area)
 	if _, err := f.ReadAt(buf, offset); err != nil {
 		return nil, nil, &errs.Error{Kind: errs.ErrIO, Detail: "failed to read header area", Err: err}
@@ -148,13 +136,7 @@ func ReadHeaderCopyFrom(f io.ReaderAt, offset int64) (*BinaryHeader, *Metadata, 
 	return &hdr, metadata, nil
 }
 
-// ReadSecondaryHeaderFrom finds and reads the secondary header copy in
-// device.
-//
-// The primary, when it is readable, states the area size outright. When it
-// is NOT readable, the finite set of legal area sizes is probed instead, and
-// a candidate is accepted only when the copy found there passes EVERY check
-// ReadHeaderCopyFrom makes.
+// ReadSecondaryHeaderFrom reads the secondary copy where the primary says, or probes the legal area sizes, accepting only a fully valid copy.
 func ReadSecondaryHeaderFrom(device io.ReaderAt) (*BinaryHeader, *Metadata, error) {
 	if hdr, _, err := ReadHeaderCopyFrom(device, PrimaryHeaderOffset); err == nil {
 		if area, err := HeaderAreaSize(hdr); err == nil {
@@ -183,20 +165,14 @@ func ExpectedMagic(offset int64) string {
 	return SecondaryMagic
 }
 
-// EncodeMetadataForHeader produces exactly the JSON WriteHeaderTo would
-// write, and refuses metadata that does not fit the container's header area
-// -- without touching the device.
-//
-// It MUTATES metadata.Config.JSONSize, as the write path always has: json_size
-// must equal the JSON area actually written and is a property of the
-// container, not of the caller.
+// EncodeMetadataForHeader produces the JSON WriteHeaderTo would write, refusing metadata that does not fit; it sets metadata.Config.JSONSize.
 func EncodeMetadataForHeader(hdr *BinaryHeader, metadata *Metadata) ([]byte, int, error) {
 	jsonData, area, err := EncodeMetadata(hdr, metadata)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	// NOTHING IS WRITTEN THAT CRYPTSETUP WOULD REFUSE TO READ (#248).
+	// Nothing is written that cryptsetup would refuse to read.
 	if err := ValidateHeaderStructure(area, metadata); err != nil {
 		return nil, 0, err
 	}
@@ -207,26 +183,16 @@ func EncodeMetadataForHeader(hdr *BinaryHeader, metadata *Metadata) ([]byte, int
 // validation: the requirements guard, the area size, the canonical encoding
 // and the fit.
 func EncodeMetadata(hdr *BinaryHeader, metadata *Metadata) ([]byte, int, error) {
-	// REFUSE BEFORE ANYTHING ELSE. A container that declares a mandatory
-	// requirement this package does not implement must not be modified by it.
+	// Refuse first: a container declaring an unimplemented mandatory requirement must not be modified.
 	if err := metadata.CheckRequirementsImplemented(); err != nil {
 		return nil, 0, err
 	}
 	return EncodeMetadataIgnoringRequirements(hdr, metadata)
 }
 
-// EncodeMetadataIgnoringRequirements is EncodeMetadata without the
-// requirements guard.
-//
-// It exists for fixtures that model a header this package's own writer would
-// refuse to produce: an online reencryption, or any other container
-// declaring a requirement nothing here implements yet. Those are exactly the
-// headers the reader has to cope with, and since #248 the normal write path
-// can no longer produce them -- so a test that needs one has to go around
-// the guard rather than mutate a shared table to defeat it.
+// EncodeMetadataIgnoringRequirements is EncodeMetadata without the requirements guard, for fixtures modeling headers the writer refuses.
 func EncodeMetadataIgnoringRequirements(hdr *BinaryHeader, metadata *Metadata) ([]byte, int, error) {
-	// The header area size is FIXED by the container; it is never recomputed
-	// from how much metadata happens to need writing. See HeaderAreaSizeForWrite.
+	// The header area size is fixed by the container; see HeaderAreaSizeForWrite.
 	area, err := HeaderAreaSizeForWrite(hdr)
 	if err != nil {
 		return nil, 0, err
@@ -260,9 +226,7 @@ func EncodeMetadataIgnoringRequirements(hdr *BinaryHeader, metadata *Metadata) (
 	return jsonData, area, nil
 }
 
-// marshalCanonicalJSON encodes the LUKS2 metadata exactly as it goes on disk:
-// COMPACT, with no HTML escaping and no trailing newline. See unknownfields.go
-// for why each of those three is a correctness property.
+// marshalCanonicalJSON encodes the metadata as it goes on disk: compact, no HTML escaping, no trailing newline.
 func MarshalCanonicalJSON(v any) ([]byte, error) {
 	var buf bytes.Buffer
 
@@ -282,13 +246,7 @@ func CheckHeaderWritable(hdr *BinaryHeader, metadata *Metadata) error {
 	return err
 }
 
-// WriteHeaderTo writes both header copies through a descriptor the caller
-// already holds, so the path is not resolved again. It writes from offset
-// zero whatever the descriptor's position (WriteEncodedHeader seeks).
-//
-// sync is called once after the primary copy lands and once after the
-// secondary; it is a parameter rather than a package seam so the caller's own
-// test substitution (fipsmigrate_crash_test.go) keeps working unchanged.
+// WriteHeaderTo writes both header copies from offset zero through the caller's descriptor, calling sync after each copy.
 func WriteHeaderTo(f *os.File, hdr *BinaryHeader, metadata *Metadata, sync func(*os.File) error) error {
 	jsonData, area, err := EncodeMetadataForHeader(hdr, metadata)
 	if err != nil {
@@ -309,7 +267,7 @@ func WriteEncodedHeader(f *os.File, hdr *BinaryHeader, jsonData []byte, area int
 	// Update header size.
 	hdr.HeaderSize = uint64(area) // #nosec G115 -- HeaderAreaSizeForWrite bounds this to HeaderMaxSize
 
-	// THE WRITER OWNS EACH COPY'S IDENTITY.
+	// The writer owns each copy's identity.
 	hdr.HeaderOffset = uint64(PrimaryHeaderOffset) // #nosec G115 -- zero
 	copy(hdr.Magic[:], Magic)
 
@@ -333,7 +291,7 @@ func WriteEncodedHeader(f *os.File, hdr *BinaryHeader, jsonData []byte, area int
 		return &errs.Error{Kind: errs.ErrIO, Detail: "failed to write padding", Err: err}
 	}
 
-	// THE PRIMARY IS DURABLE BEFORE THE SECONDARY IS TOUCHED.
+	// The primary is durable before the secondary is touched.
 	if err := sync(f); err != nil {
 		return &errs.Error{Kind: errs.ErrIO, Detail: "failed to sync the primary header before writing the secondary", Err: err}
 	}
@@ -345,14 +303,13 @@ func WriteEncodedHeader(f *os.File, hdr *BinaryHeader, jsonData []byte, area int
 	return sync(f)
 }
 
-// WriteSecondaryCopy writes the SECOND header copy of hdr, whose fields
-// describe the primary, with jsonData padded to jsonSize, at secondaryOffset.
+// WriteSecondaryCopy writes the second header copy of hdr, with jsonData padded to jsonSize, at secondaryOffset.
 func WriteSecondaryCopy(f *os.File, hdr *BinaryHeader, jsonData []byte, jsonSize int, secondaryOffset int64) error {
 	if _, err := f.Seek(secondaryOffset, io.SeekStart); err != nil {
 		return &errs.Error{Kind: errs.ErrIO, Detail: "failed to seek to backup header", Err: err}
 	}
 
-	// Update header offset and MAGIC for the backup copy.
+	// Update header offset and magic for the backup copy.
 	backupHdr := *hdr
 	backupHdr.HeaderOffset = uint64(secondaryOffset) // #nosec G115 -- bounded by HeaderAreaSizeForWrite
 	copy(backupHdr.Magic[:], SecondaryMagic)
@@ -415,9 +372,7 @@ func HeaderCopiesAgree(r io.ReaderAt) error {
 	return nil
 }
 
-// HeaderAreaSizeForWrite returns the header area size a write must use. The
-// area is a property of the CONTAINER, fixed when it was formatted, not a
-// function of how much metadata a particular write happens to produce.
+// HeaderAreaSizeForWrite returns the header area size a write must use: the container's, fixed at format time.
 func HeaderAreaSizeForWrite(hdr *BinaryHeader) (int, error) {
 	area := HeaderMinSize
 	if hdr.HeaderSize != 0 {
@@ -442,10 +397,7 @@ func HeaderAreaSizeForWrite(hdr *BinaryHeader) (int, error) {
 	return area, nil
 }
 
-// HeaderAreaSize returns the on-disk header size, bounded. hdr.HeaderSize is a
-// uint64 read straight off the device before anything has been
-// authenticated, so it is bounded here before it sizes any allocation or read
-// (#62).
+// HeaderAreaSize returns the on-disk header size, bounded before it sizes any allocation or read.
 func HeaderAreaSize(hdr *BinaryHeader) (int, error) {
 	size, err := SafeUint64ToInt(hdr.HeaderSize)
 	if err != nil {
@@ -491,21 +443,13 @@ func HeaderAreaOffset(hdr *BinaryHeader) (int64, error) {
 	return offset, nil
 }
 
-// errChecksumBufferTooShort reports a header buffer too short to contain the
-// checksum field. It is a DISTINCT value rather than another bare
-// ErrInvalidHeader because a declared area size outside the legal range and a
-// buffer too short to hold the checksum field are different faults (#62). It
-// wraps ErrInvalidHeader, so callers classify it exactly as before.
+// errChecksumBufferTooShort reports a header buffer too short for the checksum field; it wraps ErrInvalidHeader.
 var errChecksumBufferTooShort = &errs.Error{
 	Kind:   errs.ErrInvalidHeader,
 	Detail: "header buffer is too short to hold the checksum field",
 }
 
-// ValidateHeaderChecksum validates the checksum of the header copy at
-// headerOffset. The offset and headerSize are parameters rather than
-// re-derived from the header's own attacker-controlled fields: the caller
-// bounds them once, at the earliest point it can, and threads them down
-// (#62).
+// ValidateHeaderChecksum validates the checksum of the header copy at headerOffset, with bounds the caller already checked.
 func ValidateHeaderChecksum(hdr *BinaryHeader, r io.ReaderAt, headerOffset int64, headerSize int) error {
 	if headerSize < ChecksumFieldOffset+len(hdr.Checksum) {
 		return &errs.Error{Kind: errChecksumBufferTooShort, Detail: fmt.Sprintf("%d bytes, need at least %d",
@@ -570,10 +514,7 @@ func CalculateHeaderChecksum(hdr *BinaryHeader, jsonData []byte, jsonSize int) e
 	return nil
 }
 
-// ReadJSONMetadata reads the JSON metadata that follows the header copy at
-// headerOffset. As with ValidateHeaderChecksum, the offset and header area
-// size are passed in rather than re-derived from the attacker-controlled
-// header fields.
+// ReadJSONMetadata reads the JSON metadata after the header copy at headerOffset, with bounds the caller already checked.
 func ReadJSONMetadata(r io.ReaderAt, hdr *BinaryHeader, headerOffset int64, headerSize int) (*Metadata, error) {
 	if headerSize <= HeaderSize {
 		return nil, &errs.Error{
@@ -613,7 +554,7 @@ func ParseJSONMetadata(jsonArea []byte, headerSize int) (*Metadata, error) {
 		return nil, &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "failed to parse JSON metadata", Err: err}
 	}
 
-	// A JSON null is normalized away HERE, at the one point metadata is parsed.
+	// A JSON null is normalized away here, where metadata is parsed.
 	if err := normalizeMetadataNulls(&metadata); err != nil {
 		return nil, err
 	}
@@ -630,8 +571,7 @@ func ParseJSONMetadata(jsonArea []byte, headerSize int) (*Metadata, error) {
 		return nil, err
 	}
 
-	// Keyslot CONTENTS are deliberately not validated here; see ValidateKeyslot
-	// (keyslot.go).
+	// Keyslot contents are validated by ValidateKeyslot, not here.
 
 	return &metadata, nil
 }
@@ -681,8 +621,7 @@ func normalizeMetadataNulls(metadata *Metadata) error {
 		return &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "config is null"}
 	}
 
-	// TWO PHASES: phase one removes every null, phase two repairs the
-	// references that pointed at what was removed.
+	// Phase one removes every null; phase two repairs references to what was removed.
 	dropped := make([]string, 0, len(metadata.Keyslots))
 	for id, keyslot := range metadata.Keyslots {
 		if keyslot == nil {
@@ -700,9 +639,7 @@ func normalizeMetadataNulls(metadata *Metadata) error {
 		}
 	}
 
-	// The report is ORDERED: built by ranging two maps, so leaving it as-is
-	// would hand a caller a list that changes between runs for an unchanged
-	// device.
+	// Sort the report so it is stable across runs.
 	sortDroppedEntries(metadata.DroppedNullEntries)
 
 	// Phase two: a dropped keyslot must stop being referenced by digests and
@@ -794,10 +731,7 @@ func isPowerOf2(n int) bool {
 	return n > 0 && (n&(n-1)) == 0
 }
 
-// SafeUint64ToInt64 converts uint64 to int64 safely, returning an error on
-// overflow. Private copy of pkg/luks2/security.go's helper of the same name:
-// both packages need it and header must not import luks2 to reach the one
-// luks2 already has.
+// SafeUint64ToInt64 converts uint64 to int64, returning an error on overflow.
 func SafeUint64ToInt64(v uint64) (int64, error) {
 	if v > math.MaxInt64 {
 		return 0, errOverflow

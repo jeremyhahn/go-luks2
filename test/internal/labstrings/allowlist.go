@@ -9,22 +9,14 @@ import (
 	"strings"
 )
 
-// AllowRule accepts one class of lab value in the files its path pattern
-// matches. It exists for the cases an inline waiver cannot reach: a whole tree
-// of them, or a file whose syntax has no comments.
-//
-// Every field is required. A rule with no reason is rejected by
-// ValidateAllowList, because the reason is the entire difference between an
-// allow-list and a blindfold.
+// AllowRule accepts one class of lab value in the files its path pattern matches; every field, reason included, is required.
 type AllowRule struct {
 	// Path is a slash-separated pattern. `*` matches within one path
 	// segment; a `**` segment matches any number of segments, including
 	// none. An exact path matches only itself.
 	Path string
 
-	// Classes are the classes this rule accepts in those files. Naming them
-	// keeps the rule narrow: a tree allowed to mention a fleet hostname is
-	// not thereby allowed to hardcode the owner's home directory.
+	// Classes are the classes this rule accepts in those files.
 	Classes []Class
 
 	// Reason says why publishing this value is acceptable, or who owns
@@ -32,22 +24,7 @@ type AllowRule struct {
 	Reason string
 }
 
-// DefaultAllowList is the accepted set for THIS repository. Every entry is a
-// deliberate decision, and the list is meant to shrink.
-//
-// TestDefaultAllowList_AcceptsOnlyStrippedFiles keeps every entry on a
-// strip-at-publish file, so nothing published is ever accepted. Nothing in the
-// tree needed an entry when the gate was added: the scrub had already
-// removed the values themselves, which is always preferred to listing them
-// here. The fleet pattern set needs none either: it carries digests, not
-// values (fleet.go).
-//
-// The one entry is the internal review workflow code-review.yml, stripped at
-// publish. From template v5.2.1 its shared body names the review
-// host and the Ollama address, in comments and as the OLLAMA_URL default, and
-// the template is adopted verbatim, so those lines cannot be scrubbed here
-// without diverging from it. The entry goes when the template stops naming
-// them.
+// DefaultAllowList is the accepted set for this repository, limited to strip-at-publish files; its one entry is code-review.yml, adopted verbatim from the template.
 var DefaultAllowList = []AllowRule{
 	{
 		Path:    workflowDir + "code-review.yml",

@@ -14,27 +14,10 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// maxSymlinks bounds the symlinks one Open follows, as the kernel's own
-// MAXSYMLINKS does, so a loop is refused rather than walked for ever.
+// maxSymlinks bounds the symlinks one Open follows, like the kernel's MAXSYMLINKS.
 const maxSymlinks = 40
 
-// Open checks the program at path, an absolute path, and returns it pinned
-// to the descriptor the checks were made on.
-//
-// The path is walked one component at a time from "/", each opened with
-// O_PATH|O_NOFOLLOW relative to the directory before it, and each judged by
-// fstat of that descriptor -- never by name, so nothing can be swapped between
-// a check and the next step. Every directory on the walk must be owned by root
-// or this process's user and not writable by group or others, unless it is
-// sticky (as /tmp is). The file at the end must be a regular, executable file
-// owned the same way and writable by neither group nor others.
-//
-// A symlink is followed only through the same walk: it must itself be owned
-// by root or this user, it is read from its own descriptor, and its target is
-// walked with the same checks -- from "/" when absolute, from the checked
-// directory holding the link when relative. So every directory a program is
-// reached through is judged, not only the ones left once symlinks are
-// resolved, and ".." climbs only to a directory already checked.
+// Open walks the absolute path component by component with O_PATH|O_NOFOLLOW, checking ownership and permissions by fstat, and returns the program pinned to the checked descriptor.
 func Open(path string) (*Program, error) {
 	if !filepath.IsAbs(path) {
 		return nil, &errs.Error{Kind: ErrTool, Detail: path + " is not an absolute path"}

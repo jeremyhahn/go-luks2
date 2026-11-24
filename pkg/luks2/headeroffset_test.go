@@ -18,13 +18,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// setHeaderOffset patches the big-endian uint64 HeaderOffset field, which sits
-// at byte 256 (0x100): magic(6) + version(2) + header_size(8) + sequence_id(8)
-// + label(48) + checksum_alg(32) + salt(64) + uuid(40) + subsystem(48). The
-// offset is spelled as that sum rather than as 256 so a change to the struct
-// layout is visible here, and TestSetHeaderOffsetPatchesTheRightField checks
-// the sum is actually right -- eight bytes written at the wrong offset would
-// corrupt a neighboring field and still make every rejection test "pass".
+// setHeaderOffset patches the big-endian HeaderOffset field at byte 256, spelled as the sum of the preceding fields.
 func setHeaderOffset(t *testing.T, device string, offset uint64) {
 	t.Helper()
 
@@ -78,16 +72,7 @@ func TestSetHeaderOffsetPatchesTheRightField(t *testing.T) {
 	}
 }
 
-// TestReadHeaderRefusesAnOutOfRangeHeaderOffset is the regression test for #63.
-//
-// hdr.HeaderOffset is the sibling of the HeaderSize field bounded by #51, and
-// it arrives the same way: eight bytes off an attacker-controlled device with
-// only magic and version in front of them. Both read paths converted it and
-// checked overflow only; the type's own documentation ("0 or 0x4000") was the
-// only place the range was recorded, and documentation enforces nothing.
-//
-// As with HeaderSize, the assertion that matters is that the call RETURNS -- a
-// caller who checks the error ReadHeader promises must actually receive one.
+// TestReadHeaderRefusesAnOutOfRangeHeaderOffset: an out-of-range HeaderOffset returns an error.
 func TestReadHeaderRefusesAnOutOfRangeHeaderOffset(t *testing.T) {
 	defer parallel(t)()
 
@@ -130,13 +115,7 @@ func TestReadHeaderRefusesAnOutOfRangeHeaderOffset(t *testing.T) {
 	}
 }
 
-// TestHeaderAreaOffsetAcceptsEveryLegalCopyLocation is the other half of the
-// bound, and the half a refusal-only suite would miss.
-//
-// The accepted set is not just {0, 0x4000}: a container formatted with a larger
-// metadata area puts its second copy further out, and this library has to keep
-// reading those. The bound is therefore 0, or a 16 KiB-aligned offset up to
-// header.HeaderMaxOffset.
+// TestHeaderAreaOffsetAcceptsEveryLegalCopyLocation: 0, or 16 KiB-aligned up to header.HeaderMaxOffset.
 func TestHeaderAreaOffsetAcceptsEveryLegalCopyLocation(t *testing.T) {
 	for _, tc := range []struct {
 		offset uint64
@@ -165,11 +144,7 @@ func TestHeaderAreaOffsetAcceptsEveryLegalCopyLocation(t *testing.T) {
 	}
 }
 
-// TestHeaderOffsetBoundStillAdmitsTheSecondaryHeader is the interaction check
-// between this bound and the SKUL fix: the secondary header legitimately lives
-// at header.SecondaryHeaderOffset and records that offset in its own
-// HeaderOffset field, so a bound that only admitted 0 would make the backup
-// unreadable -- trading one broken recovery path for another.
+// TestHeaderOffsetBoundStillAdmitsTheSecondaryHeader: the secondary header at header.SecondaryHeaderOffset stays readable.
 func TestHeaderOffsetBoundStillAdmitsTheSecondaryHeader(t *testing.T) {
 	defer parallel(t)()
 
@@ -191,13 +166,7 @@ func TestHeaderOffsetBoundStillAdmitsTheSecondaryHeader(t *testing.T) {
 	mustDestroy(t, key)
 }
 
-// TestReadSecondaryHeaderRejectsThePrimaryMagic pins which magic each copy must
-// carry, in this library's own reader.
-//
-// Reading the primary copy through ReadSecondaryHeader must fail: the primary
-// carries "LUKS\xba\xbe" and the secondary carries "SKUL\xba\xbe", and a reader
-// that accepted either would not notice a backup written with the wrong magic
-// -- which is the state #64 describes.
+// TestReadSecondaryHeaderRejectsThePrimaryMagic: the secondary copy must carry "SKUL\xba\xbe", not the primary magic.
 func TestReadSecondaryHeaderRejectsThePrimaryMagic(t *testing.T) {
 	defer parallel(t)()
 

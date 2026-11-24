@@ -18,18 +18,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// The FIPS 140-3 policy branches, run in-process.
-//
-// FIPS mode is fixed at process start, so in the ordinary unit run every branch
-// behind fipsMode would otherwise execute only in the child processes of
-// fipsimport_cryptsetup_test.go and in CI's full-tier FIPS job: a regression in how
-// a refusal is CLASSIFIED -- import needed, or damage -- would go unseen until
-// then. These tests force the policy on, by passing a forced fipsMode into the
-// sys-accepting core the operation under test wraps, and pin each
-// classification. What the Go Cryptographic Module itself enforces under
-// GODEBUG=fips140=only is not simulated here; the child-process tests prove it.
-// In a process already in FIPS mode, forcing is a no-op and the tests assert the
-// same thing.
+// The FIPS policy branches, forced on in-process; the module's own enforcement is proved by the child-process tests.
 
 // forceFIPSPolicy returns a fipsMode func that reports the package's FIPS
 // policy as on.
@@ -81,10 +70,7 @@ func argon2DigestLabel(m *header.Metadata) {
 	d.Digest = encodeBase64(bytes.Repeat([]byte{0x5a}, argon2DigestLen))
 }
 
-// TestFIPSPolicyClassifiesWhatItRefuses: under the FIPS policy, a volume that
-// is unopenable ONLY because of its KDFs is reported as needing the import,
-// naming each keyslot and digest; one that is also damaged, or whose digest is
-// malformed, is reported as damaged.
+// TestFIPSPolicyClassifiesWhatItRefuses: a volume blocked only by its KDFs needs import; a damaged one is reported as damaged.
 func TestFIPSPolicyClassifiesWhatItRefuses(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -432,13 +418,7 @@ func TestMalformedDigestBesideShortSaltKeepsTheHeaderError(t *testing.T) {
 	}
 }
 
-// TestMalformedDigestBesideRefusedKeyslotKDFKeepsTheHeaderError pins the
-// classification of a keyslot the policy refuses at its OWN KDF -- Argon2 under
-// the FIPS policy, a PBKDF2 salt too short for strict mode -- while one of the
-// two digests attesting it is malformed. The keyslot refusal is not damage, but
-// the malformed digest is, and it is what unlock reports: ErrInvalidHeader, not
-// the policy's sentinel. MigrateToFIPS refuses the same volume at planning with
-// the same error and writes nothing.
+// TestMalformedDigestBesideRefusedKeyslotKDFKeepsTheHeaderError: a malformed attesting digest is ErrInvalidHeader, and MigrateToFIPS writes nothing.
 func TestMalformedDigestBesideRefusedKeyslotKDFKeepsTheHeaderError(t *testing.T) {
 	cases := []struct {
 		name string

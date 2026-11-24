@@ -13,10 +13,7 @@ import (
 	"testing"
 )
 
-// TestProbeFilesystemReportsWhatBlkidFound: the probe reads blkid's
-// low-level answer for the device, never its cache, and hands back the TYPE
-// only when blkid says it is a filesystem. Everything else is a refusal
-// naming what was found, so Mount cannot be steered into a guess.
+// TestProbeFilesystemReportsWhatBlkidFound: blkid's low-level probe, TYPE only for a filesystem, otherwise a refusal.
 func TestProbeFilesystemReportsWhatBlkidFound(t *testing.T) {
 	const dev = "/dev/mapper/vol"
 	tests := []struct {

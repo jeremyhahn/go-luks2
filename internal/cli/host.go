@@ -13,11 +13,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
-// mapping is the host's view of one active dm-crypt mapping: enough to
-// build its device-mapper path and to check whether a filesystem on it is
-// mounted. pkg/dmcrypt.Mapping carries Name, UUID, Major
-// and Minor; this carries only the fields open.go, close.go and mount.go
-// actually use today.
+// mapping is the host's view of one active dm-crypt mapping.
 type mapping struct {
 	name         string
 	major, minor uint32
@@ -27,11 +23,7 @@ type mapping struct {
 // pkg/dmcrypt.Mapping.Path will report it.
 func (m mapping) path() string { return "/dev/mapper/" + m.name }
 
-// activator is the dm-crypt boundary (pkg/dmcrypt): activate a volume
-// key as a named mapping, tear one down, and resolve a mapping name back to
-// its device number. Every method mirrors a pkg/dmcrypt function 1:1.
-// realActivator, below, is the production implementation; open, close,
-// mount and unmount are also unit-tested against a fake one.
+// activator is the dm-crypt boundary (pkg/dmcrypt); realActivator is the production implementation.
 type activator interface {
 	activate(ctx context.Context, v *luks2.Volume, key *luks2.Key, name string) (mapping, error)
 	deactivate(ctx context.Context, name string) error
@@ -55,19 +47,13 @@ type mounter interface {
 type loopDevice struct {
 	devPath string
 
-	// dev is the device Attach returned, which detach must use: it holds
-	// the backing file's identity, and Detach refuses a device no longer
-	// backed by that file. A device rebuilt from devPath by Lookup would
-	// take whatever the number is attached to at that later moment.
+	// dev is the device Attach returned; detach must use it, since Detach refuses a device no longer backed by the file.
 	dev *loop.Device
 }
 
 func (d loopDevice) path() string { return d.devPath }
 
-// looper is the loop-device boundary (pkg/loop): attach a
-// file as a loop device, and detach one again. create's file-volume flow is
-// the only user: it formats a regular file directly, then needs a block
-// device to activate a dm-crypt mapping on.
+// looper is the loop-device boundary (pkg/loop), used by create's file-volume flow.
 type looper interface {
 	attach(ctx context.Context, file string) (loopDevice, error)
 	detach(ctx context.Context, d loopDevice) (loop.DetachState, error)

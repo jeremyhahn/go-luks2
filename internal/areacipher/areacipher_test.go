@@ -95,12 +95,7 @@ func lockedKiB(t *testing.T) int {
 // lockedSlackKiB is the tolerance the leak assertion allows: one page.
 const lockedSlackKiB = 4
 
-// katKey and katPlaintext are the inputs the known answers below were
-// produced from by the Linux kernel's dm-crypt: `cryptsetup open --type plain
-// --cipher <spec> --key-size <bits> --key-file <katKey prefix> --offset 0`,
-// katPlaintext written through the mapping with O_DIRECT, and the two raw
-// sectors read back from the device (cryptsetup 2.7.5, Linux 6.8). The
-// answers are dm-crypt's, not a second run of this implementation.
+// katKey and katPlaintext produced the known answers below through the kernel's dm-crypt (cryptsetup plain mapping, raw sectors read back).
 func katKey(n int) []byte {
 	k := make([]byte, n)
 	for i := range k {
@@ -487,13 +482,7 @@ func legacyXtsSectors(dst, src, key []byte, sectorSize int, decrypt bool) error 
 	return nil
 }
 
-// TestXtsSectorsMatchesThePerSectorScratchFormulation pins the transform that
-// stopped copying every sector through two fresh heap buffers.
-//
-// The lengths deliberately include one that is NOT a whole number of sectors,
-// because that is the only case where the two formulations do anything
-// different: the rewrite transforms whole sectors between the caller's buffers
-// and keeps the zero-padded scratch path only for a trailing partial sector.
+// TestXtsSectorsMatchesThePerSectorScratchFormulation pins the in-place transform, including a length that is not whole sectors.
 func TestXtsSectorsMatchesThePerSectorScratchFormulation(t *testing.T) {
 	key := make([]byte, 64)
 	if _, err := rand.Read(key); err != nil {
@@ -544,22 +533,7 @@ func TestXtsSectorsMatchesThePerSectorScratchFormulation(t *testing.T) {
 	}
 }
 
-// TestKeyMaterialTransformDoesNotRoundTripAPartialSector records a PRE-EXISTING
-// limitation rather than asserting a desirable property.
-//
-// A final sector shorter than 512 bytes is zero-padded to a whole sector before
-// the transform, in both directions. On the way out only the first n ciphertext
-// bytes are kept; on the way back those n bytes are padded with zeros again,
-// which is not the ciphertext that was produced. XTS decrypts each 16-byte
-// block independently, so everything past the last whole AES block inside that
-// final sector comes back as garbage.
-//
-// This is not reachable from any LUKS2 path: keyslot material is
-// keySize*stripes bytes -- 128000 or 256000 -- both whole numbers of sectors,
-// and unlockKeyslot rounds its decryption length UP to a sector boundary
-// precisely so it stays that way. It is pinned here so that the limitation is
-// recorded where someone reusing these helpers will meet it, and so that a
-// future fix is visible as a change in behavior rather than an accident.
+// TestKeyMaterialTransformDoesNotRoundTripAPartialSector pins a known limitation: a partial final sector does not round-trip (unreachable from LUKS2 paths).
 func TestKeyMaterialTransformDoesNotRoundTripAPartialSector(t *testing.T) {
 	key := mustRandom(t, 64)
 	src := mustRandom(t, 600) // one whole sector plus 88 bytes
@@ -619,8 +593,7 @@ func TestEncryptAndDecryptKeyMaterialEnclaveRoundTrip(t *testing.T) {
 	}
 	defer mustDestroy(t, recovered)
 
-	// The plaintext comes back INSIDE an enclave -- it is the AF-split master
-	// key on a real volume, so it must never be produced as a slice.
+	// The plaintext comes back inside an enclave, never as a slice.
 	if ok, err := recovered.EqualTo(plaintext); err != nil || !ok {
 		t.Fatal("the enclave round trip did not recover the key material")
 	}
@@ -635,10 +608,7 @@ func TestDecryptKeyMaterialEnclaveReleasesOnFailure(t *testing.T) {
 
 	before := lockedKiB(t)
 
-	// A key the transform cannot take -- 64 bytes for AES-CBC -- fails AFTER
-	// the destination enclave has been allocated, which is exactly the path on
-	// which a missed Destroy would leak locked pages that nobody holds a
-	// handle to any more.
+	// A key the transform cannot take fails after the destination enclave is allocated, the path where a missed Destroy would leak.
 	for i := 0; i < 32; i++ {
 		if _, err := (Transform{mode: modeCBC, iv: ivESSIVSHA256}).DecryptEnclave(testCustody, make([]byte, 64<<10), key); err == nil {
 			t.Fatal("DecryptEnclave accepted a key its transform cannot take")
@@ -692,17 +662,7 @@ func TestEncryptEnclaveRefusesAKeyTheTransformCannotTake(t *testing.T) {
 	}
 }
 
-// TestKeyslotAreaRoundTripAES192CBCVolumeKey reproduces the exact on-disk
-// shape the pkg/luks2 write and unlock paths build around EncryptEnclave and
-// DecryptEnclave: EncryptEnclave sized by the AF-split length alone,
-// writeArea's zero padding out to the keyslot area's 4096-byte alignment,
-// and DecryptEnclave fed exactly plan.decryptLen bytes (the AF-split length
-// rounded up to a whole sector).
-//
-// A cryptsetup AES-192-CBC volume's master key is 24 bytes; 4000 AF stripes
-// puts the split at 96000 bytes, 256 bytes short of a whole sector --
-// WritableAreaKeySize(24) falls back to a 64-byte AES-256-XTS area key, so
-// this exercises xtsPartialSector on the write side, not cbcSectors.
+// TestKeyslotAreaRoundTripAES192CBCVolumeKey reproduces the pkg/luks2 write and unlock shape for a 24-byte key, exercising xtsPartialSector.
 func TestKeyslotAreaRoundTripAES192CBCVolumeKey(t *testing.T) {
 	const afSplitSize = 24 * 4000 // 96000: a cryptsetup AES-192-CBC master key, AF-split over 4000 stripes
 	const keyslotAreaAlignment = 4096
@@ -718,14 +678,7 @@ func TestKeyslotAreaRoundTripAES192CBCVolumeKey(t *testing.T) {
 	defer clear(ciphertext)
 	t.Logf("EncryptEnclave produced %d ciphertext bytes for %d plaintext bytes", len(ciphertext), afSplitSize)
 
-	// screenKeyslot/recoverKeyslotKey (pkg/luks2): decryptLen is the AF-split
-	// length rounded UP to a whole sector, never the raw AF-split length --
-	// so the unlock path always asks for a whole number of sectors' worth of
-	// ciphertext. cryptsetup writes exactly that many ciphertext bytes (the
-	// final sector's padding is encrypted, not left off the device); a
-	// ciphertext shorter than decryptLen means the bytes beyond it are
-	// on-disk zero padding (writeArea) standing in for real ciphertext, which
-	// is not what cryptsetup would have written for the same AF split.
+	// The unlock path decrypts the AF-split length rounded up to a whole sector; cryptsetup writes exactly that much ciphertext.
 	decryptLen := ((afSplitSize + SectorSize - 1) / SectorSize) * SectorSize
 	if len(ciphertext) != decryptLen {
 		t.Fatalf("EncryptEnclave produced %d ciphertext bytes, want %d (afSplitSize rounded up to a whole %d-byte sector, as cryptsetup writes it)",

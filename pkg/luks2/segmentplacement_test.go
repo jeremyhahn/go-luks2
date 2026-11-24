@@ -47,11 +47,7 @@ func TestReadHeaderRefusesASegmentOutOfPlace(t *testing.T) {
 	}
 }
 
-// TestADetachedHeaderReadsButIsNeverActivated: cryptsetup reads a segment at
-// offset 0 as a DETACHED header, whose data lives on another device, so the
-// reader must accept it. This package activates the data on the device that
-// carries the header, where offset 0 is the header itself, so the activation
-// path refuses it -- and anything else short of the end of the keyslots area.
+// TestADetachedHeaderReadsButIsNeverActivated: a segment at offset 0 reads but activation refuses it.
 func TestADetachedHeaderReadsButIsNeverActivated(t *testing.T) {
 	defer parallel(t)()
 

@@ -23,28 +23,7 @@ type CurrentHeader struct {
 	Stale bool
 }
 
-// ReadCurrentHeader reads both header copies and chooses the one a reader must
-// use, as cryptsetup's LUKS2_disk_hdr_read (lib/luks2/luks2_disk_metadata.c)
-// does:
-//
-//   - a copy failing magic, checksum or JSON validation is dropped;
-//   - of two valid copies the one with the higher sequence id is used, and the
-//     primary at a tie -- sequence ids are compared, content is not;
-//   - the secondary is read where a valid primary says it is, and only when the
-//     primary is invalid is every legal offset probed for it.
-//
-// A crash part way through a header write tears the primary (it is written
-// first), and the secondary then holds the previous header, complete. Reading
-// the primary alone refused a volume cryptsetup opens.
-//
-// With no valid copy the primary's error is returned, so a device that is not
-// LUKS2 still says why. A primary carrying the LUKS magic and another version
-// fails at once without the secondary being consulted: cryptsetup dispatches on
-// the primary's version before it reads either LUKS2 copy, so that device is a
-// LUKS1 (or unknown) container, not a damaged LUKS2 one.
-//
-// Nothing is written: repairing the stale copy needs the exclusive lock, and is
-// the caller's to do (see Stale).
+// ReadCurrentHeader reads both copies and picks the valid one with the higher sequence id (primary on a tie), as cryptsetup's LUKS2_disk_hdr_read does; nothing is written.
 func ReadCurrentHeader(device io.ReaderAt) (*CurrentHeader, error) {
 	phdr, pmeta, perr := ReadHeaderCopyFrom(device, PrimaryHeaderOffset)
 	if errors.Is(perr, ErrUnsupportedLUKSVersion) {
@@ -84,10 +63,7 @@ func ReadCurrentHeader(device io.ReaderAt) (*CurrentHeader, error) {
 	}
 }
 
-// probeSecondaryHeader tries every legal header area size for the secondary
-// copy, as cryptsetup does (hdr2_offset) when the primary cannot say where it
-// is. A candidate is accepted only when it passes every check
-// ReadHeaderCopyFrom makes; the error is the first candidate's.
+// probeSecondaryHeader tries every legal area size for the secondary copy, accepting only a fully valid one.
 func probeSecondaryHeader(device io.ReaderAt) (*BinaryHeader, *Metadata, int64, error) {
 	var firstErr error
 	for _, offset := range LegalHeaderAreaSizes() {

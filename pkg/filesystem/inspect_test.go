@@ -14,9 +14,7 @@ import (
 	"testing"
 )
 
-// TestInspectReadsBlkidsExport pins the blkid invocation and the parse: the
-// four fields blkid reports are read, anything else -- including a line
-// that is not KEY=VALUE -- is ignored.
+// TestInspectReadsBlkidsExport pins the blkid invocation and the parse of its four fields.
 func TestInspectReadsBlkidsExport(t *testing.T) {
 	record := fakeTools(t, map[string]fakeTool{"blkid": {stdout: "DEVNAME=/dev/mapper/vol\n" +
 		"UUID=2f6e1b3a-0c1d-4e5f-8a9b-0c1d2e3f4a5b\nBLOCK_SIZE=4096\nTYPE=ext4\nLABEL=data=archive\nnot an assignment\n"}})

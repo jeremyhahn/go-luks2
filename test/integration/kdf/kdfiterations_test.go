@@ -101,13 +101,7 @@ func formatWithCryptsetupForced(t *testing.T, path string, iterations int) {
 	}
 }
 
-// TestChangeKeyRaisesABelowFloorCostRatherThanRefusing is the asymmetry
-// between the pbkdf2 and argon2 halves of ChangeKey's cost preservation.
-// See kdfiterations_integration_test.go (now moved, from pkg/luks2) for the
-// full reasoning. internal/kdf.PBKDF2IterationFloor,
-// PBKDF2ReferenceTargetMs and MinPBKDF2Iterations are already exported
-// (pkg/luks2's own pbkdf2IterationFloor/pbkdf2ReferenceTargetMs/
-// minPBKDF2Iterations are thin aliases of them).
+// TestChangeKeyRaisesABelowFloorCostRatherThanRefusing: ChangeKey raises a below-floor PBKDF2 count to internal/kdf.PBKDF2IterationFloor.
 func TestChangeKeyRaisesABelowFloorCostRatherThanRefusing(t *testing.T) {
 	requireCryptsetupDeclared(t)
 

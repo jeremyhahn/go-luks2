@@ -57,16 +57,7 @@ type Entry struct {
 	ExportIgnored bool
 }
 
-// IndexEntries reads every entry in the git index at root, content included,
-// sorted by path.
-//
-// The content is read from the staged blobs, never from the working tree. The
-// index is what the next commit carries, so a value staged and then edited out
-// of the working tree, or a staged file deleted from it, or a file a sparse
-// checkout never wrote, still ships -- and is still scanned. A blob that cannot
-// be read fails the call; one larger than the scan limit fails it with
-// FileTooLargeError unless ExemptFile lists it, in which case it is returned
-// Unread. No other entry is ever passed over unread.
+// IndexEntries reads every git index entry at root from the staged blobs, sorted by path; an oversize blob fails with FileTooLargeError unless ExemptFile lists it.
 func IndexEntries(root string) ([]Entry, error) {
 	return indexEntries(root, maxFileSize)
 }

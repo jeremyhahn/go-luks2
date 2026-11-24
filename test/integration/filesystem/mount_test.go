@@ -19,11 +19,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/test/internal/harness"
 )
 
-// Mount and MakeFilesystem resolve a MAPPING NAME to a device through
-// device-mapper (dmcrypt.Lookup), not a raw path -- the C3/C5 fixes --
-// before forwarding to pkg/filesystem: that resolution is what these tests
-// exercise, so they go through test/internal/harness's old-shaped wrappers
-// rather than pkg/filesystem's own device-path entry points.
+// Mount and MakeFilesystem resolve a mapping name through dmcrypt.Lookup before forwarding to pkg/filesystem.
 
 func TestMountUnmount(t *testing.T) {
 	requireRoot(t)
@@ -209,10 +205,7 @@ func mountedType(t *testing.T, mountPoint string) string {
 	return ""
 }
 
-// TestIsMappingMountedSeesAMountedMapping is the C3/C5 fix's own real-kernel
-// assertion, moved from pkg/luks2/activation_integration_test.go (#274):
-// IsMappingMounted must resolve the MAPPING, not whatever happens to be at
-// the same device-mapper minor another mapping once held.
+// TestIsMappingMountedSeesAMountedMapping: IsMappingMounted resolves the mapping itself.
 func TestIsMappingMountedSeesAMountedMapping(t *testing.T) {
 	requireRoot(t)
 

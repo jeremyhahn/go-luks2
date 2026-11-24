@@ -39,18 +39,7 @@ type MountParams struct {
 	Data string
 }
 
-// Mount mounts the filesystem on p.Source at p.Target using the mount(2)
-// syscall.
-//
-// An empty p.Type mounts the filesystem Detect finds on p.Source, and
-// refuses with ErrNotDetected when it finds none.
-//
-// There is deliberately no already-mounted refusal, and no ErrAlreadyMounted
-// sentinel for one to return (#70). Linux permits STACKING a mount over an
-// existing mount point, so "already mounted" is a legal state rather than an
-// error condition, and a pre-check that refused it would remove a capability
-// the kernel offers. A caller that wants to know asks IsMounted, which
-// answers exactly that question.
+// Mount mounts p.Source at p.Target with mount(2); an empty p.Type mounts what Detect finds (ErrNotDetected if none). Stacking over a mount point is allowed.
 func Mount(ctx context.Context, p MountParams) (err error) {
 	defer func() { err = errs.At("filesystem", "Mount", p.Source, err) }()
 	if err := ctx.Err(); err != nil {
@@ -61,9 +50,7 @@ func Mount(ctx context.Context, p MountParams) (err error) {
 		return &Error{Kind: ErrInvalidArgument, Detail: "mount point " + p.Target + " does not exist", Err: err}
 	}
 
-	// No type named means the type ON THE DEVICE, as blkid identifies it --
-	// never an assumed one. Mounting under the wrong type fails at best, and
-	// a caller that hard-codes ext4 cannot mount the xfs volume Make made.
+	// No type named means the type blkid finds on the device.
 	fsType := p.Type
 	if fsType == "" {
 		detected, err := probeFilesystem(ctx, probeOutputRunner, p.Source)
@@ -99,14 +86,7 @@ func deviceListedInMountInfo(r io.Reader, major, minor uint32) (bool, error) {
 	return false, nil
 }
 
-// DeviceMounted reports whether a filesystem on the device numbered
-// major:minor is mounted, in this process's mount namespace.
-//
-// It matches the mounted DEVICE, by number, and not a path: a filesystem
-// mounted through a different path to the same device (/dev/dm-N or a udev
-// alias, for example) is still seen. A caller that has a device-mapper
-// mapping name resolves it to its device number first; dmcrypt.Lookup does
-// that.
+// DeviceMounted reports whether a filesystem on device major:minor is mounted in this mount namespace, matched by device number.
 func DeviceMounted(ctx context.Context, major, minor uint32) (mounted bool, err error) {
 	defer func() { err = errs.At("filesystem", "DeviceMounted", "", err) }()
 	if err := ctx.Err(); err != nil {
@@ -131,14 +111,10 @@ const (
 	// only; on other filesystems its effect is undefined -- umount2(2)).
 	Force UnmountFlags = 1 << iota
 
-	// Detach unmounts the mount point immediately but defers releasing the
-	// underlying filesystem until it is no longer busy (MNT_DETACH, "lazy").
+	// Detach unmounts immediately and releases the filesystem when no longer busy (MNT_DETACH).
 	Detach
 
-	// Expire marks a mount point that is not currently busy as expired,
-	// rather than unmounting it; a SECOND call with Expire on a mount point
-	// that is still not busy then unmounts it. It cannot be combined with
-	// Force or Detach.
+	// Expire marks an idle mount point expired; a second Expire unmounts it. Not combinable with Force or Detach.
 	Expire
 )
 
@@ -161,25 +137,7 @@ func (f UnmountFlags) toUnix() int {
 	return out
 }
 
-// Unmount unmounts target using the umount2(2) syscall.
-//
-// # The kernel decides whether this is a mount point, not us
-//
-// A pre-check with IsMounted would duplicate a decision the kernel already
-// makes, and /proc/mounts ESCAPES its fields, so a real mount at "/mnt/my
-// disk" appears there as "/mnt/my\040disk" -- a string comparison against the
-// raw field would refuse a mount point the kernel would unmount quite
-// happily (#70, caught in review of #87). So the kernel is asked, and its
-// answer is classified.
-//
-// # Why an EINVAL from the kernel can be read as "not a mount point"
-//
-// That reading is only sound because of the flag check below it. umount2(2)
-// documents exactly three causes for EINVAL: the target is not a mount
-// point; Expire was combined with Force or Detach; and flags contains a
-// value it does not define. The second and third are properties of the
-// CALLER'S OWN ARGUMENT -- not of the system, and not subject to drift -- so
-// refusing them here leaves the first as the only remaining reading.
+// Unmount unmounts target with umount2(2); with invalid flag combinations refused first, EINVAL can only mean not a mount point.
 func Unmount(ctx context.Context, target string, flags UnmountFlags) (err error) {
 	defer func() { err = errs.At("filesystem", "Unmount", target, err) }()
 	if err := ctx.Err(); err != nil {
@@ -219,12 +177,7 @@ func IsMounted(ctx context.Context, target string) (mounted bool, err error) {
 	return mountPointListed(file, target)
 }
 
-// mountPointListed reports whether target appears as the target of any line
-// in a /proc/mounts-formatted stream.
-//
-// It is separate from IsMounted so the parsing can be tested against a table
-// the test writes, rather than against whatever the host happens to have
-// mounted -- which is the only way to exercise an escaped path at all.
+// mountPointListed reports whether target is the target of any line in a /proc/mounts-format stream.
 func mountPointListed(r io.Reader, target string) (bool, error) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
@@ -241,21 +194,7 @@ func mountPointListed(r io.Reader, target string) (bool, error) {
 	return false, nil
 }
 
-// unescapeMountField decodes the octal escapes the kernel writes into
-// /proc/mounts.
-//
-// The fields there are SPACE-DELIMITED, so the four bytes that would break
-// that grammar are mangled on the way out: space, tab, newline and backslash
-// become \040, \011, \012 and \134 (fs/proc_namespace.c, seq_escape with "
-// \t\n\\"). Comparing a caller's path against the raw field therefore fails
-// for every mount point containing one of them -- which is exactly how
-// Unmount came to refuse a mount it should have unmounted (#70, caught in
-// review of #87).
-//
-// Any three-digit octal escape is decoded, not just those four. A literal
-// backslash is itself escaped as \134, so a backslash followed by three
-// digits cannot occur in the output except as an escape, and decoding
-// generally cannot misread a path the kernel wrote.
+// unescapeMountField decodes the octal escapes the kernel writes into /proc/mounts fields.
 func unescapeMountField(field string) string {
 	if !strings.Contains(field, "\\") {
 		return field

@@ -22,20 +22,9 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// The tests in this file hold #237: the KDF a keyslot gets when the caller
-// names none depends on the mode the process runs in -- PBKDF2-SHA512 in FIPS
-// 140-3 mode, Argon2id otherwise -- and a FIPS-mode process can therefore
-// create and enroll keyslots without naming one.
-//
-// The mode is fixed for the life of a process, so the resolution itself is
-// tested through its mode-parameterized form (resolveKDFTypeFor, which
-// applies defaultKDFTypeFor) and both answers are checked in every run. The tests that
-// go through the public entry points assert what they do in THIS process's
-// mode; CI's full-tier FIPS job runs them in the other one.
+// The default KDF is PBKDF2-SHA512 in FIPS 140-3 mode and Argon2id otherwise; resolveKDFTypeFor is tested for both modes.
 
-// e2eIterTimeMs is the PBKDF2 budget the end-to-end tests below calibrate to.
-// What they assert is the KDF TYPE and HASH a keyslot gets, not its cost, and
-// the default 2000 ms budget would make each derivation take two seconds.
+// e2eIterTimeMs is a low PBKDF2 budget; these tests assert type and hash, not cost.
 const e2eIterTimeMs = 50
 
 func TestDefaultKDFSpecFollowsTheProcessMode(t *testing.T) {

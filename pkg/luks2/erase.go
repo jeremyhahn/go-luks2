@@ -11,14 +11,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/device"
 )
 
-// Erase crypto-erases the volume: every header copy and
-// the keyslot area are overwritten, destroying every key the volume key
-// could be recovered through. The data segment's ciphertext is left in
-// place -- undecodable without a key, but not itself erased.
-//
-// This is the exclusive-lock half of the old Wipe(WipeOptions{HeaderOnly:
-// true}), through v's own pinned descriptor and lock rather than reopening
-// the path a second time; wipeHeaders is the shared core.
+// Erase crypto-erases the volume: every header copy and the keyslot area are overwritten; the data ciphertext stays.
 func (v *Volume) Erase(ctx context.Context) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()

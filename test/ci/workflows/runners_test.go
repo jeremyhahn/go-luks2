@@ -22,23 +22,14 @@ var runnerLabel = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 // waiverComment is the waiver a self-hosted runs-on line carries.
 var waiverComment = regexp.MustCompile(`#\s*self-hosted:(.*)$`)
 
-// waiverCategories are the reasons a job may leave the hosted runner
-// (ruling 999). hardware: the job needs specific hardware. oversize: it needs
-// more than a standard hosted runner's 4 vCPU, 16 GB memory, about 14 GB of
-// free disk or 6 hours. credential: a secret is mounted on one runner alone,
-// and only the Codex review job may claim it.
+// waiverCategories are the reasons a job may leave the hosted runner: hardware, oversize (beyond 4 vCPU, 16 GB, 14 GB disk or 6 hours) or credential (Codex review only).
 var waiverCategories = map[string]bool{"hardware": true, "oversize": true, "credential": true}
 
 // credentialJobs are the only jobs, by workflow file and job id, a
 // credential waiver is valid on.
 var credentialJobs = map[string]bool{"code-review.yml/review": true}
 
-// runsOnViolation applies ruling 999's runner rule to one job's runs-on key
-// line (the text after `runs-on:`, comments included). It returns "" when the
-// line is allowed and the reason otherwise. It fails closed: only one plain or
-// quoted label on the key line itself is read, so a value that needs a YAML
-// decoder (block or flow collection, block scalar, anchor, alias or tag) is a
-// violation; waiverViolations rejects a value continued on a later line.
+// runsOnViolation returns why one job's runs-on line is not allowed, or ""; anything needing a YAML decoder is a violation.
 func runsOnViolation(file, jobID, line string) string {
 	if line != "" && line[0] != ' ' && line[0] != '\t' {
 		return "runs-on key is not followed by a space"
@@ -51,15 +42,11 @@ func runsOnViolation(file, jobID, line string) string {
 		}
 	}
 	if file == "ci.yml" && jobID == "preflight" && strings.TrimSpace(value) == preflightRunsOn {
-		// ci-template v1.49: preflight alone may run on the bigdisk pool on
-		// github.com, by this exact form; the runner-labels step checks it
-		// with CI_PREFLIGHT_RUNS_ON unset and set to its fallback.
+		// Preflight alone may run on the bigdisk pool on github.com, in this exact form.
 		return ""
 	}
 	if file == "ci.yml" && jobID != "preflight" && strings.TrimSpace(value) == selectRunsOn(jobID) {
-		// ci-template v1.54: every other ci.yml job runs on the pool
-		// preflight's balanced runner pool step picks, by this exact form;
-		// the runner-labels step checks both pools.
+		// Every other ci.yml job runs on the pool preflight picks, in this exact form.
 		return ""
 	}
 	value, why := runsOnLabel(strings.TrimSpace(value))
@@ -88,12 +75,7 @@ func runsOnViolation(file, jobID, line string) string {
 	return ""
 }
 
-// selectRunsOnDocker and selectRunsOnGate are ci-template v1.54's runs-on
-// values, byte for byte: CI Gate reads preflight's `runner` output and every
-// other ci.yml job but preflight its `runner_docker` output. On github.com
-// each is ubuntu-latest or the self-hosted list the balanced runner pool step
-// picks; off github.com the forge label. selectRunsOnNote is the template's
-// trailing comment on both.
+// selectRunsOnDocker and selectRunsOnGate are the template's runs-on values byte for byte; selectRunsOnNote is its trailing comment.
 const (
 	selectRunsOnDocker = "${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner_docker) || 'bigdisk' }}"
 	selectRunsOnGate   = "${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner || '\"ubuntu-latest\"') || 'ci-gate' }}"
@@ -127,10 +109,7 @@ func TestCIJobsRunOnTheV154Selection(t *testing.T) {
 	}
 }
 
-// templateRoutingExpression is the handbook code-review.yml template's
-// runs-on for its scope and gate jobs (v5.12.5, owner ruling 1012). On
-// GitHub it resolves to ubuntu-latest. Only this exact string is accepted;
-// any other expression is still refused.
+// templateRoutingExpression is the code-review.yml template's runs-on for its scope and gate jobs (ubuntu-latest on GitHub); only this exact string is accepted.
 const templateRoutingExpression = "${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}"
 
 // runsOnLabel reads a runs-on value, comment removed, as one runner label: a
@@ -279,9 +258,7 @@ func TestRunsOnViolation(t *testing.T) {
 	}
 }
 
-// TestEveryJobRunsOnHostedOrWaived: ruling 999's runner rule holds for every
-// job of every workflow. A job runs on ubuntu-latest, or on one self-hosted
-// label whose runs-on line carries a waiver that names its category.
+// TestEveryJobRunsOnHostedOrWaived: every job runs on ubuntu-latest, or on one self-hosted label with a waiver naming its category.
 func TestEveryJobRunsOnHostedOrWaived(t *testing.T) {
 	for _, f := range workflowFiles(t) {
 		src, present := readUnlessStripped(t, rel(t, f))
@@ -294,8 +271,7 @@ func TestEveryJobRunsOnHostedOrWaived(t *testing.T) {
 	}
 }
 
-// waiverViolations applies ruling 999's runner rule to every job of one
-// workflow and returns one line per violation.
+// waiverViolations applies the runner rule to every job of one workflow and returns one line per violation.
 func waiverViolations(t *testing.T, name, src string) []string {
 	t.Helper()
 	jobs, out := workflowJobs(src)
@@ -343,15 +319,7 @@ var documentMarker = regexp.MustCompile(`^(?:---|\.\.\.)(?:[ \t]|$)`)
 // `jobs:` besides blanks and comments.
 var topKeyLine = regexp.MustCompile(`^[A-Za-z0-9_.-]+:(?:[ \t]|$)`)
 
-// workflowJobs enumerates the jobs mapping of a workflow without a YAML
-// decoder, and fails closed: any line under `jobs:` it cannot read as
-// a comment, a job key at two-space indentation or a line of a job's body is
-// returned as a problem, so a job the scan cannot see is never let through.
-// Every line of the file, from line 1 and top level included, must also fit
-// the strict YAML subset of subsetScanner, and the file must hold exactly one
-// top-level `jobs:` key, so a quoted or escaped key, an unclosed quote or a
-// plain multi-line scalar anywhere cannot make GitHub read a job differently
-// from the scan.
+// workflowJobs enumerates a workflow's jobs without a YAML decoder, failing closed on any line it cannot read or that breaks the subsetScanner subset.
 func workflowJobs(src string) ([]workflowJob, []string) {
 	var (
 		jobs     []workflowJob
@@ -428,16 +396,7 @@ var subsetKey = regexp.MustCompile(`^([A-Za-z0-9_.-]+):(?:[ \t]+|$)(.*)$`)
 // indentation indicator.
 var blockIndicators = map[string]bool{"|": true, ">": true, "|-": true, ">-": true, "|+": true, ">+": true}
 
-// subsetScanner is an allowlist of a strict YAML subset, fed every line of a
-// workflow file, from line 1, one at a time. Each line must be blank, a full-line comment, a
-// `key: value` or `key:` line, or a `- ` sequence item holding one of those
-// or a scalar. A quoted scalar or a flow collection must close on its line;
-// no value carries an anchor, alias or tag.
-// A line deeper than the last one is allowed only after an empty value (a
-// nested mapping or sequence) or inside a block scalar; deeper after a
-// non-empty value is a plain multi-line scalar and fails. What the subset
-// does not cover fails closed: the runs-on reader never meets YAML it would
-// read differently from GitHub.
+// subsetScanner allows only a strict YAML subset, line by line, so the runs-on reader never reads YAML differently from GitHub.
 type subsetScanner struct {
 	col    int  // column of the last content line's innermost node
 	deeper bool // the last content line opened a nested block

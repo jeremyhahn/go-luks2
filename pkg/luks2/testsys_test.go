@@ -11,10 +11,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// testVolumeSys is defaultVolumeSys with the cost floor and the digest count
-// lowered to LUKS2's own minimum, so keyslots whose cost is not under test stay as cheap as they were
-// before a calibrated count was held to the OWASP floor (#249, A8). Tests
-// about the floor use defaultVolumeSys explicitly.
+// testVolumeSys is defaultVolumeSys with the cost floor and digest count at LUKS2's minimum; floor tests use defaultVolumeSys.
 func testVolumeSys() volumeSys {
 	sys := defaultVolumeSys()
 	sys.calibratedCountFloor = func(string, keyslotCostPolicy) int { return minPBKDF2Iterations }

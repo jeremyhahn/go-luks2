@@ -15,11 +15,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// SetToken used to write any token with a type (#248, B2): a nil keyslot
-// list went to disk as "keyslots":null and a keyslot id the header does not
-// have went to disk as written. cryptsetup refuses either header outright, so
-// systemd-cryptsetup could no longer open the volume while this package still
-// could.
+// SetToken refuses a nil keyslot list or an unknown keyslot id, both of which cryptsetup refuses.
 
 // TestSetTokenWritesAKeyslotsArray: a token naming no keyslot is written
 // with an empty array.
@@ -110,11 +106,7 @@ func TestAddTokenRefusesAKeyslotTheHeaderDoesNotHave(t *testing.T) {
 	}
 }
 
-// TestAddKeyWritesNoMaterialItsHeaderCannotName: when the header carries damage
-// the write-time validator refuses -- here a token naming a missing keyslot --
-// AddKey is refused BEFORE the new keyslot's material is written, so no
-// unreferenced, passphrase-wrapped copy of the volume key is left in the
-// keyslots area.
+// TestAddKeyWritesNoMaterialItsHeaderCannotName: AddKey is refused before writing material when the header has damage.
 func TestAddKeyWritesNoMaterialItsHeaderCannotName(t *testing.T) {
 	defer parallel(t)()
 

@@ -19,20 +19,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/test/internal/harness"
 )
 
-// TestCLI_FIPSModeCreateAndRecoveryAddOpenWithCryptsetup is the acceptance
-// bar for #237, on the real kernel.
-//
-// A luks2 binary built with the Go Cryptographic Module and run under
-// GODEBUG=fips140=only creates a volume and enrolls a recovery key with NO KDF
-// options -- before #237 both were refused, because create hard-coded
-// Argon2id and recovery add defaulted to it. Both keyslots must be
-// PBKDF2-SHA512, and cryptsetup -- a separate implementation, in no FIPS mode
-// of its own -- must open the volume with each credential. An explicit
-// --pbkdf argon2id must be refused before the device is touched.
-//
-// create is given the loop device rather than a file: on a file it also
-// unlocks under a fixed mapping name, which is host-global and is not this
-// test's subject.
+// TestCLI_FIPSModeCreateAndRecoveryAddOpenWithCryptsetup: under fips140=only, create and recovery add write PBKDF2-SHA512 keyslots cryptsetup opens; --pbkdf argon2id is refused.
 func TestCLI_FIPSModeCreateAndRecoveryAddOpenWithCryptsetup(t *testing.T) {
 	if _, err := exec.LookPath("cryptsetup"); err != nil {
 		t.Fatalf("cryptsetup is not installed (%v); the integration image declares it, "+
@@ -60,8 +47,7 @@ func TestCLI_FIPSModeCreateAndRecoveryAddOpenWithCryptsetup(t *testing.T) {
 		t.Fatalf("closing the image failed: %v", err)
 	}
 
-	// Through the harness, which refuses a backing file outside the recorded
-	// run root, so the next run's reaper can detach it if this one dies (#348).
+	// Through the harness, so the next run's reaper can detach it if this run dies.
 	loopDev, err := harness.SetupLoopDevice(image)
 	if err != nil {
 		t.Fatalf("attaching the image failed: %v", err)
@@ -141,8 +127,7 @@ func TestCLI_FIPSModeCreateAndRecoveryAddOpenWithCryptsetup(t *testing.T) {
 	}
 	for i, credential := range []string{keyFile, recoveryFile} {
 		name := runVolume(t, "test-cli-fips-"+strconv.Itoa(i))
-		// Recorded before cryptsetup creates it (#348): a run canceled
-		// while it runs leaves an entry the next run's reaper can match.
+		// Recorded before cryptsetup creates it, so the next run's reaper can match it.
 		uuid, err := runSuite.Ledger.RecordMappingAhead(loopDev, name)
 		if err != nil {
 			t.Fatalf("recording dm %q ahead of its activation: %v", name, err)

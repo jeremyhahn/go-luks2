@@ -13,14 +13,7 @@ import (
 	"github.com/jeremyhahn/go-enclave"
 )
 
-// TestValidatePassphraseEnclave holds the enclave-based ValidatePassphrase
-// to the same bounds validatePassphraseBytes enforces for
-// the legacy []byte path: the two must agree, since they share one policy.
-//
-// There is no empty-passphrase case here, unlike
-// TestValidatePassphraseBytes: enclave.NewMemoryCopy itself refuses
-// empty material, so an empty passphrase can never reach ValidatePassphrase
-// through the enclave boundary at all.
+// TestValidatePassphraseEnclave holds ValidatePassphrase to validatePassphraseBytes' bounds; an empty enclave cannot exist.
 func TestValidatePassphraseEnclave(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -59,10 +52,7 @@ func TestValidatePassphraseEnclaveDoesNotConsumeItsArgument(t *testing.T) {
 	}
 }
 
-// TestValidatePassphraseErrorShape (#334): every failure ValidatePassphrase
-// reports is an *Error with its kind and the operation name, the way every
-// other exported entry point reports one -- a length failure is not a bare
-// sentinel while a destroyed enclave is an *Error.
+// TestValidatePassphraseErrorShape: every failure is an *Error with its kind and operation.
 func TestValidatePassphraseErrorShape(t *testing.T) {
 	destroyed := enclaveFrom(t, []byte("a-valid-passphrase"))
 	if err := destroyed.Destroy(); err != nil {

@@ -32,14 +32,7 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// TestBinary_PropagatesDockersExitStatus builds the launcher the way the
-// Makefile does and runs it against a stand-in docker that exits with a chosen
-// status. Every status must come back unchanged -- in particular docker's own
-// 125 (daemon or flag error), 126 (command not executable) and 127 (command not
-// found), which callers use to tell an infrastructure failure from a test
-// failure. Under `go run` all three came back as 1: the go tool stays the
-// parent and flattens any nonzero child status. That is why the Makefile and
-// the workflow run the built binary.
+// TestBinary_PropagatesDockersExitStatus: the built launcher returns docker's exit status unchanged, including 125, 126 and 127.
 func TestBinary_PropagatesDockersExitStatus(t *testing.T) {
 	goBin, err := exec.LookPath("go")
 	if err != nil {

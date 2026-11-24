@@ -26,45 +26,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
-// Crash safety of MigrateToFIPS, proved against cryptsetup (#84).
-//
-// The ordering argument in fipsmigrate.go -- nothing removed before the new
-// keyslot is verified, every digest rewrite attests the same key, each header
-// copy durable before the other is touched -- is a claim about EVERY state the
-// device can be left in if the process dies or the power goes mid-migration.
-// These tests enumerate those states instead of trusting the argument.
-//
-// # How the states are obtained
-//
-// The migration opens the device once, to lock it, and makes every write
-// through that descriptor (#255); each write STEP starts at keyslotWriteStep,
-// where the recorder sees it. The recorder
-// snapshots the region the migration may write -- everything before the data
-// segment -- at each such open, and once more at the end. Between two
-// consecutive snapshots exactly one step ran: the keyslot material, a header
-// (both copies), or a wipe.
-//
-// Two kinds of state follow. A BOUNDARY state is the device between two steps
-// -- what a failure, or a crash between steps, leaves -- and
-// TestMigrateToFIPSFailingAtEachWriteLeavesAnOpenableVolume stops the
-// migration at every one of them. A TORN state is a crash inside a step. Each
-// step syncs before the next, and writeHeaderInternal syncs the primary copy
-// before it touches the secondary, so inside a header write the torn states
-// are: primary torn and secondary old, primary new and secondary old, primary
-// new and secondary torn; inside a keyslot-area write, a partly written area.
-// TestMigrateToFIPSEveryCrashStateStillOpens builds each of those for every
-// step.
-//
-// # What each state must satisfy
-//
-//   - cryptsetup recovers the ORIGINAL volume key from it with the passphrase
-//     (it picks the newest intact copy and repairs the other itself);
-//   - this library recovers the original volume key -- reading the primary,
-//     or, when the crash tore the primary, after RestorePrimaryHeader rebuilds
-//     it from the secondary, which is this library's documented recovery;
-//   - a boundary state finishes importing when MigrateToFIPS is run again; a
-//     torn state is shown to read as exactly the boundary state before or after
-//     its step, and so finishes the same way.
+// Crash safety of MigrateToFIPS against cryptsetup: every boundary and torn state between write steps must open to the original volume key.
 
 // crashArgon2Args format a cryptsetup Argon2id volume at the lowest cost the
 // reader accepts. What is under test is the write sequence; a calibrated cost
@@ -77,18 +39,8 @@ var crashArgon2Args = []string{"--pbkdf", "argon2id",
 // that work on every state.
 var crashFormatArgs = append([]string{"--type", "luks2", "--key-size", "256"}, crashArgon2Args...)
 
-// crashFixture is a cryptsetup Argon2id volume with two Argon2id keyslots --
-// migrationPassphrase in 0, otherPassphrase in 1. With sha1Digest, digest 0 is
-// rewritten as PBKDF2-SHA1 over the real volume key, so the migration takes
-// every kind of write step it has: add a keyslot, migrate a digest, remove two
-// keyslots. Without it the digest is cryptsetup's own PBKDF2-SHA256, as on a
-// default volume, and there is no digest step.
-//
-// It returns the image's bytes before the data segment (all the migration may
-// write), the data segment's offset, and the volume key.
-// crashFixtureCache holds, per process, each crashFixture shape and the
-// complete migration recorded from it (recordedMigration). Building one runs
-// cryptsetup and a migration; every test that needs one only reads it.
+// crashFixture is a cryptsetup Argon2id volume with two keyslots, optionally with a PBKDF2-SHA1 digest 0.
+// crashFixtureCache holds each crashFixture shape and its recorded migration, built once per process.
 var crashFixtureCache struct {
 	sync.Mutex
 	fixture map[bool]*crashFixtureEntry
@@ -235,24 +187,7 @@ func rewriteDigestAsSHA1(t *testing.T, image string, key []byte) {
 }
 
 // readPrefix returns the first n bytes of path.
-// THE WHOLE-IMAGE TESTS SHARE A MEMORY BOUND.
-//
-// Every test in this file handles the volume's whole metadata prefix as bytes
-// -- 16 MiB per copy -- and most hold several at once: the write-step
-// snapshots, the torn states spliced from them, the file each state is
-// placed in and read back from. Under -race every byte of that is shadowed
-// as well, so one such test body costs hundreds of megabytes, and with one
-// parallel slot per processor a 16-CPU run held enough of them at once to
-// cross the Race job's container bound and be killed by the kernel.
-//
-// So a test here calls `defer parallelWholeImage(t)()`: it is parallel(t)
-// with a second, fixed-size semaphore taken first. The count is a memory
-// figure, not a processor one, which is why it does not grow with
-// GOMAXPROCS. The order is fixed -- an image slot, then a locked-memory slot
-// -- so a test waiting for an image slot holds no locked-memory slot that a
-// test outside this file needs, and the two semaphores cannot deadlock.
-// Released, like parallel(t)'s slot, when the body returns, so parallel
-// subtests queued by a body never wait on a slot their parent holds.
+// parallelWholeImage is parallel(t) behind a fixed image-slot semaphore that bounds memory; taken before the locked-memory slot.
 const wholeImageSlots = 4
 
 var wholeImageSlotsChan = make(chan struct{}, wholeImageSlots)
@@ -336,15 +271,7 @@ const placeImageChunk = 2048 * crashSector
 // or a write step, fails before anything is written.
 var errInjectedOpen = errors.New("injected: the device could not be opened, or a write step could not start")
 
-// writeStepRecorder snapshots device's first limit bytes at the open the
-// device lock takes and at the start of every write step on the pinned
-// descriptor (keyslotWriteStep), and fails the failAt-th of those (1-based;
-// 0 never).
-//
-// The migration opens the device once (#255): the steps are observed on the
-// descriptor, not counted as path opens, so a step that wrote through some
-// other descriptor would not be a step here -- and is what
-// TestMigrateToFIPSWritesOnlyTheDeviceItLocked rules out.
+// writeStepRecorder snapshots device's first limit bytes at the lock and at each write step, failing the failAt-th (1-based; 0 never).
 type writeStepRecorder struct {
 	device string
 	limit  int64
@@ -495,12 +422,7 @@ func migrateRecording(t *testing.T, prefix []byte, failAt int) (*writeStepRecord
 	return r, result, err, readPrefix(t, image, int64(len(prefix)))
 }
 
-// assertStateOpens is the per-state contract every state meets: cryptsetup
-// and this library both recover the original volume key. It returns whether
-// the primary header was torn, whether the secondary was, and the sequence id
-// of the header this library opened -- the primary, or, when that was torn,
-// the one RestorePrimaryHeader rebuilt it from. The library's image is left
-// in dir as library.img.
+// assertStateOpens checks cryptsetup and this library recover the original key, returning which copies were torn and the opened sequence id.
 func assertStateOpens(t *testing.T, dir string, state []byte, key []byte) (primaryTorn, secondaryTorn bool, seq uint64) {
 	t.Helper()
 
@@ -534,8 +456,7 @@ func assertStateOpens(t *testing.T, dir string, state []byte, key []byte) (prima
 		t.Fatal("this library recovers a different volume key from this state")
 	}
 	if primaryTorn {
-		// The restore writes one past the copy it rebuilt from (#248), so the
-		// state it opened is the secondary's.
+		// The restore writes one past the copy it rebuilt from.
 		if hdr.SequenceID != shdr.SequenceID+1 {
 			t.Fatalf("RestorePrimaryHeader wrote sequence %d from a secondary at %d, want one past it", hdr.SequenceID, shdr.SequenceID)
 		}
@@ -562,12 +483,7 @@ func assertImportResumes(t *testing.T, image string, key []byte) {
 	}
 }
 
-// TestMigrateToFIPSEveryCrashStateStillOpens builds every state a crash or
-// power loss INSIDE a write step of the migration can leave, and requires each
-// to open -- in cryptsetup and in this library -- to the original volume key,
-// and to read as exactly the boundary state before or after its step, from
-// which TestMigrateToFIPSFailingAtEachWriteLeavesAnOpenableVolume proves the
-// import resumes.
+// TestMigrateToFIPSEveryCrashStateStillOpens builds every torn state inside a write step and requires each to open and match a boundary state.
 func TestMigrateToFIPSEveryCrashStateStillOpens(t *testing.T) {
 	defer parallelWholeImage(t)()
 	if fips140.Enabled() {
@@ -751,15 +667,7 @@ func TestWriteHeaderStopsBeforeTheSecondaryWhenThePrimarySyncFails(t *testing.T)
 	}
 }
 
-// TestMigrateToFIPSResumedAfterACrashKeepsAWayIn is the interrupted-retry case:
-// a crash during the header write that adds the PBKDF2 keyslot leaves a
-// primary naming it beside a secondary that does not (or a torn secondary).
-// Running the import again from there must still never reach a state with no
-// way in -- in particular, wiping the Argon2 keyslot while the secondary names
-// only it, so that tearing the primary next leaves a readable copy naming
-// nothing but wiped material. The volume carries cryptsetup's own SHA-256
-// digest, as a default volume does, so no digest rewrite happens to reconcile
-// the copies by accident.
+// TestMigrateToFIPSResumedAfterACrashKeepsAWayIn: a retry after a crash in the add-keyslot header write never reaches a state with no way in.
 func TestMigrateToFIPSResumedAfterACrashKeepsAWayIn(t *testing.T) {
 	defer parallelWholeImage(t)()
 	if fips140.Enabled() {
@@ -775,10 +683,7 @@ func TestMigrateToFIPSResumedAfterACrashKeepsAWayIn(t *testing.T) {
 	headerArea := int(binary.BigEndian.Uint64(prefix[8:16]))
 	addHeader := steps[1]
 
-	// A torn PRIMARY is not a start state here: the run refuses before
-	// writing (ReadHeader fails), and a volume repaired with
-	// RestorePrimaryHeader is the "before" header of the step, from which
-	// TestMigrateToFIPSReportsADamagedPrimaryAfterAFailedHeaderWrite resumes.
+	// A torn primary is not a start state: the run refuses before writing.
 	for _, start := range tornStates(addHeader, headerArea) {
 		if start.class == "primary torn" {
 			continue
@@ -822,8 +727,7 @@ func TestMigrateToFIPSResumedAfterACrashKeepsAWayIn(t *testing.T) {
 	}
 }
 
-// damagePrimary overwrites part of device's primary JSON area, as a write that
-// failed partway leaves it: the checksum no longer matches.
+// damagePrimary corrupts part of device's primary JSON area so the checksum fails.
 func damagePrimary(t *testing.T, device string) {
 	t.Helper()
 
@@ -876,13 +780,7 @@ func onSync(t *testing.T, n int, hook func(f *os.File) error) volumeSys {
 // errInjectedSync is the sync failure the tests below inject.
 var errInjectedSync = errors.New("injected: the header write could not be made durable")
 
-// TestMigrateToFIPSReportsADamagedPrimaryAfterAFailedHeaderWrite: a header
-// write that fails having damaged the primary copy is reported as exactly
-// that -- the secondary holds the previous header, and RestorePrimaryHeader
-// rebuilds the primary -- never as "opens as before" or "the keyslot opens the
-// volume", which the library's own open would contradict. The volume then
-// opens in cryptsetup and, after RestorePrimaryHeader, in this library, and a
-// second run finishes the import.
+// TestMigrateToFIPSReportsADamagedPrimaryAfterAFailedHeaderWrite: the damaged primary is reported, restorable, and a second run finishes.
 func TestMigrateToFIPSReportsADamagedPrimaryAfterAFailedHeaderWrite(t *testing.T) {
 	defer parallelWholeImage(t)()
 	if fips140.Enabled() {
@@ -929,9 +827,7 @@ func TestMigrateToFIPSReportsADamagedPrimaryAfterAFailedHeaderWrite(t *testing.T
 	}
 }
 
-// TestMigrateToFIPSStopsWhenTheHeaderCopiesDisagreeAfterItsWrites: a secondary
-// copy damaged after the keyslot was added -- by anything -- is caught by the
-// verification before a single keyslot is removed.
+// TestMigrateToFIPSStopsWhenTheHeaderCopiesDisagreeAfterItsWrites: verification catches a damaged secondary before any removal.
 func TestMigrateToFIPSStopsWhenTheHeaderCopiesDisagreeAfterItsWrites(t *testing.T) {
 	defer parallelWholeImage(t)()
 	if fips140.Enabled() {
@@ -1172,12 +1068,7 @@ func TestStateAfterWriteFailureReadsTheDevice(t *testing.T) {
 	}
 }
 
-// TestStateAfterWriteFailureReadsOnlyTheKnownSecondary: with both header
-// copies of a 32 KiB-metadata volume unreadable, the failure report reads the
-// secondary where the volume's own geometry puts it and nowhere else. A valid
-// header copy is planted at the 4 MiB probe offset, where a reader probing
-// every legal offset -- ReadSecondaryHeader with no primary -- finds it; the
-// report must not, because on such a layout that offset can be encrypted data.
+// TestStateAfterWriteFailureReadsOnlyTheKnownSecondary: the report reads the secondary only where the geometry puts it.
 func TestStateAfterWriteFailureReadsOnlyTheKnownSecondary(t *testing.T) {
 	defer parallelWholeImage(t)()
 	small := newImage(t, "small-metadata.img")
@@ -1242,14 +1133,7 @@ func TestMigrateToFIPSRefusesATornPrimaryBeforeWriting(t *testing.T) {
 	}
 }
 
-// TestMigrateToFIPSMakesAgreeingCopiesDurableBeforeWriting is the retry after
-// a run that wrote both header copies and was stopped before the secondary
-// reached the medium: the copies then read back identical from the page cache,
-// so no reconcile happens, and with the PBKDF2 keyslot reused the retry's
-// first write is a header write -- over the primary, which until a sync is the
-// only copy known to be on the medium. Nothing may be written before the
-// run's durability barrier, and if that barrier fails nothing is written at
-// all.
+// TestMigrateToFIPSMakesAgreeingCopiesDurableBeforeWriting: nothing is written before the durability barrier, nor at all if it fails.
 func TestMigrateToFIPSMakesAgreeingCopiesDurableBeforeWriting(t *testing.T) {
 	defer parallelWholeImage(t)()
 	if fips140.Enabled() {
@@ -1317,22 +1201,7 @@ func TestMigrateToFIPSMakesAgreeingCopiesDurableBeforeWriting(t *testing.T) {
 	})
 }
 
-// TestMigrateToFIPSReadsTheMediumNotThePageCache models the cache and the
-// medium disagreeing, which is what a failed writeback leaves: the earlier
-// run's add-keyslot header write reached the medium for the primary only --
-// its secondary is torn there -- while the page cache, its failed pages now
-// clean, still serves both copies whole and agreeing, and a later fsync
-// succeeds without rewriting them. Through the cache the retry would see
-// nothing to reconcile and, reusing the PBKDF2 keyslot, would rewrite the
-// primary first: the only copy on the medium.
-//
-// The model: until dropDeviceCache runs, every READ of the device is served
-// from a second image holding the cached view; writes, and every read after
-// it, reach the device image -- the medium. The retry must repair the
-// medium's secondary first, and every state an interruption of its first
-// writes can leave on the medium must open. Writes are not mirrored into the
-// cached view: the run under test drops it before reading anything, and a run
-// that read through it without dropping it fails this test either way.
+// TestMigrateToFIPSReadsTheMediumNotThePageCache: with a cache that disagrees with the medium, the retry repairs the medium's secondary first.
 func TestMigrateToFIPSReadsTheMediumNotThePageCache(t *testing.T) {
 	defer parallelWholeImage(t)()
 	if fips140.Enabled() {
@@ -1395,15 +1264,7 @@ func TestMigrateToFIPSRefusesWhenTheCacheOutlivesItsEviction(t *testing.T) {
 	}
 }
 
-// cacheModel is a device whose page cache disagrees with its medium, as a
-// failed writeback of the add-keyslot header leaves it: the medium -- the
-// device image, which every write and every direct read reaches -- holds a
-// durable new primary and a torn secondary, while every buffered READ is
-// served from a second image holding both copies whole and agreeing, until
-// the cache is evicted. With evicts false the eviction succeeds and changes
-// nothing, as it does for pages another process holds mapped. Writes are not
-// mirrored into the cached view: a run under test either reads past it or
-// is refused, and one that read through it fails these tests either way.
+// cacheModel is a device whose buffered reads are served from a stale cache image until evicted; evicts false makes eviction a no-op.
 type cacheModel struct {
 	device     string
 	prefix     []byte
@@ -1435,9 +1296,7 @@ func newCacheModel(t *testing.T, evicts bool) *cacheModel {
 	placeImage(t, device, medium)
 	placeImage(t, cache, addHeader.after)
 
-	// Every read the run makes goes through its pinned descriptor (#255), so
-	// the cached view is modeled THERE: until the cache is dropped, a read of
-	// the device's descriptor is served from the cache image.
+	// Model the cached view on the pinned descriptor's reads.
 	dropped := false
 	cached, err := os.Open(cache) // #nosec G304 -- path is under t.TempDir()
 	if err != nil {
@@ -1528,11 +1387,7 @@ func TestDropDeviceCache(t *testing.T) {
 	}
 }
 
-// TestMigrateToFIPSReportsTheStateOnTheMediumNotInTheCache: a header write
-// whose primary writeback fails can leave the cache's primary whole while the
-// medium's is torn. The reported state must describe the MEDIUM -- what a
-// reboot, or cryptsetup, will find -- and say so when the medium cannot be
-// read at all.
+// TestMigrateToFIPSReportsTheStateOnTheMediumNotInTheCache: the reported state describes the medium, or says it cannot be read.
 func TestMigrateToFIPSReportsTheStateOnTheMediumNotInTheCache(t *testing.T) {
 	defer parallelWholeImage(t)()
 	if fips140.Enabled() {

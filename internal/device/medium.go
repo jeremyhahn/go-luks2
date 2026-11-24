@@ -21,25 +21,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// Confirming that what is read through the page cache is what is on the
-// medium.
-//
-// An operation that destroys key material on the strength of what it READ is
-// only as safe as that read. A buffered read is served from the page cache,
-// and the cache can disagree with the medium: after a writeback error the
-// kernel may keep the unwritten bytes as clean pages, which a later fsync
-// succeeds without rewriting, and evicting them with posix_fadvise is
-// advisory -- a page another process holds mapped stays cached and the call
-// still succeeds. So eviction is not proof. Proof is reading the same bytes
-// again past every cache between the caller and the medium, with O_DIRECT,
-// and comparing.
-//
-// "Every cache" is the part that needs care. O_DIRECT on a loop device skips
-// the loop device's cache, but a loop device without direct I/O reads its
-// backing FILE through that file's page cache, so the backing file is read
-// past its cache too, at the loop offset. Below any other stacked device
-// (device-mapper, md, a partition) a buffered loop device cannot be mapped to
-// an offset in general, and the check fails closed with ErrUnsupported.
+// Confirming the page cache matches the medium: read the same bytes again with O_DIRECT past every cache, including a buffered loop device's backing file, and compare.
 
 // DefaultSysDevBlockRoot is where the kernel exposes each block device by its
 // device number.
@@ -62,17 +44,7 @@ func StatRdev(path string) (uint64, error) {
 	return uint64(st.Rdev), nil //nolint:unconvert // Rdev is not uint64 on every GOARCH
 }
 
-// MediumSources returns every place a device's bytes must be read past a
-// cache for the read to be the medium's: the device itself, and, for a loop
-// device, its backing at the loop offset -- recursively, because a loop
-// device with direct I/O can sit on one without it, whose backing file is
-// then read through its cache whatever the loop above does. A stacked device
-// with a buffered loop device anywhere below it is refused with
-// ErrUnsupported: its offset into the backing file is not knowable in
-// general.
-//
-// sysDevBlockRoot and statRdev are parameters rather than package state, so a
-// test can stand a sysfs tree up for devices it cannot create.
+// MediumSources returns every place a device's bytes must be read past a cache, recursing through loop backings; a buffered loop below a stacked device is ErrUnsupported.
 func MediumSources(path, sysDevBlockRoot string, statRdev func(string) (uint64, error)) ([]MediumSource, error) {
 	self := []MediumSource{{Path: path}}
 	rdev, err := statRdev(path)
@@ -140,10 +112,7 @@ func loopAttributes(dir string) (backing string, offset int64, buffered, isLoop 
 	return backing, offset, buffered, true, nil
 }
 
-// bufferedLoopBelow returns the name of a loop device without direct I/O
-// anywhere below the sysfs block directory dir -- through its slaves and the
-// whole disk a partition belongs to, each examined in full by bufferedLoopAt
-// -- or "" if there is none.
+// bufferedLoopBelow returns the name of a loop device without direct I/O anywhere below the sysfs block directory dir, or "".
 func bufferedLoopBelow(dir, sysDevBlockRoot string, statRdev func(string) (uint64, error)) (string, error) {
 	resolved, err := filepath.EvalSymlinks(dir)
 	if err != nil {
@@ -168,11 +137,7 @@ func bufferedLoopBelow(dir, sysDevBlockRoot string, statRdev func(string) (uint6
 	return "", nil
 }
 
-// bufferedLoopAt examines the sysfs block directory dir and everything below
-// it: a buffered loop device is the answer; a direct-I/O loop device is
-// followed through its backing (bufferedLoopBehind), however many of them
-// are stacked; and every device's slaves and partition parent are walked
-// (bufferedLoopBelow). One walk, so no kind of device is a place it stops.
+// bufferedLoopAt walks dir and everything below it, following direct-I/O loop backings, and returns the first buffered loop device.
 func bufferedLoopAt(dir, sysDevBlockRoot string, statRdev func(string) (uint64, error)) (string, error) {
 	backing, _, buffered, isLoop, err := loopAttributes(dir)
 	if err != nil {
@@ -210,11 +175,7 @@ func bufferedLoopBehind(backing, sysDevBlockRoot string, statRdev func(string) (
 	return bufferedLoopAt(filepath.Join(sysDevBlockRoot, fmt.Sprintf("%d:%d", major, minor)), sysDevBlockRoot, statRdev)
 }
 
-// CompareRegion reads the first n bytes through cached -- the page cache --
-// and past it at every source, with readPastCache, and returns the cached
-// bytes if all agree. readPastCache is a parameter rather than a call to
-// ReadPastCache directly, so a caller with its own fault-injection seam over
-// that read (pkg/luks2's readDeviceDirect) is honored here too.
+// CompareRegion reads the first n bytes through cached and past it at every source with readPastCache, and returns them if all agree.
 func CompareRegion(ctx context.Context, cached io.ReaderAt, device string, sources []MediumSource, n int, readPastCache func(ctx context.Context, path string, off int64, n int) ([]byte, error)) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, &errs.Error{Kind: errs.KindOf(err, errs.ErrIO), Detail: "failed to read the device", Err: err}

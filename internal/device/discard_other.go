@@ -8,8 +8,7 @@ package device
 
 import "os"
 
-// Discard is a no-op off Linux: BLKDISCARD has no portable equivalent
-// (A.3), and it is advisory everywhere it exists.
+// Discard is a no-op off Linux.
 func Discard(f *os.File, size int64) error {
 	return nil
 }

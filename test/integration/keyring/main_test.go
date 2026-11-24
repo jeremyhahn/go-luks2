@@ -13,8 +13,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/test/internal/harness"
 )
 
-// TestMain records the host state this suite is about to create (#96),
-// matching every other test/integration/<pkg> package.
+// TestMain records the host state this suite is about to create.
 func TestMain(m *testing.M) {
 	suite, err := harness.BeginSuite(os.Stderr)
 	if err != nil {

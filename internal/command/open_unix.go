@@ -8,10 +8,7 @@ package command
 
 import "github.com/jeremyhahn/go-luks2/internal/errs"
 
-// Open fails closed off Linux: a program is run only through the descriptor
-// it was checked on (O_PATH and /proc/self/fd), and without both there is no
-// way to run the file that was checked rather than whatever its path names
-// by then.
+// Open fails closed off Linux: running through the checked descriptor needs O_PATH and /proc/self/fd.
 func Open(path string) (*Program, error) {
 	return nil, &errs.Error{Kind: ErrTool, Detail: "cannot run " + path + ": running a checked program needs Linux"}
 }

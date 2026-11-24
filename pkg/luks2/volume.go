@@ -23,14 +23,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
-// volumeSys carries Volume's seams as fields of the handle rather than
-// package-level variables, so no production path can flip one and tests can
-// run in parallel. They are defaulted once at construction (Open, or a free function's
-// own entry point) and never reassigned afterwards. A test that needs one
-// different builds its own volumeSys (defaultVolumeSys with one field
-// overridden) and either constructs a Volume carrying it directly or calls
-// the unexported sys-taking core a public free function wraps -- there is no
-// package-level var left to mutate.
+// volumeSys carries Volume's seams as handle fields, defaulted once at construction; tests build their own volumeSys.
 type volumeSys struct {
 	clock        clock.Clock
 	lockWait     time.Duration
@@ -128,16 +121,7 @@ func withTestSys(sys volumeSys) Option {
 	return func(o *options) { o.sys = &sys }
 }
 
-// Volume is a pinned descriptor on one LUKS2 device or file, and nothing
-// else: Open does not require a valid header, because RestorePrimaryHeader
-// and Erase must work on a damaged one. Every method takes the lock it
-// needs, does its I/O and releases the lock; no lock is held between calls.
-//
-// A Volume is safe for concurrent use. flock does not exclude within one
-// open file description, so mu serializes operations here: shared for
-// reads, exclusive for writes. Concurrent readers share one node flock,
-// which the pinned descriptor counts and releases only when the last of
-// them leaves.
+// Volume is a pinned descriptor on one LUKS2 device or file; each method takes and releases its own lock, and mu makes it safe for concurrent use.
 type Volume struct {
 	pinned   *device.Pinned
 	path     string
@@ -245,17 +229,9 @@ func (v *Volume) lockFor(ctx context.Context, mode device.LockMode) (*device.Loc
 	return v.pinned.Lock(ctx, mode, v.sys.lockWait, v.sys.clock, v.sys.lockDir, v.sys.openLockFile, v.sys.lockHeld)
 }
 
-// errAt is this package's boundary call into errs.At: every new exported
-// Volume method calls it exactly once, on the way out, naming its own Op.
-// errs.At fills Op and Path only where they are empty and never stacks a
-// second wrapper.
+// errAt is the boundary call into errs.At, made once by every exported Volume method with its own Op.
 func errAt(op, path string, err error) error {
-	// Nothing leaves the API unclassified or unstamped: an error that is not itself an *errs.Error -- a bare sentinel, a
-	// context error, a typed error from below such as *FIPSMigrationError --
-	// is wrapped here, with the kind its chain already carries or, failing
-	// that, the kind errors.Is reports for it. A typed error that only holds
-	// a classified cause is wrapped too: At stamps the outermost *errs.Error
-	// alone, and that is the one a caller's errors.As finds.
+	// Wrap any error that is not itself an *errs.Error, with the kind its chain carries or errors.Is reports.
 	if err == nil {
 		return errs.At("luks2", op, path, err)
 	}
@@ -263,14 +239,7 @@ func errAt(op, path string, err error) error {
 	kind := unclassifiedKind(err)
 	switch detail, isRequirement := unsupportedRequirementDetail(err); {
 	case isRequirement:
-		// The requirement's own type stays internal; the caller reads it
-		// from Kind and Detail, and that holds wherever in the chain it
-		// sits: a wrapper that classified the failure first (a header read
-		// that met the requirement while repairing a stale copy reports
-		// ErrIO) is wrapped in turn, and errors.Is still finds every
-		// sentinel underneath. A requirement that stops a migration leaves
-		// the migration's kind: the failure is still a migration failure,
-		// and errors.Is finds the requirement through Err.
+		// The requirement's type stays internal; callers read Kind and Detail, and errors.Is still finds every sentinel. A migration keeps ErrFIPSMigration.
 		if kind != ErrFIPSMigration {
 			kind = ErrUnsupportedRequirement
 		}
@@ -286,16 +255,9 @@ func errAt(op, path string, err error) error {
 	return errs.At("luks2", op, path, err)
 }
 
-// unclassifiedKind names the kind of an error that is not itself an
-// *errs.Error: ErrFIPSMigration if it is a *FIPSMigrationError (even one a
-// canceled context stopped), the context error if it is one, the kind its
-// chain already carries, the first sentinel
-// of this package it matches, or ErrIO.
+// unclassifiedKind names the kind of a non-*errs.Error: ErrFIPSMigration, the context error, the chain's kind, the first matching sentinel, or ErrIO.
 func unclassifiedKind(err error) error {
-	// A migration that stopped is a migration failure whatever stopped it,
-	// a canceled context included, so this is asked first: the cause stays
-	// reachable through errors.Is, and the stage and state through
-	// *FIPSMigrationError.
+	// A stopped migration is a migration failure, whatever stopped it.
 	var migration *FIPSMigrationError
 	if errors.As(err, &migration) {
 		return ErrFIPSMigration

@@ -13,23 +13,10 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// OpenFunc opens a file the way os.OpenFile does. Open takes it as a
-// parameter rather than calling os.OpenFile directly, so a caller can inject
-// a failing open for a test: a permission failure cannot be produced by
-// permission bits in a test (CI runs as root, and root bypasses discretionary
-// access checks), so this package has no fault to inject that way and takes
-// the opener as a seam instead, one this package does not itself hold as
-// mutable state.
+// OpenFunc opens a file like os.OpenFile; a parameter so tests can inject a failing open.
 type OpenFunc func(name string, flag int, perm os.FileMode) (*os.File, error)
 
-// Open is the one way this package opens a device, so that the
-// CLASSIFICATION of a failure lives in one place rather than at every call
-// site. openFile is this package's fault-injection seam: production callers
-// pass os.OpenFile (or a caller's own package-level seam var wrapping it).
-//
-// The mode argument is deliberately absent: nothing here passes O_CREATE, so
-// permission bits would never be consulted. 0600 is passed for the write
-// paths purely to match what the sites this replaced spelled out.
+// Open opens a device through openFile and classifies any failure in one place.
 func Open(ctx context.Context, op, path string, flag int, openFile OpenFunc) (*os.File, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, &errs.Error{Kind: errs.KindOf(err, errs.ErrIO), Detail: "could not " + op + " " + path, Err: err}
@@ -41,15 +28,7 @@ func Open(ctx context.Context, op, path string, flag int, openFile OpenFunc) (*o
 	return f, nil
 }
 
-// ClassifyOpen adds this package's typed vocabulary to an open failure: every
-// result is an *errs.Error with a non-nil Kind, and the original
-// error stays reachable as its cause, so *fs.PathError still says which path
-// and which syscall.
-//
-// The permission case keeps the cause reachable through the chain, so
-// errors.Is(err, os.ErrPermission) and errors.Is(err, ErrPermissionDenied)
-// are both true of the same value. A missing path is ErrNotFound; anything
-// else is ErrIO.
+// ClassifyOpen wraps an open failure in an *errs.Error (permission, not found, or I/O), keeping the cause reachable.
 func ClassifyOpen(op string, err error) error {
 	if err == nil {
 		return nil

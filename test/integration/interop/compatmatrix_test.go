@@ -34,17 +34,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/test/internal/harness"
 )
 
-// The two-way interoperability matrix (docs/cryptsetup-interop/engineering.md): each
-// operation done by one tool and checked by the other, against cryptsetup
-// and the real kernel. Rows are data; every row runs in parallel on a
-// volume of its own. See compatmatrix_integration_test.go (now moved, from
-// pkg/luks2) for the full history.
-//
-// Checked elsewhere and not repeated here: byte-for-byte header equality
-// (canonicalconformance_integration_test.go, which stays in pkg/luks2), the
-// FIPS import (fipsimport_test.go in this directory), the header-only
-// wipe and detached-header activation (test/integration/header,
-// test/integration/dm).
+// The two-way interoperability matrix (docs/cryptsetup-interop/engineering.md): each operation done by one tool and checked by the other, one volume per row.
 
 const (
 	matrixPassphrase = "matrix-passphrase"

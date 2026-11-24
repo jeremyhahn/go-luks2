@@ -12,28 +12,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// Test-side control of the two seams that make a container's bytes
-// unpredictable: cryptoRand and newUUID, both fields of volumeSys. Each
-// helper here returns the override; the caller sets it on a volumeSys it
-// builds (defaultVolumeSys with one field replaced) and passes that sys to
-// the unexported, sys-taking core the public function it is standing in for
-// wraps. There is no package-level var left to mutate, so nothing here
-// constrains test parallelism.
+// Test control of the cryptoRand and newUUID seams through a volumeSys passed to the sys-taking cores.
 
-// pinCryptoRand returns a deterministic ChaCha8 stream standing in for the
-// real RNG.
-//
-// THE SUBSTITUTE IS A STREAM CIPHER, NOT A CONSTANT, and that is a requirement
-// rather than a nicety. The obvious stand-in -- a reader that yields zeroes --
-// would silently invalidate every measurement taken through it: the AF split
-// draws stripes*keySize bytes (~256 KiB for a default keyslot) and XORs them
-// together, so under a zero reader the stripes collapse and the keyslot area
-// stops resembling the thing under test. It would also make "the keyslots area
-// is filled with random" trivially true and trivially meaningless.
-//
-// math/rand/v2.ChaCha8 is the standard library's own CSPRNG construction,
-// seeded rather than system-fed, so its output is indistinguishable from
-// rand.Reader's to everything downstream and reproducible from the seed.
+// pinCryptoRand returns a deterministic ChaCha8 stream; a zero reader would collapse the AF stripes.
 func pinCryptoRand(seed byte) io.Reader {
 	var key [32]byte
 	for i := range key {

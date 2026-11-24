@@ -12,11 +12,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// Cost floors and ceilings a header's KDF object is held to on read. The
-// ceiling is what WHAT IS WRITTEN MUST BE WHAT THE READER ACCEPTS (#249, A5)
-// requires every creation path to stay under; the floor is this package's own
-// minimum, which a foreign (cryptsetup-written) header is not held to beyond
-// MinKDFIterations / MinArgon2Time / MinArgon2Parallel.
+// Cost floors and ceilings a header's KDF object is held to on read; the ceiling bounds every creation path.
 const (
 	MinKDFIterations = 1
 	MaxKDFIterations = 100_000_000
@@ -24,9 +20,7 @@ const (
 	MinArgon2Time = 1
 	MaxArgon2Time = 10_000
 
-	// MinArgon2Memory is the representable floor a FOREIGN header is held to
-	// on read. MinArgon2MemoryKB, below, is the much higher floor this
-	// package itself writes.
+	// MinArgon2Memory is the floor a foreign header is held to on read; MinArgon2MemoryKB is the floor this package writes.
 	MinArgon2Memory = 8
 	MaxArgon2Memory = 4 << 20
 
@@ -42,11 +36,7 @@ const (
 	MinPBKDF2Iterations = 1000
 )
 
-// CostPolicy distinguishes a caller-supplied credential, which is held to the
-// full iteration floor, from a library-generated one (a recovery key, a FIDO2
-// secret), which is exempt from it: the entropy is already known. The zero
-// value is CallerSuppliedCredential, so a forgotten argument fails closed
-// rather than granting the exemption.
+// CostPolicy exempts a library-generated credential from the iteration floor; the zero value, CallerSuppliedCredential, does not.
 type CostPolicy int
 
 const (
@@ -54,21 +44,13 @@ const (
 	LibraryGeneratedCredential
 )
 
-// ValidateCost checks p's cost fields against the floor-to-ceiling range this
-// package accepts on read. It does not inspect Salt or Hash beyond what the
-// range check needs, and it does not apply a FIPS gate -- RequireKDF /
-// RequireHash are separate screens.
+// ValidateCost checks p's cost fields against the accepted range; it applies no FIPS gate.
 func ValidateCost(p Params) error {
 	kdfType := strings.ToLower(strings.TrimSpace(p.Type))
 
 	switch {
 	case kdfType == "argon2i" || kdfType == "argon2id":
-		// Negative values are the sharpest form of this. Time, Memory and
-		// CPUs are signed ints out of JSON and are converted with
-		// uint32/uint8 at the derive call site, so -1 does not fail -- it
-		// wraps to 4294967295, and Argon2 is then asked for a
-		// four-terabyte matrix. Checking against a positive minimum is what
-		// catches that; checking only the ceiling would not.
+		// A positive minimum catches negative values that would wrap to huge unsigned costs.
 		if p.Time == nil || p.Memory == nil || p.CPUs == nil {
 			return &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "argon2 KDF is missing its time, memory or cpus cost"}
 		}
@@ -109,10 +91,7 @@ func ValidateCost(p Params) error {
 		}
 
 	default:
-		// An unsupported type must SAY unsupported type. Treating everything
-		// non-argon2 as pbkdf2 reports a header claiming type "sha256-crypt"
-		// as "missing its iteration count", naming a field that type never
-		// claimed to have.
+		// An unsupported type is reported as such.
 		return &errs.Error{Kind: ErrUnsupportedKDF, Detail: fmt.Sprintf("unsupported KDF type %q", p.Type)}
 	}
 
@@ -128,11 +107,7 @@ func isPBKDF2Type(normalizedType string) bool {
 	}
 }
 
-// PBKDF2IterationFloor is the floor a calibrated count is held to for
-// hashAlgo at targetMs: the OWASP-recommended count for hashAlgo, scaled by
-// the budget relative to the 2-second reference, never below
-// MinPBKDF2Iterations. It returns a float because ScalePBKDF2Iterations
-// compares it against an unrounded extrapolation.
+// PBKDF2IterationFloor scales the OWASP count for hashAlgo to targetMs, never below MinPBKDF2Iterations.
 func PBKDF2IterationFloor(hashAlgo string, targetMs int) float64 {
 	floor := float64(MinPBKDF2Iterations)
 
@@ -147,11 +122,7 @@ func PBKDF2IterationFloor(hashAlgo string, targetMs int) float64 {
 	return floor
 }
 
-// PBKDF2FloorFor is the minimum iteration count this package will write for
-// hashAlgo under policy: MinPBKDF2Iterations for a library-generated
-// credential (the exemption; its entropy is already known), otherwise the
-// 2-second-budget floor rounded UP, so a count one iteration below it is
-// never admitted.
+// PBKDF2FloorFor is the minimum count this package writes for hashAlgo under policy, rounded up.
 func PBKDF2FloorFor(hashAlgo string, policy CostPolicy) int {
 	if policy == LibraryGeneratedCredential {
 		return MinPBKDF2Iterations

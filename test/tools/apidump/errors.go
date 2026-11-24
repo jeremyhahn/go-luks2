@@ -26,9 +26,7 @@ var (
 	// baseline exactly.
 	ErrCoverage = errors.New("dispositions do not cover the baseline exactly")
 
-	// ErrDishonored indicates a disposition the current API does not match:
-	// a KEEP identifier that is gone, or a RENAME/MOVE/UNEXPORT/DELETE
-	// identifier that is still there under its old name.
+	// ErrDishonored indicates a disposition the current API does not match.
 	ErrDishonored = errors.New("the current API does not honor every disposition")
 
 	// ErrNoDocs indicates a docs tree without a single feature directory,
@@ -36,7 +34,6 @@ var (
 	// worse, a tree read wrongly that a caller mistook for an empty one.
 	ErrNoDocs = errors.New("no feature docs")
 
-	// ErrUndocumented indicates an export no feature doc names and no
-	// exception lists, or an exception that no longer applies.
+	// ErrUndocumented indicates an export no feature doc names and no exception lists, or a stale exception.
 	ErrUndocumented = errors.New("an export is not named in any feature doc")
 )

@@ -13,15 +13,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// Custody allocates the enclaves key material lives in, and releases them.
-//
-// Its fields are go-enclave's three constructors and its release. They are
-// fields, not calls written where they are needed, for one reason: the
-// fail-closed paths cannot otherwise be tested. RLIMIT_MEMLOCK is
-// process-wide, so exhausting it for real inside a test binary takes the rest
-// of the suite with it, and a refusal that only ever runs on a machine already
-// out of locked memory is a refusal nothing checks on the way in. A test
-// builds a Custody whose constructors refuse; production code uses System.
+// Custody allocates and releases the enclaves key material lives in; its constructors are fields so tests can make them refuse. Production uses System.
 type Custody struct {
 	// Sized returns an enclave over n bytes of locked, zeroed, writable
 	// memory, as enclave.NewMemorySized does.
@@ -48,12 +40,7 @@ func System() Custody {
 	return Admitted(enclave.ProcessAllocator)
 }
 
-// Admitted is a Custody whose constructors ADMIT through the allocator
-// returns before anything is mapped (#26): the module allocates against the
-// one budget the binary sized (enclave.SetAllocator), or against
-// RLIMIT_MEMLOCK by default, and never installs or builds an allocator of its
-// own. A refusal is the allocator's typed enclave.ErrBudgetExhausted rather
-// than an mlock failure partway through.
+// Admitted is a Custody whose constructors admit through the process allocator before mapping anything.
 func Admitted(allocator func() (enclave.Allocator, error)) Custody {
 	sized := func(n int) (enclave.ByteAccess, error) {
 		a, err := allocator()
@@ -78,11 +65,7 @@ func Admitted(allocator func() (enclave.Allocator, error)) Custody {
 	}
 }
 
-// copiedInto builds Custody.Copied over sized: the copy is made into a fresh
-// enclave, which is then frozen read-only. Freeze is a capability reached
-// through enclave.As; a handle that is not a Freezer fails the copy with a
-// *enclave.CapabilityError and is destroyed -- the material is never handed
-// out in writable pages.
+// copiedInto copies into a fresh enclave and freezes it read-only; a non-Freezer handle fails and is destroyed.
 func copiedInto(sized func(n int) (enclave.ByteAccess, error)) func([]byte) (enclave.ByteAccess, error) {
 	return func(src []byte) (enclave.ByteAccess, error) {
 		if len(src) == 0 {
@@ -126,14 +109,7 @@ func (c Custody) Admissible(op string, n int64) error {
 	return nil
 }
 
-// New returns an enclave over n bytes of locked, zeroed memory for the caller
-// to fill IN PLACE, through a borrow.
-//
-// It is the constructor to reach for whenever the material does not exist
-// yet, because material produced inside the borrow is never anywhere else.
-// Use Adopt only for material that already exists outside an enclave and
-// cannot be produced inside one. op names the material in an error; it never
-// carries key content or a key length.
+// New returns an enclave over n bytes of locked, zeroed memory to fill in place; op names the material in errors.
 func (c Custody) New(op string, n int) (enclave.ByteAccess, error) {
 	e, err := c.Sized(n)
 	if err != nil {
@@ -142,16 +118,7 @@ func (c Custody) New(op string, n int) (enclave.ByteAccess, error) {
 	return e, nil
 }
 
-// Adopt moves already-materialized key material into an enclave.
-//
-// It TAKES OWNERSHIP of b: go-enclave wipes the caller's slice on every return
-// path, including the failure path, so the material does not survive in
-// ordinary memory even when the lock is refused. The caller must not read b
-// afterwards.
-//
-// This is the second-best constructor and exists only for the stdlib boundary
-// where a value is handed back already on the heap -- a KDF return, an
-// AF-merge result. Prefer New.
+// Adopt moves existing material into an enclave and takes ownership of b, which is wiped on every path. Prefer New.
 func (c Custody) Adopt(op string, b []byte) (enclave.ByteAccess, error) {
 	e, err := c.Moved(b)
 	if err != nil {
@@ -160,13 +127,7 @@ func (c Custody) Adopt(op string, b []byte) (enclave.ByteAccess, error) {
 	return e, nil
 }
 
-// Random draws n bytes from rand DIRECTLY into locked memory.
-//
-// The read happens inside the borrow, so the bytes are written into the locked
-// pages themselves and never exist on the Go heap -- which is the whole point.
-// A master key produced on the heap and then moved would have spent its first
-// moments on swappable, core-dumpable memory that a later wipe cannot reliably
-// reach. rand is crypto/rand.Reader on every production path.
+// Random reads n bytes from rand directly into locked memory.
 func (c Custody) Random(op string, n int, rand io.Reader) (enclave.ByteAccess, error) {
 	e, err := c.New(op, n)
 	if err != nil {
@@ -182,17 +143,7 @@ func (c Custody) Random(op string, n int, rand io.Reader) (enclave.ByteAccess, e
 	return e, nil
 }
 
-// Clone returns a FROZEN enclave holding a copy of b.
-//
-// It is for material that is ALREADY in protected memory and must be narrowed
-// -- a line located inside a locked file buffer, a body trimmed of its
-// surrounding whitespace -- where Adopt cannot be used because the source is
-// not the caller's to wipe. b must itself be protected; copying unprotected
-// bytes with this only moves them, it does not un-expose them.
-//
-// The result is read-only, exactly as Adopt's is: the material is complete
-// when this returns, so a write through a slice retained past its borrow
-// faults the process instead of silently corrupting a credential.
+// Clone returns a frozen enclave holding a copy of b, which must itself be protected.
 func (c Custody) Clone(op string, b []byte) (enclave.ByteAccess, error) {
 	e, err := c.Copied(b)
 	if err != nil {
@@ -201,23 +152,12 @@ func (c Custody) Clone(op string, b []byte) (enclave.ByteAccess, error) {
 	return e, nil
 }
 
-// CloneWritable is Clone whose result a borrow may WRITE to.
-//
-// It exists for a copy that is normalised in place after it is taken -- a
-// candidate body lower-cased before the hex test -- which the frozen result
-// of Clone cannot be. The pages are writable for the enclave's whole life, so
-// the copy should be short-lived scratch, destroyed as soon as the normalised
-// bytes have been consumed; material returned to a caller belongs in Clone.
+// CloneWritable is Clone with writable pages, for short-lived scratch normalised in place.
 func (c Custody) CloneWritable(op string, b []byte) (enclave.ByteAccess, error) {
 	return c.CloneFiltered(op, b, func(byte) bool { return true })
 }
 
-// CloneFiltered is CloneWritable keeping only the bytes keep reports true
-// for, sized exactly to what survives.
-//
-// It exists so that stripping separators out of a formatted secret happens
-// inside locked memory rather than through strings.ReplaceAll, which would
-// yield an unwipeable copy of the whole thing.
+// CloneFiltered is CloneWritable keeping only the bytes keep accepts.
 func (c Custody) CloneFiltered(op string, b []byte, keep func(byte) bool) (enclave.ByteAccess, error) {
 	n := 0
 	for _, x := range b {
@@ -249,61 +189,7 @@ func (c Custody) CloneFiltered(op string, b []byte, keep func(byte) bool) (encla
 	return e, nil
 }
 
-// Release destroys every enclave given -- zeroizing the material and
-// returning its pages -- skipping nils. It is the ONE place this module
-// receives go-enclave's release report, so the decision below is made once
-// rather than re-made, or silently not made, at each call site. A function
-// holding several pieces of key material releases all of them in a single
-// deferred call, and one enclave's report never stops the next release.
-//
-// # What the report can say, and why it is not an operation failure
-//
-// Destroy returns the release report directly (since go-enclave v0.8).
-// Apart from nil it is one of three things, and none means key material
-// escaped locked memory:
-//
-//   - enclave.ErrReleasedWithoutWipe: the mprotect that makes a frozen region
-//     writable was denied (a seccomp filter or sandbox), so the pages were
-//     unmapped without the in-process overwrite. They were mlock'd for their
-//     whole life, so nothing reached swap, and the kernel zeroes an anonymous
-//     page before any reuse. What it reports is the ENVIRONMENT: the same
-//     denial reaches every frozen enclave in the process.
-//   - enclave.ErrLockedMemoryUnavailable: the release itself was refused
-//     (ENOMEM at vm.max_map_count is the realistic cause), so the pages are
-//     still MAPPED and stay on go-enclave's WipeAll ledger. go-enclave wipes
-//     before it unlocks, so material is never left both unwiped and unlocked:
-//     if the wipe ran the pages hold zeroes, and if it could not run the pages
-//     are still mlock'd, as they have been all along. Only the process's
-//     WipeAll, or its exit, takes them back.
-//   - enclave.ErrEnclaveCorrupted: Destroy found the enclave's canary or
-//     guard pages overwritten. It returns this instead of panicking
-//     (since go-enclave v0.8), and only AFTER it has wiped the material and
-//     released the pages, so the report is about the region's history, not
-//     about anything still held.
-//
-// This module can do nothing with any of them. It cannot remedy the environment,
-// retrying at once with nothing changed is refused again (go-enclave's own
-// guidance), and WipeAll belongs to the binary that owns the process, never to
-// a library. Nor may it turn any of them into the operation's error: every release
-// happens after the operation's outcome is already decided -- a volume
-// formatted, a keyslot written, a mapping created -- or while an earlier error
-// is already being returned. Reporting a completed Format or Unlock as failed
-// because an unmap was refused afterwards would invite the caller to repeat
-// it, and a repeated Format destroys a volume. And it may not log: a logger in
-// a layer-0 primitive imposes a logging decision on every embedding
-// application.
-//
-// So the report is dropped HERE, deliberately and for those reasons. An
-// application that wants to see these conditions has them where it can act:
-// its own Destroy calls on the enclaves this module hands it report the same
-// environment, and its shutdown WipeAll counts any pages still held and
-// reports, as a *enclave.SweepError, the unwiped releases and corruption the
-// sweep itself meets.
-//
-// That includes the corruption Destroy detected: go-enclave reports every one
-// of them again in the next WipeAll's SweepError, so dropping the Destroy
-// report here does not lose it. The process's owner learns of it at shutdown,
-// where it can act on it; this layer cannot.
+// Release destroys every non-nil enclave and drops go-enclave's release report: none means material escaped, the outcome is already decided, and WipeAll at shutdown reports it again.
 func (c Custody) Release(secrets ...enclave.ByteAccess) {
 	for _, s := range secrets {
 		if s == nil {
@@ -315,14 +201,7 @@ func (c Custody) Release(secrets ...enclave.ByteAccess) {
 	}
 }
 
-// Borrow runs fn against the material inside e, translating a dead or
-// destroyed enclave into ErrProtectedMemory so callers get one error
-// vocabulary rather than go-enclave's.
-//
-// fn must not retain the slice and must not call back into the same enclave;
-// both are go-enclave contracts, not local conventions. fn MAY borrow other
-// enclaves, which is what makes the crypto helpers composable. fn's own error
-// passes through unwrapped; only the custody failure is reclassified.
+// Borrow runs fn on e's material, reporting a dead enclave as ErrProtectedMemory; fn must not retain the slice or re-borrow e.
 func Borrow(op string, e enclave.ByteAccess, fn func([]byte) error) error {
 	if e == nil {
 		// A nil handle holds nothing: it is reported as a destroyed one.
@@ -341,16 +220,7 @@ func Borrow(op string, e enclave.ByteAccess, fn func([]byte) error) error {
 	return err
 }
 
-// Locked refuses a handle that reports a backend other than go-enclave
-// locked memory, with ErrNotLockedMemory wrapping a *NotLockedMemoryError
-// that names the backend reported. It reads only the handle's Backend: the
-// bytes are never borrowed and the handle is never destroyed, because a
-// caller's handle stays the caller's. A nil handle is left to the caller's
-// own nil rule (Borrow reports it destroyed).
-//
-// The check reads the backend the handle reports. go-enclave has no
-// unforgeable provenance check, so a handle that misreports its backend is
-// outside the guarantee, like any caller that already holds the key.
+// Locked refuses a handle whose reported backend is not go-enclave locked memory, without reading or destroying it.
 func Locked(op string, e enclave.ByteAccess) error {
 	if e == nil {
 		return nil

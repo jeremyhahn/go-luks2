@@ -2,14 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package dm provides the device-mapper mechanism a LUKS2 activation needs:
-// the DM_DEV_CREATE ioctl, busy-retry around a removal, and the node
-// placement and readiness wait that stand in for udev when it is absent.
-//
-// Every seam this package needs -- the clock, the device directory, and the
-// node-identity check -- is a parameter, never a package-level variable: the
-// caller (pkg/dmcrypt, through its sys state) supplies the state
-// and this package stays reference-transparent.
+// Package dm provides DM_DEV_CREATE, busy-retry around removal, and node placement for when udev is absent; every seam is a parameter.
 package dm
 
 import (
@@ -35,10 +28,7 @@ import (
 // ControlPath is the device-mapper control node every dm ioctl is issued on.
 const ControlPath = "/dev/mapper/control"
 
-// RemoveRetryBudget and RemoveRetryInitialDelay bound RetryWhileBusy's
-// backoff: a hold on a dm target clears within a few seconds or it does not
-// clear, and retrying past that budget would turn a genuine failure into a
-// hang (#122 -- see RetryWhileBusy).
+// RemoveRetryBudget and RemoveRetryInitialDelay bound RetryWhileBusy's backoff.
 const (
 	RemoveRetryBudget       = 3 * time.Second
 	RemoveRetryInitialDelay = 20 * time.Millisecond
@@ -53,14 +43,7 @@ const (
 	MappedNodeTimeout       = 5 * time.Second
 )
 
-// CreateTarget issues DM_DEV_CREATE and returns the device number from the
-// kernel's reply.
-//
-// devmapper.Create performs the same ioctl and discards the reply, so the only
-// way to learn the new target's DevNo through it is a second lookup by name --
-// and between the two another process can remove the target and create its
-// own under the same name. The reply is the one answer that cannot belong to
-// anyone else, so the ioctl is issued here directly.
+// CreateTarget issues DM_DEV_CREATE and returns the device number from the kernel's reply, not a racy lookup by name.
 func CreateTarget(ctx context.Context, name, uuid string) (uint64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -94,19 +77,7 @@ func CreateTarget(ctx context.Context, name, uuid string) (uint64, error) {
 	return req.Dev, nil
 }
 
-// RetryWhileBusy runs attempt until it stops reporting EBUSY or the budget is
-// spent, and reports how many times it ran.
-//
-// # The ATTEMPT is the caller's whole unit of work, not just the removal
-//
-// That is the point of the signature: whatever a caller must be sure of
-// before removing has to be inside the thing being retried, so that a
-// concurrent actor recreating the target mid-backoff is caught by every
-// attempt rather than only the first (#122).
-//
-// It reports the LAST error and leaves the meaning to the caller, because
-// different callers face the same errno and owe the operator different
-// answers.
+// RetryWhileBusy reruns the caller's whole attempt until it stops reporting EBUSY or the budget is spent, returning the count and last error.
 func RetryWhileBusy(ctx context.Context, clk clock.Clock, attempt func() error) (attempts int, err error) {
 	deadline := clk.Now().Add(RemoveRetryBudget)
 	delay := RemoveRetryInitialDelay
@@ -121,8 +92,7 @@ func RetryWhileBusy(ctx context.Context, clk clock.Clock, attempt func() error) 
 		if remaining <= 0 {
 			return attempts, err
 		}
-		// The LAST wait is clipped to whatever is left, rather than the loop
-		// giving up as soon as the next doubling would overshoot (#122).
+		// Clip the last wait to the remaining budget.
 		t := clk.NewTimer(min(delay, remaining))
 		select {
 		case <-ctx.Done():
@@ -136,11 +106,7 @@ func RetryWhileBusy(ctx context.Context, clk clock.Clock, attempt func() error) 
 	}
 }
 
-// PollUntil checks done until it reports true or timeout has passed on clk,
-// sleeping interval between checks (the last sleep clipped to the deadline),
-// and reports whether done ever did. It always checks at least once and
-// checks once more at the deadline. A canceled ctx stops the wait and
-// returns ctx.Err(); the met bool is meaningless when err is non-nil.
+// PollUntil checks done every interval until true or timeout on clk, checking at least once and at the deadline; a canceled ctx returns ctx.Err().
 func PollUntil(ctx context.Context, clk clock.Clock, timeout, interval time.Duration, done func() bool) (met bool, err error) {
 	deadline := clk.Now().Add(timeout)
 	for {
@@ -176,12 +142,7 @@ func decodeDevNo(devNo uint64) (major, minor uint32) {
 	return unix.Major(devNo), unix.Minor(devNo)
 }
 
-// IsOurNode reports whether the node at path is the device info describes.
-//
-// A path that cannot be stat'd is NOT ours as far as this is concerned: the
-// answer is unknown, and unlinking or trusting on an unknown is the failure
-// mode being avoided. blockNodeRdev is the caller's seam for stat'ing a block
-// node's device number.
+// IsOurNode reports whether the node at path is the device info describes; an unstat-able path is not ours.
 func IsOurNode(blockNodeRdev func(path string) (uint64, error), path string, info *devmapper.DeviceInfo) bool {
 	if info == nil {
 		return false
@@ -206,48 +167,17 @@ func IsDanglingSymlink(path string) bool {
 	return err != nil
 }
 
-// IsNoSuchDevice reports whether err is the kernel saying a dm target does
-// not exist, as opposed to any other reason an inspection can fail.
-//
-// The distinction decides whether a caller reports a possible live plaintext
-// mapping, so it is drawn on the ERRNO rather than on the message: a
-// permission failure, a missing /dev/mapper/control or an interrupted syscall
-// all leave the target's existence unknown and must not be read as absence.
-// devmapper wraps its errno in *os.SyscallError, which errors.Is unwraps.
-//
-// ENOENT is deliberately NOT in this set: here it would come from opening
-// /dev/mapper/control, not from the kernel's answer about the target. The
-// kernel's answer for an unknown dm device is ENXIO.
+// IsNoSuchDevice reports whether err is the kernel's ENXIO for a missing dm target; other errors leave existence unknown.
 func IsNoSuchDevice(err error) bool {
 	return errors.Is(err, unix.ENXIO) || errors.Is(err, unix.ENODEV)
 }
 
-// RemoveMappingNodes deletes the device nodes a mapping left behind, and ONLY
-// those that are still that mapping's.
-//
-// # Why each node is identified before it is unlinked
-//
-// A path is not an identity. The minor is decoded from a device number, so a
-// decoding bug aims the unlink at some other device's node; and dm minors are
-// RECYCLED, so a node may belong to a device created after this one went
-// away. So each node is stat'd and its rdev compared with the DeviceInfo
-// captured before the target was removed; only a match is unlinked.
-//
-// The one deliberate exception is a DANGLING /dev/mapper/<name> symlink: it
-// cannot be stat'd, so it cannot be identified that way, but it names this
-// mapping and points at nothing. A dangling symlink also cannot be mistaken
-// for another live device, which is what makes the exception safe.
-//
-// Errors from the unlinks themselves stay ignored on purpose: a node may never
-// have existed or may already have been reaped by udev, and neither changes
-// the outcome the caller cares about, which is whether the dm target is gone.
+// RemoveMappingNodes unlinks only the nodes whose rdev still matches info, plus a dangling /dev/mapper/<name> symlink; unlink errors are ignored.
 func RemoveMappingNodes(ctx context.Context, devDir string, blockNodeRdev func(path string) (uint64, error), name string, info *devmapper.DeviceInfo) {
 	if ctx.Err() != nil {
 		return
 	}
-	// The mapper entry goes FIRST, while its target still resolves. Removing
-	// the dm node first would turn this symlink into a dangling one and force
-	// it down the exception path for no reason.
+	// Remove the mapper entry first, while its target still resolves.
 	mapperPath := MapperPath(devDir, name)
 	if IsOurNode(blockNodeRdev, mapperPath, info) || IsDanglingSymlink(mapperPath) {
 		_ = os.Remove(mapperPath)
@@ -263,23 +193,12 @@ func RemoveMappingNodes(ctx context.Context, devDir string, blockNodeRdev func(p
 	}
 }
 
-// PlaceNode puts a new directory entry at path, made by create, REPLACING
-// whatever is there.
-//
-// The entry is made under a temporary name in the same directory and renamed
-// over path, so a reader sees the old entry or the new one and never a gap.
-// It replaces rather than refuses because the only callers reach here after
-// confirming the existing entry does NOT name the device dm reports: it is
-// stale, and leaving it is how a mapping name comes to resolve to some other
-// device (#250, C5).
+// PlaceNode atomically replaces the entry at path with one made by create, via a temporary name and rename.
 func PlaceNode(ctx context.Context, path string, create func(tmp string) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	// Only an entry that could be a stale device-mapper node is replaced: a
-	// symlink, or a block device. A character device -- /dev/mapper/control
-	// above all -- a directory, a regular file or anything else is somebody
-	// else's, and is refused rather than renamed over.
+	// Replace only a symlink or block device; anything else is refused.
 	if fi, err := os.Lstat(path); err == nil {
 		mode := fi.Mode()
 		staleCandidate := mode&os.ModeSymlink != 0 || (mode&os.ModeDevice != 0 && mode&os.ModeCharDevice == 0)
@@ -302,10 +221,7 @@ func PlaceNode(ctx context.Context, path string, create func(tmp string) error) 
 	return nil
 }
 
-// randomSuffix returns n random bytes hex-encoded, for PlaceNode's temporary
-// name. It is not a secret -- it only has to be unique for the instant the
-// rename needs -- so it draws directly on crypto/rand rather than through any
-// caller-supplied seam.
+// randomSuffix returns n random bytes hex-encoded for PlaceNode's temporary name.
 func randomSuffix(n int) (string, error) {
 	b := make([]byte, n)
 	if _, err := io.ReadFull(rand.Reader, b); err != nil {

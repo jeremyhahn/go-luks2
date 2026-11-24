@@ -63,10 +63,7 @@ func (f RecoveryKeyFormat) rendering() (recoverykey.Format, bool) {
 	}
 }
 
-// ParseRecoveryKeyFormat parses the name a person types for --format: dashed,
-// hex or base64. Anything else -- the empty string included, since a caller
-// that names a format has not asked for the default -- is refused with an
-// error matching ErrInvalidArgument.
+// ParseRecoveryKeyFormat parses a --format name (dashed, hex or base64); anything else, empty included, matches ErrInvalidArgument.
 func ParseRecoveryKeyFormat(name string) (RecoveryKeyFormat, error) {
 	switch name {
 	case "dashed":
@@ -84,52 +81,12 @@ func ParseRecoveryKeyFormat(name string) (RecoveryKeyFormat, error) {
 // generated recovery key -- and the shortest NewRecoveryKey will draw.
 const DefaultRecoveryKeyLength = 32
 
-// recoveryToken builds the token that identifies a recovery keyslot.
-//
-// It is systemd's, and it is the WHOLE token: type and keyslots, nothing else.
-// systemd-cryptenroll --recovery-key writes no format member and no algorithm
-// member, because there is no material to describe -- the credential is the
-// printed text. Adding fields of our own here would produce a token systemd
-// reads differently from the way we wrote it.
-//
-// Keyslots is filled in by AddRecoveryKey once it knows which slot the
-// credential landed in.
+// recoveryToken builds systemd's recovery token: type and keyslots only.
 func recoveryToken() *LegacyToken {
 	return &LegacyToken{Type: recoveryTokenType}
 }
 
-// parseLegacyRecoveryKey decodes a formatted recovery key into the KEY MATERIAL
-// BEHIND it and returns that in protected memory.
-//
-// # This is probably not the function you want
-//
-// Its behavior is unchanged, and so is its meaning: it turns "9F3A2C-4B81DE-..."
-// into the bytes that rendering encodes. What changed around it is which of the
-// two is the credential. A keyslot enrolled by the current code holds the TEXT,
-// so ParseRecoveryKey is what produces something that opens such a volume;
-// this function is for a volume enrolled before that change, whose keyslot holds
-// the decoded bytes.
-//
-// It is tolerant in a way ParseRecoveryKey is deliberately not -- it accepts
-// either case, with or without dashes, hex or base64 -- because it is decoding a
-// rendering rather than reproducing a credential.
-//
-// # What is exposed, precisely
-//
-// formatted is a Go string and Go strings are immutable, so the CALLER'S copy
-// of the key cannot be wiped by anyone. That is unavoidable at this boundary: a
-// recovery key reaches a program by being typed, pasted or read out of a file,
-// all of which are string-shaped.
-//
-// What is avoidable is this package making more of them, and it used to make
-// about four -- ReplaceAll and ToLower each yield a new string when they change
-// anything, and both decoders took []byte(s) of the result. An earlier version
-// of this comment described only the caller's copy, which understated the
-// exposure by that factor. The string is now copied ONCE, into locked memory,
-// and every normalisation and decode happens there.
-//
-// Callers that already hold the key in an enclave should not come through
-// here at all.
+// parseLegacyRecoveryKey decodes a formatted recovery key into its key material in protected memory, for volumes whose keyslot holds the decoded bytes; use ParseRecoveryKey otherwise.
 func parseLegacyRecoveryKey(formatted string) (enclave.ByteAccess, error) {
 	if len(formatted) == 0 {
 		return nil, &errs.Error{Kind: errs.ErrInvalidCredential, Detail: "recovery key is empty"}
@@ -147,18 +104,7 @@ func parseLegacyRecoveryKey(formatted string) (enclave.ByteAccess, error) {
 	return recoverykey.Decode(custody, held)
 }
 
-// RecoveryKey is a generated recovery credential, obtainable only from
-// NewRecoveryKey. That restriction is deliberate: AddRecoveryKey enrolls the
-// credential under the library-generated KDF exemption (a relaxed PBKDF2
-// floor, sound only because the bytes behind it are 256 CSPRNG bits with no
-// candidate list to multiply), and sealing the type to NewRecoveryKey is
-// what keeps a caller from handing AddRecoveryKey a credential of its own
-// under that exemption.
-//
-// THE PRINTED TEXT IS THE PASSPHRASE: the keyslot holds the FORMATTED TEXT
-// WriteTo prints -- "9F3A2C-4B81DE-..." -- byte for byte, not an encoding of
-// it, so a printed page opens the volume from any rescue system with stock
-// cryptsetup and nothing else.
+// RecoveryKey is a generated recovery credential, obtainable only from NewRecoveryKey; the keyslot holds the printed text byte for byte.
 type RecoveryKey struct {
 	credential enclave.ByteAccess
 	format     RecoveryKeyFormat
@@ -187,14 +133,7 @@ func WithRecoveryLength(n int) RecoveryKeyOption {
 	return func(o *recoveryOptions) { o.length = n }
 }
 
-// NewRecoveryKey draws a cryptographically secure recovery key: length
-// random bytes (DefaultRecoveryKeyLength if unset), rendered in format
-// (RecoveryDashed if unset). See RecoveryKey's doc comment for why the
-// credential is the rendered TEXT and not the bytes behind it.
-//
-// The random bytes are drawn directly into locked memory and destroyed
-// before this returns; only the rendering survives. The caller owns the
-// result and must Destroy it.
+// NewRecoveryKey draws length random bytes (default DefaultRecoveryKeyLength) into locked memory and renders them in format; the caller must Destroy the result.
 func NewRecoveryKey(opts ...RecoveryKeyOption) (*RecoveryKey, error) {
 	o := recoveryOptions{format: RecoveryDashed, length: DefaultRecoveryKeyLength}
 	for _, opt := range opts {
@@ -209,8 +148,7 @@ func NewRecoveryKey(opts ...RecoveryKeyOption) (*RecoveryKey, error) {
 		return nil, &errs.Error{Kind: ErrInvalidArgument, Detail: fmt.Sprintf("%v", o.format)}
 	}
 
-	// AT LEAST 256 BITS: that is what the recovery key's cost model assumes,
-	// and AddRecoveryKey's library-generated exemption is sound only above it.
+	// At least 256 bits, which the library-generated exemption requires.
 	if o.length < DefaultRecoveryKeyLength || recoverykey.Len(o.length, rendering) > MaxPassphraseLength {
 		return nil, &errs.Error{Kind: ErrInvalidArgument, Detail: fmt.Sprintf("%d random bytes rendered %s", o.length, o.format)}
 	}
@@ -238,19 +176,10 @@ func NewRecoveryKey(opts ...RecoveryKeyOption) (*RecoveryKey, error) {
 // Format is the rendering the credential is written in.
 func (r *RecoveryKey) Format() RecoveryKeyFormat { return r.format }
 
-// Hash is a SHA-256 of the credential text, hex-encoded. It is a one-way
-// function of the credential and is not itself secret: it is safe to print
-// or save in the clear so a transcription can be checked without going near
-// the volume.
+// Hash is a hex SHA-256 of the credential text; it is not secret.
 func (r *RecoveryKey) Hash() string { return r.hash }
 
-// WriteTo writes the credential text to w -- the formatted recovery key
-// itself, byte for byte, never a Go string. It is the only way to
-// materialize the credential for display or storage; call it as late as
-// possible, at the point of output, and do not store the result.
-//
-// A failure of w is ErrIO, wrapping w's error; a failure to reach the
-// protected memory holding the credential is ErrProtectedMemory.
+// WriteTo writes the credential text to w; a write failure is ErrIO, a protected-memory failure ErrProtectedMemory.
 func (r *RecoveryKey) WriteTo(w io.Writer) (int64, error) {
 	var n int64
 	var werr error
@@ -280,31 +209,12 @@ func (r *RecoveryKey) Destroy() {
 	r.credential = nil
 }
 
-// ParseRecoveryKey normalizes a typed-or-pasted recovery key that the caller
-// has already placed in protected memory: trims surrounding whitespace and
-// refuses anything that cannot be a single-line credential. text stays the
-// caller's; the result is a new enclave. Unlike the internal
-// parseLegacyRecoveryKey, the input never passes through a Go string at this
-// boundary.
+// ParseRecoveryKey trims a recovery key held in protected memory and refuses anything not a single line; the result is a new enclave.
 func ParseRecoveryKey(text enclave.ByteAccess) (enclave.ByteAccess, error) {
 	return recoverykey.Credential(custody, text)
 }
 
-// AddRecoveryKey adds rk to the volume as a new keyslot and records a
-// systemd-recovery token naming it, re-verifying key against the volume's
-// digests under the exclusive lock taken here rather than
-// trusting it was still valid as of whatever Unlock call produced it. It is
-// built on the same keyslot and token internals as Enroll (provider.go),
-// used directly with key rather than re-deriving the master key from a
-// passphrase -- key already is it.
-//
-// rk must come from NewRecoveryKey: the library-generated KDF exemption this
-// enrolls under assumes exactly that. If the token cannot be written the
-// keyslot is rolled back, the same guard Enroll uses, so a credential that
-// nothing describes is never left live.
-//
-// Two-phase on purpose: the caller shows or persists rk
-// BEFORE calling this, so there is no save-error field to report through.
+// AddRecoveryKey enrolls rk (from NewRecoveryKey) with a systemd-recovery token, re-verifying key under the exclusive lock; a failed token write rolls the keyslot back.
 func (v *Volume) AddRecoveryKey(ctx context.Context, key *Key, rk *RecoveryKey, p KeyslotParams) (Enrollment, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()

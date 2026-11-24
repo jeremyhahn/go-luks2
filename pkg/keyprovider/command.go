@@ -24,47 +24,17 @@ import (
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
-// maxHelperOutput bounds how much of a helper's stdout is read into LOCKED
-// memory.
-//
-// The protocols here produce six short lines. 64 KiB is far above that and far
-// below the point where a locked allocation -- a process-wide rlimited
-// resource -- becomes a way for a misbehaving helper to fail every other
-// operation in flight. See internal/secret's ErrProtectedMemory discussion of
-// RLIMIT_MEMLOCK.
+// maxHelperOutput bounds how much helper stdout is read into locked memory.
 const maxHelperOutput = 64 << 10
 
-// maxHelperStderr bounds how much of a helper's stderr is kept for the error
-// message. Diagnostics from these helpers are one line; the bound exists so a
-// helper that writes forever cannot grow this process's memory through a
-// failure path.
+// maxHelperStderr bounds how much helper stderr is kept for the error message.
 const maxHelperStderr = 4 << 10
 
 // expiredDeadline is a read deadline already in the past: setting it makes a
 // blocked read return at once, without consulting a clock.
 var expiredDeadline = time.Unix(1, 0)
 
-// Command runs a program and takes its standard output as the credential.
-//
-// # Where the output goes
-//
-// The helper's stdout is read DIRECTLY INTO LOCKED MEMORY -- the pipe is
-// drained into the pages of an enclave rather than into a heap buffer that
-// io.Copy would have to be trusted to release. Material that touches the
-// ordinary heap can be swapped or core-dumped before anything gets a chance
-// to wipe it.
-//
-// # Line, and the trailing newline
-//
-// WithLine selects which 1-based line of stdout is the credential, and the
-// line TERMINATOR IS NOT PART OF IT. That is what the helper protocols need:
-// fido2-assert writes six newline-separated fields and the secret is the
-// sixth.
-//
-// Line 0 (the default) takes the whole of stdout VERBATIM, newline and all.
-// That is deliberate and matches `cryptsetup --key-file`: a helper that emits
-// a passphrase controls its own bytes, and silently trimming them is the
-// classic way a credential works one way and not the other.
+// Command runs a program and reads its stdout into locked memory as the credential: WithLine picks a line without its terminator, line 0 takes stdout verbatim.
 type Command struct {
 	path  string
 	args  []string
@@ -79,10 +49,7 @@ type Command struct {
 // commandSys is this package's seam: the production environment a Command
 // runs its helper with, read once at construction (no package-level mutable vars).
 type commandSys struct {
-	// env is the helper's base environment, over the fixed system
-	// directories: a helper does NOT inherit this process's environment,
-	// so a variable the invoking user set (LD_PRELOAD, a PATH entry they
-	// control) cannot reach the program that produces the credential.
+	// env is the helper's fixed base environment; it does not inherit this process's.
 	env []string
 
 	// waitDelay bounds how long a helper's output is waited for once the
@@ -110,12 +77,7 @@ func WithArgs(args ...string) CommandOption {
 	return func(c *Command) { c.args = append([]string(nil), args...) }
 }
 
-// WithStdin sets what is fed to the helper. The FIDO2 protocols pass their
-// parameters this way.
-//
-// Stdin is for NON-SECRET helper input only. The bytes are copied into
-// ordinary memory that is never wiped, so a credential passed through it would
-// sit in an unwipeable buffer (internal/secret/doc.go lists this boundary).
+// WithStdin sets non-secret input fed to the helper; the bytes are never wiped.
 func WithStdin(b []byte) CommandOption {
 	return func(c *Command) { c.stdin = append([]byte(nil), b...) }
 }
@@ -126,8 +88,7 @@ func WithLine(n int) CommandOption {
 	return func(c *Command) { c.line = n }
 }
 
-// WithEnv sets extra environment for the helper, as NAME=value entries,
-// added to the fixed base environment every Command runs with.
+// WithEnv adds NAME=value entries to the helper's fixed base environment.
 func WithEnv(kv ...string) CommandOption {
 	return func(c *Command) { c.env = append([]string(nil), kv...) }
 }
@@ -137,16 +98,7 @@ func WithToken(t luks2.Token) CommandOption {
 	return func(c *Command) { c.token = t }
 }
 
-// NewCommand builds a Command that runs path, an ABSOLUTE path to the helper
-// binary.
-//
-// A relative or bare name is refused rather than searched for on PATH: an
-// unlock credential must not depend on the environment of whoever happened to
-// invoke the process. Each Passphrase checks path as internal/command checks a
-// system tool before running it, and refuses, with ErrHelperFailed, a helper
-// that anyone but root or this process's user could have replaced, or that is
-// reached through a directory or symlink that could have been; the helper then
-// runs from the descriptor that was checked, not from path again.
+// NewCommand builds a Command for the absolute helper path; Passphrase checks the helper as a system tool and runs it from the checked descriptor.
 func NewCommand(path string, opts ...CommandOption) (*Command, error) {
 	const op = "NewCommand"
 	if path == "" {
@@ -191,26 +143,12 @@ func (p *Command) Passphrase(ctx context.Context) (enclave.ByteAccess, error) {
 	return credential, nil
 }
 
-// run executes the helper and returns its stdout in locked memory together
-// with the number of bytes actually written.
-//
-// # Why stdout is an os.Pipe and not StdoutPipe
-//
-// The read must end when ctx does. A read from StdoutPipe does not: killing
-// the helper on cancellation closes nothing if a grandchild inherited its
-// stdout, and the read then waits for that grandchild for ever. An os.Pipe is
-// this process's own, read through the runtime poller, so a deadline can be
-// set on it -- expiredDeadline when ctx ends, and sys.waitDelay after the
-// helper exits, for a grandchild that keeps the pipe open with no deadline in
-// ctx at all. cmd.WaitDelay does the same for the stderr copy.
+// run executes the helper and returns its stdout in locked memory with the byte count, reading an os.Pipe whose deadline follows ctx.
 func (p *Command) run(ctx context.Context) (enclave.ByteAccess, int, error) {
 	const op = "helper output"
 	custody := secret.System()
 
-	// The helper produces the credential, so it gets the trust a system tool
-	// gets: a file someone other than root or this user could have replaced
-	// is refused, not run. It runs through the descriptor that was checked,
-	// so a path swapped after the check cannot substitute another file.
+	// The helper gets system-tool trust checks and runs from the checked descriptor.
 	prog, err := command.Open(p.path)
 	if err != nil {
 		return nil, 0, &errs.Error{Kind: ErrHelperFailed, Detail: "the helper is not trusted", Err: err}
@@ -275,10 +213,7 @@ func (p *Command) run(ctx context.Context) (enclave.ByteAccess, int, error) {
 		_ = stdout.SetReadDeadline(expiredDeadline)
 	}()
 
-	// Drained INSIDE the borrow so the bytes land in the locked pages and
-	// nowhere else. A short read is not an error here -- the helpers write
-	// far less than the bound -- but an OVERLONG one is: silently
-	// truncating a credential produces one that enrolls and never opens.
+	// Drain inside the borrow; an overlong read is an error, never truncated.
 	var n int
 	readErr := secret.Borrow(op, buf, func(dst []byte) error {
 		var err error
@@ -288,12 +223,7 @@ func (p *Command) run(ctx context.Context) (enclave.ByteAccess, int, error) {
 	close(stop)
 	<-watched
 
-	// A helper that overran the bound, or whose output was cut off, is
-	// STILL RUNNING or still holds the pipe, and nothing will drain it
-	// again. With context.Background(), which an unattended unlock at
-	// boot typically passes, nothing else would end it: kill it here
-	// rather than wait for one that cannot finish. Closing the pipe alone
-	// would not stop a helper that ignores EPIPE.
+	// Kill a helper that overran or still holds the pipe; nothing else would end it.
 	if readErr != nil {
 		_ = stdout.Close() // a writer still blocked on the pipe gets EPIPE
 		if cmd.Process != nil {
@@ -388,12 +318,7 @@ func readFullish(r io.Reader, dst []byte) (int, error) {
 	}
 }
 
-// nthLine returns the 1-based nth line of b without its terminator.
-//
-// A trailing "\r" is stripped with the "\n": the helpers do not emit one, but
-// a wrapper script run through a tool that rewrites line endings does, and a
-// carriage return glued to a base64 field is a credential that enrolls and
-// never opens.
+// nthLine returns the 1-based nth line of b without its \n or \r\n terminator.
 func nthLine(b []byte, n int) ([]byte, bool) {
 	for i := 1; ; i++ {
 		idx := bytes.IndexByte(b, '\n')

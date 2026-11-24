@@ -15,14 +15,7 @@ import (
 	"time"
 )
 
-// Tests for the master-key digest's calibrated cost.
-//
-// The parameter itself defends nothing -- the digest verifies a 512-bit CSPRNG
-// master key, so no iteration count slows a search that does not exist -- and
-// DigestIterationTargetMs says so at length. What these tests protect is the
-// two things that DO matter: that the cost tracks a TIME target rather than
-// drifting to whatever a constant happened to say, and that it stays pinnable
-// so a header can be reproduced.
+// Tests that the master-key digest cost tracks a time target and stays pinnable.
 
 // recordDigestCalibration fixes the digest cost exactly as pinDigestIterations
 // does and additionally records the hash each call asked for, so a test can
@@ -37,22 +30,7 @@ func recordDigestCalibration(t *testing.T, iterations int) (*[]string, func(stri
 	}
 }
 
-// TestDigestCalibrationTargetsItsBudget is the property that replaced the
-// constant: the count is whatever costs DigestIterationTargetMs at the rate
-// this machine was measured to hash at, so it is right on hardware nobody has
-// measured on.
-//
-// The rate is INJECTED. This test used to time a real derivation on the wall
-// clock and failed whenever the host was busy -- 410ms against a 400ms bound at
-// load 35 on 8 cores -- while the arithmetic it was there to check was fine
-// (#233). With a known rate the expected count is exact, so the assertion can
-// be tight: a calibration that extrapolated wrongly, timed the wrong
-// derivation, or aimed at the wrong target lands on a different number.
-//
-// The 100ms target and the 64-byte benchmark are written out here rather than
-// read from DigestIterationTargetMs and DigestCalibrationKeyLen, because they
-// are measured facts about cryptsetup (see security.go), not this package's to
-// choose: a test that read the constants would follow a change to them.
+// TestDigestCalibrationTargetsItsBudget: with an injected rate, the count is exactly the 100 ms target for a 64-byte key.
 func TestDigestCalibrationTargetsItsBudget(t *testing.T) {
 	const cryptsetupDigestTarget = 100 * time.Millisecond
 	const cryptsetupBenchmarkBytes = 64
@@ -82,9 +60,7 @@ func TestDigestCalibrationTargetsItsBudget(t *testing.T) {
 					iterations, tc.perIteration, target, want)
 			}
 
-			// It extrapolated from the FIRST probe that ran for at least
-			// pbkdf2ProbeFloor, which is what keeps scheduler noise out of the
-			// measurement on a real clock: every earlier probe was shorter.
+			// It extrapolated from the first probe of at least pbkdf2ProbeFloor.
 			last := len(rate.probes) - 1
 			if last < 0 || time.Duration(rate.probes[last])*tc.perIteration < pbkdf2ProbeFloor {
 				t.Fatalf("probes %v: the last ran under the %v floor", rate.probes, pbkdf2ProbeFloor)
@@ -136,21 +112,7 @@ func TestDigestCalibrationReportsAFailedProbe(t *testing.T) {
 	}
 }
 
-// BenchmarkDigestCalibrationCostsItsBudget is the real-work check the injected
-// rate cannot give: the actual hash, calibrated and then derived at the count
-// it chose, costs about the digest target. It is a BENCHMARK, not a test, so
-// the ordinary unit suite never runs it: whatever clock it uses, a real
-// derivation's cost moves with the machine, and a unit verdict must not
-// (#233). `make test-calibration` runs it, uninstrumented and on its own, in
-// CI's unit job and in `make ci`, where a failure fails the build.
-//
-// Both the calibration and the check are timed in thread CPU time, which
-// leaves out time the scheduler gives to other work -- the source of the
-// failures this replaces -- though not cache or frequency effects; hence the
-// 4x band. The band is applied to the ITERATION COUNT against what the
-// check's own measured rate says the count should be, max(floor, target /
-// rate): on hardware slow enough that the floor binds, the right count costs
-// more than the target, and that is the floor working, not a failure.
+// BenchmarkDigestCalibrationCostsItsBudget checks a real calibrated derivation costs about the target, within 4x in thread CPU time; run by make test-calibration.
 func BenchmarkDigestCalibrationCostsItsBudget(b *testing.B) {
 	for _, hashAlgo := range []string{"sha256", "sha512"} {
 		b.Run(hashAlgo, func(b *testing.B) {
@@ -205,14 +167,7 @@ func TestFormatSurfacesADigestCalibrationFailure(t *testing.T) {
 	}
 }
 
-// TestPinnedDigestIterationsReachTheHeader is the pinnability requirement: a
-// reproducible header needs every calibrated value fixable, and the digest is
-// one of them.
-//
-// FormatOptions.PBKDFIterations deliberately does not pin this -- see
-// digestIterationsFor -- so the two are checked to move independently, which is
-// the property that distinguishes this package's API from cryptsetup's
-// --pbkdf-force-iterations.
+// TestPinnedDigestIterationsReachTheHeader: the digest count is pinnable, independently of FormatOptions.PBKDFIterations.
 func TestPinnedDigestIterationsReachTheHeader(t *testing.T) {
 	defer parallel(t)()
 	const digestCost = 123_456

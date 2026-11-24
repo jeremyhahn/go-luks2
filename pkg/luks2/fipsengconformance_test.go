@@ -333,17 +333,7 @@ func TestEngFIPSCodeDoesNotLog(t *testing.T) {
 	}
 }
 
-// Edge cases: "Under fips140=only, crypto/pbkdf2 also refuses a salt under
-// 128 bits": a volume with no Argon2 at all, every way in through a
-// short-salt PBKDF2-SHA256 digest, is classified with the salt as the reason
-// and is not opened by a strict FIPS process, which leaves it as it was.
-// Without cryptsetup: the fixture is the library's own PBKDF2 format,
-// weakened in a fips140=off child.
-//
-// The open is refused as the *FIPSImportRequiredError the Error semantics
-// section names, not as a damaged header: the pre-derivation screen passes
-// the approved names, strict mode refuses the short salt at derivation, and
-// the unlock classifier counts that keyslot as refused only by FIPS.
+// Edge case: a short-salt PBKDF2-SHA256 volume is refused in strict FIPS as *FIPSImportRequiredError and left unchanged.
 func TestEngAShortSaltPBKDF2VolumeIsNotOpenedInStrictMode(t *testing.T) {
 	image := newImage(t, "eng-short-salt.img")
 	if err := formatForTest(formatOptionsForTest{

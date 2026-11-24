@@ -24,57 +24,14 @@ import (
 	looppkg "github.com/jeremyhahn/go-luks2/pkg/loop"
 )
 
-// cryptsetupWriteLockFlock is which flock(2) call of a cryptsetup metadata
-// write takes the WRITE lock, under strace's injected delay. Measured
-// against cryptsetup 2.7.5: the read lock is LOCK_SH, its release LOCK_UN
-// then LOCK_EX|LOCK_NB (to unlink); the fourth call is the blocking LOCK_EX
-// of the write. Shared by lockwait_integration_test.go.
+// cryptsetupWriteLockFlock is which flock call of a cryptsetup 2.7.5 metadata write takes the write lock.
 const cryptsetupWriteLockFlock = 4
 
 // cryptsetupWriteHold is how long strace keeps cryptsetup holding its write
 // lock before it writes. Shared by lockwait_integration_test.go.
 const cryptsetupWriteHold = 5 * time.Second
 
-// This file backs what pkg/luks2's own integration tier still keeps:
-// unlockreadlock_integration_test.go moved out to
-// test/integration/luks2/ (it no longer needed any unexported seam -- see
-// its new home's own comment). canonicalconformance_integration_test.go
-// needs none of this either. The remaining three are white-box in a way
-// nothing outside this package can reach --
-//
-//   - pinnedpaths_integration_test.go drives relinkAfterFirstOpen
-//     (relink_test.go), which re-points a symlink from inside pkg/luks2's
-//     own unexported openFileFunc seam at the exact moment this package's
-//     locked-descriptor reopen (Locked.Claim) makes its first writable
-//     open. There is no path to that seam from outside the package. It no
-//     longer activates a real mapping to produce its "device in use"
-//     fixture (activation lives in pkg/dmcrypt, which pkg/luks2 cannot
-//     import): an exclusive O_EXCL open of the loop device is the
-//     same kernel condition WipeKeyslot's own busy check reacts to, per
-//     the file's own comment, so that stands in instead. relinkAfterFirstOpen
-//     itself still keeps this file from moving out: exporting openFileFunc
-//     even as module-internal API would make a security-relevant seam of
-//     this package reachable from outside it, and would mean relocating a
-//     seam device.OpenFunc already shadows (volumeSys.openFile) into an
-//     internal/ package that every other pkg/luks2 production call site
-//     (format.go, medium.go, security.go, wipe.go) would need to switch to
-//     -- the same reasoning as the two below.
-//   - lockwait_integration_test.go's TestCryptsetupWaitsForEveryWritePath
-//     substitutes volumeSys.lockHeld (volume.go), an unexported seam, to
-//     catch a write path exactly after it has taken its locks.
-//   - lockcompat_integration_test.go's TestCompatMetadataLockDirectoryStates
-//     re-execs this package's own test binary and, inside that child, sets
-//     volumeSys.calibratedCountFloor and the package var keyslotLockWait
-//     (keyslotdevice.go) -- both unexported -- before running a go-luks2
-//     operation. A copy of the binary re-exec'd from test/integration/interop
-//     would be THAT package's test binary, which cannot reach them either.
-//
-// All three are flagged for the owner, the same way the write-ahead-ledger gap
-// for dm.create once was (since closed: dmcrypt.Activate is public): new exported-within-internal surface on a Layer-0
-// library's production seams is an owner's decision, not a lane's to invent
-// -- doubly so here, where the candidate seams (random-number source,
-// lock-held observer, KDF calibration floor) are security-relevant and the
-// relocation touches production call sites well beyond these three tests.
+// Helpers for the integration tests that need this package's unexported seams (openFileFunc, volumeSys.lockHeld, calibratedCountFloor, keyslotLockWait).
 
 // boolPtr is the integration build's copy of the helper unknownfields_test.go
 // (`!integration`) keeps for the unit build; token_test.go (untagged) needs
@@ -124,9 +81,7 @@ func lockFileFor(t *testing.T, path string) string {
 	return filepath.Join(cryptsetupLockDir, "L_"+strconv.FormatUint(uint64(unix.Major(rdev)), 10)+":"+strconv.FormatUint(uint64(unix.Minor(rdev)), 10))
 }
 
-// flockWaiterOn reports whether /proc/locks shows a process BLOCKED on a
-// flock of the file with inode ino -- the "->" lines. Shared by
-// lockwait_integration_test.go.
+// flockWaiterOn reports whether /proc/locks shows a process blocked on a flock of inode ino.
 func flockWaiterOn(t *testing.T, ino uint64) bool {
 	t.Helper()
 	f, err := os.Open("/proc/locks")

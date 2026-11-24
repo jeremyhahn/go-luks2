@@ -26,17 +26,7 @@ func (v *Volume) keyslotDeviceFor(locked *device.Locked) (*keyslotDevice, error)
 	return pinnedKeyslotDevice(&deviceLock{locked: locked}, v.path, v.sys)
 }
 
-// onDiskPriority converts p to the *int addKeyslotWithMasterKeyAndPriority
-// and ChangeKeyslot write, the inverse of priorityFromDisk: nil (no member)
-// for PriorityDefault and PriorityNormal, matching the on-disk convention
-// that an absent priority means normal and cryptsetup's own omission of it;
-// int(p)-1 for everything else, so PriorityIgnore writes 0 and
-// PriorityPrefer writes 2. It is the single rule every priority-writing path
-// (AddKeyslot, ChangeKeyslot, Enroll, AddRecoveryKey) applies.
-//
-// An undeclared Priority maps outside 0..2 and is refused by
-// addKeyslotWithMasterKeyAndPriority (and by ChangeKeyslot before it writes),
-// never written.
+// onDiskPriority converts p to the on-disk *int: nil for PriorityDefault and PriorityNormal, int(p)-1 otherwise; an undeclared Priority is refused by the writers.
 func onDiskPriority(p Priority) *int {
 	if p == PriorityDefault || p == PriorityNormal {
 		return nil
@@ -45,12 +35,7 @@ func onDiskPriority(p Priority) *int {
 	return &v
 }
 
-// cloneKeyEnclave borrows key's bytes into a NEW enclave this call owns --
-// the same pattern (*Volume).UnlockWithVolumeKey uses to hand back an
-// independently destroyable copy. addKeyslotWithMasterKeyAndPriority and
-// changeKeyslotCore need an enclave.ByteAccess of their own; key's bytes
-// are reachable only through volkey.Borrow's window, never as a value this
-// package can hold past it.
+// cloneKeyEnclave borrows key's bytes into a new enclave this call owns.
 func cloneKeyEnclave(op string, v *Volume, key *Key) (enclave.ByteAccess, error) {
 	var cloned enclave.ByteAccess
 	err := volkey.Borrow(op, key, func(b []byte) error {
@@ -77,10 +62,7 @@ func keyslotInfoFor(metadata *header.Metadata, slot int, op, path string) (Keysl
 	return KeyslotInfo{}, errAt(op, path, &errs.Error{Kind: errs.ErrIO, Detail: fmt.Sprintf("keyslot %d written but not found while reading it back", slot)})
 }
 
-// AddKeyslot enrolls a new passphrase in a free keyslot (or p.Slot), wrapping
-// the volume key key already holds. It takes no existing
-// credential: key is the caller's proof of ownership, which is what AddKey's
-// old passphrase argument was for.
+// AddKeyslot enrolls a new passphrase in a free keyslot (or p.Slot), wrapping the volume key key holds; key is the proof of ownership.
 func (v *Volume) AddKeyslot(ctx context.Context, key *Key, pass enclave.ByteAccess, p KeyslotParams) (KeyslotInfo, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -149,18 +131,7 @@ func (v *Volume) AddKeyslot(ctx context.Context, key *Key, pass enclave.ByteAcce
 	return keyslotInfoFor(metadata, slot, op, v.path)
 }
 
-// ChangeKeyslot re-wraps key's volume key under a new passphrase, in the
-// keyslot key was recovered from.
-// p.Slot is not consulted -- the slot is key's, not a choice this call
-// makes. A zero p.KDF keeps the keyslot's existing KDF type and cost, as the
-// old ChangeKey this shares its write path with does (a PBKDF2-SHA1 slot is
-// still rewritten as PBKDF2-SHA256; see changeKeyslotCore). A non-zero p.KDF
-// re-costs the slot exactly as AddKeyslot would write it -- the same
-// validation, the same FIPS refusal of Argon2, the same benchmark when only
-// IterTime is given -- which is cryptsetup luksChangeKey's --pbkdf* behavior.
-// p.Priority is consulted too: PriorityDefault keeps the slot's existing
-// priority, and any other value is written (onDiskPriority) the same way
-// AddKeyslot's is.
+// ChangeKeyslot re-wraps key's volume key under a new passphrase in key's keyslot; a zero p.KDF keeps the slot's KDF, a non-zero one re-costs it as AddKeyslot would, and PriorityDefault keeps the priority.
 func (v *Volume) ChangeKeyslot(ctx context.Context, key *Key, pass enclave.ByteAccess, p KeyslotParams) (KeyslotInfo, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -247,11 +218,7 @@ func (v *Volume) ChangeKeyslot(ctx context.Context, key *Key, pass enclave.ByteA
 	return keyslotInfoFor(metadata, slot, op, v.path)
 }
 
-// RemoveKeyslot removes slot, refusing with ErrLastKeyslot if nothing else
-// could still open the volume afterward. It takes no credential:
-// removal is guarded, not authenticated -- every data-safety guard stays,
-// and authorization to remove a keyslot is the caller's policy, the same as
-// the old KillKeyslot's.
+// RemoveKeyslot removes slot, refusing with ErrLastKeyslot if nothing else could open the volume; removal is guarded, not authenticated.
 func (v *Volume) RemoveKeyslot(ctx context.Context, slot int) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -277,16 +244,7 @@ func (v *Volume) RemoveKeyslot(ctx context.Context, slot int) error {
 		return errAt(op, v.path, err)
 	}
 
-	// Claimed EXCLUSIVELY (#246 D4): RemoveKeyslot takes no credential, so
-	// this claim is the only thing standing between a volume that is open,
-	// or a device something else holds, and a keyslot being destroyed out
-	// from under it. The claim reopens the locked descriptor's own
-	// /proc/self/fd entry (device.Locked.Claim), the same way Format and
-	// Erase already claim theirs, so a path retargeted after the lock was
-	// taken cannot move the claim to a different device than the one this
-	// removal is proven against. Nothing below writes through claimed: the
-	// write still goes through dev's own locked descriptor, exactly as
-	// Format and Erase do.
+	// Claim the device exclusively through the locked descriptor, since no credential guards removal; writes still go through dev.
 	claimed, err := locked.Claim(ctx, "remove the keyslot", os.O_RDWR|os.O_EXCL, v.sys.openFile)
 	if err != nil {
 		return errAt(op, v.path, err)

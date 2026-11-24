@@ -45,12 +45,7 @@ func createPathKind(path string) (pathKind, error) {
 	return pathOther, nil
 }
 
-// claimDevice opens the block device at path read-only and EXCLUSIVELY,
-// and names the first LUKS header, filesystem or partition-table signature
-// it finds, or "" when there is none. A device the kernel reports in use
-// is luks2.ErrDeviceInUse. The exclusive claim is held until release is
-// called, so nothing can mount or map the device while the operator is
-// asked to confirm and to choose a passphrase.
+// claimDevice opens path read-only and exclusively and names the first LUKS, filesystem or partition signature; the claim holds until release.
 func claimDevice(path string) (string, func(), error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|unix.O_EXCL|unix.O_CLOEXEC, 0) // #nosec G304 -- the operator's own device argument
 	if errors.Is(err, unix.EBUSY) {
@@ -132,16 +127,7 @@ func findSignature(r io.ReaderAt) (string, error) {
 	return "", nil
 }
 
-// removeCreatedFile removes path only if it is the file this run created
-// and still holds open as created.
-//
-// Checking and then removing by name would race: the path could be
-// replaced between the check and the unlink. So the path is first moved
-// aside with an atomic rename to a name of this process's own, the file
-// now at that name is compared with the held descriptor, and only a match
-// is unlinked. Anything else is renamed back -- RENAME_NOREPLACE, so
-// nothing that has since appeared at the path is overwritten -- and the
-// cleanup is refused.
+// removeCreatedFile renames path aside atomically, unlinks it only if it is the held file, and otherwise renames it back with RENAME_NOREPLACE.
 func removeCreatedFile(path string, created *os.File) error {
 	aside := path + ".luks2-cleanup-" + strconv.Itoa(os.Getpid())
 	if err := unix.Renameat2(unix.AT_FDCWD, path, unix.AT_FDCWD, aside, unix.RENAME_NOREPLACE); err != nil {
@@ -156,11 +142,7 @@ func removeCreatedFile(path string, created *os.File) error {
 	return &errs.Error{Kind: os.ErrNotExist, Detail: path}
 }
 
-// stillCreatedFile reports whether path still names the regular file this
-// run created and still holds open as created, so cleanup removes that
-// file and never one put in its place. The descriptor is what makes the
-// comparison sound: an inode number is reused as soon as its file is gone,
-// but not while a descriptor keeps it alive.
+// stillCreatedFile reports whether path still names the regular file this run created, compared through the held descriptor.
 func stillCreatedFile(path string, created *os.File) bool {
 	if created == nil {
 		return false

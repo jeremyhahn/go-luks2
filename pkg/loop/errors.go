@@ -26,34 +26,13 @@ var (
 	// exactly as it reads: "no loop device found".
 	ErrNotFound = errors.New("loop: no loop device found")
 
-	// ErrDetachIncomplete indicates a loop device was told to detach and the
-	// kernel had not released it before the wait expired. It is deliberately
-	// distinct from a failed detach: the request succeeded, and something
-	// else still holds the device open. An operator who reads "detach
-	// failed" goes looking at the detach; this one has to go looking at what
-	// else has the device.
+	// ErrDetachIncomplete indicates the detach was accepted but something still held the device when the wait expired.
 	ErrDetachIncomplete = errors.New("loop: detach did not become observable")
 
-	// ErrNodeAbsent indicates that the kernel allocated a loop device but no
-	// device node for it appeared under /dev within the wait budget.
-	//
-	// THE ALLOCATION SUCCEEDED. LOOP_CTL_GET_FREE reserves a minor number and
-	// returns it; creating the node is a separate job belonging to devtmpfs
-	// or to udev, and neither is guaranteed to have finished -- or to be
-	// running at all. So this is not "no loop devices available", which is
-	// the reading the bare ENOENT invited: it means the number is ours and
-	// the path to it does not exist yet.
-	//
-	// It is invisible until allocation passes the PRE-CREATED range,
-	// typically loop0-loop7, because those nodes exist from boot. That is
-	// why it presents as "works for the first N, fails past them", with N
-	// depending on how many loop devices the host already has in use.
+	// ErrNodeAbsent indicates a loop device was allocated but its /dev node did not appear within the wait budget.
 	ErrNodeAbsent = errors.New("loop: allocated device's node did not appear under /dev")
 
-	// ErrDeviceReassigned indicates [Device.Detach] refused because the loop
-	// device is no longer backed by the file it was backed by when the
-	// [Device] was obtained: it was released and attached to another file in
-	// between. The device is left alone; it is someone else's now.
+	// ErrDeviceReassigned indicates [Device.Detach] refused because the device is now backed by another file.
 	ErrDeviceReassigned = errors.New("loop: the device is now attached to a different file")
 
 	// ErrPermissionDenied indicates an operation could not open a device

@@ -29,16 +29,7 @@ import (
 // (LUKS2_hdr_labels) and reads only the first 47 bytes of the field.
 const maxLabelLength = 47
 
-// formatCiphers lists every data-segment cipher Format writes, and the key
-// sizes in bits each is written with.
-//
-// It is an allow-list because the segment cipher is a device-mapper
-// specification and anything else was written blind (#248): a CipherMode of
-// "xts-plain64 x" formatted a container no reader would open, and aes-cbc with
-// a 512-bit key formatted one dm-crypt cannot set up. CBC-ESSIV takes one AES
-// key, so it has no 512-bit form; XTS splits its key in two, which is why
-// 512 bits is AES-256-XTS. Both are what cryptsetup writes for the same
-// options.
+// formatCiphers lists every data-segment cipher Format writes and its key sizes in bits.
 var formatCiphers = map[string][]int{
 	"aes-xts-plain64":      {256, 512},
 	"aes-cbc-essiv:sha256": {256},
@@ -78,14 +69,7 @@ type formatLayout struct {
 	dataOffset     int64 // the data segment
 }
 
-// newFormatLayout lays a container out the way cryptsetup does: two header
-// copies of metadataSize bytes (0 for the 16 KiB default), the keyslots area,
-// and the data segment at 16 MiB -- or later, if one keyslot of keyBytes of
-// key material would not fit before it.
-//
-// MEASURED against cryptsetup 2.7.0 (#47): --luks2-metadata-size 16k gives
-// keyslots_size 16744448, 32k gives 16711680 and 4m gives 8388608, with the
-// data segment at 16 MiB in every case.
+// newFormatLayout lays a container out as cryptsetup 2.7.0 does: two header copies, the keyslots area, data at 16 MiB or later.
 func newFormatLayout(metadataSize, keyBytes int) formatLayout {
 	area := int64(metadataSize)
 	if area == 0 {
@@ -100,14 +84,7 @@ func newFormatLayout(metadataSize, keyBytes int) formatLayout {
 	}
 }
 
-// checkFormatDeviceSize refuses a device that cannot hold the layout plus at
-// least one sector of data, or whose data area is not a whole number of
-// sectors -- BEFORE anything is written. Format used to write the header first
-// and fail later, or, on a regular file, silently grow it into a container with
-// an empty data segment.
-//
-// The data size is rounded down to 512 bytes first, as a loop device presents a
-// file, so only a sector size above 512 adds an alignment requirement.
+// checkFormatDeviceSize refuses, before writing, a device too small for the layout plus one sector or with a partial data sector.
 func checkFormatDeviceSize(f *os.File, device string, layout formatLayout, sectorSize int, measureDeviceSize func(*os.File) (int64, error)) error {
 	size, err := measureDeviceSize(f)
 	if err != nil {
@@ -126,14 +103,7 @@ func checkFormatDeviceSize(f *os.File, device string, layout formatLayout, secto
 	return nil
 }
 
-// wipeOldHeaderCopies zeroes the binary header at the primary's offset and at
-// every legal secondary offset, and syncs, before Format writes anything
-// else: the part of cryptsetup's LUKS2_wipe_header_areas that a reader sees.
-// Without it a crash between the new primary and the new secondary left the
-// old secondary -- valid, and at a higher sequence id than a fresh header's
-// -- for ReadCurrentHeader to choose, or to find by probing when the new
-// primary was torn. Every legal offset lies below any layout's data offset
-// (newFormatLayout), inside the range cryptsetup zeroes.
+// wipeOldHeaderCopies zeroes the binary header at the primary and every legal secondary offset, then syncs, before Format writes.
 func wipeOldHeaderCopies(f *os.File, device string, sync func(*os.File) error) error {
 	zero := make([]byte, header.HeaderSize)
 	for _, at := range append([]int64{header.PrimaryHeaderOffset}, header.LegalHeaderAreaSizes()...) {
@@ -147,15 +117,7 @@ func wipeOldHeaderCopies(f *os.File, device string, sync func(*os.File) error) e
 	return nil
 }
 
-// formatWithSys creates a new LUKS2 volume, parameterized by sys so this
-// package's tests can inject a seam (digestIterationsFor, measureDeviceSize,
-// ...).
-//
-// The device is opened O_EXCL. For a block device the kernel then refuses the
-// open with EBUSY while the device is mounted, mapped by device-mapper or held
-// by another exclusive opener, and formatWithSys returns ErrDeviceInUse rather
-// than overwriting something in use. On a regular file O_EXCL without O_CREAT
-// has no effect.
+// formatWithSys creates a new LUKS2 volume with injectable seams; O_EXCL makes an in-use block device fail with ErrDeviceInUse.
 func formatWithSys(opts formatOptionsForTest, sys volumeSys) error {
 	ctx := context.Background()
 	// Validate options
@@ -180,20 +142,12 @@ func formatWithSys(opts formatOptionsForTest, sys volumeSys) error {
 	if opts.KeySize == 0 {
 		opts.KeySize = DefaultKeySize
 	}
-	// The keyslot's KDF is created from the options AS THE CALLER GAVE THEM,
-	// before HashAlgo is defaulted below. HashAlgo names the digest and AF hash
-	// AND overrides the hash a KDF alias names, so defaulting it first turned
-	// every "pbkdf2-sha512" -- the FIPS-mode default (DefaultKDFSpec) among
-	// them -- into PBKDF2-SHA256 (#237). A caller who sets HashAlgo still gets
-	// it for the KDF as well, as before.
+	// Create the keyslot KDF from the options as given, before HashAlgo is defaulted.
 	kdfOpts := opts
 	if opts.HashAlgo == "" {
 		opts.HashAlgo = defaultHashAlgo
 	}
-	// HashAlgo is also the new keyslot's anti-forensic hash and its digest's,
-	// so it must be one a keyslot may be WRITTEN with -- never SHA-1 (#236,
-	// #239), nor a pbkdf2-sha1 KDF -- and that is refused here, before the KDF
-	// is paid for and before the device is touched.
+	// HashAlgo must be writable (never SHA-1); refused before the KDF or the device.
 	if err := refuseSHA1ForCreation(opts.KDFType, opts.HashAlgo, sys.fipsMode()); err != nil {
 		return err
 	}
@@ -204,11 +158,7 @@ func formatWithSys(opts formatOptionsForTest, sys volumeSys) error {
 		opts.SectorSize = DefaultSectorSize
 	}
 
-	// Claim the device exclusively: see Format's doc comment. The claim
-	// reopens the descriptor the lock above is held on, via its /proc/self/fd
-	// entry, so it targets by construction the exact file that was locked --
-	// a path retargeted between the two opens cannot put the lock on one
-	// device and the writes on another. Every write below goes through f.
+	// Claim the device exclusively by reopening the locked descriptor through /proc/self/fd.
 	claimed, err := lock.locked.Claim(ctx, "format the device", os.O_RDWR|os.O_EXCL, sys.openFile)
 	if err != nil {
 		return err
@@ -221,27 +171,7 @@ func formatWithSys(opts formatOptionsForTest, sys volumeSys) error {
 	})
 }
 
-// formatCore writes a new LUKS2 container to f, an already-claimed,
-// exclusively open descriptor on device. opts and kdfOpts are fully
-// resolved -- every default Format or (*Volume).Format applies has already
-// been applied, and a KDF or hash that must never be WRITTEN has already
-// been refused -- so this does nothing but lay the container out: opts
-// carries the digest and anti-forensic hash (HashAlgo), kdfOpts the
-// keyslot's KDF (KDFType, HashAlgo and its cost fields), the same split
-// Format has always made between kdfOpts and opts so that HashAlgo can
-// answer two independent questions.
-//
-// It is the body of the old Format from the point every option is resolved,
-// extracted so (*Volume).Format -- which claims its own descriptor through
-// v's pinned Volume rather than reopening the path itself -- writes a
-// byte-identical container through the same code, the same way
-// restorePrimaryHeaderCore is Volume.RestorePrimaryHeader's and the old
-// RestorePrimaryHeader's shared core.
-//
-// deriveAreaKey derives keyslot 0's area key from the caller's passphrase. It
-// is handed in rather than opts.Passphrase being read here so Volume.Format can
-// open its passphrase enclave for exactly that derivation and no longer: the
-// passphrase is not borrowed across the device writes that follow.
+// formatCore writes a new container to the claimed descriptor f with fully resolved options; deriveAreaKey derives keyslot 0's area key.
 func formatCore(ctx context.Context, f *os.File, device string, opts, kdfOpts formatOptionsForTest, sys volumeSys,
 	deriveAreaKey func(kdf *header.KDF, keySize int) (enclave.ByteAccess, error)) error {
 	masterKeySize := opts.KeySize / 8 // Convert bits to bytes
@@ -253,11 +183,7 @@ func formatCore(ctx context.Context, f *os.File, device string, opts, kdfOpts fo
 		return err
 	}
 
-	// Generate the master key DIRECTLY into locked memory. It is drawn inside
-	// the enclave's borrow window, so the volume's whole secret never exists on
-	// the ordinary heap -- not even for the instant between rand.Read and a
-	// move, which is a window no later wipe can close because the collector may
-	// already have copied the bytes.
+	// Generate the master key directly into locked memory.
 	masterKey, err := custody.Random("master key", masterKeySize, sys.cryptoRand)
 	if err != nil {
 		return err
@@ -300,22 +226,14 @@ func formatCore(ctx context.Context, f *os.File, device string, opts, kdfOpts fo
 	}
 	defer custody.Release(afData)
 
-	// Encrypt AF-split key material with passphrase-derived key.
-	//
-	// The RESULT is deliberately plain memory. These bytes are the AF stripes
-	// under the passphrase-derived key and they are about to be written to the
-	// device in exactly this form, so locking them would protect a copy of
-	// something already on disk while doubling the locked memory this call
-	// needs. Both inputs are borrowed from their enclaves for the transform.
+	// Encrypt the AF-split key material with the passphrase-derived key; the result is plain memory because it goes to disk as is.
 	encryptedKeyMaterial, err := areacipher.Default().WithFIPS(sys.fipsMode()).EncryptEnclave(custody, afData, passphraseKey)
 	if err != nil {
 		return err
 	}
 	defer clearBytes(encryptedKeyMaterial)
 
-	// The keyslots area starts where the two header copies end, at twice the
-	// header area size, never at a fixed 0x8000: with MetadataSize at 32 KiB
-	// the second header copy occupies 0x8000..0xFFFF (#47). See newFormatLayout.
+	// The keyslots area starts at twice the header area size; see newFormatLayout.
 	keyslotAreaStart := layout.keyslotsOffset
 	keyMaterialSize := len(encryptedKeyMaterial)
 	alignedKeyMaterialSize := alignTo(int64(keyMaterialSize), 4096)
@@ -328,16 +246,7 @@ func formatCore(ctx context.Context, f *os.File, device string, opts, kdfOpts fo
 	metadata := createMetadata(kdf, digestKDF, digestValue, opts, masterKeySize,
 		int(keyslotAreaStart), int(alignedKeyMaterialSize), int(keyslotsAreaSize), int(dataOffset))
 
-	// THE KEYSLOT IS DURABLE BEFORE ANY HEADER NAMES IT. Keyslot 0's
-	// material and the area filler are written and synced first, and the two
-	// header copies last, as the commit point: a crash before the header write
-	// leaves no LUKS2 header naming this keyslot, and a crash after it leaves
-	// a header whose keyslot is on the device. Writing the headers first -- as
-	// this once did -- left a durable header naming an area that might never
-	// be written. Every write goes through the exclusively opened descriptor.
-	//
-	// The old header copies go first of all, so that no crash from here on
-	// leaves one for a reader to choose.
+	// Write and sync keyslot 0 and the area filler first, the header copies last as the commit point; old header copies go before everything.
 	if err := wipeOldHeaderCopies(f, device, sys.syncDevice); err != nil {
 		return err
 	}
@@ -350,27 +259,7 @@ func formatCore(ctx context.Context, f *os.File, device string, opts, kdfOpts fo
 		return &errs.Error{Kind: errs.KindOf(err, errs.ErrIO), Detail: "write key material " + device, Err: err}
 	}
 
-	// FILL THE REST OF THE KEYSLOTS AREA WITH CSPRNG DATA, from the end of
-	// keyslot 0's material to the start of the data segment. That is two
-	// distinct ranges and both used to be zeroes:
-	//
-	//	the tail of keyslot 0's own declared area   2 KiB
-	//	the region no keyslot occupies yet          ~15.7 MiB
-	//
-	// Zeroes there are an INFORMATION DISCLOSURE. Encrypted key material is
-	// indistinguishable from random, so a region of random says nothing; a
-	// region of zeroes says "no keyslot has ever been written here". On a
-	// stolen or discarded drive that hands the holder the container's key
-	// management history for free -- how many keys exist, where they sit, and
-	// which slots were used and later destroyed -- without breaking anything.
-	// cryptsetup fills the whole area at format for exactly this reason, and
-	// the same reasoning is why wipeKeyslotArea now fills with random rather
-	// than zeroing (keyslot.go).
-	//
-	// It is not a conformance requirement: cryptsetup opens a container whose
-	// unallocated area is zeroed. MEASURED over 20 formats of a 64 MiB image,
-	// it costs 20ms on top of 375ms -- the CSPRNG is not the cost, writing 16
-	// MiB and syncing it is -- and the image is no longer sparse.
+	// Fill the rest of the keyslots area with CSPRNG data, as cryptsetup does, so it does not disclose keyslot history.
 	if err := writeRandom(ctx, f, dataOffset-(keyslotAreaStart+int64(keyMaterialSize)), sys.cryptoRand); err != nil {
 		return &errs.Error{Kind: errs.KindOf(err, errs.ErrIO), Detail: "fill the keyslots area " + device, Err: err}
 	}
@@ -382,26 +271,14 @@ func formatCore(ctx context.Context, f *os.File, device string, opts, kdfOpts fo
 	return writeHeaderTo(f, hdr, metadata, sys.syncDevice)
 }
 
-// DefaultCipher is the cipher dm-crypt is configured with when
-// FormatParams.Cipher names none: AES-XTS with a 512-bit key (two 256-bit
-// half-keys) -- cryptsetup's own default, and the strongest combination
-// formatCiphers allows.
+// DefaultCipher is AES-XTS with a 512-bit key, cryptsetup's default.
 const DefaultCipher = "aes-xts-plain64"
 
 // DefaultHash is the digest and anti-forensic hash Format uses when
 // FormatParams.Hash names none.
 const DefaultHash = crypto.SHA256
 
-// FormatParams is a new LUKS2 container's parameters.
-//
-// Cipher is one cryptsetup spec ("aes-xts-plain64"), unlike the internal
-// formatOptionsForTest.Cipher/CipherMode pair, because that is the form dm-crypt's
-// table entry takes and a caller who knows cryptsetup's option already
-// knows it. Hash is FormatParams' own digest and anti-forensic hash; it is
-// independent of KDF.Hash, the keyslot's PBKDF2 PRF -- the two were one
-// conflated formatOptionsForTest.HashAlgo field before this type, with an alias
-// spelling in KDFType breaking the tie when a caller set only one of them.
-// A FormatParams caller sets each the API names for.
+// FormatParams is a new container's parameters; Cipher is one cryptsetup spec, and Hash is independent of KDF.Hash.
 type FormatParams struct {
 	Cipher       string      // cryptsetup spec; zero: DefaultCipher
 	KeySize      int         // bits; zero: DefaultKeySize
@@ -414,14 +291,7 @@ type FormatParams struct {
 	KDF KDFParams
 }
 
-// Validate refuses a FormatParams Format cannot write: a cipher, mode and
-// key size outside formatCiphers, a label or subsystem that does not fit
-// its header field (#248), a key or sector size outside the sizes this
-// package supports, a metadata size outside cryptsetup's power-of-two range
-// (#47), and everything KDFParams.Validate refuses on p.KDF -- including,
-// in FIPS 140-3 mode, an Argon2 KDF named or implied by a nonzero Argon2
-// cost. Nothing is read, created or written on p's device when this
-// returns an error.
+// Validate refuses a FormatParams Format cannot write, including KDFParams.Validate's refusals; nothing is touched on error.
 func (p FormatParams) Validate() error {
 	return p.validateWith(fips.Probe)
 }
@@ -468,24 +338,13 @@ func cipherSpecOrDefault(spec string) string {
 	return spec
 }
 
-// splitCipherSpec splits a cryptsetup cipher spec into the base cipher and
-// its mode, the pair formatOptionsForTest still carries separately:
-// "aes-xts-plain64" splits to ("aes", "xts-plain64"), which
-// validateFormatChoices rejoins with one "-" to look up in formatCiphers. A
-// spec with no "-" splits to (spec, ""), which no formatCiphers entry
-// matches, so it is refused there as ErrUnsupported rather than
-// panicking here.
+// splitCipherSpec splits "aes-xts-plain64" into ("aes", "xts-plain64"); a spec with no "-" returns (spec, "").
 func splitCipherSpec(spec string) (cipher, mode string) {
 	cipher, mode, _ = strings.Cut(spec, "-")
 	return cipher, mode
 }
 
-// hashAlgoName names h the way this package's HashAlgo fields spell a hash:
-// lowercase, no hyphen. It is the only place FormatParams.Hash and
-// KDFParams.Hash cross into the legacy string-keyed format internals; an h
-// this package does not write is named anyway and left to the checks those
-// internals already make (af.ValidateWriteHash, getPBKDF2HashFunc) to
-// refuse, rather than duplicating their allow-lists here.
+// hashAlgoName names h as the HashAlgo fields spell it: lowercase, no hyphen.
 func hashAlgoName(h crypto.Hash) string {
 	switch h {
 	case 0:
@@ -503,12 +362,7 @@ func hashAlgoName(h crypto.Hash) string {
 	}
 }
 
-// toFormatOptions converts p, already validated, into the
-// formatOptionsForTest the format internals still take: opts carries the digest
-// and anti-forensic hash, kdfOpts the keyslot's KDF. The two are
-// independent fields on FormatParams/KDFParams, so, unlike the legacy
-// Format, nothing here infers one hash from the other or from an alias
-// spelling.
+// toFormatOptions converts a validated p into the internal digest and KDF option sets.
 func (p FormatParams) toFormatOptions(device string, fipsMode fips.Mode) (opts, kdfOpts formatOptionsForTest) {
 	cipher, mode := splitCipherSpec(cipherSpecOrDefault(p.Cipher))
 	keySize := p.KeySize
@@ -551,11 +405,7 @@ func (p FormatParams) toFormatOptions(device string, fipsMode fips.Mode) (opts, 
 	return opts, kdfOpts
 }
 
-// Format creates a new LUKS2 container on v's device,
-// writing exactly what the package-level Format writes, through v's own
-// pinned descriptor and exclusive lock rather than reopening the path a
-// second time. pass is the caller's enclave and stays the caller's: it is
-// only ever borrowed, for the passphrase derivation.
+// Format creates a new LUKS2 container on v's device through v's pinned descriptor and lock; pass is only borrowed.
 func (v *Volume) Format(ctx context.Context, pass enclave.ByteAccess, p FormatParams) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -573,10 +423,7 @@ func (v *Volume) Format(ctx context.Context, pass enclave.ByteAccess, p FormatPa
 
 	opts, kdfOpts := p.toFormatOptions(v.path, v.sys.fipsMode())
 
-	// Refused here, before the device is locked or claimed, exactly as the
-	// package-level Format refuses them before its own exclusive claim:
-	// never SHA-1 for the KDF (#239), and never an anti-forensic/digest hash
-	// af.ValidateWriteHash does not write.
+	// Refuse a SHA-1 KDF or an unwritable AF/digest hash before locking the device.
 	if err := refuseSHA1ForCreation(kdfOpts.KDFType, kdfOpts.HashAlgo, v.sys.fipsMode()); err != nil {
 		return errAt(op, v.path, err)
 	}
@@ -628,19 +475,7 @@ func (v *Volume) Format(ctx context.Context, pass enclave.ByteAccess, p FormatPa
 func createMetadata(kdf, digestKDF *header.KDF, digestValue string, opts formatOptionsForTest,
 	masterKeySize, keyslotOffset, keyslot0Size, keyslotsAreaSize, dataOffset int) *header.Metadata {
 
-	// Create keyslot.
-	//
-	// PRIORITY IS DELIBERATELY NOT SET. LUKS2 makes the member optional and an
-	// ABSENT priority means "normal" -- so writing `"priority":1` states the
-	// default the reader already assumes. MEASURED against cryptsetup 2.7.0:
-	// luksFormat and luksAddKey emit no priority member at all, and
-	// `cryptsetup config --priority normal` DELETES it rather than writing 1.
-	// Omitting it is what every LUKS2 writer does, and it is what lets a
-	// formatted container's JSON be byte-identical to cryptsetup's.
-	//
-	// The field stays declared and omitempty on Keyslot: a caller that sets a
-	// non-default priority still writes it, and a foreign container's priority
-	// still round-trips untouched.
+	// Create the keyslot; priority stays unset, as cryptsetup writes it.
 	keyslots := make(map[string]*header.Keyslot)
 	keyslots["0"] = &header.Keyslot{
 		Type:    "luks2",
@@ -650,20 +485,7 @@ func createMetadata(kdf, digestKDF *header.KDF, digestValue string, opts formatO
 			KeySize: masterKeySize,
 			Offset:  formatSize(int64(keyslotOffset)),
 			Size:    formatSize(int64(keyslot0Size)),
-			// The KEYSLOT AREA cipher, which is not the container's data
-			// cipher and was written as though it were.
-			//
-			// A caller may format with any cipher dm-crypt supports, and that
-			// choice describes the SEGMENT below. header.Keyslot key material is
-			// wrapped by areacipher.Default (AES-XTS) regardless --
-			// so copying opts.Cipher+opts.CipherMode here declared, for any
-			// non-XTS choice, an encryption the material does not have. The
-			// container then opened for this package, whose read path consulted
-			// only the algorithm, and for nothing else. Since #106 the read path
-			// honors the mode, so such a keyslot is refused everywhere.
-			//
-			// Unchanged for the default aes/xts-plain64, where the two strings
-			// were the same by coincidence -- which is why it survived.
+			// The keyslot area cipher is areacipher.Default (AES-XTS), not the data cipher.
 			Encryption: keyslotAreaEncryption,
 		},
 		KDF: kdf,
@@ -697,19 +519,7 @@ func createMetadata(kdf, digestKDF *header.KDF, digestValue string, opts formatO
 		Digest:     digestValue,
 	}
 
-	// Create config.
-	//
-	// config.keyslots_size is the SIZE OF THE KEYSLOTS AREA ALONE, not the
-	// offset at which that area ends. Writing keyslotOffset + keyslotsAreaSize
-	// made the two indistinguishable for the default geometry only by accident
-	// of arithmetic, and cryptsetup reads it as a size:
-	//
-	//	keyslots_size is too large 16777216 (bytes).
-	//	Data offset: 16777216, keyslots offset: 32768
-	//
-	// The bound cryptsetup enforces is keyslots_size <= data_offset -
-	// keyslots_offset, i.e. 16777216 - 32768 = 16744448 for the geometry this
-	// library writes. Measured against cryptsetup 2.7.0; see #28.
+	// config.keyslots_size is the keyslots area size alone, not its end offset.
 	jsonSize := header.DefaultSize
 	config := &header.Config{
 		JSONSize:     formatSize(int64(jsonSize)),
@@ -727,28 +537,9 @@ func createMetadata(kdf, digestKDF *header.KDF, digestValue string, opts formatO
 	}
 }
 
-// digestIterationsFor (volumeSys.digestIterationsFor) is the digest
-// calibration.
-//
-// formatOptionsForTest.PBKDFIterations deliberately does NOT pin this. Pinning the
-// keyslot count and the digest count with one knob is exactly what
-// cryptsetup's --pbkdf-force-iterations does, and that conflation is what
-// produced a confounded measurement, a wrong ruling and a revert here. They are
-// independent parameters defending different things -- one a human-chosen
-// passphrase, the other nothing at all -- and the API says so by keeping them
-// apart.
+// digestIterationsFor is the digest calibration; PBKDFIterations does not pin it.
 
-// calibrateDigestIterations returns the digest iteration count for a hash on
-// this machine.
-//
-// It reuses BenchmarkPBKDF2 rather than adding a second calibration mechanism.
-// One consequence is worth naming: BenchmarkPBKDF2 applies the keyslot
-// iteration floor scaled to the requested budget, which at a 100ms target is
-// ~10500 for sha512 rather than the 1000 LUKS2 requires. That floor is meant
-// for a parameter this one is not, so it is over-strict here -- but it binds
-// only on a machine roughly thirty times slower than current hardware, where it
-// costs a few milliseconds, and one calibration path is worth more than a
-// second one tuned for a value that defends nothing.
+// calibrateDigestIterations returns the digest iteration count for a hash on this machine, via BenchmarkPBKDF2.
 func calibrateDigestIterations(hashAlgo string) (int, error) {
 	return digestIterationsTimedBy(hashAlgo, wallClockPBKDF2)
 }
@@ -765,32 +556,13 @@ func digestIterationsTimedBy(hashAlgo string, timer pbkdf2Timer) (int, error) {
 		pbkdf2ProbeFloor, pbkdf2ProbeCeiling, timer)
 }
 
-// createDigest creates a digest for master key verification.
-//
-// The master key is passed as an ENCLAVE and this package never copies it out:
-// the derivation borrows it through deriveKeySecret rather than opening it into
-// a slice of ours.
-//
-// That is NOT the same as the key staying in protected memory, and an earlier
-// version of this comment claimed it did. The borrowed slice goes to
-// crypto/pbkdf2.Key, which stringifies it -- see exposure 2 in internal/secret. Every
-// format puts the master key into an unwipeable Go string for the duration of
-// this derivation. Nothing here can prevent that; what it can do is not pretend
-// otherwise.
-//
-// What this returns -- the salt and the base64 digest -- are cleartext LUKS2
-// header fields and are not secret; the digest is a one-way function of the
-// key, and the whole point of writing it to the header is that anyone can check
-// a candidate key against it.
+// createDigest creates the master-key digest; crypto/pbkdf2 still makes a heap string of the borrowed key. The salt and digest are public header fields.
 func createDigest(masterKey enclave.ByteAccess, hashAlgo string, sys volumeSys) (*header.KDF, string, error) {
-	// A digest is written, so it is never PBKDF2-SHA1 (#239).
+	// A digest is never PBKDF2-SHA1.
 	if err := refuseSHA1ForCreation("", hashAlgo, sys.fipsMode()); err != nil {
 		return nil, "", err
 	}
-	// CALIBRATED, not a constant. See DigestIterationTargetMs (security.go) for
-	// what this parameter is, what it is not, and why 100ms -- and for the
-	// --pbkdf-force-iterations measurement trap that makes cryptsetup look as
-	// though it hardcodes this.
+	// Calibrated, not a constant; see DigestIterationTargetMs.
 	digestIterations, err := sys.digestIterationsFor(hashAlgo)
 	if err != nil {
 		return nil, "", err
@@ -808,24 +580,13 @@ func createDigest(masterKey enclave.ByteAccess, hashAlgo string, sys volumeSys) 
 		Iterations: &digestIterations,
 	}
 
-	// The digest is the master key derived to the OUTPUT LENGTH OF THE HASH the
-	// digest declares -- 64 bytes for sha512, 32 for sha256 -- not to a fixed
-	// 32. Writing 32 bytes under a "sha512" label produced a digest no other
-	// LUKS2 implementation derives the same way, which is the write half of #73.
-	//
-	// The read half is deliberately NOT symmetric: verifyMasterKey derives to
-	// the length STORED in the header, not to this one, so containers written
-	// before this change still open.
+	// Derive to the digest hash's output length; verifyMasterKey derives to the stored length.
 	digestLen, err := hashOutputLen(hashAlgo)
 	if err != nil {
 		return nil, "", err
 	}
 
-	// context.Background(), not the caller's ctx: this derivation decides
-	// WHICH digest a key belongs to and must always run to completion -- see
-	// evaluateDigest. Only the slow, cancellable passphrase KDF (sys.passphraseKDF
-	// / deriveKeyEnclave) observes ctx, and only before it starts: a
-	// derivation in flight is never interrupted.
+	// context.Background(): this derivation always runs to completion; see evaluateDigest.
 	digest, err := deriveKeySecret(context.Background(), masterKey, kdf, digestLen, sys)
 	if err != nil {
 		return nil, "", err
@@ -843,12 +604,5 @@ func createDigest(masterKey enclave.ByteAccess, hashAlgo string, sys volumeSys) 
 	return kdf, encoded, nil
 }
 
-// keyslotAreaEncryption is the ONLY area encryption this package writes to a
-// keyslot, and it is exact rather than a family.
-//
-// header.Keyslot key material is encrypted with areacipher.Default, which is AES-XTS
-// tweaked on a uint64 sector index -- that is plain64 and nothing else. It is deliberately NOT the
-// container's DATA cipher: a caller may format a volume with any cipher
-// dm-crypt supports, and that choice describes the data segment. It says
-// nothing about how the keyslots are wrapped, which this package does one way.
+// keyslotAreaEncryption is the only keyslot area encryption written: AES-XTS plain64, independent of the data cipher.
 const keyslotAreaEncryption = areacipher.WriteSpec

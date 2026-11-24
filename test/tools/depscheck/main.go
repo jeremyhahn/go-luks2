@@ -2,45 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Command depscheck is `make deps-check`: it fails when any module go.mod
-// requires is behind a latest release at least 7 days old and no reason is
-// written for holding it there.
-//
-//	go run ./test/tools/depscheck [-modfile go.mod] [-first-party prefix]
-//
-// Every require line is checked, direct and indirect, first-party and
-// third-party alike. A module may stay behind only with its reason written
-// beside it in go.mod, as a comment on its require or replace line or on the
-// comment lines directly above it (`// indirect; <reason>` for an indirect
-// one). The reason is printed with the result, so a held-back module is a
-// visible decision rather than drift.
-//
-// "Latest" is resolved through the go command, so it follows the same
-// GOPROXY, GOPRIVATE and git configuration the build does:
-//
-//   - a first-party module (under -first-party) is behind when a higher tag
-//     exists, prereleases included, because the portfolio releases alpha
-//     tags and a consumer takes the newest one;
-//   - a third-party module is behind when the go command's `@latest` is
-//     higher, which is the newest release, or the newest prerelease or
-//     pseudo-version when the module has no release.
-//
-// A version the build already uses that is NEWER than every tag (a
-// pseudo-version after the last tag) is current, not behind.
-//
-// A new release does not turn every build red at once: an undocumented lag
-// behind a latest version released under 7 days ago is REPORTED, as a status
-// line, and does not fail the check; at 7 days or more it fails. The release
-// time is the one the go command reports for that version (for a first-party
-// tag newer than `@latest`, a lookup of that tag). A release time in the
-// future counts as young. A missing or zero release time counts as old, so
-// the lag fails.
-//
-// FAIL-CLOSED: a module whose latest version cannot be resolved fails the
-// check. With GOPROXY=off nothing can be resolved, so the check reports that
-// rather than calling the module current. Lookups run in an empty directory
-// with a private module cache, so the check neither reads the module's
-// `-mod` setting nor needs the shared module cache to be writable.
+// Command depscheck (make deps-check) fails when a required module is behind a latest release at least 7 days old with no reason written in go.mod; unresolvable modules fail.
 package main
 
 import (

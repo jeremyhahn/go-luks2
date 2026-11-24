@@ -15,29 +15,9 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// External key providers: credentials that come from something outside this
-// process -- a hardware authenticator, an agent, a script -- rather than from a
-// human at a terminal.
-//
-// Implementations that exec a helper binary -- the command and systemd-fido2
-// providers -- live in pkg/keyprovider (#271), which depends on this package
-// for the KeyProvider interface rather than the other way around. What stays
-// here is the interface itself and the operations that consume one --
-// (*Volume).Enroll (provider.go) and (*Volume).UnlockWithProvider -- because
-// they also need this package's own Token and keyslot/device internals that
-// pkg/keyprovider must not import.
+// External key providers; the exec-helper implementations are in pkg/keyprovider.
 
-// KeyProvider yields a volume credential from outside this process, together
-// with the token that records where it came from.
-//
-// The credential is returned in protected memory and is the CALLER's to
-// Destroy. Token returns the metadata to write into the LUKS2 header alongside
-// the keyslot; its Keyslots field is filled in by Enroll (provider.go), which
-// is the only place that knows the answer.
-//
-// This replaces the old KeyProvider{Token() *Token} in place: the method set
-// cannot be redeclared under one name with two shapes, and the API carries no
-// backward-compatibility promise, so the new shape keeps the name.
+// KeyProvider yields a volume credential from outside this process, in protected memory the caller destroys, with the token recording its origin.
 type KeyProvider interface {
 	// Passphrase runs whatever produces the credential and returns it. ctx
 	// bounds the work: a hardware authenticator waiting for a touch blocks
@@ -50,19 +30,10 @@ type KeyProvider interface {
 	Token() Token
 }
 
-// recoveryTokenType is the LUKS2 token type for this package's own recovery
-// keys. fido2TokenType, its FIDO2 counterpart, moved to
-// pkg/keyprovider.TokenTypeFIDO2 with the rest of the exec-helper code (#271).
+// recoveryTokenType is the LUKS2 token type for this package's recovery keys.
 const recoveryTokenType = "systemd-recovery"
 
-// importTokenLocked writes token into slot tokenID for a caller that holds the
-// device lock -- (*Volume).SetToken would wait on that same lock for ever,
-// since flock on a second descriptor waits on the first. The slot must still
-// be free: it was chosen under this lock, so anything else there is a defect,
-// and overwriting it would destroy another credential's record.
-//
-// It refuses what (*Volume).SetToken refuses: an id out of range, and a
-// token with no type.
+// importTokenLocked writes token into the free slot tokenID for a caller holding the device lock; it refuses what (*Volume).SetToken refuses.
 func importTokenLocked(ctx context.Context, dev *keyslotDevice, tokenID int, token *LegacyToken) error {
 	if tokenID < 0 || tokenID >= MaxTokens {
 		return &errs.Error{Kind: ErrInvalidHeader, Detail: "token id " + strconv.Itoa(tokenID) + " is out of range"}
@@ -113,45 +84,15 @@ func killKeyslotLocked(ctx context.Context, dev *keyslotDevice, keyslot int) err
 	return err
 }
 
-// importToken (volumeSys.importToken) is importTokenLocked: the rollback
-// itself can be exercised by overriding the field on a keyslotDevice a test
-// constructs, since the token this package writes for a recovery key is
-// built internally and is always well-formed -- there is no argument a test
-// can pass that makes the write fail at the point where a keyslot is already
-// on the device.
+// volumeSys.importToken is importTokenLocked; tests override it to fail the token write.
 
-// killKeyslot (volumeSys.killKeyslot) is killKeyslotLocked: the rollback's
-// own failure path is exercised the same way, by overriding the field. The
-// branch behind it is the only one in this file that ends with a human
-// holding a volume that needs attention, so it is the last one that should
-// go untested.
+// volumeSys.killKeyslot is killKeyslotLocked; tests override it to exercise rollback failure.
 
-// The old free-function UnlockWithProvider is gone (#268): it activated a
-// volume, which is now pkg/dmcrypt's job, and pkg/luks2 no longer has a
-// route to device-mapper or the kernel keyring. Its replacement is
-// (*Volume).UnlockWithProvider (provider.go) plus pkg/dmcrypt.Activate.
+// Errors: the sentinels are in errors.go; each type here reports its sentinel through Is.
 
-// ---------------------------------------------------------------------------
-// Errors
-//
-// The external-key sentinels are in errors.go with every other sentinel. The
-// types here follow the same shape: a structured type carrying what a
-// diagnosis needs, and an Is that reports the type as its sentinel so a caller
-// never has to know the type exists.
-// ---------------------------------------------------------------------------
+// Provider errors are returned as given; only an OrphanedKeyslotError matches ErrKeyProvider, and none carries credential material.
 
-// A failure obtaining or enrolling an external credential keeps its own
-// sentinel: the provider's error is returned as the provider gave it, and
-// this package's refusals are ErrInvalidArgument or ErrKeyslotNotFound. Only
-// an OrphanedKeyslotError matches ErrKeyProvider. None carries credential
-// material.
-
-// OrphanedKeyslotError reports a keyslot holding a live credential that no
-// token describes and that could not be removed.
-//
-// It names the slot because that number is the only way back: an operator
-// removes it with `luks2 killslot <device> <n>`, and no other record of it
-// exists anywhere.
+// OrphanedKeyslotError reports a keyslot holding a live credential that no token describes and that could not be removed; remove it with luks2 killslot.
 type OrphanedKeyslotError struct {
 	// Keyslot is the slot holding the credential.
 	Keyslot int
@@ -168,10 +109,7 @@ func (e *OrphanedKeyslotError) Error() string {
 		ErrOrphanedKeyslot.Error(), e.Keyslot, e.Err, e.Cause, e.Keyslot)
 }
 
-// Unwrap reports an OrphanedKeyslotError as both ErrOrphanedKeyslot and
-// ErrKeyProvider -- it is the provider vocabulary, and it is also the one
-// condition a caller may want to single out -- and keeps the original
-// failure reachable too.
+// Unwrap returns ErrOrphanedKeyslot, ErrKeyProvider and the original failure.
 func (e *OrphanedKeyslotError) Unwrap() []error {
 	return []error{ErrOrphanedKeyslot, ErrKeyProvider, e.Err}
 }

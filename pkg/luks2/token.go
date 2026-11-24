@@ -19,61 +19,7 @@ import (
 // MaxTokens is the maximum number of token slots in LUKS2.
 const MaxTokens = 32
 
-// canonicalTokenID returns the slot a token map key names, and whether the key
-// ADDRESSES a token at all: it must be the canonical spelling of a number, and
-// that number must be a slot this library and cryptsetup can both reach.
-//
-// Two independent things are checked, and leaving either one out reproduces the
-// same defect in a different disguise -- a listing that names a token no caller
-// can retrieve.
-//
-// SPELLING. strconv.Atoi accepts "01", "+1" and " 1" and returns 1 for all of
-// them, so parsing alone does not answer whether a key addresses a token.
-// Requiring the round trip does: a key is canonical exactly when it is what
-// strconv.Itoa produces.
-//
-// RANGE. "-1", "32" and "999" are canonical spellings, so the round trip alone
-// admits them -- and every other entry point rejects them, because AddToken,
-// SetToken and RemoveToken all bound the id to 0..MaxTokens-1. A listing that
-// reports a token no lookup can retrieve is exactly the inconsistency #35
-// exists to remove, so the same bound applies here.
-//
-// # Why an unaddressable key is IGNORED rather than refused or honored
-//
-// MEASURED against cryptsetup 2.7.0 on containers this library wrote, which is
-// what #35 was blocked on -- and the answer is neither of the two the issue
-// expected:
-//
-//	tokens {"01": t}            luksDump exit 0, "Tokens:" section EMPTY
-//	tokens {"1": a, "01": b}    luksDump exit 0, shows "1: a" once
-//	tokens {"1": a}             luksDump exit 0, shows "1: a" once
-//	tokens {"32": t}            luksDump exit 0, "Tokens:" section EMPTY
-//	tokens {"999": t}           luksDump exit 0, "Tokens:" section EMPTY
-//	tokens {"31": t}            luksDump exit 0, shows "31: t"  <- control
-//	tokens {"-1": t}            luksDump exit 1, "is not a valid LUKS device"
-//
-// cryptsetup neither rejects those headers nor reaches those entries: it
-// addresses tokens by looking up the canonical spelling of each slot number
-// from 0 to LUKS2_TOKENS_MAX-1, so "01", "32" and "999" are all unreachable to
-// it while "31" is not. MaxTokens is the same boundary, which the 31/32
-// pair pins rather than assumes.
-//
-// So such a key is not a working token that refusing would strand -- no LUKS2
-// implementation can use it -- and it is not grounds to refuse the header
-// either, which would be the bricking direction the tokens-are-tolerated ruling
-// exists to avoid.
-//
-// The negative id is the one case where cryptsetup refuses the whole container,
-// and it does not change what this function does. The header is still readable
-// HERE, which is the point of tolerating a damaged token: an operator has to be
-// able to inspect a container that cryptsetup will not open, and reporting a
-// token that nothing can retrieve does not help them do it.
-//
-// The defect that closes is not that these keys are invisible. It is that
-// "01" could silently REPLACE the working token at "1" -- both mapped to the
-// same int key and Go's randomized map iteration decided which survived, so a
-// real token vanished from inspection on a different read each time -- and that
-// an out-of-range key was listed as a token no lookup could retrieve.
+// canonicalTokenID returns the slot a token key names and whether it addresses one: the canonical spelling of 0..MaxTokens-1, as cryptsetup looks tokens up.
 func canonicalTokenID(key string) (int, bool) {
 	id, err := strconv.Atoi(key)
 	if err != nil || strconv.Itoa(id) != key {
@@ -89,17 +35,7 @@ func canonicalTokenID(key string) (int, bool) {
 // keys: systemd-cryptenroll's "systemd-recovery".
 const TokenTypeRecovery = header.TokenTypeSystemdRecovery
 
-// Token is a LUKS2 token: a named external-credential binding recorded in the
-// header. Keyslots is the set of keyslot ids the token
-// identifies -- empty for a token that names none, never nil on the wire,
-// since LUKS2 requires the member to be an array. Members carries every field
-// this package does not model as a typed one itself -- a systemd-fido2
-// token's fido2-credential/fido2-salt/fido2-rp and requirement flags, a
-// systemd-tpm2 token's fields, or any other token type's -- untouched, so
-// writing a token back never drops what wrote it.
-//
-// A zero Token (empty Type) is the KeyProvider.Token anonymous case: no token
-// should be written for it.
+// Token is a LUKS2 token: Keyslots (never nil on the wire) and Members, every field not modeled, kept untouched; a zero Token writes nothing.
 type Token struct {
 	Type     string
 	Keyslots []int
@@ -190,10 +126,7 @@ func isJSONNull(v json.RawMessage) bool {
 	return string(bytes.TrimSpace(v)) == "null"
 }
 
-// toLegacyToken converts t to the on-disk LegacyToken shape, through
-// LegacyToken's own JSON codec: a member this package models as a typed
-// field (the systemd-fido2 schema) lands there, and everything else passes
-// through LegacyToken's own unknown-field passthrough untouched.
+// toLegacyToken converts t to the on-disk LegacyToken shape through LegacyToken's JSON codec.
 func (t Token) toLegacyToken() (*LegacyToken, error) {
 	raw, err := t.MarshalJSON()
 	if err != nil {
@@ -241,11 +174,7 @@ func (v *Volume) AddToken(ctx context.Context, t Token) (int, error) {
 	}
 	defer func() { _ = locked.Unlock() }()
 
-	// No exclusive open: the exclusive flock is what excludes other writers,
-	// as for AddKeyslot and cryptsetup token import, and a claim would refuse
-	// a volume that is mapped or mounted. The header is the CURRENT copy, as
-	// for the keyslot writes, and reading it levels a stale one: a primary one
-	// write behind the secondary must not hide a token from freeTokenSlot.
+	// No exclusive open; read the current header copy so a stale primary cannot hide a token from freeTokenSlot.
 	dev, err := v.keyslotDeviceFor(locked)
 	if err != nil {
 		return 0, errAt(op, v.path, err)

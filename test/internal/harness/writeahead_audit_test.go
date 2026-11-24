@@ -30,15 +30,7 @@ var activateUnrecordedAllowed = map[string]string{
 		"is refused on the name before any device-mapper call",
 }
 
-// auditWriteAhead reports every place in src that creates a loop device or a
-// dm mapping without the record that must come first (#348):
-//
-//   - `losetup -f`/`--find`, which attaches outside harness.SetupLoopDevice
-//     and so outside its check that the backing file is below the recorded
-//     run root;
-//   - loop.Attach outside the loop package's own tests, for the same reason;
-//   - dmcrypt.Activate anywhere but inside the function handed to
-//     Ledger.ActivateRecordedAhead, unless activateUnrecordedAllowed says why.
+// auditWriteAhead reports every loop device or dm mapping creation in src that is not recorded first: losetup -f, loop.Attach outside its tests, or unrecorded dmcrypt.Activate.
 func auditWriteAhead(t *testing.T, rel, src string) []string {
 	t.Helper()
 	fset := token.NewFileSet()
@@ -152,9 +144,7 @@ func insideActivateRecordedAhead(stack []ast.Node) bool {
 	return false
 }
 
-// TestEveryLoopDeviceAndMappingIsRecordedFirst holds the integration suite to
-// what docs/volumes/engineering.md says of it: every loop device and mapping
-// is in the host-side ledger before it exists (#348).
+// TestEveryLoopDeviceAndMappingIsRecordedFirst holds the suite to docs/volumes/engineering.md: every loop device and mapping is in the ledger before it exists.
 func TestEveryLoopDeviceAndMappingIsRecordedFirst(t *testing.T) {
 	audited := 0
 	err := filepath.WalkDir(integrationTree, func(path string, d fs.DirEntry, err error) error {

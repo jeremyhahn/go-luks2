@@ -18,9 +18,7 @@ import (
 // run-root name, (b) a state directory used through the handle it was
 // validated by, (c) run roots bound to the run that recorded them.
 
-// (a) A damaged or forged loop-root line must not be able to aim a detach at
-// every loop device under an arbitrary directory. Only "" and "/" used to be
-// refused, so /var/lib/snapd would have detached every snap.
+// (a) A damaged or forged loop-root line cannot aim a detach at every loop device under an arbitrary directory.
 func TestLoopDevicesUnderRefusesARootNotNamedLikeARunRoot(t *testing.T) {
 	sys := t.TempDir()
 	d := filepath.Join(sys, "loop7", "loop")
@@ -53,9 +51,7 @@ func TestLoopDevicesUnderRefusesARootNotNamedLikeARunRoot(t *testing.T) {
 	}
 }
 
-// swapDir moves dir aside and puts a FORGED state directory in its place: one
-// that would pass validation on its own, holding a ledger that aims the reaper
-// at a mapping nobody recorded.
+// swapDir moves dir aside and puts in its place a forged, otherwise valid state directory whose ledger names an unrecorded mapping.
 func swapDir(t *testing.T, dir string) {
 	t.Helper()
 	if err := os.Rename(dir, dir+".validated"); err != nil {

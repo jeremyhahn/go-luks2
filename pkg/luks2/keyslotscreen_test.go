@@ -19,17 +19,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// The removal guard and the unlock path must answer ONE question -- can this
-// keyslot open this volume? -- and for a long time they answered it separately.
-// The guard's copy was wrong three times (#45), and each time the volume paid:
-// a keyslot it counted as a survivor could open nothing, so removing the last
-// working credential was permitted and reported as a success (#37, #71).
-//
-// These tests hold the two together. They do not check that the guard has some
-// particular list of checks in it; they check that for each damaged shape, the
-// UNLOCK PATH refuses the keyslot and the GUARD does not count it -- with the
-// unlock path as the yardstick, which is the only way to notice the two
-// disagreeing about a shape nobody thought to enumerate.
+// For each damaged shape the unlock path refuses the keyslot and the removal guard does not count it.
 
 // damagedSibling is one way to make a keyslot that reads as a keyslot and can
 // open nothing. `apply` is handed the whole metadata as well as the sibling,
@@ -40,14 +30,7 @@ type damagedSibling struct {
 	apply func(metadata *header.Metadata, sibling *header.Keyslot)
 }
 
-// unopenableKeyslotShapes is the set of ways a keyslot can be well-formed
-// enough to be counted and unable to yield a key.
-//
-// Every entry here was a live counting-too-many defect at some point, or is a
-// rejection the unlock path makes that no previous version of the guard knew
-// about. The last four came out of walking the unlock path rather than out of a
-// review finding, which is the point: enumeration from findings is what was
-// too narrow three times running.
+// unopenableKeyslotShapes are keyslots well-formed enough to count but unable to yield a key.
 var unopenableKeyslotShapes = []damagedSibling{
 	{
 		// #71. `reencrypt` is legitimate metadata recording an in-progress
@@ -154,15 +137,7 @@ var unopenableKeyslotShapes = []damagedSibling{
 		},
 	},
 	{
-		// ASSOCIATION IS NOT USABILITY, and treating it as such was a
-		// fail-open the guard's first version shipped with. The sibling is
-		// attested -- by a digest verifyMasterKey will skip, because its value
-		// is not base64. It can never be authenticated and could never open the
-		// volume, so counting it authorizes destroying the keyslot that works.
-		//
-		// The digest is given ONLY to the sibling, so keyslot 0 keeps the real
-		// one and stays openable; that is what makes this a removal-guard case
-		// rather than a broken container.
+		// The sibling's only digest is not base64, so it can never be authenticated; keyslot 0 stays openable.
 		name: "a keyslot whose only digest cannot be evaluated",
 		apply: func(metadata *header.Metadata, _ *header.Keyslot) {
 			for _, digest := range metadata.Digests {
@@ -236,9 +211,7 @@ var unopenableKeyslotShapes = []damagedSibling{
 		},
 	},
 	{
-		// parseSize is ParseInt, so this parses. Every consumer used to hand it
-		// to a syscall that refused it, which is why it survived -- but a guard
-		// does ARITHMETIC with it.
+		// parseSize accepts this, but the guard does arithmetic with it.
 		name: "a negative area offset",
 		apply: func(_ *header.Metadata, sibling *header.Keyslot) {
 			sibling.Area.Offset = "-4096"
@@ -249,47 +222,16 @@ var unopenableKeyslotShapes = []damagedSibling{
 // siblingSlotID is where every fixture in this file puts the second keyslot.
 const siblingSlotID = "1"
 
-// volumeWithSibling formats a container and gives it a SECOND keyslot whose
-// metadata is a copy of the first, in a disjoint area, with `damage` applied.
-//
-// The sibling's area holds zeros rather than key material, so it cannot open
-// the volume whatever its metadata says. That is deliberate and it is what
-// makes the control below meaningful: an undamaged sibling is counted by the
-// guard and still cannot open anything, which is the irreducible residual the
-// guard cannot remove (only trying the passphrase would tell). Everything these
-// tests assert is about the shapes the guard CAN see.
-//
-// damage may be nil, for the control.
+// volumeWithSibling adds a second keyslot copied from the first, over a zeroed disjoint area, with damage applied (nil for the control).
 func volumeWithSibling(t *testing.T, name string, damage func(*header.Metadata, *header.Keyslot)) string {
 	t.Helper()
 	return restoreVolume(t, name, goldenSiblingVolume(t, damage))
 }
 
-// goldenVolumePrefix is how much of a fixture image is captured and stamped back.
-//
-// A formatted container's header copies and every keyslot area these tests
-// create live inside the first megabyte -- two 16 KiB headers, then keyslot
-// areas of 252 KiB each from offset 0x8000. Everything past that is the zeroed
-// data segment, which no fixture writes and no assertion reads, so copying it
-// would be a megabyte of nothing per case. 2 MiB leaves generous room for the
-// three-keyslot fixtures without making the copy interesting.
+// goldenVolumePrefix is how much of a fixture image is captured: the headers and keyslot areas.
 const goldenVolumePrefix = 2 << 20
 
-// goldenSiblingVolume formats the two-keyslot fixture ONCE and returns its
-// bytes, for restoreVolume to stamp onto a fresh file per case.
-//
-// This is the idiom the issue/3-secure-buffer branch arrived at after its unit
-// package crossed Go's default 600s test timeout on a loaded CI runner, having
-// finished comfortably on the developer's box -- load-dependent, and local
-// non-reproduction was no more exculpatory there than it is for a race. Measured
-// on that branch under -race: Format ~900ms, restoring from golden bytes ~1.5ms.
-// The guard tables here are fifteen damage shapes by four removal paths, so a
-// format per CASE pays for sixty where fifteen would do.
-//
-// NOTHING IS MADE CRYPTOGRAPHICALLY CHEAPER by this. The KDF cost, the AF split
-// and the XTS pass are exactly what they were; only the number of times they are
-// paid changes. Weakening a fixture to buy time is how a control stops catching
-// what it was written for.
+// goldenSiblingVolume formats the two-keyslot fixture once and returns its bytes for restoreVolume; costs are unchanged.
 func goldenSiblingVolume(t *testing.T, damage func(*header.Metadata, *header.Keyslot)) []byte {
 	t.Helper()
 	return goldenBytes(t, buildVolumeWithSibling(t, "golden-sibling.img", damage))
@@ -333,11 +275,6 @@ func restoreVolume(t *testing.T, name string, golden []byte) string {
 	return device
 }
 
-// The per-fixture digest cheapening that used to live here is GONE: it is baked
-// into the shared golden now (cheapenGoldenDigests, conformance_test.go), so
-// every fixture in the package inherits it and the expensive unlock it costs
-// is paid once per process rather than once per shape.
-
 func buildVolumeWithSibling(t *testing.T, name string, damage func(*header.Metadata, *header.Keyslot)) string {
 	t.Helper()
 
@@ -380,16 +317,7 @@ func buildVolumeWithSibling(t *testing.T, name string, damage func(*header.Metad
 	return path
 }
 
-// TestTheUnlockPathRefusesEveryShapeTheRemovalGuardMustNotCount is the
-// yardstick, and it is measured against the UNLOCK PATH rather than against the
-// predicate under test.
-//
-// #45's whole argument is that a predicate maintained beside unlockKeyslot
-// drifts from it. A test that asserted "the guard rejects these fifteen shapes"
-// would be a third copy of the same list and would drift with the second. So
-// each shape is put through unlockKeyslot with the CORRECT passphrase first: if
-// the unlock refuses it, no removal guard may count it, and the next assertion
-// is entitled to demand that.
+// TestTheUnlockPathRefusesEveryShapeTheRemovalGuardMustNotCount: each shape is refused by unlockKeyslot with the correct passphrase.
 func TestTheUnlockPathRefusesEveryShapeTheRemovalGuardMustNotCount(t *testing.T) {
 	defer parallel(t)()
 
@@ -426,16 +354,7 @@ func TestTheUnlockPathRefusesEveryShapeTheRemovalGuardMustNotCount(t *testing.T)
 	}
 }
 
-// TestTheRemovalGuardCountsTheSlotsTheUnlockPathWouldOpen is the positive
-// control, and without it every assertion above is satisfied by a predicate
-// that returns false unconditionally.
-//
-// It also pins the direction of the guard's inexactness. The sibling here is
-// undamaged metadata over an area of zeros: it cannot actually open the volume,
-// and the guard counts it anyway, because only trying the passphrase would tell
-// and KillKeyslot has none to try. That residual is documented on
-// keyslotCanOpenVolume and it falls on the counting-MORE side; this test states
-// it rather than leaving a reader to assume the predicate is exact.
+// TestTheRemovalGuardCountsTheSlotsTheUnlockPathWouldOpen: the positive control; an undamaged sibling over zeros is still counted.
 func TestTheRemovalGuardCountsTheSlotsTheUnlockPathWouldOpen(t *testing.T) {
 	defer parallel(t)()
 
@@ -513,15 +432,7 @@ func TestScreenKeyslotAcceptsAKeyslotThisLibraryWrote(t *testing.T) {
 	}
 }
 
-// TestScreenKeyslotKeepsTheDigestBindingClassification pins the one rejection
-// the screen moves that does NOT carry ErrInvalidKeyslot.
-//
-// The safety argument for moving rejections earlier is that they are the SAME
-// rejections, sooner. A keyslot no digest attests is a header fault -- the
-// passphrase may be right and the material intact -- and verifyMasterKey says
-// so with ErrInvalidHeader. Restating it as a keyslot fault while moving it
-// would have changed what an operator is told, which is the one thing this
-// refactor may not do.
+// TestScreenKeyslotKeepsTheDigestBindingClassification: a keyslot no digest attests stays ErrInvalidHeader.
 func TestScreenKeyslotKeepsTheDigestBindingClassification(t *testing.T) {
 	defer parallel(t)()
 
@@ -570,14 +481,7 @@ func TestValidateXTSKeySize(t *testing.T) {
 	}
 }
 
-// TestValidateKeyslotRefusesAreaArithmeticThatCannotBeReasonedAbout covers the
-// two checks harvested out of the issue/3-secure-buffer branch's
-// keyslotAreaBounds.
-//
-// Neither mattered while every consumer handed the offset straight to a syscall
-// that refused it. Both matter now that the removal guard computes
-// [offset, offset+size) and compares it against other keyslots: a negative
-// start intersects nothing, and a sum that wraps is "before everything".
+// TestValidateKeyslotRefusesAreaArithmeticThatCannotBeReasonedAbout: a negative start or a wrapping sum is refused.
 func TestValidateKeyslotRefusesAreaArithmeticThatCannotBeReasonedAbout(t *testing.T) {
 	base := func() *header.Keyslot {
 		stripes := header.AFStripes
@@ -608,13 +512,7 @@ func TestValidateKeyslotRefusesAreaArithmeticThatCannotBeReasonedAbout(t *testin
 	}
 }
 
-// TestAKeyslotWithOneUsableDigestIsStillCounted is the #58 half of the digest
-// screen, and without it the screen above could be "every applicable digest
-// must be usable" -- which would refuse a volume that opens perfectly well.
-//
-// A keyslot carrying one unusable digest and one good one is openable: the scan
-// skips the bad and verifies against the good. So the guard must count it, and
-// a removal that leaves it must be permitted.
+// TestAKeyslotWithOneUsableDigestIsStillCounted: one usable digest beside a bad one suffices.
 func TestAKeyslotWithOneUsableDigestIsStillCounted(t *testing.T) {
 	defer parallel(t)()
 
@@ -653,23 +551,7 @@ func TestAKeyslotWithOneUsableDigestIsStillCounted(t *testing.T) {
 	}
 }
 
-// TestTheRemovalGuardRefusesWhenTheDeviceSizeCannotBeEstablished is the
-// block-device half of the area bound, and it is a unit test only because the
-// measurement is reachable through a seam.
-//
-// checkAreaWithinDevice measured with Stat alone and read a size of 0 as
-// "nothing to compare against". A regular file reports its real size, so every
-// test passed and every file-backed container was checked -- and a BLOCK DEVICE,
-// which is what this package is built for, reports 0 through Stat. The bound was
-// therefore not approximate on real hardware: it was absent, and a keyslot whose
-// area lies past the end of the device counted as a survivor. Raised by Codex
-// review of fb29c6d; the fix measures with BLKGETSIZE64 first and refuses when
-// neither that nor Stat can answer.
-//
-// The seam presents what such a device reports. Injecting the FAILURE to measure
-// is the sharper case of the two: it asserts the guard refuses rather than waves
-// through, which is the property "a guard that cannot verify its condition must
-// not report success".
+// TestTheRemovalGuardRefusesWhenTheDeviceSizeCannotBeEstablished: through the measurement seam, an unmeasurable device is refused.
 func TestTheRemovalGuardRefusesWhenTheDeviceSizeCannotBeEstablished(t *testing.T) {
 	passphrase := []byte(conformancePassphrase)
 	golden := goldenSiblingVolume(t, nil)
@@ -756,28 +638,7 @@ func TestDeviceSizeIsMeasuredNotAssumed(t *testing.T) {
 	}
 }
 
-// TestScreenDigestNeverAcceptsWhatTheDerivationRefuses pins the thesis of #45
-// one layer below the keyslot, where it kept drifting back.
-//
-// The guard's predicate may be STRICTER than the path it screens for. It may
-// never be weaker. Everything else in this file asserts that for keyslots; this
-// asserts it for the digests a keyslot is authenticated by, and it asserts it
-// against the DERIVATION ITSELF rather than against a list of conditions
-// somebody wrote down. A list is the thing that drifts.
-//
-// # It is deliberately mode-sensitive, and that is the point
-//
-// PBKDF2-HMAC-SHA1 is a hash this package supports outside FIPS 140-3 and
-// refuses inside it, so the correct answer for that shape DIFFERS between the
-// default suite and the FIPS job. The assertion does not branch on the mode: it
-// compares the screen against the derivation, in whatever mode the process is
-// running, so one test covers both and neither run is a no-op.
-//
-// Measured rather than reasoned about, because "does hashOutputLen know this
-// hash" and "will the crypto layer let me compute it" are different questions
-// that happen to share an implementation -- hashOutputLen resolves through
-// getPBKDF2HashFunc, which is where the FIPS refusal lives. That is a property
-// of the current code, not a law, and this test is what keeps it true.
+// TestScreenDigestNeverAcceptsWhatTheDerivationRefuses compares the screen with the derivation in the process's FIPS mode.
 func TestScreenDigestNeverAcceptsWhatTheDerivationRefuses(t *testing.T) {
 	defer parallel(t)()
 
@@ -805,21 +666,12 @@ func TestScreenDigestNeverAcceptsWhatTheDerivationRefuses(t *testing.T) {
 			}
 
 			if screenErr != nil {
-				// The screen refused. It is ALLOWED to be stricter than the
-				// derivation, so there is nothing to compare against and the
-				// yardstick is not run.
-				//
-				// Not merely an optimisation: one shape here is a digest of
-				// absurd length, and running the yardstick on it asks PBKDF2
-				// for a MEGABYTE of output. That single subtest dominated this
-				// test's 154s on the CI runner, to establish a case the
-				// assertion never reads.
+				// The screen may be stricter; skip the yardstick, which would ask PBKDF2 for huge outputs.
 				return
 			}
 			accepted++
 
-			// THE YARDSTICK, taken from the path being screened for rather than
-			// from the predicate under test. verifyMasterKey ends up here.
+			// The yardstick: the derivation verifyMasterKey runs.
 			kdf := &header.KDF{
 				Type:       digest.Type,
 				Hash:       digest.Hash,

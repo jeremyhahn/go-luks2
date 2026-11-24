@@ -2,13 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package recoverykey renders recovery keys as text and reads them back,
-// entirely inside protected memory.
-//
-// A recovery key's printed text IS the credential a keyslot holds, so every
-// step here works on bytes in locked pages and never builds a Go string: a
-// string holding a credential can never be wiped, and strings.ToUpper,
-// ToLower, TrimSpace and Split would each make another one.
+// Package recoverykey renders recovery keys as text and reads them back inside protected memory, never building a Go string.
 package recoverykey
 
 import (
@@ -78,10 +72,7 @@ func Render(c secret.Custody, key enclave.ByteAccess, f Format) (enclave.ByteAcc
 	return credential, nil
 }
 
-// Hash returns the SHA-256 of the credential text, hex-encoded. It is a
-// one-way function of the credential and is not itself secret: it is printed
-// beside the key so a transcription can be checked without the volume. It is
-// computed inside the borrow only because that is where the text is readable.
+// Hash returns the hex SHA-256 of the credential text, printed beside the key to check a transcription.
 func Hash(credential enclave.ByteAccess) (string, error) {
 	var sum [sha256.Size]byte
 	if err := secret.Borrow("recovery key", credential, func(b []byte) error {
@@ -93,12 +84,7 @@ func Hash(credential enclave.ByteAccess) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// renderInto renders key into dst, which must be exactly Len(len(key), f)
-// bytes.
-//
-// The dashed form is built by encoding the hex RIGHT-ALIGNED in dst and then
-// walking left to right inserting separators: the read cursor stays ahead of
-// the write cursor for every group, so the expansion needs no second buffer.
+// renderInto renders key into dst, which must be exactly Len(len(key), f) bytes, expanding in place.
 func renderInto(dst, key []byte, f Format) {
 	switch f {
 	case Base64:
@@ -130,20 +116,7 @@ func renderInto(dst, key []byte, f Format) {
 	}
 }
 
-// Credential returns the credential typed or pasted text names, in a new
-// enclave c allocates: the text with surrounding whitespace trimmed, because a
-// paste carries it and no keyslot holds it.
-//
-// NOTHING ELSE IS TOUCHED. Case is significant, the dashes are significant, and
-// a credential that has been "canonicalized" on the way in is a credential the
-// volume has never seen. That is the contract cryptsetup offers when the same
-// string is pasted at its own prompt, and the two must agree: the credential is
-// text precisely so that stock cryptsetup can open the volume.
-//
-// A newline inside the trimmed text means more than one line was handed in --
-// a whole file, most likely -- and is refused rather than silently taking the
-// first line, because guessing which line somebody meant is how the wrong
-// string gets enrolled or tested.
+// Credential returns the credential text with surrounding whitespace trimmed and nothing else changed, refusing more than one line.
 func Credential(c secret.Custody, text enclave.ByteAccess) (enclave.ByteAccess, error) {
 	var credential enclave.ByteAccess
 	err := secret.Borrow("recovery key", text, func(b []byte) error {
@@ -164,11 +137,7 @@ func Credential(c secret.Custody, text enclave.ByteAccess) (enclave.ByteAccess, 
 	return credential, nil
 }
 
-// FirstLine returns the first line of a recovery key file that is neither
-// blank nor a comment, trimmed, as a SUB-SLICE of contents -- which the caller
-// holds in locked memory -- or nil when there is none. It walks bytes rather
-// than using strings.Split, which would allocate an unwipeable string per
-// line of a file whose whole point is to hold a credential.
+// FirstLine returns the first non-blank, non-comment line of contents, trimmed, as a sub-slice, or nil.
 func FirstLine(contents []byte) []byte {
 	for len(contents) > 0 {
 		line := contents
@@ -187,14 +156,7 @@ func FirstLine(contents []byte) []byte {
 	return nil
 }
 
-// Decode turns a rendering held in locked memory back into the KEY MATERIAL
-// behind it, in a new enclave c allocates, normalising inside locked scratch.
-//
-// It is tolerant in a way Credential is deliberately not -- either case, with
-// or without dashes, hex or base64 -- because it decodes a rendering rather
-// than reproducing a credential. The format decision: dashes mean dashed hex;
-// an all-hex even-length body is tried as hex first; a trailing '=' or any
-// non-hex character admits base64; and hex is the fallback.
+// Decode turns a rendering (dashed hex, hex or base64, any case) back into key material in a new enclave.
 func Decode(c secret.Custody, rendered enclave.ByteAccess) (enclave.ByteAccess, error) {
 	var key enclave.ByteAccess
 
@@ -219,9 +181,7 @@ func Decode(c secret.Custody, rendered enclave.ByteAccess) (enclave.ByteAccess, 
 			})
 		}
 
-		// Not dashed. The hex test is on the lower-cased body, so a WRITABLE
-		// copy is taken to lower-case in: an enclave built from existing
-		// material is frozen read-only, and a write through it faults.
+		// Lower-case a writable copy; frozen enclaves fault on write.
 		normalized, err := c.CloneWritable("recovery key", body)
 		if err != nil {
 			return err
@@ -239,8 +199,7 @@ func Decode(c secret.Custody, rendered enclave.ByteAccess) (enclave.ByteAccess, 
 				}
 			}
 
-			// base64 is case-sensitive, so it decodes the ORIGINAL body rather
-			// than the lower-cased copy.
+			// base64 is case-sensitive, so decode the original body.
 			if body[len(body)-1] == '=' || !isHex {
 				if k, err := decodeBase64(c, body); err == nil {
 					key = k
@@ -259,8 +218,7 @@ func Decode(c secret.Custody, rendered enclave.ByteAccess) (enclave.ByteAccess, 
 	return key, nil
 }
 
-// decodeHex decodes hex bytes DIRECTLY into locked memory. The caller has
-// already trimmed and lower-cased in place.
+// decodeHex decodes trimmed, lower-cased hex bytes directly into locked memory.
 func decodeHex(c secret.Custody, src []byte) (enclave.ByteAccess, error) {
 	n := hex.DecodedLen(len(src))
 	invalid := &errs.Error{Kind: errs.ErrInvalidCredential, Detail: "recovery key is not valid hex"}
@@ -279,7 +237,7 @@ func decodeHex(c secret.Custody, src []byte) (enclave.ByteAccess, error) {
 	return key, err
 }
 
-// decodeBase64 decodes base64 bytes DIRECTLY into locked memory.
+// decodeBase64 decodes base64 bytes directly into locked memory.
 func decodeBase64(c secret.Custody, src []byte) (enclave.ByteAccess, error) {
 	n := base64.StdEncoding.DecodedLen(len(src))
 	if n == 0 {
@@ -290,14 +248,7 @@ func decodeBase64(c secret.Custody, src []byte) (enclave.ByteAccess, error) {
 	})
 }
 
-// decodeExact allocates maxLen bytes of locked scratch, lets decode fill it,
-// and returns an enclave holding exactly the bytes decode reported.
-//
-// The two steps exist because base64's DecodedLen is an upper bound -- padding
-// makes the real length shorter -- and an enclave sized from the bound would
-// hand back trailing zeros as part of the key. The scratch is destroyed once
-// the exact-sized enclave has been filled, so the surplus is wiped rather than
-// merely ignored, and the caller's handle never aliases it.
+// decodeExact decodes into maxLen bytes of locked scratch and returns an enclave of exactly the decoded length.
 func decodeExact(c secret.Custody, maxLen int, decode func(dst []byte) (int, error)) (enclave.ByteAccess, error) {
 	scratch, err := c.New("recovery key", maxLen)
 	if err != nil {

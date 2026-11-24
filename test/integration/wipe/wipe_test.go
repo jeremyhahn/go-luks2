@@ -264,8 +264,7 @@ func TestWipeWithTrimOnBlockDevice(t *testing.T) {
 		t.Fatalf("Format failed: %v", err)
 	}
 
-	// TRIM might fail on loop device (depends on backing store) but the
-	// wipe passes themselves must still succeed.
+	// TRIM may fail on a loop device; the wipe passes must still succeed.
 	if err := wipe.Sanitize(context.Background(), loopDev, wipe.Params{Patterns: patternsOf(1, false), Discard: true}); err != nil {
 		t.Fatalf("Sanitize with discard failed: %v", err)
 	}

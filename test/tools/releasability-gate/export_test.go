@@ -18,12 +18,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/test/internal/labstrings"
 )
 
-// These tests hold the strip-at-publish set to the mechanism that strips it.
-// labstrings.DefaultStripAtPublish is the one list: a path added there that
-// .gitattributes does not export-ignore, or that .dockerignore does not keep
-// out of a build context, fails here rather than shipping. They read this
-// checkout, so they live with the gate and not in labstrings, whose tests
-// must pass in a source tree with no .git.
+// Tests that every labstrings.DefaultStripAtPublish path is export-ignored in .gitattributes and kept out by .dockerignore.
 
 // gitOut runs git in root and returns its stdout, failing the test on error.
 // Git is required: a missing git fails the test, it does not skip it.
@@ -163,12 +158,7 @@ func TestThisDockerignore_ListsEveryStripAtPublishPath(t *testing.T) {
 	}
 }
 
-// TestThisPage_ListsEveryStripAtPublishPattern holds the strip-at-publish
-// table of docs/release/public-releasability.md to DefaultStripAtPublish,
-// pattern for pattern: the page is what a reader trusts for what the release
-// leaves out, so a pattern it names that the list lacks (a file the reader
-// believes stripped ships) fails, and so does a pattern the list has that the
-// page leaves out.
+// TestThisPage_ListsEveryStripAtPublishPattern: docs/release/public-releasability.md lists exactly DefaultStripAtPublish's patterns.
 func TestThisPage_ListsEveryStripAtPublishPattern(t *testing.T) {
 	page := filepath.Join(moduleRoot(t), "docs", "release", "public-releasability.md")
 	content, err := os.ReadFile(page) // #nosec G304 -- this module's own documentation

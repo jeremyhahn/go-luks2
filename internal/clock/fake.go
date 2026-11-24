@@ -21,16 +21,7 @@ type TB interface {
 // clock that moves only when it waits.
 const DefaultMaxWaits = 100_000
 
-// Fake is a Clock that moves only when the code under test waits on it.
-//
-// NewTimer advances the clock by the timer's duration and returns a timer
-// that has already fired, so a wait on a Fake runs on the caller's goroutine
-// and a test asserts exactly how long it waited and how it paced itself.
-// OnWait runs after each such advance with the new time: it is how a test
-// changes the world at a chosen moment -- a lock released, a node created --
-// without a goroutine racing the wait.
-//
-// A Fake is safe for concurrent use.
+// Fake is a Clock that advances only when code waits on it; OnWait runs after each advance; safe for concurrent use.
 type Fake struct {
 	tb       TB
 	mu       sync.Mutex

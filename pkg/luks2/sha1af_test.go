@@ -20,16 +20,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// SHA-1 anti-forensic keyslots (#236), against volumes cryptsetup wrote.
-//
-// LUKS1 split the volume key with SHA-1 by default, so every LUKS1 volume
-// converted to LUKS2 carries SHA-1 AF keyslots, as does any `cryptsetup
-// luksFormat --hash sha1`. cryptsetup opens them. This package reads them
-// outside FIPS mode, refuses them inside it with the typed import error naming
-// SHA-1, imports them into FIPS mode with MigrateToFIPS, and never writes one.
-//
-// Every fixture here is cryptsetup's, never this package's: what is under test
-// is agreement with the third party.
+// SHA-1 anti-forensic keyslots on cryptsetup-written volumes: read outside FIPS, refused inside it, imported by MigrateToFIPS, never written.
 
 // sha1AFKind is a cryptsetup-written volume shape with SHA-1 AF keyslots.
 type sha1AFKind struct {
@@ -137,10 +128,7 @@ func TestSHA1AFVolumesAreRefusedUnderTheFIPSPolicy(t *testing.T) {
 	}
 }
 
-// TestFIPSImportOfSHA1AFVolumes: each shape is migrated by a non-FIPS process,
-// leaving no SHA-1 anywhere -- keyslot KDF, AF hash or digest -- and the same
-// volume key; cryptsetup still recovers that key; and a process under
-// GODEBUG=fips140=only opens it.
+// TestFIPSImportOfSHA1AFVolumes: migration leaves no SHA-1 and the same volume key, which cryptsetup and a fips140=only process both open.
 func TestFIPSImportOfSHA1AFVolumes(t *testing.T) {
 	// Parallel at both levels, the shape parallel's comment allows: each
 	// subtest pauses in t.Parallel before it asks for a slot, so the parent's
@@ -334,8 +322,7 @@ func TestChangeKeyAndAFMergeFailuresAreTyped(t *testing.T) {
 	if err := changeKeyForTest(device, []byte(conformanceWrongPassphrase), newPassphrase, 0); !errors.Is(err, ErrWrongKey) {
 		t.Fatalf("wrong old passphrase: got %v, want ErrWrongKey reachable", err)
 	}
-	// An EXISTING credential is refused only when nothing could open a
-	// keyslot with it (#249, A7): empty. A short one is tried, like any other.
+	// An existing credential is refused only when empty; a short one is tried.
 	if err := changeKeyForTest(device, nil, newPassphrase, 0); !errors.Is(err, ErrInvalidCredential) {
 		t.Fatalf("an invalid old passphrase: got %v, want the validation error, not a credential verdict", err)
 	}

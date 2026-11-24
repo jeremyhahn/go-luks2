@@ -11,13 +11,7 @@ import (
 	"testing"
 )
 
-// A detached header -- cryptsetup luksFormat --header -- puts its data
-// segment at offset 0 of ANOTHER device. Every keyslot check that kept a
-// keyslot area clear of the data segment read that offset as "the data starts
-// at 0 of this file", so every keyslot of every detached header overlapped it:
-// the header's keyslots could not be opened, added, changed or removed here,
-// while cryptsetup manages them. Activation is still refused
-// (TestADetachedHeaderIsNeverActivated); keyslot management is not.
+// A detached header's data segment at offset 0 is on another device; its keyslots are managed here, activation is still refused.
 func TestDetachedHeaderKeyslotsAreManageable(t *testing.T) {
 	defer parallel(t)()
 	requireCryptsetup(t)

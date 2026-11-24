@@ -1,34 +1,4 @@
-# signatures-template: v1 (ci-template v1.35.2, customized) — the commit signature gate.
-#
-# v1 (2026-11-11, Company Agent m2577, Codex finding on xkey-android #129):
-# the verifier ci.yml v1.35/v1.35.1 ran as a job of the pull request's own
-# workflow, so the pull request's tree held the script that judged it: a PR
-# could edit ci.yml and pass its own Signatures job. This workflow runs on
-# `pull_request_target`, so GitHub reads it from the BASE branch, never from
-# the pull request. It checks out the base only, fetches the pull request's
-# commits as objects, and reads them with git (`verify-commit`, `log`,
-# `cat-file`). It never checks out, builds or runs anything from the pull
-# request. Its token is `contents: read` and is not persisted in the clone.
-#
-# The rules are v1.35.1's: the registry is .github/allowed_signers read from
-# the base commit (synced from the handbook's
-# software/templates/signing/<repo>.allowed_signers); a commit passes when
-# `git verify-commit` (gpg.format=ssh, gpg.ssh.allowedSignersFile) accepts it
-# AND the key's registered principal is the committer email; a commit GitHub
-# made (committer noreply@github.com) passes when the API reports it verified
-# with committer web-flow. It fails closed on an unsigned commit, an unknown
-# key, a principal mismatch, an unreadable base, an unreadable head and an
-# unreadable API. One change from v1.35.1: there is no head fallback. A base
-# with no registry fails, because under pull_request_target the head is
-# untrusted input.
-#
-# Adoption (one CI-file PR per repository): this file as
-# .github/workflows/signatures.yml, .github/allowed_signers, and ci.yml
-# v1.35.2 (no `signatures` job). That PR has no Signatures run, because the
-# workflow is not on the base yet. Once it lands, every later pull request
-# and push to main gets the `Signatures / Signatures` check, and the
-# repository ruleset requires that context beside CI Gate (a ruleset change,
-# made by its owner, not by the adoption PR).
+# Commit signature gate on pull_request_target: reads the base's .github/allowed_signers and verifies the PR's commits without checking them out; fails closed.
 name: Signatures
 
 on:
@@ -76,10 +46,7 @@ jobs:
           set -uo pipefail
           zero() { [ -z "$1" ] || printf '%s' "$1" | grep -qE '^0+$'; }
           isrev() { ! zero "$1" && git cat-file -e "$1^{commit}" 2>/dev/null; }
-          # The checkout keeps persist-credentials false, so git holds no
-          # credential. authgit hands one git command the job token as an
-          # http.extraheader through its environment: not argv, not
-          # .git/config, never printed. Every object fetch goes through it.
+          # authgit passes the job token to one git command through its environment, never argv or config.
           authgit() { GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraheader GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" git "$@"; }
           ASF="${RUNNER_TEMP:-/tmp}/allowed_signers"
           if [ "$EVENT" = pull_request_target ]; then
@@ -145,8 +112,7 @@ jobs:
               fi
               continue
             fi
-            # grep reads the whole object (no -q), so under pipefail a long
-            # commit message never ends the pipeline with SIGPIPE.
+            # grep reads the whole object (no -q) so pipefail never sees SIGPIPE.
             if ! git cat-file commit "$c" | grep '^gpgsig' >/dev/null; then
               echo "FAIL ${c:0:12} unsigned, committer $(shown "$ce"): $s"; BAD=1; continue
             fi

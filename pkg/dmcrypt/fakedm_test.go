@@ -16,16 +16,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// fakeDeviceMapper records dm operations against the seams in sys and can be
-// told to fail any of them.
-//
-// internal/dm's own test suite proves the mechanical pieces -- the create
-// ioctl, the busy retry, node identity, node placement. What this package
-// adds on top -- the transaction Activate runs across them, and the
-// rollback it performs when part of that transaction fails -- can only be
-// produced for real with root and a real kernel, so it is driven here
-// against a fake that records what was asked of it, the same way
-// pkg/luks2's pre-split devicemapper tests did.
+// fakeDeviceMapper records dm operations against the seams in sys and can be told to fail any of them.
 type fakeDeviceMapper struct {
 	// targets is the live dm state: name -> uuid.
 	targets map[string]string
@@ -42,17 +33,14 @@ type fakeDeviceMapper struct {
 	readyErr  error
 	removeErr error
 
-	// infoErr, when set, is returned by infoByName INSTEAD of consulting
-	// targets, so a test can model an inspection that fails for a reason
-	// other than the target being absent.
+	// infoErr, when set, is returned by infoByName instead of consulting targets.
 	infoErr error
 
 	created  []string
 	removed  []string
 	inspects int
 
-	// loaded records the tables handed to load, so a test can assert on
-	// WHAT device-mapper was given and not merely that it was called.
+	// loaded records the tables handed to load.
 	loaded []devmapper.Table
 
 	// onLoad, when set, runs inside load, so a test can observe state that
